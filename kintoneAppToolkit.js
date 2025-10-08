@@ -8,7 +8,8 @@
 // @run-at       document-idle
 // @grant        none
 // @license      MIT
-// @updateURL    https://github.com/youtotto/kintone-app-toolkit/blob/4afb9a6b75a941e18c8fad27a2fdd10dc6f7f0ed/kintoneAppToolkit.js
+// @updateURL    https://raw.githubusercontent.com/youtotto/kintone-app-toolkit/main/kintoneAppToolkit.js
+// @downloadURL  https://raw.githubusercontent.com/youtotto/kintone-app-toolkit/main/kintoneAppToolkit.js
 // ==/UserScript==
 (function () {
     'use strict';
