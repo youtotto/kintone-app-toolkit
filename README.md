@@ -29,8 +29,6 @@
 1. [このスクリプトの RAW ページ](https://raw.githubusercontent.com/youtotto/kintone-app-toolkit/main/kintoneAppToolkit.user.js) を開く  
 2. Tampermonkey が自動で認識するので「**インストール**」をクリック  
 
-> ※上記 URL はあなたの GitHub 公開ファイルの raw URL に置き換えてください。
-
 ---
 
 ## 🧭 使い方
