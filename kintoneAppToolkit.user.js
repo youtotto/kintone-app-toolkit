@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         kintone App Toolkit: Health Check + Field Inventory
 // @namespace    https://example.com/
-// @version      1.0.2
+// @version      1.0.0
 // @description  kintoneアプリのヘルスチェック（基準編集）とフィールド一覧（Markdown/備考つき）
 // @match        https://*.cybozu.com/k/*/
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=cybozu.com
