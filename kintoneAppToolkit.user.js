@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         kintone App Toolkit: Health Check + Field Inventory
-// @namespace    https://example.com/
-// @version      1.1.0
-// @description  kintoneアプリのヘルスチェック（基準編集）とフィールド一覧（Markdown/備考つき）
+// @name         kintone App Toolkit: Health Check + Field Inventory + Filter
+// @namespace    https://github.com/youtotto/kintone-app-toolkit
+// @version      1.3.0
+// @description  kintoneアプリのヘルスチェック、フィールド一覧、一覧のフィルター/ソート表示
 // @match        https://*.cybozu.com/k/*/
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=cybozu.com
 // @run-at       document-idle
@@ -55,6 +55,12 @@
         { level: 'OK', badge: '🟢' };
 
   /** ----------------------------
+ * Small utils
+ * ---------------------------- */
+  const getUrlParam = (key) => new URL(location.href).searchParams.get(key);
+  const escapeRegExp = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+  /** ----------------------------
  * UI Root (tabs)
  * ---------------------------- */
   const mountRoot = () => {
@@ -88,6 +94,10 @@
         <div class="tabs">
           <button id="tab-health" class="tab active">Health</button>
           <button id="tab-fields" class="tab">Fields</button>
+          <button id="tab-views"  class="tab">Views</button>
+          <!--
+          <button id="tab-graphs" class="tab">Graphs</button>
+          -->
         </div>
         <div>
           <button id="kt-close" class="btn">×</button>
@@ -96,20 +106,32 @@
       <div class="body">
         <div id="view-health"></div>
         <div id="view-fields" style="display:none"></div>
+        <div id="view-views"  style="display:none"></div>
+        <!--
+        <div id="view-graphs" style="display:none"></div>
+        -->
       </div>
     `;
-    document.body.appendChild(wrap);
+    document.body.appendChild(wapCheck(wrap));
     wrap.querySelector('#kt-close').addEventListener('click', () => wrap.remove(), { passive: true });
     const switchTab = (idShow) => {
       wrap.querySelectorAll('.tab').forEach(el => el.classList.remove('active'));
       wrap.querySelector('#tab-' + idShow).classList.add('active');
       wrap.querySelector('#view-health').style.display = idShow === 'health' ? 'block' : 'none';
       wrap.querySelector('#view-fields').style.display = idShow === 'fields' ? 'block' : 'none';
+      wrap.querySelector('#view-views').style.display = idShow === 'views' ? 'block' : 'none';
+      //wrap.querySelector('#view-graphs').style.display = idShow === 'graphs' ? 'block' : 'none';
     };
     wrap.querySelector('#tab-health').addEventListener('click', () => switchTab('health'), { passive: true });
     wrap.querySelector('#tab-fields').addEventListener('click', () => switchTab('fields'), { passive: true });
+    wrap.querySelector('#tab-views').addEventListener('click', () => switchTab('views'), { passive: true });
+    //wrap.querySelector('#tab-graphs').addEventListener('click', () => switchTab('graphs'), { passive: true });
     return wrap;
+
   };
+
+  // safety: if DOM node detached before append
+  function wapCheck(el) { return el; }
 
   /** ----------------------------
  * Health view
@@ -205,7 +227,7 @@
     renderTHRows();
 
     const summaryText = `App ${appId}
-           Fields: ${metrics.totalFields} (Group: ${metrics.groups}, SubTable: ${metrics.subtables}, maxCols:$ {metrics.subtableColsMax})
+           Fields: ${metrics.totalFields} (Group: ${metrics.groups}, SubTable: ${metrics.subtables}, maxCols:${metrics.subtableColsMax})
            States/Actions: ${metrics.states}/${metrics.actions}
            Views/Notifications: ${metrics.views}/${metrics.notifications}
            Customize JS/CSS: ${metrics.jsFiles}/${metrics.cssFiles}
@@ -363,7 +385,7 @@
       .map(r => ({ ...r, groupPath: groupPathByCode[r.code] || '' }))
       .filter(r => !SYSTEM_TYPES.has(r.type));
 
-    // ★ レイアウト順でソート（layoutに無いコードは末尾、同順はcodeで安定ソート）
+    // レイアウト順でソート
     const orderIndex = new Map(layoutOrderCodes.map((c, i) => [c, i]));
     rows.sort((a, b) => {
       const ai = orderIndex.has(a.code) ? orderIndex.get(a.code) : Number.POSITIVE_INFINITY;
@@ -371,7 +393,6 @@
       if (ai !== bi) return ai - bi;
       return a.code.localeCompare(b.code);
     });
-
 
     // render
     const el = root.querySelector('#view-fields');
@@ -428,7 +449,6 @@
     el.querySelector('#fi-hl-toggle').addEventListener('change', e => {
       const on = !!e.target.checked;
       saveHL(on);
-      // 既存行に反映（dataset.diff を見て付け外し）
       el.querySelectorAll('#fi-tbody tr').forEach(tr => {
         const isDiff = tr.dataset.diff === '1';
         tr.classList.toggle('hl-diff', on && isDiff);
@@ -454,6 +474,256 @@
   };
 
   /** ----------------------------
+ * Views view（全一覧の一覧化）
+ * ---------------------------- */
+  // 現在の一覧ビュー情報（イベントからセット）
+  let CURRENT_VIEW = { id: null, name: '' };
+  // クエリを (condition, orderBy[], limit, offset) に分解
+  function parseQuery(query) {
+    const q = (query || '').trim();
+    if (!q) return { condition: '', orderBy: [], limit: '', offset: '' };
+
+    const lower = q.toLowerCase();
+    const idxOrder = lower.indexOf(' order by ');
+    const idxLimit = lower.indexOf(' limit ');
+    const idxOffset = lower.indexOf(' offset ');
+
+    let conditionEnd = q.length;
+    if (idxOrder >= 0) conditionEnd = Math.min(conditionEnd, idxOrder);
+    if (idxLimit >= 0) conditionEnd = Math.min(conditionEnd, idxLimit);
+    if (idxOffset >= 0) conditionEnd = Math.min(conditionEnd, idxOffset);
+
+    const condition = q.substring(0, conditionEnd).trim();
+
+    // ORDER BY
+    let orderPart = '';
+    if (idxOrder >= 0) {
+      const afterOrder = q.substring(idxOrder + ' order by '.length);
+      const end = [idxLimit, idxOffset]
+        .filter(i => i >= 0)
+        .map(i => i - (idxOrder + ' order by '.length))
+        .sort((a, b) => a - b)[0];
+      orderPart = (end !== undefined ? afterOrder.substring(0, end) : afterOrder).trim();
+    }
+    const orderBy = orderPart ? orderPart.split(',').map(s => s.trim()).filter(Boolean) : [];
+
+    // LIMIT
+    let limit = '';
+    if (idxLimit >= 0) {
+      const afterLimit = q.substring(idxLimit + ' limit '.length);
+      const end = [idxOffset]
+        .filter(i => i >= 0)
+        .map(i => i - (idxLimit + ' limit '.length))
+        .sort((a, b) => a - b)[0];
+      limit = (end !== undefined ? afterLimit.substring(0, end) : afterLimit).trim();
+    }
+
+    // OFFSET
+    let offset = '';
+    if (idxOffset >= 0) {
+      const afterOffset = q.substring(idxOffset + ' offset '.length);
+      offset = afterOffset.trim();
+    }
+
+    return { condition, orderBy, limit, offset };
+  }
+
+  // クエリ内のフィールドコードをラベル（＋コード）に置換
+  function labelizeQueryPart(part, code2label) {
+    if (!part) return part;
+    const codes = Object.keys(code2label).sort((a, b) => b.length - a.length);
+    let out = part;
+    for (const code of codes) {
+      const label = code2label[code] || code;
+      const re = new RegExp(`(?<![\\w_])${escapeRegExp(code)}(?![\\w_])`, 'g');
+      out = out.replace(re, `${label}（${code}）`);
+    }
+    return out;
+  }
+
+  async function fetchFieldMap(appId) {
+    try {
+      const resp = await api('/k/v1/app/form/fields', { app: appId });
+      const map = {};
+      const stack = [resp.properties];
+      while (stack.length) {
+        const cur = stack.pop();
+        Object.values(cur).forEach(p => {
+          if (p.type === 'SUBTABLE' && p.fields) {
+            stack.push(p.fields);
+          } else if (p.code) {
+            map[p.code] = p.label || p.code;
+          }
+        });
+      }
+      return map;
+    } catch {
+      return {};
+    }
+  }
+
+  async function getCurrentViewName(appId) {
+    // まずはイベントで捕まえた最新値を優先
+    if (CURRENT_VIEW.name) return CURRENT_VIEW.name;
+
+    try {
+      const viewIdParam = new URL(location.href).searchParams.get('view');
+      const resp = await api('/k/v1/app/views', { app: appId });
+      const views = resp.views || {};
+
+      // 1) URLのview指定があれば優先
+      if (viewIdParam) {
+        if (views[viewIdParam]?.name) return views[viewIdParam].name;
+        for (const v of Object.values(views)) {
+          if (String(v.id) === String(viewIdParam)) return v.name || '';
+        }
+      }
+
+      // 2) デフォルトビュー（indexが最小のもの）を推定
+      //    ※ kintoneのレスポンスで index (並び順) が入る想定。無い環境でも安全にフォールバック。
+      const arr = Object.values(views);
+      if (arr.length) {
+        let cand = arr[0];
+        for (const v of arr) {
+          if (typeof v.index === 'number' && typeof cand.index === 'number') {
+            if (v.index < cand.index) cand = v;
+          }
+        }
+        return cand.name || '';
+      }
+    } catch (e) {
+      // ignore
+    }
+    return '';
+  }
+
+  const toViewsCSV = (rows) => [
+    ['ビュー名', '種類', 'フィルター', 'ソート', 'ビューID'].join(','),
+    ...rows.map(r => [
+      r.name, r.type, r.conditionPretty || '（なし）', r.sortPretty || '（なし）', r.id
+    ].map(s => `"${String(s ?? '').replace(/"/g, '""')}"`).join(','))
+  ].join('\r\n');
+
+  const toViewsMarkdown = (rows) => {
+    const header = ['ビュー名', '種類', 'フィルター', 'ソート', 'ビューID'];
+    const sep = header.map(() => ' :- ').join(' | ');
+    const lines = rows.map(r => [
+      r.name, r.type, r.conditionPretty || '（なし）', r.sortPretty || '（なし）', r.id
+    ].map(x => String(x).replace(/\|/g, '\\|')).join(' | '));
+    return ['| ' + header.join(' | ') + ' |', '| ' + sep + ' |', ...lines.map(l => '| ' + l + ' |')].join('\n');
+  };
+
+  const renderViews = async (root, appId) => {
+    const el = root.querySelector('#view-views');
+    el.innerHTML = `<div style="opacity:.8">Loading views…</div>`;
+
+    const [viewsResp, code2label] = await Promise.all([
+      api('/k/v1/app/views', { app: appId }),
+      fetchFieldMap(appId)
+    ]);
+
+    const views = Object.values(viewsResp.views || {});
+    // index（並び順）でソートし、先頭をデフォルトビューとして扱う（列は出さない）
+    views.sort((a, b) => (a.index ?? 0) - (b.index ?? 0));
+
+    const rows = views.map(v => {
+      const condition = v.filterCond || '';
+      const sort = (v.sort || '').trim(); // "field asc, field2 desc"
+      const query = condition + (sort ? ` order by ${sort}` : '');
+      const parsed = parseQuery(query);
+
+      return {
+        id: v.id ?? '',
+        name: v.name || '',
+        type: v.type || '', // LIST, CALENDAR, CUSTOM など
+        conditionRaw: parsed.condition,
+        conditionPretty: labelizeQueryPart(parsed.condition, code2label),
+        sortRaw: parsed.orderBy.join(', '),
+        sortPretty: (parsed.orderBy || []).map(ob => labelizeQueryPart(ob, code2label)).join(', ')
+      };
+    });
+
+    const md = toViewsMarkdown(rows);
+    const csv = toViewsCSV(rows);
+    const defaultName = rows.length ? rows[0].name : '';
+
+    el.innerHTML = `
+    <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:8px;flex-wrap:nowrap;min-width:0">
+      <div style="font-weight:700;white-space:nowrap">All Views（全一覧）</div>
+      <div style="display:flex;gap:6px;flex-wrap:nowrap;overflow:auto;white-space:nowrap">
+        <button id="kv-copy-md"  class="btn">Copy Markdown</button>
+        <button id="kv-dl-md"    class="btn">Download MD</button>
+        <button id="kv-copy-csv" class="btn">Copy CSV</button>
+        <button id="kv-dl-csv"   class="btn">Download CSV</button>
+        <button id="kv-refresh"  class="btn">Refresh</button>
+      </div>
+    </div>
+
+    <div style="opacity:.9;margin-bottom:6px">
+      デフォルトビュー（並び順1位）：<strong>${escHTML(defaultName || '—')}</strong>
+    </div>
+
+    <div style="overflow:auto;max-height:60vh;border:1px solid #2a2a2a;border-radius:8px">
+      <table style="border-collapse:collapse;width:100%;table-layout:fixed">
+        <colgroup>
+                  <col style="width:88px">  <!-- ビューID -->
+          <col style="width:28%">   <!-- ビュー名 -->
+          <col style="width:88px">  <!-- 種類 -->
+          <col style="width:auto">  <!-- フィルター -->
+          <col style="width:26%">   <!-- ソート -->
+        </colgroup>
+        <thead>
+          <tr>
+            <th style="position:sticky;top:0;background:#111;padding:6px;border-bottom:1px solid #333;white-space:nowrap">ビューID</th>
+            <th style="position:sticky;top:0;background:#111;padding:6px;border-bottom:1px solid #333">ビュー名</th>
+            <th style="position:sticky;top:0;background:#111;padding:6px;border-bottom:1px solid #333;white-space:nowrap">種類</th>
+            <th style="position:sticky;top:0;background:#111;padding:6px;border-bottom:1px solid #333">フィルター</th>
+            <th style="position:sticky;top:0;background:#111;padding:6px;border-bottom:1px solid #333">ソート</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${rows.map(r => `
+            <tr>
+              <td style="padding:6px;border-bottom:1px solid #222;white-space:nowrap">${escHTML(r.id)}</td>
+              <td style="padding:6px;border-bottom:1px solid #222;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="${escHTML(r.name)}">${escHTML(r.name)}</td>
+              <td style="padding:6px;border-bottom:1px solid #222;white-space:nowrap">${escHTML(r.type)}</td>
+              <td style="padding:6px;border-bottom:1px solid #222;white-space:pre-wrap">${escHTML(r.conditionPretty || '（なし）')}</td>
+              <td style="padding:6px;border-bottom:1px solid #222;white-space:pre-wrap">${escHTML(r.sortPretty || '（なし）')}</td>
+            </tr>
+          `).join('')}
+        </tbody>
+      </table>
+    </div>
+  `;
+
+    const dl = (filename, text, type = 'text/plain') => {
+      const blob = new Blob([text], { type });
+      const url = URL.createObjectURL(blob);
+      const a = Object.assign(document.createElement('a'), { href: url, download: filename });
+      document.body.appendChild(a); a.click(); a.remove();
+      URL.revokeObjectURL(url);
+    };
+
+    el.querySelector('#kv-refresh').addEventListener('click', () => renderViews(root, appId), { passive: true });
+    el.querySelector('#kv-copy-md').addEventListener('click', async () => {
+      await navigator.clipboard.writeText(md);
+      const b = el.querySelector('#kv-copy-md'); const t = b.textContent; b.textContent = 'Copied!'; setTimeout(() => b.textContent = t, 1200);
+    }, { passive: true });
+    el.querySelector('#kv-dl-md').addEventListener('click', () => dl(`kintone_views_${appId}.md`, md, 'text/markdown'), { passive: true });
+    el.querySelector('#kv-copy-csv').addEventListener('click', async () => {
+      await navigator.clipboard.writeText(csv);
+      const b = el.querySelector('#kv-copy-csv'); const t = b.textContent; b.textContent = 'Copied!'; setTimeout(() => b.textContent = t, 1200);
+    }, { passive: true });
+    el.querySelector('#kv-dl-csv').addEventListener('click', () => dl(`kintone_views_${appId}.csv`, csv, 'text/csv'), { passive: true });
+  };
+
+  /** ----------------------------
+ * Graphs views
+ * ---------------------------- */
+
+
+
+  /** ----------------------------
  * boot
  * ---------------------------- */
   waitReady().then(async () => {
@@ -461,9 +731,11 @@
     if (!appId) return;
 
     const root = mountRoot();
-    // render both views (independently)
+    // render all views (independently)
     renderHealth(root, appId).catch(e => console.warn('[Toolkit] Health error', e));
     renderFields(root, appId).catch(e => console.warn('[Toolkit] Fields error', e));
+    renderViews(root, appId).catch(e => console.warn('[Toolkit] Views error', e));
+    //renderGraphs(root, appId).catch(e => console.warn('[Toolkit] Graphs error', e));
   });
 
 })();
