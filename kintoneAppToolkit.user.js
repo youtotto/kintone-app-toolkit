@@ -1,9 +1,10 @@
 // ==UserScript==
 // @name         kintone App Toolkit: Health Check + Field Inventory + Filter
 // @namespace    https://github.com/youtotto/kintone-app-toolkit
-// @version      1.2.0
-// @description  kintoneアプリのヘルスチェック、フィールド一覧、一覧のフィルター/ソート表示
+// @version      1.3.0
+// @description  kintoneアプリのヘルスチェック、フィールド一覧、ビュー一覧、グラフ一覧
 // @match        https://*.cybozu.com/k/*/
+// @match        https://*.cybozu.com/k/*/?view=*
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=cybozu.com
 // @run-at       document-idle
 // @grant        none
@@ -15,8 +16,8 @@
   'use strict';
 
   /** ----------------------------
- * readiness / api helpers
- * ---------------------------- */
+* readiness / api helpers
+* ---------------------------- */
   const appReady = () => typeof kintone !== 'undefined' && kintone.api && kintone.app;
   const waitReady = () => new Promise(res => {
     const t = setInterval(() => { if (appReady()) { clearInterval(t); res(); } }, 50);
@@ -26,8 +27,8 @@
   const escHTML = v => String(v ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;');
 
   /** ----------------------------
- * CONSTANTS
- * ---------------------------- */
+* CONSTANTS
+* ---------------------------- */
   const CONTAINER_TYPES = new Set(['GROUP', 'SUBTABLE', 'LABEL']);
   const SYSTEM_TYPES = new Set(['RECORD_NUMBER', 'CREATOR', 'CREATED_TIME', 'MODIFIER', 'UPDATED_TIME', 'STATUS', 'STATUS_ASSIGNEE']);
 
@@ -55,21 +56,21 @@
         { level: 'OK', badge: '🟢' };
 
   /** ----------------------------
- * Small utils
- * ---------------------------- */
+* Small utils
+* ---------------------------- */
   const getUrlParam = (key) => new URL(location.href).searchParams.get(key);
   const escapeRegExp = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
   /** ----------------------------
- * UI Root (tabs)
- * ---------------------------- */
+* UI Root (tabs)
+* ---------------------------- */
   const mountRoot = () => {
     const wrap = document.createElement('div');
     wrap.id = 'kt-toolkit';
     wrap.style.cssText = `
       position:fixed; right:16px; bottom:16px; z-index:99999;
       background:#111; color:#fff; border-radius:12px; box-shadow:0 8px 30px rgba(0,0,0,.35);
-      font:12px/1.5 ui-sans-serif,system-ui; width:min(920px, 95vw); max-height:80vh; overflow:auto;
+      font:12px/1.5 ui-sans-serif,system-ui; width:min(1080px, 95vw); max-height:80vh; overflow:auto;
       border:1px solid #2a2a2a;
     `;
     wrap.innerHTML = `
@@ -89,15 +90,19 @@
         #kt-toolkit td{ padding:6px;border-bottom:1px solid #222}
         /* 必須列（Fieldsプレビューの3列目）固定 */
         #kt-fields th:nth-child(3), #kt-fields td:nth-child(3){ min-width:64px; text-align:center; white-space:nowrap; }
+        /* Graphs: 階層タグ */
+#kt-toolkit .pill{
+  display:inline-block; padding:2px 6px; border:1px solid #333; border-radius:999px;
+  font-size:11px; line-height:1; background:#1b1b1b; color:#ddd; white-space:nowrap;
+}
+#kt-toolkit .gline{ margin:2px 0; }
       </style>
       <div class="bar">
         <div class="tabs">
           <button id="tab-health" class="tab active">Health</button>
           <button id="tab-fields" class="tab">Fields</button>
           <button id="tab-views"  class="tab">Views</button>
-          <!--
           <button id="tab-graphs" class="tab">Graphs</button>
-          -->
         </div>
         <div>
           <button id="kt-close" class="btn">×</button>
@@ -107,9 +112,7 @@
         <div id="view-health"></div>
         <div id="view-fields" style="display:none"></div>
         <div id="view-views"  style="display:none"></div>
-        <!--
         <div id="view-graphs" style="display:none"></div>
-        -->
       </div>
     `;
     document.body.appendChild(wapCheck(wrap));
@@ -120,12 +123,12 @@
       wrap.querySelector('#view-health').style.display = idShow === 'health' ? 'block' : 'none';
       wrap.querySelector('#view-fields').style.display = idShow === 'fields' ? 'block' : 'none';
       wrap.querySelector('#view-views').style.display = idShow === 'views' ? 'block' : 'none';
-      //wrap.querySelector('#view-graphs').style.display = idShow === 'graphs' ? 'block' : 'none';
+      wrap.querySelector('#view-graphs').style.display = idShow === 'graphs' ? 'block' : 'none';
     };
     wrap.querySelector('#tab-health').addEventListener('click', () => switchTab('health'), { passive: true });
     wrap.querySelector('#tab-fields').addEventListener('click', () => switchTab('fields'), { passive: true });
     wrap.querySelector('#tab-views').addEventListener('click', () => switchTab('views'), { passive: true });
-    //wrap.querySelector('#tab-graphs').addEventListener('click', () => switchTab('graphs'), { passive: true });
+    wrap.querySelector('#tab-graphs').addEventListener('click', () => switchTab('graphs'), { passive: true });
     return wrap;
 
   };
@@ -134,8 +137,8 @@
   function wapCheck(el) { return el; }
 
   /** ----------------------------
- * Health view
- * ---------------------------- */
+* Health view
+* ---------------------------- */
   const renderHealth = async (root, appId) => {
     let TH = loadTH();
 
@@ -144,7 +147,7 @@
       api('/k/v1/app/form/fields', { app: appId }),
       api('/k/v1/app/status', { app: appId }),
       api('/k/v1/app/views', { app: appId }).catch(() => null),
-      api('/k/v1/app/notifications/general.json', { app: appId }).catch(() => null),
+      api('/k/v1/app/notifications/general', { app: appId }).catch(() => null),
       api('/k/v1/app/customize', { app: appId }).catch(() => null),
       api('/k/v1/app/acl', { app: appId }).catch(() => null),
     ]);
@@ -267,8 +270,8 @@
   };
 
   /** ----------------------------
- * Fields view (layout-aware, MD with notes)
- * ---------------------------- */
+* Fields view (layout-aware, MD with notes)
+* ---------------------------- */
   const formatDefault = (f) => {
     if (f.defaultValue === undefined || f.defaultValue === null) return '';
     return Array.isArray(f.defaultValue) ? f.defaultValue.join(', ') : String(f.defaultValue);
@@ -474,8 +477,8 @@
   };
 
   /** ----------------------------
- * Views view（全一覧の一覧化）
- * ---------------------------- */
+* Views view（全一覧の一覧化）
+* ---------------------------- */
   // 現在の一覧ビュー情報（イベントからセット）
   let CURRENT_VIEW = { id: null, name: '' };
   // クエリを (condition, orderBy[], limit, offset) に分解
@@ -718,14 +721,175 @@
   };
 
   /** ----------------------------
- * Graphs views
- * ---------------------------- */
+* Graphs views
+* ---------------------------- */
+  // groups を 1セル内に「G1/G2/G3のピル＋ラベル＋[PER]」で縦積み表示
+  const groupsToHTML = (groups = [], code2label = {}) => {
+    return groups.map((g, i) => {
+      const idx = i + 1;
+      const code = g?.code || '';
+      const labelRaw = code ? (code2label[code] ? `${code2label[code]}` : code) : '';
+      const perTag = g?.per ? `<span class="pill">${String(g.per).toUpperCase()}</span>` : '';
+      const label = escHTML(labelRaw);
+      return `<div class="gline"><span class="pill">G${idx}</span> ${label} ${perTag}</div>`;
+    }).join('');
+  };
 
+  // ★ CSV/Markdown 用のテキスト版（全角「、」区切り）
+  const groupsToText = (groups = [], code2label = {}) => {
+    return groups.map((g, i) => {
+      const idx = i + 1;
+      const code = g?.code || '';
+      const label = code ? (code2label[code] ? `${code2label[code]}（${code}）` : code) : '';
+      const per = g?.per ? ` [${String(g.per).toUpperCase()}]` : '';
+      return `G${idx} ${label}${per}`;
+    }).join('、 ');
+  };
 
+  const fmtAggs = (aggs = [], code2label = {}) => {
+    // 集計: { type: SUM|COUNT|..., code? }
+    return aggs.map(a => {
+      const fn = (a.type || '').toUpperCase();
+      const code = a.code || '';
+      const label = code ? (code2label[code] ? `${code2label[code]}` : code) : 'レコード';
+      return fn ? `${fn} ${label}` : label;
+    }).join(' / ');
+  };
+
+  const toGraphsCSV = (rows) => [
+    ['グラフID', 'グラフ名', 'タイプ', '表示モード', '分類項目', '集計方法', '条件'].join(','),
+    ...rows.map(r => [
+      r.id, r.name, r.chartType, r.chartMode,
+      r.groupsText || '',
+      r.aggsText, r.filterCond || '',
+    ].map(s => `"${String(s ?? '').replace(/"/g, '""')}"`).join(','))
+  ].join('\r\n');
+
+  const toGraphsMarkdown = (rows) => {
+    const header = ['グラフID', 'グラフ名', 'タイプ', '表示モード', '分類項目', '集計方法', '条件'];
+    const sep = header.map(() => ':-').join(' | ');
+    const lines = rows.map(r => [
+      r.id, r.name, r.chartType, r.chartMode,
+      (r.groupsText || ''),
+      r.aggsText, r.filterCond || '（なし）'
+    ].map(x => String(x).replace(/\|/g, '\\|')).join(' | '));
+    return [`| ${header.join(' | ')} |`, `| ${sep} |`, ...lines.map(l => `| ${l} |`)].join('\n');
+  };
+
+  const renderGraphs = async (root, appId) => {
+    const el = root.querySelector('#view-graphs');
+    el.innerHTML = `<div style="opacity:.8">Loading graphs…</div>`;
+
+    // 定義＆フィールドラベルを取得
+    const [reportsResp, code2label] = await Promise.all([
+      api('/k/v1/app/reports', { app: appId }),
+      fetchFieldMap(appId)
+    ]);
+    // ソート表示用にグローバル参照（fmtSorts内で使用）
+    window.__kt_code2label = code2label;
+
+    // reports は { [name]: { id, name, chart: {type,mode,...}, groups:[], aggregations:[], filterCond, sorts:[] } } 想定
+    const reports = Object.values(reportsResp.reports || {});
+
+    // 並び順（index）があればそれでソート
+    reports.sort((a, b) => (a.index ?? 0) - (b.index ?? 0) || String(a.name || '').localeCompare(String(b.name || '')));
+
+    const rows = reports.map(r => {
+      const chartType = r.chartType || r.chart?.type || '';
+      const chartMode = r.chartMode || r.chart?.mode || '';
+      const groups = Array.isArray(r.groups) ? r.groups : [];
+      const groupsHtml = groupsToHTML(groups, code2label);
+      const groupsText = groupsToText(groups, code2label);
+      const aggsText = fmtAggs(r.aggregations || [], code2label);
+      return {
+        id: r.id ?? '',
+        name: r.name || '',
+        chartType,
+        chartMode,
+        groupsHtml,
+        groupsText,
+        aggsText,
+        filterCond: r.filterCond || '',
+      };
+    });
+
+    const md = toGraphsMarkdown(rows);
+    const csv = toGraphsCSV(rows);
+
+    el.innerHTML = `
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:8px;flex-wrap:nowrap;min-width:0">
+        <div style="font-weight:700;white-space:nowrap">Graphs（グラフ全一覧）</div>
+        <div style="display:flex;gap:6px;flex-wrap:nowrap;overflow:auto;white-space:nowrap">
+          <button id="kg-copy-md"  class="btn">Copy Markdown</button>
+          <button id="kg-dl-md"    class="btn">Download MD</button>
+          <button id="kg-copy-csv" class="btn">Copy CSV</button>
+          <button id="kg-dl-csv"   class="btn">Download CSV</button>
+          <button id="kg-refresh"  class="btn">Refresh</button>
+        </div>
+      </div>
+      <div style="overflow:auto;max-height:60vh;border:1px solid #2a2a2a;border-radius:8px">
+        <table style="border-collapse:collapse;width:100%;table-layout:fixed">
+          <colgroup>
+            <col style="width:88px">     <!-- id -->
+            <col style="width:24%">      <!-- name -->
+            <col style="width:100px">    <!-- Type -->
+            <col style="width:100px">    <!-- Mode -->
+            <col style="width:24%">      <!-- groups -->
+            <col style="width:110px">      <!-- aggregations -->
+            <col style="width:24%">      <!-- filter -->
+          </colgroup>
+          <thead>
+            <tr>
+              <th style="position:sticky;top:0;background:#111;padding:6px;border-bottom:1px solid #333">グラフID</th>
+              <th style="position:sticky;top:0;background:#111;padding:6px;border-bottom:1px solid #333">グラフ名</th>
+              <th style="position:sticky;top:0;background:#111;padding:6px;border-bottom:1px solid #333">タイプ</th>
+              <th style="position:sticky;top:0;background:#111;padding:6px;border-bottom:1px solid #333">表示モード</th>
+              <th style="position:sticky;top:0;background:#111;padding:6px;border-bottom:1px solid #333">分類項目</th>
+              <th style="position:sticky;top:0;background:#111;padding:6px;border-bottom:1px solid #333">集計方法</th>
+              <th style="position:sticky;top:0;background:#111;padding:6px;border-bottom:1px solid #333">条件</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${rows.map(r => `
+              <tr>
+                <td style="padding:6px;border-bottom:1px solid #222;white-space:nowrap">${escHTML(r.id)}</td>
+                <td style="padding:6px;border-bottom:1px solid #222;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="${escHTML(r.name)}">${escHTML(r.name)}</td>
+                <td style="padding:6px;border-bottom:1px solid #222;white-space:nowrap">${escHTML(r.chartType)}</td>
+                <td style="padding:6px;border-bottom:1px solid #222;white-space:nowrap">${escHTML(r.chartMode)}</td>
+                <td style="padding:6px;border-bottom:1px solid #222;white-space:pre-wrap">${r.groupsHtml || '—'}</td>
+                <td style="padding:6px;border-bottom:1px solid #222;white-space:pre-wrap">${escHTML(r.aggsText || '—')}</td>
+                <td style="padding:6px;border-bottom:1px solid #222;white-space:pre-wrap">${escHTML(r.filterCond || '（なし）')}</td>
+              </tr>
+            `).join('')}
+          </tbody>
+        </table>
+      </div>
+    `;
+
+    // エクスポート操作
+    const dl = (filename, text, type = 'text/plain') => {
+      const blob = new Blob([text], { type });
+      const url = URL.createObjectURL(blob);
+      const a = Object.assign(document.createElement('a'), { href: url, download: filename });
+      document.body.appendChild(a); a.click(); a.remove();
+      URL.revokeObjectURL(url);
+    };
+    el.querySelector('#kg-refresh').addEventListener('click', () => renderGraphs(root, appId), { passive: true });
+    el.querySelector('#kg-copy-md').addEventListener('click', async () => {
+      await navigator.clipboard.writeText(md);
+      const b = el.querySelector('#kg-copy-md'); const t = b.textContent; b.textContent = 'Copied!'; setTimeout(() => b.textContent = t, 1200);
+    }, { passive: true });
+    el.querySelector('#kg-dl-md').addEventListener('click', () => dl(`kintone_graphs_${appId}.md`, md, 'text/markdown'), { passive: true });
+    el.querySelector('#kg-copy-csv').addEventListener('click', async () => {
+      await navigator.clipboard.writeText(csv);
+      const b = el.querySelector('#kg-copy-csv'); const t = b.textContent; b.textContent = 'Copied!'; setTimeout(() => b.textContent = t, 1200);
+    }, { passive: true });
+    el.querySelector('#kg-dl-csv').addEventListener('click', () => dl(`kintone_graphs_${appId}.csv`, csv, 'text/csv'), { passive: true });
+  };
 
   /** ----------------------------
- * boot
- * ---------------------------- */
+* boot
+* ---------------------------- */
   waitReady().then(async () => {
     const appId = kintone.app.getId();
     if (!appId) return;
@@ -735,7 +899,7 @@
     renderHealth(root, appId).catch(e => console.warn('[Toolkit] Health error', e));
     renderFields(root, appId).catch(e => console.warn('[Toolkit] Fields error', e));
     renderViews(root, appId).catch(e => console.warn('[Toolkit] Views error', e));
-    //renderGraphs(root, appId).catch(e => console.warn('[Toolkit] Graphs error', e));
+    renderGraphs(root, appId).catch(e => console.warn('[Toolkit] Graphs error', e));
   });
 
 })();
