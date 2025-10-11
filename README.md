@@ -28,7 +28,7 @@
 
 ### Graphs
 
-
+<img width="1606" height="771" alt="image" src="https://github.com/user-attachments/assets/48490fc3-d3b8-4057-b98a-0e2683988ecf" />
 
 ---
 
