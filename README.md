@@ -115,7 +115,7 @@
 | `/k/v1/app/status`        | プロセス状態・アクション数                           |
 | `/k/v1/app/customize`     | JS/CSSファイル一覧                            |
 | `/k/v1/app/views`         | **一覧ビュー定義の取得（Views タブ）**                |
-| `/k/v1/app/notifications` | 通知定義の取得                                 |
+| `/k/v1/app/notifications/general.json` | 通知定義の取得                                 |
 
 ---
 
