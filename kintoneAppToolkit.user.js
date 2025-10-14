@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         kintone App Toolkit: Health Check + Field Inventory + Filter
+// @name         kintone App Toolkit
 // @namespace    https://github.com/youtotto/kintone-app-toolkit
-// @version      1.3.0
+// @version      1.3.1
 // @description  kintoneアプリのヘルスチェック、フィールド一覧、ビュー一覧、グラフ一覧
 // @match        https://*.cybozu.com/k/*/
 // @match        https://*.cybozu.com/k/*/?view=*
@@ -317,13 +317,10 @@
   };
   const saveHL = (b) => localStorage.setItem(LS_HL_KEY, String(!!b));
 
+  // ==== DROP-IN REPLACEMENT (layout order only; supports top-level SUBTABLE) ====
   const renderFields = async (root, appId) => {
-    // ルックアップ判定を含めた型の正規化
-    const normalizeType = (f) => {
-      if (f && f.lookup) return 'LOOKUP';
-      return f?.type ?? '';
-    };
-    // get field defs + layout (for group/subtable placement)
+    const normalizeType = (f) => (f && f.lookup ? 'LOOKUP' : (f?.type ?? ''));
+
     const [fieldsResp, layoutResp] = await Promise.all([
       api('/k/v1/app/form/fields', { app: appId }),
       api('/k/v1/app/form/layout', { app: appId })
@@ -331,47 +328,52 @@
     const props = fieldsResp.properties || {};
     const layout = layoutResp.layout || [];
 
-    // build: 1) code -> groupPath map  2) layout order (codes as they appear)
-    const groupPathByCode = {};
-    const layoutOrderCodes = [];
-    const walk = (nodes, curGroup = null) => {
+    // --- layout から “表示順” と “グループ/サブテーブル表示名” を作る（子も順にpush）
+    const groupPathByCode = {};     // 子フィールドコード -> "Group: … / Subtable: …"
+    const layoutOrderCodes = [];    // 表示順どおりのコード列（通常＆サブ子を同一配列で）
+
+    const pushChild = (sf, curGroup, stLabel) => {
+      if (!sf?.code) return;
+      const parts = [];
+      if (curGroup) parts.push(`Group: ${curGroup}`);
+      if (stLabel) parts.push(`Subtable: ${stLabel}`);
+      groupPathByCode[sf.code] = parts.join(' / ');
+      layoutOrderCodes.push(sf.code); // ← 画面通りに採番
+    };
+
+    const walkLayout = (nodes, curGroup = null) => {
       for (const n of nodes || []) {
         if (n.type === 'ROW') {
           for (const f of n.fields || []) {
             if (f.type === 'SUBTABLE') {
               const stLabel = f.label || f.code || '(Subtable)';
-              for (const sf of f.fields || []) {
-                const parts = [];
-                if (curGroup) parts.push(`Group: ${curGroup}`);
-                parts.push(`Subtable: ${stLabel}`);
-                if (sf.code) {
-                  groupPathByCode[sf.code] = parts.join(' / ');
-                  layoutOrderCodes.push(sf.code);
-                }
-              }
+              for (const sf of f.fields || []) pushChild(sf, curGroup, stLabel);
             } else if (f.code) {
-              const parts = [];
-              if (curGroup) parts.push(`Group: ${curGroup}`);
-              groupPathByCode[f.code] = parts.join(' / ');
+              // 通常フィールド
+              groupPathByCode[f.code] = curGroup ? `Group: ${curGroup}` : '';
               layoutOrderCodes.push(f.code);
             }
           }
         } else if (n.type === 'GROUP') {
           const gLabel = n.label || n.code || '(Group)';
-          walk(n.layout, gLabel);
+          walkLayout(n.layout, gLabel);
+        } else if (n.type === 'SUBTABLE') {
+          // ★ SUBTABLE がトップレベル要素として現れるケース
+          const stLabel = n.label || n.code || '(Subtable)';
+          for (const sf of n.fields || []) pushChild(sf, curGroup, stLabel);
         }
       }
     };
-    walk(layout);
+    walkLayout(layout);
 
-    // collect leaf fields from defs
+    // --- 定義から葉フィールドを収集（順序は使わず、型や必須、初期値を取得）
     const list = [];
     const seen = new Set();
-    const collect = f => {
+    const collect = (f) => {
       if (!f || !f.type) return;
-      if (f.type === 'GROUP') Object.values(f.fields || {}).forEach(collect);
-      else if (f.type === 'SUBTABLE') Object.values(f.fields || {}).forEach(collect);
-      else if (!CONTAINER_TYPES.has(f.type) && f.code && !seen.has(f.code)) {
+      if (f.type === 'GROUP') { Object.values(f.fields || {}).forEach(collect); return; }
+      if (f.type === 'SUBTABLE') { Object.values(f.fields || {}).forEach(collect); return; }
+      if (!CONTAINER_TYPES.has(f.type) && f.code && !seen.has(f.code)) {
         seen.add(f.code);
         list.push({
           label: f.label ?? '',
@@ -384,46 +386,51 @@
     };
     Object.values(props).forEach(collect);
 
+    // --- 表示用行へ。グループ/サブテーブル表示は “layoutだけ” を正とする
     const rows = list
-      .map(r => ({ ...r, groupPath: groupPathByCode[r.code] || '' }))
+      .map(r => ({
+        ...r,
+        groupPath: groupPathByCode[r.code] || ''
+      }))
       .filter(r => !SYSTEM_TYPES.has(r.type));
 
-    // レイアウト順でソート
+    // --- layout の並び順でソート（見つからないコードは末尾）
     const orderIndex = new Map(layoutOrderCodes.map((c, i) => [c, i]));
+    const INF = Number.POSITIVE_INFINITY;
     rows.sort((a, b) => {
-      const ai = orderIndex.has(a.code) ? orderIndex.get(a.code) : Number.POSITIVE_INFINITY;
-      const bi = orderIndex.has(b.code) ? orderIndex.get(b.code) : Number.POSITIVE_INFINITY;
-      if (ai !== bi) return ai - bi;
-      return a.code.localeCompare(b.code);
+      const ai = orderIndex.has(a.code) ? orderIndex.get(a.code) : INF;
+      const bi = orderIndex.has(b.code) ? orderIndex.get(b.code) : INF;
+      return ai === bi ? a.code.localeCompare(b.code) : ai - bi;
     });
 
-    // render
+    // --- UI
     const el = root.querySelector('#view-fields');
     const highlightOn = loadHL();
     el.innerHTML = `
-      <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:8px">
-        <div style="font-weight:700">Field Inventory（読み取り専用）</div>
-        <div style="display:flex;gap:6px;flex-wrap:wrap">
-          <label style="display:flex;align-items:center;gap:6px;margin-right:8px;user-select:none">
-            <input id="fi-hl-toggle" type="checkbox" ${highlightOn ? 'checked' : ''}>
-            <span style="opacity:.9">名称≠コードをハイライト</span>
-          </label>
-          <button id="fi-copy-md" class="btn">Copy Markdown</button>
-          <button id="fi-dl-md"   class="btn">Download MD</button>
-          <button id="fi-copy"    class="btn">Copy CSV</button>
-          <button id="fi-json"    class="btn">Download JSON</button>
-        </div>
+    <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:8px">
+      <div style="font-weight:700">Field Inventory（読み取り専用）</div>
+      <div style="display:flex;gap:6px;flex-wrap:wrap">
+        <label style="display:flex;align-items:center;gap:6px;margin-right:8px;user-select:none">
+          <input id="fi-hl-toggle" type="checkbox" ${highlightOn ? 'checked' : ''}>
+          <span style="opacity:.9">名称≠コードをハイライト</span>
+        </label>
+        <button id="fi-copy-md" class="btn">Copy Markdown</button>
+        <button id="fi-dl-md"   class="btn">Download MD</button>
+        <button id="fi-copy"    class="btn">Copy CSV</button>
+        <button id="fi-json"    class="btn">Download JSON</button>
       </div>
-      <div id="kt-fields">
-        <table>
-          <thead><tr>
-            <th>フィールド名</th><th>フィールドコード</th><th>必須</th>
-            <th>初期値</th><th>フィールド形式</th><th>グループ</th>
-          </tr></thead>
-          <tbody id="fi-tbody"></tbody>
-        </table>
-      </div>
-    `;
+    </div>
+    <div id="kt-fields">
+      <table>
+        <thead><tr>
+          <th>フィールド名</th><th>フィールドコード</th><th>必須</th>
+          <th>初期値</th><th>フィールド形式</th><th>グループ</th>
+        </tr></thead>
+        <tbody id="fi-tbody"></tbody>
+      </table>
+    </div>
+  `;
+
     const tbody = el.querySelector('#fi-tbody');
     const applyRowClass = (tr, r) => {
       const different = (r.label || '').trim() !== (r.code || '').trim();
@@ -434,13 +441,13 @@
     rows.forEach(r => {
       const tr = document.createElement('tr');
       tr.innerHTML = `
-        <td>${escHTML(r.label)}</td>
-        <td style="opacity:.9">${escHTML(r.code)}</td>
-        <td>${r.required ? '✓' : ''}</td>
-        <td style="opacity:.9">${escHTML(r.defaultValue)}</td>
-        <td>${escHTML(r.type)}</td>
-        <td style="opacity:.9">${escHTML(r.groupPath)}</td>
-      `;
+      <td>${escHTML(r.label)}</td>
+      <td style="opacity:.9">${escHTML(r.code)}</td>
+      <td>${r.required ? '✓' : ''}</td>
+      <td style="opacity:.9">${escHTML(r.defaultValue)}</td>
+      <td>${escHTML(r.type)}</td>
+      <td style="opacity:.9">${escHTML(r.groupPath)}</td>
+    `;
       applyRowClass(tr, r);
       tbody.appendChild(tr);
     });
@@ -448,7 +455,6 @@
     const md = toMarkdownWithNotes(rows);
     const csv = toCSV(rows);
 
-    // ハイライト切替
     el.querySelector('#fi-hl-toggle').addEventListener('change', e => {
       const on = !!e.target.checked;
       saveHL(on);
@@ -475,6 +481,10 @@
       download(`kintone_fields_${appId}.md`, md, 'text/markdown');
     }, { passive: true });
   };
+  // ==== END REPLACEMENT ====
+
+
+
 
   /** ----------------------------
 * Views view（全一覧の一覧化）
