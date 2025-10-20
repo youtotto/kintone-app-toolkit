@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         kintone App Toolkit
 // @namespace    https://github.com/youtotto/kintone-app-toolkit
-// @version      1.3.1
+// @version      1.3.2
 // @description  kintoneアプリのヘルスチェック、フィールド一覧、ビュー一覧、グラフ一覧
 // @match        https://*.cybozu.com/k/*/
 // @match        https://*.cybozu.com/k/*/?view=*
@@ -272,10 +272,67 @@
   /** ----------------------------
 * Fields view (layout-aware, MD with notes)
 * ---------------------------- */
-  const formatDefault = (f) => {
-    if (f.defaultValue === undefined || f.defaultValue === null) return '';
-    return Array.isArray(f.defaultValue) ? f.defaultValue.join(', ') : String(f.defaultValue);
-  };
+  // 汎用の初期値フォーマッタ（フィールド定義用）
+  function formatDefault(field) {
+    const t = field?.type;
+    const dv = field?.defaultValue;
+
+    // USER_SELECT / ORGANIZATION_SELECT は defaultValue が配列（Object or string）
+    if (t === 'USER_SELECT') {
+      // 例：[{ code:'user1', type:'USER' }, { code:'group1', type:'GROUP' }, { code:'LOGINUSER()', type:'FUNCTION' }]
+      const arr = Array.isArray(dv) ? dv : [];
+      return arr.map(e => {
+        if (e && typeof e === 'object') {
+          const kind = e.type;
+          const code = e.code;
+          if (kind === 'FUNCTION') {
+            // よく使う関数はラベル化（未知はそのまま表示）
+            if (code === 'LOGINUSER()') return 'ログインユーザー';
+            if (code === 'PRIMARY_ORGANIZATION()') return '主所属組織';
+            return code || '';
+          }
+          if (kind === 'USER') return `ユーザー:${code}`;
+          if (kind === 'GROUP') return `グループ:${code}`;
+          if (kind === 'ORGANIZATION') return `組織:${code}`;
+          return String(code ?? '');
+        }
+        // 念のため素の文字列にも対応
+        return String(e ?? '');
+      }).join(', ');
+    }
+
+    if (t === 'ORGANIZATION_SELECT') {
+      // 例：['org1', 'org2'] または [{ code:'org1', type:'ORGANIZATION' }]
+      const arr = Array.isArray(dv) ? dv : [];
+      return arr.map(e => {
+        if (e && typeof e === 'object') {
+
+          const kind = e.type;
+          const code = e.code;
+          if (kind === 'FUNCTION') {
+            // よく使う関数はラベル化（未知はそのまま表示）
+            if (code === 'PRIMARY_ORGANIZATION()') return '主所属組織';
+            return code || '';
+          }
+          if (kind === 'GROUP') return `グループ:${code}`;
+          if (kind === 'ORGANIZATION') return `組織:${code}`;
+          return `組織:${String(code ?? '')}`;
+        }
+
+        return `組織:${String(e ?? '')}`;
+      }).join(', ');
+    }
+
+    // それ以外は既存挙動に近いシンプル整形
+    if (dv == null) return '';
+    if (Array.isArray(dv)) return dv.join(', ');
+    if (typeof dv === 'object') {
+      // 既定では [object Object] にならないよう JSON文字列化（短く）
+      try { return JSON.stringify(dv); } catch { return String(dv); }
+    }
+    return String(dv);
+  }
+
   const mdEsc = (v = '') =>
     String(v).replace(/\\/g, '\\\\').replace(/\|/g, '\\|').replace(/`/g, '\\`');
 
@@ -482,9 +539,6 @@
     }, { passive: true });
   };
   // ==== END REPLACEMENT ====
-
-
-
 
   /** ----------------------------
 * Views view（全一覧の一覧化）
