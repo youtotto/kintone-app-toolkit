@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         kintone App Toolkit
 // @namespace    https://github.com/youtotto/kintone-app-toolkit
-// @version      1.3.2
+// @version      1.3.3
 // @description  kintoneアプリのヘルスチェック、フィールド一覧、ビュー一覧、グラフ一覧
 // @match        https://*.cybozu.com/k/*/
 // @match        https://*.cybozu.com/k/*/?view=*
@@ -65,37 +65,95 @@
 * UI Root (tabs)
 * ---------------------------- */
   const mountRoot = () => {
+    // 1. ライトモード/ダークモードの判定
+    const isDarkMode = window.matchMedia('(prefers-color-scheme: dark)').matches;
+
+    // 2. 色の変数を定義 (D: Dark, L: Light)
+    const C = isDarkMode ? {
+      bg: '#111',       // メイン背景
+      bgSub: '#1d1d1d',  // ボタン/タブ背景
+      bgSub2: '#1b1b1b', // Pill背景
+      bgInput: '#0f0f0f',// 入力欄背景
+      text: '#fff',      // メインテキスト
+      textSub: '#ddd',   // Pillテキスト
+      border: '#2a2a2a', // メインボーダー
+      border2: '#333',   // thボーダー, pillボーダー
+      border3: '#222',   // tdボーダー
+    } : {
+      bg: '#F5F5F5',      // (L) メイン背景
+      bgSub: '#eee',       // (L) ボタン/タブ背景
+      bgSub2: '#e0e0e0',     // (L) Pill背景
+      bgInput: '#fff',     // (L) 入力欄背景
+      text: '#111',      // (L) メインテキスト (黒)
+      textSub: '#333',    // (L) Pillテキスト
+      border: '#ccc',      // (L) メインボーダー
+      border2: '#bbb',     // (L) thボーダー, pillボーダー
+      border3: '#ddd',     // (L) tdボーダー
+    };
+
     const wrap = document.createElement('div');
     wrap.id = 'kt-toolkit';
     wrap.style.cssText = `
-      position:fixed; right:16px; bottom:16px; z-index:99999;
-      background:#111; color:#fff; border-radius:12px; box-shadow:0 8px 30px rgba(0,0,0,.35);
+      position:fixed; right:16px; bottom:16px; z-index:9999;
+      background:${C.bg}; color:${C.text}; border-radius:12px;
+      box-shadow:0 8px 30px rgba(0,0,0,${isDarkMode ? '.35' : '.15'});
       font:12px/1.5 ui-sans-serif,system-ui; width:min(1080px, 95vw); max-height:80vh; overflow:auto;
-      border:1px solid #2a2a2a;
+      border:1px solid ${C.border};
     `;
     wrap.innerHTML = `
       <style>
-        #kt-toolkit .bar{display:flex;justify-content:space-between;align-items:center;padding:10px 12px;border-bottom:1px solid #2a2a2a;}
+        #kt-toolkit .bar{display:flex;justify-content:space-between;align-items:center;padding:10px 12px;border-bottom:1px solid ${C.border};}
         #kt-toolkit .tabs{display:flex;gap:6px;flex-wrap:wrap}
-        #kt-toolkit .tab{padding:6px 10px;border:1px solid #2a2a2a;background:#1d1d1d;color:#fff;border-radius:8px;cursor:pointer}
-        #kt-toolkit .tab.active{background:#2563eb;border-color:#2563eb}
-        #kt-toolkit .btn{padding:6px 10px;border:1px solid #2a2a2a;background:#1d1d1d;color:#fff;border-radius:8px;cursor:pointer}
+        #kt-toolkit .tab{padding:6px 10px;border:1px solid ${C.border};background:${C.bgSub};color:${C.text};border-radius:8px;cursor:pointer}
+        #kt-toolkit .tab.active{background:#2563eb;border-color:#2563eb;color:#fff;} /* Activeは色固定 */
+        #kt-toolkit .btn{padding:6px 10px;border:1px solid ${C.border};background:${C.bgSub};color:${C.text};border-radius:8px;cursor:pointer}
         #kt-toolkit .body{padding:12px}
         /* label≠code 行のハイライト */
         #kt-toolkit .hl-diff td { background: rgba(255, 196, 0, 0.12); }
         #kt-toolkit .hl-diff td:nth-child(1),
         #kt-toolkit .hl-diff td:nth-child(2) { font-weight: 600; }
+        /* 共通テーブルスタイル */
         #kt-toolkit table{border-collapse:collapse;width:100%}
-        #kt-toolkit th{ text-align:left;padding:6px;border-bottom:1px solid #333;position:sticky;top:0;background:#111}
-        #kt-toolkit td{ padding:6px;border-bottom:1px solid #222}
+        #kt-toolkit th{ text-align:left;padding:6px;border-bottom:1px solid ${C.border2};position:sticky;top:0;background:${C.bg}}
+        #kt-toolkit td{ padding:6px;border-bottom:1px solid ${C.border3}}
         /* 必須列（Fieldsプレビューの3列目）固定 */
         #kt-fields th:nth-child(3), #kt-fields td:nth-child(3){ min-width:64px; text-align:center; white-space:nowrap; }
         /* Graphs: 階層タグ */
-#kt-toolkit .pill{
-  display:inline-block; padding:2px 6px; border:1px solid #333; border-radius:999px;
-  font-size:11px; line-height:1; background:#1b1b1b; color:#ddd; white-space:nowrap;
-}
-#kt-toolkit .gline{ margin:2px 0; }
+        #kt-toolkit .pill{
+          display:inline-block; padding:2px 6px; border:1px solid ${C.border2}; border-radius:999px;
+          font-size:11px; line-height:1; background:${C.bgSub2}; color:${C.textSub}; white-space:nowrap;
+        }
+        #kt-toolkit .gline{ margin:2px 0; }
+
+        /* Health: 基準値設定のinput */
+        #kt-th-panel input {
+          background:${C.bgInput};color:${C.text};border:1px solid ${C.border2};border-radius:6px;padding:4px 6px;
+          width: 64px;
+        }
+
+        /* Views/Graphs: スクロールコンテナ */
+        #view-views .table-container, #view-graphs .table-container {
+            overflow:auto;max-height:60vh;border:1px solid ${C.border};border-radius:8px
+        }
+        /* Views/Graphs: th (共通) */
+        #view-views th, #view-graphs th {
+            position:sticky;top:0;background:${C.bg};padding:6px;border-bottom:1px solid ${C.border2};
+        }
+
+        /* Views: 個別スタイル */
+        #view-views th:nth-child(1), #view-views th:nth-child(3) { white-space:nowrap; }
+        #view-views td { padding:6px;border-bottom:1px solid ${C.border3}; }
+        #view-views td:nth-child(1), #view-views td:nth-child(3) { white-space:nowrap; }
+        #view-views td:nth-child(2) { white-space:nowrap;overflow:hidden;text-overflow:ellipsis; }
+        #view-views td:nth-child(4), #view-views td:nth-child(5) { white-space:pre-wrap; }
+
+        /* Graphs: 個別スタイル */
+        #view-graphs th { white-space:nowrap; }
+        #view-graphs td { padding:6px;border-bottom:1px solid ${C.border3}; }
+        #view-graphs td:nth-child(1), #view-graphs td:nth-child(3), #view-graphs td:nth-child(4) { white-space:nowrap; }
+        #view-graphs td:nth-child(2) { white-space:nowrap;overflow:hidden;text-overflow:ellipsis; }
+        #view-graphs td:nth-child(5), #view-graphs td:nth-child(6), #view-graphs td:nth-child(7) { white-space:pre-wrap; }
+
       </style>
       <div class="bar">
         <div class="tabs">
@@ -210,7 +268,7 @@
         </table>
         <div style="margin-top:8px;display:flex;gap:8px;justify-content:flex-end">
           <button id="kt-th-reset" class="btn">初期化</button>
-          <button id="kt-th-save"  class="btn" style="background:#2563eb;border-color:#2563eb">保存</button>
+          <button id="kt-th-save"  class="btn" style="background:#2563eb;border-color:#2563eb;color:#fff;">保存</button>
         </div>
       </div>
     `;
@@ -220,22 +278,20 @@
       rowsEl.innerHTML = Object.entries(TH).map(([k, v]) => `
         <tr data-key="${k}">
           <td>${v.label}</td>
-          <td style="text-align:right"><input type="number" min="0" value="${v.Y}"
-            style="width:64px;background:#0f0f0f;color:#fff;border:1px solid #333;border-radius:6px;padding:4px 6px"></td>
-          <td style="text-align:right"><input type="number" min="0" value="${v.R}"
-            style="width:64px;background:#0f0f0f;color:#fff;border:1px solid #333;border-radius:6px;padding:4px 6px"></td>
+          <td style="text-align:right"><input type="number" min="0" value="${v.Y}"></td>
+          <td style="text-align:right"><input type="number" min="0" value="${v.R}"></td>
         </tr>
       `).join('');
     };
     renderTHRows();
 
     const summaryText = `App ${appId}
-           Fields: ${metrics.totalFields} (Group: ${metrics.groups}, SubTable: ${metrics.subtables}, maxCols:${metrics.subtableColsMax})
-           States/Actions: ${metrics.states}/${metrics.actions}
-           Views/Notifications: ${metrics.views}/${metrics.notifications}
-           Customize JS/CSS: ${metrics.jsFiles}/${metrics.cssFiles}
-           ACL rules: ${metrics.roles}
-           判定: Fields=${score.totalFields.level}, States=${score.states.level}, Actions=${score.actions.level}`;
+                Fields: ${metrics.totalFields} (Group: ${metrics.groups}, SubTable: ${metrics.subtables}, maxCols:${metrics.subtableColsMax})
+                States/Actions: ${metrics.states}/${metrics.actions}
+                Views/Notifications: ${metrics.views}/${metrics.notifications}
+                Customize JS/CSS: ${metrics.jsFiles}/${metrics.cssFiles}
+                ACL rules: ${metrics.roles}
+                判定: Fields=${score.totalFields.level}, States=${score.states.level}, Actions=${score.actions.level}`;
 
     el.querySelector('#kt-copy').addEventListener('click', async () => {
       await navigator.clipboard.writeText(summaryText);
@@ -386,8 +442,8 @@
     const layout = layoutResp.layout || [];
 
     // --- layout から “表示順” と “グループ/サブテーブル表示名” を作る（子も順にpush）
-    const groupPathByCode = {};     // 子フィールドコード -> "Group: … / Subtable: …"
-    const layoutOrderCodes = [];    // 表示順どおりのコード列（通常＆サブ子を同一配列で）
+    const groupPathByCode = {};    // 子フィールドコード -> "Group: … / Subtable: …"
+    const layoutOrderCodes = [];   // 表示順どおりのコード列（通常＆サブ子を同一配列で）
 
     const pushChild = (sf, curGroup, stLabel) => {
       if (!sf?.code) return;
@@ -730,32 +786,27 @@
       デフォルトビュー（並び順1位）：<strong>${escHTML(defaultName || '—')}</strong>
     </div>
 
-    <div style="overflow:auto;max-height:60vh;border:1px solid #2a2a2a;border-radius:8px">
+    <div class="table-container">
       <table style="border-collapse:collapse;width:100%;table-layout:fixed">
         <colgroup>
-                  <col style="width:88px">  <!-- ビューID -->
-          <col style="width:28%">   <!-- ビュー名 -->
-          <col style="width:88px">  <!-- 種類 -->
-          <col style="width:auto">  <!-- フィルター -->
-          <col style="width:26%">   <!-- ソート -->
-        </colgroup>
+                  <col style="width:88px">  <col style="width:28%">    <col style="width:88px">  <col style="width:auto">  <col style="width:26%">    </colgroup>
         <thead>
           <tr>
-            <th style="position:sticky;top:0;background:#111;padding:6px;border-bottom:1px solid #333;white-space:nowrap">ビューID</th>
-            <th style="position:sticky;top:0;background:#111;padding:6px;border-bottom:1px solid #333">ビュー名</th>
-            <th style="position:sticky;top:0;background:#111;padding:6px;border-bottom:1px solid #333;white-space:nowrap">種類</th>
-            <th style="position:sticky;top:0;background:#111;padding:6px;border-bottom:1px solid #333">フィルター</th>
-            <th style="position:sticky;top:0;background:#111;padding:6px;border-bottom:1px solid #333">ソート</th>
+            <th>ビューID</th>
+            <th>ビュー名</th>
+            <th>種類</th>
+            <th>フィルター</th>
+            <th>ソート</th>
           </tr>
         </thead>
         <tbody>
           ${rows.map(r => `
             <tr>
-              <td style="padding:6px;border-bottom:1px solid #222;white-space:nowrap">${escHTML(r.id)}</td>
-              <td style="padding:6px;border-bottom:1px solid #222;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="${escHTML(r.name)}">${escHTML(r.name)}</td>
-              <td style="padding:6px;border-bottom:1px solid #222;white-space:nowrap">${escHTML(r.type)}</td>
-              <td style="padding:6px;border-bottom:1px solid #222;white-space:pre-wrap">${escHTML(r.conditionPretty || '（なし）')}</td>
-              <td style="padding:6px;border-bottom:1px solid #222;white-space:pre-wrap">${escHTML(r.sortPretty || '（なし）')}</td>
+              <td>${escHTML(r.id)}</td>
+              <td title="${escHTML(r.name)}">${escHTML(r.name)}</td>
+              <td>${escHTML(r.type)}</td>
+              <td>${escHTML(r.conditionPretty || '（なし）')}</td>
+              <td>${escHTML(r.sortPretty || '（なし）')}</td>
             </tr>
           `).join('')}
         </tbody>
@@ -891,38 +942,31 @@
           <button id="kg-refresh"  class="btn">Refresh</button>
         </div>
       </div>
-      <div style="overflow:auto;max-height:60vh;border:1px solid #2a2a2a;border-radius:8px">
+      <div class="table-container">
         <table style="border-collapse:collapse;width:100%;table-layout:fixed">
           <colgroup>
-            <col style="width:88px">     <!-- id -->
-            <col style="width:24%">      <!-- name -->
-            <col style="width:100px">    <!-- Type -->
-            <col style="width:100px">    <!-- Mode -->
-            <col style="width:24%">      <!-- groups -->
-            <col style="width:110px">      <!-- aggregations -->
-            <col style="width:24%">      <!-- filter -->
-          </colgroup>
+            <col style="width:88px">     <col style="width:24%">     <col style="width:100px">   <col style="width:100px">   <col style="width:24%">     <col style="width:110px">     <col style="width:24%">     </colgroup>
           <thead>
             <tr>
-              <th style="position:sticky;top:0;background:#111;padding:6px;border-bottom:1px solid #333">グラフID</th>
-              <th style="position:sticky;top:0;background:#111;padding:6px;border-bottom:1px solid #333">グラフ名</th>
-              <th style="position:sticky;top:0;background:#111;padding:6px;border-bottom:1px solid #333">タイプ</th>
-              <th style="position:sticky;top:0;background:#111;padding:6px;border-bottom:1px solid #333">表示モード</th>
-              <th style="position:sticky;top:0;background:#111;padding:6px;border-bottom:1px solid #333">分類項目</th>
-              <th style="position:sticky;top:0;background:#111;padding:6px;border-bottom:1px solid #333">集計方法</th>
-              <th style="position:sticky;top:0;background:#111;padding:6px;border-bottom:1px solid #333">条件</th>
+              <th>グラフID</th>
+              <th>グラフ名</th>
+              <th>タイプ</th>
+              <th>表示モード</th>
+              <th>分類項目</th>
+              <th>集計方法</th>
+              <th>条件</th>
             </tr>
           </thead>
           <tbody>
             ${rows.map(r => `
               <tr>
-                <td style="padding:6px;border-bottom:1px solid #222;white-space:nowrap">${escHTML(r.id)}</td>
-                <td style="padding:6px;border-bottom:1px solid #222;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="${escHTML(r.name)}">${escHTML(r.name)}</td>
-                <td style="padding:6px;border-bottom:1px solid #222;white-space:nowrap">${escHTML(r.chartType)}</td>
-                <td style="padding:6px;border-bottom:1px solid #222;white-space:nowrap">${escHTML(r.chartMode)}</td>
-                <td style="padding:6px;border-bottom:1px solid #222;white-space:pre-wrap">${r.groupsHtml || '—'}</td>
-                <td style="padding:6px;border-bottom:1px solid #222;white-space:pre-wrap">${escHTML(r.aggsText || '—')}</td>
-                <td style="padding:6px;border-bottom:1px solid #222;white-space:pre-wrap">${escHTML(r.filterCond || '（なし）')}</td>
+                <td>${escHTML(r.id)}</td>
+                <td title="${escHTML(r.name)}">${escHTML(r.name)}</td>
+                <td>${escHTML(r.chartType)}</td>
+                <td>${escHTML(r.chartMode)}</td>
+                <td>${r.groupsHtml || '—'}</td>
+                <td>${escHTML(r.aggsText || '—')}</td>
+                <td>${escHTML(r.filterCond || '（なし）')}</td>
               </tr>
             `).join('')}
           </tbody>
