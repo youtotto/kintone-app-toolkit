@@ -5,6 +5,10 @@
 // @description  kintoneアプリのヘルスチェック、フィールド一覧、ビュー一覧、グラフ一覧
 // @match        https://*.cybozu.com/k/*/
 // @match        https://*.cybozu.com/k/*/?view=*
+// @connect      api.github.com
+// @connect      raw.githubusercontent.com
+// @connect      cdn.jsdelivr.net
+// @connect      unpkg.com
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=cybozu.com
 // @run-at       document-idle
 // @grant        none
@@ -16,8 +20,8 @@
   'use strict';
 
   /** ----------------------------
-* readiness / api helpers
-* ---------------------------- */
+  * readiness / api helpers
+  * ---------------------------- */
   const appReady = () => typeof kintone !== 'undefined' && kintone.api && kintone.app;
   const waitReady = () => new Promise(res => {
     const t = setInterval(() => { if (appReady()) { clearInterval(t); res(); } }, 50);
@@ -27,43 +31,20 @@
   const escHTML = v => String(v ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;');
 
   /** ----------------------------
-* CONSTANTS
-* ---------------------------- */
+  * CONSTANTS
+  * ---------------------------- */
   const CONTAINER_TYPES = new Set(['GROUP', 'SUBTABLE', 'LABEL']);
   const SYSTEM_TYPES = new Set(['RECORD_NUMBER', 'CREATOR', 'CREATED_TIME', 'MODIFIER', 'UPDATED_TIME', 'STATUS', 'STATUS_ASSIGNEE']);
 
-  // Health thresholds (edit-able; persisted to LS)
-  const LS_TH_KEY = 'ktHealthThresholds.v1';
-  const DEFAULT_TH = {
-    totalFields: { Y: 100, R: 200, label: 'フォーム総フィールド数' },
-    states: { Y: 10, R: 12, label: 'プロセス状態数' },
-    actions: { Y: 15, R: 18, label: 'プロセスアクション数' }
-  };
-  const loadTH = () => {
-    try {
-      const j = JSON.parse(localStorage.getItem(LS_TH_KEY) || '{}');
-      return Object.fromEntries(Object.keys(DEFAULT_TH).map(k => {
-        const v = j[k] || {};
-        return [k, { Y: Number(v.Y ?? DEFAULT_TH[k].Y), R: Number(v.R ?? DEFAULT_TH[k].R), label: DEFAULT_TH[k].label }];
-      }));
-    } catch { return structuredClone(DEFAULT_TH); }
-  };
-  const saveTH = th => localStorage.setItem(LS_TH_KEY, JSON.stringify(th));
-
-  const judge = (val, { Y, R }) =>
-    val >= R ? { level: 'RED', badge: '🔴' } :
-      val >= Y ? { level: 'YELLOW', badge: '🟡' } :
-        { level: 'OK', badge: '🟢' };
-
   /** ----------------------------
-* Small utils
-* ---------------------------- */
+  * Small utils
+  * ---------------------------- */
   const getUrlParam = (key) => new URL(location.href).searchParams.get(key);
   const escapeRegExp = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
   /** ----------------------------
-* UI Root (tabs)
-* ---------------------------- */
+  * UI Root (tabs)
+  * ---------------------------- */
   const mountRoot = () => {
     // 1. ライトモード/ダークモードの判定
     const isDarkMode = window.matchMedia('(prefers-color-scheme: dark)').matches;
@@ -161,6 +142,7 @@
           <button id="tab-fields" class="tab">Fields</button>
           <button id="tab-views"  class="tab">Views</button>
           <button id="tab-graphs" class="tab">Graphs</button>
+          <button id="tab-templates" class="tab">Templates</button>
         </div>
         <div>
           <button id="kt-close" class="btn">×</button>
@@ -171,6 +153,7 @@
         <div id="view-fields" style="display:none"></div>
         <div id="view-views"  style="display:none"></div>
         <div id="view-graphs" style="display:none"></div>
+        <div id="view-templates" style="display:none"></div>
       </div>
     `;
     document.body.appendChild(wapCheck(wrap));
@@ -182,11 +165,13 @@
       wrap.querySelector('#view-fields').style.display = idShow === 'fields' ? 'block' : 'none';
       wrap.querySelector('#view-views').style.display = idShow === 'views' ? 'block' : 'none';
       wrap.querySelector('#view-graphs').style.display = idShow === 'graphs' ? 'block' : 'none';
+      wrap.querySelector('#view-templates').style.display = idShow === 'templates' ? 'block' : 'none';
     };
     wrap.querySelector('#tab-health').addEventListener('click', () => switchTab('health'), { passive: true });
     wrap.querySelector('#tab-fields').addEventListener('click', () => switchTab('fields'), { passive: true });
     wrap.querySelector('#tab-views').addEventListener('click', () => switchTab('views'), { passive: true });
     wrap.querySelector('#tab-graphs').addEventListener('click', () => switchTab('graphs'), { passive: true });
+    wrap.querySelector('#tab-templates').addEventListener('click', () => switchTab('templates'), { passive: true });
     return wrap;
 
   };
@@ -195,8 +180,31 @@
   function wapCheck(el) { return el; }
 
   /** ----------------------------
-* Health view
-* ---------------------------- */
+  * Health view
+  * ---------------------------- */
+  // Health thresholds (edit-able; persisted to LS)
+  const LS_TH_KEY = 'ktHealthThresholds.v1';
+  const DEFAULT_TH = {
+    totalFields: { Y: 100, R: 200, label: 'フォーム総フィールド数' },
+    states: { Y: 10, R: 12, label: 'プロセス状態数' },
+    actions: { Y: 15, R: 18, label: 'プロセスアクション数' }
+  };
+  const loadTH = () => {
+    try {
+      const j = JSON.parse(localStorage.getItem(LS_TH_KEY) || '{}');
+      return Object.fromEntries(Object.keys(DEFAULT_TH).map(k => {
+        const v = j[k] || {};
+        return [k, { Y: Number(v.Y ?? DEFAULT_TH[k].Y), R: Number(v.R ?? DEFAULT_TH[k].R), label: DEFAULT_TH[k].label }];
+      }));
+    } catch { return structuredClone(DEFAULT_TH); }
+  };
+  const saveTH = th => localStorage.setItem(LS_TH_KEY, JSON.stringify(th));
+
+  const judge = (val, { Y, R }) =>
+    val >= R ? { level: 'RED', badge: '🔴' } :
+      val >= Y ? { level: 'YELLOW', badge: '🟡' } :
+        { level: 'OK', badge: '🟢' };
+
   const renderHealth = async (root, appId) => {
     let TH = loadTH();
 
@@ -597,8 +605,8 @@
   // ==== END REPLACEMENT ====
 
   /** ----------------------------
-* Views view（全一覧の一覧化）
-* ---------------------------- */
+  * Views view（全一覧の一覧化）
+  * ---------------------------- */
   // 現在の一覧ビュー情報（イベントからセット）
   let CURRENT_VIEW = { id: null, name: '' };
   // クエリを (condition, orderBy[], limit, offset) に分解
@@ -836,8 +844,8 @@
   };
 
   /** ----------------------------
-* Graphs views
-* ---------------------------- */
+  * Graphs views
+  * ---------------------------- */
   // groups を 1セル内に「G1/G2/G3のピル＋ラベル＋[PER]」で縦積み表示
   const groupsToHTML = (groups = [], code2label = {}) => {
     return groups.map((g, i) => {
@@ -996,8 +1004,237 @@
   };
 
   /** ----------------------------
-* boot
-* ---------------------------- */
+  * Template views
+  * ---------------------------- */
+  async function renderTemplates(root) {
+    const view = document.getElementById('view-templates');
+    if (!view) return;
+    let currentFileName = 'template.js';
+
+    // Dark/Lightに追従（既存Cを再利用できない位置なら簡易色でOK）
+    const isDark = matchMedia('(prefers-color-scheme: dark)').matches;
+    const BG = isDark ? '#1b1b1b' : '#fff';
+    const BD = isDark ? '#333' : '#ddd';
+    const TX = isDark ? '#eee' : '#111';
+
+    view.innerHTML = `
+    <div id="kt-tpl" style="display:flex; gap:12px;">
+      <div style="flex:2; min-width:360px;">
+        <div style="display:flex; gap:8px; align-items:center; margin:6px 0;">
+          <button id="kt-tpl-refresh" class="btn">↻ 更新</button>
+          <button id="kt-tpl-download" class="btn" disabled>↓ ダウンロード</button>
+          <span id="kt-tpl-meta" style="opacity:.75"></span>
+        </div>
+        <div id="kt-tpl-editor"
+          style="width:100%; height:60vh; border:1px solid ${BD}; border-radius:8px; background:${isDark ? '#0f0f0f' : '#fafafa'};">
+        </div>
+      </div>
+      <div style="flex:1; min-width:120px;">
+        <div style="font-weight:600;margin:6px 0;">Templates (from GitHub)</div>
+        <div id="kt-tpl-list" style="border:1px solid ${BD}; border-radius:8px; overflow:auto; max-height:56vh; background:${BG}"></div>
+      </div>
+    </div>
+  `;
+
+    const $list = view.querySelector('#kt-tpl-list');
+    const $editor = view.querySelector('#kt-tpl-editor');
+    const $download = view.querySelector('#kt-tpl-download');
+    const $meta = view.querySelector('#kt-tpl-meta');
+    const $refresh = view.querySelector('#kt-tpl-refresh');
+
+    const API = `https://api.github.com/repos/youtotto/kintoneCustomizeJS/contents/js`; // ←置換
+    const cacheKey = 'kt_tpl_cache_v1';
+
+    async function fetchList(useCacheFirst = true) {
+      if (useCacheFirst) {
+        const c = sessionStorage.getItem(cacheKey);
+        if (c) return JSON.parse(c);
+      }
+      const res = await fetch(API, { headers: { 'Accept': 'application/vnd.github+json' } });
+      if (!res.ok) throw new Error(`GitHub API ${res.status}`);
+      const json = await res.json();
+      const files = (Array.isArray(json) ? json : []).filter(x => x.type === 'file' && x.name.endsWith('.js'));
+      sessionStorage.setItem(cacheKey, JSON.stringify(files));
+      return files;
+    }
+
+    function row(file) {
+      const el = document.createElement('div');
+      el.style.cssText = `display:flex;align-items:center;gap:8px;padding:8px 10px;border-bottom:1px solid ${BD};cursor:pointer;`;
+      const size = (file.size || 0).toLocaleString();
+      el.innerHTML = `
+      <div class="pill" style="border:1px solid ${BD};border-radius:999px;padding:2px 6px;font-size:11px">JS</div>
+      <div style="flex:1">${file.name}</div>
+      <div style="opacity:.6;font-size:11px">${size} Bytes</div>
+    `;
+      el.addEventListener('click', async () => {
+        const code = await loadCode(file);
+        currentFileName = file.name;
+        if (monacoEditor) monacoEditor.setValue(code);
+        else await initEditor(code);
+        $meta.textContent = `選択中: ${file.name}`;
+        $download.disabled = false;
+      }, { passive: true });
+      return el;
+    }
+
+    async function loadCode(file) {
+      // `download_url` が来るのでそれを使う（raw.githubusercontent.com）
+      const res = await fetch(file.download_url);
+      if (!res.ok) throw new Error(`raw fetch ${res.status}`);
+      return await res.text();
+    }
+
+    function renderList(files) {
+      $list.innerHTML = '';
+      if (!files.length) {
+        $list.innerHTML = `<div style="padding:12px; opacity:.7">js ディレクトリに .js が見つかりませんでした。</div>`;
+        return;
+      }
+      const frag = document.createDocumentFragment();
+      files.forEach(f => frag.appendChild(row(f)));
+      $list.appendChild(frag);
+    }
+
+    async function init() {
+      $list.innerHTML = `<div style="padding:12px; opacity:.7">読み込み中...</div>`;
+      try {
+        const files = await fetchList(true);
+        renderList(files);
+      } catch (e) {
+        console.warn(e);
+        // キャッシュ救済
+        const c = sessionStorage.getItem(cacheKey);
+        if (c) renderList(JSON.parse(c));
+        else $list.innerHTML = `<div style="padding:12px; color:#c00">取得に失敗しました。</div>`;
+      }
+    }
+
+    // Monacoエディタをここで初期化（空コード）
+    await initEditor('');
+    // フィールド補完は1回だけ登録
+    if (window.monaco && !window.monaco._kintoneFieldsReady) {
+      await registerFieldCompletions(window.monaco);
+      window.monaco._kintoneFieldsReady = true;
+    }
+
+    // ダウンロード（現在のエディタ内容をそのまま .js で保存）
+    $download.addEventListener('click', () => {
+      const name = currentFileName || 'template.js';
+      const content = monacoEditor ? monacoEditor.getValue() : '';
+      const blob = new Blob([content], { type: 'text/javascript' });
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = name;
+      a.click();
+      URL.revokeObjectURL(a.href);
+    });
+
+    $refresh.addEventListener('click', async () => {
+      sessionStorage.removeItem(cacheKey);
+      await init();
+    });
+
+    await init();
+  }
+
+  async function loadMonaco() {
+    if (window.monaco) return window.monaco;
+    // AMDローダを読み込み
+    await new Promise((res, rej) => {
+      const s = document.createElement('script');
+      s.src = 'https://cdn.jsdelivr.net/npm/monaco-editor@0.49.0/min/vs/loader.js';
+      s.onload = res; s.onerror = rej; document.head.appendChild(s);
+    });
+    const CDN_BASE = 'https://cdn.jsdelivr.net/npm/monaco-editor@0.49.0/min/';
+    window.require.config({
+      paths: { vs: CDN_BASE + 'vs' },
+      // 任意: 既定言語（エラー回避には不要。英語固定したい場合）
+      // 'vs/nls': { availableLanguages: { '*': 'en' } }
+    });
+    // Worker の importScripts が参照する baseUrl も「/min/」
+    window.MonacoEnvironment = {
+      getWorkerUrl: function () {
+        const code = `
+        self.MonacoEnvironment = { baseUrl: '${CDN_BASE}' };
+        importScripts('${CDN_BASE}vs/base/worker/workerMain.js');
+      `;
+        return URL.createObjectURL(new Blob([code], { type: 'text/javascript' }));
+      }
+    };
+    return new Promise((res) => {
+      window.require(['vs/editor/editor.main'], () => res(window.monaco));
+    });
+  }
+
+  let monacoEditor = null;
+  async function initEditor(initialCode = '') {
+    const monaco = await loadMonaco();
+    // JSバリデーション（構文/セマンティック）をON
+    monaco.languages.typescript.javascriptDefaults.setDiagnosticsOptions({
+      noSyntaxValidation: false,
+      noSemanticValidation: false,
+    });
+    // 既存textareaをdivに変えている前提
+    const el = document.getElementById('kt-tpl-editor');
+    el.style.height = '50vh';
+    monacoEditor = monaco.editor.create(el, {
+      value: initialCode,
+      language: 'javascript',
+      theme: matchMedia('(prefers-color-scheme: dark)').matches ? 'vs-dark' : 'vs',
+      automaticLayout: true,
+      fontSize: 12,
+      minimap: { enabled: false },
+      wordWrap: 'on',
+    });
+    return monacoEditor;
+  }
+
+  async function fetchFieldMeta() {
+    const app = kintone.app.getId();
+    const resp = await kintone.api(kintone.api.url('/k/v1/app/form/fields', true), 'GET', { app });
+    const list = [];
+    const walkProps = (propsObj = {}) => {
+      Object.values(propsObj).forEach(p => {
+        if (p.type === 'SUBTABLE') {
+          walkProps(p.fields || {});
+        } else if (p && p.code) {
+          list.push({ code: p.code, label: p.label || p.code });
+        }
+      });
+    };
+    walkProps(resp.properties || {});
+    return list;
+  }
+
+  async function registerFieldCompletions(monaco) {
+    const fields = await fetchFieldMeta();
+    monaco.languages.registerCompletionItemProvider('javascript', {
+      triggerCharacters: ['"', "'", '`', '.', '['],
+      provideCompletionItems: (model, position) => {
+        const word = model.getWordUntilPosition(position);
+        const range = new monaco.Range(position.lineNumber, word.startColumn, position.lineNumber, word.endColumn);
+        const items = fields.flatMap(f => ([
+          // フィールドコード候補
+          {
+            label: f.code, kind: monaco.languages.CompletionItemKind.Field,
+            insertText: f.code, range, detail: `code: ${f.code}`, documentation: f.label
+          },
+          // レコード参照スニペット例: record['CODE'].value
+          {
+            label: `record['${f.code}'].value`, kind: monaco.languages.CompletionItemKind.Snippet,
+            insertText: `record['${f.code}'].value`, range, detail: 'record[...] 参照', documentation: `${f.label} を参照`
+          }
+        ]));
+        return { suggestions: items };
+      }
+    });
+  }
+
+
+  /** ----------------------------
+  * boot
+  * ---------------------------- */
   waitReady().then(async () => {
     const appId = kintone.app.getId();
     if (!appId) return;
@@ -1008,6 +1245,7 @@
     renderFields(root, appId).catch(e => console.warn('[Toolkit] Fields error', e));
     renderViews(root, appId).catch(e => console.warn('[Toolkit] Views error', e));
     renderGraphs(root, appId).catch(e => console.warn('[Toolkit] Graphs error', e));
+    renderTemplates(root).catch(e => console.warn('[Toolkit] Templates error', e));
   });
 
 })();
