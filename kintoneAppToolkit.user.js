@@ -1004,124 +1004,236 @@
   };
 
   /** ----------------------------
-  * Template views
-  * ---------------------------- */
+   * Template views（Templates=上書き表示 / Snippets=挿入専用, OverviewはSnippetsのみ）
+   * ---------------------------- */
   async function renderTemplates(root) {
     const view = document.getElementById('view-templates');
     if (!view) return;
     let currentFileName = 'template.js';
 
-    // Dark/Lightに追従（既存Cを再利用できない位置なら簡易色でOK）
+    // GitHub設定
+    const GH = {
+      owner: 'youtotto',
+      repo: 'kintoneCustomizeJS',
+      dirs: { templates: 'js', snippets: 'snippets' },
+      endpoint(dir) { return `https://api.github.com/repos/${this.owner}/${this.repo}/contents/${dir}`; },
+      cacheKey(kind) { return `kt_tpl_cache_ui_${kind}`; }
+    };
+
+    // UI色
     const isDark = matchMedia('(prefers-color-scheme: dark)').matches;
     const BG = isDark ? '#1b1b1b' : '#fff';
     const BD = isDark ? '#333' : '#ddd';
-    const TX = isDark ? '#eee' : '#111';
+    const PANEL_H = '60vh';
 
+    // レイアウト（整えたHTML/CSS）
     view.innerHTML = `
-    <div id="kt-tpl" style="display:flex; gap:12px;">
-      <div style="flex:2; min-width:360px;">
-        <div style="display:flex; gap:8px; align-items:center; margin:6px 0;">
-          <button id="kt-tpl-refresh" class="btn">↻ 更新</button>
-          <button id="kt-tpl-download" class="btn" disabled>↓ ダウンロード</button>
-          <span id="kt-tpl-meta" style="opacity:.75"></span>
-        </div>
-        <div id="kt-tpl-editor"
-          style="width:100%; height:60vh; border:1px solid ${BD}; border-radius:8px; background:${isDark ? '#0f0f0f' : '#fafafa'};">
-        </div>
-      </div>
-      <div style="flex:1; min-width:120px;">
-        <div style="font-weight:600;margin:6px 0;">Templates (from GitHub)</div>
-        <div id="kt-tpl-list" style="border:1px solid ${BD}; border-radius:8px; overflow:auto; max-height:56vh; background:${BG}"></div>
-      </div>
-    </div>
-  `;
+      <div id="kt-tpl" style="display:flex; gap:14px; align-items:stretch;">
+        <!-- 左：エディタ -->
+        <div style="flex:2; min-width:380px; display:flex; flex-direction:column; gap:10px;">
+          <div style="display:flex; align-items:center; gap:10px; justify-content:space-between;">
+            <div style="display:flex; align-items:center; gap:8px;">
+              <button id="kt-tpl-refresh" class="btn" style="height:32px; padding:0 10px;">↻ 更新</button>
+              <button id="kt-tpl-download" class="btn" disabled style="height:32px; padding:0 10px;">↓ ダウンロード</button>
+            </div>
+            <span id="kt-tpl-meta"
+                  style="opacity:.75; max-width:55%; text-overflow:ellipsis; overflow:hidden; white-space:nowrap; text-align:right;"></span>
+          </div>
 
+          <div id="kt-tpl-editor"
+            style="
+              flex:1;
+              min-height:0;
+              border:1px solid ${BD};
+              border-radius:8px;
+              background:${isDark ? '#0f0f0f' : '#fafafa'};
+            ">
+          </div>
+        </div>
+
+        <!-- 右：ファイル一覧 -->
+        <div style="flex:1; min-width:240px; display:flex; flex-direction:column; gap:10px; height:${PANEL_H}; min-height:0;">
+          <div style="display:flex; align-items:center; justify-content:space-between; position:sticky; top:0; z-index:1;
+            padding:6px 0; background:${isDark ? '#1b1b1b' : '#fff'};">
+            <div style="font-weight:600; padding-left:12px; margin:6px 0;">Files</div>
+            <select id="kt-tpl-source" class="btn" style="padding:3px 4px; height:32px;">
+              <option value="templates">Templates (GitHub: ${GH.dirs.templates})</option>
+              <option value="snippets">Snippets  (GitHub: ${GH.dirs.snippets})</option>
+            </select>
+          </div>
+
+          <div style="display:flex; gap:8px;">
+            <button id="kt-tpl-insert" class="btn" disabled style="flex:1; height:32px;">⤴︎ 挿入</button>
+            <button id="kt-tpl-copy" class="btn" disabled style="flex:1; height:32px;">⎘ コピー</button>
+          </div>
+
+          <div id="kt-tpl-list"
+            style="
+              border:1px solid ${BD};
+              border-radius:8px;
+              overflow:auto;
+              max-height:56vh;
+              background:${BG};
+              padding:6px;
+              flex:1;
+              min-height:0;
+            ">
+          </div>
+
+          <div id="kt-tpl-overview"
+            style="
+              margin-top:4px;
+              display:none;
+              border:1px solid ${BD};
+              border-radius:8px;
+              padding:8px;
+              background:${isDark ? '#0f0f0f' : '#fafafa'};
+            ">
+          </div>
+        </div>
+      </div>
+`;
+
+    // 要素参照
     const $list = view.querySelector('#kt-tpl-list');
-    const $editor = view.querySelector('#kt-tpl-editor');
     const $download = view.querySelector('#kt-tpl-download');
     const $meta = view.querySelector('#kt-tpl-meta');
     const $refresh = view.querySelector('#kt-tpl-refresh');
+    const $insert = view.querySelector('#kt-tpl-insert');
+    const $copy = view.querySelector('#kt-tpl-copy');
+    const $sourceSel = view.querySelector('#kt-tpl-source');
+    const $overview = view.querySelector('#kt-tpl-overview');
 
-    const API = `https://api.github.com/repos/youtotto/kintoneCustomizeJS/contents/js`; // ←置換
-    const cacheKey = 'kt_tpl_cache_v1';
+    // 状態
+    let selectedItem = null;        // 選択中ファイル
+    let selectedKind = 'templates'; // 'templates' | 'snippets'
 
-    async function fetchList(useCacheFirst = true) {
-      if (useCacheFirst) {
-        const c = sessionStorage.getItem(cacheKey);
-        if (c) return JSON.parse(c);
-      }
-      const res = await fetch(API, { headers: { 'Accept': 'application/vnd.github+json' } });
-      if (!res.ok) throw new Error(`GitHub API ${res.status}`);
-      const json = await res.json();
-      const files = (Array.isArray(json) ? json : []).filter(x => x.type === 'file' && x.name.endsWith('.js'));
-      sessionStorage.setItem(cacheKey, JSON.stringify(files));
-      return files;
-    }
-
-    function row(file) {
-      const el = document.createElement('div');
-      el.style.cssText = `display:flex;align-items:center;gap:8px;padding:8px 10px;border-bottom:1px solid ${BD};cursor:pointer;`;
-      const size = (file.size || 0).toLocaleString();
-      el.innerHTML = `
-      <div class="pill" style="border:1px solid ${BD};border-radius:999px;padding:2px 6px;font-size:11px">JS</div>
-      <div style="flex:1">${file.name}</div>
-      <div style="opacity:.6;font-size:11px">${size} Bytes</div>
-    `;
-      el.addEventListener('click', async () => {
-        const code = await loadCode(file);
-        currentFileName = file.name;
-        if (monacoEditor) monacoEditor.setValue(code);
-        else await initEditor(code);
-        $meta.textContent = `選択中: ${file.name}`;
-        $download.disabled = false;
-      }, { passive: true });
-      return el;
-    }
-
+    // ヘルパ
     async function loadCode(file) {
-      // `download_url` が来るのでそれを使う（raw.githubusercontent.com）
       const res = await fetch(file.download_url);
       if (!res.ok) throw new Error(`raw fetch ${res.status}`);
       return await res.text();
     }
+    async function fetchList(kind, useCacheFirst = true) {
+      const dir = GH.dirs[kind];
+      const api = GH.endpoint(dir);
+      const cKey = GH.cacheKey(kind);
 
-    function renderList(files) {
+      if (useCacheFirst) {
+        const c = sessionStorage.getItem(cKey);
+        if (c) { try { return JSON.parse(c); } catch { } }
+      }
+      const res = await fetch(api, { headers: { 'Accept': 'application/vnd.github+json' } });
+      if (!res.ok) throw new Error(`GitHub API ${res.status}`);
+      const json = await res.json();
+      const files = (Array.isArray(json) ? json : []).filter(x => x.type === 'file' && x.name.endsWith('.js'));
+      sessionStorage.setItem(cKey, JSON.stringify(files));
+      return files;
+    }
+    function fileRow(file, kind) {
+      const el = document.createElement('div');
+      el.style.cssText =
+        `display:flex;align-items:center;gap:8px;padding:8px 10px;border-bottom:1px solid ${BD};cursor:pointer;`;
+      const size = (file.size || 0).toLocaleString();
+      const tag = kind === 'snippets' ? 'SNIP' : 'JS';
+      el.innerHTML = `
+      <div style="border:1px solid ${BD};border-radius:999px;padding:2px 6px;font-size:11px">${tag}</div>
+      <div style="flex:1">${file.name}</div>
+      <div style="opacity:.6;font-size:11px">${size ? size + ' Bytes' : ''}</div>
+    `;
+      el.addEventListener('click', async () => {
+        selectedItem = file;
+        selectedKind = kind;
+
+        if (kind === 'templates') {
+          // Templates: クリックでエディタ上書き表示、Overviewは非表示に
+          $overview.style.display = 'none';
+          $overview.innerHTML = '';
+          const code = await loadCode(file);
+          currentFileName = file.name;
+          if (monacoEditor) monacoEditor.setValue(code);
+          else await initEditor(code);
+          $meta.textContent = `選択中（Template表示）：${file.name}`;
+        } else {
+          // Snippets: エディタは上書きせず、Overviewのみ出す
+          await showSnippetOverview(file);
+          $meta.textContent = `選択中（Snippet挿入用）：${file.name}`;
+        }
+        [$download, $insert, $copy].forEach(b => b.disabled = false);
+      }, { passive: true });
+      return el;
+    }
+    function renderList(kind, files) {
       $list.innerHTML = '';
       if (!files.length) {
-        $list.innerHTML = `<div style="padding:12px; opacity:.7">js ディレクトリに .js が見つかりませんでした。</div>`;
+        $list.innerHTML = `<div style="padding:12px; opacity:.7">.js ファイルが見つかりませんでした。</div>`;
+        // 一覧が空ならOverviewも消す
+        $overview.style.display = 'none';
+        $overview.innerHTML = '';
         return;
       }
       const frag = document.createDocumentFragment();
-      files.forEach(f => frag.appendChild(row(f)));
+      files.forEach(f => frag.appendChild(fileRow(f, kind)));
       $list.appendChild(frag);
-    }
 
-    async function init() {
-      $list.innerHTML = `<div style="padding:12px; opacity:.7">読み込み中...</div>`;
-      try {
-        const files = await fetchList(true);
-        renderList(files);
-      } catch (e) {
-        console.warn(e);
-        // キャッシュ救済
-        const c = sessionStorage.getItem(cacheKey);
-        if (c) renderList(JSON.parse(c));
-        else $list.innerHTML = `<div style="padding:12px; color:#c00">取得に失敗しました。</div>`;
+      // 選択状態リセット
+      selectedItem = null;
+      [$download, $insert, $copy].forEach(b => b.disabled = true);
+      $meta.textContent = '';
+      // タブ切替時にOverviewの表示/非表示を整理
+      if (kind === 'snippets') {
+        $overview.style.display = 'block';
+        $overview.innerHTML = `<div style="opacity:.7; padding:8px; border:1px dashed ${BD}; border-radius:8px;">スニペットを選択するとプレビューが表示されます</div>`;
+      } else {
+        $overview.style.display = 'none';
+        $overview.innerHTML = '';
       }
     }
+    async function showSnippetOverview(file) {
+      try {
+        const code = await loadCode(file);
+        const head = code.split('\n').slice(0, 20).join('\n'); // 先頭20行
+        $overview.style.display = 'block';
+        $overview.innerHTML = `
+        <div style="margin-top:8px; border:1px solid ${BD}; border-radius:8px; overflow:hidden;">
+          <div style="padding:6px 8px; font-weight:600; ${isDark ? 'background:#101010;color:#eee;' : 'background:#f7f7f7;color:#111;'}">
+            Snippet Overview
+            <span>（ファイル:</span> <strong>${file.name}）</strong>
+          </div>
+          <div style="padding:8px; ${isDark ? 'background:#0f0f0f;color:#ddd;' : 'background:#fafafa;color:#333;'}">
+            <pre style="margin:0; white-space:pre-wrap; font-size:12px; line-height:1.4; max-height:180px; overflow:auto;">${escapeHtml(head)}</pre>
+          </div>
+        </div>`;
+      } catch (e) {
+        $overview.style.display = 'block';
+        $overview.innerHTML = `<div style="margin-top:8px; color:#c00">プレビュー取得に失敗しました。</div>`;
+      }
+    }
+    function escapeHtml(s) {
+      return String(s ?? '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;');
+    }
 
-    // Monacoエディタをここで初期化（空コード）
+    // 初期化：Monaco & 補完
     await initEditor('');
-    // フィールド補完は1回だけ登録
     if (window.monaco && !window.monaco._kintoneFieldsReady) {
       await registerFieldCompletions(window.monaco);
       window.monaco._kintoneFieldsReady = true;
     }
 
-    // ダウンロード（現在のエディタ内容をそのまま .js で保存）
-    $download.addEventListener('click', () => {
-      const name = currentFileName || 'template.js';
-      const content = monacoEditor ? monacoEditor.getValue() : '';
+    // ボタン挙動
+    $download.addEventListener('click', async () => {
+      if (!selectedItem) return;
+      let name = currentFileName || 'template.js';
+      let content = '';
+      if (selectedKind === 'templates') {
+        content = monacoEditor ? monacoEditor.getValue() : '';
+      } else {
+        name = selectedItem.name;
+        content = await loadCode(selectedItem);
+      }
       const blob = new Blob([content], { type: 'text/javascript' });
       const a = document.createElement('a');
       a.href = URL.createObjectURL(blob);
@@ -1130,12 +1242,86 @@
       URL.revokeObjectURL(a.href);
     });
 
-    $refresh.addEventListener('click', async () => {
-      sessionStorage.removeItem(cacheKey);
-      await init();
+    $insert.addEventListener('click', async () => {
+      if (!selectedItem || !monacoEditor) return;
+      const code = await loadCode(selectedItem); // 種別問わず“選択中コード”を挿入
+      monacoEditor.focus();
+      const sel = monacoEditor.getSelection();
+      monacoEditor.executeEdits('tpl-insert', [{ range: sel, text: `\n${code}\n` }]);
+      $meta.textContent = (selectedKind === 'snippets')
+        ? `✅ Snippet を挿入しました：${selectedItem.name}`
+        : `✅ Template を挿入しました（追記）：${selectedItem.name}`;
+      setTimeout(() => ($meta.textContent = ''), 1500);
     });
 
-    await init();
+    $copy.addEventListener('click', async () => {
+      if (!selectedItem) return;
+      const text = (selectedKind === 'templates')
+        ? (monacoEditor ? monacoEditor.getValue() : '')
+        : await loadCode(selectedItem);
+      try {
+        await navigator.clipboard.writeText(text);
+        $meta.textContent = '✅ コピーしました';
+      } catch {
+        $meta.textContent = '⚠️ コピーに失敗しました';
+      }
+      setTimeout(() => ($meta.textContent = ''), 1200);
+    });
+
+    $refresh.addEventListener('click', async () => {
+      sessionStorage.removeItem(GH.cacheKey($sourceSel.value));
+      await loadList();
+    });
+
+    $sourceSel.addEventListener('change', loadList);
+
+    // 初回ロード
+    await loadList();
+
+    // ロード関数
+    async function loadList() {
+      const kind = $sourceSel.value;
+      selectedKind = kind;
+      $list.innerHTML = `<div style="padding:12px; opacity:.7">読み込み中...</div>`;
+      try {
+        const files = await fetchList(kind, true);
+        renderList(kind, files);
+      } catch (e) {
+        console.warn(e);
+        const c = sessionStorage.getItem(GH.cacheKey(kind));
+        if (c) renderList(kind, JSON.parse(c));
+        else {
+          $list.innerHTML = `<div style="padding:12px; color:#c00">取得に失敗しました。</div>`;
+          $overview.style.display = 'none';
+          $overview.innerHTML = '';
+        }
+      }
+    }
+
+    // どこか1回だけ実行（存在すればスキップ）
+    if (!document.getElementById('kt-tpl-inline-style')) {
+      const st = document.createElement('style');
+      st.id = 'kt-tpl-inline-style';
+      st.textContent = `
+        .btn {
+          border: 1px solid ${BD};
+          background: ${isDark ? '#1e1e1e' : '#fff'};
+          color: ${isDark ? '#eee' : '#111'};
+          border-radius: 8px;
+          line-height: 1;
+          cursor: pointer;
+        }
+        .btn:disabled {
+          opacity: .5;
+          cursor: not-allowed;
+        }
+        .btn:not(:disabled):hover {
+          filter: brightness(${isDark ? 1.1 : 0.98});
+        }
+      `;
+      document.head.appendChild(st);
+    }
+
   }
 
   async function loadMonaco() {
@@ -1177,7 +1363,7 @@
     });
     // 既存textareaをdivに変えている前提
     const el = document.getElementById('kt-tpl-editor');
-    el.style.height = '50vh';
+    el.style.height = '100%';
     monacoEditor = monaco.editor.create(el, {
       value: initialCode,
       language: 'javascript',
@@ -1187,6 +1373,15 @@
       minimap: { enabled: false },
       wordWrap: 'on',
     });
+
+    // 🔽 サイズ変化に確実に追従させる（初期取りこぼし対策）
+    const ro = new ResizeObserver(() => { try { monacoEditor.layout(); } catch { } });
+    ro.observe(el);
+    window.addEventListener('resize', () => { try { monacoEditor.layout(); } catch { } });
+
+    // タブ切替直後の遅延レイアウト（描画完了後に1回）
+    setTimeout(() => { try { monacoEditor.layout(); } catch { } }, 0);
+
     return monacoEditor;
   }
 
