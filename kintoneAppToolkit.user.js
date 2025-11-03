@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         kintone App Toolkit
 // @namespace    https://github.com/youtotto/kintone-app-toolkit
-// @version      1.4.0
+// @version      1.4.1
 // @description  kintoneアプリのヘルスチェック、フィールド一覧、ビュー一覧、グラフ一覧
 // @match        https://*.cybozu.com/k/*/
 // @match        https://*.cybozu.com/k/*/?view=*
