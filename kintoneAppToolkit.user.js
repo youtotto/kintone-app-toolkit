@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         kintone App Toolkit
 // @namespace    https://github.com/youtotto/kintone-app-toolkit
-// @version      1.4.1
-// @description  kintoneアプリのヘルスチェック、フィールド一覧、ビュー一覧、グラフ一覧
+// @version      1.4.2
+// @description  kintone開発をブラウザで完結。アプリ分析・コード生成・ドキュメント編集を備えた開発支援ツールキット。
 // @match        https://*.cybozu.com/k/*/
 // @match        https://*.cybozu.com/k/*/?view=*
 // @connect      api.github.com
@@ -1015,8 +1015,8 @@
     const GH = {
       owner: 'youtotto',
       repo: 'kintoneCustomizeJS',
-      dirs: { templates: 'js', snippets: 'snippets' },
-      endpoint(dir) { return `https://api.github.com/repos/${this.owner}/${this.repo}/contents/${dir}`; },
+      dirs: { templates: 'js', snippets: 'snippets', documents: 'documents' },
+      endpoint(dir) { return `https://api.github.com/repos/${this.owner}/${this.repo}/contents/${encodeURIComponent(dir)}`; },
       cacheKey(kind) { return `kt_tpl_cache_ui_${kind}`; }
     };
 
@@ -1033,7 +1033,6 @@
         <div style="flex:2; min-width:380px; display:flex; flex-direction:column; gap:10px;">
           <div style="display:flex; align-items:center; gap:10px; justify-content:space-between;">
             <div style="display:flex; align-items:center; gap:8px;">
-              <button id="kt-tpl-refresh" class="btn" style="height:32px; padding:0 10px;">↻ 更新</button>
               <button id="kt-tpl-download" class="btn" disabled style="height:32px; padding:0 10px;">↓ ダウンロード</button>
             </div>
             <span id="kt-tpl-meta"
@@ -1059,12 +1058,14 @@
             <select id="kt-tpl-source" class="btn" style="padding:3px 4px; height:32px;">
               <option value="templates">Templates (GitHub: ${GH.dirs.templates})</option>
               <option value="snippets">Snippets  (GitHub: ${GH.dirs.snippets})</option>
+              <option value="documents">Documents (GitHub: ${GH.dirs.documents})</option>
             </select>
           </div>
 
           <div style="display:flex; gap:8px;">
             <button id="kt-tpl-insert" class="btn" disabled style="flex:1; height:32px;">⤴︎ 挿入</button>
             <button id="kt-tpl-copy" class="btn" disabled style="flex:1; height:32px;">⎘ コピー</button>
+            <button id="kt-tpl-refresh" class="btn" style="flex:1;　style="flex:1; height:32px;">↻ 更新</button>
           </div>
 
           <div id="kt-tpl-list"
@@ -1092,7 +1093,7 @@
           </div>
         </div>
       </div>
-`;
+    `;
 
     // 要素参照
     const $list = view.querySelector('#kt-tpl-list');
@@ -1114,6 +1115,14 @@
       if (!res.ok) throw new Error(`raw fetch ${res.status}`);
       return await res.text();
     }
+
+    // 言語モード切替
+    function setEditorLanguage(lang = 'javascript') {
+      if (!window.monaco || !monacoEditor) return;
+      const model = monacoEditor.getModel();
+      if (model) window.monaco.editor.setModelLanguage(model, lang);
+    }
+
     async function fetchList(kind, useCacheFirst = true) {
       const dir = GH.dirs[kind];
       const api = GH.endpoint(dir);
@@ -1126,27 +1135,44 @@
       const res = await fetch(api, { headers: { 'Accept': 'application/vnd.github+json' } });
       if (!res.ok) throw new Error(`GitHub API ${res.status}`);
       const json = await res.json();
-      const files = (Array.isArray(json) ? json : []).filter(x => x.type === 'file' && x.name.endsWith('.js'));
+
+      const files = (Array.isArray(json) ? json : []).filter(x => {
+        if (x.type !== 'file' || !x.name) return false;
+        const n = x.name.toLowerCase();
+        if (kind === 'templates' || kind === 'snippets') return n.endsWith('.js');
+        if (kind === 'documents') return (
+          n.endsWith('.md') || n.endsWith('.mdx') || n.endsWith('.markdown') ||
+          n.endsWith('.txt')
+        );
+        return false;
+      });
       sessionStorage.setItem(cKey, JSON.stringify(files));
       return files;
     }
+
     function fileRow(file, kind) {
       const el = document.createElement('div');
-      el.style.cssText =
-        `display:flex;align-items:center;gap:8px;padding:8px 10px;border-bottom:1px solid ${BD};cursor:pointer;`;
+      el.style.cssText = `display:flex;align-items:center;gap:8px;padding:8px 10px;border-bottom:1px solid ${BD};cursor:pointer;`;
       const size = (file.size || 0).toLocaleString();
-      const tag = kind === 'snippets' ? 'SNIP' : 'JS';
+      const tag = kind === 'snippets' ? 'SNIP' : (kind === 'documents' ? 'DOC' : 'JS');
       el.innerHTML = `
-      <div style="border:1px solid ${BD};border-radius:999px;padding:2px 6px;font-size:11px">${tag}</div>
-      <div style="flex:1">${file.name}</div>
-      <div style="opacity:.6;font-size:11px">${size ? size + ' Bytes' : ''}</div>
-    `;
+        <div style="border:1px solid ${BD};border-radius:999px;padding:2px 6px;font-size:11px">${tag}</div>
+        <div style="flex:1">${file.name}</div>
+        <div style="opacity:.6;font-size:11px">${size ? size + ' Bytes' : ''}</div>
+      `;
+
+      if (kind === 'templates') {
+        setEditorLanguage('javascript');
+      } else if (kind === 'documents') {
+        setEditorLanguage('markdown');
+      }
+
       el.addEventListener('click', async () => {
         selectedItem = file;
         selectedKind = kind;
 
         if (kind === 'templates') {
-          // Templates: クリックでエディタ上書き表示、Overviewは非表示に
+          // エディタ上書き表示、Overview非表示
           $overview.style.display = 'none';
           $overview.innerHTML = '';
           const code = await loadCode(file);
@@ -1154,20 +1180,31 @@
           if (monacoEditor) monacoEditor.setValue(code);
           else await initEditor(code);
           $meta.textContent = `選択中（Template表示）：${file.name}`;
-        } else {
-          // Snippets: エディタは上書きせず、Overviewのみ出す
+          [$download, $copy].forEach(b => b.disabled = false);
+          $insert.disabled = false;
+        } else if (kind === 'snippets') {
           await showSnippetOverview(file);
           $meta.textContent = `選択中（Snippet挿入用）：${file.name}`;
+          [$download, $copy, $insert].forEach(b => b.disabled = false);
+        } else if (kind === 'documents') {
+          $overview.style.display = 'none';
+          $overview.innerHTML = '';
+          const code = await loadCode(file);
+          currentFileName = file.name;
+          if (monacoEditor) monacoEditor.setValue(code);
+          else await initEditor(code);
+          $meta.textContent = `選択中（document表示）：${file.name}`;
+          [$download, $copy].forEach(b => b.disabled = false);
+          $insert.disabled = false;
         }
-        [$download, $insert, $copy].forEach(b => b.disabled = false);
       }, { passive: true });
       return el;
     }
+
     function renderList(kind, files) {
       $list.innerHTML = '';
       if (!files.length) {
-        $list.innerHTML = `<div style="padding:12px; opacity:.7">.js ファイルが見つかりませんでした。</div>`;
-        // 一覧が空ならOverviewも消す
+        $list.innerHTML = `<div style="padding:12px; opacity:.7">対象のファイルが見つかりませんでした。</div>`;
         $overview.style.display = 'none';
         $overview.innerHTML = '';
         return;
@@ -1176,19 +1213,21 @@
       files.forEach(f => frag.appendChild(fileRow(f, kind)));
       $list.appendChild(frag);
 
-      // 選択状態リセット
       selectedItem = null;
       [$download, $insert, $copy].forEach(b => b.disabled = true);
       $meta.textContent = '';
-      // タブ切替時にOverviewの表示/非表示を整理
+
       if (kind === 'snippets') {
         $overview.style.display = 'block';
-        $overview.innerHTML = `<div style="opacity:.7; padding:8px; border:1px dashed ${BD}; border-radius:8px;">スニペットを選択するとプレビューが表示されます</div>`;
+        $overview.innerHTML = `<div style="opacity:.7; padding:8px; border:1px dashed ${BD}; border-radius:8px;">
+          ${kind === 'snippets' ? 'スニペット' : 'ドキュメント'}を選択するとプレビューが表示されます
+        </div>`;
       } else {
         $overview.style.display = 'none';
         $overview.innerHTML = '';
       }
     }
+
     async function showSnippetOverview(file) {
       try {
         const code = await loadCode(file);
@@ -1209,6 +1248,28 @@
         $overview.innerHTML = `<div style="margin-top:8px; color:#c00">プレビュー取得に失敗しました。</div>`;
       }
     }
+
+    async function showDocumentOverview(file) {
+      try {
+        const raw = await loadCode(file);
+        const html = escapeHtml(raw)
+          .replace(/\[(.+?)\]\((https?:\/\/[^\s)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
+        $overview.style.display = 'block';
+        $overview.innerHTML = `
+      <div style="margin-top:8px; border:1px solid ${BD}; border-radius:8px; overflow:hidden;">
+        <div style="padding:6px 8px; font-weight:600; ${isDark ? 'background:#101010;color:#eee;' : 'background:#f7f7f7;color:#111;'}">
+          Document Preview <small style="opacity:.7">(${file.name})</small>
+        </div>
+        <div style="padding:8px; ${isDark ? 'background:#0f0f0f;color:#ddd;' : 'background:#fafafa;color:#333;'}">
+          <pre style="margin:0; white-space:pre-wrap; font-size:12px; line-height:1.5; max-height:180px; overflow:auto;">${html}</pre>
+        </div>
+      </div>`;
+      } catch {
+        $overview.style.display = 'block';
+        $overview.innerHTML = `<div style="margin-top:8px; color:#c00">プレビュー取得に失敗しました。</div>`;
+      }
+    }
+
     function escapeHtml(s) {
       return String(s ?? '')
         .replace(/&/g, '&amp;')
@@ -1244,7 +1305,8 @@
 
     $insert.addEventListener('click', async () => {
       if (!selectedItem || !monacoEditor) return;
-      const code = await loadCode(selectedItem); // 種別問わず“選択中コード”を挿入
+      if (selectedKind === 'documents') return; // ← ドキュメントは挿入不可
+      const code = await loadCode(selectedItem);
       monacoEditor.focus();
       const sel = monacoEditor.getSelection();
       monacoEditor.executeEdits('tpl-insert', [{ range: sel, text: `\n${code}\n` }]);
