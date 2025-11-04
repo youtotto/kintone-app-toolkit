@@ -150,7 +150,7 @@
 |**編集・DL・挿入**|どのカテゴリも直接編集・ダウンロード可（Document含む）。Snippetsは挿入専用を維持|
 |**エンコード対応**|日本語・スペースを含むファイル名でも正常取得（encodeURIComponent対応）|
 |**UI改善**|高さをflex同期化し、右パネルはstickyヘッダ＋スクロールリスト構成|
-|**キャッシュ機構**|GitHubAPI結果を`sessionStorage`に保持し、再読込時の通信を削減                                        |
+|**キャッシュ機構**|GitHubAPI結果を`sessionStorage`に保持し、再読込時の通信を削減
 
 
 ---
