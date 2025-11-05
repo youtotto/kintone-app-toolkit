@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         kintone App Toolkit
 // @namespace    https://github.com/youtotto/kintone-app-toolkit
-// @version      1.5.0
+// @version      1.5.1
 // @description  kintone開発をブラウザで完結。アプリ分析・コード生成・ドキュメント編集を備えた開発支援ツールキット。
 // @match        https://*.cybozu.com/k/*/
 // @match        https://*.cybozu.com/k/*/?view=*
@@ -392,7 +392,7 @@
       val >= Y ? { level: 'YELLOW', badge: '🟡' } :
         { level: 'OK', badge: '🟢' };
 
-  // 修正後 renderHealth
+  // renderHealth
   const renderHealth = async (
     root,
     { appId, fields, status, views, notifs, customize, acl }
@@ -1060,10 +1060,6 @@
     return [`| ${header.join(' | ')} |`, `| ${sep} |`, ...lines.map(l => `| ${l} |`)].join('\n');
   };
 
-  // ==== Graphs（Refreshなし・スナップショット依存） ====
-  // 受け取り: { appId, reports, fields }
-  //  - reports: /k/v1/app/reports の生レスポンス
-  //  - fields : /k/v1/app/form/fields の生レスポンス（ラベル化に使用）
   const renderGraphs = async (root, { appId, reports, fields }) => {
     const el = root.querySelector('#view-graphs');
     if (!el) return;
@@ -1189,484 +1185,9 @@
       dl(`kintone_graphs_${appId}.csv`, csv, 'text/csv'), { passive: true });
   };
 
-  // ==== Templates（kintoneスナップショット: fields のみ注入） ====
-  // 受け取り: { fields } （補完の登録などに利用。無くても動作可）
-  async function renderTemplates(root, { fields } = {}) {
-    const view = root.querySelector('#view-templates');
-    if (!view) return;
-    let currentFileName = 'template.js';
-
-    // GitHub設定
-    const GH = {
-      owner: 'youtotto',
-      repo: 'kintoneCustomizeJS',
-      dirs: { templates: 'js', snippets: 'snippets', documents: 'documents' },
-      endpoint(dir) { return `https://api.github.com/repos/${this.owner}/${this.repo}/contents/${encodeURIComponent(dir)}`; },
-      cacheKey(kind) { return `kt_tpl_cache_ui_${kind}`; }
-    };
-
-    // UI色
-    const isDark = matchMedia('(prefers-color-scheme: dark)').matches;
-    const BG = isDark ? '#1b1b1b' : '#fff';
-    const BD = isDark ? '#333' : '#ddd';
-    const PANEL_H = '65vh';
-
-    // レイアウト
-    view.innerHTML = `
-      <div id="kt-tpl" style="display:flex; gap:14px; align-items:stretch;">
-        <!-- 左：エディタ -->
-        <div style="flex:2; min-width:380px; display:flex; flex-direction:column; gap:10px;">
-          <div style="display:flex; align-items:center; gap:10px; justify-content:space-between;">
-            <div style="display:flex; align-items:center; gap:8px;">
-              <button id="kt-tpl-download" class="btn" disabled style="height:32px; padding:0 10px;">↓ ダウンロード</button>
-            </div>
-            <span id="kt-tpl-meta"
-                  style="opacity:.75; max-width:55%; text-overflow:ellipsis; overflow:hidden; white-space:nowrap; text-align:right;"></span>
-          </div>
-
-          <div id="kt-tpl-editor"
-            style="
-              flex:1;
-              min-height:0;
-              border:1px solid ${BD};
-              border-radius:8px;
-              background:${isDark ? '#0f0f0f' : '#fafafa'};
-            ">
-          </div>
-        </div>
-
-        <!-- 右：ファイル一覧 -->
-        <div style="flex:1; min-width:240px; display:flex; flex-direction:column; gap:10px; height:${PANEL_H}; min-height:0;">
-          <div style="display:flex; align-items:center; justify-content:space-between; position:sticky; top:0; z-index:1;
-            padding:6px 0; background:${isDark ? '#1b1b1b' : '#fff'};">
-            <div style="font-weight:600; padding-left:12px; margin:6px 0;">Files</div>
-            <select id="kt-tpl-source" class="btn" style="padding:3px 4px; height:32px;">
-              <option value="templates">Templates (GitHub: ${GH.dirs.templates})</option>
-              <option value="snippets">Snippets  (GitHub: ${GH.dirs.snippets})</option>
-              <option value="documents">Documents (GitHub: ${GH.dirs.documents})</option>
-            </select>
-          </div>
-
-          <div style="display:flex; gap:8px;">
-            <button id="kt-tpl-insert" class="btn" disabled style="flex:1; height:32px;">⤴︎ 挿入</button>
-            <button id="kt-tpl-copy" class="btn" disabled style="flex:1; height:32px;">⎘ コピー</button>
-            <button id="kt-tpl-refresh" class="btn" style="flex:1; height:32px;">↻ 更新</button>
-          </div>
-
-          <div id="kt-tpl-list"
-            style="
-              border:1px solid ${BD};
-              border-radius:8px;
-              overflow:auto;
-              max-height:56vh;
-              background:${BG};
-              padding:6px;
-              flex:1;
-              min-height:0;
-            ">
-          </div>
-          <div id="kt-tpl-overview"></div>
-        </div>
-      </div>
-    `;
-
-    // 要素参照
-    const $list = view.querySelector('#kt-tpl-list');
-    const $download = view.querySelector('#kt-tpl-download');
-    const $meta = view.querySelector('#kt-tpl-meta');
-    const $refresh = view.querySelector('#kt-tpl-refresh');
-    const $insert = view.querySelector('#kt-tpl-insert');
-    const $copy = view.querySelector('#kt-tpl-copy');
-    const $sourceSel = view.querySelector('#kt-tpl-source');
-    const $overview = view.querySelector('#kt-tpl-overview');
-
-    // 状態
-    let selectedItem = null;        // 選択中ファイル
-    let selectedKind = 'templates'; // 'templates' | 'snippets' | 'documents'
-
-    // ヘルパ
-    async function loadCode(file) {
-      const res = await fetch(file.download_url);
-      if (!res.ok) throw new Error(`raw fetch ${res.status}`);
-      return await res.text();
-    }
-
-    function setEditorLanguage(lang = 'javascript') {
-      if (!window.monaco || !monacoEditor) return;
-      const model = monacoEditor.getModel();
-      if (model) window.monaco.editor.setModelLanguage(model, lang);
-    }
-
-    async function fetchList(kind, useCacheFirst = true) {
-      const dir = GH.dirs[kind];
-      const api = GH.endpoint(dir);
-      const cKey = GH.cacheKey(kind);
-
-      if (useCacheFirst) {
-        const c = sessionStorage.getItem(cKey);
-        if (c) { try { return JSON.parse(c); } catch { } }
-      }
-      const res = await fetch(api, { headers: { 'Accept': 'application/vnd.github+json' } });
-      if (!res.ok) throw new Error(`GitHub API ${res.status}`);
-      const json = await res.json();
-
-      const files = (Array.isArray(json) ? json : []).filter(x => {
-        if (x.type !== 'file' || !x.name) return false;
-        const n = x.name.toLowerCase();
-        if (kind === 'templates' || kind === 'snippets') return n.endsWith('.js');
-        if (kind === 'documents') return (n.endsWith('.md') || n.endsWith('.mdx') || n.endsWith('.markdown') || n.endsWith('.txt'));
-        return false;
-      });
-      sessionStorage.setItem(cKey, JSON.stringify(files));
-      return files;
-    }
-
-    function fileRow(file, kind) {
-      const el = document.createElement('div');
-      el.style.cssText = `display:flex;align-items:center;gap:8px;padding:8px 10px;border-bottom:1px solid ${BD};cursor:pointer;`;
-      const size = (file.size || 0).toLocaleString();
-      const tag = kind === 'snippets' ? 'SNIP' : (kind === 'documents' ? 'DOC' : 'JS');
-      el.innerHTML = `
-        <div style="border:1px solid ${BD};border-radius:999px;padding:2px 6px;font-size:11px">${tag}</div>
-        <div style="flex:1">${file.name}</div>
-        <div style="opacity:.6;font-size:11px">${size ? size + ' Bytes' : ''}</div>
-      `;
-
-      if (kind === 'templates') setEditorLanguage('javascript');
-      else if (kind === 'documents') setEditorLanguage('markdown');
-
-      el.addEventListener('click', async () => {
-        selectedItem = file;
-        selectedKind = kind;
-
-        if (kind === 'templates') {
-          // エディタ上書き表示、Overview非表示
-          $overview.style.display = 'none';
-          $overview.innerHTML = '';
-          const code = await loadCode(file);
-          currentFileName = file.name;
-          if (monacoEditor) monacoEditor.setValue(code);
-          else await initEditor(code);
-          $meta.textContent = `選択中（Template表示）：${file.name}`;
-          [$download, $copy].forEach(b => b.disabled = false);
-          $insert.disabled = false;
-        } else if (kind === 'snippets') {
-          await showSnippetOverview(file);
-          $meta.textContent = `選択中（Snippet挿入用）：${file.name}`;
-          [$download, $copy, $insert].forEach(b => b.disabled = false);
-        } else if (kind === 'documents') {
-          $overview.style.display = 'none';
-          $overview.innerHTML = '';
-          const code = await loadCode(file);
-          currentFileName = file.name;
-          if (monacoEditor) monacoEditor.setValue(code);
-          else await initEditor(code);
-          $meta.textContent = `選択中（document表示）：${file.name}`;
-          [$download, $copy].forEach(b => b.disabled = false);
-          $insert.disabled = false; // ドキュメントも挿入可にするなら true のまま
-        }
-      }, { passive: true });
-      return el;
-    }
-
-    function renderList(kind, files) {
-      $list.innerHTML = '';
-      if (!files.length) {
-        $list.innerHTML = `<div style="padding:12px; opacity:.7">対象のファイルが見つかりませんでした。</div>`;
-        $overview.style.display = 'none';
-        $overview.innerHTML = '';
-        return;
-      }
-      const frag = document.createDocumentFragment();
-      files.forEach(f => frag.appendChild(fileRow(f, kind)));
-      $list.appendChild(frag);
-
-      selectedItem = null;
-      [$download, $insert, $copy].forEach(b => b.disabled = true);
-      $meta.textContent = '';
-
-      if (kind === 'snippets') {
-        $overview.style.display = 'block';
-        $overview.innerHTML = `<div style="opacity:.7; padding:8px; border:1px dashed ${BD}; border-radius:8px;">
-            ${kind === 'snippets' ? 'スニペット' : 'ドキュメント'}を選択するとプレビューが表示されます
-          </div>`;
-      } else {
-        $overview.style.display = 'none';
-        $overview.innerHTML = '';
-      }
-    }
-
-    async function showSnippetOverview(file) {
-      try {
-        const code = await loadCode(file);
-        const head = code.split('\n').slice(0, 20).join('\n'); // 先頭20行
-        $overview.style.display = 'block';
-        $overview.innerHTML = `
-          <div style="margin-top:8px; border:1px solid ${BD}; border-radius:8px; overflow:hidden;">
-            <div style="padding:6px 8px; font-weight:600; ${isDark ? 'background:#101010;color:#eee;' : 'background:#f7f7f7;color:#111;'}">
-              Snippet Overview
-              <span>（ファイル:</span> <strong>${file.name}）</strong>
-            </div>
-            <div style="padding:8px; ${isDark ? 'background:#0f0f0f;color:#ddd;' : 'background:#fafafa;color:#333;'}">
-              <pre style="margin:0; white-space:pre-wrap; font-size:12px; line-height:1.4; max-height:180px; overflow:auto;">${escapeHtml(head)}</pre>
-            </div>
-          </div>`;
-      } catch (e) {
-        $overview.style.display = 'block';
-        $overview.innerHTML = `<div style="margin-top:8px; color:#c00">プレビュー取得に失敗しました。</div>`;
-      }
-    }
-
-    async function showDocumentOverview(file) {
-      try {
-        const raw = await loadCode(file);
-        const html = escapeHtml(raw)
-          .replace(/\[(.+?)\]\((https?:\/\/[^\s)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
-        $overview.style.display = 'block';
-        $overview.innerHTML = `
-          <div style="margin-top:8px; border:1px solid ${BD}; border-radius:8px; overflow:hidden;">
-            <div style="padding:6px 8px; font-weight:600; ${isDark ? 'background:#101010;color:#eee;' : 'background:#f7f7f7;color:#111;'}">
-              Document Preview <small style="opacity:.7">(${file.name})</small>
-            </div>
-            <div style="padding:8px; ${isDark ? 'background:#0f0f0f;color:#ddd;' : 'background:#fafafa;color:#333;'}">
-              <pre style="margin:0; white-space:pre-wrap; font-size:12px; line-height:1.5; max-height:180px; overflow:auto;">${html}</pre>
-            </div>
-          </div>`;
-      } catch {
-        $overview.style.display = 'block';
-        $overview.innerHTML = `<div style="margin-top:8px; color:#c00">プレビュー取得に失敗しました。</div>`;
-      }
-    }
-
-    function escapeHtml(s) {
-      return String(s ?? '')
-        .replace(/&/g, '&amp;')
-        .replace(/</g, '&lt;')
-        .replace(/>/g, '&gt;');
-    }
-
-    // 初期化：Monaco & 補完（fields を渡せる場合は渡す）
-    await initEditor('');
-    if (window.monaco && !window.monaco._kintoneFieldsReady) {
-      try {
-        // 既存の registerFieldCompletions(monaco, props?) があれば fields.properties を渡す
-        await registerFieldCompletions(window.monaco, fields?.properties);
-      } catch (e) {
-        // 旧シグネチャ（monacoのみ）互換
-        try { await registerFieldCompletions(window.monaco); } catch { }
-      }
-      window.monaco._kintoneFieldsReady = true;
-    }
-
-    // ボタン挙動
-    $download.addEventListener('click', async () => {
-      if (!selectedItem) return;
-      let name = currentFileName || 'template.js';
-      let content = '';
-      if (selectedKind === 'templates' || selectedKind === 'documents') {
-        content = monacoEditor ? monacoEditor.getValue() : '';
-      } else {
-        name = selectedItem.name;
-        content = await loadCode(selectedItem);
-      }
-      const mime = selectedKind === 'documents' ? 'text/markdown' : 'text/javascript';
-      const blob = new Blob([content], { type: mime });
-      const a = document.createElement('a');
-      a.href = URL.createObjectURL(blob);
-      a.download = name;
-      a.click();
-      URL.revokeObjectURL(a.href);
-    });
-
-    $insert.addEventListener('click', async () => {
-      if (!selectedItem || !monacoEditor) return;
-      if (selectedKind === 'documents') return; // ドキュメントは挿入不可のままにするなら return
-      const code = await loadCode(selectedItem);
-      monacoEditor.focus();
-      const sel = monacoEditor.getSelection();
-      monacoEditor.executeEdits('tpl-insert', [{ range: sel, text: `\n${code}\n` }]);
-      $meta.textContent = (selectedKind === 'snippets')
-        ? `✅ Snippet を挿入しました：${selectedItem.name}`
-        : `✅ Template を挿入しました（追記）：${selectedItem.name}`;
-      setTimeout(() => ($meta.textContent = ''), 1500);
-    });
-
-    $copy.addEventListener('click', async () => {
-      if (!selectedItem) return;
-      const text = (selectedKind === 'templates' || selectedKind === 'documents')
-        ? (monacoEditor ? monacoEditor.getValue() : '')
-        : await loadCode(selectedItem);
-      try {
-        await navigator.clipboard.writeText(text);
-        $meta.textContent = '✅ コピーしました';
-      } catch {
-        $meta.textContent = '⚠️ コピーに失敗しました';
-      }
-      setTimeout(() => ($meta.textContent = ''), 1200);
-    });
-
-    $refresh.addEventListener('click', async () => {
-      sessionStorage.removeItem(GH.cacheKey($sourceSel.value));
-      await loadList();
-    });
-
-    $sourceSel.addEventListener('change', loadList);
-
-    // 初回ロード
-    await loadList();
-
-    // ロード関数
-    async function loadList() {
-      const kind = $sourceSel.value;
-      selectedKind = kind;
-      $list.innerHTML = `<div style="padding:12px; opacity:.7">読み込み中...</div>`;
-      try {
-        const files = await fetchList(kind, true);
-        renderList(kind, files);
-      } catch (e) {
-        console.warn(e);
-        const c = sessionStorage.getItem(GH.cacheKey(kind));
-        if (c) renderList(kind, JSON.parse(c));
-        else {
-          $list.innerHTML = `<div style="padding:12px; color:#c00">取得に失敗しました。</div>`;
-          $overview.style.display = 'none';
-          $overview.innerHTML = '';
-        }
-      }
-    }
-
-    // どこか1回だけ実行（存在すればスキップ）
-    if (!document.getElementById('kt-tpl-inline-style')) {
-      const st = document.createElement('style');
-      st.id = 'kt-tpl-inline-style';
-      st.textContent = `
-      .btn {
-        border: 1px solid ${BD};
-        background: ${isDark ? '#1e1e1e' : '#fff'};
-        color: ${isDark ? '#eee' : '#111'};
-        border-radius: 8px;
-        line-height: 1;
-        cursor: pointer;
-      }
-      .btn:disabled { opacity: .5; cursor: not-allowed; }
-      .btn:not(:disabled):hover { filter: brightness(${isDark ? 1.1 : 0.98}); }
-    `;
-      document.head.appendChild(st);
-    }
-
-    // ユーティリティ
-    function escapeHtml(s) {
-      return String(s ?? '')
-        .replace(/&/g, '&amp;')
-        .replace(/</g, '&lt;')
-        .replace(/>/g, '&gt;');
-    }
-  }
-
-
-  async function loadMonaco() {
-    if (window.monaco) return window.monaco;
-    // AMDローダを読み込み
-    await new Promise((res, rej) => {
-      const s = document.createElement('script');
-      s.src = 'https://cdn.jsdelivr.net/npm/monaco-editor@0.49.0/min/vs/loader.js';
-      s.onload = res; s.onerror = rej; document.head.appendChild(s);
-    });
-    const CDN_BASE = 'https://cdn.jsdelivr.net/npm/monaco-editor@0.49.0/min/';
-    window.require.config({
-      paths: { vs: CDN_BASE + 'vs' },
-      // 任意: 既定言語（エラー回避には不要。英語固定したい場合）
-      // 'vs/nls': { availableLanguages: { '*': 'en' } }
-    });
-    // Worker の importScripts が参照する baseUrl も「/min/」
-    window.MonacoEnvironment = {
-      getWorkerUrl: function () {
-        const code = `
-        self.MonacoEnvironment = { baseUrl: '${CDN_BASE}' };
-        importScripts('${CDN_BASE}vs/base/worker/workerMain.js');
-      `;
-        return URL.createObjectURL(new Blob([code], { type: 'text/javascript' }));
-      }
-    };
-    return new Promise((res) => {
-      window.require(['vs/editor/editor.main'], () => res(window.monaco));
-    });
-  }
-
-  let monacoEditor = null;
-  async function initEditor(initialCode = '') {
-    const monaco = await loadMonaco();
-    // JSバリデーション（構文/セマンティック）をON
-    monaco.languages.typescript.javascriptDefaults.setDiagnosticsOptions({
-      noSyntaxValidation: false,
-      noSemanticValidation: false,
-    });
-    // 既存textareaをdivに変えている前提
-    const el = document.getElementById('kt-tpl-editor');
-    el.style.height = '100%';
-    monacoEditor = monaco.editor.create(el, {
-      value: initialCode,
-      language: 'javascript',
-      theme: matchMedia('(prefers-color-scheme: dark)').matches ? 'vs-dark' : 'vs',
-      automaticLayout: true,
-      fontSize: 12,
-      minimap: { enabled: false },
-      wordWrap: 'on',
-    });
-
-    // 🔽 サイズ変化に確実に追従させる（初期取りこぼし対策）
-    const ro = new ResizeObserver(() => { try { monacoEditor.layout(); } catch { } });
-    ro.observe(el);
-    window.addEventListener('resize', () => { try { monacoEditor.layout(); } catch { } });
-
-    // タブ切替直後の遅延レイアウト（描画完了後に1回）
-    setTimeout(() => { try { monacoEditor.layout(); } catch { } }, 0);
-
-    return monacoEditor;
-  }
-
-  async function fetchFieldMeta() {
-    const app = kintone.app.getId();
-    const resp = await kintone.api(kintone.api.url('/k/v1/app/form/fields', true), 'GET', { app });
-    const list = [];
-    const walkProps = (propsObj = {}) => {
-      Object.values(propsObj).forEach(p => {
-        if (p.type === 'SUBTABLE') {
-          walkProps(p.fields || {});
-        } else if (p && p.code) {
-          list.push({ code: p.code, label: p.label || p.code });
-        }
-      });
-    };
-    walkProps(resp.properties || {});
-    return list;
-  }
-
-  async function registerFieldCompletions(monaco) {
-    const fields = await fetchFieldMeta();
-    monaco.languages.registerCompletionItemProvider('javascript', {
-      triggerCharacters: ['"', "'", '`', '.', '['],
-      provideCompletionItems: (model, position) => {
-        const word = model.getWordUntilPosition(position);
-        const range = new monaco.Range(position.lineNumber, word.startColumn, position.lineNumber, word.endColumn);
-        const items = fields.flatMap(f => ([
-          // フィールドコード候補
-          {
-            label: f.code, kind: monaco.languages.CompletionItemKind.Field,
-            insertText: f.code, range, detail: `code: ${f.code}`, documentation: f.label
-          },
-          // レコード参照スニペット例: record['CODE'].value
-          {
-            label: `record['${f.code}'].value`, kind: monaco.languages.CompletionItemKind.Snippet,
-            insertText: `record['${f.code}'].value`, range, detail: 'record[...] 参照', documentation: `${f.label} を参照`
-          }
-        ]));
-        return { suggestions: items };
-      }
-    });
-  }
-
-  /* relations */
+  /** ----------------------------
+  * Relations view
+  * ---------------------------- */
   // ===== ダウンロード共通ユーティリティ =====
   function dlText(filename, text, mime = 'text/plain;charset=utf-8') {
     const blob = new Blob([text], { type: mime });
@@ -1978,6 +1499,619 @@
   }
 
   /** ----------------------------
+  * Templates view
+  * ---------------------------- */
+  async function renderTemplates(root, DATA) {
+    const view = root.querySelector('#view-templates');
+    if (!view) return;
+    let currentFileName = 'template.js';
+
+    // GitHub設定
+    const GH = {
+      owner: 'youtotto',
+      repo: 'kintoneCustomizeJS',
+      dirs: { templates: 'js', snippets: 'snippets', documents: 'documents' },
+      endpoint(dir) { return `https://api.github.com/repos/${this.owner}/${this.repo}/contents/${encodeURIComponent(dir)}`; },
+      cacheKey(kind) { return `kt_tpl_cache_ui_${kind}`; }
+    };
+
+    // UI色
+    const isDark = matchMedia('(prefers-color-scheme: dark)').matches;
+    const BG = isDark ? '#1b1b1b' : '#fff';
+    const BD = isDark ? '#333' : '#ddd';
+    const PANEL_H = '65vh';
+
+    // レイアウト
+    view.innerHTML = `
+      <div id="kt-tpl" style="display:flex; gap:14px; align-items:stretch;">
+        <!-- 左：エディタ -->
+        <div style="flex:2; min-width:380px; display:flex; flex-direction:column; gap:10px;">
+          <div style="display:flex; align-items:center; gap:10px; justify-content:space-between;">
+            <div style="display:flex; align-items:center; gap:8px;">
+              <button id="kt-tpl-download" class="btn" disabled style="height:32px; padding:0 10px;">↓ ダウンロード</button>
+            </div>
+            <span id="kt-tpl-meta"
+                  style="opacity:.75; max-width:55%; text-overflow:ellipsis; overflow:hidden; white-space:nowrap; text-align:right;"></span>
+          </div>
+
+          <div id="kt-tpl-editor"
+            style="
+              flex:1;
+              min-height:0;
+              border:1px solid ${BD};
+              border-radius:8px;
+              background:${isDark ? '#0f0f0f' : '#fafafa'};
+            ">
+          </div>
+        </div>
+
+        <!-- 右：ファイル一覧 -->
+        <div style="flex:1; min-width:240px; display:flex; flex-direction:column; gap:10px; height:${PANEL_H}; min-height:0;">
+          <div style="display:flex; align-items:center; justify-content:space-between; position:sticky; top:0; z-index:1;
+            padding:6px 0; background:${isDark ? '#1b1b1b' : '#fff'};">
+            <div style="font-weight:600; padding-left:12px; margin:6px 0;">Files</div>
+            <select id="kt-tpl-source" class="btn" style="padding:3px 4px; height:32px;">
+              <option value="templates">Templates (GitHub: ${GH.dirs.templates})</option>
+              <option value="snippets">Snippets  (GitHub: ${GH.dirs.snippets})</option>
+              <option value="documents">Documents (GitHub: ${GH.dirs.documents})</option>
+            </select>
+          </div>
+
+          <div style="display:flex; gap:8px;">
+            <button id="kt-tpl-insert" class="btn" disabled style="flex:1; height:32px;">⤴︎ 挿入</button>
+            <button id="kt-tpl-copy" class="btn" disabled style="flex:1; height:32px;">⎘ コピー</button>
+            <button id="kt-tpl-refresh" class="btn" style="flex:1; height:32px;">↻ 更新</button>
+            <button id="kt-tpl-ai-req" class="btn" style="flex:1; height:32px; display:none;">AI</button>
+          </div>
+
+          <div id="kt-tpl-list"
+            style="
+              border:1px solid ${BD};
+              border-radius:8px;
+              overflow:auto;
+              max-height:56vh;
+              background:${BG};
+              padding:6px;
+              flex:1;
+              min-height:0;
+            ">
+          </div>
+          <div id="kt-tpl-overview"></div>
+        </div>
+      </div>
+    `;
+
+    // 要素参照
+    const $list = view.querySelector('#kt-tpl-list');
+    const $download = view.querySelector('#kt-tpl-download');
+    const $meta = view.querySelector('#kt-tpl-meta');
+    const $refresh = view.querySelector('#kt-tpl-refresh');
+    const $insert = view.querySelector('#kt-tpl-insert');
+    const $copy = view.querySelector('#kt-tpl-copy');
+    const $sourceSel = view.querySelector('#kt-tpl-source');
+    const $overview = view.querySelector('#kt-tpl-overview');
+    const $btnAIReq = view.querySelector('#kt-tpl-ai-req');
+
+
+    function updateAIReqVisibility() {
+      const isDocs = ($sourceSel.value === 'documents');
+      // 表示/非表示
+      $btnAIReq.style.display = isDocs ? '' : 'none';
+      if (!isDocs) return;
+
+      // documents のときは内容があれば有効化
+      const text = (monacoEditor ? monacoEditor.getValue() : '').trim();
+      $btnAIReq.disabled = !text;
+    }
+
+    // 状態
+    let selectedItem = null;        // 選択中ファイル
+    let selectedKind = 'templates'; // 'templates' | 'snippets' | 'documents'
+
+    // ヘルパ
+    async function loadCode(file) {
+      const res = await fetch(file.download_url);
+      if (!res.ok) throw new Error(`raw fetch ${res.status}`);
+      return await res.text();
+    }
+
+    function setEditorLanguage(lang = 'javascript') {
+      if (!window.monaco || !monacoEditor) return;
+      const model = monacoEditor.getModel();
+      if (model) window.monaco.editor.setModelLanguage(model, lang);
+    }
+
+    async function fetchList(kind, useCacheFirst = true) {
+      const dir = GH.dirs[kind];
+      const api = GH.endpoint(dir);
+      const cKey = GH.cacheKey(kind);
+
+      if (useCacheFirst) {
+        const c = sessionStorage.getItem(cKey);
+        if (c) { try { return JSON.parse(c); } catch { } }
+      }
+      const res = await fetch(api, { headers: { 'Accept': 'application/vnd.github+json' } });
+      if (!res.ok) throw new Error(`GitHub API ${res.status}`);
+      const json = await res.json();
+
+      const files = (Array.isArray(json) ? json : []).filter(x => {
+        if (x.type !== 'file' || !x.name) return false;
+        const n = x.name.toLowerCase();
+        if (kind === 'templates' || kind === 'snippets') return n.endsWith('.js');
+        if (kind === 'documents') return (n.endsWith('.md') || n.endsWith('.mdx') || n.endsWith('.markdown') || n.endsWith('.txt'));
+        return false;
+      });
+      sessionStorage.setItem(cKey, JSON.stringify(files));
+      return files;
+    }
+
+    function fileRow(file, kind) {
+      const el = document.createElement('div');
+      el.style.cssText = `display:flex;align-items:center;gap:8px;padding:8px 10px;border-bottom:1px solid ${BD};cursor:pointer;`;
+      const size = (file.size || 0).toLocaleString();
+      const tag = kind === 'snippets' ? 'SNIP' : (kind === 'documents' ? 'DOC' : 'JS');
+      el.innerHTML = `
+        <div style="border:1px solid ${BD};border-radius:999px;padding:2px 6px;font-size:11px">${tag}</div>
+        <div style="flex:1">${file.name}</div>
+        <div style="opacity:.6;font-size:11px">${size ? size + ' Bytes' : ''}</div>
+      `;
+
+      if (kind === 'templates') setEditorLanguage('javascript');
+      else if (kind === 'documents') setEditorLanguage('markdown');
+
+      el.addEventListener('click', async () => {
+        selectedItem = file;
+        selectedKind = kind;
+
+        if (window.monaco && monacoEditor && !monacoEditor._aiReqHooked) {
+          monacoEditor._aiReqHooked = true;
+          monacoEditor.onDidChangeModelContent(() => {
+            updateAIReqVisibility();
+          });
+        }
+
+        if (kind === 'templates') {
+          // エディタ上書き表示、Overview非表示
+          $overview.style.display = 'none';
+          $overview.innerHTML = '';
+          const code = await loadCode(file);
+          currentFileName = file.name;
+          if (monacoEditor) monacoEditor.setValue(code);
+          else await initEditor(code);
+          updateAIReqVisibility();
+          $meta.textContent = `選択中（Template表示）：${file.name}`;
+          [$download, $copy].forEach(b => b.disabled = false);
+          $insert.disabled = false;
+        } else if (kind === 'snippets') {
+          await showSnippetOverview(file);
+          $meta.textContent = `選択中（Snippet挿入用）：${file.name}`;
+          [$download, $copy, $insert].forEach(b => b.disabled = false);
+        } else if (kind === 'documents') {
+          $overview.style.display = 'none';
+          $overview.innerHTML = '';
+          const code = await loadCode(file);
+          currentFileName = file.name;
+          if (monacoEditor) monacoEditor.setValue(code);
+          else await initEditor(code);
+          updateAIReqVisibility();
+          $meta.textContent = `選択中（document表示）：${file.name}`;
+          [$download, $copy].forEach(b => b.disabled = false);
+          $insert.disabled = false; // ドキュメントも挿入可にするなら true のまま
+        }
+      }, { passive: true });
+      return el;
+    }
+
+    function renderList(kind, files) {
+      $list.innerHTML = '';
+      if (!files.length) {
+        $list.innerHTML = `<div style="padding:12px; opacity:.7">対象のファイルが見つかりませんでした。</div>`;
+        $overview.style.display = 'none';
+        $overview.innerHTML = '';
+        return;
+      }
+      const frag = document.createDocumentFragment();
+      files.forEach(f => frag.appendChild(fileRow(f, kind)));
+      $list.appendChild(frag);
+
+      selectedItem = null;
+      [$download, $insert, $copy].forEach(b => b.disabled = true);
+      $meta.textContent = '';
+
+      if (kind === 'snippets') {
+        $overview.style.display = 'block';
+        $overview.innerHTML = `<div style="opacity:.7; padding:8px; border:1px dashed ${BD}; border-radius:8px;">
+            ${kind === 'snippets' ? 'スニペット' : 'ドキュメント'}を選択するとプレビューが表示されます
+          </div>`;
+      } else {
+        $overview.style.display = 'none';
+        $overview.innerHTML = '';
+      }
+    }
+
+    async function showSnippetOverview(file) {
+      try {
+        const code = await loadCode(file);
+        const head = code.split('\n').slice(0, 20).join('\n'); // 先頭20行
+        $overview.style.display = 'block';
+        $overview.innerHTML = `
+          <div style="margin-top:8px; border:1px solid ${BD}; border-radius:8px; overflow:hidden;">
+            <div style="padding:6px 8px; font-weight:600; ${isDark ? 'background:#101010;color:#eee;' : 'background:#f7f7f7;color:#111;'}">
+              Snippet Overview
+              <span>（ファイル:</span> <strong>${file.name}）</strong>
+            </div>
+            <div style="padding:8px; ${isDark ? 'background:#0f0f0f;color:#ddd;' : 'background:#fafafa;color:#333;'}">
+              <pre style="margin:0; white-space:pre-wrap; font-size:12px; line-height:1.4; max-height:180px; overflow:auto;">${escapeHtml(head)}</pre>
+            </div>
+          </div>`;
+      } catch (e) {
+        $overview.style.display = 'block';
+        $overview.innerHTML = `<div style="margin-top:8px; color:#c00">プレビュー取得に失敗しました。</div>`;
+      }
+    }
+
+    function escapeHtml(s) {
+      return String(s ?? '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;');
+    }
+
+    // 初期化：Monaco & 補完（fields を渡せる場合は渡す）
+    await initEditor('');
+    if (window.monaco && !window.monaco._kintoneFieldsReady) {
+      try {
+        // 既存の registerFieldCompletions(monaco, props?) があれば fields.properties を渡す
+        await registerFieldCompletions(window.monaco, DATA?.fields?.properties);
+      } catch (e) {
+        // 旧シグネチャ（monacoのみ）互換
+        try { await registerFieldCompletions(window.monaco); } catch { }
+      }
+      window.monaco._kintoneFieldsReady = true;
+    }
+
+    // ボタン挙動
+    $download.addEventListener('click', async () => {
+      if (!selectedItem) return;
+      let name = currentFileName || 'template.js';
+      let content = '';
+      if (selectedKind === 'templates' || selectedKind === 'documents') {
+        content = monacoEditor ? monacoEditor.getValue() : '';
+      } else {
+        name = selectedItem.name;
+        content = await loadCode(selectedItem);
+      }
+      const mime = selectedKind === 'documents' ? 'text/markdown' : 'text/javascript';
+      const blob = new Blob([content], { type: mime });
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = name;
+      a.click();
+      URL.revokeObjectURL(a.href);
+    });
+
+    $insert.addEventListener('click', async () => {
+      if (!selectedItem || !monacoEditor) return;
+      if (selectedKind === 'documents') return; // ドキュメントは挿入不可のままにするなら return
+      const code = await loadCode(selectedItem);
+      monacoEditor.focus();
+      const sel = monacoEditor.getSelection();
+      monacoEditor.executeEdits('tpl-insert', [{ range: sel, text: `\n${code}\n` }]);
+      $meta.textContent = (selectedKind === 'snippets')
+        ? `✅ Snippet を挿入しました：${selectedItem.name}`
+        : `✅ Template を挿入しました（追記）：${selectedItem.name}`;
+      setTimeout(() => ($meta.textContent = ''), 1500);
+    });
+
+    $copy.addEventListener('click', async () => {
+      if (!selectedItem) return;
+      const text = (selectedKind === 'templates' || selectedKind === 'documents')
+        ? (monacoEditor ? monacoEditor.getValue() : '')
+        : await loadCode(selectedItem);
+      try {
+        await navigator.clipboard.writeText(text);
+        $meta.textContent = '✅ コピーしました';
+      } catch {
+        $meta.textContent = '⚠️ コピーに失敗しました';
+      }
+      setTimeout(() => ($meta.textContent = ''), 1200);
+    });
+
+    $refresh.addEventListener('click', async () => {
+      sessionStorage.removeItem(GH.cacheKey($sourceSel.value));
+      await loadList();
+    });
+
+    $btnAIReq.addEventListener('click', async () => {
+      try {
+        // 1) エディタの内容をそのまま要件テンプレとして使う
+        const editorMarkdown = (monacoEditor ? monacoEditor.getValue() : '').trim();
+        if (!editorMarkdown) {
+          $meta.textContent = '⚠️ エディタが空です。先に要件テンプレ（Markdown）を開く/入力してください。';
+          setTimeout(() => ($meta.textContent = ''), 2500);
+          return;
+        }
+
+        // 2) 既取得の DATA から整形（API再呼び出ししない）
+        const payload = buildDocPayloadLiteFromPrefetch(DATA);
+
+        // 3) プロンプト組み立て → クリップボードへ
+        const prompt = buildRequirementsPromptFromEditor({ payload, editorMarkdown });
+        await navigator.clipboard.writeText(prompt);
+
+        $meta.textContent = '✅ 生成プロンプトをコピーしました。ChatGPTに貼り付けてください。';
+        setTimeout(() => ($meta.textContent = ''), 2500);
+      } catch (e) {
+        console.warn(e);
+        $meta.textContent = '⚠️ 生成用プロンプトの準備に失敗しました。';
+        setTimeout(() => ($meta.textContent = ''), 2500);
+      }
+    }, { passive: true });
+
+    // ソース切替
+    $sourceSel.addEventListener('change', async () => {
+      await loadList();
+      updateAIReqVisibility();
+    });
+
+    // 初回ロード
+    await loadList();
+
+    // リスト読み込み完了後
+    async function loadList() {
+      const kind = $sourceSel.value;
+      selectedKind = kind;
+      $list.innerHTML = `<div style="padding:12px; opacity:.7">読み込み中...</div>`;
+      try {
+        const files = await fetchList(kind, true);
+        renderList(kind, files);
+      } catch (e) {
+        // ...既存のエラーハンドリング...
+      }
+      updateAIReqVisibility();
+    }
+
+    // どこか1回だけ実行（存在すればスキップ）
+    if (!document.getElementById('kt-tpl-inline-style')) {
+      const st = document.createElement('style');
+      st.id = 'kt-tpl-inline-style';
+      st.textContent = `
+      .btn {
+        border: 1px solid ${BD};
+        background: ${isDark ? '#1e1e1e' : '#fff'};
+        color: ${isDark ? '#eee' : '#111'};
+        border-radius: 8px;
+        line-height: 1;
+        cursor: pointer;
+      }
+      .btn:disabled { opacity: .5; cursor: not-allowed; }
+      .btn:not(:disabled):hover { filter: brightness(${isDark ? 1.1 : 0.98}); }
+    `;
+      document.head.appendChild(st);
+    }
+
+    // ユーティリティ
+    function escapeHtml(s) {
+      return String(s ?? '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;');
+    }
+  }
+
+
+  async function loadMonaco() {
+    if (window.monaco) return window.monaco;
+    // AMDローダを読み込み
+    await new Promise((res, rej) => {
+      const s = document.createElement('script');
+      s.src = 'https://cdn.jsdelivr.net/npm/monaco-editor@0.49.0/min/vs/loader.js';
+      s.onload = res; s.onerror = rej; document.head.appendChild(s);
+    });
+    const CDN_BASE = 'https://cdn.jsdelivr.net/npm/monaco-editor@0.49.0/min/';
+    window.require.config({
+      paths: { vs: CDN_BASE + 'vs' },
+      // 任意: 既定言語（エラー回避には不要。英語固定したい場合）
+      // 'vs/nls': { availableLanguages: { '*': 'en' } }
+    });
+    // Worker の importScripts が参照する baseUrl も「/min/」
+    window.MonacoEnvironment = {
+      getWorkerUrl: function () {
+        const code = `
+        self.MonacoEnvironment = { baseUrl: '${CDN_BASE}' };
+        importScripts('${CDN_BASE}vs/base/worker/workerMain.js');
+      `;
+        return URL.createObjectURL(new Blob([code], { type: 'text/javascript' }));
+      }
+    };
+    return new Promise((res) => {
+      window.require(['vs/editor/editor.main'], () => res(window.monaco));
+    });
+  }
+
+  let monacoEditor = null;
+  async function initEditor(initialCode = '') {
+    const monaco = await loadMonaco();
+    // JSバリデーション（構文/セマンティック）をON
+    monaco.languages.typescript.javascriptDefaults.setDiagnosticsOptions({
+      noSyntaxValidation: false,
+      noSemanticValidation: false,
+    });
+    // 既存textareaをdivに変えている前提
+    const el = document.getElementById('kt-tpl-editor');
+    el.style.height = '100%';
+    monacoEditor = monaco.editor.create(el, {
+      value: initialCode,
+      language: 'javascript',
+      theme: matchMedia('(prefers-color-scheme: dark)').matches ? 'vs-dark' : 'vs',
+      automaticLayout: true,
+      fontSize: 12,
+      minimap: { enabled: false },
+      wordWrap: 'on',
+    });
+
+    // 🔽 サイズ変化に確実に追従させる（初期取りこぼし対策）
+    const ro = new ResizeObserver(() => { try { monacoEditor.layout(); } catch { } });
+    ro.observe(el);
+    window.addEventListener('resize', () => { try { monacoEditor.layout(); } catch { } });
+
+    // タブ切替直後の遅延レイアウト（描画完了後に1回）
+    setTimeout(() => { try { monacoEditor.layout(); } catch { } }, 0);
+
+    return monacoEditor;
+  }
+
+  async function fetchFieldMeta() {
+    const app = kintone.app.getId();
+    const resp = await kintone.api(kintone.api.url('/k/v1/app/form/fields', true), 'GET', { app });
+    const list = [];
+    const walkProps = (propsObj = {}) => {
+      Object.values(propsObj).forEach(p => {
+        if (p.type === 'SUBTABLE') {
+          walkProps(p.fields || {});
+        } else if (p && p.code) {
+          list.push({ code: p.code, label: p.label || p.code });
+        }
+      });
+    };
+    walkProps(resp.properties || {});
+    return list;
+  }
+
+  async function registerFieldCompletions(monaco) {
+    const fields = await fetchFieldMeta();
+    monaco.languages.registerCompletionItemProvider('javascript', {
+      triggerCharacters: ['"', "'", '`', '.', '['],
+      provideCompletionItems: (model, position) => {
+        const word = model.getWordUntilPosition(position);
+        const range = new monaco.Range(position.lineNumber, word.startColumn, position.lineNumber, word.endColumn);
+        const items = fields.flatMap(f => ([
+          // フィールドコード候補
+          {
+            label: f.code, kind: monaco.languages.CompletionItemKind.Field,
+            insertText: f.code, range, detail: `code: ${f.code}`, documentation: f.label
+          },
+          // レコード参照スニペット例: record['CODE'].value
+          {
+            label: `record['${f.code}'].value`, kind: monaco.languages.CompletionItemKind.Snippet,
+            insertText: `record['${f.code}'].value`, range, detail: 'record[...] 参照', documentation: `${f.label} を参照`
+          }
+        ]));
+        return { suggestions: items };
+      }
+    });
+  }
+
+  // ==== DocPayload Lite from prefetch (no extra API calls) ====
+  function buildDocPayloadLiteFromPrefetch(pref) {
+    if (!pref || !pref.fields || !pref.layout) {
+      throw new Error('prefetch data is missing required properties');
+    }
+    const props = pref.fields?.properties || {};
+
+    // フィールド平坦化（SUBTABLEの子を展開）
+    const flatFields = Object.values(props).flatMap(f => {
+      if (f.type === 'SUBTABLE') {
+        const subs = Object.values(f.fields || {}).map(sf => ({
+          code: sf.code, label: sf.label, type: sf.type,
+          required: !!sf.required, unique: !!sf.unique, inSubtable: f.code
+        }));
+        return [{ code: f.code, label: f.label, type: 'SUBTABLE', inSubtable: null }, ...subs];
+      }
+      return [{ code: f.code, label: f.label, type: f.type, required: !!f.required, unique: !!f.unique, inSubtable: null }];
+    });
+
+    // 参照関係（Lookup / 参照テーブル）
+    const relations = Object.values(props).flatMap(f => {
+      const rels = [];
+      if (f.lookup) {
+        rels.push({
+          kind: 'LOOKUP',
+          field: f.code,
+          toApp: f.lookup?.relatedApp?.app,
+          key: (f.lookup?.fieldMappings || []).map(m => m.field)
+        });
+      }
+      if (f.type === 'REFERENCE_TABLE' && f.referenceTable) {
+        rels.push({
+          kind: 'REFERENCE_TABLE',
+          field: f.code,
+          toApp: f.referenceTable?.relatedApp?.app,
+          condition: f.referenceTable?.condition
+        });
+      }
+      return rels;
+    });
+
+    // レイアウト概要
+    const layoutOutline = (pref.layout?.layout || []).map(row => ({
+      type: row.type,
+      title: row.code ? (props[row.code]?.label || row.code) : (row.label || null),
+      fields: (row.fields || []).map(it => ({
+        code: it.code || null, label: it.label || null, type: it.type || null
+      }))
+    }));
+
+    // ビュー/レポート
+    const views = Object.values(pref.views?.views || {}).map(v => ({
+      name: v.name, type: v.type, sort: v.sort, filterCond: v.filterCond
+    }));
+    const reports = Object.values(pref.reports?.reports || {}).map(r => ({
+      name: r.name, type: r.chartType
+    }));
+
+    // カスタマイズ一覧（ファイル名のみ）
+    const customize = pref.customize ? {
+      desktop: { js: (pref.customize.desktop?.js || []).map(x => x.file), css: (pref.customize.desktop?.css || []).map(x => x.file) },
+      mobile: { js: (pref.customize.mobile?.js || []).map(x => x.file), css: (pref.customize.mobile?.css || []).map(x => x.file) }
+    } : null;
+
+    return {
+      meta: {
+        appId: pref.appId,
+        appName: pref.app?.name || null,
+        retrievedAt: new Date().toISOString()
+      },
+      fields: flatFields,
+      layout: layoutOutline,
+      views,
+      reports,
+      process: pref.status ? { enable: !!pref.status.enable, states: pref.status.states || [], actions: pref.status.actions || [] } : null,
+      notifications: pref.notifs || null,
+      customize,
+      acl: pref.acl || null,
+      actions: pref.actions?.actions || [],
+      relations
+    };
+  }
+
+  function buildRequirementsPromptFromEditor({ payload, editorMarkdown }) {
+    const system = [
+      'あなたはkintoneのシステムエンジニアです。',
+      '根拠は与えられたJSONのみ。推測で仕様を追加しない。',
+      '出力は日本語Markdown。H1〜H3、箇条書き中心、表は最小限。',
+      'ユーザー向け要件(What/Why)と開発向け要件(How/Constraints)を分ける。'
+    ].join(' ');
+
+    const user = `
+      # 目的
+      このアプリ用の**ドラフト**を作成してください。10〜15分でレビューできる密度に抑え、曖昧な点は「未確定事項」として列挙してください。
+
+      # テンプレ（エディタの内容を骨格として使用）
+      \`\`\`markdown
+      ${editorMarkdown}
+      \`\`\`
+
+      # 入力（アプリ定義の要約JSON）
+      \`\`\`json
+      ${JSON.stringify(payload, null, 2)}
+      \`\`\`
+      `.trim();
+
+    return `SYSTEM:\n${system}\n\nUSER:\n${user}`;
+  }
+
+  /** ----------------------------
   * boot
   * ---------------------------- */
   waitReady().then(async () => {
@@ -1998,7 +2132,7 @@
     renderViews(root, pick(DATA, ['appId', 'views', 'fields']));
     renderGraphs(root, pick(DATA, ['appId', 'reports', 'fields']));
     renderRelations(root, relations);
-    renderTemplates(root, pick(DATA, ['fields']));
+    renderTemplates(root, DATA);
 
   });
 
