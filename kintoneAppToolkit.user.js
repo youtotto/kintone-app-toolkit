@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         kintone App Toolkit
 // @namespace    https://github.com/youtotto/kintone-app-toolkit
-// @version      1.6.0
+// @version      1.6.1
 // @description  kintone開発をブラウザで完結。アプリ分析・コード生成・ドキュメント編集を備えた開発支援ツールキット。
 // @match        https://*.cybozu.com/k/*/
 // @match        https://*.cybozu.com/k/*/?view=*
@@ -2038,7 +2038,7 @@
 
     $btnAIReq.addEventListener('click', async () => {
       try {
-        // 1) エディタの内容をそのまま要件テンプレとして使う
+        // 1) エディタの内容（要件テンプレ）
         const editorMarkdown = (monacoEditor ? monacoEditor.getValue() : '').trim();
         if (!editorMarkdown) {
           $meta.textContent = '⚠️ エディタが空です。先に要件テンプレ（Markdown）を開く/入力してください。';
@@ -2049,12 +2049,36 @@
         // 2) 既取得の DATA から整形（API再呼び出ししない）
         const payload = buildDocPayloadLiteFromPrefetch(DATA);
 
-        // 3) プロンプト組み立て → クリップボードへ
+        // 3) プロンプト組み立て
         const prompt = buildRequirementsPromptFromEditor({ payload, editorMarkdown });
-        await navigator.clipboard.writeText(prompt);
 
-        $meta.textContent = '✅ 生成プロンプトをコピーしました。ChatGPTに貼り付けてください。';
-        setTimeout(() => ($meta.textContent = ''), 2500);
+        // 4) テキストファイルとしてダウンロード
+        const downloadText = (filename, text) => {
+          const blob = new Blob([text], { type: 'text/plain;charset=utf-8' });
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement('a');
+          a.href = url;
+          a.download = filename;
+          document.body.appendChild(a);
+          a.click();
+          // 後片付け
+          setTimeout(() => {
+            URL.revokeObjectURL(url);
+            a.remove();
+          }, 0);
+        };
+
+        // 任意：ファイル名（日時＋アプリID入り）
+        const pad = (n) => String(n).padStart(2, '0');
+        const d = new Date();
+        const ts = `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}_${pad(d.getHours())}${pad(d.getMinutes())}`;
+        const appId = (window.kintone && kintone.app && kintone.app.getId && kintone.app.getId()) || 'app';
+        const filename = `requirements_prompt_${appId}_${ts}.txt`;
+
+        downloadText(filename, prompt);
+
+        $meta.textContent = '✅ 生成プロンプトをテキストとしてダウンロードしました。（可能ならクリップボードにもコピー済み）';
+        setTimeout(() => ($meta.textContent = ''), 3000);
       } catch (e) {
         console.warn(e);
         $meta.textContent = '⚠️ 生成用プロンプトの準備に失敗しました。';
