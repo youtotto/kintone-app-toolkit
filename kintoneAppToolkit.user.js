@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         kintone App Toolkit
 // @namespace    https://github.com/youtotto/kintone-app-toolkit
-// @version      1.5.1
+// @version      1.6.0
 // @description  kintone開発をブラウザで完結。アプリ分析・コード生成・ドキュメント編集を備えた開発支援ツールキット。
 // @match        https://*.cybozu.com/k/*/
 // @match        https://*.cybozu.com/k/*/?view=*
@@ -181,8 +181,22 @@
   /** ----------------------------
   * Small utils
   * ---------------------------- */
-  const getUrlParam = (key) => new URL(location.href).searchParams.get(key);
   const escapeRegExp = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+  /* シンプルなスピナー: Spinner.show()で表示　.hide()で非表示 */
+  const Spinner = (() => {
+    let node;
+    return {
+      show() {
+        if (node) return;
+        node = document.createElement('div');
+        node.innerHTML = '<div style="padding:12px 16px;border:1px solid #999;border-radius:10px;background:#fff">Loading...</div>';
+        node.style.cssText = 'position:fixed;inset:0;display:grid;place-items:center;background:rgba(255,255,255,.4);z-index:9999;';
+        document.body.appendChild(node);
+      },
+      hide() { node?.remove(); node = null; }
+    };
+  })();
 
   /** ----------------------------
   * UI Root (tabs)
@@ -217,7 +231,7 @@
     const wrap = document.createElement('div');
     wrap.id = 'kt-toolkit';
     wrap.style.cssText = `
-      position:fixed; right:16px; bottom:16px; z-index:9999;
+      position:fixed; right:16px; bottom:16px; z-index:9998;
       background:${C.bg}; color:${C.text}; border-radius:12px;
       box-shadow:0 8px 30px rgba(0,0,0,${isDarkMode ? '.35' : '.15'});
       font:12px/1.5 ui-sans-serif,system-ui; width:min(1080px, 95vw); max-height:80vh; overflow:auto;
@@ -366,9 +380,9 @@
   // safety: if DOM node detached before append
   function wapCheck(el) { return el; }
 
-  /** ----------------------------
+  /** --------------------------------------------------------
   * Health view
-  * ---------------------------- */
+  * -------------------------------------------------------- */
   // Health thresholds (edit-able; persisted to LS)
   const LS_TH_KEY = 'ktHealthThresholds.v1';
   const DEFAULT_TH = {
@@ -535,9 +549,9 @@
   };
 
 
-  /** ----------------------------
+  /** --------------------------------------------------------
   * Fields view (layout-aware, MD with notes)
-  * ---------------------------- */
+  * -------------------------------------------------------- */
   // 汎用の初期値フォーマッタ（フィールド定義用）
   function formatDefault(field) {
     const t = field?.type;
@@ -804,9 +818,9 @@
     }, { passive: true });
   };
 
-  /** ----------------------------
+  /** --------------------------------------------------------
   * Views view（全一覧の一覧化）
-  * ---------------------------- */
+  * -------------------------------------------------------- */
   // クエリを (condition, orderBy[], limit, offset) に分解
   function parseQuery(query) {
     const q = (query || '').trim();
@@ -1004,9 +1018,9 @@
       dl(`kintone_views_${appId}.csv`, csv, 'text/csv'));
   };
 
-  /** ----------------------------
+  /** --------------------------------------------------------
   * Graphs views
-  * ---------------------------- */
+  * -------------------------------------------------------- */
   // groups を 1セル内に「G1/G2/G3のピル＋ラベル＋[PER]」で縦積み表示
   const groupsToHTML = (groups = [], code2label = {}) => {
     return groups.map((g, i) => {
@@ -1185,9 +1199,9 @@
       dl(`kintone_graphs_${appId}.csv`, csv, 'text/csv'), { passive: true });
   };
 
-  /** ----------------------------
+  /** --------------------------------------------------------
   * Relations view
-  * ---------------------------- */
+  * -------------------------------------------------------- */
   // ===== ダウンロード共通ユーティリティ =====
   function dlText(filename, text, mime = 'text/plain;charset=utf-8') {
     const blob = new Blob([text], { type: mime });
@@ -1300,7 +1314,6 @@
 
     return { html, bind };
   }
-
 
   /**
    * Relationsタブを描画
@@ -1498,10 +1511,11 @@
     bindLU(view); bindRT(view); bindAC(view);
   }
 
-  /** ----------------------------
+
+  /** --------------------------------------------------------
   * Templates view
-  * ---------------------------- */
-  async function renderTemplates(root, DATA) {
+  * -------------------------------------------------------- */
+  async function renderTemplates(root, DATA, appId) {
     const view = root.querySelector('#view-templates');
     if (!view) return;
     let currentFileName = 'template.js';
@@ -1529,6 +1543,7 @@
           <div style="display:flex; align-items:center; gap:10px; justify-content:space-between;">
             <div style="display:flex; align-items:center; gap:8px;">
               <button id="kt-tpl-download" class="btn" disabled style="height:32px; padding:0 10px;">↓ ダウンロード</button>
+              <button id="kt-tpl-upload" class="btn" disabled style="height:32px; padding:0 10px;">↑ アップロード</button>
             </div>
             <span id="kt-tpl-meta"
                   style="opacity:.75; max-width:55%; text-overflow:ellipsis; overflow:hidden; white-space:nowrap; text-align:right;"></span>
@@ -1591,7 +1606,7 @@
     const $sourceSel = view.querySelector('#kt-tpl-source');
     const $overview = view.querySelector('#kt-tpl-overview');
     const $btnAIReq = view.querySelector('#kt-tpl-ai-req');
-
+    const $upload = view.querySelector('#kt-tpl-upload');
 
     function updateAIReqVisibility() {
       const isDocs = ($sourceSel.value === 'documents');
@@ -1680,12 +1695,12 @@
           else await initEditor(code);
           updateAIReqVisibility();
           $meta.textContent = `選択中（Template表示）：${file.name}`;
-          [$download, $copy].forEach(b => b.disabled = false);
+          [$download, $copy, $upload].forEach(b => b.disabled = false);
           $insert.disabled = false;
         } else if (kind === 'snippets') {
           await showSnippetOverview(file);
           $meta.textContent = `選択中（Snippet挿入用）：${file.name}`;
-          [$download, $copy, $insert].forEach(b => b.disabled = false);
+          [$download, $copy, $insert, $upload].forEach(b => b.disabled = false);
         } else if (kind === 'documents') {
           $overview.style.display = 'none';
           $overview.innerHTML = '';
@@ -1696,6 +1711,7 @@
           updateAIReqVisibility();
           $meta.textContent = `選択中（document表示）：${file.name}`;
           [$download, $copy].forEach(b => b.disabled = false);
+          [$upload].forEach(b => b.disabled = true);
           $insert.disabled = false; // ドキュメントも挿入可にするなら true のまま
         }
       }, { passive: true });
@@ -1789,6 +1805,204 @@
       a.click();
       URL.revokeObjectURL(a.href);
     });
+
+
+    // ------ モーダル：入力ダイアログ（ファイル名＆アップ先） ------
+    function openUploadDialog({ defaultName, defaultDesktop = true, defaultMobile = false }) {
+      return new Promise((resolve) => {
+        // ラッパ
+        const wrap = document.createElement('div');
+        wrap.id = 'kt-upload-dialog';
+        wrap.style.cssText = `
+      position: fixed; inset: 0; z-index: 9999;
+      background: rgba(0,0,0,.35); display:flex; align-items:center; justify-content:center;
+    `;
+
+        // ダイアログ
+        const box = document.createElement('div');
+        box.style.cssText = `
+          width: 520px; max-width: 92vw; border-radius: 12px;
+          background: ${document.documentElement.matches('[data-theme="dark"]') ? '#1c1c1c' : '#fff'};
+          color: inherit; padding: 16px 18px; box-shadow: 0 12px 30px rgba(0,0,0,.25);
+          border: 1px solid ${document.documentElement.matches('[data-theme="dark"]') ? '#333' : '#ddd'};
+        `;
+        box.innerHTML = `
+          <div style="font-weight:700; font-size:16px; margin-bottom:10px;">ファイルをアップロード</div>
+
+          <label style="display:block; font-size:12px; opacity:.8; margin:6px 0 4px;">ファイル名</label>
+          <input id="kt-up-name" type="text" value="${defaultName || 'template.js'}"
+            style="width:100%; padding:8px 10px; border-radius:8px; border:1px solid #8882; background:transparent; color:inherit" />
+
+          <div style="display:flex; gap:14px; margin-top:12px;">
+            <label style="display:flex; gap:8px; align-items:center;">
+              <input id="kt-up-desktop" type="checkbox" ${defaultDesktop ? 'checked' : ''}/>
+              <span>デスクトップ（JS）</span>
+            </label>
+            <label style="display:flex; gap:8px; align-items:center;">
+              <input id="kt-up-mobile" type="checkbox" ${defaultMobile ? 'checked' : ''}/>
+              <span>モバイル（JS）</span>
+            </label>
+          </div>
+
+          <div style="display:flex; gap:8px; justify-content:flex-end; margin-top:16px;">
+            <button id="kt-up-cancel" class="btn" style="height:32px; padding:0 12px;">キャンセル</button>
+            <button id="kt-up-ok" class="btn" style="height:32px; padding:0 14px; font-weight:600;">OK</button>
+          </div>
+        `;
+
+        wrap.appendChild(box);
+        document.body.appendChild(wrap);
+
+        const $name = box.querySelector('#kt-up-name');
+        const $desktop = box.querySelector('#kt-up-desktop');
+        const $mobile = box.querySelector('#kt-up-mobile');
+        const $ok = box.querySelector('#kt-up-ok');
+        const $cancel = box.querySelector('#kt-up-cancel');
+
+        const close = (result) => {
+          wrap.remove();
+          resolve(result);
+        };
+
+        $ok.addEventListener('click', () => {
+          const name = ($name.value || '').trim();
+          if (!name) { $name.focus(); return; }
+          if (!$desktop.checked && !$mobile.checked) {
+            // どちらも未選択は不可
+            alert('アップロード先を少なくとも1つ選択してください。');
+            return;
+          }
+          close({ name, toDesktop: $desktop.checked, toMobile: $mobile.checked });
+        });
+        $cancel.addEventListener('click', () => close(null));
+        wrap.addEventListener('click', (e) => { if (e.target === wrap) close(null); });
+        $name.select();
+      });
+    }
+    const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+    async function waitDeploy(appId) {
+      const maxWaitMs = 60_000, intervalMs = 1500;
+      let waited = 0;
+      while (true) {
+        await sleep(intervalMs);
+        waited += intervalMs;
+        const st = await kintone.api(
+          kintone.api.url('/k/v1/preview/app/deploy.json', true),
+          'GET',
+          { apps: [Number(appId)] }
+        );
+        const s = st?.apps?.[0]?.status;
+        if (s === 'SUCCESS') return;
+        if (s === 'FAIL') throw new Error('Deploy failed.');
+        if (waited >= maxWaitMs) throw new Error('Deploy timeout.');
+      }
+    }
+    async function uploadOnce(name, content, mime) {
+      const fd = new FormData();
+      fd.append('__REQUEST_TOKEN__', kintone.getRequestToken());
+      fd.append('file', new Blob([content], { type: mime }), name);
+      const up = await fetch(kintone.api.url('/k/v1/file.json', true), {
+        method: 'POST',
+        headers: { 'X-Requested-With': 'XMLHttpRequest' },
+        body: fd,
+        credentials: 'same-origin'
+      });
+      if (!up.ok) throw new Error(`file upload failed: ${up.status} ${await up.text().catch(() => '')}`);
+      const { fileKey } = await up.json();
+      return fileKey;
+    }
+
+    async function putAppendFileToCustomizeWithTargets(app, keys, { toDesktop, toMobile }) {
+      // preview現行
+      let base;
+      try {
+        base = await kintone.api(kintone.api.url('/k/v1/preview/app/customize.json', true), 'GET', { app });
+      } catch { base = null; }
+
+      // preview無ければ本番からURLだけ
+      if (!base) {
+        const prod = await kintone.api(kintone.api.url('/k/v1/app/customize.json', true), 'GET', { app });
+        const onlyURL = (arr = []) => (arr || []).filter(x => x?.type === 'URL');
+        base = {
+          app, scope: prod.scope || 'ALL',
+          desktop: { js: onlyURL(prod.desktop?.js), css: onlyURL(prod.desktop?.css) },
+          mobile: { js: onlyURL(prod.mobile?.js), css: onlyURL(prod.mobile?.css) }
+        };
+      }
+
+      const next = {
+        app,
+        scope: base.scope || 'ALL',
+        desktop: {
+          js: [
+            ...(base.desktop?.js ?? []),
+            ...(toDesktop && keys.fileKeyDesktop ? [{ type: 'FILE', file: { fileKey: keys.fileKeyDesktop } }] : [])
+          ],
+          css: [...(base.desktop?.css ?? [])]
+        },
+        mobile: {
+          js: [
+            ...(base.mobile?.js ?? []),
+            ...(toMobile && keys.fileKeyMobile ? [{ type: 'FILE', file: { fileKey: keys.fileKeyMobile } }] : [])
+          ],
+          css: [...(base.mobile?.css ?? [])]
+        }
+      };
+
+      await kintone.api(kintone.api.url('/k/v1/preview/app/customize.json', true), 'PUT', next);
+      await kintone.api(kintone.api.url('/k/v1/preview/app/deploy.json', true), 'POST', { apps: [{ app, revision: -1 }], revert: false });
+    }
+
+    $upload?.addEventListener('click', async (ev) => {
+      const btn = ev.currentTarget; btn.disabled = true;
+      try {
+        const app = kintone.app.getId();
+        const defaultName = (currentFileName || (selectedKind === 'documents' ? 'document.md' : 'template.js'));
+
+        // 1) ダイアログで入力
+        const form = await openUploadDialog({
+          defaultName,
+          defaultDesktop: true,
+          defaultMobile: false
+        });
+        if (!form) return; // cancel
+
+        const mime = (selectedKind === 'documents') ? 'text/markdown' : 'text/javascript';
+        const content = monacoEditor ? monacoEditor.getValue() : '';
+        if (!content.trim()) throw new Error('editor is empty');
+
+        Spinner.show();
+        // ←ここを変更：toDesktop/toMobile に応じてアップロード回数を分ける
+        let fileKeyDesktop = null, fileKeyMobile = null;
+        if (form.toDesktop && form.toMobile) {
+          // 同じ内容を2回アップして別 fileKey を作る
+          const [fk1, fk2] = await Promise.all([
+            uploadOnce(form.name, content, mime),
+            uploadOnce(form.name, content, mime)
+          ]);
+          fileKeyDesktop = fk1;
+          fileKeyMobile = fk2;
+        } else if (form.toDesktop) {
+          fileKeyDesktop = await uploadOnce(form.name, content, mime);
+        } else if (form.toMobile) {
+          fileKeyMobile = await uploadOnce(form.name, content, mime);
+        }
+
+        //  3) 追記PUT → デプロイ待ち
+        await putAppendFileToCustomizeWithTargets(app, { fileKeyDesktop, fileKeyMobile }, {
+          toDesktop: form.toDesktop, toMobile: form.toMobile
+        });
+        await waitDeploy(app);
+        alert(`✅ 追記＆デプロイ完了：${form.name}\n[Desktop JS: ${form.toDesktop ? 'Yes' : 'No'} / Mobile JS: ${form.toMobile ? 'Yes' : 'No'}]`);
+      } catch (e) {
+        console.error('[upload]', e);
+        alert(`❌ 失敗：${e?.message || e}`);
+      } finally {
+        btn.disabled = false;
+        Spinner.hide();
+      }
+    });
+
 
     $insert.addEventListener('click', async () => {
       if (!selectedItem || !monacoEditor) return;
@@ -1898,7 +2112,6 @@
         .replace(/>/g, '&gt;');
     }
   }
-
 
   async function loadMonaco() {
     if (window.monaco) return window.monaco;
@@ -2132,7 +2345,7 @@
     renderViews(root, pick(DATA, ['appId', 'views', 'fields']));
     renderGraphs(root, pick(DATA, ['appId', 'reports', 'fields']));
     renderRelations(root, relations);
-    renderTemplates(root, DATA);
+    renderTemplates(root, DATA, appId);
 
   });
 
