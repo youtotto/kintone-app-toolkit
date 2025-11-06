@@ -16,43 +16,26 @@ Toolkitは、kintone開発を標準化・効率化することを目的とした
 
 ---
 
-### Relationsタブ（News!）
-kintoneアプリの 参照関係（ルックアップ・関連レコード・アクション） を一覧化。
-アプリ間のつながりを「見える化」し、構造理解・影響範囲の把握を支援します。
-| セクション                       | 内容                                             |
-| --------------------------- | ---------------------------------------------- |
-| **Lookups（ルックアップ）**         | 参照元アプリ、コピー項目、条件式を一覧化。コピー先／コピー元の関係を明示。          |
-| **Related Records（関連レコード）** | 参照アプリ、表示フィールド、連携条件を一覧表示。条件式(`filterCond`)も可読化。 |
-| **Actions（レコード作成アクション）**    | 実行条件や作成先アプリ、マッピング設定を一覧化。開閉式UI（▸／▾）付きで見やすく整理。   |
-
-
-### Templates（New!）
-ブラウザだけで完結する kintone カスタマイズ体験。
-| 機能        | 内容                                                     |
-| --------- | ------------------------------------------------------ |
-| GitHub連携  | `youtotto/kintoneCustomizeJS/js`（テンプレート）, `snippets/`（スニペット）, `documents/`（ドキュメント）を自動取得 |
-| コードエディタ   | Monaco Editorを組込み。構文チェック／シンタックスハイライト対応                 |
-| サジェスト機能   | kintoneアプリのフィールドコード・ラベルを自動補完                           |
-| 編集＆DL     | 編集したコードをそのまま `.js` ファイルとしてダウンロード可能                     |
-| CONFIG編集型 | 初心者でも安心。設定値を書き換えるだけで動くテンプレート構成                         |
-|**AIプロンプト生成**| `.md`／`.txt`などのガイド・ドキュメントから、貼り付けるだけのAIプロンプトを生成|
-| **Upload & Deploy（New!）** | エディタ内容を `.js` として**追記**→**プレビューPUT**→**デプロイ**。ダイアログで**ファイル名**と**アップ先（デスクトップ／モバイル）**を指定 |
-
-
 ### Health
 <img width="595" height="452" alt="image" src="https://github.com/user-attachments/assets/7d13714f-78ef-4451-90b8-087b8ee78e08" />
-
 
 ### Fields
 <img width="1370" height="697" alt="image" src="https://github.com/user-attachments/assets/26a28f5b-83ae-4045-bf30-b6c7f0d10770" />
 
-
 ### Views
 <img width="916" height="251" alt="image" src="https://github.com/user-attachments/assets/9895fb8f-5d9e-437a-9378-7a78631a9562" />
 
-
 ### Graphs
 <img width="1606" height="771" alt="image" src="https://github.com/user-attachments/assets/48490fc3-d3b8-4057-b98a-0e2683988ecf" />
+
+### Relationsタブ（News!）
+kintoneアプリの 参照関係（ルックアップ・関連レコード・アクション） を一覧化。
+アプリ間のつながりを「見える化」し、構造理解・影響範囲の把握を支援します。
+<img width="1620" height="798" alt="スクリーンショット 2025-11-06 181601" src="https://github.com/user-attachments/assets/f9224f18-0f9f-43cd-94ab-b87df12fdabc" />
+
+### Templates（New!）
+ブラウザだけで完結する kintone カスタマイズ体験。
+<img width="1616" height="968" alt="スクリーンショット 2025-11-06 181610" src="https://github.com/user-attachments/assets/f8ee8d66-12db-4454-8205-6ca47ea9c46b" />
 
 ---
 
