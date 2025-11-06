@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         kintone App Toolkit
 // @namespace    https://github.com/youtotto/kintone-app-toolkit
-// @version      1.6.1
+// @version      1.6.2
 // @description  kintone開発をブラウザで完結。アプリ分析・コード生成・ドキュメント編集を備えた開発支援ツールキット。
 // @match        https://*.cybozu.com/k/*/
 // @match        https://*.cybozu.com/k/*/?view=*
@@ -175,7 +175,7 @@
   /** ----------------------------
   * CONSTANTS
   * ---------------------------- */
-  const CONTAINER_TYPES = new Set(['GROUP', 'SUBTABLE', 'LABEL']);
+  const CONTAINER_TYPES = new Set(['GROUP', 'SUBTABLE', 'LABEL', 'CATEGORY']);
   const SYSTEM_TYPES = new Set(['RECORD_NUMBER', 'CREATOR', 'CREATED_TIME', 'MODIFIER', 'UPDATED_TIME', 'STATUS', 'STATUS_ASSIGNEE']);
 
   /** ----------------------------
@@ -197,6 +197,109 @@
       hide() { node?.remove(); node = null; }
     };
   })();
+
+  // ==============================
+  // KTExport: CSV/Markdown/DL/Copy 共通ユーティリティ
+  // ==============================
+  const KTExport = (() => {
+    // ---- Escape helpers ----
+    const csvEsc = (v) => `"${String(v ?? '').replace(/"/g, '""')}"`;
+    const mdEsc = (v = '') => String(v).replace(/\\/g, '\\\\').replace(/\|/g, '\\|').replace(/`/g, '\\`');
+
+    // ---- Core table builders ----
+    // columns: [{ header:'ヘッダ', select:(row)=>値, md?:fn, csv?:fn }]
+    function buildMatrix(rows, columns, { forMd = false } = {}) {
+      const headers = columns.map(c => c.header);
+      const matrix = rows.map(r => columns.map(c => {
+        const raw = c.select ? c.select(r) : r[c.key];
+        if (forMd) return c.md ? c.md(raw, r) : mdEsc(raw);
+        return c.csv ? c.csv(raw, r) : raw;
+      }));
+      return { headers, matrix };
+    }
+
+    function toCSVString(rows, columns) {
+      const { headers, matrix } = buildMatrix(rows, columns, { forMd: false });
+      const head = headers.map(csvEsc).join(',');
+      const body = matrix.map(r => r.map(csvEsc).join(',')).join('\r\n');
+      return [head, body].join('\r\n');
+    }
+
+    function toMarkdownString(rows, columns) {
+      const { headers, matrix } = buildMatrix(rows, columns, { forMd: true });
+      const header = `| ${headers.join(' | ')} |`;
+      const sep = `| ${headers.map(() => ':-').join(' | ')} |`;
+      const lines = (matrix.length
+        ? matrix.map(r => `| ${r.map(x => String(x ?? '')).join(' | ')} |`).join('\n')
+        : `| ${headers.map(() => '-').join(' | ')} |`);
+      return [header, sep, lines].join('\n');
+    }
+
+    // ---- Download helpers ----
+    function downloadText(filename, text, mime = 'text/plain;charset=utf-8') {
+      const blob = new Blob([text], { type: mime });
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = filename;
+      a.click();
+      URL.revokeObjectURL(a.href);
+    }
+    function downloadCSV(filename, rows, columns, { withBom = false } = {}) {
+      const csv = toCSVString(rows, columns);
+      const data = withBom ? '\uFEFF' + csv : csv; // Excel対策（任意）
+      downloadText(filename, data, 'text/csv;charset=utf-8');
+    }
+    function downloadMD(filename, rows, columns) {
+      downloadText(filename, toMarkdownString(rows, columns), 'text/markdown;charset=utf-8');
+    }
+
+    // ---- Clipboard helpers ----
+    async function copyText(text) {
+      // 1) 標準API
+      try {
+        await navigator.clipboard.writeText(text);
+        return true;
+      } catch (_) {
+        // 2) フォールバック（HTTP/権限NG/古いブラウザ）
+        try {
+          const ta = document.createElement('textarea');
+          ta.value = text;
+          ta.style.cssText = 'position:fixed;top:-9999px;left:-9999px';
+          document.body.appendChild(ta);
+          ta.focus(); ta.select();
+          const ok = document.execCommand('copy');
+          ta.remove();
+          return ok;
+        } catch {
+          return false;
+        }
+      }
+    }
+    async function copyCSV(rows, columns, { withBom = false } = {}) {
+      const csv = toCSVString(rows, columns);
+      const data = withBom ? '\uFEFF' + csv : csv;
+      return copyText(data);
+    }
+    async function copyMD(rows, columns) {
+      return copyText(toMarkdownString(rows, columns));
+    }
+
+    return {
+      // 文字列生成
+      toCSVString, toMarkdownString, mdEsc,
+      // ダウンロード
+      downloadText, downloadCSV, downloadMD,
+      // クリップボード
+      copyText, copyCSV, copyMD,
+    };
+  })();
+
+  // ボタンの一時表示ユーティリティ（任意）
+  function flashBtnText(btn, text = 'Done!', ms = 1200) {
+    const old = btn.textContent;
+    btn.textContent = text;
+    setTimeout(() => (btn.textContent = old), ms);
+  }
 
   /** ----------------------------
   * UI Root (tabs)
@@ -613,39 +716,6 @@
     return String(dv);
   }
 
-  const mdEsc = (v = '') =>
-    String(v).replace(/\\/g, '\\\\').replace(/\|/g, '\\|').replace(/`/g, '\\`');
-
-  const toCSV = (rows) => [
-    ['フィールド名', 'フィールドコード', '必須', '初期値', 'フィールド形式', 'グループ'].join(','),
-    ...rows.map(r => [
-      r.label, r.code, r.required ? 'TRUE' : 'FALSE', r.defaultValue, r.type, r.groupPath
-    ].map(s => `"${String(s ?? '').replace(/"/g, '""')}"`).join(','))
-  ].join('\r\n');
-
-  const toMarkdownWithNotes = (rows) => {
-    const header = ['フィールド名', 'フィールドコード', '必須', '初期値', 'フィールド形式', 'グループ', '備考'];
-    const sep = header.map(() => ':-').join(' | ');
-    const lines = rows.map(r => [
-      mdEsc(r.label),
-      mdEsc(r.code),
-      r.required ? '✓' : '',
-      mdEsc(r.defaultValue),
-      mdEsc(r.type),
-      mdEsc(r.groupPath),
-      '' // 備考は空欄
-    ].join(' | '));
-    return [`| ${header.join(' | ')} |`, `| ${sep} |`, ...lines.map(l => `| ${l} |`)].join('\n');
-  };
-
-  const download = (filename, text, type = 'text/plain') => {
-    const blob = new Blob([text], { type });
-    const url = URL.createObjectURL(blob);
-    const a = Object.assign(document.createElement('a'), { href: url, download: filename });
-    document.body.appendChild(a); a.click(); a.remove();
-    URL.revokeObjectURL(url);
-  };
-
   // --- highlight 設定（LocalStorage）
   const LS_HL_KEY = 'ktFieldsHighlightLabelCodeDiff.v1';
   const loadHL = () => {
@@ -749,8 +819,8 @@
           </label>
           <button id="fi-copy-md" class="btn">Copy Markdown</button>
           <button id="fi-dl-md"   class="btn">Download MD</button>
-          <button id="fi-copy"    class="btn">Copy CSV</button>
-          <button id="fi-json"    class="btn">Download JSON</button>
+          <button id="fi-dl-csv"    class="btn">Download CSV</button>
+          <button id="fi-dl-json"    class="btn">Download JSON</button>
         </div>
       </div>
       <div id="kt-fields">
@@ -785,9 +855,6 @@
       tbody.appendChild(tr);
     });
 
-    const md = toMarkdownWithNotes(rows);
-    const csv = toCSV(rows);
-
     el.querySelector('#fi-hl-toggle').addEventListener('change', e => {
       const on = !!e.target.checked;
       saveHL(on);
@@ -797,24 +864,38 @@
       });
     }, { passive: true });
 
-    el.querySelector('#fi-copy').addEventListener('click', async () => {
-      await navigator.clipboard.writeText(csv);
-      const b = el.querySelector('#fi-copy'); const old = b.textContent; b.textContent = 'Copied!';
-      setTimeout(() => b.textContent = old, 1200);
-    }, { passive: true });
+    // Fields 用の列定義
+    const FD_COLUMNS = [
+      { header: 'フィールド名', select: r => r.label },
+      { header: 'フィールドコード', select: r => r.code },
+      { header: '必須', select: r => r.required ? 'TRUE' : 'FALSE' },
+      { header: '初期値', select: r => r.defaultValue || '' },
+      { header: 'フィールド形式', select: r => r.type },
+      { header: 'グループ', select: r => r.groupPath || '' },
+      { header: '備考', select: () => '' }
+    ];
 
-    el.querySelector('#fi-json').addEventListener('click', () => {
-      download(`kintone_fields_${appId}.json`, JSON.stringify(rows, null, 2), 'application/json');
-    }, { passive: true });
-
+    // クリップボード／DL を KTExport に統一
     el.querySelector('#fi-copy-md').addEventListener('click', async () => {
-      await navigator.clipboard.writeText(md);
-      const b = el.querySelector('#fi-copy-md'); const old = b.textContent; b.textContent = 'Copied!';
-      setTimeout(() => b.textContent = old, 1200);
+      const ok = await KTExport.copyMD(rows, FD_COLUMNS);
+      flashBtnText(el.querySelector('#fi-copy-md'), ok ? 'Copied!' : 'Failed');
     }, { passive: true });
 
     el.querySelector('#fi-dl-md').addEventListener('click', () => {
-      download(`kintone_fields_${appId}.md`, md, 'text/markdown');
+      KTExport.downloadMD(`kintone_fields_${appId}.md`, rows, FD_COLUMNS);
+    }, { passive: true });
+
+    el.querySelector('#fi-dl-csv').addEventListener('click', async () => {
+      KTExport.downloadText(
+        `kintone_fields_${appId}.csv`,
+        KTExport.toCSVString(rows, FD_COLUMNS),
+        'text/csv;charset=utf-8'
+      );
+    }, { passive: true });
+
+    el.querySelector('#fi-dl-json').addEventListener('click', () => {
+      const json = JSON.stringify(rows, null, 2);
+      KTExport.downloadText(`kintone_fields_${appId}.json`, json, 'application/json;charset=utf-8');
     }, { passive: true });
   };
 
@@ -884,22 +965,6 @@
     return out;
   }
 
-  const toViewsCSV = (rows) => [
-    ['ビューID', 'ビュー名', '種類', 'フィルター', 'ソート'].join(','),
-    ...rows.map(r => [
-      r.name, r.type, r.conditionPretty || '（なし）', r.sortPretty || '（なし）', r.id
-    ].map(s => `"${String(s ?? '').replace(/"/g, '""')}"`).join(','))
-  ].join('\r\n');
-
-  const toViewsMarkdown = (rows) => {
-    const header = ['ビューID', 'ビュー名', '種類', 'フィルター', 'ソート'];
-    const sep = header.map(() => ' :- ').join(' | ');
-    const lines = rows.map(r => [
-      r.id, r.name, r.type, r.conditionPretty || '（なし）', r.sortPretty || '（なし）'
-    ].map(x => String(x).replace(/\|/g, '\\|')).join(' | '));
-    return ['| ' + header.join(' | ') + ' |', '| ' + sep + ' |', ...lines.map(l => '| ' + l + ' |')].join('\n');
-  };
-
   // ==== Views ====
   const renderViews = async (root, { appId, views, fields }) => {
     const el = root.querySelector('#view-views');
@@ -937,8 +1002,6 @@
       };
     });
 
-    const md = toViewsMarkdown(rows);
-    const csv = toViewsCSV(rows);
     const defaultName = rows.length ? rows[0].name : '';
 
     el.innerHTML = `
@@ -947,8 +1010,8 @@
         <div style="display:flex;gap:6px;flex-wrap:nowrap;overflow:auto;white-space:nowrap">
           <button id="kv-copy-md"  class="btn">Copy Markdown</button>
           <button id="kv-dl-md"    class="btn">Download MD</button>
-          <button id="kv-copy-csv" class="btn">Copy CSV</button>
           <button id="kv-dl-csv"   class="btn">Download CSV</button>
+          <button id="kv-dl-json" class="btn">Download JSON</button>
         </div>
       </div>
 
@@ -989,33 +1052,38 @@
       </div>
     `;
 
-    // DLヘルパ
-    const dl = (filename, text, type = 'text/plain') => {
-      const blob = new Blob([text], { type });
-      const url = URL.createObjectURL(blob);
-      const a = Object.assign(document.createElement('a'), { href: url, download: filename });
-      document.body.appendChild(a); a.click(); a.remove();
-      URL.revokeObjectURL(url);
-    };
+    // 列定義（ヘッダー順に並べる）
+    const VW_COLUMNS = [
+      { header: 'ビューID', select: r => r.id },
+      { header: 'ビュー名', select: r => r.name },
+      { header: '種類', select: r => r.type },
+      { header: 'フィルター', select: r => r.conditionPretty || '（なし）' },
+      { header: 'ソート', select: r => r.sortPretty || '（なし）' },
+    ];
 
-    // イベント（コピー／DLのみ）
+    // イベント（Copy MD / DL MD / Copy CSV / DL JSON）
     el.querySelector('#kv-copy-md').addEventListener('click', async () => {
-      await navigator.clipboard.writeText(md);
-      const b = el.querySelector('#kv-copy-md'); const t = b.textContent;
-      b.textContent = 'Copied!'; setTimeout(() => (b.textContent = t), 1200);
-    });
+      const ok = await KTExport.copyMD(rows, VW_COLUMNS);
+      flashBtnText(el.querySelector('#kv-copy-md'), ok ? 'Copied!' : 'Failed');
+    }, { passive: true });
 
-    el.querySelector('#kv-dl-md').addEventListener('click', () =>
-      dl(`kintone_views_${appId}.md`, md, 'text/markdown'));
+    el.querySelector('#kv-dl-md').addEventListener('click', () => {
+      KTExport.downloadMD(`kintone_views_${appId}.md`, rows, VW_COLUMNS);
+    }, { passive: true });
 
-    el.querySelector('#kv-copy-csv').addEventListener('click', async () => {
-      await navigator.clipboard.writeText(csv);
-      const b = el.querySelector('#kv-copy-csv'); const t = b.textContent;
-      b.textContent = 'Copied!'; setTimeout(() => (b.textContent = t), 1200);
-    });
+    el.querySelector('#kv-dl-csv').addEventListener('click', async () => {
+      KTExport.downloadText(
+        `kintone_views_${appId}.csv`,
+        KTExport.toCSVString(rows, VW_COLUMNS),
+        'text/csv;charset=utf-8'
+      );
+    }, { passive: true });
 
-    el.querySelector('#kv-dl-csv').addEventListener('click', () =>
-      dl(`kintone_views_${appId}.csv`, csv, 'text/csv'));
+    el.querySelector('#kv-dl-json').addEventListener('click', () => {
+      const json = JSON.stringify(rows, null, 2);
+      KTExport.downloadText(`kintone_views_${appId}.json`, json, 'application/json;charset=utf-8');
+    }, { passive: true });
+
   };
 
   /** --------------------------------------------------------
@@ -1031,47 +1099,6 @@
       const label = escHTML(labelRaw);
       return `<div class="gline"><span class="pill">G${idx}</span> ${label} ${perTag}</div>`;
     }).join('');
-  };
-
-  // ★ CSV/Markdown 用のテキスト版（全角「、」区切り）
-  const groupsToText = (groups = [], code2label = {}) => {
-    return groups.map((g, i) => {
-      const idx = i + 1;
-      const code = g?.code || '';
-      const label = code ? (code2label[code] ? `${code2label[code]}（${code}）` : code) : '';
-      const per = g?.per ? ` [${String(g.per).toUpperCase()}]` : '';
-      return `G${idx} ${label}${per}`;
-    }).join('、 ');
-  };
-
-  const fmtAggs = (aggs = [], code2label = {}) => {
-    // 集計: { type: SUM|COUNT|..., code? }
-    return aggs.map(a => {
-      const fn = (a.type || '').toUpperCase();
-      const code = a.code || '';
-      const label = code ? (code2label[code] ? `${code2label[code]}` : code) : 'レコード';
-      return fn ? `${fn} ${label}` : label;
-    }).join(' / ');
-  };
-
-  const toGraphsCSV = (rows) => [
-    ['グラフID', 'グラフ名', 'タイプ', '表示モード', '分類項目', '集計方法', '条件'].join(','),
-    ...rows.map(r => [
-      r.id, r.name, r.chartType, r.chartMode,
-      r.groupsText || '',
-      r.aggsText, r.filterCond || '',
-    ].map(s => `"${String(s ?? '').replace(/"/g, '""')}"`).join(','))
-  ].join('\r\n');
-
-  const toGraphsMarkdown = (rows) => {
-    const header = ['グラフID', 'グラフ名', 'タイプ', '表示モード', '分類項目', '集計方法', '条件'];
-    const sep = header.map(() => ':-').join(' | ');
-    const lines = rows.map(r => [
-      r.id, r.name, r.chartType, r.chartMode,
-      (r.groupsText || ''),
-      r.aggsText, r.filterCond || '（なし）'
-    ].map(x => String(x).replace(/\|/g, '\\|')).join(' | '));
-    return [`| ${header.join(' | ')} |`, `| ${sep} |`, ...lines.map(l => `| ${l} |`)].join('\n');
   };
 
   const renderGraphs = async (root, { appId, reports, fields }) => {
@@ -1121,9 +1148,6 @@
       };
     });
 
-    const md = toGraphsMarkdown(rows);
-    const csv = toGraphsCSV(rows);
-
     // UI
     el.innerHTML = `
       <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:8px;flex-wrap:nowrap;min-width:0">
@@ -1131,8 +1155,8 @@
         <div style="display:flex;gap:6px;flex-wrap:nowrap;overflow:auto;white-space:nowrap">
           <button id="kg-copy-md"  class="btn">Copy Markdown</button>
           <button id="kg-dl-md"    class="btn">Download MD</button>
-          <button id="kg-copy-csv" class="btn">Copy CSV</button>
           <button id="kg-dl-csv"   class="btn">Download CSV</button>
+          <button id="kg-dl-json" class="btn">Download JSON</button>
         </div>
       </div>
       <div class="table-container">
@@ -1174,82 +1198,63 @@
       </div>
     `;
 
-    // エクスポート
-    const dl = (filename, text, type = 'text/plain') => {
-      const blob = new Blob([text], { type });
-      const url = URL.createObjectURL(blob);
-      const a = Object.assign(document.createElement('a'), { href: url, download: filename });
-      document.body.appendChild(a); a.click(); a.remove();
-      URL.revokeObjectURL(url);
-    };
+    const GR_COLUMNS = [
+      { header: 'グラフID', select: r => r.id },
+      { header: 'グラフ名', select: r => r.name },
+      { header: 'タイプ', select: r => r.chartType },
+      { header: '表示モード', select: r => r.chartMode },
+      { header: '分類項目', select: r => r.groupsText || '' },
+      { header: '集計方法', select: r => r.aggsText },
+      { header: '条件', select: r => r.filterCond || '（なし）' },
+    ];
 
+    // 2) イベント: Copy MD / Download MD / Copy CSV / Download CSV
     el.querySelector('#kg-copy-md').addEventListener('click', async () => {
-      await navigator.clipboard.writeText(md);
-      const b = el.querySelector('#kg-copy-md'); const t = b.textContent;
-      b.textContent = 'Copied!'; setTimeout(() => b.textContent = t, 1200);
+      const ok = await KTExport.copyMD(rows, GR_COLUMNS);
+      flashBtnText(el.querySelector('#kg-copy-md'), ok ? 'Copied!' : 'Failed');
     }, { passive: true });
-    el.querySelector('#kg-dl-md').addEventListener('click', () =>
-      dl(`kintone_graphs_${appId}.md`, md, 'text/markdown'), { passive: true });
-    el.querySelector('#kg-copy-csv').addEventListener('click', async () => {
-      await navigator.clipboard.writeText(csv);
-      const b = el.querySelector('#kg-copy-csv'); const t = b.textContent;
-      b.textContent = 'Copied!'; setTimeout(() => b.textContent = t, 1200);
+
+    el.querySelector('#kg-dl-md').addEventListener('click', () => {
+      KTExport.downloadMD(`kintone_graphs_${appId}.md`, rows, GR_COLUMNS);
     }, { passive: true });
-    el.querySelector('#kg-dl-csv').addEventListener('click', () =>
-      dl(`kintone_graphs_${appId}.csv`, csv, 'text/csv'), { passive: true });
+
+    el.querySelector('#kg-dl-csv').addEventListener('click', () => {
+      KTExport.downloadText(
+        `kintone_graphs_${appId}.csv`,
+        KTExport.toCSVString(rows, GR_COLUMNS),
+        'text/csv;charset=utf-8'
+      );
+    }, { passive: true });
+
+    el.querySelector('#kg-dl-json').addEventListener('click', async () => {
+      const json = JSON.stringify(rows, null, 2);
+      KTExport.downloadText(`kintone_graphs_${appId}.json`, json, 'application/json;charset=utf-8');
+    }, { passive: true });
   };
 
   /** --------------------------------------------------------
   * Relations view
   * -------------------------------------------------------- */
-  // ===== ダウンロード共通ユーティリティ =====
-  function dlText(filename, text, mime = 'text/plain;charset=utf-8') {
-    const blob = new Blob([text], { type: mime });
-    const a = document.createElement('a');
-    a.href = URL.createObjectURL(blob);
-    a.download = filename;
-    a.click();
-    URL.revokeObjectURL(a.href);
-  }
-
-  function toRelationsCSV(headers, rows) {
-    const q = (s) => `"${String(s ?? '').replace(/"/g, '""')}"`;
-    const head = headers.map(q).join(',');
-    const body = rows.map(r => r.map(q).join(',')).join('\r\n');
-    return [head, body].join('\r\n');
-  }
-
-  // MDテーブル
-  function toRelationsMD(headers, rows) {
-    const esc = (s) => mdEsc(s);
-    const header = `| ${headers.join(' | ')} |`;
-    const sep = `| ${headers.map(() => ':-').join(' | ')} |`;
-    const lines = rows.length
-      ? rows.map(r => `| ${r.map(esc).join(' | ')} |`).join('\n')
-      : `| ${headers.map(() => '-').join(' | ')} |`;
-    return [header, sep, lines].join('\n');
-  }
-
-  // --- 4ボタン＋折り畳み＋インジケータ---
+  // --- 4ボタン＋折り畳み＋インジケータ（命名統一版）---
   function sectionWithDL(
-    title, headers, dlRows, innerTableHTML, filenameBase = 'relations',
-    { defaultOpen = true, indicator = false } = {}
+    title, headers, dlRows, innerTableHTML,
+    filenameBase = 'relations',            // kind 相当（例: 'relations_lookups' など）
+    { appId, defaultOpen = true, indicator = false, relationType } = {}
   ) {
-    const t = new Date();
-    const pad = (n) => String(n).padStart(2, '0');
-    const suffix = `${t.getFullYear()}-${pad(t.getMonth() + 1)}-${pad(t.getDate())}_${pad(t.getHours())}${pad(t.getMinutes())}`;
 
-    // セクション固有ID（ここを基準スコープにする）
+    // ファイル名ビルダー: kintone_${base}_${appId}.${ext}
+    const fname = (ext) =>
+      `kintone_${filenameBase}_${appId}_${relationType}.${ext}`;
+
     const uid = Math.random().toString(36).slice(2, 8);
     const secId = `rel-sec-${uid}`;
     const btnCopyMd = `btn-copy-md-${uid}`;
     const btnDlMd = `btn-dl-md-${uid}`;
-    const btnCopyCsv = `btn-copy-csv-${uid}`;
     const btnDlCsv = `btn-dl-csv-${uid}`;
+    const btnDlJSON = `btn-dl-json-${uid}`;
     const indId = `rel-ind-${uid}`;
 
-    const mdStr = toRelationsMD(headers, dlRows);
-    const csvStr = toRelationsCSV(headers, dlRows);
+    const COLS = headers.map((h, i) => ({ header: h, select: (r) => r[i] }));
     const caret = indicator ? (defaultOpen ? '▾' : '▸') : '';
 
     const html = `
@@ -1264,8 +1269,8 @@
             <div style="display:flex;gap:6px;flex-wrap:nowrap;overflow:auto;white-space:nowrap">
               <button id="${btnCopyMd}"  class="btn">Copy Markdown</button>
               <button id="${btnDlMd}"    class="btn">Download MD</button>
-              <button id="${btnCopyCsv}" class="btn">Copy CSV</button>
               <button id="${btnDlCsv}"   class="btn">Download CSV</button>
+              <button id="${btnDlJSON}"  class="btn">Download JSON</button>
             </div>
           </div>
         </summary>
@@ -1277,34 +1282,31 @@
   `;
 
     const bind = (root = document) => {
-      // ここから先は「このセクションだけ」をスコープに探索
-      const container = (root.querySelector ? root.querySelector(`#${secId}`) : document.getElementById(secId));
+      const container = root.querySelector?.(`#${secId}`) || document.getElementById(secId);
       if (!container) return;
       const qs = (sel) => container.querySelector(sel);
-      const touch = (btn, txt = 'Copied!') => { if (!btn) return; const o = btn.textContent; btn.textContent = txt; setTimeout(() => btn.textContent = o, 1200); };
+      const touch = (btn, txt = 'Done!') => { if (!btn) return; const o = btn.textContent; btn.textContent = txt; setTimeout(() => btn.textContent = o, 1200); };
 
-      // Copy / Download
       qs(`#${btnCopyMd}`)?.addEventListener('click', async () => {
-        await navigator.clipboard.writeText(mdStr);
-        touch(qs(`#${btnCopyMd}`));
+        const ok = await KTExport.copyMD(dlRows, COLS);
+        touch(qs(`#${btnCopyMd}`), ok ? 'Copied!' : 'Failed');
       }, { passive: true });
 
       qs(`#${btnDlMd}`)?.addEventListener('click', () => {
-        const name = `${filenameBase}_${suffix}.md`;
-        dlText(name, mdStr, 'text/markdown;charset=utf-8');
-      }, { passive: true });
-
-      qs(`#${btnCopyCsv}`)?.addEventListener('click', async () => {
-        await navigator.clipboard.writeText(csvStr);
-        touch(qs(`#${btnCopyCsv}`));
+        KTExport.downloadMD(fname('md'), dlRows, COLS);
       }, { passive: true });
 
       qs(`#${btnDlCsv}`)?.addEventListener('click', () => {
-        const name = `${filenameBase}_${suffix}.csv`;
-        dlText(name, csvStr, 'text/csv;charset=utf-8');
+        KTExport.downloadCSV(fname('csv'), dlRows, COLS, { withBom: true }); // DLはBOM付
       }, { passive: true });
 
-      // ▸/▾ の切替（必要な時だけ）
+      // JSONダウンロード（命名統一）
+      qs(`#${btnDlJSON}`)?.addEventListener('click', () => {
+        const data = dlRows.map(r => Object.fromEntries(headers.map((h, i) => [h, r[i] ?? ''])));
+        const json = JSON.stringify(data, null, 2);
+        KTExport.downloadText(fname('json'), json, 'application/json;charset=utf-8');
+      }, { passive: true });
+
       if (indicator) {
         const det = qs('details');
         const ind = qs(`#${indId}`);
@@ -1320,7 +1322,7 @@
    * @param {HTMLElement|Document} root  document か ルート要素
    * @param {{relations?:{lookups?:Array, relatedTables?:Array, actions?:Array}}} data
    */
-  function renderRelations(root, relations) {
+  function renderRelations(root, relations, appId) {
     const view = root.querySelector('#view-relations');
     if (!view) return;
 
@@ -1330,7 +1332,6 @@
     const acts = Array.isArray(R.actions) ? R.actions : [];
 
     const esc = (v) => String(v ?? '');
-    const join = (arr, sep = ', ') => (Array.isArray(arr) ? arr.join(sep) : esc(arr));
     const yn = (b) => (b ? '✅' : '—');
 
     const table = (headers, rows, colWidths = null) => `
@@ -1477,7 +1478,7 @@
         headersLookups, lookupRowsDL,
         table(headersLookups, lookupRowsHtml, widthsLookups),
         'relations_lookups',
-        { defaultOpen: true, indicator: true }   // ← open
+        { appId, defaultOpen: true, indicator: true, retationType: 'lookup' }   // ← open
       );
 
     // Related Records：閉じる
@@ -1488,7 +1489,7 @@
         headersRT, rtRowsDL,
         table(headersRT, rtRowsHtml, widthsRT),
         'relations_relatedTables',
-        { defaultOpen: false, indicator: true }  // ← closed
+        { appId, defaultOpen: false, indicator: true, retationType: 'Related' }  // ← closed
       );
 
     // Actions：閉じる
@@ -1499,7 +1500,7 @@
         headersAC, actRowsDL,
         table(headersAC, actRowsHtml, widthsAC),
         'relations_actions',
-        { defaultOpen: false, indicator: true }  // ← closed
+        { appId, defaultOpen: false, indicator: true, retationType: 'action' }  // ← closed
       );
 
     // まとめて描画 & バインド
@@ -1911,7 +1912,6 @@
       const { fileKey } = await up.json();
       return fileKey;
     }
-
     async function putAppendFileToCustomizeWithTargets(app, keys, { toDesktop, toMobile }) {
       // preview現行
       let base;
@@ -1952,7 +1952,6 @@
       await kintone.api(kintone.api.url('/k/v1/preview/app/customize.json', true), 'PUT', next);
       await kintone.api(kintone.api.url('/k/v1/preview/app/deploy.json', true), 'POST', { apps: [{ app, revision: -1 }], revert: false });
     }
-
     $upload?.addEventListener('click', async (ev) => {
       const btn = ev.currentTarget; btn.disabled = true;
       try {
@@ -2002,7 +2001,6 @@
         Spinner.hide();
       }
     });
-
 
     $insert.addEventListener('click', async () => {
       if (!selectedItem || !monacoEditor) return;
@@ -2077,7 +2075,7 @@
 
         downloadText(filename, prompt);
 
-        $meta.textContent = '✅ 生成プロンプトをテキストとしてダウンロードしました。（可能ならクリップボードにもコピー済み）';
+        $meta.textContent = '✅ 生成プロンプトをテキストとしてダウンロードしました。';
         setTimeout(() => ($meta.textContent = ''), 3000);
       } catch (e) {
         console.warn(e);
@@ -2368,7 +2366,7 @@
     renderFields(root, pick(DATA, ['appId', 'fields', 'layout']));
     renderViews(root, pick(DATA, ['appId', 'views', 'fields']));
     renderGraphs(root, pick(DATA, ['appId', 'reports', 'fields']));
-    renderRelations(root, relations);
+    renderRelations(root, relations, appId);
     renderTemplates(root, DATA, appId);
 
   });
