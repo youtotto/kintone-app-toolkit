@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         kintone App Toolkit
 // @namespace    https://github.com/youtotto/kintone-app-toolkit
-// @version      1.7.1
+// @version      1.7.2
 // @description  kintone開発をブラウザで完結。アプリ分析・コード生成・ドキュメント編集を備えた開発支援ツールキット。
 // @match        https://*.cybozu.com/k/*/
 // @match        https://*.cybozu.com/k/*/?view=*
@@ -1765,8 +1765,8 @@
         <div style="flex:2; min-width:380px; display:flex; flex-direction:column; gap:10px;">
           <div style="display:flex; align-items:center; gap:10px; justify-content:space-between;">
             <div style="display:flex; align-items:center; gap:8px;">
-              <button id="kt-tpl-download" class="btn" disabled style="height:32px; padding:0 10px;">⬇ ダウンロード</button>
-              <button id="kt-tpl-upload" class="btn" disabled style="height:32px; padding:0 10px;">⬆ アップロード</button>
+              <button id="kt-tpl-download" class="btn" disabled style="height:32px; padding:0 10px;">⬇ ローカルに保存（ファイルDL）</button>
+              <button id="kt-tpl-upload" class="btn" disabled style="height:32px; padding:0 10px;">⬆ アプリに反映（デプロイ）</button>
             </div>
             <span id="kt-tpl-meta"
                   style="opacity:.75; max-width:55%; text-overflow:ellipsis; overflow:hidden; white-space:nowrap; text-align:right;"></span>
@@ -2398,8 +2398,8 @@
       <div style="flex:2; min-width:380px; display:flex; flex-direction:column; gap:10px;">
         <div style="display:flex; align-items:center; gap:10px; justify-content:space-between;">
           <div style="display:flex; align-items:center; gap:8px;">
-            <button id="kt-tpl-download" class="btn" disabled style="height:32px; padding:0 10px;">⬇ ダウンロード</button>
-            <button id="kt-tpl-upload"   class="btn" disabled style="height:32px; padding:0 10px;">⬆ デプロイ</button>
+            <button id="kt-tpl-download" class="btn" disabled style="height:32px; padding:0 10px;">⬇ ローカルに保存（ファイルDL）</button>
+            <button id="kt-tpl-upload"   class="btn" disabled style="height:32px; padding:0 10px;">⬆ アプリに反映（デプロイ）</button>
           </div>
           <span id="kt-tpl-meta"
                 style="opacity:.75; max-width:55%; text-overflow:ellipsis; overflow:hidden; white-space:nowrap; text-align:right;"></span>
