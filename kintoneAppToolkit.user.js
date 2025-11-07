@@ -1922,7 +1922,7 @@
           $insert.disabled = false;
         } else if (kind === 'snippets') {
           await showSnippetOverview(file);
-          $meta.textContent = `選択中（Snippet挿入用）：${file.name}`;
+          //$meta.textContent = `選択中（Snippet挿入用）：${file.name}`;
           [$copy, $insert, $upload].forEach(b => b.disabled = false);
         } else if (kind === 'documents') {
           $overview.style.display = 'none';
@@ -2644,7 +2644,7 @@
               </div>`;
 
             // エディタへは「挿入」ボタンで追記（currentFileName はいじらない）
-            $meta.textContent = `Snippet: ${f.name}`;
+            //$meta.textContent = `Snippet: ${f.name}`;
             $insert.disabled = false;
             $copy.disabled = false;
             $download.disabled = false;
@@ -2691,10 +2691,10 @@
 
     // === ダウンロード（エディタ内容を保存） ===
     $download.onclick = () => {
-      const blob = new Blob([editor.getValue()], { type: getMimeByName(CURRENT.name || 'custom.js') });
+      const blob = new Blob([editor.getValue()], { type: getMimeByName(currentFileName || 'custom.js') });
       const a = document.createElement('a');
       a.href = URL.createObjectURL(blob);
-      a.download = CURRENT.name || 'custom.js';
+      a.download = currentFileName || 'custom.js';
       a.click();
     };
 
