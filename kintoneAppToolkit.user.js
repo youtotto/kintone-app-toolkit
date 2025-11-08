@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         kintone App Toolkit
 // @namespace    https://github.com/youtotto/kintone-app-toolkit
-// @version      1.7.4
+// @version      1.7.5
 // @description  kintone開発をブラウザで完結。アプリ分析・コード生成・ドキュメント編集を備えた開発支援ツールキット。
 // @match        https://*.cybozu.com/k/*/
 // @match        https://*.cybozu.com/k/*/?view=*
@@ -476,6 +476,7 @@
           <button id="tab-relations" class="tab">Relations</button>
           <button id="tab-templates" class="tab">Templates</button>
           <button id="tab-customize" class="tab">Customize</button>
+          <button id="tab-links" class="tab">Links</button>
         </div>
         <div class="actions" style="display:flex;gap:6px;align-items:center;">
           <button id="kt-mini" class="btn" title="最小化">–</button>
@@ -490,6 +491,7 @@
         <div id="view-relations" style="display:none"></div>
         <div id="view-templates" style="display:none"></div>
         <div id="view-customize" style="display:none"></div>
+        <div id="view-links" style="display:none"></div>
       </div>
     `;
     document.body.appendChild(wapCheck(wrap));
@@ -531,6 +533,7 @@
       wrap.querySelector('#view-relations').style.display = idShow === 'relations' ? 'block' : 'none';
       wrap.querySelector('#view-templates').style.display = idShow === 'templates' ? 'block' : 'none';
       wrap.querySelector('#view-customize').style.display = idShow === 'customize' ? 'block' : 'none';
+      wrap.querySelector('#view-links').style.display = idShow === 'links' ? 'block' : 'none';
     };
     wrap.querySelector('#tab-health').addEventListener('click', () => switchTab('health'), { passive: true });
     wrap.querySelector('#tab-fields').addEventListener('click', () => switchTab('fields'), { passive: true });
@@ -539,6 +542,7 @@
     wrap.querySelector('#tab-relations').addEventListener('click', () => switchTab('relations'), { passive: true });
     wrap.querySelector('#tab-templates').addEventListener('click', () => switchTab('templates'), { passive: true });
     wrap.querySelector('#tab-customize').addEventListener('click', () => switchTab('customize'), { passive: true });
+    wrap.querySelector('#tab-links').addEventListener('click', () => switchTab('links'), { passive: true });
     return wrap;
 
   };
@@ -2755,7 +2759,8 @@
               style="margin-top:12px; font-size:12px; line-height:1.6; border:1px solid #f59e0b55; background:#f59e0b0f; border-radius:8px; padding:10px 12px;">
             <div style="font-weight:700; margin-bottom:6px;">⚠️ アップロードについて</div>
             <ul style="margin:0 0 0 18px; padding:0;">
-              <li>OKボタンを押下すると、運用環境へファイルがアップロードされます。</li>
+              <li>OKボタンを押下すると、運用環境へファイルが上書きアップロードされます。</li>
+              <li>アップロードする前にバックアップを取ることをおすすめします。</li>
             </ul>
           </div>
             <div style="display:flex; gap:8px; justify-content:flex-end; margin-top:16px;">
@@ -2832,6 +2837,344 @@
     await refreshList();
   }
 
+  // ===============================
+  //  renderLinks
+  // ===============================
+  const LINKS_CONFIG = {
+    // UI言語: 'ja' | 'en'（必要なら切替に利用）
+    locale: 'ja',
+
+    // カテゴリ順
+    categories: ['Official', 'Community', 'Docs', 'Tools', 'Blog/Note', 'Library'],
+
+    // タグ（任意）
+    tags: ['kintone', 'API', 'Customize', 'Plugin', 'Design', 'Mermaid', 'REST', 'JS'],
+
+    // リンク定義
+    items: [
+      // --- Official ---
+      {
+        title: 'kintone developer network',
+        url: 'https://cybozu.dev/ja/kintone/',
+        category: 'Official',
+        desc: '公式ドキュメント・サンプル・最新情報',
+        tags: ['kintone', 'Docs', 'API']
+      },
+      {
+        title: 'Cybozu Developer Network (日本語)',
+        url: 'https://cybozu.dev/ja/',
+        category: 'Official',
+        desc: '公式ヘルプセンター（日本語）',
+        tags: ['kintone', 'Docs']
+      },
+      // --- Community ---
+      {
+        title: 'kintone developer community',
+        url: 'https://community.cybozu.dev/',
+        category: 'Community',
+        desc: '日本語フォーラム',
+        tags: ['Community']
+      },
+      {
+        title: 'Qiita: kintone タグ',
+        url: 'https://qiita.com/tags/kintone',
+        category: 'Community',
+        desc: '日本の技術記事コミュニティ',
+        tags: ['Community']
+      },
+      // --- Docs ---
+      {
+        title: 'REST API Reference',
+        url: 'https://cybozu.dev/ja/kintone/docs/rest-api/',
+        category: 'Docs',
+        desc: 'kintone REST API 一覧',
+        tags: ['REST', 'API', 'Docs']
+      },
+      {
+        title: 'JavaScript API Reference',
+        url: 'https://cybozu.dev/ja/kintone/docs/js-api/',
+        category: 'Docs',
+        desc: 'kintone JS API',
+        tags: ['JS', 'API', 'Docs']
+      },
+      // --- Tools ---
+      {
+        title: 'Toolkit (GitHub)',
+        url: 'https://github.com/youtotto/kintone-App-Toolkit',
+        category: 'Tools',
+        desc: '本スクリプトのリポジトリ',
+        tags: ['Customize', 'Tools']
+      },
+      {
+        title: 'Mermaid Live Editor',
+        url: 'https://mermaid.live/',
+        category: 'Tools',
+        desc: 'Mermaid図の編集・プレビュー',
+        tags: ['Mermaid', 'Design']
+      },
+      // --- Blog/Note ---
+      {
+        title: 'Note: kintone タグ',
+        url: 'https://note.com/hashtag/kintone',
+        category: 'Blog/Note',
+        desc: 'kintone活用記事',
+        tags: ['Blog/Note']
+      },
+      // --- Library ---
+      {
+        title: 'SweetAlert2',
+        url: 'https://sweetalert2.github.io/',
+        category: 'Library',
+        desc: 'UIダイアログライブラリ',
+        tags: ['Design', 'Tools']
+      },
+      {
+        title: 'kintone UI Component',
+        url: 'https://ui-component.kintone.dev/ja/',
+        category: 'Library',
+        desc: 'UIダイアログライブラリ',
+        tags: ['Design', 'Tools']
+      },
+      // ＝軽量ユーティリティ＝
+      {
+        title: 'Day.js', url: 'https://day.js.org/', category: 'Library',
+        desc: '日付処理を軽量に。moment互換API', tags: ['date', 'utility']
+      },
+      {
+        title: 'Fuse.js', url: 'https://fusejs.io/', category: 'Library',
+        desc: '曖昧検索（ローカル全文検索）', tags: ['search', 'utility']
+      },
+      {
+        title: 'nanoid', url: 'https://github.com/ai/nanoid', category: 'Library',
+        desc: '安全・短いランダムID', tags: ['id', 'utility']
+      },
+      {
+        title: 'DOMPurify', url: 'https://github.com/cure53/DOMPurify', category: 'Library',
+        desc: 'HTMLサニタイズ（XSS対策）', tags: ['security', 'html']
+      },
+      // ＝ファイルI/O＝
+      {
+        title: 'Papa Parse', url: 'https://www.papaparse.com/', category: 'Library',
+        desc: 'CSVの高速パース/生成', tags: ['csv', 'file']
+      },
+      {
+        title: 'JSZip', url: 'https://stuk.github.io/jszip/', category: 'Library',
+        desc: 'ZIPの作成/展開（ブラウザ）', tags: ['zip', 'file']
+      },
+      {
+        title: 'FileSaver.js', url: 'https://github.com/eligrey/FileSaver.js', category: 'Library',
+        desc: 'ブラウザでのファイル保存', tags: ['download', 'file']
+      },
+      // ＝UI/UX＝
+      {
+        title: 'SortableJS', url: 'https://sortablejs.github.io/Sortable/', category: 'Library',
+        desc: 'ドラッグ＆ドロップ並べ替え', tags: ['UI', 'dragdrop']
+      },
+      {
+        title: 'LeaderLine', url: 'https://anseki.github.io/leader-line/', category: 'Library',
+        desc: '要素間のコネクタ線描画', tags: ['visualize', 'diagram']
+      },
+      {
+        title: 'Tippy.js', url: 'https://atomiks.github.io/tippyjs/', category: 'Library',
+        desc: 'ツールチップUI（Popperベース）', tags: ['UI', 'tooltip']
+      },
+      // ＝バリデーション/構造化＝
+      {
+        title: 'Zod', url: 'https://zod.dev/', category: 'Library',
+        desc: 'スキーマバリデーション（型安全）', tags: ['validation', 'schema']
+      },
+      // ＝Markdown/表示＝
+      {
+        title: 'markdown-it', url: 'https://markdown-it.github.io/', category: 'Library',
+        desc: 'Markdownレンダラー（高速/拡張）', tags: ['markdown', 'render']
+      },
+      // ＝日本の祝日（日付関数の除外用）＝
+      {
+        title: 'holiday_jp-js', url: 'https://github.com/holiday-jp/holiday_jp-js', category: 'Library',
+        desc: '日本の祝日カレンダー', tags: ['date', 'jp']
+      }
+    ]
+  };
+
+  // LocalStorageキー
+  const LINKS_LS_KEYS = {
+    category: 'kat_links_category',
+    tag: 'kat_links_tag'
+  };
+
+  function renderLinks(root) {
+    // ガード
+    const el = root.querySelector('#view-links');
+    if (!el) return;
+
+    // 既存クリア
+    el.innerHTML = '';
+
+    // ----- 状態（検索・カテゴリ・タグ） -----
+    const state = {
+      category: localStorage.getItem(LINKS_LS_KEYS.category) || 'All',
+      tag: localStorage.getItem(LINKS_LS_KEYS.tag) || 'All'
+    };
+
+    // ----- ユーティリティ -----
+    const h = (html) => {
+      const div = document.createElement('div');
+      div.innerHTML = html.trim();
+      return div.firstElementChild;
+    };
+
+    // ----- ヘッダUI（検索/カテゴリ/タグ/JSON入出力） -----
+    const categories = ['All', ...LINKS_CONFIG.categories];
+    const tags = ['All', ...LINKS_CONFIG.tags];
+
+    const $header = h(`
+      <div style="
+        display:flex; gap:8px; align-items:center; margin-bottom:12px;
+        justify-content:flex-end; flex-wrap:wrap;
+      ">
+        <select id="links-category"
+          style="padding:8px 10px; border-radius:8px; border:1px solid #333; background:#000; color:#fff;">
+          ${categories.map(c => `<option ${c === state.category ? 'selected' : ''} value="${c}">${c}</option>`).join('')}
+        </select>
+        <select id="links-tag"
+          style="padding:8px 10px; border-radius:8px; border:1px solid #333; background:#000; color:#fff;">
+          ${tags.map(t => `<option ${t === state.tag ? 'selected' : ''} value="${t}">${t}</option>`).join('')}
+        </select>
+      </div>
+    `);
+
+    // option配色の互換対策（任意）
+    if (!document.getElementById('kat-links-select-theme')) {
+      document.head.insertAdjacentHTML('beforeend', `
+        <style id="kat-links-select-theme">
+          #links-category option, #links-tag option { background:#000; color:#fff; }
+          #links-category:focus, #links-tag:focus { outline:none; box-shadow:0 0 0 2px rgba(255,255,255,.15) inset; }
+        </style>
+      `);
+    }
+
+    const $cat = $header.querySelector('#links-category');
+    const $tag = $header.querySelector('#links-tag');
+
+    $cat.addEventListener('change', () => {
+      state.category = $cat.value;
+      localStorage.setItem(LINKS_LS_KEYS.category, state.category);
+      renderList();
+    });
+    $tag.addEventListener('change', () => {
+      state.tag = $tag.value;
+      localStorage.setItem(LINKS_LS_KEYS.tag, state.tag);
+      renderList();
+    });
+
+    el.appendChild($header);
+
+    // ----- リスト本体 -----
+    const $list = h(`<div id="links-list" style="display:grid; gap:10px;"></div>`);
+    el.appendChild($list);
+
+    // カード生成
+    function card(item) {
+      const favicon = `https://www.google.com/s2/favicons?domain=${encodeURIComponent(item.url)}&sz=64`;
+      const $c = h(`
+      <div class="link-card" style="
+        border:1px solid #ddd; border-radius:12px; padding:12px; 
+        display:flex; gap:12px; align-items:flex-start;
+        min-height: 84px;
+        ">
+        <img src="${favicon}" alt="" width="20" height="20" style="margin-top:2px; border-radius:4px;" />
+        <div style="flex:1 1 auto; min-width:0;">
+          <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
+            <a href="${item.url}" target="_blank" rel="noopener" 
+               style="font-weight:700; text-decoration:none; color:inherit;">${item.title}</a>
+            <span style="font-size:11px; opacity:.7; padding:2px 6px; border:1px solid #ccc; border-radius:999px;">
+              ${item.category}
+            </span>
+            ${(item.tags || []).slice(0, 5).map(t => `
+              <span style="font-size:10px; opacity:.8; padding:2px 6px; border:1px dashed #ccc; border-radius:999px;">#${t}</span>
+            `).join('')}
+          </div>
+          <div style="font-size:12px; opacity:.85; margin-top:4px;">${item.desc || ''}</div>
+        </div>
+      </div>
+    `);
+      return $c;
+    }
+
+    // フィルタ＋描画
+    function renderList() {
+      $list.innerHTML = '';
+
+      // レイアウト：画面幅に応じて列数可変（min 280px）
+      $list.style.gridTemplateColumns = `repeat(auto-fill, minmax(280px, 1fr))`;
+
+      const q = (state.search || '').toLowerCase();
+      const filtered = LINKS_CONFIG.items.filter(item => {
+        const catOK = (state.category === 'All') || (item.category === state.category);
+        const tagOK = (state.tag === 'All') || ((item.tags || []).includes(state.tag));
+        const text = [
+          item.title, item.desc, item.url, item.category, ...(item.tags || [])
+        ].join(' ').toLowerCase();
+        const searchOK = !q || text.includes(q);
+        return catOK && tagOK && searchOK;
+      });
+
+      // カテゴリごとにまとめて表示
+      const groups = {};
+      for (const c of ['All', ...LINKS_CONFIG.categories]) groups[c] = [];
+      for (const it of filtered) groups[it.category]?.push(it);
+
+      LINKS_CONFIG.categories.forEach(cat => {
+        const arr = groups[cat];
+        if (!arr || arr.length === 0) return;
+        const $sec = h(`
+        <section>
+          <h3 style="margin:12px 4px 6px; font-size:13px; opacity:.8;">${cat}</h3>
+          <div class="links-cat" style="display:grid; gap:10px;"></div>
+        </section>
+      `);
+        const $wrap = $sec.querySelector('.links-cat');
+        $wrap.style.gridTemplateColumns = `repeat(auto-fill, minmax(280px, 1fr))`;
+        arr.forEach(item => $wrap.appendChild(card(item)));
+        $list.appendChild($sec);
+      });
+
+      if (filtered.length === 0) {
+        $list.appendChild(h(`<div style="opacity:.7; font-size:12px;">該当するリンクがありません。</div>`));
+      }
+    }
+
+    // 初回描画
+    renderList();
+
+    // 高さ揃え（カテゴリごと）
+    const normalizeHeights = () => {
+      // いったんリセット
+      $list.querySelectorAll('.link-card').forEach(c => (c.style.height = 'auto'));
+      // 各カテゴリセクション内で最大高に統一
+      $list.querySelectorAll('section .links-cat').forEach(cat => {
+        const cards = [...cat.children].filter(el => el.classList.contains('link-card'));
+        if (cards.length < 2) return;
+        const max = Math.max(...cards.map(c => c.getBoundingClientRect().height));
+        cards.forEach(c => (c.style.height = `${Math.ceil(max)}px`));
+      });
+    };
+
+    // 軽いデバウンス
+    let _hTimer;
+    const debouncedNormalize = () => {
+      clearTimeout(_hTimer);
+      _hTimer = setTimeout(normalizeHeights, 120);
+    };
+
+    normalizeHeights();
+    // 画面サイズ変更で再揃え
+    window.addEventListener('resize', () => {
+      // グリッド列数が変わるので再描画でもOKですが軽量に高さだけ再計算
+      const ev = new Event('kat-links-resize');
+      debouncedNormalize();
+    });
+  }
 
   /** ----------------------------
   * boot
@@ -2856,6 +3199,7 @@
     renderRelations(root, relations, appId);
     renderCustomize(root, DATA, appId);
     renderTemplates(root, DATA, appId);
+    renderLinks(root);
 
   });
 
