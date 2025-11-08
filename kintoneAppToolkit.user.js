@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         kintone App Toolkit
 // @namespace    https://github.com/youtotto/kintone-app-toolkit
-// @version      1.7.2
+// @version      1.7.3
 // @description  kintone開発をブラウザで完結。アプリ分析・コード生成・ドキュメント編集を備えた開発支援ツールキット。
 // @match        https://*.cybozu.com/k/*/
 // @match        https://*.cybozu.com/k/*/?view=*
@@ -48,8 +48,8 @@
     const [
       fields, layout, views, reports, status, notifs, customize, acl, actions
     ] = await Promise.all([
-      api('/k/v1/app/form/fields'),
-      api('/k/v1/app/form/layout'),
+      kintone.app.getFormFields(),
+      kintone.app.getFormLayout(),
       opt(api('/k/v1/app/views')),
       opt(api('/k/v1/app/reports')),
       opt(api('/k/v1/app/status')),
@@ -97,7 +97,7 @@
       return list;
     }
 
-    const allFields = fieldsResp?.properties ? flattenFields(fieldsResp.properties) : [];
+    const allFields = fieldsResp ? flattenFields(fieldsResp) : [];
 
     // Lookups（allFields から relations.lookups を生成）
     const lookups = allFields
@@ -190,7 +190,7 @@
       show() {
         if (node) return;
         node = document.createElement('div');
-        node.innerHTML = '<div style="padding:12px 16px;border:1px solid #999;border-radius:10px;background:#fff">Loading...</div>';
+        node.innerHTML = '<div style="padding:12px 16px;border:1px solid #999;border-radius:10px;background:#fff">update...</div>';
         node.style.cssText = 'position:fixed;inset:0;display:grid;place-items:center;background:rgba(255,255,255,.4);z-index:9999;';
         document.body.appendChild(node);
       },
@@ -584,7 +584,7 @@
     if (!el) return;
 
     // --- メトリクス計算（整形はこの中だけ） ---
-    const props = Object.values((fields && fields.properties) || {});
+    const props = Object.values(fields || {});
     const flatten = (arr) =>
       arr.flatMap((p) => (p.type === 'SUBTABLE' ? [p, ...Object.values(p.fields)] : [p]));
     const list = flatten(props);
@@ -799,8 +799,8 @@
     const normalizeType = (f) => (f && f.lookup ? 'LOOKUP' : (f?.type ?? ''));
 
     // 生レスポンスの安全な取り出し
-    const props = (fields && fields.properties) || {};
-    const layoutNodes = (layout && layout.layout) || [];
+    const props = fields || {};
+    const layoutNodes = layout || [];
 
     // --- layout から “表示順” と “グループ/サブテーブル表示名” を作る（子も順にpush）
     const groupPathByCode = {};    // 子フィールドコード -> "Group: … / Subtable: …"
@@ -1044,7 +1044,7 @@
 
     // フィールドcode→label Map（SUBTABLE子も含む）
     const code2label = new Map();
-    const props = (fields && fields.properties) || {};
+    const props = fields || {};
     (function walk(obj) {
       Object.values(obj || {}).forEach(p => {
         if (p.code && p.label) code2label.set(p.code, p.label);
@@ -1173,6 +1173,33 @@
     }).join('');
   };
 
+  // groups を 1セル内に「G1 ラベル（コード） [PER]」で全角読点区切り
+  const groupsToText = (groups = [], code2label = {}) => {
+    const list = Array.isArray(groups) ? groups : [];
+    return list.map((g, i) => {
+      const idx = i + 1;
+      const code = g?.code ?? '';
+      // ラベル（コード） or codeのみ
+      const label =
+        code ? (code2label[code] ? `${code2label[code]}（${code}）` : code) : '';
+      // per があれば [PER] を付与
+      const per = g?.per ? ` [${String(g.per).toUpperCase()}]` : '';
+      return `G${idx} ${label}${per}`;
+    }).join('、 ');
+  };
+
+  const fmtAggs = (aggs = [], code2label = {}) => {
+    const list = Array.isArray(aggs) ? aggs : [];
+    return list.map((a) => {
+      const fn = String(a?.type || '').toUpperCase();
+      const code = a?.code || '';
+      const label = code
+        ? (code2label[code] ? `${code2label[code]}` : code)
+        : 'レコード';
+      return fn ? `${fn} ${label}` : label;
+    }).join(' / ');
+  };
+
   const renderGraphs = async (root, { appId, reports, fields }) => {
     const el = root.querySelector('#view-graphs');
     if (!el) return;
@@ -1180,7 +1207,7 @@
 
     // フィールド code→label Map（SUBTABLE 子も含む）
     const code2label = new Map();
-    const props = (fields && fields.properties) || {};
+    const props = fields || {};
     (function walk(obj) {
       Object.values(obj || {}).forEach(p => {
         if (p.code && p.label) code2label.set(p.code, p.label);
@@ -1587,27 +1614,27 @@
 
 
   /** --------------------------------------------------------
-  * Templates view
-  * -------------------------------------------------------- */
-  async function fetchFieldMeta() {
-    const app = kintone.app.getId();
-    const resp = await kintone.api(kintone.api.url('/k/v1/app/form/fields', true), 'GET', { app });
+   * Templates view
+   * -------------------------------------------------------- */
+  function fetchFieldMeta(fields) {
+    const resp = fields;
     const list = [];
     const walkProps = (propsObj = {}) => {
       Object.values(propsObj).forEach(p => {
-        if (p.type === 'SUBTABLE') {
+        if (p?.type === 'SUBTABLE') {
           walkProps(p.fields || {});
-        } else if (p && p.code) {
+        } else if (p?.code) {
           list.push({ code: p.code, label: p.label || p.code });
         }
       });
     };
-    walkProps(resp.properties || {});
-    return list;
+    walkProps(resp || {});
+    return list; // ← 同期で即返す
   }
 
-  async function registerFieldCompletions(monaco) {
-    const fields = await fetchFieldMeta();
+  async function registerFieldCompletions(monaco, fieldsProp) {
+
+    const fields = fetchFieldMeta(fieldsProp);
     monaco.languages.registerCompletionItemProvider('javascript', {
       triggerCharacters: ['"', "'", '`', '.', '['],
       provideCompletionItems: (model, position) => {
@@ -1634,7 +1661,7 @@
     if (!pref || !pref.fields || !pref.layout) {
       throw new Error('prefetch data is missing required properties');
     }
-    const props = pref.fields?.properties || {};
+    const props = pref.fields || {};
 
     // フィールド平坦化（SUBTABLEの子を展開）
     const flatFields = Object.values(props).flatMap(f => {
@@ -1738,7 +1765,7 @@
     return `SYSTEM:\n${system}\n\nUSER:\n${user}`;
   }
 
-  async function renderTemplates(root, DATA, appId) {
+  async function renderTemplates(root, DATA) {
     const view = root.querySelector('#view-templates');
     if (!view) return;
     let currentFileName = 'template.js';
@@ -1765,8 +1792,8 @@
         <div style="flex:2; min-width:380px; display:flex; flex-direction:column; gap:10px;">
           <div style="display:flex; align-items:center; gap:10px; justify-content:space-between;">
             <div style="display:flex; align-items:center; gap:8px;">
-              <button id="kt-tpl-download" class="btn" disabled style="height:32px; padding:0 10px;">⬇ ローカルに保存（ファイルDL）</button>
-              <button id="kt-tpl-upload" class="btn" disabled style="height:32px; padding:0 10px;">⬆ アプリに反映（デプロイ）</button>
+              <button id="kt-tpl-download" class="btn" disabled style="height:32px; padding:0 10px;">⬇ ローカルに保存</button>
+              <button id="kt-tpl-upload" class="btn" disabled style="height:32px; padding:0 10px;">⬆ アプリに反映</button>
             </div>
             <span id="kt-tpl-meta"
                   style="opacity:.75; max-width:55%; text-overflow:ellipsis; overflow:hidden; white-space:nowrap; text-align:right;"></span>
@@ -1797,9 +1824,8 @@
 
           <div style="display:flex; gap:8px;">
             <button id="kt-tpl-insert" class="btn" disabled style="flex:1; height:32px;">⤴︎ 挿入</button>
-            <button id="kt-tpl-copy" class="btn" disabled style="flex:1; height:32px;">⎘ コピー</button>
-            <button id="kt-tpl-refresh" class="btn" style="flex:1; height:32px;">↻ 更新</button>
-            <button id="kt-tpl-ai-req" class="btn" style="flex:1; height:32px; display:none;">AI</button>
+            <button id="kt-tpl-refresh" class="btn" style="flex:1; height:32px;">↻ 一覧更新</button>
+            <button id="kt-tpl-ai-req" class="btn" style="flex:1; height:32px; display:none;">AI prompt</button>
           </div>
 
           <div id="kt-tpl-list"
@@ -1825,7 +1851,6 @@
     const $meta = view.querySelector('#kt-tpl-meta');
     const $refresh = view.querySelector('#kt-tpl-refresh');
     const $insert = view.querySelector('#kt-tpl-insert');
-    const $copy = view.querySelector('#kt-tpl-copy');
     const $sourceSel = view.querySelector('#kt-tpl-source');
     const $overview = view.querySelector('#kt-tpl-overview');
     const $btnAIReq = view.querySelector('#kt-tpl-ai-req');
@@ -1918,12 +1943,12 @@
           else await initEditor(code);
           updateAIReqVisibility();
           $meta.textContent = `選択中（Template表示）：${file.name}`;
-          [$download, $copy, $upload].forEach(b => b.disabled = false);
+          [$download, $upload].forEach(b => b.disabled = false);
           $insert.disabled = false;
         } else if (kind === 'snippets') {
           await showSnippetOverview(file);
           //$meta.textContent = `選択中（Snippet挿入用）：${file.name}`;
-          [$copy, $insert, $upload].forEach(b => b.disabled = false);
+          [$insert, $upload].forEach(b => b.disabled = false);
         } else if (kind === 'documents') {
           $overview.style.display = 'none';
           $overview.innerHTML = '';
@@ -1933,7 +1958,7 @@
           else await initEditor(code);
           updateAIReqVisibility();
           $meta.textContent = `選択中（document表示）：${file.name}`;
-          [$download, $copy].forEach(b => b.disabled = false);
+          [$download].forEach(b => b.disabled = false);
           [$upload].forEach(b => b.disabled = true);
           $insert.disabled = false; // ドキュメントも挿入可にするなら true のまま
         }
@@ -1954,7 +1979,7 @@
       $list.appendChild(frag);
 
       selectedItem = null;
-      [$download, $insert, $copy].forEach(b => b.disabled = true);
+      [$download, $insert].forEach(b => b.disabled = true);
       $meta.textContent = '';
 
       if (kind === 'snippets') {
@@ -2013,7 +2038,7 @@
     if (window.monaco && !window.monaco._kintoneFieldsReady) {
       try {
         // 既存の registerFieldCompletions(monaco, props?) があれば fields.properties を渡す
-        await registerFieldCompletions(window.monaco, DATA?.fields?.properties);
+        await registerFieldCompletions(window.monaco, DATA?.fields);
       } catch (e) {
         // 旧シグネチャ（monacoのみ）互換
         try { await registerFieldCompletions(window.monaco); } catch { }
@@ -2248,20 +2273,6 @@
       setTimeout(() => ($meta.textContent = ''), 1500);
     });
 
-    $copy.addEventListener('click', async () => {
-      if (!selectedItem) return;
-      const text = (selectedKind === 'templates' || selectedKind === 'documents')
-        ? (monacoEditor ? monacoEditor.getValue() : '')
-        : await loadCode(selectedItem);
-      try {
-        await navigator.clipboard.writeText(text);
-        $meta.textContent = '✅ コピーしました';
-      } catch {
-        $meta.textContent = '⚠️ コピーに失敗しました';
-      }
-      setTimeout(() => ($meta.textContent = ''), 1200);
-    });
-
     $refresh.addEventListener('click', async () => {
       sessionStorage.removeItem(GH.cacheKey($sourceSel.value));
       await loadList();
@@ -2398,8 +2409,8 @@
       <div style="flex:2; min-width:380px; display:flex; flex-direction:column; gap:10px;">
         <div style="display:flex; align-items:center; gap:10px; justify-content:space-between;">
           <div style="display:flex; align-items:center; gap:8px;">
-            <button id="kt-tpl-download" class="btn" disabled style="height:32px; padding:0 10px;">⬇ ローカルに保存（ファイルDL）</button>
-            <button id="kt-tpl-upload"   class="btn" disabled style="height:32px; padding:0 10px;">⬆ アプリに反映（デプロイ）</button>
+            <button id="kt-tpl-download" class="btn" disabled style="height:32px; padding:0 10px;">⬇ ローカルに保存</button>
+            <button id="kt-tpl-upload"   class="btn" disabled style="height:32px; padding:0 10px;">⬆ アプリに反映</button>
           </div>
           <span id="kt-tpl-meta"
                 style="opacity:.75; max-width:55%; text-overflow:ellipsis; overflow:hidden; white-space:nowrap; text-align:right;"></span>
@@ -2422,15 +2433,17 @@
           padding:6px 0; background:${isDark ? '#1b1b1b' : '#fff'};">
           <div style="font-weight:600; padding-left:12px; margin:6px 0;">Files</div>
           <select id="kt-tpl-source" class="btn" style="padding:3px 4px; height:32px;">
-            <option value="customize">JavaScript (App ${appId})</option>
-            <option value="snippets">Snippets  (GitHub: ${GH.dirs.snippets})</option>
+            <option value="JavaScript">JavaScript (desktop)</option>
+            <option value="css">CSS (desktop)</option>
+            <option value="JavaScriptMobile">JavaScript (mobile)</option>
+            <option value="cssMobile">CSS (mobile)</option>
+            <option value="snippets">Snippets (GitHub: ${GH.dirs.snippets})</option>
           </select>
         </div>
 
         <div style="display:flex; gap:8px;">
           <button id="kt-tpl-insert"  class="btn" disabled style="flex:1; height:32px;">⤴︎ 挿入</button>
-          <button id="kt-tpl-copy"    class="btn" disabled style="flex:1; height:32px;">⎘ コピー</button>
-          <button id="kt-tpl-refresh" class="btn"          style="flex:1; height:32px;">↻ 更新</button>
+          <button id="kt-tpl-refresh" class="btn"          style="flex:1; height:32px;">↻ 一覧更新</button>
         </div>
 
         <div id="kt-tpl-list"
@@ -2458,7 +2471,6 @@
     const $meta = $('#kt-tpl-meta');
     const $refresh = $('#kt-tpl-refresh');
     const $insert = $('#kt-tpl-insert');
-    const $copy = $('#kt-tpl-copy');
     const $sourceSel = $('#kt-tpl-source');
     const $overview = $('#kt-tpl-overview');
     const $editorHost = $('#kt-tpl-editor');
@@ -2473,6 +2485,7 @@
       fontSize: 12,
       minimap: { enabled: false },
     });
+    window.monacoEditor = editor;
     const setEditorLanguage = (lang = 'javascript') => {
       const model = editor.getModel();
       if (model) monaco.editor.setModelLanguage(model, lang);
@@ -2482,6 +2495,15 @@
     const apiUrl = (p) => kintone.api.url(p, true);
     const sleep = (ms) => new Promise(r => setTimeout(r, ms));
     const CURRENT = { target: 'desktop', name: null };
+
+    // src値 → kind/js|css, target/desktop|mobile のマッピング
+    const SRC = {
+      JavaScript: { kind: 'js', target: 'desktop' },
+      css: { kind: 'css', target: 'desktop' },
+      JavaScriptMobile: { kind: 'js', target: 'mobile' },
+      cssMobile: { kind: 'css', target: 'mobile' },
+      snippets: { kind: 'js', target: 'desktop' } // エディタ言語の既定用
+    };
 
     const getMimeByName = (name) =>
       /\.css$/i.test(name) ? 'text/css'
@@ -2521,15 +2543,42 @@
       const { fileKey } = await res.json();
       return fileKey;
     }
-    async function putPreviewReplace(app, target, name, fileKey) {
-      const { data } = await getCustomize(app);
+    function getKindByName(name) {
+      const n = String(name || '').toLowerCase().trim();
+      if (n.endsWith('.css')) return 'css';
+      if (n.endsWith('.js')) return 'js';
+      // 拡張子が無い/特殊な場合は nameヒントで雑に判定
+      return n.includes('css') ? 'css' : 'js';
+    }
+    async function putPreviewReplace(app, target /* 'desktop'|'mobile' */, name, fileKey) {
+      const kind = getKindByName(name);     // ← js or css
+      const { data } = await getCustomize(app); // 既存wrapper想定（preview側を返す）
+
       const desk = data.desktop || { js: [], css: [] };
       const mobi = data.mobile || { js: [], css: [] };
-      const arr = (target === 'desktop' ? desk.js : mobi.js) || [];
-      const next = arr.filter(f => !(f.type === 'FILE' && f.file?.name === name));
+
+      // 対象配列（js/css × desktop/mobile）を選択
+      const arr = (target === 'desktop')
+        ? (kind === 'css' ? desk.css : desk.js)
+        : (kind === 'css' ? mobi.css : mobi.js);
+
+      const next = (arr || []).filter(f => !(f.type === 'FILE' && f.file?.name === name));
       next.push({ type: 'FILE', file: { fileKey, name } });
-      if (target === 'desktop') desk.js = next; else mobi.js = next;
-      const payload = { app, scope: data.scope || 'ALL', desktop: desk, mobile: mobi };
+
+      // 選んだ配列だけ上書き
+      if (target === 'desktop') {
+        if (kind === 'css') desk.css = next; else desk.js = next;
+      } else {
+        if (kind === 'css') mobi.css = next; else mobi.js = next;
+      }
+
+      const payload = {
+        app,
+        scope: data.scope || 'ALL',
+        desktop: desk,
+        mobile: mobi
+      };
+
       await kintone.api(apiUrl('/k/v1/preview/app/customize.json'), 'PUT', payload);
     }
     async function deployAndWait(app, pollMs = 1500, timeoutMs = 60000) {
@@ -2571,46 +2620,15 @@
     let currentFileName = null;
     async function refreshList() {
       const src = $sourceSel.value;
+      const conf = SRC[src] || { kind: 'js', target: 'desktop' };
+      CURRENT.target = conf.target; // ← 重要：選択に合わせて更新
       $list.innerHTML = '<div style="padding:12px; opacity:.7">Loading...</div>';
       $overview.style.display = 'none'; $overview.innerHTML = '';
-      $download.disabled = false; $upload.disabled = false; $insert.disabled = true; $copy.disabled = true;
+      $download.disabled = false; $upload.disabled = false; $insert.disabled = true;
       CURRENT.name = null;
 
       // --- Customize (App) list ---
-      if (src === 'customize') {
-        const { data } = await getCustomize(appId);
-        const arr = (data.desktop?.js || []).filter(x => x.type === 'FILE');
-        $list.innerHTML = '';
-        if (!arr.length) {
-          $list.innerHTML = `<div style="padding:12px; opacity:.7">対象のファイルが見つかりませんでした。</div>`;
-          return;
-        }
-        setEditorLanguage('javascript');
-
-        arr.forEach((f, i) => {
-          const row = fileRow({
-            name: f.file.name,
-            size: f.file.size, // "12345"でもOK（fileRow内でNumber化）
-            badge: 'JS'
-          });
-          row.addEventListener('click', async () => {
-            const code = await downloadByKey(f.file.fileKey);
-            editor.setValue(code);
-
-            // ✅ ここだけで currentFileName を更新する
-            currentFileName = f.file.name;
-
-            $meta.textContent = `${i}: ${f.file.name}`;
-            $download.disabled = false;
-            $upload.disabled = false; // 保存+デプロイ可
-            $insert.disabled = true;
-            $copy.disabled = false;
-          }, { passive: true });
-          $list.appendChild(row);
-        });
-
-      } // --- Snippets (GitHub) list ---
-      else { // snippets
+      if (src === 'snippets') { // --- Snippets (GitHub) list ---
         const items = await loadSnippets();
         $list.innerHTML = '';
         if (!items.length) {
@@ -2646,7 +2664,6 @@
             // エディタへは「挿入」ボタンで追記（currentFileName はいじらない）
             //$meta.textContent = `Snippet: ${f.name}`;
             $insert.disabled = false;
-            $copy.disabled = false;
             $download.disabled = false;
 
             $insert.onclick = () => {
@@ -2662,7 +2679,40 @@
           }, { passive: true });
           $list.appendChild(row);
         });
+        return;
       }
+      // --- Customize (App) list: desktop/mobile × js/css 共通 ---
+      const { data } = await getCustomize(appId);
+      const bucket = conf.target === 'mobile' ? (data.mobile || { js: [], css: [] })
+        : (data.desktop || { js: [], css: [] });
+      const arr = (conf.kind === 'js' ? bucket.js : bucket.css) || [];
+      const files = arr.filter(x => x.type === 'FILE');
+
+      $list.innerHTML = '';
+      if (!files.length) {
+        $list.innerHTML = `<div style="padding:12px; opacity:.7">対象のファイルが見つかりませんでした。</div>`;
+        return;
+      }
+
+      setEditorLanguage(conf.kind === 'js' ? 'javascript' : 'css');
+      const badge = conf.target === 'mobile'
+        ? (conf.kind === 'js' ? 'mJS' : 'mCSS')
+        : (conf.kind === 'js' ? 'JS' : 'CSS');
+
+      files.forEach((f, i) => {
+        const row = fileRow({ name: f.file.name, size: f.file.size, badge });
+        row.addEventListener('click', async () => {
+          const code = await downloadByKey(f.file.fileKey);
+          editor.setValue(code);
+          currentFileName = f.file.name;   // 上書き先は常にこれ
+          CURRENT.target = conf.target;    // 念のためクリック時にも保持
+          $meta.textContent = `${i}: ${f.file.name} (${conf.target})`;
+          $download.disabled = false;
+          $upload.disabled = false;        // 保存+デプロイ可
+          $insert.disabled = true;
+        }, { passive: true });
+        $list.appendChild(row);
+      });
     }
 
     // === 保存+デプロイ（ワンボタン） ===
