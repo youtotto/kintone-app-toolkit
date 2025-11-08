@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         kintone App Toolkit
 // @namespace    https://github.com/youtotto/kintone-app-toolkit
-// @version      1.7.3
+// @version      1.7.4
 // @description  kintone開発をブラウザで完結。アプリ分析・コード生成・ドキュメント編集を備えた開発支援ツールキット。
 // @match        https://*.cybozu.com/k/*/
 // @match        https://*.cybozu.com/k/*/?view=*
@@ -1783,7 +1783,7 @@
     const isDark = matchMedia('(prefers-color-scheme: dark)').matches;
     const BG = isDark ? '#1b1b1b' : '#fff';
     const BD = isDark ? '#333' : '#ddd';
-    const PANEL_H = '65vh';
+    const PANEL_H = '70vh';
 
     // レイアウト
     view.innerHTML = `
@@ -2073,9 +2073,9 @@
         const wrap = document.createElement('div');
         wrap.id = 'kt-upload-dialog';
         wrap.style.cssText = `
-      position: fixed; inset: 0; z-index: 9999;
-      background: rgba(0,0,0,.35); display:flex; align-items:center; justify-content:center;
-    `;
+          position: fixed; inset: 0; z-index: 9999;
+          background: rgba(0,0,0,.35); display:flex; align-items:center; justify-content:center;
+        `;
 
         // ダイアログ
         const box = document.createElement('div');
@@ -2090,7 +2090,7 @@
 
           <label style="display:block; font-size:12px; opacity:.8; margin:6px 0 4px;">ファイル名</label>
           <input id="kt-up-name" type="text" value="${defaultName || 'template.js'}"
-            style="width:100%; padding:8px 10px; border-radius:8px; border:1px solid #8882; background:transparent; color:inherit" />
+            style="display:block; width:100%; max-width:100%; box-sizing:border-box; padding:8px 10px; border-radius:8px; border:1px solid #8882; background:transparent; color:inherit" />
 
           <div style="display:flex; gap:14px; margin-top:12px;">
             <label style="display:flex; gap:8px; align-items:center;">
@@ -2102,7 +2102,14 @@
               <span>モバイル（JS）</span>
             </label>
           </div>
-
+          <div role="alert"
+              style="margin-top:12px; font-size:12px; line-height:1.6; border:1px solid #f59e0b55; background:#f59e0b0f; border-radius:8px; padding:10px 12px;">
+            <div style="font-weight:700; margin-bottom:6px;">⚠️ 同名ファイルについて</div>
+            <ul style="margin:0 0 0 18px; padding:0;">
+              <li>同名のファイルの重複チェックは行いません。そのままアップロードされます。</li>
+              <li>重複を避けたい場合は<b>ファイル名を変更</b>してください。</li>
+            </ul>
+          </div>
           <div style="display:flex; gap:8px; justify-content:flex-end; margin-top:16px;">
             <button id="kt-up-cancel" class="btn" style="height:32px; padding:0 12px;">キャンセル</button>
             <button id="kt-up-ok" class="btn" style="height:32px; padding:0 14px; font-weight:600;">OK</button>
@@ -2392,7 +2399,7 @@
     const isDark = matchMedia('(prefers-color-scheme: dark)').matches;
     const BG = isDark ? '#0f0f0f' : '#fafafa';
     const BD = isDark ? '#333' : '#ddd';
-    const PANEL_H = '65vh';
+    const PANEL_H = '70vh';
 
     // === GitHub: snippetsのみ ===
     const GH = {
@@ -2681,6 +2688,7 @@
         });
         return;
       }
+
       // --- Customize (App) list: desktop/mobile × js/css 共通 ---
       const { data } = await getCustomize(appId);
       const bucket = conf.target === 'mobile' ? (data.mobile || { js: [], css: [] })
@@ -2716,6 +2724,68 @@
     }
 
     // === 保存+デプロイ（ワンボタン） ===
+    function openUploadDialog(defaultName, fileType) {
+      return new Promise((resolve) => {
+
+        // ラッパ
+        const wrap = document.createElement('div');
+        wrap.id = 'kt-upload-dialog';
+        wrap.style.cssText = `
+          position: fixed; inset: 0; z-index: 9999;
+          background: rgba(0,0,0,.35); display:flex; align-items:center; justify-content:center;
+        `;
+
+        // ダイアログ
+        const box = document.createElement('div');
+        box.style.cssText = `
+          width: 520px; max-width: 92vw; border-radius: 12px;
+          background: ${document.documentElement.matches('[data-theme="dark"]') ? '#1c1c1c' : '#fff'};
+          color: inherit; padding: 16px 18px; box-shadow: 0 12px 30px rgba(0,0,0,.25);
+          border: 1px solid ${document.documentElement.matches('[data-theme="dark"]') ? '#333' : '#ddd'};
+        `;
+        box.innerHTML = `
+          <div style="font-weight:700; font-size:16px; margin-bottom:10px;">ファイルをアップロード</div>
+
+          <label style="display:block; font-size:12px; opacity:.8; margin:6px 0 4px;">ファイル名</label>
+          <input id="kt-up-name" type="text" value="${fileType}: ${defaultName || 'template.js'}"
+              style="display:block; width:100%; max-width:100%; box-sizing:border-box;
+                  padding:8px 10px; border-radius:8px; border:1px solid #8882;
+                  background:transparent; color:inherit" readonly/>
+            <div role="alert"
+              style="margin-top:12px; font-size:12px; line-height:1.6; border:1px solid #f59e0b55; background:#f59e0b0f; border-radius:8px; padding:10px 12px;">
+            <div style="font-weight:700; margin-bottom:6px;">⚠️ アップロードについて</div>
+            <ul style="margin:0 0 0 18px; padding:0;">
+              <li>OKボタンを押下すると、運用環境へファイルがアップロードされます。</li>
+            </ul>
+          </div>
+            <div style="display:flex; gap:8px; justify-content:flex-end; margin-top:16px;">
+            <button id="kt-up-cancel" class="btn" style="height:32px; padding:0 12px;">キャンセル</button>
+            <button id="kt-up-ok" class="btn" style="height:32px; padding:0 14px; font-weight:600;">OK</button>
+          </div>
+        `;
+
+        wrap.appendChild(box);
+        document.body.appendChild(wrap);
+
+        const $name = box.querySelector('#kt-up-name');
+        const $ok = box.querySelector('#kt-up-ok');
+        const $cancel = box.querySelector('#kt-up-cancel');
+
+        const close = (result) => {
+          wrap.remove();
+          resolve(result);
+        };
+
+        $ok.addEventListener('click', () => {
+          const name = ($name.value || '').trim();
+          if (!name) { $name.focus(); return; }
+          close(name);
+        });
+        $cancel.addEventListener('click', () => close(null));
+        wrap.addEventListener('click', (e) => { if (e.target === wrap) close(null); });
+        $name.select();
+      });
+    }
     $upload.addEventListener('click', async () => {
       try {
         Spinner.show();
@@ -2724,13 +2794,19 @@
           alert('上書き先のファイルが未選択です。先に「Customize」側で対象ファイルを選択してください。');
           return;
         }
+
         const code = editor.getValue().trim();
         if (!code) throw new Error('コードが空です');
+
+        //ダイアログで入力
+        const fileType = CURRENT.target;
+        const form = await openUploadDialog(currentFileName, fileType);
+        if (!form) return; // cancel
 
         const fileKey = await uploadOnce(currentFileName, code, getMimeByName(currentFileName));
         await putPreviewReplace(appId, 'desktop', currentFileName, fileKey);
         await deployAndWait(appId);
-        alert(`✅ ${currentFileName} を保存・デプロイしました`);
+        alert(`✅ デプロイ完了：${currentFileName} `);
         await refreshList();
       } catch (e) {
         alert('失敗: ' + (e?.message || e));
