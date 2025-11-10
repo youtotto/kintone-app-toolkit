@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         kintone App Toolkit
 // @namespace    https://github.com/youtotto/kintone-app-toolkit
-// @version      1.7.5
+// @version      1.8.0
 // @description  kintone開発をブラウザで完結。アプリ分析・コード生成・ドキュメント編集を備えた開発支援ツールキット。
 // @match        https://*.cybozu.com/k/*/
 // @match        https://*.cybozu.com/k/*/?view=*
@@ -477,6 +477,7 @@
           <button id="tab-templates" class="tab">Templates</button>
           <button id="tab-customize" class="tab">Customize</button>
           <button id="tab-links" class="tab">Links</button>
+          <button id="tab-field-scanner" class="tab">Field Scanner</button>
         </div>
         <div class="actions" style="display:flex;gap:6px;align-items:center;">
           <button id="kt-mini" class="btn" title="最小化">–</button>
@@ -492,6 +493,7 @@
         <div id="view-templates" style="display:none"></div>
         <div id="view-customize" style="display:none"></div>
         <div id="view-links" style="display:none"></div>
+        <div id="view-field-scanner" style="display:none"></div>
       </div>
     `;
     document.body.appendChild(wapCheck(wrap));
@@ -534,6 +536,7 @@
       wrap.querySelector('#view-templates').style.display = idShow === 'templates' ? 'block' : 'none';
       wrap.querySelector('#view-customize').style.display = idShow === 'customize' ? 'block' : 'none';
       wrap.querySelector('#view-links').style.display = idShow === 'links' ? 'block' : 'none';
+      wrap.querySelector('#view-field-scanner').style.display = idShow === 'field-scanner' ? 'block' : 'none';
     };
     wrap.querySelector('#tab-health').addEventListener('click', () => switchTab('health'), { passive: true });
     wrap.querySelector('#tab-fields').addEventListener('click', () => switchTab('fields'), { passive: true });
@@ -543,6 +546,7 @@
     wrap.querySelector('#tab-templates').addEventListener('click', () => switchTab('templates'), { passive: true });
     wrap.querySelector('#tab-customize').addEventListener('click', () => switchTab('customize'), { passive: true });
     wrap.querySelector('#tab-links').addEventListener('click', () => switchTab('links'), { passive: true });
+    wrap.querySelector('#tab-field-scanner').addEventListener('click', () => switchTab('field-scanner'), { passive: true });
     return wrap;
 
   };
@@ -3176,6 +3180,413 @@
     });
   }
 
+  // ===============================
+  //  renderScanner (Scanner tab)
+  // ===============================
+  async function renderScanner(root, DATA) {
+    const el = root.querySelector('#view-field-scanner');
+    if (!el) return;
+    el.innerHTML = '';
+
+    (function FS_bootstrap() {
+      const isDark = matchMedia('(prefers-color-scheme: dark)').matches;
+      const BG = isDark ? '#0f0f0f' : '#fafafa'; // ← renderCustomize と同じ基準
+      const BD = isDark ? '#333' : '#ddd';
+
+      // ルートにCSS変数を割当（この1行で下位へ配布）
+      el.innerHTML = `
+        <style>
+          /* 共通: Scannerタブ内のトーン統一 */
+          #fs-wrap { --fs-bg: ${BG}; --fs-bd: ${BD}; }
+          #fs-wrap select,
+          #fs-wrap .btn {
+            background: var(--fs-bg);
+            color: inherit;
+            border: 1px solid var(--fs-bd);
+            border-radius: 8px;
+            height: 32px;
+            padding: 6px 10px;
+            outline: none;
+          }
+          #fs-wrap select { padding: 4px 8px; }
+          #fs-wrap .btn:hover,
+          #fs-wrap select:hover { filter: brightness(${isDark ? '1.15' : '0.98'}); }
+          #fs-wrap .btn:focus-visible,
+          #fs-wrap select:focus-visible {
+            box-shadow: 0 0 0 2px ${isDark ? '#444' : '#e5e7eb'};
+          }
+          #fs-wrap table thead th {
+            background: var(--fs-bg) !important;
+            border-bottom: 1px solid var(--fs-bd) !important;
+          }
+          #fs-wrap td { border-bottom: 1px solid var(--fs-bd); }
+          #fs-table-wrap { border: 1px solid var(--fs-bd); border-radius: 12px; }
+        </style>
+
+        <div id="fs-wrap" style="display:flex; flex-direction:column; gap:12px;">
+          <div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap;">
+            <strong style="font-size:14px;">🔎 Field Scanner</strong>
+
+            <label style="display:inline-flex; align-items:center; gap:6px; border:1px solid var(--fs-bd); padding:4px 8px; border-radius:10px;">
+              <span>Target</span>
+              <select id="fs-target" style="border:none;">
+                <option value="both" selected>desktop + mobile</option>
+                <option value="desktop">desktop only</option>
+                <option value="mobile">mobile only</option>
+              </select>
+            </label>
+
+            <label style="display:inline-flex; align-items:center; gap:6px; border:1px solid var(--fs-bd); padding:4px 8px; border-radius:10px;">
+              <span>Kinds</span>
+              <select id="fs-kinds" style="border:none;">
+                <option value="js" selected>JS</option>
+                <option value="css">CSS</option>
+                <option value="both">JS + CSS</option>
+              </select>
+            </label>
+
+            <button id="fs-scan" class="btn" style="margin-left:auto;">Scan</button>
+            <div style="display:flex; gap:8px;">
+              <button id="fs-copy-md"  class="btn">MD Copy</button>
+              <button id="fs-dl-md"    class="btn">MD DL</button>
+              <button id="fs-dl-csv"   class="btn">CSV DL</button>
+              <button id="fs-dl-json"  class="btn">JSON DL</button>
+            </div>
+          </div>
+
+          <div id="fs-meta" style="opacity:.8; font-size:12px;">未実行</div>
+
+          <div id="fs-table-wrap" style="overflow:auto; max-height:56vh;">
+            <table id="fs-table" style="width:100%; border-collapse:collapse;">
+              <thead>
+                <tr>
+                  <th style="text-align:left; position:sticky; top:0; padding:8px;">Used</th>
+                  <th style="text-align:left; position:sticky; top:0; padding:8px;">FieldCode</th>
+                  <th style="text-align:left; position:sticky; top:0; padding:8px;">Label</th>
+                  <th style="text-align:left; position:sticky; top:0; padding:8px;">Type</th>
+                  <th style="text-align:right; position:sticky; top:0; padding:8px;">Matches</th>
+                  <th style="text-align:left; position:sticky; top:0; padding:8px;">Files</th>
+                </tr>
+              </thead>
+              <tbody id="fs-tbody">
+                <tr><td colspan="6" style="padding:14px; opacity:.8;">Scanボタンを押してください。</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      `;
+
+      // --- ユーティリティ（外部優先で使用） ---
+      const KTExport = (window.KTExport || {});
+      const flashBtnText = (window.flashBtnText || function (btn, text = 'Done!', ms = 1200) {
+        const old = btn.textContent;
+        btn.textContent = text;
+        setTimeout(() => (btn.textContent = old), ms);
+      });
+      const downloadTextFallback = (name, text, mime = 'text/plain;charset=utf-8') => {
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(new Blob([text], { type: mime }));
+        a.download = name; a.click();
+        setTimeout(() => URL.revokeObjectURL(a.href), 0);
+      };
+      const saveText = (name, text, mime) => {
+        if (typeof KTExport.downloadText === 'function') return KTExport.downloadText(name, text);
+        if (typeof KTExport.download === 'function') return KTExport.download(name, text, mime);
+        if (typeof KTExport.saveText === 'function') return KTExport.saveText(name, text, mime);
+        return downloadTextFallback(name, text, mime);
+      };
+
+      // --- DOM取得 ---
+      const $target = el.querySelector('#fs-target');
+      const $kinds = el.querySelector('#fs-kinds');
+      const $scan = el.querySelector('#fs-scan');
+      const $copyMD = el.querySelector('#fs-copy-md');
+      const $dlMD = el.querySelector('#fs-dl-md');
+      const $dlCSV = el.querySelector('#fs-dl-csv');
+      const $dlJSON = el.querySelector('#fs-dl-json');
+      const $meta = el.querySelector('#fs-meta');
+      const $tbody = el.querySelector('#fs-tbody');
+
+      let FS_last = null;
+
+      const resolveInclude = (v) =>
+        v === 'desktop' ? { desktop: true, mobile: false } :
+          v === 'mobile' ? { desktop: false, mobile: true } :
+            { desktop: true, mobile: true };
+
+      const resolveKinds = (v) =>
+        v === 'css' ? ['css'] : (v === 'both' ? ['js', 'css'] : ['js']);
+
+      // ---- fields ----
+      async function fetchFieldList(resp) {
+        const props = resp || {};
+        const out = [];
+        for (const p of Object.values(props)) {
+          if (p.type === 'SUBTABLE') {
+            if (p.code) out.push({ code: p.code, label: p.label, type: 'SUBTABLE' });
+            for (const sf of Object.values(p.fields || {})) {
+              out.push({ code: sf.code, label: sf.label, type: sf.type, parent: p.code });
+            }
+          } else {
+            out.push({ code: p.code, label: p.label, type: p.type });
+          }
+        }
+        return out;
+      }
+
+      // ---- テキスト取得（URLは既定でスキップ、FILEのみ実体取得）----
+      async function fetchTexts({ appId, include, kinds }) {
+        const apiUrl = (p) => kintone.api.url(p, true);
+
+        // preview優先 → production
+        async function getCustomize(appId) {
+          try {
+            const prev = await kintone.api(apiUrl('/k/v1/preview/app/customize.json'), 'GET', { app: appId });
+            if (prev && (prev.desktop || prev.mobile)) return prev;
+          } catch { }
+          return await kintone.api(apiUrl('/k/v1/app/customize.json'), 'GET', { app: appId });
+        }
+
+        async function downloadByKey(fileKey) {
+          const res = await fetch(apiUrl('/k/v1/file.json') + '?fileKey=' + encodeURIComponent(fileKey), {
+            method: 'GET',
+            headers: { 'X-Requested-With': 'XMLHttpRequest' },
+            credentials: 'same-origin'
+          });
+          if (!res.ok) throw new Error('Download error ' + res.status);
+          return await res.text();
+        }
+
+        const data = await getCustomize(appId);
+        const desk = data.desktop || { js: [], css: [] };
+        const mobi = data.mobile || { js: [], css: [] };
+
+        const pickFile = (bucket, kind) => (bucket?.[kind] || []).filter(x => x.type === 'FILE');
+        const pickUrl = (bucket, kind) => (bucket?.[kind] || []).filter(x => x.url);
+
+        const chosen = [];
+        const pushKind = (bucket, target) => {
+          if (kinds.includes('js')) {
+            chosen.push(...pickFile(bucket, 'js').map(f => ({ target, kind: 'js', fileKey: f.file?.fileKey, name: f.file?.name })));
+            chosen.push(...pickUrl(bucket, 'js').map(u => ({ target, kind: 'js', url: u.url, name: (u.url || '').split('/').pop() || u.url })));
+          }
+          if (kinds.includes('css')) {
+            chosen.push(...pickFile(bucket, 'css').map(f => ({ target, kind: 'css', fileKey: f.file?.fileKey, name: f.file?.name })));
+            chosen.push(...pickUrl(bucket, 'css').map(u => ({ target, kind: 'css', url: u.url, name: (u.url || '').split('/').pop() || u.url })));
+          }
+        };
+
+        if (include.desktop) pushKind(desk, 'desktop');
+        if (include.mobile) pushKind(mobi, 'mobile');
+
+        const out = [];
+        for (const t of chosen) {
+          try {
+            if (t.fileKey) {
+              // FILEタイプは実体取得
+              const text = await downloadByKey(t.fileKey);
+              out.push({ name: t.name || '(no-name)', target: t.target, kind: t.kind, text });
+            } else if (t.url) {
+              // URLタイプは既定スキップ（CORS回避）
+              // 必要なら同一オリジンのみ取得したい場合は、以下の条件をtrueにしてください。
+              const sameOrigin = (() => {
+                try { return new URL(t.url, location.href).hostname === location.hostname; }
+                catch { return false; }
+              })();
+
+              if (sameOrigin) {
+                // どうしても同一オリジンURLの中身も見たい場合のみ取得
+                try {
+                  const res = await fetch(t.url, { credentials: 'include' });
+                  const text = res.ok ? await res.text() : '';
+                  out.push({ name: t.name || t.url, target: t.target, kind: t.kind, text, note: res.ok ? undefined : 'URL fetch failed' });
+                } catch (e) {
+                  // エラー時も落とさず空テキストで登録
+                  out.push({ name: t.name || t.url, target: t.target, kind: t.kind, text: '', note: 'URL fetch error (skipped)' });
+                }
+              } else {
+                // 外部URLは完全にスキップ（解析はできないが、一覧表示はする）
+                out.push({ name: t.name || t.url, target: t.target, kind: t.kind, text: '', note: 'external URL (skipped)' });
+              }
+            } else {
+              out.push({ name: t.name || '(unknown)', target: t.target, kind: t.kind, text: '' });
+            }
+          } catch (e) {
+            // いかなる場合も落とさず、空テキストで残す
+            out.push({ name: t.name || '(no-name)', target: t.target, kind: t.kind, text: '', note: String(e) });
+          }
+        }
+        return out;
+      }
+
+
+      // ---- analyze ----
+      function stripCommentsOnly(src) {
+        return src.replace(/\/\*[\s\S]*?\*\//g, '')
+          .replace(/(^|[^:\\])\/\/.*$/gm, '$1');
+      }
+      function buildRegexps(code) {
+        const safe = String(code || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        const pats = [
+          new RegExp(`['"\`]${safe}['"\`]`, 'gu'),
+          new RegExp(`\\[\\s*['"\`]${safe}['"\`]\\s*\\]`, 'gu'),
+          new RegExp(`getFieldElement\\(\\s*['"\`]${safe}['"\`]\\s*\\)`, 'gu'),
+          new RegExp(`getFieldElements\\(\\s*['"\`]${safe}['"\`]\\s*\\)`, 'gu'),
+        ];
+        if (/^[A-Za-z_$][A-Za-z0-9_$]*$/.test(code)) {
+          pats.push(new RegExp(`(?<![A-Za-z0-9_$])${safe}(?![A-Za-z0-9_$])`, 'g'));
+        }
+        return pats;
+      }
+      function findMatches(text, code, regexps, { before = 24, after = 48 } = {}) {
+        const arr = [];
+        for (const rx of regexps) {
+          let m;
+          while ((m = rx.exec(text)) !== null) {
+            const s = Math.max(0, m.index - before);
+            const e = Math.min(text.length, m.index + m[0].length + after);
+            arr.push({ index: m.index, snippet: text.slice(s, e).replace(/\n/g, '⏎') });
+          }
+        }
+        return arr;
+      }
+      function analyze({ fields, files, snippet }) {
+        const cleans = files.map(f => ({ ...f, clean: stripCommentsOnly(f.text || '') }));
+        const results = [];
+        for (const fld of fields) {
+          if (!fld.code) continue;
+          const rxs = buildRegexps(fld.code);
+          let count = 0;
+          const usedIn = [];
+          const samples = [];
+          for (const f of cleans) {
+            if (!f.clean) continue;
+            const hits = findMatches(f.clean, fld.code, rxs, snippet);
+            if (hits.length) {
+              count += hits.length;
+              usedIn.push(`${f.target}: ${f.name}`);
+              samples.push(...hits.slice(0, 2).map(h => ({ file: `${f.target}: ${f.name}`, snippet: h.snippet })));
+            }
+          }
+          results.push({ code: fld.code, label: fld.label, type: fld.type, used: count > 0, count, files: usedIn, samples });
+        }
+        results.sort((a, b) => (Number(b.used) - Number(a.used)) || (b.count - a.count) || String(a.code).localeCompare(String(b.code)));
+        return results;
+      }
+
+      // ---- 表示 & エクスポート ----
+      function renderTable(results) {
+        const rows = results.map(r => {
+          const filesHtml = (r.files || []).map(s => `<div>${s}</div>`).join('');
+          const samples = r.samples && r.samples.length
+            ? r.samples.map(s => `
+              <div style="opacity:.9; padding:4px 6px; border:1px dashed #8883; border-radius:8px; margin:3px 0;">
+                <b>${s.file}</b> … ${s.snippet}
+              </div>`).join('')
+            : '';
+          return `
+          <tr>
+            <td style="white-space:nowrap; padding:8px; border-bottom:1px solid ${BD};">${r.used ? '✅' : '—'}</td>
+            <td style="white-space:nowrap; padding:8px; border-bottom:1px solid ${BD};"><code>${r.code}</code></td>
+            <td style="padding:8px; border-bottom:1px solid ${BD};">${r.label ?? ''}</td>
+            <td style="white-space:nowrap; padding:8px; border-bottom:1px solid ${BD};">${r.type ?? ''}</td>
+            <td style="text-align:right; padding:8px; border-bottom:1px solid ${BD};">${r.count}</td>
+            <td style="padding:8px; border-bottom:1px solid ${BD};">${filesHtml}</td>
+          </tr>
+          ${samples ? `<tr><td></td><td colspan="5" style="padding:6px 8px; border-bottom:1px solid ${BD};">${samples}</td></tr>` : ''}
+        `;
+        }).join('');
+        $tbody.innerHTML = rows || `<tr><td colspan="6" style="padding:14px; opacity:.8;">結果なし</td></tr>`;
+      }
+
+      const toCSV = (rows) => {
+        const esc = (s) => `"${String(s ?? '').replace(/"/g, '""')}"`;
+        const header = ['FieldLabel', 'FieldCode', 'Type', 'Used', 'MatchCount', 'Files'].map(esc).join(',');
+        const lines = rows.map(r => [r.label, r.code, r.type, r.used ? 1 : 0, r.count, (r.files || []).join(' | ')].map(esc).join(','));
+        return [header, ...lines].join('\n');
+      };
+
+      const toMarkdown = (scan) => {
+        const { results, files, fields, meta } = scan;
+        const used = results.filter(r => r.used).length;
+        const lines = [];
+        lines.push(`# Field Usage Report`);
+        lines.push('');
+        lines.push(`- App ID: ${meta.appId}`);
+        lines.push(`- Target: ${meta.include.desktop && meta.include.mobile ? 'desktop+mobile' : (meta.include.desktop ? 'desktop' : 'mobile')}`);
+        lines.push(`- Kinds: ${meta.kinds.join(', ')}`);
+        lines.push(`- Files: ${files.length} / Fields: ${fields.length} / Used Fields: ${used}`);
+        lines.push('');
+        lines.push(`| Used | Code | Label | Type | Matches | Files |`);
+        lines.push(`|:---:|:-----|:------|:-----|-------:|:------|`);
+        for (const r of results) {
+          const fileStr = (r.files || []).join('<br>');
+          lines.push(`| ${r.used ? '✅' : '—'} | \`${r.code}\` | ${r.label ?? ''} | ${r.type ?? ''} | ${r.count} | ${fileStr} |`);
+        }
+        return lines.join('\n');
+      };
+
+      // ---- Scan 実行（初期実行なし）----
+      async function scanOnce() {
+        const t0 = Date.now();
+        const appId = kintone.app.getId();
+        const include = resolveInclude($target.value);
+        const kinds = resolveKinds($kinds.value);
+
+        const fields = await fetchFieldList(DATA.fields);
+        const files = await fetchTexts({ appId, include, kinds });
+        const results = analyze({ fields, files, snippet: { before: 24, after: 48 } });
+
+        FS_last = { results, files, fields, meta: { appId, include, kinds } };
+        const usedCount = results.filter(r => r.used).length;
+        const dt = ((Date.now() - t0) / 1000).toFixed(2);
+        $meta.textContent = `files: ${files.length} / fields: ${fields.length} / used: ${usedCount} / time: ${dt}s`;
+        renderTable(results);
+      }
+
+      // ---- イベント ----
+      $scan.onclick = async () => {
+        $meta.textContent = 'Scanning...';
+        try { await scanOnce(); } catch (e) { console.error(e); $meta.textContent = 'Scan failed'; }
+      };
+
+      $copyMD.onclick = async () => {
+        if (!FS_last) return;
+        const md = toMarkdown(FS_last);
+        try {
+          await navigator.clipboard.writeText(md);
+          flashBtnText($copyMD, 'Copied!');
+        } catch {
+          // 失敗時はDLにフォールバック
+          saveText(`field-usage-app${FS_last.meta.appId}.md`, md, 'text/markdown;charset=utf-8');
+          flashBtnText($copyMD, 'Saved');
+        }
+      };
+
+      $dlMD.onclick = () => {
+        if (!FS_last) return;
+        const md = toMarkdown(FS_last);
+        saveText(`field-usage-app${FS_last.meta.appId}.md`, md, 'text/markdown;charset=utf-8');
+        flashBtnText($dlMD);
+      };
+
+      $dlCSV.onclick = () => {
+        if (!FS_last) return;
+        const csv = toCSV(FS_last.results);
+        saveText(`field-usage-app${FS_last.meta.appId}.csv`, csv, 'text/csv;charset=utf-8');
+        flashBtnText($dlCSV);
+      };
+
+      $dlJSON.onclick = () => {
+        if (!FS_last) return;
+        const json = JSON.stringify(FS_last, null, 2);
+        saveText(`field-usage-app${FS_last.meta.appId}.json`, json, 'application/json;charset=utf-8');
+        flashBtnText($dlJSON);
+      };
+    })();
+  }
+
+
   /** ----------------------------
   * boot
   * ---------------------------- */
@@ -3200,6 +3611,7 @@
     renderCustomize(root, DATA, appId);
     renderTemplates(root, DATA, appId);
     renderLinks(root);
+    renderScanner(root, pick(DATA, ['appId', 'fields', 'customize']));
 
   });
 
