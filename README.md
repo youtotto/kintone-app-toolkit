@@ -42,34 +42,12 @@ Toolkitは、kintone開発を標準化・効率化するための **Tampermonkey
 
 ---
 
-### Health
-<img width="595" height="452" alt="image" src="https://github.com/user-attachments/assets/7d13714f-78ef-4451-90b8-087b8ee78e08" />
-
-### Fields
-<img width="1370" height="697" alt="image" src="https://github.com/user-attachments/assets/26a28f5b-83ae-4045-bf30-b6c7f0d10770" />
-
-### Views
-<img width="916" height="251" alt="image" src="https://github.com/user-attachments/assets/9895fb8f-5d9e-437a-9378-7a78631a9562" />
-
-### Graphs
-<img width="1606" height="771" alt="image" src="https://github.com/user-attachments/assets/48490fc3-d3b8-4057-b98a-0e2683988ecf" />
-
-### Relationsタブ
-kintoneアプリの参照関係（ルックアップ・関連レコード・アクション）を一覧化。  
-構造理解と影響範囲の把握を支援します。
-<img width="1620" height="798" alt="スクリーンショット 2025-11-06 181601" src="https://github.com/user-attachments/assets/f9224f18-0f9f-43cd-94ab-b87df12fdabc" />
-
-### Templates（New!）
-ブラウザだけで完結する kintone カスタマイズ体験。  
-<img width="1616" height="968" alt="スクリーンショット 2025-11-06 181610" src="https://github.com/user-attachments/assets/f8ee8d66-12db-4454-8205-6ca47ea9c46b" />
-
----
-
 ## 🔑 主要タブの機能
 
 ### Health
 - Fields / States / Actions / Views / JS・CSS / Notifs を集約表示
 - しきい値（YELLOW/RED）編集に対応（LocalStorage保存）
+<img width="595" height="452" alt="image" src="https://github.com/user-attachments/assets/7d13714f-78ef-4451-90b8-087b8ee78e08" />
 
 ---
 
@@ -77,12 +55,14 @@ kintoneアプリの参照関係（ルックアップ・関連レコード・ア�
 - レイアウト順・グループ/サブテーブル所属を正しく反映
 - ルックアップは `LOOKUP` として出力
 - Export: **Copy MD / Download MD / Copy CSV / Download JSON**
+<img width="1370" height="697" alt="image" src="https://github.com/user-attachments/assets/26a28f5b-83ae-4045-bf30-b6c7f0d10770" />
 
 ---
 
 ### Views
 - 種類・フィルタ・ソートを可読化（コード→ラベル(code)）
 - Export: **Copy MD / Download MD / Copy CSV / Download CSV**
+<img width="916" height="251" alt="image" src="https://github.com/user-attachments/assets/9895fb8f-5d9e-437a-9378-7a78631a9562" />
 
 ---
 
@@ -90,26 +70,31 @@ kintoneアプリの参照関係（ルックアップ・関連レコード・ア�
 - 種類（BAR/COLUMN/PIE…）、表示モード（NORMAL/STACKED/PERCENTAGE）
 - 分類項目 / 集計方法 / 条件式を可読化
 - Export: **Copy MD / Download MD / Copy CSV / Download CSV**
+<img width="1606" height="771" alt="image" src="https://github.com/user-attachments/assets/48490fc3-d3b8-4057-b98a-0e2683988ecf" />
+
 
 ---
 
 ### Relationsタブ
-参照関係をまとめて可視化。
-
+kintoneアプリの参照関係（ルックアップ・関連レコード・アクション）を一覧化。  
+構造理解と影響範囲の把握を支援します。
 | セクション | 内容 |
 |---|---|
 | **Lookups** | 参照元アプリ、コピー項目、条件式を一覧化（コピー先/元を明示） |
 | **Related Records** | 参照アプリ、表示フィールド、連携条件を一覧化（`filterCond` 可読化） |
 | **Actions** | 実行条件・作成先アプリ・マッピングを一覧化（開閉式UI） |
+<img width="1620" height="798" alt="スクリーンショット 2025-11-06 181601" src="https://github.com/user-attachments/assets/f9224f18-0f9f-43cd-94ab-b87df12fdabc" />
 
 ---
 
 ### Templates（新機能）
+ブラウザだけで完結する kintone カスタマイズ体験。  
 - **GitHub連携**：`youtotto/kintoneCustomizeJS` から Templates / Snippets / Documents を取得
 - **エディタ**：Monaco + Markdown / 補完 / 自動レイアウト
 - **サジェスト**：アプリのフィールドコード・ラベル補完
 - **AIプロンプト生成**：Documents の Markdown から要件定義プロンプト生成
 - **Upload & Deploy**：プレビュー保存→デプロイのワンボタン
+<img width="1616" height="968" alt="スクリーンショット 2025-11-06 181610" src="https://github.com/user-attachments/assets/f8ee8d66-12db-4454-8205-6ca47ea9c46b" />
 
 ---
 
@@ -117,6 +102,8 @@ kintoneアプリの参照関係（ルックアップ・関連レコード・ア�
 - **JSEdit互換** + Toolkit UIに統合
 - Snippets 連携（GitHub `snippets/` / プレビュー→エディタ挿入）
 - **保存＋デプロイ**のワンボタン化（preview更新 / deploy完了検知）
+<img width="1623" height="973" alt="スクリーンショット 2025-11-07 165409" src="https://github.com/user-attachments/assets/8eeef58a-22ef-4fee-b7cb-7e5c3f05319f" />
+
 
 ---
 
@@ -127,11 +114,14 @@ kintoneアプリの参照関係（ルックアップ・関連レコード・ア�
 1. `Target`（desktop / mobile）と `Kinds`（JS / CSS）を選択  
 2. **Scan** をクリック  
 3. 結果表から **MD Copy / MD DL / CSV DL / JSON DL** で出力  
+<img width="2296" height="1304" alt="スクリーンショット 2025-11-10 122931" src="https://github.com/user-attachments/assets/40a47207-98bf-461e-8d02-9dc068a5fb24" />
+
 
 ---
 
 ### Links
 - 公式 / コミュニティ / ライブラリへのリンク集
+<img width="1620" height="1032" alt="スクリーンショット 2025-11-08 164709" src="https://github.com/user-attachments/assets/2ecbeb43-c314-47b7-91cd-c747f7b88c3b" />
 
 
 ---
