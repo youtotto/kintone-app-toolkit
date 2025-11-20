@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         kintone App Toolkit
 // @namespace    https://github.com/youtotto/kintone-app-toolkit
-// @version      1.8.0
+// @version      1.8.1
 // @description  kintone開発をブラウザで完結。アプリ分析・コード生成・ドキュメント編集を備えた開発支援ツールキット。
 // @match        https://*.cybozu.com/k/*/
 // @match        https://*.cybozu.com/k/*/?view=*
@@ -18,6 +18,7 @@
 // ==/UserScript==
 (function () {
   'use strict';
+  const SCRIPT_VERSION = '1.8.1';
 
   /** ----------------------------
   * readiness / api helpers
@@ -390,6 +391,9 @@
       border3: '#ddd',     // (L) tdボーダー
     };
 
+    const githubURL = 'https://github.com/youtotto/kintone-app-toolkit';
+    const favicon = `https://www.google.com/s2/favicons?domain=${encodeURIComponent(githubURL)}&sz=64`;
+
     const wrap = document.createElement('div');
     wrap.id = 'kt-toolkit';
     wrap.style.cssText = `
@@ -407,12 +411,38 @@
         #kt-toolkit .tab.active{background:#2563eb;border-color:#2563eb;color:#fff;} /* Activeは色固定 */
         #kt-toolkit .btn{padding:6px 10px;border:1px solid ${C.border};background:${C.bgSub};color:${C.text};border-radius:8px;cursor:pointer}
         #kt-toolkit .body{padding:12px}
+        /* 各タブ内 view の高さをそろえる */
+        #kt-toolkit .body > div[id^="view-"]{
+          min-height: 70vh;  /* お好みで 50vh〜70vh くらいに調整 */
+        }
         #kt-toolkit.is-mini{
           width:auto !important; max-width:calc(100vw - 32px) !important;
           height:auto !important; max-height:none !important; overflow:visible !important;
         }
         #kt-toolkit.is-mini .body{ display:none !important; }
         #kt-toolkit.is-mini .tabs{ display:none !important; }
+
+        /* Version 表示（控えめ） */
+        #kt-toolkit .version-info{
+          display:flex;
+          align-items:center;
+          gap:4px;
+          font-size:11px;
+          color:${C.textSub};
+          opacity:0.75;
+          cursor:default;        /* 単なる情報ラベル */
+          user-select:none;
+        }
+        #kt-toolkit .version-info:hover{
+          opacity:1;
+        }
+        #kt-toolkit .version-info img{
+          width:14px;
+          height:14px;
+          border-radius:3px;
+          margin-top:1px;
+        }
+
         /* label≠code 行のハイライト */
         #kt-toolkit .hl-diff td { background: rgba(255, 196, 0, 0.12); }
         #kt-toolkit .hl-diff td:nth-child(1),
@@ -481,7 +511,10 @@
         </div>
         <div class="actions" style="display:flex;gap:6px;align-items:center;">
           <button id="kt-mini" class="btn" title="最小化">–</button>
-          <button id="kt-close" class="btn" title="閉じる">×</button>
+          <div id="kt-version" class="version-info" title="Toolkit version">
+            <img src="${favicon}" alt="Toolkit icon" />
+            <span>Ver ${SCRIPT_VERSION}</span>
+          </div>
         </div>
       </div>
       <div class="body">
@@ -496,6 +529,7 @@
         <div id="view-field-scanner" style="display:none"></div>
       </div>
     `;
+
     document.body.appendChild(wapCheck(wrap));
 
     // === 最小化：ドメイン共通 ===
@@ -520,11 +554,10 @@
 
     // ボタン取得＆イベント
     const btnMini = wrap.querySelector('#kt-mini');
-    const btnClose = wrap.querySelector('#kt-close');
     btnMini && btnMini.addEventListener('click', toggleMini, { passive: true });
-    btnClose && btnClose.addEventListener('click', () => wrap.remove(), { passive: true });
+    const btnVer = wrap.querySelector('#kt-version');
+    btnVer && btnVer.addEventListener('click', () => window.open(githubURL, '_blank', 'noopener'), { passive: true });
 
-    wrap.querySelector('#kt-close').addEventListener('click', () => wrap.remove(), { passive: true });
     const switchTab = (idShow) => {
       wrap.querySelectorAll('.tab').forEach(el => el.classList.remove('active'));
       wrap.querySelector('#tab-' + idShow).classList.add('active');
@@ -1586,7 +1619,7 @@
         headersLookups, lookupRowsDL,
         table(headersLookups, lookupRowsHtml, widthsLookups),
         'relations_lookups',
-        { appId, defaultOpen: true, indicator: true, relationType: 'lookup' }   // ← open
+        { appId, defaultOpen: true, indicator: true, relationType: 'lookup' }
       );
 
     // Related Records：閉じる
@@ -1597,7 +1630,7 @@
         headersRT, rtRowsDL,
         table(headersRT, rtRowsHtml, widthsRT),
         'relations_relatedTables',
-        { appId, defaultOpen: false, indicator: true, relationType: 'Related' }  // ← closed
+        { appId, defaultOpen: true, indicator: true, relationType: 'Related' }
       );
 
     // Actions：閉じる
@@ -1608,7 +1641,7 @@
         headersAC, actRowsDL,
         table(headersAC, actRowsHtml, widthsAC),
         'relations_actions',
-        { appId, defaultOpen: false, indicator: true, relationType: 'action' }  // ← closed
+        { appId, defaultOpen: true, indicator: true, relationType: 'action' }
       );
 
     // まとめて描画 & バインド
@@ -1786,6 +1819,7 @@
       endpoint(dir) { return `https://api.github.com/repos/${this.owner}/${this.repo}/contents/${encodeURIComponent(dir)}`; },
       cacheKey(kind) { return `kt_tpl_cache_ui_${kind}`; }
     };
+    const GH_BASE = `https://github.com/${GH.owner}/${GH.repo}`;
 
     // UI色
     const isDark = matchMedia('(prefers-color-scheme: dark)').matches;
@@ -1833,6 +1867,7 @@
           <div style="display:flex; gap:8px;">
             <button id="kt-tpl-insert" class="btn" disabled style="flex:1; height:32px;">⤴︎ 挿入</button>
             <button id="kt-tpl-refresh" class="btn" style="flex:1; height:32px;">↻ 一覧更新</button>
+            <button id="kt-tpl-github" class="btn" style="flex:1; height:32px;">🔗 Github</button>
             <button id="kt-tpl-ai-req" class="btn" style="flex:1; height:32px; display:none;">AI prompt</button>
           </div>
 
@@ -1863,6 +1898,7 @@
     const $overview = view.querySelector('#kt-tpl-overview');
     const $btnAIReq = view.querySelector('#kt-tpl-ai-req');
     const $upload = view.querySelector('#kt-tpl-upload');
+    const $btnGithub = view.querySelector('#kt-tpl-github');
 
     function updateAIReqVisibility() {
       const isDocs = ($sourceSel.value === 'documents');
@@ -1880,6 +1916,32 @@
     let selectedKind = 'templates'; // 'templates' | 'snippets' | 'documents'
 
     // ヘルパ
+    // 現在の種別に応じて GitHub へ飛ばす
+    function openGithubForCurrent() {
+      const kind = $sourceSel.value;
+      let url = '';
+
+      if (kind === 'templates') {
+        // Templates → js ディレクトリ
+        url = `${GH_BASE}/tree/main/${GH.dirs.templates}/README.md`; // https://github.com/.../tree/main/js
+      } else if (kind === 'snippets') {
+        // Snippets → snippets ディレクトリ
+        url = `${GH_BASE}/tree/main/${GH.dirs.snippets}/README.md`;  // https://github.com/.../tree/main/snippets
+      } else if (kind === 'documents') {
+        // Documents のときは、選択中があればそのファイル、なければディレクトリ
+        if (selectedItem) {
+          url = `${GH_BASE}/blob/main/${GH.dirs.documents}/${encodeURIComponent(selectedItem.name)}`;
+        } else {
+          url = `${GH_BASE}/tree/main/${GH.dirs.documents}`;
+        }
+      } else {
+        // フォールバック：リポジトリTOP
+        url = GH_BASE;
+      }
+
+      window.open(url, '_blank', 'noopener');
+    }
+
     async function loadCode(file) {
       const res = await fetch(file.download_url);
       if (!res.ok) throw new Error(`raw fetch ${res.status}`);
@@ -2293,6 +2355,12 @@
       await loadList();
     });
 
+    $btnGithub.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      openGithubForCurrent();
+    });
+
     $btnAIReq.addEventListener('click', async () => {
       try {
         // 1) エディタの内容（要件テンプレ）
@@ -2425,7 +2493,8 @@
         <div style="display:flex; align-items:center; gap:10px; justify-content:space-between;">
           <div style="display:flex; align-items:center; gap:8px;">
             <button id="kt-tpl-download" class="btn" disabled style="height:32px; padding:0 10px;">⬇ ローカルに保存</button>
-            <button id="kt-tpl-upload"   class="btn" disabled style="height:32px; padding:0 10px;">⬆ アプリに反映</button>
+            <button id="kt-tpl-upload" class="btn" disabled style="height:32px; padding:0 10px;">⬆ アプリに反映</button>
+            <button id="kt-tpl-new" class="btn" style="height:32px; padding:0 10px;">＋ 新規作成</button>
           </div>
           <span id="kt-tpl-meta"
                 style="opacity:.75; max-width:55%; text-overflow:ellipsis; overflow:hidden; white-space:nowrap; text-align:right;"></span>
@@ -2483,6 +2552,7 @@
     const $list = $('#kt-tpl-list');
     const $download = $('#kt-tpl-download');
     const $upload = $('#kt-tpl-upload');
+    const $new = $('#kt-tpl-new');
     const $meta = $('#kt-tpl-meta');
     const $refresh = $('#kt-tpl-refresh');
     const $insert = $('#kt-tpl-insert');
@@ -2732,6 +2802,110 @@
     }
 
     // === 保存+デプロイ（ワンボタン） ===
+    // === 新規ファイルダイアログ ===
+    function openNewFileDialog(defaultName, kindLabel) {
+      return new Promise((resolve) => {
+        const wrap = document.createElement('div');
+        wrap.id = 'kt-newfile-dialog';
+        wrap.style.cssText = `
+          position: fixed; inset: 0; z-index: 9999;
+          background: rgba(0,0,0,.35); display:flex; align-items:center; justify-content:center;
+        `;
+
+        const dark = document.documentElement.matches('[data-theme="dark"]');
+        const box = document.createElement('div');
+        box.style.cssText = `
+          width: 480px; max-width: 92vw; border-radius: 12px;
+          background: ${dark ? '#1c1c1c' : '#fff'};
+          color: inherit; padding: 16px 18px; box-shadow: 0 12px 30px rgba(0,0,0,.25);
+          border: 1px solid ${dark ? '#333' : '#ddd'};
+        `;
+        box.innerHTML = `
+          <div style="font-weight:700; font-size:16px; margin-bottom:10px;">新規ファイルを作成</div>
+          <div style="font-size:12px; opacity:.8; margin-bottom:8px;">
+            種別: <strong>${kindLabel}</strong>
+          </div>
+
+          <label style="display:block; font-size:12px; opacity:.8; margin:6px 0 4px;">ファイル名</label>
+          <input id="kt-newfile-name" type="text" value="${defaultName || ''}"
+              style="display:block; width:100%; max-width:100%; box-sizing:border-box;
+                  padding:8px 10px; border-radius:8px; border:1px solid #8882;
+                  background:transparent; color:inherit"/>
+
+          <div style="font-size:11px; opacity:.7; margin-top:6px;">
+            拡張子が付いていない場合は、自動で <code>.js</code> または <code>.css</code> を付与します。
+          </div>
+
+          <div style="display:flex; gap:8px; justify-content:flex-end; margin-top:16px;">
+            <button id="kt-newfile-cancel" class="btn" style="height:32px; padding:0 12px;">キャンセル</button>
+            <button id="kt-newfile-ok"     class="btn" style="height:32px; padding:0 14px; font-weight:600;">作成</button>
+          </div>
+        `;
+
+        wrap.appendChild(box);
+        document.body.appendChild(wrap);
+
+        const $name = box.querySelector('#kt-newfile-name');
+        const $ok = box.querySelector('#kt-newfile-ok');
+        const $cancel = box.querySelector('#kt-newfile-cancel');
+
+        const close = (result) => {
+          wrap.remove();
+          resolve(result);
+        };
+
+        $ok.addEventListener('click', () => {
+          const name = ($name.value || '').trim();
+          if (!name) { $name.focus(); return; }
+          close(name);
+        });
+        $cancel.addEventListener('click', () => close(null));
+        wrap.addEventListener('click', (e) => { if (e.target === wrap) close(null); });
+
+        $name.select();
+        $name.focus();
+      });
+    }
+
+    // === 新規ファイル作成 ===
+    $new.addEventListener('click', async () => {
+      const src = $sourceSel.value;
+
+      if (src === 'snippets') {
+        alert('Snippets からは新規ファイルを作成できません。\n上部のセレクトで JavaScript / CSS を選択してください。');
+        return;
+      }
+
+      const conf = SRC[src] || { kind: 'js', target: 'desktop' };
+      const kindLabel = conf.target === 'mobile'
+        ? (conf.kind === 'js' ? 'モバイル JS' : 'モバイル CSS')
+        : (conf.kind === 'js' ? 'JS' : 'CSS');
+
+      const defaultBase = conf.kind === 'css' ? 'custom.css' : 'custom.js';
+      const inputName = await openNewFileDialog(defaultBase, kindLabel);
+      if (!inputName) return; // キャンセル
+
+      let name = inputName.trim();
+      if (!name) return;
+
+      // 拡張子自動付与
+      if (conf.kind === 'js' && !/\.js$/i.test(name)) name += '.js';
+      if (conf.kind === 'css' && !/\.css$/i.test(name)) name += '.css';
+
+      CURRENT.target = conf.target;
+      currentFileName = name;
+
+      // エディタを初期化
+      setEditorLanguage(conf.kind === 'js' ? 'javascript' : 'css');
+      editor.setValue('');
+      editor.focus();
+
+      $meta.textContent = `新規: ${name} (${conf.target})`;
+      $upload.disabled = false;   // すぐ保存＆デプロイできる
+      $download.disabled = false; // ローカル保存も可能
+      $insert.disabled = true;
+    });
+
     function openUploadDialog(defaultName, fileType) {
       return new Promise((resolve) => {
 
@@ -2904,7 +3078,7 @@
       // --- Tools ---
       {
         title: 'Toolkit (GitHub)',
-        url: 'https://github.com/youtotto/kintone-App-Toolkit',
+        url: 'https://github.com/youtotto/kintone-app-toolkit',
         category: 'Tools',
         desc: '本スクリプトのリポジトリ',
         tags: ['Customize', 'Tools']
