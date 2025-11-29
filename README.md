@@ -45,9 +45,9 @@ Toolkitは、kintone開発を標準化・効率化するための **Tampermonkey
 ## 🔑 主要タブの機能
 
 ### Health
-- Fields / States / Actions / Views / JS・CSS / Notifs を集約表示
+- Fields / States / Actions / Views / JS・CSS を集約表示
 - しきい値（YELLOW/RED）編集に対応（LocalStorage保存）
-<img width="595" height="452" alt="image" src="https://github.com/user-attachments/assets/7d13714f-78ef-4451-90b8-087b8ee78e08" />
+<img width="1279" height="818" alt="image" src="https://github.com/user-attachments/assets/fe01eb87-aadf-4f40-88b0-16183c64d5ec" />
 
 ---
 
