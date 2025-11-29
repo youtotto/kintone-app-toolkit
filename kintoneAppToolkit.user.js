@@ -19,7 +19,7 @@
 // ==/UserScript==
 (function () {
   'use strict';
-  const SCRIPT_VERSION = '1.8.2';
+  const SCRIPT_VERSION = '1.8.3';
 
   if (window.mermaid && typeof window.mermaid.run === 'function') {
     try {
