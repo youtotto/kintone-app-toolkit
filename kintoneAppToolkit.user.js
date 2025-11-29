@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         kintone App Toolkit
 // @namespace    https://github.com/youtotto/kintone-app-toolkit
-// @version      1.8.1
+// @version      1.8.3
 // @description  kintone開発をブラウザで完結。アプリ分析・コード生成・ドキュメント編集を備えた開発支援ツールキット。
 // @match        https://*.cybozu.com/k/*/
 // @match        https://*.cybozu.com/k/*/?view=*
@@ -12,13 +12,23 @@
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=cybozu.com
 // @run-at       document-idle
 // @grant        none
+// @require     https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js
 // @license      MIT
 // @updateURL    https://github.com/youtotto/kintone-app-toolkit/raw/refs/heads/main/kintoneAppToolkit.user.js
 // @downloadURL  https://github.com/youtotto/kintone-app-toolkit/raw/refs/heads/main/kintoneAppToolkit.user.js
 // ==/UserScript==
 (function () {
   'use strict';
-  const SCRIPT_VERSION = '1.8.1';
+  const SCRIPT_VERSION = '1.8.2';
+
+  if (window.mermaid && typeof window.mermaid.run === 'function') {
+    try {
+      window.mermaid.run({ querySelector: `#${id}` });
+    } catch (e) {
+      // console.error(e);
+    }
+  }
+
 
   /** ----------------------------
   * readiness / api helpers
@@ -506,8 +516,8 @@
           <button id="tab-relations" class="tab">Relations</button>
           <button id="tab-templates" class="tab">Templates</button>
           <button id="tab-customize" class="tab">Customize</button>
-          <button id="tab-links" class="tab">Links</button>
           <button id="tab-field-scanner" class="tab">Field Scanner</button>
+          <button id="tab-links" class="tab">Links</button>
         </div>
         <div class="actions" style="display:flex;gap:6px;align-items:center;">
           <button id="kt-mini" class="btn" title="最小化">–</button>
@@ -568,8 +578,8 @@
       wrap.querySelector('#view-relations').style.display = idShow === 'relations' ? 'block' : 'none';
       wrap.querySelector('#view-templates').style.display = idShow === 'templates' ? 'block' : 'none';
       wrap.querySelector('#view-customize').style.display = idShow === 'customize' ? 'block' : 'none';
-      wrap.querySelector('#view-links').style.display = idShow === 'links' ? 'block' : 'none';
       wrap.querySelector('#view-field-scanner').style.display = idShow === 'field-scanner' ? 'block' : 'none';
+      wrap.querySelector('#view-links').style.display = idShow === 'links' ? 'block' : 'none';
     };
     wrap.querySelector('#tab-health').addEventListener('click', () => switchTab('health'), { passive: true });
     wrap.querySelector('#tab-fields').addEventListener('click', () => switchTab('fields'), { passive: true });
@@ -578,8 +588,8 @@
     wrap.querySelector('#tab-relations').addEventListener('click', () => switchTab('relations'), { passive: true });
     wrap.querySelector('#tab-templates').addEventListener('click', () => switchTab('templates'), { passive: true });
     wrap.querySelector('#tab-customize').addEventListener('click', () => switchTab('customize'), { passive: true });
-    wrap.querySelector('#tab-links').addEventListener('click', () => switchTab('links'), { passive: true });
     wrap.querySelector('#tab-field-scanner').addEventListener('click', () => switchTab('field-scanner'), { passive: true });
+    wrap.querySelector('#tab-links').addEventListener('click', () => switchTab('links'), { passive: true });
     return wrap;
 
   };
@@ -612,6 +622,52 @@
     val >= R ? { level: 'RED', badge: '🔴' } :
       val >= Y ? { level: 'YELLOW', badge: '🟡' } :
         { level: 'OK', badge: '🟢' };
+
+  // kintone プロセス管理 → Mermaid flowchart を生成
+  const buildProcessMermaid = (status) => {
+    if (!status || !status.states) return '';
+
+    const states = status.states || {};
+    const actions = status.actions || [];
+
+    // index順にソート
+    const entries = Object.entries(states).sort(
+      (a, b) => (a[1].index ?? 0) - (b[1].index ?? 0)
+    );
+
+    if (!entries.length) return '';
+
+    const idMap = {};
+    entries.forEach(([key, st], idx) => {
+      idMap[key] = `S${idx}`; // Mermaid用ノードID
+    });
+
+    const esc = (s) => String(s || '').replace(/"/g, '\\"');
+
+    const lines = ['flowchart LR'];
+
+    // ノード定義
+    for (const [key, st] of entries) {
+      const id = idMap[key];
+      const label = esc(st.name || key);
+      lines.push(`  ${id}["${label}"]`);
+    }
+
+    // アクション（遷移）定義
+    for (const a of actions) {
+      const fromId = idMap[a.from];
+      const toId = idMap[a.to];
+      if (!fromId || !toId) continue;
+      const name = esc(a.name || '');
+      if (name) {
+        lines.push(`  ${fromId} -->|${name}| ${toId}`);
+      } else {
+        lines.push(`  ${fromId} --> ${toId}`);
+      }
+    }
+
+    return lines.join('\n');
+  };
 
   // renderHealth
   const renderHealth = async (
@@ -655,51 +711,298 @@
       actions: judge(metrics.actions, TH.actions)
     };
 
+    // ★ プロセス管理のステータスフィールドコードを特定
+    let statusFieldCode = null;
+    if (status && status.enable) {
+      // kintoneアプリ設定から取れる場合（フィールドコードが入っている想定）
+      statusFieldCode = status.statusField || status.field;
+    }
+    if (!statusFieldCode) {
+      // 念のためフィールド一覧から type=STATUS を探すフォールバック
+      const statusFieldEntry = Object.entries(fields || {}).find(
+        ([, f]) => f.type === 'STATUS'
+      );
+      if (statusFieldEntry) {
+        statusFieldCode = statusFieldEntry[0];
+      }
+    }
+
     // --- 描画 ---
     el.innerHTML = `
-    <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:8px">
-      <div style="font-weight:700">App Health（Read-only）</div>
-      <div style="display:flex;gap:6px">
-        <button id="kt-copy" class="btn">Copy</button>
-        <button id="kt-th" class="btn">基準 / Thresholds</button>
-      </div>
-    </div>
+    <div style="display:flex;flex-direction:column;height:100%;gap:12px;">
 
-    <div id="kt-summary">
-      <table style="max-width:480px;margin-bottom:8px">
-        <tr><td>Fields</td><td>${metrics.totalFields} / Group: ${metrics.groups} / SubTable: ${metrics.subtables} (maxCols: ${metrics.subtableColsMax})</td></tr>
-        <tr><td>States/Actions</td><td>${metrics.states} / ${metrics.actions}</td></tr>
-        <tr><td>Views/Notifs</td><td>${metrics.views ?? '-'} / ${metrics.notifications ?? '-'}</td></tr>
-        <tr><td>JS/CSS</td><td>${metrics.jsFiles ?? '-'} / ${metrics.cssFiles ?? '-'}</td></tr>
-        <tr><td>ACL rules</td><td>${metrics.roles ?? '-'}</td></tr>
-      </table>
+      <!-- ヘッダー -->
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:8px">
+        <div style="font-weight:700;font-size:14px;">
+          App Health <span style="opacity:.7;font-weight:400">(Read-only)</span>
+        </div>
+        <div style="display:flex;gap:6px">
+          <button id="kt-copy" class="btn">Copy</button>
+          <button id="kt-th" class="btn">基準 / Thresholds</button>
+        </div>
+      </div>
 
-      <div style="display:flex;gap:12px;flex-wrap:wrap">
-        <div><strong>Fields</strong>：${score.totalFields.badge} ${score.totalFields.level}</div>
-        <div><strong>States</strong>：${score.states.badge} ${score.states.level}</div>
-        <div><strong>Actions</strong>：${score.actions.badge} ${score.actions.level}</div>
-      </div>
-    </div>
+      <!-- メインビュー -->
+      <div id="kt-summary"
+           style="flex:1;min-height:0;display:flex;flex-direction:column;gap:12px;">
 
-    <div id="kt-th-panel" style="display:none;margin-top:10px">
-      <div style="opacity:.85;margin-bottom:6px">
-        しきい値（Thresholds）：Y=注意（Caution） / R=危険（Danger）。<br>
-        保存すると LocalStorage に記録されます。 / Saved to LocalStorage.
+        <!-- 上段：3カード -->
+        <div style="
+          display:grid;
+          grid-template-columns:repeat(3,minmax(0,1fr));
+          gap:10px;
+        ">
+          <!-- Fields Card -->
+          <div style="
+            border:1px solid #e5e7eb;
+            border-radius:8px;
+            padding:8px 10px;
+            display:flex;
+            flex-direction:column;
+            gap:4px;
+          ">
+            <div style="font-size:12px;opacity:.8;">フォーム構成 / Fields</div>
+            <div style="font-size:18px;font-weight:700;">
+              ${metrics.totalFields}
+              <span style="font-size:11px;font-weight:400;opacity:.7;">
+                （Group: ${metrics.groups}, SubTable: ${metrics.subtables}）
+              </span>
+            </div>
+            <div style="font-size:11px;opacity:.75;">
+              サブテーブル最大列数：${metrics.subtableColsMax}
+            </div>
+          </div>
+
+          <!-- Process Card -->
+          <div style="
+            border:1px solid #e5e7eb;
+            border-radius:8px;
+            padding:8px 10px;
+            display:flex;
+            flex-direction:column;
+            gap:4px;
+          ">
+            <div style="font-size:12px;opacity:.8;">プロセス管理 / Process</div>
+            <div style="font-size:18px;font-weight:700;">
+              ${metrics.states}
+              <span style="font-size:11px;font-weight:400;opacity:.7;">States</span>
+              <span style="margin:0 4px;">/</span>
+              ${metrics.actions}
+              <span style="font-size:11px;font-weight:400;opacity:.7;">Actions</span>
+            </div>
+            <div style="font-size:11px;opacity:.75;">
+              ステータス・アクションの複雑さの目安です。
+            </div>
+          </div>
+
+          <!-- Logic & ACL Card -->
+          <div style="
+            border:1px solid #e5e7eb;
+            border-radius:8px;
+            padding:8px 10px;
+            display:flex;
+            flex-direction:column;
+            gap:4px;
+          ">
+            <div style="font-size:12px;opacity:.8;">ロジック / アクセス制御</div>
+
+            <!-- メイン指標：JS / ACL -->
+            <div style="font-size:18px;font-weight:700;">
+              ${metrics.jsFiles ?? '-'}
+              <span style="font-size:11px;font-weight:400;opacity:.7;">JS</span>
+              <span style="margin:0 6px;">/</span>
+              ${metrics.roles ?? '-'}
+              <span style="font-size:11px;font-weight:400;opacity:.7;">ACL</span>
+            </div>
+            <div style="font-size:11px;opacity:.75;">
+              アプリの制御ロジックの複雑さの目安です。<br>
+            </div>
+          </div>
+        </div>
+
+        <!-- 中段：Health サマリー + しきい値ガイド -->
+        <div style="
+          border:1px solid #e5e7eb;
+          border-radius:8px;
+          padding:8px 10px;
+          display:flex;
+          flex-direction:column;
+          gap:8px;
+        ">
+          <div style="display:flex;justify-content:space-between;align-items:center;">
+            <div style="font-size:12px;font-weight:600;">
+              Health summary
+            </div>
+            <div style="font-size:11px;opacity:.7;">
+              現在値としきい値（Y / R）の関係をざっくり確認できます
+            </div>
+          </div>
+
+          <!-- 行ごとのサマリー -->
+          <table style="width:100%;border-collapse:collapse;font-size:12px;">
+            <thead>
+              <tr style="opacity:.7;">
+                <th style="text-align:left;padding:4px 6px;">指標</th>
+                <th style="text-align:right;padding:4px 6px;">現在値</th>
+                <th style="text-align:right;padding:4px 6px;">Y（注意）</th>
+                <th style="text-align:right;padding:4px 6px;">R（危険）</th>
+                <th style="text-align:left;padding:4px 6px;">判定</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td style="padding:4px 6px;">${TH.totalFields.label}</td>
+                <td style="padding:4px 6px;text-align:right;">
+                  ${metrics.totalFields}
+                </td>
+                <td style="padding:4px 6px;text-align:right;">
+                  ${TH.totalFields.Y}
+                </td>
+                <td style="padding:4px 6px;text-align:right;">
+                  ${TH.totalFields.R}
+                </td>
+                <td style="padding:4px 6px;">
+                  <span style="
+                    padding:2px 8px;
+                    border-radius:999px;
+                    border:1px solid #e5e7eb;
+                    display:inline-flex;
+                    align-items:center;
+                    gap:4px;
+                    font-size:11px;
+                  ">
+                    <span>${score.totalFields.badge}</span>
+                    <span>${score.totalFields.level}</span>
+                  </span>
+                </td>
+              </tr>
+
+              <tr>
+                <td style="padding:4px 6px;">${TH.states.label}</td>
+                <td style="padding:4px 6px;text-align:right;">
+                  ${metrics.states}
+                </td>
+                <td style="padding:4px 6px;text-align:right;">
+                  ${TH.states.Y}
+                </td>
+                <td style="padding:4px 6px;text-align:right;">
+                  ${TH.states.R}
+                </td>
+                <td style="padding:4px 6px;">
+                  <span style="
+                    padding:2px 8px;
+                    border-radius:999px;
+                    border:1px solid #e5e7eb;
+                    display:inline-flex;
+                    align-items:center;
+                    gap:4px;
+                    font-size:11px;
+                  ">
+                    <span>${score.states.badge}</span>
+                    <span>${score.states.level}</span>
+                  </span>
+                </td>
+              </tr>
+
+              <tr>
+                <td style="padding:4px 6px;">${TH.actions.label}</td>
+                <td style="padding:4px 6px;text-align:right;">
+                  ${metrics.actions}
+                </td>
+                <td style="padding:4px 6px;text-align:right;">
+                  ${TH.actions.Y}
+                </td>
+                <td style="padding:4px 6px;text-align:right;">
+                  ${TH.actions.R}
+                </td>
+                <td style="padding:4px 6px;">
+                  <span style="
+                    padding:2px 8px;
+                    border-radius:999px;
+                    border:1px solid #e5e7eb;
+                    display:inline-flex;
+                    align-items:center;
+                    gap:4px;
+                    font-size:11px;
+                  ">
+                    <span>${score.actions.badge}</span>
+                    <span>${score.actions.level}</span>
+                  </span>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+
+          <!-- しきい値の説明 -->
+          <div style="margin-top:4px;font-size:11px;opacity:.8;line-height:1.5;">
+            <div>
+              上部の <b>「基準 / Thresholds」</b> ボタンから、各指標の Y / R を編集できます。<br>
+            </div>
+          </div>
+        </div>
+
+
+        <!-- 下段：Process Flow 図 -->
+        <div style="
+          border:1px solid #e5e7eb;
+          border-radius:8px;
+          padding:8px 10px;
+          min-height:140px;
+          max-height:240px;
+          overflow:auto;
+        ">
+          <div style="font-size:12px;font-weight:600;margin-bottom:4px;display:flex;justify-content:space-between;align-items:center;">
+            <span>Process flow (Mermaid)</span>
+            <span style="font-size:11px;opacity:.7;">
+              ステータス遷移をざっくり確認できます
+            </span>
+          </div>
+          <div id="kt-process-diagram">
+            <!-- ここにMermaid or メッセージを描画 -->
+          </div>
+          <!-- ★ 直近500件ヒートマップ -->
+          <div id="kt-process-heatmap"
+            style="margin-top:8px;border-top:1px solid #e5e7eb;padding-top:6px;font-size:11px;">
+            <!-- 後でJSから埋める -->
+          </div>
+        </div>
+
       </div>
-      <table style="max-width:560px">
-        <thead>
-          <tr>
-            <th>指標 / Metric</th>
-            <th style="text-align:right">Y（注意 / Caution）</th>
-            <th style="text-align:right">R（危険 / Danger）</th>
-          </tr>
-        </thead>
-        <tbody id="kt-th-rows"></tbody>
-      </table>
-      <div style="margin-top:8px;display:flex;gap:8px;justify-content:flex-end">
-        <button id="kt-th-reset" class="btn">初期化 / Reset</button>
-        <button id="kt-th-save"  class="btn" style="background:#2563eb;border-color:#2563eb;color:#fff;">保存 / Save</button>
+
+      <!-- Thresholds パネル -->
+      <div id="kt-th-panel"
+           style="
+             display:none;
+             margin-top:2px;
+             padding:8px 10px;
+             border:1px solid #e5e7eb;
+             border-radius:8px;
+             max-height:calc(70vh - 60px);
+             overflow:auto;
+           ">
+        <div style="opacity:.85;margin-bottom:6px;font-size:11px;line-height:1.5;">
+          しきい値（Thresholds）：Y = 注意（Caution） / R = 危険（Danger）<br>
+          保存すると LocalStorage に記録されます。 / Saved to LocalStorage.
+        </div>
+        <table style="width:100%;max-width:560px;border-collapse:collapse;font-size:12px;">
+          <thead>
+            <tr>
+              <th style="text-align:left;padding:4px 6px;">指標 / Metric</th>
+              <th style="text-align:right;padding:4px 6px;">Y（注意 / Caution）</th>
+              <th style="text-align:right;padding:4px 6px;">R（危険 / Danger）</th>
+            </tr>
+          </thead>
+          <tbody id="kt-th-rows"></tbody>
+        </table>
+        <div style="margin-top:8px;display:flex;gap:8px;justify-content:flex-end;">
+          <button id="kt-th-reset" class="btn">初期化 / Reset</button>
+          <button id="kt-th-save"  class="btn"
+                  style="background:#2563eb;border-color:#2563eb;color:#fff;">
+            保存 / Save
+          </button>
+        </div>
       </div>
+
     </div>
   `;
 
@@ -709,11 +1012,17 @@
       rowsEl.innerHTML = Object.entries(TH)
         .map(
           ([k, v]) => `
-        <tr data-key="${k}">
-          <td>${v.label}</td>
-          <td style="text-align:right"><input type="number" min="0" value="${v.Y}"></td>
-          <td style="text-align:right"><input type="number" min="0" value="${v.R}"></td>
-        </tr>`
+          <tr data-key="${k}">
+            <td style="padding:4px 6px;">${v.label}</td>
+            <td style="text-align:right;padding:4px 6px;">
+              <input type="number" min="0" value="${v.Y}"
+                     style="width:80px;text-align:right;">
+            </td>
+            <td style="text-align:right;padding:4px 6px;">
+              <input type="number" min="0" value="${v.R}"
+                     style="width:80px;text-align:right;">
+            </td>
+          </tr>`
         )
         .join('');
     };
@@ -728,6 +1037,156 @@
       `  ACL rules: ${metrics.roles ?? '-'}\n` +
       `  判定: Fields=${score.totalFields.level}, States=${score.states.level}, Actions=${score.actions.level}`;
 
+    // Process Flow 図描画
+    const processHost = el.querySelector('#kt-process-diagram');
+    if (processHost) {
+      const code = buildProcessMermaid(status);
+      if (code) {
+        const id = `kt-process-mermaid-${appId}`;
+
+        processHost.innerHTML = '';
+
+        const div = document.createElement('div');
+        div.className = 'mermaid';
+        div.id = id;
+        div.style.fontSize = '11px';
+        div.style.lineHeight = '1.4';
+        div.textContent = code;   // ★ Mermaidコードは textContent で
+
+        processHost.appendChild(div);
+
+        if (window.mermaid && typeof window.mermaid.run === 'function') {
+          try {
+            // ★ ここだけ今回修正
+            window.mermaid.run({ nodes: [div] });
+            // または: window.mermaid.run({ querySelector: `#${id}` });
+          } catch (e) {
+            // noop
+          }
+        } else {
+          const msg = document.createElement('div');
+          msg.style.fontSize = '11px';
+          msg.style.opacity = '0.7';
+          msg.style.marginTop = '4px';
+          msg.textContent = '※ Mermaid が読み込まれていないため、コード表示のみです。';
+          processHost.appendChild(msg);
+        }
+      } else {
+        processHost.innerHTML = `
+      <div style="font-size:11px;opacity:.7;">
+        プロセス管理が無効、またはステータス情報が取得できませんでした。
+      </div>
+    `;
+      }
+    }
+
+    // ★★★ 直近500件のステータス滞留ヒートマップ ★★★
+    (async () => {
+      const heatHost = el.querySelector('#kt-process-heatmap');
+      if (!heatHost) return;
+      if (!statusFieldCode) {
+        heatHost.innerHTML = `
+        <div style="opacity:.7;">ステータスフィールドが特定できないため、滞留状況は表示できません。</div>
+      `;
+        return;
+      }
+
+      // ローディング表示
+      heatHost.innerHTML = `<div style="opacity:.7;">直近500件のステータス分布を集計中...</div>`;
+
+      try {
+        const resp = await kintone.api(
+          kintone.api.url('/k/v1/records', true),
+          'GET',
+          {
+            app: appId,
+            fields: [statusFieldCode],
+            query: 'order by $id desc limit 500'
+          }
+        );
+
+        const records = resp.records || [];
+        if (!records.length) {
+          heatHost.innerHTML = `<div style="opacity:.7;">レコードが存在しません。</div>`;
+          return;
+        }
+
+        // ステータス名 → 件数
+        const counts = {};
+        for (const r of records) {
+          const v = (r[statusFieldCode] && r[statusFieldCode].value) || '';
+          if (!v) continue;
+          counts[v] = (counts[v] || 0) + 1;
+        }
+
+        const total = records.length;
+        const maxCount = Math.max(...Object.values(counts), 0);
+
+        // configのstates順に並べる（設定されているステータスだけ出す）
+        const stateEntries = status && status.states
+          ? Object.values(status.states).sort((a, b) => (a.index ?? 0) - (b.index ?? 0))
+          : [];
+
+        if (!stateEntries.length) {
+          heatHost.innerHTML = `<div style="opacity:.7;">ステータス定義が取得できませんでした。</div>`;
+          return;
+        }
+
+        const rowsHtml = stateEntries.map(st => {
+          const name = st.name || '';
+          const c = counts[name] || 0;
+          const ratio = total ? (c / total) : 0;
+          const percent = (ratio * 100).toFixed(1);
+          const intensity = maxCount ? (c / maxCount) : 0; // 0～1
+
+          // 背景を割合に応じてグラデーション（簡易ヒートマップ）
+          const bg = intensity
+            ? `linear-gradient(to right, rgba(248,113,113,0.6) ${percent}%, transparent ${percent}%)`
+            : 'none';
+
+          return `
+          <tr>
+            <td style="padding:2px 4px;white-space:nowrap;">${name || '(未設定)'}</td>
+            <td style="padding:2px 4px;text-align:right;">${c}</td>
+            <td style="padding:2px 4px;text-align:right;">${percent}%</td>
+            <td style="padding:2px 0 2px 4px;">
+              <div style="
+                height:10px;
+                border-radius:999px;
+                background:${bg};
+                border:1px solid #fecaca;
+                min-width:40px;
+              "></div>
+            </td>
+          </tr>
+        `;
+        }).join('');
+
+        heatHost.innerHTML = `
+        <div style="margin-bottom:4px;display:flex;justify-content:space-between;align-items:center;">
+          <span>直近500件のステータス分布</span>
+          <span style="opacity:.6;">総件数：${total}</span>
+        </div>
+        <table style="width:100%;border-collapse:collapse;">
+          <thead>
+            <tr style="font-size:10px;opacity:.7;">
+              <th style="text-align:left;padding:2px 4px;">Status</th>
+              <th style="text-align:right;padding:2px 4px;">件数</th>
+              <th style="text-align:right;padding:2px 4px;">割合</th>
+              <th style="text-align:left;padding:2px 4px;">滞留ヒート</th>
+            </tr>
+          </thead>
+          <tbody style="font-size:11px;">
+            ${rowsHtml}
+          </tbody>
+        </table>
+      `;
+      } catch (e) {
+        heatHost.innerHTML = `<div style="opacity:.7;">ステータス分布の取得に失敗しました。</div>`;
+        // console.error(e);
+      }
+    })();
+
     // イベント
     el.querySelector('#kt-copy').addEventListener('click', async () => {
       await navigator.clipboard.writeText(summaryText);
@@ -738,9 +1197,17 @@
     el.querySelector('#kt-th').addEventListener('click', () => {
       const p = el.querySelector('#kt-th-panel');
       const s = el.querySelector('#kt-summary');
-      const show = p.style.display === 'none';
-      p.style.display = show ? 'block' : 'none';
-      s.style.display = show ? 'none' : 'block';
+
+      // パネルが「閉じている or 未設定」のとき → 開く
+      const showPanel = p.style.display === 'none' || p.style.display === '';
+
+      if (showPanel) {
+        p.style.display = 'block';  // 基準パネルを表示
+        s.style.display = 'none';   // サマリを隠す
+      } else {
+        p.style.display = 'none';   // 基準パネルを隠す
+        s.style.display = 'flex';   // ★ 元の display:flex に戻す
+      }
     });
 
     el.querySelector('#kt-th-reset').addEventListener('click', () => {
@@ -997,11 +1464,7 @@
     }, { passive: true });
 
     el.querySelector('#fi-dl-csv').addEventListener('click', async () => {
-      KTExport.downloadText(
-        `kintone_fields_${appId}.csv`,
-        KTExport.toCSVString(rows, FD_COLUMNS),
-        'text/csv;charset=utf-8'
-      );
+      KTExport.downloadCSV(`kintone_fields_${appId}.csv`, rows, FD_COLUMNS, { withBom: true });
     }, { passive: true });
 
     el.querySelector('#fi-dl-json').addEventListener('click', () => {
@@ -1184,11 +1647,7 @@
     }, { passive: true });
 
     el.querySelector('#kv-dl-csv').addEventListener('click', async () => {
-      KTExport.downloadText(
-        `kintone_views_${appId}.csv`,
-        KTExport.toCSVString(rows, VW_COLUMNS),
-        'text/csv;charset=utf-8'
-      );
+      KTExport.downloadCSV(`kintone_views_${appId}.csv`, rows, VW_COLUMNS, { withBom: true });
     }, { passive: true });
 
     el.querySelector('#kv-dl-json').addEventListener('click', () => {
@@ -1359,10 +1818,7 @@
     }, { passive: true });
 
     el.querySelector('#kg-dl-csv').addEventListener('click', () => {
-      KTExport.downloadText(
-        `kintone_graphs_${appId}.csv`,
-        KTExport.toCSVString(rows, GR_COLUMNS),
-        'text/csv;charset=utf-8'
+      KTExport.downloadCSV(`kintone_graphs_${appId}.csv`, rows, GR_COLUMNS,
       );
     }, { passive: true });
 
@@ -3784,8 +4240,8 @@
     renderRelations(root, relations, appId);
     renderCustomize(root, DATA, appId);
     renderTemplates(root, DATA, appId);
-    renderLinks(root);
     renderScanner(root, pick(DATA, ['appId', 'fields', 'customize']));
+    renderLinks(root);
 
   });
 
