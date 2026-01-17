@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         kintone App Toolkit
 // @namespace    https://github.com/youtotto/kintone-app-toolkit
-// @version      1.8.3
+// @version      1.8.4
 // @description  kintone開発をブラウザで完結。アプリ分析・コード生成・ドキュメント編集を備えた開発支援ツールキット。
 // @match        https://*.cybozu.com/k/*/
 // @match        https://*.cybozu.com/k/*/?view=*
@@ -19,7 +19,7 @@
 // ==/UserScript==
 (function () {
   'use strict';
-  const SCRIPT_VERSION = '1.8.3';
+  const SCRIPT_VERSION = '1.8.4';
 
   if (window.mermaid && typeof window.mermaid.run === 'function') {
     try {
@@ -28,7 +28,6 @@
       // console.error(e);
     }
   }
-
 
   /** ----------------------------
   * readiness / api helpers
@@ -727,6 +726,8 @@
       }
     }
 
+    let processMermaidCode = '';
+
     // --- 描画 ---
     el.innerHTML = `
     <div style="display:flex;flex-direction:column;height:100%;gap:12px;">
@@ -953,9 +954,13 @@
         ">
           <div style="font-size:12px;font-weight:600;margin-bottom:4px;display:flex;justify-content:space-between;align-items:center;">
             <span>Process flow (Mermaid)</span>
-            <span style="font-size:11px;opacity:.7;">
-              ステータス遷移をざっくり確認できます
-            </span>
+
+            <div style="display:flex;gap:6px;align-items:center;">
+              <span style="font-size:11px;opacity:.7;">ステータス遷移をざっくり確認できます</span>
+              <button id="kt-copy-mermaid" class="btn" style="padding:2px 8px;font-size:11px;">
+                Copy code
+              </button>
+            </div>
           </div>
           <div id="kt-process-diagram">
             <!-- ここにMermaid or メッセージを描画 -->
@@ -1041,6 +1046,7 @@
     const processHost = el.querySelector('#kt-process-diagram');
     if (processHost) {
       const code = buildProcessMermaid(status);
+      processMermaidCode = code || '';
       if (code) {
         const id = `kt-process-mermaid-${appId}`;
 
@@ -1187,12 +1193,54 @@
       }
     })();
 
+    const copyText = async (text) => {
+      if (!text) return false;
+
+      // 標準 Clipboard API
+      if (navigator.clipboard && window.isSecureContext) {
+        try {
+          await navigator.clipboard.writeText(text);
+          return true;
+        } catch (e) {
+          // fall through
+        }
+      }
+
+      // フォールバック（古い環境/制限時）
+      try {
+        const ta = document.createElement('textarea');
+        ta.value = text;
+        ta.setAttribute('readonly', '');
+        ta.style.position = 'fixed';
+        ta.style.top = '-1000px';
+        ta.style.left = '-1000px';
+        document.body.appendChild(ta);
+        ta.select();
+        const ok = document.execCommand('copy');
+        document.body.removeChild(ta);
+        return !!ok;
+      } catch (e) {
+        return false;
+      }
+    };
+
     // イベント
     el.querySelector('#kt-copy').addEventListener('click', async () => {
       await navigator.clipboard.writeText(summaryText);
       const b = el.querySelector('#kt-copy'); const old = b.textContent;
       b.textContent = 'Copied!'; setTimeout(() => (b.textContent = old), 1200);
     });
+
+    const copyMermaidBtn = el.querySelector('#kt-copy-mermaid');
+    if (copyMermaidBtn) {
+      copyMermaidBtn.addEventListener('click', async () => {
+        const ok = await copyText(processMermaidCode);
+
+        const old = copyMermaidBtn.textContent;
+        copyMermaidBtn.textContent = ok ? 'Copied!' : 'Copy failed';
+        setTimeout(() => (copyMermaidBtn.textContent = old), 1200);
+      });
+    }
 
     el.querySelector('#kt-th').addEventListener('click', () => {
       const p = el.querySelector('#kt-th-panel');
@@ -2270,7 +2318,7 @@
     // GitHub設定
     const GH = {
       owner: 'youtotto',
-      repo: 'kintoneCustomizeJS',
+      repo: 'kintone-Customize-template',
       dirs: { templates: 'js', snippets: 'snippets', documents: 'documents' },
       endpoint(dir) { return `https://api.github.com/repos/${this.owner}/${this.repo}/contents/${encodeURIComponent(dir)}`; },
       cacheKey(kind) { return `kt_tpl_cache_ui_${kind}`; }
@@ -2360,6 +2408,7 @@
       const isDocs = ($sourceSel.value === 'documents');
       // 表示/非表示
       $btnAIReq.style.display = isDocs ? '' : 'none';
+      $insert.style.display = isDocs ? 'none' : '';
       if (!isDocs) return;
 
       // documents のときは内容があれば有効化
@@ -2936,7 +2985,7 @@
     // === GitHub: snippetsのみ ===
     const GH = {
       owner: 'youtotto',
-      repo: 'kintoneCustomizeJS',
+      repo: 'kintone-Customize-template',
       dirs: { snippets: 'snippets' },
       endpoint(dir) { return `https://api.github.com/repos/${this.owner}/${this.repo}/contents/${encodeURIComponent(dir)}`; },
     };
