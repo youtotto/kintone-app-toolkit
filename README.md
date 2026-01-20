@@ -14,6 +14,7 @@
   - [Relations](#relationsタブ)
   - [Templates](#templates新機能)
   - [Customize](#-customize-タブの特徴)
+  - [Plugins](#pluginsnew)
   - [Field Scanner](#field-scannernew)
   - [Links](#links)
 - [導入方法](#-導入方法)
@@ -37,6 +38,7 @@ Toolkitは、kintone開発を標準化・効率化するための **Tampermonkey
 - ✅ **Relations**: ルックアップ / 関連レコード / アクションの参照関係を一覧化
 - ✅ **Templates**: GitHub テンプレート / スニペット / ドキュメント + Monaco エディタ
 - ✅ **Customize**: JSEdit互換の編集体験を統合（プレビュー保存＆デプロイ対応）
+- ✅ **Plugins**: アプリ単位のプラグイン管理（preview / prod / 差分 / deploy）
 - ✅ **Field Scanner**: JS/CSS 内の **フィールド使用箇所** を自動解析（MD/CSV/JSON）
 - ✅ **Links**: 公式・コミュニティ・ライブラリのリンク集（favicon取得の安定化済み）
 
@@ -87,7 +89,7 @@ kintoneアプリの参照関係（ルックアップ・関連レコード・ア�
 
 ---
 
-### Templates（新機能）
+### Templates
 ブラウザだけで完結する kintone カスタマイズ体験。  
 - **GitHub連携**：`youtotto/kintoneCustomizeJS` から Templates / Snippets / Documents を取得
 - **エディタ**：Monaco + Markdown / 補完 / 自動レイアウト
@@ -104,6 +106,25 @@ kintoneアプリの参照関係（ルックアップ・関連レコード・ア�
 - **保存＋デプロイ**のワンボタン化（preview更新 / deploy完了検知）
 <img width="1623" height="973" alt="スクリーンショット 2025-11-07 165409" src="https://github.com/user-attachments/assets/8eeef58a-22ef-4fee-b7cb-7e5c3f05319f" />
 
+---
+
+### Plugins（New!）
+アプリにインストールされている **プラグイン構成を可視化・管理**します。  
+**システム管理者専用**の安全設計です。
+
+**主な機能**
+- 本番（prod）/ プレビュー（preview）のプラグイン一覧表示
+- preview へのプラグイン追加
+- prod / preview の **差分表示**
+- **Deploy ワークフロー**（preview → deploy → 完了待ち）
+- プラグイン数が多くても破綻しない **タブ内スクロールUI**
+
+**安全設計**
+- システム管理者のみ利用可能
+- REST API による「未許可プラグイン追加」の誤操作を防止
+- 明示操作時のみ変更系APIを実行
+
+> ※ preview に追加後、deploy を実行することで本番へ反映されます。
 
 ---
 
@@ -198,6 +219,7 @@ kintoneアプリの参照関係（ルックアップ・関連レコード・ア�
 | 1.8.1 | 2025-11-20 | UI改善（高さ統一・新バージョン表記） / Customize 新規ファイル追加 / Templates GitHub 説明リンク追加 |
 | 1.8.3 | 2025-11-29 | 機能: ヘルスタブのUIを改善し、CSVエクスポートにBOMを追加 |
 | 1.8.4 | 2026-01-17 | 機能: プロセスフロー図のMermaid codeのコピー機能を追加 |
+| 1.9.0 | 2026-01-20 | **Plugins タブ追加**（管理者限定 / preview→deploy / 差分表示） |
 
 ---
 

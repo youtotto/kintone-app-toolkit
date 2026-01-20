@@ -1,10 +1,11 @@
 // ==UserScript==
 // @name         kintone App Toolkit
 // @namespace    https://github.com/youtotto/kintone-app-toolkit
-// @version      1.8.4
+// @version      1.9.0
 // @description  kintone開発をブラウザで完結。アプリ分析・コード生成・ドキュメント編集を備えた開発支援ツールキット。
 // @match        https://*.cybozu.com/k/*/
 // @match        https://*.cybozu.com/k/*/?view=*
+// @exclude      https://*.cybozu.com/k/admin/*
 // @connect      api.github.com
 // @connect      raw.githubusercontent.com
 // @connect      cdn.jsdelivr.net
@@ -19,7 +20,7 @@
 // ==/UserScript==
 (function () {
   'use strict';
-  const SCRIPT_VERSION = '1.8.4';
+  const SCRIPT_VERSION = '1.9.0';
 
   if (window.mermaid && typeof window.mermaid.run === 'function') {
     try {
@@ -56,7 +57,7 @@
     const api = (path, extra = {}) => getImpl(path, { app: appId, ...extra });
 
     const [
-      fields, layout, views, reports, status, notifs, customize, acl, actions
+      fields, layout, views, reports, status, notifs, customize, acl, actions, plugins
     ] = await Promise.all([
       kintone.app.getFormFields(),
       kintone.app.getFormLayout(),
@@ -67,6 +68,7 @@
       opt(api('/k/v1/app/customize')),
       opt(api('/k/v1/app/acl')),
       opt(api('/k/v1/app/actions')),
+      opt(api('/k/v1/plugins')),
     ]);
 
     // 生データを読み取り専用で返す（派生計算は別レイヤで）
@@ -81,6 +83,7 @@
       customize,  // /k/v1/app/customize           （null可）
       acl,        // /k/v1/app/acl                 （null可）
       actions,    // /k/v1/app/actions             （null可）
+      plugins,     // /k/v1/plugins  
     });
   }
 
@@ -370,6 +373,7 @@
     return monacoEditor;
   }
 
+
   /** ----------------------------
   * UI Root (tabs)
   * ---------------------------- */
@@ -515,6 +519,7 @@
           <button id="tab-relations" class="tab">Relations</button>
           <button id="tab-templates" class="tab">Templates</button>
           <button id="tab-customize" class="tab">Customize</button>
+          <button id="tab-plugins" class="tab">Plugins</button>
           <button id="tab-field-scanner" class="tab">Field Scanner</button>
           <button id="tab-links" class="tab">Links</button>
         </div>
@@ -534,8 +539,9 @@
         <div id="view-relations" style="display:none"></div>
         <div id="view-templates" style="display:none"></div>
         <div id="view-customize" style="display:none"></div>
-        <div id="view-links" style="display:none"></div>
         <div id="view-field-scanner" style="display:none"></div>
+        <div id="view-plugins" style="display:none;"></div>
+        <div id="view-links" style="display:none"></div>
       </div>
     `;
 
@@ -577,6 +583,7 @@
       wrap.querySelector('#view-relations').style.display = idShow === 'relations' ? 'block' : 'none';
       wrap.querySelector('#view-templates').style.display = idShow === 'templates' ? 'block' : 'none';
       wrap.querySelector('#view-customize').style.display = idShow === 'customize' ? 'block' : 'none';
+      wrap.querySelector('#view-plugins').style.display = idShow === 'plugins' ? 'block' : 'none';
       wrap.querySelector('#view-field-scanner').style.display = idShow === 'field-scanner' ? 'block' : 'none';
       wrap.querySelector('#view-links').style.display = idShow === 'links' ? 'block' : 'none';
     };
@@ -587,6 +594,7 @@
     wrap.querySelector('#tab-relations').addEventListener('click', () => switchTab('relations'), { passive: true });
     wrap.querySelector('#tab-templates').addEventListener('click', () => switchTab('templates'), { passive: true });
     wrap.querySelector('#tab-customize').addEventListener('click', () => switchTab('customize'), { passive: true });
+    wrap.querySelector('#tab-plugins').addEventListener('click', () => switchTab('plugins'), { passive: true });
     wrap.querySelector('#tab-field-scanner').addEventListener('click', () => switchTab('field-scanner'), { passive: true });
     wrap.querySelector('#tab-links').addEventListener('click', () => switchTab('links'), { passive: true });
     return wrap;
@@ -4266,6 +4274,359 @@
   }
 
 
+  /** --------------------------------------------------------
+   * Plugins view (Toolkit tab: plug-in)
+   * DATA: { appId, plugins }
+   *   - appId: number
+   *   - plugins: (array) or ({plugins:[...]})
+   * -------------------------------------------------------- */
+  async function renderPlugins(root, DATA) {
+    const view = root.querySelector('#view-plugins');
+    if (!view) return;
+
+    // ★ ここでガード
+    const ok = await kintone.system.getPermissions();
+    if (!ok) {
+      view.innerHTML = `
+        <div style="padding:12px; border:1px solid #ddd; border-radius:10px;">
+          <div style="font-weight:700; margin-bottom:6px;">🔒 plug-in タブ（管理者専用）</div>
+          <div style="opacity:.8; font-size:12px; line-height:1.6;">
+            この機能は <b>システム管理者</b> のみ利用できます。<br/>
+            ※ REST API では、UIで「利用許可されていないプラグイン」も追加できてしまうため、
+            誤操作防止として制限しています。
+          </div>
+        </div>
+      `;
+      return;
+    }
+
+    const app = Number(DATA?.appId || (kintone.app?.getId?.() ?? 0));
+
+    const installedRaw = DATA?.plugins;
+    const installed =
+      Array.isArray(installedRaw) ? installedRaw :
+        Array.isArray(installedRaw?.plugins) ? installedRaw.plugins :
+          [];
+
+    const isDark = matchMedia('(prefers-color-scheme: dark)').matches;
+    const BG = isDark ? '#1b1b1b' : '#fff';
+    const BD = isDark ? '#333' : '#ddd';
+
+    // 使い回しボタンCSS
+    if (!document.getElementById('kt-plugins-inline-style')) {
+      const st = document.createElement('style');
+      st.id = 'kt-plugins-inline-style';
+      st.textContent = `
+        .btn {
+          border: 1px solid ${BD};
+          background: ${isDark ? '#1e1e1e' : '#fff'};
+          color: ${isDark ? '#eee' : '#111'};
+          border-radius: 8px;
+          line-height: 1;
+          cursor: pointer;
+        }
+        .btn:disabled { opacity: .5; cursor: not-allowed; }
+        .btn:not(:disabled):hover { filter: brightness(${isDark ? 1.1 : 0.98}); }
+        .kt-row { border-bottom: 1px solid ${BD}; }
+        .kt-row:hover { background:${isDark ? '#111' : '#fafafa'}; }
+        .kt-pill { display:inline-flex; align-items:center; gap:6px; border:1px solid ${BD}; border-radius:999px; padding:2px 8px; font-size:11px; opacity:.85; }
+        .kt-muted { opacity:.75; }
+        .kt-danger { color:${isDark ? '#ffb4b4' : '#b00020'}; }
+      `;
+      document.head.appendChild(st);
+    }
+
+    if (!app) {
+      view.innerHTML = `<div style="padding:12px" class="kt-danger">appId が取得できません（アプリ画面で開いてください）</div>`;
+      return;
+    }
+
+    const api = (path, method, params) =>
+      kintone.api(kintone.api.url(path, true), method, params);
+
+    const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+    async function waitDeploy(appId) {
+      const maxWaitMs = 60_000, intervalMs = 1500;
+      let waited = 0;
+      while (true) {
+        await sleep(intervalMs);
+        waited += intervalMs;
+        const st = await api('/k/v1/preview/app/deploy.json', 'GET', { apps: [Number(appId)] });
+        const s = st?.apps?.[0]?.status;
+        if (s === 'SUCCESS') return;
+        if (s === 'FAIL') throw new Error('Deploy failed.');
+        if (waited >= maxWaitMs) throw new Error('Deploy timeout.');
+      }
+    }
+
+    // --- UI ---
+    const PANEL_H = '70vh';
+
+    view.innerHTML = `
+      <div style="
+        height:${PANEL_H};
+        min-height:0;
+        display:flex;
+        gap:14px;
+        align-items:stretch;
+        overflow:hidden;   /* ← 外に溢れさせない */
+      ">
+        <div style="flex:1.15; min-width:320px; display:flex; flex-direction:column; gap:10px; min-height:0;">
+          <div style="display:flex; align-items:center; justify-content:space-between;">
+            <div style="font-weight:700;">App Plugins</div>
+            <div class="kt-muted" style="font-size:12px;">app: <b>${app}</b></div>
+          </div>
+
+          <div style="display:flex; gap:8px; flex-wrap:wrap;">
+            <button id="kt-plg-reload" class="btn" style="height:32px; padding:0 12px;">↻ 再取得</button>
+            <button id="kt-plg-deploy" class="btn" style="height:32px; padding:0 12px;" disabled>🚀 deploy</button>
+          </div>
+
+          <div id="kt-plg-status" style="border:1px solid ${BD}; border-radius:10px; background:${isDark ? '#0f0f0f' : '#fafafa'}; padding:10px 12px; font-size:12px;">
+            読み込み中...
+          </div>
+
+          <div style="display:flex; gap:10px; min-height:0; flex:1;">
+            <div style="flex:1; min-width:0; display:flex; flex-direction:column; min-height:0;">
+              <div style="display:flex; align-items:center; justify-content:space-between; margin:6px 0;">
+                <div style="font-weight:600;">本番</div><span class="kt-pill">prod</span>
+              </div>
+              <div id="kt-plg-prod" style="flex:1; min-height:0; overflow:auto; border:1px solid ${BD}; border-radius:10px; background:${BG};"></div>
+            </div>
+            <div style="flex:1; min-width:0; display:flex; flex-direction:column; min-height:0;">
+              <div style="display:flex; align-items:center; justify-content:space-between; margin:6px 0;">
+                <div style="font-weight:600;">プレビュー</div><span class="kt-pill">preview</span>
+              </div>
+              <div id="kt-plg-prev" style="flex:1; min-height:0; overflow:auto; border:1px solid ${BD}; border-radius:10px; background:${BG};"></div>
+            </div>
+          </div>
+
+          <div id="kt-plg-diff" style="border:1px dashed ${BD}; border-radius:10px; padding:10px 12px; font-size:12px; background:${isDark ? '#101010' : '#fff'};">
+            差分: -
+          </div>
+        </div>
+
+        <div style="flex:1; min-width:360px; display:flex; flex-direction:column; gap:10px; min-height:0;">
+          <div style="display:flex; align-items:center; justify-content:space-between;">
+            <div style="font-weight:700;">Installed Plugins (Domain)</div>
+            <span class="kt-pill">${installed.length}件</span>
+          </div>
+
+          <div style="display:flex; gap:8px; align-items:center;">
+            <input id="kt-plg-search" placeholder="検索（名前/説明/ID）"
+              style="flex:1; height:32px; padding:0 10px; border-radius:8px; border:1px solid ${BD}; background:transparent; color:inherit;" />
+            <button id="kt-plg-add" class="btn" style="height:32px; padding:0 12px;" disabled>＋ previewに追加</button>
+          </div>
+
+          <div class="kt-muted" style="font-size:12px;">
+            ※ previewへ追加後、deployで本番反映されます。
+          </div>
+
+          <div id="kt-plg-catalog" style="flex:1; min-height:0; overflow:auto; border:1px solid ${BD}; border-radius:10px; background:${BG};"></div>
+
+          <div id="kt-plg-log" style="border:1px solid ${BD}; border-radius:10px; padding:10px 12px; font-size:12px; background:${isDark ? '#0f0f0f' : '#fafafa'};">
+            ログ: -
+          </div>
+        </div>
+      </div>
+    `;
+
+    const $status = view.querySelector('#kt-plg-status');
+    const $prod = view.querySelector('#kt-plg-prod');
+    const $prev = view.querySelector('#kt-plg-prev');
+    const $diff = view.querySelector('#kt-plg-diff');
+
+    const $reload = view.querySelector('#kt-plg-reload');
+    const $deploy = view.querySelector('#kt-plg-deploy');
+
+    const $search = view.querySelector('#kt-plg-search');
+    const $add = view.querySelector('#kt-plg-add');
+    const $catalog = view.querySelector('#kt-plg-catalog');
+    const $log = view.querySelector('#kt-plg-log');
+
+    const esc = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    const setLog = (m) => ($log.textContent = `ログ: ${m}`);
+
+    let prodRes = null;
+    let prevRes = null;
+    let selected = new Set();
+
+    const metaMap = new Map(installed.map(p => [p.id, p]));
+
+    function rowSimple(id) {
+      const m = metaMap.get(id) || {};
+      const el = document.createElement('div');
+      el.className = 'kt-row';
+      el.style.cssText = `padding:8px 10px; display:flex; gap:8px; align-items:center;`;
+      el.innerHTML = `
+      <div class="kt-pill">PLG</div>
+      <div style="flex:1; min-width:0;">
+        <div style="font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">${esc(m.name || id)}</div>
+        <div class="kt-muted" style="font-size:11px;">${esc(id)}</div>
+      </div>
+    `;
+      return el;
+    }
+
+    function renderApp() {
+      const prodIds = (prodRes?.plugins || []).map(x => x.id || x).filter(Boolean);
+      const prevIds = (prevRes?.plugins || []).map(x => x.id || x).filter(Boolean);
+
+      $prod.innerHTML = '';
+      $prev.innerHTML = '';
+      if (!prodIds.length) $prod.innerHTML = `<div style="padding:10px 12px" class="kt-muted">（なし）</div>`;
+      else prodIds.forEach(id => $prod.appendChild(rowSimple(id)));
+      if (!prevIds.length) $prev.innerHTML = `<div style="padding:10px 12px" class="kt-muted">（なし）</div>`;
+      else prevIds.forEach(id => $prev.appendChild(rowSimple(id)));
+
+      const prodSet = new Set(prodIds), prevSet = new Set(prevIds);
+      const onlyProd = [...prodSet].filter(x => !prevSet.has(x));
+      const onlyPrev = [...prevSet].filter(x => !prodSet.has(x));
+
+      $diff.innerHTML = `
+      <div style="font-weight:700;">差分</div>
+      <div class="kt-muted" style="margin-top:6px;">本番のみ: ${onlyProd.length} / previewのみ: ${onlyPrev.length}</div>
+    `;
+
+      $deploy.disabled = !(onlyProd.length || onlyPrev.length);
+    }
+
+    function renderCatalog(filterText = '') {
+      const t = (filterText || '').trim().toLowerCase();
+      $catalog.innerHTML = '';
+
+      const list = installed
+        .filter(p => {
+          if (!t) return true;
+          const hay = `${p.id} ${p.name || ''} ${p.description || ''}`.toLowerCase();
+          return hay.includes(t);
+        })
+        .sort((a, b) => (a.name || '').localeCompare((b.name || ''), 'ja'));
+
+      if (!list.length) {
+        $catalog.innerHTML = `<div style="padding:10px 12px" class="kt-muted">該当なし</div>`;
+        return;
+      }
+
+      const prevIds = new Set((prevRes?.plugins || []).map(x => x.id || x).filter(Boolean));
+      const frag = document.createDocumentFragment();
+
+      list.forEach(p => {
+        const id = p.id;
+        const el = document.createElement('label');
+        el.className = 'kt-row';
+        el.style.cssText = `display:flex; gap:10px; padding:10px 12px; align-items:flex-start; cursor:pointer;`;
+        el.innerHTML = `
+        <input type="checkbox" ${selected.has(id) ? 'checked' : ''} style="margin-top:3px;" />
+        <div style="flex:1; min-width:0;">
+          <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
+            <div style="font-weight:600;">${esc(p.name || '(no name)')}</div>
+            ${p.version ? `<span class="kt-pill">v${esc(p.version)}</span>` : ''}
+            ${prevIds.has(id) ? `<span class="kt-pill">IN PREVIEW</span>` : ''}
+          </div>
+          <div class="kt-muted" style="font-size:12px; margin-top:4px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">
+            ${esc(p.description || '')}
+          </div>
+          <div class="kt-muted" style="font-size:11px; margin-top:4px;">id: ${esc(id)}</div>
+        </div>
+      `;
+        const $cb = el.querySelector('input');
+        el.addEventListener('click', (e) => {
+          if (e.target !== $cb) $cb.checked = !$cb.checked;
+          if ($cb.checked) selected.add(id);
+          else selected.delete(id);
+          $add.disabled = selected.size === 0;
+        });
+        frag.appendChild(el);
+      });
+
+      $catalog.appendChild(frag);
+    }
+
+    async function reload() {
+      try {
+        setLog('読み込み中...');
+        $status.textContent = '読み込み中...';
+
+        prodRes = await api('/k/v1/app/plugins.json', 'GET', { app });
+        prevRes = await api('/k/v1/preview/app/plugins.json', 'GET', { app });
+
+        $status.innerHTML = `
+        <div>本番: <b>${(prodRes?.plugins || []).length}</b> / preview: <b>${(prevRes?.plugins || []).length}</b></div>
+        <div class="kt-muted" style="margin-top:6px;">右の一覧から preview に追加 → deploy</div>
+      `;
+
+        renderApp();
+        renderCatalog($search.value || '');
+        setLog('OK');
+      } catch (e) {
+        console.error(e);
+        $status.innerHTML = `<div class="kt-danger">取得に失敗: ${esc(e?.message || e)}</div>`;
+        setLog(`NG: ${e?.message || e}`);
+      }
+    }
+
+    // events
+    $search.addEventListener('input', () => renderCatalog($search.value || ''), { passive: true });
+    $reload.addEventListener('click', reload);
+
+    $add.addEventListener('click', async (ev) => {
+      const btn = ev.currentTarget;
+      btn.disabled = true;
+      try {
+        const ids = [...selected];
+        if (!ids.length) return;
+
+        // 既にpreviewにあるものは除外
+        const prevIds = new Set((prevRes?.plugins || []).map(x => x.id || x).filter(Boolean));
+        const toAdd = ids.filter(id => !prevIds.has(id));
+        if (!toAdd.length) { setLog('追加対象なし（全てpreviewに存在）'); return; }
+
+        setLog(`previewに追加中... (${toAdd.length})`);
+        await api('/k/v1/preview/app/plugins.json', 'POST', { app, ids: toAdd });
+
+        // preview再取得
+        prevRes = await api('/k/v1/preview/app/plugins.json', 'GET', { app });
+
+        selected.clear();
+        renderApp();
+        renderCatalog($search.value || '');
+
+        setLog(`previewに追加しました: ${toAdd.length}件`);
+      } catch (e) {
+        console.error(e);
+        setLog(`NG: ${e?.message || e}`);
+        alert(`❌ 追加に失敗: ${e?.message || e}`);
+      } finally {
+        $add.disabled = selected.size === 0;
+      }
+    });
+
+    $deploy.addEventListener('click', async (ev) => {
+      const btn = ev.currentTarget;
+      btn.disabled = true;
+      try {
+        setLog('deploy開始...');
+        await api('/k/v1/preview/app/deploy.json', 'POST', { apps: [{ app, revision: -1 }], revert: false });
+        await waitDeploy(app);
+
+        await reload();
+        setLog('✅ deploy完了');
+        alert('✅ deploy完了（preview→本番）');
+      } catch (e) {
+        console.error(e);
+        setLog(`NG: ${e?.message || e}`);
+        alert(`❌ deploy失敗: ${e?.message || e}`);
+      } finally {
+        // reloadで差分判定されるのでここでは触らない
+      }
+    });
+
+    // init
+    await reload();
+  }
+
+
   /** ----------------------------
   * boot
   * ---------------------------- */
@@ -4290,6 +4651,7 @@
     renderCustomize(root, DATA, appId);
     renderTemplates(root, DATA, appId);
     renderScanner(root, pick(DATA, ['appId', 'fields', 'customize']));
+    renderPlugins(root, pick(DATA, ['appId', 'plugins']));
     renderLinks(root);
 
   });
