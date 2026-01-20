@@ -74,10 +74,9 @@ Toolkitは、kintone開発を標準化・効率化するための **Tampermonkey
 - Export: **Copy MD / Download MD / Copy CSV / Download CSV**
 <img width="1606" height="771" alt="image" src="https://github.com/user-attachments/assets/48490fc3-d3b8-4057-b98a-0e2683988ecf" />
 
-
 ---
 
-### Relationsタブ
+### Relations
 kintoneアプリの参照関係（ルックアップ・関連レコード・アクション）を一覧化。  
 構造理解と影響範囲の把握を支援します。
 | セクション | 内容 |
@@ -100,7 +99,7 @@ kintoneアプリの参照関係（ルックアップ・関連レコード・ア�
 
 ---
 
-### ✨ Customize タブの特徴
+### ✨ Customize
 - **JSEdit互換** + Toolkit UIに統合
 - Snippets 連携（GitHub `snippets/` / プレビュー→エディタ挿入）
 - **保存＋デプロイ**のワンボタン化（preview更新 / deploy完了検知）
@@ -125,6 +124,8 @@ kintoneアプリの参照関係（ルックアップ・関連レコード・ア�
 - 明示操作時のみ変更系APIを実行
 
 > ※ preview に追加後、deploy を実行することで本番へ反映されます。
+
+<img width="1086" height="720" alt="image" src="https://github.com/user-attachments/assets/2e433ed3-78c5-4f0b-bb1b-19e5e6c16907" />
 
 ---
 
