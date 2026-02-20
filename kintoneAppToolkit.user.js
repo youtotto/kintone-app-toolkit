@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         kintone App Toolkit
 // @namespace    https://github.com/youtotto/kintone-app-toolkit
-// @version      1.9.0
+// @version      1.9.1
 // @description  kintone開発をブラウザで完結。アプリ分析・コード生成・ドキュメント編集を備えた開発支援ツールキット。
 // @match        https://*.cybozu.com/k/*/
 // @match        https://*.cybozu.com/k/*/?view=*
@@ -1337,6 +1337,31 @@
         }
 
         return `組織:${String(e ?? '')}`;
+      }).join(', ');
+    }
+
+    // 例：['group1', 'group2'] または [{ code:'group1', type:'GROUP' }, { code:'LOGINUSERGROUPS()', type:'FUNCTION' }]
+    if (t === 'GROUP_SELECT') {
+      const arr = Array.isArray(dv) ? dv : [];
+      return arr.map(e => {
+        if (e && typeof e === 'object') {
+          const kind = e.type;
+          const code = e.code;
+
+          if (kind === 'FUNCTION') {
+            // よく使いそうなものだけラベル化（未知はそのまま表示）
+            if (code === 'LOGINUSERGROUPS()') return 'ログインユーザーの所属グループ';
+            return code || '';
+          }
+          if (kind === 'GROUP') return `グループ:${code}`;
+          // 念のため（万一混ざってても壊れないように）
+          if (kind === 'USER') return `ユーザー:${code}`;
+          if (kind === 'ORGANIZATION') return `組織:${code}`;
+          return String(code ?? '');
+        }
+
+        // 文字列配列のとき
+        return `グループ:${String(e ?? '')}`;
       }).join(', ');
     }
 
