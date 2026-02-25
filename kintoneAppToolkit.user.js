@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         kintone App Toolkit
 // @namespace    https://github.com/youtotto/kintone-app-toolkit
-// @version      1.9.1
+// @version      2.0.0
 // @description  kintone開発をブラウザで完結。アプリ分析・コード生成・ドキュメント編集を備えた開発支援ツールキット。
 // @match        https://*.cybozu.com/k/*/
-// @match        https://*.cybozu.com/k/*/?view=*
+// @match        https://*.cybozu.com/k/*/?*view=*
 // @exclude      https://*.cybozu.com/k/admin/*
 // @connect      api.github.com
 // @connect      raw.githubusercontent.com
@@ -20,7 +20,7 @@
 // ==/UserScript==
 (function () {
   'use strict';
-  const SCRIPT_VERSION = '1.9.0';
+  const SCRIPT_VERSION = '2.0.0';
 
   if (window.mermaid && typeof window.mermaid.run === 'function') {
     try {
@@ -38,7 +38,6 @@
     const t = setInterval(() => { if (appReady()) { clearInterval(t); res(); } }, 50);
     setTimeout(() => { clearInterval(t); res(); }, 10000);
   });
-  const escHTML = v => String(v ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;');
 
   // ---- GET ラッパ（必要なら差し替え可） ----
   const kGet = (path, params) =>
@@ -57,16 +56,21 @@
     const api = (path, extra = {}) => getImpl(path, { app: appId, ...extra });
 
     const [
-      fields, layout, views, reports, status, notifs, customize, acl, actions, plugins
+      fields, layout, views, reports, status, generalNotify, perRecordNotify, reminderNotify,
+      customize, appAcl, recordAcl, fieldAcl, actions, plugins,
     ] = await Promise.all([
       kintone.app.getFormFields(),
       kintone.app.getFormLayout(),
       opt(api('/k/v1/app/views')),
       opt(api('/k/v1/app/reports')),
       opt(api('/k/v1/app/status')),
-      opt(api('/k/v1/app/notifications/general')),
+      opt(api('/k/v1/app/notifications/general', true)),
+      opt(api('/k/v1/app/notifications/perRecord')),
+      opt(api('/k/v1/app/notifications/reminder')),
       opt(api('/k/v1/app/customize')),
-      opt(api('/k/v1/app/acl')),
+      opt(api('/k/v1/app/acl', true)),
+      opt(api('/k/v1/record/acl', true)),
+      opt(api('/k/v1/field/acl', true)),
       opt(api('/k/v1/app/actions')),
       opt(api('/k/v1/plugins')),
     ]);
@@ -79,9 +83,13 @@
       views,      // /k/v1/app/views               （null可）
       reports,    // /k/v1/app/reports             （null可）
       status,     // /k/v1/app/status              （null可）
-      notifs,     // /k/v1/app/notifications/general（null可）
+      generalNotify,    // /k/v1/app/notifications/general
+      perRecordNotify,  // /k/v1/app/notifications/perRecord
+      reminderNotify,   // /k/v1/app/notifications/reminder
       customize,  // /k/v1/app/customize           （null可）
-      acl,        // /k/v1/app/acl                 （null可）
+      appAcl,   // /k/v1/app/acl
+      recordAcl,    // /k/v1/record/acl
+      fieldAcl,   // /k/v1/field/acl
       actions,    // /k/v1/app/actions             （null可）
       plugins,     // /k/v1/plugins  
     });
@@ -210,6 +218,29 @@
       hide() { node?.remove(); node = null; }
     };
   })();
+
+  const escapeHtml = (v) => String(v ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;'); // 必要に応じて追加
+
+  // テーマカラーを返す共通関数
+  function getThemeColors() {
+    const isDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+    return {
+      isDark,
+      bg: isDark ? '#111' : '#F5F5F5',
+      bgSub: isDark ? '#1d1d1d' : '#eee',
+      bgSub2: isDark ? '#1b1b1b' : '#e0e0e0',
+      bgInput: isDark ? '#0f0f0f' : '#fff',
+      text: isDark ? '#fff' : '#111',
+      textSub: isDark ? '#ddd' : '#333',
+      border: isDark ? '#2a2a2a' : '#ccc',
+      border2: isDark ? '#333' : '#bbb',
+      border3: isDark ? '#222' : '#ddd',
+    };
+  }
 
   // ==============================
   // KTExport: CSV/Markdown/DL/Copy 共通ユーティリティ
@@ -355,7 +386,7 @@
     monacoEditor = monaco.editor.create(el, {
       value: initialCode,
       language: 'javascript',
-      theme: matchMedia('(prefers-color-scheme: dark)').matches ? 'vs-dark' : 'vs',
+      theme: getThemeColors().isDark ? 'vs-dark' : 'vs',
       automaticLayout: true,
       fontSize: 12,
       minimap: { enabled: false },
@@ -379,30 +410,8 @@
   * ---------------------------- */
   const mountRoot = () => {
     // 1. ライトモード/ダークモードの判定
-    const isDarkMode = window.matchMedia('(prefers-color-scheme: dark)').matches;
-
-    // 2. 色の変数を定義 (D: Dark, L: Light)
-    const C = isDarkMode ? {
-      bg: '#111',       // メイン背景
-      bgSub: '#1d1d1d',  // ボタン/タブ背景
-      bgSub2: '#1b1b1b', // Pill背景
-      bgInput: '#0f0f0f',// 入力欄背景
-      text: '#fff',      // メインテキスト
-      textSub: '#ddd',   // Pillテキスト
-      border: '#2a2a2a', // メインボーダー
-      border2: '#333',   // thボーダー, pillボーダー
-      border3: '#222',   // tdボーダー
-    } : {
-      bg: '#F5F5F5',      // (L) メイン背景
-      bgSub: '#eee',       // (L) ボタン/タブ背景
-      bgSub2: '#e0e0e0',     // (L) Pill背景
-      bgInput: '#fff',     // (L) 入力欄背景
-      text: '#111',      // (L) メインテキスト (黒)
-      textSub: '#333',    // (L) Pillテキスト
-      border: '#ccc',      // (L) メインボーダー
-      border2: '#bbb',     // (L) thボーダー, pillボーダー
-      border3: '#ddd',     // (L) tdボーダー
-    };
+    const C = getThemeColors();
+    const isDarkMode = C.isDark;
 
     const githubURL = 'https://github.com/youtotto/kintone-app-toolkit';
     const favicon = `https://www.google.com/s2/favicons?domain=${encodeURIComponent(githubURL)}&sz=64`;
@@ -410,14 +419,23 @@
     const wrap = document.createElement('div');
     wrap.id = 'kt-toolkit';
     wrap.style.cssText = `
-      position:fixed; right:16px; bottom:16px; z-index:9998;
+      position:fixed; right:16px; z-index:9998;
       background:${C.bg}; color:${C.text}; border-radius:12px;
       box-shadow:0 8px 30px rgba(0,0,0,${isDarkMode ? '.35' : '.15'});
-      font:12px/1.5 ui-sans-serif,system-ui; width:min(1080px, 95vw); max-height:80vh; overflow:auto;
+      font:12px/1.5 ui-sans-serif,system-ui; width:min(1280px, 95vw); max-height:85vh; overflow:auto;
       border:1px solid ${C.border};
     `;
     wrap.innerHTML = `
       <style>
+        #kt-toolkit {
+          bottom: 16px;
+          transition: bottom .18s ease;
+        }
+
+        #kt-toolkit.is-mini {
+          bottom: 32px;
+        }
+
         #kt-toolkit .bar{display:flex;justify-content:space-between;align-items:center;padding:10px 12px;border-bottom:1px solid ${C.border};}
         #kt-toolkit .tabs{display:flex;gap:6px;flex-wrap:wrap}
         #kt-toolkit .tab{padding:6px 10px;border:1px solid ${C.border};background:${C.bgSub};color:${C.text};border-radius:8px;cursor:pointer}
@@ -426,7 +444,7 @@
         #kt-toolkit .body{padding:12px}
         /* 各タブ内 view の高さをそろえる */
         #kt-toolkit .body > div[id^="view-"]{
-          min-height: 70vh;  /* お好みで 50vh〜70vh くらいに調整 */
+          min-height: 75vh;  /* max-height -10vh くらいに調整 */
         }
         #kt-toolkit.is-mini{
           width:auto !important; max-width:calc(100vw - 32px) !important;
@@ -460,6 +478,7 @@
         #kt-toolkit .hl-diff td { background: rgba(255, 196, 0, 0.12); }
         #kt-toolkit .hl-diff td:nth-child(1),
         #kt-toolkit .hl-diff td:nth-child(2) { font-weight: 600; }
+
         /* 共通テーブルスタイル */
         #kt-toolkit table{border-collapse:collapse;width:100%}
         #kt-toolkit th{ text-align:left;padding:6px;border-bottom:1px solid ${C.border2};position:sticky;top:0;background:${C.bg}}
@@ -472,6 +491,19 @@
           font-size:11px; line-height:1; background:${C.bgSub2}; color:${C.textSub}; white-space:nowrap;
         }
         #kt-toolkit .gline{ margin:2px 0; }
+
+        .fi-detail-btn {
+          background: none;
+          border: none;
+          padding: 0;
+          cursor: pointer;
+          font-size: 12px;
+          font-weight: 500;
+        }
+
+        .fi-detail-btn:hover {
+          text-decoration: underline;
+        }
 
         /* Health: 基準値設定のinput */
         #kt-th-panel input {
@@ -509,6 +541,18 @@
         #view-relations details > summary { outline:none; }
         #view-relations .table-container { overflow: hidden; /* colgroup+wrapで横スクロール抑制 */ }
 
+        /* バッジ */
+        #kt-toolkit .logic-badge {
+          display:inline-block;
+          padding:3px 10px;
+          border-radius:999px;
+          border:1px solid ${C.border2};
+          background:${C.bgSub2};
+          font-size:11px;
+          font-weight:600;
+          letter-spacing:0.5px;
+        }
+
       </style>
       <div class="bar">
         <div class="tabs">
@@ -517,10 +561,12 @@
           <button id="tab-views"  class="tab">Views</button>
           <button id="tab-graphs" class="tab">Graphs</button>
           <button id="tab-relations" class="tab">Relations</button>
+          <button id="tab-notice" class="tab">Notices</button>
+          <button id="tab-acl" class="tab">Access Control</button>
           <button id="tab-templates" class="tab">Templates</button>
           <button id="tab-customize" class="tab">Customize</button>
-          <button id="tab-plugins" class="tab">Plugins</button>
           <button id="tab-field-scanner" class="tab">Field Scanner</button>
+          <button id="tab-plugins" class="tab">Plugins</button>
           <button id="tab-links" class="tab">Links</button>
         </div>
         <div class="actions" style="display:flex;gap:6px;align-items:center;">
@@ -537,6 +583,8 @@
         <div id="view-views"  style="display:none"></div>
         <div id="view-graphs" style="display:none"></div>
         <div id="view-relations" style="display:none"></div>
+        <div id="view-notice" style="display:none"></div>
+        <div id="view-acl" style="display:none"></div>
         <div id="view-templates" style="display:none"></div>
         <div id="view-customize" style="display:none"></div>
         <div id="view-field-scanner" style="display:none"></div>
@@ -573,30 +621,27 @@
     const btnVer = wrap.querySelector('#kt-version');
     btnVer && btnVer.addEventListener('click', () => window.open(githubURL, '_blank', 'noopener'), { passive: true });
 
+    const TABS = ['health', 'fields', 'views', 'graphs', 'relations', 'notice', 'acl', 'templates', 'customize', 'field-scanner', 'plugins', 'links'];
+
     const switchTab = (idShow) => {
-      wrap.querySelectorAll('.tab').forEach(el => el.classList.remove('active'));
-      wrap.querySelector('#tab-' + idShow).classList.add('active');
-      wrap.querySelector('#view-health').style.display = idShow === 'health' ? 'block' : 'none';
-      wrap.querySelector('#view-fields').style.display = idShow === 'fields' ? 'block' : 'none';
-      wrap.querySelector('#view-views').style.display = idShow === 'views' ? 'block' : 'none';
-      wrap.querySelector('#view-graphs').style.display = idShow === 'graphs' ? 'block' : 'none';
-      wrap.querySelector('#view-relations').style.display = idShow === 'relations' ? 'block' : 'none';
-      wrap.querySelector('#view-templates').style.display = idShow === 'templates' ? 'block' : 'none';
-      wrap.querySelector('#view-customize').style.display = idShow === 'customize' ? 'block' : 'none';
-      wrap.querySelector('#view-plugins').style.display = idShow === 'plugins' ? 'block' : 'none';
-      wrap.querySelector('#view-field-scanner').style.display = idShow === 'field-scanner' ? 'block' : 'none';
-      wrap.querySelector('#view-links').style.display = idShow === 'links' ? 'block' : 'none';
+      TABS.forEach(tabId => {
+        // タブボタンのActive切り替え
+        const btn = wrap.querySelector(`#tab-${tabId}`);
+        if (btn) btn.classList.toggle('active', tabId === idShow);
+
+        // Viewの表示切り替え
+        const view = wrap.querySelector(`#view-${tabId}`);
+        if (view) view.style.display = tabId === idShow ? 'block' : 'none';
+      });
     };
-    wrap.querySelector('#tab-health').addEventListener('click', () => switchTab('health'), { passive: true });
-    wrap.querySelector('#tab-fields').addEventListener('click', () => switchTab('fields'), { passive: true });
-    wrap.querySelector('#tab-views').addEventListener('click', () => switchTab('views'), { passive: true });
-    wrap.querySelector('#tab-graphs').addEventListener('click', () => switchTab('graphs'), { passive: true });
-    wrap.querySelector('#tab-relations').addEventListener('click', () => switchTab('relations'), { passive: true });
-    wrap.querySelector('#tab-templates').addEventListener('click', () => switchTab('templates'), { passive: true });
-    wrap.querySelector('#tab-customize').addEventListener('click', () => switchTab('customize'), { passive: true });
-    wrap.querySelector('#tab-plugins').addEventListener('click', () => switchTab('plugins'), { passive: true });
-    wrap.querySelector('#tab-field-scanner').addEventListener('click', () => switchTab('field-scanner'), { passive: true });
-    wrap.querySelector('#tab-links').addEventListener('click', () => switchTab('links'), { passive: true });
+
+    // イベントリスナーの一括登録
+    TABS.forEach(tabId => {
+      const btn = wrap.querySelector(`#tab-${tabId}`);
+      if (btn) {
+        btn.addEventListener('click', () => switchTab(tabId), { passive: true });
+      }
+    });
     return wrap;
 
   };
@@ -679,7 +724,12 @@
   // renderHealth
   const renderHealth = async (
     root,
-    { appId, fields, status, views, notifs, customize, acl }
+    {
+      appId, fields, status, views, reports, customize,
+      generalNotify, perRecordNotify, reminderNotify,
+      appAcl, recordAcl, fieldAcl,
+      actions, plugins
+    }
   ) => {
     let TH = loadTH();
 
@@ -692,6 +742,33 @@
     const flatten = (arr) =>
       arr.flatMap((p) => (p.type === 'SUBTABLE' ? [p, ...Object.values(p.fields)] : [p]));
     const list = flatten(props);
+
+    const safeLen = (v, path) => {
+      try {
+        const x = path.split('.').reduce((a, k) => (a ? a[k] : undefined), v);
+        return Array.isArray(x) ? x.length : (x ? Object.keys(x).length : 0);
+      } catch { return 0; }
+    };
+
+    // 通知系
+    const cntGeneralNotify = generalNotify ? safeLen(generalNotify, 'notifications') : null;
+    const cntPerRecordNotify = perRecordNotify ? safeLen(perRecordNotify, 'notifications') : null;
+    const cntReminderNotify = reminderNotify ? safeLen(reminderNotify, 'notifications') : null;
+
+    const notificationsTotal =
+      (cntGeneralNotify == null && cntPerRecordNotify == null && cntReminderNotify == null)
+        ? null
+        : (cntGeneralNotify || 0) + (cntPerRecordNotify || 0) + (cntReminderNotify || 0);
+
+    // ACL系
+    const cntAppAcl = appAcl ? safeLen(appAcl, 'rights') : null;
+    const cntRecordAcl = recordAcl ? safeLen(recordAcl, 'rights') : null;
+    const cntFieldAcl = fieldAcl ? safeLen(fieldAcl, 'rights') : null;
+
+    const aclTotal =
+      (cntAppAcl == null && cntRecordAcl == null && cntFieldAcl == null)
+        ? null
+        : (cntAppAcl || 0) + (cntRecordAcl || 0) + (cntFieldAcl || 0);
 
     const metrics = {
       totalFields: list.length,
@@ -706,10 +783,10 @@
       states: Object.keys((status && status.states) || {}).length,
       actions: ((status && status.actions) || []).length,
       views: views ? Object.keys((views.views) || {}).length : null,
-      notifications: notifs ? ((notifs.notifications) || []).length : null,
+      notifications: notificationsTotal,
       jsFiles: customize ? ((customize.desktop && customize.desktop.js) || []).length : null,
       cssFiles: customize ? ((customize.desktop && customize.desktop.css) || []).length : null,
-      roles: acl ? ((acl.rights) || []).length : null
+      roles: aclTotal,
     };
 
     const score = {
@@ -738,286 +815,298 @@
 
     // --- 描画 ---
     el.innerHTML = `
-    <div style="display:flex;flex-direction:column;height:100%;gap:12px;">
+      <div style="display:flex;flex-direction:column;height:100%;gap:12px;">
 
-      <!-- ヘッダー -->
-      <div style="display:flex;justify-content:space-between;align-items:center;gap:8px">
-        <div style="font-weight:700;font-size:14px;">
-          App Health <span style="opacity:.7;font-weight:400">(Read-only)</span>
+        <!-- ヘッダー -->
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:8px">
+          <div style="font-weight:700;font-size:14px;">
+            App Health <span style="opacity:.7;font-weight:400">(Read-only)</span>
+          </div>
+          <div style="display:flex;gap:6px">
+            <button id="kt-copy" class="btn">Copy</button>
+            <button id="kt-th" class="btn">基準 / Thresholds</button>
+          </div>
         </div>
-        <div style="display:flex;gap:6px">
-          <button id="kt-copy" class="btn">Copy</button>
-          <button id="kt-th" class="btn">基準 / Thresholds</button>
-        </div>
-      </div>
 
-      <!-- メインビュー -->
-      <div id="kt-summary"
-           style="flex:1;min-height:0;display:flex;flex-direction:column;gap:12px;">
+        <!-- メインビュー -->
+        <div id="kt-summary"
+            style="flex:1;min-height:0;display:flex;flex-direction:column;gap:12px;">
 
-        <!-- 上段：3カード -->
-        <div style="
-          display:grid;
-          grid-template-columns:repeat(3,minmax(0,1fr));
-          gap:10px;
-        ">
-          <!-- Fields Card -->
+          <!-- 上段：3カード -->
+          <div style="
+            display:grid;
+            grid-template-columns:repeat(3,minmax(0,1fr));
+            gap:10px;
+          ">
+            <!-- Fields Card -->
+            <div style="
+              border:1px solid #e5e7eb;
+              border-radius:8px;
+              padding:8px 10px;
+              display:flex;
+              flex-direction:column;
+              gap:4px;
+            ">
+              <div style="font-size:12px;opacity:.8;">フォーム構成 / Fields</div>
+              <div style="font-size:18px;font-weight:700;">
+                ${metrics.totalFields}
+                <span style="font-size:11px;font-weight:400;opacity:.7;">
+                  （Group: ${metrics.groups}, SubTable: ${metrics.subtables}）
+                </span>
+              </div>
+              <div style="font-size:11px;opacity:.75;">
+                サブテーブル最大列数：${metrics.subtableColsMax}
+              </div>
+            </div>
+
+            <!-- Process Card -->
+            <div style="
+              border:1px solid #e5e7eb;
+              border-radius:8px;
+              padding:8px 10px;
+              display:flex;
+              flex-direction:column;
+              gap:4px;
+            ">
+              <div style="font-size:12px;opacity:.8;">プロセス管理 / Process</div>
+              <div style="font-size:18px;font-weight:700;">
+                ${metrics.states}
+                <span style="font-size:11px;font-weight:400;opacity:.7;">States</span>
+                <span style="margin:0 4px;">/</span>
+                ${metrics.actions}
+                <span style="font-size:11px;font-weight:400;opacity:.7;">Actions</span>
+              </div>
+              <div style="font-size:11px;opacity:.75;">
+                ステータス・アクションの複雑さの目安です。
+              </div>
+            </div>
+
+            <!-- Logic & ACL Card -->
+            <div style="
+              border:1px solid #e5e7eb;
+              border-radius:8px;
+              padding:8px 10px;
+              display:flex;
+              flex-direction:column;
+              gap:4px;
+            ">
+              <div style="font-size:12px;opacity:.8;">ロジック / アクセス制御</div>
+
+              <!-- メイン指標：JS / ACL -->
+              <div style="font-size:18px;font-weight:700;">
+                ${metrics.jsFiles ?? '-'}
+                <span style="font-size:11px;font-weight:400;opacity:.7;">JS</span>
+                <span style="margin:0 6px;">/</span>
+                ${metrics.roles ?? '-'}
+                <span style="font-size:11px;font-weight:400;opacity:.7;">ACL</span>
+              </div>
+              <div style="font-size:11px;opacity:.75;">
+                アプリの制御ロジックの複雑さの目安です。<br>
+              </div>
+            </div>
+          </div>
+
+          <!-- 中段：Health サマリー + しきい値ガイド -->
           <div style="
             border:1px solid #e5e7eb;
             border-radius:8px;
             padding:8px 10px;
             display:flex;
             flex-direction:column;
-            gap:4px;
+            gap:8px;
           ">
-            <div style="font-size:12px;opacity:.8;">フォーム構成 / Fields</div>
-            <div style="font-size:18px;font-weight:700;">
-              ${metrics.totalFields}
-              <span style="font-size:11px;font-weight:400;opacity:.7;">
-                （Group: ${metrics.groups}, SubTable: ${metrics.subtables}）
-              </span>
+            <div style="display:flex;justify-content:space-between;align-items:center;">
+              <div style="font-size:12px;font-weight:600;">
+                Health summary
+              </div>
+              <div style="font-size:11px;opacity:.7;">
+                現在値としきい値（Y / R）の関係をざっくり確認できます
+              </div>
             </div>
-            <div style="font-size:11px;opacity:.75;">
-              サブテーブル最大列数：${metrics.subtableColsMax}
+
+            <!-- 行ごとのサマリー -->
+            <table style="width:100%;border-collapse:collapse;font-size:12px;">
+              <thead>
+                <tr style="opacity:.7;">
+                  <th style="text-align:left;padding:4px 6px;">指標</th>
+                  <th style="text-align:right;padding:4px 6px;">現在値</th>
+                  <th style="text-align:right;padding:4px 6px;">Y（注意）</th>
+                  <th style="text-align:right;padding:4px 6px;">R（危険）</th>
+                  <th style="text-align:left;padding:4px 6px;">判定</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td style="padding:4px 6px;">${TH.totalFields.label}</td>
+                  <td style="padding:4px 6px;text-align:right;">
+                    ${metrics.totalFields}
+                  </td>
+                  <td style="padding:4px 6px;text-align:right;">
+                    ${TH.totalFields.Y}
+                  </td>
+                  <td style="padding:4px 6px;text-align:right;">
+                    ${TH.totalFields.R}
+                  </td>
+                  <td style="padding:4px 6px;">
+                    <span style="
+                      padding:2px 8px;
+                      border-radius:999px;
+                      border:1px solid #e5e7eb;
+                      display:inline-flex;
+                      align-items:center;
+                      gap:4px;
+                      font-size:11px;
+                    ">
+                      <span>${score.totalFields.badge}</span>
+                      <span>${score.totalFields.level}</span>
+                    </span>
+                  </td>
+                </tr>
+
+                <tr>
+                  <td style="padding:4px 6px;">${TH.states.label}</td>
+                  <td style="padding:4px 6px;text-align:right;">
+                    ${metrics.states}
+                  </td>
+                  <td style="padding:4px 6px;text-align:right;">
+                    ${TH.states.Y}
+                  </td>
+                  <td style="padding:4px 6px;text-align:right;">
+                    ${TH.states.R}
+                  </td>
+                  <td style="padding:4px 6px;">
+                    <span style="
+                      padding:2px 8px;
+                      border-radius:999px;
+                      border:1px solid #e5e7eb;
+                      display:inline-flex;
+                      align-items:center;
+                      gap:4px;
+                      font-size:11px;
+                    ">
+                      <span>${score.states.badge}</span>
+                      <span>${score.states.level}</span>
+                    </span>
+                  </td>
+                </tr>
+
+                <tr>
+                  <td style="padding:4px 6px;">${TH.actions.label}</td>
+                  <td style="padding:4px 6px;text-align:right;">
+                    ${metrics.actions}
+                  </td>
+                  <td style="padding:4px 6px;text-align:right;">
+                    ${TH.actions.Y}
+                  </td>
+                  <td style="padding:4px 6px;text-align:right;">
+                    ${TH.actions.R}
+                  </td>
+                  <td style="padding:4px 6px;">
+                    <span style="
+                      padding:2px 8px;
+                      border-radius:999px;
+                      border:1px solid #e5e7eb;
+                      display:inline-flex;
+                      align-items:center;
+                      gap:4px;
+                      font-size:11px;
+                    ">
+                      <span>${score.actions.badge}</span>
+                      <span>${score.actions.level}</span>
+                    </span>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+
+            <!-- しきい値の説明 -->
+            <div style="margin-top:4px;font-size:11px;opacity:.8;line-height:1.5;">
+              <div>
+                上部の <b>「基準 / Thresholds」</b> ボタンから、各指標の Y / R を編集できます。<br>
+              </div>
             </div>
           </div>
 
-          <!-- Process Card -->
+
+          <!-- 下段：Process Flow 図 -->
           <div style="
             border:1px solid #e5e7eb;
             border-radius:8px;
-            padding:8px 10px;
-            display:flex;
-            flex-direction:column;
-            gap:4px;
+            padding:10px;
+            min-height:200px; /* 横並びにするため少し高さを確保 */
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
           ">
-            <div style="font-size:12px;opacity:.8;">プロセス管理 / Process</div>
-            <div style="font-size:18px;font-weight:700;">
-              ${metrics.states}
-              <span style="font-size:11px;font-weight:400;opacity:.7;">States</span>
-              <span style="margin:0 4px;">/</span>
-              ${metrics.actions}
-              <span style="font-size:11px;font-weight:400;opacity:.7;">Actions</span>
+            <div style="font-size:12px;font-weight:600;display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid #f3f4f6;padding-bottom:4px;">
+              <span>Process Analysis (Flow & Distribution)</span>
+              <button id="kt-copy-mermaid" class="btn" style="padding:2px 8px;font-size:11px;">Copy Mermaid</button>
             </div>
-            <div style="font-size:11px;opacity:.75;">
-              ステータス・アクションの複雑さの目安です。
-            </div>
-          </div>
 
-          <!-- Logic & ACL Card -->
-          <div style="
-            border:1px solid #e5e7eb;
-            border-radius:8px;
-            padding:8px 10px;
-            display:flex;
-            flex-direction:column;
-            gap:4px;
-          ">
-            <div style="font-size:12px;opacity:.8;">ロジック / アクセス制御</div>
+            <div style="display: flex; gap: 16px; flex: 1; min-height: 0;">
+              
+              <div style="flex: 2; overflow: auto; border-right: 1px dashed #eee; padding-right: 8px;">
+                <div id="kt-process-diagram">
+                  </div>
+              </div>
 
-            <!-- メイン指標：JS / ACL -->
-            <div style="font-size:18px;font-weight:700;">
-              ${metrics.jsFiles ?? '-'}
-              <span style="font-size:11px;font-weight:400;opacity:.7;">JS</span>
-              <span style="margin:0 6px;">/</span>
-              ${metrics.roles ?? '-'}
-              <span style="font-size:11px;font-weight:400;opacity:.7;">ACL</span>
-            </div>
-            <div style="font-size:11px;opacity:.75;">
-              アプリの制御ロジックの複雑さの目安です。<br>
+              <div style="flex: 1; overflow-y: auto;">
+                <div id="kt-process-heatmap">
+                  </div>
+              </div>
+
             </div>
           </div>
         </div>
 
-        <!-- 中段：Health サマリー + しきい値ガイド -->
-        <div style="
-          border:1px solid #e5e7eb;
-          border-radius:8px;
-          padding:8px 10px;
-          display:flex;
-          flex-direction:column;
-          gap:8px;
-        ">
-          <div style="display:flex;justify-content:space-between;align-items:center;">
-            <div style="font-size:12px;font-weight:600;">
-              Health summary
-            </div>
-            <div style="font-size:11px;opacity:.7;">
-              現在値としきい値（Y / R）の関係をざっくり確認できます
-            </div>
+        <!-- Thresholds パネル -->
+        <div id="kt-th-panel"
+            style="
+              display:none;
+              margin-top:2px;
+              padding:8px 10px;
+              border:1px solid #e5e7eb;
+              border-radius:8px;
+              max-height:calc(75vh - 60px);
+              overflow:auto;
+            ">
+          <div style="opacity:.85;margin-bottom:6px;font-size:11px;line-height:1.5;">
+            しきい値（Thresholds）：Y = 注意（Caution） / R = 危険（Danger）<br>
+            保存すると LocalStorage に記録されます。 / Saved to LocalStorage.
           </div>
-
-          <!-- 行ごとのサマリー -->
-          <table style="width:100%;border-collapse:collapse;font-size:12px;">
+          <table style="width:100%;max-width:560px;border-collapse:collapse;font-size:12px;">
             <thead>
-              <tr style="opacity:.7;">
-                <th style="text-align:left;padding:4px 6px;">指標</th>
-                <th style="text-align:right;padding:4px 6px;">現在値</th>
-                <th style="text-align:right;padding:4px 6px;">Y（注意）</th>
-                <th style="text-align:right;padding:4px 6px;">R（危険）</th>
-                <th style="text-align:left;padding:4px 6px;">判定</th>
+              <tr>
+                <th style="text-align:left;padding:4px 6px;">指標 / Metric</th>
+                <th style="text-align:right;padding:4px 6px;">Y（注意 / Caution）</th>
+                <th style="text-align:right;padding:4px 6px;">R（危険 / Danger）</th>
               </tr>
             </thead>
-            <tbody>
-              <tr>
-                <td style="padding:4px 6px;">${TH.totalFields.label}</td>
-                <td style="padding:4px 6px;text-align:right;">
-                  ${metrics.totalFields}
-                </td>
-                <td style="padding:4px 6px;text-align:right;">
-                  ${TH.totalFields.Y}
-                </td>
-                <td style="padding:4px 6px;text-align:right;">
-                  ${TH.totalFields.R}
-                </td>
-                <td style="padding:4px 6px;">
-                  <span style="
-                    padding:2px 8px;
-                    border-radius:999px;
-                    border:1px solid #e5e7eb;
-                    display:inline-flex;
-                    align-items:center;
-                    gap:4px;
-                    font-size:11px;
-                  ">
-                    <span>${score.totalFields.badge}</span>
-                    <span>${score.totalFields.level}</span>
-                  </span>
-                </td>
-              </tr>
-
-              <tr>
-                <td style="padding:4px 6px;">${TH.states.label}</td>
-                <td style="padding:4px 6px;text-align:right;">
-                  ${metrics.states}
-                </td>
-                <td style="padding:4px 6px;text-align:right;">
-                  ${TH.states.Y}
-                </td>
-                <td style="padding:4px 6px;text-align:right;">
-                  ${TH.states.R}
-                </td>
-                <td style="padding:4px 6px;">
-                  <span style="
-                    padding:2px 8px;
-                    border-radius:999px;
-                    border:1px solid #e5e7eb;
-                    display:inline-flex;
-                    align-items:center;
-                    gap:4px;
-                    font-size:11px;
-                  ">
-                    <span>${score.states.badge}</span>
-                    <span>${score.states.level}</span>
-                  </span>
-                </td>
-              </tr>
-
-              <tr>
-                <td style="padding:4px 6px;">${TH.actions.label}</td>
-                <td style="padding:4px 6px;text-align:right;">
-                  ${metrics.actions}
-                </td>
-                <td style="padding:4px 6px;text-align:right;">
-                  ${TH.actions.Y}
-                </td>
-                <td style="padding:4px 6px;text-align:right;">
-                  ${TH.actions.R}
-                </td>
-                <td style="padding:4px 6px;">
-                  <span style="
-                    padding:2px 8px;
-                    border-radius:999px;
-                    border:1px solid #e5e7eb;
-                    display:inline-flex;
-                    align-items:center;
-                    gap:4px;
-                    font-size:11px;
-                  ">
-                    <span>${score.actions.badge}</span>
-                    <span>${score.actions.level}</span>
-                  </span>
-                </td>
-              </tr>
-            </tbody>
+            <tbody id="kt-th-rows"></tbody>
           </table>
-
-          <!-- しきい値の説明 -->
-          <div style="margin-top:4px;font-size:11px;opacity:.8;line-height:1.5;">
-            <div>
-              上部の <b>「基準 / Thresholds」</b> ボタンから、各指標の Y / R を編集できます。<br>
-            </div>
-          </div>
-        </div>
-
-
-        <!-- 下段：Process Flow 図 -->
-        <div style="
-          border:1px solid #e5e7eb;
-          border-radius:8px;
-          padding:8px 10px;
-          min-height:140px;
-          max-height:240px;
-          overflow:auto;
-        ">
-          <div style="font-size:12px;font-weight:600;margin-bottom:4px;display:flex;justify-content:space-between;align-items:center;">
-            <span>Process flow (Mermaid)</span>
-
-            <div style="display:flex;gap:6px;align-items:center;">
-              <span style="font-size:11px;opacity:.7;">ステータス遷移をざっくり確認できます</span>
-              <button id="kt-copy-mermaid" class="btn" style="padding:2px 8px;font-size:11px;">
-                Copy code
-              </button>
-            </div>
-          </div>
-          <div id="kt-process-diagram">
-            <!-- ここにMermaid or メッセージを描画 -->
-          </div>
-          <!-- ★ 直近500件ヒートマップ -->
-          <div id="kt-process-heatmap"
-            style="margin-top:8px;border-top:1px solid #e5e7eb;padding-top:6px;font-size:11px;">
-            <!-- 後でJSから埋める -->
+          <div style="margin-top:8px;display:flex;gap:8px;justify-content:flex-end;">
+            <button id="kt-th-reset" class="btn">初期化 / Reset</button>
+            <button id="kt-th-save"  class="btn"
+                    style="background:#2563eb;border-color:#2563eb;color:#fff;">
+              保存 / Save
+            </button>
           </div>
         </div>
 
       </div>
+    `;
 
-      <!-- Thresholds パネル -->
-      <div id="kt-th-panel"
-           style="
-             display:none;
-             margin-top:2px;
-             padding:8px 10px;
-             border:1px solid #e5e7eb;
-             border-radius:8px;
-             max-height:calc(70vh - 60px);
-             overflow:auto;
-           ">
-        <div style="opacity:.85;margin-bottom:6px;font-size:11px;line-height:1.5;">
-          しきい値（Thresholds）：Y = 注意（Caution） / R = 危険（Danger）<br>
-          保存すると LocalStorage に記録されます。 / Saved to LocalStorage.
-        </div>
-        <table style="width:100%;max-width:560px;border-collapse:collapse;font-size:12px;">
-          <thead>
-            <tr>
-              <th style="text-align:left;padding:4px 6px;">指標 / Metric</th>
-              <th style="text-align:right;padding:4px 6px;">Y（注意 / Caution）</th>
-              <th style="text-align:right;padding:4px 6px;">R（危険 / Danger）</th>
-            </tr>
-          </thead>
-          <tbody id="kt-th-rows"></tbody>
-        </table>
-        <div style="margin-top:8px;display:flex;gap:8px;justify-content:flex-end;">
-          <button id="kt-th-reset" class="btn">初期化 / Reset</button>
-          <button id="kt-th-save"  class="btn"
-                  style="background:#2563eb;border-color:#2563eb;color:#fff;">
-            保存 / Save
-          </button>
-        </div>
-      </div>
+    // --- renderHealth 関数内の Mermaid 描画部分 ---
+    const drawMermaid = () => {
+      const target = el.querySelector(`#kt-process-mermaid-${appId}`);
+      // 表示されている（display:noneでない）かつ、まだ描画されていない（data-processed属性がない）場合のみ実行
+      if (target && target.offsetParent !== null && window.mermaid) {
+        window.mermaid.run({ nodes: [target] });
+      }
+    };
 
-    </div>
-  `;
+    // 初回実行（もし表示状態なら描画）
+    drawMermaid();
 
     // しきい値テーブル
     const rowsEl = el.querySelector('#kt-th-rows');
@@ -1069,13 +1158,27 @@
 
         processHost.appendChild(div);
 
+        // --- 修正後の描画ロジック ---
         if (window.mermaid && typeof window.mermaid.run === 'function') {
           try {
-            // ★ ここだけ今回修正
-            window.mermaid.run({ nodes: [div] });
-            // または: window.mermaid.run({ querySelector: `#${id}` });
+            // 1. 要素がブラウザ上で高さ/幅を持っているかチェック
+            // offsetParent が null の場合は非表示（display:none等）の状態
+            if (div.offsetParent !== null) {
+              window.mermaid.run({ nodes: [div] });
+            } else {
+              // 2. 非表示の場合は、IntersectionObserver で表示された瞬間に実行する
+              const observer = new IntersectionObserver((entries) => {
+                entries.forEach(entry => {
+                  if (entry.isIntersecting) {
+                    window.mermaid.run({ nodes: [div] });
+                    observer.disconnect(); // 一度描画したら監視終了
+                  }
+                });
+              });
+              observer.observe(div);
+            }
           } catch (e) {
-            // noop
+            console.error("Mermaid render error:", e);
           }
         } else {
           const msg = document.createElement('div');
@@ -1087,10 +1190,10 @@
         }
       } else {
         processHost.innerHTML = `
-      <div style="font-size:11px;opacity:.7;">
-        プロセス管理が無効、またはステータス情報が取得できませんでした。
-      </div>
-    `;
+          <div style="font-size:11px;opacity:.7;">
+            プロセス管理が無効、またはステータス情報が取得できませんでした。
+          </div>
+        `;
       }
     }
 
@@ -1100,8 +1203,8 @@
       if (!heatHost) return;
       if (!statusFieldCode) {
         heatHost.innerHTML = `
-        <div style="opacity:.7;">ステータスフィールドが特定できないため、滞留状況は表示できません。</div>
-      `;
+          <div style="opacity:.7;">ステータスフィールドが特定できないため、滞留状況は表示できません。</div>
+        `;
         return;
       }
 
@@ -1159,42 +1262,42 @@
             : 'none';
 
           return `
-          <tr>
-            <td style="padding:2px 4px;white-space:nowrap;">${name || '(未設定)'}</td>
-            <td style="padding:2px 4px;text-align:right;">${c}</td>
-            <td style="padding:2px 4px;text-align:right;">${percent}%</td>
-            <td style="padding:2px 0 2px 4px;">
-              <div style="
-                height:10px;
-                border-radius:999px;
-                background:${bg};
-                border:1px solid #fecaca;
-                min-width:40px;
-              "></div>
-            </td>
-          </tr>
-        `;
+            <tr>
+              <td style="padding:2px 4px;white-space:nowrap;">${name || '(未設定)'}</td>
+              <td style="padding:2px 4px;text-align:right;">${c}</td>
+              <td style="padding:2px 4px;text-align:right;">${percent}%</td>
+              <td style="padding:2px 0 2px 4px;">
+                <div style="
+                  height:10px;
+                  border-radius:999px;
+                  background:${bg};
+                  border:1px solid #fecaca;
+                  min-width:40px;
+                "></div>
+              </td>
+            </tr>
+          `;
         }).join('');
 
         heatHost.innerHTML = `
-        <div style="margin-bottom:4px;display:flex;justify-content:space-between;align-items:center;">
-          <span>直近500件のステータス分布</span>
-          <span style="opacity:.6;">総件数：${total}</span>
-        </div>
-        <table style="width:100%;border-collapse:collapse;">
-          <thead>
-            <tr style="font-size:10px;opacity:.7;">
-              <th style="text-align:left;padding:2px 4px;">Status</th>
-              <th style="text-align:right;padding:2px 4px;">件数</th>
-              <th style="text-align:right;padding:2px 4px;">割合</th>
-              <th style="text-align:left;padding:2px 4px;">滞留ヒート</th>
-            </tr>
-          </thead>
-          <tbody style="font-size:11px;">
-            ${rowsHtml}
-          </tbody>
-        </table>
-      `;
+          <div style="margin-bottom:4px;display:flex;justify-content:space-between;align-items:center;">
+            <span>直近500件のステータス分布</span>
+            <span style="opacity:.6;">総件数：${total}</span>
+          </div>
+          <table style="width:100%;border-collapse:collapse;">
+            <thead>
+              <tr style="font-size:10px;opacity:.7;">
+                <th style="text-align:left;padding:2px 4px;">Status</th>
+                <th style="text-align:right;padding:2px 4px;">件数</th>
+                <th style="text-align:right;padding:2px 4px;">割合</th>
+                <th style="text-align:left;padding:2px 4px;">滞留ヒート</th>
+              </tr>
+            </thead>
+            <tbody style="font-size:11px;">
+              ${rowsHtml}
+            </tbody>
+          </table>
+        `;
       } catch (e) {
         heatHost.innerHTML = `<div style="opacity:.7;">ステータス分布の取得に失敗しました。</div>`;
         // console.error(e);
@@ -1232,6 +1335,7 @@
       }
     };
 
+
     // イベント
     el.querySelector('#kt-copy').addEventListener('click', async () => {
       await navigator.clipboard.writeText(summaryText);
@@ -1253,16 +1357,16 @@
     el.querySelector('#kt-th').addEventListener('click', () => {
       const p = el.querySelector('#kt-th-panel');
       const s = el.querySelector('#kt-summary');
-
-      // パネルが「閉じている or 未設定」のとき → 開く
       const showPanel = p.style.display === 'none' || p.style.display === '';
 
       if (showPanel) {
-        p.style.display = 'block';  // 基準パネルを表示
-        s.style.display = 'none';   // サマリを隠す
+        p.style.display = 'block';
+        s.style.display = 'none';
       } else {
-        p.style.display = 'none';   // 基準パネルを隠す
-        s.style.display = 'flex';   // ★ 元の display:flex に戻す
+        p.style.display = 'none';
+        s.style.display = 'flex';
+        // パネルを切り替えた瞬間に再描画をかける
+        setTimeout(drawMermaid, 0);
       }
     });
 
@@ -1383,8 +1487,19 @@
   };
   const saveHL = (b) => localStorage.setItem(LS_HL_KEY, String(!!b));
 
+  // --- elementId（LABEL/罫線等）表示トグル（LocalStorage）
+  const LS_ELEM_KEY = 'ktFieldsShowElementIdRows.v1';
+  const loadElem = () => {
+    const v = localStorage.getItem(LS_ELEM_KEY);
+    return v === 'true'; // デフォルトOFF
+  };
+  const saveElem = (b) => localStorage.setItem(LS_ELEM_KEY, String(!!b));
+
   // ==== DROP-IN REPLACEMENT (layout order only; supports top-level SUBTABLE) ====
-  const renderFields = async (root, { appId, fields, layout }) => {
+  const renderFields = async (root, { appId, fields, layout, usageData }) => {
+
+    injectFieldBadgeStyle();
+
     const normalizeType = (f) => (f && f.lookup ? 'LOOKUP' : (f?.type ?? ''));
 
     // 生レスポンスの安全な取り出し
@@ -1404,17 +1519,72 @@
       layoutOrderCodes.push(sf.code); // ← 画面通りに採番
     };
 
+    const elementRows = []; // elementIdを持つ LABEL/罫線 を溜める
+
+    const stripHtml = (html) => {
+      // 1) HTMLを文字列として扱う（DOMに入れない）
+      const s = String(html || '');
+
+      // 2) タグ除去（簡易）
+      // <br> は改行に寄せてもいい
+      return s
+        .replace(/<br\s*\/?>/gi, ' ')
+        .replace(/<[^>]+>/g, '')
+        .replace(/\s+/g, ' ')
+        .trim();
+    };
+
+    const pushElement = (node, curGroup) => {
+      const eid = node?.elementId;
+      if (!eid) return;
+
+      const t = node?.type || '';
+      const rawLabel = node?.label || '';
+
+      const pseudoCode = `@要素ID: ${eid}`;
+      groupPathByCode[pseudoCode] = curGroup ? `Group: ${curGroup}` : '';
+      layoutOrderCodes.push(pseudoCode);
+
+      // ★表示用：HTMLタグは落として文字だけに
+      const displayLabel = (t === 'LABEL')
+        ? stripHtml(rawLabel) || '(LABEL)'
+        : (rawLabel ? stripHtml(rawLabel) : `[${t}]`);
+
+      elementRows.push({
+        label: displayLabel,          // ← 以後は “テキスト” として扱える
+        code: pseudoCode,
+        required: false,
+        defaultValue: '',
+        type: t,
+        elementId: eid,
+        _raw: node,
+        _isElement: true
+      });
+    };
+
     const walkLayout = (nodes, curGroup = null) => {
       for (const n of nodes || []) {
         if (n.type === 'ROW') {
           for (const f of n.fields || []) {
+
+            // 1) SUBTABLE
             if (f.type === 'SUBTABLE') {
               const stLabel = f.label || f.code || '(Subtable)';
               for (const sf of f.fields || []) pushChild(sf, curGroup, stLabel);
-            } else if (f.code) {
-              // 通常フィールド
+              continue;
+            }
+
+            // 2) 通常フィールド（codeあり）
+            if (f.code) {
               groupPathByCode[f.code] = curGroup ? `Group: ${curGroup}` : '';
               layoutOrderCodes.push(f.code);
+              continue;
+            }
+
+            // 3) codeなしだけど elementId があるやつ（LABEL/罫線など）
+            if (f.elementId) {
+              pushElement(f, curGroup);
+              continue;
             }
           }
         } else if (n.type === 'GROUP') {
@@ -1442,17 +1612,46 @@
           label: f.label ?? '',
           code: f.code ?? '',
           required: !!f.required,
+          unique: !!f.unique,
           defaultValue: formatDefault(f),
-          type: normalizeType(f)
+          type: normalizeType(f),
+          _raw: f
         });
       }
     };
     Object.values(props).forEach(collect);
 
+    // 全フィールドコード（usage抽出のため）
+    const allFieldCodes = list.map(x => x.code).filter(Boolean);
+
+    // ここは “AppInsightから渡される usageData” が必要。
+    // いま Toolkit 側で usageData を持ってないなら、まずは引数に追加するのが一歩目です。
+    // 例：renderFields(root, { appId, fields, layout, usageData })
+    const usagePlacesMap = usageData ? extractUsedFields(usageData, allFieldCodes) : {};
+
     // --- 表示用行へ。グループ/サブテーブル表示は “layoutだけ” を正とする
-    const rows = list
-      .map(r => ({ ...r, groupPath: groupPathByCode[r.code] || '' }))
+    const showElements = loadElem();
+
+    let rows = list
+      .map(r => ({
+        ...r,
+        groupPath: groupPathByCode[r.code] || '',
+        usagePlaces: usagePlacesMap?.[r.code] || [],
+        detail: null
+      }))
       .filter(r => !SYSTEM_TYPES.has(r.type));
+
+    // ★ elementId行を混ぜる（初期はOFF）
+    if (showElements && elementRows.length) {
+      rows = rows.concat(
+        elementRows.map(er => ({
+          ...er,
+          groupPath: groupPathByCode[er.code] || '',
+          usagePlaces: [], // element系は usage なし
+          detail: { elementId: er.elementId }, // 詳細に入れても良い
+        }))
+      );
+    }
 
     // --- layout の並び順でソート（見つからないコードは末尾）
     const orderIndex = new Map(layoutOrderCodes.map((c, i) => [c, i]));
@@ -1463,30 +1662,57 @@
       return ai === bi ? a.code.localeCompare(b.code) : ai - bi;
     });
 
+
     // --- UI
     const el = root.querySelector('#view-fields');
     if (!el) return;
 
     const highlightOn = loadHL();
+    const C = getThemeColors();
+
     el.innerHTML = `
       <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:8px">
-        <div style="font-weight:700">Field Inventory（読み取り専用）</div>
-        <div style="display:flex;gap:6px;flex-wrap:wrap">
+        <div style="font-weight:700">Field Inventory</div>
+
+        <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center">
+          <input id="fi-search" type="search"
+            placeholder="検索（フィールド名 / コード）"
+            style="
+              width: 260px;
+              padding: 6px 10px;
+              margin-right: 24px;
+              border-radius: 10px;
+              border: 1px solid ${C.border};
+              background: ${C.bgInput};
+              color: ${C.text};
+              outline: none;
+              transition: border .15s ease;
+            "
+          />
+
           <label style="display:flex;align-items:center;gap:6px;margin-right:8px;user-select:none">
             <input id="fi-hl-toggle" type="checkbox" ${highlightOn ? 'checked' : ''}>
             <span style="opacity:.9">名称≠コードをハイライト</span>
           </label>
+
+          <label style="display:flex;align-items:center;gap:6px;margin-right:8px;user-select:none">
+            <input id="fi-elem-toggle" type="checkbox" ${showElements ? 'checked' : ''}>
+            <span style="opacity:.9">要素ID を表示</span>
+          </label>
+
           <button id="fi-copy-md" class="btn">Copy Markdown</button>
-          <button id="fi-dl-md"   class="btn">Download MD</button>
-          <button id="fi-dl-csv"    class="btn">Download CSV</button>
-          <button id="fi-dl-json"    class="btn">Download JSON</button>
+          <button id="fi-dl-md"   class="btn">DL MD</button>
+          <button id="fi-dl-csv"  class="btn">DL CSV</button>
+          <button id="fi-dl-json" class="btn">DL JSON</button>
         </div>
       </div>
+
       <div id="kt-fields">
         <table>
           <thead><tr>
-            <th>フィールド名</th><th>フィールドコード</th><th>必須</th>
-            <th>初期値</th><th>フィールド形式</th><th>グループ</th>
+            <th>フィールド名</th><th>フィールドコード</th><th>フィールド形式</th>
+            <th>必須</th><th>重複禁止</th><th>初期値</th>
+            <th>グループ / テーブル</th><th>詳細</th>
           </tr></thead>
           <tbody id="fi-tbody"></tbody>
         </table>
@@ -1494,25 +1720,121 @@
     `;
 
     const tbody = el.querySelector('#fi-tbody');
-    const applyRowClass = (tr, r) => {
+
+    const searchInput = el.querySelector('#fi-search');
+    searchInput.addEventListener('focus', () => {
+      searchInput.style.border = `1px solid ${C.border2}`;
+    });
+    searchInput.addEventListener('blur', () => {
+      searchInput.style.border = `1px solid ${C.border}`;
+    });
+
+    const applyRowClass = (tr, r, hlOn) => {
       const different = (r.label || '').trim() !== (r.code || '').trim();
-      tr.classList.toggle('hl-diff', highlightOn && different);
+      tr.classList.toggle('hl-diff', hlOn && different);
       tr.dataset.diff = different ? '1' : '0';
     };
 
-    rows.forEach(r => {
-      const tr = document.createElement('tr');
-      tr.innerHTML = `
-      <td>${escHTML(r.label)}</td>
-      <td style="opacity:.9">${escHTML(r.code)}</td>
-      <td>${r.required ? '✓' : ''}</td>
-      <td style="opacity:.9">${escHTML(r.defaultValue)}</td>
-      <td>${escHTML(r.type)}</td>
-      <td style="opacity:.9">${escHTML(r.groupPath)}</td>
-    `;
-      applyRowClass(tr, r);
-      tbody.appendChild(tr);
-    });
+    // ★ tbody描画（検索・再描画用）
+    const renderRows = (rowsToRender) => {
+      tbody.innerHTML = '';
+
+      rowsToRender.forEach(r => {
+        const tr = document.createElement('tr');
+
+        tr.innerHTML = `
+          <td>${escapeHtml(r.label)}</td>
+          <td style="opacity:.9">${escapeHtml(r.code)}</td>
+          <td>${escapeHtml(r.type)}</td>
+          <td>${r.required ? '✓' : ''}</td>
+          <td>${r.unique ? '✓' : ''}</td>
+          <td style="opacity:.9">${escapeHtml(r.defaultValue)}</td>
+          <td style="opacity:.9">${escapeHtml(r.groupPath)}</td>
+          <td class="fi-detail-cell"></td>
+        `;
+
+        applyRowClass(tr, r, loadHL()); //
+        // --- 詳細
+        const places = Array.isArray(r.usagePlaces) ? r.usagePlaces : [];
+        const detailObj = buildDetail(r._raw);
+        const detailHtml = buildDetailHtml(detailObj, places);
+
+        const detailCell = tr.querySelector('.fi-detail-cell');
+
+        if (detailHtml) {
+          const btn = document.createElement('button');
+          btn.type = 'button';
+          btn.className = 'fi-detail-btn';
+          btn.textContent = '開く';
+          detailCell.appendChild(btn);
+
+          const detailTr = document.createElement('tr');
+          detailTr.className = 'fi-detail-row';
+          detailTr.style.display = 'none';
+
+          const td = document.createElement('td');
+          td.colSpan = 8;
+          td.innerHTML = detailHtml;
+          detailTr.appendChild(td);
+
+          btn.addEventListener('click', () => {
+            const opened = detailTr.style.display !== 'none';
+            detailTr.style.display = opened ? 'none' : '';
+            btn.textContent = opened ? '開く' : '閉じる';
+          });
+
+          tbody.appendChild(tr);
+          tbody.appendChild(detailTr);
+          return;
+        }
+
+        // detail無し
+        detailCell.textContent = '';
+        tbody.appendChild(tr);
+      });
+    };
+
+    // 初期描画
+    renderRows(rows);
+
+    // ★検索
+    const elSearch = el.querySelector('#fi-search');
+
+    const norm = (s) => String(s || '').toLowerCase();
+
+    const filterRows = (q) => {
+      const qq = norm(q).trim();
+      if (!qq) return rows;
+
+      return rows.filter(r => {
+        // 検索対象（好きに増減OK）
+        const target = [
+          r.label,
+          r.code,
+        ].map(norm).join(' | ');
+
+        return target.includes(qq);
+      });
+    };
+
+    // デバウンス
+    const debounce = (fn, ms = 150) => {
+      let t = null;
+      return (...args) => {
+        clearTimeout(t);
+        t = setTimeout(() => fn(...args), ms);
+      };
+    };
+
+    const applySearch = () => {
+      const q = elSearch.value || '';
+      const filtered = filterRows(q);
+      renderRows(filtered);
+    };
+
+    const applySearchDebounced = debounce(applySearch, 150);
+
+    elSearch.addEventListener('input', applySearchDebounced, { passive: true });
 
     el.querySelector('#fi-hl-toggle').addEventListener('change', e => {
       const on = !!e.target.checked;
@@ -1523,15 +1845,22 @@
       });
     }, { passive: true });
 
+    el.querySelector('#fi-elem-toggle').addEventListener('change', async (e) => {
+      const on = !!e.target.checked;
+      saveElem(on);
+      // 再描画（今の引数をそのまま）
+      await renderFields(root, { appId, fields, layout, usageData });
+    }, { passive: true });
+
     // Fields 用の列定義
     const FD_COLUMNS = [
       { header: 'フィールド名', select: r => r.label },
       { header: 'フィールドコード', select: r => r.code },
-      { header: '必須', select: r => r.required ? 'TRUE' : 'FALSE' },
-      { header: '初期値', select: r => r.defaultValue || '' },
       { header: 'フィールド形式', select: r => r.type },
+      { header: '必須', select: r => r.required ? 'TRUE' : 'FALSE' },
+      { header: '重複禁止', select: r => r.unique ? 'TRUE' : 'FALSE' },
+      { header: '初期値', select: r => r.defaultValue || '' },
       { header: 'グループ', select: r => r.groupPath || '' },
-      { header: '備考', select: () => '' }
     ];
 
     // クリップボード／DL を KTExport に統一
@@ -1554,6 +1883,209 @@
     }, { passive: true });
   };
 
+  // --- フィールド利用箇所の抽出（全フィールドコードを元に拾う）
+  // usageData: { views, perRecordNotify, reminderNotify, status, customize, reports, actions }
+  function extractUsedFields(usageData, allFieldCodes) {
+    const usageMap = {}; // code -> Set(場所)
+    const mark = (code, where) => {
+      if (!code) return;
+      if (!usageMap[code]) usageMap[code] = new Set();
+      usageMap[code].add(where);
+    };
+
+    const codes = Array.isArray(allFieldCodes) ? allFieldCodes : [];
+    const markByCond = (cond, where) => {
+      const s = String(cond || '');
+      if (!s) return;
+      for (const code of codes) {
+        // 簡易：含まれてたら使用扱い（厳密にやるなら tokenizer 化）
+        if (s.includes(code)) mark(code, where);
+      }
+    };
+
+    const { views, perRecordNotify, reminderNotify, status, customize, reports, actions } = usageData || {};
+
+    // 一覧ビュー
+    Object.values(views?.views || {}).forEach(view => {
+      (view.fields || []).forEach(code => mark(code, '一覧ビュー'));
+    });
+
+    // レコード通知
+    (perRecordNotify?.notifications || []).forEach(n => {
+      markByCond(n.filterCond, 'レコード通知');
+    });
+
+    // リマインダー
+    (reminderNotify?.notifications || []).forEach(n => {
+      const timingCode = n?.timing?.code;
+      if (timingCode) mark(timingCode, 'リマインダー');
+      markByCond(n.filterCond, 'リマインダー');
+    });
+
+    // プロセス管理（actions の JSON をざっくり走査）
+    (status?.actions || []).forEach(action => {
+      markByCond(JSON.stringify(action), 'プロセス管理');
+    });
+
+    const jsText = (customize?.desktop?.js || []).map(js => js.url || '').join('\n');
+    const codePattern = /record\.(\w+)/g;
+    let m;
+    while ((m = codePattern.exec(jsText)) !== null) mark(m[1], 'JavaScript');
+
+    // レポート
+    Object.values(reports?.reports || {}).forEach(rep => {
+      (rep.groups || []).forEach(g => { if (g.code) mark(g.code, 'レポート'); });
+      (rep.aggregations || []).forEach(agg => { if (agg.code) mark(agg.code, 'レポート'); });
+
+      markByCond(rep.filterCond, 'レポート');
+
+      (rep.sorts || []).forEach(sort => {
+        const by = sort.by;
+        if (by && !['TOTAL', 'GROUP1', 'GROUP2'].includes(by)) mark(by, 'レポート');
+      });
+    });
+
+    // アプリアクション
+    Object.values(actions?.actions || {}).forEach(action => {
+      (action.mappings || []).forEach(m => {
+        if (m.srcType === 'FIELD' && m.srcField) mark(m.srcField, 'アクション（マッピング）');
+      });
+      markByCond(action.filterCond, 'アクション（条件）');
+    });
+
+    // Set -> Array
+    const out = {};
+    for (const [code, set] of Object.entries(usageMap)) out[code] = Array.from(set);
+    return out;
+  }
+
+  function getFieldOptionLabels(field) {
+    if (!field) return null;
+    if (['CHECK_BOX', 'RADIO_BUTTON', 'DROP_DOWN', 'MULTI_SELECT'].includes(field.type)) {
+      return Object.values(field.options || {}).map(o => o.label).filter(Boolean);
+    }
+    return null;
+  }
+
+  function getCalcDetail(field) {
+    if (!field) return null;
+
+    // CALC
+    if (field.type === 'CALC') {
+      return { calcExpression: field.expression || '' };
+    }
+
+    // 文字列(1行)の式（あなたが実装してる拡張仕様）
+    if (field.type === 'SINGLE_LINE_TEXT' && ('expression' in field)) {
+      if (field.hideExpression) return { calcExpression: '(hidden)' };
+      return { calcExpression: field.expression || '' };
+    }
+
+    return null;
+  }
+
+  function buildDetail(fieldObj) {
+    if (!fieldObj) return null;
+
+    const optionLabels = getFieldOptionLabels(fieldObj);
+    const calcDetail = getCalcDetail(fieldObj);
+
+    const initialValue = formatDefault(fieldObj); // Toolkit側の formatDefault を使う
+
+    const detail = {
+      ...(optionLabels?.length ? { options: optionLabels } : {}),
+      ...(initialValue ? { initialValue } : {}),
+      ...(calcDetail || {}),
+    };
+
+    const hasAny =
+      (detail.options && detail.options.length) ||
+      detail.initialValue ||
+      detail.calcExpression
+
+    return hasAny ? detail : null;
+  }
+
+  function buildDetailHtml(detail, usagePlaces) {
+    const items = [];
+
+    const add = (k, v) => {
+      if (v == null) return;
+      const s = String(v).trim();
+      if (!s) return;
+      items.push(`
+      <div class="fi-detail-item">
+        <div class="fi-detail-k">${k}: </div>
+        <div class="fi-detail-v">${escapeHtml(s)}</div>
+      </div>
+    `);
+    };
+
+    // ★使用箇所（バッジ）
+    const places = Array.isArray(usagePlaces) ? usagePlaces : [];
+    if (places.length) {
+      const badges = places.map(p => `<span class="fi-badge">${escapeHtml(p)}</span>`).join('');
+      items.push(`
+      <div class="fi-detail-item">
+        <div class="fi-detail-k">使用箇所: </div>
+        <div class="fi-detail-v">${badges}</div>
+      </div>
+    `);
+    }
+
+    if (detail?.options?.length) {
+      const badges = detail.options.map(o => `<span class="fi-badge">${escapeHtml(o)}</span>`).join('');
+      items.push(`
+      <div class="fi-detail-item">
+        <div class="fi-detail-k">選択肢: </div>
+        <div class="fi-detail-v">${badges}</div>
+      </div>
+    `);
+    }
+
+    add('初期値', detail?.initialValue);
+    add('計算式', detail?.calcExpression);
+
+    return items.length ? `<div class="fi-detail-box">${items.join('')}</div>` : '';
+  }
+
+  /* フィールドバッジ用スタイルを注入 */
+  function injectFieldBadgeStyle() {
+    const STYLE_ID = 'toolkit-field-badge-style';
+    if (document.getElementById(STYLE_ID)) return;
+
+    const style = document.createElement('style');
+    style.id = STYLE_ID;
+    style.textContent = `
+    .fi-badge{
+      display: inline-block;
+      padding: 1px 6px;
+      border: 1px solid #d1d5db;
+      border-radius: 999px;
+      font-size: 11px;
+      margin-right: 4px;
+      margin-bottom: 4px;
+      line-height: 1.4;
+      white-space: nowrap;
+    }
+
+    .fi-detail-item{
+      display: block;
+      margin-bottom: 6px;
+    }
+
+    .fi-detail-k{
+      display: inline;
+      font-weight: 600;
+      margin-right: 8px;
+    }
+
+    .fi-detail-v{
+      display: inline;
+    }
+  `;
+    document.head.appendChild(style);
+  }
 
   /** --------------------------------------------------------
   * Views view（全一覧の一覧化）
@@ -1647,14 +2179,35 @@
       const query = condition + (sort ? ` order by ${sort}` : '');
       const parsed = parseQuery(query);
 
+      // ★ viewが持つフィールド情報（type別）
+      const listFields = Array.isArray(v.fields) ? v.fields : [];
+      const calDate = v.date || '';
+      const calTitle = v.title || '';
+      const customHtml = typeof v.html === 'string' ? v.html : '';
+      const customHtmlLen = customHtml ? customHtml.length : 0;
+
+      // ★ label化（fields配列はフィールドコードなので labelも併記）
+      const listFieldsPretty = listFields.length
+        ? listFields.map(code => `${code2label.get(code) || code}（${code}）`).join(', ')
+        : '（なし）';
+
       return {
         id: String(v.id ?? ''),
         name: v.name || '',
         type: v.type || '',
+        builtinType: v.builtinType || '',
+        index: String(v.index ?? ''),
         conditionRaw: parsed.condition,
         conditionPretty: labelizeQueryPart(parsed.condition, code2label),
         sortRaw: (parsed.orderBy || []).join(', '),
-        sortPretty: (parsed.orderBy || []).map(ob => labelizeQueryPart(ob, code2label)).join(', ')
+        sortPretty: (parsed.orderBy || []).map(ob => labelizeQueryPart(ob, code2label)).join(', '),
+
+        // ★ 追加：ビュー設定としての使用フィールド
+        listFields,              // LIST: ["コード", ...]
+        listFieldsPretty,        // LIST: "ラベル（コード）, ..."
+        calDate,                 // CALENDAR
+        calTitle,                // CALENDAR
+        customHtmlLen,           // CUSTOM
       };
     });
 
@@ -1665,14 +2218,14 @@
         <div style="font-weight:700;white-space:nowrap">All Views（全一覧）</div>
         <div style="display:flex;gap:6px;flex-wrap:nowrap;overflow:auto;white-space:nowrap">
           <button id="kv-copy-md"  class="btn">Copy Markdown</button>
-          <button id="kv-dl-md"    class="btn">Download MD</button>
-          <button id="kv-dl-csv"   class="btn">Download CSV</button>
-          <button id="kv-dl-json" class="btn">Download JSON</button>
+          <button id="kv-dl-md"    class="btn">DL MD</button>
+          <button id="kv-dl-csv"   class="btn">DL CSV</button>
+          <button id="kv-dl-json" class="btn">DL JSON</button>
         </div>
       </div>
 
       <div style="opacity:.9;margin-bottom:6px">
-        デフォルトビュー（並び順1位）：<strong>${escHTML(defaultName || '—')}</strong>
+        デフォルトビュー（並び順1位）：<strong>${escapeHtml(defaultName || '—')}</strong>
       </div>
 
       <div class="table-container">
@@ -1683,6 +2236,7 @@
             <col style="width:88px">
             <col style="width:auto">
             <col style="width:26%">
+            <col style="width:72px">
           </colgroup>
           <thead>
             <tr>
@@ -1691,16 +2245,84 @@
               <th>種類</th>
               <th>フィルター</th>
               <th>ソート</th>
+              <th>詳細</th>
             </tr>
           </thead>
           <tbody>
             ${rows.map(r => `
-              <tr>
-                <td>${escHTML(r.id)}</td>
-                <td title="${escHTML(r.name)}">${escHTML(r.name)}</td>
-                <td>${escHTML(r.type)}</td>
-                <td>${escHTML(r.conditionPretty || '（なし）')}</td>
-                <td>${escHTML(r.sortPretty || '（なし）')}</td>
+              <tr data-view-row="${escapeHtml(r.id)}">
+                <td>${escapeHtml(r.id)}</td>
+                <td title="${escapeHtml(r.name)}">${escapeHtml(r.name)}</td>
+                <td>${escapeHtml(r.type)}</td>
+                <td>${escapeHtml(r.conditionPretty || '（なし）')}</td>
+                <td>${escapeHtml(r.sortPretty || '（なし）')}</td>
+                <td>
+                  <button 
+                    type="button"
+                    class="fi-detail-btn kv-vw-detail"
+                    data-view-id="${escapeHtml(r.id)}"
+                    aria-expanded="false"
+                  >
+                    開く
+                  </button>
+                </td>
+              </tr>
+
+              <tr class="kv-vw-detail-row" data-detail-for="${escapeHtml(r.id)}" style="display:none">
+                <td colspan="6" style="padding:10px 12px;background:rgba(0,0,0,.02)">
+                  ${r.type === 'LIST' ? `
+                    <div style="font-weight:700;margin-bottom:6px">表示フィールド（LIST）</div>
+                    <div style="display:flex;gap:6px;flex-wrap:wrap">
+                      ${(r.listFields || []).length ? (r.listFields || []).map(code => `
+                        <span style="display:inline-flex;gap:6px;align-items:center;border:1px solid rgb(255, 255, 255);border-radius:999px;padding:3px 10px;">
+                          <span style="font-weight:600">${escapeHtml(code2label.get(code) || code)}</span>
+                          <span style="opacity:.7">(${escapeHtml(code)})</span>
+                        </span>
+                      `).join('') : `<span style="opacity:.75">（なし）</span>`}
+                    </div>
+                  ` : r.type === 'CALENDAR' ? `
+                    <div style="display:flex;gap:14px;flex-wrap:wrap">
+                      <div>
+                        <div style="font-weight:700;margin-bottom:6px">日付フィールド（CALENDAR）</div>
+                        <div>${escapeHtml((code2label.get(r.calDate) || r.calDate) || '（未設定）')}${r.calDate ? ` <span style="opacity:.7">(${escapeHtml(r.calDate)})</span>` : ''}</div>
+                      </div>
+                      <div>
+                        <div style="font-weight:700;margin-bottom:6px">タイトルフィールド（CALENDAR）</div>
+                        <div>${escapeHtml((code2label.get(r.calTitle) || r.calTitle) || '（未設定）')}${r.calTitle ? ` <span style="opacity:.7">(${escapeHtml(r.calTitle)})</span>` : ''}</div>
+                      </div>
+                    </div>
+                  ` : r.type === 'CUSTOM' ? `
+                    <div style="display:flex;flex-direction:column;gap:10px">
+
+                      <div>
+                        <div style="font-weight:700;margin-bottom:6px">
+                          カスタムHTML（CUSTOM）
+                        </div>
+
+                        <div style="opacity:.75;font-size:12px;margin-bottom:6px">
+                          文字数：${escapeHtml(String(r.customHtmlLen || 0))}
+                        </div>
+
+                        <pre style="
+                          white-space:pre-wrap;
+                          word-break:break-word;
+                          border:1px solid rgb(255, 255, 255);
+                          border-radius:8px;
+                          padding:12px;
+                          font-size:12px;
+                          line-height:1.6;
+                          max-height:400px;
+                          overflow:auto;
+                        ">
+                        ${escapeHtml((views.views[r.name]?.html || '（未設定）'))}
+                        </pre>
+                      </div>
+
+                    </div>
+                  ` : `
+                    <div style="opacity:.8">このビュータイプでは、フィールド情報の表示はありません。</div>
+                  `}
+                </td>
               </tr>
             `).join('')}
           </tbody>
@@ -1715,7 +2337,26 @@
       { header: '種類', select: r => r.type },
       { header: 'フィルター', select: r => r.conditionPretty || '（なし）' },
       { header: 'ソート', select: r => r.sortPretty || '（なし）' },
+      { header: '表示フィールド（LIST）', select: r => r.type === 'LIST' ? (r.listFieldsPretty || '（なし）') : '' },
+      { header: 'CALENDAR日付', select: r => r.type === 'CALENDAR' ? (r.calDate || '') : '' },
+      { header: 'CALENDARタイトル', select: r => r.type === 'CALENDAR' ? (r.calTitle || '') : '' },
+      { header: 'CUSTOM htmlLen', select: r => r.type === 'CUSTOM' ? String(r.customHtmlLen || 0) : '' },
     ];
+
+    // 詳細の開閉（イベントデリゲーション）
+    el.addEventListener('click', (e) => {
+      const btn = e.target.closest('.kv-vw-detail');
+      if (!btn) return;
+
+      const viewId = btn.dataset.viewId || '';
+      const detailRow = el.querySelector(`tr.kv-vw-detail-row[data-detail-for="${CSS.escape(viewId)}"]`);
+      if (!detailRow) return;
+
+      const isOpen = detailRow.style.display !== 'none';
+      detailRow.style.display = isOpen ? 'none' : '';
+      btn.setAttribute('aria-expanded', String(!isOpen));
+      btn.textContent = isOpen ? '開く' : '閉じる';
+    }, { passive: true });
 
     // イベント（Copy MD / DL MD / Copy CSV / DL JSON）
     el.querySelector('#kv-copy-md').addEventListener('click', async () => {
@@ -1749,7 +2390,7 @@
       const code = g?.code || '';
       const labelRaw = code ? (code2label[code] ? `${code2label[code]}` : code) : '';
       const perTag = g?.per ? `<span class="pill">${String(g.per).toUpperCase()}</span>` : '';
-      const label = escHTML(labelRaw);
+      const label = escapeHtml(labelRaw);
       return `<div class="gline"><span class="pill">G${idx}</span> ${label} ${perTag}</div>`;
     }).join('');
   };
@@ -1834,9 +2475,9 @@
         <div style="font-weight:700;white-space:nowrap">Graphs（グラフ全一覧）</div>
         <div style="display:flex;gap:6px;flex-wrap:nowrap;overflow:auto;white-space:nowrap">
           <button id="kg-copy-md"  class="btn">Copy Markdown</button>
-          <button id="kg-dl-md"    class="btn">Download MD</button>
-          <button id="kg-dl-csv"   class="btn">Download CSV</button>
-          <button id="kg-dl-json" class="btn">Download JSON</button>
+          <button id="kg-dl-md"    class="btn">DL MD</button>
+          <button id="kg-dl-csv"   class="btn">DL CSV</button>
+          <button id="kg-dl-json" class="btn">DL JSON</button>
         </div>
       </div>
       <div class="table-container">
@@ -1864,13 +2505,13 @@
           <tbody>
             ${rows.map(r => `
               <tr>
-                <td>${escHTML(r.id)}</td>
-                <td title="${escHTML(r.name)}">${escHTML(r.name)}</td>
-                <td>${escHTML(r.chartType)}</td>
-                <td>${escHTML(r.chartMode)}</td>
+                <td>${escapeHtml(r.id)}</td>
+                <td title="${escapeHtml(r.name)}">${escapeHtml(r.name)}</td>
+                <td>${escapeHtml(r.chartType)}</td>
+                <td>${escapeHtml(r.chartMode)}</td>
                 <td>${r.groupsHtml || '—'}</td>
-                <td>${escHTML(r.aggsText || '—')}</td>
-                <td>${escHTML(r.filterCond || '（なし）')}</td>
+                <td>${escapeHtml(r.aggsText || '—')}</td>
+                <td>${escapeHtml(r.filterCond || '（なし）')}</td>
               </tr>
             `).join('')}
           </tbody>
@@ -1936,28 +2577,28 @@
     const caret = indicator ? (defaultOpen ? '▾' : '▸') : '';
 
     const html = `
-    <section id="${secId}" style="margin:12px 0 20px">
-      <details ${defaultOpen ? 'open' : ''}>
-        <summary style="list-style:none;cursor:pointer">
-          <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin:0 0 8px;flex-wrap:nowrap;min-width:0">
-            <h3 style="font-size:14px;margin:0;border-left:4px solid #888;padding-left:8px;display:flex;align-items:center;gap:6px;flex:1">
-              ${indicator ? `<span id="${indId}" aria-hidden="true" style="display:inline-block;width:1em;text-align:center">${caret}</span>` : ''}
-              <span>${title}</span>
-            </h3>
-            <div style="display:flex;gap:6px;flex-wrap:nowrap;overflow:auto;white-space:nowrap">
-              <button id="${btnCopyMd}"  class="btn">Copy Markdown</button>
-              <button id="${btnDlMd}"    class="btn">Download MD</button>
-              <button id="${btnDlCsv}"   class="btn">Download CSV</button>
-              <button id="${btnDlJSON}"  class="btn">Download JSON</button>
+      <section id="${secId}" style="margin:12px 0 20px">
+        <details ${defaultOpen ? 'open' : ''}>
+          <summary style="list-style:none;cursor:pointer">
+            <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin:0 0 8px;flex-wrap:nowrap;min-width:0">
+              <h3 style="font-size:14px;margin:0;border-left:4px solid #888;padding-left:8px;display:flex;align-items:center;gap:6px;flex:1">
+                ${indicator ? `<span id="${indId}" aria-hidden="true" style="display:inline-block;width:1em;text-align:center">${caret}</span>` : ''}
+                <span>${title}</span>
+              </h3>
+              <div style="display:flex;gap:6px;flex-wrap:nowrap;overflow:auto;white-space:nowrap">
+                <button id="${btnCopyMd}"  class="btn">Copy Markdown</button>
+                <button id="${btnDlMd}"    class="btn">DL MD</button>
+                <button id="${btnDlCsv}"   class="btn">DL CSV</button>
+                <button id="${btnDlJSON}"  class="btn">DL JSON</button>
+              </div>
             </div>
+          </summary>
+          <div class="table-container" style="border:1px solid #ddd;border-radius:8px">
+            ${innerTableHTML}
           </div>
-        </summary>
-        <div class="table-container" style="border:1px solid #ddd;border-radius:8px">
-          ${innerTableHTML}
-        </div>
-      </details>
-    </section>
-  `;
+        </details>
+      </section>
+    `;
 
     const bind = (root = document) => {
       const container = root.querySelector?.(`#${secId}`) || document.getElementById(secId);
@@ -2192,6 +2833,535 @@
 
 
   /** --------------------------------------------------------
+   * Notifications view
+   * -------------------------------------------------------- */
+  function renderNotifications(root, ctx) {
+    const view = root.querySelector('#view-notice');
+    if (!view) return;
+
+    const appId = ctx?.appId || kintone.app.getId();
+
+    view.innerHTML = `
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin:0 0 8px;flex-wrap:nowrap;min-width:0">
+        <h3 style="font-size:14px;margin:0;border-left:4px solid #888;padding-left:8px;display:flex;align-items:center;gap:6px;flex:1">
+          <span>Notifications</span>
+        </h3>
+      </div>
+      <div id="kt-notify-body"></div>
+    `;
+
+    const body = view.querySelector('#kt-notify-body');
+
+    try {
+      renderNotificationsByType(body, ctx, appId);
+    } catch (err) {
+      console.error('[renderNotifications] render failed', err);
+      body.innerHTML = `
+        <div style="padding:10px;border:1px solid #f5c2c7;background:#f8d7da;color:#842029;border-radius:8px">
+          <b>Notifications render error</b><br>
+          <pre style="margin:6px 0 0;white-space:pre-wrap">${String(err?.stack || err)}</pre>
+        </div>
+      `;
+    }
+  }
+
+  function renderNotificationsByType(container, data, appId) {
+    if (!container) return;
+
+    const general = data?.generalNotify || {};
+    const perRecord = data?.perRecordNotify || {};
+    const reminder = data?.reminderNotify || {};
+
+    const esc = (v) => String(v ?? '')
+      .replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;')
+      .replaceAll('"', '&quot;').replaceAll("'", "&#39;");
+
+    const yn = (b) => (b ? 'ON' : 'OFF');
+
+    const formatEntity = (entity, includeSubs) => {
+      if (!entity) return '—';
+      const t = entity?.type || '';
+      const code = entity?.code || '';
+      if (!t && !code) return '—';
+      return `${t}: ${code}${includeSubs ? ' (+subs)' : ''}`;
+    };
+    const formatTargets = (targets) => {
+      const arr = Array.isArray(targets) ? targets : [];
+      const s = arr.map(t => formatEntity(t?.entity, t?.includeSubs)).filter(x => x && x !== '—').join(', ');
+      return s || '—';
+    };
+    const formatTiming = (timing) => {
+      const t = timing || {};
+      const parts = [];
+      if (t.code) parts.push(`code=${t.code}`);
+      if (t.daysLater != null) parts.push(`daysLater=${t.daysLater}`);
+      if (t.hoursLater != null) parts.push(`hoursLater=${t.hoursLater}`);
+      if (t.time) parts.push(`time=${t.time}`);
+      return parts.join(' / ') || '—';
+    };
+
+    // AND/ORバッジ + 条件は「AND/ORを除去して改行」
+    const splitByAndOrPreserveQuotes = (s) => {
+      const out = [];
+      let buf = '';
+      let inQuote = false;
+      const flush = () => { const t = buf.trim(); if (t) out.push({ type: 'cond', text: t }); buf = ''; };
+      for (let i = 0; i < s.length; i++) {
+        const ch = s[i];
+        if (ch === '"') { inQuote = !inQuote; buf += ch; continue; }
+        if (!inQuote) {
+          const rest = s.slice(i).toLowerCase();
+          if (rest.startsWith(' and ')) { flush(); out.push({ type: 'op', op: 'AND' }); i += 4; continue; }
+          if (rest.startsWith(' or ')) { flush(); out.push({ type: 'op', op: 'OR' }); i += 3; continue; }
+        }
+        buf += ch;
+      }
+      flush();
+      return out.length ? out : [{ type: 'cond', text: s }];
+    };
+    const parseCondForBadgeAndLines = (cond) => {
+      const raw = String(cond || '').trim();
+      if (!raw) return { badge: '', linesHtml: '—', linesText: '' };
+      const tokens = splitByAndOrPreserveQuotes(raw);
+      const ops = tokens.filter(t => t.type === 'op').map(t => t.op);
+      const hasAnd = ops.includes('AND');
+      const hasOr = ops.includes('OR');
+      let badge = '';
+      if (hasAnd && hasOr) badge = 'AND/OR';
+      else if (hasAnd) badge = 'AND';
+      else if (hasOr) badge = 'OR';
+
+      const lines = tokens.filter(t => t.type === 'cond').map(t => t.text.trim()).filter(Boolean);
+      const linesHtml = lines.length ? lines.map(esc).join('<br>') : '—';
+      const linesText = lines.join('\n');
+      return { badge, linesHtml, linesText };
+    };
+    const badgeHtml = (txt) => txt ? `<span class="pill">${esc(txt)}</span>` : '—';
+
+    // Relationsと同じ table()
+    const table = (headers, rows, colWidths = null) => `
+      <table style="width:100%;border-collapse:collapse;font-size:12px;table-layout:fixed">
+        ${Array.isArray(colWidths) ? `<colgroup>${colWidths.map(w => `<col style="width:${w}">`).join('')}</colgroup>` : ''}
+        <thead>
+          <tr>${headers.map(h => `<th style="text-align:left;padding:6px 8px;border-bottom:1px solid #ddd;white-space:nowrap;">${h}</th>`).join('')}</tr>
+        </thead>
+        <tbody>
+          ${rows.length ? rows.map(cols => `
+            <tr>${cols.map((c, i) => `
+              <td style="padding:6px 8px;border-bottom:1px solid #eee;vertical-align:top;${i === 0 || i === 1 ? 'white-space:nowrap;overflow:hidden;text-overflow:ellipsis;' : ''}${i >= 2 ? 'white-space:pre-wrap;word-break:break-word;' : ''}">${c}</td>
+            `).join('')}</tr>
+          `).join('') : `<tr><td colspan="${headers.length}" style="padding:10px;color:#666">項目なし</td></tr>`}
+        </tbody>
+      </table>
+    `;
+
+    // ---------------- App notifications ----------------
+    const headersApp = ['通知先', 'イベント'];
+    const appRowsHtml = [];
+    const appRowsDL = [];
+
+    const appNotifs = Array.isArray(general?.notifications) ? general.notifications : [];
+    appNotifs.forEach(n => {
+      const to = formatEntity(n?.entity, n?.includeSubs);
+      const ev = [];
+      if (n?.recordAdded) ev.push('レコード追加');
+      if (n?.recordEdited) ev.push('レコード編集');
+      if (n?.commentAdded) ev.push('コメント書き込み');
+      if (n?.statusChanged) ev.push('ステータスの更新');
+      if (n?.fileImported) ev.push('ファイル読み込み');
+      const evText = ev.join(', ') || '—';
+      appRowsHtml.push([esc(to), esc(evText)]);
+      appRowsDL.push([to, evText]);
+    });
+
+    if (general?.notifyToCommenter != null) {
+      const v = yn(!!general.notifyToCommenter);
+      appRowsHtml.push(['コメント投稿者', esc(v)]);
+      appRowsDL.push(['コメント投稿者', v]);
+    }
+
+    const secApp = sectionWithDL(
+      `アプリ通知（レコード追加/編集/インポート等）`,
+      headersApp, appRowsDL,
+      table(headersApp, appRowsHtml, ['40%', '60%']),
+      'notifications_general',
+      { appId, defaultOpen: true, indicator: true, relationType: 'general' }
+    );
+
+    // ---------------- Per-record notifications ----------------
+    const headersRec = ['タイトル', 'AND/OR', '条件', '通知先'];
+    const recRowsHtml = [];
+    const recRowsDL = [];
+
+    const recNotifs = Array.isArray(perRecord?.notifications) ? perRecord.notifications : [];
+    recNotifs.forEach(n => {
+      const title = n?.title || '—';
+      const cond = n?.filterCond || '';
+      const parsed = parseCondForBadgeAndLines(cond);
+      const to = formatTargets(n?.targets);
+
+      recRowsHtml.push([esc(title), badgeHtml(parsed.badge), parsed.linesHtml, esc(to)]);
+      recRowsDL.push([title, parsed.badge || '', parsed.linesText || cond || '', to]);
+    });
+
+    const secRec = sectionWithDL(
+      `レコード通知（条件一致で通知）`,
+      headersRec, recRowsDL,
+      table(headersRec, recRowsHtml, ['22%', '10%', '36%', '32%']),
+      'notifications_perRecord',
+      { appId, defaultOpen: true, indicator: true, relationType: 'perRecord' }
+    );
+
+    // ---------------- Reminder notifications ----------------
+    const headersRem = ['タイトル', '基準フィールド', 'タイミング', 'AND/OR', '条件', '通知先'];
+    const remRowsHtml = [];
+    const remRowsDL = [];
+
+    const remNotifs = Array.isArray(reminder?.notifications) ? reminder.notifications : [];
+    remNotifs.forEach(n => {
+      const title = n?.title || '—';
+      const timingCode = n?.timing?.code || '—';
+      const timingText = formatTiming(n?.timing);
+      const cond = n?.filterCond || '';
+      const parsed = parseCondForBadgeAndLines(cond);
+      const to = formatTargets(n?.targets);
+
+      remRowsHtml.push([
+        esc(title),
+        `<code>${esc(timingCode)}</code>`,
+        esc(timingText),
+        badgeHtml(parsed.badge),
+        parsed.linesHtml,
+        esc(to),
+      ]);
+
+      remRowsDL.push([
+        title,
+        timingCode,
+        timingText,
+        parsed.badge || '',
+        parsed.linesText || cond || '',
+        to,
+      ]);
+    });
+
+    const tz = reminder?.timezone ? `timezone: ${reminder.timezone}` : '';
+    const secRem = sectionWithDL(
+      `リマインダー通知（日時フィールド基準） ${tz}`.trim(),
+      headersRem, remRowsDL,
+      table(headersRem, remRowsHtml, ['18%', '12%', '18%', '10%', '22%', '20%']),
+      'notifications_reminder',
+      { appId, defaultOpen: true, indicator: true, relationType: 'reminder' }
+    );
+
+    container.innerHTML = `${secApp.html}${secRec.html}${secRem.html}`;
+    secApp.bind(container); secRec.bind(container); secRem.bind(container);
+  }
+
+
+  /** --------------------------------------------------------
+ * ACL view
+ * -------------------------------------------------------- */
+  function renderAcl(root, ctx) {
+    const view = root.querySelector('#view-acl');
+    if (!view) return;
+
+    const appId = ctx?.appId || kintone.app.getId();
+
+    view.innerHTML = `
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin:0 0 8px;flex-wrap:nowrap;min-width:0">
+        <h3 style="font-size:14px;margin:0;border-left:4px solid #888;padding-left:8px;display:flex;align-items:center;gap:6px;flex:1">
+          <span>ACL</span>
+        </h3>
+      </div>
+      <div id="kt-acl-body"></div>
+    `;
+
+    const body = view.querySelector('#kt-acl-body');
+
+    try {
+      renderAclByType(body, ctx, appId);
+    } catch (err) {
+      console.error('[renderAcl] render failed', err);
+      body.innerHTML = `
+      <div style="padding:10px;border:1px solid #f5c2c7;background:#f8d7da;color:#842029;border-radius:8px">
+        <b>ACL render error</b><br>
+        <pre style="margin:6px 0 0;white-space:pre-wrap">${String(err?.stack || err)}</pre>
+      </div>
+    `;
+    }
+  }
+
+  function renderAclByType(container, ctx, appId) {
+    if (!container) return;
+
+    const esc = (v) => String(v ?? '')
+      .replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;')
+      .replaceAll('"', '&quot;').replaceAll("'", "&#39;");
+
+    const yn = (b) => (b ? 'ON' : 'OFF');
+
+    const formatEntity = (entity, includeSubs) => {
+      if (!entity) return '—';
+      const t = entity?.type || '';
+      const code = entity?.code ?? '';
+      const codeText = (code === null || code === undefined || code === '') ? '—' : String(code);
+      return `${t}: ${codeText}${includeSubs ? ' (+subs)' : ''}`;
+    };
+
+    // AND/ORバッジ + 条件は「AND/ORを除去して改行」(Notifications と同じ)
+    const splitByAndOrPreserveQuotes = (s) => {
+      const out = [];
+      let buf = '';
+      let inQuote = false;
+      const flush = () => { const t = buf.trim(); if (t) out.push({ type: 'cond', text: t }); buf = ''; };
+      for (let i = 0; i < s.length; i++) {
+        const ch = s[i];
+        if (ch === '"') { inQuote = !inQuote; buf += ch; continue; }
+        if (!inQuote) {
+          const rest = s.slice(i).toLowerCase();
+          if (rest.startsWith(' and ')) { flush(); out.push({ type: 'op', op: 'AND' }); i += 4; continue; }
+          if (rest.startsWith(' or ')) { flush(); out.push({ type: 'op', op: 'OR' }); i += 3; continue; }
+        }
+        buf += ch;
+      }
+      flush();
+      return out.length ? out : [{ type: 'cond', text: s }];
+    };
+    const parseCondForBadgeAndLines = (cond) => {
+      const raw = String(cond || '').trim();
+      if (!raw) return { badge: '', linesHtml: '—', linesText: '' };
+      const tokens = splitByAndOrPreserveQuotes(raw);
+      const ops = tokens.filter(t => t.type === 'op').map(t => t.op);
+      const hasAnd = ops.includes('AND');
+      const hasOr = ops.includes('OR');
+      let badge = '';
+      if (hasAnd && hasOr) badge = 'AND/OR';
+      else if (hasAnd) badge = 'AND';
+      else if (hasOr) badge = 'OR';
+      const lines = tokens.filter(t => t.type === 'cond').map(t => t.text.trim()).filter(Boolean);
+      const linesHtml = lines.length ? lines.map(esc).join('<br>') : '—';
+      const linesText = lines.join('\n');
+      return { badge, linesHtml, linesText };
+    };
+    const badgeHtml = (txt) => txt ? `<span class="pill">${esc(txt)}</span>` : '—';
+
+    const table = (headers, rows, colWidths = null) => `
+      <table style="width:100%;border-collapse:collapse;font-size:12px;table-layout:fixed">
+        ${Array.isArray(colWidths) ? `<colgroup>${colWidths.map(w => `<col style="width:${w}">`).join('')}</colgroup>` : ''}
+        <thead>
+          <tr>${headers.map(h => `<th style="text-align:left;padding:6px 8px;border-bottom:1px solid #ddd;white-space:nowrap;">${h}</th>`).join('')}</tr>
+        </thead>
+        <tbody>
+          ${rows.length ? rows.map(cols => `
+            <tr>${cols.map((c, i) => `
+              <td style="padding:6px 8px;border-bottom:1px solid #eee;vertical-align:top;
+                ${i === 0 || i === 1 ? 'white-space:nowrap;overflow:hidden;text-overflow:ellipsis;' : ''}
+                ${i >= 2 ? 'white-space:pre-wrap;word-break:break-word;' : ''}
+              ">${c}</td>
+            `).join('')}</tr>
+          `).join('') : `<tr><td colspan="${headers.length}" style="padding:10px;color:#666">項目なし</td></tr>`}
+        </tbody>
+      </table>
+    `;
+
+    // ========================
+    // 1) App ACL (ctx.appAcl.rights[])
+    // ========================
+    const appAcl = ctx?.appAcl || {};
+    const appRights = Array.isArray(appAcl?.rights) ? appAcl.rights : [];
+
+    const headersApp = [
+      '対象',
+      'appEditable',
+      'recordView',
+      'add',
+      'edit',
+      'del',
+      'import',
+      'export',
+    ];
+
+    const appRowsHtml = appRights.map(r => [
+      esc(formatEntity(r?.entity, r?.includeSubs)),
+      esc(yn(!!r?.appEditable)),
+      esc(yn(!!r?.recordViewable)),
+      esc(yn(!!r?.recordAddable)),
+      esc(yn(!!r?.recordEditable)),
+      esc(yn(!!r?.recordDeletable)),
+      esc(yn(!!r?.recordImportable)),
+      esc(yn(!!r?.recordExportable)),
+    ]);
+
+    const appRowsDL = appRights.map(r => [
+      formatEntity(r?.entity, r?.includeSubs),
+      yn(!!r?.appEditable),
+      yn(!!r?.recordViewable),
+      yn(!!r?.recordAddable),
+      yn(!!r?.recordEditable),
+      yn(!!r?.recordDeletable),
+      yn(!!r?.recordImportable),
+      yn(!!r?.recordExportable),
+    ]);
+
+    const secApp = sectionWithDL(
+      `アプリのアクセス権限`,
+      headersApp, appRowsDL,
+      table(headersApp, appRowsHtml, ['32%', '10%', '10%', '8%', '8%', '8%', '12%', '12%']),
+      'acl_app',
+      { appId, defaultOpen: true, indicator: true, relationType: 'appAcl' }
+    );
+
+    // ========================
+    // 2) Record ACL (ctx.recordAcl.rights[] -> entities[])
+    // ========================
+    const recordAcl = ctx?.recordAcl || {};
+    const recRights = Array.isArray(recordAcl?.rights) ? recordAcl.rights : [];
+
+    const headersRec = ['#', 'AND/OR', '条件', '対象', 'view', 'edit', 'del'];
+    const recRowsHtml = [];
+    const recRowsDL = [];
+
+    recRights.forEach((rule, ridx) => {
+      const condRaw = String(rule?.filterCond || '').trim();
+      const parsed = parseCondForBadgeAndLines(condRaw);
+      const ents = Array.isArray(rule?.entities) ? rule.entities : [];
+
+      // entities が空でも “ルール自体” は見えるように1行出す
+      if (!ents.length) {
+        recRowsHtml.push([
+          esc(String(ridx + 1)),
+          badgeHtml(parsed.badge),
+          parsed.linesHtml,
+          '—',
+          '—', '—', '—',
+        ]);
+        recRowsDL.push([
+          String(ridx + 1),
+          parsed.badge || '',
+          parsed.linesText || condRaw || '',
+          '',
+          '', '', '',
+        ]);
+        return;
+      }
+
+      // ★各 entity 行に必ず条件を出す（潰れ防止）
+      ents.forEach((e) => {
+        recRowsHtml.push([
+          esc(String(ridx + 1)),
+          badgeHtml(parsed.badge),
+          parsed.linesHtml, // 条件（改行済み）
+          esc(formatEntity(e?.entity, e?.includeSubs)),
+          esc(yn(!!e?.viewable)),
+          esc(yn(!!e?.editable)),
+          esc(yn(!!e?.deletable)),
+        ]);
+
+        recRowsDL.push([
+          String(ridx + 1),
+          parsed.badge || '',
+          parsed.linesText || condRaw || '',
+          formatEntity(e?.entity, e?.includeSubs),
+          yn(!!e?.viewable),
+          yn(!!e?.editable),
+          yn(!!e?.deletable),
+        ]);
+      });
+    });
+
+    // ★ Record ACL 専用テーブル（条件列だけ pre-wrap、nowrap を当てない）
+    const recordTable = (headers, rows) => `
+      <table style="width:100%;border-collapse:collapse;font-size:12px;table-layout:fixed">
+        <colgroup>
+          <col style="width:6%">
+          <col style="width:10%">
+          <col style="width:34%">
+          <col style="width:26%">
+          <col style="width:8%">
+          <col style="width:8%">
+          <col style="width:8%">
+        </colgroup>
+        <thead>
+          <tr>${headers.map(h => `<th style="text-align:left;padding:6px 8px;border-bottom:1px solid #ddd;white-space:nowrap;">${h}</th>`).join('')}</tr>
+        </thead>
+        <tbody>
+          ${rows.length ? rows.map(cols => `
+            <tr>
+              ${cols.map((c, i) => {
+      // i=2 が「条件」列：必ず折り返し
+      const style =
+        i === 2
+          ? 'white-space:pre-wrap;word-break:break-word;'
+          : (i === 0 || i === 4 || i === 5 || i === 6)
+            ? 'white-space:nowrap;'
+            : 'white-space:nowrap;overflow:hidden;text-overflow:ellipsis;';
+      return `<td style="padding:6px 8px;border-bottom:1px solid #eee;vertical-align:top;${style}">${c}</td>`;
+    }).join('')}
+                      </tr>
+                    `).join('') : `<tr><td colspan="${headers.length}" style="padding:10px;color:#666">項目なし</td></tr>`}
+                  </tbody>
+                </table>
+              `;
+
+    const secRec = sectionWithDL(
+      `レコードのアクセス権限`,
+      headersRec, recRowsDL,
+      recordTable(headersRec, recRowsHtml),
+      'acl_record',
+      { appId, defaultOpen: true, indicator: true, relationType: 'recordAcl' }
+    );
+
+    // ========================
+    // 3) Field ACL (ctx.fieldAcl.rights[] -> code + entities[])
+    // ========================
+    const fieldAcl = ctx?.fieldAcl || {};
+    const fldRights = Array.isArray(fieldAcl?.rights) ? fieldAcl.rights : [];
+
+    const headersFld = ['フィールド', '対象', '権限'];
+    const fldRowsHtml = [];
+    const fldRowsDL = [];
+
+    fldRights.forEach((r) => {
+      const code = r?.code || '—';
+      const label = ctx?.fields?.[code]?.label ? `（${ctx.fields[code].label}）` : '';
+      const ents = Array.isArray(r?.entities) ? r.entities : [];
+
+      if (!ents.length) {
+        fldRowsHtml.push([`<code>${esc(code)}</code>${esc(label)}`, '—', '—']);
+        fldRowsDL.push([`${code}${label}`, '', '']);
+        return;
+      }
+
+      ents.forEach((e, i) => {
+        const first = (i === 0);
+        fldRowsHtml.push([
+          first ? `<code>${esc(code)}</code>${esc(label)}` : ' ',
+          esc(formatEntity(e?.entity, e?.includeSubs)),
+          esc(e?.accessibility ?? '—'),
+        ]);
+        fldRowsDL.push([
+          first ? `${code}${label}` : '',
+          formatEntity(e?.entity, e?.includeSubs),
+          e?.accessibility ?? '',
+        ]);
+      });
+    });
+
+    const secFld = sectionWithDL(
+      `フィールドのアクセス権限`,
+      headersFld, fldRowsDL,
+      table(headersFld, fldRowsHtml, ['34%', '34%', '32%']),
+      'acl_field',
+      { appId, defaultOpen: true, indicator: true, relationType: 'fieldAcl' }
+    );
+
+    container.innerHTML = `${secApp.html}${secRec.html}${secFld.html}`;
+    secApp.bind(container); secRec.bind(container); secFld.bind(container);
+  }
+
+
+  /** --------------------------------------------------------
    * Templates view
    * -------------------------------------------------------- */
   function fetchFieldMeta(fields) {
@@ -2352,17 +3522,18 @@
     const GH = {
       owner: 'youtotto',
       repo: 'kintone-Customize-template',
-      dirs: { templates: 'js', snippets: 'snippets', documents: 'documents' },
+      dirs: { templates: 'js', css: 'CSS', snippets: 'snippets', documents: 'documents' },
       endpoint(dir) { return `https://api.github.com/repos/${this.owner}/${this.repo}/contents/${encodeURIComponent(dir)}`; },
       cacheKey(kind) { return `kt_tpl_cache_ui_${kind}`; }
     };
     const GH_BASE = `https://github.com/${GH.owner}/${GH.repo}`;
 
     // UI色
-    const isDark = matchMedia('(prefers-color-scheme: dark)').matches;
-    const BG = isDark ? '#1b1b1b' : '#fff';
-    const BD = isDark ? '#333' : '#ddd';
-    const PANEL_H = '70vh';
+    const C = getThemeColors();
+    const BG = C.bgSub2; // または C.bg
+    const BD = C.border2;
+    const isDark = C.isDark;
+    const PANEL_H = '75vh';
 
     // レイアウト
     view.innerHTML = `
@@ -2396,6 +3567,7 @@
             <div style="font-weight:600; padding-left:12px; margin:6px 0;">Files</div>
             <select id="kt-tpl-source" class="btn" style="padding:3px 4px; height:32px;">
               <option value="templates">Templates (GitHub: ${GH.dirs.templates})</option>
+              <option value="css">Css  (GitHub: ${GH.dirs.css})</option>
               <option value="snippets">Snippets  (GitHub: ${GH.dirs.snippets})</option>
               <option value="documents">Documents (GitHub: ${GH.dirs.documents})</option>
             </select>
@@ -2462,6 +3634,9 @@
       if (kind === 'templates') {
         // Templates → js ディレクトリ
         url = `${GH_BASE}/tree/main/${GH.dirs.templates}/README.md`; // https://github.com/.../tree/main/js
+      } else if (kind === 'css') {
+        // css → css ディレクトリ
+        url = `${GH_BASE}/tree/main/${GH.dirs.css}/README.md`;  // https://github.com/.../tree/main/css
       } else if (kind === 'snippets') {
         // Snippets → snippets ディレクトリ
         url = `${GH_BASE}/tree/main/${GH.dirs.snippets}/README.md`;  // https://github.com/.../tree/main/snippets
@@ -2501,6 +3676,7 @@
         const c = sessionStorage.getItem(cKey);
         if (c) { try { return JSON.parse(c); } catch { } }
       }
+
       const res = await fetch(api, { headers: { 'Accept': 'application/vnd.github+json' } });
       if (!res.ok) throw new Error(`GitHub API ${res.status}`);
       const json = await res.json();
@@ -2508,10 +3684,13 @@
       const files = (Array.isArray(json) ? json : []).filter(x => {
         if (x.type !== 'file' || !x.name) return false;
         const n = x.name.toLowerCase();
+
         if (kind === 'templates' || kind === 'snippets') return n.endsWith('.js');
+        if (kind === 'css') return n.endsWith('.css'); // ★追加
         if (kind === 'documents') return (n.endsWith('.md') || n.endsWith('.mdx') || n.endsWith('.markdown') || n.endsWith('.txt'));
         return false;
       });
+
       sessionStorage.setItem(cKey, JSON.stringify(files));
       return files;
     }
@@ -2520,15 +3699,22 @@
       const el = document.createElement('div');
       el.style.cssText = `display:flex;align-items:center;gap:8px;padding:8px 10px;border-bottom:1px solid ${BD};cursor:pointer;`;
       const size = (file.size || 0).toLocaleString();
-      const tag = kind === 'snippets' ? 'SNIP' : (kind === 'documents' ? 'DOC' : 'JS');
+
+      const tag =
+        kind === 'snippets' ? 'SNIP' :
+          kind === 'documents' ? 'DOC' :
+            kind === 'css' ? 'CSS' : 'JS';
+
       el.innerHTML = `
         <div style="border:1px solid ${BD};border-radius:999px;padding:2px 6px;font-size:11px">${tag}</div>
         <div style="flex:1">${file.name}</div>
         <div style="opacity:.6;font-size:11px">${size ? size + ' Bytes' : ''}</div>
       `;
 
-      if (kind === 'templates') setEditorLanguage('javascript');
-      else if (kind === 'documents') setEditorLanguage('markdown');
+      // ★言語切替は「クリック時」に統一すると事故が減ります（ここで切るなら kindごとに）
+      // if (kind === 'templates' || kind === 'snippets') setEditorLanguage('javascript');
+      // else if (kind === 'css') setEditorLanguage('css');
+      // else if (kind === 'documents') setEditorLanguage('markdown');
 
       el.addEventListener('click', async () => {
         selectedItem = file;
@@ -2536,13 +3722,15 @@
 
         if (window.monaco && monacoEditor && !monacoEditor._aiReqHooked) {
           monacoEditor._aiReqHooked = true;
-          monacoEditor.onDidChangeModelContent(() => {
-            updateAIReqVisibility();
-          });
+          monacoEditor.onDidChangeModelContent(() => updateAIReqVisibility());
         }
 
+        // ★ここで言語決定（確実）
+        if (kind === 'documents') setEditorLanguage('markdown');
+        else if (kind === 'css') setEditorLanguage('css');
+        else setEditorLanguage('javascript');
+
         if (kind === 'templates') {
-          // エディタ上書き表示、Overview非表示
           $overview.style.display = 'none';
           $overview.innerHTML = '';
           const code = await loadCode(file);
@@ -2553,10 +3741,24 @@
           $meta.textContent = `選択中（Template表示）：${file.name}`;
           [$download, $upload].forEach(b => b.disabled = false);
           $insert.disabled = false;
+
+        } else if (kind === 'css') {
+          // ★CSSは「エディタで表示」「ローカル保存」「アプリに反映」まで
+          $overview.style.display = 'none';
+          $overview.innerHTML = '';
+          const code = await loadCode(file);
+          currentFileName = file.name;
+          if (monacoEditor) monacoEditor.setValue(code);
+          else await initEditor(code);
+          updateAIReqVisibility();
+          $meta.textContent = `選択中（CSS表示）：${file.name}`;
+          [$download, $upload].forEach(b => b.disabled = false);
+          $insert.disabled = true; // CSSをJSへ挿入するのは事故るので無効推奨
+
         } else if (kind === 'snippets') {
           await showSnippetOverview(file);
-          //$meta.textContent = `選択中（Snippet挿入用）：${file.name}`;
           [$insert, $upload].forEach(b => b.disabled = false);
+
         } else if (kind === 'documents') {
           $overview.style.display = 'none';
           $overview.innerHTML = '';
@@ -2568,9 +3770,10 @@
           $meta.textContent = `選択中（document表示）：${file.name}`;
           [$download].forEach(b => b.disabled = false);
           [$upload].forEach(b => b.disabled = true);
-          $insert.disabled = false; // ドキュメントも挿入可にするなら true のまま
+          $insert.disabled = false;
         }
       }, { passive: true });
+
       return el;
     }
 
@@ -2582,19 +3785,21 @@
         $overview.innerHTML = '';
         return;
       }
+
       const frag = document.createDocumentFragment();
       files.forEach(f => frag.appendChild(fileRow(f, kind)));
       $list.appendChild(frag);
 
       selectedItem = null;
-      [$download, $insert].forEach(b => b.disabled = true);
+      // ★初期は全部OFF（クリックでONにする）
+      [$download, $insert, $upload].forEach(b => { if (b) b.disabled = true; });
       $meta.textContent = '';
 
       if (kind === 'snippets') {
         $overview.style.display = 'block';
         $overview.innerHTML = `<div style="opacity:.7; padding:8px; border:1px dashed ${BD}; border-radius:8px;">
-            ${kind === 'snippets' ? 'スニペット' : 'ドキュメント'}を選択するとプレビューが表示されます
-          </div>`;
+          スニペットを選択するとプレビューが表示されます
+        </div>`;
       } else {
         $overview.style.display = 'none';
         $overview.innerHTML = '';
@@ -2620,13 +3825,6 @@
         $overview.style.display = 'block';
         $overview.innerHTML = `<div style="margin-top:8px; color:#c00">プレビュー取得に失敗しました。</div>`;
       }
-    }
-
-    function escapeHtml(s) {
-      return String(s ?? '')
-        .replace(/&/g, '&amp;')
-        .replace(/</g, '&lt;')
-        .replace(/>/g, '&gt;');
     }
 
     // 初期テンプレ（kintone CustomizeJS）
@@ -2657,15 +3855,22 @@
     // ボタン挙動
     $download.addEventListener('click', async () => {
       if (!selectedItem) return;
+
       let name = currentFileName || 'template.js';
       let content = '';
-      if (selectedKind === 'templates' || selectedKind === 'documents') {
+
+      if (selectedKind === 'templates' || selectedKind === 'documents' || selectedKind === 'css') {
         content = monacoEditor ? monacoEditor.getValue() : '';
       } else {
         name = selectedItem.name;
         content = await loadCode(selectedItem);
       }
-      const mime = selectedKind === 'documents' ? 'text/markdown' : 'text/javascript';
+
+      const mime =
+        selectedKind === 'documents' ? 'text/markdown' :
+          selectedKind === 'css' ? 'text/css' :
+            'text/javascript';
+
       const blob = new Blob([content], { type: mime });
       const a = document.createElement('a');
       a.href = URL.createObjectURL(blob);
@@ -2785,7 +3990,10 @@
       const { fileKey } = await up.json();
       return fileKey;
     }
-    async function putAppendFileToCustomizeWithTargets(app, keys, { toDesktop, toMobile }) {
+    async function putAppendFileToCustomizeWithTargets(app, keys, { toDesktop, toMobile }, assetType) {
+      // assetType: 'js' | 'css'
+      const slot = (assetType === 'css') ? 'css' : 'js';
+
       // preview現行
       let base;
       try {
@@ -2803,24 +4011,24 @@
         };
       }
 
+      const toFileItem = (fileKey) => ({ type: 'FILE', file: { fileKey } });
+
       const next = {
         app,
         scope: base.scope || 'ALL',
         desktop: {
-          js: [
-            ...(base.desktop?.js ?? []),
-            ...(toDesktop && keys.fileKeyDesktop ? [{ type: 'FILE', file: { fileKey: keys.fileKeyDesktop } }] : [])
-          ],
+          js: [...(base.desktop?.js ?? [])],
           css: [...(base.desktop?.css ?? [])]
         },
         mobile: {
-          js: [
-            ...(base.mobile?.js ?? []),
-            ...(toMobile && keys.fileKeyMobile ? [{ type: 'FILE', file: { fileKey: keys.fileKeyMobile } }] : [])
-          ],
+          js: [...(base.mobile?.js ?? [])],
           css: [...(base.mobile?.css ?? [])]
         }
       };
+
+      // ★追記先を slot で切替
+      if (toDesktop && keys.fileKeyDesktop) next.desktop[slot].push(toFileItem(keys.fileKeyDesktop));
+      if (toMobile && keys.fileKeyMobile) next.mobile[slot].push(toFileItem(keys.fileKeyMobile));
 
       await kintone.api(kintone.api.url('/k/v1/preview/app/customize.json', true), 'PUT', next);
       await kintone.api(kintone.api.url('/k/v1/preview/app/deploy.json', true), 'POST', { apps: [{ app, revision: -1 }], revert: false });
@@ -2829,25 +4037,35 @@
       const btn = ev.currentTarget; btn.disabled = true;
       try {
         const app = kintone.app.getId();
-        const defaultName = (currentFileName || (selectedKind === 'documents' ? 'document.md' : 'template.js'));
 
-        // 1) ダイアログで入力
+        const assetType = (selectedKind === 'css') ? 'css' : 'js';
+        const defaultName =
+          currentFileName ||
+          (selectedKind === 'css' ? 'style.css' :
+            selectedKind === 'documents' ? 'document.md' : 'template.js');
+
+        // 1) ダイアログ
         const form = await openUploadDialog({
           defaultName,
           defaultDesktop: true,
           defaultMobile: false
         });
-        if (!form) return; // cancel
+        if (!form) return;
 
-        const mime = (selectedKind === 'documents') ? 'text/markdown' : 'text/javascript';
+        const mime =
+          (selectedKind === 'css') ? 'text/css' :
+            (selectedKind === 'documents') ? 'text/markdown' :
+              'text/javascript';
+
         const content = monacoEditor ? monacoEditor.getValue() : '';
         if (!content.trim()) throw new Error('editor is empty');
 
         Spinner.show();
-        // ←ここを変更：toDesktop/toMobile に応じてアップロード回数を分ける
+
+        // 2) アップロード（desktop/mobileで fileKey 分ける）
         let fileKeyDesktop = null, fileKeyMobile = null;
+
         if (form.toDesktop && form.toMobile) {
-          // 同じ内容を2回アップして別 fileKey を作る
           const [fk1, fk2] = await Promise.all([
             uploadOnce(form.name, content, mime),
             uploadOnce(form.name, content, mime)
@@ -2860,12 +4078,19 @@
           fileKeyMobile = await uploadOnce(form.name, content, mime);
         }
 
-        //  3) 追記PUT → デプロイ待ち
-        await putAppendFileToCustomizeWithTargets(app, { fileKeyDesktop, fileKeyMobile }, {
-          toDesktop: form.toDesktop, toMobile: form.toMobile
-        });
+        // 3) 追記PUT → デプロイ待ち（★assetType渡す）
+        await putAppendFileToCustomizeWithTargets(
+          app,
+          { fileKeyDesktop, fileKeyMobile },
+          { toDesktop: form.toDesktop, toMobile: form.toMobile },
+          assetType
+        );
+
         await waitDeploy(app);
-        alert(`✅ 追記＆デプロイ完了：${form.name}\n[Desktop JS: ${form.toDesktop ? 'Yes' : 'No'} / Mobile JS: ${form.toMobile ? 'Yes' : 'No'}]`);
+
+        const label = (assetType === 'css') ? 'CSS' : 'JS';
+        alert(`✅ 追記＆デプロイ完了：${form.name}\n[Desktop ${label}: ${form.toDesktop ? 'Yes' : 'No'} / Mobile ${label}: ${form.toMobile ? 'Yes' : 'No'}]`);
+
       } catch (e) {
         console.error('[upload]', e);
         alert(`❌ 失敗：${e?.message || e}`);
@@ -2991,13 +4216,6 @@
       document.head.appendChild(st);
     }
 
-    // ユーティリティ
-    function escapeHtml(s) {
-      return String(s ?? '')
-        .replace(/&/g, '&amp;')
-        .replace(/</g, '&lt;')
-        .replace(/>/g, '&gt;');
-    }
   }
 
 
@@ -3010,10 +4228,11 @@
     if (!view) return;
 
     // === カラースキーム ===
-    const isDark = matchMedia('(prefers-color-scheme: dark)').matches;
-    const BG = isDark ? '#0f0f0f' : '#fafafa';
-    const BD = isDark ? '#333' : '#ddd';
-    const PANEL_H = '70vh';
+    const C = getThemeColors();
+    const BG = C.bgSub2; // または C.bg
+    const BD = C.border2;
+    const isDark = C.isDark;
+    const PANEL_H = '75vh';
 
     // === GitHub: snippetsのみ ===
     const GH = {
@@ -3025,65 +4244,65 @@
 
     // === レイアウト（Templatesタブと同じ見た目） ===
     view.innerHTML = `
-    <div id="kt-tpl" style="display:flex; gap:14px; align-items:stretch;">
-      <!-- 左：エディタ -->
-      <div style="flex:2; min-width:380px; display:flex; flex-direction:column; gap:10px;">
-        <div style="display:flex; align-items:center; gap:10px; justify-content:space-between;">
-          <div style="display:flex; align-items:center; gap:8px;">
-            <button id="kt-tpl-download" class="btn" disabled style="height:32px; padding:0 10px;">⬇ ローカルに保存</button>
-            <button id="kt-tpl-upload" class="btn" disabled style="height:32px; padding:0 10px;">⬆ アプリに反映</button>
-            <button id="kt-tpl-new" class="btn" style="height:32px; padding:0 10px;">＋ 新規作成</button>
+      <div id="kt-tpl" style="display:flex; gap:14px; align-items:stretch;">
+        <!-- 左：エディタ -->
+        <div style="flex:2; min-width:380px; display:flex; flex-direction:column; gap:10px;">
+          <div style="display:flex; align-items:center; gap:10px; justify-content:space-between;">
+            <div style="display:flex; align-items:center; gap:8px;">
+              <button id="kt-tpl-download" class="btn" disabled style="height:32px; padding:0 10px;">⬇ ローカルに保存</button>
+              <button id="kt-tpl-upload" class="btn" disabled style="height:32px; padding:0 10px;">⬆ アプリに反映</button>
+              <button id="kt-tpl-new" class="btn" style="height:32px; padding:0 10px;">＋ 新規作成</button>
+            </div>
+            <span id="kt-tpl-meta"
+                  style="opacity:.75; max-width:55%; text-overflow:ellipsis; overflow:hidden; white-space:nowrap; text-align:right;"></span>
           </div>
-          <span id="kt-tpl-meta"
-                style="opacity:.75; max-width:55%; text-overflow:ellipsis; overflow:hidden; white-space:nowrap; text-align:right;"></span>
+
+          <div id="kt-tpl-editor"
+            style="
+              flex:1;
+              min-height:0;
+              border:1px solid ${BD};
+              border-radius:8px;
+              background:${isDark ? '#0f0f0f' : '#fafafa'};
+            ">
+          </div>
         </div>
 
-        <div id="kt-tpl-editor"
-          style="
-            flex:1;
-            min-height:0;
-            border:1px solid ${BD};
-            border-radius:8px;
-            background:${isDark ? '#0f0f0f' : '#fafafa'};
-          ">
+        <!-- 右：ファイル一覧（Customize / Snippets） -->
+        <div style="flex:1; min-width:240px; display:flex; flex-direction:column; gap:10px; height:${PANEL_H}; min-height:0;">
+          <div style="display:flex; align-items:center; justify-content:space-between; position:sticky; top:0; z-index:1;
+            padding:6px 0; background:${isDark ? '#1b1b1b' : '#fff'};">
+            <div style="font-weight:600; padding-left:12px; margin:6px 0;">Files</div>
+            <select id="kt-tpl-source" class="btn" style="padding:3px 4px; height:32px;">
+              <option value="JavaScript">JavaScript (desktop)</option>
+              <option value="css">CSS (desktop)</option>
+              <option value="JavaScriptMobile">JavaScript (mobile)</option>
+              <option value="cssMobile">CSS (mobile)</option>
+              <option value="snippets">Snippets (GitHub: ${GH.dirs.snippets})</option>
+            </select>
+          </div>
+
+          <div style="display:flex; gap:8px;">
+            <button id="kt-tpl-insert"  class="btn" disabled style="flex:1; height:32px;">⤴︎ 挿入</button>
+            <button id="kt-tpl-refresh" class="btn"          style="flex:1; height:32px;">↻ 一覧更新</button>
+          </div>
+
+          <div id="kt-tpl-list"
+            style="
+              border:1px solid ${BD};
+              border-radius:8px;
+              overflow:auto;
+              max-height:56vh;
+              background:${BG};
+              padding:6px;
+              flex:1;
+              min-height:0;
+            ">
+          </div>
+          <div id="kt-tpl-overview"></div>
         </div>
       </div>
-
-      <!-- 右：ファイル一覧（Customize / Snippets） -->
-      <div style="flex:1; min-width:240px; display:flex; flex-direction:column; gap:10px; height:${PANEL_H}; min-height:0;">
-        <div style="display:flex; align-items:center; justify-content:space-between; position:sticky; top:0; z-index:1;
-          padding:6px 0; background:${isDark ? '#1b1b1b' : '#fff'};">
-          <div style="font-weight:600; padding-left:12px; margin:6px 0;">Files</div>
-          <select id="kt-tpl-source" class="btn" style="padding:3px 4px; height:32px;">
-            <option value="JavaScript">JavaScript (desktop)</option>
-            <option value="css">CSS (desktop)</option>
-            <option value="JavaScriptMobile">JavaScript (mobile)</option>
-            <option value="cssMobile">CSS (mobile)</option>
-            <option value="snippets">Snippets (GitHub: ${GH.dirs.snippets})</option>
-          </select>
-        </div>
-
-        <div style="display:flex; gap:8px;">
-          <button id="kt-tpl-insert"  class="btn" disabled style="flex:1; height:32px;">⤴︎ 挿入</button>
-          <button id="kt-tpl-refresh" class="btn"          style="flex:1; height:32px;">↻ 一覧更新</button>
-        </div>
-
-        <div id="kt-tpl-list"
-          style="
-            border:1px solid ${BD};
-            border-radius:8px;
-            overflow:auto;
-            max-height:56vh;
-            background:${BG};
-            padding:6px;
-            flex:1;
-            min-height:0;
-          ">
-        </div>
-        <div id="kt-tpl-overview"></div>
-      </div>
-    </div>
-  `;
+    `;
 
     // === 要素参照（TemplatesタブのID命名に合わせる） ===
     const $ = (s) => view.querySelector(s);
@@ -3553,344 +4772,6 @@
     await refreshList();
   }
 
-  // ===============================
-  //  renderLinks
-  // ===============================
-  const LINKS_CONFIG = {
-    // UI言語: 'ja' | 'en'（必要なら切替に利用）
-    locale: 'ja',
-
-    // カテゴリ順
-    categories: ['Official', 'Community', 'Docs', 'Tools', 'Blog/Note', 'Library'],
-
-    // タグ（任意）
-    tags: ['kintone', 'API', 'Customize', 'Plugin', 'Design', 'Mermaid', 'REST', 'JS'],
-
-    // リンク定義
-    items: [
-      // --- Official ---
-      {
-        title: 'kintone developer network',
-        url: 'https://cybozu.dev/ja/kintone/',
-        category: 'Official',
-        desc: '公式ドキュメント・サンプル・最新情報',
-        tags: ['kintone', 'Docs', 'API']
-      },
-      {
-        title: 'Cybozu Developer Network (日本語)',
-        url: 'https://cybozu.dev/ja/',
-        category: 'Official',
-        desc: '公式ヘルプセンター（日本語）',
-        tags: ['kintone', 'Docs']
-      },
-      // --- Community ---
-      {
-        title: 'kintone developer community',
-        url: 'https://community.cybozu.dev/',
-        category: 'Community',
-        desc: '日本語フォーラム',
-        tags: ['Community']
-      },
-      {
-        title: 'Qiita: kintone タグ',
-        url: 'https://qiita.com/tags/kintone',
-        category: 'Community',
-        desc: '日本の技術記事コミュニティ',
-        tags: ['Community']
-      },
-      // --- Docs ---
-      {
-        title: 'REST API Reference',
-        url: 'https://cybozu.dev/ja/kintone/docs/rest-api/',
-        category: 'Docs',
-        desc: 'kintone REST API 一覧',
-        tags: ['REST', 'API', 'Docs']
-      },
-      {
-        title: 'JavaScript API Reference',
-        url: 'https://cybozu.dev/ja/kintone/docs/js-api/',
-        category: 'Docs',
-        desc: 'kintone JS API',
-        tags: ['JS', 'API', 'Docs']
-      },
-      // --- Tools ---
-      {
-        title: 'Toolkit (GitHub)',
-        url: 'https://github.com/youtotto/kintone-app-toolkit',
-        category: 'Tools',
-        desc: '本スクリプトのリポジトリ',
-        tags: ['Customize', 'Tools']
-      },
-      {
-        title: 'Mermaid Live Editor',
-        url: 'https://mermaid.live/',
-        category: 'Tools',
-        desc: 'Mermaid図の編集・プレビュー',
-        tags: ['Mermaid', 'Design']
-      },
-      // --- Blog/Note ---
-      {
-        title: 'Note: kintone タグ',
-        url: 'https://note.com/hashtag/kintone',
-        category: 'Blog/Note',
-        desc: 'kintone活用記事',
-        tags: ['Blog/Note']
-      },
-      // --- Library ---
-      {
-        title: 'SweetAlert2',
-        url: 'https://sweetalert2.github.io/',
-        category: 'Library',
-        desc: 'UIダイアログライブラリ',
-        tags: ['Design', 'Tools']
-      },
-      {
-        title: 'kintone UI Component',
-        url: 'https://ui-component.kintone.dev/ja/',
-        category: 'Library',
-        desc: 'UIダイアログライブラリ',
-        tags: ['Design', 'Tools']
-      },
-      // ＝軽量ユーティリティ＝
-      {
-        title: 'Day.js', url: 'https://day.js.org/', category: 'Library',
-        desc: '日付処理を軽量に。moment互換API', tags: ['date', 'utility']
-      },
-      {
-        title: 'Fuse.js', url: 'https://fusejs.io/', category: 'Library',
-        desc: '曖昧検索（ローカル全文検索）', tags: ['search', 'utility']
-      },
-      {
-        title: 'nanoid', url: 'https://github.com/ai/nanoid', category: 'Library',
-        desc: '安全・短いランダムID', tags: ['id', 'utility']
-      },
-      {
-        title: 'DOMPurify', url: 'https://github.com/cure53/DOMPurify', category: 'Library',
-        desc: 'HTMLサニタイズ（XSS対策）', tags: ['security', 'html']
-      },
-      // ＝ファイルI/O＝
-      {
-        title: 'Papa Parse', url: 'https://www.papaparse.com/', category: 'Library',
-        desc: 'CSVの高速パース/生成', tags: ['csv', 'file']
-      },
-      {
-        title: 'JSZip', url: 'https://stuk.github.io/jszip/', category: 'Library',
-        desc: 'ZIPの作成/展開（ブラウザ）', tags: ['zip', 'file']
-      },
-      {
-        title: 'FileSaver.js', url: 'https://github.com/eligrey/FileSaver.js', category: 'Library',
-        desc: 'ブラウザでのファイル保存', tags: ['download', 'file']
-      },
-      // ＝UI/UX＝
-      {
-        title: 'SortableJS', url: 'https://sortablejs.github.io/Sortable/', category: 'Library',
-        desc: 'ドラッグ＆ドロップ並べ替え', tags: ['UI', 'dragdrop']
-      },
-      {
-        title: 'LeaderLine', url: 'https://anseki.github.io/leader-line/', category: 'Library',
-        desc: '要素間のコネクタ線描画', tags: ['visualize', 'diagram']
-      },
-      {
-        title: 'Tippy.js', url: 'https://atomiks.github.io/tippyjs/', category: 'Library',
-        desc: 'ツールチップUI（Popperベース）', tags: ['UI', 'tooltip']
-      },
-      // ＝バリデーション/構造化＝
-      {
-        title: 'Zod', url: 'https://zod.dev/', category: 'Library',
-        desc: 'スキーマバリデーション（型安全）', tags: ['validation', 'schema']
-      },
-      // ＝Markdown/表示＝
-      {
-        title: 'markdown-it', url: 'https://markdown-it.github.io/', category: 'Library',
-        desc: 'Markdownレンダラー（高速/拡張）', tags: ['markdown', 'render']
-      },
-      // ＝日本の祝日（日付関数の除外用）＝
-      {
-        title: 'holiday_jp-js', url: 'https://github.com/holiday-jp/holiday_jp-js', category: 'Library',
-        desc: '日本の祝日カレンダー', tags: ['date', 'jp']
-      }
-    ]
-  };
-
-  // LocalStorageキー
-  const LINKS_LS_KEYS = {
-    category: 'kat_links_category',
-    tag: 'kat_links_tag'
-  };
-
-  function renderLinks(root) {
-    // ガード
-    const el = root.querySelector('#view-links');
-    if (!el) return;
-
-    // 既存クリア
-    el.innerHTML = '';
-
-    // ----- 状態（検索・カテゴリ・タグ） -----
-    const state = {
-      category: localStorage.getItem(LINKS_LS_KEYS.category) || 'All',
-      tag: localStorage.getItem(LINKS_LS_KEYS.tag) || 'All'
-    };
-
-    // ----- ユーティリティ -----
-    const h = (html) => {
-      const div = document.createElement('div');
-      div.innerHTML = html.trim();
-      return div.firstElementChild;
-    };
-
-    // ----- ヘッダUI（検索/カテゴリ/タグ/JSON入出力） -----
-    const categories = ['All', ...LINKS_CONFIG.categories];
-    const tags = ['All', ...LINKS_CONFIG.tags];
-
-    const $header = h(`
-      <div style="
-        display:flex; gap:8px; align-items:center; margin-bottom:12px;
-        justify-content:flex-end; flex-wrap:wrap;
-      ">
-        <select id="links-category"
-          style="padding:8px 10px; border-radius:8px; border:1px solid #333; background:#000; color:#fff;">
-          ${categories.map(c => `<option ${c === state.category ? 'selected' : ''} value="${c}">${c}</option>`).join('')}
-        </select>
-        <select id="links-tag"
-          style="padding:8px 10px; border-radius:8px; border:1px solid #333; background:#000; color:#fff;">
-          ${tags.map(t => `<option ${t === state.tag ? 'selected' : ''} value="${t}">${t}</option>`).join('')}
-        </select>
-      </div>
-    `);
-
-    // option配色の互換対策（任意）
-    if (!document.getElementById('kat-links-select-theme')) {
-      document.head.insertAdjacentHTML('beforeend', `
-        <style id="kat-links-select-theme">
-          #links-category option, #links-tag option { background:#000; color:#fff; }
-          #links-category:focus, #links-tag:focus { outline:none; box-shadow:0 0 0 2px rgba(255,255,255,.15) inset; }
-        </style>
-      `);
-    }
-
-    const $cat = $header.querySelector('#links-category');
-    const $tag = $header.querySelector('#links-tag');
-
-    $cat.addEventListener('change', () => {
-      state.category = $cat.value;
-      localStorage.setItem(LINKS_LS_KEYS.category, state.category);
-      renderList();
-    });
-    $tag.addEventListener('change', () => {
-      state.tag = $tag.value;
-      localStorage.setItem(LINKS_LS_KEYS.tag, state.tag);
-      renderList();
-    });
-
-    el.appendChild($header);
-
-    // ----- リスト本体 -----
-    const $list = h(`<div id="links-list" style="display:grid; gap:10px;"></div>`);
-    el.appendChild($list);
-
-    // カード生成
-    function card(item) {
-      const favicon = `https://www.google.com/s2/favicons?domain=${encodeURIComponent(item.url)}&sz=64`;
-      const $c = h(`
-      <div class="link-card" style="
-        border:1px solid #ddd; border-radius:12px; padding:12px; 
-        display:flex; gap:12px; align-items:flex-start;
-        min-height: 84px;
-        ">
-        <img src="${favicon}" alt="" width="20" height="20" style="margin-top:2px; border-radius:4px;" />
-        <div style="flex:1 1 auto; min-width:0;">
-          <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
-            <a href="${item.url}" target="_blank" rel="noopener" 
-               style="font-weight:700; text-decoration:none; color:inherit;">${item.title}</a>
-            <span style="font-size:11px; opacity:.7; padding:2px 6px; border:1px solid #ccc; border-radius:999px;">
-              ${item.category}
-            </span>
-            ${(item.tags || []).slice(0, 5).map(t => `
-              <span style="font-size:10px; opacity:.8; padding:2px 6px; border:1px dashed #ccc; border-radius:999px;">#${t}</span>
-            `).join('')}
-          </div>
-          <div style="font-size:12px; opacity:.85; margin-top:4px;">${item.desc || ''}</div>
-        </div>
-      </div>
-    `);
-      return $c;
-    }
-
-    // フィルタ＋描画
-    function renderList() {
-      $list.innerHTML = '';
-
-      // レイアウト：画面幅に応じて列数可変（min 280px）
-      $list.style.gridTemplateColumns = `repeat(auto-fill, minmax(280px, 1fr))`;
-
-      const q = (state.search || '').toLowerCase();
-      const filtered = LINKS_CONFIG.items.filter(item => {
-        const catOK = (state.category === 'All') || (item.category === state.category);
-        const tagOK = (state.tag === 'All') || ((item.tags || []).includes(state.tag));
-        const text = [
-          item.title, item.desc, item.url, item.category, ...(item.tags || [])
-        ].join(' ').toLowerCase();
-        const searchOK = !q || text.includes(q);
-        return catOK && tagOK && searchOK;
-      });
-
-      // カテゴリごとにまとめて表示
-      const groups = {};
-      for (const c of ['All', ...LINKS_CONFIG.categories]) groups[c] = [];
-      for (const it of filtered) groups[it.category]?.push(it);
-
-      LINKS_CONFIG.categories.forEach(cat => {
-        const arr = groups[cat];
-        if (!arr || arr.length === 0) return;
-        const $sec = h(`
-        <section>
-          <h3 style="margin:12px 4px 6px; font-size:13px; opacity:.8;">${cat}</h3>
-          <div class="links-cat" style="display:grid; gap:10px;"></div>
-        </section>
-      `);
-        const $wrap = $sec.querySelector('.links-cat');
-        $wrap.style.gridTemplateColumns = `repeat(auto-fill, minmax(280px, 1fr))`;
-        arr.forEach(item => $wrap.appendChild(card(item)));
-        $list.appendChild($sec);
-      });
-
-      if (filtered.length === 0) {
-        $list.appendChild(h(`<div style="opacity:.7; font-size:12px;">該当するリンクがありません。</div>`));
-      }
-    }
-
-    // 初回描画
-    renderList();
-
-    // 高さ揃え（カテゴリごと）
-    const normalizeHeights = () => {
-      // いったんリセット
-      $list.querySelectorAll('.link-card').forEach(c => (c.style.height = 'auto'));
-      // 各カテゴリセクション内で最大高に統一
-      $list.querySelectorAll('section .links-cat').forEach(cat => {
-        const cards = [...cat.children].filter(el => el.classList.contains('link-card'));
-        if (cards.length < 2) return;
-        const max = Math.max(...cards.map(c => c.getBoundingClientRect().height));
-        cards.forEach(c => (c.style.height = `${Math.ceil(max)}px`));
-      });
-    };
-
-    // 軽いデバウンス
-    let _hTimer;
-    const debouncedNormalize = () => {
-      clearTimeout(_hTimer);
-      _hTimer = setTimeout(normalizeHeights, 120);
-    };
-
-    normalizeHeights();
-    // 画面サイズ変更で再揃え
-    window.addEventListener('resize', () => {
-      // グリッド列数が変わるので再描画でもOKですが軽量に高さだけ再計算
-      const ev = new Event('kat-links-resize');
-      debouncedNormalize();
-    });
-  }
 
   // ===============================
   //  renderScanner (Scanner tab)
@@ -3901,9 +4782,11 @@
     el.innerHTML = '';
 
     (function FS_bootstrap() {
-      const isDark = matchMedia('(prefers-color-scheme: dark)').matches;
-      const BG = isDark ? '#0f0f0f' : '#fafafa'; // ← renderCustomize と同じ基準
-      const BD = isDark ? '#333' : '#ddd';
+      // UI色
+      const C = getThemeColors();
+      const BG = C.bgInput;
+      const BD = C.border2;
+      const isDark = C.isDark;
 
       // ルートにCSS変数を割当（この1行で下位へ配布）
       el.innerHTML = `
@@ -3988,24 +4871,76 @@
         </div>
       `;
 
-      // --- ユーティリティ（外部優先で使用） ---
+      // --- ユーティリティ（KTExport 優先で使用） ---
       const KTExport = (window.KTExport || {});
       const flashBtnText = (window.flashBtnText || function (btn, text = 'Done!', ms = 1200) {
         const old = btn.textContent;
         btn.textContent = text;
         setTimeout(() => (btn.textContent = old), ms);
       });
+
+      // フォールバック：downloadText
       const downloadTextFallback = (name, text, mime = 'text/plain;charset=utf-8') => {
         const a = document.createElement('a');
         a.href = URL.createObjectURL(new Blob([text], { type: mime }));
-        a.download = name; a.click();
+        a.download = name;
+        a.click();
         setTimeout(() => URL.revokeObjectURL(a.href), 0);
       };
-      const saveText = (name, text, mime) => {
-        if (typeof KTExport.downloadText === 'function') return KTExport.downloadText(name, text);
+
+      // KTExport が提供するAPIへ寄せる（存在しない場合はフォールバック）
+      const dlText = (name, text, mime = 'text/plain;charset=utf-8') => {
+        if (typeof KTExport.downloadText === 'function') return KTExport.downloadText(name, text, mime);
+        // 互換：download(name, text, mime) / saveText(name, text, mime) を持つ版も許容
         if (typeof KTExport.download === 'function') return KTExport.download(name, text, mime);
         if (typeof KTExport.saveText === 'function') return KTExport.saveText(name, text, mime);
         return downloadTextFallback(name, text, mime);
+      };
+
+      const copyText = async (text) => {
+        if (typeof KTExport.copyText === 'function') return await KTExport.copyText(text);
+        // 互換：copy(text) があればそれを使う
+        if (typeof KTExport.copy === 'function') return await KTExport.copy(text);
+        // 最後の砦：Clipboard API
+        await navigator.clipboard.writeText(text);
+        return true;
+      };
+
+      // -----------------------------
+      // Export columns（KTExport.downloadCSV / copyMD 用）
+      // -----------------------------
+      const FS_COLUMNS = [
+        { header: 'Used', select: r => (r.used ? '1' : '0') },
+        { header: 'FieldCode', select: r => r.code },
+        { header: 'FieldLabel', select: r => r.label },
+        { header: 'Type', select: r => r.type },
+        { header: 'MatchCount', select: r => String(r.count ?? 0) },
+        { header: 'Files', select: r => (Array.isArray(r.files) ? r.files.join(' | ') : '') },
+      ];
+
+      // -----------------------------
+      // Markdown report（メタ込み）
+      // -----------------------------
+      const toMarkdownReport = (scan) => {
+        const { results, files, fields, meta } = scan;
+        const used = results.filter(r => r.used).length;
+        const lines = [];
+        lines.push(`# Field Usage Report`);
+        lines.push('');
+        lines.push(`- App ID: ${meta.appId}`);
+        lines.push(`- Target: ${meta.include.desktop && meta.include.mobile ? 'desktop+mobile' : (meta.include.desktop ? 'desktop' : 'mobile')}`);
+        lines.push(`- Kinds: ${meta.kinds.join(', ')}`);
+        lines.push(`- Files: ${files.length} / Fields: ${fields.length} / Used Fields: ${used}`);
+        lines.push('');
+
+        // ここは "MD表" として出したいので、手組み（既存のまま）
+        lines.push(`| Used | Code | Label | Type | Matches | Files |`);
+        lines.push(`|:---:|:-----|:------|:-----|-------:|:------|`);
+        for (const r of results) {
+          const fileStr = (r.files || []).join('<br>');
+          lines.push(`| ${r.used ? '✅' : '—'} | \`${r.code}\` | ${r.label ?? ''} | ${r.type ?? ''} | ${r.count} | ${fileStr} |`);
+        }
+        return lines.join('\n');
       };
 
       // --- DOM取得 ---
@@ -4131,7 +5066,6 @@
         return out;
       }
 
-
       // ---- analyze ----
       function stripCommentsOnly(src) {
         return src.replace(/\/\*[\s\S]*?\*\//g, '')
@@ -4197,46 +5131,19 @@
               </div>`).join('')
             : '';
           return `
-          <tr>
-            <td style="white-space:nowrap; padding:8px; border-bottom:1px solid ${BD};">${r.used ? '✅' : '—'}</td>
-            <td style="white-space:nowrap; padding:8px; border-bottom:1px solid ${BD};"><code>${r.code}</code></td>
-            <td style="padding:8px; border-bottom:1px solid ${BD};">${r.label ?? ''}</td>
-            <td style="white-space:nowrap; padding:8px; border-bottom:1px solid ${BD};">${r.type ?? ''}</td>
-            <td style="text-align:right; padding:8px; border-bottom:1px solid ${BD};">${r.count}</td>
-            <td style="padding:8px; border-bottom:1px solid ${BD};">${filesHtml}</td>
-          </tr>
-          ${samples ? `<tr><td></td><td colspan="5" style="padding:6px 8px; border-bottom:1px solid ${BD};">${samples}</td></tr>` : ''}
-        `;
+            <tr>
+              <td style="white-space:nowrap; padding:8px; border-bottom:1px solid ${BD};">${r.used ? '✅' : '—'}</td>
+              <td style="white-space:nowrap; padding:8px; border-bottom:1px solid ${BD};"><code>${r.code}</code></td>
+              <td style="padding:8px; border-bottom:1px solid ${BD};">${r.label ?? ''}</td>
+              <td style="white-space:nowrap; padding:8px; border-bottom:1px solid ${BD};">${r.type ?? ''}</td>
+              <td style="text-align:right; padding:8px; border-bottom:1px solid ${BD};">${r.count}</td>
+              <td style="padding:8px; border-bottom:1px solid ${BD};">${filesHtml}</td>
+            </tr>
+            ${samples ? `<tr><td></td><td colspan="5" style="padding:6px 8px; border-bottom:1px solid ${BD};">${samples}</td></tr>` : ''}
+          `;
         }).join('');
         $tbody.innerHTML = rows || `<tr><td colspan="6" style="padding:14px; opacity:.8;">結果なし</td></tr>`;
       }
-
-      const toCSV = (rows) => {
-        const esc = (s) => `"${String(s ?? '').replace(/"/g, '""')}"`;
-        const header = ['FieldLabel', 'FieldCode', 'Type', 'Used', 'MatchCount', 'Files'].map(esc).join(',');
-        const lines = rows.map(r => [r.label, r.code, r.type, r.used ? 1 : 0, r.count, (r.files || []).join(' | ')].map(esc).join(','));
-        return [header, ...lines].join('\n');
-      };
-
-      const toMarkdown = (scan) => {
-        const { results, files, fields, meta } = scan;
-        const used = results.filter(r => r.used).length;
-        const lines = [];
-        lines.push(`# Field Usage Report`);
-        lines.push('');
-        lines.push(`- App ID: ${meta.appId}`);
-        lines.push(`- Target: ${meta.include.desktop && meta.include.mobile ? 'desktop+mobile' : (meta.include.desktop ? 'desktop' : 'mobile')}`);
-        lines.push(`- Kinds: ${meta.kinds.join(', ')}`);
-        lines.push(`- Files: ${files.length} / Fields: ${fields.length} / Used Fields: ${used}`);
-        lines.push('');
-        lines.push(`| Used | Code | Label | Type | Matches | Files |`);
-        lines.push(`|:---:|:-----|:------|:-----|-------:|:------|`);
-        for (const r of results) {
-          const fileStr = (r.files || []).join('<br>');
-          lines.push(`| ${r.used ? '✅' : '—'} | \`${r.code}\` | ${r.label ?? ''} | ${r.type ?? ''} | ${r.count} | ${fileStr} |`);
-        }
-        return lines.join('\n');
-      };
 
       // ---- Scan 実行（初期実行なし）----
       async function scanOnce() {
@@ -4264,35 +5171,46 @@
 
       $copyMD.onclick = async () => {
         if (!FS_last) return;
-        const md = toMarkdown(FS_last);
+        const md = toMarkdownReport(FS_last);
         try {
-          await navigator.clipboard.writeText(md);
-          flashBtnText($copyMD, 'Copied!');
+          const ok = await copyText(md);
+          flashBtnText($copyMD, ok ? 'Copied!' : 'Failed');
         } catch {
-          // 失敗時はDLにフォールバック
-          saveText(`field-usage-app${FS_last.meta.appId}.md`, md, 'text/markdown;charset=utf-8');
+          // クリップボード失敗時は DL にフォールバック
+          dlText(`field-usage-app${FS_last.meta.appId}.md`, md, 'text/markdown;charset=utf-8');
           flashBtnText($copyMD, 'Saved');
         }
       };
 
       $dlMD.onclick = () => {
         if (!FS_last) return;
-        const md = toMarkdown(FS_last);
-        saveText(`field-usage-app${FS_last.meta.appId}.md`, md, 'text/markdown;charset=utf-8');
+        const md = toMarkdownReport(FS_last);
+        dlText(`field-usage-app${FS_last.meta.appId}.md`, md, 'text/markdown;charset=utf-8');
         flashBtnText($dlMD);
       };
 
       $dlCSV.onclick = () => {
         if (!FS_last) return;
-        const csv = toCSV(FS_last.results);
-        saveText(`field-usage-app${FS_last.meta.appId}.csv`, csv, 'text/csv;charset=utf-8');
+        // ✅ renderFields と同じ：KTExport.downloadCSV に統一（BOMあり）
+        if (typeof KTExport.downloadCSV === 'function') {
+          KTExport.downloadCSV(`field-usage-app${FS_last.meta.appId}.csv`, FS_last.results, FS_COLUMNS, { withBom: true });
+          flashBtnText($dlCSV);
+          return;
+        }
+
+        // フォールバック（KTExportが無い/古い場合）
+        const esc = (s) => `"${String(s ?? '').replace(/"/g, '""')}"`;
+        const header = FS_COLUMNS.map(c => esc(c.header)).join(',');
+        const lines = FS_last.results.map(r => FS_COLUMNS.map(c => esc(c.select(r))).join(','));
+        const csv = [header, ...lines].join('\n');
+        dlText(`field-usage-app${FS_last.meta.appId}.csv`, csv, 'text/csv;charset=utf-8');
         flashBtnText($dlCSV);
       };
 
       $dlJSON.onclick = () => {
         if (!FS_last) return;
         const json = JSON.stringify(FS_last, null, 2);
-        saveText(`field-usage-app${FS_last.meta.appId}.json`, json, 'application/json;charset=utf-8');
+        dlText(`field-usage-app${FS_last.meta.appId}.json`, json, 'application/json;charset=utf-8');
         flashBtnText($dlJSON);
       };
     })();
@@ -4333,9 +5251,10 @@
         Array.isArray(installedRaw?.plugins) ? installedRaw.plugins :
           [];
 
-    const isDark = matchMedia('(prefers-color-scheme: dark)').matches;
-    const BG = isDark ? '#1b1b1b' : '#fff';
-    const BD = isDark ? '#333' : '#ddd';
+    const C = getThemeColors();
+    const BG = C.bgInput;
+    const BD = C.border2;
+    const isDark = C.isDark;
 
     // 使い回しボタンCSS
     if (!document.getElementById('kt-plugins-inline-style')) {
@@ -4385,7 +5304,7 @@
     }
 
     // --- UI ---
-    const PANEL_H = '70vh';
+    const PANEL_H = '75vh';
 
     view.innerHTML = `
       <div style="
@@ -4652,6 +5571,291 @@
   }
 
 
+  // ===============================
+  //  renderLinks
+  // ===============================
+  const LINKS_CONFIG = {
+    locale: 'ja',
+    categories: ['Official', 'Community', 'Docs', 'Tools', 'Blog/Note', 'Library'],
+    tags: ['kintone', 'API', 'Customize', 'Plugin', 'Design', 'Mermaid', 'REST', 'JS', 'CSV', 'ZIP'],
+
+    items: [
+      // --- Official ---
+      {
+        title: 'kintone developer network',
+        url: 'https://cybozu.dev/ja/kintone/',
+        category: 'Official',
+        desc: '公式ドキュメント・サンプル・最新情報',
+        tags: ['kintone', 'Docs', 'API']
+      },
+      {
+        title: 'Cybozu Developer Network (日本語)',
+        url: 'https://cybozu.dev/ja/',
+        category: 'Official',
+        desc: 'Cybozu Dev 全体（日本語）',
+        tags: ['Docs']
+      },
+
+      // --- Community ---
+      {
+        title: 'kintone developer community',
+        url: 'https://community.cybozu.dev/',
+        category: 'Community',
+        desc: '日本語フォーラム',
+        tags: ['Community']
+      },
+      {
+        title: 'Qiita: kintone タグ',
+        url: 'https://qiita.com/tags/kintone',
+        category: 'Community',
+        desc: '日本の技術記事コミュニティ',
+        tags: ['Community']
+      },
+
+      // --- Docs ---
+      {
+        title: 'REST API Reference',
+        url: 'https://cybozu.dev/ja/kintone/docs/rest-api/',
+        category: 'Docs',
+        desc: 'kintone REST API 一覧',
+        tags: ['REST', 'API', 'Docs']
+      },
+      {
+        title: 'JavaScript API Reference',
+        url: 'https://cybozu.dev/ja/kintone/docs/js-api/',
+        category: 'Docs',
+        desc: 'kintone JavaScript API',
+        tags: ['JS', 'API', 'Docs']
+      },
+
+      // --- Tools ---
+      {
+        title: 'Toolkit (GitHub)',
+        url: 'https://github.com/youtotto/kintone-app-toolkit',
+        category: 'Tools',
+        desc: '本スクリプトのリポジトリ',
+        tags: ['Customize', 'Tools']
+      },
+      {
+        title: 'Mermaid Live Editor',
+        url: 'https://mermaid.live/',
+        category: 'Tools',
+        desc: 'Mermaid図の編集・プレビュー',
+        tags: ['Mermaid', 'Design']
+      },
+
+      // --- Blog/Note ---
+      {
+        title: 'Note: kintone タグ',
+        url: 'https://note.com/hashtag/kintone',
+        category: 'Blog/Note',
+        desc: 'kintone活用記事',
+        tags: ['Blog/Note']
+      },
+
+      // --- Library ---
+      {
+        title: 'kintone UI Component',
+        url: 'https://ui-component.kintone.dev/ja/',
+        category: 'Library',
+        desc: 'kintone向けUIコンポーネント（KUC）',
+        tags: ['kintone', 'Design']
+      },
+      {
+        title: 'SweetAlert2',
+        url: 'https://sweetalert2.github.io/',
+        category: 'Library',
+        desc: 'ダイアログUI（定番）',
+        tags: ['Design']
+      },
+      {
+        title: 'FileSaver.js',
+        url: 'https://github.com/eligrey/FileSaver.js',
+        category: 'Library',
+        desc: 'ブラウザでファイル保存',
+        tags: ['download']
+      },
+      {
+        title: 'SortableJS',
+        url: 'https://sortablejs.github.io/Sortable/',
+        category: 'Library',
+        desc: 'ドラッグ＆ドロップ並べ替え',
+        tags: ['UI']
+      },
+      {
+        title: 'holiday_jp-js',
+        url: 'https://github.com/holiday-jp/holiday_jp-js',
+        category: 'Library',
+        desc: '日本の祝日カレンダー',
+        tags: ['date', 'jp']
+      }
+    ]
+  };
+
+  // LocalStorageキー
+  const LINKS_LS_KEYS = {
+    category: 'kat_links_category',
+    tag: 'kat_links_tag'
+  };
+
+  function renderLinks(root) {
+    // ガード
+    const el = root.querySelector('#view-links');
+    if (!el) return;
+
+    // UI色の取得
+    const C = getThemeColors();
+    const isDark = C.isDark;
+
+    // 既存クリア
+    el.innerHTML = '';
+
+    // ----- 状態（検索・カテゴリ・タグ） -----
+    const state = {
+      category: localStorage.getItem(LINKS_LS_KEYS.category) || 'All',
+      tag: localStorage.getItem(LINKS_LS_KEYS.tag) || 'All'
+    };
+
+    // ----- ユーティリティ -----
+    const h = (html) => {
+      const div = document.createElement('div');
+      div.innerHTML = html.trim();
+      return div.firstElementChild;
+    };
+
+    // ----- ヘッダUI（配色を共通変数へ） -----
+    const categories = ['All', ...LINKS_CONFIG.categories];
+    const tags = ['All', ...LINKS_CONFIG.tags];
+
+    const $header = h(`
+      <div style="
+        display:flex; gap:8px; align-items:center; margin-bottom:12px;
+        justify-content:flex-end; flex-wrap:wrap;
+      ">
+        <select id="links-category"
+          style="padding:8px 10px; border-radius:8px; border:1px solid ${C.border}; background:${C.bgInput}; color:${C.text};">
+          ${categories.map(c => `<option ${c === state.category ? 'selected' : ''} value="${c}" style="background:${C.bgInput}; color:${C.text};">${c}</option>`).join('')}
+        </select>
+        <select id="links-tag"
+          style="padding:8px 10px; border-radius:8px; border:1px solid ${C.border}; background:${C.bgInput}; color:${C.text};">
+          ${tags.map(t => `<option ${t === state.tag ? 'selected' : ''} value="${t}" style="background:${C.bgInput}; color:${C.text};">${t}</option>`).join('')}
+        </select>
+      </div>
+    `);
+
+    // option配色のテーマ適用
+    if (!document.getElementById('kat-links-select-theme')) {
+      document.head.insertAdjacentHTML('beforeend', `
+        <style id="kat-links-select-theme">
+          #links-category:focus, #links-tag:focus { outline:none; box-shadow:0 0 0 2px ${isDark ? 'rgba(255,255,255,.1)' : 'rgba(0,0,0,.05)'} inset; }
+        </style>
+      `);
+    }
+
+    const $cat = $header.querySelector('#links-category');
+    const $tag = $header.querySelector('#links-tag');
+
+    $cat.addEventListener('change', () => {
+      state.category = $cat.value;
+      localStorage.setItem(LINKS_LS_KEYS.category, state.category);
+      renderList();
+    });
+    $tag.addEventListener('change', () => {
+      state.tag = $tag.value;
+      localStorage.setItem(LINKS_LS_KEYS.tag, state.tag);
+      renderList();
+    });
+
+    el.appendChild($header);
+
+    // ----- リスト本体 -----
+    const $list = h(`<div id="links-list" style="display:grid; gap:10px;"></div>`);
+    el.appendChild($list);
+
+    // カード生成（枠線やバッジの色を調整）
+    function card(item) {
+      const favicon = `https://www.google.com/s2/favicons?domain=${encodeURIComponent(item.url)}&sz=64`;
+      const $c = h(`
+        <div class="link-card" style="
+          border:1px solid ${C.border}; border-radius:12px; padding:12px; 
+          display:flex; gap:12px; align-items:flex-start;
+          min-height: 84px;
+          background: ${isDark ? 'rgba(255,255,255,.03)' : 'transparent'};
+          ">
+          <img src="${favicon}" alt="" width="20" height="20" style="margin-top:2px; border-radius:4px;" />
+          <div style="flex:1 1 auto; min-width:0;">
+            <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
+              <a href="${item.url}" target="_blank" rel="noopener" 
+                style="font-weight:700; text-decoration:none; color:${C.text};">${item.title}</a>
+              <span style="font-size:11px; opacity:.7; padding:2px 6px; border:1px solid ${C.border}; border-radius:999px; color:${C.text};">
+                ${item.category}
+              </span>
+              ${(item.tags || []).slice(0, 5).map(t => `
+                <span style="font-size:10px; opacity:.6; padding:2px 6px; border:1px dashed ${C.border}; border-radius:999px; color:${C.text};">#${t}</span>
+              `).join('')}
+            </div>
+            <div style="font-size:12px; opacity:.85; margin-top:4px; color:${C.text};">${item.desc || ''}</div>
+          </div>
+        </div>
+      `);
+      return $c;
+    }
+
+    // --- (renderList 以下のロジックは変更なしのため省略可能ですが、色の反映を確実にします) ---
+    function renderList() {
+      $list.innerHTML = '';
+      $list.style.gridTemplateColumns = `repeat(auto-fill, minmax(280px, 1fr))`;
+
+      const q = (state.search || '').toLowerCase();
+      const filtered = LINKS_CONFIG.items.filter(item => {
+        const catOK = (state.category === 'All') || (item.category === state.category);
+        const tagOK = (state.tag === 'All') || ((item.tags || []).includes(state.tag));
+        const text = [item.title, item.desc, item.url, item.category, ...(item.tags || [])].join(' ').toLowerCase();
+        return catOK && tagOK && (!q || text.includes(q));
+      });
+
+      const groups = {};
+      for (const c of ['All', ...LINKS_CONFIG.categories]) groups[c] = [];
+      for (const it of filtered) groups[it.category]?.push(it);
+
+      LINKS_CONFIG.categories.forEach(cat => {
+        const arr = groups[cat];
+        if (!arr || arr.length === 0) return;
+        const $sec = h(`
+          <section>
+            <h3 style="margin:12px 4px 6px; font-size:13px; opacity:.8; color:${C.text};">${cat}</h3>
+            <div class="links-cat" style="display:grid; gap:10px;"></div>
+          </section>
+        `);
+        const $wrap = $sec.querySelector('.links-cat');
+        $wrap.style.gridTemplateColumns = `repeat(auto-fill, minmax(280px, 1fr))`;
+        arr.forEach(item => $wrap.appendChild(card(item)));
+        $list.appendChild($sec);
+      });
+
+      if (filtered.length === 0) {
+        $list.appendChild(h(`<div style="opacity:.7; font-size:12px; color:${C.text};">該当するリンクがありません。</div>`));
+      }
+      normalizeHeights();
+    }
+
+    renderList();
+
+    // (以下、normalizeHeights と resize イベント処理は既存と同じ)
+    function normalizeHeights() {
+      $list.querySelectorAll('.link-card').forEach(c => (c.style.height = 'auto'));
+      $list.querySelectorAll('section .links-cat').forEach(cat => {
+        const cards = [...cat.children].filter(el => el.classList.contains('link-card'));
+        if (cards.length < 2) return;
+        const max = Math.max(...cards.map(c => c.getBoundingClientRect().height));
+        cards.forEach(c => (c.style.height = `${Math.ceil(max)}px`));
+      });
+    }
+
+    window.addEventListener('resize', normalizeHeights);
+  }
+
+
   /** ----------------------------
   * boot
   * ---------------------------- */
@@ -4668,11 +5872,28 @@
     //    派生 relations を別関数で作る
     let relations = buildRelations(DATA);
     // 3) 各 render に “必要分だけ” 注入
-    renderHealth(root, pick(DATA, ['appId', 'fields', 'status', 'views', 'notifs', 'customize', 'acl']));
-    renderFields(root, pick(DATA, ['appId', 'fields', 'layout']));
+    renderHealth(root, pick(DATA, [
+      'appId', 'fields', 'status', 'views', 'reports', 'customize',
+      'generalNotify', 'perRecordNotify', 'reminderNotify',
+      'appAcl', 'recordAcl', 'fieldAcl',
+      'actions', 'plugins'
+    ]));
+    renderFields(root, { ...pick(DATA, ['appId', 'fields', 'layout']), usageData: DATA });
     renderViews(root, pick(DATA, ['appId', 'views', 'fields']));
     renderGraphs(root, pick(DATA, ['appId', 'reports', 'fields']));
     renderRelations(root, relations, appId);
+    renderNotifications(root, pick(DATA, [
+      'appId',
+      'generalNotify',
+      'perRecordNotify',
+      'reminderNotify',
+    ]));
+    renderAcl(root, pick(DATA, [
+      'appId',
+      'appAcl',
+      'recordAcl',
+      'fieldAcl',
+    ]));
     renderCustomize(root, DATA, appId);
     renderTemplates(root, DATA, appId);
     renderScanner(root, pick(DATA, ['appId', 'fields', 'customize']));
