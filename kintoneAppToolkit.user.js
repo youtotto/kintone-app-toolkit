@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         kintone App Toolkit
 // @namespace    https://github.com/youtotto/kintone-app-toolkit
-// @version      2.0.0
+// @version      2.0.1
 // @description  kintone開発をブラウザで完結。アプリ分析・コード生成・ドキュメント編集を備えた開発支援ツールキット。
 // @match        https://*.cybozu.com/k/*/
 // @match        https://*.cybozu.com/k/*/?*view=*
@@ -20,19 +20,220 @@
 // ==/UserScript==
 (function () {
   'use strict';
-  const SCRIPT_VERSION = '2.0.0';
 
-  if (window.mermaid && typeof window.mermaid.run === 'function') {
-    try {
-      window.mermaid.run({ querySelector: `#${id}` });
-    } catch (e) {
-      // console.error(e);
-    }
+
+  // ==========================================
+  // 1. 定数・グローバル状態
+  // ==========================================
+  const SCRIPT_VERSION = '2.0.1';
+  const CONTAINER_TYPES = new Set(['GROUP', 'SUBTABLE', 'LABEL', 'CATEGORY']);
+  const SYSTEM_TYPES = new Set(['RECORD_NUMBER', 'CREATOR', 'CREATED_TIME', 'MODIFIER', 'UPDATED_TIME', 'STATUS', 'STATUS_ASSIGNEE']);
+
+
+  // ==========================================
+  // 2. 汎用ユーティリティ (特定の機能に依存しない共通関数)
+  // ==========================================
+  const escapeRegExp = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const escapeHtml = (v) => String(v ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+
+  // シンプルなスピナー: Spinner.show()で表示　.hide()で非表示
+  const Spinner = (() => {
+    let node;
+    return {
+      show() {
+        if (node) return;
+        node = document.createElement('div');
+        node.innerHTML = '<div style="padding:12px 16px;border:1px solid #999;border-radius:10px;background:#fff">update...</div>';
+        node.style.cssText = 'position:fixed;inset:0;display:grid;place-items:center;background:rgba(255,255,255,.4);z-index:9999;';
+        document.body.appendChild(node);
+      },
+      hide() { node?.remove(); node = null; }
+    };
+  })();
+
+  // テーマカラーを返す共通関数
+  function getThemeColors() {
+    const isDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+    return {
+      isDark,
+      bg: isDark ? '#111' : '#F5F5F5',
+      bgSub: isDark ? '#1d1d1d' : '#eee',
+      bgSub2: isDark ? '#1b1b1b' : '#e0e0e0',
+      bgInput: isDark ? '#0f0f0f' : '#fff',
+      text: isDark ? '#fff' : '#111',
+      textSub: isDark ? '#ddd' : '#333',
+      border: isDark ? '#2a2a2a' : '#ccc',
+      border2: isDark ? '#333' : '#bbb',
+      border3: isDark ? '#222' : '#ddd',
+    };
   }
 
-  /** ----------------------------
-  * readiness / api helpers
-  * ---------------------------- */
+  // ボタンの一時表示ユーティリティ（任意）
+  function flashBtnText(btn, text = 'Done!', ms = 1200) {
+    const old = btn.textContent;
+    btn.textContent = text;
+    setTimeout(() => (btn.textContent = old), ms);
+  }
+
+  // KTExport: CSV/Markdown/DL/Copy 共通ユーティリティ
+  const KTExport = (() => {
+    // ---- Escape helpers ----
+    const csvEsc = (v) => `"${String(v ?? '').replace(/"/g, '""')}"`;
+    const mdEsc = (v = '') => String(v).replace(/\\/g, '\\\\').replace(/\|/g, '\\|').replace(/`/g, '\\`');
+
+    // ---- Core table builders ----
+    // columns: [{ header:'ヘッダ', select:(row)=>値, md?:fn, csv?:fn }]
+    function buildMatrix(rows, columns, { forMd = false } = {}) {
+      const headers = columns.map(c => c.header);
+      const matrix = rows.map(r => columns.map(c => {
+        const raw = c.select ? c.select(r) : r[c.key];
+        if (forMd) return c.md ? c.md(raw, r) : mdEsc(raw);
+        return c.csv ? c.csv(raw, r) : raw;
+      }));
+      return { headers, matrix };
+    }
+
+    function toCSVString(rows, columns) {
+      const { headers, matrix } = buildMatrix(rows, columns, { forMd: false });
+      const head = headers.map(csvEsc).join(',');
+      const body = matrix.map(r => r.map(csvEsc).join(',')).join('\r\n');
+      return [head, body].join('\r\n');
+    }
+
+    function toMarkdownString(rows, columns) {
+      const { headers, matrix } = buildMatrix(rows, columns, { forMd: true });
+      const header = `| ${headers.join(' | ')} |`;
+      const sep = `| ${headers.map(() => ':-').join(' | ')} |`;
+      const lines = (matrix.length
+        ? matrix.map(r => `| ${r.map(x => String(x ?? '')).join(' | ')} |`).join('\n')
+        : `| ${headers.map(() => '-').join(' | ')} |`);
+      return [header, sep, lines].join('\n');
+    }
+
+    // ---- Download helpers ----
+    function downloadText(filename, text, mime = 'text/plain;charset=utf-8') {
+      const blob = new Blob([text], { type: mime });
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = filename;
+      a.click();
+      URL.revokeObjectURL(a.href);
+    }
+    function downloadCSV(filename, rows, columns, { withBom = false } = {}) {
+      const csv = toCSVString(rows, columns);
+      const data = withBom ? '\uFEFF' + csv : csv; // Excel対策（任意）
+      downloadText(filename, data, 'text/csv;charset=utf-8');
+    }
+    function downloadMD(filename, rows, columns) {
+      downloadText(filename, toMarkdownString(rows, columns), 'text/markdown;charset=utf-8');
+    }
+
+    // ---- Clipboard helpers ----
+    async function copyText(text) {
+      // 1) 標準API
+      try {
+        await navigator.clipboard.writeText(text);
+        return true;
+      } catch (_) {
+        // 2) フォールバック（HTTP/権限NG/古いブラウザ）
+        try {
+          const ta = document.createElement('textarea');
+          ta.value = text;
+          ta.style.cssText = 'position:fixed;top:-9999px;left:-9999px';
+          document.body.appendChild(ta);
+          ta.focus(); ta.select();
+          const ok = document.execCommand('copy');
+          ta.remove();
+          return ok;
+        } catch {
+          return false;
+        }
+      }
+    }
+    async function copyCSV(rows, columns, { withBom = false } = {}) {
+      const csv = toCSVString(rows, columns);
+      const data = withBom ? '\uFEFF' + csv : csv;
+      return copyText(data);
+    }
+    async function copyMD(rows, columns) {
+      return copyText(toMarkdownString(rows, columns));
+    }
+
+    return {
+      // 文字列生成
+      toCSVString, toMarkdownString, mdEsc,
+      // ダウンロード
+      downloadText, downloadCSV, downloadMD,
+      // クリップボード
+      copyText, copyCSV, copyMD,
+    };
+  })();
+
+  // 共通Monacoローダ（複数タブで安全に使う）
+  window.loadMonaco = async function loadMonaco() {
+    if (window.monaco) return window.monaco; // 既にロード済
+    if (window.__monaco_loading__) return window.__monaco_loading__; // 読み込み中Promise共有
+
+    window.__monaco_loading__ = new Promise((resolve, reject) => {
+      const existing = document.querySelector('script[data-monaco-loader]');
+      if (existing) {
+        existing.addEventListener('load', () => resolve(window.monaco));
+        return;
+      }
+      const s = document.createElement('script');
+      s.src = 'https://cdnjs.cloudflare.com/ajax/libs/monaco-editor/0.36.1/min/vs/loader.min.js';
+      s.setAttribute('data-monaco-loader', 'true');
+      s.onload = () => {
+        require.config({ paths: { vs: 'https://cdnjs.cloudflare.com/ajax/libs/monaco-editor/0.36.1/min/vs' } });
+        require(['vs/editor/editor.main'], () => resolve(window.monaco));
+      };
+      s.onerror = reject;
+      document.head.appendChild(s);
+    });
+
+    return window.__monaco_loading__;
+  };
+
+  let monacoEditor = null;
+  async function initEditor(initialCode = '') {
+    const monaco = await loadMonaco();
+    // JSバリデーション（構文/セマンティック）をON
+    monaco.languages.typescript.javascriptDefaults.setDiagnosticsOptions({
+      noSyntaxValidation: false,
+      noSemanticValidation: false,
+    });
+    // 既存textareaをdivに変えている前提
+    const el = document.getElementById('kt-tpl-editor');
+    el.style.height = '100%';
+    monacoEditor = monaco.editor.create(el, {
+      value: initialCode,
+      language: 'javascript',
+      theme: getThemeColors().isDark ? 'vs-dark' : 'vs',
+      automaticLayout: true,
+      fontSize: 12,
+      minimap: { enabled: false },
+      wordWrap: 'on',
+    });
+
+    // 🔽 サイズ変化に確実に追従させる（初期取りこぼし対策）
+    const ro = new ResizeObserver(() => { try { monacoEditor.layout(); } catch { } });
+    ro.observe(el);
+    window.addEventListener('resize', () => { try { monacoEditor.layout(); } catch { } });
+
+    // タブ切替直後の遅延レイアウト（描画完了後に1回）
+    setTimeout(() => { try { monacoEditor.layout(); } catch { } }, 0);
+
+    return monacoEditor;
+  }
+
+
+  // ==========================================
+  // 3. Kintone API・データ取得層
+  // ==========================================
   const appReady = () => typeof kintone !== 'undefined' && kintone.api && kintone.app;
   const waitReady = () => new Promise(res => {
     const t = setInterval(() => { if (appReady()) { clearInterval(t); res(); } }, 50);
@@ -45,6 +246,22 @@
 
   // ---- optional（失敗は null に丸める）----
   const opt = (p) => p.catch(() => null);
+
+  // カスタマイズデプロイ用
+  async function uploadOnce(name, content, mime) {
+    const fd = new FormData();
+    fd.append('__REQUEST_TOKEN__', kintone.getRequestToken());
+    fd.append('file', new Blob([content], { type: mime }), name);
+    const up = await fetch(kintone.api.url('/k/v1/file.json', true), {
+      method: 'POST',
+      headers: { 'X-Requested-With': 'XMLHttpRequest' },
+      body: fd,
+      credentials: 'same-origin'
+    });
+    if (!up.ok) throw new Error(`file upload failed: ${up.status} ${await up.text().catch(() => '')}`);
+    const { fileKey } = await up.json();
+    return fileKey;
+  }
 
   /**
    * 指定アプリの各種定義をまとめて取得（生レスポンスのみを返す）
@@ -64,13 +281,13 @@
       opt(api('/k/v1/app/views')),
       opt(api('/k/v1/app/reports')),
       opt(api('/k/v1/app/status')),
-      opt(api('/k/v1/app/notifications/general', true)),
+      opt(api('/k/v1/app/notifications/general')),
       opt(api('/k/v1/app/notifications/perRecord')),
       opt(api('/k/v1/app/notifications/reminder')),
       opt(api('/k/v1/app/customize')),
-      opt(api('/k/v1/app/acl', true)),
-      opt(api('/k/v1/record/acl', true)),
-      opt(api('/k/v1/field/acl', true)),
+      opt(api('/k/v1/app/acl')),
+      opt(api('/k/v1/record/acl')),
+      opt(api('/k/v1/field/acl')),
       opt(api('/k/v1/app/actions')),
       opt(api('/k/v1/plugins')),
     ]);
@@ -193,221 +410,10 @@
     return { lookups, relatedTables, actions };
   }
 
-  /** ----------------------------
-  * CONSTANTS
-  * ---------------------------- */
-  const CONTAINER_TYPES = new Set(['GROUP', 'SUBTABLE', 'LABEL', 'CATEGORY']);
-  const SYSTEM_TYPES = new Set(['RECORD_NUMBER', 'CREATOR', 'CREATED_TIME', 'MODIFIER', 'UPDATED_TIME', 'STATUS', 'STATUS_ASSIGNEE']);
 
-  /** ----------------------------
-  * Small utils
-  * ---------------------------- */
-  const escapeRegExp = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-
-  /* シンプルなスピナー: Spinner.show()で表示　.hide()で非表示 */
-  const Spinner = (() => {
-    let node;
-    return {
-      show() {
-        if (node) return;
-        node = document.createElement('div');
-        node.innerHTML = '<div style="padding:12px 16px;border:1px solid #999;border-radius:10px;background:#fff">update...</div>';
-        node.style.cssText = 'position:fixed;inset:0;display:grid;place-items:center;background:rgba(255,255,255,.4);z-index:9999;';
-        document.body.appendChild(node);
-      },
-      hide() { node?.remove(); node = null; }
-    };
-  })();
-
-  const escapeHtml = (v) => String(v ?? '')
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;'); // 必要に応じて追加
-
-  // テーマカラーを返す共通関数
-  function getThemeColors() {
-    const isDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
-    return {
-      isDark,
-      bg: isDark ? '#111' : '#F5F5F5',
-      bgSub: isDark ? '#1d1d1d' : '#eee',
-      bgSub2: isDark ? '#1b1b1b' : '#e0e0e0',
-      bgInput: isDark ? '#0f0f0f' : '#fff',
-      text: isDark ? '#fff' : '#111',
-      textSub: isDark ? '#ddd' : '#333',
-      border: isDark ? '#2a2a2a' : '#ccc',
-      border2: isDark ? '#333' : '#bbb',
-      border3: isDark ? '#222' : '#ddd',
-    };
-  }
-
-  // ==============================
-  // KTExport: CSV/Markdown/DL/Copy 共通ユーティリティ
-  // ==============================
-  const KTExport = (() => {
-    // ---- Escape helpers ----
-    const csvEsc = (v) => `"${String(v ?? '').replace(/"/g, '""')}"`;
-    const mdEsc = (v = '') => String(v).replace(/\\/g, '\\\\').replace(/\|/g, '\\|').replace(/`/g, '\\`');
-
-    // ---- Core table builders ----
-    // columns: [{ header:'ヘッダ', select:(row)=>値, md?:fn, csv?:fn }]
-    function buildMatrix(rows, columns, { forMd = false } = {}) {
-      const headers = columns.map(c => c.header);
-      const matrix = rows.map(r => columns.map(c => {
-        const raw = c.select ? c.select(r) : r[c.key];
-        if (forMd) return c.md ? c.md(raw, r) : mdEsc(raw);
-        return c.csv ? c.csv(raw, r) : raw;
-      }));
-      return { headers, matrix };
-    }
-
-    function toCSVString(rows, columns) {
-      const { headers, matrix } = buildMatrix(rows, columns, { forMd: false });
-      const head = headers.map(csvEsc).join(',');
-      const body = matrix.map(r => r.map(csvEsc).join(',')).join('\r\n');
-      return [head, body].join('\r\n');
-    }
-
-    function toMarkdownString(rows, columns) {
-      const { headers, matrix } = buildMatrix(rows, columns, { forMd: true });
-      const header = `| ${headers.join(' | ')} |`;
-      const sep = `| ${headers.map(() => ':-').join(' | ')} |`;
-      const lines = (matrix.length
-        ? matrix.map(r => `| ${r.map(x => String(x ?? '')).join(' | ')} |`).join('\n')
-        : `| ${headers.map(() => '-').join(' | ')} |`);
-      return [header, sep, lines].join('\n');
-    }
-
-    // ---- Download helpers ----
-    function downloadText(filename, text, mime = 'text/plain;charset=utf-8') {
-      const blob = new Blob([text], { type: mime });
-      const a = document.createElement('a');
-      a.href = URL.createObjectURL(blob);
-      a.download = filename;
-      a.click();
-      URL.revokeObjectURL(a.href);
-    }
-    function downloadCSV(filename, rows, columns, { withBom = false } = {}) {
-      const csv = toCSVString(rows, columns);
-      const data = withBom ? '\uFEFF' + csv : csv; // Excel対策（任意）
-      downloadText(filename, data, 'text/csv;charset=utf-8');
-    }
-    function downloadMD(filename, rows, columns) {
-      downloadText(filename, toMarkdownString(rows, columns), 'text/markdown;charset=utf-8');
-    }
-
-    // ---- Clipboard helpers ----
-    async function copyText(text) {
-      // 1) 標準API
-      try {
-        await navigator.clipboard.writeText(text);
-        return true;
-      } catch (_) {
-        // 2) フォールバック（HTTP/権限NG/古いブラウザ）
-        try {
-          const ta = document.createElement('textarea');
-          ta.value = text;
-          ta.style.cssText = 'position:fixed;top:-9999px;left:-9999px';
-          document.body.appendChild(ta);
-          ta.focus(); ta.select();
-          const ok = document.execCommand('copy');
-          ta.remove();
-          return ok;
-        } catch {
-          return false;
-        }
-      }
-    }
-    async function copyCSV(rows, columns, { withBom = false } = {}) {
-      const csv = toCSVString(rows, columns);
-      const data = withBom ? '\uFEFF' + csv : csv;
-      return copyText(data);
-    }
-    async function copyMD(rows, columns) {
-      return copyText(toMarkdownString(rows, columns));
-    }
-
-    return {
-      // 文字列生成
-      toCSVString, toMarkdownString, mdEsc,
-      // ダウンロード
-      downloadText, downloadCSV, downloadMD,
-      // クリップボード
-      copyText, copyCSV, copyMD,
-    };
-  })();
-
-  // ボタンの一時表示ユーティリティ（任意）
-  function flashBtnText(btn, text = 'Done!', ms = 1200) {
-    const old = btn.textContent;
-    btn.textContent = text;
-    setTimeout(() => (btn.textContent = old), ms);
-  }
-
-  // =======================================
-  // 共通Monacoローダ（複数タブで安全に使う）
-  // =======================================
-  window.loadMonaco = async function loadMonaco() {
-    if (window.monaco) return window.monaco; // 既にロード済
-    if (window.__monaco_loading__) return window.__monaco_loading__; // 読み込み中Promise共有
-
-    window.__monaco_loading__ = new Promise((resolve, reject) => {
-      const existing = document.querySelector('script[data-monaco-loader]');
-      if (existing) {
-        existing.addEventListener('load', () => resolve(window.monaco));
-        return;
-      }
-      const s = document.createElement('script');
-      s.src = 'https://cdnjs.cloudflare.com/ajax/libs/monaco-editor/0.36.1/min/vs/loader.min.js';
-      s.setAttribute('data-monaco-loader', 'true');
-      s.onload = () => {
-        require.config({ paths: { vs: 'https://cdnjs.cloudflare.com/ajax/libs/monaco-editor/0.36.1/min/vs' } });
-        require(['vs/editor/editor.main'], () => resolve(window.monaco));
-      };
-      s.onerror = reject;
-      document.head.appendChild(s);
-    });
-
-    return window.__monaco_loading__;
-  };
-
-  let monacoEditor = null;
-  async function initEditor(initialCode = '') {
-    const monaco = await loadMonaco();
-    // JSバリデーション（構文/セマンティック）をON
-    monaco.languages.typescript.javascriptDefaults.setDiagnosticsOptions({
-      noSyntaxValidation: false,
-      noSemanticValidation: false,
-    });
-    // 既存textareaをdivに変えている前提
-    const el = document.getElementById('kt-tpl-editor');
-    el.style.height = '100%';
-    monacoEditor = monaco.editor.create(el, {
-      value: initialCode,
-      language: 'javascript',
-      theme: getThemeColors().isDark ? 'vs-dark' : 'vs',
-      automaticLayout: true,
-      fontSize: 12,
-      minimap: { enabled: false },
-      wordWrap: 'on',
-    });
-
-    // 🔽 サイズ変化に確実に追従させる（初期取りこぼし対策）
-    const ro = new ResizeObserver(() => { try { monacoEditor.layout(); } catch { } });
-    ro.observe(el);
-    window.addEventListener('resize', () => { try { monacoEditor.layout(); } catch { } });
-
-    // タブ切替直後の遅延レイアウト（描画完了後に1回）
-    setTimeout(() => { try { monacoEditor.layout(); } catch { } }, 0);
-
-    return monacoEditor;
-  }
-
-
-  /** ----------------------------
-  * UI Root (tabs)
-  * ---------------------------- */
+  // ==========================================
+  // 4. UIルート構築
+  // ==========================================
   const mountRoot = () => {
     // 1. ライトモード/ダークモードの判定
     const C = getThemeColors();
@@ -593,7 +599,7 @@
       </div>
     `;
 
-    document.body.appendChild(wapCheck(wrap));
+    document.body.appendChild(wrap);
 
     // === 最小化：ドメイン共通 ===
     const MINI_KEY = `kt_mini_${location.host}_global`;
@@ -646,12 +652,13 @@
 
   };
 
-  // safety: if DOM node detached before append
-  function wapCheck(el) { return el; }
 
-  /** --------------------------------------------------------
-  * Health view
-  * -------------------------------------------------------- */
+  // ==========================================
+  // 5. 各機能（タブ）のモジュール
+  // ==========================================
+  // ----------------------------
+  // [Feature] Health
+  // ----------------------------
   // Health thresholds (edit-able; persisted to LS)
   const LS_TH_KEY = 'ktHealthThresholds.v1';
   const DEFAULT_TH = {
@@ -1390,9 +1397,9 @@
   };
 
 
-  /** --------------------------------------------------------
-  * Fields view (layout-aware, MD with notes)
-  * -------------------------------------------------------- */
+  // ----------------------------
+  // [Feature] Fields
+  // ----------------------------
   // 汎用の初期値フォーマッタ（フィールド定義用）
   function formatDefault(field) {
     const t = field?.type;
@@ -1975,7 +1982,7 @@
       return { calcExpression: field.expression || '' };
     }
 
-    // 文字列(1行)の式（あなたが実装してる拡張仕様）
+    // 文字列(1行)の式
     if (field.type === 'SINGLE_LINE_TEXT' && ('expression' in field)) {
       if (field.hideExpression) return { calcExpression: '(hidden)' };
       return { calcExpression: field.expression || '' };
@@ -2087,9 +2094,10 @@
     document.head.appendChild(style);
   }
 
-  /** --------------------------------------------------------
-  * Views view（全一覧の一覧化）
-  * -------------------------------------------------------- */
+
+  // ----------------------------
+  // [Feature] Views
+  // ----------------------------
   // クエリを (condition, orderBy[], limit, offset) に分解
   function parseQuery(query) {
     const q = (query || '').trim();
@@ -2380,9 +2388,9 @@
   };
 
 
-  /** --------------------------------------------------------
-  * Graphs views
-  * -------------------------------------------------------- */
+  // ----------------------------
+  // [Feature] Graphs
+  // ----------------------------
   // groups を 1セル内に「G1/G2/G3のピル＋ラベル＋[PER]」で縦積み表示
   const groupsToHTML = (groups = [], code2label = {}) => {
     return groups.map((g, i) => {
@@ -2551,9 +2559,9 @@
   };
 
 
-  /** --------------------------------------------------------
-  * Relations view
-  * -------------------------------------------------------- */
+  // ----------------------------
+  // [Feature] Relations
+  // ----------------------------
   // --- 4ボタン＋折り畳み＋インジケータ（命名統一版）---
   function sectionWithDL(
     title, headers, dlRows, innerTableHTML,
@@ -2826,15 +2834,12 @@
     view.innerHTML = `${secLU}${secRT}${secAC}`;
     bindLU(view); bindRT(view); bindAC(view);
 
-    // まとめて描画＆バインド
-    view.innerHTML = `${secLU}${secRT}${secAC}`;
-    bindLU(view); bindRT(view); bindAC(view);
   }
 
 
-  /** --------------------------------------------------------
-   * Notifications view
-   * -------------------------------------------------------- */
+  // ----------------------------
+  // [Feature] Notifications
+  // ----------------------------
   function renderNotifications(root, ctx) {
     const view = root.querySelector('#view-notice');
     if (!view) return;
@@ -3059,9 +3064,9 @@
   }
 
 
-  /** --------------------------------------------------------
- * ACL view
- * -------------------------------------------------------- */
+  // ----------------------------
+  // [Feature] Access Control List
+  // ----------------------------
   function renderAcl(root, ctx) {
     const view = root.querySelector('#view-acl');
     if (!view) return;
@@ -3361,9 +3366,9 @@
   }
 
 
-  /** --------------------------------------------------------
-   * Templates view
-   * -------------------------------------------------------- */
+  // ----------------------------
+  // [Feature] Templates
+  // ----------------------------
   function fetchFieldMeta(fields) {
     const resp = fields;
     const list = [];
@@ -3976,20 +3981,7 @@
         if (waited >= maxWaitMs) throw new Error('Deploy timeout.');
       }
     }
-    async function uploadOnce(name, content, mime) {
-      const fd = new FormData();
-      fd.append('__REQUEST_TOKEN__', kintone.getRequestToken());
-      fd.append('file', new Blob([content], { type: mime }), name);
-      const up = await fetch(kintone.api.url('/k/v1/file.json', true), {
-        method: 'POST',
-        headers: { 'X-Requested-With': 'XMLHttpRequest' },
-        body: fd,
-        credentials: 'same-origin'
-      });
-      if (!up.ok) throw new Error(`file upload failed: ${up.status} ${await up.text().catch(() => '')}`);
-      const { fileKey } = await up.json();
-      return fileKey;
-    }
+
     async function putAppendFileToCustomizeWithTargets(app, keys, { toDesktop, toMobile }, assetType) {
       // assetType: 'js' | 'css'
       const slot = (assetType === 'css') ? 'css' : 'js';
@@ -4219,10 +4211,10 @@
   }
 
 
-  // ===============================
-  //  renderCustomize
-  //  kintone JS/CSS カスタマイズ編集機能（Toolkit版 JSEditタブ）
-  // ===============================
+  // ----------------------------
+  // [Feature] Customize
+  // kintone JS/CSS カスタマイズ編集機能（Toolkit版 JSEditタブ）
+  // ----------------------------
   async function renderCustomize(root, DATA, appId) {
     const view = root.querySelector('#view-customize');
     if (!view) return;
@@ -4773,9 +4765,9 @@
   }
 
 
-  // ===============================
-  //  renderScanner (Scanner tab)
-  // ===============================
+  // ----------------------------
+  // [Feature] Field Scanner
+  // ----------------------------
   async function renderScanner(root, DATA) {
     const el = root.querySelector('#view-field-scanner');
     if (!el) return;
@@ -5217,12 +5209,9 @@
   }
 
 
-  /** --------------------------------------------------------
-   * Plugins view (Toolkit tab: plug-in)
-   * DATA: { appId, plugins }
-   *   - appId: number
-   *   - plugins: (array) or ({plugins:[...]})
-   * -------------------------------------------------------- */
+  // ----------------------------
+  // [Feature] Plugins
+  // ----------------------------
   async function renderPlugins(root, DATA) {
     const view = root.querySelector('#view-plugins');
     if (!view) return;
@@ -5571,9 +5560,9 @@
   }
 
 
-  // ===============================
-  //  renderLinks
-  // ===============================
+  // ----------------------------
+  // [Feature] Links
+  // ----------------------------
   const LINKS_CONFIG = {
     locale: 'ja',
     categories: ['Official', 'Community', 'Docs', 'Tools', 'Blog/Note', 'Library'],
@@ -5856,9 +5845,9 @@
   }
 
 
-  /** ----------------------------
-  * boot
-  * ---------------------------- */
+  // ==========================================
+  // 6. メイン実行処理 (Entry Point)
+  // ==========================================
   waitReady().then(async () => {
     const appId = kintone.app.getId();
     if (!appId) return;
