@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         kintone App Toolkit
 // @namespace    https://github.com/youtotto/kintone-app-toolkit
-// @version      2.0.1
+// @version      2.0.2
 // @description  kintone開発をブラウザで完結。アプリ分析・コード生成・ドキュメント編集を備えた開発支援ツールキット。
 // @match        https://*.cybozu.com/k/*/
 // @match        https://*.cybozu.com/k/*/?*view=*
@@ -25,7 +25,7 @@
   // ==========================================
   // 1. 定数・グローバル状態
   // ==========================================
-  const SCRIPT_VERSION = '2.0.1';
+  const SCRIPT_VERSION = '2.0.2';
   const CONTAINER_TYPES = new Set(['GROUP', 'SUBTABLE', 'LABEL', 'CATEGORY']);
   const SYSTEM_TYPES = new Set(['RECORD_NUMBER', 'CREATOR', 'CREATED_TIME', 'MODIFIER', 'UPDATED_TIME', 'STATUS', 'STATUS_ASSIGNEE']);
 
@@ -84,6 +84,13 @@
     // ---- Escape helpers ----
     const csvEsc = (v) => `"${String(v ?? '').replace(/"/g, '""')}"`;
     const mdEsc = (v = '') => String(v).replace(/\\/g, '\\\\').replace(/\|/g, '\\|').replace(/`/g, '\\`');
+    // Notion向け：セル内改行は潰す（<br>使わない）
+    const mdEscNotion = (v = '') => String(v ?? '')
+      .replace(/\r?\n/g, ' / ')       // ★改行は区切りに変換
+      .replace(/\s+/g, ' ')           // ★連続空白を潰したいなら（任意）
+      .replace(/\\/g, '\\\\')
+      .replace(/\|/g, '\\|')
+      .replace(/`/g, '\\`');
 
     // ---- Core table builders ----
     // columns: [{ header:'ヘッダ', select:(row)=>値, md?:fn, csv?:fn }]
@@ -104,13 +111,21 @@
       return [head, body].join('\r\n');
     }
 
-    function toMarkdownString(rows, columns) {
-      const { headers, matrix } = buildMatrix(rows, columns, { forMd: true });
+    function toMarkdownString(rows, columns, { esc = mdEscNotion } = {}) {
+      const headers = columns.map(c => esc(c.header));
+      const matrix = rows.map(r => columns.map(c => {
+        const raw = c.select ? c.select(r) : r[c.key];
+        // mdフォーマット関数があるなら優先、最後にesc
+        const v = c.md ? c.md(raw, r) : raw;
+        return esc(v);
+      }));
+
       const header = `| ${headers.join(' | ')} |`;
       const sep = `| ${headers.map(() => ':-').join(' | ')} |`;
       const lines = (matrix.length
         ? matrix.map(r => `| ${r.map(x => String(x ?? '')).join(' | ')} |`).join('\n')
         : `| ${headers.map(() => '-').join(' | ')} |`);
+
       return [header, sep, lines].join('\n');
     }
 
@@ -160,7 +175,7 @@
       return copyText(data);
     }
     async function copyMD(rows, columns) {
-      return copyText(toMarkdownString(rows, columns));
+      return copyText(toMarkdownString(rows, columns, { esc: mdEscNotion }));
     }
 
     return {
