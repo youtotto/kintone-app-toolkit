@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         kintone App Toolkit
 // @namespace    https://github.com/youtotto/kintone-app-toolkit
-// @version      2.0.2
-// @description  kintone開発をブラウザで完結。アプリ分析・コード生成・ドキュメント編集を備えた開発支援ツールキット。
+// @version      2.1.0
+// @description  kintoneアプリの構造・依存関係・変更影響をブラウザ上で分析。フィールドの利用箇所、JS解析、アプリ間連携、設定の整合性チェックまで対応した開発支援ツールキット。
 // @match        https://*.cybozu.com/k/*/
 // @match        https://*.cybozu.com/k/*/?*view=*
 // @exclude      https://*.cybozu.com/k/admin/*
@@ -25,7 +25,7 @@
   // ==========================================
   // 1. 定数・グローバル状態
   // ==========================================
-  const SCRIPT_VERSION = '2.0.2';
+  const SCRIPT_VERSION = '2.1.0';
   const CONTAINER_TYPES = new Set(['GROUP', 'SUBTABLE', 'LABEL', 'CATEGORY']);
   const SYSTEM_TYPES = new Set(['RECORD_NUMBER', 'CREATOR', 'CREATED_TIME', 'MODIFIER', 'UPDATED_TIME', 'STATUS', 'STATUS_ASSIGNEE']);
 
@@ -189,28 +189,54 @@
   })();
 
   // 共通Monacoローダ（複数タブで安全に使う）
+  // ★B7修正
+  //  (1) 既存のloaderが「読み込み済み」の場合、loadイベントは二度と発火しないため
+  //      Promiseが永久に解決しなかった。window.require の有無で判定するよう変更。
+  //  (2) 失敗時に __monaco_loading__ が残り、以降ずっと再試行できなかった問題を修正。
+  const MONACO_BASE = 'https://cdnjs.cloudflare.com/ajax/libs/monaco-editor/0.36.1/min/vs';
   window.loadMonaco = async function loadMonaco() {
     if (window.monaco) return window.monaco; // 既にロード済
     if (window.__monaco_loading__) return window.__monaco_loading__; // 読み込み中Promise共有
 
-    window.__monaco_loading__ = new Promise((resolve, reject) => {
+    const p = new Promise((resolve, reject) => {
+      // loader.js の読み込み完了後に monaco 本体を require する
+      const requireMonaco = () => {
+        try {
+          if (typeof window.require !== 'function') {
+            reject(new Error('Monaco loader is not available'));
+            return;
+          }
+          window.require.config({ paths: { vs: MONACO_BASE } });
+          window.require(['vs/editor/editor.main'], () => resolve(window.monaco), reject);
+        } catch (e) {
+          reject(e);
+        }
+      };
+
       const existing = document.querySelector('script[data-monaco-loader]');
       if (existing) {
-        existing.addEventListener('load', () => resolve(window.monaco));
+        // 既に読み込み完了していれば load は発火しないので、require の有無で判定する
+        if (typeof window.require === 'function') { requireMonaco(); return; }
+        existing.addEventListener('load', requireMonaco, { once: true });
+        existing.addEventListener('error', () => reject(new Error('Monaco loader failed to load')), { once: true });
         return;
       }
+
       const s = document.createElement('script');
-      s.src = 'https://cdnjs.cloudflare.com/ajax/libs/monaco-editor/0.36.1/min/vs/loader.min.js';
+      s.src = `${MONACO_BASE}/loader.min.js`;
       s.setAttribute('data-monaco-loader', 'true');
-      s.onload = () => {
-        require.config({ paths: { vs: 'https://cdnjs.cloudflare.com/ajax/libs/monaco-editor/0.36.1/min/vs' } });
-        require(['vs/editor/editor.main'], () => resolve(window.monaco));
-      };
-      s.onerror = reject;
+      s.addEventListener('load', requireMonaco, { once: true });
+      s.addEventListener('error', () => reject(new Error('Monaco loader failed to load')), { once: true });
       document.head.appendChild(s);
     });
 
-    return window.__monaco_loading__;
+    // 失敗した場合は共有Promiseを破棄し、次回の呼び出しで再試行できるようにする
+    p.catch(() => {
+      if (window.__monaco_loading__ === p) window.__monaco_loading__ = null;
+    });
+
+    window.__monaco_loading__ = p;
+    return p;
   };
 
   let monacoEditor = null;
@@ -262,20 +288,196 @@
   // ---- optional（失敗は null に丸める）----
   const opt = (p) => p.catch(() => null);
 
-  // カスタマイズデプロイ用
+  // ==========================================
+  // 2.2 kintone REST 共通クライアント (KTApi)
+  //  - Customize / Templates / Field Scanner / Plugins に散在していた
+  //    getCustomize・downloadByKey・uploadOnce・waitDeploy を一本化する
+  //  - preview（動作テスト環境）と production（運用環境）の区別を明示する
+  // ==========================================
+  const KTApi = (() => {
+    const url = (p) => kintone.api.url(p, true);
+    const wait = (ms) => new Promise(r => setTimeout(r, ms));
+
+    /**
+     * カスタマイズ設定を取得する
+     * @param {boolean} opt.preferPreview true(既定)ならpreviewを優先し、無ければproductionを返す
+     * @returns {{source:'preview'|'production', data:object}} どちらを取得したかを必ず返す
+     */
+    async function getCustomize(app, { preferPreview = true } = {}) {
+      if (preferPreview) {
+        try {
+          const prev = await kintone.api(url('/k/v1/preview/app/customize.json'), 'GET', { app });
+          if (prev && (prev.desktop || prev.mobile)) return { source: 'preview', data: prev };
+        } catch (e) {
+          // preview取得不可（権限不足など）はproductionへフォールバックする
+          console.warn('[KTApi] preview customize の取得に失敗しました。production を使用します', e);
+        }
+      }
+      const prod = await kintone.api(url('/k/v1/app/customize.json'), 'GET', { app });
+      return { source: 'production', data: prod };
+    }
+
+    /** fileKey からファイル本文をテキストで取得する */
+    async function downloadFile(fileKey) {
+      const res = await fetch(url('/k/v1/file.json') + '?fileKey=' + encodeURIComponent(fileKey), {
+        method: 'GET',
+        headers: { 'X-Requested-With': 'XMLHttpRequest' },
+        credentials: 'same-origin',
+      });
+      if (!res.ok) throw new Error(`file download failed: ${res.status}`);
+      return await res.text();
+    }
+
+    /** テキストをアップロードして fileKey を得る */
+    async function uploadFile(name, content, mime) {
+      const fd = new FormData();
+      try { fd.append('__REQUEST_TOKEN__', kintone.getRequestToken()); } catch (e) { }
+      fd.append('file', new Blob([content], { type: mime }), name);
+      const res = await fetch(url('/k/v1/file.json'), {
+        method: 'POST',
+        headers: { 'X-Requested-With': 'XMLHttpRequest' },
+        credentials: 'same-origin',
+        body: fd,
+      });
+      if (!res.ok) {
+        const detail = await res.text().catch(() => '');
+        throw new Error(`file upload failed: ${res.status} ${detail}`);
+      }
+      const { fileKey } = await res.json();
+      return fileKey;
+    }
+
+    /** previewのカスタマイズ設定を更新する（運用環境には反映されない） */
+    async function putPreviewCustomize(app, payload) {
+      return await kintone.api(url('/k/v1/preview/app/customize.json'), 'PUT', payload);
+    }
+
+    /** previewの内容を運用環境へデプロイする（戻り値は無し。完了待ちは waitDeploy） */
+    async function deploy(app) {
+      return await kintone.api(url('/k/v1/preview/app/deploy.json'), 'POST',
+        { apps: [{ app: Number(app), revision: -1 }], revert: false });
+    }
+
+    /** デプロイ完了を待つ（SUCCESS/PROCESSEDで正常終了、FAIL系は例外） */
+    async function waitDeploy(app, { pollMs = 1500, timeoutMs = 60000 } = {}) {
+      const deadline = Date.now() + timeoutMs;
+      while (Date.now() < deadline) {
+        await wait(pollMs);
+        const st = await kintone.api(url('/k/v1/preview/app/deploy.json'), 'GET', { apps: [Number(app)] });
+        const s = st?.apps?.[0]?.status;
+        if (s === 'SUCCESS' || s === 'PROCESSED') return s;
+        if (s === 'FAIL' || s === 'FAILED' || s === 'CANCEL') throw new Error(`Deploy failed: ${s}`);
+      }
+      throw new Error('Deploy timeout');
+    }
+
+    /**
+     * 複数アプリの基本情報（名前など）をまとめて取得する
+     * - /k/v1/apps.json は1回の呼び出しで複数アプリを取得できる（最大100件）
+     * - 閲覧権限が無いアプリは結果に含まれない → 名称は解決できないものとして扱う
+     * @returns {Map<string,string>} appId -> アプリ名
+     */
+    // アプリ名のキャッシュ（アプリ名は頻繁には変わらないため、再訪時のAPI呼び出しを避ける）
+    const APP_NAME_CACHE_KEY = 'ktAppNames.v1';
+    const APP_NAME_TTL_MS = 24 * 60 * 60 * 1000; // 24時間
+
+    function loadAppNameCache() {
+      try {
+        const raw = localStorage.getItem(APP_NAME_CACHE_KEY);
+        const obj = raw ? JSON.parse(raw) : {};
+        return (obj && typeof obj === 'object') ? obj : {};
+      } catch (e) {
+        return {}; // 壊れたキャッシュは無視する
+      }
+    }
+    function saveAppNameCache(cache) {
+      try { localStorage.setItem(APP_NAME_CACHE_KEY, JSON.stringify(cache)); }
+      catch (e) { console.warn('[KTApi] アプリ名キャッシュの保存に失敗しました', e); }
+    }
+
+    async function getAppNames(ids) {
+      const list = [...new Set((ids || []).map(String).filter(v => /^\d+$/.test(v)))];
+      const map = new Map();
+      if (!list.length) return map;
+
+      // 1) キャッシュから引けるものは先に埋め、APIに問い合わせるIDを減らす
+      const cache = loadAppNameCache();
+      const now = Date.now();
+      const missing = [];
+      for (const id of list) {
+        const c = cache[id];
+        if (c && c.name && (now - (c.at || 0)) < APP_NAME_TTL_MS) map.set(id, c.name);
+        else missing.push(id);
+      }
+      if (!missing.length) return map;
+
+      // 2) 不足分だけAPIで取得する
+      const before = map.size;
+      for (let i = 0; i < missing.length; i += 100) {
+        const chunk = missing.slice(i, i + 100).map(Number);
+        try {
+          const res = await kintone.api(url('/k/v1/apps.json'), 'GET', { ids: chunk });
+          for (const a of res?.apps || []) {
+            if (a?.appId != null && a?.name) {
+              map.set(String(a.appId), a.name);
+              cache[String(a.appId)] = { name: a.name, at: now };
+            }
+          }
+        } catch (e) {
+          // 権限不足などは致命的ではない。解決できなかったIDは呼び出し側で「取得不可」として扱う
+          console.warn('[KTApi] アプリ名の取得に失敗しました', e);
+        }
+      }
+      if (map.size > before) saveAppNameCache(cache);
+      return map;
+    }
+
+    /**
+     * 同一ドメインのアプリ一覧を取得する（閲覧できるアプリのみ返る）
+     * 1回あたり最大100件のため、必要な分だけページングする
+     */
+    async function getAppList({ max = 500 } = {}) {
+      const out = [];
+      for (let offset = 0; offset < max; offset += 100) {
+        const res = await kintone.api(url('/k/v1/apps.json'), 'GET', { limit: 100, offset });
+        const apps = res?.apps || [];
+        out.push(...apps);
+        if (apps.length < 100) break;
+      }
+      return out;
+    }
+
+    /**
+     * 指定アプリのフィールド設定を取得する（運用環境）
+     * レコード閲覧権限があれば取得できる（アプリ管理権限は不要）
+     */
+    async function getFormFieldsOf(appId) {
+      return await kintone.api(url('/k/v1/app/form/fields.json'), 'GET', { app: Number(appId) });
+    }
+
+    /** 指定アプリのアクション設定を取得する（アプリ管理権限が必要） */
+    async function getActionsOf(appId) {
+      return await kintone.api(url('/k/v1/app/actions.json'), 'GET', { app: Number(appId) });
+    }
+
+    /** アプリのURL（同一ドメイン内のアプリへのリンク用） */
+    function appUrl(appId) {
+      return `${location.origin}/k/${encodeURIComponent(String(appId))}/`;
+    }
+
+    /** デプロイして完了まで待つ */
+    async function deployAndWait(app, opt = {}) {
+      await deploy(app);
+      return await waitDeploy(app, opt);
+    }
+
+    return { url, wait, getCustomize, downloadFile, uploadFile, putPreviewCustomize, deploy, waitDeploy, deployAndWait, getAppNames, appUrl,
+      getAppList, getFormFieldsOf, getActionsOf };
+  })();
+
+  // カスタマイズデプロイ用（後方互換のための薄いラッパ。実体は KTApi.uploadFile）
   async function uploadOnce(name, content, mime) {
-    const fd = new FormData();
-    fd.append('__REQUEST_TOKEN__', kintone.getRequestToken());
-    fd.append('file', new Blob([content], { type: mime }), name);
-    const up = await fetch(kintone.api.url('/k/v1/file.json', true), {
-      method: 'POST',
-      headers: { 'X-Requested-With': 'XMLHttpRequest' },
-      body: fd,
-      credentials: 'same-origin'
-    });
-    if (!up.ok) throw new Error(`file upload failed: ${up.status} ${await up.text().catch(() => '')}`);
-    const { fileKey } = await up.json();
-    return fileKey;
+    return await KTApi.uploadFile(name, content, mime);
   }
 
   /**
@@ -288,9 +490,12 @@
     const api = (path, extra = {}) => getImpl(path, { app: appId, ...extra });
 
     const [
-      fields, layout, views, reports, status, generalNotify, perRecordNotify, reminderNotify,
-      customize, appAcl, recordAcl, fieldAcl, actions, plugins,
+      fieldsRaw, layoutRaw, views, reports, status, generalNotify, perRecordNotify, reminderNotify,
+      customize, appAcl, recordAcl, fieldAcl, actions, plugins, settings, appPlugins,
     ] = await Promise.all([
+      // フォーム定義はJS APIで取得する。
+      //   これらは REST の properties / layout と同等の値を返し、
+      //   RESTと違ってアプリ管理権限を必要としない（一般ユーザーでも動作する）。
       kintone.app.getFormFields(),
       kintone.app.getFormLayout(),
       opt(api('/k/v1/app/views')),
@@ -305,13 +510,27 @@
       opt(api('/k/v1/field/acl')),
       opt(api('/k/v1/app/actions')),
       opt(api('/k/v1/plugins')),
+      // アプリ名・説明（他の取得と並列なので追加のラウンドトリップは発生しない）
+      opt(api('/k/v1/app/settings')),
+      // このアプリに追加されているプラグイン（/k/v1/plugins はドメイン全体の一覧なので別途取得する）
+      opt(api('/k/v1/app/plugins')),
     ]);
+
+    // 戻り値の形をならす。
+    //   fields : properties 相当のオブジェクト（{ properties: {...} } 形式で来た場合にも対応）
+    //   layout : layout 相当の配列（{ layout: [...] } 形式で来た場合にも対応）
+    const fields = (fieldsRaw && typeof fieldsRaw === 'object' && fieldsRaw.properties)
+      ? fieldsRaw.properties
+      : (fieldsRaw || {});
+    const layout = Array.isArray(layoutRaw)
+      ? layoutRaw
+      : (Array.isArray(layoutRaw?.layout) ? layoutRaw.layout : []);
 
     // 生データを読み取り専用で返す（派生計算は別レイヤで）
     return Object.freeze({
       appId,
-      fields,     // /k/v1/app/form/fields
-      layout,     // /k/v1/app/form/layout
+      fields,     // kintone.app.getFormFields()（REST form/fields の properties 相当）
+      layout,     // kintone.app.getFormLayout()（REST form/layout の layout 相当。グループ・要素IDを含む）
       views,      // /k/v1/app/views               （null可）
       reports,    // /k/v1/app/reports             （null可）
       status,     // /k/v1/app/status              （null可）
@@ -319,6 +538,8 @@
       perRecordNotify,  // /k/v1/app/notifications/perRecord
       reminderNotify,   // /k/v1/app/notifications/reminder
       customize,  // /k/v1/app/customize           （null可）
+      settings, // /k/v1/app/settings（アプリ名・説明・アイコン等。null可）
+      appPlugins, // /k/v1/app/plugins（このアプリに追加されているプラグイン。null可）
       appAcl,   // /k/v1/app/acl
       recordAcl,    // /k/v1/record/acl
       fieldAcl,   // /k/v1/field/acl
@@ -394,16 +615,14 @@
       ? Object.entries(actionsResp.actions).map(([key, a], i) => {
         const dest = a?.destApp || a?.toApp || {};
 
-        // ここを「文字列で保存」に変更
+        // ★変更：表示用HTML（<br>結合）ではなくプレーン文字列の配列で保持する
+        //   （HTML化とエスケープは renderRelations 側で行う。エスケープ漏れ対策）
         const mappings = (a?.mappings || a?.mapping || [])
           .map(m => {
             const left = m?.srcField ?? (m?.srcType || ''); // srcFieldが無ければsrcType
             const right = m?.destField ?? '';
-            const L = left ? left : '—';
-            const R = right ? right : '—';
-            return `${L} → ${R}`;
-          })
-          .join('<br>'); // 複数は改行
+            return `${left || '—'} → ${right || '—'}`;
+          });
 
         const entities = Array.isArray(a?.entities)
           ? a.entities.map(e => ({ type: e?.type ?? null, code: e?.code ?? null }))
@@ -414,7 +633,9 @@
           name: a?.name ?? key,
           toAppId: dest?.app ?? null,
           toAppCode: dest?.code ?? null,
-          mappings,                 // ← 文字列で保存（例: "数値_0 → 数値_0<br>RECORD_URL → リンク_0"）
+          mappings,                 // ← プレーン文字列の配列（例: ["数値_0 → 数値_0", "RECORD_URL → リンク_0"]）
+          // ★追加：APIレスポンスに enabled があれば真偽値、無ければ null（不明）として保持
+          enabled: (typeof a?.enabled === 'boolean') ? a.enabled : null,
           entities,
           filterCond: a?.filterCond ?? '',
         };
@@ -424,6 +645,2297 @@
 
     return { lookups, relatedTables, actions };
   }
+
+
+  // ==========================================
+  // 2.4 JavaScript自動解析の共通基盤 (KTScan)
+  //  - Field Scannerタブを開かなくても依存関係にJS情報が入るようにする
+  //  - API取得回数を増やさないため、結果をLocalStorageにキャッシュする
+  // ==========================================
+  const KTScan = (() => {
+    const CACHE_PREFIX = 'ktScanCache.v1.';
+    // ★解析ロジックのバージョン。
+    //   解析内容（検出パターン・保存する項目）を変更したら必ず上げること。
+    //   これを署名に含めないと、Toolkit更新後も古い解析結果が使われ続ける。
+    const ANALYZER_VERSION = '9'; // 解析ロジックを変更したら上げる（キャッシュが自動的に無効になる）
+    const CACHE_TTL_MS = 6 * 60 * 60 * 1000; // 6時間（プレビュー編集を拾えないため長くしすぎない）
+
+    // Scannerタブが登録する実行関数（renderScannerから設定される）
+    let runner = null;
+    // 'idle' | 'running' | 'done' | 'cached' | 'skipped' | 'error'
+    let state = 'idle';
+    let lastError = null;
+    let scannedAt = null;
+    // 状態変化の通知先（Fields/Relationsの再描画などに使う）
+    const listeners = new Set();
+
+    const notify = () => { for (const fn of listeners) { try { fn(getStatus()); } catch (e) { console.error(e); } } };
+
+    const setState = (s, opt = {}) => {
+      state = s;
+      if ('error' in opt) lastError = opt.error;
+      if ('at' in opt) scannedAt = opt.at;
+      notify();
+    };
+
+    const getStatus = () => ({ state, lastError, scannedAt, available: !!runner });
+    const onChange = (fn) => { listeners.add(fn); return () => listeners.delete(fn); };
+
+    /** Scannerタブが自身のscan関数を登録する */
+    const register = (fn) => { runner = fn; notify(); };
+
+    /**
+     * 解析を実行する
+     * @param {object} opt.force trueならキャッシュを無視して再取得する
+     * @param {object} opt.silent trueならScannerタブのUI更新を最小限にする
+     */
+    const run = async (opt = {}) => {
+      if (!runner) return { ok: false, reason: 'scanner-not-ready' };
+      if (state === 'running') return { ok: false, reason: 'already-running' };
+      setState('running');
+      try {
+        const res = await runner(opt);
+        setState(res?.fromCache ? 'cached' : 'done', { at: res?.scannedAt || new Date().toISOString(), error: null });
+        return { ok: true, ...res };
+      } catch (e) {
+        console.error('[KTScan] JavaScript解析に失敗しました', e);
+        setState('error', { error: e?.message || String(e) });
+        return { ok: false, reason: 'error', error: e };
+      }
+    };
+
+    // ---- キャッシュ ----
+    // 署名：カスタマイズ設定のファイル構成（fileKey/URL）から作る。
+    //       内容が差し替われば fileKey が変わるため、変更検知に使える。
+    const buildSignature = (customize) => {
+      const pick = (bucket, kind, target) => (bucket?.[kind] || []).map(x =>
+        `${target}:${kind}:${x?.type || ''}:${x?.file?.fileKey || x?.url || x?.file?.name || ''}`);
+      const parts = [
+        ...pick(customize?.desktop, 'js', 'desktop'),
+        ...pick(customize?.desktop, 'css', 'desktop'),
+        ...pick(customize?.mobile, 'js', 'mobile'),
+        ...pick(customize?.mobile, 'css', 'mobile'),
+      ];
+      return parts.sort().join('|') || 'empty';
+    };
+
+    const cacheKey = (appId) => `${CACHE_PREFIX}${appId}`;
+
+    const loadCache = (appId, signature) => {
+      try {
+        const raw = localStorage.getItem(cacheKey(appId));
+        if (!raw) return null;
+        const c = JSON.parse(raw);
+        if (!c || c.signature !== signature) return null;                 // 構成が変わった
+        if (Date.now() - new Date(c.scannedAt).getTime() > CACHE_TTL_MS) return null; // 期限切れ
+        return c;
+      } catch (e) {
+        return null; // 壊れたキャッシュは無視する（例外で全体を止めない）
+      }
+    };
+
+    const saveCache = (appId, signature, payload) => {
+      try {
+        localStorage.setItem(cacheKey(appId), JSON.stringify({
+          signature, scannedAt: new Date().toISOString(), ...payload,
+        }));
+        return true;
+      } catch (e) {
+        // 容量超過などは致命的ではないため警告のみ
+        console.warn('[KTScan] 解析結果のキャッシュ保存に失敗しました', e);
+        return false;
+      }
+    };
+
+    const clearCache = (appId) => {
+      try { localStorage.removeItem(cacheKey(appId)); } catch (e) { }
+    };
+
+    // ---- 自動実行の設定（既定ON。ユーザーが切れるようにする）----
+    const AUTO_KEY = 'ktScanAuto.v1';
+    const isAutoEnabled = () => {
+      try { return localStorage.getItem(AUTO_KEY) !== '0'; } catch (e) { return true; }
+    };
+    const setAutoEnabled = (on) => {
+      try { localStorage.setItem(AUTO_KEY, on ? '1' : '0'); } catch (e) { }
+    };
+
+    /** ブラウザが空いたタイミングで自動実行する（初期描画をブロックしない） */
+    const scheduleAuto = (opt = {}) => {
+      if (!isAutoEnabled()) { setState('skipped'); return; }
+      const kick = () => { run({ silent: true, auto: true }); };
+      if (typeof window.requestIdleCallback === 'function') {
+        window.requestIdleCallback(kick, { timeout: 3000 });
+      } else {
+        setTimeout(kick, 500);
+      }
+    };
+
+    return {
+      register, run, scheduleAuto, onChange, getStatus,
+      buildSignature, loadCache, saveCache, clearCache,
+      isAutoEnabled, setAutoEnabled,
+      CACHE_TTL_MS, ANALYZER_VERSION,
+    };
+  })();
+
+  // ==========================================
+  // 2.6 他アプリからの被参照の走査 (KTIncoming)
+  //  - 「このアプリを参照しているアプリ」はアプリ設定APIでは直接取得できない。
+  //    同一ドメインの各アプリのフォーム設定を1つずつ確認する必要がある。
+  //  - API呼び出しがアプリ数に比例するため、必ずユーザーの明示操作で実行し、
+  //    結果はキャッシュする（自動実行はしない）。
+  // ==========================================
+  const KTIncoming = (() => {
+    const CACHE_PREFIX = 'ktIncoming.v1.';
+    const CACHE_TTL_MS = 24 * 60 * 60 * 1000; // 24時間
+    const CONCURRENCY = 5;                    // 同時実行数（サーバ負荷を抑える）
+    const MAX_APPS = 500;                     // 走査対象の上限（超過時は警告して打ち切る）
+
+    // ---- キャッシュ ----
+    const cacheKey = (appId) => `${CACHE_PREFIX}${appId}`;
+
+    function loadCache(appId) {
+      try {
+        const raw = localStorage.getItem(cacheKey(appId));
+        if (!raw) return null;
+        const c = JSON.parse(raw);
+        if (!c?.scannedAt) return null;
+        if (Date.now() - new Date(c.scannedAt).getTime() > CACHE_TTL_MS) return null;
+        return c;
+      } catch (e) {
+        return null; // 壊れたキャッシュは無視する
+      }
+    }
+
+    function saveCache(appId, data) {
+      try { localStorage.setItem(cacheKey(appId), JSON.stringify(data)); }
+      catch (e) { console.warn('[KTIncoming] 結果のキャッシュ保存に失敗しました', e); }
+    }
+
+    function clearCache(appId) {
+      try { localStorage.removeItem(cacheKey(appId)); } catch (e) { }
+    }
+
+    /** 指定した並列数でタスクを順に処理する（サーバへの同時接続を抑える） */
+    async function runPool(items, worker, concurrency, onEach) {
+      const results = [];
+      let index = 0;
+      let done = 0;
+      const runners = Array.from({ length: Math.min(concurrency, items.length) }, async () => {
+        while (index < items.length) {
+          const i = index++;
+          results[i] = await worker(items[i], i);
+          done++;
+          if (onEach) onEach(done, items.length);
+        }
+      });
+      await Promise.all(runners);
+      return results;
+    }
+
+    /**
+     * 1アプリのフォーム設定を調べ、このアプリを参照している箇所を抽出する
+     * @returns {{rows:Array, error:string|null}}
+     */
+    function analyzeApp(app, selfId, fieldsRes, actionsRes) {
+      const rows = [];
+      const self = String(selfId);
+      const props = fieldsRes?.properties || {};
+
+      const pushField = (f, parentCode) => {
+        // ルックアップ：このアプリを参照している
+        if (f?.lookup?.relatedApp?.app != null && String(f.lookup.relatedApp.app) === self) {
+          rows.push({
+            appId: String(app.appId), appName: app.name || '',
+            kind: 'ルックアップ',
+            sourceField: f.code, sourceLabel: f.label || f.code,
+            targetField: f.lookup.relatedKeyField || '',
+            note: `${(f.lookup.fieldMappings || []).length}項目を取得${parentCode ? `／テーブル ${parentCode} 内` : ''}`,
+          });
+        }
+        // 関連レコード一覧：このアプリのレコードを表示している
+        if (f?.type === 'REFERENCE_TABLE' && String(f?.referenceTable?.relatedApp?.app ?? '') === self) {
+          rows.push({
+            appId: String(app.appId), appName: app.name || '',
+            kind: '関連レコード',
+            sourceField: f.code, sourceLabel: f.label || f.code,
+            targetField: f.referenceTable?.condition?.relatedField || '',
+            note: f.referenceTable?.condition?.field
+              ? `${f.referenceTable.condition.field} で突合`
+              : '',
+          });
+        }
+      };
+
+      for (const f of Object.values(props)) {
+        if (f?.type === 'SUBTABLE') {
+          for (const sf of Object.values(f.fields || {})) pushField(sf, f.code);
+        } else {
+          pushField(f, null);
+        }
+      }
+
+      // アプリアクション：このアプリへレコードを作成している
+      for (const [key, a] of Object.entries(actionsRes?.actions || {})) {
+        if (String(a?.destApp?.app ?? '') !== self) continue;
+        const maps = (a?.mappings || []).filter(m => m?.destField);
+        rows.push({
+          appId: String(app.appId), appName: app.name || '',
+          kind: 'アプリアクション',
+          sourceField: a?.name || key, sourceLabel: a?.name || key,
+          targetField: maps.length === 1 ? maps[0].destField : (maps.length ? '複数' : ''),
+          note: maps.length ? `${maps.length}項目を転記` : '',
+          destFields: maps.map(m => m.destField),
+        });
+      }
+
+      return rows;
+    }
+
+    /**
+     * 同一ドメインのアプリを走査し、このアプリへの参照を集める
+     * @param {number|string} selfId 対象アプリのID
+     * @param {object} opt.includeActions アプリアクションも調べる（API呼び出しが約2倍になる）
+     * @param {function} opt.onProgress (done, total, phase) => void
+     * @param {boolean} opt.force キャッシュを無視して再走査する
+     */
+    async function run(selfId, opt = {}) {
+      const { includeActions = true, onProgress = null, force = false } = opt;
+      const self = String(selfId);
+
+      if (!force) {
+        const cached = loadCache(self);
+        if (cached) return { ...cached, fromCache: true };
+      }
+
+      if (onProgress) onProgress(0, 0, 'アプリ一覧を取得中');
+      const apps = (await KTApi.getAppList({ max: MAX_APPS }))
+        .filter(a => String(a.appId) !== self);
+
+      const truncated = apps.length >= MAX_APPS;
+      const rows = [];
+      const errors = [];   // 取得できなかったアプリ（権限不足など）
+
+      await runPool(apps, async (app) => {
+        try {
+          const fieldsRes = await KTApi.getFormFieldsOf(app.appId);
+          let actionsRes = null;
+          if (includeActions) {
+            // アクション設定はアプリ管理権限が必要なため、取れなくても続行する
+            try { actionsRes = await KTApi.getActionsOf(app.appId); } catch (e) { actionsRes = null; }
+          }
+          rows.push(...analyzeApp(app, self, fieldsRes, actionsRes));
+        } catch (e) {
+          errors.push({
+            appId: String(app.appId), appName: app.name || '',
+            reason: /403|permission|権限/i.test(String(e?.message || e)) ? '権限不足' : '取得失敗',
+          });
+        }
+      }, CONCURRENCY, (done, total) => {
+        if (onProgress) onProgress(done, total, '各アプリを確認中');
+      });
+
+      rows.sort((a, b) =>
+        String(a.appName).localeCompare(String(b.appName), 'ja') ||
+        String(a.kind).localeCompare(String(b.kind), 'ja') ||
+        String(a.sourceField).localeCompare(String(b.sourceField), 'ja')
+      );
+
+      const data = {
+        rows, errors,
+        stats: {
+          scannedApps: apps.length,
+          referencingApps: new Set(rows.map(r => r.appId)).size,
+          failedApps: errors.length,
+          includeActions,
+          truncated,
+        },
+        scannedAt: new Date().toISOString(),
+      };
+      saveCache(self, data);
+      return { ...data, fromCache: false };
+    }
+
+    return { run, loadCache, clearCache, CACHE_TTL_MS, MAX_APPS };
+  })();
+
+  // ==========================================
+  // 2.5 依存関係解析レイヤ (KTDeps)
+  //  - Raw Data(DATA) から Normalized / Dependency Data を生成する純関数群
+  //  - UI描画には依存しない（各タブから再利用する）
+  // ==========================================
+  const KTDeps = (() => {
+
+    // ---- 定数：関係種別（後からグラフ・影響分析で再利用する共通語彙）----
+    const REL = {
+      DISPLAYS: 'DISPLAYS',                 // 一覧・関連レコードがフィールドを表示
+      FILTERS_BY: 'FILTERS_BY',             // 絞り込み条件で使用
+      SORTS_BY: 'SORTS_BY',                 // ソート条件で使用
+      GROUPS_BY: 'GROUPS_BY',               // グラフの分類項目
+      AGGREGATES: 'AGGREGATES',             // グラフの集計項目
+      NOTIFY_TARGET: 'NOTIFY_TARGET',       // 通知先（フィールド指定）
+      REMINDER_TIMING: 'REMINDER_TIMING',   // リマインダー基準日時
+      ASSIGNS_BY: 'ASSIGNS_BY',             // プロセス管理の作業者（フィールド指定）
+      LOOKUP_KEY: 'LOOKUP_KEY',             // ルックアップの参照キー（相手アプリ側）
+      LOOKUP_COPY_TO: 'LOOKUP_COPY_TO',     // ルックアップのコピー先（自アプリ側）
+      LOOKUP_PICKER: 'LOOKUP_PICKER',       // ルックアップのピッカー表示（相手アプリ側）
+      REFERENCES: 'REFERENCES',             // 計算式が別フィールドを参照
+      HTML_REFERENCE: 'HTML_REFERENCE',     // カスタマイズビューのHTML内に記述（静的解析による推定）
+      ACTION_MAPS_FROM: 'ACTION_MAPS_FROM', // アプリアクションの転記元（自アプリ側）
+      ACL_CONDITION: 'ACL_CONDITION',       // レコードACLの条件で使用
+      ACL_TARGET: 'ACL_TARGET',             // フィールドACLの対象／エンティティ指定
+      APP_REFERENCE: 'APP_REFERENCE',       // 他アプリへの参照（Lookup/関連/アクション）
+      JS_READ: 'JS_READ',                   // JavaScriptがフィールド値を参照（静的解析による推定）
+      JS_WRITE: 'JS_WRITE',                 // JavaScriptがフィールド値を設定（静的解析による推定）
+      JS_CONTROL: 'JS_CONTROL',             // JavaScriptが表示/活性/エラー等を制御（静的解析による推定）
+      JS_REFERENCE: 'JS_REFERENCE',         // JavaScript内にコードが出現（用途は特定できず）
+      REFERENCED_BY: 'REFERENCED_BY',       // 他アプリからこのアプリのフィールドが参照されている
+    };
+
+    // ---- 定数：確度（推定結果を確定情報として表示しないための語彙）----
+    const CONF = {
+      CERTAIN: 'CERTAIN',           // 構造化された設定値から直接取得（確実）
+      LIKELY: 'LIKELY',             // 条件式・計算式のトークン一致（可能性が高い）
+      UNCERTAIN: 'UNCERTAIN',       // 文字列一致のみ（要確認）
+      NOT_ANALYZED: 'NOT_ANALYZED', // 解析対象外（外部URLのJS等）
+    };
+
+    // ================= Normalized Data =================
+
+    /**
+     * フォームフィールド定義（DATA.fields）をフラットな配列へ正規化する
+     * - SUBTABLE の子は parent にサブテーブルコードを持つ
+     * - lookup を持つフィールドは type:'LOOKUP'（rawType に元typeを保持）
+     */
+    function normalizeFields(fieldsResp) {
+      const list = [];
+      const walk = (props, parent = null) => {
+        for (const code of Object.keys(props || {})) {
+          const f = props[code];
+          if (!f) continue;
+          if (f.type === 'SUBTABLE') {
+            list.push({
+              code: f.code, label: f.label ?? f.code, type: 'SUBTABLE',
+              rawType: 'SUBTABLE', parent: null,
+              required: false, unique: false, raw: f,
+            });
+            walk(f.fields, f.code);
+            continue;
+          }
+          list.push({
+            code: f.code, label: f.label ?? f.code,
+            type: f.lookup ? 'LOOKUP' : (f.type ?? ''),
+            rawType: f.type ?? '',
+            parent,
+            required: !!f.required, unique: !!f.unique,
+            raw: f,
+          });
+        }
+      };
+      walk(fieldsResp);
+      return list;
+    }
+
+    /** code -> label の Map を作る（共通化。各タブはこれを再利用する） */
+    function buildCode2Label(normalizedFields) {
+      const m = new Map();
+      for (const f of normalizedFields || []) {
+        if (f.code) m.set(f.code, f.label || f.code);
+      }
+      return m;
+    }
+
+    /** Map / plain object のどちらでもラベルを引ける共通ヘルパ */
+    function labelOf(code2label, code) {
+      if (!code) return '';
+      if (code2label instanceof Map) return code2label.get(code) || code;
+      return (code2label && code2label[code]) || code;
+    }
+
+    // ================= テキスト解析（誤検出抑制） =================
+
+    /** "..." / '...' の文字列リテラルを同じ長さの空白でマスクする */
+    function maskStringLiterals(src) {
+      let out = '';
+      let i = 0;
+      const s = String(src || '');
+      while (i < s.length) {
+        const ch = s[i];
+        if (ch === '"' || ch === "'") {
+          const quote = ch;
+          out += ' ';
+          i++;
+          while (i < s.length) {
+            if (s[i] === '\\') { out += '  '; i += 2; continue; }
+            if (s[i] === quote) { out += ' '; i++; break; }
+            out += ' ';
+            i++;
+          }
+          continue;
+        }
+        out += ch;
+        i++;
+      }
+      return out;
+    }
+
+    // 語を構成しうる文字か（英数・_・全角文字全般）
+    const isWordChar = (ch) => !!ch && /[A-Za-z0-9_\u00C0-\uFFFF]/.test(ch);
+
+    /**
+     * テキストからフィールドコードの出現を抽出する
+     * 誤検出対策：
+     *  1) 文字列リテラル内はマスクして対象外にする
+     *  2) 長いコードを先にマッチさせ、確保した区間には短いコードを再マッチさせない
+     *     （「顧客コード」がある文で「コード」を誤検出しない）
+     *  3) 前後が語構成文字ならマッチ不採用（前方一致・部分一致の除外）
+     * トレードオフ：
+     *  - 「旧顧客コード」のような連続語の中の一致も除外するため、取りこぼしはあり得る
+     *  - そのため結果は confidence: LIKELY として扱う（確定情報にしない）
+     */
+    function extractFieldCodes(text, allCodes, { maskStrings = true } = {}) {
+      const raw = String(text || '');
+      if (!raw || !Array.isArray(allCodes) || !allCodes.length) return [];
+      const s = maskStrings ? maskStringLiterals(raw) : raw;
+
+      const codes = [...new Set(allCodes.filter(Boolean))].sort((a, b) => b.length - a.length);
+      const taken = new Array(s.length).fill(false);
+      const found = [];
+
+      for (const code of codes) {
+        let from = 0;
+        while (true) {
+          const idx = s.indexOf(code, from);
+          if (idx < 0) break;
+          from = idx + 1;
+          const end = idx + code.length;
+          let overlapped = false;
+          for (let k = idx; k < end; k++) { if (taken[k]) { overlapped = true; break; } }
+          if (overlapped) continue;
+          const before = idx > 0 ? s[idx - 1] : '';
+          const after = end < s.length ? s[end] : '';
+          if (isWordChar(before) || isWordChar(after)) continue;
+          for (let k = idx; k < end; k++) taken[k] = true;
+          found.push({ code, index: idx });
+        }
+      }
+      found.sort((a, b) => a.index - b.index);
+      return found;
+    }
+
+    /** kintoneクエリの sort 部（"code asc, code2 desc"）を分解して code を返す */
+    /**
+     * kintoneクエリの sort 部（"code asc, code2 desc"）を分解して code を返す
+     * ★変更：存在しないコードも返す（壊れた参照の検出に使うため）。
+     *   $id / $revision などのシステム項目はフィールドではないので除外する。
+     */
+    function parseSortCodes(sortStr) {
+      return String(sortStr || '')
+        .split(',')
+        .map(s => s.trim().split(/\s+/)[0])
+        .filter(c => c && !c.startsWith('$'));
+    }
+
+    // ================= Dependency Data =================
+
+    /**
+     * 依存関係データを生成する（同期・純関数）
+     * @returns {{nodes: Array, edges: Array, meta: object}}
+     * edge 形式:
+     * {
+     *   sourceType, sourceId, sourceName,   // 利用する側（VIEW / REPORT / NOTIFICATION / ...）
+     *   relationType,                        // REL.*
+     *   targetType, targetId, targetName,    // 利用される側（FIELD / APP / EXTERNAL_FIELD）
+     *   context: { settingType, settingName },
+     *   confidence,                          // CONF.*
+     * }
+     */
+    function buildDependencyData(DATA, normalizedFields) {
+      const fieldsN = normalizedFields || normalizeFields(DATA?.fields);
+      const code2label = buildCode2Label(fieldsN);
+      const allCodes = fieldsN.map(f => f.code).filter(Boolean);
+      const codeSet = new Set(allCodes);
+
+      const nodes = [];
+      const edges = [];
+      const nodeIds = new Set();
+
+      const addNode = (type, id, name, extra = {}) => {
+        const key = `${type}:${id}`;
+        if (!id || nodeIds.has(key)) return;
+        nodeIds.add(key);
+        nodes.push({ id: key, type, name: name ?? String(id), ...extra });
+      };
+      const addEdge = (e) => { edges.push(e); };
+
+      // フィールドノード
+      for (const f of fieldsN) {
+        addNode('FIELD', f.code, f.label, { fieldType: f.type, parent: f.parent });
+      }
+      // 自アプリノード
+      const selfName = DATA?.settings?.name ? ` ${DATA.settings.name}` : '';
+      addNode('APP', String(DATA?.appId ?? ''), `app ${DATA?.appId ?? '?'}${selfName}（このアプリ）`, { self: true });
+
+      // 条件式（filterCond等）からのエッジ生成ヘルパ
+      const edgesFromCond = (cond, src, relationType, settingType, settingName) => {
+        for (const hit of extractFieldCodes(cond, allCodes)) {
+          addEdge({
+            ...src, relationType,
+            targetType: 'FIELD', targetId: hit.code, targetName: labelOf(code2label, hit.code),
+            context: { settingType, settingName },
+            confidence: CONF.LIKELY,
+          });
+        }
+      };
+      // 設定値として明示されているフィールドコードのエッジを作る。
+      // フォーム定義に存在しないコードは missing:true を立て、壊れた参照として検出できるようにする。
+      // （条件式や計算式からの抽出はコード一覧を元に行うため、ここには該当しない）
+      const fieldEdge = (src, relationType, code, settingType, settingName, confidence = CONF.CERTAIN) => {
+        if (!code) return;
+        const missing = !codeSet.has(code);
+        addEdge({
+          ...src, relationType,
+          targetType: 'FIELD', targetId: code, targetName: labelOf(code2label, code),
+          context: { settingType, settingName, ...(missing ? { missing: true } : {}) },
+          confidence: missing ? CONF.UNCERTAIN : confidence,
+        });
+      };
+
+      // ---- 1) 一覧（views） ----
+      for (const v of Object.values(DATA?.views?.views || {})) {
+        const src = { sourceType: 'VIEW', sourceId: String(v.id ?? v.name ?? ''), sourceName: v.name ?? '' };
+        addNode('VIEW', src.sourceId, v.name ?? '');
+        (v.fields || []).forEach(c => fieldEdge(src, REL.DISPLAYS, c, 'VIEW_FIELDS', v.name ?? ''));
+        if (v.type === 'CALENDAR') {
+          fieldEdge(src, REL.DISPLAYS, v.date, 'VIEW_CALENDAR_DATE', v.name ?? '');
+          fieldEdge(src, REL.DISPLAYS, v.title, 'VIEW_CALENDAR_TITLE', v.name ?? '');
+        }
+        edgesFromCond(v.filterCond, src, REL.FILTERS_BY, 'VIEW_FILTER', v.name ?? '');
+        parseSortCodes(v.sort).forEach(c => fieldEdge(src, REL.SORTS_BY, c, 'VIEW_SORT', v.name ?? ''));
+
+        // ★カスタマイズビュー：HTML内に記述されたフィールドコードを検出する
+        //   HTMLに埋め込まれたJavaScriptでは 'フィールドコード' のように文字列で書かれるため、
+        //   文字列リテラルのマスクは行わない。そのぶん誤検出しやすいので確度は「要確認」とする。
+        if (v.type === 'CUSTOM' && v.html) {
+          const htmlHits = new Set(extractFieldCodes(v.html, allCodes, { maskStrings: false }).map(h => h.code));
+          for (const code of htmlHits) {
+            const hit = { code };
+            addEdge({
+              ...src, relationType: REL.HTML_REFERENCE,
+              targetType: 'FIELD', targetId: hit.code, targetName: labelOf(code2label, hit.code),
+              context: { settingType: 'VIEW_CUSTOM_HTML', settingName: v.name ?? '' },
+              confidence: CONF.UNCERTAIN,
+            });
+          }
+        }
+      }
+
+      // ---- 2) グラフ（reports） ----
+      for (const r of Object.values(DATA?.reports?.reports || {})) {
+        const src = { sourceType: 'REPORT', sourceId: String(r.id ?? r.name ?? ''), sourceName: r.name ?? '' };
+        addNode('REPORT', src.sourceId, r.name ?? '');
+        (r.groups || []).forEach(g => fieldEdge(src, REL.GROUPS_BY, g?.code, 'REPORT_GROUP', r.name ?? ''));
+        (r.aggregations || []).forEach(a => fieldEdge(src, REL.AGGREGATES, a?.code, 'REPORT_AGG', r.name ?? ''));
+        edgesFromCond(r.filterCond, src, REL.FILTERS_BY, 'REPORT_FILTER', r.name ?? '');
+        (r.sorts || []).forEach(s => {
+          const by = s?.by;
+          if (by && !['TOTAL', 'GROUP1', 'GROUP2', 'GROUP3'].includes(by)) {
+            fieldEdge(src, REL.SORTS_BY, by, 'REPORT_SORT', r.name ?? '');
+          }
+        });
+      }
+
+      // ---- 3) 通知 ----
+      // アプリ条件通知（perRecord）
+      (DATA?.perRecordNotify?.notifications || []).forEach((n, i) => {
+        const name = n?.title || `条件通知#${i + 1}`;
+        const src = { sourceType: 'NOTIFICATION', sourceId: `perRecord:${i}`, sourceName: name };
+        addNode('NOTIFICATION', src.sourceId, name, { kind: 'perRecord' });
+        edgesFromCond(n?.filterCond, src, REL.FILTERS_BY, 'NOTIFY_CONDITION', name);
+        (n?.targets || []).forEach(t => {
+          if (t?.entity?.type === 'FIELD') {
+            fieldEdge(src, REL.NOTIFY_TARGET, t.entity.code, 'NOTIFY_TARGET', name);
+          }
+        });
+      });
+      // リマインダー通知
+      (DATA?.reminderNotify?.notifications || []).forEach((n, i) => {
+        const name = n?.title || `リマインダー#${i + 1}`;
+        const src = { sourceType: 'NOTIFICATION', sourceId: `reminder:${i}`, sourceName: name };
+        addNode('NOTIFICATION', src.sourceId, name, { kind: 'reminder' });
+        fieldEdge(src, REL.REMINDER_TIMING, n?.timing?.code, 'REMINDER_TIMING', name);
+        edgesFromCond(n?.filterCond, src, REL.FILTERS_BY, 'REMINDER_CONDITION', name);
+        (n?.targets || []).forEach(t => {
+          if (t?.entity?.type === 'FIELD') {
+            fieldEdge(src, REL.NOTIFY_TARGET, t.entity.code, 'REMINDER_TARGET', name);
+          }
+        });
+      });
+
+      // ---- 4) プロセス管理（status） ----
+      if (DATA?.status?.enable) {
+        Object.values(DATA.status.states || {}).forEach(st => {
+          const name = st?.name || '';
+          const src = { sourceType: 'PROCESS_STATE', sourceId: name, sourceName: name };
+          addNode('PROCESS_STATE', name, name);
+          (st?.assignee?.entities || []).forEach(e => {
+            if (e?.entity?.type === 'FIELD') {
+              fieldEdge(src, REL.ASSIGNS_BY, e.entity.code, 'PROCESS_ASSIGNEE', name);
+            }
+          });
+        });
+        (DATA.status.actions || []).forEach((a, i) => {
+          const name = a?.name || `アクション#${i + 1}`;
+          const src = { sourceType: 'PROCESS_ACTION', sourceId: `${name}:${i}`, sourceName: name };
+          addNode('PROCESS_ACTION', src.sourceId, name);
+          edgesFromCond(a?.filterCond, src, REL.FILTERS_BY, 'PROCESS_CONDITION', name);
+        });
+      }
+
+      // ---- 5) アクセス権 ----
+      // レコードACL：条件式＋FIELDエンティティ
+      (DATA?.recordAcl?.rights || []).forEach((r, i) => {
+        const name = `レコードACL#${i + 1}`;
+        const src = { sourceType: 'ACL', sourceId: `record:${i}`, sourceName: name };
+        addNode('ACL', src.sourceId, name, { kind: 'record' });
+        edgesFromCond(r?.filterCond, src, REL.ACL_CONDITION, 'RECORD_ACL_CONDITION', name);
+        (r?.entities || []).forEach(e => {
+          if (e?.entity?.type === 'FIELD') {
+            fieldEdge(src, REL.ACL_TARGET, e.entity.code, 'RECORD_ACL_ENTITY', name);
+          }
+        });
+      });
+      // フィールドACL：対象フィールドそのもの
+      (DATA?.fieldAcl?.rights || []).forEach((r, i) => {
+        const name = `フィールドACL#${i + 1}`;
+        const src = { sourceType: 'ACL', sourceId: `field:${i}`, sourceName: name };
+        addNode('ACL', src.sourceId, name, { kind: 'field' });
+        fieldEdge(src, REL.ACL_TARGET, r?.code, 'FIELD_ACL_TARGET', name);
+        (r?.entities || []).forEach(e => {
+          if (e?.entity?.type === 'FIELD') {
+            fieldEdge(src, REL.ACL_TARGET, e.entity.code, 'FIELD_ACL_ENTITY', name);
+          }
+        });
+      });
+
+      // ---- 6) ルックアップ / 関連レコード / アプリアクション ----
+      // 既存の buildRelations と同じ生データを直接参照する（buildRelations の
+      // mappings が表示用文字列になっているため、ここでは raw から取り直す）
+      for (const f of fieldsN) {
+        const raw = f.raw || {};
+        // 6-1) Lookup
+        if (raw.lookup) {
+          const lu = raw.lookup;
+          const relApp = lu?.relatedApp?.app ?? null;
+          const src = { sourceType: 'FIELD', sourceId: f.code, sourceName: f.label };
+          if (relApp != null) {
+            addNode('APP', String(relApp), `app ${relApp}`, { self: false });
+            addEdge({
+              ...src, relationType: REL.APP_REFERENCE,
+              targetType: 'APP', targetId: String(relApp), targetName: `app ${relApp}`,
+              context: { settingType: 'LOOKUP', settingName: f.label },
+              confidence: CONF.CERTAIN,
+            });
+          }
+          const keyField = lu?.relatedKeyField ?? lu?.keyField ?? null;
+          if (keyField) {
+            addEdge({
+              ...src, relationType: REL.LOOKUP_KEY,
+              targetType: 'EXTERNAL_FIELD', targetId: `${relApp ?? '?'}:${keyField}`, targetName: keyField,
+              context: { settingType: 'LOOKUP_KEY', settingName: f.label, appId: relApp },
+              confidence: CONF.CERTAIN,
+            });
+          }
+          (lu?.fieldMappings || []).forEach(m => {
+            // kintoneレスポンス：field=自アプリ側(コピー先), relatedField=参照アプリ側(コピー元)
+            const to = m?.field?.code ?? m?.field ?? null;
+            const from = m?.relatedField?.code ?? m?.relatedField ?? null;
+            if (to) fieldEdge(src, REL.LOOKUP_COPY_TO, to, 'LOOKUP_MAPPING', f.label);
+            if (from) {
+              addEdge({
+                ...src, relationType: REL.LOOKUP_PICKER,
+                targetType: 'EXTERNAL_FIELD', targetId: `${relApp ?? '?'}:${from}`, targetName: from,
+                context: { settingType: 'LOOKUP_MAPPING_SRC', settingName: f.label, appId: relApp },
+                confidence: CONF.CERTAIN,
+              });
+            }
+          });
+        }
+        // 6-2) 関連レコード一覧
+        if (f.rawType === 'REFERENCE_TABLE' && f.raw?.referenceTable) {
+          const rt = f.raw.referenceTable;
+          const relApp = rt?.relatedApp?.app ?? null;
+          const src = { sourceType: 'FIELD', sourceId: f.code, sourceName: f.label };
+          if (relApp != null) {
+            addNode('APP', String(relApp), `app ${relApp}`, { self: false });
+            addEdge({
+              ...src, relationType: REL.APP_REFERENCE,
+              targetType: 'APP', targetId: String(relApp), targetName: `app ${relApp}`,
+              context: { settingType: 'REFERENCE_TABLE', settingName: f.label },
+              confidence: CONF.CERTAIN,
+            });
+          }
+          const condField = rt?.condition?.field;
+          if (condField) fieldEdge(src, REL.FILTERS_BY, condField, 'REFTABLE_CONDITION', f.label);
+        }
+      }
+      // 6-3) アプリアクション
+      for (const [key, a] of Object.entries(DATA?.actions?.actions || {})) {
+        const name = a?.name ?? key;
+        const src = { sourceType: 'ACTION', sourceId: String(a?.id ?? key), sourceName: name };
+        addNode('ACTION', src.sourceId, name);
+        const destApp = a?.destApp?.app ?? null;
+        if (destApp != null) {
+          addNode('APP', String(destApp), `app ${destApp}`, { self: false });
+          addEdge({
+            ...src, relationType: REL.APP_REFERENCE,
+            targetType: 'APP', targetId: String(destApp), targetName: `app ${destApp}`,
+            context: { settingType: 'ACTION', settingName: name },
+            confidence: CONF.CERTAIN,
+          });
+        }
+        (a?.mappings || []).forEach(m => {
+          if (m?.srcType === 'FIELD' && m?.srcField) {
+            fieldEdge(src, REL.ACTION_MAPS_FROM, m.srcField, 'ACTION_MAPPING', name);
+          }
+        });
+        edgesFromCond(a?.filterCond, src, REL.FILTERS_BY, 'ACTION_CONDITION', name);
+      }
+
+      // ---- 7) 計算式（CALC / 文字列1行の自動計算） ----
+      for (const f of fieldsN) {
+        const raw = f.raw || {};
+        const hasExpr =
+          (raw.type === 'CALC' && raw.expression) ||
+          (raw.type === 'SINGLE_LINE_TEXT' && raw.expression);
+        if (!hasExpr) continue;
+        const src = { sourceType: 'FIELD', sourceId: f.code, sourceName: f.label };
+        for (const hit of extractFieldCodes(raw.expression, allCodes)) {
+          if (hit.code === f.code) continue; // 自己参照は除外
+          addEdge({
+            ...src, relationType: REL.REFERENCES,
+            targetType: 'FIELD', targetId: hit.code, targetName: labelOf(code2label, hit.code),
+            context: { settingType: 'CALC', settingName: `${f.label} の計算式` },
+            confidence: CONF.LIKELY,
+          });
+        }
+      }
+
+      // ---- 8) JavaScript/CSSカスタマイズ ----
+      // 現時点ではファイル本文を取得しないため「解析対象外」として明示だけ行う。
+      // （Field Scanner 統合が次フェーズ。取得できないものを取得できるように見せない）
+      const jsFiles = [
+        ...((DATA?.customize?.desktop?.js || []).map(x => ({ ...x, target: 'desktop', kind: 'js' }))),
+        ...((DATA?.customize?.desktop?.css || []).map(x => ({ ...x, target: 'desktop', kind: 'css' }))),
+        ...((DATA?.customize?.mobile?.js || []).map(x => ({ ...x, target: 'mobile', kind: 'js' }))),
+        ...((DATA?.customize?.mobile?.css || []).map(x => ({ ...x, target: 'mobile', kind: 'css' }))),
+      ];
+      for (const jf of jsFiles) {
+        const name = jf?.file?.name || jf?.url || '(unknown)';
+        addNode('CUSTOMIZE', `${jf.target}:${jf.kind}:${name}`, name, {
+          target: jf.target, kind: jf.kind,
+          analyzed: false, note: 'NOT_ANALYZED（Field Scanner統合で対応予定）',
+        });
+      }
+
+      return {
+        nodes, edges,
+        meta: {
+          appId: DATA?.appId ?? null,
+          appName: DATA?.settings?.name ?? null,
+          // プラグイン設定の中身はAPIで取得できないため、件数だけ保持して注意喚起に使う
+          pluginCount: Array.isArray(DATA?.appPlugins?.plugins) ? DATA.appPlugins.plugins.length : null,
+          generatedAt: new Date().toISOString(),
+          fieldCount: fieldsN.length,
+          edgeCount: edges.length,
+          notAnalyzed: ['JavaScript/CSS本文', 'プラグイン設定内容', '他アプリからの被参照'],
+        },
+      };
+    }
+
+    // ================= Presentation 変換 =================
+
+    // relationType -> 表示ラベル（バッジ用）
+    const REL_LABEL = {
+      DISPLAYS: '表示', FILTERS_BY: '条件', SORTS_BY: 'ソート',
+      GROUPS_BY: '分類', AGGREGATES: '集計',
+      NOTIFY_TARGET: '通知先', REMINDER_TIMING: '基準日時',
+      ASSIGNS_BY: '作業者', LOOKUP_KEY: '参照キー', LOOKUP_COPY_TO: 'コピー先',
+      LOOKUP_PICKER: '取得元', REFERENCES: '計算参照',
+      ACTION_MAPS_FROM: '転記元', ACL_CONDITION: 'ACL条件', ACL_TARGET: 'ACL対象',
+      APP_REFERENCE: 'アプリ参照', HTML_REFERENCE: 'HTML記述',
+      JS_READ: '読取', JS_WRITE: '書込', JS_CONTROL: '制御', JS_REFERENCE: '参照',
+      REFERENCED_BY: '他アプリから参照',
+    };
+    const SRC_LABEL = {
+      VIEW: '一覧', REPORT: 'グラフ', NOTIFICATION: '通知',
+      PROCESS_STATE: 'プロセス', PROCESS_ACTION: 'プロセス',
+      ACL: 'ACL', ACTION: 'アクション', FIELD: 'フィールド', CUSTOMIZE: 'JS',
+    };
+
+    /**
+     * Fieldsタブ互換：フィールドコード -> 使用箇所文字列の配列
+     * 例: 「一覧「顧客一覧」表示」「通知「変更通知」条件(推定)」
+     * 既存の extractUsedFields の戻り値（string[]）と互換の形で返す
+     */
+    // 使用箇所サマリのカテゴリ（表示順つき）
+    //   同じカテゴリの利用が何件あっても1つのバッジにまとめる。
+    //   個別の設定名・確度・行番号は「変更影響」で確認する。
+    const USAGE_CATEGORY_ORDER = [
+      '一覧', 'グラフ', '通知', 'プロセス管理', 'アクセス権',
+      'ルックアップ', '関連レコード', 'アプリアクション', '計算式', 'JavaScript',
+    ];
+
+    /** エッジ1本から、使用箇所サマリのカテゴリ名を求める */
+    function usageCategoryOf(edge) {
+      if (edge.sourceType === 'FIELD') {
+        const st = edge.context?.settingType || '';
+        if (st === 'CALC') return '計算式';
+        if (st.startsWith('LOOKUP')) return 'ルックアップ';
+        if (st.startsWith('REFTABLE')) return '関連レコード';
+        return 'フィールド';
+      }
+      const map = {
+        VIEW: '一覧', REPORT: 'グラフ', NOTIFICATION: '通知',
+        PROCESS_STATE: 'プロセス管理', PROCESS_ACTION: 'プロセス管理',
+        ACL: 'アクセス権', ACTION: 'アプリアクション', CUSTOMIZE: 'JavaScript',
+      };
+      return map[edge.sourceType] || edge.sourceType;
+    }
+
+    /**
+     * Fieldsタブの「使用箇所」表示用データ
+     * どの種類の設定で使われているかだけを返す（例: ['一覧', '通知', 'JavaScript']）
+     * 件数・設定名・確度は含めない（詳細は impactOf を参照）
+     */
+    function usageMapFromEdges(edges) {
+      const map = {};
+      for (const e of edges || []) {
+        if (e.targetType !== 'FIELD') continue;
+        if (!map[e.targetId]) map[e.targetId] = new Set();
+        map[e.targetId].add(usageCategoryOf(e));
+      }
+      const rank = (c) => {
+        const i = USAGE_CATEGORY_ORDER.indexOf(c);
+        return i < 0 ? USAGE_CATEGORY_ORDER.length : i;
+      };
+      const out = {};
+      for (const [code, set] of Object.entries(map)) {
+        out[code] = [...set].sort((a, b) => rank(a) - rank(b) || a.localeCompare(b, 'ja'));
+      }
+      return out;
+    }
+
+    // ================= 壊れた参照の検出 =================
+
+    // 設定種別 → 表示名（どの設定のどの項目かが分かるようにする）
+    const BROKEN_ROLE_LABEL = {
+      VIEW_FIELDS: '一覧の表示フィールド',
+      VIEW_SORT: '一覧のソート条件',
+      VIEW_CALENDAR_DATE: 'カレンダー一覧の日付フィールド',
+      VIEW_CALENDAR_TITLE: 'カレンダー一覧のタイトルフィールド',
+      REPORT_GROUP: 'グラフの分類項目',
+      REPORT_AGG: 'グラフの集計項目',
+      REPORT_SORT: 'グラフのソート条件',
+      NOTIFY_TARGET: '条件通知の通知先（フィールド指定）',
+      REMINDER_TIMING: 'リマインダーの基準日時',
+      REMINDER_TARGET: 'リマインダーの通知先（フィールド指定）',
+      PROCESS_ASSIGNEE: 'プロセス管理の作業者（フィールド指定）',
+      RECORD_ACL_ENTITY: 'レコードのアクセス権（フィールド指定）',
+      FIELD_ACL_TARGET: 'フィールドのアクセス権の対象',
+      FIELD_ACL_ENTITY: 'フィールドのアクセス権（フィールド指定）',
+      LOOKUP_MAPPING: 'ルックアップのコピー先',
+      REFTABLE_CONDITION: '関連レコードの条件',
+      ACTION_MAPPING: 'アプリアクションの転記元',
+    };
+
+    /**
+     * フォーム定義に存在しないフィールドコードを参照している設定を洗い出す
+     *
+     * 対象は「設定値としてフィールドコードが明示されている箇所」のみ。
+     * 条件式・計算式・JavaScriptからの抽出はフィールド一覧を元に行っているため、
+     * そもそも存在しないコードは出てこない（＝ここには含まれない）。
+     * したがって検出結果は推測を含まず、確実に「壊れている」と言える。
+     *
+     * @returns {Array<{category, settingName, settingType, role, code}>}
+     */
+    function findBrokenRefs(deps) {
+      const rows = [];
+      const seen = new Set();
+
+      // ---- ① JavaScript内に残った、存在しないフィールドコード ----
+      //   kintoneはフィールドを削除すると一覧・通知などの設定からは自動的に取り除くが、
+      //   JavaScriptは対象外のため、古い参照がそのまま残る。実務上はここが主戦場になる。
+      for (const u of (deps?.meta?.unknownJsRefs || [])) {
+        const fileText = (u.files || [])
+          .map(f => `${f.name}${f.lines?.length ? `（${f.lines.map(n => `${n}行目`).join(', ')}）` : ''}`)
+          .join(' / ');
+        // 表記ゆれで一致していないだけの可能性がある場合は、確度を下げて候補を示す
+        const near = u.nearMatch && u.nearMatch !== u.code ? u.nearMatch : null;
+        rows.push({
+          source: 'JS',
+          category: 'JavaScript',
+          settingName: (u.files || []).map(f => f.name).join(' / ') || '(unknown)',
+          settingType: 'JS_UNKNOWN_FIELD',
+          role: `コード参照（${(u.patterns || []).slice(0, 3).join(', ')}）`,
+          code: u.code,
+          confidence: near ? CONF.UNCERTAIN : (u.confidence === 'HIGH' ? CONF.LIKELY : CONF.UNCERTAIN),
+          detail: near ? `${fileText} ／ 近い既存コード: ${near}` : fileText,
+          count: u.count || 0,
+          nearMatch: near,
+        });
+      }
+
+      // ---- ② 設定値として記録されたフィールドコードのうち、存在しないもの ----
+      for (const e of (deps?.edges || [])) {
+        if (!e.context?.missing) continue;
+        const st = e.context.settingType || '';
+        const category = IMPACT_CATEGORY[e.sourceType] || e.sourceType;
+        const settingName = (e.sourceType === 'FIELD')
+          ? (e.context.settingName || e.sourceName || e.sourceId)
+          : (e.sourceName || e.sourceId);
+        const key = `${category}|${settingName}|${st}|${e.targetId}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        rows.push({
+          source: 'SETTING',
+          category,
+          settingName,
+          settingType: st,
+          role: BROKEN_ROLE_LABEL[st] || st,
+          code: e.targetId,
+          confidence: CONF.CERTAIN,
+          detail: '',
+          count: 1,
+        });
+      }
+
+      // 設定由来（確実）を先に、JS由来（推定）を後に並べる
+      const srcRank = (s) => (s === 'SETTING' ? 0 : 1);
+      const confRank = (c) => (c === CONF.CERTAIN ? 0 : c === CONF.LIKELY ? 1 : 2);
+      rows.sort((a, b) =>
+        srcRank(a.source) - srcRank(b.source) ||
+        confRank(a.confidence) - confRank(b.confidence) ||
+        String(a.category).localeCompare(String(b.category), 'ja') ||
+        String(a.settingName).localeCompare(String(b.settingName), 'ja') ||
+        String(a.code).localeCompare(String(b.code), 'ja')
+      );
+      return rows;
+    }
+
+    // ================= 変更影響分析 =================
+
+    // 利用箇所のカテゴリ表示名（バッジの左側に出す種別）
+    const IMPACT_CATEGORY = {
+      VIEW: '一覧', REPORT: 'グラフ', NOTIFICATION: '通知',
+      PROCESS_STATE: 'プロセス管理', PROCESS_ACTION: 'プロセス管理',
+      ACL: 'アクセス権', ACTION: 'アプリアクション',
+      FIELD: 'フィールド', CUSTOMIZE: 'JavaScript',
+      EXTERNAL_APP: '他アプリ',
+    };
+
+    /**
+     * 指定フィールドを変更・削除した場合の影響候補を集計する
+     * @returns {{
+     *   direct: Array, indirect: Array, crossApp: Array, cautions: Array,
+     *   counts: {direct:number, indirect:number, crossApp:number}
+     * }}
+     * 注意：
+     *  - 完全な静的解析ではないため、各項目に confidence（確実／可能性が高い／要確認）を必ず付ける
+     *  - JavaScriptはField Scanner実行後のみ反映される（未実行なら cautions で明示する）
+     */
+    function impactOf(deps, fieldCode) {
+      const edges = (deps && deps.edges) || [];
+      const empty = { direct: [], indirect: [], crossApp: [], cautions: [], operations: [], counts: { direct: 0, indirect: 0, crossApp: 0 } };
+      // 依存が1件も無くても「削除して問題ないか」の判断材料は必要なので、
+      // fieldCode さえあれば通常の処理を続ける（operations は必ず生成される）
+      if (!fieldCode) return empty;
+
+      const relLabel = (r) => REL_LABEL[r] || r;
+      const lineNote = (ctx) => (Array.isArray(ctx?.lines) && ctx.lines.length)
+        ? `${ctx.lines.slice(0, 5).map(n => `${n}行目`).join(', ')}${ctx.lines.length > 5 ? ' ほか' : ''}`
+        : '';
+
+      // ---- 直接利用：このフィールドを参照している設定・コード ----
+      // 表示用タイトル：JSはファイル名、フィールド起点は設定名、それ以外は 種別「名前」
+      const titleOf = (e) => {
+        const category = IMPACT_CATEGORY[e.sourceType] || e.sourceType;
+        if (e.sourceType === 'CUSTOMIZE') return e.sourceName || e.sourceId;
+        if (e.sourceType === 'FIELD') return e.context?.settingName || e.sourceName || e.sourceId;
+        return `${category}「${e.sourceName || e.sourceId}」`;
+      };
+      // ラベルとコードが同じ場合は重複表示しない
+      const nameWithCode = (name, code) => (name && name !== code) ? `${name}（${code}）` : String(code);
+
+      const direct = [];
+      for (const e of edges) {
+        if (e.targetType !== 'FIELD' || e.targetId !== fieldCode) continue;
+        const category = IMPACT_CATEGORY[e.sourceType] || e.sourceType;
+        const title = titleOf(e);
+        // JSはイベント種別が分かれば「いつ動くか」も添える
+        const evsRaw = (e.sourceType === 'CUSTOMIZE') ? (deps?.meta?.jsEvents?.[e.sourceId] || []) : [];
+        // {name, direct} 形式／旧・文字列形式の両方に対応する
+        const evs = evsRaw.map(v => (typeof v === 'string')
+          ? { name: v, direct: true }
+          : { name: v?.name ?? '', direct: !!v?.direct });
+        const evNote = evs.length
+          ? `イベント: ${evs.slice(0, 3).map(v => v.direct ? v.name : `${v.name}?`).join(', ')}${evs.length > 3 ? ` ほか${evs.length - 3}件` : ''}`
+          : '';
+        const baseNote = lineNote(e.context);
+
+        direct.push({
+          category,
+          title,
+          role: relLabel(e.relationType),
+          confidence: e.confidence,
+          note: [baseNote, evNote].filter(Boolean).join(' / '),
+          sourceType: e.sourceType,
+          relationType: e.relationType,
+        });
+      }
+
+      // ---- 間接利用：このフィールドを計算式で参照しているフィールドの、さらに利用先（1段のみ）----
+      const calcDependents = edges
+        .filter(e => e.relationType === REL.REFERENCES && e.targetId === fieldCode && e.sourceType === 'FIELD')
+        .map(e => ({ code: e.sourceId, name: e.sourceName || e.sourceId }));
+
+      const indirect = [];
+      const seenIndirect = new Set();
+      for (const dep of calcDependents) {
+        // 計算フィールド自体（値が変わる可能性がある）
+        const key0 = `CALC:${dep.code}`;
+        if (!seenIndirect.has(key0)) {
+          seenIndirect.add(key0);
+          indirect.push({
+            category: '計算フィールド',
+            title: nameWithCode(dep.name, dep.code),
+            role: 'このフィールドを計算式で参照',
+            via: null,
+            confidence: CONF.LIKELY,
+          });
+        }
+        // その計算フィールドを利用している箇所
+        for (const e of edges) {
+          if (e.targetType !== 'FIELD' || e.targetId !== dep.code) continue;
+          if (e.sourceType === 'FIELD' && e.sourceId === fieldCode) continue; // 起点そのものは除く
+          const category = IMPACT_CATEGORY[e.sourceType] || e.sourceType;
+          const title = titleOf(e);
+          const key = `${category}|${title}|${e.relationType}`;
+          if (seenIndirect.has(key)) continue;
+          seenIndirect.add(key);
+          indirect.push({
+            category, title,
+            role: relLabel(e.relationType),
+            via: `${nameWithCode(dep.name, dep.code)}経由`,
+            confidence: CONF.LIKELY, // 間接のため確実とは扱わない
+          });
+        }
+      }
+
+      // ---- 他アプリ連携 ----
+      const crossApp = [];
+      const pushCross = (text, confidence, note) => {
+        if (crossApp.some(c => c.text === text)) return;
+        crossApp.push({ text, confidence, note: note || '' });
+      };
+      for (const e of edges) {
+        // このフィールド自身が他アプリを参照している（ルックアップ／関連レコード）
+        if (e.sourceType === 'FIELD' && e.sourceId === fieldCode) {
+          const st = e.context?.settingType;
+          if (e.relationType === REL.APP_REFERENCE) {
+            const verb = st === 'LOOKUP' ? 'から値を取得' : st === 'REFERENCE_TABLE' ? 'のレコードを表示' : 'を参照';
+            pushCross(`${appLabel(deps, e.targetId)}${verb}`, e.confidence);
+          } else if (e.relationType === REL.LOOKUP_KEY) {
+            pushCross(`${appLabel(deps, e.context?.appId)} の「${e.targetName}」を参照キーに使用`, e.confidence);
+          }
+        }
+        // 他アプリから参照されている（走査済みの場合のみ）
+        if (e.relationType === REL.REFERENCED_BY && e.targetId === fieldCode) {
+          const kind = e.context?.kind || '参照';
+          const via = e.context?.settingName ? `「${e.context.settingName}」` : '';
+          pushCross(`${e.sourceName} の${kind}${via}から参照されている`, e.confidence, e.context?.note || '');
+        }
+        // アプリアクションの転記元になっている
+        if (e.relationType === REL.ACTION_MAPS_FROM && e.targetId === fieldCode) {
+          const appEdge = edges.find(x =>
+            x.sourceType === 'ACTION' && x.sourceId === e.sourceId && x.relationType === REL.APP_REFERENCE);
+          const appTxt = appEdge ? appLabel(deps, appEdge.targetId) : '接続先アプリ';
+          pushCross(`アプリアクション「${e.sourceName}」で ${appTxt} へ値を転記`, e.confidence);
+        }
+      }
+
+      // ---- 変更時の確認事項（操作の種類ごとに整理する）----
+      // kintoneはフィールドコードを変更・削除すると、一覧・通知・条件式などの
+      // 「アプリ設定側」は自動的に追随する。追随しないのは JavaScript とプラグイン設定。
+      // この違いを踏まえて、操作ごとに見るべき箇所を分ける。
+      const has = (fn) => direct.some(fn);
+      const jsRows = direct.filter(d => d.sourceType === 'CUSTOMIZE');
+      const jsFiles = [...new Set(jsRows.map(d => d.title))];
+      const pluginCount = deps?.meta?.pluginCount;
+      const scannerDone = !!(deps?.meta?.scannerMergedAt);
+
+      // 選択肢を持つフィールドかどうか（「選択肢を変更する場合」を出すかの判定に使う）
+      const fieldNode = (deps?.nodes || []).find(n => n.id === `FIELD:${fieldCode}`);
+      const fieldType = fieldNode?.fieldType || '';
+      const hasOptions = ['DROP_DOWN', 'RADIO_BUTTON', 'CHECK_BOX', 'MULTI_SELECT'].includes(fieldType);
+
+      const ops = [];
+      // 主要な操作区分は常に表示する（区分が消えると「見落としたのか該当なしなのか」が分からないため）
+      const addOp = (key, label, notes, emptyNote) => {
+        const list = notes.filter(Boolean);
+        if (!list.length && emptyNote) list.push(emptyNote);
+        if (list.length) ops.push({ key, label, notes: list });
+      };
+
+      // 1) フィールドコードの変更
+      const codeChange = [];
+      if (jsFiles.length) {
+        codeChange.push(`JavaScript（${jsFiles.join(' / ')}）の修正が必要です。アプリ設定と違い、JavaScriptはコード変更に追随しません。`);
+      }
+      if (pluginCount) {
+        codeChange.push(`プラグイン設定（${pluginCount}個）でこのフィールドを指定している場合、手動での修正が必要です（設定内容はAPIで取得できないため未確認）。`);
+      }
+      if (!jsFiles.length && !pluginCount) {
+        codeChange.push('一覧・通知・条件式などのアプリ設定は、コード変更に自動的に追随します。手動修正が必要な参照は検出されていません。');
+      }
+      addOp('CODE_CHANGE', 'フィールドコードを変更する場合', codeChange,
+        'アプリ設定は自動的に追随します。手動修正が必要な参照は検出されていません。');
+
+      // 2) フィールド型の変更
+      const typeChange = [];
+      if (has(d => d.relationType === REL.REFERENCES)) {
+        typeChange.push('他フィールドの計算式から参照されています。型が変わると計算結果が変わる、またはエラーになる可能性があります。');
+      }
+      if (has(d => d.relationType === REL.FILTERS_BY || d.relationType === REL.SORTS_BY)) {
+        typeChange.push('条件式・ソート指定に使われています。型によって比較方法や指定できる演算子が変わります。');
+      }
+      if (has(d => d.relationType === REL.AGGREGATES || d.relationType === REL.GROUPS_BY)) {
+        typeChange.push('グラフの分類・集計に使われています。型によっては集計できなくなります。');
+      }
+      if (has(d => d.relationType === REL.LOOKUP_COPY_TO)) {
+        typeChange.push('ルックアップのコピー先です。参照元フィールドと型が一致しないと設定できません。');
+      }
+      addOp('TYPE_CHANGE', 'フィールド型を変更する場合', typeChange,
+        '型に依存する利用箇所（計算式・条件式・グラフ集計・ルックアップ）は検出されていません。');
+
+      // 3) 選択肢の変更（選択肢を持つフィールドのみ意味を持つ）
+      const optionChange = [];
+      if (has(d => d.relationType === REL.FILTERS_BY)) {
+        optionChange.push('条件式で選択肢の値を直接指定している場合、その条件が一致しなくなります（一覧・通知・アクセス権などの絞り込み条件を確認してください）。');
+      }
+      if (jsFiles.length) {
+        optionChange.push('JavaScriptで選択肢の値を比較・代入している可能性があります。');
+      }
+      // 選択肢を持つフィールドのときだけ出す（数値フィールド等では意味がないため）
+      if (hasOptions) {
+        addOp('OPTION_CHANGE', '選択肢を変更する場合', optionChange,
+          '選択肢の値を条件式やJavaScriptで直接指定している箇所は検出されていません。');
+      }
+
+      // 4) 削除
+      const del = [];
+      const totalUse = direct.length + indirect.length + crossApp.length;
+      if (totalUse) {
+        del.push(`直接 ${direct.length} 件／間接 ${indirect.length} 件／他アプリ ${crossApp.length} 件から参照されています。削除するとこれらの設定から取り除かれます。`);
+      } else {
+        del.push('解析範囲内では利用箇所が見つかりませんでした（解析対象外の設定で使われている可能性はあります）。');
+      }
+      if (has(d => d.relationType === REL.REFERENCES)) {
+        del.push('計算式から参照されているため、削除すると計算式がエラーになります。');
+      }
+      if (has(d => d.relationType === REL.ASSIGNS_BY)) {
+        del.push('プロセス管理の作業者に指定されています。削除するとワークフローが止まる可能性があります。');
+      }
+      if (has(d => d.relationType === REL.REMINDER_TIMING)) {
+        del.push('リマインダー通知の基準日時です。削除すると通知が動作しなくなります。');
+      }
+      if (has(d => d.relationType === REL.ACL_TARGET || d.relationType === REL.ACL_CONDITION)) {
+        del.push('アクセス権の設定に使われています。削除後に意図しない公開範囲にならないか確認してください。');
+      }
+      if (has(d => d.relationType === REL.LOOKUP_COPY_TO)) {
+        del.push('ルックアップのコピー先です。ルックアップ設定の見直しが必要です。');
+      }
+      if (crossApp.length) {
+        del.push('他アプリとの連携に関わります。接続先アプリ側の設定も確認してください。');
+      }
+      if (jsFiles.length) {
+        del.push(`JavaScript（${jsFiles.join(' / ')}）が参照しているため、削除すると実行時エラーになる可能性があります。`);
+      }
+      addOp('DELETE', 'フィールドを削除する場合', del);
+
+      // 5) 共通（解析範囲の制約）
+      const common = [];
+      if (!deps?.meta?.incomingScannedAt) {
+        common.push('他アプリからこのアプリへの参照は未走査です。Relationsタブの「他アプリからの参照」で走査すると反映されます。');
+      }
+      if (!scannerDone) {
+        common.push('JavaScriptカスタマイズは未解析です。Field Scannerで「Scan」を実行すると、JSからの参照が反映されます。');
+      }
+      if (pluginCount) {
+        common.push(`このアプリには${pluginCount}個のプラグインが追加されています。プラグイン設定の内容はAPIで取得できないため解析対象外です。各プラグインの設定画面で確認してください。`);
+      }
+      addOp('COMMON', '解析範囲について', common);
+
+      // 旧形式（フラットな注意書き）も残す：既存の呼び出し側との互換のため
+      const cautions = ops.flatMap(o => o.notes);
+
+      return {
+        direct, indirect, crossApp, cautions,
+        operations: ops,
+        counts: { direct: direct.length, indirect: indirect.length, crossApp: crossApp.length },
+      };
+    }
+
+    // ================= アプリ名の解決 =================
+
+    /**
+     * 他アプリからの被参照（KTIncoming の走査結果）を依存関係データへ取り込む
+     * - 相手アプリのフォーム設定から得た確実な情報のため confidence は CERTAIN
+     * - 再走査時は入れ替える（重複させない）
+     */
+    function applyIncomingRefs(deps, incoming) {
+      if (!deps || !Array.isArray(deps.edges)) return deps;
+      const rows = (incoming && incoming.rows) || [];
+
+      // 既存の被参照エッジを除去（再走査時の重複防止）
+      deps.edges = deps.edges.filter(e => e.sourceType !== 'EXTERNAL_APP');
+
+      const code2label = new Map(
+        (deps.nodes || [])
+          .filter(n => n.type === 'FIELD')
+          .map(n => [String(n.id).replace(/^FIELD:/, ''), n.name])
+      );
+
+      for (const r of rows) {
+        // このアプリ側のどのフィールドが参照されているか（複数転記の場合は展開する）
+        const targets = Array.isArray(r.destFields) && r.destFields.length
+          ? r.destFields
+          : (r.targetField ? [r.targetField] : []);
+        if (!targets.length) continue;
+
+        for (const code of targets) {
+          addNodeTo(deps, 'EXTERNAL_APP', r.appId, `app ${r.appId} ${r.appName || ''}`.trim());
+          deps.edges.push({
+            sourceType: 'EXTERNAL_APP', sourceId: r.appId,
+            sourceName: r.appName ? `app ${r.appId} ${r.appName}` : `app ${r.appId}`,
+            relationType: REL.REFERENCED_BY,
+            targetType: 'FIELD', targetId: code, targetName: code2label.get(code) || code,
+            context: {
+              settingType: `INCOMING_${r.kind}`, settingName: r.sourceLabel || r.sourceField,
+              kind: r.kind, note: r.note || '',
+            },
+            confidence: CONF.CERTAIN,
+          });
+        }
+      }
+
+      deps.meta = deps.meta || {};
+      deps.meta.incomingScannedAt = incoming?.scannedAt || null;
+      deps.meta.incomingStats = incoming?.stats || null;
+      return deps;
+    }
+
+    /**
+     * 参照先アプリの名前を依存関係データへ反映する
+     * - 解決できたものだけ meta.appNames に入れる（未解決は「取得不可」として扱う）
+     */
+    function applyAppNames(deps, nameMap) {
+      if (!deps || !nameMap) return deps;
+      deps.meta = deps.meta || {};
+      deps.meta.appNames = deps.meta.appNames || {};
+      for (const [id, name] of nameMap) deps.meta.appNames[String(id)] = name;
+
+      // ノード名も更新しておく（グラフ表示などで再利用するため）
+      for (const n of deps.nodes || []) {
+        if (n.type !== 'APP') continue;
+        const id = String(n.id).replace(/^APP:/, '');
+        const nm = deps.meta.appNames[id];
+        if (nm) n.name = `app ${id} ${nm}`;
+      }
+      return deps;
+    }
+
+    /**
+     * アプリIDの表示文字列を作る
+     * 解決済み: 「app 100 顧客管理」／未解決: 「app 100（名称取得不可）」
+     */
+    function appLabel(deps, appId, { withNote = true } = {}) {
+      const id = String(appId ?? '');
+      if (!id || id === 'UNKNOWN') return '不明';
+      const nm = deps?.meta?.appNames?.[id];
+      if (nm) return `app ${id} ${nm}`;
+      return withNote ? `app ${id}（名称取得不可）` : `app ${id}`;
+    }
+
+    // ================= アプリ間依存（JS内のアプリID参照） =================
+
+    /**
+     * JavaScript本文から「他アプリのアプリID参照」を抽出する
+     * 検出対象:
+     *   app: 123 / app: '123' / appId: 123          → 数値リテラル（確度: 中）
+     *   app: SOME_APP_ID / app: CONFIG.appId        → 変数参照（値は不明。確度: 低）
+     *   kintone.api.url('/k/v1/records.json') 付近の app 指定
+     *   URL内のアプリID  /k/123/ , /k/123/show
+     * 注意:
+     *   - 正規表現ベースの推定であり、実行時にしか決まらない値は取得できない
+     *   - 自アプリID・kintone.app.getId() 由来は除外できないため呼び出し側で除去する
+     * @returns {Array<{appId:string|null, raw:string, line:number, kind:string, confidence:string}>}
+     */
+    function extractAppIdRefs(text, lineIndexFn) {
+      const s = String(text || '');
+      if (!s) return [];
+      const out = [];
+      const push = (appId, raw, index, kind, confidence) => {
+        out.push({
+          appId: appId ?? null,
+          raw: String(raw || '').trim().slice(0, 80),
+          line: lineIndexFn ? lineIndexFn(index) : null,
+          kind, confidence,
+        });
+      };
+
+      // 1) app: 123 / app: '123' / appId: 123 / "app": 123
+      const rxNum = /['"]?\b(?:app|appId|appID|app_id)['"]?\s*[:=]\s*['"]?(\d{1,7})['"]?/g;
+      let m;
+      while ((m = rxNum.exec(s)) !== null) push(m[1], m[0], m.index, 'LITERAL', 'MEDIUM');
+
+      // 2) app: 変数・定数・プロパティ参照（値は静的には決まらない）
+      const rxVar = /['"]?\b(?:app|appId|appID|app_id)['"]?\s*[:=]\s*([A-Za-z_$][\w$]*(?:\.[\w$]+)*)/g;
+      while ((m = rxVar.exec(s)) !== null) {
+        const ident = m[1];
+        // 自アプリ取得は他アプリ参照ではないので除外
+        if (/^(kintone|event|this|record)\b/.test(ident)) continue;
+        push(null, m[0], m.index, 'VARIABLE', 'LOW');
+      }
+
+      // 3) URL内のアプリID  /k/123/ （/k/v1/ 等のAPIパスは除外）
+      const rxUrl = /\/k\/(\d{1,7})(?=[/'"`?\s])/g;
+      while ((m = rxUrl.exec(s)) !== null) push(m[1], m[0], m.index, 'URL', 'MEDIUM');
+
+      return out;
+    }
+
+    /**
+     * 依存関係データから「アプリ間依存一覧（自アプリ → 他アプリ）」を作る
+     * dataSource で情報の取得元・信頼性を区別する:
+     *   SETTING : アプリ設定APIから確実に取得（ルックアップ/関連レコード/アクション）
+     *   JS_STATIC: JavaScriptの静的解析による推定（値が変数の場合は特定不可）
+     * なお「他アプリから自アプリへの参照」はアプリ設定APIでは取得できないため、
+     * この一覧には含めない（呼び出し側で注記を表示すること）
+     */
+    function buildAppLinks(deps, selfAppId) {
+      const rows = [];
+      const edges = (deps && deps.edges) || [];
+      const self = String(selfAppId ?? '');
+
+      // 対象アプリごとの補足情報（参照キー・マッピング数）を集める
+      const byField = new Map(); // sourceId(FIELD) -> { keys:[], copies:0, picks:[] }
+      for (const e of edges) {
+        if (e.sourceType !== 'FIELD') continue;
+        if (!['LOOKUP_KEY', 'LOOKUP_COPY_TO', 'LOOKUP_PICKER'].includes(e.relationType)) continue;
+        let a = byField.get(e.sourceId);
+        if (!a) { a = { keys: [], copies: 0, picks: [] }; byField.set(e.sourceId, a); }
+        if (e.relationType === 'LOOKUP_KEY') a.keys.push(e.targetName);
+        if (e.relationType === 'LOOKUP_COPY_TO') a.copies++;
+        if (e.relationType === 'LOOKUP_PICKER') a.picks.push(e.targetName);
+      }
+
+      for (const e of edges) {
+        if (e.relationType !== REL.APP_REFERENCE) continue;
+        if (e.targetType !== 'APP') continue;
+        if (String(e.targetId) === self) continue; // 自アプリは除外
+
+        const st = e.context?.settingType || '';
+        let kind = st, note = '', destField = '';
+
+        if (st === 'LOOKUP') {
+          kind = 'ルックアップ';
+          const a = byField.get(e.sourceId) || { keys: [], copies: 0 };
+          destField = a.keys[0] || '';
+          note = a.copies ? `${a.copies}項目を取得` : '';
+        } else if (st === 'REFERENCE_TABLE') {
+          kind = '関連レコード';
+          note = '関連レコード一覧で表示';
+        } else if (st === 'ACTION') {
+          kind = 'アプリアクション';
+          const maps = edges.filter(x => x.sourceId === e.sourceId && x.relationType === REL.ACTION_MAPS_FROM).length;
+          note = maps ? `${maps}項目を転記` : '';
+          destField = maps > 1 ? '複数' : '';
+        } else if (st === 'JS_APP_ID') {
+          kind = 'JavaScript';
+          destField = '不明';
+          note = e.context?.note || 'JS内でアプリIDを参照';
+        }
+
+        rows.push({
+          kind,
+          selfSide: e.sourceName || e.sourceId,
+          destAppId: e.targetId === 'UNKNOWN' ? '不明' : String(e.targetId),
+          // 表示用のアプリ名（未解決なら「名称取得不可」を明示）
+          destAppLabel: appLabel(deps, e.targetId),
+          destField: destField || '—',
+          note: note || '—',
+          confidence: e.confidence,
+          dataSource: st === 'JS_APP_ID' ? 'JS_STATIC' : 'SETTING',
+          lines: e.context?.lines || null,
+        });
+      }
+
+      // 種別 → 接続先アプリID の順で安定ソート
+      const order = { 'ルックアップ': 1, '関連レコード': 2, 'アプリアクション': 3, 'JavaScript': 4 };
+      rows.sort((a, b) =>
+        (order[a.kind] || 9) - (order[b.kind] || 9) ||
+        String(a.destAppId).localeCompare(String(b.destAppId), 'ja', { numeric: true }) ||
+        String(a.selfSide).localeCompare(String(b.selfSide), 'ja')
+      );
+      return rows;
+    }
+
+    /**
+     * Field Scanner の解析結果を依存関係データへ合流させる（再スキャン時は入替え）
+     * - 正規表現ベースの静的解析のため、confidence は最大でも LIKELY（確定情報にしない）
+     * - スキャン対象（desktop/mobile, JS/CSS）の範囲内のみが反映される点に注意
+     */
+    // 既存の依存データへノードを後から安全に追加する（重複はスキップ）
+    function addNodeTo(deps, type, id, name, extra = {}) {
+      if (!deps || !Array.isArray(deps.nodes) || !id) return;
+      const key = `${type}:${id}`;
+      if (deps.nodes.some(n => n.id === key)) return;
+      deps.nodes.push({ id: key, type, name: name ?? String(id), ...extra });
+    }
+
+    function mergeScannerEdges(deps, scan) {
+      if (!deps || !Array.isArray(deps.edges) || !scan) return deps;
+
+      // 既存のScanner由来エッジ（フィールド利用・アプリID参照とも）を除去（再スキャン時の重複防止）
+      deps.edges = deps.edges.filter(e => e.sourceType !== 'CUSTOMIZE');
+
+      const ACCESS2REL = {
+        READ: REL.JS_READ, WRITE: REL.JS_WRITE,
+        ELEMENT: REL.JS_CONTROL, SHOW_HIDE: REL.JS_CONTROL, CONTROL: REL.JS_CONTROL,
+        FIELDS_PARAM: REL.JS_READ, QUERY: REL.JS_READ,
+        // 関数へ渡す・配列に列挙は、読み書きのどちらかを断定できないため「参照」として扱う
+        ARGUMENT: REL.JS_REFERENCE, LIST: REL.JS_REFERENCE,
+        OTHER: REL.JS_REFERENCE,
+      };
+      const CONF2 = { HIGH: CONF.LIKELY, MEDIUM: CONF.LIKELY, LOW: CONF.UNCERTAIN };
+
+      // (対象ファイル, フィールド, 関係種別) 単位に集約する
+      const agg = new Map();
+      for (const r of scan.results || []) {
+        for (const m of r.matches || []) {
+          const rel = ACCESS2REL[m.access] || REL.JS_REFERENCE;
+          const srcId = `${m.target}:${m.kind}:${m.file}`; // CUSTOMIZEノードのIDと揃える
+          const key = `${srcId}|${r.code}|${rel}`;
+          let a = agg.get(key);
+          if (!a) {
+            a = {
+              srcId, file: m.file, target: m.target, code: r.code, label: r.label || r.code,
+              rel, conf: CONF2[m.confidence] || CONF.UNCERTAIN, lines: [], count: 0,
+            };
+            agg.set(key, a);
+          }
+          a.count++;
+          if (a.lines.length < 10) a.lines.push(m.line);
+          // 集約内で最も高い確度を採用する
+          if ((CONF2[m.confidence] || CONF.UNCERTAIN) === CONF.LIKELY) a.conf = CONF.LIKELY;
+        }
+      }
+      // 依存データにノードが無いコード（グループフィールドなど、form/fields に現れないもの）を補う
+      const knownNodeIds = new Set((deps.nodes || []).map(n => n.id));
+      const typeByCode = new Map((scan.results || []).map(r => [r.code, r.type]));
+
+      for (const a of agg.values()) {
+        if (!knownNodeIds.has(`FIELD:${a.code}`)) {
+          knownNodeIds.add(`FIELD:${a.code}`);
+          addNodeTo(deps, 'FIELD', a.code, a.label, {
+            fieldType: typeByCode.get(a.code) || 'UNKNOWN',
+            fromScanner: true, // フォーム定義には無く、JS解析でのみ現れたコード
+          });
+        }
+        deps.edges.push({
+          sourceType: 'CUSTOMIZE', sourceId: a.srcId, sourceName: a.file,
+          relationType: a.rel,
+          targetType: 'FIELD', targetId: a.code, targetName: a.label,
+          context: {
+            settingType: 'JS', settingName: a.file, target: a.target,
+            lines: a.lines, matchCount: a.count,
+          },
+          confidence: a.conf,
+        });
+      }
+
+      // ★アプリID参照（JS静的解析）をアプリ間依存エッジとして追加
+      //   値が変数の場合はアプリIDを特定できないため targetId は 'UNKNOWN' とする
+      const appAgg = new Map();
+      for (const ref of scan.appRefs || []) {
+        const target = ref.appId || 'UNKNOWN';
+        const key = `${ref.file}|${target}`;
+        let a = appAgg.get(key);
+        if (!a) {
+          a = { file: ref.file, target: ref.target, appId: target, lines: [], kinds: new Set(), count: 0 };
+          appAgg.set(key, a);
+        }
+        a.count++;
+        a.kinds.add(ref.kind);
+        if (a.lines.length < 10) a.lines.push(ref.line);
+      }
+      for (const a of appAgg.values()) {
+        const isUnknown = a.appId === 'UNKNOWN';
+        if (!isUnknown) addNodeTo(deps, 'APP', a.appId, `app ${a.appId}`, { self: false, viaJs: true });
+        deps.edges.push({
+          sourceType: 'CUSTOMIZE', sourceId: `${a.target}:js:${a.file}`, sourceName: a.file,
+          relationType: REL.APP_REFERENCE,
+          targetType: 'APP', targetId: a.appId, targetName: isUnknown ? '不明（変数指定）' : `app ${a.appId}`,
+          context: {
+            settingType: 'JS_APP_ID', settingName: a.file, target: a.target,
+            lines: a.lines, matchCount: a.count,
+            note: isUnknown
+              ? '変数でアプリIDを指定（静的解析では特定不可）'
+              : `JS内にアプリID記述（${[...a.kinds].join('/')}）`,
+          },
+          // リテラルでも「実際に呼ばれるか」までは判定できないため UNCERTAIN 止まり
+          confidence: CONF.UNCERTAIN,
+        });
+      }
+
+      // ★JavaScriptのイベント種別を保持する（このファイルがいつ動くかの手がかり）
+      deps.meta = deps.meta || {};
+      deps.meta.jsEvents = { ...(scan.fileEvents || {}) };
+      // ★JS内に残った「存在しないフィールドコード」も保持する（整合性チェックで使う）
+      deps.meta.unknownJsRefs = Array.isArray(scan.unknownRefs) ? scan.unknownRefs : [];
+
+      // CUSTOMIZEノードを解析済みに更新し、meta の未解析一覧から本文解析を外す
+      for (const n of deps.nodes || []) {
+        if (n.type !== 'CUSTOMIZE') continue;
+        n.analyzed = true;
+        n.note = 'Field Scanner解析済み';
+        const evs = deps.meta.jsEvents[String(n.id).replace(/^CUSTOMIZE:/, '')];
+        if (evs && evs.length) n.events = evs;
+      }
+      if (deps.meta) {
+        deps.meta.notAnalyzed = (deps.meta.notAnalyzed || []).filter(x => x !== 'JavaScript/CSS本文');
+        deps.meta.scannerMergedAt = new Date().toISOString();
+        deps.meta.edgeCount = deps.edges.length;
+      }
+      return deps;
+    }
+
+    // ================= 部分依存グラフ =================
+
+    // グラフの表示カテゴリ（絞り込み用）。edge の sourceType / relationType から判定する
+    // color は図のノード色と対応させる（チェックボックスの色見本に使う）
+    const GRAPH_SCOPES = {
+      CALC: { label: '計算式', color: '#2563eb', colorDark: '#60a5fa', match: (e) => e.relationType === REL.REFERENCES },
+      VIEW_REPORT: { label: '一覧・グラフ', color: '#16a34a', colorDark: '#4ade80', match: (e) => e.sourceType === 'VIEW' || e.sourceType === 'REPORT' },
+      NOTIFICATION: { label: '通知', color: '#f59e0b', colorDark: '#fbbf24', match: (e) => e.sourceType === 'NOTIFICATION' },
+      PROCESS: { label: 'プロセス管理', color: '#f59e0b', colorDark: '#fbbf24', match: (e) => e.sourceType === 'PROCESS_STATE' || e.sourceType === 'PROCESS_ACTION' },
+      JS: { label: 'JavaScript', color: '#ec4899', colorDark: '#f472b6', match: (e) => e.sourceType === 'CUSTOMIZE' },
+      ACL: { label: 'アクセス権', color: '#a855f7', colorDark: '#c084fc', match: (e) => e.sourceType === 'ACL' },
+      APP_LINK: {
+        label: 'アプリ間連携',
+        color: '#06b6d4', colorDark: '#22d3ee',
+        // ★修正：ルックアップのコピー先・参照キー・取得元、アプリアクションの転記元が
+        //   どのカテゴリにも該当せず、グラフから抜け落ちていた
+        match: (e) => e.targetType === 'APP' || e.targetType === 'EXTERNAL_FIELD'
+          || e.sourceType === 'ACTION'
+          || [REL.LOOKUP_KEY, REL.LOOKUP_COPY_TO, REL.LOOKUP_PICKER, REL.ACTION_MAPS_FROM].includes(e.relationType)
+          || String(e.context?.settingType || '').startsWith('LOOKUP')
+          || String(e.context?.settingType || '').startsWith('REFTABLE')
+          || e.context?.settingType === 'REFERENCE_TABLE'
+          || e.context?.settingType === 'ACTION',
+      },
+    };
+    const GRAPH_SCOPE_KEYS = Object.keys(GRAPH_SCOPES);
+
+    /**
+     * 表示対象の部分グラフを組み立てる
+     * @param {object} opt.focusId 起点ノードID（例 'FIELD:顧客コード'）。未指定なら絞り込み結果全体
+     * @param {string[]} opt.scopes 表示するカテゴリ（GRAPH_SCOPESのキー）。空なら全カテゴリ
+     * @param {number} opt.depth 起点からの距離（1=直接依存のみ、2=間接依存まで）
+     * @param {boolean} opt.fieldsOnly true ならフィールド同士の関係のみ
+     * @param {number} opt.maxNodes ノード数の上限（超過時は truncated=true を返す）
+     * @returns {{nodes:Array, edges:Array, truncated:boolean, totalNodes:number, totalEdges:number}}
+     */
+    function buildSubgraph(deps, opt = {}) {
+      const {
+        focusId = null, scopes = [], depth = 1,
+        fieldsOnly = false, maxNodes = 60,
+        foldExternalFields = true,
+      } = opt;
+
+      const allEdges = (deps && deps.edges) || [];
+      const nodeById = new Map(((deps && deps.nodes) || []).map(n => [n.id, n]));
+
+      // ---- 1) カテゴリで絞り込む ----
+      const activeScopes = (scopes && scopes.length) ? scopes : GRAPH_SCOPE_KEYS;
+      let edges = allEdges.filter(e =>
+        activeScopes.some(k => GRAPH_SCOPES[k] && GRAPH_SCOPES[k].match(e)));
+
+      if (fieldsOnly) {
+        edges = edges.filter(e => e.sourceType === 'FIELD' && e.targetType === 'FIELD');
+      }
+
+      // 外部フィールド（相手アプリ側のフィールド）を接続先アプリノードに畳む。
+      // 1つのルックアップで相手フィールドが何個も生えると図が急激に読みにくくなるため。
+      if (foldExternalFields) {
+        edges = edges.map(e => {
+          if (e.targetType !== 'EXTERNAL_FIELD') return e;
+          const appId = String(e.context?.appId ?? String(e.targetId).split(':')[0] ?? '');
+          if (!appId) return e;
+          return {
+            ...e,
+            targetType: 'APP', targetId: appId,
+            // 解決済みならアプリ名を含めた表示にする
+            targetName: appLabel(deps, appId, { withNote: false }),
+            context: { ...(e.context || {}), foldedFrom: e.targetName },
+          };
+        });
+      }
+
+      // エッジ→ノードIDの組（グラフ探索用）
+      const idOf = (type, id) => `${type}:${id}`;
+      const pairs = edges.map(e => ({
+        e,
+        s: idOf(e.sourceType, e.sourceId),
+        t: idOf(e.targetType, e.targetId),
+      }));
+
+      const totalEdges = pairs.length;
+      const allIds = new Set();
+      for (const p of pairs) { allIds.add(p.s); allIds.add(p.t); }
+      const totalNodes = allIds.size;
+
+      // ---- 2) 起点があれば、そこから depth ホップ以内に限定する ----
+      let keepIds;
+      if (focusId) {
+        // 無向として探索する（「使っている／使われている」の両方向を見たいため）
+        const adj = new Map();
+        const link = (a, b) => {
+          if (!adj.has(a)) adj.set(a, new Set());
+          adj.get(a).add(b);
+        };
+        for (const p of pairs) { link(p.s, p.t); link(p.t, p.s); }
+
+        keepIds = new Set([focusId]);
+        let frontier = [focusId];
+        for (let d = 0; d < Math.max(1, depth); d++) {
+          const next = [];
+          for (const id of frontier) {
+            for (const nb of (adj.get(id) || [])) {
+              if (keepIds.has(nb)) continue;
+              keepIds.add(nb);
+              next.push(nb);
+            }
+          }
+          frontier = next;
+          if (!frontier.length) break;
+        }
+      } else {
+        keepIds = allIds;
+      }
+
+      let selected = pairs.filter(p => keepIds.has(p.s) && keepIds.has(p.t));
+
+      // ---- 3) ノード数の上限を適用する ----
+      // 起点に近いノードを優先して残す（起点が無い場合は登場順）
+      let truncated = false;
+      const ordered = [];
+      const seen = new Set();
+      const pushId = (id) => { if (!seen.has(id)) { seen.add(id); ordered.push(id); } };
+      if (focusId) pushId(focusId);
+      for (const p of selected) { pushId(p.s); pushId(p.t); }
+
+      let finalIds = new Set(ordered);
+      if (ordered.length > maxNodes) {
+        truncated = true;
+        finalIds = new Set(ordered.slice(0, maxNodes));
+        selected = selected.filter(p => finalIds.has(p.s) && finalIds.has(p.t));
+      }
+
+      const nodes = [...finalIds].map(id => nodeById.get(id) || {
+        id,
+        type: id.split(':')[0],
+        name: id.slice(id.indexOf(':') + 1),
+      });
+
+      return {
+        nodes,
+        edges: selected.map(p => p.e),
+        truncated,
+        totalNodes,
+        totalEdges,
+        shownNodes: nodes.length,
+        shownEdges: selected.length,
+      };
+    }
+
+    // Mermaid のノード形状（種別が一目で分かるようにする）
+    const MERMAID_SHAPE = {
+      FIELD: (id, label) => `${id}["${label}"]`,
+      VIEW: (id, label) => `${id}[/"${label}"/]`,
+      REPORT: (id, label) => `${id}[/"${label}"/]`,
+      NOTIFICATION: (id, label) => `${id}>"${label}"]`,
+      PROCESS_STATE: (id, label) => `${id}(["${label}"])`,
+      PROCESS_ACTION: (id, label) => `${id}(["${label}"])`,
+      ACL: (id, label) => `${id}{{"${label}"}}`,
+      ACTION: (id, label) => `${id}[["${label}"]]`,
+      CUSTOMIZE: (id, label) => `${id}[("${label}")]`,
+      APP: (id, label) => `${id}[("${label}")]`,
+      EXTERNAL_FIELD: (id, label) => `${id}["${label}"]`,
+    };
+
+    // ノード種別 → 表示グループ名（図を種別ごとに枠で囲むために使う）
+    const GRAPH_GROUP_OF = {
+      FIELD: 'フィールド',
+      VIEW: '一覧・グラフ', REPORT: '一覧・グラフ',
+      NOTIFICATION: '通知', PROCESS_STATE: 'プロセス管理', PROCESS_ACTION: 'プロセス管理',
+      ACL: 'アクセス権', CUSTOMIZE: 'JavaScript',
+      ACTION: '他アプリ連携', APP: '他アプリ連携', EXTERNAL_FIELD: '他アプリ連携',
+    };
+
+    // ノード種別 → Mermaidのクラス（色分け）
+    const MERMAID_CLASS_OF = {
+      FIELD: 'ktField',
+      VIEW: 'ktViewRep', REPORT: 'ktViewRep',
+      NOTIFICATION: 'ktNotice', PROCESS_STATE: 'ktNotice', PROCESS_ACTION: 'ktNotice',
+      ACL: 'ktAcl', CUSTOMIZE: 'ktJs',
+      ACTION: 'ktApp', APP: 'ktApp', EXTERNAL_FIELD: 'ktApp',
+    };
+
+    /**
+     * 部分グラフから Mermaid のコードを生成する
+     * 読みやすさのための工夫：
+     *  - 種別ごとに色分けし、枠（subgraph）で囲む
+     *  - 同じノード間の関係は1本にまとめる
+     *  - 関係が多いときは矢印ラベルを省略する（文字量で読めなくなるのを防ぐ）
+     *  - 推定（LIKELY / UNCERTAIN）の依存は破線にして確実なものと区別する
+     */
+    function toMermaid(sub, opt = {}) {
+      const {
+        direction = 'LR',
+        focusId = null,
+        group = true,          // 種別ごとに枠で囲む
+        showLabels = 'auto',   // true / false / 'auto'（本数が多いときは省略）
+        labelLimit = 30,       // 'auto' のときにラベルを省略し始める関係数
+        linkResolver = null,   // (node) => URL文字列 | null。図中のノードをリンクにする
+      } = opt;
+      const nodes = (sub && sub.nodes) || [];
+      const edges = (sub && sub.edges) || [];
+      if (!nodes.length) return '';
+
+      // Mermaidのラベルを壊す文字を除去・置換する
+      const safeLabel = (s) => String(s ?? '')
+        .replace(/["`]/g, "'")
+        .replace(/[<>{}[\]|]/g, ' ')
+        .replace(/\r?\n/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .slice(0, 28) || '(no name)';
+
+      // ノードIDは英数字に正規化する（日本語コードをそのまま使うと壊れるため）
+      const idMap = new Map();
+      nodes.forEach((n, i) => idMap.set(n.id, `N${i}`));
+
+      const lines = [`flowchart ${direction}`];
+
+      // ---- ノード定義 ----
+      const emitNode = (n) => {
+        const mid = idMap.get(n.id);
+        const shape = MERMAID_SHAPE[n.type] || MERMAID_SHAPE.FIELD;
+        // 枠で囲む場合は種別が枠名で分かるため、ノード名に種別を付けない
+        const prefix = (group || n.type === 'FIELD') ? '' : `${n.type.toLowerCase()}: `;
+        return shape(mid, safeLabel(prefix + (n.name || n.id)));
+      };
+
+      if (group) {
+        const groups = new Map();
+        for (const n of nodes) {
+          const g = GRAPH_GROUP_OF[n.type] || 'その他';
+          if (!groups.has(g)) groups.set(g, []);
+          groups.get(g).push(n);
+        }
+        let gi = 0;
+        for (const [gname, list] of groups) {
+          lines.push(`  subgraph G${gi}["${safeLabel(gname)}"]`);
+          for (const n of list) lines.push(`    ${emitNode(n)}`);
+          lines.push('  end');
+          gi++;
+        }
+      } else {
+        for (const n of nodes) lines.push(`  ${emitNode(n)}`);
+      }
+
+      // ---- 同じノード間の関係はまとめる（同じ矢印が何本も重なるのを防ぐ）----
+      const merged = new Map();
+      for (const e of edges) {
+        const s = idMap.get(`${e.sourceType}:${e.sourceId}`);
+        const t = idMap.get(`${e.targetType}:${e.targetId}`);
+        if (!s || !t || s === t) continue;
+        // 同じ向きの関係は線種を問わず1本にまとめる。
+        // 1つでも確実な依存があれば実線（依存の存在は確定しているため）、
+        // すべて推定なら破線にする。
+        const certain = (e.confidence === CONF.CERTAIN);
+        const key = `${s}|${t}`;
+        if (!merged.has(key)) merged.set(key, { s, t, anyCertain: false, labels: new Set() });
+        const m = merged.get(key);
+        if (certain) m.anyCertain = true;
+        m.labels.add(REL_LABEL[e.relationType] || e.relationType);
+      }
+
+      // 関係が多いときはラベルを省略する
+      const useLabels = (showLabels === 'auto') ? (merged.size <= labelLimit) : !!showLabels;
+
+      for (const m of merged.values()) {
+        const label = safeLabel([...m.labels].join('・'));
+        const dashed = !m.anyCertain;
+        if (useLabels) {
+          lines.push(dashed ? `  ${m.s} -. "${label}" .-> ${m.t}` : `  ${m.s} -- "${label}" --> ${m.t}`);
+        } else {
+          lines.push(dashed ? `  ${m.s} -.-> ${m.t}` : `  ${m.s} --> ${m.t}`);
+        }
+      }
+
+      // ---- 種別ごとの色分け ----
+      // 透過色（末尾22＝約13%）を使い、ライト／ダークどちらでも文字が読めるようにする
+      lines.push('  classDef ktField fill:#2563eb22,stroke:#2563eb,stroke-width:1px');
+      lines.push('  classDef ktViewRep fill:#16a34a22,stroke:#16a34a,stroke-width:1px');
+      lines.push('  classDef ktNotice fill:#f59e0b22,stroke:#f59e0b,stroke-width:1px');
+      lines.push('  classDef ktAcl fill:#a855f722,stroke:#a855f7,stroke-width:1px');
+      lines.push('  classDef ktJs fill:#ec489922,stroke:#ec4899,stroke-width:1px');
+      lines.push('  classDef ktApp fill:#06b6d422,stroke:#06b6d4,stroke-width:1px');
+
+      const byClass = new Map();
+      for (const n of nodes) {
+        const cls = MERMAID_CLASS_OF[n.type] || 'ktField';
+        if (!byClass.has(cls)) byClass.set(cls, []);
+        byClass.get(cls).push(idMap.get(n.id));
+      }
+      for (const [cls, list] of byClass) {
+        if (list.length) lines.push(`  class ${list.join(',')} ${cls}`);
+      }
+
+      // 起点を強調する
+      // classDef は後から定義したものが優先されるため、種別の色分けより後に定義する。
+      // あわせて style も指定し、どちらかが効けば赤枠になるようにする。
+      if (focusId && idMap.has(focusId)) {
+        const fid = idMap.get(focusId);
+        lines.push('  classDef ktFocus stroke:#ef4444,stroke-width:4px');
+        lines.push(`  class ${fid} ktFocus`);
+        lines.push(`  style ${fid} stroke:#ef4444,stroke-width:4px`);
+      }
+
+      // ---- ノードのリンク（Mermaidのclick構文）----
+      // 動作には securityLevel が 'strict' 以外である必要がある（呼び出し側で設定する）
+      if (typeof linkResolver === 'function') {
+        for (const n of nodes) {
+          let href = null;
+          try { href = linkResolver(n); } catch (e) { href = null; }
+          if (!href) continue;
+          // URLに " が含まれると構文が壊れるため除去する
+          const safeHref = String(href).replace(/["\s]/g, '');
+          lines.push(`  click ${idMap.get(n.id)} href "${safeHref}" _blank`);
+        }
+      }
+
+      return lines.join('\n');
+    }
+
+    // ================= 計算式チェーン =================
+
+    /**
+     * 計算式の参照ツリーを組み立てる
+     *
+     *   報酬額
+     *    ├─ 人数
+     *    └─ 単価
+     *
+     * 計算フィールドが別の計算フィールドを参照していると多段になり、
+     * 1つ変えたときの波及が読みにくくなる。その深さを把握するために使う。
+     *
+     * @param {number} opt.maxDepth 安全のための打ち切り深さ（既定10）
+     * @returns {{code, name, depth, children:Array, truncated:boolean, circular:boolean}}
+     */
+    function buildCalcTree(deps, fieldCode, opt = {}) {
+      const { maxDepth = 10 } = opt;
+      const edges = (deps?.edges || []).filter(e => e.relationType === REL.REFERENCES);
+
+      // 計算元 → 参照先 の索引（1フィールドが複数を参照する）
+      const refMap = new Map();
+      for (const e of edges) {
+        if (e.sourceType !== 'FIELD' || e.targetType !== 'FIELD') continue;
+        if (!refMap.has(e.sourceId)) refMap.set(e.sourceId, []);
+        const list = refMap.get(e.sourceId);
+        if (!list.includes(e.targetId)) list.push(e.targetId);
+      }
+
+      const nameOf = (code) => {
+        const n = (deps?.nodes || []).find(x => x.id === `FIELD:${code}`);
+        return n?.name || code;
+      };
+
+      const walk = (code, depth, ancestors) => {
+        const node = { code, name: nameOf(code), depth, children: [], truncated: false, circular: false };
+        // 循環参照はkintone側で防がれるが、データ不整合に備えて自衛する
+        if (ancestors.has(code)) { node.circular = true; return node; }
+        if (depth >= maxDepth) { node.truncated = true; return node; }
+
+        const refs = refMap.get(code) || [];
+        if (!refs.length) return node;
+
+        const nextAncestors = new Set(ancestors);
+        nextAncestors.add(code);
+        node.children = refs
+          .map(c => walk(c, depth + 1, nextAncestors))
+          .sort((a, b) => String(a.name).localeCompare(String(b.name), 'ja'));
+        return node;
+      };
+
+      return walk(String(fieldCode), 0, new Set());
+    }
+
+    /** ツリーの最大深さ（葉までの段数）を返す */
+    function calcTreeDepth(tree) {
+      if (!tree || !tree.children || !tree.children.length) return 0;
+      return 1 + Math.max(...tree.children.map(calcTreeDepth));
+    }
+
+    /**
+     * アプリ全体の計算式チェーンの状況をまとめる
+     * @returns {{maxDepth:number, calcFields:number, deepest:Array<{code,name,depth}>}}
+     */
+    function calcChainStats(deps, opt = {}) {
+      const { topN = 5 } = opt;
+      const roots = [...new Set(
+        (deps?.edges || [])
+          .filter(e => e.relationType === REL.REFERENCES && e.sourceType === 'FIELD')
+          .map(e => e.sourceId)
+      )];
+
+      const list = roots.map(code => {
+        const tree = buildCalcTree(deps, code);
+        return { code, name: tree.name, depth: calcTreeDepth(tree) };
+      });
+
+      list.sort((a, b) => b.depth - a.depth || String(a.name).localeCompare(String(b.name), 'ja'));
+      return {
+        maxDepth: list.length ? list[0].depth : 0,
+        calcFields: list.length,
+        deepest: list.slice(0, topN),
+      };
+    }
+
+    /** 計算式ツリーを罫線付きのテキストに整形する（表示・レポート共通） */
+    function calcTreeToText(tree) {
+      const lines = [];
+      const walk = (node, prefix, isLast, isRoot) => {
+        if (isRoot) {
+          lines.push(node.name === node.code ? node.code : `${node.name}（${node.code}）`);
+        } else {
+          const mark = node.circular ? ' ※循環参照' : (node.truncated ? ' ※以降省略' : '');
+          const label = node.name === node.code ? node.code : `${node.name}（${node.code}）`;
+          lines.push(`${prefix}${isLast ? '└─ ' : '├─ '}${label}${mark}`);
+        }
+        const nextPrefix = isRoot ? ' ' : prefix + (isLast ? '   ' : '│  ');
+        node.children.forEach((c, i) => walk(c, nextPrefix, i === node.children.length - 1, false));
+      };
+      walk(tree, '', true, true);
+      return lines.join('\n');
+    }
+
+    // ================= 横断検索 =================
+
+    /**
+     * 依存関係全体をフリーワードで検索する
+     *
+     * フィールド名・コードだけでなく、設定名・JSファイル名・アプリ名・関係種別も対象にする。
+     * 「custom.js が触っているもの」「"顧客" を含む依存」のような探し方ができる。
+     *
+     * @param {string} query 空白区切りで複数語を指定した場合はAND条件
+     * @param {number} opt.limit 返す最大件数（既定200。多すぎる結果でUIが重くならないようにする）
+     * @returns {{rows:Array, total:number, truncated:boolean}}
+     */
+    function searchEdges(deps, query, opt = {}) {
+      const { limit = 200 } = opt;
+      const terms = String(query || '')
+        .trim()
+        .toLowerCase()
+        .split(/[\s\u3000]+/)
+        .filter(Boolean);
+      if (!terms.length) return { rows: [], total: 0, truncated: false };
+
+      const CONF_JA_LOCAL = { CERTAIN: '確実', LIKELY: '可能性が高い', UNCERTAIN: '要確認', NOT_ANALYZED: '解析対象外' };
+
+      const rows = [];
+      for (const e of (deps?.edges || [])) {
+        const relLabel = REL_LABEL[e.relationType] || e.relationType || '';
+        const srcKind = IMPACT_CATEGORY[e.sourceType] || e.sourceType || '';
+        // 検索対象の文字列をまとめる（表示に出ている情報はすべて引っかかるようにする）
+        const haystack = [
+          e.sourceType, e.sourceId, e.sourceName,
+          e.relationType, relLabel, srcKind,
+          e.targetType, e.targetId, e.targetName,
+          e.context?.settingType, e.context?.settingName, e.context?.note,
+          e.confidence, CONF_JA_LOCAL[e.confidence],
+        ].filter(Boolean).join(' ').toLowerCase();
+
+        if (!terms.every(t => haystack.includes(t))) continue;
+
+        rows.push({
+          sourceType: e.sourceType,
+          sourceKind: srcKind,
+          sourceName: e.sourceName || e.sourceId,
+          sourceId: e.sourceId,
+          relation: relLabel,
+          relationType: e.relationType,
+          targetType: e.targetType,
+          targetName: e.targetName || e.targetId,
+          targetId: e.targetId,
+          settingName: e.context?.settingName || '',
+          confidence: e.confidence,
+          lines: Array.isArray(e.context?.lines) ? e.context.lines : null,
+        });
+      }
+
+      // 確実なものを先に、次に種別・名前順で並べる
+      const confRank = (c) => (c === CONF.CERTAIN ? 0 : c === CONF.LIKELY ? 1 : 2);
+      rows.sort((a, b) =>
+        confRank(a.confidence) - confRank(b.confidence) ||
+        String(a.sourceKind).localeCompare(String(b.sourceKind), 'ja') ||
+        String(a.sourceName).localeCompare(String(b.sourceName), 'ja') ||
+        String(a.targetName).localeCompare(String(b.targetName), 'ja')
+      );
+
+      const total = rows.length;
+      return { rows: rows.slice(0, limit), total, truncated: total > limit };
+    }
+
+    // ================= レポート出力 =================
+
+    // 確度の日本語表記（レポート共通）
+    const CONF_JA = {
+      CERTAIN: '確実', LIKELY: '可能性が高い',
+      UNCERTAIN: '要確認', NOT_ANALYZED: '解析対象外',
+    };
+
+    /** Markdownの表やリストを壊す文字を無害化する */
+    function mdEscape(s) {
+      return String(s ?? '')
+        .replace(/\|/g, '\\|')
+        .replace(/\r?\n/g, ' ')
+        .trim();
+    }
+
+    /**
+     * 依存関係のMarkdownレポートを生成する
+     * 仕様書やNotionへ貼り付けやすい形式（見出し＋箇条書き）にする
+     * @param {Array} opt.fields 正規化済みフィールド配列（型・必須の表示に使う）
+     * @param {boolean} opt.onlyUsed true なら利用箇所のあるフィールドのみ出力する
+     */
+    function toMarkdown(deps, opt = {}) {
+      const { fields = [], onlyUsed = false } = opt;
+      const meta = deps?.meta || {};
+      const out = [];
+
+      const appTitle = meta.appName ? `${meta.appName}（app ${meta.appId}）` : `app ${meta.appId ?? '?'}`;
+      out.push(`# フィールド依存関係 — ${mdEscape(appTitle)}`);
+      out.push('');
+      out.push(`- 生成日時: ${meta.generatedAt || new Date().toISOString()}`);
+      out.push(`- フィールド数: ${meta.fieldCount ?? fields.length}`);
+      out.push(`- 依存関係数: ${(deps?.edges || []).length}`);
+      out.push(`- JavaScript解析: ${meta.scannerMergedAt ? `実施済み（${meta.scannerMergedAt}）` : '未実施（JSからの参照は含まれません）'}`);
+      if (Array.isArray(meta.notAnalyzed) && meta.notAnalyzed.length) {
+        out.push(`- 解析対象外: ${meta.notAnalyzed.map(mdEscape).join(' / ')}`);
+      }
+      out.push('');
+      out.push('> この文書は kintone App Toolkit が自動生成しました。');
+      out.push('> 条件式・計算式・JavaScriptの解析は文字列解析による推定を含みます。');
+      out.push('> 確度が「可能性が高い」「要確認」の項目は、実際の設定での確認をおすすめします。');
+      out.push('');
+
+      // ---- フィールドごとの依存関係 ----
+      const fieldNodes = (deps?.nodes || []).filter(n => n.type === 'FIELD');
+      const fieldMeta = new Map((fields || []).map(f => [f.code, f]));
+      const unused = [];
+
+      for (const n of fieldNodes) {
+        const code = String(n.id).replace(/^FIELD:/, '');
+        const imp = impactOf(deps, code);
+        const total = imp.counts.direct + imp.counts.indirect + imp.counts.crossApp;
+        if (!total) unused.push({ code, name: n.name });
+        if (onlyUsed && !total) continue;
+
+        const fm = fieldMeta.get(code) || {};
+        out.push(`## ${mdEscape(n.name || code)}`);
+        out.push('');
+        out.push('### 基本情報');
+        out.push(`- ラベル: ${mdEscape(fm.label ?? n.name ?? code)}`);
+        out.push(`- フィールドコード: \`${mdEscape(code)}\``);
+        out.push(`- 種類: ${mdEscape(fm.type ?? n.fieldType ?? '不明')}`);
+        out.push(`- 必須: ${fm.required ? 'はい' : 'いいえ'}`);
+        if (fm.parent) out.push(`- サブテーブル: ${mdEscape(fm.parent)}`);
+        out.push('');
+
+        if (imp.direct.length) {
+          out.push('### 利用箇所');
+          for (const d of imp.direct) {
+            const note = d.note ? `（${mdEscape(d.note)}）` : '';
+            out.push(`- [${mdEscape(d.category)}] ${mdEscape(d.title)} — ${mdEscape(d.role)}${note} 〔${CONF_JA[d.confidence] || d.confidence}〕`);
+          }
+          out.push('');
+        }
+
+        if (imp.indirect.length) {
+          out.push('### 間接的な影響（計算式経由）');
+          for (const d of imp.indirect) {
+            const via = d.via ? `（${mdEscape(d.via)}）` : '';
+            out.push(`- [${mdEscape(d.category)}] ${mdEscape(d.title)} — ${mdEscape(d.role)}${via}`);
+          }
+          out.push('');
+        }
+
+        // 計算式が多段になっている場合は、参照の連なりも記録する
+        const ct = buildCalcTree(deps, code);
+        if (ct.children && ct.children.length) {
+          out.push('### 計算式の参照ツリー');
+          out.push(`- 深さ: ${calcTreeDepth(ct)} 段`);
+          out.push('');
+          out.push('```');
+          out.push(calcTreeToText(ct));
+          out.push('```');
+          out.push('');
+        }
+
+        if (imp.crossApp.length) {
+          out.push('### 他アプリ連携');
+          for (const c of imp.crossApp) {
+            out.push(`- ${mdEscape(c.text)} 〔${CONF_JA[c.confidence] || c.confidence}〕`);
+          }
+          out.push('');
+        }
+
+        if (imp.operations && imp.operations.length) {
+          out.push('### 変更時の確認事項');
+          for (const o of imp.operations) {
+            out.push(`**${mdEscape(o.label)}**`);
+            for (const n of o.notes) out.push(`- ${mdEscape(n)}`);
+            out.push('');
+          }
+        } else if (imp.cautions.length) {
+          out.push('### 変更時の確認事項');
+          for (const c of imp.cautions) out.push(`- ${mdEscape(c)}`);
+          out.push('');
+        }
+
+        if (!total) {
+          out.push('### 利用箇所');
+          out.push('- 検出されませんでした（未使用の可能性があります）');
+          out.push('');
+        }
+      }
+
+      // ---- アプリ間依存 ----
+      const links = buildAppLinks(deps, meta.appId);
+      out.push('# アプリ間依存関係（このアプリ → 他アプリ）');
+      out.push('');
+      if (links.length) {
+        out.push('| 接続種別 | 自アプリ側 | 接続先アプリ | 接続先フィールド | 備考 | 確度 |');
+        out.push('| --- | --- | --- | --- | --- | --- |');
+        for (const l of links) {
+          const dest = l.destAppId === '不明' ? '不明（変数指定）' : (l.destAppLabel || `app ${l.destAppId}`);
+          const src = l.dataSource === 'JS_STATIC' ? '推定' : '設定';
+          out.push(`| ${mdEscape(l.kind)} | ${mdEscape(l.selfSide)} | ${mdEscape(dest)} | ${mdEscape(l.destField)} | ${mdEscape(l.note)} | ${src}／${CONF_JA[l.confidence] || l.confidence} |`);
+        }
+      } else {
+        out.push('他アプリへの接続は検出されませんでした。');
+      }
+      out.push('');
+      out.push('※ この一覧は「このアプリ → 他アプリ」の向きのみです。');
+      out.push('※ 他アプリからこのアプリへの参照は、アプリ設定APIでは取得できません。');
+      out.push('');
+
+      // ---- 壊れた参照 ----
+      const broken = findBrokenRefs(deps);
+      out.push('# 存在しないフィールドコードへの参照');
+      out.push('');
+      if (broken.length) {
+        out.push('フィールドの削除・コード変更のあとに、参照側が更新されていない可能性があります。');
+        out.push('kintoneはフィールド削除時に一覧や通知などの設定からは自動的に取り除きますが、JavaScriptは対象外です。');
+        out.push('');
+        out.push('| 種別 | コード | 検出パターン / 箇所 | ファイル・設定名 | 確度 |');
+        out.push('| --- | --- | --- | --- | --- |');
+        for (const b of broken) {
+          out.push(`| ${mdEscape(b.category)} | \`${mdEscape(b.code)}\` | ${mdEscape(b.role)} | ${mdEscape(b.detail || b.settingName)} | ${CONF_JA[b.confidence] || b.confidence} |`);
+        }
+      } else {
+        out.push('存在しないフィールドコードへの参照は見つかりませんでした。');
+      }
+      out.push('');
+
+      // ---- 未使用の可能性があるフィールド ----
+      out.push('# 利用箇所が検出されなかったフィールド');
+      out.push('');
+      if (unused.length) {
+        out.push('以下のフィールドは、解析範囲内では利用箇所が見つかりませんでした。');
+        out.push('ただし、解析対象外の設定（プラグイン設定、外部URLのJavaScript等）で使われている可能性があります。');
+        out.push('削除前に必ず実物での確認を行ってください。');
+        out.push('');
+        for (const u of unused) out.push(`- ${mdEscape(u.name)}（\`${mdEscape(u.code)}\`）`);
+      } else {
+        out.push('すべてのフィールドに利用箇所が検出されました。');
+      }
+      out.push('');
+
+      return out.join('\n');
+    }
+
+    /**
+     * 依存関係をCSV（1行1関係）で出力する
+     * 表計算での絞り込み・集計に使えるフラット形式
+     */
+    function toCSV(deps) {
+      const rows = [[
+        'sourceType', 'sourceId', 'sourceName',
+        'relationType', 'relationLabel',
+        'targetType', 'targetId', 'targetName',
+        'settingType', 'settingName', 'confidence', 'confidenceJa', 'lines',
+      ]];
+      for (const e of (deps?.edges || [])) {
+        rows.push([
+          e.sourceType ?? '', e.sourceId ?? '', e.sourceName ?? '',
+          e.relationType ?? '', REL_LABEL[e.relationType] || e.relationType || '',
+          e.targetType ?? '', e.targetId ?? '', e.targetName ?? '',
+          e.context?.settingType ?? '', e.context?.settingName ?? '',
+          e.confidence ?? '', CONF_JA[e.confidence] || e.confidence || '',
+          Array.isArray(e.context?.lines) ? e.context.lines.join(' ') : '',
+        ]);
+      }
+      // CSVエスケープ（" は "" に、値全体を " で囲む）
+      return rows
+        .map(r => r.map(v => `"${String(v ?? '').replace(/"/g, '""')}"`).join(','))
+        .join('\r\n');
+    }
+
+    /** 依存関係JSON（他ツール・AI向け）を文字列で返す */
+    function toJSON(deps) {
+      // raw（フィールド定義そのもの）は含めない軽量版
+      const nodes = (deps?.nodes || []).map(({ raw, ...rest }) => rest);
+      return JSON.stringify({ meta: deps?.meta ?? {}, nodes, edges: deps?.edges ?? [] }, null, 2);
+    }
+
+    return {
+      REL, CONF,
+      normalizeFields, buildCode2Label, labelOf,
+      maskStringLiterals, extractFieldCodes, parseSortCodes,
+      buildDependencyData, usageMapFromEdges, mergeScannerEdges,
+      extractAppIdRefs, buildAppLinks, impactOf, applyAppNames, appLabel, findBrokenRefs,
+      applyIncomingRefs,
+      buildSubgraph, toMermaid, GRAPH_SCOPES, searchEdges,
+      buildCalcTree, calcTreeDepth, calcChainStats, calcTreeToText,
+      toJSON, toMarkdown, toCSV,
+    };
+  })();
 
 
   // ==========================================
@@ -457,6 +2969,38 @@
           bottom: 32px;
         }
 
+        /* 全画面表示：画面いっぱいに広げる（内側の高さ指定も併せて広げる） */
+        /* 最小化中は全画面指定を打ち消す（is-mini が優先） */
+        #kt-toolkit.is-full.is-mini {
+          inset: auto !important;
+          right: 16px !important;
+          bottom: 32px !important;
+          width: auto !important;
+          height: auto !important;
+          max-height: none !important;
+          border-radius: 12px !important;
+        }
+
+        #kt-toolkit.is-full {
+          /* width:100vw は縦スクロールバーの幅を含み、横にはみ出す。
+             fixed要素なので上下左右を0にするだけで画面いっぱいになる。 */
+          top: 0 !important;
+          right: 0 !important;
+          bottom: 0 !important;
+          left: 0 !important;
+          width: auto !important;
+          max-width: none !important;
+          height: auto !important;
+          max-height: none !important;
+          border-radius: 0 !important;
+          border: none !important;
+        }
+        /* 全画面のときは、図や一覧を画面の高さに合わせて広げる
+           （タブが2段になる場合を考慮して余裕を持たせる） */
+        #kt-toolkit.is-full #dp-canvas { max-height: calc(100vh - 360px) !important; }
+        #kt-toolkit.is-full #fs-file-view,
+        #kt-toolkit.is-full #fs-table-wrap { max-height: calc(100vh - 300px) !important; }
+
         #kt-toolkit .bar{display:flex;justify-content:space-between;align-items:center;padding:10px 12px;border-bottom:1px solid ${C.border};}
         #kt-toolkit .tabs{display:flex;gap:6px;flex-wrap:wrap}
         #kt-toolkit .tab{padding:6px 10px;border:1px solid ${C.border};background:${C.bgSub};color:${C.text};border-radius:8px;cursor:pointer}
@@ -473,6 +3017,7 @@
         }
         #kt-toolkit.is-mini .body{ display:none !important; }
         #kt-toolkit.is-mini .tabs{ display:none !important; }
+        #kt-toolkit.is-mini #kt-full{ display:none !important; }
 
         /* Version 表示（控えめ） */
         #kt-toolkit .version-info{
@@ -582,15 +3127,16 @@
           <button id="tab-views"  class="tab">Views</button>
           <button id="tab-graphs" class="tab">Graphs</button>
           <button id="tab-relations" class="tab">Relations</button>
+          <button id="tab-deps" class="tab" title="依存関係グラフ（フィールド・設定・JS・他アプリ）">Deps</button>
           <button id="tab-notice" class="tab">Notices</button>
           <button id="tab-acl" class="tab">Access Control</button>
           <button id="tab-templates" class="tab">Templates</button>
           <button id="tab-customize" class="tab">Customize</button>
           <button id="tab-field-scanner" class="tab">Field Scanner</button>
           <button id="tab-plugins" class="tab">Plugins</button>
-          <button id="tab-links" class="tab">Links</button>
         </div>
         <div class="actions" style="display:flex;gap:6px;align-items:center;">
+          <button id="kt-full" class="btn" title="全画面表示に切り替え（もう一度押すと戻ります）">⛶</button>
           <button id="kt-mini" class="btn" title="最小化">–</button>
           <div id="kt-version" class="version-info" title="Toolkit version">
             <img src="${favicon}" alt="Toolkit icon" />
@@ -604,13 +3150,13 @@
         <div id="view-views"  style="display:none"></div>
         <div id="view-graphs" style="display:none"></div>
         <div id="view-relations" style="display:none"></div>
+        <div id="view-deps" style="display:none"></div>
         <div id="view-notice" style="display:none"></div>
         <div id="view-acl" style="display:none"></div>
         <div id="view-templates" style="display:none"></div>
         <div id="view-customize" style="display:none"></div>
         <div id="view-field-scanner" style="display:none"></div>
         <div id="view-plugins" style="display:none;"></div>
-        <div id="view-links" style="display:none"></div>
       </div>
     `;
 
@@ -637,12 +3183,33 @@
     function toggleMini() { setMini(!wrap.classList.contains('is-mini')); }
 
     // ボタン取得＆イベント
+    // 全画面表示の切り替え
+    //   既定は従来どおりのパネル表示。kintoneの画面を後ろに見ながら使いたい場面があるため、
+    //   全画面は「切り替えて使うモード」として提供する。
+    const FULL_KEY = 'ktToolkitFull.v1';
+    const btnFull = wrap.querySelector('#kt-full');
+    const applyFull = (on) => {
+      wrap.classList.toggle('is-full', !!on);
+      if (btnFull) {
+        btnFull.textContent = on ? '⤢' : '⛶';
+        btnFull.title = on ? 'パネル表示に戻す' : '全画面表示に切り替え（もう一度押すと戻ります）';
+      }
+    };
+    let isFull = false;
+    try { isFull = localStorage.getItem(FULL_KEY) === '1'; } catch (e) { }
+    applyFull(isFull);
+    btnFull?.addEventListener('click', () => {
+      isFull = !isFull;
+      try { localStorage.setItem(FULL_KEY, isFull ? '1' : '0'); } catch (e) { }
+      applyFull(isFull);
+    }, { passive: true });
+
     const btnMini = wrap.querySelector('#kt-mini');
     btnMini && btnMini.addEventListener('click', toggleMini, { passive: true });
     const btnVer = wrap.querySelector('#kt-version');
     btnVer && btnVer.addEventListener('click', () => window.open(githubURL, '_blank', 'noopener'), { passive: true });
 
-    const TABS = ['health', 'fields', 'views', 'graphs', 'relations', 'notice', 'acl', 'templates', 'customize', 'field-scanner', 'plugins', 'links'];
+    const TABS = ['health', 'fields', 'views', 'graphs', 'relations', 'deps', 'notice', 'acl', 'templates', 'customize', 'field-scanner', 'plugins'];
 
     const switchTab = (idShow) => {
       TABS.forEach(tabId => {
@@ -716,7 +3283,13 @@
       idMap[key] = `S${idx}`; // Mermaid用ノードID
     });
 
-    const esc = (s) => String(s || '').replace(/"/g, '\\"');
+    // Mermaidのラベルを壊す文字とHTMLタグ由来の文字をまとめて除去する
+    const esc = (s) => String(s || '')
+      .replace(/["`]/g, "'")
+      .replace(/[<>{}[\]|]/g, ' ')
+      .replace(/\r?\n/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
 
     const lines = ['flowchart LR'];
 
@@ -743,6 +3316,113 @@
     return lines.join('\n');
   };
 
+  /**
+   * 存在しないフィールドコードへの参照を Healthタブに表示する
+   * renderHealth の初回描画時と、JavaScript解析の完了後の両方から呼ぶ。
+   * （Healthタブ全体を再描画すると、ステータス分布のレコード取得が再実行されるため分離している）
+   */
+  function renderBrokenRefs(root, deps) {
+    const el = root.querySelector('#view-health');
+    if (!el) return;
+    const host = el.querySelector('#kt-broken');
+    if (!host) return;
+    if (!deps) { host.style.display = 'none'; return; }
+
+    let broken = [];
+    try {
+      broken = KTDeps.findBrokenRefs(deps);
+    } catch (e) {
+      console.error('[Health] 整合性チェックに失敗しました', e);
+      host.style.display = 'none';
+      return;
+    }
+
+    const scannerDone = !!(deps?.meta?.scannerMergedAt);
+    const jsNote = scannerDone
+      ? ''
+      : '（JavaScriptは未解析です。Field Scannerで「Scan」を実行すると対象になります）';
+
+    if (!broken.length) {
+      host.innerHTML = `
+        <div style="border:1px solid #16a34a55;background:#16a34a0f;border-radius:8px;padding:8px 10px;font-size:12px">
+          ✅ <b>設定の整合性チェック</b>：存在しないフィールドコードへの参照は見つかりませんでした。
+          <span style="opacity:.75">${escapeHtml(jsNote)}</span>
+        </div>`;
+      return;
+    }
+
+    const CONF_JA = { CERTAIN: '確実', LIKELY: '可能性が高い', UNCERTAIN: '要確認' };
+    const CONF_COLOR = { CERTAIN: '#ef4444', LIKELY: '#f59e0b', UNCERTAIN: '#6b7280' };
+    const confBadge = (c) => `<span style="display:inline-block;padding:0 6px;border:1px solid ${CONF_COLOR[c] || '#888'}66;
+      color:${CONF_COLOR[c] || '#888'};border-radius:999px;font-size:10px;white-space:nowrap">${escapeHtml(CONF_JA[c] || c)}</span>`;
+
+    const rows = broken.map(b => `
+      <tr>
+        <td style="padding:4px 6px;white-space:nowrap">${escapeHtml(b.category)}</td>
+        <td style="padding:4px 6px"><code>${escapeHtml(b.code)}</code></td>
+        <td style="padding:4px 6px">${escapeHtml(b.role)}</td>
+        <td style="padding:4px 6px;font-size:11px;opacity:.85">${escapeHtml(b.detail || b.settingName)}</td>
+        <td style="padding:4px 6px">${confBadge(b.confidence)}</td>
+      </tr>`).join('');
+
+    const jsCount = broken.filter(b => b.source === 'JS').length;
+    const setCount = broken.length - jsCount;
+    const summaryParts = [];
+    if (setCount) summaryParts.push(`設定 ${setCount} 件`);
+    if (jsCount) summaryParts.push(`JavaScript ${jsCount} 件`);
+
+    host.innerHTML = `
+      <div style="border:1px solid #ef444455;background:#ef44440f;border-radius:8px;padding:8px 10px">
+        <details open>
+          <summary style="cursor:pointer;font-size:12px;font-weight:600">
+            ⚠️ 存在しないフィールドコードへの参照が ${broken.length} 件あります（${escapeHtml(summaryParts.join(' / '))}）
+          </summary>
+          <div style="font-size:11px;opacity:.85;margin:6px 0 8px;line-height:1.7">
+            フィールドの削除・コード変更のあとに、参照側が更新されていない可能性があります。<br>
+            kintoneはフィールドを削除すると一覧や通知などの<b>設定からは自動的に取り除きます</b>が、
+            <b>JavaScriptは対象外</b>のため、古い参照がそのまま残ります（動かない処理・エラーの原因になります）。<br>
+            <span style="opacity:.8">
+              ・<b>確実</b>＝設定値として記録されたコードが存在しない
+              ・<b>可能性が高い</b>＝フィールド操作APIやrecord参照の引数に指定されている
+              ・<b>要確認</b>＝フィールド系の配列に書かれているが、用途は特定できない
+            </span>
+          </div>
+          <div style="max-height:240px;overflow:auto">
+            <table style="width:100%;border-collapse:collapse;font-size:12px">
+              <thead><tr style="opacity:.7">
+                <th style="text-align:left;padding:4px 6px">種別</th>
+                <th style="text-align:left;padding:4px 6px">存在しないコード</th>
+                <th style="text-align:left;padding:4px 6px">検出パターン / 箇所</th>
+                <th style="text-align:left;padding:4px 6px">ファイル・設定名</th>
+                <th style="text-align:left;padding:4px 6px">確度</th>
+              </tr></thead>
+              <tbody>${rows}</tbody>
+            </table>
+          </div>
+          <div style="margin-top:8px;display:flex;justify-content:flex-end">
+            <button id="kt-broken-copy" class="btn" style="padding:2px 10px;font-size:11px">Copy MD</button>
+          </div>
+        </details>
+      </div>`;
+
+    host.querySelector('#kt-broken-copy')?.addEventListener('click', async () => {
+      const md = [
+        '# 存在しないフィールドコードへの参照',
+        '',
+        '| 種別 | コード | 検出パターン / 箇所 | ファイル・設定名 | 確度 |',
+        '| --- | --- | --- | --- | --- |',
+        ...broken.map(b => `| ${b.category} | \`${b.code}\` | ${b.role} | ${b.detail || b.settingName} | ${CONF_JA[b.confidence] || b.confidence} |`),
+      ].join('\n');
+      const btn = host.querySelector('#kt-broken-copy');
+      try {
+        await navigator.clipboard.writeText(md);
+        flashBtnText(btn, 'Copied!');
+      } catch (e) {
+        flashBtnText(btn, 'Failed');
+      }
+    }, { passive: true });
+  }
+
   // renderHealth
   const renderHealth = async (
     root,
@@ -750,10 +3430,21 @@
       appId, fields, status, views, reports, customize,
       generalNotify, perRecordNotify, reminderNotify,
       appAcl, recordAcl, fieldAcl,
-      actions, plugins
+      actions, plugins, deps
     }
   ) => {
     let TH = loadTH();
+
+    // カードの枠線などに使うテーマ色（ライト／ダーク両対応）
+    const C = getThemeColors();
+
+    // 計算式チェーンの状況（依存関係データがある場合のみ）
+    let calcStats = null;
+    try {
+      if (deps) calcStats = KTDeps.calcChainStats(deps);
+    } catch (e) {
+      console.error('[Health] 計算式チェーンの集計に失敗しました', e);
+    }
 
     // ガード
     const el = root.querySelector('#view-health');
@@ -835,6 +3526,19 @@
 
     let processMermaidCode = '';
 
+    // カード右上に出す判定バッジ（現在値としきい値の関係を一目で示す）
+    //   色は判定に合わせ、しきい値はツールチップで補足する
+    const HEALTH_BADGE_COLOR = { OK: '#16a34a', YELLOW: '#f59e0b', RED: '#ef4444' };
+    const healthBadge = (sc, th, caption = '') => {
+      const color = HEALTH_BADGE_COLOR[sc.level] || '#6b7280';
+      const title = `${th.label}：現在値の判定は ${sc.level}（Y=${th.Y} で注意 / R=${th.R} で危険）`;
+      return `<span title="${escapeHtml(title)}"
+        style="display:inline-flex;align-items:center;gap:3px;padding:1px 7px;border-radius:999px;
+               border:1px solid ${color}66;color:${color};font-size:10px;white-space:nowrap;">
+        <span>${sc.badge}</span>${caption ? `<span style="opacity:.85">${escapeHtml(caption)}</span>` : ''}
+      </span>`;
+    };
+
     // --- 描画 ---
     el.innerHTML = `
       <div style="display:flex;flex-direction:column;height:100%;gap:12px;">
@@ -854,7 +3558,7 @@
         <div id="kt-summary"
             style="flex:1;min-height:0;display:flex;flex-direction:column;gap:12px;">
 
-          <!-- 上段：3カード -->
+          <!-- 上段：3カード（判定バッジ・しきい値を内包）-->
           <div style="
             display:grid;
             grid-template-columns:repeat(3,minmax(0,1fr));
@@ -862,14 +3566,17 @@
           ">
             <!-- Fields Card -->
             <div style="
-              border:1px solid #e5e7eb;
+              border:1px solid ${C.border};
               border-radius:8px;
               padding:8px 10px;
               display:flex;
               flex-direction:column;
               gap:4px;
             ">
-              <div style="font-size:12px;opacity:.8;">フォーム構成 / Fields</div>
+              <div style="display:flex;justify-content:space-between;align-items:center;gap:6px;">
+                <div style="font-size:12px;opacity:.8;">フォーム構成 / Fields</div>
+                ${healthBadge(score.totalFields, TH.totalFields)}
+              </div>
               <div style="font-size:18px;font-weight:700;">
                 ${metrics.totalFields}
                 <span style="font-size:11px;font-weight:400;opacity:.7;">
@@ -883,14 +3590,20 @@
 
             <!-- Process Card -->
             <div style="
-              border:1px solid #e5e7eb;
+              border:1px solid ${C.border};
               border-radius:8px;
               padding:8px 10px;
               display:flex;
               flex-direction:column;
               gap:4px;
             ">
-              <div style="font-size:12px;opacity:.8;">プロセス管理 / Process</div>
+              <div style="display:flex;justify-content:space-between;align-items:center;gap:6px;">
+                <div style="font-size:12px;opacity:.8;">プロセス管理 / Process</div>
+                <div style="display:flex;gap:4px;">
+                  ${healthBadge(score.states, TH.states, 'States')}
+                  ${healthBadge(score.actions, TH.actions, 'Actions')}
+                </div>
+              </div>
               <div style="font-size:18px;font-weight:700;">
                 ${metrics.states}
                 <span style="font-size:11px;font-weight:400;opacity:.7;">States</span>
@@ -905,14 +3618,17 @@
 
             <!-- Logic & ACL Card -->
             <div style="
-              border:1px solid #e5e7eb;
+              border:1px solid ${C.border};
               border-radius:8px;
               padding:8px 10px;
               display:flex;
               flex-direction:column;
               gap:4px;
             ">
-              <div style="font-size:12px;opacity:.8;">ロジック / アクセス制御</div>
+              <div style="display:flex;justify-content:space-between;align-items:center;gap:6px;">
+                <div style="font-size:12px;opacity:.8;">ロジック / アクセス制御</div>
+                <span style="font-size:10px;opacity:.55;white-space:nowrap;">基準なし</span>
+              </div>
 
               <!-- メイン指標：JS / ACL -->
               <div style="font-size:18px;font-weight:700;">
@@ -923,132 +3639,23 @@
                 <span style="font-size:11px;font-weight:400;opacity:.7;">ACL</span>
               </div>
               <div style="font-size:11px;opacity:.75;">
-                アプリの制御ロジックの複雑さの目安です。<br>
+                アプリの制御ロジックの複雑さの目安です。
+                ${calcStats && calcStats.calcFields
+      ? `<br>計算式 ${calcStats.calcFields} 個 / 最大 ${calcStats.maxDepth} 段${calcStats.maxDepth >= 3
+        ? `<span title="計算式が多段になっていると、1つ変えたときの波及が読みにくくなります">（${escapeHtml(calcStats.deepest[0].name)} が最長）</span>`
+        : ''}`
+      : ''}
               </div>
             </div>
           </div>
 
-          <!-- 中段：Health サマリー + しきい値ガイド -->
-          <div style="
-            border:1px solid #e5e7eb;
-            border-radius:8px;
-            padding:8px 10px;
-            display:flex;
-            flex-direction:column;
-            gap:8px;
-          ">
-            <div style="display:flex;justify-content:space-between;align-items:center;">
-              <div style="font-size:12px;font-weight:600;">
-                Health summary
-              </div>
-              <div style="font-size:11px;opacity:.7;">
-                現在値としきい値（Y / R）の関係をざっくり確認できます
-              </div>
-            </div>
-
-            <!-- 行ごとのサマリー -->
-            <table style="width:100%;border-collapse:collapse;font-size:12px;">
-              <thead>
-                <tr style="opacity:.7;">
-                  <th style="text-align:left;padding:4px 6px;">指標</th>
-                  <th style="text-align:right;padding:4px 6px;">現在値</th>
-                  <th style="text-align:right;padding:4px 6px;">Y（注意）</th>
-                  <th style="text-align:right;padding:4px 6px;">R（危険）</th>
-                  <th style="text-align:left;padding:4px 6px;">判定</th>
-                </tr>
-              </thead>
-              <tbody>
-                <tr>
-                  <td style="padding:4px 6px;">${TH.totalFields.label}</td>
-                  <td style="padding:4px 6px;text-align:right;">
-                    ${metrics.totalFields}
-                  </td>
-                  <td style="padding:4px 6px;text-align:right;">
-                    ${TH.totalFields.Y}
-                  </td>
-                  <td style="padding:4px 6px;text-align:right;">
-                    ${TH.totalFields.R}
-                  </td>
-                  <td style="padding:4px 6px;">
-                    <span style="
-                      padding:2px 8px;
-                      border-radius:999px;
-                      border:1px solid #e5e7eb;
-                      display:inline-flex;
-                      align-items:center;
-                      gap:4px;
-                      font-size:11px;
-                    ">
-                      <span>${score.totalFields.badge}</span>
-                      <span>${score.totalFields.level}</span>
-                    </span>
-                  </td>
-                </tr>
-
-                <tr>
-                  <td style="padding:4px 6px;">${TH.states.label}</td>
-                  <td style="padding:4px 6px;text-align:right;">
-                    ${metrics.states}
-                  </td>
-                  <td style="padding:4px 6px;text-align:right;">
-                    ${TH.states.Y}
-                  </td>
-                  <td style="padding:4px 6px;text-align:right;">
-                    ${TH.states.R}
-                  </td>
-                  <td style="padding:4px 6px;">
-                    <span style="
-                      padding:2px 8px;
-                      border-radius:999px;
-                      border:1px solid #e5e7eb;
-                      display:inline-flex;
-                      align-items:center;
-                      gap:4px;
-                      font-size:11px;
-                    ">
-                      <span>${score.states.badge}</span>
-                      <span>${score.states.level}</span>
-                    </span>
-                  </td>
-                </tr>
-
-                <tr>
-                  <td style="padding:4px 6px;">${TH.actions.label}</td>
-                  <td style="padding:4px 6px;text-align:right;">
-                    ${metrics.actions}
-                  </td>
-                  <td style="padding:4px 6px;text-align:right;">
-                    ${TH.actions.Y}
-                  </td>
-                  <td style="padding:4px 6px;text-align:right;">
-                    ${TH.actions.R}
-                  </td>
-                  <td style="padding:4px 6px;">
-                    <span style="
-                      padding:2px 8px;
-                      border-radius:999px;
-                      border:1px solid #e5e7eb;
-                      display:inline-flex;
-                      align-items:center;
-                      gap:4px;
-                      font-size:11px;
-                    ">
-                      <span>${score.actions.badge}</span>
-                      <span>${score.actions.level}</span>
-                    </span>
-                  </td>
-                </tr>
-              </tbody>
-            </table>
-
-            <!-- しきい値の説明 -->
-            <div style="margin-top:4px;font-size:11px;opacity:.8;line-height:1.5;">
-              <div>
-                上部の <b>「基準 / Thresholds」</b> ボタンから、各指標の Y / R を編集できます。<br>
-              </div>
-            </div>
+          <div style="font-size:11px;opacity:.7;">
+            バッジは現在値としきい値（Y=注意 / R=危険）の関係を示します。
+            上部の「基準 / Thresholds」ボタンから各指標の Y / R を編集できます。
           </div>
 
+          <!-- 設定の整合性チェック（壊れた参照） -->
+          <div id="kt-broken"></div>
 
           <!-- 下段：Process Flow 図 -->
           <div style="
@@ -1117,6 +3724,9 @@
 
       </div>
     `;
+
+    // --- 設定の整合性チェック（存在しないフィールドコードへの参照）---
+    renderBrokenRefs(root, deps);
 
     // --- renderHealth 関数内の Mermaid 描画部分 ---
     const drawMermaid = () => {
@@ -1518,7 +4128,7 @@
   const saveElem = (b) => localStorage.setItem(LS_ELEM_KEY, String(!!b));
 
   // ==== DROP-IN REPLACEMENT (layout order only; supports top-level SUBTABLE) ====
-  const renderFields = async (root, { appId, fields, layout, usageData }) => {
+  const renderFields = async (root, { appId, fields, layout, usageData, deps }) => {
 
     injectFieldBadgeStyle();
 
@@ -1649,7 +4259,22 @@
     // ここは “AppInsightから渡される usageData” が必要。
     // いま Toolkit 側で usageData を持ってないなら、まずは引数に追加するのが一歩目です。
     // 例：renderFields(root, { appId, fields, layout, usageData })
-    const usagePlacesMap = usageData ? extractUsedFields(usageData, allFieldCodes) : {};
+    // deps（依存関係データ）があればエッジから生成。無ければ既存ロジックにフォールバック
+    const usagePlacesMap = deps
+      ? KTDeps.usageMapFromEdges(deps.edges)
+      : (usageData ? extractUsedFields(usageData, allFieldCodes) : {});
+
+    // ★変更影響はフィールドごとに一度だけ算出してMapに保持する（行描画時の再計算を避ける）
+    let impactMap = null;
+    if (deps) {
+      try {
+        impactMap = new Map();
+        for (const code of allFieldCodes) impactMap.set(code, KTDeps.impactOf(deps, code));
+      } catch (e) {
+        console.error('[KTDeps] 変更影響の算出に失敗しました', e);
+        impactMap = null;
+      }
+    }
 
     // --- 表示用行へ。グループ/サブテーブル表示は “layoutだけ” を正とする
     const showElements = loadElem();
@@ -1692,17 +4317,29 @@
     const highlightOn = loadHL();
     const C = getThemeColors();
 
+    // フィールド形式の絞り込み用の選択肢
+    //   実在する形式だけを、件数の多い順に並べる（使われていない形式は出さない）
+    const typeOptions = (() => {
+      const counts = new Map();
+      for (const r of rows) {
+        const key = r.type || '(不明)';
+        counts.set(key, (counts.get(key) || 0) + 1);
+      }
+      return [...counts.entries()]
+        .map(([type, count]) => ({ type, count }))
+        .sort((a, b) => b.count - a.count || String(a.type).localeCompare(String(b.type)));
+    })();
+
     el.innerHTML = `
       <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:8px">
         <div style="font-weight:700">Field Inventory</div>
 
-        <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center">
+        <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;justify-content:flex-end;flex:1;min-width:0">
           <input id="fi-search" type="search"
-            placeholder="検索（フィールド名 / コード）"
+            placeholder="検索（名前 / コード）"
             style="
-              width: 260px;
+              width: 200px;
               padding: 6px 10px;
-              margin-right: 24px;
               border-radius: 10px;
               border: 1px solid ${C.border};
               background: ${C.bgInput};
@@ -1712,20 +4349,40 @@
             "
           />
 
-          <label style="display:flex;align-items:center;gap:6px;margin-right:8px;user-select:none">
-            <input id="fi-hl-toggle" type="checkbox" ${highlightOn ? 'checked' : ''}>
-            <span style="opacity:.9">名称≠コードをハイライト</span>
+          <select id="fi-type" title="フィールド形式で絞り込みます"
+            style="padding:6px 8px;border-radius:10px;border:1px solid ${C.border};
+                   background:${C.bgInput};color:${C.text};outline:none;max-width:190px">
+            <option value="">形式：すべて（${rows.length}）</option>
+            ${typeOptions.map(o => `<option value="${escapeHtml(o.type)}">${escapeHtml(o.type)}（${o.count}）</option>`).join('')}
+          </select>
+
+          <label style="display:flex;align-items:center;gap:4px;user-select:none;white-space:nowrap"
+                 title="フィールド名とフィールドコードが異なる行を色付けします">
+            <input id="fi-hl-toggle" type="checkbox" ${highlightOn ? 'checked' : ''} style="margin:0">
+            <span style="opacity:.9">名称≠コード</span>
           </label>
 
-          <label style="display:flex;align-items:center;gap:6px;margin-right:8px;user-select:none">
-            <input id="fi-elem-toggle" type="checkbox" ${showElements ? 'checked' : ''}>
-            <span style="opacity:.9">要素ID を表示</span>
+          <label style="display:flex;align-items:center;gap:4px;user-select:none;white-space:nowrap"
+                 title="スペース・ラベル・罫線などの要素IDも一覧に表示します">
+            <input id="fi-elem-toggle" type="checkbox" ${showElements ? 'checked' : ''} style="margin:0">
+            <span style="opacity:.9">要素ID</span>
           </label>
 
-          <button id="fi-copy-md" class="btn">Copy Markdown</button>
-          <button id="fi-dl-md"   class="btn">DL MD</button>
-          <button id="fi-dl-csv"  class="btn">DL CSV</button>
-          <button id="fi-dl-json" class="btn">DL JSON</button>
+          <select id="fi-format" title="出力する形式を選びます"
+            style="padding:6px 8px;border-radius:10px;border:1px solid ${C.border};
+                   background:${C.bgInput};color:${C.text};outline:none">
+            <option value="md" selected>Markdown</option>
+            <option value="csv">CSV</option>
+            <option value="json">JSON</option>
+            <option value="deps">依存関係JSON</option>
+          </select>
+          <button id="fi-copy" class="btn" title="選択した形式をクリップボードへコピーします">Copy</button>
+          <button id="fi-dl" class="btn" title="選択した形式をファイルとして保存します">DL</button>
+          <!-- ★状態表示とボタンは1組で扱い、折り返しで分断されないようにする -->
+          <span style="display:inline-flex;align-items:center;gap:6px;white-space:nowrap">
+            <span id="fi-scan-state" style="font-size:11px;opacity:.75"></span>
+            <button id="fi-scan-js" class="btn" title="JavaScriptを解析して、使用箇所・変更影響に反映します">JS解析</button>
+          </span>
         </div>
       </div>
 
@@ -1734,7 +4391,9 @@
           <thead><tr>
             <th>フィールド名</th><th>フィールドコード</th><th>フィールド形式</th>
             <th>必須</th><th>重複禁止</th><th>初期値</th>
-            <th>グループ / テーブル</th><th>詳細</th>
+            <th>グループ / テーブル</th>
+            <th title="この依存関係データで検出された利用箇所の件数（直接利用）">利用数</th>
+            <th>詳細</th>
           </tr></thead>
           <tbody id="fi-tbody"></tbody>
         </table>
@@ -1772,6 +4431,7 @@
           <td>${r.unique ? '✓' : ''}</td>
           <td style="opacity:.9">${escapeHtml(r.defaultValue)}</td>
           <td style="opacity:.9">${escapeHtml(r.groupPath)}</td>
+          <td class="fi-usage-cell" style="text-align:right;white-space:nowrap"></td>
           <td class="fi-detail-cell"></td>
         `;
 
@@ -1779,7 +4439,43 @@
         // --- 詳細
         const places = Array.isArray(r.usagePlaces) ? r.usagePlaces : [];
         const detailObj = buildDetail(r._raw);
-        const detailHtml = buildDetailHtml(detailObj, places);
+        // ★変更影響：解析済みの依存関係データから算出（描画のたびに再解析はしない）
+        const impact = impactMap ? impactMap.get(r.code) : null;
+        // 計算式ツリーは計算式を持つフィールドだけ組み立てる（不要な再帰を避ける）
+        const calcTree = (deps && detailObj?.calcExpression)
+          ? KTDeps.buildCalcTree(deps, r.code)
+          : null;
+        const detailHtml = buildDetailHtml(detailObj, places, impact, calcTree);
+
+        // --- 利用数（直接利用の件数）とグラフへの導線
+        const usageCell = tr.querySelector('.fi-usage-cell');
+        if (usageCell) {
+          const cnt = impact ? impact.counts.direct : null;
+          if (cnt === null) {
+            usageCell.textContent = '—';
+            usageCell.title = '依存関係データを生成できませんでした';
+          } else {
+            const num = document.createElement('span');
+            num.textContent = String(cnt);
+            // 未使用（0件）は目立たせて、棚卸しの手がかりにする
+            if (cnt === 0) {
+              num.style.opacity = '.6';
+              num.title = '利用箇所が検出されませんでした（解析対象外の設定で使われている可能性はあります）';
+            } else {
+              num.title = `直接 ${cnt} 件 / 間接 ${impact.counts.indirect} 件 / 他アプリ ${impact.counts.crossApp} 件`;
+            }
+            usageCell.appendChild(num);
+
+            // Depsタブでこのフィールドを起点にしたグラフを開く
+            const graphBtn = document.createElement('button');
+            graphBtn.type = 'button';
+            graphBtn.className = 'fi-graph-btn';
+            graphBtn.textContent = '図';
+            graphBtn.title = 'Depsタブでこのフィールドを起点にしたグラフを表示します';
+            graphBtn.addEventListener('click', () => openDepsGraphFor(root, r.code), { passive: true });
+            usageCell.appendChild(graphBtn);
+          }
+        }
 
         const detailCell = tr.querySelector('.fi-detail-cell');
 
@@ -1795,7 +4491,7 @@
           detailTr.style.display = 'none';
 
           const td = document.createElement('td');
-          td.colSpan = 8;
+          td.colSpan = 9;
           td.innerHTML = detailHtml;
           detailTr.appendChild(td);
 
@@ -1824,17 +4520,16 @@
 
     const norm = (s) => String(s || '').toLowerCase();
 
-    const filterRows = (q) => {
+    // フリーワード（名称・コード）と、フィールド形式のAND条件で絞り込む
+    //   形式はドロップダウンで選ぶため、検索文字列には混ぜない
+    const filterRows = (q, type) => {
       const qq = norm(q).trim();
-      if (!qq) return rows;
+      const ty = String(type || '');
 
       return rows.filter(r => {
-        // 検索対象（好きに増減OK）
-        const target = [
-          r.label,
-          r.code,
-        ].map(norm).join(' | ');
-
+        if (ty && (r.type || '(不明)') !== ty) return false;
+        if (!qq) return true;
+        const target = [r.label, r.code].map(norm).join(' | ');
         return target.includes(qq);
       });
     };
@@ -1848,15 +4543,20 @@
       };
     };
 
+    const elType = el.querySelector('#fi-type');
+
     const applySearch = () => {
       const q = elSearch.value || '';
-      const filtered = filterRows(q);
+      const type = elType ? elType.value : '';
+      const filtered = filterRows(q, type);
       renderRows(filtered);
     };
 
     const applySearchDebounced = debounce(applySearch, 150);
 
     elSearch.addEventListener('input', applySearchDebounced, { passive: true });
+    // ドロップダウンは選択が確定するため、待たずに即時反映する
+    elType?.addEventListener('change', applySearch, { passive: true });
 
     el.querySelector('#fi-hl-toggle').addEventListener('change', e => {
       const on = !!e.target.checked;
@@ -1871,7 +4571,7 @@
       const on = !!e.target.checked;
       saveElem(on);
       // 再描画（今の引数をそのまま）
-      await renderFields(root, { appId, fields, layout, usageData });
+      await renderFields(root, { appId, fields, layout, usageData, deps });
     }, { passive: true });
 
     // Fields 用の列定義
@@ -1883,25 +4583,116 @@
       { header: '重複禁止', select: r => r.unique ? 'TRUE' : 'FALSE' },
       { header: '初期値', select: r => r.defaultValue || '' },
       { header: 'グループ', select: r => r.groupPath || '' },
+      // 依存関係データがある場合のみ意味を持つ列（無い場合は空欄）
+      { header: '利用数(直接)', select: r => (impactMap ? String(impactMap.get(r.code)?.counts.direct ?? 0) : '') },
+      { header: '利用数(間接)', select: r => (impactMap ? String(impactMap.get(r.code)?.counts.indirect ?? 0) : '') },
+      { header: '利用数(他アプリ)', select: r => (impactMap ? String(impactMap.get(r.code)?.counts.crossApp ?? 0) : '') },
     ];
 
     // クリップボード／DL を KTExport に統一
-    el.querySelector('#fi-copy-md').addEventListener('click', async () => {
-      const ok = await KTExport.copyMD(rows, FD_COLUMNS);
-      flashBtnText(el.querySelector('#fi-copy-md'), ok ? 'Copied!' : 'Failed');
+    // ---- 出力（Copy / DL）----
+    // 形式はセレクトで選ぶ。フィールド一覧は現在の絞り込みではなく全件を対象にする
+    // （絞り込みは画面上の閲覧用で、出力は資料として全件必要なことが多いため）。
+    const $format = el.querySelector('#fi-format');
+
+    /**
+     * 選択中の形式で出力内容を組み立てる
+     * @returns {{text:string, filename:string, mime:string}|null}
+     */
+    const buildFieldsOutput = () => {
+      const fmt = $format ? $format.value : 'md';
+      switch (fmt) {
+        case 'csv':
+          return {
+            // Excelでの文字化けを避けるためBOMを付ける
+            text: '\uFEFF' + KTExport.toCSVString(rows, FD_COLUMNS),
+            filename: `kintone_fields_${appId}.csv`,
+            mime: 'text/csv;charset=utf-8',
+          };
+        case 'json':
+          return {
+            text: JSON.stringify(rows, null, 2),
+            filename: `kintone_fields_${appId}.json`,
+            mime: 'application/json;charset=utf-8',
+          };
+        case 'deps':
+          if (!deps) return null;
+          return {
+            text: KTDeps.toJSON(deps),
+            filename: `kintone_dependencies_${appId}.json`,
+            mime: 'application/json;charset=utf-8',
+          };
+        case 'md':
+        default:
+          return {
+            text: KTExport.toMarkdownString(rows, FD_COLUMNS),
+            filename: `kintone_fields_${appId}.md`,
+            mime: 'text/markdown;charset=utf-8',
+          };
+      }
+    };
+
+    el.querySelector('#fi-copy').addEventListener('click', async () => {
+      const btn = el.querySelector('#fi-copy');
+      let out = null;
+      try {
+        out = buildFieldsOutput();
+      } catch (e) {
+        console.error('[Fields] 出力の生成に失敗しました', e);
+        flashBtnText(btn, 'Failed');
+        return;
+      }
+      if (!out) { flashBtnText(btn, 'No data'); return; }
+      const ok = await KTExport.copyText(out.text);
+      flashBtnText(btn, ok ? 'Copied!' : 'Failed');
     }, { passive: true });
 
-    el.querySelector('#fi-dl-md').addEventListener('click', () => {
-      KTExport.downloadMD(`kintone_fields_${appId}.md`, rows, FD_COLUMNS);
+    el.querySelector('#fi-dl').addEventListener('click', () => {
+      const btn = el.querySelector('#fi-dl');
+      let out = null;
+      try {
+        out = buildFieldsOutput();
+      } catch (e) {
+        console.error('[Fields] 出力の生成に失敗しました', e);
+        flashBtnText(btn, 'Failed');
+        return;
+      }
+      if (!out) { flashBtnText(btn, 'No data'); return; }
+      KTExport.downloadText(out.filename, out.text, out.mime);
+      flashBtnText(btn);
     }, { passive: true });
 
-    el.querySelector('#fi-dl-csv').addEventListener('click', async () => {
-      KTExport.downloadCSV(`kintone_fields_${appId}.csv`, rows, FD_COLUMNS, { withBom: true });
-    }, { passive: true });
+    // ★JS解析：Scannerタブへ移動しなくても、ここから実行・状態確認できるようにする
+    const $scanBtn = el.querySelector('#fi-scan-js');
+    const $scanState = el.querySelector('#fi-scan-state');
+    // 表示は短く保ち、詳しい説明は title（ツールチップ）に逃がす
+    const SCAN_STATE_TEXT = {
+      idle: 'JS未解析', running: '解析中…', done: 'JS解析済み',
+      cached: 'JS解析済み', skipped: '自動解析OFF', error: '解析失敗',
+    };
+    const SCAN_STATE_TITLE = {
+      idle: 'JavaScriptは未解析です。「JS解析」で使用箇所・変更影響に反映されます。',
+      running: 'JavaScriptを解析しています。',
+      done: 'JavaScriptの解析結果を反映済みです。',
+      cached: 'キャッシュした解析結果を反映済みです。最新にするには「JS解析」を押してください。',
+      skipped: '自動解析はオフです（Field Scannerタブで切り替えできます）。',
+      error: 'JavaScriptの解析に失敗しました。詳細はコンソールを確認してください。',
+    };
+    const paintScanState = (st) => {
+      if (!$scanState || !$scanBtn) return;
+      $scanState.textContent = SCAN_STATE_TEXT[st.state] || '';
+      $scanState.title = SCAN_STATE_TITLE[st.state] || '';
+      $scanBtn.disabled = (st.state === 'running') || !st.available;
+      $scanBtn.textContent = (st.state === 'running') ? '解析中…' : 'JS解析';
+    };
+    paintScanState(KTScan.getStatus());
+    // 状態変化を購読（この購読は次回のrenderFieldsで作り直されるため、都度解除する）
+    if (el._ktScanUnsub) { try { el._ktScanUnsub(); } catch (e) { } }
+    el._ktScanUnsub = KTScan.onChange(paintScanState);
 
-    el.querySelector('#fi-dl-json').addEventListener('click', () => {
-      const json = JSON.stringify(rows, null, 2);
-      KTExport.downloadText(`kintone_fields_${appId}.json`, json, 'application/json;charset=utf-8');
+    $scanBtn?.addEventListener('click', async () => {
+      // 手動実行はキャッシュを無視して取り直す
+      await KTScan.run({ force: true });
     }, { passive: true });
   };
 
@@ -2028,7 +4819,76 @@
     return hasAny ? detail : null;
   }
 
-  function buildDetailHtml(detail, usagePlaces) {
+  /**
+   * 変更影響（KTDeps.impactOf の結果）を折りたたみHTMLに変換する
+   * - 断定を避けるため、各行に確度バッジを付ける
+   * - 件数が多い場合に備え、既定は折りたたみ
+   */
+  function buildImpactHtml(impact) {
+    if (!impact) return '';
+    const { direct = [], indirect = [], crossApp = [], cautions = [], counts } = impact;
+    const total = (counts?.direct || 0) + (counts?.indirect || 0) + (counts?.crossApp || 0);
+
+    const CONF_JA = { CERTAIN: '確実', LIKELY: '可能性が高い', UNCERTAIN: '要確認', NOT_ANALYZED: '解析対象外' };
+    const CONF_COLOR = { CERTAIN: '#16a34a', LIKELY: '#f59e0b', UNCERTAIN: '#6b7280', NOT_ANALYZED: '#6b7280' };
+    const confBadge = (c) => `<span class="fi-conf" style="border-color:${CONF_COLOR[c] || '#888'}55;color:${CONF_COLOR[c] || '#888'}">${escapeHtml(CONF_JA[c] || c)}</span>`;
+
+    const line = (categoryText, mainText, subText, conf) => `
+      <div class="fi-imp-row">
+        <span class="fi-badge">${escapeHtml(categoryText)}</span>
+        <span class="fi-imp-main">${escapeHtml(mainText)}</span>
+        ${subText ? `<span class="fi-imp-sub">${escapeHtml(subText)}</span>` : ''}
+        ${conf ? confBadge(conf) : ''}
+      </div>`;
+
+    const block = (title, rowsHtml, count) => rowsHtml
+      ? `<div class="fi-imp-block"><div class="fi-imp-title">${escapeHtml(title)}（${count}）</div>${rowsHtml}</div>`
+      : '';
+
+    const directHtml = direct
+      .map(d => line(d.category, `${d.title} — ${d.role}`, d.note, d.confidence)).join('');
+    const indirectHtml = indirect
+      .map(d => line(d.category, `${d.title} — ${d.role}`, d.via, d.confidence)).join('');
+    const crossHtml = crossApp
+      .map(c => line('他アプリ', c.text, c.note, c.confidence)).join('');
+    // 操作の種類ごとに注意事項をまとめる（何をしたいかで見る場所が変わるため）
+    const operations = impact.operations || [];
+    const cautionHtml = operations.length
+      ? operations.map(o => `
+          <div class="fi-imp-block">
+            <div class="fi-imp-title">${escapeHtml(o.label)}</div>
+            ${o.notes.map(n => `<div class="fi-imp-caution">・${escapeHtml(n)}</div>`).join('')}
+          </div>`).join('')
+      : (cautions.length
+        ? `<div class="fi-imp-block"><div class="fi-imp-title">変更時の確認事項</div>` +
+          cautions.map(c => `<div class="fi-imp-caution">・${escapeHtml(c)}</div>`).join('') + `</div>`
+        : '');
+
+    if (!total && !cautions.length && !(impact.operations || []).length) return '';
+
+    const summary = total
+      ? `変更・削除時の影響候補：直接 ${counts.direct} 件／間接 ${counts.indirect} 件／他アプリ ${counts.crossApp} 件`
+      : '変更・削除時の影響候補：検出なし';
+
+    return `
+      <div class="fi-detail-item" style="align-items:flex-start">
+        <div class="fi-detail-k">変更影響: </div>
+        <div class="fi-detail-v" style="flex:1;min-width:0">
+          <details class="fi-imp">
+            <summary class="fi-imp-summary">${escapeHtml(summary)}</summary>
+            <div class="fi-imp-body">
+              ${block('直接利用', directHtml, counts.direct)}
+              ${block('間接利用（計算式経由）', indirectHtml, counts.indirect)}
+              ${block('他アプリ連携', crossHtml, counts.crossApp)}
+              ${cautionHtml}
+              <div class="fi-imp-note">※ 条件式・計算式・JavaScriptの解析は文字列解析による推定を含みます。確度が「可能性が高い」「要確認」の項目は実物での確認をおすすめします。</div>
+            </div>
+          </details>
+        </div>
+      </div>`;
+  }
+
+  function buildDetailHtml(detail, usagePlaces, impact = null, calcTree = null) {
     const items = [];
 
     const add = (k, v) => {
@@ -2068,6 +4928,24 @@
     add('初期値', detail?.initialValue);
     add('計算式', detail?.calcExpression);
 
+    // 計算式が別の計算フィールドを参照している場合、参照の連なりをツリーで示す
+    // （1段だけでは波及範囲が読めないため）
+    if (calcTree && calcTree.children && calcTree.children.length) {
+      const depth = KTDeps.calcTreeDepth(calcTree);
+      items.push(`
+        <div class="fi-detail-item" style="align-items:flex-start">
+          <div class="fi-detail-k">参照ツリー: </div>
+          <div class="fi-detail-v" style="flex:1;min-width:0">
+            <div style="font-size:11px;opacity:.7;margin-bottom:2px">深さ ${depth} 段</div>
+            <pre style="margin:0;font-size:11px;line-height:1.6;white-space:pre;overflow:auto">${escapeHtml(KTDeps.calcTreeToText(calcTree))}</pre>
+          </div>
+        </div>`);
+    }
+
+    // ★変更影響（依存関係データがある場合のみ）
+    const impactHtml = buildImpactHtml(impact);
+    if (impactHtml) items.push(impactHtml);
+
     return items.length ? `<div class="fi-detail-box">${items.join('')}</div>` : '';
   }
 
@@ -2090,6 +4968,39 @@
       line-height: 1.4;
       white-space: nowrap;
     }
+
+    /* ★変更影響（Fieldsタブ詳細内）: 色は currentColor 基準にしてダークモードでも破綻させない */
+    .fi-imp > summary{
+      cursor: pointer; font-size: 12px; padding: 4px 0; outline: none;
+    }
+    .fi-imp-body{
+      margin-top: 6px; padding: 8px 10px;
+      border: 1px solid currentColor; border-color: color-mix(in srgb, currentColor 20%, transparent);
+      border-radius: 8px;
+    }
+    .fi-imp-block{ margin-bottom: 10px; }
+    .fi-imp-block:last-of-type{ margin-bottom: 0; }
+    .fi-imp-title{ font-weight: 600; font-size: 11px; opacity: .8; margin-bottom: 4px; }
+    .fi-imp-row{
+      display: flex; align-items: center; gap: 6px;
+      flex-wrap: wrap; padding: 2px 0; font-size: 12px; line-height: 1.6;
+    }
+    .fi-imp-main{ }
+    .fi-imp-sub{ font-size: 11px; opacity: .7; }
+    .fi-conf{
+      display: inline-block; padding: 0 6px; border: 1px solid;
+      border-radius: 999px; font-size: 10px; line-height: 1.6; white-space: nowrap;
+    }
+    .fi-imp-caution{ font-size: 11px; line-height: 1.8; opacity: .9; }
+    .fi-imp-note{ margin-top: 8px; font-size: 10px; opacity: .65; line-height: 1.6; }
+
+    /* ★Fieldsタブ：Depsタブへの導線ボタン */
+    .fi-graph-btn{
+      margin-left: 6px; padding: 0 6px; font-size: 10px; line-height: 1.6;
+      border: 1px solid currentColor; border-radius: 999px;
+      background: transparent; color: inherit; cursor: pointer; opacity: .7;
+    }
+    .fi-graph-btn:hover{ opacity: 1; }
 
     .fi-detail-item{
       display: block;
@@ -2164,12 +5075,16 @@
   }
 
   // クエリ内のフィールドコードをラベル（＋コード）に置換
+  // ★修正：code2label が Map / plain object のどちらでも動くように（従来はMapだと無効だった）
   function labelizeQueryPart(part, code2label) {
     if (!part) return part;
-    const codes = Object.keys(code2label).sort((a, b) => b.length - a.length);
+    const codes = ((code2label instanceof Map)
+      ? [...code2label.keys()]
+      : Object.keys(code2label || {}))
+      .sort((a, b) => b.length - a.length);
     let out = part;
     for (const code of codes) {
-      const label = code2label[code] || code;
+      const label = KTDeps.labelOf(code2label, code);
       const re = new RegExp(`(?<![\\w_])${escapeRegExp(code)}(?![\\w_])`, 'g');
       out = out.replace(re, `${label}（${code}）`);
     }
@@ -2240,7 +5155,7 @@
       <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:8px;flex-wrap:nowrap;min-width:0">
         <div style="font-weight:700;white-space:nowrap">All Views（全一覧）</div>
         <div style="display:flex;gap:6px;flex-wrap:nowrap;overflow:auto;white-space:nowrap">
-          <button id="kv-copy-md"  class="btn">Copy Markdown</button>
+          <button id="kv-copy-md"  class="btn">Copy MD</button>
           <button id="kv-dl-md"    class="btn">DL MD</button>
           <button id="kv-dl-csv"   class="btn">DL CSV</button>
           <button id="kv-dl-json" class="btn">DL JSON</button>
@@ -2407,11 +5322,12 @@
   // [Feature] Graphs
   // ----------------------------
   // groups を 1セル内に「G1/G2/G3のピル＋ラベル＋[PER]」で縦積み表示
+  // ★修正：Map / plain object 両対応（従来はMapだとラベル解決が無効だった）
   const groupsToHTML = (groups = [], code2label = {}) => {
     return groups.map((g, i) => {
       const idx = i + 1;
       const code = g?.code || '';
-      const labelRaw = code ? (code2label[code] ? `${code2label[code]}` : code) : '';
+      const labelRaw = code ? KTDeps.labelOf(code2label, code) : '';
       const perTag = g?.per ? `<span class="pill">${String(g.per).toUpperCase()}</span>` : '';
       const label = escapeHtml(labelRaw);
       return `<div class="gline"><span class="pill">G${idx}</span> ${label} ${perTag}</div>`;
@@ -2424,9 +5340,10 @@
     return list.map((g, i) => {
       const idx = i + 1;
       const code = g?.code ?? '';
-      // ラベル（コード） or codeのみ
+      // ラベル（コード） or codeのみ（★Map/plain object 両対応に修正）
+      const lb = code ? KTDeps.labelOf(code2label, code) : '';
       const label =
-        code ? (code2label[code] ? `${code2label[code]}（${code}）` : code) : '';
+        code ? (lb !== code ? `${lb}（${code}）` : code) : '';
       // per があれば [PER] を付与
       const per = g?.per ? ` [${String(g.per).toUpperCase()}]` : '';
       return `G${idx} ${label}${per}`;
@@ -2438,9 +5355,8 @@
     return list.map((a) => {
       const fn = String(a?.type || '').toUpperCase();
       const code = a?.code || '';
-      const label = code
-        ? (code2label[code] ? `${code2label[code]}` : code)
-        : 'レコード';
+      // ★Map/plain object 両対応に修正
+      const label = code ? KTDeps.labelOf(code2label, code) : 'レコード';
       return fn ? `${fn} ${label}` : label;
     }).join(' / ');
   };
@@ -2497,7 +5413,7 @@
       <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:8px;flex-wrap:nowrap;min-width:0">
         <div style="font-weight:700;white-space:nowrap">Graphs（グラフ全一覧）</div>
         <div style="display:flex;gap:6px;flex-wrap:nowrap;overflow:auto;white-space:nowrap">
-          <button id="kg-copy-md"  class="btn">Copy Markdown</button>
+          <button id="kg-copy-md"  class="btn">Copy MD</button>
           <button id="kg-dl-md"    class="btn">DL MD</button>
           <button id="kg-dl-csv"   class="btn">DL CSV</button>
           <button id="kg-dl-json" class="btn">DL JSON</button>
@@ -2609,7 +5525,7 @@
                 <span>${title}</span>
               </h3>
               <div style="display:flex;gap:6px;flex-wrap:nowrap;overflow:auto;white-space:nowrap">
-                <button id="${btnCopyMd}"  class="btn">Copy Markdown</button>
+                <button id="${btnCopyMd}"  class="btn">Copy MD</button>
                 <button id="${btnDlMd}"    class="btn">DL MD</button>
                 <button id="${btnDlCsv}"   class="btn">DL CSV</button>
                 <button id="${btnDlJSON}"  class="btn">DL JSON</button>
@@ -2660,21 +5576,156 @@
   }
 
   /**
-   * Relationsタブを描画
-   * @param {HTMLElement|Document} root  document か ルート要素
-   * @param {{relations?:{lookups?:Array, relatedTables?:Array, actions?:Array}}} data
+   * 「他アプリからの参照」セクションの動作を組み立てる
+   * 走査はユーザーがボタンを押したときだけ実行し、結果はキャッシュから復元する。
    */
-  function renderRelations(root, relations, appId) {
+  function bindIncoming(view, appId, deps) {
+    const $scan = view.querySelector('#kt-in-scan');
+    const $status = view.querySelector('#kt-in-status');
+    const $result = view.querySelector('#kt-in-result');
+    const $actions = view.querySelector('#kt-in-actions');
+    if (!$scan || !$result) return;
+
+    const BD = getThemeColors().border;
+
+    const render = (data, fromCache) => {
+      const rows = data?.rows || [];
+      const st = data?.stats || {};
+      const when = data?.scannedAt ? new Date(data.scannedAt).toLocaleString() : '';
+
+      const summary = [
+        `${st.scannedApps ?? 0} アプリを確認`,
+        `${st.referencingApps ?? 0} アプリから参照あり`,
+        st.failedApps ? `${st.failedApps} アプリは確認できず` : null,
+        st.truncated ? `※ 上限 ${KTIncoming.MAX_APPS} アプリで打ち切り` : null,
+      ].filter(Boolean).join(' / ');
+
+      if ($status) $status.textContent = `${summary}${when ? `（${fromCache ? 'キャッシュ ' : ''}${when}）` : ''}`;
+
+      if (!rows.length) {
+        $result.innerHTML = `
+          <div style="padding:10px;font-size:12px;opacity:.85">
+            このアプリを参照しているアプリは見つかりませんでした。
+            ${st.failedApps ? `<br><span style="opacity:.75">ただし ${st.failedApps} アプリは権限等の理由で確認できていません。</span>` : ''}
+          </div>`;
+        return;
+      }
+
+      const body = rows.map(r => `
+        <tr>
+          <td style="padding:5px 7px;border-bottom:1px solid ${BD};white-space:nowrap">
+            <a href="${escapeHtml(KTApi.appUrl(r.appId))}" target="_blank" rel="noopener noreferrer" style="color:inherit">
+              app ${escapeHtml(r.appId)}${r.appName ? ' ' + escapeHtml(r.appName) : ''} 🔗</a>
+          </td>
+          <td style="padding:5px 7px;border-bottom:1px solid ${BD};white-space:nowrap">${escapeHtml(r.kind)}</td>
+          <td style="padding:5px 7px;border-bottom:1px solid ${BD}">${escapeHtml(r.sourceLabel || r.sourceField)}</td>
+          <td style="padding:5px 7px;border-bottom:1px solid ${BD}"><code>${escapeHtml(r.targetField || '—')}</code></td>
+          <td style="padding:5px 7px;border-bottom:1px solid ${BD};font-size:11px;opacity:.85">${escapeHtml(r.note || '')}</td>
+        </tr>`).join('');
+
+      $result.innerHTML = `
+        <div style="max-height:280px;overflow:auto">
+          <table style="width:100%;border-collapse:collapse;font-size:12px">
+            <thead><tr style="opacity:.7">
+              <th style="text-align:left;padding:5px 7px">参照元アプリ</th>
+              <th style="text-align:left;padding:5px 7px">種別</th>
+              <th style="text-align:left;padding:5px 7px">参照元の設定</th>
+              <th style="text-align:left;padding:5px 7px">このアプリの項目</th>
+              <th style="text-align:left;padding:5px 7px">備考</th>
+            </tr></thead>
+            <tbody>${body}</tbody>
+          </table>
+        </div>
+        ${(data.errors || []).length ? `
+          <div style="margin-top:6px;font-size:11px;opacity:.75">
+            確認できなかったアプリ: ${(data.errors || []).slice(0, 20)
+          .map(e => `app ${escapeHtml(e.appId)}（${escapeHtml(e.reason)}）`).join(' / ')}${(data.errors || []).length > 20 ? ' ほか' : ''}
+          </div>` : ''}
+        <div style="margin-top:8px;display:flex;justify-content:flex-end">
+          <button id="kt-in-copy" class="btn" style="padding:2px 10px;font-size:11px">Copy MD</button>
+        </div>`;
+
+      $result.querySelector('#kt-in-copy')?.addEventListener('click', async () => {
+        const btn = $result.querySelector('#kt-in-copy');
+        const md = [
+          '# 他アプリからの参照（他アプリ → このアプリ）',
+          '',
+          `- 走査日時: ${when}`,
+          `- ${summary}`,
+          '',
+          '| 参照元アプリ | 種別 | 参照元の設定 | このアプリの項目 | 備考 |',
+          '| --- | --- | --- | --- | --- |',
+          ...rows.map(r => `| app ${r.appId} ${r.appName || ''} | ${r.kind} | ${r.sourceLabel || r.sourceField} | \`${r.targetField || ''}\` | ${r.note || ''} |`),
+        ].join('\n');
+        try {
+          await navigator.clipboard.writeText(md);
+          flashBtnText(btn, 'Copied!');
+        } catch (e) {
+          flashBtnText(btn, 'Failed');
+        }
+      }, { passive: true });
+    };
+
+    // 走査済みならキャッシュから復元して表示する（API呼び出しは発生しない）
+    const cached = KTIncoming.loadCache(String(appId));
+    if (cached) {
+      render(cached, true);
+      if (deps) {
+        try { KTDeps.applyIncomingRefs(deps, cached); } catch (e) { console.error(e); }
+      }
+    } else if ($status) {
+      $status.textContent = '未走査';
+    }
+
+    $scan.addEventListener('click', async () => {
+      $scan.disabled = true;
+      const original = $scan.textContent;
+      try {
+        const data = await KTIncoming.run(appId, {
+          includeActions: !!($actions && $actions.checked),
+          force: true,
+          onProgress: (done, total, phase) => {
+            if ($status) $status.textContent = total ? `${phase}… ${done} / ${total}` : `${phase}…`;
+            $scan.textContent = total ? `走査中 ${Math.round((done / total) * 100)}%` : '走査中…';
+          },
+        });
+        render(data, false);
+        // 依存関係データへ取り込み、変更影響の「他アプリ連携」にも反映する
+        if (deps) {
+          try { KTDeps.applyIncomingRefs(deps, data); } catch (e) { console.error(e); }
+        }
+      } catch (e) {
+        console.error('[KTIncoming] 走査に失敗しました', e);
+        if ($status) $status.textContent = '走査に失敗しました（詳細はブラウザのコンソール）';
+      } finally {
+        $scan.disabled = false;
+        $scan.textContent = original;
+      }
+    }, { passive: true });
+  }
+
+  /**
+   * Relationsタブを描画
+   * @param {HTMLElement|Document} root document か ルート要素
+   * @param {{lookups?:Array, relatedTables?:Array, actions?:Array}} relations buildRelations の結果
+   * @param {number|string} appId 対象アプリのID
+   * @param {object} deps 依存関係データ（アプリ間依存一覧の生成に使用。無くても従来3セクションは動作する）
+   */
+  function renderRelations(root, relations, appId, deps = null) {
     const view = root.querySelector('#view-relations');
     if (!view) return;
+
+    // 枠線などに使うテーマ色（ライト／ダーク両対応）
+    const BD = getThemeColors().border;
 
     const R = relations || {};
     const lookups = Array.isArray(R.lookups) ? R.lookups : [];
     const rts = Array.isArray(R.relatedTables) ? R.relatedTables : [];
     const acts = Array.isArray(R.actions) ? R.actions : [];
 
-    const esc = (v) => String(v ?? '');
-    const yn = (b) => (b ? '✅' : '—');
+    // ★エスケープ漏れ修正：HTMLに入れる値は escH（共通の escapeHtml）を必ず通す
+    const escH = (v) => escapeHtml(v);
+    const yn = (b) => (b === true ? '✅' : '—');
 
     const table = (headers, rows, colWidths = null) => `
       <table style="width:100%;border-collapse:collapse;font-size:12px;table-layout:fixed">
@@ -2711,28 +5762,27 @@
 
     lookups.forEach(lu => {
       const app = [lu?.relatedAppId || '', lu?.relatedAppCode || ''].filter(Boolean).join(' / ') || '—';
-      const mappingsHtml = (Array.isArray(lu?.fieldMappings) && lu.fieldMappings.length)
-        ? lu.fieldMappings.map(m => `${esc(m?.from || '—')} → ${esc(m?.to || '—')}`).join('<br>')
-        : '—';
-      const mappingsText = (Array.isArray(lu?.fieldMappings) && lu.fieldMappings.length)
-        ? lu.fieldMappings.map(m => `${esc(m?.from || '—')} → ${esc(m?.to || '—')}`).join(' / ')
-        : '—';
-      const keyHtml = lu?.relatedKeyField ? `<code>${esc(lu.relatedKeyField)}</code>` : '—';
+      const mappingsPlain = (Array.isArray(lu?.fieldMappings) && lu.fieldMappings.length)
+        ? lu.fieldMappings.map(m => `${m?.from || '—'} → ${m?.to || '—'}`)
+        : [];
+      const mappingsHtml = mappingsPlain.length ? mappingsPlain.map(escH).join('<br>') : '—';
+      const mappingsText = mappingsPlain.length ? mappingsPlain.join(' / ') : '—';
       const keyText = lu?.relatedKeyField || '—';
+      const keyHtml = lu?.relatedKeyField ? `<code>${escH(lu.relatedKeyField)}</code>` : '—';
       const picker = (Array.isArray(lu?.lookupPickerFields) && lu.lookupPickerFields.length)
         ? lu.lookupPickerFields.join(', ')
         : '—';
 
-      // 表示：code と label を分行
+      // 表示：code と label を分行（★従来は未エスケープでinnerHTMLへ入っていた）
       lookupRowsHtml.push([
-        `<code>${esc(lu?.code ?? '')}</code><br><small>${esc(lu?.label ?? '')}</small>`,
-        app,
+        `<code>${escH(lu?.code ?? '')}</code><br><small>${escH(lu?.label ?? '')}</small>`,
+        escH(app),
         keyHtml,
         mappingsHtml,
-        picker,
+        escH(picker),
       ]);
 
-      // DL：フィールド列は「ラベル（コード）」で1セルに集約
+      // DL：フィールド列は「ラベル（コード）」で1セルに集約（テキストなのでエスケープ不要）
       lookupRowsDL.push([
         `${lu?.label ?? ''}（${lu?.code ?? ''}）`,
         app,
@@ -2750,8 +5800,8 @@
 
     rts.forEach(rt => {
       const app = [rt?.relatedAppId || '', rt?.relatedAppCode || ''].filter(Boolean).join(' / ') || '—';
-      const cond = (rt?.condition?.field && rt?.condition?.relatedField)
-        ? `${esc(rt.condition.field)} = ${esc(rt.condition.relatedField)}`
+      const condText = (rt?.condition?.field && rt?.condition?.relatedField)
+        ? `${rt.condition.field} = ${rt.condition.relatedField}`
         : '—';
       const disp = (Array.isArray(rt?.displayFields) && rt.displayFields.length)
         ? rt.displayFields.join(', ')
@@ -2759,16 +5809,16 @@
       const sort = rt?.sort || '—';
 
       rtRowsHtml.push([
-        `<code>${esc(rt?.code ?? '')}</code><br><small>${esc(rt?.label ?? '')}</small>`,
-        app,
-        cond,
-        disp,
-        sort,
+        `<code>${escH(rt?.code ?? '')}</code><br><small>${escH(rt?.label ?? '')}</small>`,
+        escH(app),
+        escH(condText),
+        escH(disp),
+        escH(sort),
       ]);
       rtRowsDL.push([
         `${rt?.label ?? ''}（${rt?.code ?? ''}）`,
         app,
-        cond,
+        condText,
         disp,
         sort,
       ]);
@@ -2782,28 +5832,35 @@
 
     acts.forEach(a => {
       const app = [a?.toAppId || '', a?.toAppCode || ''].filter(Boolean).join(' / ') || '—';
-      const mapsHtml = (typeof a?.mappings === 'string' && a.mappings.length) ? a.mappings : '—';
-      const mapsText = (typeof a?.mappings === 'string' && a.mappings.length)
-        ? a.mappings.replace(/<br\s*\/?>/gi, ' / ')
-        : '—';
-      const entsText = (Array.isArray(a?.entities) && a.entities.length)
-        ? a.entities.map(e => `${esc(e?.code ?? '—')}（${esc(e?.type ?? '—')}）`).join(' / ')
-        : '—';
-      const enabled = !!a?.enabled;
+      // ★mappings は配列（旧形式の '<br>' 連結文字列にも後方互換で対応）
+      const mapsArr = Array.isArray(a?.mappings)
+        ? a.mappings
+        : (typeof a?.mappings === 'string' && a.mappings.length)
+          ? a.mappings.split(/<br\s*\/?>/i)
+          : [];
+      const mapsHtml = mapsArr.length ? mapsArr.map(escH).join('<br>') : '—';
+      const mapsText = mapsArr.length ? mapsArr.join(' / ') : '—';
+      const entsPlain = (Array.isArray(a?.entities) && a.entities.length)
+        ? a.entities.map(e => `${e?.code ?? '—'}（${e?.type ?? '—'}）`)
+        : [];
+      const entsHtml = entsPlain.length ? entsPlain.map(escH).join(' / ') : '—';
+      const entsText = entsPlain.length ? entsPlain.join(' / ') : '—';
+      // ★B4修正：buildRelations 側で enabled を保持するようにした（無い場合は null＝不明で '—' 表示）
+      const enabled = a?.enabled;
 
       actRowsHtml.push([
-        `<code>${esc(a?.name ?? '')}</code><br><small>${esc(a?.id ?? '')}</small>`,
+        `<code>${escH(a?.name ?? '')}</code><br><small>${escH(a?.id ?? '')}</small>`,
         yn(enabled),
-        app,
+        escH(app),
         mapsHtml,
-        entsText,
-        esc(a?.filterCond || ''),
+        entsHtml,
+        escH(a?.filterCond || ''),
       ]);
 
-      // CSVは TRUE/FALSE、MDは ✓/空欄 に合わせたい場合はここで分岐も可能だが、統一してTRUE/FALSEに寄せる
+      // CSV/MD：enabled 不明時は空欄
       actRowsDL.push([
         `${a?.id ?? ''} / ${a?.name ?? ''}`,
-        enabled ? 'TRUE' : 'FALSE',
+        enabled == null ? '' : (enabled ? 'TRUE' : 'FALSE'),
         app,
         mapsText,
         entsText,
@@ -2812,42 +5869,161 @@
     });
 
     // ---------- セクション描画（DLは *DL用行* を渡す） ----------
-    // Lookups：開く
+    // ★構成変更：先頭の「アプリ間依存関係」を概要として常時表示し、
+    //   個別設定の3セクションは「詳細」として初期は折りたたむ（同じ情報の二重表示を避けるため）。
+    //   タイトルに件数を出しているので、折りたたんだままでも有無と規模が分かる。
+    const cnt = (n) => `（${n}件）`;
+
+    // 詳細：Lookups
     const widthsLookups = ['22%', '16%', '12%', '30%', '20%'];
     const { html: secLU, bind: bindLU } =
       sectionWithDL(
-        'Lookups（ルックアップ）',
+        `詳細：Lookups（ルックアップ）${cnt(lookupRowsDL.length)}`,
         headersLookups, lookupRowsDL,
         table(headersLookups, lookupRowsHtml, widthsLookups),
         'relations_lookups',
-        { appId, defaultOpen: true, indicator: true, relationType: 'lookup' }
+        { appId, defaultOpen: false, indicator: true, relationType: 'lookup' }
       );
 
-    // Related Records：閉じる
+    // 詳細：Related Records
     const widthsRT = ['24%', '16%', '18%', '28%', '14%'];
     const { html: secRT, bind: bindRT } =
       sectionWithDL(
-        'Related Records（関連レコード）',
+        `詳細：Related Records（関連レコード）${cnt(rtRowsDL.length)}`,
         headersRT, rtRowsDL,
         table(headersRT, rtRowsHtml, widthsRT),
         'relations_relatedTables',
-        { appId, defaultOpen: true, indicator: true, relationType: 'Related' }
+        { appId, defaultOpen: false, indicator: true, relationType: 'Related' }
       );
 
-    // Actions：閉じる
+    // 詳細：Actions
     const widthsAC = ['20%', '8%', '18%', '24%', '20%', '10%'];
     const { html: secAC, bind: bindAC } =
       sectionWithDL(
-        'Actions（レコード作成アクション）',
+        `詳細：Actions（レコード作成アクション）${cnt(actRowsDL.length)}`,
         headersAC, actRowsDL,
         table(headersAC, actRowsHtml, widthsAC),
         'relations_actions',
-        { appId, defaultOpen: true, indicator: true, relationType: 'action' }
+        { appId, defaultOpen: false, indicator: true, relationType: 'action' }
       );
 
+    // ---------- アプリ間依存関係（概要）----------
+    // ルックアップ／関連レコード／アプリアクション／JS内アプリID参照を1表に集約する。
+    // 下の「詳細：…」セクションが各設定の内訳で、この表はその横断ビューにあたる。
+    // Toolkit単体で確実に取れるもの（設定API）と、JS静的解析による推定を明確に分ける。
+    const headersAL = ['接続種別', '自アプリ側', '接続先アプリ', '接続先フィールド', '備考', '確度'];
+    const CONF_JA = { CERTAIN: '確実', LIKELY: '可能性が高い', UNCERTAIN: '要確認', NOT_ANALYZED: '解析対象外' };
+
+    const alRows = deps ? KTDeps.buildAppLinks(deps, appId) : [];
+    const alRowsHtml = [];
+    const alRowsDL = [];
+
+    alRows.forEach(r => {
+      // アプリ名が解決できていれば「app 100 顧客管理」、できなければ「app 100（名称取得不可）」
+      const destApp = r.destAppId === '不明' ? '不明（変数指定）' : (r.destAppLabel || `app ${r.destAppId}`);
+      const lineNote = (Array.isArray(r.lines) && r.lines.length)
+        ? `（${r.lines.slice(0, 5).map(n => `${n}行目`).join(', ')}${r.lines.length > 5 ? ' ほか' : ''}）`
+        : '';
+      const noteFull = `${r.note}${lineNote}`;
+      const confJa = CONF_JA[r.confidence] || r.confidence;
+      const srcMark = r.dataSource === 'JS_STATIC' ? '推定' : '設定';
+
+      // 接続先アプリはリンクにする（別タブで開く）
+      const destAppHtml = /^\d+$/.test(String(r.destAppId))
+        ? `<a href="${escH(KTApi.appUrl(r.destAppId))}" target="_blank" rel="noopener noreferrer"
+             style="color:inherit" title="このアプリを別タブで開きます">${escH(destApp)} 🔗</a>`
+        : escH(destApp);
+
+      alRowsHtml.push([
+        escH(r.kind),
+        escH(r.selfSide),
+        destAppHtml,
+        escH(r.destField),
+        escH(noteFull),
+        `<span class="pill">${escH(srcMark)}／${escH(confJa)}</span>`,
+      ]);
+      alRowsDL.push([r.kind, r.selfSide, destApp, r.destField, noteFull, `${srcMark}／${confJa}`]);
+    });
+
+    // 取得可能性の説明（取得できないものを取得できるように見せない）
+    // 取得できる情報／できない情報を明示する（折りたたみ。既定は閉じる）
+    const alNote = `
+      <details style="margin:0 0 8px">
+        <summary style="cursor:pointer;font-size:11px;opacity:.85;padding:6px 8px;border:1px solid #f59e0b55;background:#f59e0b0f;border-radius:8px">
+          この一覧で分かること・分からないこと（クリックで開く）
+        </summary>
+        <div style="padding:8px 10px;margin-top:6px;border:1px solid #8883;border-radius:8px;font-size:11px;line-height:1.8">
+          <div>・<b>設定</b>＝アプリ設定APIから取得（ルックアップ／関連レコード／アプリアクション）。確実な情報です。
+            各設定の詳細な項目は、下の「詳細：…」セクションを開くと確認できます。</div>
+          <div>・<b>推定</b>＝JavaScriptの静的解析による検出。実行時にしか決まらない値は特定できません。
+            Field Scannerで「Scan」を実行すると反映されます${deps ? '' : '（現在は依存データが未生成です）'}。</div>
+          <div>・<b>この一覧は「このアプリ → 他アプリ」の向きのみ</b>です。他アプリからこのアプリへの参照は、
+            アプリ設定APIでは取得できません（同一ドメインの他アプリを走査すれば取得可能ですが、現時点では未対応です）。</div>
+          <div>・プラグイン設定内の接続先アプリ、および外部URLのJavaScriptは<b>解析対象外</b>です。</div>
+          <div>・接続先のアプリ名は、閲覧権限があるアプリのみ表示されます。権限が無い場合は「名称取得不可」と表示します。</div>
+        </div>
+      </details>
+    `;
+
+    // 接続先が1件も無い場合の表示（空表よりも状況が伝わる）
+    const alEmpty = `
+      <div style="padding:14px;opacity:.8;font-size:12px">
+        他アプリへの接続は検出されませんでした。
+        ${deps ? 'JavaScript内のアプリID参照は、Field Scannerで「Scan」を実行すると検出されます。' : ''}
+      </div>
+    `;
+
+    const widthsAL = ['12%', '20%', '16%', '16%', '24%', '12%'];
+    const destAppCount = new Set(alRows.map(r => r.destAppId)).size;
+    const alTitle = alRows.length
+      ? `アプリ間依存関係：このアプリ → 他アプリ（${destAppCount}アプリ / ${alRows.length}件）`
+      : 'アプリ間依存関係：このアプリ → 他アプリ';
+    const { html: secAL, bind: bindAL } =
+      sectionWithDL(
+        alTitle,
+        headersAL, alRowsDL,
+        alNote + (alRows.length ? table(headersAL, alRowsHtml, widthsAL) : alEmpty),
+        'relations_appLinks',
+        { appId, defaultOpen: true, indicator: true, relationType: 'appLink' }
+      );
+
+    // ---------- 他アプリからの参照（走査が必要）----------
+    // アプリ設定APIでは「誰がこのアプリを参照しているか」を直接取得できないため、
+    // 同一ドメインの各アプリを1つずつ確認する。API呼び出しがアプリ数に比例するので、
+    // 自動実行はせず、ユーザーが明示的に走査を実行する形にする。
+    const secIN = `
+      <details id="kt-incoming" open style="border:1px solid ${BD};border-radius:10px;padding:8px 10px;margin-bottom:10px">
+        <summary style="cursor:pointer;font-weight:600;font-size:13px">
+          他アプリからの参照（他アプリ → このアプリ）
+        </summary>
+        <div style="font-size:11px;opacity:.85;margin:6px 0 8px;line-height:1.8">
+          この向きの依存は、アプリ設定APIでは直接取得できません。
+          同一ドメインのアプリを1件ずつ確認することで判明します。<br>
+          <b>アプリ数に比例してAPI呼び出しが発生する</b>ため、実行はボタン操作のみです（自動実行はしません）。
+          結果は24時間キャッシュされます。<br>
+          <span style="opacity:.8">
+            ※ 閲覧権限のないアプリは確認できません。件数を「確認できず」として表示します。<br>
+            ※ ルックアップ・関連レコードはレコード閲覧権限で確認できます。
+            アプリアクションはアプリ管理権限が必要なため、取得できない場合があります。
+          </span>
+        </div>
+        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:8px">
+          <button id="kt-in-scan" class="btn">走査する</button>
+          <label style="display:inline-flex;align-items:center;gap:4px;font-size:12px;cursor:pointer"
+                 title="アプリアクションも確認します。API呼び出しが約2倍になります">
+            <input type="checkbox" id="kt-in-actions" checked style="margin:0">
+            <span>アプリアクションも確認</span>
+          </label>
+          <span id="kt-in-status" style="font-size:11px;opacity:.8"></span>
+        </div>
+        <div id="kt-in-result"></div>
+      </details>
+    `;
+
     // まとめて描画 & バインド
-    view.innerHTML = `${secLU}${secRT}${secAC}`;
-    bindLU(view); bindRT(view); bindAC(view);
+    view.innerHTML = `${secAL}${secIN}${secLU}${secRT}${secAC}`;
+    bindAL(view); bindLU(view); bindRT(view); bindAC(view);
+    bindIncoming(view, appId, deps);
 
   }
 
@@ -3447,11 +6623,17 @@
     const relations = Object.values(props).flatMap(f => {
       const rels = [];
       if (f.lookup) {
+        // ★B6修正：従来 key に fieldMappings のオブジェクトがそのまま入っていた。
+        //   参照キーは relatedKeyField、コピー設定は mappings として文字列で持たせる。
         rels.push({
           kind: 'LOOKUP',
           field: f.code,
-          toApp: f.lookup?.relatedApp?.app,
-          key: (f.lookup?.fieldMappings || []).map(m => m.field)
+          toApp: f.lookup?.relatedApp?.app ?? null,
+          key: f.lookup?.relatedKeyField ?? null,
+          mappings: (f.lookup?.fieldMappings || []).map(m => ({
+            from: m?.relatedField?.code ?? m?.relatedField ?? null,
+            to: m?.field?.code ?? m?.field ?? null,
+          })),
         });
       }
       if (f.type === 'REFERENCE_TABLE' && f.referenceTable) {
@@ -3466,7 +6648,11 @@
     });
 
     // レイアウト概要
-    const layoutOutline = (pref.layout?.layout || []).map(row => ({
+    // ★B6修正：prefetchの layout は配列（他の描画関数も配列前提）。
+    //   従来は pref.layout.layout を見ていたため、常に空になっていた。
+    //   将来 { layout: [] } 形式で渡された場合にも備えて両対応にする。
+    const layoutArray = Array.isArray(pref.layout) ? pref.layout : (pref.layout?.layout || []);
+    const layoutOutline = layoutArray.map(row => ({
       type: row.type,
       title: row.code ? (props[row.code]?.label || row.code) : (row.label || null),
       fields: (row.fields || []).map(it => ({
@@ -3491,7 +6677,11 @@
     return {
       meta: {
         appId: pref.appId,
-        appName: pref.app?.name || null,
+        // ★B6修正：従来は存在しないプロパティ pref.app?.name を参照していた。
+        //   アプリ名は /k/v1/app/settings から取得できるため、そこから設定する。
+        //   （権限不足などで取得できなかった場合のみ null）
+        appName: pref.settings?.name ?? null,
+        appDescription: pref.settings?.description ?? null,
         retrievedAt: new Date().toISOString()
       },
       fields: flatFields,
@@ -3499,9 +6689,18 @@
       views,
       reports,
       process: pref.status ? { enable: !!pref.status.enable, states: pref.status.states || [], actions: pref.status.actions || [] } : null,
-      notifications: pref.notifs || null,
+      // ★B6修正：prefetch のプロパティ名に合わせる（pref.notifs / pref.acl は存在しなかった）
+      notifications: {
+        general: pref.generalNotify ?? null,
+        perRecord: pref.perRecordNotify ?? null,
+        reminder: pref.reminderNotify ?? null,
+      },
       customize,
-      acl: pref.acl || null,
+      acl: {
+        app: pref.appAcl ?? null,
+        record: pref.recordAcl ?? null,
+        field: pref.fieldAcl ?? null,
+      },
       actions: pref.actions?.actions || [],
       relations
     };
@@ -3727,7 +6926,7 @@
 
       el.innerHTML = `
         <div style="border:1px solid ${BD};border-radius:999px;padding:2px 6px;font-size:11px">${tag}</div>
-        <div style="flex:1">${file.name}</div>
+        <div style="flex:1">${escapeHtml(file.name)}</div>
         <div style="opacity:.6;font-size:11px">${size ? size + ' Bytes' : ''}</div>
       `;
 
@@ -3835,7 +7034,7 @@
           <div style="margin-top:8px; border:1px solid ${BD}; border-radius:8px; overflow:hidden;">
             <div style="padding:6px 8px; font-weight:600; ${isDark ? 'background:#101010;color:#eee;' : 'background:#f7f7f7;color:#111;'}">
               Snippet Overview
-              <span>（ファイル:</span> <strong>${file.name}）</strong>
+              <span>（ファイル:</span> <strong>${escapeHtml(file.name)}）</strong>
             </div>
             <div style="padding:8px; ${isDark ? 'background:#0f0f0f;color:#ddd;' : 'background:#fafafa;color:#333;'}">
               <pre style="margin:0; white-space:pre-wrap; font-size:12px; line-height:1.4; max-height:180px; overflow:auto;">${escapeHtml(head)}</pre>
@@ -3978,24 +7177,8 @@
         $name.select();
       });
     }
-    const sleep = (ms) => new Promise(r => setTimeout(r, ms));
-    async function waitDeploy(appId) {
-      const maxWaitMs = 60_000, intervalMs = 1500;
-      let waited = 0;
-      while (true) {
-        await sleep(intervalMs);
-        waited += intervalMs;
-        const st = await kintone.api(
-          kintone.api.url('/k/v1/preview/app/deploy.json', true),
-          'GET',
-          { apps: [Number(appId)] }
-        );
-        const s = st?.apps?.[0]?.status;
-        if (s === 'SUCCESS') return;
-        if (s === 'FAIL') throw new Error('Deploy failed.');
-        if (waited >= maxWaitMs) throw new Error('Deploy timeout.');
-      }
-    }
+    // ★共通化：実体は KTApi.waitDeploy
+    const waitDeploy = (appId) => KTApi.waitDeploy(appId);
 
     async function putAppendFileToCustomizeWithTargets(app, keys, { toDesktop, toMobile }, assetType) {
       // assetType: 'js' | 'css'
@@ -4342,7 +7525,6 @@
 
     // === ヘルパ ===
     const apiUrl = (p) => kintone.api.url(p, true);
-    const sleep = (ms) => new Promise(r => setTimeout(r, ms));
     const CURRENT = { target: 'desktop', name: null };
 
     // src値 → kind/js|css, target/desktop|mobile のマッピング
@@ -4360,38 +7542,10 @@
           : 'text/javascript';
 
     // kintone customize
-    async function getCustomize(app) {
-      try {
-        const prev = await kintone.api(apiUrl('/k/v1/preview/app/customize.json'), 'GET', { app });
-        return { source: 'preview', data: prev };
-      } catch {
-        const prod = await kintone.api(apiUrl('/k/v1/app/customize.json'), 'GET', { app });
-        return { source: 'production', data: prod };
-      }
-    }
-    async function downloadByKey(fileKey) {
-      const res = await fetch(apiUrl('/k/v1/file.json') + '?fileKey=' + encodeURIComponent(fileKey), {
-        method: 'GET',
-        headers: { 'X-Requested-With': 'XMLHttpRequest' },
-        credentials: 'same-origin'
-      });
-      if (!res.ok) throw new Error('Download error ' + res.status);
-      return await res.text();
-    }
-    async function uploadOnce(name, content, mime) {
-      const fd = new FormData();
-      try { fd.append('__REQUEST_TOKEN__', kintone.getRequestToken()); } catch { }
-      fd.append('file', new Blob([content], { type: mime }), name);
-      const res = await fetch(apiUrl('/k/v1/file.json'), {
-        method: 'POST',
-        headers: { 'X-Requested-With': 'XMLHttpRequest' },
-        credentials: 'same-origin',
-        body: fd
-      });
-      if (!res.ok) throw new Error('Upload ' + res.status);
-      const { fileKey } = await res.json();
-      return fileKey;
-    }
+    // ★共通化：実体は KTApi（重複実装を廃止）
+    const getCustomize = (app) => KTApi.getCustomize(app);
+    const downloadByKey = (fileKey) => KTApi.downloadFile(fileKey);
+    const uploadOnce = (name, content, mime) => KTApi.uploadFile(name, content, mime);
     function getKindByName(name) {
       const n = String(name || '').toLowerCase().trim();
       if (n.endsWith('.css')) return 'css';
@@ -4401,7 +7555,12 @@
     }
     async function putPreviewReplace(app, target /* 'desktop'|'mobile' */, name, fileKey) {
       const kind = getKindByName(name);     // ← js or css
-      const { data } = await getCustomize(app); // 既存wrapper想定（preview側を返す）
+      const { data, source } = await KTApi.getCustomize(app);
+      if (source !== 'preview') {
+        // previewを取得できなかった場合、production をベースにPUTすることになる。
+        // preview側の未反映の変更が失われる可能性があるため明示的に警告する。
+        console.warn('[Customize] preview設定を取得できなかったため、production設定をベースに更新します');
+      }
 
       const desk = data.desktop || { js: [], css: [] };
       const mobi = data.mobile || { js: [], css: [] };
@@ -4428,20 +7587,11 @@
         mobile: mobi
       };
 
-      await kintone.api(apiUrl('/k/v1/preview/app/customize.json'), 'PUT', payload);
+      await KTApi.putPreviewCustomize(app, payload);
     }
-    async function deployAndWait(app, pollMs = 1500, timeoutMs = 60000) {
-      await kintone.api(apiUrl('/k/v1/preview/app/deploy.json'), 'POST', { apps: [{ app, revision: -1 }], revert: false });
-      const deadline = Date.now() + timeoutMs;
-      while (Date.now() < deadline) {
-        await sleep(pollMs);
-        const st = await kintone.api(apiUrl('/k/v1/preview/app/deploy.json'), 'GET', { apps: [Number(app)] });
-        const s = st?.apps?.[0]?.status;
-        if (s === 'SUCCESS' || s === 'PROCESSED') return;
-        if (s === 'FAIL' || s === 'FAILED') throw new Error('Deploy failed');
-      }
-      throw new Error('Deploy timeout');
-    }
+    // ★共通化：実体は KTApi.deployAndWait
+    const deployAndWait = (app, pollMs = 1500, timeoutMs = 60000) =>
+      KTApi.deployAndWait(app, { pollMs, timeoutMs });
 
     // GitHub snippets
     async function loadSnippets() {
@@ -4450,7 +7600,7 @@
       if (!Array.isArray(json)) return [];
       return json.filter(x => x.type === 'file' && /\.js$/i.test(x.name));
     }
-    const escapeHtml = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    // ★修正：引用符未対応のローカル escapeHtml を廃止し、共通の escapeHtml を使用する
 
     // === ファイル行：Templatesタブの見た目に合わせたデザイン ===
     function fileRow({ name, size, badge = 'JS' }) {
@@ -4459,7 +7609,7 @@
       const sz = size ? Number(size) : 0; // "12345" でも OK
       el.innerHTML = `
         <div style="border:1px solid ${BD};border-radius:999px;padding:2px 6px;font-size:11px">${badge}</div>
-        <div style="flex:1">${name}</div>
+        <div style="flex:1">${escapeHtml(name)}</div>
         <div style="opacity:.6;font-size:11px">${sz ? sz.toLocaleString() + ' Bytes' : ''}</div>
       `;
       return el;
@@ -4503,7 +7653,7 @@
             $overview.innerHTML = /* …（既存のプレビューHTMLそのまま）… */ `
               <div style="margin-top:8px; border:1px solid ${BD}; border-radius:8px; overflow:hidden;">
                 <div style="padding:6px 8px; font-weight:600; ${isDark ? 'background:#101010;color:#eee;' : 'background:#f7f7f7;color:#111;'}">
-                  Snippet Overview <strong>${f.name}</strong>
+                  Snippet Overview <strong>${escapeHtml(f.name)}</strong>
                 </div>
                 <div style="padding:8px; ${isDark ? 'background:#0f0f0f;color:#ddd;' : 'background:#fafafa;color:#333;'}">
                   <pre style="margin:0; white-space:pre-wrap; font-size:12px; line-height:1.4; max-height:180px; overflow:auto;">${escapeHtml(head)}</pre>
@@ -4746,12 +7896,15 @@
         if (!code) throw new Error('コードが空です');
 
         //ダイアログで入力
-        const fileType = CURRENT.target;
+        // ★バグ修正：アップロード先が 'desktop' 固定になっており、
+        //   モバイルJS/CSSを選択していても desktop 側に登録されていた。
+        //   選択中のターゲット（CURRENT.target）を使用する。
+        const fileType = CURRENT.target === 'mobile' ? 'mobile' : 'desktop';
         const form = await openUploadDialog(currentFileName, fileType);
         if (!form) return; // cancel
 
         const fileKey = await uploadOnce(currentFileName, code, getMimeByName(currentFileName));
-        await putPreviewReplace(appId, 'desktop', currentFileName, fileKey);
+        await putPreviewReplace(appId, fileType, currentFileName, fileKey);
         await deployAndWait(appId);
         alert(`✅ デプロイ完了：${currentFileName} `);
         await refreshList();
@@ -4781,12 +7934,609 @@
 
 
   // ----------------------------
+  // [Feature] Deps（依存関係グラフ）
+  //  - 全件を最初から描かず、起点と絞り込みを選んで部分グラフを描く
+  //  - ノード数の上限を設け、超過時は警告して切り詰める
+  //  - 図／一覧の切替と Mermaidコードのコピーに対応する
+  // ----------------------------
+  // Mermaidの設定を1度だけ適用する
+  //  既定の securityLevel は 'strict' で、click（ノードのリンク）が無効になる。
+  //  リンクを使うため 'antiscript'（scriptタグは除去、リンクは許可）へ変更する。
+  //  ラベルは生成側で危険文字を除去済みのため、HTMLが混入することはない。
+  let __ktMermaidConfigured = false;
+  function ensureMermaidConfig() {
+    if (__ktMermaidConfigured) return true;
+    if (!(window.mermaid && typeof window.mermaid.initialize === 'function')) return false;
+    try {
+      window.mermaid.initialize({ startOnLoad: false, securityLevel: 'antiscript' });
+      __ktMermaidConfigured = true;
+      return true;
+    } catch (e) {
+      console.warn('[Deps] Mermaidの設定に失敗しました（図中のリンクは無効になります）', e);
+      return false;
+    }
+  }
+
+  /**
+   * Depsタブへ切り替え、指定フィールドを起点にしたグラフを表示する
+   * （Fieldsタブの「図」ボタンから呼ばれる）
+   */
+  function openDepsGraphFor(root, fieldCode) {
+    const tabBtn = root.querySelector('#tab-deps');
+    if (tabBtn) tabBtn.click();
+
+    const $focus = root.querySelector('#dp-focus');
+    if (!$focus) return;
+    const value = `FIELD:${fieldCode}`;
+    // 選択肢に存在する場合のみ設定する（依存が1件も無いフィールドは選択肢に無い場合がある）
+    const exists = [...$focus.options].some(o => o.value === value);
+    if (!exists) return;
+    if ($focus.value !== value) {
+      $focus.value = value;
+      // change を発火して既存の描画処理に任せる（描画ロジックを二重に持たない）
+      $focus.dispatchEvent(new Event('change'));
+    }
+  }
+
+  function renderDepsGraph(root, deps, appId, fieldsN = []) {
+    const el = root.querySelector('#view-deps');
+    if (!el) return;
+
+    const C = getThemeColors();
+    const BD = C.border;
+
+    if (!deps) {
+      el.innerHTML = `<div style="padding:14px;opacity:.8">依存関係データを生成できませんでした。</div>`;
+      return;
+    }
+
+    // 起点候補（フィールド）。ラベルとコードを併記する
+    const fieldNodes = (deps.nodes || [])
+      .filter(n => n.type === 'FIELD')
+      .sort((a, b) => String(a.name).localeCompare(String(b.name), 'ja'));
+
+    const scopeKeys = Object.keys(KTDeps.GRAPH_SCOPES);
+    // チェックボックス自体と文字を、図のノード色と同じ色にする（別途の色見本は置かない）
+    // ダークモードでは沈まないよう明るい色を使う
+    const scopeChecks = scopeKeys.map(k => {
+      const sc = KTDeps.GRAPH_SCOPES[k];
+      const col = (C.isDark ? sc.colorDark : sc.color) || '#888';
+      return `
+      <label style="display:inline-flex;align-items:center;gap:4px;white-space:nowrap;cursor:pointer;color:${col}">
+        <input type="checkbox" class="dp-scope" value="${escapeHtml(k)}" checked style="accent-color:${col};margin:0">
+        <span>${escapeHtml(sc.label)}</span>
+      </label>`;
+    }).join('');
+
+    el.innerHTML = `
+      <div style="display:flex;flex-direction:column;gap:10px">
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap">
+          <div style="font-weight:700">Dependency Graph</div>
+          <div style="display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end;align-items:center">
+            <label style="display:inline-flex;align-items:center;gap:4px;cursor:pointer;font-size:12px;white-space:nowrap"
+                   title="図の代わりに依存関係を表で表示します">
+              <input type="checkbox" id="dp-list-mode" style="margin:0">
+              <span>一覧で表示</span>
+            </label>
+            <button id="dp-draw" class="btn" title="最新の依存関係データで描き直します（Field ScannerのScan後などに使用）">再描画</button>
+            <select id="dp-format" title="出力する形式を選びます"
+                    style="padding:4px 8px;border-radius:8px;border:1px solid ${BD};background:${C.bgInput};color:${C.text};font-size:12px">
+              <option value="mermaid" selected>Mermaid（表示中の図）</option>
+              <option value="md">Markdown（アプリ全体）</option>
+              <option value="md-used">Markdown（利用ありのみ）</option>
+              <option value="csv">CSV（アプリ全体）</option>
+              <option value="json">JSON（アプリ全体）</option>
+            </select>
+            <button id="dp-copy" class="btn" title="選択した形式をクリップボードへコピーします">Copy</button>
+            <button id="dp-dl" class="btn" title="選択した形式をファイルとして保存します">DL</button>
+          </div>
+        </div>
+
+        <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;font-size:12px">
+          <label style="display:inline-flex;align-items:center;gap:6px">
+            <span>起点</span>
+            <select id="dp-focus" style="max-width:260px;padding:4px 8px;border-radius:8px;border:1px solid ${BD};background:${C.bgInput};color:${C.text}">
+              <option value="">（指定なし：全体）</option>
+              ${fieldNodes.map(n => {
+      const code = String(n.id).replace(/^FIELD:/, '');
+      const text = n.name === code ? code : `${n.name}（${code}）`;
+      return `<option value="${escapeHtml(n.id)}">${escapeHtml(text)}</option>`;
+    }).join('')}
+            </select>
+          </label>
+
+          <label style="display:inline-flex;align-items:center;gap:6px">
+            <span>範囲</span>
+            <select id="dp-depth" style="padding:4px 8px;border-radius:8px;border:1px solid ${BD};background:${C.bgInput};color:${C.text}">
+              <option value="1" selected>直接依存のみ</option>
+              <option value="2">直接＋間接依存</option>
+            </select>
+          </label>
+
+          <label style="display:inline-flex;align-items:center;gap:6px" title="表示するノード数の上限">
+            <span>上限(ノード)</span>
+            <select id="dp-max" style="padding:4px 8px;border-radius:8px;border:1px solid ${BD};background:${C.bgInput};color:${C.text}">
+              <option value="20">20</option>
+              <option value="30" selected>30</option>
+              <option value="60">60</option>
+              <option value="120">120（重い）</option>
+            </select>
+          </label>
+
+          <label style="display:inline-flex;align-items:center;gap:6px">
+            <span>向き</span>
+            <select id="dp-dir" style="padding:4px 8px;border-radius:8px;border:1px solid ${BD};background:${C.bgInput};color:${C.text}">
+              <option value="LR" selected>横</option>
+              <option value="TD">縦</option>
+            </select>
+          </label>
+
+          <label style="display:inline-flex;align-items:center;gap:4px;cursor:pointer;white-space:nowrap"
+                 title="フィールド同士の関係だけを表示します">
+            <input type="checkbox" id="dp-fields-only" style="margin:0">
+            <span>フィールドのみ</span>
+          </label>
+
+          <label style="display:inline-flex;align-items:center;gap:4px;cursor:pointer;white-space:nowrap"
+                 title="種別ごとに枠で囲んで整理します">
+            <input type="checkbox" id="dp-group" checked style="margin:0">
+            <span>種別で囲む</span>
+          </label>
+
+          <label style="display:inline-flex;align-items:center;gap:4px;cursor:pointer;white-space:nowrap"
+                 title="矢印のラベル。関係が多いと文字量で読みにくくなるため、自動では省略します">
+            <input type="checkbox" id="dp-labels" style="margin:0">
+            <span>関係ラベル</span>
+          </label>
+
+          <label style="display:inline-flex;align-items:center;gap:4px;cursor:pointer;white-space:nowrap"
+                 title="ルックアップ等の相手アプリ側フィールドを、接続先アプリ1つにまとめます">
+            <input type="checkbox" id="dp-fold" checked style="margin:0">
+            <span>外部項目を集約</span>
+          </label>
+        </div>
+
+
+        <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center;font-size:12px;padding:6px 8px;border:1px solid ${BD};border-radius:8px">
+          <span style="opacity:.75">表示対象:</span>${scopeChecks}
+          <span id="dp-legend" style="margin-left:auto;display:flex;gap:10px;align-items:center;font-size:11px;opacity:.9;white-space:nowrap">
+            <span title="設定から取得した確実な依存">─ 実線＝確実</span>
+            <span title="条件式・計算式・JavaScriptの解析による推定">┄ 破線＝推定</span>
+            <span title="「起点」で選んだフィールドは、図の中で赤い太枠で表示されます">
+              <span style="display:inline-block;padding:0 5px;border:2px solid #ef4444;border-radius:3px;line-height:1.3">A</span>
+              赤枠＝選択した起点
+            </span>
+          </span>
+        </div>
+
+        <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;font-size:12px">
+          <span>検索</span>
+          <input id="dp-search" type="search" placeholder="フィールド名・設定名・JSファイル名・アプリ名など（空白区切りでAND）"
+                 style="flex:1;min-width:260px;padding:4px 8px;border-radius:8px;border:1px solid ${BD};background:${C.bgInput};color:${C.text}" />
+          <span id="dp-search-count" style="font-size:11px;opacity:.75;white-space:nowrap"></span>
+          <span id="dp-search-hint" style="font-size:10px;opacity:.55;white-space:nowrap;display:none">行クリックで起点に設定</span>
+        </div>
+        <div id="dp-search-result"></div>
+        <style>
+          .dp-badge{
+            display:inline-block;padding:0 5px;border:1px solid currentColor;border-radius:999px;
+            font-size:10px;opacity:.7;margin-right:3px;
+          }
+          #dp-search-result tr[data-focus]:not([data-focus=""]):hover{ background:rgba(128,128,128,.12); }
+        </style>
+
+        <div id="dp-status" style="font-size:11px;opacity:.8"></div>
+        <div id="dp-warn" style="display:none"></div>
+        <div id="dp-canvas" style="border:1px solid ${BD};border-radius:10px;padding:10px;overflow:auto;max-height:60vh"></div>
+      </div>
+    `;
+
+    const $focus = el.querySelector('#dp-focus');
+    const $depth = el.querySelector('#dp-depth');
+    const $max = el.querySelector('#dp-max');
+    const $fieldsOnly = el.querySelector('#dp-fields-only');
+    const $dir = el.querySelector('#dp-dir');
+    const $group = el.querySelector('#dp-group');
+    const $labels = el.querySelector('#dp-labels');
+    const $fold = el.querySelector('#dp-fold');
+    const $listMode = el.querySelector('#dp-list-mode');
+    const $status = el.querySelector('#dp-status');
+    const $search = el.querySelector('#dp-search');
+    const $searchCount = el.querySelector('#dp-search-count');
+    const $searchResult = el.querySelector('#dp-search-result');
+    const $searchHint = el.querySelector('#dp-search-hint');
+    const $warn = el.querySelector('#dp-warn');
+    const $canvas = el.querySelector('#dp-canvas');
+
+    let lastCode = '';
+    let renderSeq = 0; // 再描画の競合を避けるための通し番号
+    let lastFocusMermaidId = null; // 起点ノードのMermaid上のID（描画後の強調に使う）
+
+    const currentOptions = () => ({
+      focusId: $focus.value || null,
+      depth: Number($depth.value) || 1,
+      maxNodes: Number($max.value) || 60,
+      fieldsOnly: $fieldsOnly.checked,
+      foldExternalFields: $fold.checked,
+      scopes: [...el.querySelectorAll('.dp-scope')].filter(c => c.checked).map(c => c.value),
+    });
+    // ラベルは既定を 'auto'（関係が多いときだけ省略）とし、チェック時は常に表示する
+    const mermaidOptions = (focusId) => ({
+      focusId,
+      direction: $dir.value === 'TD' ? 'TD' : 'LR',
+      group: $group.checked,
+      showLabels: $labels.checked ? true : 'auto',
+      // 他アプリのノードだけリンクにする（自アプリ・不明は対象外）
+      linkResolver: (n) => {
+        if (n.type !== 'APP') return null;
+        const id = String(n.id).replace(/^APP:/, '');
+        if (!/^\d+$/.test(id) || id === String(appId)) return null;
+        return KTApi.appUrl(id);
+      },
+    });
+
+    // 確度の日本語表記（一覧表示で使う）
+    const CONF_JA = { CERTAIN: '確実', LIKELY: '可能性が高い', UNCERTAIN: '要確認', NOT_ANALYZED: '解析対象外' };
+
+    const renderList = (sub) => {
+      if (!sub.edges.length) {
+        $canvas.innerHTML = `<div style="padding:10px;opacity:.8">該当する依存関係はありません。</div>`;
+        return;
+      }
+      // 接続先がアプリの場合はリンクにする
+      const targetCell = (e) => {
+        const text = e.targetName || e.targetId;
+        if (e.targetType !== 'APP' || !/^\d+$/.test(String(e.targetId))) return escapeHtml(text);
+        return `<a href="${escapeHtml(KTApi.appUrl(e.targetId))}" target="_blank" rel="noopener noreferrer"
+                   style="color:inherit">${escapeHtml(text)} 🔗</a>`;
+      };
+      const rows = sub.edges.map(e => `
+        <tr>
+          <td style="padding:6px 8px;border-bottom:1px solid ${BD}">${escapeHtml(e.sourceName || e.sourceId)}</td>
+          <td style="padding:6px 8px;border-bottom:1px solid ${BD};white-space:nowrap">→ ${escapeHtml(e.relationType)}</td>
+          <td style="padding:6px 8px;border-bottom:1px solid ${BD}">${targetCell(e)}</td>
+          <td style="padding:6px 8px;border-bottom:1px solid ${BD};white-space:nowrap">${escapeHtml(CONF_JA[e.confidence] || e.confidence)}</td>
+        </tr>`).join('');
+      $canvas.innerHTML = `
+        <table style="width:100%;border-collapse:collapse;font-size:12px">
+          <thead><tr>
+            <th style="text-align:left;padding:6px 8px;border-bottom:1px solid ${BD}">利用する側</th>
+            <th style="text-align:left;padding:6px 8px;border-bottom:1px solid ${BD}">関係</th>
+            <th style="text-align:left;padding:6px 8px;border-bottom:1px solid ${BD}">利用される側</th>
+            <th style="text-align:left;padding:6px 8px;border-bottom:1px solid ${BD}">確度</th>
+          </tr></thead>
+          <tbody>${rows}</tbody>
+        </table>`;
+    };
+
+    const renderDiagram = (code, seq) => {
+      $canvas.innerHTML = '';
+      if (!code) {
+        $canvas.innerHTML = `<div style="padding:10px;opacity:.8">該当する依存関係はありません。</div>`;
+        return;
+      }
+      const div = document.createElement('div');
+      div.className = 'mermaid';
+      div.style.fontSize = '11px';
+      // Mermaidコードは textContent で入れる（HTMLとして解釈させない）
+      div.textContent = code;
+      $canvas.appendChild(div);
+
+      ensureMermaidConfig();
+
+      const showCodeFallback = (msg, danger) => {
+        $canvas.innerHTML = `<pre style="margin:0;white-space:pre-wrap;font-size:11px">${escapeHtml(code)}</pre>
+          <div style="margin-top:6px;font-size:11px;${danger ? 'color:#c00' : 'opacity:.8'}">${escapeHtml(msg)}</div>`;
+      };
+
+      if (!(window.mermaid && typeof window.mermaid.run === 'function')) {
+        showCodeFallback('Mermaidを読み込めなかったため、コードを表示しています。');
+        return;
+      }
+
+      // 描画完了後のSVGに手を入れる
+      const postProcess = () => {
+        try {
+          const svg = div.querySelector('svg');
+          if (!svg) return;
+
+          // ① リンクは必ず別タブで開く（Mermaidのバージョン差で _blank が付かないことがある）
+          for (const a of svg.querySelectorAll('a')) {
+            a.setAttribute('target', '_blank');
+            a.setAttribute('rel', 'noopener noreferrer');
+            a.style.cursor = 'pointer';
+          }
+
+          // ② 起点ノードを赤枠にする
+          //   classDef（CSSクラス）が style 指定に勝ってしまう場合があるため、
+          //   描画後に該当ノードの図形へ直接スタイルを当てて確実に反映させる
+          if (lastFocusMermaidId) {
+            const g = svg.querySelector(`g.node[id*="-${lastFocusMermaidId}-"]`)
+              || svg.querySelector(`g[id^="flowchart-${lastFocusMermaidId}-"]`);
+            if (g) {
+              for (const shape of g.querySelectorAll('rect, circle, ellipse, polygon, path')) {
+                shape.style.stroke = '#ef4444';
+                shape.style.strokeWidth = '3px';
+              }
+            }
+          }
+        } catch (e) {
+          console.warn('[Deps] 図の後処理に失敗しました', e);
+        }
+      };
+
+      const runMermaid = () => {
+        try {
+          // 再描画時に前回の結果が残らないよう、処理済みフラグを消してから実行する
+          div.removeAttribute('data-processed');
+          const p = window.mermaid.run({ nodes: [div] });
+          // mermaid.run は Promise を返す（返さない版もあるため両対応）
+          if (p && typeof p.then === 'function') p.then(postProcess).catch(() => postProcess());
+          else postProcess();
+        } catch (e) {
+          console.error('Mermaid render error:', e);
+          showCodeFallback('図の描画に失敗しました。コードを表示しています。', true);
+        }
+      };
+
+      if (div.offsetParent !== null) {
+        runMermaid();
+      } else {
+        // 非表示（別タブ）のときは、表示された瞬間に描画する
+        const obs = new IntersectionObserver((entries) => {
+          for (const en of entries) {
+            if (!en.isIntersecting) continue;
+            obs.disconnect();
+            // 監視中に再描画されていたら、古い描画は行わない
+            if (seq !== renderSeq) return;
+            runMermaid();
+          }
+        });
+        obs.observe(div);
+      }
+    };
+
+    // ---- 依存関係の横断検索 ----
+    // 起点セレクトはフィールドしか選べないため、設定名やJSファイル名から辿る入口として用意する。
+    // 検索は依存関係データを絞り込むだけで、API取得や再描画は行わない。
+    const CONF_JA_SEARCH = { CERTAIN: '確実', LIKELY: '可能性が高い', UNCERTAIN: '要確認', NOT_ANALYZED: '解析対象外' };
+
+    const renderSearch = () => {
+      if (!$search || !$searchResult) return;
+      const q = $search.value || '';
+      if (!q.trim()) {
+        $searchResult.innerHTML = '';
+        if ($searchCount) $searchCount.textContent = '';
+        if ($searchHint) $searchHint.style.display = 'none';
+        return;
+      }
+
+      const res = KTDeps.searchEdges(deps, q, { limit: 200 });
+      if ($searchCount) {
+        $searchCount.textContent = res.total
+          ? `${res.total} 件${res.truncated ? `（上位 ${res.rows.length} 件を表示）` : ''}`
+          : '該当なし';
+      }
+
+      if ($searchHint) $searchHint.style.display = res.total ? '' : 'none';
+
+      if (!res.total) {
+        $searchResult.innerHTML = `<div style="padding:6px 10px;font-size:12px;opacity:.8">該当する依存関係はありません。</div>`;
+        return;
+      }
+
+      const rows = res.rows.map((r, i) => {
+        const lines = (r.lines && r.lines.length)
+          ? `<span style="opacity:.6;font-size:10px">${escapeHtml(r.lines.slice(0, 3).map(n => `${n}行目`).join(', '))}</span>`
+          : '';
+        // フィールドが絡む行は、クリックで起点にできるようにする
+        const focusCode = (r.targetType === 'FIELD') ? r.targetId
+          : (r.sourceType === 'FIELD' ? r.sourceId : '');
+        return `
+          <tr data-focus="${escapeHtml(focusCode)}" style="${focusCode ? 'cursor:pointer' : ''}">
+            <td style="padding:4px 6px;border-bottom:1px solid ${BD};white-space:nowrap">
+              <span class="dp-badge">${escapeHtml(r.sourceKind)}</span> ${escapeHtml(r.sourceName)}
+            </td>
+            <td style="padding:4px 6px;border-bottom:1px solid ${BD};white-space:nowrap;opacity:.8">→ ${escapeHtml(r.relation)}</td>
+            <td style="padding:4px 6px;border-bottom:1px solid ${BD}">${escapeHtml(r.targetName)} ${lines}</td>
+            <td style="padding:4px 6px;border-bottom:1px solid ${BD};white-space:nowrap;font-size:10px;opacity:.75">
+              ${escapeHtml(CONF_JA_SEARCH[r.confidence] || r.confidence || '')}
+            </td>
+          </tr>`;
+      }).join('');
+
+      $searchResult.innerHTML = `
+        <div style="max-height:200px;overflow:auto;border:1px solid ${BD};border-radius:8px">
+          <table style="width:100%;border-collapse:collapse;font-size:12px">
+            <thead><tr style="opacity:.7">
+              <th style="text-align:left;padding:4px 6px">利用する側</th>
+              <th style="text-align:left;padding:4px 6px">関係</th>
+              <th style="text-align:left;padding:4px 6px">利用される側</th>
+              <th style="text-align:left;padding:4px 6px">確度</th>
+            </tr></thead>
+            <tbody>${rows}</tbody>
+          </table>
+        </div>
+        `;
+
+      // 行クリックで起点に設定して描画する
+      for (const tr of $searchResult.querySelectorAll('tr[data-focus]')) {
+        const code = tr.getAttribute('data-focus');
+        if (!code) continue;
+        tr.addEventListener('click', () => {
+          const value = `FIELD:${code}`;
+          if ($focus && [...$focus.options].some(o => o.value === value)) {
+            $focus.value = value;
+            $focus.dispatchEvent(new Event('change'));
+          }
+        }, { passive: true });
+      }
+    };
+
+    const draw = () => {
+      const seq = ++renderSeq;
+      const opt = currentOptions();
+      const sub = KTDeps.buildSubgraph(deps, opt);
+      lastCode = KTDeps.toMermaid(sub, mermaidOptions(opt.focusId));
+      // toMermaid は nodes の並び順に N0, N1 ... と採番するため、添字から起点のIDが分かる
+      const focusIdx = opt.focusId ? sub.nodes.findIndex(n => n.id === opt.focusId) : -1;
+      lastFocusMermaidId = focusIdx >= 0 ? `N${focusIdx}` : null;
+
+      $status.textContent =
+        `表示 ${sub.shownNodes} ノード / ${sub.shownEdges} 関係（絞り込み後の全体: ${sub.totalNodes} ノード / ${sub.totalEdges} 関係）`;
+
+
+      if (sub.truncated) {
+        $warn.style.display = 'block';
+        $warn.innerHTML = `
+          <div style="padding:8px 10px;border:1px solid #f59e0b55;background:#f59e0b0f;border-radius:8px;font-size:11px;line-height:1.7">
+            <b>ノード数が上限（${opt.maxNodes}）を超えたため、一部のみ表示しています。</b>
+            起点フィールドを指定する、表示対象を絞る、「直接依存のみ」にするなどで対象を減らしてください。
+          </div>`;
+      } else {
+        $warn.style.display = 'none';
+        $warn.innerHTML = '';
+      }
+
+      if ($listMode.checked) renderList(sub);
+      else renderDiagram(lastCode, seq);
+    };
+
+    // 検索は入力のたびに走るため、少し待ってからまとめて実行する
+    let searchTimer = null;
+    if ($search) {
+      $search.addEventListener('input', () => {
+        if (searchTimer) clearTimeout(searchTimer);
+        searchTimer = setTimeout(() => { searchTimer = null; renderSearch(); }, 200);
+      }, { passive: true });
+    }
+
+    // 連続操作（セレクトのキーボード操作や複数チェックの切り替え）でも
+    // 描画が何度も走らないよう、少し待ってからまとめて実行する
+    let drawTimer = null;
+    const scheduleDraw = () => {
+      if (drawTimer) clearTimeout(drawTimer);
+      drawTimer = setTimeout(() => { drawTimer = null; draw(); }, 200);
+    };
+
+    // すべての設定は変更した時点で反映する（「描画」を押さないと反映されない項目をなくす）
+    const allControls = [
+      $focus, $depth, $max, $dir,
+      $fieldsOnly, $group, $labels, $fold, $listMode,
+      ...el.querySelectorAll('.dp-scope'),
+    ];
+    for (const $c of allControls) {
+      if ($c) $c.addEventListener('change', scheduleDraw, { passive: true });
+    }
+
+    // ボタンは即時に描き直す（JS解析の完了後など、最新の依存データで描き直したいとき用）
+    el.querySelector('#dp-draw').addEventListener('click', () => {
+      if (drawTimer) { clearTimeout(drawTimer); drawTimer = null; }
+      draw();
+    }, { passive: true });
+
+    // ---- 出力（Copy / DL）----
+    // 形式はセレクトで選ぶ。Mermaidは「表示中の図」、それ以外は「アプリ全体」が対象。
+    const $format = el.querySelector('#dp-format');
+
+    /**
+     * 選択中の形式で出力内容を組み立てる
+     * レポート生成は全フィールドの影響分析が走るため、押されたときだけ実行する
+     * @returns {{text:string, filename:string, mime:string}|null}
+     */
+    const buildOutput = () => {
+      const fmt = $format ? $format.value : 'mermaid';
+      switch (fmt) {
+        case 'md':
+        case 'md-used':
+          return {
+            text: KTDeps.toMarkdown(deps, { fields: fieldsN, onlyUsed: fmt === 'md-used' }),
+            filename: `kintone_dependencies_${appId}.md`,
+            mime: 'text/markdown;charset=utf-8',
+          };
+        case 'csv':
+          return {
+            // Excelでの文字化けを避けるためBOMを付ける
+            text: '\uFEFF' + KTDeps.toCSV(deps),
+            filename: `kintone_dependencies_${appId}.csv`,
+            mime: 'text/csv;charset=utf-8',
+          };
+        case 'json':
+          return {
+            text: KTDeps.toJSON(deps),
+            filename: `kintone_dependencies_${appId}.json`,
+            mime: 'application/json;charset=utf-8',
+          };
+        case 'mermaid':
+        default:
+          // Mermaidは表示中の図が対象。まだ描画していない場合は出力できない
+          if (!lastCode) return null;
+          return {
+            text: lastCode,
+            filename: `kintone_deps_${appId}.mmd`,
+            mime: 'text/plain;charset=utf-8',
+          };
+      }
+    };
+
+    el.querySelector('#dp-copy').addEventListener('click', async () => {
+      const btn = el.querySelector('#dp-copy');
+      let out = null;
+      try {
+        out = buildOutput();
+      } catch (e) {
+        console.error('[Deps] 出力の生成に失敗しました', e);
+        flashBtnText(btn, 'Failed');
+        return;
+      }
+      if (!out) { flashBtnText(btn, '先に描画'); return; }
+      try {
+        await navigator.clipboard.writeText(out.text);
+        flashBtnText(btn, 'Copied!');
+      } catch (e) {
+        console.error('[Deps] クリップボードへのコピーに失敗しました', e);
+        flashBtnText(btn, 'Failed');
+      }
+    }, { passive: true });
+
+    el.querySelector('#dp-dl').addEventListener('click', () => {
+      const btn = el.querySelector('#dp-dl');
+      let out = null;
+      try {
+        out = buildOutput();
+      } catch (e) {
+        console.error('[Deps] 出力の生成に失敗しました', e);
+        flashBtnText(btn, 'Failed');
+        return;
+      }
+      if (!out) { flashBtnText(btn, '先に描画'); return; }
+      KTExport.downloadText(out.filename, out.text, out.mime);
+      flashBtnText(btn);
+    }, { passive: true });
+
+    // 初期表示は描画せず、操作方法だけ案内する（大規模アプリで固まらないようにする）
+    $status.textContent =
+      `全体では ${(deps.nodes || []).length} ノード / ${(deps.edges || []).length} 関係が検出されています。`;
+    $canvas.innerHTML = `
+      <div style="padding:14px;opacity:.85;font-size:12px;line-height:1.9">
+        <b>上の「起点」からフィールドを1つ選んでください。</b>すぐに図が表示されます。<br>
+        設定を変更するとその場で描き直されます（初期状態では、大量のノードを一度に描いて重くならないよう図を出しません）。<br>
+        <span style="opacity:.75">
+          図が複雑すぎるときは、①起点を指定する ②「直接依存のみ」にする ③表示対象のチェックを減らす
+          ④「フィールドのみ」にする ⑤「一覧で表示」に切り替える、のいずれかをお試しください。
+        </span>
+      </div>`;
+  }
+
+  // ----------------------------
   // [Feature] Field Scanner
   // ----------------------------
   async function renderScanner(root, DATA) {
     const el = root.querySelector('#view-field-scanner');
     if (!el) return;
     el.innerHTML = '';
+    // ★追加：依存関係データ（エントリポイントで生成）と、統合後にFieldsタブを再描画するコールバック
+    const { deps = null, onDepsUpdated = null } = DATA || {};
 
     (function FS_bootstrap() {
       // UI色
@@ -4800,20 +8550,17 @@
         <style>
           /* 共通: Scannerタブ内のトーン統一 */
           #fs-wrap { --fs-bg: ${BG}; --fs-bd: ${BD}; }
-          #fs-wrap select,
-          #fs-wrap .btn {
+          /* ★ボタンは共通スタイル（#kt-toolkit .btn）に統一するため、ここでは上書きしない。
+             従来は背景色と height:32px を独自指定しており、他タブと見た目が揃っていなかった。 */
+          #fs-wrap select {
             background: var(--fs-bg);
             color: inherit;
             border: 1px solid var(--fs-bd);
             border-radius: 8px;
-            height: 32px;
-            padding: 6px 10px;
+            padding: 4px 8px;
             outline: none;
           }
-          #fs-wrap select { padding: 4px 8px; }
-          #fs-wrap .btn:hover,
           #fs-wrap select:hover { filter: brightness(${isDark ? '1.15' : '0.98'}); }
-          #fs-wrap .btn:focus-visible,
           #fs-wrap select:focus-visible {
             box-shadow: 0 0 0 2px ${isDark ? '#444' : '#e5e7eb'};
           }
@@ -4847,18 +8594,35 @@
               </select>
             </label>
 
-            <button id="fs-scan" class="btn" style="margin-left:auto;">Scan</button>
+            <label style="display:inline-flex; align-items:center; gap:6px; margin-left:auto; font-size:12px; cursor:pointer;"
+                   title="Toolkit起動時にJavaScriptを自動解析し、Fields／Relationsタブへ反映します（結果は6時間キャッシュされます）">
+              <input type="checkbox" id="fs-auto" />
+              <span>自動解析</span>
+            </label>
+            <label style="display:inline-flex; align-items:center; gap:6px; font-size:12px; white-space:nowrap;"
+                   title="ファイル起点＝このJSがいつ動き何を触るか／フィールド起点＝どのフィールドがJSで使われているか">
+              <span>表示</span>
+              <select id="fs-view" style="padding:4px 8px;">
+                <option value="file" selected>ファイル起点</option>
+                <option value="field">フィールド起点</option>
+              </select>
+            </label>
+            <button id="fs-scan" class="btn" title="キャッシュを無視して再取得します">Scan</button>
             <div style="display:flex; gap:8px;">
-              <button id="fs-copy-md"  class="btn">MD Copy</button>
-              <button id="fs-dl-md"    class="btn">MD DL</button>
-              <button id="fs-dl-csv"   class="btn">CSV DL</button>
-              <button id="fs-dl-json"  class="btn">JSON DL</button>
+              <button id="fs-copy-md"  class="btn">Copy MD</button>
+              <button id="fs-dl-md"    class="btn">DL MD</button>
+              <button id="fs-dl-csv"   class="btn">DL CSV</button>
+              <button id="fs-dl-json"  class="btn">DL JSON</button>
             </div>
           </div>
 
           <div id="fs-meta" style="opacity:.8; font-size:12px;">未実行</div>
 
-          <div id="fs-table-wrap" style="overflow:auto; max-height:56vh;">
+          <div id="fs-file-view" style="overflow:auto; max-height:56vh;">
+            <div style="padding:14px; opacity:.8;">解析結果を待っています。</div>
+          </div>
+
+          <div id="fs-table-wrap" style="overflow:auto; max-height:56vh; display:none;">
             <table id="fs-table" style="width:100%; border-collapse:collapse;">
               <thead>
                 <tr>
@@ -4867,24 +8631,22 @@
                   <th style="text-align:left; position:sticky; top:0; padding:8px;">Label</th>
                   <th style="text-align:left; position:sticky; top:0; padding:8px;">Type</th>
                   <th style="text-align:right; position:sticky; top:0; padding:8px;">Matches</th>
+                  <th style="text-align:left; position:sticky; top:0; padding:8px;">Access</th>
                   <th style="text-align:left; position:sticky; top:0; padding:8px;">Files</th>
                 </tr>
               </thead>
               <tbody id="fs-tbody">
-                <tr><td colspan="6" style="padding:14px; opacity:.8;">Scanボタンを押してください。</td></tr>
+                <tr><td colspan="7" style="padding:14px; opacity:.8;">Scanボタンを押してください。</td></tr>
               </tbody>
             </table>
           </div>
         </div>
       `;
 
-      // --- ユーティリティ（KTExport 優先で使用） ---
-      const KTExport = (window.KTExport || {});
-      const flashBtnText = (window.flashBtnText || function (btn, text = 'Done!', ms = 1200) {
-        const old = btn.textContent;
-        btn.textContent = text;
-        setTimeout(() => (btn.textContent = old), ms);
-      });
+      // --- ユーティリティ ---
+      // ★B5修正：window.KTExport / window.flashBtnText は未登録のため常に空オブジェクトになり、
+      //   KTExport統一パスがデッドコードだった。クロージャ上の共通 KTExport / flashBtnText を
+      //   そのまま使用する（下の dlText / copyText のフォールバックは保険として残置）。
 
       // フォールバック：downloadText
       const downloadTextFallback = (name, text, mime = 'text/plain;charset=utf-8') => {
@@ -4922,6 +8684,7 @@
         { header: 'FieldLabel', select: r => r.label },
         { header: 'Type', select: r => r.type },
         { header: 'MatchCount', select: r => String(r.count ?? 0) },
+        { header: 'Access', select: r => r.accessSummary || '' },
         { header: 'Files', select: r => (Array.isArray(r.files) ? r.files.join(' | ') : '') },
       ];
 
@@ -4941,11 +8704,11 @@
         lines.push('');
 
         // ここは "MD表" として出したいので、手組み（既存のまま）
-        lines.push(`| Used | Code | Label | Type | Matches | Files |`);
-        lines.push(`|:---:|:-----|:------|:-----|-------:|:------|`);
+        lines.push(`| Used | Code | Label | Type | Matches | Access | Files |`);
+        lines.push(`|:---:|:-----|:------|:-----|-------:|:-------|:------|`);
         for (const r of results) {
           const fileStr = (r.files || []).join('<br>');
-          lines.push(`| ${r.used ? '✅' : '—'} | \`${r.code}\` | ${r.label ?? ''} | ${r.type ?? ''} | ${r.count} | ${fileStr} |`);
+          lines.push(`| ${r.used ? '✅' : '—'} | \`${r.code}\` | ${r.label ?? ''} | ${r.type ?? ''} | ${r.count} | ${r.accessSummary || ''} | ${fileStr} |`);
         }
         return lines.join('\n');
       };
@@ -4960,6 +8723,9 @@
       const $dlJSON = el.querySelector('#fs-dl-json');
       const $meta = el.querySelector('#fs-meta');
       const $tbody = el.querySelector('#fs-tbody');
+      const $fileView = el.querySelector('#fs-file-view');
+      const $tableWrap = el.querySelector('#fs-table-wrap');
+      const $view = el.querySelector('#fs-view');
 
       let FS_last = null;
 
@@ -4972,8 +8738,31 @@
         v === 'css' ? ['css'] : (v === 'both' ? ['js', 'css'] : ['js']);
 
       // ---- fields ----
-      async function fetchFieldList(resp) {
-        const props = resp || {};
+      async function fetchFieldList(resp, layout) {
+        // フォーム定義・レイアウトは prefetch 済みの値を使う。
+        // 空のまま進むと全コードが「存在しない」と誤判定されるため、念のため取り直す。
+        let props = (resp && typeof resp === 'object' && resp.properties) ? resp.properties : (resp || {});
+        if (!Object.keys(props).length) {
+          try {
+            const f = await kintone.app.getFormFields();
+            props = (f && f.properties) ? f.properties : (f || {});
+            console.warn('[Field Scanner] フィールド定義が空だったため再取得しました', Object.keys(props).length);
+          } catch (e) {
+            console.error('[Field Scanner] フィールド定義の再取得に失敗しました', e);
+          }
+        }
+
+        let layoutNodes = Array.isArray(layout) ? layout : (layout?.layout || []);
+        if (!layoutNodes.length) {
+          try {
+            const l = await kintone.app.getFormLayout();
+            layoutNodes = Array.isArray(l) ? l : (l?.layout || []);
+            console.warn('[Field Scanner] レイアウトが空だったため再取得しました', layoutNodes.length);
+          } catch (e) {
+            console.error('[Field Scanner] レイアウトの再取得に失敗しました', e);
+          }
+        }
+
         const out = [];
         for (const p of Object.values(props)) {
           if (p.type === 'SUBTABLE') {
@@ -4985,6 +8774,63 @@
             out.push({ code: p.code, label: p.label, type: p.type });
           }
         }
+
+        // ★レイアウトにしか現れない識別子を追加する
+        //   JavaScriptは以下も「コード」として指定するが、いずれも form/fields には含まれない。
+        //     - グループコード      : setFieldShown('group02', false)
+        //     - サブテーブルコード  : setFieldShown('明細', false)
+        //     - 要素ID（スペース等）: getSpaceElement('TAG_MENU')
+        //   これらを既知リストに入れておかないと、すべて「存在しないコード」と誤検出される。
+        const seen = new Set(out.map(f => f.code));
+        const add = (code, label, type) => {
+          if (!code || seen.has(code)) return;
+          seen.add(code);
+          out.push({ code, label: label || code, type });
+        };
+
+        const walkLayout = (nodes) => {
+          for (const n of nodes || []) {
+            if (!n) continue;
+
+            if (n.type === 'GROUP') {
+              add(n.code, n.label, 'GROUP');
+              walkLayout(n.layout);          // グループ内の行を辿る
+              continue;
+            }
+
+            if (n.type === 'SUBTABLE') {
+              add(n.code, n.label, 'SUBTABLE');
+              for (const sf of n.fields || []) {
+                if (sf?.code) add(sf.code, sf.label, sf.type || 'FIELD');
+                else if (sf?.elementId) add(sf.elementId, sf.label, `ELEMENT_${sf.type || ''}`);
+              }
+              continue;
+            }
+
+            if (n.type === 'ROW') {
+              for (const f of n.fields || []) {
+                if (!f) continue;
+                if (f.type === 'SUBTABLE') {
+                  add(f.code, f.label, 'SUBTABLE');
+                  for (const sf of f.fields || []) {
+                    if (sf?.code) add(sf.code, sf.label, sf.type || 'FIELD');
+                  }
+                  continue;
+                }
+                // 通常フィールド（form/fields にもあるが、念のため）
+                if (f.code) { add(f.code, f.label, f.type || 'FIELD'); continue; }
+                // ★スペース・ラベル・罫線などの要素ID（codeを持たない）
+                if (f.elementId) add(f.elementId, f.label || `(${f.type || 'ELEMENT'})`, `ELEMENT_${f.type || ''}`);
+              }
+              continue;
+            }
+
+            // 想定外のノードでも layout / fields があれば辿る
+            if (Array.isArray(n.layout)) walkLayout(n.layout);
+          }
+        };
+        walkLayout(layoutNodes);
+
         return out;
       }
 
@@ -4992,26 +8838,10 @@
       async function fetchTexts({ appId, include, kinds }) {
         const apiUrl = (p) => kintone.api.url(p, true);
 
-        // preview優先 → production
-        async function getCustomize(appId) {
-          try {
-            const prev = await kintone.api(apiUrl('/k/v1/preview/app/customize.json'), 'GET', { app: appId });
-            if (prev && (prev.desktop || prev.mobile)) return prev;
-          } catch { }
-          return await kintone.api(apiUrl('/k/v1/app/customize.json'), 'GET', { app: appId });
-        }
+        // ★共通化：preview優先 → production（実体は KTApi）
+        const downloadByKey = (fileKey) => KTApi.downloadFile(fileKey);
 
-        async function downloadByKey(fileKey) {
-          const res = await fetch(apiUrl('/k/v1/file.json') + '?fileKey=' + encodeURIComponent(fileKey), {
-            method: 'GET',
-            headers: { 'X-Requested-With': 'XMLHttpRequest' },
-            credentials: 'same-origin'
-          });
-          if (!res.ok) throw new Error('Download error ' + res.status);
-          return await res.text();
-        }
-
-        const data = await getCustomize(appId);
+        const { data } = await KTApi.getCustomize(appId);
         const desk = data.desktop || { js: [], css: [] };
         const mobi = data.mobile || { js: [], css: [] };
 
@@ -5033,147 +8863,716 @@
         if (include.desktop) pushKind(desk, 'desktop');
         if (include.mobile) pushKind(mobi, 'mobile');
 
-        const out = [];
-        for (const t of chosen) {
+        // ★改善：直列ダウンロードを並列化（結果の順序は chosen の順を維持）
+        const out = await Promise.all(chosen.map(async (t) => {
           try {
             if (t.fileKey) {
               // FILEタイプは実体取得
               const text = await downloadByKey(t.fileKey);
-              out.push({ name: t.name || '(no-name)', target: t.target, kind: t.kind, text });
-            } else if (t.url) {
-              // URLタイプは既定スキップ（CORS回避）
-              // 必要なら同一オリジンのみ取得したい場合は、以下の条件をtrueにしてください。
+              return { name: t.name || '(no-name)', target: t.target, kind: t.kind, text };
+            }
+            if (t.url) {
+              // URLタイプ：同一オリジンのみ取得、外部URLは解析対象外（NOT_ANALYZED）
               const sameOrigin = (() => {
                 try { return new URL(t.url, location.href).hostname === location.hostname; }
                 catch { return false; }
               })();
-
               if (sameOrigin) {
-                // どうしても同一オリジンURLの中身も見たい場合のみ取得
                 try {
                   const res = await fetch(t.url, { credentials: 'include' });
                   const text = res.ok ? await res.text() : '';
-                  out.push({ name: t.name || t.url, target: t.target, kind: t.kind, text, note: res.ok ? undefined : 'URL fetch failed' });
+                  return { name: t.name || t.url, target: t.target, kind: t.kind, text, note: res.ok ? undefined : 'URL fetch failed' };
                 } catch (e) {
-                  // エラー時も落とさず空テキストで登録
-                  out.push({ name: t.name || t.url, target: t.target, kind: t.kind, text: '', note: 'URL fetch error (skipped)' });
+                  return { name: t.name || t.url, target: t.target, kind: t.kind, text: '', note: 'URL fetch error (skipped)' };
                 }
-              } else {
-                // 外部URLは完全にスキップ（解析はできないが、一覧表示はする）
-                out.push({ name: t.name || t.url, target: t.target, kind: t.kind, text: '', note: 'external URL (skipped)' });
               }
-            } else {
-              out.push({ name: t.name || '(unknown)', target: t.target, kind: t.kind, text: '' });
+              return { name: t.name || t.url, target: t.target, kind: t.kind, text: '', note: 'external URL (skipped)' };
             }
+            return { name: t.name || '(unknown)', target: t.target, kind: t.kind, text: '' };
           } catch (e) {
             // いかなる場合も落とさず、空テキストで残す
-            out.push({ name: t.name || '(no-name)', target: t.target, kind: t.kind, text: '', note: String(e) });
+            return { name: t.name || '(no-name)', target: t.target, kind: t.kind, text: '', note: String(e) };
           }
-        }
+        }));
         return out;
       }
 
       // ---- analyze ----
+      // ★改善：コメントは削除ではなく「同じ長さの空白」に置換する
+      //   （文字オフセット・行番号を保ったまま解析するため）
       function stripCommentsOnly(src) {
-        return src.replace(/\/\*[\s\S]*?\*\//g, '')
-          .replace(/(^|[^:\\])\/\/.*$/gm, '$1');
+        return String(src || '')
+          .replace(/\/\*[\s\S]*?\*\//g, (m) => m.replace(/[^\n]/g, ' '))
+          .replace(/(^|[^:\\])(\/\/.*)$/gm, (m, p1, p2) => p1 + ' '.repeat(p2.length));
       }
+
+      /**
+       * kintone.events.on(...) で登録されているイベント種別を抽出する
+       * 対応形式：
+       *   kintone.events.on('app.record.create.show', ...)
+       *   kintone.events.on(['app.record.create.show', 'app.record.edit.show'], ...)
+       *   kintone.events.on(EVENTS, ...) → 変数指定は特定できないため対象外
+       * @returns {string[]} 重複を除いたイベント種別
+       */
+      // kintoneのイベント名の形か（app.record.* / mobile.app.record.* / app.report.show など）
+      const EVENT_NAME_RE = /^(mobile\.)?app\.(record|report)\.[A-Za-z0-9_.\u00C0-\uFFFF]+$/;
+
+      function extractEventTypes(cleanText) {
+        const s = String(cleanText || '');
+        const direct = new Set();
+
+        // ---- ① kintone.events.on(...) の第1引数から検出（確実）----
+        //   文字列リテラル、または配列リテラルをそのまま渡している場合に対応する
+        const rx = /kintone\.events\.on\s*\(\s*(\[[^\]]*\]|['"`][^'"`]*['"`])/g;
+        let m;
+        while ((m = rx.exec(s)) !== null) {
+          const strRx = /['"`]([^'"`]+)['"`]/g;
+          let sm;
+          while ((sm = strRx.exec(m[1])) !== null) {
+            const ev = sm[1].trim();
+            if (EVENT_NAME_RE.test(ev)) direct.add(ev);
+          }
+        }
+
+        // ---- ② ファイル内のイベント名らしき文字列から検出（推定）----
+        //   var events = [...]; kintone.events.on(events, cb) のような
+        //   変数経由の書き方は①では拾えないため、文字列リテラル全体を走査して補う。
+        //   「登録に使われている」とは限らないので、確度は下げて扱う。
+        const inferred = new Set();
+        if (/kintone\.events\.on\s*\(/.test(s)) {
+          const anyStr = /['"`]([^'"`\n]+)['"`]/g;
+          let am;
+          while ((am = anyStr.exec(s)) !== null) {
+            const ev = am[1].trim();
+            if (EVENT_NAME_RE.test(ev) && !direct.has(ev)) inferred.add(ev);
+          }
+        }
+
+        return [
+          ...[...direct].sort().map(name => ({ name, direct: true })),
+          ...[...inferred].sort().map(name => ({ name, direct: false })),
+        ];
+      }
+
+      // 行番号算出用：各行の先頭オフセット表（1ファイルにつき1回だけ作る）
+      function buildLineIndex(text) {
+        const starts = [0];
+        for (let i = 0; i < text.length; i++) {
+          if (text.charCodeAt(i) === 10) starts.push(i + 1);
+        }
+        return starts;
+      }
+      function lineAt(starts, idx) {
+        let lo = 0, hi = starts.length - 1;
+        while (lo < hi) {
+          const mid = (lo + hi + 1) >> 1;
+          if (starts[mid] <= idx) lo = mid; else hi = mid - 1;
+        }
+        return lo + 1; // 1始まり
+      }
+
+      // ---- 未知フィールドコードの検出 ----
+      // Field Scanner の通常解析は「既知のフィールドコードを探す」方式のため、
+      // 存在しないコードは原理的に見つけられない。
+      // ここでは逆に「コードらしき文字列」を先に抽出し、フィールド一覧に無いものを洗い出す。
+
+      // フィールドコードとしてあり得ない文字列を除外する
+      //  - 空白・改行を含む（文章）
+      //  - URL / パス / イベント名
+      //  - 極端に長い
+      function isPlausibleFieldCode(s) {
+        const v = String(s || '').trim();
+        if (!v || v.length > 128) return false;
+        if (/[\s\u3000]/.test(v)) return false;              // 空白を含む
+        if (/^(https?:|\/|\.\/|#)/.test(v)) return false;    // URL・パス
+        if (/^\$/.test(v)) return false;                     // $id などのシステム項目
+        if (/^(mobile\.)?app\.(record|report)\./.test(v)) return false; // イベント名
+        if (/^(GET|POST|PUT|DELETE)$/i.test(v)) return false;
+        if (/\.(json|js|css|html?)$/i.test(v)) return false; // ファイル名
+        return true;
+      }
+
+      /**
+       * JavaScript本文から「フィールドコードらしき文字列」を抽出する
+       * @returns {Array<{code, line, pattern, confidence}>}
+       *   confidence: HIGH = kintone APIやrecord参照の引数（フィールドコード以外あり得ない）
+       *               MEDIUM = フィールド系の変数・キーに入った配列リテラル
+       */
+      function extractFieldCodeCandidates(cleanText, lineIndexFn) {
+        const s = String(cleanText || '');
+        const out = [];
+        const push = (code, index, pattern, confidence) => {
+          if (!isPlausibleFieldCode(code)) return;
+          out.push({
+            code: String(code).trim(),
+            line: lineIndexFn ? lineIndexFn(index) : null,
+            pattern, confidence,
+          });
+        };
+
+        // 1) kintone のフィールド操作API：第1引数はフィールドコード（またはグループコード）
+        const rxApi = /\b(setFieldShown|setFieldValue|setFieldRequired|getFieldElements?|getSpaceElement|getHeaderMenuSpaceElement)\s*\(\s*['"`]([^'"`]+)['"`]/g;
+        let m;
+        while ((m = rxApi.exec(s)) !== null) push(m[2], m.index, m[1], 'HIGH');
+
+        // 2) record['CODE'] / event.record['CODE']
+        const rxBracket = /\brecord\s*\[\s*['"`]([^'"`]+)['"`]\s*\]/g;
+        while ((m = rxBracket.exec(s)) !== null) push(m[1], m.index, "record['…']", 'HIGH');
+
+        // 3) record.CODE.value / event.record.CODE.value
+        //    （.value が続く場合のみ。メソッド呼び出しと区別するため）
+        const rxDot = /\brecord\.([A-Za-z_$\u00C0-\uFFFF][\w$\u00C0-\uFFFF]*)\s*\.\s*value/g;
+        while ((m = rxDot.exec(s)) !== null) push(m[1], m.index, 'record.….value', 'HIGH');
+
+        // 4) フィールド系の変数名・キー名に代入された配列リテラル
+        //    例: const disabledFields = ['A','B'];  targetFieldCodes: ['C']
+        //    「field」を含む名前のときだけ対象にする（誤検出を抑えるため）
+        const rxArr = /([A-Za-z_$][\w$]*)\s*[:=]\s*\[([^\]]*)\]/g;
+        while ((m = rxArr.exec(s)) !== null) {
+          const name = m[1];
+          if (!/field/i.test(name)) continue;
+          const body = m[2];
+          const rxStr = /['"`]([^'"`]+)['"`]/g;
+          let sm;
+          while ((sm = rxStr.exec(body)) !== null) {
+            push(sm[1], m.index + m[1].length + sm.index, `${name}[…]`, 'MEDIUM');
+          }
+        }
+
+        return out;
+      }
+
+      /**
+       * 抽出した候補のうち、フィールド一覧に存在しないものを集約する
+       * @returns {Array<{code, files:Array, confidence, count}>}
+       */
+      // 比較用の正規化（大文字小文字・全角半角・記号の違いを吸収する）
+      function normalizeCode(s) {
+        return String(s || '')
+          .normalize('NFKC')          // 全角英数→半角など
+          .trim()
+          .toLowerCase()
+          .replace(/[\s\u3000_\-]/g, ''); // 空白・アンダースコア・ハイフンを無視
+      }
+
+      function collectUnknownFieldRefs(files, fields, extraKnown) {
+        const known = new Set((fields || []).map(f => f.code).filter(Boolean));
+        // 依存関係データ側が知っているフィールドも既知として扱う（多重防御）
+        for (const c of extraKnown || []) if (c) known.add(c);
+
+        // 正規化した既知コードの索引（「近い既知コード」を示すために使う）
+        const normIndex = new Map();
+        for (const c of known) {
+          const n = normalizeCode(c);
+          if (n && !normIndex.has(n)) normIndex.set(n, c);
+        }
+
+        const agg = new Map();
+
+        for (const f of files || []) {
+          if (f.kind !== 'js' || !f.text) continue;
+          const clean = stripCommentsOnly(f.text);
+          const li = buildLineIndex(clean);
+          for (const c of extractFieldCodeCandidates(clean, (i) => lineAt(li, i))) {
+            if (known.has(c.code)) continue;
+            let a = agg.get(c.code);
+            if (!a) {
+              a = { code: c.code, files: new Map(), confidence: 'MEDIUM', count: 0, patterns: new Set() };
+              agg.set(c.code, a);
+            }
+            a.count++;
+            a.patterns.add(c.pattern);
+            // 1つでもHIGHがあれば、そのコードはHIGH扱い（API引数は確実にフィールドコード）
+            if (c.confidence === 'HIGH') a.confidence = 'HIGH';
+            const key = `${f.target}:${f.name}`;
+            if (!a.files.has(key)) a.files.set(key, []);
+            const lines = a.files.get(key);
+            if (lines.length < 10 && !lines.includes(c.line)) lines.push(c.line);
+          }
+        }
+
+        return [...agg.values()]
+          .map(a => ({
+            code: a.code,
+            confidence: a.confidence,
+            count: a.count,
+            patterns: [...a.patterns],
+            // 表記ゆれで一致していないだけの可能性がある場合、その候補を示す
+            nearMatch: normIndex.get(normalizeCode(a.code)) || null,
+            // 行番号は昇順に並べる（検出順のままだと読みにくいため）
+            files: [...a.files.entries()].map(([name, lines]) => ({ name, lines: [...lines].sort((x, y) => x - y) })),
+          }))
+          .sort((a, b) =>
+            (a.confidence === b.confidence ? 0 : (a.confidence === 'HIGH' ? -1 : 1)) ||
+            String(a.code).localeCompare(String(b.code), 'ja')
+          );
+      }
+
+      // パターン種別付きの正規表現を作る
+      //   ELEMENT: getFieldElement(s)('code') / BRACKET: ['code'] / QUOTED: 'code' / BARE: 裸の識別子
       function buildRegexps(code) {
         const safe = String(code || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
         const pats = [
-          new RegExp(`['"\`]${safe}['"\`]`, 'gu'),
-          new RegExp(`\\[\\s*['"\`]${safe}['"\`]\\s*\\]`, 'gu'),
-          new RegExp(`getFieldElement\\(\\s*['"\`]${safe}['"\`]\\s*\\)`, 'gu'),
-          new RegExp(`getFieldElements\\(\\s*['"\`]${safe}['"\`]\\s*\\)`, 'gu'),
+          { kind: 'ELEMENT', rx: new RegExp(`getFieldElements?\\(\\s*['"\`]${safe}['"\`]\\s*\\)`, 'gu') },
+          { kind: 'BRACKET', rx: new RegExp(`\\[\\s*['"\`]${safe}['"\`]\\s*\\]`, 'gu') },
+          { kind: 'QUOTED', rx: new RegExp(`['"\`]${safe}['"\`]`, 'gu') },
         ];
         if (/^[A-Za-z_$][A-Za-z0-9_$]*$/.test(code)) {
-          pats.push(new RegExp(`(?<![A-Za-z0-9_$])${safe}(?![A-Za-z0-9_$])`, 'g'));
+          pats.push({ kind: 'BARE', rx: new RegExp(`(?<![A-Za-z0-9_$])${safe}(?![A-Za-z0-9_$])`, 'g') });
         }
         return pats;
       }
-      function findMatches(text, code, regexps, { before = 24, after = 48 } = {}) {
-        const arr = [];
-        for (const rx of regexps) {
+
+      // アクセス種別の推定（正規表現ベースの簡易判定。断定せず confidence を必ず併記する）
+      //   READ / WRITE / ELEMENT / SHOW_HIDE / CONTROL / FIELDS_PARAM / QUERY / OTHER
+      function classifyAccess(text, start, end, kind) {
+        if (kind === 'ELEMENT') return { access: 'ELEMENT', confidence: 'HIGH' };
+        const before = text.slice(Math.max(0, start - 80), start);
+        const after = text.slice(end, end + 80);
+
+        if (/setFieldShown\(\s*$/.test(before)) return { access: 'SHOW_HIDE', confidence: 'HIGH' };
+
+        // 裸の識別子は同名変数・関数名の可能性があるため確度を1段下げる
+        const cap = (c) => (kind === 'BARE')
+          ? (c === 'HIGH' ? 'MEDIUM' : 'LOW')
+          : c;
+
+        // .value.push() など、配列を直接書き換える呼び出しは WRITE として扱う
+        if (/^\s*\.value\s*\.\s*(push|pop|shift|unshift|splice|sort|reverse|fill)\s*\(/.test(after)) {
+          return { access: 'WRITE', confidence: cap('HIGH') };
+        }
+        const mv = after.match(/^\s*\.value\s*(=(?!=)|\+=|-=|\*=|\/=)?/);
+        if (mv) return { access: mv[1] ? 'WRITE' : 'READ', confidence: cap('HIGH') };
+        if (/^\s*\.(disabled|error)\s*=/.test(after)) return { access: 'CONTROL', confidence: cap('HIGH') };
+        // fields: [...] の中（BRACKETマッチでは '[' がマッチ側に含まれるため、'[' 無しの形も許容する）
+        if (/fields\s*:\s*(\[[^\]]*)?$/.test(before)) return { access: 'FIELDS_PARAM', confidence: cap('MEDIUM') };
+        if (/query\s*[:=]\s*['"`][^'"`\n]*$/.test(before)) return { access: 'QUERY', confidence: cap('MEDIUM') };
+
+        // record['CODE'] をそのまま関数へ渡している（読み取りも書き換えもあり得るため用途は断定しない）
+        //   例: const err = textCheck(record['得意先名']);
+        if (/record\s*$/.test(before) && /^\s*[),]/.test(after)) {
+          return { access: 'ARGUMENT', confidence: cap('MEDIUM') };
+        }
+
+        // 配列リテラルに列挙されている（後で record[配列[i]] のように使われることが多い）
+        //   例: const filedName = ['会計_担当者1_KintoneUser', '会計_担当者2_KintoneUser'];
+        if (/[[,]\s*$/.test(before) && /^\s*[,\]]/.test(after)) {
+          return { access: 'LIST', confidence: cap('MEDIUM') };
+        }
+        // 要素が1つだけの配列は ['CODE'] 全体がマッチするため、上の判定に掛からない。
+        // 直前が識別子（record など）でなければ、添字アクセスではなく配列リテラルとみなす。
+        if (kind === 'BRACKET' && !/[\w$\])]\s*$/.test(before)) {
+          return { access: 'LIST', confidence: cap('MEDIUM') };
+        }
+
+        return { access: 'OTHER', confidence: 'LOW' };
+      }
+
+      // 1ファイル内の全マッチを取得し、重複スパンを除去する
+      // ★改善：従来は ['code'] が BRACKET と QUOTED の両方にヒットし二重カウントされていた
+      function findAllMatches(text, pats) {
+        const all = [];
+        for (const p of pats) {
           let m;
-          while ((m = rx.exec(text)) !== null) {
-            const s = Math.max(0, m.index - before);
-            const e = Math.min(text.length, m.index + m[0].length + after);
-            arr.push({ index: m.index, snippet: text.slice(s, e).replace(/\n/g, '⏎') });
+          while ((m = p.rx.exec(text)) !== null) {
+            all.push({ start: m.index, end: m.index + m[0].length, kind: p.kind });
           }
         }
-        return arr;
+        // 開始位置昇順・長い方優先で並べ、重なるスパンは捨てる
+        all.sort((a, b) => (a.start - b.start) || (b.end - a.end));
+        const kept = [];
+        let lastEnd = -1;
+        for (const h of all) {
+          if (h.start < lastEnd) continue;
+          kept.push(h);
+          lastEnd = h.end;
+        }
+        return kept;
       }
+
       function analyze({ fields, files, snippet }) {
-        const cleans = files.map(f => ({ ...f, clean: stripCommentsOnly(f.text || '') }));
+        const { before = 24, after = 48 } = snippet || {};
+        const cleans = files.map(f => {
+          const clean = stripCommentsOnly(f.text || '');
+          return { ...f, clean, lineIdx: buildLineIndex(clean) };
+        });
         const results = [];
         for (const fld of fields) {
           if (!fld.code) continue;
-          const rxs = buildRegexps(fld.code);
+          const pats = buildRegexps(fld.code);
           let count = 0;
           const usedIn = [];
           const samples = [];
+          const matches = [];      // 全マッチ詳細（JSON出力・依存関係データ統合用）
+          const accessCounts = {}; // アクセス種別ごとの件数
+
           for (const f of cleans) {
             if (!f.clean) continue;
-            const hits = findMatches(f.clean, fld.code, rxs, snippet);
-            if (hits.length) {
-              count += hits.length;
-              usedIn.push(`${f.target}: ${f.name}`);
-              samples.push(...hits.slice(0, 2).map(h => ({ file: `${f.target}: ${f.name}`, snippet: h.snippet })));
+            const hits = findAllMatches(f.clean, pats);
+            if (!hits.length) continue;
+            count += hits.length;
+            usedIn.push(`${f.target}: ${f.name}`);
+            let sampled = 0;
+            for (const h of hits) {
+              const cls = classifyAccess(f.clean, h.start, h.end, h.kind);
+              const line = lineAt(f.lineIdx, h.start);
+              accessCounts[cls.access] = (accessCounts[cls.access] || 0) + 1;
+              const s = Math.max(0, h.start - before);
+              const e = Math.min(f.clean.length, h.end + after);
+              const snip = f.clean.slice(s, e).replace(/\n/g, '⏎');
+              matches.push({
+                file: f.name, target: f.target, kind: f.kind,
+                line, access: cls.access, confidence: cls.confidence, snippet: snip,
+              });
+              if (sampled < 2) {
+                samples.push({
+                  file: `${f.target}: ${f.name}`, line,
+                  access: cls.access, confidence: cls.confidence, snippet: snip,
+                });
+                sampled++;
+              }
             }
           }
-          results.push({ code: fld.code, label: fld.label, type: fld.type, used: count > 0, count, files: usedIn, samples });
+
+          const accessSummary = Object.entries(accessCounts)
+            .sort((a, b) => b[1] - a[1])
+            .map(([k, v]) => `${k}×${v}`)
+            .join(', ');
+
+          results.push({
+            code: fld.code, label: fld.label, type: fld.type,
+            used: count > 0, count, files: usedIn,
+            samples, matches, accessCounts, accessSummary,
+          });
         }
         results.sort((a, b) => (Number(b.used) - Number(a.used)) || (b.count - a.count) || String(a.code).localeCompare(String(b.code)));
         return results;
       }
 
       // ---- 表示 & エクスポート ----
+
       function renderTable(results) {
         const rows = results.map(r => {
-          const filesHtml = (r.files || []).map(s => `<div>${s}</div>`).join('');
+          // ★エスケープ漏れ修正：code / label / type / files / snippet をすべてエスケープする
+          const filesHtml = (r.files || []).map(s => `<div>${escapeHtml(s)}</div>`).join('');
+          const accessHtml = escapeHtml(r.accessSummary || '');
           const samples = r.samples && r.samples.length
             ? r.samples.map(s => `
               <div style="opacity:.9; padding:4px 6px; border:1px dashed #8883; border-radius:8px; margin:3px 0;">
-                <b>${s.file}</b> … ${s.snippet}
+                <b>${escapeHtml(s.file)}</b>
+                <code style="opacity:.8">L${Number(s.line) || '?'}</code>
+                <span style="border:1px solid #8886;border-radius:999px;padding:0 6px;font-size:10px;">${escapeHtml(s.access || '')}${s.confidence === 'LOW' ? '?' : ''}</span>
+                … ${escapeHtml(s.snippet)}
               </div>`).join('')
             : '';
           return `
             <tr>
               <td style="white-space:nowrap; padding:8px; border-bottom:1px solid ${BD};">${r.used ? '✅' : '—'}</td>
-              <td style="white-space:nowrap; padding:8px; border-bottom:1px solid ${BD};"><code>${r.code}</code></td>
-              <td style="padding:8px; border-bottom:1px solid ${BD};">${r.label ?? ''}</td>
-              <td style="white-space:nowrap; padding:8px; border-bottom:1px solid ${BD};">${r.type ?? ''}</td>
+              <td style="white-space:nowrap; padding:8px; border-bottom:1px solid ${BD};"><code>${escapeHtml(r.code)}</code></td>
+              <td style="padding:8px; border-bottom:1px solid ${BD};">${escapeHtml(r.label ?? '')}</td>
+              <td style="white-space:nowrap; padding:8px; border-bottom:1px solid ${BD};">${escapeHtml(r.type ?? '')}</td>
               <td style="text-align:right; padding:8px; border-bottom:1px solid ${BD};">${r.count}</td>
+              <td style="padding:8px; border-bottom:1px solid ${BD};">${accessHtml}</td>
               <td style="padding:8px; border-bottom:1px solid ${BD};">${filesHtml}</td>
             </tr>
-            ${samples ? `<tr><td></td><td colspan="5" style="padding:6px 8px; border-bottom:1px solid ${BD};">${samples}</td></tr>` : ''}
+            ${samples ? `<tr><td></td><td colspan="6" style="padding:6px 8px; border-bottom:1px solid ${BD};">${samples}</td></tr>` : ''}
           `;
         }).join('');
-        $tbody.innerHTML = rows || `<tr><td colspan="6" style="padding:14px; opacity:.8;">結果なし</td></tr>`;
+        $tbody.innerHTML = rows || `<tr><td colspan="7" style="padding:14px; opacity:.8;">結果なし</td></tr>`;
       }
 
+      /**
+       * ファイル起点ビュー：JS/CSSファイルごとに「いつ動き・何を触り・どのアプリを見るか」を表示する
+       * 既存のフィールド起点テーブル（renderTable）と切り替えて使う。
+       * 追加のAPI取得は不要で、スキャン結果（results / appRefs / fileEvents）を並べ替えるだけ。
+       */
+      function renderFileView(payload) {
+        const results = payload?.results || [];
+        const files = payload?.files || [];
+        const appRefs = payload?.appRefs || [];
+        const fileEvents = payload?.fileEvents || {};
+
+        if (!files.length) {
+          $fileView.innerHTML = `<div style="padding:14px;opacity:.8">対象ファイルがありません。</div>`;
+          return;
+        }
+
+        // ファイルキー（target:kind:name）ごとに、フィールド利用を集約する
+        const byFile = new Map();
+        const keyOf = (target, kind, name) => `${target}:${kind}:${name}`;
+        for (const f of files) {
+          byFile.set(keyOf(f.target, f.kind, f.name), {
+            file: f, fields: new Map(), apps: new Map(),
+          });
+        }
+        for (const r of results) {
+          for (const m of (r.matches || [])) {
+            const entry = byFile.get(keyOf(m.target, m.kind, m.file));
+            if (!entry) continue;
+            let fe = entry.fields.get(r.code);
+            if (!fe) {
+              fe = { code: r.code, label: r.label || r.code, access: {}, lines: [] };
+              entry.fields.set(r.code, fe);
+            }
+            fe.access[m.access] = (fe.access[m.access] || 0) + 1;
+            if (fe.lines.length < 10) fe.lines.push(m.line);
+          }
+        }
+        for (const ref of appRefs) {
+          const entry = byFile.get(keyOf(ref.target, 'js', ref.file));
+          if (!entry) continue;
+          const id = ref.appId || 'UNKNOWN';
+          let ae = entry.apps.get(id);
+          if (!ae) { ae = { appId: id, lines: [], kinds: new Set() }; entry.apps.set(id, ae); }
+          if (ae.lines.length < 10) ae.lines.push(ref.line);
+          ae.kinds.add(ref.kind);
+        }
+
+        // アクセス種別の表示順（読み書きを先に出す）
+        const ACCESS_ORDER = ['READ', 'WRITE', 'CONTROL', 'SHOW_HIDE', 'ELEMENT', 'ARGUMENT', 'LIST', 'FIELDS_PARAM', 'QUERY', 'OTHER'];
+        const accessText = (obj) => ACCESS_ORDER
+          .filter(k => obj[k])
+          .map(k => `${k}×${obj[k]}`)
+          .join(', ');
+
+        const pill = (text, title = '') =>
+          `<span style="display:inline-block;border:1px solid #8886;border-radius:999px;padding:0 6px;font-size:10px;margin:0 4px 4px 0"
+                 title="${escapeHtml(title)}">${escapeHtml(text)}</span>`;
+
+        const linesText = (lines) => (lines && lines.length)
+          ? `${lines.slice(0, 5).map(n => `${n}行目`).join(', ')}${lines.length > 5 ? ' ほか' : ''}`
+          : '';
+
+        const blocks = [];
+        for (const entry of byFile.values()) {
+          const f = entry.file;
+          const key = keyOf(f.target, f.kind, f.name);
+          const events = fileEvents[key] || [];
+          const fieldList = [...entry.fields.values()]
+            .sort((a, b) => String(a.label).localeCompare(String(b.label), 'ja'));
+          const appList = [...entry.apps.values()];
+
+          // 解析できていないファイル（外部URL等）は理由を明示する
+          const notAnalyzed = !f.text && f.note;
+
+          const row = (label, html) => `
+            <div style="display:flex;gap:8px;padding:3px 0;font-size:12px;align-items:flex-start">
+              <div style="width:110px;flex:none;opacity:.7">${escapeHtml(label)}</div>
+              <div style="flex:1;min-width:0">${html}</div>
+            </div>`;
+
+          const fieldsHtml = fieldList.length
+            ? fieldList.map(fe => `
+                <div style="padding:2px 0">
+                  <code>${escapeHtml(fe.code)}</code>
+                  ${fe.label !== fe.code ? `<span style="opacity:.75">（${escapeHtml(fe.label)}）</span>` : ''}
+                  <span style="opacity:.8;font-size:11px">${escapeHtml(accessText(fe.access))}</span>
+                  <span style="opacity:.6;font-size:11px">${escapeHtml(linesText(fe.lines))}</span>
+                </div>`).join('')
+            : '<span style="opacity:.7">検出なし</span>';
+
+          const appsHtml = appList.length
+            ? appList.map(a => {
+              const isUnknown = a.appId === 'UNKNOWN';
+              const label = isUnknown
+                ? '不明（変数指定）'
+                : (deps?.meta?.appNames?.[a.appId] ? `app ${a.appId} ${deps.meta.appNames[a.appId]}` : `app ${a.appId}`);
+              const link = isUnknown
+                ? escapeHtml(label)
+                : `<a href="${escapeHtml(KTApi.appUrl(a.appId))}" target="_blank" rel="noopener noreferrer" style="color:inherit">${escapeHtml(label)} 🔗</a>`;
+              return `<div style="padding:2px 0">${link}
+                        <span style="opacity:.6;font-size:11px">${escapeHtml(linesText(a.lines))}</span></div>`;
+            }).join('')
+            : '<span style="opacity:.7">検出なし</span>';
+
+          blocks.push(`
+            <div style="border:1px solid ${BD}; border-radius:10px; padding:10px; margin-bottom:8px">
+              <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:6px">
+                <span style="font-weight:600">${escapeHtml(f.name)}</span>
+                ${pill(f.target)}${pill(String(f.kind).toUpperCase())}
+                ${notAnalyzed ? pill('解析対象外', f.note || '') : ''}
+              </div>
+              ${notAnalyzed
+              ? `<div style="font-size:12px;opacity:.8">${escapeHtml(f.note)}（本文を取得できないため、参照内容は解析していません）</div>`
+              : [
+                f.kind === 'js' ? row('イベント', events.length
+                  ? events.map(e => {
+                    // 旧形式（文字列）との後方互換：文字列なら直接検出扱い
+                    const name = (typeof e === 'string') ? e : e.name;
+                    const isDirect = (typeof e === 'string') ? true : !!e.direct;
+                    return isDirect
+                      ? pill(name, 'kintone.events.on に直接記述されています')
+                      : pill(`${name} ?`, '変数経由などで登録されている可能性があります（ファイル内に記述はありますが、登録に使われているかは確認が必要です）');
+                  }).join('')
+                  : '<span style="opacity:.7">kintone.events.on の記述を検出できませんでした</span>') : '',
+                row('参照フィールド', fieldsHtml),
+                f.kind === 'js' ? row('参照アプリ', appsHtml) : '',
+              ].filter(Boolean).join('')}
+            </div>`);
+        }
+
+        $fileView.innerHTML = blocks.join('') || `<div style="padding:14px;opacity:.8">結果なし</div>`;
+      }
+
+
       // ---- Scan 実行（初期実行なし）----
-      async function scanOnce() {
+
+      /**
+       * 依存関係データへの合流とUI更新（キャッシュ経路・実スキャン経路で共通）
+       */
+      function applyScanResult(payload, { fromCache, elapsedSec, silent }) {
+        FS_last = payload;
+
+        let merged = false;
+        if (deps) {
+          try {
+            KTDeps.mergeScannerEdges(deps, FS_last);
+            if (typeof onDepsUpdated === 'function') onDepsUpdated();
+            merged = true;
+          } catch (e) {
+            console.error('[KTDeps] Scanner結果の統合に失敗しました', e);
+          }
+        }
+
+        const results = payload.results || [];
+        const usedCount = results.filter(r => r.used).length;
+        const appRefCount = new Set((payload.appRefs || []).map(r => r.appId || 'UNKNOWN')).size;
+        const unknownCount = (payload.unknownRefs || []).length;
+        const src = fromCache
+          ? `キャッシュ（${new Date(payload.meta?.scannedAt || Date.now()).toLocaleString()}）`
+          : `${elapsedSec}s`;
+        $meta.textContent = `files: ${(payload.files || []).length}`
+          + ` / fields: ${(payload.fields || []).length} / used: ${usedCount}`
+          + ` / appRefs: ${appRefCount} / 未知コード: ${unknownCount} / ${src}`
+          + (merged ? ' ｜ 依存データへ反映済み' : '');
+
+        // サイレント実行でも表示を更新しておく（タブを開いたときに結果が見える状態にする）
+        renderTable(results);
+        renderFileView(payload);
+        applyViewMode();
+        return merged;
+      }
+
+      /**
+       * JavaScript/CSSの解析を実行する
+       * @param {boolean} opt.force キャッシュを無視して再取得する（手動Scanボタン）
+       * @param {boolean} opt.silent 進捗表示を控えめにする（自動実行時）
+       * @returns {{fromCache:boolean, scannedAt:string}}
+       */
+      async function scanOnce(opt = {}) {
+        const { force = false, silent = false } = opt;
         const t0 = Date.now();
         const appId = kintone.app.getId();
         const include = resolveInclude($target.value);
         const kinds = resolveKinds($kinds.value);
 
-        const fields = await fetchFieldList(DATA.fields);
+        // --- キャッシュ確認（API呼び出しを増やさないための要）---
+        // 署名は prefetch 済みの customize 設定から作るため、追加のAPI取得は発生しない
+        // 解析ロジックのバージョンを含めることで、Toolkit更新時にキャッシュが自動的に無効になる
+        const signature = `v${KTScan.ANALYZER_VERSION}|`
+          + KTScan.buildSignature(DATA.customize)
+          + `|${$target.value}|${$kinds.value}`;
+        if (!force) {
+          const cached = KTScan.loadCache(appId, signature);
+          if (cached?.payload) {
+            applyScanResult(cached.payload, { fromCache: true, silent });
+            return { fromCache: true, scannedAt: cached.scannedAt };
+          }
+        }
+
+        if (!silent) $meta.textContent = 'Scanning...';
+
+        const fields = await fetchFieldList(DATA.fields, DATA.layout);
         const files = await fetchTexts({ appId, include, kinds });
         const results = analyze({ fields, files, snippet: { before: 24, after: 48 } });
 
-        FS_last = { results, files, fields, meta: { appId, include, kinds } };
-        const usedCount = results.filter(r => r.used).length;
-        const dt = ((Date.now() - t0) / 1000).toFixed(2);
-        $meta.textContent = `files: ${files.length} / fields: ${fields.length} / used: ${usedCount} / time: ${dt}s`;
-        renderTable(results);
+        // JS本文からアプリID参照とイベント種別を抽出（自アプリIDは除外）
+        // コメント除去済みテキストを使い、行番号は原文と一致させる
+        const appRefs = [];
+        const fileEvents = {};
+        for (const f of files) {
+          if (f.kind !== 'js' || !f.text) continue;
+          const clean = stripCommentsOnly(f.text);
+          const li = buildLineIndex(clean);
+          for (const ref of KTDeps.extractAppIdRefs(clean, (i) => lineAt(li, i))) {
+            if (ref.appId && String(ref.appId) === String(appId)) continue;
+            appRefs.push({ ...ref, file: f.name, target: f.target });
+          }
+          const evs = extractEventTypes(clean);
+          if (evs.length) fileEvents[`${f.target}:js:${f.name}`] = evs;
+        }
+
+        // ★存在しないフィールドコードの検出（JSに残った古い参照を洗い出す）
+        // 依存関係データが持つフィールドコードも既知として渡す
+        const depsKnown = (deps?.nodes || [])
+          .filter(n => n.type === 'FIELD')
+          .map(n => String(n.id).replace(/^FIELD:/, ''));
+        const unknownRefs = collectUnknownFieldRefs(files, fields, depsKnown);
+
+        const scannedAt = new Date().toISOString();
+        const payload = {
+          results, files, fields, appRefs, fileEvents, unknownRefs,
+          meta: { appId, include, kinds, scannedAt },
+        };
+
+        const elapsedSec = ((Date.now() - t0) / 1000).toFixed(2);
+        applyScanResult(payload, { fromCache: false, elapsedSec, silent });
+
+        // --- キャッシュ保存 ---
+        // ファイル本文（files[].text）は容量が大きいため保存対象から外す。
+        // 依存関係の再構築に必要なのは results / appRefs と、件数表示用のファイル名のみ。
+        const slimFiles = files.map(f => ({ name: f.name, target: f.target, kind: f.kind, note: f.note }));
+        const slimResults = results.map(r => ({
+          code: r.code, label: r.label, type: r.type, used: r.used, count: r.count,
+          files: r.files, accessCounts: r.accessCounts, accessSummary: r.accessSummary,
+          samples: r.samples, matches: r.matches,
+        }));
+        KTScan.saveCache(appId, signature, {
+          payload: { results: slimResults, files: slimFiles, fields, appRefs, fileEvents, unknownRefs, meta: payload.meta },
+        });
+
+        return { fromCache: false, scannedAt };
       }
 
+      // ★KTScanへ登録：Fieldsタブや起動時の自動実行から呼び出せるようにする
+      KTScan.register(scanOnce);
+
       // ---- イベント ----
+      // 表示ビューの切替（ファイル起点／フィールド起点）
+      //   選択はLocalStorageに保存し、次回も同じビューで開けるようにする
+      const FS_VIEW_KEY = 'ktScanView.v1';
+      function applyViewMode() {
+        const mode = $view ? $view.value : 'file';
+        if ($fileView) $fileView.style.display = (mode === 'file') ? '' : 'none';
+        if ($tableWrap) $tableWrap.style.display = (mode === 'file') ? 'none' : '';
+      }
+      if ($view) {
+        try {
+          const saved = localStorage.getItem(FS_VIEW_KEY);
+          if (saved === 'file' || saved === 'field') $view.value = saved;
+        } catch (e) { }
+        $view.addEventListener('change', () => {
+          try { localStorage.setItem(FS_VIEW_KEY, $view.value); } catch (e) { }
+          applyViewMode();
+        }, { passive: true });
+        applyViewMode();
+      }
+
+      // 自動解析トグル（既定ON）
+      const $auto = el.querySelector('#fs-auto');
+      if ($auto) {
+        $auto.checked = KTScan.isAutoEnabled();
+        $auto.addEventListener('change', () => {
+          KTScan.setAutoEnabled($auto.checked);
+          if ($auto.checked && KTScan.getStatus().state !== 'done') KTScan.run({ silent: true });
+        }, { passive: true });
+      }
+
+      // 手動Scanは常に最新を取り直す（キャッシュ無視）
       $scan.onclick = async () => {
         $meta.textContent = 'Scanning...';
-        try { await scanOnce(); } catch (e) { console.error(e); $meta.textContent = 'Scan failed'; }
+        const r = await KTScan.run({ force: true });
+        if (!r.ok && r.reason === 'error') $meta.textContent = 'Scan failed: ' + (r.error?.message || '');
       };
 
       $copyMD.onclick = async () => {
@@ -5292,20 +9691,8 @@
     const api = (path, method, params) =>
       kintone.api(kintone.api.url(path, true), method, params);
 
-    const sleep = (ms) => new Promise(r => setTimeout(r, ms));
-    async function waitDeploy(appId) {
-      const maxWaitMs = 60_000, intervalMs = 1500;
-      let waited = 0;
-      while (true) {
-        await sleep(intervalMs);
-        waited += intervalMs;
-        const st = await api('/k/v1/preview/app/deploy.json', 'GET', { apps: [Number(appId)] });
-        const s = st?.apps?.[0]?.status;
-        if (s === 'SUCCESS') return;
-        if (s === 'FAIL') throw new Error('Deploy failed.');
-        if (waited >= maxWaitMs) throw new Error('Deploy timeout.');
-      }
-    }
+    // ★共通化：実体は KTApi.waitDeploy
+    const waitDeploy = (appId) => KTApi.waitDeploy(appId);
 
     // --- UI ---
     const PANEL_H = '75vh';
@@ -5575,291 +9962,6 @@
   }
 
 
-  // ----------------------------
-  // [Feature] Links
-  // ----------------------------
-  const LINKS_CONFIG = {
-    locale: 'ja',
-    categories: ['Official', 'Community', 'Docs', 'Tools', 'Blog/Note', 'Library'],
-    tags: ['kintone', 'API', 'Customize', 'Plugin', 'Design', 'Mermaid', 'REST', 'JS', 'CSV', 'ZIP'],
-
-    items: [
-      // --- Official ---
-      {
-        title: 'kintone developer network',
-        url: 'https://cybozu.dev/ja/kintone/',
-        category: 'Official',
-        desc: '公式ドキュメント・サンプル・最新情報',
-        tags: ['kintone', 'Docs', 'API']
-      },
-      {
-        title: 'Cybozu Developer Network (日本語)',
-        url: 'https://cybozu.dev/ja/',
-        category: 'Official',
-        desc: 'Cybozu Dev 全体（日本語）',
-        tags: ['Docs']
-      },
-
-      // --- Community ---
-      {
-        title: 'kintone developer community',
-        url: 'https://community.cybozu.dev/',
-        category: 'Community',
-        desc: '日本語フォーラム',
-        tags: ['Community']
-      },
-      {
-        title: 'Qiita: kintone タグ',
-        url: 'https://qiita.com/tags/kintone',
-        category: 'Community',
-        desc: '日本の技術記事コミュニティ',
-        tags: ['Community']
-      },
-
-      // --- Docs ---
-      {
-        title: 'REST API Reference',
-        url: 'https://cybozu.dev/ja/kintone/docs/rest-api/',
-        category: 'Docs',
-        desc: 'kintone REST API 一覧',
-        tags: ['REST', 'API', 'Docs']
-      },
-      {
-        title: 'JavaScript API Reference',
-        url: 'https://cybozu.dev/ja/kintone/docs/js-api/',
-        category: 'Docs',
-        desc: 'kintone JavaScript API',
-        tags: ['JS', 'API', 'Docs']
-      },
-
-      // --- Tools ---
-      {
-        title: 'Toolkit (GitHub)',
-        url: 'https://github.com/youtotto/kintone-app-toolkit',
-        category: 'Tools',
-        desc: '本スクリプトのリポジトリ',
-        tags: ['Customize', 'Tools']
-      },
-      {
-        title: 'Mermaid Live Editor',
-        url: 'https://mermaid.live/',
-        category: 'Tools',
-        desc: 'Mermaid図の編集・プレビュー',
-        tags: ['Mermaid', 'Design']
-      },
-
-      // --- Blog/Note ---
-      {
-        title: 'Note: kintone タグ',
-        url: 'https://note.com/hashtag/kintone',
-        category: 'Blog/Note',
-        desc: 'kintone活用記事',
-        tags: ['Blog/Note']
-      },
-
-      // --- Library ---
-      {
-        title: 'kintone UI Component',
-        url: 'https://ui-component.kintone.dev/ja/',
-        category: 'Library',
-        desc: 'kintone向けUIコンポーネント（KUC）',
-        tags: ['kintone', 'Design']
-      },
-      {
-        title: 'SweetAlert2',
-        url: 'https://sweetalert2.github.io/',
-        category: 'Library',
-        desc: 'ダイアログUI（定番）',
-        tags: ['Design']
-      },
-      {
-        title: 'FileSaver.js',
-        url: 'https://github.com/eligrey/FileSaver.js',
-        category: 'Library',
-        desc: 'ブラウザでファイル保存',
-        tags: ['download']
-      },
-      {
-        title: 'SortableJS',
-        url: 'https://sortablejs.github.io/Sortable/',
-        category: 'Library',
-        desc: 'ドラッグ＆ドロップ並べ替え',
-        tags: ['UI']
-      },
-      {
-        title: 'holiday_jp-js',
-        url: 'https://github.com/holiday-jp/holiday_jp-js',
-        category: 'Library',
-        desc: '日本の祝日カレンダー',
-        tags: ['date', 'jp']
-      }
-    ]
-  };
-
-  // LocalStorageキー
-  const LINKS_LS_KEYS = {
-    category: 'kat_links_category',
-    tag: 'kat_links_tag'
-  };
-
-  function renderLinks(root) {
-    // ガード
-    const el = root.querySelector('#view-links');
-    if (!el) return;
-
-    // UI色の取得
-    const C = getThemeColors();
-    const isDark = C.isDark;
-
-    // 既存クリア
-    el.innerHTML = '';
-
-    // ----- 状態（検索・カテゴリ・タグ） -----
-    const state = {
-      category: localStorage.getItem(LINKS_LS_KEYS.category) || 'All',
-      tag: localStorage.getItem(LINKS_LS_KEYS.tag) || 'All'
-    };
-
-    // ----- ユーティリティ -----
-    const h = (html) => {
-      const div = document.createElement('div');
-      div.innerHTML = html.trim();
-      return div.firstElementChild;
-    };
-
-    // ----- ヘッダUI（配色を共通変数へ） -----
-    const categories = ['All', ...LINKS_CONFIG.categories];
-    const tags = ['All', ...LINKS_CONFIG.tags];
-
-    const $header = h(`
-      <div style="
-        display:flex; gap:8px; align-items:center; margin-bottom:12px;
-        justify-content:flex-end; flex-wrap:wrap;
-      ">
-        <select id="links-category"
-          style="padding:8px 10px; border-radius:8px; border:1px solid ${C.border}; background:${C.bgInput}; color:${C.text};">
-          ${categories.map(c => `<option ${c === state.category ? 'selected' : ''} value="${c}" style="background:${C.bgInput}; color:${C.text};">${c}</option>`).join('')}
-        </select>
-        <select id="links-tag"
-          style="padding:8px 10px; border-radius:8px; border:1px solid ${C.border}; background:${C.bgInput}; color:${C.text};">
-          ${tags.map(t => `<option ${t === state.tag ? 'selected' : ''} value="${t}" style="background:${C.bgInput}; color:${C.text};">${t}</option>`).join('')}
-        </select>
-      </div>
-    `);
-
-    // option配色のテーマ適用
-    if (!document.getElementById('kat-links-select-theme')) {
-      document.head.insertAdjacentHTML('beforeend', `
-        <style id="kat-links-select-theme">
-          #links-category:focus, #links-tag:focus { outline:none; box-shadow:0 0 0 2px ${isDark ? 'rgba(255,255,255,.1)' : 'rgba(0,0,0,.05)'} inset; }
-        </style>
-      `);
-    }
-
-    const $cat = $header.querySelector('#links-category');
-    const $tag = $header.querySelector('#links-tag');
-
-    $cat.addEventListener('change', () => {
-      state.category = $cat.value;
-      localStorage.setItem(LINKS_LS_KEYS.category, state.category);
-      renderList();
-    });
-    $tag.addEventListener('change', () => {
-      state.tag = $tag.value;
-      localStorage.setItem(LINKS_LS_KEYS.tag, state.tag);
-      renderList();
-    });
-
-    el.appendChild($header);
-
-    // ----- リスト本体 -----
-    const $list = h(`<div id="links-list" style="display:grid; gap:10px;"></div>`);
-    el.appendChild($list);
-
-    // カード生成（枠線やバッジの色を調整）
-    function card(item) {
-      const favicon = `https://www.google.com/s2/favicons?domain=${encodeURIComponent(item.url)}&sz=64`;
-      const $c = h(`
-        <div class="link-card" style="
-          border:1px solid ${C.border}; border-radius:12px; padding:12px; 
-          display:flex; gap:12px; align-items:flex-start;
-          min-height: 84px;
-          background: ${isDark ? 'rgba(255,255,255,.03)' : 'transparent'};
-          ">
-          <img src="${favicon}" alt="" width="20" height="20" style="margin-top:2px; border-radius:4px;" />
-          <div style="flex:1 1 auto; min-width:0;">
-            <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
-              <a href="${item.url}" target="_blank" rel="noopener" 
-                style="font-weight:700; text-decoration:none; color:${C.text};">${item.title}</a>
-              <span style="font-size:11px; opacity:.7; padding:2px 6px; border:1px solid ${C.border}; border-radius:999px; color:${C.text};">
-                ${item.category}
-              </span>
-              ${(item.tags || []).slice(0, 5).map(t => `
-                <span style="font-size:10px; opacity:.6; padding:2px 6px; border:1px dashed ${C.border}; border-radius:999px; color:${C.text};">#${t}</span>
-              `).join('')}
-            </div>
-            <div style="font-size:12px; opacity:.85; margin-top:4px; color:${C.text};">${item.desc || ''}</div>
-          </div>
-        </div>
-      `);
-      return $c;
-    }
-
-    // --- (renderList 以下のロジックは変更なしのため省略可能ですが、色の反映を確実にします) ---
-    function renderList() {
-      $list.innerHTML = '';
-      $list.style.gridTemplateColumns = `repeat(auto-fill, minmax(280px, 1fr))`;
-
-      const q = (state.search || '').toLowerCase();
-      const filtered = LINKS_CONFIG.items.filter(item => {
-        const catOK = (state.category === 'All') || (item.category === state.category);
-        const tagOK = (state.tag === 'All') || ((item.tags || []).includes(state.tag));
-        const text = [item.title, item.desc, item.url, item.category, ...(item.tags || [])].join(' ').toLowerCase();
-        return catOK && tagOK && (!q || text.includes(q));
-      });
-
-      const groups = {};
-      for (const c of ['All', ...LINKS_CONFIG.categories]) groups[c] = [];
-      for (const it of filtered) groups[it.category]?.push(it);
-
-      LINKS_CONFIG.categories.forEach(cat => {
-        const arr = groups[cat];
-        if (!arr || arr.length === 0) return;
-        const $sec = h(`
-          <section>
-            <h3 style="margin:12px 4px 6px; font-size:13px; opacity:.8; color:${C.text};">${cat}</h3>
-            <div class="links-cat" style="display:grid; gap:10px;"></div>
-          </section>
-        `);
-        const $wrap = $sec.querySelector('.links-cat');
-        $wrap.style.gridTemplateColumns = `repeat(auto-fill, minmax(280px, 1fr))`;
-        arr.forEach(item => $wrap.appendChild(card(item)));
-        $list.appendChild($sec);
-      });
-
-      if (filtered.length === 0) {
-        $list.appendChild(h(`<div style="opacity:.7; font-size:12px; color:${C.text};">該当するリンクがありません。</div>`));
-      }
-      normalizeHeights();
-    }
-
-    renderList();
-
-    // (以下、normalizeHeights と resize イベント処理は既存と同じ)
-    function normalizeHeights() {
-      $list.querySelectorAll('.link-card').forEach(c => (c.style.height = 'auto'));
-      $list.querySelectorAll('section .links-cat').forEach(cat => {
-        const cards = [...cat.children].filter(el => el.classList.contains('link-card'));
-        if (cards.length < 2) return;
-        const max = Math.max(...cards.map(c => c.getBoundingClientRect().height));
-        cards.forEach(c => (c.style.height = `${Math.ceil(max)}px`));
-      });
-    }
-
-    window.addEventListener('resize', normalizeHeights);
-  }
-
-
   // ==========================================
   // 6. メイン実行処理 (Entry Point)
   // ==========================================
@@ -5875,17 +9977,66 @@
     const pick = (obj, keys) => Object.fromEntries(keys.map(k => [k, obj[k] ?? null]));
     //    派生 relations を別関数で作る
     let relations = buildRelations(DATA);
+
+    // ★追加：正規化フィールドと依存関係データを一度だけ生成（各タブで再利用する）
+    //   解析に失敗しても Toolkit 全体は停止させない
+    let FIELDS_N = [];
+    let DEPS = null;
+    try {
+      FIELDS_N = KTDeps.normalizeFields(DATA.fields);
+      DEPS = KTDeps.buildDependencyData(DATA, FIELDS_N);
+    } catch (e) {
+      console.error('[KTDeps] 依存関係解析に失敗しました（既存表示にフォールバック）', e);
+    }
+
+    // ★参照先アプリ名の解決
+    //   /k/v1/apps.json は複数アプリを1回で取得できるうえ、結果は24時間キャッシュされるため、
+    //   API呼び出しは通常1回、再訪時は0回で済む。
+    //   JS解析で新しい接続先アプリが判明した場合にも、未解決のIDだけを追加で問い合わせる。
+    //   取得できないアプリ（閲覧権限なし）は「名称取得不可」として表示する。
+    const resolveAppNames = async ({ rerender = true } = {}) => {
+      if (!DEPS) return false;
+      try {
+        const known = (DEPS.meta && DEPS.meta.appNames) || {};
+        const ids = [...new Set(
+          DEPS.edges
+            .filter(e => e.targetType === 'APP' && e.targetId !== 'UNKNOWN' && String(e.targetId) !== String(appId))
+            .map(e => String(e.targetId))
+        )].filter(id => !known[id]); // 解決済みのIDは問い合わせない
+        if (!ids.length) return false;
+
+        const nameMap = await KTApi.getAppNames(ids);
+        if (!nameMap.size) return false;
+        KTDeps.applyAppNames(DEPS, nameMap);
+
+        if (rerender) {
+          // アプリ名を反映して再描画（Relations＝アプリ間依存、Fields＝変更影響の他アプリ連携）
+          renderRelations(root, relations, appId, DEPS);
+          renderFields(root, { ...pick(DATA, ['appId', 'fields', 'layout']), usageData: DATA, deps: DEPS });
+        }
+        return true;
+      } catch (e) {
+        console.error('[Toolkit] 参照先アプリ名の解決に失敗しました（ID表示のまま継続します）', e);
+        return false;
+      }
+    };
+
     // 3) 各 render に “必要分だけ” 注入
-    renderHealth(root, pick(DATA, [
-      'appId', 'fields', 'status', 'views', 'reports', 'customize',
-      'generalNotify', 'perRecordNotify', 'reminderNotify',
-      'appAcl', 'recordAcl', 'fieldAcl',
-      'actions', 'plugins'
-    ]));
-    renderFields(root, { ...pick(DATA, ['appId', 'fields', 'layout']), usageData: DATA });
+    renderHealth(root, {
+      ...pick(DATA, [
+        'appId', 'fields', 'status', 'views', 'reports', 'customize',
+        'generalNotify', 'perRecordNotify', 'reminderNotify',
+        'appAcl', 'recordAcl', 'fieldAcl',
+        'actions', 'plugins'
+      ]),
+      // 設定の整合性チェック（存在しないフィールド参照の検出）に使用する
+      deps: DEPS,
+    });
+    renderFields(root, { ...pick(DATA, ['appId', 'fields', 'layout']), usageData: DATA, deps: DEPS });
     renderViews(root, pick(DATA, ['appId', 'views', 'fields']));
     renderGraphs(root, pick(DATA, ['appId', 'reports', 'fields']));
-    renderRelations(root, relations, appId);
+    renderRelations(root, relations, appId, DEPS);
+    renderDepsGraph(root, DEPS, appId, FIELDS_N);
     renderNotifications(root, pick(DATA, [
       'appId',
       'generalNotify',
@@ -5900,9 +10051,31 @@
     ]));
     renderCustomize(root, DATA, appId);
     renderTemplates(root, DATA, appId);
-    renderScanner(root, pick(DATA, ['appId', 'fields', 'customize']));
+    renderScanner(root, {
+      ...pick(DATA, ['appId', 'fields', 'layout', 'customize']),
+      deps: DEPS,
+      // ★Scan実行後、JS由来の依存（フィールド利用・アプリID参照）を Fields / Relations に反映する
+      onDepsUpdated: () => {
+        renderFields(root, { ...pick(DATA, ['appId', 'fields', 'layout']), usageData: DATA, deps: DEPS });
+        renderRelations(root, relations, appId, DEPS);
+        // ★Healthタブの整合性チェックも更新する（JS内の未知コードは解析後に判明するため）
+        //   Healthタブ全体を描き直すとステータス分布のレコード取得が再実行されるので、
+        //   該当ブロックだけを更新する
+        renderBrokenRefs(root, DEPS);
+        // JS解析で新たに判明した接続先アプリの名前を解決する（未解決のIDだけ問い合わせる）
+        resolveAppNames();
+      },
+    });
     renderPlugins(root, pick(DATA, ['appId', 'plugins']));
-    renderLinks(root);
+
+    // 参照先アプリ名の解決（定義は上部）。初期描画をブロックしないよう、描画後に実行する
+    resolveAppNames();
+
+    // ★JavaScriptの自動解析：初期描画の完了後、ブラウザが空いたタイミングで実行する。
+    //   - Field Scannerタブを開かなくても、使用箇所・変更影響・アプリ間依存にJS情報が入る
+    //   - 結果は6時間キャッシュされるため、通常の再訪では追加のAPI取得は発生しない
+    //   - 失敗してもToolkit全体は停止しない（KTScan内でcatch済み）
+    if (DEPS) KTScan.scheduleAuto();
 
   });
 
