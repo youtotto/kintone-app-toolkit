@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         kintone App Toolkit
 // @namespace    https://github.com/youtotto/kintone-app-toolkit
-// @version      2.1.0
+// @version      2.2.0
 // @description  kintoneアプリの構造・依存関係・変更影響をブラウザ上で分析。フィールドの利用箇所、JS解析、アプリ間連携、設定の整合性チェックまで対応した開発支援ツールキット。
 // @match        https://*.cybozu.com/k/*/
 // @match        https://*.cybozu.com/k/*/?*view=*
@@ -25,7 +25,7 @@
   // ==========================================
   // 1. 定数・グローバル状態
   // ==========================================
-  const SCRIPT_VERSION = '2.1.0';
+  const SCRIPT_VERSION = '2.2.0';
   const CONTAINER_TYPES = new Set(['GROUP', 'SUBTABLE', 'LABEL', 'CATEGORY']);
   const SYSTEM_TYPES = new Set(['RECORD_NUMBER', 'CREATOR', 'CREATED_TIME', 'MODIFIER', 'UPDATED_TIME', 'STATUS', 'STATUS_ASSIGNEE']);
 
@@ -657,7 +657,7 @@
     // ★解析ロジックのバージョン。
     //   解析内容（検出パターン・保存する項目）を変更したら必ず上げること。
     //   これを署名に含めないと、Toolkit更新後も古い解析結果が使われ続ける。
-    const ANALYZER_VERSION = '9'; // 解析ロジックを変更したら上げる（キャッシュが自動的に無効になる）
+    const ANALYZER_VERSION = '11'; // 解析ロジックを変更したら上げる（キャッシュが自動的に無効になる）
     const CACHE_TTL_MS = 6 * 60 * 60 * 1000; // 6時間（プレビュー編集を拾えないため長くしすぎない）
 
     // Scannerタブが登録する実行関数（renderScannerから設定される）
@@ -1177,8 +1177,25 @@
       const selfName = DATA?.settings?.name ? ` ${DATA.settings.name}` : '';
       addNode('APP', String(DATA?.appId ?? ''), `app ${DATA?.appId ?? '?'}${selfName}（このアプリ）`, { self: true });
 
+      // ステータス名の検証に使う情報
+      //   states  : プロセス管理に定義されているステータス名
+      //   codes   : ステータスフィールドのコード（条件式で使われる）
+      //   conds   : 検証対象の条件式（設定の種別・名前つきで集める）
+      const statusStates = DATA?.status?.enable
+        ? Object.values(DATA.status.states || {}).map(st => st?.name).filter(Boolean)
+        : [];
+      const statusFieldCodes = fieldsN
+        .filter(f => f.rawType === 'STATUS')
+        .map(f => f.code);
+      const statusConditions = [];
+      const collectCond = (cond, category, settingType, settingName) => {
+        if (cond) statusConditions.push({ cond, category, settingType, settingName });
+      };
+
       // 条件式（filterCond等）からのエッジ生成ヘルパ
       const edgesFromCond = (cond, src, relationType, settingType, settingName) => {
+        // ステータス名の検証用に、条件式そのものも控えておく
+        collectCond(cond, IMPACT_CATEGORY[src.sourceType] || src.sourceType, settingType, settingName);
         for (const hit of extractFieldCodes(cond, allCodes)) {
           addEdge({
             ...src, relationType,
@@ -1444,6 +1461,10 @@
         meta: {
           appId: DATA?.appId ?? null,
           appName: DATA?.settings?.name ?? null,
+          // ステータス名の検証に使う情報
+          statusStates,
+          statusFieldCodes,
+          statusConditions,
           // プラグイン設定の中身はAPIで取得できないため、件数だけ保持して注意喚起に使う
           pluginCount: Array.isArray(DATA?.appPlugins?.plugins) ? DATA.appPlugins.plugins.length : null,
           generatedAt: new Date().toISOString(),
@@ -1527,6 +1548,62 @@
       return out;
     }
 
+    // ================= ステータス名の検証 =================
+
+    /**
+     * 条件式から、ステータスフィールドに指定されている値を抽出する
+     *
+     *   ステータス in ("完了", "承認待ち")
+     *   ステータス = "未処理"
+     *
+     * フィールドコードと同じく、ステータス名を変更・削除しても
+     * 条件式やJavaScriptの参照は置き去りになるため、突き合わせに使う。
+     *
+     * @returns {string[]} 指定されているステータス名
+     */
+    function extractStatusValues(cond, statusCodes) {
+      const s = String(cond || '');
+      if (!s || !statusCodes || !statusCodes.length) return [];
+      const out = [];
+      for (const code of statusCodes) {
+        const safe = String(code).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        // <ステータスフィールド> <演算子> ( "..." , "..." ) / "..."
+        const rx = new RegExp(`${safe}\\s*(?:not\\s+in|in|!=|=)\\s*(\\([^)]*\\)|['"\`][^'"\`]*['"\`])`, 'g');
+        let m;
+        while ((m = rx.exec(s)) !== null) {
+          const strRx = /['"`]([^'"`]+)['"`]/g;
+          let sm;
+          while ((sm = strRx.exec(m[1])) !== null) out.push(sm[1].trim());
+        }
+      }
+      return [...new Set(out)];
+    }
+
+    /**
+     * 設定の条件式に、存在しないステータス名が指定されていないか調べる
+     * @returns {Array<{category, settingName, settingType, value}>}
+     */
+    function findUnknownStatusInSettings(deps) {
+      const meta = deps?.meta || {};
+      const known = new Set(meta.statusStates || []);
+      const codes = meta.statusFieldCodes || [];
+      // プロセス管理が無効、またはステータスフィールドが無ければ検証しない
+      if (!known.size || !codes.length) return [];
+
+      const rows = [];
+      const seen = new Set();
+      for (const c of (meta.statusConditions || [])) {
+        for (const v of extractStatusValues(c.cond, codes)) {
+          if (known.has(v)) continue;
+          const key = `${c.category}|${c.settingName}|${v}`;
+          if (seen.has(key)) continue;
+          seen.add(key);
+          rows.push({ category: c.category, settingName: c.settingName, settingType: c.settingType, value: v });
+        }
+      }
+      return rows;
+    }
+
     // ================= 壊れた参照の検出 =================
 
     // 設定種別 → 表示名（どの設定のどの項目かが分かるようにする）
@@ -1584,6 +1661,41 @@
           detail: near ? `${fileText} ／ 近い既存コード: ${near}` : fileText,
           count: u.count || 0,
           nearMatch: near,
+        });
+      }
+
+      // ---- ③ 存在しないステータス名（JavaScript内の比較）----
+      //   ステータス名を変更してもJavaScriptは追随しないため、条件が成立しなくなる
+      for (const u of (deps?.meta?.unknownJsStatuses || [])) {
+        const fileText = (u.files || [])
+          .map(f => `${f.name}${f.lines?.length ? `（${f.lines.map(n => `${n}行目`).join(', ')}）` : ''}`)
+          .join(' / ');
+        rows.push({
+          source: 'JS',
+          category: 'JavaScript',
+          settingName: (u.files || []).map(f => f.name).join(' / ') || '(unknown)',
+          settingType: 'JS_UNKNOWN_STATUS',
+          role: 'ステータス名との比較',
+          code: u.value,
+          confidence: CONF.LIKELY,
+          detail: fileText,
+          count: u.count || 0,
+        });
+      }
+
+      // ---- ④ 存在しないステータス名（設定の条件式）----
+      for (const u of findUnknownStatusInSettings(deps)) {
+        rows.push({
+          source: 'SETTING',
+          category: u.category,
+          settingName: u.settingName,
+          settingType: u.settingType,
+          role: '条件式のステータス指定',
+          code: u.value,
+          // 条件式からの抽出のため、確実とまでは言い切らない
+          confidence: CONF.LIKELY,
+          detail: '',
+          count: 1,
         });
       }
 
@@ -2205,6 +2317,7 @@
       deps.meta.jsEvents = { ...(scan.fileEvents || {}) };
       // ★JS内に残った「存在しないフィールドコード」も保持する（整合性チェックで使う）
       deps.meta.unknownJsRefs = Array.isArray(scan.unknownRefs) ? scan.unknownRefs : [];
+      deps.meta.unknownJsStatuses = Array.isArray(scan.unknownStatuses) ? scan.unknownStatuses : [];
 
       // CUSTOMIZEノードを解析済みに更新し、meta の未解析一覧から本文解析を外す
       for (const n of deps.nodes || []) {
@@ -2857,19 +2970,19 @@
 
       // ---- 壊れた参照 ----
       const broken = findBrokenRefs(deps);
-      out.push('# 存在しないフィールドコードへの参照');
+      out.push('# 存在しない参照（フィールドコード・ステータス名）');
       out.push('');
       if (broken.length) {
         out.push('フィールドの削除・コード変更のあとに、参照側が更新されていない可能性があります。');
         out.push('kintoneはフィールド削除時に一覧や通知などの設定からは自動的に取り除きますが、JavaScriptは対象外です。');
         out.push('');
-        out.push('| 種別 | コード | 検出パターン / 箇所 | ファイル・設定名 | 確度 |');
+        out.push('| 種別 | コード / 名前 | 検出パターン / 箇所 | ファイル・設定名 | 確度 |');
         out.push('| --- | --- | --- | --- | --- |');
         for (const b of broken) {
           out.push(`| ${mdEscape(b.category)} | \`${mdEscape(b.code)}\` | ${mdEscape(b.role)} | ${mdEscape(b.detail || b.settingName)} | ${CONF_JA[b.confidence] || b.confidence} |`);
         }
       } else {
-        out.push('存在しないフィールドコードへの参照は見つかりませんでした。');
+        out.push('存在しないフィールドコード・ステータス名への参照は見つかりませんでした。');
       }
       out.push('');
 
@@ -3345,7 +3458,7 @@
     if (!broken.length) {
       host.innerHTML = `
         <div style="border:1px solid #16a34a55;background:#16a34a0f;border-radius:8px;padding:8px 10px;font-size:12px">
-          ✅ <b>設定の整合性チェック</b>：存在しないフィールドコードへの参照は見つかりませんでした。
+          ✅ <b>設定の整合性チェック</b>：存在しないフィールドコード・ステータス名への参照は見つかりませんでした。
           <span style="opacity:.75">${escapeHtml(jsNote)}</span>
         </div>`;
       return;
@@ -3375,7 +3488,7 @@
       <div style="border:1px solid #ef444455;background:#ef44440f;border-radius:8px;padding:8px 10px">
         <details open>
           <summary style="cursor:pointer;font-size:12px;font-weight:600">
-            ⚠️ 存在しないフィールドコードへの参照が ${broken.length} 件あります（${escapeHtml(summaryParts.join(' / '))}）
+            ⚠️ 存在しない参照が ${broken.length} 件あります（${escapeHtml(summaryParts.join(' / '))}）
           </summary>
           <div style="font-size:11px;opacity:.85;margin:6px 0 8px;line-height:1.7">
             フィールドの削除・コード変更のあとに、参照側が更新されていない可能性があります。<br>
@@ -3391,7 +3504,7 @@
             <table style="width:100%;border-collapse:collapse;font-size:12px">
               <thead><tr style="opacity:.7">
                 <th style="text-align:left;padding:4px 6px">種別</th>
-                <th style="text-align:left;padding:4px 6px">存在しないコード</th>
+                <th style="text-align:left;padding:4px 6px">存在しないコード / 名前</th>
                 <th style="text-align:left;padding:4px 6px">検出パターン / 箇所</th>
                 <th style="text-align:left;padding:4px 6px">ファイル・設定名</th>
                 <th style="text-align:left;padding:4px 6px">確度</th>
@@ -3407,9 +3520,9 @@
 
     host.querySelector('#kt-broken-copy')?.addEventListener('click', async () => {
       const md = [
-        '# 存在しないフィールドコードへの参照',
+        '# 存在しない参照（フィールドコード・ステータス名）',
         '',
-        '| 種別 | コード | 検出パターン / 箇所 | ファイル・設定名 | 確度 |',
+        '| 種別 | コード / 名前 | 検出パターン / 箇所 | ファイル・設定名 | 確度 |',
         '| --- | --- | --- | --- | --- |',
         ...broken.map(b => `| ${b.category} | \`${b.code}\` | ${b.role} | ${b.detail || b.settingName} | ${CONF_JA[b.confidence] || b.confidence} |`),
       ].join('\n');
@@ -9043,6 +9156,122 @@
       }
 
       /**
+       * JavaScript内で「ステータスと比較している文字列」を抽出する
+       *
+       *   record['ステータス'].value === '承認待ち'
+       *   event.record.ステータス.value !== '完了'
+       *   '完了' === record['ステータス'].value      （左右が逆の書き方）
+       *
+       * ステータス名を変更してもJavaScriptは追随しないため、
+       * 存在しない名前との比較が残ると条件が成立しなくなる。
+       * @returns {Array<{value, line}>}
+       */
+      function extractStatusComparisons(cleanText, statusCodes, lineIndexFn) {
+        const s = String(cleanText || '');
+        if (!s) return [];
+        const out = [];
+        const push = (value, index) => {
+          const v = String(value || '').trim();
+          if (v) out.push({ value: v, line: lineIndexFn ? lineIndexFn(index) : null });
+        };
+        const esc = (v) => String(v).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+        // --- ステータス値を持つ式を列挙する ---
+        //   プロセス管理のイベントでは event.nextStatus.value / event.status.value、
+        //   レコードからはステータスフィールドの .value がステータス名になる。
+        const exprs = ['event\\s*\\.\\s*(?:nextStatus|status)\\s*\\.\\s*value'];
+        for (const code of (statusCodes || [])) {
+          const c = esc(code);
+          exprs.push(`record\\s*(?:\\[\\s*['"\`]${c}['"\`]\\s*\\]|\\.${c})\\s*\\.\\s*value`);
+        }
+
+        // --- 上記を代入した変数も追跡する ---
+        //   例: const nStatus = event.nextStatus.value;
+        const tokens = [...exprs];
+        const rxAssign = /(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*([^;\n]+)/g;
+        let am;
+        while ((am = rxAssign.exec(s)) !== null) {
+          const name = am[1];
+          const rhs = am[2];
+          if (exprs.some(e => new RegExp(e).test(rhs))) tokens.push(esc(name));
+        }
+
+        for (const token of tokens) {
+          // 比較（左右どちらに文字列が来る書き方にも対応）
+          const rxA = new RegExp(`${token}\\s*(?:===?|!==?)\\s*['"\`]([^'"\`]+)['"\`]`, 'g');
+          const rxB = new RegExp(`['"\`]([^'"\`]+)['"\`]\\s*(?:===?|!==?)\\s*${token}`, 'g');
+          for (const rx of [rxA, rxB]) {
+            let m;
+            while ((m = rx.exec(s)) !== null) push(m[1], m.index);
+          }
+
+          // switch 文の case ラベル
+          //   例: switch (nStatus) { case 'A03:1次Aチェック中': ... }
+          const rxSw = new RegExp(`switch\\s*\\(\\s*${token}\\s*\\)\\s*\\{`, 'g');
+          let sm;
+          while ((sm = rxSw.exec(s)) !== null) {
+            // 対応する閉じ括弧までを switch の本体とみなす
+            let depth = 0;
+            let end = -1;
+            for (let i = sm.index + sm[0].length - 1; i < s.length; i++) {
+              if (s[i] === '{') depth++;
+              else if (s[i] === '}') {
+                depth--;
+                if (depth === 0) { end = i; break; }
+              }
+            }
+            const bodyText = s.slice(sm.index, end < 0 ? s.length : end);
+            const rxCase = /case\s*['"`]([^'"`]+)['"`]\s*:/g;
+            let cm;
+            while ((cm = rxCase.exec(bodyText)) !== null) push(cm[1], sm.index + cm.index);
+          }
+        }
+
+        // 同じ値・同じ行の重複を除く
+        const seen = new Set();
+        return out.filter(o => {
+          const k = `${o.value}|${o.line}`;
+          if (seen.has(k)) return false;
+          seen.add(k);
+          return true;
+        });
+      }
+
+      /**
+       * JavaScript内の比較のうち、存在しないステータス名を集約する
+       * @returns {Array<{value, files:Array, count:number}>}
+       */
+      function collectUnknownStatusRefs(files, statusStates, statusCodes) {
+        const known = new Set(statusStates || []);
+        // プロセス管理が無効なアプリでは検証しない（すべて未知になってしまうため）
+        // ステータスフィールドが無くても event.nextStatus 経由の判定は検証できる
+        if (!known.size) return [];
+
+        const agg = new Map();
+        for (const f of files || []) {
+          if (f.kind !== 'js' || !f.text) continue;
+          const clean = stripCommentsOnly(f.text);
+          const li = buildLineIndex(clean);
+          for (const c of extractStatusComparisons(clean, statusCodes, (i) => lineAt(li, i))) {
+            if (known.has(c.value)) continue;
+            let a = agg.get(c.value);
+            if (!a) { a = { value: c.value, files: new Map(), count: 0 }; agg.set(c.value, a); }
+            a.count++;
+            const key = `${f.target}:${f.name}`;
+            if (!a.files.has(key)) a.files.set(key, []);
+            const lines = a.files.get(key);
+            if (lines.length < 10 && !lines.includes(c.line)) lines.push(c.line);
+          }
+        }
+        return [...agg.values()]
+          .map(a => ({
+            value: a.value, count: a.count,
+            files: [...a.files.entries()].map(([name, lines]) => ({ name, lines: [...lines].sort((x, y) => x - y) })),
+          }))
+          .sort((a, b) => String(a.value).localeCompare(String(b.value), 'ja'));
+      }
+
+      /**
        * 抽出した候補のうち、フィールド一覧に存在しないものを集約する
        * @returns {Array<{code, files:Array, confidence, count}>}
        */
@@ -9508,10 +9737,13 @@
           .filter(n => n.type === 'FIELD')
           .map(n => String(n.id).replace(/^FIELD:/, ''));
         const unknownRefs = collectUnknownFieldRefs(files, fields, depsKnown);
+        // 存在しないステータス名との比較も検出する（プロセス管理が有効な場合のみ）
+        const unknownStatuses = collectUnknownStatusRefs(
+          files, deps?.meta?.statusStates, deps?.meta?.statusFieldCodes);
 
         const scannedAt = new Date().toISOString();
         const payload = {
-          results, files, fields, appRefs, fileEvents, unknownRefs,
+          results, files, fields, appRefs, fileEvents, unknownRefs, unknownStatuses,
           meta: { appId, include, kinds, scannedAt },
         };
 
@@ -9528,7 +9760,7 @@
           samples: r.samples, matches: r.matches,
         }));
         KTScan.saveCache(appId, signature, {
-          payload: { results: slimResults, files: slimFiles, fields, appRefs, fileEvents, unknownRefs, meta: payload.meta },
+          payload: { results: slimResults, files: slimFiles, fields, appRefs, fileEvents, unknownRefs, unknownStatuses, meta: payload.meta },
         });
 
         return { fromCache: false, scannedAt };
