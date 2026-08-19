@@ -240,17 +240,27 @@
   };
 
   let monacoEditor = null;
-  async function initEditor(initialCode = '') {
+  // ★レイアウト修正：Templates/Customize で同名IDを使っていたため、document全体からの
+  //   getElementById をやめ、呼び出し側からホスト要素を受け取る（Templatesタブにスコープ）。
+  //   高さは親のflexレイアウト（ホスト要素の .kt-flex-fill: flex:1; min-height:0）に任せる。
+  //   ResizeObserver / resizeリスナーは再生成時に前回分を破棄し、多重登録を防ぐ。
+  let monacoEditorResizeCleanup = null;
+  async function initEditor(initialCode = '', hostEl = null) {
     const monaco = await loadMonaco();
     // JSバリデーション（構文/セマンティック）をON
     monaco.languages.typescript.javascriptDefaults.setDiagnosticsOptions({
       noSyntaxValidation: false,
       noSemanticValidation: false,
     });
-    // 既存textareaをdivに変えている前提
-    const el = document.getElementById('kt-tpl-editor');
-    el.style.height = '100%';
-    monacoEditor = monaco.editor.create(el, {
+    const el = hostEl || document.getElementById('kt-template-editor');
+    if (!el) throw new Error('editor host element not found');
+
+    // 前回分（observer/リスナー/エディタ）を破棄してから作り直す
+    if (typeof monacoEditorResizeCleanup === 'function') { try { monacoEditorResizeCleanup(); } catch { } }
+    monacoEditorResizeCleanup = null;
+    if (monacoEditor) { try { monacoEditor.dispose(); } catch { } monacoEditor = null; }
+
+    const editor = monaco.editor.create(el, {
       value: initialCode,
       language: 'javascript',
       theme: getThemeColors().isDark ? 'vs-dark' : 'vs',
@@ -259,16 +269,22 @@
       minimap: { enabled: false },
       wordWrap: 'on',
     });
+    monacoEditor = editor;
 
-    // 🔽 サイズ変化に確実に追従させる（初期取りこぼし対策）
-    const ro = new ResizeObserver(() => { try { monacoEditor.layout(); } catch { } });
+    // 🔽 サイズ変化に確実に追従させる（automaticLayout の保険。全画面切替/タブ切替直後など）
+    const relayout = () => { try { if (monacoEditor === editor) editor.layout(); } catch { } };
+    const ro = new ResizeObserver(relayout);
     ro.observe(el);
-    window.addEventListener('resize', () => { try { monacoEditor.layout(); } catch { } });
+    window.addEventListener('resize', relayout);
+    monacoEditorResizeCleanup = () => {
+      try { ro.disconnect(); } catch { }
+      window.removeEventListener('resize', relayout);
+    };
 
     // タブ切替直後の遅延レイアウト（描画完了後に1回）
-    setTimeout(() => { try { monacoEditor.layout(); } catch { } }, 0);
+    setTimeout(relayout, 0);
 
-    return monacoEditor;
+    return editor;
   }
 
 
@@ -3068,14 +3084,22 @@
       position:fixed; right:16px; z-index:9998;
       background:${C.bg}; color:${C.text}; border-radius:12px;
       box-shadow:0 8px 30px rgba(0,0,0,${isDarkMode ? '.35' : '.15'});
-      font:12px/1.5 ui-sans-serif,system-ui; width:min(1280px, 95vw); max-height:85vh; overflow:auto;
+      font:12px/1.5 ui-sans-serif,system-ui; width:min(1280px, 95vw);
       border:1px solid ${C.border};
     `;
     wrap.innerHTML = `
       <style>
+        /* ★レイアウト：Toolkit本体を「bar（固定）＋body（残り高さ・スクロール）」の縦flexにする。
+           通常時は 85vh の確定高さを持たせ、子View が height:100% で追従できるようにする。
+           （全画面時は inset:0 で高さが確定するので、子側に vh 指定は不要） */
         #kt-toolkit {
           bottom: 16px;
           transition: bottom .18s ease;
+          display: flex;
+          flex-direction: column;
+          height: 85vh;
+          max-height: 85vh;
+          overflow: hidden;
         }
 
         #kt-toolkit.is-mini {
@@ -3108,21 +3132,69 @@
           border-radius: 0 !important;
           border: none !important;
         }
-        /* 全画面のときは、図や一覧を画面の高さに合わせて広げる
-           （タブが2段になる場合を考慮して余裕を持たせる） */
+        /* 全画面のときは、図を画面の高さに合わせて広げる
+           （タブが2段になる場合を考慮して余裕を持たせる）
+           ※ Field Scanner の結果領域は flex で親に追従するようになったため、ここでの上書きは不要 */
         #kt-toolkit.is-full #dp-canvas { max-height: calc(100vh - 360px) !important; }
-        #kt-toolkit.is-full #fs-file-view,
-        #kt-toolkit.is-full #fs-table-wrap { max-height: calc(100vh - 300px) !important; }
 
-        #kt-toolkit .bar{display:flex;justify-content:space-between;align-items:center;padding:10px 12px;border-bottom:1px solid ${C.border};}
+        #kt-toolkit .bar{display:flex;justify-content:space-between;align-items:center;padding:10px 12px;border-bottom:1px solid ${C.border};flex:none;}
         #kt-toolkit .tabs{display:flex;gap:6px;flex-wrap:wrap}
         #kt-toolkit .tab{padding:6px 10px;border:1px solid ${C.border};background:${C.bgSub};color:${C.text};border-radius:8px;cursor:pointer}
         #kt-toolkit .tab.active{background:#2563eb;border-color:#2563eb;color:#fff;} /* Activeは色固定 */
         #kt-toolkit .btn{padding:6px 10px;border:1px solid ${C.border};background:${C.bgSub};color:${C.text};border-radius:8px;cursor:pointer}
-        #kt-toolkit .body{padding:12px}
-        /* 各タブ内 view の高さをそろえる */
+        /* body が唯一の縦スクロール領域（bar は固定） */
+        #kt-toolkit .body{padding:12px; flex:1 1 0%; min-height:0; overflow:auto;}
+        /* 各タブ内 view の高さをそろえる（bodyの利用可能高さ基準。vh固定はやめる） */
         #kt-toolkit .body > div[id^="view-"]{
-          min-height: 75vh;  /* max-height -10vh くらいに調整 */
+          min-height: 100%;
+        }
+        /* flexで高さ追従させるタブ（Templates / Customize / Field Scanner / Plugins） */
+        #kt-toolkit .body > .kt-fill-view{
+          height: 100%;
+          min-height: 0;
+        }
+
+        /* ===== 共通レイアウトクラス（4タブで同じサイズ制御ルールを使う） ===== */
+        /* 2カラム分割のルート：親Viewの高さを使い切る */
+        #kt-toolkit .kt-split-layout{
+          height: 100%;
+          min-height: 0;
+          display: flex;
+          align-items: stretch;
+          gap: 14px;
+        }
+        /* 縦flexコンテナ（min-width/min-height:0 で子が親からはみ出さないようにする） */
+        #kt-toolkit .kt-flex-column{
+          display: flex;
+          flex-direction: column;
+          min-width: 0;
+          min-height: 0;
+        }
+        /* 分割の各カラム：最小幅は --kt-col-min で個別指定（.kt-flex-column の min-width:0 より後に置いて優先させる） */
+        #kt-toolkit .kt-split-col{
+          min-width: var(--kt-col-min, 240px);
+        }
+        /* 残り領域を使う可変ブロック（Monacoホストなど。スクロールは中身側） */
+        #kt-toolkit .kt-flex-fill{
+          flex: 1 1 0%;
+          min-width: 0;
+          min-height: 0;
+        }
+        /* 残り領域を使い、内部だけスクロールする領域（一覧・テーブル・結果表示） */
+        #kt-toolkit .kt-scroll-area{
+          flex: 1 1 0%;
+          min-width: 0;
+          min-height: 0;
+          overflow: auto;
+        }
+        /* 固定高さのパーツ（ツールバー等）。flex縮小で潰れないようにする */
+        #kt-toolkit .kt-flex-fixed{
+          flex: none;
+        }
+        /* 幅が狭いときは2カラム→縦積み（各カラムが高さを分け合う） */
+        @media (max-width: 760px){
+          #kt-toolkit .kt-split-layout{ flex-direction: column; }
+          #kt-toolkit .kt-split-layout > .kt-split-col{ min-width: 0; flex: 1 1 0% !important; }
         }
         #kt-toolkit.is-mini{
           width:auto !important; max-width:calc(100vw - 32px) !important;
@@ -3266,10 +3338,10 @@
         <div id="view-deps" style="display:none"></div>
         <div id="view-notice" style="display:none"></div>
         <div id="view-acl" style="display:none"></div>
-        <div id="view-templates" style="display:none"></div>
-        <div id="view-customize" style="display:none"></div>
-        <div id="view-field-scanner" style="display:none"></div>
-        <div id="view-plugins" style="display:none;"></div>
+        <div id="view-templates" class="kt-fill-view" style="display:none"></div>
+        <div id="view-customize" class="kt-fill-view" style="display:none"></div>
+        <div id="view-field-scanner" class="kt-fill-view" style="display:none"></div>
+        <div id="view-plugins" class="kt-fill-view" style="display:none;"></div>
       </div>
     `;
 
@@ -6865,26 +6937,25 @@
     const BG = C.bgSub2; // または C.bg
     const BD = C.border2;
     const isDark = C.isDark;
-    const PANEL_H = '75vh';
 
     // レイアウト
+    //   ★高さは vh 固定ではなく、親View（.kt-fill-view）→ .kt-split-layout → 各カラム → flex:1 の連鎖で追従させる。
+    //   ID は Customize タブと重複しないよう kt-template-* に統一。
     view.innerHTML = `
-      <div id="kt-tpl" style="display:flex; gap:14px; align-items:stretch;">
+      <div id="kt-template" class="kt-split-layout">
         <!-- 左：エディタ -->
-        <div style="flex:2; min-width:380px; display:flex; flex-direction:column; gap:10px;">
-          <div style="display:flex; align-items:center; gap:10px; justify-content:space-between;">
+        <div class="kt-split-col kt-flex-column" style="flex:2; --kt-col-min:380px; gap:10px;">
+          <div class="kt-flex-fixed" style="display:flex; align-items:center; gap:10px; justify-content:space-between;">
             <div style="display:flex; align-items:center; gap:8px;">
-              <button id="kt-tpl-download" class="btn" disabled style="height:32px; padding:0 10px;">⬇ ローカルに保存</button>
-              <button id="kt-tpl-upload" class="btn" disabled style="height:32px; padding:0 10px;">⬆ アプリに反映</button>
+              <button id="kt-template-download" class="btn" disabled style="height:32px; padding:0 10px;">⬇ ローカルに保存</button>
+              <button id="kt-template-upload" class="btn" disabled style="height:32px; padding:0 10px;">⬆ アプリに反映</button>
             </div>
-            <span id="kt-tpl-meta"
+            <span id="kt-template-meta"
                   style="opacity:.75; max-width:55%; text-overflow:ellipsis; overflow:hidden; white-space:nowrap; text-align:right;"></span>
           </div>
 
-          <div id="kt-tpl-editor"
+          <div id="kt-template-editor" class="kt-flex-fill"
             style="
-              flex:1;
-              min-height:0;
               border:1px solid ${BD};
               border-radius:8px;
               background:${isDark ? '#0f0f0f' : '#fafafa'};
@@ -6893,11 +6964,11 @@
         </div>
 
         <!-- 右：ファイル一覧 -->
-        <div style="flex:1; min-width:240px; display:flex; flex-direction:column; gap:10px; height:${PANEL_H}; min-height:0;">
-          <div style="display:flex; align-items:center; justify-content:space-between; position:sticky; top:0; z-index:1;
+        <div class="kt-split-col kt-flex-column" style="flex:1; --kt-col-min:240px; gap:10px;">
+          <div class="kt-flex-fixed" style="display:flex; align-items:center; justify-content:space-between;
             padding:6px 0; background:${isDark ? '#1b1b1b' : '#fff'};">
             <div style="font-weight:600; padding-left:12px; margin:6px 0;">Files</div>
-            <select id="kt-tpl-source" class="btn" style="padding:3px 4px; height:32px;">
+            <select id="kt-template-source" class="btn" style="padding:3px 4px; height:32px;">
               <option value="templates">Templates (GitHub: ${GH.dirs.templates})</option>
               <option value="css">Css  (GitHub: ${GH.dirs.css})</option>
               <option value="snippets">Snippets  (GitHub: ${GH.dirs.snippets})</option>
@@ -6905,41 +6976,38 @@
             </select>
           </div>
 
-          <div style="display:flex; gap:8px;">
-            <button id="kt-tpl-insert" class="btn" disabled style="flex:1; height:32px;">⤴︎ 挿入</button>
-            <button id="kt-tpl-refresh" class="btn" style="flex:1; height:32px;">↻ 一覧更新</button>
-            <button id="kt-tpl-github" class="btn" style="flex:1; height:32px;">🔗 Github</button>
-            <button id="kt-tpl-ai-req" class="btn" style="flex:1; height:32px; display:none;">AI prompt</button>
+          <div class="kt-flex-fixed" style="display:flex; gap:8px;">
+            <button id="kt-template-insert" class="btn" disabled style="flex:1; height:32px;">⤴︎ 挿入</button>
+            <button id="kt-template-refresh" class="btn" style="flex:1; height:32px;">↻ 一覧更新</button>
+            <button id="kt-template-github" class="btn" style="flex:1; height:32px;">🔗 Github</button>
+            <button id="kt-template-ai-req" class="btn" style="flex:1; height:32px; display:none;">AI prompt</button>
           </div>
 
-          <div id="kt-tpl-list"
+          <div id="kt-template-list" class="kt-scroll-area"
             style="
               border:1px solid ${BD};
               border-radius:8px;
-              overflow:auto;
-              max-height:56vh;
               background:${BG};
               padding:6px;
-              flex:1;
-              min-height:0;
             ">
           </div>
-          <div id="kt-tpl-overview"></div>
+          <div id="kt-template-overview" class="kt-flex-fixed"></div>
         </div>
       </div>
     `;
 
     // 要素参照
-    const $list = view.querySelector('#kt-tpl-list');
-    const $download = view.querySelector('#kt-tpl-download');
-    const $meta = view.querySelector('#kt-tpl-meta');
-    const $refresh = view.querySelector('#kt-tpl-refresh');
-    const $insert = view.querySelector('#kt-tpl-insert');
-    const $sourceSel = view.querySelector('#kt-tpl-source');
-    const $overview = view.querySelector('#kt-tpl-overview');
-    const $btnAIReq = view.querySelector('#kt-tpl-ai-req');
-    const $upload = view.querySelector('#kt-tpl-upload');
-    const $btnGithub = view.querySelector('#kt-tpl-github');
+    const $list = view.querySelector('#kt-template-list');
+    const $download = view.querySelector('#kt-template-download');
+    const $meta = view.querySelector('#kt-template-meta');
+    const $refresh = view.querySelector('#kt-template-refresh');
+    const $insert = view.querySelector('#kt-template-insert');
+    const $sourceSel = view.querySelector('#kt-template-source');
+    const $overview = view.querySelector('#kt-template-overview');
+    const $btnAIReq = view.querySelector('#kt-template-ai-req');
+    const $upload = view.querySelector('#kt-template-upload');
+    const $btnGithub = view.querySelector('#kt-template-github');
+    const $editorHost = view.querySelector('#kt-template-editor');
 
     function updateAIReqVisibility() {
       const isDocs = ($sourceSel.value === 'documents');
@@ -7068,7 +7136,7 @@
           const code = await loadCode(file);
           currentFileName = file.name;
           if (monacoEditor) monacoEditor.setValue(code);
-          else await initEditor(code);
+          else await initEditor(code, $editorHost);
           updateAIReqVisibility();
           $meta.textContent = `選択中（Template表示）：${file.name}`;
           [$download, $upload].forEach(b => b.disabled = false);
@@ -7081,7 +7149,7 @@
           const code = await loadCode(file);
           currentFileName = file.name;
           if (monacoEditor) monacoEditor.setValue(code);
-          else await initEditor(code);
+          else await initEditor(code, $editorHost);
           updateAIReqVisibility();
           $meta.textContent = `選択中（CSS表示）：${file.name}`;
           [$download, $upload].forEach(b => b.disabled = false);
@@ -7097,7 +7165,7 @@
           const code = await loadCode(file);
           currentFileName = file.name;
           if (monacoEditor) monacoEditor.setValue(code);
-          else await initEditor(code);
+          else await initEditor(code, $editorHost);
           updateAIReqVisibility();
           $meta.textContent = `選択中（document表示）：${file.name}`;
           [$download].forEach(b => b.disabled = false);
@@ -7172,7 +7240,7 @@
         });
     })();`;
     // どこかの初期化処理内で
-    await initEditor(KINTONE_TEMPLATE);
+    await initEditor(KINTONE_TEMPLATE, $editorHost);
     if (window.monaco && !window.monaco._kintoneFieldsReady) {
       try {
         // 既存の registerFieldCompletions(monaco, props?) があれば fields.properties を渡す
@@ -7501,9 +7569,9 @@
     }
 
     // どこか1回だけ実行（存在すればスキップ）
-    if (!document.getElementById('kt-tpl-inline-style')) {
+    if (!document.getElementById('kt-template-inline-style')) {
       const st = document.createElement('style');
-      st.id = 'kt-tpl-inline-style';
+      st.id = 'kt-template-inline-style';
       st.textContent = `
       .btn {
         border: 1px solid ${BD};
@@ -7535,7 +7603,6 @@
     const BG = C.bgSub2; // または C.bg
     const BD = C.border2;
     const isDark = C.isDark;
-    const PANEL_H = '75vh';
 
     // === GitHub: snippetsのみ ===
     const GH = {
@@ -7545,25 +7612,25 @@
       endpoint(dir) { return `https://api.github.com/repos/${this.owner}/${this.repo}/contents/${encodeURIComponent(dir)}`; },
     };
 
-    // === レイアウト（Templatesタブと同じ見た目） ===
+    // === レイアウト（Templatesタブと同じ見た目・同じサイズ制御） ===
+    //   ★高さは vh 固定ではなく、親View（.kt-fill-view）→ .kt-split-layout → 各カラム → flex:1 の連鎖で追従させる。
+    //   ID は Templates タブと重複しないよう kt-customize-* に統一。
     view.innerHTML = `
-      <div id="kt-tpl" style="display:flex; gap:14px; align-items:stretch;">
+      <div id="kt-customize" class="kt-split-layout">
         <!-- 左：エディタ -->
-        <div style="flex:2; min-width:380px; display:flex; flex-direction:column; gap:10px;">
-          <div style="display:flex; align-items:center; gap:10px; justify-content:space-between;">
+        <div class="kt-split-col kt-flex-column" style="flex:2; --kt-col-min:380px; gap:10px;">
+          <div class="kt-flex-fixed" style="display:flex; align-items:center; gap:10px; justify-content:space-between;">
             <div style="display:flex; align-items:center; gap:8px;">
-              <button id="kt-tpl-download" class="btn" disabled style="height:32px; padding:0 10px;">⬇ ローカルに保存</button>
-              <button id="kt-tpl-upload" class="btn" disabled style="height:32px; padding:0 10px;">⬆ アプリに反映</button>
-              <button id="kt-tpl-new" class="btn" style="height:32px; padding:0 10px;">＋ 新規作成</button>
+              <button id="kt-customize-download" class="btn" disabled style="height:32px; padding:0 10px;">⬇ ローカルに保存</button>
+              <button id="kt-customize-upload" class="btn" disabled style="height:32px; padding:0 10px;">⬆ アプリに反映</button>
+              <button id="kt-customize-new" class="btn" style="height:32px; padding:0 10px;">＋ 新規作成</button>
             </div>
-            <span id="kt-tpl-meta"
+            <span id="kt-customize-meta"
                   style="opacity:.75; max-width:55%; text-overflow:ellipsis; overflow:hidden; white-space:nowrap; text-align:right;"></span>
           </div>
 
-          <div id="kt-tpl-editor"
+          <div id="kt-customize-editor" class="kt-flex-fill"
             style="
-              flex:1;
-              min-height:0;
               border:1px solid ${BD};
               border-radius:8px;
               background:${isDark ? '#0f0f0f' : '#fafafa'};
@@ -7572,11 +7639,11 @@
         </div>
 
         <!-- 右：ファイル一覧（Customize / Snippets） -->
-        <div style="flex:1; min-width:240px; display:flex; flex-direction:column; gap:10px; height:${PANEL_H}; min-height:0;">
-          <div style="display:flex; align-items:center; justify-content:space-between; position:sticky; top:0; z-index:1;
+        <div class="kt-split-col kt-flex-column" style="flex:1; --kt-col-min:240px; gap:10px;">
+          <div class="kt-flex-fixed" style="display:flex; align-items:center; justify-content:space-between;
             padding:6px 0; background:${isDark ? '#1b1b1b' : '#fff'};">
             <div style="font-weight:600; padding-left:12px; margin:6px 0;">Files</div>
-            <select id="kt-tpl-source" class="btn" style="padding:3px 4px; height:32px;">
+            <select id="kt-customize-source" class="btn" style="padding:3px 4px; height:32px;">
               <option value="JavaScript">JavaScript (desktop)</option>
               <option value="css">CSS (desktop)</option>
               <option value="JavaScriptMobile">JavaScript (mobile)</option>
@@ -7585,40 +7652,36 @@
             </select>
           </div>
 
-          <div style="display:flex; gap:8px;">
-            <button id="kt-tpl-insert"  class="btn" disabled style="flex:1; height:32px;">⤴︎ 挿入</button>
-            <button id="kt-tpl-refresh" class="btn"          style="flex:1; height:32px;">↻ 一覧更新</button>
+          <div class="kt-flex-fixed" style="display:flex; gap:8px;">
+            <button id="kt-customize-insert"  class="btn" disabled style="flex:1; height:32px;">⤴︎ 挿入</button>
+            <button id="kt-customize-refresh" class="btn"          style="flex:1; height:32px;">↻ 一覧更新</button>
           </div>
 
-          <div id="kt-tpl-list"
+          <div id="kt-customize-list" class="kt-scroll-area"
             style="
               border:1px solid ${BD};
               border-radius:8px;
-              overflow:auto;
-              max-height:56vh;
               background:${BG};
               padding:6px;
-              flex:1;
-              min-height:0;
             ">
           </div>
-          <div id="kt-tpl-overview"></div>
+          <div id="kt-customize-overview" class="kt-flex-fixed"></div>
         </div>
       </div>
     `;
 
-    // === 要素参照（TemplatesタブのID命名に合わせる） ===
+    // === 要素参照（このタブ内にスコープ） ===
     const $ = (s) => view.querySelector(s);
-    const $list = $('#kt-tpl-list');
-    const $download = $('#kt-tpl-download');
-    const $upload = $('#kt-tpl-upload');
-    const $new = $('#kt-tpl-new');
-    const $meta = $('#kt-tpl-meta');
-    const $refresh = $('#kt-tpl-refresh');
-    const $insert = $('#kt-tpl-insert');
-    const $sourceSel = $('#kt-tpl-source');
-    const $overview = $('#kt-tpl-overview');
-    const $editorHost = $('#kt-tpl-editor');
+    const $list = $('#kt-customize-list');
+    const $download = $('#kt-customize-download');
+    const $upload = $('#kt-customize-upload');
+    const $new = $('#kt-customize-new');
+    const $meta = $('#kt-customize-meta');
+    const $refresh = $('#kt-customize-refresh');
+    const $insert = $('#kt-customize-insert');
+    const $sourceSel = $('#kt-customize-source');
+    const $overview = $('#kt-customize-overview');
+    const $editorHost = $('#kt-customize-editor');
 
     // === Monaco ===
     const monaco = await loadMonaco();
@@ -8685,8 +8748,8 @@
           #fs-table-wrap { border: 1px solid var(--fs-bd); border-radius: 12px; }
         </style>
 
-        <div id="fs-wrap" style="display:flex; flex-direction:column; gap:12px;">
-          <div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap;">
+        <div id="fs-wrap" class="kt-flex-column" style="height:100%; gap:12px;">
+          <div class="kt-flex-fixed" style="display:flex; align-items:center; gap:10px; flex-wrap:wrap;">
             <strong style="font-size:14px;">🔎 Field Scanner</strong>
 
             <label style="display:inline-flex; align-items:center; gap:6px; border:1px solid var(--fs-bd); padding:4px 8px; border-radius:10px;">
@@ -8729,13 +8792,14 @@
             </div>
           </div>
 
-          <div id="fs-meta" style="opacity:.8; font-size:12px;">未実行</div>
+          <div id="fs-meta" class="kt-flex-fixed" style="opacity:.8; font-size:12px;">未実行</div>
 
-          <div id="fs-file-view" style="overflow:auto; max-height:56vh;">
+          <!-- 結果領域：残り高さをすべて使い、内部だけスクロール（ファイル起点／フィールド起点とも同じ高さ） -->
+          <div id="fs-file-view" class="kt-scroll-area">
             <div style="padding:14px; opacity:.8;">解析結果を待っています。</div>
           </div>
 
-          <div id="fs-table-wrap" style="overflow:auto; max-height:56vh; display:none;">
+          <div id="fs-table-wrap" class="kt-scroll-area" style="display:none;">
             <table id="fs-table" style="width:100%; border-collapse:collapse;">
               <thead>
                 <tr>
@@ -9927,71 +9991,63 @@
     const waitDeploy = (appId) => KTApi.waitDeploy(appId);
 
     // --- UI ---
-    const PANEL_H = '75vh';
-
+    //   ★高さは vh 固定ではなく、親View（.kt-fill-view）→ .kt-split-layout → 各カラム → flex:1 の連鎖で追従させる。
     view.innerHTML = `
-      <div style="
-        height:${PANEL_H};
-        min-height:0;
-        display:flex;
-        gap:14px;
-        align-items:stretch;
-        overflow:hidden;   /* ← 外に溢れさせない */
-      ">
-        <div style="flex:1.15; min-width:320px; display:flex; flex-direction:column; gap:10px; min-height:0;">
-          <div style="display:flex; align-items:center; justify-content:space-between;">
+      <div id="kt-plugins" class="kt-split-layout" style="overflow:hidden; /* ← 外に溢れさせない */">
+        <div class="kt-split-col kt-flex-column" style="flex:1.15; --kt-col-min:320px; gap:10px;">
+          <div class="kt-flex-fixed" style="display:flex; align-items:center; justify-content:space-between;">
             <div style="font-weight:700;">App Plugins</div>
             <div class="kt-muted" style="font-size:12px;">app: <b>${app}</b></div>
           </div>
 
-          <div style="display:flex; gap:8px; flex-wrap:wrap;">
+          <div class="kt-flex-fixed" style="display:flex; gap:8px; flex-wrap:wrap;">
             <button id="kt-plg-reload" class="btn" style="height:32px; padding:0 12px;">↻ 再取得</button>
             <button id="kt-plg-deploy" class="btn" style="height:32px; padding:0 12px;" disabled>🚀 deploy</button>
           </div>
 
-          <div id="kt-plg-status" style="border:1px solid ${BD}; border-radius:10px; background:${isDark ? '#0f0f0f' : '#fafafa'}; padding:10px 12px; font-size:12px;">
+          <div id="kt-plg-status" class="kt-flex-fixed" style="border:1px solid ${BD}; border-radius:10px; background:${isDark ? '#0f0f0f' : '#fafafa'}; padding:10px 12px; font-size:12px;">
             読み込み中...
           </div>
 
-          <div style="display:flex; gap:10px; min-height:0; flex:1;">
-            <div style="flex:1; min-width:0; display:flex; flex-direction:column; min-height:0;">
-              <div style="display:flex; align-items:center; justify-content:space-between; margin:6px 0;">
+          <div class="kt-flex-fill" style="display:flex; gap:10px;">
+            <div class="kt-flex-column" style="flex:1;">
+              <div class="kt-flex-fixed" style="display:flex; align-items:center; justify-content:space-between; margin:6px 0;">
                 <div style="font-weight:600;">本番</div><span class="kt-pill">prod</span>
               </div>
-              <div id="kt-plg-prod" style="flex:1; min-height:0; overflow:auto; border:1px solid ${BD}; border-radius:10px; background:${BG};"></div>
+              <div id="kt-plg-prod" class="kt-scroll-area" style="border:1px solid ${BD}; border-radius:10px; background:${BG};"></div>
             </div>
-            <div style="flex:1; min-width:0; display:flex; flex-direction:column; min-height:0;">
-              <div style="display:flex; align-items:center; justify-content:space-between; margin:6px 0;">
+            <div class="kt-flex-column" style="flex:1;">
+              <div class="kt-flex-fixed" style="display:flex; align-items:center; justify-content:space-between; margin:6px 0;">
                 <div style="font-weight:600;">プレビュー</div><span class="kt-pill">preview</span>
               </div>
-              <div id="kt-plg-prev" style="flex:1; min-height:0; overflow:auto; border:1px solid ${BD}; border-radius:10px; background:${BG};"></div>
+              <div id="kt-plg-prev" class="kt-scroll-area" style="border:1px solid ${BD}; border-radius:10px; background:${BG};"></div>
             </div>
           </div>
 
-          <div id="kt-plg-diff" style="border:1px dashed ${BD}; border-radius:10px; padding:10px 12px; font-size:12px; background:${isDark ? '#101010' : '#fff'};">
+          <div id="kt-plg-diff" class="kt-flex-fixed" style="border:1px dashed ${BD}; border-radius:10px; padding:10px 12px; font-size:12px; background:${isDark ? '#101010' : '#fff'};">
             差分: -
           </div>
         </div>
 
-        <div style="flex:1; min-width:360px; display:flex; flex-direction:column; gap:10px; min-height:0;">
-          <div style="display:flex; align-items:center; justify-content:space-between;">
+        <div class="kt-split-col kt-flex-column" style="flex:1; --kt-col-min:360px; gap:10px;">
+          <div class="kt-flex-fixed" style="display:flex; align-items:center; justify-content:space-between;">
             <div style="font-weight:700;">Installed Plugins (Domain)</div>
             <span class="kt-pill">${installed.length}件</span>
           </div>
 
-          <div style="display:flex; gap:8px; align-items:center;">
+          <div class="kt-flex-fixed" style="display:flex; gap:8px; align-items:center;">
             <input id="kt-plg-search" placeholder="検索（名前/説明/ID）"
-              style="flex:1; height:32px; padding:0 10px; border-radius:8px; border:1px solid ${BD}; background:transparent; color:inherit;" />
+              style="flex:1; min-width:0; height:32px; padding:0 10px; border-radius:8px; border:1px solid ${BD}; background:transparent; color:inherit;" />
             <button id="kt-plg-add" class="btn" style="height:32px; padding:0 12px;" disabled>＋ previewに追加</button>
           </div>
 
-          <div class="kt-muted" style="font-size:12px;">
+          <div class="kt-muted kt-flex-fixed" style="font-size:12px;">
             ※ previewへ追加後、deployで本番反映されます。
           </div>
 
-          <div id="kt-plg-catalog" style="flex:1; min-height:0; overflow:auto; border:1px solid ${BD}; border-radius:10px; background:${BG};"></div>
+          <div id="kt-plg-catalog" class="kt-scroll-area" style="border:1px solid ${BD}; border-radius:10px; background:${BG};"></div>
 
-          <div id="kt-plg-log" style="border:1px solid ${BD}; border-radius:10px; padding:10px 12px; font-size:12px; background:${isDark ? '#0f0f0f' : '#fafafa'};">
+          <div id="kt-plg-log" class="kt-flex-fixed" style="border:1px solid ${BD}; border-radius:10px; padding:10px 12px; font-size:12px; background:${isDark ? '#0f0f0f' : '#fafafa'};">
             ログ: -
           </div>
         </div>
