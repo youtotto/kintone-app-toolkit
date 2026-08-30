@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         kintone App Toolkit
 // @namespace    https://github.com/youtotto/kintone-app-toolkit
-// @version      2.2.1
+// @version      2.2.2
 // @description  kintoneアプリの構造・依存関係・変更影響をブラウザ上で分析。フィールドの利用箇所、JS解析、アプリ間連携、設定の整合性チェックまで対応した開発支援ツールキット。
 // @match        https://*.cybozu.com/k/*/
 // @match        https://*.cybozu.com/k/*/?*view=*
@@ -25,7 +25,7 @@
   // ==========================================
   // 1. 定数・グローバル状態
   // ==========================================
-  const SCRIPT_VERSION = '2.2.1';
+  const SCRIPT_VERSION = '2.2.2';
   const CONTAINER_TYPES = new Set(['GROUP', 'SUBTABLE', 'LABEL', 'CATEGORY']);
   const SYSTEM_TYPES = new Set(['RECORD_NUMBER', 'CREATOR', 'CREATED_TIME', 'MODIFIER', 'UPDATED_TIME', 'STATUS', 'STATUS_ASSIGNEE']);
 
@@ -609,6 +609,10 @@
         lookupPickerFields: Array.isArray(f.lookup?.lookupPickerFields)
           ? [...f.lookup.lookupPickerFields]
           : [],
+        // ★Details拡充用（v2.2.1）：APIが返す場合のみ保持する（無ければ空。推測はしない）
+        filterCond: f.lookup?.filterCond ?? '',
+        sort: f.lookup?.sort ?? '',
+        raw: f.lookup ?? null,   // Raw設定JSON表示用
       }));
 
     // Related Records（REFERENCE_TABLE）
@@ -624,6 +628,10 @@
           ? f.referenceTable.displayFields.slice()
           : [],
         sort: f.referenceTable?.sort ?? '',
+        // ★Details拡充用（v2.2.1）：APIが返す場合のみ保持する（無ければ空。推測はしない）
+        filterCond: f.referenceTable?.filterCond ?? '',
+        size: f.referenceTable?.size ?? null,
+        raw: f.referenceTable ?? null,   // Raw設定JSON表示用
       }));
 
     // ---- Actions（srcField→destField 文字列で保存）----
@@ -654,6 +662,13 @@
           enabled: (typeof a?.enabled === 'boolean') ? a.enabled : null,
           entities,
           filterCond: a?.filterCond ?? '',
+          // ★Details拡充用（v2.2.1）：構造化マッピング（自アプリ srcField/srcType → 接続先 destField）
+          mappingsDetail: (a?.mappings || a?.mapping || []).map(m => ({
+            srcType: m?.srcType ?? null,
+            srcField: m?.srcField ?? null,
+            destField: m?.destField ?? null,
+          })),
+          raw: a ?? null,   // Raw設定JSON表示用
         };
       })
       : [];
@@ -1405,7 +1420,14 @@
             addEdge({
               ...src, relationType: REL.APP_REFERENCE,
               targetType: 'APP', targetId: String(relApp), targetName: `app ${relApp}`,
-              context: { settingType: 'REFERENCE_TABLE', settingName: f.label },
+              // 連携キー（自アプリ側 condField ＝ 接続先側 condRelatedField）と
+              // 表示フィールド数をSummary表示用に保持
+              context: {
+                settingType: 'REFERENCE_TABLE', settingName: f.label,
+                condField: rt?.condition?.field ?? null,
+                condRelatedField: rt?.condition?.relatedField ?? null,
+                displayCount: Array.isArray(rt?.displayFields) ? rt.displayFields.length : null,
+              },
               confidence: CONF.CERTAIN,
             });
           }
@@ -2169,10 +2191,23 @@
         if (e.relationType === 'LOOKUP_PICKER') a.picks.push(e.targetName);
       }
 
+      // 自アプリ参照の表示ラベル（例：関連レコード一覧で自アプリの他レコードを表示する設定）
+      //   自アプリ名は meta.appName（/k/v1/app/settings 由来）から補う
+      const selfLabel = (id) => {
+        const nm = deps?.meta?.appName;
+        return `app ${id}${nm ? ' ' + nm : ''}（このアプリ）`;
+      };
+
       for (const e of edges) {
         if (e.relationType !== REL.APP_REFERENCE) continue;
         if (e.targetType !== 'APP') continue;
-        if (String(e.targetId) === self) continue; // 自アプリは除外
+        // ★修正（v2.2.1）：自アプリ参照を除外しない。
+        //   関連レコード一覧が自アプリ自身を参照する設定は、詳細（Related Records）には
+        //   表示される一方、この概要からは除外されており、件数が不整合になっていた。
+        //   接続先アプリ単位ではなく「設定単位で1行」表示し、自アプリは「（このアプリ）」と明示する。
+        //   ※ JS解析由来（JS_APP_ID）の自アプリ参照はスキャン側（scanOnce）で除外済みのため、
+        //     ここで self 除外を外しても JS 由来の自アプリ行は増えない。
+        const isSelf = String(e.targetId) === self;
 
         const st = e.context?.settingType || '';
         let kind = st, note = '', destField = '';
@@ -2184,7 +2219,12 @@
           note = a.copies ? `${a.copies}項目を取得` : '';
         } else if (st === 'REFERENCE_TABLE') {
           kind = '関連レコード';
-          note = '関連レコード一覧で表示';
+          // ★v2.2.1：接続先キーは「接続先フィールド」列、自アプリ側キーは行の selfKey で表示する。
+          //   備考はキーの重複表示を避け、表示フィールド数の概要に留める（詳細はDetails側）。
+          destField = e.context?.condRelatedField || '';
+          note = (e.context?.displayCount != null)
+            ? `${e.context.displayCount}フィールド表示`
+            : '関連レコード一覧で表示';
         } else if (st === 'ACTION') {
           kind = 'アプリアクション';
           const maps = edges.filter(x => x.sourceId === e.sourceId && x.relationType === REL.ACTION_MAPS_FROM).length;
@@ -2198,10 +2238,14 @@
 
         rows.push({
           kind,
+          // Summary行 → Details該当カードへのジャンプ用（フィールドコード／アクションID）
+          sourceId: e.sourceId,
           selfSide: e.sourceName || e.sourceId,
+          // 自アプリ側の接続キー（関連レコードのみ。「自アプリ側」列に ↳ 付きで補足表示する）
+          selfKey: st === 'REFERENCE_TABLE' ? (e.context?.condField || '') : '',
           destAppId: e.targetId === 'UNKNOWN' ? '不明' : String(e.targetId),
-          // 表示用のアプリ名（未解決なら「名称取得不可」を明示）
-          destAppLabel: appLabel(deps, e.targetId),
+          // 表示用のアプリ名（未解決なら「名称取得不可」、自アプリなら「（このアプリ）」を明示）
+          destAppLabel: isSelf ? selfLabel(e.targetId) : appLabel(deps, e.targetId),
           destField: destField || '—',
           note: note || '—',
           confidence: e.confidence,
@@ -5889,6 +5933,521 @@
     }, { passive: true });
   }
 
+  // ==========================================================
+  // Relations：設定詳細（Details）レンダラー（v2.2.1）
+  //   Summary（依存関係サマリー）＝どのアプリとどう接続しているかの横断ビュー、
+  //   Details（設定詳細）＝各設定の内容を調査する場所、として役割を分離する。
+  //   機能単位でレンダラーを分割し、将来 JavaScript／計算式／通知などの詳細も
+  //   同じカード構造（relDetailCard）＋共通フィルター（relFilterBar）で追加できるようにする。
+  //   各レンダラーは { cardsHtml, headers, dlRows, appOptions } を返す。
+  // ==========================================================
+
+  /** deps の FIELD ノードから code → {label, type} を引けるMapを作る */
+  function relFieldInfoMap(deps) {
+    const m = new Map();
+    (deps?.nodes || []).forEach(n => {
+      if (n.type === 'FIELD') m.set(String(n.id).replace(/^FIELD:/, ''), { label: n.name || '', type: n.fieldType || '' });
+    });
+    return m;
+  }
+
+  /** 接続先アプリの表示文字列（自アプリなら「（このアプリ）」、名前は解決済みのものだけ表示） */
+  function relAppDisp(deps, id, selfAppId) {
+    const sid = String(id ?? '');
+    if (!sid) return '—';
+    if (!/^\d+$/.test(sid)) return `アプリコード: ${sid}`; // アプリコード指定（IDが取得できない場合）
+    if (String(selfAppId ?? '') === sid) {
+      const nm = deps?.meta?.appName;
+      return `app ${sid}${nm ? ' ' + nm : ''}（このアプリ）`;
+    }
+    const nm = deps?.meta?.appNames?.[sid];
+    return nm ? `app ${sid} ${nm}` : `app ${sid}`;
+  }
+
+  /** 接続先アプリ名だけを返す（エクスポート用。未解決なら空文字） */
+  function relAppNameOnly(deps, id, selfAppId) {
+    const sid = String(id ?? '');
+    if (!/^\d+$/.test(sid)) return '';
+    if (String(selfAppId ?? '') === sid) return `${deps?.meta?.appName || ''}（このアプリ）`;
+    return deps?.meta?.appNames?.[sid] || '';
+  }
+
+  /** filterCond の簡易整形（and/or の前で改行して大文字表示）。Raw文字列は別途表示する */
+  function relCondFmt(cond) {
+    return String(cond || '').replace(/\s+(and|or)\s+/gi, (m, op) => `\n${op.toUpperCase()} `);
+  }
+
+  /** kintoneのsort文字列（"code desc, code2 asc"）→ [{field, dirJa}] */
+  function relSortList(sortStr) {
+    return String(sortStr || '')
+      .split(',')
+      .map(s => s.trim())
+      .filter(Boolean)
+      .map(s => {
+        const [field, dir] = s.split(/\s+/);
+        const d = String(dir || '').toLowerCase();
+        return { field: field || '', dirJa: d === 'desc' ? '降順' : d === 'asc' ? '昇順' : (dir || '') };
+      });
+  }
+
+  /** Raw設定JSON（開発・調査用。初期状態は閉じる） */
+  function relRawJson(obj) {
+    if (obj == null) return '';
+    let json = '';
+    try { json = JSON.stringify(obj, null, 2); } catch { return ''; }
+    return `
+      <details class="kt-rel-raw" style="margin-top:10px">
+        <summary style="cursor:pointer;font-size:11px;opacity:.7">Raw設定JSON（開発・調査用）</summary>
+        <pre>${escapeHtml(json)}</pre>
+      </details>`;
+  }
+
+  /** 「自アプリ側キー → 接続先キー」の縦型キーブロック（Lookup／Related Records共通） */
+  function relKeyBlock({ selfLabel, selfCode, destDisp, destCode, opLabel = '=' }) {
+    const esc = escapeHtml;
+    return `
+      <div class="kt-rel-keybox">
+        <div class="kt-rel-keybox-app">自アプリ</div>
+        <div>${selfLabel && selfLabel !== selfCode ? `${esc(selfLabel)}<br>` : ''}<code>${esc(selfCode || '—')}</code></div>
+        <div class="kt-rel-keybox-op">↓ ${esc(opLabel)}</div>
+        <div class="kt-rel-keybox-app">${esc(destDisp)}</div>
+        <div><code>${esc(destCode || '—')}</code></div>
+      </div>`;
+  }
+
+  /** 詳細セクションの見出し（本題は短く、補足は小さく分離する） */
+  function relH(title, sub) {
+    return `<div class="kt-rel-h">${escapeHtml(title)}${sub ? ` <small class="kt-rel-hsub">${escapeHtml(sub)}</small>` : ''}</div>`;
+  }
+
+  /** フィールド形式の共通バッジ表示（確度バッジと馴染む控えめなデザイン） */
+  function relTypeBadge(type) {
+    return type ? ` <span class="kt-rel-type">${escapeHtml(type)}</span>` : '';
+  }
+
+  /** 「なし／取得できませんでした／解析できませんでした」等の状態表示 */
+  function relStateNote(text) {
+    return `<div class="kt-rel-note">${escapeHtml(text)}</div>`;
+  }
+
+  /**
+   * ラベル・コード（・フィールド形式バッジ）の併記表示（自アプリのフィールドのみ形式が分かる）
+   * ラベル＝コードの場合はコードを通常表示、異なる場合はラベル＋弱い表示のコード＋形式バッジ
+   */
+  function relFieldDisp(fmap, code) {
+    const esc = escapeHtml;
+    if (!code) return '—';
+    const info = fmap?.get(code);
+    const hasLabel = !!(info?.label && info.label !== code);
+    const codeHtml = hasLabel
+      ? `<code style="opacity:.6;font-size:11px">${esc(code)}</code>`
+      : `<code>${esc(code)}</code>`;
+    return `${hasLabel ? esc(info.label) + ' ' : ''}${codeHtml}${relTypeBadge(info?.type)}`;
+  }
+
+  /** 詳細カード共通ラッパ（折りたたみ・フィルター用データ属性つき） */
+  function relDetailCard({ kindKey, id, badge, title, sub, destAppId, search, bodyHtml }) {
+    const esc = escapeHtml;
+    return `
+      <details class="kt-rel-card"
+        data-rel-card="${esc(`${kindKey}:${id}`)}"
+        data-app="${esc(String(destAppId ?? ''))}"
+        data-search="${esc(String(search || '').toLowerCase())}">
+        <summary>
+          <span class="kt-rel-badge">${esc(badge)}</span>
+          <span class="kt-rel-title">${esc(title)}</span>
+          <span class="kt-rel-sub">${sub}</span>
+        </summary>
+        <div class="kt-rel-body">${bodyHtml}</div>
+      </details>`;
+  }
+
+  /** key-value 表（基本情報用） */
+  function relKV(rows) {
+    return `
+      <table class="kt-rel-kv"><tbody>
+        ${rows.filter(r => r).map(([k, vHtml]) => `<tr><td>${escapeHtml(k)}</td><td>${vHtml}</td></tr>`).join('')}
+      </tbody></table>`;
+  }
+
+  /**
+   * 条件ブロック（整形版＋Raw折りたたみ）。項目自体は常に表示し、状態を区別する：
+   *   - 設定されていない（空文字）             → 「なし」
+   *   - APIレスポンスにキーが無い／raw未保持   → 「取得できませんでした」
+   *   - 値はあるが整形に失敗                   → 「解析できませんでした」（Rawで確認可能）
+   * @param {string} title 見出し（短く）
+   * @param {object|null} rawObj APIレスポンス相当のオブジェクト（filterCond等を含む）
+   * @param {object} opt key: rawObj上のキー名 / sub: 見出しの補足（小さく表示）
+   */
+  function relCondBlock(title, rawObj, { key = 'filterCond', sub = 'filterCond' } = {}) {
+    let body;
+    if (rawObj == null || typeof rawObj !== 'object' || !(key in rawObj)) {
+      body = relStateNote('取得できませんでした');
+    } else {
+      const cond = rawObj[key];
+      if (cond == null || String(cond).trim() === '') {
+        body = relStateNote('なし');
+      } else {
+        let fmt = null;
+        try { fmt = relCondFmt(cond); } catch { fmt = null; }
+        const raw = `
+          <details class="kt-rel-raw"><summary style="cursor:pointer;font-size:11px;opacity:.6">Raw</summary>
+            <pre>${escapeHtml(String(cond))}</pre></details>`;
+        body = (fmt == null)
+          ? relStateNote('解析できませんでした') + raw
+          : `<pre class="kt-rel-cond">${escapeHtml(fmt)}</pre>` + raw;
+      }
+    }
+    return `${relH(title, sub)}${body}`;
+  }
+
+  /** 詳細セクション共通フィルターバー（テキスト検索＋接続先アプリ絞り込み＋件数表示） */
+  function relFilterBar(kindKey, appOptions, deps, selfAppId) {
+    const opts = (appOptions || []).map(id =>
+      `<option value="${escapeHtml(String(id))}">${escapeHtml(relAppDisp(deps, id, selfAppId))}</option>`).join('');
+    return `
+      <div class="kt-rel-filter">
+        <input id="kt-rel-q-${kindKey}" type="text"
+          placeholder="検索（フィールド名・コード・アプリ・条件・マッピング）" />
+        <select id="kt-rel-app-${kindKey}" title="接続先アプリで絞り込み">
+          <option value="">接続先: すべて</option>${opts}
+        </select>
+        <button id="kt-rel-clear-${kindKey}" class="btn" type="button">クリア</button>
+        <span id="kt-rel-count-${kindKey}" class="kt-rel-count"></span>
+      </div>`;
+  }
+
+  /** フィルターバーのイベントを結線する（カードの表示/非表示と件数表示） */
+  function bindRelFilter(view, kindKey) {
+    const list = view.querySelector(`#kt-rel-list-${kindKey}`);
+    if (!list) return;
+    const $q = view.querySelector(`#kt-rel-q-${kindKey}`);
+    const $app = view.querySelector(`#kt-rel-app-${kindKey}`);
+    const $clear = view.querySelector(`#kt-rel-clear-${kindKey}`);
+    const $count = view.querySelector(`#kt-rel-count-${kindKey}`);
+    const cards = [...list.querySelectorAll('details.kt-rel-card')];
+    const apply = () => {
+      const text = ($q?.value || '').trim().toLowerCase();
+      const app = $app?.value || '';
+      let shown = 0;
+      for (const c of cards) {
+        const okText = !text || (c.dataset.search || '').includes(text);
+        const okApp = !app || String(c.dataset.app || '') === app;
+        const on = okText && okApp;
+        c.style.display = on ? '' : 'none';
+        if (on) shown++;
+      }
+      if ($count) $count.textContent = `表示 ${shown} / ${cards.length}件`;
+    };
+    $q?.addEventListener('input', apply, { passive: true });
+    $app?.addEventListener('change', apply, { passive: true });
+    $clear?.addEventListener('click', () => { if ($q) $q.value = ''; if ($app) $app.value = ''; apply(); }, { passive: true });
+    apply();
+  }
+
+  /** SummaryからDetailsの該当カードへ移動・展開・一時ハイライト */
+  function relJumpToCard(view, kindKey, id) {
+    const wanted = `${kindKey}:${id}`;
+    const card = [...view.querySelectorAll('details.kt-rel-card')].find(c => c.dataset.relCard === wanted);
+    if (!card) return;
+    // セクション（外側details）を開いてからカードを開く
+    const wrap = view.querySelector(`#kt-rel-details-${kindKey}`);
+    const outer = wrap ? wrap.closest('details') : null;
+    if (outer && !outer.open) outer.open = true;
+    // フィルターで非表示になっていても見えるようにする（フィルター自体は変更しない）
+    card.style.display = '';
+    card.open = true;
+    card.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    card.classList.add('kt-rel-flash');
+    setTimeout(() => card.classList.remove('kt-rel-flash'), 2000);
+  }
+
+  /**
+   * Details：Lookup（ルックアップ）
+   * 基本情報／検索キー（自アプリ→接続先）／フィールドマッピング／その他設定（絞り込み・並び順）／Raw JSON
+   */
+  function renderLookupDetails(lookups, ctx) {
+    const { deps, appId, fmap } = ctx;
+    const esc = escapeHtml;
+    const headers = ['フィールド', 'コード', '接続先AppID', '接続先アプリ名', '自アプリ側キー', '接続先キー',
+      'マッピング（接続先 → 自アプリ）', 'ピッカー表示項目', '絞り込み条件', '並び順'];
+    const dlRows = [];
+    const cards = [];
+    const appIds = new Set();
+
+    (lookups || []).forEach(lu => {
+      const destId = (lu?.relatedAppId != null && lu.relatedAppId !== '') ? String(lu.relatedAppId) : '';
+      const destKeyForFilter = destId || String(lu?.relatedAppCode || '');
+      if (destKeyForFilter) appIds.add(destKeyForFilter);
+      const destDisp = relAppDisp(deps, destKeyForFilter, appId);
+      const destKey = lu?.relatedKeyField || '';
+      const maps = Array.isArray(lu?.fieldMappings) ? lu.fieldMappings : [];
+      const picker = Array.isArray(lu?.lookupPickerFields) ? lu.lookupPickerFields : [];
+      const selfInfo = fmap?.get(lu?.code);
+
+      const destLink = /^\d+$/.test(destId)
+        ? `<a href="${esc(KTApi.appUrl(destId))}" target="_blank" rel="noopener noreferrer" style="color:inherit">${esc(destDisp)} 🔗</a>`
+        : esc(destDisp);
+
+      // 表示順は共通方針（基本情報 → 検索キー → 絞り込み → マッピング → ピッカー → 並び順 → Raw）
+      const mapRows = relH('フィールドマッピング', '接続先 → 自アプリ') + (maps.length ? `
+        <table class="kt-rel-mini">
+          <thead><tr><th>接続先</th><th></th><th>自アプリ</th></tr></thead>
+          <tbody>${maps.map(m => `
+            <tr>
+              <td><code>${esc(m?.from || '—')}</code></td>
+              <td>→</td>
+              <td>${relFieldDisp(fmap, m?.to)}</td>
+            </tr>`).join('')}
+          </tbody>
+        </table>` : relStateNote('なし'));
+
+      const pickerHtml = relH('ピッカー表示項目', 'Lookup選択画面に表示') + (picker.length
+        ? `<div style="font-size:12px">${picker.map(p => `<code>${esc(p)}</code>`).join('　')}</div>`
+        : relStateNote('なし'));
+
+      const sortList = relSortList(lu?.sort);
+      const sortHtml = relH('並び順', 'コピー元') + (
+        (lu?.raw == null || !('sort' in lu.raw)) ? relStateNote('取得できませんでした')
+          : sortList.length ? `
+            <table class="kt-rel-mini">
+              <thead><tr><th>フィールド</th><th>順序</th></tr></thead>
+              <tbody>${sortList.map(s => `
+                <tr><td><code>${esc(s.field)}</code></td><td>${esc(s.dirJa)}</td></tr>`).join('')}
+              </tbody></table>`
+            : relStateNote('なし'));
+
+      const bodyHtml = `
+        ${relH('基本情報')}
+        ${relKV([
+        ['フィールド名', esc(lu?.label ?? '')],
+        ['フィールドコード', `<code>${esc(lu?.code ?? '')}</code>${relTypeBadge(selfInfo?.type)}`],
+        ['接続先アプリ', destLink],
+        ['コピー項目数', `${maps.length}項目`],
+      ])}
+        ${relH('検索キー')}
+        ${relKeyBlock({ selfLabel: lu?.label, selfCode: lu?.code, destDisp, destCode: destKey, opLabel: '＝（値を照合）' })}
+        ${relCondBlock('絞り込み条件', lu?.raw, { sub: 'filterCond（コピー元の絞り込み）' })}
+        ${mapRows}
+        ${pickerHtml}
+        ${sortHtml}
+        ${relRawJson(lu?.raw)}`;
+
+      const search = [
+        lu?.label, lu?.code, destId, lu?.relatedAppCode, relAppNameOnly(deps, destKeyForFilter, appId),
+        destKey, lu?.filterCond, lu?.sort,
+        ...maps.flatMap(m => [m?.from, m?.to]), ...picker,
+      ].filter(Boolean).join(' ');
+
+      cards.push(relDetailCard({
+        kindKey: 'lookup', id: lu?.code ?? '', badge: 'Lookup',
+        title: `${lu?.label ?? ''}（${lu?.code ?? ''}）`,
+        sub: `→ ${esc(destDisp)}　キー: <code>${esc(destKey || '—')}</code>　${maps.length}項目取得`,
+        destAppId: destKeyForFilter, search, bodyHtml,
+      }));
+
+      dlRows.push([
+        lu?.label ?? '', lu?.code ?? '', destId || (lu?.relatedAppCode || ''), relAppNameOnly(deps, destKeyForFilter, appId),
+        lu?.code ?? '', destKey,
+        maps.map(m => `${m?.from || '—'} → ${m?.to || '—'}`).join(' / '),
+        picker.join(', '), lu?.filterCond || '', lu?.sort || '',
+      ]);
+    });
+
+    return { cardsHtml: cards.join(''), headers, dlRows, appOptions: [...appIds] };
+  }
+
+  /**
+   * Details：Related Records（関連レコード一覧）
+   * 基本情報／接続条件（自アプリ側キー→接続先キー）／表示フィールド一覧／フィルター条件／並び順／Raw JSON
+   */
+  function renderRelatedRecordDetails(rts, ctx) {
+    const { deps, appId, fmap } = ctx;
+    const esc = escapeHtml;
+    const headers = ['フィールド', 'コード', '接続先AppID', '接続先アプリ名', '自アプリ側キー', '接続先キー',
+      '表示フィールド', '絞り込み条件', '並び順', '表示件数'];
+    const dlRows = [];
+    const cards = [];
+    const appIds = new Set();
+
+    (rts || []).forEach(rt => {
+      const destId = (rt?.relatedAppId != null && rt.relatedAppId !== '') ? String(rt.relatedAppId) : '';
+      const destKeyForFilter = destId || String(rt?.relatedAppCode || '');
+      if (destKeyForFilter) appIds.add(destKeyForFilter);
+      const destDisp = relAppDisp(deps, destKeyForFilter, appId);
+      const isSelfApp = String(appId ?? '') === destId;
+      const condField = rt?.condition?.field || '';
+      const condRelated = rt?.condition?.relatedField || '';
+      const disp = Array.isArray(rt?.displayFields) ? rt.displayFields : [];
+      const sortList = relSortList(rt?.sort);
+
+      const destLink = /^\d+$/.test(destId)
+        ? `<a href="${esc(KTApi.appUrl(destId))}" target="_blank" rel="noopener noreferrer" style="color:inherit">${esc(destDisp)} 🔗</a>`
+        : esc(destDisp);
+
+      // 表示順は共通方針（基本情報 → 接続条件 → 絞り込み → 表示フィールド → 並び順 → 表示件数 → Raw）
+      // 表示フィールド：一覧化（接続先が自アプリの場合のみラベル・形式バッジを併記できる）
+      const dispHtml = relH('表示フィールド', '関連レコード一覧に表示') + (disp.length ? `
+        <table class="kt-rel-mini">
+          <thead><tr><th>#</th><th>フィールド</th></tr></thead>
+          <tbody>${disp.map((c, i) => `
+            <tr><td>${i + 1}</td><td>${isSelfApp ? relFieldDisp(fmap, c) : `<code>${esc(c)}</code>`}</td></tr>`).join('')}
+          </tbody>
+        </table>
+        ${isSelfApp ? '' : '<div style="font-size:11px;opacity:.6">※ 接続先アプリのフィールドのため、ラベル・形式は取得できません（コードのみ表示）</div>'}`
+        : relStateNote('なし'));
+
+      const sortHtml = relH('並び順') + (
+        (rt?.raw == null || !('sort' in rt.raw)) ? relStateNote('取得できませんでした')
+          : sortList.length ? `
+            <table class="kt-rel-mini">
+              <thead><tr><th>フィールド</th><th>順序</th></tr></thead>
+              <tbody>${sortList.map(s => `
+                <tr><td>${isSelfApp ? relFieldDisp(fmap, s.field) : `<code>${esc(s.field)}</code>`}</td><td>${esc(s.dirJa)}</td></tr>`).join('')}
+              </tbody></table>`
+            : relStateNote('なし'));
+
+      const sizeHtml = relH('表示件数', '一度に表示するレコード数') + (
+        rt?.size != null ? `<div style="font-size:12px">${esc(String(rt.size))}件</div>`
+          : (rt?.raw != null && 'size' in rt.raw) ? relStateNote('なし')
+            : relStateNote('取得できませんでした'));
+
+      const selfInfo = fmap?.get(condField);
+      const bodyHtml = `
+        ${relH('基本情報')}
+        ${relKV([
+        ['フィールド名', esc(rt?.label ?? '')],
+        ['フィールドコード', `<code>${esc(rt?.code ?? '')}</code>`],
+        ['接続先アプリ', destLink],
+      ])}
+        ${relH('接続条件', '自アプリ側キー → 接続先キー')}
+        ${relKeyBlock({
+        selfLabel: selfInfo?.label || '', selfCode: condField,
+        destDisp, destCode: condRelated, opLabel: '=',
+      })}
+        ${relCondBlock('絞り込み条件', rt?.raw, { sub: 'filterCond（表示するレコードの絞り込み）' })}
+        ${dispHtml}
+        ${sortHtml}
+        ${sizeHtml}
+        ${relRawJson(rt?.raw)}`;
+
+      const search = [
+        rt?.label, rt?.code, destId, rt?.relatedAppCode, relAppNameOnly(deps, destKeyForFilter, appId),
+        condField, condRelated, rt?.filterCond, rt?.sort, ...disp,
+      ].filter(Boolean).join(' ');
+
+      cards.push(relDetailCard({
+        kindKey: 'related', id: rt?.code ?? '', badge: 'Related Records',
+        title: `${rt?.label ?? ''}（${rt?.code ?? ''}）`,
+        sub: `→ ${esc(destDisp)}　連携: <code>${esc(condField || '—')}</code> = <code>${esc(condRelated || '—')}</code>`,
+        destAppId: destKeyForFilter, search, bodyHtml,
+      }));
+
+      // Export上でも「条件なし（空欄）」と「未取得」を区別する
+      const condForExport = (rt?.raw != null && 'filterCond' in rt.raw) ? (rt.filterCond || '') : '（取得不可）';
+      dlRows.push([
+        rt?.label ?? '', rt?.code ?? '', destId || (rt?.relatedAppCode || ''), relAppNameOnly(deps, destKeyForFilter, appId),
+        condField, condRelated, disp.join(', '), condForExport,
+        sortList.map(s => `${s.field} ${s.dirJa}`).join(', '),
+        rt?.size != null ? String(rt.size) : '',
+      ]);
+    });
+
+    return { cardsHtml: cards.join(''), headers, dlRows, appOptions: [...appIds] };
+  }
+
+  /**
+   * Details：App Action（レコード作成アクション）
+   * 基本情報／マッピング（自アプリ → 接続先）／実行条件／Raw JSON
+   */
+  function renderAppActionDetails(acts, ctx) {
+    const { deps, appId, fmap } = ctx;
+    const esc = escapeHtml;
+    const headers = ['ID', 'アクション名', '有効', '接続先AppID', '接続先アプリ名',
+      'マッピング（自アプリ → 接続先）', '割当対象', '実行条件'];
+    const dlRows = [];
+    const cards = [];
+    const appIds = new Set();
+
+    (acts || []).forEach(a => {
+      const destId = (a?.toAppId != null && a.toAppId !== '') ? String(a.toAppId) : '';
+      const destKeyForFilter = destId || String(a?.toAppCode || '');
+      if (destKeyForFilter) appIds.add(destKeyForFilter);
+      const destDisp = destKeyForFilter ? relAppDisp(deps, destKeyForFilter, appId) : '—（接続先不明）';
+      const maps = Array.isArray(a?.mappingsDetail) ? a.mappingsDetail : [];
+      const ents = Array.isArray(a?.entities) ? a.entities : [];
+      const enabled = a?.enabled;
+
+      const destLink = /^\d+$/.test(destId)
+        ? `<a href="${esc(KTApi.appUrl(destId))}" target="_blank" rel="noopener noreferrer" style="color:inherit">${esc(destDisp)} 🔗</a>`
+        : esc(destDisp);
+
+      // 表示順は共通方針（基本情報 → 接続方向 → 実行条件 → 転記フィールド → Raw）
+      // 接続方向：自アプリ → 接続先アプリ を先に明示する
+      const dirHtml = relH('接続方向') + `
+        <div class="kt-rel-keybox">
+          <div class="kt-rel-keybox-app">自アプリ</div>
+          <div class="kt-rel-keybox-op">↓ レコード作成</div>
+          <div class="kt-rel-keybox-app">${esc(destDisp)}</div>
+        </div>`;
+
+      // 転記フィールド：自アプリ（srcField / srcType）→ 接続先（destField）。方向を明示する
+      const mapHtml = relH(`転記フィールド ${maps.length}件`, '自アプリ → 接続先') + (maps.length ? `
+        <table class="kt-rel-mini">
+          <thead><tr><th>自アプリ</th><th></th><th>接続先</th></tr></thead>
+          <tbody>${maps.map(m => `
+            <tr>
+              <td>${m?.srcField ? relFieldDisp(fmap, m.srcField) : `<small style="opacity:.7">${esc(m?.srcType || '—')}</small>`}</td>
+              <td>→</td>
+              <td><code>${esc(m?.destField || '—')}</code></td>
+            </tr>`).join('')}
+          </tbody>
+        </table>` : relStateNote('なし'));
+
+      const entsHtml = ents.length
+        ? ents.map(e => `${esc(e?.code ?? '—')}<small style="opacity:.6">（${esc(e?.type ?? '—')}）</small>`).join(' / ')
+        : '全員';
+
+      const bodyHtml = `
+        ${relH('基本情報')}
+        ${relKV([
+        ['アクション名', esc(a?.name ?? '')],
+        ['ID', `<code>${esc(String(a?.id ?? ''))}</code>`],
+        ['有効', enabled == null ? '—（取得不可）' : (enabled ? '✅ 有効' : '❌ 無効')],
+        ['接続先アプリ', destLink],
+        ['利用できるユーザー', entsHtml],
+      ])}
+        ${dirHtml}
+        ${relCondBlock('実行条件', a?.raw, { sub: 'filterCond（アクションを表示するレコードの条件）' })}
+        ${mapHtml}
+        ${relRawJson(a?.raw)}`;
+
+      const search = [
+        a?.name, String(a?.id ?? ''), destId, a?.toAppCode, relAppNameOnly(deps, destKeyForFilter, appId),
+        a?.filterCond, ...maps.flatMap(m => [m?.srcField, m?.srcType, m?.destField]),
+        ...ents.map(e => e?.code),
+      ].filter(Boolean).join(' ');
+
+      cards.push(relDetailCard({
+        kindKey: 'action', id: String(a?.id ?? ''), badge: 'App Action',
+        title: a?.name ?? '',
+        sub: `→ ${esc(destDisp)}　${maps.length}項目を転記${enabled === false ? '　<b style="color:#b00020">無効</b>' : ''}`,
+        destAppId: destKeyForFilter, search, bodyHtml,
+      }));
+
+      dlRows.push([
+        String(a?.id ?? ''), a?.name ?? '',
+        enabled == null ? '' : (enabled ? 'TRUE' : 'FALSE'),
+        destId || (a?.toAppCode || ''), relAppNameOnly(deps, destKeyForFilter, appId),
+        maps.map(m => `${m?.srcField || m?.srcType || '—'} → ${m?.destField || '—'}`).join(' / '),
+        ents.map(e => `${e?.code ?? '—'}（${e?.type ?? '—'}）`).join(' / '),
+        a?.filterCond || '',
+      ]);
+    });
+
+    return { cardsHtml: cards.join(''), headers, dlRows, appOptions: [...appIds] };
+  }
+
   /**
    * Relationsタブを描画
    * @param {HTMLElement|Document} root document か ルート要素
@@ -5910,7 +6469,6 @@
 
     // ★エスケープ漏れ修正：HTMLに入れる値は escH（共通の escapeHtml）を必ず通す
     const escH = (v) => escapeHtml(v);
-    const yn = (b) => (b === true ? '✅' : '—');
 
     const table = (headers, rows, colWidths = null) => `
       <table style="width:100%;border-collapse:collapse;font-size:12px;table-layout:fixed">
@@ -5939,157 +6497,53 @@
       </table>
     `;
 
-    // ---------- Lookups（表示用とDL用） ----------
-    const headersLookups = ['フィールド', '参照アプリID / コード', '参照キー', 'フィールドマッピング', 'ピッカー表示項目'];
-
-    const lookupRowsHtml = [];
-    const lookupRowsDL = [];
-
-    lookups.forEach(lu => {
-      const app = [lu?.relatedAppId || '', lu?.relatedAppCode || ''].filter(Boolean).join(' / ') || '—';
-      const mappingsPlain = (Array.isArray(lu?.fieldMappings) && lu.fieldMappings.length)
-        ? lu.fieldMappings.map(m => `${m?.from || '—'} → ${m?.to || '—'}`)
-        : [];
-      const mappingsHtml = mappingsPlain.length ? mappingsPlain.map(escH).join('<br>') : '—';
-      const mappingsText = mappingsPlain.length ? mappingsPlain.join(' / ') : '—';
-      const keyText = lu?.relatedKeyField || '—';
-      const keyHtml = lu?.relatedKeyField ? `<code>${escH(lu.relatedKeyField)}</code>` : '—';
-      const picker = (Array.isArray(lu?.lookupPickerFields) && lu.lookupPickerFields.length)
-        ? lu.lookupPickerFields.join(', ')
-        : '—';
-
-      // 表示：code と label を分行（★従来は未エスケープでinnerHTMLへ入っていた）
-      lookupRowsHtml.push([
-        `<code>${escH(lu?.code ?? '')}</code><br><small>${escH(lu?.label ?? '')}</small>`,
-        escH(app),
-        keyHtml,
-        mappingsHtml,
-        escH(picker),
-      ]);
-
-      // DL：フィールド列は「ラベル（コード）」で1セルに集約（テキストなのでエスケープ不要）
-      lookupRowsDL.push([
-        `${lu?.label ?? ''}（${lu?.code ?? ''}）`,
-        app,
-        keyText,
-        mappingsText,
-        picker,
-      ]);
-    });
-
-    // ---------- Related Records（表示用とDL用） ----------
-    const headersRT = ['フィールド', '参照アプリID / コード', '連携条件', '表示フィールド', '並び順'];
-
-    const rtRowsHtml = [];
-    const rtRowsDL = [];
-
-    rts.forEach(rt => {
-      const app = [rt?.relatedAppId || '', rt?.relatedAppCode || ''].filter(Boolean).join(' / ') || '—';
-      const condText = (rt?.condition?.field && rt?.condition?.relatedField)
-        ? `${rt.condition.field} = ${rt.condition.relatedField}`
-        : '—';
-      const disp = (Array.isArray(rt?.displayFields) && rt.displayFields.length)
-        ? rt.displayFields.join(', ')
-        : '—';
-      const sort = rt?.sort || '—';
-
-      rtRowsHtml.push([
-        `<code>${escH(rt?.code ?? '')}</code><br><small>${escH(rt?.label ?? '')}</small>`,
-        escH(app),
-        escH(condText),
-        escH(disp),
-        escH(sort),
-      ]);
-      rtRowsDL.push([
-        `${rt?.label ?? ''}（${rt?.code ?? ''}）`,
-        app,
-        condText,
-        disp,
-        sort,
-      ]);
-    });
-
-    // ---------- Actions（表示用とDL用） ----------
-    const headersAC = ['ID / 名称', '有効', '作成先アプリID / コード', 'マッピング', '割当対象', 'フィルタ'];
-
-    const actRowsHtml = [];
-    const actRowsDL = [];
-
-    acts.forEach(a => {
-      const app = [a?.toAppId || '', a?.toAppCode || ''].filter(Boolean).join(' / ') || '—';
-      // ★mappings は配列（旧形式の '<br>' 連結文字列にも後方互換で対応）
-      const mapsArr = Array.isArray(a?.mappings)
-        ? a.mappings
-        : (typeof a?.mappings === 'string' && a.mappings.length)
-          ? a.mappings.split(/<br\s*\/?>/i)
-          : [];
-      const mapsHtml = mapsArr.length ? mapsArr.map(escH).join('<br>') : '—';
-      const mapsText = mapsArr.length ? mapsArr.join(' / ') : '—';
-      const entsPlain = (Array.isArray(a?.entities) && a.entities.length)
-        ? a.entities.map(e => `${e?.code ?? '—'}（${e?.type ?? '—'}）`)
-        : [];
-      const entsHtml = entsPlain.length ? entsPlain.map(escH).join(' / ') : '—';
-      const entsText = entsPlain.length ? entsPlain.join(' / ') : '—';
-      // ★B4修正：buildRelations 側で enabled を保持するようにした（無い場合は null＝不明で '—' 表示）
-      const enabled = a?.enabled;
-
-      actRowsHtml.push([
-        `<code>${escH(a?.name ?? '')}</code><br><small>${escH(a?.id ?? '')}</small>`,
-        yn(enabled),
-        escH(app),
-        mapsHtml,
-        entsHtml,
-        escH(a?.filterCond || ''),
-      ]);
-
-      // CSV/MD：enabled 不明時は空欄
-      actRowsDL.push([
-        `${a?.id ?? ''} / ${a?.name ?? ''}`,
-        enabled == null ? '' : (enabled ? 'TRUE' : 'FALSE'),
-        app,
-        mapsText,
-        entsText,
-        a?.filterCond || '',
-      ]);
-    });
-
-    // ---------- セクション描画（DLは *DL用行* を渡す） ----------
-    // ★構成変更：先頭の「アプリ間依存関係」を概要として常時表示し、
-    //   個別設定の3セクションは「詳細」として初期は折りたたむ（同じ情報の二重表示を避けるため）。
-    //   タイトルに件数を出しているので、折りたたんだままでも有無と規模が分かる。
+    // ---------- 設定詳細（Details）：機能単位のレンダラーで生成 ----------
+    // ★v2.2.1 構成変更：詳細は「1設定＝1カード（折りたたみ）」で表示し、
+    //   検索・接続先アプリでの絞り込みができる。エクスポートは従来どおり
+    //   sectionWithDL（Copy MD / DL MD / CSV / JSON）で、内容はSummaryより詳細な設定情報を出す。
     const cnt = (n) => `（${n}件）`;
+    const fmap = relFieldInfoMap(deps);
+    const detailCtx = { deps, appId, fmap };
 
-    // 詳細：Lookups
-    const widthsLookups = ['22%', '16%', '12%', '30%', '20%'];
+    const LU = renderLookupDetails(lookups, detailCtx);
+    const RT = renderRelatedRecordDetails(rts, detailCtx);
+    const AC = renderAppActionDetails(acts, detailCtx);
+
+    const emptyCards = `<div style="padding:12px;opacity:.7;font-size:12px">項目なし</div>`;
+    const detailSectionInner = (kindKey, R) => `
+      <div id="kt-rel-details-${kindKey}" style="padding:8px 10px">
+        ${R.dlRows.length ? relFilterBar(kindKey, R.appOptions, deps, appId) : ''}
+        <div id="kt-rel-list-${kindKey}">${R.cardsHtml || emptyCards}</div>
+      </div>`;
+
+    // 詳細：Lookup（セクションは展開・カードは折りたたみ）
     const { html: secLU, bind: bindLU } =
       sectionWithDL(
-        `詳細：Lookups（ルックアップ）${cnt(lookupRowsDL.length)}`,
-        headersLookups, lookupRowsDL,
-        table(headersLookups, lookupRowsHtml, widthsLookups),
+        `Lookup（ルックアップ）${cnt(LU.dlRows.length)}`,
+        LU.headers, LU.dlRows,
+        detailSectionInner('lookup', LU),
         'relations_lookups',
-        { appId, defaultOpen: false, indicator: true, relationType: 'lookup' }
+        { appId, defaultOpen: true, indicator: true, relationType: 'lookup' }
       );
 
     // 詳細：Related Records
-    const widthsRT = ['24%', '16%', '18%', '28%', '14%'];
     const { html: secRT, bind: bindRT } =
       sectionWithDL(
-        `詳細：Related Records（関連レコード）${cnt(rtRowsDL.length)}`,
-        headersRT, rtRowsDL,
-        table(headersRT, rtRowsHtml, widthsRT),
+        `Related Records（関連レコード）${cnt(RT.dlRows.length)}`,
+        RT.headers, RT.dlRows,
+        detailSectionInner('related', RT),
         'relations_relatedTables',
-        { appId, defaultOpen: false, indicator: true, relationType: 'Related' }
+        { appId, defaultOpen: true, indicator: true, relationType: 'Related' }
       );
 
-    // 詳細：Actions
-    const widthsAC = ['20%', '8%', '18%', '24%', '20%', '10%'];
+    // 詳細：App Actions
     const { html: secAC, bind: bindAC } =
       sectionWithDL(
-        `詳細：Actions（レコード作成アクション）${cnt(actRowsDL.length)}`,
-        headersAC, actRowsDL,
-        table(headersAC, actRowsHtml, widthsAC),
+        `App Actions（レコード作成アクション）${cnt(AC.dlRows.length)}`,
+        AC.headers, AC.dlRows,
+        detailSectionInner('action', AC),
         'relations_actions',
-        { appId, defaultOpen: false, indicator: true, relationType: 'action' }
+        { appId, defaultOpen: true, indicator: true, relationType: 'action' }
       );
 
     // ---------- アプリ間依存関係（概要）----------
@@ -6119,15 +6573,21 @@
              style="color:inherit" title="このアプリを別タブで開きます">${escH(destApp)} 🔗</a>`
         : escH(destApp);
 
+      // 自アプリ側：関連レコードは接続キーを ↳ 付きで補足（Summaryだけでキーが分かるように）
+      const selfSideHtml = r.selfKey
+        ? `${escH(r.selfSide)}<br><small style="opacity:.7">↳ ${escH(r.selfKey)}</small>`
+        : escH(r.selfSide);
+      const selfSideText = r.selfKey ? `${r.selfSide} ↳ ${r.selfKey}` : r.selfSide;
+
       alRowsHtml.push([
         escH(r.kind),
-        escH(r.selfSide),
+        selfSideHtml,
         destAppHtml,
         escH(r.destField),
         escH(noteFull),
         `<span class="pill">${escH(srcMark)}／${escH(confJa)}</span>`,
       ]);
-      alRowsDL.push([r.kind, r.selfSide, destApp, r.destField, noteFull, `${srcMark}／${confJa}`]);
+      alRowsDL.push([r.kind, selfSideText, destApp, r.destField, noteFull, `${srcMark}／${confJa}`]);
     });
 
     // 取得可能性の説明（取得できないものを取得できるように見せない）
@@ -6139,11 +6599,12 @@
         </summary>
         <div style="padding:8px 10px;margin-top:6px;border:1px solid #8883;border-radius:8px;font-size:11px;line-height:1.8">
           <div>・<b>設定</b>＝アプリ設定APIから取得（ルックアップ／関連レコード／アプリアクション）。確実な情報です。
-            各設定の詳細な項目は、下の「詳細：…」セクションを開くと確認できます。</div>
+            各設定の詳細な項目は、下の「設定詳細（Details）」の各カードで確認できます。</div>
           <div>・<b>推定</b>＝JavaScriptの静的解析による検出。実行時にしか決まらない値は特定できません。
             Field Scannerで「Scan」を実行すると反映されます${deps ? '' : '（現在は依存データが未生成です）'}。</div>
           <div>・<b>この一覧は「このアプリ → 他アプリ」の向きのみ</b>です。他アプリからこのアプリへの参照は、
             アプリ設定APIでは取得できません（同一ドメインの他アプリを走査すれば取得可能ですが、現時点では未対応です）。</div>
+          <div>・関連レコード一覧などが<b>自アプリ自身を参照する設定</b>も、設定単位で1行表示します（接続先に「（このアプリ）」と表示）。</div>
           <div>・プラグイン設定内の接続先アプリ、および外部URLのJavaScriptは<b>解析対象外</b>です。</div>
           <div>・接続先のアプリ名は、閲覧権限があるアプリのみ表示されます。権限が無い場合は「名称取得不可」と表示します。</div>
         </div>
@@ -6160,14 +6621,18 @@
 
     const widthsAL = ['12%', '20%', '16%', '16%', '24%', '12%'];
     const destAppCount = new Set(alRows.map(r => r.destAppId)).size;
+    // ★v2.2.1：役割が分かる名称へ変更（Summary＝横断ビュー、下の「設定詳細」＝調査用）
     const alTitle = alRows.length
-      ? `アプリ間依存関係：このアプリ → 他アプリ（${destAppCount}アプリ / ${alRows.length}件）`
-      : 'アプリ間依存関係：このアプリ → 他アプリ';
+      ? `依存関係サマリー <span style="font-size:11px;opacity:.6;font-weight:400">Summary</span>：このアプリ → 他アプリ（${destAppCount}アプリ / ${alRows.length}件）`
+      : `依存関係サマリー <span style="font-size:11px;opacity:.6;font-weight:400">Summary</span>：このアプリ → 他アプリ`;
+    const alHint = alRows.length
+      ? `<div style="font-size:11px;opacity:.75;margin:2px 0 6px">行をクリックすると、下の「設定詳細」の該当設定へ移動します（JavaScript行を除く）。</div>`
+      : '';
     const { html: secAL, bind: bindAL } =
       sectionWithDL(
         alTitle,
         headersAL, alRowsDL,
-        alNote + (alRows.length ? table(headersAL, alRowsHtml, widthsAL) : alEmpty),
+        alNote + alHint + (alRows.length ? `<div id="kt-rel-summary-table">${table(headersAL, alRowsHtml, widthsAL)}</div>` : alEmpty),
         'relations_appLinks',
         { appId, defaultOpen: true, indicator: true, relationType: 'appLink' }
       );
@@ -6205,11 +6670,80 @@
       </details>
     `;
 
+    // ---------- 設定詳細（Details）の見出し ----------
+    const secDivider = `
+      <div style="display:flex;align-items:baseline;gap:10px;margin:18px 0 4px;flex-wrap:wrap">
+        <h3 style="font-size:14px;margin:0;border-left:4px solid #2563eb;padding-left:8px">
+          設定詳細 <span style="font-size:11px;opacity:.6;font-weight:400">Details</span>
+        </h3>
+        <span style="font-size:11px;opacity:.7">各接続の設定内容を調査できます（検索・接続先アプリで絞り込み可）</span>
+      </div>`;
+
+    // ---------- カード・フィルター用スタイル（Relationsタブ内スコープ） ----------
+    const relStyle = `
+      <style>
+        #view-relations .kt-rel-card{border:1px solid ${BD};border-radius:10px;margin:8px 0}
+        #view-relations .kt-rel-card>summary{list-style:none;cursor:pointer;display:flex;align-items:center;gap:8px;padding:8px 10px;flex-wrap:wrap}
+        #view-relations .kt-rel-card>summary::-webkit-details-marker{display:none}
+        #view-relations .kt-rel-card>summary::before{content:'▸';width:1em;text-align:center;opacity:.6}
+        #view-relations .kt-rel-card[open]>summary::before{content:'▾'}
+        #view-relations .kt-rel-badge{border:1px solid ${BD};border-radius:999px;padding:2px 8px;font-size:11px;white-space:nowrap;opacity:.85}
+        #view-relations .kt-rel-title{font-weight:600;font-size:12px}
+        #view-relations .kt-rel-sub{font-size:11px;opacity:.75}
+        #view-relations .kt-rel-body{padding:0 12px 10px;border-top:1px dashed ${BD};font-size:12px}
+        #view-relations .kt-rel-h{font-weight:600;font-size:12px;margin:10px 0 4px}
+        #view-relations .kt-rel-hsub{font-weight:400;font-size:10px;opacity:.6;margin-left:4px}
+        #view-relations .kt-rel-note{font-size:12px;opacity:.75}
+        #view-relations .kt-rel-type{display:inline-block;border:1px solid ${BD};border-radius:4px;padding:0 4px;font-size:10px;line-height:1.5;opacity:.7;margin-left:4px;vertical-align:1px;white-space:nowrap}
+        #view-relations .kt-rel-kv{width:auto}
+        #view-relations .kt-rel-kv td{padding:3px 10px 3px 0;vertical-align:top;font-size:12px;border-bottom:none}
+        #view-relations .kt-rel-kv td:first-child{opacity:.7;white-space:nowrap}
+        #view-relations .kt-rel-mini{width:auto;border-collapse:collapse;font-size:12px}
+        #view-relations .kt-rel-mini th{position:static;font-size:11px;opacity:.7;padding:2px 10px 2px 0;border-bottom:1px solid ${BD};text-align:left;background:transparent}
+        #view-relations .kt-rel-mini td{padding:3px 10px 3px 0;border-bottom:none;vertical-align:top}
+        #view-relations .kt-rel-keybox{border:1px solid ${BD};border-radius:8px;padding:8px 12px;display:inline-block;min-width:220px;font-size:12px;line-height:1.7}
+        #view-relations .kt-rel-keybox-app{opacity:.65;font-size:11px}
+        #view-relations .kt-rel-keybox-op{opacity:.75;margin:2px 0 2px 10px;font-weight:600}
+        #view-relations .kt-rel-cond{margin:0;font-size:12px;line-height:1.6;white-space:pre-wrap;word-break:break-word;border:1px solid ${BD};border-radius:8px;padding:8px 10px}
+        #view-relations .kt-rel-raw pre{margin:4px 0 0;font-size:11px;line-height:1.5;white-space:pre-wrap;word-break:break-all;max-height:240px;overflow:auto;border:1px solid ${BD};border-radius:8px;padding:8px 10px}
+        #view-relations .kt-rel-filter{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:2px 0 8px}
+        #view-relations .kt-rel-filter input{flex:1;min-width:200px;height:30px;padding:0 10px;border:1px solid ${BD};border-radius:8px;background:transparent;color:inherit;font-size:12px}
+        #view-relations .kt-rel-filter select{height:30px;border:1px solid ${BD};border-radius:8px;background:transparent;color:inherit;max-width:280px;font-size:12px}
+        #view-relations .kt-rel-count{font-size:11px;opacity:.75}
+        #view-relations .kt-rel-flash{outline:2px solid #2563eb;outline-offset:1px}
+        #view-relations #kt-rel-summary-table tbody tr[data-rel-jump]:hover{background:rgba(37,99,235,.08)}
+      </style>`;
+
     // まとめて描画 & バインド
-    view.innerHTML = `${secAL}${secIN}${secLU}${secRT}${secAC}`;
+    view.innerHTML = `${relStyle}${secAL}${secIN}${secDivider}${secLU}${secRT}${secAC}`;
     bindAL(view); bindLU(view); bindRT(view); bindAC(view);
     bindIncoming(view, appId, deps);
 
+    // 詳細セクションの共通フィルター
+    bindRelFilter(view, 'lookup');
+    bindRelFilter(view, 'related');
+    bindRelFilter(view, 'action');
+
+    // ---------- Summary → Details 導線 ----------
+    // Summaryの行クリックで、対応するDetailsカードへスクロール・展開・一時ハイライト。
+    // JS由来（JS_APP_ID）行は対応する詳細が無いため対象外。
+    const KIND2KEY = { 'ルックアップ': 'lookup', '関連レコード': 'related', 'アプリアクション': 'action' };
+    const sumTbl = view.querySelector('#kt-rel-summary-table');
+    if (sumTbl) {
+      const trs = sumTbl.querySelectorAll('tbody tr');
+      alRows.forEach((r, i) => {
+        const tr = trs[i];
+        const key = KIND2KEY[r.kind];
+        if (!tr || !key || r.sourceId == null) return;
+        tr.dataset.relJump = '1';
+        tr.style.cursor = 'pointer';
+        tr.title = 'クリックで該当の設定詳細へ移動します';
+        tr.addEventListener('click', (ev) => {
+          if (ev.target.closest('a')) return; // アプリへのリンクは通常動作を優先
+          relJumpToCard(view, key, String(r.sourceId));
+        });
+      });
+    }
   }
 
 

@@ -1,0 +1,35 @@
+# Node.js
+node_modules/
+
+# ビルド・一時ファイル
+dist/
+build/
+tmp/
+temp/
+tests/
+
+# ログ
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+
+# 環境変数・秘密情報
+.env
+.env.*
+*.ppk
+
+# kintoneプラグイン生成物
+plugin.zip
+
+# esbuild probe artifact（Git管理しない）
+tests/.build/
+
+# AI Phase Runner の実行時出力（Git管理しない）
+.ai/runs/
+
+# wrangler 実設定・キャッシュ（staging実IDは追跡しない。テンプレは *.staging.toml / *.example のみ追跡）
+worker/wrangler.toml
+worker/.wrangler/
+.wrangler/
