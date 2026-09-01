@@ -688,7 +688,7 @@
     // ★解析ロジックのバージョン。
     //   解析内容（検出パターン・保存する項目）を変更したら必ず上げること。
     //   これを署名に含めないと、Toolkit更新後も古い解析結果が使われ続ける。
-    const ANALYZER_VERSION = '11'; // 解析ロジックを変更したら上げる（キャッシュが自動的に無効になる）
+    const ANALYZER_VERSION = '12'; // 解析ロジックを変更したら上げる（キャッシュが自動的に無効になる）
     const CACHE_TTL_MS = 6 * 60 * 60 * 1000; // 6時間（プレビュー編集を拾えないため長くしすぎない）
 
     // Scannerタブが登録する実行関数（renderScannerから設定される）
@@ -802,11 +802,160 @@
       }
     };
 
+    // ==========================================
+    // 未知フィールドコード候補の抽出（純粋なテキスト解析）
+    //  Field Scanner の通常解析は「既知のフィールドコードを探す」方式のため、
+    //  存在しないコードは原理的に見つけられない。ここでは逆に「コードらしき文字列」を先に抽出する。
+    //  ★方針：JavaScript内の文字列を広く拾うのではなく、
+    //    「その値が実際にフィールドコードとして使われている文脈」だけを見る。
+    //    表示ラベル・選択肢値・比較値はフィールドコードではないため対象外にする。
+    // ==========================================
+
+    // フィールドコードとしてあり得ない文字列を除外する
+    //  - 空白・改行を含む（文章）
+    //  - URL / パス / イベント名
+    //  - 極端に長い
+    function isPlausibleFieldCode(s) {
+      const v = String(s || '').trim();
+      if (!v || v.length > 128) return false;
+      if (/[\s\u3000]/.test(v)) return false;              // 空白を含む
+      if (/^(https?:|\/|\.\/|#)/.test(v)) return false;    // URL・パス
+      if (/^\$/.test(v)) return false;                     // $id などのシステム項目
+      if (/^(mobile\.)?app\.(record|report)\./.test(v)) return false; // イベント名
+      if (/^(GET|POST|PUT|DELETE)$/i.test(v)) return false;
+      if (/\.(json|js|css|html?)$/i.test(v)) return false; // ファイル名
+      return true;
+    }
+
+    /** idx から始まる文字列リテラルを読む（文字列でなければ null） */
+    function readStringLiteral(s, idx) {
+      const q = s[idx];
+      if (q !== '"' && q !== "'" && q !== '`') return null;
+      let j = idx + 1;
+      for (; j < s.length; j++) {
+        if (s[j] === '\\') { j++; continue; }
+        if (s[j] === q) break;
+      }
+      return { value: s.slice(idx + 1, j), index: idx + 1, end: j };
+    }
+
+    /**
+     * 配列リテラルを走査し、その配列の「直下の要素」である文字列リテラルだけを返す。
+     * ★入れ子（オブジェクト・内側の配列）の中身は対象外にする。
+     *   これをしないと [{ option: '選択肢', fields: [...] }] のような構造で、
+     *   表示ラベルや選択肢値までフィールドコードとして拾ってしまう。
+     * @param {string} s ソース全文
+     * @param {number} openIdx '[' の位置
+     * @returns {{items: Array<{value:string, index:number}>, end:number}|null}
+     */
+    function scanArrayLiteralItems(s, openIdx) {
+      if (s[openIdx] !== '[') return null;
+      const items = [];
+      let depth = 0;
+      for (let i = openIdx; i < s.length; i++) {
+        const ch = s[i];
+        if (ch === '[' || ch === '{' || ch === '(') { depth++; continue; }
+        if (ch === ']' || ch === '}' || ch === ')') {
+          depth--;
+          if (depth <= 0) return { items, end: i };
+          continue;
+        }
+        if (ch === '"' || ch === "'" || ch === '`') {
+          const lit = readStringLiteral(s, i);
+          if (!lit) continue;
+          // 直下の要素（depth === 1）のときだけフィールドコード候補として採用する
+          if (depth === 1) items.push({ value: lit.value, index: lit.index });
+          i = lit.end;
+          continue;
+        }
+      }
+      return { items, end: s.length };
+    }
+
+    // record を第1引数に取る呼び出しでも、フィールド操作ではないことが明らかなもの
+    // （JS標準の出力・変換系。ドメイン固有名のハードコードは行わない）
+    const NON_FIELD_SINKS = /^(log|warn|error|info|debug|trace|assert|dir|table|stringify|parse)$/;
+
+    /**
+     * JavaScript本文から「フィールドコードらしき文字列」を抽出する
+     * @returns {Array<{code, line, pattern, confidence, dynamic}>}
+     *   confidence: HIGH = kintone APIやrecord参照の引数（フィールドコード以外あり得ない）
+     *               MEDIUM = フィールド系の変数・キーに入った配列リテラルの直下要素
+     *   dynamic: テンプレートリテラルの ${...} を含み、実行時にしかコードが決まらない参照
+     */
+    function extractFieldCodeCandidates(cleanText, lineIndexFn) {
+      const s = String(cleanText || '');
+      const out = [];
+      const push = (code, index, pattern, confidence) => {
+        if (!isPlausibleFieldCode(code)) return;
+        const value = String(code).trim();
+        out.push({
+          code: value,
+          line: lineIndexFn ? lineIndexFn(index) : null,
+          pattern, confidence,
+          // ${...} を含む参照は静的にコードを確定できない（存在しないと断定してはいけない）
+          dynamic: /\$\{/.test(value),
+        });
+      };
+
+      // 1) kintone のフィールド操作API：第1引数はフィールドコード（またはグループコード）
+      const rxApi = /\b(setFieldShown|setFieldValue|setFieldRequired|getFieldElements?|getSpaceElement|getHeaderMenuSpaceElement)\s*\(\s*['"`]([^'"`]+)['"`]/g;
+      let m;
+      while ((m = rxApi.exec(s)) !== null) push(m[2], m.index, m[1], 'HIGH');
+
+      // 2) record['CODE'] / event.record['CODE']
+      const rxBracket = /\brecord\s*\[\s*['"`]([^'"`]+)['"`]\s*\]/g;
+      while ((m = rxBracket.exec(s)) !== null) push(m[1], m.index, "record['…']", 'HIGH');
+
+      // 3) record.CODE.value / event.record.CODE.value
+      //    （.value が続く場合のみ。メソッド呼び出しと区別するため）
+      const rxDot = /\brecord\.([A-Za-z_$\u00C0-\uFFFF][\w$\u00C0-\uFFFF]*)\s*\.\s*value/g;
+      while ((m = rxDot.exec(s)) !== null) push(m[1], m.index, 'record.….value', 'HIGH');
+
+      // 4) record を第1引数に渡している呼び出しの第2引数
+      //    例: getFieldValue(record, 'CODE') / setFieldValue(record, 'CODE', v)
+      //        setFieldsDisabled(record, ['A', 'B'], true)
+      //    ★関数名を列挙せず「recordを渡している」文脈で判定するため、
+      //      プロジェクト独自のラッパー関数にも効く（名前のハードコードにしない）。
+      const rxRecordArg = /\b([A-Za-z_$][\w$]*)\s*\(\s*(?:[A-Za-z_$][\w$]*\s*\.\s*)?record\s*,\s*/g;
+      while ((m = rxRecordArg.exec(s)) !== null) {
+        const fn = m[1];
+        if (NON_FIELD_SINKS.test(fn)) continue;
+        const at = m.index + m[0].length;
+        const lit = readStringLiteral(s, at);
+        if (lit) { push(lit.value, lit.index, `${fn}(record, '…')`, 'HIGH'); continue; }
+        if (s[at] === '[') {
+          const arr = scanArrayLiteralItems(s, at);
+          for (const it of (arr ? arr.items : [])) push(it.value, it.index, `${fn}(record, […])`, 'HIGH');
+        }
+        // 変数渡し（例: setFieldsDisabled(record, group.fields, ...)）の場合は、
+        // その配列リテラル自体を 5) の名前ヒューリスティクスで拾う
+      }
+
+      // 5) フィールド系の変数名・キー名に代入された配列リテラル
+      //    例: const disabledFields = ['A','B'];  targetFieldCodes: ['C']
+      //    「field」を含む名前のときだけ対象にする（誤検出を抑えるため）
+      //    ★配列の「直下の要素」だけを見る。入れ子のオブジェクト内の文字列
+      //      （表示ラベル labels や選択肢値 option）はフィールドコードではないため。
+      const rxArr = /([A-Za-z_$][\w$]*)\s*[:=]\s*\[/g;
+      while ((m = rxArr.exec(s)) !== null) {
+        const name = m[1];
+        if (!/field/i.test(name)) continue;
+        const openIdx = m.index + m[0].length - 1;
+        const arr = scanArrayLiteralItems(s, openIdx);
+        for (const it of (arr ? arr.items : [])) push(it.value, it.index, `${name}[…]`, 'MEDIUM');
+      }
+
+      return out;
+    }
+
     return {
       register, run, scheduleAuto, onChange, getStatus,
       buildSignature, loadCache, saveCache, clearCache,
       isAutoEnabled, setAutoEnabled,
       CACHE_TTL_MS, ANALYZER_VERSION,
+      // 純粋なテキスト解析（Field Scannerが利用。回帰テストの対象）
+      isPlausibleFieldCode, extractFieldCodeCandidates, scanArrayLiteralItems,
     };
   })();
 
@@ -3613,7 +3762,9 @@
             <span style="opacity:.8">
               ・<b>確実</b>＝設定値として記録されたコードが存在しない
               ・<b>可能性が高い</b>＝フィールド操作APIやrecord参照の引数に指定されている
-              ・<b>要確認</b>＝フィールド系の配列に書かれているが、用途は特定できない
+              ・<b>要確認</b>＝フィールド系の配列に書かれているが、用途は特定できない<br>
+              ※ 表示ラベル・選択肢値などフィールドコードとして使われていない文字列は対象外です。
+              テンプレートリテラルのように実行時にフィールドコードが決まる参照も、存在の有無を判断できないため検査していません。
             </span>
           </div>
           <div style="max-height:240px;overflow:auto">
@@ -9686,72 +9837,9 @@
       // Field Scanner の通常解析は「既知のフィールドコードを探す」方式のため、
       // 存在しないコードは原理的に見つけられない。
       // ここでは逆に「コードらしき文字列」を先に抽出し、フィールド一覧に無いものを洗い出す。
-
-      // フィールドコードとしてあり得ない文字列を除外する
-      //  - 空白・改行を含む（文章）
-      //  - URL / パス / イベント名
-      //  - 極端に長い
-      function isPlausibleFieldCode(s) {
-        const v = String(s || '').trim();
-        if (!v || v.length > 128) return false;
-        if (/[\s\u3000]/.test(v)) return false;              // 空白を含む
-        if (/^(https?:|\/|\.\/|#)/.test(v)) return false;    // URL・パス
-        if (/^\$/.test(v)) return false;                     // $id などのシステム項目
-        if (/^(mobile\.)?app\.(record|report)\./.test(v)) return false; // イベント名
-        if (/^(GET|POST|PUT|DELETE)$/i.test(v)) return false;
-        if (/\.(json|js|css|html?)$/i.test(v)) return false; // ファイル名
-        return true;
-      }
-
-      /**
-       * JavaScript本文から「フィールドコードらしき文字列」を抽出する
-       * @returns {Array<{code, line, pattern, confidence}>}
-       *   confidence: HIGH = kintone APIやrecord参照の引数（フィールドコード以外あり得ない）
-       *               MEDIUM = フィールド系の変数・キーに入った配列リテラル
-       */
-      function extractFieldCodeCandidates(cleanText, lineIndexFn) {
-        const s = String(cleanText || '');
-        const out = [];
-        const push = (code, index, pattern, confidence) => {
-          if (!isPlausibleFieldCode(code)) return;
-          out.push({
-            code: String(code).trim(),
-            line: lineIndexFn ? lineIndexFn(index) : null,
-            pattern, confidence,
-          });
-        };
-
-        // 1) kintone のフィールド操作API：第1引数はフィールドコード（またはグループコード）
-        const rxApi = /\b(setFieldShown|setFieldValue|setFieldRequired|getFieldElements?|getSpaceElement|getHeaderMenuSpaceElement)\s*\(\s*['"`]([^'"`]+)['"`]/g;
-        let m;
-        while ((m = rxApi.exec(s)) !== null) push(m[2], m.index, m[1], 'HIGH');
-
-        // 2) record['CODE'] / event.record['CODE']
-        const rxBracket = /\brecord\s*\[\s*['"`]([^'"`]+)['"`]\s*\]/g;
-        while ((m = rxBracket.exec(s)) !== null) push(m[1], m.index, "record['…']", 'HIGH');
-
-        // 3) record.CODE.value / event.record.CODE.value
-        //    （.value が続く場合のみ。メソッド呼び出しと区別するため）
-        const rxDot = /\brecord\.([A-Za-z_$\u00C0-\uFFFF][\w$\u00C0-\uFFFF]*)\s*\.\s*value/g;
-        while ((m = rxDot.exec(s)) !== null) push(m[1], m.index, 'record.….value', 'HIGH');
-
-        // 4) フィールド系の変数名・キー名に代入された配列リテラル
-        //    例: const disabledFields = ['A','B'];  targetFieldCodes: ['C']
-        //    「field」を含む名前のときだけ対象にする（誤検出を抑えるため）
-        const rxArr = /([A-Za-z_$][\w$]*)\s*[:=]\s*\[([^\]]*)\]/g;
-        while ((m = rxArr.exec(s)) !== null) {
-          const name = m[1];
-          if (!/field/i.test(name)) continue;
-          const body = m[2];
-          const rxStr = /['"`]([^'"`]+)['"`]/g;
-          let sm;
-          while ((sm = rxStr.exec(body)) !== null) {
-            push(sm[1], m.index + m[1].length + sm.index, `${name}[…]`, 'MEDIUM');
-          }
-        }
-
-        return out;
-      }
+      // ★抽出ロジックの実体は KTScan 側にある（純粋なテキスト解析。回帰テストの対象）。
+      const extractFieldCodeCandidates = (cleanText, lineIndexFn) =>
+        KTScan.extractFieldCodeCandidates(cleanText, lineIndexFn);
 
       /**
        * JavaScript内で「ステータスと比較している文字列」を抽出する
@@ -9902,6 +9990,10 @@
           const li = buildLineIndex(clean);
           for (const c of extractFieldCodeCandidates(clean, (i) => lineAt(li, i))) {
             if (known.has(c.code)) continue;
+            // ${...} を含むテンプレートリテラルは、実行時にしかフィールドコードが決まらない。
+            // 静的解析では存在有無を判断できないため「存在しない」とは断定しない。
+            // （例: record[`品目${index}_株価計算`]）
+            if (c.dynamic) continue;
             let a = agg.get(c.code);
             if (!a) {
               a = { code: c.code, files: new Map(), confidence: 'MEDIUM', count: 0, patterns: new Set() };
