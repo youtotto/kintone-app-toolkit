@@ -6,7 +6,6 @@ dist/
 build/
 tmp/
 temp/
-tests/
 
 # ログ
 *.log

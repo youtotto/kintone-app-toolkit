@@ -872,10 +872,6 @@
       return { items, end: s.length };
     }
 
-    // record を第1引数に取る呼び出しでも、フィールド操作ではないことが明らかなもの
-    // （JS標準の出力・変換系。ドメイン固有名のハードコードは行わない）
-    const NON_FIELD_SINKS = /^(log|warn|error|info|debug|trace|assert|dir|table|stringify|parse)$/;
-
     /**
      * JavaScript本文から「フィールドコードらしき文字列」を抽出する
      * @returns {Array<{code, line, pattern, confidence, dynamic}>}
@@ -912,15 +908,20 @@
       const rxDot = /\brecord\.([A-Za-z_$\u00C0-\uFFFF][\w$\u00C0-\uFFFF]*)\s*\.\s*value/g;
       while ((m = rxDot.exec(s)) !== null) push(m[1], m.index, 'record.….value', 'HIGH');
 
-      // 4) record を第1引数に渡している呼び出しの第2引数
+      // 4) フィールド操作関数の第2引数（第1引数に record を渡している呼び出し）
       //    例: getFieldValue(record, 'CODE') / setFieldValue(record, 'CODE', v)
       //        setFieldsDisabled(record, ['A', 'B'], true)
-      //    ★関数名を列挙せず「recordを渡している」文脈で判定するため、
-      //      プロジェクト独自のラッパー関数にも効く（名前のハードコードにしない）。
+      //    ★2つの条件を both 満たすときだけ候補にする：
+      //      (a) 第1引数が record（= レコードを操作している）
+      //      (b) 関数名に field を含む（= フィールドを対象にしている）
+      //    (a) だけでは showMessage(record, '表示文言') のような
+      //    フィールド操作でない呼び出しまで拾ってしまう。
+      //    (b) は 5) の配列名と同じ既存ヒューリスティクスで、関数名を列挙しないため
+      //    プロジェクト独自のラッパー（toggleFieldVisibility など）にも効く。
       const rxRecordArg = /\b([A-Za-z_$][\w$]*)\s*\(\s*(?:[A-Za-z_$][\w$]*\s*\.\s*)?record\s*,\s*/g;
       while ((m = rxRecordArg.exec(s)) !== null) {
         const fn = m[1];
-        if (NON_FIELD_SINKS.test(fn)) continue;
+        if (!/field/i.test(fn)) continue;
         const at = m.index + m[0].length;
         const lit = readStringLiteral(s, at);
         if (lit) { push(lit.value, lit.index, `${fn}(record, '…')`, 'HIGH'); continue; }
