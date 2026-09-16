@@ -688,7 +688,7 @@
     // ★解析ロジックのバージョン。
     //   解析内容（検出パターン・保存する項目）を変更したら必ず上げること。
     //   これを署名に含めないと、Toolkit更新後も古い解析結果が使われ続ける。
-    const ANALYZER_VERSION = '12'; // 解析ロジックを変更したら上げる（キャッシュが自動的に無効になる）
+    const ANALYZER_VERSION = '13'; // 解析ロジックを変更したら上げる（キャッシュが自動的に無効になる）
     const CACHE_TTL_MS = 6 * 60 * 60 * 1000; // 6時間（プレビュー編集を拾えないため長くしすぎない）
 
     // Scannerタブが登録する実行関数（renderScannerから設定される）
@@ -872,17 +872,325 @@
       return { items, end: s.length };
     }
 
+    /** idx から空白を読み飛ばした位置 */
+    function skipWs(s, idx) {
+      let i = idx;
+      while (i < s.length && /\s/.test(s[i])) i++;
+      return i;
+    }
+
+    /**
+     * オブジェクトリテラルの「直下のプロパティ」を列挙する（入れ子の中身は見ない）。
+     * 識別子キー・文字列キー・省略記法（{ app, fields }）に対応。計算プロパティやスプレッドは対象外。
+     * @returns {{props: Array<{key:string, index:number, valueStart:number, shorthand:boolean}>, end:number}|null}
+     */
+    function scanObjectProps(s, openIdx) {
+      if (s[openIdx] !== '{') return null;
+      const props = [];
+      let depth = 0;
+      let expectKey = false;
+      for (let i = openIdx; i < s.length; i++) {
+        const ch = s[i];
+        if (ch === '"' || ch === "'" || ch === '`') {
+          const lit = readStringLiteral(s, i);
+          if (depth === 1 && expectKey) {
+            const m = s.slice(lit.end + 1, lit.end + 40).match(/^\s*:/);
+            if (m) props.push({ key: lit.value, index: lit.index, valueStart: skipWs(s, lit.end + 1 + m[0].length), shorthand: false });
+            expectKey = false;
+          }
+          i = lit.end;
+          continue;
+        }
+        if (ch === '{' || ch === '[' || ch === '(') {
+          depth++;
+          if (depth === 1) expectKey = true;
+          continue;
+        }
+        if (ch === '}' || ch === ']' || ch === ')') {
+          depth--;
+          if (depth <= 0) return { props, end: i };
+          continue;
+        }
+        if (depth !== 1) continue;
+        if (ch === ',') { expectKey = true; continue; }
+        if (/\s/.test(ch)) continue;
+        if (!expectKey) continue;
+        const m = s.slice(i, i + 200).match(/^([A-Za-z_$À-￿][\w$À-￿]*)\s*(:|[,}])/);
+        if (m) {
+          if (m[2] === ':') {
+            props.push({ key: m[1], index: i, valueStart: skipWs(s, i + m[0].length), shorthand: false });
+            i += m[0].length - 1;
+          } else {
+            // 省略記法 { app, fields }：キー名＝変数名
+            props.push({ key: m[1], index: i, valueStart: i, shorthand: true });
+            i += m[1].length - 1;
+          }
+        }
+        expectKey = false;
+      }
+      return { props, end: s.length };
+    }
+
+    /** 配列リテラルの直下要素のうち、オブジェクトリテラルの '{' 位置を列挙する */
+    function scanArrayElementObjects(s, openIdx) {
+      const out = [];
+      let depth = 0;
+      for (let i = openIdx; i < s.length; i++) {
+        const ch = s[i];
+        if (ch === '"' || ch === "'" || ch === '`') { i = readStringLiteral(s, i).end; continue; }
+        if (ch === '[' || ch === '{' || ch === '(') { depth++; if (depth === 2 && ch === '{') out.push(i); continue; }
+        if (ch === ']' || ch === '}' || ch === ')') { depth--; if (depth <= 0) break; }
+      }
+      return out;
+    }
+
+    /** at から始まる値の式を、同じ深さの , ; 改行 または閉じ括弧の手前まで読む */
+    function readValueExpr(s, at) {
+      let depth = 0;
+      let i = at;
+      for (; i < s.length; i++) {
+        const ch = s[i];
+        if (ch === '"' || ch === "'" || ch === '`') { i = readStringLiteral(s, i).end; continue; }
+        if (ch === '(' || ch === '[' || ch === '{') { depth++; continue; }
+        if (ch === ')' || ch === ']' || ch === '}') { if (depth === 0) break; depth--; continue; }
+        if (depth === 0 && (ch === ',' || ch === ';' || ch === '\n')) break;
+      }
+      return s.slice(at, i).trim();
+    }
+
+    /** const / let / var の初期化式を集める（同名は最初の宣言を採用） */
+    function collectDeclarations(s) {
+      const decls = new Map();
+      const rx = /\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*/g;
+      let m;
+      while ((m = rx.exec(s)) !== null) {
+        if (!decls.has(m[1])) decls.set(m[1], readValueExpr(s, m.index + m[0].length));
+      }
+      return decls;
+    }
+
+    // 自アプリのIDを返す式（kintone.app.getId() / kintone.mobile.app.getId()）
+    const SELF_APP_RX = /kintone\s*\.\s*(?:mobile\s*\.\s*)?app\s*\.\s*getId\s*\(\s*\)/;
+
+    /**
+     * REST APIパラメータの app: の値を解決する
+     * @returns {{kind:'literal', appId:string}|{kind:'self'}|{kind:'unknown', raw:string}}
+     *   literal: 数値リテラル（外部アプリ、または自アプリと同じID）
+     *   self   : kintone.app.getId() 由来（自アプリ）
+     *   unknown: 静的には特定できない（変数・関数戻り値など）→ 断定しない
+     */
+    function resolveAppExpr(expr, decls, hop = 0) {
+      const e = String(expr || '').trim();
+      if (!e) return { kind: 'unknown', raw: '' };
+      let m;
+      if ((m = e.match(/^['"]?(\d{1,7})['"]?$/))) return { kind: 'literal', appId: m[1] };
+      if (SELF_APP_RX.test(e)) return { kind: 'self' };
+      // Number(x) / String(x) / parseInt(x, 10) の薄い包みは剥がして中身を見る
+      if ((m = e.match(/^(?:Number|String|parseInt)\s*\(\s*([^,()]+?)\s*(?:,\s*\d+\s*)?\)$/))) return resolveAppExpr(m[1], decls, hop);
+      // 変数：宣言の右辺を辿る（深追い・循環防止で3段まで）
+      if (/^[A-Za-z_$][\w$]*$/.test(e) && hop < 3 && decls && decls.has(e)) return resolveAppExpr(decls.get(e), decls, hop + 1);
+      return { kind: 'unknown', raw: e.slice(0, 80) };
+    }
+
+    /** idx から前方向に空白を読み飛ばした位置の文字（無ければ ''） */
+    function prevNonWs(s, idx) {
+      let i = idx;
+      while (i >= 0 && /\s/.test(s[i])) i--;
+      return i >= 0 ? s[i] : '';
+    }
+
+    // '(' の直前に来ても「呼び出し」ではない語
+    const NOT_CALLEE_RX = /^(?:if|for|while|switch|catch|with|return|typeof|await|yield|void|delete|in|of|function|else|do|case|throw)$/;
+
+    /**
+     * '(' の直前にある呼び出し先（識別子・メンバーチェーン）を返す。呼び出しでなければ null
+     *   client.record.getRecords( → 'client.record.getRecords'／kintone.api( → 'kintone.api'／if ( → null
+     */
+    function calleeBefore(s, parenIdx) {
+      const head = s.slice(Math.max(0, parenIdx - 160), parenIdx);
+      const m = head.match(/([A-Za-z_$][\w$]*(?:\s*\.\s*[A-Za-z_$][\w$]*)*)\s*$/);
+      if (!m) return null;
+      const callee = m[1].replace(/\s+/g, '');
+      if (!callee.includes('.') && NOT_CALLEE_RX.test(callee)) return null;
+      return callee;
+    }
+
+    /** '{' がオブジェクトリテラルの開始か（ブロック { … } と区別する。直前の文字で判定） */
+    function isObjectBrace(s, braceIdx) {
+      let i = braceIdx - 1;
+      while (i >= 0 && /\s/.test(s[i])) i--;
+      if (i < 0) return false;
+      const c = s[i];
+      if (c === '(' || c === ',' || c === '=' || c === ':' || c === '[' || c === '?') return true; // '=> {' はブロック本体なので対象外（'=> ({' は直前が '(' になる）
+      return /(?:return|yield)$/.test(s.slice(Math.max(0, i - 6), i + 1));
+    }
+
+    /** '{' の直前が「識別子への代入」（const p = { ／ p = {）なら、その識別子名を返す */
+    function assignedNameBefore(s, braceIdx) {
+      const head = s.slice(Math.max(0, braceIdx - 120), braceIdx);
+      const m = head.match(/(?<![\w$.])([A-Za-z_$][\w$]*)\s*=\s*$/);
+      return m ? m[1] : null;
+    }
+
+    /**
+     * 関数呼び出しの引数として「そのまま」渡されている識別子を集める（name → 呼び出し先の一覧）
+     *   client.record.getRecords(params) → params: ['client.record.getRecords']
+     *   getRecords(params.fields) や params[0] のようなメンバー参照は対象外
+     */
+    function collectCallArgIdentifiers(s) {
+      const map = new Map();
+      const stack = [];
+      for (let i = 0; i < s.length; i++) {
+        const ch = s[i];
+        if (ch === '"' || ch === "'" || ch === '`') { i = readStringLiteral(s, i).end; continue; }
+        if (ch === '(') { stack.push({ ch, callee: calleeBefore(s, i) }); continue; }
+        if (ch === '[' || ch === '{') { stack.push({ ch, callee: null }); continue; }
+        if (ch === ')' || ch === ']' || ch === '}') { stack.pop(); continue; }
+        if (!/[A-Za-z_$]/.test(ch)) continue;
+        const name = s.slice(i, i + 200).match(/^[A-Za-z_$][\w$]*/)[0];
+        const top = stack[stack.length - 1];
+        if (top && top.ch === '(' && top.callee) {
+          const bef = prevNonWs(s, i - 1);
+          const aft = s[skipWs(s, i + name.length)];
+          if ((bef === '(' || bef === ',') && (aft === ',' || aft === ')')) {
+            if (!map.has(name)) map.set(name, []);
+            map.get(name).push(top.callee);
+          }
+        }
+        i += name.length - 1;
+      }
+      return map;
+    }
+
+    // kintone REST API として認識する呼び出し先。変数名（client / restClient / this.client …）は問わず、
+    // メソッド名で判定する：
+    //   - @kintone/rest-api-client の record 系（app と fields / record / records を取るもの）
+    //   - kintone.api(url, method, params)（kintone.api.url は対象外）
+    //   - bulkRequest（requests[].payload に app / record を持つ）
+    const REST_CALLEE_RX = new RegExp(
+      '(?:^kintone\\.api$'
+      + '|(?:^|\\.)bulkRequest$'
+      + '|\\.record\\.(?:getRecord|getRecords|getAllRecords(?:WithId|WithOffset|WithCursor)?'
+      + '|addRecord|addRecords|addAllRecords|updateRecord|updateRecords|updateAllRecords'
+      + '|upsertRecord|upsertRecords|createCursor)$)');
+    /** 呼び出し先が kintone REST API と認識できるか */
+    function isRestCallee(callee) {
+      return !!callee && REST_CALLEE_RX.test(String(callee));
+    }
+
+    /**
+     * kintone REST API のパラメータ形（app と fields / record / records を持つオブジェクトリテラル）から
+     * フィールド参照を抽出する。文字列の見た目ではなく「どのアプリのフィールドか」の文脈で判定する。
+     *   { app: 1112, fields: ['A'] }                       → app 1112 の A を取得（READ）
+     *   { app: 1112, record: { A: { value } } }            → app 1112 の A を更新（WRITE）
+     *   { app: 1112, records: [{ id, record: { A } }] }    → 同上（updateRecords）
+     *   { app: 1112, records: [{ A: { value } }] }         → 同上（addRecords）
+     * app が kintone.app.getId() 由来なら自アプリ、数値なら外部アプリ（自アプリと同じIDの可能性は呼び出し側で判定）、
+     * 変数などで特定できなければ unknown として断定しない。
+     *
+     * ★REST API 呼び出しとの関連（appRef.restCall / appRef.callee）：
+     *   (a) 呼び出しの引数にオブジェクトリテラルを直接書いている   client.record.getRecords({ app, fields })
+     *   (b) 変数に入れてから引数として渡している                    const p = {…}; client.record.getRecords(p)
+     *   のいずれかで、かつ呼び出し先を kintone REST API と認識できる（isRestCallee）場合だけ restCall = true。
+     *   fetchAll(p) / showConfig(p) のような独自関数は、内部で REST API を使うかを静的に追跡できないため
+     *   依存（EXTERNAL_FIELD）の根拠にはしない（誤検出の抑制を優先）。どこにも渡されていない設定オブジェクトも同様。
+     *   いずれの場合も app の文脈自体は使う（別アプリが明示されていれば自アプリの「存在しない参照」にはしない）。
+     * @param {Function} emit (code, index, pattern, confidence, { appRef, access }) を呼ぶ
+     * @returns {Set<number>} ここで処理した配列リテラルの '[' 位置（名前ヒューリスティクスと二重に拾わないため）
+     */
+    function extractRestParamFieldRefs(s, decls, emit) {
+      const claimed = new Set();
+      const CONF_REST = 'MEDIUM';
+      const argUsage = collectCallArgIdentifiers(s);
+      const emitObjectKeys = (openIdx, pattern, appRef, skipKeys) => {
+        const rec = scanObjectProps(s, openIdx);
+        for (const rp of (rec ? rec.props : [])) {
+          if (skipKeys && skipKeys.test(rp.key)) continue;
+          emit(rp.key, rp.index, pattern, CONF_REST, { appRef, access: 'WRITE' });
+        }
+      };
+
+      // 括弧の入れ子を追い、'(' には呼び出し先、'{' にはオブジェクトリテラルかどうかを持たせる
+      const stack = [];
+      for (let i = 0; i < s.length; i++) {
+        const ch = s[i];
+        if (ch === '"' || ch === "'" || ch === '`') { i = readStringLiteral(s, i).end; continue; }
+        if (ch === '(') { stack.push({ ch, callee: calleeBefore(s, i), isObj: false }); continue; }
+        if (ch === '[') { stack.push({ ch, callee: null, isObj: false }); continue; }
+        if (ch === ')' || ch === ']' || ch === '}') { stack.pop(); continue; }
+        if (ch !== '{') continue;
+
+        // この '{' が呼び出し引数（の一部）かどうか：オブジェクト／配列の入れ子だけを遡って '(' を探す
+        //   client.record.getRecords({ app })            → 直上が '('
+        //   client.bulkRequest({ requests: [{ payload: { app } }] }) → '{' '[' '{' を経て '('
+        //   forEach(c => { const cfg = { app } })         → ブロック '{' で止まり、呼び出し引数とはみなさない
+        let callee = null;
+        for (let k = stack.length - 1; k >= 0; k--) {
+          const e = stack[k];
+          if (e.ch === '(') { callee = e.callee; break; }
+          if (e.ch === '[' || (e.ch === '{' && e.isObj)) continue;
+          break;
+        }
+        stack.push({ ch, callee: null, isObj: isObjectBrace(s, i) });
+
+        const obj = scanObjectProps(s, i);
+        if (!obj) continue;
+        const appProp = obj.props.find(p => p.key === 'app');
+        if (!appProp) continue;
+
+        // (b) 変数に入れてから渡している場合：渡し先が複数あれば REST API と認識できるものを優先する
+        if (!callee) {
+          const name = assignedNameBefore(s, i);
+          const callees = (name && argUsage.get(name)) || [];
+          callee = callees.find(isRestCallee) || callees[0] || null;
+        }
+        // ★依存の根拠にするのは、呼び出し先を kintone REST API と認識できる場合だけ
+        const restCall = isRestCallee(callee);
+        const appRef = Object.assign(
+          appProp.shorthand
+            ? resolveAppExpr('app', decls)
+            : resolveAppExpr(readValueExpr(s, appProp.valueStart), decls),
+          { restCall, callee: callee || null });
+        const tag = (appRef.kind === 'literal' ? `app: ${appRef.appId}`
+          : appRef.kind === 'self' ? 'app: 自アプリ'
+            : 'app: 変数（特定不可）')
+          + (!callee ? '・未呼出' : !restCall ? '・呼出先未確認' : '');
+
+        for (const p of obj.props) {
+          if (p.shorthand) continue;
+          if (p.key === 'fields' && s[p.valueStart] === '[') {
+            claimed.add(p.valueStart);
+            const arr = scanArrayLiteralItems(s, p.valueStart);
+            for (const it of (arr ? arr.items : [])) emit(it.value, it.index, `fields[…]（${tag}）`, CONF_REST, { appRef, access: 'READ' });
+          } else if (p.key === 'record' && s[p.valueStart] === '{') {
+            emitObjectKeys(p.valueStart, `record: {…}（${tag}）`, appRef, null);
+          } else if (p.key === 'records' && s[p.valueStart] === '[') {
+            for (const oi of scanArrayElementObjects(s, p.valueStart)) {
+              const el = scanObjectProps(s, oi);
+              if (!el) continue;
+              const inner = el.props.find(q => q.key === 'record' && !q.shorthand && s[q.valueStart] === '{');
+              if (inner) emitObjectKeys(inner.valueStart, `records[].record: {…}（${tag}）`, appRef, null);
+              else emitObjectKeys(oi, `records[]: {…}（${tag}）`, appRef, /^(id|updateKey|revision)$/);
+            }
+          }
+        }
+      }
+      return claimed;
+    }
+
     /**
      * JavaScript本文から「フィールドコードらしき文字列」を抽出する
-     * @returns {Array<{code, line, pattern, confidence, dynamic}>}
+     * @returns {Array<{code, line, pattern, confidence, dynamic, appRef, access}>}
      *   confidence: HIGH = kintone APIやrecord参照の引数（フィールドコード以外あり得ない）
      *               MEDIUM = フィールド系の変数・キーに入った配列リテラルの直下要素
      *   dynamic: テンプレートリテラルの ${...} を含み、実行時にしかコードが決まらない参照
+     *   appRef : REST APIパラメータ由来の場合の参照先アプリ（{kind:'literal'|'self'|'unknown', ...}）。それ以外は null
+     *   access : REST APIパラメータ由来の場合の用途（'READ' = fields で取得 / 'WRITE' = record で更新）。それ以外は null
      */
     function extractFieldCodeCandidates(cleanText, lineIndexFn) {
       const s = String(cleanText || '');
       const out = [];
-      const push = (code, index, pattern, confidence) => {
+      const push = (code, index, pattern, confidence, extra) => {
         if (!isPlausibleFieldCode(code)) return;
         const value = String(code).trim();
         out.push({
@@ -891,8 +1199,16 @@
           pattern, confidence,
           // ${...} を含む参照は静的にコードを確定できない（存在しないと断定してはいけない）
           dynamic: /\$\{/.test(value),
+          appRef: (extra && extra.appRef) || null,
+          access: (extra && extra.access) || null,
         });
       };
+
+      // 0) kintone REST API のパラメータ（{ app, fields / record / records }）
+      //    「どのアプリのフィールドか」を app の値から判定し、候補に appRef を付ける。
+      //    ここで処理した fields 配列は 5) の名前ヒューリスティクスでは二重に拾わない。
+      const decls = collectDeclarations(s);
+      const claimedArrays = extractRestParamFieldRefs(s, decls, push);
 
       // 1) kintone のフィールド操作API：第1引数はフィールドコード（またはグループコード）
       const rxApi = /\b(setFieldShown|setFieldValue|setFieldRequired|getFieldElements?|getSpaceElement|getHeaderMenuSpaceElement)\s*\(\s*['"`]([^'"`]+)['"`]/g;
@@ -943,11 +1259,155 @@
         const name = m[1];
         if (!/field/i.test(name)) continue;
         const openIdx = m.index + m[0].length - 1;
+        if (claimedArrays.has(openIdx)) continue; // 0) で app の文脈つきで処理済み
         const arr = scanArrayLiteralItems(s, openIdx);
         for (const it of (arr ? arr.items : [])) push(it.value, it.index, `${name}[…]`, 'MEDIUM');
       }
 
       return out;
+    }
+
+    // ==========================================
+    // 「存在しないフィールド参照」の集約（純粋なテキスト解析。Field Scanner から利用）
+    //   ここに置くことで、回帰テストから同じ経路をそのまま検証できる。
+    // ==========================================
+
+    // コメントは削除ではなく「同じ長さの空白」に置換する（文字オフセット・行番号を保ったまま解析するため）
+    function stripCommentsOnly(src) {
+      return String(src || '')
+        .replace(/\/\*[\s\S]*?\*\//g, (m) => m.replace(/[^\n]/g, ' '))
+        .replace(/(^|[^:\\])(\/\/.*)$/gm, (m, p1, p2) => p1 + ' '.repeat(p2.length));
+    }
+
+    // 行番号算出用：各行の先頭オフセット表（1ファイルにつき1回だけ作る）
+    function buildLineIndex(text) {
+      const starts = [0];
+      for (let i = 0; i < text.length; i++) {
+        if (text.charCodeAt(i) === 10) starts.push(i + 1);
+      }
+      return starts;
+    }
+    function lineAt(starts, idx) {
+      let lo = 0, hi = starts.length - 1;
+      while (lo < hi) {
+        const mid = (lo + hi + 1) >> 1;
+        if (starts[mid] <= idx) lo = mid; else hi = mid - 1;
+      }
+      return lo + 1; // 1始まり
+    }
+
+    // 比較用の正規化（大文字小文字・全角半角・記号の違いを吸収する）
+    function normalizeCode(s) {
+      return String(s || '')
+        .normalize('NFKC')          // 全角英数→半角など
+        .trim()
+        .toLowerCase()
+        .replace(/[\s　_\-]/g, ''); // 空白・アンダースコア・ハイフンを無視
+    }
+
+    /**
+     * 抽出した候補のうち、フィールド一覧に存在しないものを集約する
+     * @param {Array<{name,target,kind,text}>} files 解析対象ファイル
+     * @param {Array<{code}>} fields 自アプリのフィールド一覧
+     * @param {string[]} extraKnown 既知として扱う追加コード（依存関係データ側のフィールド等）
+     * @param {number|string} selfAppId 自アプリID。REST APIパラメータで別アプリが明示された参照を除外するために使う
+     * @returns {Array<{code, files:Array, confidence, count, patterns, nearMatch}>}
+     */
+    function collectUnknownFieldRefs(files, fields, extraKnown, selfAppId) {
+      const known = new Set((fields || []).map(f => f.code).filter(Boolean));
+      // 依存関係データ側が知っているフィールドも既知として扱う（多重防御）
+      for (const c of extraKnown || []) if (c) known.add(c);
+
+      // 正規化した既知コードの索引（「近い既知コード」を示すために使う）
+      const normIndex = new Map();
+      for (const c of known) {
+        const n = normalizeCode(c);
+        if (n && !normIndex.has(n)) normIndex.set(n, c);
+      }
+
+      const agg = new Map();
+
+      for (const f of files || []) {
+        if (f.kind !== 'js' || !f.text) continue;
+        const clean = stripCommentsOnly(f.text);
+        const li = buildLineIndex(clean);
+        for (const c of extractFieldCodeCandidates(clean, (i) => lineAt(li, i))) {
+          if (known.has(c.code)) continue;
+          // ${...} を含むテンプレートリテラルは、実行時にしかフィールドコードが決まらない。
+          // 静的解析では存在有無を判断できないため「存在しない」とは断定しない。
+          // （例: record[`品目${index}_株価計算`]）
+          if (c.dynamic) continue;
+          // REST APIパラメータで別アプリが明示されている参照（{ app: 1112, fields: [...] } 等）は
+          // そのアプリのフィールドであって自アプリのフィールドではないため、「存在しない参照」に含めない。
+          // app が変数などで特定できない場合は従来どおり候補に残す（断定はしない）。
+          if (c.appRef && c.appRef.kind === 'literal' && selfAppId != null
+            && String(c.appRef.appId) !== String(selfAppId)) continue;
+          let a = agg.get(c.code);
+          if (!a) {
+            a = { code: c.code, files: new Map(), confidence: 'MEDIUM', count: 0, patterns: new Set() };
+            agg.set(c.code, a);
+          }
+          a.count++;
+          a.patterns.add(c.pattern);
+          // 1つでもHIGHがあれば、そのコードはHIGH扱い（API引数は確実にフィールドコード）
+          if (c.confidence === 'HIGH') a.confidence = 'HIGH';
+          const key = `${f.target}:${f.name}`;
+          if (!a.files.has(key)) a.files.set(key, []);
+          const lines = a.files.get(key);
+          if (lines.length < 10 && !lines.includes(c.line)) lines.push(c.line);
+        }
+      }
+
+      return [...agg.values()]
+        .map(a => ({
+          code: a.code,
+          confidence: a.confidence,
+          count: a.count,
+          patterns: [...a.patterns],
+          // 表記ゆれで一致していないだけの可能性がある場合、その候補を示す
+          nearMatch: normIndex.get(normalizeCode(a.code)) || null,
+          // 行番号は昇順に並べる（検出順のままだと読みにくいため）
+          files: [...a.files.entries()].map(([name, lines]) => ({ name, lines: [...lines].sort((x, y) => x - y) })),
+        }))
+        .sort((a, b) =>
+          (a.confidence === b.confidence ? 0 : (a.confidence === 'HIGH' ? -1 : 1)) ||
+          String(a.code).localeCompare(String(b.code), 'ja')
+        );
+    }
+
+    /**
+     * REST APIパラメータで外部アプリが明示されているフィールド参照を集約する
+     *   { app: 1112, fields: ['A'] } → app 1112 の A を READ、record: { A } → WRITE
+     * 自アプリと同じIDが数値で書かれている場合は外部扱いにしない。
+     * 呼び出し先が kintone REST API と認識できる呼び出しの引数として渡されているもの（直接／変数経由）だけを対象にする。
+     * @returns {Array<{appId, code, access:'READ'|'WRITE', file, target, lines:number[], count, via:string|null}>}
+     */
+    function collectExternalFieldRefs(files, selfAppId) {
+      const agg = new Map();
+      for (const f of files || []) {
+        if (f.kind !== 'js' || !f.text) continue;
+        const clean = stripCommentsOnly(f.text);
+        const li = buildLineIndex(clean);
+        for (const c of extractFieldCodeCandidates(clean, (i) => lineAt(li, i))) {
+          if (c.dynamic || !c.appRef || c.appRef.kind !== 'literal') continue;
+          if (String(c.appRef.appId) === String(selfAppId)) continue;
+          // REST API と認識できる呼び出しに渡されていないもの（未使用の設定・独自関数への受け渡し）は、依存の根拠にしない
+          if (!c.appRef.restCall) continue;
+          const access = c.access === 'WRITE' ? 'WRITE' : 'READ';
+          const key = `${f.target}|${f.name}|${c.appRef.appId}|${c.code}|${access}`;
+          let a = agg.get(key);
+          if (!a) {
+            a = { appId: String(c.appRef.appId), code: c.code, access, file: f.name, target: f.target, lines: [], count: 0, via: c.appRef.callee || null };
+            agg.set(key, a);
+          }
+          a.count++;
+          if (a.lines.length < 10 && !a.lines.includes(c.line)) a.lines.push(c.line);
+        }
+      }
+      return [...agg.values()].sort((a, b) =>
+        String(a.appId).localeCompare(String(b.appId), 'ja', { numeric: true }) ||
+        String(a.code).localeCompare(String(b.code), 'ja') ||
+        a.access.localeCompare(b.access));
     }
 
     return {
@@ -957,6 +1417,9 @@
       CACHE_TTL_MS, ANALYZER_VERSION,
       // 純粋なテキスト解析（Field Scannerが利用。回帰テストの対象）
       isPlausibleFieldCode, extractFieldCodeCandidates, scanArrayLiteralItems,
+      scanObjectProps, resolveAppExpr, collectDeclarations, isRestCallee,
+      stripCommentsOnly, buildLineIndex, lineAt, normalizeCode,
+      collectUnknownFieldRefs, collectExternalFieldRefs,
     };
   })();
 
@@ -2518,6 +2981,26 @@
               : `JS内にアプリID記述（${[...a.kinds].join('/')}）`,
           },
           // リテラルでも「実際に呼ばれるか」までは判定できないため UNCERTAIN 止まり
+          confidence: CONF.UNCERTAIN,
+        });
+      }
+
+      // ★REST APIパラメータで外部アプリが明示されたフィールド参照（{ app: 1112, fields / record }）
+      //   自アプリのフィールドではないため EXTERNAL_FIELD（相手アプリ側のフィールド）として表現する。
+      //   ルックアップの参照キーと同じ形（context.appId）にしておくと、グラフでは接続先アプリノードに畳まれる。
+      for (const r of scan.externalRefs || []) {
+        if (!r || !r.appId || !r.code) continue;
+        addNodeTo(deps, 'APP', r.appId, `app ${r.appId}`, { self: false, viaJs: true });
+        deps.edges.push({
+          sourceType: 'CUSTOMIZE', sourceId: `${r.target}:js:${r.file}`, sourceName: r.file,
+          relationType: r.access === 'WRITE' ? REL.JS_WRITE : REL.JS_READ,
+          targetType: 'EXTERNAL_FIELD', targetId: `${r.appId}:${r.code}`, targetName: r.code,
+          context: {
+            settingType: 'JS_EXTERNAL_FIELD', settingName: r.file, target: r.target, appId: String(r.appId),
+            lines: r.lines || [], matchCount: r.count || 0,
+            note: `REST API${r.via ? `（${r.via}）` : ''}で app ${r.appId} の「${r.code}」を${r.access === 'WRITE' ? '更新' : '取得'}`,
+          },
+          // 静的解析による推定のため確定情報にはしない
           confidence: CONF.UNCERTAIN,
         });
       }
@@ -9761,13 +10244,8 @@
       }
 
       // ---- analyze ----
-      // ★改善：コメントは削除ではなく「同じ長さの空白」に置換する
-      //   （文字オフセット・行番号を保ったまま解析するため）
-      function stripCommentsOnly(src) {
-        return String(src || '')
-          .replace(/\/\*[\s\S]*?\*\//g, (m) => m.replace(/[^\n]/g, ' '))
-          .replace(/(^|[^:\\])(\/\/.*)$/gm, (m, p1, p2) => p1 + ' '.repeat(p2.length));
-      }
+      // ★コメント除去・行番号算出などの純粋な処理は KTScan 側に移設（回帰テストの対象）
+      const stripCommentsOnly = KTScan.stripCommentsOnly;
 
       /**
        * kintone.events.on(...) で登録されているイベント種別を抽出する
@@ -9817,22 +10295,9 @@
         ];
       }
 
-      // 行番号算出用：各行の先頭オフセット表（1ファイルにつき1回だけ作る）
-      function buildLineIndex(text) {
-        const starts = [0];
-        for (let i = 0; i < text.length; i++) {
-          if (text.charCodeAt(i) === 10) starts.push(i + 1);
-        }
-        return starts;
-      }
-      function lineAt(starts, idx) {
-        let lo = 0, hi = starts.length - 1;
-        while (lo < hi) {
-          const mid = (lo + hi + 1) >> 1;
-          if (starts[mid] <= idx) lo = mid; else hi = mid - 1;
-        }
-        return lo + 1; // 1始まり
-      }
+      // 行番号算出用（実体は KTScan 側）
+      const buildLineIndex = KTScan.buildLineIndex;
+      const lineAt = KTScan.lineAt;
 
       // ---- 未知フィールドコードの検出 ----
       // Field Scanner の通常解析は「既知のフィールドコードを探す」方式のため、
@@ -9958,75 +10423,9 @@
           .sort((a, b) => String(a.value).localeCompare(String(b.value), 'ja'));
       }
 
-      /**
-       * 抽出した候補のうち、フィールド一覧に存在しないものを集約する
-       * @returns {Array<{code, files:Array, confidence, count}>}
-       */
-      // 比較用の正規化（大文字小文字・全角半角・記号の違いを吸収する）
-      function normalizeCode(s) {
-        return String(s || '')
-          .normalize('NFKC')          // 全角英数→半角など
-          .trim()
-          .toLowerCase()
-          .replace(/[\s\u3000_\-]/g, ''); // 空白・アンダースコア・ハイフンを無視
-      }
-
-      function collectUnknownFieldRefs(files, fields, extraKnown) {
-        const known = new Set((fields || []).map(f => f.code).filter(Boolean));
-        // 依存関係データ側が知っているフィールドも既知として扱う（多重防御）
-        for (const c of extraKnown || []) if (c) known.add(c);
-
-        // 正規化した既知コードの索引（「近い既知コード」を示すために使う）
-        const normIndex = new Map();
-        for (const c of known) {
-          const n = normalizeCode(c);
-          if (n && !normIndex.has(n)) normIndex.set(n, c);
-        }
-
-        const agg = new Map();
-
-        for (const f of files || []) {
-          if (f.kind !== 'js' || !f.text) continue;
-          const clean = stripCommentsOnly(f.text);
-          const li = buildLineIndex(clean);
-          for (const c of extractFieldCodeCandidates(clean, (i) => lineAt(li, i))) {
-            if (known.has(c.code)) continue;
-            // ${...} を含むテンプレートリテラルは、実行時にしかフィールドコードが決まらない。
-            // 静的解析では存在有無を判断できないため「存在しない」とは断定しない。
-            // （例: record[`品目${index}_株価計算`]）
-            if (c.dynamic) continue;
-            let a = agg.get(c.code);
-            if (!a) {
-              a = { code: c.code, files: new Map(), confidence: 'MEDIUM', count: 0, patterns: new Set() };
-              agg.set(c.code, a);
-            }
-            a.count++;
-            a.patterns.add(c.pattern);
-            // 1つでもHIGHがあれば、そのコードはHIGH扱い（API引数は確実にフィールドコード）
-            if (c.confidence === 'HIGH') a.confidence = 'HIGH';
-            const key = `${f.target}:${f.name}`;
-            if (!a.files.has(key)) a.files.set(key, []);
-            const lines = a.files.get(key);
-            if (lines.length < 10 && !lines.includes(c.line)) lines.push(c.line);
-          }
-        }
-
-        return [...agg.values()]
-          .map(a => ({
-            code: a.code,
-            confidence: a.confidence,
-            count: a.count,
-            patterns: [...a.patterns],
-            // 表記ゆれで一致していないだけの可能性がある場合、その候補を示す
-            nearMatch: normIndex.get(normalizeCode(a.code)) || null,
-            // 行番号は昇順に並べる（検出順のままだと読みにくいため）
-            files: [...a.files.entries()].map(([name, lines]) => ({ name, lines: [...lines].sort((x, y) => x - y) })),
-          }))
-          .sort((a, b) =>
-            (a.confidence === b.confidence ? 0 : (a.confidence === 'HIGH' ? -1 : 1)) ||
-            String(a.code).localeCompare(String(b.code), 'ja')
-          );
-      }
+      // 「存在しないフィールド参照」「外部アプリのフィールド参照」の集約（実体は KTScan 側）
+      const collectUnknownFieldRefs = KTScan.collectUnknownFieldRefs;
+      const collectExternalFieldRefs = KTScan.collectExternalFieldRefs;
 
       // パターン種別付きの正規表現を作る
       //   ELEMENT: getFieldElement(s)('code') / BRACKET: ['code'] / QUOTED: 'code' / BARE: 裸の識別子
@@ -10210,6 +10609,7 @@
         const results = payload?.results || [];
         const files = payload?.files || [];
         const appRefs = payload?.appRefs || [];
+        const externalRefs = payload?.externalRefs || [];
         const fileEvents = payload?.fileEvents || {};
 
         if (!files.length) {
@@ -10246,6 +10646,16 @@
           if (!ae) { ae = { appId: id, lines: [], kinds: new Set() }; entry.apps.set(id, ae); }
           if (ae.lines.length < 10) ae.lines.push(ref.line);
           ae.kinds.add(ref.kind);
+        }
+        // REST APIで触っている外部アプリのフィールド（app ノードの下に並べる）
+        for (const r of externalRefs) {
+          const entry = byFile.get(keyOf(r.target, 'js', r.file));
+          if (!entry) continue;
+          let ae = entry.apps.get(r.appId);
+          if (!ae) { ae = { appId: r.appId, lines: [], kinds: new Set() }; entry.apps.set(r.appId, ae); }
+          if (!ae.fields) ae.fields = new Map();
+          const k = `${r.code}|${r.access}`;
+          if (!ae.fields.has(k)) ae.fields.set(k, { code: r.code, access: r.access, lines: r.lines || [] });
         }
 
         // アクセス種別の表示順（読み書きを先に出す）
@@ -10300,8 +10710,13 @@
               const link = isUnknown
                 ? escapeHtml(label)
                 : `<a href="${escapeHtml(KTApi.appUrl(a.appId))}" target="_blank" rel="noopener noreferrer" style="color:inherit">${escapeHtml(label)} 🔗</a>`;
+              const ext = a.fields ? [...a.fields.values()] : [];
+              const extHtml = ext.length
+                ? `<div style="padding:0 0 2px 14px;font-size:11px;opacity:.85">${ext.map(x =>
+                  `<code>${escapeHtml(x.code)}</code><span style="opacity:.7">（${x.access === 'WRITE' ? '更新' : '取得'}）</span>`).join('　')}</div>`
+                : '';
               return `<div style="padding:2px 0">${link}
-                        <span style="opacity:.6;font-size:11px">${escapeHtml(linesText(a.lines))}</span></div>`;
+                        <span style="opacity:.6;font-size:11px">${escapeHtml(linesText(a.lines))}</span></div>${extHtml}`;
             }).join('')
             : '<span style="opacity:.7">検出なし</span>';
 
@@ -10358,12 +10773,14 @@
         const usedCount = results.filter(r => r.used).length;
         const appRefCount = new Set((payload.appRefs || []).map(r => r.appId || 'UNKNOWN')).size;
         const unknownCount = (payload.unknownRefs || []).length;
+        const externalCount = (payload.externalRefs || []).length;
         const src = fromCache
           ? `キャッシュ（${new Date(payload.meta?.scannedAt || Date.now()).toLocaleString()}）`
           : `${elapsedSec}s`;
         $meta.textContent = `files: ${(payload.files || []).length}`
           + ` / fields: ${(payload.fields || []).length} / used: ${usedCount}`
-          + ` / appRefs: ${appRefCount} / 未知コード: ${unknownCount} / ${src}`
+          + ` / appRefs: ${appRefCount} / 未知コード: ${unknownCount}`
+          + (externalCount ? ` / 外部フィールド: ${externalCount}` : '') + ` / ${src}`
           + (merged ? ' ｜ 依存データへ反映済み' : '');
 
         // サイレント実行でも表示を更新しておく（タブを開いたときに結果が見える状態にする）
@@ -10427,14 +10844,16 @@
         const depsKnown = (deps?.nodes || [])
           .filter(n => n.type === 'FIELD')
           .map(n => String(n.id).replace(/^FIELD:/, ''));
-        const unknownRefs = collectUnknownFieldRefs(files, fields, depsKnown);
+        const unknownRefs = collectUnknownFieldRefs(files, fields, depsKnown, appId);
+        // REST APIパラメータで別アプリが明示されたフィールド参照（{ app: 1112, fields / record }）
+        const externalRefs = collectExternalFieldRefs(files, appId);
         // 存在しないステータス名との比較も検出する（プロセス管理が有効な場合のみ）
         const unknownStatuses = collectUnknownStatusRefs(
           files, deps?.meta?.statusStates, deps?.meta?.statusFieldCodes);
 
         const scannedAt = new Date().toISOString();
         const payload = {
-          results, files, fields, appRefs, fileEvents, unknownRefs, unknownStatuses,
+          results, files, fields, appRefs, fileEvents, unknownRefs, unknownStatuses, externalRefs,
           meta: { appId, include, kinds, scannedAt },
         };
 
@@ -10451,7 +10870,7 @@
           samples: r.samples, matches: r.matches,
         }));
         KTScan.saveCache(appId, signature, {
-          payload: { results: slimResults, files: slimFiles, fields, appRefs, fileEvents, unknownRefs, unknownStatuses, meta: payload.meta },
+          payload: { results: slimResults, files: slimFiles, fields, appRefs, fileEvents, unknownRefs, unknownStatuses, externalRefs, meta: payload.meta },
         });
 
         return { fromCache: false, scannedAt };
