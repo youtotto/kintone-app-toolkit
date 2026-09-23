@@ -1431,7 +1431,10 @@
   //    結果はキャッシュする（自動実行はしない）。
   // ==========================================
   const KTIncoming = (() => {
-    const CACHE_PREFIX = 'ktIncoming.v1.';
+    // v2: ルックアップ行に「ほかのフィールドのコピー」のコピー元（copyFields）を持つ。
+    //     v1 の結果はコピー元を持たないため読まずに破棄し、再走査で最新形式にする。
+    const CACHE_PREFIX = 'ktIncoming.v2.';
+    const LEGACY_CACHE_PREFIXES = ['ktIncoming.v1.'];
     const CACHE_TTL_MS = 24 * 60 * 60 * 1000; // 24時間
     const CONCURRENCY = 5;                    // 同時実行数（サーバ負荷を抑える）
     const MAX_APPS = 500;                     // 走査対象の上限（超過時は警告して打ち切る）
@@ -1441,6 +1444,7 @@
 
     function loadCache(appId) {
       try {
+        for (const p of LEGACY_CACHE_PREFIXES) localStorage.removeItem(`${p}${appId}`);
         const raw = localStorage.getItem(cacheKey(appId));
         if (!raw) return null;
         const c = JSON.parse(raw);
@@ -1489,13 +1493,24 @@
 
       const pushField = (f, parentCode) => {
         // ルックアップ：このアプリを参照している
+        //   参照キー（relatedKeyField）に加えて、「ほかのフィールドのコピー」のコピー元もこのアプリ側のフィールド。
+        //   kintone のレスポンスは relatedField=コピー元（このアプリ側）, field=コピー先（相手アプリ側）。
+        //   コピー先は相手アプリのフィールドなので、このアプリの項目としては扱わない。
         if (f?.lookup?.relatedApp?.app != null && String(f.lookup.relatedApp.app) === self) {
+          const maps = Array.isArray(f.lookup.fieldMappings) ? f.lookup.fieldMappings : [];
+          const copyFields = [];
+          for (const m of maps) {
+            const from = m?.relatedField?.code ?? m?.relatedField ?? null;
+            const to = m?.field?.code ?? m?.field ?? null;
+            if (from) copyFields.push({ from: String(from), to: to ? String(to) : '' });
+          }
           rows.push({
             appId: String(app.appId), appName: app.name || '',
             kind: 'ルックアップ',
             sourceField: f.code, sourceLabel: f.label || f.code,
             targetField: f.lookup.relatedKeyField || '',
-            note: `${(f.lookup.fieldMappings || []).length}項目を取得${parentCode ? `／テーブル ${parentCode} 内` : ''}`,
+            copyFields,
+            note: `${maps.length}項目を取得${parentCode ? `／テーブル ${parentCode} 内` : ''}`,
           });
         }
         // 関連レコード一覧：このアプリのレコードを表示している
@@ -1601,7 +1616,7 @@
       return { ...data, fromCache: false };
     }
 
-    return { run, loadCache, clearCache, CACHE_TTL_MS, MAX_APPS };
+    return { run, analyzeApp, loadCache, clearCache, CACHE_TTL_MS, MAX_APPS };
   })();
 
   // ==========================================
@@ -2156,7 +2171,7 @@
     //   個別の設定名・確度・行番号は「変更影響」で確認する。
     const USAGE_CATEGORY_ORDER = [
       '一覧', 'グラフ', '通知', 'プロセス管理', 'アクセス権',
-      'ルックアップ', '関連レコード', 'アプリアクション', '計算式', 'JavaScript',
+      'ルックアップ', '関連レコード', 'アプリアクション', '計算式', 'JavaScript', '他アプリ',
     ];
 
     /** エッジ1本から、使用箇所サマリのカテゴリ名を求める */
@@ -2172,6 +2187,7 @@
         VIEW: '一覧', REPORT: 'グラフ', NOTIFICATION: '通知',
         PROCESS_STATE: 'プロセス管理', PROCESS_ACTION: 'プロセス管理',
         ACL: 'アクセス権', ACTION: 'アプリアクション', CUSTOMIZE: 'JavaScript',
+        EXTERNAL_APP: '他アプリ',
       };
       return map[edge.sourceType] || edge.sourceType;
     }
@@ -2446,13 +2462,20 @@
           ? `イベント: ${evs.slice(0, 3).map(v => v.direct ? v.name : `${v.name}?`).join(', ')}${evs.length > 3 ? ` ほか${evs.length - 3}件` : ''}`
           : '';
         const baseNote = lineNote(e.context);
+        // 他アプリからの参照は、相手アプリのどの設定のどの役割かを添える（例: ルックアップ「商品」の参照キー）
+        const inNote = (e.sourceType === 'EXTERNAL_APP')
+          ? [
+            (e.context?.kind && e.context?.settingName) ? `${e.context.kind}「${e.context.settingName}」` : '',
+            e.context?.role || '',
+          ].filter(Boolean).join('の')
+          : '';
 
         direct.push({
           category,
           title,
           role: relLabel(e.relationType),
           confidence: e.confidence,
-          note: [baseNote, evNote].filter(Boolean).join(' / '),
+          note: [baseNote, evNote, inNote].filter(Boolean).join(' / '),
           sourceType: e.sourceType,
           relationType: e.relationType,
         });
@@ -2517,7 +2540,9 @@
         if (e.relationType === REL.REFERENCED_BY && e.targetId === fieldCode) {
           const kind = e.context?.kind || '参照';
           const via = e.context?.settingName ? `「${e.context.settingName}」` : '';
-          pushCross(`${e.sourceName} の${kind}${via}から参照されている`, e.confidence, e.context?.note || '');
+          // 役割（参照キー／コピー元／転記先）が分かる場合は文中に入れる
+          const how = e.context?.role ? `の${e.context.role}として` : 'から';
+          pushCross(`${e.sourceName} の${kind}${via}${how}参照されている`, e.confidence, e.context?.note || '');
         }
         // アプリアクションの転記元になっている
         if (e.relationType === REL.ACTION_MAPS_FROM && e.targetId === fieldCode) {
@@ -2600,7 +2625,8 @@
       const del = [];
       const totalUse = direct.length + indirect.length + crossApp.length;
       if (totalUse) {
-        del.push(`直接 ${direct.length} 件／間接 ${indirect.length} 件／他アプリ ${crossApp.length} 件から参照されています。削除するとこれらの設定から取り除かれます。`);
+        // 件数はいずれも「設定（依存関係）の件数」。他アプリ連携は参照元アプリ数ではなく連携の件数
+        del.push(`直接 ${direct.length} 件／間接 ${indirect.length} 件／他アプリ連携 ${crossApp.length} 件の設定から参照されています。削除するとこれらの設定から取り除かれます。`);
       } else {
         del.push('解析範囲内では利用箇所が見つかりませんでした（解析対象外の設定で使われている可能性はあります）。');
       }
@@ -2671,13 +2697,32 @@
       );
 
       for (const r of rows) {
-        // このアプリ側のどのフィールドが参照されているか（複数転記の場合は展開する）
-        const targets = Array.isArray(r.destFields) && r.destFields.length
-          ? r.destFields
-          : (r.targetField ? [r.targetField] : []);
-        if (!targets.length) continue;
+        // このアプリ側のどのフィールドが参照されているか（役割ごとに集め、同じフィールドは1本のエッジにまとめる）
+        //   - アプリアクション: destFields（転記先。複数なら展開する）
+        //   - ルックアップ:     targetField（参照キー）＋ copyFields[].from（「ほかのフィールドのコピー」のコピー元）
+        //   - 関連レコード:     targetField（突合に使うこのアプリ側のフィールド）
+        const targets = new Map(); // code -> { roles: string[], notes: string[] }
+        const addTarget = (code, role, note) => {
+          const c = String(code ?? '').trim();
+          if (!c) return;
+          const t = targets.get(c) || { roles: [], notes: [] };
+          if (role && !t.roles.includes(role)) t.roles.push(role);
+          if (note && !t.notes.includes(note)) t.notes.push(note);
+          targets.set(c, t);
+        };
+        if (Array.isArray(r.destFields) && r.destFields.length) {
+          r.destFields.forEach(code => addTarget(code, '転記先', r.note || ''));
+        } else if (r.targetField) {
+          addTarget(r.targetField, r.kind === 'ルックアップ' ? '参照キー' : '', r.note || '');
+        }
+        for (const cf of (Array.isArray(r.copyFields) ? r.copyFields : [])) {
+          const from = (cf && typeof cf === 'object') ? cf.from : cf;
+          const to = (cf && typeof cf === 'object') ? (cf.to || '') : '';
+          addTarget(from, 'コピー元', to ? `「${to}」へコピー` : '');
+        }
+        if (!targets.size) continue;
 
-        for (const code of targets) {
+        for (const [code, t] of targets) {
           addNodeTo(deps, 'EXTERNAL_APP', r.appId, `app ${r.appId} ${r.appName || ''}`.trim());
           deps.edges.push({
             sourceType: 'EXTERNAL_APP', sourceId: r.appId,
@@ -2686,7 +2731,9 @@
             targetType: 'FIELD', targetId: code, targetName: code2label.get(code) || code,
             context: {
               settingType: `INCOMING_${r.kind}`, settingName: r.sourceLabel || r.sourceField,
-              kind: r.kind, note: r.note || '',
+              kind: r.kind,
+              role: t.roles.join('・'),   // 参照キー／コピー元／転記先（複数の役割は「・」で連結）
+              note: t.notes.join('／'),
             },
             confidence: CONF.CERTAIN,
           });
@@ -5326,7 +5373,7 @@
               num.style.opacity = '.6';
               num.title = '利用箇所が検出されませんでした（解析対象外の設定で使われている可能性はあります）';
             } else {
-              num.title = `直接 ${cnt} 件 / 間接 ${impact.counts.indirect} 件 / 他アプリ ${impact.counts.crossApp} 件`;
+              num.title = `直接 ${cnt} 件 / 間接 ${impact.counts.indirect} 件 / 他アプリ連携 ${impact.counts.crossApp} 件`;
             }
             usageCell.appendChild(num);
 
@@ -5731,7 +5778,7 @@
     if (!total && !cautions.length && !(impact.operations || []).length) return '';
 
     const summary = total
-      ? `変更・削除時の影響候補：直接 ${counts.direct} 件／間接 ${counts.indirect} 件／他アプリ ${counts.crossApp} 件`
+      ? `変更・削除時の影響候補：直接 ${counts.direct} 件／間接 ${counts.indirect} 件／他アプリ連携 ${counts.crossApp} 件`
       : '変更・削除時の影響候補：検出なし';
 
     return `
@@ -6443,7 +6490,7 @@
    * 「他アプリからの参照」セクションの動作を組み立てる
    * 走査はユーザーがボタンを押したときだけ実行し、結果はキャッシュから復元する。
    */
-  function bindIncoming(view, appId, deps) {
+  function bindIncoming(view, appId, deps, onUpdated = null) {
     const $scan = view.querySelector('#kt-in-scan');
     const $status = view.querySelector('#kt-in-status');
     const $result = view.querySelector('#kt-in-result');
@@ -6466,6 +6513,17 @@
 
       if ($status) $status.textContent = `${summary}${when ? `（${fromCache ? 'キャッシュ ' : ''}${when}）` : ''}`;
 
+      // 「このアプリの項目」：参照キー（またはアクションの転記先）に加えて、ルックアップのコピー元も並べる
+      const itemsOf = (r) => {
+        const out = [];
+        if (r.targetField) out.push({ code: r.targetField, role: r.kind === 'ルックアップ' ? '参照キー' : '' });
+        for (const cf of (Array.isArray(r.copyFields) ? r.copyFields : [])) {
+          const from = (cf && typeof cf === 'object') ? cf.from : cf;
+          if (from) out.push({ code: String(from), role: 'コピー元' });
+        }
+        return out;
+      };
+
       if (!rows.length) {
         $result.innerHTML = `
           <div style="padding:10px;font-size:12px;opacity:.85">
@@ -6483,7 +6541,8 @@
           </td>
           <td style="padding:5px 7px;border-bottom:1px solid ${BD};white-space:nowrap">${escapeHtml(r.kind)}</td>
           <td style="padding:5px 7px;border-bottom:1px solid ${BD}">${escapeHtml(r.sourceLabel || r.sourceField)}</td>
-          <td style="padding:5px 7px;border-bottom:1px solid ${BD}"><code>${escapeHtml(r.targetField || '—')}</code></td>
+          <td style="padding:5px 7px;border-bottom:1px solid ${BD}">${itemsOf(r).map(it =>
+            `<code>${escapeHtml(it.code)}</code>${it.role ? `<span style="font-size:11px;opacity:.75">（${escapeHtml(it.role)}）</span>` : ''}`).join('<br>') || '—'}</td>
           <td style="padding:5px 7px;border-bottom:1px solid ${BD};font-size:11px;opacity:.85">${escapeHtml(r.note || '')}</td>
         </tr>`).join('');
 
@@ -6519,7 +6578,7 @@
           '',
           '| 参照元アプリ | 種別 | 参照元の設定 | このアプリの項目 | 備考 |',
           '| --- | --- | --- | --- | --- |',
-          ...rows.map(r => `| app ${r.appId} ${r.appName || ''} | ${r.kind} | ${r.sourceLabel || r.sourceField} | \`${r.targetField || ''}\` | ${r.note || ''} |`),
+          ...rows.map(r => `| app ${r.appId} ${r.appName || ''} | ${r.kind} | ${r.sourceLabel || r.sourceField} | ${itemsOf(r).map(it => `\`${it.code}\`${it.role ? `（${it.role}）` : ''}`).join('／')} | ${r.note || ''} |`),
         ].join('\n');
         try {
           await navigator.clipboard.writeText(md);
@@ -6556,7 +6615,12 @@
         render(data, false);
         // 依存関係データへ取り込み、変更影響の「他アプリ連携」にも反映する
         if (deps) {
-          try { KTDeps.applyIncomingRefs(deps, data); } catch (e) { console.error(e); }
+          let applied = false;
+          try { KTDeps.applyIncomingRefs(deps, data); applied = true; } catch (e) { console.error(e); }
+          // 依存関係データを共有している他のタブ（Fields の利用数・変更影響）を再計算させる
+          if (applied && typeof onUpdated === 'function') {
+            try { onUpdated(); } catch (e) { console.error('[KTIncoming] 走査結果の反映に失敗しました', e); }
+          }
         }
       } catch (e) {
         console.error('[KTIncoming] 走査に失敗しました', e);
@@ -7089,8 +7153,10 @@
    * @param {{lookups?:Array, relatedTables?:Array, actions?:Array}} relations buildRelations の結果
    * @param {number|string} appId 対象アプリのID
    * @param {object} deps 依存関係データ（アプリ間依存一覧の生成に使用。無くても従来3セクションは動作する）
+   * @param {object} [opt]
+   * @param {function} [opt.onDepsUpdated] 「他アプリからの参照」の走査で deps が更新された後に呼ぶ（Fields などの再計算用）
    */
-  function renderRelations(root, relations, appId, deps = null) {
+  function renderRelations(root, relations, appId, deps = null, { onDepsUpdated = null } = {}) {
     const view = root.querySelector('#view-relations');
     if (!view) return;
 
@@ -7352,7 +7418,7 @@
     // まとめて描画 & バインド
     view.innerHTML = `${relStyle}${secAL}${secIN}${secDivider}${secLU}${secRT}${secAC}`;
     bindAL(view); bindLU(view); bindRT(view); bindAC(view);
-    bindIncoming(view, appId, deps);
+    bindIncoming(view, appId, deps, onDepsUpdated);
 
     // 詳細セクションの共通フィルター
     bindRelFilter(view, 'lookup');
@@ -11323,6 +11389,29 @@
       console.error('[KTDeps] 依存関係解析に失敗しました（既存表示にフォールバック）', e);
     }
 
+    // ★他アプリからの参照（Relationsタブの走査結果。24時間キャッシュ）は、初回描画の前に依存関係データへ取り込む。
+    //   従来は Relations タブの描画時（Fields の描画後）に取り込んでいたため、Fields の変更影響は
+    //   JS自動解析による再描画が起きるまで走査結果を含まなかった。走査そのものは自動実行しない。
+    if (DEPS) {
+      try {
+        const cachedIncoming = KTIncoming.loadCache(String(appId));
+        if (cachedIncoming) KTDeps.applyIncomingRefs(DEPS, cachedIncoming);
+      } catch (e) {
+        console.error('[KTIncoming] 走査結果の取り込みに失敗しました（未走査として続行します）', e);
+      }
+    }
+
+    // ★依存関係データ（DEPS）は各タブで共有する単一のオブジェクト。
+    //   Fields は描画時に利用数・変更影響を算出するため、DEPS が更新されたら再描画で再計算する。
+    //   （更新契機：参照先アプリ名の解決／JS解析の完了／他アプリからの参照の走査完了）
+    const rerenderFields = () =>
+      renderFields(root, { ...pick(DATA, ['appId', 'fields', 'layout']), usageData: DATA, deps: DEPS });
+    const rerenderRelations = () =>
+      renderRelations(root, relations, appId, DEPS, {
+        // 「他アプリからの参照」の走査完了後、Fields の利用数・変更影響・未走査の注意書きを最新にする
+        onDepsUpdated: rerenderFields,
+      });
+
     // ★参照先アプリ名の解決
     //   /k/v1/apps.json は複数アプリを1回で取得できるうえ、結果は24時間キャッシュされるため、
     //   API呼び出しは通常1回、再訪時は0回で済む。
@@ -11345,8 +11434,8 @@
 
         if (rerender) {
           // アプリ名を反映して再描画（Relations＝アプリ間依存、Fields＝変更影響の他アプリ連携）
-          renderRelations(root, relations, appId, DEPS);
-          renderFields(root, { ...pick(DATA, ['appId', 'fields', 'layout']), usageData: DATA, deps: DEPS });
+          rerenderRelations();
+          rerenderFields();
         }
         return true;
       } catch (e) {
@@ -11366,10 +11455,10 @@
       // 設定の整合性チェック（存在しないフィールド参照の検出）に使用する
       deps: DEPS,
     });
-    renderFields(root, { ...pick(DATA, ['appId', 'fields', 'layout']), usageData: DATA, deps: DEPS });
+    rerenderFields();
     renderViews(root, pick(DATA, ['appId', 'views', 'fields']));
     renderGraphs(root, pick(DATA, ['appId', 'reports', 'fields']));
-    renderRelations(root, relations, appId, DEPS);
+    rerenderRelations();
     renderDepsGraph(root, DEPS, appId, FIELDS_N);
     renderNotifications(root, pick(DATA, [
       'appId',
@@ -11390,8 +11479,8 @@
       deps: DEPS,
       // ★Scan実行後、JS由来の依存（フィールド利用・アプリID参照）を Fields / Relations に反映する
       onDepsUpdated: () => {
-        renderFields(root, { ...pick(DATA, ['appId', 'fields', 'layout']), usageData: DATA, deps: DEPS });
-        renderRelations(root, relations, appId, DEPS);
+        rerenderFields();
+        rerenderRelations();
         // ★Healthタブの整合性チェックも更新する（JS内の未知コードは解析後に判明するため）
         //   Healthタブ全体を描き直すとステータス分布のレコード取得が再実行されるので、
         //   該当ブロックだけを更新する
