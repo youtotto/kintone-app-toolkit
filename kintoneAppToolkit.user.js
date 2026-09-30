@@ -1636,6 +1636,7 @@
       NOTIFY_TARGET: 'NOTIFY_TARGET',       // 通知先（フィールド指定）
       REMINDER_TIMING: 'REMINDER_TIMING',   // リマインダー基準日時
       ASSIGNS_BY: 'ASSIGNS_BY',             // プロセス管理の作業者（フィールド指定）
+      EXECUTABLE_BY: 'EXECUTABLE_BY',       // プロセス管理の「作業者以外でも実行できるアクション」の実行可能ユーザー（フィールド指定）
       LOOKUP_KEY: 'LOOKUP_KEY',             // ルックアップの参照キー（相手アプリ側）
       LOOKUP_COPY_TO: 'LOOKUP_COPY_TO',     // ルックアップのコピー先（自アプリ側）
       LOOKUP_PICKER: 'LOOKUP_PICKER',       // ルックアップのピッカー表示（相手アプリ側）
@@ -1659,6 +1660,20 @@
       UNCERTAIN: 'UNCERTAIN',       // 文字列一致のみ（要確認）
       NOT_ANALYZED: 'NOT_ANALYZED', // 解析対象外（外部URLのJS等）
     };
+
+    // ---- kintone API の entity.type（通知先・作業者・アクセス権の対象の指定形式）----
+    //   USER / GROUP / ORGANIZATION : ユーザー・グループ・組織
+    //   FIELD_ENTITY                : 「フォームのフィールドを追加」で指定したフィールド（entity.code = フィールドコード）
+    //   CREATOR / CUSTOM_FIELD      : アプリ作成者（code は null）／cybozu.com共通管理のカスタマイズ項目
+    //   このうちフィールドへの依存になるのは FIELD_ENTITY だけ。
+    // ★'FIELD' は依存関係データ（内部モデル）のノード種別と、アプリアクションの mappings[].srcType の値であり、
+    //   entity.type の値ではない。APIの語彙を内部モデルの語彙と取り違えないよう、判定はここに集約する。
+    const ENTITY_TYPE_FIELD = 'FIELD_ENTITY';
+
+    /** entity（{ type, code }）がフィールド指定なら、そのフィールドコードを返す（それ以外は null） */
+    function entityFieldCode(entity) {
+      return (entity && entity.type === ENTITY_TYPE_FIELD && entity.code) ? entity.code : null;
+    }
 
     // ================= Normalized Data =================
 
@@ -1877,6 +1892,10 @@
           confidence: missing ? CONF.UNCERTAIN : confidence,
         });
       };
+      // 通知先・作業者・アクセス権の対象（entity）がフィールド指定のとき、そのフィールドへのエッジを作る。
+      // ユーザー・グループ・組織などの指定はフィールドへの依存ではないため、エッジにしない。
+      const entityEdge = (src, relationType, entity, settingType, settingName) =>
+        fieldEdge(src, relationType, entityFieldCode(entity), settingType, settingName);
 
       // ---- 1) 一覧（views） ----
       for (const v of Object.values(DATA?.views?.views || {})) {
@@ -1923,17 +1942,21 @@
       }
 
       // ---- 3) 通知 ----
-      // アプリ条件通知（perRecord）
+      // アプリの条件通知（general）：通知先ごとの設定。通知先がフィールド指定の行だけがフィールドへの依存になる
+      const generalNotifs = DATA?.generalNotify?.notifications || [];
+      if (generalNotifs.length) {
+        const name = 'アプリの条件通知';
+        const src = { sourceType: 'NOTIFICATION', sourceId: 'general', sourceName: name };
+        addNode('NOTIFICATION', src.sourceId, name, { kind: 'general' });
+        generalNotifs.forEach(n => entityEdge(src, REL.NOTIFY_TARGET, n?.entity, 'GENERAL_NOTIFY_TARGET', name));
+      }
+      // レコードの条件通知（perRecord）
       (DATA?.perRecordNotify?.notifications || []).forEach((n, i) => {
         const name = n?.title || `条件通知#${i + 1}`;
         const src = { sourceType: 'NOTIFICATION', sourceId: `perRecord:${i}`, sourceName: name };
         addNode('NOTIFICATION', src.sourceId, name, { kind: 'perRecord' });
         edgesFromCond(n?.filterCond, src, REL.FILTERS_BY, 'NOTIFY_CONDITION', name);
-        (n?.targets || []).forEach(t => {
-          if (t?.entity?.type === 'FIELD') {
-            fieldEdge(src, REL.NOTIFY_TARGET, t.entity.code, 'NOTIFY_TARGET', name);
-          }
-        });
+        (n?.targets || []).forEach(t => entityEdge(src, REL.NOTIFY_TARGET, t?.entity, 'NOTIFY_TARGET', name));
       });
       // リマインダー通知
       (DATA?.reminderNotify?.notifications || []).forEach((n, i) => {
@@ -1942,11 +1965,7 @@
         addNode('NOTIFICATION', src.sourceId, name, { kind: 'reminder' });
         fieldEdge(src, REL.REMINDER_TIMING, n?.timing?.code, 'REMINDER_TIMING', name);
         edgesFromCond(n?.filterCond, src, REL.FILTERS_BY, 'REMINDER_CONDITION', name);
-        (n?.targets || []).forEach(t => {
-          if (t?.entity?.type === 'FIELD') {
-            fieldEdge(src, REL.NOTIFY_TARGET, t.entity.code, 'REMINDER_TARGET', name);
-          }
-        });
+        (n?.targets || []).forEach(t => entityEdge(src, REL.NOTIFY_TARGET, t?.entity, 'REMINDER_TARGET', name));
       });
 
       // ---- 4) プロセス管理（status） ----
@@ -1955,44 +1974,35 @@
           const name = st?.name || '';
           const src = { sourceType: 'PROCESS_STATE', sourceId: name, sourceName: name };
           addNode('PROCESS_STATE', name, name);
-          (st?.assignee?.entities || []).forEach(e => {
-            if (e?.entity?.type === 'FIELD') {
-              fieldEdge(src, REL.ASSIGNS_BY, e.entity.code, 'PROCESS_ASSIGNEE', name);
-            }
-          });
+          (st?.assignee?.entities || []).forEach(e => entityEdge(src, REL.ASSIGNS_BY, e?.entity, 'PROCESS_ASSIGNEE', name));
         });
         (DATA.status.actions || []).forEach((a, i) => {
           const name = a?.name || `アクション#${i + 1}`;
           const src = { sourceType: 'PROCESS_ACTION', sourceId: `${name}:${i}`, sourceName: name };
           addNode('PROCESS_ACTION', src.sourceId, name);
           edgesFromCond(a?.filterCond, src, REL.FILTERS_BY, 'PROCESS_CONDITION', name);
+          // 「作業者以外でも実行できるアクション」（type: SECONDARY）の実行可能ユーザー。作業者（ASSIGNS_BY）とは区別する
+          (a?.executableUser?.entities || []).forEach(e =>
+            entityEdge(src, REL.EXECUTABLE_BY, e?.entity, 'PROCESS_EXECUTABLE_USER', name));
         });
       }
 
       // ---- 5) アクセス権 ----
-      // レコードACL：条件式＋FIELDエンティティ
+      // レコードACL：条件式＋フィールド指定の対象
       (DATA?.recordAcl?.rights || []).forEach((r, i) => {
         const name = `レコードACL#${i + 1}`;
         const src = { sourceType: 'ACL', sourceId: `record:${i}`, sourceName: name };
         addNode('ACL', src.sourceId, name, { kind: 'record' });
         edgesFromCond(r?.filterCond, src, REL.ACL_CONDITION, 'RECORD_ACL_CONDITION', name);
-        (r?.entities || []).forEach(e => {
-          if (e?.entity?.type === 'FIELD') {
-            fieldEdge(src, REL.ACL_TARGET, e.entity.code, 'RECORD_ACL_ENTITY', name);
-          }
-        });
+        (r?.entities || []).forEach(e => entityEdge(src, REL.ACL_TARGET, e?.entity, 'RECORD_ACL_ENTITY', name));
       });
-      // フィールドACL：対象フィールドそのもの
+      // フィールドACL：対象フィールドそのもの＋フィールド指定の対象
       (DATA?.fieldAcl?.rights || []).forEach((r, i) => {
         const name = `フィールドACL#${i + 1}`;
         const src = { sourceType: 'ACL', sourceId: `field:${i}`, sourceName: name };
         addNode('ACL', src.sourceId, name, { kind: 'field' });
         fieldEdge(src, REL.ACL_TARGET, r?.code, 'FIELD_ACL_TARGET', name);
-        (r?.entities || []).forEach(e => {
-          if (e?.entity?.type === 'FIELD') {
-            fieldEdge(src, REL.ACL_TARGET, e.entity.code, 'FIELD_ACL_ENTITY', name);
-          }
-        });
+        (r?.entities || []).forEach(e => entityEdge(src, REL.ACL_TARGET, e?.entity, 'FIELD_ACL_ENTITY', name));
       });
 
       // ---- 6) ルックアップ / 関連レコード / アプリアクション ----
@@ -2148,7 +2158,7 @@
       DISPLAYS: '表示', FILTERS_BY: '条件', SORTS_BY: 'ソート',
       GROUPS_BY: '分類', AGGREGATES: '集計',
       NOTIFY_TARGET: '通知先', REMINDER_TIMING: '基準日時',
-      ASSIGNS_BY: '作業者', LOOKUP_KEY: '参照キー', LOOKUP_COPY_TO: 'コピー先',
+      ASSIGNS_BY: '作業者', EXECUTABLE_BY: '実行可能ユーザー', LOOKUP_KEY: '参照キー', LOOKUP_COPY_TO: 'コピー先',
       LOOKUP_PICKER: '取得元', REFERENCES: '計算参照',
       ACTION_MAPS_FROM: '転記元', ACL_CONDITION: 'ACL条件', ACL_TARGET: 'ACL対象',
       APP_REFERENCE: 'アプリ参照', HTML_REFERENCE: 'HTML記述',
@@ -2282,10 +2292,12 @@
       REPORT_GROUP: 'グラフの分類項目',
       REPORT_AGG: 'グラフの集計項目',
       REPORT_SORT: 'グラフのソート条件',
+      GENERAL_NOTIFY_TARGET: 'アプリの条件通知の通知先（フィールド指定）',
       NOTIFY_TARGET: '条件通知の通知先（フィールド指定）',
       REMINDER_TIMING: 'リマインダーの基準日時',
       REMINDER_TARGET: 'リマインダーの通知先（フィールド指定）',
       PROCESS_ASSIGNEE: 'プロセス管理の作業者（フィールド指定）',
+      PROCESS_EXECUTABLE_USER: 'プロセス管理のアクションの実行可能ユーザー（フィールド指定）',
       RECORD_ACL_ENTITY: 'レコードのアクセス権（フィールド指定）',
       FIELD_ACL_TARGET: 'フィールドのアクセス権の対象',
       FIELD_ACL_ENTITY: 'フィールドのアクセス権（フィールド指定）',
@@ -3000,13 +3012,16 @@
 
       // ★アプリID参照（JS静的解析）をアプリ間依存エッジとして追加
       //   値が変数の場合はアプリIDを特定できないため targetId は 'UNKNOWN' とする
+      //   (対象ファイル, 接続先アプリ) 単位に集約する。ファイルはフィールド利用と同じく target を含むIDで識別する
+      //   （ファイル名だけで集約すると、PC用とモバイル用の同名ファイルが1件に合流し、片方の参照が欠落する）
       const appAgg = new Map();
       for (const ref of scan.appRefs || []) {
-        const target = ref.appId || 'UNKNOWN';
-        const key = `${ref.file}|${target}`;
+        const appId = ref.appId || 'UNKNOWN';
+        const srcId = `${ref.target}:js:${ref.file}`; // CUSTOMIZEノードのIDと揃える
+        const key = `${srcId}|${appId}`;
         let a = appAgg.get(key);
         if (!a) {
-          a = { file: ref.file, target: ref.target, appId: target, lines: [], kinds: new Set(), count: 0 };
+          a = { srcId, file: ref.file, target: ref.target, appId, lines: [], kinds: new Set(), count: 0 };
           appAgg.set(key, a);
         }
         a.count++;
@@ -3017,7 +3032,7 @@
         const isUnknown = a.appId === 'UNKNOWN';
         if (!isUnknown) addNodeTo(deps, 'APP', a.appId, `app ${a.appId}`, { self: false, viaJs: true });
         deps.edges.push({
-          sourceType: 'CUSTOMIZE', sourceId: `${a.target}:js:${a.file}`, sourceName: a.file,
+          sourceType: 'CUSTOMIZE', sourceId: a.srcId, sourceName: a.file,
           relationType: REL.APP_REFERENCE,
           targetType: 'APP', targetId: a.appId, targetName: isUnknown ? '不明（変数指定）' : `app ${a.appId}`,
           context: {
