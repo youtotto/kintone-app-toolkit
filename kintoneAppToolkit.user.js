@@ -4820,7 +4820,8 @@
       const reg = health.registry?.[PRODUCT]?.[FEATURE];
       if (!reg || reg.implemented !== true) return { available: false, reason: ERROR_CODES.FEATURE_NOT_IMPLEMENTED };
       if (!(reg.promptVersions || []).includes(PROMPT_VERSION)) return { available: false, reason: ERROR_CODES.UNKNOWN_PROMPT_VERSION };
-      return { available: true, reason: null, usage: health.usage ?? null, tokenExpiresAt: health.tokenExpiresAt ?? null };
+      // contractExpiresAt（契約の期限。W5）。tokenExpiresAt は Access Token 認証では Access の期限なので契約の表示には使わない
+      return { available: true, reason: null, usage: health.usage ?? null, tokenExpiresAt: health.tokenExpiresAt ?? null, contractExpiresAt: health.contractExpiresAt ?? null };
     }
 
     /**
@@ -5424,7 +5425,7 @@
       const fmt = (iso) => { const d = iso ? new Date(iso) : null; return d && !isNaN(d) ? d.toLocaleDateString() : '—'; };
       const contract = !status?.connected ? '未接続'
         : cap?.checking ? '確認中...'
-          : cap?.available ? `有効${cap.tokenExpiresAt ? `（${fmt(cap.tokenExpiresAt)} まで）` : ''}`
+          : cap?.available ? `有効${cap.contractExpiresAt ? `（${fmt(cap.contractExpiresAt)} まで）` : ''}`
             : (cap ? KTAiClient.errorText(cap.reason) : '確認済み');
       const rows = [
         ['AI Assistant', cap?.checking ? '確認中...' : cap?.available ? '利用可能' : (cap ? KTAiClient.errorText(cap.reason) : '—')],

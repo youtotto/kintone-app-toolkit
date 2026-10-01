@@ -79,7 +79,7 @@ function makeGateway({ now = () => Date.now(), ttlSec = 600, pollSec = 2, author
     const bearer = (req.headers.Authorization || '').replace(/^Bearer /, '');
     const a = access.get(bearer);
     if (!a || revokedFamilies.has(a.familyId)) return err(401, 'AUTH_INVALID_TOKEN');
-    if (u.pathname === '/v2/health') return { status: 200, body: JSON.stringify({ ok: true, supportedContractVersions: ['2.0', '2.1'], entitlements: [{ product: 'toolkit', features: ['assistant-qa'] }], registry: { toolkit: { 'assistant-qa': { implemented: true, promptVersions: ['1'] } } }, usage: { yyyymm: '202610', monthlyLimit: 100, usedThisMonth: 6, remainingThisMonth: 94 }, tokenExpiresAt: '2099-01-01T00:00:00Z', auth: { type: 'access_token' } }) };
+    if (u.pathname === '/v2/health') return { status: 200, body: JSON.stringify({ ok: true, supportedContractVersions: ['2.0', '2.1'], entitlements: [{ product: 'toolkit', features: ['assistant-qa'] }], registry: { toolkit: { 'assistant-qa': { implemented: true, promptVersions: ['1'] } } }, usage: { yyyymm: '202610', monthlyLimit: 100, usedThisMonth: 6, remainingThisMonth: 94 }, tokenExpiresAt: '2026-10-02T00:45:00Z', contractExpiresAt: '2099-01-01T00:00:00Z', auth: { type: 'access_token' } }) };
     return err(404, 'NOT_FOUND');
   };
   return { transport, reqs, sessions, access, refresh, revokedFamilies, approve: (sid) => { sessions.get(sid).status = 'AUTHORIZED'; }, deny: (sid) => { sessions.get(sid).status = 'DENIED'; } };
@@ -260,7 +260,7 @@ console.log('\n--- 4. UI（mountAiDocsPanel）---');
     assert(u.opened.length === 1 && u.opened[0].includes(`session=${sid}`), '承認ページを開く');
     assert(u.$('kt-ai-session').style.display === 'flex' && u.$('kt-ai-connecting').style.display === 'none' && u.$('kt-ai-conn-badge').textContent === '✓ 接続済み' && u.$('kt-ai-paid-status').textContent.includes('Nest Rec AIに接続しました') && u.$('kt-ai-ask').disabled === false, '接続完了: ✓ 接続済み・AIに質問が有効');
     const lines = u.$('kt-ai-session-lines').innerHTML;
-    assert(lines.includes('AI Assistant') && lines.includes('利用可能') && lines.includes('接続先') && lines.includes('>h<') && lines.includes('契約') && lines.includes('有効') && lines.includes('AI利用') && lines.includes('6 / 100'), '接続後の表示: AI Assistant / 接続先 / 契約 / AI利用');
+    assert(lines.includes('AI Assistant') && lines.includes('利用可能') && lines.includes('接続先') && lines.includes('>h<') && lines.includes('契約') && lines.includes('有効（') && lines.includes('2099') && !lines.includes('2026/10/2') && lines.includes('AI利用') && lines.includes('6 / 100'), '接続後の表示: AI Assistant / 接続先 / 契約（契約の期限であって Access の期限ではない）/ AI利用');
     const allText = u.host.innerHTML + u.$('kt-ai-paid-status').textContent + lines;
     assert(!/AT-\d|RT-\d|v1\.AT|v1\.RT/.test(allText), 'UI に Access / Refresh の文字列が出ない');
     // 接続解除

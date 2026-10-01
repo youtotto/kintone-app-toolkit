@@ -36,7 +36,7 @@ const HEALTH_OK = {
   ok: true, supportedContractVersions: ['2.0', '2.1'],
   entitlements: [{ product: 'toolkit', features: ['assistant-qa'] }],
   registry: { toolkit: { 'assistant-qa': { implemented: true, directCall: true, promptVersions: ['1'], defaultPromptVersion: '1' } } },
-  usage: { yyyymm: '202610', monthlyLimit: 100, usedThisMonth: 3, remainingThisMonth: 97 }, tokenExpiresAt: '2099-01-01T00:00:00Z',
+  usage: { yyyymm: '202610', monthlyLimit: 100, usedThisMonth: 3, remainingThisMonth: 97 }, tokenExpiresAt: '2026-10-02T00:45:00Z', contractExpiresAt: '2099-01-01T00:00:00Z',
 };
 /** Gateway の 200 応答 */
 const GOOD_RESPONSE = {
