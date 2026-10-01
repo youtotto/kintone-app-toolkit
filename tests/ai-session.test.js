@@ -148,6 +148,28 @@ console.log('\n--- 4. exchange unauthorized / disconnect / 旧形式の移行 --
   assert(await s2.migrateLegacy() === false, '旧形式が無ければ false');
 }
 
+console.log('\n--- 4b. apiBase は毎回 store から解決する（session 生成時の既定値に固定しない）---');
+{
+  // 実機で発生: 空の store で session を作り、後から connect(token, { apiBase: staging }) すると
+  // exchange は staging へ行くが、health / ask が session 生成時の既定（production）へ送られていた
+  const storage = makeStorage();
+  const store = KTAiClient.createSettingsStore({ storage, host: 'h' });
+  const gw = makeGateway();
+  const session = KTAiClient.createSession({ store, hostname: 'h', transport: gw.transport });   // apiBase 未指定・store も空
+  await session.connect('CUSTOMER-TOKEN-1', { apiBase: 'https://staging.test' });
+  await session.client.getHealth();
+  assert(gw.reqs.length === 2 && gw.reqs[0].url === 'https://staging.test/v2/token/exchange' && gw.reqs[1].url === 'https://staging.test/v2/health', 'connect 時に指定した apiBase が exchange と health の両方に使われる（既定の production URL へ送らない）');
+  assert(gw.reqs.every(r => !r.url.startsWith(KTAiClient.DEFAULT_API_BASE)), '既定 apiBase への request が 1 件も無い');
+  // 旧形式の移行でも同じ（migrateLegacy は legacy の apiBase を使う）
+  const storage2 = makeStorage();
+  storage2.setItem('ktAi.v1.h', JSON.stringify({ apiBase: 'https://staging.test', customerToken: 'CUSTOMER-TOKEN-1' }));
+  const gw2 = makeGateway();
+  const s2 = KTAiClient.createSession({ store: KTAiClient.createSettingsStore({ storage: storage2, host: 'h' }), hostname: 'h', transport: gw2.transport });
+  await s2.migrateLegacy();
+  await s2.client.getHealth();
+  assert(gw2.reqs.every(r => r.url.startsWith('https://staging.test/')), 'migrateLegacy 後の health も legacy の apiBase へ');
+}
+
 console.log('\n--- 5. 設定 store の形 ---');
 {
   const storage = makeStorage();

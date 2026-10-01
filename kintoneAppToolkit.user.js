@@ -4993,11 +4993,18 @@
         await refresh();
         return access.token;
       }
-      const client = createAiClient({
+      // apiBase は呼び出しのたびに store から解決する（session 生成時の値に固定すると、後から connect で
+      // 接続先を変えたときに exchange だけ新しい接続先へ行き、health / ask が既定の production へ飛ぶ）
+      const authed = () => createAiClient({
         apiBase: base(), hostname, transport, pluginVersion,
         getToken: ensureAccessToken,
         onAuthExpired: async () => { access = { token: null, expiresAt: null }; await refresh(); return true; },
       });
+      const client = {
+        getHealth: () => authed().getHealth(),
+        exchange: (p) => authed().exchange(p),
+        ask: (p) => authed().ask(p),
+      };
       return {
         /** 契約時に発行された Customer Token で接続（1 回だけ送り、保存しない） */
         async connect(customerToken, { apiBase: ab = null } = {}) {
