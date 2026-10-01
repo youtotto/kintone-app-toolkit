@@ -54,39 +54,43 @@ const okBody = (json) => ({ status: 200, body: JSON.stringify(json) });
 /** fake storage */
 const makeStorage = () => { const m = new Map(); return { getItem: (k) => (m.has(k) ? m.get(k) : null), setItem: (k, v) => m.set(k, String(v)), removeItem: (k) => m.delete(k) }; };
 
-/** パネル mount（無料側は本物、有料側はテスト用 client） */
-function mount({ token = 'tok', health = HEALTH_OK, responses = [], onAsk = null, createClientThrows = false, paid = true } = {}) {
+/** パネル mount（無料側は本物、有料側はテスト用 session: connect / status / client を模す） */
+function mount({ token = 'tok', health = HEALTH_OK, responses = [], onAsk = null, createClientThrows = false, paid = true, connected = true } = {}) {
   const storage = makeStorage();
   const settings = KTAiClient.createSettingsStore({ storage, host: 't.cybozu.com' });
-  if (token) settings.save({ apiBase: 'https://gw.test', customerToken: token });
-  const calls = { health: 0, ask: [] };
+  const calls = { health: 0, ask: [], connect: [], refresh: 0, disconnect: 0 };
   const queue = [...responses];
-  const createClient = (opts) => {
-    if (createClientThrows) throw new Error('boom');
-    calls.opts = opts;
-    return {
-      async getHealth() { calls.health++; if (health instanceof Error || health?.name === 'AiClientError') throw health; return health; },   // vm の Error は別 realm なので name でも判定
-      async ask({ ctx, requestId }) {
-        calls.ask.push({ ctx, requestId });
-        if (onAsk) return onAsk({ ctx, requestId });
-        const r = queue.shift();
-        if (r instanceof Error || r?.name === 'AiClientError') throw r;
-        const v = KTAiClient.validateAnswer(r, ctx);
-        if (!v.ok) throw new KTAiClient.AiClientError({ code: v.errors[0].code, message: v.errors[0].message, requestId });
-        return { ...v.normalized, requestId: v.normalized.requestId || requestId, clientWarnings: v.warnings };
-      },
-    };
+  const client = {
+    async getHealth() { calls.health++; if (health instanceof Error || health?.name === 'AiClientError') throw health; return health; },   // vm の Error は別 realm なので name でも判定
+    async ask({ ctx, requestId }) {
+      calls.ask.push({ ctx, requestId });
+      if (onAsk) return onAsk({ ctx, requestId });
+      const r = queue.shift();
+      if (r instanceof Error || r?.name === 'AiClientError') throw r;
+      const v = KTAiClient.validateAnswer(r, ctx);
+      if (!v.ok) throw new KTAiClient.AiClientError({ code: v.errors[0].code, message: v.errors[0].message, requestId });
+      return { ...v.normalized, requestId: v.normalized.requestId || requestId, clientWarnings: v.warnings };
+    },
+  };
+  let isConnected = !!(token && connected);
+  const session = {
+    status() { if (createClientThrows) throw new Error('boom'); return { connected: isConnected, apiBase: 'https://gw.test', refreshExpiresAt: isConnected ? '2099-01-01T00:00:00Z' : null, scope: isConnected ? { product: 'toolkit', feature: 'assistant-qa', domain: 't.cybozu.com' } : null }; },
+    async connect(ct, opts) { calls.connect.push({ ct, opts }); if (ct === 'bad') throw new KTAiClient.AiClientError({ code: C.PRODUCT_NOT_ENTITLED, message: 'x', requestId: 'e-c' }); isConnected = true; return this.status(); },
+    async migrateLegacy() { return false; },
+    async refresh() { calls.refresh++; if (!isConnected) throw new KTAiClient.AiClientError({ code: C.NOT_CONNECTED, message: 'x' }); return {}; },
+    disconnect() { calls.disconnect++; isConnected = false; },
+    client,
   };
   const host = makeFakeHost();
   const copies = [];
   const panel = mountAiDocsPanel(host, {
     getInputs: () => INPUTS, setPreview: () => { }, copyText: async (t) => { copies.push(t); return true; },
     colors: { border: '#ccc', bg: '#fff' },
-    ...(paid ? { settings, createClient, hostname: 't.cybozu.com' } : {}),
+    ...(paid ? { settings, session, hostname: 't.cybozu.com' } : {}),
   });
   const $ = (id) => host.querySelector(`#${id}`);
   const generate = async () => { $('kt-ai-target-type').value = 'field'; await $('kt-ai-target-type').dispatch('change'); $('kt-ai-target').value = 'customer_code'; $('kt-ai-question').value = '顧客コードを削除して大丈夫？'; await $('kt-ai-generate').dispatch('click'); };
-  return { host, panel, $, calls, copies, settings, storage, generate };
+  return { host, panel, $, calls, copies, settings, storage, generate, session };
 }
 const tick = () => new Promise(r => setTimeout(r, 0));
 
@@ -166,9 +170,9 @@ console.log('\n--- 2. 利用可否 ---');
 {
   const m = mount({ token: '' });
   await tick();
-  assert(m.$('kt-ai-paid').style.display !== 'none' && m.$('kt-ai-ask').disabled === true, '未設定: Nest Rec AI 区画は表示・「AIに質問」は無効');
-  assert(m.$('kt-ai-paid-status').textContent.includes('契約（Customer Token）が必要'), '未設定: 契約が必要な旨を表示');
-  assert(m.calls.health === 0, '未設定なら health を呼ばない');
+  assert(m.$('kt-ai-paid').style.display !== 'none' && m.$('kt-ai-ask').disabled === true, '未接続: Nest Rec AI 区画は表示・「AIに質問」は無効');
+  assert(m.$('kt-ai-paid-status').textContent.includes('接続されていません') && m.$('kt-ai-connect').style.display === 'flex' && m.$('kt-ai-session').style.display === 'none' && m.$('kt-ai-conn-badge').textContent === '未接続', '未接続: 接続フォームを表示（Customer Token の恒常入力欄は無い）');
+  assert(m.calls.health === 0, '未接続なら health を呼ばない');
   await m.generate();
   await m.$('kt-ai-copy-prompt').dispatch('click');
   assert(m.copies.length === 1 && m.copies[0].includes('## Context'), '無料機能（生成・コピー）はそのまま使える');
@@ -177,7 +181,24 @@ console.log('\n--- 2. 利用可否 ---');
   const m = mount({});
   await tick();
   assert(m.calls.health === 1 && m.$('kt-ai-ask').disabled === false && m.$('kt-ai-paid-status').textContent.includes('AI に質問できます') && m.$('kt-ai-paid-status').textContent.includes('3 / 100'), '契約あり: health → 「AIに質問」有効・利用量表示');
-  assert(m.calls.opts.apiBase === 'https://gw.test' && m.calls.opts.customerToken === 'tok' && m.calls.opts.hostname === 't.cybozu.com', 'client は設定（apiBase / token）と hostname で生成');
+  assert(m.$('kt-ai-session').style.display === 'flex' && m.$('kt-ai-connect').style.display === 'none' && m.$('kt-ai-conn-badge').textContent === '接続済み', '接続済み: 状態表示に切り替わる');
+  const lines = m.$('kt-ai-session-lines').innerHTML;
+  assert(lines.includes('契約状態') && lines.includes('確認済み') && lines.includes('AI Assistant') && lines.includes('利用可能') && lines.includes('接続の有効期限') && lines.includes('3 / 100'), '接続済み: 契約状態 / AI Assistant / 有効期限 / 利用量');
+  // 接続フォームからの接続（トークンは入力欄から即座に消え、session.connect に 1 回だけ渡る）
+  const c = mount({ token: '', connected: false });
+  await tick();
+  c.$('kt-ai-token').value = 'ct-once'; c.$('kt-ai-api-base').value = 'https://gw.test';
+  await c.$('kt-ai-connect-btn').dispatch('click'); await tick();
+  assert(c.calls.connect.length === 1 && c.calls.connect[0].ct === 'ct-once' && c.$('kt-ai-token').value === '' && c.$('kt-ai-ask').disabled === false && c.$('kt-ai-conn-badge').textContent === '接続済み', '接続: exchange に 1 回渡して入力欄を消し、利用可能になる');
+  assert(!JSON.stringify([...c.storage.getItem ? [] : []]).includes('ct-once'), 'Customer Token は保存されない');
+  const bad = mount({ token: '', connected: false });
+  await tick();
+  bad.$('kt-ai-token').value = 'bad';
+  await bad.$('kt-ai-connect-btn').dispatch('click'); await tick();
+  assert(bad.$('kt-ai-ask').disabled === true && bad.$('kt-ai-paid-status').textContent.includes('利用できません') && bad.$('kt-ai-paid-status').textContent.includes('[PRODUCT_NOT_ENTITLED]') && bad.$('kt-ai-conn-badge').textContent === '未接続', '接続失敗: 文言＋code・未接続のまま');
+  // 切断
+  await m.$('kt-ai-session-disconnect').dispatch('click'); await tick();
+  assert(m.calls.disconnect === 1 && m.$('kt-ai-ask').disabled === true && m.$('kt-ai-connect').style.display === 'flex' && !m.settings.hasConsent(), '切断: 接続情報と同意を消し、接続フォームへ戻る');
 }
 {
   const m = mount({ health: { ...HEALTH_OK, entitlements: [{ product: 'appinsight', features: ['*'] }] } });
@@ -197,7 +218,7 @@ console.log('\n--- 2. 利用可否 ---');
   assert(m3.copies.length === 2 && m3.copies[0].startsWith('# 案件管理') && JSON.parse(m3.copies[1]).contextVersion === '1', 'Gateway 停止でも無料の Markdown / JSON コピーは動く');
   const m4 = mount({ createClientThrows: true });
   await tick();
-  assert(m4.$('kt-ai-paid-status').textContent.includes('ネットワークエラー') && m4.calls.ask.length === 0, 'client 生成に失敗しても例外にならない（文言のみ）');
+  assert(m4.$('kt-ai-paid-status').textContent.includes('ネットワークエラー') && m4.calls.ask.length === 0, 'session の失敗でも例外にならない（文言のみ）');
   const rl = mount({ health: new KTAiClient.AiClientError({ code: C.RATE_LIMITED, message: 'x' }) });
   await tick();
   assert(rl.$('kt-ai-ask').disabled === false && rl.$('kt-ai-paid-status').textContent.includes('アクセスが集中'), 'rate limit（一時的）: 文言＋再試行ボタンは有効');

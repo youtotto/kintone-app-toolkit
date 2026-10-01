@@ -3902,6 +3902,7 @@
     const FACT_KIND_ORDER = [
       'field', 'dependency', 'indirect-dependency', 'incoming-reference', 'js-reference', 'js-app-reference',
       'js-external-field', 'calc-chain', 'change-impact', 'broken-reference', 'app-link', 'js-file', 'js-match', 'code-excerpt',
+      'overview',   // L0 の要点（AI が引用できるよう根拠ID を持たせる。末尾に置き、他の ID を動かさない）
     ];
     const kindRank = (k) => { const i = FACT_KIND_ORDER.indexOf(k); return i < 0 ? 99 : i; };
 
@@ -4153,6 +4154,26 @@
     }
 
     const safe = (fn, fallback) => { try { return fn(); } catch (e) { return fallback; } };
+
+    /**
+     * L0（アプリ概要）の要点を根拠ID 付きの fact にする（Phase 5 の L0 grounding）。
+     * AI が「フィールド数」「解析状態」等を根拠として引用できるようにする。件数は増やしすぎない（最大 7 件）
+     */
+    function buildOverviewFacts(app, coverage) {
+      if (!app) return [];
+      const f = [];
+      const push = (key, statement, extra = {}) => f.push({ kind: 'overview', key: `OVERVIEW|${key}`, confidence: 'CERTAIN', statement, ...extra });
+      push('fields', `このアプリ（${app.name ? `${app.name}・` : ''}app ${app.id}）のフィールド数は ${app.fieldCount} 件（${Object.entries(app.fieldTypeCounts || {}).map(([k, v]) => `${k}×${v}`).join(', ')}）`, { count: app.fieldCount });
+      if (app.dependencies) push('dependencies', `解析済みの依存関係は ${app.dependencies.edgeCount} 件（一覧 ${app.views?.count ?? 0}・グラフ ${app.reports?.count ?? 0}・通知 ${(app.notifications?.general ?? 0) + (app.notifications?.perRecord ?? 0) + (app.notifications?.reminder ?? 0)}・アクセス権 ${(app.acl?.record ?? 0) + (app.acl?.field ?? 0)}・アプリアクション ${app.actions?.count ?? 0}）`, { count: app.dependencies.edgeCount });
+      push('process', app.process?.enabled ? `プロセス管理は有効（ステータス: ${(app.process.states || []).join(' → ')}・アクション ${app.process.actionCount} 件）` : 'プロセス管理は無効', { enabled: !!app.process?.enabled });
+      push('javascript', app.javascript?.analyzed
+        ? `JavaScript は解析済み（${app.javascript.fileCount} ファイル${coverage?.javascriptSource === 'snippets' ? '・本文はキャッシュ復元のため抜粋のみ' : ''}・存在しないコードの参照 ${app.javascript.unknownFieldRefs} 件）`
+        : 'JavaScript は未解析（JS からの参照は含まれていない）', { analyzed: !!app.javascript?.analyzed });
+      push('incoming', app.incoming?.scanned ? `他アプリからの参照は走査済み（参照元 ${app.incoming.referencingApps ?? 0} アプリ）` : '他アプリからの参照は未走査（被参照は含まれていない）', { scanned: !!app.incoming?.scanned });
+      push('brokenRefs', `壊れた参照（存在しないフィールド・ステータスの指定）は ${app.brokenRefs?.total ?? 0} 件`, { count: app.brokenRefs?.total ?? 0 });
+      if (app.plugins?.count) push('plugins', `プラグインが ${app.plugins.count} 個追加されている（設定内容は API で取得できないため未解析）`, { count: app.plugins.count });
+      return f;
+    }
 
     // ================= facts =================
 
@@ -4455,6 +4476,8 @@
       if (level !== LEVELS.L0 && target?.type === 'field') facts = buildFieldFacts({ data, deps, scan, target, limits, trunc });
       else if (level === LEVELS.L2 && target?.type === 'file') facts = buildFileFacts({ data, deps, scan, target, limits, trunc });
       else if (!target && level !== LEVELS.L0) facts = buildAppFacts({ data, deps, limits, trunc });
+      // L1 以上では L0 の要点にも根拠ID を付ける（AI が概要を引用できる。順序は末尾なので他の ID は不変）
+      if (level !== LEVELS.L0) facts.push(...buildOverviewFacts(app, coverage));
 
       // 重複排除（同じ key は 1 件）→ 決定的な並び → 根拠ID採番
       const seen = new Set();
@@ -4587,6 +4610,7 @@
       }
       out.push('');
       out.push(`> 確度の語彙: 確実＝設定値から直接取得 / 可能性が高い＝条件式・計算式・JS のトークン一致 / 要確認＝文字列一致のみ。`);
+      out.push(`> 根拠として引用できるのは「事実」の表にある根拠ID（E1…）だけ。L0 の概要は overview の根拠ID で引用する。`);
       out.push(`> 「含まない」とある項目は未解析であり、「存在しない」ことを意味しない。`);
       return out.join('\n');
     }
@@ -4627,7 +4651,11 @@
   //   Toolkit 固有なのは envelope（product toolkit / feature assistant-qa / payload = KTContext）と
   //   応答の根拠ID 再検証だけに留める。
   //   クライアントに置かないもの: API キー・Worker secret・model 名・system prompt。
-  //   Customer Token はユーザーが設定画面で入力し localStorage（このドメイン）に保存する（コードに埋め込まない）。
+  //   credential（Phase 5 / docs/contracts/14-ai-access-token.md）:
+  //     Customer Token（長寿命・契約証明）は「接続」時に 1 回だけ入力し、POST /v2/token/exchange で
+  //     短命 Access Token（memory のみ）＋ Refresh Token（localStorage・単回使用・rotation・scope 限定）に交換して捨てる。
+  //     /v2 の呼び出しは Access Token で行い、期限切れは Refresh で自動更新する。Customer Token は保存しない。
+  //     （kintone 同一オリジンの他 JavaScript は localStorage を読めるため、永続化するのは権限と寿命が小さい Refresh Token だけ）
   // ==========================================
   const KTAiClient = (() => {
     const CONTRACT_VERSION = '2.1';
@@ -4636,9 +4664,11 @@
     const PROMPT_VERSION = '1';
     /** 公開エンドポイント（secret ではない）。設定で上書きできる */
     const DEFAULT_API_BASE = 'https://appinsight-ai-api.black-waterfall-157a.workers.dev';
-    const SETTINGS_KEY = 'ktAi.v1';
+    const SETTINGS_KEY = 'ktAi.v1';          // 旧: Customer Token を保存していた（staging E2E 用。見つけたら 1 回だけ exchange して削除）
+    const SESSION_KEY = 'ktAi.v2';           // 新: Refresh Token と scope のみ
     const CONSENT_KEY = 'ktAiConsent.v1';
     const HEALTH_TTL_MS = 10 * 60 * 1000;
+    const ACCESS_SKEW_MS = 60 * 1000;         // 期限の 60 秒前から更新する
 
     /** Gateway の error.code（docs/contracts/12 §7・13 §5）＋ client 側の正規化 code */
     const ERROR_CODES = {
@@ -4651,10 +4681,13 @@
       // client 側のみ
       TRANSPORT_ERROR: 'TRANSPORT_ERROR', TIMEOUT: 'TIMEOUT', INVALID_RESPONSE: 'INVALID_RESPONSE', WORKER_ERROR: 'WORKER_ERROR',
       NO_CONFIG: 'NO_CONFIG', NOT_ENTITLED: 'NOT_ENTITLED', CONTRACT_INCOMPATIBLE: 'CONTRACT_INCOMPATIBLE', NO_CONTEXT: 'NO_CONTEXT',
+      NOT_CONNECTED: 'NOT_CONNECTED', SESSION_EXPIRED: 'SESSION_EXPIRED',
     };
     /** ユーザー向け文言（AppInsight ai-review-ui.js の AI_ERROR_TEXT を Toolkit 向けに統合） */
     const ERROR_TEXT = {
-      NO_CONFIG: 'AI 機能を利用するには Nest Rec AI の契約（Customer Token）が必要です。接続設定からトークンを入力してください。',
+      NO_CONFIG: 'AI 機能を利用するには Nest Rec AI の契約が必要です。契約時に発行されたトークンで「接続」してください。',
+      NOT_CONNECTED: 'Nest Rec AI に接続されていません。契約時に発行されたトークンで「接続」してください。',
+      SESSION_EXPIRED: 'Nest Rec AI との接続の有効期限が切れました。もう一度「接続」してください。',
       NOT_ENTITLED: 'このトークンでは kintone App Toolkit の AI 機能を利用できません。契約内容を確認してください。',
       PRODUCT_NOT_ENTITLED: 'このトークンでは kintone App Toolkit の AI 機能を利用できません。契約内容を確認してください。',
       FEATURE_NOT_ENTITLED: 'このトークンでは「AIに質問」を利用できません。契約内容を確認してください。',
@@ -4693,15 +4726,37 @@
 
     // ---- 設定（localStorage。token をコードに持たない）----
     function createSettingsStore({ storage = (typeof localStorage !== 'undefined' ? localStorage : null), host = (typeof location !== 'undefined' ? location.host : '') } = {}) {
-      const key = `${SETTINGS_KEY}.${host}`;
+      const legacyKey = `${SETTINGS_KEY}.${host}`;
+      const key = `${SESSION_KEY}.${host}`;
       return {
+        /** 接続情報（Refresh Token・scope・期限）。Customer Token / Access Token は含めない */
         load() {
-          try { const raw = storage?.getItem(key); const j = raw ? JSON.parse(raw) : {}; return { apiBase: String(j.apiBase || DEFAULT_API_BASE), customerToken: String(j.customerToken || '') }; }
-          catch (e) { return { apiBase: DEFAULT_API_BASE, customerToken: '' }; }
+          try {
+            const raw = storage?.getItem(key); const j = raw ? JSON.parse(raw) : {};
+            return {
+              apiBase: String(j.apiBase || DEFAULT_API_BASE),
+              refreshToken: String(j.refreshToken || ''), refreshExpiresAt: j.refreshExpiresAt || null,
+              scope: j.scope || null, connectedAt: j.connectedAt || null,
+            };
+          } catch (e) { return { apiBase: DEFAULT_API_BASE, refreshToken: '', refreshExpiresAt: null, scope: null, connectedAt: null }; }
         },
-        save({ apiBase, customerToken }) {
-          try { storage?.setItem(key, JSON.stringify({ apiBase: String(apiBase || DEFAULT_API_BASE).trim().replace(/\/+$/, ''), customerToken: String(customerToken || '').trim() })); return true; }
-          catch (e) { return false; }
+        save({ apiBase, refreshToken, refreshExpiresAt, scope, connectedAt }) {
+          try {
+            storage?.setItem(key, JSON.stringify({
+              apiBase: String(apiBase || DEFAULT_API_BASE).trim().replace(/\/+$/, ''),
+              refreshToken: String(refreshToken || ''), refreshExpiresAt: refreshExpiresAt || null, scope: scope || null, connectedAt: connectedAt || null,
+            }));
+            return true;
+          } catch (e) { return false; }
+        },
+        clear() { try { storage?.removeItem(key); } catch (e) { } },
+        /** 旧形式（Customer Token を localStorage に保存）を 1 回だけ取り出して削除する（exchange に使う） */
+        takeLegacyCustomerToken() {
+          try {
+            const raw = storage?.getItem(legacyKey); if (!raw) return null;
+            const j = JSON.parse(raw); storage?.removeItem(legacyKey);
+            return j?.customerToken ? { customerToken: String(j.customerToken), apiBase: String(j.apiBase || DEFAULT_API_BASE) } : null;
+          } catch (e) { return null; }
         },
         hasConsent() { try { return storage?.getItem(`${CONSENT_KEY}.${host}`) === '1'; } catch (e) { return false; } },
         setConsent(on) { try { if (on) storage?.setItem(`${CONSENT_KEY}.${host}`, '1'); else storage?.removeItem(`${CONSENT_KEY}.${host}`); } catch (e) { } },
@@ -4788,7 +4843,7 @@
       const demoted = [];
       for (const f of items(r.facts, 'facts')) (f.evidenceIds.length ? facts : demoted).push(f);
       if (demoted.length) warnings.push({ code: 'UNGROUNDED_FACT_DEMOTED', path: 'facts', message: `根拠ID の無い事実 ${demoted.length} 件を分析へ移しました` });
-      const answer = String(r.answer).replace(/\[(E[1-9][0-9]*)\]/g, (m, id) => (known.has(id) ? m : '[根拠不明]'));
+      const answer = String(r.answer).replace(/\[((?:E[0-9]*|L[0-9]+|app|overview)[A-Za-z0-9_-]*)\]/g, (m, id) => (known.has(id) ? m : '[根拠不明]'));
       return {
         ok: true, errors, warnings,
         normalized: {
@@ -4805,13 +4860,19 @@
     /**
      * @param {object} p apiBase / customerToken（必須）/ hostname（既定 location.hostname）/ transport / timeoutMs（既定 60000）/ pluginVersion
      */
-    function createAiClient({ apiBase, customerToken, hostname = null, transport = null, timeoutMs = 60000, pluginVersion = SCRIPT_VERSION, nowFn = null } = {}) {
+    /**
+     * @param {object} p apiBase（必須）/ customerToken（固定 token。staging 等）または getToken()（短命 Access Token の供給。async 可）/
+     *   onAuthExpired()（AUTH_TOKEN_EXPIRED のとき 1 回だけ呼んで再試行。Refresh に使う）/ hostname / transport / timeoutMs / pluginVersion
+     */
+    function createAiClient({ apiBase, customerToken = null, getToken = null, onAuthExpired = null, hostname = null, transport = null, timeoutMs = 60000, pluginVersion = SCRIPT_VERSION, nowFn = null } = {}) {
       if (!apiBase || !String(apiBase).trim()) throw new AiClientError({ code: ERROR_CODES.INVALID_ENVELOPE, message: 'apiBase は必須です' });
       const base = String(apiBase).replace(/\/+$/, '');
       const send = transport || createDefaultTransport();
       const domain = hostname ?? (typeof location !== 'undefined' ? location.hostname : '');
-      const headers = (withJson) => {
-        const h = { 'Authorization': `Bearer ${String(customerToken || '').trim()}`, 'X-Kintone-Domain': domain };
+      const resolveToken = async () => (typeof getToken === 'function' ? await getToken() : customerToken);
+      const headers = (withJson, token) => {
+        const h = { 'X-Kintone-Domain': domain };
+        if (token != null && token !== '') h['Authorization'] = `Bearer ${String(token).trim()}`;
         if (withJson) h['Content-Type'] = 'application/json';
         return h;
       };
@@ -4841,10 +4902,10 @@
         const legacy = typeof we === 'string' ? we : '';
         throw new AiClientError({ code: normalizeLegacyErrorCode(legacy) ?? ERROR_CODES.WORKER_ERROR, httpStatus: status, message: legacy || `AI API error: ${status}`, details: json, retryAfterSeconds: pickRetryAfter(null, json) });
       };
-      const request = async ({ path, method, body }) => {
+      const rawRequest = async ({ path, method, body, token }) => {
         let result;
         try {
-          result = await withTimeout((signal) => send({ url: `${base}${path}`, method, headers: headers(method === 'POST'), body, signal }));
+          result = await withTimeout((signal) => send({ url: `${base}${path}`, method, headers: headers(method === 'POST', token), body, signal }));
         } catch (e) {
           if (isAiClientError(e)) throw e;
           if (e?.name === 'AbortError') throw new AiClientError({ code: ERROR_CODES.TIMEOUT, message: `AI サービスが ${timeoutMs}ms 以内に応答しませんでした` });
@@ -4852,9 +4913,30 @@
         }
         return settle(result);
       };
+      /** 認証付き request。Access Token の期限切れは onAuthExpired（Refresh）後に 1 回だけ再試行 */
+      const request = async ({ path, method, body }) => {
+        try {
+          return await rawRequest({ path, method, body, token: await resolveToken() });
+        } catch (e) {
+          if (isAiClientError(e) && e.code === ERROR_CODES.AUTH_TOKEN_EXPIRED && typeof onAuthExpired === 'function') {
+            const refreshed = await onAuthExpired(e);
+            if (refreshed) return rawRequest({ path, method, body, token: await resolveToken() });
+          }
+          throw e;
+        }
+      };
       return {
         /** GET /v2/health */
         getHealth: () => request({ path: '/v2/health', method: 'GET', body: '' }),
+        /**
+         * POST /v2/token/exchange（docs/contracts/14）。customer_token grant は Bearer に Customer Token、
+         * refresh_token grant は body に Refresh Token（Bearer 無し）。戻り値の token は呼び出し側が保持する
+         */
+        exchange: ({ grantType, customerToken: ct = null, refreshToken = null, product = PRODUCT, feature = FEATURE }) => rawRequest({
+          path: '/v2/token/exchange', method: 'POST',
+          token: grantType === 'customer_token' ? ct : null,
+          body: JSON.stringify({ grantType, product, feature, ...(grantType === 'refresh_token' ? { refreshToken } : {}) }),
+        }),
         /** POST /v2/review（toolkit.assistant-qa）。生成済みの ctx をそのまま送り、応答の根拠ID を再検証して返す */
         async ask({ ctx, requestId = newRequestId() } = {}) {
           const envelope = buildAskEnvelope({ ctx, requestId, pluginVersion, now: nowFn ? nowFn() : new Date().toISOString() });
@@ -4866,11 +4948,89 @@
       };
     }
 
+    /**
+     * 接続セッション（Phase 5）。Customer Token → exchange → Access Token（memory）＋ Refresh Token（store）。
+     * @param {object} p store（createSettingsStore 互換）/ hostname / transport / nowFn / apiBase（省略時は store の値）
+     */
+    function createSession({ store, hostname = null, transport = null, nowFn = null, apiBase = null, pluginVersion = SCRIPT_VERSION } = {}) {
+      const now = () => (nowFn ? nowFn() : Date.now());
+      let access = { token: null, expiresAt: null };   // memory のみ
+      let refreshing = null;                            // 同時更新の抑止
+      const cfg = () => store.load();
+      const base = () => apiBase || cfg().apiBase || DEFAULT_API_BASE;
+      const bare = () => createAiClient({ apiBase: base(), hostname, transport, pluginVersion });
+
+      const persist = (ex) => {
+        store.save({ apiBase: base(), refreshToken: ex.refreshToken, refreshExpiresAt: ex.refreshExpiresAt, scope: ex.scope, connectedAt: new Date(now()).toISOString() });
+        access = { token: ex.accessToken, expiresAt: ex.expiresAt };
+      };
+      const accessValid = () => !!access.token && Number.isFinite(Date.parse(access.expiresAt)) && Date.parse(access.expiresAt) - ACCESS_SKEW_MS > now();
+      const refreshValid = (c) => !!c.refreshToken && (!c.refreshExpiresAt || Date.parse(c.refreshExpiresAt) > now());
+
+      /** Refresh Token で新しい pair を得る（単回使用・rotation）。失敗したら接続を破棄して SESSION_EXPIRED */
+      async function refresh() {
+        if (refreshing) return refreshing;
+        refreshing = (async () => {
+          const c = cfg();
+          if (!refreshValid(c)) { access = { token: null, expiresAt: null }; throw new AiClientError({ code: c.refreshToken ? ERROR_CODES.SESSION_EXPIRED : ERROR_CODES.NOT_CONNECTED, message: 'refresh unavailable' }); }
+          try {
+            const ex = await bare().exchange({ grantType: 'refresh_token', refreshToken: c.refreshToken, product: c.scope?.product || PRODUCT, feature: c.scope?.feature || FEATURE });
+            persist(ex);
+            return ex;
+          } catch (e) {
+            if (isAiClientError(e) && [ERROR_CODES.AUTH_INVALID_TOKEN, ERROR_CODES.AUTH_TOKEN_EXPIRED].includes(e.code)) {
+              store.clear(); access = { token: null, expiresAt: null };
+              throw new AiClientError({ code: ERROR_CODES.SESSION_EXPIRED, message: e.message, httpStatus: e.httpStatus, requestId: e.requestId });
+            }
+            throw e;
+          }
+        })().finally(() => { refreshing = null; });
+        return refreshing;
+      }
+      /** 有効な Access Token を返す（memory → Refresh の順。無ければ NOT_CONNECTED） */
+      async function ensureAccessToken() {
+        if (accessValid()) return access.token;
+        await refresh();
+        return access.token;
+      }
+      const client = createAiClient({
+        apiBase: base(), hostname, transport, pluginVersion,
+        getToken: ensureAccessToken,
+        onAuthExpired: async () => { access = { token: null, expiresAt: null }; await refresh(); return true; },
+      });
+      return {
+        /** 契約時に発行された Customer Token で接続（1 回だけ送り、保存しない） */
+        async connect(customerToken, { apiBase: ab = null } = {}) {
+          if (ab) store.save({ ...cfg(), apiBase: ab });
+          const ex = await bare().exchange({ grantType: 'customer_token', customerToken: String(customerToken || '').trim() });
+          persist(ex);
+          return this.status();
+        },
+        /** 旧形式（localStorage の Customer Token）があれば exchange して移行する。無ければ false */
+        async migrateLegacy() {
+          const legacy = store.takeLegacyCustomerToken();
+          if (!legacy) return false;
+          try { await this.connect(legacy.customerToken, { apiBase: legacy.apiBase }); return true; } catch (e) { return false; }
+        },
+        disconnect() { store.clear(); access = { token: null, expiresAt: null }; },
+        refresh,
+        status() {
+          const c = cfg();
+          return {
+            connected: refreshValid(c), apiBase: base(),
+            refreshExpiresAt: c.refreshExpiresAt, scope: c.scope, connectedAt: c.connectedAt,
+            accessExpiresAt: accessValid() ? access.expiresAt : null,
+          };
+        },
+        client,
+      };
+    }
+
     return {
-      CONTRACT_VERSION, PRODUCT, FEATURE, PROMPT_VERSION, DEFAULT_API_BASE, HEALTH_TTL_MS,
+      CONTRACT_VERSION, PRODUCT, FEATURE, PROMPT_VERSION, DEFAULT_API_BASE, HEALTH_TTL_MS, ACCESS_SKEW_MS,
       ERROR_CODES, ERROR_TEXT, errorText, AiClientError, isAiClientError,
       createSettingsStore, createDefaultTransport, normalizeLegacyErrorCode,
-      buildAskEnvelope, capabilityFromHealth, validateAnswer, createAiClient, newRequestId,
+      buildAskEnvelope, capabilityFromHealth, validateAnswer, createAiClient, createSession, newRequestId,
     };
   })();
 
@@ -5079,16 +5239,25 @@
           <div id="kt-ai-paid" style="border-top:1px solid ${border}; padding-top:8px; display:flex; flex-direction:column; gap:6px;">
             <div style="display:flex; align-items:center; justify-content:space-between; gap:6px;">
               <b>Nest Rec AI</b>
-              <details id="kt-ai-paid-settings" style="font-size:11px;"><summary style="cursor:pointer;">接続設定</summary>
-                <div style="display:flex; flex-direction:column; gap:4px; padding:4px 0;">
-                  <input id="kt-ai-api-base" placeholder="API Base URL" style="border:1px solid ${border}; border-radius:6px; padding:4px; background:${bg}; color:inherit; font:inherit;">
-                  <input id="kt-ai-token" type="password" placeholder="Customer Token" autocomplete="off" style="border:1px solid ${border}; border-radius:6px; padding:4px; background:${bg}; color:inherit; font:inherit;">
-                  <div style="display:flex; gap:6px;">
-                    <button id="kt-ai-settings-save" class="btn" style="height:26px; flex:1;">保存して接続確認</button>
-                    <button id="kt-ai-settings-clear" class="btn" style="height:26px;">削除</button>
-                  </div>
-                </div>
-              </details>
+              <span id="kt-ai-conn-badge" style="font-size:11px; opacity:.8;"></span>
+            </div>
+            <!-- 未接続: 契約時に発行されたトークンで接続（トークンは交換後に捨て、保存しない） -->
+            <div id="kt-ai-connect" style="display:none; flex-direction:column; gap:4px;">
+              <input id="kt-ai-token" type="password" placeholder="契約時に発行されたトークン（接続後は保存されません）" autocomplete="off" style="border:1px solid ${border}; border-radius:6px; padding:4px; background:${bg}; color:inherit; font:inherit;">
+              <div style="display:flex; gap:6px;">
+                <button id="kt-ai-connect-btn" class="btn" style="height:28px; flex:1;">接続</button>
+                <details id="kt-ai-paid-settings" style="font-size:11px;"><summary style="cursor:pointer; line-height:28px;">詳細</summary>
+                  <input id="kt-ai-api-base" placeholder="API Base URL" style="width:100%; box-sizing:border-box; border:1px solid ${border}; border-radius:6px; padding:4px; background:${bg}; color:inherit; font:inherit;">
+                </details>
+              </div>
+            </div>
+            <!-- 接続済み: 契約状態・有効期限・更新 / 切断 -->
+            <div id="kt-ai-session" style="display:none; flex-direction:column; gap:2px; font-size:11px;">
+              <div id="kt-ai-session-lines"></div>
+              <div style="display:flex; gap:6px; margin-top:4px;">
+                <button id="kt-ai-session-refresh" class="btn" style="height:26px; flex:1;">接続を更新</button>
+                <button id="kt-ai-session-disconnect" class="btn" style="height:26px;">切断</button>
+              </div>
             </div>
             <button id="kt-ai-ask" class="btn" disabled style="height:32px; font-weight:600;">AIに質問</button>
             <div id="kt-ai-paid-status" style="opacity:.85; min-height:1.2em;"></div>
@@ -5116,6 +5285,19 @@
         return `AI に質問できます${u}`;
       }
       return KTAiClient.errorText(cap.reason);
+    }
+
+    /** 接続済みの状態表示（契約状態 / AI Assistant / 有効期限 / 利用量） */
+    function sessionLinesHtml(status, cap) {
+      const fmt = (iso) => { const d = iso ? new Date(iso) : null; return d && !isNaN(d) ? d.toLocaleString() : '—'; };
+      const rows = [
+        ['契約状態', status?.connected ? '確認済み' : '未接続'],
+        ['AI Assistant', cap?.checking ? '確認中...' : cap?.available ? '利用可能' : (cap ? KTAiClient.errorText(cap.reason) : '—')],
+        ['接続の有効期限', fmt(status?.refreshExpiresAt)],
+        ...(cap?.usage ? [['今月の利用', `${cap.usage.usedThisMonth} / ${cap.usage.monthlyLimit} 回`]] : []),
+        ...(cap?.tokenExpiresAt ? [['契約の有効期限', fmt(cap.tokenExpiresAt)]] : []),
+      ];
+      return rows.map(([k, v]) => `<div><span style="opacity:.7; display:inline-block; min-width:7em;">${esc(k)}</span>${esc(v)}</div>`).join('');
     }
 
     /** 根拠ID のチップ（クリックで該当 fact を表示） */
@@ -5179,7 +5361,7 @@
     return {
       TARGET_TYPES, PRESETS, CONFIDENCE_HELP, INTRO_TEXT, INTRO_NOTE,
       listTargets, fileLabel, toBuildRequest, generate, coverageRows, truncationSummary, sizeSummary, outputFilename,
-      panelHtml, resultHtml, capabilityStatusText, answerHtml, evidenceDetailHtml,
+      panelHtml, resultHtml, capabilityStatusText, sessionLinesHtml, answerHtml, evidenceDetailHtml,
     };
   })();
 
@@ -5193,8 +5375,8 @@
    *   runScan()          → Promise<{ok}>（省略可。無ければ「JS を解析」ボタンを出さない）
    *   colors             { border, bg }
    *   ---- 有料（Nest Rec AI）。省略時は無料機能のみ ----
-   *   settings           KTAiClient.createSettingsStore() 互換（load / save / hasConsent / setConsent）
-   *   createClient({ apiBase, customerToken, hostname }) → KTAiClient.createAiClient 互換（テスト注入可）
+   *   settings           KTAiClient.createSettingsStore() 互換（hasConsent / setConsent を使う）
+   *   session            KTAiClient.createSession() 互換（connect / migrateLegacy / disconnect / refresh / status / client）
    *   hostname           X-Kintone-Domain（既定 location.hostname）
    * @returns {{ regenerate(), currentOutput(), refreshCapability(), ask(), showEvidence(id) }} 外側から使う
    */
@@ -5212,13 +5394,14 @@
     const setStatus = (t) => { $status.textContent = t || ''; };
 
     // ---- 有料: Nest Rec AI（AIに質問）。無料側（生成・コピー）はこのブロックに依存しない ----
-    const $paid = $('kt-ai-paid'), $ask = $('kt-ai-ask'), $paidStatus = $('kt-ai-paid-status');
-    const $apiBase = $('kt-ai-api-base'), $token = $('kt-ai-token'), $settingsSave = $('kt-ai-settings-save'), $settingsClear = $('kt-ai-settings-clear');
+    const $paid = $('kt-ai-paid'), $ask = $('kt-ai-ask'), $paidStatus = $('kt-ai-paid-status'), $badge = $('kt-ai-conn-badge');
+    const $connect = $('kt-ai-connect'), $apiBase = $('kt-ai-api-base'), $token = $('kt-ai-token'), $connectBtn = $('kt-ai-connect-btn');
+    const $session = $('kt-ai-session'), $sessionLines = $('kt-ai-session-lines'), $sessionRefresh = $('kt-ai-session-refresh'), $sessionDisconnect = $('kt-ai-session-disconnect');
     const $consent = $('kt-ai-consent'), $consentOk = $('kt-ai-consent-ok'), $consentCancel = $('kt-ai-consent-cancel');
     const $answer = $('kt-ai-answer'), $factDetail = $('kt-ai-fact-detail');
     const settings = d.settings || null;
-    const createClient = d.createClient || null;
-    const paidEnabled = !!(settings && createClient);
+    const session = d.session || null;
+    const paidEnabled = !!(settings && session);
     let capability = { available: false, reason: KTAiClient.ERROR_CODES.NO_CONFIG };
     let healthAt = 0;
     let sending = false;
@@ -5230,13 +5413,24 @@
     const isTransient = () => !capability.available && TRANSIENT.includes(capability.reason);
     const setAskEnabled = () => { $ask.disabled = !(paidEnabled && (capability.available || isTransient()) && !sending); };
 
+    /** 接続状態 → 接続フォーム / 状態表示を切り替える */
+    function renderSession() {
+      let st = null;
+      try { st = session.status(); } catch (e) { st = null; }
+      const connected = !!st?.connected;
+      $connect.style.display = connected ? 'none' : 'flex';
+      $session.style.display = connected ? 'flex' : 'none';
+      $badge.textContent = connected ? '接続済み' : '未接続';
+      if (connected) $sessionLines.innerHTML = KTContextUi.sessionLinesHtml(st, capability);
+      return st;
+    }
     function makeClient() {
-      const cfg = settings.load();
-      if (!cfg.customerToken) return null;
       try {
-        return createClient({ apiBase: cfg.apiBase || KTAiClient.DEFAULT_API_BASE, customerToken: cfg.customerToken, hostname: d.hostname ?? undefined });
+        const st = session.status();
+        if (!st.connected) return null;
+        return session.client;
       } catch (e) {
-        return { error: e };   // client 生成の失敗も無料機能へ波及させない
+        return { error: e };   // session の失敗も無料機能へ波及させない
       }
     }
     /** /v2/health で利用可否を判定（TTL 内は再利用）。失敗しても無料機能には影響しない */
@@ -5244,12 +5438,13 @@
       if (!paidEnabled) { $paid.style.display = 'none'; return capability; }
       const client = makeClient();
       if (!client || client.error) {
-        capability = { available: false, reason: client?.error ? KTAiClient.ERROR_CODES.TRANSPORT_ERROR : KTAiClient.ERROR_CODES.NO_CONFIG };
-        setPaidStatus(KTContextUi.capabilityStatusText(capability)); setAskEnabled();
+        capability = { available: false, reason: client?.error ? KTAiClient.ERROR_CODES.TRANSPORT_ERROR : KTAiClient.ERROR_CODES.NOT_CONNECTED };
+        setPaidStatus(KTContextUi.capabilityStatusText(capability)); setAskEnabled(); renderSession();
         return capability;
       }
-      if (!force && capability.available && (Date.now() - healthAt) < KTAiClient.HEALTH_TTL_MS) { setAskEnabled(); return capability; }
-      setPaidStatus(KTContextUi.capabilityStatusText({ checking: true })); $ask.disabled = true;
+      if (!force && capability.available && (Date.now() - healthAt) < KTAiClient.HEALTH_TTL_MS) { setAskEnabled(); renderSession(); return capability; }
+      capability = { ...capability, checking: true };
+      setPaidStatus(KTContextUi.capabilityStatusText({ checking: true })); $ask.disabled = true; renderSession();
       try {
         const health = await client.getHealth();
         capability = KTAiClient.capabilityFromHealth(health);
@@ -5257,7 +5452,7 @@
       } catch (e) {
         capability = { available: false, reason: KTAiClient.isAiClientError(e) ? e.code : KTAiClient.ERROR_CODES.TRANSPORT_ERROR };
       }
-      setPaidStatus(KTContextUi.capabilityStatusText(capability)); setAskEnabled();
+      setPaidStatus(KTContextUi.capabilityStatusText(capability)); setAskEnabled(); renderSession();
       return capability;
     }
     function renderAnswer(a) {
@@ -5280,7 +5475,7 @@
       if (!capability.available && isTransient()) await refreshCapability({ force: true });   // 一時的な失敗は再判定してから送る
       if (!capability.available) { setPaidStatus(KTContextUi.capabilityStatusText(capability)); return null; }
       const client = makeClient();
-      if (!client || client.error) { capability = { available: false, reason: client?.error ? KTAiClient.ERROR_CODES.TRANSPORT_ERROR : KTAiClient.ERROR_CODES.NO_CONFIG }; setPaidStatus(KTContextUi.capabilityStatusText(capability)); setAskEnabled(); return null; }
+      if (!client || client.error) { capability = { available: false, reason: client?.error ? KTAiClient.ERROR_CODES.TRANSPORT_ERROR : KTAiClient.ERROR_CODES.NOT_CONNECTED }; setPaidStatus(KTContextUi.capabilityStatusText(capability)); setAskEnabled(); renderSession(); return null; }
       sending = true; setAskEnabled();
       const requestId = KTAiClient.newRequestId();
       setPaidStatus(`AI に送信中... （requestId: ${requestId}）`);
@@ -5295,8 +5490,9 @@
         const retry = KTAiClient.isAiClientError(e) && e.retryAfterSeconds ? `（約${e.retryAfterSeconds}秒後に再実行可能）` : '';
         setPaidStatus(`${KTAiClient.errorText(code)}${retry} [${code}] requestId: ${e?.requestId || requestId}`);
         if ([KTAiClient.ERROR_CODES.AUTH_INVALID_TOKEN, KTAiClient.ERROR_CODES.AUTH_TOKEN_EXPIRED, KTAiClient.ERROR_CODES.AUTH_DOMAIN_MISMATCH,
-          KTAiClient.ERROR_CODES.PRODUCT_NOT_ENTITLED, KTAiClient.ERROR_CODES.FEATURE_NOT_ENTITLED].includes(code)) {
+          KTAiClient.ERROR_CODES.PRODUCT_NOT_ENTITLED, KTAiClient.ERROR_CODES.FEATURE_NOT_ENTITLED, KTAiClient.ERROR_CODES.SESSION_EXPIRED, KTAiClient.ERROR_CODES.NOT_CONNECTED].includes(code)) {
           capability = { available: false, reason: code };
+          renderSession();
         }
         return null;
       } finally {
@@ -5304,16 +5500,33 @@
       }
     }
     if (paidEnabled) {
-      const cfg = settings.load();
-      $apiBase.value = cfg.apiBase || KTAiClient.DEFAULT_API_BASE;
-      $token.value = cfg.customerToken || '';
-      $settingsSave.addEventListener('click', async () => {
-        settings.save({ apiBase: $apiBase.value || KTAiClient.DEFAULT_API_BASE, customerToken: $token.value });
-        await refreshCapability({ force: true });
+      try { $apiBase.value = (session.status?.()?.apiBase) || KTAiClient.DEFAULT_API_BASE; } catch (e) { $apiBase.value = KTAiClient.DEFAULT_API_BASE; }
+      // 接続: 契約時のトークンを 1 回だけ exchange（入力欄は即座に消す。保存しない）
+      $connectBtn.addEventListener('click', async () => {
+        const token = String($token.value || '').trim();
+        $token.value = '';
+        if (!token) { setPaidStatus(KTAiClient.errorText(KTAiClient.ERROR_CODES.NO_CONFIG)); return; }
+        $connectBtn.disabled = true; setPaidStatus('Nest Rec AI に接続しています...');
+        try {
+          await session.connect(token, { apiBase: $apiBase.value || KTAiClient.DEFAULT_API_BASE });
+          await refreshCapability({ force: true });
+        } catch (e) {
+          const code = KTAiClient.isAiClientError(e) ? e.code : KTAiClient.ERROR_CODES.TRANSPORT_ERROR;
+          capability = { available: false, reason: code };
+          setPaidStatus(`${KTAiClient.errorText(code)} [${code}]${e?.requestId ? ` requestId: ${e.requestId}` : ''}`); setAskEnabled(); renderSession();
+        } finally { $connectBtn.disabled = false; }
       });
-      $settingsClear.addEventListener('click', async () => {
-        settings.save({ apiBase: KTAiClient.DEFAULT_API_BASE, customerToken: '' }); settings.setConsent(false);
-        $token.value = ''; $apiBase.value = KTAiClient.DEFAULT_API_BASE;
+      $sessionRefresh.addEventListener('click', async () => {
+        $sessionRefresh.disabled = true;
+        try { await session.refresh(); await refreshCapability({ force: true }); }
+        catch (e) {
+          const code = KTAiClient.isAiClientError(e) ? e.code : KTAiClient.ERROR_CODES.TRANSPORT_ERROR;
+          capability = { available: false, reason: code }; setPaidStatus(`${KTAiClient.errorText(code)} [${code}]`); setAskEnabled(); renderSession();
+        } finally { $sessionRefresh.disabled = false; }
+      });
+      $sessionDisconnect.addEventListener('click', async () => {
+        session.disconnect(); settings.setConsent(false);
+        $answer.style.display = 'none'; $factDetail.style.display = 'none';
         await refreshCapability({ force: true });
       });
       $ask.addEventListener('click', async () => {
@@ -5329,7 +5542,11 @@
         const id = el?.dataset?.eid ?? (typeof el?.getAttribute === 'function' ? el.getAttribute('data-eid') : null);
         if (id) showEvidence(id);
       });
-      refreshCapability();   // 初期判定（非同期。無料機能はこの結果を待たない）
+      // 初期判定（非同期。無料機能はこの結果を待たない）。旧形式の保存があれば exchange して移行する
+      (async () => {
+        try { if (typeof session.migrateLegacy === 'function') await session.migrateLegacy(); } catch (e) { }
+        await refreshCapability();
+      })();
     } else {
       $paid.style.display = 'none';
     }
@@ -9923,9 +10140,9 @@
         copyText: (t) => KTExport.copyText(t),
         runScan,
         colors: { border: BD, bg: isDark ? '#1b1b1b' : '#fff' },
-        // 有料: Nest Rec AI（設定は localStorage・token はコードに置かない）
+        // 有料: Nest Rec AI（接続情報は Refresh Token のみ localStorage・Customer Token は保存しない）
         settings: KTAiClient.createSettingsStore(),
-        createClient: (opts) => KTAiClient.createAiClient(opts),
+        session: KTAiClient.createSession({ store: KTAiClient.createSettingsStore() }),
       })
       : null;
     function applyAiMode(isAi) {

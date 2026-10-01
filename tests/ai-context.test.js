@@ -326,5 +326,28 @@ console.log('\n--- 13. アプリ全体 ---');
   assert(ctx.app.brokenRefs.total >= 1 && ctx.app.appLinks.count >= 3, 'L0 の件数と整合');
 }
 
+// =========================================================
+// 14. L0 grounding（Phase 5）: 概要の要点に根拠ID を付ける
+// =========================================================
+console.log('\n--- 14. L0 grounding ---');
+{
+  const ctx = build('顧客コードを削除して大丈夫？');
+  const ov = byKind(ctx, 'overview');
+  assert(ov.length >= 6 && ov.length <= 7, `overview fact は 6〜7 件（${ov.length}）`);
+  assert(ov.every(f => f.confidence === 'CERTAIN' && /^E\d+$/.test(f.id) && f.key.startsWith('OVERVIEW|')), 'overview は CERTAIN・根拠ID 付き・決定的 key');
+  const lastNonOv = ctx.facts.filter(f => f.kind !== 'overview').length;
+  assert(ctx.facts.slice(0, lastNonOv).every(f => f.kind !== 'overview') && ctx.facts.slice(lastNonOv).every(f => f.kind === 'overview'), 'overview は末尾（既存の根拠ID は動かない）');
+  const keys = ov.map(f => f.key.replace('OVERVIEW|', ''));
+  assert(['fields', 'dependencies', 'process', 'javascript', 'incoming', 'brokenRefs'].every(k => keys.includes(k)), `fields / dependencies / process / javascript / incoming / brokenRefs（${keys.join(',')}）`);
+  assert(ov.find(f => f.key === 'OVERVIEW|fields').count === ctx.app.fieldCount && ov.find(f => f.key === 'OVERVIEW|javascript').analyzed === true && ov.find(f => f.key === 'OVERVIEW|incoming').scanned === true, 'overview の値は L0 と一致');
+  assert(build(null).facts.length === 0, 'L0 のみ（質問なし）では overview も付けない');
+  const app = build('このアプリの問題点は？');
+  assert(byKind(app, 'overview').length >= 6, 'アプリ全体の質問にも overview が付く');
+  const bare = KTContext.build({ question: 'q', ...buildInputs({ withScan: false, withIncoming: false }), options: { now: NOW } });
+  assert(byKind(bare, 'overview').find(f => f.key === 'OVERVIEW|javascript').statement.includes('未解析') && byKind(bare, 'overview').find(f => f.key === 'OVERVIEW|incoming').statement.includes('未走査'), '未解析・未走査は overview でも明示');
+  assert(KTContext.toMarkdown(ctx).includes('overview の根拠ID'), 'Markdown の注記');
+}
+
+
 console.log(`\n${state.failed ? 'FAILED' : 'ALL PASSED'}: ${state.passed} passed / ${state.failed} failed`);
 process.exit(state.failed ? 1 : 0);
