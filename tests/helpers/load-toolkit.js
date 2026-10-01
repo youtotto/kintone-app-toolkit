@@ -11,7 +11,7 @@ function loadToolkit() {
   const lastClose = code.lastIndexOf('})();');
   if (lastClose < 0) throw new Error('IIFE close not found');
   code = code.slice(0, lastClose)
-    + '\n  globalThis.__TEST__ = { KTDeps, KTScan, KTIncoming, KTContext, KTContextUi, mountAiDocsPanel, SCRIPT_VERSION };\n'
+    + '\n  globalThis.__TEST__ = { KTDeps, KTScan, KTIncoming, KTContext, KTContextUi, KTAiClient, mountAiDocsPanel, SCRIPT_VERSION };\n'
     + code.slice(lastClose);
 
   const noop = () => { };
@@ -19,6 +19,7 @@ function loadToolkit() {
   const sandbox = {
     console, setTimeout, clearTimeout,
     setInterval: () => 0, clearInterval: noop,
+    AbortController, TextEncoder, URL,   // ブラウザにもある標準 API（timeout の中断・サイズ計測で使う）
     localStorage: fakeStorage, sessionStorage: fakeStorage,
     navigator: {},
     document: {

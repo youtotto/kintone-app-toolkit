@@ -4620,6 +4620,262 @@
 
 
   // ==========================================
+  // 3.7 Nest Rec AI Gateway クライアント (KTAiClient)
+  //   有料機能「AIに質問」の通信層。AppInsight の src/desktop/ai/ai-client.js と同じ設計
+  //   （kintone.proxy 優先・fetch フォールバック・timeout は AbortController で中断・エラーは
+  //   { code, message, httpStatus, details, retryAfterSeconds } へ正規化）。将来 AppInsight と共通化する前提で、
+  //   Toolkit 固有なのは envelope（product toolkit / feature assistant-qa / payload = KTContext）と
+  //   応答の根拠ID 再検証だけに留める。
+  //   クライアントに置かないもの: API キー・Worker secret・model 名・system prompt。
+  //   Customer Token はユーザーが設定画面で入力し localStorage（このドメイン）に保存する（コードに埋め込まない）。
+  // ==========================================
+  const KTAiClient = (() => {
+    const CONTRACT_VERSION = '2.1';
+    const PRODUCT = 'toolkit';
+    const FEATURE = 'assistant-qa';
+    const PROMPT_VERSION = '1';
+    /** 公開エンドポイント（secret ではない）。設定で上書きできる */
+    const DEFAULT_API_BASE = 'https://appinsight-ai-api.black-waterfall-157a.workers.dev';
+    const SETTINGS_KEY = 'ktAi.v1';
+    const CONSENT_KEY = 'ktAiConsent.v1';
+    const HEALTH_TTL_MS = 10 * 60 * 1000;
+
+    /** Gateway の error.code（docs/contracts/12 §7・13 §5）＋ client 側の正規化 code */
+    const ERROR_CODES = {
+      AUTH_INVALID_TOKEN: 'AUTH_INVALID_TOKEN', AUTH_TOKEN_EXPIRED: 'AUTH_TOKEN_EXPIRED', AUTH_DOMAIN_MISMATCH: 'AUTH_DOMAIN_MISMATCH',
+      PRODUCT_NOT_ENTITLED: 'PRODUCT_NOT_ENTITLED', FEATURE_NOT_ENTITLED: 'FEATURE_NOT_ENTITLED', FEATURE_NOT_IMPLEMENTED: 'FEATURE_NOT_IMPLEMENTED',
+      RATE_LIMITED: 'RATE_LIMITED', MONTHLY_LIMIT_EXCEEDED: 'MONTHLY_LIMIT_EXCEEDED',
+      UNSUPPORTED_CONTRACT_VERSION: 'UNSUPPORTED_CONTRACT_VERSION', UNKNOWN_PROMPT_VERSION: 'UNKNOWN_PROMPT_VERSION',
+      INVALID_ENVELOPE: 'INVALID_ENVELOPE', INVALID_CONTEXT: 'INVALID_CONTEXT', PAYLOAD_TOO_LARGE: 'PAYLOAD_TOO_LARGE',
+      UPSTREAM_ERROR: 'UPSTREAM_ERROR', MODEL_OUTPUT_INVALID: 'MODEL_OUTPUT_INVALID', INTERNAL_ERROR: 'INTERNAL_ERROR',
+      // client 側のみ
+      TRANSPORT_ERROR: 'TRANSPORT_ERROR', TIMEOUT: 'TIMEOUT', INVALID_RESPONSE: 'INVALID_RESPONSE', WORKER_ERROR: 'WORKER_ERROR',
+      NO_CONFIG: 'NO_CONFIG', NOT_ENTITLED: 'NOT_ENTITLED', CONTRACT_INCOMPATIBLE: 'CONTRACT_INCOMPATIBLE', NO_CONTEXT: 'NO_CONTEXT',
+    };
+    /** ユーザー向け文言（AppInsight ai-review-ui.js の AI_ERROR_TEXT を Toolkit 向けに統合） */
+    const ERROR_TEXT = {
+      NO_CONFIG: 'AI 機能を利用するには Nest Rec AI の契約（Customer Token）が必要です。接続設定からトークンを入力してください。',
+      NOT_ENTITLED: 'このトークンでは kintone App Toolkit の AI 機能を利用できません。契約内容を確認してください。',
+      PRODUCT_NOT_ENTITLED: 'このトークンでは kintone App Toolkit の AI 機能を利用できません。契約内容を確認してください。',
+      FEATURE_NOT_ENTITLED: 'このトークンでは「AIに質問」を利用できません。契約内容を確認してください。',
+      FEATURE_NOT_IMPLEMENTED: 'この機能は AI サービス側でまだ有効化されていません。',
+      CONTRACT_INCOMPATIBLE: 'Toolkit と AI サービスのバージョンが一致しません。Toolkit の更新または AI サービスの更新をお待ちください。',
+      UNSUPPORTED_CONTRACT_VERSION: 'Toolkit と AI サービスのバージョンが一致しません。Toolkit の更新が必要です。',
+      UNKNOWN_PROMPT_VERSION: 'Toolkit と AI サービスのバージョンが一致しません。Toolkit の更新が必要です。',
+      AUTH_INVALID_TOKEN: 'Customer Token が無効です。接続設定を確認してください。',
+      AUTH_TOKEN_EXPIRED: 'Customer Token の有効期限が切れています。新しいトークンを設定してください。',
+      AUTH_DOMAIN_MISMATCH: 'この kintone 環境では AI サービスを利用できません。トークンの対象ドメインを確認してください。',
+      RATE_LIMITED: 'アクセスが集中しています。しばらく待ってから再実行してください。',
+      MONTHLY_LIMIT_EXCEEDED: '今月の AI 利用回数の上限に達しています。',
+      UPSTREAM_ERROR: 'AI プロバイダが応答しませんでした。時間をおいて再実行してください。',
+      MODEL_OUTPUT_INVALID: 'AI の応答が契約形式を満たしませんでした。再実行しても解決しない場合はお問い合わせください。',
+      INTERNAL_ERROR: 'AI サービス内部でエラーが発生しました。時間をおいて再実行してください。',
+      TIMEOUT: 'AI サービスが時間内に応答しませんでした。時間をおいて再実行してください。',
+      INVALID_RESPONSE: 'AI サービスの応答を解釈できませんでした。',
+      INVALID_CONTEXT: '送信した解析データが AI サービスの検証を通りませんでした。Toolkit の更新が必要な可能性があります。',
+      INVALID_ENVELOPE: '送信データの生成に失敗しました。',
+      PAYLOAD_TOO_LARGE: '解析データが送信上限を超えています。対象を絞って再実行してください。',
+      TRANSPORT_ERROR: 'ネットワークエラーが発生しました。通信環境を確認して再実行してください。',
+      WORKER_ERROR: 'AI サービスでエラーが発生しました。',
+      NO_CONTEXT: '先に「AI Prompt を生成」で Context を作成してください。',
+    };
+    const errorText = (code) => ERROR_TEXT[code] || 'AI への質問に失敗しました。';
+
+    class AiClientError extends Error {
+      constructor({ code, message, httpStatus = null, details = null, retryAfterSeconds = null, requestId = null }) {
+        super(message || code);
+        this.name = 'AiClientError';
+        this.code = code; this.httpStatus = httpStatus; this.details = details;
+        this.retryAfterSeconds = retryAfterSeconds; this.requestId = requestId;
+      }
+    }
+    const isAiClientError = (e) => e instanceof AiClientError || (e && e.name === 'AiClientError' && typeof e.code === 'string');
+
+    // ---- 設定（localStorage。token をコードに持たない）----
+    function createSettingsStore({ storage = (typeof localStorage !== 'undefined' ? localStorage : null), host = (typeof location !== 'undefined' ? location.host : '') } = {}) {
+      const key = `${SETTINGS_KEY}.${host}`;
+      return {
+        load() {
+          try { const raw = storage?.getItem(key); const j = raw ? JSON.parse(raw) : {}; return { apiBase: String(j.apiBase || DEFAULT_API_BASE), customerToken: String(j.customerToken || '') }; }
+          catch (e) { return { apiBase: DEFAULT_API_BASE, customerToken: '' }; }
+        },
+        save({ apiBase, customerToken }) {
+          try { storage?.setItem(key, JSON.stringify({ apiBase: String(apiBase || DEFAULT_API_BASE).trim().replace(/\/+$/, ''), customerToken: String(customerToken || '').trim() })); return true; }
+          catch (e) { return false; }
+        },
+        hasConsent() { try { return storage?.getItem(`${CONSENT_KEY}.${host}`) === '1'; } catch (e) { return false; } },
+        setConsent(on) { try { if (on) storage?.setItem(`${CONSENT_KEY}.${host}`, '1'); else storage?.removeItem(`${CONSENT_KEY}.${host}`); } catch (e) { } },
+      };
+    }
+
+    // ---- transport（AppInsight と同じ: kintone.proxy 優先・fetch フォールバック・signal 対応）----
+    function createDefaultTransport({ kintoneApi = (typeof kintone !== 'undefined' ? kintone : null), fetchFn = (typeof fetch !== 'undefined' ? fetch : null) } = {}) {
+      return async ({ url, method, headers, body, signal = null }) => {
+        if (kintoneApi && typeof kintoneApi.proxy === 'function') {
+          const [respBody, status] = await kintoneApi.proxy(url, method, headers, body ?? '');
+          return { status: Number(status), body: String(respBody ?? '') };
+        }
+        if (!fetchFn) throw new AiClientError({ code: ERROR_CODES.TRANSPORT_ERROR, message: '利用可能な transport がありません' });
+        const resp = await fetchFn(url, { method, headers, body: body || undefined, ...(signal ? { signal } : {}) });
+        return { status: resp.status, body: await resp.text() };
+      };
+    }
+
+    /** Legacy（/v1 形式）エラー文字列の翻訳（AppInsight ai-client と同じ表）。未知は null */
+    function normalizeLegacyErrorCode(message) {
+      const m = String(message || '');
+      if (m === 'Missing Bearer token' || m === 'Invalid token' || m === 'Token revoked' || m === 'Token expiry invalid') return ERROR_CODES.AUTH_INVALID_TOKEN;
+      if (m === 'Token expired') return ERROR_CODES.AUTH_TOKEN_EXPIRED;
+      if (m === 'Domain mismatch' || m === 'Token domain not set' || m === 'Missing X-Kintone-Domain header') return ERROR_CODES.AUTH_DOMAIN_MISMATCH;
+      if (m === 'Monthly limit exceeded') return ERROR_CODES.MONTHLY_LIMIT_EXCEEDED;
+      if (m === 'Rate limit exceeded') return ERROR_CODES.RATE_LIMITED;
+      if (m === 'Payload too large') return ERROR_CODES.PAYLOAD_TOO_LARGE;
+      return null;
+    }
+
+    const newRequestId = () => `tk-${(typeof crypto !== 'undefined' && crypto.randomUUID) ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(16).slice(2)}`}`;
+
+    /** Contract 2.1 の request envelope（payload は KTContext.build() の結果そのもの。作り直さない） */
+    function buildAskEnvelope({ ctx, requestId = newRequestId(), pluginVersion = SCRIPT_VERSION, now = new Date().toISOString() }) {
+      if (!ctx || typeof ctx !== 'object' || !Array.isArray(ctx.facts)) throw new AiClientError({ code: ERROR_CODES.NO_CONTEXT, message: 'KTContext がありません' });
+      return {
+        contractVersion: CONTRACT_VERSION,
+        meta: {
+          requestId, generatedAt: now,
+          product: PRODUCT, feature: FEATURE, promptVersion: PROMPT_VERSION, contextVersion: String(ctx.contextVersion),
+          plugin: { name: 'kintone App Toolkit', version: pluginVersion },
+        },
+        payload: ctx,
+      };
+    }
+
+    /** /v2/health → 利用可否（client の contract が対応され、toolkit.assistant-qa が付与・実装済みか） */
+    function capabilityFromHealth(health) {
+      if (!health || health.ok !== true) return { available: false, reason: ERROR_CODES.INVALID_RESPONSE };
+      const versions = Array.isArray(health.supportedContractVersions) ? health.supportedContractVersions : [];
+      if (!versions.includes(CONTRACT_VERSION)) return { available: false, reason: ERROR_CODES.CONTRACT_INCOMPATIBLE };
+      const ent = (Array.isArray(health.entitlements) ? health.entitlements : []).find(e => e?.product === PRODUCT);
+      if (!ent || !(ent.features || []).includes(FEATURE)) return { available: false, reason: ERROR_CODES.NOT_ENTITLED };
+      const reg = health.registry?.[PRODUCT]?.[FEATURE];
+      if (!reg || reg.implemented !== true) return { available: false, reason: ERROR_CODES.FEATURE_NOT_IMPLEMENTED };
+      if (!(reg.promptVersions || []).includes(PROMPT_VERSION)) return { available: false, reason: ERROR_CODES.UNKNOWN_PROMPT_VERSION };
+      return { available: true, reason: null, usage: health.usage ?? null, tokenExpiresAt: health.tokenExpiresAt ?? null };
+    }
+
+    /**
+     * 応答の根拠ID を送信した ctx.facts[].id で再検証する（Worker の検証と二重。未知 ID は除去して warnings に記録）
+     * @returns {{ ok:boolean, errors:Array, warnings:Array, normalized:object|null }}
+     */
+    function validateAnswer(response, ctx) {
+      const errors = [], warnings = [];
+      const r = response || {};
+      if (r.ok !== true) { errors.push({ code: ERROR_CODES.INVALID_RESPONSE, path: 'ok', message: 'ok:true ではありません' }); return { ok: false, errors, warnings, normalized: null }; }
+      if (r.contractVersion !== CONTRACT_VERSION) errors.push({ code: ERROR_CODES.UNSUPPORTED_CONTRACT_VERSION, path: 'contractVersion', message: `contractVersion が一致しません: ${r.contractVersion}` });
+      if (typeof r.answer !== 'string' || !r.answer.trim()) errors.push({ code: ERROR_CODES.INVALID_RESPONSE, path: 'answer', message: 'answer がありません' });
+      const known = new Set((ctx?.facts || []).map(f => f.id));
+      const filter = (ids, path) => {
+        const kept = [];
+        for (const id of Array.isArray(ids) ? ids : []) {
+          if (known.has(id)) { if (!kept.includes(id)) kept.push(id); continue; }
+          warnings.push({ code: 'UNKNOWN_EVIDENCE_REMOVED', path, message: `未知の根拠ID を除去しました: ${id}` });
+        }
+        return kept;
+      };
+      const items = (list, path) => (Array.isArray(list) ? list : []).filter(x => x && typeof x.text === 'string' && x.text.trim())
+        .map((x, i) => ({ text: x.text, evidenceIds: filter(x.evidenceIds, `${path}[${i}]`) }));
+      if (errors.length) return { ok: false, errors, warnings, normalized: null };
+      const facts = [];
+      const demoted = [];
+      for (const f of items(r.facts, 'facts')) (f.evidenceIds.length ? facts : demoted).push(f);
+      if (demoted.length) warnings.push({ code: 'UNGROUNDED_FACT_DEMOTED', path: 'facts', message: `根拠ID の無い事実 ${demoted.length} 件を分析へ移しました` });
+      const answer = String(r.answer).replace(/\[(E[1-9][0-9]*)\]/g, (m, id) => (known.has(id) ? m : '[根拠不明]'));
+      return {
+        ok: true, errors, warnings,
+        normalized: {
+          answer,
+          answerEvidenceIds: [...new Set([...answer.matchAll(/\[(E[1-9][0-9]*)\]/g)].map(m => m[1]))],
+          facts, analysis: [...demoted, ...items(r.analysis, 'analysis')], recommendations: items(r.recommendations, 'recommendations'),
+          unknowns: (Array.isArray(r.unknowns) ? r.unknowns : []).filter(s => typeof s === 'string' && s.trim()),
+          requestId: r.meta?.requestId ?? null, usage: r.meta?.usage ?? null, ai: r.meta?.ai ?? null,
+          gatewayWarnings: r.meta?.normalization?.warnings ?? [],
+        },
+      };
+    }
+
+    /**
+     * @param {object} p apiBase / customerToken（必須）/ hostname（既定 location.hostname）/ transport / timeoutMs（既定 60000）/ pluginVersion
+     */
+    function createAiClient({ apiBase, customerToken, hostname = null, transport = null, timeoutMs = 60000, pluginVersion = SCRIPT_VERSION, nowFn = null } = {}) {
+      if (!apiBase || !String(apiBase).trim()) throw new AiClientError({ code: ERROR_CODES.INVALID_ENVELOPE, message: 'apiBase は必須です' });
+      const base = String(apiBase).replace(/\/+$/, '');
+      const send = transport || createDefaultTransport();
+      const domain = hostname ?? (typeof location !== 'undefined' ? location.hostname : '');
+      const headers = (withJson) => {
+        const h = { 'Authorization': `Bearer ${String(customerToken || '').trim()}`, 'X-Kintone-Domain': domain };
+        if (withJson) h['Content-Type'] = 'application/json';
+        return h;
+      };
+      const withTimeout = (run) => {
+        if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) return run(null);
+        const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
+        let timer;
+        const timeout = new Promise((_, reject) => {
+          timer = setTimeout(() => {
+            try { controller?.abort(); } catch (e) { }
+            reject(new AiClientError({ code: ERROR_CODES.TIMEOUT, message: `AI サービスが ${timeoutMs}ms 以内に応答しませんでした` }));
+          }, timeoutMs);
+        });
+        return Promise.race([run(controller?.signal ?? null), timeout]).finally(() => clearTimeout(timer));
+      };
+      const pickRetryAfter = (we, json) => { const n = Number(we?.retryAfterSeconds ?? json?.details?.retryAfterSec ?? null); return Number.isFinite(n) && n > 0 ? n : null; };
+      const settle = ({ status, body }) => {
+        let json = null;
+        try { json = JSON.parse(body); } catch (e) {
+          throw new AiClientError({ code: ERROR_CODES.INVALID_RESPONSE, httpStatus: status, message: 'AI サービスの応答が JSON として解釈できません' });
+        }
+        if (status >= 200 && status < 300 && json?.ok === true) return json;
+        const we = json?.error;
+        if (we && typeof we === 'object' && we.code) {
+          throw new AiClientError({ code: we.code, httpStatus: status, message: we.message || we.code, details: json, retryAfterSeconds: pickRetryAfter(we, json), requestId: we.requestId ?? null });
+        }
+        const legacy = typeof we === 'string' ? we : '';
+        throw new AiClientError({ code: normalizeLegacyErrorCode(legacy) ?? ERROR_CODES.WORKER_ERROR, httpStatus: status, message: legacy || `AI API error: ${status}`, details: json, retryAfterSeconds: pickRetryAfter(null, json) });
+      };
+      const request = async ({ path, method, body }) => {
+        let result;
+        try {
+          result = await withTimeout((signal) => send({ url: `${base}${path}`, method, headers: headers(method === 'POST'), body, signal }));
+        } catch (e) {
+          if (isAiClientError(e)) throw e;
+          if (e?.name === 'AbortError') throw new AiClientError({ code: ERROR_CODES.TIMEOUT, message: `AI サービスが ${timeoutMs}ms 以内に応答しませんでした` });
+          throw new AiClientError({ code: ERROR_CODES.TRANSPORT_ERROR, message: e?.message || String(e) });
+        }
+        return settle(result);
+      };
+      return {
+        /** GET /v2/health */
+        getHealth: () => request({ path: '/v2/health', method: 'GET', body: '' }),
+        /** POST /v2/review（toolkit.assistant-qa）。生成済みの ctx をそのまま送り、応答の根拠ID を再検証して返す */
+        async ask({ ctx, requestId = newRequestId() } = {}) {
+          const envelope = buildAskEnvelope({ ctx, requestId, pluginVersion, now: nowFn ? nowFn() : new Date().toISOString() });
+          const response = await request({ path: '/v2/review', method: 'POST', body: JSON.stringify(envelope) });
+          const v = validateAnswer(response, ctx);
+          if (!v.ok) throw new AiClientError({ code: v.errors[0].code, message: v.errors[0].message, details: { errors: v.errors }, requestId });
+          return { ...v.normalized, requestId: v.normalized.requestId || requestId, clientWarnings: v.warnings, raw: null };
+        },
+      };
+    }
+
+    return {
+      CONTRACT_VERSION, PRODUCT, FEATURE, PROMPT_VERSION, DEFAULT_API_BASE, HEALTH_TTL_MS,
+      ERROR_CODES, ERROR_TEXT, errorText, AiClientError, isAiClientError,
+      createSettingsStore, createDefaultTransport, normalizeLegacyErrorCode,
+      buildAskEnvelope, capabilityFromHealth, validateAnswer, createAiClient, newRequestId,
+    };
+  })();
+
+
+  // ==========================================
   // 3.6 AI向けドキュメント UI（KTContextUi ＋ mountAiDocsPanel）
   //   無料版の機能: Toolkit の解析結果を KTContext で AI 向け Prompt / Markdown / JSON に変換し、
   //   ユーザーがコピーして ChatGPT / Claude などへ貼り付ける。LLM へは送信しない。
@@ -4818,8 +5074,89 @@
             </label>
           </div>
           <div id="kt-ai-result" style="display:none; border:1px solid ${border}; border-radius:8px; padding:8px; background:${bg}; line-height:1.6;"></div>
+
+          <!-- 有料: Nest Rec AI（AIに質問）。無料側の生成・コピーには依存させない -->
+          <div id="kt-ai-paid" style="border-top:1px solid ${border}; padding-top:8px; display:flex; flex-direction:column; gap:6px;">
+            <div style="display:flex; align-items:center; justify-content:space-between; gap:6px;">
+              <b>Nest Rec AI</b>
+              <details id="kt-ai-paid-settings" style="font-size:11px;"><summary style="cursor:pointer;">接続設定</summary>
+                <div style="display:flex; flex-direction:column; gap:4px; padding:4px 0;">
+                  <input id="kt-ai-api-base" placeholder="API Base URL" style="border:1px solid ${border}; border-radius:6px; padding:4px; background:${bg}; color:inherit; font:inherit;">
+                  <input id="kt-ai-token" type="password" placeholder="Customer Token" autocomplete="off" style="border:1px solid ${border}; border-radius:6px; padding:4px; background:${bg}; color:inherit; font:inherit;">
+                  <div style="display:flex; gap:6px;">
+                    <button id="kt-ai-settings-save" class="btn" style="height:26px; flex:1;">保存して接続確認</button>
+                    <button id="kt-ai-settings-clear" class="btn" style="height:26px;">削除</button>
+                  </div>
+                </div>
+              </details>
+            </div>
+            <button id="kt-ai-ask" class="btn" disabled style="height:32px; font-weight:600;">AIに質問</button>
+            <div id="kt-ai-paid-status" style="opacity:.85; min-height:1.2em;"></div>
+            <div id="kt-ai-consent" style="display:none; border:1px solid ${border}; border-radius:8px; padding:8px; background:${bg}; line-height:1.5;">
+              <div><b>この Context を AI サービス（Nest Rec AI Gateway）へ送信します。</b></div>
+              <div>送信する内容: アプリ設定の要約・依存関係・JavaScript の解析結果と抜粋（伏字済み）・質問</div>
+              <div>送信しない内容: レコードの値・添付ファイル・cookie・API キー</div>
+              <div style="display:flex; gap:6px; margin-top:6px;">
+                <button id="kt-ai-consent-ok" class="btn" style="height:28px; flex:1;">送信する（次回から確認しない）</button>
+                <button id="kt-ai-consent-cancel" class="btn" style="height:28px;">キャンセル</button>
+              </div>
+            </div>
+            <div id="kt-ai-answer" style="display:none; border:1px solid ${border}; border-radius:8px; padding:8px; background:${bg}; line-height:1.6;"></div>
+            <div id="kt-ai-fact-detail" style="display:none; border:1px dashed ${border}; border-radius:8px; padding:8px; background:${bg}; line-height:1.5; font-size:11px;"></div>
+          </div>
         </div>`;
     }
+
+    /** 利用可否 → 表示文（AI 未契約でも無料機能はそのまま使える） */
+    function capabilityStatusText(cap) {
+      if (!cap) return '';
+      if (cap.checking) return '接続を確認しています...';
+      if (cap.available) {
+        const u = cap.usage ? `（今月 ${cap.usage.usedThisMonth} / ${cap.usage.monthlyLimit} 回）` : '';
+        return `AI に質問できます${u}`;
+      }
+      return KTAiClient.errorText(cap.reason);
+    }
+
+    /** 根拠ID のチップ（クリックで該当 fact を表示） */
+    const chips = (ids) => (ids || []).map(id => `<button type="button" class="btn kt-ai-chip" data-eid="${esc(id)}" style="padding:0 6px; height:20px; font-size:11px; margin-left:4px;">${esc(id)}</button>`).join('');
+
+    /** AI 回答（回答 / 確認できた事実 / AI による分析 / 提案 / 確認できないこと） */
+    function answerHtml(a) {
+      if (!a) return '';
+      const list = (items, empty) => (items && items.length)
+        ? `<ul style="margin:4px 0 0 18px; padding:0;">${items.map(x => `<li>${esc(x.text)}${chips(x.evidenceIds)}</li>`).join('')}</ul>`
+        : `<div style="opacity:.6; margin-top:4px;">${esc(empty)}</div>`;
+      const answerText = esc(a.answer).replace(/\[(E[1-9][0-9]*)\]/g, (m, id) => chips([id]));
+      const warn = [...(a.clientWarnings || []), ...(a.gatewayWarnings || [])];
+      return `
+        <div style="display:flex; align-items:center; justify-content:space-between;"><b>AI回答</b><span style="opacity:.6; font-size:11px;">requestId: ${esc(a.requestId || '')}</span></div>
+        <div style="margin-top:6px;"><b>回答</b><div style="margin-top:4px;">${answerText}</div></div>
+        <div style="margin-top:8px;"><b>確認できた事実</b>${list(a.facts, '根拠付きの事実はありません')}</div>
+        <div style="margin-top:8px;"><b>AIによる分析</b>${list(a.analysis, '分析はありません')}</div>
+        <div style="margin-top:8px;"><b>提案</b>${list(a.recommendations, '提案はありません')}</div>
+        <div style="margin-top:8px;"><b>確認できないこと</b>${(a.unknowns && a.unknowns.length) ? `<ul style="margin:4px 0 0 18px; padding:0;">${a.unknowns.map(u => `<li>${esc(u)}</li>`).join('')}</ul>` : '<div style="opacity:.6; margin-top:4px;">なし</div>'}</div>
+        ${warn.length ? `<details style="margin-top:6px; font-size:11px;"><summary style="cursor:pointer;">検証で除去・調整した項目（${warn.length}）</summary>${warn.map(w => `<div>${esc(w.code)}: ${esc(w.message)}</div>`).join('')}</details>` : ''}
+        ${a.usage ? `<div style="margin-top:6px; opacity:.6; font-size:11px;">今月の利用: ${esc(a.usage.usedThisMonth)} / ${esc(a.usage.monthlyLimit)} 回</div>` : ''}
+        <div style="margin-top:6px; opacity:.6; font-size:11px;">AI の回答は Toolkit が解析した事実を根拠にした参考情報です。設定を変更する前に実際の設定・コードで確認してください。</div>`;
+    }
+
+    /** 根拠ID → fact の詳細（将来は Fields / Relations / Scanner へ遷移させる） */
+    function evidenceDetailHtml(fact) {
+      if (!fact) return '<div style="opacity:.7;">該当する根拠が見つかりません</div>';
+      const rows = [
+        ['根拠ID', fact.id], ['種別', fact.kind], ['確度', `${confJaOf(fact.confidence)}（${fact.confidence}）`],
+        fact.source ? ['利用元', `${fact.source.type} ${fact.source.name ? `「${fact.source.name}」` : ''} (${fact.source.id})`] : null,
+        fact.relationType ? ['関係', `${fact.relationLabel || ''} (${fact.relationType})`] : null,
+        fact.target ? ['利用先', `${fact.target.type} ${fact.target.name ? `「${fact.target.name}」` : ''} (${fact.target.id})`] : null,
+        fact.setting && (fact.setting.type || fact.setting.name) ? ['設定', `${fact.setting.name || ''} (${fact.setting.type || ''})`] : null,
+        fact.file ? ['ファイル', `${fact.file.target || ''} ${fact.file.name || ''}${fact.line ? ` ${fact.line} 行目` : ''}`] : null,
+        Array.isArray(fact.lines) ? ['行', fact.lines.join(', ')] : null,
+      ].filter(Boolean);
+      return `<div><b>${esc(fact.id)}</b> ${esc(fact.statement)}</div>` +
+        `<table style="margin-top:4px; border-collapse:collapse;">${rows.map(([k, v]) => `<tr><td style="opacity:.7; padding:1px 8px 1px 0; white-space:nowrap;">${esc(k)}</td><td>${esc(v)}</td></tr>`).join('')}</table>`;
+    }
+    const confJaOf = (c) => ({ CERTAIN: '確実', LIKELY: '可能性が高い', UNCERTAIN: '要確認', NOT_ANALYZED: '未解析' })[c] || c || '';
 
     /** 生成結果のサマリ HTML（coverage / truncation / size / confidence ヘルプ） */
     function resultHtml(gen) {
@@ -4842,7 +5179,7 @@
     return {
       TARGET_TYPES, PRESETS, CONFIDENCE_HELP, INTRO_TEXT, INTRO_NOTE,
       listTargets, fileLabel, toBuildRequest, generate, coverageRows, truncationSummary, sizeSummary, outputFilename,
-      panelHtml, resultHtml,
+      panelHtml, resultHtml, capabilityStatusText, answerHtml, evidenceDetailHtml,
     };
   })();
 
@@ -4855,7 +5192,11 @@
    *   copyText(text)     → Promise<boolean>
    *   runScan()          → Promise<{ok}>（省略可。無ければ「JS を解析」ボタンを出さない）
    *   colors             { border, bg }
-   * @returns {{ regenerate(), currentOutput() }} 外側（ローカル保存ボタン等）から使う
+   *   ---- 有料（Nest Rec AI）。省略時は無料機能のみ ----
+   *   settings           KTAiClient.createSettingsStore() 互換（load / save / hasConsent / setConsent）
+   *   createClient({ apiBase, customerToken, hostname }) → KTAiClient.createAiClient 互換（テスト注入可）
+   *   hostname           X-Kintone-Domain（既定 location.hostname）
+   * @returns {{ regenerate(), currentOutput(), refreshCapability(), ask(), showEvidence(id) }} 外側から使う
    */
   function mountAiDocsPanel(host, d) {
     host.innerHTML = KTContextUi.panelHtml(d.colors || { border: '#ccc', bg: 'transparent' });
@@ -4869,6 +5210,124 @@
     let last = null;      // 直近の generate 結果
     const esc = escapeHtml;
     const setStatus = (t) => { $status.textContent = t || ''; };
+
+    // ---- 有料: Nest Rec AI（AIに質問）。無料側（生成・コピー）はこのブロックに依存しない ----
+    const $paid = $('kt-ai-paid'), $ask = $('kt-ai-ask'), $paidStatus = $('kt-ai-paid-status');
+    const $apiBase = $('kt-ai-api-base'), $token = $('kt-ai-token'), $settingsSave = $('kt-ai-settings-save'), $settingsClear = $('kt-ai-settings-clear');
+    const $consent = $('kt-ai-consent'), $consentOk = $('kt-ai-consent-ok'), $consentCancel = $('kt-ai-consent-cancel');
+    const $answer = $('kt-ai-answer'), $factDetail = $('kt-ai-fact-detail');
+    const settings = d.settings || null;
+    const createClient = d.createClient || null;
+    const paidEnabled = !!(settings && createClient);
+    let capability = { available: false, reason: KTAiClient.ERROR_CODES.NO_CONFIG };
+    let healthAt = 0;
+    let sending = false;
+    let lastAnswer = null;
+    const setPaidStatus = (t) => { $paidStatus.textContent = t || ''; };
+    const setAskEnabled = () => { $ask.disabled = !(paidEnabled && capability.available && !sending); };
+
+    function makeClient() {
+      const cfg = settings.load();
+      if (!cfg.customerToken) return null;
+      try {
+        return createClient({ apiBase: cfg.apiBase || KTAiClient.DEFAULT_API_BASE, customerToken: cfg.customerToken, hostname: d.hostname ?? undefined });
+      } catch (e) {
+        return { error: e };   // client 生成の失敗も無料機能へ波及させない
+      }
+    }
+    /** /v2/health で利用可否を判定（TTL 内は再利用）。失敗しても無料機能には影響しない */
+    async function refreshCapability({ force = false } = {}) {
+      if (!paidEnabled) { $paid.style.display = 'none'; return capability; }
+      const client = makeClient();
+      if (!client || client.error) {
+        capability = { available: false, reason: client?.error ? KTAiClient.ERROR_CODES.TRANSPORT_ERROR : KTAiClient.ERROR_CODES.NO_CONFIG };
+        setPaidStatus(KTContextUi.capabilityStatusText(capability)); setAskEnabled();
+        return capability;
+      }
+      if (!force && capability.available && (Date.now() - healthAt) < KTAiClient.HEALTH_TTL_MS) { setAskEnabled(); return capability; }
+      setPaidStatus(KTContextUi.capabilityStatusText({ checking: true })); $ask.disabled = true;
+      try {
+        const health = await client.getHealth();
+        capability = KTAiClient.capabilityFromHealth(health);
+        healthAt = Date.now();
+      } catch (e) {
+        capability = { available: false, reason: KTAiClient.isAiClientError(e) ? e.code : KTAiClient.ERROR_CODES.TRANSPORT_ERROR };
+      }
+      setPaidStatus(KTContextUi.capabilityStatusText(capability)); setAskEnabled();
+      return capability;
+    }
+    function renderAnswer(a) {
+      lastAnswer = a;
+      $answer.innerHTML = KTContextUi.answerHtml(a);
+      $answer.style.display = '';
+      $factDetail.style.display = 'none';
+    }
+    function showEvidence(id) {
+      const fact = (last?.ctx?.facts || []).find(f => f.id === id) || null;
+      $factDetail.innerHTML = KTContextUi.evidenceDetailHtml(fact);
+      $factDetail.style.display = '';
+      return fact;
+    }
+    /** 送信（二重送信防止・loading・requestId 保持）。生成済みの同じ ctx を送る */
+    async function ask() {
+      if (!paidEnabled) return null;
+      if (!last || !last.ok) { setPaidStatus(KTAiClient.errorText(KTAiClient.ERROR_CODES.NO_CONTEXT)); return null; }
+      if (sending) return null;
+      if (!capability.available) { setPaidStatus(KTContextUi.capabilityStatusText(capability)); return null; }
+      const client = makeClient();
+      if (!client || client.error) { capability = { available: false, reason: client?.error ? KTAiClient.ERROR_CODES.TRANSPORT_ERROR : KTAiClient.ERROR_CODES.NO_CONFIG }; setPaidStatus(KTContextUi.capabilityStatusText(capability)); setAskEnabled(); return null; }
+      sending = true; setAskEnabled();
+      const requestId = KTAiClient.newRequestId();
+      setPaidStatus(`AI に送信中... （requestId: ${requestId}）`);
+      $answer.style.display = 'none'; $factDetail.style.display = 'none';
+      try {
+        const a = await client.ask({ ctx: last.ctx, requestId });
+        renderAnswer(a);
+        setPaidStatus(`回答を受信しました${a.usage ? `（今月 ${a.usage.usedThisMonth} / ${a.usage.monthlyLimit} 回）` : ''}`);
+        return a;
+      } catch (e) {
+        const code = KTAiClient.isAiClientError(e) ? e.code : KTAiClient.ERROR_CODES.TRANSPORT_ERROR;
+        const retry = KTAiClient.isAiClientError(e) && e.retryAfterSeconds ? `（約${e.retryAfterSeconds}秒後に再実行可能）` : '';
+        setPaidStatus(`${KTAiClient.errorText(code)}${retry} [${code}] requestId: ${e?.requestId || requestId}`);
+        if ([KTAiClient.ERROR_CODES.AUTH_INVALID_TOKEN, KTAiClient.ERROR_CODES.AUTH_TOKEN_EXPIRED, KTAiClient.ERROR_CODES.AUTH_DOMAIN_MISMATCH,
+          KTAiClient.ERROR_CODES.PRODUCT_NOT_ENTITLED, KTAiClient.ERROR_CODES.FEATURE_NOT_ENTITLED].includes(code)) {
+          capability = { available: false, reason: code };
+        }
+        return null;
+      } finally {
+        sending = false; setAskEnabled();
+      }
+    }
+    if (paidEnabled) {
+      const cfg = settings.load();
+      $apiBase.value = cfg.apiBase || KTAiClient.DEFAULT_API_BASE;
+      $token.value = cfg.customerToken || '';
+      $settingsSave.addEventListener('click', async () => {
+        settings.save({ apiBase: $apiBase.value || KTAiClient.DEFAULT_API_BASE, customerToken: $token.value });
+        await refreshCapability({ force: true });
+      });
+      $settingsClear.addEventListener('click', async () => {
+        settings.save({ apiBase: KTAiClient.DEFAULT_API_BASE, customerToken: '' }); settings.setConsent(false);
+        $token.value = ''; $apiBase.value = KTAiClient.DEFAULT_API_BASE;
+        await refreshCapability({ force: true });
+      });
+      $ask.addEventListener('click', async () => {
+        if (!last || !last.ok) { setPaidStatus(KTAiClient.errorText(KTAiClient.ERROR_CODES.NO_CONTEXT)); return; }
+        if (!settings.hasConsent()) { $consent.style.display = ''; return; }   // 送信前の確認（初回のみ）
+        await ask();
+      });
+      $consentOk.addEventListener('click', async () => { settings.setConsent(true); $consent.style.display = 'none'; await ask(); });
+      $consentCancel.addEventListener('click', () => { $consent.style.display = 'none'; });
+      $answer.addEventListener('click', (ev) => {
+        const t = ev?.target;
+        const el = t && typeof t.closest === 'function' ? t.closest('[data-eid]') : t;
+        const id = el?.dataset?.eid ?? (typeof el?.getAttribute === 'function' ? el.getAttribute('data-eid') : null);
+        if (id) showEvidence(id);
+      });
+      refreshCapability();   // 初期判定（非同期。無料機能はこの結果を待たない）
+    } else {
+      $paid.style.display = 'none';
+    }
 
     function fillTargets() {
       const inputs = d.getInputs() || {};
@@ -4970,6 +5429,9 @@
     return {
       regenerate: () => (last ? generate() : null),
       refreshTargets: fillTargets,
+      refreshCapability, ask, showEvidence,
+      lastAnswer: () => lastAnswer,
+      capability: () => capability,
       currentOutput: () => {
         if (!last || !last.ok) return null;
         const view = $view.value || 'prompt';
@@ -9456,6 +9918,9 @@
         copyText: (t) => KTExport.copyText(t),
         runScan,
         colors: { border: BD, bg: isDark ? '#1b1b1b' : '#fff' },
+        // 有料: Nest Rec AI（設定は localStorage・token はコードに置かない）
+        settings: KTAiClient.createSettingsStore(),
+        createClient: (opts) => KTAiClient.createAiClient(opts),
       })
       : null;
     function applyAiMode(isAi) {

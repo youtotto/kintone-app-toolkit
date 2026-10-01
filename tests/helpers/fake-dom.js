@@ -8,7 +8,10 @@ function makeFakeElement(id) {
   return {
     id, value: '', innerHTML: '', textContent: '', disabled: false, style: {},
     addEventListener(type, fn) { (listeners[type] = listeners[type] || []).push(fn); },
-    async dispatch(type) { for (const fn of (listeners[type] || [])) await fn({ type, target: this }); },
+    async dispatch(typeOrEvent) {
+      const ev = typeof typeOrEvent === 'string' ? { type: typeOrEvent, target: this } : { target: this, ...typeOrEvent };
+      for (const fn of (listeners[ev.type] || [])) await fn(ev);
+    },
     listenerCount(type) { return (listeners[type] || []).length; },
   };
 }
