@@ -5224,7 +5224,11 @@
     let sending = false;
     let lastAnswer = null;
     const setPaidStatus = (t) => { $paidStatus.textContent = t || ''; };
-    const setAskEnabled = () => { $ask.disabled = !(paidEnabled && capability.available && !sending); };
+    // 一時的な失敗（rate limit / timeout / 通信・サービス障害）は再試行できるようボタンを残す（押下時に再判定）
+    const TRANSIENT = [KTAiClient.ERROR_CODES.RATE_LIMITED, KTAiClient.ERROR_CODES.TIMEOUT, KTAiClient.ERROR_CODES.TRANSPORT_ERROR,
+      KTAiClient.ERROR_CODES.UPSTREAM_ERROR, KTAiClient.ERROR_CODES.INTERNAL_ERROR, KTAiClient.ERROR_CODES.WORKER_ERROR, KTAiClient.ERROR_CODES.INVALID_RESPONSE];
+    const isTransient = () => !capability.available && TRANSIENT.includes(capability.reason);
+    const setAskEnabled = () => { $ask.disabled = !(paidEnabled && (capability.available || isTransient()) && !sending); };
 
     function makeClient() {
       const cfg = settings.load();
@@ -5273,6 +5277,7 @@
       if (!paidEnabled) return null;
       if (!last || !last.ok) { setPaidStatus(KTAiClient.errorText(KTAiClient.ERROR_CODES.NO_CONTEXT)); return null; }
       if (sending) return null;
+      if (!capability.available && isTransient()) await refreshCapability({ force: true });   // 一時的な失敗は再判定してから送る
       if (!capability.available) { setPaidStatus(KTContextUi.capabilityStatusText(capability)); return null; }
       const client = makeClient();
       if (!client || client.error) { capability = { available: false, reason: client?.error ? KTAiClient.ERROR_CODES.TRANSPORT_ERROR : KTAiClient.ERROR_CODES.NO_CONFIG }; setPaidStatus(KTContextUi.capabilityStatusText(capability)); setAskEnabled(); return null; }
