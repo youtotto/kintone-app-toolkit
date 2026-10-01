@@ -3794,6 +3794,8 @@
 
     return {
       REL, CONF,
+      // 表示ラベル（KTContext の Markdown / 文章化で再利用する。語彙の正本はここ）
+      REL_LABEL, IMPACT_CATEGORY, CONF_JA, BROKEN_ROLE_LABEL,
       normalizeFields, buildCode2Label, labelOf,
       maskStringLiterals, extractFieldCodes, parseSortCodes,
       buildDependencyData, usageMapFromEdges, mergeScannerEdges,
@@ -3802,6 +3804,796 @@
       buildSubgraph, toMermaid, GRAPH_SCOPES, searchEdges,
       buildCalcTree, calcTreeDepth, calcChainStats, calcTreeToText,
       toJSON, toMarkdown, toCSV,
+    };
+  })();
+
+
+  // ==========================================
+  // 3.5 AI Context Builder (KTContext)
+  //   Toolkit が既に解析している事実（DATA / DEPS / KTScan / KTIncoming）を、
+  //   AI が理解しやすく・根拠を追跡でき・サイズを制御できる Context へ変換する。
+  //
+  //   責務: 質問から対象候補を決定（決定的・LLM 不使用）／既存解析結果から事実を取得／重複排除／
+  //         根拠ID付与／confidence・coverage の保持／truncation 記録／AI向け JSON・Markdown・Prompt への変換
+  //   担当しない: LLM 呼び出し・Prompt 本文（システム指示）・ライセンス・Gateway 通信・AI 回答の生成/検証
+  //
+  //   階層: L0（App Overview・常に含める）／L1（Focus Context・対象に直接関係する事実）／
+  //         L2（Detail Context・JS ファイル等の詳細。必要時のみ）
+  //   Fact と Interpretation の分離: ここで出すのは Toolkit の決定的な解析結果（事実）のみ。
+  //   「削除すると業務が止まる」のような解釈は含めない（impactOf の operations は Toolkit 自身の
+  //   決定的な注意書きなので change-impact fact として含める）。
+  //   DOM / kintone API には依存しない純関数（Node の vm sandbox でテストできる）。
+  //   有料 AI 専用ではなく、無料版の「AI 向けドキュメント / Prompt のコピー」でも同じ Context を使う。
+  // ==========================================
+  const KTContext = (() => {
+    const CONTEXT_VERSION = '1';
+    const LEVELS = { L0: 'L0', L1: 'L1', L2: 'L2' };
+
+    // ---- 既定のサイズ制御（件数上限・バイト上限。超過分は truncation に記録する）----
+    const DEFAULT_LIMITS = {
+      maxFields: 50,           // L0 のフィールド一覧（L0 を 1〜2k tokens に収めるための既定。大きなアプリは typeCounts と省略記録で補う）
+      maxViewNames: 20,        // L0 の一覧名
+      maxFacts: 120,           // facts 全体の上限（超過は kind ごとの優先順で削る）
+      maxDependencyFacts: 60,  // 対象フィールドの直接依存
+      maxIndirectFacts: 20,
+      maxBrokenRefFacts: 30,
+      maxAppLinkFacts: 30,
+      maxIncomingFacts: 30,
+      maxJsMatchFacts: 20,     // JS の出現箇所（行・抜粋）
+      maxJsFileFacts: 20,
+      maxSnippetLen: 160,      // JS 抜粋の最大長（AppInsight の SNIPPET_MAX_LEN と同じ）
+      maxCodeExcerptLines: 12, // L2 のコード抜粋（対象行の前後。本文がある場合のみ）
+      maxCodeExcerpts: 6,
+      maxBytes: null,          // 全体のバイト上限（null = 件数上限のみ）
+    };
+    const LEVEL_BUDGET_BYTES = { L0: 8 * 1024, L1: 48 * 1024, L2: 80 * 1024 }; // 目安（約 2k / 12k / 20k tokens）
+
+    // ---- 秘密情報の伏字（AppInsight analysis/js-signals.js redactSecretLikeText の移植。過剰 mask 側に倒す）----
+    //   key:value 形の secret 系代入・Bearer / API トークンヘッダ・40 文字以上の不透明トークンを '***' へ
+    function redactSecretLikeText(text) {
+      let s = String(text ?? '');
+      s = s.replace(
+        /((?:api[_-]?key|apikey|access[_-]?key|token|secret|password|passwd|credential|authorization|cookie)['"`]?\s*[:=]\s*['"`])([^'"`]{4,}?)(['"`])/gi,
+        '$1***$3');
+      s = s.replace(/((?:X-Cybozu-API-Token|X-Cybozu-Authorization|Authorization)['"`]?\s*[:=]\s*['"`]?)([^'"`\s,}]{4,})/gi, '$1***');
+      s = s.replace(/\bBearer\s+[A-Za-z0-9\-._~+/=]{8,}/gi, 'Bearer ***');
+      s = s.replace(/\b[A-Za-z0-9_\-]{40,}\b/g, '***');
+      return s;
+    }
+    const bounded = (s, max) => {
+      const t = String(s ?? '');
+      return t.length > max ? `${t.slice(0, max)}…` : t;
+    };
+    const snippetOf = (s, max) => bounded(redactSecretLikeText(String(s ?? '').replace(/\r?\n/g, '⏎')), max);
+
+    // ---- サイズ計測（厳密な tokenizer は持たない。文字種から近似する）----
+    //   CJK（日本語）はおおむね 1 文字 ≒ 1 token、それ以外（ASCII の JSON 構造・英数）は約 4 文字 ≒ 1 token
+    function measureText(str) {
+      const s = String(str ?? '');
+      let cjk = 0;
+      for (let i = 0; i < s.length; i++) {
+        const c = s.charCodeAt(i);
+        if (c >= 0x3000 && c <= 0x9FFF || c >= 0xF900 && c <= 0xFAFF || c >= 0xFF00 && c <= 0xFFEF) cjk++;
+      }
+      const other = s.length - cjk;
+      let bytes = 0;
+      for (let i = 0; i < s.length; i++) {
+        const c = s.charCodeAt(i);
+        bytes += c < 0x80 ? 1 : c < 0x800 ? 2 : (c >= 0xD800 && c <= 0xDBFF) ? 4 : 3;
+        if (c >= 0xD800 && c <= 0xDBFF) i++;
+      }
+      return { chars: s.length, bytes, approxTokens: Math.ceil(cjk + other / 4) };
+    }
+
+    // ---- 根拠ID：決定的な識別子（表示文字列に依存せず、同じ解析結果なら同じ ID）----
+    //   edge の identity = 利用元（type:id）／関係種別／利用先（type:id）／設定種別／設定名
+    //   JS ファイルは表示用ファイル名ではなく、既存 edge の sourceId（target:kind:name）をそのまま使う
+    const edgeKey = (e) => [
+      `${e.sourceType}:${e.sourceId}`, e.relationType, `${e.targetType}:${e.targetId}`,
+      e.context?.settingType ?? '', e.context?.settingName ?? '',
+    ].join('|');
+    const cmp = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
+
+    // 事実の種別と並び順（根拠IDの採番順。同じ入力なら常に同じ順になる）
+    const FACT_KIND_ORDER = [
+      'field', 'dependency', 'indirect-dependency', 'incoming-reference', 'js-reference', 'js-app-reference',
+      'js-external-field', 'calc-chain', 'change-impact', 'broken-reference', 'app-link', 'js-file', 'js-match', 'code-excerpt',
+    ];
+    const kindRank = (k) => { const i = FACT_KIND_ORDER.indexOf(k); return i < 0 ? 99 : i; };
+
+    const CONF_RANK = { CERTAIN: 0, LIKELY: 1, UNCERTAIN: 2, NOT_ANALYZED: 3 };
+    /** Toolkit の confidence 語彙（KTDeps.CONF）に正規化する。未知の値は UNCERTAIN（確実扱いにしない） */
+    const normConf = (c) => (c && CONF_RANK[c] != null) ? c : (c === 'HIGH' || c === 'MEDIUM' ? 'LIKELY' : c === 'LOW' ? 'UNCERTAIN' : 'UNCERTAIN');
+    const isCertain = (c) => c === 'CERTAIN';
+
+    const REL_LABEL = () => KTDeps.REL_LABEL || {};
+    const SRC_LABEL = () => KTDeps.IMPACT_CATEGORY || {};
+    const relLabel = (r) => REL_LABEL()[r] || r || '';
+    const srcLabel = (t) => SRC_LABEL()[t] || t || '';
+    const confJa = (c) => (KTDeps.CONF_JA || {})[c] || c || '';
+
+    // ================= 対象（focus）の決定的な解決 =================
+
+    /**
+     * 質問と照合する辞書を作る（フィールドコード／ラベル／JS ファイル名／アプリID／設定名）
+     * 値はすべて既存データ由来。LLM は使わない
+     */
+    function buildDictionary({ data, deps, scan }) {
+      const entries = []; // { key, type, id, label, by, extra }
+      const push = (key, type, id, label, by, extra = {}) => {
+        const k = String(key ?? '').trim();
+        if (!k) return;
+        entries.push({ key: k, type, id: String(id), label: label ?? String(id), by, ...extra });
+      };
+      const fieldsN = Array.isArray(data?.fields) ? data.fields : KTDeps.normalizeFields(data?.fields || {});
+      for (const f of fieldsN) {
+        push(f.code, 'field', f.code, f.label, 'code', { fieldType: f.type });
+        if (f.label && f.label !== f.code) push(f.label, 'field', f.code, f.label, 'label', { fieldType: f.type });
+      }
+      // JS 解析でのみ現れたコード（グループ等）も対象にできる
+      for (const n of (deps?.nodes || [])) {
+        if (n.type === 'FIELD' && n.fromScanner) push(String(n.id).replace(/^FIELD:/, ''), 'field', String(n.id).replace(/^FIELD:/, ''), n.name, 'code', { fieldType: n.fieldType });
+        if (n.type === 'CUSTOMIZE') {
+          // 既存 edge の sourceId（target:kind:name）を identity にする。表示名（ファイル名）は照合キー
+          push(n.name, 'file', String(n.id).replace(/^CUSTOMIZE:/, ''), n.name, 'fileName', { target: n.target, kind: n.kind });
+        }
+        if (n.type === 'VIEW' || n.type === 'REPORT' || n.type === 'NOTIFICATION' || n.type === 'ACTION'
+          || n.type === 'PROCESS_STATE' || n.type === 'PROCESS_ACTION') {
+          push(n.name, 'setting', String(n.id), n.name, 'settingName', { settingType: n.type });
+        }
+      }
+      for (const f of (scan?.files || [])) {
+        const id = `${f.target}:${f.kind}:${f.name}`;
+        if (!entries.some(e => e.type === 'file' && e.id === id)) push(f.name, 'file', id, f.name, 'fileName', { target: f.target, kind: f.kind });
+      }
+      return entries;
+    }
+
+    /**
+     * 質問文から対象を決める（完全一致の辞書照合。長い一致を優先し、重なる短い一致は捨てる）
+     * @returns {{ resolution:'resolved'|'ambiguous'|'none'|'explicit', target?:object, candidates:Array }}
+     */
+    function resolveFocus({ question, focus, data, deps, scan }) {
+      // 明示指定が最優先（UI や呼び出し側が対象を決めている場合）
+      if (focus && typeof focus === 'object' && focus.type && focus.id != null) {
+        return { resolution: 'explicit', target: { type: focus.type, id: String(focus.id), label: focus.label ?? String(focus.id) }, candidates: [] };
+      }
+      const q = String(question ?? '');
+      if (!q.trim()) return { resolution: 'none', candidates: [] };
+      const dict = buildDictionary({ data, deps, scan });
+
+      // 出現位置を集め、長いキーを優先して重なりを除去する（KTDeps.extractFieldCodes と同じ考え方）
+      const hits = [];
+      for (const en of dict) {
+        let from = 0;
+        while (true) {
+          const idx = q.indexOf(en.key, from);
+          if (idx < 0) break;
+          hits.push({ ...en, start: idx, end: idx + en.key.length });
+          from = idx + 1;
+        }
+      }
+      hits.sort((a, b) => (a.start - b.start) || (b.end - a.end) || cmp(a.type, b.type) || cmp(a.id, b.id));
+      // 同じ区間を占める複数の候補（例: 同じラベルの別フィールド）は全部残す。短い部分一致だけ落とす
+      const kept = [];
+      let lastStart = -1, lastEnd = -1;
+      for (const h of hits) {
+        if (h.start === lastStart && h.end === lastEnd) { kept.push(h); continue; }
+        if (h.start < lastEnd) continue;
+        kept.push(h);
+        lastStart = h.start; lastEnd = h.end;
+      }
+      // 同一 target（type:id）は 1 候補にまとめる（コードとラベルの両方で当たった場合など）
+      const byTarget = new Map();
+      for (const h of kept) {
+        const k = `${h.type}:${h.id}`;
+        const c = byTarget.get(k);
+        if (c) { if (!c.matchedBy.includes(h.by)) c.matchedBy.push(h.by); continue; }
+        byTarget.set(k, {
+          type: h.type, id: h.id, label: h.label, matchedBy: [h.by], matchedText: h.key,
+          ...(h.fieldType ? { fieldType: h.fieldType } : {}),
+          ...(h.target ? { target: h.target, kind: h.kind } : {}),
+          ...(h.settingType ? { settingType: h.settingType } : {}),
+        });
+      }
+      const candidates = [...byTarget.values()].sort((a, b) => cmp(a.type, b.type) || cmp(a.id, b.id));
+      if (!candidates.length) return { resolution: 'none', candidates: [] };
+      if (candidates.length === 1) return { resolution: 'resolved', target: candidates[0], candidates };
+      return { resolution: 'ambiguous', candidates }; // 勝手に 1 件へ決めない
+    }
+
+    // ================= coverage =================
+
+    function buildCoverage({ data, deps, scan, incoming }) {
+      const meta = deps?.meta || {};
+      const jsAnalyzed = !!(meta.scannerMergedAt || (scan && Array.isArray(scan.results)));
+      const incomingScanned = !!(meta.incomingScannedAt || (incoming && Array.isArray(incoming.rows)));
+      const jsFiles = [
+        ...((data?.customize?.desktop?.js || []).map(x => ({ ...x, target: 'desktop' }))),
+        ...((data?.customize?.mobile?.js || []).map(x => ({ ...x, target: 'mobile' }))),
+      ];
+      const urlJs = jsFiles.filter(x => x?.type === 'URL' || (!x?.file && x?.url)).length;
+      const notes = [];
+      if (!jsAnalyzed) notes.push('JavaScript/CSS 本文は未解析（Field Scanner 未実行）。JS からの参照は含まれていない');
+      if (jsAnalyzed && urlJs) notes.push(`URL 指定の JavaScript ${urlJs} 件は本文を取得できないため未解析`);
+      if (!incomingScanned) notes.push('他アプリからこのアプリへの参照は未走査。被参照は含まれていない');
+      if (incomingScanned && incoming?.stats?.truncated) notes.push('他アプリの走査は上限件数で打ち切られている');
+      if (incomingScanned && (incoming?.stats?.failedApps || meta.incomingStats?.failedApps)) {
+        notes.push(`他アプリの走査で取得できなかったアプリがある（${incoming?.stats?.failedApps ?? meta.incomingStats?.failedApps} 件）`);
+      }
+      if (meta.pluginCount) notes.push(`プラグイン ${meta.pluginCount} 個の設定内容は API で取得できないため未解析`);
+      notes.push('レコードの実データ・添付ファイルは含まない');
+      return {
+        fields: !!data?.fields,
+        layout: Array.isArray(data?.layout) && data.layout.length > 0,
+        settings: {
+          views: !!data?.views, reports: !!data?.reports,
+          notifications: !!(data?.generalNotify || data?.perRecordNotify || data?.reminderNotify),
+          process: !!data?.status, acl: !!(data?.recordAcl || data?.fieldAcl), actions: !!data?.actions,
+          customize: !!data?.customize,
+        },
+        dependencies: !!(deps && Array.isArray(deps.edges)),
+        javascript: jsAnalyzed,
+        javascriptScannedAt: scan?.meta?.scannedAt || meta.scannerMergedAt || null,
+        incoming: incomingScanned,
+        incomingScannedAt: meta.incomingScannedAt || incoming?.scannedAt || null,
+        plugins: false,
+        pluginCount: meta.pluginCount ?? null,
+        recordData: false,
+        attachments: false,
+        notAnalyzed: Array.isArray(meta.notAnalyzed) ? [...meta.notAnalyzed] : [],
+        notes,
+      };
+    }
+
+    // ================= L0: App Overview =================
+
+    /**
+     * Documents 機能の buildDocPayloadLiteFromPrefetch（Common Context Model）を再利用し、
+     * AI 向けには要約（件数）だけを載せる。生の通知・ACL オブジェクトは入れない
+     */
+    function buildAppOverview({ data, deps, scan, incoming, limits, trunc }) {
+      let lite = null;
+      try {
+        lite = buildDocPayloadLiteFromPrefetch({ ...(data || {}), layout: Array.isArray(data?.layout) ? data.layout : [] });
+      } catch (e) { lite = null; }
+      const fieldsN = KTDeps.normalizeFields(data?.fields || {});
+      const fieldRows = (lite?.fields || fieldsN.map(f => ({ code: f.code, label: f.label, type: f.type === 'LOOKUP' ? f.rawType : f.type, required: f.required, unique: f.unique, inSubtable: f.parent })))
+        .map(f => ({
+          code: f.code, label: f.label, type: f.type,
+          ...(f.required ? { required: true } : {}), ...(f.unique ? { unique: true } : {}),
+          ...(f.inSubtable ? { subtable: f.inSubtable } : {}),
+        }))
+        .sort((a, b) => cmp(a.code, b.code));
+      const typeCounts = {};
+      for (const f of fieldRows) typeCounts[f.type] = (typeCounts[f.type] || 0) + 1;
+      const fields = fieldRows.slice(0, limits.maxFields);
+      if (fieldRows.length > fields.length) trunc('app.fields', fieldRows.length, fields.length);
+
+      const meta = deps?.meta || {};
+      const edges = deps?.edges || [];
+      const byRelation = {}, bySource = {};
+      for (const e of edges) {
+        byRelation[e.relationType] = (byRelation[e.relationType] || 0) + 1;
+        bySource[e.sourceType] = (bySource[e.sourceType] || 0) + 1;
+      }
+      const broken = deps ? safe(() => KTDeps.findBrokenRefs(deps), []) : [];
+      const brokenByConf = {};
+      for (const b of broken) brokenByConf[normConf(b.confidence)] = (brokenByConf[normConf(b.confidence)] || 0) + 1;
+      const links = deps ? safe(() => KTDeps.buildAppLinks(deps, data?.appId), []) : [];
+      const linksByKind = {};
+      for (const l of links) linksByKind[l.kind] = (linksByKind[l.kind] || 0) + 1;
+      const calc = deps ? safe(() => KTDeps.calcChainStats(deps, { topN: 3 }), null) : null;
+      const states = data?.status?.enable ? Object.values(data.status.states || {}).map(s => s?.name).filter(Boolean) : [];
+      const jsNames = (t) => (data?.customize?.[t]?.js || []).map(x => x?.file?.name || x?.url || '(unknown)');
+      const allViewNames = (lite?.views || []).map(v => v.name);
+      const viewNames = allViewNames.slice(0, limits.maxViewNames);
+      if (allViewNames.length > viewNames.length) trunc('app.views.names', allViewNames.length, viewNames.length);
+
+      return {
+        id: String(data?.appId ?? meta.appId ?? ''),
+        name: lite?.meta?.appName ?? data?.settings?.name ?? meta.appName ?? null,
+        description: lite?.meta?.appDescription ?? null,
+        fieldCount: fieldRows.length,
+        fieldTypeCounts: typeCounts,
+        fields,
+        views: { count: (lite?.views || []).length, names: viewNames },
+        reports: { count: (lite?.reports || []).length },
+        notifications: {
+          general: (data?.generalNotify?.notifications || []).length,
+          perRecord: (data?.perRecordNotify?.notifications || []).length,
+          reminder: (data?.reminderNotify?.notifications || []).length,
+        },
+        process: { enabled: !!data?.status?.enable, stateCount: states.length, states, actionCount: (data?.status?.actions || []).length },
+        acl: {
+          app: (data?.appAcl?.rights || []).length,
+          record: (data?.recordAcl?.rights || []).length,
+          field: (data?.fieldAcl?.rights || []).length,
+        },
+        actions: { count: Object.keys(data?.actions?.actions || {}).length },
+        customize: {
+          desktop: { js: jsNames('desktop'), css: (data?.customize?.desktop?.css || []).length },
+          mobile: { js: jsNames('mobile'), css: (data?.customize?.mobile?.css || []).length },
+        },
+        plugins: { count: meta.pluginCount ?? (Array.isArray(data?.appPlugins?.plugins) ? data.appPlugins.plugins.length : null) },
+        dependencies: deps ? { edgeCount: edges.length, byRelation, bySource } : null,
+        javascript: {
+          analyzed: !!(meta.scannerMergedAt || scan),
+          scannedAt: scan?.meta?.scannedAt || meta.scannerMergedAt || null,
+          fileCount: (deps?.nodes || []).filter(n => n.type === 'CUSTOMIZE').length,
+          unknownFieldRefs: (meta.unknownJsRefs || scan?.unknownRefs || []).length,
+          unknownStatusRefs: (meta.unknownJsStatuses || scan?.unknownStatuses || []).length,
+        },
+        incoming: {
+          scanned: !!(meta.incomingScannedAt || incoming),
+          scannedAt: meta.incomingScannedAt || incoming?.scannedAt || null,
+          referencingApps: (incoming?.stats || meta.incomingStats)?.referencingApps ?? null,
+          scannedApps: (incoming?.stats || meta.incomingStats)?.scannedApps ?? null,
+          failedApps: (incoming?.stats || meta.incomingStats)?.failedApps ?? null,
+        },
+        brokenRefs: { total: broken.length, byConfidence: brokenByConf },
+        appLinks: { count: links.length, byKind: linksByKind },
+        calcChain: calc ? { calcFields: calc.calcFields, maxDepth: calc.maxDepth, deepest: calc.deepest } : null,
+      };
+    }
+
+    const safe = (fn, fallback) => { try { return fn(); } catch (e) { return fallback; } };
+
+    // ================= facts =================
+
+    const nodeName = (deps, type, id) => (deps?.nodes || []).find(n => n.id === `${type}:${id}`)?.name ?? null;
+    const appName = (deps, id) => (deps?.meta?.appNames || {})[String(id)] || null;
+    const endpoint = (deps, type, id, name) => {
+      const o = { type, id: String(id) };
+      const nm = name ?? nodeName(deps, type, id);
+      if (nm != null && nm !== '' && nm !== String(id)) o.name = nm;
+      if (type === 'APP' || type === 'EXTERNAL_APP') { const an = appName(deps, id); if (an) o.name = an; }
+      return o;
+    };
+
+    /** edge → dependency fact（文章は語彙ラベルから機械的に組み立てる。解釈は入れない） */
+    function factFromEdge(deps, e, direction) {
+      const st = e.context?.settingType || '';
+      const src = endpoint(deps, e.sourceType, e.sourceId, e.sourceName);
+      const tgt = endpoint(deps, e.targetType, e.targetId, e.targetName);
+      const srcText = e.sourceType === 'FIELD' ? `フィールド「${e.sourceName || e.sourceId}」`
+        : e.sourceType === 'CUSTOMIZE' ? `${e.context?.target ? `${e.context.target} 用 ` : ''}JavaScript「${e.sourceName || e.sourceId}」`
+          : e.sourceType === 'EXTERNAL_APP' ? `他アプリ ${e.sourceId}${appName(deps, e.sourceId) ? `（${appName(deps, e.sourceId)}）` : ''}の${e.context?.kind || '設定'}「${e.context?.settingName || ''}」`
+            : `${srcLabel(e.sourceType)}「${e.sourceName || e.sourceId}」`;
+      const tgtText = e.targetType === 'FIELD' ? `フィールド「${e.targetName || e.targetId}」`
+        : e.targetType === 'APP' ? `アプリ ${e.targetId}${appName(deps, e.targetId) ? `（${appName(deps, e.targetId)}）` : ''}`
+          : e.targetType === 'EXTERNAL_FIELD' ? `アプリ ${e.context?.appId ?? '?'} のフィールド「${e.targetName || e.targetId}」` : `${e.targetType}「${e.targetName || e.targetId}」`;
+      const settingText = (e.sourceType !== 'EXTERNAL_APP' && e.context?.settingName && e.context.settingName !== e.sourceName) ? `（${e.context.settingName}）` : '';
+      const fact = {
+        kind: 'dependency',
+        key: edgeKey(e),
+        confidence: normConf(e.confidence),
+        direction,
+        relationType: e.relationType,
+        relationLabel: relLabel(e.relationType),
+        source: src,
+        target: tgt,
+        setting: { type: st, name: e.context?.settingName ?? '' },
+        statement: e.sourceType === 'EXTERNAL_APP'
+          ? `${srcText}は ${tgtText} を${e.context?.role ? `${e.context.role}として` : ''}参照している（他アプリからの被参照）`
+          : `${srcText}${settingText} は ${tgtText} を「${relLabel(e.relationType)}」として利用している`,
+      };
+      if (e.context?.missing) { fact.missing = true; fact.statement += '（参照先のフィールドはフォームに存在しない）'; }
+      if (e.context?.appId != null) fact.appId = String(e.context.appId);
+      if (Array.isArray(e.context?.lines) && e.context.lines.length) fact.lines = e.context.lines.slice(0, 10);
+      if (e.context?.matchCount != null) fact.matchCount = e.context.matchCount;
+      if (e.context?.target) fact.jsTarget = e.context.target;
+      if (e.context?.role) fact.role = e.context.role;
+      if (e.context?.kind) fact.settingKind = e.context.kind;
+      if (e.context?.note) fact.note = e.context.note;
+      if (e.sourceType === 'CUSTOMIZE') {
+        const evs = (deps?.meta?.jsEvents || {})[e.sourceId] || [];
+        if (evs.length) fact.events = evs.map(v => (typeof v === 'string' ? v : v?.name)).filter(Boolean).slice(0, 10);
+      }
+      return fact;
+    }
+
+    /** 対象フィールドの L1 facts */
+    function buildFieldFacts({ data, deps, scan, target, limits, trunc }) {
+      const code = target.id;
+      const facts = [];
+      const edges = deps?.edges || [];
+      const fieldsN = KTDeps.normalizeFields(data?.fields || {});
+      const f = fieldsN.find(x => x.code === code);
+      const node = (deps?.nodes || []).find(n => n.id === `FIELD:${code}`);
+
+      // 1) 対象フィールドそのもの（定義）
+      const def = {
+        kind: 'field', key: `FIELD:${code}`, confidence: 'CERTAIN',
+        field: {
+          code, label: f?.label ?? node?.name ?? code,
+          type: f ? (f.type === 'LOOKUP' ? f.rawType : f.type) : (node?.fieldType ?? 'UNKNOWN'),
+          ...(f?.type === 'LOOKUP' ? { lookup: true } : {}),
+          ...(f?.required ? { required: true } : {}), ...(f?.unique ? { unique: true } : {}),
+          ...(f?.parent ? { subtable: f.parent } : {}),
+          ...(f?.raw?.expression ? { expression: bounded(f.raw.expression, 200) } : {}),
+          ...(Array.isArray(f?.raw?.options) || (f?.raw?.options && typeof f.raw.options === 'object')
+            ? { optionCount: Object.keys(f.raw.options).length } : {}),
+          ...(node?.fromScanner ? { fromScanner: true } : {}),
+        },
+        statement: f
+          ? `フィールド「${f.label}」（コード ${code}・${f.type === 'LOOKUP' ? `${f.rawType}／ルックアップ` : f.type}${f.required ? '・必須' : ''}${f.unique ? '・重複禁止' : ''}${f.parent ? `・テーブル ${f.parent} 内` : ''}）はフォームに存在する`
+          : `フィールドコード ${code} はフォーム定義に存在しない（JavaScript 解析でのみ現れた）`,
+      };
+      facts.push(def);
+
+      // 2) 直接依存（このフィールドを利用している設定・JS。incoming / outgoing を区別する）
+      const direct = edges.filter(e => e.targetType === 'FIELD' && e.targetId === code);
+      const outgoing = edges.filter(e => e.sourceType === 'FIELD' && e.sourceId === code);
+      const depFacts = [
+        ...direct.map(e => factFromEdge(deps, e, 'usedBy')),
+        ...outgoing.map(e => factFromEdge(deps, e, 'uses')),
+      ];
+      depFacts.sort((a, b) => (CONF_RANK[a.confidence] - CONF_RANK[b.confidence]) || cmp(a.key, b.key));
+      const depKept = depFacts.slice(0, limits.maxDependencyFacts);
+      if (depFacts.length > depKept.length) trunc('facts.dependency', depFacts.length, depKept.length);
+      facts.push(...depKept);
+
+      // 3) 間接依存・他アプリ連携・変更時の確認事項（impactOf: Toolkit の決定的な分析結果）
+      const impact = deps ? safe(() => KTDeps.impactOf(deps, code), null) : null;
+      if (impact) {
+        const ind = (impact.indirect || []).map(i => ({
+          kind: 'indirect-dependency', key: `INDIRECT|${i.category}|${i.title}|${i.role}|${i.via ?? ''}`,
+          confidence: normConf(i.confidence), category: i.category, title: i.title, role: i.role, via: i.via,
+          statement: `${i.category}「${i.title}」は${i.via ? `${i.via}で` : ''}対象フィールドを間接的に利用している（${i.role}）`,
+        })).sort((a, b) => cmp(a.key, b.key));
+        const indKept = ind.slice(0, limits.maxIndirectFacts);
+        if (ind.length > indKept.length) trunc('facts.indirect-dependency', ind.length, indKept.length);
+        facts.push(...indKept);
+        for (const op of (impact.operations || [])) {
+          if (op.key === 'COMMON') continue; // 解析範囲の注記は coverage に載せる
+          facts.push({
+            kind: 'change-impact', key: `IMPACT|${code}|${op.key}`, confidence: 'CERTAIN',
+            operation: op.key, label: op.label, notes: [...op.notes],
+            counts: { ...impact.counts },
+            statement: `${op.label}: ${op.notes.join(' ')}`,
+          });
+        }
+      }
+
+      // 4) 計算式チェーン（対象が計算式を持つ／計算式から参照されている場合）
+      const tree = deps ? safe(() => KTDeps.buildCalcTree(deps, code), null) : null;
+      if (tree && tree.children && tree.children.length) {
+        facts.push({
+          kind: 'calc-chain', key: `CALC|${code}`, confidence: 'LIKELY',
+          depth: KTDeps.calcTreeDepth(tree), tree: pruneTree(tree),
+          statement: `対象フィールドの計算式は ${tree.children.length} 個のフィールドを参照している（深さ ${KTDeps.calcTreeDepth(tree)}）`,
+        });
+      }
+
+      // 5) 壊れた参照（対象コードに関するもの。JS の近似一致も含める）
+      const broken = deps ? safe(() => KTDeps.findBrokenRefs(deps), []) : [];
+      const brokenMine = broken.filter(b => b.code === code || b.nearMatch === code);
+      facts.push(...brokenMine.map(b => brokenFact(b)));
+
+      // 6) JavaScript の出現箇所（Field Scanner の結果。抜粋は伏字・上限つき）
+      const r = (scan?.results || []).find(x => x.code === code);
+      if (r && Array.isArray(r.matches) && r.matches.length) {
+        const ms = [...r.matches].sort((a, b) => cmp(`${a.target}:${a.kind}:${a.file}`, `${b.target}:${b.kind}:${b.file}`) || (a.line - b.line) || cmp(a.access, b.access));
+        const kept = ms.slice(0, limits.maxJsMatchFacts);
+        if (ms.length > kept.length) trunc('facts.js-match', ms.length, kept.length);
+        for (const m of kept) {
+          facts.push({
+            kind: 'js-match', key: `JS|${m.target}:${m.kind}:${m.file}|${m.line}|${m.access}|${code}`,
+            confidence: normConf(m.confidence),
+            file: { id: `${m.target}:${m.kind}:${m.file}`, name: m.file, target: m.target },
+            line: m.line, access: m.access, snippet: snippetOf(m.snippet, limits.maxSnippetLen),
+            statement: `${m.target} 用 JavaScript「${m.file}」の ${m.line} 行目で対象フィールドを ${m.access} として使用している`,
+          });
+        }
+      }
+      return facts;
+    }
+
+    const pruneTree = (t) => ({ code: t.code, name: t.name, ...(t.circular ? { circular: true } : {}), ...(t.truncated ? { truncated: true } : {}),
+      children: (t.children || []).map(pruneTree) });
+
+    function brokenFact(b) {
+      return {
+        kind: 'broken-reference', key: `BROKEN|${b.source}|${b.category}|${b.settingName}|${b.settingType}|${b.code}`,
+        confidence: normConf(b.confidence), source: b.source, category: b.category,
+        setting: { type: b.settingType, name: b.settingName }, role: b.role, code: b.code,
+        ...(b.nearMatch ? { nearMatch: b.nearMatch } : {}), ...(b.count ? { count: b.count } : {}),
+        statement: `${b.category}「${b.settingName}」の${b.role}に、存在しないコード「${b.code}」が指定されている${b.nearMatch ? `（近い既存コード: ${b.nearMatch}）` : ''}`,
+      };
+    }
+
+    /** アプリ全体（対象なし）の facts: 壊れた参照とアプリ間連携の一覧 */
+    function buildAppFacts({ data, deps, limits, trunc }) {
+      const facts = [];
+      const broken = deps ? safe(() => KTDeps.findBrokenRefs(deps), []) : [];
+      const bk = broken.slice(0, limits.maxBrokenRefFacts);
+      if (broken.length > bk.length) trunc('facts.broken-reference', broken.length, bk.length);
+      facts.push(...bk.map(brokenFact));
+      const links = deps ? safe(() => KTDeps.buildAppLinks(deps, data?.appId), []) : [];
+      const lk = links.slice(0, limits.maxAppLinkFacts);
+      if (links.length > lk.length) trunc('facts.app-link', links.length, lk.length);
+      for (const l of lk) {
+        facts.push({
+          kind: 'app-link', key: `LINK|${l.kind}|${l.sourceId}|${l.destAppId}`, confidence: normConf(l.confidence),
+          linkKind: l.kind, dataSource: l.dataSource, source: { id: l.sourceId, name: l.selfSide }, destAppId: l.destAppId,
+          ...(l.destField && l.destField !== '—' ? { destField: l.destField } : {}),
+          ...(l.selfKey ? { selfKey: l.selfKey } : {}), ...(l.lines ? { lines: l.lines.slice(0, 10) } : {}),
+          statement: `${l.kind}「${l.selfSide}」は ${l.destAppLabel}${l.destField && l.destField !== '—' ? ` の「${l.destField}」` : ''} を参照している${l.dataSource === 'JS_STATIC' ? '（JavaScript の静的解析による推定）' : ''}`,
+        });
+      }
+      // 他アプリからの被参照（走査済みのときだけ）
+      const incomingEdges = (deps?.edges || []).filter(e => e.sourceType === 'EXTERNAL_APP');
+      const inc = incomingEdges.map(e => ({ ...factFromEdge(deps, e, 'usedBy'), kind: 'incoming-reference' }))
+        .sort((a, b) => cmp(a.key, b.key));
+      const ik = inc.slice(0, limits.maxIncomingFacts);
+      if (inc.length > ik.length) trunc('facts.incoming-reference', inc.length, ik.length);
+      facts.push(...ik);
+      return facts;
+    }
+
+    /** JS ファイル対象の L2 facts（KTScan 結果と既存 edge のみ。AST 解析はしない） */
+    function buildFileFacts({ data, deps, scan, target, limits, trunc }) {
+      const facts = [];
+      const id = target.id; // target:kind:name（既存 edge の sourceId）
+      const [tgt, kind, ...rest] = id.split(':');
+      const name = rest.join(':');
+      const node = (deps?.nodes || []).find(n => n.id === `CUSTOMIZE:${id}`);
+      const events = ((deps?.meta?.jsEvents || scan?.fileEvents || {})[id] || []).map(v => (typeof v === 'string' ? { name: v, direct: true } : { name: v?.name ?? '', direct: !!v?.direct }));
+      const edges = (deps?.edges || []).filter(e => e.sourceType === 'CUSTOMIZE' && e.sourceId === id);
+      const fieldEdges = edges.filter(e => e.targetType === 'FIELD');
+      const appEdges = edges.filter(e => e.targetType === 'APP');
+      const extEdges = edges.filter(e => e.targetType === 'EXTERNAL_FIELD');
+      facts.push({
+        kind: 'js-file', key: `FILE|${id}`, confidence: node?.analyzed === false ? 'NOT_ANALYZED' : 'CERTAIN',
+        file: { id, name, target: tgt, kind },
+        analyzed: node ? node.analyzed !== false : !!scan,
+        events: events.map(v => ({ name: v.name, direct: v.direct })),
+        referencedFieldCount: new Set(fieldEdges.map(e => e.targetId)).size,
+        appRefCount: appEdges.length, externalFieldRefCount: extEdges.length,
+        statement: `${tgt} 用 ${kind === 'css' ? 'CSS' : 'JavaScript'}「${name}」は${events.length ? `イベント ${events.map(v => v.direct ? v.name : `${v.name}?`).join(', ')} で動作し、` : ''}フィールド ${new Set(fieldEdges.map(e => e.targetId)).size} 件・アプリ参照 ${appEdges.length} 件を含む`,
+      });
+      const refs = fieldEdges.map(e => factFromEdge(deps, e, 'uses')).sort((a, b) => cmp(a.key, b.key));
+      const rk = refs.slice(0, limits.maxDependencyFacts);
+      if (refs.length > rk.length) trunc('facts.js-reference', refs.length, rk.length);
+      facts.push(...rk.map(f => ({ ...f, kind: 'js-reference' })));
+      facts.push(...appEdges.map(e => ({ ...factFromEdge(deps, e, 'uses'), kind: 'js-app-reference' })).sort((a, b) => cmp(a.key, b.key)));
+      facts.push(...extEdges.map(e => ({ ...factFromEdge(deps, e, 'uses'), kind: 'js-external-field' })).sort((a, b) => cmp(a.key, b.key)));
+      // このファイルに残った存在しないコード
+      const broken = deps ? safe(() => KTDeps.findBrokenRefs(deps), []) : [];
+      facts.push(...broken.filter(b => b.source === 'JS'
+        && String(b.settingName || '').split(' / ').some(n => n === name || n === `${tgt}:${name}` || n === `${tgt}: ${name}`)).map(brokenFact));
+      // コード抜粋（本文がある場合のみ。対象行の前後・上限・伏字）
+      const file = (scan?.files || []).find(f => f.name === name && f.target === tgt && f.kind === kind && typeof f.text === 'string');
+      if (file) {
+        const lines = file.text.split(/\r?\n/);
+        const anchors = [...new Set(edges.flatMap(e => e.context?.lines || []))].filter(n => Number.isFinite(n)).sort((a, b) => a - b);
+        const kept = anchors.slice(0, limits.maxCodeExcerpts);
+        if (anchors.length > kept.length) trunc('facts.code-excerpt', anchors.length, kept.length);
+        const half = Math.floor(limits.maxCodeExcerptLines / 2);
+        for (const ln of kept) {
+          const s = Math.max(1, ln - half), e2 = Math.min(lines.length, ln + half);
+          const text = lines.slice(s - 1, e2).map((t, i) => `${s + i}: ${redactSecretLikeText(t)}`).join('\n');
+          facts.push({
+            kind: 'code-excerpt', key: `CODE|${id}|${ln}`, confidence: 'CERTAIN',
+            file: { id, name, target: tgt }, lines: { from: s, to: e2, anchor: ln }, text: bounded(text, limits.maxSnippetLen * 8),
+            statement: `「${name}」${s}〜${e2} 行目の抜粋（${ln} 行目付近。秘密情報らしき値は伏字）`,
+          });
+        }
+      } else {
+        // 本文が無いときは Scanner の抜粋（伏字・上限つき）だけを載せる
+        const ms = (scan?.results || []).flatMap(r => (r.matches || []).filter(m => m.file === name && m.target === tgt).map(m => ({ ...m, code: r.code })))
+          .sort((a, b) => (a.line - b.line) || cmp(a.code, b.code));
+        const mk = ms.slice(0, limits.maxJsMatchFacts);
+        if (ms.length > mk.length) trunc('facts.js-match', ms.length, mk.length);
+        for (const m of mk) {
+          facts.push({
+            kind: 'js-match', key: `JS|${id}|${m.line}|${m.access}|${m.code}`, confidence: normConf(m.confidence),
+            file: { id, name, target: tgt }, fieldCode: m.code, line: m.line, access: m.access, snippet: snippetOf(m.snippet, limits.maxSnippetLen),
+            statement: `「${name}」${m.line} 行目でフィールド「${m.code}」を ${m.access} として使用している`,
+          });
+        }
+      }
+      return facts;
+    }
+
+    // ================= build =================
+
+    /**
+     * Context を生成する（純関数）
+     * @param {object} p
+     *   question : 質問文（対象の自動解決に使う。無くてもよい）
+     *   focus    : 明示の対象 { type:'field'|'file'|'app', id, label? }（指定時は question の解決を省略）
+     *   data     : prefetchAppData の戻り値（DATA）
+     *   deps     : KTDeps.buildDependencyData の戻り値（mergeScannerEdges / applyIncomingRefs 適用後が望ましい）
+     *   scan     : Field Scanner の payload（results / files / appRefs / fileEvents / unknownRefs ...）省略可
+     *   incoming : KTIncoming.run の戻り値（rows / stats / scannedAt）省略可
+     *   options  : { level:'auto'|'L0'|'L1'|'L2', limits:{...}, now:string }
+     */
+    function build({ question = null, focus = null, data = null, deps = null, scan = null, incoming = null, options = {} } = {}) {
+      const limits = { ...DEFAULT_LIMITS, ...(options.limits || {}) };
+      const sections = new Map();
+      const trunc = (name, total, included) => {
+        const cur = sections.get(name);
+        if (cur) { cur.total = Math.max(cur.total, total); cur.included = Math.min(cur.included, included); return; }
+        sections.set(name, { name, total, included });
+      };
+
+      const resolved = resolveFocus({ question, focus, data, deps, scan });
+      const target = resolved.target || null;
+      // 自動判定: ファイル対象 → L2 / その他の対象 → L1 / 対象なしでも質問があればアプリ全体の L1 / 質問も無ければ L0
+      let level = options.level && options.level !== 'auto' ? options.level
+        : target?.type === 'file' ? LEVELS.L2 : target ? LEVELS.L1
+          : (resolved.resolution === 'none' && question) ? LEVELS.L1 : LEVELS.L0;
+      const levels = level === LEVELS.L2 ? ['L0', 'L1', 'L2'] : level === LEVELS.L1 ? ['L0', 'L1'] : ['L0'];
+
+      const app = buildAppOverview({ data, deps, scan, incoming, limits, trunc });
+      const coverage = buildCoverage({ data, deps, scan, incoming });
+
+      let facts = [];
+      if (level !== LEVELS.L0 && target?.type === 'field') facts = buildFieldFacts({ data, deps, scan, target, limits, trunc });
+      else if (level === LEVELS.L2 && target?.type === 'file') facts = buildFileFacts({ data, deps, scan, target, limits, trunc });
+      else if (!target && level !== LEVELS.L0) facts = buildAppFacts({ data, deps, limits, trunc });
+
+      // 重複排除（同じ key は 1 件）→ 決定的な並び → 根拠ID採番
+      const seen = new Set();
+      facts = facts.filter(f => { if (seen.has(f.key)) return false; seen.add(f.key); return true; });
+      facts.sort((a, b) => (kindRank(a.kind) - kindRank(b.kind)) || cmp(a.key, b.key));
+      if (facts.length > limits.maxFacts) {
+        trunc('facts', facts.length, limits.maxFacts);
+        facts = facts.slice(0, limits.maxFacts);
+      }
+      facts = facts.map((f, i) => ({ id: `E${i + 1}`, ...f }));
+
+      const ctx = {
+        contextVersion: CONTEXT_VERSION,
+        generatedAt: options.now ?? new Date().toISOString(),
+        generator: { name: 'kintone App Toolkit', version: SCRIPT_VERSION, analyzerVersion: KTScan?.ANALYZER_VERSION ?? null },
+        question: question == null ? null : String(question),
+        focus: {
+          resolution: resolved.resolution,
+          ...(target ? { target } : {}),
+          candidates: resolved.candidates,
+        },
+        level, levels,
+        app,
+        facts,
+        confidenceVocabulary: { CERTAIN: '構造化された設定値から直接取得（確実）', LIKELY: '条件式・計算式・JS のトークン一致（可能性が高い）', UNCERTAIN: '文字列一致のみ（要確認）', NOT_ANALYZED: '解析対象外' },
+        coverage,
+        truncation: { applied: false, sections: [] },
+        size: null,
+      };
+
+      // バイト上限（任意）: 超過したら事実を末尾（優先度の低い kind）から削って記録する
+      const budget = limits.maxBytes ?? null;
+      const finalize = () => {
+        ctx.truncation = { applied: sections.size > 0, sections: [...sections.values()].sort((a, b) => cmp(a.name, b.name)) };
+        ctx.size = null;
+        const m = measureText(JSON.stringify(ctx));
+        ctx.size = { bytes: m.bytes, chars: m.chars, approxTokens: m.approxTokens, facts: ctx.facts.length, budgetBytes: budget ?? LEVEL_BUDGET_BYTES[level] ?? null };
+      };
+      finalize();
+      if (budget && ctx.size.bytes > budget) {
+        const total = ctx.facts.length;
+        while (ctx.facts.length > 1 && ctx.size.bytes > budget) {
+          ctx.facts = ctx.facts.slice(0, Math.max(1, Math.floor(ctx.facts.length * 0.8)));
+          trunc('facts', total, ctx.facts.length);
+          finalize();
+        }
+        if (ctx.size.bytes > budget && ctx.app.fields.length > 20) {
+          const t = ctx.app.fieldCount;
+          ctx.app.fields = ctx.app.fields.slice(0, 20);
+          trunc('app.fields', t, 20);
+          finalize();
+        }
+      }
+      return ctx;
+    }
+
+    // ================= 出力 =================
+
+    const toJSON = (ctx, { pretty = false } = {}) => JSON.stringify(ctx, null, pretty ? 2 : 0);
+
+    const mdEsc = (s) => String(s ?? '').replace(/\|/g, '\\|').replace(/\r?\n/g, ' ').trim();
+
+    /** 人間が読める Markdown（無料版の「AI 用ドキュメントをコピー」で使う形式） */
+    function toMarkdown(ctx) {
+      const out = [];
+      const app = ctx.app || {};
+      out.push(`# ${app.name ? `${app.name}（app ${app.id}）` : `app ${app.id}`} — AI Context`);
+      out.push('');
+      if (ctx.question) out.push(`**質問**: ${mdEsc(ctx.question)}`);
+      const fo = ctx.focus || {};
+      if (fo.resolution === 'resolved' || fo.resolution === 'explicit') {
+        out.push(`**対象**: ${fo.target.type} \`${fo.target.id}\`${fo.target.label && fo.target.label !== fo.target.id ? `（${mdEsc(fo.target.label)}）` : ''}`);
+      } else if (fo.resolution === 'ambiguous') {
+        out.push(`**対象**: 複数候補のため未確定 — ${fo.candidates.map(c => `${c.type} \`${c.id}\`${c.label !== c.id ? `（${mdEsc(c.label)}）` : ''}`).join(' / ')}`);
+      } else {
+        out.push('**対象**: アプリ全体（質問から特定の対象は見つからなかった）');
+      }
+      out.push(`**階層**: ${(ctx.levels || []).join(' + ')}　**contextVersion**: ${ctx.contextVersion}　**生成**: ${ctx.generatedAt}`);
+      out.push('');
+
+      out.push('## L0 アプリ概要');
+      out.push(`- フィールド数: ${app.fieldCount}（${Object.entries(app.fieldTypeCounts || {}).map(([k, v]) => `${k}×${v}`).join(', ')}）`);
+      out.push(`- 一覧 ${app.views?.count ?? 0} / グラフ ${app.reports?.count ?? 0} / 通知 ${(app.notifications?.general ?? 0) + (app.notifications?.perRecord ?? 0) + (app.notifications?.reminder ?? 0)}（アプリ ${app.notifications?.general ?? 0}・レコード ${app.notifications?.perRecord ?? 0}・リマインダー ${app.notifications?.reminder ?? 0}）`);
+      out.push(`- プロセス管理: ${app.process?.enabled ? `有効（ステータス ${app.process.stateCount}: ${app.process.states.join(' → ')} / アクション ${app.process.actionCount}）` : '無効'}`);
+      out.push(`- アクセス権: アプリ ${app.acl?.app ?? 0} / レコード ${app.acl?.record ?? 0} / フィールド ${app.acl?.field ?? 0}　アプリアクション: ${app.actions?.count ?? 0}　プラグイン: ${app.plugins?.count ?? '不明'}`);
+      out.push(`- JavaScript: PC ${app.customize?.desktop?.js?.length ?? 0} 件 / モバイル ${app.customize?.mobile?.js?.length ?? 0} 件（解析: ${app.javascript?.analyzed ? `済 ${app.javascript.scannedAt || ''}` : '未'}）`);
+      if (app.dependencies) out.push(`- 依存関係: ${app.dependencies.edgeCount} 件（${Object.entries(app.dependencies.byRelation).map(([k, v]) => `${relLabel(k)} ${v}`).join(', ')}）`);
+      out.push(`- 壊れた参照: ${app.brokenRefs?.total ?? 0} 件　アプリ間連携: ${app.appLinks?.count ?? 0} 件　他アプリからの参照: ${app.incoming?.scanned ? `走査済（参照元 ${app.incoming.referencingApps ?? 0} アプリ）` : '未走査'}`);
+      if (app.calcChain && app.calcChain.calcFields) out.push(`- 計算式: ${app.calcChain.calcFields} フィールド（最大深さ ${app.calcChain.maxDepth}）`);
+      if (app.fields && app.fields.length) {
+        out.push('');
+        out.push('| コード | ラベル | 型 | 備考 |');
+        out.push('|---|---|---|---|');
+        for (const f of app.fields) {
+          const note = [f.required ? '必須' : '', f.unique ? '重複禁止' : '', f.subtable ? `テーブル ${f.subtable}` : ''].filter(Boolean).join('・');
+          out.push(`| ${mdEsc(f.code)} | ${mdEsc(f.label)} | ${mdEsc(f.type)} | ${mdEsc(note)} |`);
+        }
+        if (app.fieldCount > app.fields.length) out.push(`| … | （${app.fieldCount - app.fields.length} 件省略） | | |`);
+      }
+      out.push('');
+
+      if (ctx.facts && ctx.facts.length) {
+        out.push(`## ${(ctx.levels || []).includes('L2') ? 'L1/L2' : 'L1'} 事実（根拠ID付き）`);
+        out.push('');
+        out.push('| ID | 種別 | 確度 | 事実 |');
+        out.push('|---|---|---|---|');
+        for (const f of ctx.facts) {
+          const extra = f.kind === 'js-match' ? ` \`${mdEsc(f.snippet)}\`` : f.kind === 'code-excerpt' ? '' : (f.lines ? `（${Array.isArray(f.lines) ? f.lines.join(', ') + ' 行目' : ''}）` : '');
+          out.push(`| ${f.id} | ${f.kind} | ${confJa(f.confidence)} | ${mdEsc(f.statement)}${extra} |`);
+        }
+        for (const f of ctx.facts.filter(x => x.kind === 'code-excerpt')) {
+          out.push('');
+          out.push(`**${f.id}** ${mdEsc(f.statement)}`);
+          out.push('```');
+          out.push(f.text);
+          out.push('```');
+        }
+        out.push('');
+      }
+
+      out.push('## 解析範囲（coverage）');
+      const cv = ctx.coverage || {};
+      const yn = (b) => (b ? '含む' : '含まない');
+      out.push(`- フィールド定義: ${yn(cv.fields)} / 依存関係: ${yn(cv.dependencies)} / JavaScript 本文: ${yn(cv.javascript)} / 他アプリからの参照: ${yn(cv.incoming)} / プラグイン設定: ${yn(cv.plugins)} / レコード実データ: ${yn(cv.recordData)} / 添付ファイル: ${yn(cv.attachments)}`);
+      for (const n of (cv.notes || [])) out.push(`- ${mdEsc(n)}`);
+      if (ctx.truncation?.applied) {
+        out.push('');
+        out.push('## 省略（truncation）');
+        for (const s of ctx.truncation.sections) out.push(`- ${s.name}: 全 ${s.total} 件中 ${s.included} 件を収録`);
+      }
+      out.push('');
+      out.push(`> 確度の語彙: 確実＝設定値から直接取得 / 可能性が高い＝条件式・計算式・JS のトークン一致 / 要確認＝文字列一致のみ。`);
+      out.push(`> 「含まない」とある項目は未解析であり、「存在しない」ことを意味しない。`);
+      return out.join('\n');
+    }
+
+    /** ChatGPT / Claude などへそのまま貼れる Prompt（指示＋Markdown Context）。有料 Gateway の Prompt 本文とは別物 */
+    function toPrompt(ctx, { instruction = null } = {}) {
+      const rules = instruction || [
+        'あなたは kintone アプリの設定・依存関係を読み解くアシスタントです。',
+        '以下の Context は kintone App Toolkit が解析した事実です。回答は Context の事実だけを根拠にし、根拠ID（E1 など）を引用してください。',
+        '確度が「可能性が高い」「要確認」の事実は推定として扱い、「確実」と区別して述べてください。',
+        '解析範囲（coverage）で「含まない」とされた項目は未解析であり、存在しないと断定しないでください。',
+        'Context に無い設定や業務ルールを推測で補わないでください。不明な点は不明と述べてください。',
+      ].join('\n');
+      const q = ctx.question ? `\n## 質問\n${ctx.question}\n` : '';
+      return `${rules}\n${q}\n## Context\n${toMarkdown(ctx)}\n`;
+    }
+
+    /** サイズ計測（JSON byte / 文字数 / token 近似 / 件数） */
+    function measure(ctx) {
+      const json = typeof ctx === 'string' ? ctx : JSON.stringify({ ...ctx, size: null });
+      return { ...measureText(json), facts: Array.isArray(ctx?.facts) ? ctx.facts.length : null };
+    }
+
+    return {
+      CONTEXT_VERSION, LEVELS, DEFAULT_LIMITS, LEVEL_BUDGET_BYTES,
+      build, resolveFocus, buildDictionary, buildCoverage, buildAppOverview,
+      toJSON, toMarkdown, toPrompt, measure, measureText,
+      redactSecretLikeText, edgeKey,
     };
   })();
 
