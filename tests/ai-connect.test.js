@@ -144,6 +144,17 @@ console.log('\n--- 2. connect flow（start → open → polling → complete →
   assert(r.revoked === true && dReq && JSON.parse(dReq.body).refreshToken === rtBefore && !s2.status().connected && storage.dump() === '' && gw.revokedFamilies.size === 1, 'disconnect: /v2/connect/disconnect に Refresh を送って family 失効・local は空');
   let after = null; try { await s2.client.getHealth(); } catch (e) { after = e; }
   assert(after && after.code === C.NOT_CONNECTED, 'disconnect 後は NOT_CONNECTED');
+  // 実機で発生: apiBase を store だけが持つ構成で disconnect すると、store.clear() の後に接続先が既定（production）に戻り、
+  // 失効 request が別の Gateway へ飛んでいた。store を消す前の接続先へ送ること
+  const st3 = makeStorage();
+  const gw3 = makeGateway();
+  const sess3 = KTAiClient.createSession({ store: KTAiClient.createSettingsStore({ storage: st3, host: 'h' }), hostname: 'h', transport: gw3.transport });   // apiBase は渡さない
+  const flow3 = KTAiClient.createConnectFlow({ session: sess3, hostname: 'h', transport: gw3.transport, sleep: sleepNone, cryptoObj, openUrl: () => true });
+  sess3.adopt({ accessToken: 'x', expiresAt: new Date(Date.now() + 1000).toISOString(), refreshToken: 'x', refreshExpiresAt: new Date(Date.now() + 1000).toISOString(), scope: {} }, { apiBase: 'https://staging.test' });
+  await flow3.start({ onState: (st) => { if (st.phase === 'pending') gw3.approve(st.sessionId); } });
+  const r3 = await sess3.disconnect();
+  const d3 = gw3.reqs.filter(r => r.url.endsWith('/v2/connect/disconnect')).pop();
+  assert(r3.revoked === true && d3 && d3.url === 'https://staging.test/v2/connect/disconnect', 'disconnect は store に保存していた接続先（staging）へ送る（既定 URL へ飛ばない）');
 }
 
 console.log('\n--- 3. popup blocked / cancel / denied / expired / 不明 / Gateway 停止 ---');

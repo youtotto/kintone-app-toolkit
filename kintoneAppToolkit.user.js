@@ -5044,9 +5044,10 @@
         async disconnect() {
           const c = cfg();
           const rt = c.refreshToken || '';
+          const gateway = bare();   // store を消す前に接続先を確定する（消した後は既定の production URL に戻ってしまう）
           store.clear(); access = { token: null, expiresAt: null };
           if (!rt) return { revoked: false };
-          try { await bare().connectDisconnect({ refreshToken: rt }); return { revoked: true }; }
+          try { await gateway.connectDisconnect({ refreshToken: rt }); return { revoked: true }; }
           catch (e) { return { revoked: false, error: isAiClientError(e) ? e.code : ERROR_CODES.TRANSPORT_ERROR }; }
         },
         refresh,
