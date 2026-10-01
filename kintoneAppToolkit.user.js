@@ -711,6 +711,10 @@
 
     const getStatus = () => ({ state, lastError, scannedAt, available: !!runner });
     const onChange = (fn) => { listeners.add(fn); return () => listeners.delete(fn); };
+    // 直近の解析 payload（Scanner タブが applyScanResult で登録。AI向けドキュメント等、他タブが参照する）
+    let lastPayload = null;
+    const setLastPayload = (p) => { lastPayload = p || null; };
+    const getLastPayload = () => lastPayload;
 
     /** Scannerタブが自身のscan関数を登録する */
     const register = (fn) => { runner = fn; notify(); };
@@ -1411,7 +1415,7 @@
     }
 
     return {
-      register, run, scheduleAuto, onChange, getStatus,
+      register, run, scheduleAuto, onChange, getStatus, setLastPayload, getLastPayload,
       buildSignature, loadCache, saveCache, clearCache,
       isAutoEnabled, setAutoEnabled,
       CACHE_TTL_MS, ANALYZER_VERSION,
@@ -3943,6 +3947,7 @@
         }
       }
       for (const f of (scan?.files || [])) {
+        if (f?.note) continue;   // 外部 URL（本文未取得・"external URL (skipped)"）は DEPS の CUSTOMIZE ノード側で扱う
         const id = `${f.target}:${f.kind}:${f.name}`;
         if (!entries.some(e => e.type === 'file' && e.id === id)) push(f.name, 'file', id, f.name, 'fileName', { target: f.target, kind: f.kind });
       }
@@ -4013,8 +4018,12 @@
         ...((data?.customize?.mobile?.js || []).map(x => ({ ...x, target: 'mobile' }))),
       ];
       const urlJs = jsFiles.filter(x => x?.type === 'URL' || (!x?.file && x?.url)).length;
+      // JS 本文の有無: 直後のスキャンなら files[].text を持つ。キャッシュ復元時は Scanner の断片（snippet）だけ
+      const scanFiles = (scan?.files || []).filter(f => !f?.note);
+      const jsSource = !jsAnalyzed ? null : scanFiles.some(f => typeof f.text === 'string') ? 'full' : 'snippets';
       const notes = [];
       if (!jsAnalyzed) notes.push('JavaScript/CSS 本文は未解析（Field Scanner 未実行）。JS からの参照は含まれていない');
+      if (jsSource === 'snippets') notes.push('JavaScript 本文はキャッシュから復元した解析結果のため含まない（コード抜粋は Scanner の断片のみ）');
       if (jsAnalyzed && urlJs) notes.push(`URL 指定の JavaScript ${urlJs} 件は本文を取得できないため未解析`);
       if (!incomingScanned) notes.push('他アプリからこのアプリへの参照は未走査。被参照は含まれていない');
       if (incomingScanned && incoming?.stats?.truncated) notes.push('他アプリの走査は上限件数で打ち切られている');
@@ -4035,6 +4044,7 @@
         dependencies: !!(deps && Array.isArray(deps.edges)),
         javascript: jsAnalyzed,
         javascriptScannedAt: scan?.meta?.scannedAt || meta.scannerMergedAt || null,
+        javascriptSource: jsSource,   // 'full' | 'snippets' | null
         incoming: incomingScanned,
         incomingScannedAt: meta.incomingScannedAt || incoming?.scannedAt || null,
         plugins: false,
@@ -4084,7 +4094,12 @@
       const linksByKind = {};
       for (const l of links) linksByKind[l.kind] = (linksByKind[l.kind] || 0) + 1;
       const calc = deps ? safe(() => KTDeps.calcChainStats(deps, { topN: 3 }), null) : null;
-      const states = data?.status?.enable ? Object.values(data.status.states || {}).map(s => s?.name).filter(Boolean) : [];
+      // ステータスは kintone の index 順（Object.values の順序に依存しない）
+      const states = data?.status?.enable
+        ? Object.values(data.status.states || {}).filter(Boolean)
+          .sort((a, b) => (Number(a.index ?? 0) - Number(b.index ?? 0)) || cmp(String(a.name ?? ''), String(b.name ?? '')))
+          .map(s => s.name).filter(Boolean)
+        : [];
       const jsNames = (t) => (data?.customize?.[t]?.js || []).map(x => x?.file?.name || x?.url || '(unknown)');
       const allViewNames = (lite?.views || []).map(v => v.name);
       const viewNames = allViewNames.slice(0, limits.maxViewNames);
@@ -4277,9 +4292,12 @@
         const ms = [...r.matches].sort((a, b) => cmp(`${a.target}:${a.kind}:${a.file}`, `${b.target}:${b.kind}:${b.file}`) || (a.line - b.line) || cmp(a.access, b.access));
         const kept = ms.slice(0, limits.maxJsMatchFacts);
         if (ms.length > kept.length) trunc('facts.js-match', ms.length, kept.length);
+        const dupCount = new Map();   // 同じ行に同じ access の出現が複数ある（実データで確認）→ 連番で区別する
         for (const m of kept) {
+          const base = `JS|${m.target}:${m.kind}:${m.file}|${m.line}|${m.access}|${code}`;
+          const n = (dupCount.get(base) || 0) + 1; dupCount.set(base, n);
           facts.push({
-            kind: 'js-match', key: `JS|${m.target}:${m.kind}:${m.file}|${m.line}|${m.access}|${code}`,
+            kind: 'js-match', key: n === 1 ? base : `${base}|#${n}`,
             confidence: normConf(m.confidence),
             file: { id: `${m.target}:${m.kind}:${m.file}`, name: m.file, target: m.target },
             line: m.line, access: m.access, snippet: snippetOf(m.snippet, limits.maxSnippetLen),
@@ -4386,9 +4404,12 @@
           .sort((a, b) => (a.line - b.line) || cmp(a.code, b.code));
         const mk = ms.slice(0, limits.maxJsMatchFacts);
         if (ms.length > mk.length) trunc('facts.js-match', ms.length, mk.length);
+        const dupCount = new Map();
         for (const m of mk) {
+          const base = `JS|${id}|${m.line}|${m.access}|${m.code}`;
+          const n = (dupCount.get(base) || 0) + 1; dupCount.set(base, n);
           facts.push({
-            kind: 'js-match', key: `JS|${id}|${m.line}|${m.access}|${m.code}`, confidence: normConf(m.confidence),
+            kind: 'js-match', key: n === 1 ? base : `${base}|#${n}`, confidence: normConf(m.confidence),
             file: { id, name, target: tgt }, fieldCode: m.code, line: m.line, access: m.access, snippet: snippetOf(m.snippet, limits.maxSnippetLen),
             statement: `「${name}」${m.line} 行目でフィールド「${m.code}」を ${m.access} として使用している`,
           });
@@ -4596,6 +4617,366 @@
       redactSecretLikeText, edgeKey,
     };
   })();
+
+
+  // ==========================================
+  // 3.6 AI向けドキュメント UI（KTContextUi ＋ mountAiDocsPanel）
+  //   無料版の機能: Toolkit の解析結果を KTContext で AI 向け Prompt / Markdown / JSON に変換し、
+  //   ユーザーがコピーして ChatGPT / Claude などへ貼り付ける。LLM へは送信しない。
+  //   将来の有料版（Toolkit 内で AI 回答）も同じ対象選択・質問・Context 生成を入口として使う。
+  //
+  //   KTContextUi      : DOM に依存しない UI ロジック（対象一覧・プリセット・生成・表示用サマリ・HTML 文字列）
+  //   mountAiDocsPanel : Templates タブ内のパネルへ結び付ける薄い DOM 層（#id だけで要素を引く）
+  // ==========================================
+  const KTContextUi = (() => {
+    const TARGET_TYPES = [
+      { id: 'app', label: 'アプリ全体' },
+      { id: 'field', label: 'フィールド' },
+      { id: 'file', label: 'JavaScript' },
+    ];
+    // 質問プリセット（選択後も自由に編集できる）
+    const PRESETS = {
+      app: [
+        'このアプリの構造を説明してください',
+        'このアプリで変更時に注意する箇所を教えてください',
+        'このアプリの壊れた参照や整合性の問題を整理してください',
+      ],
+      field: [
+        'このフィールドを変更した場合の影響を説明してください',
+        'このフィールドを削除して大丈夫か確認してください',
+        'このフィールドがどこで使われているか整理してください',
+      ],
+      file: [
+        'このJavaScriptが何をしているか説明してください',
+        'このJavaScriptが参照しているフィールドと他アプリを整理してください',
+      ],
+    };
+    const CONFIDENCE_HELP = [
+      { code: 'CERTAIN', label: '確実', text: 'アプリ設定の値から直接取得した事実' },
+      { code: 'LIKELY', label: '可能性が高い', text: '条件式・計算式・JavaScript のトークン一致による推定' },
+      { code: 'UNCERTAIN', label: '要確認', text: '文字列一致のみ。実際の設定・コードでの確認を推奨' },
+      { code: 'NOT_ANALYZED', label: '未解析', text: '解析対象外（外部URLのJS・プラグイン設定など）' },
+    ];
+    const INTRO_TEXT = 'Toolkit が解析したアプリ構成・依存関係・JavaScript の参照を、生成AIが理解しやすい形式に変換します。コピーした内容を ChatGPT や Claude などへ貼り付けて利用できます。Toolkit から AI へ送信することはありません。';
+    const INTRO_NOTE = 'レコードの値・添付ファイルは含まれません。API キー等らしき文字列は伏字になります。';
+
+    /** JS ファイルの表示名（PC / モバイルの同名ファイルを区別する。識別子は edge.sourceId） */
+    const fileLabel = (f) => `${f.target === 'mobile' ? 'モバイル' : 'PC'}: ${f.name}${f.kind === 'css' ? '（CSS）' : ''}${f.analyzed === false ? '（未解析）' : ''}`;
+
+    /** 選択肢（フィールド・JS ファイル）を既存データから作る。JS は DEPS の CUSTOMIZE ノード（sourceId）を正とする */
+    function listTargets({ data, deps, scan }) {
+      const fieldsN = KTDeps.normalizeFields(data?.fields || {});
+      const fields = fieldsN
+        .filter(f => f.type !== 'SUBTABLE' || true)
+        .map(f => ({ id: f.code, label: f.label === f.code ? f.code : `${f.label}（${f.code}）`, type: f.type === 'LOOKUP' ? f.rawType : f.type }))
+        .sort((a, b) => a.label.localeCompare(b.label, 'ja'));
+      const seen = new Set();
+      const files = [];
+      for (const n of (deps?.nodes || [])) {
+        if (n.type !== 'CUSTOMIZE') continue;
+        const id = String(n.id).replace(/^CUSTOMIZE:/, '');
+        if (seen.has(id)) continue;
+        seen.add(id);
+        // URL 指定（外部）の JS は Scanner が本文を取得しないため、node.analyzed の値にかかわらず未解析として扱う
+        files.push({ id, name: n.name, target: n.target, kind: n.kind, analyzed: n.analyzed !== false && !/^https?:\/\//i.test(String(n.name)) });
+      }
+      for (const f of (scan?.files || [])) {
+        if (f?.note) continue;   // 外部 URL（skipped）は DEPS 側のノード（未解析）で表す
+        const id = `${f.target}:${f.kind}:${f.name}`;
+        if (seen.has(id)) continue;
+        seen.add(id);
+        files.push({ id, name: f.name, target: f.target, kind: f.kind, analyzed: true });
+      }
+      files.sort((a, b) => (a.kind === b.kind ? 0 : a.kind === 'js' ? -1 : 1) || a.name.localeCompare(b.name, 'ja') || a.target.localeCompare(b.target));
+      return { fields, files: files.map(f => ({ ...f, label: fileLabel(f) })) };
+    }
+
+    /**
+     * 画面の入力 → KTContext.build の引数。対象を明示選択しているときは focus を渡し、自然言語からの対象解決は行わない。
+     * アプリ全体は focus なし・質問だけ（質問が空なら L0 のみ）
+     */
+    function toBuildRequest({ targetType, targetId, targetLabel = null, question }) {
+      const q = String(question ?? '').trim() || null;
+      const label = targetLabel != null && String(targetLabel).trim() ? String(targetLabel) : undefined;
+      if (targetType === 'field' && targetId) return { question: q, focus: { type: 'field', id: String(targetId), ...(label ? { label } : {}) } };
+      if (targetType === 'file' && targetId) return { question: q, focus: { type: 'file', id: String(targetId), ...(label ? { label } : {}) } };
+      return { question: q, focus: null, options: {} };
+    }
+
+    /** coverage → 表示行（✓ 含む / — 未解析・対象外。「—」は存在しないという意味ではない） */
+    function coverageRows(ctx) {
+      const cv = ctx?.coverage || {};
+      const s = cv.settings || {};
+      const settingsOk = !!(s.views || s.notifications || s.process || s.acl || s.actions);
+      return [
+        { label: 'フィールド', included: !!cv.fields },
+        { label: 'アプリ設定（一覧・通知・プロセス・アクセス権・アクション）', included: settingsOk },
+        { label: '依存関係', included: !!cv.dependencies },
+        { label: 'JavaScript', included: !!cv.javascript },
+        { label: '他アプリからの参照', included: !!cv.incoming },
+        { label: 'プラグイン設定', included: false, reason: cv.pluginCount ? `${cv.pluginCount} 個あり・設定内容は API で取得不可` : '取得不可' },
+        { label: 'レコードデータ', included: false, reason: '対象外（取得しない）' },
+        { label: '添付ファイル', included: false, reason: '対象外（取得しない）' },
+      ];
+    }
+
+    /** truncation → 表示（applied のときだけ本文と内訳） */
+    function truncationSummary(ctx) {
+      const t = ctx?.truncation || { applied: false, sections: [] };
+      return {
+        applied: !!t.applied,
+        message: t.applied ? '一部の解析結果はサイズ制限のため省略されています。' : '',
+        details: (t.sections || []).map(s => `${s.name}: ${s.total}件中${s.included}件`),
+      };
+    }
+
+    /** size → 表示文字列（KTContext.measure の近似値） */
+    function sizeSummary(ctx) {
+      const sz = ctx?.size || {};
+      const kb = Math.max(1, Math.round((sz.bytes || 0) / 1024));
+      return {
+        tokens: sz.approxTokens ?? 0, bytes: sz.bytes ?? 0, facts: sz.facts ?? 0,
+        text: `約 ${(sz.approxTokens ?? 0).toLocaleString()} tokens（近似） / ${kb} KB / Facts: ${sz.facts ?? 0}`,
+      };
+    }
+
+    /**
+     * 生成（純関数）。ambiguous のときは候補を返し、出力は作らない（勝手に決めない）
+     * @returns {{ ok:true, ctx, outputs:{prompt,markdown,json}, coverage, truncation, size, warnings:string[] }
+     *          |{ ok:false, reason:'ambiguous'|'no-data'|'error', candidates?:Array, message:string }}
+     */
+    function generate({ targetType, targetId, targetLabel = null, question, inputs, limits = null, now = undefined }) {
+      if (!inputs || !inputs.data) return { ok: false, reason: 'no-data', message: 'アプリ設定の取得が完了していません。' };
+      const req = toBuildRequest({ targetType, targetId, targetLabel, question });
+      let ctx;
+      try {
+        ctx = KTContext.build({
+          ...req, data: inputs.data, deps: inputs.deps || null, scan: inputs.scan || null, incoming: inputs.incoming || null,
+          options: { ...(limits ? { limits } : {}), ...(now !== undefined ? { now } : {}) },
+        });
+      } catch (e) {
+        return { ok: false, reason: 'error', message: `Context の生成に失敗しました: ${e?.message || e}` };
+      }
+      if (ctx.focus.resolution === 'ambiguous') {
+        return {
+          ok: false, reason: 'ambiguous', ctx,
+          candidates: ctx.focus.candidates.map(c => ({ type: c.type, id: c.id, label: c.type === 'file' ? fileLabel({ name: c.label, target: c.target, kind: c.kind }) : (c.label && c.label !== c.id ? `${c.label}（${c.id}）` : c.id) })),
+          message: '対象を特定できませんでした。候補から選択してください。',
+        };
+      }
+      const warnings = [];
+      if (!ctx.coverage.javascript) warnings.push('JavaScript は未解析です（Field Scanner の Scan 実行で反映されます）。');
+      if (!ctx.coverage.incoming) warnings.push('他アプリからの参照は未走査です（Relations タブで走査できます）。');
+      if (inputs.scan && !(inputs.scan.files || []).some(f => typeof f.text === 'string')) warnings.push('JavaScript 本文はキャッシュに含まれないため、コード抜粋は Scanner の断片のみです。');
+      return {
+        ok: true, ctx,
+        outputs: { prompt: KTContext.toPrompt(ctx), markdown: KTContext.toMarkdown(ctx), json: KTContext.toJSON(ctx, { pretty: true }) },
+        coverage: coverageRows(ctx), truncation: truncationSummary(ctx), size: sizeSummary(ctx), warnings,
+      };
+    }
+
+    /** 出力ファイル名（ローカル保存用） */
+    function outputFilename(ctx, view) {
+      const ext = view === 'json' ? 'json' : 'md';
+      const tgt = ctx?.focus?.target ? `_${String(ctx.focus.target.id).replace(/[^\w.\-]+/g, '_')}` : '';
+      return `ai-context_app${ctx?.app?.id ?? ''}${tgt}_${view}.${ext}`;
+    }
+
+    // ---- HTML（文字列のみ。DOM には触らない）----
+    const esc = (v) => escapeHtml(v);
+    function panelHtml({ border, bg }) {
+      const opt = (list, sel) => list.map(x => `<option value="${esc(x.id)}"${x.id === sel ? ' selected' : ''}>${esc(x.label)}</option>`).join('');
+      return `
+        <div id="kt-ai-panel" style="display:flex; flex-direction:column; gap:8px; font-size:12px;">
+          <div style="opacity:.85; line-height:1.5;">${esc(INTRO_TEXT)}<br><span style="opacity:.8;">${esc(INTRO_NOTE)}</span></div>
+          <label style="display:flex; align-items:center; gap:6px; white-space:nowrap;">対象
+            <select id="kt-ai-target-type" class="btn" style="padding:3px 4px; height:28px; flex:1;">${opt(TARGET_TYPES, 'app')}</select>
+          </label>
+          <select id="kt-ai-target" class="btn" style="padding:3px 4px; height:28px; display:none;"></select>
+          <label style="display:flex; align-items:center; gap:6px; white-space:nowrap;">質問プリセット
+            <select id="kt-ai-preset" class="btn" style="padding:3px 4px; height:28px; flex:1;"></select>
+          </label>
+          <textarea id="kt-ai-question" rows="3" placeholder="質問（自由に編集できます。空でも構成だけの Context を生成します）"
+            style="width:100%; box-sizing:border-box; border:1px solid ${border}; border-radius:8px; padding:6px; background:${bg}; color:inherit; font:inherit; resize:vertical;"></textarea>
+          <div style="display:flex; gap:6px; align-items:center;">
+            <button id="kt-ai-generate" class="btn" style="flex:1; height:32px; font-weight:600;">AI Prompt を生成</button>
+            <button id="kt-ai-scan" class="btn" style="height:32px; display:none;" title="JavaScript を解析して Context に含める">JS を解析</button>
+          </div>
+          <div id="kt-ai-status" style="min-height:1.2em; opacity:.85;"></div>
+          <div id="kt-ai-candidates-wrap" style="display:none; gap:6px; align-items:center;">
+            <select id="kt-ai-candidate" class="btn" style="padding:3px 4px; height:28px; flex:1;"></select>
+            <button id="kt-ai-candidate-apply" class="btn" style="height:28px;">この対象で生成</button>
+          </div>
+          <div id="kt-ai-actions" style="display:none; flex-wrap:wrap; gap:6px;">
+            <button id="kt-ai-copy-prompt" class="btn" style="height:32px; flex:1 1 100%; font-weight:600;">AI Prompt をコピー</button>
+            <button id="kt-ai-copy-md" class="btn" style="height:28px; flex:1;">Markdown をコピー</button>
+            <button id="kt-ai-copy-json" class="btn" style="height:28px; flex:1;">JSON をコピー</button>
+            <label style="display:flex; align-items:center; gap:6px; flex:1 1 100%; white-space:nowrap;">プレビュー
+              <select id="kt-ai-view" class="btn" style="padding:3px 4px; height:28px; flex:1;">
+                <option value="prompt">AI Prompt</option><option value="markdown">Markdown</option><option value="json">JSON（開発者向け）</option>
+              </select>
+            </label>
+          </div>
+          <div id="kt-ai-result" style="display:none; border:1px solid ${border}; border-radius:8px; padding:8px; background:${bg}; line-height:1.6;"></div>
+        </div>`;
+    }
+
+    /** 生成結果のサマリ HTML（coverage / truncation / size / confidence ヘルプ） */
+    function resultHtml(gen) {
+      if (!gen || !gen.ok) return '';
+      const cov = gen.coverage.map(r => `<div>${r.included ? '✓' : '—'} ${esc(r.label)}${!r.included && r.reason ? ` <span style="opacity:.7;">（${esc(r.reason)}）</span>` : ''}</div>`).join('');
+      const tr = gen.truncation.applied
+        ? `<details style="margin-top:6px;"><summary style="cursor:pointer;">⚠ ${esc(gen.truncation.message)}</summary><div style="opacity:.85; padding-left:8px;">${gen.truncation.details.map(d => `<div>${esc(d)}</div>`).join('')}</div></details>`
+        : '';
+      const warn = gen.warnings.length ? `<div style="margin-top:6px; opacity:.85;">${gen.warnings.map(w => `<div>※ ${esc(w)}</div>`).join('')}</div>` : '';
+      const help = `<details style="margin-top:6px;"><summary style="cursor:pointer;">確度（confidence）の意味</summary><div style="padding-left:8px;">${CONFIDENCE_HELP.map(h => `<div><b>${esc(h.label)}</b>（${esc(h.code)}）: ${esc(h.text)}</div>`).join('')}</div></details>`;
+      const focus = gen.ctx.focus;
+      const target = focus.target ? `${esc(focus.target.type)} <code>${esc(focus.target.id)}</code>` : 'アプリ全体';
+      return `
+        <div><b>対象</b>: ${target}　<b>階層</b>: ${esc(gen.ctx.levels.join(' + '))}</div>
+        <div><b>サイズ</b>: ${esc(gen.size.text)}</div>
+        <div style="margin-top:6px;"><b>解析範囲</b>（— は未解析・対象外。存在しないという意味ではありません）</div>
+        ${cov}${tr}${warn}${help}`;
+    }
+
+    return {
+      TARGET_TYPES, PRESETS, CONFIDENCE_HELP, INTRO_TEXT, INTRO_NOTE,
+      listTargets, fileLabel, toBuildRequest, generate, coverageRows, truncationSummary, sizeSummary, outputFilename,
+      panelHtml, resultHtml,
+    };
+  })();
+
+  /**
+   * Templates タブ内の「AI向けドキュメント」パネルを組み立てる（DOM 層。#id だけで要素を引く）
+   * @param {Element} host  パネルを描くコンテナ
+   * @param {object} d
+   *   getInputs()        → { data, deps, scan, incoming }（呼び出し時点の最新）
+   *   setPreview(text, lang) エディタ側へ出力を表示する
+   *   copyText(text)     → Promise<boolean>
+   *   runScan()          → Promise<{ok}>（省略可。無ければ「JS を解析」ボタンを出さない）
+   *   colors             { border, bg }
+   * @returns {{ regenerate(), currentOutput() }} 外側（ローカル保存ボタン等）から使う
+   */
+  function mountAiDocsPanel(host, d) {
+    host.innerHTML = KTContextUi.panelHtml(d.colors || { border: '#ccc', bg: 'transparent' });
+    const $ = (id) => host.querySelector(`#${id}`);
+    const $type = $('kt-ai-target-type'), $target = $('kt-ai-target'), $preset = $('kt-ai-preset'), $q = $('kt-ai-question');
+    const $gen = $('kt-ai-generate'), $scan = $('kt-ai-scan'), $status = $('kt-ai-status');
+    const $candWrap = $('kt-ai-candidates-wrap'), $cand = $('kt-ai-candidate'), $candApply = $('kt-ai-candidate-apply');
+    const $actions = $('kt-ai-actions'), $view = $('kt-ai-view'), $result = $('kt-ai-result');
+    const $copyPrompt = $('kt-ai-copy-prompt'), $copyMd = $('kt-ai-copy-md'), $copyJson = $('kt-ai-copy-json');
+
+    let last = null;      // 直近の generate 結果
+    const esc = escapeHtml;
+    const setStatus = (t) => { $status.textContent = t || ''; };
+
+    function fillTargets() {
+      const inputs = d.getInputs() || {};
+      const { fields, files } = KTContextUi.listTargets(inputs);
+      const type = $type.value || 'app';
+      if (type === 'field') {
+        $target.innerHTML = fields.map(f => `<option value="${esc(f.id)}">${esc(f.label)}</option>`).join('');
+        $target.style.display = '';
+      } else if (type === 'file') {
+        $target.innerHTML = files.length
+          ? files.map(f => `<option value="${esc(f.id)}">${esc(f.label)}</option>`).join('')
+          : `<option value="">（JavaScript ファイルがありません）</option>`;
+        $target.style.display = '';
+      } else {
+        $target.innerHTML = '';
+        $target.style.display = 'none';
+      }
+      const presets = KTContextUi.PRESETS[type] || [];
+      $preset.innerHTML = `<option value="">（プリセットを選択）</option>` + presets.map(p => `<option value="${esc(p)}">${esc(p)}</option>`).join('');
+      // JS 未解析なら解析ボタンを出す
+      $scan.style.display = (typeof d.runScan === 'function' && !inputs.scan) ? '' : 'none';
+    }
+
+    function showPreview() {
+      if (!last || !last.ok) return;
+      const view = $view.value || 'prompt';
+      d.setPreview(last.outputs[view], view === 'json' ? 'json' : 'markdown');
+    }
+
+    function render(gen) {
+      last = gen;
+      if (!gen.ok) {
+        $actions.style.display = 'none';
+        $result.style.display = 'none';
+        setStatus(gen.message);
+        if (gen.reason === 'ambiguous') {
+          $cand.innerHTML = gen.candidates.map(c => `<option value="${esc(`${c.type}:${c.id}`)}">${esc(c.label)}</option>`).join('');
+          $candWrap.style.display = 'flex';
+        } else {
+          $candWrap.style.display = 'none';
+        }
+        return;
+      }
+      $candWrap.style.display = 'none';
+      $actions.style.display = 'flex';
+      $result.style.display = '';
+      $result.innerHTML = KTContextUi.resultHtml(gen);
+      setStatus(`生成しました（${gen.size.text}）`);
+      showPreview();
+    }
+
+    function generate(override = null) {
+      const type = override?.type || $type.value || 'app';
+      const id = override?.id ?? (type === 'app' ? null : $target.value);
+      // 表示名（ラベル（コード）/ PC: name）を focus.label に渡す。識別子は常に id（フィールドコード / sourceId）
+      const opt = (type !== 'app' && $target.options) ? [...$target.options].find(o => o.value === String(id)) : null;
+      const label = override?.label ?? (opt ? opt.textContent : null);
+      setStatus('生成中...');
+      const gen = KTContextUi.generate({ targetType: type, targetId: id, targetLabel: label, question: $q.value, inputs: d.getInputs() });
+      render(gen);
+      return gen;
+    }
+
+    $type.addEventListener('change', () => { fillTargets(); });
+    $preset.addEventListener('change', () => { if ($preset.value) $q.value = $preset.value; });
+    $gen.addEventListener('click', () => generate());
+    $candApply.addEventListener('click', () => {
+      const v = String($cand.value || '');
+      const i = v.indexOf(':');
+      if (i < 0) return;
+      const type = v.slice(0, i), id = v.slice(i + 1);
+      // 候補を UI の対象選択にも反映し、以後は明示 focus で生成する
+      $type.value = type; fillTargets(); $target.value = id;
+      generate({ type, id });
+    });
+    $view.addEventListener('change', showPreview);
+    const copy = async (btn, key) => {
+      if (!last || !last.ok) { flashBtnText(btn, '先に生成'); return; }
+      const ok = await d.copyText(last.outputs[key]);
+      flashBtnText(btn, ok ? 'Copied!' : 'Failed');
+    };
+    $copyPrompt.addEventListener('click', () => copy($copyPrompt, 'prompt'));
+    $copyMd.addEventListener('click', () => copy($copyMd, 'markdown'));
+    $copyJson.addEventListener('click', () => copy($copyJson, 'json'));
+    $scan.addEventListener('click', async () => {
+      if (typeof d.runScan !== 'function') return;
+      setStatus('JavaScript を解析中...');
+      $scan.disabled = true;
+      try {
+        const r = await d.runScan();
+        setStatus(r?.ok ? 'JavaScript を解析しました。再度「AI Prompt を生成」で反映されます。' : `解析できませんでした（${r?.reason || 'unknown'}）`);
+      } finally {
+        $scan.disabled = false;
+        fillTargets();
+      }
+    });
+
+    fillTargets();
+    return {
+      regenerate: () => (last ? generate() : null),
+      refreshTargets: fillTargets,
+      currentOutput: () => {
+        if (!last || !last.ok) return null;
+        const view = $view.value || 'prompt';
+        return { text: last.outputs[view], filename: KTContextUi.outputFilename(last.ctx, view), mime: view === 'json' ? 'application/json' : 'text/markdown' };
+      },
+    };
+  }
 
 
   // ==========================================
@@ -8959,7 +9340,7 @@
     return `SYSTEM:\n${system}\n\nUSER:\n${user}`;
   }
 
-  async function renderTemplates(root, DATA) {
+  async function renderTemplates(root, DATA, appId = null, { getContextInputs = null, runScan = null } = {}) {
     const view = root.querySelector('#view-templates');
     if (!view) return;
     let currentFileName = 'template.js';
@@ -9015,6 +9396,7 @@
               <option value="css">Css  (GitHub: ${GH.dirs.css})</option>
               <option value="snippets">Snippets  (GitHub: ${GH.dirs.snippets})</option>
               <option value="documents">Documents (GitHub: ${GH.dirs.documents})</option>
+              <option value="ai">AI向けドキュメント（Toolkit解析 → AI Prompt）</option>
             </select>
           </div>
 
@@ -9033,6 +9415,8 @@
               padding:6px;
             ">
           </div>
+          <!-- AI向けドキュメント（無料機能。source=ai のときだけ表示。KTContext → Prompt / Markdown / JSON） -->
+          <div id="kt-template-ai" class="kt-scroll-area" style="display:none; border:1px solid ${BD}; border-radius:8px; background:${BG}; padding:8px;"></div>
           <div id="kt-template-overview" class="kt-flex-fixed"></div>
         </div>
       </div>
@@ -9050,8 +9434,51 @@
     const $upload = view.querySelector('#kt-template-upload');
     const $btnGithub = view.querySelector('#kt-template-github');
     const $editorHost = view.querySelector('#kt-template-editor');
+    const $aiHost = view.querySelector('#kt-template-ai');
+
+    // ---- AI向けドキュメント（KTContext）パネル。source=ai で表示。エディタはプレビューとして使う ----
+    async function setAiPreview(text, lang = 'markdown') {
+      try {
+        if (!monacoEditor) await initEditor(text, $editorHost);
+        else monacoEditor.setValue(text);
+        setEditorLanguage(lang);
+        // 日本語の全角記号が「紛らわしい Unicode」として枠表示されるのを抑える（プレビュー用途のため）
+        try { monacoEditor.updateOptions({ unicodeHighlight: { ambiguousCharacters: false, invisibleCharacters: false } }); } catch (e) { }
+      } catch (e) {
+        // Monaco（CDN）が使えない環境でもプレビューは出す
+        $editorHost.innerHTML = `<pre style="margin:0; padding:8px; white-space:pre-wrap; font-size:12px; overflow:auto; height:100%;">${escapeHtml(text)}</pre>`;
+      }
+    }
+    const aiPanel = (typeof getContextInputs === 'function')
+      ? mountAiDocsPanel($aiHost, {
+        getInputs: getContextInputs,
+        setPreview: setAiPreview,
+        copyText: (t) => KTExport.copyText(t),
+        runScan,
+        colors: { border: BD, bg: isDark ? '#1b1b1b' : '#fff' },
+      })
+      : null;
+    function applyAiMode(isAi) {
+      $aiHost.style.display = isAi ? '' : 'none';
+      $list.style.display = isAi ? 'none' : '';
+      [$refresh, $btnGithub].forEach(b => { b.style.display = isAi ? 'none' : ''; });
+      if (isAi) {
+        $overview.style.display = 'none';
+        $overview.innerHTML = '';
+        $insert.style.display = 'none';
+        $upload.disabled = true;
+        $download.disabled = false;
+        $meta.textContent = 'AI向けドキュメント：生成した Prompt / Markdown / JSON を左に表示します';
+        if (aiPanel) aiPanel.refreshTargets();
+      }
+    }
 
     function updateAIReqVisibility() {
+      const isAi = ($sourceSel.value === 'ai');
+      applyAiMode(isAi);
+      if (isAi) { $btnAIReq.style.display = 'none'; return; }
+      // AI プレビューで切っていた Unicode の紛らわしい文字の強調を、通常のテンプレート編集に戻す
+      try { monacoEditor?.updateOptions({ unicodeHighlight: { ambiguousCharacters: true, invisibleCharacters: true } }); } catch (e) { }
       const isDocs = ($sourceSel.value === 'documents');
       // 表示/非表示
       $btnAIReq.style.display = isDocs ? '' : 'none';
@@ -9296,6 +9723,13 @@
 
     // ボタン挙動
     $download.addEventListener('click', async () => {
+      // AI向けドキュメント：プレビュー中の出力をそのまま保存する
+      if (selectedKind === 'ai') {
+        const out = aiPanel ? aiPanel.currentOutput() : null;
+        if (!out) { flashBtnText($download, '先に生成'); return; }
+        KTExport.downloadText(out.filename, out.text, `${out.mime};charset=utf-8`);
+        return;
+      }
       if (!selectedItem) return;
 
       let name = currentFileName || 'template.js';
@@ -9600,6 +10034,7 @@
     async function loadList() {
       const kind = $sourceSel.value;
       selectedKind = kind;
+      if (kind === 'ai') { updateAIReqVisibility(); return; }   // GitHub は参照しない
       $list.innerHTML = `<div style="padding:12px; opacity:.7">読み込み中...</div>`;
       try {
         const files = await fetchList(kind, true);
@@ -11630,6 +12065,7 @@
        */
       function applyScanResult(payload, { fromCache, elapsedSec, silent }) {
         FS_last = payload;
+        KTScan.setLastPayload(payload);
 
         let merged = false;
         if (deps) {
@@ -12280,7 +12716,16 @@
       'fieldAcl',
     ]));
     renderCustomize(root, DATA, appId);
-    renderTemplates(root, DATA, appId);
+    renderTemplates(root, DATA, appId, {
+      // AI向けドキュメント（無料機能）: 呼び出し時点の最新の解析結果を渡す（Scanner / 他アプリ走査の結果は後から入る）
+      getContextInputs: () => ({
+        data: DATA,
+        deps: DEPS,
+        scan: KTScan.getLastPayload(),
+        incoming: (() => { try { return KTIncoming.loadCache(String(appId)); } catch (e) { return null; } })(),
+      }),
+      runScan: () => KTScan.run({ silent: true }),
+    });
     renderScanner(root, {
       ...pick(DATA, ['appId', 'fields', 'layout', 'customize']),
       deps: DEPS,

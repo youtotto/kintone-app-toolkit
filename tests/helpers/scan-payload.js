@@ -5,7 +5,12 @@
 // （Scanner 本体の analyze / extractEventTypes は UI 内にあり sandbox から呼べないため）。
 'use strict';
 
-function buildScanPayload({ KTScan, KTDeps }, { appId, files, fields, deps = null, scannedAt = '2026-10-01T00:00:00.000Z' }) {
+// 実データ（Field Scanner のキャッシュ payload。2026-10-01 に実機で確認）に合わせる:
+//   meta.include = { desktop:true, mobile:true } / meta.kinds = ['js']
+//   files[] は本文を持たず、外部 URL の JS は { name, target, kind, note:'external URL (skipped)' }
+//   matches[] = { file, target, kind, line, access, confidence, snippet }（access: READ/WRITE/CONTROL/ELEMENT/OTHER …、confidence: HIGH/MEDIUM/LOW）
+//   fileEvents = { 'desktop:js:<name>': [{ name, direct }] } / unknownRefs[].files[].name = 'desktop:<name>'
+function buildScanPayload({ KTScan, KTDeps }, { appId, files, fields, deps = null, scannedAt = '2026-10-01T00:00:00.000Z', skippedUrlFiles = [] }) {
   const lineOf = (text, idx) => text.slice(0, idx).split('\n').length;
   const results = [];
   for (const f of fields) {
@@ -58,9 +63,13 @@ function buildScanPayload({ KTScan, KTDeps }, { appId, files, fields, deps = nul
   const depsKnown = (deps?.nodes || []).filter(n => n.type === 'FIELD').map(n => String(n.id).replace(/^FIELD:/, ''));
   const unknownRefs = KTScan.collectUnknownFieldRefs(files, fields, depsKnown, appId);
   const externalRefs = KTScan.collectExternalFieldRefs(files, appId);
+  const allFiles = [
+    ...files,
+    ...skippedUrlFiles.map(u => ({ name: u.name, target: u.target, kind: 'js', note: 'external URL (skipped)' })),
+  ];
   return {
-    results, files, fields, appRefs, fileEvents, unknownRefs, unknownStatuses: [], externalRefs,
-    meta: { appId, include: 'both', kinds: 'js', scannedAt },
+    results, files: allFiles, fields, appRefs, fileEvents, unknownRefs, unknownStatuses: [], externalRefs,
+    meta: { appId, include: { desktop: true, mobile: true }, kinds: ['js'], scannedAt },
   };
 }
 

@@ -139,4 +139,7 @@ const incoming = {
   scannedAt: '2026-10-01T00:00:00.000Z',
 };
 
-module.exports = { SELF_APP, CUSTOMER_APP, QUOTE_APP, makeData, files, incoming, DESKTOP_COMMON, MOBILE_COMMON, AUTO_LOOKUP };
+// 外部 URL の JS（Scanner は本文を取得せず files[] に note 付きで残す。実データと同じ形）
+const skippedUrlFiles = [{ name: 'luxon.min.js', target: 'desktop' }];
+
+module.exports = { SELF_APP, CUSTOMER_APP, QUOTE_APP, makeData, files, incoming, skippedUrlFiles, DESKTOP_COMMON, MOBILE_COMMON, AUTO_LOOKUP };

@@ -33,7 +33,7 @@ function buildInputs({ withScan = true, withIncoming = true } = {}) {
   let scan = null;
   if (withScan) {
     const fields = fieldsN.filter(f => f.type !== 'SUBTABLE').map(f => ({ code: f.code, label: f.label, type: f.rawType }));
-    scan = buildScanPayload({ KTScan, KTDeps }, { appId: FX.SELF_APP, files: FX.files, fields, deps });
+    scan = buildScanPayload({ KTScan, KTDeps }, { appId: FX.SELF_APP, files: FX.files, fields, deps, skippedUrlFiles: FX.skippedUrlFiles });
     KTDeps.mergeScannerEdges(deps, scan);
   }
   if (withIncoming) KTDeps.applyIncomingRefs(deps, FX.incoming);
@@ -59,7 +59,8 @@ console.log('\n--- 1. L0 App Overview ---');
   assert(a.contextVersion === '1' && a.generator.version === SCRIPT_VERSION, 'contextVersion "1" と生成元バージョンを持つ');
   assert(a.app.id === '310' && a.app.name === '案件管理', 'アプリID・アプリ名');
   assert(a.app.fieldCount === 23 && a.app.fields.length === 23, `フィールド数 23（実際: ${a.app.fieldCount}）`);
-  assert(a.app.process.enabled && a.app.process.states.join(',') === '未処理,承認待ち,承認済み,完了' || a.app.process.stateCount === Object.keys(FX.makeData().status.states).length, 'プロセス管理の状態一覧');
+  const expectStates = Object.values(FX.makeData().status.states).sort((x, y) => Number(x.index) - Number(y.index)).map(x => x.name);
+  assert(a.app.process.enabled && a.app.process.states.join(',') === expectStates.join(','), `プロセス管理の状態一覧（index 順: ${a.app.process.states.join(' → ')}）`);
     const FD = FX.makeData();
   assert(a.app.notifications.general === FD.generalNotify.notifications.length && a.app.notifications.perRecord === FD.perRecordNotify.notifications.length
     && a.app.notifications.reminder === FD.reminderNotify.notifications.length, `通知件数が fixture と一致（${JSON.stringify(a.app.notifications)}）`);
