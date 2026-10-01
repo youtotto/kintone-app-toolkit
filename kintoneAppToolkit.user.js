@@ -4682,22 +4682,28 @@
       TRANSPORT_ERROR: 'TRANSPORT_ERROR', TIMEOUT: 'TIMEOUT', INVALID_RESPONSE: 'INVALID_RESPONSE', WORKER_ERROR: 'WORKER_ERROR',
       NO_CONFIG: 'NO_CONFIG', NOT_ENTITLED: 'NOT_ENTITLED', CONTRACT_INCOMPATIBLE: 'CONTRACT_INCOMPATIBLE', NO_CONTEXT: 'NO_CONTEXT',
       NOT_CONNECTED: 'NOT_CONNECTED', SESSION_EXPIRED: 'SESSION_EXPIRED',
+      // tokenless connect（Browser Authorization Session）
+      CONNECT_DENIED: 'CONNECT_DENIED', CONNECT_EXPIRED: 'CONNECT_EXPIRED', CONNECT_CANCELLED: 'CONNECT_CANCELLED', NOT_FOUND: 'NOT_FOUND',
     };
     /** ユーザー向け文言（AppInsight ai-review-ui.js の AI_ERROR_TEXT を Toolkit 向けに統合） */
     const ERROR_TEXT = {
-      NO_CONFIG: 'AI 機能を利用するには Nest Rec AI の契約が必要です。契約時に発行されたトークンで「接続」してください。',
-      NOT_CONNECTED: 'Nest Rec AI に接続されていません。契約時に発行されたトークンで「接続」してください。',
-      SESSION_EXPIRED: 'Nest Rec AI との接続の有効期限が切れました。もう一度「接続」してください。',
-      NOT_ENTITLED: 'このトークンでは kintone App Toolkit の AI 機能を利用できません。契約内容を確認してください。',
-      PRODUCT_NOT_ENTITLED: 'このトークンでは kintone App Toolkit の AI 機能を利用できません。契約内容を確認してください。',
-      FEATURE_NOT_ENTITLED: 'このトークンでは「AIに質問」を利用できません。契約内容を確認してください。',
+      NO_CONFIG: 'AI 機能を利用するには Nest Rec AI の契約が必要です。「Nest Rec AIに接続」から接続してください。',
+      NOT_CONNECTED: 'Nest Rec AI に接続されていません。「Nest Rec AIに接続」から接続してください。',
+      SESSION_EXPIRED: 'Nest Rec AI との接続の有効期限が切れました。もう一度「Nest Rec AIに接続」してください。',
+      NOT_ENTITLED: 'この契約では kintone App Toolkit の AI 機能を利用できません。契約内容を確認してください。',
+      PRODUCT_NOT_ENTITLED: 'この契約では kintone App Toolkit の AI 機能を利用できません。契約内容を確認してください。',
+      FEATURE_NOT_ENTITLED: 'この契約では「AIに質問」を利用できません。契約内容を確認してください。',
+      CONNECT_DENIED: 'Nest Rec で接続がキャンセル（拒否）されました。',
+      CONNECT_EXPIRED: '接続の確認が時間切れになりました。もう一度「Nest Rec AIに接続」してください。',
+      CONNECT_CANCELLED: '接続をキャンセルしました。',
+      NOT_FOUND: '接続セッションが見つかりません。もう一度「Nest Rec AIに接続」してください。',
       FEATURE_NOT_IMPLEMENTED: 'この機能は AI サービス側でまだ有効化されていません。',
       CONTRACT_INCOMPATIBLE: 'Toolkit と AI サービスのバージョンが一致しません。Toolkit の更新または AI サービスの更新をお待ちください。',
       UNSUPPORTED_CONTRACT_VERSION: 'Toolkit と AI サービスのバージョンが一致しません。Toolkit の更新が必要です。',
       UNKNOWN_PROMPT_VERSION: 'Toolkit と AI サービスのバージョンが一致しません。Toolkit の更新が必要です。',
-      AUTH_INVALID_TOKEN: 'Customer Token が無効です。接続設定を確認してください。',
-      AUTH_TOKEN_EXPIRED: 'Customer Token の有効期限が切れています。新しいトークンを設定してください。',
-      AUTH_DOMAIN_MISMATCH: 'この kintone 環境では AI サービスを利用できません。トークンの対象ドメインを確認してください。',
+      AUTH_INVALID_TOKEN: 'Nest Rec AI との接続が無効です。もう一度「Nest Rec AIに接続」してください。',
+      AUTH_TOKEN_EXPIRED: 'Nest Rec AI との接続または契約の有効期限が切れています。もう一度「Nest Rec AIに接続」してください。',
+      AUTH_DOMAIN_MISMATCH: 'この kintone 環境では AI サービスを利用できません。契約の対象ドメインを確認してください。',
       RATE_LIMITED: 'アクセスが集中しています。しばらく待ってから再実行してください。',
       MONTHLY_LIMIT_EXCEEDED: '今月の AI 利用回数の上限に達しています。',
       UPSTREAM_ERROR: 'AI プロバイダが応答しませんでした。時間をおいて再実行してください。',
@@ -4937,6 +4943,14 @@
           token: grantType === 'customer_token' ? ct : null,
           body: JSON.stringify({ grantType, product, feature, ...(grantType === 'refresh_token' ? { refreshToken } : {}) }),
         }),
+        /** tokenless connect（docs/contracts/15）。start / status / complete は認証なし、disconnect は Refresh Token（body）*/
+        connectStart: ({ codeChallenge, product = PRODUCT, feature = FEATURE, clientVersion = pluginVersion }) => rawRequest({
+          path: '/v2/connect/start', method: 'POST', token: null,
+          body: JSON.stringify({ domain, product, feature, codeChallenge, codeChallengeMethod: 'S256', clientVersion }),
+        }),
+        connectStatus: (sessionId) => rawRequest({ path: `/v2/connect/status?session=${encodeURIComponent(sessionId)}`, method: 'GET', body: '', token: null }),
+        connectComplete: ({ sessionId, codeVerifier }) => rawRequest({ path: '/v2/connect/complete', method: 'POST', token: null, body: JSON.stringify({ sessionId, codeVerifier }) }),
+        connectDisconnect: ({ refreshToken }) => rawRequest({ path: '/v2/connect/disconnect', method: 'POST', token: null, body: JSON.stringify({ refreshToken }) }),
         /** POST /v2/review（toolkit.assistant-qa）。生成済みの ctx をそのまま送り、応答の根拠ID を再検証して返す */
         async ask({ ctx, requestId = newRequestId() } = {}) {
           const envelope = buildAskEnvelope({ ctx, requestId, pluginVersion, now: nowFn ? nowFn() : new Date().toISOString() });
@@ -5006,7 +5020,13 @@
         ask: (p) => authed().ask(p),
       };
       return {
-        /** 契約時に発行された Customer Token で接続（1 回だけ送り、保存しない） */
+        /** connect flow（PKCE）で発行された pair を取り込む（Customer Token は存在しない） */
+        adopt(ex, { apiBase: ab = null } = {}) {
+          if (ab) store.save({ ...cfg(), apiBase: ab });
+          persist(ex);
+          return this.status();
+        },
+        /** 開発・運用者向け: Customer Token で接続（1 回だけ送り、保存しない。本番 UI には出さない） */
         async connect(customerToken, { apiBase: ab = null } = {}) {
           if (ab) store.save({ ...cfg(), apiBase: ab });
           const ex = await bare().exchange({ grantType: 'customer_token', customerToken: String(customerToken || '').trim() });
@@ -5019,7 +5039,15 @@
           if (!legacy) return false;
           try { await this.connect(legacy.customerToken, { apiBase: legacy.apiBase }); return true; } catch (e) { return false; }
         },
-        disconnect() { store.clear(); access = { token: null, expiresAt: null }; },
+        /** 接続解除: memory の Access・local の Refresh を消し、Gateway 側でも family を失効する（best-effort） */
+        async disconnect() {
+          const c = cfg();
+          const rt = c.refreshToken || '';
+          store.clear(); access = { token: null, expiresAt: null };
+          if (!rt) return { revoked: false };
+          try { await bare().connectDisconnect({ refreshToken: rt }); return { revoked: true }; }
+          catch (e) { return { revoked: false, error: isAiClientError(e) ? e.code : ERROR_CODES.TRANSPORT_ERROR }; }
+        },
         refresh,
         status() {
           const c = cfg();
@@ -5033,11 +5061,94 @@
       };
     }
 
+    // ---- tokenless connect（Browser Authorization Session。docs/contracts/15）----
+    const b64url = (bytes) => { let b = ''; bytes.forEach(x => { b += String.fromCharCode(x); }); return btoa(b).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, ''); };
+    /** PKCE（S256）: verifier は memory にだけ置き、Gateway には challenge だけを送る */
+    async function createPkce({ cryptoObj = (typeof crypto !== 'undefined' ? crypto : null) } = {}) {
+      if (!cryptoObj?.getRandomValues || !cryptoObj?.subtle?.digest) throw new AiClientError({ code: ERROR_CODES.TRANSPORT_ERROR, message: 'この環境では安全な乱数を生成できません' });
+      const bytes = new Uint8Array(32);
+      cryptoObj.getRandomValues(bytes);
+      const verifier = b64url(bytes);
+      const digest = await cryptoObj.subtle.digest('SHA-256', new TextEncoder().encode(verifier));
+      return { verifier, challenge: b64url(new Uint8Array(digest)) };
+    }
+    const CONNECT_MAX_TRANSIENT = 5;
+    /** 開発モード（Customer Token 入力の旧方式を表示する）。本番 UI では非表示 */
+    function isDevMode() {
+      try { return typeof localStorage !== 'undefined' && localStorage.getItem('ktAi.devMode') === '1'; } catch (e) { return false; }
+    }
+    /**
+     * 接続フロー: start → 承認ページを別タブで開く → status を polling → complete（PKCE）→ session.adopt
+     * @param {object} p session（createSession）/ hostname / transport / nowFn / sleep / openUrl(url) → opened:boolean / pluginVersion / cryptoObj
+     */
+    function createConnectFlow({ session, hostname = null, transport = null, nowFn = null, sleep = null, openUrl = null, pluginVersion = SCRIPT_VERSION, cryptoObj = undefined } = {}) {
+      const now = () => (nowFn ? nowFn() : Date.now());
+      const wait = sleep || ((ms) => new Promise(r => setTimeout(r, ms)));
+      const open = openUrl || ((url) => { try { const w = (typeof window !== 'undefined') ? window.open(url, '_blank', 'noopener') : null; return !!w; } catch (e) { return false; } });
+      let state = { phase: 'idle', sessionId: null, authorizeUrl: null, expiresAt: null, popupBlocked: false, error: null };
+      let cancelled = false, running = null;
+      const set = (patch, onState) => { state = { ...state, ...patch }; if (onState) { try { onState(state); } catch (e) { } } };
+      const client = () => createAiClient({ apiBase: session.status().apiBase, hostname, transport, pluginVersion });
+      async function run(onState) {
+        cancelled = false;
+        set({ phase: 'starting', error: null, popupBlocked: false, sessionId: null, authorizeUrl: null }, onState);
+        const pkce = await createPkce(cryptoObj === undefined ? {} : { cryptoObj });
+        const st = await client().connectStart({ codeChallenge: pkce.challenge });
+        const opened = open(st.authorizeUrl);
+        set({ phase: 'pending', sessionId: st.sessionId, authorizeUrl: st.authorizeUrl, expiresAt: st.expiresAt, popupBlocked: !opened }, onState);
+        let intervalSec = Math.max(1, Number(st.pollIntervalSeconds) || 2);
+        let transient = 0;
+        while (!cancelled) {
+          if (Number.isFinite(Date.parse(st.expiresAt)) && now() >= Date.parse(st.expiresAt)) throw new AiClientError({ code: ERROR_CODES.CONNECT_EXPIRED, message: 'connect session expired' });
+          await wait(intervalSec * 1000);
+          if (cancelled) break;
+          let r;
+          try { r = await client().connectStatus(st.sessionId); transient = 0; }
+          catch (e) {
+            if (isAiClientError(e) && e.code === ERROR_CODES.RATE_LIMITED) { intervalSec = Math.max(intervalSec, Number(e.retryAfterSeconds) || intervalSec * 2); continue; }
+            if (isAiClientError(e) && e.code === ERROR_CODES.NOT_FOUND) throw e;
+            if (++transient > CONNECT_MAX_TRANSIENT) throw e;
+            continue;   // 一時的な失敗は polling を続ける
+          }
+          if (r.pollIntervalSeconds) intervalSec = Math.max(1, Number(r.pollIntervalSeconds) || intervalSec);
+          if (r.status === 'pending') continue;
+          if (r.status === 'denied') throw new AiClientError({ code: ERROR_CODES.CONNECT_DENIED, message: 'denied' });
+          if (r.status === 'expired') throw new AiClientError({ code: ERROR_CODES.CONNECT_EXPIRED, message: 'expired' });
+          if (r.status === 'consumed') throw new AiClientError({ code: ERROR_CODES.AUTH_INVALID_TOKEN, message: 'consumed' });
+          // authorized → complete（verifier は memory のみ）
+          set({ phase: 'completing' }, onState);
+          const ex = await client().connectComplete({ sessionId: st.sessionId, codeVerifier: pkce.verifier });
+          session.adopt(ex);
+          set({ phase: 'connected', customer: ex.customer || null }, onState);
+          return ex;
+        }
+        throw new AiClientError({ code: ERROR_CODES.CONNECT_CANCELLED, message: 'cancelled' });
+      }
+      return {
+        /** 接続を開始する（同時に 1 つ）。失敗・キャンセルは AiClientError（CONNECT_*）で reject */
+        start({ onState = null } = {}) {
+          if (running) return running;
+          running = run(onState).catch((e) => {
+            const code = isAiClientError(e) ? e.code : ERROR_CODES.TRANSPORT_ERROR;
+            set({ phase: 'failed', error: code }, onState);
+            throw e;
+          }).finally(() => { running = null; });
+          return running;
+        },
+        cancel() { cancelled = true; },
+        /** ポップアップがブロックされたときに承認ページをもう一度開く */
+        reopen() { if (!state.authorizeUrl) return false; const ok = open(state.authorizeUrl); set({ popupBlocked: !ok }); return ok; },
+        state: () => ({ ...state }),
+        isRunning: () => !!running,
+      };
+    }
+
     return {
       CONTRACT_VERSION, PRODUCT, FEATURE, PROMPT_VERSION, DEFAULT_API_BASE, HEALTH_TTL_MS, ACCESS_SKEW_MS,
       ERROR_CODES, ERROR_TEXT, errorText, AiClientError, isAiClientError,
       createSettingsStore, createDefaultTransport, normalizeLegacyErrorCode,
       buildAskEnvelope, capabilityFromHealth, validateAnswer, createAiClient, createSession, newRequestId,
+      createPkce, createConnectFlow, isDevMode,
     };
   })();
 
@@ -5248,22 +5359,36 @@
               <b>Nest Rec AI</b>
               <span id="kt-ai-conn-badge" style="font-size:11px; opacity:.8;"></span>
             </div>
-            <!-- 未接続: 契約時に発行されたトークンで接続（トークンは交換後に捨て、保存しない） -->
-            <div id="kt-ai-connect" style="display:none; flex-direction:column; gap:4px;">
-              <input id="kt-ai-token" type="password" placeholder="契約時に発行されたトークン（接続後は保存されません）" autocomplete="off" style="border:1px solid ${border}; border-radius:6px; padding:4px; background:${bg}; color:inherit; font:inherit;">
-              <div style="display:flex; gap:6px;">
-                <button id="kt-ai-connect-btn" class="btn" style="height:28px; flex:1;">接続</button>
-                <details id="kt-ai-paid-settings" style="font-size:11px;"><summary style="cursor:pointer; line-height:28px;">詳細</summary>
-                  <input id="kt-ai-api-base" placeholder="API Base URL" style="width:100%; box-sizing:border-box; border:1px solid ${border}; border-radius:6px; padding:4px; background:${bg}; color:inherit; font:inherit;">
-                </details>
+            <!-- 未接続: 「Nest Rec AIに接続」だけ（利用者に credential を見せない・入力させない）。
+                 Customer Token の旧方式は開発モード（localStorage ktAi.devMode = "1"）のときだけ表示する -->
+            <div id="kt-ai-connect" style="display:none; flex-direction:column; gap:6px;">
+              <button id="kt-ai-connect-start" class="btn" style="height:32px; font-weight:600;">Nest Rec AIに接続</button>
+              <div style="opacity:.7; font-size:11px;">AI向けドキュメント機能は接続しなくても無料で利用できます。</div>
+              <div id="kt-ai-dev" style="display:none; flex-direction:column; gap:4px; border:1px dashed ${border}; border-radius:6px; padding:6px;">
+                <div style="font-size:11px; opacity:.7;">開発モード: Customer Token で接続（運用者向け。接続後は保存されません）</div>
+                <input id="kt-ai-token" type="password" placeholder="Customer Token" autocomplete="off" style="border:1px solid ${border}; border-radius:6px; padding:4px; background:${bg}; color:inherit; font:inherit;">
+                <div style="display:flex; gap:6px;">
+                  <button id="kt-ai-connect-btn" class="btn" style="height:28px; flex:1;">接続（Customer Token）</button>
+                  <details id="kt-ai-paid-settings" style="font-size:11px;"><summary style="cursor:pointer; line-height:28px;">詳細</summary>
+                    <input id="kt-ai-api-base" placeholder="API Base URL" style="width:100%; box-sizing:border-box; border:1px solid ${border}; border-radius:6px; padding:4px; background:${bg}; color:inherit; font:inherit;">
+                  </details>
+                </div>
               </div>
             </div>
-            <!-- 接続済み: 契約状態・有効期限・更新 / 切断 -->
+            <!-- 接続中: Nest Rec の承認ページを別タブで開き、承認を待つ（ポップアップ block 時は再度開ける） -->
+            <div id="kt-ai-connecting" style="display:none; flex-direction:column; gap:6px; border:1px solid ${border}; border-radius:8px; padding:8px; background:${bg};">
+              <div id="kt-ai-connecting-text">Nest Recで接続を確認しています...</div>
+              <div style="display:flex; gap:6px;">
+                <button id="kt-ai-open-authorize" class="btn" style="height:28px; flex:1;">Nest Recのページを開く</button>
+                <button id="kt-ai-connect-cancel" class="btn" style="height:28px;">キャンセル</button>
+              </div>
+            </div>
+            <!-- 接続済み: AI Assistant / 接続先 / 契約 / 利用量・更新 / 接続解除 -->
             <div id="kt-ai-session" style="display:none; flex-direction:column; gap:2px; font-size:11px;">
               <div id="kt-ai-session-lines"></div>
               <div style="display:flex; gap:6px; margin-top:4px;">
                 <button id="kt-ai-session-refresh" class="btn" style="height:26px; flex:1;">接続を更新</button>
-                <button id="kt-ai-session-disconnect" class="btn" style="height:26px;">切断</button>
+                <button id="kt-ai-session-disconnect" class="btn" style="height:26px;">接続解除</button>
               </div>
             </div>
             <button id="kt-ai-ask" class="btn" disabled style="height:32px; font-weight:600;">AIに質問</button>
@@ -5294,15 +5419,19 @@
       return KTAiClient.errorText(cap.reason);
     }
 
-    /** 接続済みの状態表示（契約状態 / AI Assistant / 有効期限 / 利用量） */
+    /** 接続済みの状態表示（AI Assistant / 接続先 / 契約 / AI利用 / 接続の有効期限）。credential は表示しない */
     function sessionLinesHtml(status, cap) {
-      const fmt = (iso) => { const d = iso ? new Date(iso) : null; return d && !isNaN(d) ? d.toLocaleString() : '—'; };
+      const fmt = (iso) => { const d = iso ? new Date(iso) : null; return d && !isNaN(d) ? d.toLocaleDateString() : '—'; };
+      const contract = !status?.connected ? '未接続'
+        : cap?.checking ? '確認中...'
+          : cap?.available ? `有効${cap.tokenExpiresAt ? `（${fmt(cap.tokenExpiresAt)} まで）` : ''}`
+            : (cap ? KTAiClient.errorText(cap.reason) : '確認済み');
       const rows = [
-        ['契約状態', status?.connected ? '確認済み' : '未接続'],
         ['AI Assistant', cap?.checking ? '確認中...' : cap?.available ? '利用可能' : (cap ? KTAiClient.errorText(cap.reason) : '—')],
+        ['接続先', status?.scope?.domain || '—'],
+        ['契約', contract],
+        ...(cap?.usage ? [['AI利用', `${cap.usage.usedThisMonth} / ${cap.usage.monthlyLimit}`]] : []),
         ['接続の有効期限', fmt(status?.refreshExpiresAt)],
-        ...(cap?.usage ? [['今月の利用', `${cap.usage.usedThisMonth} / ${cap.usage.monthlyLimit} 回`]] : []),
-        ...(cap?.tokenExpiresAt ? [['契約の有効期限', fmt(cap.tokenExpiresAt)]] : []),
       ];
       return rows.map(([k, v]) => `<div><span style="opacity:.7; display:inline-block; min-width:7em;">${esc(k)}</span>${esc(v)}</div>`).join('');
     }
@@ -5403,12 +5532,29 @@
     // ---- 有料: Nest Rec AI（AIに質問）。無料側（生成・コピー）はこのブロックに依存しない ----
     const $paid = $('kt-ai-paid'), $ask = $('kt-ai-ask'), $paidStatus = $('kt-ai-paid-status'), $badge = $('kt-ai-conn-badge');
     const $connect = $('kt-ai-connect'), $apiBase = $('kt-ai-api-base'), $token = $('kt-ai-token'), $connectBtn = $('kt-ai-connect-btn');
+    const $connectStart = $('kt-ai-connect-start'), $dev = $('kt-ai-dev');
+    const $connecting = $('kt-ai-connecting'), $connectingText = $('kt-ai-connecting-text'), $openAuthorize = $('kt-ai-open-authorize'), $connectCancel = $('kt-ai-connect-cancel');
     const $session = $('kt-ai-session'), $sessionLines = $('kt-ai-session-lines'), $sessionRefresh = $('kt-ai-session-refresh'), $sessionDisconnect = $('kt-ai-session-disconnect');
     const $consent = $('kt-ai-consent'), $consentOk = $('kt-ai-consent-ok'), $consentCancel = $('kt-ai-consent-cancel');
     const $answer = $('kt-ai-answer'), $factDetail = $('kt-ai-fact-detail');
     const settings = d.settings || null;
     const session = d.session || null;
     const paidEnabled = !!(settings && session);
+    // tokenless connect（Nest Rec の承認ページ → PKCE → Access / Refresh）。credential 文字列を UI に出さない
+    // 承認ページはクリック直後に空タブを同期的に開いておき（ポップアップ block 回避）、start の応答が来たら URL を入れる。
+    // opener は切る（Nest Rec 側から kintone の window を参照させない）
+    let preWin = null;
+    const openUrl = d.openUrl || ((url) => {
+      try {
+        if (preWin && !preWin.closed) { const w = preWin; preWin = null; try { w.opener = null; } catch (e) { } w.location.href = url; return true; }
+        const w = (typeof window !== 'undefined' && typeof window.open === 'function') ? window.open(url, '_blank', 'noopener') : null;
+        return !!w;
+      } catch (e) { return false; }
+    });
+    const preOpen = () => { try { preWin = (!d.openUrl && typeof window !== 'undefined' && typeof window.open === 'function') ? window.open('about:blank', '_blank') : null; } catch (e) { preWin = null; } };
+    const closePre = () => { try { if (preWin && !preWin.closed) preWin.close(); } catch (e) { } preWin = null; };
+    const flow = paidEnabled ? (d.connectFlow || KTAiClient.createConnectFlow({ session, openUrl })) : null;
+    const devMode = !!(d.devMode ?? KTAiClient.isDevMode());
     let capability = { available: false, reason: KTAiClient.ERROR_CODES.NO_CONFIG };
     let healthAt = 0;
     let sending = false;
@@ -5425,9 +5571,12 @@
       let st = null;
       try { st = session.status(); } catch (e) { st = null; }
       const connected = !!st?.connected;
-      $connect.style.display = connected ? 'none' : 'flex';
+      const connecting = !connected && !!(flow && flow.isRunning());
+      $connect.style.display = (connected || connecting) ? 'none' : 'flex';
+      $connecting.style.display = connecting ? 'flex' : 'none';
       $session.style.display = connected ? 'flex' : 'none';
-      $badge.textContent = connected ? '接続済み' : '未接続';
+      $dev.style.display = devMode ? 'flex' : 'none';
+      $badge.textContent = connected ? '✓ 接続済み' : connecting ? '接続中' : '未接続';
       if (connected) $sessionLines.innerHTML = KTContextUi.sessionLinesHtml(st, capability);
       return st;
     }
@@ -5508,7 +5657,32 @@
     }
     if (paidEnabled) {
       try { $apiBase.value = (session.status?.()?.apiBase) || KTAiClient.DEFAULT_API_BASE; } catch (e) { $apiBase.value = KTAiClient.DEFAULT_API_BASE; }
-      // 接続: 契約時のトークンを 1 回だけ exchange（入力欄は即座に消す。保存しない）
+      // 接続（本番）: Nest Rec AI に接続 → 承認ページ（別タブ）→ 承認を待つ → 自動で接続完了。利用者は credential を扱わない
+      const connectingText = (st) => {
+        if (st.phase === 'starting') return '接続を準備しています...';
+        if (st.phase === 'completing') return '接続を完了しています...';
+        if (st.popupBlocked) return 'ブラウザがポップアップをブロックしました。「Nest Recのページを開く」を押して、Nest Rec で接続を承認してください。';
+        return 'Nest Recで接続を確認しています...（別タブの Nest Rec ページで「接続する」を押してください）';
+      };
+      $connectStart.addEventListener('click', async () => {
+        if (flow.isRunning()) return;
+        $connectStart.disabled = true;
+        setPaidStatus('');
+        preOpen();
+        try {
+          await flow.start({ onState: (st) => { if (st.phase === 'failed') closePre(); $connectingText.textContent = connectingText(st); renderSession(); } });
+          setPaidStatus('✓ Nest Rec AIに接続しました');
+          await refreshCapability({ force: true });
+          setPaidStatus(`✓ Nest Rec AIに接続しました。${KTContextUi.capabilityStatusText(capability)}`);
+        } catch (e) {
+          const code = KTAiClient.isAiClientError(e) ? e.code : KTAiClient.ERROR_CODES.TRANSPORT_ERROR;
+          capability = { available: false, reason: code };
+          setPaidStatus(`${KTAiClient.errorText(code)} [${code}]${e?.requestId ? ` requestId: ${e.requestId}` : ''}`); setAskEnabled(); renderSession();
+        } finally { $connectStart.disabled = false; renderSession(); }
+      });
+      $openAuthorize.addEventListener('click', () => { const ok = flow.reopen(); $connectingText.textContent = ok ? connectingText({ phase: 'pending' }) : connectingText({ phase: 'pending', popupBlocked: true }); });
+      $connectCancel.addEventListener('click', () => { flow.cancel(); });
+      // 開発モード: Customer Token を 1 回だけ exchange（入力欄は即座に消す。保存しない）
       $connectBtn.addEventListener('click', async () => {
         const token = String($token.value || '').trim();
         $token.value = '';
@@ -5532,9 +5706,14 @@
         } finally { $sessionRefresh.disabled = false; }
       });
       $sessionDisconnect.addEventListener('click', async () => {
-        session.disconnect(); settings.setConsent(false);
-        $answer.style.display = 'none'; $factDetail.style.display = 'none';
-        await refreshCapability({ force: true });
+        $sessionDisconnect.disabled = true;
+        try {
+          const r = await session.disconnect();   // memory の Access・local の Refresh を消し、Gateway 側でも family を失効
+          settings.setConsent(false);
+          $answer.style.display = 'none'; $factDetail.style.display = 'none';
+          await refreshCapability({ force: true });
+          setPaidStatus(r?.revoked ? 'Nest Rec AI との接続を解除しました。' : 'Nest Rec AI との接続を解除しました（サーバー側の失効は確認できませんでした。接続の有効期限で自動的に失効します）。');
+        } finally { $sessionDisconnect.disabled = false; }
       });
       $ask.addEventListener('click', async () => {
         if (!last || !last.ok) { setPaidStatus(KTAiClient.errorText(KTAiClient.ERROR_CODES.NO_CONTEXT)); return; }

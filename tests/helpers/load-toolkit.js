@@ -19,7 +19,7 @@ function loadToolkit() {
   const sandbox = {
     console, setTimeout, clearTimeout,
     setInterval: () => 0, clearInterval: noop,
-    AbortController, TextEncoder, URL,   // ブラウザにもある標準 API（timeout の中断・サイズ計測で使う）
+    AbortController, TextEncoder, TextDecoder, URL, btoa, atob, Uint8Array,   // ブラウザにもある標準 API（timeout の中断・サイズ計測・PKCE で使う）
     localStorage: fakeStorage, sessionStorage: fakeStorage,
     navigator: {},
     document: {

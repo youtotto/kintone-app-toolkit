@@ -55,7 +55,7 @@ const okBody = (json) => ({ status: 200, body: JSON.stringify(json) });
 const makeStorage = () => { const m = new Map(); return { getItem: (k) => (m.has(k) ? m.get(k) : null), setItem: (k, v) => m.set(k, String(v)), removeItem: (k) => m.delete(k) }; };
 
 /** パネル mount（無料側は本物、有料側はテスト用 session: connect / status / client を模す） */
-function mount({ token = 'tok', health = HEALTH_OK, responses = [], onAsk = null, createClientThrows = false, paid = true, connected = true } = {}) {
+function mount({ token = 'tok', health = HEALTH_OK, responses = [], onAsk = null, createClientThrows = false, paid = true, connected = true, devMode = false, connectFlow = null } = {}) {
   const storage = makeStorage();
   const settings = KTAiClient.createSettingsStore({ storage, host: 't.cybozu.com' });
   const calls = { health: 0, ask: [], connect: [], refresh: 0, disconnect: 0 };
@@ -78,15 +78,17 @@ function mount({ token = 'tok', health = HEALTH_OK, responses = [], onAsk = null
     async connect(ct, opts) { calls.connect.push({ ct, opts }); if (ct === 'bad') throw new KTAiClient.AiClientError({ code: C.PRODUCT_NOT_ENTITLED, message: 'x', requestId: 'e-c' }); isConnected = true; return this.status(); },
     async migrateLegacy() { return false; },
     async refresh() { calls.refresh++; if (!isConnected) throw new KTAiClient.AiClientError({ code: C.NOT_CONNECTED, message: 'x' }); return {}; },
-    disconnect() { calls.disconnect++; isConnected = false; },
+    async disconnect() { calls.disconnect++; isConnected = false; return { revoked: true }; },
     client,
   };
+  // 接続フロー（tokenless）は既定で「開始されていない」fake。実フローは tests/ai-connect.test.js で検証する
+  const flow = connectFlow || { start: async () => { throw new KTAiClient.AiClientError({ code: C.TRANSPORT_ERROR, message: 'fake flow' }); }, cancel() { }, reopen: () => false, state: () => ({ phase: 'idle' }), isRunning: () => false };
   const host = makeFakeHost();
   const copies = [];
   const panel = mountAiDocsPanel(host, {
     getInputs: () => INPUTS, setPreview: () => { }, copyText: async (t) => { copies.push(t); return true; },
     colors: { border: '#ccc', bg: '#fff' },
-    ...(paid ? { settings, session, hostname: 't.cybozu.com' } : {}),
+    ...(paid ? { settings, session, hostname: 't.cybozu.com', devMode, connectFlow: flow } : {}),
   });
   const $ = (id) => host.querySelector(`#${id}`);
   const generate = async () => { $('kt-ai-target-type').value = 'field'; await $('kt-ai-target-type').dispatch('change'); $('kt-ai-target').value = 'customer_code'; $('kt-ai-question').value = '顧客コードを削除して大丈夫？'; await $('kt-ai-generate').dispatch('click'); };
@@ -181,17 +183,20 @@ console.log('\n--- 2. 利用可否 ---');
   const m = mount({});
   await tick();
   assert(m.calls.health === 1 && m.$('kt-ai-ask').disabled === false && m.$('kt-ai-paid-status').textContent.includes('AI に質問できます') && m.$('kt-ai-paid-status').textContent.includes('3 / 100'), '契約あり: health → 「AIに質問」有効・利用量表示');
-  assert(m.$('kt-ai-session').style.display === 'flex' && m.$('kt-ai-connect').style.display === 'none' && m.$('kt-ai-conn-badge').textContent === '接続済み', '接続済み: 状態表示に切り替わる');
+  assert(m.$('kt-ai-session').style.display === 'flex' && m.$('kt-ai-connect').style.display === 'none' && m.$('kt-ai-conn-badge').textContent === '✓ 接続済み', '接続済み: 状態表示に切り替わる');
   const lines = m.$('kt-ai-session-lines').innerHTML;
-  assert(lines.includes('契約状態') && lines.includes('確認済み') && lines.includes('AI Assistant') && lines.includes('利用可能') && lines.includes('接続の有効期限') && lines.includes('3 / 100'), '接続済み: 契約状態 / AI Assistant / 有効期限 / 利用量');
-  // 接続フォームからの接続（トークンは入力欄から即座に消え、session.connect に 1 回だけ渡る）
-  const c = mount({ token: '', connected: false });
+  assert(lines.includes('AI Assistant') && lines.includes('利用可能') && lines.includes('接続先') && lines.includes('t.cybozu.com') && lines.includes('契約') && lines.includes('有効') && lines.includes('AI利用') && lines.includes('3 / 100') && lines.includes('接続の有効期限'), '接続済み: AI Assistant / 接続先 / 契約 / AI利用 / 接続の有効期限');
+  assert(!/v1\.|Bearer|refreshToken/.test(lines), '状態表示に credential 文字列は無い');
+  // 本番 UI: Customer Token の入力欄は出ない（開発モードだけ）
+  assert(m.$('kt-ai-dev').style.display === 'none' && m.host.innerHTML.includes('>Nest Rec AIに接続<') && !/placeholder="[^"]*トークン/.test(m.host.innerHTML), '本番 UI は「Nest Rec AIに接続」だけ（Customer Token 入力欄は非表示・「トークン」の入力案内なし）');
+  // 開発モードの接続フォーム（トークンは入力欄から即座に消え、session.connect に 1 回だけ渡る）
+  const c = mount({ token: '', connected: false, devMode: true });
   await tick();
   c.$('kt-ai-token').value = 'ct-once'; c.$('kt-ai-api-base').value = 'https://gw.test';
   await c.$('kt-ai-connect-btn').dispatch('click'); await tick();
-  assert(c.calls.connect.length === 1 && c.calls.connect[0].ct === 'ct-once' && c.$('kt-ai-token').value === '' && c.$('kt-ai-ask').disabled === false && c.$('kt-ai-conn-badge').textContent === '接続済み', '接続: exchange に 1 回渡して入力欄を消し、利用可能になる');
+  assert(c.calls.connect.length === 1 && c.calls.connect[0].ct === 'ct-once' && c.$('kt-ai-token').value === '' && c.$('kt-ai-ask').disabled === false && c.$('kt-ai-conn-badge').textContent === '✓ 接続済み' && c.$('kt-ai-dev').style.display === 'flex', '接続（開発モード）: exchange に 1 回渡して入力欄を消し、利用可能になる');
   assert(!JSON.stringify([...c.storage.getItem ? [] : []]).includes('ct-once'), 'Customer Token は保存されない');
-  const bad = mount({ token: '', connected: false });
+  const bad = mount({ token: '', connected: false, devMode: true });
   await tick();
   bad.$('kt-ai-token').value = 'bad';
   await bad.$('kt-ai-connect-btn').dispatch('click'); await tick();
@@ -291,7 +296,7 @@ console.log('\n--- 4. 根拠チップ / 未知根拠 / エラー ---');
 {
   const errs = [
     [new KTAiClient.AiClientError({ code: C.PRODUCT_NOT_ENTITLED, message: 'x', requestId: 'e-9' }), 'AI 機能を利用できません', 'PRODUCT_NOT_ENTITLED'],
-    [new KTAiClient.AiClientError({ code: C.AUTH_INVALID_TOKEN, message: 'x' }), 'Customer Token が無効', 'AUTH_INVALID_TOKEN'],
+    [new KTAiClient.AiClientError({ code: C.AUTH_INVALID_TOKEN, message: 'x' }), 'Nest Rec AI との接続が無効', 'AUTH_INVALID_TOKEN'],
     [new KTAiClient.AiClientError({ code: C.AUTH_TOKEN_EXPIRED, message: 'x' }), '有効期限が切れています', 'AUTH_TOKEN_EXPIRED'],
     [new KTAiClient.AiClientError({ code: C.AUTH_DOMAIN_MISMATCH, message: 'x' }), '対象ドメイン', 'AUTH_DOMAIN_MISMATCH'],
     [new KTAiClient.AiClientError({ code: C.RATE_LIMITED, message: 'x', retryAfterSeconds: 42 }), 'アクセスが集中', 'RATE_LIMITED'],
