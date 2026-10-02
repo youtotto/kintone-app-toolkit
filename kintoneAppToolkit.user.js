@@ -5005,7 +5005,7 @@
     const CHANGE = Object.freeze({ ADD: 'ADD', UPDATE: 'UPDATE', REUSE: 'REUSE', REMOVE: 'REMOVE', NO_CHANGE: 'NO_CHANGE', INVALID: 'INVALID' });
     const STATUS_RANK = { VALID: 0, WARNING: 1, NEEDS_CONFIRMATION: 2, INVALID: 3, BLOCKED_BY_DEPENDENCY: 3 };
     /**
-     * Action Catalog ごとの能力表（将来の Executor でも再利用する）。
+     * Action Catalog ごとの能力表（Executor の SoT。KTPlanExecutor.ACTION_CAPABILITIES が previewExecute / verify / rollbackStrategy / productionDeploy を重ねる）。
      *   simulate: After モデルへ仮適用できるか / validate: 検証器があるか / defaultSafety: 既定の安全分類 / execution: 将来の実行対応
      */
     const ACTION_CAPABILITIES = Object.freeze({
@@ -5075,11 +5075,14 @@
       const fieldAcl = (d.fieldAcl?.rights || []).map(r => ({ code: r.code, entities: (r.entities || []).map(e => ({ type: e.entity?.type, code: e.entity?.code ?? null, accessibility: e.accessibility })), origin: 'existing' }));
       const appActions = Object.values(d.actions?.actions || {}).filter(Boolean).sort((a, b) => (Number(a.index ?? 0) - Number(b.index ?? 0)) || cmp(String(a.name), String(b.name)))
         .map(a => ({ name: a.name, destApp: String(a.destApp?.app ?? ''), mappings: (a.mappings || []).map(m => ({ srcType: m.srcType, srcField: m.srcField ?? null, destField: m.destField })), origin: 'existing' }));
+      // アプリ設定の revision（各 GET が同じ値を返す。JS API のフィールド取得には無いので、REST の応答から最初に見つかったもの）
+      const revisionOf = [d.views, d.status, d.generalNotify, d.perRecordNotify, d.reminderNotify, d.actions, d.appAcl, d.recordAcl, d.fieldAcl].map(x => x?.revision).find(r => r != null && r !== '');
       return {
         appId: String(d.appId ?? ''), fields,
         process: { enabled: !!st.enable, states, actions },
         notifications: { general, perRecord }, reminders, views, reports,
         acl: { record: recordAcl, field: fieldAcl }, appActions,
+        revision: revisionOf != null ? String(revisionOf) : null,
       };
     }
     function entityList(list) { return (Array.isArray(list) ? list : []).map(x => x?.entity ?? x).filter(Boolean).map(en => ({ type: en.type, code: en.code ?? null })); }
@@ -5316,7 +5319,7 @@
       };
       const processChanged = stepReviews.some(r => ['PROCESS_STATUS', 'PROCESS_ACTION', 'PROCESS'].includes(r.diff.target.kind) && r.diff.changeType !== CHANGE.INVALID && r.diff.changeType !== CHANGE.NO_CHANGE);
       const simulation = {
-        after: model,
+        before, after: model, order: [...order],
         process: { before: processSummary(before.process), after: processSummary(model.process), changed: processChanged, mermaid: { before: processMermaid(before.process), after: processMermaid(model.process, before.process) } },
       };
       return {
@@ -5823,9 +5826,10 @@
       for (const s of p.states) if (s.origin === 'proposed') lines.push(`  style ${idOf.get(s.name)} fill:#e3f0ff,stroke:#1a73e8,stroke-width:2px`);
       return lines.join('\n');
     }
-    /** Executor へ渡す形。承認は実行できる step（SAFE / REVIEW_REQUIRED）だけを採り、review.executionReadiness.approvedSteps と一致させる */
+    /** Executor へ渡す形。承認は BLOCKED でない step（SAFE / REVIEW_REQUIRED / PLAN_ONLY）を採り、review.executionReadiness.approvedSteps と一致させる。
+     *  PLAN_ONLY の承認は Executor が「承認済みだが未対応」として表示する（黙って落とさない） */
     const executorOutput = (plan, rev, approvedSteps = []) => {
-      const executable = new Set((rev?.steps || []).filter(r => r.safety === SAFETY.SAFE || r.safety === SAFETY.REVIEW_REQUIRED).map(r => r.stepId));
+      const executable = new Set((rev?.steps || []).filter(r => r.safety !== SAFETY.BLOCKED).map(r => r.stepId));
       const approved = [...new Set(approvedSteps)].filter(id => executable.has(id));
       return { outputVersion: '1', plan: KTContextUi.planJson ? KTContextUi.planJson(plan) : plan, review: { ...rev, simulation: { ...rev.simulation, after: undefined }, executionReadiness: { ...(rev?.executionReadiness || {}), approvedSteps: approved } }, approvedSteps: approved };
     };
@@ -5833,6 +5837,466 @@
     return {
       REVIEW_VERSION, STATUS, SAFETY, CHANGE, ACTION_CAPABILITIES, HIGH_RISK,
       buildBeforeModel, normalizeSpec, parseEntity, parseCond, condsOverlap, condNarrower, review, processMermaid, processSummary, objDiffLines, executorOutput,
+    };
+  })();
+
+  // ==========================================
+  // 3.6c Preview Executor (KTPlanExecutor) — Phase 9
+  //   人間が承認した「安全に実行できる step」だけを kintone の動作テスト環境（preview）へ反映し、再取得して検証する層。
+  //   AI は Executor を直接操作できない。実行経路は AI Plan → KTPlanReview → 人間の承認 → Executor → Action Handler Registry
+  //   （allowlist）→ kintone preview API → 再取得 → Verification。運用環境へ反映する関数は持たない（productionDeploy は常に false）。
+  //   kintone API は注入（api）。純粋なロジックは Node でテストできる。token・cookie・秘密情報はログに含めない。
+  // ==========================================
+  const KTPlanExecutor = (() => {
+    const EXECUTOR_VERSION = '1';
+    const ENV = 'preview';
+    const STEP = Object.freeze({ PENDING: 'PENDING', RUNNING: 'RUNNING', APPLIED: 'APPLIED', VERIFIED: 'VERIFIED', VERIFY_FAILED: 'VERIFY_FAILED', FAILED: 'FAILED', SKIPPED: 'SKIPPED', BLOCKED: 'BLOCKED', UNSUPPORTED: 'UNSUPPORTED', ROLLED_BACK: 'ROLLED_BACK' });
+    const RUN = Object.freeze({ PREPARED: 'PREPARED', BLOCKED: 'BLOCKED', RUNNING: 'RUNNING', DONE: 'DONE', PARTIAL: 'PARTIAL', FAILED: 'FAILED' });
+    /** Tier 1 で preview へ追加できるフィールド型（API 仕様が単純で、追加パラメーターが要らないもの。CALC / LINK / LOOKUP / 関連レコード / テーブル / グループは対象外） */
+    const PREVIEW_FIELD_TYPES = ['SINGLE_LINE_TEXT', 'MULTI_LINE_TEXT', 'RICH_TEXT', 'NUMBER', 'DATE', 'TIME', 'DATETIME', 'DROP_DOWN', 'RADIO_BUTTON', 'CHECK_BOX', 'MULTI_SELECT', 'USER_SELECT', 'ORGANIZATION_SELECT', 'GROUP_SELECT', 'FILE'];
+    const OPTION_TYPES = ['DROP_DOWN', 'RADIO_BUTTON', 'CHECK_BOX', 'MULTI_SELECT'];
+    const BUILTIN_VIEW_CODES = ['レコード番号', '作成者', '作成日時', '更新者', '更新日時', 'ステータス', '作業者', 'カテゴリー'];
+    const clone = (v) => JSON.parse(JSON.stringify(v ?? null));
+    const same = (a, b) => JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
+    const nowIso = (now) => new Date(now()).toISOString();
+    const newId = (prefix) => `${prefix}_${(typeof crypto !== 'undefined' && crypto.randomUUID) ? crypto.randomUUID() : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`}`;
+    const strErr = (e) => (e && typeof e === 'object') ? { code: e.code ?? null, message: String(e.message ?? e.error ?? ''), status: e.status ?? null } : { code: null, message: String(e ?? ''), status: null };
+    const isPermissionError = (e) => { const s = strErr(e); return s.status === 403 || s.code === 'CB_NO02' || /権限|permission|forbidden/i.test(s.message); };
+    const isRevisionError = (e) => { const s = strErr(e); return s.code === 'GAIA_CO02' || /リビジョン|revision/i.test(s.message); };
+
+    // ================= Action Capability Registry（Executor の SoT）=================
+    //   Phase 8 の ACTION_CAPABILITIES（validate / simulate / defaultSafety）に Executor の列を重ねる。
+    //   previewExecute: 動作テスト環境へ反映できるか / verify: 反映後に再取得で検証するか / rollbackStrategy: 将来の rollback handler の方針 /
+    //   productionDeploy: 運用環境へ反映できるか（Phase 9 は全て false。関数も持たない）
+    const EXECUTOR_COLUMNS = Object.freeze({
+      ADD_FIELD: { previewExecute: true, verify: true, rollbackStrategy: 'DELETE_FIELD' },
+      ADD_VIEW: { previewExecute: true, verify: true, rollbackStrategy: 'RESTORE_VIEWS' },
+      ADD_NOTIFICATION: { previewExecute: false, verify: true, rollbackStrategy: 'RESTORE_SNAPSHOT', reason: 'NEXT' },
+      ADD_REMINDER: { previewExecute: false, verify: true, rollbackStrategy: 'RESTORE_SNAPSHOT', reason: 'NEXT' },
+    });
+    const ACTION_CAPABILITIES = Object.freeze(Object.fromEntries(Object.entries(KTPlanReview.ACTION_CAPABILITIES).map(([k, v]) => {
+      const ex = EXECUTOR_COLUMNS[k] || { previewExecute: false, verify: !!v.validate, rollbackStrategy: v.simulate ? 'RESTORE_SNAPSHOT' : 'NONE' };
+      return [k, Object.freeze({ ...v, previewExecute: !!ex.previewExecute, verify: !!ex.verify, rollbackStrategy: ex.rollbackStrategy, productionDeploy: false })];
+    })));
+
+    // ================= Action Handler Registry（allowlist）=================
+    //   handler = { prepare(step, ctx) → { payload, expect, summary }, apply(ctx, p) → { revision }, verify(ctx, p) → { ok, checks[] }, rollback(ctx, p) → rollback step（計画のみ） }
+    const HANDLERS = {};
+
+    /** review の step（diff.after）と spec から、フィールド追加の API payload を作る */
+    HANDLERS.ADD_FIELD = {
+      prepare(step, { stepReview }) {
+        const after = stepReview?.diff?.after;
+        if (!after || !after.code) return { unsupported: 'NO_FIELD_SPEC', message: 'Review に追加後のフィールド定義がありません' };
+        const type = after.type;
+        if (!PREVIEW_FIELD_TYPES.includes(type)) return { unsupported: 'FIELD_TYPE_NOT_SUPPORTED', message: `フィールド型 ${type} は現在の Executor では動作テスト環境へ追加できません（Tier 1: ${PREVIEW_FIELD_TYPES.join(', ')}）` };
+        const options = Array.isArray(after.options) ? after.options : [];
+        if (OPTION_TYPES.includes(type) && !options.length) return { unsupported: 'OPTIONS_MISSING', message: '選択肢が決まっていないため追加できません' };
+        const prop = { type, code: after.code, label: after.label, noLabel: false, required: !!after.required };
+        if (OPTION_TYPES.includes(type)) prop.options = Object.fromEntries(options.map((o, i) => [o, { label: o, index: String(i) }]));
+        if (type === 'SINGLE_LINE_TEXT' || type === 'NUMBER') prop.unique = !!after.unique;
+        return {
+          payload: { properties: { [after.code]: prop } },
+          expect: { code: after.code, type, label: after.label, required: !!after.required, ...(OPTION_TYPES.includes(type) ? { options } : {}) },
+          summary: `＋ フィールド「${after.label}」（${after.code}・${type}${after.required ? '・必須' : ''}${options.length ? `・選択肢 ${options.length} 件` : ''}）`,
+          temporaryId: after.temporaryId || null,
+        };
+      },
+      async apply({ api, appId, revision, layoutPolicy }, p) {
+        const res = await api.addPreviewFields(appId, p.payload.properties, revision);
+        const out = { revision: String(res?.revision ?? ''), requests: [{ method: 'POST', path: '/k/v1/preview/app/form/fields.json', codes: Object.keys(p.payload.properties) }] };
+        // 配置: フィールド追加だけでは配置が保証されないので、レイアウトを取得して無ければ末尾の行へ追加する（既存の行は変えない）
+        if (layoutPolicy === 'APPEND_ROW') {
+          const lay = await api.getPreviewLayout(appId);
+          const rows = Array.isArray(lay?.layout) ? lay.layout : [];
+          const code = p.expect.code;
+          if (!layoutHasCode(rows, code)) {
+            const next = [...clone(rows), { type: 'ROW', fields: [{ type: p.expect.type, code }] }];
+            const put = await api.putPreviewLayout(appId, next, String(lay?.revision ?? out.revision));
+            out.revision = String(put?.revision ?? out.revision);
+            out.requests.push({ method: 'PUT', path: '/k/v1/preview/app/form/layout.json', placement: 'APPENDED_ROW', rowsBefore: rows.length, rowsAfter: next.length });
+            out.layout = { placement: 'APPENDED_ROW', rowsBefore: rows.length };
+          } else {
+            out.requests.push({ method: 'GET', path: '/k/v1/preview/app/form/layout.json', placement: 'AUTO' });
+            out.layout = { placement: 'AUTO', rowsBefore: rows.length };
+          }
+        }
+        return out;
+      },
+      async verify({ api, appId, snapshot }, p, applied) {
+        const cur = await api.getPreviewFields(appId);
+        const f = cur?.properties?.[p.expect.code];
+        const checks = [];
+        const check = (name, ok, expected, actual) => checks.push({ name, ok, expected, actual });
+        check('exists', !!f, true, !!f);
+        if (f) {
+          check('type', f.type === p.expect.type, p.expect.type, f.type);
+          check('label', f.label === p.expect.label, p.expect.label, f.label);
+          check('required', !!f.required === p.expect.required, p.expect.required, !!f.required);
+          if (p.expect.options) {
+            const actual = Object.keys(f.options || {}).sort((a, b) => Number(f.options[a]?.index ?? 0) - Number(f.options[b]?.index ?? 0));
+            check('options', same(actual, p.expect.options), p.expect.options, actual);
+          }
+        }
+        // 既存フィールドが減っていない（追加のみ）
+        const beforeCodes = Object.keys(snapshot?.fields?.properties || {});
+        const lost = beforeCodes.filter(c => !cur?.properties?.[c]);
+        check('existingFieldsPreserved', lost.length === 0, beforeCodes.length, beforeCodes.length - lost.length);
+        if (applied?.layout) {
+          const lay = await api.getPreviewLayout(appId);
+          const rows = Array.isArray(lay?.layout) ? lay.layout : [];
+          check('layoutContainsField', layoutHasCode(rows, p.expect.code), true, layoutHasCode(rows, p.expect.code));
+          const beforeRows = Array.isArray(snapshot?.layout?.layout) ? snapshot.layout.layout : [];
+          const preserved = beforeRows.every((row, i) => same(stripLayoutRow(row), stripLayoutRow(rows[i])));
+          check('existingLayoutPreserved', preserved, beforeRows.length, rows.length);
+        }
+        return { ok: checks.every(c => c.ok), checks, revision: String(cur?.revision ?? '') };
+      },
+      rollback({ appId }, p) {
+        return { actionType: 'DELETE_FIELD', target: p.expect.code, api: { method: 'DELETE', path: '/k/v1/preview/app/form/fields.json', payload: { app: appId, fields: [p.expect.code] } }, note: '動作テスト環境のフィールドを削除する（運用環境には無い）。レイアウトは snapshot の layout を PUT で戻す' };
+      },
+    };
+
+    /** 既存の一覧 ＋ 新しい一覧 = 完全な payload（既存を落とさない） */
+    HANDLERS.ADD_VIEW = {
+      prepare(step, { stepReview }) {
+        const after = stepReview?.diff?.after;
+        if (!after || !after.name) return { unsupported: 'NO_VIEW_SPEC', message: 'Review に追加後の一覧定義がありません' };
+        if ((after.type || 'LIST') !== 'LIST') return { unsupported: 'VIEW_TYPE_NOT_SUPPORTED', message: `一覧の形式 ${after.type} は現在の Executor では追加できません（表形式のみ）` };
+        if (!Array.isArray(after.fields) || !after.fields.length) return { unsupported: 'VIEW_FIELDS_MISSING', message: '表示フィールドが決まっていないため追加できません' };
+        return {
+          payload: { view: { type: 'LIST', name: after.name, fields: [...after.fields], filterCond: after.filterCond || '', sort: after.sort || '' } },
+          expect: { name: after.name, type: 'LIST', fields: [...after.fields], filterCond: after.filterCond || '', sort: after.sort || '' },
+          summary: `＋ 一覧「${after.name}」（表示 ${after.fields.join(', ')}${after.filterCond ? `・絞り込み ${after.filterCond}` : ''}${after.sort ? `・並び順 ${after.sort}` : ''}）`,
+        };
+      },
+      async apply({ api, appId }, p) {
+        const cur = await api.getPreviewViews(appId);
+        const existing = cur?.views && typeof cur.views === 'object' ? cur.views : {};
+        if (existing[p.expect.name]) throw Object.assign(new Error(`一覧「${p.expect.name}」は既に存在します`), { code: 'TARGET_EXISTS' });
+        const maxIndex = Object.values(existing).reduce((m, v) => Math.max(m, Number(v?.index ?? -1)), -1);
+        const views = {};
+        for (const [name, v] of Object.entries(existing)) { const { id, ...rest } = v || {}; views[name] = rest; }   // id は応答プロパティ。builtinType（作業者が自分）は保持
+        views[p.expect.name] = { ...p.payload.view, index: String(maxIndex + 1) };
+        const res = await api.putPreviewViews(appId, views, String(cur?.revision ?? ''));
+        return { revision: String(res?.revision ?? ''), requests: [{ method: 'PUT', path: '/k/v1/preview/app/views.json', existingViews: Object.keys(existing).length, totalViews: Object.keys(views).length }] };
+      },
+      async verify({ api, appId, snapshot }, p) {
+        const cur = await api.getPreviewViews(appId);
+        const v = cur?.views?.[p.expect.name];
+        const checks = [];
+        const check = (name, ok, expected, actual) => checks.push({ name, ok, expected, actual });
+        check('exists', !!v, true, !!v);
+        if (v) {
+          check('type', v.type === 'LIST', 'LIST', v.type);
+          check('fields', same(v.fields || [], p.expect.fields), p.expect.fields, v.fields || []);
+          check('filterCond', String(v.filterCond || '') === p.expect.filterCond, p.expect.filterCond, String(v.filterCond || ''));
+          check('sort', String(v.sort || '') === p.expect.sort, p.expect.sort, String(v.sort || ''));
+        }
+        const beforeNames = Object.keys(snapshot?.views?.views || {});
+        const lost = beforeNames.filter(n => !cur?.views?.[n]);
+        check('existingViewsPreserved', lost.length === 0, beforeNames.length, beforeNames.length - lost.length);
+        return { ok: checks.every(c => c.ok), checks, revision: String(cur?.revision ?? '') };
+      },
+      rollback({ appId, snapshot }, p) {
+        return { actionType: 'RESTORE_VIEWS', target: p.expect.name, api: { method: 'PUT', path: '/k/v1/preview/app/views.json', payload: { app: appId, views: '<snapshot.views.views（id を除く）>' } }, note: `snapshot の一覧設定（${Object.keys(snapshot?.views?.views || {}).length} 件）を PUT で戻す（追加した「${p.expect.name}」が消える）` };
+      },
+    };
+
+    function layoutHasCode(rows, code) {
+      for (const row of rows || []) {
+        for (const f of row?.fields || []) if (f?.code === code) return true;
+        if (Array.isArray(row?.layout) && layoutHasCode(row.layout, code)) return true;
+      }
+      return false;
+    }
+    /** 行の比較用（size は kintone が補正することがあるので code / type だけ） */
+    const stripLayoutRow = (row) => row ? { type: row.type, code: row.code ?? null, fields: (row.fields || []).map(f => ({ type: f.type, code: f.code ?? null, elementId: f.elementId ?? null })), layout: Array.isArray(row.layout) ? row.layout.map(stripLayoutRow) : null } : null;
+
+    // ================= preview の設定 → Review の Before と同じ形（stale 判定・再検証・再解析に使う）=================
+    function previewDataFrom({ fields, layout, views }, base = null) {
+      return {
+        ...(base && typeof base === 'object' ? base : {}),
+        appId: base?.appId ?? null,
+        fields: fields?.properties || {},
+        layout: Array.isArray(layout?.layout) ? layout.layout : [],
+        views: views || null,
+      };
+    }
+    const fieldKey = (f) => ({ type: f.type, label: f.label, required: !!f.required, ...(f.options ? { options: f.options } : {}), ...(f.lookup ? { lookup: f.lookup } : {}) });
+    const viewKey = (v) => ({ type: v.type, fields: v.fields, filterCond: v.filterCond, sort: v.sort });
+    /** Review 時点の Before と現在の preview の差（stale 判定）。kinds は比較対象 */
+    function diffBefore(before, current, { kinds = ['fields', 'views'] } = {}) {
+      const diffs = [];
+      if (kinds.includes('fields')) {
+        for (const [code, f] of Object.entries(before.fields || {})) {
+          const c = current.fields?.[code];
+          if (!c) diffs.push({ kind: 'FIELD', id: code, change: 'REMOVED', message: `フィールド「${f.label}」（${code}）が動作テスト環境にありません` });
+          else if (!same(fieldKey(f), fieldKey(c))) diffs.push({ kind: 'FIELD', id: code, change: 'CHANGED', message: `フィールド「${f.label}」（${code}）の設定が Review 時点と違います`, before: fieldKey(f), after: fieldKey(c) });
+        }
+        for (const [code, c] of Object.entries(current.fields || {})) if (!before.fields?.[code]) diffs.push({ kind: 'FIELD', id: code, change: 'ADDED', message: `動作テスト環境にフィールド「${c.label}」（${code}）が追加されています（未反映の変更）` });
+      }
+      if (kinds.includes('views')) {
+        const bv = new Map((before.views || []).map(v => [v.name, v])), cv = new Map((current.views || []).map(v => [v.name, v]));
+        for (const [name, v] of bv) { const c = cv.get(name); if (!c) diffs.push({ kind: 'VIEW', id: name, change: 'REMOVED', message: `一覧「${name}」が動作テスト環境にありません` }); else if (!same(viewKey(v), viewKey(c))) diffs.push({ kind: 'VIEW', id: name, change: 'CHANGED', message: `一覧「${name}」の設定が Review 時点と違います`, before: viewKey(v), after: viewKey(c) }); }
+        for (const [name] of cv) if (!bv.has(name)) diffs.push({ kind: 'VIEW', id: name, change: 'ADDED', message: `動作テスト環境に一覧「${name}」が追加されています（未反映の変更）` });
+      }
+      return diffs;
+    }
+
+    // ================= prepare =================
+    /**
+     * @param {object} input executorOutput() の { plan, review, approvedSteps }（review は simulation.before / after を含んでよい）
+     * @param {object} o { api, appId, now?, data? (再解析用の運用環境 DATA), layoutPolicy? ('APPEND_ROW' | 'NONE') }
+     */
+    async function prepare(input, { api, appId, now = Date.now, layoutPolicy = 'APPEND_ROW' } = {}) {
+      const plan = input?.plan, review = input?.review;
+      const approved = Array.isArray(input?.approvedSteps) ? [...new Set(input.approvedSteps)] : [];
+      const prepared = {
+        executorVersion: EXECUTOR_VERSION, executionId: newId('ex'), appId: String(appId ?? ''), env: ENV, preparedAt: nowIso(now),
+        status: RUN.PREPARED, blockers: [], stale: { status: 'FRESH', diffs: [] }, revision: { production: null, preview: null, reviewed: null },
+        steps: [], snapshot: null, temporaryIdMap: {}, summary: { executable: 0, unsupported: 0, blocked: 0, skipped: 0 }, layoutPolicy,
+      };
+      const block = (code, message, detail = null) => { prepared.blockers.push({ code, message, ...(detail ? { detail } : {}) }); prepared.status = RUN.BLOCKED; };
+      if (!plan || !Array.isArray(plan.steps) || !review || !Array.isArray(review.steps)) { block('INVALID_INPUT', 'plan / review がありません（executorOutput の形で渡してください）'); return prepared; }
+      if (String(review.reviewVersion) !== '1') { block('UNSUPPORTED_REVIEW_VERSION', `reviewVersion ${review.reviewVersion} は未対応です`); return prepared; }
+      if (!prepared.appId) { block('APP_ID_MISSING', 'アプリ ID がありません'); return prepared; }
+      const before = review.simulation?.before || null;
+      if (!before) { block('NO_BEFORE_MODEL', 'Review に Before モデルがありません（古い Review。計画を作り直してください）'); return prepared; }
+
+      // ---- 1. step の分類（承認 / Review の判定 / allowlist / 依存）----
+      const byId = new Map(plan.steps.map(s => [s.id, s]));
+      const rv = new Map(review.steps.map(r => [r.stepId, r]));
+      const order = Array.isArray(review.simulation?.order) && review.simulation.order.length ? review.simulation.order : plan.steps.map(s => s.id);
+      const states = new Map();
+      for (const id of order) {
+        const step = byId.get(id); const r = rv.get(id);
+        if (!step) continue;
+        const cap = ACTION_CAPABILITIES[step.actionType] || null;
+        const st = { stepId: id, actionType: step.actionType, title: step.title || '', status: STEP.PENDING, reason: null, message: '', dependsOn: [...(step.dependsOn || [])], capability: cap ? { previewExecute: cap.previewExecute, verify: cap.verify, rollbackStrategy: cap.rollbackStrategy, productionDeploy: false } : null, review: r ? { status: r.status, safety: r.safety } : null, approved: approved.includes(id), prepared: null };
+        const set = (status, reason, message) => { st.status = status; st.reason = reason; st.message = message; };
+        if (!st.approved) set(STEP.SKIPPED, 'NOT_APPROVED', '承認されていません');
+        else if (!r) set(STEP.BLOCKED, 'NO_REVIEW', 'Review の結果がありません');
+        else if (r.status === KTPlanReview.STATUS.INVALID || r.status === KTPlanReview.STATUS.BLOCKED_BY_DEPENDENCY || r.safety === KTPlanReview.SAFETY.BLOCKED) set(STEP.BLOCKED, 'REVIEW_BLOCKED', 'Review で実行不可と判定されています');
+        else if (r.safety === KTPlanReview.SAFETY.PLAN_ONLY) set(STEP.UNSUPPORTED, 'PLAN_ONLY', '計画のみ（自動反映の対象外）');
+        else if (!cap || !cap.previewExecute || !HANDLERS[step.actionType]) set(STEP.UNSUPPORTED, 'PREVIEW_NOT_SUPPORTED', '現在の Executor では自動反映できません');
+        else {
+          const p = HANDLERS[step.actionType].prepare(step, { stepReview: r, plan });
+          if (p.unsupported) set(STEP.UNSUPPORTED, p.unsupported, p.message);
+          else { st.prepared = p; if (p.temporaryId) prepared.temporaryIdMap[p.temporaryId] = p.expect.code; }
+        }
+        states.set(id, st);
+      }
+      // 依存: 依存先が実行されない（SKIPPED / UNSUPPORTED / BLOCKED）なら BLOCKED
+      for (const st of states.values()) {
+        if (st.status !== STEP.PENDING) continue;
+        const bad = st.dependsOn.filter(d => { const ds = states.get(d); return !ds || ds.status !== STEP.PENDING; });
+        if (bad.length) { st.status = STEP.BLOCKED; st.reason = 'DEPENDENCY_NOT_EXECUTABLE'; st.message = `依存する ${bad.join(', ')} が実行されないため反映できません`; }
+      }
+      prepared.steps = [...states.values()];
+      const summarize = () => { prepared.summary = { executable: prepared.steps.filter(s => s.status === STEP.PENDING).length, unsupported: prepared.steps.filter(s => s.status === STEP.UNSUPPORTED).length, blocked: prepared.steps.filter(s => s.status === STEP.BLOCKED).length, skipped: prepared.steps.filter(s => s.status === STEP.SKIPPED).length }; };
+      const pending = prepared.steps.filter(s => s.status === STEP.PENDING);
+      if (!pending.length) { block('NOTHING_TO_EXECUTE', '承認済みで実行できる step がありません'); summarize(); return prepared; }
+
+      // ---- 2. 現在の設定（動作テスト環境）と revision を取得（アプリ管理権限が無ければここで止まる）----
+      let fields, layout, views, prodViews;
+      try {
+        [fields, layout, views, prodViews] = await Promise.all([api.getPreviewFields(prepared.appId), api.getPreviewLayout(prepared.appId), api.getPreviewViews(prepared.appId), api.getProductionViews(prepared.appId)]);
+      } catch (e) {
+        const s = strErr(e);
+        if (isPermissionError(e)) block('PERMISSION_DENIED', 'このユーザーにはアプリ設定を変更する権限がありません（動作テスト環境の設定を取得できませんでした）', s);
+        else block('FETCH_FAILED', `現在の設定を取得できませんでした: ${s.message}`, s);
+        summarize(); return prepared;
+      }
+      prepared.snapshot = { takenAt: nowIso(now), revision: String(fields?.revision ?? ''), fields: clone(fields), layout: clone(layout), views: clone(views) };
+      prepared.revision = { production: prodViews?.revision != null ? String(prodViews.revision) : null, preview: fields?.revision != null ? String(fields.revision) : null, reviewed: before.revision != null ? String(before.revision) : null };
+
+      // ---- 3. stale 判定（Review 時点との差異があれば止める。古い計画を当て直さない）----
+      const currentModel = KTPlanReview.buildBeforeModel(previewDataFrom({ fields, layout, views }, { appId: prepared.appId }));
+      const diffs = diffBefore(before, currentModel);
+      if (prepared.revision.reviewed && prepared.revision.production && prepared.revision.reviewed !== prepared.revision.production) diffs.unshift({ kind: 'APP', id: 'revision', change: 'CHANGED', message: `運用環境の設定が Review 後に変更されています（revision ${prepared.revision.reviewed} → ${prepared.revision.production}）` });
+      prepared.stale = { status: diffs.length ? 'STALE' : 'FRESH', diffs };
+      if (diffs.length) block('STALE_PLAN', '計画作成後にアプリ設定が変更されています。再レビューしてください。', { count: diffs.length });
+
+      // ---- 4. 実行直前の再検証（同じ決定的エンジンを動作テスト環境の設定で再実行し、期待する結果が変わっていないことを確かめる）----
+      if (prepared.status === RUN.PREPARED) {
+        let re = null;
+        try { re = KTPlanReview.review({ plan, data: previewDataFrom({ fields, layout, views }, { appId: prepared.appId }) }); } catch (e) { block('REVALIDATION_ERROR', `再検証に失敗しました: ${strErr(e).message}`); }
+        if (re) {
+          const reMap = new Map(re.steps.map(r => [r.stepId, r]));
+          for (const st of pending) {
+            const r0 = rv.get(st.stepId), r1 = reMap.get(st.stepId);
+            const bad = !r1 || r1.status === KTPlanReview.STATUS.INVALID || r1.status === KTPlanReview.STATUS.BLOCKED_BY_DEPENDENCY || r1.safety === KTPlanReview.SAFETY.BLOCKED;
+            const changed = !bad && !same(r0?.diff?.after, r1?.diff?.after);
+            if (bad || changed) { st.status = STEP.BLOCKED; st.reason = 'REVALIDATION_FAILED'; st.message = bad ? `再検証で実行不可（${(r1?.issues || []).map(i => i.code).join(', ') || '不明'}）` : '再検証の結果が Review 時点と異なります'; }
+          }
+          if (!prepared.steps.some(s => s.status === STEP.PENDING)) block('REVALIDATION_FAILED', '再検証で実行できる step が無くなりました');
+        }
+      }
+      summarize();
+      return prepared;
+    }
+
+    // ================= executePreview =================
+    /** 承認済み・実行可能な step を dependsOn 順に動作テスト環境へ反映し、1 step ごとに再取得して検証する。失敗したら以降を止める（Fail Stop） */
+    async function executePreview(prepared, { api, now = Date.now, onProgress = null, review = null, data = null } = {}) {
+      if (!prepared || prepared.status !== RUN.PREPARED) throw Object.assign(new Error('prepare が完了していない、または実行できない状態です'), { code: 'NOT_PREPARED' });
+      if (prepared.executed) throw Object.assign(new Error('この prepare は既に実行されています（二重実行の防止。やり直すには prepare からやり直してください）'), { code: 'ALREADY_EXECUTED' });
+      prepared.executed = true;
+      const log = {
+        executorVersion: EXECUTOR_VERSION, executionId: prepared.executionId, appId: prepared.appId, env: ENV, startedAt: nowIso(now), finishedAt: null,
+        beforeRevision: prepared.revision.preview, afterRevision: null, status: RUN.RUNNING, steps: [], simulation: null, reanalysis: null, snapshot: prepared.snapshot,
+      };
+      const progress = (st) => { if (typeof onProgress === 'function') { try { onProgress(clone(st), clone(log)); } catch (e) { } } };
+      const yieldUi = () => new Promise(r => setTimeout(r, 0));
+      const stepLogs = new Map();
+      for (const st of prepared.steps) { const l = { stepId: st.stepId, actionType: st.actionType, title: st.title, status: st.status === STEP.PENDING ? STEP.PENDING : st.status, reason: st.reason, message: st.message, summary: st.prepared?.summary || '', requests: [], revision: null, verification: null, error: null }; stepLogs.set(st.stepId, l); log.steps.push(l); }
+      let revision = prepared.revision.preview;
+      let failed = false;
+      for (const st of prepared.steps) {
+        const l = stepLogs.get(st.stepId);
+        if (st.status !== STEP.PENDING) { progress(l); continue; }
+        if (failed) { l.status = STEP.SKIPPED; l.reason = 'STOPPED_AFTER_FAILURE'; l.message = '前の step が失敗したため実行していません'; progress(l); continue; }
+        const depsOk = st.dependsOn.every(d => { const dl = stepLogs.get(d); return !dl || dl.status === STEP.VERIFIED; });
+        if (!depsOk) { l.status = STEP.SKIPPED; l.reason = 'DEPENDENCY_NOT_VERIFIED'; l.message = '依存する step が検証済みでないため実行していません'; progress(l); continue; }
+        l.status = STEP.RUNNING; progress(l); await yieldUi();
+        const handler = HANDLERS[st.actionType];
+        const ctx = { api, appId: prepared.appId, revision, snapshot: prepared.snapshot, layoutPolicy: prepared.layoutPolicy };
+        try {
+          const applied = await handler.apply(ctx, st.prepared);
+          l.requests = applied.requests || []; l.revision = applied.revision || null; revision = applied.revision || revision;
+          l.status = STEP.APPLIED; progress(l); await yieldUi();
+          const v = await handler.verify(ctx, st.prepared, applied);
+          l.verification = v; if (v.revision) revision = v.revision;
+          l.status = v.ok ? STEP.VERIFIED : STEP.VERIFY_FAILED;
+          if (!v.ok) { l.reason = 'VERIFY_FAILED'; l.message = `API は成功しましたが、再取得した設定が期待と一致しません（${v.checks.filter(c => !c.ok).map(c => c.name).join(', ')}）`; failed = true; }
+        } catch (e) {
+          const s = strErr(e);
+          l.status = STEP.FAILED; l.error = s; failed = true;
+          l.reason = isPermissionError(e) ? 'PERMISSION_DENIED' : isRevisionError(e) ? 'REVISION_MISMATCH' : s.code === 'TARGET_EXISTS' ? 'TARGET_EXISTS' : 'API_ERROR';
+          l.message = l.reason === 'PERMISSION_DENIED' ? 'アプリ設定を変更する権限がありません' : l.reason === 'REVISION_MISMATCH' ? '実行中に他の変更が入りました（revision 不一致）。再レビューしてください' : s.message;
+        }
+        progress(l); await yieldUi();
+      }
+      log.afterRevision = revision;
+      const verified = log.steps.filter(s => s.status === STEP.VERIFIED).length;
+      const bad = log.steps.filter(s => s.status === STEP.FAILED || s.status === STEP.VERIFY_FAILED).length;
+      log.status = bad ? (verified ? RUN.PARTIAL : RUN.FAILED) : RUN.DONE;
+      // ---- 反映後の再取得 → Simulation との比較・再解析 ----
+      try {
+        const [fields, layout, views] = await Promise.all([api.getPreviewFields(prepared.appId), api.getPreviewLayout(prepared.appId), api.getPreviewViews(prepared.appId)]);
+        log.afterRevision = String(fields?.revision ?? log.afterRevision ?? '');
+        const previewData = previewDataFrom({ fields, layout, views }, data && typeof data === 'object' ? { ...data, appId: prepared.appId } : { appId: prepared.appId });
+        const actual = KTPlanReview.buildBeforeModel(previewData);
+        log.simulation = compareSimulation(review?.simulation?.after || null, actual, log.steps, prepared);
+        log.reanalysis = reanalyze(previewData, data, log.steps, prepared);
+        log.actualAfter = { fieldCount: Object.keys(actual.fields).length, views: actual.views.length, addedFields: log.steps.filter(s => s.actionType === 'ADD_FIELD' && s.status === STEP.VERIFIED).map(s => stepLogTarget(s, prepared)), addedViews: log.steps.filter(s => s.actionType === 'ADD_VIEW' && s.status === STEP.VERIFIED).map(s => stepLogTarget(s, prepared)) };
+      } catch (e) { log.simulation = { compared: false, match: null, mismatches: [], error: strErr(e).message }; }
+      log.finishedAt = nowIso(now);
+      return log;
+    }
+    const stepLogTarget = (s, prepared) => prepared.steps.find(x => x.stepId === s.stepId)?.prepared?.expect?.code || prepared.steps.find(x => x.stepId === s.stepId)?.prepared?.expect?.name || null;
+
+    /** Simulation After（Review が仮適用したモデル）と実際の After を、実行した対象だけ比較する */
+    function compareSimulation(simAfter, actual, stepLogs, prepared) {
+      if (!simAfter) return { compared: false, match: null, mismatches: [], note: 'Review の After モデルが無いため比較していません' };
+      const mismatches = [];
+      for (const s of stepLogs) {
+        if (s.status !== STEP.VERIFIED) continue;
+        const expect = prepared?.steps?.find(x => x.stepId === s.stepId)?.prepared?.expect || null;
+        if (s.actionType === 'ADD_FIELD') {
+          const code = expect?.code;
+          const sim = simAfter.fields?.[code], act = actual.fields?.[code];
+          if (!sim || !act) { mismatches.push({ stepId: s.stepId, kind: 'FIELD', id: code, message: sim ? '実際の設定に追加したフィールドがありません' : 'Simulation に該当フィールドがありません' }); continue; }
+          const a = fieldKey(sim), b = fieldKey(act);
+          if (!same(a, b)) mismatches.push({ stepId: s.stepId, kind: 'FIELD', id: code, message: 'Simulation と実際の設定が一致しません', simulation: a, actual: b });
+        } else if (s.actionType === 'ADD_VIEW') {
+          const name = expect?.name || null;
+          const sim = (simAfter.views || []).find(v => v.origin === 'proposed' && v.stepId === s.stepId) || (name ? (simAfter.views || []).find(v => v.name === name) : null) || null;
+          const act = sim ? (actual.views || []).find(v => v.name === sim.name) : null;
+          if (!sim || !act) { mismatches.push({ stepId: s.stepId, kind: 'VIEW', id: sim?.name || name, message: sim ? '実際の設定に追加した一覧がありません' : 'Simulation に該当一覧がありません' }); continue; }
+          const a = viewKey(sim), b = viewKey(act);
+          if (!same(a, b)) mismatches.push({ stepId: s.stepId, kind: 'VIEW', id: sim.name, message: 'Simulation と実際の設定が一致しません', simulation: a, actual: b });
+        }
+      }
+      return { compared: true, match: mismatches.length === 0, mismatches, ...(mismatches.length ? { code: 'SIMULATION_MISMATCH' } : {}) };
+    }
+
+    /** 反映後の再解析（可能な範囲）: preview の fields / layout / views ＋ 運用環境のその他設定で DEPS を作り直し、追加フィールドの参照・壊れた参照を数える */
+    function reanalyze(previewData, baseData, stepLogs, prepared) {
+      const out = { available: false, before: null, after: null, addedFields: [] };
+      if (!KTDeps || typeof KTDeps.buildDependencyData !== 'function') return out;
+      const safe = (fn, fb) => { try { return fn(); } catch (e) { return fb; } };
+      const build = (d) => safe(() => { const fieldsN = KTDeps.normalizeFields(d?.fields || {}); const deps = KTDeps.buildDependencyData(d, fieldsN); return { deps, fields: fieldsN.length, edges: Array.isArray(deps?.edges) ? deps.edges.length : 0, broken: safe(() => KTDeps.findBrokenRefs(deps).length, null) }; }, null);
+      const after = build(previewData);
+      const before = baseData ? build(baseData) : null;
+      if (!after) return out;
+      out.available = true;
+      out.before = before ? { fields: before.fields, edges: before.edges, brokenRefs: before.broken } : null;
+      out.after = { fields: after.fields, edges: after.edges, brokenRefs: after.broken };
+      for (const s of stepLogs) {
+        if (s.actionType !== 'ADD_FIELD' || s.status !== STEP.VERIFIED) continue;
+        const code = prepared.steps.find(x => x.stepId === s.stepId)?.prepared?.expect?.code;
+        if (!code) continue;
+        const impact = safe(() => KTDeps.impactOf(after.deps, code), null);
+        out.addedFields.push({ code, directRefs: impact ? (impact.direct || []).length : null, indirectRefs: impact ? (impact.indirect || []).length : null });
+      }
+      return out;
+    }
+
+    // ================= rollback（計画のみ。実行しない）=================
+    function buildRollbackPlan(execution, prepared) {
+      const steps = [];
+      for (const s of [...(execution?.steps || [])].reverse()) {
+        if (![STEP.APPLIED, STEP.VERIFIED, STEP.VERIFY_FAILED].includes(s.status)) continue;
+        const st = prepared?.steps?.find(x => x.stepId === s.stepId);
+        const handler = HANDLERS[s.actionType];
+        if (!st?.prepared || !handler) continue;
+        steps.push({ stepId: s.stepId, ...handler.rollback({ appId: execution.appId, snapshot: execution.snapshot }, st.prepared) });
+      }
+      return { rollbackVersion: '1', executionId: execution?.executionId ?? null, appId: execution?.appId ?? null, env: ENV, executed: false, snapshotRevision: execution?.snapshot?.revision ?? null, steps, note: 'このロールバック計画は実行されません（Phase 9 は計画の生成まで）。snapshot は実行前の動作テスト環境の設定です' };
+    }
+
+    // ================= 監査用 JSON =================
+    function buildAudit({ goal = null, plan = null, review = null, decisions = null, prepared = null, execution = null } = {}) {
+      const rv = review ? { ...review, simulation: review.simulation ? { before: review.simulation.before ?? null, process: review.simulation.process ?? null } : null } : null;
+      return {
+        auditVersion: '1', generatedAt: new Date().toISOString(),
+        goal: goal ?? plan?.goal ?? null,
+        plan: plan ? (KTContextUi.planJson ? KTContextUi.planJson(plan) : plan) : null,
+        review: rv,
+        humanDecisions: decisions ? (typeof decisions.entries === 'function' && typeof decisions.get === 'function' ? Object.fromEntries(decisions.entries()) : decisions) : {},   // Map（別 realm でも可）か plain object
+        execution: execution ? { ...execution, snapshot: undefined } : (prepared ? { executionId: prepared.executionId, appId: prepared.appId, env: ENV, status: prepared.status, blockers: prepared.blockers, stale: prepared.stale, steps: prepared.steps.map(s => ({ stepId: s.stepId, actionType: s.actionType, status: s.status, reason: s.reason })) } : null),
+        verification: execution ? execution.steps.map(s => ({ stepId: s.stepId, status: s.status, verification: s.verification })) : null,
+        beforeSnapshot: execution?.snapshot ?? prepared?.snapshot ?? null,
+        actualAfter: execution?.actualAfter ?? null,
+        simulation: execution?.simulation ?? null,
+        reanalysis: execution?.reanalysis ?? null,
+        rollbackPlan: execution && prepared ? buildRollbackPlan(execution, prepared) : null,
+      };
+    }
+
+    // ================= kintone API adapter（セッション認証。Toolkit を使っているユーザーの権限で実行）=================
+    function createKintoneApi({ kintoneApi = (typeof kintone !== 'undefined' ? kintone : null) } = {}) {
+      if (!kintoneApi) throw new Error('kintone API がありません');
+      const url = (p) => kintoneApi.api.url(p, true);
+      const call = (p, method, body) => kintoneApi.api(url(p), method, body);
+      const app = (a) => Number(a);
+      return {
+        getPreviewFields: (a) => call('/k/v1/preview/app/form/fields.json', 'GET', { app: app(a) }),
+        getPreviewLayout: (a) => call('/k/v1/preview/app/form/layout.json', 'GET', { app: app(a) }),
+        getPreviewViews: (a) => call('/k/v1/preview/app/views.json', 'GET', { app: app(a) }),
+        getProductionViews: (a) => call('/k/v1/app/views.json', 'GET', { app: app(a) }),
+        addPreviewFields: (a, properties, revision) => call('/k/v1/preview/app/form/fields.json', 'POST', { app: app(a), properties, ...(revision ? { revision } : {}) }),
+        putPreviewLayout: (a, layout, revision) => call('/k/v1/preview/app/form/layout.json', 'PUT', { app: app(a), layout, ...(revision ? { revision } : {}) }),
+        putPreviewViews: (a, views, revision) => call('/k/v1/preview/app/views.json', 'PUT', { app: app(a), views, ...(revision ? { revision } : {}) }),
+        // 運用環境へ反映する関数は意図的に無い（Phase 9: Preview only）
+      };
+    }
+
+    return {
+      EXECUTOR_VERSION, ENV, STEP, RUN, PREVIEW_FIELD_TYPES, ACTION_CAPABILITIES, HANDLERS,
+      prepare, executePreview, buildRollbackPlan, buildAudit, compareSimulation, diffBefore, previewDataFrom, layoutHasCode, createKintoneApi,
     };
   })();
 

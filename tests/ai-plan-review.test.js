@@ -272,7 +272,7 @@ console.log('\n--- 9. staging E2E（2026-10-02）で見つかった実データ�
     step('P3', 'CUSTOMIZATION_REQUIRED', 'JS', '', []),
   ]));
   const eo = R.executorOutput(plan([]), mix, ['P1', 'P2', 'P3', 'P1']);
-  assert(eo.approvedSteps.join() === 'P1' && eo.review.executionReadiness.approvedSteps.join() === 'P1' && mix.executionReadiness.approvedSteps.length === 0, 'executorOutput: 承認は実行できる step だけ（重複・BLOCKED・PLAN_ONLY を除く）で、review 内の readiness とも一致。元の review は変えない');
+  assert(eo.approvedSteps.join() === 'P1,P3' && eo.review.executionReadiness.approvedSteps.join() === 'P1,P3' && mix.executionReadiness.approvedSteps.length === 0, 'executorOutput: 承認は BLOCKED でない step（重複を除く。PLAN_ONLY は残して Executor が「未対応」と示す）で、review 内の readiness とも一致。元の review は変えない');
   assert(JSON.stringify(INPUTS.data) === SNAPSHOT, '§9 の後も DATA は不変');
 }
 
