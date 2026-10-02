@@ -289,6 +289,8 @@ console.log('\n--- 9. staging E2E（2026-10-02）で見つかった実データ�
   // Phase 10 staging E2E（app 343）: AI が events: ["なし（レコードの条件通知）"] と書いた → 配列の placeholder も空扱い（イベント不明の指摘にしない）
   const noneEv = review(plan([step('P1', 'ADD_NOTIFICATION', 'NOTIFICATION', 'n', [], { spec: { name: 'n', targets: ['FIELD_ENTITY:owner_group'], filterCond: 'amount >= "1"', events: ['なし（レコードの条件通知）'] } })]));
   assert(!codes(st(noneEv, 'P1')).includes('NOTIFICATION_EVENT_UNKNOWN') && st(noneEv, 'P1').diff.after.scope === 'perRecord' && !st(noneEv, 'P1').spec.events, '配列の placeholder（なし）は捨てる');
+  const noneEv2 = review(plan([step('P1', 'ADD_NOTIFICATION', 'NOTIFICATION', 'n2', [['通知先', 'owner_group'], ['条件', 'amount >= "1"'], ['イベント', 'なし（レコードの条件通知）']], { spec: { name: 'n2', targets: ['FIELD_ENTITY:owner_group'], filterCond: 'amount >= "1"', events: ['なし（レコードの条件通知）'] } })]));
+  assert(!codes(st(noneEv2, 'P1')).includes('NOTIFICATION_EVENT_UNKNOWN') && !st(noneEv2, 'P1').spec.events, 'details の「イベント: なし」も拾い直さない（実機で spec と details の両方に出た）');
   assert(JSON.stringify(INPUTS.data) === SNAPSHOT, '§9 の後も DATA は不変');
 }
 

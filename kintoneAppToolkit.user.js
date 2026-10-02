@@ -5358,13 +5358,15 @@
       const s = step.spec && typeof step.spec === 'object' ? step.spec : null;
       // AI が「なし」「none」「—」などを値として書くことがある（staging E2E で filterCond: "なし"）。空と同じ意味なので捨てる
       const PLACEHOLDER_RE = /^(なし|無し|指定なし|条件なし|設定なし|特になし|none|n\/a|null|undefined|-|—|－|–)$/i;
-      const put = (k, v) => { if (v == null) return; if (typeof v === 'string' && PLACEHOLDER_RE.test(v.trim())) return; if (Array.isArray(v) ? v.length : String(v).trim() !== '') spec[k] = v; };
+      const isPlaceholder = (x) => PLACEHOLDER_RE.test(String(x ?? '').replace(/[（(][^）)]*[）)]/g, '').trim());   // 「なし（レコードの条件通知）」のような注釈付きも
+      const dropPh = (arr) => arr.filter(x => !isPlaceholder(x));
+      const put = (k, v) => { if (v == null) return; if (typeof v === 'string' && isPlaceholder(v)) return; if (Array.isArray(v) ? v.length : String(v).trim() !== '') spec[k] = v; };
       if (s) {
         for (const k of Object.keys(DETAIL_KEYS)) {
           const v = s[k];
           if (v == null) continue;
           if (k === 'mappings' && Array.isArray(v)) put(k, v.filter(m => m && (m.from || m.to)).map(m => ({ from: String(m.from ?? '').trim(), to: String(m.to ?? '').trim() })));
-          else if (['assignees', 'targets', 'events', 'fields', 'options', 'entities'].includes(k)) put(k, (Array.isArray(v) ? v.map(x => String(x).trim()).filter(Boolean) : splitList(v)).filter(x => !PLACEHOLDER_RE.test(x.replace(/[（(][^）)]*[）)]/g, '').trim())));   // 配列の「なし」も捨てる
+          else if (['assignees', 'targets', 'events', 'fields', 'options', 'entities'].includes(k)) put(k, dropPh(Array.isArray(v) ? v.map(x => String(x).trim()).filter(Boolean) : splitList(v)));   // 配列の「なし」も捨てる
           else if (k === 'required') { if (typeof v === 'boolean') spec.required = v; else if (/^(true|yes|必須|はい)$/i.test(String(v))) spec.required = true; else if (/^(false|no|任意|いいえ)$/i.test(String(v))) spec.required = false; }
           else put(k, String(v).trim());
         }
@@ -5373,9 +5375,9 @@
         const k = keyOf(d.key);
         if (!k || spec[k] != null) continue;
         const v = String(d.value ?? '').trim();
-        if (!v) continue;
+        if (!v || isPlaceholder(v)) continue;   // details の「なし」も捨てる（spec で捨てた項目を details から拾い直さない）
         if (k === 'mappings') spec.mappings = splitList(v).map(x => { const m = x.match(/^(.+?)\s*(?:→|->|=>|:|：)\s*(.+)$/); return m ? { from: m[1].trim(), to: m[2].trim() } : { from: x, to: '' }; });
-        else if (['assignees', 'targets', 'events', 'fields', 'options', 'entities'].includes(k)) spec[k] = splitList(v);
+        else if (['assignees', 'targets', 'events', 'fields', 'options', 'entities'].includes(k)) { const list = dropPh(splitList(v)); if (list.length) spec[k] = list; }
         else if (k === 'required') spec.required = /^(true|yes|必須|はい)$/i.test(v) ? true : /^(false|no|任意|いいえ)$/i.test(v) ? false : undefined;
         else spec[k] = v;
       }
