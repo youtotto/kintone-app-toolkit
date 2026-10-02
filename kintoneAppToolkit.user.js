@@ -5823,8 +5823,12 @@
       for (const s of p.states) if (s.origin === 'proposed') lines.push(`  style ${idOf.get(s.name)} fill:#e3f0ff,stroke:#1a73e8,stroke-width:2px`);
       return lines.join('\n');
     }
-    /** Executor へ渡す形 */
-    const executorOutput = (plan, rev, approvedSteps = []) => ({ outputVersion: '1', plan: KTContextUi.planJson ? KTContextUi.planJson(plan) : plan, review: { ...rev, simulation: { ...rev.simulation, after: undefined } }, approvedSteps: [...approvedSteps] });
+    /** Executor へ渡す形。承認は実行できる step（SAFE / REVIEW_REQUIRED）だけを採り、review.executionReadiness.approvedSteps と一致させる */
+    const executorOutput = (plan, rev, approvedSteps = []) => {
+      const executable = new Set((rev?.steps || []).filter(r => r.safety === SAFETY.SAFE || r.safety === SAFETY.REVIEW_REQUIRED).map(r => r.stepId));
+      const approved = [...new Set(approvedSteps)].filter(id => executable.has(id));
+      return { outputVersion: '1', plan: KTContextUi.planJson ? KTContextUi.planJson(plan) : plan, review: { ...rev, simulation: { ...rev.simulation, after: undefined }, executionReadiness: { ...(rev?.executionReadiness || {}), approvedSteps: approved } }, approvedSteps: approved };
+    };
 
     return {
       REVIEW_VERSION, STATUS, SAFETY, CHANGE, ACTION_CAPABILITIES, HIGH_RISK,
