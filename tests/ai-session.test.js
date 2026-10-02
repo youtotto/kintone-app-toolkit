@@ -20,10 +20,11 @@ const C = KTAiClient.ERROR_CODES;
 const makeStorage = () => { const m = new Map(); return { getItem: (k) => (m.has(k) ? m.get(k) : null), setItem: (k, v) => m.set(k, String(v)), removeItem: (k) => m.delete(k), dump: () => [...m.entries()].map(([k, v]) => `${k}=${v}`).join('\n') }; };
 
 /** Gateway の exchange / health / review を模す transport（KV の代わりに Map） */
-function makeGateway({ customerToken = 'CUSTOMER-TOKEN-1', now = () => Date.now(), accessTtlSec = 2700, refreshTtlSec = 1209600, failExchange = null } = {}) {
+function makeGateway({ customerToken = 'CUSTOMER-TOKEN-1', now = () => Date.now(), accessTtlSec = 2700, refreshTtlSec = 1209600, failExchange = null, replayGraceSec = 1800 } = {}) {
   const access = new Map(), refresh = new Map();
   const reqs = [];
   let seq = 0;
+  const ctl = { hangNext: false, lastRefreshBody: null };   // hangNext: 次の refresh の応答を落とす（通信断 / タブ スリープ。Gateway 側では rotation 済み）
   const issue = () => {
     const a = `AT-${++seq}`, r = `RT-${++seq}`;
     const aExp = new Date(now() + accessTtlSec * 1000).toISOString(), rExp = new Date(now() + refreshTtlSec * 1000).toISOString();
@@ -39,10 +40,19 @@ function makeGateway({ customerToken = 'CUSTOMER-TOKEN-1', now = () => Date.now(
       if (failExchange) return err(failExchange.status, failExchange.code);
       if (b.grantType === 'customer_token') return bearer === customerToken ? { status: 200, body: JSON.stringify(issue()) } : err(401, 'AUTH_INVALID_TOKEN');
       const r = refresh.get(b.refreshToken);
-      if (!r || r.used) return err(401, 'AUTH_INVALID_TOKEN');
+      ctl.lastRefreshBody = b;
+      if (!r) return err(401, 'AUTH_INVALID_TOKEN');
+      if (r.used) {
+        // Phase 8.5: 同じ requestId の再送は猶予内なら同じ pair（それ以外は family 失効 = 401 reused）
+        if (b.requestId && r.rid === b.requestId && r.issued && now() - r.usedAt <= replayGraceSec * 1000) return { status: 200, body: JSON.stringify({ ...r.issued, reissued: true }) };
+        for (const x of refresh.values()) x.used = true; access.clear();
+        return { status: 401, body: JSON.stringify({ ok: false, contractVersion: '2.1', error: { code: 'AUTH_INVALID_TOKEN', message: 'reused', detail: { reason: 'reused' } } }) };
+      }
       if (Date.parse(r.exp) <= now()) return err(401, 'AUTH_TOKEN_EXPIRED');
-      r.used = true;
-      return { status: 200, body: JSON.stringify(issue()) };
+      const issued = issue();
+      r.used = true; r.usedAt = now(); r.rid = b.requestId || null; r.issued = b.requestId ? issued : null;
+      if (ctl.hangNext) { ctl.hangNext = false; return new Promise(() => {}); }   // 応答が client に届かない
+      return { status: 200, body: JSON.stringify(issued) };
     }
     const exp = access.get(bearer);
     if (!exp) return err(401, 'AUTH_INVALID_TOKEN');
@@ -50,7 +60,7 @@ function makeGateway({ customerToken = 'CUSTOMER-TOKEN-1', now = () => Date.now(
     if (req.url.endsWith('/v2/health')) return { status: 200, body: JSON.stringify({ ok: true, supportedContractVersions: ['2.0', '2.1'], entitlements: [{ product: 'toolkit', features: ['assistant-qa'] }], registry: { toolkit: { 'assistant-qa': { implemented: true, promptVersions: ['1'] } } }, auth: { type: 'access_token' } }) };
     return err(404, 'NOT_FOUND');
   };
-  return { transport, reqs, access, refresh };
+  return { transport, reqs, access, refresh, ctl };
 }
 
 (async () => {
@@ -180,6 +190,103 @@ console.log('\n--- 5. 設定 store の形 ---');
   assert(store.load().apiBase === 'https://gw.test' && store.load().refreshToken === 'r', 'save / load（末尾スラッシュ除去）');
   store.clear();
   assert(store.load().refreshToken === '', 'clear');
+}
+
+console.log('\n--- 6. Refresh robustness（Phase 8.5: 応答喪失 ≠ replay）---');
+{
+  // lost response: refresh の応答が届かない（timeout）→ 旧 Refresh を捨てず、同じ requestId で再送 → 同じ pair
+  let t = Date.now();
+  const storage = makeStorage();
+  const store = KTAiClient.createSettingsStore({ storage, host: 'h' });
+  const gw = makeGateway({ now: () => t, accessTtlSec: 120 });
+  const session = KTAiClient.createSession({ store, hostname: 'h', transport: gw.transport, apiBase: 'https://gw.test', nowFn: () => t, timeoutMs: 30 });
+  await session.connect('CUSTOMER-TOKEN-1');
+  t += 70 * 1000;
+  gw.ctl.hangNext = true;
+  let err = null; try { await session.client.getHealth(); } catch (e) { err = e; }
+  const c1 = store.load();
+  assert(err && err.code === C.TIMEOUT && session.status().connected === true && c1.refreshToken === 'RT-2', 'refresh の timeout → 接続情報を捨てない（旧 Refresh を保持・接続済みのまま）');
+  assert(c1.refreshAttempt && /^[A-Za-z0-9_-]{8,128}$/.test(c1.refreshAttempt.requestId) && c1.refreshAttempt.at, 'refresh 要求の requestId を接続情報と一緒に保存（Gateway の形式に合う）');
+  const rid = c1.refreshAttempt.requestId;
+  assert(gw.ctl.lastRefreshBody.requestId === rid, 'refresh 要求に requestId を送る');
+  const h = await session.client.getHealth();
+  assert(h.ok && gw.ctl.lastRefreshBody.requestId === rid && gw.reqs.filter(r => r.url.endsWith('/exchange')).length === 3, '次の呼び出しで同じ requestId により再送 → 同じ pair で回復（connect + refresh + 再送 = exchange 3 回）');
+  const c2 = store.load();
+  assert(c2.refreshToken === 'RT-4' && !c2.refreshAttempt, '回復後は新しい Refresh を保存し、requestId は消す');
+  t += 70 * 1000;
+  await session.client.getHealth();
+  assert(gw.ctl.lastRefreshBody.requestId && gw.ctl.lastRefreshBody.requestId !== rid && store.load().refreshToken === 'RT-6', '次の refresh は別の requestId');
+}
+{
+  // identical retry after reload: ページ再読込（新しい session）でも保存した requestId で再送する
+  let t = Date.now();
+  const storage = makeStorage();
+  const store = KTAiClient.createSettingsStore({ storage, host: 'h' });
+  const gw = makeGateway({ now: () => t, accessTtlSec: 120 });
+  const s1 = KTAiClient.createSession({ store, hostname: 'h', transport: gw.transport, apiBase: 'https://gw.test', nowFn: () => t, timeoutMs: 30 });
+  await s1.connect('CUSTOMER-TOKEN-1');
+  t += 70 * 1000;
+  gw.ctl.hangNext = true;
+  try { await s1.client.getHealth(); } catch (e) { }
+  const rid = store.load().refreshAttempt.requestId;
+  const s2 = KTAiClient.createSession({ store: KTAiClient.createSettingsStore({ storage, host: 'h' }), hostname: 'h', transport: gw.transport, apiBase: 'https://gw.test', nowFn: () => t, timeoutMs: 30 });
+  const h = await s2.client.getHealth();
+  assert(h.ok && gw.ctl.lastRefreshBody.requestId === rid && gw.ctl.lastRefreshBody.refreshToken === 'RT-2' && s2.status().connected, '再読込後の session も同じ requestId・同じ旧 Refresh で再送して回復');
+}
+{
+  // true replay: Gateway が reused と判定（別の requestId）→ SESSION_EXPIRED・接続情報を破棄（無限に再送しない）
+  let t = Date.now();
+  const storage = makeStorage();
+  const store = KTAiClient.createSettingsStore({ storage, host: 'h' });
+  const gw = makeGateway({ now: () => t, accessTtlSec: 120 });
+  const session = KTAiClient.createSession({ store, hostname: 'h', transport: gw.transport, apiBase: 'https://gw.test', nowFn: () => t, timeoutMs: 30 });
+  await session.connect('CUSTOMER-TOKEN-1');
+  t += 70 * 1000;
+  gw.ctl.hangNext = true;
+  try { await session.client.getHealth(); } catch (e) { }
+  store.save({ ...store.load(), refreshAttempt: { requestId: 'rf_someone-else-0001', at: new Date(t).toISOString() } });
+  let err = null; try { await session.client.getHealth(); } catch (e) { err = e; }
+  assert(err && err.code === C.SESSION_EXPIRED && session.status().connected === false && storage.dump() === '', 'Gateway が reused（family 失効）→ SESSION_EXPIRED・接続情報を破棄');
+}
+{
+  // browser sleep: 猶予（Gateway 側 30 分）内に起きれば回復、超えれば失効（client はループしない）
+  let t = Date.now();
+  const storage = makeStorage();
+  const store = KTAiClient.createSettingsStore({ storage, host: 'h' });
+  const gw = makeGateway({ now: () => t, accessTtlSec: 120, replayGraceSec: 1800 });
+  const session = KTAiClient.createSession({ store, hostname: 'h', transport: gw.transport, apiBase: 'https://gw.test', nowFn: () => t, timeoutMs: 30 });
+  await session.connect('CUSTOMER-TOKEN-1');
+  t += 70 * 1000;
+  gw.ctl.hangNext = true;
+  try { await session.client.getHealth(); } catch (e) { }
+  t += 29 * 60 * 1000;
+  const h = await session.client.getHealth();
+  assert(h.ok && session.status().connected, '猶予内（29 分）の再送は回復');
+  t += 70 * 1000;
+  gw.ctl.hangNext = true;
+  try { await session.client.getHealth(); } catch (e) { }
+  t += 2 * 60 * 60 * 1000;
+  let err = null; try { await session.client.getHealth(); } catch (e) { err = e; }
+  assert(err && err.code === C.SESSION_EXPIRED && session.status().connected === false, '猶予後（2 時間）の再送は Gateway が失効 → SESSION_EXPIRED（再接続が必要）');
+}
+{
+  // 通信断（TRANSPORT_ERROR）でも同様に保持して再送。成功した refresh は attempt を残さない
+  let t = Date.now();
+  const storage = makeStorage();
+  const store = KTAiClient.createSettingsStore({ storage, host: 'h' });
+  const gw = makeGateway({ now: () => t, accessTtlSec: 120 });
+  let drop = false;
+  const transport = async (req) => { if (drop) { drop = false; throw new Error('network down'); } return gw.transport(req); };
+  const session = KTAiClient.createSession({ store, hostname: 'h', transport, apiBase: 'https://gw.test', nowFn: () => t, timeoutMs: 30 });
+  await session.connect('CUSTOMER-TOKEN-1');
+  t += 70 * 1000;
+  drop = true;
+  let err = null; try { await session.client.getHealth(); } catch (e) { err = e; }
+  const rid = store.load().refreshAttempt?.requestId;
+  assert(err && err.code === C.TRANSPORT_ERROR && store.load().refreshToken === 'RT-2' && rid, '通信断 → 旧 Refresh と requestId を保持');
+  const h = await session.client.getHealth();
+  assert(h.ok && gw.ctl.lastRefreshBody.requestId === rid && !store.load().refreshAttempt, '再送（Gateway は未使用なので通常発行）→ 回復・attempt を消す');
+  assert(!storage.dump().includes('AT-') && !storage.dump().includes('CUSTOMER-TOKEN'), 'store に Access / Customer Token は無い');
 }
 
 console.log(`\n${state.failed ? 'FAILED' : 'ALL PASSED'}: ${state.passed} passed / ${state.failed} failed`);

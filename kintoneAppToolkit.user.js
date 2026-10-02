@@ -5936,18 +5936,22 @@
         load() {
           try {
             const raw = storage?.getItem(key); const j = raw ? JSON.parse(raw) : {};
+            const attempt = j.refreshAttempt && typeof j.refreshAttempt.requestId === 'string' ? { requestId: j.refreshAttempt.requestId, at: j.refreshAttempt.at || null } : null;
             return {
               apiBase: String(j.apiBase || DEFAULT_API_BASE),
               refreshToken: String(j.refreshToken || ''), refreshExpiresAt: j.refreshExpiresAt || null,
               scope: j.scope || null, connectedAt: j.connectedAt || null,
+              // 進行中（応答未受信）の refresh 要求（Phase 8.5）。再送に同じ requestId を使う。token ではない
+              ...(attempt ? { refreshAttempt: attempt } : {}),
             };
           } catch (e) { return { apiBase: DEFAULT_API_BASE, refreshToken: '', refreshExpiresAt: null, scope: null, connectedAt: null }; }
         },
-        save({ apiBase, refreshToken, refreshExpiresAt, scope, connectedAt }) {
+        save({ apiBase, refreshToken, refreshExpiresAt, scope, connectedAt, refreshAttempt = null }) {
           try {
             storage?.setItem(key, JSON.stringify({
               apiBase: String(apiBase || DEFAULT_API_BASE).trim().replace(/\/+$/, ''),
               refreshToken: String(refreshToken || ''), refreshExpiresAt: refreshExpiresAt || null, scope: scope || null, connectedAt: connectedAt || null,
+              ...(refreshAttempt && refreshAttempt.requestId ? { refreshAttempt: { requestId: String(refreshAttempt.requestId), at: refreshAttempt.at || null } } : {}),
             }));
             return true;
           } catch (e) { return false; }
@@ -6204,10 +6208,11 @@
          * POST /v2/token/exchange（docs/contracts/14）。customer_token grant は Bearer に Customer Token、
          * refresh_token grant は body に Refresh Token（Bearer 無し）。戻り値の token は呼び出し側が保持する
          */
-        exchange: ({ grantType, customerToken: ct = null, refreshToken = null, product = PRODUCT, feature = FEATURES.join(',') }) => rawRequest({
+        exchange: ({ grantType, customerToken: ct = null, refreshToken = null, product = PRODUCT, feature = FEATURES.join(','), requestId = null }) => rawRequest({
           path: '/v2/token/exchange', method: 'POST',
           token: grantType === 'customer_token' ? ct : null,
-          body: JSON.stringify({ grantType, product, feature, ...(grantType === 'refresh_token' ? { refreshToken } : {}) }),
+          // requestId（Phase 8.5）: refresh 要求ごとの idempotency key。応答を受け取れなかった再送は同じ値を送ると同じ pair が返る
+          body: JSON.stringify({ grantType, product, feature, ...(grantType === 'refresh_token' ? { refreshToken, ...(requestId ? { requestId } : {}) } : {}) }),
         }),
         /** tokenless connect（docs/contracts/15）。start / status / complete は認証なし、disconnect は Refresh Token（body）*/
         connectStart: ({ codeChallenge, product = PRODUCT, feature = FEATURES.join(','), clientVersion = pluginVersion }) => rawRequest({
@@ -6240,30 +6245,40 @@
      * 接続セッション（Phase 5）。Customer Token → exchange → Access Token（memory）＋ Refresh Token（store）。
      * @param {object} p store（createSettingsStore 互換）/ hostname / transport / nowFn / apiBase（省略時は store の値）
      */
-    function createSession({ store, hostname = null, transport = null, nowFn = null, apiBase = null, pluginVersion = SCRIPT_VERSION } = {}) {
+    function createSession({ store, hostname = null, transport = null, nowFn = null, apiBase = null, pluginVersion = SCRIPT_VERSION, timeoutMs = undefined } = {}) {
       const now = () => (nowFn ? nowFn() : Date.now());
       let access = { token: null, expiresAt: null };   // memory のみ
       let refreshing = null;                            // 同時更新の抑止
       const cfg = () => store.load();
       const base = () => apiBase || cfg().apiBase || DEFAULT_API_BASE;
-      const bare = () => createAiClient({ apiBase: base(), hostname, transport, pluginVersion });
+      const clientOpts = () => ({ apiBase: base(), hostname, transport, pluginVersion, ...(timeoutMs != null ? { timeoutMs } : {}) });
+      const bare = () => createAiClient(clientOpts());
 
       const persist = (ex) => {
+        // 新しい pair を保存する（進行中の refresh 要求の記録は持ち越さない）
         store.save({ apiBase: base(), refreshToken: ex.refreshToken, refreshExpiresAt: ex.refreshExpiresAt, scope: ex.scope, connectedAt: new Date(now()).toISOString() });
         access = { token: ex.accessToken, expiresAt: ex.expiresAt };
       };
       const accessValid = () => !!access.token && Number.isFinite(Date.parse(access.expiresAt)) && Date.parse(access.expiresAt) - ACCESS_SKEW_MS > now();
       const refreshValid = (c) => !!c.refreshToken && (!c.refreshExpiresAt || Date.parse(c.refreshExpiresAt) > now());
+      const newRefreshRequestId = () => `rf_${(typeof crypto !== 'undefined' && crypto.randomUUID) ? crypto.randomUUID() : `${now().toString(36)}-${Math.random().toString(36).slice(2, 12)}-${Math.random().toString(36).slice(2, 12)}`}`;
 
-      /** Refresh Token で新しい pair を得る（単回使用・rotation）。失敗したら接続を破棄して SESSION_EXPIRED */
+      /**
+       * Refresh Token で新しい pair を得る（単回使用・rotation）。Gateway が token を拒否したら接続を破棄して SESSION_EXPIRED。
+       * Phase 8.5: 応答を受け取れなかった場合（timeout / 通信断 / タブのスリープ）は旧 Refresh を捨てず、要求の requestId を接続情報と
+       * 一緒に保存しておき、次の refresh は同じ requestId で再送する（Gateway は猶予内なら同じ pair を返す。ページ再読込後も同じ）。
+       * 旧 token の再利用攻撃は Gateway 側が requestId の不一致で見分けて family を失効する
+       */
       async function refresh() {
         if (refreshing) return refreshing;
         refreshing = (async () => {
           const c = cfg();
           if (!refreshValid(c)) { access = { token: null, expiresAt: null }; throw new AiClientError({ code: c.refreshToken ? ERROR_CODES.SESSION_EXPIRED : ERROR_CODES.NOT_CONNECTED, message: 'refresh unavailable' }); }
+          const attempt = c.refreshAttempt && c.refreshAttempt.requestId ? c.refreshAttempt : { requestId: newRefreshRequestId(), at: new Date(now()).toISOString() };
+          if (!c.refreshAttempt || c.refreshAttempt.requestId !== attempt.requestId) store.save({ ...c, refreshAttempt: attempt });
           try {
             // 要求は常に全 feature（Planner など後から契約に加わった機能を、再接続なしに scope へ取り込む）。Gateway が許可された交差を返す
-            const ex = await bare().exchange({ grantType: 'refresh_token', refreshToken: c.refreshToken, product: c.scope?.product || PRODUCT, feature: FEATURES.join(',') });
+            const ex = await bare().exchange({ grantType: 'refresh_token', refreshToken: c.refreshToken, product: c.scope?.product || PRODUCT, feature: FEATURES.join(','), requestId: attempt.requestId });
             persist(ex);
             return ex;
           } catch (e) {
@@ -6271,6 +6286,7 @@
               store.clear(); access = { token: null, expiresAt: null };
               throw new AiClientError({ code: ERROR_CODES.SESSION_EXPIRED, message: e.message, httpStatus: e.httpStatus, requestId: e.requestId });
             }
+            // それ以外（TIMEOUT / TRANSPORT_ERROR / RATE_LIMITED / 5xx）: 旧 Refresh と requestId を保持し、次回同じ要求として再送する
             throw e;
           }
         })().finally(() => { refreshing = null; });
@@ -6285,7 +6301,7 @@
       // apiBase は呼び出しのたびに store から解決する（session 生成時の値に固定すると、後から connect で
       // 接続先を変えたときに exchange だけ新しい接続先へ行き、health / ask が既定の production へ飛ぶ）
       const authed = () => createAiClient({
-        apiBase: base(), hostname, transport, pluginVersion,
+        ...clientOpts(),
         getToken: ensureAccessToken,
         onAuthExpired: async () => { access = { token: null, expiresAt: null }; await refresh(); return true; },
       });
