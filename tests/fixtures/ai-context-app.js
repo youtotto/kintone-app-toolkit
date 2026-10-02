@@ -38,6 +38,24 @@ function makeData() {
       filterCond: '', displayFields: ['quote_no', 'amount'], sort: '', size: '5',
     },
   });
+  // ---- ルックアップの参照先アプリ（Phase 13: prefetch が read-only で取得する形。500 = 顧客マスタ）----
+  data.relatedApps = {
+    [String(CUSTOMER_APP)]: {
+      appId: String(CUSTOMER_APP), name: '顧客マスタ', code: '', revision: '21',
+      fields: {
+        'レコード番号': { type: 'RECORD_NUMBER', code: 'レコード番号', label: 'レコード番号' },
+        code: field('SINGLE_LINE_TEXT', 'code', '顧客コード', { unique: true }),
+        name: field('SINGLE_LINE_TEXT', 'name', '顧客名'),
+        address: field('SINGLE_LINE_TEXT', 'address', '住所'),
+        phone: field('LINK', 'phone', '電話番号', { protocol: 'CALL' }),
+        memo: field('MULTI_LINE_TEXT', 'memo', '備考'),
+        rank: field('DROP_DOWN', 'rank', 'ランク', { options: { A: { label: 'A', index: '0' }, B: { label: 'B', index: '1' } } }),
+        sales_rep: field('USER_SELECT', 'sales_rep', '営業担当', { entities: [], defaultValue: [] }),
+        credit: field('NUMBER', 'credit', '与信枠'),
+        contacts: field('SUBTABLE', 'contacts', '連絡先', { fields: { contact_name: field('SINGLE_LINE_TEXT', 'contact_name', '担当者名') } }),
+      },
+    },
+  };
   data.fields.tax = field('CALC', 'tax', '税額', { expression: 'amount * 0.1' });
   data.fields.total = field('CALC', 'total', '合計', { expression: 'amount + tax' });
   data.fields.pic_sales = field('USER_SELECT', 'pic_sales', '担当', { entities: [], defaultValue: [] });

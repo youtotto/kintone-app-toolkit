@@ -541,10 +541,14 @@
     const layout = Array.isArray(layoutRaw)
       ? layoutRaw
       : (Array.isArray(layoutRaw?.layout) ? layoutRaw.layout : []);
+    // Phase 13: ルックアップの参照先アプリ（他アプリ）の名前とフィールド定義を read-only で取得する（ルックアップの Review / Executor が参照先の実設定で検証するため）。
+    //   運用環境の設定取得（レコード閲覧権限で可）。権限が無い・存在しない場合は error を残す（推測で補わない）
+    const relatedApps = await fetchRelatedApps(fields, getImpl);
 
     // 生データを読み取り専用で返す（派生計算は別レイヤで）
     return Object.freeze({
       appId,
+      relatedApps,   // { [appId]: { appId, name, code, revision, fields: properties, error? } }（ルックアップの参照先。Phase 13）
       fields,     // kintone.app.getFormFields()（REST form/fields の properties 相当）
       layout,     // kintone.app.getFormLayout()（REST form/layout の layout 相当。グループ・要素IDを含む）
       views,      // /k/v1/app/views               （null可）
@@ -562,6 +566,22 @@
       actions,    // /k/v1/app/actions             （null可）
       plugins,     // /k/v1/plugins  
     });
+  }
+
+  /** ルックアップの参照先アプリの基本情報とフィールド定義（read-only）。失敗はアプリごとに { error: { code, message } } */
+  async function fetchRelatedApps(fields, getImpl = kGet) {
+    const ids = [];
+    const walk = (props) => { for (const f of Object.values(props || {})) { if (!f || typeof f !== 'object') continue; const app = f.lookup?.relatedApp?.app; if (app != null && String(app) !== '' && !ids.includes(String(app))) ids.push(String(app)); if (f.type === 'SUBTABLE' && f.fields) walk(f.fields); } };
+    walk(fields);
+    const out = {};
+    await Promise.all(ids.map(async (id) => {
+      const errOf = (e) => ({ code: e?.code ?? null, message: String(e?.message ?? e ?? ''), status: e?.status ?? null });
+      let info = null, infoErr = null, def = null, defErr = null;
+      try { info = await getImpl('/k/v1/app', { id }); } catch (e) { infoErr = errOf(e); }
+      try { def = await getImpl('/k/v1/app/form/fields', { app: id }); } catch (e) { defErr = errOf(e); }
+      out[id] = { appId: id, name: info?.name ?? null, code: info?.code ?? null, revision: def?.revision ?? null, fields: def?.properties ?? null, ...(defErr ? { error: defErr } : infoErr && !def ? { error: infoErr } : {}) };
+    }));
+    return out;
   }
 
   // ---- 派生: relations を作る（同期・純関数） ----
@@ -4640,9 +4660,11 @@
         const sc = fieldScore.get(f.code) || { score: 0, reasons: [] };
         const raw = f.raw || {};
         const opts = raw.options && typeof raw.options === 'object' ? Object.keys(raw.options).sort((a, b) => (Number(raw.options[a]?.index ?? 0) - Number(raw.options[b]?.index ?? 0)) || cmp(a, b)) : null;
+        const relInfo = raw.lookup ? (data?.relatedApps?.[String(raw.lookup.relatedApp?.app ?? '')] || null) : null;
         const lookup = raw.lookup ? {
-          app: String(raw.lookup.relatedApp?.app ?? ''), keyField: raw.lookup.relatedKeyField ?? null,
+          app: String(raw.lookup.relatedApp?.app ?? ''), ...(relInfo?.name ? { appName: relInfo.name } : {}), ...(raw.lookup.relatedApp?.code ? { appCode: raw.lookup.relatedApp.code } : {}), keyField: raw.lookup.relatedKeyField ?? null,
           mappings: (raw.lookup.fieldMappings || []).map(m => ({ to: m.field, from: m.relatedField })),
+          pickerFields: Array.isArray(raw.lookup.lookupPickerFields) ? [...raw.lookup.lookupPickerFields] : [], filterCond: raw.lookup.filterCond || '', sort: raw.lookup.sort || '',
         } : null;
         const refTable = raw.referenceTable ? { app: String(raw.referenceTable.relatedApp?.app ?? ''), condition: raw.referenceTable.condition ?? null, displayFields: raw.referenceTable.displayFields || [] } : null;
         const type = f.type === 'LOOKUP' ? `${f.rawType}（ルックアップ）` : f.rawType;
@@ -4656,7 +4678,7 @@
             ...(refTable ? { referenceTable: refTable } : {}),
             ...(raw.enabled === false ? { enabled: false } : {}),
           },
-          statement: `フィールド「${f.label}」（コード ${f.code}・${type}${f.required ? '・必須' : ''}${f.unique ? '・重複禁止' : ''}${f.parent ? `・テーブル ${f.parent} 内` : ''}${opts ? `・選択肢 ${opts.length} 件` : ''}${lookup ? `・アプリ ${lookup.app} から ${lookup.mappings.length} 項目を取得` : ''}${raw.expression ? `・計算式 ${bounded(raw.expression, 60)}` : ''}）はフォームに存在する`,
+          statement: `フィールド「${f.label}」（コード ${f.code}・${type}${f.required ? '・必須' : ''}${f.unique ? '・重複禁止' : ''}${f.parent ? `・テーブル ${f.parent} 内` : ''}${opts ? `・選択肢 ${opts.length} 件` : ''}${lookup ? `・ルックアップ: アプリ ${lookup.app}${lookup.appName ? `「${lookup.appName}」` : ''} のキー ${lookup.keyField} から ${lookup.mappings.length} 項目を取得（${lookup.mappings.map(m => `${m.from}→${m.to}`).join(', ') || '取得項目なし'}）` : ''}${raw.expression ? `・計算式 ${bounded(raw.expression, 60)}` : ''}）はフォームに存在する`,
           _score: sc.score, _reasons: sc.reasons,
         };
       });
@@ -4664,6 +4686,21 @@
       const fieldKept = fieldFacts.slice(0, limits.maxFields);
       if (fieldFacts.length > fieldKept.length) trunc('facts.field', fieldFacts.length, fieldKept.length);
       for (const ff of fieldKept) { const { _score, _reasons, ...rest } = ff; push({ ...rest, ...(_reasons.length ? { retrieval: { score: _score, reasons: _reasons } } : {}) }, _score); }
+      // related apps（Phase 13: ルックアップの参照先。AI が実在するコピー元フィールドを選び、無いものを「あるはず」と推測しないため）
+      const relatedAppFields = {};
+      for (const [rid, ra] of Object.entries(data?.relatedApps || {})) {
+        const used = fieldsN.filter(x => x.raw?.lookup?.relatedApp?.app != null && String(x.raw.lookup.relatedApp.app) === String(rid)).map(x => x.code);
+        if (!ra || ra.error || !ra.fields) {
+          push({ kind: 'related-app', key: `RELATED_APP:${rid}`, confidence: 'CERTAIN', relatedApp: { app: String(rid), name: ra?.name ?? null, available: false, error: ra?.error?.code ?? null, usedBy: used }, statement: `ルックアップ ${used.join(', ')} の参照先アプリ ${rid}${ra?.name ? `「${ra.name}」` : ''} のフィールド設定は取得できない（${ra?.error?.code || '権限なし / 不明'}）。参照先のフィールドを推測しないこと` }, 20);
+          continue;
+        }
+        const rf = Object.values(ra.fields).filter(x => x && x.code && !['GROUP', 'SPACER', 'LABEL', 'HR'].includes(x.type)).sort((a, b) => cmp(a.code, b.code));
+        const list = rf.slice(0, 80).map(x => ({ code: x.code, label: x.label, type: x.type, ...(x.unique ? { unique: true } : {}), ...(x.type === 'SUBTABLE' ? { subtable: true } : {}) }));
+        relatedAppFields[String(rid)] = rf.map(x => x.code);
+        const rel = 20 + (list.some(x => settingHit(x.label) || settingHit(x.code)) ? 10 : 0);
+        push({ kind: 'related-app', key: `RELATED_APP:${rid}`, confidence: 'CERTAIN', relatedApp: { app: String(rid), name: ra.name ?? null, code: ra.code ?? null, revision: ra.revision ?? null, available: true, usedBy: used, fieldCount: rf.length, fields: list }, statement: `ルックアップ ${used.join(', ')} の参照先アプリ ${rid}「${ra.name ?? ''}」には ${rf.length} 件のフィールドがある（${list.slice(0, 40).map(x => `${x.label}=${x.code}（${x.type}${x.unique ? '・重複禁止' : ''}）`).join('、')}${rf.length > 40 ? ' …' : ''}）。コピー元に使えるのはこの一覧のフィールドだけ` }, rel);
+        if (rf.length > 80) trunc(`facts.related-app.${rid}`, rf.length, 80);
+      }
       // process
       const states = data?.status?.enable ? Object.values(data.status.states || {}).filter(Boolean).sort((a, b) => (Number(a.index ?? 0) - Number(b.index ?? 0)) || cmp(String(a.name), String(b.name))) : [];
       const procRel = relevantSettings.has('process-state') ? 5 : 1;
@@ -4800,6 +4837,9 @@
         reports: reports.map(r => r.name),
         appActions: acts.map(a => a.name),
         jsFiles: (deps?.nodes || []).filter(n => n.type === 'CUSTOMIZE').map(n => n.name).sort(cmp),
+        // Phase 13: 参照先アプリのフィールドコード（ルックアップの relatedField / relatedKeyField / pickerFields に使える識別子。他は「既存」ではない）
+        relatedAppFields,
+        lookups: fieldsN.filter(x => x.type === 'LOOKUP').map(x => x.code),
       };
 
       const candidates = {
