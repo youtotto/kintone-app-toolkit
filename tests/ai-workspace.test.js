@@ -146,7 +146,8 @@ console.log('\n--- 1. KTAiConversation.classifyIntent（決定的規則） ---')
   assert(cls('ありがとう') === I.GENERAL && cls('') === I.GENERAL, 'GENERAL: 挨拶・空');
   // 実行済みの計画
   const executed = { activePlan: { ...v1, status: 'EXECUTED' } };
-  assert(cls('通知はいらない', executed) === I.REVISE_PLAN && KTAiConversation.classifyIntent('通知はいらない', executed).revisable === false, '反映済みの計画への修正は intent REVISE_PLAN（revisable false。送信側が作り直しを案内する）');
+  assert(cls('通知はいらない', executed) === I.REVISE_PLAN && KTAiConversation.classifyIntent('通知はいらない', executed).revisable === false, '反映済みの計画への「修正だけ」の文は intent REVISE_PLAN（revisable false。送信側が作り直しを案内する）');
+  assert(cls('顧客マスタから住所と電話番号も取って', executed) === I.PLAN && cls('顧客マスタから住所と電話番号も取って', { activePlan: { ...v1, status: 'ROLLED_BACK' } }) === I.PLAN, '反映済み / 戻し済みの計画のあとの新しい要望は新しい計画（実機: 「〜も取って」が修正扱いになっていた）');
   assert(KTAiConversation.planTerms(PLAN_V1.plan).includes('更新状況') && KTAiConversation.planTerms(PLAN_V1.plan).includes('担当者別'), 'planTerms: 新規フィールドのラベル・手順の対象');
 }
 

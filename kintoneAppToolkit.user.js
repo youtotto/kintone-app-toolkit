@@ -10632,6 +10632,8 @@
       preview: /(これ|この(計画|内容|案|まま)|それ)で(進め|すすめ|お願い|いい|OK|反映|実行|決定|確定)|進めて|進めたい|進めよう|反映して|反映したい|反映を|反映お願い|動作テスト|テストして|テストしたい|実行して|実行したい|実行しろ|適用して|承認して|承認する$|承認します|^承認$|全部承認|全て承認|すべて承認|そのまま(実行|反映|進め)|いいから|やって(ください|$)|お願いします$|^(OK|ok|オッケー|はい|いいよ|それで)(、|。|\s)*(進めて|お願い|反映|実行)?$|Preview|プレビュー/i,
       // 「使って」は依頼（使ってください / 使って）。「使ってる / 使っている / 使われている」は現在の設定の質問なので含めない
       reviseVerb: /使って(?!る|い|ます|た)|使えない|使える|使う|使いたい|使えば|いらない|不要|なし(で|に|にして)|やめ|外して|除いて|削除|消して|ではなく|じゃなく|代わり|かわり|変えて|変更して|減らし|増やし|作らず|作らない|作らないで|追加せず|追加しない|にして|のほう|の方で|だけ(で|に)|も(追加|つけ|付け|入れ|取|転記|通知|欲しい|ほしい|して)|にしたい|に変え/,
+      // 「修正だけ」の文（単独では新しい計画の goal にならない）。反映済みの計画に対しては作り直しの案内に使う
+      reviseOnly: /既存|いらない|不要|やめ|外して|除いて|削除|消して|ではなく|じゃなく|代わり|かわり|作らず|作らない|追加せず|追加しない|だけ(で|に)|のほう|の方で/,
       desire: /したい|欲しい|ほしい|追加(して|する|を)|作成|作って|作りたい|設定(して|したい)|変更(して|したい)|変えて|にして|できるように|ようにしたい|つけて|付けて|入れて|取って|取得(して|したい)|通知(して|したい|を)|転記(して|したい)|コピー(して|したい)|連携(して|したい)|自動(で|化)|必要$|増やし|減らし|外して|削除して|消して|なくして|いらない|不要|やめて|使って(ください|ほしい|欲しい|$)|使え(ない|る)[?？]?$|ではなく|じゃなく|代わり|かわり|のほう|の方/,
       question: /[?？]$|(か|の|かな|かしら)[?？]$|ですか|ますか|でしょうか|のか$|何|なに|どこ|どれ|誰|だれ|いつ|教えて|説明して|使って(い|)る|使われて|わかる|分かる|ありますか|ある[?？]|いる[?？]|ている[?？]|している/,
       ambiguous: /^(これ|それ|この|その|あれ)?(は)?(どう|どうですか|どう思う|どうかな|いい|いいの|大丈夫|OK|ok|問題ない)(ですか|かな|か|？|\?)?[?？]?$/,
@@ -10673,8 +10675,9 @@
       if (RE.rollback.test(t)) return canRollback ? { intent: INTENT.REQUEST_ROLLBACK, reason: 'ROLLBACK_WORDS' } : { intent: INTENT.GENERAL, reason: 'NO_EXECUTION' };
       // 3) 進める（「全部承認」「そのまま実行」等も含む。承認・最終確認にはならない）
       if (RE.preview.test(t) && !(q && RE.questionWord.test(t))) return plan ? { intent: INTENT.REQUEST_PREVIEW, reason: 'PREVIEW_WORDS' } : { intent: INTENT.GENERAL, reason: 'NO_PLAN' };
-      // 4) 計画の修正（現在の計画の語に触れる、または修正の動詞）。反映済みの計画でも intent は REVISE_PLAN（送信側で「作り直し」を案内する）
-      if (plan && (RE.reviseVerb.test(t) || mentionsPlan(t, plan.plan)) && !(q && !RE.reviseVerb.test(t))) return { intent: INTENT.REVISE_PLAN, reason: mentionsPlan(t, plan.plan) ? 'MENTIONS_PLAN' : 'REVISE_VERB', revisable: canRevise };
+      // 4) 計画の修正（現在の計画の語に触れる、または修正の動詞）。反映済み / 戻し済みの計画は、その計画の語に触れるか「修正だけ」の文
+      //    （既存 / いらない / ではなく 等）のときだけ REVISE_PLAN（送信側で「作り直し」を案内する）。それ以外の新しい要望は新しい計画（6）へ
+      if (plan && (canRevise ? (RE.reviseVerb.test(t) || mentionsPlan(t, plan.plan)) : (mentionsPlan(t, plan.plan) || RE.reviseOnly.test(t))) && !(q && !RE.reviseVerb.test(t))) return { intent: INTENT.REVISE_PLAN, reason: mentionsPlan(t, plan.plan) ? 'MENTIONS_PLAN' : 'REVISE_VERB', revisable: canRevise };
       // 5) 曖昧（「これどう？」）
       if (RE.ambiguous.test(t)) return plan ? { intent: INTENT.AMBIGUOUS, reason: 'VAGUE_REFERENCE', choices: [INTENT.EXPLAIN_PLAN, ...(review ? [INTENT.EXPLAIN_REVIEW] : []), INTENT.REQUEST_PREVIEW] } : { intent: INTENT.GENERAL, reason: 'VAGUE_NO_PLAN' };
       // 6) 実現したいこと（計画）。計画があり、その計画の語に触れないなら「修正か新規か」を聞く
@@ -10818,7 +10821,7 @@
             case INTENT.REVISE_PLAN: {
               const base = state.activePlan;
               if (!base || (base.status !== PLAN_STATUS.ACTIVE && base.status !== PLAN_STATUS.STALE)) {
-                toolkit(base ? `現在の${planLabel(base)}は動作テスト環境へ反映済みです。追加の変更は新しい計画として作ります。実現したいことを改めて入力してください。` : '修正する計画がありません。実現したいことを入力してください。');
+                toolkit(base ? `現在の${planLabel(base)}は${base.status === PLAN_STATUS.ROLLED_BACK ? '動作テスト環境へ反映したあと元に戻しました' : '動作テスト環境へ反映済みです'}。追加の変更は新しい計画として作ります。実現したいこと（修正内容を含めた全体）を改めて入力してください。` : '修正する計画がありません。実現したいことを入力してください。');
                 result.ok = false; break;
               }
               loading = push(MSG.LOADING, ROLE.ASSISTANT, LOADING_TEXT.REVISE_PLAN, { intent: cls.intent });
