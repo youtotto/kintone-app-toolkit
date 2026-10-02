@@ -4538,6 +4538,351 @@
 
     const toJSON = (ctx, { pretty = false } = {}) => JSON.stringify(ctx, null, pretty ? 2 : 0);
 
+    // ================= Planner Context（AI Change Planner・contextVersion "planner-1"）=================
+    //   「実現したい業務（goal）」から、アプリ全体の既存資産（フィールド・プロセス・通知・一覧・ACL・アプリアクション・
+    //   依存関係・JS 参照・被参照・壊れた参照）を根拠ID 付きの facts として渡す。単一 focus ではなく、goal との
+    //   関連度（retrieval。決定的な辞書照合・キーワード→種別のヒント。LLM は使わない）で候補を複数抽出し、
+    //   サイズ上限では関連度の低いものから省略する（省略は truncation に記録）。full DEPS は送らない。
+    //   dictionary（既存の識別子一覧）は、AI が「存在しないフィールド・ステータス・通知・一覧」を既存として扱うのを
+    //   Gateway / クライアントが検出するために使う。
+    const PLANNER_CONTEXT_VERSION = 'planner-1';
+    const PLANNER_LIMITS = {
+      maxFields: 200, maxOptions: 8, maxDependencyFacts: 60, maxJsFacts: 40, maxIncomingFacts: 20, maxBrokenRefFacts: 20,
+      maxViews: 30, maxReports: 20, maxNotifications: 30, maxReminders: 20, maxRecordAcl: 20, maxFieldAcl: 30, maxAppActions: 20,
+      maxFacts: 400, maxBytes: 64 * 1024, maxGoalChars: 2000,
+    };
+    const PLANNER_KIND_ORDER = [
+      'overview', 'field', 'process-state', 'process-action', 'notification', 'reminder', 'view', 'report', 'record-acl', 'field-acl', 'app-action',
+      'dependency', 'js-reference', 'incoming-reference', 'broken-reference', 'app-link',
+    ];
+    const plannerKindRank = (k) => { const i = PLANNER_KIND_ORDER.indexOf(k); return i < 0 ? 99 : i; };
+    // goal のキーワード → 関係する種別（決定的なヒント。LLM は使わない）
+    const PLANNER_HINTS = [
+      { re: /通知|知らせ|連絡|メール/, settings: ['notification', 'reminder'], fieldTypes: { USER_SELECT: 3, ORGANIZATION_SELECT: 2, GROUP_SELECT: 2 } },
+      { re: /リマインド|リマインダー|日前|前日|期限|締切|期日|経過/, settings: ['reminder'], fieldTypes: { DATE: 4, DATETIME: 3 } },
+      { re: /承認|決裁|申請|却下|差し戻|ステータス|プロセス|ワークフロー|作業者/, settings: ['process-state', 'process-action'], fieldTypes: { USER_SELECT: 3, STATUS: 2, STATUS_ASSIGNEE: 2 } },
+      { re: /金額|円|以上|以下|超え|未満|合計|単価|数量|税/, settings: [], fieldTypes: { NUMBER: 4, CALC: 3 } },
+      { re: /担当|責任者|営業|管理者|部長|課長|上長|本人|ユーザー/, settings: [], fieldTypes: { USER_SELECT: 4, ORGANIZATION_SELECT: 2, GROUP_SELECT: 2, CREATOR: 1 } },
+      { re: /住所|電話|メール|取得|マスタ|ルックアップ|コピー|参照/, settings: ['app-link'], fieldTypes: { LOOKUP: 5, SINGLE_LINE_TEXT: 1, LINK: 1 } },
+      { re: /一覧|絞り込|並び|表示|ビュー/, settings: ['view'], fieldTypes: {} },
+      { re: /権限|閲覧|編集|削除|見せ|公開|非公開|アクセス/, settings: ['record-acl', 'field-acl'], fieldTypes: {} },
+      { re: /契約|更新|開始|終了|有効/, settings: ['reminder'], fieldTypes: { DATE: 3, DROP_DOWN: 2, RADIO_BUTTON: 1 } },
+      { re: /計算|自動|集計|グラフ/, settings: ['report'], fieldTypes: { CALC: 3, NUMBER: 1 } },
+      { re: /別アプリ|他アプリ|連携|作成|アクション/, settings: ['app-action', 'app-link'], fieldTypes: {} },
+    ];
+    /** 文字列 label の長さ 2 以上の部分文字列が goal に含まれる最長の長さ（部分一致の強さ） */
+    function longestSharedSubstring(goal, label) {
+      const l = String(label || '');
+      if (!l || l.length < 2) return 0;
+      if (goal.includes(l)) return l.length;
+      for (let len = Math.min(l.length - 1, 12); len >= 2; len--) {
+        for (let i = 0; i + len <= l.length; i++) { if (goal.includes(l.slice(i, i + len))) return len; }
+      }
+      return 0;
+    }
+    const entityText = (en) => en ? `${en.type}${en.code != null && en.code !== '' ? `:${en.code}` : ''}` : '';
+    const entityList = (list, pick = (x) => x?.entity) => (Array.isArray(list) ? list : []).map(x => pick(x)).filter(Boolean).map(en => ({ type: en.type, code: en.code ?? null }));
+    const fieldEntityCodes = (list, pick = (x) => x?.entity) => entityList(list, pick).filter(e => e.type === 'FIELD_ENTITY' && e.code).map(e => e.code);
+
+    /**
+     * Planner Context を生成する（純関数）
+     * @param {object} p goal（必須）/ data / deps / scan / incoming / options { limits, now }
+     */
+    function buildPlan({ goal = '', data = null, deps = null, scan = null, incoming = null, options = {} } = {}) {
+      const limits = { ...PLANNER_LIMITS, ...(options.limits || {}) };
+      const g = String(goal ?? '').slice(0, limits.maxGoalChars);
+      const sections = new Map();
+      const trunc = (name, total, included) => {
+        const cur = sections.get(name);
+        if (cur) { cur.total = Math.max(cur.total, total); cur.included = Math.min(cur.included, included); return; }
+        sections.set(name, { name, total, included });
+      };
+      const app = buildAppOverview({ data, deps, scan, incoming, limits: { ...DEFAULT_LIMITS, maxFields: 0, maxViewNames: 0 }, trunc: () => { } });
+      delete app.fields;   // フィールドは facts（inventory）側に載せる
+      const coverage = buildCoverage({ data, deps, scan, incoming });
+      const fieldsN = KTDeps.normalizeFields(data?.fields || {});
+      const edges = deps?.edges || [];
+
+      // ---- retrieval: goal → 関連する種別・フィールド ----
+      const hints = PLANNER_HINTS.filter(h => h.re.test(g));
+      const relevantSettings = new Set(hints.flatMap(h => h.settings));
+      const fieldTypeScore = {};
+      for (const h of hints) for (const [t, v] of Object.entries(h.fieldTypes)) fieldTypeScore[t] = Math.max(fieldTypeScore[t] || 0, v);
+      const dict = buildDictionary({ data, deps, scan });
+      const matchedTerms = [];
+      const fieldScore = new Map();   // code -> { score, reasons[] }
+      const bump = (code, pts, reason) => {
+        const cur = fieldScore.get(code) || { score: 0, reasons: [] };
+        cur.score += pts; if (reason && !cur.reasons.includes(reason)) cur.reasons.push(reason);
+        fieldScore.set(code, cur);
+      };
+      for (const f of fieldsN) {
+        const t = f.type === 'LOOKUP' ? 'LOOKUP' : f.rawType;
+        const byLabel = longestSharedSubstring(g, f.label), byCode = longestSharedSubstring(g, f.code);
+        const best = Math.max(byLabel, byCode);
+        if (best >= 2) { bump(f.code, best >= Math.max(2, Math.min(String(f.label).length, String(f.code).length)) ? 10 : Math.min(6, best), `goal に「${byLabel >= byCode ? f.label : f.code}」の語が含まれる`); }
+        if (fieldTypeScore[t]) bump(f.code, fieldTypeScore[t], `goal の内容から ${t} 型が関係しやすい`);
+        if (fieldTypeScore.LOOKUP && f.type === 'LOOKUP') bump(f.code, 2, 'ルックアップ');
+      }
+      for (const en of dict) { if (g.includes(en.key) && !matchedTerms.some(m => m.key === en.key && m.type === en.type)) matchedTerms.push({ key: en.key, type: en.type, id: en.id }); }
+      matchedTerms.sort((a, b) => (b.key.length - a.key.length) || cmp(a.type, b.type) || cmp(a.id, b.id));
+      // 設定名の一致（一覧・通知・ステータス等）
+      const settingHit = (name) => !!name && longestSharedSubstring(g, name) >= 2;
+
+      // ---- facts（既存資産の棚卸し。各 fact に根拠ID を付ける）----
+      let facts = [];
+      const push = (fact, relevance) => facts.push({ ...fact, relevance });
+      // overview
+      for (const o of buildOverviewFacts(app, coverage)) push(o, 100);   // 概要は省略しない（関連度を最大にする）
+      // fields
+      const fieldRows = fieldsN.filter(f => f.rawType !== 'SUBTABLE' || true);
+      const fieldFacts = fieldRows.map(f => {
+        const sc = fieldScore.get(f.code) || { score: 0, reasons: [] };
+        const raw = f.raw || {};
+        const opts = raw.options && typeof raw.options === 'object' ? Object.keys(raw.options).sort((a, b) => (Number(raw.options[a]?.index ?? 0) - Number(raw.options[b]?.index ?? 0)) || cmp(a, b)) : null;
+        const lookup = raw.lookup ? {
+          app: String(raw.lookup.relatedApp?.app ?? ''), keyField: raw.lookup.relatedKeyField ?? null,
+          mappings: (raw.lookup.fieldMappings || []).map(m => ({ to: m.field, from: m.relatedField })),
+        } : null;
+        const refTable = raw.referenceTable ? { app: String(raw.referenceTable.relatedApp?.app ?? ''), condition: raw.referenceTable.condition ?? null, displayFields: raw.referenceTable.displayFields || [] } : null;
+        const type = f.type === 'LOOKUP' ? `${f.rawType}（ルックアップ）` : f.rawType;
+        return {
+          kind: 'field', key: `FIELD:${f.code}`, confidence: 'CERTAIN',
+          field: {
+            code: f.code, label: f.label, type: f.rawType, ...(f.type === 'LOOKUP' ? { lookup } : {}),
+            ...(f.required ? { required: true } : {}), ...(f.unique ? { unique: true } : {}), ...(f.parent ? { subtable: f.parent } : {}),
+            ...(opts ? { options: opts.slice(0, limits.maxOptions), optionCount: opts.length } : {}),
+            ...(raw.expression ? { expression: bounded(raw.expression, 160) } : {}),
+            ...(refTable ? { referenceTable: refTable } : {}),
+            ...(raw.enabled === false ? { enabled: false } : {}),
+          },
+          statement: `フィールド「${f.label}」（コード ${f.code}・${type}${f.required ? '・必須' : ''}${f.unique ? '・重複禁止' : ''}${f.parent ? `・テーブル ${f.parent} 内` : ''}${opts ? `・選択肢 ${opts.length} 件` : ''}${lookup ? `・アプリ ${lookup.app} から ${lookup.mappings.length} 項目を取得` : ''}${raw.expression ? `・計算式 ${bounded(raw.expression, 60)}` : ''}）はフォームに存在する`,
+          _score: sc.score, _reasons: sc.reasons,
+        };
+      });
+      fieldFacts.sort((a, b) => (b._score - a._score) || cmp(a.key, b.key));
+      const fieldKept = fieldFacts.slice(0, limits.maxFields);
+      if (fieldFacts.length > fieldKept.length) trunc('facts.field', fieldFacts.length, fieldKept.length);
+      for (const ff of fieldKept) { const { _score, _reasons, ...rest } = ff; push({ ...rest, ...(_reasons.length ? { retrieval: { score: _score, reasons: _reasons } } : {}) }, _score); }
+      // process
+      const states = data?.status?.enable ? Object.values(data.status.states || {}).filter(Boolean).sort((a, b) => (Number(a.index ?? 0) - Number(b.index ?? 0)) || cmp(String(a.name), String(b.name))) : [];
+      const procRel = relevantSettings.has('process-state') ? 5 : 1;
+      for (const st of states) {
+        const ents = entityList(st.assignee?.entities);
+        push({
+          kind: 'process-state', key: `STATE#${String(Number(st.index ?? 0)).padStart(2, '0')}:${st.name}`, confidence: 'CERTAIN',
+          state: { name: st.name, index: Number(st.index ?? 0), assigneeType: st.assignee?.type ?? null, assignees: ents },
+          statement: `プロセス管理のステータス「${st.name}」（${Number(st.index ?? 0) + 1} 番目）${ents.length ? `の作業者は ${ents.map(entityText).join(', ')}` : 'に作業者の指定は無い'}`,
+        }, procRel + (settingHit(st.name) ? 5 : 0));
+      }
+      for (const ac of (data?.status?.enable ? (data.status.actions || []) : [])) {
+        const ex = entityList(ac.executableUser?.entities);
+        push({
+          kind: 'process-action', key: `ACTION:${ac.name}|${ac.from}|${ac.to}`, confidence: 'CERTAIN',
+          action: { name: ac.name, from: ac.from, to: ac.to, type: ac.type ?? null, filterCond: ac.filterCond ? bounded(ac.filterCond, 160) : '', executableUsers: ex },
+          statement: `プロセスアクション「${ac.name}」は「${ac.from}」→「${ac.to}」${ac.filterCond ? `（条件: ${bounded(ac.filterCond, 80)}）` : ''}${ex.length ? `、実行可能ユーザー ${ex.map(entityText).join(', ')}` : ''}`,
+        }, procRel + (settingHit(ac.name) ? 5 : 0));
+      }
+      if (!data?.status?.enable && data?.status) push({ kind: 'process-state', key: 'STATE:(disabled)', confidence: 'CERTAIN', state: null, statement: 'プロセス管理は無効（ステータス・作業者・アクションは使われていない）' }, procRel);
+      // notifications
+      const notiRel = relevantSettings.has('notification') ? 5 : 1;
+      const gen = (data?.generalNotify?.notifications || []);
+      gen.slice(0, limits.maxNotifications).forEach((n, i) => {
+        const events = ['recordAdded', 'recordEdited', 'commentAdded', 'statusChanged', 'fileImported'].filter(k => n[k]);
+        push({ kind: 'notification', key: `NOTIFY:general#${i + 1}`, confidence: 'CERTAIN',
+          notification: { id: `general#${i + 1}`, scope: 'general', target: { type: n.entity?.type, code: n.entity?.code ?? null }, events },
+          statement: `アプリの条件通知 #${i + 1}: ${entityText(n.entity)} へ ${events.join(', ') || '（イベント指定なし）'} を通知` }, notiRel + (n.entity?.type === 'FIELD_ENTITY' && fieldScore.has(n.entity.code) ? 3 : 0));
+      });
+      if (gen.length > limits.maxNotifications) trunc('facts.notification.general', gen.length, limits.maxNotifications);
+      const per = (data?.perRecordNotify?.notifications || []);
+      per.slice(0, limits.maxNotifications).forEach((n, i) => {
+        const targets = entityList(n.targets);
+        const codes = fieldEntityCodes(n.targets);
+        push({ kind: 'notification', key: `NOTIFY:perRecord#${i + 1}`, confidence: 'CERTAIN',
+          notification: { id: `perRecord#${i + 1}`, scope: 'perRecord', title: n.title || '', filterCond: bounded(n.filterCond || '', 160), targets },
+          statement: `レコードの条件通知 #${i + 1}「${n.title || '（無題）'}」: 条件 ${n.filterCond ? bounded(n.filterCond, 80) : '（なし）'} で ${targets.map(entityText).join(', ') || '（通知先なし）'} へ通知` },
+        notiRel + (settingHit(n.title) ? 5 : 0) + (codes.some(c => fieldScore.has(c)) ? 3 : 0));
+      });
+      if (per.length > limits.maxNotifications) trunc('facts.notification.perRecord', per.length, limits.maxNotifications);
+      const rem = (data?.reminderNotify?.notifications || []);
+      const remRel = relevantSettings.has('reminder') ? 5 : 1;
+      rem.slice(0, limits.maxReminders).forEach((n, i) => {
+        const targets = entityList(n.targets);
+        push({ kind: 'reminder', key: `REMINDER#${i + 1}`, confidence: 'CERTAIN',
+          reminder: { id: `reminder#${i + 1}`, title: n.title || '', timing: { code: n.timing?.code ?? null, daysLater: n.timing?.daysLater ?? null, time: n.timing?.time ?? null }, filterCond: bounded(n.filterCond || '', 160), targets },
+          statement: `リマインダー #${i + 1}「${n.title || '（無題）'}」: 「${n.timing?.code ?? '?'}」の ${n.timing?.daysLater ?? '?'} 日後 ${n.timing?.time ?? ''} に ${targets.map(entityText).join(', ') || '（通知先なし）'} へ通知${n.filterCond ? `（条件: ${bounded(n.filterCond, 60)}）` : ''}` },
+        remRel + (settingHit(n.title) ? 5 : 0) + (fieldScore.has(n.timing?.code) ? 3 : 0));
+      });
+      if (rem.length > limits.maxReminders) trunc('facts.reminder', rem.length, limits.maxReminders);
+      if (coverage.settings?.notifications && !gen.length && !per.length && !rem.length) push({ kind: 'notification', key: 'NOTIFY:(none)', confidence: 'CERTAIN', notification: null, statement: '通知（アプリの条件通知・レコードの条件通知・リマインダー）は設定されていない' }, notiRel);
+      // views / reports
+      const viewRel = relevantSettings.has('view') ? 4 : 1;
+      const views = Object.values(data?.views?.views || {}).filter(Boolean).sort((a, b) => (Number(a.index ?? 0) - Number(b.index ?? 0)) || cmp(String(a.name), String(b.name)));
+      views.slice(0, limits.maxViews).forEach(v => push({ kind: 'view', key: `VIEW:${v.name}`, confidence: 'CERTAIN',
+        view: { name: v.name, type: v.type ?? null, fields: Array.isArray(v.fields) ? v.fields.slice(0, 20) : [], filterCond: bounded(v.filterCond || '', 160), sort: v.sort || '' },
+        statement: `一覧「${v.name}」（${v.type ?? 'LIST'}）${v.filterCond ? `: 絞り込み ${bounded(v.filterCond, 80)}` : ''}${Array.isArray(v.fields) && v.fields.length ? `、表示 ${v.fields.slice(0, 8).join(', ')}${v.fields.length > 8 ? ' ほか' : ''}` : ''}` },
+        viewRel + (settingHit(v.name) ? 5 : 0) + ((v.fields || []).some(c => fieldScore.has(c)) ? 2 : 0)));
+      if (views.length > limits.maxViews) trunc('facts.view', views.length, limits.maxViews);
+      const reports = Object.values(data?.reports?.reports || {}).filter(Boolean).sort((a, b) => (Number(a.index ?? 0) - Number(b.index ?? 0)) || cmp(String(a.name), String(b.name)));
+      reports.slice(0, limits.maxReports).forEach(r => push({ kind: 'report', key: `REPORT:${r.name}`, confidence: 'CERTAIN', report: { name: r.name, chartType: r.chartType ?? null }, statement: `グラフ「${r.name}」${r.chartType ? `（${r.chartType}）` : ''}が存在する` }, (relevantSettings.has('report') ? 3 : 1) + (settingHit(r.name) ? 5 : 0)));
+      if (reports.length > limits.maxReports) trunc('facts.report', reports.length, limits.maxReports);
+      // ACL
+      const aclRel = relevantSettings.has('record-acl') ? 4 : 1;
+      const racl = (data?.recordAcl?.rights || []);
+      racl.slice(0, limits.maxRecordAcl).forEach((r, i) => push({ kind: 'record-acl', key: `RECORD_ACL#${i + 1}`, confidence: 'CERTAIN',
+        acl: { id: `record#${i + 1}`, filterCond: bounded(r.filterCond || '', 160), entities: (r.entities || []).map(e => ({ type: e.entity?.type, code: e.entity?.code ?? null, viewable: !!e.viewable, editable: !!e.editable, deletable: !!e.deletable })) },
+        statement: `レコードのアクセス権 #${i + 1}: 条件 ${r.filterCond ? bounded(r.filterCond, 60) : '（全レコード）'} に対し ${(r.entities || []).map(e => `${entityText(e.entity)}(${[e.viewable && '閲覧', e.editable && '編集', e.deletable && '削除'].filter(Boolean).join('/') || '不可'})`).join(', ')}` }, aclRel));
+      if (racl.length > limits.maxRecordAcl) trunc('facts.record-acl', racl.length, limits.maxRecordAcl);
+      const facl = (data?.fieldAcl?.rights || []);
+      facl.slice(0, limits.maxFieldAcl).forEach((r, i) => push({ kind: 'field-acl', key: `FIELD_ACL:${r.code}`, confidence: 'CERTAIN',
+        acl: { id: `field:${r.code}`, code: r.code, entities: (r.entities || []).map(e => ({ type: e.entity?.type, code: e.entity?.code ?? null, accessibility: e.accessibility })) },
+        statement: `フィールド「${r.code}」のアクセス権: ${(r.entities || []).map(e => `${entityText(e.entity)}=${e.accessibility}`).join(', ')}` }, aclRel + (fieldScore.has(r.code) ? 3 : 0)));
+      if (facl.length > limits.maxFieldAcl) trunc('facts.field-acl', facl.length, limits.maxFieldAcl);
+      // app actions
+      const acts = Object.values(data?.actions?.actions || {}).filter(Boolean).sort((a, b) => (Number(a.index ?? 0) - Number(b.index ?? 0)) || cmp(String(a.name), String(b.name)));
+      acts.slice(0, limits.maxAppActions).forEach(a => push({ kind: 'app-action', key: `APP_ACTION:${a.name}`, confidence: 'CERTAIN',
+        appAction: { name: a.name, destApp: String(a.destApp?.app ?? ''), mappings: (a.mappings || []).map(m => ({ srcType: m.srcType, srcField: m.srcField ?? null, destField: m.destField })) },
+        statement: `アプリアクション「${a.name}」はアプリ ${a.destApp?.app ?? '?'} へレコードを作成し、${(a.mappings || []).length} 項目をコピーする` }, (relevantSettings.has('app-action') ? 4 : 1) + (settingHit(a.name) ? 5 : 0)));
+      if (acts.length > limits.maxAppActions) trunc('facts.app-action', acts.length, limits.maxAppActions);
+      // dependencies（関連フィールドに触れる edge を優先。full DEPS は送らない）
+      const relCodes = new Set([...fieldScore.entries()].filter(([, v]) => v.score >= 3).map(([k]) => k));
+      const depFacts = edges.filter(e => e.sourceType !== 'EXTERNAL_APP' && e.sourceType !== 'CUSTOMIZE')
+        .map(e => ({ fact: factFromEdge(deps, e, 'usedBy'), rel: (relCodes.has(e.targetId) || relCodes.has(e.sourceId)) ? 4 : 0 }))
+        .sort((a, b) => (b.rel - a.rel) || cmp(a.fact.key, b.fact.key));
+      const depKept = depFacts.slice(0, limits.maxDependencyFacts);
+      if (depFacts.length > depKept.length) trunc('facts.dependency', depFacts.length, depKept.length);
+      for (const d of depKept) push(d.fact, d.rel);
+      const jsFacts = edges.filter(e => e.sourceType === 'CUSTOMIZE')
+        .map(e => ({ fact: { ...factFromEdge(deps, e, 'usedBy'), kind: 'js-reference' }, rel: (relCodes.has(e.targetId)) ? 4 : 0 }))
+        .sort((a, b) => (b.rel - a.rel) || cmp(a.fact.key, b.fact.key));
+      const jsKept = jsFacts.slice(0, limits.maxJsFacts);
+      if (jsFacts.length > jsKept.length) trunc('facts.js-reference', jsFacts.length, jsKept.length);
+      for (const d of jsKept) push(d.fact, d.rel);
+      const incFacts = edges.filter(e => e.sourceType === 'EXTERNAL_APP').map(e => ({ ...factFromEdge(deps, e, 'usedBy'), kind: 'incoming-reference' })).sort((a, b) => cmp(a.key, b.key));
+      const incKept = incFacts.slice(0, limits.maxIncomingFacts);
+      if (incFacts.length > incKept.length) trunc('facts.incoming-reference', incFacts.length, incKept.length);
+      for (const d of incKept) push(d, relCodes.has(d.target?.id) ? 4 : 1);
+      const broken = deps ? safe(() => KTDeps.findBrokenRefs(deps), []) : [];
+      const bk = broken.slice(0, limits.maxBrokenRefFacts);
+      if (broken.length > bk.length) trunc('facts.broken-reference', broken.length, bk.length);
+      for (const b of bk) push(brokenFact(b), 2);
+      const links = deps ? safe(() => KTDeps.buildAppLinks(deps, data?.appId), []) : [];
+      for (const l of links.slice(0, limits.maxAppLinkFacts || 30)) push({
+        kind: 'app-link', key: `LINK|${l.kind}|${l.sourceId}|${l.destAppId}`, confidence: normConf(l.confidence),
+        linkKind: l.kind, dataSource: l.dataSource, source: { id: l.sourceId, name: l.selfSide }, destAppId: l.destAppId,
+        statement: `${l.kind}「${l.selfSide}」は ${l.destAppLabel}${l.destField && l.destField !== '—' ? ` の「${l.destField}」` : ''} を参照している`,
+      }, relevantSettings.has('app-link') ? 3 : 1);
+
+      // ---- 重複排除 → 決定的な並び → 採番 ----
+      const seen = new Set();
+      facts = facts.filter(x => { if (seen.has(x.key)) return false; seen.add(x.key); return true; });
+      const order = (a, b) => (plannerKindRank(a.kind) - plannerKindRank(b.kind)) || cmp(a.key, b.key);
+      const assign = () => { facts.sort(order); facts = facts.map((x, i) => ({ id: `E${i + 1}`, ...x })); };
+      if (facts.length > limits.maxFacts) {
+        // 関連度の低いものから削る（overview / field は残す）
+        const keep = [...facts].sort((a, b) => (b.relevance - a.relevance) || order(a, b)).slice(0, limits.maxFacts);
+        trunc('facts', facts.length, keep.length);
+        facts = keep;
+      }
+      assign();
+
+      // ---- dictionary（既存の識別子。AI の幻覚検出に使う）----
+      const dictionary = {
+        fieldCodes: fieldsN.map(x => x.code).sort(cmp),
+        fieldLabels: [...new Set(fieldsN.map(x => x.label))].sort(cmp),
+        fieldTypes: Object.fromEntries(fieldsN.map(x => [x.code, x.rawType])),
+        statuses: states.map(x => x.name),
+        processActions: (data?.status?.enable ? (data.status.actions || []) : []).map(a => a.name),
+        notifications: [...gen.map((_, i) => `general#${i + 1}`), ...per.map((_, i) => `perRecord#${i + 1}`)],
+        reminders: rem.map((_, i) => `reminder#${i + 1}`),
+        views: views.map(v => v.name),
+        reports: reports.map(r => r.name),
+        appActions: acts.map(a => a.name),
+        jsFiles: (deps?.nodes || []).filter(n => n.type === 'CUSTOMIZE').map(n => n.name).sort(cmp),
+      };
+
+      const candidates = {
+        fields: [...fieldScore.entries()].filter(([, v]) => v.score > 0).map(([code, v]) => ({ code, label: fieldsN.find(x => x.code === code)?.label ?? code, type: fieldsN.find(x => x.code === code)?.rawType ?? null, score: v.score, reasons: v.reasons, evidenceId: facts.find(x => x.kind === 'field' && x.field?.code === code)?.id ?? null }))
+          .sort((a, b) => (b.score - a.score) || cmp(a.code, b.code)).slice(0, 20),
+        settings: [...relevantSettings],
+        matchedTerms,
+      };
+
+      const ctx = {
+        contextVersion: PLANNER_CONTEXT_VERSION,
+        generatedAt: options.now ?? new Date().toISOString(),
+        generator: { name: 'kintone App Toolkit', version: SCRIPT_VERSION, analyzerVersion: KTScan?.ANALYZER_VERSION ?? null },
+        goal: g,
+        app,
+        retrieval: candidates,
+        facts,
+        dictionary,
+        confidenceVocabulary: { CERTAIN: '構造化された設定値から直接取得（確実）', LIKELY: '条件式・計算式・JS のトークン一致（可能性が高い）', UNCERTAIN: '文字列一致のみ（要確認）', NOT_ANALYZED: '解析対象外' },
+        coverage,
+        truncation: { applied: false, sections: [] },
+        size: null,
+      };
+      const budget = limits.maxBytes ?? null;
+      const finalize = () => {
+        ctx.truncation = { applied: sections.size > 0, sections: [...sections.values()].sort((a, b) => cmp(a.name, b.name)) };
+        ctx.size = null;
+        const m = measureText(JSON.stringify(ctx));
+        ctx.size = { bytes: m.bytes, chars: m.chars, approxTokens: m.approxTokens, facts: ctx.facts.length, budgetBytes: budget };
+      };
+      finalize();
+      if (budget && ctx.size.bytes > budget) {
+        // 関連度の低い fact から削る（overview と関連フィールドは残す）。採番は削った後にやり直す
+        const total = ctx.facts.length;
+        let pool = ctx.facts.map(x => { const { id, ...rest } = x; return rest; });
+        while (pool.length > 10 && ctx.size.bytes > budget) {
+          pool.sort((a, b) => (b.relevance - a.relevance) || order(a, b));
+          pool = pool.slice(0, Math.max(10, Math.floor(pool.length * 0.8)));
+          facts = pool; assign(); ctx.facts = facts;
+          trunc('facts', total, facts.length);
+          finalize();
+        }
+      }
+      return ctx;
+    }
+
+    /** Planner Context の人間向け Markdown（無料版の「変更計画 Prompt をコピー」で使う） */
+    function toPlannerMarkdown(ctx) {
+      const out = [];
+      const app = ctx.app || {};
+      out.push(`# ${app.name ? `${app.name}（app ${app.id}）` : `app ${app.id}`} — Change Planner Context`);
+      out.push('');
+      out.push(`**実現したいこと**: ${mdEsc(ctx.goal)}`);
+      out.push(`**生成**: ${ctx.generatedAt}  **facts**: ${ctx.facts.length}${ctx.truncation?.applied ? '（一部省略あり）' : ''}`);
+      out.push('');
+      if (ctx.retrieval?.candidates?.length || ctx.retrieval?.fields?.length) {
+        out.push('## 関連しそうな既存フィールド（Toolkit の辞書照合）');
+        for (const c of (ctx.retrieval.fields || [])) out.push(`- ${c.evidenceId ? `[${c.evidenceId}] ` : ''}${mdEsc(c.label)}（${c.code}・${c.type}）: ${mdEsc(c.reasons.join('／'))}`);
+        out.push('');
+      }
+      out.push('## 既存資産（facts。根拠ID で引用する）');
+      let lastKind = null;
+      for (const f of ctx.facts) {
+        if (f.kind !== lastKind) { out.push(`### ${f.kind}`); lastKind = f.kind; }
+        out.push(`- [${f.id}] ${mdEsc(f.statement)}（${confJa(f.confidence)}）`);
+      }
+      out.push('');
+      out.push('## 解析範囲');
+      for (const n of (ctx.coverage?.notes || [])) out.push(`- ${mdEsc(n)}`);
+      if (ctx.truncation?.applied) { out.push(''); out.push('## 省略'); for (const t of ctx.truncation.sections) out.push(`- ${t.name}: ${t.included} / ${t.total}`); }
+      return out.join('\n');
+    }
+    function toPlannerPrompt(ctx) {
+      const rules = [
+        'あなたは kintone アプリの変更計画を作るアシスタントです。利用者が実現したい業務を、現在のアプリ設定（下の facts）を使ってどう構築するかを考えてください。',
+        '順序: 1) 既存のフィールド・設定だけで実現できないか 2) 既存設定の変更・追加だけで実現できないか 3) 新しい標準設定が必要か 4) 新しいフィールドが必要か 5) 標準機能で不足する場合だけカスタマイズ。',
+        'kintone 標準設定を優先し、JavaScript カスタマイズは最後の手段にしてください。既存設定に関する主張は根拠ID（E1 など）を引用してください。',
+        '既存フィールドの意味（例: 「承認者」が部長承認者かどうか）は Toolkit の解析では確認できません。勝手に決めず、質問または代替案にしてください。',
+        '不足するフィールドは「新規フィールド」として label / 種類 / 理由を示し、既存で代用できる案があれば併記してください。変更計画は P1, P2 … の手順にし、依存関係と影響範囲、確認したいこと、解析できないことを分けて書いてください。',
+      ].join('\n');
+      return `${rules}\n\n## 実現したいこと\n${ctx.goal}\n\n## Context\n${toPlannerMarkdown(ctx)}\n`;
+    }
+
+
     const mdEsc = (s) => String(s ?? '').replace(/\|/g, '\\|').replace(/\r?\n/g, ' ').trim();
 
     /** 人間が読める Markdown（無料版の「AI 用ドキュメントをコピー」で使う形式） */
@@ -4639,6 +4984,8 @@
       build, resolveFocus, buildDictionary, buildCoverage, buildAppOverview,
       toJSON, toMarkdown, toPrompt, measure, measureText,
       redactSecretLikeText, edgeKey,
+      // AI Change Planner（Phase 7）
+      PLANNER_CONTEXT_VERSION, PLANNER_LIMITS, buildPlan, toPlannerMarkdown, toPlannerPrompt, longestSharedSubstring,
     };
   })();
 
@@ -4661,7 +5008,10 @@
     const CONTRACT_VERSION = '2.1';
     const PRODUCT = 'toolkit';
     const FEATURE = 'assistant-qa';
+    const FEATURE_PLANNER = 'change-planner';          // Phase 7: AI Change Planner（Gateway の別 feature）
+    const FEATURES = [FEATURE, FEATURE_PLANNER];        // 接続（exchange / connect）で要求する scope。許可された交差が付与される
     const PROMPT_VERSION = '1';
+    const PLANNER_PROMPT_VERSION = '1';
     /** 公開エンドポイント（secret ではない）。設定で上書きできる */
     const DEFAULT_API_BASE = 'https://appinsight-ai-api.black-waterfall-157a.workers.dev';
     const SETTINGS_KEY = 'ktAi.v1';          // 旧: Customer Token を保存していた（staging E2E 用。見つけたら 1 回だけ exchange して削除）
@@ -4680,7 +5030,7 @@
       UPSTREAM_ERROR: 'UPSTREAM_ERROR', MODEL_OUTPUT_INVALID: 'MODEL_OUTPUT_INVALID', INTERNAL_ERROR: 'INTERNAL_ERROR',
       // client 側のみ
       TRANSPORT_ERROR: 'TRANSPORT_ERROR', TIMEOUT: 'TIMEOUT', INVALID_RESPONSE: 'INVALID_RESPONSE', WORKER_ERROR: 'WORKER_ERROR',
-      NO_CONFIG: 'NO_CONFIG', NOT_ENTITLED: 'NOT_ENTITLED', CONTRACT_INCOMPATIBLE: 'CONTRACT_INCOMPATIBLE', NO_CONTEXT: 'NO_CONTEXT',
+      NO_CONFIG: 'NO_CONFIG', NOT_ENTITLED: 'NOT_ENTITLED', CONTRACT_INCOMPATIBLE: 'CONTRACT_INCOMPATIBLE', NO_CONTEXT: 'NO_CONTEXT', PLANNER_NOT_AVAILABLE: 'PLANNER_NOT_AVAILABLE',
       NOT_CONNECTED: 'NOT_CONNECTED', SESSION_EXPIRED: 'SESSION_EXPIRED',
       // tokenless connect（Browser Authorization Session）
       CONNECT_DENIED: 'CONNECT_DENIED', CONNECT_EXPIRED: 'CONNECT_EXPIRED', CONNECT_CANCELLED: 'CONNECT_CANCELLED', NOT_FOUND: 'NOT_FOUND',
@@ -4693,6 +5043,7 @@
       NOT_ENTITLED: 'この契約では kintone App Toolkit の AI 機能を利用できません。契約内容を確認してください。',
       PRODUCT_NOT_ENTITLED: 'この契約では kintone App Toolkit の AI 機能を利用できません。契約内容を確認してください。',
       FEATURE_NOT_ENTITLED: 'この契約では「AIに質問」を利用できません。契約内容を確認してください。',
+      PLANNER_NOT_AVAILABLE: 'この契約では「変更計画を作る」を利用できません。契約内容を確認してください。',
       CONNECT_DENIED: 'Nest Rec で接続がキャンセル（拒否）されました。',
       CONNECT_EXPIRED: '接続の確認が時間切れになりました。もう一度「Nest Rec AIに接続」してください。',
       CONNECT_CANCELLED: '接続をキャンセルしました。',
@@ -4810,18 +5161,86 @@
       };
     }
 
-    /** /v2/health → 利用可否（client の contract が対応され、toolkit.assistant-qa が付与・実装済みか） */
+    /** feature 1 つの利用可否（entitlement → registry implemented → promptVersion） */
+    function featureCapability(health, feature, promptVersion) {
+      const ent = (Array.isArray(health.entitlements) ? health.entitlements : []).find(e => e?.product === PRODUCT);
+      if (!ent || !(ent.features || []).includes(feature)) return { available: false, reason: ERROR_CODES.NOT_ENTITLED };
+      const reg = health.registry?.[PRODUCT]?.[feature];
+      if (!reg || reg.implemented !== true) return { available: false, reason: ERROR_CODES.FEATURE_NOT_IMPLEMENTED };
+      if (!(reg.promptVersions || []).includes(promptVersion)) return { available: false, reason: ERROR_CODES.UNKNOWN_PROMPT_VERSION };
+      return { available: true, reason: null };
+    }
+    /**
+     * /v2/health → 利用可否。available / reason は assistant-qa（従来どおり）。features に feature ごとの可否
+     * （change-planner は契約に含まれない場合もある。Q&A が使えても Planner は不可、ということがある）
+     */
     function capabilityFromHealth(health) {
       if (!health || health.ok !== true) return { available: false, reason: ERROR_CODES.INVALID_RESPONSE };
       const versions = Array.isArray(health.supportedContractVersions) ? health.supportedContractVersions : [];
       if (!versions.includes(CONTRACT_VERSION)) return { available: false, reason: ERROR_CODES.CONTRACT_INCOMPATIBLE };
-      const ent = (Array.isArray(health.entitlements) ? health.entitlements : []).find(e => e?.product === PRODUCT);
-      if (!ent || !(ent.features || []).includes(FEATURE)) return { available: false, reason: ERROR_CODES.NOT_ENTITLED };
-      const reg = health.registry?.[PRODUCT]?.[FEATURE];
-      if (!reg || reg.implemented !== true) return { available: false, reason: ERROR_CODES.FEATURE_NOT_IMPLEMENTED };
-      if (!(reg.promptVersions || []).includes(PROMPT_VERSION)) return { available: false, reason: ERROR_CODES.UNKNOWN_PROMPT_VERSION };
+      const qa = featureCapability(health, FEATURE, PROMPT_VERSION);
+      const planner = featureCapability(health, FEATURE_PLANNER, PLANNER_PROMPT_VERSION);
+      const features = { [FEATURE]: qa, [FEATURE_PLANNER]: planner };
+      if (!qa.available) return { available: false, reason: qa.reason, features, usage: health.usage ?? null };
       // contractExpiresAt（契約の期限。W5）。tokenExpiresAt は Access Token 認証では Access の期限なので契約の表示には使わない
-      return { available: true, reason: null, usage: health.usage ?? null, tokenExpiresAt: health.tokenExpiresAt ?? null, contractExpiresAt: health.contractExpiresAt ?? null };
+      return { available: true, reason: null, features, usage: health.usage ?? null, tokenExpiresAt: health.tokenExpiresAt ?? null, contractExpiresAt: health.contractExpiresAt ?? null };
+    }
+
+    /** Contract 2.1 の request envelope（change-planner。payload は KTContext.buildPlan() の結果そのもの） */
+    function buildPlanEnvelope({ ctx, requestId = newRequestId(), pluginVersion = SCRIPT_VERSION, now = new Date().toISOString() }) {
+      if (!ctx || typeof ctx !== 'object' || !Array.isArray(ctx.facts) || typeof ctx.goal !== 'string') throw new AiClientError({ code: ERROR_CODES.NO_CONTEXT, message: 'Planner Context がありません' });
+      return {
+        contractVersion: CONTRACT_VERSION,
+        meta: {
+          requestId, generatedAt: now,
+          product: PRODUCT, feature: FEATURE_PLANNER, promptVersion: PLANNER_PROMPT_VERSION, contextVersion: String(ctx.contextVersion),
+          plugin: { name: 'kintone App Toolkit', version: pluginVersion },
+        },
+        payload: ctx,
+      };
+    }
+
+    /**
+     * Change Plan の応答を送信した Planner Context で再検証する（Worker の検証と二重。未知の根拠ID は除去、
+     * 存在しない既存資産（dictionary に無い fieldCode / ステータス / 通知 / 一覧）への参照は invalid にして warnings に記録）
+     * @returns {{ ok:boolean, errors:Array, warnings:Array, normalized:object|null }}
+     */
+    function validatePlan(response, ctx) {
+      const errors = [], warnings = [];
+      const r = response || {};
+      if (r.ok !== true) { errors.push({ code: ERROR_CODES.INVALID_RESPONSE, path: 'ok', message: 'ok:true ではありません' }); return { ok: false, errors, warnings, normalized: null }; }
+      if (r.contractVersion !== CONTRACT_VERSION) errors.push({ code: ERROR_CODES.UNSUPPORTED_CONTRACT_VERSION, path: 'contractVersion', message: `contractVersion が一致しません: ${r.contractVersion}` });
+      const p = r.plan;
+      if (!p || typeof p !== 'object' || typeof p.goal !== 'string' || !Array.isArray(p.steps) || !p.assessment) errors.push({ code: ERROR_CODES.INVALID_RESPONSE, path: 'plan', message: 'plan がありません' });
+      if (errors.length) return { ok: false, errors, warnings, normalized: null };
+      const known = new Set((ctx?.facts || []).map(x => x.id));
+      const dict = ctx?.dictionary || {};
+      const setOf = (k) => new Set(Array.isArray(dict[k]) ? dict[k] : []);
+      const D = { FIELD: setOf('fieldCodes'), LOOKUP: setOf('fieldCodes'), FIELD_ACL: setOf('fieldCodes'), PROCESS_STATUS: setOf('statuses'), PROCESS_ACTION: setOf('processActions'), NOTIFICATION: setOf('notifications'), REMINDER: setOf('reminders'), VIEW: setOf('views'), REPORT: setOf('reports'), APP_ACTION: setOf('appActions'), JS: setOf('jsFiles') };
+      const ids = (list, path) => { const kept = []; for (const id of Array.isArray(list) ? list : []) { if (known.has(id)) { if (!kept.includes(id)) kept.push(id); } else warnings.push({ code: 'UNKNOWN_EVIDENCE_REMOVED', path, message: `未知の根拠ID を除去しました: ${id}` }); } return kept; };
+      const proposedIds = new Set((p.proposedFields || []).map(x => x.temporaryId));
+      const addKinds = { ADD_FIELD: 'PROPOSED_FIELD', ADD_PROCESS_STATUS: 'PROCESS_STATUS', ADD_PROCESS_ACTION: 'PROCESS_ACTION', ADD_NOTIFICATION: 'NOTIFICATION', ADD_REMINDER: 'REMINDER', ADD_VIEW: 'VIEW', ADD_APP_ACTION: 'APP_ACTION' };
+      const relevantFields = (p.relevantFields || []).filter(x => { const ok = D.FIELD.has(x.fieldCode); if (!ok) warnings.push({ code: 'HALLUCINATED_EXISTING_REMOVED', path: 'relevantFields', message: `存在しないフィールド「${x.fieldCode}」を除去しました` }); return ok; }).map(x => ({ ...x, evidenceIds: ids(x.evidenceIds, 'relevantFields') }));
+      const assessment = { ...p.assessment, usableExistingFields: (p.assessment.usableExistingFields || []).filter(x => D.FIELD.has(x.fieldCode)).map(x => ({ ...x, evidenceIds: ids(x.evidenceIds, 'assessment') })), usableExistingSettings: (p.assessment.usableExistingSettings || []).map(x => ({ ...x, evidenceIds: ids(x.evidenceIds, 'assessment') })) };
+      const proposedFields = (p.proposedFields || []).map((x, i) => ({ ...x, evidenceIds: ids(x.evidenceIds, `proposedFields[${i}]`), codeConflict: x.codeConflict || D.FIELD.has(x.suggestedCode), labelDuplicate: x.labelDuplicate || setOf('fieldLabels').has(x.label) }));
+      const steps = (p.steps || []).map((st, i) => {
+        const v = { status: st.validation?.status || 'ok', issues: [...(st.validation?.issues || [])] };
+        if (st.targetKind === 'PROPOSED_FIELD') { if (!proposedIds.has(st.targetRef)) { v.status = 'invalid'; v.issues.push(`新規フィールド ${st.targetRef} が提案に無い`); } }
+        else if (st.targetRef && D[st.targetKind] && !D[st.targetKind].has(st.targetRef) && addKinds[st.actionType] !== st.targetKind && !['REQUIRE_CONFIRMATION', 'CUSTOMIZATION_REQUIRED', 'UPDATE_PROCESS', 'UPDATE_RECORD_ACL'].includes(st.actionType)) {
+          v.status = 'invalid'; v.issues.push(`存在しない${st.targetKind}「${st.targetRef}」を既存として参照`);
+          warnings.push({ code: 'HALLUCINATED_EXISTING_STEP', path: `steps[${i}]`, message: `${st.id}: 存在しない${st.targetKind}「${st.targetRef}」を既存として参照しています` });
+        }
+        return { ...st, evidenceIds: ids(st.evidenceIds, `steps[${i}]`), dependsOn: Array.isArray(st.dependsOn) ? st.dependsOn : [], validation: v, execution: st.execution || { mode: 'PLAN_ONLY', supported: false, reason: 'Planner MVP では自動変更未実装' } };
+      });
+      const impact = (p.impact || []).map((x, i) => ({ ...x, evidenceIds: ids(x.evidenceIds, `impact[${i}]`) }));
+      const questions = (p.questions || []).map((x, i) => ({ ...x, relatedEvidenceIds: ids(x.relatedEvidenceIds, `questions[${i}]`) }));
+      return {
+        ok: true, errors, warnings,
+        normalized: {
+          ...p, assessment, relevantFields, proposedFields, steps, impact, questions,
+          requestId: r.meta?.requestId ?? null, usage: r.meta?.usage ?? null, ai: r.meta?.ai ?? null, gatewayWarnings: r.meta?.normalization?.warnings ?? [],
+        },
+      };
     }
 
     /**
@@ -4939,13 +5358,13 @@
          * POST /v2/token/exchange（docs/contracts/14）。customer_token grant は Bearer に Customer Token、
          * refresh_token grant は body に Refresh Token（Bearer 無し）。戻り値の token は呼び出し側が保持する
          */
-        exchange: ({ grantType, customerToken: ct = null, refreshToken = null, product = PRODUCT, feature = FEATURE }) => rawRequest({
+        exchange: ({ grantType, customerToken: ct = null, refreshToken = null, product = PRODUCT, feature = FEATURES.join(',') }) => rawRequest({
           path: '/v2/token/exchange', method: 'POST',
           token: grantType === 'customer_token' ? ct : null,
           body: JSON.stringify({ grantType, product, feature, ...(grantType === 'refresh_token' ? { refreshToken } : {}) }),
         }),
         /** tokenless connect（docs/contracts/15）。start / status / complete は認証なし、disconnect は Refresh Token（body）*/
-        connectStart: ({ codeChallenge, product = PRODUCT, feature = FEATURE, clientVersion = pluginVersion }) => rawRequest({
+        connectStart: ({ codeChallenge, product = PRODUCT, feature = FEATURES.join(','), clientVersion = pluginVersion }) => rawRequest({
           path: '/v2/connect/start', method: 'POST', token: null,
           body: JSON.stringify({ domain, product, feature, codeChallenge, codeChallengeMethod: 'S256', clientVersion }),
         }),
@@ -4959,6 +5378,14 @@
           const v = validateAnswer(response, ctx);
           if (!v.ok) throw new AiClientError({ code: v.errors[0].code, message: v.errors[0].message, details: { errors: v.errors }, requestId });
           return { ...v.normalized, requestId: v.normalized.requestId || requestId, clientWarnings: v.warnings, raw: null };
+        },
+        /** POST /v2/review（toolkit.change-planner）。Planner Context を送り、Change Plan を再検証して返す（計画のみ。設定変更はしない） */
+        async plan({ ctx, requestId = newRequestId() } = {}) {
+          const envelope = buildPlanEnvelope({ ctx, requestId, pluginVersion, now: nowFn ? nowFn() : new Date().toISOString() });
+          const response = await request({ path: '/v2/review', method: 'POST', body: JSON.stringify(envelope) });
+          const v = validatePlan(response, ctx);
+          if (!v.ok) throw new AiClientError({ code: v.errors[0].code, message: v.errors[0].message, details: { errors: v.errors }, requestId });
+          return { ...v.normalized, requestId: v.normalized.requestId || requestId, clientWarnings: v.warnings };
         },
       };
     }
@@ -5019,6 +5446,7 @@
         getHealth: () => authed().getHealth(),
         exchange: (p) => authed().exchange(p),
         ask: (p) => authed().ask(p),
+        plan: (p) => authed().plan(p),
       };
       return {
         /** connect flow（PKCE）で発行された pair を取り込む（Customer Token は存在しない） */
@@ -5146,10 +5574,10 @@
     }
 
     return {
-      CONTRACT_VERSION, PRODUCT, FEATURE, PROMPT_VERSION, DEFAULT_API_BASE, HEALTH_TTL_MS, ACCESS_SKEW_MS,
+      CONTRACT_VERSION, PRODUCT, FEATURE, FEATURE_PLANNER, FEATURES, PROMPT_VERSION, PLANNER_PROMPT_VERSION, DEFAULT_API_BASE, HEALTH_TTL_MS, ACCESS_SKEW_MS,
       ERROR_CODES, ERROR_TEXT, errorText, AiClientError, isAiClientError,
       createSettingsStore, createDefaultTransport, normalizeLegacyErrorCode,
-      buildAskEnvelope, capabilityFromHealth, validateAnswer, createAiClient, createSession, newRequestId,
+      buildAskEnvelope, buildPlanEnvelope, capabilityFromHealth, validateAnswer, validatePlan, createAiClient, createSession, newRequestId,
       createPkce, createConnectFlow, isDevMode,
     };
   })();
@@ -5311,10 +5739,42 @@
       };
     }
 
+    /** 変更計画（Planner）の goal プリセット */
+    const PLANNER_PRESETS = [
+      '担当者が設定されたら本人に通知したい',
+      '金額が100万円以上なら部長承認を追加したい',
+      '契約終了日の30日前に担当者へ通知したい',
+      '顧客マスタから住所と電話番号も自動で取得したい',
+    ];
+    /**
+     * 変更計画用の Context 生成（純関数）。無料側でも Prompt / Markdown / JSON をコピーできる
+     * @returns {{ ok:true, ctx, outputs, coverage, truncation, size, warnings }|{ ok:false, reason, message }}
+     */
+    function generatePlan({ goal, inputs, limits = null, now = undefined }) {
+      if (!inputs || !inputs.data) return { ok: false, reason: 'no-data', message: 'アプリ設定の取得が完了していません。' };
+      const g = String(goal ?? '').trim();
+      if (!g) return { ok: false, reason: 'no-goal', message: '実現したいことを入力してください。' };
+      let ctx;
+      try {
+        ctx = KTContext.buildPlan({ goal: g, data: inputs.data, deps: inputs.deps || null, scan: inputs.scan || null, incoming: inputs.incoming || null, options: { ...(limits ? { limits } : {}), ...(now !== undefined ? { now } : {}) } });
+      } catch (e) {
+        return { ok: false, reason: 'error', message: `Context の生成に失敗しました: ${e?.message || e}` };
+      }
+      const warnings = [];
+      if (!ctx.coverage.javascript) warnings.push('JavaScript は未解析です（Field Scanner の Scan 実行で反映されます）。');
+      if (!ctx.coverage.incoming) warnings.push('他アプリからの参照は未走査です（Relations タブで走査できます）。');
+      if (!ctx.retrieval.fields.length) warnings.push('入力内容に一致する既存フィールドは見つかりませんでした（アプリ全体の既存資産を送ります）。');
+      return {
+        ok: true, ctx, mode: 'plan',
+        outputs: { prompt: KTContext.toPlannerPrompt(ctx), markdown: KTContext.toPlannerMarkdown(ctx), json: KTContext.toJSON(ctx, { pretty: true }) },
+        coverage: coverageRows(ctx), truncation: truncationSummary(ctx), size: sizeSummary(ctx), warnings,
+      };
+    }
+
     /** 出力ファイル名（ローカル保存用） */
     function outputFilename(ctx, view) {
       const ext = view === 'json' ? 'json' : 'md';
-      const tgt = ctx?.focus?.target ? `_${String(ctx.focus.target.id).replace(/[^\w.\-]+/g, '_')}` : '';
+      const tgt = ctx?.focus?.target ? `_${String(ctx.focus.target.id).replace(/[^\w.\-]+/g, '_')}` : (ctx?.goal != null ? '_plan' : '');
       return `ai-context_app${ctx?.app?.id ?? ''}${tgt}_${view}.${ext}`;
     }
 
@@ -5325,6 +5785,12 @@
       return `
         <div id="kt-ai-panel" style="display:flex; flex-direction:column; gap:8px; font-size:12px;">
           <div style="opacity:.85; line-height:1.5;">${esc(INTRO_TEXT)}<br><span style="opacity:.8;">${esc(INTRO_NOTE)}</span></div>
+          <!-- モード: 質問する（現在の設定について）/ 変更計画を作る（実現したい業務 → Change Plan）。既存の Q&A は変えない -->
+          <div id="kt-ai-mode" style="display:flex; gap:12px; align-items:center;">
+            <label style="display:flex; align-items:center; gap:4px; cursor:pointer;"><input type="radio" name="kt-ai-mode" id="kt-ai-mode-qa" value="qa" checked> 質問する</label>
+            <label style="display:flex; align-items:center; gap:4px; cursor:pointer;"><input type="radio" name="kt-ai-mode" id="kt-ai-mode-plan" value="plan"> 変更計画を作る</label>
+          </div>
+          <div id="kt-ai-qa-inputs" style="display:flex; flex-direction:column; gap:8px;">
           <label style="display:flex; align-items:center; gap:6px; white-space:nowrap;">対象
             <select id="kt-ai-target-type" class="btn" style="padding:3px 4px; height:28px; flex:1;">${opt(TARGET_TYPES, 'app')}</select>
           </label>
@@ -5334,6 +5800,15 @@
           </label>
           <textarea id="kt-ai-question" rows="3" placeholder="質問（自由に編集できます。空でも構成だけの Context を生成します）"
             style="width:100%; box-sizing:border-box; border:1px solid ${border}; border-radius:8px; padding:6px; background:${bg}; color:inherit; font:inherit; resize:vertical;"></textarea>
+          </div>
+          <div id="kt-ai-plan-inputs" style="display:none; flex-direction:column; gap:8px;">
+            <label style="display:flex; align-items:center; gap:6px; white-space:nowrap;">例
+              <select id="kt-ai-goal-preset" class="btn" style="padding:3px 4px; height:28px; flex:1;"><option value="">（例を選択）</option>${PLANNER_PRESETS.map(p => `<option value="${esc(p)}">${esc(p)}</option>`).join('')}</select>
+            </label>
+            <textarea id="kt-ai-goal" rows="3" placeholder="実現したいことを入力（例: 契約更新を管理して、終了30日前に担当者へ通知したい）"
+              style="width:100%; box-sizing:border-box; border:1px solid ${border}; border-radius:8px; padding:6px; background:${bg}; color:inherit; font:inherit; resize:vertical;"></textarea>
+            <div style="opacity:.75; font-size:11px;">Toolkit がアプリ全体の既存資産（フィールド・プロセス・通知・一覧・権限・依存関係）を解析し、既存資産の再利用を最優先に変更計画を作ります。設定の自動変更はしません。</div>
+          </div>
           <div style="display:flex; gap:6px; align-items:center;">
             <button id="kt-ai-generate" class="btn" style="flex:1; height:32px; font-weight:600;">AI Prompt を生成</button>
             <button id="kt-ai-scan" class="btn" style="height:32px; display:none;" title="JavaScript を解析して Context に含める">JS を解析</button>
@@ -5394,6 +5869,7 @@
               </div>
             </div>
             <button id="kt-ai-ask" class="btn" disabled style="height:32px; font-weight:600;">AIに質問</button>
+            <button id="kt-ai-plan" class="btn" disabled style="height:32px; font-weight:600; display:none;">変更計画を作成</button>
             <div id="kt-ai-paid-status" style="opacity:.85; min-height:1.2em;"></div>
             <div id="kt-ai-consent" style="display:none; border:1px solid ${border}; border-radius:8px; padding:8px; background:${bg}; line-height:1.5;">
               <div><b>この Context を AI サービス（Nest Rec AI Gateway）へ送信します。</b></div>
@@ -5405,6 +5881,7 @@
               </div>
             </div>
             <div id="kt-ai-answer" style="display:none; border:1px solid ${border}; border-radius:8px; padding:8px; background:${bg}; line-height:1.6;"></div>
+            <div id="kt-ai-plan-result" style="display:none; border:1px solid ${border}; border-radius:8px; padding:8px; background:${bg}; line-height:1.6;"></div>
             <div id="kt-ai-fact-detail" style="display:none; border:1px dashed ${border}; border-radius:8px; padding:8px; background:${bg}; line-height:1.5; font-size:11px;"></div>
           </div>
         </div>`;
@@ -5461,6 +5938,79 @@
         <div style="margin-top:6px; opacity:.6; font-size:11px;">AI の回答は Toolkit が解析した事実を根拠にした参考情報です。設定を変更する前に実際の設定・コードで確認してください。</div>`;
     }
 
+    // ---- Change Plan（変更計画）の表示 ----
+    /** step の種別バッジ（新規提案 / 既存利用 / 変更 / カスタマイズ）と状態バッジ（確認必要 / 無効）。枠線の色は状態を優先 */
+    const STEP_KIND_BADGE = (st) => (/^ADD_/.test(st.actionType) ? ['新規提案', '#1a73e8'] : st.actionType === 'REUSE_FIELD' ? ['既存利用', '#2e7d32']
+      : /^UPDATE_/.test(st.actionType) ? ['変更', '#6a1b9a'] : st.actionType === 'CUSTOMIZATION_REQUIRED' ? ['カスタマイズ', '#b26a00'] : ['確認', '#555']);
+    const STEP_STATUS_BADGE = (st) => (st.validation?.status === 'invalid' ? ['無効', '#b00020']
+      : (st.validation?.status === 'needs_confirmation' || st.confidence === 'NEEDS_CONFIRMATION') ? ['確認必要', '#b26a00'] : null);
+    const STEP_BADGE = (st) => STEP_STATUS_BADGE(st) || STEP_KIND_BADGE(st);
+    const badge = (text, color) => `<span style="display:inline-block; font-size:10px; padding:0 6px; border-radius:8px; border:1px solid ${color}; color:${color}; margin-right:4px;">${esc(text)}</span>`;
+    const CONF_JA_PLAN = { CONFIRMED: '確認済み', INFERRED: '推論', NEEDS_CONFIRMATION: '要確認', OUT_OF_SCOPE: '解析範囲外' };
+    const ACTION_JA = {
+      ADD_FIELD: 'フィールド追加', UPDATE_FIELD: 'フィールド変更', REUSE_FIELD: '既存フィールド利用', ADD_PROCESS_STATUS: 'ステータス追加', UPDATE_PROCESS: 'プロセス管理変更', ADD_PROCESS_ACTION: 'プロセスアクション追加',
+      ADD_NOTIFICATION: '通知追加', UPDATE_NOTIFICATION: '通知変更', ADD_REMINDER: 'リマインダー追加', ADD_VIEW: '一覧追加', UPDATE_VIEW: '一覧変更', UPDATE_RECORD_ACL: 'レコードのアクセス権変更', UPDATE_FIELD_ACL: 'フィールドのアクセス権変更',
+      ADD_APP_ACTION: 'アプリアクション追加', UPDATE_APP_ACTION: 'アプリアクション変更', UPDATE_LOOKUP: 'ルックアップ変更', REQUIRE_CONFIRMATION: '要確認', CUSTOMIZATION_REQUIRED: 'カスタマイズが必要',
+    };
+    /** Change Plan → HTML（実現したいこと / 現在利用できるもの / 追加が必要なもの / 変更計画 / 代替案 / 影響範囲 / 確認したいこと / 解析できないこと / JSON） */
+    function planHtml(plan) {
+      if (!plan) return '';
+      const li = (items, render, empty) => (items && items.length) ? `<ul style="margin:4px 0 0 18px; padding:0;">${items.map(render).join('')}</ul>` : `<div style="opacity:.6; margin-top:4px;">${esc(empty)}</div>`;
+      const sec = (title, body) => `<div style="margin-top:8px;"><b>${esc(title)}</b>${body}</div>`;
+      const a = plan.assessment || {};
+      const existing = [
+        ...(a.usableExistingFields || []).map(x => `<li>${badge('既存', '#2e7d32')}<code>${esc(x.fieldCode)}</code> ${esc(x.note)}${chips(x.evidenceIds)}</li>`),
+        ...(a.usableExistingSettings || []).map(x => `<li>${badge('既存', '#2e7d32')}${esc(x.kind)}「${esc(x.name)}」 ${esc(x.note)}${chips(x.evidenceIds)}</li>`),
+      ];
+      const proposed = (plan.proposedFields || []).map(p => `
+        <div class="kt-ai-new-field" style="border:2px solid #1a73e8; border-radius:8px; padding:8px; margin-top:6px; background:rgba(26,115,232,.06);">
+          <div><b>＋ 新規フィールド</b> ${badge('新規提案', '#1a73e8')}${p.codeConflict ? badge('コード重複', '#b00020') : ''}${p.labelDuplicate ? badge('名前重複', '#b26a00') : ''}${p.typeValid === false ? badge('型要確認', '#b00020') : ''}</div>
+          <div style="margin-top:4px; font-size:13px;"><b>${esc(p.label)}</b> <span style="opacity:.7;">（コード案: ${esc(p.suggestedCode)} / ${esc(p.temporaryId)}）</span></div>
+          <div>種類：${esc(p.type)}${p.required ? '（必須）' : ''}${(p.options || []).length ? `　選択肢：${esc(p.options.join(' / '))}` : ''}</div>
+          <div style="margin-top:4px;">理由：${esc(p.reason)}${chips(p.evidenceIds)}</div>
+          ${p.alternativeExistingFieldCode ? `<div style="margin-top:4px;">${badge('代替案', '#2e7d32')}既存の <code>${esc(p.alternativeExistingFieldCode)}</code> で代用できる可能性（要確認）</div>` : ''}
+        </div>`).join('');
+      const stepHtml = (st) => {
+        const [bt, bc] = STEP_BADGE(st);
+        const details = (st.proposal?.details || []).map(dd => `<div style="font-size:11px; opacity:.85;">・${esc(dd.key)}: ${esc(dd.value)}</div>`).join('');
+        const issues = (st.validation?.issues || []).map(x => `<div style="font-size:11px; color:#b00020;">※ ${esc(x)}</div>`).join('');
+        return `<div class="kt-ai-step" data-step="${esc(st.id)}" style="border:1px solid ${bc}; border-left:4px solid ${bc}; border-radius:6px; padding:6px 8px; margin-top:6px;">
+          <div><b>${esc(st.id)}</b> ${STEP_STATUS_BADGE(st) ? badge(...STEP_STATUS_BADGE(st)) : ''}${badge(...STEP_KIND_BADGE(st))}${badge(ACTION_JA[st.actionType] || st.actionType, '#555')}${badge(CONF_JA_PLAN[st.confidence] || st.confidence, '#555')} ${esc(st.title)}</div>
+          <div style="margin-top:2px;">対象：${st.targetKind === 'PROPOSED_FIELD' ? `${badge('新規', '#1a73e8')}${esc(st.targetRef || '')}` : st.targetRef ? `${badge(st.targetExists === false ? '不明' : '既存', st.targetExists === false ? '#b00020' : '#2e7d32')}${esc(st.targetKind)} <code>${esc(st.targetRef)}</code>` : '（なし）'}</div>
+          <div style="margin-top:2px;">${esc(st.proposal?.summary || '')}</div>${details}
+          <div style="margin-top:2px; opacity:.85;">理由：${esc(st.reason)}${chips(st.evidenceIds)}</div>
+          ${(st.dependsOn || []).length ? `<div style="font-size:11px; opacity:.7;">依存：${esc(st.dependsOn.join(', '))} の後</div>` : ''}${issues}
+        </div>`;
+      };
+      const mainSteps = (plan.steps || []).filter(st => !st.alternativeId);
+      const altSteps = (alt) => (plan.steps || []).filter(st => st.alternativeId === alt.id || (alt.stepIds || []).includes(st.id));
+      const warn = [...(plan.clientWarnings || []), ...(plan.gatewayWarnings || [])];
+      return `
+        <div style="display:flex; align-items:center; justify-content:space-between;"><b>変更計画（AI Change Planner）</b><span style="opacity:.6; font-size:11px;">requestId: ${esc(plan.requestId || '')}</span></div>
+        ${sec('実現したいこと', `<div style="margin-top:4px;">${esc(plan.goal)}</div><div style="margin-top:4px; opacity:.85;">${esc(a.summary || '')}</div><div style="font-size:11px; opacity:.7;">計画の確度：${esc(CONF_JA_PLAN[plan.planConfidence] || plan.planConfidence || '')}</div>`)}
+        ${sec('現在利用できるもの', li(existing, x => x, '利用できる既存資産は挙げられていません'))}
+        ${sec('追加が必要なもの', `${li(a.missingCapabilities || [], x => `<li>${esc(x)}</li>`, '追加が必要なものはありません')}${proposed}`)}
+        ${sec('変更計画', mainSteps.length ? mainSteps.map(stepHtml).join('') : '<div style="opacity:.6; margin-top:4px;">計画の手順はありません</div>')}
+        ${(plan.alternatives || []).length ? sec('代替案', plan.alternatives.map(alt => `<div style="margin-top:6px;"><b>${esc(alt.id)}</b> ${esc(alt.title)} <span style="opacity:.8;">${esc(alt.summary)}</span>${altSteps(alt).map(stepHtml).join('')}</div>`).join('')) : ''}
+        ${sec('影響範囲', li(plan.impact || [], x => `<li>${x.validation?.status === 'invalid' ? badge('不明な対象', '#b00020') : ''}${esc(x.targetKind)}${x.targetRef ? ` <code>${esc(x.targetRef)}</code>` : ''}: ${esc(x.description)}${chips(x.evidenceIds)}</li>`, '既存設定への影響は挙げられていません'))}
+        ${sec('確認したいこと', li(plan.questions || [], q => `<li>${badge('確認必要', '#b26a00')}<b>${esc(q.id)}</b> ${esc(q.question)} <span style="opacity:.7;">（${esc(q.reason)}）</span>${chips(q.relatedEvidenceIds)}</li>`, '確認事項はありません'))}
+        ${sec('解析できないこと', li(plan.unknowns || [], u => `<li>${esc(u)}</li>`, 'なし'))}
+        ${warn.length ? `<details style="margin-top:6px; font-size:11px;"><summary style="cursor:pointer;">検証で除去・調整した項目（${warn.length}）</summary>${warn.map(w => `<div>${esc(w.code)}: ${esc(w.message)}</div>`).join('')}</details>` : ''}
+        <div style="margin-top:8px; display:flex; gap:6px;">
+          <button type="button" id="kt-ai-plan-json-toggle" class="btn" style="height:26px; font-size:11px;">Change Plan JSON を見る</button>
+          <button type="button" id="kt-ai-plan-json-copy" class="btn" style="height:26px; font-size:11px;">JSON をコピー</button>
+        </div>
+        <pre id="kt-ai-plan-json" style="display:none; margin-top:6px; max-height:320px; overflow:auto; font-size:11px; white-space:pre-wrap;">${esc(JSON.stringify(planJson(plan), null, 2))}</pre>
+        ${plan.usage ? `<div style="margin-top:6px; opacity:.6; font-size:11px;">今月の利用: ${esc(plan.usage.usedThisMonth)} / ${esc(plan.usage.monthlyLimit)} 回</div>` : ''}
+        <div style="margin-top:6px; opacity:.6; font-size:11px;">この変更計画は提案です。Toolkit は設定を変更しません。実施前に各手順と影響範囲を確認してください。</div>`;
+    }
+    /** Executor へ渡す形（表示用の warnings / usage を除いた計画そのもの） */
+    function planJson(plan) {
+      if (!plan) return null;
+      const { clientWarnings, gatewayWarnings, usage, ai, requestId, ...rest } = plan;
+      return { planVersion: '1', requestId: requestId ?? null, ...rest };
+    }
+
     /** 根拠ID → fact の詳細（将来は Fields / Relations / Scanner へ遷移させる） */
     function evidenceDetailHtml(fact) {
       if (!fact) return '<div style="opacity:.7;">該当する根拠が見つかりません</div>';
@@ -5487,10 +6037,11 @@
         : '';
       const warn = gen.warnings.length ? `<div style="margin-top:6px; opacity:.85;">${gen.warnings.map(w => `<div>※ ${esc(w)}</div>`).join('')}</div>` : '';
       const help = `<details style="margin-top:6px;"><summary style="cursor:pointer;">確度（confidence）の意味</summary><div style="padding-left:8px;">${CONFIDENCE_HELP.map(h => `<div><b>${esc(h.label)}</b>（${esc(h.code)}）: ${esc(h.text)}</div>`).join('')}</div></details>`;
-      const focus = gen.ctx.focus;
-      const target = focus.target ? `${esc(focus.target.type)} <code>${esc(focus.target.id)}</code>` : 'アプリ全体';
+      const focus = gen.ctx.focus || {};
+      const target = focus.target ? `${esc(focus.target.type)} <code>${esc(focus.target.id)}</code>` : (gen.ctx.goal != null ? '変更計画（アプリ全体の既存資産）' : 'アプリ全体');
+      const levelText = Array.isArray(gen.ctx.levels) ? gen.ctx.levels.join(' + ') : 'planner';
       return `
-        <div><b>対象</b>: ${target}　<b>階層</b>: ${esc(gen.ctx.levels.join(' + '))}</div>
+        <div><b>対象</b>: ${target}　<b>階層</b>: ${esc(levelText)}</div>
         <div><b>サイズ</b>: ${esc(gen.size.text)}</div>
         <div style="margin-top:6px;"><b>解析範囲</b>（— は未解析・対象外。存在しないという意味ではありません）</div>
         ${cov}${tr}${warn}${help}`;
@@ -5500,6 +6051,8 @@
       TARGET_TYPES, PRESETS, CONFIDENCE_HELP, INTRO_TEXT, INTRO_NOTE,
       listTargets, fileLabel, toBuildRequest, generate, coverageRows, truncationSummary, sizeSummary, outputFilename,
       panelHtml, resultHtml, capabilityStatusText, sessionLinesHtml, answerHtml, evidenceDetailHtml,
+      // AI Change Planner（Phase 7）
+      PLANNER_PRESETS, generatePlan, planHtml, planJson,
     };
   })();
 
@@ -5526,6 +6079,10 @@
     const $candWrap = $('kt-ai-candidates-wrap'), $cand = $('kt-ai-candidate'), $candApply = $('kt-ai-candidate-apply');
     const $actions = $('kt-ai-actions'), $view = $('kt-ai-view'), $result = $('kt-ai-result');
     const $copyPrompt = $('kt-ai-copy-prompt'), $copyMd = $('kt-ai-copy-md'), $copyJson = $('kt-ai-copy-json');
+    // モード（質問する / 変更計画を作る）
+    const $modeQa = $('kt-ai-mode-qa'), $modePlan = $('kt-ai-mode-plan'), $qaInputs = $('kt-ai-qa-inputs'), $planInputs = $('kt-ai-plan-inputs');
+    const $goal = $('kt-ai-goal'), $goalPreset = $('kt-ai-goal-preset');
+    const mode = () => ($modePlan && $modePlan.checked ? 'plan' : 'qa');
 
     let last = null;      // 直近の generate 結果
     const esc = escapeHtml;
@@ -5539,6 +6096,8 @@
     const $session = $('kt-ai-session'), $sessionLines = $('kt-ai-session-lines'), $sessionRefresh = $('kt-ai-session-refresh'), $sessionDisconnect = $('kt-ai-session-disconnect');
     const $consent = $('kt-ai-consent'), $consentOk = $('kt-ai-consent-ok'), $consentCancel = $('kt-ai-consent-cancel');
     const $answer = $('kt-ai-answer'), $factDetail = $('kt-ai-fact-detail');
+    const $planBtn = $('kt-ai-plan'), $planResult = $('kt-ai-plan-result');
+    let lastPlan = null;
     const settings = d.settings || null;
     const session = d.session || null;
     const paidEnabled = !!(settings && session);
@@ -5566,7 +6125,23 @@
     const TRANSIENT = [KTAiClient.ERROR_CODES.RATE_LIMITED, KTAiClient.ERROR_CODES.TIMEOUT, KTAiClient.ERROR_CODES.TRANSPORT_ERROR,
       KTAiClient.ERROR_CODES.UPSTREAM_ERROR, KTAiClient.ERROR_CODES.INTERNAL_ERROR, KTAiClient.ERROR_CODES.WORKER_ERROR, KTAiClient.ERROR_CODES.INVALID_RESPONSE];
     const isTransient = () => !capability.available && TRANSIENT.includes(capability.reason);
-    const setAskEnabled = () => { $ask.disabled = !(paidEnabled && (capability.available || isTransient()) && !sending); };
+    const plannerAvailable = () => !!(capability.available && capability.features?.[KTAiClient.FEATURE_PLANNER]?.available);
+    const setAskEnabled = () => {
+      $ask.disabled = !(paidEnabled && (capability.available || isTransient()) && !sending);
+      $planBtn.disabled = !(paidEnabled && (plannerAvailable() || isTransient()) && !sending);
+    };
+    /** モードに応じて入力欄・ボタン・結果の表示を切り替える（Q&A と Planner を同時に出さない） */
+    function applyMode() {
+      const plan = mode() === 'plan';
+      $qaInputs.style.display = plan ? 'none' : 'flex';
+      $planInputs.style.display = plan ? 'flex' : 'none';
+      $gen.textContent = plan ? '変更計画 Prompt を生成' : 'AI Prompt を生成';
+      $ask.style.display = plan ? 'none' : '';
+      $planBtn.style.display = plan ? '' : 'none';
+      $answer.style.display = (!plan && lastAnswer) ? '' : 'none';
+      $planResult.style.display = (plan && lastPlan) ? '' : 'none';
+      $factDetail.style.display = 'none';
+    }
 
     /** 接続状態 → 接続フォーム / 状態表示を切り替える */
     function renderSession() {
@@ -5618,6 +6193,45 @@
       $answer.innerHTML = KTContextUi.answerHtml(a);
       $answer.style.display = '';
       $factDetail.style.display = 'none';
+    }
+    function renderPlan(p) {
+      lastPlan = p;
+      $planResult.innerHTML = KTContextUi.planHtml(p);
+      $planResult.style.display = '';
+      $factDetail.style.display = 'none';
+    }
+    /** 変更計画の作成（Planner Context を送る。設定は変更しない）。二重送信防止・requestId 保持 */
+    async function plan() {
+      if (!paidEnabled) return null;
+      if (!last || !last.ok || last.ctx?.contextVersion !== KTContext.PLANNER_CONTEXT_VERSION) { setPaidStatus('先に「変更計画 Prompt を生成」で実現したいことの Context を作成してください。'); return null; }
+      if (sending) return null;
+      if (!capability.available && isTransient()) await refreshCapability({ force: true });
+      if (!capability.available) { setPaidStatus(KTContextUi.capabilityStatusText(capability)); return null; }
+      if (!plannerAvailable()) { capability = { ...capability }; setPaidStatus(`${KTAiClient.errorText(KTAiClient.ERROR_CODES.PLANNER_NOT_AVAILABLE)} [${capability.features?.[KTAiClient.FEATURE_PLANNER]?.reason || 'NOT_ENTITLED'}]`); return null; }
+      const client = makeClient();
+      if (!client || client.error) { capability = { available: false, reason: client?.error ? KTAiClient.ERROR_CODES.TRANSPORT_ERROR : KTAiClient.ERROR_CODES.NOT_CONNECTED }; setPaidStatus(KTContextUi.capabilityStatusText(capability)); setAskEnabled(); renderSession(); return null; }
+      sending = true; setAskEnabled();
+      const requestId = KTAiClient.newRequestId();
+      setPaidStatus(`変更計画を作成しています... （requestId: ${requestId}）`);
+      $planResult.style.display = 'none'; $factDetail.style.display = 'none';
+      try {
+        const p = await client.plan({ ctx: last.ctx, requestId });
+        renderPlan(p);
+        setPaidStatus(`変更計画を受信しました（手順 ${p.steps.length} 件・新規フィールド ${p.proposedFields.length} 件・確認事項 ${p.questions.length} 件${p.usage ? `・今月 ${p.usage.usedThisMonth} / ${p.usage.monthlyLimit} 回` : ''}）`);
+        return p;
+      } catch (e) {
+        const code = KTAiClient.isAiClientError(e) ? e.code : KTAiClient.ERROR_CODES.TRANSPORT_ERROR;
+        const retry = KTAiClient.isAiClientError(e) && e.retryAfterSeconds ? `（約${e.retryAfterSeconds}秒後に再実行可能）` : '';
+        setPaidStatus(`${KTAiClient.errorText(code)}${retry} [${code}] requestId: ${e?.requestId || requestId}`);
+        if ([KTAiClient.ERROR_CODES.AUTH_INVALID_TOKEN, KTAiClient.ERROR_CODES.AUTH_TOKEN_EXPIRED, KTAiClient.ERROR_CODES.AUTH_DOMAIN_MISMATCH,
+          KTAiClient.ERROR_CODES.PRODUCT_NOT_ENTITLED, KTAiClient.ERROR_CODES.FEATURE_NOT_ENTITLED, KTAiClient.ERROR_CODES.SESSION_EXPIRED, KTAiClient.ERROR_CODES.NOT_CONNECTED].includes(code)) {
+          capability = { available: false, reason: code };
+          renderSession();
+        }
+        return null;
+      } finally {
+        sending = false; setAskEnabled();
+      }
     }
     function showEvidence(id) {
       const fact = (last?.ctx?.facts || []).find(f => f.id === id) || null;
@@ -5722,7 +6336,21 @@
         if (!settings.hasConsent()) { $consent.style.display = ''; return; }   // 送信前の確認（初回のみ）
         await ask();
       });
-      $consentOk.addEventListener('click', async () => { settings.setConsent(true); $consent.style.display = 'none'; await ask(); });
+      $planBtn.addEventListener('click', async () => {
+        if (!last || !last.ok || last.ctx?.contextVersion !== KTContext.PLANNER_CONTEXT_VERSION) { setPaidStatus('先に「変更計画 Prompt を生成」で実現したいことの Context を作成してください。'); return; }
+        if (!settings.hasConsent()) { $consent.style.display = ''; return; }
+        await plan();
+      });
+      $planResult.addEventListener('click', async (ev) => {
+        const t = ev?.target;
+        const id = t?.id || (typeof t?.getAttribute === 'function' ? t.getAttribute('id') : null);
+        if (id === 'kt-ai-plan-json-toggle') { const pre = host.querySelector('#kt-ai-plan-json'); if (pre) pre.style.display = pre.style.display === 'none' ? '' : 'none'; return; }
+        if (id === 'kt-ai-plan-json-copy') { const ok = await d.copyText(JSON.stringify(KTContextUi.planJson(lastPlan), null, 2)); if (t) flashBtnText(t, ok ? 'Copied!' : 'Failed'); return; }
+        const el = t && typeof t.closest === 'function' ? t.closest('[data-eid]') : t;
+        const eid = el?.dataset?.eid ?? (typeof el?.getAttribute === 'function' ? el.getAttribute('data-eid') : null);
+        if (eid) showEvidence(eid);
+      });
+      $consentOk.addEventListener('click', async () => { settings.setConsent(true); $consent.style.display = 'none'; await (mode() === 'plan' ? plan() : ask()); });
       $consentCancel.addEventListener('click', () => { $consent.style.display = 'none'; });
       $answer.addEventListener('click', (ev) => {
         const t = ev?.target;
@@ -5790,6 +6418,12 @@
     }
 
     function generate(override = null) {
+      if (mode() === 'plan') {
+        setStatus('生成中...');
+        const gen = KTContextUi.generatePlan({ goal: $goal.value, inputs: d.getInputs() });
+        render(gen);
+        return gen;
+      }
       const type = override?.type || $type.value || 'app';
       const id = override?.id ?? (type === 'app' ? null : $target.value);
       // 表示名（ラベル（コード）/ PC: name）を focus.label に渡す。識別子は常に id（フィールドコード / sourceId）
@@ -5803,6 +6437,10 @@
 
     $type.addEventListener('change', () => { fillTargets(); });
     $preset.addEventListener('change', () => { if ($preset.value) $q.value = $preset.value; });
+    $goalPreset.addEventListener('change', () => { if ($goalPreset.value) $goal.value = $goalPreset.value; });
+    const onMode = () => { last = null; $actions.style.display = 'none'; $result.style.display = 'none'; $candWrap.style.display = 'none'; setStatus(''); applyMode(); setAskEnabled(); };
+    $modeQa.addEventListener('change', onMode);
+    $modePlan.addEventListener('change', onMode);
     $gen.addEventListener('click', () => generate());
     $candApply.addEventListener('click', () => {
       const v = String($cand.value || '');
@@ -5836,10 +6474,13 @@
     });
 
     fillTargets();
+    applyMode();
     return {
       regenerate: () => (last ? generate() : null),
       refreshTargets: fillTargets,
-      refreshCapability, ask, showEvidence,
+      refreshCapability, ask, plan, showEvidence,
+      mode, setMode: (m) => { if ($modePlan) $modePlan.checked = (m === 'plan'); if ($modeQa) $modeQa.checked = (m !== 'plan'); onMode(); },
+      lastPlan: () => lastPlan,
       lastAnswer: () => lastAnswer,
       capability: () => capability,
       currentOutput: () => {

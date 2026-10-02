@@ -66,7 +66,7 @@ console.log('\n--- 1. connect（exchange）---');
   const st = await session.connect('CUSTOMER-TOKEN-1');
   assert(st.connected && st.scope.product === 'toolkit' && st.refreshExpiresAt && gw.reqs.length === 1, 'connect → exchange 1 回・接続済み');
   const ex = gw.reqs[0];
-  assert(ex.url === 'https://gw.test/v2/token/exchange' && ex.method === 'POST' && ex.headers.Authorization === 'Bearer CUSTOMER-TOKEN-1' && ex.headers['X-Kintone-Domain'] === 'h' && JSON.parse(ex.body).grantType === 'customer_token' && JSON.parse(ex.body).product === 'toolkit' && JSON.parse(ex.body).feature === 'assistant-qa', 'exchange request（Bearer = Customer Token・grantType・product / feature・domain）');
+  assert(ex.url === 'https://gw.test/v2/token/exchange' && ex.method === 'POST' && ex.headers.Authorization === 'Bearer CUSTOMER-TOKEN-1' && ex.headers['X-Kintone-Domain'] === 'h' && JSON.parse(ex.body).grantType === 'customer_token' && JSON.parse(ex.body).product === 'toolkit' && JSON.parse(ex.body).feature === 'assistant-qa,change-planner', 'exchange request（Bearer = Customer Token・grantType・product / feature（assistant-qa,change-planner の両方を要求）・domain）');
   const dump = storage.dump();
   assert(dump.includes('ktAi.v2.h') && dump.includes('RT-2') && !dump.includes('CUSTOMER-TOKEN-1') && !dump.includes('AT-1'), 'store には Refresh Token だけ（Customer / Access Token は保存しない）');
   const h = await session.client.getHealth();

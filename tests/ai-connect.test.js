@@ -116,7 +116,7 @@ console.log('\n--- 2. connect flow（start → open → polling → complete →
   const ex = await flow2.start({ onState: (st) => states.push(st.phase) });
   const startReq = gw.reqs.find(r => r.url.endsWith('/v2/connect/start'));
   const startBody = JSON.parse(startReq.body);
-  assert(startReq.method === 'POST' && !startReq.headers.Authorization && startBody.domain === 'h' && startBody.product === 'toolkit' && startBody.feature === 'assistant-qa' && startBody.codeChallengeMethod === 'S256' && /^[A-Za-z0-9_-]{43}$/.test(startBody.codeChallenge), 'start: Bearer 無し・domain / product / feature / S256 challenge（Customer Token は送らない）');
+  assert(startReq.method === 'POST' && !startReq.headers.Authorization && startBody.domain === 'h' && startBody.product === 'toolkit' && startBody.feature === 'assistant-qa,change-planner' && startBody.codeChallengeMethod === 'S256' && /^[A-Za-z0-9_-]{43}$/.test(startBody.codeChallenge), 'start: Bearer 無し・domain / product / feature / S256 challenge（Customer Token は送らない）');
   assert(opened.length === 1 && opened[0].startsWith('https://www.nestrec.com/ai-connect?session=cs_'), 'authorizeUrl（Gateway 生成）を別タブで開く');
   assert(polls === 3 && gw.reqs.filter(r => r.url.includes('/v2/connect/status')).length === 3, 'pending の間 polling を続け、authorized で止める');
   const completeReq = gw.reqs.find(r => r.url.endsWith('/v2/connect/complete'));
