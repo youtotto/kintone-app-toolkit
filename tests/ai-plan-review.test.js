@@ -134,7 +134,7 @@ console.log('\n--- 5. Lookup ---');
   assert((a.status === 'VALID' || a.status === 'WARNING') && a.safety === 'REVIEW_REQUIRED' && a.diff.changeType === 'UPDATE' && a.diff.after.lookup.mappings.length === 3 && a.diff.after.lookup.mappings.some(m => m.to === 'customer_address') && a.diff.before.lookup.mappings.length === 2, 'add mapping: 既存ルックアップに取得項目を追加（Before 2 → After 3）');
   const dupDest = review(plan([step('P1', 'UPDATE_LOOKUP', 'LOOKUP', 'customer_lookup', [['取得項目', 'addr → amount, tel → amount']])]));
   assert(st(dupDest, 'P1').status === 'INVALID' && codes(st(dupDest, 'P1')).includes('LOOKUP_DEST_DUPLICATE'), 'duplicate destination → INVALID');
-  const over = review(plan([step('P1', 'UPDATE_LOOKUP', 'LOOKUP', 'customer_lookup', [['取得項目', 'other_name → case_name']])]));
+  const over = review(plan([step('P1', 'UPDATE_LOOKUP', 'LOOKUP', 'customer_lookup', [['取得項目', 'address → case_name']])]));   // Phase 13: 取得元は参照元アプリに実在するフィールド（address）
   assert(codes(st(over, 'P1')).includes('LOOKUP_MAPPING_OVERWRITE') && st(over, 'P1').status === 'NEEDS_CONFIRMATION', '既存マッピングの上書き → 高リスク');
   const missing = review(plan([step('P1', 'UPDATE_LOOKUP', 'LOOKUP', 'customer_lookup', [['取得項目', 'address → NEW_FIELD_1']])]));
   assert(st(missing, 'P1').status === 'INVALID' && codes(st(missing, 'P1')).includes('PROPOSED_FIELD_NOT_APPLIED'), 'proposed field 未追加のコピー先 → INVALID');
@@ -411,6 +411,119 @@ console.log('\n--- 11. Phase 12: プロセス管理（Before モデル / identit
   const eu = review(plan([step('P1', 'UPDATE_PROCESS', 'PROCESS_ACTION', '取り下げる', [], { spec: { entities: ['FIELD_ENTITY:owner'], changeKind: 'EXECUTABLE_USER' } })]));
   assert(codes(st(eu, 'P1')).includes('EXECUTABLE_USER_CHANGE') && st(eu, 'P1').issues.find(i => i.code === 'EXECUTABLE_USER_CHANGE').severity === 'high' && eu.summary.counts.highRisk === 1 && st(eu, 'P1').diff.changeKind === 'EXECUTABLE_USER' && st(eu, 'P1').diff.after.executableUsers.join() === 'FIELD_ENTITY:owner', 'UPDATE_PROCESS（実行可能ユーザーの変更: user2 を外す）: EXECUTABLE_USER_CHANGE（高リスク）');
   assert(JSON.stringify(INPUTS.data) === SNAPSHOT, '§11 の後も DATA は不変');
+}
+
+console.log('\n--- 12. Lookup Preview Executor の Review（Phase 13 §43〜§45） ---');
+{
+  // 参照元 App 500「顧客マスタ」: code(unique) / name / address / phone(LINK CALL) / memo(MULTI_LINE) / rank(DROP_DOWN) / sales_rep(USER_SELECT) / credit(NUMBER) / contacts(SUBTABLE: contact_name)
+  const withDest = (extraFields = {}) => { const i = buildInputs(); for (const [c, f] of Object.entries(extraFields)) i.data.fields[c] = f; i.deps = KTDeps.buildDependencyData(i.data, KTDeps.normalizeFields(i.data.fields)); return i; };
+  const fld = (type, code, label, extra = {}) => ({ type, code, label, ...extra });
+  const upd = (spec, extra = {}) => step('P1', 'UPDATE_LOOKUP', 'LOOKUP', 'customer_lookup', [], { spec, ...extra });
+  // ---- §43 context: 既存ルックアップの特定 ----
+  const m0 = R.buildBeforeModel(INPUTS.data);
+  assert(m0.fields.customer_lookup.lookup.code === '' && m0.fields.customer_lookup.lookup.pickerFields.join() === 'code,name' && m0.fields.customer_lookup.lookup.filterCond === '' && m0.fields.customer_lookup.lookup.sort === '' && m0.fields.customer_lookup.lookup.mappings.length === 2, 'Before: ルックアップは app / code / keyField / mappings / pickerFields / filterCond / sort で正規化');
+  const byApp = review(plan([step('P1', 'UPDATE_LOOKUP', 'LOOKUP', '顧客マスタ', [], { spec: { addMappings: [{ relatedField: 'address', field: 'customer_address' }] } })]), withDest({ customer_address: fld('SINGLE_LINE_TEXT', 'customer_address', '顧客住所') }));
+  assert(st(byApp, 'P1').status !== 'INVALID' && st(byApp, 'P1').diff.target.id === 'customer_lookup' && codes(st(byApp, 'P1')).includes('LOOKUP_TARGET_RESOLVED'), 'existing lookup detection: 参照元アプリ名で既存ルックアップを 1 件に特定（LOOKUP_TARGET_RESOLVED）');
+  const two = withDest({ customer_lookup2: fld('SINGLE_LINE_TEXT', 'customer_lookup2', '顧客マスタ参照2', { lookup: { relatedApp: { app: '500', code: '' }, relatedKeyField: 'code', fieldMappings: [], lookupPickerFields: [], filterCond: '', sort: '' } }) });
+  const amb = review(plan([step('P1', 'UPDATE_LOOKUP', 'LOOKUP', '500', [], { spec: { addMappings: [{ relatedField: 'address', field: 'customer_code' }] } })]), two);
+  assert(st(amb, 'P1').status === 'INVALID' && codes(st(amb, 'P1')).includes('LOOKUP_TARGET_AMBIGUOUS') && /customer_lookup2/.test(st(amb, 'P1').issues[0].message), 'multiple lookup candidates: 同じ参照元のルックアップが 2 つ → LOOKUP_TARGET_AMBIGUOUS（決めない）');
+  const unavailable = (() => { const i = buildInputs(); i.data.relatedApps['500'] = { appId: '500', error: { code: 'CB_NO02', message: '権限がありません', status: 403 } }; return i; })();
+  const un = review(plan([upd({ addMappings: [{ relatedField: 'address', field: 'customer_code' }] })]), unavailable);
+  assert(st(un, 'P1').status === 'INVALID' && codes(st(un, 'P1')).includes('RELATED_APP_SETTINGS_UNAVAILABLE') && /アクセス権/.test(st(un, 'P1').issues[0].message) && un.crossApp.length === 1 && un.crossApp[0].available === false, 'related app unavailable: 参照元のフィールド設定が読めない → RELATED_APP_SETTINGS_UNAVAILABLE（推測しない。crossApp に available: false）');
+  const notLoaded = (() => { const i = buildInputs(); delete i.data.relatedApps; return i; })();
+  const nl = review(plan([upd({ addMappings: [{ relatedField: 'address', field: 'customer_code' }] })]), notLoaded);
+  assert(st(nl, 'P1').status === 'INVALID' && codes(st(nl, 'P1')).includes('RELATED_APP_SETTINGS_UNAVAILABLE'), 'relatedApps が無い DATA でも UPDATE_LOOKUP は推測せず INVALID');
+  const nullLk = (() => { const i = buildInputs(); i.data.fields.blind_lookup = { type: 'SINGLE_LINE_TEXT', code: 'blind_lookup', label: '権限なし参照', lookup: null }; return i; })();
+  const nlk = review(plan([step('P1', 'UPDATE_LOOKUP', 'LOOKUP', 'blind_lookup', [], { spec: { addMappings: [{ relatedField: 'address', field: 'customer_code' }] } })]), nullLk);
+  assert(st(nlk, 'P1').status === 'INVALID' && codes(st(nlk, 'P1')).includes('RELATED_APP_SETTINGS_UNAVAILABLE') && R.buildBeforeModel(nullLk.data).fields.blind_lookup.lookupUnavailable === true, 'lookup: null（参照先の権限なし）のフィールド → lookupUnavailable、UPDATE_LOOKUP は INVALID');
+  // source field exists / missing
+  const srcMissing = review(plan([upd({ addMappings: [{ relatedField: 'zip', field: 'customer_code' }] })]));
+  assert(st(srcMissing, 'P1').status === 'INVALID' && codes(st(srcMissing, 'P1')).includes('RELATED_FIELD_NOT_FOUND'), 'source field missing: 参照元に無いフィールド → RELATED_FIELD_NOT_FOUND');
+  const srcTable = review(plan([upd({ addMappings: [{ relatedField: 'contact_name', field: 'customer_code' }] })]));
+  assert(st(srcTable, 'P1').status === 'INVALID' && codes(st(srcTable, 'P1')).includes('RELATED_FIELD_IN_TABLE'), 'source in table: 参照元のテーブル内フィールド → RELATED_FIELD_IN_TABLE');
+  const srcLabel = review(plan([upd({ addMappings: [{ relatedField: '住所', field: 'customer_address' }] })]), withDest({ customer_address: fld('SINGLE_LINE_TEXT', 'customer_address', '顧客住所') }));
+  assert(st(srcLabel, 'P1').status !== 'INVALID' && st(srcLabel, 'P1').diff.after.lookup.mappings.some(m => m.from === 'address' && m.to === 'customer_address'), 'source by label: 参照元のラベル「住所」→ code address に解決');
+  // destination exists / proposed / ambiguous
+  const destExists = review(plan([upd({ addMappings: [{ relatedField: 'address', field: 'customer_address' }] })]), withDest({ customer_address: fld('SINGLE_LINE_TEXT', 'customer_address', '顧客住所') }));
+  const de = st(destExists, 'P1');
+  assert(de.status === 'VALID' && de.safety === 'REVIEW_REQUIRED' && de.diff.changeType === 'UPDATE' && de.diff.lookupChanges.mappings.length === 1 && de.diff.lookupChanges.mappings[0].proposed === false && de.diff.human.some(h => /参照元: App 500「顧客マスタ」 \/ キー: code（顧客コード）/.test(h)) && de.diff.human.some(h => /＋ 取得項目: address（住所） → customer_address（顧客住所）$/.test(h)), 'destination exists: 既存フィールドへ取得項目を追加（VALID / REVIEW_REQUIRED、参照元・キー・取得項目の行）');
+  const destProposed = review(plan([step('P1', 'ADD_FIELD', 'PROPOSED_FIELD', 'NEW_FIELD_1'), step('P2', 'UPDATE_LOOKUP', 'LOOKUP', 'customer_lookup', [], { dependsOn: ['P1'], spec: { addMappings: [{ relatedField: 'address', field: 'NEW_FIELD_1' }] } })], [pf('NEW_FIELD_1', '顧客住所', 'customer_address', 'SINGLE_LINE_TEXT')]));
+  const dp = st(destProposed, 'P2');
+  assert(dp.status !== 'INVALID' && dp.diff.lookupChanges.mappings[0].proposed === true && dp.diff.human.some(h => /customer_address（顧客住所）・この計画で追加/.test(h)) && dp.diff.target.identity.mappings.length === 2 && dp.diff.after.lookup.mappings.length === 3, 'destination proposed: 先行 ADD_FIELD の NEW_FIELD_1 をコピー先に解決（・この計画で追加。identity は変更前の 2 項目）');
+  const ambData = withDest({ customer_address: fld('SINGLE_LINE_TEXT', 'customer_address', '顧客住所'), ship_address: fld('SINGLE_LINE_TEXT', 'ship_address', '送付先住所') });
+  const destAmb = review(plan([step('P1', 'ADD_FIELD', 'PROPOSED_FIELD', 'NEW_FIELD_1'), step('P2', 'UPDATE_LOOKUP', 'LOOKUP', 'customer_lookup', [], { dependsOn: ['P1'], spec: { addMappings: [{ relatedField: 'address', field: 'NEW_FIELD_1' }] } })], [pf('NEW_FIELD_1', '住所', 'address_copy', 'SINGLE_LINE_TEXT')]), ambData);
+  assert(destAmb.warnings.filter(w => w.code === 'POSSIBLE_EXISTING_REUSE').length === 2 && st(destAmb, 'P1').status === 'WARNING', 'destination ambiguous: 顧客住所 / 送付先住所 が既にある → POSSIBLE_EXISTING_REUSE ×2（新規追加は確認）');
+  // ---- §44 mapping ----
+  const multi = review(plan([step('P1', 'ADD_FIELD', 'PROPOSED_FIELD', 'NEW_FIELD_1'), step('P2', 'ADD_FIELD', 'PROPOSED_FIELD', 'NEW_FIELD_2'), step('P3', 'UPDATE_LOOKUP', 'LOOKUP', 'customer_lookup', [], { dependsOn: ['P1', 'P2'], spec: { addMappings: [{ relatedField: 'address', field: 'NEW_FIELD_1' }, { relatedField: 'phone', field: 'NEW_FIELD_2' }] } })], [pf('NEW_FIELD_1', '顧客住所', 'customer_address', 'SINGLE_LINE_TEXT'), pf('NEW_FIELD_2', '顧客電話番号', 'customer_phone', 'LINK')]));
+  const mu = st(multi, 'P3');
+  assert((mu.status === 'VALID' || mu.status === 'WARNING') && mu.diff.after.lookup.mappings.length === 4 && mu.diff.after.lookup.mappings.slice(0, 2).map(m => m.to).join() === 'customer_code,case_name' && mu.diff.after.lookup.pickerFields.join() === 'code,name' && multi.executionReadiness.reviewSteps.includes('P3') && multi.crossApp.length === 1 && multi.crossApp[0].appId === '500' && multi.crossApp[0].stepIds.join() === 'P3' && /^[0-9a-f]{8}$/.test(multi.crossApp[0].fieldsHash) && multi.crossApp[0].revision === '21', 'add multiple mappings: 住所 / 電話番号 を新規 2 フィールドへ（既存 2 項目と picker は保持。crossApp に 500 / revision / fieldsHash）');
+  const dup = review(plan([upd({ addMappings: [{ relatedField: 'name', field: 'case_name' }] })]));
+  assert(st(dup, 'P1').status === 'NEEDS_CONFIRMATION' && codes(st(dup, 'P1')).includes('LOOKUP_MAPPING_DUPLICATE') && codes(st(dup, 'P1')).includes('NO_STRUCTURED_CHANGE') && st(dup, 'P1').diff.changeType === 'NO_CHANGE', 'duplicate mapping: 既にある取得項目と同じ → LOOKUP_MAPPING_DUPLICATE（変更なし）');
+  const conflict = withDest({ customer_address: fld('SINGLE_LINE_TEXT', 'customer_address', '顧客住所'), other_lookup: fld('SINGLE_LINE_TEXT', 'other_lookup', '別参照', { lookup: { relatedApp: { app: '500', code: '' }, relatedKeyField: 'code', fieldMappings: [{ field: 'customer_address', relatedField: 'address' }], lookupPickerFields: [], filterCond: '', sort: '' } }) });
+  const cf = review(plan([upd({ addMappings: [{ relatedField: 'address', field: 'customer_address' }] })]), conflict);
+  assert(codes(st(cf, 'P1')).includes('LOOKUP_DEST_CONFLICT') && st(cf, 'P1').status === 'NEEDS_CONFIRMATION' && cf.conflicts.some(c => c.code === 'LOOKUP_DEST_CONFLICT'), 'destination conflict: 別のルックアップも書き込むコピー先 → LOOKUP_DEST_CONFLICT（高・conflicts）');
+  const tm = review(plan([upd({ addMappings: [{ relatedField: 'address', field: 'amount' }] })]));
+  assert(st(tm, 'P1').status === 'INVALID' && codes(st(tm, 'P1')).includes('LOOKUP_TYPE_MISMATCH') && /SINGLE_LINE_TEXT \/ MULTI_LINE_TEXT \/ RICH_TEXT/.test(st(tm, 'P1').issues.find(i => i.code === 'LOOKUP_TYPE_MISMATCH').message), 'type mismatch: 文字列（住所）→ 数値（amount）は取得できない → LOOKUP_TYPE_MISMATCH（取得できる型を示す）');
+  const tmP = review(plan([step('P1', 'ADD_FIELD', 'PROPOSED_FIELD', 'NEW_FIELD_1'), step('P2', 'UPDATE_LOOKUP', 'LOOKUP', 'customer_lookup', [], { dependsOn: ['P1'], spec: { addMappings: [{ relatedField: 'credit', field: 'NEW_FIELD_1' }] } })], [pf('NEW_FIELD_1', '与信枠', 'credit_copy', 'SINGLE_LINE_TEXT')]));
+  assert(st(tmP, 'P2').status === 'INVALID' && /新規フィールドの種類を合わせてください/.test(st(tmP, 'P2').issues.find(i => i.code === 'LOOKUP_TYPE_MISMATCH').message), 'type mismatch（新規コピー先）: NUMBER → SINGLE_LINE_TEXT の新規フィールドは種類を合わせる案内');
+  const compat = [['credit', 'amount', true], ['rank', 'customer_code', true], ['memo', 'customer_code', false], ['sales_rep', 'owner', true], ['レコード番号', 'amount', true], ['phone', 'customer_code', false]];
+  for (const [from, to, ok] of compat) { const rv = review(plan([upd({ addMappings: [{ relatedField: from, field: to }] })])); assert((st(rv, 'P1').status !== 'INVALID') === ok, `type table: ${from} → ${to} は${ok ? '取得できる' : '取得できない'}`); }
+  const self = review(plan([upd({ addMappings: [{ relatedField: 'code', field: 'customer_lookup' }] })]));
+  assert(st(self, 'P1').status === 'INVALID' && codes(st(self, 'P1')).includes('LOOKUP_DEST_IS_SELF'), 'self destination: ルックアップ自身をコピー先に → INVALID');
+  const preserve = review(plan([upd({ addMappings: [{ relatedField: 'address', field: 'customer_address' }], addPickerFields: ['address'], filterCond: 'rank in ("A")', sort: 'code asc' })]), withDest({ customer_address: fld('SINGLE_LINE_TEXT', 'customer_address', '顧客住所') }));
+  const pv = st(preserve, 'P1');
+  assert(pv.status === 'NEEDS_CONFIRMATION' && pv.safety === 'REVIEW_REQUIRED' && pv.diff.before.lookup.mappings.length === 2 && pv.diff.after.lookup.mappings.length === 3 && pv.diff.after.lookup.app === '500' && pv.diff.after.lookup.keyField === 'code' && pv.diff.after.lookup.pickerFields.join() === 'code,name,address' && pv.diff.after.lookup.filterCond === 'rank in ("A")' && pv.diff.after.lookup.sort === 'code asc' && pv.diff.target.identity.filterCond === '' && pv.diff.target.identity.related.appId === '500' && pv.diff.target.identity.related.fieldsHash === preserve.crossApp[0].fieldsHash, 'existing preserved: 参照元・キー・既存取得項目・picker を保ったまま追加（identity は変更前、fingerprint 付き）');
+  // ---- §45 settings: picker / filterCond / sort / relatedApp・key unchanged ----
+  const pk = review(plan([upd({ addPickerFields: ['address', 'name', 'contact_name', 'nothing'] })]));
+  assert(st(pk, 'P1').status === 'INVALID' && codes(st(pk, 'P1')).includes('PICKER_FIELD_INVALID') && codes(st(pk, 'P1')).includes('PICKER_FIELD_NOT_FOUND') && codes(st(pk, 'P1')).includes('PICKER_FIELD_DUPLICATE'), 'picker fields: テーブル内 → INVALID、無い → PICKER_FIELD_NOT_FOUND、既にある → 重複（変更なし）');
+  const pkOk = review(plan([upd({ addPickerFields: ['address'] })]));
+  assert(['VALID', 'WARNING'].includes(st(pkOk, 'P1').status) && st(pkOk, 'P1').safety === 'REVIEW_REQUIRED' && st(pkOk, 'P1').diff.after.lookup.pickerFields.join() === 'code,name,address' && st(pkOk, 'P1').diff.human.some(h => h === '＋ 選択時に表示: address（住所）'), 'picker add: 選択時に表示するフィールドの追加だけ → VALID（JS 参照の警告は別）/ REVIEW_REQUIRED');
+  const fcOk = review(plan([upd({ filterCond: 'rank in ("A") and credit >= "100"' })]));
+  assert(st(fcOk, 'P1').status === 'NEEDS_CONFIRMATION' && codes(st(fcOk, 'P1')).includes('LOOKUP_FILTER_CHANGE') && !codes(st(fcOk, 'P1')).includes('COND_INVALID') && st(fcOk, 'P1').diff.after.lookup.filterCond === 'rank in ("A") and credit >= "100"', 'filterCond valid: 参照元のフィールドで書かれた条件 → LOOKUP_FILTER_CHANGE（要確認）');
+  const fcUnknown = review(plan([upd({ filterCond: 'customer_code = "A"' })]));
+  assert(st(fcUnknown, 'P1').status === 'INVALID' && codes(st(fcUnknown, 'P1')).includes('LOOKUP_FILTER_FIELD_UNKNOWN'), 'filterCond invalid（このアプリのフィールドで書いた）: 参照元に無い → LOOKUP_FILTER_FIELD_UNKNOWN');
+  const fcTable = review(plan([upd({ filterCond: 'contact_name = "x"' })]));
+  assert(codes(st(fcTable, 'P1')).includes('COND_INVALID') && st(fcTable, 'P1').issues.find(i => i.code === 'COND_INVALID').message.includes('テーブル内のフィールド'), 'filterCond invalid（テーブル内）: KTQueryCheck lookup 用途 → COND_INVALID');
+  const fcOp = review(plan([upd({ filterCond: 'memo = "x"' })]));
+  assert(codes(st(fcOp, 'P1')).includes('COND_INVALID'), 'filterCond invalid（複数行に =）: 演算子の検査も参照元の型で行う');
+  const sOk = review(plan([upd({ sort: 'name asc, code desc' })]));
+  assert(st(sOk, 'P1').status === 'NEEDS_CONFIRMATION' && codes(st(sOk, 'P1')).includes('LOOKUP_SORT_CHANGE') && st(sOk, 'P1').diff.after.lookup.sort === 'name asc, code desc', 'sort valid: 参照元のフィールド asc / desc');
+  const sBad = review(plan([upd({ sort: 'zip asc' })]));
+  assert(st(sBad, 'P1').status === 'INVALID' && codes(st(sBad, 'P1')).includes('LOOKUP_SORT_FIELD_UNKNOWN'), 'sort invalid: 参照元に無いフィールド → INVALID');
+  const sForm = review(plan([upd({ sort: 'name ascending' })]));
+  assert(codes(st(sForm, 'P1')).includes('LOOKUP_SORT_INVALID') && st(sForm, 'P1').status === 'NEEDS_CONFIRMATION', 'sort invalid（形）: 「code asc|desc」でない → 要確認');
+  const sType = review(plan([upd({ sort: 'memo asc' })]));
+  assert(codes(st(sType, 'P1')).includes('LOOKUP_SORT_FIELD_NOT_SORTABLE'), 'sort invalid（型）: 複数行テキストは並び順に使えない');
+  const srcChange = review(plan([upd({ sourceApp: '600', addMappings: [{ relatedField: 'address', field: 'customer_code' }] })]));
+  assert(st(srcChange, 'P1').safety === 'PLAN_ONLY' && codes(st(srcChange, 'P1')).includes('LOOKUP_SOURCE_CHANGE') && st(srcChange, 'P1').diff.after.lookup.app === '500' && srcChange.executionReadiness.planOnlySteps.includes('P1'), 'relatedApp change: 参照元の変更は PLAN_ONLY（After の参照元は変えない）');
+  const keyChange = review(plan([upd({ keyField: 'name' })]));
+  assert(st(keyChange, 'P1').safety === 'PLAN_ONLY' && codes(st(keyChange, 'P1')).includes('LOOKUP_KEY_CHANGE') && st(keyChange, 'P1').diff.changeType === 'NO_CHANGE' && st(keyChange, 'P1').diff.after.lookup.keyField === 'code', 'relatedKey change: キーの変更は PLAN_ONLY（変更なし）');
+  const same = review(plan([upd({ sourceApp: '500', keyField: 'code', addPickerFields: ['address'] })]));
+  assert(!codes(st(same, 'P1')).includes('LOOKUP_SOURCE_CHANGE') && !codes(st(same, 'P1')).includes('LOOKUP_KEY_CHANGE') && st(same, 'P1').safety === 'REVIEW_REQUIRED', 'relatedApp / key unchanged: 現在と同じ指定は変更と見ない');
+  const keyBroken = (() => { const i = buildInputs(); delete i.data.relatedApps['500'].fields.code; return i; })();
+  const kb = review(plan([upd({ addPickerFields: ['address'] })]), keyBroken);
+  assert(st(kb, 'P1').status === 'INVALID' && codes(st(kb, 'P1')).includes('RELATED_KEY_INVALID'), 'related key validation: 参照元からキーが消えている → RELATED_KEY_INVALID');
+  const keyNotUnique = (() => { const i = buildInputs(); i.data.relatedApps['500'].fields.code.unique = false; return i; })();
+  const knu = review(plan([upd({ addPickerFields: ['address'] })]), keyNotUnique);
+  assert(['VALID', 'WARNING'].includes(st(knu, 'P1').status) && codes(st(knu, 'P1')).includes('LOOKUP_KEY_NOT_UNIQUE') && st(knu, 'P1').issues.find(i => i.code === 'LOOKUP_KEY_NOT_UNIQUE').severity === 'low', 'related key not unique: 運用上の注意（low）。実行は妨げない');
+  const addLkChecked = review(plan([step('P1', 'ADD_LOOKUP', 'PROPOSED_FIELD', 'NEW_FIELD_1', [], { spec: { sourceApp: '500', keyField: 'code', mappings: [{ from: 'zip', to: 'customer_code' }] } })], [pf('NEW_FIELD_1', '顧客参照', 'cust_ref', 'LOOKUP')]));
+  assert(st(addLkChecked, 'P1').status === 'INVALID' && codes(st(addLkChecked, 'P1')).includes('RELATED_FIELD_NOT_FOUND'), 'ADD_LOOKUP も参照元が取得済みなら取得元の実在を確かめる');
+  const addLkNum = review(plan([step('P1', 'ADD_LOOKUP', 'PROPOSED_FIELD', 'NEW_FIELD_1', [], { spec: { sourceApp: '500', keyField: 'credit', mappings: [{ from: 'name', to: 'case_name' }] } })], [pf('NEW_FIELD_1', '与信参照', 'credit_ref', 'LOOKUP')]));
+  assert(st(addLkNum, 'P1').status !== 'INVALID' && addLkNum.simulation.after.fields.credit_ref.baseType === 'NUMBER' && codes(st(addLkNum, 'P1')).includes('LOOKUP_KEY_NOT_UNIQUE'), 'ADD_LOOKUP: キーの型をルックアップの型にする（NUMBER）・キーの重複禁止なしは注意');
+  const addLkOther = review(plan([step('P1', 'ADD_LOOKUP', 'PROPOSED_FIELD', 'NEW_FIELD_1', [], { spec: { sourceApp: '999999', keyField: 'code', mappings: [{ from: 'name', to: 'case_name' }] } })], [pf('NEW_FIELD_1', '別参照', 'other_ref', 'LOOKUP')]));
+  assert(codes(st(addLkOther, 'P1')).includes('LOOKUP_SOURCE_NOT_LOADED') && st(addLkOther, 'P1').status === 'NEEDS_CONFIRMATION', 'ADD_LOOKUP（未取得の参照元）: 推測せず要確認（LOOKUP_SOURCE_NOT_LOADED）');
+  // normalizeSpec: details の文章形も addMappings に読む
+  const det = review(plan([step('P1', 'UPDATE_LOOKUP', 'LOOKUP', 'customer_lookup', [['追加する取得項目', 'address → customer_address, phone → customer_phone'], ['選択時に表示するフィールド', 'address']])]), withDest({ customer_address: fld('SINGLE_LINE_TEXT', 'customer_address', '顧客住所'), customer_phone: fld('LINK', 'customer_phone', '顧客電話', { protocol: 'CALL' }) }));
+  assert(st(det, 'P1').status === 'VALID' && st(det, 'P1').diff.after.lookup.mappings.length === 4 && st(det, 'P1').diff.after.lookup.pickerFields.includes('address'), 'details（追加する取得項目 / 選択時に表示するフィールド）も addMappings / addPickerFields に正規化');
+  const linkMismatch = review(plan([upd({ addMappings: [{ relatedField: 'phone', field: 'customer_url' }] })]), withDest({ customer_url: fld('LINK', 'customer_url', 'URL', { protocol: 'WEB' }) }));
+  assert(st(linkMismatch, 'P1').status === 'INVALID' && /リンクの種類/.test(st(linkMismatch, 'P1').issues.find(i => i.code === 'LOOKUP_TYPE_MISMATCH').message), 'LINK: プロトコル（CALL / WEB）が違えば取得できない');
+  // KTQueryCheck lookup usage
+  const KTQueryCheck = loadToolkit().KTQueryCheck;
+  const relFields = R.relatedAppModel(INPUTS.data.relatedApps['500'], '500').fields;
+  assert(KTQueryCheck.USAGE.lookup && KTQueryCheck.check('contact_name in ("a")', { fields: relFields, usage: 'lookup' }).errors.some(e => e.code === 'COND_FIELD_NOT_ALLOWED') && KTQueryCheck.check('rank in ("A")', { fields: relFields, usage: 'lookup' }).ok && KTQueryCheck.check('contact_name in ("a")', { fields: relFields, usage: 'view' }).ok, 'KTQueryCheck lookup 用途: テーブル内のフィールドは in でも不可（view では可）');
+  const fh1 = R.fieldsHash(relFields), fh2 = R.fieldsHash(R.relatedAppModel({ ...INPUTS.data.relatedApps['500'], fields: { ...INPUTS.data.relatedApps['500'].fields, extra: { type: 'SINGLE_LINE_TEXT', code: 'extra', label: 'x' } } }, '500').fields);
+  assert(fh1 !== fh2 && fh1 === R.fieldsHash(R.relatedAppModel(JSON.parse(JSON.stringify(INPUTS.data.relatedApps['500'])), '500').fields), 'fieldsHash: 定義が変わると変わり、同じ定義なら同じ（ラベルは含めない）');
+  assert(JSON.stringify(INPUTS.data) === SNAPSHOT, '§12 の後も DATA は不変');
 }
 
 console.log(`\n${state.failed ? 'FAILED' : 'ALL PASSED'}: ${state.passed} passed / ${state.failed} failed`);
