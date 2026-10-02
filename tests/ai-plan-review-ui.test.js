@@ -112,6 +112,12 @@ console.log('\n--- 1. 実行前レビューの表示 ---');
   assert(m.panel.reviewOutput().approvedSteps.join() === 'P1', '判断: 承認した step だけ approvedSteps に入る（保存はしない）');
   await m.$('kt-ai-plan-result').dispatch({ type: 'change', target: { dataset: { step: 'P4' }, value: 'reject' } });
   assert(!m.panel.reviewOutput().approvedSteps.includes('P4'), 'select の change で判断を記録');
+  // staging E2E で発見: 表示中の Review JSON と判断の集計は、判断を変えたら追従する（コピーだけ最新だった）
+  await m.$('kt-ai-plan-result').dispatch({ type: 'change', target: { dataset: { step: 'P2' }, value: 'approve' } });
+  const shown = JSON.parse(m.$('kt-ai-review-json').textContent);
+  assert(shown.approvedSteps.join() === 'P1,P2', 'Review JSON の表示が判断に追従する');
+  const dsum = m.$('kt-ai-review-decisions').textContent;
+  assert(/承認 2/.test(dsum) && /却下 1/.test(dsum) && /未定/.test(dsum), '判断の集計（承認 / 保留 / 却下 / 未定）を表示');
   assert(JSON.stringify(INPUTS.data) === SNAPSHOT, 'UI 経由でも DATA は変更しない');
 }
 

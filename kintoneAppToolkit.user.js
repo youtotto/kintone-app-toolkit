@@ -6847,6 +6847,7 @@
           ${stepLine(er.planOnlySteps || [], '計画のみ（仮適用・自動検証の対象外）', '#555', '○')}
         </div>
         <div style="margin-top:6px; font-size:11px;">追加：${c.additions ?? 0}　既存変更：${c.updates ?? 0}　既存利用：${c.reuse ?? 0}　高リスク変更：${c.highRisk ?? 0}　競合候補：${c.conflicts ?? 0}　確認事項：${c.confirmations ?? 0}　無効：${c.invalid ?? 0}</div>
+        <div id="kt-ai-review-decisions" style="margin-top:4px; font-size:11px;">${esc(decisionSummary(review, {}))}</div>
         ${conflicts ? `<div style="margin-top:8px;"><b>⚠ 競合・重複の候補</b>${conflicts}</div>` : ''}
         ${warnings ? `<div style="margin-top:8px;"><b>Toolkit からの指摘</b>${warnings}</div>` : ''}
         ${procHtml}
@@ -6864,6 +6865,14 @@
       </div>`;
     }
 
+    /** 判断の集計（承認 / 保留 / 却下 / 未定）。decisions は stepId → 'approve' | 'hold' | 'reject' */
+    function decisionSummary(review, decisions) {
+      const ids = (review?.steps || []).map(r => r.stepId);
+      const get = (id) => (decisions instanceof Map ? decisions.get(id) : decisions?.[id]) || '';
+      const n = (v) => ids.filter(id => get(id) === v).length;
+      const undecided = ids.filter(id => !get(id)).length;
+      return `判断: 承認 ${n('approve')}　保留 ${n('hold')}　却下 ${n('reject')}　未定 ${undecided}（承認した step だけが Executor への入力 approvedSteps になります。保存はしません）`;
+    }
     /** Change Plan → HTML（実現したいこと / 現在利用できるもの / 追加が必要なもの / 変更計画 / 代替案 / 影響範囲 / 確認したいこと / 解析できないこと / JSON）。review を渡すと Toolkit 検証を併記 */
     function planHtml(plan, review = null) {
       if (!plan) return '';
@@ -6968,7 +6977,7 @@
       listTargets, fileLabel, toBuildRequest, generate, coverageRows, truncationSummary, sizeSummary, outputFilename,
       panelHtml, resultHtml, capabilityStatusText, sessionLinesHtml, answerHtml, evidenceDetailHtml,
       // AI Change Planner（Phase 7）/ Review（Phase 8）
-      PLANNER_PRESETS, generatePlan, planHtml, planJson, reviewHtml, reviewStepHtml,
+      PLANNER_PRESETS, generatePlan, planHtml, planJson, reviewHtml, reviewStepHtml, decisionSummary,
     };
   })();
 
@@ -7132,6 +7141,13 @@
       try { const r = m.run({ nodes: divs }); if (r && typeof r.catch === 'function') r.catch(() => { }); } catch (e) { }
     }
     const reviewOutput = () => (lastPlan && lastReview) ? KTPlanReview.executorOutput(lastPlan, lastReview, [...decisions.entries()].filter(([, v]) => v === 'approve').map(([k]) => k)) : null;
+    /** 判断を記録し、表示中の Review JSON・判断の集計を追従させる（コピーだけが最新だった不一致を無くす） */
+    const decide = (stepId, v) => {
+      if (v) decisions.set(stepId, v); else decisions.delete(stepId);
+      const out = reviewOutput();
+      const pre = host.querySelector('#kt-ai-review-json'); if (pre && out) pre.textContent = JSON.stringify(out, null, 2);
+      const sum = host.querySelector('#kt-ai-review-decisions'); if (sum && lastReview) sum.textContent = KTContextUi.decisionSummary(lastReview, decisions);
+    };
     /** 変更計画の作成（Planner Context を送る。設定は変更しない）。二重送信防止・requestId 保持 */
     async function plan() {
       if (!paidEnabled) return null;
@@ -7290,7 +7306,7 @@
       $planResult.addEventListener('change', (ev) => {
         const t = ev?.target;
         const sid = t?.dataset?.step ?? (typeof t?.getAttribute === 'function' ? t.getAttribute('data-step') : null);
-        if (sid && t && 'value' in t) { if (t.value) decisions.set(sid, t.value); else decisions.delete(sid); }
+        if (sid && t && 'value' in t) decide(sid, t.value);
       });
       $consentOk.addEventListener('click', async () => { settings.setConsent(true); $consent.style.display = 'none'; await (mode() === 'plan' ? plan() : ask()); });
       $consentCancel.addEventListener('click', () => { $consent.style.display = 'none'; });
@@ -7425,7 +7441,7 @@
       lastPlan: () => lastPlan,
       lastReview: () => lastReview,
       reviewOutput,
-      decide: (stepId, v) => { if (v) decisions.set(stepId, v); else decisions.delete(stepId); },
+      decide,
       lastAnswer: () => lastAnswer,
       capability: () => capability,
       currentOutput: () => {
