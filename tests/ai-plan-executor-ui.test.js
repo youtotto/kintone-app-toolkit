@@ -189,6 +189,59 @@ console.log('\n--- 2. 失敗 / 未対応のみ / stale / 権限 / Simulation mis
   m.mock.api.getPreviewFields = orig;
 }
 
+console.log('\n--- 2b. Tier 2（通知 / リマインダー / フィールド変更）の UI ---');
+{
+  // 通知 ＋ リマインダー ＋ 必須化 ＋ 表示名変更 ＋ 類似通知
+  const PLAN_T2 = {
+    ok: true, contractVersion: '2.1',
+    meta: { requestId: 'pl-t2', gateway: { product: 'toolkit', feature: 'change-planner', promptVersion: '1', contextVersion: 'planner-1' }, normalization: { warnings: [] }, ai: { model: 'm' }, usage: { usedThisMonth: 1, monthlyLimit: 20 } },
+    plan: {
+      goal: '担当者が設定されたら本人に通知したい',
+      assessment: { summary: 's', usableExistingFields: [{ fieldCode: 'owner', note: '', evidenceIds: [E('owner')] }], usableExistingSettings: [], missingCapabilities: [], uncertainties: [] },
+      relevantFields: [{ fieldCode: 'owner', role: '担当', evidenceIds: [E('owner')] }],
+      proposedFields: [],
+      steps: [
+        mkStep('P1', 'ADD_NOTIFICATION', 'NOTIFICATION', '担当者設定通知', { name: '担当者設定通知', targets: ['FIELD_ENTITY:owner'], filterCond: 'owner not in ("")' }),
+        mkStep('P2', 'ADD_REMINDER', 'REMINDER', '期限7日前', { name: '期限7日前', timingField: 'due_date', daysLater: '-7', time: '09:00', targets: ['FIELD_ENTITY:owner'] }),
+        mkStep('P3', 'UPDATE_FIELD', 'FIELD', 'owner', { required: true }),
+        mkStep('P4', 'UPDATE_FIELD', 'FIELD', 'case_name', { name: '案件名（正式）' }),
+        mkStep('P5', 'ADD_NOTIFICATION', 'NOTIFICATION', '高額案件アラート', { name: '高額案件アラート', targets: ['FIELD_ENTITY:approver'], filterCond: 'amount >= "1000000"' }),
+      ],
+      alternatives: [], impact: [], questions: [], unknowns: [], planConfidence: 'INFERRED',
+      summary: { steps: 5, invalidSteps: 0, needsConfirmation: 0, proposedFields: 0, questions: 0 },
+    },
+  };
+  const m = mount({ planResponse: PLAN_T2 });
+  await tick(); await runPlan(m);
+  for (const id of ['P1', 'P2', 'P3', 'P4', 'P5']) m.panel.decide(id, 'approve');
+  const e1 = execHtml(m);
+  assert(/通知追加[\s\S]*?<b>2（P1, P5）/.test(e1) && /リマインダー追加[\s\S]*?<b>1（P2）/.test(e1) && /フィールド変更[\s\S]*?<b>2（P3, P4）/.test(e1) && /△ フィールド変更/.test(e1) && /✓ 通知追加/.test(e1), 'カテゴリ別の件数（✓ 通知追加 2 / ✓ リマインダー追加 1 / △ フィールド変更 2）');
+  await click(m, 'kt-ai-exec-start'); await tick();
+  const e2 = execHtml(m);
+  assert(m.panel.executorState().stage === 'confirm' && e2.includes('＋ 通知追加 2 件') && e2.includes('＋ リマインダー追加 1 件') && e2.includes('＋ フィールド変更 2 件'), '最終確認: カテゴリ別の件数');
+  assert(e2.includes('レコードの条件通知: Before 既存 2 件 → After 3 件') && e2.includes('リマインダー: Before 1 件 → After 2 件') && e2.includes('「担当者」 必須: いいえ → はい（フィールドコード owner は変わりません）') && e2.includes('表示名: 案件名 → 案件名（正式）'), 'Before / After: 通知（既存 2 → 3）・リマインダー（1 → 2）・フィールド（必須 いいえ → はい・表示名）');
+  assert(e2.includes('⚠ 既存フィールドを変更します') && e2.includes('「担当者」を必須に変更します。この変更は今後の入力・保存に影響します。既存レコードの値は Toolkit では確認していません。') && e2.includes('フィールドコード（case_name）は変わりません'), 'Sensitive: 必須化と表示名変更を確認ダイアログで目立たせる（指定の文言）');
+  assert(/P5[\s\S]*⚠ 既存の設定と似ています[\s\S]*既存: 「高額案件の登録」/.test(e2), 'POSSIBLE_DUPLICATE を最終確認で再度人間に見せる');
+  await click(m, 'kt-ai-exec-go'); await tick(); await tick();
+  const e3 = execHtml(m);
+  const st = m.panel.executorState();
+  assert(st.stage === 'done' && st.execution.status === 'DONE' && e3.includes('✓ 5 件 VERIFIED') && e3.includes('Simulationとの一致：✓'), `完了: 5 件 VERIFIED・Simulation 一致（${st.execution?.status}）`);
+  assert(e3.includes('通知: Before 既存 2 件 → After 3 件（＋1 件）') && e3.includes('リマインダー: Before 1 件 → After 2 件') && e3.includes('必須: いいえ → はい') && e3.includes('表示名: 案件名 → 案件名（正式）'), '結果一覧の各 step に Before / After');
+  assert(m.mock.st.perRecord.length === 4 && m.mock.st.reminders.length === 2 && m.mock.st.fields.owner.required === true && m.mock.st.fields.case_name.label === '案件名（正式）' && m.mock.st.fields.case_name.code === 'case_name' && m.mock.st.general.length === 5, 'モックの動作テスト環境: 通知 2 → 4・リマインダー 1 → 2・必須化・表示名変更・既存はすべて保持');
+  await click(m, 'kt-ai-exec-audit-copy');
+  const audit = JSON.parse(m.copies[m.copies.length - 1]);
+  assert(audit.beforeAfter.length === 5 && audit.beforeAfter.find(x => x.stepId === 'P3').before.required === false && audit.beforeAfter.find(x => x.stepId === 'P3').after.required === true && audit.rollbackPlan.steps.map(x => x.actionType).sort().join() === 'RESTORE_FIELD_PROPERTY,RESTORE_FIELD_PROPERTY,RESTORE_NOTIFICATION_SETTINGS,RESTORE_NOTIFICATION_SETTINGS,RESTORE_REMINDER_SETTINGS', 'Audit: 各 step の before / after と rollback 計画（RESTORE_*）');
+}
+{
+  // 評価できない条件式（AI の `owner != ""`）は承認しても実行不可として出る
+  const PLAN_BAD = { ...PLAN_X, plan: { ...PLAN_X.plan, proposedFields: [], steps: [mkStep('P1', 'ADD_NOTIFICATION', 'NOTIFICATION', 'x', { name: 'x', targets: ['FIELD_ENTITY:owner'], filterCond: 'owner != ""' })], summary: { steps: 1, invalidSteps: 0, needsConfirmation: 0, proposedFields: 0, questions: 0 } } };
+  const m = mount({ planResponse: PLAN_BAD });
+  await tick(); await runPlan(m);
+  m.panel.decide('P1', 'approve');
+  const e = execHtml(m);
+  assert(/実行不可[\s\S]*?<b>1 件（P1）/.test(e) && /id="kt-ai-exec-start"[^>]*disabled/.test(e), '条件式が受理されない通知は「× 実行不可」・ボタンは押せない');
+}
+
 console.log('\n--- 3. 回帰: Review UI の既存要素は変わらない ---');
 {
   const m = mount();

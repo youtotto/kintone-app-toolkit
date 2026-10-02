@@ -6348,13 +6348,14 @@
         const res = scope === 'general'
           ? await api.putPreviewGeneralNotifications(appId, { notifications: all, ...(cur?.notifyToCommenter != null ? { notifyToCommenter: cur.notifyToCommenter } : {}) }, String(cur?.revision ?? revision ?? ''))
           : await api.putPreviewPerRecordNotifications(appId, { notifications: all }, String(cur?.revision ?? revision ?? ''));
-        return { revision: String(res?.revision ?? ''), requests: [{ method: 'PUT', path: scope === 'general' ? '/k/v1/preview/app/notifications/general.json' : '/k/v1/preview/app/notifications/perRecord.json', existing: existing.length, total: all.length }], before: { count: existing.length }, after: { count: all.length, added: p.payload.entries.length } };
+        return { revision: String(res?.revision ?? ''), requests: [{ method: 'PUT', path: scope === 'general' ? '/k/v1/preview/app/notifications/general.json' : '/k/v1/preview/app/notifications/perRecord.json', existing: existing.length, total: all.length }], before: { count: existing.length }, after: { count: all.length, added: p.payload.entries.length }, existingList: clone(existing) };
       },
-      async verify({ api, appId, snapshot }, p) {
+      async verify({ api, appId, snapshot }, p, applied) {
         const scope = p.payload.scope;
         const cur = scope === 'general' ? await api.getPreviewGeneralNotifications(appId) : await api.getPreviewPerRecordNotifications(appId);
         const list = Array.isArray(cur?.notifications) ? cur.notifications : [];
-        const beforeList = scope === 'general' ? (snapshot?.generalNotify?.notifications || []) : (snapshot?.perRecordNotify?.notifications || []);
+        // 基準は「この step の反映直前の一覧」（同じ実行で先行 step が足した分を含む）。無ければ snapshot
+        const beforeList = applied?.existingList || (scope === 'general' ? (snapshot?.generalNotify?.notifications || []) : (snapshot?.perRecordNotify?.notifications || []));
         const checks = preservationChecks(beforeList, list, scope === 'general' ? generalKey : perRecordKey, p.payload.entries.length);
         const check = (name, ok, expected, actual) => checks.push({ name, ok, expected, actual });
         for (const e of p.payload.entries) {
@@ -6402,12 +6403,12 @@
         if (re.verdict === 'EXACT_DUPLICATE') throw Object.assign(new Error('同じリマインダーが既に存在します'), { code: 'EXACT_DUPLICATE' });
         const all = [...clone(existing), ...p.payload.entries];
         const res = await api.putPreviewReminders(appId, { notifications: all, ...(cur?.timezone ? { timezone: cur.timezone } : {}) }, String(cur?.revision ?? revision ?? ''));
-        return { revision: String(res?.revision ?? ''), requests: [{ method: 'PUT', path: '/k/v1/preview/app/notifications/reminder.json', existing: existing.length, total: all.length }], before: { count: existing.length }, after: { count: all.length, added: 1 } };
+        return { revision: String(res?.revision ?? ''), requests: [{ method: 'PUT', path: '/k/v1/preview/app/notifications/reminder.json', existing: existing.length, total: all.length }], before: { count: existing.length }, after: { count: all.length, added: 1 }, existingList: clone(existing) };
       },
-      async verify({ api, appId, snapshot }, p) {
+      async verify({ api, appId, snapshot }, p, applied) {
         const cur = await api.getPreviewReminders(appId);
         const list = Array.isArray(cur?.notifications) ? cur.notifications : [];
-        const checks = preservationChecks(snapshot?.reminderNotify?.notifications || [], list, reminderKey, 1);
+        const checks = preservationChecks(applied?.existingList || snapshot?.reminderNotify?.notifications || [], list, reminderKey, 1);
         const check = (name, ok, expected, actual) => checks.push({ name, ok, expected, actual });
         const e = p.payload.entries[0];
         const loose = (n) => `${n.timing?.code}|${normCondE(n.filterCond)}|${(n.targets || []).map(t => entityKey(t.entity)).sort().join(',')}|${n.title || ''}`;
@@ -6438,7 +6439,7 @@
         if (changes.required && changes.required.to === true) sensitive.push({ code: 'REQUIRED_ON', message: `「${before.label}」を必須に変更します。この変更は今後の入力・保存に影響します。既存レコードの値は Toolkit では確認していません。` });
         if (changes.required && changes.required.to === false) sensitive.push({ code: 'REQUIRED_OFF', message: `「${before.label}」の必須を解除します。今後は未入力でも保存できるようになります。` });
         if (changes.label) sensitive.push({ code: 'LABEL_CHANGE', message: `表示名を「${changes.label.from}」→「${changes.label.to}」に変更します。フィールドコード（${before.code}）は変わりません。一覧・通知・画面の表示名が変わります。` });
-        return { payload: { code: before.code, changes: Object.fromEntries(changed.map(k => [k, after[k]])) }, expect: { code: before.code, type: before.type, ...Object.fromEntries(changed.map(k => [k, after[k]])) }, summary: `フィールド「${before.label}」（${before.code}）: ${changed.map(k => k === 'label' ? `表示名 ${before.label} → ${after.label}` : `必須 ${before.required ? 'はい' : 'いいえ'} → ${after.required ? 'はい' : 'いいえ'}`).join('・')}`, sensitive, before: Object.fromEntries(changed.map(k => [k, before[k]])), after: Object.fromEntries(changed.map(k => [k, after[k]])) };
+        return { fieldLabel: before.label, payload: { code: before.code, changes: Object.fromEntries(changed.map(k => [k, after[k]])) }, expect: { code: before.code, type: before.type, ...Object.fromEntries(changed.map(k => [k, after[k]])) }, summary: `フィールド「${before.label}」（${before.code}）: ${changed.map(k => k === 'label' ? `表示名 ${before.label} → ${after.label}` : `必須 ${before.required ? 'はい' : 'いいえ'} → ${after.required ? 'はい' : 'いいえ'}`).join('・')}`, sensitive, before: Object.fromEntries(changed.map(k => [k, before[k]])), after: Object.fromEntries(changed.map(k => [k, after[k]])) };
       },
       async apply({ api, appId, revision }, p) {
         const cur = await api.getPreviewFields(appId);
@@ -7906,9 +7907,28 @@
     // ---- Preview Executor（Phase 9）の表示。設定を書くのは KTPlanExecutor。ここは HTML だけ ----
     const EXEC_STEP_JA = { PENDING: '待機中', RUNNING: '処理中...', APPLIED: '反映済み（検証中）', VERIFIED: 'VERIFIED', VERIFY_FAILED: 'VERIFY_FAILED（状態不一致）', FAILED: 'FAILED', SKIPPED: '未実行', BLOCKED: '実行不可', UNSUPPORTED: 'PLAN_ONLY', ROLLED_BACK: 'ROLLED_BACK' };
     const EXEC_STEP_COLOR = { VERIFIED: '#2e7d32', APPLIED: '#1a73e8', RUNNING: '#1a73e8', VERIFY_FAILED: '#b00020', FAILED: '#b00020', BLOCKED: '#b00020', UNSUPPORTED: '#555', SKIPPED: '#777', PENDING: '#777' };
-    const EXEC_REASON_JA = { NOT_APPROVED: '承認されていません', REVIEW_BLOCKED: 'Review で実行不可', PLAN_ONLY: '現在の Executor では自動反映できません', PREVIEW_NOT_SUPPORTED: '現在の Executor では自動反映できません', FIELD_TYPE_NOT_SUPPORTED: 'このフィールド型は現在の Executor では追加できません', OPTIONS_MISSING: '選択肢が決まっていません', DEPENDENCY_NOT_EXECUTABLE: '依存する step が実行されません', INVALID_CONDITION: '条件式が kintone で評価できません（計画の条件式を直してください）', REVALIDATION_FAILED: '実行前の再検証で止まりました', STOPPED_AFTER_FAILURE: '前の step の失敗で停止', DEPENDENCY_NOT_VERIFIED: '依存 step が検証済みでない', PERMISSION_DENIED: 'アプリ設定を変更する権限がありません', REVISION_MISMATCH: '他の変更が入りました（revision 不一致）', TARGET_EXISTS: '同じ名前 / コードが既にあります', API_ERROR: 'API エラー', VERIFY_FAILED: 'API は成功したが状態が一致しません' };
+    const EXEC_REASON_JA = { NOT_APPROVED: '承認されていません', REVIEW_BLOCKED: 'Review で実行不可', PLAN_ONLY: '現在の Executor では自動反映できません', PREVIEW_NOT_SUPPORTED: '現在の Executor では自動反映できません', FIELD_TYPE_NOT_SUPPORTED: 'このフィールド型は現在の Executor では追加できません', OPTIONS_MISSING: '選択肢が決まっていません', DEPENDENCY_NOT_EXECUTABLE: '依存する step が実行されません', INVALID_CONDITION: '条件式が kintone で評価できません（計画の条件式を直してください）', EXACT_DUPLICATE: '同じ設定が既にあります', NOTIFICATION_SCOPE_AMBIGUOUS: 'アプリの条件通知かレコードの条件通知か決められません', RECIPIENT_FIELD_INVALID: '通知先に使えないフィールドです', RECIPIENT_FIELD_MISSING: '通知先のフィールドがありません', REMINDER_TIME_MISSING: '通知時刻が決まっていません', REMINDER_FIELD_TYPE: '基準フィールドが日付型ではありません', FIELD_CHANGE_NOT_SUPPORTED: '表示名・必須以外の変更は反映しません', FIELD_CODE_CHANGE_NOT_SUPPORTED: 'フィールドコードの変更は反映しません', TARGET_CHANGED: '対象の設定が Review 後に変わっています', TARGET_MISSING: '対象が動作テスト環境にありません', REVALIDATION_FAILED: '実行前の再検証で止まりました', STOPPED_AFTER_FAILURE: '前の step の失敗で停止', DEPENDENCY_NOT_VERIFIED: '依存 step が検証済みでない', PERMISSION_DENIED: 'アプリ設定を変更する権限がありません', REVISION_MISMATCH: '他の変更が入りました（revision 不一致）', TARGET_EXISTS: '同じ名前 / コードが既にあります', API_ERROR: 'API エラー', VERIFY_FAILED: 'API は成功したが状態が一致しません' };
     const execActionJa = (a) => ({ ADD_FIELD: 'フィールド追加', ADD_VIEW: '一覧追加', ADD_NOTIFICATION: '通知追加', ADD_REMINDER: 'リマインダー追加' }[a] || ACTION_JA[a] || a);
-    const execStepLine = (st) => `<div style="display:flex; gap:8px; align-items:baseline; font-size:12px;"><span style="min-width:34px; font-weight:600;">${esc(st.stepId)}</span><span style="flex:1;">${esc(st.title || execActionJa(st.actionType))}</span><span style="color:${EXEC_STEP_COLOR[st.status] || '#555'}; font-weight:600;">${esc(EXEC_STEP_JA[st.status] || st.status)}</span></div>${st.status !== 'VERIFIED' && st.status !== 'RUNNING' && st.status !== 'PENDING' && (st.message || st.reason) ? `<div style="font-size:11px; opacity:.75; margin-left:42px;">${esc(st.message || EXEC_REASON_JA[st.reason] || st.reason)}</div>` : ''}`;
+    const execStepLine = (st) => `<div style="display:flex; gap:8px; align-items:baseline; font-size:12px;"><span style="min-width:34px; font-weight:600;">${esc(st.stepId)}</span><span style="flex:1;">${esc(st.title || execActionJa(st.actionType))}</span><span style="color:${EXEC_STEP_COLOR[st.status] || '#555'}; font-weight:600;">${esc(EXEC_STEP_JA[st.status] || st.status)}</span></div>${st.status !== 'VERIFIED' && st.status !== 'RUNNING' && st.status !== 'PENDING' && (st.message || st.reason) ? `<div style="font-size:11px; opacity:.75; margin-left:42px;">${esc(st.message || EXEC_REASON_JA[st.reason] || st.reason)}</div>` : ''}${st.before || st.after ? `<div style="font-size:11px; opacity:.75; margin-left:42px;">${esc(beforeAfterText(st))}</div>` : ''}`;
+    const existingText = (ex) => ex.title ? `「${ex.title}」` : ex.entity ? `${ex.entity.type}:${ex.entity.code}` : ex.timing ? `${ex.timing.code} の ${ex.timing.daysLater} 日後` : '';
+    const beforeAfterText = (st) => {
+      const b = st.before || {}, a = st.after || {};
+      if (st.actionType === 'ADD_NOTIFICATION') return `通知: Before 既存 ${b.count ?? '—'} 件 → After ${a.count ?? '—'} 件（＋${a.added ?? 1} 件）`;
+      if (st.actionType === 'ADD_REMINDER') return `リマインダー: Before ${b.count ?? '—'} 件 → After ${a.count ?? '—'} 件`;
+      if (st.actionType === 'UPDATE_FIELD') return Object.keys(a).map(k => k === 'required' ? `必須: ${b.required ? 'はい' : 'いいえ'} → ${a.required ? 'はい' : 'いいえ'}` : `${k === 'label' ? '表示名' : k}: ${b[k] ?? '—'} → ${a[k] ?? '—'}`).join('・');
+      return '';
+    };
+    /** 最終確認の Before / After（prepared の snapshot と payload から決定的に出す） */
+    function executorBeforeAfterHtml(x, p) {
+      const pp = x.prepared; if (!pp) return '';
+      const row = (t) => `<div style="font-size:11px; margin-left:12px; opacity:.85;">${esc(t)}</div>`;
+      if (x.actionType === 'ADD_NOTIFICATION') { const list = pp.payload.scope === 'general' ? (p?.snapshot?.generalNotify?.notifications || []) : (p?.snapshot?.perRecordNotify?.notifications || []); return row(`${pp.payload.scope === 'general' ? 'アプリの条件通知' : 'レコードの条件通知'}: Before 既存 ${list.length} 件 → After ${list.length + pp.payload.entries.length} 件（既存はそのまま＋追加）`); }
+      if (x.actionType === 'ADD_REMINDER') { const n = (p?.snapshot?.reminderNotify?.notifications || []).length; return row(`リマインダー: Before ${n} 件 → After ${n + 1} 件`); }
+      if (x.actionType === 'UPDATE_FIELD') return row(`「${pp.fieldLabel ?? pp.expect.code}」${Object.keys(pp.after || {}).map(k => k === 'required' ? ` 必須: ${pp.before.required ? 'はい' : 'いいえ'} → ${pp.after.required ? 'はい' : 'いいえ'}` : ` 表示名: ${pp.before[k]} → ${pp.after[k]}`).join('・')}（フィールドコード ${pp.expect.code} は変わりません）`);
+      if (x.actionType === 'ADD_FIELD') { const n = Object.keys(p?.snapshot?.fields?.properties || {}).length; return row(`フィールド: Before ${n} 件 → After ${n + 1} 件`); }
+      if (x.actionType === 'ADD_VIEW') { const n = Object.keys(p?.snapshot?.views?.views || {}).length; return row(`一覧: Before ${n} 件 → After ${n + 1} 件`); }
+      return '';
+    }
     /**
      * @param {object} s { stage: 'idle'|'preparing'|'blocked'|'confirm'|'running'|'done', classified[], prepared, execution, error, available }
      */
@@ -7917,8 +7937,11 @@
       const executable = cls.filter(x => x.status === 'PENDING'), unsupported = cls.filter(x => x.status === 'UNSUPPORTED'), blocked = cls.filter(x => x.status === 'BLOCKED');
       const line = (ids, label, color, mark) => `<div style="display:flex; justify-content:space-between; font-size:12px;"><span style="color:${color};">${mark} ${esc(label)}</span><b>${ids.length} 件${ids.length ? `（${esc(ids.map(x => x.stepId).join(', '))}）` : ''}</b></div>`;
       const unsupportedList = unsupported.length ? `<div style="margin-top:4px; display:grid; gap:2px;">${unsupported.map(x => `<div style="font-size:11px; opacity:.8;">${esc(x.stepId)} ${esc(x.title || execActionJa(x.actionType))}：<b>PLAN_ONLY</b> — ${esc(EXEC_REASON_JA[x.reason] || x.message || x.reason)}</div>`).join('')}</div>` : '';
+      // カテゴリ別（Tier 2）: ✓ 追加系 / △ 既存フィールドの変更（REVIEW_REQUIRED）
+      const CATEGORY = [['ADD_FIELD', 'フィールド追加', '✓', '#2e7d32'], ['ADD_VIEW', '一覧追加', '✓', '#2e7d32'], ['ADD_NOTIFICATION', '通知追加', '✓', '#2e7d32'], ['ADD_REMINDER', 'リマインダー追加', '✓', '#2e7d32'], ['UPDATE_FIELD', 'フィールド変更', '△', '#b26a00']];
+      const catLines = CATEGORY.map(([a, label, mark, color]) => { const ids = executable.filter(x => x.actionType === a); return ids.length ? `<div style="display:flex; justify-content:space-between; font-size:12px;"><span style="color:${color};">${mark} ${esc(label)}</span><b>${ids.length}（${esc(ids.map(x => x.stepId).join(', '))}）</b></div>` : ''; }).join('');
       const head = `<div style="border-top:1px dashed #1a73e8; padding-top:8px;"><b>動作テスト環境への反映（Preview Executor）</b>
-        <div style="margin-top:4px; display:grid; gap:2px;">${line(executable, '承認済み・実行可能', '#2e7d32', '✓')}${line(unsupported, '承認済みだが未対応', '#b26a00', '△')}${line(blocked, '実行不可', '#b00020', '×')}</div>${unsupportedList}`;
+        <div style="margin-top:4px; display:grid; gap:2px;">${line(executable, '承認済み・実行可能', '#2e7d32', '✓')}${catLines ? `<div style="margin-left:12px; display:grid; gap:1px;">${catLines}</div>` : ''}${line(unsupported, '承認済みだが未対応', '#b26a00', '△')}${line(blocked, '実行不可', '#b00020', '×')}</div>${unsupportedList}`;
       const foot = '</div>';
       const note = (t, color = '#555') => `<div style="font-size:11px; color:${color}; margin-top:4px;">${esc(t)}</div>`;
       if (s.stage === 'idle' || s.stage === 'preparing') {
@@ -7937,10 +7960,12 @@
         const byType = {};
         for (const x of pend) byType[x.actionType] = (byType[x.actionType] || 0) + 1;
         const lines = Object.entries(byType).map(([a, n]) => `<div style="font-size:12px;">＋ ${esc(execActionJa(a))} ${n} 件</div>`).join('');
-        const details = pend.map(x => `<div style="font-size:11px; opacity:.85;">${esc(x.stepId)} ${esc(x.prepared?.summary || x.title)}</div>`).join('');
+        const details = pend.map(x => `<div style="font-size:11px; opacity:.85;">${esc(x.stepId)} ${esc(x.prepared?.summary || x.title)}</div>${executorBeforeAfterHtml(x, p)}${(x.warnings || []).map(w => `<div style="font-size:11px; color:#b26a00; margin-left:12px;">⚠ ${esc(w.message)}${w.existing ? `（既存: ${esc(existingText(w.existing))}）` : ''}</div>`).join('')}`).join('');
+        const sensitive = pend.flatMap(x => (x.prepared?.sensitive || []).map(sv => ({ stepId: x.stepId, ...sv })));
+        const sensitiveHtml = sensitive.length ? `<div style="margin-top:8px; border:2px solid #b00020; border-radius:6px; padding:6px; background:rgba(176,0,32,.06);"><b style="color:#b00020;">⚠ 既存フィールドを変更します</b>${sensitive.map(sv => `<div style="font-size:12px; margin-top:4px;">${esc(sv.stepId)}：${esc(sv.message)}</div>`).join('')}</div>` : '';
         return `${head}<div id="kt-ai-exec-confirm" style="margin-top:8px; border:2px solid #b26a00; border-radius:6px; padding:8px;">
           <b>動作テスト環境へ以下を反映します。</b>
-          <div style="margin-top:4px;">${lines}</div><div style="margin-top:4px; display:grid; gap:2px;">${details}</div>
+          <div style="margin-top:4px;">${lines}</div><div style="margin-top:4px; display:grid; gap:2px;">${details}</div>${sensitiveHtml}
           <div style="margin-top:6px; font-size:12px;"><b>運用環境には反映されません。</b>（動作テスト環境 revision ${esc(String(p?.revision?.preview ?? '—'))}・実行前の設定は snapshot として保持します）</div>
           <div style="margin-top:8px; display:flex; gap:6px;"><button type="button" id="kt-ai-exec-cancel" class="btn" style="height:28px;">キャンセル</button><button type="button" id="kt-ai-exec-go" class="btn" style="height:28px; font-weight:600; border-color:#b26a00;">動作テスト環境へ反映</button></div>
         </div>${foot}`;
