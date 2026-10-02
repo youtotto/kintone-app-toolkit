@@ -1437,11 +1437,392 @@
         a.access.localeCompare(b.access));
     }
 
+    // ==== Phase 16: Field Scanner の純粋な解析（UI から移設。生成コードの再解析にも使う）====
+    // kintoneのイベント名の形か（app.record.* / mobile.app.record.* / app.report.show など）
+    const EVENT_NAME_RE = /^(mobile\.)?app\.(record|report)\.[A-Za-z0-9_.\u00C0-\uFFFF]+$/;
+
+    function extractEventTypes(cleanText) {
+      const s = String(cleanText || '');
+      const direct = new Set();
+
+      // ---- ① kintone.events.on(...) の第1引数から検出（確実）----
+      //   文字列リテラル、または配列リテラルをそのまま渡している場合に対応する
+      const rx = /kintone\.events\.on\s*\(\s*(\[[^\]]*\]|['"`][^'"`]*['"`])/g;
+      let m;
+      while ((m = rx.exec(s)) !== null) {
+        const strRx = /['"`]([^'"`]+)['"`]/g;
+        let sm;
+        while ((sm = strRx.exec(m[1])) !== null) {
+          const ev = sm[1].trim();
+          if (EVENT_NAME_RE.test(ev)) direct.add(ev);
+        }
+      }
+
+      // ---- ② ファイル内のイベント名らしき文字列から検出（推定）----
+      //   var events = [...]; kintone.events.on(events, cb) のような
+      //   変数経由の書き方は①では拾えないため、文字列リテラル全体を走査して補う。
+      //   「登録に使われている」とは限らないので、確度は下げて扱う。
+      const inferred = new Set();
+      if (/kintone\.events\.on\s*\(/.test(s)) {
+        const anyStr = /['"`]([^'"`\n]+)['"`]/g;
+        let am;
+        while ((am = anyStr.exec(s)) !== null) {
+          const ev = am[1].trim();
+          if (EVENT_NAME_RE.test(ev) && !direct.has(ev)) inferred.add(ev);
+        }
+      }
+
+      return [
+        ...[...direct].sort().map(name => ({ name, direct: true })),
+        ...[...inferred].sort().map(name => ({ name, direct: false })),
+      ];
+    }
+
+
+    /**
+     * JavaScript内で「ステータスと比較している文字列」を抽出する
+     *
+     *   record['ステータス'].value === '承認待ち'
+     *   event.record.ステータス.value !== '完了'
+     *   '完了' === record['ステータス'].value      （左右が逆の書き方）
+     *
+     * ステータス名を変更してもJavaScriptは追随しないため、
+     * 存在しない名前との比較が残ると条件が成立しなくなる。
+     * @returns {Array<{value, line}>}
+     */
+    function extractStatusComparisons(cleanText, statusCodes, lineIndexFn) {
+      const s = String(cleanText || '');
+      if (!s) return [];
+      const out = [];
+      const push = (value, index) => {
+        const v = String(value || '').trim();
+        if (v) out.push({ value: v, line: lineIndexFn ? lineIndexFn(index) : null });
+      };
+      const esc = (v) => String(v).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+      // --- ステータス値を持つ式を列挙する ---
+      //   プロセス管理のイベントでは event.nextStatus.value / event.status.value、
+      //   レコードからはステータスフィールドの .value がステータス名になる。
+      const exprs = ['event\\s*\\.\\s*(?:nextStatus|status)\\s*\\.\\s*value'];
+      for (const code of (statusCodes || [])) {
+        const c = esc(code);
+        exprs.push(`record\\s*(?:\\[\\s*['"\`]${c}['"\`]\\s*\\]|\\.${c})\\s*\\.\\s*value`);
+      }
+
+      // --- 上記を代入した変数も追跡する ---
+      //   例: const nStatus = event.nextStatus.value;
+      const tokens = [...exprs];
+      const rxAssign = /(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*([^;\n]+)/g;
+      let am;
+      while ((am = rxAssign.exec(s)) !== null) {
+        const name = am[1];
+        const rhs = am[2];
+        if (exprs.some(e => new RegExp(e).test(rhs))) tokens.push(esc(name));
+      }
+
+      for (const token of tokens) {
+        // 比較（左右どちらに文字列が来る書き方にも対応）
+        const rxA = new RegExp(`${token}\\s*(?:===?|!==?)\\s*['"\`]([^'"\`]+)['"\`]`, 'g');
+        const rxB = new RegExp(`['"\`]([^'"\`]+)['"\`]\\s*(?:===?|!==?)\\s*${token}`, 'g');
+        for (const rx of [rxA, rxB]) {
+          let m;
+          while ((m = rx.exec(s)) !== null) push(m[1], m.index);
+        }
+
+        // switch 文の case ラベル
+        //   例: switch (nStatus) { case 'A03:1次Aチェック中': ... }
+        const rxSw = new RegExp(`switch\\s*\\(\\s*${token}\\s*\\)\\s*\\{`, 'g');
+        let sm;
+        while ((sm = rxSw.exec(s)) !== null) {
+          // 対応する閉じ括弧までを switch の本体とみなす
+          let depth = 0;
+          let end = -1;
+          for (let i = sm.index + sm[0].length - 1; i < s.length; i++) {
+            if (s[i] === '{') depth++;
+            else if (s[i] === '}') {
+              depth--;
+              if (depth === 0) { end = i; break; }
+            }
+          }
+          const bodyText = s.slice(sm.index, end < 0 ? s.length : end);
+          const rxCase = /case\s*['"`]([^'"`]+)['"`]\s*:/g;
+          let cm;
+          while ((cm = rxCase.exec(bodyText)) !== null) push(cm[1], sm.index + cm.index);
+        }
+      }
+
+      // 同じ値・同じ行の重複を除く
+      const seen = new Set();
+      return out.filter(o => {
+        const k = `${o.value}|${o.line}`;
+        if (seen.has(k)) return false;
+        seen.add(k);
+        return true;
+      });
+    }
+
+    /**
+     * JavaScript内の比較のうち、存在しないステータス名を集約する
+     * @returns {Array<{value, files:Array, count:number}>}
+     */
+    function collectUnknownStatusRefs(files, statusStates, statusCodes) {
+      const known = new Set(statusStates || []);
+      // プロセス管理が無効なアプリでは検証しない（すべて未知になってしまうため）
+      // ステータスフィールドが無くても event.nextStatus 経由の判定は検証できる
+      if (!known.size) return [];
+
+      const agg = new Map();
+      for (const f of files || []) {
+        if (f.kind !== 'js' || !f.text) continue;
+        const clean = stripCommentsOnly(f.text);
+        const li = buildLineIndex(clean);
+        for (const c of extractStatusComparisons(clean, statusCodes, (i) => lineAt(li, i))) {
+          if (known.has(c.value)) continue;
+          let a = agg.get(c.value);
+          if (!a) { a = { value: c.value, files: new Map(), count: 0 }; agg.set(c.value, a); }
+          a.count++;
+          const key = `${f.target}:${f.name}`;
+          if (!a.files.has(key)) a.files.set(key, []);
+          const lines = a.files.get(key);
+          if (lines.length < 10 && !lines.includes(c.line)) lines.push(c.line);
+        }
+      }
+      return [...agg.values()]
+        .map(a => ({
+          value: a.value, count: a.count,
+          files: [...a.files.entries()].map(([name, lines]) => ({ name, lines: [...lines].sort((x, y) => x - y) })),
+        }))
+        .sort((a, b) => String(a.value).localeCompare(String(b.value), 'ja'));
+    }
+
+
+    // パターン種別付きの正規表現を作る
+    //   ELEMENT: getFieldElement(s)('code') / BRACKET: ['code'] / QUOTED: 'code' / BARE: 裸の識別子
+    function buildRegexps(code) {
+      const safe = String(code || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const pats = [
+        { kind: 'ELEMENT', rx: new RegExp(`getFieldElements?\\(\\s*['"\`]${safe}['"\`]\\s*\\)`, 'gu') },
+        { kind: 'BRACKET', rx: new RegExp(`\\[\\s*['"\`]${safe}['"\`]\\s*\\]`, 'gu') },
+        { kind: 'QUOTED', rx: new RegExp(`['"\`]${safe}['"\`]`, 'gu') },
+      ];
+      if (/^[A-Za-z_$][A-Za-z0-9_$]*$/.test(code)) {
+        pats.push({ kind: 'BARE', rx: new RegExp(`(?<![A-Za-z0-9_$])${safe}(?![A-Za-z0-9_$])`, 'g') });
+      }
+      return pats;
+    }
+
+    // アクセス種別の推定（正規表現ベースの簡易判定。断定せず confidence を必ず併記する）
+    //   READ / WRITE / ELEMENT / SHOW_HIDE / CONTROL / FIELDS_PARAM / QUERY / OTHER
+    function classifyAccess(text, start, end, kind) {
+      if (kind === 'ELEMENT') return { access: 'ELEMENT', confidence: 'HIGH' };
+      const before = text.slice(Math.max(0, start - 80), start);
+      const after = text.slice(end, end + 80);
+
+      if (/setFieldShown\(\s*$/.test(before)) return { access: 'SHOW_HIDE', confidence: 'HIGH' };
+
+      // 裸の識別子は同名変数・関数名の可能性があるため確度を1段下げる
+      const cap = (c) => (kind === 'BARE')
+        ? (c === 'HIGH' ? 'MEDIUM' : 'LOW')
+        : c;
+
+      // .value.push() など、配列を直接書き換える呼び出しは WRITE として扱う
+      if (/^\s*\.value\s*\.\s*(push|pop|shift|unshift|splice|sort|reverse|fill)\s*\(/.test(after)) {
+        return { access: 'WRITE', confidence: cap('HIGH') };
+      }
+      const mv = after.match(/^\s*\.value\s*(=(?!=)|\+=|-=|\*=|\/=)?/);
+      if (mv) return { access: mv[1] ? 'WRITE' : 'READ', confidence: cap('HIGH') };
+      if (/^\s*\.(disabled|error)\s*=/.test(after)) return { access: 'CONTROL', confidence: cap('HIGH') };
+      // fields: [...] の中（BRACKETマッチでは '[' がマッチ側に含まれるため、'[' 無しの形も許容する）
+      if (/fields\s*:\s*(\[[^\]]*)?$/.test(before)) return { access: 'FIELDS_PARAM', confidence: cap('MEDIUM') };
+      if (/query\s*[:=]\s*['"`][^'"`\n]*$/.test(before)) return { access: 'QUERY', confidence: cap('MEDIUM') };
+
+      // record['CODE'] をそのまま関数へ渡している（読み取りも書き換えもあり得るため用途は断定しない）
+      //   例: const err = textCheck(record['得意先名']);
+      if (/record\s*$/.test(before) && /^\s*[),]/.test(after)) {
+        return { access: 'ARGUMENT', confidence: cap('MEDIUM') };
+      }
+
+      // 配列リテラルに列挙されている（後で record[配列[i]] のように使われることが多い）
+      //   例: const filedName = ['会計_担当者1_KintoneUser', '会計_担当者2_KintoneUser'];
+      if (/[[,]\s*$/.test(before) && /^\s*[,\]]/.test(after)) {
+        return { access: 'LIST', confidence: cap('MEDIUM') };
+      }
+      // 要素が1つだけの配列は ['CODE'] 全体がマッチするため、上の判定に掛からない。
+      // 直前が識別子（record など）でなければ、添字アクセスではなく配列リテラルとみなす。
+      if (kind === 'BRACKET' && !/[\w$\])]\s*$/.test(before)) {
+        return { access: 'LIST', confidence: cap('MEDIUM') };
+      }
+
+      return { access: 'OTHER', confidence: 'LOW' };
+    }
+
+    // 1ファイル内の全マッチを取得し、重複スパンを除去する
+    // ★改善：従来は ['code'] が BRACKET と QUOTED の両方にヒットし二重カウントされていた
+    function findAllMatches(text, pats) {
+      const all = [];
+      for (const p of pats) {
+        let m;
+        while ((m = p.rx.exec(text)) !== null) {
+          all.push({ start: m.index, end: m.index + m[0].length, kind: p.kind });
+        }
+      }
+      // 開始位置昇順・長い方優先で並べ、重なるスパンは捨てる
+      all.sort((a, b) => (a.start - b.start) || (b.end - a.end));
+      const kept = [];
+      let lastEnd = -1;
+      for (const h of all) {
+        if (h.start < lastEnd) continue;
+        kept.push(h);
+        lastEnd = h.end;
+      }
+      return kept;
+    }
+
+    function analyze({ fields, files, snippet }) {
+      const { before = 24, after = 48 } = snippet || {};
+      const cleans = files.map(f => {
+        const clean = stripCommentsOnly(f.text || '');
+        return { ...f, clean, lineIdx: buildLineIndex(clean) };
+      });
+      const results = [];
+      for (const fld of fields) {
+        if (!fld.code) continue;
+        const pats = buildRegexps(fld.code);
+        let count = 0;
+        const usedIn = [];
+        const samples = [];
+        const matches = [];      // 全マッチ詳細（JSON出力・依存関係データ統合用）
+        const accessCounts = {}; // アクセス種別ごとの件数
+
+        for (const f of cleans) {
+          if (!f.clean) continue;
+          const hits = findAllMatches(f.clean, pats);
+          if (!hits.length) continue;
+          count += hits.length;
+          usedIn.push(`${f.target}: ${f.name}`);
+          let sampled = 0;
+          for (const h of hits) {
+            const cls = classifyAccess(f.clean, h.start, h.end, h.kind);
+            const line = lineAt(f.lineIdx, h.start);
+            accessCounts[cls.access] = (accessCounts[cls.access] || 0) + 1;
+            const s = Math.max(0, h.start - before);
+            const e = Math.min(f.clean.length, h.end + after);
+            const snip = f.clean.slice(s, e).replace(/\n/g, '⏎');
+            matches.push({
+              file: f.name, target: f.target, kind: f.kind,
+              line, access: cls.access, confidence: cls.confidence, snippet: snip,
+            });
+            if (sampled < 2) {
+              samples.push({
+                file: `${f.target}: ${f.name}`, line,
+                access: cls.access, confidence: cls.confidence, snippet: snip,
+              });
+              sampled++;
+            }
+          }
+        }
+
+        const accessSummary = Object.entries(accessCounts)
+          .sort((a, b) => b[1] - a[1])
+          .map(([k, v]) => `${k}×${v}`)
+          .join(', ');
+
+        results.push({
+          code: fld.code, label: fld.label, type: fld.type,
+          used: count > 0, count, files: usedIn,
+          samples, matches, accessCounts, accessSummary,
+        });
+      }
+      results.sort((a, b) => (Number(b.used) - Number(a.used)) || (b.count - a.count) || String(a.code).localeCompare(String(b.code)));
+      return results;
+    }
+
+
+    /** 本文の指紋（FNV-1a 32bit・16 進）。既存 JS への patch の baseHash、生成コードの同一性に使う */
+    function hashText(text) {
+      const s = String(text ?? '');
+      let h = 0x811c9dc5;
+      for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 0x01000193) >>> 0; }
+      return h.toString(16).padStart(8, '0');
+    }
+    /**
+     * Phase 16: 1 ファイル（登録済みの JS・生成コードの仮想ファイル）を Field Scanner と同じ解析に通す（純関数）。
+     *   events（目録照合つき）/ fieldAccess（code → READ / WRITE / CONTROL … の件数）/ appRefs / unknownRefs / externalRefs / apis（目録照合）/ network / security
+     * @param {object} file { name, target: 'desktop'|'mobile', kind: 'js', text }
+     * @param {object} o    { fields: [{ code, label, type }], selfAppId, depsKnown: string[], statusStates, statusCodes }
+     */
+    function analyzeFile(file, { fields = [], selfAppId = null, depsKnown = [], statusStates = null, statusCodes = null } = {}) {
+      const f = { name: file?.name || '(generated)', target: file?.target || 'desktop', kind: file?.kind || 'js', text: String(file?.text ?? '') };
+      const clean = stripCommentsOnly(f.text);
+      const li = buildLineIndex(clean);
+      const lineOf = (i) => lineAt(li, i);
+      const fieldList = (Array.isArray(fields) ? fields : []).filter(x => x && x.code);
+      const results = analyze({ fields: fieldList, files: [f], snippet: { before: 24, after: 48 } });
+      const fieldAccess = {};
+      const touched = [];
+      for (const r of results) { if (!r.used) continue; fieldAccess[r.code] = r.accessCounts; touched.push({ code: r.code, label: r.label, type: r.type, access: r.accessCounts, lines: [...new Set(r.matches.map(m => m.line))].slice(0, 20) }); }
+      const cat = (typeof KTJsCatalog !== 'undefined') ? KTJsCatalog : null;
+      const codes = fieldList.map(x => x.code);
+      const events = extractEventTypes(clean).map(e => { if (!cat) return e; const c = cat.checkEvent(e.name, { fields: codes }); return { ...e, valid: c.ok, base: c.base, field: c.field, platform: c.platform, screen: c.screen, ...(c.reason ? { reason: c.reason } : {}) }; });
+      const appRefs = ((typeof KTDeps !== 'undefined' && KTDeps.extractAppIdRefs) ? KTDeps.extractAppIdRefs(clean, lineOf) : []).filter(r => !(r.appId && selfAppId != null && String(r.appId) === String(selfAppId))).map(r => ({ ...r, file: f.name, target: f.target }));
+      const unknownRefs = collectUnknownFieldRefs([f], fieldList, depsKnown, selfAppId);
+      const externalRefs = collectExternalFieldRefs([f], selfAppId);
+      const unknownStatuses = statusStates ? collectUnknownStatusRefs([f], statusStates, statusCodes) : [];
+      return {
+        file: { name: f.name, target: f.target, kind: f.kind, bytes: f.text.length, lines: clean.split('\n').length, hash: hashText(f.text) },
+        events, fieldAccess, fields: touched, results, appRefs, unknownRefs, externalRefs, unknownStatuses,
+        apis: cat ? cat.extractApis(clean, lineOf) : [], network: cat ? cat.extractNetwork(clean, lineOf) : [], security: cat ? cat.scanSecurity(clean, lineOf) : [],
+      };
+    }
+
+    /**
+     * Phase 16: 登録済み JavaScript をファイル単位にまとめる（Planner Context の js-file facts と Review の競合判定で共用。純関数）。
+     *   scan（Field Scanner の payload。キャッシュなら本文は無い）と data.customize（登録設定）から
+     *   [{ name, target, kind, url?, analyzed, sourceAvailable, text?, events[], fields: { code → { READ, WRITE, CONTROL … } }, appRefs[] }]
+     */
+    function summarizeFiles(scan, data = null) {
+      const out = new Map();
+      const keyOf = (target, name) => `${target}:${name}`;
+      const ensure = (name, target, extra = {}) => { const k = keyOf(target, name); if (!out.has(k)) out.set(k, { name, target, kind: 'js', analyzed: false, sourceAvailable: false, events: [], fields: {}, appRefs: [], ...extra }); return out.get(k); };
+      for (const t of ['desktop', 'mobile']) {
+        for (const x of (data?.customize?.[t]?.js || [])) {
+          if (!x) continue;
+          if (x.type === 'FILE' && x.file?.name) ensure(x.file.name, t, { fileKey: x.file.fileKey ?? null });
+          else if (x.url) ensure(String(x.url).split('/').pop() || String(x.url), t, { url: x.url, external: !/^\/|^https?:\/\/[^/]*\.cybozu\.com\//i.test(String(x.url)) });
+        }
+      }
+      for (const f of (scan?.files || [])) {
+        if (!f || f.kind !== 'js') continue;
+        const e = ensure(f.name, f.target);
+        e.analyzed = !f.note;
+        if (typeof f.text === 'string') { e.sourceAvailable = true; e.text = f.text; }
+        if (f.note) e.note = f.note;
+      }
+      for (const [k, evs] of Object.entries(scan?.fileEvents || {})) {
+        const m = /^(desktop|mobile):js:(.+)$/.exec(k); if (!m) continue;
+        const e = ensure(m[2], m[1]); e.analyzed = true;
+        e.events = [...new Set((evs || []).map(x => (typeof x === 'string' ? x : x?.name)).filter(Boolean))];
+      }
+      for (const r of (scan?.results || [])) {
+        for (const m of (r.matches || [])) {
+          if (!m || m.kind !== 'js') continue;
+          const e = ensure(m.file, m.target); e.analyzed = true;
+          const acc = e.fields[r.code] || (e.fields[r.code] = {});
+          acc[m.access] = (acc[m.access] || 0) + 1;
+        }
+      }
+      for (const ref of (scan?.appRefs || [])) { const e = out.get(keyOf(ref.target, ref.file)); if (e && ref.appId && !e.appRefs.includes(String(ref.appId))) e.appRefs.push(String(ref.appId)); }
+      return [...out.values()].sort((a, b) => (a.target === b.target ? 0 : a.target === 'desktop' ? -1 : 1) || String(a.name).localeCompare(String(b.name), 'ja'));
+    }
+
     return {
       register, run, scheduleAuto, onChange, getStatus, setLastPayload, getLastPayload,
+      hashText, analyzeFile, summarizeFiles,
       buildSignature, loadCache, saveCache, clearCache,
       isAutoEnabled, setAutoEnabled,
       CACHE_TTL_MS, ANALYZER_VERSION,
+      // Phase 16: 解析関数（UI と生成コードの再解析で共用）
+      EVENT_NAME_RE, extractEventTypes, extractStatusComparisons, collectUnknownStatusRefs, buildRegexps, classifyAccess, findAllMatches, analyze,
       // 純粋なテキスト解析（Field Scannerが利用。回帰テストの対象）
       isPlausibleFieldCode, extractFieldCodeCandidates, scanArrayLiteralItems,
       scanObjectProps, resolveAppExpr, collectDeclarations, isRestCallee,
@@ -4581,12 +4962,12 @@
     const PLANNER_CONTEXT_VERSION = 'planner-1';
     const PLANNER_LIMITS = {
       maxFields: 200, maxOptions: 8, maxDependencyFacts: 60, maxJsFacts: 40, maxIncomingFacts: 20, maxBrokenRefFacts: 20,
-      maxViews: 30, maxReports: 20, maxNotifications: 30, maxReminders: 20, maxRecordAcl: 20, maxFieldAcl: 30, maxAppActions: 20,
+      maxViews: 30, maxReports: 20, maxNotifications: 30, maxReminders: 20, maxRecordAcl: 20, maxFieldAcl: 30, maxAppActions: 20, maxJsFiles: 20,
       maxFacts: 400, maxBytes: 64 * 1024, maxGoalChars: 2000,
     };
     const PLANNER_KIND_ORDER = [
       'overview', 'field', 'process-state', 'process-action', 'notification', 'reminder', 'view', 'report', 'record-acl', 'field-acl', 'app-action',
-      'dependency', 'js-reference', 'incoming-reference', 'broken-reference', 'app-link',
+      'js-file', 'dependency', 'js-reference', 'incoming-reference', 'broken-reference', 'app-link',
     ];
     const plannerKindRank = (k) => { const i = PLANNER_KIND_ORDER.indexOf(k); return i < 0 ? 99 : i; };
     // goal のキーワード → 関係する種別（決定的なヒント。LLM は使わない）
@@ -4816,6 +5197,23 @@
       const jsKept = jsFacts.slice(0, limits.maxJsFacts);
       if (jsFacts.length > jsKept.length) trunc('facts.js-reference', jsFacts.length, jsKept.length);
       for (const d of jsKept) push(d.fact, d.rel);
+      // Phase 16: 登録済み JavaScript をファイル単位で（イベント・READ / WRITE / CONTROL するフィールド・本文の有無）。
+      //   Planner が「既存 JS への統合」と「競合」を判断する材料。本文は送らない（Generator が別に送る）
+      const jsFiles = KTScan.summarizeFiles(scan, data);
+      const jsWords = /JavaScript|JS|カスタマイズ|コード|スクリプト|制御|編集不可|編集でき|警告|入力チェック|自動計算/i.test(rt);
+      for (const jf of jsFiles.slice(0, limits.maxJsFiles || 20)) {
+        const touched = Object.entries(jf.fields).map(([code, acc]) => ({ code, label: fieldsN.find(x => x.code === code)?.label ?? code, access: acc }));
+        const accText = (acc) => Object.entries(acc).sort((a, b) => b[1] - a[1]).map(([k, v]) => `${k}×${v}`).join('/');
+        const rel = 3 + (touched.some(t => fieldScore.has(t.code) && (fieldScore.get(t.code).score >= 3)) ? 6 : 0) + (jsWords ? 4 : 0) + (settingHit(jf.name) ? 5 : 0);
+        push({
+          kind: 'js-file', key: `JS_FILE:${jf.target}:${jf.name}`, confidence: jf.analyzed ? 'CERTAIN' : 'NOT_ANALYZED',
+          jsFile: { name: jf.name, target: jf.target, analyzed: jf.analyzed, sourceAvailable: !!jf.sourceAvailable, ...(jf.url ? { url: jf.url, external: !!jf.external } : {}), events: jf.events, fields: touched, appRefs: jf.appRefs },
+          statement: jf.analyzed
+            ? `JavaScript「${jf.name}」（${jf.target === 'mobile' ? 'モバイル' : 'PC'}）はイベント ${jf.events.length ? jf.events.join(', ') : '（検出なし）'} で動き、${touched.length ? touched.map(t => `${t.code}（${t.label}）を ${accText(t.access)}`).join('、') : 'フィールドの参照は検出されていない'}${jf.appRefs.length ? `。他アプリ ${jf.appRefs.join(', ')} を参照` : ''}。本文は${jf.sourceAvailable ? '取得済み' : '未取得（統合するときは生成時に取得する）'}`
+            : `JavaScript「${jf.name}」（${jf.target === 'mobile' ? 'モバイル' : 'PC'}）は${jf.url ? `URL 指定（${jf.external ? '外部' : '同一ドメイン'}）で` : ''}未解析（イベント・フィールドは不明。統合先に選ばないこと）`,
+        }, rel);
+      }
+      if (jsFiles.length > (limits.maxJsFiles || 20)) trunc('facts.js-file', jsFiles.length, limits.maxJsFiles || 20);
       const incFacts = edges.filter(e => e.sourceType === 'EXTERNAL_APP').map(e => ({ ...factFromEdge(deps, e, 'usedBy'), kind: 'incoming-reference' })).sort((a, b) => cmp(a.key, b.key));
       const incKept = incFacts.slice(0, limits.maxIncomingFacts);
       if (incFacts.length > incKept.length) trunc('facts.incoming-reference', incFacts.length, incKept.length);
@@ -4858,6 +5256,8 @@
         reports: reports.map(r => r.name),
         appActions: acts.map(a => a.name),
         jsFiles: (deps?.nodes || []).filter(n => n.type === 'CUSTOMIZE').map(n => n.name).sort(cmp),
+        // Phase 16: 既存 JS が登録しているイベント（統合・競合の判断材料。Event Catalog ではない）
+        jsEvents: [...new Set(jsFiles.flatMap(f => f.events))].sort(cmp),
         // Phase 13: 参照先アプリのフィールドコード（ルックアップの relatedField / relatedKeyField / pickerFields に使える識別子。他は「既存」ではない）
         relatedAppFields,
         lookups: fieldsN.filter(x => x.type === 'LOOKUP').map(x => x.code),
@@ -4936,6 +5336,9 @@
         questions: (plan.questions || []).slice(0, maxItems).map(q => ({ id: q.id, question: cut(q.question, REVISION_LIMITS.maxText), reason: cut(q.reason, REVISION_LIMITS.maxText) })),
         unknowns: strList(plan.unknowns, 8).map(u => cut(u, REVISION_LIMITS.maxText)),
         planConfidence: plan.planConfidence ?? null,
+        // Phase 16: 標準設定 / JavaScript の分類とカスタマイズの計画（修正・説明の対象）
+        ...(plan.solution ? { solution: plan.solution } : {}),
+        ...(Array.isArray(plan.customizations) && plan.customizations.length ? { customizations: plan.customizations.slice(0, 6).map(c => ({ customizationId: c.customizationId, requirement: cut(c.requirement, REVISION_LIMITS.maxText), whyStandardInsufficient: cut(c.whyStandardInsufficient, REVISION_LIMITS.maxText), strategy: c.strategy ?? null, platform: strList(c.platform), events: strList(c.events), fields: (c.fields || []).slice(0, 12).map(f => ({ code: f.code, access: f.access })), apis: strList(c.apis), existingFiles: (c.existingFiles || []).slice(0, 4).map(e => ({ name: e.name, target: e.target })), risks: strList(c.risks, 6).map(x => cut(x, 200)), questions: strList(c.questions, 6).map(x => cut(x, 200)), dependsOn: strList(c.dependsOn) })) } : {}),
       };
     }
     /** Toolkit Review（KTPlanReview.review）の写し。判定（status / safety / issue code）は正本なので値を変えずに写す */
@@ -4944,7 +5347,8 @@
       return {
         counts: review.summary?.counts ?? null,
         executionReadiness: review.executionReadiness ?? null,
-        steps: (review.steps || []).map(r => ({ stepId: r.stepId, status: r.status, safety: r.safety, changeType: r.diff?.changeType ?? null, human: strList(r.diff?.human, 8).map(l => cut(l, 200)), issues: (r.issues || []).slice(0, 10).map(i => ({ code: i.code, severity: i.severity, message: cut(i.message, 200) })), ...(r.blockedBy?.length ? { blockedBy: strList(r.blockedBy) } : {}) })),
+        steps: (review.steps || []).map(r => ({ stepId: r.stepId, status: r.status, safety: r.safety, changeType: r.diff?.changeType ?? null, human: strList(r.diff?.human, 8).map(l => cut(l, 200)), issues: (r.issues || []).slice(0, 10).map(i => ({ code: i.code, severity: i.severity, message: cut(i.message, 200) })), ...(r.blockedBy?.length ? { blockedBy: strList(r.blockedBy) } : {}), ...(r.solution ? { solution: r.solution } : {}), ...(r.codeGeneration ? { codeGeneration: { supported: !!r.codeGeneration.supported, strategy: r.codeGeneration.strategy ?? null, reason: r.codeGeneration.reason ?? null } } : {}) })),
+        ...(review.hybrid ? { hybrid: { solution: review.hybrid.solution, standard: review.hybrid.standard, customization: review.hybrid.customization } } : {}),
         conflicts: (review.conflicts || []).slice(0, 10).map(c => ({ code: c.code ?? null, message: cut(c.message, 200), stepIds: strList(c.stepIds) })),
         warnings: (review.warnings || []).slice(0, 12).map(w => ({ code: w.code, severity: w.severity, message: cut(w.message, 200), stepIds: strList(w.stepIds) })),
       };
@@ -4997,6 +5401,67 @@
       };
       const m = measureText(JSON.stringify(ctx));
       ctx.size = { bytes: m.bytes, chars: m.chars, approxTokens: m.approxTokens, facts: ctx.facts.length, budgetBytes: null };
+      return ctx;
+    }
+
+    // ================= Phase 16: Generator Context（JavaScript Generator の入力。contextVersion "customization-1"）=================
+    const GENERATOR_CONTEXT_VERSION = 'customization-1';
+    /**
+     * 承認済みの Customization Plan ＋ 関係するフィールド ＋ 統合先の既存 JS（本文・解析）＋ 他の JS の要約 ＋ 規約。アプリ全体の facts は送らない。
+     * @param {object} p { customization, plan, planId, version, data, deps, scan, existingSource: { name, target, text } | null, options }
+     */
+    function buildGenerator({ customization, plan = null, planId = null, version = null, data = null, deps = null, scan = null, existingSource = null, options = {} } = {}) {
+      const c = customization;
+      if (!c || typeof c !== 'object') throw new Error('customization（Customization Plan）がありません');
+      const fieldsN = KTDeps.normalizeFields(data?.fields || {});
+      const proposed = new Map((plan?.proposedFields || []).map(p => [p.temporaryId, p]));
+      const mapCode = (code) => (proposed.get(code)?.suggestedCode ?? code);
+      const codes = new Set();
+      for (const f of (c.fields || [])) codes.add(String(f.code));
+      for (const ev of (c.events || [])) { const chk = KTJsCatalog.checkEvent(ev); if (chk.field) codes.add(chk.field); }
+      const fieldRow = (code) => {
+        const p = proposed.get(code);
+        if (p) return { code: p.suggestedCode, label: p.label, type: p.type, proposed: true, temporaryId: p.temporaryId, ...(Array.isArray(p.options) && p.options.length ? { options: p.options.slice(0, 20) } : {}) };
+        const f = fieldsN.find(x => x.code === code); if (!f) return null;
+        const raw = f.raw || {};
+        const opts = raw.options && typeof raw.options === 'object' ? Object.keys(raw.options).sort((a, b) => (Number(raw.options[a]?.index ?? 0) - Number(raw.options[b]?.index ?? 0)) || cmp(a, b)) : null;
+        return { code: f.code, label: f.label, type: f.rawType, ...(opts ? { options: opts.slice(0, 20) } : {}), ...(f.required ? { required: true } : {}), ...(f.parent ? { subtable: f.parent } : {}) };
+      };
+      const fields = [...codes].map(fieldRow).filter(Boolean);
+      // ステータス（プロセス管理）は条件に使うので常に渡す
+      const statusField = fieldsN.find(x => x.rawType === 'STATUS');
+      if (statusField && !fields.some(f => f.code === statusField.code)) fields.push({ code: statusField.code, label: statusField.label, type: 'STATUS' });
+      const statuses = data?.status?.enable ? Object.values(data.status.states || {}).filter(Boolean).sort((a, b) => Number(a.index ?? 0) - Number(b.index ?? 0)).map(s => s.name) : [];
+      const dictionary = { fieldCodes: [...new Set([...fieldsN.map(x => x.code), ...fields.filter(f => f.proposed).map(f => f.code)])].sort(cmp), statuses, fieldTypes: Object.fromEntries(fields.map(f => [f.code, f.type])) };
+      const cust = {
+        customizationId: c.customizationId, requirement: c.requirement, whyStandardInsufficient: c.whyStandardInsufficient ?? '', strategy: c.strategy, platform: [...(c.platform || [])],
+        events: (c.events || []).map(ev => { const chk = KTJsCatalog.checkEvent(ev); return chk.field && proposed.has(chk.field) ? `${chk.base.replace('<fieldCode>', '')}${mapCode(chk.field)}` : ev; }),
+        fields: (c.fields || []).map(f => ({ code: mapCode(String(f.code)), access: f.access })), apis: [...(c.apis || [])],
+        existingFiles: (c.existingFiles || []).map(e => ({ name: e.name, target: e.target, reason: e.reason ?? '' })), dependsOn: [...(c.dependsOn || [])], risks: [...(c.risks || [])],
+      };
+      const standardSteps = (plan?.steps || []).filter(st => st.actionType !== 'CUSTOMIZATION_REQUIRED' && !st.alternativeId).map(st => ({ id: st.id, actionType: st.actionType, title: st.title, summary: st.proposal?.summary || '', ...(st.targetRef ? { targetRef: st.targetRef } : {}) })).slice(0, 12);
+      const jsFiles = KTScan.summarizeFiles(scan, data);
+      const scanFields = fieldsN.map(f => ({ code: f.code, label: f.label, type: f.rawType }));
+      let existingFile = null;
+      if (existingSource && typeof existingSource.text === 'string') {
+        const an = KTScan.analyzeFile({ name: existingSource.name, target: existingSource.target || 'desktop', kind: 'js', text: existingSource.text }, { fields: scanFields, selfAppId: data?.appId ?? null });
+        existingFile = { name: existingSource.name, target: existingSource.target || 'desktop', hash: an.file.hash, source: existingSource.text, analysis: { events: an.events.map(e => e.name), fields: an.fields.map(f => ({ code: f.code, access: f.access })), apis: [...new Set(an.apis.map(a => a.name))], lines: an.file.lines } };
+      }
+      const otherFiles = jsFiles.filter(f => f.analyzed && !(existingFile && f.name === existingFile.name && f.target === existingFile.target)).map(f => ({ name: f.name, target: f.target, events: f.events, fields: Object.entries(f.fields).map(([code, acc]) => ({ code, access: Object.keys(acc) })) })).slice(0, 10);
+      const app = (() => { try { const o = buildAppOverview({ data, deps, scan, incoming: null, limits: { ...DEFAULT_LIMITS, maxFields: 0, maxViewNames: 0 }, trunc: () => { } }); return { id: o.id, name: o.name }; } catch (e) { return { id: String(data?.appId ?? ''), name: null }; } })();
+      const ctx = {
+        contextVersion: GENERATOR_CONTEXT_VERSION,
+        generatedAt: options.now ?? new Date().toISOString(),
+        generator: { name: 'kintone App Toolkit', version: SCRIPT_VERSION, analyzerVersion: KTScan?.ANALYZER_VERSION ?? null, catalogVersion: KTJsCatalog.CATALOG_VERSION },
+        app,
+        plan: { planId, version, goal: plan?.goal ?? '', standardSteps },
+        customization: cust,
+        fields, dictionary, existingFile, otherFiles,
+        constraints: { style: "即時関数 (function () { 'use strict'; … })(); で包む。ハンドラは必ず return event。ライブラリは使わない。フィールドコード・ステータス名は dictionary の表記のまま", platform: cust.platform, noNetwork: true, noSecrets: true, allowedEvents: cust.events, allowedFields: cust.fields.map(f => f.code), allowedApis: cust.apis, patchOnly: cust.strategy === 'EXTEND_EXISTING_JS' },
+        size: null,
+      };
+      const m = measureText(JSON.stringify(ctx));
+      ctx.size = { bytes: m.bytes, chars: m.chars, approxTokens: m.approxTokens, budgetBytes: 256 * 1024 };
       return ctx;
     }
 
@@ -5143,6 +5608,8 @@
       PLANNER_CONTEXT_VERSION, PLANNER_LIMITS, buildPlan, toPlannerMarkdown, toPlannerPrompt, longestSharedSubstring,
       // AI Workspace（Phase 15）: 計画の修正・説明のための要約と Context
       REVISION_LIMITS, compactPlan, compactReview, compactRevision, buildExplain,
+      // Customization Planner & JavaScript Generator（Phase 16）
+      GENERATOR_CONTEXT_VERSION, buildGenerator,
     };
   })();
 
@@ -5355,6 +5822,166 @@
     }
 
     return { SETTINGS_OPS, TYPE_FUNCS, ALL_FUNCS, USAGE, SYSTEM_CODES, tokenize, parse, check };
+  })();
+
+  // ==========================================
+  // 3.6a2 kintone JavaScript カスタマイズの語彙 (KTJsCatalog) — Phase 16
+  //   Planner（計画の検証）/ Generator（生成コードの検査）/ Review で共用する決定的な語彙:
+  //   イベント目録（存在しないイベントを弾く）・JavaScript API 目録（生成コードが使う API の実在確認）・
+  //   セキュリティ規則（秘密情報・eval・cookie・外部送信）・外部通信の検出。kintone 公式 JavaScript API（cybozu developer network。
+  //   2026-10-03 確認）の語彙を正本にし、AI の自由文からイベント名・API 名を作らせない。
+  // ==========================================
+  const KTJsCatalog = (() => {
+    const CATALOG_VERSION = '1';
+    /** 固定名のイベント（desktop）。mobile は同じ名前に mobile. を付ける（一覧の編集・印刷・ポータルは mobile に無いものがある） */
+    const DESKTOP_EVENTS = [
+      'app.record.index.show', 'app.record.index.edit.show', 'app.record.index.edit.submit', 'app.record.index.edit.submit.success', 'app.record.index.delete.submit',
+      'app.record.detail.show', 'app.record.detail.delete.submit', 'app.record.detail.process.proceed',
+      'app.record.create.show', 'app.record.create.submit', 'app.record.create.submit.success',
+      'app.record.edit.show', 'app.record.edit.submit', 'app.record.edit.submit.success',
+      'app.record.print.show', 'app.report.show', 'portal.show', 'space.portal.show',
+    ];
+    const MOBILE_EVENTS = [
+      'mobile.app.record.index.show',
+      'mobile.app.record.detail.show', 'mobile.app.record.detail.delete.submit', 'mobile.app.record.detail.process.proceed',
+      'mobile.app.record.create.show', 'mobile.app.record.create.submit', 'mobile.app.record.create.submit.success',
+      'mobile.app.record.edit.show', 'mobile.app.record.edit.submit', 'mobile.app.record.edit.submit.success',
+      'mobile.app.report.show', 'mobile.portal.show', 'mobile.space.portal.show',
+    ];
+    /** フィールド値変更イベントの接頭辞（<fieldCode> が続く） */
+    const CHANGE_PREFIXES = ['app.record.create.change.', 'app.record.edit.change.', 'app.record.index.edit.change.', 'mobile.app.record.create.change.', 'mobile.app.record.edit.change.'];
+    const EVENTS = Object.freeze([...DESKTOP_EVENTS, ...MOBILE_EVENTS]);
+    /** 画面（イベント名 → 画面の種類と編集可否）。Review が「編集不可にする」要件に detail.show を選んでも意味が無い等の判定に使う */
+    const screenOf = (name) => {
+      const n = String(name || '').replace(/^mobile\./, '');
+      if (/^app\.record\.create\./.test(n)) return { screen: 'create', editable: true };
+      if (/^app\.record\.edit\./.test(n)) return { screen: 'edit', editable: true };
+      if (/^app\.record\.index\.edit\./.test(n)) return { screen: 'index-edit', editable: true };
+      if (/^app\.record\.index\./.test(n)) return { screen: 'index', editable: false };
+      if (/^app\.record\.detail\./.test(n)) return { screen: 'detail', editable: false };
+      if (/^app\.record\.print\./.test(n)) return { screen: 'print', editable: false };
+      if (/^app\.report\./.test(n)) return { screen: 'report', editable: false };
+      return { screen: 'portal', editable: false };
+    };
+    /**
+     * イベント名の検証。{ ok, name, base, field, platform, screen } を返す。change イベントは <fieldCode> が fields に実在するか（fields 省略時は形だけ）
+     */
+    function checkEvent(name, { fields = null } = {}) {
+      const n = String(name || '').trim();
+      const platform = /^mobile\./.test(n) ? 'mobile' : 'desktop';
+      if (EVENTS.includes(n)) return { ok: true, name: n, base: n, field: null, platform, ...screenOf(n) };
+      for (const p of CHANGE_PREFIXES) {
+        if (n.startsWith(p) && n.length > p.length) {
+          const field = n.slice(p.length);
+          const known = !fields || (Array.isArray(fields) ? fields.includes(field) : !!fields[field]);
+          return { ok: known, name: n, base: `${p}<fieldCode>`, field, platform, ...screenOf(n), ...(known ? {} : { reason: 'UNKNOWN_FIELD' }) };
+        }
+      }
+      return { ok: false, name: n, base: null, field: null, platform, reason: 'UNKNOWN_EVENT', ...screenOf(n) };
+    }
+    const isMobileEvent = (name) => /^mobile\./.test(String(name || ''));
+    /** platform（desktop / mobile / both）と整合するイベントか */
+    const eventPlatform = (name) => (isMobileEvent(name) ? 'mobile' : 'desktop');
+
+    /**
+     * JavaScript API 目録（生成コードが使ってよい kintone.* の呼び出し）。
+     *   review: true = 利用は可だが人のレビューを要する（REST / proxy など通信を伴う・権限に依存する）
+     *   network: true = 通信を伴う
+     */
+    const APIS = Object.freeze([
+      { name: 'kintone.events.on', kind: 'events' }, { name: 'kintone.events.off', kind: 'events' },
+      { name: 'kintone.app.getId', kind: 'app' }, { name: 'kintone.app.getQueryCondition', kind: 'app' }, { name: 'kintone.app.getQuery', kind: 'app' },
+      { name: 'kintone.app.getLookupTargetAppId', kind: 'app' }, { name: 'kintone.app.getRelatedRecordsTargetAppId', kind: 'app' },
+      { name: 'kintone.app.getFieldElements', kind: 'ui' }, { name: 'kintone.app.getHeaderMenuSpaceElement', kind: 'ui' }, { name: 'kintone.app.getHeaderSpaceElement', kind: 'ui' },
+      { name: 'kintone.app.record.get', kind: 'record' }, { name: 'kintone.app.record.set', kind: 'record' }, { name: 'kintone.app.record.getId', kind: 'record' },
+      { name: 'kintone.app.record.getFieldElement', kind: 'ui' }, { name: 'kintone.app.record.getSpaceElement', kind: 'ui' }, { name: 'kintone.app.record.getHeaderMenuSpaceElement', kind: 'ui' },
+      { name: 'kintone.app.record.setFieldShown', kind: 'ui' }, { name: 'kintone.app.record.setGroupFieldOpen', kind: 'ui' },
+      { name: 'kintone.mobile.app.getId', kind: 'app' }, { name: 'kintone.mobile.app.getQueryCondition', kind: 'app' }, { name: 'kintone.mobile.app.getQuery', kind: 'app' },
+      { name: 'kintone.mobile.app.getHeaderSpaceElement', kind: 'ui' }, { name: 'kintone.mobile.app.getLookupTargetAppId', kind: 'app' }, { name: 'kintone.mobile.app.getRelatedRecordsTargetAppId', kind: 'app' },
+      { name: 'kintone.mobile.app.record.get', kind: 'record' }, { name: 'kintone.mobile.app.record.set', kind: 'record' }, { name: 'kintone.mobile.app.record.getId', kind: 'record' },
+      { name: 'kintone.mobile.app.record.getSpaceElement', kind: 'ui' }, { name: 'kintone.mobile.app.record.setFieldShown', kind: 'ui' }, { name: 'kintone.mobile.app.record.setGroupFieldOpen', kind: 'ui' },
+      { name: 'kintone.api', kind: 'api', review: true, network: true }, { name: 'kintone.api.url', kind: 'api' }, { name: 'kintone.api.urlForGet', kind: 'api' },
+      { name: 'kintone.proxy', kind: 'api', review: true, network: true, external: true }, { name: 'kintone.proxy.upload', kind: 'api', review: true, network: true, external: true },
+      { name: 'kintone.getLoginUser', kind: 'user' }, { name: 'kintone.getUiVersion', kind: 'user' }, { name: 'kintone.getRequestToken', kind: 'api', review: true },
+      { name: 'kintone.Promise', kind: 'misc' }, { name: 'kintone.$PLUGIN_ID', kind: 'plugin' },
+      { name: 'kintone.plugin.app.getConfig', kind: 'plugin', review: true }, { name: 'kintone.plugin.app.setConfig', kind: 'plugin', review: true }, { name: 'kintone.plugin.app.proxy', kind: 'plugin', review: true, network: true, external: true },
+      { name: 'kintone.plugin.app.setProxyConfig', kind: 'plugin', review: true }, { name: 'kintone.plugin.app.getProxyConfig', kind: 'plugin', review: true },
+    ]);
+    const API_BY_NAME = new Map(APIS.map(a => [a.name, a]));
+    /**
+     * コードから kintone.* の呼び出し（メンバー連鎖）を抽出し、目録と照合する。
+     *   kintone.app.record.get() → kintone.app.record.get / kintone.api.url(...) → kintone.api.url / kintone.api(...) → kintone.api
+     *   目録に無い連鎖は known:false（AI が作った API 名 / 目録外の API）
+     */
+    function extractApis(cleanText, lineIndexFn = null) {
+      const s = String(cleanText || '');
+      const out = [];
+      const rx = /\bkintone(?:\s*\.\s*[A-Za-z_$][\w$]*)+/g;
+      let m;
+      while ((m = rx.exec(s)) !== null) {
+        const chain = m[0].replace(/\s+/g, '');
+        // 最長一致で目録を探す（kintone.app.record.get.xxx のような余分は切る）
+        const parts = chain.split('.');
+        let found = null;
+        for (let n = parts.length; n >= 2; n--) { const cand = parts.slice(0, n).join('.'); if (API_BY_NAME.has(cand)) { found = cand; break; } }
+        const name = found || chain;
+        const info = found ? API_BY_NAME.get(found) : null;
+        out.push({ name, raw: chain, known: !!info, review: !!info?.review, network: !!info?.network, external: !!info?.external, kind: info?.kind || null, index: m.index, line: lineIndexFn ? lineIndexFn(m.index) : null });
+      }
+      return out;
+    }
+    const sameOriginHint = (url) => /^\/k\//.test(url) || /^\/api\//.test(url) || /\bkintone\.api\.url/.test(url);
+    /**
+     * 外部通信の検出: fetch / XMLHttpRequest / axios / kintone.proxy と、URL リテラル。
+     *   external: true = kintone 外（http(s):// で始まり、cybozu.com / kintone.com 以外か、ホストが分からない）
+     */
+    function extractNetwork(cleanText, lineIndexFn = null) {
+      const s = String(cleanText || '');
+      const out = [];
+      const push = (kind, url, index, extra = {}) => {
+        const u = String(url || '');
+        const abs = /^https?:\/\//i.test(u);
+        const cybozu = abs && /^https?:\/\/[^/]*\.(cybozu\.com|cybozu-dev\.com|kintone\.com)(\/|$)/i.test(u);
+        out.push({ kind, url: u || null, external: abs ? !cybozu : (u ? false : kind === 'proxy'), index, line: lineIndexFn ? lineIndexFn(index) : null, ...extra });
+      };
+      let m;
+      const rxFetch = /\b(fetch|axios(?:\.(?:get|post|put|delete|patch))?)\s*\(\s*(?:['"`]([^'"`]*)['"`]|([A-Za-z_$][\w$.()]*))/g;
+      while ((m = rxFetch.exec(s)) !== null) push('fetch', m[2] ?? (m[3] && /kintone\.api\.url/.test(m[3]) ? '/k/(kintone.api.url)' : ''), m.index, { callee: m[1], viaExpr: !m[2] });
+      const rxXhr = /\.open\s*\(\s*['"`](GET|POST|PUT|DELETE|PATCH)['"`]\s*,\s*(?:['"`]([^'"`]*)['"`]|([^,)]+))/gi;
+      while ((m = rxXhr.exec(s)) !== null) push('xhr', m[2] ?? '', m.index, { method: m[1].toUpperCase(), viaExpr: !m[2] });
+      const rxProxy = /\bkintone\s*\.\s*(?:plugin\s*\.\s*app\s*\.\s*)?proxy\s*\(\s*(?:['"`]([^'"`]*)['"`]|([^,)]+))/g;
+      while ((m = rxProxy.exec(s)) !== null) push('proxy', m[1] ?? '', m.index, { viaExpr: !m[1] });
+      const rxUrl = /['"`](https?:\/\/[^'"`\s]+)['"`]/g;
+      while ((m = rxUrl.exec(s)) !== null) { if (!out.some(o => o.url === m[1])) push('url', m[1], m.index, { literalOnly: true }); }
+      return out;
+    }
+    /** セキュリティ規則（生成コードの検査。block = 生成を採用しない / review = 人のレビュー） */
+    const SECURITY_RULES = Object.freeze([
+      { code: 'SEC_HARDCODED_TOKEN', severity: 'block', rx: /(?:api[_-]?token|apiToken|X-Cybozu-API-Token|X-Cybozu-Authorization|access[_-]?token|secret[_-]?key|client[_-]?secret|password)\s*['"]?\s*[:=]\s*['"`][^'"`]{8,}['"`]/i, message: 'トークン / パスワードらしき値がコードに直接書かれています' },
+      { code: 'SEC_HARDCODED_AUTH', severity: 'block', rx: /Authorization['"`]?\s*[:=]\s*['"`]\s*(?:Bearer|Basic)\s+[A-Za-z0-9+/=_.-]{8,}/i, message: 'Authorization ヘッダーに認証情報が直接書かれています' },
+      { code: 'SEC_AUTH_HEADER', severity: 'review', rx: /['"`]Authorization['"`]\s*[:,]|\bAuthorization\s*:\s*['"`]/i, message: 'Authorization ヘッダーを設定しています' },
+      { code: 'SEC_SUSPICIOUS_SECRET', severity: 'review', rx: /['"`][A-Za-z0-9+/=_-]{40,}['"`]/, message: '長い英数字の文字列（秘密情報の可能性）があります' },
+      { code: 'SEC_EVAL', severity: 'block', rx: /\beval\s*\(/, message: 'eval を使っています' },
+      { code: 'SEC_FUNCTION_CONSTRUCTOR', severity: 'block', rx: /\bnew\s+Function\s*\(|\bFunction\s*\(\s*['"`]/, message: 'Function コンストラクタを使っています' },
+      { code: 'SEC_DOCUMENT_COOKIE', severity: 'block', rx: /document\s*\.\s*cookie/, message: 'document.cookie にアクセスしています' },
+      { code: 'SEC_STORAGE_SECRET', severity: 'review', rx: /(?:localStorage|sessionStorage)\s*\.\s*setItem\s*\([^)]*(?:token|secret|password|key)/i, message: 'ブラウザの保存領域に秘密情報らしき値を書いています' },
+      { code: 'SEC_INNER_HTML', severity: 'review', rx: /\.innerHTML\s*=/, message: 'innerHTML への代入があります（XSS に注意）' },
+    ]);
+    function scanSecurity(cleanText, lineIndexFn = null) {
+      const s = String(cleanText || '');
+      const out = [];
+      for (const r of SECURITY_RULES) { const m = r.rx.exec(s); if (m) out.push({ code: r.code, severity: r.severity, message: r.message, index: m.index, line: lineIndexFn ? lineIndexFn(m.index) : null }); }
+      for (const n of extractNetwork(s, lineIndexFn)) {
+        if (n.external) out.push({ code: 'SEC_EXTERNAL_NETWORK', severity: 'block', message: `外部への通信があります（${n.kind}${n.url ? ` ${n.url}` : ''}）`, index: n.index, line: n.line });
+        else if (n.kind === 'proxy' || (n.kind === 'xhr' && n.method === 'POST') || (n.kind === 'fetch' && n.viaExpr)) out.push({ code: 'SEC_NETWORK_REVIEW', severity: 'review', message: `通信があります（${n.kind}${n.url ? ` ${n.url}` : ''}）。宛先を確認してください`, index: n.index, line: n.line });
+      }
+      return out;
+    }
+    const STRATEGIES = Object.freeze(['NEW_JS_FILE', 'EXTEND_EXISTING_JS', 'REPLACE_EXISTING_LOGIC', 'PLUGIN_CANDIDATE', 'NOT_RECOMMENDED']);
+    const PLATFORMS = Object.freeze(['desktop', 'mobile']);
+    const ACCESS = Object.freeze(['READ', 'WRITE', 'CONTROL']);
+    const SOLUTIONS = Object.freeze(['STANDARD', 'CUSTOMIZATION', 'HYBRID', 'UNKNOWN']);
+    return { CATALOG_VERSION, EVENTS, DESKTOP_EVENTS, MOBILE_EVENTS, CHANGE_PREFIXES, APIS, STRATEGIES, PLATFORMS, ACCESS, SOLUTIONS, SECURITY_RULES, checkEvent, isMobileEvent, eventPlatform, screenOf, extractApis, extractNetwork, scanSecurity };
   })();
 
   // ==========================================
@@ -5809,7 +6436,7 @@
       // ---- 2. step ごとに検証 → 仮適用 ----
       for (const id of order) {
         const step = byId.get(id);
-        const r = reviewStep(step, { model, before, proposedMap, resolvedCodes, deps, scan, cyc, results, steps, relatedApps: (data && data.relatedApps && typeof data.relatedApps === 'object') ? data.relatedApps : {} });
+        const r = reviewStep(step, { model, before, proposedMap, resolvedCodes, deps, scan, data, plan, cyc, results, steps, relatedApps: (data && data.relatedApps && typeof data.relatedApps === 'object') ? data.relatedApps : {} });
         results.set(id, r);
       }
       // ---- 3. plan 内部の競合（複数 step の組み合わせ）----
@@ -5865,6 +6492,18 @@
         warnings: stepReviews.filter(r => r.status === STATUS.WARNING).length,
         invalid: stepReviews.filter(r => r.status === STATUS.INVALID || r.status === STATUS.BLOCKED_BY_DEPENDENCY).length,
         planOnly: planOnlySteps.length,
+        // Phase 16: JavaScript カスタマイズ（標準設定の step とは別に数える）
+        customizations: stepReviews.filter(r => r.solution === 'CUSTOMIZATION').length,
+        generatable: stepReviews.filter(r => r.codeGeneration?.supported).length,
+        jsConflicts: stepReviews.filter(r => r.issues.some(i => i.code === 'JS_FIELD_CONFLICT' || i.code === 'JS_EXECUTION_ORDER_RISK')).length,
+      };
+      // Phase 16: 標準設定と JavaScript を同じ Review 上で要約（§43）
+      const stdReviews = stepReviews.filter(r => r.solution !== 'CUSTOMIZATION');
+      const jsReviews = stepReviews.filter(r => r.solution === 'CUSTOMIZATION');
+      const hybrid = {
+        solution: plan?.solution || (jsReviews.length ? (stdReviews.some(r => r.actionType !== 'REQUIRE_CONFIRMATION') ? 'HYBRID' : 'CUSTOMIZATION') : 'STANDARD'),
+        standard: { steps: stdReviews.map(r => r.stepId), safe: stdReviews.filter(r => r.safety === SAFETY.SAFE).length, review: stdReviews.filter(r => r.safety === SAFETY.REVIEW_REQUIRED).length, blocked: stdReviews.filter(r => r.safety === SAFETY.BLOCKED).length, planOnly: stdReviews.filter(r => r.safety === SAFETY.PLAN_ONLY).length },
+        customization: { steps: jsReviews.map(r => r.stepId), generatable: jsReviews.filter(r => r.codeGeneration?.supported).map(r => r.stepId), blocked: jsReviews.filter(r => r.status === STATUS.INVALID || r.status === STATUS.BLOCKED_BY_DEPENDENCY).map(r => r.stepId), needsConfirmation: jsReviews.filter(r => r.status === STATUS.NEEDS_CONFIRMATION).map(r => r.stepId), conflicts: jsReviews.filter(r => r.issues.some(i => i.code === 'JS_FIELD_CONFLICT')).map(r => r.stepId) },
       };
       const processChanged = stepReviews.some(r => ['PROCESS_STATUS', 'PROCESS_ACTION', 'PROCESS'].includes(r.diff.target.kind) && r.diff.changeType !== CHANGE.INVALID && r.diff.changeType !== CHANGE.NO_CHANGE);
       // Phase 13: 計画が触る参照元アプリ（ルックアップの step ごとの crossApp を appId で集約。Executor は実行直前に再取得して revision / fieldsHash を照合する）
@@ -5887,7 +6526,8 @@
         diff: { steps: stepReviews.map(r => r.diff), before: { fieldCount: Object.keys(before.fields).length, states: before.process.states.length, actions: before.process.actions.length, notifications: before.notifications.general.length + before.notifications.perRecord.length, reminders: before.reminders.length, views: before.views.length }, after: { fieldCount: Object.keys(model.fields).length, states: model.process.states.length, actions: model.process.actions.length, notifications: model.notifications.general.length + model.notifications.perRecord.length, reminders: model.reminders.length, views: model.views.length } },
         simulation,
         crossApp,
-        executionReadiness: { status: counts.invalid ? 'BLOCKED' : reviewSteps.length || planOnlySteps.length ? 'REVIEW_REQUIRED' : stepReviews.length ? 'SAFE' : 'EMPTY', safeSteps, reviewSteps, blockedSteps, planOnlySteps, approvedSteps: [] },
+        executionReadiness: { status: counts.invalid ? 'BLOCKED' : reviewSteps.length || planOnlySteps.length ? 'REVIEW_REQUIRED' : stepReviews.length ? 'SAFE' : 'EMPTY', safeSteps, reviewSteps, blockedSteps, planOnlySteps, approvedSteps: [], generatableSteps: hybrid.customization.generatable },
+        hybrid,
         impactCheck: impactCheck.items,
         reviewCoverage: {
           fields: true, process: true, notifications: true, reminders: true, lookup: true, views: true, appActions: true,
@@ -5895,6 +6535,105 @@
           notes: ['ACL は対象の実在・既存ルールとの重複だけを確認し、仮適用はしない', 'アプリアクションはコピー先アプリの定義（取得済みのもの）で転記先の実在・型・必須を確認し、未取得のコピー先は Executor が実行直前に取得して検証する', 'JavaScript は既存の参照（impactOf）を再確認するのみで、コードの変更は評価しない', '条件式は単純な比較（field op value）だけを解析し、それ以外は「重なる可能性あり」として扱う', 'ルックアップの参照元アプリは prefetch 時点のフィールド定義（read-only）で検証する。取得できないアプリのフィールドは推測しない。ルックアップの検索方法（search mode）は kintone が管理し、API では読めない'],
         },
       };
+    }
+
+    // ================= Phase 16: JavaScript カスタマイズの step =================
+    const GENERATABLE_STRATEGIES = ['NEW_JS_FILE', 'EXTEND_EXISTING_JS'];
+    const ACCESS_WRITES = (acc) => Object.keys(acc || {}).filter(k => k === 'WRITE' || k === 'CONTROL' || k === 'SHOW_HIDE');
+    /**
+     * CUSTOMIZATION_REQUIRED ＋ spec.customizationId の step。Executor は反映しない（PLAN_ONLY）が、
+     *   - 標準設定で不足する理由 / strategy / platform / Event Catalog / フィールドの実在 / 統合先の既存 JS を検証し、
+     *   - 既存 JS との競合（同じフィールドの WRITE / CONTROL = JS_FIELD_CONFLICT、同じイベント = 候補、実行順序の懸念）を出し、
+     *   - codeGeneration { supported, strategy, existingFile, sourceAvailable } でコード生成の可否を返す
+     */
+    function reviewCustomization(step, r, ctx) {
+      const { model, proposedMap, resolvedCodes, scan, data, plan } = ctx;
+      const issue = (code, severity, message, extra = {}) => r.issues.push({ code, severity, message, ...extra });
+      const h = (line) => r.diff.human.push(line);
+      const cid = String(step.spec.customizationId);
+      const c = (plan?.customizations || []).find(x => x.customizationId === cid) || null;
+      r.solution = 'CUSTOMIZATION'; r.safety = SAFETY.PLAN_ONLY; r.diff.changeType = CHANGE.NO_CHANGE;
+      r.diff.target = { kind: 'JS', id: step.targetRef ?? null };
+      r.codeGeneration = { supported: false, strategy: null, existingFile: null, sourceAvailable: null, reason: null };
+      if (!c) { issue('CUSTOMIZATION_NOT_FOUND', 'high', `計画に customization ${cid} がありません`); r.status = STATUS.INVALID; r.safety = SAFETY.BLOCKED; r.diff.changeType = CHANGE.INVALID; r.codeGeneration.reason = 'CUSTOMIZATION_NOT_FOUND'; return r; }
+      r.customization = c;
+      h(`JS ${c.requirement || step.title}`);
+      let worst = 'none';
+      const bump = (sev) => { const rank = { none: 0, low: 1, medium: 2, high: 3 }; if (rank[sev] > rank[worst]) worst = sev; };
+      const add = (code, sev, message, extra) => { issue(code, sev, message, extra); bump(sev); };
+      // 1. 標準設定で不足する理由（単に「カスタマイズが必要」だけでは不可）
+      if (!String(c.whyStandardInsufficient || '').trim()) add('JS_REASON_MISSING', 'medium', '標準設定だけでは不足する理由が書かれていません（AI に理由を求めてください）');
+      else h(`標準設定で不足する理由: ${c.whyStandardInsufficient}`);
+      // 2. strategy
+      if (!c.strategy) add('JS_STRATEGY_UNKNOWN', 'medium', '実装方針（新規 JS / 既存 JS へ統合）が決まっていません');
+      else if (!GENERATABLE_STRATEGIES.includes(c.strategy)) add('JS_STRATEGY_NOT_GENERATED', 'low', `方針 ${c.strategy} はコード生成の対象外です（計画のみ）`);
+      // 3. platform（勝手に desktop だけにしない）
+      const platform = Array.isArray(c.platform) ? c.platform : [];
+      if (!platform.length) add('JS_PLATFORM_UNSPECIFIED', 'medium', 'PC / モバイルのどちらが対象か決まっていません（確認してから生成）');
+      else h(`対象: ${platform.map(p => (p === 'mobile' ? 'モバイル' : 'PC')).join(' / ')}`);
+      // 4. events（Event Catalog。change イベントのフィールドは既存 or この計画の新規）
+      const knownCodes = [...Object.keys(model.fields || {}), ...proposedMap.keys(), ...resolvedCodes.values(), ...[...proposedMap.values()].map(p => p.suggestedCode).filter(Boolean)];
+      const events = Array.isArray(c.events) ? c.events : [];
+      const evInfo = events.map(ev => KTJsCatalog.checkEvent(ev, { fields: knownCodes }));
+      if (!events.length) add('JS_EVENT_MISSING', 'medium', 'イベントが決まっていません');
+      for (const e of evInfo) if (!e.ok) add('JS_EVENT_UNKNOWN', 'high', `イベント「${e.name}」は kintone のイベント目録にありません${e.reason === 'UNKNOWN_FIELD' ? `（フィールド ${e.field} が無い）` : ''}`);
+      if (events.length) h(`イベント: ${events.join(', ')}`);
+      if (platform.length && !platform.includes('mobile') && evInfo.some(e => e.platform === 'mobile')) add('JS_PLATFORM_EVENT_MISMATCH', 'low', 'PC だけが対象なのにモバイルのイベントが含まれています');
+      if (platform.includes('mobile') && events.length && !evInfo.some(e => e.platform === 'mobile')) add('JS_MOBILE_EVENT_MISSING', 'medium', 'モバイルが対象なのに mobile.app.record.* のイベントがありません');
+      // 5. fields（実在・access）
+      const fields = Array.isArray(c.fields) ? c.fields : [];
+      for (const f of fields) {
+        const code = String(f.code || '');
+        if (!(model.fields && model.fields[code]) && !proposedMap.has(code) && ![...proposedMap.values()].some(p => p.suggestedCode === code)) add('JS_FIELD_UNKNOWN', 'high', `フィールド「${code}」は存在しません（この計画の新規フィールドでもありません）`);
+      }
+      if (fields.length) h(`フィールド: ${fields.map(f => { const m = model.fields?.[f.code]; const p = proposedMap.get(f.code); return `${f.code}${m?.label && m.label !== f.code ? `（${m.label}）` : p ? `（新規「${p.label}」）` : ''} ${f.access}`; }).join('、')}`);
+      const controls = fields.filter(f => f.access === 'CONTROL' || f.access === 'WRITE');
+      if (fields.length && !fields.some(f => f.access === 'CONTROL') && /編集不可|編集でき|警告|エラー|メッセージ|非表示|表示しない|必須に|disabled|error/.test(`${c.requirement || ''} ${step.title || ''}`)) add('JS_ACCESS_HINT', 'low', '要件は編集可否 / 警告（エラー表示）/ 表示の制御ですが、CONTROL のフィールドがありません。生成コードが計画（READ）と不一致になる可能性があります（計画の access を CONTROL にするか、生成後の照合で確認）');
+      if (controls.length && evInfo.length && evInfo.every(e => e.ok && e.editable === false)) add('JS_SCREEN_MISMATCH', 'medium', `${controls.map(f => f.code).join(', ')} を ${controls[0].access} するのに、編集できない画面のイベント（${events.join(', ')}）だけが選ばれています（create.show / edit.show が必要）`);
+      // 6. 既存 JS（統合先・競合）
+      const files = (typeof KTScan !== 'undefined' && KTScan.summarizeFiles) ? KTScan.summarizeFiles(scan, data) : [];
+      const targets = Array.isArray(c.existingFiles) ? c.existingFiles : [];
+      const isTarget = (f) => targets.some(t => t.name === f.name && (t.target || 'desktop') === f.target);
+      if (c.strategy === 'EXTEND_EXISTING_JS') {
+        if (!targets.length) add('JS_TARGET_FILE_MISSING', 'medium', '統合先の既存 JS が指定されていません');
+        for (const t of targets) {
+          const f = files.find(x => x.name === t.name && x.target === (t.target || 'desktop'));
+          if (!f) { add('JS_TARGET_FILE_NOT_FOUND', 'high', `統合先「${t.name}」（${t.target}）は登録されていません`); continue; }
+          if (!f.analyzed) add('JS_TARGET_NOT_ANALYZED', 'medium', `統合先「${t.name}」は未解析（URL 指定）のため内容が分かりません`);
+          r.codeGeneration.existingFile = { name: f.name, target: f.target, fileKey: f.fileKey ?? null, url: f.url ?? null };
+          r.codeGeneration.sourceAvailable = !!f.sourceAvailable;
+          if (!f.sourceAvailable) add('JS_SOURCE_UNAVAILABLE', 'low', `統合先「${t.name}」の本文はまだ取得していません（生成時に取得します。取得できなければ 再スキャン / 新規 JS として設計 / 手動確認 のいずれか）`);
+          const shared = fields.filter(x => f.fields[x.code]);
+          if (shared.length) add('JS_EXISTING_INTEGRATION', 'low', `「${t.name}」は ${shared.map(x => `${x.code}（${Object.keys(f.fields[x.code]).join('/')}）`).join(', ')} を既に扱っています。既存処理へ統合します`);
+          h(`方針: ✎ 既存 ${f.name}（${f.target === 'mobile' ? 'モバイル' : 'PC'}）へ統合`);
+        }
+      } else if (c.strategy === 'NEW_JS_FILE') h('方針: ＋ 新規 JS');
+      // 競合: 統合先以外の既存 JS が同じフィールドを WRITE / CONTROL している（JS_FIELD_CONFLICT → REVIEW_REQUIRED）、同じイベント（候補）、実行順序
+      for (const f of files) {
+        if (!f.analyzed || isTarget(f)) continue;
+        if (platform.length && !platform.includes(f.target) && events.length && !events.some(ev => KTJsCatalog.eventPlatform(ev) === f.target)) continue;   // 対象でない platform のファイル
+        const fieldHits = fields.filter(x => (x.access === 'WRITE' || x.access === 'CONTROL') && f.fields[x.code] && ACCESS_WRITES(f.fields[x.code]).length);
+        if (fieldHits.length) add('JS_FIELD_CONFLICT', 'medium', `既存 JS「${f.name}」（${f.target === 'mobile' ? 'モバイル' : 'PC'}）も ${fieldHits.map(x => `${x.code}（${ACCESS_WRITES(f.fields[x.code]).join('/')}）`).join(', ')} を書き換え・制御しています。新しいファイルを足す前に既存処理への統合を検討してください`, { file: f.name, target: f.target, fields: fieldHits.map(x => x.code) });
+        const sameEvents = events.filter(ev => f.events.includes(ev));
+        if (sameEvents.length) {
+          add('JS_EVENT_CONFLICT_CANDIDATE', 'low', `既存 JS「${f.name}」も ${sameEvents.join(', ')} を使っています（同じイベントだけでは競合とは限りません）`, { file: f.name, events: sameEvents });
+          const orderRisk = fields.filter(x => f.fields[x.code] && (f.fields[x.code].WRITE || x.access === 'WRITE'));
+          if (orderRisk.length) add('JS_EXECUTION_ORDER_RISK', 'medium', `同じイベント ${sameEvents.join(', ')} で「${f.name}」と同じフィールド ${orderRisk.map(x => x.code).join(', ')} の値を扱うため、kintone.events.on の実行順序に依存する可能性があります`, { file: f.name });
+        }
+      }
+      // 7. 依存（標準設定の step の後に生成する）
+      if ((c.dependsOn || []).length) h(`依存: ${c.dependsOn.join(', ')} の後`);
+      for (const q of (c.questions || [])) add('JS_QUESTION', 'medium', `確認: ${q}`);
+      for (const rk of (c.risks || [])) h(`リスク: ${rk}`);
+      // 8. 判定
+      if (worst === 'high') { r.status = STATUS.INVALID; r.safety = SAFETY.BLOCKED; r.diff.changeType = CHANGE.INVALID; }
+      else if (worst === 'medium') r.status = STATUS.NEEDS_CONFIRMATION;
+      else if (worst === 'low') r.status = STATUS.WARNING;
+      r.codeGeneration.strategy = c.strategy || null;
+      const targetOk = c.strategy !== 'EXTEND_EXISTING_JS' || !!r.codeGeneration.existingFile;
+      r.codeGeneration.supported = r.status !== STATUS.INVALID && GENERATABLE_STRATEGIES.includes(c.strategy) && platform.length > 0 && events.length > 0 && targetOk;
+      r.codeGeneration.reason = r.codeGeneration.supported ? null : (r.status === STATUS.INVALID ? 'INVALID' : !GENERATABLE_STRATEGIES.includes(c.strategy) ? 'STRATEGY_NOT_GENERATED' : !platform.length ? 'PLATFORM_UNSPECIFIED' : !events.length ? 'EVENT_MISSING' : 'TARGET_FILE_MISSING');
+      return r;
     }
 
     // ================= step ごとの検証・仮適用 =================
@@ -5911,6 +6650,8 @@
       if (step.validation?.status === 'invalid') invalid('GATEWAY_INVALID', (step.validation.issues || []).join('；') || 'Gateway の検証で無効と判定されています');
       if (cyc.has(step.id)) invalid('CIRCULAR_DEPENDENCY', '依存関係が循環しています');
       if (!cap) { invalid('UNSUPPORTED_ACTION_TYPE', `語彙外の actionType「${String(step.actionType)}」`); return r; }
+      // Phase 16: JavaScript カスタマイズの step は専用の検証（Executor は反映しない。コード生成の可否と既存 JS との競合を判定）
+      if (step.actionType === 'CUSTOMIZATION_REQUIRED' && step.spec && step.spec.customizationId && r.status !== STATUS.INVALID) return reviewCustomization(step, r, ctx);
       if (!cap.simulate || !cap.validate) {
         if (cap.validate) validateOnly(step, r, ctx);
         if (!cap.simulate) { r.simulated = false; if (r.status === STATUS.VALID && cap.defaultSafety === SAFETY.PLAN_ONLY) r.diff.human.push('（計画のみ。Toolkit の仮適用には未対応）'); if (!cap.simulate && cap.validate && r.status !== STATUS.INVALID) { r.safety = r.safety === SAFETY.BLOCKED ? r.safety : SAFETY.REVIEW_REQUIRED; } }
@@ -9134,6 +9875,262 @@
   })();
 
   // ==========================================
+  // 3.6e 生成コードの静的検査 (KTCodeReview) — Phase 16
+  //   JavaScript Generator が返したコード（新規ファイルの全文、または既存ファイルへの patch）を Toolkit 側で決定的に検査する層。
+  //   - patch の適用（baseHash の照合・anchor は 1 回だけ一致・全文の書き換えはしない）と Before / After の行差分
+  //   - 構文（new Function で compile するだけ。実行しない）/ イベント（Event Catalog）/ フィールド（dictionary ＋ 計画の新規）/
+  //     API（API Catalog）/ グローバル汚染 / return event / async / 重複 handler / 既存 JS との競合 / セキュリティ / 外部通信
+  //   - 生成コードを KTScan.analyzeFile（仮想ファイル）に通し、Customization Plan（fields / access / events）と照合する
+  //   判定: BLOCKED（採用しない）/ REVIEW_REQUIRED（人の確認）/ OK。kintone への登録はしない（Phase 16 では提示まで）。
+  // ==========================================
+  const KTCodeReview = (() => {
+    const REVIEW_VERSION = '1';
+    const STATUS = Object.freeze({ OK: 'OK', REVIEW_REQUIRED: 'REVIEW_REQUIRED', BLOCKED: 'BLOCKED' });
+    const EOL_RE = /\r\n|\r|\n/;
+    const hash = (t) => KTScan.hashText(t);
+    /** 既存ソースへ patch を適用する（純関数）。anchor は 1 回だけ一致しなければ止める。baseHash が違えば止める */
+    function applyPatch(source, patch) {
+      const errors = [];
+      const src = String(source ?? '');
+      if (!patch || !Array.isArray(patch.operations) || !patch.operations.length) { errors.push({ code: 'PATCH_EMPTY', message: 'patch の操作がありません' }); return { ok: false, text: src, errors, applied: 0 }; }
+      const cur = hash(src);
+      if (patch.baseHash && patch.baseHash !== cur) errors.push({ code: 'PATCH_BASE_MISMATCH', message: `既存ソースの指紋が違います（patch ${patch.baseHash} / 現在 ${cur}）。既存ファイルが変わっています` });
+      let text = src;
+      let applied = 0;
+      const nl = /\r\n/.test(src) ? '\r\n' : '\n';
+      for (const [i, op] of patch.operations.entries()) {
+        const type = op?.type;
+        const anchor = String(op?.anchor ?? '').replace(/\r\n/g, '\n');
+        const content = String(op?.content ?? '').replace(/\r\n/g, '\n');
+        const norm = text.replace(/\r\n/g, '\n');
+        if (type === 'APPEND') { text = norm + (norm.endsWith('\n') || !norm ? '' : '\n') + content + (content.endsWith('\n') ? '' : '\n'); applied++; continue; }
+        if (!['INSERT_AFTER', 'INSERT_BEFORE', 'REPLACE'].includes(type)) { errors.push({ code: 'PATCH_OP_INVALID', message: `操作 ${i + 1}: 語彙外の type「${String(type)}」` }); continue; }
+        if (!anchor.trim()) { errors.push({ code: 'PATCH_ANCHOR_EMPTY', message: `操作 ${i + 1}: anchor がありません` }); continue; }
+        let count = 0, idx = -1, from = 0;
+        while ((from = norm.indexOf(anchor, from)) >= 0) { count++; if (idx < 0) idx = from; from += anchor.length; }
+        if (count !== 1) { errors.push({ code: count === 0 ? 'PATCH_ANCHOR_NOT_FOUND' : 'PATCH_ANCHOR_AMBIGUOUS', message: `操作 ${i + 1}: anchor が既存ソースに ${count} 回現れます（1 回だけ必要）` }); continue; }
+        const end = idx + anchor.length;
+        const withNl = (t) => (t.endsWith('\n') ? t : `${t}\n`);
+        if (type === 'INSERT_AFTER') { const rest = norm.slice(end); text = norm.slice(0, end) + (norm[end - 1] === '\n' ? '' : '\n') + content.replace(/\n$/, '') + (rest.startsWith('\n') || !rest ? '' : '\n') + rest; }   // anchor の行の直後に content（空行を挟まない）
+        else if (type === 'INSERT_BEFORE') text = norm.slice(0, idx) + withNl(content) + norm.slice(idx);
+        else text = norm.slice(0, idx) + content + norm.slice(end);
+        applied++;
+      }
+      if (nl === '\r\n') text = text.replace(/\n/g, '\r\n');
+      return { ok: errors.length === 0 && applied > 0, text, errors, applied, afterHash: hash(text) };
+    }
+    /** 行単位の差分（LCS）。[{ type: ' ' | '+' | '-', text }]。大きいファイルは上限で打ち切る */
+    function diffLines(before, after, { max = 4000 } = {}) {
+      const a = String(before ?? '') === '' ? [] : String(before ?? '').split(EOL_RE), b = String(after ?? '') === '' ? [] : String(after ?? '').split(EOL_RE);   // 空は 0 行（新規ファイルは全行追加）
+      if (a.length * b.length > max * max) return { lines: [{ type: ' ', text: `（差分の計算を省略: ${a.length} 行 → ${b.length} 行）` }], added: Math.max(0, b.length - a.length), removed: 0, truncated: true };
+      const n = a.length, m = b.length;
+      const dp = Array.from({ length: n + 1 }, () => new Uint16Array(m + 1));
+      for (let i = n - 1; i >= 0; i--) for (let j = m - 1; j >= 0; j--) dp[i][j] = a[i] === b[j] ? dp[i + 1][j + 1] + 1 : Math.max(dp[i + 1][j], dp[i][j + 1]);
+      const lines = [];
+      let i = 0, j = 0, added = 0, removed = 0;
+      while (i < n && j < m) {
+        if (a[i] === b[j]) { lines.push({ type: ' ', text: a[i] }); i++; j++; }
+        else if (dp[i + 1][j] >= dp[i][j + 1]) { lines.push({ type: '-', text: a[i] }); i++; removed++; }
+        else { lines.push({ type: '+', text: b[j] }); j++; added++; }
+      }
+      while (i < n) { lines.push({ type: '-', text: a[i++] }); removed++; }
+      while (j < m) { lines.push({ type: '+', text: b[j++] }); added++; }
+      return { lines, added, removed, truncated: false };
+    }
+    const diffText = (d) => (d?.lines || []).map(l => `${l.type}${l.text}`).join('\n');
+    /** unified 風（変更の前後 3 行だけ）。コピー用 */
+    function diffHunks(d, context = 3) {
+      const lines = d?.lines || [];
+      const keep = new Set();
+      lines.forEach((l, i) => { if (l.type !== ' ') for (let k = Math.max(0, i - context); k <= Math.min(lines.length - 1, i + context); k++) keep.add(k); });
+      const out = [];
+      let last = -2;
+      lines.forEach((l, i) => { if (!keep.has(i)) return; if (i !== last + 1) out.push('@@'); out.push(`${l.type}${l.text}`); last = i; });
+      return out.join('\n');
+    }
+    /** 構文検査（compile のみ。実行しない） */
+    function checkSyntax(code) {
+      try { new Function(String(code ?? '')); return { ok: true, message: null }; }   // eslint-disable-line no-new-func
+      catch (e) { return { ok: false, message: e?.message || String(e) }; }
+    }
+    const stripStrings = (s) => String(s).replace(/`(?:\\[\s\S]|[^`\\])*`|'(?:\\.|[^'\\\n])*'|"(?:\\.|[^"\\\n])*"/g, (m) => '"' + ' '.repeat(Math.max(0, m.length - 2)) + '"');
+    /** ハンドラ（kintone.events.on の第 2 引数）ごとの簡易検査: return event / async */
+    function inspectHandlers(clean) {
+      const s = String(clean || '');
+      const out = [];
+      const rx = /kintone\s*\.\s*events\s*\.\s*on\s*\(/g;
+      let m;
+      while ((m = rx.exec(s)) !== null) {
+        // 第 1 引数の終わりのカンマを探し、その後の handler 本体の { … } を括弧の深さで切り出す
+        let i = m.index + m[0].length, depth = 1, comma = -1;
+        for (; i < s.length && depth > 0; i++) { const ch = s[i]; if (ch === '(' || ch === '[' || ch === '{') depth++; else if (ch === ')' || ch === ']' || ch === '}') depth--; else if (ch === ',' && depth === 1 && comma < 0) comma = i; }
+        const callEnd = i;
+        let handler = comma >= 0 ? s.slice(comma + 1, callEnd - 1) : '';
+        let named = null;
+        const idm = /^\s*([A-Za-z_$][\w$]*)\s*$/.exec(handler);
+        if (idm) {   // 名前付き関数を渡している（kintone.events.on(EVENTS, checkAmount)）→ 定義の本体を探す
+          named = idm[1];
+          const defRx = new RegExp(`(?:\\bfunction\\s+${named}\\s*\\(|\\b${named}\\s*=\\s*(?:async\\s+)?(?:function\\b[^{]*|\\([^)]*\\)\\s*=>|[A-Za-z_$][\\w$]*\\s*=>)|\\basync\\s+function\\s+${named}\\s*\\()`);
+          const dm = defRx.exec(s);
+          if (dm) {
+            const open = s.indexOf('{', dm.index + dm[0].length - (dm[0].endsWith('(') ? 1 : 0));
+            if (open >= 0) { let d = 0, k = open; for (; k < s.length; k++) { const ch = s[k]; if (ch === '{') d++; else if (ch === '}') { d--; if (d === 0) break; } } handler = (/\basync\b/.test(dm[0]) ? 'async ' : '') + 'function ' + s.slice(open, k + 1); }
+          }
+        }
+        const isAsync = /^\s*async\b/.test(handler) || /^\s*\(?\s*async\b/.test(handler);
+        const body = handler;
+        const hasReturnEvent = /\breturn\s+event\b/.test(body) || /\breturn\s+\w+\s*;\s*$/.test(body.trim()) && /\breturn\s+(event|e|ev)\b/.test(body);
+        const usesPromiseThen = /\.then\s*\(/.test(body);
+        const usesAwait = /\bawait\b/.test(body);
+        out.push({ index: m.index, async: isAsync, named, returnEvent: /\breturn\s+(event|e|ev)\b/.test(body) || hasReturnEvent, promiseThen: usesPromiseThen, awaitInNonAsync: usesAwait && !isAsync, handlerLength: body.length, firstArg: s.slice(m.index + m[0].length, comma >= 0 ? comma : m.index + m[0].length + 60).trim().slice(0, 600) });
+      }
+      return out;
+    }
+    /** グローバル汚染: 即時関数の外（ネスト 0）に var / let / const / function / class の宣言があるか */
+    function globalDeclarations(clean) {
+      const s = stripStrings(String(clean || ''));
+      const out = [];
+      let depth = 0;
+      const lines = s.split(EOL_RE);
+      let pos = 0;
+      for (const line of lines) {
+        if (depth === 0) { const m = /^\s*(?:var|let|const|function|class)\s+([A-Za-z_$][\w$]*)/.exec(line); if (m) out.push(m[1]); }
+        for (const ch of line) { if (ch === '{' || ch === '(' || ch === '[') depth++; else if (ch === '}' || ch === ')' || ch === ']') depth = Math.max(0, depth - 1); }
+        pos += line.length + 1;
+      }
+      return out;
+    }
+    /**
+     * 生成コードの検査
+     * @param {object} p
+     *   generated     Gateway の generated（strategy / targetFile / code / patch / events / fields / apis …）
+     *   customization 承認済みの Customization Plan（events / fields / apis / platform / strategy）
+     *   plan          Change Plan（proposedFields の suggestedCode を既知コードに含める）
+     *   data / scan   アプリの定義と Field Scanner の結果（既存 JS との競合）
+     *   existingSource { name, target, text } | null（EXTEND_EXISTING_JS の統合先）
+     * @returns {{ status, checks[], finalCode, addedCode, diff, rescan, mismatches[], security[], provenance }}
+     */
+    function review({ generated, customization, plan = null, data = null, scan = null, existingSource = null, provenance = null } = {}) {
+      const checks = [];
+      const add = (name, ok, severity, message, detail = null) => checks.push({ name, ok, severity: ok ? 'info' : severity, message, ...(detail ? { detail } : {}) });
+      const g = generated || {};
+      const c = customization || {};
+      const fieldsN = KTDeps.normalizeFields(data?.fields || {});
+      const proposedCodes = new Map((plan?.proposedFields || []).map(p => [p.temporaryId, p.suggestedCode]));
+      const knownCodes = new Set([...fieldsN.map(f => f.code), ...proposedCodes.values()]);
+      const fieldRows = [...fieldsN.map(f => ({ code: f.code, label: f.label, type: f.rawType })), ...(plan?.proposedFields || []).map(p => ({ code: p.suggestedCode, label: p.label, type: p.type }))];
+      // ---- 1. コードの確定（新規: 全文 / 統合: patch を適用）----
+      let finalCode = String(g.code ?? '');
+      let addedCode = finalCode;
+      let diff = null, patchResult = null;
+      if (g.strategy === 'EXTEND_EXISTING_JS') {
+        if (!existingSource || typeof existingSource.text !== 'string') { add('patch', false, 'block', '統合先の既存ソースがありません（JS_SOURCE_UNAVAILABLE）。再スキャン / 新規 JS として設計 / 手動確認 のいずれかを選んでください'); return finish(); }
+        patchResult = applyPatch(existingSource.text, g.patch);
+        if (!patchResult.ok) { for (const e of patchResult.errors) add('patch', false, 'block', e.message, { code: e.code }); return finish(); }
+        finalCode = patchResult.text;
+        diff = diffLines(existingSource.text, finalCode);
+        add('patch', true, 'info', `既存「${existingSource.name}」へ ${patchResult.applied} 件の操作を適用（＋${diff.added} 行 / −${diff.removed} 行）。元のコードは保持（全文の書き換えなし）`);
+        if (diff.removed > 0) add('patch-removal', false, 'review', `既存の ${diff.removed} 行が置き換え・削除されます（REPLACE）。既存処理が失われないか確認してください`);
+      } else if (g.strategy !== 'NEW_JS_FILE') { add('strategy', false, 'block', `方針 ${String(g.strategy)} はコード生成の対象外です`); return finish(); }
+      else diff = diffLines('', finalCode);
+      if (!finalCode.trim()) { add('code', false, 'block', 'コードが空です'); return finish(); }
+      // ---- 2. 構文（compile のみ）----
+      const syn = checkSyntax(finalCode);
+      add('syntax', syn.ok, 'block', syn.ok ? '構文エラーなし' : `構文エラー: ${syn.message}`);
+      if (!syn.ok) return finish();
+      // ---- 3. 再解析（KTScan の仮想ファイル）----
+      const target = Array.isArray(c.platform) && c.platform.length === 1 && c.platform[0] === 'mobile' ? 'mobile' : (existingSource?.target || 'desktop');
+      const rescan = KTScan.analyzeFile({ name: g.targetFile || existingSource?.name || 'generated.js', target, kind: 'js', text: finalCode }, { fields: fieldRows, selfAppId: data?.appId ?? null });
+      const addedScan = g.strategy === 'EXTEND_EXISTING_JS' ? KTScan.analyzeFile({ name: g.targetFile || 'added.js', target, kind: 'js', text: addedCode }, { fields: fieldRows, selfAppId: data?.appId ?? null }) : rescan;
+      const clean = KTScan.stripCommentsOnly(finalCode);
+      const cleanAdded = KTScan.stripCommentsOnly(addedCode);
+      // ---- 4. イベント（Event Catalog・計画との一致）----
+      const planEvents = new Set(c.events || []);
+      const codeEvents = addedScan.events;            // 追加したコードが登録するイベント
+      const fileEvents = rescan.events;               // 最終的なファイル全体のイベント（統合では既存 handler のものを含む）
+      const badEvents = codeEvents.filter(e => e.valid === false);
+      add('events', !badEvents.length, 'block', badEvents.length ? `kintone に無いイベント: ${badEvents.map(e => e.name).join(', ')}` : `イベント ${(codeEvents.length ? codeEvents : fileEvents).map(e => e.name).join(', ') || '（検出なし）'} は目録にあります`);
+      const extraEvents = codeEvents.filter(e => e.valid !== false && !planEvents.has(e.name)).map(e => e.name);
+      const missingEvents = [...planEvents].filter(ev => !fileEvents.some(e => e.name === ev));
+      const mismatches = [];
+      if (extraEvents.length) mismatches.push({ kind: 'event', code: 'EXTRA_EVENT', items: extraEvents, message: `計画に無いイベント: ${extraEvents.join(', ')}` });
+      if (missingEvents.length) mismatches.push({ kind: 'event', code: 'MISSING_EVENT', items: missingEvents, message: `計画のイベントがコードに無い: ${missingEvents.join(', ')}` });
+      const addedRegisters = /kintone\s*\.\s*events\s*\.\s*on/.test(cleanAdded);
+      if (!addedRegisters) {
+        if (g.strategy === 'EXTEND_EXISTING_JS' && fileEvents.length) add('handler', true, 'info', `既存の handler（${fileEvents.map(e => e.name).join(', ')}）の中に処理を追加します`);
+        else add('handler', false, 'review', 'kintone.events.on の登録が見つかりません');
+      }
+      // ---- 5. フィールド（dictionary ＋ 計画の新規・計画との一致）----
+      const unknownRefs = (addedScan.unknownRefs || []).map(u => u.code || u.value || u.ref).filter(Boolean);
+      add('fields', !unknownRefs.length, 'block', unknownRefs.length ? `存在しないフィールドコードを参照しています（GENERATED_JS_UNKNOWN_FIELD）: ${unknownRefs.join(', ')}` : `参照するフィールド ${addedScan.fields.map(f => f.code).join(', ') || '（なし）'} は存在します`);
+      const planFields = new Map((c.fields || []).map(f => [f.code, f.access]));
+      for (const f of addedScan.fields) {
+        const writes = ACCESS_W(f.access);
+        const planned = planFields.get(f.code) || null;
+        if (!planned) mismatches.push({ kind: 'field', code: writes.length ? 'EXTRA_FIELD_WRITE' : 'EXTRA_FIELD_READ', items: [f.code], message: `計画に無いフィールド ${f.code} を${writes.length ? `書き換え・制御（${writes.join('/')}）` : '参照'}しています` });
+        else if (writes.length && planned === 'READ') mismatches.push({ kind: 'field', code: 'ACCESS_ESCALATED', items: [f.code], message: `${f.code} は計画では READ ですがコードは ${writes.join('/')} しています` });
+      }
+      for (const [code, access] of planFields) if (!addedScan.fields.some(f => f.code === code)) mismatches.push({ kind: 'field', code: 'MISSING_FIELD', items: [code], message: `計画のフィールド ${code}（${access}）がコードに現れません` });
+      const hardMismatch = mismatches.filter(m => ['EXTRA_FIELD_WRITE', 'ACCESS_ESCALATED', 'EXTRA_EVENT'].includes(m.code));
+      add('plan-consistency', !hardMismatch.length, 'review', hardMismatch.length ? `計画と生成コードが一致しません（CUSTOMIZATION_PLAN_MISMATCH）: ${hardMismatch.map(m => m.message).join('／')}` : mismatches.length ? `計画との軽微な差: ${mismatches.map(m => m.message).join('／')}` : '計画（イベント・フィールド・アクセス）と一致');
+      // ---- 6. API（API Catalog・通信）----
+      const apis = addedScan.apis;
+      const unknownApis = [...new Set(apis.filter(a => !a.known).map(a => a.name))];
+      add('apis', !unknownApis.length, 'review', unknownApis.length ? `目録に無い kintone API: ${unknownApis.join(', ')}` : `使用 API ${[...new Set(apis.map(a => a.name))].join(', ') || '（なし）'} は目録にあります`);
+      const netApis = [...new Set(apis.filter(a => a.network).map(a => a.name))];
+      const planApis = new Set(c.apis || []);
+      const unplannedNet = netApis.filter(a => !planApis.has(a));
+      if (unplannedNet.length) add('apis-network', false, 'review', `計画に無い通信 API を使っています: ${unplannedNet.join(', ')}（単純な制御なら不要）`);
+      // ---- 7. セキュリティ / 外部通信 ----
+      const security = addedScan.security;
+      const blocks = security.filter(x => x.severity === 'block'), reviews = security.filter(x => x.severity === 'review');
+      add('security', !blocks.length, 'block', blocks.length ? blocks.map(x => `${x.message} [${x.code}]`).join('／') : '秘密情報・eval・cookie・外部通信はありません');
+      if (reviews.length) add('security-review', false, 'review', reviews.map(x => `${x.message} [${x.code}]`).join('／'));
+      // ---- 8. 作法: グローバル汚染 / return event / async / 重複 handler ----
+      const globals = g.strategy === 'NEW_JS_FILE' ? globalDeclarations(clean) : [];
+      add('globals', !globals.length, 'review', globals.length ? `ファイル直下に宣言があります（グローバル汚染）: ${globals.join(', ')}。即時関数で包んでください` : '即時関数の外に宣言はありません');
+      const handlers = inspectHandlers(cleanAdded);
+      const noReturn = handlers.filter(h => !h.returnEvent);
+      add('return-event', !noReturn.length, 'review', noReturn.length ? `${noReturn.length} 件の handler に return event がありません（表示イベントで無いと画面が止まります）` : handlers.length ? `${handlers.length} 件の handler は return event しています` : '追加分に新しい handler はありません（既存 handler の中に追加。既存の return event をそのまま使います）');
+      const asyncIssues = handlers.filter(h => h.awaitInNonAsync);
+      add('async', !asyncIssues.length, 'block', asyncIssues.length ? 'async でない handler の中で await を使っています（構文エラーになります）' : handlers.some(h => h.async) ? 'async handler は return event を Promise で返します' : 'async は使っていません');
+      if (handlers.some(h => h.promiseThen && !h.async)) add('async-then', false, 'review', '.then() を使う handler は Promise を return しないと kintone が結果を待ちません');
+      // 登録ごとのイベント名（第 1 引数の文字列リテラル。変数経由なら解析結果の名前で代用）
+      const literalRegs = handlers.flatMap(h => [...String(h.firstArg || '').matchAll(/['"`]((?:mobile\.)?app\.(?:record|report|event)\.[A-Za-z0-9_.]+)['"`]/g)].map(x => x[1]));
+      const regs = literalRegs.length ? literalRegs : codeEvents.map(e => e.name);
+      const dupInAdded = regs.filter((e, i) => regs.indexOf(e) !== i);
+      const existingEvents = existingSource ? KTScan.extractEventTypes(KTScan.stripCommentsOnly(existingSource.text)).map(e => e.name) : [];
+      const dupWithExisting = g.strategy === 'EXTEND_EXISTING_JS' ? [...new Set(regs.filter(e => existingEvents.includes(e)))] : [];
+      if (dupInAdded.length) add('duplicate-handler', false, 'review', `同じイベントを 2 回登録しています: ${[...new Set(dupInAdded)].join(', ')}`);
+      else if (dupWithExisting.length) add('duplicate-handler', false, 'review', `既存ファイルが既に登録しているイベントに別の handler を足します: ${dupWithExisting.join(', ')}（同じイベントの handler は登録順に動きます）`);
+      else add('duplicate-handler', true, 'info', '重複した handler はありません');
+      // ---- 9. 既存 JS との競合（統合先以外の既存ファイルが同じフィールドを WRITE / CONTROL）----
+      const files = KTScan.summarizeFiles(scan, data).filter(f => f.analyzed && !(existingSource && f.name === existingSource.name && f.target === existingSource.target));
+      const conflicts = [];
+      for (const f of files) {
+        for (const fld of addedScan.fields) {
+          const mine = ACCESS_W(fld.access); const theirs = ACCESS_W(f.fields[fld.code] || {});
+          if (mine.length && theirs.length) conflicts.push({ file: f.name, target: f.target, code: fld.code, theirs });
+        }
+      }
+      add('existing-conflict', !conflicts.length, 'review', conflicts.length ? `既存 JS と同じフィールドを制御します（JS_FIELD_CONFLICT）: ${conflicts.map(x => `${x.file}（${x.code}: ${x.theirs.join('/')}）`).join(', ')}` : '既存 JS との書き換え・制御の重なりはありません');
+      // ---- 10. platform ----
+      const mobileEvents = codeEvents.filter(e => KTJsCatalog.isMobileEvent(e.name)).length;
+      if (Array.isArray(c.platform) && c.platform.includes('mobile') && !mobileEvents) add('platform', false, 'review', '計画はモバイルも対象ですが、mobile.app.record.* のイベントがありません');
+      else if (Array.isArray(c.platform) && c.platform.length && !c.platform.includes('mobile') && mobileEvents) add('platform', false, 'review', '計画は PC だけですが、モバイルのイベントが含まれています');
+      else add('platform', true, 'info', `対象 ${(c.platform || []).join(' / ') || '—'} と整合`);
+      return finish({ rescan, mismatches, security, finalCode, addedCode, diff, patchResult });
+      function finish(extra = {}) {
+        const status = checks.some(x => !x.ok && x.severity === 'block') ? STATUS.BLOCKED : checks.some(x => !x.ok) ? STATUS.REVIEW_REQUIRED : STATUS.OK;
+        return { reviewVersion: REVIEW_VERSION, status, checks, finalCode: extra.finalCode ?? null, addedCode: extra.addedCode ?? null, diff: extra.diff ?? null, diffText: extra.diff ? diffHunks(extra.diff) : null, rescan: extra.rescan ?? null, mismatches: extra.mismatches ?? [], security: extra.security ?? [], patch: extra.patchResult ? { applied: extra.patchResult.applied, afterHash: extra.patchResult.afterHash } : null, provenance: provenance ? { ...provenance, reviewedAt: new Date().toISOString(), codeHash: extra.finalCode ? hash(extra.finalCode) : null } : null };
+      }
+    }
+    const ACCESS_W = (acc) => Object.keys(acc || {}).filter(k => k === 'WRITE' || k === 'CONTROL' || k === 'SHOW_HIDE');
+
+    return { REVIEW_VERSION, STATUS, applyPatch, diffLines, diffText, diffHunks, checkSyntax, inspectHandlers, globalDeclarations, review };
+  })();
+
+  // ==========================================
   // 3.7 Nest Rec AI Gateway クライアント (KTAiClient)
   //   有料機能「AIに質問」の通信層。AppInsight の src/desktop/ai/ai-client.js と同じ設計
   //   （kintone.proxy 優先・fetch フォールバック・timeout は AbortController で中断・エラーは
@@ -9152,9 +10149,11 @@
     const PRODUCT = 'toolkit';
     const FEATURE = 'assistant-qa';
     const FEATURE_PLANNER = 'change-planner';          // Phase 7: AI Change Planner（Gateway の別 feature）
-    const FEATURES = [FEATURE, FEATURE_PLANNER];        // 接続（exchange / connect）で要求する scope。許可された交差が付与される
+    const FEATURE_GENERATOR = 'customization-generator';   // Phase 16: JavaScript Generator（Planner と別 feature・別 model）
+    const FEATURES = [FEATURE, FEATURE_PLANNER, FEATURE_GENERATOR];   // 接続（exchange / connect）で要求する scope。許可された交差が付与される
     const PROMPT_VERSION = '1';
     const PLANNER_PROMPT_VERSION = '1';
+    const GENERATOR_PROMPT_VERSION = '1';
     /** 公開エンドポイント（secret ではない）。設定で上書きできる */
     const DEFAULT_API_BASE = 'https://appinsight-ai-api.black-waterfall-157a.workers.dev';
     const SETTINGS_KEY = 'ktAi.v1';          // 旧: Customer Token を保存していた（staging E2E 用。見つけたら 1 回だけ exchange して削除）
@@ -9173,7 +10172,7 @@
       UPSTREAM_ERROR: 'UPSTREAM_ERROR', MODEL_OUTPUT_INVALID: 'MODEL_OUTPUT_INVALID', INTERNAL_ERROR: 'INTERNAL_ERROR',
       // client 側のみ
       TRANSPORT_ERROR: 'TRANSPORT_ERROR', TIMEOUT: 'TIMEOUT', INVALID_RESPONSE: 'INVALID_RESPONSE', WORKER_ERROR: 'WORKER_ERROR',
-      NO_CONFIG: 'NO_CONFIG', NOT_ENTITLED: 'NOT_ENTITLED', CONTRACT_INCOMPATIBLE: 'CONTRACT_INCOMPATIBLE', NO_CONTEXT: 'NO_CONTEXT', PLANNER_NOT_AVAILABLE: 'PLANNER_NOT_AVAILABLE',
+      NO_CONFIG: 'NO_CONFIG', NOT_ENTITLED: 'NOT_ENTITLED', CONTRACT_INCOMPATIBLE: 'CONTRACT_INCOMPATIBLE', NO_CONTEXT: 'NO_CONTEXT', PLANNER_NOT_AVAILABLE: 'PLANNER_NOT_AVAILABLE', GENERATOR_NOT_AVAILABLE: 'GENERATOR_NOT_AVAILABLE',
       NOT_CONNECTED: 'NOT_CONNECTED', SESSION_EXPIRED: 'SESSION_EXPIRED',
       CANCELLED: 'CANCELLED',   // Phase 15: 利用者が送信を取り消した（AbortSignal）。応答は捨てる
       // tokenless connect（Browser Authorization Session）
@@ -9188,6 +10187,7 @@
       PRODUCT_NOT_ENTITLED: 'この契約では kintone App Toolkit の AI 機能を利用できません。契約内容を確認してください。',
       FEATURE_NOT_ENTITLED: 'この契約では「AIに質問」を利用できません。契約内容を確認してください。',
       PLANNER_NOT_AVAILABLE: 'この契約では「変更計画を作る」を利用できません。契約内容を確認してください。',
+      GENERATOR_NOT_AVAILABLE: 'この契約では「JavaScript の生成」を利用できません。契約内容を確認してください。',
       CONNECT_DENIED: 'Nest Rec で接続がキャンセル（拒否）されました。',
       CONNECT_EXPIRED: '接続の確認が時間切れになりました。もう一度「Nest Rec AIに接続」してください。',
       CONNECT_CANCELLED: '接続をキャンセルしました。',
@@ -9329,7 +10329,8 @@
       if (!versions.includes(CONTRACT_VERSION)) return { available: false, reason: ERROR_CODES.CONTRACT_INCOMPATIBLE };
       const qa = featureCapability(health, FEATURE, PROMPT_VERSION);
       const planner = featureCapability(health, FEATURE_PLANNER, PLANNER_PROMPT_VERSION);
-      const features = { [FEATURE]: qa, [FEATURE_PLANNER]: planner };
+      const generator = featureCapability(health, FEATURE_GENERATOR, GENERATOR_PROMPT_VERSION);
+      const features = { [FEATURE]: qa, [FEATURE_PLANNER]: planner, [FEATURE_GENERATOR]: generator };
       if (!qa.available) return { available: false, reason: qa.reason, features, usage: health.usage ?? null };
       // contractExpiresAt（契約の期限。W5）。tokenExpiresAt は Access Token 認証では Access の期限なので契約の表示には使わない
       return { available: true, reason: null, features, usage: health.usage ?? null, tokenExpiresAt: health.tokenExpiresAt ?? null, contractExpiresAt: health.contractExpiresAt ?? null };
@@ -9346,6 +10347,47 @@
           plugin: { name: 'kintone App Toolkit', version: pluginVersion },
         },
         payload: ctx,
+      };
+    }
+
+    /** Contract 2.1 の request envelope（customization-generator。payload は KTContext.buildGenerator() の結果そのもの） */
+    function buildGenerateEnvelope({ ctx, requestId = newRequestId(), pluginVersion = SCRIPT_VERSION, now = new Date().toISOString() }) {
+      if (!ctx || typeof ctx !== 'object' || !ctx.customization || typeof ctx.customization !== 'object') throw new AiClientError({ code: ERROR_CODES.NO_CONTEXT, message: 'Generator Context がありません' });
+      return {
+        contractVersion: CONTRACT_VERSION,
+        meta: {
+          requestId, generatedAt: now,
+          product: PRODUCT, feature: FEATURE_GENERATOR, promptVersion: GENERATOR_PROMPT_VERSION, contextVersion: String(ctx.contextVersion),
+          plugin: { name: 'kintone App Toolkit', version: pluginVersion },
+        },
+        payload: ctx,
+      };
+    }
+    /**
+     * 生成コードの応答を送信した Generator Context で再検証する（Worker の検証と二重。strategy / code / patch の形だけ。
+     * コードの静的検査（構文・イベント・フィールド・API・セキュリティ・計画との一致）は KTCodeReview が行う）
+     */
+    function validateGenerated(response, ctx) {
+      const errors = [], warnings = [];
+      const r = response || {};
+      if (r.ok !== true) { errors.push({ code: ERROR_CODES.INVALID_RESPONSE, path: 'ok', message: 'ok:true ではありません' }); return { ok: false, errors, warnings, normalized: null }; }
+      if (r.contractVersion !== CONTRACT_VERSION) errors.push({ code: ERROR_CODES.UNSUPPORTED_CONTRACT_VERSION, path: 'contractVersion', message: `contractVersion が一致しません: ${r.contractVersion}` });
+      const g = r.generated;
+      if (!g || typeof g !== 'object' || typeof g.code !== 'string' || !g.code.trim() || typeof g.strategy !== 'string') errors.push({ code: ERROR_CODES.INVALID_RESPONSE, path: 'generated', message: 'generated（strategy / code）がありません' });
+      if (errors.length) return { ok: false, errors, warnings, normalized: null };
+      const want = ctx?.customization?.strategy;
+      if (want && g.strategy !== want) warnings.push({ code: 'STRATEGY_MISMATCH', path: 'generated.strategy', message: `方針が計画（${want}）と違います: ${g.strategy}` });
+      if (g.strategy === 'EXTEND_EXISTING_JS' && (!g.patch || !Array.isArray(g.patch.operations) || !g.patch.operations.length)) errors.push({ code: ERROR_CODES.INVALID_RESPONSE, path: 'generated.patch', message: '既存 JS への統合なのに patch がありません' });
+      if (errors.length) return { ok: false, errors, warnings, normalized: null };
+      return {
+        ok: true, errors, warnings,
+        normalized: {
+          strategy: g.strategy, targetFile: String(g.targetFile || ''), summary: String(g.summary || ''), code: g.code, patch: g.patch && typeof g.patch === 'object' ? g.patch : null,
+          events: Array.isArray(g.events) ? g.events.filter(x => typeof x === 'string') : [], fields: Array.isArray(g.fields) ? g.fields.filter(f => f && typeof f.code === 'string') : [], apis: Array.isArray(g.apis) ? g.apis.filter(x => typeof x === 'string') : [],
+          assumptions: Array.isArray(g.assumptions) ? g.assumptions.filter(x => typeof x === 'string') : [], warnings: Array.isArray(g.warnings) ? g.warnings.filter(x => typeof x === 'string') : [],
+          gatewayChecks: g.gatewayChecks && typeof g.gatewayChecks === 'object' ? g.gatewayChecks : null,
+          requestId: r.meta?.requestId ?? null, usage: r.meta?.usage ?? null, ai: r.meta?.ai ?? null, gatewayWarnings: r.meta?.normalization?.warnings ?? [],
+        },
       };
     }
 
@@ -9383,10 +10425,28 @@
       });
       const impact = (p.impact || []).map((x, i) => ({ ...x, evidenceIds: ids(x.evidenceIds, `impact[${i}]`) }));
       const questions = (p.questions || []).map((x, i) => ({ ...x, relatedEvidenceIds: ids(x.relatedEvidenceIds, `questions[${i}]`) }));
+      // Phase 16: Customization Plan（形だけ正規化。イベント目録・フィールドの実在・既存 JS との競合は KTPlanReview.reviewCustomization が検証する）
+      const strs = (a) => (Array.isArray(a) ? a.filter(x => typeof x === 'string' && x.trim()) : []);
+      const customizations = (Array.isArray(p.customizations) ? p.customizations : []).filter(c => c && typeof c === 'object' && typeof c.customizationId === 'string').map((c, i) => ({
+        customizationId: c.customizationId, requirement: String(c.requirement ?? ''), whyStandardInsufficient: String(c.whyStandardInsufficient ?? ''),
+        strategy: typeof c.strategy === 'string' ? c.strategy : null, platform: strs(c.platform).filter(x => x === 'desktop' || x === 'mobile'),
+        events: strs(c.events), fields: (Array.isArray(c.fields) ? c.fields : []).filter(f => f && typeof f.code === 'string').map(f => ({ code: f.code, access: ['READ', 'WRITE', 'CONTROL'].includes(f.access) ? f.access : 'READ' })),
+        apis: strs(c.apis), existingFiles: (Array.isArray(c.existingFiles) ? c.existingFiles : []).filter(f => f && typeof f.name === 'string').map(f => ({ name: f.name, target: f.target === 'mobile' ? 'mobile' : 'desktop', reason: String(f.reason ?? '') })),
+        risks: strs(c.risks), questions: strs(c.questions), dependsOn: strs(c.dependsOn), evidenceIds: ids(c.evidenceIds, `customizations[${i}]`),
+      })).map((c, i) => {
+        // Gateway validate-plan と同じ正規化（実機 Phase 16）: PC / モバイルの要否を質問しながら両方を platform に入れたら空に、警告 / 編集不可 / 表示の要件で唯一の READ は CONTROL に
+        if (c.platform.length === 2 && c.questions.some(q => /モバイル|スマホ|スマートフォン|mobile/i.test(q) && /両方|必要|対象|どちら|いる|要る|要否|否/.test(q))) { c.platform = []; warnings.push({ code: 'CUSTOMIZATION_PLATFORM_QUESTIONED', path: `customizations[${i}].platform`, message: `${c.customizationId}: PC / モバイルの要否を質問しているため platform を空にしました` }); }
+        if (c.fields.length === 1 && c.fields[0].access === 'READ' && /編集不可|編集でき|編集を|警告|エラー|メッセージ|非表示|表示しない|必須に|disabled|error/.test(`${c.requirement} ${c.whyStandardInsufficient}`)) { c.fields[0].access = 'CONTROL'; warnings.push({ code: 'CUSTOMIZATION_ACCESS_ADJUSTED', path: `customizations[${i}].fields`, message: `${c.customizationId}: ${c.fields[0].code} の access を READ → CONTROL にしました（要件が編集可否 / 警告 / 表示の制御）` }); }
+        return c;
+      });
+      const custSteps = steps.filter(st => st.actionType === 'CUSTOMIZATION_REQUIRED' && st.spec?.customizationId);
+      for (const st of custSteps) if (!customizations.some(c => c.customizationId === st.spec.customizationId)) warnings.push({ code: 'CUSTOMIZATION_MISSING', path: 'customizations', message: `${st.id} の customization ${st.spec.customizationId} が plan.customizations にありません` });
+      const hasStd = steps.some(st => !st.alternativeId && st.actionType !== 'CUSTOMIZATION_REQUIRED' && st.actionType !== 'REQUIRE_CONFIRMATION');
+      const solution = ['STANDARD', 'CUSTOMIZATION', 'HYBRID', 'UNKNOWN'].includes(p.solution) ? p.solution : (custSteps.length ? (hasStd ? 'HYBRID' : 'CUSTOMIZATION') : 'STANDARD');
       return {
         ok: true, errors, warnings,
         normalized: {
-          ...p, assessment, relevantFields, proposedFields, steps, impact, questions,
+          ...p, assessment, relevantFields, proposedFields, steps, impact, questions, customizations, solution,
           requestId: r.meta?.requestId ?? null, usage: r.meta?.usage ?? null, ai: r.meta?.ai ?? null, gatewayWarnings: r.meta?.normalization?.warnings ?? [],
         },
       };
@@ -9545,6 +10605,14 @@
           if (!v.ok) throw new AiClientError({ code: v.errors[0].code, message: v.errors[0].message, details: { errors: v.errors }, requestId });
           return { ...v.normalized, requestId: v.normalized.requestId || requestId, clientWarnings: v.warnings };
         },
+        /** POST /v2/review（toolkit.customization-generator）。Generator Context を送り、生成コードを再検証して返す（登録はしない） */
+        async generate({ ctx, requestId = newRequestId(), signal = null } = {}) {
+          const envelope = buildGenerateEnvelope({ ctx, requestId, pluginVersion, now: nowFn ? nowFn() : new Date().toISOString() });
+          const response = await request({ path: '/v2/review', method: 'POST', body: JSON.stringify(envelope), signal });
+          const v = validateGenerated(response, ctx);
+          if (!v.ok) throw new AiClientError({ code: v.errors[0].code, message: v.errors[0].message, details: { errors: v.errors }, requestId });
+          return { ...v.normalized, requestId: v.normalized.requestId || requestId, clientWarnings: v.warnings };
+        },
       };
     }
 
@@ -9617,6 +10685,7 @@
         exchange: (p) => authed().exchange(p),
         ask: (p) => authed().ask(p),
         plan: (p) => authed().plan(p),
+        generate: (p) => authed().generate(p),
       };
       return {
         /** connect flow（PKCE）で発行された pair を取り込む（Customer Token は存在しない） */
@@ -9747,7 +10816,8 @@
       CONTRACT_VERSION, PRODUCT, FEATURE, FEATURE_PLANNER, FEATURES, PROMPT_VERSION, PLANNER_PROMPT_VERSION, DEFAULT_API_BASE, HEALTH_TTL_MS, ACCESS_SKEW_MS,
       ERROR_CODES, ERROR_TEXT, errorText, AiClientError, isAiClientError,
       createSettingsStore, createDefaultTransport, normalizeLegacyErrorCode,
-      buildAskEnvelope, buildPlanEnvelope, capabilityFromHealth, validateAnswer, validatePlan, createAiClient, createSession, newRequestId,
+      buildAskEnvelope, buildPlanEnvelope, buildGenerateEnvelope, capabilityFromHealth, validateAnswer, validatePlan, validateGenerated, createAiClient, createSession, newRequestId,
+      FEATURE_GENERATOR, GENERATOR_PROMPT_VERSION,
       createPkce, createConnectFlow, isDevMode,
     };
   })();
@@ -10156,9 +11226,10 @@
       const [sfText, sfColor] = RSAFETY[r.safety] || [r.safety, '#555'];
       const lines = (r.diff?.human || []).map(l => `<div style="font-size:11px;">${esc(l)}</div>`).join('');
       const issues = (r.issues || []).map(i => `<div style="font-size:11px; color:${i.severity === 'high' ? '#b00020' : i.severity === 'medium' ? '#b26a00' : '#555'};">${i.severity === 'high' ? '⚠' : '・'} ${esc(i.message)}</div>`).join('');
+      const gen = r.codeGeneration ? `<div style="font-size:11px; margin-top:2px; color:${r.codeGeneration.supported ? '#2e7d32' : '#b26a00'};">${r.codeGeneration.supported ? '✓ コード生成できます（Executor は反映しません）' : `△ コード生成はまだできません（${esc(r.codeGeneration.reason || '要確認')}）`}</div>${r.codeGeneration.supported ? `<div style="margin-top:4px;"><button type="button" class="btn kt-ai-act" data-act="generate" data-cid="${esc(r.customization?.customizationId || '')}" style="height:24px; font-size:11px; border-color:#6a1b9a;">コードを作る</button></div>` : ''}` : '';
       return `<div class="kt-ai-review-step" data-step="${esc(r.stepId)}" style="margin-top:6px; padding:6px 8px; border-radius:6px; background:rgba(0,0,0,.04); border-left:3px solid ${stColor};">
-        <div><b>Toolkit で確認した結果</b> ${badge(stText, stColor)}${badge(sfText, sfColor)}${changeBadges(r)}${r.blockedBy?.length ? badge(`依存: ${r.blockedBy.join(', ')}`, '#b00020') : ''}</div>
-        ${lines}${issues}
+        <div><b>Toolkit で確認した結果</b> ${badge(stText, stColor)}${badge(sfText, sfColor)}${changeBadges(r)}${r.blockedBy?.length ? badge(`依存: ${r.blockedBy.join(', ')}`, '#b00020') : ''}${r.solution === 'CUSTOMIZATION' ? badge('JavaScript', '#6a1b9a') : ''}</div>
+        ${lines}${issues}${gen}
         <label style="display:flex; align-items:center; gap:6px; margin-top:4px; font-size:11px;">判断
           <select class="kt-ai-decision" data-step="${esc(r.stepId)}" style="font-size:11px;"><option value="">（未定）</option><option value="approve"${r.safety === 'BLOCKED' ? ' disabled' : ''}>承認</option><option value="hold">保留</option><option value="reject">却下</option></select>
         </label>
@@ -10193,6 +11264,13 @@
       const crossApp = Array.isArray(review.crossApp) ? review.crossApp : [];
       const roleJa = (x) => (x.role === 'destination' ? 'コピー先' : '参照元');
       const crossAppHtml = crossApp.length ? `<div id="kt-ai-review-crossapp" style="margin-top:8px;"><b>相手アプリ（ルックアップの参照元 / アプリアクションのコピー先）</b>${crossApp.map(x => `<div style="font-size:11px; margin-left:8px; margin-top:2px; color:${x.available ? 'inherit' : (x.error?.code === 'NOT_LOADED' ? '#b26a00' : '#b00020')};">${x.available ? '✓' : (x.error?.code === 'NOT_LOADED' ? '△' : '×')} ${esc(roleJa(x))} App ${esc(String(x.appId))}${x.name ? `「${esc(x.name)}」` : ''}${x.available ? `：フィールド設定を取得済み（revision ${esc(String(x.revision ?? '—'))}・指紋 ${esc(String(x.fieldsHash ?? '—'))}）。実行直前にもう一度取得して照合します` : x.error?.code === 'NOT_LOADED' ? '：フィールド設定はまだ取得していません。実行直前に取得して転記先の実在・型・必須を検証します（推測しません）' : `：フィールド設定を確認できません${x.error?.message ? `（${esc(x.error.message)}）` : ''}。${esc(roleJa(x))}アプリへのアクセス権を確認してください。相手アプリのフィールドは推測しません`}<span style="opacity:.6;">（${esc((x.stepIds || []).join(', '))}）</span></div>`).join('')}</div>` : '';
+      // Phase 16（§43）: 標準設定と JavaScript を同じ Review 上で要約する
+      const hy = review.hybrid || null;
+      const hybridHtml = hy && hy.customization.steps.length ? `<div id="kt-ai-review-hybrid" style="margin-top:8px; border:1px solid #6a1b9a; border-radius:6px; padding:6px 8px;"><b>実装計画（標準設定 ＋ JavaScript）</b>
+        <div style="margin-top:4px; font-size:12px;"><b>標準設定</b>${steps.filter(r => r.solution !== 'CUSTOMIZATION').map(r => `<div style="margin-left:8px;"><span style="color:${r.safety === 'SAFE' ? '#2e7d32' : r.safety === 'BLOCKED' ? '#b00020' : '#b26a00'};">${r.safety === 'SAFE' ? '✓' : r.safety === 'BLOCKED' ? '×' : '△'}</span> ${esc(r.stepId)} ${esc((r.diff?.human?.[0] || '').replace(/^[＋✎↻] /, ''))}</div>`).join('') || '<div style="margin-left:8px; opacity:.6;">（なし）</div>'}</div>
+        <div style="margin-top:4px; font-size:12px;"><b>JavaScript</b>${steps.filter(r => r.solution === 'CUSTOMIZATION').map(r => `<div style="margin-left:8px;"><span style="color:${r.status === 'INVALID' || r.status === 'BLOCKED_BY_DEPENDENCY' ? '#b00020' : r.codeGeneration?.supported && r.status === 'VALID' ? '#2e7d32' : '#b26a00'};">${r.status === 'INVALID' || r.status === 'BLOCKED_BY_DEPENDENCY' ? '×' : r.codeGeneration?.supported && r.status === 'VALID' ? '✓' : '△'}</span> ${esc(r.stepId)} ${esc(r.customization?.requirement || r.diff?.human?.[0] || '')}（${r.codeGeneration?.strategy === 'EXTEND_EXISTING_JS' ? `✎ ${esc(r.codeGeneration.existingFile?.name || '既存 JS')} を変更` : r.codeGeneration?.strategy === 'NEW_JS_FILE' ? '＋ 新規 JS' : '計画のみ'}）</div>`).join('')}</div>
+        <div style="margin-top:4px; font-size:12px;"><b>全体</b>　実行可能な標準設定: ${hy.standard.safe + hy.standard.review} 件　コード生成可能: ${hy.customization.generatable.length} 件　確認事項: ${c.confirmations ?? 0} 件${hy.customization.conflicts.length ? `　既存 JS との競合: ${hy.customization.conflicts.length} 件` : ''}</div>
+        <div style="font-size:11px; opacity:.7; margin-top:2px;">JavaScript は Executor では反映しません。コードは「コードを作る」で生成し、Toolkit の静的検査の後にコピーして登録します。</div></div>` : '';
       const cov = review.reviewCoverage || {};
       const covText = Object.entries(cov).filter(([k]) => k !== 'notes').map(([k, v]) => `${k}: ${v === true ? '✓' : v === false ? '—' : esc(String(v))}`).join('　');
       return `<div id="kt-ai-review" style="margin-top:10px; border:2px solid #1a73e8; border-radius:8px; padding:8px;">
@@ -10206,6 +11284,7 @@
         <div style="margin-top:6px; font-size:11px;">追加：${c.additions ?? 0}　既存変更：${c.updates ?? 0}　既存利用：${c.reuse ?? 0}　高リスク変更：${c.highRisk ?? 0}　競合候補：${c.conflicts ?? 0}　確認事項：${c.confirmations ?? 0}　無効：${c.invalid ?? 0}</div>
         <div id="kt-ai-review-decisions" style="margin-top:4px; font-size:11px;">${esc(decisionSummary(review, {}))}</div>
         ${updatesHtml}
+        ${hybridHtml}
         ${crossAppHtml}
         ${conflicts ? `<div style="margin-top:8px;"><b>⚠ 競合・重複の候補</b>${conflicts}</div>` : ''}
         ${warnings ? `<div style="margin-top:8px;"><b>Toolkit からの指摘</b>${warnings}</div>` : ''}
@@ -10612,12 +11691,14 @@
   //   LLM へは会話履歴を送らず、intent ごとに必要な Context だけを services 経由で送る（UI の履歴と LLM の Context は別）。
   // ==========================================
   const KTAiConversation = (() => {
-    const INTENT = { ASK: 'ASK', PLAN: 'PLAN', REVISE_PLAN: 'REVISE_PLAN', EXPLAIN_PLAN: 'EXPLAIN_PLAN', EXPLAIN_REVIEW: 'EXPLAIN_REVIEW', REQUEST_PREVIEW: 'REQUEST_PREVIEW', REQUEST_ROLLBACK: 'REQUEST_ROLLBACK', GENERAL: 'GENERAL', AMBIGUOUS: 'AMBIGUOUS' };
-    const MSG = { USER: 'USER', ASSISTANT_TEXT: 'ASSISTANT_TEXT', ANSWER: 'ANSWER', PLAN: 'PLAN', REVIEW: 'REVIEW', DIFF: 'DIFF', EXECUTION: 'EXECUTION', ROLLBACK: 'ROLLBACK', SYSTEM_NOTICE: 'SYSTEM_NOTICE', ERROR: 'ERROR', LOADING: 'LOADING' };
+    const INTENT = { ASK: 'ASK', PLAN: 'PLAN', REVISE_PLAN: 'REVISE_PLAN', EXPLAIN_PLAN: 'EXPLAIN_PLAN', EXPLAIN_REVIEW: 'EXPLAIN_REVIEW', REQUEST_PREVIEW: 'REQUEST_PREVIEW', REQUEST_ROLLBACK: 'REQUEST_ROLLBACK', GENERAL: 'GENERAL', AMBIGUOUS: 'AMBIGUOUS',
+      // Phase 16: JavaScript カスタマイズ（コード生成は明示の意図だけ。「これで進めて」では生成しない）
+      GENERATE_CODE: 'GENERATE_CODE', EXPLAIN_CUSTOMIZATION: 'EXPLAIN_CUSTOMIZATION' };
+    const MSG = { USER: 'USER', ASSISTANT_TEXT: 'ASSISTANT_TEXT', ANSWER: 'ANSWER', PLAN: 'PLAN', REVIEW: 'REVIEW', DIFF: 'DIFF', EXECUTION: 'EXECUTION', ROLLBACK: 'ROLLBACK', SYSTEM_NOTICE: 'SYSTEM_NOTICE', ERROR: 'ERROR', LOADING: 'LOADING', CODE: 'CODE' };
     const PLAN_STATUS = { ACTIVE: 'ACTIVE', SUPERSEDED: 'SUPERSEDED', STALE: 'STALE', EXECUTED: 'EXECUTED', ROLLED_BACK: 'ROLLED_BACK' };
     const ROLE = { USER: 'user', ASSISTANT: 'assistant', TOOLKIT: 'toolkit', SYSTEM: 'system' };
     const MAX_MESSAGES = 200;
-    const LOADING_TEXT = { ASK: '確認しています...', EXPLAIN_PLAN: '確認しています...', EXPLAIN_REVIEW: '確認しています...', PLAN: '現在の設定を確認し、変更計画を作っています...', REVISE_PLAN: '変更計画を見直しています...' };
+    const LOADING_TEXT = { ASK: '確認しています...', EXPLAIN_PLAN: '確認しています...', EXPLAIN_REVIEW: '確認しています...', EXPLAIN_CUSTOMIZATION: '確認しています...', PLAN: '現在の設定を確認し、変更計画を作っています...', REVISE_PLAN: '変更計画を見直しています...', GENERATE_CODE: '既存の JavaScript を確認し、コードを生成しています...' };
     const TRANSIENT = ['RATE_LIMITED', 'TIMEOUT', 'TRANSPORT_ERROR', 'UPSTREAM_ERROR', 'INTERNAL_ERROR', 'WORKER_ERROR', 'INVALID_RESPONSE', 'MODEL_OUTPUT_INVALID'];
     let seq = 0;
     const newId = (p) => `${p}_${Date.now().toString(36)}_${(++seq).toString(36)}`;
@@ -10626,6 +11707,9 @@
     const RE = {
       // 説明の依頼（計画 / Review について）。「このフィールドは何に使ってる？」のような現在の設定の質問は含めない
       questionWord: /なぜ|何で|なんで|どうして|何してる|何をして|何する|って何|とは[?？]?$|どういう|意味|説明して|教えて|理由/,
+      // Phase 16: コード生成の明示（「コードを作って」「JS を書いて」）と、カスタマイズについての質問
+      generate: /コード\s*(を|も)?\s*(作|生成|書|出)|JS\s*(を|も)?\s*(作|生成|書|出)|JavaScript\s*(を|も)?\s*(作|生成|書|出)|スクリプト\s*(を|も)?\s*(作|生成|書)|カスタマイズ\s*(を|も)?\s*(作|生成|書|実装)|実装して|生成して/i,
+      aboutCustomization: /カスタマイズ|JavaScript|JS\b|スクリプト|コード|既存の処理|ファイル/i,
       aboutPlan: /\bP[0-9]+\b|手順|ステップ|step|計画|プラン|提案|新規|追加|変更|代替|案\b|必要|依存|順番/i,
       aboutReview: /危ない|危険|リスク|警告|注意|確認が必要|確認必要|確認事項|実行不可|無効|問題|競合|重複|安全|レビュー|review|判定|ブロック|blocked|止ま|だめ|ダメ|反映できない|できないの|△|×|✓/i,
       rollback: /(元|もと)に戻|戻して|戻したい|戻せ|取り消(し|して|したい)|ロールバック|rollback|undo/i,
@@ -10667,10 +11751,19 @@
       const canRollback = !!(ex && ex.written && !ex.rolledBack);
       const q = RE.question.test(t);
       // 1) 計画 / Review についての質問（計画があるとき）。「このフィールドは何に使ってる？」は現在の設定の質問 → ASK
-      if (plan && RE.questionWord.test(t) && (RE.aboutReview.test(t) || RE.aboutPlan.test(t) || stepIdsIn(t).length)) {
-        return { intent: review && RE.aboutReview.test(t) ? INTENT.EXPLAIN_REVIEW : INTENT.EXPLAIN_PLAN, reason: 'QUESTION_ABOUT_PLAN', stepIds: stepIdsIn(t) };
+      if (plan && RE.questionWord.test(t) && (RE.aboutReview.test(t) || RE.aboutPlan.test(t) || stepIdsIn(t).length || (RE.aboutCustomization.test(t) && (plan.plan?.customizations || []).length))) {
+        const aboutCust = (plan.plan?.customizations || []).length && (RE.aboutCustomization.test(t) || /\bC[0-9]+\b/.test(t)) && !RE.aboutReview.test(t);
+        return { intent: review && RE.aboutReview.test(t) ? INTENT.EXPLAIN_REVIEW : aboutCust ? INTENT.EXPLAIN_CUSTOMIZATION : INTENT.EXPLAIN_PLAN, reason: 'QUESTION_ABOUT_PLAN', stepIds: stepIdsIn(t) };
       }
       if (plan && stepIdsIn(t).length && q) return { intent: INTENT.EXPLAIN_PLAN, reason: 'STEP_ID_QUESTION', stepIds: stepIdsIn(t) };
+      // 1b) コード生成（Phase 16）: 計画があり、カスタマイズがあるときだけ。文の中の C1 等で対象を指定できる
+      if (RE.generate.test(t) && !(q && RE.questionWord.test(t))) {
+        const custs = plan?.plan?.customizations || [];
+        if (!plan) return { intent: INTENT.GENERAL, reason: 'NO_PLAN' };
+        if (!custs.length) return { intent: INTENT.GENERAL, reason: 'NO_CUSTOMIZATION' };
+        const cid = (t.match(/\bC[0-9]+\b/g) || [])[0] || null;
+        return { intent: INTENT.GENERATE_CODE, reason: 'GENERATE_WORDS', customizationId: cid };
+      }
       // 2) 元に戻す（反映済みの実行があるときだけ意味を持つ。即 Rollback はしない）
       if (RE.rollback.test(t)) return canRollback ? { intent: INTENT.REQUEST_ROLLBACK, reason: 'ROLLBACK_WORDS' } : { intent: INTENT.GENERAL, reason: 'NO_EXECUTION' };
       // 3) 進める（「全部承認」「そのまま実行」等も含む。承認・最終確認にはならない）
@@ -10740,12 +11833,17 @@
       const counts = (review) => { const er = review?.executionReadiness || {}; return { safe: (er.safeSteps || []).length, review: (er.reviewSteps || []).length, blocked: (er.blockedSteps || []).length, planOnly: (er.planOnlySteps || []).length, conflicts: (review?.conflicts || []).length }; };
       function announcePlan(v, { revised = false } = {}) {
         const p = v.plan || {};
-        const summary = revised ? `${planLabel(v)} に見直しました（v${v.basedOnVersion} の修正）。${p.assessment?.summary || ''}` : `変更計画を作成しました。${p.assessment?.summary || ''}`;
-        assistant(summary, { planId: v.planId, version: v.version });
+        const custs = Array.isArray(p.customizations) ? p.customizations : [];
+        const solutionText = p.solution === 'HYBRID' ? '標準設定と JavaScript の組み合わせで実現できます。' : p.solution === 'CUSTOMIZATION' ? '標準設定では実現できないため、JavaScript カスタマイズで実現します。' : custs.length ? '' : (p.solution === 'STANDARD' && /JavaScript|JS|カスタマイズ/.test(v.goal || '') ? '標準設定だけで実現できます（JavaScript は不要です）。' : '');
+        const summary = revised ? `${planLabel(v)} に見直しました（v${v.basedOnVersion} の修正）。${solutionText}${p.assessment?.summary || ''}` : `変更計画を作成しました。${solutionText}${p.assessment?.summary || ''}`;
+        assistant(summary, { planId: v.planId, version: v.version, solution: p.solution || null });
         push(MSG.PLAN, ROLE.ASSISTANT, planLabel(v), { planId: v.planId, version: v.version });
         if (v.review) {
           const c = counts(v.review);
-          toolkit(`${planLabel(v)} を検証しました。${c.blocked ? '実行できない手順があります。' : c.review ? '確認が必要な手順があります。' : '問題は見つかりませんでした。'}`, { planId: v.planId, version: v.version });
+          // Phase 16: JavaScript の step は PLAN_ONLY なので safety の件数には出ない。hybrid の判定（実行不可 / 要確認）を文言に反映する
+          const hc = v.review.hybrid?.customization || null;
+          const jsBlocked = (hc?.blocked || []).length, jsNeeds = (hc?.needsConfirmation || []).length;
+          toolkit(`${planLabel(v)} を検証しました。${c.blocked ? '実行できない手順があります。' : c.review ? '確認が必要な手順があります。' : jsBlocked ? 'JavaScript カスタマイズに実行できない問題があります。' : jsNeeds ? 'JavaScript カスタマイズに確認が必要な点があります。' : '問題は見つかりませんでした。'}`, { planId: v.planId, version: v.version });
           push(MSG.REVIEW, ROLE.TOOLKIT, 'Toolkit Review', { planId: v.planId, version: v.version, counts: c });
         }
         if ((p.questions || []).length) assistant(`確認したいことが ${p.questions.length} 件あります。${p.questions.slice(0, 3).map(q => `${q.id}: ${q.question}`).join(' / ')}${p.questions.length > 3 ? ' …' : ''}`, { planId: v.planId, version: v.version, kind: 'questions' });
@@ -10796,7 +11894,7 @@
         if (!t || busy) return null;
         busy = true;
         push(MSG.USER, ROLE.USER, t);
-        const cls = intentOverride ? { intent: intentOverride, reason: 'USER_CHOICE' } : classifyIntent(t, state);
+        const cls = intentOverride ? { intent: intentOverride, reason: 'USER_CHOICE', customizationId: (t.match(/\bC[0-9]+\b/g) || [])[0] || null } : classifyIntent(t, state);
         const result = { intent: cls.intent, reason: cls.reason, text: t, ok: true, cancelled: false, error: null };
         let loading = null;
         try {
@@ -10831,12 +11929,45 @@
               else { result.ok = false; push(MSG.ERROR, ROLE.TOOLKIT, r?.message || '変更計画を見直せませんでした。', { code: r?.reason || 'ERROR', retryText: t }); }
               break;
             }
+            case INTENT.GENERATE_CODE: {
+              const v = state.activePlan;
+              if (!v) { toolkit('コードを生成する計画がありません。'); result.ok = false; break; }
+              const custs = v.plan?.customizations || [];
+              if (!custs.length) { toolkit(`現在の${planLabel(v)}に JavaScript カスタマイズはありません（標準設定だけで実現できる計画です）。`); result.ok = false; break; }
+              const reviewOf = (cid) => (v.review?.steps || []).find(r => r.customization?.customizationId === cid) || null;
+              let cid = cls.customizationId || null;
+              if (!cid) {
+                const gen = custs.filter(c => reviewOf(c.customizationId)?.codeGeneration?.supported);
+                if (gen.length === 1) cid = gen[0].customizationId;
+                else if (custs.length === 1) cid = custs[0].customizationId;
+                else { assistant(`どのカスタマイズのコードを作りますか？`, { kind: 'customization-choices', planId: v.planId, version: v.version, choices: custs.map(c => ({ customizationId: c.customizationId, requirement: c.requirement, supported: !!reviewOf(c.customizationId)?.codeGeneration?.supported })) }); break; }
+              }
+              const c = custs.find(x => x.customizationId === cid);
+              if (!c) { toolkit(`カスタマイズ ${cid} は現在の計画にありません。`); result.ok = false; break; }
+              const rv = reviewOf(cid);
+              if (rv && !rv.codeGeneration?.supported) { toolkit(`${cid}「${c.requirement}」はまだコードを生成できません（${(rv.issues || []).filter(i => i.severity !== 'low').map(i => i.message).join('／') || rv.codeGeneration?.reason || '要確認'}）。計画を修正するか、確認事項に答えてください。`, { kind: 'generate-blocked', planId: v.planId, version: v.version, customizationId: cid }); result.ok = false; break; }
+              loading = push(MSG.LOADING, ROLE.ASSISTANT, LOADING_TEXT.GENERATE_CODE, { intent: cls.intent });
+              const r = await services.generate({ version: v, customizationId: cid, signal });
+              remove(loading); loading = null;
+              if (r && r.ok) {
+                v.generated = v.generated || {};
+                v.generated[cid] = { generated: r.generated, review: r.review, ctx: r.ctx || null, existingSource: r.existingSource || null, at: now() };
+                const st = r.review?.status;
+                toolkit(st === 'BLOCKED' ? 'JavaScript を生成しましたが、Toolkit の検査で採用できない問題があります。' : st === 'REVIEW_REQUIRED' ? 'JavaScript を生成しました。確認が必要な点があります。' : 'JavaScript を生成しました。Toolkit の検査を通過しています。', { planId: v.planId, version: v.version, customizationId: cid });
+                push(MSG.CODE, ROLE.TOOLKIT, 'JavaScript', { planId: v.planId, version: v.version, customizationId: cid });
+              } else if (r && r.reason === 'JS_SOURCE_UNAVAILABLE') {
+                toolkit(`統合先「${r.file?.name || ''}」の本文を取得できませんでした（JS_SOURCE_UNAVAILABLE）。既存ファイルへの自動生成は行いません。`, { kind: 'source-unavailable', planId: v.planId, version: v.version, customizationId: cid, file: r.file || null });
+                result.ok = false;
+              } else { result.ok = false; push(MSG.ERROR, ROLE.TOOLKIT, r?.message || 'JavaScript を生成できませんでした。', { code: r?.reason || 'ERROR', retryText: t, intent: cls.intent }); }
+              break;
+            }
+            case INTENT.EXPLAIN_CUSTOMIZATION:
             case INTENT.EXPLAIN_PLAN:
             case INTENT.EXPLAIN_REVIEW: {
               const v = state.activePlan;
               if (!v) { toolkit('説明する計画がありません。'); result.ok = false; break; }
               loading = push(MSG.LOADING, ROLE.ASSISTANT, LOADING_TEXT.ASK, { intent: cls.intent });
-              const a = await services.explain({ question: t, kind: cls.intent, plan: v.plan, review: v.review, ctx: v.ctx, version: v.version, stepIds: cls.stepIds || [], signal });
+              const a = await services.explain({ question: t, kind: cls.intent === INTENT.EXPLAIN_REVIEW ? INTENT.EXPLAIN_REVIEW : INTENT.EXPLAIN_PLAN, plan: v.plan, review: v.review, ctx: v.ctx, version: v.version, stepIds: cls.stepIds || [], signal });
               remove(loading); loading = null;
               push(MSG.ANSWER, ROLE.ASSISTANT, a?.answer || '', { answer: a, kind: cls.intent, planId: v.planId, version: v.version, ctxFacts: v.ctx?.facts || [] });
               break;
@@ -10860,7 +11991,7 @@
             }
             default: {
               const v = state.activePlan, ae = state.activeExecution;
-              const text2 = cls.reason === 'NO_EXECUTION' ? '元に戻せる反映はありません（動作テスト環境への反映はまだ行っていません）。' : cls.reason === 'NO_PLAN' ? '反映できる計画がまだありません。実現したいことを入力すると変更計画を作ります。' : cls.reason === 'GREETING' ? 'このアプリについての質問や、実現したいことを入力してください。' : v ? `現在は${planLabel(v)}があります。質問・計画の修正・「これで進めたい」のいずれかで続けられます。` : 'このアプリについての質問（例: このフィールドは何に使ってる？）や、実現したいこと（例: 100万円以上なら部長承認を追加したい）を入力してください。';
+              const text2 = cls.reason === 'NO_EXECUTION' ? '元に戻せる反映はありません（動作テスト環境への反映はまだ行っていません）。' : cls.reason === 'NO_CUSTOMIZATION' ? `現在の${planLabel(v)}に JavaScript カスタマイズはありません（標準設定だけで実現できます）。` : cls.reason === 'NO_PLAN' ? '反映できる計画がまだありません。実現したいことを入力すると変更計画を作ります。' : cls.reason === 'GREETING' ? 'このアプリについての質問や、実現したいことを入力してください。' : v ? `現在は${planLabel(v)}があります。質問・計画の修正・「これで進めたい」のいずれかで続けられます。` : 'このアプリについての質問（例: このフィールドは何に使ってる？）や、実現したいこと（例: 100万円以上なら部長承認を追加したい）を入力してください。';
               assistant(text2, { kind: 'general', reason: cls.reason, ...(ae ? { executionId: ae.executionId } : {}) });
             }
           }
@@ -10971,12 +12102,14 @@
               <div id="kt-ai-drawer-tabs" class="kt-ai-drawer-tabs">
                 <button type="button" class="btn kt-ai-dtab active" data-pane="plan">計画 / レビュー</button>
                 <button type="button" class="btn kt-ai-dtab" data-pane="evidence">根拠</button>
+                <button type="button" class="btn kt-ai-dtab" data-pane="code">コード</button>
                 <button type="button" class="btn kt-ai-dtab" data-pane="context">Context</button>
                 <button type="button" class="btn kt-ai-dtab" data-pane="connection" ${paidEnabled ? '' : 'style="display:none;"'}>接続</button>
                 <button type="button" id="kt-ai-drawer-close" class="btn" style="margin-left:auto;" title="閉じる">×</button>
               </div>
               <div id="kt-ai-pane-plan" class="kt-ai-pane active"><div id="kt-ai-pane-plan-empty" style="opacity:.7; padding:6px;">変更計画はまだありません。チャットで実現したいことを入力するか、「Context」から計画を作成してください。</div>${KTContextUi.planPaneHtml(c)}</div>
               <div id="kt-ai-pane-evidence" class="kt-ai-pane"><div style="opacity:.7; padding:6px; font-size:11px;">回答・計画の根拠ID（E1 など）をクリックすると、Toolkit が解析した事実（statement / 利用元 / 関係 / 確度 / 設定 / ファイルと行）を表示します。</div>${KTContextUi.evidencePaneHtml(c)}</div>
+              <div id="kt-ai-pane-code" class="kt-ai-pane"><div id="kt-ai-code-head" style="opacity:.7; padding:6px; font-size:11px;">生成した JavaScript はまだありません。計画の「JS カスタマイズ」カードの［コードを作る］か、チャットで「コードを作って」と伝えると生成します（kintone への登録はしません）。</div><div id="kt-ai-code-actions" style="display:none; gap:6px; flex-wrap:wrap; margin:4px 0;"><button type="button" id="kt-ai-code-copy" class="btn" style="height:26px; font-size:11px;">コードをコピー</button><button type="button" id="kt-ai-diff-copy" class="btn" style="height:26px; font-size:11px;">Diff をコピー</button><button type="button" id="kt-ai-cplan-copy" class="btn" style="height:26px; font-size:11px;">Customization Plan JSON をコピー</button><button type="button" id="kt-ai-code-download" class="btn" style="height:26px; font-size:11px;">ファイルとして保存</button></div><div id="kt-ai-code-review" style="font-size:11px;"></div><div id="kt-ai-code-tabs" style="display:none; gap:4px; margin-top:6px;"><button type="button" class="btn kt-ai-ctab active" data-code-view="code" style="height:24px; font-size:11px;">コード</button><button type="button" class="btn kt-ai-ctab" data-code-view="diff" style="height:24px; font-size:11px;">Diff（Before / After）</button></div><pre id="kt-ai-code-view" style="margin-top:4px; max-height:60vh; overflow:auto; white-space:pre; font-size:11px; border:1px solid ${esc(c.border)}; border-radius:8px; padding:8px; display:none;"></pre><pre id="kt-ai-diff-view" style="margin-top:4px; max-height:60vh; overflow:auto; white-space:pre; font-size:11px; border:1px solid ${esc(c.border)}; border-radius:8px; padding:8px; display:none;"></pre></div>
               <div id="kt-ai-pane-context" class="kt-ai-pane">${KTContextUi.generatorHtml(c)}<div style="margin-top:8px; display:flex; gap:6px; align-items:center;"><b style="font-size:12px;">プレビュー</b><button type="button" id="kt-ai-download" class="btn" style="height:26px; font-size:11px;" disabled>⬇ ローカルに保存</button></div><pre id="kt-ai-preview" style="margin-top:4px; max-height:320px; overflow:auto; white-space:pre-wrap; font-size:11px; border:1px solid ${esc(c.border)}; border-radius:8px; padding:8px;"></pre></div>
               <div id="kt-ai-pane-connection" class="kt-ai-pane">${paidEnabled ? KTContextUi.connectionHtml(c) : '<div id="kt-ai-paid" style="display:none;"></div>'}</div>
             </div>
@@ -10985,7 +12118,7 @@
     }
 
     // ---- Context ヘッダー（§21。簡潔に。詳細は展開式）----
-    function headerHtml({ app = {}, overview = null, connection = {}, drawerOpen = false } = {}) {
+    function headerHtml({ app = {}, overview = null, connection = {}, drawerOpen = false, jsFiles = [] } = {}) {
       const o = overview || {};
       const ok = (b) => (b ? '✓' : '—');
       const health = o.brokenRefs?.total ? `△ 壊れた参照 ${o.brokenRefs.total}` : (o.brokenRefs ? '✓' : '—');
@@ -11002,7 +12135,8 @@
         <div id="kt-ai-header-detail" style="display:none; flex:1 1 100%; font-size:11px; opacity:.85; line-height:1.6;">
           <div>一覧 ${esc(String(o.views?.count ?? '—'))}　グラフ ${esc(String(o.reports?.count ?? '—'))}　通知 ${esc(String((o.notifications?.general ?? 0) + (o.notifications?.perRecord ?? 0) + (o.notifications?.reminder ?? 0)))}　プロセス管理 ${o.process?.enabled ? `有効（ステータス ${esc(String(o.process.stateCount))}・アクション ${esc(String(o.process.actionCount))}）` : '無効'}　アプリアクション ${esc(String(o.actions?.count ?? '—'))}　プラグイン ${esc(String(o.plugins?.count ?? '不明'))}</div>
           <div>JavaScript: PC ${esc(String(o.customize?.desktop?.js?.length ?? 0))} / モバイル ${esc(String(o.customize?.mobile?.js?.length ?? 0))}（解析 ${o.javascript?.analyzed ? '済' : '未'}）　他アプリからの参照: ${o.incoming?.scanned ? `走査済（${esc(String(o.incoming.referencingApps ?? 0))} アプリ）` : '未走査'}　アプリ間連携 ${esc(String(o.appLinks?.count ?? 0))}</div>
-          <div>Nest Rec AI: ${esc(connection.text || '—')}　／　この画面の解析は運用環境の設定です。AI の提案の反映先は動作テスト環境だけで、運用環境には反映しません。</div>
+          ${(jsFiles || []).length ? `<div id="kt-ai-header-js">登録済み JS: ${jsFiles.map(f => `<span style="white-space:nowrap;">${esc(f.target === 'mobile' ? 'モバイル' : 'PC')}: <b>${esc(f.name)}</b>${f.analyzed ? `（${esc((f.events || []).slice(0, 4).join(', ') || 'イベント検出なし')}${(f.events || []).length > 4 ? ' …' : ''}${Object.keys(f.fields || {}).length ? `・フィールド ${Object.keys(f.fields).length}` : ''}）` : '（未解析）'}</span>`).join('　')}</div>` : ''}
+          <div>Nest Rec AI: ${esc(connection.text || '—')}　／　この画面の解析は運用環境の設定です。AI の提案の反映先は動作テスト環境だけで、運用環境には反映しません。JavaScript の生成コードは登録しません（コピーして手動で登録）。</div>
         </div>`;
     }
 
@@ -11023,7 +12157,7 @@
 
     // ---- カード ----
     /** 計画の内容（§11 / §12）: 手順の要約行と、提案資産（新規フィールド / 通知 / リマインダー / プロセス / ルックアップ / アプリアクション / 一覧）のカード */
-    function assetCardsHtml(plan) {
+    function assetCardsHtml(plan, review = null) {
       if (!plan) return '';
       const items = [];
       for (const p of (plan.proposedFields || [])) items.push(card('kt-ai-asset', `<div><b>＋ 新規フィールド</b> ${KTContextUi.badge('新規提案', '#1a73e8')}${p.codeConflict ? KTContextUi.badge('コード重複', '#b00020') : ''}${p.labelDuplicate ? KTContextUi.badge('名前重複', '#b26a00') : ''}</div><div style="margin-top:2px; font-size:13px;"><b>${esc(p.label)}</b> <span style="opacity:.7;">${esc(p.type)}${p.required ? '（必須）' : ''}${(p.options || []).length ? `　選択肢: ${esc(p.options.join(' / '))}` : ''}　コード案 ${esc(p.suggestedCode)}</span></div><div style="margin-top:2px;">理由：${esc(p.reason)}${KTContextUi.chips(p.evidenceIds)}</div>${p.alternativeExistingFieldCode ? `<div>${KTContextUi.badge('代替案', '#2e7d32')}既存の <code>${esc(p.alternativeExistingFieldCode)}</code> で代用できる可能性（要確認）</div>` : ''}`, '#1a73e8'));
@@ -11034,22 +12168,54 @@
         const color = /^ADD_/.test(st.actionType) ? '#1a73e8' : '#6a1b9a';
         items.push(card('kt-ai-asset', `<div><b>${stepMark(st)} ${esc(kind)}</b> ${KTContextUi.badge(KTContextUi.ACTION_JA[st.actionType] || st.actionType, '#555')}<span style="opacity:.7; font-size:11px;"> ${esc(st.id)}</span></div><div style="margin-top:2px; font-size:13px;"><b>${esc(st.spec?.name || st.targetRef || st.title)}</b>${st.targetRef && st.spec?.name && st.spec.name !== st.targetRef ? ` <span style="opacity:.7;">（対象 ${esc(st.targetRef)}）</span>` : ''}</div><div style="margin-top:2px;">${esc(st.proposal?.summary || '')}</div>${specLines(st)}<div style="margin-top:2px; opacity:.85;">理由：${esc(st.reason)}${KTContextUi.chips(st.evidenceIds)}</div>`, color));
       }
+      for (const c of (plan.customizations || [])) items.push(customizationCardHtml(c, plan, { review: (review?.steps || []).find(r => r.customization?.customizationId === c.customizationId) || null }));
       return items.length ? `<details class="kt-ai-assets" style="margin-top:6px;"><summary style="cursor:pointer; font-size:11px;">提案の内容（${items.length} 件）</summary>${items.join('')}</details>` : '';
+    }
+    const STRATEGY_JA = { NEW_JS_FILE: '＋ 新規 JS', EXTEND_EXISTING_JS: '✎ 既存 JS を変更', REPLACE_EXISTING_LOGIC: '既存処理の置き換え（計画のみ）', PLUGIN_CANDIDATE: 'プラグイン候補（計画のみ）', NOT_RECOMMENDED: '推奨しない' };
+    /** JS カスタマイズのカード（§19 / §20 / §42）: 要件 / 対象 / イベント / フィールド / 方針（既存を変更 or 新規）/ 不足する理由 / リスク / 質問 / [コードを作る] */
+    function customizationCardHtml(c, plan = null, { review = null, registered = null } = {}) {
+      const r = review || null;
+      const gen = r?.codeGeneration || null;
+      const files = (c.existingFiles || []).map(f => `${f.name}（${f.target === 'mobile' ? 'モバイル' : 'PC'}）`).join(', ');
+      const strategy = c.strategy ? (c.strategy === 'EXTEND_EXISTING_JS' ? `${STRATEGY_JA[c.strategy]}: ${files || '（統合先未指定）'}` : STRATEGY_JA[c.strategy] || c.strategy) : '（未定）';
+      const reg = registered && registered.length ? `<div style="font-size:11px; opacity:.8; margin-top:2px;">登録済み JS: ${esc(registered.map(f => `${f.target === 'mobile' ? 'モバイル' : 'PC'}: ${f.name}`).join(' / '))}</div>` : '';
+      return card('kt-ai-asset kt-ai-customization-card', `<div><b>JS カスタマイズ</b> ${KTContextUi.badge(c.customizationId, '#555')}${c.strategy === 'EXTEND_EXISTING_JS' ? KTContextUi.badge('✎ 既存 JS を変更', '#6a1b9a') : c.strategy === 'NEW_JS_FILE' ? KTContextUi.badge('＋ 新規 JS', '#1a73e8') : ''}${gen ? (gen.supported ? KTContextUi.badge('コード生成可', '#2e7d32') : KTContextUi.badge('生成不可', '#b26a00')) : ''}</div>
+        <div style="margin-top:2px; font-size:13px;"><b>${esc(c.requirement || '')}</b></div>
+        <div style="margin-top:4px; display:grid; grid-template-columns:auto 1fr; gap:2px 10px; font-size:12px;">
+          <span style="opacity:.7;">対象</span><span>${esc((c.platform || []).map(x => (x === 'mobile' ? 'モバイル' : 'PC')).join(' / ') || '（未定: PC / モバイルを確認）')}</span>
+          <span style="opacity:.7;">イベント</span><span>${esc((c.events || []).join(', ') || '（未定）')}</span>
+          <span style="opacity:.7;">フィールド</span><span>${esc((c.fields || []).map(f => `${f.code}（${f.access}）`).join(', ') || '（なし）')}</span>
+          ${(c.apis || []).length ? `<span style="opacity:.7;">API</span><span>${esc(c.apis.join(', '))}</span>` : ''}
+          <span style="opacity:.7;">方針</span><span>${esc(strategy)}</span>
+        </div>
+        <div style="margin-top:4px; font-size:12px;">標準設定で不足する理由: ${esc(c.whyStandardInsufficient || '（未記載）')}</div>
+        ${(c.risks || []).length ? `<div style="font-size:11px; color:#b26a00; margin-top:2px;">${c.risks.map(x => `⚠ ${esc(x)}`).join('<br>')}</div>` : ''}
+        ${(c.questions || []).length ? `<div style="font-size:11px; color:#b26a00; margin-top:2px;">${c.questions.map(x => `？ ${esc(x)}`).join('<br>')}</div>` : ''}
+        ${reg}
+        ${(c.evidenceIds || []).length ? `<div style="margin-top:2px; font-size:11px; opacity:.85;">根拠${KTContextUi.chips(c.evidenceIds)}</div>` : ''}
+        ${r ? `<div style="margin-top:4px; font-size:11px;">${(r.issues || []).filter(i => i.severity !== 'low').slice(0, 4).map(i => `<div style="color:${i.severity === 'high' ? '#b00020' : '#b26a00'};">${i.severity === 'high' ? '×' : '△'} ${esc(i.message)}</div>`).join('')}</div>` : ''}
+        <div style="margin-top:6px; display:flex; gap:6px; flex-wrap:wrap;">${btn('generate', 'コードを作る', `data-cid="${esc(c.customizationId)}"`, gen && !gen.supported ? 'opacity:.5;' : 'font-weight:600; border-color:#6a1b9a;')}</div>`, c.strategy === 'EXTEND_EXISTING_JS' ? '#6a1b9a' : '#1a73e8');
     }
     const readinessCounts = (review) => { const er = review?.executionReadiness || {}; return { safe: (er.safeSteps || []).length, review: (er.reviewSteps || []).length, blocked: (er.blockedSteps || []).length, planOnly: (er.planOnlySteps || []).length, conflicts: (review?.conflicts || []).length }; };
     /** 計画カード（§11）。AI の提案と Toolkit の判定は分けて表示する */
     function planCardHtml(v, { active = true } = {}) {
       const p = v.plan || {};
-      const lines = (p.steps || []).filter(st => !st.alternativeId).map(st => `<div style="font-size:12px;">${stepMark(st)} ${esc(st.title || st.id)}<span style="opacity:.6; font-size:10px;"> ${esc(st.id)}</span></div>`).join('');
+      const line = (st) => `<div style="font-size:12px;">${st.actionType === 'CUSTOMIZATION_REQUIRED' ? 'JS' : stepMark(st)} ${esc(st.title || st.id)}<span style="opacity:.6; font-size:10px;"> ${esc(st.id)}</span></div>`;
+      const main = (p.steps || []).filter(st => !st.alternativeId);
+      const stdSteps = main.filter(st => st.actionType !== 'CUSTOMIZATION_REQUIRED'), jsSteps = main.filter(st => st.actionType === 'CUSTOMIZATION_REQUIRED');
+      const lines = jsSteps.length
+        ? `<div style="font-size:11px; opacity:.7; margin-top:2px;">標準設定</div><div style="border-top:1px solid var(--kt-ai-border, #ccc); margin:2px 0;"></div>${stdSteps.map(line).join('') || '<div style="font-size:12px; opacity:.6;">（なし）</div>'}<div style="font-size:11px; opacity:.7; margin-top:6px;">JavaScript カスタマイズ</div><div style="border-top:1px solid var(--kt-ai-border, #ccc); margin:2px 0;"></div>${jsSteps.map(line).join('')}`
+        : main.map(line).join('');
       const c = v.review ? readinessCounts(v.review) : null;
+      const hy = v.review?.hybrid || null;
       const status = STATUS_JA[v.status] || v.status;
       return card('kt-ai-plan-card', `
         <div style="display:flex; align-items:center; justify-content:space-between; gap:6px; flex-wrap:wrap;"><b>変更計画 v${esc(String(v.version))}</b><span style="font-size:10px; opacity:.7;">${esc(status)}${v.basedOnVersion ? `・v${esc(String(v.basedOnVersion))} の修正` : ''}${p.requestId ? `・requestId ${esc(p.requestId)}` : ''}</span></div>
-        <div style="font-size:11px; opacity:.8; margin-top:2px;">${esc(v.goal || p.goal || '')}${v.revisionRequest ? `<br>修正: ${esc(v.revisionRequest)}` : ''}</div>
+        <div style="font-size:11px; opacity:.8; margin-top:2px;">${esc(v.goal || p.goal || '')}${v.revisionRequest ? `<br>修正: ${esc(v.revisionRequest)}` : ''}${p.solution ? ` <span style="opacity:.7;">［${esc({ STANDARD: '標準設定', CUSTOMIZATION: 'JavaScript', HYBRID: '標準設定 ＋ JavaScript', UNKNOWN: '判断できず' }[p.solution] || p.solution)}］</span>` : ''}</div>
         <div style="margin-top:4px;">${lines || '<span style="opacity:.6;">手順はありません</span>'}</div>
         ${(p.alternatives || []).length ? `<div style="font-size:11px; opacity:.8; margin-top:2px;">代替案 ${p.alternatives.length} 件（${esc(p.alternatives.map(a => a.title).join(' / '))}）</div>` : ''}
-        ${assetCardsHtml(p)}
-        ${c ? `<div style="margin-top:6px; font-size:11px;"><b>Toolkit Review</b>　<span style="color:#2e7d32;">✓ ${c.safe}</span>　<span style="color:#b26a00;">△ 確認必要 ${c.review}</span>　<span style="color:#b00020;">× 実行不可 ${c.blocked}</span>${c.planOnly ? `　<span style="color:#555;">○ 計画のみ ${c.planOnly}</span>` : ''}</div>` : '<div style="margin-top:6px; font-size:11px; opacity:.7;">Toolkit Review は未実施です</div>'}
+        ${assetCardsHtml(p, v.review)}
+        ${c ? `<div style="margin-top:6px; font-size:11px;"><b>Toolkit Review</b>　<span style="color:#2e7d32;">✓ ${c.safe}</span>　<span style="color:#b26a00;">△ 確認必要 ${c.review}</span>　<span style="color:#b00020;">× 実行不可 ${c.blocked}</span>${c.planOnly && !hy?.customization?.steps?.length ? `　<span style="color:#555;">○ 計画のみ ${c.planOnly}</span>` : ''}${hy && hy.customization.steps.length ? `　<span style="color:#6a1b9a;">JS ${hy.customization.steps.length}（生成可 ${hy.customization.generatable.length}${hy.customization.needsConfirmation.length ? `・要確認 ${hy.customization.needsConfirmation.length}` : ''}${hy.customization.blocked.length ? `・実行不可 ${hy.customization.blocked.length}` : ''}${hy.customization.conflicts.length ? `・競合 ${hy.customization.conflicts.length}` : ''}）</span>` : ''}</div>` : '<div style="margin-top:6px; font-size:11px; opacity:.7;">Toolkit Review は未実施です</div>'}
         <div style="margin-top:6px; display:flex; gap:6px; flex-wrap:wrap;">${btn('open-plan', '詳細', `data-plan="${esc(v.planId)}" data-version="${esc(String(v.version))}"`)}${v.review ? btn('before-after', 'Before / After', `data-plan="${esc(v.planId)}" data-version="${esc(String(v.version))}"`) : ''}${v.review ? btn('open-review', 'Reviewを開く', `data-plan="${esc(v.planId)}" data-version="${esc(String(v.version))}"`) : ''}</div>
         ${active ? '' : '<div style="font-size:10px; opacity:.6; margin-top:4px;">この版は最新ではありません（Executor へは最新の版だけが進めます）</div>'}`, active ? '#1a73e8' : '#999');
     }
@@ -11066,6 +12232,7 @@
           ${c.planOnly ? `<div style="display:flex; justify-content:space-between;"><span style="color:#555;">○ 計画のみ</span><b>${c.planOnly} 件</b></div>` : ''}
           <div style="display:flex; justify-content:space-between;"><span>競合候補</span><b>${c.conflicts} 件</b></div>
           ${n.highRisk ? `<div style="display:flex; justify-content:space-between;"><span style="color:#b00020;">高リスク変更</span><b>${esc(String(n.highRisk))} 件</b></div>` : ''}
+          ${v.review?.hybrid?.customization?.steps?.length ? `<div style="display:flex; justify-content:space-between; margin-top:4px;"><span style="color:#6a1b9a;">JS コード生成可能</span><b>${v.review.hybrid.customization.generatable.length} / ${v.review.hybrid.customization.steps.length} 件</b></div>${v.review.hybrid.customization.conflicts.length ? `<div style="display:flex; justify-content:space-between;"><span style="color:#b26a00;">△ 既存 JS との競合</span><b>${v.review.hybrid.customization.conflicts.length} 件</b></div>` : ''}` : ''}
         </div>
         <div style="margin-top:6px; display:flex; gap:6px; flex-wrap:wrap;">${btn('open-review', '実行前レビューを開く', `data-plan="${esc(v.planId)}" data-version="${esc(String(v.version))}"`, 'font-weight:600;')}</div>
         <div style="font-size:10px; opacity:.6; margin-top:4px;">反映の可否は Toolkit の判定と、実行前レビューでの人間の判断（承認）・最終確認で決まります。チャットの文章では承認になりません。</div>`, '#1a73e8');
@@ -11088,7 +12255,8 @@
           <div style="display:flex; justify-content:space-between;"><span style="color:#b00020;">× 実行不可</span><b>${rd.blocked} 件</b></div>
           <div style="display:flex; justify-content:space-between;"><span style="opacity:.8;">未判断（承認 / 保留 / 却下が未定）</span><b>${rd.undecided} 件</b></div>
         </div>` : '';
-      return card('kt-ai-preview-ready', `<div><b>${esc(m.text)}</b></div>${rows}<div style="margin-top:6px; display:flex; gap:6px; flex-wrap:wrap;">${btn('open-review', '実行前レビューを開く', `data-plan="${esc(m.data?.planId || '')}" data-version="${esc(String(m.data?.version ?? ''))}"`, 'font-weight:600;')}</div><div style="font-size:10px; opacity:.6; margin-top:4px;">反映は実行前レビューでの判断（承認）→「動作テスト環境へ反映」→ 最終確認の順です。運用環境には反映しません。</div>`, '#1a73e8');
+      const js = rd && rd.customizations ? `<div style="font-size:11px; color:#6a1b9a; margin-top:4px;">JS カスタマイズ ${rd.customizations} 件は Executor では反映しません（「コードを作って」で生成 → コピーして登録）。</div>` : '';
+      return card('kt-ai-preview-ready', `<div><b>${esc(m.text)}</b></div>${rows}${js}<div style="margin-top:6px; display:flex; gap:6px; flex-wrap:wrap;">${btn('open-review', '実行前レビューを開く', `data-plan="${esc(m.data?.planId || '')}" data-version="${esc(String(m.data?.version ?? ''))}"`, 'font-weight:600;')}</div><div style="font-size:10px; opacity:.6; margin-top:4px;">反映は実行前レビューでの判断（承認）→「動作テスト環境へ反映」→ 最終確認の順です。運用環境には反映しません。</div>`, '#1a73e8');
     }
     /** 元に戻す準備（§16）: 既存の Rollback 確認へ。即 Rollback はしない */
     function rollbackReadyHtml(m) {
@@ -11127,11 +12295,46 @@
       const ok = rb.status === 'ROLLED_BACK_VERIFIED';
       return card('kt-ai-rollback-card', `<div><b>${esc(rb.message || (ok ? '変更前の状態へ戻しました。' : '元に戻せませんでした。'))}</b></div><div style="margin-top:4px; font-size:12px;">✓ ${okCount} 件 ROLLBACK_VERIFIED${bad ? `　× ${bad} 件` : ''}</div>${rb.verification?.restoredToSnapshot != null ? `<div style="font-size:12px;">実行前 snapshot との比較：${rb.verification.restoredToSnapshot ? '✓ 一致' : `× 差分 ${(rb.verification.diffs || []).length} 件`}</div>` : ''}<div style="margin-top:4px; font-size:12px;"><b>運用環境には影響していません。</b></div><div style="margin-top:6px;">${btn('open-rollback', '詳細', '')}</div>`, ok ? '#2e7d32' : '#b00020');
     }
+    const CHECK_JA = { patch: 'Patch', 'patch-removal': '既存行の置換', syntax: 'Syntax', events: 'Event', handler: 'Handler', fields: 'Field references', 'plan-consistency': '計画との一致', apis: 'API', 'apis-network': '通信 API', security: 'Security', 'security-review': 'Security（確認）', globals: 'グローバル汚染', 'return-event': 'return event', async: 'async', 'async-then': 'Promise', 'duplicate-handler': '重複 handler', 'existing-conflict': '既存 JS との競合', platform: 'PC / モバイル', strategy: '方針', code: 'コード' };
+    /** 生成コードのカード（§38）: 対象 / 追加内容 / Toolkit Code Review（✓ △ ×）/ [コードを見る][Diffを見る][コピー] */
+    function codeCardHtml(m, v) {
+      const cid = m.data?.customizationId;
+      const g = v?.generated?.[cid] || null;
+      if (!g) return card('kt-ai-code-card', `<div>${esc(m.text)}</div>`, '#555');
+      const gen = g.generated, rv = g.review;
+      const c = (v.plan?.customizations || []).find(x => x.customizationId === cid) || {};
+      const mark = (ch) => (ch.ok ? '✓' : ch.severity === 'block' ? '×' : '△');
+      const color = (ch) => (ch.ok ? '#2e7d32' : ch.severity === 'block' ? '#b00020' : '#b26a00');
+      const st = rv?.status || 'REVIEW_REQUIRED';
+      const stBadge = st === 'OK' ? KTContextUi.badge('✓ 検査を通過', '#2e7d32') : st === 'BLOCKED' ? KTContextUi.badge('× 採用不可', '#b00020') : KTContextUi.badge('△ 要確認', '#b26a00');
+      const checks = (rv?.checks || []).map(ch => `<div style="font-size:11px; color:${color(ch)};">${mark(ch)} ${esc(CHECK_JA[ch.name] || ch.name)}${ch.ok && ch.severity === 'info' && /^(syntax|events|fields|security)$/.test(ch.name) ? '' : `: ${esc(ch.message)}`}</div>`).join('');
+      return card('kt-ai-code-card', `
+        <div style="display:flex; align-items:center; justify-content:space-between; gap:6px; flex-wrap:wrap;"><b>JavaScript を生成しました</b><span>${stBadge}</span></div>
+        <div style="margin-top:4px; display:grid; grid-template-columns:auto 1fr; gap:2px 10px; font-size:12px;">
+          <span style="opacity:.7;">対象</span><span>${gen.strategy === 'EXTEND_EXISTING_JS' ? `✎ 既存 JS を変更: <b>${esc(gen.targetFile)}</b>` : `＋ 新規 JS: <b>${esc(gen.targetFile)}</b>`}${g.existingSource ? `（${g.existingSource.target === 'mobile' ? 'モバイル' : 'PC'}）` : ''}</span>
+          <span style="opacity:.7;">追加内容</span><span>${esc(gen.summary || c.requirement || '')}</span>
+          ${rv?.diff ? `<span style="opacity:.7;">差分</span><span>＋${rv.diff.added} 行 / −${rv.diff.removed} 行${gen.strategy === 'EXTEND_EXISTING_JS' ? '（元のコードは保持）' : ''}</span>` : ''}
+        </div>
+        <div style="margin-top:6px; font-size:12px;"><b>Toolkit Code Review</b></div>
+        <div style="margin-top:2px; display:grid; gap:1px;">${checks}</div>
+        ${(gen.assumptions || []).length ? `<div style="margin-top:4px; font-size:11px; opacity:.85;">前提: ${esc(gen.assumptions.join('／'))}</div>` : ''}
+        ${(gen.warnings || []).length ? `<div style="font-size:11px; color:#b26a00;">${gen.warnings.map(w => `⚠ ${esc(w)}`).join('<br>')}</div>` : ''}
+        <div style="margin-top:6px; display:flex; gap:6px; flex-wrap:wrap;">${btn('open-code', 'コードを見る', `data-cid="${esc(cid)}" data-view="code"`, 'font-weight:600;')}${rv?.diff ? btn('open-code', 'Diffを見る', `data-cid="${esc(cid)}" data-view="diff"`) : ''}${btn('copy-code', 'コピー', `data-cid="${esc(cid)}"`)}${rv?.diff ? btn('copy-diff', 'Diffをコピー', `data-cid="${esc(cid)}"`) : ''}${btn('copy-cplan', 'Plan JSON', `data-cid="${esc(cid)}"`)}</div>
+        <div style="font-size:10px; opacity:.6; margin-top:4px;">kintone への登録は行いません（コピーして手動で登録するか、次のフェーズの登録機能を待ってください）。${st === 'BLOCKED' ? ' 採用できない問題があるため、計画を修正して再生成してください。' : ''}</div>`, st === 'OK' ? '#2e7d32' : st === 'BLOCKED' ? '#b00020' : '#6a1b9a');
+    }
+    function customizationChoicesHtml(m) {
+      const d = m.data || {};
+      return card('kt-ai-choices-card', `<div>${esc(m.text)}</div><div style="margin-top:6px; display:flex; gap:6px; flex-wrap:wrap;">${(d.choices || []).map(c => btn('generate', `${c.customizationId} ${c.requirement}`, `data-cid="${esc(c.customizationId)}"`, c.supported ? '' : 'opacity:.5;')).join('')}</div>`, '#555');
+    }
+    function sourceUnavailableHtml(m) {
+      const d = m.data || {};
+      return card('kt-ai-source-unavailable', `<div>${esc(m.text)}</div><div style="font-size:11px; opacity:.85; margin-top:2px;">次のいずれかを選んでください。</div><div style="margin-top:6px; display:flex; gap:6px; flex-wrap:wrap;">${btn('rescan', '再スキャン（JS を取得し直す）', `data-cid="${esc(d.customizationId || '')}"`)}${btn('choice', '新規 JS として設計', `data-intent="REVISE_PLAN" data-text="${esc(`${d.customizationId || ''} は既存ファイルに統合せず、新規の JS ファイルとして設計して`)}"`)}<span style="font-size:11px; opacity:.7; align-self:center;">／ 手動で確認する</span></div>`, '#b26a00');
+    }
     /** 回答カード（Q&A / 説明）。根拠チップはそのまま（クリックで根拠ペイン） */
     function answerCardHtml(m) {
       const a = m.data?.answer;
       const kind = m.data?.kind;
-      const head = kind === INTENT.EXPLAIN_REVIEW ? '<div style="font-size:10px; opacity:.7;">Toolkit Review の説明（判定は Toolkit が正本。AI の説明で判定は変わりません）</div>' : kind === INTENT.EXPLAIN_PLAN ? '<div style="font-size:10px; opacity:.7;">変更計画の説明（計画は変更していません）</div>' : '';
+      const head = kind === INTENT.EXPLAIN_REVIEW ? '<div style="font-size:10px; opacity:.7;">Toolkit Review の説明（判定は Toolkit が正本。AI の説明で判定は変わりません）</div>' : kind === INTENT.EXPLAIN_PLAN ? '<div style="font-size:10px; opacity:.7;">変更計画の説明（計画は変更していません）</div>' : kind === INTENT.EXPLAIN_CUSTOMIZATION ? '<div style="font-size:10px; opacity:.7;">JavaScript カスタマイズの説明（計画・コードは変更していません）</div>' : '';
       return card('kt-ai-answer-card', `${head}${a ? KTContextUi.answerHtml(a) : esc(m.text)}`, kind ? '#555' : '#2e7d32');
     }
     function errorCardHtml(m) {
@@ -11162,6 +12365,7 @@
         case MSG.REVIEW: { const v = planOf(); return wrap(v && v.review ? reviewCardHtml(v) : `<div class="kt-ai-bubble">${esc(m.text)}</div>`); }
         case MSG.DIFF: { const v = planOf(); return wrap(v ? diffCardHtml(v) : `<div class="kt-ai-bubble">${esc(m.text)}</div>`); }
         case MSG.ANSWER: return wrap(answerCardHtml(m));
+        case MSG.CODE: { const v = planOf(); return wrap(codeCardHtml(m, v)); }
         case MSG.EXECUTION: return wrap(executionCardHtml(m, view.execState));
         case MSG.ROLLBACK: return wrap(rollbackCardHtml(m, view.execState));
         case MSG.ERROR: return wrap(errorCardHtml(m));
@@ -11171,6 +12375,8 @@
           if (kind === 'preview-ready') return wrap(previewReadyHtml(m));
           if (kind === 'rollback-ready') return wrap(rollbackReadyHtml(m));
           if (kind === 'choices') return wrap(choicesHtml(m));
+          if (kind === 'customization-choices') return wrap(customizationChoicesHtml(m));
+          if (kind === 'source-unavailable') return wrap(sourceUnavailableHtml(m));
           if (kind === 'candidates') return wrap(candidatesHtml(m));
           return wrap(`<div class="kt-ai-bubble">${esc(m.text)}</div>`);
         }
@@ -11186,7 +12392,20 @@
       return head + shown.map(m => messageHtml(m, view)).join('');
     }
 
-    return { INTENT_JA, STATUS_JA, workspaceHtml, headerHtml, freePanelHtml, chatHtml, messageHtml, planCardHtml, reviewCardHtml, diffCardHtml, assetCardsHtml, previewReadyHtml, rollbackReadyHtml, executionCardHtml, rollbackCardHtml, answerCardHtml, errorCardHtml, readinessCounts };
+    /** コードペイン（drawer）: Code Review の一覧 ＋ コード / Diff */
+    function codePaneHtml(entry, { view = 'code' } = {}) {
+      if (!entry) return { head: '生成した JavaScript はまだありません。', review: '', code: '', diff: '' };
+      const g = entry.generated, rv = entry.review;
+      const mark = (ch) => (ch.ok ? '✓' : ch.severity === 'block' ? '×' : '△');
+      const color = (ch) => (ch.ok ? '#2e7d32' : ch.severity === 'block' ? '#b00020' : '#b26a00');
+      return {
+        head: `<b>${esc(g.strategy === 'EXTEND_EXISTING_JS' ? '✎ 既存 JS を変更' : '＋ 新規 JS')}: ${esc(g.targetFile)}</b>　${rv?.status === 'OK' ? '✓ 検査を通過' : rv?.status === 'BLOCKED' ? '× 採用不可' : '△ 要確認'}<br><span style="opacity:.85;">${esc(g.summary || '')}</span>`,
+        review: (rv?.checks || []).map(ch => `<div style="color:${color(ch)};">${mark(ch)} ${esc(CHECK_JA[ch.name] || ch.name)}: ${esc(ch.message)}</div>`).join('') + ((rv?.mismatches || []).length ? `<div style="margin-top:4px; opacity:.85;">計画との照合: ${rv.mismatches.map(x => esc(x.message)).join('／')}</div>` : ''),
+        code: rv?.finalCode ?? g.code ?? '',
+        diff: rv?.diff ? (rv.diff.lines || []).map(l => `${l.type}${l.text}`).join('\n') : '',
+      };
+    }
+    return { INTENT_JA, STATUS_JA, STRATEGY_JA, CHECK_JA, workspaceHtml, headerHtml, freePanelHtml, chatHtml, messageHtml, planCardHtml, reviewCardHtml, diffCardHtml, assetCardsHtml, customizationCardHtml, codeCardHtml, codePaneHtml, previewReadyHtml, rollbackReadyHtml, executionCardHtml, rollbackCardHtml, answerCardHtml, errorCardHtml, readinessCounts };
   })();
 
   /**
@@ -11227,7 +12446,7 @@
     // ---- AI Workspace（Phase 15）: ヘッダー / 会話 / composer / drawer ----
     const $header = $('kt-ai-header'), $free = $('kt-ai-free'), $chat = $('kt-ai-chat'), $input = $('kt-ai-input'), $send = $('kt-ai-send'), $cancel = $('kt-ai-cancel'), $note = $('kt-ai-composer-note');
     const $drawer = $('kt-ai-drawer'), $dtabs = $('kt-ai-drawer-tabs'), $planEmpty = $('kt-ai-pane-plan-empty');
-    const PANES = ['plan', 'evidence', 'context', 'connection'];
+    const PANES = ['plan', 'evidence', 'code', 'context', 'connection'];   // Phase 16: コード（生成した JavaScript / Diff）
     const $pane = (p) => $(`kt-ai-pane-${p}`);
 
     let last = null;      // 直近の generate 結果
@@ -11272,6 +12491,7 @@
       KTAiClient.ERROR_CODES.UPSTREAM_ERROR, KTAiClient.ERROR_CODES.INTERNAL_ERROR, KTAiClient.ERROR_CODES.WORKER_ERROR, KTAiClient.ERROR_CODES.INVALID_RESPONSE];
     const isTransient = () => !capability.available && TRANSIENT.includes(capability.reason);
     const plannerAvailable = () => !!(capability.available && capability.features?.[KTAiClient.FEATURE_PLANNER]?.available);
+    const generatorAvailable = () => !!(capability.available && capability.features?.[KTAiClient.FEATURE_GENERATOR]?.available);
     const AUTH_CODES = [KTAiClient.ERROR_CODES.AUTH_INVALID_TOKEN, KTAiClient.ERROR_CODES.AUTH_TOKEN_EXPIRED, KTAiClient.ERROR_CODES.AUTH_DOMAIN_MISMATCH,
       KTAiClient.ERROR_CODES.PRODUCT_NOT_ENTITLED, KTAiClient.ERROR_CODES.FEATURE_NOT_ENTITLED, KTAiClient.ERROR_CODES.SESSION_EXPIRED, KTAiClient.ERROR_CODES.NOT_CONNECTED];
     const setAskEnabled = () => {
@@ -11297,11 +12517,12 @@
     // ==================================================================
     const inputsNow = () => (typeof d.getInputs === 'function' ? (d.getInputs() || {}) : {});
     /** 送信の共通前段（接続 / 利用可否 / 二重送信）。だめなら理由（AiClientError 相当）を投げる */
-    async function ensureReady({ planner = false } = {}) {
+    async function ensureReady({ planner = false, generator = false } = {}) {
       if (!paidEnabled) throw new KTAiClient.AiClientError({ code: KTAiClient.ERROR_CODES.NO_CONFIG, message: KTAiClient.errorText(KTAiClient.ERROR_CODES.NO_CONFIG) });
       if (!capability.available && isTransient()) await refreshCapability({ force: true });
       if (!capability.available) throw new KTAiClient.AiClientError({ code: capability.reason || KTAiClient.ERROR_CODES.NOT_CONNECTED, message: KTContextUi.capabilityStatusText(capability) });
       if (planner && !plannerAvailable()) throw new KTAiClient.AiClientError({ code: KTAiClient.ERROR_CODES.PLANNER_NOT_AVAILABLE, message: `${KTAiClient.errorText(KTAiClient.ERROR_CODES.PLANNER_NOT_AVAILABLE)} [${capability.features?.[KTAiClient.FEATURE_PLANNER]?.reason || 'NOT_ENTITLED'}]` });
+      if (generator && !generatorAvailable()) throw new KTAiClient.AiClientError({ code: KTAiClient.ERROR_CODES.GENERATOR_NOT_AVAILABLE, message: `${KTAiClient.errorText(KTAiClient.ERROR_CODES.GENERATOR_NOT_AVAILABLE)} [${capability.features?.[KTAiClient.FEATURE_GENERATOR]?.reason || 'NOT_ENTITLED'}]` });
       const client = makeClient();
       if (!client || client.error) { capability = { available: false, reason: client?.error ? KTAiClient.ERROR_CODES.TRANSPORT_ERROR : KTAiClient.ERROR_CODES.NOT_CONNECTED }; setAskEnabled(); renderSession(); throw new KTAiClient.AiClientError({ code: capability.reason, message: KTContextUi.capabilityStatusText(capability) }); }
       return client;
@@ -11343,9 +12564,62 @@
         const out = reviewOutput(); if (!out || !v) return null;
         const cls = KTPlanExecutor.classifySteps(out);
         const approved = cls.filter(x => x.approved).length;
-        return { approved, executable: cls.filter(x => x.status === 'PENDING').length, unsupported: cls.filter(x => x.status === 'UNSUPPORTED').length, blocked: cls.filter(x => x.status === 'BLOCKED').length, undecided: (lastReview?.steps || []).filter(r => !decisions.get(r.stepId)).length };
+        return { approved, executable: cls.filter(x => x.status === 'PENDING').length, unsupported: cls.filter(x => x.status === 'UNSUPPORTED').length, blocked: cls.filter(x => x.status === 'BLOCKED').length, undecided: (lastReview?.steps || []).filter(r => !decisions.get(r.stepId)).length, customizations: (lastReview?.hybrid?.customization?.steps || []).length };
+      },
+      /**
+       * GENERATE_CODE（Phase 16）: 承認済み Customization Plan ＋ 関係フィールド ＋ 統合先の既存 JS 本文 → KTContext.buildGenerator → customization-generator
+       * → KTCodeReview（Toolkit の静的検査）。kintone へは登録しない。Toolkit Review で生成不可の step は送らない。
+       * @returns {{ ok:true, generated, review, ctx, existingSource } | { ok:false, reason, message?, file? }}
+       */
+      async generate({ version: v, customizationId, signal = null }) {
+        const plan = v?.plan || null;
+        const c = (plan?.customizations || []).find(x => x.customizationId === customizationId) || null;
+        if (!c) return { ok: false, reason: 'CUSTOMIZATION_NOT_FOUND', message: `カスタマイズ ${customizationId} は現在の計画にありません。` };
+        const rv = (v.review?.steps || []).find(r => r.customization?.customizationId === customizationId) || null;
+        if (rv && !rv.codeGeneration?.supported) return { ok: false, reason: 'GENERATE_BLOCKED', message: `${customizationId} は Toolkit Review でコード生成できない状態です（${rv.codeGeneration?.reason || '要確認'}）。` };
+        if (!rv && !['NEW_JS_FILE', 'EXTEND_EXISTING_JS'].includes(c.strategy)) return { ok: false, reason: 'STRATEGY_NOT_GENERATED', message: `方針 ${c.strategy || '（未定）'} はコード生成の対象外です。` };
+        const inputs = inputsNow();
+        let existingSource = null;
+        if (c.strategy === 'EXTEND_EXISTING_JS') {
+          const t = (c.existingFiles || [])[0] || rv?.codeGeneration?.existingFile || null;
+          if (!t) return { ok: false, reason: 'JS_TARGET_FILE_MISSING', message: '統合先の既存 JS が指定されていません。計画を修正してください。' };
+          const target = t.target || 'desktop';
+          existingSource = await loadJsSource(t.name, target, inputs);
+          if (!existingSource) return { ok: false, reason: 'JS_SOURCE_UNAVAILABLE', file: { name: t.name, target } };
+        }
+        const ctx = KTContext.buildGenerator({ customization: c, plan, planId: v.planId, version: v.version, data: inputs.data || null, deps: inputs.deps || null, scan: inputs.scan || null, existingSource });
+        const client = await ensureReady({ generator: true });
+        const requestId = KTAiClient.newRequestId();
+        let generated;
+        try { generated = await client.generate({ ctx, requestId, signal }); }
+        catch (e) { noteAuthError(e); throw e; }
+        const provenance = { planId: v.planId, planVersion: v.version, customizationId, generatedAt: new Date().toISOString(), appId: String(inputs.data?.appId ?? d.appId ?? executor?.appId ?? ''), requestId: generated.requestId || requestId, generator: 'nest-rec-ai/customization-generator', toolkitVersion: SCRIPT_VERSION };
+        let review;
+        try { review = KTCodeReview.review({ generated, customization: c, plan, data: inputs.data || null, scan: inputs.scan || null, existingSource, provenance }); }
+        catch (e) { review = { reviewVersion: KTCodeReview.REVIEW_VERSION, status: KTCodeReview.STATUS.REVIEW_REQUIRED, checks: [{ name: 'code', ok: false, severity: 'review', message: `Toolkit の検査を完了できませんでした: ${e?.message || String(e)}` }], finalCode: generated.code, addedCode: generated.code, diff: null, mismatches: [], security: [], provenance }; }
+        return { ok: true, generated, review, ctx, existingSource };
       },
     };
+    /**
+     * 統合先の既存 JS 本文を取る（順に: 直近の解析結果の本文 → d.loadJsSource（テスト / 差し替え）→ fileKey でダウンロード → 同一オリジン URL）。
+     * 取れなければ null（JS_SOURCE_UNAVAILABLE。推測して生成はしない）
+     */
+    async function loadJsSource(name, target, inputs) {
+      const files = KTScan.summarizeFiles(inputs.scan || null, inputs.data || null);
+      const f = files.find(x => x.name === name && x.target === target) || null;
+      if (f && typeof f.text === 'string' && f.text.trim()) return { name, target, text: f.text, from: 'scan' };
+      if (typeof d.loadJsSource === 'function') {
+        try { const t = await d.loadJsSource({ name, target, fileKey: f?.fileKey ?? null, url: f?.url ?? null }); if (typeof t === 'string' && t.trim()) return { name, target, text: t, from: 'loader' }; } catch (e) { }
+        return null;
+      }
+      if (f?.fileKey && typeof KTApi !== 'undefined' && typeof KTApi.downloadFile === 'function') {
+        try { const t = await KTApi.downloadFile(f.fileKey); if (typeof t === 'string' && t.trim()) return { name, target, text: t, from: 'download' }; } catch (e) { }
+      }
+      if (f?.url && !f.external && typeof fetch === 'function') {
+        try { const res = await fetch(f.url, { credentials: 'include' }); if (res.ok) { const t = await res.text(); if (t.trim()) return { name, target, text: t, from: 'url' }; } } catch (e) { }
+      }
+      return null;
+    }
     conv = KTAiConversation.create({ services });
     let adopted = null;          // 会話側で最新になった計画の版（lastPlan / lastReview と同期する）
     let showAll = false;
@@ -11383,7 +12657,9 @@
     function renderHeader() {
       let overview = null, app = {};
       try { const inputs = inputsNow(); if (inputs.data) { overview = KTContext.buildAppOverview({ data: inputs.data, deps: inputs.deps || null, scan: inputs.scan || null, incoming: inputs.incoming || null, limits: { ...KTContext.DEFAULT_LIMITS, maxFields: 0, maxViewNames: 0 }, trunc: () => { } }); app = { id: overview.id, name: overview.name }; } else app = { id: d.appId ?? executor?.appId ?? '' }; } catch (e) { overview = null; }
-      $header.innerHTML = KTAiChatUi.headerHtml({ app, overview, connection: connectionInfo(), drawerOpen });
+      let jsFiles = [];
+      try { const inputs = inputsNow(); jsFiles = KTScan.summarizeFiles(inputs.scan || null, inputs.data || null); } catch (e) { jsFiles = []; }
+      $header.innerHTML = KTAiChatUi.headerHtml({ app, overview, connection: connectionInfo(), drawerOpen, jsFiles });
     }
     /** composer（送信欄）: 接続済みで利用できるときだけ送れる。無料ユーザーは無料パネルを出す（§22 / §23） */
     function renderComposer() {
@@ -11400,7 +12676,7 @@
       $note.textContent = busy ? '' : !paidEnabled ? 'この環境ではチャットは利用できません。無料の AI Prompt / Markdown / JSON は「Context」から生成できます。' : !conn.connected ? 'Nest Rec AI に接続するとチャットで質問・変更計画ができます。無料の AI Prompt / Markdown / JSON は「Context」から。' : capability.checking ? '接続を確認しています...' : !capability.available ? KTContextUi.capabilityStatusText(capability) : (plannerAvailable() ? 'Enter で送信・Shift+Enter で改行。質問・変更計画・修正・「これで進めたい」に対応します。' : 'Enter で送信。この契約では質問だけ利用できます（変更計画は契約に含まれていません）。');
     }
     function renderDrawerTabs() {
-      $dtabs.innerHTML = `${PANES.map(p => `<button type="button" class="btn kt-ai-dtab${activePane === p ? ' active' : ''}" data-pane="${p}"${p === 'connection' && !paidEnabled ? ' style="display:none;"' : ''}>${{ plan: '計画 / レビュー', evidence: '根拠', context: 'Context', connection: '接続' }[p]}</button>`).join('')}<button type="button" id="kt-ai-drawer-close" class="btn" style="margin-left:auto;" title="閉じる">×</button>`;
+      $dtabs.innerHTML = `${PANES.map(p => `<button type="button" class="btn kt-ai-dtab${activePane === p ? ' active' : ''}" data-pane="${p}"${p === 'connection' && !paidEnabled ? ' style="display:none;"' : ''}>${{ plan: '計画 / レビュー', evidence: '根拠', code: 'コード', context: 'Context', connection: '接続' }[p]}</button>`).join('')}<button type="button" id="kt-ai-drawer-close" class="btn" style="margin-left:auto;" title="閉じる">×</button>`;
     }
     function openDrawer(pane = activePane, { scrollTo = null } = {}) {
       drawerOpen = true;
@@ -11417,7 +12693,7 @@
       const t = String(text ?? '').trim();
       if (!t || conv.isBusy()) return null;
       const cls = intent ? { intent } : conv.classify(t);
-      const needsAi = [KTAiConversation.INTENT.ASK, KTAiConversation.INTENT.PLAN, KTAiConversation.INTENT.REVISE_PLAN, KTAiConversation.INTENT.EXPLAIN_PLAN, KTAiConversation.INTENT.EXPLAIN_REVIEW].includes(cls.intent);
+      const needsAi = [KTAiConversation.INTENT.ASK, KTAiConversation.INTENT.PLAN, KTAiConversation.INTENT.REVISE_PLAN, KTAiConversation.INTENT.EXPLAIN_PLAN, KTAiConversation.INTENT.EXPLAIN_REVIEW, KTAiConversation.INTENT.EXPLAIN_CUSTOMIZATION, KTAiConversation.INTENT.GENERATE_CODE].includes(cls.intent);
       if (needsAi && paidEnabled && !settings.hasConsent()) { pendingChat = { text: t, intent }; $consent.style.display = ''; return { pendingConsent: true, intent: cls.intent }; }
       currentAbort = typeof AbortController !== 'undefined' ? new AbortController() : null;
       $input.disabled = true; renderComposer();
@@ -11452,6 +12728,69 @@
       if (act === 'choice') { const text = dataOf(t, 'text'), intent = dataOf(t, 'intent'); if (text && intent) await sendChat(text, { intent }); return; }
       if (act === 'candidate') { const text = dataOf(t, 'text'); const focus = { type: dataOf(t, 'type'), id: dataOf(t, 'id') }; if (focus.type && focus.id) await askWithFocus(text, focus); return; }
       if (act === 'show-all') { showAll = true; renderChat(); return; }
+      // Phase 16: JavaScript Generator（ボタンからの生成も会話の GENERATE_CODE を通る。登録はしない）
+      if (act === 'generate') { const cid = dataOf(t, 'cid'); await sendChat(cid ? `${cid} のコードを作って` : 'コードを作って', { intent: KTAiConversation.INTENT.GENERATE_CODE }); return; }
+      if (act === 'open-code') { showCode(dataOf(t, 'cid'), { view: dataOf(t, 'view') || 'code' }); return; }
+      if (act === 'copy-code' || act === 'copy-diff' || act === 'copy-cplan') { const ok = await copyGenerated(dataOf(t, 'cid'), act === 'copy-code' ? 'code' : act === 'copy-diff' ? 'diff' : 'cplan'); if (t && t.textContent != null) flashBtnText(t, ok ? 'Copied!' : 'Failed'); return; }
+      if (act === 'rescan') { const cid = dataOf(t, 'cid'); await rescanAndGenerate(cid); return; }
+    });
+    // ---- 生成コード（Phase 16）: 会話の版ごとに v.generated[cid] = { generated, review, ctx, existingSource }。コードペインに写す ----
+    let codeShown = null;    // { planId, version, cid, view }
+    const generatedEntry = (cid, v = null) => {
+      const vs = v ? [v] : [conv.activePlan(), ...conv.planHistory()].filter(Boolean);
+      for (const x of vs) { const g = x?.generated?.[cid]; if (g) return { v: x, entry: g }; }
+      return null;
+    };
+    const customizationOf = (v, cid) => (v?.plan?.customizations || []).find(c => c.customizationId === cid) || null;
+    function showCode(cid, { view = 'code' } = {}) {
+      const hit = cid ? generatedEntry(cid) : null;
+      const pane = hit ? KTAiChatUi.codePaneHtml(hit.entry, { view }) : KTAiChatUi.codePaneHtml(null);
+      const $head = $('kt-ai-code-head'), $rv = $('kt-ai-code-review'), $code = $('kt-ai-code-view'), $diff = $('kt-ai-diff-view'), $acts = $('kt-ai-code-actions'), $tabs = $('kt-ai-code-tabs');
+      if ($head) $head.innerHTML = pane.head;
+      if ($rv) $rv.innerHTML = pane.review;
+      if ($code) { $code.textContent = pane.code; $code.style.display = hit && view !== 'diff' ? '' : 'none'; }
+      if ($diff) { $diff.textContent = pane.diff; $diff.style.display = hit && view === 'diff' ? '' : 'none'; }
+      if ($acts) $acts.style.display = hit ? 'flex' : 'none';
+      if ($tabs) $tabs.style.display = hit && hit.entry.review?.diff ? 'flex' : 'none';
+      codeShown = hit ? { planId: hit.v.planId, version: hit.v.version, cid, view } : null;
+      openDrawer('code');
+      return codeShown;
+    }
+    /** コピー: code（最終コード）/ diff（Before / After）/ cplan（Customization Plan JSON ＋ 出所） */
+    async function copyGenerated(cid, what = 'code') {
+      const hit = cid ? generatedEntry(cid) : (codeShown ? generatedEntry(codeShown.cid) : null);
+      if (!hit) return false;
+      const { v, entry } = hit;
+      const text = what === 'diff' ? (entry.review?.diffText || KTCodeReview.diffText(entry.review?.diff) || '')
+        : what === 'cplan' ? JSON.stringify({ customization: customizationOf(v, cid || codeShown?.cid), generated: { strategy: entry.generated.strategy, targetFile: entry.generated.targetFile, summary: entry.generated.summary, events: entry.generated.events, fields: entry.generated.fields, apis: entry.generated.apis, assumptions: entry.generated.assumptions, warnings: entry.generated.warnings }, codeReview: { status: entry.review?.status, checks: (entry.review?.checks || []).map(c => ({ name: c.name, ok: c.ok, severity: c.severity, message: c.message })), mismatches: entry.review?.mismatches || [] }, provenance: entry.review?.provenance || null }, null, 2)
+        : (entry.review?.finalCode ?? entry.generated.code ?? '');
+      if (!text) return false;
+      return await d.copyText(text);
+    }
+    /** source-unavailable → 再スキャン（本文を取り直す）→ 同じカスタマイズのコード生成をやり直す */
+    async function rescanAndGenerate(cid) {
+      const fn = typeof d.rescanJs === 'function' ? d.rescanJs : (typeof d.runScan === 'function' ? d.runScan : null);
+      if (!fn) { conv.notice('この環境では JavaScript を再スキャンできません。Field Scanner タブで Scan を実行してから、もう一度「コードを作って」と伝えてください。', { kind: 'rescan-unavailable' }); return null; }
+      let r = null;
+      try { r = await fn(); } catch (e) { r = { ok: false, reason: e?.message || String(e) }; }
+      if (!r || r.ok === false) { conv.notice(`JavaScript の再スキャンに失敗しました（${r?.reason || 'unknown'}）。`, { kind: 'rescan-failed' }); return r; }
+      fillTargets(); renderHeader();
+      return await sendChat(cid ? `${cid} のコードを作って` : 'コードを作って', { intent: KTAiConversation.INTENT.GENERATE_CODE });
+    }
+    $pane('code').addEventListener('click', async (ev) => {
+      const t = ev?.target;
+      const id = t?.id || (typeof t?.getAttribute === 'function' ? t.getAttribute('id') : null);
+      const view = dataOf(t, 'codeView');
+      if (view && codeShown) { showCode(codeShown.cid, { view }); return; }
+      if (!codeShown) return;
+      if (id === 'kt-ai-code-copy' || id === 'kt-ai-diff-copy' || id === 'kt-ai-cplan-copy') { const ok = await copyGenerated(codeShown.cid, id === 'kt-ai-code-copy' ? 'code' : id === 'kt-ai-diff-copy' ? 'diff' : 'cplan'); if (t) flashBtnText(t, ok ? 'Copied!' : 'Failed'); return; }
+      if (id === 'kt-ai-code-download') {
+        const hit = generatedEntry(codeShown.cid); if (!hit) return;
+        const name = hit.entry.generated.targetFile || `${codeShown.cid}.js`;
+        const text = hit.entry.review?.finalCode ?? hit.entry.generated.code ?? '';
+        if (typeof d.downloadText === 'function') d.downloadText(name, text, 'text/javascript;charset=utf-8');
+        else if (typeof KTExport !== 'undefined' && KTExport.downloadText) KTExport.downloadText(name, text, 'text/javascript;charset=utf-8');
+      }
     });
     /** 候補から対象を選んだ質問（ASK。明示 focus） */
     async function askWithFocus(question, focus) {
@@ -11806,6 +13145,8 @@
       const id = t?.id || (typeof t?.getAttribute === 'function' ? t.getAttribute('id') : null);
       if (id === 'kt-ai-plan-json-toggle') { const pre = host.querySelector('#kt-ai-plan-json'); if (pre) pre.style.display = pre.style.display === 'none' ? '' : 'none'; return; }
       if (id === 'kt-ai-plan-json-copy') { const ok = await d.copyText(JSON.stringify(KTContextUi.planJson(lastPlan), null, 2)); if (t) flashBtnText(t, ok ? 'Copied!' : 'Failed'); return; }
+      const actT = t && typeof t.closest === 'function' ? (t.closest('[data-act]') || t) : t;
+      if (dataOf(actT, 'act') === 'generate') { const cid = dataOf(actT, 'cid'); await sendChat(cid ? `${cid} のコードを作って` : 'コードを作って', { intent: KTAiConversation.INTENT.GENERATE_CODE }); return; }
       const toggle = (sel) => { const el = host.querySelector(sel); if (el) el.style.display = el.style.display === 'none' ? '' : 'none'; };
       if (id === 'kt-ai-review-diff-toggle') { toggle('#kt-ai-review-diff'); return; }
       if (id === 'kt-ai-review-json-toggle') { toggle('#kt-ai-review-json'); return; }
@@ -11981,6 +13322,9 @@
       currentOutput,
       // AI Workspace（Phase 15）
       send: sendChat, conversation: () => conv, classify: (t) => conv.classify(t),
+      // JavaScript Generator（Phase 16）: 生成は会話の GENERATE_CODE を通る。登録はしない
+      generate: (cid = null) => sendChat(cid ? `${cid} のコードを作って` : 'コードを作って', { intent: KTAiConversation.INTENT.GENERATE_CODE }),
+      generated: (cid, v = null) => (generatedEntry(cid, v)?.entry || null), showCode, copyGenerated, codeShown: () => codeShown, loadJsSource,
       openDrawer, closeDrawer, drawerState: () => ({ open: drawerOpen, pane: activePane }),
       renderHeader, isConnected,
       cancel: () => { try { currentAbort?.abort(); } catch (e) { } },
@@ -16377,6 +17721,7 @@
         copyText: (t) => KTExport.copyText(t),
         downloadText: (name, text, mime) => KTExport.downloadText(name, text, mime),
         runScan,
+        rescanJs: () => KTScan.run({ force: true, silent: true }),   // Phase 16: 統合先 JS の本文を取り直す（キャッシュを無視）
         appId,
         colors: { border: BD, bg: isDark ? '#1b1b1b' : '#fff' },
         // 有料: Nest Rec AI（接続情報は Refresh Token のみ localStorage・Customer Token は保存しない）
@@ -18565,45 +19910,8 @@
        *   kintone.events.on(EVENTS, ...) → 変数指定は特定できないため対象外
        * @returns {string[]} 重複を除いたイベント種別
        */
-      // kintoneのイベント名の形か（app.record.* / mobile.app.record.* / app.report.show など）
-      const EVENT_NAME_RE = /^(mobile\.)?app\.(record|report)\.[A-Za-z0-9_.\u00C0-\uFFFF]+$/;
-
-      function extractEventTypes(cleanText) {
-        const s = String(cleanText || '');
-        const direct = new Set();
-
-        // ---- ① kintone.events.on(...) の第1引数から検出（確実）----
-        //   文字列リテラル、または配列リテラルをそのまま渡している場合に対応する
-        const rx = /kintone\.events\.on\s*\(\s*(\[[^\]]*\]|['"`][^'"`]*['"`])/g;
-        let m;
-        while ((m = rx.exec(s)) !== null) {
-          const strRx = /['"`]([^'"`]+)['"`]/g;
-          let sm;
-          while ((sm = strRx.exec(m[1])) !== null) {
-            const ev = sm[1].trim();
-            if (EVENT_NAME_RE.test(ev)) direct.add(ev);
-          }
-        }
-
-        // ---- ② ファイル内のイベント名らしき文字列から検出（推定）----
-        //   var events = [...]; kintone.events.on(events, cb) のような
-        //   変数経由の書き方は①では拾えないため、文字列リテラル全体を走査して補う。
-        //   「登録に使われている」とは限らないので、確度は下げて扱う。
-        const inferred = new Set();
-        if (/kintone\.events\.on\s*\(/.test(s)) {
-          const anyStr = /['"`]([^'"`\n]+)['"`]/g;
-          let am;
-          while ((am = anyStr.exec(s)) !== null) {
-            const ev = am[1].trim();
-            if (EVENT_NAME_RE.test(ev) && !direct.has(ev)) inferred.add(ev);
-          }
-        }
-
-        return [
-          ...[...direct].sort().map(name => ({ name, direct: true })),
-          ...[...inferred].sort().map(name => ({ name, direct: false })),
-        ];
-      }
+      // ★イベント抽出・ステータス比較・アクセス種別・analyze は KTScan 側（Phase 16: 生成コードも同じ解析に通す）
+      const { extractEventTypes, extractStatusComparisons, collectUnknownStatusRefs, buildRegexps, classifyAccess, findAllMatches, analyze } = KTScan;
 
       // 行番号算出用（実体は KTScan 側）
       const buildLineIndex = KTScan.buildLineIndex;
@@ -18617,266 +19925,9 @@
       const extractFieldCodeCandidates = (cleanText, lineIndexFn) =>
         KTScan.extractFieldCodeCandidates(cleanText, lineIndexFn);
 
-      /**
-       * JavaScript内で「ステータスと比較している文字列」を抽出する
-       *
-       *   record['ステータス'].value === '承認待ち'
-       *   event.record.ステータス.value !== '完了'
-       *   '完了' === record['ステータス'].value      （左右が逆の書き方）
-       *
-       * ステータス名を変更してもJavaScriptは追随しないため、
-       * 存在しない名前との比較が残ると条件が成立しなくなる。
-       * @returns {Array<{value, line}>}
-       */
-      function extractStatusComparisons(cleanText, statusCodes, lineIndexFn) {
-        const s = String(cleanText || '');
-        if (!s) return [];
-        const out = [];
-        const push = (value, index) => {
-          const v = String(value || '').trim();
-          if (v) out.push({ value: v, line: lineIndexFn ? lineIndexFn(index) : null });
-        };
-        const esc = (v) => String(v).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-
-        // --- ステータス値を持つ式を列挙する ---
-        //   プロセス管理のイベントでは event.nextStatus.value / event.status.value、
-        //   レコードからはステータスフィールドの .value がステータス名になる。
-        const exprs = ['event\\s*\\.\\s*(?:nextStatus|status)\\s*\\.\\s*value'];
-        for (const code of (statusCodes || [])) {
-          const c = esc(code);
-          exprs.push(`record\\s*(?:\\[\\s*['"\`]${c}['"\`]\\s*\\]|\\.${c})\\s*\\.\\s*value`);
-        }
-
-        // --- 上記を代入した変数も追跡する ---
-        //   例: const nStatus = event.nextStatus.value;
-        const tokens = [...exprs];
-        const rxAssign = /(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*([^;\n]+)/g;
-        let am;
-        while ((am = rxAssign.exec(s)) !== null) {
-          const name = am[1];
-          const rhs = am[2];
-          if (exprs.some(e => new RegExp(e).test(rhs))) tokens.push(esc(name));
-        }
-
-        for (const token of tokens) {
-          // 比較（左右どちらに文字列が来る書き方にも対応）
-          const rxA = new RegExp(`${token}\\s*(?:===?|!==?)\\s*['"\`]([^'"\`]+)['"\`]`, 'g');
-          const rxB = new RegExp(`['"\`]([^'"\`]+)['"\`]\\s*(?:===?|!==?)\\s*${token}`, 'g');
-          for (const rx of [rxA, rxB]) {
-            let m;
-            while ((m = rx.exec(s)) !== null) push(m[1], m.index);
-          }
-
-          // switch 文の case ラベル
-          //   例: switch (nStatus) { case 'A03:1次Aチェック中': ... }
-          const rxSw = new RegExp(`switch\\s*\\(\\s*${token}\\s*\\)\\s*\\{`, 'g');
-          let sm;
-          while ((sm = rxSw.exec(s)) !== null) {
-            // 対応する閉じ括弧までを switch の本体とみなす
-            let depth = 0;
-            let end = -1;
-            for (let i = sm.index + sm[0].length - 1; i < s.length; i++) {
-              if (s[i] === '{') depth++;
-              else if (s[i] === '}') {
-                depth--;
-                if (depth === 0) { end = i; break; }
-              }
-            }
-            const bodyText = s.slice(sm.index, end < 0 ? s.length : end);
-            const rxCase = /case\s*['"`]([^'"`]+)['"`]\s*:/g;
-            let cm;
-            while ((cm = rxCase.exec(bodyText)) !== null) push(cm[1], sm.index + cm.index);
-          }
-        }
-
-        // 同じ値・同じ行の重複を除く
-        const seen = new Set();
-        return out.filter(o => {
-          const k = `${o.value}|${o.line}`;
-          if (seen.has(k)) return false;
-          seen.add(k);
-          return true;
-        });
-      }
-
-      /**
-       * JavaScript内の比較のうち、存在しないステータス名を集約する
-       * @returns {Array<{value, files:Array, count:number}>}
-       */
-      function collectUnknownStatusRefs(files, statusStates, statusCodes) {
-        const known = new Set(statusStates || []);
-        // プロセス管理が無効なアプリでは検証しない（すべて未知になってしまうため）
-        // ステータスフィールドが無くても event.nextStatus 経由の判定は検証できる
-        if (!known.size) return [];
-
-        const agg = new Map();
-        for (const f of files || []) {
-          if (f.kind !== 'js' || !f.text) continue;
-          const clean = stripCommentsOnly(f.text);
-          const li = buildLineIndex(clean);
-          for (const c of extractStatusComparisons(clean, statusCodes, (i) => lineAt(li, i))) {
-            if (known.has(c.value)) continue;
-            let a = agg.get(c.value);
-            if (!a) { a = { value: c.value, files: new Map(), count: 0 }; agg.set(c.value, a); }
-            a.count++;
-            const key = `${f.target}:${f.name}`;
-            if (!a.files.has(key)) a.files.set(key, []);
-            const lines = a.files.get(key);
-            if (lines.length < 10 && !lines.includes(c.line)) lines.push(c.line);
-          }
-        }
-        return [...agg.values()]
-          .map(a => ({
-            value: a.value, count: a.count,
-            files: [...a.files.entries()].map(([name, lines]) => ({ name, lines: [...lines].sort((x, y) => x - y) })),
-          }))
-          .sort((a, b) => String(a.value).localeCompare(String(b.value), 'ja'));
-      }
-
       // 「存在しないフィールド参照」「外部アプリのフィールド参照」の集約（実体は KTScan 側）
       const collectUnknownFieldRefs = KTScan.collectUnknownFieldRefs;
       const collectExternalFieldRefs = KTScan.collectExternalFieldRefs;
-
-      // パターン種別付きの正規表現を作る
-      //   ELEMENT: getFieldElement(s)('code') / BRACKET: ['code'] / QUOTED: 'code' / BARE: 裸の識別子
-      function buildRegexps(code) {
-        const safe = String(code || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-        const pats = [
-          { kind: 'ELEMENT', rx: new RegExp(`getFieldElements?\\(\\s*['"\`]${safe}['"\`]\\s*\\)`, 'gu') },
-          { kind: 'BRACKET', rx: new RegExp(`\\[\\s*['"\`]${safe}['"\`]\\s*\\]`, 'gu') },
-          { kind: 'QUOTED', rx: new RegExp(`['"\`]${safe}['"\`]`, 'gu') },
-        ];
-        if (/^[A-Za-z_$][A-Za-z0-9_$]*$/.test(code)) {
-          pats.push({ kind: 'BARE', rx: new RegExp(`(?<![A-Za-z0-9_$])${safe}(?![A-Za-z0-9_$])`, 'g') });
-        }
-        return pats;
-      }
-
-      // アクセス種別の推定（正規表現ベースの簡易判定。断定せず confidence を必ず併記する）
-      //   READ / WRITE / ELEMENT / SHOW_HIDE / CONTROL / FIELDS_PARAM / QUERY / OTHER
-      function classifyAccess(text, start, end, kind) {
-        if (kind === 'ELEMENT') return { access: 'ELEMENT', confidence: 'HIGH' };
-        const before = text.slice(Math.max(0, start - 80), start);
-        const after = text.slice(end, end + 80);
-
-        if (/setFieldShown\(\s*$/.test(before)) return { access: 'SHOW_HIDE', confidence: 'HIGH' };
-
-        // 裸の識別子は同名変数・関数名の可能性があるため確度を1段下げる
-        const cap = (c) => (kind === 'BARE')
-          ? (c === 'HIGH' ? 'MEDIUM' : 'LOW')
-          : c;
-
-        // .value.push() など、配列を直接書き換える呼び出しは WRITE として扱う
-        if (/^\s*\.value\s*\.\s*(push|pop|shift|unshift|splice|sort|reverse|fill)\s*\(/.test(after)) {
-          return { access: 'WRITE', confidence: cap('HIGH') };
-        }
-        const mv = after.match(/^\s*\.value\s*(=(?!=)|\+=|-=|\*=|\/=)?/);
-        if (mv) return { access: mv[1] ? 'WRITE' : 'READ', confidence: cap('HIGH') };
-        if (/^\s*\.(disabled|error)\s*=/.test(after)) return { access: 'CONTROL', confidence: cap('HIGH') };
-        // fields: [...] の中（BRACKETマッチでは '[' がマッチ側に含まれるため、'[' 無しの形も許容する）
-        if (/fields\s*:\s*(\[[^\]]*)?$/.test(before)) return { access: 'FIELDS_PARAM', confidence: cap('MEDIUM') };
-        if (/query\s*[:=]\s*['"`][^'"`\n]*$/.test(before)) return { access: 'QUERY', confidence: cap('MEDIUM') };
-
-        // record['CODE'] をそのまま関数へ渡している（読み取りも書き換えもあり得るため用途は断定しない）
-        //   例: const err = textCheck(record['得意先名']);
-        if (/record\s*$/.test(before) && /^\s*[),]/.test(after)) {
-          return { access: 'ARGUMENT', confidence: cap('MEDIUM') };
-        }
-
-        // 配列リテラルに列挙されている（後で record[配列[i]] のように使われることが多い）
-        //   例: const filedName = ['会計_担当者1_KintoneUser', '会計_担当者2_KintoneUser'];
-        if (/[[,]\s*$/.test(before) && /^\s*[,\]]/.test(after)) {
-          return { access: 'LIST', confidence: cap('MEDIUM') };
-        }
-        // 要素が1つだけの配列は ['CODE'] 全体がマッチするため、上の判定に掛からない。
-        // 直前が識別子（record など）でなければ、添字アクセスではなく配列リテラルとみなす。
-        if (kind === 'BRACKET' && !/[\w$\])]\s*$/.test(before)) {
-          return { access: 'LIST', confidence: cap('MEDIUM') };
-        }
-
-        return { access: 'OTHER', confidence: 'LOW' };
-      }
-
-      // 1ファイル内の全マッチを取得し、重複スパンを除去する
-      // ★改善：従来は ['code'] が BRACKET と QUOTED の両方にヒットし二重カウントされていた
-      function findAllMatches(text, pats) {
-        const all = [];
-        for (const p of pats) {
-          let m;
-          while ((m = p.rx.exec(text)) !== null) {
-            all.push({ start: m.index, end: m.index + m[0].length, kind: p.kind });
-          }
-        }
-        // 開始位置昇順・長い方優先で並べ、重なるスパンは捨てる
-        all.sort((a, b) => (a.start - b.start) || (b.end - a.end));
-        const kept = [];
-        let lastEnd = -1;
-        for (const h of all) {
-          if (h.start < lastEnd) continue;
-          kept.push(h);
-          lastEnd = h.end;
-        }
-        return kept;
-      }
-
-      function analyze({ fields, files, snippet }) {
-        const { before = 24, after = 48 } = snippet || {};
-        const cleans = files.map(f => {
-          const clean = stripCommentsOnly(f.text || '');
-          return { ...f, clean, lineIdx: buildLineIndex(clean) };
-        });
-        const results = [];
-        for (const fld of fields) {
-          if (!fld.code) continue;
-          const pats = buildRegexps(fld.code);
-          let count = 0;
-          const usedIn = [];
-          const samples = [];
-          const matches = [];      // 全マッチ詳細（JSON出力・依存関係データ統合用）
-          const accessCounts = {}; // アクセス種別ごとの件数
-
-          for (const f of cleans) {
-            if (!f.clean) continue;
-            const hits = findAllMatches(f.clean, pats);
-            if (!hits.length) continue;
-            count += hits.length;
-            usedIn.push(`${f.target}: ${f.name}`);
-            let sampled = 0;
-            for (const h of hits) {
-              const cls = classifyAccess(f.clean, h.start, h.end, h.kind);
-              const line = lineAt(f.lineIdx, h.start);
-              accessCounts[cls.access] = (accessCounts[cls.access] || 0) + 1;
-              const s = Math.max(0, h.start - before);
-              const e = Math.min(f.clean.length, h.end + after);
-              const snip = f.clean.slice(s, e).replace(/\n/g, '⏎');
-              matches.push({
-                file: f.name, target: f.target, kind: f.kind,
-                line, access: cls.access, confidence: cls.confidence, snippet: snip,
-              });
-              if (sampled < 2) {
-                samples.push({
-                  file: `${f.target}: ${f.name}`, line,
-                  access: cls.access, confidence: cls.confidence, snippet: snip,
-                });
-                sampled++;
-              }
-            }
-          }
-
-          const accessSummary = Object.entries(accessCounts)
-            .sort((a, b) => b[1] - a[1])
-            .map(([k, v]) => `${k}×${v}`)
-            .join(', ');
-
-          results.push({
-            code: fld.code, label: fld.label, type: fld.type,
-            used: count > 0, count, files: usedIn,
-            samples, matches, accessCounts, accessSummary,
-          });
-        }
-        results.sort((a, b) => (Number(b.used) - Number(a.used)) || (b.count - a.count) || String(a.code).localeCompare(String(b.code)));
-        return results;
-      }
 
       // ---- 表示 & エクスポート ----
 

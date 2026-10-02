@@ -37,7 +37,14 @@ console.log('\n--- 1. 構造・決定性 ---');
   assert(ctx.contextVersion === 'planner-1' && ctx.goal === '担当者が設定されたら本人に通知したい' && ctx.app && !ctx.app.fields && Array.isArray(ctx.facts) && ctx.dictionary && ctx.retrieval && ctx.coverage && ctx.truncation && ctx.size, 'planner-1 の構造（goal / app / facts / dictionary / retrieval / coverage / truncation / size）');
   assert(ctx.facts.every((f, i) => f.id === `E${i + 1}`) && new Set(ctx.facts.map(f => f.key)).size === ctx.facts.length, '根拠ID は E1.. の連番・key は一意');
   const kinds = [...new Set(ctx.facts.map(f => f.kind))];
-  assert(['overview', 'field', 'process-state', 'process-action', 'notification', 'reminder', 'view', 'record-acl', 'field-acl', 'app-action', 'dependency', 'js-reference', 'incoming-reference'].every(k => kinds.includes(k)), `既存資産の種別が揃う（${kinds.join(',')}）`);
+  assert(['overview', 'field', 'process-state', 'process-action', 'notification', 'reminder', 'view', 'record-acl', 'field-acl', 'app-action', 'js-file', 'dependency', 'incoming-reference'].every(k => kinds.includes(k)), `既存資産の種別が揃う（${kinds.join(',')}）`);
+  // Phase 16: 登録済み JavaScript をファイル単位で（イベント・READ / WRITE / CONTROL・本文の有無。未解析の URL 指定は「統合先に選ばない」）
+  const jsf = ctx.facts.filter(f => f.kind === 'js-file');
+  const common = jsf.find(f => f.jsFile.name === 'common.js' && f.jsFile.target === 'desktop');
+  assert(jsf.length >= 3 && common && common.jsFile.events.includes('app.record.edit.show') && common.jsFile.fields.some(x => x.code === 'case_name' && x.access.WRITE === 1) && common.jsFile.sourceAvailable === true && /本文は取得済み/.test(common.statement) && common.confidence === 'CERTAIN', 'js-file facts: common.js（PC）のイベント・フィールドの access・本文あり');
+  const luxon = jsf.find(f => /luxon/.test(f.jsFile.name));
+  assert(luxon && luxon.jsFile.analyzed === false && luxon.confidence === 'NOT_ANALYZED' && /統合先に選ばないこと/.test(luxon.statement), 'js-file facts: URL 指定の JS は未解析（統合先に選ばない）');
+  assert(Array.isArray(ctx.dictionary.jsEvents) && ctx.dictionary.jsEvents.includes('app.record.edit.show'), 'dictionary.jsEvents: 既存 JS が登録しているイベント');
   const again = plan('担当者が設定されたら本人に通知したい');
   assert(JSON.stringify(ctx) === JSON.stringify(again), '同じ入力なら同じ Context（決定的）');
   assert(ctx.facts.filter(f => f.kind === 'field').length === KTDeps.normalizeFields(FX.makeData().fields).length, '全フィールドの軽量情報（code / label / type / required / options / lookup / 計算式）が facts に入る');
