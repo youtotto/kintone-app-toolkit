@@ -530,6 +530,93 @@ console.log('\n--- 12. Lookup Preview Executor の Review（Phase 13 §43〜§45
   assert(JSON.stringify(INPUTS.data) === SNAPSHOT, '§12 の後も DATA は不変');
 }
 
+console.log('\n--- 13. App Action Preview Executor の Review（Phase 14 §41〜§44） ---');
+{
+  // コピー先 App 311「見積管理」: quote_title(必須) / source_url(LINK WEB) / quote_amount(NUMBER) / customer / note(MULTI_LINE) / issue_date(DATE 必須・初期値なし) / quote_no(必須・初期値あり) / due(必須・今日) / owner_q(USER_SELECT) / phone_q(LINK CALL) / rank_q(DROP_DOWN) / attachment(FILE) / items(SUBTABLE)
+  // 既存アクション「見積を作成」: case_name → quote_title, レコードURL → source_url。利用者 USER:user1 / GROUP:sales_group
+  const upd = (spec, extra = {}) => step('P1', 'UPDATE_APP_ACTION', 'APP_ACTION', '見積を作成', [], { spec, ...extra });
+  const add = (spec, extra = {}) => step('P1', 'ADD_APP_ACTION', 'APP_ACTION', spec.name || '請求書作成', [], { spec, ...extra });
+  const m0 = R.buildBeforeModel(INPUTS.data);
+  assert(m0.appActions.length === 1 && m0.appActions[0].id === '5520' && m0.appActions[0].index === '0' && m0.appActions[0].destApp.app === '311' && m0.appActions[0].mappings.length === 2 && m0.appActions[0].mappings[1].srcType === 'RECORD_URL' && m0.appActions[0].mappings[1].srcField === null && m0.appActions[0].entities.length === 2 && m0.appActions[0].filterCond === '' && m0.appActions[0].destUnavailable === false, 'App Action Model: id / index / destApp{app, code} / mappings(srcType, srcField, destField) / entities / filterCond');
+  // ---- §41 destination ----
+  const okUpd = review(plan([upd({ actionMappings: [{ srcType: 'FIELD', srcField: 'secret_memo', destField: 'note' }] })]));
+  const u = st(okUpd, 'P1');
+  assert(['VALID', 'WARNING', 'NEEDS_CONFIRMATION'].includes(u.status) && u.safety === 'REVIEW_REQUIRED' && u.diff.changeType === 'UPDATE' && u.diff.after.mappings.length === 3 && u.diff.after.mappings[2].srcField === 'secret_memo' && u.diff.after.mappings[2].destField === 'note' && u.diff.before.mappings.length === 2 && u.diff.target.identity.kind === 'APP_ACTION' && u.diff.target.identity.id === '5520' && u.diff.target.identity.dest.appId === '311' && /^[0-9a-f]{8}$/.test(u.diff.target.identity.dest.fieldsHash) && okUpd.crossApp.some(c => c.appId === '311' && c.role === 'destination'), 'destination app exists: 既存アクションに転記を 1 件追加（identity に id / コピー先の指紋、crossApp に destination）');
+  assert(u.diff.human.some(h => h === '✎ 既存アプリアクション「見積を作成」を変更') && u.diff.human.some(h => h === 'コピー先: App 311「見積管理」') && u.diff.human.some(h => h === '＋ 転記: secret_memo（機密メモ） → note（備考）') && u.diff.human.some(h => h.startsWith('既存の転記 2 件（case_name→quote_title, レコードURL→source_url）はそのまま')), 'human: ✎ 既存アプリアクション / コピー先 App 311「見積管理」 / ＋ 転記 / 既存はそのまま');
+  const unavailable = (() => { const i = buildInputs(); i.data.relatedApps['311'] = { appId: '311', error: { code: 'CB_NO02', message: '権限がありません。', status: 403 } }; return i; })();
+  const un = review(plan([upd({ actionMappings: [{ srcType: 'FIELD', srcField: 'secret_memo', destField: 'note' }] })]), unavailable);
+  assert(st(un, 'P1').status === 'INVALID' && codes(st(un, 'P1')).includes('DEST_APP_SETTINGS_UNAVAILABLE') && /アクセス権/.test(st(un, 'P1').issues[0].message) && un.crossApp[0].available === false, 'destination unavailable: コピー先の設定が読めない → DEST_APP_SETTINGS_UNAVAILABLE（推測しない）');
+  const nullDest = (() => { const i = buildInputs(); i.data.actions.actions['見積を作成'].destApp = null; i.data.actions.actions['見積を作成'].mappings = null; return i; })();
+  const nd = review(plan([upd({ actionMappings: [{ srcType: 'FIELD', srcField: 'secret_memo', destField: 'note' }] })]), nullDest);
+  assert(st(nd, 'P1').status === 'INVALID' && codes(st(nd, 'P1')).includes('DEST_APP_SETTINGS_UNAVAILABLE') && R.buildBeforeModel(nullDest.data).appActions[0].destUnavailable === true, 'destApp: null（コピー先の権限なし）→ destUnavailable・UPDATE は INVALID');
+  const notLoaded = review(plan([add({ name: '請求書作成', destApp: '999', actionMappings: [{ srcType: 'FIELD', srcField: 'case_name', destField: 'title' }] })]));
+  assert(st(notLoaded, 'P1').status === 'NEEDS_CONFIRMATION' && st(notLoaded, 'P1').safety === 'REVIEW_REQUIRED' && codes(st(notLoaded, 'P1')).includes('DEST_APP_NOT_LOADED') && st(notLoaded, 'P1').diff.after.mappings[0].destField === 'title' && st(notLoaded, 'P1').diff.appActionChanges.destLoaded === false, 'destination not loaded: 未取得のコピー先 → 要確認（転記先は検証できず、Executor が実行直前に取得して検証）');
+  const missing = review(plan([upd({ actionMappings: [{ srcType: 'FIELD', srcField: 'secret_memo', destField: 'remarks' }] })]));
+  assert(st(missing, 'P1').status === 'INVALID' && codes(st(missing, 'P1')).includes('DEST_FIELD_NOT_FOUND'), 'missing destination field → DEST_FIELD_NOT_FOUND');
+  const byLabel = review(plan([upd({ actionMappings: [{ srcType: 'FIELD', srcField: 'secret_memo', destField: '備考' }] })]));
+  assert(st(byLabel, 'P1').status !== 'INVALID' && st(byLabel, 'P1').diff.after.mappings[2].destField === 'note', 'destination by label: 「備考」→ note に解決');
+  const req = review(plan([add({ name: '見積を複製', destApp: '311', actionMappings: [{ srcType: 'FIELD', srcField: 'case_name', destField: 'quote_title' }] })]));
+  const rq = st(req, 'P1').issues.find(i => i.code === 'DEST_REQUIRED_FIELD_UNMAPPED');
+  assert(rq && rq.severity === 'medium' && rq.fields.map(f => f.code).join() === 'issue_date' && /作成時に入力・自動設定/.test(rq.message) && st(req, 'P1').status === 'NEEDS_CONFIRMATION' && st(req, 'P1').diff.appActionChanges.requiredUnmapped[0].label === '見積日', 'required unmapped: 必須で初期値の無い issue_date だけ警告（quote_no は初期値あり・due は今日・quote_title は転記）');
+  // ---- §42 mapping ----
+  const multi = review(plan([upd({ actionMappings: [{ srcType: 'FIELD', srcField: 'secret_memo', destField: 'note' }, { srcType: 'FIELD', srcField: 'amount', destField: 'quote_amount' }, { srcType: 'FIELD', srcField: 'owner', destField: 'owner_q' }] })]));
+  assert(st(multi, 'P1').status !== 'INVALID' && st(multi, 'P1').diff.after.mappings.length === 5 && st(multi, 'P1').diff.appActionChanges.mappings.length === 3, 'add multiple: 3 件追加（既存 2 件は保持）');
+  const dup = review(plan([upd({ actionMappings: [{ srcType: 'FIELD', srcField: 'case_name', destField: 'quote_title' }] })]));
+  assert(codes(st(dup, 'P1')).includes('APP_ACTION_MAPPING_DUPLICATE') && st(dup, 'P1').diff.changeType === 'NO_CHANGE' && codes(st(dup, 'P1')).includes('NO_STRUCTURED_CHANGE'), 'duplicate mapping: 既にある転記 → APP_ACTION_MAPPING_DUPLICATE（変更なし）');
+  const conflict = review(plan([upd({ actionMappings: [{ srcType: 'FIELD', srcField: 'customer_code', destField: 'quote_title' }] })]));
+  assert(st(conflict, 'P1').status === 'INVALID' && codes(st(conflict, 'P1')).includes('APP_ACTION_DESTINATION_CONFLICT'), 'destination collision: 既存の転記先に別の転記元 → APP_ACTION_DESTINATION_CONFLICT');
+  const conflict2 = review(plan([add({ name: '請求書作成', destApp: '311', actionMappings: [{ srcType: 'FIELD', srcField: 'case_name', destField: 'customer' }, { srcType: 'FIELD', srcField: 'customer_code', destField: 'customer' }] })]));
+  assert(st(conflict2, 'P1').status === 'INVALID' && codes(st(conflict2, 'P1')).includes('APP_ACTION_DESTINATION_CONFLICT'), 'destination collision（同じ計画内）');
+  const compat = [['amount', 'quote_title', false], ['amount', 'quote_amount', true], ['total', 'quote_amount', true], ['レコード番号', 'quote_amount', true], ['case_name', 'note', false], ['secret_memo', 'note', true], ['owner', 'owner_q', true], ['作成者', 'owner_q', true], ['due_date', 'issue_date', true], ['case_name', 'phone_q', true], ['customer_lookup', 'customer', true], ['case_name', 'attachment', false], ['quotes', 'note', false], ['case_name', 'item_name', false]];
+  for (const [from, to, ok] of compat) { const rv = review(plan([upd({ actionMappings: [{ srcType: 'FIELD', srcField: from, destField: to }] })])); assert((st(rv, 'P1').status !== 'INVALID') === ok, `type table: ${from} → ${to} は${ok ? '転記できる' : '転記できない'}`); }
+  const tm = review(plan([upd({ actionMappings: [{ srcType: 'FIELD', srcField: 'amount', destField: 'customer' }] })]));
+  assert(codes(st(tm, 'P1')).includes('APP_ACTION_MAPPING_TYPE_MISMATCH') && /NUMBER/.test(st(tm, 'P1').issues.find(i => i.code === 'APP_ACTION_MAPPING_TYPE_MISMATCH').message), 'type mismatch: 数値 → 文字列（1行）は転記できない（転記できる種類を示す）');
+  const url = review(plan([add({ name: '請求書作成', destApp: '311', actionMappings: [{ srcType: 'RECORD_URL', srcField: null, destField: 'source_url' }] })]));
+  assert(st(url, 'P1').status !== 'INVALID' && st(url, 'P1').diff.after.mappings[0].srcType === 'RECORD_URL' && st(url, 'P1').diff.after.mappings[0].srcField === null && st(url, 'P1').diff.human.some(h => h === '＋ 転記: レコードURL → source_url（元案件URL）'), 'RECORD_URL: srcField なし・リンク（Web）へ転記');
+  const urlBad = review(plan([add({ name: '請求書作成', destApp: '311', actionMappings: [{ srcType: 'RECORD_URL', srcField: null, destField: 'phone_q' }] })]));
+  const urlBad2 = review(plan([add({ name: '請求書作成', destApp: '311', actionMappings: [{ srcType: 'RECORD_URL', srcField: null, destField: 'customer' }] })]));
+  assert(st(urlBad, 'P1').status === 'INVALID' && st(urlBad2, 'P1').status === 'INVALID' && codes(st(urlBad2, 'P1')).includes('APP_ACTION_MAPPING_TYPE_MISMATCH'), 'RECORD_URL: 電話リンク・文字列へは転記できない');
+  const urlText = review(plan([step('P1', 'UPDATE_APP_ACTION', 'APP_ACTION', '見積を作成', [['転記', 'レコードURL → source_url, secret_memo → note']])]));
+  assert(st(urlText, 'P1').status !== 'INVALID' && codes(st(urlText, 'P1')).includes('APP_ACTION_MAPPING_DUPLICATE') && st(urlText, 'P1').diff.after.mappings.length === 3, 'details の文章形（レコードURL → …）も actionMappings に正規化（既存の URL 転記は重複として変更なし）');
+  const preserved = review(plan([upd({ actionMappings: [{ srcType: 'FIELD', srcField: 'secret_memo', destField: 'note' }] })]));
+  const pv = st(preserved, 'P1');
+  assert(pv.diff.after.mappings.slice(0, 2).map(m => `${m.srcType}:${m.srcField}:${m.destField}`).join() === 'FIELD:case_name:quote_title,RECORD_URL:null:source_url' && pv.diff.after.entities.map(e => `${e.type}:${e.code}`).join() === 'USER:user1,GROUP:sales_group' && pv.diff.after.destApp.app === '311' && pv.diff.after.name === '見積を作成' && pv.diff.after.index === '0', 'existing preserved: 既存の転記・利用者・コピー先・名前・並び順はそのまま');
+  const srcMissing = review(plan([upd({ actionMappings: [{ srcType: 'FIELD', srcField: 'ghost', destField: 'note' }] })]));
+  assert(st(srcMissing, 'P1').status === 'INVALID' && codes(st(srcMissing, 'P1')).includes('UNKNOWN_FIELD'), 'source missing → INVALID');
+  const srcProposed = review(plan([step('P1', 'ADD_FIELD', 'PROPOSED_FIELD', 'NEW_FIELD_1'), step('P2', 'UPDATE_APP_ACTION', 'APP_ACTION', '見積を作成', [], { dependsOn: ['P1'], spec: { actionMappings: [{ srcType: 'FIELD', srcField: 'NEW_FIELD_1', destField: 'note' }] } })], [pf('NEW_FIELD_1', '備考', 'remarks', 'MULTI_LINE_TEXT')]));
+  assert(st(srcProposed, 'P2').status !== 'INVALID' && st(srcProposed, 'P2').diff.after.mappings[2].srcField === 'remarks', 'source proposed: 先行 ADD_FIELD の NEW_FIELD_1 を転記元に解決');
+  // ---- §44 update: entities / filterCond / rename / dest change ----
+  const ent = review(plan([upd({ entities: ['GROUP:sales_group', 'ORGANIZATION:sales_div'] })]));
+  const en = st(ent, 'P1');
+  assert(en.status === 'NEEDS_CONFIRMATION' && codes(en).includes('APP_ACTION_ENTITIES_REMOVED') && en.issues.find(i => i.code === 'APP_ACTION_ENTITIES_REMOVED').severity === 'high' && /USER:user1/.test(en.issues.find(i => i.code === 'APP_ACTION_ENTITIES_REMOVED').message) && en.diff.after.entities.map(e => `${e.type}:${e.code}`).join() === 'GROUP:sales_group,ORGANIZATION:sales_div' && ent.summary.counts.highRisk === 1, 'entities change: user1 を外す → APP_ACTION_ENTITIES_REMOVED（高・要確認）');
+  const entBad = review(plan([upd({ entities: ['FIELD_ENTITY:owner'] })]));
+  assert(st(entBad, 'P1').status === 'INVALID' && codes(st(entBad, 'P1')).includes('APP_ACTION_ENTITY_INVALID'), 'entities: FIELD_ENTITY は使えない（INVALID）');
+  const entEveryone = review(plan([add({ name: '請求書作成', destApp: '311', actionMappings: [{ srcType: 'FIELD', srcField: 'case_name', destField: 'customer' }] })]));
+  assert(st(entEveryone, 'P1').diff.after.entities.length === 1 && st(entEveryone, 'P1').diff.after.entities[0].code === 'everyone' && codes(st(entEveryone, 'P1')).includes('APP_ACTION_ENTITIES_DEFAULT_EVERYONE'), 'ADD で利用者の指定なし → Everyone（画面の既定）');
+  const fc = review(plan([upd({ filterCond: 'ステータス in ("承認待ち")' })]));
+  assert(st(fc, 'P1').status === 'NEEDS_CONFIRMATION' && codes(st(fc, 'P1')).includes('APP_ACTION_CONDITION_CHANGE') && !codes(st(fc, 'P1')).includes('COND_INVALID') && st(fc, 'P1').diff.after.filterCond === 'ステータス in ("承認待ち")', 'filterCond change: KTQueryCheck（appAction）で検証して要確認');
+  const fcBad = review(plan([upd({ filterCond: 'ISBLANK(owner)' })]));
+  assert(codes(st(fcBad, 'P1')).includes('COND_UNKNOWN_FUNCTION'), 'filterCond invalid: kintone に無い関数');
+  const rename = review(plan([upd({ name: '見積書を作成', actionMappings: [{ srcType: 'FIELD', srcField: 'secret_memo', destField: 'note' }] })]));
+  assert(st(rename, 'P1').safety === 'PLAN_ONLY' && codes(st(rename, 'P1')).includes('APP_ACTION_RENAME') && rename.executionReadiness.planOnlySteps.includes('P1'), 'rename → PLAN_ONLY');
+  const destChange = review(plan([upd({ destApp: '600', actionMappings: [{ srcType: 'FIELD', srcField: 'secret_memo', destField: 'note' }] })]));
+  assert(st(destChange, 'P1').safety === 'PLAN_ONLY' && codes(st(destChange, 'P1')).includes('APP_ACTION_DEST_CHANGE') && st(destChange, 'P1').diff.after.destApp.app === '311', 'destination change → PLAN_ONLY（After のコピー先は変えない）');
+  const sameDest = review(plan([upd({ destApp: '311', actionMappings: [{ srcType: 'FIELD', srcField: 'secret_memo', destField: 'note' }] })]));
+  assert(!codes(st(sameDest, 'P1')).includes('APP_ACTION_DEST_CHANGE') && st(sameDest, 'P1').safety === 'REVIEW_REQUIRED', '同じコピー先の指定は変更と見ない');
+  // existing action detection / ambiguity
+  const byDest = review(plan([step('P1', 'UPDATE_APP_ACTION', 'APP_ACTION', '見積管理', [], { spec: { actionMappings: [{ srcType: 'FIELD', srcField: 'secret_memo', destField: 'note' }] } })]));
+  assert(st(byDest, 'P1').status !== 'INVALID' && st(byDest, 'P1').diff.target.id === '見積を作成' && codes(st(byDest, 'P1')).includes('APP_ACTION_TARGET_RESOLVED'), 'existing action detection: コピー先のアプリ名で既存アクションを 1 件に特定');
+  const two = (() => { const i = buildInputs(); i.data.actions.actions['再見積'] = { ...JSON.parse(JSON.stringify(i.data.actions.actions['見積を作成'])), name: '再見積', id: '5521', index: '1' }; return i; })();
+  const amb = review(plan([step('P1', 'UPDATE_APP_ACTION', 'APP_ACTION', '311', [], { spec: { actionMappings: [{ srcType: 'FIELD', srcField: 'secret_memo', destField: 'note' }] } })]), two);
+  assert(st(amb, 'P1').status === 'INVALID' && codes(st(amb, 'P1')).includes('APP_ACTION_TARGET_AMBIGUOUS') && /再見積/.test(st(amb, 'P1').issues[0].message), 'multiple candidates: 同じコピー先のアクションが 2 つ → APP_ACTION_TARGET_AMBIGUOUS（決めない）');
+  const addDup = review(plan([add({ name: '見積を作成', destApp: '311', actionMappings: [{ srcType: 'FIELD', srcField: 'case_name', destField: 'customer' }] })]));
+  assert(st(addDup, 'P1').status === 'INVALID' && codes(st(addDup, 'P1')).includes('APP_ACTION_NAME_DUPLICATE'), 'ADD: 同名の既存アクション → INVALID（UPDATE を使う）');
+  const addOk = review(plan([add({ name: '請求書作成', destApp: '311', actionMappings: [{ srcType: 'FIELD', srcField: 'case_name', destField: 'customer' }, { srcType: 'FIELD', srcField: 'amount', destField: 'quote_amount' }, { srcType: 'RECORD_URL', srcField: null, destField: 'source_url' }], entities: ['GROUP:sales_group'], filterCond: 'amount >= "1"' })]));
+  const ao = st(addOk, 'P1');
+  assert(ao.status === 'NEEDS_CONFIRMATION' && ao.safety === 'REVIEW_REQUIRED' && ao.diff.changeType === 'ADD' && ao.diff.after.name === '請求書作成' && ao.diff.after.index === '1' && ao.diff.after.destApp.app === '311' && ao.diff.after.mappings.length === 3 && ao.diff.after.entities[0].code === 'sales_group' && ao.diff.after.filterCond === 'amount >= "1"' && addOk.simulation.after.appActions.length === 2 && ao.diff.human[0] === '＋ 新規アプリアクション「請求書作成」' && ao.diff.human.some(h => h === 'コピー先: App 311「見積管理」') && ao.diff.human.some(h => h.startsWith('⚠ コピー先の必須項目: 「見積件名」 「見積日」')), 'ADD_APP_ACTION: 新規アクション（index 末尾・転記 3 件・利用者・条件・必須項目の警告）');
+  assert(JSON.stringify(INPUTS.data) === SNAPSHOT, '§13 の後も DATA は不変');
+}
+
 console.log(`\n${state.failed ? 'FAILED' : 'ALL PASSED'}: ${state.passed} passed / ${state.failed} failed`);
 process.exit(state.failed ? 1 : 0);
 })().catch(e => { console.error(e); process.exit(1); });

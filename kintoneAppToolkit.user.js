@@ -543,12 +543,13 @@
       : (Array.isArray(layoutRaw?.layout) ? layoutRaw.layout : []);
     // Phase 13: ルックアップの参照先アプリ（他アプリ）の名前とフィールド定義を read-only で取得する（ルックアップの Review / Executor が参照先の実設定で検証するため）。
     //   運用環境の設定取得（レコード閲覧権限で可）。権限が無い・存在しない場合は error を残す（推測で補わない）
-    const relatedApps = await fetchRelatedApps(fields, getImpl);
+    //   Phase 14: アプリアクションのコピー先アプリも同じ形で取得する（転記先フィールドの実在・型・必須を Review が確かめるため）
+    const relatedApps = await fetchRelatedApps(fields, getImpl, actions);
 
     // 生データを読み取り専用で返す（派生計算は別レイヤで）
     return Object.freeze({
       appId,
-      relatedApps,   // { [appId]: { appId, name, code, revision, fields: properties, error? } }（ルックアップの参照先。Phase 13）
+      relatedApps,   // { [appId]: { appId, name, code, revision, fields: properties, error? } }（ルックアップの参照先・アプリアクションのコピー先。Phase 13 / 14）
       fields,     // kintone.app.getFormFields()（REST form/fields の properties 相当）
       layout,     // kintone.app.getFormLayout()（REST form/layout の layout 相当。グループ・要素IDを含む）
       views,      // /k/v1/app/views               （null可）
@@ -569,10 +570,12 @@
   }
 
   /** ルックアップの参照先アプリの基本情報とフィールド定義（read-only）。失敗はアプリごとに { error: { code, message } } */
-  async function fetchRelatedApps(fields, getImpl = kGet) {
+  async function fetchRelatedApps(fields, getImpl = kGet, actions = null) {
     const ids = [];
-    const walk = (props) => { for (const f of Object.values(props || {})) { if (!f || typeof f !== 'object') continue; const app = f.lookup?.relatedApp?.app; if (app != null && String(app) !== '' && !ids.includes(String(app))) ids.push(String(app)); if (f.type === 'SUBTABLE' && f.fields) walk(f.fields); } };
+    const add = (app) => { if (app != null && String(app) !== '' && !ids.includes(String(app))) ids.push(String(app)); };
+    const walk = (props) => { for (const f of Object.values(props || {})) { if (!f || typeof f !== 'object') continue; add(f.lookup?.relatedApp?.app); if (f.type === 'SUBTABLE' && f.fields) walk(f.fields); } };
     walk(fields);
+    for (const a of Object.values(actions?.actions || {})) add(a?.destApp?.app);   // Phase 14: アプリアクションのコピー先（権限が無いと destApp は null）
     const out = {};
     await Promise.all(ids.map(async (id) => {
       const errOf = (e) => ({ code: e?.code ?? null, message: String(e?.message ?? e ?? ''), status: e?.status ?? null });
@@ -4690,15 +4693,19 @@
       const relatedAppFields = {};
       for (const [rid, ra] of Object.entries(data?.relatedApps || {})) {
         const used = fieldsN.filter(x => x.raw?.lookup?.relatedApp?.app != null && String(x.raw.lookup.relatedApp.app) === String(rid)).map(x => x.code);
+        // Phase 14: アプリアクションのコピー先としても使われる
+        const usedByActions = Object.values(data?.actions?.actions || {}).filter(a => a && String(a.destApp?.app ?? '') === String(rid)).map(a => a.name);
+        const usedText = [...(used.length ? [`ルックアップ ${used.join(', ')}`] : []), ...(usedByActions.length ? [`アプリアクション ${usedByActions.map(x => `「${x}」`).join(', ')}`] : [])].join(' / ') || '設定';
         if (!ra || ra.error || !ra.fields) {
-          push({ kind: 'related-app', key: `RELATED_APP:${rid}`, confidence: 'CERTAIN', relatedApp: { app: String(rid), name: ra?.name ?? null, available: false, error: ra?.error?.code ?? null, usedBy: used }, statement: `ルックアップ ${used.join(', ')} の参照先アプリ ${rid}${ra?.name ? `「${ra.name}」` : ''} のフィールド設定は取得できない（${ra?.error?.code || '権限なし / 不明'}）。参照先のフィールドを推測しないこと` }, 20);
+          push({ kind: 'related-app', key: `RELATED_APP:${rid}`, confidence: 'CERTAIN', relatedApp: { app: String(rid), name: ra?.name ?? null, available: false, error: ra?.error?.code ?? null, usedBy: used, usedByActions }, statement: `${usedText} の相手アプリ ${rid}${ra?.name ? `「${ra.name}」` : ''} のフィールド設定は取得できない（${ra?.error?.code || '権限なし / 不明'}）。相手アプリのフィールドを推測しないこと` }, 20);
           continue;
         }
         const rf = Object.values(ra.fields).filter(x => x && x.code && !['GROUP', 'SPACER', 'LABEL', 'HR'].includes(x.type)).sort((a, b) => cmp(a.code, b.code));
-        const list = rf.slice(0, 80).map(x => ({ code: x.code, label: x.label, type: x.type, ...(x.unique ? { unique: true } : {}), ...(x.type === 'SUBTABLE' ? { subtable: true } : {}) }));
+        const list = rf.slice(0, 80).map(x => ({ code: x.code, label: x.label, type: x.type, ...(x.unique ? { unique: true } : {}), ...(x.required ? { required: true } : {}), ...(x.type === 'SUBTABLE' ? { subtable: true } : {}) }));
         relatedAppFields[String(rid)] = rf.map(x => x.code);
         const rel = 20 + (list.some(x => settingHit(x.label) || settingHit(x.code)) ? 10 : 0);
-        push({ kind: 'related-app', key: `RELATED_APP:${rid}`, confidence: 'CERTAIN', relatedApp: { app: String(rid), name: ra.name ?? null, code: ra.code ?? null, revision: ra.revision ?? null, available: true, usedBy: used, fieldCount: rf.length, fields: list }, statement: `ルックアップ ${used.join(', ')} の参照先アプリ ${rid}「${ra.name ?? ''}」には ${rf.length} 件のフィールドがある（${list.slice(0, 40).map(x => `${x.label}=${x.code}（${x.type}${x.unique ? '・重複禁止' : ''}）`).join('、')}${rf.length > 40 ? ' …' : ''}）。コピー元に使えるのはこの一覧のフィールドだけ` }, rel);
+        const requiredCodes = rf.filter(x => x.required && !['RECORD_NUMBER', 'CREATOR', 'CREATED_TIME', 'MODIFIER', 'UPDATED_TIME', 'STATUS', 'STATUS_ASSIGNEE', 'CATEGORY'].includes(x.type)).map(x => x.code);
+        push({ kind: 'related-app', key: `RELATED_APP:${rid}`, confidence: 'CERTAIN', relatedApp: { app: String(rid), name: ra.name ?? null, code: ra.code ?? null, revision: ra.revision ?? null, available: true, usedBy: used, usedByActions, fieldCount: rf.length, fields: list, requiredFields: requiredCodes }, statement: `${usedText} の相手アプリ ${rid}「${ra.name ?? ''}」には ${rf.length} 件のフィールドがある（${list.slice(0, 40).map(x => `${x.label}=${x.code}（${x.type}${x.unique ? '・重複禁止' : ''}${x.required ? '・必須' : ''}）`).join('、')}${rf.length > 40 ? ' …' : ''}）。ルックアップのコピー元・アプリアクションの転記先に使えるのはこの一覧のフィールドだけ${requiredCodes.length ? `。必須フィールド: ${requiredCodes.join(', ')}（転記先に無いと作成時に手入力が要る）` : ''}` }, rel);
         if (rf.length > 80) trunc(`facts.related-app.${rid}`, rf.length, 80);
       }
       // process
@@ -4777,9 +4784,9 @@
       if (facl.length > limits.maxFieldAcl) trunc('facts.field-acl', facl.length, limits.maxFieldAcl);
       // app actions
       const acts = Object.values(data?.actions?.actions || {}).filter(Boolean).sort((a, b) => (Number(a.index ?? 0) - Number(b.index ?? 0)) || cmp(String(a.name), String(b.name)));
-      acts.slice(0, limits.maxAppActions).forEach(a => push({ kind: 'app-action', key: `APP_ACTION:${a.name}`, confidence: 'CERTAIN',
-        appAction: { name: a.name, destApp: String(a.destApp?.app ?? ''), mappings: (a.mappings || []).map(m => ({ srcType: m.srcType, srcField: m.srcField ?? null, destField: m.destField })) },
-        statement: `アプリアクション「${a.name}」はアプリ ${a.destApp?.app ?? '?'} へレコードを作成し、${(a.mappings || []).length} 項目をコピーする` }, (relevantSettings.has('app-action') ? 4 : 1) + (settingHit(a.name) ? 5 : 0)));
+      acts.slice(0, limits.maxAppActions).forEach(a => { const destName = data?.relatedApps?.[String(a.destApp?.app ?? '')]?.name || null; const maps = (a.mappings || []).map(m => ({ srcType: m.srcType, srcField: m.srcField ?? null, destField: m.destField })); push({ kind: 'app-action', key: `APP_ACTION:${a.name}`, confidence: 'CERTAIN',
+        appAction: { id: a.id != null ? String(a.id) : null, name: a.name, index: a.index != null ? String(a.index) : null, destApp: String(a.destApp?.app ?? ''), destAppName: destName, destUnavailable: a.destApp == null, mappings: maps, entities: (a.entities || []).map(e => ({ type: e.type, code: e.code ?? null })), filterCond: a.filterCond || '' },
+        statement: a.destApp == null ? `アプリアクション「${a.name}」のコピー先アプリは閲覧権限が無く確認できない（転記先を推測しないこと）` : `アプリアクション「${a.name}」はアプリ ${a.destApp?.app ?? '?'}${destName ? `「${destName}」` : ''} へレコードを作成し、${maps.length} 項目を転記する（${maps.map(m => `${m.srcType === 'RECORD_URL' ? 'レコードURL' : m.srcField}→${m.destField}`).join(', ') || 'なし'}）。利用者: ${(a.entities || []).map(e => `${e.type}:${e.code}`).join(', ') || 'なし'}${a.filterCond ? `。利用条件: ${a.filterCond}` : ''}` }, (relevantSettings.has('app-action') ? 4 : 1) + (settingHit(a.name) ? 5 : 0)); });
       if (acts.length > limits.maxAppActions) trunc('facts.app-action', acts.length, limits.maxAppActions);
       // dependencies（関連フィールドに触れる edge を優先。full DEPS は送らない）
       const relCodes = new Set([...fieldScore.entries()].filter(([, v]) => v.score >= 3).map(([k]) => k));
@@ -5071,6 +5078,8 @@
       recordAcl: { label: 'レコードのアクセス権の条件', forbidTypes: ['MULTI_LINE_TEXT', 'RICH_TEXT', 'FILE', 'REFERENCE_TABLE'], forbidFuncs: ALL_FUNCS, forbidOps: { SINGLE_LINE_TEXT: ['like', 'not like'], LINK: ['like', 'not like'] } },
       // Phase 13: ルックアップの絞り込みの初期設定。参照元アプリのフィールドで評価する（fields に参照元の定義を渡す）。関連レコードとテーブル内のフィールドは条件に指定できない（kintone ヘルプ）
       lookup: { label: 'ルックアップの絞り込み', forbidTypes: ['REFERENCE_TABLE'], forbidFuncs: [], forbidOps: {}, forbidSubtable: true },
+      // Phase 14: アプリアクションを利用できる条件（フィールドの値・ステータス・作業者。画面で設定できる演算子のみ）
+      appAction: { label: 'アプリアクションの利用条件', forbidTypes: ['REFERENCE_TABLE'], forbidFuncs: [], forbidOps: {} },
     });
     const SYSTEM_CODES = { 'レコード番号': 'RECORD_NUMBER', '$id': 'RECORD_NUMBER', '作成者': 'CREATOR', '作成日時': 'CREATED_TIME', '更新者': 'MODIFIER', '更新日時': 'UPDATED_TIME', 'ステータス': 'STATUS', '作業者': 'STATUS_ASSIGNEE' };
     const OPS2 = ['>=', '<=', '!='];
@@ -5273,14 +5282,15 @@
       UPDATE_RECORD_ACL: { simulate: false, validate: true, defaultSafety: 'REVIEW_REQUIRED', execution: 'FUTURE', changeType: 'UPDATE', kind: 'RECORD_ACL' },
       UPDATE_FIELD_ACL: { simulate: false, validate: true, defaultSafety: 'REVIEW_REQUIRED', execution: 'FUTURE', changeType: 'UPDATE', kind: 'FIELD_ACL' },
       ADD_APP_ACTION: { simulate: true, validate: true, defaultSafety: 'REVIEW_REQUIRED', execution: 'FUTURE', changeType: 'ADD', kind: 'APP_ACTION' },
-      UPDATE_APP_ACTION: { simulate: false, validate: true, defaultSafety: 'REVIEW_REQUIRED', execution: 'FUTURE', changeType: 'UPDATE', kind: 'APP_ACTION' },
+      // Phase 14: 既存アプリアクションへの転記項目の追加・利用者・利用条件を仮適用する（名前 / コピー先の変更・転記項目の削除は計画のみ）
+      UPDATE_APP_ACTION: { simulate: true, validate: true, defaultSafety: 'REVIEW_REQUIRED', execution: 'FUTURE', changeType: 'UPDATE', kind: 'APP_ACTION' },
       ADD_LOOKUP: { simulate: true, validate: true, defaultSafety: 'REVIEW_REQUIRED', execution: 'FUTURE', changeType: 'ADD', kind: 'LOOKUP' },
       UPDATE_LOOKUP: { simulate: true, validate: true, defaultSafety: 'REVIEW_REQUIRED', execution: 'FUTURE', changeType: 'UPDATE', kind: 'LOOKUP' },
       REQUIRE_CONFIRMATION: { simulate: false, validate: false, defaultSafety: 'PLAN_ONLY', execution: 'NONE', changeType: 'NO_CHANGE', kind: 'NONE' },
       CUSTOMIZATION_REQUIRED: { simulate: false, validate: false, defaultSafety: 'PLAN_ONLY', execution: 'NONE', changeType: 'NO_CHANGE', kind: 'JS' },
     });
     /** 高リスクの変更（安全分類を REVIEW_REQUIRED に上げ、status は NEEDS_CONFIRMATION） */
-    const HIGH_RISK = ['TYPE_CHANGE', 'OPTIONS_REMOVED', 'EXISTING_PATH_RESTRICTED', 'ACL_CHANGE', 'LOOKUP_MAPPING_OVERWRITE', 'NOTIFICATION_EVENTS_REMOVED', 'NOTIFICATION_RECIPIENTS_REMOVED', 'REMINDER_BASE_FIELD_CHANGE', 'REMINDER_RECIPIENTS_REMOVED', 'EXECUTABLE_USER_CHANGE'];
+    const HIGH_RISK = ['TYPE_CHANGE', 'OPTIONS_REMOVED', 'EXISTING_PATH_RESTRICTED', 'ACL_CHANGE', 'LOOKUP_MAPPING_OVERWRITE', 'NOTIFICATION_EVENTS_REMOVED', 'NOTIFICATION_RECIPIENTS_REMOVED', 'REMINDER_BASE_FIELD_CHANGE', 'REMINDER_RECIPIENTS_REMOVED', 'EXECUTABLE_USER_CHANGE', 'APP_ACTION_ENTITIES_REMOVED'];
     const KINTONE_FIELD_TYPES = ['SINGLE_LINE_TEXT', 'MULTI_LINE_TEXT', 'RICH_TEXT', 'NUMBER', 'CALC', 'CHECK_BOX', 'RADIO_BUTTON', 'DROP_DOWN', 'MULTI_SELECT', 'DATE', 'TIME', 'DATETIME', 'FILE', 'LINK', 'USER_SELECT', 'ORGANIZATION_SELECT', 'GROUP_SELECT', 'LOOKUP', 'REFERENCE_TABLE', 'SUBTABLE', 'GROUP', 'SPACER', 'LABEL', 'HR'];
     const OPTION_TYPES = ['CHECK_BOX', 'RADIO_BUTTON', 'DROP_DOWN', 'MULTI_SELECT'];
     const ENTITY_TYPES = ['USER', 'GROUP', 'ORGANIZATION', 'FIELD_ENTITY', 'CREATOR', 'CUSTOM_FIELD'];
@@ -5332,8 +5342,9 @@
       const reports = Object.values(d.reports?.reports || {}).filter(Boolean).map(r => ({ name: r.name, origin: 'existing' }));
       const recordAcl = (d.recordAcl?.rights || []).map((r, i) => ({ id: `record#${i + 1}`, filterCond: r.filterCond || '', entities: (r.entities || []).map(e => ({ type: e.entity?.type, code: e.entity?.code ?? null, viewable: !!e.viewable, editable: !!e.editable, deletable: !!e.deletable })), origin: 'existing' }));
       const fieldAcl = (d.fieldAcl?.rights || []).map(r => ({ code: r.code, entities: (r.entities || []).map(e => ({ type: e.entity?.type, code: e.entity?.code ?? null, accessibility: e.accessibility })), origin: 'existing' }));
+      // Phase 14: アプリアクション（id / 並び順 / コピー先 app・code / 転記 / 利用者 / 利用条件。コピー先の権限が無いと destApp・mappings は null → destUnavailable）
       const appActions = Object.values(d.actions?.actions || {}).filter(Boolean).sort((a, b) => (Number(a.index ?? 0) - Number(b.index ?? 0)) || cmp(String(a.name), String(b.name)))
-        .map(a => ({ name: a.name, destApp: String(a.destApp?.app ?? ''), mappings: (a.mappings || []).map(m => ({ srcType: m.srcType, srcField: m.srcField ?? null, destField: m.destField })), origin: 'existing' }));
+        .map(a => appActionModel(a));
       // アプリ設定の revision（各 GET が同じ値を返す。JS API のフィールド取得には無いので、REST の応答から最初に見つかったもの）
       const revisionOf = [d.views, d.status, d.generalNotify, d.perRecordNotify, d.reminderNotify, d.actions, d.appAcl, d.recordAcl, d.fieldAcl].map(x => x?.revision).find(r => r != null && r !== '');
       return {
@@ -5345,6 +5356,62 @@
       };
     }
     function entityList(list) { return (Array.isArray(list) ? list : []).map(x => x?.entity ?? x).filter(Boolean).map(en => ({ type: en.type, code: en.code ?? null })); }
+    /** アプリアクション 1 件の正規化（Phase 14）。Executor はこの形で現在値と照合する */
+    function appActionModel(a) {
+      return { id: a?.id != null ? String(a.id) : null, name: a?.name, index: a?.index != null ? String(a.index) : null, destApp: { app: String(a?.destApp?.app ?? ''), code: a?.destApp?.code ? String(a.destApp.code) : '' }, destUnavailable: a?.destApp == null || a?.mappings == null, mappings: (a?.mappings || []).map(m => ({ srcType: m.srcType, srcField: m.srcType === 'RECORD_URL' ? null : (m.srcField ?? null), destField: m.destField })), entities: (a?.entities || []).map(e => ({ type: e?.type, code: e?.code ?? null })), filterCond: a?.filterCond || '', origin: 'existing' };
+    }
+    /** 転記先の型 → 転記できるコピー元の型（kintone ヘルプ「アプリアクションに設定できるフィールドの組み合わせ」。ルックアップはキーの型（API の type）で判定。RECORD_URL は Web サイトのアドレスのリンクだけ） */
+    const APP_ACTION_COPY_COMPAT = Object.freeze({
+      SINGLE_LINE_TEXT: ['SINGLE_LINE_TEXT', 'LINK'],
+      MULTI_LINE_TEXT: ['MULTI_LINE_TEXT'], RICH_TEXT: ['RICH_TEXT'],
+      NUMBER: ['NUMBER', 'CALC', 'RECORD_NUMBER'],
+      LINK: ['SINGLE_LINE_TEXT', 'LINK', 'RECORD_URL'],
+      DATE: ['DATE'], TIME: ['TIME'], DATETIME: ['DATETIME', 'CREATED_TIME', 'UPDATED_TIME'],
+      USER_SELECT: ['USER_SELECT', 'CREATOR', 'MODIFIER'], ORGANIZATION_SELECT: ['ORGANIZATION_SELECT'], GROUP_SELECT: ['GROUP_SELECT'],
+      DROP_DOWN: ['DROP_DOWN'], RADIO_BUTTON: ['RADIO_BUTTON'], MULTI_SELECT: ['MULTI_SELECT'], CHECK_BOX: ['CHECK_BOX'],
+    });
+    /** アプリアクションの転記の型互換（決定的）。src は { type, baseType, subtable, protocol } か RECORD_URL、dest は転記先アプリのフィールド。問題なければ null */
+    function appActionTypeCheck(src, dest) {
+      const dt = dest.baseType || dest.type;
+      const allowed = APP_ACTION_COPY_COMPAT[dt];
+      if (!allowed) return { code: 'APP_ACTION_MAPPING_TYPE_MISMATCH', message: `転記先「${dest.code}」（${dt}）はアプリアクションの転記先に使えない種類のフィールドです` };
+      if (src === 'RECORD_URL') {
+        if (dt !== 'LINK') return { code: 'APP_ACTION_MAPPING_TYPE_MISMATCH', message: `レコードの URL は Web サイトのアドレスのリンクフィールドにだけ転記できます（「${dest.code}」は ${dt}）` };
+        if (dest.protocol && dest.protocol !== 'WEB') return { code: 'APP_ACTION_MAPPING_TYPE_MISMATCH', message: `レコードの URL の転記先「${dest.code}」は入力値の種類が Web サイトのアドレスのリンクである必要があります（${dest.protocol}）` };
+        if (dest.subtable) return { code: 'APP_ACTION_MAPPING_TYPE_MISMATCH', message: `レコードの URL はテーブル内のフィールド「${dest.code}」には転記できません` };
+        return null;
+      }
+      const stype = src.baseType || src.type;
+      if (!allowed.includes(stype)) { const want = Object.entries(APP_ACTION_COPY_COMPAT).filter(([, v]) => v.includes(stype)).map(([k]) => k); return { code: 'APP_ACTION_MAPPING_TYPE_MISMATCH', message: `「${src.code}」（${stype}）を「${dest.code}」（${dt}）へは転記できません${want.length ? `（転記できる転記先の種類: ${want.join(' / ')}）` : '（この種類は転記できません）'}` }; }
+      if (dt === 'LINK' && stype === 'LINK' && src.protocol && dest.protocol && src.protocol !== dest.protocol) return { code: 'APP_ACTION_MAPPING_TYPE_MISMATCH', message: `リンク「${src.code}」（${src.protocol}）と「${dest.code}」（${dest.protocol}）の入力値の種類が違います` };
+      if (!!src.subtable !== !!dest.subtable) return { code: 'APP_ACTION_MAPPING_TYPE_MISMATCH', message: src.subtable ? `テーブル内のフィールド「${src.code}」はテーブル外のフィールド「${dest.code}」には転記できません` : `テーブル外のフィールド「${src.code}」はテーブル内のフィールド「${dest.code}」には転記できません` };
+      return null;
+    }
+    /** 転記先アプリで、必須なのに転記されず・初期値も無いフィールド（§12: 作成時に手入力が要る）。システム系は除く。断定はしない（JS 等で補われる可能性） */
+    function destRequiredUnmapped(dest, mappedDestCodes) {
+      return Object.values(dest?.fields || {}).filter(f => f.required && !f.subtable && f.type !== 'SUBTABLE' && !['RECORD_NUMBER', 'CREATOR', 'CREATED_TIME', 'MODIFIER', 'UPDATED_TIME', 'STATUS', 'STATUS_ASSIGNEE', 'CATEGORY'].includes(f.type) && !mappedDestCodes.includes(f.code) && !f.hasDefault);
+    }
+    const APP_ACTION_ENTITY_TYPES = ['USER', 'GROUP', 'ORGANIZATION'];
+    const EVERYONE = Object.freeze({ type: 'GROUP', code: 'everyone' });
+    /** アプリアクションの利用者（USER / GROUP / ORGANIZATION。フィールド指定は無い）。"GROUP:sales" / "sales_group"（既存設定に現れるコード）/ "Everyone" / "すべてのユーザー" */
+    function parseActionEntity(text, model) {
+      const t = String(text ?? '').trim();
+      if (!t) return null;
+      if (/^(everyone|すべてのユーザー|全ユーザー|全員|group:everyone)$/i.test(t)) return { ...EVERYONE };
+      const m1 = t.match(/^(USER|GROUP|ORGANIZATION|FIELD_ENTITY|CREATOR|CUSTOM_FIELD)\s*[:：]\s*(.*)$/i);
+      if (m1) return { type: m1[1].toUpperCase(), code: m1[2].trim() || null };
+      if (/NEW_FIELD_\d+/.test(t) || model.fields[t] || Object.values(model.fields).some(f => f.label === t)) return { type: 'FIELD_ENTITY', code: t };
+      const known = knownEntities(model).find(en => String(en.code) === t);
+      if (known) return { type: known.type, code: known.code };
+      for (const a of model.appActions || []) { const hit = (a.entities || []).find(en => String(en.code) === t); if (hit) return { type: hit.type, code: hit.code }; }
+      return { type: 'UNKNOWN', code: t };
+    }
+    /** Review 時点の同一性（Phase 14）。コピー先アプリの指紋（revision / fieldsHash）も含める */
+    function appActionIdentity(a, dest) {
+      return { kind: 'APP_ACTION', id: a.id ?? null, name: a.name, index: a.index ?? null, destApp: { app: a.destApp?.app ?? '', code: a.destApp?.code ?? '' }, mappings: (a.mappings || []).map(m => ({ srcType: m.srcType, srcField: m.srcField ?? null, destField: m.destField })), entities: (a.entities || []).map(e => ({ type: e.type, code: e.code ?? null })), filterCond: a.filterCond || '', dest: dest ? { appId: dest.appId, name: dest.name, revision: dest.revision, fieldsHash: dest.fieldsHash } : null };
+    }
+    const appActionView = (a) => ({ id: a.id ?? null, name: a.name, index: a.index ?? null, destApp: { app: a.destApp?.app ?? '', code: a.destApp?.code ?? '' }, mappings: (a.mappings || []).map(m => ({ srcType: m.srcType, srcField: m.srcField ?? null, destField: m.destField })), entities: (a.entities || []).map(e => ({ type: e.type, code: e.code ?? null })), filterCond: a.filterCond || '', ...(a.stepId ? { stepId: a.stepId } : {}) });
+    const mappingText = (m) => `${m.srcType === 'RECORD_URL' ? 'レコードURL' : m.srcField}→${m.destField}`;
     /** ルックアップ設定の正規化（Phase 13）: 参照元 app / code・キー・取得項目（from = 参照元, to = コピー先）・選択時に表示するフィールド・絞り込み・並び順。Executor はこの形で現在値と照合する */
     function lookupModel(lk) {
       return { app: String(lk?.relatedApp?.app ?? ''), code: lk?.relatedApp?.code ? String(lk.relatedApp.code) : '', keyField: lk?.relatedKeyField ?? null, mappings: (lk?.fieldMappings || []).map(m => ({ from: m.relatedField, to: m.field })), pickerFields: Array.isArray(lk?.lookupPickerFields) ? [...lk.lookupPickerFields] : [], filterCond: lk?.filterCond || '', sort: lk?.sort || '' };
@@ -5365,7 +5432,8 @@
         for (const code of Object.keys(props || {})) {
           const f = props[code]; if (!f) continue;
           if (f.type === 'SUBTABLE') { fields[code] = { code, label: f.label ?? code, type: 'SUBTABLE', baseType: 'SUBTABLE', unique: false, subtable: null }; walk(f.fields, code); continue; }
-          fields[code] = { code, label: f.label ?? code, type: f.lookup ? 'LOOKUP' : (f.type ?? ''), baseType: f.type ?? '', unique: !!f.unique, subtable: parent, ...(f.protocol ? { protocol: f.protocol } : {}), ...(f.options && typeof f.options === 'object' ? { options: Object.keys(f.options) } : {}) };
+          const hasDefault = (f.defaultValue != null && f.defaultValue !== '' && !(Array.isArray(f.defaultValue) && !f.defaultValue.length)) || !!f.defaultNowValue || !!f.defaultExpression;
+          fields[code] = { code, label: f.label ?? code, type: f.lookup ? 'LOOKUP' : (f.type ?? ''), baseType: f.type ?? '', unique: !!f.unique, required: !!f.required, hasDefault, subtable: parent, ...(f.protocol ? { protocol: f.protocol } : {}), ...(f.options && typeof f.options === 'object' ? { options: Object.keys(f.options) } : {}) };
         }
       };
       walk(e.fields, null);
@@ -5458,7 +5526,10 @@
       // Phase 13: 既存ルックアップへの追加（取得項目 / 選択時に表示するフィールド）。既存の取得項目は消さない語彙
       addMappings: ['addmappings', '追加する取得項目', '追加取得項目', '取得項目の追加'],
       addPickerFields: ['addpickerfields', 'pickerfields', 'lookuppickerfields', '選択時に表示するフィールド', '選択時表示フィールド', '選択時に表示'],
+      // Phase 14: アプリアクションの転記（{ srcType: FIELD | RECORD_URL, srcField, destField }）。既存の転記は消さない語彙
+      actionMappings: ['actionmappings', '転記', '転記項目', 'フィールドの関連付け', '関連付け', '追加する転記'],
     };
+    const actionMappingOf = (m) => { if (!m || typeof m !== 'object') return null; const st = String(m.srcType ?? '').trim().toUpperCase(); const sf = String(m.srcField ?? '').trim(); const df = String(m.destField ?? '').trim(); const isUrl = st === 'RECORD_URL' || (!st && /^(レコード\s*(の)?\s*URL|RECORD_URL)$/i.test(sf)); if (!df && !sf && !isUrl) return null; return { srcType: isUrl ? 'RECORD_URL' : 'FIELD', srcField: isUrl ? null : sf, destField: df }; };
     const keyOf = (k) => { const n = norm(k); for (const [canon, syn] of Object.entries(DETAIL_KEYS)) if (syn.some(s => n === norm(s) || n.startsWith(norm(s)))) return canon; return null; };
     const splitList = (v) => String(v ?? '').split(/[、,，\/／;；\n]+/).map(s => s.trim()).filter(Boolean);
     /** "担当者(owner)" / "FIELD_ENTITY:owner" / "NEW_FIELD_1（部長承認者）" / "USER:user1" → entity 候補 */
@@ -5508,6 +5579,7 @@
           if (v == null) continue;
           if (k === 'mappings' && Array.isArray(v)) put(k, v.filter(m => m && (m.from || m.to)).map(m => ({ from: String(m.from ?? '').trim(), to: String(m.to ?? '').trim() })));
           else if (k === 'addMappings' && Array.isArray(v)) put(k, v.filter(m => m && (m.relatedField || m.field || m.from || m.to)).map(m => ({ from: String(m.relatedField ?? m.from ?? '').trim(), to: String(m.field ?? m.to ?? '').trim() })));   // Gateway: { relatedField（参照元）, field（コピー先）}
+          else if (k === 'actionMappings' && Array.isArray(v)) put(k, v.map(actionMappingOf).filter(Boolean));
           else if (['assignees', 'targets', 'events', 'fields', 'options', 'entities', 'addPickerFields'].includes(k)) put(k, dropPh(Array.isArray(v) ? v.map(x => String(x).trim()).filter(Boolean) : splitList(v)));   // 配列の「なし」も捨てる
           else if (k === 'required') { if (typeof v === 'boolean') spec.required = v; else if (/^(true|yes|必須|はい)$/i.test(String(v))) spec.required = true; else if (/^(false|no|任意|いいえ)$/i.test(String(v))) spec.required = false; }
           else put(k, String(v).trim());
@@ -5519,6 +5591,7 @@
         const v = String(d.value ?? '').trim();
         if (!v || isPlaceholder(v)) continue;   // details の「なし」も捨てる（spec で捨てた項目を details から拾い直さない）
         if (k === 'mappings' || k === 'addMappings') spec[k] = splitList(v).map(x => { const m = x.match(/^(.+?)\s*(?:→|->|=>|:|：)\s*(.+)$/); return m ? { from: m[1].trim(), to: m[2].trim() } : { from: x, to: '' }; });
+        else if (k === 'actionMappings') spec[k] = splitList(v).map(x => { const m = x.match(/^(.+?)\s*(?:→|->|=>|:|：)\s*(.+)$/); return actionMappingOf(m ? { srcField: m[1].trim(), destField: m[2].trim() } : { srcField: x, destField: '' }); }).filter(Boolean);
         else if (['assignees', 'targets', 'events', 'fields', 'options', 'entities', 'addPickerFields'].includes(k)) { const list = dropPh(splitList(v)); if (list.length) spec[k] = list; }
         else if (k === 'required') spec.required = /^(true|yes|必須|はい)$/i.test(v) ? true : /^(false|no|任意|いいえ)$/i.test(v) ? false : undefined;
         else spec[k] = v;
@@ -5708,9 +5781,9 @@
         executionReadiness: { status: counts.invalid ? 'BLOCKED' : reviewSteps.length || planOnlySteps.length ? 'REVIEW_REQUIRED' : stepReviews.length ? 'SAFE' : 'EMPTY', safeSteps, reviewSteps, blockedSteps, planOnlySteps, approvedSteps: [] },
         impactCheck: impactCheck.items,
         reviewCoverage: {
-          fields: true, process: true, notifications: true, reminders: true, lookup: true, views: true, appActions: 'partial',
+          fields: true, process: true, notifications: true, reminders: true, lookup: true, views: true, appActions: true,
           acl: 'partial', javascript: !!(deps && Array.isArray(deps.edges) && deps.meta?.scannerMergedAt) || !!scan, incoming: !!(incoming || deps?.meta?.incomingScannedAt),
-          notes: ['ACL は対象の実在・既存ルールとの重複だけを確認し、仮適用はしない', 'アプリアクションは名前・作成先・マッピングのフィールド実在だけを確認', 'JavaScript は既存の参照（impactOf）を再確認するのみで、コードの変更は評価しない', '条件式は単純な比較（field op value）だけを解析し、それ以外は「重なる可能性あり」として扱う', 'ルックアップの参照元アプリは prefetch 時点のフィールド定義（read-only）で検証する。取得できないアプリのフィールドは推測しない。ルックアップの検索方法（search mode）は kintone が管理し、API では読めない'],
+          notes: ['ACL は対象の実在・既存ルールとの重複だけを確認し、仮適用はしない', 'アプリアクションはコピー先アプリの定義（取得済みのもの）で転記先の実在・型・必須を確認し、未取得のコピー先は Executor が実行直前に取得して検証する', 'JavaScript は既存の参照（impactOf）を再確認するのみで、コードの変更は評価しない', '条件式は単純な比較（field op value）だけを解析し、それ以外は「重なる可能性あり」として扱う', 'ルックアップの参照元アプリは prefetch 時点のフィールド定義（read-only）で検証する。取得できないアプリのフィールドは推測しない。ルックアップの検索方法（search mode）は kintone が管理し、API では読めない'],
         },
       };
     }
@@ -6338,20 +6411,121 @@
           }
           break;
         }
-        case 'ADD_APP_ACTION': {
-          const name = spec.name || step.targetRef;
-          if (!name) { invalid('APP_ACTION_NAME_MISSING', 'アプリアクション名が指定されていません'); return r; }
-          if (model.appActions.some(a => a.name === name)) invalid('APP_ACTION_NAME_DUPLICATE', `アプリアクション「${name}」は既に存在します`);
-          const mappings = (spec.mappings || []).map(m => ({ srcType: 'FIELD', srcField: m.from, destField: m.to }));
-          for (const m of mappings) { if (m.srcField && !resolveField(m.srcField)) invalid('UNKNOWN_FIELD', `コピー元フィールド「${m.srcField}」が存在しません`); if (!m.destField) issue('DEST_FIELD_UNKNOWN', 'medium', `コピー先フィールドが不明です（${m.srcField}）`); }
-          if (!spec.destApp) { issue('DEST_APP_UNKNOWN', 'medium', '作成先アプリが指定されていません（要確認）'); r.status = STATUS.NEEDS_CONFIRMATION; }
-          if (mappings.some((m, i) => mappings.findIndex(x => x.destField === m.destField) !== i)) issue('MAPPING_DUPLICATE', 'medium', '同じコピー先に複数のコピー元があります');
+        case 'ADD_APP_ACTION': case 'UPDATE_APP_ACTION': {
+          // ---- Phase 14: App Action Preview Executor の Review ----
+          const isAdd = step.actionType === 'ADD_APP_ACTION';
+          const specMaps = [...(spec.actionMappings || []), ...(spec.mappings || []).map(m => actionMappingOf({ srcField: m.from, destField: m.to })).filter(Boolean)];
+          let target = null;
+          if (!isAdd) {
+            const t = String(step.targetRef ?? '').trim();
+            target = model.appActions.find(x => x.name === t) || null;
+            if (!target && spec.name) target = model.appActions.find(x => x.name === spec.name) || null;
+            if (!target && t) {
+              // コピー先アプリ（ID / コード / 名前）で既存アクションを探す。複数なら決めない
+              const appName = (id) => ctx.relatedApps?.[id]?.name || '';
+              const byDest = model.appActions.filter(x => x.destApp?.app === t || (x.destApp?.code && x.destApp.code === t) || (appName(x.destApp?.app) && norm(appName(x.destApp.app)) === norm(t)));
+              if (byDest.length > 1) { invalid('APP_ACTION_TARGET_AMBIGUOUS', `「${t}」へ転記するアプリアクションが複数あります（${byDest.map(x => `「${x.name}」`).join(', ')}）。どのアクションを変更するか指定してください`); return r; }
+              if (byDest.length === 1) { target = byDest[0]; issue('APP_ACTION_TARGET_RESOLVED', 'low', `「${t}」を、コピー先 App ${target.destApp.app}${appName(target.destApp.app) ? `「${appName(target.destApp.app)}」` : ''} の既存アプリアクション「${target.name}」と解釈しました`); }
+            }
+            if (!target) { invalid('UNKNOWN_APP_ACTION', `アプリアクション「${step.targetRef}」が存在しません`); return r; }
+            if (target.destUnavailable) { invalid('DEST_APP_SETTINGS_UNAVAILABLE', `アプリアクション「${target.name}」のコピー先アプリの設定を kintone が返しません（コピー先アプリへのレコード閲覧 / 追加 / アプリ管理のいずれかの権限が必要）。コピー先アプリへのアクセス権を確認してください`); return r; }
+          }
+          const name = isAdd ? (spec.name || step.targetRef) : target.name;
+          if (isAdd) {
+            if (!name) { invalid('APP_ACTION_NAME_MISSING', 'アプリアクション名が指定されていません'); return r; }
+            if (String(name).length > 32) invalid('APP_ACTION_NAME_TOO_LONG', `アプリアクション名「${name}」は 32 文字を超えています`);
+            const dup = model.appActions.find(a => a.name === name);
+            if (dup) invalid(dup.origin === 'proposed' ? 'PLAN_INTERNAL_DUPLICATE' : 'APP_ACTION_NAME_DUPLICATE', dup.origin === 'proposed' ? `アプリアクション「${name}」は ${dup.stepId} でも追加しています` : `アプリアクション「${name}」は既に存在します（変更なら UPDATE_APP_ACTION）`);
+          }
+          // コピー先アプリ（Phase 14 §6〜7）: ADD は spec.destApp（ID かコード）、UPDATE は現在の設定。変更は計画のみ
+          const planOnly = [];
+          const destRef = spec.destApp ? String(spec.destApp).trim() : null;
+          let destId = isAdd ? destRef : target.destApp.app;
+          if (destId && !/^[0-9]+$/.test(destId)) { const byCode = Object.entries(ctx.relatedApps || {}).find(([, e]) => e && (String(e.code ?? '') === destId || norm(String(e.name ?? '')) === norm(destId))); if (byCode) destId = byCode[0]; }
+          if (!isAdd && destRef && destRef !== target.destApp.app && destRef !== target.destApp.code && (!ctx.relatedApps?.[target.destApp.app] || norm(ctx.relatedApps[target.destApp.app].name || '') !== norm(destRef))) { issue('APP_ACTION_DEST_CHANGE', 'high', `コピー先を App ${target.destApp.app} → ${destRef} に変える計画です。コピー先の変更は Toolkit では反映しません（転記先の整合が崩れるため、kintone の画面で行ってください）`); planOnly.push('コピー先アプリ'); }
+          if (!isAdd && spec.name && spec.name !== target.name) { issue('APP_ACTION_RENAME', 'high', `アクション名を「${target.name}」→「${spec.name}」に変える計画です。名前の変更は Toolkit では反映しません`); planOnly.push('アクション名'); }
+          if (isAdd && !destId) { invalid('DEST_APP_UNKNOWN', 'コピー先アプリ（destApp: アプリ ID）が指定されていません'); return r; }
+          if (isAdd && !/^[0-9]+$/.test(destId)) { invalid('DEST_APP_NOT_ID', `コピー先アプリ「${destId}」はアプリ ID でもアプリコードでもありません（コピー先のアプリ ID を指定）`); return r; }
+          const dest = relatedAppModel(ctx.relatedApps?.[destId], destId);
+          const appLabel = `App ${destId}${dest.name ? `「${dest.name}」` : ''}`;
+          const destLoaded = dest.available;
+          r.crossApp = { appId: dest.appId, name: dest.name, code: dest.code, revision: dest.revision, fieldsHash: dest.fieldsHash, available: dest.available, error: dest.error, role: 'destination' };
+          if (!destLoaded && dest.error?.code !== 'NOT_LOADED') { invalid('DEST_APP_SETTINGS_UNAVAILABLE', `コピー先 ${appLabel} のフィールド設定を確認できません（${dest.error?.message || '取得できません'}）。コピー先アプリへのアクセス権を確認してください。転記先のフィールドは推測しません`); return r; }
+          if (!destLoaded) { issue('DEST_APP_NOT_LOADED', 'medium', `コピー先 App ${destId} のフィールド設定はまだ取得していません（このアプリの既存設定が参照していないアプリ）。転記先の実在・型・必須は Executor が実行直前に取得して検証します（要確認）`); }
+          if (destId === String(model.appId)) issue('APP_ACTION_SELF_COPY', 'low', 'コピー先がこのアプリ自身です（レコードの再利用アクション）');
+          // 転記（§8〜§14）: 既存 ＋ 追加 = 完全な一覧。既存の転記は消さない
+          const beforeA = isAdd ? null : clone(target);
+          const after = isAdd ? { id: null, name, index: String(model.appActions.length), destApp: { app: destId, code: dest.code || '' }, destUnavailable: false, mappings: [], entities: [], filterCond: '', origin: 'proposed', stepId: step.id } : clone(target);
+          const changes = { mappings: [], entities: null, filterCond: null };
+          const destFieldOf = (ref) => (destLoaded ? relatedFieldOf(ref, dest) : (String(ref ?? '').trim() ? { code: String(ref).trim(), unresolved: true } : null));
+          const srcTableOf = (code) => (model.fields[code]?.subtable || null);
+          for (const m of specMaps) {
+            if (!m.destField) { invalid('DEST_FIELD_MISSING', `転記「${m.srcType === 'RECORD_URL' ? 'レコードURL' : m.srcField}」の転記先が指定されていません`); continue; }
+            let src = null;
+            if (m.srcType === 'FIELD') {
+              const f = resolveField(m.srcField);
+              if (!f) { invalid('UNKNOWN_FIELD', `転記元フィールド「${m.srcField}」が存在しません`); continue; }
+              if (f.missingProposed) { invalid('PROPOSED_FIELD_NOT_APPLIED', `転記元の新規フィールド ${f.missingProposed}${addingStepOf(f.missingProposed)} はこの step より前に追加されていません（順序 / dependsOn を確認）`); continue; }
+              src = f;
+              if (['FILE', 'REFERENCE_TABLE', 'SUBTABLE', 'GROUP', 'SPACER', 'LABEL', 'HR', 'STATUS', 'STATUS_ASSIGNEE', 'CATEGORY'].includes(src.baseType || src.type)) { invalid('APP_ACTION_MAPPING_TYPE_MISMATCH', `「${src.code}」（${src.baseType || src.type}）はアプリアクションで転記できません`); continue; }
+            }
+            const d = destFieldOf(m.destField);
+            if (!d) { invalid('DEST_FIELD_NOT_FOUND', `転記先「${m.destField}」はコピー先 ${appLabel} にありません（コピー先アプリのフィールドコードを確認）`); continue; }
+            if (d.ambiguous) { invalid('DEST_FIELD_AMBIGUOUS', `転記先「${m.destField}」に当たるコピー先のフィールドが複数あります（${d.ambiguous.join(', ')}）。フィールドコードで指定してください`); continue; }
+            const destCode = d.code, srcCode = src ? src.code : null;
+            const existing = after.mappings.find(x => x.destField === destCode);
+            if (existing && existing.srcType === m.srcType && (existing.srcField ?? null) === srcCode) { issue('APP_ACTION_MAPPING_DUPLICATE', 'low', `転記 ${mappingText(existing)} は既に設定されています（変更なし）`); continue; }
+            if (existing) { invalid('APP_ACTION_DESTINATION_CONFLICT', `転記先「${destCode}」には既に ${mappingText(existing)} があります（同じ転記先に別の転記元 ${m.srcType === 'RECORD_URL' ? 'レコードURL' : srcCode}。業務上上書きになるため反映しません）`); continue; }
+            if (!d.unresolved) { const tc = appActionTypeCheck(src ? src : 'RECORD_URL', d); if (tc) { invalid(tc.code, tc.message); continue; } }
+            // テーブル: 複数のテーブルから 1 つのテーブルへは転記できない
+            if (src && src.subtable && d.subtable) { const other = after.mappings.find(x => x.srcType === 'FIELD' && srcTableOf(x.srcField) && srcTableOf(x.srcField) !== src.subtable && destLoaded && dest.fields[x.destField]?.subtable === d.subtable); if (other) { invalid('APP_ACTION_MAPPING_TYPE_MISMATCH', `テーブル「${d.subtable}」へは 1 つのテーブルからしか転記できません（${other.srcField} と ${src.code} は別のテーブル）`); continue; } }
+            const mapping = { srcType: m.srcType, srcField: srcCode, destField: destCode };
+            after.mappings.push(mapping); changes.mappings.push({ ...mapping, srcLabel: src ? src.label : null, destLabel: d.label ?? null });
+          }
+          // 利用者（§16）: USER / GROUP / ORGANIZATION だけ。ADD で指定が無ければ Everyone（画面の既定）
+          if (spec.entities && spec.entities.length) {
+            const ents = spec.entities.map(e => parseActionEntity(e, model)).filter(Boolean);
+            const bad = ents.find(e => !APP_ACTION_ENTITY_TYPES.includes(e.type) && e.type !== 'UNKNOWN');
+            if (bad) { invalid('APP_ACTION_ENTITY_INVALID', `アプリアクションの利用者に ${bad.type}${bad.code ? `:${bad.code}` : ''} は指定できません（ユーザー / グループ / 組織だけ。フィールド指定は使えません）`); }
+            for (const e of ents.filter(e => e.type === 'UNKNOWN')) { issue('UNKNOWN_ENTITY', 'medium', `利用者「${e.code}」はユーザー・グループ・組織のどれか判別できません（要確認。USER: / GROUP: / ORGANIZATION: を付けて指定）`); if (r.status === STATUS.VALID) r.status = STATUS.NEEDS_CONFIRMATION; }
+            const list = ents.filter(e => APP_ACTION_ENTITY_TYPES.includes(e.type)).filter((e, i, arr) => arr.findIndex(x => sameEntity(x, e)) === i);
+            if (isAdd) { after.entities = list; }
+            else if (!sameTargets(list, target.entities)) {
+              const removed = target.entities.filter(x => !list.some(y => sameEntity(x, y))), added = list.filter(x => !target.entities.some(y => sameEntity(x, y)));
+              if (removed.length) issue('APP_ACTION_ENTITIES_REMOVED', 'high', `アクション「${name}」の利用者から ${removed.map(entityText).join(', ')} を外します（これらのユーザーにはボタンが表示されなくなります）`);
+              if (added.length) issue('APP_ACTION_ENTITIES_ADDED', 'low', `アクション「${name}」の利用者に ${added.map(entityText).join(', ')} を追加します`);
+              changes.entities = { from: target.entities.map(entityText), to: list.map(entityText) }; after.entities = list;
+            }
+          } else if (isAdd) { after.entities = [{ ...EVERYONE }]; issue('APP_ACTION_ENTITIES_DEFAULT_EVERYONE', 'low', '利用者の指定が無いため、画面の既定と同じ「Everyone（すべてのユーザー）」にします'); }
+          // 利用条件（§17）: このアプリのフィールドで評価
+          if (spec.filterCond && normCond(spec.filterCond) !== normCond(after.filterCond || '')) {
+            checkCond(spec.filterCond, 'アプリアクションの利用条件', 'appAction');
+            if (!isAdd) { issue('APP_ACTION_CONDITION_CHANGE', 'medium', `アクション「${name}」の利用条件を「${target.filterCond || 'すべてのレコード'}」→「${spec.filterCond}」に変更します（ボタンが表示されるレコードが変わります）`); changes.filterCond = { from: target.filterCond || '', to: spec.filterCond }; }
+            after.filterCond = spec.filterCond;
+          }
           if (r.status === STATUS.INVALID) return r;
-          const a = { name, destApp: spec.destApp || '', mappings, origin: 'proposed', stepId: step.id };
-          model.appActions.push(a); r.simulated = true;
-          r.diff.target = { kind: 'APP_ACTION', id: name }; r.diff.before = null; r.diff.after = clone(a);
-          h(`＋ アプリアクション「${name}」→ アプリ ${a.destApp || '（要確認）'}`); if (mappings.length) h(`コピー: ${mappings.map(m => `${m.srcField}→${m.destField || '?'}`).join(', ')}`);
-          if (r.status === STATUS.VALID) r.status = STATUS.NEEDS_CONFIRMATION;
+          // 必須フィールド（§12）: 転記されず初期値も無い必須フィールドは作成時に手入力が要る（断定はしない）
+          const unmapped = destLoaded ? destRequiredUnmapped(dest, after.mappings.map(x => x.destField)) : [];
+          if (unmapped.length) { issue('DEST_REQUIRED_FIELD_UNMAPPED', 'medium', `コピー先 ${appLabel} の必須フィールド ${unmapped.map(f => `「${f.label}」（${f.code}）`).join(' / ')} はこのアクションでは値を設定しません。作成時に入力・自動設定（JS など）されるか確認してください`, { fields: unmapped.map(f => ({ code: f.code, label: f.label, type: f.type })) }); if (r.status === STATUS.VALID) r.status = STATUS.NEEDS_CONFIRMATION; }
+          const changed = isAdd || changes.mappings.length || changes.entities || changes.filterCond;
+          if (!changed) {
+            r.diff.changeType = CHANGE.NO_CHANGE; r.diff.target = { kind: 'APP_ACTION', id: name, identity: appActionIdentity(target, destLoaded ? dest : null) }; r.diff.before = appActionView(target); r.diff.after = appActionView(target); r.status = STATUS.NEEDS_CONFIRMATION;
+            if (planOnly.length) { r.safety = SAFETY.PLAN_ONLY; h(`アプリアクション「${name}」: ${planOnly.join(' / ')}の変更は計画のみ（Toolkit は反映しません）`); break; }
+            issue('NO_STRUCTURED_CHANGE', 'medium', '変更内容が構造化されていないため仮適用できません（actionMappings / entities / filterCond を確認）'); h(`アプリアクション「${name}」: 変更内容を特定できません`); break;
+          }
+          if (isAdd) model.appActions.push(after); else model.appActions[model.appActions.indexOf(target)] = after;
+          r.simulated = true;
+          r.diff.target = { kind: 'APP_ACTION', id: name, ...(isAdd ? {} : { identity: appActionIdentity(target, destLoaded ? dest : null) }) };
+          r.diff.before = beforeA ? appActionView(beforeA) : null; r.diff.after = appActionView(after); r.diff.appActionChanges = { ...changes, destLoaded, requiredUnmapped: unmapped.map(f => ({ code: f.code, label: f.label, type: f.type })) };
+          h(isAdd ? `＋ 新規アプリアクション「${name}」` : `✎ 既存アプリアクション「${name}」を変更`);
+          h(`コピー先: ${appLabel}${destLoaded ? '' : '（フィールド設定は未取得。実行直前に取得して検証）'}`);
+          for (const m of changes.mappings) h(`＋ 転記: ${m.srcType === 'RECORD_URL' ? 'レコードURL' : `${m.srcField}${m.srcLabel && m.srcLabel !== m.srcField ? `（${m.srcLabel}）` : ''}`} → ${m.destField}${m.destLabel && m.destLabel !== m.destField ? `（${m.destLabel}）` : ''}`);
+          if (!isAdd) { const kept = target.mappings.filter(x => !changes.mappings.some(y => y.destField === x.destField)); h(kept.length ? `既存の転記 ${kept.length} 件（${kept.map(mappingText).join(', ')}）はそのまま` : '既存の転記はありません'); }
+          if (isAdd || changes.entities) h(`利用者: ${after.entities.map(entityText).join(', ') || '（なし）'}${changes.entities ? `（変更前: ${changes.entities.from.join(', ') || 'なし'}）` : ''}`);
+          if (isAdd ? after.filterCond : changes.filterCond) h(`利用条件: ${changes.filterCond ? `${changes.filterCond.from || 'すべてのレコード'} → ` : ''}${after.filterCond}`);
+          if (unmapped.length) h(`⚠ コピー先の必須項目: ${unmapped.map(f => `「${f.label}」`).join(' ')} はこのアクションでは値を設定しません`);
+          if (planOnly.length) { r.safety = SAFETY.PLAN_ONLY; r.status = STATUS.NEEDS_CONFIRMATION; h(`（${planOnly.join(' / ')}の変更は計画のみ。Toolkit は反映しません）`); }
+          else if ((isAdd || changes.filterCond || issues.some(i => HIGH_RISK.includes(i.code))) && r.status === STATUS.VALID) r.status = STATUS.NEEDS_CONFIRMATION;
           break;
         }
         default:
@@ -6363,7 +6537,7 @@
       return r;
     }
 
-    /** 仮適用しない（検証のみ）の action: ACL / UPDATE_APP_ACTION */
+    /** 仮適用しない（検証のみ）の action: ACL */
     function validateOnly(step, r, ctx) {
       const { model, proposedMap } = ctx;
       const spec = normalizeSpec(step, model, proposedMap);
@@ -6384,10 +6558,6 @@
         if (ex) issue('ACL_EXISTING_RULE', 'medium', `同じ条件（${ex.filterCond || '全レコード'}）のレコードのアクセス権 ${ex.id} が既にあります`);
         r.diff.target = { kind: 'RECORD_ACL', id: step.targetRef || null }; r.diff.before = ex ? clone(ex) : null;
         r.diff.human.push(`レコードのアクセス権を変更${spec.filterCond ? `（条件 ${spec.filterCond}）` : ''}（仮適用なし）`);
-      } else if (step.actionType === 'UPDATE_APP_ACTION') {
-        const a = model.appActions.find(x => x.name === step.targetRef);
-        if (!a) invalid('UNKNOWN_APP_ACTION', `アプリアクション「${step.targetRef}」が存在しません`);
-        else { r.diff.target = { kind: 'APP_ACTION', id: a.name }; r.diff.before = clone(a); for (const m of (spec.mappings || [])) if (m.from && !model.fields[m.from]) issue('UNKNOWN_FIELD', 'medium', `コピー元フィールド「${m.from}」が存在しません`); r.diff.human.push(`アプリアクション「${a.name}」を変更（仮適用なし）`); }
       }
       if (r.status !== STATUS.INVALID) r.status = STATUS.NEEDS_CONFIRMATION;
     }
@@ -6465,7 +6635,7 @@
     const remView = (n) => ({ id: n.id, title: n.title || '', timingField: n.timing?.code ?? null, daysLater: n.timing?.daysLater ?? null, time: n.timing?.time ?? null, filterCond: n.filterCond || '', targets: (n.targets || []).map(entityText) });
     const viewView = (v) => ({ name: v.name, type: v.type || 'LIST', fields: [...(v.fields || [])], filterCond: v.filterCond || '', sort: v.sort || '', ...(v.id != null ? { id: v.id } : {}), ...(v.builtinType ? { builtinType: v.builtinType } : {}) });
     const daysText = (d) => (d == null || d === '' ? '—' : Number(d) < 0 ? `${-Number(d)} 日前` : Number(d) === 0 ? '当日' : `${Number(d)} 日後`);
-    const JA = { type: '種類', required: '必須', label: '名前', options: '選択肢', expression: '計算式', lookup: 'ルックアップ', targets: '通知先', filterCond: '条件', events: 'イベント', title: '名前', fields: '表示フィールド', sort: '並び順', timingField: '基準日', daysLater: 'タイミング', time: '時刻', name: '名前' };
+    const JA = { type: '種類', required: '必須', label: '名前', options: '選択肢', expression: '計算式', lookup: 'ルックアップ', targets: '通知先', filterCond: '条件', events: 'イベント', title: '名前', fields: '表示フィールド', sort: '並び順', timingField: '基準日', daysLater: 'タイミング', time: '時刻', name: '名前', destApp: 'コピー先', mappings: '転記', entities: '利用者', index: '並び順' };
     const fmtVal = (v) => (v == null ? '—' : Array.isArray(v) ? (v.length ? v.join(', ') : '（なし）') : typeof v === 'object' ? JSON.stringify(v) : typeof v === 'boolean' ? (v ? 'true' : 'false') : String(v) || '（なし）');
     /** 変更のある属性だけ Before / After を出す（変更していない属性は出さない） */
     function objDiffLines(a, b) {
@@ -6548,6 +6718,7 @@
       buildBeforeModel, normalizeSpec, parseEntity, parseCond, condsOverlap, condNarrower, review, processMermaid, processSummary, objDiffLines, executorOutput,
       remView, viewView, daysText, actionView, stateView, partitionCheck, assigneeTypeOf, ASSIGNEE_TYPES, ASSIGNEE_TYPE_JA, CHANGE_KINDS, ENTITY_FIELD_TYPES,
       lookupModel, relatedAppModel, fieldsHash, relatedFieldOf, relatedKeyCheck, lookupTypeCheck, lookupIdentity, LOOKUP_COPY_COMPAT, LOOKUP_KEY_TYPES, NOT_SORTABLE,
+      appActionModel, appActionView, appActionIdentity, appActionTypeCheck, destRequiredUnmapped, parseActionEntity, APP_ACTION_COPY_COMPAT, APP_ACTION_ENTITY_TYPES, EVERYONE,
     };
   })();
 

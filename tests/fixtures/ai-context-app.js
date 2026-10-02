@@ -14,6 +14,7 @@ const field = (type, code, label, extra = {}) => ({ type, code, label, noLabel: 
 const SELF_APP = 310;
 const CUSTOMER_APP = 500;
 const QUOTE_APP = 600;
+const QUOTE_DEST_APP = 311;   // 既存アプリアクション「見積を作成」のコピー先（field-entity-app.js の actions）
 
 function makeData() {
   const data = FX.makeData();
@@ -54,6 +55,26 @@ function makeData() {
         credit: field('NUMBER', 'credit', '与信枠'),
         contacts: field('SUBTABLE', 'contacts', '連絡先', { fields: { contact_name: field('SINGLE_LINE_TEXT', 'contact_name', '担当者名') } }),
       },
+    },
+  };
+  // ---- アプリアクションのコピー先アプリ（Phase 14: 311 = 見積管理。既存アクション「見積を作成」が case_name → quote_title / レコードURL → source_url を転記）----
+  data.relatedApps[String(QUOTE_DEST_APP)] = {
+    appId: String(QUOTE_DEST_APP), name: '見積管理', code: 'QUOTE', revision: '7',
+    fields: {
+      'レコード番号': { type: 'RECORD_NUMBER', code: 'レコード番号', label: 'レコード番号' },
+      quote_title: field('SINGLE_LINE_TEXT', 'quote_title', '見積件名', { required: true }),
+      source_url: field('LINK', 'source_url', '元案件URL', { protocol: 'WEB' }),
+      quote_amount: field('NUMBER', 'quote_amount', '見積金額'),
+      customer: field('SINGLE_LINE_TEXT', 'customer', '顧客名'),
+      note: field('MULTI_LINE_TEXT', 'note', '備考'),
+      issue_date: field('DATE', 'issue_date', '見積日', { required: true, defaultNowValue: false }),
+      quote_no: field('SINGLE_LINE_TEXT', 'quote_no', '見積番号', { required: true, defaultValue: 'Q-' }),
+      due: field('DATE', 'due', '有効期限', { required: true, defaultNowValue: true }),
+      owner_q: field('USER_SELECT', 'owner_q', '見積担当', { entities: [], defaultValue: [] }),
+      phone_q: field('LINK', 'phone_q', '電話', { protocol: 'CALL' }),
+      rank_q: field('DROP_DOWN', 'rank_q', 'ランク', { options: { A: { label: 'A', index: '0' } } }),
+      attachment: field('FILE', 'attachment', '添付'),
+      items: field('SUBTABLE', 'items', '明細', { fields: { item_name: field('SINGLE_LINE_TEXT', 'item_name', '品名'), qty: field('NUMBER', 'qty', '数量') } }),
     },
   };
   data.fields.tax = field('CALC', 'tax', '税額', { expression: 'amount * 0.1' });
@@ -160,4 +181,4 @@ const incoming = {
 // 外部 URL の JS（Scanner は本文を取得せず files[] に note 付きで残す。実データと同じ形）
 const skippedUrlFiles = [{ name: 'luxon.min.js', target: 'desktop' }];
 
-module.exports = { SELF_APP, CUSTOMER_APP, QUOTE_APP, makeData, files, incoming, skippedUrlFiles, DESKTOP_COMMON, MOBILE_COMMON, AUTO_LOOKUP };
+module.exports = { SELF_APP, CUSTOMER_APP, QUOTE_APP, QUOTE_DEST_APP, makeData, files, incoming, skippedUrlFiles, DESKTOP_COMMON, MOBILE_COMMON, AUTO_LOOKUP };
