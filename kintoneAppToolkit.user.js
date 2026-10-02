@@ -6024,17 +6024,21 @@
       };
     }
     const fieldKey = (f) => ({ type: f.type, label: f.label, required: !!f.required, ...(f.options ? { options: f.options } : {}), ...(f.lookup ? { lookup: f.lookup } : {}) });
+    /** システムフィールド（JS API と REST で有無・表現が揺れることがあり、利用者が変更できない）は stale 判定の対象外 */
+    const SYSTEM_FIELD_TYPES = ['RECORD_NUMBER', 'CREATOR', 'CREATED_TIME', 'MODIFIER', 'UPDATED_TIME', 'STATUS', 'STATUS_ASSIGNEE', 'CATEGORY'];
+    const isSystemField = (f) => !!f && SYSTEM_FIELD_TYPES.includes(f.type);
     const viewKey = (v) => ({ type: v.type, fields: v.fields, filterCond: v.filterCond, sort: v.sort });
     /** Review 時点の Before と現在の preview の差（stale 判定）。kinds は比較対象 */
     function diffBefore(before, current, { kinds = ['fields', 'views'] } = {}) {
       const diffs = [];
       if (kinds.includes('fields')) {
         for (const [code, f] of Object.entries(before.fields || {})) {
+          if (isSystemField(f)) continue;
           const c = current.fields?.[code];
           if (!c) diffs.push({ kind: 'FIELD', id: code, change: 'REMOVED', message: `フィールド「${f.label}」（${code}）が動作テスト環境にありません` });
           else if (!same(fieldKey(f), fieldKey(c))) diffs.push({ kind: 'FIELD', id: code, change: 'CHANGED', message: `フィールド「${f.label}」（${code}）の設定が Review 時点と違います`, before: fieldKey(f), after: fieldKey(c) });
         }
-        for (const [code, c] of Object.entries(current.fields || {})) if (!before.fields?.[code]) diffs.push({ kind: 'FIELD', id: code, change: 'ADDED', message: `動作テスト環境にフィールド「${c.label}」（${code}）が追加されています（未反映の変更）` });
+        for (const [code, c] of Object.entries(current.fields || {})) if (!before.fields?.[code] && !isSystemField(c)) diffs.push({ kind: 'FIELD', id: code, change: 'ADDED', message: `動作テスト環境にフィールド「${c.label}」（${code}）が追加されています（未反映の変更）` });
       }
       if (kinds.includes('views')) {
         const bv = new Map((before.views || []).map(v => [v.name, v])), cv = new Map((current.views || []).map(v => [v.name, v]));
