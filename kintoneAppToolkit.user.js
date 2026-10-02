@@ -7166,7 +7166,7 @@
         return {
           mutation: { kind: 'UPDATE_STATUS', identity: clone(identity), set: { assignee: { type, entities } } },
           expect: { kind: 'PROCESS_STATUS', name: identity.name, assigneeType: type, assignees: entities.map(e => entityKey(e.entity)).sort() },
-          summary: `✎ ステータス「${identity.name}」の作業者: ${changesText(changes)}`,
+          summary: `✎ ステータス「${identity.name}」: ${changesText(changes)}`,
           sensitive, before: Object.fromEntries(Object.entries(changes).map(([k, c]) => [k, c.from])), after: Object.fromEntries(Object.entries(changes).map(([k, c]) => [k, c.to])),
           targetLabel: identity.name, changeKind: 'ASSIGNEE',
         };
@@ -9122,7 +9122,7 @@
       ROLLBACK_PENDING: '待機中', ROLLING_BACK: '戻しています...', ROLLED_BACK: '戻しました（検証中）', ROLLBACK_VERIFIED: 'ROLLBACK_VERIFIED', ROLLBACK_VERIFY_FAILED: 'ROLLBACK_VERIFY_FAILED（状態不一致）', ROLLBACK_FAILED: 'ROLLBACK_FAILED', ROLLBACK_STALE: 'ROLLBACK_STALE（反映後に変更あり）', ROLLBACK_SKIPPED: '未実行' };
     const EXEC_STEP_COLOR = { VERIFIED: '#2e7d32', APPLIED: '#1a73e8', RUNNING: '#1a73e8', VERIFY_FAILED: '#b00020', FAILED: '#b00020', BLOCKED: '#b00020', UNSUPPORTED: '#555', SKIPPED: '#777', PENDING: '#777', ROLLBACK_VERIFIED: '#2e7d32', ROLLED_BACK: '#1a73e8', ROLLING_BACK: '#1a73e8', ROLLBACK_VERIFY_FAILED: '#b00020', ROLLBACK_FAILED: '#b00020', ROLLBACK_STALE: '#b00020', ROLLBACK_SKIPPED: '#777', ROLLBACK_PENDING: '#777' };
     /** 既存設定の変更の属性名（Phase 11。属性単位の Before / After に使う） */
-    const EXEC_ATTR_JA = { targets: '通知先', filterCond: '条件', events: 'イベント', title: '名前', timing: 'タイミング', fields: '表示項目', sort: '並び順', label: '表示名', required: '必須' };
+    const EXEC_ATTR_JA = { targets: '通知先', filterCond: '条件', events: 'イベント', title: '名前', timing: 'タイミング', fields: '表示項目', sort: '並び順', label: '表示名', required: '必須', to: '遷移先', from: '遷移元', executableUsers: '実行可能ユーザー', assignees: '作業者', assigneeType: '作業者の指定形式' };
     const execAttrVal = (k, v) => (v == null ? '—' : k === 'required' ? (v ? 'はい' : 'いいえ') : Array.isArray(v) ? (v.length ? v.join(', ') : '（なし）') : typeof v === 'object' ? (k === 'timing' ? `${v.code ?? '—'} の ${KTPlanReview.daysText(v.daysLater)}${v.time ? ' ' + v.time : ''}` : JSON.stringify(v)) : String(v) || '（なし）');
     /** 変更した属性だけ「属性: Before → After」で並べる（変更していない属性は出さない） */
     const execAttrDiff = (before, after) => Object.keys(after || {}).map(k => `${EXEC_ATTR_JA[k] || k}: ${execAttrVal(k, before?.[k])} → ${execAttrVal(k, after[k])}`);
