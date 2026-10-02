@@ -6756,9 +6756,79 @@
       ADD_NOTIFICATION: '通知追加', UPDATE_NOTIFICATION: '通知変更', ADD_REMINDER: 'リマインダー追加', ADD_VIEW: '一覧追加', UPDATE_VIEW: '一覧変更', UPDATE_RECORD_ACL: 'レコードのアクセス権変更', UPDATE_FIELD_ACL: 'フィールドのアクセス権変更',
       ADD_APP_ACTION: 'アプリアクション追加', UPDATE_APP_ACTION: 'アプリアクション変更', ADD_LOOKUP: 'ルックアップ追加', UPDATE_LOOKUP: 'ルックアップ変更', REQUIRE_CONFIRMATION: '要確認', CUSTOMIZATION_REQUIRED: 'カスタマイズが必要',
     };
-    /** Change Plan → HTML（実現したいこと / 現在利用できるもの / 追加が必要なもの / 変更計画 / 代替案 / 影響範囲 / 確認したいこと / 解析できないこと / JSON） */
-    function planHtml(plan) {
+    // ---- Toolkit 検証（KTPlanReview）の表示 ----
+    const RSTATUS = { VALID: ['✓ 問題なし', '#2e7d32'], WARNING: ['△ 注意', '#b26a00'], NEEDS_CONFIRMATION: ['△ 確認が必要', '#b26a00'], INVALID: ['× 実行不可', '#b00020'], BLOCKED_BY_DEPENDENCY: ['× 依存先が無効', '#b00020'] };
+    const RSAFETY = { SAFE: ['安全', '#2e7d32'], REVIEW_REQUIRED: ['要レビュー', '#b26a00'], BLOCKED: ['実行不可', '#b00020'], PLAN_ONLY: ['計画のみ', '#555'] };
+    const RCHANGE = { ADD: '追加', UPDATE: '既存変更', REUSE: '既存利用', REMOVE: '削除', NO_CHANGE: '変更なし', INVALID: '無効' };
+    /** step 1 件分の Toolkit 検証（AI の提案とは分けて表示する） */
+    function reviewStepHtml(r) {
+      if (!r) return '';
+      const [stText, stColor] = RSTATUS[r.status] || [r.status, '#555'];
+      const [sfText, sfColor] = RSAFETY[r.safety] || [r.safety, '#555'];
+      const lines = (r.diff?.human || []).map(l => `<div style="font-size:11px;">${esc(l)}</div>`).join('');
+      const issues = (r.issues || []).map(i => `<div style="font-size:11px; color:${i.severity === 'high' ? '#b00020' : i.severity === 'medium' ? '#b26a00' : '#555'};">${i.severity === 'high' ? '⚠' : '・'} ${esc(i.message)}</div>`).join('');
+      return `<div class="kt-ai-review-step" data-step="${esc(r.stepId)}" style="margin-top:6px; padding:6px 8px; border-radius:6px; background:rgba(0,0,0,.04); border-left:3px solid ${stColor};">
+        <div><b>Toolkit で確認した結果</b> ${badge(stText, stColor)}${badge(sfText, sfColor)}${badge(RCHANGE[r.diff?.changeType] || r.diff?.changeType || '', '#555')}${r.blockedBy?.length ? badge(`依存: ${r.blockedBy.join(', ')}`, '#b00020') : ''}</div>
+        ${lines}${issues}
+        <label style="display:flex; align-items:center; gap:6px; margin-top:4px; font-size:11px;">判断
+          <select class="kt-ai-decision" data-step="${esc(r.stepId)}" style="font-size:11px;"><option value="">（未定）</option><option value="approve"${r.safety === 'BLOCKED' ? ' disabled' : ''}>承認</option><option value="hold">保留</option><option value="reject">却下</option></select>
+        </label>
+      </div>`;
+    }
+    /** 実行前レビュー（plan 全体の集約・競合・警告・Before / After・プロセス図・Review JSON） */
+    function reviewHtml(review, plan) {
+      if (!review) return '';
+      const c = review.summary?.counts || {};
+      const er = review.executionReadiness || {};
+      const stepLine = (ids, label, color, mark) => `<div style="display:flex; justify-content:space-between; gap:8px;"><span style="color:${color};">${mark} ${esc(label)}</span><b>${ids.length} 件${ids.length ? `（${esc(ids.join(', '))}）` : ''}</b></div>`;
+      const conflicts = (review.conflicts || []).map(x => `<div style="border:1px solid #b26a00; border-radius:6px; padding:6px 8px; margin-top:6px;">
+        <div><b>⚠ ${esc(x.message)}</b> <span style="opacity:.7; font-size:11px;">（${esc((x.stepIds || []).join(', '))}）</span></div>
+        ${x.existing ? `<div style="font-size:11px; margin-top:4px;">${badge('既存', '#2e7d32')}${esc(x.existing.title || x.existing.id || '')}${x.existing.targets ? ` 通知先: ${esc(x.existing.targets.join(', '))}` : ''}${x.existing.filterCond ? ` 条件: ${esc(x.existing.filterCond)}` : ''}${x.existing.events?.length ? ` イベント: ${esc(x.existing.events.join(', '))}` : ''}</div>` : ''}
+        ${x.proposed ? `<div style="font-size:11px;">${badge('提案', '#1a73e8')}${esc(x.proposed.title || x.proposed.id || '')}${x.proposed.targets ? ` 通知先: ${esc(x.proposed.targets.join(', '))}` : ''}${x.proposed.filterCond ? ` 条件: ${esc(x.proposed.filterCond)}` : ''}${x.proposed.events?.length ? ` イベント: ${esc(x.proposed.events.join(', '))}` : ''}</div>` : ''}
+      </div>`).join('');
+      const warnings = (review.warnings || []).map(w => `<div style="font-size:11px; margin-top:2px;">${w.severity === 'high' ? '⚠' : '・'} ${esc(w.message)} <span style="opacity:.6;">(${esc(w.code)}${w.stepIds?.length ? ` / ${esc(w.stepIds.join(', '))}` : ''})</span></div>`).join('');
+      const steps = review.steps || [];
+      const diffs = steps.map(r => `<div style="margin-top:6px;"><b>${esc(r.stepId)}</b> ${badge(RCHANGE[r.diff?.changeType] || '', '#555')}${esc(r.diff?.target?.kind || '')}${r.diff?.target?.id ? ` <code>${esc(r.diff.target.id)}</code>` : ''}${(r.diff?.human || []).map(l => `<div style="font-size:11px; padding-left:8px;">${esc(l)}</div>`).join('')}</div>`).join('');
+      const proc = review.simulation?.process;
+      const procHtml = proc && proc.changed ? `<div style="margin-top:8px;"><b>プロセス管理の変更前後</b>
+        <div style="display:flex; gap:8px; flex-wrap:wrap; margin-top:4px;">
+          <div style="flex:1 1 280px; border:1px solid #ccc; border-radius:6px; padding:6px;"><div style="font-size:11px; opacity:.7;">Before</div><pre class="kt-ai-mermaid" data-side="before" style="font-size:11px; white-space:pre-wrap; margin:0;">${esc(proc.mermaid.before)}</pre></div>
+          <div style="flex:1 1 280px; border:1px solid #1a73e8; border-radius:6px; padding:6px;"><div style="font-size:11px; opacity:.7;">After（青＝追加・変更）</div><pre class="kt-ai-mermaid" data-side="after" style="font-size:11px; white-space:pre-wrap; margin:0;">${esc(proc.mermaid.after)}</pre></div>
+        </div>
+        <div style="font-size:11px; opacity:.8; margin-top:4px;">After: ${esc(proc.after.states.map(x => x.name).join(' → '))}　アクション ${proc.after.actions.length} 件（Before ${proc.before.actions.length} 件）</div>
+      </div>` : '';
+      const cov = review.reviewCoverage || {};
+      const covText = Object.entries(cov).filter(([k]) => k !== 'notes').map(([k, v]) => `${k}: ${v === true ? '✓' : v === false ? '—' : esc(String(v))}`).join('　');
+      return `<div id="kt-ai-review" style="margin-top:10px; border:2px solid #1a73e8; border-radius:8px; padding:8px;">
+        <div style="display:flex; align-items:center; justify-content:space-between;"><b>実行前レビュー（Toolkit 検証）</b><span style="font-size:11px; opacity:.7;">AI の提案を Toolkit が決定的に検証した結果です。AI の説明より優先します</span></div>
+        <div style="margin-top:6px; display:grid; gap:2px;">
+          ${stepLine(er.safeSteps || [], '安全に追加できる変更', '#2e7d32', '✓')}
+          ${stepLine(er.reviewSteps || [], '確認が必要', '#b26a00', '△')}
+          ${stepLine(er.blockedSteps || [], '実行不可', '#b00020', '×')}
+          ${stepLine(er.planOnlySteps || [], '計画のみ（仮適用・自動検証の対象外）', '#555', '○')}
+        </div>
+        <div style="margin-top:6px; font-size:11px;">追加：${c.additions ?? 0}　既存変更：${c.updates ?? 0}　既存利用：${c.reuse ?? 0}　高リスク変更：${c.highRisk ?? 0}　競合候補：${c.conflicts ?? 0}　確認事項：${c.confirmations ?? 0}　無効：${c.invalid ?? 0}</div>
+        ${conflicts ? `<div style="margin-top:8px;"><b>⚠ 競合・重複の候補</b>${conflicts}</div>` : ''}
+        ${warnings ? `<div style="margin-top:8px;"><b>Toolkit からの指摘</b>${warnings}</div>` : ''}
+        ${procHtml}
+        <div style="margin-top:8px; display:flex; gap:6px; flex-wrap:wrap;">
+          <button type="button" id="kt-ai-review-diff-toggle" class="btn" style="height:26px; font-size:11px;">変更前後を比較</button>
+          <button type="button" id="kt-ai-review-json-toggle" class="btn" style="height:26px; font-size:11px;">Review JSON を見る</button>
+          <button type="button" id="kt-ai-review-json-copy" class="btn" style="height:26px; font-size:11px;">Review JSON をコピー</button>
+          <button type="button" id="kt-ai-review-raw-toggle" class="btn" style="height:26px; font-size:11px;">Raw Diff JSON</button>
+        </div>
+        <div id="kt-ai-review-diff" style="display:none; margin-top:6px;">${diffs || '<div style="opacity:.6;">差分はありません</div>'}</div>
+        <pre id="kt-ai-review-json" style="display:none; margin-top:6px; max-height:320px; overflow:auto; font-size:11px; white-space:pre-wrap;">${esc(JSON.stringify(KTPlanReview.executorOutput(plan, review), null, 2))}</pre>
+        <pre id="kt-ai-review-raw" style="display:none; margin-top:6px; max-height:320px; overflow:auto; font-size:11px; white-space:pre-wrap;">${esc(JSON.stringify(review.diff, null, 2))}</pre>
+        <div style="margin-top:6px; font-size:11px; opacity:.7;">検証範囲: ${covText}</div>
+        <div style="font-size:11px; opacity:.7;">このレビューは設定を変更しません（計画の検証のみ）。実行可否は Toolkit の判定が正本です。</div>
+      </div>`;
+    }
+
+    /** Change Plan → HTML（実現したいこと / 現在利用できるもの / 追加が必要なもの / 変更計画 / 代替案 / 影響範囲 / 確認したいこと / 解析できないこと / JSON）。review を渡すと Toolkit 検証を併記 */
+    function planHtml(plan, review = null) {
       if (!plan) return '';
+      const reviewOf = (id) => (review?.steps || []).find(r => r.stepId === id) || null;
       const li = (items, render, empty) => (items && items.length) ? `<ul style="margin:4px 0 0 18px; padding:0;">${items.map(render).join('')}</ul>` : `<div style="opacity:.6; margin-top:4px;">${esc(empty)}</div>`;
       const sec = (title, body) => `<div style="margin-top:8px;"><b>${esc(title)}</b>${body}</div>`;
       const a = plan.assessment || {};
@@ -6784,6 +6854,7 @@
           <div style="margin-top:2px;">${esc(st.proposal?.summary || '')}</div>${details}
           <div style="margin-top:2px; opacity:.85;">理由：${esc(st.reason)}${chips(st.evidenceIds)}</div>
           ${(st.dependsOn || []).length ? `<div style="font-size:11px; opacity:.7;">依存：${esc(st.dependsOn.join(', '))} の後</div>` : ''}${issues}
+          ${reviewStepHtml(reviewOf(st.id))}
         </div>`;
       };
       const mainSteps = (plan.steps || []).filter(st => !st.alternativeId);
@@ -6791,6 +6862,7 @@
       const warn = [...(plan.clientWarnings || []), ...(plan.gatewayWarnings || [])];
       return `
         <div style="display:flex; align-items:center; justify-content:space-between;"><b>変更計画（AI Change Planner）</b><span style="opacity:.6; font-size:11px;">requestId: ${esc(plan.requestId || '')}</span></div>
+        <div style="font-size:11px; opacity:.7;">以下は AI の提案です。各手順の「Toolkit で確認した結果」と末尾の「実行前レビュー」は Toolkit が決定的に検証したものです。</div>
         ${sec('実現したいこと', `<div style="margin-top:4px;">${esc(plan.goal)}</div><div style="margin-top:4px; opacity:.85;">${esc(a.summary || '')}</div><div style="font-size:11px; opacity:.7;">計画の確度：${esc(CONF_JA_PLAN[plan.planConfidence] || plan.planConfidence || '')}</div>`)}
         ${sec('現在利用できるもの', li(existing, x => x, '利用できる既存資産は挙げられていません'))}
         ${sec('追加が必要なもの', `${li(a.missingCapabilities || [], x => `<li>${esc(x)}</li>`, '追加が必要なものはありません')}${proposed}`)}
@@ -6800,6 +6872,7 @@
         ${sec('確認したいこと', li(plan.questions || [], q => `<li>${badge('確認必要', '#b26a00')}<b>${esc(q.id)}</b> ${esc(q.question)} <span style="opacity:.7;">（${esc(q.reason)}）</span>${chips(q.relatedEvidenceIds)}</li>`, '確認事項はありません'))}
         ${sec('解析できないこと', li(plan.unknowns || [], u => `<li>${esc(u)}</li>`, 'なし'))}
         ${warn.length ? `<details style="margin-top:6px; font-size:11px;"><summary style="cursor:pointer;">検証で除去・調整した項目（${warn.length}）</summary>${warn.map(w => `<div>${esc(w.code)}: ${esc(w.message)}</div>`).join('')}</details>` : ''}
+        ${review ? reviewHtml(review, plan) : ''}
         <div style="margin-top:8px; display:flex; gap:6px;">
           <button type="button" id="kt-ai-plan-json-toggle" class="btn" style="height:26px; font-size:11px;">Change Plan JSON を見る</button>
           <button type="button" id="kt-ai-plan-json-copy" class="btn" style="height:26px; font-size:11px;">JSON をコピー</button>
@@ -6855,8 +6928,8 @@
       TARGET_TYPES, PRESETS, CONFIDENCE_HELP, INTRO_TEXT, INTRO_NOTE,
       listTargets, fileLabel, toBuildRequest, generate, coverageRows, truncationSummary, sizeSummary, outputFilename,
       panelHtml, resultHtml, capabilityStatusText, sessionLinesHtml, answerHtml, evidenceDetailHtml,
-      // AI Change Planner（Phase 7）
-      PLANNER_PRESETS, generatePlan, planHtml, planJson,
+      // AI Change Planner（Phase 7）/ Review（Phase 8）
+      PLANNER_PRESETS, generatePlan, planHtml, planJson, reviewHtml, reviewStepHtml,
     };
   })();
 
@@ -6902,6 +6975,8 @@
     const $answer = $('kt-ai-answer'), $factDetail = $('kt-ai-fact-detail');
     const $planBtn = $('kt-ai-plan'), $planResult = $('kt-ai-plan-result');
     let lastPlan = null;
+    let lastReview = null;         // KTPlanReview.review の結果（Toolkit 検証）
+    const decisions = new Map();   // stepId → approve | hold | reject（MVP: 保存しない）
     const settings = d.settings || null;
     const session = d.session || null;
     const paidEnabled = !!(settings && session);
@@ -7000,10 +7075,24 @@
     }
     function renderPlan(p) {
       lastPlan = p;
-      $planResult.innerHTML = KTContextUi.planHtml(p);
+      decisions.clear();
+      // Toolkit 検証（決定的）。失敗しても AI の提案は表示する
+      try { lastReview = KTPlanReview.review({ plan: p, ...(d.getInputs() || {}) }); } catch (e) { lastReview = null; }
+      $planResult.innerHTML = KTContextUi.planHtml(p, lastReview);
       $planResult.style.display = '';
       $factDetail.style.display = 'none';
+      renderMermaid($planResult);
     }
+    /** プロセスの Before / After を Mermaid で描く（mermaid があるときだけ。無ければコードのまま表示） */
+    function renderMermaid(root) {
+      const m = (typeof window !== 'undefined') ? window.mermaid : null;
+      if (!m || typeof m.run !== 'function' || typeof root.querySelectorAll !== 'function') return;
+      const nodes = [...root.querySelectorAll('pre.kt-ai-mermaid')];
+      if (!nodes.length) return;
+      const divs = nodes.map(pre => { const div = document.createElement('div'); div.className = 'mermaid'; div.style.fontSize = '11px'; div.textContent = pre.textContent; pre.replaceWith(div); return div; });
+      try { const r = m.run({ nodes: divs }); if (r && typeof r.catch === 'function') r.catch(() => { }); } catch (e) { }
+    }
+    const reviewOutput = () => (lastPlan && lastReview) ? KTPlanReview.executorOutput(lastPlan, lastReview, [...decisions.entries()].filter(([, v]) => v === 'approve').map(([k]) => k)) : null;
     /** 変更計画の作成（Planner Context を送る。設定は変更しない）。二重送信防止・requestId 保持 */
     async function plan() {
       if (!paidEnabled) return null;
@@ -7150,9 +7239,19 @@
         const id = t?.id || (typeof t?.getAttribute === 'function' ? t.getAttribute('id') : null);
         if (id === 'kt-ai-plan-json-toggle') { const pre = host.querySelector('#kt-ai-plan-json'); if (pre) pre.style.display = pre.style.display === 'none' ? '' : 'none'; return; }
         if (id === 'kt-ai-plan-json-copy') { const ok = await d.copyText(JSON.stringify(KTContextUi.planJson(lastPlan), null, 2)); if (t) flashBtnText(t, ok ? 'Copied!' : 'Failed'); return; }
+        const toggle = (sel) => { const el = host.querySelector(sel); if (el) el.style.display = el.style.display === 'none' ? '' : 'none'; };
+        if (id === 'kt-ai-review-diff-toggle') { toggle('#kt-ai-review-diff'); return; }
+        if (id === 'kt-ai-review-json-toggle') { toggle('#kt-ai-review-json'); return; }
+        if (id === 'kt-ai-review-raw-toggle') { toggle('#kt-ai-review-raw'); return; }
+        if (id === 'kt-ai-review-json-copy') { const out = reviewOutput(); const ok = out ? await d.copyText(JSON.stringify(out, null, 2)) : false; if (t) flashBtnText(t, ok ? 'Copied!' : 'Failed'); return; }
         const el = t && typeof t.closest === 'function' ? t.closest('[data-eid]') : t;
         const eid = el?.dataset?.eid ?? (typeof el?.getAttribute === 'function' ? el.getAttribute('data-eid') : null);
         if (eid) showEvidence(eid);
+      });
+      $planResult.addEventListener('change', (ev) => {
+        const t = ev?.target;
+        const sid = t?.dataset?.step ?? (typeof t?.getAttribute === 'function' ? t.getAttribute('data-step') : null);
+        if (sid && t && 'value' in t) { if (t.value) decisions.set(sid, t.value); else decisions.delete(sid); }
       });
       $consentOk.addEventListener('click', async () => { settings.setConsent(true); $consent.style.display = 'none'; await (mode() === 'plan' ? plan() : ask()); });
       $consentCancel.addEventListener('click', () => { $consent.style.display = 'none'; });
@@ -7285,6 +7384,9 @@
       refreshCapability, ask, plan, showEvidence,
       mode, setMode: (m) => { if ($modePlan) $modePlan.checked = (m === 'plan'); if ($modeQa) $modeQa.checked = (m !== 'plan'); onMode(); },
       lastPlan: () => lastPlan,
+      lastReview: () => lastReview,
+      reviewOutput,
+      decide: (stepId, v) => { if (v) decisions.set(stepId, v); else decisions.delete(stepId); },
       lastAnswer: () => lastAnswer,
       capability: () => capability,
       currentOutput: () => {
