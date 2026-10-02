@@ -5212,6 +5212,17 @@
       const samples = [pa.num - 1, pa.num, pa.num + 1, pb.num - 1, pb.num, pb.num + 1, -1e12, 1e12];
       return samples.some(x => ok(pb, x) && !ok(pa, x));
     }
+    /** kintone の条件式（クエリ）で使える関数。これ以外の「名前(」は kintone では評価できない（AI が別システムの関数を書きがち） */
+    const KINTONE_COND_FUNCTIONS = ['LOGINUSER', 'PRIMARY_ORGANIZATION', 'NOW', 'TODAY', 'YESTERDAY', 'TOMORROW', 'FROM_TODAY', 'THIS_WEEK', 'LAST_WEEK', 'NEXT_WEEK', 'THIS_MONTH', 'LAST_MONTH', 'NEXT_MONTH', 'THIS_YEAR', 'LAST_YEAR', 'NEXT_YEAR'];
+    /** 条件式に含まれる kintone 外の関数名（NOT / AND / OR / IN / LIKE は演算子なので除く） */
+    function condUnknownFunctions(cond) {
+      const out = [];
+      const c = String(cond ?? '').replace(/"[^"]*"/g, '""');
+      const re = /([A-Za-z_][A-Za-z0-9_]*)\s*\(/g;
+      let m;
+      while ((m = re.exec(c))) { const name = m[1].toUpperCase(); if (['NOT', 'AND', 'OR', 'IN', 'LIKE'].includes(name) || KINTONE_COND_FUNCTIONS.includes(name) || out.includes(m[1])) continue; out.push(m[1]); }
+      return out;
+    }
     /** 条件式が参照するフィールドコード（単純な字句抽出） */
     function condFields(cond, model) {
       const out = [];
@@ -5259,7 +5270,7 @@
       // ---- 2. step ごとに検証 → 仮適用 ----
       for (const id of order) {
         const step = byId.get(id);
-        const r = reviewStep(step, { model, before, proposedMap, resolvedCodes, deps, scan, cyc, results });
+        const r = reviewStep(step, { model, before, proposedMap, resolvedCodes, deps, scan, cyc, results, steps });
         results.set(id, r);
       }
       // ---- 3. plan 内部の競合（複数 step の組み合わせ）----
@@ -5283,8 +5294,8 @@
         if (blockedBy.length && r.status !== STATUS.INVALID) { r.status = STATUS.BLOCKED_BY_DEPENDENCY; r.safety = SAFETY.BLOCKED; r.blockedBy = blockedBy; r.issues.push({ code: 'BLOCKED_BY_DEPENDENCY', severity: 'high', message: `依存する ${blockedBy.join(', ')} が無効のため実行できません` }); }
       }
       // 競合に関わる step の status を反映
-      for (const c of conflicts) for (const sid of c.stepIds) { const r = results.get(sid); if (!r) continue; const want = c.severity === 'high' ? STATUS.NEEDS_CONFIRMATION : STATUS.WARNING; if (STATUS_RANK[want] > STATUS_RANK[r.status]) r.status = want; r.issues.push({ code: c.code, severity: c.severity, message: c.message }); if (r.safety === SAFETY.SAFE) r.safety = SAFETY.REVIEW_REQUIRED; }
-      for (const w of impactCheck.warnings) for (const sid of w.stepIds) { const r = results.get(sid); if (!r) continue; if (r.status === STATUS.VALID) r.status = STATUS.WARNING; r.issues.push({ code: w.code, severity: w.severity, message: w.message }); }
+      for (const c of conflicts) for (const sid of c.stepIds) { const r = results.get(sid); if (!r) continue; const want = c.severity === 'high' ? STATUS.NEEDS_CONFIRMATION : STATUS.WARNING; if (STATUS_RANK[want] > STATUS_RANK[r.status]) r.status = want; if (!r.issues.some(i => i.code === c.code && i.message === c.message)) r.issues.push({ code: c.code, severity: c.severity, message: c.message }); if (r.safety === SAFETY.SAFE) r.safety = SAFETY.REVIEW_REQUIRED; }
+      for (const w of impactCheck.warnings) for (const sid of w.stepIds) { const r = results.get(sid); if (!r) continue; if (r.status === STATUS.VALID) r.status = STATUS.WARNING; if (!r.issues.some(i => i.code === w.code && i.message === w.message)) r.issues.push({ code: w.code, severity: w.severity, message: w.message }); }
 
       // ---- 7. 集約 ----
       const stepReviews = steps.map(s => results.get(s.id)).filter(Boolean);
@@ -5357,13 +5368,24 @@
         if (temp) { const code = resolvedCodes.get(temp[0]); return code && model.fields[code] ? model.fields[code] : { missingProposed: temp[0] }; }
         if (model.fields[t]) return model.fields[t];
         const byLabel = Object.values(model.fields).find(f => f.label === t);
-        return byLabel || null;
+        if (byLabel) return byLabel;
+        // この計画で追加予定の新規フィールドを「コード / ラベル」で参照している（まだ仮適用されていない）
+        const pending = [...proposedMap.values()].find(p => !resolvedCodes.has(p.temporaryId) && (p.suggestedCode === t || p.label === t));
+        return pending ? { missingProposed: pending.temporaryId } : null;
       };
+      const addingStepOf = (temporaryId) => { const s = (ctx.steps || []).find(x => x.targetRef === temporaryId && /^ADD_/.test(String(x.actionType))); return s ? `（${s.id} で追加予定）` : ''; };
       const requireField = (ref, role) => {
         const f = resolveField(ref);
         if (!f) { invalid('UNKNOWN_FIELD', `${role}のフィールド「${ref}」が存在しません`); return null; }
-        if (f.missingProposed) { invalid('PROPOSED_FIELD_NOT_APPLIED', `${role}の新規フィールド ${f.missingProposed} はこの step より前に追加されていません（dependsOn を確認）`); return null; }
+        if (f.missingProposed) { invalid('PROPOSED_FIELD_NOT_APPLIED', `${role}の新規フィールド ${f.missingProposed}${addingStepOf(f.missingProposed)} はこの step より前に追加されていません（順序 / dependsOn を確認）`); return null; }
         return f;
+      };
+      /** 条件式の構文検査: kintone に無い関数が含まれていれば要確認（評価できない条件は設定できない） */
+      const checkCond = (cond, role) => {
+        const unknown = condUnknownFunctions(cond);
+        if (!unknown.length) return;
+        issue('COND_UNKNOWN_FUNCTION', 'medium', `${role}「${cond}」に kintone の条件式で使えない関数（${unknown.join(', ')}）が含まれています（要確認）`);
+        if (r.status === STATUS.VALID) r.status = STATUS.NEEDS_CONFIRMATION;
       };
       const entityOk = (en, role) => {
         if (!en) return;
@@ -5389,7 +5411,7 @@
             const lk = { app: spec.sourceApp || null, keyField: spec.keyField || null, mappings: (spec.mappings || []).map(m => ({ from: m.from, to: m.to })) };
             field.lookup = lk;
             if (!lk.app) issue('LOOKUP_SOURCE_UNKNOWN', 'medium', '参照元アプリが指定されていません（要確認）');
-            validateLookupMappings(lk, step, r, { model, resolveField, requireField, invalid, issue, selfCode: code });
+            validateLookupMappings(lk, step, r, { model, resolveField, requireField, invalid, issue, selfCode: code, addingStepOf });
           }
           model.fields[code] = field;
           resolvedCodes.set(p.temporaryId, code);
@@ -5430,7 +5452,7 @@
               lk.mappings.push({ from: m.from, to: toCode }); addedNow.add(toCode); changed = true;
             }
             after.lookup = lk;
-            validateLookupMappings(lk, step, r, { model, resolveField, requireField, invalid, issue, selfCode: f.code });
+            validateLookupMappings(lk, step, r, { model, resolveField, requireField, invalid, issue, selfCode: f.code, addingStepOf });
           } else {
             if (spec.fieldType && spec.fieldType !== f.type && spec.fieldType !== f.baseType) { issue('TYPE_CHANGE', 'high', `フィールド型を ${f.type} → ${spec.fieldType} に変更します（既存データ・参照している設定に影響）`); after.type = spec.fieldType; after.baseType = spec.fieldType; changed = true; }
             if (typeof spec.required === 'boolean' && spec.required !== f.required) { issue('REQUIRED_CHANGE', spec.required ? 'medium' : 'low', `必須を ${f.required} → ${spec.required} に変更します`); after.required = spec.required; changed = true; }
@@ -5475,6 +5497,7 @@
           if (!model.process.states.some(s => s.name === to)) invalid('UNKNOWN_STATUS', `遷移先ステータス「${to}」が存在しません`);
           if (model.process.actions.some(a => a.name === name && froms.includes(a.from))) invalid('ACTION_DUPLICATE', `アクション「${name}」（${froms.join('/')} から）は既に存在します`);
           for (const c of condFields(cond, model)) requireField(c, '条件式');
+          checkCond(cond, '条件式');
           if (r.status === STATUS.INVALID) return r;
           for (const fr of froms) {
             for (const a of model.process.actions.filter(a => a.from === fr)) {
@@ -5507,6 +5530,7 @@
             const primary = branches[0] || (spec.filterCond ? { cond: spec.filterCond, to: spec.to || null } : null);
             if (primary && primary.cond && normCond(primary.cond) !== normCond(act.filterCond)) {
               for (const c of condFields(primary.cond, model)) requireField(c, '条件式');
+              checkCond(primary.cond, '条件式');
               const narrower = condNarrower(primary.cond, act.filterCond);
               if (narrower === true || !act.filterCond) issue('EXISTING_PATH_RESTRICTED', 'high', `「${act.name}」は現在${act.filterCond ? `条件「${act.filterCond}」` : 'すべて'}の「${act.from}」レコードで実行できます。変更後は「${primary.cond}」の場合のみ実行可能になります`);
               else if (narrower === null) issue('CONDITION_CHANGE_UNPARSED', 'medium', `「${act.name}」の条件を「${act.filterCond}」→「${primary.cond}」に変更します（制限の有無を自動判定できません）`);
@@ -5550,6 +5574,7 @@
           const cond = spec.filterCond || '';
           const events = spec.events || [];
           for (const c of condFields(cond, model)) requireField(c, '通知条件');
+          checkCond(cond, '通知条件');
           if (step.actionType === 'UPDATE_NOTIFICATION') {
             const ref = step.targetRef;
             const ex = [...model.notifications.general, ...model.notifications.perRecord].find(n => n.id === ref || (n.title && n.title === ref));
@@ -5570,7 +5595,8 @@
           if (!targets.length) { issue('TARGETS_MISSING', 'medium', '通知先が指定されていません（要確認）'); r.status = STATUS.NEEDS_CONFIRMATION; }
           if (r.status === STATUS.INVALID) return r;
           const scope = cond || !events.length ? 'perRecord' : 'general';
-          const n = { id: `${scope}#new:${step.id}`, scope, title: spec.name || step.targetRef || step.title || '', filterCond: cond, targets, events, origin: 'proposed', stepId: step.id };
+          if (scope === 'perRecord' && events.length) issue('NOTIFICATION_EVENTS_IGNORED', 'low', `レコードの条件通知にはイベント（${events.join(', ')}）の指定はありません（アプリの条件通知の項目。条件式で判定します）`);
+          const n = { id: `${scope}#new:${step.id}`, scope, title: spec.name || step.targetRef || step.title || '', filterCond: cond, targets, events: scope === 'perRecord' ? [] : events, origin: 'proposed', stepId: step.id };
           // 重複 / 類似（既存・plan 内）
           for (const ex of [...model.notifications.general, ...model.notifications.perRecord]) {
             const exact = normCond(ex.filterCond) === normCond(n.filterCond) && sameTargets(ex.targets, n.targets) && (ex.scope !== 'general' || (ex.events.length === n.events.length && ex.events.every(e => n.events.includes(e))));
@@ -5580,7 +5606,7 @@
           }
           model.notifications[scope].push(n); r.simulated = true;
           r.diff.target = { kind: 'NOTIFICATION', id: n.title || n.id }; r.diff.before = null; r.diff.after = notifView(n);
-          h(`＋ ${scope === 'general' ? 'アプリの条件通知' : 'レコードの条件通知'}「${n.title || '（無題）'}」`); h(`通知先: ${targets.map(entityText).join(', ') || '（未指定）'}`); if (cond) h(`条件: ${cond}`); if (events.length) h(`イベント: ${events.join(', ')}`);
+          h(`＋ ${scope === 'general' ? 'アプリの条件通知' : 'レコードの条件通知'}「${n.title || '（無題）'}」`); h(`通知先: ${targets.map(entityText).join(', ') || '（未指定）'}`); if (cond) h(`条件: ${cond}`); if (n.events.length) h(`イベント: ${n.events.join(', ')}`);
           if (issues.some(i => i.code === 'DUPLICATE' || i.code === 'PLAN_INTERNAL_DUPLICATE')) r.status = STATUS.NEEDS_CONFIRMATION; else if (issues.some(i => i.code.includes('POSSIBLE_DUPLICATE')) && r.status === STATUS.VALID) r.status = STATUS.WARNING;
           break;
         }
@@ -5591,6 +5617,7 @@
           if (!spec.timingField) { issue('TIMING_FIELD_MISSING', 'medium', '基準となる日付フィールドが指定されていません（要確認）'); r.status = STATUS.NEEDS_CONFIRMATION; }
           else if (tf && !['DATE', 'DATETIME', 'CREATED_TIME', 'UPDATED_TIME'].includes(tf.baseType || tf.type)) invalid('REMINDER_FIELD_TYPE', `基準フィールド「${tf.code}」は日付型ではありません（${tf.type}）`);
           for (const c of condFields(spec.filterCond || '', model)) requireField(c, '条件');
+          checkCond(spec.filterCond || '', '条件');
           if (r.status === STATUS.INVALID) return r;
           const days = spec.daysLater != null ? String(spec.daysLater).replace(/[^-0-9]/g, '') : null;
           const rem = { id: `reminder#new:${step.id}`, title: spec.name || step.targetRef || step.title || '', timing: { code: tf ? tf.code : null, daysLater: days, time: spec.time || null }, filterCond: spec.filterCond || '', targets, origin: 'proposed', stepId: step.id };
@@ -5611,6 +5638,7 @@
           const fields = (spec.fields || []).map(f => { const rf = resolveField(f); return rf ? (rf.missingProposed ? rf : rf.code) : f; });
           for (const f of fields) { if (typeof f === 'object') invalid('PROPOSED_FIELD_NOT_APPLIED', `一覧の表示フィールド ${f.missingProposed} はこの step より前に追加されていません`); else if (!model.fields[f] && !RESERVED_CODES.includes(f)) invalid('UNKNOWN_FIELD', `一覧の表示フィールド「${f}」が存在しません`); }
           for (const c of condFields(spec.filterCond || '', model)) requireField(c, '絞り込み条件');
+          checkCond(spec.filterCond || '', '絞り込み条件');
           if (spec.sort) { const sf = String(spec.sort).trim().split(/\s+/)[0]; if (sf && !model.fields[sf] && !RESERVED_CODES.includes(sf)) issue('SORT_FIELD_UNKNOWN', 'medium', `ソート条件のフィールド「${sf}」が存在しません（要確認）`); }
           if (step.actionType === 'ADD_VIEW') {
             if (!name) { invalid('VIEW_NAME_MISSING', '一覧名が指定されていません'); return r; }
@@ -5689,13 +5717,13 @@
       if (r.status !== STATUS.INVALID) r.status = STATUS.NEEDS_CONFIRMATION;
     }
 
-    function validateLookupMappings(lk, step, r, { model, resolveField, requireField, invalid, issue, selfCode }) {
+    function validateLookupMappings(lk, step, r, { model, resolveField, requireField, invalid, issue, selfCode, addingStepOf = () => '' }) {
       const seen = new Map();
       for (const m of lk.mappings) {
         if (!m.to) { issue('LOOKUP_DEST_MISSING', 'medium', `取得項目「${m.from}」のコピー先が指定されていません`); continue; }
         const f = resolveField(m.to);
         if (!f) { invalid('LOOKUP_DEST_UNKNOWN', `コピー先フィールド「${m.to}」が存在しません`); continue; }
-        if (f.missingProposed) { invalid('PROPOSED_FIELD_NOT_APPLIED', `コピー先の新規フィールド ${f.missingProposed} はこの step より前に追加されていません`); continue; }
+        if (f.missingProposed) { invalid('PROPOSED_FIELD_NOT_APPLIED', `コピー先の新規フィールド ${f.missingProposed}${addingStepOf(f.missingProposed)} はこの step より前に追加されていません（順序 / dependsOn を確認）`); continue; }
         m.to = f.code;
         if (seen.has(m.to)) invalid('LOOKUP_DEST_DUPLICATE', `コピー先「${m.to}」に複数の取得元（${seen.get(m.to)}, ${m.from}）があります`); else seen.set(m.to, m.from);
         if (f.type === 'LOOKUP' && f.code !== selfCode) issue('LOOKUP_DEST_IS_LOOKUP', 'medium', `コピー先「${m.to}」はルックアップフィールドです`);

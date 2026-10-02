@@ -215,6 +215,36 @@ console.log('\n--- 8. Impact re-check / coverage / Executor 出力 ---');
   assert(JSON.stringify(INPUTS.data) === SNAPSHOT, 'すべての review の後も DATA は不変');
 }
 
+console.log('\n--- 9. staging E2E（2026-10-02）で見つかった実データの癖 ---');
+{
+  // A: 既存通知と類似 → step.issues に同じ指摘が 2 回並ばない（plan-level conflict の step への反映は重複を除く）
+  const dupA = review(plan([step('P1', 'ADD_NOTIFICATION', 'NOTIFICATION', '担当者設定通知', [['通知先', 'owner'], ['条件', 'owner != ""']])]));
+  const dupCodes = codes(st(dupA, 'P1')).filter(c => c === 'POSSIBLE_DUPLICATE');
+  assert(dupCodes.length === 1 && dupA.conflicts.filter(c => c.code === 'POSSIBLE_DUPLICATE').length === 1, 'POSSIBLE_DUPLICATE は step.issues にも conflicts にも 1 回だけ');
+  // A: kintone の条件式に無い関数（IS_NULL / PREVIOUS_VALUE）→ COND_UNKNOWN_FUNCTION（要確認。VALID のままにしない）
+  const fn = review(plan([step('P1', 'ADD_NOTIFICATION', 'NOTIFICATION', '担当者設定通知', [], { spec: { targets: ['FIELD_ENTITY:owner_group'], filterCond: 'NOT(IS_NULL(owner)) AND PREVIOUS_VALUE(owner) != owner' } })]));
+  const fnIssue = st(fn, 'P1').issues.find(i => i.code === 'COND_UNKNOWN_FUNCTION');
+  assert(fnIssue && /IS_NULL/.test(fnIssue.message) && /PREVIOUS_VALUE/.test(fnIssue.message) && !/NOT\b/.test(fnIssue.message.replace(/NOT\(IS_NULL/, '')) && st(fn, 'P1').status === 'NEEDS_CONFIRMATION', '条件式の未知関数 → COND_UNKNOWN_FUNCTION（NOT / AND は関数扱いしない）');
+  const okFn = review(plan([step('P1', 'ADD_NOTIFICATION', 'NOTIFICATION', '本日分', [], { spec: { targets: ['FIELD_ENTITY:owner_group'], filterCond: 'due_date = TODAY() and owner in (LOGINUSER())' } })]));
+  assert(!codes(st(okFn, 'P1')).includes('COND_UNKNOWN_FUNCTION'), 'kintone の関数（TODAY / LOGINUSER）は指摘しない');
+  const fnAct = review(plan([step('P1', 'ADD_PROCESS_ACTION', 'PROCESS_ACTION', '差戻し', [], { spec: { name: '差戻し', from: '承認待ち', to: '未処理', filterCond: 'ISBLANK(approver)' } })]));
+  assert(codes(st(fnAct, 'P1')).includes('COND_UNKNOWN_FUNCTION'), 'プロセスアクションの条件式でも同じ検査');
+  // A: レコードの条件通知に events が混在 → NOTIFICATION_EVENTS_IGNORED（イベントは After モデルに載せない）
+  const mixed = st(fn, 'P1');
+  const mixed2 = review(plan([step('P1', 'ADD_NOTIFICATION', 'NOTIFICATION', '設定通知', [], { spec: { targets: ['FIELD_ENTITY:owner_group'], filterCond: 'amount > "5"', events: ['recordEdited'] } })]));
+  assert(codes(st(mixed2, 'P1')).includes('NOTIFICATION_EVENTS_IGNORED') && st(mixed2, 'P1').diff.after.scope === 'perRecord' && st(mixed2, 'P1').diff.after.events.length === 0 && !codes(mixed).includes('NOTIFICATION_EVENTS_IGNORED'), 'perRecord 通知に events → 無視した旨を指摘し After には載せない');
+  // C: ルックアップのコピー先が「後の step で追加する新規フィールドのコード」→ UNKNOWN ではなく PROPOSED_FIELD_NOT_APPLIED（順序 / dependsOn の問題と分かる）
+  const order = review(plan([
+    step('P1', 'ADD_FIELD', 'PROPOSED_FIELD', 'NEW_FIELD_1', [], { spec: { fieldType: 'LOOKUP', sourceApp: '999999', keyField: '顧客コード', mappings: [{ from: '住所', to: 'address' }, { from: '電話番号', to: 'phone_number' }] } }),
+    step('P2', 'ADD_FIELD', 'PROPOSED_FIELD', 'NEW_FIELD_2', [], { dependsOn: ['P1'] }),
+    step('P3', 'ADD_FIELD', 'PROPOSED_FIELD', 'NEW_FIELD_3', [], { dependsOn: ['P1'] }),
+  ], [pf('NEW_FIELD_1', '顧客コード（ルックアップ）', 'customer_code2', 'LOOKUP'), pf('NEW_FIELD_2', '住所', 'address', 'SINGLE_LINE_TEXT'), pf('NEW_FIELD_3', '電話番号', 'phone_number', 'SINGLE_LINE_TEXT')]));
+  const p1 = st(order, 'P1');
+  assert(p1.status === 'INVALID' && codes(p1).includes('PROPOSED_FIELD_NOT_APPLIED') && !codes(p1).includes('LOOKUP_DEST_UNKNOWN') && p1.issues.some(i => /NEW_FIELD_2/.test(i.message) && /P2/.test(i.message)), 'コピー先が後続 step の新規フィールドコード → PROPOSED_FIELD_NOT_APPLIED（追加予定の step を明示）');
+  assert(st(order, 'P2').status === 'BLOCKED_BY_DEPENDENCY' && order.executionReadiness.status === 'BLOCKED', '順序が逆の計画は BLOCKED（Toolkit は自動で並べ替えない）');
+  assert(JSON.stringify(INPUTS.data) === SNAPSHOT, '§9 の後も DATA は不変');
+}
+
 console.log(`\n${state.failed ? 'FAILED' : 'ALL PASSED'}: ${state.passed} passed / ${state.failed} failed`);
 process.exit(state.failed ? 1 : 0);
 })().catch(e => { console.error(e); process.exit(1); });
