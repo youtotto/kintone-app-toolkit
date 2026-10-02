@@ -4793,8 +4793,9 @@
         fieldTypes: Object.fromEntries(fieldsN.map(x => [x.code, x.rawType])),
         statuses: states.map(x => x.name),
         processActions: (data?.status?.enable ? (data.status.actions || []) : []).map(a => a.name),
-        notifications: [...gen.map((_, i) => `general#${i + 1}`), ...per.map((_, i) => `perRecord#${i + 1}`)],
-        reminders: rem.map((_, i) => `reminder#${i + 1}`),
+        // 通知・リマインダーは id（perRecord#1 等）に加えてタイトルでも参照できるようにする（AI はタイトルで呼ぶことが多い）
+        notifications: [...gen.map((_, i) => `general#${i + 1}`), ...per.map((_, i) => `perRecord#${i + 1}`), ...per.map(n => String(n.title || '').trim()).filter(Boolean)],
+        reminders: [...rem.map((_, i) => `reminder#${i + 1}`), ...rem.map(n => String(n.title || '').trim()).filter(Boolean)],
         views: views.map(v => v.name),
         reports: reports.map(r => r.name),
         appActions: acts.map(a => a.name),
@@ -5983,7 +5984,7 @@
         </div>`;
       };
       const mainSteps = (plan.steps || []).filter(st => !st.alternativeId);
-      const altSteps = (alt) => (plan.steps || []).filter(st => st.alternativeId === alt.id || (alt.stepIds || []).includes(st.id));
+      const altSteps = (alt) => (plan.steps || []).filter(st => st.alternativeId === alt.id);
       const warn = [...(plan.clientWarnings || []), ...(plan.gatewayWarnings || [])];
       return `
         <div style="display:flex; align-items:center; justify-content:space-between;"><b>変更計画（AI Change Planner）</b><span style="opacity:.6; font-size:11px;">requestId: ${esc(plan.requestId || '')}</span></div>
@@ -5991,8 +5992,8 @@
         ${sec('現在利用できるもの', li(existing, x => x, '利用できる既存資産は挙げられていません'))}
         ${sec('追加が必要なもの', `${li(a.missingCapabilities || [], x => `<li>${esc(x)}</li>`, '追加が必要なものはありません')}${proposed}`)}
         ${sec('変更計画', mainSteps.length ? mainSteps.map(stepHtml).join('') : '<div style="opacity:.6; margin-top:4px;">計画の手順はありません</div>')}
-        ${(plan.alternatives || []).length ? sec('代替案', plan.alternatives.map(alt => `<div style="margin-top:6px;"><b>${esc(alt.id)}</b> ${esc(alt.title)} <span style="opacity:.8;">${esc(alt.summary)}</span>${altSteps(alt).map(stepHtml).join('')}</div>`).join('')) : ''}
-        ${sec('影響範囲', li(plan.impact || [], x => `<li>${x.validation?.status === 'invalid' ? badge('不明な対象', '#b00020') : ''}${esc(x.targetKind)}${x.targetRef ? ` <code>${esc(x.targetRef)}</code>` : ''}: ${esc(x.description)}${chips(x.evidenceIds)}</li>`, '既存設定への影響は挙げられていません'))}
+        ${(plan.alternatives || []).length ? sec('代替案', plan.alternatives.map(alt => `<div style="margin-top:6px;"><b>${esc(alt.id)}</b> ${esc(alt.title)} <span style="opacity:.8;">${esc(alt.summary)}</span>${(alt.stepIds || []).length ? `<div style="font-size:11px; opacity:.7;">対象の手順: ${esc(alt.stepIds.join(', '))}</div>` : ''}${altSteps(alt).map(stepHtml).join('')}</div>`).join('')) : ''}
+        ${sec('影響範囲', li(plan.impact || [], x => `<li>${x.validation?.status === 'invalid' ? badge('不明な対象', '#b00020') : x.validation?.status === 'proposed' ? badge('新規提案', '#1a73e8') : badge('既存', '#2e7d32')}${esc(x.targetKind)}${x.targetRef ? ` <code>${esc(x.targetRef)}</code>` : ''}: ${esc(x.description)}${chips(x.evidenceIds)}</li>`, '既存設定への影響は挙げられていません'))}
         ${sec('確認したいこと', li(plan.questions || [], q => `<li>${badge('確認必要', '#b26a00')}<b>${esc(q.id)}</b> ${esc(q.question)} <span style="opacity:.7;">（${esc(q.reason)}）</span>${chips(q.relatedEvidenceIds)}</li>`, '確認事項はありません'))}
         ${sec('解析できないこと', li(plan.unknowns || [], u => `<li>${esc(u)}</li>`, 'なし'))}
         ${warn.length ? `<details style="margin-top:6px; font-size:11px;"><summary style="cursor:pointer;">検証で除去・調整した項目（${warn.length}）</summary>${warn.map(w => `<div>${esc(w.code)}: ${esc(w.message)}</div>`).join('')}</details>` : ''}
