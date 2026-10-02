@@ -8690,7 +8690,7 @@
       if (x.actionType === 'ADD_FIELD') { const n = Object.keys(p?.snapshot?.fields?.properties || {}).length; return row(`フィールド: Before ${n} 件 → After ${n + 1} 件`); }
       if (x.actionType === 'ADD_VIEW') { const n = Object.keys(p?.snapshot?.views?.views || {}).length; return row(`一覧: Before ${n} 件 → After ${n + 1} 件`); }
       // 既存設定の変更（Phase 11）: 変更した属性だけ Before → After。他の設定・属性はそのまま
-      if (isUpdateAction(x.actionType) && pp.after) return execAttrDiff(pp.before, pp.after).map(row).join('') + row(`（${execActionJa(x.actionType)}。変更しない属性と他の${EXEC_NOUN[x.actionType] || '設定'}はそのまま）`);
+      if (isUpdateAction(x.actionType) && pp.after) return row(`変更する属性: ${Object.keys(pp.after).map(k => EXEC_ATTR_JA[k] || k).join('・')}（変更しない属性と他の${EXEC_NOUN[x.actionType] || '設定'}はそのまま。他の${EXEC_NOUN[x.actionType] || '設定'}が bit 単位で保持されたことを反映後に検証します）`);
       return '';
     }
     /**

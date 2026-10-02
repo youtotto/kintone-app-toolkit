@@ -286,7 +286,7 @@ const PLAN_U = { ...PLAN_X, plan: { ...PLAN_X.plan, proposedFields: [], steps: [
   await click(m, 'kt-ai-exec-start'); await tick();
   const e1 = execHtml(m);
   assert(m.panel.executorState().stage === 'confirm' && /<div[^>]*>追加<\/div>/.test(e1) && e1.includes('＋ 一覧 1 件') && /<div[^>]*>既存設定の変更<\/div>/.test(e1) && e1.includes('✎ 通知 1 件') && e1.includes('✎ 一覧 1 件'), '最終確認: 「追加 ＋ 一覧 1 件」「既存設定の変更 ✎ 通知 1 件 / ✎ 一覧 1 件」（§36）');
-  assert(e1.includes('条件: amount &gt;= &quot;1000000&quot; → amount &gt;= &quot;2000000&quot;') && e1.includes('表示項目: case_name, approver → case_name, approver, amount') && !/通知先: /.test(e1) && e1.includes('⚠ 既存の設定を変更します') && e1.includes('通知される範囲が狭くなります'), '最終確認の Before / After は変更した属性だけ・条件変更は警告（通知が届かなくなる可能性）');
+  assert(e1.includes('条件: amount &gt;= &quot;1000000&quot; → amount &gt;= &quot;2000000&quot;') && e1.includes('表示フィールド: case_name, approver → case_name, approver, amount') && e1.includes('変更する属性: 条件') && !/通知先: /.test(e1) && e1.includes('⚠ 既存の設定を変更します') && e1.includes('通知される範囲が狭くなります'), '最終確認の Before / After は変更した属性だけ・条件変更は警告（通知が届かなくなる可能性）');
   await click(m, 'kt-ai-exec-go'); await tick(); await tick();
   const ex = m.panel.executorState().execution;
   assert(m.panel.executorState().stage === 'done' && ex.status === 'DONE' && m.mock.st.perRecord[0].filterCond === 'amount >= "2000000"' && m.mock.st.views['承認待ち'].fields.join() === 'case_name,approver,amount' && m.mock.st.views['担当者別'], '反映: 通知の条件・一覧の表示項目・新しい一覧');
