@@ -61,7 +61,7 @@ function mount({ planResponse = PLAN_X, inputs = INPUTS, executor = undefined } 
   const mock = makeKintoneMock(inputs.data);
   const panel = mountAiDocsPanel(host, { getInputs: () => inputs, setPreview: () => { }, copyText: async (t) => { copies.push(t); return true; }, downloadText: (name, text) => downloads.push({ name, text }), colors: { border: '#ccc', bg: '#fff' }, settings, session, hostname: 't.cybozu.com', connectFlow: flow, executor: executor === undefined ? { api: mock.api, appId: '341' } : executor });
   const $ = (id) => host.querySelector(`#${id}`);
-  return { host, panel, $, copies, downloads, mock };
+  return { host, panel, $, copies, downloads, mock, session };
 }
 async function runPlan(m) {
   m.panel.setMode('plan');
@@ -240,6 +240,22 @@ console.log('\n--- 2b. Tier 2（通知 / リマインダー / フィールド変
   m.panel.decide('P1', 'approve');
   const e = execHtml(m);
   assert(/実行不可[\s\S]*?<b>1 件（P1）/.test(e) && /id="kt-ai-exec-start"[^>]*disabled/.test(e), '条件式が受理されない通知は「× 実行不可」・ボタンは押せない');
+}
+
+console.log('\n--- 2c. AI 接続が切れても Review / Executor は動く（Executor は Gateway 非依存）---');
+{
+  const m = mount();
+  await tick(); await runPlan(m);
+  // 計画生成後に AI 接続が壊れた（タブのスリープ / timeout / 失効）状況を模す: Gateway はすべて失敗、接続は未接続
+  m.session.status = () => ({ connected: false, apiBase: 'https://gw.test', refreshExpiresAt: null, scope: null });
+  m.session.client.getHealth = async () => { throw Object.assign(new Error('timeout'), { name: 'AiClientError', code: 'TIMEOUT' }); };
+  m.session.client.plan = async () => { throw Object.assign(new Error('expired'), { name: 'AiClientError', code: 'SESSION_EXPIRED' }); };
+  await m.panel.refreshCapability({ force: true }).catch(() => { });
+  m.panel.decide('P1', 'approve'); m.panel.decide('P2', 'approve');
+  await click(m, 'kt-ai-exec-start'); await tick();
+  assert(m.panel.executorState().stage === 'confirm', 'AI 接続が無くても prepare（kintone API のみ）は動く');
+  await click(m, 'kt-ai-exec-go'); await tick(); await tick();
+  assert(m.panel.executorState().execution?.status === 'DONE' && m.mock.st.fields.progress && m.mock.st.views['担当者別'], 'AI 接続が切れていても承認済み計画の反映・検証は完了する（Gateway を呼ばない）');
 }
 
 console.log('\n--- 3. 回帰: Review UI の既存要素は変わらない ---');
