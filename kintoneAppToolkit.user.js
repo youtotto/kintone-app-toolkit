@@ -5772,7 +5772,8 @@
           execUsers.forEach(en => executableUserOk(en));
           if (r.status === STATUS.INVALID) return r;
           for (const fr of froms) {
-            for (const a of model.process.actions.filter(a => a.from === fr)) {
+            // 重なりの候補は作業者が実行する PRIMARY だけ（作業者以外でも実行できる SECONDARY の差し戻し等は分岐の相手ではない）
+            for (const a of model.process.actions.filter(a => a.from === fr && (a.type || 'PRIMARY') !== 'SECONDARY')) {
               const ov = condsOverlap(a.filterCond, cond);
               if (normCond(a.filterCond) === normCond(cond)) issue('ACTION_SAME_CONDITION', 'high', `同じ遷移元「${fr}」に同じ条件のアクション「${a.name}」が既にあります（どちらが実行されるか曖昧）`);
               else if (ov === true) issue('ACTION_CONDITION_OVERLAP', 'medium', `遷移元「${fr}」の既存アクション「${a.name}」（${a.filterCond || '条件なし'}）と条件が重なる可能性があります`);
@@ -5809,7 +5810,7 @@
               for (const c of condFields(primary.cond, model)) requireField(c, '条件式');
               checkCond(primary.cond, '条件式', 'process');
               const narrower = condNarrower(primary.cond, act.filterCond);
-              if (narrower === true || !act.filterCond) issue('EXISTING_PATH_RESTRICTED', 'high', `⚠ 既存の操作可能条件を変更します。「${act.name}」は現在${act.filterCond ? `「${act.filterCond}」の` : 'すべての'}「${act.from}」で実行できます。変更後は「${primary.cond}」の場合のみ実行可能になります。`);
+              if (narrower === true || !act.filterCond) issue('EXISTING_PATH_RESTRICTED', 'high', `⚠ 既存の操作可能条件を変更します。「${act.name}」は、現在は${act.filterCond ? `「${act.filterCond}」の` : 'すべての'}「${act.from}」で実行できます。変更後は「${primary.cond}」の場合のみ実行可能になります。`);
               else if (narrower === null) issue('CONDITION_CHANGE_UNPARSED', 'medium', `「${act.name}」の条件を「${act.filterCond}」→「${primary.cond}」に変更します（制限の有無を自動判定できません。これまで実行できたレコードで実行できなくなる可能性があります）`);
               else issue('CONDITION_CHANGE', 'medium', `「${act.name}」の条件を「${act.filterCond || 'なし'}」→「${primary.cond}」に変更します（実行できる範囲は広がります）`);
               act.filterCond = primary.cond; changed = true; kinds.push('ACTION_CONDITION');
@@ -6227,7 +6228,7 @@
         if (unknown) { item.message = `「${from}」からのアクションの条件が複数のフィールドにまたがる、または単純な比較式ではないため、重複・欠落を判定できません`; out.push(item); continue; }
         const ok = (p, x) => (p.op === '>' ? x > p.num : p.op === '>=' ? x >= p.num : p.op === '<' ? x < p.num : p.op === '<=' ? x <= p.num : p.op === '=' ? x === p.num : x !== p.num);
         const nums = [...new Set(parsed.map(x => x.p.num))].sort((a, b) => a - b);
-        const samples = [...nums, ...nums.map(n => n - 0.5), ...nums.map(n => n + 0.5), -1e15, 1e15];
+        const samples = [...nums, ...nums.map(n => n - 1), ...nums.map(n => n + 1), -1e15, 1e15];   // 整数として判定（小数の隙間は欠落にしない）
         for (let i = 0; i < parsed.length; i++) for (let j = i + 1; j < parsed.length; j++) {
           const a = parsed[i], b = parsed[j];
           if (a.p.op === b.p.op && a.p.num === b.p.num) { item.identical.push([a.name, b.name]); continue; }
@@ -6238,7 +6239,7 @@
         item.gap = gaps.length ? { example: gaps[0] } : null;
         item.verdict = item.identical.length ? 'IDENTICAL' : item.overlaps.length ? 'OVERLAP' : item.gap ? 'GAP' : 'PARTITION_OK';
         const field = parsed[0].p.field;
-        item.message = item.verdict === 'PARTITION_OK' ? `「${from}」からのアクションの条件（${field}）に明らかな重複・欠落なし` : item.verdict === 'IDENTICAL' ? `「${from}」からのアクション ${item.identical.map(p => p.join(' / ')).join('、')} の条件が同一です（どちらが実行されるか曖昧）` : item.verdict === 'OVERLAP' ? (unconditional.length ? `「${from}」に無条件のアクション「${unconditional.map(a => a.name).join('」「')}」があり、条件付きのアクション（${parsed.map(x => x.name).join(' / ')}）と同時に実行できます（分岐が強制されません）` : `「${from}」からのアクション ${item.overlaps.map(p => p.join(' / ')).join('、')} の条件が重なります（両方のボタンが出るレコードがあります）`) : `「${from}」からのアクションの条件に欠落があります（例: ${field} = ${item.gap.example} のレコードはどのアクションも実行できません）`;
+        item.message = item.verdict === 'PARTITION_OK' ? `「${from}」からのアクションの条件（${field}・整数として判定）に明らかな重複・欠落なし` : item.verdict === 'IDENTICAL' ? `「${from}」からのアクション ${item.identical.map(p => p.join(' / ')).join('、')} の条件が同一です（どちらが実行されるか曖昧）` : item.verdict === 'OVERLAP' ? (unconditional.length ? `「${from}」に無条件のアクション「${unconditional.map(a => a.name).join('」「')}」があり、条件付きのアクション（${parsed.map(x => x.name).join(' / ')}）と同時に実行できます（分岐が強制されません）` : `「${from}」からのアクション ${item.overlaps.map(p => p.join(' / ')).join('、')} の条件が重なります（両方のボタンが出るレコードがあります）`) : `「${from}」からのアクションの条件に欠落があります（例: ${field} = ${item.gap.example} のレコードはどのアクションも実行できません）`;
         out.push(item);
       }
       return out;
@@ -6319,6 +6320,10 @@
       UPDATE_NOTIFICATION: { previewExecute: true, verify: true, rollbackStrategy: 'RESTORE_NOTIFICATION_SETTINGS', conditional: '通知先 / 条件 / イベント / 名前' },
       UPDATE_REMINDER: { previewExecute: true, verify: true, rollbackStrategy: 'RESTORE_REMINDER_SETTINGS', conditional: 'タイミング / 条件 / 通知先 / 名前' },
       UPDATE_VIEW: { previewExecute: true, verify: true, rollbackStrategy: 'RESTORE_VIEWS', conditional: '表形式の表示フィールド / 絞り込み / 並び順' },
+      // Phase 12: プロセス管理（有効なアプリのみ）。Process 関連の step は 1 つの Change Group にまとめ、完全な payload を 1 回の PUT で反映する
+      ADD_PROCESS_STATUS: { previewExecute: true, verify: true, rollbackStrategy: 'RESTORE_PROCESS_SETTINGS', conditional: 'プロセス管理が有効・到達経路あり' },
+      ADD_PROCESS_ACTION: { previewExecute: true, verify: true, rollbackStrategy: 'RESTORE_PROCESS_SETTINGS', conditional: 'プロセス管理が有効・遷移元 1 件' },
+      UPDATE_PROCESS: { previewExecute: true, verify: true, rollbackStrategy: 'RESTORE_PROCESS_SETTINGS', conditional: '条件 / 遷移先 / 作業者 / 実行可能ユーザー（削除・改名・有効化・無効化・分岐は計画のみ）' },
     });
     const ACTION_CAPABILITIES = Object.freeze(Object.fromEntries(Object.entries(KTPlanReview.ACTION_CAPABILITIES).map(([k, v]) => {
       const ex = EXECUTOR_COLUMNS[k] || { previewExecute: false, verify: !!v.validate, rollbackStrategy: v.simulate ? 'RESTORE_SNAPSHOT' : 'NONE' };
@@ -6747,7 +6752,7 @@
     /** 実行直前の再取得と prepare 時の snapshot を bit 単位で比べる（prepare → 実行の間の変更も止める） */
     const changedSincePrepare = (what, cur, snap) => (snap !== undefined && !same(cur, snap)) ? Object.assign(new Error(`対象の${what}が実行直前に変更されています（確認時点と一致しません）。もう一度確認してください`), { code: 'TARGET_CHANGED', detail: ['sincePrepare'] }) : null;
     const sensitiveFrom = (stepReview, codes) => (stepReview?.issues || []).filter(i => codes.includes(i.code)).map(i => ({ code: i.code, message: i.message }));
-    const JA_ATTR = { targets: '通知先', filterCond: '条件', events: 'イベント', title: '名前', timing: 'タイミング', fields: '表示フィールド', sort: '並び順' };
+    const JA_ATTR = { targets: '通知先', filterCond: '条件', events: 'イベント', title: '名前', timing: 'タイミング', fields: '表示フィールド', sort: '並び順', to: '遷移先', from: '遷移元', executableUsers: '実行可能ユーザー', assignees: '作業者', assigneeType: '作業者の指定形式' };
     const attrText = (k, v) => (v == null ? '—' : Array.isArray(v) ? (v.length ? v.join(', ') : '（なし）') : typeof v === 'object' ? (k === 'timing' ? `${v.code ?? '—'} の ${KTPlanReview.daysText(v.daysLater)}${v.time ? ' ' + v.time : ''}` : JSON.stringify(v)) : String(v) || '（なし）');
     const changesText = (changes) => Object.entries(changes).map(([k, c]) => `${JA_ATTR[k] || k}: ${attrText(k, c.from)} → ${attrText(k, c.to)}`).join('・');
 
@@ -7023,6 +7028,260 @@
       },
     };
 
+    // ================= プロセス管理（Phase 12）=================
+    //   API（cybozu.dev 2026-10-02 確認）: GET / PUT /k/v1/preview/app/status.json。states / actions は指定すると全体置換（指定しないステータスは削除される）。
+    //   先頭ステータスは新規追加不可。assignee.type は ONE / ALL / ANY。executableUser は type SECONDARY のときだけ。revision で楽観ロック。
+    //   handler の prepare は「変更（mutation）」だけを作り、apply / verify は Change Group（同じ実行の Process 関連 step 全部）で 1 回の PUT にまとめる
+    const PROCESS_ACTIONS = ['ADD_PROCESS_STATUS', 'ADD_PROCESS_ACTION', 'UPDATE_PROCESS'];
+    const isProcessAction = (a) => PROCESS_ACTIONS.includes(a);
+    const PROCESS_ENTITY_FIELD_TYPES = ['USER_SELECT', 'ORGANIZATION_SELECT', 'GROUP_SELECT', 'CREATOR', 'MODIFIER'];
+    const normEntityKey = (t) => { const x = String(t ?? ''); return x.includes(':') ? x : x + ':'; };
+    /** "TYPE:code" / {type, code} → プロセス管理の entity。作業者は USER / GROUP / ORGANIZATION / FIELD_ENTITY / CREATOR / CUSTOM_FIELD、実行可能ユーザーは CREATOR / CUSTOM_FIELD 不可 */
+    function processEntity(text, fieldsNow, { executable = false } = {}) {
+      const t = (text && typeof text === 'object') ? `${text.type ?? ''}${text.code != null && text.code !== '' ? ':' + text.code : ''}` : String(text ?? '').trim();
+      const m = t.match(/^(USER|GROUP|ORGANIZATION|FIELD_ENTITY|CREATOR|CUSTOM_FIELD)(?::(.*))?$/i);
+      if (!m) return { error: 'ENTITY_UNRESOLVED', message: `${executable ? '実行可能ユーザー' : '作業者'}「${t}」を解決できません` };
+      const type = m[1].toUpperCase(); const code = (m[2] ?? '').trim();
+      if (type === 'CREATOR') return executable ? { error: 'EXECUTABLE_USER_INVALID', message: '実行可能ユーザーにアプリ作成者（CREATOR）は指定できません' } : { entity: { type: 'CREATOR' } };
+      if (type === 'CUSTOM_FIELD' && executable) return { error: 'EXECUTABLE_USER_INVALID', message: '実行可能ユーザーにカスタマイズ項目（CUSTOM_FIELD）は指定できません' };
+      if (!code) return { error: 'ENTITY_UNRESOLVED', message: `「${t}」のコードがありません` };
+      if (type === 'FIELD_ENTITY' && fieldsNow) {
+        const fd = fieldsNow[code];
+        if (!fd) return { error: 'ASSIGNEE_FIELD_MISSING', message: `${executable ? '実行可能ユーザー' : '作業者'}のフィールド「${code}」が動作テスト環境にありません` };
+        if (!PROCESS_ENTITY_FIELD_TYPES.includes(fd.type)) return { error: 'ASSIGNEE_FIELD_INVALID', message: `フィールド「${code}」（${fd.type}）は${executable ? '実行可能ユーザー' : '作業者'}に使えません（作成者 / 更新者 / ユーザー選択 / 組織選択 / グループ選択）` };
+      }
+      return { entity: { type, code } };
+    }
+    const procEntityKeys = (list) => (list || []).map(x => entityKey(x.entity)).sort();
+    const stateKeyOf = (st) => ({ name: st?.name, index: String(st?.index ?? ''), assignee: { type: st?.assignee?.type ?? null, entities: (st?.assignee?.entities || []).map(e => ({ k: entityKey(e.entity), includeSubs: !!e.includeSubs })).sort((a, b) => (a.k < b.k ? -1 : a.k > b.k ? 1 : 0)) } });
+    const actionKeyOf = (a) => ({ name: a?.name, from: a?.from, to: a?.to, filterCond: normCondE(a?.filterCond), type: a?.type || 'PRIMARY', executableUser: (a?.type === 'SECONDARY') ? (a.executableUser?.entities || []).map(e => ({ k: entityKey(e.entity), includeSubs: !!e.includeSubs })).sort((x, y) => (x.k < y.k ? -1 : x.k > y.k ? 1 : 0)) : null });
+    const sortedStates = (states) => Object.values(states || {}).filter(Boolean).sort((a, b) => Number(a.index) - Number(b.index));
+    const findAction = (actions, name, from) => (actions || []).findIndex(a => a.name === name && a.from === from);
+    /** Review 時点の同一性（diff.target.identity）と現在のプロセス設定を比べ、違う属性名を返す */
+    function processIdentityMismatch(identity, status) {
+      if (!identity) return ['identity'];
+      if (identity.kind === 'PROCESS_STATUS') {
+        const st = status?.states?.[identity.name]; if (!st) return ['missing'];
+        const out = [];
+        const pos = sortedStates(status.states).findIndex(x => x.name === identity.name);
+        if (identity.index != null && pos !== identity.index) out.push('index');
+        if ((st.assignee?.type ?? null) !== (identity.assigneeType ?? null)) out.push('assigneeType');
+        if (!same(procEntityKeys(st.assignee?.entities), (identity.assignees || []).map(normEntityKey).sort())) out.push('assignees');
+        return out;
+      }
+      const i = findAction(status?.actions, identity.name, identity.from); if (i < 0) return ['missing'];
+      const a = status.actions[i]; const out = [];
+      if (a.to !== identity.to) out.push('to');
+      if (normCondE(a.filterCond) !== normCondE(identity.filterCond)) out.push('filterCond');
+      if ((a.type || 'PRIMARY') !== (identity.type || 'PRIMARY')) out.push('type');
+      if (!same(procEntityKeys(a.type === 'SECONDARY' ? a.executableUser?.entities : []), (identity.executableUsers || []).map(normEntityKey).sort())) out.push('executableUsers');
+      return out;
+    }
+    const PROCESS_SENSITIVE = ['EXISTING_PATH_RESTRICTED', 'TRANSITION_CHANGE', 'EXECUTABLE_USER_CHANGE', 'ASSIGNEE_CHANGE', 'ASSIGNEE_TYPE_CHANGE', 'CONDITION_CHANGE_UNPARSED', 'CONDITION_CHANGE'];
+    const ASSIGNEE_TYPE_JA = { ONE: '次のユーザーから作業者を選択', ALL: '全員', ANY: '一人' };
+
+    /** ADD_PROCESS_STATUS: Review の After（name / assigneeType / assignees）→ ステータス追加の変更。index は現在の最大 + 1（末尾） */
+    HANDLERS.ADD_PROCESS_STATUS = {
+      group: 'process',
+      prepare(step, { stepReview, fieldsNow = null, processNow = null }) {
+        const after = stepReview?.diff?.after;
+        if (!after || !after.name) return { unsupported: 'NO_STATUS_SPEC', message: 'Review に追加後のステータス定義がありません' };
+        if (processNow && processNow.enable !== true) return { unsupported: 'PROCESS_ENABLE_NOT_SUPPORTED', message: 'プロセス管理が無効なアプリです。有効化は Toolkit では行いません（kintone の設定画面で有効にしてから計画を作り直してください）' };
+        const type = ['ONE', 'ALL', 'ANY'].includes(after.assigneeType) ? after.assigneeType : null;
+        if (!type) return { unsupported: 'ASSIGNEE_TYPE_UNKNOWN', message: `作業者の指定形式「${after.assigneeType}」は kintone の語彙（ONE / ALL / ANY）ではありません` };
+        const entities = [];
+        for (const a of after.assignees || []) { const r = processEntity(a, fieldsNow); if (r.error) return { unsupported: r.error, message: r.message }; entities.push({ entity: r.entity, includeSubs: false }); }
+        return {
+          mutation: { kind: 'ADD_STATUS', name: after.name, assignee: { type, entities } },
+          expect: { name: after.name, assigneeType: type, assignees: entities.map(e => entityKey(e.entity)).sort() },
+          summary: `＋ ステータス「${after.name}」${entities.length ? `（作業者: ${entities.map(e => entityKey(e.entity)).join(', ')}・${ASSIGNEE_TYPE_JA[type]}）` : '（作業者なし）'}`,
+          sensitive: [], targetLabel: after.name, changeKind: 'ADD_STATUS',
+        };
+      },
+    };
+    /** ADD_PROCESS_ACTION: name / from（1 件）/ to / filterCond / executableUsers（あれば SECONDARY） */
+    HANDLERS.ADD_PROCESS_ACTION = {
+      group: 'process',
+      prepare(step, { stepReview, fieldsNow = null, processNow = null }) {
+        const after = stepReview?.diff?.after;
+        if (!after || !after.name) return { unsupported: 'NO_ACTION_SPEC', message: 'Review に追加後のアクション定義がありません' };
+        if (processNow && processNow.enable !== true) return { unsupported: 'PROCESS_ENABLE_NOT_SUPPORTED', message: 'プロセス管理が無効なアプリです。有効化は Toolkit では行いません' };
+        const froms = Array.isArray(after.from) ? after.from : [after.from];
+        if (froms.length !== 1 || !froms[0]) return { unsupported: 'MULTI_FROM_NOT_SUPPORTED', message: '遷移元が複数のアクションは 1 件ずつの step に分けてください（計画のみ）' };
+        if (!after.to) return { unsupported: 'NO_ACTION_SPEC', message: '遷移先がありません' };
+        const filterCond = String(after.filterCond || '').trim();
+        if (filterCond && fieldsNow) { const qc = KTQueryCheck.check(filterCond, { fields: fieldsNow, usage: 'process' }); if (!qc.ok) return { unsupported: 'INVALID_CONDITION', message: `条件式が kintone で受理されません: ${qc.errors.map(e => e.message).join('／')}` }; }
+        const execUsers = [];
+        for (const u of after.executableUsers || []) { const r = processEntity(u, fieldsNow, { executable: true }); if (r.error) return { unsupported: r.error, message: r.message }; execUsers.push({ entity: r.entity, includeSubs: false }); }
+        const type = execUsers.length ? 'SECONDARY' : 'PRIMARY';
+        const action = { name: after.name, from: froms[0], to: after.to, filterCond, type, ...(type === 'SECONDARY' ? { executableUser: { entities: execUsers } } : {}) };
+        return {
+          mutation: { kind: 'ADD_ACTION', action },
+          expect: { name: after.name, from: froms[0], to: after.to, filterCond, type, executableUsers: execUsers.map(e => entityKey(e.entity)).sort() },
+          summary: `＋ アクション「${after.name}」: ${froms[0]} → ${after.to}${filterCond ? ` [${filterCond}]` : ''}${execUsers.length ? `（作業者以外でも実行可: ${execUsers.map(e => entityKey(e.entity)).join(', ')}）` : ''}`,
+          sensitive: [], targetLabel: after.name, changeKind: 'ADD_ACTION', condition: filterCond || null,
+        };
+      },
+    };
+    /** UPDATE_PROCESS: Review が固定した identity（アクション: name / from / to / 条件 / type / 実行可能ユーザー、ステータス: name / index / 作業者）の 1 件だけを変更 */
+    HANDLERS.UPDATE_PROCESS = {
+      group: 'process',
+      prepare(step, { stepReview, fieldsNow = null, processNow = null }) {
+        const identity = stepReview?.diff?.target?.identity, before = stepReview?.diff?.before, after = stepReview?.diff?.after;
+        if (!identity || !before || !after) return { unsupported: 'NO_PROCESS_SPEC', message: 'Review に変更前後のプロセス定義（対象の同一性）がありません。計画を作り直してください' };
+        if (processNow && processNow.enable !== true) return { unsupported: 'PROCESS_ENABLE_NOT_SUPPORTED', message: 'プロセス管理が無効なアプリです。有効化は Toolkit では行いません' };
+        const kinds = stepReview?.diff?.changeKinds || [];
+        if (kinds.includes('ACTION_BRANCH') || after.branches) return { unsupported: 'BRANCH_NOT_SUPPORTED', message: '既存アクションに分岐を足す変更は反映しません（ADD_PROCESS_ACTION で別名のアクションにしてください）' };
+        const sensitive = sensitiveFrom(stepReview, PROCESS_SENSITIVE);
+        if (identity.kind === 'PROCESS_ACTION') {
+          const changes = {};
+          if (before.to !== after.to) changes.to = { from: before.to, to: after.to };
+          if (before.from !== after.from) changes.from = { from: before.from, to: after.from };
+          if (normCondE(before.filterCond) !== normCondE(after.filterCond)) changes.filterCond = { from: before.filterCond || '', to: String(after.filterCond || '').trim() };
+          if (!sameKeys(before.executableUsers, after.executableUsers)) changes.executableUsers = { from: [...(before.executableUsers || [])], to: [...(after.executableUsers || [])] };
+          if (!Object.keys(changes).length) return { unsupported: 'NO_CHANGE', message: '変更内容がありません' };
+          if (changes.filterCond && changes.filterCond.to && fieldsNow) { const qc = KTQueryCheck.check(changes.filterCond.to, { fields: fieldsNow, usage: 'process' }); if (!qc.ok) return { unsupported: 'INVALID_CONDITION', message: `条件式が kintone で受理されません: ${qc.errors.map(e => e.message).join('／')}` }; }
+          const mut = { kind: 'UPDATE_ACTION', identity: clone(identity), set: {} };
+          if (changes.to) mut.set.to = changes.to.to;
+          if (changes.from) mut.set.from = changes.from.to;
+          if (changes.filterCond) mut.set.filterCond = changes.filterCond.to;
+          if (changes.executableUsers) { const list = []; for (const u of changes.executableUsers.to) { const r = processEntity(u, fieldsNow, { executable: true }); if (r.error) return { unsupported: r.error, message: r.message }; list.push({ entity: r.entity, includeSubs: false }); } mut.set.executableUser = { entities: list }; mut.set.type = list.length ? 'SECONDARY' : 'PRIMARY'; }
+          return {
+            mutation: mut,
+            expect: { kind: 'PROCESS_ACTION', name: identity.name, from: mut.set.from ?? identity.from, to: mut.set.to ?? identity.to, filterCond: mut.set.filterCond ?? (identity.filterCond || ''), type: mut.set.type ?? identity.type, executableUsers: (mut.set.executableUser ? mut.set.executableUser.entities.map(e => entityKey(e.entity)) : (identity.executableUsers || []).map(normEntityKey)).sort() },
+            summary: `✎ アクション「${identity.name}」: ${changesText(changes)}`,
+            sensitive, before: Object.fromEntries(Object.entries(changes).map(([k, c]) => [k, c.from])), after: Object.fromEntries(Object.entries(changes).map(([k, c]) => [k, c.to])),
+            targetLabel: identity.name, changeKind: kinds[0] || 'ACTION_CONDITION', condition: changes.filterCond ? changes.filterCond.to : null,
+          };
+        }
+        // ステータス（作業者 / 指定形式）
+        const changes = {};
+        if (!sameKeys(before.assignees, after.assignees)) changes.assignees = { from: [...(before.assignees || [])], to: [...(after.assignees || [])] };
+        if (before.assigneeType !== after.assigneeType) changes.assigneeType = { from: before.assigneeType, to: after.assigneeType };
+        if (!Object.keys(changes).length) return { unsupported: 'NO_CHANGE', message: '変更内容がありません' };
+        const type = ['ONE', 'ALL', 'ANY'].includes(after.assigneeType) ? after.assigneeType : null;
+        if (!type) return { unsupported: 'ASSIGNEE_TYPE_UNKNOWN', message: `作業者の指定形式「${after.assigneeType}」は kintone の語彙（ONE / ALL / ANY）ではありません` };
+        const entities = [];
+        for (const a of after.assignees || []) { const r = processEntity(a, fieldsNow); if (r.error) return { unsupported: r.error, message: r.message }; entities.push({ entity: r.entity, includeSubs: false }); }
+        return {
+          mutation: { kind: 'UPDATE_STATUS', identity: clone(identity), set: { assignee: { type, entities } } },
+          expect: { kind: 'PROCESS_STATUS', name: identity.name, assigneeType: type, assignees: entities.map(e => entityKey(e.entity)).sort() },
+          summary: `✎ ステータス「${identity.name}」の作業者: ${changesText(changes)}`,
+          sensitive, before: Object.fromEntries(Object.entries(changes).map(([k, c]) => [k, c.from])), after: Object.fromEntries(Object.entries(changes).map(([k, c]) => [k, c.to])),
+          targetLabel: identity.name, changeKind: 'ASSIGNEE',
+        };
+      },
+    };
+
+    /** Process Change Group（§25〜26）: 同じ実行の Process 関連 step を「最新 preview ＋ 承認分 = 完全な payload」に合成して 1 回の PUT */
+    const PROCESS_GROUP = {
+      /** 合成（API は呼ばない。純関数）。current = GET /preview/app/status の応答 */
+      compose(current, steps) {
+        const next = { enable: current.enable, states: clone(current.states || {}), actions: clone(current.actions || []) };
+        const firstName = sortedStates(current.states)[0]?.name ?? null;
+        for (const st of steps) {
+          const m = st.prepared?.mutation; if (!m) throw Object.assign(new Error(`${st.stepId} に反映する変更がありません`), { code: 'NO_PROCESS_SPEC', stepId: st.stepId });
+          if (m.kind === 'ADD_STATUS') {
+            if (next.states[m.name]) throw Object.assign(new Error(`ステータス「${m.name}」は既に存在します`), { code: 'TARGET_EXISTS', stepId: st.stepId });
+            const maxIndex = sortedStates(next.states).reduce((mx, x) => Math.max(mx, Number(x.index)), -1);
+            next.states[m.name] = { name: m.name, index: String(maxIndex + 1), assignee: clone(m.assignee) };
+          } else if (m.kind === 'ADD_ACTION') {
+            const a = m.action;
+            if (!next.states[a.from]) throw Object.assign(new Error(`遷移元ステータス「${a.from}」がありません`), { code: 'TARGET_MISSING', stepId: st.stepId });
+            if (!next.states[a.to]) throw Object.assign(new Error(`遷移先ステータス「${a.to}」がありません`), { code: 'TARGET_MISSING', stepId: st.stepId });
+            if (findAction(next.actions, a.name, a.from) >= 0) throw Object.assign(new Error(`アクション「${a.name}」（${a.from} から）は既に存在します`), { code: 'TARGET_EXISTS', stepId: st.stepId });
+            next.actions.push(clone(a));
+          } else if (m.kind === 'UPDATE_ACTION') {
+            const mis = processIdentityMismatch(m.identity, next);
+            if (mis.length) throw Object.assign(new Error(`対象のアクション「${m.identity.name}」が Review 時点から変わっています（${mis.join(', ')}）。再レビューしてください`), { code: 'TARGET_CHANGED', stepId: st.stepId, detail: mis });
+            const i = findAction(next.actions, m.identity.name, m.identity.from);
+            const a = next.actions[i];
+            if (m.set.to != null) { if (!next.states[m.set.to]) throw Object.assign(new Error(`遷移先ステータス「${m.set.to}」がありません`), { code: 'TARGET_MISSING', stepId: st.stepId }); a.to = m.set.to; }
+            if (m.set.from != null) { if (!next.states[m.set.from]) throw Object.assign(new Error(`遷移元ステータス「${m.set.from}」がありません`), { code: 'TARGET_MISSING', stepId: st.stepId }); a.from = m.set.from; }
+            if (m.set.filterCond != null) a.filterCond = m.set.filterCond;
+            if (m.set.executableUser) { const old = a.executableUser?.entities || []; a.executableUser = { entities: m.set.executableUser.entities.map(e => { const o = old.find(x => entityKey(x.entity) === entityKey(e.entity)); return o ? clone(o) : clone(e); }) }; a.type = m.set.type; if (a.type === 'PRIMARY') delete a.executableUser; }
+          } else if (m.kind === 'UPDATE_STATUS') {
+            const mis = processIdentityMismatch(m.identity, next);
+            if (mis.length) throw Object.assign(new Error(`対象のステータス「${m.identity.name}」が Review 時点から変わっています（${mis.join(', ')}）。再レビューしてください`), { code: 'TARGET_CHANGED', stepId: st.stepId, detail: mis });
+            const stx = next.states[m.identity.name];
+            const old = stx.assignee?.entities || [];
+            stx.assignee = { type: m.set.assignee.type, entities: m.set.assignee.entities.map(e => { const o = old.find(x => entityKey(x.entity) === entityKey(e.entity)); return o ? clone(o) : clone(e); }) };
+          }
+        }
+        // 合成結果の整合: 先頭ステータスは変わらない / 全アクションの from・to が存在する / 追加したステータスに到達経路がある
+        if (firstName && sortedStates(next.states)[0]?.name !== firstName) throw Object.assign(new Error('先頭のステータスは変更・追加できません'), { code: 'FIRST_STATUS_CHANGED' });
+        for (const a of next.actions) if (!next.states[a.from] || !next.states[a.to]) throw Object.assign(new Error(`アクション「${a.name}」の遷移元 / 遷移先（${a.from} → ${a.to}）が存在しません`), { code: 'TARGET_MISSING' });
+        for (const st of steps) { const m = st.prepared?.mutation; if (m?.kind === 'ADD_STATUS' && !next.actions.some(a => a.to === m.name)) throw Object.assign(new Error(`ステータス「${m.name}」へ遷移するアクションがありません（到達不能）`), { code: 'STATUS_UNREACHABLE', stepId: st.stepId }); }
+        return next;
+      },
+      async apply({ api, appId, snapshot, processBaseline = undefined }, steps) {
+        const [cur, views, generalNotify, perRecordNotify, reminderNotify] = await Promise.all([api.getPreviewStatus(appId), api.getPreviewViews(appId), api.getPreviewGeneralNotifications(appId), api.getPreviewPerRecordNotifications(appId), api.getPreviewReminders(appId)]);
+        if (cur?.enable !== true) throw Object.assign(new Error('プロセス管理が無効です（Toolkit は有効化しません）'), { code: 'PROCESS_ENABLE_NOT_SUPPORTED' });
+        const baseline = processBaseline !== undefined ? processBaseline : (snapshot?.status ? stripRevision(snapshot.status) : undefined);
+        const since = changedSincePrepare('プロセス管理の設定', stripRevision(cur), baseline);
+        if (since) throw since;
+        const next = PROCESS_GROUP.compose(cur, steps);
+        const res = await api.putPreviewStatus(appId, { enable: next.enable, states: next.states, actions: next.actions }, String(cur?.revision ?? ''));
+        return {
+          revision: String(res?.revision ?? ''),
+          requests: [{ method: 'PUT', path: '/k/v1/preview/app/status.json', groupId: steps[0]?.groupId ?? null, stepIds: steps.map(x => x.stepId), states: Object.keys(next.states).length, actions: next.actions.length }],
+          before: { states: Object.keys(cur.states || {}).length, actions: (cur.actions || []).length }, after: { states: Object.keys(next.states).length, actions: next.actions.length },
+          current: stripRevision(cur), expectedNext: next, preGroup: { views: stripRevision(views), generalNotify: stripRevision(generalNotify), perRecordNotify: stripRevision(perRecordNotify), reminderNotify: stripRevision(reminderNotify) },
+        };
+      },
+      /** 反映後の再取得で、既存の保持（bit 単位）・意図した変更だけ・enable 不変・kintone 側の副作用（一覧 / 通知 / リマインダー）を確かめる */
+      async verify({ api, appId }, steps, applied) {
+        const [now, views, generalNotify, perRecordNotify, reminderNotify] = await Promise.all([api.getPreviewStatus(appId), api.getPreviewViews(appId), api.getPreviewGeneralNotifications(appId), api.getPreviewPerRecordNotifications(appId), api.getPreviewReminders(appId)]);
+        const cur = applied.current, exp = applied.expectedNext;
+        const checks = []; const check = (name, ok, expected, actual) => checks.push({ name, ok, expected, actual });
+        check('enableUnchanged', now?.enable === cur.enable, cur.enable, now?.enable);
+        const intendedStates = new Set(steps.map(x => x.prepared?.mutation).filter(m => m && (m.kind === 'ADD_STATUS' || m.kind === 'UPDATE_STATUS')).map(m => m.kind === 'ADD_STATUS' ? m.name : m.identity.name));
+        const intendedActions = new Set(steps.map(x => x.prepared?.mutation).filter(m => m && (m.kind === 'ADD_ACTION' || m.kind === 'UPDATE_ACTION')).map(m => m.kind === 'ADD_ACTION' ? `${m.action.name}|${m.action.from}` : `${m.identity.name}|${m.identity.from}`));
+        const removedStates = Object.keys(cur.states || {}).filter(n => !now?.states?.[n]);
+        const changedStates = Object.keys(cur.states || {}).filter(n => now?.states?.[n] && !intendedStates.has(n) && !same(stateKeyOf(cur.states[n]), stateKeyOf(now.states[n])));
+        check('existingStatesPreserved', removedStates.length === 0 && changedStates.length === 0, [], [...removedStates, ...changedStates]);
+        const removedActions = (cur.actions || []).filter(a => findAction(now?.actions, a.name, a.from) < 0).map(a => `${a.name}|${a.from}`);
+        const changedActions = (cur.actions || []).filter(a => { const i = findAction(now?.actions, a.name, a.from); return i >= 0 && !intendedActions.has(`${a.name}|${a.from}`) && !same(actionKeyOf(a), actionKeyOf(now.actions[i])); }).map(a => `${a.name}|${a.from}`);
+        check('existingActionsPreserved', removedActions.length === 0 && changedActions.length === 0, [], [...removedActions, ...changedActions]);
+        check('unexpectedRemoved', removedStates.length + removedActions.length === 0, 0, removedStates.length + removedActions.length);
+        check('unexpectedChanged', changedStates.length + changedActions.length === 0, 0, changedStates.length + changedActions.length);
+        const extraStates = Object.keys(now?.states || {}).filter(n => !exp.states[n]), extraActions = (now?.actions || []).filter(a => findAction(exp.actions, a.name, a.from) < 0).map(a => `${a.name}|${a.from}`);
+        check('noUnexpectedAdditions', extraStates.length + extraActions.length === 0, [], [...extraStates, ...extraActions]);
+        const perStep = new Map();
+        for (const st of steps) {
+          const m = st.prepared?.mutation; const own = [];
+          const c = (name, ok, expected, actual) => { own.push({ name, ok, expected, actual }); };
+          if (m.kind === 'ADD_STATUS' || m.kind === 'UPDATE_STATUS') { const name = m.kind === 'ADD_STATUS' ? m.name : m.identity.name; const got = now?.states?.[name]; c(m.kind === 'ADD_STATUS' ? 'newStatusExists' : 'statusUpdated', !!got && same(stateKeyOf(got), stateKeyOf(exp.states[name])), stateKeyOf(exp.states[name]), got ? stateKeyOf(got) : null); }
+          else { const name = m.kind === 'ADD_ACTION' ? m.action.name : m.identity.name, from = m.kind === 'ADD_ACTION' ? m.action.from : (m.set.from ?? m.identity.from); const i = findAction(now?.actions, name, from), j = findAction(exp.actions, name, from); c(m.kind === 'ADD_ACTION' ? 'newActionExists' : 'actionUpdated', i >= 0 && j >= 0 && same(actionKeyOf(now.actions[i]), actionKeyOf(exp.actions[j])), j >= 0 ? actionKeyOf(exp.actions[j]) : null, i >= 0 ? actionKeyOf(now.actions[i]) : null); }
+          perStep.set(st.stepId, own);
+        }
+        // kintone 側の副作用（§17）: 一覧 / 通知 / リマインダーが PUT の前後で変わっていないか
+        const sideEffects = [];
+        const pre = applied.preGroup || {};
+        if (!same(stripViewIds(pre.views?.views), stripViewIds(views?.views))) sideEffects.push({ collection: 'views', message: '一覧が変更されています', diffs: collectionDiffs({ ...pre, fields: { properties: {} } }, { views, fields: { properties: {} } }, ['views'], 'プロセス変更の直前') });
+        if (!same(pre.generalNotify, stripRevision(generalNotify)) || !same(pre.perRecordNotify, stripRevision(perRecordNotify))) sideEffects.push({ collection: 'notifications', message: '通知が変更されています', diffs: collectionDiffs({ ...pre, fields: { properties: {} } }, { generalNotify, perRecordNotify, fields: { properties: {} } }, ['notifications'], 'プロセス変更の直前') });
+        if (!same(pre.reminderNotify, stripRevision(reminderNotify))) sideEffects.push({ collection: 'reminderNotify', message: 'リマインダーが変更されています', diffs: collectionDiffs({ ...pre, fields: { properties: {} } }, { reminderNotify, fields: { properties: {} } }, ['reminders'], 'プロセス変更の直前') });
+        check('noSideEffects', sideEffects.length === 0, [], sideEffects.map(x => x.collection));
+        const groupOk = checks.every(c => c.ok);
+        return { ok: groupOk && [...perStep.values()].every(list => list.every(c => c.ok)), checks, perStep, sideEffects, revision: String(now?.revision ?? ''), actualStatus: stripRevision(now) };
+      },
+    };
+    /** Change Group の形成: PENDING の Process 関連 step を、非 Process の依存が先に済む範囲でまとめる（prepare で付与） */
+    function formProcessGroups(steps) {
+      const pos = new Map(steps.map((s, i) => [s.stepId, i]));
+      const byId = new Map(steps.map(s => [s.stepId, s]));
+      const groups = []; let cur = null;
+      steps.forEach((st, i) => {
+        if (st.status !== STEP.PENDING || !isProcessAction(st.actionType)) { st.groupId = null; return; }
+        const nonProc = st.dependsOn.filter(d => byId.has(d) && !isProcessAction(byId.get(d).actionType));
+        const maxDep = nonProc.reduce((m, d) => Math.max(m, pos.get(d) ?? -1), -1);
+        if (cur && maxDep < cur.anchor) { cur.stepIds.push(st.stepId); }
+        else { cur = { groupId: `PROCESS_CHANGE_${groups.length + 1}`, anchor: i, stepIds: [st.stepId] }; groups.push(cur); }
+        st.groupId = cur.groupId;
+      });
+      return groups.map(g => ({ groupId: g.groupId, stepIds: g.stepIds, anchorStepId: steps[g.anchor].stepId }));
+    }
+
     function layoutHasCode(rows, code) {
       for (const row of rows || []) {
         for (const f of row?.fields || []) if (f?.code === code) return true;
@@ -7034,7 +7293,7 @@
     const stripLayoutRow = (row) => row ? { type: row.type, code: row.code ?? null, fields: (row.fields || []).map(f => ({ type: f.type, code: f.code ?? null, elementId: f.elementId ?? null })), layout: Array.isArray(row.layout) ? row.layout.map(stripLayoutRow) : null } : null;
 
     // ================= preview の設定 → Review の Before と同じ形（stale 判定・再検証・再解析に使う）=================
-    function previewDataFrom({ fields, layout, views, generalNotify = undefined, perRecordNotify = undefined, reminderNotify = undefined }, base = null) {
+    function previewDataFrom({ fields, layout, views, generalNotify = undefined, perRecordNotify = undefined, reminderNotify = undefined, status = undefined }, base = null) {
       return {
         ...(base && typeof base === 'object' ? base : {}),
         appId: base?.appId ?? null,
@@ -7044,6 +7303,7 @@
         ...(generalNotify !== undefined ? { generalNotify } : {}),
         ...(perRecordNotify !== undefined ? { perRecordNotify } : {}),
         ...(reminderNotify !== undefined ? { reminderNotify } : {}),
+        ...(status !== undefined ? { status } : {}),
       };
     }
     const fieldKey = (f) => ({ type: f.type, label: f.label, required: !!f.required, ...(f.options ? { options: f.options } : {}), ...(f.lookup ? { lookup: f.lookup } : {}) });
@@ -7054,8 +7314,21 @@
     /** Review 時点の Before と現在の preview の差（stale 判定）。kinds は比較対象 */
     const notifKey = (n) => ({ scope: n.scope, title: n.scope === 'general' ? '' : (n.title || ''), targets: (n.targets || []).map(t => `${t.type}:${t.code ?? ''}`).sort(), filterCond: normCondE(n.filterCond), events: [...(n.events || [])].sort() });
     const remKey = (n) => ({ title: n.title || '', timing: n.timing, targets: (n.targets || []).map(t => `${t.type}:${t.code ?? ''}`).sort(), filterCond: normCondE(n.filterCond) });
-    function diffBefore(before, current, { kinds = ['fields', 'views', 'notifications', 'reminders'], baseline = 'Review 時点' } = {}) {
+    const procStateKey = (s) => ({ name: s.name, index: s.index, assigneeType: s.assigneeType ?? null, assignees: (s.assignees || []).map(e => `${e.type}:${e.code ?? ''}`).sort() });
+    const procActionKey = (a) => ({ name: a.name, from: a.from, to: a.to, filterCond: normCondE(a.filterCond), type: a.type || 'PRIMARY', executableUsers: (a.executableUsers || []).map(e => `${e.type}:${e.code ?? ''}`).sort() });
+    function diffBefore(before, current, { kinds = ['fields', 'views', 'notifications', 'reminders', 'process'], baseline = 'Review 時点' } = {}) {
       const diffs = [];
+      if (kinds.includes('process') && (before.process || current.process)) {
+        const bp = before.process || { enabled: false, states: [], actions: [] }, cp = current.process || { enabled: false, states: [], actions: [] };
+        if (!!bp.enabled !== !!cp.enabled) diffs.push({ kind: 'PROCESS', id: 'enable', change: 'CHANGED', message: `プロセス管理の有効 / 無効が${baseline}と違います（${bp.enabled ? '有効' : '無効'} → ${cp.enabled ? '有効' : '無効'}）` });
+        const bs = new Map((bp.states || []).map(x => [x.name, x])), cs = new Map((cp.states || []).map(x => [x.name, x]));
+        for (const [name, x] of bs) { const c = cs.get(name); if (!c) diffs.push({ kind: 'PROCESS_STATUS', id: name, change: 'REMOVED', message: `ステータス「${name}」が動作テスト環境にありません` }); else if (!same(procStateKey(x), procStateKey(c))) diffs.push({ kind: 'PROCESS_STATUS', id: name, change: 'CHANGED', message: `ステータス「${name}」（順序 / 作業者）が${baseline}と違います`, before: procStateKey(x), after: procStateKey(c) }); }
+        for (const [name] of cs) if (!bs.has(name)) diffs.push({ kind: 'PROCESS_STATUS', id: name, change: 'ADDED', message: `動作テスト環境にステータス「${name}」が追加されています（未反映の変更）` });
+        const ak = (a) => `${a.name}|${a.from}`;
+        const ba = new Map((bp.actions || []).map(a => [ak(a), a])), ca = new Map((cp.actions || []).map(a => [ak(a), a]));
+        for (const [k, a] of ba) { const c = ca.get(k); if (!c) diffs.push({ kind: 'PROCESS_ACTION', id: a.name, change: 'REMOVED', message: `アクション「${a.name}」（${a.from} から）が動作テスト環境にありません` }); else if (!same(procActionKey(a), procActionKey(c))) diffs.push({ kind: 'PROCESS_ACTION', id: a.name, change: 'CHANGED', message: `アクション「${a.name}」（${a.from} から）の遷移先 / 条件 / 実行可能ユーザーが${baseline}と違います`, before: procActionKey(a), after: procActionKey(c) }); }
+        for (const [k, c] of ca) if (!ba.has(k)) diffs.push({ kind: 'PROCESS_ACTION', id: c.name, change: 'ADDED', message: `動作テスト環境にアクション「${c.name}」（${c.from} から）が追加されています（未反映の変更）` });
+      }
       if (kinds.includes('notifications')) {
         const bn = [...(before.notifications?.general || []), ...(before.notifications?.perRecord || [])].map(notifKey).map(k => JSON.stringify(k));
         const cn = [...(current.notifications?.general || []), ...(current.notifications?.perRecord || [])].map(notifKey).map(k => JSON.stringify(k));
@@ -7086,7 +7359,7 @@
 
     // ================= step の分類（API を呼ばない。UI の件数表示と prepare で共用）=================
     /** 承認 / Review の判定 / allowlist（capability ＋ handler の prepare）/ 依存 の順に、各 step を PENDING / SKIPPED / UNSUPPORTED / BLOCKED に分ける */
-    function classifySteps({ plan, review, approvedSteps = [], fieldsNow = null } = {}) {
+    function classifySteps({ plan, review, approvedSteps = [], fieldsNow = null, processNow = null } = {}) {
       const steps = Array.isArray(plan?.steps) ? plan.steps : [];
       const approved = [...new Set(Array.isArray(approvedSteps) ? approvedSteps : [])];
       const byId = new Map(steps.map(s => [s.id, s]));
@@ -7107,8 +7380,9 @@
         else if (r.safety === KTPlanReview.SAFETY.PLAN_ONLY) set(STEP.UNSUPPORTED, 'PLAN_ONLY', '計画のみ（自動反映の対象外）');
         else if ((r.issues || []).some(i => i.code === 'COND_UNKNOWN_FUNCTION' || i.code === 'COND_NOT_EXPRESSION' || i.code === 'COND_INVALID')) set(STEP.BLOCKED, 'INVALID_CONDITION', '条件式が kintone で評価できないため反映しません（計画の条件式を直してください）');
         else if (!cap || !cap.previewExecute || !HANDLERS[step.actionType]) set(STEP.UNSUPPORTED, 'PREVIEW_NOT_SUPPORTED', '現在の Executor では自動反映できません');
+        else if (step.actionType === 'ADD_PROCESS_STATUS' && (review?.conflicts || []).some(c => c.code === 'STATUS_UNREACHABLE' && (c.stepIds || []).includes(id))) set(STEP.BLOCKED, 'STATUS_UNREACHABLE', 'このステータスへ遷移するアクションが計画に無く孤立するため反映しません（遷移するアクションの step を足してください）');
         else {
-          const p = HANDLERS[step.actionType].prepare(step, { stepReview: r, plan, fieldsNow: ahead });
+          const p = HANDLERS[step.actionType].prepare(step, { stepReview: r, plan, fieldsNow: ahead, processNow });
           if (p.unsupported) set(p.unsupported === 'INVALID_CONDITION' ? STEP.BLOCKED : STEP.UNSUPPORTED, p.unsupported, p.message);
           else { st.prepared = p; if (ahead && step.actionType === 'ADD_FIELD' && p.expect?.code) ahead[p.expect.code] = { type: p.expect.type, code: p.expect.code, label: p.expect.label, required: !!p.expect.required, ...(p.expect.options ? { options: Object.fromEntries(p.expect.options.map((o, i) => [o, { label: o, index: String(i) }])) } : {}) }; }
         }
@@ -7152,20 +7426,20 @@
       if (!pending.length) { block('NOTHING_TO_EXECUTE', '承認済みで実行できる step がありません'); summarize(); return prepared; }
 
       // ---- 2. 現在の設定（動作テスト環境）と revision を取得（アプリ管理権限が無ければここで止まる）----
-      let fields, layout, views, prodViews, generalNotify, perRecordNotify, reminderNotify;
+      let fields, layout, views, prodViews, generalNotify, perRecordNotify, reminderNotify, status;
       try {
-        [fields, layout, views, prodViews, generalNotify, perRecordNotify, reminderNotify] = await Promise.all([api.getPreviewFields(prepared.appId), api.getPreviewLayout(prepared.appId), api.getPreviewViews(prepared.appId), api.getProductionViews(prepared.appId), api.getPreviewGeneralNotifications(prepared.appId), api.getPreviewPerRecordNotifications(prepared.appId), api.getPreviewReminders(prepared.appId)]);
+        [fields, layout, views, prodViews, generalNotify, perRecordNotify, reminderNotify, status] = await Promise.all([api.getPreviewFields(prepared.appId), api.getPreviewLayout(prepared.appId), api.getPreviewViews(prepared.appId), api.getProductionViews(prepared.appId), api.getPreviewGeneralNotifications(prepared.appId), api.getPreviewPerRecordNotifications(prepared.appId), api.getPreviewReminders(prepared.appId), typeof api.getPreviewStatus === 'function' ? api.getPreviewStatus(prepared.appId) : Promise.resolve(null)]);
       } catch (e) {
         const s = strErr(e);
         if (isPermissionError(e)) block('PERMISSION_DENIED', 'このユーザーにはアプリ設定を変更する権限がありません（動作テスト環境の設定を取得できませんでした）', s);
         else block('FETCH_FAILED', `現在の設定を取得できませんでした: ${s.message}`, s);
         summarize(); return prepared;
       }
-      prepared.snapshot = { takenAt: nowIso(now), revision: String(fields?.revision ?? ''), fields: clone(fields), layout: clone(layout), views: clone(views), generalNotify: clone(generalNotify), perRecordNotify: clone(perRecordNotify), reminderNotify: clone(reminderNotify) };
-      // 現在のフィールドで handler の prepare をやり直す（通知先フィールドの型・条件式・基準フィールドの型を今の設定で確かめる）
-      const previewNow = previewDataFrom({ fields, layout, views, generalNotify, perRecordNotify, reminderNotify }, { appId: prepared.appId });
+      prepared.snapshot = { takenAt: nowIso(now), revision: String(fields?.revision ?? ''), fields: clone(fields), layout: clone(layout), views: clone(views), generalNotify: clone(generalNotify), perRecordNotify: clone(perRecordNotify), reminderNotify: clone(reminderNotify), ...(status ? { status: clone(status) } : {}) };
+      // 現在のフィールドで handler の prepare をやり直す（通知先フィールドの型・条件式・基準フィールドの型・プロセス管理の有効 / 無効を今の設定で確かめる）
+      const previewNow = previewDataFrom({ fields, layout, views, generalNotify, perRecordNotify, reminderNotify, ...(status ? { status } : {}) }, { appId: prepared.appId });
       {
-        const re = classifySteps({ plan, review, approvedSteps: approved, fieldsNow: previewNow.fields });
+        const re = classifySteps({ plan, review, approvedSteps: approved, fieldsNow: previewNow.fields, processNow: status || null });
         const map = new Map(re.map(s => [s.stepId, s]));
         prepared.steps = prepared.steps.map(s => map.get(s.stepId) || s);
         prepared.temporaryIdMap = {};
@@ -7186,7 +7460,7 @@
 
       // ---- 3. stale 判定（Review 時点との差異があれば止める。古い計画を当て直さない）----
       const currentModel = KTPlanReview.buildBeforeModel(previewNow);
-      const diffs = diffBefore(before, currentModel);
+      const diffs = diffBefore(before, currentModel, { kinds: ['fields', 'views', 'notifications', 'reminders', ...(status ? ['process'] : [])] });
       if (prepared.revision.reviewed && prepared.revision.production && prepared.revision.reviewed !== prepared.revision.production) diffs.unshift({ kind: 'APP', id: 'revision', change: 'CHANGED', message: `運用環境の設定が Review 後に変更されています（revision ${prepared.revision.reviewed} → ${prepared.revision.production}）` });
       prepared.stale = { status: diffs.length ? 'STALE' : 'FRESH', diffs };
       if (diffs.length) block('STALE_PLAN', '計画作成後にアプリ設定が変更されています。再レビューしてください。', { count: diffs.length });
@@ -7206,6 +7480,8 @@
           if (!prepared.steps.some(s => s.status === STEP.PENDING)) block('REVALIDATION_FAILED', '再検証で実行できる step が無くなりました');
         }
       }
+      // Process Change Group（§25〜26）: Process 関連の PENDING step は 1 つの payload・1 回の PUT にまとめる
+      prepared.groups = formProcessGroups(prepared.steps);
       summarize();
       return prepared;
     }
@@ -7226,10 +7502,57 @@
       for (const st of prepared.steps) { const l = { stepId: st.stepId, actionType: st.actionType, title: st.title, status: st.status === STEP.PENDING ? STEP.PENDING : st.status, reason: st.reason, message: st.message, summary: st.prepared?.summary || '', requests: [], revision: null, verification: null, error: null, before: null, after: null, ...(st.warnings?.length ? { warnings: clone(st.warnings) } : {}) }; stepLogs.set(st.stepId, l); log.steps.push(l); }
       let revision = prepared.revision.preview;
       let failed = false;
+      const done = new Set();
+      let processBaseline = prepared.snapshot?.status ? stripRevision(prepared.snapshot.status) : undefined;   // 直前のグループが作ったプロセス設定（2 つ目以降の bit 比較の基準）
+      const groups = Array.isArray(prepared.groups) ? prepared.groups : formProcessGroups(prepared.steps);
+      const stepById = new Map(prepared.steps.map(x => [x.stepId, x]));
       for (const st of prepared.steps) {
         const l = stepLogs.get(st.stepId);
+        if (done.has(st.stepId)) continue;
         if (st.status !== STEP.PENDING) { progress(l); continue; }
         if (failed) { l.status = STEP.SKIPPED; l.reason = 'STOPPED_AFTER_FAILURE'; l.message = '前の step が失敗したため実行していません'; progress(l); continue; }
+        // ---- Process Change Group: アンカー step に来たらグループ全体を 1 回の PUT で反映する（§25〜27）----
+        const group = st.groupId ? groups.find(g => g.groupId === st.groupId) : null;
+        if (group) {
+          const members = group.stepIds.map(id => stepById.get(id)).filter(Boolean);
+          const logs = members.map(m => stepLogs.get(m.stepId));
+          for (const m of members) { done.add(m.stepId); stepLogs.get(m.stepId).groupId = group.groupId; }
+          const unmet = members.flatMap(m => m.dependsOn.filter(d => !group.stepIds.includes(d)).filter(d => { const dl = stepLogs.get(d); return dl && dl.status !== STEP.VERIFIED; }));
+          if (unmet.length) { for (const gl of logs) { gl.status = STEP.SKIPPED; gl.reason = 'DEPENDENCY_NOT_VERIFIED'; gl.message = `依存する ${[...new Set(unmet)].join(', ')} が検証済みでないため実行していません`; progress(gl); } continue; }
+          for (const gl of logs) { gl.status = STEP.RUNNING; progress(gl); }
+          await yieldUi();
+          const ctx = { api, appId: prepared.appId, revision, snapshot: prepared.snapshot, processBaseline };
+          try {
+            const applied = await PROCESS_GROUP.apply(ctx, members);
+            revision = applied.revision || revision; processBaseline = applied.expectedNext;
+            for (const gl of logs) { gl.requests = applied.requests; gl.revision = applied.revision; gl.before = stepById.get(gl.stepId).prepared?.before ?? applied.before; gl.after = stepById.get(gl.stepId).prepared?.after ?? applied.after; gl.status = STEP.APPLIED; progress(gl); }
+            await yieldUi();
+            const v = await PROCESS_GROUP.verify(ctx, members, applied);
+            if (v.revision) revision = v.revision;
+            log.processActual = v.actualStatus;
+            const side = v.sideEffects && v.sideEffects.length ? v.sideEffects : null;
+            for (const gl of logs) {
+              const own = v.perStep.get(gl.stepId) || [];
+              const ok = v.checks.every(c => c.ok) && own.every(c => c.ok);
+              gl.verification = { ok, checks: [...own, ...v.checks], revision: v.revision, groupId: group.groupId, ...(side ? { sideEffects: side } : {}) };
+              gl.status = ok ? STEP.VERIFIED : STEP.VERIFY_FAILED;
+              if (!ok) { gl.reason = side && own.every(c => c.ok) && v.checks.filter(c => !c.ok).every(c => c.name === 'noSideEffects') ? 'KINTONE_SIDE_EFFECT' : 'VERIFY_FAILED'; gl.message = gl.reason === 'KINTONE_SIDE_EFFECT' ? `プロセス管理の変更は反映されましたが、kintone 側で他の設定が自動変更されました（${side.map(x => x.message).join('、')}）。正常扱いにはしません` : `API は成功しましたが、再取得した設定が期待と一致しません（${[...own, ...v.checks].filter(c => !c.ok).map(c => c.name).join(', ')}）`; }
+              progress(gl);
+            }
+            if (logs.some(gl => gl.status !== STEP.VERIFIED)) failed = true;
+          } catch (e) {
+            const s = strErr(e);
+            for (const gl of logs) {
+              gl.status = STEP.FAILED; gl.error = s;
+              gl.reason = isPermissionError(e) ? 'PERMISSION_DENIED' : isRevisionError(e) ? 'REVISION_MISMATCH' : ['TARGET_EXISTS', 'TARGET_CHANGED', 'TARGET_MISSING', 'STATUS_UNREACHABLE', 'PROCESS_ENABLE_NOT_SUPPORTED', 'FIRST_STATUS_CHANGED', 'NO_PROCESS_SPEC'].includes(s.code) ? s.code : 'API_ERROR';
+              gl.message = gl.reason === 'PERMISSION_DENIED' ? 'アプリ設定を変更する権限がありません' : gl.reason === 'REVISION_MISMATCH' ? '実行中に他の変更が入りました（revision 不一致）。再レビューしてください' : (e && e.stepId && e.stepId !== gl.stepId ? `同じグループの ${e.stepId} で止まりました: ${s.message}` : s.message);
+              progress(gl);
+            }
+            failed = true;
+          }
+          await yieldUi();
+          continue;
+        }
         const depsOk = st.dependsOn.every(d => { const dl = stepLogs.get(d); return !dl || dl.status === STEP.VERIFIED; });
         if (!depsOk) { l.status = STEP.SKIPPED; l.reason = 'DEPENDENCY_NOT_VERIFIED'; l.message = '依存する step が検証済みでないため実行していません'; progress(l); continue; }
         l.status = STEP.RUNNING; progress(l); await yieldUi();
@@ -7258,16 +7581,21 @@
       log.status = bad ? (verified ? RUN.PARTIAL : RUN.FAILED) : RUN.DONE;
       // ---- 反映後の再取得 → Simulation との比較・再解析 ----
       try {
-        const [fields, layout, views, generalNotify, perRecordNotify, reminderNotify] = await Promise.all([api.getPreviewFields(prepared.appId), api.getPreviewLayout(prepared.appId), api.getPreviewViews(prepared.appId), api.getPreviewGeneralNotifications(prepared.appId), api.getPreviewPerRecordNotifications(prepared.appId), api.getPreviewReminders(prepared.appId)]);
+        const [fields, layout, views, generalNotify, perRecordNotify, reminderNotify, status] = await Promise.all([api.getPreviewFields(prepared.appId), api.getPreviewLayout(prepared.appId), api.getPreviewViews(prepared.appId), api.getPreviewGeneralNotifications(prepared.appId), api.getPreviewPerRecordNotifications(prepared.appId), api.getPreviewReminders(prepared.appId), typeof api.getPreviewStatus === 'function' ? api.getPreviewStatus(prepared.appId) : Promise.resolve(null)]);
         log.afterRevision = String(fields?.revision ?? log.afterRevision ?? '');
         // 反映直後の設定（Execution Actual After）。Rollback はこれと「現在」を比べ、違えば ROLLBACK_STALE で止める
-        log.actualAfterRaw = clone({ fields, layout, views, generalNotify, perRecordNotify, reminderNotify });
-        const previewData = previewDataFrom({ fields, layout, views, generalNotify, perRecordNotify, reminderNotify }, data && typeof data === 'object' ? { ...data, appId: prepared.appId } : { appId: prepared.appId });
+        log.actualAfterRaw = clone({ fields, layout, views, generalNotify, perRecordNotify, reminderNotify, ...(status ? { status } : {}) });
+        const previewData = previewDataFrom({ fields, layout, views, generalNotify, perRecordNotify, reminderNotify, ...(status ? { status } : {}) }, data && typeof data === 'object' ? { ...data, appId: prepared.appId } : { appId: prepared.appId });
         const actual = KTPlanReview.buildBeforeModel(previewData);
         log.simulation = compareSimulation(review?.simulation?.after || null, actual, log.steps, prepared);
+        // プロセス管理の Before / Planned / Actual（§18）: Mermaid と要約
+        if (log.steps.some(x => isProcessAction(x.actionType) && x.status !== STEP.SKIPPED && x.status !== STEP.BLOCKED && x.status !== STEP.UNSUPPORTED)) {
+          const beforeModel = prepared.snapshot?.status ? KTPlanReview.buildBeforeModel(previewDataFrom(prepared.snapshot, { appId: prepared.appId })) : null;
+          log.process = { before: beforeModel ? KTPlanReview.processSummary(beforeModel.process) : null, planned: review?.simulation?.process?.after ?? null, actual: KTPlanReview.processSummary(actual.process), partition: review?.simulation?.process?.partition ?? null, mermaid: { before: beforeModel ? KTPlanReview.processMermaid(beforeModel.process) : '', planned: review?.simulation?.process?.mermaid?.after ?? '', actual: KTPlanReview.processMermaid(actual.process, beforeModel ? beforeModel.process : null) } };
+        }
         log.reanalysis = reanalyze(previewData, data, log.steps, prepared);
         const verifiedOf = (a) => log.steps.filter(s => s.actionType === a && s.status === STEP.VERIFIED);
-        log.actualAfter = { fieldCount: Object.keys(actual.fields).length, views: actual.views.length, notifications: actual.notifications.general.length + actual.notifications.perRecord.length, reminders: actual.reminders.length, addedFields: verifiedOf('ADD_FIELD').map(s => stepLogTarget(s, prepared)), addedViews: verifiedOf('ADD_VIEW').map(s => stepLogTarget(s, prepared)), addedNotifications: verifiedOf('ADD_NOTIFICATION').length, addedReminders: verifiedOf('ADD_REMINDER').length, updatedFields: verifiedOf('UPDATE_FIELD').map(s => stepLogTarget(s, prepared)), updatedNotifications: verifiedOf('UPDATE_NOTIFICATION').map(s => stepLogLabel(s, prepared)), updatedReminders: verifiedOf('UPDATE_REMINDER').map(s => stepLogLabel(s, prepared)), updatedViews: verifiedOf('UPDATE_VIEW').map(s => stepLogLabel(s, prepared)) };
+        log.actualAfter = { fieldCount: Object.keys(actual.fields).length, views: actual.views.length, notifications: actual.notifications.general.length + actual.notifications.perRecord.length, reminders: actual.reminders.length, processStates: actual.process.states.length, processActions: actual.process.actions.length, addedStatuses: verifiedOf('ADD_PROCESS_STATUS').map(s => stepLogLabel(s, prepared)), addedActions: verifiedOf('ADD_PROCESS_ACTION').map(s => stepLogLabel(s, prepared)), updatedProcess: verifiedOf('UPDATE_PROCESS').map(s => stepLogLabel(s, prepared)), addedFields: verifiedOf('ADD_FIELD').map(s => stepLogTarget(s, prepared)), addedViews: verifiedOf('ADD_VIEW').map(s => stepLogTarget(s, prepared)), addedNotifications: verifiedOf('ADD_NOTIFICATION').length, addedReminders: verifiedOf('ADD_REMINDER').length, updatedFields: verifiedOf('UPDATE_FIELD').map(s => stepLogTarget(s, prepared)), updatedNotifications: verifiedOf('UPDATE_NOTIFICATION').map(s => stepLogLabel(s, prepared)), updatedReminders: verifiedOf('UPDATE_REMINDER').map(s => stepLogLabel(s, prepared)), updatedViews: verifiedOf('UPDATE_VIEW').map(s => stepLogLabel(s, prepared)) };
       } catch (e) { log.simulation = { compared: false, match: null, mismatches: [], error: strErr(e).message }; log.actualAfterRaw = null; }
       log.finishedAt = nowIso(now);
       return log;
@@ -7327,6 +7655,17 @@
           const sim = (simAfter.views || []).find(v => v.name === name), act = (actual.views || []).find(v => v.name === name);
           if (!sim || !act) { mismatches.push({ stepId: s.stepId, kind: 'VIEW', id: name, message: 'Simulation または実際の設定に対象の一覧がありません' }); continue; }
           if (!same(viewKey(sim), viewKey(act))) mismatches.push({ stepId: s.stepId, kind: 'VIEW', id: name, message: 'Simulation と実際の設定が一致しません', simulation: viewKey(sim), actual: viewKey(act) });
+        } else if (s.actionType === 'ADD_PROCESS_STATUS' || (s.actionType === 'UPDATE_PROCESS' && expect?.kind === 'PROCESS_STATUS')) {
+          const name = expect?.name;
+          const sim = (simAfter.process?.states || []).find(x => x.name === name), act = (actual.process?.states || []).find(x => x.name === name);
+          if (!sim || !act) { mismatches.push({ stepId: s.stepId, kind: 'PROCESS_STATUS', id: name, message: 'Simulation または実際の設定に対象のステータスがありません' }); continue; }
+          const a = { assigneeType: sim.assigneeType, assignees: (sim.assignees || []).map(e => `${e.type}:${e.code ?? ''}`).sort() }, b = { assigneeType: act.assigneeType, assignees: (act.assignees || []).map(e => `${e.type}:${e.code ?? ''}`).sort() };
+          if (!same(a, b)) mismatches.push({ stepId: s.stepId, kind: 'PROCESS_STATUS', id: name, message: 'Simulation と実際の設定が一致しません（作業者）', simulation: a, actual: b });
+        } else if (s.actionType === 'ADD_PROCESS_ACTION' || (s.actionType === 'UPDATE_PROCESS' && expect?.kind === 'PROCESS_ACTION')) {
+          const name = expect?.name, from = expect?.from;
+          const sim = (simAfter.process?.actions || []).find(x => x.name === name && x.from === from), act = (actual.process?.actions || []).find(x => x.name === name && x.from === from);
+          if (!sim || !act) { mismatches.push({ stepId: s.stepId, kind: 'PROCESS_ACTION', id: name, message: 'Simulation または実際の設定に対象のアクションがありません' }); continue; }
+          if (!same(procActionKey(sim), procActionKey(act))) mismatches.push({ stepId: s.stepId, kind: 'PROCESS_ACTION', id: name, message: 'Simulation と実際の設定が一致しません', simulation: procActionKey(sim), actual: procActionKey(act) });
         }
       }
       return { compared: true, match: mismatches.length === 0, mismatches, ...(mismatches.length ? { code: 'SIMULATION_MISMATCH' } : {}) };
@@ -7362,9 +7701,25 @@
     /** 動作テスト環境に書き込んだ step（APPLIED / VERIFIED / VERIFY_FAILED、途中まで反映された FAILED）だけを逆順に。反映していない step は対象外 */
     function buildRollbackPlan(execution, prepared) {
       const steps = [];
+      const seenGroups = new Set();
       for (const s of [...(execution?.steps || [])].reverse()) {
         const written = [STEP.APPLIED, STEP.VERIFIED, STEP.VERIFY_FAILED].includes(s.status) || (s.status === STEP.FAILED && !!s.partial);
         if (!written) continue;
+        if (isProcessAction(s.actionType)) {
+          // Process Change Group は 1 回の PUT なので、戻すのも 1 手順（snapshot のプロセス設定全体）。kintone 側の副作用があればその集合も戻す
+          const gid = s.groupId || 'PROCESS_CHANGE';
+          if (seenGroups.has(gid)) continue;
+          seenGroups.add(gid);
+          const members = (execution.steps || []).filter(x => isProcessAction(x.actionType) && (x.groupId || 'PROCESS_CHANGE') === gid && [STEP.APPLIED, STEP.VERIFIED, STEP.VERIFY_FAILED].includes(x.status));
+          const snapP = execution.snapshot?.status;
+          steps.push({ stepId: gid, stepIds: members.map(x => x.stepId), sourceActionType: 'PROCESS_CHANGE', sourceStatus: s.status, actionType: 'RESTORE_PROCESS_SETTINGS', collection: 'status', target: members.map(x => prepared?.steps?.find(p => p.stepId === x.stepId)?.prepared?.targetLabel || x.stepId).join(' / '), api: { method: 'PUT', path: '/k/v1/preview/app/status.json', payload: { app: execution.appId, enable: '<snapshot.status.enable>', states: '<snapshot.status.states>', actions: '<snapshot.status.actions>' } }, note: `snapshot のプロセス管理（ステータス ${Object.keys(snapP?.states || {}).length} 件・アクション ${(snapP?.actions || []).length} 件）を PUT で戻す（グループ ${gid} の ${members.length} step 分）` });
+          for (const se of (s.verification?.sideEffects || [])) {
+            if (se.collection === 'views') steps.push({ stepId: `${gid}:views`, stepIds: members.map(x => x.stepId), sourceActionType: 'KINTONE_SIDE_EFFECT', sourceStatus: s.status, actionType: 'RESTORE_VIEWS', collection: 'views', target: '一覧（kintone 側の自動変更）', api: { method: 'PUT', path: '/k/v1/preview/app/views.json' }, note: 'プロセス変更時に kintone が自動変更した一覧を snapshot へ戻す' });
+            if (se.collection === 'notifications') { steps.push({ stepId: `${gid}:general`, stepIds: members.map(x => x.stepId), sourceActionType: 'KINTONE_SIDE_EFFECT', sourceStatus: s.status, actionType: 'RESTORE_NOTIFICATION_SETTINGS', collection: 'generalNotify', target: 'アプリの条件通知（kintone 側の自動変更）', api: { method: 'PUT', path: '/k/v1/preview/app/notifications/general.json' }, note: 'プロセス変更時に kintone が自動変更した通知を snapshot へ戻す' }); steps.push({ stepId: `${gid}:perRecord`, stepIds: members.map(x => x.stepId), sourceActionType: 'KINTONE_SIDE_EFFECT', sourceStatus: s.status, actionType: 'RESTORE_NOTIFICATION_SETTINGS', collection: 'perRecordNotify', target: 'レコードの条件通知（kintone 側の自動変更）', api: { method: 'PUT', path: '/k/v1/preview/app/notifications/perRecord.json' }, note: '同上' }); }
+            if (se.collection === 'reminderNotify') steps.push({ stepId: `${gid}:reminders`, stepIds: members.map(x => x.stepId), sourceActionType: 'KINTONE_SIDE_EFFECT', sourceStatus: s.status, actionType: 'RESTORE_REMINDER_SETTINGS', collection: 'reminderNotify', target: 'リマインダー（kintone 側の自動変更）', api: { method: 'PUT', path: '/k/v1/preview/app/notifications/reminder.json' }, note: '同上' });
+          }
+          continue;
+        }
         const st = prepared?.steps?.find(x => x.stepId === s.stepId);
         const handler = HANDLERS[s.actionType];
         if (!st?.prepared || !handler) continue;
@@ -7384,15 +7739,15 @@
     const layoutCodes = (rows) => { const out = []; const walk = (rs) => { for (const r of rs || []) { for (const x of r?.fields || []) if (x?.code) out.push(x.code); if (Array.isArray(r?.layout)) walk(r.layout); } }; walk(rows); return out; };
     const COLLECTION_JA = { fields: 'フィールド', layout: 'フォームのレイアウト', views: '一覧', generalNotify: 'アプリの条件通知', perRecordNotify: 'レコードの条件通知', reminderNotify: 'リマインダー' };
     async function fetchPreviewAll(api, appId) {
-      const [fields, layout, views, generalNotify, perRecordNotify, reminderNotify] = await Promise.all([api.getPreviewFields(appId), api.getPreviewLayout(appId), api.getPreviewViews(appId), api.getPreviewGeneralNotifications(appId), api.getPreviewPerRecordNotifications(appId), api.getPreviewReminders(appId)]);
-      return { fields, layout, views, generalNotify, perRecordNotify, reminderNotify };
+      const [fields, layout, views, generalNotify, perRecordNotify, reminderNotify, status] = await Promise.all([api.getPreviewFields(appId), api.getPreviewLayout(appId), api.getPreviewViews(appId), api.getPreviewGeneralNotifications(appId), api.getPreviewPerRecordNotifications(appId), api.getPreviewReminders(appId), typeof api.getPreviewStatus === 'function' ? api.getPreviewStatus(appId) : Promise.resolve(null)]);
+      return { fields, layout, views, generalNotify, perRecordNotify, reminderNotify, ...(status ? { status } : {}) };
     }
     /** 2 つの設定の人間向け差分（集合ごと。Review の Before モデルに変換して diffBefore を使う） */
     function collectionDiffs(expectedRaw, currentRaw, kinds, baseline) {
       try {
         const a = KTPlanReview.buildBeforeModel(previewDataFrom(expectedRaw)), b = KTPlanReview.buildBeforeModel(previewDataFrom(currentRaw));
         return diffBefore(a, b, { kinds, baseline });
-      } catch (e) { return [{ kind: 'UNKNOWN', id: null, change: 'CHANGED', message: '差分を要約できません（設定が変更されています）' }]; }
+      } catch (e) { return [{ kind: 'UNKNOWN', id: null, change: 'CHANGED', message: `差分を要約できません（設定が変更されています）: ${strErr(e).message}` }]; }
     }
     const condMentions = (text, code) => { const t = String(text ?? ''); if (!t || !code) return false; if (!/^[A-Za-z0-9_]+$/.test(code)) return t.includes(code); return new RegExp(`(^|[^A-Za-z0-9_])${code.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}($|[^A-Za-z0-9_])`).test(t); };
     /** 現在の preview でフィールドコードを参照している設定（削除すると壊れるもの） */
@@ -7406,6 +7761,8 @@
       for (const n of listOf(cur.generalNotify)) if (n.entity?.type === 'FIELD_ENTITY' && n.entity.code === code) refs.push({ kind: 'NOTIFICATION', id: 'general', where: 'アプリの条件通知の通知先' });
       for (const n of listOf(cur.perRecordNotify)) { const label = `レコードの条件通知「${n.title || '（無題）'}」`; if ((n.targets || []).some(t => t.entity?.type === 'FIELD_ENTITY' && t.entity.code === code)) refs.push({ kind: 'NOTIFICATION', id: n.title || '', where: `${label}の通知先` }); if (condMentions(n.filterCond, code)) refs.push({ kind: 'NOTIFICATION', id: n.title || '', where: `${label}の条件` }); }
       for (const n of listOf(cur.reminderNotify)) { const label = `リマインダー「${n.title || '（無題）'}」`; if (n.timing?.code === code) refs.push({ kind: 'REMINDER', id: n.title || '', where: `${label}の基準日` }); if ((n.targets || []).some(t => t.entity?.type === 'FIELD_ENTITY' && t.entity.code === code)) refs.push({ kind: 'REMINDER', id: n.title || '', where: `${label}の通知先` }); if (condMentions(n.filterCond, code)) refs.push({ kind: 'REMINDER', id: n.title || '', where: `${label}の条件` }); }
+      for (const [name, st] of Object.entries(cur.status?.states || {})) if ((st.assignee?.entities || []).some(e => e.entity?.type === 'FIELD_ENTITY' && e.entity.code === code)) refs.push({ kind: 'PROCESS_STATUS', id: name, where: `ステータス「${name}」の作業者` });
+      for (const a of cur.status?.actions || []) { if (condMentions(a.filterCond, code)) refs.push({ kind: 'PROCESS_ACTION', id: a.name, where: `アクション「${a.name}」の条件` }); if ((a.executableUser?.entities || []).some(e => e.entity?.type === 'FIELD_ENTITY' && e.entity.code === code)) refs.push({ kind: 'PROCESS_ACTION', id: a.name, where: `アクション「${a.name}」の実行可能ユーザー` }); }
       for (const [c, f] of Object.entries(cur.fields?.properties || {})) {
         if (c === code) continue;
         if (f.type === 'CALC' && condMentions(f.expression, code)) refs.push({ kind: 'FIELD', id: c, where: `計算フィールド「${f.label}」（${c}）の計算式` });
@@ -7444,7 +7801,10 @@
     const eqGeneral = (a, b) => same(listOf(a), listOf(b)) && (a?.notifyToCommenter ?? null) === (b?.notifyToCommenter ?? null);
     const eqPerRecord = (a, b) => same(listOf(a), listOf(b));
     const eqReminders = (a, b) => same(listOf(a), listOf(b)) && String(a?.timezone ?? '') === String(b?.timezone ?? '');
+    const putStatus = (api, appId, snap, revision) => api.putPreviewStatus(appId, { enable: snap?.enable, states: clone(snap?.states || {}), actions: clone(snap?.actions || []) }, revision); putStatus.path = '/k/v1/preview/app/status.json';
+    const eqProcess = (a, b) => same(stripRevision(a), stripRevision(b));
     const ROLLBACK_STRATEGIES = {
+      RESTORE_PROCESS_SETTINGS: restoreStrategy('status', { get: (api, a) => api.getPreviewStatus(a), put: putStatus, equal: eqProcess, kinds: ['process'], label: 'プロセス管理' }),
       RESTORE_VIEWS: restoreStrategy('views', { get: (api, a) => api.getPreviewViews(a), put: putViews, equal: eqViews, kinds: ['views'], label: '一覧' }),
       RESTORE_NOTIFICATION_SETTINGS: {
         collection: (step) => step.collection,
@@ -7631,7 +7991,7 @@
       rb.partial = okCount > 0 && badCount > 0;
       rb.message = rb.status === RB_RUN.VERIFIED ? '動作テスト環境を実行前の状態に戻しました。' : rb.partial ? '一部の変更だけ元に戻りました。' : '元に戻せませんでした。';
       rb.finishedAt = nowIso(now);
-      for (const s of execution.steps || []) { const r = rb.steps.find(x => x.stepId === s.stepId); if (r) s.rollbackStatus = r.status; }
+      for (const s of execution.steps || []) { const r = rb.steps.find(x => x.stepId === s.stepId || (Array.isArray(x.stepIds) && x.stepIds.includes(s.stepId) && x.sourceActionType === 'PROCESS_CHANGE')); if (r) s.rollbackStatus = r.status; }
       execution.lifecycle = rb.status;
       return rb;
     }
@@ -7684,6 +8044,9 @@
         updatePreviewFields: (a, properties, revision) => call('/k/v1/preview/app/form/fields.json', 'PUT', { app: app(a), properties, ...(revision ? { revision } : {}) }),
         // Phase 11（Rollback Executor）: 追加したフィールドの削除（動作テスト環境のみ）
         deletePreviewFields: (a, fields, revision) => call('/k/v1/preview/app/form/fields.json', 'DELETE', { app: app(a), fields, ...(revision ? { revision } : {}) }),
+        // Phase 12（プロセス管理）: GET / PUT /k/v1/preview/app/status.json（states / actions は全体置換。Change Group が完全な payload を作る）
+        getPreviewStatus: (a) => call('/k/v1/preview/app/status.json', 'GET', { app: app(a) }),
+        putPreviewStatus: (a, body, revision) => call('/k/v1/preview/app/status.json', 'PUT', { app: app(a), ...body, ...(revision ? { revision } : {}) }),
         // 運用環境へ反映する関数は意図的に無い（Phase 9: Preview only）
       };
     }
@@ -7693,6 +8056,7 @@
       classifySteps, prepare, executePreview, buildRollbackPlan, prepareRollback, executeRollback, rollbackSection, fieldReferences, buildAudit, compareSimulation, diffBefore, previewDataFrom, layoutHasCode, createKintoneApi,
       recipientEntity, notificationDuplicate, reminderDuplicate, preservationChecks, UPDATABLE_FIELD_KEYS,
       preservationExceptIndex, notificationIdentityMismatch, reminderIdentityMismatch, viewIdentityMismatch,
+      PROCESS_GROUP, PROCESS_ACTIONS, processEntity, processIdentityMismatch, formProcessGroups,
     };
   })();
 
