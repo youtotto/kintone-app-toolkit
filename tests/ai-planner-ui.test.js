@@ -164,7 +164,7 @@ console.log('\n--- 3. UI: 変更計画の作成（loading → result）---');
   const h = m.$('kt-ai-plan-result').innerHTML;
   assert(m.$('kt-ai-plan-result').style.display === '' && ['実現したいこと', '現在利用できるもの', '追加が必要なもの', '変更計画', '代替案', '影響範囲', '確認したいこと', '解析できないこと'].every(t => h.includes(t)), 'result: 必要な節がすべて表示される');
   assert(h.includes('＋ 新規フィールド') && h.includes('部長承認者') && h.includes('USER_SELECT') && h.includes('kt-ai-new-field') && h.includes('特定する情報がありません'), '新規フィールド提案は目立つ枠（＋ 新規フィールド / 名前 / 種類 / 理由）');
-  assert(h.includes('>既存<') && h.includes('>新規提案<') && h.includes('>確認必要<') && h.includes('>無効<') && h.includes('>既存利用<') && h.includes('>変更<'), '既存 / 新規提案 / 変更 / 確認必要 / 無効 のバッジ');
+  assert(h.includes('>既存<') && h.includes('>＋ 新規<') && h.includes('>△ 確認必要<') && h.includes('>× 無効<') && h.includes('>↻ 再利用<') && h.includes('>✎ 既存変更<'), '既存 / ＋ 新規 / ✎ 既存変更 / ↻ 再利用 / △ 確認必要 / × 無効 のバッジ（Phase 11 §35）');
   assert(h.includes('<b>P1</b>') && h.includes('<b>P2</b>') && h.includes('<b>P3</b>') && h.includes('依存：P1 の後') && h.includes('依存：P2 の後'), '手順 P1〜P3 と依存関係');
   assert(h.includes('<b>A1</b>') && h.includes('既存「承認者」を再利用') && h.indexOf('<b>P4</b>') > h.indexOf('代替案'), '代替案 A1 の下に P4');
   assert(h.includes(`data-eid="${E_AMOUNT}"`) && h.includes(`data-eid="${E_APPROVER}"`), '根拠チップ（data-eid）');

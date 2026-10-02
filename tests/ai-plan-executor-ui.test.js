@@ -96,7 +96,7 @@ console.log('\n--- 1. 実行前レビューに「動作テスト環境へ反映�
   const st = m.panel.executorState();
   const e2 = execHtml(m);
   assert(st.stage === 'confirm' && st.prepared && st.prepared.status === 'PREPARED' && m.mock.calls.every(c => c.startsWith('GET')), 'ボタン押下 → prepare（取得と再検証のみ。書き込みなし）→ 最終確認');
-  assert(e2.includes('動作テスト環境へ以下を反映します。') && e2.includes('＋ フィールド追加 1 件') && e2.includes('＋ 一覧追加 1 件') && e2.includes('運用環境には反映されません。') && hasButton(e2, 'キャンセル') && e2.includes('id="kt-ai-exec-go"') && hasButton(e2, '動作テスト環境へ反映'), '最終確認: 反映内容の件数・「運用環境には反映されません。」・キャンセル / 動作テスト環境へ反映');
+  assert(e2.includes('動作テスト環境へ以下を反映します。') && /<div[^>]*>追加<\/div>/.test(e2) && e2.includes('＋ フィールド 1 件') && e2.includes('＋ 一覧 1 件') && !/既存設定の変更/.test(e2) && e2.includes('運用環境には反映されません。') && hasButton(e2, 'キャンセル') && e2.includes('id="kt-ai-exec-go"') && hasButton(e2, '動作テスト環境へ反映'), '最終確認: 反映内容の件数・「運用環境には反映されません。」・キャンセル / 動作テスト環境へ反映');
   await click(m, 'kt-ai-exec-cancel');
   assert(m.panel.executorState().stage === 'idle' && /id="kt-ai-exec-start"/.test(execHtml(m)) && !m.mock.st.fields.progress, 'キャンセル → 何も反映せず元に戻る');
   // 実行（進捗 → 結果）
@@ -218,7 +218,7 @@ console.log('\n--- 2b. Tier 2（通知 / リマインダー / フィールド変
   assert(/通知追加[\s\S]*?<b>2（P1, P5）/.test(e1) && /リマインダー追加[\s\S]*?<b>1（P2）/.test(e1) && /フィールド変更[\s\S]*?<b>2（P3, P4）/.test(e1) && /△ フィールド変更/.test(e1) && /✓ 通知追加/.test(e1), 'カテゴリ別の件数（✓ 通知追加 2 / ✓ リマインダー追加 1 / △ フィールド変更 2）');
   await click(m, 'kt-ai-exec-start'); await tick();
   const e2 = execHtml(m);
-  assert(m.panel.executorState().stage === 'confirm' && e2.includes('＋ 通知追加 2 件') && e2.includes('＋ リマインダー追加 1 件') && e2.includes('＋ フィールド変更 2 件'), '最終確認: カテゴリ別の件数');
+  assert(m.panel.executorState().stage === 'confirm' && e2.includes('＋ 通知 2 件') && e2.includes('＋ リマインダー 1 件') && /<div[^>]*>既存設定の変更<\/div>/.test(e2) && e2.includes('✎ フィールド 2 件'), '最終確認: 「追加」と「既存設定の変更」に分けた件数（§36）');
   assert(e2.includes('レコードの条件通知: Before 既存 2 件 → After 3 件') && e2.includes('リマインダー: Before 1 件 → After 2 件') && e2.includes('「担当者」 必須: いいえ → はい（フィールドコード owner は変わりません）') && e2.includes('表示名: 案件名 → 案件名（正式）'), 'Before / After: 通知（既存 2 → 3）・リマインダー（1 → 2）・フィールド（必須 いいえ → はい・表示名）');
   assert(e2.includes('⚠ 既存フィールドを変更します') && e2.includes('「担当者」を必須に変更します。この変更は今後の入力・保存に影響します。既存レコードの値は Toolkit では確認していません。') && e2.includes('フィールドコード（case_name）は変わりません'), 'Sensitive: 必須化と表示名変更を確認ダイアログで目立たせる（指定の文言）');
   assert(/P5[\s\S]*⚠ 既存の設定と似ています[\s\S]*既存: 「高額案件の登録」/.test(e2), 'POSSIBLE_DUPLICATE を最終確認で再度人間に見せる');
@@ -267,6 +267,78 @@ console.log('\n--- 2c. AI 接続が切れても Review / Executor は動く（Ex
   assert(m.panel.executorState().stage === 'confirm', 'AI 接続が無くても prepare（kintone API のみ）は動く');
   await click(m, 'kt-ai-exec-go'); await tick(); await tick();
   assert(m.panel.executorState().execution?.status === 'DONE' && m.mock.st.fields.progress && m.mock.st.views['担当者別'], 'AI 接続が切れていても承認済み計画の反映・検証は完了する（Gateway を呼ばない）');
+}
+
+console.log('\n--- 2d. Phase 11: 既存設定の変更の表示（バッジ・既存設定を変更・属性単位の差分・「追加」「既存設定の変更」）---');
+const PLAN_U = { ...PLAN_X, plan: { ...PLAN_X.plan, proposedFields: [], steps: [
+  mkStep('P1', 'UPDATE_NOTIFICATION', 'NOTIFICATION', 'perRecord#1', { filterCond: 'amount >= "2000000"' }, { title: '高額案件通知の条件を 200 万円以上へ' }),
+  mkStep('P2', 'UPDATE_VIEW', 'VIEW', '承認待ち', { fields: ['case_name', 'approver', 'amount'] }, { title: '承認待ち一覧に金額を表示' }),
+  mkStep('P3', 'ADD_VIEW', 'VIEW', '担当者別', { name: '担当者別', fields: ['owner', 'case_name'] }, { title: '担当者別一覧を追加' }),
+], summary: { steps: 3, invalidSteps: 0, needsConfirmation: 0, proposedFields: 0, questions: 0 } } };
+{
+  const m = mount({ planResponse: PLAN_U });
+  await tick(); const h = await runPlan(m);
+  assert(h.includes('>✎ 既存変更<') && h.includes('>△ 確認必要<') && h.includes('>＋ 新規<'), 'バッジ: ✎ 既存変更 / △ 確認必要 / ＋ 新規（§35）');
+  assert(h.includes('id="kt-ai-review-updates"') && h.includes('✎ 既存設定を変更') && /△<\/span> P1 レコードの条件通知「高額案件の登録」を変更/.test(h) && h.includes('条件: amount &gt;= &quot;1000000&quot; → amount &gt;= &quot;2000000&quot;') && /✓<\/span> P2 一覧「承認待ち」を変更/.test(h) && h.includes('表示フィールド: case_name, approver → case_name, approver, amount'), '「既存設定を変更」の要約: △ 通知（条件の差分だけ）・✓ 一覧（表示項目の差分だけ）（§34）');
+  m.panel.decide('P1', 'approve'); m.panel.decide('P2', 'approve'); m.panel.decide('P3', 'approve');
+  const e0 = execHtml(m);
+  assert(e0.includes('✎ 通知変更') && e0.includes('✎ 一覧変更') && /承認済み・実行可能[\s\S]*?<b>3 件/.test(e0), 'Executor の件数: カテゴリに ✎ 通知変更 / ✎ 一覧変更');
+  await click(m, 'kt-ai-exec-start'); await tick();
+  const e1 = execHtml(m);
+  assert(m.panel.executorState().stage === 'confirm' && /<div[^>]*>追加<\/div>/.test(e1) && e1.includes('＋ 一覧 1 件') && /<div[^>]*>既存設定の変更<\/div>/.test(e1) && e1.includes('✎ 通知 1 件') && e1.includes('✎ 一覧 1 件'), '最終確認: 「追加 ＋ 一覧 1 件」「既存設定の変更 ✎ 通知 1 件 / ✎ 一覧 1 件」（§36）');
+  assert(e1.includes('条件: amount &gt;= &quot;1000000&quot; → amount &gt;= &quot;2000000&quot;') && e1.includes('表示項目: case_name, approver → case_name, approver, amount') && !/通知先: /.test(e1) && e1.includes('⚠ 既存の設定を変更します') && e1.includes('通知される範囲が狭くなります'), '最終確認の Before / After は変更した属性だけ・条件変更は警告（通知が届かなくなる可能性）');
+  await click(m, 'kt-ai-exec-go'); await tick(); await tick();
+  const ex = m.panel.executorState().execution;
+  assert(m.panel.executorState().stage === 'done' && ex.status === 'DONE' && m.mock.st.perRecord[0].filterCond === 'amount >= "2000000"' && m.mock.st.views['承認待ち'].fields.join() === 'case_name,approver,amount' && m.mock.st.views['担当者別'], '反映: 通知の条件・一覧の表示項目・新しい一覧');
+  const e2 = execHtml(m);
+  assert(e2.includes('動作テスト環境への反映が完了しました。') && e2.includes('✓ 3 件 VERIFIED') && e2.includes('運用環境にはまだ反映されていません。') && hasButton(e2, '変更前の状態に戻す') && e2.includes('id="kt-ai-exec-rollback-start"') && e2.includes('条件: amount &gt;= &quot;1000000&quot; → amount &gt;= &quot;2000000&quot;'), '完了画面: ✓ 3 件 VERIFIED・運用環境には反映されていません・[変更前の状態に戻す]（§17）・進捗行に属性単位の差分');
+  // Rollback: 確認 → 実行 → 検証
+  await click(m, 'kt-ai-exec-rollback-start'); await tick();
+  const r1 = execHtml(m);
+  assert(m.panel.executorState().stage === 'rollback-confirm' && r1.includes('動作テスト環境の変更を元に戻します。') && r1.includes('・一覧追加 1 件') && r1.includes('・通知変更 1 件') && r1.includes('・一覧変更 1 件') && r1.includes('運用環境には影響しません。') && hasButton(r1, 'キャンセル') && r1.includes('id="kt-ai-exec-rollback-go"') && hasButton(r1, '変更前の状態に戻す'), 'rollback 確認: 元に戻す内容の件数・運用環境には影響しません・[キャンセル][変更前の状態に戻す]（§18）');
+  assert(/P3[\s\S]*?P2[\s\S]*?P1/.test(r1.slice(r1.indexOf('kt-ai-rollback'))) && !m.mock.calls.slice(-10).some(c => /^(PUT|DELETE)/.test(c) && m.mock.calls.indexOf(c) > m.mock.calls.lastIndexOf('GET fields')), '確認までは書き込みなし・順序は P3 → P2 → P1（逆順）');
+  await click(m, 'kt-ai-exec-rollback-cancel'); await tick();
+  assert(m.panel.executorState().stage === 'done' && hasButton(execHtml(m), '変更前の状態に戻す'), 'キャンセルで完了画面に戻る（ボタンは残る）');
+  await click(m, 'kt-ai-exec-rollback-start'); await tick();
+  await click(m, 'kt-ai-exec-rollback-go'); await tick(); await tick();
+  const r2 = execHtml(m);
+  const rb = m.panel.executorState().rollback;
+  assert(m.panel.executorState().stage === 'rolled-back' && rb.status === 'ROLLED_BACK_VERIFIED' && r2.includes('動作テスト環境を実行前の状態に戻しました。') && r2.includes('✓ 3 件 ROLLBACK_VERIFIED') && r2.includes('実行前 snapshot との比較：✓ 一致') && r2.includes('運用環境には影響していません。') && !r2.includes('id="kt-ai-exec-rollback-start"'), 'rollback 結果: ROLLED_BACK_VERIFIED・snapshot と一致・ボタンは消える');
+  assert(m.mock.st.perRecord[0].filterCond === 'amount >= "1000000"' && m.mock.st.views['承認待ち'].fields.join() === 'case_name,approver' && !m.mock.st.views['担当者別'], '動作テスト環境が実行前に戻っている');
+  await click(m, 'kt-ai-exec-audit-copy'); await tick();
+  const audit = JSON.parse(m.copies[m.copies.length - 1]);
+  assert(audit.auditVersion === '2' && audit.rollback && audit.rollback.status === 'ROLLED_BACK_VERIFIED' && audit.rollback.steps.length === 3 && audit.rollback.verification.restoredToSnapshot === true && audit.rollback.requestedAt, '監査 JSON に rollback { requestedAt, status, steps, verification }（§27）');
+}
+{
+  // Rollback stale（Case D）: 反映後に人間が同じ集合を変更 → 「自動では元に戻せません」[ROLLBACK_STALE]・人間の変更は残る
+  const m = mount({ planResponse: PLAN_U });
+  await tick(); await runPlan(m);
+  m.panel.decide('P1', 'approve');
+  await click(m, 'kt-ai-exec-start'); await tick(); await click(m, 'kt-ai-exec-go'); await tick(); await tick();
+  assert(m.panel.executorState().execution?.status === 'DONE', '前提: 通知の条件変更を反映');
+  m.mock.st.perRecord[0].title = '人間が変更'; m.mock.st.revision += 1;
+  await click(m, 'kt-ai-exec-rollback-start'); await tick();
+  const r = execHtml(m);
+  assert(m.panel.executorState().stage === 'rollback-blocked' && r.includes('自動では元に戻せません') && r.includes('[ROLLBACK_STALE]') && r.includes('反映後にレコードの条件通知の設定が変更されています') && r.includes('現在の動作テスト環境を確認してください') && hasButton(r, '閉じる') && hasButton(r, 'もう一度確認する'), 'ROLLBACK_STALE: 止まる・理由と差分・設定は変更していません');
+  assert(m.mock.st.perRecord[0].title === '人間が変更' && m.mock.st.perRecord[0].filterCond === 'amount >= "2000000"', '人間の変更を消さない（PUT なし）');
+  await click(m, 'kt-ai-exec-rollback-cancel'); await tick();
+  assert(m.panel.executorState().stage === 'done' && hasButton(execHtml(m), '変更前の状態に戻す'), '閉じると完了画面へ');
+}
+{
+  // Partial rollback（§30）: P2 の rollback 成功・P1 失敗 → 「一部の変更だけ元に戻りました。」✓ P2 × P1
+  const PLAN_P = { ...PLAN_X, plan: { ...PLAN_X.plan, steps: [
+    mkStep('P1', 'ADD_FIELD', 'PROPOSED_FIELD', 'NEW_FIELD_1', { fieldType: 'DROP_DOWN', options: OPTIONS }),
+    mkStep('P2', 'ADD_VIEW', 'VIEW', '担当者別', { name: '担当者別', fields: ['owner', 'case_name', 'NEW_FIELD_1'] }, { dependsOn: ['P1'] }),
+  ], summary: { steps: 2, invalidSteps: 0, needsConfirmation: 0, proposedFields: 1, questions: 0 } } };
+  const m = mount({ planResponse: PLAN_P });
+  await tick(); await runPlan(m);
+  m.panel.decide('P1', 'approve'); m.panel.decide('P2', 'approve');
+  await click(m, 'kt-ai-exec-start'); await tick(); await click(m, 'kt-ai-exec-go'); await tick(); await tick();
+  await click(m, 'kt-ai-exec-rollback-start'); await tick();
+  m.mock.ctl.failDelete = true;
+  await click(m, 'kt-ai-exec-rollback-go'); await tick(); await tick();
+  const r = execHtml(m);
+  assert(m.panel.executorState().stage === 'rolled-back' && r.includes('一部の変更だけ元に戻りました。') && /✓ P2[\s\S]*?× P1/.test(r) && r.includes('現在の動作テスト環境を確認してください。') && !m.mock.st.views['担当者別'] && m.mock.st.fields.progress, '§30: 一部の変更だけ元に戻りました ✓ P2 × P1・現在の動作テスト環境を確認してください（一覧は戻りフィールドは残る）');
 }
 
 console.log('\n--- 3. 回帰: Review UI の既存要素は変わらない ---');
