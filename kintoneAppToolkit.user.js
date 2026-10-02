@@ -5929,6 +5929,11 @@
               if (!dest || !src) continue;
               if (dest.code === f.code) { invalid('LOOKUP_DEST_IS_SELF', `コピー先「${dest.code}」はこのルックアップ自身です（キーの値はルックアップ自身に入ります）`); continue; }
               const tc = lookupTypeCheck(src, dest); if (tc) invalid(tc.code, tc.message);
+              // 既存フィールドをコピー先にするとき、同じ種類で似た名前の既存フィールドが他にもあれば、どちらへ取得するかは人が決める（AI が黙って片方を選んだ可能性）
+              if (dest.origin !== 'proposed' && !m.overwrite) {
+                const rivals = Object.values(model.fields).filter(o => o.code !== dest.code && o.code !== f.code && o.origin !== 'proposed' && (o.baseType || o.type) === (dest.baseType || dest.type) && !lk.mappings.some(x => x.to === o.code) && (similarLabel(o.label, dest.label) || similarLabel(o.label, src.label)));
+                if (rivals.length) { issue('LOOKUP_DEST_AMBIGUOUS', 'medium', `取得元「${src.code}」（${src.label}）のコピー先を「${dest.label}」（${dest.code}）にしますが、似た名前の既存フィールド ${rivals.map(o => `「${o.label}」（${o.code}）`).join(' / ')} もあります。どのフィールドへ取得するか確認してください`, { candidates: [dest.code, ...rivals.map(o => o.code)] }); if (r.status === STATUS.VALID) r.status = STATUS.NEEDS_CONFIRMATION; }
+              }
             }
             // 選択時に表示するフィールド（参照元のフィールド。追加のみ）
             for (const ref of (spec.addPickerFields || [])) {
