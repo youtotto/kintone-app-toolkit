@@ -5237,13 +5237,19 @@
       CUSTOMIZATION_REQUIRED: { simulate: false, validate: false, defaultSafety: 'PLAN_ONLY', execution: 'NONE', changeType: 'NO_CHANGE', kind: 'JS' },
     });
     /** 高リスクの変更（安全分類を REVIEW_REQUIRED に上げ、status は NEEDS_CONFIRMATION） */
-    const HIGH_RISK = ['TYPE_CHANGE', 'OPTIONS_REMOVED', 'EXISTING_PATH_RESTRICTED', 'ACL_CHANGE', 'LOOKUP_MAPPING_OVERWRITE', 'NOTIFICATION_EVENTS_REMOVED', 'NOTIFICATION_RECIPIENTS_REMOVED', 'REMINDER_BASE_FIELD_CHANGE', 'REMINDER_RECIPIENTS_REMOVED'];
+    const HIGH_RISK = ['TYPE_CHANGE', 'OPTIONS_REMOVED', 'EXISTING_PATH_RESTRICTED', 'ACL_CHANGE', 'LOOKUP_MAPPING_OVERWRITE', 'NOTIFICATION_EVENTS_REMOVED', 'NOTIFICATION_RECIPIENTS_REMOVED', 'REMINDER_BASE_FIELD_CHANGE', 'REMINDER_RECIPIENTS_REMOVED', 'EXECUTABLE_USER_CHANGE'];
     const KINTONE_FIELD_TYPES = ['SINGLE_LINE_TEXT', 'MULTI_LINE_TEXT', 'RICH_TEXT', 'NUMBER', 'CALC', 'CHECK_BOX', 'RADIO_BUTTON', 'DROP_DOWN', 'MULTI_SELECT', 'DATE', 'TIME', 'DATETIME', 'FILE', 'LINK', 'USER_SELECT', 'ORGANIZATION_SELECT', 'GROUP_SELECT', 'LOOKUP', 'REFERENCE_TABLE', 'SUBTABLE', 'GROUP', 'SPACER', 'LABEL', 'HR'];
     const OPTION_TYPES = ['CHECK_BOX', 'RADIO_BUTTON', 'DROP_DOWN', 'MULTI_SELECT'];
     const ENTITY_TYPES = ['USER', 'GROUP', 'ORGANIZATION', 'FIELD_ENTITY', 'CREATOR', 'CUSTOM_FIELD'];
     const NOTIFY_EVENTS = ['recordAdded', 'recordEdited', 'commentAdded', 'statusChanged', 'fileImported'];
     const EVENT_SYNONYMS = [['recordAdded', ['レコード追加', '追加', '登録']], ['recordEdited', ['レコード編集', '編集', '更新', '変更']], ['commentAdded', ['コメント']], ['statusChanged', ['ステータス変更', 'ステータス']], ['fileImported', ['ファイル', 'インポート']]];
     const RESERVED_CODES = ['レコード番号', '作成者', '作成日時', '更新者', '更新日時', 'ステータス', '作業者', 'カテゴリー'];
+    /** プロセス管理（Phase 12）: 作業者の指定形式の語彙（kintone API: ONE = 次のユーザーから作業者を選択 / ALL = 全員 / ANY = 一人）と同義語 */
+    const ASSIGNEE_TYPES = ['ONE', 'ALL', 'ANY'];
+    const assigneeTypeOf = (v) => { const t = String(v ?? '').trim(); const up = t.toUpperCase(); if (ASSIGNEE_TYPES.includes(up)) return up; if (/全員|すべて|全て|everyone/i.test(t)) return 'ALL'; if (/一人|1人|いずれか|誰か|anyone/i.test(t)) return 'ANY'; if (/選択|次のユーザーから|one of/i.test(t)) return 'ONE'; return null; };
+    const CHANGE_KINDS = ['ACTION_CONDITION', 'ACTION_TRANSITION', 'ASSIGNEE', 'EXECUTABLE_USER', 'STATUS'];
+    /** 作業者 / 実行可能ユーザーに使えるフィールドの型（API: 作成者・更新者・ユーザー選択・組織選択・グループ選択） */
+    const ENTITY_FIELD_TYPES = ['USER_SELECT', 'ORGANIZATION_SELECT', 'GROUP_SELECT', 'CREATOR', 'MODIFIER'];
     const CODE_RE = /^[A-Za-z0-9_＿ぁ-んァ-ヶー一-龠々・￥＄％＄]+$/u;
     const clone = (v) => JSON.parse(JSON.stringify(v ?? null));
     const cmp = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
@@ -5271,7 +5277,7 @@
       const st = d.status || {};
       const states = Object.values(st.states || {}).filter(Boolean).sort((a, b) => (Number(a.index ?? 0) - Number(b.index ?? 0)) || cmp(String(a.name), String(b.name)))
         .map((s, i) => ({ name: s.name, index: i, assigneeType: s.assignee?.type ?? null, assignees: entityList(s.assignee?.entities), origin: 'existing' }));
-      const actions = (st.enable ? (st.actions || []) : []).map(a => ({ name: a.name, from: a.from, to: a.to, filterCond: a.filterCond || '', type: a.type ?? null, executableUsers: entityList(a.executableUser?.entities), origin: 'existing' }));
+      const actions = (st.enable ? (st.actions || []) : []).map(a => ({ name: a.name, from: a.from, to: a.to, filterCond: a.filterCond || '', type: a.type ?? 'PRIMARY', executableUsers: entityList(a.executableUser?.entities), origin: 'existing' }));
       const general = (d.generalNotify?.notifications || []).map((n, i) => ({ id: `general#${i + 1}`, index: i, scope: 'general', title: '', target: { type: n.entity?.type, code: n.entity?.code ?? null }, targets: [{ type: n.entity?.type, code: n.entity?.code ?? null }], events: NOTIFY_EVENTS.filter(k => n[k]), filterCond: '', origin: 'existing' }));
       const perRecord = (d.perRecordNotify?.notifications || []).map((n, i) => ({ id: `perRecord#${i + 1}`, index: i, scope: 'perRecord', title: n.title || '', filterCond: n.filterCond || '', targets: entityList(n.targets), events: [], origin: 'existing' }));
       const reminders = (d.reminderNotify?.notifications || []).map((n, i) => ({ id: `reminder#${i + 1}`, index: i, title: n.title || '', timing: { code: n.timing?.code ?? null, daysLater: n.timing?.daysLater != null ? String(n.timing.daysLater) : null, time: n.timing?.time ?? null }, filterCond: n.filterCond || '', targets: entityList(n.targets), origin: 'existing' }));
@@ -5318,7 +5324,9 @@
       options: ['options', '選択肢', 'choices'],
       destApp: ['destapp', '作成先アプリ', '作成先', '遷移先アプリ'],
       accessibility: ['accessibility', '権限', 'アクセス権'],
-      entities: ['entities', '対象', 'ユーザー', 'グループ', '組織'],
+      entities: ['entities', '対象', 'ユーザー', 'グループ', '組織', '実行可能ユーザー', 'executableuser'],
+      changeKind: ['changekind', '変更種別'],
+      assigneeType: ['assigneetype', '作業者の指定形式', '指定形式'],
     };
     const keyOf = (k) => { const n = norm(k); for (const [canon, syn] of Object.entries(DETAIL_KEYS)) if (syn.some(s => n === norm(s) || n.startsWith(norm(s)))) return canon; return null; };
     const splitList = (v) => String(v ?? '').split(/[、,，\/／;；\n]+/).map(s => s.trim()).filter(Boolean);
@@ -5385,6 +5393,9 @@
       }
       if (spec.events) spec.events = spec.events.map(e => { const n = norm(e); const exact = NOTIFY_EVENTS.find(x => norm(x) === n); if (exact) return exact; const hit = EVENT_SYNONYMS.find(([, syn]) => syn.some(s => n.includes(norm(s)))); return hit ? hit[0] : e; });
       if (spec.filterCond) spec.filterCond = String(spec.filterCond).replace(/^(条件|condition)[:：]\s*/i, '');
+      // Phase 12: 作業者の指定形式と変更種別は語彙に揃える（AI の自由文を API 値に使わない。語彙外は Review が指摘する）
+      if (spec.assigneeType != null) { const t = assigneeTypeOf(spec.assigneeType); spec.assigneeTypeRaw = String(spec.assigneeType); if (t) spec.assigneeType = t; else delete spec.assigneeType; }
+      if (spec.changeKind != null) { const k = String(spec.changeKind).trim().toUpperCase(); if (CHANGE_KINDS.includes(k)) spec.changeKind = k; else delete spec.changeKind; }
       // name の既定: targetRef（ADD_* の新規名）
       if (!spec.name && step.targetRef && step.targetKind !== 'PROPOSED_FIELD' && /^ADD_/.test(step.actionType)) spec.name = step.targetRef;
       return spec;
@@ -5489,6 +5500,18 @@
       }
       // ---- 3. plan 内部の競合（複数 step の組み合わせ）----
       planLevelConflicts(steps, results, model, conflicts);
+      // ---- 3a. 条件の分割判定（Phase 12 §10）。計画が追加・変更したアクションのある遷移元だけ警告する ----
+      const partition = partitionCheck(model.process);
+      for (const item of partition) {
+        const touched = item.actions.filter(a => a.origin === 'proposed' || a.stepId).map(a => a.stepId).filter(Boolean);
+        const touchedByUpdate = [...results.values()].filter(r => r.diff.target.kind === 'PROCESS_ACTION' && r.diff.changeType === CHANGE.UPDATE && item.actions.some(a => a.name === r.diff.target.id)).map(r => r.stepId);
+        const stepIds = [...new Set([...touched, ...touchedByUpdate])];
+        if (!stepIds.length) continue;
+        if (item.verdict === 'OVERLAP') warnings.push({ code: 'PROCESS_CONDITION_OVERLAP', severity: 'medium', stepIds, message: item.message, detail: item });
+        else if (item.verdict === 'GAP') warnings.push({ code: 'PROCESS_CONDITION_GAP', severity: 'medium', stepIds, message: item.message, detail: item });
+        else if (item.verdict === 'IDENTICAL') warnings.push({ code: 'PROCESS_CONDITION_IDENTICAL', severity: 'high', stepIds, message: item.message, detail: item });
+        else if (item.verdict === 'UNKNOWN') warnings.push({ code: 'PROCESS_CONDITION_UNKNOWN', severity: 'low', stepIds, message: item.message, detail: item });
+      }
       // ---- 4. 影響の再確認（Planner の impact と Toolkit の impactOf を照合）----
       const impactCheck = recheckImpact(plan, results, deps, before);
       warnings.push(...impactCheck.warnings);
@@ -5510,6 +5533,7 @@
       // 競合に関わる step の status を反映
       for (const c of conflicts) for (const sid of c.stepIds) { const r = results.get(sid); if (!r) continue; const want = c.severity === 'high' ? STATUS.NEEDS_CONFIRMATION : STATUS.WARNING; if (STATUS_RANK[want] > STATUS_RANK[r.status]) r.status = want; if (!r.issues.some(i => i.code === c.code && i.message === c.message)) r.issues.push({ code: c.code, severity: c.severity, message: c.message }); if (r.safety === SAFETY.SAFE) r.safety = SAFETY.REVIEW_REQUIRED; }
       for (const w of impactCheck.warnings) for (const sid of w.stepIds) { const r = results.get(sid); if (!r) continue; if (r.status === STATUS.VALID) r.status = STATUS.WARNING; if (!r.issues.some(i => i.code === w.code && i.message === w.message)) r.issues.push({ code: w.code, severity: w.severity, message: w.message }); }
+      for (const w of warnings.filter(x => /^PROCESS_CONDITION_/.test(x.code))) for (const sid of w.stepIds) { const r = results.get(sid); if (!r) continue; if (!r.issues.some(i => i.code === w.code)) r.issues.push({ code: w.code, severity: w.severity, message: w.message }); if (w.severity === 'high' && STATUS_RANK[r.status] < STATUS_RANK[STATUS.NEEDS_CONFIRMATION]) r.status = STATUS.NEEDS_CONFIRMATION; }
 
       // ---- 7. 集約 ----
       const stepReviews = steps.map(s => results.get(s.id)).filter(Boolean);
@@ -5531,7 +5555,7 @@
       const processChanged = stepReviews.some(r => ['PROCESS_STATUS', 'PROCESS_ACTION', 'PROCESS'].includes(r.diff.target.kind) && r.diff.changeType !== CHANGE.INVALID && r.diff.changeType !== CHANGE.NO_CHANGE);
       const simulation = {
         before, after: model, order: [...order],
-        process: { before: processSummary(before.process), after: processSummary(model.process), changed: processChanged, mermaid: { before: processMermaid(before.process), after: processMermaid(model.process, before.process) } },
+        process: { before: processSummary(before.process), after: processSummary(model.process), changed: processChanged, mermaid: { before: processMermaid(before.process), after: processMermaid(model.process, before.process) }, partition },
       };
       return {
         reviewVersion: REVIEW_VERSION, planVersion: plan?.planVersion ?? '1', requestId: plan?.requestId ?? null, reviewedAt: null,
@@ -5623,6 +5647,10 @@
         if (en.type === 'FIELD_ENTITY') { const f = requireField(en.temporaryId || en.code, role); if (f) en.code = f.code; }
         else if (en.type === 'UNKNOWN') { issue('UNKNOWN_ENTITY', 'medium', `${role}「${en.code}」はフィールド・ユーザー・グループ・組織のどれか判別できません（要確認）`); if (r.status === STATUS.VALID) r.status = STATUS.NEEDS_CONFIRMATION; }
       };
+      /** 作業者（プロセス管理）に使えるフィールド: 作成者・更新者・ユーザー選択・組織選択・グループ選択（API 仕様） */
+      const assigneeFieldOk = (en, role) => { if (en && en.type === 'FIELD_ENTITY' && en.code && model.fields[en.code] && !ENTITY_FIELD_TYPES.includes(model.fields[en.code].baseType || model.fields[en.code].type)) invalid('ASSIGNEE_FIELD_INVALID', `${role}のフィールド「${en.code}」（${model.fields[en.code].type}）は作業者に使えません（作成者 / 更新者 / ユーザー選択 / 組織選択 / グループ選択）`); };
+      /** 実行可能ユーザー（作業者以外でも実行できるアクション）: USER / GROUP / ORGANIZATION / FIELD_ENTITY だけ（CREATOR・CUSTOM_FIELD は不可） */
+      const executableUserOk = (en) => { if (!en) return; if (en.type === 'CREATOR' || en.type === 'CUSTOM_FIELD') invalid('EXECUTABLE_USER_INVALID', `実行可能ユーザーに ${en.type} は指定できません（ユーザー / グループ / 組織 / フィールド）`); else assigneeFieldOk(en, '実行可能ユーザー'); };
       switch (step.actionType) {
         case 'ADD_FIELD': case 'ADD_LOOKUP': {
           const p = proposedMap.get(step.targetRef);
@@ -5716,12 +5744,14 @@
           if (model.process.states.some(s => s.name === name)) invalid('STATUS_DUPLICATE', `ステータス「${name}」は既に存在します`);
           const assignees = (spec.assignees || []).map(a => parseEntity(a, model, proposedMap)).filter(Boolean);
           assignees.forEach(en => entityOk(en, '作業者'));
+          assignees.forEach(en => assigneeFieldOk(en, '作業者'));
+          if (spec.assigneeTypeRaw && !spec.assigneeType) { issue('ASSIGNEE_TYPE_UNKNOWN', 'medium', `作業者の指定形式「${spec.assigneeTypeRaw}」は kintone の語彙（ONE: 次のユーザーから作業者を選択 / ALL: 全員 / ANY: 一人）ではありません。ONE として扱います（要確認）`); }
           if (r.status === STATUS.INVALID) return r;
-          const stateObj = { name, index: model.process.states.length, assigneeType: assignees.length > 1 ? 'ALL' : 'ONE', assignees, origin: 'proposed', stepId: step.id };
-          if (!model.process.enabled) issue('PROCESS_DISABLED', 'medium', 'プロセス管理は現在無効です（有効化が必要）');
+          const stateObj = { name, index: model.process.states.length, assigneeType: spec.assigneeType || 'ONE', assignees, origin: 'proposed', stepId: step.id };
+          if (!model.process.enabled) issue('PROCESS_DISABLED', 'medium', 'プロセス管理は現在無効です（有効化が必要。Toolkit は自動で有効化しません）');
           model.process.states.push(stateObj); model.process.enabled = true; r.simulated = true;
           r.diff.target = { kind: 'PROCESS_STATUS', id: name }; r.diff.before = null; r.diff.after = clone(stateObj);
-          h(`＋ ステータス「${name}」${assignees.length ? `（作業者: ${assignees.map(entityText).join(', ')}）` : '（作業者の指定なし）'}`);
+          h(`＋ ステータス「${name}」${assignees.length ? `（作業者: ${assignees.map(entityText).join(', ')}・${ASSIGNEE_TYPE_JA[stateObj.assigneeType]}）` : '（作業者の指定なし）'}`);
           // 到達可能性は plan 全体の最後に判定する（後続の ADD_PROCESS_ACTION で繋がる）
           if (r.status === STATUS.VALID) r.status = STATUS.NEEDS_CONFIRMATION;   // 既定: プロセスの変更は確認
           break;
@@ -5737,6 +5767,9 @@
           if (model.process.actions.some(a => a.name === name && froms.includes(a.from))) invalid('ACTION_DUPLICATE', `アクション「${name}」（${froms.join('/')} から）は既に存在します`);
           for (const c of condFields(cond, model)) requireField(c, '条件式');
           checkCond(cond, '条件式', 'process');
+          const execUsers = (spec.entities || []).map(e => parseEntity(e, model, proposedMap)).filter(Boolean);
+          execUsers.forEach(en => entityOk(en, '実行可能ユーザー'));
+          execUsers.forEach(en => executableUserOk(en));
           if (r.status === STATUS.INVALID) return r;
           for (const fr of froms) {
             for (const a of model.process.actions.filter(a => a.from === fr)) {
@@ -5745,12 +5778,12 @@
               else if (ov === true) issue('ACTION_CONDITION_OVERLAP', 'medium', `遷移元「${fr}」の既存アクション「${a.name}」（${a.filterCond || '条件なし'}）と条件が重なる可能性があります`);
               else if (ov === null) issue('ACTION_CONDITION_UNPARSED', 'low', `既存アクション「${a.name}」との条件の重なりを判定できません（条件式が複雑）`);
             }
-            const act = { name, from: fr, to, filterCond: cond, type: 'PRIMARY', executableUsers: (spec.entities || []).map(e => parseEntity(e, model, proposedMap)).filter(Boolean), origin: 'proposed', stepId: step.id };
+            const act = { name, from: fr, to, filterCond: cond, type: execUsers.length ? 'SECONDARY' : 'PRIMARY', executableUsers: execUsers, origin: 'proposed', stepId: step.id };
             model.process.actions.push(act);
           }
           r.simulated = true;
-          r.diff.target = { kind: 'PROCESS_ACTION', id: name }; r.diff.before = null; r.diff.after = { name, from: froms, to, filterCond: cond };
-          h(`＋ アクション「${name}」: ${froms.join('/')} → ${to}${cond ? ` [${cond}]` : ''}`);
+          r.diff.target = { kind: 'PROCESS_ACTION', id: name }; r.diff.before = null; r.diff.after = { name, from: froms, to, filterCond: cond, type: execUsers.length ? 'SECONDARY' : 'PRIMARY', executableUsers: execUsers.map(entityText) };
+          h(`＋ アクション「${name}」: ${froms.join('/')} → ${to}${cond ? ` [${cond}]` : ''}${execUsers.length ? `（作業者以外でも実行可: ${execUsers.map(entityText).join(', ')}）` : ''}`);
           if (r.status === STATUS.VALID) r.status = STATUS.NEEDS_CONFIRMATION;
           break;
         }
@@ -5760,9 +5793,14 @@
           const act = model.process.actions.find(a => a.name === ref);
           const st = model.process.states.find(s => s.name === ref);
           if (!act && !st) { if (ref) invalid('UNKNOWN_PROCESS_TARGET', `プロセス管理に「${ref}」というステータス / アクションはありません`); else { issue('PROCESS_TARGET_MISSING', 'medium', '変更対象（ステータス / アクション）が指定されていません'); r.status = STATUS.NEEDS_CONFIRMATION; r.diff.changeType = CHANGE.NO_CHANGE; } return r; }
+          // Review 時点の同一性（Executor は反映直前に現在の設定と比べ、1 属性でも違えば TARGET_CHANGED で止める）
+          if (act) r.diff.target = { kind: 'PROCESS_ACTION', id: act.name, identity: { kind: 'PROCESS_ACTION', name: act.name, from: act.from, to: act.to, filterCond: act.filterCond || '', type: act.type || 'PRIMARY', executableUsers: act.executableUsers.map(entityText) } };
+          else r.diff.target = { kind: 'PROCESS_STATUS', id: st.name, identity: { kind: 'PROCESS_STATUS', name: st.name, index: st.index, assigneeType: st.assigneeType, assignees: st.assignees.map(entityText) } };
+          const identity = r.diff.target.identity;
           if (act) {
             const beforeAct = clone(act);
             let changed = false;
+            const kinds = [];
             // 複数条件（分岐）が details に並ぶ場合: 最初の条件を既存に適用し、他は新しい遷移として扱う
             const condDetails = (step.proposal?.details || []).filter(d => keyOf(d.key) === 'filterCond').map(d => String(d.value));
             const branches = condDetails.map(v => { const m = v.match(/^(.*?)\s*(?:→|->|=>)\s*(.+?)(?:へ遷移|に遷移)?$/); return m ? { cond: m[1].trim(), to: m[2].trim() } : { cond: v.replace(/^(条件|condition)[:：]\s*/i, '').trim(), to: null }; });
@@ -5771,14 +5809,25 @@
               for (const c of condFields(primary.cond, model)) requireField(c, '条件式');
               checkCond(primary.cond, '条件式', 'process');
               const narrower = condNarrower(primary.cond, act.filterCond);
-              if (narrower === true || !act.filterCond) issue('EXISTING_PATH_RESTRICTED', 'high', `「${act.name}」は現在${act.filterCond ? `条件「${act.filterCond}」` : 'すべて'}の「${act.from}」レコードで実行できます。変更後は「${primary.cond}」の場合のみ実行可能になります`);
-              else if (narrower === null) issue('CONDITION_CHANGE_UNPARSED', 'medium', `「${act.name}」の条件を「${act.filterCond}」→「${primary.cond}」に変更します（制限の有無を自動判定できません）`);
-              else issue('CONDITION_CHANGE', 'medium', `「${act.name}」の条件を「${act.filterCond || 'なし'}」→「${primary.cond}」に変更します`);
-              act.filterCond = primary.cond; changed = true;
+              if (narrower === true || !act.filterCond) issue('EXISTING_PATH_RESTRICTED', 'high', `⚠ 既存の操作可能条件を変更します。「${act.name}」は現在${act.filterCond ? `「${act.filterCond}」の` : 'すべての'}「${act.from}」で実行できます。変更後は「${primary.cond}」の場合のみ実行可能になります。`);
+              else if (narrower === null) issue('CONDITION_CHANGE_UNPARSED', 'medium', `「${act.name}」の条件を「${act.filterCond}」→「${primary.cond}」に変更します（制限の有無を自動判定できません。これまで実行できたレコードで実行できなくなる可能性があります）`);
+              else issue('CONDITION_CHANGE', 'medium', `「${act.name}」の条件を「${act.filterCond || 'なし'}」→「${primary.cond}」に変更します（実行できる範囲は広がります）`);
+              act.filterCond = primary.cond; changed = true; kinds.push('ACTION_CONDITION');
             }
             const newTo = (primary && primary.to && primary.to !== act.to) ? primary.to : (spec.to && spec.to !== act.to ? spec.to : null);
-            if (newTo) { if (!model.process.states.some(s => s.name === newTo)) invalid('UNKNOWN_STATUS', `遷移先ステータス「${newTo}」が存在しません`); else { issue('TRANSITION_CHANGE', 'high', `「${act.name}」の遷移先を「${act.to}」→「${newTo}」に変更します`); act.to = newTo; changed = true; } }
-            if (spec.from && spec.from !== act.from && !branches.length) { const nf = splitList(spec.from); for (const x of nf) if (!model.process.states.some(s => s.name === x)) invalid('UNKNOWN_STATUS', `遷移元ステータス「${x}」が存在しません`); if (r.status !== STATUS.INVALID) { issue('TRANSITION_CHANGE', 'high', `「${act.name}」の遷移元を「${act.from}」→「${nf.join('/')}」に変更します`); act.from = nf[0]; changed = true; for (const x of nf.slice(1)) model.process.actions.push({ ...clone(act), from: x, origin: 'proposed', stepId: step.id }); } }
+            if (newTo) { if (!model.process.states.some(s => s.name === newTo)) invalid('UNKNOWN_STATUS', `遷移先ステータス「${newTo}」が存在しません`); else { issue('TRANSITION_CHANGE', 'high', `「${act.name}」の遷移先を「${act.to}」→「${newTo}」に変更します`); act.to = newTo; changed = true; kinds.push('ACTION_TRANSITION'); } }
+            if (spec.from && spec.from !== act.from && !branches.length) { const nf = splitList(spec.from); for (const x of nf) if (!model.process.states.some(s => s.name === x)) invalid('UNKNOWN_STATUS', `遷移元ステータス「${x}」が存在しません`); if (r.status !== STATUS.INVALID) { issue('TRANSITION_CHANGE', 'high', `「${act.name}」の遷移元を「${act.from}」→「${nf.join('/')}」に変更します`); act.from = nf[0]; changed = true; kinds.push('ACTION_TRANSITION'); for (const x of nf.slice(1)) model.process.actions.push({ ...clone(act), from: x, origin: 'proposed', stepId: step.id }); } }
+            // 実行可能ユーザー（作業者以外でも実行できるアクション）の変更: 変更後の全件で指定。変更は高リスク
+            if ((spec.entities || []).length) {
+              const execUsers = spec.entities.map(e => parseEntity(e, model, proposedMap)).filter(Boolean);
+              execUsers.forEach(en => entityOk(en, '実行可能ユーザー'));
+              execUsers.forEach(en => executableUserOk(en));
+              if (r.status !== STATUS.INVALID && !sameTargets(act.executableUsers, execUsers)) {
+                const removed = act.executableUsers.filter(t => !execUsers.some(x => sameEntity(x, t))), added = execUsers.filter(t => !act.executableUsers.some(x => sameEntity(x, t)));
+                issue('EXECUTABLE_USER_CHANGE', 'high', `「${act.name}」を作業者以外でも実行できるユーザーを変更します${removed.length ? `（外れる: ${removed.map(entityText).join(', ')}）` : ''}${added.length ? `（追加: ${added.map(entityText).join(', ')}）` : ''}。誰がこの操作をできるかが変わります`);
+                act.executableUsers = execUsers; act.type = 'SECONDARY'; changed = true; kinds.push('EXECUTABLE_USER');
+              }
+            }
             for (const b of branches.slice(1)) {
               if (!b.to) continue;
               if (!model.process.states.some(s => s.name === b.to)) { invalid('UNKNOWN_STATUS', `遷移先ステータス「${b.to}」が存在しません`); continue; }
@@ -5788,22 +5837,33 @@
               issue('BRANCH_ADDED', 'medium', `「${act.name}」に分岐を追加: ${add.from} → ${add.to} [${add.filterCond}]`);
             }
             if (r.status === STATUS.INVALID) return r;
-            if (!changed) { issue('NO_STRUCTURED_CHANGE', 'medium', '変更内容が構造化されていないため仮適用できません（要確認）'); r.status = STATUS.NEEDS_CONFIRMATION; r.diff.changeType = CHANGE.NO_CHANGE; r.diff.target = { kind: 'PROCESS_ACTION', id: act.name }; r.diff.before = beforeAct; r.diff.after = beforeAct; return r; }
+            if (!changed) { issue('NO_STRUCTURED_CHANGE', 'medium', '変更内容が構造化されていないため仮適用できません（要確認）'); r.status = STATUS.NEEDS_CONFIRMATION; r.diff.changeType = CHANGE.NO_CHANGE; r.diff.before = actionView(beforeAct); r.diff.after = actionView(beforeAct); return r; }
             r.simulated = true;
-            r.diff.target = { kind: 'PROCESS_ACTION', id: act.name }; r.diff.before = { name: beforeAct.name, from: beforeAct.from, to: beforeAct.to, filterCond: beforeAct.filterCond }; r.diff.after = { name: act.name, from: act.from, to: act.to, filterCond: act.filterCond, branches: model.process.actions.filter(a => a.name === act.name && a.stepId === step.id).map(a => ({ from: a.from, to: a.to, filterCond: a.filterCond })) };
-            h(`「${act.name}」を変更`); h(`Before: ${beforeAct.from} → ${beforeAct.to}${beforeAct.filterCond ? ` [${beforeAct.filterCond}]` : '（条件なし）'}`); h(`After: ${act.from} → ${act.to}${act.filterCond ? ` [${act.filterCond}]` : '（条件なし）'}`);
-            for (const a of model.process.actions.filter(a => a.name === act.name && a.stepId === step.id)) h(`After（分岐）: ${a.from} → ${a.to}${a.filterCond ? ` [${a.filterCond}]` : ''}`);
+            const branchList = model.process.actions.filter(a => a.name === act.name && a.stepId === step.id).map(a => ({ from: a.from, to: a.to, filterCond: a.filterCond }));
+            if (branchList.length) kinds.push('ACTION_BRANCH');
+            r.diff.changeKind = kinds[0] || 'ACTION_CONDITION'; r.diff.changeKinds = kinds;
+            r.diff.before = actionView(beforeAct); r.diff.after = { ...actionView(act), ...(branchList.length ? { branches: branchList } : {}) };
+            h(`✎ アクション「${act.name}」を変更`); h(`Before: ${beforeAct.from} → ${beforeAct.to}${beforeAct.filterCond ? ` [${beforeAct.filterCond}]` : '（条件なし）'}`); h(`After: ${act.from} → ${act.to}${act.filterCond ? ` [${act.filterCond}]` : '（条件なし）'}`);
+            if (kinds.includes('EXECUTABLE_USER')) h(`実行可能ユーザー: ${beforeAct.executableUsers.map(entityText).join(', ') || '（作業者のみ）'} → ${act.executableUsers.map(entityText).join(', ')}`);
+            for (const a of branchList) h(`After（分岐）: ${a.from} → ${a.to}${a.filterCond ? ` [${a.filterCond}]` : ''}`);
             r.status = STATUS.NEEDS_CONFIRMATION;
           } else {
             const beforeSt = clone(st);
             const assignees = (spec.assignees || []).map(a => parseEntity(a, model, proposedMap)).filter(Boolean);
             assignees.forEach(en => entityOk(en, '作業者'));
+            assignees.forEach(en => assigneeFieldOk(en, '作業者'));
+            if (spec.assigneeTypeRaw && !spec.assigneeType) issue('ASSIGNEE_TYPE_UNKNOWN', 'medium', `作業者の指定形式「${spec.assigneeTypeRaw}」は kintone の語彙（ONE / ALL / ANY）ではありません（要確認）`);
             if (r.status === STATUS.INVALID) return r;
-            if (!assignees.length) { issue('NO_STRUCTURED_CHANGE', 'medium', '作業者の変更内容を特定できません（要確認）'); r.status = STATUS.NEEDS_CONFIRMATION; r.diff.changeType = CHANGE.NO_CHANGE; r.diff.target = { kind: 'PROCESS_STATUS', id: st.name }; return r; }
-            st.assignees = assignees; st.assigneeType = assignees.length > 1 ? 'ALL' : 'ONE'; r.simulated = true;
-            r.diff.target = { kind: 'PROCESS_STATUS', id: st.name }; r.diff.before = beforeSt; r.diff.after = clone(st);
-            h(`ステータス「${st.name}」の作業者を変更`); h(`Before: ${beforeSt.assignees.map(entityText).join(', ') || '（なし）'}`); h(`After: ${assignees.map(entityText).join(', ')}`);
-            issue('ASSIGNEE_CHANGE', 'medium', '作業者の変更は承認フローに影響します'); r.status = STATUS.NEEDS_CONFIRMATION;
+            const typeChange = spec.assigneeType && spec.assigneeType !== st.assigneeType;
+            if (!assignees.length && !typeChange) { issue('NO_STRUCTURED_CHANGE', 'medium', '作業者の変更内容を特定できません（要確認）'); r.status = STATUS.NEEDS_CONFIRMATION; r.diff.changeType = CHANGE.NO_CHANGE; return r; }
+            if (st.index === 0) { invalid('FIRST_STATUS_ASSIGNEE', `先頭のステータス「${st.name}」の作業者は kintone では設定できません`); return r; }
+            const removed = assignees.length ? st.assignees.filter(t => !assignees.some(x => sameEntity(x, t))) : [], added = assignees.length ? assignees.filter(t => !st.assignees.some(x => sameEntity(x, t))) : [];
+            if (assignees.length) st.assignees = assignees;
+            if (typeChange) { issue('ASSIGNEE_TYPE_CHANGE', 'medium', `ステータス「${st.name}」の作業者の指定形式を ${ASSIGNEE_TYPE_JA[st.assigneeType] || st.assigneeType} → ${ASSIGNEE_TYPE_JA[spec.assigneeType]} に変更します`); st.assigneeType = spec.assigneeType; }
+            r.simulated = true; r.diff.changeKind = 'ASSIGNEE'; r.diff.changeKinds = ['ASSIGNEE'];
+            r.diff.before = stateView(beforeSt); r.diff.after = stateView(st);
+            h(`✎ ステータス「${st.name}」の作業者を変更`); h(`Before: ${beforeSt.assignees.map(entityText).join(', ') || '（なし）'}（${ASSIGNEE_TYPE_JA[beforeSt.assigneeType] || beforeSt.assigneeType}）`); h(`After: ${st.assignees.map(entityText).join(', ') || '（なし）'}（${ASSIGNEE_TYPE_JA[st.assigneeType] || st.assigneeType}）`);
+            issue('ASSIGNEE_CHANGE', 'medium', `作業者の変更は承認フローに影響します${removed.length ? `（外れる: ${removed.map(entityText).join(', ')}）` : ''}${added.length ? `（追加: ${added.map(entityText).join(', ')}）` : ''}`); r.status = STATUS.NEEDS_CONFIRMATION;
           }
           break;
         }
@@ -6125,6 +6185,10 @@
     const fieldView = (f) => ({ code: f.code, label: f.label, type: f.type, required: !!f.required, ...(f.unique ? { unique: true } : {}), ...(f.options ? { options: [...f.options] } : {}), ...(f.expression ? { expression: f.expression } : {}), ...(f.lookup ? { lookup: clone(f.lookup) } : {}), ...(f.temporaryId ? { temporaryId: f.temporaryId } : {}) });
     const notifView = (n) => ({ id: n.id, scope: n.scope, title: n.title, targets: n.targets.map(entityText), filterCond: n.filterCond, events: [...(n.events || [])], ...(n.stepId ? { stepId: n.stepId } : {}) });
     /** リマインダーの表示（Phase 11: UPDATE_REMINDER の Before / After。属性単位の差分が出せる平らな形） */
+    const ASSIGNEE_TYPE_JA = { ONE: '次のユーザーから作業者を選択', ALL: '全員', ANY: '一人' };
+    /** プロセスの表示（Phase 12: UPDATE_PROCESS の Before / After。Executor はこの形を読む） */
+    const actionView = (a) => ({ name: a.name, from: a.from, to: a.to, filterCond: a.filterCond || '', type: a.type || 'PRIMARY', executableUsers: (a.executableUsers || []).map(entityText) });
+    const stateView = (s) => ({ name: s.name, index: s.index, assigneeType: s.assigneeType, assignees: (s.assignees || []).map(entityText) });
     const remView = (n) => ({ id: n.id, title: n.title || '', timingField: n.timing?.code ?? null, daysLater: n.timing?.daysLater ?? null, time: n.timing?.time ?? null, filterCond: n.filterCond || '', targets: (n.targets || []).map(entityText) });
     const viewView = (v) => ({ name: v.name, type: v.type || 'LIST', fields: [...(v.fields || [])], filterCond: v.filterCond || '', sort: v.sort || '', ...(v.id != null ? { id: v.id } : {}), ...(v.builtinType ? { builtinType: v.builtinType } : {}) });
     const daysText = (d) => (d == null || d === '' ? '—' : Number(d) < 0 ? `${-Number(d)} 日前` : Number(d) === 0 ? '当日' : `${Number(d)} 日後`);
@@ -6143,7 +6207,42 @@
       return out;
     }
     const fieldDiffLines = objDiffLines;
-    function processSummary(p) { return { enabled: p.enabled, states: p.states.map(s => ({ name: s.name, assignees: s.assignees.map(entityText), origin: s.origin })), actions: p.actions.map(a => ({ name: a.name, from: a.from, to: a.to, filterCond: a.filterCond, origin: a.origin })) }; }
+    function processSummary(p) { return { enabled: p.enabled, states: p.states.map(s => ({ name: s.name, index: s.index, assigneeType: s.assigneeType, assignees: s.assignees.map(entityText), origin: s.origin })), actions: p.actions.map(a => ({ name: a.name, from: a.from, to: a.to, filterCond: a.filterCond, type: a.type || 'PRIMARY', executableUsers: (a.executableUsers || []).map(entityText), origin: a.origin })) }; }
+    /**
+     * 条件の分割判定（Phase 12 §10）: 同じ遷移元のアクション群について、条件の重複（overlap）・漏れ（gap）・同一（identical）を判定する。
+     * 単純な比較式（同じ数値フィールド）だけ評価し、評価できない条件は UNKNOWN（安全と断定しない）。無条件のアクションは全域を覆う
+     */
+    function partitionCheck(process) {
+      const out = [];
+      const byFrom = new Map();
+      for (const a of process?.actions || []) byFrom.set(a.from, [...(byFrom.get(a.from) || []), a]);
+      for (const [from, acts] of byFrom) {
+        // 分岐の判定は作業者が実行する PRIMARY だけ（作業者以外でも実行できる SECONDARY の差し戻し等は分岐ではない）。条件付きが無ければ判定しない
+        const primary = acts.filter(a => (a.type || 'PRIMARY') !== 'SECONDARY');
+        const conditional = primary.filter(a => a.filterCond), unconditional = primary.filter(a => !a.filterCond);
+        if (primary.length < 2 || !conditional.length) continue;
+        const parsed = conditional.map(a => ({ name: a.name, cond: a.filterCond || '', p: parseCond(a.filterCond), origin: a.origin, stepId: a.stepId ?? null }));
+        const item = { from, actions: primary.map(a => ({ name: a.name, filterCond: a.filterCond || '', origin: a.origin, stepId: a.stepId ?? null })), unconditional: unconditional.map(a => a.name), verdict: 'UNKNOWN', overlaps: [], identical: [], gap: null, message: '' };
+        const unknown = parsed.some(x => !x.p || x.p.num == null) || new Set(parsed.map(x => x.p && x.p.field)).size > 1;
+        if (unknown) { item.message = `「${from}」からのアクションの条件が複数のフィールドにまたがる、または単純な比較式ではないため、重複・欠落を判定できません`; out.push(item); continue; }
+        const ok = (p, x) => (p.op === '>' ? x > p.num : p.op === '>=' ? x >= p.num : p.op === '<' ? x < p.num : p.op === '<=' ? x <= p.num : p.op === '=' ? x === p.num : x !== p.num);
+        const nums = [...new Set(parsed.map(x => x.p.num))].sort((a, b) => a - b);
+        const samples = [...nums, ...nums.map(n => n - 0.5), ...nums.map(n => n + 0.5), -1e15, 1e15];
+        for (let i = 0; i < parsed.length; i++) for (let j = i + 1; j < parsed.length; j++) {
+          const a = parsed[i], b = parsed[j];
+          if (a.p.op === b.p.op && a.p.num === b.p.num) { item.identical.push([a.name, b.name]); continue; }
+          if (samples.some(x => ok(a.p, x) && ok(b.p, x))) item.overlaps.push([a.name, b.name]);
+        }
+        for (const u of unconditional) for (const c of parsed) item.overlaps.push([u.name, c.name]);
+        const gaps = unconditional.length ? [] : samples.filter(x => !parsed.some(a => ok(a.p, x)));
+        item.gap = gaps.length ? { example: gaps[0] } : null;
+        item.verdict = item.identical.length ? 'IDENTICAL' : item.overlaps.length ? 'OVERLAP' : item.gap ? 'GAP' : 'PARTITION_OK';
+        const field = parsed[0].p.field;
+        item.message = item.verdict === 'PARTITION_OK' ? `「${from}」からのアクションの条件（${field}）に明らかな重複・欠落なし` : item.verdict === 'IDENTICAL' ? `「${from}」からのアクション ${item.identical.map(p => p.join(' / ')).join('、')} の条件が同一です（どちらが実行されるか曖昧）` : item.verdict === 'OVERLAP' ? (unconditional.length ? `「${from}」に無条件のアクション「${unconditional.map(a => a.name).join('」「')}」があり、条件付きのアクション（${parsed.map(x => x.name).join(' / ')}）と同時に実行できます（分岐が強制されません）` : `「${from}」からのアクション ${item.overlaps.map(p => p.join(' / ')).join('、')} の条件が重なります（両方のボタンが出るレコードがあります）`) : `「${from}」からのアクションの条件に欠落があります（例: ${field} = ${item.gap.example} のレコードはどのアクションも実行できません）`;
+        out.push(item);
+      }
+      return out;
+    }
     /** プロセスの Mermaid（flowchart LR）。before を渡すと新規・変更分を強調する */
     function processMermaid(p, before = null) {
       if (!p || !p.states.length) return '';
@@ -6174,7 +6273,7 @@
     return {
       REVIEW_VERSION, STATUS, SAFETY, CHANGE, ACTION_CAPABILITIES, HIGH_RISK,
       buildBeforeModel, normalizeSpec, parseEntity, parseCond, condsOverlap, condNarrower, review, processMermaid, processSummary, objDiffLines, executorOutput,
-      remView, viewView, daysText,
+      remView, viewView, daysText, actionView, stateView, partitionCheck, assigneeTypeOf, ASSIGNEE_TYPES, ASSIGNEE_TYPE_JA, CHANGE_KINDS, ENTITY_FIELD_TYPES,
     };
   })();
 

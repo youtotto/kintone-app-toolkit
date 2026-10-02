@@ -362,6 +362,57 @@ console.log('\n--- 10. Phase 11: 既存設定の変更（UPDATE_NOTIFICATION / U
   assert(JSON.stringify(INPUTS.data) === SNAPSHOT, '§10 の後も DATA は不変');
 }
 
+console.log('\n--- 11. Phase 12: プロセス管理（Before モデル / identity / 作業者 / 実行可能ユーザー / 条件の分割判定）---');
+{
+  // Process Before Model: name / index / assignee type / entities / action type / executableUser を正規化
+  const m = R.buildBeforeModel(INPUTS.data);
+  const wait = m.process.states.find(s => s.name === '承認待ち');
+  assert(m.process.enabled === true && m.process.states.map(s => s.index).join() === '0,1,2' && wait.assigneeType === 'ALL' && wait.assignees.length === 6 && wait.assignees.some(e => e.type === 'CUSTOM_FIELD' && e.code === 'supervisor') && wait.assignees.some(e => e.type === 'CREATOR'), 'Before: ステータスの index / 作業者の指定形式 / entities（CUSTOM_FIELD・CREATOR を含む）');
+  assert(m.process.actions.map(a => a.type).join() === 'PRIMARY,PRIMARY,SECONDARY' && m.process.actions[2].executableUsers.map(e => `${e.type}:${e.code}`).join() === 'FIELD_ENTITY:owner,USER:user2', 'Before: アクションの type（PRIMARY / SECONDARY）と実行可能ユーザー');
+  // identity（UPDATE_PROCESS）: アクション / ステータス
+  const cond = review(plan([step('P1', 'UPDATE_PROCESS', 'PROCESS_ACTION', '承認する', [], { spec: { filterCond: 'amount < "1000000"', changeKind: 'ACTION_CONDITION' } })]));
+  const c1 = st(cond, 'P1');
+  assert(c1.diff.target.identity && c1.diff.target.identity.kind === 'PROCESS_ACTION' && c1.diff.target.identity.from === '承認待ち' && c1.diff.target.identity.to === '完了' && c1.diff.target.identity.filterCond === '' && c1.diff.target.identity.type === 'PRIMARY' && c1.diff.changeKind === 'ACTION_CONDITION', 'UPDATE_PROCESS（アクション）: identity に name / from / to / filterCond / type / executableUsers、changeKind ACTION_CONDITION');
+  assert(c1.issues.find(i => i.code === 'EXISTING_PATH_RESTRICTED').message === '⚠ 既存の操作可能条件を変更します。「承認する」は現在すべての「承認待ち」で実行できます。変更後は「amount < "1000000"」の場合のみ実行可能になります。' && c1.safety === 'REVIEW_REQUIRED' && c1.diff.after.filterCond === 'amount < "1000000"', '§9 の文言: 既存の操作可能条件を変更します（REVIEW_REQUIRED 以上）');
+  const broaden = review(plan([step('P1', 'UPDATE_PROCESS', 'PROCESS_ACTION', '申請する', [], { spec: { filterCond: 'amount >= "0"' } })]));
+  assert(codes(st(broaden, 'P1')).includes('CONDITION_CHANGE') && !codes(st(broaden, 'P1')).includes('EXISTING_PATH_RESTRICTED') && st(broaden, 'P1').safety === 'REVIEW_REQUIRED', 'broaden condition（amount > "0" → >= "0"）: CONDITION_CHANGE（広がる）・それでも REVIEW_REQUIRED');
+  const invalidCond = review(plan([step('P1', 'UPDATE_PROCESS', 'PROCESS_ACTION', '承認する', [], { spec: { filterCond: 'owner in (LOGINUSER())' } })]));
+  assert(codes(st(invalidCond, 'P1')).includes('COND_INVALID'), 'invalid expression（プロセスで LOGINUSER）: COND_INVALID');
+  const asg = review(plan([step('P1', 'UPDATE_PROCESS', 'PROCESS_STATUS', '承認待ち', [], { spec: { assignees: ['FIELD_ENTITY:approver'], assigneeType: 'ANY', changeKind: 'ASSIGNEE' } })]));
+  const a1 = st(asg, 'P1');
+  assert(a1.diff.target.identity.kind === 'PROCESS_STATUS' && a1.diff.target.identity.index === 1 && a1.diff.target.identity.assigneeType === 'ALL' && a1.diff.target.identity.assignees.length === 6 && a1.diff.changeKind === 'ASSIGNEE' && a1.diff.after.assignees.join() === 'FIELD_ENTITY:approver' && a1.diff.after.assigneeType === 'ANY' && codes(a1).includes('ASSIGNEE_CHANGE') && codes(a1).includes('ASSIGNEE_TYPE_CHANGE') && a1.safety === 'REVIEW_REQUIRED', 'UPDATE_PROCESS（ステータス）: identity に index / assigneeType / assignees、作業者と指定形式の変更（ANY）');
+  const first = review(plan([step('P1', 'UPDATE_PROCESS', 'PROCESS_STATUS', '未処理', [], { spec: { assignees: ['FIELD_ENTITY:owner'] } })]));
+  assert(st(first, 'P1').status === 'INVALID' && codes(st(first, 'P1')).includes('FIRST_STATUS_ASSIGNEE'), '先頭ステータスの作業者は設定できない（INVALID）');
+  const badType = review(plan([step('P1', 'ADD_PROCESS_STATUS', 'PROCESS_STATUS', '部長承認', [], { spec: { name: '部長承認', assignees: ['FIELD_ENTITY:approver'], assigneeType: '上長が承認' } })]));
+  assert(codes(st(badType, 'P1')).includes('ASSIGNEE_TYPE_UNKNOWN') && st(badType, 'P1').diff.after.assigneeType === 'ONE', '語彙外の assigneeType: ASSIGNEE_TYPE_UNKNOWN・ONE として扱う（自由文を API 値にしない）');
+  const synonym = review(plan([step('P1', 'ADD_PROCESS_STATUS', 'PROCESS_STATUS', '部長承認', [], { spec: { name: '部長承認', assignees: ['FIELD_ENTITY:approver', 'USER:user1'], assigneeType: '全員' } })]));
+  assert(st(synonym, 'P1').diff.after.assigneeType === 'ALL' && !codes(st(synonym, 'P1')).includes('ASSIGNEE_TYPE_UNKNOWN'), '「全員」→ ALL（決定的な同義語）');
+  const badField = review(plan([step('P1', 'ADD_PROCESS_STATUS', 'PROCESS_STATUS', '部長承認', [], { spec: { name: '部長承認', assignees: ['FIELD_ENTITY:case_name'] } })]));
+  assert(st(badField, 'P1').status === 'INVALID' && codes(st(badField, 'P1')).includes('ASSIGNEE_FIELD_INVALID'), '文字列フィールドを作業者に: INVALID（ASSIGNEE_FIELD_INVALID）');
+  const temp = review(plan([step('P1', 'ADD_FIELD', 'PROPOSED_FIELD', 'NEW_FIELD_1'), step('P2', 'ADD_PROCESS_STATUS', 'PROCESS_STATUS', '部長承認', [], { spec: { name: '部長承認', assignees: ['NEW_FIELD_1'] }, dependsOn: ['P1'] }), step('P3', 'ADD_PROCESS_ACTION', 'PROCESS_ACTION', '部長へ申請', [], { spec: { name: '部長へ申請', from: '承認待ち', to: '部長承認', filterCond: 'amount >= "1000000"' }, dependsOn: ['P2'] }), step('P4', 'ADD_PROCESS_ACTION', 'PROCESS_ACTION', '部長承認する', [], { spec: { name: '部長承認する', from: '部長承認', to: '完了' }, dependsOn: ['P2'] }), step('P5', 'UPDATE_PROCESS', 'PROCESS_ACTION', '承認する', [], { spec: { filterCond: 'amount < "1000000"', changeKind: 'ACTION_CONDITION' }, dependsOn: ['P3'] })], [pf('NEW_FIELD_1', '部長承認者', 'manager_approver', 'USER_SELECT')]));
+  assert(st(temp, 'P2').diff.after.assignees[0].code === 'manager_approver' && st(temp, 'P2').diff.after.assigneeType === 'ONE' && !temp.conflicts.some(c => c.code === 'STATUS_UNREACHABLE'), '新規フィールドを作業者にするステータス: temporaryId を解決・到達経路あり');
+  const part = temp.simulation.process.partition.find(p => p.from === '承認待ち');
+  assert(part && part.verdict === 'PARTITION_OK' && /明らかな重複・欠落なし/.test(part.message) && !temp.warnings.some(w => /^PROCESS_CONDITION_/.test(w.code)), '条件の分割判定: 承認する < 100万 / 部長へ申請 >= 100万 → PARTITION_OK（重複・欠落なし）');
+  const overlap = review(plan([step('P1', 'ADD_PROCESS_STATUS', 'PROCESS_STATUS', '部長承認', [], { spec: { name: '部長承認' } }), step('P2', 'ADD_PROCESS_ACTION', 'PROCESS_ACTION', '部長へ申請', [], { spec: { name: '部長へ申請', from: '承認待ち', to: '部長承認', filterCond: 'amount >= "1000000"' }, dependsOn: ['P1'] }), step('P3', 'ADD_PROCESS_ACTION', 'PROCESS_ACTION', '部長承認する', [], { spec: { name: '部長承認する', from: '部長承認', to: '完了' }, dependsOn: ['P1'] })]));
+  const op = overlap.simulation.process.partition.find(p => p.from === '承認待ち');
+  assert(op.verdict === 'OVERLAP' && overlap.warnings.some(w => w.code === 'PROCESS_CONDITION_OVERLAP' && w.stepIds.includes('P2')) && codes(st(overlap, 'P2')).includes('PROCESS_CONDITION_OVERLAP'), '既存「承認する」（無条件）と「部長へ申請」（>= 100万）→ OVERLAP（両方のボタンが出る）を警告');
+  const gap = review(plan([step('P1', 'UPDATE_PROCESS', 'PROCESS_ACTION', '承認する', [], { spec: { filterCond: 'amount < "500000"' } }), step('P2', 'ADD_PROCESS_ACTION', 'PROCESS_ACTION', '部長へ申請', [], { spec: { name: '部長へ申請', from: '承認待ち', to: '完了', filterCond: 'amount >= "1000000"' } })]));
+  const gp = gap.simulation.process.partition.find(p => p.from === '承認待ち');
+  assert(gp.verdict === 'GAP' && gap.warnings.some(w => w.code === 'PROCESS_CONDITION_GAP') && /欠落/.test(gp.message), '< 50万 と >= 100万 → GAP（50万〜100万のレコードはどのアクションも実行できない）');
+  const same2 = review(plan([step('P1', 'ADD_PROCESS_ACTION', 'PROCESS_ACTION', '別名', [], { spec: { name: '別名', from: '承認待ち', to: '完了', filterCond: 'amount >= "1000000"' } }), step('P2', 'ADD_PROCESS_ACTION', 'PROCESS_ACTION', '別名2', [], { spec: { name: '別名2', from: '承認待ち', to: '未処理', filterCond: 'amount >= "1000000"' } })]));
+  assert(same2.simulation.process.partition.find(p => p.from === '承認待ち').verdict === 'IDENTICAL' && same2.warnings.some(w => w.code === 'PROCESS_CONDITION_IDENTICAL'), '同一条件 → IDENTICAL（高）');
+  const unk = review(plan([step('P1', 'ADD_PROCESS_ACTION', 'PROCESS_ACTION', '条件付き', [], { spec: { name: '条件付き', from: '承認待ち', to: '完了', filterCond: 'case_name like "緊急"' } })]));
+  assert(unk.simulation.process.partition.find(p => p.from === '承認待ち').verdict === 'UNKNOWN' && unk.warnings.some(w => w.code === 'PROCESS_CONDITION_UNKNOWN'), '評価できない条件（like）→ UNKNOWN（安全と断定しない）');
+  // 実行可能ユーザー（作業者以外でも実行できるアクション）
+  const sec = review(plan([step('P1', 'ADD_PROCESS_ACTION', 'PROCESS_ACTION', '差し戻す', [], { spec: { name: '差し戻す', from: '承認待ち', to: '未処理', entities: ['FIELD_ENTITY:owner', 'GROUP:sales_group'] } })]));
+  assert(st(sec, 'P1').diff.after.type === 'SECONDARY' && st(sec, 'P1').diff.after.executableUsers.join() === 'FIELD_ENTITY:owner,GROUP:sales_group', 'ADD_PROCESS_ACTION with entities → type SECONDARY・executableUsers');
+  const secBad = review(plan([step('P1', 'ADD_PROCESS_ACTION', 'PROCESS_ACTION', '差し戻す', [], { spec: { name: '差し戻す', from: '承認待ち', to: '未処理', entities: ['CREATOR:'] } })]));
+  assert(st(secBad, 'P1').status === 'INVALID' && codes(st(secBad, 'P1')).includes('EXECUTABLE_USER_INVALID'), '実行可能ユーザーに CREATOR: INVALID（API で指定できない）');
+  const eu = review(plan([step('P1', 'UPDATE_PROCESS', 'PROCESS_ACTION', '取り下げる', [], { spec: { entities: ['FIELD_ENTITY:owner'], changeKind: 'EXECUTABLE_USER' } })]));
+  assert(codes(st(eu, 'P1')).includes('EXECUTABLE_USER_CHANGE') && st(eu, 'P1').issues.find(i => i.code === 'EXECUTABLE_USER_CHANGE').severity === 'high' && eu.summary.counts.highRisk === 1 && st(eu, 'P1').diff.changeKind === 'EXECUTABLE_USER' && st(eu, 'P1').diff.after.executableUsers.join() === 'FIELD_ENTITY:owner', 'UPDATE_PROCESS（実行可能ユーザーの変更: user2 を外す）: EXECUTABLE_USER_CHANGE（高リスク）');
+  assert(JSON.stringify(INPUTS.data) === SNAPSHOT, '§11 の後も DATA は不変');
+}
+
 console.log(`\n${state.failed ? 'FAILED' : 'ALL PASSED'}: ${state.passed} passed / ${state.failed} failed`);
 process.exit(state.failed ? 1 : 0);
 })().catch(e => { console.error(e); process.exit(1); });
