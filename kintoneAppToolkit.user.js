@@ -7608,11 +7608,11 @@
           appActionChanges: clone(ch),
         };
       },
-      async apply({ api, appId, revision, snapshot }, p) {
+      async apply({ api, appId, revision, snapshot, actionsBaseline }, p) {
         const cur = await api.getPreviewActions(appId);
         const list = actionsOf(cur);
         if (list[p.payload.name]) throw Object.assign(new Error(`アプリアクション「${p.payload.name}」は既にあります`), { code: 'TARGET_EXISTS' });
-        const since = changedSincePrepare('アプリアクション', stripActionIds(list), snapshot?.actions ? stripActionIds(actionsOf(snapshot.actions)) : undefined);
+        const since = changedSincePrepare('アプリアクション', stripActionIds(list), actionsBaseline !== undefined ? actionsBaseline : (snapshot?.actions ? stripActionIds(actionsOf(snapshot.actions)) : undefined));
         if (since) throw since;
         // 全体置換: 既存の全アクション（bit 単位でそのまま）＋ 新規 1 件（index は末尾）
         const maxIndex = Object.values(list).reduce((m, a) => Math.max(m, Number(a.index ?? -1)), -1);
@@ -7642,7 +7642,7 @@
           check('filterCond', normCondE(found.filterCond) === normCondE(p.expect.filterCond), p.expect.filterCond, found.filterCond || '');
           check('index', String(found.index ?? '') === String(applied.expectedEntry?.index ?? ''), applied.expectedEntry?.index ?? null, found.index ?? null);
         }
-        return { ok: checks.every(c => c.ok), checks, revision: String(cur?.revision ?? '') };
+        return { ok: checks.every(c => c.ok), checks, revision: String(cur?.revision ?? ''), actions: clone(list) };
       },
       rollback({ appId, snapshot }, p) {
         return { actionType: 'RESTORE_APP_ACTION_SETTINGS', collection: 'actions', target: p.expect.name, api: { method: 'PUT', path: '/k/v1/preview/app/actions.json', payload: { app: appId, actions: '<snapshot.actions.actions>' } }, note: `snapshot のアプリアクション全体（${Object.keys(actionsOf(snapshot?.actions)).length} 件）を PUT で戻す（追加した「${p.expect.name}」が消える）。コピー先アプリには触れない` };
@@ -7688,14 +7688,14 @@
           appActionChanges: stepReview?.diff?.appActionChanges ? clone(stepReview.diff.appActionChanges) : null,
         };
       },
-      async apply({ api, appId, revision, snapshot }, p) {
+      async apply({ api, appId, revision, snapshot, actionsBaseline }, p) {
         const cur = await api.getPreviewActions(appId);
         const list = actionsOf(cur);
         const entry = list[p.payload.name];
         if (!entry) throw Object.assign(new Error(`アプリアクション「${p.payload.name}」が動作テスト環境にありません`), { code: 'TARGET_MISSING' });
         const mismatch = appActionIdentityMismatch(entry, p.payload.identity);
         if (mismatch.length) throw targetChanged(`アプリアクション「${p.targetLabel}」`, mismatch);
-        const since = changedSincePrepare('アプリアクション', stripActionIds(list), snapshot?.actions ? stripActionIds(actionsOf(snapshot.actions)) : undefined);
+        const since = changedSincePrepare('アプリアクション', stripActionIds(list), actionsBaseline !== undefined ? actionsBaseline : (snapshot?.actions ? stripActionIds(actionsOf(snapshot.actions)) : undefined));
         if (since) throw since;
         // 対象 1 件だけを差し替える（変更しない属性・他のアクションはそのまま）
         const next = { ...clone(entry) };
@@ -7735,7 +7735,7 @@
           check('filterCond', normCondE(found.filterCond) === normCondE(p.expect.filterCond), p.expect.filterCond, found.filterCond || '');
           check('unchangedAttributesPreserved', same(stripActionIds({ x: found }).x, stripActionIds({ x: applied.expectedEntry }).x), stripActionIds({ x: applied.expectedEntry }).x, stripActionIds({ x: found }).x);
         }
-        return { ok: checks.every(c => c.ok), checks, revision: String(cur?.revision ?? '') };
+        return { ok: checks.every(c => c.ok), checks, revision: String(cur?.revision ?? ''), actions: clone(list) };
       },
       rollback({ appId, snapshot }, p) {
         return { actionType: 'RESTORE_APP_ACTION_SETTINGS', collection: 'actions', target: p.expect.name, api: { method: 'PUT', path: '/k/v1/preview/app/actions.json', payload: { app: appId, actions: '<snapshot.actions.actions>' } }, note: `snapshot のアプリアクション全体（${Object.keys(actionsOf(snapshot?.actions)).length} 件）を PUT で戻す（「${p.expect.name}」の転記 / 利用者 / 利用条件が実行前に戻る）。コピー先アプリには触れない` };
@@ -8369,6 +8369,7 @@
       let failed = false;
       const done = new Set();
       let processBaseline = prepared.snapshot?.status ? stripRevision(prepared.snapshot.status) : undefined;   // 直前のグループが作ったプロセス設定（2 つ目以降の bit 比較の基準）
+      let actionsBaseline = undefined;   // Phase 14: 直前のアプリアクション step が検証したアクション全体（2 つ目以降の bit 比較の基準）
       const groups = Array.isArray(prepared.groups) ? prepared.groups : formProcessGroups(prepared.steps);
       const stepById = new Map(prepared.steps.map(x => [x.stepId, x]));
       for (const st of prepared.steps) {
@@ -8422,12 +8423,13 @@
         if (!depsOk) { l.status = STEP.SKIPPED; l.reason = 'DEPENDENCY_NOT_VERIFIED'; l.message = '依存する step が検証済みでないため実行していません'; progress(l); continue; }
         l.status = STEP.RUNNING; progress(l); await yieldUi();
         const handler = HANDLERS[st.actionType];
-        const ctx = { api, appId: prepared.appId, revision, snapshot: prepared.snapshot, layoutPolicy: prepared.layoutPolicy };
+        const ctx = { api, appId: prepared.appId, revision, snapshot: prepared.snapshot, layoutPolicy: prepared.layoutPolicy, actionsBaseline };
         try {
           const applied = await handler.apply(ctx, st.prepared);
           l.requests = applied.requests || []; l.revision = applied.revision || null; revision = applied.revision || revision; l.before = applied.before ?? null; l.after = applied.after ?? null;
           l.status = STEP.APPLIED; progress(l); await yieldUi();
           const v = await handler.verify(ctx, st.prepared, applied);
+          if (v.actions) { actionsBaseline = stripActionIds(v.actions); delete v.actions; }
           l.verification = v; if (v.revision) revision = v.revision;
           l.status = v.ok ? STEP.VERIFIED : STEP.VERIFY_FAILED;
           if (!v.ok) { l.reason = 'VERIFY_FAILED'; l.message = `API は成功しましたが、再取得した設定が期待と一致しません（${v.checks.filter(c => !c.ok).map(c => c.name).join(', ')}）`; failed = true; }
@@ -10060,7 +10062,8 @@
       </div>` : '';
       // 参照元アプリ（Phase 13 §38）: ルックアップの step が読んだ参照元の定義（取得できたか・revision・フィールドの指紋）。取得できなければ推測しない旨を出す
       const crossApp = Array.isArray(review.crossApp) ? review.crossApp : [];
-      const crossAppHtml = crossApp.length ? `<div id="kt-ai-review-crossapp" style="margin-top:8px;"><b>参照元アプリ（ルックアップ）</b>${crossApp.map(x => `<div style="font-size:11px; margin-left:8px; margin-top:2px; color:${x.available ? 'inherit' : '#b00020'};">${x.available ? '✓' : '×'} App ${esc(String(x.appId))}${x.name ? `「${esc(x.name)}」` : ''}${x.available ? `：フィールド設定を取得済み（revision ${esc(String(x.revision ?? '—'))}・指紋 ${esc(String(x.fieldsHash ?? '—'))}）。実行直前にもう一度取得して照合します` : `：フィールド設定を確認できません${x.error?.message ? `（${esc(x.error.message)}）` : ''}。参照元アプリへのアクセス権を確認してください。参照先のフィールドは推測しません`}<span style="opacity:.6;">（${esc((x.stepIds || []).join(', '))}）</span></div>`).join('')}</div>` : '';
+      const roleJa = (x) => (x.role === 'destination' ? 'コピー先' : '参照元');
+      const crossAppHtml = crossApp.length ? `<div id="kt-ai-review-crossapp" style="margin-top:8px;"><b>相手アプリ（ルックアップの参照元 / アプリアクションのコピー先）</b>${crossApp.map(x => `<div style="font-size:11px; margin-left:8px; margin-top:2px; color:${x.available ? 'inherit' : (x.error?.code === 'NOT_LOADED' ? '#b26a00' : '#b00020')};">${x.available ? '✓' : (x.error?.code === 'NOT_LOADED' ? '△' : '×')} ${esc(roleJa(x))} App ${esc(String(x.appId))}${x.name ? `「${esc(x.name)}」` : ''}${x.available ? `：フィールド設定を取得済み（revision ${esc(String(x.revision ?? '—'))}・指紋 ${esc(String(x.fieldsHash ?? '—'))}）。実行直前にもう一度取得して照合します` : x.error?.code === 'NOT_LOADED' ? '：フィールド設定はまだ取得していません。実行直前に取得して転記先の実在・型・必須を検証します（推測しません）' : `：フィールド設定を確認できません${x.error?.message ? `（${esc(x.error.message)}）` : ''}。${esc(roleJa(x))}アプリへのアクセス権を確認してください。相手アプリのフィールドは推測しません`}<span style="opacity:.6;">（${esc((x.stepIds || []).join(', '))}）</span></div>`).join('')}</div>` : '';
       const cov = review.reviewCoverage || {};
       const covText = Object.entries(cov).filter(([k]) => k !== 'notes').map(([k, v]) => `${k}: ${v === true ? '✓' : v === false ? '—' : esc(String(v))}`).join('　');
       return `<div id="kt-ai-review" style="margin-top:10px; border:2px solid #1a73e8; border-radius:8px; padding:8px;">
@@ -10098,17 +10101,19 @@
       ROLLBACK_PENDING: '待機中', ROLLING_BACK: '戻しています...', ROLLED_BACK: '戻しました（検証中）', ROLLBACK_VERIFIED: 'ROLLBACK_VERIFIED', ROLLBACK_VERIFY_FAILED: 'ROLLBACK_VERIFY_FAILED（状態不一致）', ROLLBACK_FAILED: 'ROLLBACK_FAILED', ROLLBACK_STALE: 'ROLLBACK_STALE（反映後に変更あり）', ROLLBACK_SKIPPED: '未実行' };
     const EXEC_STEP_COLOR = { VERIFIED: '#2e7d32', APPLIED: '#1a73e8', RUNNING: '#1a73e8', VERIFY_FAILED: '#b00020', FAILED: '#b00020', BLOCKED: '#b00020', UNSUPPORTED: '#555', SKIPPED: '#777', PENDING: '#777', ROLLBACK_VERIFIED: '#2e7d32', ROLLED_BACK: '#1a73e8', ROLLING_BACK: '#1a73e8', ROLLBACK_VERIFY_FAILED: '#b00020', ROLLBACK_FAILED: '#b00020', ROLLBACK_STALE: '#b00020', ROLLBACK_SKIPPED: '#777', ROLLBACK_PENDING: '#777' };
     /** 既存設定の変更の属性名（Phase 11。属性単位の Before / After に使う） */
-    const EXEC_ATTR_JA = { targets: '通知先', filterCond: '条件', events: 'イベント', title: '名前', timing: 'タイミング', fields: '表示項目', sort: '並び順', label: '表示名', required: '必須', to: '遷移先', from: '遷移元', executableUsers: '実行可能ユーザー', assignees: '作業者', assigneeType: '作業者の指定形式', mappings: '取得項目', pickerFields: '選択時に表示するフィールド' };
+    const EXEC_ATTR_JA = { targets: '通知先', filterCond: '条件', events: 'イベント', title: '名前', timing: 'タイミング', fields: '表示項目', sort: '並び順', label: '表示名', required: '必須', to: '遷移先', from: '遷移元', executableUsers: '実行可能ユーザー', assignees: '作業者', assigneeType: '作業者の指定形式', mappings: '取得項目', pickerFields: '選択時に表示するフィールド', entities: '利用者', destApp: 'コピー先' };
     const execAttrVal = (k, v) => (v == null ? '—' : k === 'required' ? (v ? 'はい' : 'いいえ') : Array.isArray(v) ? (v.length ? v.join(', ') : '（なし）') : typeof v === 'object' ? (k === 'timing' ? `${v.code ?? '—'} の ${KTPlanReview.daysText(v.daysLater)}${v.time ? ' ' + v.time : ''}` : JSON.stringify(v)) : String(v) || '（なし）');
     /** 変更した属性だけ「属性: Before → After」で並べる（変更していない属性は出さない） */
     const execAttrDiff = (before, after) => Object.keys(after || {}).map(k => `${EXEC_ATTR_JA[k] || k}: ${execAttrVal(k, before?.[k])} → ${execAttrVal(k, after[k])}`);
     const EXEC_REASON_JA = { NOT_APPROVED: '承認されていません', REVIEW_BLOCKED: 'Review で実行不可', PLAN_ONLY: '現在の Executor では自動反映できません', PREVIEW_NOT_SUPPORTED: '現在の Executor では自動反映できません', FIELD_TYPE_NOT_SUPPORTED: 'このフィールド型は現在の Executor では追加できません', OPTIONS_MISSING: '選択肢が決まっていません', DEPENDENCY_NOT_EXECUTABLE: '依存する step が実行されません', INVALID_CONDITION: '条件式が kintone で評価できません（計画の条件式を直してください）', EXACT_DUPLICATE: '同じ設定が既にあります', NOTIFICATION_SCOPE_AMBIGUOUS: 'アプリの条件通知かレコードの条件通知か決められません', RECIPIENT_FIELD_INVALID: '通知先に使えないフィールドです', RECIPIENT_FIELD_MISSING: '通知先のフィールドがありません', REMINDER_TIME_MISSING: '通知時刻が決まっていません', REMINDER_FIELD_TYPE: '基準フィールドが日付型ではありません', FIELD_CHANGE_NOT_SUPPORTED: '表示名・必須以外の変更は反映しません', FIELD_CODE_CHANGE_NOT_SUPPORTED: 'フィールドコードの変更は反映しません', TARGET_CHANGED: '対象の設定が Review 後に変わっています', TARGET_MISSING: '対象が動作テスト環境にありません', REVALIDATION_FAILED: '実行前の再検証で止まりました', STOPPED_AFTER_FAILURE: '前の step の失敗で停止', DEPENDENCY_NOT_VERIFIED: '依存 step が検証済みでない', PERMISSION_DENIED: 'アプリ設定を変更する権限がありません', REVISION_MISMATCH: '他の変更が入りました（revision 不一致）', TARGET_EXISTS: '同じ名前 / コードが既にあります', API_ERROR: 'API エラー', VERIFY_FAILED: 'API は成功したが状態が一致しません',
       NO_CHANGE: '変更内容がありません', GENERAL_NOTIFICATION_MULTI_TARGET: 'アプリの条件通知は通知先 1 件ごとの設定です', REMINDER_TIMING_MODE_CHANGE: '日付と日時の間で基準日を変える変更は反映しません', REMINDER_DAYS_INVALID: '日数が整数で決まっていません', INVALID_SORT: '並び順の指定が不正です', VIEW_TYPE_NOT_SUPPORTED: '表形式以外の一覧は変更しません', BUILTIN_VIEW_NOT_SUPPORTED: 'kintone 組み込みの一覧は変更しません', VIEW_FIELD_MISSING: '表示フィールドが動作テスト環境にありません', VIEW_FIELDS_MISSING: '表示フィールドが決まっていません', CONDITION_MISSING: '条件式が必要です', EVENTS_MISSING: 'イベントが決まっていません', TARGETS_MISSING: '通知先が決まっていません',
       STATUS_UNREACHABLE: 'このステータスへ遷移するアクションが計画に無く孤立します', PROCESS_ENABLE_NOT_SUPPORTED: 'プロセス管理が無効なアプリです（有効化は Toolkit では行いません）', MULTI_FROM_NOT_SUPPORTED: '遷移元が複数のアクションは 1 件ずつに分けてください', BRANCH_NOT_SUPPORTED: '既存アクションへの分岐追加は反映しません（別名のアクションを追加）', NO_PROCESS_SPEC: 'プロセスの変更内容がありません', ASSIGNEE_TYPE_UNKNOWN: '作業者の指定形式が kintone の語彙（ONE / ALL / ANY）ではありません', ASSIGNEE_FIELD_MISSING: '作業者のフィールドがありません', ASSIGNEE_FIELD_INVALID: '作業者に使えないフィールドです', EXECUTABLE_USER_INVALID: '実行可能ユーザーに指定できません', ENTITY_UNRESOLVED: '作業者 / 実行可能ユーザーを解決できません', KINTONE_SIDE_EFFECT: 'kintone 側で他の設定が自動変更されました', FIRST_STATUS_CHANGED: '先頭のステータスは変更できません',
+      // Phase 14（アプリアクション）
+      DEST_APP_SETTINGS_UNAVAILABLE: 'コピー先アプリのフィールド設定を確認できません（コピー先アプリへのアクセス権を確認してください）', DEST_APP_CHANGED: 'コピー先アプリのフィールド設定が Review 後に変わっています', DEST_FIELD_NOT_FOUND: '転記先のフィールドがコピー先アプリにありません', SOURCE_FIELD_MISSING: '転記元のフィールドが動作テスト環境にありません', NO_APP_ACTION_SPEC: 'アプリアクションの変更内容がありません', APP_ACTION_RENAME_NOT_SUPPORTED: 'アクション名の変更は反映しません（計画のみ）', APP_ACTION_DEST_CHANGE_NOT_SUPPORTED: 'コピー先アプリの変更は反映しません（計画のみ）', APP_ACTION_MAPPING_REMOVAL_NOT_SUPPORTED: '転記の削除は反映しません（計画のみ）',
       // Phase 13（ルックアップ）
       RELATED_APP_SETTINGS_UNAVAILABLE: '参照元アプリのフィールド設定を確認できません（参照元アプリへのアクセス権を確認してください）', LOOKUP_RELATED_APP_CHANGED: '参照元アプリのフィールド設定が Review 後に変わっています', RELATED_FIELD_NOT_FOUND: '取得元のフィールドが参照元アプリにありません', RELATED_KEY_MISSING: '参照キーが参照元アプリにありません', PICKER_FIELD_NOT_FOUND: '選択時に表示するフィールドが参照元アプリにありません', DESTINATION_MISSING: 'コピー先のフィールドが動作テスト環境にありません', SORT_FIELD_UNKNOWN: '並び順のフィールドが参照元アプリにありません', NOT_A_LOOKUP: 'ルックアップフィールドではありません', NO_LOOKUP_SPEC: 'ルックアップの変更内容がありません', LOOKUP_SOURCE_CHANGE_NOT_SUPPORTED: '参照元アプリ / 参照キーの変更は反映しません（計画のみ）', LOOKUP_MAPPING_REMOVAL_NOT_SUPPORTED: '取得項目の削除は反映しません（計画のみ）', LOOKUP_PICKER_REMOVAL_NOT_SUPPORTED: '選択時に表示するフィールドの削除は反映しません（計画のみ）', RELATED_APP_REVISION_CHANGED: '参照元アプリの設定は変わっていますが、フィールド定義は同じです', RELATED_APP_CHANGED_SINCE_EXECUTION: '参照元アプリのフィールド定義が反映後に変わっています', RELATED_APP_UNREADABLE: '参照元アプリの定義を確認できませんでした',
       THIRD_PARTY_CHANGE: '反映後に設定が変更されています', FIELD_REFERENCED: '追加したフィールドが他の設定から参照されています', FIELD_CHANGED: '反映後にフィールドが変更されています', FIELD_MISSING: 'フィールドが見つかりません', SNAPSHOT_MISSING: '実行前の定義がありません', ALREADY_RESTORED: '既に実行前の状態です', ROLLBACK_VERIFY_FAILED: 'API は成功したが実行前の状態と一致しません', NO_ACTUAL_AFTER: '反映直後の設定を取得できていません', ALREADY_ROLLED_BACK: '既に元に戻す処理を行っています', NOTHING_TO_ROLLBACK: '元に戻す変更がありません', ROLLBACK_STALE: '反映後に動作テスト環境が変更されています', NO_STRATEGY: '元に戻す方法がありません' };
-    const execActionJa = (a) => ({ ADD_FIELD: 'フィールド追加', ADD_VIEW: '一覧追加', ADD_NOTIFICATION: '通知追加', ADD_REMINDER: 'リマインダー追加', PROCESS_CHANGE: 'プロセス管理の変更', KINTONE_SIDE_EFFECT: 'kintone 側の自動変更', UPDATE_LOOKUP: 'ルックアップ変更' }[a] || ACTION_JA[a] || a);
+    const execActionJa = (a) => ({ ADD_FIELD: 'フィールド追加', ADD_VIEW: '一覧追加', ADD_NOTIFICATION: '通知追加', ADD_REMINDER: 'リマインダー追加', PROCESS_CHANGE: 'プロセス管理の変更', KINTONE_SIDE_EFFECT: 'kintone 側の自動変更', UPDATE_LOOKUP: 'ルックアップ変更', ADD_APP_ACTION: 'アプリアクション追加', UPDATE_APP_ACTION: 'アプリアクション変更' }[a] || ACTION_JA[a] || a);
     const isProcessAction = (a) => ['ADD_PROCESS_STATUS', 'ADD_PROCESS_ACTION', 'UPDATE_PROCESS'].includes(String(a || ''));
     const PROCESS_KIND_JA = { ACTION_CONDITION: '条件変更', ACTION_TRANSITION: '遷移の変更', ASSIGNEE: '作業者の変更', EXECUTABLE_USER: '実行可能ユーザーの変更', ACTION_BRANCH: '分岐の追加', ADD_STATUS: 'ステータス追加', ADD_ACTION: 'アクション追加' };
     /** プロセス管理の変更 1 件分の行（§22: ＋ ステータス「部長承認」 / ✎ 「承認する」の条件変更） */
@@ -10117,7 +10122,25 @@
     const mermaidBox = (title, code, color) => (code ? `<div style="flex:1 1 220px; border:1px solid ${color}; border-radius:6px; padding:6px; min-width:0;"><div style="font-size:11px; opacity:.7;">${esc(title)}</div><pre class="kt-ai-mermaid" style="font-size:11px; white-space:pre-wrap; margin:0;">${esc(code)}</pre></div>` : '');
     const partitionHtml = (items) => (Array.isArray(items) && items.length ? `<div style="margin-top:4px; display:grid; gap:2px;">${items.map(it => `<div style="font-size:11px; color:${it.verdict === 'PARTITION_OK' ? '#2e7d32' : it.verdict === 'UNKNOWN' ? '#555' : '#b26a00'};">${it.verdict === 'PARTITION_OK' ? '✓' : it.verdict === 'UNKNOWN' ? '？' : '⚠'} 条件の分割（${esc(it.from)}）: ${esc(it.message)}</div>`).join('')}</div>` : '');
     /** 最終確認・rollback 確認の件数表示に使う名詞（§36: ＋ フィールド 1 件 / ✎ 通知 1 件） */
-    const EXEC_NOUN = { ADD_FIELD: 'フィールド', ADD_VIEW: '一覧', ADD_NOTIFICATION: '通知', ADD_REMINDER: 'リマインダー', UPDATE_FIELD: 'フィールド', UPDATE_NOTIFICATION: '通知', UPDATE_REMINDER: 'リマインダー', UPDATE_VIEW: '一覧', ADD_PROCESS_STATUS: 'ステータス', ADD_PROCESS_ACTION: 'アクション', UPDATE_PROCESS: 'プロセス管理', UPDATE_LOOKUP: 'ルックアップ' };
+    const EXEC_NOUN = { ADD_FIELD: 'フィールド', ADD_VIEW: '一覧', ADD_NOTIFICATION: '通知', ADD_REMINDER: 'リマインダー', UPDATE_FIELD: 'フィールド', UPDATE_NOTIFICATION: '通知', UPDATE_REMINDER: 'リマインダー', UPDATE_VIEW: '一覧', ADD_PROCESS_STATUS: 'ステータス', ADD_PROCESS_ACTION: 'アクション', UPDATE_PROCESS: 'プロセス管理', UPDATE_LOOKUP: 'ルックアップ', ADD_APP_ACTION: 'アプリアクション', UPDATE_APP_ACTION: 'アプリアクション' };
+    const isAppAction = (a) => a === 'ADD_APP_ACTION' || a === 'UPDATE_APP_ACTION';
+    /** アプリアクションの変更 1 件分（Phase 14 §34〜37: コピー先 / 追加する転記 / 利用者 / 利用条件 / 既存はそのまま / コピー先の必須項目） */
+    function appActionLines(x, p) {
+      const pp = x.prepared || {}; const ch = pp.appActionChanges || {}; const ca = pp.crossApp || {}; const isAdd = x.actionType === 'ADD_APP_ACTION';
+      const cur = (p?.crossApp || []).find(c => c.stepId === x.stepId) || null;
+      const appLabel = `App ${ca.appId || '—'}${ca.name ? `「${ca.name}」` : ''}`;
+      const out = [];
+      out.push(`コピー先: ${appLabel}${cur?.fetchedAtPrepare ? '（Review 時点では未取得。実行直前に取得して検証）' : ''}`);
+      const maps = isAdd ? (pp.payload?.entry?.mappings || []) : (pp.expect?.addedMappings || []);
+      const labels = new Map((ch.mappings || []).map(m => [`${m.srcType}:${m.srcField ?? ''}>${m.destField}`, m]));
+      for (const m of maps) { const lb = labels.get(`${m.srcType}:${m.srcField ?? ''}>${m.destField}`) || {}; out.push(`＋ ${isAdd ? '転記' : '追加する転記'}: ${m.srcType === 'RECORD_URL' ? 'レコードURL' : `${m.srcField}${lb.srcLabel && lb.srcLabel !== m.srcField ? `（${lb.srcLabel}）` : ''}`} → ${m.destField}${lb.destLabel && lb.destLabel !== m.destField ? `（${lb.destLabel}）` : ''}`); }
+      if (!isAdd) { const kept = (pp.payload?.identity?.mappings || []).filter(m => !maps.some(a => a.destField === m.destField)); out.push(kept.length ? `既存の転記 ${kept.length} 件（${kept.map(m => `${m.srcType === 'RECORD_URL' ? 'レコードURL' : m.srcField}→${m.destField}`).join(', ')}）はそのまま` : '既存の転記はありません'); }
+      if (isAdd) out.push(`利用者: ${(pp.payload?.entry?.entities || []).map(e => `${e.type}:${e.code}`).join(', ') || '（なし）'}`);
+      else if (pp.after?.entities) out.push(`利用者: ${(pp.before?.entities || []).join(', ') || 'なし'} → ${pp.after.entities.join(', ') || 'なし'}`);
+      if (isAdd ? pp.payload?.entry?.filterCond : pp.after?.filterCond != null) out.push(`利用条件: ${isAdd ? pp.payload.entry.filterCond : `${pp.before?.filterCond || 'すべてのレコード'} → ${pp.after.filterCond}`}`);
+      out.push(`コピー先アプリ${ca.name ? `「${ca.name}」` : ''}の設定・レコードは変更しません${cur?.current ? (cur.current.fieldsHash === cur.reviewed?.fieldsHash ? `（フィールド定義は Review 時点と同じ・revision ${cur.current.revision ?? '—'}）` : cur.reviewed?.fieldsHash ? '（フィールド定義が Review 時点と違います）' : `（revision ${cur.current.revision ?? '—'}）`) : ''}`);
+      return out;
+    }
     /** ルックアップの変更 1 件分（Phase 13 §39: 参照元 / キー / ＋ 取得項目 / ＋ 選択時に表示 / 絞り込み / 並び順 / 既存はそのまま / 参照元は変更しない） */
     function lookupLines(x, p) {
       const pp = x.prepared || {}; const idn = pp.payload?.identity || {}; const ch = pp.lookupChanges || null; const ca = pp.crossApp || {};
@@ -10155,6 +10178,9 @@
       if (x.actionType === 'UPDATE_FIELD') return row(`「${pp.fieldLabel ?? pp.expect.code}」${Object.keys(pp.after || {}).map(k => k === 'required' ? ` 必須: ${pp.before.required ? 'はい' : 'いいえ'} → ${pp.after.required ? 'はい' : 'いいえ'}` : ` 表示名: ${pp.before[k]} → ${pp.after[k]}`).join('・')}（フィールドコード ${pp.expect.code} は変わりません）`);
       if (x.actionType === 'ADD_FIELD') { const n = Object.keys(p?.snapshot?.fields?.properties || {}).length; return row(`フィールド: Before ${n} 件 → After ${n + 1} 件`); }
       if (x.actionType === 'ADD_VIEW') { const n = Object.keys(p?.snapshot?.views?.views || {}).length; return row(`一覧: Before ${n} 件 → After ${n + 1} 件`); }
+      // アプリアクション（Phase 14）: 詳細は確認ブロック（appActionLines）。全体置換 API なので他のアクションが bit 単位で保持されたことを検証する
+      if (x.actionType === 'ADD_APP_ACTION') { const n = Object.keys(p?.snapshot?.actions?.actions || {}).length; return row(`アプリアクション: Before ${n} 件 → After ${n + 1} 件（既存はそのまま＋追加。全アクションを含めて更新し、他のアクションが bit 単位で保持されたことを反映後に検証します）`); }
+      if (x.actionType === 'UPDATE_APP_ACTION' && pp.after) return row(`変更する属性: ${Object.keys(pp.after).map(k => EXEC_ATTR_JA[k] || k).join('・')}（名前・コピー先・既存の転記はそのまま。全アクションを含めて更新し、他のアクションが bit 単位で保持されたことを反映後に検証します）`);
       // ルックアップ（Phase 13）: 参照元 / キー / 既存の取得項目は変えない。詳細は確認ブロック（lookupLines）に出す
       if (x.actionType === 'UPDATE_LOOKUP' && pp.after) return row(`変更する属性: ${Object.keys(pp.after).map(k => EXEC_ATTR_JA[k] || k).join('・')}（参照元アプリ・参照キー・既存の取得項目・表示名・必須はそのまま。反映後に取得項目の全体と参照元の取得元を検証します。検索方法は kintone が管理するため検証の対象外）`);
       // 既存設定の変更（Phase 11）: 変更した属性だけ Before → After。他の設定・属性はそのまま
@@ -10170,7 +10196,7 @@
       const line = (ids, label, color, mark) => `<div style="display:flex; justify-content:space-between; font-size:12px;"><span style="color:${color};">${mark} ${esc(label)}</span><b>${ids.length} 件${ids.length ? `（${esc(ids.map(x => x.stepId).join(', '))}）` : ''}</b></div>`;
       const unsupportedList = unsupported.length ? `<div style="margin-top:4px; display:grid; gap:2px;">${unsupported.map(x => `<div style="font-size:11px; opacity:.8;">${esc(x.stepId)} ${esc(x.title || execActionJa(x.actionType))}：<b>PLAN_ONLY</b> — ${esc(EXEC_REASON_JA[x.reason] || x.message || x.reason)}</div>`).join('')}</div>` : '';
       // カテゴリ別（Tier 2）: ✓ 追加系 / △ 既存フィールドの変更（REVIEW_REQUIRED）
-      const CATEGORY = [['ADD_FIELD', 'フィールド追加', '✓', '#2e7d32'], ['ADD_VIEW', '一覧追加', '✓', '#2e7d32'], ['ADD_NOTIFICATION', '通知追加', '✓', '#2e7d32'], ['ADD_REMINDER', 'リマインダー追加', '✓', '#2e7d32'], ['UPDATE_FIELD', 'フィールド変更', '△', '#b26a00'], ['UPDATE_NOTIFICATION', '通知変更', '✎', '#6a1b9a'], ['UPDATE_REMINDER', 'リマインダー変更', '✎', '#6a1b9a'], ['UPDATE_VIEW', '一覧変更', '✎', '#6a1b9a'], ['ADD_PROCESS_STATUS', 'ステータス追加', '＋', '#6a1b9a'], ['ADD_PROCESS_ACTION', 'アクション追加', '＋', '#6a1b9a'], ['UPDATE_PROCESS', 'プロセス管理変更', '✎', '#6a1b9a'], ['UPDATE_LOOKUP', 'ルックアップ変更', '✎', '#6a1b9a']];
+      const CATEGORY = [['ADD_FIELD', 'フィールド追加', '✓', '#2e7d32'], ['ADD_VIEW', '一覧追加', '✓', '#2e7d32'], ['ADD_NOTIFICATION', '通知追加', '✓', '#2e7d32'], ['ADD_REMINDER', 'リマインダー追加', '✓', '#2e7d32'], ['UPDATE_FIELD', 'フィールド変更', '△', '#b26a00'], ['UPDATE_NOTIFICATION', '通知変更', '✎', '#6a1b9a'], ['UPDATE_REMINDER', 'リマインダー変更', '✎', '#6a1b9a'], ['UPDATE_VIEW', '一覧変更', '✎', '#6a1b9a'], ['ADD_PROCESS_STATUS', 'ステータス追加', '＋', '#6a1b9a'], ['ADD_PROCESS_ACTION', 'アクション追加', '＋', '#6a1b9a'], ['UPDATE_PROCESS', 'プロセス管理変更', '✎', '#6a1b9a'], ['UPDATE_LOOKUP', 'ルックアップ変更', '✎', '#6a1b9a'], ['ADD_APP_ACTION', 'アプリアクション追加', '＋', '#6a1b9a'], ['UPDATE_APP_ACTION', 'アプリアクション変更', '✎', '#6a1b9a']];
       const catLines = CATEGORY.map(([a, label, mark, color]) => { const ids = executable.filter(x => x.actionType === a); return ids.length ? `<div style="display:flex; justify-content:space-between; font-size:12px;"><span style="color:${color};">${mark} ${esc(label)}</span><b>${ids.length}（${esc(ids.map(x => x.stepId).join(', '))}）</b></div>` : ''; }).join('');
       const head = `<div style="border-top:1px dashed #1a73e8; padding-top:8px;"><b>動作テスト環境への反映（Preview Executor）</b>
         <div style="margin-top:4px; display:grid; gap:2px;">${line(executable, '承認済み・実行可能', '#2e7d32', '✓')}${catLines ? `<div style="margin-left:12px; display:grid; gap:1px;">${catLines}</div>` : ''}${line(unsupported, '承認済みだが未対応', '#b26a00', '△')}${line(blocked, '実行不可', '#b00020', '×')}</div>${unsupportedList}`;
@@ -10196,7 +10222,7 @@
         const lines = group('追加', pend.filter(x => !isUpdateAction(x.actionType)), '＋') + group('既存設定の変更', pend.filter(x => isUpdateAction(x.actionType)), '✎');
         const details = pend.map(x => `<div style="font-size:11px; opacity:.85;">${esc(x.stepId)} ${esc(x.prepared?.summary || x.title)}</div>${executorBeforeAfterHtml(x, p)}${(x.warnings || []).map(w => `<div style="font-size:11px; color:#b26a00; margin-left:12px;">⚠ ${esc(w.message)}${w.existing ? `（既存: ${esc(existingText(w.existing))}）` : ''}</div>`).join('')}`).join('');
         const sensitive = pend.flatMap(x => (x.prepared?.sensitive || []).map(sv => ({ stepId: x.stepId, ...sv })));
-        const sensitiveHtml = sensitive.length ? `<div style="margin-top:8px; border:2px solid #b00020; border-radius:6px; padding:6px; background:rgba(176,0,32,.06);"><b style="color:#b00020;">⚠ ${pend.some(x => x.actionType !== 'UPDATE_FIELD' && (x.prepared?.sensitive || []).length) ? '既存の設定を変更します' : '既存フィールドを変更します'}</b>${sensitive.map(sv => `<div style="font-size:12px; margin-top:4px;">${esc(sv.stepId)}：${esc(sv.message)}</div>`).join('')}</div>` : '';
+        const sensitiveHtml = sensitive.length ? `<div style="margin-top:8px; border:2px solid #b00020; border-radius:6px; padding:6px; background:rgba(176,0,32,.06);"><b style="color:#b00020;">⚠ ${pend.some(x => !isUpdateAction(x.actionType) && (x.prepared?.sensitive || []).length) ? '確認が必要な点があります' : pend.some(x => x.actionType !== 'UPDATE_FIELD' && (x.prepared?.sensitive || []).length) ? '既存の設定を変更します' : '既存フィールドを変更します'}</b>${sensitive.map(sv => `<div style="font-size:12px; margin-top:4px;">${esc(sv.stepId)}：${esc(sv.message)}</div>`).join('')}</div>` : '';
         const procSteps = pend.filter(x => isProcessAction(x.actionType));
         const procHtml = procSteps.length ? `<div id="kt-ai-exec-process-confirm" style="margin-top:6px; border:2px solid #6a1b9a; border-radius:6px; padding:6px; background:rgba(106,27,154,.05);">
             <b style="color:#6a1b9a;">⚠ プロセス管理を変更します</b>
@@ -10207,14 +10233,22 @@
             ${partitionHtml(s.review?.simulation?.process?.partition)}
           </div>` : '';
         // ルックアップ（Phase 13 §39）: 参照元 / キー / 追加する取得項目 / 既存はそのまま / 参照元アプリは変更しない
+        // アプリアクション（Phase 14 §34〜37）: 必ずコピー先を見せる。コピー先の必須項目が転記されないときは警告
+        const aaSteps = pend.filter(x => isAppAction(x.actionType));
+        const reqWarn = (x) => { const list = x.prepared?.appActionChanges?.requiredUnmapped || []; return list.length ? `<div class="kt-ai-exec-required-warning" style="margin-top:4px; margin-left:8px; border:1px solid #b26a00; border-radius:6px; padding:4px 6px; color:#b26a00;"><b>⚠ コピー先に必須項目があります</b>${list.map(f => `<div style="font-size:12px;">「${esc(f.label)}」（${esc(f.code)}）</div>`).join('')}<div style="font-size:11px;">このアクションでは値を設定しません。作成時に入力・自動設定されるか確認してください。</div></div>` : ''; };
+        const aaHtml = aaSteps.length ? `<div id="kt-ai-exec-app-action-confirm" style="margin-top:6px; border:2px solid #6a1b9a; border-radius:6px; padding:6px; background:rgba(106,27,154,.05);">
+            <b style="color:#6a1b9a;">⚠ アプリアクションを${aaSteps.some(x => x.actionType === 'ADD_APP_ACTION') ? '追加' : ''}${aaSteps.some(x => x.actionType === 'ADD_APP_ACTION') && aaSteps.some(x => x.actionType === 'UPDATE_APP_ACTION') ? '・' : ''}${aaSteps.some(x => x.actionType === 'UPDATE_APP_ACTION') ? '変更' : ''}します</b>
+            <div style="font-size:12px; margin-top:2px;">他のアプリへレコードを転記するボタンの設定です。コピー先アプリの設定・レコードは変更しません。</div>
+            ${aaSteps.map(x => `<div style="font-size:12px; margin-top:4px; font-weight:600;">${esc(x.stepId)} ${x.actionType === 'ADD_APP_ACTION' ? '＋ 新規アプリアクション' : '✎ 既存アプリアクションを変更'}「${esc(x.prepared?.targetLabel || x.title)}」</div>${appActionLines(x, p).map(l => `<div style="font-size:12px; margin-left:8px;">${esc(l)}</div>`).join('')}${reqWarn(x)}`).join('')}
+          </div>` : '';
         const lkSteps = pend.filter(x => x.actionType === 'UPDATE_LOOKUP');
         const lkHtml = lkSteps.length ? `<div id="kt-ai-exec-lookup-confirm" style="margin-top:6px; border:2px solid #6a1b9a; border-radius:6px; padding:6px; background:rgba(106,27,154,.05);">
             <b style="color:#6a1b9a;">⚠ ルックアップを変更します</b>
             <div style="font-size:12px; margin-top:2px;">既存のルックアップに取得項目などを追加します。参照元アプリの設定・レコードは変更しません。</div>
             ${lkSteps.map(x => `<div style="font-size:12px; margin-top:4px; font-weight:600;">${esc(x.stepId)} ルックアップ「${esc(x.prepared?.targetLabel || x.title)}」（${esc(x.prepared?.payload?.code || '')}）</div>${lookupLines(x, p).map(l => `<div style="font-size:12px; margin-left:8px;">${esc(l)}</div>`).join('')}`).join('')}
           </div>` : '';
-        return `${head}<div id="kt-ai-exec-confirm" style="margin-top:8px; border:2px solid ${procSteps.length || lkSteps.length ? '#6a1b9a' : '#b26a00'}; border-radius:6px; padding:8px;">
-          <b>動作テスト環境へ以下を反映します。</b>${procHtml}${lkHtml}
+        return `${head}<div id="kt-ai-exec-confirm" style="margin-top:8px; border:2px solid ${procSteps.length || lkSteps.length || aaSteps.length ? '#6a1b9a' : '#b26a00'}; border-radius:6px; padding:8px;">
+          <b>動作テスト環境へ以下を反映します。</b>${procHtml}${lkHtml}${aaHtml}
           <div style="margin-top:4px;">${lines}</div><div style="margin-top:4px; display:grid; gap:2px;">${details}</div>${sensitiveHtml}
           <div style="margin-top:6px; font-size:12px;"><b>運用環境には反映されません。</b>（動作テスト環境 revision ${esc(String(p?.revision?.preview ?? '—'))}・実行前の設定は snapshot として保持します）</div>
           <div style="margin-top:8px; display:flex; gap:6px;"><button type="button" id="kt-ai-exec-cancel" class="btn" style="height:28px;">キャンセル</button><button type="button" id="kt-ai-exec-go" class="btn" style="height:28px; font-weight:600; border-color:#b26a00;">動作テスト環境へ反映</button></div>
@@ -10230,7 +10264,7 @@
         const sim = ex?.simulation;
         const simText = !sim || sim.compared === false ? 'Simulationとの一致：—（比較していません）' : sim.match ? 'Simulationとの一致：✓' : `Simulationとの一致：× SIMULATION_MISMATCH（${(sim.mismatches || []).map(m => m.id).join(', ')}）`;
         const re = ex?.reanalysis;
-        const reText = re?.available ? `再解析：フィールド ${re.after.fields} 件（実行前 ${re.before?.fields ?? '—'}）・依存 ${re.after.edges} 件・存在しない参照 ${re.after.brokenRefs ?? '—'} 件（実行前 ${re.before?.brokenRefs ?? '—'}）${(re.addedFields || []).length ? '・追加フィールドの参照 ' + re.addedFields.map(a => `${a.code}: ${a.directRefs}`).join(', ') : ''}${(re.updatedLookups || []).length ? '・ルックアップの依存 ' + re.updatedLookups.map(l => `${l.code}: ${l.edgesBefore ?? '—'} → ${l.edgesAfter}`).join(', ') : ''}` : '再解析：—';
+        const reText = re?.available ? `再解析：フィールド ${re.after.fields} 件（実行前 ${re.before?.fields ?? '—'}）・依存 ${re.after.edges} 件・存在しない参照 ${re.after.brokenRefs ?? '—'} 件（実行前 ${re.before?.brokenRefs ?? '—'}）${(re.addedFields || []).length ? '・追加フィールドの参照 ' + re.addedFields.map(a => `${a.code}: ${a.directRefs}`).join(', ') : ''}${(re.updatedLookups || []).length ? '・ルックアップの依存 ' + re.updatedLookups.map(l => `${l.code}: ${l.edgesBefore ?? '—'} → ${l.edgesAfter}`).join(', ') : ''}${(re.appActions || []).length ? '・アプリアクションの依存 ' + re.appActions.map(a => `${a.name}: ${a.edgesBefore ?? '—'} → ${a.edgesAfter}`).join(', ') : ''}` : '再解析：—';
         // ルックアップ（Phase 13 §41）: 反映した取得項目の件数と参照元の確認結果
         const lkDone = steps.filter(x => x.actionType === 'UPDATE_LOOKUP' && ['VERIFIED', 'VERIFY_FAILED'].includes(x.status)).map(x => {
           const pp = (s.prepared?.steps || []).find(y => y.stepId === x.stepId)?.prepared || {};
@@ -10241,6 +10275,16 @@
           return `${x.status === 'VERIFIED' ? '✓' : '⚠'} ルックアップ「${pp.targetLabel || x.title}」: 取得項目 ${before} → ${after ?? '—'} 件${(pp.expect?.addedPickerFields || []).length ? `・選択時に表示 ＋${pp.expect.addedPickerFields.length}` : ''}${pp.after?.filterCond != null ? '・絞り込み変更' : ''}${pp.after?.sort != null ? '・並び順変更' : ''}。参照元 App ${ca.appId || '—'}${ca.name ? `「${ca.name}」` : ''}: ${src ? (src.actual === 'UNVERIFIED' ? '取得元の確認は未実施（参照元を読めませんでした）' : src.ok ? '取得元フィールドは存在' : `取得元が見つかりません（${(src.actual || []).join(', ')}）`) : '—'}${fp && fp.note ? `・${fp.note}` : ''}。検索方法は kintone が管理（検証対象外）`;
         });
         const lkDoneHtml = lkDone.length ? `<div id="kt-ai-exec-lookup-result" style="margin-top:4px; display:grid; gap:2px;">${lkDone.map(t => `<div style="font-size:12px;">${esc(t)}</div>`).join('')}</div>` : '';
+        // アプリアクション（Phase 14）: 反映したアクションと転記の件数・他のアクションの保持・コピー先
+        const aaDone = steps.filter(x => isAppAction(x.actionType) && ['VERIFIED', 'VERIFY_FAILED'].includes(x.status)).map(x => {
+          const pp = (s.prepared?.steps || []).find(y => y.stepId === x.stepId)?.prepared || {};
+          const chk = (name) => (x.verification?.checks || []).find(c => c.name === name) || null;
+          const ca = pp.crossApp || {}; const others = chk('otherActionsPreserved') || chk('existingActionsPreserved'); const cnt = chk('countPreserved');
+          const maps = x.actionType === 'ADD_APP_ACTION' ? (pp.payload?.entry?.mappings || []).length : null;
+          const before = (pp.payload?.identity?.mappings || []).length, after = x.actionType === 'ADD_APP_ACTION' ? maps : (Array.isArray(chk('mappingCount')?.actual) ? chk('mappingCount').actual : chk('mappingCount')?.actual ?? null);
+          return `${x.status === 'VERIFIED' ? '✓' : '⚠'} アプリアクション「${pp.targetLabel || x.title}」${x.actionType === 'ADD_APP_ACTION' ? `を追加: 転記 ${maps} 件` : `: 転記 ${before} → ${after ?? '—'} 件`}${pp.after?.entities ? '・利用者変更' : ''}${pp.after?.filterCond != null ? '・利用条件変更' : ''}。コピー先 App ${ca.appId || '—'}${ca.name ? `「${ca.name}」` : ''}（変更なし）。他のアクション ${cnt ? `${x.actionType === 'ADD_APP_ACTION' ? cnt.expected - 1 : cnt.expected} 件` : ''}は${others ? (others.ok ? 'そのまま' : '変わっています（要確認）') : '—'}`;
+        });
+        const aaDoneHtml = aaDone.length ? `<div id="kt-ai-exec-app-action-result" style="margin-top:4px; display:grid; gap:2px;">${aaDone.map(t => `<div style="font-size:12px;">${esc(t)}</div>`).join('')}</div>` : '';
         const title = ok ? '動作テスト環境への反映が完了しました。' : `${verified} 件反映済み・${failed + warn} 件失敗・以降未実行（${skipped} 件）`;
         // Rollback（Phase 11）: 書き込んだ step があり、まだ戻していなければ「変更前の状態に戻す」を出す
         const written = steps.some(x => ['APPLIED', 'VERIFIED', 'VERIFY_FAILED'].includes(x.status) || (x.status === 'FAILED' && x.partial));
@@ -10250,7 +10294,7 @@
           <b>${esc(title)}</b>
           <div style="margin-top:4px; font-size:12px;">✓ ${verified} 件 VERIFIED　⚠ ${warn} 件　× ${failed} 件</div>
           <div style="font-size:12px;">${esc(simText)}</div>
-          <div style="font-size:11px; opacity:.8;">${esc(reText)}</div>${lkDoneHtml}
+          <div style="font-size:11px; opacity:.8;">${esc(reText)}</div>${lkDoneHtml}${aaDoneHtml}
           ${ex?.process ? `<div id="kt-ai-exec-process" style="margin-top:6px;"><b>プロセス管理の Before / Planned / Actual</b><div style="display:flex; gap:6px; flex-wrap:wrap; margin-top:4px;">${mermaidBox('Before（実行前）', ex.process.mermaid?.before, '#ccc')}${mermaidBox('Planned（Review の After）', ex.process.mermaid?.planned, '#1a73e8')}${mermaidBox('Actual（反映後の動作テスト環境。青＝実行前との差）', ex.process.mermaid?.actual, '#2e7d32')}</div><div style="font-size:11px; opacity:.8; margin-top:2px;">Actual: ステータス ${(ex.process.actual?.states || []).map(x => x.name).join(' → ')}　アクション ${(ex.process.actual?.actions || []).length} 件（実行前 ${(ex.process.before?.actions || []).length} 件）</div>${partitionHtml(ex.process.partition)}</div>` : ''}
           ${list}
           <div style="margin-top:6px; font-size:12px;"><b>運用環境にはまだ反映されていません。</b>（反映は kintone のアプリ設定画面から行ってください。Executor は運用環境へ反映しません）</div>
@@ -10283,7 +10327,7 @@
       if (stage === 'rollback-confirm') {
         const by = Object.entries(rb?.summary?.bySource || {}).map(([a, n]) => `<div style="font-size:12px; margin-left:8px;">・${esc(execActionJa(a))} ${n} 件</div>`).join('');
         const warnings = (rb?.warnings || []).map(w => `<div style="font-size:11px; color:#b26a00; margin-top:4px;">⚠ ${esc(w.message)}</div>`).join('');
-        const steps = (rb?.steps || []).map(st => `<div style="font-size:11px; opacity:.85; margin-left:8px;">${esc(st.stepId)} ${esc(execActionJa(st.sourceActionType))}${st.target ? `「${esc(String(st.target))}」` : ''} → ${esc(st.note === 'ALREADY_RESTORED' ? '既に実行前の状態（追加の変更なし）' : st.actionType === 'DELETE_FIELD' ? 'フィールドを削除' : st.actionType === 'RESTORE_FIELD_PROPERTY' ? '実行前の値に戻す' : st.actionType === 'RESTORE_PROCESS_SETTINGS' ? '実行前のプロセス管理（ステータス・アクション・作業者）全体に戻す' : st.actionType === 'RESTORE_LOOKUP_SETTINGS' ? '実行前のルックアップ設定（取得項目・選択時表示・絞り込み・並び順）に戻す。参照元アプリには触れない' : '実行前の設定全体に戻す')}</div>`).join('');
+        const steps = (rb?.steps || []).map(st => `<div style="font-size:11px; opacity:.85; margin-left:8px;">${esc(st.stepId)} ${esc(execActionJa(st.sourceActionType))}${st.target ? `「${esc(String(st.target))}」` : ''} → ${esc(st.note === 'ALREADY_RESTORED' ? '既に実行前の状態（追加の変更なし）' : st.actionType === 'DELETE_FIELD' ? 'フィールドを削除' : st.actionType === 'RESTORE_FIELD_PROPERTY' ? '実行前の値に戻す' : st.actionType === 'RESTORE_PROCESS_SETTINGS' ? '実行前のプロセス管理（ステータス・アクション・作業者）全体に戻す' : st.actionType === 'RESTORE_LOOKUP_SETTINGS' ? '実行前のルックアップ設定（取得項目・選択時表示・絞り込み・並び順）に戻す。参照元アプリには触れない' : st.actionType === 'RESTORE_APP_ACTION_SETTINGS' ? '実行前のアプリアクション全体に戻す（追加したアクションは消え、変更した転記 / 利用者 / 利用条件は元に戻る）。コピー先アプリには触れない' : '実行前の設定全体に戻す')}</div>`).join('');
         return `<div id="kt-ai-rollback" style="margin-top:8px; border:2px solid #6a1b9a; border-radius:6px; padding:8px;">
           <b>動作テスト環境の変更を元に戻します。</b>
           <div style="margin-top:4px;">${by}</div>

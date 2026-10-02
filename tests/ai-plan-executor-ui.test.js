@@ -389,7 +389,7 @@ console.log('\n--- 2f. Phase 13: ルックアップ（§38 参照元の表示 / 
   ], summary: { steps: 3, invalidSteps: 0, needsConfirmation: 0, proposedFields: 2, questions: 0 } } };
   const m = mount({ planResponse: PLAN_LK });
   await tick(); const h = await runPlan(m);
-  assert(h.includes('id="kt-ai-review-crossapp"') && h.includes('✓ App 500「顧客マスタ」：フィールド設定を取得済み（revision 21') && h.includes('実行直前にもう一度取得して照合します'), '§38: Review に参照元アプリ（App 500「顧客マスタ」・取得済み・revision）');
+  assert(h.includes('id="kt-ai-review-crossapp"') && h.includes('✓ 参照元 App 500「顧客マスタ」：フィールド設定を取得済み（revision 21') && h.includes('実行直前にもう一度取得して照合します'), '§38: Review に参照元アプリ（App 500「顧客マスタ」・取得済み・revision）');
   assert(h.includes('✎ ルックアップ「顧客マスタ参照」（customer_lookup）を変更') && h.includes('参照元: App 500「顧客マスタ」 / キー: code（顧客コード）') && h.includes('＋ 取得項目: address（住所） → customer_address（顧客住所）・この計画で追加') && h.includes('＋ 取得項目: credit（与信枠） → customer_credit（与信枠）・この計画で追加'), '§38: 参照元 / キー / 追加する取得項目（この計画で追加）を Review に表示');
   for (const id of ['P1', 'P2', 'P3']) m.panel.decide(id, 'approve');
   const e0 = execHtml(m);
@@ -429,7 +429,51 @@ console.log('\n--- 2f. Phase 13: ルックアップ（§38 参照元の表示 / 
   const inputs3 = buildInputs(); inputs3.data.relatedApps['500'] = { appId: '500', name: null, code: null, revision: null, fields: null, error: { code: 'CB_NO02', message: '権限がありません。', status: 403 } };
   const m3 = mount({ planResponse: PLAN_LK, inputs: inputs3 });
   await tick(); const h3 = await runPlan(m3);
-  assert(h3.includes('× App 500：フィールド設定を確認できません（権限がありません。）。参照元アプリへのアクセス権を確認してください。参照先のフィールドは推測しません') && /P3[\s\S]*?× 実行不可/.test(h3), '§38 / §40: Review 時点で参照元が読めない → × 実行不可・推測しない');
+  assert(h3.includes('× 参照元 App 500：フィールド設定を確認できません（権限がありません。）。参照元アプリへのアクセス権を確認してください。相手アプリのフィールドは推測しません') && /P3[\s\S]*?× 実行不可/.test(h3), '§38 / §40: Review 時点で参照元が読めない → × 実行不可・推測しない');
+}
+
+console.log('\n--- 2g. Phase 14: アプリアクション（§34〜37 コピー先の表示 / 新規 / 既存変更 / 必須項目の警告 / 結果 / Rollback）---');
+{
+  // 既存アクション「見積を作成」（→ App 311「見積管理」）に備考（secret_memo → note）を追加 ＋ 新規「請求書作成」（コピー先 311・必須の見積日が未転記）
+  const PLAN_AA = { ...PLAN_X, plan: { ...PLAN_X.plan, missingCapabilities: [], proposedFields: [], steps: [
+    mkStep('P1', 'UPDATE_APP_ACTION', 'APP_ACTION', '見積を作成', { actionMappings: [{ srcType: 'FIELD', srcField: 'secret_memo', destField: 'note' }] }, { title: '見積を作成に備考も転記' }),
+    mkStep('P2', 'ADD_APP_ACTION', 'APP_ACTION', '請求書作成', { name: '請求書作成', destApp: '311', actionMappings: [{ srcType: 'FIELD', srcField: 'case_name', destField: 'quote_title' }, { srcType: 'FIELD', srcField: 'amount', destField: 'quote_amount' }, { srcType: 'RECORD_URL', srcField: null, destField: 'source_url' }], entities: ['GROUP:everyone'] }, { title: '請求書作成アクションを追加' }),
+  ], summary: { steps: 2, invalidSteps: 0, needsConfirmation: 0, proposedFields: 0, questions: 0 } } };
+  const m = mount({ planResponse: PLAN_AA });
+  await tick(); const h = await runPlan(m);
+  assert(h.includes('id="kt-ai-review-crossapp"') && h.includes('✓ コピー先 App 311「見積管理」：フィールド設定を取得済み（revision 7'), '§35: Review に相手アプリ（コピー先 App 311「見積管理」・取得済み）');
+  assert(h.includes('✎ 既存アプリアクション「見積を作成」を変更') && h.includes('コピー先: App 311「見積管理」') && h.includes('＋ 転記: secret_memo（機密メモ） → note（備考）') && h.includes('＋ 新規アプリアクション「請求書作成」') && h.includes('⚠ コピー先の必須項目: 「見積日」 はこのアクションでは値を設定しません'), '§34 / §36 / §37: Review に既存変更 / 新規 / コピー先 / 転記 / 必須項目の行');
+  for (const id of ['P1', 'P2']) m.panel.decide(id, 'approve');
+  const e0 = execHtml(m);
+  assert(e0.includes('✎ アプリアクション変更') && e0.includes('＋ アプリアクション追加') && /承認済み・実行可能[\s\S]*?<b>2 件/.test(e0), 'Executor の件数: アプリアクション変更 1 / 追加 1');
+  await click(m, 'kt-ai-exec-start'); await tick();
+  const e1 = execHtml(m);
+  assert(m.panel.executorState().stage === 'confirm' && e1.includes('id="kt-ai-exec-app-action-confirm"') && e1.includes('⚠ アプリアクションを追加・変更します') && e1.includes('コピー先アプリの設定・レコードは変更しません。'), '§34: ⚠ アプリアクションを追加・変更します / コピー先は変更しない');
+  assert(e1.includes('P1 ✎ 既存アプリアクションを変更「見積を作成」') && e1.includes('コピー先: App 311「見積管理」') && e1.includes('＋ 追加する転記: secret_memo（機密メモ） → note（備考）') && e1.includes('既存の転記 2 件（case_name→quote_title, レコードURL→source_url）はそのまま') && e1.includes('コピー先アプリ「見積管理」の設定・レコードは変更しません（フィールド定義は Review 時点と同じ・revision 7）'), '§34 / §35: 既存変更の行（コピー先 / 追加する転記 / 既存はそのまま / コピー先の指紋）');
+  assert(e1.includes('P2 ＋ 新規アプリアクション「請求書作成」') && e1.includes('＋ 転記: case_name（案件名） → quote_title（見積件名）') && e1.includes('＋ 転記: レコードURL → source_url（元案件URL）') && e1.includes('利用者: GROUP:everyone') && e1.includes('class="kt-ai-exec-required-warning"') && e1.includes('⚠ コピー先に必須項目があります') && e1.includes('「見積日」（issue_date）') && e1.includes('このアクションでは値を設定しません。作成時に入力・自動設定されるか確認してください。'), '§36 / §37: 新規アクションの行と必須項目の警告（見積日）');
+  assert(/既存設定の変更[\s\S]*?✎ アプリアクション 1 件/.test(e1) && /追加[\s\S]*?＋ アプリアクション 1 件/.test(e1) && e1.includes('アプリアクション: Before 1 件 → After 2 件') && e1.includes('他のアクションが bit 単位で保持されたことを反映後に検証します'), '§34: 追加 1 / 既存設定の変更 1・全体置換の注記');
+  await click(m, 'kt-ai-exec-go'); await tick(); await tick();
+  const ex = m.panel.executorState().execution;
+  assert(m.panel.executorState().stage === 'done' && ex.status === 'DONE' && ex.steps.every(s => s.status === 'VERIFIED') && Object.keys(m.mock.st.actions).length === 2 && m.mock.st.actions['見積を作成'].mappings.length === 3 && m.mock.st.actions['請求書作成'].mappings.length === 3 && m.mock.calls.filter(c => c === 'PUT actions').length === 2, '反映: 2 step VERIFIED（PUT 2 回・既存に転記 1 件追加・新規 1 件）');
+  const e2 = execHtml(m);
+  assert(e2.includes('✓ 2 件 VERIFIED') && e2.includes('id="kt-ai-exec-app-action-result"') && e2.includes('✓ アプリアクション「見積を作成」: 転記 2 → 3 件。コピー先 App 311「見積管理」（変更なし）。他のアクション 1 件はそのまま') && e2.includes('✓ アプリアクション「請求書作成」を追加: 転記 3 件。コピー先 App 311「見積管理」（変更なし）。他のアクション 1 件はそのまま') && e2.includes('Simulationとの一致：✓') && e2.includes('アプリアクションの依存 見積を作成:') && hasButton(e2, '変更前の状態に戻す'), '結果: アプリアクションの行（転記 2 → 3 / 追加 3 件・コピー先・他のアクションはそのまま）と再解析');
+  await click(m, 'kt-ai-exec-rollback-start'); await tick();
+  const r1 = execHtml(m);
+  assert(m.panel.executorState().stage === 'rollback-confirm' && r1.includes('・アプリアクション追加 1 件') && r1.includes('・アプリアクション変更 1 件') && r1.includes('実行前のアプリアクション全体に戻す（追加したアクションは消え、変更した転記 / 利用者 / 利用条件は元に戻る）。コピー先アプリには触れない'), 'rollback 確認: アプリアクション全体の復元');
+  await click(m, 'kt-ai-exec-rollback-go'); await tick(); await tick();
+  const r2 = execHtml(m);
+  assert(m.panel.executorState().stage === 'rolled-back' && m.panel.executorState().rollback.status === 'ROLLED_BACK_VERIFIED' && r2.includes('動作テスト環境を実行前の状態に戻しました。') && Object.keys(m.mock.st.actions).length === 1 && m.mock.st.actions['見積を作成'].mappings.length === 2, 'rollback: 元の 1 件・転記 2 件に戻る');
+  await click(m, 'kt-ai-exec-audit-copy'); await tick();
+  const audit = JSON.parse(m.copies[m.copies.length - 1]);
+  assert(audit.crossApp.every(c => c.appId === '311' && c.role === 'destination') && audit.rollback.steps[0].actionType === 'RESTORE_APP_ACTION_SETTINGS' && audit.execution.actualAfter.addedAppActions.join() === '請求書作成' && audit.execution.actualAfter.updatedAppActions.join() === '見積を作成', '監査 JSON: crossApp（コピー先）・rollback・added / updatedAppActions');
+  // コピー先が読めない（実行時）→ 実行不可
+  const m2 = mount({ planResponse: PLAN_AA });
+  await tick(); await runPlan(m2);
+  for (const id of ['P1', 'P2']) m2.panel.decide(id, 'approve');
+  m2.mock.ctl.destUnavailable = '311';
+  await click(m2, 'kt-ai-exec-start'); await tick();
+  const b1 = execHtml(m2);
+  assert(m2.panel.executorState().stage === 'blocked' && b1.includes('P1 見積を作成に備考も転記：<b>実行不可</b>') && b1.includes('コピー先アプリへのアクセス権を確認してください') && b1.includes('[DEST_APP_SETTINGS_UNAVAILABLE]'), 'コピー先を読めない → 実行不可（DEST_APP_SETTINGS_UNAVAILABLE）');
 }
 
 console.log('\n--- 3. 回帰: Review UI の既存要素は変わらない ---');
