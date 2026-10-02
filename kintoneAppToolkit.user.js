@@ -5417,7 +5417,8 @@
           const c = cfg();
           if (!refreshValid(c)) { access = { token: null, expiresAt: null }; throw new AiClientError({ code: c.refreshToken ? ERROR_CODES.SESSION_EXPIRED : ERROR_CODES.NOT_CONNECTED, message: 'refresh unavailable' }); }
           try {
-            const ex = await bare().exchange({ grantType: 'refresh_token', refreshToken: c.refreshToken, product: c.scope?.product || PRODUCT, feature: c.scope?.feature || FEATURE });
+            // 要求は常に全 feature（Planner など後から契約に加わった機能を、再接続なしに scope へ取り込む）。Gateway が許可された交差を返す
+            const ex = await bare().exchange({ grantType: 'refresh_token', refreshToken: c.refreshToken, product: c.scope?.product || PRODUCT, feature: FEATURES.join(',') });
             persist(ex);
             return ex;
           } catch (e) {
