@@ -248,6 +248,9 @@ const NON_ENTITY_EDGES = [
   'ACL | field:1 | ACL_TARGET | FIELD:secret_memo | FIELD_ACL_TARGET | CERTAIN',
   'ACL | record:0 | ACL_CONDITION | FIELD:amount | RECORD_ACL_CONDITION | LIKELY',
   'ACTION | 5520 | ACTION_MAPS_FROM | FIELD:case_name | ACTION_MAPPING | CERTAIN',
+  // Phase 14: 転記先（相手アプリ側）のエッジ
+  'ACTION | 5520 | ACTION_MAPS_TO | EXTERNAL_FIELD:311:quote_title | ACTION_MAPPING_DEST | CERTAIN',
+  'ACTION | 5520 | ACTION_MAPS_TO | EXTERNAL_FIELD:311:source_url | ACTION_MAPPING_DEST | CERTAIN',
   'ACTION | 5520 | APP_REFERENCE | APP:311 | ACTION | CERTAIN',
   'NOTIFICATION | perRecord:0 | FILTERS_BY | FIELD:amount | NOTIFY_CONDITION | LIKELY',
   'NOTIFICATION | perRecord:1 | FILTERS_BY | FIELD:owner | NOTIFY_CONDITION | LIKELY',
@@ -271,7 +274,7 @@ const NON_ENTITY_EDGES = [
     'アプリのアクセス権（フィールド指定なし。CREATOR を含む）からはエッジを作らない');
 
   assert(JSON.stringify(sigs(deps.edges.filter(e => !isEntityEdge(e)))) === JSON.stringify(NON_ENTITY_EDGES),
-    'フィールド指定以外のエッジ（条件式・基準日時・ACL対象・アクション）は従来どおり 10 本');
+    'フィールド指定以外のエッジ（条件式・基準日時・ACL対象・アクション）は従来どおり 10 本 ＋ 転記先 2 本（Phase 14）');
 
   // FIELD_ENTITY をすべて USER に置き換える（code は同じ文字列のまま）
   //   → ログイン名がフィールドコードと同じ文字列でも、type が USER ならフィールドへの依存にしない

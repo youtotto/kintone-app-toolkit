@@ -1670,6 +1670,7 @@
       REFERENCES: 'REFERENCES',             // 計算式が別フィールドを参照
       HTML_REFERENCE: 'HTML_REFERENCE',     // カスタマイズビューのHTML内に記述（静的解析による推定）
       ACTION_MAPS_FROM: 'ACTION_MAPS_FROM', // アプリアクションの転記元（自アプリ側）
+      ACTION_MAPS_TO: 'ACTION_MAPS_TO',     // アプリアクションの転記先（相手アプリ側。Phase 14）
       ACL_CONDITION: 'ACL_CONDITION',       // レコードACLの条件で使用
       ACL_TARGET: 'ACL_TARGET',             // フィールドACLの対象／エンティティ指定
       APP_REFERENCE: 'APP_REFERENCE',       // 他アプリへの参照（Lookup/関連/アクション）
@@ -2119,6 +2120,15 @@
           if (m?.srcType === 'FIELD' && m?.srcField) {
             fieldEdge(src, REL.ACTION_MAPS_FROM, m.srcField, 'ACTION_MAPPING', name);
           }
+          // 転記先（相手アプリのフィールド。Phase 14: 反映後の再解析で新しい転記が edge として現れる）
+          if (m?.destField && destApp != null) {
+            addEdge({
+              ...src, relationType: REL.ACTION_MAPS_TO,
+              targetType: 'EXTERNAL_FIELD', targetId: `${destApp}:${m.destField}`, targetName: m.destField,
+              context: { settingType: 'ACTION_MAPPING_DEST', settingName: name, appId: destApp, srcType: m.srcType, srcField: m.srcField ?? null },
+              confidence: CONF.CERTAIN,
+            });
+          }
         });
         edgesFromCond(a?.filterCond, src, REL.FILTERS_BY, 'ACTION_CONDITION', name);
       }
@@ -2187,7 +2197,7 @@
       NOTIFY_TARGET: '通知先', REMINDER_TIMING: '基準日時',
       ASSIGNS_BY: '作業者', EXECUTABLE_BY: '実行可能ユーザー', LOOKUP_KEY: '参照キー', LOOKUP_COPY_TO: 'コピー先',
       LOOKUP_PICKER: '取得元', REFERENCES: '計算参照',
-      ACTION_MAPS_FROM: '転記元', ACL_CONDITION: 'ACL条件', ACL_TARGET: 'ACL対象',
+      ACTION_MAPS_FROM: '転記元', ACTION_MAPS_TO: '転記先', ACL_CONDITION: 'ACL条件', ACL_TARGET: 'ACL対象',
       APP_REFERENCE: 'アプリ参照', HTML_REFERENCE: 'HTML記述',
       JS_READ: '読取', JS_WRITE: '書込', JS_CONTROL: '制御', JS_REFERENCE: '参照',
       REFERENCED_BY: '他アプリから参照',
@@ -6771,6 +6781,9 @@
       // Phase 13: 既存ルックアップ。参照元アプリの定義を実行直前に read-only で再取得して指紋を照合し、「現在の lookup ＋ 承認分」の完全な lookup（fieldMappings / lookupPickerFields / filterCond / sort）で PUT する。
       //   relatedApp / relatedKeyField は送らない（変更できない項目。変更は計画のみ）。新規ルックアップ（ADD_LOOKUP）は計画のみ（参照元の選択は人が kintone で行う）
       UPDATE_LOOKUP: { previewExecute: true, verify: true, rollbackStrategy: 'RESTORE_LOOKUP_SETTINGS', conditional: '取得項目 / 選択時に表示するフィールドの追加・絞り込み / 並び順（参照元・キーの変更・取得項目の削除は計画のみ）' },
+      // Phase 14: アプリアクション。PUT /preview/app/actions は全体置換なので「最新の全アクション ＋ 承認分」を 1 回で送り、他のアクションが bit 単位で保たれたことを検証する。コピー先アプリは読むだけ
+      ADD_APP_ACTION: { previewExecute: true, verify: true, rollbackStrategy: 'RESTORE_APP_ACTION_SETTINGS', conditional: 'コピー先アプリの定義が読めること・転記先の実在と型' },
+      UPDATE_APP_ACTION: { previewExecute: true, verify: true, rollbackStrategy: 'RESTORE_APP_ACTION_SETTINGS', conditional: '転記の追加 / 利用者 / 利用条件（名前・コピー先の変更、転記の削除は計画のみ）' },
     });
     const ACTION_CAPABILITIES = Object.freeze(Object.fromEntries(Object.entries(KTPlanReview.ACTION_CAPABILITIES).map(([k, v]) => {
       const ex = EXECUTOR_COLUMNS[k] || { previewExecute: false, verify: !!v.validate, rollbackStrategy: v.simulate ? 'RESTORE_SNAPSHOT' : 'NONE' };
@@ -7535,6 +7548,200 @@
       },
     };
 
+    // ---- アプリアクション（Phase 14）----
+    /** PUT で送る形（GET の id / 余分なキーを落とし、既存はそのまま）。全体置換なので全アクションを含める */
+    const actionForPut = (a) => ({ name: a.name, index: String(a.index ?? '0'), destApp: a.destApp?.code ? { code: a.destApp.code } : { app: String(a.destApp?.app ?? '') }, mappings: (a.mappings || []).map(m => (m.srcType === 'RECORD_URL' ? { srcType: 'RECORD_URL', destField: m.destField } : { srcType: 'FIELD', srcField: m.srcField, destField: m.destField })), entities: (a.entities || []).map(e => ({ type: e.type, code: e.code })), filterCond: a.filterCond || '' });
+    const stripActionIds = (actions) => Object.fromEntries(Object.entries(actions || {}).map(([k, a]) => { const { id, ...rest } = a || {}; return [k, rest]; }));
+    const actionsOf = (raw) => (raw && raw.actions && typeof raw.actions === 'object' ? raw.actions : {});
+    const entityKeyA = (e) => `${e?.type}:${e?.code ?? ''}`;
+    const mapKeyA = (m) => `${m.srcType}:${m.srcType === 'RECORD_URL' ? '' : (m.srcField ?? '')}>${m.destField}`;
+    /** Review 時点の同一性（diff.target.identity）と現在のアクション（kintone の raw）を比べ、違う属性名を返す（空なら同一） */
+    function appActionIdentityMismatch(entry, identity) {
+      if (!entry) return ['missing'];
+      const out = [];
+      if (identity.id != null && entry.id != null && String(entry.id) !== String(identity.id)) out.push('id');
+      if (identity.index != null && String(entry.index ?? '') !== String(identity.index)) out.push('index');
+      if (entry.destApp == null || entry.mappings == null) out.push('destApp');
+      else if (String(entry.destApp?.app ?? '') !== String(identity.destApp?.app ?? '')) out.push('destApp');
+      if (entry.mappings != null && !same((entry.mappings || []).map(mapKeyA), (identity.mappings || []).map(mapKeyA))) out.push('mappings');
+      if (!sameKeys((entry.entities || []).map(entityKeyA), (identity.entities || []).map(entityKeyA))) out.push('entities');
+      if (normCondE(entry.filterCond) !== normCondE(identity.filterCond)) out.push('filterCond');
+      return out;
+    }
+    /** コピー先アプリの定義（prepare で再取得）で転記先を検証。null なら問題なし */
+    function appActionDestCheck(mappings, dest, appLabel) {
+      if (!dest || !dest.available) return { unsupported: 'DEST_APP_SETTINGS_UNAVAILABLE', message: `コピー先 ${appLabel} のフィールド設定を確認できません${dest?.error?.message ? `（${dest.error.message}）` : ''}。コピー先アプリへのアクセス権を確認してください` };
+      for (const m of mappings) { if (!dest.fields[m.destField]) return { unsupported: 'DEST_FIELD_NOT_FOUND', message: `転記先「${m.destField}」がコピー先 ${appLabel} にありません（コピー先の設定が変わっています）` }; }
+      return null;
+    }
+    function appActionSummaryParts(changes) {
+      const parts = [];
+      if (changes.mappings?.length) parts.push(`転記 ＋${changes.mappings.length}（${changes.mappings.map(m => `${m.srcType === 'RECORD_URL' ? 'レコードURL' : m.srcField}→${m.destField}`).join(', ')}）`);
+      if (changes.entities) parts.push(`利用者 ${changes.entities.from.join(', ') || 'なし'} → ${changes.entities.to.join(', ') || 'なし'}`);
+      if (changes.filterCond) parts.push(`利用条件 ${changes.filterCond.from || 'すべてのレコード'} → ${changes.filterCond.to}`);
+      return parts;
+    }
+    /**
+     * ADD_APP_ACTION（Phase 14）: Review が仮適用した新規アクション（diff.after）を、現在の全アクション ＋ 1 件の完全な payload で PUT する。
+     * コピー先アプリは prepare で再取得した定義（relatedNow）で転記先の実在を確かめる（型・必須は Review）。コピー先には書き込まない
+     */
+    HANDLERS.ADD_APP_ACTION = {
+      prepare(step, { stepReview, fieldsNow = null, relatedNow = null, actionsNow = null }) {
+        const after = stepReview?.diff?.after;
+        if (!after || !after.name || !after.destApp?.app) return { unsupported: 'NO_APP_ACTION_SPEC', message: 'Review に追加後のアプリアクション定義がありません' };
+        const ch = stepReview?.diff?.appActionChanges || {};
+        const appLabel = `App ${after.destApp.app}${stepReview?.crossApp?.name ? `「${stepReview.crossApp.name}」` : ''}`;
+        if (fieldsNow) for (const m of after.mappings) if (m.srcType === 'FIELD' && !fieldsNow[m.srcField]) return { unsupported: 'SOURCE_FIELD_MISSING', message: `転記元「${m.srcField}」が動作テスト環境にありません（先行する ADD_FIELD が反映されている必要があります）` };
+        if (actionsNow && actionsOf(actionsNow)[after.name]) return { unsupported: 'TARGET_EXISTS', message: `アプリアクション「${after.name}」は動作テスト環境に既にあります` };
+        if (relatedNow) { const bad = appActionDestCheck(after.mappings, relatedNow[String(after.destApp.app)], appLabel); if (bad) return bad; }
+        const unresolved = after.entities.filter(e => !['USER', 'GROUP', 'ORGANIZATION'].includes(e.type));
+        if (unresolved.length) return { unsupported: 'ENTITY_UNRESOLVED', message: `利用者 ${unresolved.map(entityKeyA).join(', ')} の種別（ユーザー / グループ / 組織）が決まっていません` };
+        if (after.filterCond && fieldsNow) { const qc = KTQueryCheck.check(after.filterCond, { fields: fieldsNow, usage: 'appAction' }); if (!qc.ok) return { unsupported: 'INVALID_CONDITION', message: `利用条件が kintone で受理されません: ${qc.errors.map(e => e.message).join('／')}` }; }
+        const entry = { name: after.name, index: after.index ?? null, destApp: { app: String(after.destApp.app), code: after.destApp.code || '' }, mappings: after.mappings.map(m => ({ srcType: m.srcType, srcField: m.srcType === 'RECORD_URL' ? null : m.srcField, destField: m.destField })), entities: after.entities.map(e => ({ type: e.type, code: e.code })), filterCond: after.filterCond || '' };
+        return {
+          payload: { name: after.name, entry },
+          expect: { name: after.name, destApp: entry.destApp, mappings: entry.mappings, entities: entry.entities.map(entityKeyA), filterCond: entry.filterCond },
+          summary: `＋ アプリアクション「${after.name}」（コピー先 ${appLabel}）: 転記 ${entry.mappings.length} 件（${entry.mappings.map(m => `${m.srcType === 'RECORD_URL' ? 'レコードURL' : m.srcField}→${m.destField}`).join(', ') || 'なし'}）・利用者 ${entry.entities.map(entityKeyA).join(', ') || 'なし'}${entry.filterCond ? `・利用条件 ${entry.filterCond}` : ''}`,
+          sensitive: sensitiveFrom(stepReview, ['DEST_REQUIRED_FIELD_UNMAPPED', 'APP_ACTION_SELF_COPY']),
+          targetLabel: after.name, changeKind: 'ADD', condition: entry.filterCond || null,
+          crossApp: { appId: String(after.destApp.app), name: stepReview?.crossApp?.name ?? null, appLabel, role: 'destination', reviewed: { revision: stepReview?.crossApp?.revision ?? null, fieldsHash: stepReview?.crossApp?.fieldsHash ?? null } },
+          appActionChanges: clone(ch),
+        };
+      },
+      async apply({ api, appId, revision, snapshot }, p) {
+        const cur = await api.getPreviewActions(appId);
+        const list = actionsOf(cur);
+        if (list[p.payload.name]) throw Object.assign(new Error(`アプリアクション「${p.payload.name}」は既にあります`), { code: 'TARGET_EXISTS' });
+        const since = changedSincePrepare('アプリアクション', stripActionIds(list), snapshot?.actions ? stripActionIds(actionsOf(snapshot.actions)) : undefined);
+        if (since) throw since;
+        // 全体置換: 既存の全アクション（bit 単位でそのまま）＋ 新規 1 件（index は末尾）
+        const maxIndex = Object.values(list).reduce((m, a) => Math.max(m, Number(a.index ?? -1)), -1);
+        const entry = { ...p.payload.entry, index: String(maxIndex + 1) };
+        const all = { ...Object.fromEntries(Object.entries(list).map(([k, a]) => [k, actionForPut(a)])), [p.payload.name]: actionForPut(entry) };
+        const res = await api.putPreviewActions(appId, { actions: all }, String(cur?.revision ?? revision ?? ''));
+        return { revision: String(res?.revision ?? ''), requests: [{ method: 'PUT', path: '/k/v1/preview/app/actions.json', total: Object.keys(all).length, added: [p.payload.name] }], before: { count: Object.keys(list).length }, after: { count: Object.keys(all).length, added: 1 }, existingList: clone(list), expectedEntry: clone(entry), newId: res?.actions?.[p.payload.name]?.id ?? null };
+      },
+      async verify({ api, appId }, p, applied) {
+        const cur = await api.getPreviewActions(appId);
+        const list = actionsOf(cur);
+        const checks = [];
+        const check = (name, ok, expected, actual) => checks.push({ name, ok, expected, actual });
+        const b = applied.existingList || {};
+        const changedOthers = Object.keys(b).filter(k => !same(stripActionIds({ x: b[k] }).x, stripActionIds({ x: list[k] }).x));
+        check('existingCountBefore', true, Object.keys(b).length, Object.keys(b).length);
+        check('countPreserved', Object.keys(list).length === Object.keys(b).length + 1, Object.keys(b).length + 1, Object.keys(list).length);
+        check('existingActionsPreserved', changedOthers.length === 0, [], changedOthers);
+        check('unexpectedRemoved', Object.keys(b).every(k => list[k]), 0, Object.keys(b).filter(k => !list[k]).length);
+        check('unexpectedChanged', changedOthers.length === 0, 0, changedOthers.length);
+        const found = list[p.payload.name];
+        check('targetExists', !!found, true, !!found);
+        if (found) {
+          check('destAppPreserved', String(found.destApp?.app ?? '') === p.expect.destApp.app, p.expect.destApp.app, String(found.destApp?.app ?? ''));
+          check('requestedMappingsExist', same((found.mappings || []).map(mapKeyA), p.expect.mappings.map(mapKeyA)), p.expect.mappings.map(mapKeyA), (found.mappings || []).map(mapKeyA));
+          check('entities', sameKeys((found.entities || []).map(entityKeyA), p.expect.entities), p.expect.entities, (found.entities || []).map(entityKeyA));
+          check('filterCond', normCondE(found.filterCond) === normCondE(p.expect.filterCond), p.expect.filterCond, found.filterCond || '');
+          check('index', String(found.index ?? '') === String(applied.expectedEntry?.index ?? ''), applied.expectedEntry?.index ?? null, found.index ?? null);
+        }
+        return { ok: checks.every(c => c.ok), checks, revision: String(cur?.revision ?? '') };
+      },
+      rollback({ appId, snapshot }, p) {
+        return { actionType: 'RESTORE_APP_ACTION_SETTINGS', collection: 'actions', target: p.expect.name, api: { method: 'PUT', path: '/k/v1/preview/app/actions.json', payload: { app: appId, actions: '<snapshot.actions.actions>' } }, note: `snapshot のアプリアクション全体（${Object.keys(actionsOf(snapshot?.actions)).length} 件）を PUT で戻す（追加した「${p.expect.name}」が消える）。コピー先アプリには触れない` };
+      },
+    };
+    /**
+     * UPDATE_APP_ACTION（Phase 14）: Review が固定した対象（identity: id / 並び順 / コピー先 / 転記 / 利用者 / 利用条件 ＋ コピー先の指紋）の 1 件だけを変更する。
+     * payload は「現在の全アクションの対象 1 件を差し替えた完全な形」。既存の転記は消さない（追加だけ）。対象が Review 時点と 1 属性でも違えば TARGET_CHANGED
+     */
+    HANDLERS.UPDATE_APP_ACTION = {
+      prepare(step, { stepReview, fieldsNow = null, relatedNow = null, actionsNow = null }) {
+        const before = stepReview?.diff?.before, after = stepReview?.diff?.after, identity = stepReview?.diff?.target?.identity;
+        if (!before || !after || !identity || identity.kind !== 'APP_ACTION') return { unsupported: 'NO_APP_ACTION_SPEC', message: 'Review に変更前後のアプリアクション定義（対象の同一性）がありません。計画を作り直してください' };
+        if (after.name !== before.name) return { unsupported: 'APP_ACTION_RENAME_NOT_SUPPORTED', message: 'アクション名の変更は反映しません（計画のみ）' };
+        if (String(after.destApp?.app ?? '') !== String(before.destApp?.app ?? '')) return { unsupported: 'APP_ACTION_DEST_CHANGE_NOT_SUPPORTED', message: 'コピー先アプリの変更は反映しません（計画のみ）' };
+        const bm = before.mappings || [], am = after.mappings || [];
+        const removed = bm.filter(m => !am.some(x => mapKeyA(x) === mapKeyA(m)));
+        if (removed.length) return { unsupported: 'APP_ACTION_MAPPING_REMOVAL_NOT_SUPPORTED', message: `転記の削除（${removed.map(m => `${m.srcType === 'RECORD_URL' ? 'レコードURL' : m.srcField}→${m.destField}`).join(', ')}）は反映しません（計画のみ）` };
+        const addedMappings = am.filter(m => !bm.some(x => mapKeyA(x) === mapKeyA(m)));
+        const changes = {};
+        if (addedMappings.length) changes.mappings = addedMappings.map(m => ({ srcType: m.srcType, srcField: m.srcType === 'RECORD_URL' ? null : m.srcField, destField: m.destField }));
+        if (!sameKeys((before.entities || []).map(entityKeyA), (after.entities || []).map(entityKeyA))) changes.entities = { from: (before.entities || []).map(entityKeyA), to: (after.entities || []).map(entityKeyA) };
+        if (normCondE(before.filterCond) !== normCondE(after.filterCond)) changes.filterCond = { from: before.filterCond || '', to: String(after.filterCond || '').trim() };
+        if (!Object.keys(changes).length) return { unsupported: 'NO_CHANGE', message: '変更内容がありません' };
+        const appLabel = `App ${before.destApp.app}${identity.dest?.name ? `「${identity.dest.name}」` : ''}`;
+        if (fieldsNow) for (const m of addedMappings) if (m.srcType === 'FIELD' && !fieldsNow[m.srcField]) return { unsupported: 'SOURCE_FIELD_MISSING', message: `転記元「${m.srcField}」が動作テスト環境にありません（先行する ADD_FIELD が反映されている必要があります）` };
+        if (actionsNow) { const cur = actionsOf(actionsNow)[before.name]; if (!cur) return { unsupported: 'TARGET_MISSING', message: `アプリアクション「${before.name}」が動作テスト環境にありません` }; if (cur.destApp == null || cur.mappings == null) return { unsupported: 'DEST_APP_SETTINGS_UNAVAILABLE', message: `アプリアクション「${before.name}」のコピー先アプリの設定を kintone が返しません。コピー先アプリへのアクセス権を確認してください` }; }
+        if (relatedNow) { const bad = appActionDestCheck(addedMappings, relatedNow[String(before.destApp.app)], appLabel); if (bad) return bad; }
+        if (changes.entities) { const unresolved = (after.entities || []).filter(e => !['USER', 'GROUP', 'ORGANIZATION'].includes(e.type)); if (unresolved.length) return { unsupported: 'ENTITY_UNRESOLVED', message: `利用者 ${unresolved.map(entityKeyA).join(', ')} の種別（ユーザー / グループ / 組織）が決まっていません` }; }
+        if (changes.filterCond && changes.filterCond.to && fieldsNow) { const qc = KTQueryCheck.check(changes.filterCond.to, { fields: fieldsNow, usage: 'appAction' }); if (!qc.ok) return { unsupported: 'INVALID_CONDITION', message: `利用条件が kintone で受理されません: ${qc.errors.map(e => e.message).join('／')}` }; }
+        const payloadChanges = {};
+        if (changes.mappings) payloadChanges.mappings = am.map(m => ({ srcType: m.srcType, srcField: m.srcType === 'RECORD_URL' ? null : m.srcField, destField: m.destField }));
+        if (changes.entities) payloadChanges.entities = (after.entities || []).map(e => ({ type: e.type, code: e.code }));
+        if (changes.filterCond) payloadChanges.filterCond = changes.filterCond.to;
+        return {
+          payload: { name: before.name, identity: clone(identity), changes: payloadChanges },
+          expect: { name: before.name, destApp: { app: String(before.destApp.app), code: before.destApp.code || '' }, mappings: am.map(m => ({ srcType: m.srcType, srcField: m.srcType === 'RECORD_URL' ? null : m.srcField, destField: m.destField })), addedMappings: changes.mappings || [], entities: (after.entities || []).map(entityKeyA), filterCond: String(after.filterCond || ''), index: identity.index ?? null },
+          summary: `✎ アプリアクション「${before.name}」（コピー先 ${appLabel}）: ${appActionSummaryParts(changes).join('・')}`,
+          sensitive: sensitiveFrom(stepReview, ['APP_ACTION_ENTITIES_REMOVED', 'APP_ACTION_CONDITION_CHANGE', 'DEST_REQUIRED_FIELD_UNMAPPED']),
+          before: Object.fromEntries(Object.entries(changes).map(([k, c]) => [k, k === 'mappings' ? bm.map(mapKeyA) : c.from])), after: Object.fromEntries(Object.entries(changes).map(([k, c]) => [k, k === 'mappings' ? am.map(mapKeyA) : c.to])),
+          targetLabel: before.name, changeKind: 'UPDATE', condition: changes.filterCond ? changes.filterCond.to : null,
+          crossApp: { appId: String(before.destApp.app), name: identity.dest?.name ?? null, appLabel, role: 'destination', reviewed: { revision: identity.dest?.revision ?? null, fieldsHash: identity.dest?.fieldsHash ?? null } },
+          appActionChanges: stepReview?.diff?.appActionChanges ? clone(stepReview.diff.appActionChanges) : null,
+        };
+      },
+      async apply({ api, appId, revision, snapshot }, p) {
+        const cur = await api.getPreviewActions(appId);
+        const list = actionsOf(cur);
+        const entry = list[p.payload.name];
+        if (!entry) throw Object.assign(new Error(`アプリアクション「${p.payload.name}」が動作テスト環境にありません`), { code: 'TARGET_MISSING' });
+        const mismatch = appActionIdentityMismatch(entry, p.payload.identity);
+        if (mismatch.length) throw targetChanged(`アプリアクション「${p.targetLabel}」`, mismatch);
+        const since = changedSincePrepare('アプリアクション', stripActionIds(list), snapshot?.actions ? stripActionIds(actionsOf(snapshot.actions)) : undefined);
+        if (since) throw since;
+        // 対象 1 件だけを差し替える（変更しない属性・他のアクションはそのまま）
+        const next = { ...clone(entry) };
+        const ch = p.payload.changes;
+        if (ch.mappings) next.mappings = ch.mappings.map(m => (m.srcType === 'RECORD_URL' ? { srcType: 'RECORD_URL', destField: m.destField } : { srcType: 'FIELD', srcField: m.srcField, destField: m.destField }));   // GET と同じ形（RECORD_URL に srcField は無い）
+        if (ch.entities) next.entities = ch.entities.map(e => ({ type: e.type, code: e.code }));
+        if (ch.filterCond != null) next.filterCond = ch.filterCond;
+        const all = Object.fromEntries(Object.entries(list).map(([k, a]) => [k, actionForPut(k === p.payload.name ? next : a)]));
+        const res = await api.putPreviewActions(appId, { actions: all }, String(cur?.revision ?? revision ?? ''));
+        return { revision: String(res?.revision ?? ''), requests: [{ method: 'PUT', path: '/k/v1/preview/app/actions.json', total: Object.keys(all).length, target: p.payload.name, changedKeys: Object.keys(ch) }], before: p.before, after: p.after, existingList: clone(list), expectedEntry: clone(next) };
+      },
+      async verify({ api, appId }, p, applied) {
+        const cur = await api.getPreviewActions(appId);
+        const list = actionsOf(cur);
+        const checks = [];
+        const check = (name, ok, expected, actual) => checks.push({ name, ok, expected, actual });
+        const b = applied.existingList || {};
+        const others = Object.keys(b).filter(k => k !== p.payload.name);
+        const changedOthers = others.filter(k => !same(stripActionIds({ x: b[k] }).x, stripActionIds({ x: list[k] }).x));
+        check('existingCountBefore', true, Object.keys(b).length, Object.keys(b).length);
+        check('countPreserved', Object.keys(list).length === Object.keys(b).length, Object.keys(b).length, Object.keys(list).length);
+        check('otherActionsPreserved', changedOthers.length === 0, [], changedOthers);
+        check('unexpectedRemoved', Object.keys(b).every(k => list[k]), 0, Object.keys(b).filter(k => !list[k]).length);
+        check('unexpectedChanged', changedOthers.length === 0, 0, changedOthers.length);
+        const found = list[p.payload.name];
+        check('targetExists', !!found, true, !!found);
+        if (found) {
+          const ch = p.payload.changes;
+          check('destAppPreserved', String(found.destApp?.app ?? '') === p.expect.destApp.app, p.expect.destApp.app, String(found.destApp?.app ?? ''));
+          check('indexPreserved', p.expect.index == null || String(found.index ?? '') === String(p.expect.index), p.expect.index, found.index ?? null);
+          const curMaps = (found.mappings || []).map(mapKeyA);
+          check('mappingCount', curMaps.length === p.expect.mappings.length, p.expect.mappings.length, curMaps.length);
+          check('existingMappingsPreserved', (p.payload.identity.mappings || []).every(m => curMaps.includes(mapKeyA(m))), (p.payload.identity.mappings || []).map(mapKeyA), curMaps);
+          for (const m of p.expect.addedMappings) check(`added:${m.destField}`, curMaps.includes(mapKeyA(m)), mapKeyA(m), curMaps.includes(mapKeyA(m)) ? mapKeyA(m) : null);
+          if (ch.mappings) check('mappings', same(curMaps, p.expect.mappings.map(mapKeyA)), p.expect.mappings.map(mapKeyA), curMaps);
+          check('entities', sameKeys((found.entities || []).map(entityKeyA), p.expect.entities), p.expect.entities, (found.entities || []).map(entityKeyA));
+          check('filterCond', normCondE(found.filterCond) === normCondE(p.expect.filterCond), p.expect.filterCond, found.filterCond || '');
+          check('unchangedAttributesPreserved', same(stripActionIds({ x: found }).x, stripActionIds({ x: applied.expectedEntry }).x), stripActionIds({ x: applied.expectedEntry }).x, stripActionIds({ x: found }).x);
+        }
+        return { ok: checks.every(c => c.ok), checks, revision: String(cur?.revision ?? '') };
+      },
+      rollback({ appId, snapshot }, p) {
+        return { actionType: 'RESTORE_APP_ACTION_SETTINGS', collection: 'actions', target: p.expect.name, api: { method: 'PUT', path: '/k/v1/preview/app/actions.json', payload: { app: appId, actions: '<snapshot.actions.actions>' } }, note: `snapshot のアプリアクション全体（${Object.keys(actionsOf(snapshot?.actions)).length} 件）を PUT で戻す（「${p.expect.name}」の転記 / 利用者 / 利用条件が実行前に戻る）。コピー先アプリには触れない` };
+      },
+    };
+
     HANDLERS.UPDATE_VIEW = {
       prepare(step, { stepReview, fieldsNow = null }) {
         const before = stepReview?.diff?.before, after = stepReview?.diff?.after, identity = stepReview?.diff?.target?.identity;
@@ -7885,7 +8092,7 @@
     const stripLayoutRow = (row) => row ? { type: row.type, code: row.code ?? null, fields: (row.fields || []).map(f => ({ type: f.type, code: f.code ?? null, elementId: f.elementId ?? null })), layout: Array.isArray(row.layout) ? row.layout.map(stripLayoutRow) : null } : null;
 
     // ================= preview の設定 → Review の Before と同じ形（stale 判定・再検証・再解析に使う）=================
-    function previewDataFrom({ fields, layout, views, generalNotify = undefined, perRecordNotify = undefined, reminderNotify = undefined, status = undefined }, base = null) {
+    function previewDataFrom({ fields, layout, views, generalNotify = undefined, perRecordNotify = undefined, reminderNotify = undefined, status = undefined, actions = undefined }, base = null) {
       return {
         ...(base && typeof base === 'object' ? base : {}),
         appId: base?.appId ?? null,
@@ -7896,6 +8103,7 @@
         ...(perRecordNotify !== undefined ? { perRecordNotify } : {}),
         ...(reminderNotify !== undefined ? { reminderNotify } : {}),
         ...(status !== undefined ? { status } : {}),
+        ...(actions !== undefined ? { actions } : {}),
       };
     }
     const fieldKey = (f) => ({ type: f.type, label: f.label, required: !!f.required, ...(f.options ? { options: f.options } : {}), ...(f.lookup ? { lookup: f.lookup } : {}) });
@@ -7910,6 +8118,8 @@
     const remKey = (n) => ({ title: n.title || '', timing: n.timing, targets: (n.targets || []).map(t => `${t.type}:${t.code ?? ''}`).sort(), filterCond: normCondE(n.filterCond) });
     const procStateKey = (s) => ({ name: s.name, index: s.index, assigneeType: s.assigneeType ?? null, assignees: (s.assignees || []).map(e => `${e.type}:${e.code ?? ''}`).sort() });
     const procActionKey = (a) => ({ name: a.name, from: a.from, to: a.to, filterCond: normCondE(a.filterCond), type: a.type || 'PRIMARY', executableUsers: (a.executableUsers || []).map(e => `${e.type}:${e.code ?? ''}`).sort() });
+    /** アプリアクションの比較キー（Phase 14。id は環境で揺れるので除く。全体置換 API なので 1 件の違いで stale） */
+    const appActionKey = (a) => ({ name: a.name, index: a.index != null ? String(a.index) : null, destApp: String(a.destApp?.app ?? ''), destUnavailable: !!a.destUnavailable, mappings: (a.mappings || []).map(m => `${m.srcType}:${m.srcType === 'RECORD_URL' ? '' : (m.srcField ?? '')}>${m.destField}`), entities: (a.entities || []).map(e => `${e.type}:${e.code ?? ''}`).sort(), filterCond: normCondE(a.filterCond) });
     function diffBefore(before, current, { kinds = ['fields', 'views', 'notifications', 'reminders', 'process'], baseline = 'Review 時点' } = {}) {
       const diffs = [];
       if (kinds.includes('process') && (before.process || current.process)) {
@@ -7944,6 +8154,11 @@
         }
         for (const [code, c] of Object.entries(current.fields || {})) if (!before.fields?.[code] && !isSystemField(c)) diffs.push({ kind: 'FIELD', id: code, change: 'ADDED', message: `動作テスト環境にフィールド「${c.label}」（${code}）が追加されています（未反映の変更）` });
       }
+      if (kinds.includes('appActions')) {
+        const ba = new Map((before.appActions || []).map(a => [a.name, a])), ca = new Map((current.appActions || []).map(a => [a.name, a]));
+        for (const [name, a] of ba) { const c = ca.get(name); if (!c) diffs.push({ kind: 'APP_ACTION', id: name, change: 'REMOVED', message: `アプリアクション「${name}」が動作テスト環境にありません` }); else if (!same(appActionKey(a), appActionKey(c))) diffs.push({ kind: 'APP_ACTION', id: name, change: 'CHANGED', message: `アプリアクション「${name}」の設定（並び順 / コピー先 / 転記 / 利用者 / 利用条件）が${baseline}と違います`, before: appActionKey(a), after: appActionKey(c) }); }
+        for (const [name] of ca) if (!ba.has(name)) diffs.push({ kind: 'APP_ACTION', id: name, change: 'ADDED', message: `動作テスト環境にアプリアクション「${name}」が追加されています（未反映の変更）` });
+      }
       if (kinds.includes('views')) {
         const bv = new Map((before.views || []).map(v => [v.name, v])), cv = new Map((current.views || []).map(v => [v.name, v]));
         for (const [name, v] of bv) { const c = cv.get(name); if (!c) diffs.push({ kind: 'VIEW', id: name, change: 'REMOVED', message: `一覧「${name}」が動作テスト環境にありません` }); else if (!same(viewKey(v), viewKey(c))) diffs.push({ kind: 'VIEW', id: name, change: 'CHANGED', message: `一覧「${name}」の設定が${baseline}と違います`, before: viewKey(v), after: viewKey(c) }); }
@@ -7955,7 +8170,8 @@
     // ================= step の分類（API を呼ばない。UI の件数表示と prepare で共用）=================
     /** 承認 / Review の判定 / allowlist（capability ＋ handler の prepare）/ 依存 の順に、各 step を PENDING / SKIPPED / UNSUPPORTED / BLOCKED に分ける */
     const LOOKUP_BLOCKING = ['RELATED_APP_SETTINGS_UNAVAILABLE', 'RELATED_FIELD_NOT_FOUND', 'RELATED_KEY_MISSING', 'PICKER_FIELD_NOT_FOUND', 'DESTINATION_MISSING', 'SORT_FIELD_UNKNOWN', 'INVALID_SORT'];
-    function classifySteps({ plan, review, approvedSteps = [], fieldsNow = null, processNow = null, relatedNow = null } = {}) {
+    const APP_ACTION_BLOCKING = ['DEST_APP_SETTINGS_UNAVAILABLE', 'DEST_FIELD_NOT_FOUND', 'SOURCE_FIELD_MISSING', 'TARGET_EXISTS', 'TARGET_MISSING', 'ENTITY_UNRESOLVED'];
+    function classifySteps({ plan, review, approvedSteps = [], fieldsNow = null, processNow = null, relatedNow = null, actionsNow = null } = {}) {
       const steps = Array.isArray(plan?.steps) ? plan.steps : [];
       const approved = [...new Set(Array.isArray(approvedSteps) ? approvedSteps : [])];
       const byId = new Map(steps.map(s => [s.id, s]));
@@ -7978,8 +8194,8 @@
         else if (!cap || !cap.previewExecute || !HANDLERS[step.actionType]) set(STEP.UNSUPPORTED, 'PREVIEW_NOT_SUPPORTED', '現在の Executor では自動反映できません');
         else if (step.actionType === 'ADD_PROCESS_STATUS' && (review?.conflicts || []).some(c => c.code === 'STATUS_UNREACHABLE' && (c.stepIds || []).includes(id))) set(STEP.BLOCKED, 'STATUS_UNREACHABLE', 'このステータスへ遷移するアクションが計画に無く孤立するため反映しません（遷移するアクションの step を足してください）');
         else {
-          const p = HANDLERS[step.actionType].prepare(step, { stepReview: r, plan, fieldsNow: ahead, processNow, relatedNow });
-          if (p.unsupported) set(p.unsupported === 'INVALID_CONDITION' || (step.actionType === 'UPDATE_LOOKUP' && LOOKUP_BLOCKING.includes(p.unsupported)) ? STEP.BLOCKED : STEP.UNSUPPORTED, p.unsupported, p.message);
+          const p = HANDLERS[step.actionType].prepare(step, { stepReview: r, plan, fieldsNow: ahead, processNow, relatedNow, actionsNow });
+          if (p.unsupported) set(p.unsupported === 'INVALID_CONDITION' || (step.actionType === 'UPDATE_LOOKUP' && LOOKUP_BLOCKING.includes(p.unsupported)) || ((step.actionType === 'ADD_APP_ACTION' || step.actionType === 'UPDATE_APP_ACTION') && APP_ACTION_BLOCKING.includes(p.unsupported)) ? STEP.BLOCKED : STEP.UNSUPPORTED, p.unsupported, p.message);
           else { st.prepared = p; if (ahead && step.actionType === 'ADD_FIELD' && p.expect?.code) ahead[p.expect.code] = { type: p.expect.type, code: p.expect.code, label: p.expect.label, required: !!p.expect.required, ...(p.expect.options ? { options: Object.fromEntries(p.expect.options.map((o, i) => [o, { label: o, index: String(i) }])) } : {}) }; }
         }
         states.set(id, st);
@@ -8022,27 +8238,36 @@
       if (!pending.length) { block('NOTHING_TO_EXECUTE', '承認済みで実行できる step がありません'); summarize(); return prepared; }
 
       // ---- 2. 現在の設定（動作テスト環境）と revision を取得（アプリ管理権限が無ければここで止まる）----
-      let fields, layout, views, prodViews, generalNotify, perRecordNotify, reminderNotify, status;
+      let fields, layout, views, prodViews, generalNotify, perRecordNotify, reminderNotify, status, actions;
       try {
-        [fields, layout, views, prodViews, generalNotify, perRecordNotify, reminderNotify, status] = await Promise.all([api.getPreviewFields(prepared.appId), api.getPreviewLayout(prepared.appId), api.getPreviewViews(prepared.appId), api.getProductionViews(prepared.appId), api.getPreviewGeneralNotifications(prepared.appId), api.getPreviewPerRecordNotifications(prepared.appId), api.getPreviewReminders(prepared.appId), typeof api.getPreviewStatus === 'function' ? api.getPreviewStatus(prepared.appId) : Promise.resolve(null)]);
+        [fields, layout, views, prodViews, generalNotify, perRecordNotify, reminderNotify, status, actions] = await Promise.all([api.getPreviewFields(prepared.appId), api.getPreviewLayout(prepared.appId), api.getPreviewViews(prepared.appId), api.getProductionViews(prepared.appId), api.getPreviewGeneralNotifications(prepared.appId), api.getPreviewPerRecordNotifications(prepared.appId), api.getPreviewReminders(prepared.appId), typeof api.getPreviewStatus === 'function' ? api.getPreviewStatus(prepared.appId) : Promise.resolve(null), typeof api.getPreviewActions === 'function' ? api.getPreviewActions(prepared.appId) : Promise.resolve(null)]);
       } catch (e) {
         const s = strErr(e);
         if (isPermissionError(e)) block('PERMISSION_DENIED', 'このユーザーにはアプリ設定を変更する権限がありません（動作テスト環境の設定を取得できませんでした）', s);
         else block('FETCH_FAILED', `現在の設定を取得できませんでした: ${s.message}`, s);
         summarize(); return prepared;
       }
-      prepared.snapshot = { takenAt: nowIso(now), revision: String(fields?.revision ?? ''), fields: clone(fields), layout: clone(layout), views: clone(views), generalNotify: clone(generalNotify), perRecordNotify: clone(perRecordNotify), reminderNotify: clone(reminderNotify), ...(status ? { status: clone(status) } : {}) };
-      // Phase 13: ルックアップの step があれば、参照元アプリの定義を read-only で再取得する（運用環境の GET。参照元アプリには書き込まない）。読めないアプリは推測しない
+      prepared.snapshot = { takenAt: nowIso(now), revision: String(fields?.revision ?? ''), fields: clone(fields), layout: clone(layout), views: clone(views), generalNotify: clone(generalNotify), perRecordNotify: clone(perRecordNotify), reminderNotify: clone(reminderNotify), ...(status ? { status: clone(status) } : {}), ...(actions ? { actions: clone(actions) } : {}) };
+      // Phase 13 / 14: ルックアップ・アプリアクションの step があれば、相手アプリ（参照元 / コピー先）の定義を read-only で再取得する（運用環境の GET。相手アプリには書き込まない）。読めないアプリは推測しない
       let relatedApps = null, relatedNow = null;
-      if (pending.some(s => s.actionType === 'UPDATE_LOOKUP')) {
-        relatedApps = await fetchRelatedAppsForLookups(api, fields, pending.filter(s => s.actionType === 'UPDATE_LOOKUP').map(s => rv.get(s.stepId)));
+      const crossSteps = pending.filter(s => ['UPDATE_LOOKUP', 'ADD_APP_ACTION', 'UPDATE_APP_ACTION'].includes(s.actionType));
+      if (crossSteps.length) {
+        relatedApps = await fetchRelatedAppsForLookups(api, fields, crossSteps.map(s => rv.get(s.stepId)), actions);
         prepared.snapshot.relatedApps = clone(relatedApps);
         relatedNow = Object.fromEntries(Object.entries(relatedApps).map(([id, e]) => [id, KTPlanReview.relatedAppModel(e, id)]));
       }
-      // 現在のフィールドで handler の prepare をやり直す（通知先フィールドの型・条件式・基準フィールドの型・プロセス管理の有効 / 無効・参照元アプリの定義を今の設定で確かめる）
-      const previewNow = previewDataFrom({ fields, layout, views, generalNotify, perRecordNotify, reminderNotify, ...(status ? { status } : {}) }, { appId: prepared.appId, ...(relatedApps ? { relatedApps } : {}) });
+      // 現在のフィールドで handler の prepare をやり直す（通知先フィールドの型・条件式・基準フィールドの型・プロセス管理の有効 / 無効・相手アプリの定義を今の設定で確かめる）
+      const previewNow = previewDataFrom({ fields, layout, views, generalNotify, perRecordNotify, reminderNotify, ...(status ? { status } : {}), ...(actions ? { actions } : {}) }, { appId: prepared.appId, ...(relatedApps ? { relatedApps } : {}) });
+      // 実行直前の再 Review（同じ決定的エンジンを最新 preview ＋ 再取得した相手アプリで実行）。Review 時点でコピー先が未取得だった ADD_APP_ACTION は、この結果で handler を準備する（§: 推測しない）
+      let reFresh = null, reFreshError = null;
+      try { reFresh = KTPlanReview.review({ plan, data: previewNow }); } catch (e) { reFreshError = strErr(e).message; }
+      const reFreshMap = new Map((reFresh?.steps || []).map(r => [r.stepId, r]));
+      const freshSteps = new Set(review.steps.filter(r => (r.issues || []).some(i => i.code === 'DEST_APP_NOT_LOADED') && reFreshMap.has(r.stepId)).map(r => r.stepId));
+      const reviewNow = freshSteps.size ? { ...review, steps: review.steps.map(r => (freshSteps.has(r.stepId) ? reFreshMap.get(r.stepId) : r)) } : review;
+      prepared.freshReviewSteps = [...freshSteps];
+      if (freshSteps.size && reFresh?.simulation?.after) prepared.freshSimulationAfter = clone(reFresh.simulation.after);
       {
-        const re = classifySteps({ plan, review, approvedSteps: approved, fieldsNow: previewNow.fields, processNow: status || null, relatedNow });
+        const re = classifySteps({ plan, review: reviewNow, approvedSteps: approved, fieldsNow: previewNow.fields, processNow: status || null, relatedNow, actionsNow: actions || null });
         const map = new Map(re.map(s => [s.stepId, s]));
         prepared.steps = prepared.steps.map(s => map.get(s.stepId) || s);
         prepared.temporaryIdMap = {};
@@ -8063,34 +8288,37 @@
 
       // ---- 3. stale 判定（Review 時点との差異があれば止める。古い計画を当て直さない）----
       const currentModel = KTPlanReview.buildBeforeModel(previewNow);
-      const diffs = diffBefore(before, currentModel, { kinds: ['fields', 'views', 'notifications', 'reminders', ...(status ? ['process'] : [])] });
+      const diffs = diffBefore(before, currentModel, { kinds: ['fields', 'views', 'notifications', 'reminders', ...(status ? ['process'] : []), ...(actions ? ['appActions'] : [])] });
       if (prepared.revision.reviewed && prepared.revision.production && prepared.revision.reviewed !== prepared.revision.production) diffs.unshift({ kind: 'APP', id: 'revision', change: 'CHANGED', message: `運用環境の設定が Review 後に変更されています（revision ${prepared.revision.reviewed} → ${prepared.revision.production}）` });
       // ---- 3a. 参照元アプリの指紋（Phase 13）: フィールド定義（fieldsHash）が Review 時点と違えば STALE（LOOKUP_RELATED_APP_CHANGED）。revision だけの違い（一覧・通知など）は警告に留める ----
       prepared.crossApp = [];
-      for (const st of prepared.steps.filter(x => x.actionType === 'UPDATE_LOOKUP' && x.status !== STEP.SKIPPED)) {
-        const idn = rv.get(st.stepId)?.diff?.target?.identity || null;
-        const ca = st.prepared?.crossApp || (idn ? { appId: String(idn.relatedApp?.app ?? ''), name: idn.related?.name ?? null, reviewed: { revision: idn.related?.revision ?? null, fieldsHash: idn.related?.fieldsHash ?? null } } : null);
+      for (const st of prepared.steps.filter(x => ['UPDATE_LOOKUP', 'ADD_APP_ACTION', 'UPDATE_APP_ACTION'].includes(x.actionType) && x.status !== STEP.SKIPPED)) {
+        const r0 = rv.get(st.stepId); const idn = r0?.diff?.target?.identity || null;
+        const isAction = st.actionType !== 'UPDATE_LOOKUP';
+        const ca = st.prepared?.crossApp || (isAction ? (r0?.crossApp?.appId ? { appId: String(r0.crossApp.appId), name: r0.crossApp.name ?? null, role: 'destination', reviewed: { revision: r0.crossApp.revision ?? null, fieldsHash: r0.crossApp.fieldsHash ?? null } } : null) : (idn ? { appId: String(idn.relatedApp?.app ?? ''), name: idn.related?.name ?? null, reviewed: { revision: idn.related?.revision ?? null, fieldsHash: idn.related?.fieldsHash ?? null } } : null));
         if (!ca || !ca.appId) continue;
         const rel = relatedNow?.[ca.appId] || null;
-        const item = { stepId: st.stepId, appId: ca.appId, name: rel?.name || ca.name || null, reviewed: ca.reviewed, current: rel ? { revision: rel.revision, fieldsHash: rel.fieldsHash, available: rel.available, ...(rel.error ? { error: rel.error } : {}) } : null };
+        const roleJa = isAction ? 'コピー先' : '参照元';
+        const item = { stepId: st.stepId, appId: ca.appId, role: isAction ? 'destination' : 'source', name: rel?.name || ca.name || null, reviewed: ca.reviewed, current: rel ? { revision: rel.revision, fieldsHash: rel.fieldsHash, available: rel.available, ...(rel.error ? { error: rel.error } : {}) } : null, ...(freshSteps.has(st.stepId) ? { fetchedAtPrepare: true } : {}) };
         prepared.crossApp.push(item);
-        if (st.status !== STEP.PENDING || !rel || !rel.available) continue;
-        if (ca.reviewed?.fieldsHash && rel.fieldsHash !== ca.reviewed.fieldsHash) diffs.push({ kind: 'RELATED_APP', id: ca.appId, change: 'CHANGED', code: 'LOOKUP_RELATED_APP_CHANGED', stepId: st.stepId, message: `参照元 App ${ca.appId}${item.name ? `「${item.name}」` : ''} のフィールド設定が Review 時点から変わっています（revision ${ca.reviewed.revision ?? '?'} → ${rel.revision ?? '?'}）。再レビューしてください`, before: ca.reviewed, after: { revision: rel.revision, fieldsHash: rel.fieldsHash } });
-        else if (ca.reviewed?.revision != null && rel.revision != null && String(rel.revision) !== String(ca.reviewed.revision)) st.warnings = [...(st.warnings || []), { code: 'RELATED_APP_REVISION_CHANGED', message: `参照元 App ${ca.appId}${item.name ? `「${item.name}」` : ''} の設定は Review 後に変更されています（revision ${ca.reviewed.revision} → ${rel.revision}）が、フィールド定義（コード / 種類 / 重複禁止 / テーブル）は同じです` }];
+        if (!rel || !rel.available) continue;   // BLOCKED の step でも相手アプリの指紋の違いは stale として記録する（人が原因を見られるように）
+        if (ca.reviewed?.fieldsHash && rel.fieldsHash !== ca.reviewed.fieldsHash) diffs.push({ kind: 'RELATED_APP', id: ca.appId, change: 'CHANGED', code: isAction ? 'DEST_APP_CHANGED' : 'LOOKUP_RELATED_APP_CHANGED', stepId: st.stepId, message: `${roleJa} App ${ca.appId}${item.name ? `「${item.name}」` : ''} のフィールド設定が Review 時点から変わっています（revision ${ca.reviewed.revision ?? '?'} → ${rel.revision ?? '?'}）。再レビューしてください`, before: ca.reviewed, after: { revision: rel.revision, fieldsHash: rel.fieldsHash } });
+        else if (ca.reviewed?.revision != null && rel.revision != null && String(rel.revision) !== String(ca.reviewed.revision)) st.warnings = [...(st.warnings || []), { code: 'RELATED_APP_REVISION_CHANGED', message: `${roleJa} App ${ca.appId}${item.name ? `「${item.name}」` : ''} の設定は Review 後に変更されています（revision ${ca.reviewed.revision} → ${rel.revision}）が、フィールド定義（コード / 種類 / 重複禁止 / テーブル）は同じです` }];
       }
       prepared.stale = { status: diffs.length ? 'STALE' : 'FRESH', diffs };
       if (diffs.length) block('STALE_PLAN', '計画作成後にアプリ設定が変更されています。再レビューしてください。', { count: diffs.length });
 
       // ---- 4. 実行直前の再検証（同じ決定的エンジンを動作テスト環境の設定で再実行し、期待する結果が変わっていないことを確かめる）----
       if (prepared.status === RUN.PREPARED) {
-        let re = null;
-        try { re = KTPlanReview.review({ plan, data: previewNow }); } catch (e) { block('REVALIDATION_ERROR', `再検証に失敗しました: ${strErr(e).message}`); }
+        const re = reFresh;
+        if (!re) block('REVALIDATION_ERROR', `再検証に失敗しました: ${reFreshError || '不明'}`);
         if (re) {
           const reMap = new Map(re.steps.map(r => [r.stepId, r]));
           for (const st of pending) {
             const r0 = rv.get(st.stepId), r1 = reMap.get(st.stepId);
             const bad = !r1 || r1.status === KTPlanReview.STATUS.INVALID || r1.status === KTPlanReview.STATUS.BLOCKED_BY_DEPENDENCY || r1.safety === KTPlanReview.SAFETY.BLOCKED;
-            const changed = !bad && !same(r0?.diff?.after, r1?.diff?.after);
+            // Review 時点でコピー先が未取得だった step は、取得後の結果（reviewNow）を正とするので after の比較はしない
+            const changed = !bad && !freshSteps.has(st.stepId) && !same(r0?.diff?.after, r1?.diff?.after);
             if (bad || changed) { st.status = STEP.BLOCKED; st.reason = 'REVALIDATION_FAILED'; st.message = bad ? `再検証で実行不可（${(r1?.issues || []).map(i => i.code).join(', ') || '不明'}）` : '再検証の結果が Review 時点と異なります'; }
           }
           if (!prepared.steps.some(s => s.status === STEP.PENDING)) block('REVALIDATION_FAILED', '再検証で実行できる step が無くなりました');
@@ -8102,10 +8330,15 @@
       return prepared;
     }
 
-    /** ルックアップの step が参照する参照元アプリ（Review の identity とフィールド定義の双方から）を read-only で取得。prefetch（fetchRelatedApps）と同じ形で返す */
-    async function fetchRelatedAppsForLookups(api, fieldsResp, stepReviews) {
+    /** ルックアップ / アプリアクションの step が参照する相手アプリ（Review の identity・diff・現在の設定から）を read-only で取得。prefetch（fetchRelatedApps）と同じ形で返す */
+    async function fetchRelatedAppsForLookups(api, fieldsResp, stepReviews, actionsResp = null) {
       const ids = new Set();
-      for (const r of stepReviews || []) { const app = r?.diff?.target?.identity?.relatedApp?.app ?? r?.diff?.before?.lookup?.app; if (app != null && String(app) !== '') ids.add(String(app)); const code = r?.diff?.target?.id; const app2 = fieldsResp?.properties?.[code]?.lookup?.relatedApp?.app; if (app2 != null && String(app2) !== '') ids.add(String(app2)); }
+      const addId = (v) => { if (v != null && String(v) !== '' && /^[0-9]+$/.test(String(v))) ids.add(String(v)); };
+      for (const r of stepReviews || []) {
+        if (!r) continue;
+        if (r.actionType === 'ADD_APP_ACTION' || r.actionType === 'UPDATE_APP_ACTION') { addId(r.diff?.target?.identity?.destApp?.app); addId(r.diff?.after?.destApp?.app); addId(r.crossApp?.appId); addId(actionsResp?.actions?.[r.diff?.target?.id]?.destApp?.app); continue; }
+        addId(r.diff?.target?.identity?.relatedApp?.app ?? r.diff?.before?.lookup?.app); addId(fieldsResp?.properties?.[r.diff?.target?.id]?.lookup?.relatedApp?.app);
+      }
       const out = {};
       const errOf = (e) => strErr(e);
       await Promise.all([...ids].map(async (id) => {
@@ -8202,7 +8435,7 @@
           const s = strErr(e);
           l.status = STEP.FAILED; l.error = s; failed = true;
           if (e && typeof e === 'object' && e.applied) { l.partial = clone({ ...e.applied, requests: undefined }); l.requests = e.applied.requests || []; l.revision = e.applied.revision || null; revision = l.revision || revision; }   // 途中まで反映された（rollback の対象）
-          l.reason = isPermissionError(e) ? 'PERMISSION_DENIED' : isRevisionError(e) ? 'REVISION_MISMATCH' : ['TARGET_EXISTS', 'EXACT_DUPLICATE', 'TARGET_CHANGED', 'TARGET_MISSING', 'RELATED_APP_SETTINGS_UNAVAILABLE', 'NOT_A_LOOKUP'].includes(s.code) ? s.code : 'API_ERROR';
+          l.reason = isPermissionError(e) ? 'PERMISSION_DENIED' : isRevisionError(e) ? 'REVISION_MISMATCH' : ['TARGET_EXISTS', 'EXACT_DUPLICATE', 'TARGET_CHANGED', 'TARGET_MISSING', 'RELATED_APP_SETTINGS_UNAVAILABLE', 'NOT_A_LOOKUP', 'DEST_APP_SETTINGS_UNAVAILABLE'].includes(s.code) ? s.code : 'API_ERROR';
           l.message = l.reason === 'PERMISSION_DENIED' ? 'アプリ設定を変更する権限がありません' : l.reason === 'REVISION_MISMATCH' ? '実行中に他の変更が入りました（revision 不一致）。再レビューしてください' : s.message;
         }
         progress(l); await yieldUi();
@@ -8214,11 +8447,11 @@
       log.status = bad ? (verified ? RUN.PARTIAL : RUN.FAILED) : RUN.DONE;
       // ---- 反映後の再取得 → Simulation との比較・再解析 ----
       try {
-        const [fields, layout, views, generalNotify, perRecordNotify, reminderNotify, status] = await Promise.all([api.getPreviewFields(prepared.appId), api.getPreviewLayout(prepared.appId), api.getPreviewViews(prepared.appId), api.getPreviewGeneralNotifications(prepared.appId), api.getPreviewPerRecordNotifications(prepared.appId), api.getPreviewReminders(prepared.appId), typeof api.getPreviewStatus === 'function' ? api.getPreviewStatus(prepared.appId) : Promise.resolve(null)]);
+        const [fields, layout, views, generalNotify, perRecordNotify, reminderNotify, status, actions] = await Promise.all([api.getPreviewFields(prepared.appId), api.getPreviewLayout(prepared.appId), api.getPreviewViews(prepared.appId), api.getPreviewGeneralNotifications(prepared.appId), api.getPreviewPerRecordNotifications(prepared.appId), api.getPreviewReminders(prepared.appId), typeof api.getPreviewStatus === 'function' ? api.getPreviewStatus(prepared.appId) : Promise.resolve(null), typeof api.getPreviewActions === 'function' ? api.getPreviewActions(prepared.appId) : Promise.resolve(null)]);
         log.afterRevision = String(fields?.revision ?? log.afterRevision ?? '');
         // 反映直後の設定（Execution Actual After）。Rollback はこれと「現在」を比べ、違えば ROLLBACK_STALE で止める
-        log.actualAfterRaw = clone({ fields, layout, views, generalNotify, perRecordNotify, reminderNotify, ...(status ? { status } : {}) });
-        const previewData = previewDataFrom({ fields, layout, views, generalNotify, perRecordNotify, reminderNotify, ...(status ? { status } : {}) }, data && typeof data === 'object' ? { ...data, appId: prepared.appId } : { appId: prepared.appId });
+        log.actualAfterRaw = clone({ fields, layout, views, generalNotify, perRecordNotify, reminderNotify, ...(status ? { status } : {}), ...(actions ? { actions } : {}) });
+        const previewData = previewDataFrom({ fields, layout, views, generalNotify, perRecordNotify, reminderNotify, ...(status ? { status } : {}), ...(actions ? { actions } : {}) }, data && typeof data === 'object' ? { ...data, appId: prepared.appId, ...(prepared.snapshot?.relatedApps ? { relatedApps: { ...(data.relatedApps || {}), ...prepared.snapshot.relatedApps } } : {}) } : { appId: prepared.appId, ...(prepared.snapshot?.relatedApps ? { relatedApps: prepared.snapshot.relatedApps } : {}) });
         const actual = KTPlanReview.buildBeforeModel(previewData);
         log.simulation = compareSimulation(review?.simulation?.after || null, actual, log.steps, prepared);
         // プロセス管理の Before / Planned / Actual（§18）: Mermaid と要約
@@ -8228,7 +8461,7 @@
         }
         log.reanalysis = reanalyze(previewData, data, log.steps, prepared);
         const verifiedOf = (a) => log.steps.filter(s => s.actionType === a && s.status === STEP.VERIFIED);
-        log.actualAfter = { fieldCount: Object.keys(actual.fields).length, views: actual.views.length, notifications: actual.notifications.general.length + actual.notifications.perRecord.length, reminders: actual.reminders.length, processStates: actual.process.states.length, processActions: actual.process.actions.length, addedStatuses: verifiedOf('ADD_PROCESS_STATUS').map(s => stepLogLabel(s, prepared)), addedActions: verifiedOf('ADD_PROCESS_ACTION').map(s => stepLogLabel(s, prepared)), updatedProcess: verifiedOf('UPDATE_PROCESS').map(s => stepLogLabel(s, prepared)), addedFields: verifiedOf('ADD_FIELD').map(s => stepLogTarget(s, prepared)), addedViews: verifiedOf('ADD_VIEW').map(s => stepLogTarget(s, prepared)), addedNotifications: verifiedOf('ADD_NOTIFICATION').length, addedReminders: verifiedOf('ADD_REMINDER').length, updatedFields: verifiedOf('UPDATE_FIELD').map(s => stepLogTarget(s, prepared)), updatedNotifications: verifiedOf('UPDATE_NOTIFICATION').map(s => stepLogLabel(s, prepared)), updatedReminders: verifiedOf('UPDATE_REMINDER').map(s => stepLogLabel(s, prepared)), updatedViews: verifiedOf('UPDATE_VIEW').map(s => stepLogLabel(s, prepared)), updatedLookups: verifiedOf('UPDATE_LOOKUP').map(s => stepLogLabel(s, prepared)) };
+        log.actualAfter = { fieldCount: Object.keys(actual.fields).length, views: actual.views.length, notifications: actual.notifications.general.length + actual.notifications.perRecord.length, reminders: actual.reminders.length, processStates: actual.process.states.length, processActions: actual.process.actions.length, addedStatuses: verifiedOf('ADD_PROCESS_STATUS').map(s => stepLogLabel(s, prepared)), addedActions: verifiedOf('ADD_PROCESS_ACTION').map(s => stepLogLabel(s, prepared)), updatedProcess: verifiedOf('UPDATE_PROCESS').map(s => stepLogLabel(s, prepared)), addedFields: verifiedOf('ADD_FIELD').map(s => stepLogTarget(s, prepared)), addedViews: verifiedOf('ADD_VIEW').map(s => stepLogTarget(s, prepared)), addedNotifications: verifiedOf('ADD_NOTIFICATION').length, addedReminders: verifiedOf('ADD_REMINDER').length, updatedFields: verifiedOf('UPDATE_FIELD').map(s => stepLogTarget(s, prepared)), updatedNotifications: verifiedOf('UPDATE_NOTIFICATION').map(s => stepLogLabel(s, prepared)), updatedReminders: verifiedOf('UPDATE_REMINDER').map(s => stepLogLabel(s, prepared)), updatedViews: verifiedOf('UPDATE_VIEW').map(s => stepLogLabel(s, prepared)), updatedLookups: verifiedOf('UPDATE_LOOKUP').map(s => stepLogLabel(s, prepared)), appActions: actual.appActions.length, addedAppActions: verifiedOf('ADD_APP_ACTION').map(s => stepLogLabel(s, prepared)), updatedAppActions: verifiedOf('UPDATE_APP_ACTION').map(s => stepLogLabel(s, prepared)) };
       } catch (e) { log.simulation = { compared: false, match: null, mismatches: [], error: strErr(e).message }; log.actualAfterRaw = null; }
       log.finishedAt = nowIso(now);
       return log;
@@ -8273,6 +8506,14 @@
           if (!sim || !act) { mismatches.push({ stepId: s.stepId, kind: 'FIELD', id: code, message: 'Simulation または実際の設定にフィールドがありません' }); continue; }
           const a = fieldKey(sim), b = fieldKey(act);
           if (!same(a, b)) mismatches.push({ stepId: s.stepId, kind: 'FIELD', id: code, message: 'Simulation と実際の設定が一致しません', simulation: a, actual: b });
+        } else if (s.actionType === 'ADD_APP_ACTION' || s.actionType === 'UPDATE_APP_ACTION') {
+          const name = expect?.name;
+          const simSrc = (prepared?.freshReviewSteps || []).includes(s.stepId) && prepared?.freshSimulationAfter ? prepared.freshSimulationAfter : simAfter;   // コピー先を実行直前に取得した step は再 Review の After と比べる
+          const sim = (simSrc.appActions || []).find(a => a.name === name), act = (actual.appActions || []).find(a => a.name === name);
+          if (!sim || !act) { mismatches.push({ stepId: s.stepId, kind: 'APP_ACTION', id: name, message: sim ? '実際の設定に対象のアプリアクションがありません' : 'Simulation に該当アプリアクションがありません' }); continue; }
+          const a = appActionKey(sim), b = appActionKey(act);
+          // index は Review が末尾と仮定するので、実際の末尾と一致すればよい（他は完全一致）
+          if (!same({ ...a, index: null }, { ...b, index: null })) mismatches.push({ stepId: s.stepId, kind: 'APP_ACTION', id: name, message: 'Simulation と実際の設定が一致しません（コピー先 / 転記 / 利用者 / 利用条件）', simulation: a, actual: b });
         } else if (s.actionType === 'UPDATE_LOOKUP') {
           const code = expect?.code;
           const sim = simAfter.fields?.[code], act = actual.fields?.[code];
@@ -8328,6 +8569,17 @@
         if (!code) continue;
         const impact = safe(() => KTDeps.impactOf(after.deps, code), null);
         out.addedFields.push({ code, directRefs: impact ? (impact.direct || []).length : null, indirectRefs: impact ? (impact.indirect || []).length : null });
+      }
+      // Phase 14: 追加・変更したアプリアクションの依存 edge（転記元 / 転記先 / コピー先アプリ）を再解析前後で数える
+      out.appActions = [];
+      const actionEdges = (deps, name) => (Array.isArray(deps?.edges) ? deps.edges : []).filter(e => e.sourceType === 'ACTION' && e.sourceName === name && ['ACTION_MAPS_FROM', 'ACTION_MAPS_TO', 'APP_REFERENCE'].includes(e.relationType));
+      for (const s of stepLogs) {
+        if ((s.actionType !== 'ADD_APP_ACTION' && s.actionType !== 'UPDATE_APP_ACTION') || s.status !== STEP.VERIFIED) continue;
+        const name = prepared.steps.find(x => x.stepId === s.stepId)?.prepared?.expect?.name;
+        if (!name) continue;
+        const ea = actionEdges(after.deps, name), eb = before ? actionEdges(before.deps, name) : null;
+        const key = (e) => `${e.relationType}:${e.targetId}`;
+        out.appActions.push({ name, edgesBefore: eb ? eb.length : null, edgesAfter: ea.length, newEdges: eb ? ea.filter(e => !eb.some(x => key(x) === key(e))).map(e => ({ relationType: e.relationType, target: e.targetId })) : ea.map(e => ({ relationType: e.relationType, target: e.targetId })), sourceFields: ea.filter(e => e.relationType === 'ACTION_MAPS_FROM').map(e => e.targetId), destFields: ea.filter(e => e.relationType === 'ACTION_MAPS_TO').map(e => e.targetId) });
       }
       // Phase 13: 変更したルックアップの依存 edge（コピー先 / 取得元）を再解析前後で数える（新しい取得項目の edge が増えていること）
       out.updatedLookups = [];
@@ -8387,10 +8639,10 @@
     const stripViewIds = (views) => Object.fromEntries(Object.entries(views || {}).map(([n, v]) => { const { id, ...rest } = v || {}; return [n, rest]; }));
     const listOf = (raw) => (Array.isArray(raw?.notifications) ? raw.notifications : []);
     const layoutCodes = (rows) => { const out = []; const walk = (rs) => { for (const r of rs || []) { for (const x of r?.fields || []) if (x?.code) out.push(x.code); if (Array.isArray(r?.layout)) walk(r.layout); } }; walk(rows); return out; };
-    const COLLECTION_JA = { fields: 'フィールド', layout: 'フォームのレイアウト', views: '一覧', generalNotify: 'アプリの条件通知', perRecordNotify: 'レコードの条件通知', reminderNotify: 'リマインダー' };
+    const COLLECTION_JA = { fields: 'フィールド', layout: 'フォームのレイアウト', views: '一覧', generalNotify: 'アプリの条件通知', perRecordNotify: 'レコードの条件通知', reminderNotify: 'リマインダー', actions: 'アプリアクション' };
     async function fetchPreviewAll(api, appId) {
-      const [fields, layout, views, generalNotify, perRecordNotify, reminderNotify, status] = await Promise.all([api.getPreviewFields(appId), api.getPreviewLayout(appId), api.getPreviewViews(appId), api.getPreviewGeneralNotifications(appId), api.getPreviewPerRecordNotifications(appId), api.getPreviewReminders(appId), typeof api.getPreviewStatus === 'function' ? api.getPreviewStatus(appId) : Promise.resolve(null)]);
-      return { fields, layout, views, generalNotify, perRecordNotify, reminderNotify, ...(status ? { status } : {}) };
+      const [fields, layout, views, generalNotify, perRecordNotify, reminderNotify, status, actions] = await Promise.all([api.getPreviewFields(appId), api.getPreviewLayout(appId), api.getPreviewViews(appId), api.getPreviewGeneralNotifications(appId), api.getPreviewPerRecordNotifications(appId), api.getPreviewReminders(appId), typeof api.getPreviewStatus === 'function' ? api.getPreviewStatus(appId) : Promise.resolve(null), typeof api.getPreviewActions === 'function' ? api.getPreviewActions(appId) : Promise.resolve(null)]);
+      return { fields, layout, views, generalNotify, perRecordNotify, reminderNotify, ...(status ? { status } : {}), ...(actions ? { actions } : {}) };
     }
     /** 2 つの設定の人間向け差分（集合ごと。Review の Before モデルに変換して diffBefore を使う） */
     function collectionDiffs(expectedRaw, currentRaw, kinds, baseline) {
@@ -8413,6 +8665,7 @@
       for (const n of listOf(cur.reminderNotify)) { const label = `リマインダー「${n.title || '（無題）'}」`; if (n.timing?.code === code) refs.push({ kind: 'REMINDER', id: n.title || '', where: `${label}の基準日` }); if ((n.targets || []).some(t => t.entity?.type === 'FIELD_ENTITY' && t.entity.code === code)) refs.push({ kind: 'REMINDER', id: n.title || '', where: `${label}の通知先` }); if (condMentions(n.filterCond, code)) refs.push({ kind: 'REMINDER', id: n.title || '', where: `${label}の条件` }); }
       for (const [name, st] of Object.entries(cur.status?.states || {})) if ((st.assignee?.entities || []).some(e => e.entity?.type === 'FIELD_ENTITY' && e.entity.code === code)) refs.push({ kind: 'PROCESS_STATUS', id: name, where: `ステータス「${name}」の作業者` });
       for (const a of cur.status?.actions || []) { if (condMentions(a.filterCond, code)) refs.push({ kind: 'PROCESS_ACTION', id: a.name, where: `アクション「${a.name}」の条件` }); if ((a.executableUser?.entities || []).some(e => e.entity?.type === 'FIELD_ENTITY' && e.entity.code === code)) refs.push({ kind: 'PROCESS_ACTION', id: a.name, where: `アクション「${a.name}」の実行可能ユーザー` }); }
+      for (const [name, a] of Object.entries(cur.actions?.actions || {})) { if ((a?.mappings || []).some(m => m.srcType === 'FIELD' && m.srcField === code)) refs.push({ kind: 'APP_ACTION', id: name, where: `アプリアクション「${name}」の転記元` }); if (condMentions(a?.filterCond, code)) refs.push({ kind: 'APP_ACTION', id: name, where: `アプリアクション「${name}」の利用条件` }); }
       for (const [c, f] of Object.entries(cur.fields?.properties || {})) {
         if (c === code) continue;
         if (f.type === 'CALC' && condMentions(f.expression, code)) refs.push({ kind: 'FIELD', id: c, where: `計算フィールド「${f.label}」（${c}）の計算式` });
@@ -8453,8 +8706,13 @@
     const eqReminders = (a, b) => same(listOf(a), listOf(b)) && String(a?.timezone ?? '') === String(b?.timezone ?? '');
     const putStatus = (api, appId, snap, revision) => api.putPreviewStatus(appId, { enable: snap?.enable, states: clone(snap?.states || {}), actions: clone(snap?.actions || []) }, revision); putStatus.path = '/k/v1/preview/app/status.json';
     const eqProcess = (a, b) => same(stripRevision(a), stripRevision(b));
+    // Phase 14: アプリアクション全体（全体置換 API。id は送らず、snapshot の全アクションを PUT 形に）
+    const putAppActions = (api, appId, snap, revision) => api.putPreviewActions(appId, { actions: Object.fromEntries(Object.entries(actionsOf(snap)).map(([k, a]) => [k, actionForPut(a)])) }, revision); putAppActions.path = '/k/v1/preview/app/actions.json';
+    const eqAppActions = (a, b) => same(stripActionIds(actionsOf(a)), stripActionIds(actionsOf(b)));
     const ROLLBACK_STRATEGIES = {
       RESTORE_PROCESS_SETTINGS: restoreStrategy('status', { get: (api, a) => api.getPreviewStatus(a), put: putStatus, equal: eqProcess, kinds: ['process'], label: 'プロセス管理' }),
+      /** ADD / UPDATE_APP_ACTION → snapshot のアプリアクション全体を PUT（全体置換）。反映直後と現在が 1 件でも違えば ROLLBACK_STALE。コピー先アプリには触れない */
+      RESTORE_APP_ACTION_SETTINGS: restoreStrategy('actions', { get: (api, a) => api.getPreviewActions(a), put: putAppActions, equal: eqAppActions, kinds: ['appActions'], label: 'アプリアクション' }),
       RESTORE_VIEWS: restoreStrategy('views', { get: (api, a) => api.getPreviewViews(a), put: putViews, equal: eqViews, kinds: ['views'], label: '一覧' }),
       RESTORE_NOTIFICATION_SETTINGS: {
         collection: (step) => step.collection,
@@ -8687,7 +8945,7 @@
       try {
         const cur = await fetchPreviewAll(api, rb.appId);
         rb.afterRollbackRevision = String(cur.fields?.revision ?? '');
-        const diffs = collectionDiffs(snapshot, cur, ['fields', 'views', 'notifications', 'reminders'], '実行前の snapshot');
+        const diffs = collectionDiffs(snapshot, cur, ['fields', 'views', 'notifications', 'reminders', ...(snapshot.actions ? ['appActions'] : [])], '実行前の snapshot');
         rb.verification = { restoredToSnapshot: diffs.length === 0, diffs, snapshotRevision: rb.snapshotRevision, currentRevision: rb.afterRollbackRevision };
       } catch (e) { rb.verification = { restoredToSnapshot: null, diffs: [], error: strErr(e).message }; }
       const okCount = rb.steps.filter(x => x.status === RB.VERIFIED).length, badCount = rb.steps.filter(x => [RB.FAILED, RB.STALE, RB.VERIFY_FAILED].includes(x.status)).length;
@@ -8756,6 +9014,9 @@
         // Phase 13（ルックアップ）: 参照元アプリの定義（運用環境の GET。read-only。参照元アプリへ書き込む関数は無い）
         getApp: (a) => call('/k/v1/app.json', 'GET', { id: app(a) }),
         getAppFields: (a) => call('/k/v1/app/form/fields.json', 'GET', { app: app(a) }),
+        // Phase 14（アプリアクション）: GET / PUT /k/v1/preview/app/actions.json（actions は全体置換。handler が「全アクション ＋ 承認分」の完全な payload を作る）
+        getPreviewActions: (a) => call('/k/v1/preview/app/actions.json', 'GET', { app: app(a) }),
+        putPreviewActions: (a, body, revision) => call('/k/v1/preview/app/actions.json', 'PUT', { app: app(a), ...body, ...(revision ? { revision } : {}) }),
         // 運用環境へ反映する関数は意図的に無い（Phase 9: Preview only）
       };
     }
@@ -8767,6 +9028,7 @@
       preservationExceptIndex, notificationIdentityMismatch, reminderIdentityMismatch, viewIdentityMismatch,
       PROCESS_GROUP, PROCESS_ACTIONS, processEntity, processIdentityMismatch, formProcessGroups,
       lookupIdentityMismatch, lookupOf, fetchRelatedAppsForLookups,
+      appActionIdentityMismatch, actionForPut, stripActionIds,
     };
   })();
 

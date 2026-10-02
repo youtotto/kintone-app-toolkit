@@ -59,7 +59,7 @@ function makeData() {
   };
   // ---- アプリアクションのコピー先アプリ（Phase 14: 311 = 見積管理。既存アクション「見積を作成」が case_name → quote_title / レコードURL → source_url を転記）----
   data.relatedApps[String(QUOTE_DEST_APP)] = {
-    appId: String(QUOTE_DEST_APP), name: '見積管理', code: 'QUOTE', revision: '7',
+    appId: String(QUOTE_DEST_APP), name: '見積管理', code: '', revision: '7',   // 既存アクションの destApp.code（''）と一致させる（kintone はアプリコードがあれば両方に返す）
     fields: {
       'レコード番号': { type: 'RECORD_NUMBER', code: 'レコード番号', label: 'レコード番号' },
       quote_title: field('SINGLE_LINE_TEXT', 'quote_title', '見積件名', { required: true }),

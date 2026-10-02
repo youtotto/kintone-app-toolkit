@@ -23,13 +23,16 @@ function makeKintoneMock(data, { permission = true, autoPlace = true } = {}) {
     status: data.status ? normalizeStatus({ enable: !!data.status.enable, states: clone(data.status.states || {}), actions: clone(data.status.actions || []) }) : { enable: false, states: null, actions: null },
     // 参照元アプリ（Phase 13）: data.relatedApps と同じ形（appId → { name, code, revision, fields }）。運用環境の GET だけ（書き込み API は無い）
     relatedApps: clone(data.relatedApps || {}),
+    // アプリアクション（Phase 14）: GET /preview/app/actions と同じ形（アクション名 → { name, id, index, destApp, mappings, entities, filterCond }）。PUT は全体置換
+    actions: clone(data.actions?.actions || {}), actionSeq: 9000,
   };
   const calls = [];
   const err = (code, message) => Object.assign(new Error(message), { code, message });
   // mutateList(what, list): 全体置換 API が受け取った一覧を保存直前に書き換える（検証の mutant。what = 'general' | 'perRecord' | 'reminders' | 'views'）
   // sideEffectOnStatusPut: プロセス管理の PUT 後に kintone が自動で一覧 / 通知を足す挙動を模す（Phase 12 §17）
   // relatedUnavailable: 参照元アプリ ID → その参照元の GET は CB_NO02、参照するルックアップの lookup は null（kintone の挙動）/ mutateLookup(lookup): PUT 直前にルックアップ設定を書き換える mutant
-  const ctl = { failAddField: null, mangleLabel: false, failPut: null, dropOneExistingOnPut: null, mangleReminderTime: false, onWrite: null, mutateList: null, failDelete: null, sideEffectOnStatusPut: null, relatedUnavailable: null, mutateLookup: null };
+  // destUnavailable: コピー先アプリ ID → そのアプリへのアクションの GET は destApp / mappings が null（kintone の挙動）。dropOneExistingOnPut: 'actions' で既存 1 件が抜ける mutant
+  const ctl = { failAddField: null, mangleLabel: false, failPut: null, dropOneExistingOnPut: null, mangleReminderTime: false, onWrite: null, mutateList: null, failDelete: null, sideEffectOnStatusPut: null, relatedUnavailable: null, mutateLookup: null, destUnavailable: null };
   const mutate = (what, list) => (ctl.mutateList ? ctl.mutateList(what, list) : list);
   const guard = () => { if (!permission) throw err('CB_NO02', '権限がありません。'); };
   const checkRev = (revision) => { if (revision != null && revision !== '' && String(revision) !== String(st.revision)) throw err('GAIA_CO02', '指定したリビジョンが最新ではありません。'); };
@@ -121,6 +124,53 @@ function makeKintoneMock(data, { permission = true, autoPlace = true } = {}) {
       st.status = next; st.revision += 1;
       if (ctl.sideEffectOnStatusPut) ctl.sideEffectOnStatusPut(st);
       return { revision: String(st.revision) };
+    },
+    // アプリアクション（Phase 14）
+    async getPreviewActions() {
+      calls.push('GET actions'); guard();
+      const out = {};
+      for (const [k, a] of Object.entries(st.actions)) { const c = clone(a); if (ctl.destUnavailable && String(c.destApp?.app) === String(ctl.destUnavailable)) { c.destApp = null; c.mappings = null; } out[k] = c; }
+      return { actions: out, revision: String(st.revision) };
+    },
+    async putPreviewActions(app, body, revision) {
+      write('PUT actions'); guard(); checkRev(revision);
+      const incoming = body?.actions;
+      if (!incoming || typeof incoming !== 'object') throw err('GAIA_IL02', 'actions は必須です');
+      const next = {};
+      let idx = 0;
+      for (const [key, a] of Object.entries(incoming)) {
+        const cur = st.actions[key];
+        if (!cur && !a.name) throw err('GAIA_IL02', `actions.${key}.name はアクションを追加するときに必須です`);
+        if (a.name && a.name !== key && Object.keys(incoming).includes(a.name)) throw err('GAIA_IL04', '更新後のアクション名がほかのアクション名と重複します');
+        if (a.name != null && String(a.name).length > 32) throw err('GAIA_IL02', 'アクション名は 32 文字以内です');
+        if (a.name && a.index == null) throw err('GAIA_IL02', 'name を指定する場合 index は必須です');
+        if (!cur && !a.destApp) throw err('GAIA_IL02', 'アクションを追加するときは destApp が必須です');
+        if (!cur && !a.mappings) throw err('GAIA_IL02', 'アクションを追加するときは mappings が必須です');
+        if (!cur && !a.entities) throw err('GAIA_IL02', 'アクションを追加するときは entities が必須です');
+        if ('id' in a) throw err('GAIA_IL01', 'id は指定できません（モックの厳格化）');
+        const destId = a.destApp ? (a.destApp.code ? (Object.entries(st.relatedApps).find(([, r]) => r.code === a.destApp.code) || [null])[0] : String(a.destApp.app)) : String(cur.destApp?.app);
+        if (a.destApp && !destId) throw err('GAIA_IL04', `コピー先アプリ（code ${a.destApp.code}）が存在しません`);
+        const rel = st.relatedApps[String(destId)];
+        const relFields = rel ? Object.assign({}, rel.fields, ...Object.values(rel.fields).filter(f => f.type === 'SUBTABLE').map(f => f.fields || {})) : null;
+        const mappings = a.mappings != null ? a.mappings : cur.mappings;
+        for (const m of mappings || []) {
+          if (!['FIELD', 'RECORD_URL'].includes(m.srcType)) throw err('GAIA_IL02', 'mappings[].srcType は FIELD / RECORD_URL');
+          if (m.srcType === 'FIELD' && !st.fields[m.srcField]) throw err('GAIA_IL04', `転記元「${m.srcField}」が存在しません`);
+          if (!m.destField) throw err('GAIA_IL02', 'mappings[].destField は必須です');
+          if (relFields && !relFields[m.destField]) throw err('GAIA_IL04', `転記先「${m.destField}」がコピー先アプリに存在しません`);
+        }
+        const entities = a.entities != null ? a.entities : cur.entities;
+        for (const e of entities || []) if (!['USER', 'GROUP', 'ORGANIZATION'].includes(e.type)) throw err('GAIA_IL02', 'entities[].type は USER / GROUP / ORGANIZATION');
+        if (/LOGIN_USER|IS_NULL/.test(a.filterCond || '')) throw err('GAIA_IL08', 'クエリの指定が不正です。');
+        const name = a.name ?? cur.name;
+        next[name] = { name, id: cur ? cur.id : String(st.actionSeq++), index: String(a.index ?? cur.index ?? idx), destApp: a.destApp ? { app: String(destId), code: rel?.code || '' } : clone(cur.destApp), mappings: clone(mappings || []).map(m => (m.srcType === 'RECORD_URL' ? { srcType: 'RECORD_URL', destField: m.destField } : { srcType: 'FIELD', srcField: m.srcField, destField: m.destField })), entities: clone(entities || []).map(e => ({ type: e.type, code: e.code })), filterCond: a.filterCond != null ? a.filterCond : (cur ? cur.filterCond : '') };
+        idx++;
+      }
+      let list = next;
+      if (ctl.dropOneExistingOnPut === 'actions') { const [first] = Object.keys(list); delete list[first]; }   // バグの注入: 既存 1 件が抜ける
+      list = mutate('actions', list);
+      st.actions = list; st.revision += 1;
+      return { actions: Object.fromEntries(Object.entries(list).map(([k, v]) => [k, { id: v.id }])), revision: String(st.revision) };
     },
     async deletePreviewFields(app, fields, revision) {
       write('DELETE fields'); guard(); checkRev(revision);
