@@ -5364,7 +5364,7 @@
           const v = s[k];
           if (v == null) continue;
           if (k === 'mappings' && Array.isArray(v)) put(k, v.filter(m => m && (m.from || m.to)).map(m => ({ from: String(m.from ?? '').trim(), to: String(m.to ?? '').trim() })));
-          else if (['assignees', 'targets', 'events', 'fields', 'options', 'entities'].includes(k)) put(k, Array.isArray(v) ? v.map(x => String(x).trim()).filter(Boolean) : splitList(v));
+          else if (['assignees', 'targets', 'events', 'fields', 'options', 'entities'].includes(k)) put(k, (Array.isArray(v) ? v.map(x => String(x).trim()).filter(Boolean) : splitList(v)).filter(x => !PLACEHOLDER_RE.test(x.replace(/[（(][^）)]*[）)]/g, '').trim())));   // 配列の「なし」も捨てる
           else if (k === 'required') { if (typeof v === 'boolean') spec.required = v; else if (/^(true|yes|必須|はい)$/i.test(String(v))) spec.required = true; else if (/^(false|no|任意|いいえ)$/i.test(String(v))) spec.required = false; }
           else put(k, String(v).trim());
         }

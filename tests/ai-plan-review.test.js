@@ -286,6 +286,9 @@ console.log('\n--- 9. staging E2E（2026-10-02）で見つかった実データ�
   // Phase 9 staging E2E（app 341）: AI が filterCond: "なし" と書いた → 空として扱う（散文の条件と誤認しない）
   const noneCond = review(plan([step('P1', 'ADD_VIEW', 'VIEW', '期限順', [], { spec: { name: '期限順', fields: ['case_name', 'owner', 'due_date'], filterCond: 'なし', sort: 'due_date asc' } })]));
   assert(st(noneCond, 'P1').status === 'VALID' && st(noneCond, 'P1').diff.after.filterCond === '' && !codes(st(noneCond, 'P1')).includes('COND_NOT_EXPRESSION'), '「なし」「none」「—」などの placeholder は空扱い（COND_NOT_EXPRESSION にしない）');
+  // Phase 10 staging E2E（app 343）: AI が events: ["なし（レコードの条件通知）"] と書いた → 配列の placeholder も空扱い（イベント不明の指摘にしない）
+  const noneEv = review(plan([step('P1', 'ADD_NOTIFICATION', 'NOTIFICATION', 'n', [], { spec: { name: 'n', targets: ['FIELD_ENTITY:owner_group'], filterCond: 'amount >= "1"', events: ['なし（レコードの条件通知）'] } })]));
+  assert(!codes(st(noneEv, 'P1')).includes('NOTIFICATION_EVENT_UNKNOWN') && st(noneEv, 'P1').diff.after.scope === 'perRecord' && !st(noneEv, 'P1').spec.events, '配列の placeholder（なし）は捨てる');
   assert(JSON.stringify(INPUTS.data) === SNAPSHOT, '§9 の後も DATA は不変');
 }
 
