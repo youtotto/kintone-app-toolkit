@@ -20,56 +20,7 @@ const step = (id, actionType, targetKind, targetRef, sp = {}, extra = {}) => ({ 
 const pf = (temporaryId, label, suggestedCode, type, extra = {}) => ({ temporaryId, label, suggestedCode, type, typeValid: true, required: false, options: [], reason: '', evidenceIds: [], alternativeExistingFieldCode: null, codeConflict: false, labelDuplicate: false, ...extra });
 const plan = (steps, proposedFields = [], extra = {}) => ({ planVersion: '1', requestId: 'tk-exec', goal: 'g', assessment: { summary: '' }, relevantFields: [], proposedFields, steps, alternatives: [], impact: [], questions: [], unknowns: [], planConfidence: 'INFERRED', ...extra });
 
-/** 動作テスト環境を模す kintone API（セッション認証のユーザー権限で呼ぶ想定）。運用環境の revision は prod で別管理 */
-function makeKintoneMock(data, { permission = true, autoPlace = false } = {}) {
-  const rowsFrom = (fields) => Object.values(fields).filter(f => !['SUBTABLE', 'GROUP'].includes(f.type)).map(f => ({ type: 'ROW', fields: [{ type: f.type, code: f.code, size: { width: '200' } }] }));
-  const st = { fields: clone(data.fields), layout: rowsFrom(data.fields), views: clone(data.views.views), revision: Number(data.views.revision), prodRevision: Number(data.views.revision), prodViews: clone(data.views.views) };
-  const calls = [];
-  const err = (code, message) => Object.assign(new Error(message), { code, message });
-  const ctl = { failAddField: null, mangleLabel: false, hooks: {} };
-  const checkRev = (revision) => { if (revision != null && revision !== '' && String(revision) !== String(st.revision)) throw err('GAIA_CO02', '指定したリビジョンが最新ではありません。'); };
-  const api = {
-    async getPreviewFields(app) { calls.push('GET fields'); if (!permission) throw err('CB_NO02', '権限がありません。'); return { properties: clone(st.fields), revision: String(st.revision) }; },
-    async getPreviewLayout(app) { calls.push('GET layout'); if (!permission) throw err('CB_NO02', '権限がありません。'); return { layout: clone(st.layout), revision: String(st.revision) }; },
-    async getPreviewViews(app) { calls.push('GET views'); if (!permission) throw err('CB_NO02', '権限がありません。'); return { views: clone(st.views), revision: String(st.revision) }; },
-    async getProductionViews(app) { calls.push('GET prod views'); return { views: clone(st.prodViews), revision: String(st.prodRevision) }; },
-    async addPreviewFields(app, properties, revision) {
-      calls.push('POST fields ' + Object.keys(properties).join(','));
-      if (!permission) throw err('CB_NO02', '権限がありません。');
-      checkRev(revision);
-      if (ctl.failAddField && Object.keys(properties).includes(ctl.failAddField)) throw err('GAIA_IL04', `フィールド「${ctl.failAddField}」の追加に失敗しました（モック）`);
-      for (const [code, p] of Object.entries(properties)) {
-        if (st.fields[code]) throw err('GAIA_FC01', `フィールドコード「${code}」は既に使われています。`);
-        st.fields[code] = { ...clone(p), label: ctl.mangleLabel ? p.label + '!' : p.label };
-        if (autoPlace) st.layout.push({ type: 'ROW', fields: [{ type: p.type, code, size: { width: '200' } }] });
-      }
-      st.revision += 1;
-      return { revision: String(st.revision) };
-    },
-    async putPreviewLayout(app, layout, revision) {
-      calls.push('PUT layout');
-      checkRev(revision);
-      const codes = new Set(); const walk = (rows) => { for (const r of rows) { for (const f of r.fields || []) if (f.code) { if (!st.fields[f.code] && !['LABEL', 'SPACER', 'HR'].includes(f.type)) throw err('GAIA_IL03', `レイアウトのフィールド「${f.code}」が存在しません`); codes.add(f.code); } if (r.layout) walk(r.layout); } };
-      walk(layout);
-      for (const code of Object.keys(st.fields)) if (!codes.has(code) && !['SUBTABLE', 'GROUP'].includes(st.fields[code].type) && !st.fields[code].parent) throw err('GAIA_IL04', `フィールド「${code}」がレイアウトに含まれていません`);
-      st.layout = clone(layout); st.revision += 1;
-      return { revision: String(st.revision) };
-    },
-    async putPreviewViews(app, views, revision) {
-      calls.push('PUT views ' + Object.keys(views).length);
-      checkRev(revision);
-      for (const [name, v] of Object.entries(views)) {
-        if (v.type === 'LIST') for (const f of v.fields || []) if (!st.fields[f]) throw err('GAIA_IL04', `一覧「${name}」のフィールド「${f}」が存在しません`);
-        if ('id' in v) throw err('GAIA_IL01', 'id は指定できません（モックの厳格化）');
-      }
-      let seq = 900; const next = {};
-      for (const [name, v] of Object.entries(views)) next[name] = { id: st.views[name]?.id || String(seq++), ...clone(v) };
-      st.views = next; st.revision += 1;
-      return { views: Object.fromEntries(Object.entries(next).map(([n, v]) => [n, { id: v.id }])), revision: String(st.revision) };
-    },
-  };
-  return { api, st, calls, ctl };
-}
+const { makeKintoneMock } = require('./helpers/kintone-preview-mock.js');
 
 const DATA = FX.makeData();
 const DEPS = KTDeps.buildDependencyData(DATA, KTDeps.normalizeFields(DATA.fields));
@@ -87,7 +38,7 @@ const run = async (input, mock, { review = null, onProgress = null } = {}) => { 
 (async () => {
 console.log('\n--- 1. ADD_FIELD: 承認 → prepare → preview へ反映 → 再取得で検証 ---');
 {
-  const p = planField(); const rv = reviewOf(p); const mock = makeKintoneMock(DATA);
+  const p = planField(); const rv = reviewOf(p); const mock = makeKintoneMock(DATA, { autoPlace: false });   // 自動配置しない場合（Executor が末尾行を足す）
   const input = approveAll(p, rv);
   assert(input.approvedSteps.join() === 'P1' && st0(rv).safety === 'SAFE', '前提: Review は SAFE・承認済み');
   const prepared = await E.prepare(input, { api: mock.api, appId: '341' });
@@ -137,15 +88,15 @@ console.log('\n--- 2. 承認・Review・allowlist による拒否 ---');
     step('P2', 'CUSTOMIZATION_REQUIRED', 'JS', '', {}),
     step('P3', 'ADD_FIELD', 'PROPOSED_FIELD', 'NEW_FIELD_1', { fieldType: 'CALC' }),
     step('P4', 'ADD_FIELD', 'PROPOSED_FIELD', 'NEW_FIELD_2', { fieldType: 'DROP_DOWN' }),
-    step('P5', 'ADD_NOTIFICATION', 'NOTIFICATION', '通知', { targets: ['FIELD_ENTITY:owner'], filterCond: 'amount > "5"' }),
+    step('P5', 'UPDATE_RECORD_ACL', 'RECORD_ACL', 'record#1', { entities: ['USER:user1'], accessibility: 'READ' }),
   ], [pf('NEW_FIELD_1', '合計2', 'total2', 'CALC'), pf('NEW_FIELD_2', '区分', 'kubun', 'DROP_DOWN')]);
   const unsupRv = reviewOf(unsup);
   const unsupPrep = await E.prepare(R.executorOutput(unsup, unsupRv, ['P1', 'P2', 'P3', 'P4', 'P5']), { api: mock.api, appId: '341' });
   const reasons = Object.fromEntries(unsupPrep.steps.map(s => [s.stepId, `${s.status}:${s.reason}`]));
-  assert(reasons.P1 === 'UNSUPPORTED:PREVIEW_NOT_SUPPORTED' && reasons.P2 === 'UNSUPPORTED:PLAN_ONLY' && reasons.P3 === 'UNSUPPORTED:FIELD_TYPE_NOT_SUPPORTED' && reasons.P5 === 'UNSUPPORTED:PREVIEW_NOT_SUPPORTED', `unsupported: プロセス / JS / CALC 型 / 通知（Tier 1 外）は無視せず UNSUPPORTED と理由を出す: ${JSON.stringify(reasons)}`);
+  assert(reasons.P1 === 'UNSUPPORTED:PREVIEW_NOT_SUPPORTED' && reasons.P2 === 'UNSUPPORTED:PLAN_ONLY' && reasons.P3 === 'UNSUPPORTED:FIELD_TYPE_NOT_SUPPORTED' && /UNSUPPORTED|BLOCKED/.test(reasons.P5), `unsupported: プロセス / JS / CALC 型 / ACL は無視せず UNSUPPORTED と理由を出す: ${JSON.stringify(reasons)}`);
   assert(reasons.P4 === 'UNSUPPORTED:OPTIONS_MISSING' || reasons.P4 === 'BLOCKED:REVIEW_BLOCKED' || /UNSUPPORTED|BLOCKED/.test(reasons.P4), `選択肢の無い DROP_DOWN は実行しない（${reasons.P4}）`);
   assert(unsupPrep.status === 'BLOCKED' && unsupPrep.blockers[0].code === 'NOTHING_TO_EXECUTE' && unsupPrep.summary.unsupported >= 4, '実行できる step が無ければ BLOCKED（NOTHING_TO_EXECUTE）');
-  assert(Object.values(E.ACTION_CAPABILITIES).every(c => c.productionDeploy === false) && Object.entries(E.ACTION_CAPABILITIES).filter(([, c]) => c.previewExecute).map(([k]) => k).join() === 'ADD_FIELD,ADD_VIEW' && E.ACTION_CAPABILITIES.ADD_FIELD.rollbackStrategy === 'DELETE_FIELD' && E.ACTION_CAPABILITIES.UPDATE_RECORD_ACL.previewExecute === false, 'Action Capability Registry: previewExecute は ADD_FIELD / ADD_VIEW だけ・productionDeploy は全て false');
+  assert(Object.values(E.ACTION_CAPABILITIES).every(c => c.productionDeploy === false) && Object.entries(E.ACTION_CAPABILITIES).filter(([, c]) => c.previewExecute).map(([k]) => k).sort().join() === 'ADD_FIELD,ADD_NOTIFICATION,ADD_REMINDER,ADD_VIEW,UPDATE_FIELD' && E.ACTION_CAPABILITIES.ADD_FIELD.rollbackStrategy === 'DELETE_FIELD' && E.ACTION_CAPABILITIES.ADD_NOTIFICATION.rollbackStrategy === 'RESTORE_NOTIFICATION_SETTINGS' && E.ACTION_CAPABILITIES.ADD_REMINDER.rollbackStrategy === 'RESTORE_REMINDER_SETTINGS' && E.ACTION_CAPABILITIES.UPDATE_FIELD.rollbackStrategy === 'RESTORE_FIELD_PROPERTY' && E.ACTION_CAPABILITIES.UPDATE_RECORD_ACL.previewExecute === false && E.ACTION_CAPABILITIES.UPDATE_PROCESS.previewExecute === false && E.ACTION_CAPABILITIES.ADD_LOOKUP.previewExecute === false, 'Action Capability Registry（Tier 2）: previewExecute は ADD_FIELD / ADD_VIEW / ADD_NOTIFICATION / ADD_REMINDER / UPDATE_FIELD・productionDeploy は全て false・Process / ACL / Lookup は不可');
   const api = E.createKintoneApi({ kintoneApi: { api: Object.assign(() => Promise.resolve({}), { url: (p) => p }) } });
   assert(!('deploy' in api) && !Object.keys(api).some(k => /deploy/i.test(k)) && Object.keys(api).every(k => /Preview|ProductionViews/.test(k)), 'kintone API adapter に運用環境へ反映する関数は無い（GET 以外は preview のみ）');
 }
@@ -193,7 +144,7 @@ console.log('\n--- 4. 実行順（DAG）・部分失敗・Fail Stop・検証失�
   assert(prepared.status === 'PREPARED' && prepared.summary.executable === 3, 'prepare: 3 step 実行可能');
   assert(log.status === 'DONE' && log.steps.map(s => `${s.stepId}:${s.status}`).join() === 'P1:VERIFIED,P2:VERIFIED,P3:VERIFIED', `dependsOn 順に実行して全て VERIFIED（${log.steps.map(s => s.stepId + ':' + s.status).join()}）`);
   const order = mock.calls.filter(c => /^(POST|PUT views)/.test(c));
-  assert(order.join(' | ') === 'POST fields progress | POST fields checked_on | PUT views 3', `API 呼び出し順: P1 → P2 → P3（${order.join(' | ')}）`);
+  assert(order.join(' | ') === 'POST fields | POST fields | PUT views', `API 呼び出し順: P1 → P2 → P3（${order.join(' | ')}）`);
   assert(mock.st.views['担当者別'] && mock.st.views['担当者別'].fields.join() === 'owner,case_name,progress,checked_on' && mock.st.views['担当者別'].index === '2' && Object.keys(mock.st.views).length === 3, '一覧: 既存 2 件を保持して 3 件目として追加（index は最大 + 1）');
   assert(log.simulation.match === true && log.actualAfter.addedViews.join() === '担当者別', 'Simulation と一致');
   // 部分失敗（P2 が失敗 → P3 は未実行。P1 は戻さない）

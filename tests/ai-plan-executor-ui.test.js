@@ -45,24 +45,7 @@ const PLAN_X = {
     summary: { steps: 3, invalidSteps: 0, needsConfirmation: 0, proposedFields: 1, questions: 0 },
   },
 };
-const clone = (v) => JSON.parse(JSON.stringify(v));
-/** 動作テスト環境のモック（tests/ai-plan-executor.test.js と同じ振る舞いの最小版） */
-function makeKintoneMock(data, { permission = true } = {}) {
-  const st = { fields: clone(data.fields), layout: Object.values(data.fields).map(f => ({ type: 'ROW', fields: [{ type: f.type, code: f.code }] })), views: clone(data.views.views), revision: Number(data.views.revision), prodRevision: Number(data.views.revision) };
-  const calls = [];
-  const err = (code, message) => Object.assign(new Error(message), { code, message });
-  const ctl = { failAddField: null, onWrite: null };
-  const api = {
-    async getPreviewFields() { calls.push('GET fields'); if (!permission) throw err('CB_NO02', '権限がありません。'); return { properties: clone(st.fields), revision: String(st.revision) }; },
-    async getPreviewLayout() { calls.push('GET layout'); return { layout: clone(st.layout), revision: String(st.revision) }; },
-    async getPreviewViews() { calls.push('GET views'); return { views: clone(st.views), revision: String(st.revision) }; },
-    async getProductionViews() { calls.push('GET prod views'); return { views: clone(data.views.views), revision: String(st.prodRevision) }; },
-    async addPreviewFields(app, properties) { calls.push('POST fields'); if (ctl.onWrite) ctl.onWrite('POST fields'); if (ctl.failAddField) throw err('GAIA_IL04', 'モックの失敗'); for (const [code, p] of Object.entries(properties)) { if (st.fields[code]) throw err('GAIA_FC01', '既に存在'); st.fields[code] = clone(p); } st.revision += 1; return { revision: String(st.revision) }; },
-    async putPreviewLayout(app, layout) { calls.push('PUT layout'); st.layout = clone(layout); st.revision += 1; return { revision: String(st.revision) }; },
-    async putPreviewViews(app, views) { calls.push('PUT views'); if (ctl.onWrite) ctl.onWrite('PUT views'); st.views = Object.fromEntries(Object.entries(views).map(([n, v]) => [n, { id: '9', ...clone(v) }])); st.revision += 1; return { views: {}, revision: String(st.revision) }; },
-  };
-  return { api, st, calls, ctl };
-}
+const { makeKintoneMock } = require('./helpers/kintone-preview-mock.js');
 const makeStorage = () => { const m = new Map(); return { getItem: (k) => (m.has(k) ? m.get(k) : null), setItem: (k, v) => m.set(k, String(v)), removeItem: (k) => m.delete(k) }; };
 const tick = () => new Promise(r => setTimeout(r, 0));
 const HEALTH = { ok: true, supportedContractVersions: ['2.0', '2.1'], entitlements: [{ product: 'toolkit', features: ['assistant-qa', 'change-planner'] }], registry: { toolkit: { 'assistant-qa': { implemented: true, promptVersions: ['1'] }, 'change-planner': { implemented: true, promptVersions: ['1'] } } }, usage: { monthlyLimit: 20, usedThisMonth: 1 } };
