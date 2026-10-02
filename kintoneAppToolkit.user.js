@@ -5444,6 +5444,9 @@
             if (step.confidence === 'NEEDS_CONFIRMATION' || step.validation?.status === 'needs_confirmation') { issue('MEANING_UNCONFIRMED', 'medium', '既存フィールドの意味（用途）は Toolkit の解析では確認できません'); r.status = STATUS.NEEDS_CONFIRMATION; r.safety = SAFETY.REVIEW_REQUIRED; }
             break;
           }
+          // システムフィールド: ステータス / 作業者 / カテゴリー は API で変更できない。レコード番号・作成者・作成日時・更新者・更新日時 は表示名以外を変えられない
+          if (['STATUS', 'STATUS_ASSIGNEE', 'CATEGORY'].includes(f.type)) { invalid('SYSTEM_FIELD_IMMUTABLE', `「${f.label}」（${f.type}）は kintone の API で変更できないフィールドです`); return r; }
+          if (['RECORD_NUMBER', 'CREATOR', 'CREATED_TIME', 'MODIFIER', 'UPDATED_TIME'].includes(f.type) && (spec.fieldType || spec.required != null || (spec.options || []).length || step.actionType === 'UPDATE_LOOKUP')) { invalid('SYSTEM_FIELD_IMMUTABLE', `「${f.label}」（${f.type}）は表示名以外を変更できないフィールドです`); return r; }
           const after = clone(f);
           let changed = false;
           if (step.actionType === 'UPDATE_LOOKUP') {
@@ -5582,7 +5585,9 @@
           const targets = (spec.targets || []).map(t => parseEntity(t, model, proposedMap)).filter(Boolean);
           targets.forEach(en => entityOk(en, '通知先'));
           const cond = spec.filterCond || '';
-          const events = spec.events || [];
+          const unknownEvents = (spec.events || []).filter(e => !NOTIFY_EVENTS.includes(e));
+          if (unknownEvents.length) { issue('NOTIFICATION_EVENT_UNKNOWN', 'medium', `イベント「${unknownEvents.join(', ')}」は kintone の通知イベント（${NOTIFY_EVENTS.join(' / ')}）にありません（要確認）`); if (r.status === STATUS.VALID) r.status = STATUS.NEEDS_CONFIRMATION; }
+          const events = (spec.events || []).filter(e => NOTIFY_EVENTS.includes(e));
           for (const c of condFields(cond, model)) requireField(c, '通知条件');
           checkCond(cond, '通知条件');
           if (step.actionType === 'UPDATE_NOTIFICATION') {
@@ -6067,6 +6072,7 @@
         else if (!r) set(STEP.BLOCKED, 'NO_REVIEW', 'Review の結果がありません');
         else if (r.status === KTPlanReview.STATUS.INVALID || r.status === KTPlanReview.STATUS.BLOCKED_BY_DEPENDENCY || r.safety === KTPlanReview.SAFETY.BLOCKED) set(STEP.BLOCKED, 'REVIEW_BLOCKED', 'Review で実行不可と判定されています');
         else if (r.safety === KTPlanReview.SAFETY.PLAN_ONLY) set(STEP.UNSUPPORTED, 'PLAN_ONLY', '計画のみ（自動反映の対象外）');
+        else if ((r.issues || []).some(i => i.code === 'COND_UNKNOWN_FUNCTION' || i.code === 'COND_NOT_EXPRESSION')) set(STEP.BLOCKED, 'INVALID_CONDITION', '条件式が kintone で評価できないため反映しません（計画の条件式を直してください）');
         else if (!cap || !cap.previewExecute || !HANDLERS[step.actionType]) set(STEP.UNSUPPORTED, 'PREVIEW_NOT_SUPPORTED', '現在の Executor では自動反映できません');
         else {
           const p = HANDLERS[step.actionType].prepare(step, { stepReview: r, plan });
@@ -6214,6 +6220,7 @@
     /** Simulation After（Review が仮適用したモデル）と実際の After を、実行した対象だけ比較する */
     function compareSimulation(simAfter, actual, stepLogs, prepared) {
       if (!simAfter) return { compared: false, match: null, mismatches: [], note: 'Review の After モデルが無いため比較していません' };
+      if (!stepLogs.some(s => s.status === STEP.VERIFIED)) return { compared: false, match: null, mismatches: [], note: '反映した step が無いため比較していません' };
       const mismatches = [];
       for (const s of stepLogs) {
         if (s.status !== STEP.VERIFIED) continue;
@@ -7367,7 +7374,7 @@
     // ---- Preview Executor（Phase 9）の表示。設定を書くのは KTPlanExecutor。ここは HTML だけ ----
     const EXEC_STEP_JA = { PENDING: '待機中', RUNNING: '処理中...', APPLIED: '反映済み（検証中）', VERIFIED: 'VERIFIED', VERIFY_FAILED: 'VERIFY_FAILED（状態不一致）', FAILED: 'FAILED', SKIPPED: '未実行', BLOCKED: '実行不可', UNSUPPORTED: 'PLAN_ONLY', ROLLED_BACK: 'ROLLED_BACK' };
     const EXEC_STEP_COLOR = { VERIFIED: '#2e7d32', APPLIED: '#1a73e8', RUNNING: '#1a73e8', VERIFY_FAILED: '#b00020', FAILED: '#b00020', BLOCKED: '#b00020', UNSUPPORTED: '#555', SKIPPED: '#777', PENDING: '#777' };
-    const EXEC_REASON_JA = { NOT_APPROVED: '承認されていません', REVIEW_BLOCKED: 'Review で実行不可', PLAN_ONLY: '現在の Executor では自動反映できません', PREVIEW_NOT_SUPPORTED: '現在の Executor では自動反映できません', FIELD_TYPE_NOT_SUPPORTED: 'このフィールド型は現在の Executor では追加できません', OPTIONS_MISSING: '選択肢が決まっていません', DEPENDENCY_NOT_EXECUTABLE: '依存する step が実行されません', REVALIDATION_FAILED: '実行前の再検証で止まりました', STOPPED_AFTER_FAILURE: '前の step の失敗で停止', DEPENDENCY_NOT_VERIFIED: '依存 step が検証済みでない', PERMISSION_DENIED: 'アプリ設定を変更する権限がありません', REVISION_MISMATCH: '他の変更が入りました（revision 不一致）', TARGET_EXISTS: '同じ名前 / コードが既にあります', API_ERROR: 'API エラー', VERIFY_FAILED: 'API は成功したが状態が一致しません' };
+    const EXEC_REASON_JA = { NOT_APPROVED: '承認されていません', REVIEW_BLOCKED: 'Review で実行不可', PLAN_ONLY: '現在の Executor では自動反映できません', PREVIEW_NOT_SUPPORTED: '現在の Executor では自動反映できません', FIELD_TYPE_NOT_SUPPORTED: 'このフィールド型は現在の Executor では追加できません', OPTIONS_MISSING: '選択肢が決まっていません', DEPENDENCY_NOT_EXECUTABLE: '依存する step が実行されません', INVALID_CONDITION: '条件式が kintone で評価できません（計画の条件式を直してください）', REVALIDATION_FAILED: '実行前の再検証で止まりました', STOPPED_AFTER_FAILURE: '前の step の失敗で停止', DEPENDENCY_NOT_VERIFIED: '依存 step が検証済みでない', PERMISSION_DENIED: 'アプリ設定を変更する権限がありません', REVISION_MISMATCH: '他の変更が入りました（revision 不一致）', TARGET_EXISTS: '同じ名前 / コードが既にあります', API_ERROR: 'API エラー', VERIFY_FAILED: 'API は成功したが状態が一致しません' };
     const execActionJa = (a) => ({ ADD_FIELD: 'フィールド追加', ADD_VIEW: '一覧追加', ADD_NOTIFICATION: '通知追加', ADD_REMINDER: 'リマインダー追加' }[a] || ACTION_JA[a] || a);
     const execStepLine = (st) => `<div style="display:flex; gap:8px; align-items:baseline; font-size:12px;"><span style="min-width:34px; font-weight:600;">${esc(st.stepId)}</span><span style="flex:1;">${esc(st.title || execActionJa(st.actionType))}</span><span style="color:${EXEC_STEP_COLOR[st.status] || '#555'}; font-weight:600;">${esc(EXEC_STEP_JA[st.status] || st.status)}</span></div>${st.status !== 'VERIFIED' && st.status !== 'RUNNING' && st.status !== 'PENDING' && (st.message || st.reason) ? `<div style="font-size:11px; opacity:.75; margin-left:42px;">${esc(st.message || EXEC_REASON_JA[st.reason] || st.reason)}</div>` : ''}`;
     /**

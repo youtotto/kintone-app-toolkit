@@ -261,6 +261,20 @@ console.log('\n--- 5. ADD_VIEW / layout ---');
   assert(r5.log.steps[0].verification.checks.find(c => c.name === 'existingLayoutPreserved').ok && r5.log.steps[0].verification.checks.find(c => c.name === 'layoutContainsField').ok, 'レイアウト検証: 既存の行を保持・追加フィールドが含まれる（no accidental removal）');
 }
 
+console.log('\n--- 5b. staging E2E（app 344）で見つかった癖 ---');
+{
+  // AI が「owner = LOGIN_USER()」と書き、Review は COND_UNKNOWN_FUNCTION（要確認）。承認しても kintone が GAIA_IL08 で拒否するので、Executor は最初から実行しない
+  const pv = plan([step('P1', 'ADD_VIEW', 'VIEW', '担当者別', { name: '担当者別', fields: ['case_name', 'amount'], filterCond: 'owner = LOGIN_USER()' })]);
+  const rv = reviewOf(pv); const mock = makeKintoneMock(DATA);
+  assert(st0(rv).status === 'NEEDS_CONFIRMATION' && codes0(rv).includes('COND_UNKNOWN_FUNCTION'), '前提: Review は要確認（COND_UNKNOWN_FUNCTION）');
+  const prep = await E.prepare(R.executorOutput(pv, rv, ['P1']), { api: mock.api, appId: '341' });
+  assert(prep.steps[0].status === 'BLOCKED' && prep.steps[0].reason === 'INVALID_CONDITION' && prep.status === 'BLOCKED' && mock.calls.length === 0, '条件式が kintone で評価できない step は承認されても BLOCKED（INVALID_CONDITION）・API を呼ばない');
+  // 反映した step が無いときは Simulation を「一致」と言わない
+  const p2 = planField(); const rv2 = reviewOf(p2); const m2 = makeKintoneMock(DATA); m2.ctl.failAddField = 'progress';
+  const r2 = await run(approveAll(p2, rv2), m2, { review: rv2 });
+  assert(r2.log.status === 'FAILED' && r2.log.simulation.compared === false && r2.log.simulation.match === null, '全 step 失敗 → simulation.compared false（✓ と表示しない）');
+}
+
 console.log('\n--- 6. 入力の検証・DATA 不変 ---');
 {
   const mock = makeKintoneMock(DATA);
@@ -278,6 +292,7 @@ console.log('\n--- 6. 入力の検証・DATA 不変 ---');
 }
 
 function st0(rv) { return rv.steps[0]; }
+function codes0(rv) { return rv.steps[0].issues.map(i => i.code); }
 console.log(`\n${state.failed ? 'FAILED' : 'ALL PASSED'}: ${state.passed} passed / ${state.failed} failed`);
 process.exit(state.failed ? 1 : 0);
 })().catch(e => { console.error(e); process.exit(1); });

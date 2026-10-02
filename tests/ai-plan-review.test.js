@@ -273,6 +273,16 @@ console.log('\n--- 9. staging E2E（2026-10-02）で見つかった実データ�
   ]));
   const eo = R.executorOutput(plan([]), mix, ['P1', 'P2', 'P3', 'P1']);
   assert(eo.approvedSteps.join() === 'P1,P3' && eo.review.executionReadiness.approvedSteps.join() === 'P1,P3' && mix.executionReadiness.approvedSteps.length === 0, 'executorOutput: 承認は BLOCKED でない step（重複を除く。PLAN_ONLY は残して Executor が「未対応」と示す）で、review 内の readiness とも一致。元の review は変えない');
+  // Phase 9 staging E2E（app 343）: AI がシステムフィールド「ステータス」の選択肢を変えようとした → 要確認ではなく INVALID
+  const sysUpd = review(plan([step('P1', 'UPDATE_FIELD', 'FIELD', 'ステータス', [], { spec: { options: ['未着手', '進行中', '完了'] } })]));
+  assert(st(sysUpd, 'P1').status === 'INVALID' && codes(st(sysUpd, 'P1')).includes('SYSTEM_FIELD_IMMUTABLE'), 'ステータス / 作業者 / カテゴリー の変更は API で不可 → SYSTEM_FIELD_IMMUTABLE（INVALID）');
+  const sysLabel = review(plan([step('P1', 'UPDATE_FIELD', 'FIELD', '作成者', [], { spec: { name: '登録者' } })]));
+  assert(st(sysLabel, 'P1').status !== 'INVALID', '作成者などの表示名変更は可能なので INVALID にしない');
+  const sysReq = review(plan([step('P1', 'UPDATE_FIELD', 'FIELD', '作成者', [], { spec: { required: true } })]));
+  assert(st(sysReq, 'P1').status === 'INVALID' && codes(st(sysReq, 'P1')).includes('SYSTEM_FIELD_IMMUTABLE'), '作成者などの必須化・型変更は不可 → INVALID');
+  // Phase 9 staging E2E: AI が存在しないイベント名（recordUpdated）を書いた → 要確認
+  const badEv = review(plan([step('P1', 'ADD_NOTIFICATION', 'NOTIFICATION', '更新通知', [], { spec: { targets: ['FIELD_ENTITY:owner_group'], events: ['recordUpdated'] } })]));
+  assert(codes(st(badEv, 'P1')).includes('NOTIFICATION_EVENT_UNKNOWN') && st(badEv, 'P1').status === 'NEEDS_CONFIRMATION' && st(badEv, 'P1').diff.after.events.length === 0, '未知のイベント名 → NOTIFICATION_EVENT_UNKNOWN（要確認・After に載せない）');
   assert(JSON.stringify(INPUTS.data) === SNAPSHOT, '§9 の後も DATA は不変');
 }
 
