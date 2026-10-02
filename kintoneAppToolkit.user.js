@@ -5401,10 +5401,13 @@
           if (!p) { invalid('PROPOSED_FIELD_MISSING', `新規フィールド ${step.targetRef} が提案（proposedFields）にありません`); return r; }
           const code = p.suggestedCode || p.label;
           const type = step.actionType === 'ADD_LOOKUP' ? 'LOOKUP' : (p.type === 'UNKNOWN' ? (spec.fieldType || 'UNKNOWN') : p.type);
-          if (model.fields[code]) invalid('FIELD_CODE_COLLISION', `フィールドコード「${code}」は既に存在します`);
+          const already = model.fields[code];
+          if (already && already.origin === 'proposed') invalid('PLAN_INTERNAL_DUPLICATE', already.temporaryId === p.temporaryId ? `新規フィールド ${p.temporaryId}（${code}）は ${already.stepId} で既に追加しています（同じ新規フィールドを 2 回追加。ルックアップにするなら ADD_LOOKUP 1 回にまとめます）` : `フィールドコード「${code}」は ${already.stepId} で追加する新規フィールドと重複します`);
+          else if (already) invalid('FIELD_CODE_COLLISION', `フィールドコード「${code}」は既に存在します`);
           if (RESERVED_CODES.includes(code)) invalid('RESERVED_CODE', `「${code}」は予約されたフィールドコードです`);
           if (!CODE_RE.test(code) || /^[0-9]/.test(code)) issue('INVALID_CODE', 'medium', `フィールドコード「${code}」は kintone の命名規則に合わない可能性があります（要確認）`);
-          if (Object.values(model.fields).some(f => f.label === p.label)) issue('LABEL_DUPLICATE', 'medium', `フィールド名「${p.label}」は既存のフィールドと重複します`);
+          const sameLabel = Object.values(model.fields).find(f => f.label === p.label && f.code !== code);
+          if (sameLabel) issue('LABEL_DUPLICATE', 'medium', sameLabel.origin === 'proposed' ? `フィールド名「${p.label}」は ${sameLabel.stepId} で追加する新規フィールドと重複します` : `フィールド名「${p.label}」は既存のフィールドと重複します`);
           if (!KINTONE_FIELD_TYPES.includes(type)) invalid('INVALID_FIELD_TYPE', `フィールド型「${type}」は kintone の型ではありません`);
           if (OPTION_TYPES.includes(type) && !(p.options || spec.options || []).length) issue('OPTIONS_MISSING', 'medium', '選択肢が指定されていません（要確認）');
           if ([...resolvedCodes.entries()].some(([tid, c]) => tid !== p.temporaryId && c === code)) invalid('PLAN_INTERNAL_DUPLICATE', `同じコード「${code}」を別の step でも追加しています`);
@@ -5414,6 +5417,7 @@
             const lk = { app: spec.sourceApp || null, keyField: spec.keyField || null, mappings: (spec.mappings || []).map(m => ({ from: m.from, to: m.to })) };
             field.lookup = lk;
             if (!lk.app) issue('LOOKUP_SOURCE_UNKNOWN', 'medium', '参照元アプリが指定されていません（要確認）');
+            else if (!/^[0-9]+$/.test(String(lk.app).trim())) { issue('LOOKUP_SOURCE_NOT_ID', 'medium', `参照元アプリ「${lk.app}」はアプリ ID ではありません（参照元のアプリを確認してください）`); if (r.status === STATUS.VALID) r.status = STATUS.NEEDS_CONFIRMATION; }
             validateLookupMappings(lk, step, r, { model, resolveField, requireField, invalid, issue, selfCode: code, addingStepOf });
           }
           model.fields[code] = field;
@@ -5742,6 +5746,10 @@
       // plan 内で追加した通知同士の重複（reviewStep で PLAN_INTERNAL_* として issue 済みのものを conflicts にも集約）
       for (const r of results.values()) for (const i of r.issues) if (i.code.startsWith('PLAN_INTERNAL') && !conflicts.some(c => c.stepIds.includes(r.stepId) && c.code === i.code)) conflicts.push({ code: i.code, severity: i.severity, stepIds: [r.stepId, ...(i.existing?.stepId ? [i.existing.stepId] : [])], message: i.message, existing: i.existing ?? null, proposed: i.proposed ?? null });
       for (const r of results.values()) for (const i of r.issues) if ((i.code === 'DUPLICATE' || i.code === 'POSSIBLE_DUPLICATE' || i.code === 'LOOKUP_DEST_CONFLICT' || i.code === 'ACTION_SAME_CONDITION' || i.code === 'ACTION_CONDITION_OVERLAP') && !conflicts.some(c => c.stepIds.includes(r.stepId) && c.message === i.message)) conflicts.push({ code: i.code, severity: i.severity, stepIds: [r.stepId], message: i.message, existing: i.existing ?? null, proposed: i.proposed ?? null });
+      // 同じ参照元アプリ・キーのルックアップを複数の step が追加 → kintone では 1 つのルックアップで複数項目を取得できる
+      const lookups = new Map();
+      for (const r of results.values()) if (r.diff.changeType === CHANGE.ADD && r.diff.after && r.diff.after.lookup && r.diff.after.lookup.app) { const k = `${r.diff.after.lookup.app}|${r.diff.after.lookup.keyField || ''}`; lookups.set(k, [...(lookups.get(k) || []), r.stepId]); }
+      for (const [k, ids] of lookups) if (ids.length > 1) conflicts.push({ code: 'LOOKUP_SPLIT', severity: 'medium', stepIds: ids, message: `${ids.join(', ')} は同じ参照元（アプリ ${k.split('|')[0]} / キー ${k.split('|')[1] || '—'}）のルックアップです。1 つのルックアップで複数の項目を取得できます（分けると利用者が ${ids.length} 回選ぶことになります）` });
       // プロセス: 到達不能なステータス（遷移先として現れない新規ステータス）・遷移先の無いステータス
       const states = model.process.states, actions = model.process.actions;
       for (const s of states.filter(x => x.origin === 'proposed')) {

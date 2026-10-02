@@ -251,6 +251,20 @@ console.log('\n--- 9. staging E2E（2026-10-02）で見つかった実データ�
   assert(evRemoved && evRemoved.severity === 'high' && /recordAdded/.test(evRemoved.message) && upd.summary.counts.highRisk === 1, '通知イベントの削減（既存の通知が止まる）→ 高リスク');
   const condOk = review(plan([step('P1', 'ADD_NOTIFICATION', 'NOTIFICATION', '高額', [], { spec: { targets: ['FIELD_ENTITY:owner_group'], filterCond: 'amount >= "1000000" and ステータス in ("承認待ち")' } })]));
   assert(!codes(st(condOk, 'P1')).includes('COND_NOT_EXPRESSION'), '演算子を含む条件式は散文扱いしない');
+  // C（3 回目の実行）: ADD_FIELD の後に同じ NEW_FIELD_n を ADD_LOOKUP で「変換」しようとする / 参照元が散文 / ルックアップを 3 本に分割
+  const split = review(plan([
+    step('P1', 'ADD_FIELD', 'PROPOSED_FIELD', 'NEW_FIELD_1', [], { spec: { fieldType: 'SINGLE_LINE_TEXT' } }),
+    step('P2', 'ADD_FIELD', 'PROPOSED_FIELD', 'NEW_FIELD_2', [], { spec: { fieldType: 'SINGLE_LINE_TEXT' } }),
+    step('P3', 'ADD_LOOKUP', 'PROPOSED_FIELD', 'NEW_FIELD_1', [], { dependsOn: ['P1'], spec: { sourceApp: '顧客マスタアプリID（要確認）', keyField: '顧客コード', mappings: [{ from: '顧客コード', to: 'NEW_FIELD_1' }] } }),
+    step('P4', 'ADD_LOOKUP', 'PROPOSED_FIELD', 'NEW_FIELD_3', [], { dependsOn: ['P2'], spec: { sourceApp: '顧客マスタアプリID（要確認）', keyField: '顧客コード', mappings: [{ from: '住所', to: 'NEW_FIELD_2' }] } }),
+    step('P5', 'ADD_LOOKUP', 'PROPOSED_FIELD', 'NEW_FIELD_4', [], { dependsOn: ['P2'], spec: { sourceApp: '顧客マスタアプリID（要確認）', keyField: '顧客コード', mappings: [{ from: '電話番号', to: 'NEW_FIELD_2' }] } }),
+  ], [pf('NEW_FIELD_1', '顧客コード', 'customer_code2', 'SINGLE_LINE_TEXT'), pf('NEW_FIELD_2', '住所', 'address', 'SINGLE_LINE_TEXT'), pf('NEW_FIELD_3', '顧客参照1', 'cust_ref1', 'LOOKUP'), pf('NEW_FIELD_4', '顧客参照2', 'cust_ref2', 'LOOKUP')]));
+  const p3 = st(split, 'P3');
+  assert(p3.status === 'INVALID' && codes(p3).includes('PLAN_INTERNAL_DUPLICATE') && !codes(p3).includes('FIELD_CODE_COLLISION') && p3.issues.some(i => /P1/.test(i.message)), '同じ NEW_FIELD_n を 2 回追加 → PLAN_INTERNAL_DUPLICATE（既存との衝突ではなく plan 内の重複。追加した step を明示）');
+  assert(codes(st(split, 'P4')).includes('LOOKUP_SOURCE_NOT_ID') && st(split, 'P4').status === 'NEEDS_CONFIRMATION', '参照元アプリが数値 ID でない（散文）→ LOOKUP_SOURCE_NOT_ID（要確認）');
+  assert(split.conflicts.some(c => c.code === 'LOOKUP_SPLIT' && c.stepIds.includes('P4') && c.stepIds.includes('P5')), '同じ参照元・キーのルックアップが複数 → LOOKUP_SPLIT（1 つのルックアップにまとめられる）');
+  const idOk = review(plan([step('P1', 'ADD_LOOKUP', 'PROPOSED_FIELD', 'NEW_FIELD_1', [], { spec: { sourceApp: '999999', keyField: '顧客コード', mappings: [{ from: '住所', to: 'secret_memo' }] } })], [pf('NEW_FIELD_1', '顧客参照', 'cust_ref', 'LOOKUP')]));
+  assert(!codes(st(idOk, 'P1')).includes('LOOKUP_SOURCE_NOT_ID') && !idOk.conflicts.some(c => c.code === 'LOOKUP_SPLIT'), '数値の参照元・1 本のルックアップは指摘しない');
   assert(JSON.stringify(INPUTS.data) === SNAPSHOT, '§9 の後も DATA は不変');
 }
 
