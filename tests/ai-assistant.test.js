@@ -15,7 +15,7 @@ const { buildScanPayload } = require('./helpers/scan-payload.js');
 const { makeFakeHost } = require('./helpers/fake-dom.js');
 const FX = require('./fixtures/ai-context-app.js');
 
-const { KTDeps, KTScan, KTContext, KTContextUi, KTAiClient, mountAiDocsPanel, SCRIPT_VERSION } = loadToolkit();
+const { KTDeps, KTScan, KTContext, KTContextUi, KTAiClient, mountAiWorkspace, SCRIPT_VERSION } = loadToolkit();
 const { assert, state } = makeAssert();
 const C = KTAiClient.ERROR_CODES;
 
@@ -85,7 +85,7 @@ function mount({ token = 'tok', health = HEALTH_OK, responses = [], onAsk = null
   const flow = connectFlow || { start: async () => { throw new KTAiClient.AiClientError({ code: C.TRANSPORT_ERROR, message: 'fake flow' }); }, cancel() { }, reopen: () => false, state: () => ({ phase: 'idle' }), isRunning: () => false };
   const host = makeFakeHost();
   const copies = [];
-  const panel = mountAiDocsPanel(host, {
+  const panel = mountAiWorkspace(host, {
     getInputs: () => INPUTS, setPreview: () => { }, copyText: async (t) => { copies.push(t); return true; },
     colors: { border: '#ccc', bg: '#fff' },
     ...(paid ? { settings, session, hostname: 't.cybozu.com', devMode, connectFlow: flow } : {}),

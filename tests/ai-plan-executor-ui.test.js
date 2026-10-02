@@ -1,4 +1,4 @@
-// Preview Executor の UI（mountAiDocsPanel: 実行前レビューの「動作テスト環境へ反映」/ 最終確認 / 進捗 / 結果 / 未対応 / 監査 JSON）
+// Preview Executor の UI（mountAiWorkspace: 実行前レビューの「動作テスト環境へ反映」/ 最終確認 / 進捗 / 結果 / 未対応 / 監査 JSON）
 //
 // 検証内容（§35）: preview button / confirmation / progress / success / failure / unsupported / verified / simulation mismatch /
 //   production deploy button absent / stale / 権限
@@ -7,7 +7,7 @@
 'use strict';
 const { loadToolkit, makeAssert } = require('./helpers/load-toolkit.js');
 const { makeFakeHost } = require('./helpers/fake-dom.js');
-const { KTDeps, KTScan, KTContext, KTAiClient, mountAiDocsPanel } = loadToolkit();
+const { KTDeps, KTScan, KTContext, KTAiClient, mountAiWorkspace } = loadToolkit();
 const { assert, state } = makeAssert();
 const FX = require('./fixtures/ai-context-app.js');
 const { buildScanPayload } = require('./helpers/scan-payload.js');
@@ -59,7 +59,7 @@ function mount({ planResponse = PLAN_X, inputs = INPUTS, executor = undefined } 
   const host = makeFakeHost();
   const copies = [], downloads = [];
   const mock = makeKintoneMock(inputs.data);
-  const panel = mountAiDocsPanel(host, { getInputs: () => inputs, setPreview: () => { }, copyText: async (t) => { copies.push(t); return true; }, downloadText: (name, text) => downloads.push({ name, text }), colors: { border: '#ccc', bg: '#fff' }, settings, session, hostname: 't.cybozu.com', connectFlow: flow, executor: executor === undefined ? { api: mock.api, appId: '341' } : executor });
+  const panel = mountAiWorkspace(host, { getInputs: () => inputs, setPreview: () => { }, copyText: async (t) => { copies.push(t); return true; }, downloadText: (name, text) => downloads.push({ name, text }), colors: { border: '#ccc', bg: '#fff' }, settings, session, hostname: 't.cybozu.com', connectFlow: flow, executor: executor === undefined ? { api: mock.api, appId: '341' } : executor });
   const $ = (id) => host.querySelector(`#${id}`);
   return { host, panel, $, copies, downloads, mock, session };
 }

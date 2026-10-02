@@ -1,4 +1,4 @@
-// tokenless connect（Browser Authorization Session）: KTAiClient.createConnectFlow ＋ mountAiDocsPanel の接続 UI
+// tokenless connect（Browser Authorization Session）: KTAiClient.createConnectFlow ＋ mountAiWorkspace の接続 UI
 //
 // 検証内容:
 //   - PKCE: verifier は memory のみ・Gateway には S256 challenge だけ・complete で verifier を送る
@@ -15,7 +15,7 @@
 const nodeCrypto = require('crypto');
 const { loadToolkit, makeAssert } = require('./helpers/load-toolkit.js');
 const { makeFakeHost } = require('./helpers/fake-dom.js');
-const { KTAiClient, mountAiDocsPanel, KTDeps, KTScan, KTContext } = loadToolkit();
+const { KTAiClient, mountAiWorkspace, KTDeps, KTScan, KTContext } = loadToolkit();
 const { assert, state } = makeAssert();
 const C = KTAiClient.ERROR_CODES;
 const cryptoObj = nodeCrypto.webcrypto;
@@ -229,7 +229,7 @@ console.log('\n--- 3. popup blocked / cancel / denied / expired / 不明 / Gatew
   }
 }
 
-console.log('\n--- 4. UI（mountAiDocsPanel）---');
+console.log('\n--- 4. UI（mountAiWorkspace）---');
 {
   const FX = require('./fixtures/ai-context-app.js');
   const { buildScanPayload } = require('./helpers/scan-payload.js');
@@ -250,7 +250,7 @@ console.log('\n--- 4. UI（mountAiDocsPanel）---');
     const flow = KTAiClient.createConnectFlow({ session: session2, hostname: 'h', transport: gw.transport, sleep: sleepTick, cryptoObj, openUrl: (u) => { opened.push(u); return !blocked; } });
     const host = makeFakeHost();
     const copies = [];
-    mountAiDocsPanel(host, { getInputs: () => INPUTS, setPreview: () => { }, copyText: async (t) => { copies.push(t); return true; }, colors: { border: '#ccc', bg: '#fff' }, settings, session: session2, hostname: 'h', connectFlow: flow, devMode });
+    mountAiWorkspace(host, { getInputs: () => INPUTS, setPreview: () => { }, copyText: async (t) => { copies.push(t); return true; }, colors: { border: '#ccc', bg: '#fff' }, settings, session: session2, hostname: 'h', connectFlow: flow, devMode });
     const $ = (id) => host.querySelector(`#${id}`);
     return { host, $, gw, flow, opened, storage, settings, session: session2, copies };
   };
@@ -325,7 +325,7 @@ console.log('\n--- 4. UI（mountAiDocsPanel）---');
     const opened = [];
     const flow = KTAiClient.createConnectFlow({ session, hostname: 'h', transport: u1.gw.transport, sleep: sleepTick, cryptoObj, openUrl: (x) => { opened.push(x); return true; } });
     const host = makeFakeHost();
-    mountAiDocsPanel(host, { getInputs: () => INPUTS, setPreview: () => { }, copyText: async () => true, colors: { border: '#ccc', bg: '#fff' }, settings, session, hostname: 'h', connectFlow: flow });
+    mountAiWorkspace(host, { getInputs: () => INPUTS, setPreview: () => { }, copyText: async () => true, colors: { border: '#ccc', bg: '#fff' }, settings, session, hostname: 'h', connectFlow: flow });
     await tick(); await tick(); await tick();
     const $ = (id) => host.querySelector(`#${id}`);
     assert($('kt-ai-session').style.display === 'flex' && $('kt-ai-ask').disabled === false && opened.length === 0 && u1.gw.reqs.filter(r => r.url.endsWith('/v2/token/exchange')).length === 1, 'reload 後: Refresh で復帰・承認ページは開かない');

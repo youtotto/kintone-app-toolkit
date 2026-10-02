@@ -1,4 +1,4 @@
-// 無料版「AI向けドキュメント」UI（KTContextUi ＋ mountAiDocsPanel）のテスト
+// 無料版「AI向けドキュメント」UI（KTContextUi ＋ mountAiWorkspace）のテスト
 //
 // 検証内容:
 //   1. UI mount（パネル HTML・対象/プリセットの初期化）
@@ -20,7 +20,7 @@ const { makeFakeHost, optionValues, unescape } = require('./helpers/fake-dom.js'
 const FX = require('./fixtures/ai-context-app.js');
 const REAL = require('./fixtures/scanner-cache-297.js');
 
-const { KTDeps, KTScan, KTContext, KTContextUi, mountAiDocsPanel } = loadToolkit();
+const { KTDeps, KTScan, KTContext, KTContextUi, mountAiWorkspace } = loadToolkit();
 const { assert, state } = makeAssert();
 
 function buildInputs({ withScan = true, withIncoming = true, cachedOnly = false } = {}) {
@@ -43,7 +43,7 @@ function mount(inputs, { runScan = undefined } = {}) {
   const host = makeFakeHost();
   const copies = [];
   const previews = [];
-  const panel = mountAiDocsPanel(host, {
+  const panel = mountAiWorkspace(host, {
     getInputs: () => inputs,
     setPreview: (text, lang) => { previews.push({ text, lang }); },
     copyText: async (t) => { copies.push(t); return true; },

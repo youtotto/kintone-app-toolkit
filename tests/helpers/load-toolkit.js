@@ -5,13 +5,13 @@ const fs = require('fs');
 const path = require('path');
 const vm = require('vm');
 
-function loadToolkit() {
+function loadToolkit({ document: docOverride = null } = {}) {
   const SRC = path.join(__dirname, '..', '..', 'kintoneAppToolkit.user.js');
   let code = fs.readFileSync(SRC, 'utf8');
   const lastClose = code.lastIndexOf('})();');
   if (lastClose < 0) throw new Error('IIFE close not found');
   code = code.slice(0, lastClose)
-    + '\n  globalThis.__TEST__ = { KTDeps, KTScan, KTIncoming, KTContext, KTContextUi, KTAiClient, KTQueryCheck, KTPlanReview, KTPlanExecutor, mountAiDocsPanel, SCRIPT_VERSION };\n'
+    + '\n  globalThis.__TEST__ = { KTDeps, KTScan, KTIncoming, KTContext, KTContextUi, KTAiClient, KTQueryCheck, KTPlanReview, KTPlanExecutor, KTAiConversation, KTAiChatUi, mountAiWorkspace, mountRoot, renderTemplates, renderAiWorkspace, SCRIPT_VERSION };\n'
     + code.slice(lastClose);
 
   const noop = () => { };
@@ -22,7 +22,8 @@ function loadToolkit() {
     AbortController, TextEncoder, TextDecoder, URL, btoa, atob, Uint8Array,   // ブラウザにもある標準 API（timeout の中断・サイズ計測・PKCE で使う）
     localStorage: fakeStorage, sessionStorage: fakeStorage,
     navigator: {},
-    document: {
+    // Phase 15: mountRoot（タブ構成）のテストでは fake-dom.js の makeFakeDocument() を渡す
+    document: docOverride || {
       createElement: () => ({ style: {}, setAttribute: noop, addEventListener: noop, appendChild: noop }),
       querySelector: () => null, getElementById: () => null,
       head: { appendChild: noop }, body: { appendChild: noop, removeChild: noop },

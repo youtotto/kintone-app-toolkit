@@ -1,4 +1,4 @@
-// Change Plan Review の UI（mountAiDocsPanel: 実行前レビュー / step ごとの Toolkit 検証 / Before・After / 競合 / プロセス図 / Review JSON / 判断）
+// Change Plan Review の UI（mountAiWorkspace: 実行前レビュー / step ごとの Toolkit 検証 / Before・After / 競合 / プロセス図 / Review JSON / 判断）
 //
 // 検証内容（§41）: review summary / safe・review・blocked / Before・After / conflict / Process diff / proposed field /
 //   impact mismatch / unsupported action / Review JSON（Executor-ready）/ AI 提案と Toolkit 検証の分離 / 既存 Planner UI・Q&A・Free 回帰
@@ -7,7 +7,7 @@
 'use strict';
 const { loadToolkit, makeAssert } = require('./helpers/load-toolkit.js');
 const { makeFakeHost } = require('./helpers/fake-dom.js');
-const { KTDeps, KTScan, KTContext, KTAiClient, KTContextUi, KTPlanReview, mountAiDocsPanel } = loadToolkit();
+const { KTDeps, KTScan, KTContext, KTAiClient, KTContextUi, KTPlanReview, mountAiWorkspace } = loadToolkit();
 const { assert, state } = makeAssert();
 const FX = require('./fixtures/ai-context-app.js');
 const { buildScanPayload } = require('./helpers/scan-payload.js');
@@ -65,7 +65,7 @@ function mount({ planResponse = PLAN_B, inputs = INPUTS } = {}) {
   const flow = { start: async () => { throw new Error('x'); }, cancel() { }, reopen: () => false, state: () => ({ phase: 'idle' }), isRunning: () => false };
   const host = makeFakeHost();
   const copies = [];
-  const panel = mountAiDocsPanel(host, { getInputs: () => inputs, setPreview: () => { }, copyText: async (t) => { copies.push(t); return true; }, colors: { border: '#ccc', bg: '#fff' }, settings, session, hostname: 't.cybozu.com', connectFlow: flow });
+  const panel = mountAiWorkspace(host, { getInputs: () => inputs, setPreview: () => { }, copyText: async (t) => { copies.push(t); return true; }, colors: { border: '#ccc', bg: '#fff' }, settings, session, hostname: 't.cybozu.com', connectFlow: flow });
   const $ = (id) => host.querySelector(`#${id}`);
   return { host, panel, $, copies };
 }

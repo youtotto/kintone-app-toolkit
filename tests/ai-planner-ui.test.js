@@ -1,4 +1,4 @@
-// AI Change Planner の UI（mountAiDocsPanel のモード切替・変更計画の作成・表示）と KTAiClient.plan / validatePlan
+// AI Change Planner の UI（mountAiWorkspace のモード切替・変更計画の作成・表示）と KTAiClient.plan / validatePlan
 //
 // 検証内容（Phase 7 §38）:
 //   - mode switch（質問する / 変更計画を作る）/ goal 入力・例プリセット / 無料: 変更計画 Prompt の生成・コピー
@@ -11,7 +11,7 @@
 'use strict';
 const { loadToolkit, makeAssert } = require('./helpers/load-toolkit.js');
 const { makeFakeHost } = require('./helpers/fake-dom.js');
-const { KTDeps, KTScan, KTContext, KTAiClient, KTContextUi, mountAiDocsPanel } = loadToolkit();
+const { KTDeps, KTScan, KTContext, KTAiClient, KTContextUi, mountAiWorkspace } = loadToolkit();
 const { assert, state } = makeAssert();
 const FX = require('./fixtures/ai-context-app.js');
 const { buildScanPayload } = require('./helpers/scan-payload.js');
@@ -91,7 +91,7 @@ function mount({ health = HEALTH_BOTH, planResponses = [], askResponses = [], co
   const flow = { start: async () => { throw new Error('x'); }, cancel() { }, reopen: () => false, state: () => ({ phase: 'idle' }), isRunning: () => false };
   const host = makeFakeHost();
   const copies = [];
-  const panel = mountAiDocsPanel(host, { getInputs: () => INPUTS, setPreview: () => { }, copyText: async (t) => { copies.push(t); return true; }, colors: { border: '#ccc', bg: '#fff' }, settings, session, hostname: 't.cybozu.com', connectFlow: flow });
+  const panel = mountAiWorkspace(host, { getInputs: () => INPUTS, setPreview: () => { }, copyText: async (t) => { copies.push(t); return true; }, colors: { border: '#ccc', bg: '#fff' }, settings, session, hostname: 't.cybozu.com', connectFlow: flow });
   const $ = (id) => host.querySelector(`#${id}`);
   return { host, panel, $, calls, copies, settings };
 }
@@ -178,9 +178,11 @@ console.log('\n--- 3. UI: 変更計画の作成（loading → result）---');
   const json = JSON.parse(m.copies[m.copies.length - 1]);
   assert(json.planVersion === '1' && json.steps.length === 5 && json.steps[0].execution.mode === 'PLAN_ONLY' && !('clientWarnings' in json) && !('usage' in json), 'Change Plan JSON のコピー（Executor へ渡す形: planVersion / steps / execution）');
   assert(m.panel.lastPlan().goal === GOAL, 'lastPlan');
-  // モードを Q&A に戻すと plan の結果は隠れ、戻すと再表示
-  m.panel.setMode('qa'); assert(m.$('kt-ai-plan-result').style.display === 'none', 'Q&A モードでは plan 結果を隠す');
-  m.panel.setMode('plan'); assert(m.$('kt-ai-plan-result').style.display === '', 'plan モードで再表示');
+  // Phase 15: 計画 / Review は Context ペインのモードに紐づかず、drawer の「計画 / レビュー」ペインに残る（Q&A に切り替えても消えない）
+  m.panel.setMode('qa'); assert(m.$('kt-ai-plan-result').style.display === '' && m.panel.lastPlan() && m.panel.lastReview(), 'Q&A モードに切り替えても計画 / レビューは残る（AI タブの計画ペイン）');
+  m.panel.setMode('plan'); assert(m.$('kt-ai-plan-result').style.display === '', 'plan モードでも表示されたまま');
+  assert(m.panel.drawerState().open === true && m.panel.drawerState().pane === 'evidence', 'drawer は開いたまま（直前の根拠チップで根拠ペイン）。計画の受信で drawer が開く');
+  m.panel.openDrawer('plan'); assert(m.panel.drawerState().pane === 'plan', '計画ペインへ切り替え');
 }
 
 console.log('\n--- 4. UI: errors / entitlement / Q&A と無料機能は不変 ---');
