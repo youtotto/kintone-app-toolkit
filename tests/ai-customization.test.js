@@ -164,6 +164,10 @@ console.log('\n--- §51-3. Toolkit Review: 統合先が曖昧 / 本文なし / P
   assert(unknownField.jsReview.status === 'INVALID' && unknownField.jsReview.issues.some(i => i.code === 'JS_FIELD_UNKNOWN'), '存在しないフィールドを計画に含む: INVALID');
   const missing = reviewPlan(planOf({ steps: [JS_STEP('C9')], customizations: [cust()] }));
   assert(missing.jsReview.status === 'INVALID' && missing.jsReview.issues.some(i => i.code === 'CUSTOMIZATION_NOT_FOUND'), 'step が指す customization が無い: INVALID');
+  // 実機（Scenario A 2 回目）: 依存する標準設定（新しいステータス等）が無効 → JS は BLOCKED_BY_DEPENDENCY で生成不可（存在しない設定名を前提にしたコードを作らない）
+  const depBad = reviewPlan(planOf({ steps: [mkStep('P1', 'ADD_FIELD', 'PROPOSED_FIELD', 'NEW_FIELD_9', { fieldType: 'DROP_DOWN', options: ['a'] }, { title: '提案に無い新規フィールド' }), JS_STEP('C1', { dependsOn: ['P1'] })], customizations: [cust({ dependsOn: ['P1'] })], solution: 'HYBRID' }));
+  assert(depBad.jsReview.status === 'BLOCKED_BY_DEPENDENCY' && depBad.jsReview.codeGeneration.supported === false && depBad.jsReview.codeGeneration.reason === 'BLOCKED_BY_DEPENDENCY' && depBad.review.hybrid.customization.blocked.includes('P2') && !depBad.review.hybrid.customization.generatable.includes('P2'), '依存する標準設定が無効: JS は BLOCKED_BY_DEPENDENCY・生成不可（generatable に入らない）');
+  assert(/依存する標準設定が無効/.test(KTContextUi.planHtml(depBad.plan, depBad.review)), '実行前レビュー: 生成できない理由を日本語で');
   // 実機（Scenario C）: 「警告メッセージを表示」なのに amount が READ → 生成コード（error = CONTROL）と計画が不一致になる → ヒント（低）
   const readOnly = reviewPlan(planOf({ steps: [JS_STEP('C1', { title: '金額が100万円以上なら警告メッセージを表示（JavaScript）' })], customizations: [{ ...NEW_JS_CUST(), fields: [{ code: 'amount', access: 'READ' }, { code: 'ステータス', access: 'READ' }] }] }), INPUTS_PLAIN);
   assert(readOnly.jsReview.issues.some(i => i.code === 'JS_ACCESS_HINT' && i.severity === 'low') && readOnly.jsReview.codeGeneration.supported === true, '要件が警告表示なのに CONTROL のフィールドが無い（複数フィールドで自動調整の対象外）: JS_ACCESS_HINT（低。生成は可能）');

@@ -6469,7 +6469,11 @@
       for (const id of order) {
         const r = results.get(id);
         const blockedBy = (byId.get(id)?.dependsOn || []).filter(dep => { const d = results.get(dep); return !d || d.status === STATUS.INVALID || d.status === STATUS.BLOCKED_BY_DEPENDENCY; });
-        if (blockedBy.length && r.status !== STATUS.INVALID) { r.status = STATUS.BLOCKED_BY_DEPENDENCY; r.safety = SAFETY.BLOCKED; r.blockedBy = blockedBy; r.issues.push({ code: 'BLOCKED_BY_DEPENDENCY', severity: 'high', message: `依存する ${blockedBy.join(', ')} が無効のため実行できません` }); }
+        if (blockedBy.length && r.status !== STATUS.INVALID) {
+          r.status = STATUS.BLOCKED_BY_DEPENDENCY; r.safety = SAFETY.BLOCKED; r.blockedBy = blockedBy; r.issues.push({ code: 'BLOCKED_BY_DEPENDENCY', severity: 'high', message: `依存する ${blockedBy.join(', ')} が無効のため実行できません` });
+          // Phase 16（実機）: 依存する標準設定（新しいステータス等）が無効なら、その前提で書く JavaScript も生成しない（存在しない設定名を参照するコードになる）
+          if (r.codeGeneration) { r.codeGeneration.supported = false; r.codeGeneration.reason = 'BLOCKED_BY_DEPENDENCY'; }
+        }
       }
       // 競合に関わる step の status を反映
       for (const c of conflicts) for (const sid of c.stepIds) { const r = results.get(sid); if (!r) continue; const want = c.severity === 'high' ? STATUS.NEEDS_CONFIRMATION : STATUS.WARNING; if (STATUS_RANK[want] > STATUS_RANK[r.status]) r.status = want; if (!r.issues.some(i => i.code === c.code && i.message === c.message)) r.issues.push({ code: c.code, severity: c.severity, message: c.message }); if (r.safety === SAFETY.SAFE) r.safety = SAFETY.REVIEW_REQUIRED; }
@@ -11226,7 +11230,8 @@
       const [sfText, sfColor] = RSAFETY[r.safety] || [r.safety, '#555'];
       const lines = (r.diff?.human || []).map(l => `<div style="font-size:11px;">${esc(l)}</div>`).join('');
       const issues = (r.issues || []).map(i => `<div style="font-size:11px; color:${i.severity === 'high' ? '#b00020' : i.severity === 'medium' ? '#b26a00' : '#555'};">${i.severity === 'high' ? '⚠' : '・'} ${esc(i.message)}</div>`).join('');
-      const gen = r.codeGeneration ? `<div style="font-size:11px; margin-top:2px; color:${r.codeGeneration.supported ? '#2e7d32' : '#b26a00'};">${r.codeGeneration.supported ? '✓ コード生成できます（Executor は反映しません）' : `△ コード生成はまだできません（${esc(r.codeGeneration.reason || '要確認')}）`}</div>${r.codeGeneration.supported ? `<div style="margin-top:4px;"><button type="button" class="btn kt-ai-act" data-act="generate" data-cid="${esc(r.customization?.customizationId || '')}" style="height:24px; font-size:11px; border-color:#6a1b9a;">コードを作る</button></div>` : ''}` : '';
+      const GEN_REASON_JA = { INVALID: '計画が無効', STRATEGY_NOT_GENERATED: '方針が生成の対象外', PLATFORM_UNSPECIFIED: 'PC / モバイル未定', EVENT_MISSING: 'イベント未定', TARGET_FILE_MISSING: '統合先の JS 未指定', BLOCKED_BY_DEPENDENCY: '依存する標準設定が無効', CUSTOMIZATION_NOT_FOUND: 'customization が無い' };
+      const gen = r.codeGeneration ? `<div style="font-size:11px; margin-top:2px; color:${r.codeGeneration.supported ? '#2e7d32' : '#b26a00'};">${r.codeGeneration.supported ? '✓ コード生成できます（Executor は反映しません）' : `△ コード生成はまだできません（${esc(GEN_REASON_JA[r.codeGeneration.reason] || r.codeGeneration.reason || '要確認')}）`}</div>${r.codeGeneration.supported ? `<div style="margin-top:4px;"><button type="button" class="btn kt-ai-act" data-act="generate" data-cid="${esc(r.customization?.customizationId || '')}" style="height:24px; font-size:11px; border-color:#6a1b9a;">コードを作る</button></div>` : ''}` : '';
       return `<div class="kt-ai-review-step" data-step="${esc(r.stepId)}" style="margin-top:6px; padding:6px 8px; border-radius:6px; background:rgba(0,0,0,.04); border-left:3px solid ${stColor};">
         <div><b>Toolkit で確認した結果</b> ${badge(stText, stColor)}${badge(sfText, sfColor)}${changeBadges(r)}${r.blockedBy?.length ? badge(`依存: ${r.blockedBy.join(', ')}`, '#b00020') : ''}${r.solution === 'CUSTOMIZATION' ? badge('JavaScript', '#6a1b9a') : ''}</div>
         ${lines}${issues}${gen}
