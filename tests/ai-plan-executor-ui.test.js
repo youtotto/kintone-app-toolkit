@@ -377,6 +377,57 @@ console.log('\n--- 2e. Phase 12: プロセス管理の最終確認（§22）・B
   assert(audit.execution.process && audit.execution.process.planned && audit.execution.process.actual && audit.rollback.status === 'ROLLED_BACK_VERIFIED' && audit.rollback.steps[0].actionType === 'RESTORE_PROCESS_SETTINGS', '監査 JSON に Before / Planned / Actual のプロセスと rollback');
 }
 
+console.log('\n--- 2f. Phase 13: ルックアップ（§38 参照元の表示 / §39 最終確認 / §40 参照元が読めない / §41 結果 / Rollback）---');
+{
+  const PLAN_LK = { ...PLAN_X, plan: { ...PLAN_X.plan, missingCapabilities: [], proposedFields: [
+    { temporaryId: 'NEW_FIELD_1', label: '顧客住所', suggestedCode: 'customer_address', type: 'SINGLE_LINE_TEXT', typeValid: true, required: false, options: [], reason: 'r', evidenceIds: [E('owner')], alternativeExistingFieldCode: null, codeConflict: false, labelDuplicate: false },
+    { temporaryId: 'NEW_FIELD_2', label: '与信枠', suggestedCode: 'customer_credit', type: 'NUMBER', typeValid: true, required: false, options: [], reason: 'r', evidenceIds: [E('owner')], alternativeExistingFieldCode: null, codeConflict: false, labelDuplicate: false },
+  ], steps: [
+    mkStep('P1', 'ADD_FIELD', 'PROPOSED_FIELD', 'NEW_FIELD_1', { fieldType: 'SINGLE_LINE_TEXT' }, { title: '顧客住所フィールドを追加' }),
+    mkStep('P2', 'ADD_FIELD', 'PROPOSED_FIELD', 'NEW_FIELD_2', { fieldType: 'NUMBER' }, { title: '与信枠フィールドを追加' }),
+    mkStep('P3', 'UPDATE_LOOKUP', 'LOOKUP', 'customer_lookup', { addMappings: [{ relatedField: 'address', field: 'NEW_FIELD_1' }, { relatedField: 'credit', field: 'NEW_FIELD_2' }] }, { title: '顧客マスタ参照で住所と与信枠も取得', dependsOn: ['P1', 'P2'] }),
+  ], summary: { steps: 3, invalidSteps: 0, needsConfirmation: 0, proposedFields: 2, questions: 0 } } };
+  const m = mount({ planResponse: PLAN_LK });
+  await tick(); const h = await runPlan(m);
+  assert(h.includes('id="kt-ai-review-crossapp"') && h.includes('✓ App 500「顧客マスタ」：フィールド設定を取得済み（revision 21') && h.includes('実行直前にもう一度取得して照合します'), '§38: Review に参照元アプリ（App 500「顧客マスタ」・取得済み・revision）');
+  assert(h.includes('✎ ルックアップ「顧客マスタ参照」（customer_lookup）を変更') && h.includes('参照元: App 500「顧客マスタ」 / キー: code（顧客コード）') && h.includes('＋ 取得項目: address（住所） → customer_address（顧客住所）・この計画で追加') && h.includes('＋ 取得項目: credit（与信枠） → customer_credit（与信枠）・この計画で追加'), '§38: 参照元 / キー / 追加する取得項目（この計画で追加）を Review に表示');
+  for (const id of ['P1', 'P2', 'P3']) m.panel.decide(id, 'approve');
+  const e0 = execHtml(m);
+  assert(e0.includes('✓ フィールド追加') && e0.includes('✎ ルックアップ変更') && /承認済み・実行可能[\s\S]*?<b>3 件/.test(e0), 'Executor の件数: フィールド追加 2 / ルックアップ変更 1');
+  await click(m, 'kt-ai-exec-start'); await tick();
+  const e1 = execHtml(m);
+  assert(m.panel.executorState().stage === 'confirm' && e1.includes('id="kt-ai-exec-lookup-confirm"') && e1.includes('⚠ ルックアップを変更します') && e1.includes('参照元アプリの設定・レコードは変更しません。') && e1.includes('P3 ルックアップ「顧客マスタ参照」（customer_lookup）'), '§39: ⚠ ルックアップを変更します / 参照元アプリは変更しない');
+  assert(e1.includes('参照元: App 500「顧客マスタ」 / キー: code') && e1.includes('＋ 取得項目: address（住所） → customer_address（この計画で追加）') && e1.includes('＋ 取得項目: credit（与信枠） → customer_credit（この計画で追加）') && e1.includes('既存の取得項目 2 件（code → customer_code, name → case_name）はそのまま') && e1.includes('参照元アプリ「顧客マスタ」の設定は変更しません（フィールド定義は Review 時点と同じ・revision 21）'), '§39: 参照元 / キー / ＋ 取得項目（この計画で追加）/ 既存はそのまま / 参照元の定義は Review 時点と同じ');
+  assert(/既存設定の変更[\s\S]*?✎ ルックアップ 1 件/.test(e1) && /追加[\s\S]*?＋ フィールド 2 件/.test(e1) && e1.includes('変更する属性: 取得項目（参照元アプリ・参照キー・既存の取得項目・表示名・必須はそのまま') && e1.includes('検索方法は kintone が管理するため検証の対象外'), '§39: 追加 2 / 既存設定の変更 1・変更する属性・検索方法の注記');
+  await click(m, 'kt-ai-exec-go'); await tick(); await tick();
+  const ex = m.panel.executorState().execution;
+  assert(m.panel.executorState().stage === 'done' && ex.status === 'DONE' && ex.steps.every(s => s.status === 'VERIFIED') && m.mock.st.fields.customer_lookup.lookup.fieldMappings.length === 4 && m.mock.st.fields.customer_lookup.lookup.relatedApp.app === '500', '反映: 3 step VERIFIED・取得項目 4 件・参照元は不変');
+  const e2 = execHtml(m);
+  assert(e2.includes('✓ 3 件 VERIFIED') && e2.includes('id="kt-ai-exec-lookup-result"') && e2.includes('✓ ルックアップ「顧客マスタ参照」: 取得項目 2 → 4 件。参照元 App 500「顧客マスタ」: 取得元フィールドは存在・参照元のフィールド定義は Review 時点と同じ。検索方法は kintone が管理（検証対象外）') && e2.includes('Simulationとの一致：✓') && e2.includes('ルックアップの依存 customer_lookup:') && hasButton(e2, '変更前の状態に戻す'), '§41: 結果にルックアップの行（取得項目 2 → 4・参照元の確認・検索方法の注記）と再解析の edge');
+  await click(m, 'kt-ai-exec-rollback-start'); await tick();
+  const r1 = execHtml(m);
+  assert(m.panel.executorState().stage === 'rollback-confirm' && r1.includes('・ルックアップ変更 1 件') && r1.includes('・フィールド追加 2 件') && r1.includes('実行前のルックアップ設定（取得項目・選択時表示・絞り込み・並び順）に戻す。参照元アプリには触れない') && r1.indexOf('ルックアップ変更') < r1.indexOf('フィールドを削除'), 'rollback 確認: ルックアップの復元（先）とフィールド削除（後）');
+  await click(m, 'kt-ai-exec-rollback-go'); await tick(); await tick();
+  const r2 = execHtml(m);
+  assert(m.panel.executorState().stage === 'rolled-back' && m.panel.executorState().rollback.status === 'ROLLED_BACK_VERIFIED' && r2.includes('動作テスト環境を実行前の状態に戻しました。') && m.mock.st.fields.customer_lookup.lookup.fieldMappings.length === 2 && !m.mock.st.fields.customer_address && !m.mock.st.fields.customer_credit, 'rollback: 取得項目 2 件・追加フィールドなしに戻る');
+  await click(m, 'kt-ai-exec-audit-copy'); await tick();
+  const audit = JSON.parse(m.copies[m.copies.length - 1]);
+  assert(audit.crossApp && audit.crossApp[0].appId === '500' && audit.crossApp[0].reviewed.fieldsHash === audit.crossApp[0].current.fieldsHash && audit.rollback.steps[0].actionType === 'RESTORE_LOOKUP_SETTINGS' && audit.execution.actualAfter.updatedLookups.join() === '顧客マスタ参照', '監査 JSON: crossApp（指紋）・rollback の先頭は RESTORE_LOOKUP_SETTINGS・updatedLookups');
+  // §40: 参照元アプリへのアクセス権が無い（Review は読めていたが、実行時に読めない）
+  const m2 = mount({ planResponse: PLAN_LK });
+  await tick(); await runPlan(m2);
+  for (const id of ['P1', 'P2', 'P3']) m2.panel.decide(id, 'approve');
+  m2.mock.ctl.relatedUnavailable = '500';
+  await click(m2, 'kt-ai-exec-start'); await tick();
+  const b1 = execHtml(m2);
+  assert(m2.panel.executorState().stage === 'blocked' && b1.includes('P3 顧客マスタ参照で住所と与信枠も取得：<b>実行不可</b>') && b1.includes('顧客マスタのフィールド設定を確認できません。参照元アプリへのアクセス権を確認してください') && b1.includes('[RELATED_APP_SETTINGS_UNAVAILABLE]') && b1.includes('設定は変更していません。'), '§40: 参照元を読めない → 実行不可・「顧客マスタのフィールド設定を確認できません。参照元アプリへのアクセス権を確認してください」');
+  // §38: Review 時点で参照元が読めない → 実行不可（推測しない）
+  const inputs3 = buildInputs(); inputs3.data.relatedApps['500'] = { appId: '500', name: null, code: null, revision: null, fields: null, error: { code: 'CB_NO02', message: '権限がありません。', status: 403 } };
+  const m3 = mount({ planResponse: PLAN_LK, inputs: inputs3 });
+  await tick(); const h3 = await runPlan(m3);
+  assert(h3.includes('× App 500：フィールド設定を確認できません（権限がありません。）。参照元アプリへのアクセス権を確認してください。参照先のフィールドは推測しません') && /P3[\s\S]*?× 実行不可/.test(h3), '§38 / §40: Review 時点で参照元が読めない → × 実行不可・推測しない');
+}
+
 console.log('\n--- 3. 回帰: Review UI の既存要素は変わらない ---');
 {
   const m = mount();
