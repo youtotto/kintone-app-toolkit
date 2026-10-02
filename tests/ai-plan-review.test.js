@@ -283,6 +283,9 @@ console.log('\n--- 9. staging E2E（2026-10-02）で見つかった実データ�
   // Phase 9 staging E2E: AI が存在しないイベント名（recordUpdated）を書いた → 要確認
   const badEv = review(plan([step('P1', 'ADD_NOTIFICATION', 'NOTIFICATION', '更新通知', [], { spec: { targets: ['FIELD_ENTITY:owner_group'], events: ['recordUpdated'] } })]));
   assert(codes(st(badEv, 'P1')).includes('NOTIFICATION_EVENT_UNKNOWN') && st(badEv, 'P1').status === 'NEEDS_CONFIRMATION' && st(badEv, 'P1').diff.after.events.length === 0, '未知のイベント名 → NOTIFICATION_EVENT_UNKNOWN（要確認・After に載せない）');
+  // Phase 9 staging E2E（app 341）: AI が filterCond: "なし" と書いた → 空として扱う（散文の条件と誤認しない）
+  const noneCond = review(plan([step('P1', 'ADD_VIEW', 'VIEW', '期限順', [], { spec: { name: '期限順', fields: ['case_name', 'owner', 'due_date'], filterCond: 'なし', sort: 'due_date asc' } })]));
+  assert(st(noneCond, 'P1').status === 'VALID' && st(noneCond, 'P1').diff.after.filterCond === '' && !codes(st(noneCond, 'P1')).includes('COND_NOT_EXPRESSION'), '「なし」「none」「—」などの placeholder は空扱い（COND_NOT_EXPRESSION にしない）');
   assert(JSON.stringify(INPUTS.data) === SNAPSHOT, '§9 の後も DATA は不変');
 }
 

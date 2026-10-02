@@ -5151,7 +5151,9 @@
     function normalizeSpec(step, model, proposedMap) {
       const spec = {};
       const s = step.spec && typeof step.spec === 'object' ? step.spec : null;
-      const put = (k, v) => { if (v == null) return; if (Array.isArray(v) ? v.length : String(v).trim() !== '') spec[k] = v; };
+      // AI が「なし」「none」「—」などを値として書くことがある（staging E2E で filterCond: "なし"）。空と同じ意味なので捨てる
+      const PLACEHOLDER_RE = /^(なし|無し|指定なし|条件なし|設定なし|特になし|none|n/a|null|undefined|-|—|－|–)$/i;
+      const put = (k, v) => { if (v == null) return; if (typeof v === 'string' && PLACEHOLDER_RE.test(v.trim())) return; if (Array.isArray(v) ? v.length : String(v).trim() !== '') spec[k] = v; };
       if (s) {
         for (const k of Object.keys(DETAIL_KEYS)) {
           const v = s[k];
