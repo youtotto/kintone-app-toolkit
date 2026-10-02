@@ -21,18 +21,24 @@ function makeKintoneMock(data, { permission = true, autoPlace = true } = {}) {
     revision: Number(data.views?.revision || 1), prodRevision: Number(data.views?.revision || 1), prodViews: clone(data.views?.views || {}),
     // プロセス管理（Phase 12）: GET /preview/app/status と同じ形（enable / states / actions）。states / actions は PUT で全体置換
     status: data.status ? normalizeStatus({ enable: !!data.status.enable, states: clone(data.status.states || {}), actions: clone(data.status.actions || []) }) : { enable: false, states: null, actions: null },
+    // 参照元アプリ（Phase 13）: data.relatedApps と同じ形（appId → { name, code, revision, fields }）。運用環境の GET だけ（書き込み API は無い）
+    relatedApps: clone(data.relatedApps || {}),
   };
   const calls = [];
   const err = (code, message) => Object.assign(new Error(message), { code, message });
   // mutateList(what, list): 全体置換 API が受け取った一覧を保存直前に書き換える（検証の mutant。what = 'general' | 'perRecord' | 'reminders' | 'views'）
   // sideEffectOnStatusPut: プロセス管理の PUT 後に kintone が自動で一覧 / 通知を足す挙動を模す（Phase 12 §17）
-  const ctl = { failAddField: null, mangleLabel: false, failPut: null, dropOneExistingOnPut: null, mangleReminderTime: false, onWrite: null, mutateList: null, failDelete: null, sideEffectOnStatusPut: null };
+  // relatedUnavailable: 参照元アプリ ID → その参照元の GET は CB_NO02、参照するルックアップの lookup は null（kintone の挙動）/ mutateLookup(lookup): PUT 直前にルックアップ設定を書き換える mutant
+  const ctl = { failAddField: null, mangleLabel: false, failPut: null, dropOneExistingOnPut: null, mangleReminderTime: false, onWrite: null, mutateList: null, failDelete: null, sideEffectOnStatusPut: null, relatedUnavailable: null, mutateLookup: null };
   const mutate = (what, list) => (ctl.mutateList ? ctl.mutateList(what, list) : list);
   const guard = () => { if (!permission) throw err('CB_NO02', '権限がありません。'); };
   const checkRev = (revision) => { if (revision != null && revision !== '' && String(revision) !== String(st.revision)) throw err('GAIA_CO02', '指定したリビジョンが最新ではありません。'); };
   const write = (what) => { calls.push(what); if (ctl.onWrite) ctl.onWrite(what); if (ctl.failPut === what.split(' ')[1]) throw err('GAIA_XX', `モックの失敗（${what}）`); };
   const api = {
-    async getPreviewFields() { calls.push('GET fields'); guard(); return { properties: clone(st.fields), revision: String(st.revision) }; },
+    async getPreviewFields() { calls.push('GET fields'); guard(); const props = clone(st.fields); if (ctl.relatedUnavailable) for (const f of Object.values(props)) if (f.lookup && String(f.lookup.relatedApp?.app) === String(ctl.relatedUnavailable)) f.lookup = null; return { properties: props, revision: String(st.revision) }; },
+    // 参照元アプリ（運用環境・read-only）
+    async getApp(id) { calls.push('GET app'); const r = st.relatedApps[String(id)]; if (!r || String(ctl.relatedUnavailable) === String(id)) throw err('CB_NO02', '権限がありません。'); return { appId: String(id), name: r.name, code: r.code || '' }; },
+    async getAppFields(id) { calls.push('GET app fields'); const r = st.relatedApps[String(id)]; if (!r || String(ctl.relatedUnavailable) === String(id)) throw err('CB_NO02', '権限がありません。'); return { properties: clone(r.fields), revision: String(r.revision ?? 1) }; },
     async getPreviewLayout() { calls.push('GET layout'); guard(); return { layout: clone(st.layout), revision: String(st.revision) }; },
     async getPreviewViews() { calls.push('GET views'); guard(); return { views: clone(st.views), revision: String(st.revision) }; },
     async getProductionViews() { calls.push('GET prod views'); return { views: clone(st.prodViews), revision: String(st.prodRevision) }; },
@@ -60,7 +66,25 @@ function makeKintoneMock(data, { permission = true, autoPlace = true } = {}) {
         if (p.type !== cur.type) throw err('GAIA_IL04', 'フィールドの種類は変更できません（モック）');
         if (['STATUS', 'STATUS_ASSIGNEE', 'CATEGORY'].includes(cur.type)) throw err('GAIA_IL04', 'このフィールドは変更できません');
         const next = { ...cur };
-        for (const [k, v] of Object.entries(p)) if (k !== 'type' && k !== 'code') next[k] = v;
+        for (const [k, v] of Object.entries(p)) {
+          if (k === 'type' || k === 'code') continue;
+          if (k === 'lookup') {
+            // kintone: lookup の下位パラメーターは個別に更新（省略 = 変更なし）。relatedApp / relatedKeyField は PUT で変更できない（モックの厳格化: 送ったら拒否）
+            if (!cur.lookup) throw err('GAIA_IL04', `「${code}」はルックアップフィールドではありません（モック）`);
+            if (!v || typeof v !== 'object') throw err('GAIA_IL02', 'lookup はオブジェクトです');
+            if ('relatedApp' in v || 'relatedKeyField' in v) throw err('GAIA_IL04', 'relatedApp / relatedKeyField は変更できません（モックの厳格化）');
+            const rel = st.relatedApps[String(cur.lookup.relatedApp?.app)];
+            const relFields = rel ? Object.assign({}, rel.fields, ...Object.values(rel.fields).filter(f => f.type === 'SUBTABLE').map(f => f.fields || {})) : null;
+            for (const m of v.fieldMappings || []) { if (!st.fields[m.field]) throw err('GAIA_IL04', `コピー先「${m.field}」が存在しません`); if (relFields && !relFields[m.relatedField]) throw err('GAIA_IL04', `取得元「${m.relatedField}」が参照元アプリに存在しません`); }
+            for (const c of v.lookupPickerFields || []) if (relFields && !relFields[c]) throw err('GAIA_IL04', `選択時に表示するフィールド「${c}」が参照元アプリに存在しません`);
+            if ((v.fieldMappings || []).some((m, i) => (v.fieldMappings || []).findIndex(x => x.field === m.field) !== i)) throw err('GAIA_IL04', '同じコピー先が複数あります');
+            let merged = { ...cur.lookup, ...clone(v) };
+            if (ctl.mutateLookup) merged = ctl.mutateLookup(merged);
+            next.lookup = merged;
+            continue;
+          }
+          next[k] = v;
+        }
         if (p.code && p.code !== code) { delete st.fields[code]; next.code = p.code; st.fields[p.code] = next; } else st.fields[code] = next;
       }
       st.revision += 1;

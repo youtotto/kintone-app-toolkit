@@ -6592,6 +6592,9 @@
       ADD_PROCESS_STATUS: { previewExecute: true, verify: true, rollbackStrategy: 'RESTORE_PROCESS_SETTINGS', conditional: 'プロセス管理が有効・到達経路あり' },
       ADD_PROCESS_ACTION: { previewExecute: true, verify: true, rollbackStrategy: 'RESTORE_PROCESS_SETTINGS', conditional: 'プロセス管理が有効・遷移元 1 件' },
       UPDATE_PROCESS: { previewExecute: true, verify: true, rollbackStrategy: 'RESTORE_PROCESS_SETTINGS', conditional: '条件 / 遷移先 / 作業者 / 実行可能ユーザー（削除・改名・有効化・無効化・分岐は計画のみ）' },
+      // Phase 13: 既存ルックアップ。参照元アプリの定義を実行直前に read-only で再取得して指紋を照合し、「現在の lookup ＋ 承認分」の完全な lookup（fieldMappings / lookupPickerFields / filterCond / sort）で PUT する。
+      //   relatedApp / relatedKeyField は送らない（変更できない項目。変更は計画のみ）。新規ルックアップ（ADD_LOOKUP）は計画のみ（参照元の選択は人が kintone で行う）
+      UPDATE_LOOKUP: { previewExecute: true, verify: true, rollbackStrategy: 'RESTORE_LOOKUP_SETTINGS', conditional: '取得項目 / 選択時に表示するフィールドの追加・絞り込み / 並び順（参照元・キーの変更・取得項目の削除は計画のみ）' },
     });
     const ACTION_CAPABILITIES = Object.freeze(Object.fromEntries(Object.entries(KTPlanReview.ACTION_CAPABILITIES).map(([k, v]) => {
       const ex = EXECUTOR_COLUMNS[k] || { previewExecute: false, verify: !!v.validate, rollbackStrategy: v.simulate ? 'RESTORE_SNAPSHOT' : 'NONE' };
@@ -7211,6 +7214,151 @@
 
     /** UPDATE_VIEW（Phase 11）: 表形式の一覧の表示フィールド / 絞り込み / 並び順だけ。形式・カレンダー・カスタマイズ HTML は対象外 */
     const SORT_RE = /^[^\s,]+\s+(asc|desc)$/i;
+    /** Review 時点の同一性（diff.target.identity）と現在のフィールド（kintone の raw）のルックアップ設定を比べ、違う属性名を返す（空なら同一） */
+    function lookupIdentityMismatch(f, identity) {
+      if (!f) return ['missing'];
+      if (!f.lookup) return ['lookup'];
+      const lk = f.lookup, out = [];
+      if (identity.type && f.type !== identity.type) out.push('type');
+      if (String(lk.relatedApp?.app ?? '') !== String(identity.relatedApp?.app ?? '')) out.push('relatedApp');
+      if (String(lk.relatedKeyField ?? '') !== String(identity.relatedKeyField ?? '')) out.push('relatedKeyField');
+      if (!same((lk.fieldMappings || []).map(m => `${m.relatedField}→${m.field}`), (identity.mappings || []).map(m => `${m.from}→${m.to}`))) out.push('fieldMappings');
+      if (!same(lk.lookupPickerFields || [], identity.pickerFields || [])) out.push('lookupPickerFields');
+      if (normCondE(lk.filterCond) !== normCondE(identity.filterCond)) out.push('filterCond');
+      if (normCondE(lk.sort) !== normCondE(identity.sort)) out.push('sort');
+      return out;
+    }
+    /** kintone の raw フィールドから、PUT で変えられるルックアップの 4 項目だけを取り出す（relatedApp / relatedKeyField は含めない） */
+    const lookupOf = (f) => (f && f.lookup ? { fieldMappings: (f.lookup.fieldMappings || []).map(m => ({ field: m.field, relatedField: m.relatedField })), lookupPickerFields: [...(f.lookup.lookupPickerFields || [])], filterCond: f.lookup.filterCond || '', sort: f.lookup.sort || '' } : null);
+    const LOOKUP_SORT_RE = /^[^\s,]+\s+(asc|desc)$/i;
+    /**
+     * UPDATE_LOOKUP（Phase 13）: Review が固定した既存ルックアップ（identity: 参照元 / キー / 取得項目 / 選択時表示 / 絞り込み / 並び順 ＋ 参照元アプリの指紋）に、
+     * 承認された追加分だけを足した「完全な lookup」で PUT する。既存の取得項目・選択時表示・絞り込み・並び順・表示名・必須・型は現在値を保つ。
+     * 参照元 / キーの変更・取得項目の削除は反映しない（計画のみ）。対象が Review 時点と 1 属性でも違えば TARGET_CHANGED
+     */
+    HANDLERS.UPDATE_LOOKUP = {
+      prepare(step, { stepReview, fieldsNow = null, relatedNow = null }) {
+        const before = stepReview?.diff?.before, after = stepReview?.diff?.after, identity = stepReview?.diff?.target?.identity;
+        if (!before || !after || !before.lookup || !after.lookup || !identity || identity.kind !== 'LOOKUP') return { unsupported: 'NO_LOOKUP_SPEC', message: 'Review に変更前後のルックアップ定義（対象の同一性）がありません。計画を作り直してください' };
+        const b = before.lookup, a = after.lookup;
+        if (String(a.app ?? '') !== String(b.app ?? '') || String(a.keyField ?? '') !== String(b.keyField ?? '')) return { unsupported: 'LOOKUP_SOURCE_CHANGE_NOT_SUPPORTED', message: '参照元アプリ / 参照キーの変更は反映しません（計画のみ。kintone の画面で行ってください）' };
+        const bm = b.mappings || [], am = a.mappings || [];
+        const removed = bm.filter(m => !am.some(x => x.to === m.to));
+        if (removed.length) return { unsupported: 'LOOKUP_MAPPING_REMOVAL_NOT_SUPPORTED', message: `取得項目の削除（${removed.map(m => m.to).join(', ')}）は反映しません（計画のみ）` };
+        const removedPicker = (b.pickerFields || []).filter(c => !(a.pickerFields || []).includes(c));
+        if (removedPicker.length) return { unsupported: 'LOOKUP_PICKER_REMOVAL_NOT_SUPPORTED', message: `選択時に表示するフィールドの削除（${removedPicker.join(', ')}）は反映しません（計画のみ）` };
+        const addedMappings = am.filter(m => !bm.some(x => x.to === m.to && x.from === m.from));
+        const overwritten = addedMappings.filter(m => bm.some(x => x.to === m.to));
+        const addedPicker = (a.pickerFields || []).filter(c => !(b.pickerFields || []).includes(c));
+        const changes = {};
+        if (addedMappings.length) changes.mappings = { from: bm.map(m => `${m.from}→${m.to}`), to: am.map(m => `${m.from}→${m.to}`) };
+        if (addedPicker.length) changes.pickerFields = { from: [...(b.pickerFields || [])], to: [...(a.pickerFields || [])] };
+        if (normCondE(a.filterCond) !== normCondE(b.filterCond)) changes.filterCond = { from: b.filterCond || '', to: String(a.filterCond || '').trim() };
+        if (normCondE(a.sort) !== normCondE(b.sort)) changes.sort = { from: b.sort || '', to: String(a.sort || '').trim() };
+        if (!Object.keys(changes).length) return { unsupported: 'NO_CHANGE', message: '変更内容がありません' };
+        const appLabel = `App ${b.app}${identity.related?.name ? `「${identity.related.name}」` : ''}`;
+        // 現在のフィールド（prepare 時の動作テスト環境 ＋ 先行 ADD_FIELD の予定）: 対象がルックアップで、コピー先が実在する
+        if (fieldsNow) {
+          const f = fieldsNow[before.code];
+          if (!f) return { unsupported: 'TARGET_MISSING', message: `フィールド「${before.code}」が動作テスト環境にありません` };
+          if (f.lookup === null) return { unsupported: 'RELATED_APP_SETTINGS_UNAVAILABLE', message: `ルックアップ「${before.label || before.code}」の設定を kintone が返しません。${identity.related?.name || '参照元アプリ'}のフィールド設定を確認できません。参照元アプリへのアクセス権を確認してください` };
+          if (!f.lookup) return { unsupported: 'NOT_A_LOOKUP', message: `「${before.code}」は動作テスト環境ではルックアップフィールドではありません` };
+          for (const m of addedMappings) if (!fieldsNow[m.to]) return { unsupported: 'DESTINATION_MISSING', message: `コピー先「${m.to}」が動作テスト環境にありません（先行する ADD_FIELD が反映されている必要があります）` };
+        }
+        // 参照元アプリの現在の定義（prepare で再取得したもの）: 取得元・選択時表示・絞り込み・並び順のフィールドが実在する
+        if (relatedNow) {
+          const rel = relatedNow[String(b.app)];
+          if (!rel || !rel.available) return { unsupported: 'RELATED_APP_SETTINGS_UNAVAILABLE', message: `${identity.related?.name || `参照元 ${appLabel}`}のフィールド設定を確認できません${rel?.error?.message ? `（${rel.error.message}）` : ''}。参照元アプリへのアクセス権を確認してください` };
+          if (!rel.fields[b.keyField]) return { unsupported: 'RELATED_KEY_MISSING', message: `参照キー「${b.keyField}」が参照元 ${appLabel} にありません（参照元アプリの設定が変わっています）` };
+          for (const m of addedMappings) if (!rel.fields[m.from]) return { unsupported: 'RELATED_FIELD_NOT_FOUND', message: `取得元「${m.from}」が参照元 ${appLabel} にありません` };
+          for (const c of addedPicker) if (!rel.fields[c]) return { unsupported: 'PICKER_FIELD_NOT_FOUND', message: `選択時に表示するフィールド「${c}」が参照元 ${appLabel} にありません` };
+          if (changes.filterCond && changes.filterCond.to) { const qc = KTQueryCheck.check(changes.filterCond.to, { fields: rel.fields, usage: 'lookup' }); if (!qc.ok) return { unsupported: 'INVALID_CONDITION', message: `絞り込みが kintone で受理されません: ${qc.errors.map(e => e.message).join('／')}` }; }
+          if (changes.sort) for (const part of changes.sort.to.split(',').map(x => x.trim()).filter(Boolean)) { if (!LOOKUP_SORT_RE.test(part)) return { unsupported: 'INVALID_SORT', message: `並び順「${part}」は「フィールドコード asc|desc」の形ではありません` }; const code = part.split(/\s+/)[0]; if (!rel.fields[code] && !KTQueryCheck.SYSTEM_CODES[code]) return { unsupported: 'SORT_FIELD_UNKNOWN', message: `並び順のフィールド「${code}」が参照元 ${appLabel} にありません` }; }
+        }
+        const label = before.label || before.code;
+        const parts = [];
+        if (addedMappings.length) parts.push(`取得項目 ＋${addedMappings.length}（${addedMappings.map(m => `${m.from}→${m.to}`).join(', ')}）`);
+        if (addedPicker.length) parts.push(`選択時に表示 ＋${addedPicker.join(', ')}`);
+        if (changes.filterCond) parts.push(`絞り込み ${changes.filterCond.from || 'なし'} → ${changes.filterCond.to}`);
+        if (changes.sort) parts.push(`並び順 ${changes.sort.from || 'なし'} → ${changes.sort.to}`);
+        const lookup = { fieldMappings: am.map(m => ({ field: m.to, relatedField: m.from })), lookupPickerFields: [...(a.pickerFields || [])], filterCond: String(a.filterCond || ''), sort: String(a.sort || '') };
+        return {
+          payload: { code: before.code, identity: clone(identity), lookup, changes: Object.keys(changes) },
+          expect: { code: before.code, type: identity.type, relatedApp: { app: String(b.app ?? ''), code: String(b.code ?? '') }, relatedKeyField: b.keyField ?? null, ...clone(lookup), addedMappings: addedMappings.map(m => ({ field: m.to, relatedField: m.from })), addedPickerFields: [...addedPicker] },
+          summary: `✎ ルックアップ「${label}」（${before.code}・参照元 ${appLabel}）: ${parts.join('・')}`,
+          sensitive: [...sensitiveFrom(stepReview, ['LOOKUP_MAPPING_OVERWRITE', 'LOOKUP_DEST_CONFLICT', 'LOOKUP_FILTER_CHANGE', 'LOOKUP_SORT_CHANGE', 'LOOKUP_KEY_NOT_UNIQUE']), ...(overwritten.length && !sensitiveFrom(stepReview, ['LOOKUP_MAPPING_OVERWRITE']).length ? [{ code: 'LOOKUP_MAPPING_OVERWRITE', message: `既存の取得項目の取得元を変更します（${overwritten.map(m => m.to).join(', ')}）` }] : [])],
+          before: Object.fromEntries(Object.entries(changes).map(([k, c]) => [k, c.from])), after: Object.fromEntries(Object.entries(changes).map(([k, c]) => [k, c.to])),
+          targetLabel: label, changeKind: 'UPDATE', condition: changes.filterCond ? changes.filterCond.to : null,
+          crossApp: { appId: String(b.app ?? ''), name: identity.related?.name ?? null, appLabel, reviewed: { revision: identity.related?.revision ?? null, fieldsHash: identity.related?.fieldsHash ?? null } },
+          lookupChanges: stepReview?.diff?.lookupChanges ? clone(stepReview.diff.lookupChanges) : null,
+        };
+      },
+      async apply({ api, appId, revision, snapshot }, p) {
+        const cur = await api.getPreviewFields(appId);
+        const f = cur?.properties?.[p.payload.code];
+        if (!f) throw Object.assign(new Error(`フィールド「${p.payload.code}」が動作テスト環境にありません`), { code: 'TARGET_MISSING' });
+        if (f.lookup === null) throw Object.assign(new Error(`ルックアップ「${p.targetLabel}」の設定を kintone が返しません（参照元アプリへのアクセス権を確認してください）`), { code: 'RELATED_APP_SETTINGS_UNAVAILABLE' });
+        if (!f.lookup) throw Object.assign(new Error(`「${p.payload.code}」はルックアップフィールドではありません`), { code: 'NOT_A_LOOKUP' });
+        const mismatch = lookupIdentityMismatch(f, p.payload.identity);
+        if (mismatch.length) throw targetChanged(`ルックアップ「${p.targetLabel}」`, mismatch);
+        const since = changedSincePrepare(`ルックアップ「${p.targetLabel}」`, f, snapshot?.fields?.properties?.[p.payload.code]);
+        if (since) throw since;
+        // 現在の lookup ＋ 承認分 = 完全な 4 項目。relatedApp / relatedKeyField は送らない（kintone: 省略した項目は変更されない）
+        const nextLookup = clone(p.payload.lookup);
+        const prop = { type: f.type, code: p.payload.code, lookup: nextLookup };
+        const res = await api.updatePreviewFields(appId, { [p.payload.code]: prop }, String(cur?.revision ?? revision ?? ''));
+        const expectedField = { ...clone(f), lookup: { ...clone(f.lookup), ...nextLookup } };
+        return { revision: String(res?.revision ?? ''), requests: [{ method: 'PUT', path: '/k/v1/preview/app/form/fields.json', codes: [p.payload.code], keys: ['lookup'], lookupKeys: [...p.payload.changes] }], before: p.before, after: p.after, expectedField, existingFields: clone(cur?.properties || {}) };
+      },
+      async verify({ api, appId, snapshot }, p, applied) {
+        const cur = await api.getPreviewFields(appId);
+        const f = cur?.properties?.[p.expect.code];
+        const checks = [];
+        const check = (name, ok, expected, actual, extra = {}) => checks.push({ name, ok, expected, actual, ...extra });
+        check('exists', !!f, true, !!f);
+        if (f) {
+          const lk = f.lookup || {};
+          check('isLookup', !!f.lookup, true, !!f.lookup);
+          check('typePreserved', f.type === p.expect.type, p.expect.type, f.type);
+          check('relatedAppPreserved', String(lk.relatedApp?.app ?? '') === p.expect.relatedApp.app, p.expect.relatedApp.app, String(lk.relatedApp?.app ?? ''));
+          check('relatedKeyFieldPreserved', String(lk.relatedKeyField ?? '') === String(p.expect.relatedKeyField ?? ''), p.expect.relatedKeyField, lk.relatedKeyField ?? null);
+          const mapKey = (m) => `${m.relatedField}→${m.field}`;
+          const curMaps = (lk.fieldMappings || []).map(mapKey), expMaps = p.expect.fieldMappings.map(mapKey);
+          check('fieldMappings', same(curMaps, expMaps), expMaps, curMaps);
+          const existing = (p.payload.identity.mappings || []).filter(m => !p.expect.addedMappings.some(x => x.field === m.to)).map(m => `${m.from}→${m.to}`);
+          check('existingMappingsPreserved', existing.every(k => curMaps.includes(k)), existing, curMaps.filter(k => existing.includes(k)));
+          for (const m of p.expect.addedMappings) { check(`added:${m.field}`, curMaps.includes(mapKey(m)), mapKey(m), curMaps.includes(mapKey(m)) ? mapKey(m) : null); const d = cur?.properties?.[m.field]; check(`destinationExists:${m.field}`, !!d, true, !!d); }
+          check('lookupPickerFields', same(lk.lookupPickerFields || [], p.expect.lookupPickerFields), p.expect.lookupPickerFields, lk.lookupPickerFields || []);
+          check('filterCond', normCondE(lk.filterCond) === normCondE(p.expect.filterCond), p.expect.filterCond, lk.filterCond || '');
+          check('sort', normCondE(lk.sort) === normCondE(p.expect.sort), p.expect.sort, lk.sort || '');
+          const prevF = applied?.existingFields?.[p.expect.code] || snapshot?.fields?.properties?.[p.expect.code] || null;
+          if (prevF) { const others = Object.keys({ ...prevF, ...f }).filter(k => k !== 'lookup'); const mutated = others.filter(k => !same(prevF[k], f[k])); check('otherPropertiesPreserved', mutated.length === 0, [], mutated); }
+        }
+        const prevAll = applied?.existingFields || snapshot?.fields?.properties || {};
+        const mutatedOthers = Object.keys({ ...prevAll, ...(cur?.properties || {}) }).filter(c => c !== p.expect.code && !same(prevAll[c], cur?.properties?.[c]));
+        check('otherFieldsPreserved', mutatedOthers.length === 0, [], mutatedOthers);
+        // 参照元アプリ（§32）: 取得元フィールドとキーが今も存在する（read-only の GET。読めなければ UNVERIFIED と明記し、失敗扱いにはしない）
+        if (typeof api.getAppFields === 'function') {
+          try {
+            const rel = await api.getAppFields(p.expect.relatedApp.app);
+            const relM = KTPlanReview.relatedAppModel({ appId: p.expect.relatedApp.app, fields: rel?.properties, revision: rel?.revision }, p.expect.relatedApp.app);
+            const missing = p.expect.fieldMappings.map(m => m.relatedField).filter(c => !relM.fields[c]);
+            check('sourceFieldsExist', missing.length === 0, [], missing);
+            check('relatedKeyExists', !!relM.fields[p.expect.relatedKeyField], true, !!relM.fields[p.expect.relatedKeyField]);
+            const reviewedHash = p.crossApp?.reviewed?.fieldsHash ?? null;
+            check('relatedAppFingerprint', true, reviewedHash, relM.fieldsHash, { note: reviewedHash && relM.fieldsHash !== reviewedHash ? '参照元のフィールド定義が Review 時点と違います（反映後の変更。取得元は上で確認済み）' : '参照元のフィールド定義は Review 時点と同じ' });
+          } catch (e) { check('sourceFieldsExist', true, 'read', 'UNVERIFIED', { note: `参照元アプリの定義を再取得できませんでした（${strErr(e).message}）` }); }
+        }
+        // 検索方法（search mode）は kintone が管理し API では取得・指定できない → 検証対象外（Simulation 不一致ではない）
+        check('searchMode', true, 'SERVER_MANAGED', 'SERVER_MANAGED', { note: 'ルックアップの検索方法は kintone が自動設定し API では読めないため検証の対象外（SEARCH_MODE_SERVER_MANAGED）' });
+        return { ok: checks.every(c => c.ok), checks, revision: String(cur?.revision ?? ''), coverage: { searchMode: 'SEARCH_MODE_SERVER_MANAGED' } };
+      },
+      rollback({ appId, snapshot }, p) {
+        const snapLk = lookupOf(snapshot?.fields?.properties?.[p.expect.code]);
+        return { actionType: 'RESTORE_LOOKUP_SETTINGS', collection: 'fields', target: p.expect.code, api: { method: 'PUT', path: '/k/v1/preview/app/form/fields.json', payload: { app: appId, properties: { [p.expect.code]: { type: p.expect.type, code: p.expect.code, lookup: snapLk || '<snapshot.fields[code].lookup>' } } } }, note: `ルックアップ「${p.targetLabel}」の取得項目 / 選択時表示 / 絞り込み / 並び順を実行前（snapshot）に戻す。追加したコピー先フィールドの削除（DELETE_FIELD）より先に行う` };
+      },
+    };
+
     HANDLERS.UPDATE_VIEW = {
       prepare(step, { stepReview, fieldsNow = null }) {
         const before = stepReview?.diff?.before, after = stepReview?.diff?.after, identity = stepReview?.diff?.target?.identity;
@@ -7579,6 +7727,8 @@
     const SYSTEM_FIELD_TYPES = ['RECORD_NUMBER', 'CREATOR', 'CREATED_TIME', 'MODIFIER', 'UPDATED_TIME', 'STATUS', 'STATUS_ASSIGNEE', 'CATEGORY'];
     const isSystemField = (f) => !!f && SYSTEM_FIELD_TYPES.includes(f.type);
     const viewKey = (v) => ({ type: v.type, fields: v.fields, filterCond: v.filterCond, sort: v.sort });
+    /** Review の Before モデル形のルックアップの比較キー（参照元の code 表記は環境で揺れるので app ID で見る。検索方法は API に無い） */
+    const lookupKey = (f) => ({ app: String(f.lookup?.app ?? ''), keyField: f.lookup?.keyField ?? null, mappings: (f.lookup?.mappings || []).map(m => `${m.from}→${m.to}`), pickerFields: [...(f.lookup?.pickerFields || [])], filterCond: normCondE(f.lookup?.filterCond), sort: normCondE(f.lookup?.sort) });
     /** Review 時点の Before と現在の preview の差（stale 判定）。kinds は比較対象 */
     const notifKey = (n) => ({ scope: n.scope, title: n.scope === 'general' ? '' : (n.title || ''), targets: (n.targets || []).map(t => `${t.type}:${t.code ?? ''}`).sort(), filterCond: normCondE(n.filterCond), events: [...(n.events || [])].sort() });
     const remKey = (n) => ({ title: n.title || '', timing: n.timing, targets: (n.targets || []).map(t => `${t.type}:${t.code ?? ''}`).sort(), filterCond: normCondE(n.filterCond) });
@@ -7613,6 +7763,7 @@
           if (isSystemField(f)) continue;
           const c = current.fields?.[code];
           if (!c) diffs.push({ kind: 'FIELD', id: code, change: 'REMOVED', message: `フィールド「${f.label}」（${code}）が動作テスト環境にありません` });
+          else if (f.lookup && c.lookupUnavailable) diffs.push({ kind: 'FIELD', id: code, change: 'UNAVAILABLE', code: 'RELATED_APP_SETTINGS_UNAVAILABLE', message: `ルックアップ「${f.label}」（${code}）の設定を kintone が返しません（参照元アプリへのアクセス権を確認してください）` });
           else if (!same(fieldKey(f), fieldKey(c))) diffs.push({ kind: 'FIELD', id: code, change: 'CHANGED', message: `フィールド「${f.label}」（${code}）の設定が${baseline}と違います`, before: fieldKey(f), after: fieldKey(c) });
         }
         for (const [code, c] of Object.entries(current.fields || {})) if (!before.fields?.[code] && !isSystemField(c)) diffs.push({ kind: 'FIELD', id: code, change: 'ADDED', message: `動作テスト環境にフィールド「${c.label}」（${code}）が追加されています（未反映の変更）` });
@@ -7627,7 +7778,8 @@
 
     // ================= step の分類（API を呼ばない。UI の件数表示と prepare で共用）=================
     /** 承認 / Review の判定 / allowlist（capability ＋ handler の prepare）/ 依存 の順に、各 step を PENDING / SKIPPED / UNSUPPORTED / BLOCKED に分ける */
-    function classifySteps({ plan, review, approvedSteps = [], fieldsNow = null, processNow = null } = {}) {
+    const LOOKUP_BLOCKING = ['RELATED_APP_SETTINGS_UNAVAILABLE', 'RELATED_FIELD_NOT_FOUND', 'RELATED_KEY_MISSING', 'PICKER_FIELD_NOT_FOUND', 'DESTINATION_MISSING', 'SORT_FIELD_UNKNOWN', 'INVALID_SORT'];
+    function classifySteps({ plan, review, approvedSteps = [], fieldsNow = null, processNow = null, relatedNow = null } = {}) {
       const steps = Array.isArray(plan?.steps) ? plan.steps : [];
       const approved = [...new Set(Array.isArray(approvedSteps) ? approvedSteps : [])];
       const byId = new Map(steps.map(s => [s.id, s]));
@@ -7650,8 +7802,8 @@
         else if (!cap || !cap.previewExecute || !HANDLERS[step.actionType]) set(STEP.UNSUPPORTED, 'PREVIEW_NOT_SUPPORTED', '現在の Executor では自動反映できません');
         else if (step.actionType === 'ADD_PROCESS_STATUS' && (review?.conflicts || []).some(c => c.code === 'STATUS_UNREACHABLE' && (c.stepIds || []).includes(id))) set(STEP.BLOCKED, 'STATUS_UNREACHABLE', 'このステータスへ遷移するアクションが計画に無く孤立するため反映しません（遷移するアクションの step を足してください）');
         else {
-          const p = HANDLERS[step.actionType].prepare(step, { stepReview: r, plan, fieldsNow: ahead, processNow });
-          if (p.unsupported) set(p.unsupported === 'INVALID_CONDITION' ? STEP.BLOCKED : STEP.UNSUPPORTED, p.unsupported, p.message);
+          const p = HANDLERS[step.actionType].prepare(step, { stepReview: r, plan, fieldsNow: ahead, processNow, relatedNow });
+          if (p.unsupported) set(p.unsupported === 'INVALID_CONDITION' || (step.actionType === 'UPDATE_LOOKUP' && LOOKUP_BLOCKING.includes(p.unsupported)) ? STEP.BLOCKED : STEP.UNSUPPORTED, p.unsupported, p.message);
           else { st.prepared = p; if (ahead && step.actionType === 'ADD_FIELD' && p.expect?.code) ahead[p.expect.code] = { type: p.expect.type, code: p.expect.code, label: p.expect.label, required: !!p.expect.required, ...(p.expect.options ? { options: Object.fromEntries(p.expect.options.map((o, i) => [o, { label: o, index: String(i) }])) } : {}) }; }
         }
         states.set(id, st);
@@ -7704,10 +7856,17 @@
         summarize(); return prepared;
       }
       prepared.snapshot = { takenAt: nowIso(now), revision: String(fields?.revision ?? ''), fields: clone(fields), layout: clone(layout), views: clone(views), generalNotify: clone(generalNotify), perRecordNotify: clone(perRecordNotify), reminderNotify: clone(reminderNotify), ...(status ? { status: clone(status) } : {}) };
-      // 現在のフィールドで handler の prepare をやり直す（通知先フィールドの型・条件式・基準フィールドの型・プロセス管理の有効 / 無効を今の設定で確かめる）
-      const previewNow = previewDataFrom({ fields, layout, views, generalNotify, perRecordNotify, reminderNotify, ...(status ? { status } : {}) }, { appId: prepared.appId });
+      // Phase 13: ルックアップの step があれば、参照元アプリの定義を read-only で再取得する（運用環境の GET。参照元アプリには書き込まない）。読めないアプリは推測しない
+      let relatedApps = null, relatedNow = null;
+      if (pending.some(s => s.actionType === 'UPDATE_LOOKUP')) {
+        relatedApps = await fetchRelatedAppsForLookups(api, fields, pending.filter(s => s.actionType === 'UPDATE_LOOKUP').map(s => rv.get(s.stepId)));
+        prepared.snapshot.relatedApps = clone(relatedApps);
+        relatedNow = Object.fromEntries(Object.entries(relatedApps).map(([id, e]) => [id, KTPlanReview.relatedAppModel(e, id)]));
+      }
+      // 現在のフィールドで handler の prepare をやり直す（通知先フィールドの型・条件式・基準フィールドの型・プロセス管理の有効 / 無効・参照元アプリの定義を今の設定で確かめる）
+      const previewNow = previewDataFrom({ fields, layout, views, generalNotify, perRecordNotify, reminderNotify, ...(status ? { status } : {}) }, { appId: prepared.appId, ...(relatedApps ? { relatedApps } : {}) });
       {
-        const re = classifySteps({ plan, review, approvedSteps: approved, fieldsNow: previewNow.fields, processNow: status || null });
+        const re = classifySteps({ plan, review, approvedSteps: approved, fieldsNow: previewNow.fields, processNow: status || null, relatedNow });
         const map = new Map(re.map(s => [s.stepId, s]));
         prepared.steps = prepared.steps.map(s => map.get(s.stepId) || s);
         prepared.temporaryIdMap = {};
@@ -7730,6 +7889,19 @@
       const currentModel = KTPlanReview.buildBeforeModel(previewNow);
       const diffs = diffBefore(before, currentModel, { kinds: ['fields', 'views', 'notifications', 'reminders', ...(status ? ['process'] : [])] });
       if (prepared.revision.reviewed && prepared.revision.production && prepared.revision.reviewed !== prepared.revision.production) diffs.unshift({ kind: 'APP', id: 'revision', change: 'CHANGED', message: `運用環境の設定が Review 後に変更されています（revision ${prepared.revision.reviewed} → ${prepared.revision.production}）` });
+      // ---- 3a. 参照元アプリの指紋（Phase 13）: フィールド定義（fieldsHash）が Review 時点と違えば STALE（LOOKUP_RELATED_APP_CHANGED）。revision だけの違い（一覧・通知など）は警告に留める ----
+      prepared.crossApp = [];
+      for (const st of prepared.steps.filter(x => x.actionType === 'UPDATE_LOOKUP' && x.status !== STEP.SKIPPED)) {
+        const idn = rv.get(st.stepId)?.diff?.target?.identity || null;
+        const ca = st.prepared?.crossApp || (idn ? { appId: String(idn.relatedApp?.app ?? ''), name: idn.related?.name ?? null, reviewed: { revision: idn.related?.revision ?? null, fieldsHash: idn.related?.fieldsHash ?? null } } : null);
+        if (!ca || !ca.appId) continue;
+        const rel = relatedNow?.[ca.appId] || null;
+        const item = { stepId: st.stepId, appId: ca.appId, name: rel?.name || ca.name || null, reviewed: ca.reviewed, current: rel ? { revision: rel.revision, fieldsHash: rel.fieldsHash, available: rel.available, ...(rel.error ? { error: rel.error } : {}) } : null };
+        prepared.crossApp.push(item);
+        if (st.status !== STEP.PENDING || !rel || !rel.available) continue;
+        if (ca.reviewed?.fieldsHash && rel.fieldsHash !== ca.reviewed.fieldsHash) diffs.push({ kind: 'RELATED_APP', id: ca.appId, change: 'CHANGED', code: 'LOOKUP_RELATED_APP_CHANGED', stepId: st.stepId, message: `参照元 App ${ca.appId}${item.name ? `「${item.name}」` : ''} のフィールド設定が Review 時点から変わっています（revision ${ca.reviewed.revision ?? '?'} → ${rel.revision ?? '?'}）。再レビューしてください`, before: ca.reviewed, after: { revision: rel.revision, fieldsHash: rel.fieldsHash } });
+        else if (ca.reviewed?.revision != null && rel.revision != null && String(rel.revision) !== String(ca.reviewed.revision)) st.warnings = [...(st.warnings || []), { code: 'RELATED_APP_REVISION_CHANGED', message: `参照元 App ${ca.appId}${item.name ? `「${item.name}」` : ''} の設定は Review 後に変更されています（revision ${ca.reviewed.revision} → ${rel.revision}）が、フィールド定義（コード / 種類 / 重複禁止 / テーブル）は同じです` }];
+      }
       prepared.stale = { status: diffs.length ? 'STALE' : 'FRESH', diffs };
       if (diffs.length) block('STALE_PLAN', '計画作成後にアプリ設定が変更されています。再レビューしてください。', { count: diffs.length });
 
@@ -7752,6 +7924,22 @@
       prepared.groups = formProcessGroups(prepared.steps);
       summarize();
       return prepared;
+    }
+
+    /** ルックアップの step が参照する参照元アプリ（Review の identity とフィールド定義の双方から）を read-only で取得。prefetch（fetchRelatedApps）と同じ形で返す */
+    async function fetchRelatedAppsForLookups(api, fieldsResp, stepReviews) {
+      const ids = new Set();
+      for (const r of stepReviews || []) { const app = r?.diff?.target?.identity?.relatedApp?.app ?? r?.diff?.before?.lookup?.app; if (app != null && String(app) !== '') ids.add(String(app)); const code = r?.diff?.target?.id; const app2 = fieldsResp?.properties?.[code]?.lookup?.relatedApp?.app; if (app2 != null && String(app2) !== '') ids.add(String(app2)); }
+      const out = {};
+      const errOf = (e) => strErr(e);
+      await Promise.all([...ids].map(async (id) => {
+        if (typeof api.getAppFields !== 'function') { out[id] = { appId: id, name: null, code: null, revision: null, fields: null, error: { code: 'NOT_SUPPORTED', message: '参照元アプリの定義を取得する API がありません', status: null } }; return; }
+        let info = null, infoErr = null, def = null, defErr = null;
+        if (typeof api.getApp === 'function') { try { info = await api.getApp(id); } catch (e) { infoErr = errOf(e); } }
+        try { def = await api.getAppFields(id); } catch (e) { defErr = errOf(e); }
+        out[id] = { appId: id, name: info?.name ?? null, code: info?.code ?? null, revision: def?.revision ?? null, fields: def?.properties ?? null, ...(defErr ? { error: defErr } : infoErr && !def ? { error: infoErr } : {}) };
+      }));
+      return out;
     }
 
     // ================= executePreview =================
@@ -7838,12 +8026,13 @@
           const s = strErr(e);
           l.status = STEP.FAILED; l.error = s; failed = true;
           if (e && typeof e === 'object' && e.applied) { l.partial = clone({ ...e.applied, requests: undefined }); l.requests = e.applied.requests || []; l.revision = e.applied.revision || null; revision = l.revision || revision; }   // 途中まで反映された（rollback の対象）
-          l.reason = isPermissionError(e) ? 'PERMISSION_DENIED' : isRevisionError(e) ? 'REVISION_MISMATCH' : ['TARGET_EXISTS', 'EXACT_DUPLICATE', 'TARGET_CHANGED', 'TARGET_MISSING'].includes(s.code) ? s.code : 'API_ERROR';
+          l.reason = isPermissionError(e) ? 'PERMISSION_DENIED' : isRevisionError(e) ? 'REVISION_MISMATCH' : ['TARGET_EXISTS', 'EXACT_DUPLICATE', 'TARGET_CHANGED', 'TARGET_MISSING', 'RELATED_APP_SETTINGS_UNAVAILABLE', 'NOT_A_LOOKUP'].includes(s.code) ? s.code : 'API_ERROR';
           l.message = l.reason === 'PERMISSION_DENIED' ? 'アプリ設定を変更する権限がありません' : l.reason === 'REVISION_MISMATCH' ? '実行中に他の変更が入りました（revision 不一致）。再レビューしてください' : s.message;
         }
         progress(l); await yieldUi();
       }
       log.afterRevision = revision;
+      if (Array.isArray(prepared.crossApp) && prepared.crossApp.length) log.crossApp = clone(prepared.crossApp);
       const verified = log.steps.filter(s => s.status === STEP.VERIFIED).length;
       const bad = log.steps.filter(s => s.status === STEP.FAILED || s.status === STEP.VERIFY_FAILED).length;
       log.status = bad ? (verified ? RUN.PARTIAL : RUN.FAILED) : RUN.DONE;
@@ -7863,7 +8052,7 @@
         }
         log.reanalysis = reanalyze(previewData, data, log.steps, prepared);
         const verifiedOf = (a) => log.steps.filter(s => s.actionType === a && s.status === STEP.VERIFIED);
-        log.actualAfter = { fieldCount: Object.keys(actual.fields).length, views: actual.views.length, notifications: actual.notifications.general.length + actual.notifications.perRecord.length, reminders: actual.reminders.length, processStates: actual.process.states.length, processActions: actual.process.actions.length, addedStatuses: verifiedOf('ADD_PROCESS_STATUS').map(s => stepLogLabel(s, prepared)), addedActions: verifiedOf('ADD_PROCESS_ACTION').map(s => stepLogLabel(s, prepared)), updatedProcess: verifiedOf('UPDATE_PROCESS').map(s => stepLogLabel(s, prepared)), addedFields: verifiedOf('ADD_FIELD').map(s => stepLogTarget(s, prepared)), addedViews: verifiedOf('ADD_VIEW').map(s => stepLogTarget(s, prepared)), addedNotifications: verifiedOf('ADD_NOTIFICATION').length, addedReminders: verifiedOf('ADD_REMINDER').length, updatedFields: verifiedOf('UPDATE_FIELD').map(s => stepLogTarget(s, prepared)), updatedNotifications: verifiedOf('UPDATE_NOTIFICATION').map(s => stepLogLabel(s, prepared)), updatedReminders: verifiedOf('UPDATE_REMINDER').map(s => stepLogLabel(s, prepared)), updatedViews: verifiedOf('UPDATE_VIEW').map(s => stepLogLabel(s, prepared)) };
+        log.actualAfter = { fieldCount: Object.keys(actual.fields).length, views: actual.views.length, notifications: actual.notifications.general.length + actual.notifications.perRecord.length, reminders: actual.reminders.length, processStates: actual.process.states.length, processActions: actual.process.actions.length, addedStatuses: verifiedOf('ADD_PROCESS_STATUS').map(s => stepLogLabel(s, prepared)), addedActions: verifiedOf('ADD_PROCESS_ACTION').map(s => stepLogLabel(s, prepared)), updatedProcess: verifiedOf('UPDATE_PROCESS').map(s => stepLogLabel(s, prepared)), addedFields: verifiedOf('ADD_FIELD').map(s => stepLogTarget(s, prepared)), addedViews: verifiedOf('ADD_VIEW').map(s => stepLogTarget(s, prepared)), addedNotifications: verifiedOf('ADD_NOTIFICATION').length, addedReminders: verifiedOf('ADD_REMINDER').length, updatedFields: verifiedOf('UPDATE_FIELD').map(s => stepLogTarget(s, prepared)), updatedNotifications: verifiedOf('UPDATE_NOTIFICATION').map(s => stepLogLabel(s, prepared)), updatedReminders: verifiedOf('UPDATE_REMINDER').map(s => stepLogLabel(s, prepared)), updatedViews: verifiedOf('UPDATE_VIEW').map(s => stepLogLabel(s, prepared)), updatedLookups: verifiedOf('UPDATE_LOOKUP').map(s => stepLogLabel(s, prepared)) };
       } catch (e) { log.simulation = { compared: false, match: null, mismatches: [], error: strErr(e).message }; log.actualAfterRaw = null; }
       log.finishedAt = nowIso(now);
       return log;
@@ -7908,6 +8097,12 @@
           if (!sim || !act) { mismatches.push({ stepId: s.stepId, kind: 'FIELD', id: code, message: 'Simulation または実際の設定にフィールドがありません' }); continue; }
           const a = fieldKey(sim), b = fieldKey(act);
           if (!same(a, b)) mismatches.push({ stepId: s.stepId, kind: 'FIELD', id: code, message: 'Simulation と実際の設定が一致しません', simulation: a, actual: b });
+        } else if (s.actionType === 'UPDATE_LOOKUP') {
+          const code = expect?.code;
+          const sim = simAfter.fields?.[code], act = actual.fields?.[code];
+          if (!sim || !act || !sim.lookup || !act.lookup) { mismatches.push({ stepId: s.stepId, kind: 'LOOKUP', id: code, message: 'Simulation または実際の設定に対象のルックアップがありません' }); continue; }
+          const a = lookupKey(sim), b = lookupKey(act);
+          if (!same(a, b)) mismatches.push({ stepId: s.stepId, kind: 'LOOKUP', id: code, message: 'Simulation と実際の設定が一致しません（参照元 / キー / 取得項目 / 選択時表示 / 絞り込み / 並び順）', simulation: a, actual: b });
         } else if (s.actionType === 'UPDATE_NOTIFICATION') {
           const scope = expect?.scope, idx = expect?.index;
           const sim = (simAfter.notifications?.[scope] || [])[idx], act = (actual.notifications?.[scope] || [])[idx];
@@ -7957,6 +8152,17 @@
         if (!code) continue;
         const impact = safe(() => KTDeps.impactOf(after.deps, code), null);
         out.addedFields.push({ code, directRefs: impact ? (impact.direct || []).length : null, indirectRefs: impact ? (impact.indirect || []).length : null });
+      }
+      // Phase 13: 変更したルックアップの依存 edge（コピー先 / 取得元）を再解析前後で数える（新しい取得項目の edge が増えていること）
+      out.updatedLookups = [];
+      const lookupEdges = (deps, code) => (Array.isArray(deps?.edges) ? deps.edges : []).filter(e => e.sourceType === 'FIELD' && e.sourceId === code && (e.relationType === 'LOOKUP_COPY_TO' || e.relationType === 'LOOKUP_PICKER'));
+      for (const s of stepLogs) {
+        if (s.actionType !== 'UPDATE_LOOKUP' || s.status !== STEP.VERIFIED) continue;
+        const code = prepared.steps.find(x => x.stepId === s.stepId)?.prepared?.expect?.code;
+        if (!code) continue;
+        const ea = lookupEdges(after.deps, code), eb = before ? lookupEdges(before.deps, code) : null;
+        const key = (e) => `${e.relationType}:${e.targetId}`;
+        out.updatedLookups.push({ code, edgesBefore: eb ? eb.length : null, edgesAfter: ea.length, newEdges: eb ? ea.filter(e => !eb.some(x => key(x) === key(e))).map(e => ({ relationType: e.relationType, target: e.targetId })) : ea.map(e => ({ relationType: e.relationType, target: e.targetId })), copyTargets: ea.filter(e => e.relationType === 'LOOKUP_COPY_TO').map(e => e.targetId) });
       }
       return out;
     }
@@ -8130,6 +8336,50 @@
           return { ok: checks.every(c => c.ok), checks, revision: String(cur?.revision ?? '') };
         },
       },
+      /**
+       * UPDATE_LOOKUP → ルックアップの 4 項目（取得項目 / 選択時表示 / 絞り込み / 並び順）を snapshot へ戻す（Phase 13）。
+       * 反映直後と現在が違えば止める（第三者の変更を消さない）。参照元アプリの変化は戻す対象ではなく再確認もしない（戻すのはこのアプリの設定。
+       * 取得元が参照元から消えていれば kintone が PUT を拒否する → ROLLBACK_FAILED・再試行なし）。コピー先フィールドの削除（DELETE_FIELD）より先に並ぶ
+       */
+      RESTORE_LOOKUP_SETTINGS: {
+        collection: 'fields',
+        check({ current, expected, snapshot, step, state = current }) {
+          const code = step.target;
+          const curF = current.fields?.properties?.[code], expF = expected.fields?.properties?.[code], snapF = snapshot.fields?.properties?.[code];
+          if (!curF) return { ok: false, code: 'FIELD_MISSING', message: `ルックアップ「${code}」が動作テスト環境にありません` };
+          if (!snapF || !snapF.lookup) return { ok: false, code: 'SNAPSHOT_MISSING', message: `ルックアップ「${code}」の実行前の設定が snapshot にありません` };
+          if (curF.lookup === null) return { ok: false, code: 'RELATED_APP_SETTINGS_UNAVAILABLE', message: `ルックアップ「${curF.label || code}」（${code}）の設定を kintone が返しません（参照元アプリへのアクセス権を確認してください）` };
+          if (same(lookupOf(state.fields?.properties?.[code]), lookupOf(snapF))) return { ok: true, alreadyRestored: true };
+          if (expF && !same(lookupOf(curF), lookupOf(expF))) return { ok: false, code: 'FIELD_CHANGED', message: `ルックアップ「${curF.label || code}」（${code}）の設定が反映後に変更されています（自動では戻しません）`, diffs: [{ kind: 'LOOKUP', id: code, change: 'CHANGED', message: `ルックアップ「${curF.label || code}」（${code}）の取得項目 / 選択時表示 / 絞り込み / 並び順が反映直後と違います`, before: lookupOf(expF), after: lookupOf(curF) }] };
+          return { ok: true };
+        },
+        project(state, snapshot, step) { const code = step.target; const next = { ...state, fields: clone(state.fields) }; const snapLk = lookupOf(snapshot.fields?.properties?.[code]); if (next.fields?.properties?.[code] && snapLk) next.fields.properties[code] = { ...next.fields.properties[code], lookup: { ...clone(next.fields.properties[code].lookup || {}), ...snapLk } }; return next; },
+        async apply({ api, appId, current, expected, snapshot, step }) {
+          const code = step.target;
+          const curF = current.fields.properties[code], snapLk = lookupOf(snapshot.fields.properties[code]);
+          const prop = { type: curF.type, code, lookup: clone(snapLk) };
+          const res = await api.updatePreviewFields(appId, { [code]: prop }, String(current.fields?.revision ?? ''));
+          const expFields = clone(expected.fields); if (expFields?.properties?.[code]) expFields.properties[code] = { ...clone(curF), lookup: { ...clone(curF.lookup || {}), ...clone(snapLk) } };
+          return { revision: String(res?.revision ?? ''), requests: [{ method: 'PUT', path: '/k/v1/preview/app/form/fields.json', codes: [code], keys: ['lookup'] }], expected: { fields: expFields } };
+        },
+        async verify({ api, appId, expected, snapshot, step }) {
+          const code = step.target;
+          const cur = await api.getPreviewFields(appId);
+          const f = cur?.properties?.[code], snapF = snapshot.fields?.properties?.[code] || {};
+          const checks = [];
+          const check = (name, ok, exp, act) => checks.push({ name, ok, expected: exp, actual: act });
+          check('exists', !!f, true, !!f);
+          if (f) {
+            check('restored:lookup', same(lookupOf(f), lookupOf(snapF)), lookupOf(snapF), lookupOf(f));
+            check('codePreserved', f.code === code, code, f.code); check('typePreserved', f.type === snapF.type, snapF.type, f.type);
+            check('relatedAppPreserved', String(f.lookup?.relatedApp?.app ?? '') === String(snapF.lookup?.relatedApp?.app ?? ''), String(snapF.lookup?.relatedApp?.app ?? ''), String(f.lookup?.relatedApp?.app ?? ''));
+            const expF = expected.fields?.properties?.[code] || {};
+            const others = Object.keys({ ...expF, ...f }).filter(k => k !== 'lookup'); const mutated = others.filter(k => !same(expF[k], f[k]));
+            check('otherPropertiesPreserved', mutated.length === 0, [], mutated);
+          }
+          return { ok: checks.every(c => c.ok), checks, revision: String(cur?.revision ?? '') };
+        },
+      },
       /** UPDATE_FIELD → Review 時点の値（snapshot の fields）へ戻す。コード・型・他の属性が反映後に変わっていれば止める */
       RESTORE_FIELD_PROPERTY: {
         collection: 'fields',
@@ -8206,6 +8456,16 @@
       if (stale.length) { rb.stale = { status: 'STALE', diffs: stale.flatMap(x => (x.diffs || []).map(d => ({ stepId: x.stepId, ...d }))) }; block('ROLLBACK_STALE', '反映後に動作テスト環境の設定が変更されているため、自動では元に戻せません。現在の動作テスト環境を確認してください。', { steps: stale.map(x => x.stepId) }); }
       if (rb.steps.some(x => x.status === RB.FAILED)) block('ROLLBACK_NOT_POSSIBLE', '元に戻す方法が無い step があります');
       if (rb.status === RB_RUN.PREPARED && rb.afterRevision && rb.currentRevision && rb.afterRevision !== rb.currentRevision) rb.warnings.push({ code: 'OTHER_CHANGES_SINCE_EXECUTION', message: `反映後に他の設定が変更されています（revision ${rb.afterRevision} → ${rb.currentRevision}）。元に戻す対象の設定は変わっていないため戻せますが、それ以外の変更には触れません` });
+      // Phase 13: 参照元アプリの変化は戻す対象ではない（戻すのはこのアプリのルックアップ設定）。フィールド定義が反映時点から変わっていれば警告だけ出す（取得元が無くなっていれば kintone が PUT を拒否し、失敗として止まる）
+      if (rb.status === RB_RUN.PREPARED && rb.steps.some(x => x.actionType === 'RESTORE_LOOKUP_SETTINGS') && typeof api.getAppFields === 'function') {
+        for (const ca of (Array.isArray(prepared.crossApp) ? prepared.crossApp : [])) {
+          try {
+            const rel = await api.getAppFields(ca.appId);
+            const m = KTPlanReview.relatedAppModel({ appId: ca.appId, fields: rel?.properties, revision: rel?.revision }, ca.appId);
+            if (ca.current?.fieldsHash && m.fieldsHash !== ca.current.fieldsHash) rb.warnings.push({ code: 'RELATED_APP_CHANGED_SINCE_EXECUTION', message: `参照元 App ${ca.appId}${ca.name ? `「${ca.name}」` : ''} のフィールド定義が反映時点から変わっています。ルックアップ設定の復元は行いますが、実行前の取得元フィールドが無くなっていれば kintone が受け付けず、その手順は失敗として止まります（再試行しません）` });
+          } catch (e) { rb.warnings.push({ code: 'RELATED_APP_UNREADABLE', message: `参照元 App ${ca.appId} の定義を確認できませんでした（${strErr(e).message}）。ルックアップ設定の復元は行います` }); }
+        }
+      }
       return rb;
     }
 
@@ -8285,6 +8545,8 @@
         afterSnapshot: execution?.actualAfterRaw ?? null,
         rollbackPlan: execution && prepared ? buildRollbackPlan(execution, prepared) : null,
         rollback: rollbackSection(rollback || execution?.rollback || null),
+        // Phase 13: 参照元アプリ（ID / 名前 / Review 時点と実行時点の revision・fieldsHash）。参照元のレコードデータは含めない
+        crossApp: execution?.crossApp ?? prepared?.crossApp ?? null,
       };
     }
 
@@ -8315,6 +8577,9 @@
         // Phase 12（プロセス管理）: GET / PUT /k/v1/preview/app/status.json（states / actions は全体置換。Change Group が完全な payload を作る）
         getPreviewStatus: (a) => call('/k/v1/preview/app/status.json', 'GET', { app: app(a) }),
         putPreviewStatus: (a, body, revision) => call('/k/v1/preview/app/status.json', 'PUT', { app: app(a), ...body, ...(revision ? { revision } : {}) }),
+        // Phase 13（ルックアップ）: 参照元アプリの定義（運用環境の GET。read-only。参照元アプリへ書き込む関数は無い）
+        getApp: (a) => call('/k/v1/app.json', 'GET', { id: app(a) }),
+        getAppFields: (a) => call('/k/v1/app/form/fields.json', 'GET', { app: app(a) }),
         // 運用環境へ反映する関数は意図的に無い（Phase 9: Preview only）
       };
     }
@@ -8325,6 +8590,7 @@
       recipientEntity, notificationDuplicate, reminderDuplicate, preservationChecks, UPDATABLE_FIELD_KEYS,
       preservationExceptIndex, notificationIdentityMismatch, reminderIdentityMismatch, viewIdentityMismatch,
       PROCESS_GROUP, PROCESS_ACTIONS, processEntity, processIdentityMismatch, formProcessGroups,
+      lookupIdentityMismatch, lookupOf, fetchRelatedAppsForLookups,
     };
   })();
 
