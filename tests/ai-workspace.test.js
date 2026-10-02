@@ -262,6 +262,20 @@ console.log('\n--- 3. AI タブ（mountRoot / switch / minimized / Templates か
   await byId.get('kt-mini').dispatch('click');
   assert(!wrap.classList.contains('is-mini'), 'expanded: 戻る');
   assert(/#kt-toolkit\.is-mini \.body\{ display:none/.test(wrap.innerHTML) && /@media \(max-width: 760px\)/.test(wrap.innerHTML), 'mini の CSS と狭い幅の CSS が root にある');
+  // 全画面のときだけ文字を少し大きく（zoom は .is-full:not(.is-mini) の bar / body だけ。#kt-zoom は全画面でだけ見える）
+  assert(/#kt-toolkit\.is-full:not\(\.is-mini\) > \.body \{ zoom: var\(--kt-full-zoom, 1\.1\); \}/.test(wrap.innerHTML) && /#kt-toolkit:not\(\.is-full\) #kt-zoom, #kt-toolkit\.is-mini #kt-zoom \{ display: none !important; \}/.test(wrap.innerHTML), '全画面の文字サイズ: zoom の CSS（既定 110%・パネル表示 / 最小化では等倍・ボタンは全画面だけ）');
+  const zoomBtn = byId.get('kt-zoom');
+  assert(zoomBtn && zoomBtn.textContent === '文字 110%' && wrap.ktZoom.get() === 1.1, '#kt-zoom: 既定 110%');
+  await zoomBtn.dispatch('click');
+  assert(zoomBtn.textContent === '文字 120%' && wrap.ktZoom.get() === 1.2, '#kt-zoom: 押すと 120%');
+  await zoomBtn.dispatch('click'); await zoomBtn.dispatch('click');
+  assert(zoomBtn.textContent === '文字 100%' && wrap.ktZoom.get() === 1, '#kt-zoom: 130% → 100%（等倍に戻せる）');
+  await zoomBtn.dispatch('click');
+  assert(zoomBtn.textContent === '文字 110%', '#kt-zoom: 100% の次は 110%（巡回）');
+  await byId.get('kt-full').dispatch('click');
+  assert(wrap.classList.contains('is-full'), '全画面: is-full（zoom は CSS で bar / body に効く）');
+  await byId.get('kt-full').dispatch('click');
+  assert(!wrap.classList.contains('is-full'), '全画面: 戻る');
   // Templates 側に AI mode は無い
   const src = renderTemplates.toString();
   assert(!src.includes('value="ai"') && !src.includes('mountAiDocsPanel') && !src.includes('mountAiWorkspace') && !src.includes('id="kt-template-ai"') && !src.includes('getContextInputs') && !src.includes("=== 'ai'"), 'Templates: AI mode（source=ai / AI パネルの mount / #kt-template-ai / getContextInputs）は無い');
@@ -316,7 +330,9 @@ console.log('\n--- 4. AI Workspace: free / connected / responsive / header ---')
   assert(/@media \(max-width: 760px\)\{[^}]*#kt-ai-workspace \.kt-ai-ws-body\{ flex-direction:column; \}/.test(css) && /\.kt-ai-drawer\{ flex:0 0 auto; max-height:55%; \}/.test(css) && /\.kt-ai-card \.kt-ai-mermaid-row\{ flex-direction:column; \}/.test(css), 'narrow width: 会話と drawer は縦積み・Mermaid は縦表示（Edge 半幅）');
   assert(/\.kt-ai-card \.kt-ai-mermaid-row > div\{[^}]*overflow-x:auto/.test(css), 'Mermaid は横スクロール可');
   // drawer
-  assert(c.$('kt-ai-drawer').style.display === 'none' && c.panel.drawerState().open === false, 'drawer は既定で閉じている（会話が主役）');
+  assert(c.$('kt-ai-drawer').style.display === 'flex' && c.panel.drawerState().open === true && c.panel.drawerState().pane === 'plan' && c.$('kt-ai-pane-plan').style.display === 'block' && c.$('kt-ai-pane-context').style.display === 'none' && /詳細パネルを閉じる/.test(c.$('kt-ai-header').innerHTML), 'drawer（計画 / レビューのペイン）は既定で開いている');
+  await c.$('kt-ai-header').dispatch({ type: 'click', target: { id: 'kt-ai-drawer-toggle' } });
+  assert(c.panel.drawerState().open === false && c.$('kt-ai-drawer').style.display === 'none' && /計画 \/ レビューを開く/.test(c.$('kt-ai-header').innerHTML), 'ヘッダーの開閉ボタンで閉じる');
   await c.$('kt-ai-header').dispatch({ type: 'click', target: { id: 'kt-ai-drawer-toggle' } });
   assert(c.panel.drawerState().open === true && c.$('kt-ai-drawer').style.display === 'flex' && c.$('kt-ai-pane-plan').style.display === 'block' && c.$('kt-ai-pane-context').style.display === 'none', 'ヘッダーの開閉ボタンで drawer（計画ペイン）を開く');
   await c.$('kt-ai-drawer-tabs').dispatch({ type: 'click', target: { dataset: { pane: 'evidence' } } });

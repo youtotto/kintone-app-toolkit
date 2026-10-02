@@ -13304,11 +13304,10 @@
     fillTargets();
     applyMode();
     renderDrawerTabs();
-    // drawer: 既定は閉じる（会話が主役）。計画ができたら開く。狭い幅では下に積む（CSS）
-    $drawer.style.display = 'none';
+    // drawer: 既定で開いておく（計画 / レビューのペイン。閉じればその間は閉じたまま、計画が届けば開く）。狭い幅では下に積む（CSS）
     $planResult.style.display = 'none';
-    for (const p of PANES) $pane(p).style.display = p === activePane ? 'block' : 'none';
-    renderHeader(); renderComposer(); renderChat();
+    openDrawer('plan');
+    renderComposer(); renderChat();
     return {
       regenerate: () => (last ? generate() : null),
       refreshTargets: fillTargets,
@@ -13406,6 +13405,11 @@
            （タブが2段になる場合を考慮して余裕を持たせる）
            ※ Field Scanner の結果領域は flex で親に追従するようになったため、ここでの上書きは不要 */
         #kt-toolkit.is-full #dp-canvas { max-height: calc(100vh - 360px) !important; }
+        /* 全画面のときだけ文字を少し大きく：各タブの文字サイズは px 指定なので zoom でまとめて拡大する
+           （文字・余白・行間が同じ比率で広がる。既定 110%。#kt-zoom で 110 → 120 → 130 → 100% に切り替え、最小化中とパネル表示では等倍） */
+        #kt-toolkit.is-full:not(.is-mini) > .bar,
+        #kt-toolkit.is-full:not(.is-mini) > .body { zoom: var(--kt-full-zoom, 1.1); }
+        #kt-toolkit:not(.is-full) #kt-zoom, #kt-toolkit.is-mini #kt-zoom { display: none !important; }
 
         #kt-toolkit .bar{display:flex;justify-content:space-between;align-items:center;padding:10px 12px;border-bottom:1px solid ${C.border};flex:none;}
         #kt-toolkit .tabs{display:flex;gap:6px;flex-wrap:wrap}
@@ -13592,6 +13596,7 @@
           <button id="tab-ai" class="tab" title="AI 開発ワークスペース（質問・変更計画・Toolkit Review・動作テスト環境への反映・元に戻す）">AI</button>
         </div>
         <div class="actions" style="display:flex;gap:6px;align-items:center;">
+          <button id="kt-zoom" class="btn" title="全画面表示の文字サイズ（押すたびに 110% → 120% → 130% → 100%）">文字 110%</button>
           <button id="kt-full" class="btn" title="全画面表示に切り替え（もう一度押すと戻ります）">⛶</button>
           <button id="kt-mini" class="btn" title="最小化">–</button>
           <div id="kt-version" class="version-info" title="Toolkit version">
@@ -13660,6 +13665,26 @@
       try { localStorage.setItem(FULL_KEY, isFull ? '1' : '0'); } catch (e) { }
       applyFull(isFull);
     }, { passive: true });
+    // 全画面のときだけ文字を少し大きく（CSS の zoom。既定 110%。ボタンで 110 → 120 → 130 → 100% を巡回し、保存する。パネル表示・最小化中は等倍）
+    const ZOOM_KEY = 'ktToolkitFullZoom.v1';
+    const ZOOM_STEPS = [1.1, 1.2, 1.3, 1];
+    const btnZoom = wrap.querySelector('#kt-zoom');
+    let fullZoom = 1.1;
+    try { const v = Number(localStorage.getItem(ZOOM_KEY)); if (ZOOM_STEPS.includes(v)) fullZoom = v; } catch (e) { }
+    const applyZoom = () => {
+      try { if (typeof wrap.style.setProperty === 'function') wrap.style.setProperty('--kt-full-zoom', String(fullZoom)); } catch (e) { }
+      if (btnZoom) {
+        btnZoom.textContent = `文字 ${Math.round(fullZoom * 100)}%`;
+        btnZoom.title = `全画面表示の文字サイズ: ${Math.round(fullZoom * 100)}%（押すと ${Math.round(ZOOM_STEPS[(ZOOM_STEPS.indexOf(fullZoom) + 1) % ZOOM_STEPS.length] * 100)}%。パネル表示では等倍）`;
+      }
+    };
+    applyZoom();
+    btnZoom?.addEventListener('click', () => {
+      fullZoom = ZOOM_STEPS[(ZOOM_STEPS.indexOf(fullZoom) + 1) % ZOOM_STEPS.length];
+      try { localStorage.setItem(ZOOM_KEY, String(fullZoom)); } catch (e) { }
+      applyZoom();
+    }, { passive: true });
+    wrap.ktZoom = { get: () => fullZoom, steps: ZOOM_STEPS };
 
     const btnMini = wrap.querySelector('#kt-mini');
     btnMini && btnMini.addEventListener('click', toggleMini, { passive: true });
