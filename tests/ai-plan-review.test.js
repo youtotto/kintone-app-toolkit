@@ -242,6 +242,15 @@ console.log('\n--- 9. staging E2E（2026-10-02）で見つかった実データ�
   const p1 = st(order, 'P1');
   assert(p1.status === 'INVALID' && codes(p1).includes('PROPOSED_FIELD_NOT_APPLIED') && !codes(p1).includes('LOOKUP_DEST_UNKNOWN') && p1.issues.some(i => /NEW_FIELD_2/.test(i.message) && /P2/.test(i.message)), 'コピー先が後続 step の新規フィールドコード → PROPOSED_FIELD_NOT_APPLIED（追加予定の step を明示）');
   assert(st(order, 'P2').status === 'BLOCKED_BY_DEPENDENCY' && order.executionReadiness.status === 'BLOCKED', '順序が逆の計画は BLOCKED（Toolkit は自動で並べ替えない）');
+  // A（2 回目の実行）: 既存のアプリ通知（fixture では general#3）を UPDATE。name に ID が入る / 条件が散文 / イベントが減る
+  const upd = review(plan([step('P1', 'UPDATE_NOTIFICATION', 'NOTIFICATION', 'general#3', [], { spec: { name: 'general#3', targets: ['FIELD_ENTITY:owner'], filterCond: '担当者フィールドが空から設定された場合（要確認）', events: ['recordEdited'] } })]));
+  const u = st(upd, 'P1');
+  assert(u.diff.before && u.diff.after && u.diff.after.title === u.diff.before.title, 'spec.name が通知 ID / targetRef と同じならタイトル変更として扱わない');
+  assert(codes(u).includes('COND_NOT_EXPRESSION') && codes(u).includes('GENERAL_NOTIFICATION_COND'), '散文の条件 → COND_NOT_EXPRESSION、アプリの条件通知に条件式 → GENERAL_NOTIFICATION_COND');
+  const evRemoved = u.issues.find(i => i.code === 'NOTIFICATION_EVENTS_REMOVED');
+  assert(evRemoved && evRemoved.severity === 'high' && /recordAdded/.test(evRemoved.message) && upd.summary.counts.highRisk === 1, '通知イベントの削減（既存の通知が止まる）→ 高リスク');
+  const condOk = review(plan([step('P1', 'ADD_NOTIFICATION', 'NOTIFICATION', '高額', [], { spec: { targets: ['FIELD_ENTITY:owner_group'], filterCond: 'amount >= "1000000" and ステータス in ("承認待ち")' } })]));
+  assert(!codes(st(condOk, 'P1')).includes('COND_NOT_EXPRESSION'), '演算子を含む条件式は散文扱いしない');
   assert(JSON.stringify(INPUTS.data) === SNAPSHOT, '§9 の後も DATA は不変');
 }
 

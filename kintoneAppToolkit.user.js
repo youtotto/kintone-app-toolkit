@@ -5030,7 +5030,7 @@
       CUSTOMIZATION_REQUIRED: { simulate: false, validate: false, defaultSafety: 'PLAN_ONLY', execution: 'NONE', changeType: 'NO_CHANGE', kind: 'JS' },
     });
     /** 高リスクの変更（安全分類を REVIEW_REQUIRED に上げ、status は NEEDS_CONFIRMATION） */
-    const HIGH_RISK = ['TYPE_CHANGE', 'OPTIONS_REMOVED', 'EXISTING_PATH_RESTRICTED', 'ACL_CHANGE', 'LOOKUP_MAPPING_OVERWRITE'];
+    const HIGH_RISK = ['TYPE_CHANGE', 'OPTIONS_REMOVED', 'EXISTING_PATH_RESTRICTED', 'ACL_CHANGE', 'LOOKUP_MAPPING_OVERWRITE', 'NOTIFICATION_EVENTS_REMOVED'];
     const KINTONE_FIELD_TYPES = ['SINGLE_LINE_TEXT', 'MULTI_LINE_TEXT', 'RICH_TEXT', 'NUMBER', 'CALC', 'CHECK_BOX', 'RADIO_BUTTON', 'DROP_DOWN', 'MULTI_SELECT', 'DATE', 'TIME', 'DATETIME', 'FILE', 'LINK', 'USER_SELECT', 'ORGANIZATION_SELECT', 'GROUP_SELECT', 'LOOKUP', 'REFERENCE_TABLE', 'SUBTABLE', 'GROUP', 'SPACER', 'LABEL', 'HR'];
     const OPTION_TYPES = ['CHECK_BOX', 'RADIO_BUTTON', 'DROP_DOWN', 'MULTI_SELECT'];
     const ENTITY_TYPES = ['USER', 'GROUP', 'ORGANIZATION', 'FIELD_ENTITY', 'CREATOR', 'CUSTOM_FIELD'];
@@ -5382,9 +5382,12 @@
       };
       /** 条件式の構文検査: kintone に無い関数が含まれていれば要確認（評価できない条件は設定できない） */
       const checkCond = (cond, role) => {
-        const unknown = condUnknownFunctions(cond);
-        if (!unknown.length) return;
-        issue('COND_UNKNOWN_FUNCTION', 'medium', `${role}「${cond}」に kintone の条件式で使えない関数（${unknown.join(', ')}）が含まれています（要確認）`);
+        const c = String(cond ?? '').trim();
+        if (!c) return;
+        const unknown = condUnknownFunctions(c);
+        if (unknown.length) issue('COND_UNKNOWN_FUNCTION', 'medium', `${role}「${c}」に kintone の条件式で使えない関数（${unknown.join(', ')}）が含まれています（要確認）`);
+        else if (!/(=|!=|<|>|\bin\b|\blike\b)/i.test(c)) issue('COND_NOT_EXPRESSION', 'medium', `${role}「${c}」は kintone の条件式（フィールド 演算子 値）の形ではありません（要確認）`);
+        else return;
         if (r.status === STATUS.VALID) r.status = STATUS.NEEDS_CONFIRMATION;
       };
       const entityOk = (en, role) => {
@@ -5582,9 +5585,9 @@
             const beforeN = clone(ex);
             let changed = false;
             if (targets.length) { ex.targets = targets; changed = true; }
-            if (cond) { ex.filterCond = cond; changed = true; }
-            if (events.length) { ex.events = events; changed = true; }
-            if (spec.name && spec.name !== ex.title) { ex.title = spec.name; changed = true; }
+            if (cond) { if (ex.scope === 'general') issue('GENERAL_NOTIFICATION_COND', 'medium', 'アプリの条件通知には条件式はありません（条件で絞るならレコードの条件通知として追加します。要確認）'); ex.filterCond = cond; changed = true; }
+            if (events.length) { const removed = (ex.events || []).filter(e => !events.includes(e)); if (removed.length) issue('NOTIFICATION_EVENTS_REMOVED', 'high', `通知「${ex.title || ex.id}」のイベント ${removed.join(', ')} が外れます（これらのタイミングでは通知されなくなります）`); ex.events = events; changed = true; }
+            if (spec.name && spec.name !== ex.title && spec.name !== ex.id && spec.name !== step.targetRef) { ex.title = spec.name; changed = true; }
             if (r.status === STATUS.INVALID) return r;
             if (!changed) { issue('NO_STRUCTURED_CHANGE', 'medium', '変更内容を特定できません（要確認）'); r.status = STATUS.NEEDS_CONFIRMATION; r.diff.changeType = CHANGE.NO_CHANGE; r.diff.target = { kind: 'NOTIFICATION', id: ex.id }; return r; }
             r.simulated = true; r.diff.target = { kind: 'NOTIFICATION', id: ex.id }; r.diff.before = notifView(beforeN); r.diff.after = notifView(ex);
