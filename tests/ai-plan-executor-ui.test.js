@@ -115,9 +115,9 @@ console.log('\n--- 1. 実行前レビューに「動作テスト環境へ反映�
   // 監査 JSON / snapshot / rollback
   await click(m, 'kt-ai-exec-audit-copy');
   const audit = JSON.parse(m.copies[m.copies.length - 1]);
-  assert(audit.auditVersion === '1' && audit.goal === GOAL && audit.plan.steps.length === 3 && audit.humanDecisions.P1 === 'approve' && audit.execution.status === 'DONE' && audit.verification.length === 3 && audit.beforeSnapshot.revision === '12' && audit.actualAfter.addedFields.join() === 'progress' && audit.rollbackPlan.steps.length === 2 && audit.rollbackPlan.executed === false, '監査 JSON: goal / plan / review / 判断 / execution / verification / before snapshot / actual after / rollback 計画');
+  assert(audit.auditVersion === '2' && audit.goal === GOAL && audit.plan.steps.length === 3 && audit.humanDecisions.P1 === 'approve' && audit.execution.status === 'DONE' && audit.verification.length === 3 && audit.beforeSnapshot.revision === '12' && audit.actualAfter.addedFields.join() === 'progress' && audit.rollbackPlan.steps.length === 2 && audit.rollbackPlan.executed === false, '監査 JSON: goal / plan / review / 判断 / execution / verification / before snapshot / actual after / rollback 計画');
   await click(m, 'kt-ai-exec-audit-download');
-  assert(m.downloads.length === 1 && /^toolkit-ai-execution-ex_.*\.json$/.test(m.downloads[0].name) && JSON.parse(m.downloads[0].text).auditVersion === '1', '監査 JSON を保存（ファイル名に executionId）');
+  assert(m.downloads.length === 1 && /^toolkit-ai-execution-ex_.*\.json$/.test(m.downloads[0].name) && JSON.parse(m.downloads[0].text).auditVersion === '2', '監査 JSON を保存（ファイル名に executionId）');
   await click(m, 'kt-ai-exec-snapshot-copy');
   const snap = JSON.parse(m.copies[m.copies.length - 1]);
   assert(snap.revision === '12' && snap.fields.properties.owner && !snap.fields.properties.progress, '実行前スナップショットをコピー（追加前の設定）');

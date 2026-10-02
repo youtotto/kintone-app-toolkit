@@ -6188,8 +6188,11 @@
   const KTPlanExecutor = (() => {
     const EXECUTOR_VERSION = '1';
     const ENV = 'preview';
-    const STEP = Object.freeze({ PENDING: 'PENDING', RUNNING: 'RUNNING', APPLIED: 'APPLIED', VERIFIED: 'VERIFIED', VERIFY_FAILED: 'VERIFY_FAILED', FAILED: 'FAILED', SKIPPED: 'SKIPPED', BLOCKED: 'BLOCKED', UNSUPPORTED: 'UNSUPPORTED', ROLLED_BACK: 'ROLLED_BACK' });
+    const STEP = Object.freeze({ PENDING: 'PENDING', RUNNING: 'RUNNING', APPLIED: 'APPLIED', VERIFIED: 'VERIFIED', VERIFY_FAILED: 'VERIFY_FAILED', FAILED: 'FAILED', SKIPPED: 'SKIPPED', BLOCKED: 'BLOCKED', UNSUPPORTED: 'UNSUPPORTED', ROLLBACK_PENDING: 'ROLLBACK_PENDING', ROLLING_BACK: 'ROLLING_BACK', ROLLED_BACK: 'ROLLED_BACK', ROLLBACK_VERIFIED: 'ROLLBACK_VERIFIED', ROLLBACK_FAILED: 'ROLLBACK_FAILED' });
     const RUN = Object.freeze({ PREPARED: 'PREPARED', BLOCKED: 'BLOCKED', RUNNING: 'RUNNING', DONE: 'DONE', PARTIAL: 'PARTIAL', FAILED: 'FAILED' });
+    /** Rollback（Phase 11）の step 状態と run 状態。ROLLBACK_STALE = 反映直後と現在の設定が違うため戻さない */
+    const RB = Object.freeze({ PENDING: 'ROLLBACK_PENDING', RUNNING: 'ROLLING_BACK', ROLLED_BACK: 'ROLLED_BACK', VERIFIED: 'ROLLBACK_VERIFIED', VERIFY_FAILED: 'ROLLBACK_VERIFY_FAILED', FAILED: 'ROLLBACK_FAILED', STALE: 'ROLLBACK_STALE', SKIPPED: 'ROLLBACK_SKIPPED' });
+    const RB_RUN = Object.freeze({ PREPARED: 'PREPARED', BLOCKED: 'BLOCKED', RUNNING: 'ROLLING_BACK', VERIFIED: 'ROLLED_BACK_VERIFIED', VERIFY_FAILED: 'ROLLBACK_VERIFY_FAILED', FAILED: 'ROLLBACK_FAILED' });
     /** Tier 1 で preview へ追加できるフィールド型（API 仕様が単純で、追加パラメーターが要らないもの。CALC / LINK / LOOKUP / 関連レコード / テーブル / グループは対象外） */
     const PREVIEW_FIELD_TYPES = ['SINGLE_LINE_TEXT', 'MULTI_LINE_TEXT', 'RICH_TEXT', 'NUMBER', 'DATE', 'TIME', 'DATETIME', 'DROP_DOWN', 'RADIO_BUTTON', 'CHECK_BOX', 'MULTI_SELECT', 'USER_SELECT', 'ORGANIZATION_SELECT', 'GROUP_SELECT', 'FILE'];
     const OPTION_TYPES = ['DROP_DOWN', 'RADIO_BUTTON', 'CHECK_BOX', 'MULTI_SELECT'];
@@ -6251,6 +6254,10 @@
         const out = { revision: String(res?.revision ?? ''), requests: [{ method: 'POST', path: '/k/v1/preview/app/form/fields.json', codes: Object.keys(p.payload.properties) }] };
         // 配置: フィールド追加だけでは配置が保証されないので、レイアウトを取得して無ければ末尾の行へ追加する（既存の行は変えない）
         if (layoutPolicy === 'APPEND_ROW') {
+          try { await placeField(); } catch (e) { const err = (e && typeof e === 'object') ? e : new Error(String(e)); err.applied = { ...out, partial: 'FIELD_ADDED_LAYOUT_FAILED' }; throw err; }
+        }
+        return out;
+        async function placeField() {
           const lay = await api.getPreviewLayout(appId);
           const rows = Array.isArray(lay?.layout) ? lay.layout : [];
           const code = p.expect.code;
@@ -6265,7 +6272,6 @@
             out.layout = { placement: 'AUTO', rowsBefore: rows.length };
           }
         }
-        return out;
       },
       async verify({ api, appId, snapshot }, p, applied) {
         const cur = await api.getPreviewFields(appId);
@@ -6949,7 +6955,7 @@
     /** Review 時点の Before と現在の preview の差（stale 判定）。kinds は比較対象 */
     const notifKey = (n) => ({ scope: n.scope, title: n.scope === 'general' ? '' : (n.title || ''), targets: (n.targets || []).map(t => `${t.type}:${t.code ?? ''}`).sort(), filterCond: normCondE(n.filterCond), events: [...(n.events || [])].sort() });
     const remKey = (n) => ({ title: n.title || '', timing: n.timing, targets: (n.targets || []).map(t => `${t.type}:${t.code ?? ''}`).sort(), filterCond: normCondE(n.filterCond) });
-    function diffBefore(before, current, { kinds = ['fields', 'views', 'notifications', 'reminders'] } = {}) {
+    function diffBefore(before, current, { kinds = ['fields', 'views', 'notifications', 'reminders'], baseline = 'Review 時点' } = {}) {
       const diffs = [];
       if (kinds.includes('notifications')) {
         const bn = [...(before.notifications?.general || []), ...(before.notifications?.perRecord || [])].map(notifKey).map(k => JSON.stringify(k));
@@ -6967,13 +6973,13 @@
           if (isSystemField(f)) continue;
           const c = current.fields?.[code];
           if (!c) diffs.push({ kind: 'FIELD', id: code, change: 'REMOVED', message: `フィールド「${f.label}」（${code}）が動作テスト環境にありません` });
-          else if (!same(fieldKey(f), fieldKey(c))) diffs.push({ kind: 'FIELD', id: code, change: 'CHANGED', message: `フィールド「${f.label}」（${code}）の設定が Review 時点と違います`, before: fieldKey(f), after: fieldKey(c) });
+          else if (!same(fieldKey(f), fieldKey(c))) diffs.push({ kind: 'FIELD', id: code, change: 'CHANGED', message: `フィールド「${f.label}」（${code}）の設定が${baseline}と違います`, before: fieldKey(f), after: fieldKey(c) });
         }
         for (const [code, c] of Object.entries(current.fields || {})) if (!before.fields?.[code] && !isSystemField(c)) diffs.push({ kind: 'FIELD', id: code, change: 'ADDED', message: `動作テスト環境にフィールド「${c.label}」（${code}）が追加されています（未反映の変更）` });
       }
       if (kinds.includes('views')) {
         const bv = new Map((before.views || []).map(v => [v.name, v])), cv = new Map((current.views || []).map(v => [v.name, v]));
-        for (const [name, v] of bv) { const c = cv.get(name); if (!c) diffs.push({ kind: 'VIEW', id: name, change: 'REMOVED', message: `一覧「${name}」が動作テスト環境にありません` }); else if (!same(viewKey(v), viewKey(c))) diffs.push({ kind: 'VIEW', id: name, change: 'CHANGED', message: `一覧「${name}」の設定が Review 時点と違います`, before: viewKey(v), after: viewKey(c) }); }
+        for (const [name, v] of bv) { const c = cv.get(name); if (!c) diffs.push({ kind: 'VIEW', id: name, change: 'REMOVED', message: `一覧「${name}」が動作テスト環境にありません` }); else if (!same(viewKey(v), viewKey(c))) diffs.push({ kind: 'VIEW', id: name, change: 'CHANGED', message: `一覧「${name}」の設定が${baseline}と違います`, before: viewKey(v), after: viewKey(c) }); }
         for (const [name] of cv) if (!bv.has(name)) diffs.push({ kind: 'VIEW', id: name, change: 'ADDED', message: `動作テスト環境に一覧「${name}」が追加されています（未反映の変更）` });
       }
       return diffs;
@@ -7141,6 +7147,7 @@
         } catch (e) {
           const s = strErr(e);
           l.status = STEP.FAILED; l.error = s; failed = true;
+          if (e && typeof e === 'object' && e.applied) { l.partial = clone({ ...e.applied, requests: undefined }); l.requests = e.applied.requests || []; l.revision = e.applied.revision || null; revision = l.revision || revision; }   // 途中まで反映された（rollback の対象）
           l.reason = isPermissionError(e) ? 'PERMISSION_DENIED' : isRevisionError(e) ? 'REVISION_MISMATCH' : ['TARGET_EXISTS', 'EXACT_DUPLICATE', 'TARGET_CHANGED', 'TARGET_MISSING'].includes(s.code) ? s.code : 'API_ERROR';
           l.message = l.reason === 'PERMISSION_DENIED' ? 'アプリ設定を変更する権限がありません' : l.reason === 'REVISION_MISMATCH' ? '実行中に他の変更が入りました（revision 不一致）。再レビューしてください' : s.message;
         }
@@ -7154,16 +7161,20 @@
       try {
         const [fields, layout, views, generalNotify, perRecordNotify, reminderNotify] = await Promise.all([api.getPreviewFields(prepared.appId), api.getPreviewLayout(prepared.appId), api.getPreviewViews(prepared.appId), api.getPreviewGeneralNotifications(prepared.appId), api.getPreviewPerRecordNotifications(prepared.appId), api.getPreviewReminders(prepared.appId)]);
         log.afterRevision = String(fields?.revision ?? log.afterRevision ?? '');
+        // 反映直後の設定（Execution Actual After）。Rollback はこれと「現在」を比べ、違えば ROLLBACK_STALE で止める
+        log.actualAfterRaw = clone({ fields, layout, views, generalNotify, perRecordNotify, reminderNotify });
         const previewData = previewDataFrom({ fields, layout, views, generalNotify, perRecordNotify, reminderNotify }, data && typeof data === 'object' ? { ...data, appId: prepared.appId } : { appId: prepared.appId });
         const actual = KTPlanReview.buildBeforeModel(previewData);
         log.simulation = compareSimulation(review?.simulation?.after || null, actual, log.steps, prepared);
         log.reanalysis = reanalyze(previewData, data, log.steps, prepared);
-        log.actualAfter = { fieldCount: Object.keys(actual.fields).length, views: actual.views.length, notifications: actual.notifications.general.length + actual.notifications.perRecord.length, reminders: actual.reminders.length, addedFields: log.steps.filter(s => s.actionType === 'ADD_FIELD' && s.status === STEP.VERIFIED).map(s => stepLogTarget(s, prepared)), addedViews: log.steps.filter(s => s.actionType === 'ADD_VIEW' && s.status === STEP.VERIFIED).map(s => stepLogTarget(s, prepared)), addedNotifications: log.steps.filter(s => s.actionType === 'ADD_NOTIFICATION' && s.status === STEP.VERIFIED).length, addedReminders: log.steps.filter(s => s.actionType === 'ADD_REMINDER' && s.status === STEP.VERIFIED).length, updatedFields: log.steps.filter(s => s.actionType === 'UPDATE_FIELD' && s.status === STEP.VERIFIED).map(s => stepLogTarget(s, prepared)) };
-      } catch (e) { log.simulation = { compared: false, match: null, mismatches: [], error: strErr(e).message }; }
+        const verifiedOf = (a) => log.steps.filter(s => s.actionType === a && s.status === STEP.VERIFIED);
+        log.actualAfter = { fieldCount: Object.keys(actual.fields).length, views: actual.views.length, notifications: actual.notifications.general.length + actual.notifications.perRecord.length, reminders: actual.reminders.length, addedFields: verifiedOf('ADD_FIELD').map(s => stepLogTarget(s, prepared)), addedViews: verifiedOf('ADD_VIEW').map(s => stepLogTarget(s, prepared)), addedNotifications: verifiedOf('ADD_NOTIFICATION').length, addedReminders: verifiedOf('ADD_REMINDER').length, updatedFields: verifiedOf('UPDATE_FIELD').map(s => stepLogTarget(s, prepared)), updatedNotifications: verifiedOf('UPDATE_NOTIFICATION').map(s => stepLogLabel(s, prepared)), updatedReminders: verifiedOf('UPDATE_REMINDER').map(s => stepLogLabel(s, prepared)), updatedViews: verifiedOf('UPDATE_VIEW').map(s => stepLogLabel(s, prepared)) };
+      } catch (e) { log.simulation = { compared: false, match: null, mismatches: [], error: strErr(e).message }; log.actualAfterRaw = null; }
       log.finishedAt = nowIso(now);
       return log;
     }
     const stepLogTarget = (s, prepared) => prepared.steps.find(x => x.stepId === s.stepId)?.prepared?.expect?.code || prepared.steps.find(x => x.stepId === s.stepId)?.prepared?.expect?.name || null;
+    const stepLogLabel = (s, prepared) => prepared.steps.find(x => x.stepId === s.stepId)?.prepared?.targetLabel || stepLogTarget(s, prepared);
 
     /** Simulation After（Review が仮適用したモデル）と実際の After を、実行した対象だけ比較する */
     function compareSimulation(simAfter, actual, stepLogs, prepared) {
@@ -7202,6 +7213,21 @@
           if (!sim || !act) { mismatches.push({ stepId: s.stepId, kind: 'FIELD', id: code, message: 'Simulation または実際の設定にフィールドがありません' }); continue; }
           const a = fieldKey(sim), b = fieldKey(act);
           if (!same(a, b)) mismatches.push({ stepId: s.stepId, kind: 'FIELD', id: code, message: 'Simulation と実際の設定が一致しません', simulation: a, actual: b });
+        } else if (s.actionType === 'UPDATE_NOTIFICATION') {
+          const scope = expect?.scope, idx = expect?.index;
+          const sim = (simAfter.notifications?.[scope] || [])[idx], act = (actual.notifications?.[scope] || [])[idx];
+          if (!sim || !act) { mismatches.push({ stepId: s.stepId, kind: 'NOTIFICATION', id: expect?.title || null, message: 'Simulation または実際の設定に対象の通知がありません' }); continue; }
+          if (!same(notifKey(sim), notifKey(act))) mismatches.push({ stepId: s.stepId, kind: 'NOTIFICATION', id: sim.title || sim.id, message: 'Simulation と実際の設定が一致しません', simulation: notifKey(sim), actual: notifKey(act) });
+        } else if (s.actionType === 'UPDATE_REMINDER') {
+          const idx = expect?.index;
+          const sim = (simAfter.reminders || [])[idx], act = (actual.reminders || [])[idx];
+          if (!sim || !act) { mismatches.push({ stepId: s.stepId, kind: 'REMINDER', id: expect?.title || null, message: 'Simulation または実際の設定に対象のリマインダーがありません' }); continue; }
+          if (!same(remKey(sim), remKey(act))) mismatches.push({ stepId: s.stepId, kind: 'REMINDER', id: sim.title || sim.id, message: 'Simulation と実際の設定が一致しません', simulation: remKey(sim), actual: remKey(act) });
+        } else if (s.actionType === 'UPDATE_VIEW') {
+          const name = expect?.name;
+          const sim = (simAfter.views || []).find(v => v.name === name), act = (actual.views || []).find(v => v.name === name);
+          if (!sim || !act) { mismatches.push({ stepId: s.stepId, kind: 'VIEW', id: name, message: 'Simulation または実際の設定に対象の一覧がありません' }); continue; }
+          if (!same(viewKey(sim), viewKey(act))) mismatches.push({ stepId: s.stepId, kind: 'VIEW', id: name, message: 'Simulation と実際の設定が一致しません', simulation: viewKey(sim), actual: viewKey(act) });
         }
       }
       return { compared: true, match: mismatches.length === 0, mismatches, ...(mismatches.length ? { code: 'SIMULATION_MISMATCH' } : {}) };
@@ -7229,40 +7255,309 @@
       return out;
     }
 
-    // ================= rollback（計画のみ。実行しない）=================
+    // ================= rollback 計画（逆順。Rollback Executor の入力）=================
     /** step ごとの Before / After（監査用。全体 payload ではなく要約と snapshot 参照） */
     function stepBeforeAfter(execution) {
       return (execution?.steps || []).filter(s => s.before || s.after || s.verification).map(s => ({ stepId: s.stepId, actionType: s.actionType, status: s.status, before: s.before, after: s.after, snapshotRevision: execution?.snapshot?.revision ?? null }));
     }
+    /** 動作テスト環境に書き込んだ step（APPLIED / VERIFIED / VERIFY_FAILED、途中まで反映された FAILED）だけを逆順に。反映していない step は対象外 */
     function buildRollbackPlan(execution, prepared) {
       const steps = [];
       for (const s of [...(execution?.steps || [])].reverse()) {
-        if (![STEP.APPLIED, STEP.VERIFIED, STEP.VERIFY_FAILED].includes(s.status)) continue;
+        const written = [STEP.APPLIED, STEP.VERIFIED, STEP.VERIFY_FAILED].includes(s.status) || (s.status === STEP.FAILED && !!s.partial);
+        if (!written) continue;
         const st = prepared?.steps?.find(x => x.stepId === s.stepId);
         const handler = HANDLERS[s.actionType];
         if (!st?.prepared || !handler) continue;
-        steps.push({ stepId: s.stepId, ...handler.rollback({ appId: execution.appId, snapshot: execution.snapshot }, st.prepared) });
+        const rb = handler.rollback({ appId: execution.appId, snapshot: execution.snapshot }, st.prepared);
+        steps.push({ stepId: s.stepId, sourceActionType: s.actionType, sourceStatus: s.status, ...(s.partial ? { partial: s.partial.partial || true } : {}), ...rb, collection: rb.collection || null });
       }
-      return { rollbackVersion: '1', executionId: execution?.executionId ?? null, appId: execution?.appId ?? null, env: ENV, executed: false, snapshotRevision: execution?.snapshot?.revision ?? null, steps, note: 'このロールバック計画は実行されません（Phase 9 は計画の生成まで）。snapshot は実行前の動作テスト環境の設定です' };
+      return { rollbackVersion: '2', executionId: execution?.executionId ?? null, appId: execution?.appId ?? null, env: ENV, executed: false, snapshotRevision: execution?.snapshot?.revision ?? null, steps, note: 'Rollback Executor（prepareRollback → executeRollback）がこの順で実行する計画。snapshot は実行前の動作テスト環境の設定。運用環境には触れない' };
     }
 
+    // ================= Rollback Executor（Phase 11）=================
+    //   Executor 自身がこの実行で変更した内容だけを、実行前 snapshot へ戻す。無条件には戻さない:
+    //   「反映直後（Execution Actual After）」と「現在の動作テスト環境」を集合ごとに比べ、違えば ROLLBACK_STALE で止める（第三者の変更を消さない）。
+    //   API には最新の preview revision を使い、revision 不一致は再試行しない。戻した後に再取得して snapshot と比較する（ROLLED_BACK_VERIFIED / ROLLBACK_VERIFY_FAILED）。
+    const stripRevision = (o) => { if (!o || typeof o !== 'object') return o; const { revision, ...rest } = o; return rest; };
+    const stripViewIds = (views) => Object.fromEntries(Object.entries(views || {}).map(([n, v]) => { const { id, ...rest } = v || {}; return [n, rest]; }));
+    const listOf = (raw) => (Array.isArray(raw?.notifications) ? raw.notifications : []);
+    const layoutCodes = (rows) => { const out = []; const walk = (rs) => { for (const r of rs || []) { for (const x of r?.fields || []) if (x?.code) out.push(x.code); if (Array.isArray(r?.layout)) walk(r.layout); } }; walk(rows); return out; };
+    const COLLECTION_JA = { fields: 'フィールド', layout: 'フォームのレイアウト', views: '一覧', generalNotify: 'アプリの条件通知', perRecordNotify: 'レコードの条件通知', reminderNotify: 'リマインダー' };
+    async function fetchPreviewAll(api, appId) {
+      const [fields, layout, views, generalNotify, perRecordNotify, reminderNotify] = await Promise.all([api.getPreviewFields(appId), api.getPreviewLayout(appId), api.getPreviewViews(appId), api.getPreviewGeneralNotifications(appId), api.getPreviewPerRecordNotifications(appId), api.getPreviewReminders(appId)]);
+      return { fields, layout, views, generalNotify, perRecordNotify, reminderNotify };
+    }
+    /** 2 つの設定の人間向け差分（集合ごと。Review の Before モデルに変換して diffBefore を使う） */
+    function collectionDiffs(expectedRaw, currentRaw, kinds, baseline) {
+      try {
+        const a = KTPlanReview.buildBeforeModel(previewDataFrom(expectedRaw)), b = KTPlanReview.buildBeforeModel(previewDataFrom(currentRaw));
+        return diffBefore(a, b, { kinds, baseline });
+      } catch (e) { return [{ kind: 'UNKNOWN', id: null, change: 'CHANGED', message: '差分を要約できません（設定が変更されています）' }]; }
+    }
+    const condMentions = (text, code) => { const t = String(text ?? ''); if (!t || !code) return false; if (!/^[A-Za-z0-9_]+$/.test(code)) return t.includes(code); return new RegExp(`(^|[^A-Za-z0-9_])${code.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}($|[^A-Za-z0-9_])`).test(t); };
+    /** 現在の preview でフィールドコードを参照している設定（削除すると壊れるもの） */
+    function fieldReferences(code, cur) {
+      const refs = [];
+      for (const [name, v] of Object.entries(cur.views?.views || {})) {
+        if ((v.fields || []).includes(code)) refs.push({ kind: 'VIEW', id: name, where: `一覧「${name}」の表示項目` });
+        if (condMentions(v.filterCond, code)) refs.push({ kind: 'VIEW', id: name, where: `一覧「${name}」の絞り込み` });
+        if (condMentions(v.sort, code)) refs.push({ kind: 'VIEW', id: name, where: `一覧「${name}」の並び順` });
+      }
+      for (const n of listOf(cur.generalNotify)) if (n.entity?.type === 'FIELD_ENTITY' && n.entity.code === code) refs.push({ kind: 'NOTIFICATION', id: 'general', where: 'アプリの条件通知の通知先' });
+      for (const n of listOf(cur.perRecordNotify)) { const label = `レコードの条件通知「${n.title || '（無題）'}」`; if ((n.targets || []).some(t => t.entity?.type === 'FIELD_ENTITY' && t.entity.code === code)) refs.push({ kind: 'NOTIFICATION', id: n.title || '', where: `${label}の通知先` }); if (condMentions(n.filterCond, code)) refs.push({ kind: 'NOTIFICATION', id: n.title || '', where: `${label}の条件` }); }
+      for (const n of listOf(cur.reminderNotify)) { const label = `リマインダー「${n.title || '（無題）'}」`; if (n.timing?.code === code) refs.push({ kind: 'REMINDER', id: n.title || '', where: `${label}の基準日` }); if ((n.targets || []).some(t => t.entity?.type === 'FIELD_ENTITY' && t.entity.code === code)) refs.push({ kind: 'REMINDER', id: n.title || '', where: `${label}の通知先` }); if (condMentions(n.filterCond, code)) refs.push({ kind: 'REMINDER', id: n.title || '', where: `${label}の条件` }); }
+      for (const [c, f] of Object.entries(cur.fields?.properties || {})) {
+        if (c === code) continue;
+        if (f.type === 'CALC' && condMentions(f.expression, code)) refs.push({ kind: 'FIELD', id: c, where: `計算フィールド「${f.label}」（${c}）の計算式` });
+        if (f.lookup && (f.lookup.fieldMappings || []).some(m => m.field === code)) refs.push({ kind: 'FIELD', id: c, where: `ルックアップ「${f.label}」（${c}）のコピー先` });
+        if (f.type === 'REFERENCE_TABLE' && f.referenceTable?.condition?.field === code) refs.push({ kind: 'FIELD', id: c, where: `関連レコード「${f.label}」（${c}）の条件` });
+        if (f.type === 'SUBTABLE' && f.fields && f.fields[code]) refs.push({ kind: 'FIELD', id: c, where: `テーブル「${f.label}」（${c}）` });
+      }
+      return refs;
+    }
+    /** 集合の復元（全体置換 API）: check は「反映直後 == 現在」か（違えば stale）・「現在 == snapshot」なら戻す必要なし */
+    function restoreStrategy(collection, { get, put, equal, kinds, label }) {
+      return {
+        collection,
+        check({ current, expected, snapshot, state = current }) {
+          if (equal(state[collection], snapshot[collection])) return { ok: true, alreadyRestored: true };
+          if (!equal(current[collection], expected[collection])) return { ok: false, code: 'THIRD_PARTY_CHANGE', message: `反映後に${label}の設定が変更されています（自動では戻しません）`, diffs: collectionDiffs(expected, current, kinds, '反映直後') };
+          return { ok: true };
+        },
+        project(state, snapshot) { return { ...state, [collection]: clone(snapshot[collection]) }; },
+        async apply({ api, appId, current, snapshot }) {
+          const res = await put(api, appId, snapshot[collection], String(current[collection]?.revision ?? current.fields?.revision ?? ''));
+          return { revision: String(res?.revision ?? ''), requests: [{ method: 'PUT', path: put.path, restored: label }], expected: { [collection]: clone(snapshot[collection]) } };
+        },
+        async verify({ api, appId, snapshot }) {
+          const cur = await get(api, appId);
+          const ok = equal(cur, snapshot[collection]);
+          return { ok, checks: [{ name: 'restoredToSnapshot', ok, expected: label, actual: ok ? 'snapshot と一致' : 'snapshot と不一致' }], revision: String(cur?.revision ?? '') };
+        },
+      };
+    }
+    const putViews = (api, appId, snap, revision) => api.putPreviewViews(appId, stripViewIds(snap?.views), revision); putViews.path = '/k/v1/preview/app/views.json';
+    const putGeneral = (api, appId, snap, revision) => api.putPreviewGeneralNotifications(appId, { notifications: clone(listOf(snap)), ...(snap?.notifyToCommenter != null ? { notifyToCommenter: snap.notifyToCommenter } : {}) }, revision); putGeneral.path = '/k/v1/preview/app/notifications/general.json';
+    const putPerRecord = (api, appId, snap, revision) => api.putPreviewPerRecordNotifications(appId, { notifications: clone(listOf(snap)) }, revision); putPerRecord.path = '/k/v1/preview/app/notifications/perRecord.json';
+    const putReminders = (api, appId, snap, revision) => api.putPreviewReminders(appId, { notifications: clone(listOf(snap)), ...(snap?.timezone ? { timezone: snap.timezone } : {}) }, revision); putReminders.path = '/k/v1/preview/app/notifications/reminder.json';
+    const eqViews = (a, b) => same(stripViewIds(a?.views), stripViewIds(b?.views));
+    const eqGeneral = (a, b) => same(listOf(a), listOf(b)) && (a?.notifyToCommenter ?? null) === (b?.notifyToCommenter ?? null);
+    const eqPerRecord = (a, b) => same(listOf(a), listOf(b));
+    const eqReminders = (a, b) => same(listOf(a), listOf(b)) && String(a?.timezone ?? '') === String(b?.timezone ?? '');
+    const ROLLBACK_STRATEGIES = {
+      RESTORE_VIEWS: restoreStrategy('views', { get: (api, a) => api.getPreviewViews(a), put: putViews, equal: eqViews, kinds: ['views'], label: '一覧' }),
+      RESTORE_NOTIFICATION_SETTINGS: {
+        collection: (step) => step.collection,
+        check(ctx) { return (ctx.step.collection === 'generalNotify' ? GENERAL_RESTORE : PER_RECORD_RESTORE).check(ctx); },
+        apply(ctx) { return (ctx.step.collection === 'generalNotify' ? GENERAL_RESTORE : PER_RECORD_RESTORE).apply(ctx); },
+        verify(ctx) { return (ctx.step.collection === 'generalNotify' ? GENERAL_RESTORE : PER_RECORD_RESTORE).verify(ctx); },
+        project(state, snapshot, step) { return (step.collection === 'generalNotify' ? GENERAL_RESTORE : PER_RECORD_RESTORE).project(state, snapshot, step); },
+      },
+      RESTORE_REMINDER_SETTINGS: restoreStrategy('reminderNotify', { get: (api, a) => api.getPreviewReminders(a), put: putReminders, equal: eqReminders, kinds: ['reminders'], label: 'リマインダー' }),
+      /** ADD_FIELD → DELETE_FIELD: 定義が反映直後と同じ・他の設定から参照されていない・人間が変えていない、のときだけ削除。レイアウトは snapshot へ */
+      DELETE_FIELD: {
+        collection: 'fields',
+        check({ current, expected, snapshot, step, state = current }) {
+          const code = step.target;
+          if (snapshot.fields?.properties?.[code]) return { ok: false, code: 'FIELD_MISSING', message: `フィールド「${code}」は実行前からあるため削除しません` };
+          const curF = current.fields?.properties?.[code], expF = expected.fields?.properties?.[code];
+          if (!state.fields?.properties?.[code]) return { ok: true, alreadyRestored: true };
+          if (curF && expF && !same(curF, expF)) return { ok: false, code: 'FIELD_CHANGED', message: `追加したフィールド「${curF.label || code}」（${code}）が反映後に変更されています（自動では削除しません）`, diffs: [{ kind: 'FIELD', id: code, change: 'CHANGED', message: `フィールド「${curF.label || code}」（${code}）の定義が反映直後と違います`, before: fieldKey(expF), after: fieldKey(curF) }] };
+          // 参照は「先行する手順が戻した後の状態」で見る（この実行で追加した一覧の参照は、先にその一覧が戻るので壊れない）
+          const refs = fieldReferences(code, state);
+          if (refs.length) return { ok: false, code: 'FIELD_REFERENCED', message: `追加したフィールド「${(curF && curF.label) || code}」（${code}）は ${refs.map(r => r.where).join('、')} から参照されています（削除すると壊れるため自動では削除しません）`, diffs: refs.map(r => ({ kind: r.kind, id: r.id, change: 'REFERENCED', message: `${r.where}が ${code} を参照` })) };
+          return { ok: true };
+        },
+        project(state, snapshot, step) { const next = { ...state, fields: clone(state.fields), layout: clone(snapshot.layout) }; if (next.fields?.properties) delete next.fields.properties[step.target]; return next; },
+        async apply({ api, appId, current, expected, snapshot, step }) {
+          const code = step.target;
+          const res = await api.deletePreviewFields(appId, [code], String(current.fields?.revision ?? ''));
+          let revision = String(res?.revision ?? '');
+          const requests = [{ method: 'DELETE', path: '/k/v1/preview/app/form/fields.json', codes: [code] }];
+          // レイアウト: 削除で行ごと消えていれば何もしない。残っていて、フィールドの集合が snapshot と同じなら snapshot のレイアウトを戻す
+          const lay = await api.getPreviewLayout(appId);
+          const rows = Array.isArray(lay?.layout) ? lay.layout : [], snapRows = Array.isArray(snapshot.layout?.layout) ? snapshot.layout.layout : [];
+          let layoutRestored = same(rows.map(stripLayoutRow), snapRows.map(stripLayoutRow));
+          if (!layoutRestored && sameKeys(layoutCodes(rows), layoutCodes(snapRows))) {
+            const put = await api.putPreviewLayout(appId, clone(snapRows), String(lay?.revision ?? revision));
+            revision = String(put?.revision ?? revision); requests.push({ method: 'PUT', path: '/k/v1/preview/app/form/layout.json', rows: snapRows.length }); layoutRestored = true;
+          }
+          const expFields = clone(expected.fields); if (expFields?.properties) delete expFields.properties[code];
+          return { revision, requests, expected: { fields: expFields, layout: layoutRestored ? clone(snapshot.layout) : clone(lay) }, layoutRestored };
+        },
+        async verify({ api, appId, expected, snapshot, step }) {
+          const code = step.target;
+          const cur = await api.getPreviewFields(appId);
+          const lay = await api.getPreviewLayout(appId);
+          const checks = [];
+          const check = (name, ok, exp, act) => checks.push({ name, ok, expected: exp, actual: act });
+          check('fieldAbsent', !cur?.properties?.[code], true, !cur?.properties?.[code]);
+          const expProps = expected.fields?.properties || {};
+          const mutated = Object.keys({ ...expProps, ...(cur?.properties || {}) }).filter(k => k !== code && !same(expProps[k], cur?.properties?.[k]));
+          check('otherFieldsPreserved', mutated.length === 0, [], mutated);
+          const rows = Array.isArray(lay?.layout) ? lay.layout : [], snapRows = Array.isArray(snapshot.layout?.layout) ? snapshot.layout.layout : [];
+          check('layoutFieldRemoved', !layoutHasCode(rows, code), true, !layoutHasCode(rows, code));
+          const restored = same(rows.map(stripLayoutRow), snapRows.map(stripLayoutRow));
+          check('layoutRestored', restored || !sameKeys(layoutCodes(rows), layoutCodes(snapRows)), restored ? 'snapshot と一致' : '他のフィールドが増えているため比較対象外', restored ? 'snapshot と一致' : 'snapshot と不一致');
+          return { ok: checks.every(c => c.ok), checks, revision: String(cur?.revision ?? '') };
+        },
+      },
+      /** UPDATE_FIELD → Review 時点の値（snapshot の fields）へ戻す。コード・型・他の属性が反映後に変わっていれば止める */
+      RESTORE_FIELD_PROPERTY: {
+        collection: 'fields',
+        keysOf: (step) => Object.keys(step.api?.payload?.properties?.[step.target] || {}).filter(k => k !== 'type' && k !== 'code'),
+        check({ current, expected, snapshot, step, state = current }) {
+          const code = step.target;
+          const curF = current.fields?.properties?.[code], expF = expected.fields?.properties?.[code], snapF = snapshot.fields?.properties?.[code];
+          if (!curF) return { ok: false, code: 'FIELD_MISSING', message: `フィールド「${code}」が動作テスト環境にありません` };
+          if (!snapF) return { ok: false, code: 'SNAPSHOT_MISSING', message: `フィールド「${code}」の実行前の定義が snapshot にありません` };
+          if (same(state.fields?.properties?.[code], snapF)) return { ok: true, alreadyRestored: true };
+          if (expF && !same(curF, expF)) return { ok: false, code: 'FIELD_CHANGED', message: `フィールド「${curF.label || code}」（${code}）が反映後に変更されています（自動では戻しません）`, diffs: [{ kind: 'FIELD', id: code, change: 'CHANGED', message: `フィールド「${curF.label || code}」（${code}）の定義が反映直後と違います`, before: fieldKey(expF), after: fieldKey(curF) }] };
+          return { ok: true };
+        },
+        project(state, snapshot, step) { const code = step.target, keys = ROLLBACK_STRATEGIES.RESTORE_FIELD_PROPERTY.keysOf(step); const next = { ...state, fields: clone(state.fields) }; if (next.fields?.properties?.[code]) next.fields.properties[code] = { ...next.fields.properties[code], ...Object.fromEntries(keys.map(k => [k, snapshot.fields?.properties?.[code]?.[k]])) }; return next; },
+        async apply({ api, appId, current, expected, snapshot, step }) {
+          const code = step.target, keys = ROLLBACK_STRATEGIES.RESTORE_FIELD_PROPERTY.keysOf(step);
+          const curF = current.fields.properties[code], snapF = snapshot.fields.properties[code];
+          const prop = { type: curF.type, code, ...Object.fromEntries(keys.map(k => [k, snapF[k]])) };
+          const res = await api.updatePreviewFields(appId, { [code]: prop }, String(current.fields?.revision ?? ''));
+          const expFields = clone(expected.fields); if (expFields?.properties) expFields.properties[code] = { ...clone(curF), ...Object.fromEntries(keys.map(k => [k, snapF[k]])) };
+          return { revision: String(res?.revision ?? ''), requests: [{ method: 'PUT', path: '/k/v1/preview/app/form/fields.json', codes: [code], keys }], expected: { fields: expFields } };
+        },
+        async verify({ api, appId, expected, snapshot, step }) {
+          const code = step.target, keys = ROLLBACK_STRATEGIES.RESTORE_FIELD_PROPERTY.keysOf(step);
+          const cur = await api.getPreviewFields(appId);
+          const f = cur?.properties?.[code], snapF = snapshot.fields?.properties?.[code] || {};
+          const checks = [];
+          const check = (name, ok, exp, act) => checks.push({ name, ok, expected: exp, actual: act });
+          check('exists', !!f, true, !!f);
+          if (f) {
+            for (const k of keys) check(`restored:${k}`, k === 'required' ? !!f[k] === !!snapF[k] : same(f[k], snapF[k]), snapF[k], f[k]);
+            check('codePreserved', f.code === code, code, f.code); check('typePreserved', f.type === snapF.type, snapF.type, f.type);
+            const expF = expected.fields?.properties?.[code] || {};
+            const others = Object.keys({ ...expF, ...f }).filter(k => !keys.includes(k)); const mutated = others.filter(k => !same(expF[k], f[k]));
+            check('otherPropertiesPreserved', mutated.length === 0, [], mutated);
+          }
+          return { ok: checks.every(c => c.ok), checks, revision: String(cur?.revision ?? '') };
+        },
+      },
+    };
+    const GENERAL_RESTORE = restoreStrategy('generalNotify', { get: (api, a) => api.getPreviewGeneralNotifications(a), put: putGeneral, equal: eqGeneral, kinds: ['notifications'], label: 'アプリの条件通知' });
+    const PER_RECORD_RESTORE = restoreStrategy('perRecordNotify', { get: (api, a) => api.getPreviewPerRecordNotifications(a), put: putPerRecord, equal: eqPerRecord, kinds: ['notifications'], label: 'レコードの条件通知' });
+
+    /**
+     * 元に戻す準備（書き込みなし）: 対象 step（逆順）を決め、現在の preview を取得して「反映直後」と集合ごとに比べる。
+     * 違えば ROLLBACK_STALE で止める（第三者の変更を消さない）。既に戻っている集合は実行時に「追加の変更なし」として通す
+     * @param {object} execution executePreview の結果（snapshot / actualAfterRaw を含む）
+     */
+    async function prepareRollback(execution, prepared, { api, now = Date.now } = {}) {
+      const rb = { rollbackVersion: '2', rollbackId: newId('rb'), executionId: execution?.executionId ?? null, appId: execution?.appId ?? null, env: ENV, requestedAt: nowIso(now), status: RB_RUN.PREPARED, blockers: [], stale: { status: 'FRESH', diffs: [] }, warnings: [], steps: [], snapshotRevision: execution?.snapshot?.revision ?? null, afterRevision: execution?.afterRevision ?? null, currentRevision: null, summary: { total: 0, bySource: {} } };
+      const block = (code, message, detail = null) => { rb.blockers.push({ code, message, ...(detail ? { detail } : {}) }); rb.status = RB_RUN.BLOCKED; };
+      if (!execution || !prepared || execution.executionId !== prepared.executionId) { block('INVALID_INPUT', '実行結果と準備（prepare）の組が一致しません'); return rb; }
+      if (execution.status === RUN.RUNNING) { block('EXECUTION_RUNNING', '反映の処理中です'); return rb; }
+      if (execution.rollback) { block('ALREADY_ROLLED_BACK', 'この実行は既に元に戻す処理を行っています（結果を確認してください。同じ実行を 2 回戻すことはできません）'); return rb; }
+      if (!execution.snapshot) { block('NO_SNAPSHOT', '実行前の snapshot が無いため元に戻せません'); return rb; }
+      if (!execution.actualAfterRaw) { block('NO_ACTUAL_AFTER', '反映直後の設定を取得できていないため、安全に元に戻せません。現在の動作テスト環境を確認してください'); return rb; }
+      rb.steps = buildRollbackPlan(execution, prepared).steps.map(st => ({ ...st, status: RB.PENDING, reason: null, message: '', requests: [], revision: null, verification: null, error: null }));
+      rb.summary.total = rb.steps.length; for (const st of rb.steps) rb.summary.bySource[st.sourceActionType] = (rb.summary.bySource[st.sourceActionType] || 0) + 1;
+      if (!rb.steps.length) { block('NOTHING_TO_ROLLBACK', '元に戻す変更がありません（動作テスト環境に書き込んだ step はありません）'); return rb; }
+      let current;
+      try { current = await fetchPreviewAll(api, rb.appId); } catch (e) { const s = strErr(e); if (isPermissionError(e)) block('PERMISSION_DENIED', 'アプリ設定を変更する権限がありません（動作テスト環境の設定を取得できませんでした）', s); else block('FETCH_FAILED', `現在の設定を取得できませんでした: ${s.message}`, s); return rb; }
+      rb.currentRevision = String(current.fields?.revision ?? '');
+      const expected = execution.actualAfterRaw;
+      let projected = clone(current);   // 先行する手順が戻した後の状態（参照チェック・already restored の判定に使う）
+      for (const st of rb.steps) {
+        const strat = ROLLBACK_STRATEGIES[st.actionType];
+        if (!strat) { st.status = RB.FAILED; st.reason = 'NO_STRATEGY'; st.message = '元に戻す方法がありません'; continue; }
+        const chk = strat.check({ current, expected, snapshot: execution.snapshot, step: st, prepared, state: projected });
+        if (!chk.ok) { st.status = RB.STALE; st.reason = chk.code; st.message = chk.message; st.diffs = chk.diffs || []; continue; }
+        if (chk.alreadyRestored) st.note = 'ALREADY_RESTORED';
+        projected = strat.project(projected, execution.snapshot, st);
+      }
+      const stale = rb.steps.filter(x => x.status === RB.STALE);
+      if (stale.length) { rb.stale = { status: 'STALE', diffs: stale.flatMap(x => (x.diffs || []).map(d => ({ stepId: x.stepId, ...d }))) }; block('ROLLBACK_STALE', '反映後に動作テスト環境の設定が変更されているため、自動では元に戻せません。現在の動作テスト環境を確認してください。', { steps: stale.map(x => x.stepId) }); }
+      if (rb.steps.some(x => x.status === RB.FAILED)) block('ROLLBACK_NOT_POSSIBLE', '元に戻す方法が無い step があります');
+      if (rb.status === RB_RUN.PREPARED && rb.afterRevision && rb.currentRevision && rb.afterRevision !== rb.currentRevision) rb.warnings.push({ code: 'OTHER_CHANGES_SINCE_EXECUTION', message: `反映後に他の設定が変更されています（revision ${rb.afterRevision} → ${rb.currentRevision}）。元に戻す対象の設定は変わっていないため戻せますが、それ以外の変更には触れません` });
+      return rb;
+    }
+
+    /** 元に戻す実行: 逆順に 1 手順ずつ（直前に再取得 → stale 再判定 → 復元 → 再取得して snapshot と比較）。失敗したら以降を止める */
+    async function executeRollback(rb, { api, execution, now = Date.now, onProgress = null } = {}) {
+      if (!rb || rb.status !== RB_RUN.PREPARED) throw Object.assign(new Error('元に戻す準備ができていない、または実行できない状態です'), { code: 'NOT_PREPARED' });
+      if (rb.executed) throw Object.assign(new Error('この準備は既に実行されています（やり直すには準備からやり直してください）'), { code: 'ALREADY_EXECUTED' });
+      if (!execution || execution.executionId !== rb.executionId) throw Object.assign(new Error('実行結果が準備と一致しません'), { code: 'INVALID_INPUT' });
+      if (execution.rollback) throw Object.assign(new Error('この実行は既に元に戻す処理を行っています'), { code: 'ALREADY_ROLLED_BACK' });
+      rb.executed = true; rb.status = RB_RUN.RUNNING; rb.startedAt = nowIso(now);
+      execution.rollback = rb;   // lifecycle: ROLLING_BACK（途中で止まっても結果を残す）
+      const progress = (st) => { if (typeof onProgress === 'function') { try { onProgress(clone(st), clone(rb)); } catch (e) { } } };
+      const yieldUi = () => new Promise(r => setTimeout(r, 0));
+      const expected = clone(execution.actualAfterRaw);
+      const snapshot = execution.snapshot;
+      let failed = false;
+      for (const st of rb.steps) {
+        if (failed) { st.status = RB.SKIPPED; st.reason = 'STOPPED_AFTER_FAILURE'; st.message = '前の手順が失敗したため実行していません'; progress(st); continue; }
+        st.status = RB.RUNNING; progress(st); await yieldUi();
+        const strat = ROLLBACK_STRATEGIES[st.actionType];
+        try {
+          const current = await fetchPreviewAll(api, rb.appId);
+          const chk = strat.check({ current, expected, snapshot, step: st, prepared: null });
+          if (!chk.ok) { st.status = RB.STALE; st.reason = chk.code; st.message = chk.message; st.diffs = chk.diffs || []; failed = true; progress(st); continue; }
+          if (chk.alreadyRestored) { st.status = RB.VERIFIED; st.reason = 'ALREADY_RESTORED'; st.message = '既に実行前の状態です（先行する手順で戻っています。追加の変更なし）'; st.verification = { ok: true, checks: [{ name: 'alreadyRestored', ok: true, expected: true, actual: true }] }; progress(st); continue; }
+          const applied = await strat.apply({ api, appId: rb.appId, current, expected, snapshot, step: st });
+          st.requests = applied.requests || []; st.revision = applied.revision || null;
+          Object.assign(expected, applied.expected || {});
+          st.status = RB.ROLLED_BACK; progress(st); await yieldUi();
+          const v = await strat.verify({ api, appId: rb.appId, expected, snapshot, step: st, applied });
+          st.verification = v; if (v.revision) st.revision = v.revision;
+          st.status = v.ok ? RB.VERIFIED : RB.VERIFY_FAILED;
+          if (!v.ok) { st.reason = 'ROLLBACK_VERIFY_FAILED'; st.message = `API は成功しましたが、再取得した設定が実行前の snapshot と一致しません（${v.checks.filter(c => !c.ok).map(c => c.name).join(', ')}）`; failed = true; }
+        } catch (e) {
+          const s = strErr(e);
+          st.status = RB.FAILED; st.error = s; failed = true;
+          st.reason = isPermissionError(e) ? 'PERMISSION_DENIED' : isRevisionError(e) ? 'REVISION_MISMATCH' : 'API_ERROR';
+          st.message = st.reason === 'PERMISSION_DENIED' ? 'アプリ設定を変更する権限がありません' : st.reason === 'REVISION_MISMATCH' ? '元に戻す途中で他の変更が入りました（revision 不一致）。再試行せず停止しました' : s.message;
+        }
+        progress(st); await yieldUi();
+      }
+      // 全体の検証（§31）: 現在の動作テスト環境 == 実行前 snapshot
+      try {
+        const cur = await fetchPreviewAll(api, rb.appId);
+        rb.afterRollbackRevision = String(cur.fields?.revision ?? '');
+        const diffs = collectionDiffs(snapshot, cur, ['fields', 'views', 'notifications', 'reminders'], '実行前の snapshot');
+        rb.verification = { restoredToSnapshot: diffs.length === 0, diffs, snapshotRevision: rb.snapshotRevision, currentRevision: rb.afterRollbackRevision };
+      } catch (e) { rb.verification = { restoredToSnapshot: null, diffs: [], error: strErr(e).message }; }
+      const okCount = rb.steps.filter(x => x.status === RB.VERIFIED).length, badCount = rb.steps.filter(x => [RB.FAILED, RB.STALE, RB.VERIFY_FAILED].includes(x.status)).length;
+      rb.status = rb.steps.some(x => x.status === RB.FAILED || x.status === RB.STALE) ? RB_RUN.FAILED : rb.steps.some(x => x.status === RB.VERIFY_FAILED) ? RB_RUN.VERIFY_FAILED : RB_RUN.VERIFIED;
+      rb.partial = okCount > 0 && badCount > 0;
+      rb.message = rb.status === RB_RUN.VERIFIED ? '動作テスト環境を実行前の状態に戻しました。' : rb.partial ? '一部の変更だけ元に戻りました。' : '元に戻せませんでした。';
+      rb.finishedAt = nowIso(now);
+      for (const s of execution.steps || []) { const r = rb.steps.find(x => x.stepId === s.stepId); if (r) s.rollbackStatus = r.status; }
+      execution.lifecycle = rb.status;
+      return rb;
+    }
+    /** 監査 JSON の rollback 節（§27: requestedAt / status / steps / verification） */
+    const rollbackSection = (rb) => (rb ? { rollbackId: rb.rollbackId, executionId: rb.executionId, requestedAt: rb.requestedAt, startedAt: rb.startedAt ?? null, finishedAt: rb.finishedAt ?? null, status: rb.status, partial: !!rb.partial, message: rb.message ?? null, blockers: rb.blockers || [], stale: rb.stale || null, warnings: rb.warnings || [], snapshotRevision: rb.snapshotRevision ?? null, afterRevision: rb.afterRevision ?? null, currentRevision: rb.currentRevision ?? null, afterRollbackRevision: rb.afterRollbackRevision ?? null, steps: (rb.steps || []).map(s => ({ stepId: s.stepId, actionType: s.actionType, sourceActionType: s.sourceActionType, collection: s.collection, target: s.target, status: s.status, reason: s.reason ?? null, message: s.message ?? '', requests: s.requests || [], revision: s.revision ?? null, verification: s.verification ?? null, error: s.error ?? null, diffs: s.diffs || [] })), verification: rb.verification ?? null } : null);
+
     // ================= 監査用 JSON =================
-    function buildAudit({ goal = null, plan = null, review = null, decisions = null, prepared = null, execution = null } = {}) {
+    function buildAudit({ goal = null, plan = null, review = null, decisions = null, prepared = null, execution = null, rollback = null } = {}) {
       const rv = review ? { ...review, simulation: review.simulation ? { before: review.simulation.before ?? null, process: review.simulation.process ?? null } : null } : null;
       return {
-        auditVersion: '1', generatedAt: new Date().toISOString(),
+        auditVersion: '2', generatedAt: new Date().toISOString(),
         goal: goal ?? plan?.goal ?? null,
         plan: plan ? (KTContextUi.planJson ? KTContextUi.planJson(plan) : plan) : null,
         review: rv,
         humanDecisions: decisions ? (typeof decisions.entries === 'function' && typeof decisions.get === 'function' ? Object.fromEntries(decisions.entries()) : decisions) : {},   // Map（別 realm でも可）か plain object
-        execution: execution ? { ...execution, snapshot: undefined } : (prepared ? { executionId: prepared.executionId, appId: prepared.appId, env: ENV, status: prepared.status, blockers: prepared.blockers, stale: prepared.stale, steps: prepared.steps.map(s => ({ stepId: s.stepId, actionType: s.actionType, status: s.status, reason: s.reason })) } : null),
+        execution: execution ? { ...execution, snapshot: undefined, actualAfterRaw: undefined, rollback: undefined } : (prepared ? { executionId: prepared.executionId, appId: prepared.appId, env: ENV, status: prepared.status, blockers: prepared.blockers, stale: prepared.stale, steps: prepared.steps.map(s => ({ stepId: s.stepId, actionType: s.actionType, status: s.status, reason: s.reason })) } : null),
         verification: execution ? execution.steps.map(s => ({ stepId: s.stepId, status: s.status, verification: s.verification })) : null,
         beforeAfter: execution ? stepBeforeAfter(execution) : null,
         beforeSnapshot: execution?.snapshot ?? prepared?.snapshot ?? null,
         actualAfter: execution?.actualAfter ?? null,
         simulation: execution?.simulation ?? null,
         reanalysis: execution?.reanalysis ?? null,
+        afterSnapshot: execution?.actualAfterRaw ?? null,
         rollbackPlan: execution && prepared ? buildRollbackPlan(execution, prepared) : null,
+        rollback: rollbackSection(rollback || execution?.rollback || null),
       };
     }
 
@@ -7288,13 +7583,15 @@
         getPreviewReminders: (a) => call('/k/v1/preview/app/notifications/reminder.json', 'GET', { app: app(a) }),
         putPreviewReminders: (a, body, revision) => call('/k/v1/preview/app/notifications/reminder.json', 'PUT', { app: app(a), ...body, ...(revision ? { revision } : {}) }),
         updatePreviewFields: (a, properties, revision) => call('/k/v1/preview/app/form/fields.json', 'PUT', { app: app(a), properties, ...(revision ? { revision } : {}) }),
+        // Phase 11（Rollback Executor）: 追加したフィールドの削除（動作テスト環境のみ）
+        deletePreviewFields: (a, fields, revision) => call('/k/v1/preview/app/form/fields.json', 'DELETE', { app: app(a), fields, ...(revision ? { revision } : {}) }),
         // 運用環境へ反映する関数は意図的に無い（Phase 9: Preview only）
       };
     }
 
     return {
-      EXECUTOR_VERSION, ENV, STEP, RUN, PREVIEW_FIELD_TYPES, ACTION_CAPABILITIES, HANDLERS,
-      classifySteps, prepare, executePreview, buildRollbackPlan, buildAudit, compareSimulation, diffBefore, previewDataFrom, layoutHasCode, createKintoneApi,
+      EXECUTOR_VERSION, ENV, STEP, RUN, RB, RB_RUN, PREVIEW_FIELD_TYPES, ACTION_CAPABILITIES, HANDLERS, ROLLBACK_STRATEGIES,
+      classifySteps, prepare, executePreview, buildRollbackPlan, prepareRollback, executeRollback, rollbackSection, fieldReferences, buildAudit, compareSimulation, diffBefore, previewDataFrom, layoutHasCode, createKintoneApi,
       recipientEntity, notificationDuplicate, reminderDuplicate, preservationChecks, UPDATABLE_FIELD_KEYS,
       preservationExceptIndex, notificationIdentityMismatch, reminderIdentityMismatch, viewIdentityMismatch,
     };
