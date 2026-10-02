@@ -341,6 +341,42 @@ const PLAN_U = { ...PLAN_X, plan: { ...PLAN_X.plan, proposedFields: [], steps: [
   assert(m.panel.executorState().stage === 'rolled-back' && r.includes('一部の変更だけ元に戻りました。') && /✓ P2[\s\S]*?× P1/.test(r) && r.includes('現在の動作テスト環境を確認してください。') && !m.mock.st.views['担当者別'] && m.mock.st.fields.progress, '§30: 一部の変更だけ元に戻りました ✓ P2 × P1・現在の動作テスト環境を確認してください（一覧は戻りフィールドは残る）');
 }
 
+console.log('\n--- 2e. Phase 12: プロセス管理の最終確認（§22）・Before / Planned / Actual（§18）・Change Group・Rollback ---');
+{
+  const PLAN_PR = { ...PLAN_X, plan: { ...PLAN_X.plan, proposedFields: [], steps: [
+    mkStep('P1', 'ADD_PROCESS_STATUS', 'PROCESS_STATUS', '部長承認', { name: '部長承認', assignees: ['FIELD_ENTITY:approver'], assigneeType: 'ONE' }, { title: 'ステータス「部長承認」を追加' }),
+    mkStep('P2', 'UPDATE_PROCESS', 'PROCESS_ACTION', '承認する', { filterCond: 'amount <= "999999"', changeKind: 'ACTION_CONDITION' }, { title: '「承認する」を 100 万円未満に限定', dependsOn: ['P1'] }),
+    mkStep('P3', 'ADD_PROCESS_ACTION', 'PROCESS_ACTION', '部長へ申請', { name: '部長へ申請', from: '承認待ち', to: '部長承認', filterCond: 'amount >= "1000000"' }, { title: '100 万円以上は部長へ', dependsOn: ['P1'] }),
+    mkStep('P4', 'ADD_PROCESS_ACTION', 'PROCESS_ACTION', '部長承認する', { name: '部長承認する', from: '部長承認', to: '完了' }, { title: '部長が承認', dependsOn: ['P1'] }),
+  ], summary: { steps: 4, invalidSteps: 0, needsConfirmation: 0, proposedFields: 0, questions: 0 } } };
+  const m = mount({ planResponse: PLAN_PR });
+  await tick(); const h = await runPlan(m);
+  assert(h.includes('プロセス管理の変更前後') && h.includes('kt-ai-mermaid'), 'Review にプロセスの Before / After（Mermaid）');
+  for (const id of ['P1', 'P2', 'P3', 'P4']) m.panel.decide(id, 'approve');
+  const e0 = execHtml(m);
+  assert(e0.includes('＋ ステータス追加') && e0.includes('＋ アクション追加') && e0.includes('✎ プロセス管理変更') && /承認済み・実行可能[\s\S]*?<b>4 件/.test(e0), 'Executor の件数: ステータス追加 / アクション追加 / プロセス管理変更');
+  await click(m, 'kt-ai-exec-start'); await tick();
+  const e1 = execHtml(m);
+  assert(m.panel.executorState().stage === 'confirm' && e1.includes('id="kt-ai-exec-process-confirm"') && e1.includes('⚠ プロセス管理を変更します') && e1.includes('動作テスト環境の承認フローを変更します。') && e1.includes('PROCESS_CHANGE_1: 4 step を 1 回の更新にまとめます'), '§22: ⚠ プロセス管理を変更します / 承認フローを変更します / Change Group の説明');
+  assert(/追加：[\s\S]*?＋ ステータス「部長承認」[\s\S]*?＋ アクション「部長へ申請」[\s\S]*?＋ アクション「部長承認する」/.test(e1) && /既存変更：[\s\S]*?✎ 「承認する」の条件変更/.test(e1), '§22: 追加（＋ ステータス / ＋ アクション）と既存変更（✎ 「承認する」の条件変更）');
+  assert(e1.includes('既存の操作可能条件を変更します') && e1.includes('現在はすべての「承認待ち」で実行できます') && e1.includes('変更後は「amount &lt;= &quot;999999&quot;」の場合のみ実行可能になります') && e1.includes('⚠ 既存の設定を変更します'), '§9: 既存の操作可能条件を変更します… を最終確認に表示');
+  assert((e1.match(/class="kt-ai-mermaid"/g) || []).length >= 2 && e1.includes('Proposed After') && e1.includes('条件の分割（承認待ち）') && e1.includes('明らかな重複・欠落なし') && e1.includes('運用環境には反映されません。'), '最終確認に Before / Proposed After の Mermaid と条件の分割判定・運用環境には反映されません');
+  await click(m, 'kt-ai-exec-go'); await tick(); await tick();
+  const ex = m.panel.executorState().execution;
+  assert(m.panel.executorState().stage === 'done' && ex.status === 'DONE' && ex.steps.every(s => s.status === 'VERIFIED' && s.groupId === 'PROCESS_CHANGE_1') && Object.keys(m.mock.st.status.states).length === 4 && m.mock.calls.filter(c => c === 'PUT status').length === 1, '反映: 4 step が 1 回の PUT で VERIFIED');
+  const e2 = execHtml(m);
+  assert(e2.includes('✓ 4 件 VERIFIED') && e2.includes('id="kt-ai-exec-process"') && e2.includes('プロセス管理の Before / Planned / Actual') && (e2.match(/class="kt-ai-mermaid"/g) || []).length >= 3 && e2.includes('Actual: ステータス 未処理 → 承認待ち → 完了 → 部長承認') && e2.includes('[PROCESS_CHANGE_1]') && hasButton(e2, '変更前の状態に戻す'), '§18: 完了画面に Before / Planned / Actual の Mermaid・Actual の要約・グループ表示・[変更前の状態に戻す]');
+  await click(m, 'kt-ai-exec-rollback-start'); await tick();
+  const r1 = execHtml(m);
+  assert(m.panel.executorState().stage === 'rollback-confirm' && r1.includes('・プロセス管理の変更 1 件') && r1.includes('実行前のプロセス管理（ステータス・アクション・作業者）全体に戻す') && r1.includes('運用環境には影響しません。'), 'rollback 確認: プロセス管理の変更 1 件 → 全体に戻す');
+  await click(m, 'kt-ai-exec-rollback-go'); await tick(); await tick();
+  const r2 = execHtml(m);
+  assert(m.panel.executorState().stage === 'rolled-back' && m.panel.executorState().rollback.status === 'ROLLED_BACK_VERIFIED' && r2.includes('動作テスト環境を実行前の状態に戻しました。') && Object.keys(m.mock.st.status.states).length === 3 && m.mock.st.status.actions.length === 3 && m.mock.st.status.actions[1].filterCond === '', 'rollback: プロセス設定が実行前（3 ステータス / 3 アクション・承認するは条件なし）に戻る');
+  await click(m, 'kt-ai-exec-audit-copy'); await tick();
+  const audit = JSON.parse(m.copies[m.copies.length - 1]);
+  assert(audit.execution.process && audit.execution.process.planned && audit.execution.process.actual && audit.rollback.status === 'ROLLED_BACK_VERIFIED' && audit.rollback.steps[0].actionType === 'RESTORE_PROCESS_SETTINGS', '監査 JSON に Before / Planned / Actual のプロセスと rollback');
+}
+
 console.log('\n--- 3. 回帰: Review UI の既存要素は変わらない ---');
 {
   const m = mount();
