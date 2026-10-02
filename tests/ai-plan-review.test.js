@@ -77,7 +77,7 @@ console.log('\n--- 2. Field ---');
 
 console.log('\n--- 3. Notification / Reminder ---');
 {
-  const uniq = review(plan([step('P1', 'ADD_NOTIFICATION', 'NOTIFICATION', '担当者設定通知', [['通知先', 'owner'], ['条件', 'owner != ""']])]));
+  const uniq = review(plan([step('P1', 'ADD_NOTIFICATION', 'NOTIFICATION', '担当者設定通知', [['通知先', 'owner'], ['条件', 'owner not in ("")']])]));
   const us = st(uniq, 'P1');
   assert(us.status === 'VALID' || us.status === 'WARNING', 'unique notification: 追加できる');
   const exact = review(plan([step('P1', 'ADD_NOTIFICATION', 'NOTIFICATION', '高額案件', [['通知先', 'user1, approver, owner_org'], ['条件', 'amount >= "1000000"']])]));
@@ -180,7 +180,7 @@ console.log('\n--- 7. Dependencies / Plan 内部 / Safety ---');
   assert(cycle.warnings.some(w => w.code === 'CIRCULAR_DEPENDENCY') && st(cycle, 'P1').status === 'INVALID' && st(cycle, 'P2').status === 'INVALID', 'plan cycle → INVALID＋warning');
   const twoFields = review(plan([step('P1', 'ADD_FIELD', 'PROPOSED_FIELD', 'NEW_FIELD_1'), step('P2', 'ADD_FIELD', 'PROPOSED_FIELD', 'NEW_FIELD_2')], [pf('NEW_FIELD_1', '部長承認者', 'mgr', 'USER_SELECT'), pf('NEW_FIELD_2', '部長', 'mgr', 'USER_SELECT')]));
   assert(st(twoFields, 'P2').status === 'INVALID' && codes(st(twoFields, 'P2')).includes('PLAN_INTERNAL_DUPLICATE'), 'two steps create same field → PLAN_INTERNAL_DUPLICATE');
-  const twoNotif = review(plan([step('P1', 'ADD_NOTIFICATION', 'NOTIFICATION', '担当者通知', [['通知先', 'owner'], ['条件', 'owner != ""']]), step('P4', 'ADD_NOTIFICATION', 'NOTIFICATION', '担当者設定通知', [['通知先', 'owner'], ['条件', 'owner != ""']])]));
+  const twoNotif = review(plan([step('P1', 'ADD_NOTIFICATION', 'NOTIFICATION', '担当者通知', [['通知先', 'owner'], ['条件', 'owner not in ("")']]), step('P4', 'ADD_NOTIFICATION', 'NOTIFICATION', '担当者設定通知', [['通知先', 'owner'], ['条件', 'owner not in ("")']])]));
   assert(codes(st(twoNotif, 'P4')).includes('PLAN_INTERNAL_DUPLICATE') && twoNotif.conflicts.some(c => c.code === 'PLAN_INTERNAL_DUPLICATE' && c.stepIds.includes('P4') && c.stepIds.includes('P1')), 'two notifications duplicate（別名・同条件・同通知先）→ Plan 内部重複');
   // Safety の 4 種
   const safety = review(plan([
@@ -218,7 +218,7 @@ console.log('\n--- 8. Impact re-check / coverage / Executor 出力 ---');
 console.log('\n--- 9. staging E2E（2026-10-02）で見つかった実データの癖 ---');
 {
   // A: 既存通知と類似 → step.issues に同じ指摘が 2 回並ばない（plan-level conflict の step への反映は重複を除く）
-  const dupA = review(plan([step('P1', 'ADD_NOTIFICATION', 'NOTIFICATION', '担当者設定通知', [['通知先', 'owner'], ['条件', 'owner != ""']])]));
+  const dupA = review(plan([step('P1', 'ADD_NOTIFICATION', 'NOTIFICATION', '担当者設定通知', [['通知先', 'owner'], ['条件', 'owner not in ("")']])]));
   const dupCodes = codes(st(dupA, 'P1')).filter(c => c === 'POSSIBLE_DUPLICATE');
   assert(dupCodes.length === 1 && dupA.conflicts.filter(c => c.code === 'POSSIBLE_DUPLICATE').length === 1, 'POSSIBLE_DUPLICATE は step.issues にも conflicts にも 1 回だけ');
   // A: kintone の条件式に無い関数（IS_NULL / PREVIOUS_VALUE）→ COND_UNKNOWN_FUNCTION（要確認。VALID のままにしない）

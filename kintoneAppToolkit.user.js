@@ -4992,6 +4992,211 @@
 
 
   // ==========================================
+  // 3.6a kintone 条件式の検査 (KTQueryCheck) — Phase 10
+  //   AI が書いた条件式（一覧の絞り込み・通知 / リマインダーの条件・プロセスの実行条件）を、kintone の「アプリの設定を変更する操作」で
+  //   受理できる形か Toolkit 側で決定的に検査する。根拠: cybozu developer network「クエリの書き方」（2026-10-02 確認）の
+  //   「フィールド、システム識別子ごとの利用可能な演算子と関数一覧」と「API ごとの追加の制限」。
+  //   「API に投げてエラーなら止める」ではなく、送る前に field code / 演算子 / リテラル / 関数 を確かめる。純関数（DOM 非依存）。
+  // ==========================================
+  const KTQueryCheck = (() => {
+    /** アプリの設定を変更する操作で使える演算子（フィールド型ごと） */
+    const SETTINGS_OPS = Object.freeze({
+      RECORD_NUMBER: ['=', '!=', '>=', '<='], $id: ['=', '!=', '>=', '<='],
+      CREATOR: ['in', 'not in'], MODIFIER: ['in', 'not in'],
+      CREATED_TIME: ['=', '!=', '>', '<', '>=', '<='], UPDATED_TIME: ['=', '!=', '>', '<', '>=', '<='],
+      SINGLE_LINE_TEXT: ['=', '!=', 'in', 'like', 'not like'], LINK: ['=', '!=', 'in', 'like', 'not like'],
+      NUMBER: ['=', '!=', '>=', '<='], CALC: ['=', '!=', '>=', '<='],
+      MULTI_LINE_TEXT: ['like', 'not like', 'is', 'is not'], RICH_TEXT: ['like', 'not like'],
+      CHECK_BOX: ['in', 'not in'], RADIO_BUTTON: ['in', 'not in'], DROP_DOWN: ['in', 'not in'], MULTI_SELECT: ['in', 'not in'],
+      FILE: ['like', 'not like', 'is', 'is not'],
+      DATE: ['=', '!=', '>', '<', '>=', '<='], TIME: ['=', '!=', '>', '<', '>=', '<='], DATETIME: ['=', '!=', '>', '<', '>=', '<='],
+      USER_SELECT: ['in', 'not in'], ORGANIZATION_SELECT: ['in', 'not in'], GROUP_SELECT: ['in', 'not in'],
+      STATUS: ['in', 'not in'], STATUS_ASSIGNEE: ['in', 'not in'],
+      GROUP: [], CATEGORY: [], SUBTABLE: [], SPACER: [], LABEL: [], HR: [],
+    });
+    const DATE_FUNCS = ['TODAY', 'YESTERDAY', 'TOMORROW', 'FROM_TODAY', 'THIS_WEEK', 'LAST_WEEK', 'NEXT_WEEK', 'THIS_MONTH', 'LAST_MONTH', 'NEXT_MONTH', 'THIS_YEAR', 'LAST_YEAR', 'NEXT_YEAR'];
+    /** フィールド型ごとに使える関数 */
+    const TYPE_FUNCS = Object.freeze({
+      CREATOR: ['LOGINUSER', 'PRIMARY_ORGANIZATION'], MODIFIER: ['LOGINUSER', 'PRIMARY_ORGANIZATION'], USER_SELECT: ['LOGINUSER', 'PRIMARY_ORGANIZATION'],
+      ORGANIZATION_SELECT: ['PRIMARY_ORGANIZATION'],
+      CREATED_TIME: ['NOW', ...DATE_FUNCS], UPDATED_TIME: ['NOW', ...DATE_FUNCS], DATETIME: ['NOW', ...DATE_FUNCS], DATE: DATE_FUNCS,
+    });
+    const ALL_FUNCS = ['LOGINUSER', 'PRIMARY_ORGANIZATION', 'NOW', ...DATE_FUNCS];
+    /** API ごとの追加の制限 */
+    const USAGE = Object.freeze({
+      view: { label: '一覧の絞り込み', forbidTypes: [], forbidFuncs: [], forbidOps: {} },
+      perRecordNotification: { label: 'レコードの条件通知', forbidTypes: ['MULTI_LINE_TEXT', 'RICH_TEXT', 'FILE', 'REFERENCE_TABLE'], forbidFuncs: ['LOGINUSER', 'PRIMARY_ORGANIZATION'], forbidOps: {} },
+      reminder: { label: 'リマインダーの条件', forbidTypes: ['REFERENCE_TABLE'], forbidFuncs: ['LOGINUSER', 'PRIMARY_ORGANIZATION'], forbidOps: {} },
+      process: { label: 'プロセス管理の実行条件', forbidTypes: ['STATUS', 'MULTI_LINE_TEXT', 'RICH_TEXT', 'FILE', 'REFERENCE_TABLE'], forbidFuncs: ['LOGINUSER', 'PRIMARY_ORGANIZATION'], forbidOps: {} },
+      recordAcl: { label: 'レコードのアクセス権の条件', forbidTypes: ['MULTI_LINE_TEXT', 'RICH_TEXT', 'FILE', 'REFERENCE_TABLE'], forbidFuncs: ALL_FUNCS, forbidOps: { SINGLE_LINE_TEXT: ['like', 'not like'], LINK: ['like', 'not like'] } },
+    });
+    const SYSTEM_CODES = { 'レコード番号': 'RECORD_NUMBER', '$id': 'RECORD_NUMBER', '作成者': 'CREATOR', '作成日時': 'CREATED_TIME', '更新者': 'MODIFIER', '更新日時': 'UPDATED_TIME', 'ステータス': 'STATUS', '作業者': 'STATUS_ASSIGNEE' };
+    const OPS2 = ['>=', '<=', '!='];
+    const OPS1 = ['=', '>', '<'];
+    const KEYWORDS = ['and', 'or', 'in', 'not', 'like', 'is', 'empty'];
+
+    // ---- 字句解析 ----
+    function tokenize(src) {
+      const s = String(src ?? '');
+      const toks = [];
+      let i = 0;
+      const err = (message, at) => { const e = new Error(message); e.code = 'COND_SYNTAX'; e.at = at; throw e; };
+      while (i < s.length) {
+        const c = s[i];
+        if (/\s/.test(c)) { i++; continue; }
+        if (c === '(') { toks.push({ t: 'lp', at: i }); i++; continue; }
+        if (c === ')') { toks.push({ t: 'rp', at: i }); i++; continue; }
+        if (c === ',') { toks.push({ t: 'comma', at: i }); i++; continue; }
+        if (c === '"' || c === '“' || c === '”') {
+          let j = i + 1, out = '';
+          while (j < s.length) { const d = s[j]; if (d === '\\' && j + 1 < s.length) { out += s[j + 1]; j += 2; continue; } if (d === '"' || d === '”' || d === '“') break; out += d; j++; }
+          if (j >= s.length) err('文字列リテラルが閉じていません', i);
+          toks.push({ t: 'str', v: out, at: i }); i = j + 1; continue;
+        }
+        if (c === "'") err('文字列は "（ダブルクオート）で囲みます', i);
+        const two = s.slice(i, i + 2);
+        if (OPS2.includes(two)) { toks.push({ t: 'op', v: two, at: i }); i += 2; continue; }
+        if (OPS1.includes(c)) { toks.push({ t: 'op', v: c, at: i }); i++; continue; }
+        const num = s.slice(i).match(/^-?\d+(\.\d+)?(?![\w.])/);
+        if (num) { toks.push({ t: 'num', v: num[0], at: i }); i += num[0].length; continue; }
+        const word = s.slice(i).match(/^[^\s()",=<>!]+/u);
+        if (!word) err(`解釈できない文字「${c}」`, i);
+        const w = word[0];
+        const lower = w.toLowerCase();
+        if (KEYWORDS.includes(lower)) { toks.push({ t: 'kw', v: lower, at: i }); i += w.length; continue; }
+        // 関数（NAME( ... )）
+        const rest = s.slice(i + w.length);
+        if (/^[A-Z_]+$/.test(w) && /^\s*\(/.test(rest)) { toks.push({ t: 'func', v: w, at: i }); i += w.length; continue; }
+        toks.push({ t: 'ident', v: w, at: i }); i += w.length;
+      }
+      return toks;
+    }
+
+    // ---- 構文解析（expr := term ((and|or) term)* / term := '(' expr ')' | ident op value）----
+    function parse(toks) {
+      let p = 0;
+      const peek = () => toks[p];
+      const err = (message, tok) => { const e = new Error(message); e.code = 'COND_SYNTAX'; e.at = tok ? tok.at : null; throw e; };
+      const logicals = new Set();
+      const conds = [];
+      function parseValueList() {
+        const items = [];
+        if (!peek() || peek().t !== 'lp') err('in / not in の値は ( ) で囲みます', peek());
+        p++;
+        while (peek() && peek().t !== 'rp') {
+          items.push(parseScalar());
+          if (peek() && peek().t === 'comma') p++;
+          else if (!peek() || peek().t !== 'rp') err('値の区切りは , です', peek());
+        }
+        if (!peek()) err('( が閉じていません');
+        p++;
+        return { kind: 'list', items };
+      }
+      function parseFuncCall() {
+        const f = toks[p++];
+        const args = [];
+        if (!peek() || peek().t !== 'lp') err(`関数 ${f.v} の後に ( が必要です`, f);
+        p++;
+        while (peek() && peek().t !== 'rp') {
+          const a = toks[p++];
+          if (!['ident', 'num', 'str'].includes(a.t)) err(`関数 ${f.v} の引数が不正です`, a);
+          args.push(a.v);
+          if (peek() && peek().t === 'comma') p++;
+        }
+        if (!peek()) err(`関数 ${f.v} の ) がありません`, f);
+        p++;
+        return { kind: 'func', name: f.v, args };
+      }
+      function parseScalar() {
+        const tok = peek();
+        if (!tok) err('値がありません');
+        if (tok.t === 'str') { p++; return { kind: 'str', v: tok.v }; }
+        if (tok.t === 'num') { p++; return { kind: 'num', v: tok.v }; }
+        if (tok.t === 'func') return parseFuncCall();
+        if (tok.t === 'ident') err(`値「${tok.v}」は文字列なら " で囲みます（フィールド同士の比較はできません）`, tok);
+        err('値の形が不正です', tok);
+      }
+      function parseCond() {
+        const f = toks[p];
+        if (!f || f.t !== 'ident') err(f ? `フィールドコードの位置に「${f.v ?? f.t}」があります` : 'フィールドコードがありません', f);
+        p++;
+        const o = toks[p];
+        if (!o) err(`「${f.v}」の後に演算子がありません`, f);
+        let op = null;
+        if (o.t === 'op') { op = o.v; p++; }
+        else if (o.t === 'kw' && o.v === 'in') { op = 'in'; p++; }
+        else if (o.t === 'kw' && o.v === 'like') { op = 'like'; p++; }
+        else if (o.t === 'kw' && o.v === 'not') { const n = toks[p + 1]; if (n && n.t === 'kw' && n.v === 'in') { op = 'not in'; p += 2; } else if (n && n.t === 'kw' && n.v === 'like') { op = 'not like'; p += 2; } else err('not の後は in か like です', o); }
+        else if (o.t === 'kw' && o.v === 'is') { const n = toks[p + 1]; if (n && n.t === 'kw' && n.v === 'not') { op = 'is not'; p += 2; } else { op = 'is'; p++; } }
+        else err(`「${f.v}」の後の「${o.v ?? o.t}」は演算子ではありません`, o);
+        let value;
+        if (op === 'in' || op === 'not in') value = parseValueList();
+        else if (op === 'is' || op === 'is not') { const e = toks[p]; if (!e || e.t !== 'kw' || e.v !== 'empty') err('is / is not の後は empty です', e || o); p++; value = { kind: 'empty' }; }
+        else value = parseScalar();
+        const cond = { field: f.v, op, value };
+        conds.push(cond);
+        return cond;
+      }
+      function parseTerm() {
+        const tok = peek();
+        if (tok && tok.t === 'lp') { p++; const inner = parseExpr(); if (!peek() || peek().t !== 'rp') err('( が閉じていません', tok); p++; return inner; }
+        return parseCond();
+      }
+      function parseExpr() {
+        const items = [parseTerm()];
+        while (peek() && peek().t === 'kw' && (peek().v === 'and' || peek().v === 'or')) { logicals.add(peek().v); p++; items.push(parseTerm()); }
+        return items.length === 1 ? items[0] : { type: 'logical', items };
+      }
+      if (!toks.length) err('条件式が空です');
+      const ast = parseExpr();
+      if (p < toks.length) { const t = toks[p]; if (t.t === 'ident' && /^(order|limit|offset)$/i.test(t.v)) err('order by / limit / offset はアプリの設定の条件では使えません', t); err(`「${t.v ?? t.t}」の位置から先を解釈できません`, t); }
+      return { ast, conds, logicals: [...logicals] };
+    }
+
+    /**
+     * @param {string} cond 条件式
+     * @param {object} o fields: code → { type, baseType?, subtable? }（Review の Before モデルの fields）/ usage: USAGE のキー
+     * @returns {{ ok, errors: [{ code, message }], conds: [{ field, op, value }], logical }}
+     */
+    function check(cond, { fields = {}, usage = 'view' } = {}) {
+      const text = String(cond ?? '').trim();
+      const u = USAGE[usage] || USAGE.view;
+      const errors = [];
+      const push = (code, message) => { if (!errors.some(e => e.code === code && e.message === message)) errors.push({ code, message }); };
+      if (!text) return { ok: true, errors: [], conds: [], logical: null, empty: true };
+      let parsed;
+      try { parsed = parse(tokenize(text)); } catch (e) { push(e.code || 'COND_SYNTAX', e.message || String(e)); return { ok: false, errors, conds: [], logical: null }; }
+      if (parsed.logicals.length > 1) push('COND_MIXED_AND_OR', 'アプリの設定の条件では and と or を混在できません');
+      for (const c of parsed.conds) {
+        const f = fields[c.field] || null;
+        const sysType = SYSTEM_CODES[c.field] || null;
+        const type = f ? (f.type === 'LOOKUP' ? (f.baseType || 'SINGLE_LINE_TEXT') : f.type) : sysType;
+        if (!type) { push('COND_UNKNOWN_FIELD', `条件のフィールド「${c.field}」が存在しません`); continue; }
+        if (f && f.subtable) push('COND_FIELD_NOT_ALLOWED', `テーブル内のフィールド「${c.field}」は in / not in でだけ比較できます`);
+        if (u.forbidTypes.includes(type)) { push('COND_FIELD_NOT_ALLOWED', `${u.label}では「${c.field}」（${type}）を条件にできません`); continue; }
+        if (type === 'REFERENCE_TABLE') continue;   // 参照先アプリの型に依存するため判定しない
+        const ops = SETTINGS_OPS[type];
+        if (!ops) continue;
+        const forbid = u.forbidOps[type] || [];
+        if (!ops.includes(c.op) || forbid.includes(c.op)) push('COND_OPERATOR_NOT_ALLOWED', `「${c.field}」（${type}）に演算子「${c.op}」は使えません（使えるのは ${ops.filter(o => !forbid.includes(o)).join(' ') || 'なし'}）`);
+        const values = c.value.kind === 'list' ? c.value.items : [c.value];
+        for (const v of values) {
+          if (v.kind === 'func') {
+            if (!ALL_FUNCS.includes(v.name)) { push('COND_UNKNOWN_FUNCTION', `関数「${v.name}」は kintone の条件式にありません`); continue; }
+            if (u.forbidFuncs.includes(v.name)) push('COND_FUNCTION_NOT_ALLOWED', `${u.label}では関数「${v.name}()」を使えません`);
+            else if (!(TYPE_FUNCS[type] || []).includes(v.name)) push('COND_FUNCTION_NOT_ALLOWED', `「${c.field}」（${type}）に関数「${v.name}()」は使えません`);
+            if (v.name === 'FROM_TODAY' && (v.args.length !== 2 || !/^-?\d+$/.test(String(v.args[0])) || !/^(DAYS|WEEKS|MONTHS|YEARS)$/.test(String(v.args[1])))) push('COND_VALUE_TYPE', 'FROM_TODAY(数値, DAYS|WEEKS|MONTHS|YEARS) の形で指定します');
+          } else if (v.kind === 'num' && !['NUMBER', 'CALC', 'RECORD_NUMBER'].includes(type)) push('COND_VALUE_TYPE', `「${c.field}」（${type}）の値は " で囲んだ文字列で指定します`);
+        }
+        if ((c.op === 'like' || c.op === 'not like') && c.value.kind !== 'str') push('COND_VALUE_TYPE', 'like / not like の値は文字列です');
+      }
+      return { ok: errors.length === 0, errors, conds: parsed.conds.map(c => ({ field: c.field, op: c.op, value: c.value })), logical: parsed.logicals[0] || null };
+    }
+
+    return { SETTINGS_OPS, TYPE_FUNCS, ALL_FUNCS, USAGE, SYSTEM_CODES, tokenize, parse, check };
+  })();
+
+  // ==========================================
   // 3.6b Change Plan Review & Simulation (KTPlanReview)  — Phase 8
   //   AI Change Planner が生成した Change Plan を、Toolkit 側の決定的ロジックで検証する層。
   //   現在の設定（Before）から Change Plan を仮適用した After モデルをメモリ上に作り、Diff・競合・重複・影響の再確認・
@@ -5386,13 +5591,22 @@
         return f;
       };
       /** 条件式の構文検査: kintone に無い関数が含まれていれば要確認（評価できない条件は設定できない） */
-      const checkCond = (cond, role) => {
+      /**
+       * 条件式の検査（Phase 10: KTQueryCheck で field code / 演算子 / リテラル / 関数 / API ごとの制限を確かめる）。
+       * 使えない関数 → COND_UNKNOWN_FUNCTION、演算子の無い散文 → COND_NOT_EXPRESSION、それ以外の不備 → COND_INVALID。いずれも要確認
+       */
+      const checkCond = (cond, role, usage = 'view') => {
         const c = String(cond ?? '').trim();
         if (!c) return;
         const unknown = condUnknownFunctions(c);
         if (unknown.length) issue('COND_UNKNOWN_FUNCTION', 'medium', `${role}「${c}」に kintone の条件式で使えない関数（${unknown.join(', ')}）が含まれています（要確認）`);
-        else if (!/(=|!=|<|>|\bin\b|\blike\b)/i.test(c)) issue('COND_NOT_EXPRESSION', 'medium', `${role}「${c}」は kintone の条件式（フィールド 演算子 値）の形ではありません（要確認）`);
-        else return;
+        else if (!/(=|!=|<|>|\bin\b|\blike\b|\bis\b)/i.test(c)) issue('COND_NOT_EXPRESSION', 'medium', `${role}「${c}」は kintone の条件式（フィールド 演算子 値）の形ではありません（要確認）`);
+        else {
+          const qc = KTQueryCheck.check(c, { fields: model.fields, usage });
+          const errs = qc.errors.filter(e => e.code !== 'COND_UNKNOWN_FIELD');   // フィールドの実在は requireField が INVALID として扱う
+          if (!errs.length) return;
+          issue('COND_INVALID', 'medium', `${role}「${c}」は kintone の設定では受理されません: ${errs.map(e => e.message).join('／')}（要確認）`, { conditionErrors: errs });
+        }
         if (r.status === STATUS.VALID) r.status = STATUS.NEEDS_CONFIRMATION;
       };
       const entityOk = (en, role) => {
@@ -5512,7 +5726,7 @@
           if (!model.process.states.some(s => s.name === to)) invalid('UNKNOWN_STATUS', `遷移先ステータス「${to}」が存在しません`);
           if (model.process.actions.some(a => a.name === name && froms.includes(a.from))) invalid('ACTION_DUPLICATE', `アクション「${name}」（${froms.join('/')} から）は既に存在します`);
           for (const c of condFields(cond, model)) requireField(c, '条件式');
-          checkCond(cond, '条件式');
+          checkCond(cond, '条件式', 'process');
           if (r.status === STATUS.INVALID) return r;
           for (const fr of froms) {
             for (const a of model.process.actions.filter(a => a.from === fr)) {
@@ -5545,7 +5759,7 @@
             const primary = branches[0] || (spec.filterCond ? { cond: spec.filterCond, to: spec.to || null } : null);
             if (primary && primary.cond && normCond(primary.cond) !== normCond(act.filterCond)) {
               for (const c of condFields(primary.cond, model)) requireField(c, '条件式');
-              checkCond(primary.cond, '条件式');
+              checkCond(primary.cond, '条件式', 'process');
               const narrower = condNarrower(primary.cond, act.filterCond);
               if (narrower === true || !act.filterCond) issue('EXISTING_PATH_RESTRICTED', 'high', `「${act.name}」は現在${act.filterCond ? `条件「${act.filterCond}」` : 'すべて'}の「${act.from}」レコードで実行できます。変更後は「${primary.cond}」の場合のみ実行可能になります`);
               else if (narrower === null) issue('CONDITION_CHANGE_UNPARSED', 'medium', `「${act.name}」の条件を「${act.filterCond}」→「${primary.cond}」に変更します（制限の有無を自動判定できません）`);
@@ -5591,7 +5805,7 @@
           if (unknownEvents.length) { issue('NOTIFICATION_EVENT_UNKNOWN', 'medium', `イベント「${unknownEvents.join(', ')}」は kintone の通知イベント（${NOTIFY_EVENTS.join(' / ')}）にありません（要確認）`); if (r.status === STATUS.VALID) r.status = STATUS.NEEDS_CONFIRMATION; }
           const events = (spec.events || []).filter(e => NOTIFY_EVENTS.includes(e));
           for (const c of condFields(cond, model)) requireField(c, '通知条件');
-          checkCond(cond, '通知条件');
+          checkCond(cond, '通知条件', 'perRecordNotification');
           if (step.actionType === 'UPDATE_NOTIFICATION') {
             const ref = step.targetRef;
             const ex = [...model.notifications.general, ...model.notifications.perRecord].find(n => n.id === ref || (n.title && n.title === ref));
@@ -5634,7 +5848,7 @@
           if (!spec.timingField) { issue('TIMING_FIELD_MISSING', 'medium', '基準となる日付フィールドが指定されていません（要確認）'); r.status = STATUS.NEEDS_CONFIRMATION; }
           else if (tf && !['DATE', 'DATETIME', 'CREATED_TIME', 'UPDATED_TIME'].includes(tf.baseType || tf.type)) invalid('REMINDER_FIELD_TYPE', `基準フィールド「${tf.code}」は日付型ではありません（${tf.type}）`);
           for (const c of condFields(spec.filterCond || '', model)) requireField(c, '条件');
-          checkCond(spec.filterCond || '', '条件');
+          checkCond(spec.filterCond || '', '条件', 'reminder');
           if (r.status === STATUS.INVALID) return r;
           const days = spec.daysLater != null ? String(spec.daysLater).replace(/[^-0-9]/g, '') : null;
           const rem = { id: `reminder#new:${step.id}`, title: spec.name || step.targetRef || step.title || '', timing: { code: tf ? tf.code : null, daysLater: days, time: spec.time || null }, filterCond: spec.filterCond || '', targets, origin: 'proposed', stepId: step.id };
@@ -5655,7 +5869,7 @@
           const fields = (spec.fields || []).map(f => { const rf = resolveField(f); return rf ? (rf.missingProposed ? rf : rf.code) : f; });
           for (const f of fields) { if (typeof f === 'object') invalid('PROPOSED_FIELD_NOT_APPLIED', `一覧の表示フィールド ${f.missingProposed} はこの step より前に追加されていません`); else if (!model.fields[f] && !RESERVED_CODES.includes(f)) invalid('UNKNOWN_FIELD', `一覧の表示フィールド「${f}」が存在しません`); }
           for (const c of condFields(spec.filterCond || '', model)) requireField(c, '絞り込み条件');
-          checkCond(spec.filterCond || '', '絞り込み条件');
+          checkCond(spec.filterCond || '', '絞り込み条件', 'view');
           if (spec.sort) { const sf = String(spec.sort).trim().split(/\s+/)[0]; if (sf && !model.fields[sf] && !RESERVED_CODES.includes(sf)) issue('SORT_FIELD_UNKNOWN', 'medium', `ソート条件のフィールド「${sf}」が存在しません（要確認）`); }
           if (step.actionType === 'ADD_VIEW') {
             if (!name) { invalid('VIEW_NAME_MISSING', '一覧名が指定されていません'); return r; }
