@@ -7936,7 +7936,7 @@
      * @param {object} s { stage: 'idle'|'preparing'|'blocked'|'confirm'|'running'|'done', classified[], prepared, execution, error, available }
      */
     function executorHtml(s) {
-      const cls = s.classified || [];
+      const cls = (s.prepared && Array.isArray(s.prepared.steps) && s.stage !== 'idle') ? s.prepared.steps : (s.classified || []);
       const executable = cls.filter(x => x.status === 'PENDING'), unsupported = cls.filter(x => x.status === 'UNSUPPORTED'), blocked = cls.filter(x => x.status === 'BLOCKED');
       const line = (ids, label, color, mark) => `<div style="display:flex; justify-content:space-between; font-size:12px;"><span style="color:${color};">${mark} ${esc(label)}</span><b>${ids.length} 件${ids.length ? `（${esc(ids.map(x => x.stepId).join(', '))}）` : ''}</b></div>`;
       const unsupportedList = unsupported.length ? `<div style="margin-top:4px; display:grid; gap:2px;">${unsupported.map(x => `<div style="font-size:11px; opacity:.8;">${esc(x.stepId)} ${esc(x.title || execActionJa(x.actionType))}：<b>PLAN_ONLY</b> — ${esc(EXEC_REASON_JA[x.reason] || x.message || x.reason)}</div>`).join('')}</div>` : '';
@@ -7955,7 +7955,8 @@
         const p = s.prepared;
         const stale = p?.stale?.status === 'STALE' ? `<div style="margin-top:4px; display:grid; gap:2px;">${(p.stale.diffs || []).slice(0, 12).map(d => `<div style="font-size:11px;">・${esc(d.message)}</div>`).join('')}</div>` : '';
         const blockers = (p?.blockers || s.error ? [...(p?.blockers || []), ...(s.error ? [{ code: 'ERROR', message: s.error }] : [])] : []).map(b => `<div style="font-size:12px; color:#b00020;">× ${esc(b.message)} <span style="opacity:.7;">[${esc(b.code)}]</span></div>`).join('');
-        return `${head}<div style="margin-top:8px; border:1px solid #b00020; border-radius:6px; padding:6px;">${blockers}${stale}${note('設定は変更していません。計画を作り直すか、動作テスト環境の変更を確認してください。')}</div><div style="margin-top:6px;"><button type="button" id="kt-ai-exec-start" class="btn" style="height:26px; font-size:11px;">もう一度確認する</button></div>${foot}`;
+        const stepReasons = (p?.steps || []).filter(x => x.status === 'BLOCKED' || x.status === 'UNSUPPORTED').map(x => `<div style="font-size:11px; margin-left:12px;">${esc(x.stepId)} ${esc(x.title || execActionJa(x.actionType))}：<b>${esc(x.status === 'BLOCKED' ? '実行不可' : 'PLAN_ONLY')}</b> — ${esc(x.message || EXEC_REASON_JA[x.reason] || x.reason || '')}${x.reason ? ` <span style="opacity:.7;">[${esc(x.reason)}]</span>` : ''}</div>`).join('');
+        return `${head}<div style="margin-top:8px; border:1px solid #b00020; border-radius:6px; padding:6px;">${blockers}${stepReasons}${stale}${note('設定は変更していません。計画を作り直すか、動作テスト環境の変更を確認してください。')}</div><div style="margin-top:6px;"><button type="button" id="kt-ai-exec-start" class="btn" style="height:26px; font-size:11px;">もう一度確認する</button></div>${foot}`;
       }
       if (s.stage === 'confirm') {
         const p = s.prepared;

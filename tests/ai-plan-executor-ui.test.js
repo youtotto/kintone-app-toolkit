@@ -241,6 +241,17 @@ console.log('\n--- 2b. Tier 2（通知 / リマインダー / フィールド変
   const e = execHtml(m);
   assert(/実行不可[\s\S]*?<b>1 件（P1）/.test(e) && /id="kt-ai-exec-start"[^>]*disabled/.test(e), '条件式が受理されない通知は「× 実行不可」・ボタンは押せない');
 }
+{
+  // 実機 Case D: 既存と同一の通知を承認しても、prepare の重複再チェックで止まり、理由（EXACT_DUPLICATE）が step ごとに表示される
+  const PLAN_DUP = { ...PLAN_X, plan: { ...PLAN_X.plan, proposedFields: [], steps: [mkStep('P1', 'ADD_NOTIFICATION', 'NOTIFICATION', '高額案件の登録_追加', { name: '高額案件の登録_追加', targets: ['USER:user1', 'FIELD_ENTITY:approver', 'FIELD_ENTITY:owner_org'], filterCond: 'amount >= "1000000"' })], summary: { steps: 1, invalidSteps: 0, needsConfirmation: 0, proposedFields: 0, questions: 0 } } };
+  const m = mount({ planResponse: PLAN_DUP });
+  await tick(); await runPlan(m);
+  assert(m.panel.lastReview().steps[0].issues.some(i => i.code === 'DUPLICATE'), 'Review が DUPLICATE');
+  m.panel.decide('P1', 'approve');
+  await click(m, 'kt-ai-exec-start'); await tick();
+  const e = execHtml(m);
+  assert(m.panel.executorState().stage === 'blocked' && e.includes('EXACT_DUPLICATE') && e.includes('同じ設定が動作テスト環境に既にあります') && /承認済み・実行可能[\s\S]*?<b>0 件/.test(e) && !m.mock.calls.some(c => /^PUT/.test(c)), '承認しても Executor の重複再チェックで止まり（EXACT_DUPLICATE）、件数は prepare 後の判定で 0 件・書き込みなし');
+}
 
 console.log('\n--- 2c. AI 接続が切れても Review / Executor は動く（Executor は Gateway 非依存）---');
 {
