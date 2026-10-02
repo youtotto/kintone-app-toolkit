@@ -12,7 +12,7 @@ function normalizeStatus({ enable, states, actions }) {
   return { enable: !!enable, states: ns, actions: na };
 }
 
-function makeKintoneMock(data, { permission = true, autoPlace = true } = {}) {
+function makeKintoneMock(data, { permission = true, autoPlace = true, jsSources = [] } = {}) {
   const rowsFrom = (fields) => Object.values(fields).filter(f => !['SUBTABLE', 'GROUP'].includes(f.type)).map(f => ({ type: 'ROW', fields: [{ type: f.type, code: f.code, size: { width: '200' } }] }));
   const st = {
     fields: clone(data.fields), layout: rowsFrom(data.fields), views: clone(data.views?.views || {}),
@@ -25,19 +25,86 @@ function makeKintoneMock(data, { permission = true, autoPlace = true } = {}) {
     relatedApps: clone(data.relatedApps || {}),
     // アプリアクション（Phase 14）: GET /preview/app/actions と同じ形（アクション名 → { name, id, index, destApp, mappings, entities, filterCond }）。PUT は全体置換
     actions: clone(data.actions?.actions || {}), actionSeq: 9000,
+    // JavaScript / CSS カスタマイズ（Phase 17）: GET / PUT /preview/app/customize と upload / download。
+    //   kintone と同じく、取得 API の fileKey（dl:n）は PUT で再指定するとファイルが残り、アップロード API の fileKey（up:n）は PUT で実体化されて別のキー（dl:n）になる
+    customize: null, files: new Map(), pending: new Map(), fileSeq: 1,
   };
+  {
+    const cz = data.customize || { scope: 'ALL', desktop: { js: [], css: [] }, mobile: { js: [], css: [] } };
+    const src = (name, target) => (jsSources.find(f => f.name === name && (f.target || 'desktop') === target)?.text ?? '');
+    const conv = (list, target, kind) => (list || []).map(e => {
+      if (e.type === 'URL') return { type: 'URL', url: e.url };
+      const key = e.file?.fileKey || ('dl:' + (st.fileSeq++));
+      const content = kind === 'js' ? src(e.file?.name, target) : '';
+      st.files.set(key, { name: e.file?.name, size: String(e.file?.size ?? Buffer.byteLength(content, 'utf8')), content, contentType: e.file?.contentType || (kind === 'js' ? 'text/javascript' : 'text/css') });
+      return { type: 'FILE', fileKey: key };
+    });
+    st.customize = { scope: cz.scope || 'ALL', desktop: { js: conv(cz.desktop?.js, 'desktop', 'js'), css: conv(cz.desktop?.css, 'desktop', 'css') }, mobile: { js: conv(cz.mobile?.js, 'mobile', 'js'), css: conv(cz.mobile?.css, 'mobile', 'css') } };
+  }
   const calls = [];
   const err = (code, message) => Object.assign(new Error(message), { code, message });
   // mutateList(what, list): 全体置換 API が受け取った一覧を保存直前に書き換える（検証の mutant。what = 'general' | 'perRecord' | 'reminders' | 'views'）
   // sideEffectOnStatusPut: プロセス管理の PUT 後に kintone が自動で一覧 / 通知を足す挙動を模す（Phase 12 §17）
   // relatedUnavailable: 参照元アプリ ID → その参照元の GET は CB_NO02、参照するルックアップの lookup は null（kintone の挙動）/ mutateLookup(lookup): PUT 直前にルックアップ設定を書き換える mutant
   // destUnavailable: コピー先アプリ ID → そのアプリへのアクションの GET は destApp / mappings が null（kintone の挙動）。dropOneExistingOnPut: 'actions' で既存 1 件が抜ける mutant
-  const ctl = { failAddField: null, mangleLabel: false, failPut: null, dropOneExistingOnPut: null, mangleReminderTime: false, onWrite: null, mutateList: null, failDelete: null, sideEffectOnStatusPut: null, relatedUnavailable: null, mutateLookup: null, destUnavailable: null };
+  // failUpload: 'CSRF' | 'PERMISSION' | 'TOO_LARGE' | 'INVALID' | 'GENERIC'（ファイルのアップロードを失敗させる）/ mutateCustomize(next): PUT 直前にカスタマイズ設定を書き換える mutant / corruptUploaded: 実体化した本文を壊す mutant
+  const ctl = { failAddField: null, mangleLabel: false, failPut: null, dropOneExistingOnPut: null, mangleReminderTime: false, onWrite: null, mutateList: null, failDelete: null, sideEffectOnStatusPut: null, relatedUnavailable: null, mutateLookup: null, destUnavailable: null, failUpload: null, mutateCustomize: null, corruptUploaded: false };
   const mutate = (what, list) => (ctl.mutateList ? ctl.mutateList(what, list) : list);
   const guard = () => { if (!permission) throw err('CB_NO02', '権限がありません。'); };
   const checkRev = (revision) => { if (revision != null && revision !== '' && String(revision) !== String(st.revision)) throw err('GAIA_CO02', '指定したリビジョンが最新ではありません。'); };
   const write = (what) => { calls.push(what); if (ctl.onWrite) ctl.onWrite(what); if (ctl.failPut === what.split(' ')[1]) throw err('GAIA_XX', `モックの失敗（${what}）`); };
   const api = {
+    // ---- JavaScript / CSS カスタマイズ（Phase 17）----
+    async getPreviewCustomize() {
+      calls.push('GET customize'); guard();
+      const out = (list) => list.map(e => (e.type === 'URL' ? { type: 'URL', url: e.url } : { type: 'FILE', file: { fileKey: e.fileKey, name: st.files.get(e.fileKey)?.name, size: st.files.get(e.fileKey)?.size, contentType: st.files.get(e.fileKey)?.contentType } }));
+      const c = st.customize;
+      return { scope: c.scope, desktop: { js: out(c.desktop.js), css: out(c.desktop.css) }, mobile: { js: out(c.mobile.js), css: out(c.mobile.css) }, revision: String(st.revision) };
+    },
+    async uploadFile(name, content, mime = 'text/javascript') {
+      calls.push('POST file');
+      if (ctl.failUpload === 'CSRF') throw err('GAIA_RE01', 'CSRF token が不正です（__REQUEST_TOKEN__）');
+      if (ctl.failUpload === 'PERMISSION' || !permission) throw Object.assign(err('CB_NO02', '権限がありません。'), { status: 403 });
+      if (ctl.failUpload === 'TOO_LARGE') throw Object.assign(err('GAIA_FI02', 'ファイルのサイズが上限を超えています'), { status: 413 });
+      if (ctl.failUpload === 'INVALID') throw Object.assign(err('GAIA_IL02', 'ファイルが不正です'), { status: 400 });
+      if (ctl.failUpload === 'GENERIC') throw err('GAIA_XX', 'モックの失敗（POST file）');
+      const key = 'up:' + (st.fileSeq++);
+      st.pending.set(key, { name, content: String(content), mime });
+      return key;
+    },
+    async downloadFile(fileKey) {
+      calls.push('GET file');
+      const f = st.files.get(fileKey);
+      if (!f) throw Object.assign(err('GAIA_IL23', 'ファイルが見つかりません（アップロード直後のキーはダウンロードできません）'), { status: 404 });
+      return f.content;
+    },
+    async putPreviewCustomize(app, body, revision) {
+      write('PUT customize'); guard(); checkRev(revision);
+      if (body.scope != null && !['ALL', 'ADMIN', 'NONE'].includes(body.scope)) throw err('GAIA_IL02', 'scope が不正です');
+      const next = { scope: body.scope ?? st.customize.scope, desktop: { js: [], css: [] }, mobile: { js: [], css: [] } };
+      for (const t of ['desktop', 'mobile']) for (const k of ['js', 'css']) {
+        const list = body[t]?.[k];
+        if (list == null) { next[t][k] = clone(st.customize[t][k]); continue; }
+        if (list.length > 30) throw err('GAIA_IL04', 'ファイルは30個までです（' + t + '.' + k + '）');
+        next[t][k] = list.map(e => {
+          if (e.type === 'URL') { if (!String(e.url).startsWith('https://')) throw err('GAIA_IL02', 'url は https が必要です'); return { type: 'URL', url: e.url }; }
+          if (e.type !== 'FILE' || !e.file?.fileKey) throw err('GAIA_IL02', 'type / file.fileKey が不正です');
+          const key = e.file.fileKey;
+          if (st.files.has(key)) return { type: 'FILE', fileKey: key };                       // 取得 API の fileKey を再指定 → ファイルは残る
+          const up = st.pending.get(key);
+          if (!up) throw err('GAIA_IL04', '指定した fileKey「' + key + '」は不正です');
+          const dl = 'dl:' + (st.fileSeq++);
+          const content = ctl.corruptUploaded ? up.content + '\n// corrupted' : up.content;   // corruptUploaded: 実体化した本文を壊す mutant（本文の指紋検証が検出する）
+          st.files.set(dl, { name: up.name, size: String(Buffer.byteLength(content, 'utf8')), content, contentType: up.mime });
+          st.pending.delete(key);
+          return { type: 'FILE', fileKey: dl };
+        });
+      }
+      if (ctl.dropOneExistingOnPut === 'customize') next.desktop.js = next.desktop.js.slice(1);   // バグの注入: 既存 1 件が抜ける
+      const final = ctl.mutateCustomize ? ctl.mutateCustomize(next) : next;
+      st.customize = final; st.revision += 1;
+      return { revision: String(st.revision) };
+    },
     async getPreviewFields() { calls.push('GET fields'); guard(); const props = clone(st.fields); if (ctl.relatedUnavailable) for (const f of Object.values(props)) if (f.lookup && String(f.lookup.relatedApp?.app) === String(ctl.relatedUnavailable)) f.lookup = null; return { properties: props, revision: String(st.revision) }; },
     // 参照元アプリ（運用環境・read-only）
     async getApp(id) { calls.push('GET app'); const r = st.relatedApps[String(id)]; if (!r || String(ctl.relatedUnavailable) === String(id)) throw err('CB_NO02', '権限がありません。'); return { appId: String(id), name: r.name, code: r.code || '' }; },

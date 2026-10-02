@@ -366,6 +366,8 @@ function mount({ inputs = INPUTS, planResponse = PLAN_HYBRID, generatedFor = nul
   return { host, panel, $, calls, copies, downloads, mock, conv: () => panel.conversation(), chat: () => $('kt-ai-chat').innerHTML, msgs: () => panel.conversation().state.messages, types: () => panel.conversation().state.messages.map(m => m.type) };
 }
 const clickChat = (m, act, extra = {}) => m.$('kt-ai-chat').dispatch({ type: 'click', target: { dataset: { act, ...extra } } });
+/** Phase 17: 実装仕様の確定（Human Approval の SoT は仕様カードの［この仕様で確定］）。仕様が無い（JS のない）計画では何もしない */
+const confirmSpec = async (m) => { const v = m.conv().activePlan(); if (v?.spec) await clickChat(m, 'confirm-spec', { plan: v.planId, version: String(v.version) }); };
 const writes = (m) => m.mock.calls.filter(c => !c.startsWith('GET'));
 {
   const m = mount();
@@ -389,6 +391,14 @@ const writes = (m) => m.mock.calls.filter(c => !c.startsWith('GET'));
   const ex = await m.panel.send('C1 はなぜ JavaScript が必要？');
   assert(ex.intent === KTAiConversation.INTENT.EXPLAIN_CUSTOMIZATION && m.calls.ask.length === 1 && m.calls.ask[0].ctx.planContext?.kind === 'EXPLAIN_PLAN' && /JavaScript カスタマイズの説明/.test(m.chat()), 'EXPLAIN_CUSTOMIZATION: planContext（EXPLAIN_PLAN）で説明だけ。計画は変えない');
   assert(m.conv().activePlan() === v && m.calls.plan.length === 1 && m.calls.generate.length === 0, '説明では Planner / Generator を呼ばない');
+  // Phase 17: 仕様の確定前はコードを作らない（spec-required）。チャットの「それでいい」でも確定しない。確定は仕様カードの［この仕様で確定］だけ
+  assert(v.spec && v.spec.status === 'DRAFT' && m.types().includes('SPEC') && /実装仕様 v1/.test(m.chat()) && /data-act="confirm-spec"/.test(m.chat()) && /data-act="revise-spec"/.test(m.chat()), '計画に JS があれば実装仕様 v1（DRAFT）のカード: ［仕様を修正］［この仕様で確定］');
+  const g0 = await m.panel.send('コードを作って');
+  assert(g0.ok === false && m.calls.generate.length === 0 && m.msgs().some(x => x.data?.kind === 'spec-required'), '仕様の確定前の「コードを作って」: Generator を呼ばず、確定を案内');
+  const c0 = await m.panel.send('それでいい');
+  assert(c0.intent === KTAiConversation.INTENT.CONFIRM_SPEC && v.spec.status === 'DRAFT' && /この仕様で確定］ボタン/.test(m.chat()), '「それでいい」は CONFIRM_SPEC（案内だけ。仕様は DRAFT のまま）');
+  await confirmSpec(m);
+  assert(v.spec.status === 'CONFIRMED' && v.spec.customizeRevision === '12' && m.msgs().some(x => x.data?.kind === 'spec-confirmed') && /確定済み/.test(m.chat()) && /JavaScript を生成（C1）/.test(m.chat()), '［この仕様で確定］→ CONFIRMED・動作テスト環境の customize revision（12）を記録・［JavaScript を生成（C1）］');
   // コード生成
   const g = await m.panel.send('コードを作って');
   assert(g && g.ok && g.intent === KTAiConversation.INTENT.GENERATE_CODE && m.calls.generate.length === 1, '「コードを作って」→ GENERATE_CODE → Generator を 1 回呼ぶ');
@@ -399,7 +409,7 @@ const writes = (m) => m.mock.calls.filter(c => !c.startsWith('GET'));
   assert(m.types().includes('CODE') && /JavaScript を生成しました/.test(m.chat()) && /Toolkit Code Review/.test(m.chat()) && /✓ 検査を通過/.test(m.chat()) && /✎ 既存 JS を変更: <b>fieldOnOff\.js<\/b>/.test(m.chat()), 'コードカード: 対象（✎ 既存 JS を変更）・Toolkit Code Review ✓');
   assert(/data-act="open-code" data-cid="C1" data-view="code"/.test(m.chat()) && /data-act="open-code" data-cid="C1" data-view="diff"/.test(m.chat()) && /data-act="copy-code"/.test(m.chat()) && /data-act="copy-diff"/.test(m.chat()), 'コードカードの操作: コードを見る / Diffを見る / コピー / Diffをコピー');
   assert(/＋3 行 \/ −0 行/.test(m.chat()) && /元のコードは保持/.test(m.chat()), 'Diff の要約: 3 行追加・削除 0（元のコードは保持）');
-  assert(/kintone への登録は行いません/.test(m.chat()), 'コードカード: kintone へは登録しない旨');
+  assert(/data-act="open-js-register"/.test(m.chat()) && /登録は［動作テスト環境へ登録］→ 確認画面/.test(m.chat()) && /運用環境には反映しません/.test(m.chat()), 'コードカード: ［動作テスト環境へ登録］は確認画面を経る旨（Phase 17）・運用環境には反映しない');
   assert(writes(m).length === 0, 'コード生成で kintone への書き込みは 0 件');
   // コードを見る / Diff
   await clickChat(m, 'open-code', { cid: 'C1', view: 'code' });
@@ -448,6 +458,7 @@ console.log('\n--- §53-2. カスタマイズの修正 / 複数カスタマイ�
   const m = mount({ planResponse: (ctx) => (ctx.revision ? planOf({ steps: [STD_STEP(), JS_STEP()], customizations: [cust({ platform: ['desktop', 'mobile'], events: ['app.record.edit.show', 'mobile.app.record.edit.show'] })], solution: 'HYBRID', requestId: 'pl-h2' }) : twoC) });
   await ticks();
   await m.panel.send(GOAL_HYBRID);
+  await confirmSpec(m);
   const g0 = await m.panel.send('コードを作って');
   assert(g0.intent === KTAiConversation.INTENT.GENERATE_CODE && m.calls.generate.length === 0 && m.msgs().some(x => x.data?.kind === 'customization-choices' && x.data.choices.length === 2), '複数の生成可能なカスタマイズ: どれか聞く（勝手に生成しない）');
   assert(/data-act="generate" data-cid="C2"/.test(m.chat()), '選択肢のボタン（data-cid）');
@@ -468,6 +479,7 @@ console.log('\n--- §53-2. カスタマイズの修正 / 複数カスタマイ�
   const m = mount({ planResponse: planOf({ steps: [STD_STEP(), JS_STEP()], customizations: [cust({ platform: [] })], solution: 'HYBRID' }) });
   await ticks();
   await m.panel.send(GOAL_HYBRID);
+  await confirmSpec(m);
   assert(/生成不可/.test(m.chat()) && /PC \/ モバイルのどちらが対象か決まっていません/.test(m.$('kt-ai-plan-result').innerHTML), 'PC / モバイル未定: カードは「生成不可」・Review に確認事項');
   assert(/JS 1（生成可 0・要確認 1）/.test(m.chat()), '計画カードの JS 行: 生成可 0・要確認 1（JS の確認事項は Executor の △ とは別に数える）');
   assert(/JavaScript カスタマイズに確認が必要な点があります/.test(m.chat()) && !/問題は見つかりませんでした/.test(m.chat()), 'Review の案内: JS の要確認を文言に反映（「問題は見つかりませんでした」にしない。実機で確認）');
@@ -480,6 +492,7 @@ console.log('\n--- §53-2. カスタマイズの修正 / 複数カスタマイ�
   await ticks();
   await m.panel.send('金額が100万円以上なら警告メッセージを表示したい');
   assert(/＋ 新規 JS/.test(m.chat()) && m.conv().activePlan().plan.solution === 'CUSTOMIZATION', '新規 JS の計画: ＋ 新規 JS・solution CUSTOMIZATION');
+  await confirmSpec(m);
   const g = await m.panel.send('JS を書いて');
   assert(g.ok && m.calls.generate.length === 1 && m.panel.generated('C1').review.status === 'BLOCKED', 'Generator の応答に未知フィールド → Toolkit Code Review BLOCKED');
   assert(/× 採用不可/.test(m.chat()) && /採用できない問題/.test(m.chat()) && /GENERATED_JS_UNKNOWN_FIELD/.test(m.chat()) && /計画を修正して再生成/.test(m.chat()), 'コードカード: × 採用不可・理由（GENERATED_JS_UNKNOWN_FIELD）・再生成の案内');
@@ -496,6 +509,7 @@ console.log('\n--- §53-3. JS_SOURCE_UNAVAILABLE → 再スキャン / 契約に
   await m.panel.send(GOAL_HYBRID);
   const v = m.conv().activePlan();
   assert(v.review.steps.find(r => r.solution === 'CUSTOMIZATION').codeGeneration.sourceAvailable === false && v.review.steps.find(r => r.solution === 'CUSTOMIZATION').codeGeneration.supported === true, 'キャッシュ payload: 本文なし（生成は試みる）');
+  await confirmSpec(m);
   const g = await m.panel.send('コードを作って');
   assert(g.ok === false && m.calls.generate.length === 0 && m.msgs().some(x => x.data?.kind === 'source-unavailable' && x.data.file?.name === 'fieldOnOff.js') && /JS_SOURCE_UNAVAILABLE/.test(m.chat()), '本文を取得できない: Generator を呼ばず JS_SOURCE_UNAVAILABLE（既存ファイルへの自動生成はしない）');
   assert(/data-act="rescan"/.test(m.chat()) && /新規 JS として設計/.test(m.chat()) && /手動で確認する/.test(m.chat()), '選択肢: 再スキャン / 新規 JS として設計 / 手動確認');
@@ -505,6 +519,7 @@ console.log('\n--- §53-3. JS_SOURCE_UNAVAILABLE → 再スキャン / 契約に
   const m2 = mount({ inputs: INPUTS_CACHED, loadJsSource: async () => null });
   await ticks();
   await m2.panel.send(GOAL_HYBRID);
+  await confirmSpec(m2);
   await m2.panel.send('コードを作って');
   await clickChat(m2, 'choice', { intent: 'REVISE_PLAN', text: 'C1 は既存ファイルに統合せず、新規の JS ファイルとして設計して' });
   assert(m2.calls.plan.length === 2 && m2.calls.plan[1].ctx.revision?.request.includes('新規の JS ファイルとして設計'), '「新規 JS として設計」→ 計画の修正（REVISE_PLAN）として Planner へ');
@@ -513,6 +528,7 @@ console.log('\n--- §53-3. JS_SOURCE_UNAVAILABLE → 再スキャン / 契約に
   const m = mount({ health: HEALTH_NO_GEN });
   await ticks();
   await m.panel.send(GOAL_HYBRID);
+  await confirmSpec(m);
   const g = await m.panel.send('コードを作って');
   assert(g.ok === false && m.calls.generate.length === 0 && m.msgs().some(x => x.type === 'ERROR' && x.data.code === 'GENERATOR_NOT_AVAILABLE') && /JavaScript の生成」を利用できません/.test(m.chat()), '契約に customization-generator が無い: GENERATOR_NOT_AVAILABLE（Planner / Q&A は使える）');
   assert(m.panel.capability().features['customization-generator']?.available === false && m.panel.capability().features['change-planner']?.available === true, 'capability: generator だけ利用不可');
@@ -521,6 +537,7 @@ console.log('\n--- §53-3. JS_SOURCE_UNAVAILABLE → 再スキャン / 契約に
   const m = mount({ generateError: new KTAiClient.AiClientError({ code: KTAiClient.ERROR_CODES.RATE_LIMITED, message: 'rate', retryAfterSeconds: 30, requestId: 'gen-x' }) });
   await ticks();
   await m.panel.send(GOAL_HYBRID);
+  await confirmSpec(m);
   const g = await m.panel.send('コードを作って');
   assert(g.ok === false && m.calls.generate.length === 1 && m.msgs().some(x => x.type === 'ERROR' && x.data.code === 'RATE_LIMITED' && x.data.retryText === 'コードを作って') && !m.panel.generated('C1'), 'Gateway の RATE_LIMITED: エラーカード（再試行）。生成結果は無い');
   assert(/data-act="retry"/.test(m.chat()) && /data-intent="GENERATE_CODE"/.test(m.chat()), '再試行ボタンは GENERATE_CODE を保持');

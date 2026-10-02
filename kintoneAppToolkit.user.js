@@ -5008,6 +5008,8 @@
       // Phase 15: 計画の修正（revision）。goal は変えず、前回の計画の要約と修正の依頼を ctx.revision として送る（Gateway が再計画する）。
       //   retrieval（辞書照合のヒント）には修正の依頼の語も使う（「住所は既存の顧客住所を使って」→ 顧客住所 を候補に）
       const revision = options.revision && typeof options.revision === 'object' ? compactRevision(options.revision, limits) : null;
+      // Phase 17: Customize タブから相談している JavaScript（subject）。Planner に「このファイルへの統合を第一候補に」と伝え、その js-file fact は省略しない
+      const subject = options.subject && typeof options.subject === 'object' && options.subject.sourceId ? compactSubject(options.subject) : null;
       const rt = revision ? `${g} ${revision.request}` : g;
       const sections = new Map();
       const trunc = (name, total, included) => {
@@ -5204,7 +5206,9 @@
       for (const jf of jsFiles.slice(0, limits.maxJsFiles || 20)) {
         const touched = Object.entries(jf.fields).map(([code, acc]) => ({ code, label: fieldsN.find(x => x.code === code)?.label ?? code, access: acc }));
         const accText = (acc) => Object.entries(acc).sort((a, b) => b[1] - a[1]).map(([k, v]) => `${k}×${v}`).join('/');
-        const rel = 3 + (touched.some(t => fieldScore.has(t.code) && (fieldScore.get(t.code).score >= 3)) ? 6 : 0) + (jsWords ? 4 : 0) + (settingHit(jf.name) ? 5 : 0);
+        const isSubject = !!subject && subject.name === jf.name && subject.target === jf.target;
+        if (isSubject) for (const t of touched) bump(t.code, 4, '相談中の JavaScript が扱うフィールド');
+        const rel = 3 + (touched.some(t => fieldScore.has(t.code) && (fieldScore.get(t.code).score >= 3)) ? 6 : 0) + (jsWords ? 4 : 0) + (settingHit(jf.name) ? 5 : 0) + (isSubject ? 40 : 0);
         push({
           kind: 'js-file', key: `JS_FILE:${jf.target}:${jf.name}`, confidence: jf.analyzed ? 'CERTAIN' : 'NOT_ANALYZED',
           jsFile: { name: jf.name, target: jf.target, analyzed: jf.analyzed, sourceAvailable: !!jf.sourceAvailable, ...(jf.url ? { url: jf.url, external: !!jf.external } : {}), events: jf.events, fields: touched, appRefs: jf.appRefs },
@@ -5255,7 +5259,8 @@
         views: views.map(v => v.name),
         reports: reports.map(r => r.name),
         appActions: acts.map(a => a.name),
-        jsFiles: (deps?.nodes || []).filter(n => n.type === 'CUSTOMIZE').map(n => n.name).sort(cmp),
+        // URL 指定のファイルは deps のノード名が URL 全体、js-file facts はファイル名（basename）なので両方を既存として持つ（Phase 17）
+        jsFiles: [...new Set([...(deps?.nodes || []).filter(n => n.type === 'CUSTOMIZE').map(n => n.name), ...jsFiles.map(f => f.name)])].sort(cmp),
         // Phase 16: 既存 JS が登録しているイベント（統合・競合の判断材料。Event Catalog ではない）
         jsEvents: [...new Set(jsFiles.flatMap(f => f.events))].sort(cmp),
         // Phase 13: 参照先アプリのフィールドコード（ルックアップの relatedField / relatedKeyField / pickerFields に使える識別子。他は「既存」ではない）
@@ -5276,6 +5281,7 @@
         generator: { name: 'kintone App Toolkit', version: SCRIPT_VERSION, analyzerVersion: KTScan?.ANALYZER_VERSION ?? null },
         goal: g,
         ...(revision ? { revision } : {}),
+        ...(subject ? { subject } : {}),
         app,
         retrieval: candidates,
         facts,
@@ -5465,6 +5471,66 @@
       return ctx;
     }
 
+    /** Phase 17: Planner Context の subject（相談中の JS。Gateway の validate-planner-context と同じ形・上限） */
+    function compactSubject(sub) {
+      const strs = (a, n) => (Array.isArray(a) ? a.filter(x => typeof x === 'string').slice(0, n) : []);
+      return {
+        type: 'javascript', sourceId: String(sub.sourceId).slice(0, 300), name: String(sub.name ?? '').slice(0, 300), target: sub.target === 'mobile' ? 'mobile' : 'desktop',
+        customizationType: sub.customizationType === 'URL' ? 'URL' : 'FILE', sourceAvailable: !!sub.sourceAvailable,
+        events: strs(sub.events, 40), fields: (Array.isArray(sub.fields) ? sub.fields : []).filter(f => f && typeof f.code === 'string').slice(0, 60).map(f => ({ code: f.code, access: f.access })),
+      };
+    }
+    // ================= Phase 17: JsConsultationSeed（Customize タブ「AIに相談」が集める、相談対象 JS の事実）=================
+    const CONSULTATION_SEED_VERSION = 'js-consultation-1';
+    /**
+     * @param {object} p { data, deps, scan, file: { name, target, type: FILE | URL, fileKey?, url?, size? }, sourceText: string | null, appName, now }
+     *   本文（sourceText）があれば KTScan.analyzeFile で解析し、無ければ Scanner の要約（summarizeFiles）と deps の edge だけを使う。
+     *   token / cookie は含めない。Gateway へは compactSubject の形だけ送る（本文は Generator が別に送る）。
+     */
+    function buildConsultationSeed({ data = null, deps = null, scan = null, file, sourceText = null, appName = null, now = null } = {}) {
+      if (!file || !file.name) throw new Error('file（name / target）がありません');
+      const target = file.target === 'mobile' ? 'mobile' : 'desktop';
+      const name = String(file.name);
+      const sourceId = `${target}:js:${name}`;
+      const type = file.type === 'URL' || (!file.fileKey && file.url) ? 'URL' : 'FILE';
+      const fieldsN = KTDeps.normalizeFields(data?.fields || {});
+      const fieldRows = fieldsN.map(f => ({ code: f.code, label: f.label, type: f.rawType }));
+      const summary = KTScan.summarizeFiles(scan, data).find(f => f.name === name && f.target === target) || null;
+      const text = typeof sourceText === 'string' && sourceText.trim() ? sourceText : (summary && typeof summary.text === 'string' ? summary.text : null);
+      const an = text ? KTScan.analyzeFile({ name, target, kind: 'js', text }, { fields: fieldRows, selfAppId: data?.appId ?? null, statusStates: data?.status?.enable ? Object.values(data.status.states || {}).map(x => x?.name).filter(Boolean) : null }) : null;
+      const accessOf = (acc) => Object.keys(acc || {});
+      const fieldAccess = an ? Object.fromEntries(an.fields.map(f => [f.code, f.access])) : (summary ? summary.fields : {});
+      const byAccess = (k) => Object.entries(fieldAccess).filter(([, acc]) => accessOf(acc).includes(k)).map(([code]) => code).sort(cmp);
+      const events = an ? an.events.map(e => e.name) : (summary ? summary.events : []);
+      const edges = (deps?.edges || []).filter(e => e.sourceType === 'CUSTOMIZE' && e.sourceId === sourceId);
+      const dependencyFacts = edges.slice(0, 60).map(e => ({ relation: e.relation ?? e.type ?? null, targetType: e.targetType, targetId: e.targetId, targetName: e.targetName ?? null, confidence: e.confidence ?? null }));
+      const external = type === 'URL' ? !/^\/|^https?:\/\/[^/]*\.cybozu\.com\//i.test(String(file.url || '')) : false;
+      return {
+        seedVersion: CONSULTATION_SEED_VERSION, createdAt: now ?? new Date().toISOString(),
+        appId: String(data?.appId ?? ''), appName: appName ?? data?.settings?.name ?? null,
+        platform: target, customizationType: type, sourceId, name,
+        ...(type === 'FILE' ? { fileKey: file.fileKey ?? summary?.fileKey ?? null, size: file.size ?? null } : { url: file.url ?? summary?.url ?? null, external }),
+        source: { available: !!text, text: text || null, hash: text ? KTScan.hashText(text) : null, bytes: text ? text.length : null, lines: an ? an.file.lines : null },
+        analysis: {
+          analyzed: !!(an || (summary && summary.analyzed)), events, fieldAccess,
+          fields: { READ: byAccess('READ'), WRITE: byAccess('WRITE'), CONTROL: [...new Set([...byAccess('CONTROL'), ...byAccess('SHOW_HIDE')])].sort(cmp) },
+          appRefs: an ? [...new Set(an.appRefs.map(r => String(r.appId)).filter(Boolean))] : (summary ? summary.appRefs : []),
+          apis: an ? [...new Set(an.apis.map(a => a.name))] : [], network: an ? an.network.map(n => ({ kind: n.kind, external: !!n.external, url: n.url ?? null })) : [],
+          unknownRefs: an ? (an.unknownRefs || []).map(u => u.code || u.value || u.ref).filter(Boolean) : [],
+        },
+        dependencies: dependencyFacts,
+        customizeRevision: data?.customize?.revision ?? null,
+        counts: { events: events.length, fields: Object.keys(fieldAccess).length, control: [...new Set([...byAccess('CONTROL'), ...byAccess('SHOW_HIDE')])].length, write: byAccess('WRITE').length, read: byAccess('READ').length },
+      };
+    }
+    /** seed → Planner Context の subject（本文は含めない） */
+    function subjectFromSeed(seed) {
+      if (!seed) return null;
+      const fa = seed.analysis?.fieldAccess || {};
+      const pick = (acc) => (acc.CONTROL || acc.SHOW_HIDE ? 'CONTROL' : acc.WRITE ? 'WRITE' : 'READ');
+      return compactSubject({ sourceId: seed.sourceId, name: seed.name, target: seed.platform, customizationType: seed.customizationType, sourceAvailable: !!seed.source?.available, events: seed.analysis?.events || [], fields: Object.entries(fa).map(([code, acc]) => ({ code, access: pick(acc) })) });
+    }
+
     /** Planner Context の人間向け Markdown（無料版の「変更計画 Prompt をコピー」で使う） */
     function toPlannerMarkdown(ctx) {
       const out = [];
@@ -5610,6 +5676,7 @@
       REVISION_LIMITS, compactPlan, compactReview, compactRevision, buildExplain,
       // Customization Planner & JavaScript Generator（Phase 16）
       GENERATOR_CONTEXT_VERSION, buildGenerator,
+      CONSULTATION_SEED_VERSION, buildConsultationSeed, subjectFromSeed, compactSubject,
     };
   })();
 
@@ -9863,6 +9930,11 @@
         // Phase 14（アプリアクション）: GET / PUT /k/v1/preview/app/actions.json（actions は全体置換。handler が「全アクション ＋ 承認分」の完全な payload を作る）
         getPreviewActions: (a) => call('/k/v1/preview/app/actions.json', 'GET', { app: app(a) }),
         putPreviewActions: (a, body, revision) => call('/k/v1/preview/app/actions.json', 'PUT', { app: app(a), ...body, ...(revision ? { revision } : {}) }),
+        // Phase 17（JavaScript Preview Registration）: カスタマイズ設定（preview のみ）とファイルの upload / download。API トークンは使えないので現在のセッションで呼ぶ
+        getPreviewCustomize: (a) => call('/k/v1/preview/app/customize.json', 'GET', { app: app(a) }),
+        putPreviewCustomize: (a, body, revision) => call('/k/v1/preview/app/customize.json', 'PUT', { ...body, app: app(a), ...(revision != null ? { revision: String(revision) } : {}) }),
+        uploadFile: (name, content, mime = 'text/javascript') => KTApi.uploadFile(name, content, mime),
+        downloadFile: (fileKey) => KTApi.downloadFile(fileKey),
         // 運用環境へ反映する関数は意図的に無い（Phase 9: Preview only）
       };
     }
@@ -10132,6 +10204,400 @@
     const ACCESS_W = (acc) => Object.keys(acc || {}).filter(k => k === 'WRITE' || k === 'CONTROL' || k === 'SHOW_HIDE');
 
     return { REVIEW_VERSION, STATUS, applyPatch, diffLines, diffText, diffHunks, checkSyntax, inspectHandlers, globalDeclarations, review };
+  })();
+
+  // ==========================================
+  // 3.6f JavaScript Preview Registration Executor (KTJsExecutor) — Phase 17
+  //   承認済みの生成コード（KTCodeReview を通ったもの）を kintone の動作テスト環境（preview）の
+  //   JavaScript / CSS カスタマイズ設定へ登録する。標準設定の Executor と同じ安全思想:
+  //     prepare（読み取り・snapshot・stale / 権限 / 上限 / 統合先の本文照合）→ 最終確認（UI）→ executePreview（upload → 完全な payload で PUT → 再取得で検証）
+  //     → prepareRollback（現在の設定が反映直後と同じか）→ executeRollback（snapshot を PUT → 再取得で検証）
+  //   原則:
+  //     - 既存のファイル（JS / CSS・PC / モバイル）と scope は完全に保持する（Current Preview Customization ＋ Approved JS Change = Complete After）
+  //     - URL 型（外部サーバー）の JS は書き換えない（EXTERNAL_JS_NOT_WRITABLE）。自動で FILE に置き換えない
+  //     - 統合先の本文は登録直前にもう一度取得して baseHash を照合する（違えば JS_SOURCE_CHANGED。自動 merge はしない）
+  //     - revision を必ず指定する（-1 は使わない）。Review / 仕様確定の時点から設定が変わっていれば STALE_CUSTOMIZATION
+  //     - 運用環境へ反映する関数は無い（deploy を呼ばない）。kintone の資格情報は Gateway へ送らない
+  // ==========================================
+  const KTJsExecutor = (() => {
+    const EXECUTOR_VERSION = '1';
+    const ENV = 'preview';
+    const MAX_FILES = 30;   // kintone: desktop.js / desktop.css / mobile.js / mobile.css それぞれ file ＋ url 合わせて 30 個まで（cybozu.dev「JavaScript/CSSカスタマイズ設定の変更」）
+    const CHANGE = Object.freeze({ ADD_FILE: 'ADD_FILE', REPLACE_FILE: 'REPLACE_FILE' });
+    const ST = Object.freeze({ PENDING: 'PENDING', RUNNING: 'RUNNING', UPLOADED: 'UPLOADED', APPLIED: 'APPLIED', VERIFIED: 'VERIFIED', VERIFY_FAILED: 'VERIFY_FAILED', FAILED: 'FAILED', BLOCKED: 'BLOCKED', SKIPPED: 'SKIPPED' });
+    const RUN = Object.freeze({ PREPARED: 'PREPARED', BLOCKED: 'BLOCKED', RUNNING: 'RUNNING', DONE: 'DONE', VERIFY_FAILED: 'VERIFY_FAILED', FAILED: 'FAILED' });
+    const RB = Object.freeze({ PREPARED: 'PREPARED', BLOCKED: 'BLOCKED', RUNNING: 'ROLLING_BACK', VERIFIED: 'ROLLED_BACK_VERIFIED', VERIFY_FAILED: 'ROLLBACK_VERIFY_FAILED', FAILED: 'ROLLBACK_FAILED' });
+    const clone = (v) => JSON.parse(JSON.stringify(v ?? null));
+    const nowIso = (now) => new Date(now()).toISOString();
+    const newId = (prefix) => `${prefix}_${(typeof crypto !== 'undefined' && crypto.randomUUID) ? crypto.randomUUID() : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`}`;
+    const strErr = (e) => (e && typeof e === 'object') ? { code: e.code ?? null, message: String(e.message ?? e.error ?? ''), status: e.status ?? null } : { code: null, message: String(e ?? ''), status: null };
+    const isPermissionError = (e) => { const x = strErr(e); return x.status === 403 || x.code === 'CB_NO02' || /権限|permission|forbidden/i.test(x.message); };
+    const isRevisionError = (e) => { const x = strErr(e); return x.code === 'GAIA_CO02' || /リビジョン|revision/i.test(x.message); };
+    const hash = (t) => KTScan.hashText(t);
+    const TARGETS = ['desktop', 'mobile'];
+    const KINDS = ['js', 'css'];
+
+    // ---- カスタマイズ設定の正規化（snapshot / 比較の単位）----
+    /** GET /preview/app/customize の 1 entry → { type, url } | { type, fileKey, name, size, contentType } */
+    const normEntry = (e) => (!e ? null : e.type === 'URL' ? { type: 'URL', url: String(e.url ?? '') } : { type: 'FILE', fileKey: String(e.file?.fileKey ?? ''), name: String(e.file?.name ?? ''), size: e.file?.size != null ? String(e.file.size) : null, contentType: e.file?.contentType ?? null });
+    const entryLabel = (e) => (e?.type === 'URL' ? e.url : e?.name ?? '');
+    /** 取得した設定 → snapshot（scope / desktop.js / desktop.css / mobile.js / mobile.css / revision）。他の設定は含めない */
+    function snapshotOf(raw) {
+      const out = { scope: raw?.scope ?? 'ALL', desktop: { js: [], css: [] }, mobile: { js: [], css: [] }, revision: raw?.revision != null ? String(raw.revision) : null };
+      for (const t of TARGETS) for (const k of KINDS) out[t][k] = (raw?.[t]?.[k] || []).map(normEntry).filter(Boolean);
+      return out;
+    }
+    /** snapshot → PUT payload。既存の FILE は取得 API で得た fileKey をそのまま再指定する（kintone の仕様。ファイルは残る）。URL はそのまま */
+    const payloadEntry = (e) => (e.type === 'URL' ? { type: 'URL', url: e.url } : { type: 'FILE', file: { fileKey: e.fileKey } });
+    function payloadOf(snap, appId, revision) {
+      const body = { app: Number(appId), scope: snap.scope, desktop: { js: [], css: [] }, mobile: { js: [], css: [] } };
+      for (const t of TARGETS) for (const k of KINDS) body[t][k] = snap[t][k].map(payloadEntry);
+      if (revision != null) body.revision = String(revision);
+      return body;
+    }
+    /** 2 つの snapshot の差（scope ＋ 4 つの一覧。順序も比較。fileKey は取得 API 同士なら比較できる） */
+    function diffSnapshots(a, b, { compareFileKey = true } = {}) {
+      const diffs = [];
+      if ((a?.scope ?? 'ALL') !== (b?.scope ?? 'ALL')) diffs.push({ where: 'scope', before: a?.scope ?? null, after: b?.scope ?? null });
+      const sameEntry = (x, y) => !!x && !!y && x.type === y.type && (x.type === 'URL' ? x.url === y.url : (x.name === y.name && (!compareFileKey || x.fileKey === y.fileKey)));
+      for (const t of TARGETS) for (const k of KINDS) {
+        const la = a?.[t]?.[k] || [], lb = b?.[t]?.[k] || [];
+        const n = Math.max(la.length, lb.length);
+        for (let i = 0; i < n; i++) if (!sameEntry(la[i], lb[i])) diffs.push({ where: `${t}.${k}[${i}]`, before: la[i] ? entryLabel(la[i]) : null, after: lb[i] ? entryLabel(lb[i]) : null, ...(la[i] && lb[i] && la[i].type === 'FILE' && lb[i].type === 'FILE' && la[i].name === lb[i].name ? { fileKeyChanged: true } : {}) });
+      }
+      return diffs;
+    }
+
+    // ---- ファイル名（§20）----
+    /** 安全なファイル名: 既存の名前は維持。新規は Generator の提案を正規化（英数字・-_. のみ、.js を保証、既存と重複なら -2 …） */
+    function safeFileName(proposed, { existingNames = [], fallback = 'customization.js' } = {}) {
+      let base = String(proposed ?? '').trim().split(/[\\/]/).pop() || '';
+      base = base.replace(/\.js$/i, '').replace(/[^A-Za-z0-9._-]+/g, '-').replace(/^[-.]+|[-.]+$/g, '').slice(0, 80);
+      if (!base) base = fallback.replace(/\.js$/i, '');
+      let name = `${base}.js`;
+      const taken = new Set((existingNames || []).map(x => String(x).toLowerCase()));
+      for (let i = 2; taken.has(name.toLowerCase()) && i < 100; i++) name = `${base}-${i}.js`;
+      return name;
+    }
+
+    // ---- 変更 1 件（承認済みの生成結果 → 登録の単位）----
+    /**
+     * @param {object} p { customization, generated（KTAiClient の正規化済み）, review（KTCodeReview.review の結果）, existingSource { name, target, text } | null, target?, fileName? }
+     * @returns {{ ok:true, change } | { ok:false, reason, message }}
+     */
+    function changeFromGenerated({ customization = null, generated, review, existingSource = null, target = null, fileName = null, existingNames = [] } = {}) {
+      if (!generated || typeof generated.code !== 'string') return { ok: false, reason: 'NO_CODE', message: '生成コードがありません' };
+      if (!review || review.status === KTCodeReview.STATUS.BLOCKED) return { ok: false, reason: 'CODE_REVIEW_BLOCKED', message: 'Toolkit Code Review で採用不可の問題があるため登録できません' };
+      const content = typeof review.finalCode === 'string' && review.finalCode ? review.finalCode : generated.code;
+      const strategy = generated.strategy;
+      const tgt = target || existingSource?.target || (Array.isArray(customization?.platform) && customization.platform.length === 1 ? customization.platform[0] : 'desktop');
+      const base = { changeId: newId('chg'), customizationId: customization?.customizationId ?? null, strategy, target: tgt === 'mobile' ? 'mobile' : 'desktop', summary: generated.summary ?? customization?.requirement ?? '', content, contentHash: hash(content), bytes: content.length, codeReview: { status: review.status, checks: (review.checks || []).map(c => ({ name: c.name, ok: c.ok, severity: c.severity })), rescan: review.rescan ? { events: (review.rescan.events || []).map(e => e.name), fieldAccess: review.rescan.fieldAccess || {}, apis: (review.rescan.apis || []).map(a => a.name) } : null }, provenance: review.provenance ?? null, planFields: (customization?.fields || []).map(f => ({ code: f.code, access: f.access })), planEvents: [...(customization?.events || [])] };
+      if (strategy === 'EXTEND_EXISTING_JS') {
+        if (!existingSource || typeof existingSource.text !== 'string') return { ok: false, reason: 'JS_SOURCE_UNAVAILABLE', message: '統合先の本文が無いため、既存ファイルの更新として登録できません' };
+        return { ok: true, change: { ...base, kind: CHANGE.REPLACE_FILE, name: existingSource.name, baseHash: hash(existingSource.text), existingName: existingSource.name } };
+      }
+      if (strategy === 'NEW_JS_FILE') return { ok: true, change: { ...base, kind: CHANGE.ADD_FILE, name: safeFileName(fileName || generated.targetFile, { existingNames }), proposedName: generated.targetFile ?? null } };
+      return { ok: false, reason: 'STRATEGY_NOT_REGISTERED', message: `方針 ${String(strategy)} は登録の対象外です` };
+    }
+
+    // ---- 完全な payload（Current ＋ Approved Change = After）----
+    /** uploads: changeId → fileKey（未アップロードなら '<pending>'）。REPLACE は同じ位置の fileKey だけ差し替え、ADD は末尾に足す。他は不変 */
+    function buildAfter(snap, changes, uploads = {}) {
+      const after = clone(snap);
+      for (const ch of changes) {
+        const list = after[ch.target].js;
+        const key = uploads[ch.changeId] ?? '<pending>';
+        if (ch.kind === CHANGE.REPLACE_FILE) { const i = ch.position ?? list.findIndex(e => e.type === 'FILE' && e.name === ch.name); if (i >= 0) list[i] = { type: 'FILE', fileKey: key, name: ch.name, size: String(ch.bytes), contentType: 'text/javascript' }; }
+        else list.push({ type: 'FILE', fileKey: key, name: ch.name, size: String(ch.bytes), contentType: 'text/javascript' });
+      }
+      return after;
+    }
+
+    // ---- prepare（読み取りだけ）----
+    /**
+     * @param {object} input { appId, changes[], expectedRevision（仕様確定 / Review 時点の customize revision。違えば STALE_CUSTOMIZATION）, spec, provenance }
+     */
+    async function prepare(input, { api, now = Date.now } = {}) {
+      const changes = clone(Array.isArray(input?.changes) ? input.changes : []);
+      const prepared = { executorVersion: EXECUTOR_VERSION, executionId: newId('jsx'), appId: String(input?.appId ?? ''), env: ENV, preparedAt: nowIso(now), status: RUN.PREPARED, blockers: [], warnings: [], snapshot: null, changes, after: null, summary: { add: 0, replace: 0, byTarget: { desktop: { add: 0, replace: 0 }, mobile: { add: 0, replace: 0 } }, preservedJs: 0, preservedCss: 0 }, spec: input?.spec ?? null, provenance: input?.provenance ?? null };
+      const block = (code, message, detail = null) => { prepared.blockers.push({ code, message, ...(detail ? { detail } : {}) }); prepared.status = RUN.BLOCKED; };
+      if (!api || typeof api.getPreviewCustomize !== 'function' || typeof api.putPreviewCustomize !== 'function' || typeof api.uploadFile !== 'function') { block('NO_API', 'kintone API（カスタマイズ設定）がありません'); return prepared; }
+      if (!prepared.appId) { block('NO_APP', 'appId がありません'); return prepared; }
+      if (!changes.length) { block('NOTHING_TO_REGISTER', '登録する JavaScript がありません（仕様を確定してコードを生成してください）'); return prepared; }
+      let raw;
+      try { raw = await api.getPreviewCustomize(prepared.appId); }
+      catch (e) { const x = strErr(e); if (isPermissionError(e)) block('PERMISSION_DENIED', 'カスタマイズ設定を変更する権限がありません（kintone のシステム管理権限とアプリ管理権限が必要です）', x); else block('FETCH_FAILED', `動作テスト環境のカスタマイズ設定を取得できませんでした: ${x.message}`, x); return prepared; }
+      const snap = snapshotOf(raw);
+      prepared.snapshot = snap;
+      if (input?.expectedRevision != null && String(input.expectedRevision) !== String(snap.revision)) block('STALE_CUSTOMIZATION', `仕様確定の後に設定が変更されています（revision ${input.expectedRevision} → ${snap.revision}）。Customize タブで現在の設定を確認し、相談をやり直してください`, { expected: String(input.expectedRevision), current: snap.revision });
+      if (snap.scope === 'NONE') prepared.warnings.push({ code: 'CUSTOMIZATION_DISABLED', message: 'このアプリの JavaScript / CSS カスタマイズは現在無効（scope NONE）です。登録はできますが有効化はしません（scope は変更しません）' });
+      const addCount = { desktop: 0, mobile: 0 };
+      for (const ch of changes) {
+        ch.status = ST.PENDING; ch.reason = null; ch.message = '';
+        if (!TARGETS.includes(ch.target)) { ch.status = ST.BLOCKED; ch.reason = 'INVALID_TARGET'; ch.message = 'PC / モバイルの指定が不正です'; block('INVALID_CHANGE', ch.message); continue; }
+        if (typeof ch.content !== 'string' || !ch.content.trim()) { ch.status = ST.BLOCKED; ch.reason = 'NO_CODE'; ch.message = 'コードが空です'; block('INVALID_CHANGE', ch.message); continue; }
+        const list = snap[ch.target].js;
+        if (ch.kind === CHANGE.REPLACE_FILE) {
+          const i = list.findIndex(e => e.type === 'FILE' && e.name === ch.name);
+          if (i < 0) {
+            const urlHit = list.find(e => e.type === 'URL' && String(e.url).split('/').pop() === ch.name);
+            if (urlHit) { ch.status = ST.BLOCKED; ch.reason = 'EXTERNAL_JS_NOT_WRITABLE'; ch.message = `「${ch.name}」は URL 指定（${urlHit.url}）の JavaScript です。外部サーバーのファイルは Toolkit から書き換えられません（自動で FILE に置き換えもしません）。コード / Diff を手動で反映するか、新規の補助 JS として設計し直してください`; block('EXTERNAL_JS_NOT_WRITABLE', ch.message, { name: ch.name, url: urlHit.url }); }
+            else { ch.status = ST.BLOCKED; ch.reason = 'TARGET_NOT_FOUND'; ch.message = `統合先「${ch.name}」（${ch.target === 'mobile' ? 'モバイル' : 'PC'}）が動作テスト環境に登録されていません`; block('TARGET_NOT_FOUND', ch.message); }
+            continue;
+          }
+          ch.position = i; ch.oldFileKey = list[i].fileKey;
+          // 登録直前の本文照合（§11）: baseHash が違えば止める（自動 merge しない）
+          try {
+            const cur = typeof api.downloadFile === 'function' ? await api.downloadFile(list[i].fileKey) : null;
+            if (typeof cur !== 'string') { ch.status = ST.BLOCKED; ch.reason = 'JS_SOURCE_UNAVAILABLE'; ch.message = `統合先「${ch.name}」の現在の本文を取得できません`; block('JS_SOURCE_UNAVAILABLE', ch.message); continue; }
+            ch.currentHash = hash(cur);
+            if (ch.baseHash && ch.currentHash !== ch.baseHash) { ch.status = ST.BLOCKED; ch.reason = 'JS_SOURCE_CHANGED'; ch.message = `統合先「${ch.name}」の本文がコード生成の時点から変わっています（指紋 ${ch.baseHash} → ${ch.currentHash}）。自動では統合しません。再スキャンして計画からやり直してください`; block('JS_SOURCE_CHANGED', ch.message, { name: ch.name, baseHash: ch.baseHash, currentHash: ch.currentHash }); continue; }
+          } catch (e) { const x = strErr(e); ch.status = ST.BLOCKED; ch.reason = 'JS_SOURCE_UNAVAILABLE'; ch.message = `統合先「${ch.name}」の現在の本文を取得できません: ${x.message}`; block('JS_SOURCE_UNAVAILABLE', ch.message, x); continue; }
+          prepared.summary.replace++; prepared.summary.byTarget[ch.target].replace++;
+        } else if (ch.kind === CHANGE.ADD_FILE) {
+          if (list.some(e => e.type === 'FILE' && e.name.toLowerCase() === String(ch.name).toLowerCase())) { ch.status = ST.BLOCKED; ch.reason = 'NAME_CONFLICT'; ch.message = `同じ名前のファイル「${ch.name}」が既に登録されています（既存の変更なら「既存 JS を変更」の計画にしてください）`; block('NAME_CONFLICT', ch.message); continue; }
+          addCount[ch.target]++;
+          if (list.length + addCount[ch.target] > MAX_FILES) { ch.status = ST.BLOCKED; ch.reason = 'CUSTOMIZATION_FILE_LIMIT'; ch.message = `${ch.target === 'mobile' ? 'モバイル' : 'PC'}の JavaScript は ${MAX_FILES} 個までです（現在 ${list.length} 個）`; block('CUSTOMIZATION_FILE_LIMIT', ch.message); continue; }
+          ch.position = list.length + addCount[ch.target] - 1;
+          prepared.summary.add++; prepared.summary.byTarget[ch.target].add++;
+        } else { ch.status = ST.BLOCKED; ch.reason = 'INVALID_KIND'; ch.message = '変更の種類が不正です'; block('INVALID_CHANGE', ch.message); }
+      }
+      if (changes.some((c, i) => changes.findIndex(x => x.target === c.target && x.name === c.name) !== i)) block('DUPLICATE_CHANGE', '同じファイルへの変更が複数あります');
+      prepared.after = buildAfter(snap, changes.filter(c => c.status === ST.PENDING));
+      prepared.summary.preservedJs = TARGETS.reduce((n, t) => n + snap[t].js.filter(e => !changes.some(c => c.target === t && c.kind === CHANGE.REPLACE_FILE && c.name === e.name)).length, 0);
+      prepared.summary.preservedCss = TARGETS.reduce((n, t) => n + snap[t].css.length, 0);
+      return prepared;
+    }
+
+    // ---- エラーの分類（§38 / §39）----
+    const classifyUpload = (e) => { const x = strErr(e); const m = `${x.code ?? ''} ${x.message}`; if (/CSRF|__REQUEST_TOKEN__|request token/i.test(m)) return 'UPLOAD_CSRF'; if (isPermissionError(e)) return 'PERMISSION_DENIED'; if (x.status === 413 || /too large|サイズ|size limit|大きすぎ/i.test(m)) return 'FILE_TOO_LARGE'; if (x.status === 400 || /invalid|不正/i.test(m)) return 'INVALID_FILE'; return 'UPLOAD_FAILED'; };
+    const classifyPut = (e) => { const x = strErr(e); const m = `${x.code ?? ''} ${x.message}`; if (isRevisionError(e)) return 'REVISION_MISMATCH'; if (isPermissionError(e)) return 'PERMISSION_DENIED'; if (/30|上限|limit/i.test(m) && /ファイル|file|js|css/i.test(m)) return 'CUSTOMIZATION_FILE_LIMIT'; if (/fileKey|ファイルキー/i.test(m)) return 'INVALID_FILE_KEY'; if (x.code === 'GAIA_IL02' || x.code === 'GAIA_IL04' || /invalid|不正/i.test(m)) return 'INVALID_CUSTOMIZATION'; return 'API_ERROR'; };
+    const UPLOAD_JA = { UPLOAD_CSRF: 'アップロードがブラウザの保護（CSRF）で拒否されました。ページを再読み込みしてからやり直してください', PERMISSION_DENIED: 'ファイルをアップロードする権限がありません', FILE_TOO_LARGE: 'ファイルが大きすぎます', INVALID_FILE: 'ファイルが不正です', UPLOAD_FAILED: 'ファイルのアップロードに失敗しました' };
+    const PUT_JA = { REVISION_MISMATCH: '登録の途中で他の変更が入りました（revision 不一致）。再試行せず停止しました', PERMISSION_DENIED: 'カスタマイズ設定を変更する権限がありません（システム管理権限とアプリ管理権限が必要です）', CUSTOMIZATION_FILE_LIMIT: 'ファイル数の上限（30 個）に達しています', INVALID_FILE_KEY: 'アップロードしたファイルのキーが受け付けられませんでした', INVALID_CUSTOMIZATION: 'カスタマイズ設定の内容が受け付けられませんでした', API_ERROR: 'カスタマイズ設定の変更に失敗しました' };
+
+    // ---- 検証（§23〜§27）----
+    function verifyAfter(execution, actual, { downloaded = {} } = {}) {
+      const checks = [];
+      const add = (name, ok, expected = null, actualV = null, message = null) => checks.push({ name, ok, expected, actual: actualV, ...(message ? { message } : {}) });
+      const snap = execution.snapshot, after = snapshotOf(actual);
+      add('revisionAdvanced', snap.revision == null || after.revision == null || Number(after.revision) > Number(snap.revision), snap.revision, after.revision);
+      add('scopePreserved', after.scope === snap.scope, snap.scope, after.scope);
+      // 変更対象以外の保持（JS は変更した位置を除き、CSS と他 platform は全部）
+      const unexpected = [];
+      for (const t of TARGETS) {
+        const changedIdx = new Set(execution.steps.filter(c => c.target === t && c.kind === CHANGE.REPLACE_FILE).map(c => c.position));
+        const addedNames = new Set(execution.steps.filter(c => c.target === t && c.kind === CHANGE.ADD_FILE).map(c => c.name));
+        const before = snap[t].js, now = after[t].js;
+        before.forEach((e, i) => { if (changedIdx.has(i)) return; const cur = now[i]; if (!cur) unexpected.push({ where: `${t}.js[${i}]`, kind: 'removed', entry: entryLabel(e) }); else if (cur.type !== e.type || (e.type === 'URL' ? cur.url !== e.url : (cur.name !== e.name || cur.fileKey !== e.fileKey))) unexpected.push({ where: `${t}.js[${i}]`, kind: 'changed', entry: entryLabel(e), now: entryLabel(cur) }); });
+        const expectedLen = before.length + [...addedNames].length;
+        if (now.length !== expectedLen) unexpected.push({ where: `${t}.js`, kind: 'count', expected: expectedLen, actual: now.length });
+        for (let i = before.length; i < now.length; i++) if (!addedNames.has(now[i]?.name)) unexpected.push({ where: `${t}.js[${i}]`, kind: 'unexpectedAdded', entry: entryLabel(now[i]) });
+        const cssDiff = diffSnapshots({ scope: snap.scope, desktop: { js: [], css: snap[t].css }, mobile: { js: [], css: [] } }, { scope: snap.scope, desktop: { js: [], css: after[t].css }, mobile: { js: [], css: [] } });
+        if (cssDiff.length) unexpected.push(...cssDiff.map(d => ({ where: `${t}.css${d.where.replace(/^desktop\.css/, '')}`, kind: 'cssChanged', before: d.before, after: d.after })));
+      }
+      add('unrelatedPreserved', unexpected.length === 0, 'すべて保持', unexpected.length ? unexpected : 'すべて保持');
+      // 変更ごと: 位置・platform・名前・サイズ・fileKey の更新・本文の指紋・再解析
+      for (const st of execution.steps) {
+        if (![ST.APPLIED, ST.VERIFIED, ST.VERIFY_FAILED].includes(st.status)) continue;
+        const list = after[st.target].js;
+        const idx = st.kind === CHANGE.REPLACE_FILE ? st.position : list.findIndex(e => e.type === 'FILE' && e.name === st.name);
+        const e = idx >= 0 ? list[idx] : null;
+        const stChecks = [];
+        const sc = (name, ok, expected = null, actualV = null, message = null) => stChecks.push({ name, ok, expected, actual: actualV, ...(message ? { message } : {}) });
+        sc('entryExists', !!e && e.type === 'FILE' && e.name === st.name, st.name, e ? entryLabel(e) : null);
+        sc('platform', !!e && !after[st.target === 'desktop' ? 'mobile' : 'desktop'].js.some(x => x.type === 'FILE' && x.name === st.name && x.fileKey === e.fileKey), st.target, st.target);
+        if (st.kind === CHANGE.REPLACE_FILE) { sc('position', idx === st.position, st.position, idx); sc('fileKeyUpdated', !!e && e.fileKey !== st.oldFileKey, 'old と異なる fileKey', e?.fileKey ? '更新あり' : null); }
+        else sc('position', idx === list.length - 1 && idx === st.position, st.position, idx);
+        if (e && e.size != null) sc('size', String(e.size) === String(new TextEncoder().encode(st.content).length) || String(e.size) === String(st.bytes), st.bytes, e.size);
+        const src = e ? downloaded[e.fileKey] : undefined;
+        if (typeof src === 'string') {
+          sc('sourceHash', hash(src) === st.contentHash, st.contentHash, hash(src));
+          // KTScan の再解析（§25）と Plan との一致（§26）
+          const an = KTScan.analyzeFile({ name: st.name, target: st.target, kind: 'js', text: src }, { fields: (execution.fieldRows || []), selfAppId: execution.appId });
+          st.reanalysis = { events: an.events.map(x => x.name), fieldAccess: an.fieldAccess, apis: [...new Set(an.apis.map(a => a.name))], security: an.security.filter(x => x.severity === 'block').map(x => x.code) };
+          const rs = st.codeReview?.rescan || null;
+          if (rs) {
+            const evOk = JSON.stringify([...new Set(st.reanalysis.events)].sort()) === JSON.stringify([...new Set(rs.events)].sort());
+            const wr = (fa) => Object.entries(fa || {}).filter(([, acc]) => acc.WRITE || acc.CONTROL || acc.SHOW_HIDE).map(([c]) => c).sort();
+            const fOk = JSON.stringify(wr(st.reanalysis.fieldAccess)) === JSON.stringify(wr(rs.fieldAccess));
+            const apiOk = JSON.stringify([...new Set(st.reanalysis.apis)].sort()) === JSON.stringify([...new Set(rs.apis)].sort());
+            sc('reanalysisMatchesCodeReview', evOk && fOk && apiOk, { events: rs.events, writes: wr(rs.fieldAccess), apis: rs.apis }, { events: st.reanalysis.events, writes: wr(st.reanalysis.fieldAccess), apis: st.reanalysis.apis });
+          }
+          const planEv = new Set(st.planEvents || []), planW = new Set((st.planFields || []).filter(f => f.access === 'WRITE' || f.access === 'CONTROL').map(f => f.code));
+          const extraEv = st.reanalysis.events.filter(x => !planEv.has(x)), extraW = Object.entries(st.reanalysis.fieldAccess).filter(([c, acc]) => (acc.WRITE || acc.CONTROL || acc.SHOW_HIDE) && !planW.has(c)).map(([c]) => c);
+          const missingEv = [...planEv].filter(x => !st.reanalysis.events.includes(x));
+          const strict = st.kind === CHANGE.ADD_FILE;   // 既存ファイルへの統合は既存の handler / フィールドが残るので、計画との一致は「計画のイベントとフィールドが含まれる」で判定
+          const planOk = strict ? (extraEv.length === 0 && extraW.length === 0 && missingEv.length === 0) : (missingEv.length === 0 && (st.planFields || []).every(f => !!st.reanalysis.fieldAccess[f.code]));
+          sc('planVsActual', planOk, { events: [...planEv], writes: [...planW] }, { extraEvents: extraEv, extraWrites: extraW, missingEvents: missingEv }, planOk ? null : 'JS_VERIFY_MISMATCH');
+          sc('securityOnActual', st.reanalysis.security.length === 0, [], st.reanalysis.security);
+        } else sc('sourceHash', false, st.contentHash, null, '登録後の本文をダウンロードできませんでした');
+        st.verification = { ok: stChecks.every(c => c.ok), checks: stChecks };
+        st.status = st.verification.ok ? ST.VERIFIED : ST.VERIFY_FAILED;
+        if (!st.verification.ok) { const bad = stChecks.filter(c => !c.ok); st.reason = bad.some(c => c.message === 'JS_VERIFY_MISMATCH') ? 'JS_VERIFY_MISMATCH' : 'VERIFY_FAILED'; st.message = `再取得した設定・本文が期待と一致しません（${bad.map(c => c.name).join(', ')}）`; }
+      }
+      return { ok: checks.every(c => c.ok) && execution.steps.filter(st => [ST.VERIFIED, ST.VERIFY_FAILED].includes(st.status)).every(st => st.status === ST.VERIFIED), checks, unexpected };
+    }
+
+    // ---- executePreview（書き込み: upload → PUT 1 回 → 再取得して検証）----
+    async function executePreview(prepared, { api, now = Date.now, onProgress = null, fieldRows = [] } = {}) {
+      if (!prepared || prepared.status !== RUN.PREPARED) throw Object.assign(new Error('登録の準備ができていない、または登録できない状態です'), { code: 'NOT_PREPARED' });
+      if (prepared.executed) throw Object.assign(new Error('この準備は既に実行されています（やり直すには準備からやり直してください）'), { code: 'ALREADY_EXECUTED' });
+      prepared.executed = true;
+      const execution = { executorVersion: EXECUTOR_VERSION, executionId: prepared.executionId, appId: prepared.appId, env: ENV, startedAt: nowIso(now), finishedAt: null, status: RUN.RUNNING, lifecycle: RUN.RUNNING, snapshot: clone(prepared.snapshot), steps: clone(prepared.changes).filter(c => c.status === ST.PENDING), uploads: [], put: null, previewUnchanged: null, afterRevision: null, actualAfterRaw: null, verification: null, error: null, fieldRows: clone(fieldRows), spec: prepared.spec ?? null, provenance: prepared.provenance ?? null };
+      const progress = () => { if (typeof onProgress === 'function') { try { onProgress(clone(execution)); } catch (e) { } } };
+      const finish = (status) => { execution.status = status; execution.lifecycle = status; execution.finishedAt = nowIso(now); progress(); return execution; };
+      // 1. 直前の再取得（stale）
+      let current;
+      try { current = snapshotOf(await api.getPreviewCustomize(execution.appId)); }
+      catch (e) { const x = strErr(e); execution.error = { code: isPermissionError(e) ? 'PERMISSION_DENIED' : 'FETCH_FAILED', message: x.message }; for (const st of execution.steps) { st.status = ST.BLOCKED; st.reason = execution.error.code; } execution.previewUnchanged = true; return finish(RUN.FAILED); }
+      if (String(current.revision) !== String(execution.snapshot.revision) || diffSnapshots(execution.snapshot, current).length) {
+        execution.error = { code: 'STALE_CUSTOMIZATION', message: `準備の後にカスタマイズ設定が変更されています（revision ${execution.snapshot.revision} → ${current.revision}）。登録していません。準備からやり直してください` };
+        for (const st of execution.steps) { st.status = ST.BLOCKED; st.reason = 'STALE_CUSTOMIZATION'; st.message = execution.error.message; }
+        execution.previewUnchanged = true; return finish(RUN.FAILED);
+      }
+      // 2. アップロード（全部済んでから PUT。1 件でも失敗したら PUT しない＝設定は変わらない）
+      const uploads = {};
+      for (const st of execution.steps) {
+        st.status = ST.RUNNING; progress();
+        try {
+          const fileKey = await api.uploadFile(st.name, st.content, 'text/javascript');
+          if (typeof fileKey !== 'string' || !fileKey) throw Object.assign(new Error('fileKey が返りませんでした'), { code: 'NO_FILE_KEY' });
+          uploads[st.changeId] = fileKey; st.uploadKey = fileKey; st.status = ST.UPLOADED;
+          execution.uploads.push({ changeId: st.changeId, name: st.name, target: st.target, bytes: st.bytes, contentHash: st.contentHash, ok: true });
+        } catch (e) {
+          const x = strErr(e); const reason = classifyUpload(e);
+          st.status = ST.FAILED; st.reason = reason; st.message = `${UPLOAD_JA[reason] || UPLOAD_JA.UPLOAD_FAILED}: ${x.message}`; st.error = x;
+          execution.uploads.push({ changeId: st.changeId, name: st.name, target: st.target, ok: false, reason, message: x.message });
+          execution.error = { code: reason, message: st.message };
+          for (const o of execution.steps) if (o !== st && o.status !== ST.FAILED) { o.status = ST.SKIPPED; o.reason = 'STOPPED_AFTER_FAILURE'; o.message = 'アップロードに失敗した変更があるため、設定は変更していません'; }
+          execution.previewUnchanged = true;   // PUT 前なので動作テスト環境の設定は変わっていない（アップロード済みの一時ファイルは自然に消える）
+          return finish(RUN.FAILED);
+        }
+        progress();
+      }
+      // 3. PUT（完全な payload。revision は snapshot のもの）
+      const afterSnap = buildAfter(execution.snapshot, execution.steps, uploads);
+      const body = payloadOf(afterSnap, execution.appId, execution.snapshot.revision);
+      execution.put = { request: { scope: body.scope, counts: Object.fromEntries(TARGETS.map(t => [t, { js: body[t].js.length, css: body[t].css.length }])), revision: body.revision }, ok: null };
+      try {
+        const r = await api.putPreviewCustomize(execution.appId, body, execution.snapshot.revision);
+        execution.put.ok = true; execution.put.revision = r?.revision != null ? String(r.revision) : null;
+        for (const st of execution.steps) st.status = ST.APPLIED;
+      } catch (e) {
+        const x = strErr(e); const reason = classifyPut(e);
+        execution.put.ok = false; execution.put.error = { code: reason, message: x.message };
+        execution.error = { code: reason, message: `${PUT_JA[reason] || PUT_JA.API_ERROR}: ${x.message}` };
+        for (const st of execution.steps) { st.status = ST.FAILED; st.reason = reason; st.message = execution.error.message; }
+        // 既存設定に影響が無かったことを再取得で確認（§39）
+        try { const again = snapshotOf(await api.getPreviewCustomize(execution.appId)); execution.previewUnchanged = diffSnapshots(execution.snapshot, again).length === 0 && String(again.revision) === String(execution.snapshot.revision); execution.actualAfterRaw = again; } catch (e2) { execution.previewUnchanged = null; }
+        return finish(RUN.FAILED);
+      }
+      progress();
+      // 4. 再取得して検証（設定・本文・再解析・計画との一致）
+      try {
+        const actual = await api.getPreviewCustomize(execution.appId);
+        execution.actualAfterRaw = snapshotOf(actual);
+        execution.afterRevision = execution.actualAfterRaw.revision;
+        const downloaded = {};
+        if (typeof api.downloadFile === 'function') {
+          for (const st of execution.steps) {
+            const list = execution.actualAfterRaw[st.target].js;
+            const e = st.kind === CHANGE.REPLACE_FILE ? list[st.position] : list.find(x => x.type === 'FILE' && x.name === st.name);
+            if (e && e.type === 'FILE' && e.fileKey && !(e.fileKey in downloaded)) { try { downloaded[e.fileKey] = await api.downloadFile(e.fileKey); } catch (e2) { downloaded[e.fileKey] = null; } }
+          }
+        }
+        execution.verification = verifyAfter(execution, actual, { downloaded });
+      } catch (e) {
+        const x = strErr(e);
+        execution.verification = { ok: false, checks: [{ name: 'refetch', ok: false, expected: '再取得', actual: x.message }], unexpected: [] };
+        for (const st of execution.steps) { st.status = ST.VERIFY_FAILED; st.reason = 'VERIFY_FAILED'; st.message = `登録後の設定を再取得できませんでした: ${x.message}`; }
+      }
+      return finish(execution.verification.ok ? RUN.DONE : RUN.VERIFY_FAILED);
+    }
+
+    // ---- Rollback（§28〜§30）----
+    async function prepareRollback(execution, { api, now = Date.now } = {}) {
+      const rb = { rollbackVersion: '1', rollbackId: newId('jrb'), executionId: execution?.executionId ?? null, appId: execution?.appId ?? null, env: ENV, requestedAt: nowIso(now), status: RB.PREPARED, blockers: [], stale: { status: 'FRESH', diffs: [] }, warnings: [], snapshotRevision: execution?.snapshot?.revision ?? null, afterRevision: execution?.afterRevision ?? null, currentRevision: null, restores: [] };
+      const block = (code, message, detail = null) => { rb.blockers.push({ code, message, ...(detail ? { detail } : {}) }); rb.status = RB.BLOCKED; };
+      if (!execution) { block('INVALID_INPUT', '実行結果がありません'); return rb; }
+      if (execution.status === RUN.RUNNING) { block('EXECUTION_RUNNING', '登録の処理中です'); return rb; }
+      if (execution.rollback) { block('ALREADY_ROLLED_BACK', 'この登録は既に元に戻す処理を行っています（同じ登録を 2 回戻すことはできません）'); return rb; }
+      if (!execution.put?.ok) { block('NOTHING_TO_ROLLBACK', '動作テスト環境の設定は変更されていません（戻すものはありません）'); return rb; }
+      if (!execution.snapshot || !execution.actualAfterRaw) { block('NO_SNAPSHOT', '登録前の snapshot か登録直後の設定が無いため、安全に元に戻せません'); return rb; }
+      let current;
+      try { current = snapshotOf(await api.getPreviewCustomize(rb.appId)); }
+      catch (e) { const x = strErr(e); if (isPermissionError(e)) block('PERMISSION_DENIED', 'カスタマイズ設定を変更する権限がありません', x); else block('FETCH_FAILED', `現在の設定を取得できませんでした: ${x.message}`, x); return rb; }
+      rb.currentRevision = current.revision;
+      const diffs = diffSnapshots(execution.actualAfterRaw, current);
+      if (diffs.length) { rb.stale = { status: 'STALE', diffs }; block('ROLLBACK_STALE', '登録後に動作テスト環境のカスタマイズ設定が変更されているため、自動では元に戻せません（第三者の変更は上書きしません）。Customize タブで現在の設定を確認してください', { diffs }); return rb; }
+      if (String(current.revision) !== String(execution.afterRevision)) rb.warnings.push({ code: 'OTHER_CHANGES_SINCE_EXECUTION', message: `登録後に他の設定が変更されています（revision ${execution.afterRevision} → ${current.revision}）。カスタマイズ設定は登録直後と同じなので戻せますが、それ以外の変更には触れません` });
+      rb.restores = execution.steps.filter(st => [ST.APPLIED, ST.VERIFIED, ST.VERIFY_FAILED].includes(st.status)).map(st => ({ changeId: st.changeId, kind: st.kind, target: st.target, name: st.name, ...(st.kind === CHANGE.REPLACE_FILE ? { restoreFileKey: st.oldFileKey, restoreHash: st.currentHash ?? st.baseHash ?? null } : { removeName: st.name }) }));
+      rb.payloadPreview = { scope: execution.snapshot.scope, counts: Object.fromEntries(TARGETS.map(t => [t, { js: execution.snapshot[t].js.length, css: execution.snapshot[t].css.length }])) };
+      return rb;
+    }
+    async function executeRollback(rb, { api, execution, now = Date.now, onProgress = null } = {}) {
+      if (!rb || rb.status !== RB.PREPARED) throw Object.assign(new Error('元に戻す準備ができていない、または実行できない状態です'), { code: 'NOT_PREPARED' });
+      if (rb.executed) throw Object.assign(new Error('この準備は既に実行されています'), { code: 'ALREADY_EXECUTED' });
+      if (!execution || execution.executionId !== rb.executionId) throw Object.assign(new Error('実行結果が準備と一致しません'), { code: 'INVALID_INPUT' });
+      if (execution.rollback) throw Object.assign(new Error('この登録は既に元に戻す処理を行っています'), { code: 'ALREADY_ROLLED_BACK' });
+      rb.executed = true; rb.status = RB.RUNNING; rb.startedAt = nowIso(now);
+      execution.rollback = rb; execution.lifecycle = RB.RUNNING;
+      const progress = () => { if (typeof onProgress === 'function') { try { onProgress(clone(rb)); } catch (e) { } } };
+      progress();
+      try {
+        const current = snapshotOf(await api.getPreviewCustomize(rb.appId));
+        const diffs = diffSnapshots(execution.actualAfterRaw, current);
+        if (diffs.length) { rb.stale = { status: 'STALE', diffs }; rb.status = RB.FAILED; rb.reason = 'ROLLBACK_STALE'; rb.message = '登録後に設定が変更されたため、元に戻しませんでした'; rb.finishedAt = nowIso(now); execution.lifecycle = rb.status; progress(); return rb; }
+        const body = payloadOf(execution.snapshot, rb.appId, current.revision);
+        const r = await api.putPreviewCustomize(rb.appId, body, current.revision);
+        rb.put = { ok: true, revision: r?.revision != null ? String(r.revision) : null };
+        const after = snapshotOf(await api.getPreviewCustomize(rb.appId));
+        rb.afterRollbackRevision = after.revision;
+        // 検証: 名前 / URL / 順序 / scope は snapshot と一致（fileKey は再発行され得るので比較しない）。REPLACE の統合先は本文の指紋も確認
+        const vdiffs = diffSnapshots(execution.snapshot, after, { compareFileKey: false });
+        const checks = [{ name: 'restoredToSnapshot', ok: vdiffs.length === 0, expected: '一致', actual: vdiffs.length ? vdiffs : '一致' }];
+        if (typeof api.downloadFile === 'function') {
+          for (const rs of rb.restores) {
+            if (rs.kind !== CHANGE.REPLACE_FILE || !rs.restoreHash) continue;
+            const e = after[rs.target].js.find(x => x.type === 'FILE' && x.name === rs.name);
+            let h = null; try { h = e ? hash(await api.downloadFile(e.fileKey)) : null; } catch (e2) { h = null; }
+            checks.push({ name: `sourceRestored:${rs.name}`, ok: h === rs.restoreHash, expected: rs.restoreHash, actual: h });
+          }
+        }
+        rb.verification = { restoredToSnapshot: checks.every(c => c.ok), checks, snapshotRevision: rb.snapshotRevision, currentRevision: after.revision };
+        rb.status = rb.verification.restoredToSnapshot ? RB.VERIFIED : RB.VERIFY_FAILED;
+        rb.message = rb.status === RB.VERIFIED ? '動作テスト環境の JavaScript カスタマイズ設定を登録前の状態に戻しました。' : 'API は成功しましたが、再取得した設定が登録前の snapshot と一致しません。';
+      } catch (e) {
+        const x = strErr(e);
+        rb.status = RB.FAILED; rb.error = x; rb.reason = isPermissionError(e) ? 'PERMISSION_DENIED' : isRevisionError(e) ? 'REVISION_MISMATCH' : 'API_ERROR';
+        rb.message = rb.reason === 'PERMISSION_DENIED' ? 'カスタマイズ設定を変更する権限がありません' : rb.reason === 'REVISION_MISMATCH' ? '元に戻す途中で他の変更が入りました（revision 不一致）。再試行せず停止しました' : `元に戻せませんでした: ${x.message}`;
+      }
+      rb.finishedAt = nowIso(now);
+      execution.lifecycle = rb.status;
+      progress();
+      return rb;
+    }
+
+    // ---- 監査（§37。token / cookie / 本文は含めない。本文は指紋だけ）----
+    function buildAudit({ subject = null, specs = [], approvedSpec = null, generated = [], prepared = null, execution = null, rollback = null } = {}) {
+      const stepOut = (st) => ({ changeId: st.changeId, customizationId: st.customizationId ?? null, kind: st.kind, target: st.target, name: st.name, position: st.position ?? null, status: st.status, reason: st.reason ?? null, message: st.message ?? '', bytes: st.bytes, contentHash: st.contentHash, baseHash: st.baseHash ?? null, currentHash: st.currentHash ?? null, oldFileKey: st.oldFileKey ?? null, uploadKey: st.uploadKey ?? null, codeReview: st.codeReview ? { status: st.codeReview.status, checks: st.codeReview.checks } : null, provenance: st.provenance ?? null, verification: st.verification ?? null, reanalysis: st.reanalysis ?? null, error: st.error ?? null });
+      return {
+        auditVersion: '1', kind: 'customization', generatedAt: new Date().toISOString(),
+        consultationSubject: subject ? { type: subject.type ?? 'javascript', sourceId: subject.sourceId ?? null, name: subject.name ?? null, target: subject.target ?? subject.platform ?? null, customizationType: subject.customizationType ?? null, sourceHash: subject.source?.hash ?? subject.sourceHash ?? null } : null,
+        specVersions: (specs || []).map(sp => ({ specId: sp.specId, version: sp.version, status: sp.status, planVersion: sp.planVersion ?? null, confirmedAt: sp.confirmedAt ?? null, customizations: (sp.customizations || []).map(c => ({ customizationId: c.customizationId, requirement: c.requirement, strategy: c.strategy, platform: c.platform, events: c.events, fields: c.fields, existingFiles: c.existingFiles })) })),
+        approvedSpec: approvedSpec ? { specId: approvedSpec.specId, version: approvedSpec.version, confirmedAt: approvedSpec.confirmedAt ?? null } : null,
+        generated: (generated || []).map(g => ({ customizationId: g.customizationId ?? null, strategy: g.generated?.strategy ?? null, targetFile: g.generated?.targetFile ?? null, codeHash: g.review?.provenance?.codeHash ?? (g.review?.finalCode ? hash(g.review.finalCode) : null), codeReview: g.review ? { status: g.review.status, checks: (g.review.checks || []).map(c => ({ name: c.name, ok: c.ok, severity: c.severity, message: c.message })), mismatches: g.review.mismatches || [] } : null, provenance: g.review?.provenance ?? null, sourceBeforeHash: g.existingSource?.text ? hash(g.existingSource.text) : null, sourceAfterHash: g.review?.finalCode ? hash(g.review.finalCode) : null })),
+        prepared: prepared ? { executionId: prepared.executionId, appId: prepared.appId, env: ENV, status: prepared.status, blockers: prepared.blockers, warnings: prepared.warnings, summary: prepared.summary, changes: prepared.changes.map(stepOut) } : null,
+        customizationBefore: execution?.snapshot ?? prepared?.snapshot ?? null,
+        customizationAfter: execution?.actualAfterRaw ?? null,
+        execution: execution ? { executionId: execution.executionId, appId: execution.appId, env: ENV, status: execution.status, lifecycle: execution.lifecycle, startedAt: execution.startedAt, finishedAt: execution.finishedAt, error: execution.error, previewUnchanged: execution.previewUnchanged, afterRevision: execution.afterRevision, put: execution.put, uploads: execution.uploads, steps: execution.steps.map(stepOut) } : null,
+        verification: execution?.verification ?? null,
+        rollback: rollback || execution?.rollback ? (() => { const r = rollback || execution.rollback; return { rollbackId: r.rollbackId, executionId: r.executionId, requestedAt: r.requestedAt, startedAt: r.startedAt ?? null, finishedAt: r.finishedAt ?? null, status: r.status, reason: r.reason ?? null, message: r.message ?? null, blockers: r.blockers || [], stale: r.stale || null, warnings: r.warnings || [], restores: r.restores || [], verification: r.verification ?? null, error: r.error ?? null }; })() : null,
+        notes: ['運用環境へは反映していない（preview のみ）', '本文は指紋（FNV-1a）だけ記録。認証情報は含めない'],
+      };
+    }
+
+    return { EXECUTOR_VERSION, ENV, MAX_FILES, CHANGE, ST, RUN, RB, snapshotOf, payloadOf, diffSnapshots, safeFileName, changeFromGenerated, buildAfter, prepare, executePreview, verifyAfter, prepareRollback, executeRollback, buildAudit, classifyUpload, classifyPut };
   })();
 
   // ==========================================
@@ -10995,14 +11461,14 @@
      * 変更計画用の Context 生成（純関数）。無料側でも Prompt / Markdown / JSON をコピーできる
      * @returns {{ ok:true, ctx, outputs, coverage, truncation, size, warnings }|{ ok:false, reason, message }}
      */
-    function generatePlan({ goal, inputs, limits = null, now = undefined, revision = null }) {
+    function generatePlan({ goal, inputs, limits = null, now = undefined, revision = null, subject = null }) {
       if (!inputs || !inputs.data) return { ok: false, reason: 'no-data', message: 'アプリ設定の取得が完了していません。' };
       const g = String(goal ?? '').trim();
       if (!g) return { ok: false, reason: 'no-goal', message: '実現したいことを入力してください。' };
       let ctx;
       try {
         // Phase 15: revision（計画の修正）があれば Planner Context に載せる（goal は同じ。Gateway が再計画する）
-        ctx = KTContext.buildPlan({ goal: g, data: inputs.data, deps: inputs.deps || null, scan: inputs.scan || null, incoming: inputs.incoming || null, options: { ...(limits ? { limits } : {}), ...(now !== undefined ? { now } : {}), ...(revision ? { revision } : {}) } });
+        ctx = KTContext.buildPlan({ goal: g, data: inputs.data, deps: inputs.deps || null, scan: inputs.scan || null, incoming: inputs.incoming || null, options: { ...(limits ? { limits } : {}), ...(now !== undefined ? { now } : {}), ...(revision ? { revision } : {}), ...(subject ? { subject } : {}) } });
       } catch (e) {
         return { ok: false, reason: 'error', message: `Context の生成に失敗しました: ${e?.message || e}` };
       }
@@ -11698,12 +12164,17 @@
   const KTAiConversation = (() => {
     const INTENT = { ASK: 'ASK', PLAN: 'PLAN', REVISE_PLAN: 'REVISE_PLAN', EXPLAIN_PLAN: 'EXPLAIN_PLAN', EXPLAIN_REVIEW: 'EXPLAIN_REVIEW', REQUEST_PREVIEW: 'REQUEST_PREVIEW', REQUEST_ROLLBACK: 'REQUEST_ROLLBACK', GENERAL: 'GENERAL', AMBIGUOUS: 'AMBIGUOUS',
       // Phase 16: JavaScript カスタマイズ（コード生成は明示の意図だけ。「これで進めて」では生成しない）
-      GENERATE_CODE: 'GENERATE_CODE', EXPLAIN_CUSTOMIZATION: 'EXPLAIN_CUSTOMIZATION' };
-    const MSG = { USER: 'USER', ASSISTANT_TEXT: 'ASSISTANT_TEXT', ANSWER: 'ANSWER', PLAN: 'PLAN', REVIEW: 'REVIEW', DIFF: 'DIFF', EXECUTION: 'EXECUTION', ROLLBACK: 'ROLLBACK', SYSTEM_NOTICE: 'SYSTEM_NOTICE', ERROR: 'ERROR', LOADING: 'LOADING', CODE: 'CODE' };
+      GENERATE_CODE: 'GENERATE_CODE', EXPLAIN_CUSTOMIZATION: 'EXPLAIN_CUSTOMIZATION',
+      // Phase 17: JS 相談（Customize タブからの相談は PLAN と同じ経路で subject を付けて送る）・仕様の確定（チャットでは確定しない）・JS の登録 / 復元の依頼（UI の確認へ案内するだけ）
+      DISCUSS_JS: 'DISCUSS_JS', CONFIRM_SPEC: 'CONFIRM_SPEC', REQUEST_JS_PREVIEW: 'REQUEST_JS_PREVIEW', REQUEST_JS_ROLLBACK: 'REQUEST_JS_ROLLBACK' };
+    const MSG = { USER: 'USER', ASSISTANT_TEXT: 'ASSISTANT_TEXT', ANSWER: 'ANSWER', PLAN: 'PLAN', REVIEW: 'REVIEW', DIFF: 'DIFF', EXECUTION: 'EXECUTION', ROLLBACK: 'ROLLBACK', SYSTEM_NOTICE: 'SYSTEM_NOTICE', ERROR: 'ERROR', LOADING: 'LOADING', CODE: 'CODE',
+      // Phase 17: 実装仕様カード・JS 登録 / 復元の写し
+      SPEC: 'SPEC', JS_EXECUTION: 'JS_EXECUTION', JS_ROLLBACK: 'JS_ROLLBACK' };
+    const SPEC_STATUS = { DRAFT: 'DRAFT', CONFIRMED: 'CONFIRMED', SUPERSEDED: 'SUPERSEDED' };
     const PLAN_STATUS = { ACTIVE: 'ACTIVE', SUPERSEDED: 'SUPERSEDED', STALE: 'STALE', EXECUTED: 'EXECUTED', ROLLED_BACK: 'ROLLED_BACK' };
     const ROLE = { USER: 'user', ASSISTANT: 'assistant', TOOLKIT: 'toolkit', SYSTEM: 'system' };
     const MAX_MESSAGES = 200;
-    const LOADING_TEXT = { ASK: '確認しています...', EXPLAIN_PLAN: '確認しています...', EXPLAIN_REVIEW: '確認しています...', EXPLAIN_CUSTOMIZATION: '確認しています...', PLAN: '現在の設定を確認し、変更計画を作っています...', REVISE_PLAN: '変更計画を見直しています...', GENERATE_CODE: '既存の JavaScript を確認し、コードを生成しています...' };
+    const LOADING_TEXT = { ASK: '確認しています...', EXPLAIN_PLAN: '確認しています...', EXPLAIN_REVIEW: '確認しています...', EXPLAIN_CUSTOMIZATION: '確認しています...', PLAN: '現在の設定を確認し、変更計画を作っています...', REVISE_PLAN: '変更計画を見直しています...', GENERATE_CODE: '既存の JavaScript を確認し、コードを生成しています...', DISCUSS_JS: 'この JavaScript と現在の設定を確認し、実装案を作っています...' };
     const TRANSIENT = ['RATE_LIMITED', 'TIMEOUT', 'TRANSPORT_ERROR', 'UPSTREAM_ERROR', 'INTERNAL_ERROR', 'WORKER_ERROR', 'INVALID_RESPONSE', 'MODEL_OUTPUT_INVALID'];
     let seq = 0;
     const newId = (p) => `${p}_${Date.now().toString(36)}_${(++seq).toString(36)}`;
@@ -11727,6 +12198,9 @@
       question: /[?？]$|(か|の|かな|かしら)[?？]$|ですか|ますか|でしょうか|のか$|何|なに|どこ|どれ|誰|だれ|いつ|教えて|説明して|使って(い|)る|使われて|わかる|分かる|ありますか|ある[?？]|いる[?？]|ている[?？]|している/,
       ambiguous: /^(これ|それ|この|その|あれ)?(は)?(どう|どうですか|どう思う|どうかな|いい|いいの|大丈夫|OK|ok|問題ない)(ですか|かな|か|？|\?)?[?？]?$/,
       greeting: /^(こんにちは|こんばんは|おはよう|はじめまして|ありがとう|ありがと|助かり|すごい|了解|わかった|分かった|なるほど|おつかれ|お疲れ|よろしく|ok|OK|はい)(です|ます|ございます|した|！|!|。)*$/,
+      // Phase 17: 仕様の確定の言葉（チャットでは確定にならない。［この仕様で確定］へ案内する）と、JS の登録 / 復元の依頼
+      confirmSpec: /仕様(を|で)?(確定|決定|確認|固定|OK|ok)|この仕様で|その仕様で|それでいい|それで(お願い|OK|ok|進め)|仕様はこれで|仕様確定/,
+      jsRegister: /(JS|JavaScript|コード|スクリプト|ファイル)\s*(を|も)?\s*(登録|反映|アップロード|置いて|入れて|適用)|登録して|登録したい|登録をお願い|動作テスト環境(へ|に)登録/i,
     };
     const norm = (t) => String(t ?? '').replace(/\s+/g, ' ').trim();
     /** 計画の語（新規フィールドのラベル / 手順の対象 / タイトルの語）が文に含まれるか（修正の対象が現在の計画か判断する材料） */
@@ -11754,7 +12228,17 @@
       const review = plan ? (state.activeReview?.review || plan.review || null) : null;
       const ex = state.activeExecution;
       const canRollback = !!(ex && ex.written && !ex.rolledBack);
+      const jx = state.activeJsExecution;
+      const canJsRollback = !!(jx && jx.written && !jx.rolledBack);
+      const hasGenerated = !!(plan && plan.generated && Object.keys(plan.generated).length);
       const q = RE.question.test(t);
+      // 0) Phase 17: JS の登録 / 復元の依頼（生成コードがあるときだけ。UI の確認へ案内するだけで登録はしない）
+      if (RE.jsRegister.test(t) && !(q && RE.questionWord.test(t)) && !RE.rollback.test(t)) {
+        if (hasGenerated) return { intent: INTENT.REQUEST_JS_PREVIEW, reason: 'JS_REGISTER_WORDS' };
+        if (plan && (plan.plan?.customizations || []).length) return { intent: INTENT.GENERAL, reason: 'NO_GENERATED_CODE' };
+      }
+      // 0b) 仕様の確定の言葉: 実装仕様があれば「ボタンで確定」を案内（文章では確定しない）
+      if (plan && plan.spec && plan.spec.status !== SPEC_STATUS.SUPERSEDED && RE.confirmSpec.test(t) && !q) return { intent: INTENT.CONFIRM_SPEC, reason: 'CONFIRM_WORDS' };
       // 1) 計画 / Review についての質問（計画があるとき）。「このフィールドは何に使ってる？」は現在の設定の質問 → ASK
       if (plan && RE.questionWord.test(t) && (RE.aboutReview.test(t) || RE.aboutPlan.test(t) || stepIdsIn(t).length || (RE.aboutCustomization.test(t) && (plan.plan?.customizations || []).length))) {
         const aboutCust = (plan.plan?.customizations || []).length && (RE.aboutCustomization.test(t) || /\bC[0-9]+\b/.test(t)) && !RE.aboutReview.test(t);
@@ -11770,7 +12254,12 @@
         return { intent: INTENT.GENERATE_CODE, reason: 'GENERATE_WORDS', customizationId: cid };
       }
       // 2) 元に戻す（反映済みの実行があるときだけ意味を持つ。即 Rollback はしない）
-      if (RE.rollback.test(t)) return canRollback ? { intent: INTENT.REQUEST_ROLLBACK, reason: 'ROLLBACK_WORDS' } : { intent: INTENT.GENERAL, reason: 'NO_EXECUTION' };
+      if (RE.rollback.test(t)) {
+        // Phase 17: JS の登録だけがあれば JS の復元。両方あれば標準設定の Rollback を優先し、JS は言葉（JS / コード / ファイル）で指定したときだけ
+        const wantsJs = /JS|JavaScript|コード|スクリプト|ファイル/i.test(t);
+        if (canJsRollback && (!canRollback || wantsJs)) return { intent: INTENT.REQUEST_JS_ROLLBACK, reason: 'JS_ROLLBACK_WORDS' };
+        return canRollback ? { intent: INTENT.REQUEST_ROLLBACK, reason: 'ROLLBACK_WORDS' } : { intent: INTENT.GENERAL, reason: 'NO_EXECUTION' };
+      }
       // 3) 進める（「全部承認」「そのまま実行」等も含む。承認・最終確認にはならない）
       if (RE.preview.test(t) && !(q && RE.questionWord.test(t))) return plan ? { intent: INTENT.REQUEST_PREVIEW, reason: 'PREVIEW_WORDS' } : { intent: INTENT.GENERAL, reason: 'NO_PLAN' };
       // 4) 計画の修正（現在の計画の語に触れる、または修正の動詞）。反映済み / 戻し済みの計画は、その計画の語に触れるか「修正だけ」の文
@@ -11780,7 +12269,7 @@
       if (RE.ambiguous.test(t)) return plan ? { intent: INTENT.AMBIGUOUS, reason: 'VAGUE_REFERENCE', choices: [INTENT.EXPLAIN_PLAN, ...(review ? [INTENT.EXPLAIN_REVIEW] : []), INTENT.REQUEST_PREVIEW] } : { intent: INTENT.GENERAL, reason: 'VAGUE_NO_PLAN' };
       // 6) 実現したいこと（計画）。計画があり、その計画の語に触れないなら「修正か新規か」を聞く
       if (RE.desire.test(t) && !q) {
-        if (!plan) return { intent: INTENT.PLAN, reason: 'DESIRE' };
+        if (!plan) return { intent: state.subject ? INTENT.DISCUSS_JS : INTENT.PLAN, reason: state.subject ? 'CONSULTATION' : 'DESIRE' };
         if (canRevise) return { intent: INTENT.AMBIGUOUS, reason: 'NEW_OR_REVISE', choices: [INTENT.REVISE_PLAN, INTENT.PLAN] };
         return { intent: INTENT.PLAN, reason: 'DESIRE_AFTER_EXECUTION' };
       }
@@ -11789,6 +12278,8 @@
       if (RE.greeting.test(t)) return { intent: INTENT.GENERAL, reason: 'GREETING' };
       // 8) 既定: 計画があれば何を指すか聞く。無ければ現在の設定への質問として扱う（Planner は起動しない）
       if (plan) return { intent: INTENT.AMBIGUOUS, reason: 'UNCLEAR', choices: [INTENT.ASK, ...(canRevise ? [INTENT.REVISE_PLAN] : []), INTENT.PLAN] };
+      // Phase 17: JS の相談中は、質問でない短い文（「承認済みでは金額を編集不可」）も相談（計画）として扱う
+      if (state.subject && t.length >= 6) return { intent: INTENT.DISCUSS_JS, reason: 'CONSULTATION_DEFAULT' };
       return { intent: INTENT.ASK, reason: 'DEFAULT_ASK' };
     }
 
@@ -11804,7 +12295,9 @@
      *   now() → ISO 文字列（省略時は現在時刻）
      */
     function create({ services = {}, now = () => new Date().toISOString(), maxMessages = MAX_MESSAGES } = {}) {
-      const state = { messages: [], activePlan: null, activeReview: null, activeExecution: null, planHistory: [], dropped: 0 };
+      const state = { messages: [], activePlan: null, activeReview: null, activeExecution: null, planHistory: [], dropped: 0,
+        // Phase 17: 相談対象の JS（Customize タブから。無ければ null）と、JS の登録（KTJsExecutor の写し）
+        subject: null, consultation: null, activeJsExecution: null };
       const listeners = new Set();
       const emit = () => { for (const fn of listeners) { try { fn(state); } catch (e) { } } };
       const push = (type, role, text = '', data = null) => {
@@ -11829,11 +12322,29 @@
           revisionRequests: [...(parent?.revisionRequests || []), ...(revisionRequest ? [revisionRequest] : [])],
           plan, ctx, review, status: PLAN_STATUS.ACTIVE, createdAt: now(), executionId: null,
         };
+        // Phase 17: 実装仕様（Customization Spec）。customizations がある計画の版ごとに 1 つ。確定（CONFIRMED）は UI の［この仕様で確定］だけ
+        const custs = Array.isArray(plan?.customizations) ? plan.customizations : [];
+        if (custs.length) {
+          for (const o of state.planHistory) if (o.planId === planId && o.spec && o.spec.status !== SPEC_STATUS.SUPERSEDED) o.spec.status = SPEC_STATUS.SUPERSEDED;
+          v.spec = { specId: `${planId}:spec`, version, planVersion: version, status: SPEC_STATUS.DRAFT, createdAt: now(), confirmedAt: null, customizeRevision: null, customizations: JSON.parse(JSON.stringify(custs)), subject: state.subject ? { sourceId: state.subject.sourceId, name: state.subject.name, target: state.subject.platform } : null };
+        } else v.spec = null;
         state.planHistory.push(v);
         state.activePlan = v;
         state.activeReview = review ? { planId, version, review } : null;
         return v;
       }
+      /** 実装仕様の確定（Human Approval の SoT は UI の［この仕様で確定］。チャットの文章では呼ばない） */
+      function confirmSpec({ planId, version, customizeRevision = null } = {}) {
+        const v = state.planHistory.find(x => x.planId === planId && x.version === version) || state.activePlan;
+        if (!v || !v.spec) return { ok: false, reason: 'NO_SPEC' };
+        if (v !== state.activePlan || v.status === PLAN_STATUS.SUPERSEDED) return { ok: false, reason: 'NOT_ACTIVE' };
+        if (v.spec.status === SPEC_STATUS.CONFIRMED) return { ok: true, spec: v.spec, already: true };
+        v.spec.status = SPEC_STATUS.CONFIRMED; v.spec.confirmedAt = now(); v.spec.customizeRevision = customizeRevision;
+        push(MSG.SYSTEM_NOTICE, ROLE.SYSTEM, `実装仕様 v${v.spec.version} を確定しました。JavaScript を生成できます（生成したコードは Toolkit の検査の後、［動作テスト環境へ登録］で登録します）。`, { kind: 'spec-confirmed', planId: v.planId, version: v.version, specVersion: v.spec.version });
+        push(MSG.SPEC, ROLE.TOOLKIT, `実装仕様 v${v.spec.version}`, { planId: v.planId, version: v.version });
+        return { ok: true, spec: v.spec };
+      }
+      const specSummary = (v) => (v?.spec ? { specId: v.spec.specId, version: v.spec.version, status: v.spec.status, confirmedAt: v.spec.confirmedAt } : null);
       const planLabel = (v) => `変更計画 v${v.version}`;
       const counts = (review) => { const er = review?.executionReadiness || {}; return { safe: (er.safeSteps || []).length, review: (er.reviewSteps || []).length, blocked: (er.blockedSteps || []).length, planOnly: (er.planOnlySteps || []).length, conflicts: (review?.conflicts || []).length }; };
       function announcePlan(v, { revised = false } = {}) {
@@ -11852,6 +12363,66 @@
           push(MSG.REVIEW, ROLE.TOOLKIT, 'Toolkit Review', { planId: v.planId, version: v.version, counts: c });
         }
         if ((p.questions || []).length) assistant(`確認したいことが ${p.questions.length} 件あります。${p.questions.slice(0, 3).map(q => `${q.id}: ${q.question}`).join(' / ')}${p.questions.length > 3 ? ' …' : ''}`, { planId: v.planId, version: v.version, kind: 'questions' });
+        // Phase 17: 実装仕様（JS がある計画）。会話から即コード生成へ進まず、仕様を確定してから生成する
+        if (v.spec) {
+          toolkit(`JavaScript カスタマイズの実装仕様 v${v.spec.version} をまとめました。内容を確認して［この仕様で確定］を押すとコードを生成できます（修正があればそのまま伝えてください）。`, { planId: v.planId, version: v.version, kind: 'spec-intro' });
+          push(MSG.SPEC, ROLE.TOOLKIT, `実装仕様 v${v.spec.version}`, { planId: v.planId, version: v.version });
+        }
+      }
+      // ---- Phase 17: JS 相談（Customize タブ「AIに相談」）----
+      function subjectOf(seed) {
+        return { type: 'javascript', sourceId: seed.sourceId, name: seed.name, platform: seed.platform, customizationType: seed.customizationType, sourceAvailable: !!seed.source?.available, sourceHash: seed.source?.hash ?? null, customizeRevision: seed.customizeRevision ?? null, counts: seed.counts || {}, events: seed.analysis?.events || [], fields: seed.analysis?.fields || { READ: [], WRITE: [], CONTROL: [] }, fieldAccess: seed.analysis?.fieldAccess || {}, appId: seed.appId ?? null, appName: seed.appName ?? null };
+      }
+      function resetConversation() {
+        state.messages.length = 0; state.dropped = 0;
+        // 反映済み（未復元）の実行は残す（「戻して」と drawer の Rollback 確認は引き続き使える）。計画・仕様・生成コードは消える
+        state.planHistory.length = 0; state.activePlan = null; state.activeReview = null;
+        if (state.activeExecution && !(state.activeExecution.written && !state.activeExecution.rolledBack)) state.activeExecution = null;
+        if (state.activeJsExecution && !(state.activeJsExecution.written && !state.activeJsExecution.rolledBack)) state.activeJsExecution = null;
+      }
+      /**
+       * 相談を始める。同じ JS の相談中なら再開（会話を残す）。別の JS の会話があれば { needsConfirm } を返し、UI が「戻る / 新しい会話」を聞く
+       * @param {object} seed KTContext.buildConsultationSeed の結果
+       * @param {object} o { force: true なら確認なしで新しい会話 }
+       */
+      function startConsultation(seed, { force = false } = {}) {
+        if (!seed || !seed.sourceId) return { ok: false, reason: 'NO_SEED' };
+        if (state.subject && state.subject.sourceId === seed.sourceId && state.messages.length) { state.consultation = { ...state.consultation, resumedAt: now() }; emit(); return { ok: true, resumed: true, subject: state.subject }; }
+        if (!force && state.messages.length) return { ok: false, needsConfirm: true, current: state.subject ? { sourceId: state.subject.sourceId, name: state.subject.name } : null, hasPlan: !!state.activePlan, pendingExecution: !!((state.activeExecution && state.activeExecution.written && !state.activeExecution.rolledBack) || (state.activeJsExecution && state.activeJsExecution.written && !state.activeJsExecution.rolledBack)) };
+        resetConversation();
+        state.subject = subjectOf(seed);
+        state.consultation = { seed, startedAt: now(), resumedAt: null };
+        const c = state.counts = state.subject.counts || {};
+        const lines = [`${state.subject.platform === 'mobile' ? 'モバイル' : 'PC'}用 JavaScript（${state.subject.customizationType === 'URL' ? 'URL 指定' : 'ファイル'}）`, `イベント：${c.events ?? 0}件`, `参照フィールド：${c.fields ?? 0}件`, `CONTROL：${c.control ?? 0}件${c.write ? `　WRITE：${c.write}件` : ''}`];
+        if (!state.subject.sourceAvailable) lines.push(state.subject.customizationType === 'URL' ? '本文は取得できません（外部 URL）。変更案はコード / Diff として出し、Toolkit からは書き換えません' : '本文は未取得です（生成時に取得します）');
+        push(MSG.ASSISTANT_TEXT, ROLE.TOOLKIT, `${state.subject.name} について相談します。`, { kind: 'consultation-start', subject: state.subject, lines });
+        return { ok: true, resumed: false, subject: state.subject };
+      }
+      /** JS の登録（KTJsExecutor の状態）を写す。登録は UI の最終確認でだけ始まる */
+      function noteJsExecution(jsState) {
+        const ex = jsState?.execution || null;
+        const executionId = ex?.executionId || jsState?.prepared?.executionId || null;
+        const stage = jsState?.stage || 'idle';
+        if (!executionId || ['idle', 'preparing', 'confirm', 'blocked'].includes(stage)) return;
+        if (!state.activeJsExecution || state.activeJsExecution.executionId !== executionId) {
+          const v = state.activePlan;
+          state.activeJsExecution = { executionId, planId: v?.planId ?? null, version: v?.version ?? null, stage, written: false, rolledBack: false, status: null, rollbackMessage: null };
+          push(MSG.JS_EXECUTION, ROLE.TOOLKIT, 'JavaScript を動作テスト環境へ登録しています。', { executionId, planId: v?.planId ?? null, version: v?.version ?? null });
+        }
+        const ae = state.activeJsExecution;
+        ae.stage = stage;
+        ae.written = ae.written || !!ex?.put?.ok;
+        if (stage === 'done' && ae.status !== (ex?.status || 'DONE')) {
+          ae.status = ex?.status || 'DONE';
+          if (ae.written) push(MSG.SYSTEM_NOTICE, ROLE.SYSTEM, '動作テスト環境の JavaScript カスタマイズ設定が変更されました。運用環境には反映されていません。', { executionId, kind: 'js-preview-changed' });
+        }
+        if (/^roll/.test(stage) && !ae.rollbackMessage) ae.rollbackMessage = push(MSG.JS_ROLLBACK, ROLE.TOOLKIT, 'JavaScript の登録を元に戻します。', { executionId, planId: ae.planId, version: ae.version }).id;
+        if (stage === 'rolled-back' && !ae.rolledBack) {
+          const rb = jsState?.rollback || ex?.rollback || null;
+          ae.rolledBack = rb?.status === 'ROLLED_BACK_VERIFIED';
+          if (ae.rolledBack) push(MSG.SYSTEM_NOTICE, ROLE.SYSTEM, 'JavaScript カスタマイズ設定を登録前の状態に戻しました。', { executionId, kind: 'js-rolled-back' });
+        }
+        emit();
       }
 
       // ---- 実行・Rollback（KTPlanExecutor の状態を写すだけ。ここでは管理しない）----
@@ -11913,9 +12484,10 @@
               else { result.ok = false; push(MSG.ERROR, ROLE.TOOLKIT, r?.message || '回答を取得できませんでした。', { code: r?.reason || 'ERROR', retryText: t }); }
               break;
             }
+            case INTENT.DISCUSS_JS:
             case INTENT.PLAN: {
-              loading = push(MSG.LOADING, ROLE.ASSISTANT, LOADING_TEXT.PLAN, { intent: cls.intent });
-              const r = await services.plan({ goal: t, signal });
+              loading = push(MSG.LOADING, ROLE.ASSISTANT, state.subject ? LOADING_TEXT.DISCUSS_JS : LOADING_TEXT.PLAN, { intent: cls.intent });
+              const r = await services.plan({ goal: t, signal, ...(state.subject ? { subject: state.subject } : {}) });
               remove(loading); loading = null;
               if (r && r.plan) announcePlan(registerPlan({ plan: r.plan, ctx: r.ctx || null, review: r.review || null }));
               else { result.ok = false; push(MSG.ERROR, ROLE.TOOLKIT, r?.message || '変更計画を作成できませんでした。', { code: r?.reason || 'ERROR', retryText: t }); }
@@ -11928,7 +12500,7 @@
                 result.ok = false; break;
               }
               loading = push(MSG.LOADING, ROLE.ASSISTANT, LOADING_TEXT.REVISE_PLAN, { intent: cls.intent });
-              const r = await services.plan({ goal: base.goal, revision: { basedOnVersion: base.version, request: t, previousPlan: base.plan, previousRequests: base.revisionRequests }, signal });
+              const r = await services.plan({ goal: base.goal, revision: { basedOnVersion: base.version, request: t, previousPlan: base.plan, previousRequests: base.revisionRequests }, signal, ...(state.subject ? { subject: state.subject } : {}) });
               remove(loading); loading = null;
               if (r && r.plan) announcePlan(registerPlan({ plan: r.plan, ctx: r.ctx || null, review: r.review || null, revisionRequest: t, basedOn: base }), { revised: true });
               else { result.ok = false; push(MSG.ERROR, ROLE.TOOLKIT, r?.message || '変更計画を見直せませんでした。', { code: r?.reason || 'ERROR', retryText: t }); }
@@ -11939,6 +12511,8 @@
               if (!v) { toolkit('コードを生成する計画がありません。'); result.ok = false; break; }
               const custs = v.plan?.customizations || [];
               if (!custs.length) { toolkit(`現在の${planLabel(v)}に JavaScript カスタマイズはありません（標準設定だけで実現できる計画です）。`); result.ok = false; break; }
+              // Phase 17: 仕様が確定するまで生成しない（会話から即コード生成へ進まない）
+              if (v.spec && v.spec.status !== SPEC_STATUS.CONFIRMED) { toolkit(`先に実装仕様 v${v.spec.version} を確定してください（仕様カードの［この仕様で確定］。チャットの文章では確定になりません）。`, { kind: 'spec-required', planId: v.planId, version: v.version }); push(MSG.SPEC, ROLE.TOOLKIT, `実装仕様 v${v.spec.version}`, { planId: v.planId, version: v.version }); result.ok = false; break; }
               const reviewOf = (cid) => (v.review?.steps || []).find(r => r.customization?.customizationId === cid) || null;
               let cid = cls.customizationId || null;
               if (!cid) {
@@ -11988,6 +12562,25 @@
               push(MSG.ASSISTANT_TEXT, ROLE.TOOLKIT, '動作テスト環境を変更前の状態へ戻せます。', { kind: 'rollback-ready', executionId: ae.executionId, planId: ae.planId, version: ae.version });
               break;
             }
+            // Phase 17: 仕様の確定・JS の登録 / 復元は UI の操作だけ。ここでは案内する
+            case INTENT.CONFIRM_SPEC: {
+              const v = state.activePlan;
+              toolkit(v?.spec?.status === SPEC_STATUS.CONFIRMED ? `実装仕様 v${v.spec.version} は確定済みです。「コードを作って」で JavaScript を生成できます。` : '仕様の確定は仕様カードの［この仕様で確定］ボタンで行います（チャットの文章では確定になりません）。', { kind: 'spec-confirm-hint', planId: v?.planId ?? null, version: v?.version ?? null });
+              if (v?.spec) push(MSG.SPEC, ROLE.TOOLKIT, `実装仕様 v${v.spec.version}`, { planId: v.planId, version: v.version });
+              break;
+            }
+            case INTENT.REQUEST_JS_PREVIEW: {
+              const v = state.activePlan;
+              const gen = Object.values(v?.generated || {});
+              const ok = gen.filter(g => g.review && g.review.status !== 'BLOCKED').length, blocked = gen.length - ok;
+              push(MSG.ASSISTANT_TEXT, ROLE.TOOLKIT, ok ? 'JavaScript を動作テスト環境へ登録できます。登録の確認（内容・登録先・保持される設定）を開いてください。' : 'Toolkit Code Review で採用できない問題があるため登録できません。計画を修正して再生成してください。', { kind: 'js-preview-ready', planId: v.planId, version: v.version, registrable: ok, blocked });
+              break;
+            }
+            case INTENT.REQUEST_JS_ROLLBACK: {
+              const jx = state.activeJsExecution;
+              push(MSG.ASSISTANT_TEXT, ROLE.TOOLKIT, 'JavaScript の登録を登録前の状態へ戻せます。', { kind: 'js-rollback-ready', executionId: jx.executionId, planId: jx.planId, version: jx.version });
+              break;
+            }
             case INTENT.AMBIGUOUS: {
               const v = state.activePlan;
               const text2 = cls.reason === 'NEW_OR_REVISE' ? `現在の${planLabel(v)}の修正ですか、新しい計画ですか？` : v ? `何についてでしょうか。現在は${planLabel(v)}${v.review ? '（Toolkit Review あり）' : ''}があります。` : '何についてでしょうか。';
@@ -11996,7 +12589,7 @@
             }
             default: {
               const v = state.activePlan, ae = state.activeExecution;
-              const text2 = cls.reason === 'NO_EXECUTION' ? '元に戻せる反映はありません（動作テスト環境への反映はまだ行っていません）。' : cls.reason === 'NO_CUSTOMIZATION' ? `現在の${planLabel(v)}に JavaScript カスタマイズはありません（標準設定だけで実現できます）。` : cls.reason === 'NO_PLAN' ? '反映できる計画がまだありません。実現したいことを入力すると変更計画を作ります。' : cls.reason === 'GREETING' ? 'このアプリについての質問や、実現したいことを入力してください。' : v ? `現在は${planLabel(v)}があります。質問・計画の修正・「これで進めたい」のいずれかで続けられます。` : 'このアプリについての質問（例: このフィールドは何に使ってる？）や、実現したいこと（例: 100万円以上なら部長承認を追加したい）を入力してください。';
+              const text2 = cls.reason === 'NO_GENERATED_CODE' ? '登録できる JavaScript はまだありません。実装仕様を確定して「コードを作って」で生成してください。' : cls.reason === 'NO_EXECUTION' ? '元に戻せる反映はありません（動作テスト環境への反映はまだ行っていません）。' : cls.reason === 'NO_CUSTOMIZATION' ? `現在の${planLabel(v)}に JavaScript カスタマイズはありません（標準設定だけで実現できます）。` : cls.reason === 'NO_PLAN' ? '反映できる計画がまだありません。実現したいことを入力すると変更計画を作ります。' : cls.reason === 'GREETING' ? 'このアプリについての質問や、実現したいことを入力してください。' : v ? `現在は${planLabel(v)}があります。質問・計画の修正・「これで進めたい」のいずれかで続けられます。` : 'このアプリについての質問（例: このフィールドは何に使ってる？）や、実現したいこと（例: 100万円以上なら部長承認を追加したい）を入力してください。';
               assistant(text2, { kind: 'general', reason: cls.reason, ...(ae ? { executionId: ae.executionId } : {}) });
             }
           }
@@ -12022,6 +12615,8 @@
         setReview: (review) => { if (state.activePlan) { state.activePlan.review = review; state.activeReview = review ? { planId: state.activePlan.planId, version: state.activePlan.version, review } : null; emit(); } },
         activePlan: () => state.activePlan, planHistory: () => state.planHistory,
         noteExecution, markStale,
+        // Phase 17
+        startConsultation, confirmSpec, noteJsExecution, specSummary, subject: () => state.subject, activeJsExecution: () => state.activeJsExecution,
         notice: (text, data) => push(MSG.SYSTEM_NOTICE, ROLE.SYSTEM, text, data),
         pushMessage: push,
         /** Before / After を会話に出す（計画カードの操作。Review の diff を写す） */
@@ -12029,7 +12624,7 @@
       };
     }
 
-    return { INTENT, MSG, PLAN_STATUS, ROLE, MAX_MESSAGES, classifyIntent, planTerms, create };
+    return { INTENT, MSG, PLAN_STATUS, SPEC_STATUS, ROLE, MAX_MESSAGES, classifyIntent, planTerms, create };
   })();
 
   // ==========================================
@@ -12041,7 +12636,8 @@
   const KTAiChatUi = (() => {
     const esc = (v) => escapeHtml(v);
     const { MSG, INTENT, PLAN_STATUS } = KTAiConversation;
-    const INTENT_JA = { ASK: '質問する', PLAN: '新しい計画を作る', REVISE_PLAN: '現在の計画を修正する', EXPLAIN_PLAN: '計画の説明を聞く', EXPLAIN_REVIEW: 'Toolkit Review の説明を聞く', REQUEST_PREVIEW: '動作テスト環境への反映へ進む', REQUEST_ROLLBACK: '変更前の状態に戻す', GENERAL: 'その他' };
+    const INTENT_JA_P17 = { DISCUSS_JS: 'この JS の相談として計画を作る', CONFIRM_SPEC: '仕様を確定（ボタンで）', REQUEST_JS_PREVIEW: 'JS を動作テスト環境へ登録', REQUEST_JS_ROLLBACK: 'JS の登録を元に戻す' };
+    const INTENT_JA = { ...INTENT_JA_P17, ASK: '質問する', PLAN: '新しい計画を作る', REVISE_PLAN: '現在の計画を修正する', EXPLAIN_PLAN: '計画の説明を聞く', EXPLAIN_REVIEW: 'Toolkit Review の説明を聞く', REQUEST_PREVIEW: '動作テスト環境への反映へ進む', REQUEST_ROLLBACK: '変更前の状態に戻す', GENERAL: 'その他' };
     const STATUS_JA = { ACTIVE: '最新', SUPERSEDED: '旧版（SUPERSEDED）', STALE: '要再作成（STALE）', EXECUTED: '動作テスト環境へ反映済み', ROLLED_BACK: '元に戻し済み' };
     const stepMark = (st) => (/^ADD_/.test(st.actionType) ? '＋' : st.actionType === 'REUSE_FIELD' ? '↻' : /^UPDATE_/.test(st.actionType) ? '✎' : st.actionType === 'CUSTOMIZATION_REQUIRED' ? '⚙' : '？');
     const btn = (act, label, attrs = '', style = '') => `<button type="button" class="btn kt-ai-act" data-act="${esc(act)}" ${attrs} style="height:26px; font-size:11px; ${style}">${esc(label)}</button>`;
@@ -12114,7 +12710,7 @@
               </div>
               <div id="kt-ai-pane-plan" class="kt-ai-pane active"><div id="kt-ai-pane-plan-empty" style="opacity:.7; padding:6px;">変更計画はまだありません。チャットで実現したいことを入力するか、「Context」から計画を作成してください。</div>${KTContextUi.planPaneHtml(c)}</div>
               <div id="kt-ai-pane-evidence" class="kt-ai-pane"><div style="opacity:.7; padding:6px; font-size:11px;">回答・計画の根拠ID（E1 など）をクリックすると、Toolkit が解析した事実（statement / 利用元 / 関係 / 確度 / 設定 / ファイルと行）を表示します。</div>${KTContextUi.evidencePaneHtml(c)}</div>
-              <div id="kt-ai-pane-code" class="kt-ai-pane"><div id="kt-ai-code-head" style="opacity:.7; padding:6px; font-size:11px;">生成した JavaScript はまだありません。計画の「JS カスタマイズ」カードの［コードを作る］か、チャットで「コードを作って」と伝えると生成します（kintone への登録はしません）。</div><div id="kt-ai-code-actions" style="display:none; gap:6px; flex-wrap:wrap; margin:4px 0;"><button type="button" id="kt-ai-code-copy" class="btn" style="height:26px; font-size:11px;">コードをコピー</button><button type="button" id="kt-ai-diff-copy" class="btn" style="height:26px; font-size:11px;">Diff をコピー</button><button type="button" id="kt-ai-cplan-copy" class="btn" style="height:26px; font-size:11px;">Customization Plan JSON をコピー</button><button type="button" id="kt-ai-code-download" class="btn" style="height:26px; font-size:11px;">ファイルとして保存</button></div><div id="kt-ai-code-review" style="font-size:11px;"></div><div id="kt-ai-code-tabs" style="display:none; gap:4px; margin-top:6px;"><button type="button" class="btn kt-ai-ctab active" data-code-view="code" style="height:24px; font-size:11px;">コード</button><button type="button" class="btn kt-ai-ctab" data-code-view="diff" style="height:24px; font-size:11px;">Diff（Before / After）</button></div><pre id="kt-ai-code-view" style="margin-top:4px; max-height:60vh; overflow:auto; white-space:pre; font-size:11px; border:1px solid ${esc(c.border)}; border-radius:8px; padding:8px; display:none;"></pre><pre id="kt-ai-diff-view" style="margin-top:4px; max-height:60vh; overflow:auto; white-space:pre; font-size:11px; border:1px solid ${esc(c.border)}; border-radius:8px; padding:8px; display:none;"></pre></div>
+              <div id="kt-ai-pane-code" class="kt-ai-pane"><div id="kt-ai-code-head" style="opacity:.7; padding:6px; font-size:11px;">生成した JavaScript はまだありません。計画の「JS カスタマイズ」カードの［コードを作る］か、チャットで「コードを作って」と伝えると生成します（kintone への登録はしません）。</div><div id="kt-ai-code-actions" style="display:none; gap:6px; flex-wrap:wrap; margin:4px 0;"><button type="button" id="kt-ai-code-copy" class="btn" style="height:26px; font-size:11px;">コードをコピー</button><button type="button" id="kt-ai-diff-copy" class="btn" style="height:26px; font-size:11px;">Diff をコピー</button><button type="button" id="kt-ai-cplan-copy" class="btn" style="height:26px; font-size:11px;">Customization Plan JSON をコピー</button><button type="button" id="kt-ai-code-download" class="btn" style="height:26px; font-size:11px;">ファイルとして保存</button></div><div id="kt-ai-code-review" style="font-size:11px;"></div><div id="kt-ai-code-tabs" style="display:none; gap:4px; margin-top:6px;"><button type="button" class="btn kt-ai-ctab active" data-code-view="code" style="height:24px; font-size:11px;">コード</button><button type="button" class="btn kt-ai-ctab" data-code-view="diff" style="height:24px; font-size:11px;">Diff（Before / After）</button></div><pre id="kt-ai-code-view" style="margin-top:4px; max-height:60vh; overflow:auto; white-space:pre; font-size:11px; border:1px solid ${esc(c.border)}; border-radius:8px; padding:8px; display:none;"></pre><pre id="kt-ai-diff-view" style="margin-top:4px; max-height:60vh; overflow:auto; white-space:pre; font-size:11px; border:1px solid ${esc(c.border)}; border-radius:8px; padding:8px; display:none;"></pre><div id="kt-ai-jsreg" style="margin-top:8px;"></div></div>
               <div id="kt-ai-pane-context" class="kt-ai-pane">${KTContextUi.generatorHtml(c)}<div style="margin-top:8px; display:flex; gap:6px; align-items:center;"><b style="font-size:12px;">プレビュー</b><button type="button" id="kt-ai-download" class="btn" style="height:26px; font-size:11px;" disabled>⬇ ローカルに保存</button></div><pre id="kt-ai-preview" style="margin-top:4px; max-height:320px; overflow:auto; white-space:pre-wrap; font-size:11px; border:1px solid ${esc(c.border)}; border-radius:8px; padding:8px;"></pre></div>
               <div id="kt-ai-pane-connection" class="kt-ai-pane">${paidEnabled ? KTContextUi.connectionHtml(c) : '<div id="kt-ai-paid" style="display:none;"></div>'}</div>
             </div>
@@ -12123,14 +12719,14 @@
     }
 
     // ---- Context ヘッダー（§21。簡潔に。詳細は展開式）----
-    function headerHtml({ app = {}, overview = null, connection = {}, drawerOpen = false, jsFiles = [] } = {}) {
+    function headerHtml({ app = {}, overview = null, connection = {}, drawerOpen = false, jsFiles = [], subject = null } = {}) {
       const o = overview || {};
       const ok = (b) => (b ? '✓' : '—');
       const health = o.brokenRefs?.total ? `△ 壊れた参照 ${o.brokenRefs.total}` : (o.brokenRefs ? '✓' : '—');
       const conn = connection.checking ? '確認中...' : connection.connected ? (connection.available ? '✓' : '△') : '未接続';
       const items = [['Fields', o.fieldCount ?? '—'], ['Relations', o.dependencies?.edgeCount ?? '—'], ['JS', ok(o.javascript?.analyzed)], ['Incoming', ok(o.incoming?.scanned)], ['Health', health], ['Nest Rec AI', conn]];
       return `<div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap; min-width:0;">
-          <b style="font-size:13px;">${esc(app.name || `App ${app.id ?? ''}`)}</b><span style="opacity:.7;">App ${esc(String(app.id ?? '—'))}</span>
+          <b style="font-size:13px;">${esc(app.name || `App ${app.id ?? ''}`)}</b><span style="opacity:.7;">App ${esc(String(app.id ?? '—'))}</span>${subject ? `<span id="kt-ai-subject" style="font-size:11px; border:1px solid #6a1b9a; color:#6a1b9a; border-radius:8px; padding:0 6px;">相談中: ${esc(subject.name)}（${subject.platform === 'mobile' ? 'モバイル' : 'PC'}${subject.customizationType === 'URL' ? '・URL' : ''}）</span>` : ''}
           <span style="display:flex; gap:10px; flex-wrap:wrap; font-size:11px; opacity:.9;">${items.map(([k, v]) => `<span><span style="opacity:.7;">${esc(k)}</span> ${esc(String(v))}</span>`).join('')}</span>
         </div>
         <div style="display:flex; gap:6px; align-items:center;">
@@ -12300,6 +12896,90 @@
       const ok = rb.status === 'ROLLED_BACK_VERIFIED';
       return card('kt-ai-rollback-card', `<div><b>${esc(rb.message || (ok ? '変更前の状態へ戻しました。' : '元に戻せませんでした。'))}</b></div><div style="margin-top:4px; font-size:12px;">✓ ${okCount} 件 ROLLBACK_VERIFIED${bad ? `　× ${bad} 件` : ''}</div>${rb.verification?.restoredToSnapshot != null ? `<div style="font-size:12px;">実行前 snapshot との比較：${rb.verification.restoredToSnapshot ? '✓ 一致' : `× 差分 ${(rb.verification.diffs || []).length} 件`}</div>` : ''}<div style="margin-top:4px; font-size:12px;"><b>運用環境には影響していません。</b></div><div style="margin-top:6px;">${btn('open-rollback', '詳細', '')}</div>`, ok ? '#2e7d32' : '#b00020');
     }
+    /** 相談開始（Customize タブ「AIに相談」）: 対象ファイルの要約 ＋ 「何を変更したいですか？」 */
+    function consultationStartHtml(m) {
+      const sub = m.data?.subject || {};
+      const lines = m.data?.lines || [];
+      return card('kt-ai-consultation-card', `<div><b>${esc(m.text)}</b></div><div style="margin-top:4px; font-size:12px; line-height:1.7;">${lines.map(l => esc(l)).join('<br>')}</div>${(sub.fields?.CONTROL || []).length || (sub.fields?.WRITE || []).length ? `<div style="font-size:11px; opacity:.85; margin-top:2px;">${(sub.fields.CONTROL || []).length ? `制御: ${esc(sub.fields.CONTROL.join(', '))}` : ''}${(sub.fields.WRITE || []).length ? `　書換: ${esc(sub.fields.WRITE.join(', '))}` : ''}${(sub.fields.READ || []).length ? `　読取: ${esc(sub.fields.READ.slice(0, 8).join(', '))}${sub.fields.READ.length > 8 ? ' …' : ''}` : ''}</div>` : ''}<div style="margin-top:6px; font-size:13px;"><b>何を変更したいですか？</b></div><div style="font-size:11px; opacity:.7; margin-top:2px;">例: 「承認済みになったら金額を編集できなくしたい」「モバイルでも同じようにしたい」。質問（「このファイルは何をしている？」）もできます。</div>`, '#6a1b9a');
+    }
+    const SPEC_STATUS_JA = { DRAFT: '確認待ち', CONFIRMED: '確定済み', SUPERSEDED: '旧版' };
+    /** 実装仕様カード（§7 / §8 / §9）: 目的 / 各カスタマイズの platform・方針・フィールド・イベント / 競合 / 質問 / ［仕様を修正］［この仕様で確定］。確定は UI だけ */
+    function specCardHtml(v, { active = true } = {}) {
+      const sp = v?.spec; if (!sp) return card('kt-ai-spec-card', '<div style="opacity:.7;">実装仕様はありません</div>', '#555');
+      const p = v.plan || {};
+      const reviewOf = (cid) => (v.review?.steps || []).find(r => r.customization?.customizationId === cid) || null;
+      const custs = sp.customizations || [];
+      const conflictFiles = [...new Set(custs.flatMap(c => (reviewOf(c.customizationId)?.issues || []).filter(i => i.code === 'JS_FIELD_CONFLICT').map(i => `${i.file}（${(i.fields || []).join(', ')}）`)))];
+      const questions = [...(p.questions || []).map(q => q.question), ...custs.flatMap(c => c.questions || [])];
+      const status = sp.status === 'SUPERSEDED' || !active ? 'SUPERSEDED' : sp.status;
+      const badgeColor = status === 'CONFIRMED' ? '#2e7d32' : status === 'DRAFT' ? '#b26a00' : '#999';
+      const rows = custs.map(c => {
+        const r = reviewOf(c.customizationId);
+        const platforms = (c.platform || []).length ? c.platform : [null];
+        const line = (pl) => `<div style="display:grid; grid-template-columns:auto 1fr; gap:2px 10px; font-size:12px; margin-top:2px;"><span style="opacity:.7;">${pl === 'mobile' ? 'Mobile' : pl === 'desktop' ? 'PC' : '対象'}</span><span>${pl == null ? '（未定: PC / モバイルを確認）' : c.strategy === 'EXTEND_EXISTING_JS' ? `✎ ${esc((c.existingFiles || []).filter(f => (f.target || 'desktop') === pl).map(f => f.name).join(', ') || (c.existingFiles || []).map(f => f.name).join(', ') || '既存 JS')} を変更` : c.strategy === 'NEW_JS_FILE' ? '＋ 新規 JS' : esc(STRATEGY_JA[c.strategy] || c.strategy || '（未定）')}</span></div>`;
+        return `<div style="margin-top:6px; padding:6px 8px; border-left:3px solid ${c.strategy === 'EXTEND_EXISTING_JS' ? '#6a1b9a' : '#1a73e8'}; background:rgba(0,0,0,.03); border-radius:4px;">
+          <div style="font-size:12px;"><b>${esc(c.customizationId)}</b> ${esc(c.requirement || '')}${r ? (r.codeGeneration?.supported ? KTContextUi.badge('生成可', '#2e7d32') : KTContextUi.badge('要確認', '#b26a00')) : ''}</div>
+          ${platforms.map(line).join('')}
+          <div style="display:grid; grid-template-columns:auto 1fr; gap:2px 10px; font-size:12px; margin-top:2px;">
+            <span style="opacity:.7;">対象フィールド</span><span>${esc((c.fields || []).map(f => `${f.code}（${f.access}）`).join('、') || '（なし）')}</span>
+            <span style="opacity:.7;">イベント</span><span>${esc((c.events || []).join(', ') || '（未定）')}</span>
+            ${c.whyStandardInsufficient ? `<span style="opacity:.7;">標準で不足</span><span>${esc(c.whyStandardInsufficient)}</span>` : ''}
+          </div></div>`;
+      }).join('');
+      const actions = status === 'DRAFT' ? `${btn('revise-spec', '仕様を修正', `data-plan="${esc(v.planId)}" data-version="${esc(String(v.version))}"`)}${btn('confirm-spec', 'この仕様で確定', `data-plan="${esc(v.planId)}" data-version="${esc(String(v.version))}"`, 'font-weight:600; border-color:#2e7d32;')}`
+        : status === 'CONFIRMED' ? `${custs.filter(c => reviewOf(c.customizationId)?.codeGeneration?.supported !== false).map(c => btn('generate', `JavaScript を生成（${c.customizationId}）`, `data-cid="${esc(c.customizationId)}"`, 'font-weight:600; border-color:#6a1b9a;')).join('')}${btn('revise-spec', '仕様を修正', `data-plan="${esc(v.planId)}" data-version="${esc(String(v.version))}"`)}` : '';
+      return card('kt-ai-spec-card', `
+        <div style="display:flex; align-items:center; justify-content:space-between; gap:6px; flex-wrap:wrap;"><b>実装仕様 v${esc(String(sp.version))}</b><span>${KTContextUi.badge(SPEC_STATUS_JA[status] || status, badgeColor)}${sp.subject ? KTContextUi.badge(`相談: ${sp.subject.name}`, '#6a1b9a') : ''}</span></div>
+        <div style="margin-top:4px; display:grid; grid-template-columns:auto 1fr; gap:2px 10px; font-size:12px;"><span style="opacity:.7;">目的</span><span>${esc(v.goal || p.goal || '')}</span></div>
+        ${rows}
+        ${conflictFiles.length ? `<div style="margin-top:4px; font-size:12px;"><span style="opacity:.7;">既存 JS との競合</span>　${esc(conflictFiles.join('、'))}</div>` : ''}
+        ${questions.length ? `<div style="margin-top:4px; font-size:11px; color:#b26a00;">${questions.map(q => `？ ${esc(q)}`).join('<br>')}</div>` : ''}
+        ${actions ? `<div style="margin-top:6px; display:flex; gap:6px; flex-wrap:wrap;">${actions}</div>` : ''}
+        <div style="font-size:10px; opacity:.6; margin-top:4px;">${status === 'DRAFT' ? '確定は［この仕様で確定］だけです（チャットの「それでいい」では確定になりません）。修正は会話で伝えると新しい版になります。' : status === 'CONFIRMED' ? `確定: ${esc(String(sp.confirmedAt || '').replace('T', ' ').slice(0, 16))}。生成したコードは Toolkit の検査の後に［動作テスト環境へ登録］で登録します。` : 'この仕様は最新ではありません（修正で新しい版ができました）。'}</div>`, badgeColor);
+    }
+    /** JS 登録の案内（REQUEST_JS_PREVIEW）: 登録の確認（Human Approval）はコードペインで */
+    function jsPreviewReadyHtml(m) {
+      const d = m.data || {};
+      return card('kt-ai-js-ready', `<div><b>${esc(m.text)}</b></div>${d.registrable != null ? `<div style="font-size:12px; margin-top:4px;">登録できるコード ${esc(String(d.registrable))} 件${d.blocked ? `　採用不可 ${esc(String(d.blocked))} 件` : ''}</div>` : ''}${d.registrable ? `<div style="margin-top:6px; display:flex; gap:6px;">${btn('open-js-register', '登録の確認を開く', `data-plan="${esc(d.planId || '')}" data-version="${esc(String(d.version ?? ''))}"`, 'font-weight:600;')}</div>` : ''}<div style="font-size:10px; opacity:.6; margin-top:4px;">登録は確認画面の［動作テスト環境へ登録］を押したときだけ行います。運用環境には反映しません。</div>`, '#6a1b9a');
+    }
+    function jsRollbackReadyHtml(m) {
+      return card('kt-ai-js-rollback-ready', `<div><b>${esc(m.text)}</b></div><div style="font-size:11px; opacity:.8; margin-top:2px;">登録前のカスタマイズ設定（snapshot）へ戻します。登録後に他の変更があれば止まります。</div><div style="margin-top:6px; display:flex; gap:6px;">${btn('js-rollback', '変更前の状態に戻す', `data-execution="${esc(m.data?.executionId || '')}"`, 'border-color:#6a1b9a; font-weight:600;')}</div><div style="font-size:10px; opacity:.6; margin-top:4px;">押すと現在の設定を確認（書き込みなし）し、確認画面で「変更前の状態に戻す」を押したときだけ戻します。</div>`, '#6a1b9a');
+    }
+    const JS_ST_MARK = { VERIFIED: '✓', APPLIED: '…', UPLOADED: '…', RUNNING: '…', PENDING: '・', VERIFY_FAILED: '⚠', FAILED: '×', BLOCKED: '×', SKIPPED: '－' };
+    /** JS 登録カード（§31）: KTJsExecutor の状態（jsExecState）を写すだけ */
+    function jsExecutionCardHtml(m, jx) {
+      const ex = jx?.execution || null;
+      const stage = jx?.stage || 'idle';
+      const steps = ex?.steps || jx?.prepared?.changes || [];
+      const line = (st) => `<div style="font-size:12px;">${esc(JS_ST_MARK[st.status] || '・')} ${st.kind === 'REPLACE_FILE' ? '✎' : '＋'} ${esc(st.name)}（${st.target === 'mobile' ? 'モバイル' : 'PC'}）${st.kind === 'REPLACE_FILE' ? ' 更新' : ' 追加'}${st.status !== 'VERIFIED' && st.message ? ` <span style="opacity:.7; font-size:11px;">— ${esc(st.message)}</span>` : ''}</div>`;
+      if (stage === 'running' || !ex || ex.status === 'RUNNING') return card('kt-ai-js-execution-card', `<div><b>JavaScript を動作テスト環境へ登録しています。</b></div><div style="margin-top:4px; display:grid; gap:1px;">${steps.map(line).join('')}</div><div style="font-size:11px; opacity:.7; margin-top:4px;">運用環境には反映されません</div>`, '#6a1b9a');
+      const ok = ex.status === 'DONE';
+      const v = ex.verification || null;
+      const chk = (name) => v?.checks?.find(c => c.name === name)?.ok ?? null;
+      const stepChk = (name) => ex.steps.length ? ex.steps.every(st => st.verification?.checks?.find(c => c.name === name)?.ok) : null;
+      const mark = (b) => (b === true ? '✓' : b === false ? '×' : '—');
+      if (!ex.put?.ok) return card('kt-ai-js-execution-card', `<div><b>JavaScript を登録できませんでした。</b></div><div style="font-size:12px; margin-top:4px; color:#b00020;">${esc(ex.error?.message || '')} <span style="opacity:.7;">[${esc(ex.error?.code || 'ERROR')}]</span></div><div style="margin-top:4px; display:grid; gap:1px;">${steps.map(line).join('')}</div><div style="margin-top:4px; font-size:12px;"><b>${ex.previewUnchanged === true ? '動作テスト環境の設定は変更されていません。' : ex.previewUnchanged === false ? '動作テスト環境の設定が変わっている可能性があります。Customize タブで確認してください。' : '動作テスト環境の設定を確認できませんでした。'}</b></div><div style="margin-top:6px;">${btn('open-js-result', '詳細', '')}</div>`, '#b00020');
+      return card('kt-ai-js-execution-card', `<div><b>${ok ? 'JavaScript を動作テスト環境へ登録しました。' : 'JavaScript を登録しましたが、検証で一致しない点があります。'}</b></div>
+        <div style="margin-top:4px; display:grid; gap:1px;">${steps.map(line).join('')}</div>
+        <div style="margin-top:6px; display:grid; grid-template-columns:auto auto; gap:2px 12px; font-size:12px; width:max-content;"><span>Code Review</span><b>${mark(ex.steps.every(st => st.codeReview?.status !== 'BLOCKED'))}</b><span>Preview 設定</span><b>${mark(chk('unrelatedPreserved') && chk('scopePreserved') && chk('revisionAdvanced'))}</b><span>再解析</span><b>${mark(stepChk('reanalysisMatchesCodeReview'))}</b><span>Plan との一致</span><b>${mark(stepChk('planVsActual'))}</b></div>
+        <div style="margin-top:4px; font-size:12px;"><b>運用環境には反映されていません。</b></div>
+        <div style="margin-top:6px; display:flex; gap:6px; flex-wrap:wrap;">${btn('open-js-result', '登録内容を見る', '')}${!ex.rollback && stage === 'done' ? btn('js-rollback', '変更前の状態に戻す', `data-execution="${esc(ex.executionId || '')}"`, 'border-color:#6a1b9a;') : ''}</div>`, ok ? '#2e7d32' : '#b26a00');
+    }
+    function jsRollbackCardHtml(m, jx) {
+      const stage = jx?.stage || '';
+      const rb = jx?.rollback || jx?.execution?.rollback || null;
+      if (stage === 'rollback-preparing') return card('kt-ai-js-rollback-card', '<div><b>現在のカスタマイズ設定を確認しています...</b></div><div style="font-size:11px; opacity:.7;">書き込みはしません</div>', '#6a1b9a');
+      if (stage === 'rollback-confirm') return card('kt-ai-js-rollback-card', `<div><b>登録前の状態に戻す確認を表示しています。</b></div><div style="font-size:11px; opacity:.8;">コードペインの確認画面で「変更前の状態に戻す」を押すと戻します。</div><div style="margin-top:6px;">${btn('open-js-result', '確認画面を開く', '', 'border-color:#6a1b9a;')}</div>`, '#6a1b9a');
+      if (stage === 'rollback-blocked') return card('kt-ai-js-rollback-card', `<div><b>自動では元に戻せません。</b></div>${(rb?.blockers || []).map(b => `<div style="font-size:12px; color:#b00020;">× ${esc(b.message)} <span style="opacity:.7;">[${esc(b.code)}]</span></div>`).join('')}<div style="font-size:11px; opacity:.8; margin-top:2px;">設定は変更していません。Customize タブで現在の設定を確認してください。</div><div style="margin-top:6px;">${btn('open-js-result', '詳細', '')}</div>`, '#b00020');
+      if (stage === 'rolling-back') return card('kt-ai-js-rollback-card', '<div><b>登録前の状態に戻しています...</b></div>', '#6a1b9a');
+      if (!rb) return card('kt-ai-js-rollback-card', `<div><b>${esc(m.text)}</b></div>`, '#6a1b9a');
+      const ok = rb.status === 'ROLLED_BACK_VERIFIED';
+      return card('kt-ai-js-rollback-card', `<div><b>${esc(rb.message || (ok ? '登録前の状態へ戻しました。' : '元に戻せませんでした。'))}</b></div>${rb.verification ? `<div style="font-size:12px; margin-top:4px;">登録前 snapshot との比較：${rb.verification.restoredToSnapshot ? '✓ 一致' : '× 差分あり'}</div>` : ''}<div style="margin-top:4px; font-size:12px;"><b>運用環境には影響していません。</b></div><div style="margin-top:6px;">${btn('open-js-result', '詳細', '')}</div>`, ok ? '#2e7d32' : '#b00020');
+    }
+    function consultChoicesHtml(m) {
+      const d = m.data || {};
+      return card('kt-ai-choices-card', `<div>${esc(m.text)}</div><div style="margin-top:6px; display:flex; gap:6px; flex-wrap:wrap;">${btn('consult-resume', d.current?.name ? `現在の会話に戻る（${d.current.name}）` : '現在の会話に戻る', '')}${btn('consult-new', `${d.next?.name || 'この JS'} で新しい会話を始める`, '', 'font-weight:600;')}</div>${d.pendingExecution ? '<div style="font-size:11px; color:#b26a00; margin-top:4px;">動作テスト環境に反映済み（未復元）の変更があります。元に戻す操作は新しい会話でも「戻して」や詳細パネルから続けられます。</div>' : ''}<div style="font-size:10px; opacity:.6; margin-top:4px;">新しい会話を始めると、現在の会話・計画・生成コードはこの画面から消えます（kintone の設定は変わりません）。</div>`, '#6a1b9a');
+    }
     const CHECK_JA = { patch: 'Patch', 'patch-removal': '既存行の置換', syntax: 'Syntax', events: 'Event', handler: 'Handler', fields: 'Field references', 'plan-consistency': '計画との一致', apis: 'API', 'apis-network': '通信 API', security: 'Security', 'security-review': 'Security（確認）', globals: 'グローバル汚染', 'return-event': 'return event', async: 'async', 'async-then': 'Promise', 'duplicate-handler': '重複 handler', 'existing-conflict': '既存 JS との競合', platform: 'PC / モバイル', strategy: '方針', code: 'コード' };
     /** 生成コードのカード（§38）: 対象 / 追加内容 / Toolkit Code Review（✓ △ ×）/ [コードを見る][Diffを見る][コピー] */
     function codeCardHtml(m, v) {
@@ -12324,8 +13004,9 @@
         <div style="margin-top:2px; display:grid; gap:1px;">${checks}</div>
         ${(gen.assumptions || []).length ? `<div style="margin-top:4px; font-size:11px; opacity:.85;">前提: ${esc(gen.assumptions.join('／'))}</div>` : ''}
         ${(gen.warnings || []).length ? `<div style="font-size:11px; color:#b26a00;">${gen.warnings.map(w => `⚠ ${esc(w)}`).join('<br>')}</div>` : ''}
-        <div style="margin-top:6px; display:flex; gap:6px; flex-wrap:wrap;">${btn('open-code', 'コードを見る', `data-cid="${esc(cid)}" data-view="code"`, 'font-weight:600;')}${rv?.diff ? btn('open-code', 'Diffを見る', `data-cid="${esc(cid)}" data-view="diff"`) : ''}${btn('copy-code', 'コピー', `data-cid="${esc(cid)}"`)}${rv?.diff ? btn('copy-diff', 'Diffをコピー', `data-cid="${esc(cid)}"`) : ''}${btn('copy-cplan', 'Plan JSON', `data-cid="${esc(cid)}"`)}</div>
-        <div style="font-size:10px; opacity:.6; margin-top:4px;">kintone への登録は行いません（コピーして手動で登録するか、次のフェーズの登録機能を待ってください）。${st === 'BLOCKED' ? ' 採用できない問題があるため、計画を修正して再生成してください。' : ''}</div>`, st === 'OK' ? '#2e7d32' : st === 'BLOCKED' ? '#b00020' : '#6a1b9a');
+        ${g.existingSource?.from === 'url' || g.existingSource?.external ? `<div style="margin-top:6px; font-size:11px; color:#b26a00; border:1px solid #b26a00; border-radius:6px; padding:4px 6px;">統合先「${esc(gen.targetFile)}」は URL 指定の JavaScript です。外部サーバーのファイルは Toolkit から書き換えられません（EXTERNAL_JS_NOT_WRITABLE）。コード / Diff を手動で反映するか、新規の補助 JS として設計し直してください。</div>` : ''}
+        <div style="margin-top:6px; display:flex; gap:6px; flex-wrap:wrap;">${btn('open-code', 'コードを見る', `data-cid="${esc(cid)}" data-view="code"`, 'font-weight:600;')}${rv?.diff ? btn('open-code', 'Diffを見る', `data-cid="${esc(cid)}" data-view="diff"`) : ''}${btn('copy-code', 'コピー', `data-cid="${esc(cid)}"`)}${rv?.diff ? btn('copy-diff', 'Diffをコピー', `data-cid="${esc(cid)}"`) : ''}${btn('copy-cplan', 'Plan JSON', `data-cid="${esc(cid)}"`)}${st !== 'BLOCKED' && !(g.existingSource?.from === 'url' || g.existingSource?.external) ? btn('open-js-register', '動作テスト環境へ登録', `data-plan="${esc(v.planId)}" data-version="${esc(String(v.version))}"`, 'font-weight:600; border-color:#6a1b9a;') : ''}${g.existingSource?.from === 'url' || g.existingSource?.external ? btn('choice', '新規 JS として設計し直す', `data-intent="REVISE_PLAN" data-text="${esc(`${cid} は ${gen.targetFile} を変更せず、新規の JavaScript ファイルとして設計して`)}"`) : ''}</div>
+        <div style="font-size:10px; opacity:.6; margin-top:4px;">${st === 'BLOCKED' ? '採用できない問題があるため登録できません。計画を修正して再生成してください。' : '登録は［動作テスト環境へ登録］→ 確認画面 →［動作テスト環境へ登録］の順です。運用環境には反映しません。'}</div>`, st === 'OK' ? '#2e7d32' : st === 'BLOCKED' ? '#b00020' : '#6a1b9a');
     }
     function customizationChoicesHtml(m) {
       const d = m.data || {};
@@ -12371,6 +13052,9 @@
         case MSG.DIFF: { const v = planOf(); return wrap(v ? diffCardHtml(v) : `<div class="kt-ai-bubble">${esc(m.text)}</div>`); }
         case MSG.ANSWER: return wrap(answerCardHtml(m));
         case MSG.CODE: { const v = planOf(); return wrap(codeCardHtml(m, v)); }
+        case MSG.SPEC: { const v = planOf(); return wrap(v ? specCardHtml(v, { active: view.activePlan ? view.activePlan === v : true }) : `<div class="kt-ai-bubble">${esc(m.text)}</div>`); }
+        case MSG.JS_EXECUTION: return wrap(jsExecutionCardHtml(m, view.jsExecState));
+        case MSG.JS_ROLLBACK: return wrap(jsRollbackCardHtml(m, view.jsExecState));
         case MSG.EXECUTION: return wrap(executionCardHtml(m, view.execState));
         case MSG.ROLLBACK: return wrap(rollbackCardHtml(m, view.execState));
         case MSG.ERROR: return wrap(errorCardHtml(m));
@@ -12382,6 +13066,10 @@
           if (kind === 'choices') return wrap(choicesHtml(m));
           if (kind === 'customization-choices') return wrap(customizationChoicesHtml(m));
           if (kind === 'source-unavailable') return wrap(sourceUnavailableHtml(m));
+          if (kind === 'consultation-start') return wrap(consultationStartHtml(m));
+          if (kind === 'consult-choices') return wrap(consultChoicesHtml(m));
+          if (kind === 'js-preview-ready') return wrap(jsPreviewReadyHtml(m));
+          if (kind === 'js-rollback-ready') return wrap(jsRollbackReadyHtml(m));
           if (kind === 'candidates') return wrap(candidatesHtml(m));
           return wrap(`<div class="kt-ai-bubble">${esc(m.text)}</div>`);
         }
@@ -12393,10 +13081,54 @@
       const hidden = showAll ? 0 : Math.max(0, list.length - limit);
       const shown = list.slice(hidden);
       const head = hidden || dropped ? `<div style="text-align:center; margin-top:4px;">${hidden ? btn('show-all', `以前のメッセージ ${hidden} 件を表示`) : ''}${dropped ? `<div style="font-size:10px; opacity:.6;">古いメッセージ ${dropped} 件はこの会話から外しました（セッション上限）</div>` : ''}</div>` : '';
-      if (!shown.length) return `${head}<div style="opacity:.7; padding:12px 4px; line-height:1.7;">このアプリについて質問したり、実現したいことを伝えてください。<br><span style="font-size:11px;">例: 「このフィールドは何に使ってる？」「100万円以上なら部長承認を追加したい」「契約終了30日前に担当者へ通知したい」</span></div>`;
+      if (!shown.length) return `${head}<div style="opacity:.7; padding:12px 4px; line-height:1.7;">このアプリについて質問したり、実現したいことを伝えてください。<br><span style="font-size:11px;">例: 「このフィールドは何に使ってる？」「100万円以上なら部長承認を追加したい」「契約終了30日前に担当者へ通知したい」。既存の JavaScript の相談は Customize タブの［AIに相談］から。</span></div>`;
       return head + shown.map(m => messageHtml(m, view)).join('');
     }
 
+    /** JS 登録セクション（コードペイン）: 最終確認（§21）/ 進捗 / 結果（§23〜§27）/ 復元の確認・結果（§28〜§30）。Human Approval はここだけ */
+    function jsRegisterPaneHtml(jx, v = null) {
+      const stage = jx?.stage || 'idle';
+      const pr = jx?.prepared || null, ex = jx?.execution || null, rb = jx?.rollback || ex?.rollback || null;
+      const name = (c) => `${c.kind === 'REPLACE_FILE' ? '✎' : '＋'} <b>${esc(c.name)}</b>（${c.target === 'mobile' ? 'モバイル' : 'PC'}）${c.kind === 'REPLACE_FILE' ? '　既存ファイルを更新' : `　新規追加（${c.position != null ? `${c.position + 1} 番目・末尾` : '末尾'}）`}`;
+      const blockers = (list) => (list || []).map(b => `<div style="font-size:12px; color:#b00020;">× ${esc(b.message)} <span style="opacity:.7;">[${esc(b.code)}]</span></div>`).join('');
+      const warns = (list) => (list || []).map(w => `<div style="font-size:11px; color:#b26a00;">△ ${esc(w.message)}</div>`).join('');
+      const head = (title, color = '#6a1b9a') => `<div style="border:2px solid ${color}; border-radius:8px; padding:8px;"><b>${esc(title)}</b>`;
+      if (stage === 'idle') return '';
+      if (stage === 'preparing') return `${head('動作テスト環境のカスタマイズ設定を確認しています...')}<div style="font-size:11px; opacity:.7; margin-top:4px;">書き込みはしません（現在の設定・統合先の本文・権限・上限を確認）</div></div>`;
+      if (stage === 'blocked') return `${head('登録できません', '#b00020')}<div style="margin-top:4px;">${blockers(pr?.blockers)}${(pr?.changes || []).filter(c => c.status === 'BLOCKED').map(c => `<div style="font-size:11px; margin-left:8px;">${esc(c.name)}: ${esc(c.message)}</div>`).join('')}</div><div style="font-size:11px; opacity:.8; margin-top:4px;">動作テスト環境の設定は変更していません。</div><div style="margin-top:6px;"><button type="button" id="kt-ai-jsreg-cancel" class="btn" style="height:26px; font-size:11px;">閉じる</button></div></div>`;
+      if (stage === 'confirm') {
+        const by = pr.summary.byTarget;
+        return `${head('JavaScript を動作テスト環境へ登録します。')}
+          <div style="margin-top:6px; display:grid; gap:4px; font-size:12px;">${pr.changes.filter(c => c.status === 'PENDING').map(c => `<div>${name(c)}${c.kind === 'REPLACE_FILE' ? `<div style="font-size:11px; opacity:.75; margin-left:16px;">現在の本文の指紋 ${esc(c.currentHash || '—')} ＝ 生成時の指紋（一致を確認済み）。位置 ${c.position + 1} 番目はそのまま</div>` : ''}</div>`).join('')}</div>
+          <div style="margin-top:6px; font-size:12px;">PC：${by.desktop.replace ? `${by.desktop.replace}件変更` : ''}${by.desktop.replace && by.desktop.add ? '・' : ''}${by.desktop.add ? `${by.desktop.add}件追加` : ''}${!by.desktop.replace && !by.desktop.add ? '変更なし' : ''}　Mobile：${by.mobile.replace ? `${by.mobile.replace}件変更` : ''}${by.mobile.replace && by.mobile.add ? '・' : ''}${by.mobile.add ? `${by.mobile.add}件追加` : ''}${!by.mobile.replace && !by.mobile.add ? '変更なし' : ''}</div>
+          <div style="font-size:12px; margin-top:2px;">既存の CSS（${pr.summary.preservedCss} 件）・その他の JS（${pr.summary.preservedJs} 件）・適用範囲（${esc(pr.snapshot.scope)}）は変更しません。</div>
+          ${warns(pr.warnings)}
+          <div style="font-size:12px; margin-top:4px;"><b>運用環境には反映されません。</b><span style="opacity:.7;">（登録先は動作テスト環境のカスタマイズ設定だけ。revision ${esc(pr.snapshot.revision || '—')} を指定して登録し、直前にもう一度確認します）</span></div>
+          <div style="margin-top:8px; display:flex; gap:6px;"><button type="button" id="kt-ai-jsreg-cancel" class="btn" style="height:28px;">キャンセル</button><button type="button" id="kt-ai-jsreg-go" class="btn" style="height:28px; font-weight:600; border-color:#6a1b9a;">動作テスト環境へ登録</button></div></div>`;
+      }
+      if (stage === 'running') return `${head('JavaScript を動作テスト環境へ登録しています...')}<div style="margin-top:4px; display:grid; gap:1px; font-size:12px;">${(ex?.steps || []).map(c => `<div>${esc(JS_ST_MARK[c.status] || '・')} ${esc(c.name)}（${c.target === 'mobile' ? 'モバイル' : 'PC'}）${esc(c.status)}</div>`).join('')}</div></div>`;
+      const resultHtml = () => {
+        if (!ex) return '';
+        const v2 = ex.verification;
+        const checks = (v2?.checks || []).map(c => `<div style="font-size:11px; color:${c.ok ? '#2e7d32' : '#b00020'};">${c.ok ? '✓' : '×'} ${esc(c.name)}${c.ok ? '' : `: ${esc(typeof c.actual === 'string' ? c.actual : JSON.stringify(c.actual))}`}</div>`).join('');
+        const stepsHtml = (ex.steps || []).map(c => `<div style="margin-top:4px; font-size:12px;">${esc(JS_ST_MARK[c.status] || '・')} ${name(c)} <span style="opacity:.7; font-size:11px;">${esc(c.status)}${c.message ? ` — ${esc(c.message)}` : ''}</span>${(c.verification?.checks || []).map(k => `<div style="font-size:11px; margin-left:16px; color:${k.ok ? '#2e7d32' : '#b00020'};">${k.ok ? '✓' : '×'} ${esc(k.name)}${k.ok ? '' : `: ${esc(typeof k.actual === 'string' ? k.actual : JSON.stringify(k.actual))}`}</div>`).join('')}${c.reanalysis ? `<div style="font-size:11px; margin-left:16px; opacity:.8;">再解析: イベント ${esc(c.reanalysis.events.join(', ') || '（なし）')}／フィールド ${esc(Object.entries(c.reanalysis.fieldAccess || {}).map(([k, a]) => `${k}（${Object.keys(a).join('/')}）`).join('、') || '（なし）')}</div>` : ''}</div>`).join('');
+        return `<div style="margin-top:6px;">${stepsHtml}</div>${ex.put ? `<div style="font-size:11px; margin-top:4px; opacity:.85;">PUT /preview/app/customize: ${ex.put.ok ? `✓（revision ${esc(ex.snapshot?.revision || '—')} → ${esc(ex.afterRevision || ex.put.revision || '—')}）` : `×（${esc(ex.put.error?.code || '')}）`}　アップロード: ${(ex.uploads || []).filter(u => u.ok).length} / ${(ex.uploads || []).length}</div>` : ''}${checks ? `<div style="margin-top:4px;">${checks}</div>` : ''}${ex.previewUnchanged === true ? '<div style="font-size:12px; margin-top:4px;"><b>動作テスト環境の設定は変更されていません。</b></div>' : ''}`;
+      };
+      if (stage === 'done') {
+        const ok = ex?.status === 'DONE';
+        return `${head(ok ? 'JavaScript を動作テスト環境へ登録しました。' : ex?.put?.ok ? '登録しましたが、検証で一致しない点があります。' : 'JavaScript を登録できませんでした。', ok ? '#2e7d32' : '#b00020')}${ex?.error ? `<div style="font-size:12px; color:#b00020; margin-top:4px;">${esc(ex.error.message)} <span style="opacity:.7;">[${esc(ex.error.code)}]</span></div>` : ''}${resultHtml()}<div style="margin-top:4px; font-size:12px;"><b>運用環境には反映されていません。</b></div>
+          <div style="margin-top:8px; display:flex; gap:6px; flex-wrap:wrap;"><button type="button" id="kt-ai-jsreg-audit-copy" class="btn" style="height:26px; font-size:11px;">Customization Audit JSON をコピー</button>${ex?.put?.ok && !ex.rollback ? '<button type="button" id="kt-ai-jsreg-rollback-start" class="btn" style="height:26px; font-size:11px; border-color:#6a1b9a;">変更前の状態に戻す</button>' : ''}<button type="button" id="kt-ai-jsreg-close" class="btn" style="height:26px; font-size:11px;">閉じる</button></div></div>`;
+      }
+      if (stage === 'rollback-preparing') return `${head('現在のカスタマイズ設定を確認しています...')}<div style="font-size:11px; opacity:.7; margin-top:4px;">書き込みはしません</div></div>`;
+      if (stage === 'rollback-blocked') return `${head('自動では元に戻せません', '#b00020')}<div style="margin-top:4px;">${blockers(rb?.blockers)}${(rb?.stale?.diffs || []).slice(0, 8).map(d => `<div style="font-size:11px; margin-left:8px;">${esc(d.where)}: ${esc(String(d.before ?? '（なし）'))} → ${esc(String(d.after ?? '（なし）'))}</div>`).join('')}</div><div style="font-size:11px; opacity:.8; margin-top:4px;">設定は変更していません。</div><div style="margin-top:6px; display:flex; gap:6px;"><button type="button" id="kt-ai-jsreg-rollback-cancel" class="btn" style="height:26px; font-size:11px;">閉じる</button></div></div>`;
+      if (stage === 'rollback-confirm') return `${head('登録前の状態に戻します。')}<div style="margin-top:6px; display:grid; gap:2px; font-size:12px;">${(rb?.restores || []).map(r => `<div>${r.kind === 'REPLACE_FILE' ? `✎ <b>${esc(r.name)}</b>（${r.target === 'mobile' ? 'モバイル' : 'PC'}）を登録前の本文に戻す（指紋 ${esc(r.restoreHash || '—')}）` : `－ <b>${esc(r.name)}</b>（${r.target === 'mobile' ? 'モバイル' : 'PC'}）を外す`}</div>`).join('')}</div>${warns(rb?.warnings)}<div style="font-size:12px; margin-top:4px;">登録前の snapshot（revision ${esc(rb?.snapshotRevision || '—')}）のカスタマイズ設定全体を PUT します。その他の JS / CSS / 適用範囲は snapshot のとおりです。<b>運用環境には反映されません。</b></div><div style="margin-top:8px; display:flex; gap:6px;"><button type="button" id="kt-ai-jsreg-rollback-cancel" class="btn" style="height:28px;">キャンセル</button><button type="button" id="kt-ai-jsreg-rollback-go" class="btn" style="height:28px; font-weight:600; border-color:#6a1b9a;">変更前の状態に戻す</button></div></div>`;
+      if (stage === 'rolling-back') return `${head('登録前の状態に戻しています...')}</div>`;
+      if (stage === 'rolled-back') {
+        const ok = rb?.status === 'ROLLED_BACK_VERIFIED';
+        return `${head(rb?.message || (ok ? '登録前の状態へ戻しました。' : '元に戻せませんでした。'), ok ? '#2e7d32' : '#b00020')}${(rb?.verification?.checks || []).map(c => `<div style="font-size:11px; color:${c.ok ? '#2e7d32' : '#b00020'};">${c.ok ? '✓' : '×'} ${esc(c.name)}</div>`).join('')}${rb?.error ? `<div style="font-size:12px; color:#b00020;">${esc(rb.error.message)}</div>` : ''}<div style="margin-top:4px; font-size:12px;"><b>運用環境には影響していません。</b></div><div style="margin-top:8px; display:flex; gap:6px;"><button type="button" id="kt-ai-jsreg-audit-copy" class="btn" style="height:26px; font-size:11px;">Customization Audit JSON をコピー</button><button type="button" id="kt-ai-jsreg-close" class="btn" style="height:26px; font-size:11px;">閉じる</button></div></div>`;
+      }
+      return '';
+    }
     /** コードペイン（drawer）: Code Review の一覧 ＋ コード / Diff */
     function codePaneHtml(entry, { view = 'code' } = {}) {
       if (!entry) return { head: '生成した JavaScript はまだありません。', review: '', code: '', diff: '' };
@@ -12410,7 +13142,9 @@
         diff: rv?.diff ? (rv.diff.lines || []).map(l => `${l.type}${l.text}`).join('\n') : '',
       };
     }
-    return { INTENT_JA, STATUS_JA, STRATEGY_JA, CHECK_JA, workspaceHtml, headerHtml, freePanelHtml, chatHtml, messageHtml, planCardHtml, reviewCardHtml, diffCardHtml, assetCardsHtml, customizationCardHtml, codeCardHtml, codePaneHtml, previewReadyHtml, rollbackReadyHtml, executionCardHtml, rollbackCardHtml, answerCardHtml, errorCardHtml, readinessCounts };
+    return { INTENT_JA, STATUS_JA, STRATEGY_JA, CHECK_JA, SPEC_STATUS_JA, workspaceHtml, headerHtml, freePanelHtml, chatHtml, messageHtml, planCardHtml, reviewCardHtml, diffCardHtml, assetCardsHtml, customizationCardHtml, codeCardHtml, codePaneHtml, previewReadyHtml, rollbackReadyHtml, executionCardHtml, rollbackCardHtml, answerCardHtml, errorCardHtml, readinessCounts,
+      // Phase 17
+      consultationStartHtml, specCardHtml, jsPreviewReadyHtml, jsRollbackReadyHtml, jsExecutionCardHtml, jsRollbackCardHtml, consultChoicesHtml, jsRegisterPaneHtml };
   })();
 
   /**
@@ -12544,8 +13278,10 @@
         catch (e) { noteAuthError(e); throw e; }
       },
       /** PLAN / REVISE_PLAN: goal（＋修正）→ KTContext.buildPlan → change-planner → KTPlanReview（Toolkit 検証） */
-      async plan({ goal, revision = null, signal = null }) {
-        const gen = KTContextUi.generatePlan({ goal, inputs: inputsNow(), revision });
+      async plan({ goal, revision = null, signal = null, subject = null }) {
+        // Phase 17: 相談中の JS（subject）を Planner Context に付ける（統合先の第一候補。本文は送らない）
+        const sub = subject ? KTContext.compactSubject({ sourceId: subject.sourceId, name: subject.name, target: subject.platform, customizationType: subject.customizationType, sourceAvailable: !!subject.sourceAvailable, events: subject.events || [], fields: Object.entries(subject.fieldAccess || {}).map(([code, acc]) => ({ code, access: acc.CONTROL || acc.SHOW_HIDE ? 'CONTROL' : acc.WRITE ? 'WRITE' : 'READ' })) }) : null;
+        const gen = KTContextUi.generatePlan({ goal, inputs: inputsNow(), revision, subject: sub });
         if (!gen.ok) return gen;
         const client = await ensureReady({ planner: true });
         const requestId = KTAiClient.newRequestId();
@@ -12589,7 +13325,9 @@
           const t = (c.existingFiles || [])[0] || rv?.codeGeneration?.existingFile || null;
           if (!t) return { ok: false, reason: 'JS_TARGET_FILE_MISSING', message: '統合先の既存 JS が指定されていません。計画を修正してください。' };
           const target = t.target || 'desktop';
-          existingSource = await loadJsSource(t.name, target, inputs);
+          const seed = conv?.state?.consultation?.seed || null;
+          if (seed && seed.name === t.name && seed.platform === target && seed.source?.available && typeof seed.source.text === 'string') existingSource = { name: t.name, target, text: seed.source.text, from: seed.customizationType === 'URL' ? 'url' : 'seed', ...(seed.customizationType === 'URL' ? { external: !!seed.external, url: seed.url ?? null } : {}) };
+          else existingSource = await loadJsSource(t.name, target, inputs);
           if (!existingSource) return { ok: false, reason: 'JS_SOURCE_UNAVAILABLE', file: { name: t.name, target } };
         }
         const ctx = KTContext.buildGenerator({ customization: c, plan, planId: v.planId, version: v.version, data: inputs.data || null, deps: inputs.deps || null, scan: inputs.scan || null, existingSource });
@@ -12636,7 +13374,7 @@
     const planIndex = () => new Map(conv.planHistory().map(v => [`${v.planId}:${v.version}`, v]));
     function renderChat() {
       const st = conv.state;
-      $chat.innerHTML = KTAiChatUi.chatHtml(st.messages, { plans: planIndex(), activePlan: st.activePlan, execState }, { showAll, dropped: st.dropped });
+      $chat.innerHTML = KTAiChatUi.chatHtml(st.messages, { plans: planIndex(), activePlan: st.activePlan, execState, jsExecState: jsExec }, { showAll, dropped: st.dropped });
       renderMermaid($chat);
       try { if (typeof $chat.scrollHeight === 'number') $chat.scrollTop = $chat.scrollHeight; } catch (e) { }
       renderComposer();
@@ -12664,7 +13402,7 @@
       try { const inputs = inputsNow(); if (inputs.data) { overview = KTContext.buildAppOverview({ data: inputs.data, deps: inputs.deps || null, scan: inputs.scan || null, incoming: inputs.incoming || null, limits: { ...KTContext.DEFAULT_LIMITS, maxFields: 0, maxViewNames: 0 }, trunc: () => { } }); app = { id: overview.id, name: overview.name }; } else app = { id: d.appId ?? executor?.appId ?? '' }; } catch (e) { overview = null; }
       let jsFiles = [];
       try { const inputs = inputsNow(); jsFiles = KTScan.summarizeFiles(inputs.scan || null, inputs.data || null); } catch (e) { jsFiles = []; }
-      $header.innerHTML = KTAiChatUi.headerHtml({ app, overview, connection: connectionInfo(), drawerOpen, jsFiles });
+      $header.innerHTML = KTAiChatUi.headerHtml({ app, overview, connection: connectionInfo(), drawerOpen, jsFiles, subject: conv ? conv.subject() : null });
     }
     /** composer（送信欄）: 接続済みで利用できるときだけ送れる。無料ユーザーは無料パネルを出す（§22 / §23） */
     function renderComposer() {
@@ -12698,7 +13436,7 @@
       const t = String(text ?? '').trim();
       if (!t || conv.isBusy()) return null;
       const cls = intent ? { intent } : conv.classify(t);
-      const needsAi = [KTAiConversation.INTENT.ASK, KTAiConversation.INTENT.PLAN, KTAiConversation.INTENT.REVISE_PLAN, KTAiConversation.INTENT.EXPLAIN_PLAN, KTAiConversation.INTENT.EXPLAIN_REVIEW, KTAiConversation.INTENT.EXPLAIN_CUSTOMIZATION, KTAiConversation.INTENT.GENERATE_CODE].includes(cls.intent);
+      const needsAi = [KTAiConversation.INTENT.ASK, KTAiConversation.INTENT.PLAN, KTAiConversation.INTENT.DISCUSS_JS, KTAiConversation.INTENT.REVISE_PLAN, KTAiConversation.INTENT.EXPLAIN_PLAN, KTAiConversation.INTENT.EXPLAIN_REVIEW, KTAiConversation.INTENT.EXPLAIN_CUSTOMIZATION, KTAiConversation.INTENT.GENERATE_CODE].includes(cls.intent);
       if (needsAi && paidEnabled && !settings.hasConsent()) { pendingChat = { text: t, intent }; $consent.style.display = ''; return { pendingConsent: true, intent: cls.intent }; }
       currentAbort = typeof AbortController !== 'undefined' ? new AbortController() : null;
       $input.disabled = true; renderComposer();
@@ -12738,6 +13476,128 @@
       if (act === 'open-code') { showCode(dataOf(t, 'cid'), { view: dataOf(t, 'view') || 'code' }); return; }
       if (act === 'copy-code' || act === 'copy-diff' || act === 'copy-cplan') { const ok = await copyGenerated(dataOf(t, 'cid'), act === 'copy-code' ? 'code' : act === 'copy-diff' ? 'diff' : 'cplan'); if (t && t.textContent != null) flashBtnText(t, ok ? 'Copied!' : 'Failed'); return; }
       if (act === 'rescan') { const cid = dataOf(t, 'cid'); await rescanAndGenerate(cid); return; }
+      // Phase 17: 仕様の確定（Human Approval の SoT）・修正・JS 登録の確認・復元・相談の選択
+      if (act === 'confirm-spec') { await confirmSpec(dataOf(t, 'plan'), Number(dataOf(t, 'version'))); return; }
+      if (act === 'revise-spec') { $input.placeholder = '仕様の修正内容を入力（例: モバイルでも同じようにしたい / 条件は承認済みではなく完了にして）'; try { $input.focus?.(); } catch (e) { } return; }
+      if (act === 'open-js-register') { const v = planIndex().get(`${dataOf(t, 'plan')}:${dataOf(t, 'version')}`) || conv.activePlan(); await startJsRegister(v); return; }
+      if (act === 'open-js-result') { jsExec.paneClosed = false; renderJsReg(); openDrawer('code', { scrollTo: '#kt-ai-jsreg' }); return; }
+      if (act === 'js-rollback') { openDrawer('code', { scrollTo: '#kt-ai-jsreg' }); await startJsRollback(); return; }
+      if (act === 'consult-resume') { const m = conv.state.messages.find(x => x.data?.kind === 'consult-choices'); if (m) conv.state.messages.splice(conv.state.messages.indexOf(m), 1); pendingSeed = null; renderChat(); return; }
+      if (act === 'consult-new') { const seed = pendingSeed; pendingSeed = null; if (seed) { conv.startConsultation(seed, { force: true }); renderHeader(); renderChat(); } return; }
+    });
+    // ==================================================================
+    // Phase 17: JS 相談（Customize タブから）・実装仕様の確定・JavaScript の動作テスト環境への登録 / 復元（KTJsExecutor）
+    //   登録・復元は drawer（コードペイン）の確認画面の操作だけで始まる。チャットの文章・AI の出力では始まらない
+    // ==================================================================
+    let pendingSeed = null;
+    const jsExec = { stage: 'idle', prepared: null, execution: null, rollback: null, error: null, planId: null, version: null, paneClosed: false };
+    const resetJsExec = () => { jsExec.stage = 'idle'; jsExec.prepared = null; jsExec.execution = null; jsExec.rollback = null; jsExec.error = null; jsExec.planId = null; jsExec.version = null; jsExec.paneClosed = false; };
+    function renderJsReg() {
+      const el = $('kt-ai-jsreg');
+      if (el) el.innerHTML = jsExec.paneClosed ? '' : KTAiChatUi.jsRegisterPaneHtml(jsExec, jsExec.planId != null ? planIndex().get(`${jsExec.planId}:${jsExec.version}`) : null);
+      if (conv) { conv.noteJsExecution(jsExec); renderChat(); }
+    }
+    /** Customize タブ「AIに相談」: seed を受けて会話を始める（同じ JS なら再開。別の会話があれば選択を出す） */
+    function consult(seed) {
+      if (!seed || !seed.sourceId) return { ok: false, reason: 'NO_SEED' };
+      const r = conv.startConsultation(seed);
+      if (r.needsConfirm) {
+        pendingSeed = seed;
+        conv.pushMessage(KTAiConversation.MSG.ASSISTANT_TEXT, KTAiConversation.ROLE.TOOLKIT, r.current ? `現在は「${r.current.name}」の相談中です。${seed.name} について新しい会話を始めますか？` : `現在の会話を続けますか、${seed.name} について新しい会話を始めますか？`, { kind: 'consult-choices', current: r.current, next: { sourceId: seed.sourceId, name: seed.name }, hasPlan: r.hasPlan, pendingExecution: r.pendingExecution });
+      }
+      renderHeader(); renderChat();
+      try { $input.focus?.(); } catch (e) { }
+      return r;
+    }
+    /** 実装仕様の確定（［この仕様で確定］）。動作テスト環境のカスタマイズ設定の revision を記録し、登録時の stale 判定に使う */
+    async function confirmSpec(planId, version) {
+      const v = planIndex().get(`${planId}:${version}`) || conv.activePlan();
+      if (!v || !v.spec) return { ok: false, reason: 'NO_SPEC' };
+      let customizeRevision = null;
+      if (executor && typeof executor.api.getPreviewCustomize === 'function') { try { const c = await executor.api.getPreviewCustomize(executor.appId); customizeRevision = c?.revision != null ? String(c.revision) : null; } catch (e) { customizeRevision = null; } }
+      const r = conv.confirmSpec({ planId: v.planId, version: v.version, customizeRevision });
+      renderChat();
+      return r;
+    }
+    /** 登録の準備（読み取りだけ）: 版の生成コード → 変更 → KTJsExecutor.prepare → 確認画面 */
+    async function startJsRegister(v) {
+      if (!v) return null;
+      if (['preparing', 'running', 'rollback-preparing', 'rolling-back'].includes(jsExec.stage)) return null;
+      if (jsExec.execution && jsExec.execution.put?.ok && !jsExec.execution.rollback && jsExec.planId === v.planId && jsExec.version === v.version) { jsExec.paneClosed = false; renderJsReg(); openDrawer('code', { scrollTo: '#kt-ai-jsreg' }); return jsExec.prepared; }
+      if (!executor || typeof executor.api.getPreviewCustomize !== 'function') { conv.notice('この環境では動作テスト環境への登録ができません（kintone API がありません）。', { kind: 'js-register-unavailable' }); return null; }
+      resetJsExec();
+      jsExec.planId = v.planId; jsExec.version = v.version; jsExec.stage = 'preparing'; renderJsReg(); openDrawer('code', { scrollTo: '#kt-ai-jsreg' });
+      const inputs = inputsNow();
+      const files = KTScan.summarizeFiles(inputs.scan || null, inputs.data || null);
+      const changes = [], blocked = [];
+      for (const [cid, g] of Object.entries(v.generated || {})) {
+        const c = (v.plan?.customizations || []).find(x => x.customizationId === cid) || null;
+        const target = g.existingSource?.target || (Array.isArray(c?.platform) && c.platform.length === 1 ? c.platform[0] : 'desktop');
+        const r = KTJsExecutor.changeFromGenerated({ customization: c, generated: g.generated, review: g.review, existingSource: g.existingSource ? { name: g.existingSource.name, target: g.existingSource.target, text: g.existingSource.text } : null, target, existingNames: files.filter(f => f.target === target).map(f => f.name) });
+        if (r.ok) { if (g.existingSource?.from === 'url' || g.existingSource?.external) blocked.push({ code: 'EXTERNAL_JS_NOT_WRITABLE', message: `${cid}: 「${g.generated.targetFile}」は URL 指定の JavaScript です。外部サーバーのファイルは Toolkit から書き換えられません（コード / Diff を手動で反映するか、新規の補助 JS として設計し直してください）` }); else changes.push(r.change); }
+        else blocked.push({ code: r.reason, message: `${cid}: ${r.message}` });
+      }
+      if (!changes.length) { jsExec.prepared = { executionId: null, status: 'BLOCKED', blockers: blocked.length ? blocked : [{ code: 'NOTHING_TO_REGISTER', message: '登録できる JavaScript がありません（仕様を確定してコードを生成してください）' }], warnings: [], changes: [], summary: { add: 0, replace: 0, byTarget: { desktop: { add: 0, replace: 0 }, mobile: { add: 0, replace: 0 } }, preservedJs: 0, preservedCss: 0 }, snapshot: null }; jsExec.stage = 'blocked'; renderJsReg(); return jsExec.prepared; }
+      try {
+        const prepared = await KTJsExecutor.prepare({ appId: executor.appId, changes, expectedRevision: v.spec?.customizeRevision ?? null, spec: conv.specSummary(v), provenance: { planId: v.planId, planVersion: v.version, specVersion: v.spec?.version ?? null, subject: conv.subject() ? { sourceId: conv.subject().sourceId, name: conv.subject().name } : null } }, { api: executor.api });
+        if (blocked.length) prepared.warnings.push(...blocked.map(b => ({ code: b.code, message: `登録対象外: ${b.message}` })));
+        jsExec.prepared = prepared;
+        jsExec.stage = prepared.status === 'PREPARED' ? 'confirm' : 'blocked';
+      } catch (e) { jsExec.stage = 'blocked'; jsExec.error = e?.message || String(e); jsExec.prepared = { status: 'BLOCKED', blockers: [{ code: 'PREPARE_FAILED', message: jsExec.error }], warnings: [], changes, summary: { add: 0, replace: 0, byTarget: { desktop: { add: 0, replace: 0 }, mobile: { add: 0, replace: 0 } }, preservedJs: 0, preservedCss: 0 }, snapshot: null }; }
+      renderJsReg();
+      return jsExec.prepared;
+    }
+    const cancelJsRegister = () => { if (jsExec.stage === 'confirm' || jsExec.stage === 'blocked') { resetJsExec(); renderJsReg(); } };
+    /** 最終確認の後: upload → 完全な payload で PUT → 再取得して検証。運用環境へは反映しない */
+    async function confirmJsRegister() {
+      if (!executor || jsExec.stage !== 'confirm' || !jsExec.prepared) return null;
+      jsExec.stage = 'running'; renderJsReg();
+      const inputs = inputsNow();
+      const fieldRows = KTDeps.normalizeFields(inputs.data?.fields || {}).map(f => ({ code: f.code, label: f.label, type: f.rawType }));
+      try {
+        jsExec.execution = await KTJsExecutor.executePreview(jsExec.prepared, { api: executor.api, fieldRows, onProgress: (ex) => { jsExec.execution = ex; renderJsReg(); } });
+      } catch (e) { jsExec.error = e?.message || String(e); jsExec.execution = jsExec.execution || { executionId: jsExec.prepared.executionId, status: 'FAILED', steps: jsExec.prepared.changes, put: null, error: { code: 'EXECUTE_FAILED', message: jsExec.error }, previewUnchanged: null }; }
+      jsExec.stage = 'done';
+      const v = planIndex().get(`${jsExec.planId}:${jsExec.version}`); if (v && jsExec.execution?.put?.ok) v.jsExecutionId = jsExec.execution.executionId;
+      renderJsReg();
+      if (jsExec.execution?.put?.ok && typeof d.rescanJs === 'function') { try { await d.rescanJs(); fillTargets(); renderHeader(); } catch (e) { } }
+      return jsExec.execution;
+    }
+    async function startJsRollback() {
+      if (!executor || !jsExec.execution || !['done', 'rollback-blocked'].includes(jsExec.stage)) return null;
+      jsExec.stage = 'rollback-preparing'; jsExec.rollback = null; jsExec.paneClosed = false; renderJsReg();
+      try { const rb = await KTJsExecutor.prepareRollback(jsExec.execution, { api: executor.api }); jsExec.rollback = rb; jsExec.stage = rb.status === 'PREPARED' ? 'rollback-confirm' : 'rollback-blocked'; }
+      catch (e) { jsExec.stage = 'rollback-blocked'; jsExec.rollback = { status: 'BLOCKED', blockers: [{ code: 'PREPARE_FAILED', message: e?.message || String(e) }], restores: [] }; }
+      renderJsReg();
+      return jsExec.rollback;
+    }
+    const cancelJsRollback = () => { if (jsExec.stage === 'rollback-confirm' || jsExec.stage === 'rollback-blocked') { jsExec.rollback = null; jsExec.stage = 'done'; renderJsReg(); } };
+    async function confirmJsRollback() {
+      if (!executor || jsExec.stage !== 'rollback-confirm' || !jsExec.rollback || !jsExec.execution) return null;
+      jsExec.stage = 'rolling-back'; renderJsReg();
+      try { await KTJsExecutor.executeRollback(jsExec.rollback, { api: executor.api, execution: jsExec.execution, onProgress: () => renderJsReg() }); }
+      catch (e) { jsExec.error = e?.message || String(e); }
+      jsExec.stage = 'rolled-back'; renderJsReg();
+      if (typeof d.rescanJs === 'function') { try { await d.rescanJs(); fillTargets(); renderHeader(); } catch (e) { } }
+      return jsExec.rollback;
+    }
+    /** Customization Audit（§37）。相談対象・仕様の版・承認した仕様・生成の出所・Code Review・登録前後・検証・復元。token / cookie / 本文は含めない */
+    const jsAudit = () => {
+      const v = jsExec.planId != null ? planIndex().get(`${jsExec.planId}:${jsExec.version}`) : conv.activePlan();
+      const specs = v ? conv.planHistory().filter(x => x.planId === v.planId && x.spec).map(x => x.spec) : [];
+      const generated = v ? Object.entries(v.generated || {}).map(([customizationId, g]) => ({ customizationId, generated: g.generated, review: g.review, existingSource: g.existingSource })) : [];
+      return KTJsExecutor.buildAudit({ subject: conv.subject() ? { ...conv.subject(), source: { hash: conv.subject().sourceHash } } : null, specs, approvedSpec: v?.spec?.status === 'CONFIRMED' ? v.spec : null, generated, prepared: jsExec.prepared, execution: jsExec.execution, rollback: jsExec.rollback });
+    };
+    $pane('code').addEventListener('click', async (ev) => {
+      const t = ev?.target;
+      const id = t?.id || (typeof t?.getAttribute === 'function' ? t.getAttribute('id') : null);
+      if (id === 'kt-ai-jsreg-cancel') { cancelJsRegister(); return; }
+      if (id === 'kt-ai-jsreg-go') { await confirmJsRegister(); return; }
+      if (id === 'kt-ai-jsreg-close') { jsExec.paneClosed = true; renderJsReg(); return; }
+      if (id === 'kt-ai-jsreg-rollback-start') { await startJsRollback(); return; }
+      if (id === 'kt-ai-jsreg-rollback-cancel') { cancelJsRollback(); return; }
+      if (id === 'kt-ai-jsreg-rollback-go') { await confirmJsRollback(); return; }
+      if (id === 'kt-ai-jsreg-audit-copy') { const a = jsAudit(); const ok = a ? await d.copyText(JSON.stringify(a, null, 2)) : false; if (t) flashBtnText(t, ok ? 'Copied!' : 'Failed'); }
     });
     // ---- 生成コード（Phase 16）: 会話の版ごとに v.generated[cid] = { generated, review, ctx, existingSource }。コードペインに写す ----
     let codeShown = null;    // { planId, version, cid, view }
@@ -13329,6 +14189,8 @@
       // JavaScript Generator（Phase 16）: 生成は会話の GENERATE_CODE を通る。登録はしない
       generate: (cid = null) => sendChat(cid ? `${cid} のコードを作って` : 'コードを作って', { intent: KTAiConversation.INTENT.GENERATE_CODE }),
       generated: (cid, v = null) => (generatedEntry(cid, v)?.entry || null), showCode, copyGenerated, codeShown: () => codeShown, loadJsSource,
+      // JS 相談 / 実装仕様 / JS 登録（Phase 17）
+      consult, confirmSpec, startJsRegister, confirmJsRegister, cancelJsRegister, startJsRollback, confirmJsRollback, cancelJsRollback, jsExecState: () => jsExec, jsAudit,
       openDrawer, closeDrawer, drawerState: () => ({ open: drawerOpen, pane: activePane }),
       renderHeader, isConnected,
       cancel: () => { try { currentAbort?.abort(); } catch (e) { } },
@@ -18448,7 +19310,7 @@
   // [Feature] Customize
   // kintone JS/CSS カスタマイズ編集機能（Toolkit版 JSEditタブ）
   // ----------------------------
-  async function renderCustomize(root, DATA, appId) {
+  async function renderCustomize(root, DATA, appId, { consult = null, getInputs = null } = {}) {
     const view = root.querySelector('#view-customize');
     if (!view) return;
 
@@ -18511,6 +19373,7 @@
             <button id="kt-customize-refresh" class="btn"          style="flex:1; height:32px;">↻ 一覧更新</button>
           </div>
 
+          <div id="kt-customize-env" class="kt-flex-fixed" style="font-size:11px; opacity:.85; padding:0 4px; display:none;"></div>
           <div id="kt-customize-list" class="kt-scroll-area"
             style="
               border:1px solid ${BD};
@@ -18536,6 +19399,7 @@
     const $sourceSel = $('#kt-customize-source');
     const $overview = $('#kt-customize-overview');
     const $editorHost = $('#kt-customize-editor');
+    const $env = $('#kt-customize-env');
 
     // === Monaco ===
     const monaco = await loadMonaco();
@@ -18633,16 +19497,60 @@
     // ★修正：引用符未対応のローカル escapeHtml を廃止し、共通の escapeHtml を使用する
 
     // === ファイル行：Templatesタブの見た目に合わせたデザイン ===
-    function fileRow({ name, size, badge = 'JS' }) {
+    function fileRow({ name, size, badge = 'JS', note = '', onConsult = null, title = '' }) {
       const el = document.createElement('div');
       el.style.cssText = `display:flex;align-items:center;gap:8px;padding:8px 10px;border-bottom:1px solid ${BD};cursor:pointer;`;
       const sz = size ? Number(size) : 0; // "12345" でも OK
       el.innerHTML = `
         <div style="border:1px solid ${BD};border-radius:999px;padding:2px 6px;font-size:11px">${badge}</div>
-        <div style="flex:1">${escapeHtml(name)}</div>
+        <div style="flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;" title="${escapeHtml(title || name)}">${escapeHtml(name)}${note ? `<span style="margin-left:6px; font-size:10px; color:#b26a00; border:1px solid #b26a00; border-radius:8px; padding:0 5px;">${escapeHtml(note)}</span>` : ''}</div>
         <div style="opacity:.6;font-size:11px">${sz ? sz.toLocaleString() + ' Bytes' : ''}</div>
       `;
+      // Phase 17: 「AIに相談」（JavaScript だけ。AI タブへ切り替えて、このファイルを対象にした会話を始める）
+      if (typeof onConsult === 'function') {
+        const b = document.createElement('button');
+        b.type = 'button'; b.className = 'btn kt-customize-consult'; b.textContent = 'AIに相談'; b.title = 'この JavaScript について AI タブで相談する（ファイルを選び直す必要はありません）';
+        b.style.cssText = 'height:24px; padding:0 8px; font-size:11px; border-color:#6a1b9a; flex:none;';
+        b.addEventListener('click', async (ev) => { ev.stopPropagation(); ev.preventDefault(); b.disabled = true; try { await onConsult(); } finally { b.disabled = false; } });
+        el.appendChild(b);
+      }
       return el;
+    }
+    // ---- Phase 17: 相談（JsConsultationSeed を作って AI タブへ）----
+    let lastCustomize = null;   // 直近に取得したカスタマイズ設定（{ source, data }）
+    const sameOrigin = (u) => { try { return new URL(u, location.href).origin === location.origin; } catch (e) { return false; } };
+    async function consultFile(entry, target) {
+      if (typeof consult !== 'function') return null;
+      const inputs = typeof getInputs === 'function' ? (getInputs() || {}) : {};
+      const file = entry.type === 'URL'
+        ? { name: String(entry.url || '').split('/').pop() || String(entry.url || ''), target, type: 'URL', url: entry.url }
+        : { name: entry.file?.name, target, type: 'FILE', fileKey: entry.file?.fileKey, size: entry.file?.size };
+      let sourceText = null;
+      try {
+        if (file.type === 'FILE' && file.fileKey) sourceText = await downloadByKey(file.fileKey);
+        else if (file.type === 'URL' && sameOrigin(file.url)) { const res = await fetch(file.url, { credentials: 'include' }); if (res.ok) sourceText = await res.text(); }
+      } catch (e) { sourceText = null; }
+      const seed = KTContext.buildConsultationSeed({ data: inputs.data || DATA, deps: inputs.deps || null, scan: inputs.scan || null, file, sourceText, appName: DATA?.settings?.name ?? null });
+      // 動作テスト環境のカスタマイズ設定の revision（登録時の stale 判定の起点）
+      try { const cz = lastCustomize || await getCustomize(appId); seed.customizeRevision = cz?.data?.revision ?? seed.customizeRevision; seed.customizeSource = cz?.source ?? null; } catch (e) { }
+      return consult(seed);
+    }
+    /** §32: 動作テスト環境（preview）と運用環境のカスタマイズ設定の差（名前 / URL / 順序。fileKey は環境で異なるので比べない） */
+    async function renderEnvDiff(previewData, source) {
+      if (!$env) return;
+      if (source !== 'preview' || typeof KTJsExecutor === 'undefined') { $env.style.display = 'none'; return; }
+      try {
+        const { data: prod } = await KTApi.getCustomize(appId, { preferPreview: false });
+        const diffs = KTJsExecutor.diffSnapshots(KTJsExecutor.snapshotOf(prod), KTJsExecutor.snapshotOf(previewData), { compareFileKey: false });
+        const sizeDiff = [];
+        for (const t of ['desktop', 'mobile']) for (const k of ['js', 'css']) {
+          const pl = (prod?.[t]?.[k] || []), vl = (previewData?.[t]?.[k] || []);
+          vl.forEach((e, i) => { const q = pl[i]; if (e?.type === 'FILE' && q?.type === 'FILE' && e.file?.name === q.file?.name && String(e.file?.size ?? '') !== String(q.file?.size ?? '')) sizeDiff.push(`${t}.${k}: ${e.file.name}（内容が変更）`); });
+        }
+        if (!diffs.length && !sizeDiff.length) { $env.style.display = ''; $env.innerHTML = '動作テスト環境のカスタマイズ設定は運用環境と同じです。'; return; }
+        $env.style.display = '';
+        $env.innerHTML = `<span style="color:#b26a00;">動作テスト環境に未反映の変更があります（運用環境との差）:</span> ${[...diffs.map(d => `${escapeHtml(d.where)}: ${escapeHtml(String(d.before ?? '（なし）'))} → ${escapeHtml(String(d.after ?? '（なし）'))}`), ...sizeDiff.map(escapeHtml)].slice(0, 6).join('　')}${diffs.length + sizeDiff.length > 6 ? ' …' : ''}`;
+      } catch (e) { $env.style.display = 'none'; }
     }
 
     // === リスト描画（Customize / Snippets） ===
@@ -18712,14 +19620,18 @@
       }
 
       // --- Customize (App) list: desktop/mobile × js/css 共通 ---
-      const { data } = await getCustomize(appId);
+      const got = await getCustomize(appId);
+      const { data, source } = got;
+      lastCustomize = got;
       const bucket = conf.target === 'mobile' ? (data.mobile || { js: [], css: [] })
         : (data.desktop || { js: [], css: [] });
       const arr = (conf.kind === 'js' ? bucket.js : bucket.css) || [];
       const files = arr.filter(x => x.type === 'FILE');
+      const urls = arr.filter(x => x.type === 'URL');
+      renderEnvDiff(data, source);
 
       $list.innerHTML = '';
-      if (!files.length) {
+      if (!files.length && !urls.length) {
         $list.innerHTML = `<div style="padding:12px; opacity:.7">対象のファイルが見つかりませんでした。</div>`;
         return;
       }
@@ -18728,9 +19640,23 @@
       const badge = conf.target === 'mobile'
         ? (conf.kind === 'js' ? 'mJS' : 'mCSS')
         : (conf.kind === 'js' ? 'JS' : 'CSS');
+      // 動作テスト環境だけにあるファイル（運用環境に無い名前）に印を付ける（§32）
+      let prodNames = null;
+      if (source === 'preview') { try { const { data: prod } = await KTApi.getCustomize(appId, { preferPreview: false }); const pb = conf.target === 'mobile' ? (prod.mobile || {}) : (prod.desktop || {}); prodNames = new Set(((conf.kind === 'js' ? pb.js : pb.css) || []).map(x => (x.type === 'URL' ? x.url : x.file?.name))); } catch (e) { prodNames = null; } }
+      const noteOf = (name) => (prodNames && !prodNames.has(name) ? '動作テスト環境のみ' : '');
 
-      files.forEach((f, i) => {
-        const row = fileRow({ name: f.file.name, size: f.file.size, badge });
+      // 一覧は登録順（FILE と URL を混ぜて kintone の順序どおり）
+      arr.forEach((entry, i) => {
+        if (entry.type === 'URL') {
+          const name = String(entry.url || '').split('/').pop() || String(entry.url || '');
+          const row = fileRow({ name, size: null, badge: conf.target === 'mobile' ? 'mURL' : 'URL', note: noteOf(entry.url), title: entry.url, onConsult: (conf.kind === 'js' && typeof consult === 'function') ? () => consultFile(entry, conf.target) : null });
+          row.style.cursor = 'default';
+          row.addEventListener('click', () => { $meta.textContent = `URL: ${entry.url}（エディタでは編集できません）`; }, { passive: true });
+          $list.appendChild(row);
+          return;
+        }
+        const f = entry;
+        const row = fileRow({ name: f.file.name, size: f.file.size, badge, note: noteOf(f.file.name), onConsult: (conf.kind === 'js' && typeof consult === 'function') ? () => consultFile(f, conf.target) : null });
         row.addEventListener('click', async () => {
           const code = await downloadByKey(f.file.fileKey);
           editor.setValue(code);
@@ -20798,10 +21724,14 @@
       'recordAcl',
       'fieldAcl',
     ]));
-    renderCustomize(root, DATA, appId);
+    // Phase 17: Customize タブ「AIに相談」→ AI タブで、そのファイルを対象にした会話を始める（ファイルを選び直させない）
+    renderCustomize(root, DATA, appId, {
+      consult: (seed) => { let r = null; try { r = root.ktAi?.consult?.(seed) ?? null; } catch (e) { console.error('[Toolkit AI] 相談の開始に失敗しました', e); } try { root.ktTabs?.switchTab?.('ai'); } catch (e) { } return r; },
+      getInputs: () => ({ data: DATA, deps: DEPS, scan: KTScan.getLastPayload() }),
+    });
     renderTemplates(root, DATA, appId);
     // AI タブ（Phase 15: AI 開発ワークスペース。Templates にあった AI 関連機能の移行先）
-    renderAiWorkspace(root, DATA, appId, {
+    root.ktAi = renderAiWorkspace(root, DATA, appId, {
       // 呼び出し時点の最新の解析結果を渡す（Scanner / 他アプリ走査の結果は後から入る）
       getContextInputs: () => ({
         data: DATA,
