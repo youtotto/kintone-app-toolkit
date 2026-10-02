@@ -80,6 +80,11 @@ console.log('\n--- 1. ADD_NOTIFICATION（レコードの条件通知）---');
   const rv4 = reviewOf(p4); const m4 = makeKintoneMock(DATA);
   const pr4 = await E.prepare(approveAll(p4, rv4), { api: m4.api, appId: '341' });
   assert(pr4.steps[0].status === 'UNSUPPORTED' && pr4.steps[0].reason === 'NOTIFICATION_SCOPE_AMBIGUOUS', '条件式とイベントの両方 → どちらの通知か決められず実行しない（REQUIRE_CONFIRMATION 相当）');
+  // staging E2E（app 343）: AI が存在しないイベント名（recordAdd）を条件通知に添えた → 不明なイベントは曖昧さの根拠にしない（Review が要確認・After から除外済み）
+  const p5 = plan([step('P1', 'ADD_NOTIFICATION', 'NOTIFICATION', 'x', { name: 'x', targets: ['FIELD_ENTITY:owner'], filterCond: 'amount >= "1"', events: ['recordAdd', 'recordEdit'] })]);
+  const rv5 = reviewOf(p5); const m5 = makeKintoneMock(DATA);
+  const pr5 = await E.prepare(approveAll(p5, rv5), { api: m5.api, appId: '341' });
+  assert(codes0(rv5).includes('NOTIFICATION_EVENT_UNKNOWN') && pr5.steps[0].status === 'PENDING' && pr5.steps[0].prepared.payload.scope === 'perRecord', '不明なイベント名だけなら曖昧ではない → レコードの条件通知として実行可（Review は要確認）');
 }
 {
   // アプリの条件通知（events）: 既存 5 件 ＋ 1 件・notifyToCommenter を保持

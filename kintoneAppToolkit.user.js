@@ -6312,7 +6312,8 @@
         const after = stepReview?.diff?.after;
         if (!after || !after.scope) return { unsupported: 'NO_NOTIFICATION_SPEC', message: 'Review に追加後の通知定義がありません' };
         const spec = stepReview?.spec || {};
-        const hasCond = !!String(spec.filterCond || after.filterCond || '').trim(), hasEvents = Array.isArray(spec.events) && spec.events.length > 0;
+        // 曖昧さの判定は kintone に実在するイベント名だけで行う（AI が書いた不明なイベント名は Review が要確認として落としている）
+        const hasCond = !!String(spec.filterCond || after.filterCond || '').trim(), hasEvents = Array.isArray(spec.events) && spec.events.some(e => NOTIFY_EVENTS.includes(e));
         if (hasCond && hasEvents) return { unsupported: 'NOTIFICATION_SCOPE_AMBIGUOUS', message: '条件式（レコードの条件通知）とイベント（アプリの条件通知）の両方が指定されていて、どちらの通知か決められません（計画で片方に絞ってください）' };
         const scope = after.scope === 'general' ? 'general' : 'perRecord';
         const targets = [];
