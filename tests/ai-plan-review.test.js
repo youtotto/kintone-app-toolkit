@@ -48,7 +48,7 @@ console.log('\n--- 1. Before model / Action Catalog ---');
   assert(JSON.stringify(INPUTS.data) === SNAPSHOT, 'buildBeforeModel は DATA を変更しない');
   const caps = R.ACTION_CAPABILITIES;
   assert(caps.ADD_FIELD.defaultSafety === 'SAFE' && caps.ADD_VIEW.defaultSafety === 'SAFE' && caps.ADD_REMINDER.defaultSafety === 'SAFE' && caps.ADD_NOTIFICATION.defaultSafety === 'REVIEW_REQUIRED' && caps.UPDATE_PROCESS.defaultSafety === 'REVIEW_REQUIRED' && caps.UPDATE_RECORD_ACL.defaultSafety === 'REVIEW_REQUIRED' && caps.CUSTOMIZATION_REQUIRED.defaultSafety === 'PLAN_ONLY' && caps.REQUIRE_CONFIRMATION.defaultSafety === 'PLAN_ONLY', 'Action Catalog の既定 safety（§17 の表）');
-  assert(Object.keys(caps).length === 19 && Object.values(caps).every(c => 'simulate' in c && 'validate' in c && 'defaultSafety' in c && 'execution' in c), 'ACTION_CAPABILITIES: 全 actionType に simulate / validate / defaultSafety / execution');
+  assert(Object.keys(caps).length === 20 && Object.values(caps).every(c => 'simulate' in c && 'validate' in c && 'defaultSafety' in c && 'execution' in c) && caps.UPDATE_REMINDER.defaultSafety === 'REVIEW_REQUIRED' && caps.UPDATE_NOTIFICATION.defaultSafety === 'REVIEW_REQUIRED' && caps.UPDATE_VIEW.defaultSafety === 'REVIEW_REQUIRED', 'ACTION_CAPABILITIES: 全 actionType（UPDATE_REMINDER を含む 20 件）に simulate / validate / defaultSafety / execution。UPDATE 系の既定は REVIEW_REQUIRED（Phase 11 §33）');
 }
 
 console.log('\n--- 2. Field ---');
@@ -292,6 +292,74 @@ console.log('\n--- 9. staging E2E（2026-10-02）で見つかった実データ�
   const noneEv2 = review(plan([step('P1', 'ADD_NOTIFICATION', 'NOTIFICATION', 'n2', [['通知先', 'owner_group'], ['条件', 'amount >= "1"'], ['イベント', 'なし（レコードの条件通知）']], { spec: { name: 'n2', targets: ['FIELD_ENTITY:owner_group'], filterCond: 'amount >= "1"', events: ['なし（レコードの条件通知）'] } })]));
   assert(!codes(st(noneEv2, 'P1')).includes('NOTIFICATION_EVENT_UNKNOWN') && !st(noneEv2, 'P1').spec.events, 'details の「イベント: なし」も拾い直さない（実機で spec と details の両方に出た）');
   assert(JSON.stringify(INPUTS.data) === SNAPSHOT, '§9 の後も DATA は不変');
+}
+
+console.log('\n--- 10. Phase 11: 既存設定の変更（UPDATE_NOTIFICATION / UPDATE_REMINDER / UPDATE_VIEW）---');
+{
+  // UPDATE_NOTIFICATION: 対象の同一性を Review 時点で固定（scope / index / id / title / 条件 / イベント）。通知先の追加は low、削除は高リスク
+  const add = review(plan([step('P1', 'UPDATE_NOTIFICATION', 'NOTIFICATION', 'perRecord#1', [], { spec: { targets: ['USER:user1', 'FIELD_ENTITY:approver', 'FIELD_ENTITY:owner_org', 'FIELD_ENTITY:owner'] } })]));
+  const sa = st(add, 'P1');
+  assert(sa.status === 'NEEDS_CONFIRMATION' && sa.safety === 'REVIEW_REQUIRED' && sa.diff.changeType === 'UPDATE' && codes(sa).includes('NOTIFICATION_RECIPIENTS_ADDED') && !codes(sa).includes('NOTIFICATION_RECIPIENTS_REMOVED'), 'UPDATE_NOTIFICATION 通知先の追加: REVIEW_REQUIRED・RECIPIENTS_ADDED（削除なし）');
+  assert(sa.diff.target.identity && sa.diff.target.identity.scope === 'perRecord' && sa.diff.target.identity.index === 0 && sa.diff.target.identity.id === 'perRecord#1' && sa.diff.target.identity.title === '高額案件の登録' && sa.diff.target.identity.filterCond === 'amount >= "1000000"' && sa.diff.target.identity.targets.length === 3, 'target.identity に scope / index / id / title / 条件 / 通知先を固定');
+  assert(sa.diff.human.length === 2 && /✎ レコードの条件通知「高額案件の登録」を変更/.test(sa.diff.human[0]) && /^通知先: .* → .*FIELD_ENTITY:owner$/.test(sa.diff.human[1]), '属性単位の差分: 変更した通知先だけが Before → After で出る（条件・名前は出ない）');
+  const byTitle = review(plan([step('P1', 'UPDATE_NOTIFICATION', 'NOTIFICATION', '高額案件の登録', [], { spec: { filterCond: 'amount >= "2000000"' } })]));
+  const sb = st(byTitle, 'P1');
+  assert(sb.diff.target.id === 'perRecord#1' && codes(sb).includes('NOTIFICATION_CONDITION_CHANGE') && sb.issues.find(i => i.code === 'NOTIFICATION_CONDITION_CHANGE').message.includes('通知される範囲が狭くなります') && sb.diff.after.filterCond === 'amount >= "2000000"' && sb.diff.human.length === 2 && /^条件: /.test(sb.diff.human[1]), '名前で特定・条件を 100 万→200 万: 範囲が狭くなる警告（通知が届かなくなる可能性）・差分は条件だけ');
+  const rm = review(plan([step('P1', 'UPDATE_NOTIFICATION', 'NOTIFICATION', 'perRecord#1', [], { spec: { targets: ['USER:user1'] } })]));
+  assert(codes(st(rm, 'P1')).includes('NOTIFICATION_RECIPIENTS_REMOVED') && st(rm, 'P1').issues.find(i => i.code === 'NOTIFICATION_RECIPIENTS_REMOVED').severity === 'high' && st(rm, 'P1').issues.find(i => i.code === 'NOTIFICATION_RECIPIENTS_REMOVED').message.includes('通知が届かなくなる可能性') && rm.summary.counts.highRisk === 1, '通知先の削除: 高リスク（NOTIFICATION_RECIPIENTS_REMOVED・届かなくなる警告）');
+  const ev = review(plan([step('P1', 'UPDATE_NOTIFICATION', 'NOTIFICATION', 'general#3', [], { spec: { events: ['recordAdded'] } })]));
+  assert(codes(st(ev, 'P1')).includes('NOTIFICATION_EVENTS_REMOVED') && st(ev, 'P1').diff.after.events.join() === 'recordAdded' && st(ev, 'P1').diff.target.identity.scope === 'general' && st(ev, 'P1').diff.target.identity.index === 2, 'アプリの条件通知のイベント削除: NOTIFICATION_EVENTS_REMOVED（高リスク）・identity は general#3 = index 2');
+  const multi = review(plan([step('P1', 'UPDATE_NOTIFICATION', 'NOTIFICATION', 'general#3', [], { spec: { targets: ['FIELD_ENTITY:owner', 'USER:user1'] } })]));
+  assert(st(multi, 'P1').status === 'INVALID' && codes(st(multi, 'P1')).includes('GENERAL_NOTIFICATION_MULTI_TARGET'), 'アプリの条件通知の通知先を複数にする: INVALID（通知先 1 件ごとの設定。追加は ADD_NOTIFICATION）');
+  const gcond = review(plan([step('P1', 'UPDATE_NOTIFICATION', 'NOTIFICATION', 'general#3', [], { spec: { filterCond: 'amount >= "1"', events: ['recordAdded', 'recordEdited', 'commentAdded', 'statusChanged', 'fileImported'] } })]));
+  assert(codes(st(gcond, 'P1')).includes('GENERAL_NOTIFICATION_COND') && st(gcond, 'P1').diff.after.filterCond === '' && codes(st(gcond, 'P1')).includes('NOTIFICATION_EVENTS_ADDED'), 'アプリの条件通知に条件式: 反映しない（GENERAL_NOTIFICATION_COND）・イベント追加は low');
+  const amb = review(plan([step('P1', 'UPDATE_NOTIFICATION', 'NOTIFICATION', '', [], { spec: { targets: ['USER:user1'] } })]));
+  assert(st(amb, 'P1').status === 'INVALID' && codes(st(amb, 'P1')).includes('UNKNOWN_NOTIFICATION'), '対象未指定: UNKNOWN_NOTIFICATION');
+  const dupTitle = review(plan([step('P1', 'UPDATE_NOTIFICATION', 'NOTIFICATION', '同名', [], { spec: { targets: ['USER:user1'] } })]), (() => { const d = FX.makeData(); d.perRecordNotify.notifications[0].title = '同名'; d.perRecordNotify.notifications[1].title = '同名'; return { data: d }; })());
+  assert(st(dupTitle, 'P1').status === 'INVALID' && codes(st(dupTitle, 'P1')).includes('NOTIFICATION_TARGET_AMBIGUOUS'), '同じ名前の通知が 2 件: title だけでは決めない（NOTIFICATION_TARGET_AMBIGUOUS）');
+  const inv = review(plan([step('P1', 'UPDATE_NOTIFICATION', 'NOTIFICATION', 'perRecord#1', [], { spec: { filterCond: 'owner != ""' } })]));
+  assert(codes(st(inv, 'P1')).includes('COND_INVALID'), '無効な条件式（USER_SELECT に !=）: COND_INVALID（KTQueryCheck を共通利用）');
+  const noch = review(plan([step('P1', 'UPDATE_NOTIFICATION', 'NOTIFICATION', 'perRecord#1', [], { spec: { targets: ['USER:user1', 'FIELD_ENTITY:approver', 'FIELD_ENTITY:owner_org'], filterCond: 'amount >= "1000000"' } })]));
+  assert(codes(st(noch, 'P1')).includes('NO_STRUCTURED_CHANGE') && st(noch, 'P1').diff.changeType === 'NO_CHANGE' && st(noch, 'P1').diff.target.identity, '同じ値を指定: 変更なし（NO_STRUCTURED_CHANGE）');
+
+  // UPDATE_REMINDER: 日数 / 時刻 / 通知先 / 条件 / 基準日（高リスク）
+  const rt = review(plan([step('P1', 'UPDATE_REMINDER', 'REMINDER', 'reminder#1', [], { spec: { daysLater: '-3' } })]));
+  const sr = st(rt, 'P1');
+  assert(sr.status === 'NEEDS_CONFIRMATION' && sr.safety === 'REVIEW_REQUIRED' && sr.diff.changeType === 'UPDATE' && codes(sr).includes('REMINDER_TIMING_CHANGE') && sr.diff.after.daysLater === '-3' && sr.diff.before.daysLater === '-1' && sr.diff.human.length === 2 && sr.diff.human[1] === 'タイミング: 1 日前 → 3 日前', 'UPDATE_REMINDER 日数変更: REVIEW_REQUIRED・差分は「1 日前 → 3 日前」だけ');
+  assert(sr.diff.target.identity && sr.diff.target.identity.id === 'reminder#1' && sr.diff.target.identity.index === 0 && sr.diff.target.identity.timing.code === 'due_date' && sr.diff.target.identity.targets.length === 3, 'identity に id / index / timing / 通知先を固定');
+  const rr = review(plan([step('P1', 'UPDATE_REMINDER', 'REMINDER', '期限前日のリマインド', [], { spec: { targets: ['FIELD_ENTITY:owner', 'FIELD_ENTITY:owner_group', 'USER:user1', 'FIELD_ENTITY:approver'], time: '10:00' } })]));
+  assert(st(rr, 'P1').diff.target.id === 'reminder#1' && codes(st(rr, 'P1')).includes('REMINDER_RECIPIENTS_ADDED') && codes(st(rr, 'P1')).includes('REMINDER_TIMING_CHANGE') && st(rr, 'P1').diff.after.time === '10:00', '名前で特定・通知先の追加と時刻変更');
+  const rb = review(plan([step('P1', 'UPDATE_REMINDER', 'REMINDER', 'reminder#1', [], { spec: { timingField: '作成日時' } })]));
+  assert(codes(st(rb, 'P1')).includes('REMINDER_BASE_FIELD_CHANGE') && st(rb, 'P1').issues.find(i => i.code === 'REMINDER_BASE_FIELD_CHANGE').severity === 'high' && rb.summary.counts.highRisk === 1 && st(rb, 'P1').diff.after.timingField === '作成日時', '基準日の変更: 高リスク（REMINDER_BASE_FIELD_CHANGE）');
+  const rbad = review(plan([step('P1', 'UPDATE_REMINDER', 'REMINDER', 'reminder#1', [], { spec: { timingField: 'amount' } })]));
+  assert(st(rbad, 'P1').status === 'INVALID' && codes(st(rbad, 'P1')).includes('REMINDER_FIELD_TYPE'), '日付型でないフィールドを基準日にする: INVALID');
+  const rrm = review(plan([step('P1', 'UPDATE_REMINDER', 'REMINDER', 'reminder#1', [], { spec: { targets: ['USER:user1'] } })]));
+  assert(codes(st(rrm, 'P1')).includes('REMINDER_RECIPIENTS_REMOVED') && st(rrm, 'P1').issues.find(i => i.code === 'REMINDER_RECIPIENTS_REMOVED').severity === 'high', '通知先の削除: 高リスク');
+  const rc = review(plan([step('P1', 'UPDATE_REMINDER', 'REMINDER', 'reminder#1', [], { spec: { filterCond: 'owner in (LOGINUSER())' } })]));
+  assert(codes(st(rc, 'P1')).includes('REMINDER_CONDITION_CHANGE') && codes(st(rc, 'P1')).includes('COND_INVALID'), 'リマインダーの条件に LOGINUSER(): COND_INVALID（API ごとの制限）');
+  const rnone = review(plan([step('P1', 'UPDATE_REMINDER', 'REMINDER', 'reminder#9', [], { spec: { daysLater: '-3' } })]));
+  assert(st(rnone, 'P1').status === 'INVALID' && codes(st(rnone, 'P1')).includes('UNKNOWN_REMINDER'), '存在しないリマインダー: UNKNOWN_REMINDER');
+
+  // UPDATE_VIEW: 表示項目の追加だけなら SAFE 候補、削除 / 絞り込み / 並び順は REVIEW_REQUIRED、表形式以外・組み込みは仮適用しない
+  const va = review(plan([step('P1', 'UPDATE_VIEW', 'VIEW', '承認待ち', [], { spec: { fields: ['case_name', 'approver', 'amount'] } })]));
+  const sv = st(va, 'P1');
+  assert(sv.status === 'VALID' && sv.safety === 'SAFE' && codes(sv).join() === 'VIEW_FIELDS_ADDED' && sv.diff.after.fields.join() === 'case_name,approver,amount' && sv.diff.human.length === 2 && /^表示フィールド: case_name, approver → case_name, approver, amount$/.test(sv.diff.human[1]) && va.executionReadiness.safeSteps.join() === 'P1', 'UPDATE_VIEW 表示項目の追加だけ: SAFE 候補・差分は表示フィールドだけ');
+  assert(sv.diff.target.identity && sv.diff.target.identity.name === '承認待ち' && sv.diff.target.identity.id === '102' && sv.diff.target.identity.fields.join() === 'case_name,approver', 'identity に name / id / fields / 条件 / 並び順を固定');
+  const vr = review(plan([step('P1', 'UPDATE_VIEW', 'VIEW', '承認待ち', [], { spec: { fields: ['case_name'] } })]));
+  assert(st(vr, 'P1').status === 'NEEDS_CONFIRMATION' && st(vr, 'P1').safety === 'REVIEW_REQUIRED' && codes(st(vr, 'P1')).includes('VIEW_FIELDS_REMOVED'), '表示項目の削除: REVIEW_REQUIRED');
+  const vf = review(plan([step('P1', 'UPDATE_VIEW', 'VIEW', '承認待ち', [], { spec: { filterCond: 'ステータス in ("承認待ち", "未処理")' } })]));
+  assert(st(vf, 'P1').safety === 'REVIEW_REQUIRED' && codes(st(vf, 'P1')).includes('VIEW_FILTER_CHANGE') && st(vf, 'P1').diff.human.length === 2 && /^条件: /.test(st(vf, 'P1').diff.human[1]), '絞り込みの変更: REVIEW_REQUIRED・差分は条件だけ');
+  const vs = review(plan([step('P1', 'UPDATE_VIEW', 'VIEW', '承認待ち', [], { spec: { sort: 'amount desc' } })]));
+  assert(st(vs, 'P1').safety === 'REVIEW_REQUIRED' && codes(st(vs, 'P1')).includes('VIEW_SORT_CHANGE'), '並び順の変更: REVIEW_REQUIRED');
+  const vm = review(plan([step('P1', 'UPDATE_VIEW', 'VIEW', '承認待ち', [], { spec: { fields: ['case_name', 'approver', 'ghost'] } })]));
+  assert(st(vm, 'P1').status === 'INVALID' && codes(st(vm, 'P1')).includes('UNKNOWN_FIELD'), '存在しないフィールドを表示項目に: INVALID');
+  const vinv = review(plan([step('P1', 'UPDATE_VIEW', 'VIEW', '承認待ち', [], { spec: { filterCond: 'owner != ""' } })]));
+  assert(codes(st(vinv, 'P1')).includes('COND_INVALID'), '一覧の絞り込みも KTQueryCheck（USER_SELECT に !=）');
+  const vcal = review(plan([step('P1', 'UPDATE_VIEW', 'VIEW', 'カレンダー', [], { spec: { fields: ['case_name'] } })]), (() => { const d = FX.makeData(); d.views.views['カレンダー'] = { id: '103', name: 'カレンダー', type: 'CALENDAR', index: '2', date: 'due_date', title: 'case_name', filterCond: '', sort: '' }; return { data: d }; })());
+  assert(st(vcal, 'P1').status === 'NEEDS_CONFIRMATION' && codes(st(vcal, 'P1')).includes('VIEW_TYPE_NOT_SUPPORTED') && st(vcal, 'P1').diff.changeType === 'NO_CHANGE' && !st(vcal, 'P1').simulated, 'カレンダー形式の一覧: 仮適用しない（計画のみ）');
+  const vbi = review(plan([step('P1', 'UPDATE_VIEW', 'VIEW', '（作業者が自分）', [], { spec: { fields: ['case_name'] } })]), (() => { const d = FX.makeData(); d.views.views['（作業者が自分）'] = { id: '104', name: '（作業者が自分）', type: 'LIST', builtinType: 'ASSIGNEE', index: '2', fields: ['case_name', 'owner'], filterCond: '', sort: '' }; return { data: d }; })());
+  assert(codes(st(vbi, 'P1')).includes('BUILTIN_VIEW_NOT_SUPPORTED') && !st(vbi, 'P1').simulated, '組み込みの一覧（作業者が自分）: 仮適用しない');
+  assert(JSON.stringify(INPUTS.data) === SNAPSHOT, '§10 の後も DATA は不変');
 }
 
 console.log(`\n${state.failed ? 'FAILED' : 'ALL PASSED'}: ${state.passed} passed / ${state.failed} failed`);

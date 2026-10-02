@@ -5223,7 +5223,9 @@
       ADD_NOTIFICATION: { simulate: true, validate: true, defaultSafety: 'REVIEW_REQUIRED', execution: 'FUTURE', changeType: 'ADD', kind: 'NOTIFICATION' },
       UPDATE_NOTIFICATION: { simulate: true, validate: true, defaultSafety: 'REVIEW_REQUIRED', execution: 'FUTURE', changeType: 'UPDATE', kind: 'NOTIFICATION' },
       ADD_REMINDER: { simulate: true, validate: true, defaultSafety: 'SAFE', execution: 'FUTURE', changeType: 'ADD', kind: 'REMINDER' },
+      UPDATE_REMINDER: { simulate: true, validate: true, defaultSafety: 'REVIEW_REQUIRED', execution: 'FUTURE', changeType: 'UPDATE', kind: 'REMINDER' },
       ADD_VIEW: { simulate: true, validate: true, defaultSafety: 'SAFE', execution: 'FUTURE', changeType: 'ADD', kind: 'VIEW' },
+      // Phase 11: 表示項目の追加だけなら SAFE 候補（reviewStep が下げる）。絞り込み / 並び順 / 表示項目の削除は REVIEW_REQUIRED
       UPDATE_VIEW: { simulate: true, validate: true, defaultSafety: 'REVIEW_REQUIRED', execution: 'FUTURE', changeType: 'UPDATE', kind: 'VIEW' },
       UPDATE_RECORD_ACL: { simulate: false, validate: true, defaultSafety: 'REVIEW_REQUIRED', execution: 'FUTURE', changeType: 'UPDATE', kind: 'RECORD_ACL' },
       UPDATE_FIELD_ACL: { simulate: false, validate: true, defaultSafety: 'REVIEW_REQUIRED', execution: 'FUTURE', changeType: 'UPDATE', kind: 'FIELD_ACL' },
@@ -5235,7 +5237,7 @@
       CUSTOMIZATION_REQUIRED: { simulate: false, validate: false, defaultSafety: 'PLAN_ONLY', execution: 'NONE', changeType: 'NO_CHANGE', kind: 'JS' },
     });
     /** 高リスクの変更（安全分類を REVIEW_REQUIRED に上げ、status は NEEDS_CONFIRMATION） */
-    const HIGH_RISK = ['TYPE_CHANGE', 'OPTIONS_REMOVED', 'EXISTING_PATH_RESTRICTED', 'ACL_CHANGE', 'LOOKUP_MAPPING_OVERWRITE', 'NOTIFICATION_EVENTS_REMOVED'];
+    const HIGH_RISK = ['TYPE_CHANGE', 'OPTIONS_REMOVED', 'EXISTING_PATH_RESTRICTED', 'ACL_CHANGE', 'LOOKUP_MAPPING_OVERWRITE', 'NOTIFICATION_EVENTS_REMOVED', 'NOTIFICATION_RECIPIENTS_REMOVED', 'REMINDER_BASE_FIELD_CHANGE', 'REMINDER_RECIPIENTS_REMOVED'];
     const KINTONE_FIELD_TYPES = ['SINGLE_LINE_TEXT', 'MULTI_LINE_TEXT', 'RICH_TEXT', 'NUMBER', 'CALC', 'CHECK_BOX', 'RADIO_BUTTON', 'DROP_DOWN', 'MULTI_SELECT', 'DATE', 'TIME', 'DATETIME', 'FILE', 'LINK', 'USER_SELECT', 'ORGANIZATION_SELECT', 'GROUP_SELECT', 'LOOKUP', 'REFERENCE_TABLE', 'SUBTABLE', 'GROUP', 'SPACER', 'LABEL', 'HR'];
     const OPTION_TYPES = ['CHECK_BOX', 'RADIO_BUTTON', 'DROP_DOWN', 'MULTI_SELECT'];
     const ENTITY_TYPES = ['USER', 'GROUP', 'ORGANIZATION', 'FIELD_ENTITY', 'CREATOR', 'CUSTOM_FIELD'];
@@ -5270,11 +5272,11 @@
       const states = Object.values(st.states || {}).filter(Boolean).sort((a, b) => (Number(a.index ?? 0) - Number(b.index ?? 0)) || cmp(String(a.name), String(b.name)))
         .map((s, i) => ({ name: s.name, index: i, assigneeType: s.assignee?.type ?? null, assignees: entityList(s.assignee?.entities), origin: 'existing' }));
       const actions = (st.enable ? (st.actions || []) : []).map(a => ({ name: a.name, from: a.from, to: a.to, filterCond: a.filterCond || '', type: a.type ?? null, executableUsers: entityList(a.executableUser?.entities), origin: 'existing' }));
-      const general = (d.generalNotify?.notifications || []).map((n, i) => ({ id: `general#${i + 1}`, scope: 'general', title: '', target: { type: n.entity?.type, code: n.entity?.code ?? null }, targets: [{ type: n.entity?.type, code: n.entity?.code ?? null }], events: NOTIFY_EVENTS.filter(k => n[k]), filterCond: '', origin: 'existing' }));
-      const perRecord = (d.perRecordNotify?.notifications || []).map((n, i) => ({ id: `perRecord#${i + 1}`, scope: 'perRecord', title: n.title || '', filterCond: n.filterCond || '', targets: entityList(n.targets), events: [], origin: 'existing' }));
-      const reminders = (d.reminderNotify?.notifications || []).map((n, i) => ({ id: `reminder#${i + 1}`, title: n.title || '', timing: { code: n.timing?.code ?? null, daysLater: n.timing?.daysLater != null ? String(n.timing.daysLater) : null, time: n.timing?.time ?? null }, filterCond: n.filterCond || '', targets: entityList(n.targets), origin: 'existing' }));
+      const general = (d.generalNotify?.notifications || []).map((n, i) => ({ id: `general#${i + 1}`, index: i, scope: 'general', title: '', target: { type: n.entity?.type, code: n.entity?.code ?? null }, targets: [{ type: n.entity?.type, code: n.entity?.code ?? null }], events: NOTIFY_EVENTS.filter(k => n[k]), filterCond: '', origin: 'existing' }));
+      const perRecord = (d.perRecordNotify?.notifications || []).map((n, i) => ({ id: `perRecord#${i + 1}`, index: i, scope: 'perRecord', title: n.title || '', filterCond: n.filterCond || '', targets: entityList(n.targets), events: [], origin: 'existing' }));
+      const reminders = (d.reminderNotify?.notifications || []).map((n, i) => ({ id: `reminder#${i + 1}`, index: i, title: n.title || '', timing: { code: n.timing?.code ?? null, daysLater: n.timing?.daysLater != null ? String(n.timing.daysLater) : null, time: n.timing?.time ?? null }, filterCond: n.filterCond || '', targets: entityList(n.targets), origin: 'existing' }));
       const views = Object.values(d.views?.views || {}).filter(Boolean).sort((a, b) => (Number(a.index ?? 0) - Number(b.index ?? 0)) || cmp(String(a.name), String(b.name)))
-        .map(v => ({ name: v.name, type: v.type ?? 'LIST', fields: Array.isArray(v.fields) ? [...v.fields] : [], filterCond: v.filterCond || '', sort: v.sort || '', origin: 'existing' }));
+        .map(v => ({ name: v.name, type: v.type ?? 'LIST', fields: Array.isArray(v.fields) ? [...v.fields] : [], filterCond: v.filterCond || '', sort: v.sort || '', ...(v.id != null ? { id: String(v.id) } : {}), ...(v.builtinType ? { builtinType: v.builtinType } : {}), origin: 'existing' }));
       const reports = Object.values(d.reports?.reports || {}).filter(Boolean).map(r => ({ name: r.name, origin: 'existing' }));
       const recordAcl = (d.recordAcl?.rights || []).map((r, i) => ({ id: `record#${i + 1}`, filterCond: r.filterCond || '', entities: (r.entities || []).map(e => ({ type: e.entity?.type, code: e.entity?.code ?? null, viewable: !!e.viewable, editable: !!e.editable, deletable: !!e.deletable })), origin: 'existing' }));
       const fieldAcl = (d.fieldAcl?.rights || []).map(r => ({ code: r.code, entities: (r.entities || []).map(e => ({ type: e.entity?.type, code: e.entity?.code ?? null, accessibility: e.accessibility })), origin: 'existing' }));
@@ -5815,19 +5817,58 @@
           for (const c of condFields(cond, model)) requireField(c, '通知条件');
           checkCond(cond, '通知条件', 'perRecordNotification');
           if (step.actionType === 'UPDATE_NOTIFICATION') {
-            const ref = step.targetRef;
-            const ex = [...model.notifications.general, ...model.notifications.perRecord].find(n => n.id === ref || (n.title && n.title === ref));
-            if (!ex) { invalid('UNKNOWN_NOTIFICATION', `通知「${ref}」が存在しません`); return r; }
+            // 対象の特定: id（perRecord#1 / general#2）→ 名前の完全一致 → 名前の正規化一致。複数一致は特定しない（title だけで決めない）
+            const ref = String(step.targetRef ?? '').trim();
+            const all = [...model.notifications.general, ...model.notifications.perRecord];
+            let cands = all.filter(n => n.id === ref);
+            if (!cands.length && ref) cands = all.filter(n => n.title && n.title === ref);
+            if (!cands.length && ref) cands = all.filter(n => n.title && norm(n.title) === norm(ref));
+            if (!cands.length) { invalid('UNKNOWN_NOTIFICATION', `通知「${ref || '（未指定）'}」が存在しません（通知の id（perRecord#1 等）か名前で指定します）`); return r; }
+            if (cands.length > 1) { invalid('NOTIFICATION_TARGET_AMBIGUOUS', `「${ref}」に一致する通知が ${cands.length} 件あり、対象を 1 件に特定できません（id で指定してください）`); return r; }
+            const ex = cands[0];
+            if (ex.origin === 'proposed') { invalid('NOTIFICATION_TARGET_PROPOSED', `「${ref}」はこの計画で追加する通知です（追加の step で内容を決めてください）`); return r; }
             const beforeN = clone(ex);
+            // Review 時点の同一性（Executor は実行直前にこれと現在の設定を比べ、1 属性でも違えば TARGET_CHANGED で止める）
+            const identity = { scope: ex.scope, index: ex.index ?? null, id: ex.id, title: ex.title || '', filterCond: ex.filterCond || '', targets: ex.targets.map(entityText), events: [...(ex.events || [])] };
+            const label = ex.title || ex.id;
+            const stopFire = (what) => `${what}。これまで通知されていたレコードや相手に通知が届かなくなる可能性があります`;
             let changed = false;
-            if (targets.length) { ex.targets = targets; changed = true; }
-            if (cond) { if (ex.scope === 'general') issue('GENERAL_NOTIFICATION_COND', 'medium', 'アプリの条件通知には条件式はありません（条件で絞るならレコードの条件通知として追加します。要確認）'); ex.filterCond = cond; changed = true; }
-            if (events.length) { const removed = (ex.events || []).filter(e => !events.includes(e)); if (removed.length) issue('NOTIFICATION_EVENTS_REMOVED', 'high', `通知「${ex.title || ex.id}」のイベント ${removed.join(', ')} が外れます（これらのタイミングでは通知されなくなります）`); ex.events = events; changed = true; }
-            if (spec.name && spec.name !== ex.title && spec.name !== ex.id && spec.name !== step.targetRef) { ex.title = spec.name; changed = true; }
+            // 通知先（変更後の全件で指定。既存に無いものは追加、指定から消えたものは削除）
+            if (targets.length && !sameTargets(ex.targets, targets)) {
+              if (ex.scope === 'general' && targets.length !== 1) { invalid('GENERAL_NOTIFICATION_MULTI_TARGET', 'アプリの条件通知は通知先 1 件ごとの設定です。通知先を増やすには ADD_NOTIFICATION で別の通知として追加してください'); return r; }
+              const removed = ex.targets.filter(t => !targets.some(x => sameEntity(x, t))), added = targets.filter(t => !ex.targets.some(x => sameEntity(x, t)));
+              if (removed.length) issue('NOTIFICATION_RECIPIENTS_REMOVED', 'high', stopFire(`通知「${label}」の通知先から ${removed.map(entityText).join(', ')} が外れます`));
+              if (added.length) issue('NOTIFICATION_RECIPIENTS_ADDED', 'low', `通知「${label}」の通知先に ${added.map(entityText).join(', ')} を追加します`);
+              ex.targets = targets; changed = true;
+            }
+            // 条件式（レコードの条件通知だけ。アプリの条件通知に条件は無い → 反映しない）
+            if (cond) {
+              if (ex.scope === 'general') issue('GENERAL_NOTIFICATION_COND', 'medium', 'アプリの条件通知には条件式はありません（条件で絞るならレコードの条件通知として追加します。この条件は反映しません。要確認）');
+              else if (normCond(cond) !== normCond(ex.filterCond)) {
+                const narrower = condNarrower(cond, ex.filterCond);
+                issue('NOTIFICATION_CONDITION_CHANGE', 'medium', narrower === true ? stopFire(`通知「${label}」の条件を「${ex.filterCond || 'なし'}」→「${cond}」に変更します。通知される範囲が狭くなります`) : narrower === null ? `通知「${label}」の条件を「${ex.filterCond || 'なし'}」→「${cond}」に変更します（範囲の広がり / 狭まりは自動判定できません。これまで通知されていたレコードで通知されなくなる可能性があります）` : `通知「${label}」の条件を「${ex.filterCond || 'なし'}」→「${cond}」に変更します（通知される範囲は広がります）`);
+                ex.filterCond = cond; changed = true;
+              }
+            }
+            // イベント（アプリの条件通知だけ）
+            if (events.length) {
+              if (ex.scope === 'perRecord') issue('NOTIFICATION_EVENTS_IGNORED', 'low', `レコードの条件通知にはイベント（${events.join(', ')}）の指定はありません（反映しません。条件式で判定します）`);
+              else if (!(ex.events.length === events.length && ex.events.every(e => events.includes(e)))) {
+                const removed = (ex.events || []).filter(e => !events.includes(e)), added = events.filter(e => !(ex.events || []).includes(e));
+                if (removed.length) issue('NOTIFICATION_EVENTS_REMOVED', 'high', stopFire(`通知「${label}」のイベント ${removed.join(', ')} が外れます（これらのタイミングでは通知されなくなります）`));
+                if (added.length) issue('NOTIFICATION_EVENTS_ADDED', 'low', `通知「${label}」のイベントに ${added.join(', ')} を追加します`);
+                ex.events = events; changed = true;
+              }
+            }
+            // 名前（レコードの条件通知だけ。アプリの条件通知に名前は無い）
+            if (spec.name && spec.name !== ex.title && spec.name !== ex.id && spec.name !== step.targetRef) {
+              if (ex.scope === 'general') issue('GENERAL_NOTIFICATION_TITLE_IGNORED', 'low', 'アプリの条件通知に名前はありません（反映しません）');
+              else { issue('NOTIFICATION_TITLE_CHANGE', 'low', `通知の名前を「${ex.title || '（無題）'}」→「${spec.name}」に変更します`); ex.title = spec.name; changed = true; }
+            }
             if (r.status === STATUS.INVALID) return r;
-            if (!changed) { issue('NO_STRUCTURED_CHANGE', 'medium', '変更内容を特定できません（要確認）'); r.status = STATUS.NEEDS_CONFIRMATION; r.diff.changeType = CHANGE.NO_CHANGE; r.diff.target = { kind: 'NOTIFICATION', id: ex.id }; return r; }
-            r.simulated = true; r.diff.target = { kind: 'NOTIFICATION', id: ex.id }; r.diff.before = notifView(beforeN); r.diff.after = notifView(ex);
-            h(`通知「${beforeN.title || beforeN.id}」を変更`); for (const line of objDiffLines(r.diff.before, r.diff.after)) h(line);
+            if (!changed) { issue('NO_STRUCTURED_CHANGE', 'medium', '変更内容を特定できません（要確認）'); r.status = STATUS.NEEDS_CONFIRMATION; r.diff.changeType = CHANGE.NO_CHANGE; r.diff.target = { kind: 'NOTIFICATION', id: ex.id, identity }; return r; }
+            r.simulated = true; r.diff.target = { kind: 'NOTIFICATION', id: ex.id, identity }; r.diff.before = notifView(beforeN); r.diff.after = notifView(ex);
+            h(`✎ ${ex.scope === 'general' ? 'アプリの条件通知' : 'レコードの条件通知'}「${beforeN.title || beforeN.id}」を変更`); for (const line of objDiffLines(r.diff.before, r.diff.after)) h(line);
             r.status = STATUS.NEEDS_CONFIRMATION;
             break;
           }
@@ -5835,7 +5876,7 @@
           if (r.status === STATUS.INVALID) return r;
           const scope = cond || !events.length ? 'perRecord' : 'general';
           if (scope === 'perRecord' && events.length) issue('NOTIFICATION_EVENTS_IGNORED', 'low', `レコードの条件通知にはイベント（${events.join(', ')}）の指定はありません（アプリの条件通知の項目。条件式で判定します）`);
-          const n = { id: `${scope}#new:${step.id}`, scope, title: spec.name || step.targetRef || step.title || '', filterCond: cond, targets, events: scope === 'perRecord' ? [] : events, origin: 'proposed', stepId: step.id };
+          const n = { id: `${scope}#new:${step.id}`, index: model.notifications[scope].length, scope, title: spec.name || step.targetRef || step.title || '', filterCond: cond, targets, events: scope === 'perRecord' ? [] : events, origin: 'proposed', stepId: step.id };
           // 重複 / 類似（既存・plan 内）
           for (const ex of [...model.notifications.general, ...model.notifications.perRecord]) {
             const exact = normCond(ex.filterCond) === normCond(n.filterCond) && sameTargets(ex.targets, n.targets) && (ex.scope !== 'general' || (ex.events.length === n.events.length && ex.events.every(e => n.events.includes(e))));
@@ -5859,7 +5900,7 @@
           checkCond(spec.filterCond || '', '条件', 'reminder');
           if (r.status === STATUS.INVALID) return r;
           const days = spec.daysLater != null ? String(spec.daysLater).replace(/[^-0-9]/g, '') : null;
-          const rem = { id: `reminder#new:${step.id}`, title: spec.name || step.targetRef || step.title || '', timing: { code: tf ? tf.code : null, daysLater: days, time: spec.time || null }, filterCond: spec.filterCond || '', targets, origin: 'proposed', stepId: step.id };
+          const rem = { id: `reminder#new:${step.id}`, index: model.reminders.length, title: spec.name || step.targetRef || step.title || '', timing: { code: tf ? tf.code : null, daysLater: days, time: spec.time || null }, filterCond: spec.filterCond || '', targets, origin: 'proposed', stepId: step.id };
           for (const ex of model.reminders) {
             const same = ex.timing.code === rem.timing.code && String(ex.timing.daysLater) === String(rem.timing.daysLater) && normCond(ex.filterCond) === normCond(rem.filterCond) && sameTargets(ex.targets, rem.targets);
             const similar = !same && ex.timing.code === rem.timing.code && overlapTargets(ex.targets, rem.targets);
@@ -5870,6 +5911,55 @@
           r.diff.target = { kind: 'REMINDER', id: rem.title || rem.id }; r.diff.before = null; r.diff.after = clone(rem);
           h(`＋ リマインダー「${rem.title || '（無題）'}」: ${rem.timing.code || '（基準日 要確認）'} の ${rem.timing.daysLater ?? '?'} 日後${rem.timing.time ? ` ${rem.timing.time}` : ''} に ${targets.map(entityText).join(', ') || '（通知先 未指定）'} へ`);
           if (issues.some(i => i.code === 'DUPLICATE' || i.code === 'PLAN_INTERNAL_DUPLICATE')) r.status = STATUS.NEEDS_CONFIRMATION; else if (issues.some(i => i.code.includes('POSSIBLE_DUPLICATE')) && r.status === STATUS.VALID) r.status = STATUS.WARNING;
+          break;
+        }
+        case 'UPDATE_REMINDER': {
+          // 対象の特定: id（reminder#1）→ 名前の完全一致 → 正規化一致。複数一致は特定しない
+          const ref = String(step.targetRef ?? '').trim();
+          let cands = model.reminders.filter(n => n.id === ref);
+          if (!cands.length && ref) cands = model.reminders.filter(n => n.title && n.title === ref);
+          if (!cands.length && ref) cands = model.reminders.filter(n => n.title && norm(n.title) === norm(ref));
+          if (!cands.length) { invalid('UNKNOWN_REMINDER', `リマインダー「${ref || '（未指定）'}」が存在しません（id（reminder#1 等）か名前で指定します）`); return r; }
+          if (cands.length > 1) { invalid('REMINDER_TARGET_AMBIGUOUS', `「${ref}」に一致するリマインダーが ${cands.length} 件あり、対象を 1 件に特定できません（id で指定してください）`); return r; }
+          const ex = cands[0];
+          if (ex.origin === 'proposed') { invalid('REMINDER_TARGET_PROPOSED', `「${ref}」はこの計画で追加するリマインダーです（追加の step で内容を決めてください）`); return r; }
+          const beforeR = clone(ex);
+          const identity = { index: ex.index ?? null, id: ex.id, title: ex.title || '', timing: clone(ex.timing), filterCond: ex.filterCond || '', targets: ex.targets.map(entityText) };
+          const label = ex.title || ex.id;
+          const targets = (spec.targets || []).map(t => parseEntity(t, model, proposedMap)).filter(Boolean);
+          targets.forEach(en => entityOk(en, '通知先'));
+          let changed = false;
+          if (spec.timingField) {
+            const tf = requireField(spec.timingField, '基準日');
+            if (tf && tf.code !== ex.timing.code) {
+              if (!['DATE', 'DATETIME', 'CREATED_TIME', 'UPDATED_TIME'].includes(tf.baseType || tf.type)) invalid('REMINDER_FIELD_TYPE', `基準フィールド「${tf.code}」は日付型ではありません（${tf.type}）`);
+              else { issue('REMINDER_BASE_FIELD_CHANGE', 'high', `リマインダー「${label}」の基準日を「${ex.timing.code}」→「${tf.code}」に変更します。通知日が別のフィールドの値で決まるようになり、通知のタイミングが大きく変わる可能性があります`); ex.timing.code = tf.code; changed = true; }
+            }
+          }
+          if (spec.daysLater != null && String(spec.daysLater).trim() !== '') {
+            const days = String(spec.daysLater).replace(/[^-0-9]/g, '');
+            if (!/^-?\d+$/.test(days)) issue('REMINDER_DAYS_INVALID', 'medium', `日数「${spec.daysLater}」を整数として読めません（要確認）`);
+            else if (days !== String(ex.timing.daysLater)) { issue('REMINDER_TIMING_CHANGE', 'medium', `リマインダー「${label}」のタイミングを ${daysText(ex.timing.daysLater)} → ${daysText(days)} に変更します`); ex.timing.daysLater = days; changed = true; }
+          }
+          if (spec.time && spec.time !== ex.timing.time) { issue('REMINDER_TIMING_CHANGE', 'medium', `リマインダー「${label}」の通知時刻を ${ex.timing.time || '—'} → ${spec.time} に変更します`); ex.timing.time = spec.time; changed = true; }
+          if (spec.filterCond && normCond(spec.filterCond) !== normCond(ex.filterCond)) {
+            for (const c of condFields(spec.filterCond, model)) requireField(c, '条件');
+            checkCond(spec.filterCond, '条件', 'reminder');
+            issue('REMINDER_CONDITION_CHANGE', 'medium', `リマインダー「${label}」の条件を「${ex.filterCond || 'なし'}」→「${spec.filterCond}」に変更します（これまで通知されていたレコードで通知されなくなる可能性があります）`);
+            ex.filterCond = spec.filterCond; changed = true;
+          }
+          if (targets.length && !sameTargets(ex.targets, targets)) {
+            const removed = ex.targets.filter(t => !targets.some(x => sameEntity(x, t))), added = targets.filter(t => !ex.targets.some(x => sameEntity(x, t)));
+            if (removed.length) issue('REMINDER_RECIPIENTS_REMOVED', 'high', `リマインダー「${label}」の通知先から ${removed.map(entityText).join(', ')} が外れます。この相手にはリマインダーが届かなくなります`);
+            if (added.length) issue('REMINDER_RECIPIENTS_ADDED', 'low', `リマインダー「${label}」の通知先に ${added.map(entityText).join(', ')} を追加します`);
+            ex.targets = targets; changed = true;
+          }
+          if (spec.name && spec.name !== ex.title && spec.name !== ex.id && spec.name !== step.targetRef) { issue('REMINDER_TITLE_CHANGE', 'low', `リマインダーの名前を「${ex.title || '（無題）'}」→「${spec.name}」に変更します`); ex.title = spec.name; changed = true; }
+          if (r.status === STATUS.INVALID) return r;
+          if (!changed) { issue('NO_STRUCTURED_CHANGE', 'medium', '変更内容を特定できません（要確認）'); r.status = STATUS.NEEDS_CONFIRMATION; r.diff.changeType = CHANGE.NO_CHANGE; r.diff.target = { kind: 'REMINDER', id: ex.id, identity }; return r; }
+          r.simulated = true; r.diff.target = { kind: 'REMINDER', id: ex.id, identity }; r.diff.before = remView(beforeR); r.diff.after = remView(ex);
+          h(`✎ リマインダー「${beforeR.title || beforeR.id}」を変更`); for (const line of objDiffLines(r.diff.before, r.diff.after)) h(line);
+          r.status = STATUS.NEEDS_CONFIRMATION;
           break;
         }
         case 'ADD_VIEW': case 'UPDATE_VIEW': {
@@ -5891,14 +5981,27 @@
             const v = model.views.find(x => x.name === name);
             if (!v) { invalid('UNKNOWN_VIEW', `一覧「${name}」が存在しません`); return r; }
             if (r.status === STATUS.INVALID) return r;
+            const noSim = (code, message) => { issue(code, 'medium', message); r.status = STATUS.NEEDS_CONFIRMATION; r.diff.changeType = CHANGE.NO_CHANGE; r.diff.target = { kind: 'VIEW', id: name }; r.diff.before = viewView(v); r.diff.after = viewView(v); h(`一覧「${name}」: ${message}`); };
+            if ((v.type || 'LIST') !== 'LIST') { noSim('VIEW_TYPE_NOT_SUPPORTED', `${v.type === 'CALENDAR' ? 'カレンダー形式' : v.type === 'CUSTOM' ? 'カスタマイズ形式' : v.type} の一覧です。表形式以外の一覧の変更は計画のみ（仮適用しません）`); return r; }
+            if (v.builtinType) { noSim('BUILTIN_VIEW_NOT_SUPPORTED', `kintone 組み込みの一覧（${v.builtinType}）です。変更は計画のみ（仮適用しません）`); return r; }
             const beforeV = clone(v); let changed = false;
-            if (fields.length) { v.fields = fields.filter(f => typeof f === 'string'); changed = true; }
-            if (spec.filterCond) { v.filterCond = spec.filterCond; changed = true; }
-            if (spec.sort) { v.sort = spec.sort; changed = true; }
-            if (!changed) { issue('NO_STRUCTURED_CHANGE', 'medium', '変更内容を特定できません（要確認）'); r.status = STATUS.NEEDS_CONFIRMATION; r.diff.changeType = CHANGE.NO_CHANGE; r.diff.target = { kind: 'VIEW', id: name }; return r; }
-            r.simulated = true; r.diff.target = { kind: 'VIEW', id: name }; r.diff.before = beforeV; r.diff.after = clone(v);
-            h(`一覧「${name}」を変更`); for (const line of objDiffLines({ fields: beforeV.fields.join(', '), filterCond: beforeV.filterCond, sort: beforeV.sort }, { fields: v.fields.join(', '), filterCond: v.filterCond, sort: v.sort })) h(line);
-            if (r.status === STATUS.VALID) r.status = STATUS.WARNING;
+            const identity = { name: v.name, id: v.id ?? null, type: v.type || 'LIST', fields: [...v.fields], filterCond: v.filterCond || '', sort: v.sort || '' };
+            const newFields = fields.filter(f => typeof f === 'string');
+            if (newFields.length && JSON.stringify(v.fields) !== JSON.stringify(newFields)) {
+              const removed = v.fields.filter(x => !newFields.includes(x)), added = newFields.filter(x => !v.fields.includes(x));
+              if (removed.length) issue('VIEW_FIELDS_REMOVED', 'medium', `一覧「${name}」の表示項目から ${removed.join(', ')} を外します`);
+              if (added.length) issue('VIEW_FIELDS_ADDED', 'low', `一覧「${name}」の表示項目に ${added.join(', ')} を追加します`);
+              if (!removed.length && !added.length) issue('VIEW_FIELDS_REORDERED', 'low', `一覧「${name}」の表示項目の並びを変えます`);
+              v.fields = newFields; changed = true;
+            }
+            if (spec.filterCond && normCond(spec.filterCond) !== normCond(v.filterCond)) { issue('VIEW_FILTER_CHANGE', 'medium', `一覧「${name}」の絞り込み条件を「${v.filterCond || 'なし'}」→「${spec.filterCond}」に変更します（表示されるレコードが変わります）`); v.filterCond = spec.filterCond; changed = true; }
+            if (spec.sort && normCond(spec.sort) !== normCond(v.sort)) { issue('VIEW_SORT_CHANGE', 'medium', `一覧「${name}」の並び順を「${v.sort || 'なし'}」→「${spec.sort}」に変更します`); v.sort = spec.sort; changed = true; }
+            if (!changed) { issue('NO_STRUCTURED_CHANGE', 'medium', '変更内容を特定できません（要確認）'); r.status = STATUS.NEEDS_CONFIRMATION; r.diff.changeType = CHANGE.NO_CHANGE; r.diff.target = { kind: 'VIEW', id: name, identity }; return r; }
+            r.simulated = true; r.diff.target = { kind: 'VIEW', id: name, identity }; r.diff.before = viewView(beforeV); r.diff.after = viewView(v);
+            h(`✎ 一覧「${name}」を変更`); for (const line of objDiffLines(r.diff.before, r.diff.after)) h(line);
+            // 表示項目の追加だけなら SAFE 候補。絞り込み / 並び順 / 表示項目の削除・並び替え・不明なソート項目は確認必須
+            if (issues.length && issues.every(i => i.code === 'VIEW_FIELDS_ADDED')) r.safety = SAFETY.SAFE;
+            else if (r.status === STATUS.VALID) r.status = STATUS.NEEDS_CONFIRMATION;
           }
           break;
         }
@@ -6021,16 +6124,21 @@
     // ================= 表示用 =================
     const fieldView = (f) => ({ code: f.code, label: f.label, type: f.type, required: !!f.required, ...(f.unique ? { unique: true } : {}), ...(f.options ? { options: [...f.options] } : {}), ...(f.expression ? { expression: f.expression } : {}), ...(f.lookup ? { lookup: clone(f.lookup) } : {}), ...(f.temporaryId ? { temporaryId: f.temporaryId } : {}) });
     const notifView = (n) => ({ id: n.id, scope: n.scope, title: n.title, targets: n.targets.map(entityText), filterCond: n.filterCond, events: [...(n.events || [])], ...(n.stepId ? { stepId: n.stepId } : {}) });
-    const JA = { type: '種類', required: '必須', label: '名前', options: '選択肢', expression: '計算式', lookup: 'ルックアップ', targets: '通知先', filterCond: '条件', events: 'イベント', title: 'タイトル', fields: '表示フィールド', sort: '並び順' };
+    /** リマインダーの表示（Phase 11: UPDATE_REMINDER の Before / After。属性単位の差分が出せる平らな形） */
+    const remView = (n) => ({ id: n.id, title: n.title || '', timingField: n.timing?.code ?? null, daysLater: n.timing?.daysLater ?? null, time: n.timing?.time ?? null, filterCond: n.filterCond || '', targets: (n.targets || []).map(entityText) });
+    const viewView = (v) => ({ name: v.name, type: v.type || 'LIST', fields: [...(v.fields || [])], filterCond: v.filterCond || '', sort: v.sort || '', ...(v.id != null ? { id: v.id } : {}), ...(v.builtinType ? { builtinType: v.builtinType } : {}) });
+    const daysText = (d) => (d == null || d === '' ? '—' : Number(d) < 0 ? `${-Number(d)} 日前` : Number(d) === 0 ? '当日' : `${Number(d)} 日後`);
+    const JA = { type: '種類', required: '必須', label: '名前', options: '選択肢', expression: '計算式', lookup: 'ルックアップ', targets: '通知先', filterCond: '条件', events: 'イベント', title: '名前', fields: '表示フィールド', sort: '並び順', timingField: '基準日', daysLater: 'タイミング', time: '時刻', name: '名前' };
     const fmtVal = (v) => (v == null ? '—' : Array.isArray(v) ? (v.length ? v.join(', ') : '（なし）') : typeof v === 'object' ? JSON.stringify(v) : typeof v === 'boolean' ? (v ? 'true' : 'false') : String(v) || '（なし）');
-    /** 変更のある属性だけ Before / After を出す */
+    /** 変更のある属性だけ Before / After を出す（変更していない属性は出さない） */
     function objDiffLines(a, b) {
       const out = [];
       for (const k of new Set([...Object.keys(a || {}), ...Object.keys(b || {})])) {
-        if (k === 'code' || k === 'id' || k === 'scope' || k === 'temporaryId') continue;
+        if (k === 'code' || k === 'id' || k === 'scope' || k === 'temporaryId' || k === 'builtinType') continue;
         const x = a?.[k], y = b?.[k];
         if (JSON.stringify(x) === JSON.stringify(y)) continue;
-        out.push(`${JA[k] || k}: ${fmtVal(x)} → ${fmtVal(y)}`);
+        const fv = k === 'daysLater' ? daysText : fmtVal;
+        out.push(`${JA[k] || k}: ${fv(x)} → ${fv(y)}`);
       }
       return out;
     }
@@ -6066,6 +6174,7 @@
     return {
       REVIEW_VERSION, STATUS, SAFETY, CHANGE, ACTION_CAPABILITIES, HIGH_RISK,
       buildBeforeModel, normalizeSpec, parseEntity, parseCond, condsOverlap, condNarrower, review, processMermaid, processSummary, objDiffLines, executorOutput,
+      remView, viewView, daysText,
     };
   })();
 
