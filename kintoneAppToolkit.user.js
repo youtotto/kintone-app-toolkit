@@ -10217,7 +10217,12 @@
       const out = reviewOutput();
       const pre = host.querySelector('#kt-ai-review-json'); if (pre && out) pre.textContent = JSON.stringify(out, null, 2);
       const sum = host.querySelector('#kt-ai-review-decisions'); if (sum && lastReview) sum.textContent = KTContextUi.decisionSummary(lastReview, decisions);
-      if (execState.stage !== 'running' && execState.stage !== 'rolling-back') { if (execState.stage !== 'idle') resetExec(); renderExec(); }
+      // 処理中は触らない。反映した後（done / rollback 系）は判断を変えても実行結果と「変更前の状態に戻す」を失わない（Phase 13 実機: 判断の変更で結果が消え、戻せなくなった）。
+      // 反映前の確認 / blocked はやり直し（新しい判断で prepare し直す）
+      if (['running', 'preparing', 'rolling-back', 'rollback-preparing'].includes(execState.stage)) return;
+      if (execState.execution) { renderExec(); return; }
+      if (execState.stage !== 'idle') resetExec();
+      renderExec();
     };
     /** 変更計画の作成（Planner Context を送る。設定は変更しない）。二重送信防止・requestId 保持 */
     async function plan() {

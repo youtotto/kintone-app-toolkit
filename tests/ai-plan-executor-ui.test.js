@@ -404,6 +404,10 @@ console.log('\n--- 2f. Phase 13: ルックアップ（§38 参照元の表示 / 
   assert(m.panel.executorState().stage === 'done' && ex.status === 'DONE' && ex.steps.every(s => s.status === 'VERIFIED') && m.mock.st.fields.customer_lookup.lookup.fieldMappings.length === 4 && m.mock.st.fields.customer_lookup.lookup.relatedApp.app === '500', '反映: 3 step VERIFIED・取得項目 4 件・参照元は不変');
   const e2 = execHtml(m);
   assert(e2.includes('✓ 3 件 VERIFIED') && e2.includes('id="kt-ai-exec-lookup-result"') && e2.includes('✓ ルックアップ「顧客マスタ参照」: 取得項目 2 → 4 件。参照元 App 500「顧客マスタ」: 取得元フィールドは存在・参照元のフィールド定義は Review 時点と同じ。検索方法は kintone が管理（検証対象外）') && e2.includes('Simulationとの一致：✓') && e2.includes('ルックアップの依存 customer_lookup:') && hasButton(e2, '変更前の状態に戻す'), '§41: 結果にルックアップの行（取得項目 2 → 4・参照元の確認・検索方法の注記）と再解析の edge');
+  // 実機（Phase 13 Case A）: 反映後に判断のセレクトを触ると Executor が idle に戻り、実行結果と「変更前の状態に戻す」が消えた → 反映後は判断を変えても結果を保つ
+  m.panel.decide('P2', '');
+  assert(m.panel.executorState().stage === 'done' && m.panel.executorState().execution && m.panel.executorState().execution.status === 'DONE' && hasButton(execHtml(m), '変更前の状態に戻す'), '反映後に判断を変えても実行結果と [変更前の状態に戻す] は消えない');
+  m.panel.decide('P2', 'approve');
   await click(m, 'kt-ai-exec-rollback-start'); await tick();
   const r1 = execHtml(m);
   assert(m.panel.executorState().stage === 'rollback-confirm' && r1.includes('・ルックアップ変更 1 件') && r1.includes('・フィールド追加 2 件') && r1.includes('実行前のルックアップ設定（取得項目・選択時表示・絞り込み・並び順）に戻す。参照元アプリには触れない') && r1.indexOf('ルックアップ変更') < r1.indexOf('フィールドを削除'), 'rollback 確認: ルックアップの復元（先）とフィールド削除（後）');
