@@ -5952,7 +5952,7 @@
     const ACTION_JA = {
       ADD_FIELD: 'フィールド追加', UPDATE_FIELD: 'フィールド変更', REUSE_FIELD: '既存フィールド利用', ADD_PROCESS_STATUS: 'ステータス追加', UPDATE_PROCESS: 'プロセス管理変更', ADD_PROCESS_ACTION: 'プロセスアクション追加',
       ADD_NOTIFICATION: '通知追加', UPDATE_NOTIFICATION: '通知変更', ADD_REMINDER: 'リマインダー追加', ADD_VIEW: '一覧追加', UPDATE_VIEW: '一覧変更', UPDATE_RECORD_ACL: 'レコードのアクセス権変更', UPDATE_FIELD_ACL: 'フィールドのアクセス権変更',
-      ADD_APP_ACTION: 'アプリアクション追加', UPDATE_APP_ACTION: 'アプリアクション変更', UPDATE_LOOKUP: 'ルックアップ変更', REQUIRE_CONFIRMATION: '要確認', CUSTOMIZATION_REQUIRED: 'カスタマイズが必要',
+      ADD_APP_ACTION: 'アプリアクション追加', UPDATE_APP_ACTION: 'アプリアクション変更', ADD_LOOKUP: 'ルックアップ追加', UPDATE_LOOKUP: 'ルックアップ変更', REQUIRE_CONFIRMATION: '要確認', CUSTOMIZATION_REQUIRED: 'カスタマイズが必要',
     };
     /** Change Plan → HTML（実現したいこと / 現在利用できるもの / 追加が必要なもの / 変更計画 / 代替案 / 影響範囲 / 確認したいこと / 解析できないこと / JSON） */
     function planHtml(plan) {
@@ -5978,7 +5978,7 @@
         const issues = (st.validation?.issues || []).map(x => `<div style="font-size:11px; color:#b00020;">※ ${esc(x)}</div>`).join('');
         return `<div class="kt-ai-step" data-step="${esc(st.id)}" style="border:1px solid ${bc}; border-left:4px solid ${bc}; border-radius:6px; padding:6px 8px; margin-top:6px;">
           <div><b>${esc(st.id)}</b> ${STEP_STATUS_BADGE(st) ? badge(...STEP_STATUS_BADGE(st)) : ''}${badge(...STEP_KIND_BADGE(st))}${badge(ACTION_JA[st.actionType] || st.actionType, '#555')}${badge(CONF_JA_PLAN[st.confidence] || st.confidence, '#555')} ${esc(st.title)}</div>
-          <div style="margin-top:2px;">対象：${st.targetKind === 'PROPOSED_FIELD' ? `${badge('新規', '#1a73e8')}${esc(st.targetRef || '')}` : st.targetRef ? `${badge(st.targetExists === false ? '不明' : '既存', st.targetExists === false ? '#b00020' : '#2e7d32')}${esc(st.targetKind)} <code>${esc(st.targetRef)}</code>` : '（なし）'}</div>
+          <div style="margin-top:2px;">対象：${st.targetKind === 'PROPOSED_FIELD' ? `${badge('新規', '#1a73e8')}${esc(st.targetRef || '')}` : st.targetRef ? `${st.targetExists === false ? (/^ADD_/.test(st.actionType) ? badge('新規', '#1a73e8') : badge('不明', '#b00020')) : badge('既存', '#2e7d32')}${esc(st.targetKind)} <code>${esc(st.targetRef)}</code>` : '（なし）'}</div>
           <div style="margin-top:2px;">${esc(st.proposal?.summary || '')}</div>${details}
           <div style="margin-top:2px; opacity:.85;">理由：${esc(st.reason)}${chips(st.evidenceIds)}</div>
           ${(st.dependsOn || []).length ? `<div style="font-size:11px; opacity:.7;">依存：${esc(st.dependsOn.join(', '))} の後</div>` : ''}${issues}
@@ -5994,7 +5994,7 @@
         ${sec('追加が必要なもの', `${li(a.missingCapabilities || [], x => `<li>${esc(x)}</li>`, '追加が必要なものはありません')}${proposed}`)}
         ${sec('変更計画', mainSteps.length ? mainSteps.map(stepHtml).join('') : '<div style="opacity:.6; margin-top:4px;">計画の手順はありません</div>')}
         ${(plan.alternatives || []).length ? sec('代替案', plan.alternatives.map(alt => `<div style="margin-top:6px;"><b>${esc(alt.id)}</b> ${esc(alt.title)} <span style="opacity:.8;">${esc(alt.summary)}</span>${(alt.stepIds || []).length ? `<div style="font-size:11px; opacity:.7;">対象の手順: ${esc(alt.stepIds.join(', '))}</div>` : ''}${altSteps(alt).map(stepHtml).join('')}</div>`).join('')) : ''}
-        ${sec('影響範囲', li(plan.impact || [], x => `<li>${x.validation?.status === 'invalid' ? badge('不明な対象', '#b00020') : x.validation?.status === 'proposed' ? badge('新規提案', '#1a73e8') : badge('既存', '#2e7d32')}${esc(x.targetKind)}${x.targetRef ? ` <code>${esc(x.targetRef)}</code>` : ''}: ${esc(x.description)}${chips(x.evidenceIds)}</li>`, '既存設定への影響は挙げられていません'))}
+        ${sec('影響範囲', li(plan.impact || [], x => `<li>${x.validation?.status === 'invalid' ? badge('不明な対象', '#b00020') : (x.validation?.status === 'proposed' || x.targetKind === 'PROPOSED_FIELD') ? badge('新規提案', '#1a73e8') : badge('既存', '#2e7d32')}${esc(x.targetKind)}${x.targetRef ? ` <code>${esc(x.targetRef)}</code>` : ''}: ${esc(x.description)}${chips(x.evidenceIds)}</li>`, '既存設定への影響は挙げられていません'))}
         ${sec('確認したいこと', li(plan.questions || [], q => `<li>${badge('確認必要', '#b26a00')}<b>${esc(q.id)}</b> ${esc(q.question)} <span style="opacity:.7;">（${esc(q.reason)}）</span>${chips(q.relatedEvidenceIds)}</li>`, '確認事項はありません'))}
         ${sec('解析できないこと', li(plan.unknowns || [], u => `<li>${esc(u)}</li>`, 'なし'))}
         ${warn.length ? `<details style="margin-top:6px; font-size:11px;"><summary style="cursor:pointer;">検証で除去・調整した項目（${warn.length}）</summary>${warn.map(w => `<div>${esc(w.code)}: ${esc(w.message)}</div>`).join('')}</details>` : ''}
