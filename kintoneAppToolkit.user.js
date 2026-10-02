@@ -6044,6 +6044,42 @@
       return diffs;
     }
 
+    // ================= step の分類（API を呼ばない。UI の件数表示と prepare で共用）=================
+    /** 承認 / Review の判定 / allowlist（capability ＋ handler の prepare）/ 依存 の順に、各 step を PENDING / SKIPPED / UNSUPPORTED / BLOCKED に分ける */
+    function classifySteps({ plan, review, approvedSteps = [] } = {}) {
+      const steps = Array.isArray(plan?.steps) ? plan.steps : [];
+      const approved = [...new Set(Array.isArray(approvedSteps) ? approvedSteps : [])];
+      const byId = new Map(steps.map(s => [s.id, s]));
+      const rv = new Map((review?.steps || []).map(r => [r.stepId, r]));
+      const order = Array.isArray(review?.simulation?.order) && review.simulation.order.length ? review.simulation.order : steps.map(s => s.id);
+      const states = new Map();
+      for (const id of order) {
+        const step = byId.get(id); const r = rv.get(id);
+        if (!step) continue;
+        const cap = ACTION_CAPABILITIES[step.actionType] || null;
+        const st = { stepId: id, actionType: step.actionType, title: step.title || '', status: STEP.PENDING, reason: null, message: '', dependsOn: [...(step.dependsOn || [])], capability: cap ? { previewExecute: cap.previewExecute, verify: cap.verify, rollbackStrategy: cap.rollbackStrategy, productionDeploy: false } : null, review: r ? { status: r.status, safety: r.safety } : null, approved: approved.includes(id), prepared: null };
+        const set = (status, reason, message) => { st.status = status; st.reason = reason; st.message = message; };
+        if (!st.approved) set(STEP.SKIPPED, 'NOT_APPROVED', '承認されていません');
+        else if (!r) set(STEP.BLOCKED, 'NO_REVIEW', 'Review の結果がありません');
+        else if (r.status === KTPlanReview.STATUS.INVALID || r.status === KTPlanReview.STATUS.BLOCKED_BY_DEPENDENCY || r.safety === KTPlanReview.SAFETY.BLOCKED) set(STEP.BLOCKED, 'REVIEW_BLOCKED', 'Review で実行不可と判定されています');
+        else if (r.safety === KTPlanReview.SAFETY.PLAN_ONLY) set(STEP.UNSUPPORTED, 'PLAN_ONLY', '計画のみ（自動反映の対象外）');
+        else if (!cap || !cap.previewExecute || !HANDLERS[step.actionType]) set(STEP.UNSUPPORTED, 'PREVIEW_NOT_SUPPORTED', '現在の Executor では自動反映できません');
+        else {
+          const p = HANDLERS[step.actionType].prepare(step, { stepReview: r, plan });
+          if (p.unsupported) set(STEP.UNSUPPORTED, p.unsupported, p.message);
+          else st.prepared = p;
+        }
+        states.set(id, st);
+      }
+      // 依存: 依存先が実行されない（SKIPPED / UNSUPPORTED / BLOCKED）なら BLOCKED
+      for (const st of states.values()) {
+        if (st.status !== STEP.PENDING) continue;
+        const bad = st.dependsOn.filter(d => { const ds = states.get(d); return !ds || ds.status !== STEP.PENDING; });
+        if (bad.length) { st.status = STEP.BLOCKED; st.reason = 'DEPENDENCY_NOT_EXECUTABLE'; st.message = `依存する ${bad.join(', ')} が実行されないため反映できません`; }
+      }
+      return [...states.values()];
+    }
+
     // ================= prepare =================
     /**
      * @param {object} input executorOutput() の { plan, review, approvedSteps }（review は simulation.before / after を含んでよい）
@@ -6065,35 +6101,9 @@
       if (!before) { block('NO_BEFORE_MODEL', 'Review に Before モデルがありません（古い Review。計画を作り直してください）'); return prepared; }
 
       // ---- 1. step の分類（承認 / Review の判定 / allowlist / 依存）----
-      const byId = new Map(plan.steps.map(s => [s.id, s]));
       const rv = new Map(review.steps.map(r => [r.stepId, r]));
-      const order = Array.isArray(review.simulation?.order) && review.simulation.order.length ? review.simulation.order : plan.steps.map(s => s.id);
-      const states = new Map();
-      for (const id of order) {
-        const step = byId.get(id); const r = rv.get(id);
-        if (!step) continue;
-        const cap = ACTION_CAPABILITIES[step.actionType] || null;
-        const st = { stepId: id, actionType: step.actionType, title: step.title || '', status: STEP.PENDING, reason: null, message: '', dependsOn: [...(step.dependsOn || [])], capability: cap ? { previewExecute: cap.previewExecute, verify: cap.verify, rollbackStrategy: cap.rollbackStrategy, productionDeploy: false } : null, review: r ? { status: r.status, safety: r.safety } : null, approved: approved.includes(id), prepared: null };
-        const set = (status, reason, message) => { st.status = status; st.reason = reason; st.message = message; };
-        if (!st.approved) set(STEP.SKIPPED, 'NOT_APPROVED', '承認されていません');
-        else if (!r) set(STEP.BLOCKED, 'NO_REVIEW', 'Review の結果がありません');
-        else if (r.status === KTPlanReview.STATUS.INVALID || r.status === KTPlanReview.STATUS.BLOCKED_BY_DEPENDENCY || r.safety === KTPlanReview.SAFETY.BLOCKED) set(STEP.BLOCKED, 'REVIEW_BLOCKED', 'Review で実行不可と判定されています');
-        else if (r.safety === KTPlanReview.SAFETY.PLAN_ONLY) set(STEP.UNSUPPORTED, 'PLAN_ONLY', '計画のみ（自動反映の対象外）');
-        else if (!cap || !cap.previewExecute || !HANDLERS[step.actionType]) set(STEP.UNSUPPORTED, 'PREVIEW_NOT_SUPPORTED', '現在の Executor では自動反映できません');
-        else {
-          const p = HANDLERS[step.actionType].prepare(step, { stepReview: r, plan });
-          if (p.unsupported) set(STEP.UNSUPPORTED, p.unsupported, p.message);
-          else { st.prepared = p; if (p.temporaryId) prepared.temporaryIdMap[p.temporaryId] = p.expect.code; }
-        }
-        states.set(id, st);
-      }
-      // 依存: 依存先が実行されない（SKIPPED / UNSUPPORTED / BLOCKED）なら BLOCKED
-      for (const st of states.values()) {
-        if (st.status !== STEP.PENDING) continue;
-        const bad = st.dependsOn.filter(d => { const ds = states.get(d); return !ds || ds.status !== STEP.PENDING; });
-        if (bad.length) { st.status = STEP.BLOCKED; st.reason = 'DEPENDENCY_NOT_EXECUTABLE'; st.message = `依存する ${bad.join(', ')} が実行されないため反映できません`; }
-      }
-      prepared.steps = [...states.values()];
+      prepared.steps = classifySteps({ plan, review, approvedSteps: approved });
+      for (const st of prepared.steps) if (st.prepared?.temporaryId) prepared.temporaryIdMap[st.prepared.temporaryId] = st.prepared.expect.code;
       const summarize = () => { prepared.summary = { executable: prepared.steps.filter(s => s.status === STEP.PENDING).length, unsupported: prepared.steps.filter(s => s.status === STEP.UNSUPPORTED).length, blocked: prepared.steps.filter(s => s.status === STEP.BLOCKED).length, skipped: prepared.steps.filter(s => s.status === STEP.SKIPPED).length }; };
       const pending = prepared.steps.filter(s => s.status === STEP.PENDING);
       if (!pending.length) { block('NOTHING_TO_EXECUTE', '承認済みで実行できる step がありません'); summarize(); return prepared; }
@@ -6296,7 +6306,7 @@
 
     return {
       EXECUTOR_VERSION, ENV, STEP, RUN, PREVIEW_FIELD_TYPES, ACTION_CAPABILITIES, HANDLERS,
-      prepare, executePreview, buildRollbackPlan, buildAudit, compareSimulation, diffBefore, previewDataFrom, layoutHasCode, createKintoneApi,
+      classifySteps, prepare, executePreview, buildRollbackPlan, buildAudit, compareSimulation, diffBefore, previewDataFrom, layoutHasCode, createKintoneApi,
     };
   })();
 
@@ -7346,7 +7356,81 @@
         <pre id="kt-ai-review-raw" style="display:none; margin-top:6px; max-height:320px; overflow:auto; font-size:11px; white-space:pre-wrap;">${esc(JSON.stringify(review.diff, null, 2))}</pre>
         <div style="margin-top:6px; font-size:11px; opacity:.7;">検証範囲: ${covText}</div>
         <div style="font-size:11px; opacity:.7;">このレビューは設定を変更しません（計画の検証のみ）。実行可否は Toolkit の判定が正本です。</div>
+        <div id="kt-ai-exec" style="margin-top:8px;"></div>
       </div>`;
+    }
+
+    // ---- Preview Executor（Phase 9）の表示。設定を書くのは KTPlanExecutor。ここは HTML だけ ----
+    const EXEC_STEP_JA = { PENDING: '待機中', RUNNING: '処理中...', APPLIED: '反映済み（検証中）', VERIFIED: 'VERIFIED', VERIFY_FAILED: 'VERIFY_FAILED（状態不一致）', FAILED: 'FAILED', SKIPPED: '未実行', BLOCKED: '実行不可', UNSUPPORTED: 'PLAN_ONLY', ROLLED_BACK: 'ROLLED_BACK' };
+    const EXEC_STEP_COLOR = { VERIFIED: '#2e7d32', APPLIED: '#1a73e8', RUNNING: '#1a73e8', VERIFY_FAILED: '#b00020', FAILED: '#b00020', BLOCKED: '#b00020', UNSUPPORTED: '#555', SKIPPED: '#777', PENDING: '#777' };
+    const EXEC_REASON_JA = { NOT_APPROVED: '承認されていません', REVIEW_BLOCKED: 'Review で実行不可', PLAN_ONLY: '現在の Executor では自動反映できません', PREVIEW_NOT_SUPPORTED: '現在の Executor では自動反映できません', FIELD_TYPE_NOT_SUPPORTED: 'このフィールド型は現在の Executor では追加できません', OPTIONS_MISSING: '選択肢が決まっていません', DEPENDENCY_NOT_EXECUTABLE: '依存する step が実行されません', REVALIDATION_FAILED: '実行前の再検証で止まりました', STOPPED_AFTER_FAILURE: '前の step の失敗で停止', DEPENDENCY_NOT_VERIFIED: '依存 step が検証済みでない', PERMISSION_DENIED: 'アプリ設定を変更する権限がありません', REVISION_MISMATCH: '他の変更が入りました（revision 不一致）', TARGET_EXISTS: '同じ名前 / コードが既にあります', API_ERROR: 'API エラー', VERIFY_FAILED: 'API は成功したが状態が一致しません' };
+    const execActionJa = (a) => ({ ADD_FIELD: 'フィールド追加', ADD_VIEW: '一覧追加', ADD_NOTIFICATION: '通知追加', ADD_REMINDER: 'リマインダー追加' }[a] || ACTION_JA[a] || a);
+    const execStepLine = (st) => `<div style="display:flex; gap:8px; align-items:baseline; font-size:12px;"><span style="min-width:34px; font-weight:600;">${esc(st.stepId)}</span><span style="flex:1;">${esc(st.title || execActionJa(st.actionType))}</span><span style="color:${EXEC_STEP_COLOR[st.status] || '#555'}; font-weight:600;">${esc(EXEC_STEP_JA[st.status] || st.status)}</span></div>${st.status !== 'VERIFIED' && st.status !== 'RUNNING' && st.status !== 'PENDING' && (st.message || st.reason) ? `<div style="font-size:11px; opacity:.75; margin-left:42px;">${esc(st.message || EXEC_REASON_JA[st.reason] || st.reason)}</div>` : ''}`;
+    /**
+     * @param {object} s { stage: 'idle'|'preparing'|'blocked'|'confirm'|'running'|'done', classified[], prepared, execution, error, available }
+     */
+    function executorHtml(s) {
+      const cls = s.classified || [];
+      const executable = cls.filter(x => x.status === 'PENDING'), unsupported = cls.filter(x => x.status === 'UNSUPPORTED'), blocked = cls.filter(x => x.status === 'BLOCKED');
+      const line = (ids, label, color, mark) => `<div style="display:flex; justify-content:space-between; font-size:12px;"><span style="color:${color};">${mark} ${esc(label)}</span><b>${ids.length} 件${ids.length ? `（${esc(ids.map(x => x.stepId).join(', '))}）` : ''}</b></div>`;
+      const unsupportedList = unsupported.length ? `<div style="margin-top:4px; display:grid; gap:2px;">${unsupported.map(x => `<div style="font-size:11px; opacity:.8;">${esc(x.stepId)} ${esc(x.title || execActionJa(x.actionType))}：<b>PLAN_ONLY</b> — ${esc(EXEC_REASON_JA[x.reason] || x.message || x.reason)}</div>`).join('')}</div>` : '';
+      const head = `<div style="border-top:1px dashed #1a73e8; padding-top:8px;"><b>動作テスト環境への反映（Preview Executor）</b>
+        <div style="margin-top:4px; display:grid; gap:2px;">${line(executable, '承認済み・実行可能', '#2e7d32', '✓')}${line(unsupported, '承認済みだが未対応', '#b26a00', '△')}${line(blocked, '実行不可', '#b00020', '×')}</div>${unsupportedList}`;
+      const foot = '</div>';
+      const note = (t, color = '#555') => `<div style="font-size:11px; color:${color}; margin-top:4px;">${esc(t)}</div>`;
+      if (s.stage === 'idle' || s.stage === 'preparing') {
+        const disabled = s.stage === 'preparing' || !executable.length || !s.available;
+        return `${head}<div style="margin-top:8px; display:flex; gap:6px; align-items:center; flex-wrap:wrap;"><button type="button" id="kt-ai-exec-start" class="btn" style="height:28px; font-weight:600;"${disabled ? ' disabled' : ''}>動作テスト環境へ反映</button><span style="font-size:11px; opacity:.75;">${s.stage === 'preparing' ? '現在の設定を確認しています...' : !s.available ? 'この環境では実行できません（kintone API が無い）' : !executable.length ? '承認済みで実行できる step がありません' : '運用環境には反映されません（動作テスト環境のみ）'}</span></div>${foot}`;
+      }
+      if (s.stage === 'blocked') {
+        const p = s.prepared;
+        const stale = p?.stale?.status === 'STALE' ? `<div style="margin-top:4px; display:grid; gap:2px;">${(p.stale.diffs || []).slice(0, 12).map(d => `<div style="font-size:11px;">・${esc(d.message)}</div>`).join('')}</div>` : '';
+        const blockers = (p?.blockers || s.error ? [...(p?.blockers || []), ...(s.error ? [{ code: 'ERROR', message: s.error }] : [])] : []).map(b => `<div style="font-size:12px; color:#b00020;">× ${esc(b.message)} <span style="opacity:.7;">[${esc(b.code)}]</span></div>`).join('');
+        return `${head}<div style="margin-top:8px; border:1px solid #b00020; border-radius:6px; padding:6px;">${blockers}${stale}${note('設定は変更していません。計画を作り直すか、動作テスト環境の変更を確認してください。')}</div><div style="margin-top:6px;"><button type="button" id="kt-ai-exec-start" class="btn" style="height:26px; font-size:11px;">もう一度確認する</button></div>${foot}`;
+      }
+      if (s.stage === 'confirm') {
+        const p = s.prepared;
+        const pend = (p?.steps || []).filter(x => x.status === 'PENDING');
+        const byType = {};
+        for (const x of pend) byType[x.actionType] = (byType[x.actionType] || 0) + 1;
+        const lines = Object.entries(byType).map(([a, n]) => `<div style="font-size:12px;">＋ ${esc(execActionJa(a))} ${n} 件</div>`).join('');
+        const details = pend.map(x => `<div style="font-size:11px; opacity:.85;">${esc(x.stepId)} ${esc(x.prepared?.summary || x.title)}</div>`).join('');
+        return `${head}<div id="kt-ai-exec-confirm" style="margin-top:8px; border:2px solid #b26a00; border-radius:6px; padding:8px;">
+          <b>動作テスト環境へ以下を反映します。</b>
+          <div style="margin-top:4px;">${lines}</div><div style="margin-top:4px; display:grid; gap:2px;">${details}</div>
+          <div style="margin-top:6px; font-size:12px;"><b>運用環境には反映されません。</b>（動作テスト環境 revision ${esc(String(p?.revision?.preview ?? '—'))}・実行前の設定は snapshot として保持します）</div>
+          <div style="margin-top:8px; display:flex; gap:6px;"><button type="button" id="kt-ai-exec-cancel" class="btn" style="height:28px;">キャンセル</button><button type="button" id="kt-ai-exec-go" class="btn" style="height:28px; font-weight:600; border-color:#b26a00;">動作テスト環境へ反映</button></div>
+        </div>${foot}`;
+      }
+      if (s.stage === 'running' || s.stage === 'done') {
+        const ex = s.execution;
+        const steps = ex?.steps || (s.prepared?.steps || []);
+        const list = `<div id="kt-ai-exec-progress" style="margin-top:6px; display:grid; gap:3px;">${steps.map(execStepLine).join('')}</div>`;
+        if (s.stage === 'running') return `${head}<div style="margin-top:8px;"><b>動作テスト環境へ反映しています...</b>${list}${note('画面を閉じずにお待ちください（運用環境には反映されません）')}</div>${foot}`;
+        const verified = steps.filter(x => x.status === 'VERIFIED').length, warn = steps.filter(x => x.status === 'VERIFY_FAILED').length, failed = steps.filter(x => x.status === 'FAILED').length, skipped = steps.filter(x => x.status === 'SKIPPED' && x.reason !== 'NOT_APPROVED').length;
+        const ok = ex?.status === 'DONE';
+        const sim = ex?.simulation;
+        const simText = !sim || sim.compared === false ? 'Simulationとの一致：—（比較していません）' : sim.match ? 'Simulationとの一致：✓' : `Simulationとの一致：× SIMULATION_MISMATCH（${(sim.mismatches || []).map(m => m.id).join(', ')}）`;
+        const re = ex?.reanalysis;
+        const reText = re?.available ? `再解析：フィールド ${re.after.fields} 件（実行前 ${re.before?.fields ?? '—'}）・依存 ${re.after.edges} 件・存在しない参照 ${re.after.brokenRefs ?? '—'} 件（実行前 ${re.before?.brokenRefs ?? '—'}）${(re.addedFields || []).length ? '・追加フィールドの参照 ' + re.addedFields.map(a => `${a.code}: ${a.directRefs}`).join(', ') : ''}` : '再解析：—';
+        const title = ok ? '動作テスト環境への反映が完了しました。' : `${verified} 件反映済み・${failed + warn} 件失敗・以降未実行（${skipped} 件）`;
+        return `${head}<div id="kt-ai-exec-result" style="margin-top:8px; border:2px solid ${ok ? '#2e7d32' : '#b00020'}; border-radius:6px; padding:8px;">
+          <b>${esc(title)}</b>
+          <div style="margin-top:4px; font-size:12px;">✓ ${verified} 件 VERIFIED　⚠ ${warn} 件　× ${failed} 件</div>
+          <div style="font-size:12px;">${esc(simText)}</div>
+          <div style="font-size:11px; opacity:.8;">${esc(reText)}</div>
+          ${list}
+          <div style="margin-top:6px; font-size:12px;"><b>運用環境にはまだ反映されていません。</b>（反映は kintone のアプリ設定画面から行ってください。Executor は運用環境へ反映しません）</div>
+          <div style="margin-top:8px; display:flex; gap:6px; flex-wrap:wrap;">
+            <button type="button" id="kt-ai-exec-audit-copy" class="btn" style="height:26px; font-size:11px;">監査 JSON をコピー</button>
+            <button type="button" id="kt-ai-exec-audit-download" class="btn" style="height:26px; font-size:11px;">監査 JSON を保存</button>
+            <button type="button" id="kt-ai-exec-snapshot-copy" class="btn" style="height:26px; font-size:11px;">実行前スナップショットをコピー</button>
+            <button type="button" id="kt-ai-exec-rollback-toggle" class="btn" style="height:26px; font-size:11px;">ロールバック計画を見る</button>
+          </div>
+          <pre id="kt-ai-exec-rollback" style="display:none; margin-top:6px; max-height:240px; overflow:auto; font-size:11px; white-space:pre-wrap;">${esc(JSON.stringify(s.rollbackPlan || null, null, 2))}</pre>
+        </div>${foot}`;
+      }
+      return `${head}${foot}`;
     }
 
     /** 判断の集計（承認 / 保留 / 却下 / 未定）。decisions は stepId → 'approve' | 'hold' | 'reject' */
@@ -7461,7 +7545,7 @@
       listTargets, fileLabel, toBuildRequest, generate, coverageRows, truncationSummary, sizeSummary, outputFilename,
       panelHtml, resultHtml, capabilityStatusText, sessionLinesHtml, answerHtml, evidenceDetailHtml,
       // AI Change Planner（Phase 7）/ Review（Phase 8）
-      PLANNER_PRESETS, generatePlan, planHtml, planJson, reviewHtml, reviewStepHtml, decisionSummary,
+      PLANNER_PRESETS, generatePlan, planHtml, planJson, reviewHtml, reviewStepHtml, decisionSummary, executorHtml,
     };
   })();
 
@@ -7509,6 +7593,9 @@
     let lastPlan = null;
     let lastReview = null;         // KTPlanReview.review の結果（Toolkit 検証）
     const decisions = new Map();   // stepId → approve | hold | reject（MVP: 保存しない）
+    // Preview Executor（Phase 9）。d.executor = { api, appId }。api は kintone のセッション認証（このユーザーの権限）で動作テスト環境だけを書く
+    const executor = d.executor && d.executor.api ? d.executor : null;
+    const execState = { stage: 'idle', prepared: null, execution: null, error: null, rollbackPlan: null };
     const settings = d.settings || null;
     const session = d.session || null;
     const paidEnabled = !!(settings && session);
@@ -7614,6 +7701,7 @@
       $planResult.style.display = '';
       $factDetail.style.display = 'none';
       renderMermaid($planResult);
+      resetExec(); renderExec();
     }
     /** プロセスの Before / After を Mermaid で描く（mermaid があるときだけ。無ければコードのまま表示） */
     function renderMermaid(root) {
@@ -7625,12 +7713,48 @@
       try { const r = m.run({ nodes: divs }); if (r && typeof r.catch === 'function') r.catch(() => { }); } catch (e) { }
     }
     const reviewOutput = () => (lastPlan && lastReview) ? KTPlanReview.executorOutput(lastPlan, lastReview, [...decisions.entries()].filter(([, v]) => v === 'approve').map(([k]) => k)) : null;
-    /** 判断を記録し、表示中の Review JSON・判断の集計を追従させる（コピーだけが最新だった不一致を無くす） */
+    // ---- Preview Executor の表示・操作 ----
+    const execClassified = () => { const out = reviewOutput(); return out ? KTPlanExecutor.classifySteps(out) : []; };
+    function renderExec() {
+      const el = host.querySelector('#kt-ai-exec'); if (!el) return;
+      el.innerHTML = KTContextUi.executorHtml({ ...execState, classified: execClassified(), available: !!executor });
+    }
+    const resetExec = () => { execState.stage = 'idle'; execState.prepared = null; execState.execution = null; execState.error = null; execState.rollbackPlan = null; };
+    /** 「動作テスト環境へ反映」: 現在の設定を取得して stale / 権限 / 再検証（書き込みなし）→ 最終確認へ */
+    async function startExecutor() {
+      if (!executor || execState.stage === 'running' || execState.stage === 'preparing') return null;
+      const out = reviewOutput(); if (!out) return null;
+      execState.stage = 'preparing'; execState.prepared = null; execState.execution = null; execState.error = null; renderExec();
+      try {
+        const prepared = await KTPlanExecutor.prepare(out, { api: executor.api, appId: executor.appId });
+        execState.prepared = prepared;
+        execState.stage = prepared.status === 'PREPARED' ? 'confirm' : 'blocked';
+      } catch (e) { execState.stage = 'blocked'; execState.error = e?.message || String(e); }
+      renderExec();
+      return execState.prepared;
+    }
+    const cancelExecutor = () => { if (execState.stage === 'confirm' || execState.stage === 'blocked') { resetExec(); renderExec(); } };
+    /** 最終確認の後: 動作テスト環境へ反映（dependsOn 順・Fail Stop・1 step ごとに検証）。運用環境へは反映しない */
+    async function confirmExecutor() {
+      if (!executor || execState.stage !== 'confirm' || !execState.prepared) return null;
+      execState.stage = 'running'; renderExec();
+      try {
+        const inputs = d.getInputs ? (d.getInputs() || {}) : {};
+        const execution = await KTPlanExecutor.executePreview(execState.prepared, { api: executor.api, review: lastReview, data: inputs.data || null, onProgress: (step, partial) => { execState.execution = partial; renderExec(); } });
+        execState.execution = execution;
+        execState.rollbackPlan = KTPlanExecutor.buildRollbackPlan(execution, execState.prepared);
+      } catch (e) { execState.error = e?.message || String(e); execState.execution = execState.execution || { status: 'FAILED', steps: execState.prepared.steps, simulation: null, reanalysis: null }; }
+      execState.stage = 'done'; renderExec();
+      return execState.execution;
+    }
+    const auditJson = () => (lastPlan && lastReview) ? KTPlanExecutor.buildAudit({ goal: lastPlan.goal, plan: lastPlan, review: lastReview, decisions, prepared: execState.prepared, execution: execState.execution }) : null;
+    /** 判断を記録し、表示中の Review JSON・判断の集計・Executor の件数を追従させる */
     const decide = (stepId, v) => {
       if (v) decisions.set(stepId, v); else decisions.delete(stepId);
       const out = reviewOutput();
       const pre = host.querySelector('#kt-ai-review-json'); if (pre && out) pre.textContent = JSON.stringify(out, null, 2);
       const sum = host.querySelector('#kt-ai-review-decisions'); if (sum && lastReview) sum.textContent = KTContextUi.decisionSummary(lastReview, decisions);
+      if (execState.stage !== 'running') { if (execState.stage !== 'idle') resetExec(); renderExec(); }
     };
     /** 変更計画の作成（Planner Context を送る。設定は変更しない）。二重送信防止・requestId 保持 */
     async function plan() {
@@ -7783,6 +7907,14 @@
         if (id === 'kt-ai-review-json-toggle') { toggle('#kt-ai-review-json'); return; }
         if (id === 'kt-ai-review-raw-toggle') { toggle('#kt-ai-review-raw'); return; }
         if (id === 'kt-ai-review-json-copy') { const out = reviewOutput(); const ok = out ? await d.copyText(JSON.stringify(out, null, 2)) : false; if (t) flashBtnText(t, ok ? 'Copied!' : 'Failed'); return; }
+        // Preview Executor（Phase 9）
+        if (id === 'kt-ai-exec-start') { await startExecutor(); return; }
+        if (id === 'kt-ai-exec-cancel') { cancelExecutor(); return; }
+        if (id === 'kt-ai-exec-go') { await confirmExecutor(); return; }
+        if (id === 'kt-ai-exec-audit-copy') { const a = auditJson(); const ok = a ? await d.copyText(JSON.stringify(a, null, 2)) : false; if (t) flashBtnText(t, ok ? 'Copied!' : 'Failed'); return; }
+        if (id === 'kt-ai-exec-audit-download') { const a = auditJson(); if (a) { const name = `toolkit-ai-execution-${execState.execution?.executionId || 'audit'}.json`; const text = JSON.stringify(a, null, 2); if (typeof d.downloadText === 'function') d.downloadText(name, text, 'application/json;charset=utf-8'); else if (typeof KTExport !== 'undefined' && KTExport.downloadText) KTExport.downloadText(name, text, 'application/json;charset=utf-8'); } return; }
+        if (id === 'kt-ai-exec-snapshot-copy') { const snap = execState.execution?.snapshot || execState.prepared?.snapshot || null; const ok = snap ? await d.copyText(JSON.stringify(snap, null, 2)) : false; if (t) flashBtnText(t, ok ? 'Copied!' : 'Failed'); return; }
+        if (id === 'kt-ai-exec-rollback-toggle') { toggle('#kt-ai-exec-rollback'); return; }
         const el = t && typeof t.closest === 'function' ? t.closest('[data-eid]') : t;
         const eid = el?.dataset?.eid ?? (typeof el?.getAttribute === 'function' ? el.getAttribute('data-eid') : null);
         if (eid) showEvidence(eid);
@@ -7926,6 +8058,9 @@
       lastReview: () => lastReview,
       reviewOutput,
       decide,
+      // Preview Executor（Phase 9）
+      executorState: () => execState,
+      startExecutor, confirmExecutor, cancelExecutor, auditJson,
       lastAnswer: () => lastAnswer,
       capability: () => capability,
       currentOutput: () => {
@@ -12417,6 +12552,8 @@
         // 有料: Nest Rec AI（接続情報は Refresh Token のみ localStorage・Customer Token は保存しない）
         settings: KTAiClient.createSettingsStore(),
         session: KTAiClient.createSession({ store: KTAiClient.createSettingsStore() }),
+        // Preview Executor: このユーザーのセッション権限で動作テスト環境だけを書く（運用環境への反映関数は無い）
+        executor: (() => { try { return { api: KTPlanExecutor.createKintoneApi(), appId: appId ?? (typeof kintone !== 'undefined' ? kintone.app.getId() : null) }; } catch (e) { return null; } })(),
       })
       : null;
     function applyAiMode(isAi) {
