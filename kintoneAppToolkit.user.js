@@ -6198,7 +6198,7 @@
     const same = (a, b) => JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
     const nowIso = (now) => new Date(now()).toISOString();
     const newId = (prefix) => `${prefix}_${(typeof crypto !== 'undefined' && crypto.randomUUID) ? crypto.randomUUID() : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`}`;
-    const strErr = (e) => (e && typeof e === 'object') ? { code: e.code ?? null, message: String(e.message ?? e.error ?? ''), status: e.status ?? null } : { code: null, message: String(e ?? ''), status: null };
+    const strErr = (e) => (e && typeof e === 'object') ? { code: e.code ?? null, message: String(e.message ?? e.error ?? ''), status: e.status ?? null, ...(e.detail !== undefined ? { detail: clone(e.detail) } : {}) } : { code: null, message: String(e ?? ''), status: null };
     const isPermissionError = (e) => { const s = strErr(e); return s.status === 403 || s.code === 'CB_NO02' || /権限|permission|forbidden/i.test(s.message); };
     const isRevisionError = (e) => { const s = strErr(e); return s.code === 'GAIA_CO02' || /リビジョン|revision/i.test(s.message); };
 
@@ -6213,6 +6213,10 @@
       ADD_NOTIFICATION: { previewExecute: true, verify: true, rollbackStrategy: 'RESTORE_NOTIFICATION_SETTINGS' },
       ADD_REMINDER: { previewExecute: true, verify: true, rollbackStrategy: 'RESTORE_REMINDER_SETTINGS' },
       UPDATE_FIELD: { previewExecute: true, verify: true, rollbackStrategy: 'RESTORE_FIELD_PROPERTY', conditional: 'label / required のみ' },
+      // Phase 11: 既存設定の変更。対象 1 件だけを変更した「完全な payload」で全体置換し、他の設定は bit 単位で保持されたことを検証する
+      UPDATE_NOTIFICATION: { previewExecute: true, verify: true, rollbackStrategy: 'RESTORE_NOTIFICATION_SETTINGS', conditional: '通知先 / 条件 / イベント / 名前' },
+      UPDATE_REMINDER: { previewExecute: true, verify: true, rollbackStrategy: 'RESTORE_REMINDER_SETTINGS', conditional: 'タイミング / 条件 / 通知先 / 名前' },
+      UPDATE_VIEW: { previewExecute: true, verify: true, rollbackStrategy: 'RESTORE_VIEWS', conditional: '表形式の表示フィールド / 絞り込み / 並び順' },
     });
     const ACTION_CAPABILITIES = Object.freeze(Object.fromEntries(Object.entries(KTPlanReview.ACTION_CAPABILITIES).map(([k, v]) => {
       const ex = EXECUTOR_COLUMNS[k] || { previewExecute: false, verify: !!v.validate, rollbackStrategy: v.simulate ? 'RESTORE_SNAPSHOT' : 'NONE' };
@@ -6293,7 +6297,7 @@
         return { ok: checks.every(c => c.ok), checks, revision: String(cur?.revision ?? '') };
       },
       rollback({ appId }, p) {
-        return { actionType: 'DELETE_FIELD', target: p.expect.code, api: { method: 'DELETE', path: '/k/v1/preview/app/form/fields.json', payload: { app: appId, fields: [p.expect.code] } }, note: '動作テスト環境のフィールドを削除する（運用環境には無い）。レイアウトは snapshot の layout を PUT で戻す' };
+        return { actionType: 'DELETE_FIELD', collection: 'fields', target: p.expect.code, api: { method: 'DELETE', path: '/k/v1/preview/app/form/fields.json', payload: { app: appId, fields: [p.expect.code] } }, note: '動作テスト環境のフィールドを削除する（運用環境には無い）。レイアウトは snapshot の layout を PUT で戻す' };
       },
     };
 
@@ -6339,7 +6343,7 @@
         return { ok: checks.every(c => c.ok), checks, revision: String(cur?.revision ?? '') };
       },
       rollback({ appId, snapshot }, p) {
-        return { actionType: 'RESTORE_VIEWS', target: p.expect.name, api: { method: 'PUT', path: '/k/v1/preview/app/views.json', payload: { app: appId, views: '<snapshot.views.views（id を除く）>' } }, note: `snapshot の一覧設定（${Object.keys(snapshot?.views?.views || {}).length} 件）を PUT で戻す（追加した「${p.expect.name}」が消える）` };
+        return { actionType: 'RESTORE_VIEWS', collection: 'views', target: p.expect.name, api: { method: 'PUT', path: '/k/v1/preview/app/views.json', payload: { app: appId, views: '<snapshot.views.views（id を除く）>' } }, note: `snapshot の一覧設定（${Object.keys(snapshot?.views?.views || {}).length} 件）を PUT で戻す（追加した「${p.expect.name}」が消える）` };
       },
     };
 
@@ -6482,7 +6486,7 @@
       },
       rollback({ appId, snapshot }, p) {
         const scope = p.payload.scope;
-        return { actionType: 'RESTORE_NOTIFICATION_SETTINGS', target: scope, api: { method: 'PUT', path: scope === 'general' ? '/k/v1/preview/app/notifications/general.json' : '/k/v1/preview/app/notifications/perRecord.json', payload: { app: appId, notifications: `<snapshot.${scope === 'general' ? 'generalNotify' : 'perRecordNotify'}.notifications>` } }, note: `snapshot の${scope === 'general' ? 'アプリ' : 'レコード'}の条件通知（${(scope === 'general' ? snapshot?.generalNotify?.notifications : snapshot?.perRecordNotify?.notifications)?.length ?? 0} 件）を PUT で戻す` };
+        return { actionType: 'RESTORE_NOTIFICATION_SETTINGS', collection: scope === 'general' ? 'generalNotify' : 'perRecordNotify', target: scope, api: { method: 'PUT', path: scope === 'general' ? '/k/v1/preview/app/notifications/general.json' : '/k/v1/preview/app/notifications/perRecord.json', payload: { app: appId, notifications: `<snapshot.${scope === 'general' ? 'generalNotify' : 'perRecordNotify'}.notifications>` } }, note: `snapshot の${scope === 'general' ? 'アプリ' : 'レコード'}の条件通知（${(scope === 'general' ? snapshot?.generalNotify?.notifications : snapshot?.perRecordNotify?.notifications)?.length ?? 0} 件）を PUT で戻す` };
       },
     };
 
@@ -6530,7 +6534,7 @@
         return { ok: checks.every(c => c.ok), checks, revision: String(cur?.revision ?? '') };
       },
       rollback({ appId, snapshot }, p) {
-        return { actionType: 'RESTORE_REMINDER_SETTINGS', target: p.expect.title || p.expect.timing.code, api: { method: 'PUT', path: '/k/v1/preview/app/notifications/reminder.json', payload: { app: appId, notifications: '<snapshot.reminderNotify.notifications>' } }, note: `snapshot のリマインダー（${snapshot?.reminderNotify?.notifications?.length ?? 0} 件）を PUT で戻す` };
+        return { actionType: 'RESTORE_REMINDER_SETTINGS', collection: 'reminderNotify', target: p.expect.title || p.expect.timing.code, api: { method: 'PUT', path: '/k/v1/preview/app/notifications/reminder.json', payload: { app: appId, notifications: '<snapshot.reminderNotify.notifications>' } }, note: `snapshot のリマインダー（${snapshot?.reminderNotify?.notifications?.length ?? 0} 件）を PUT で戻す` };
       },
     };
 
@@ -6581,7 +6585,336 @@
         return { ok: checks.every(c => c.ok), checks, revision: String(cur?.revision ?? '') };
       },
       rollback({ appId }, p) {
-        return { actionType: 'RESTORE_FIELD_PROPERTY', target: p.expect.code, api: { method: 'PUT', path: '/k/v1/preview/app/form/fields.json', payload: { app: appId, properties: { [p.expect.code]: { type: p.expect.type, code: p.expect.code, ...(p.before || {}) } } } }, note: `${Object.keys(p.before || {}).join('・')} を Review 時点の値に戻す（snapshot の fields から）` };
+        return { actionType: 'RESTORE_FIELD_PROPERTY', collection: 'fields', target: p.expect.code, api: { method: 'PUT', path: '/k/v1/preview/app/form/fields.json', payload: { app: appId, properties: { [p.expect.code]: { type: p.expect.type, code: p.expect.code, ...(p.before || {}) } } } }, note: `${Object.keys(p.before || {}).join('・')} を Review 時点の値に戻す（snapshot の fields から）` };
+      },
+    };
+
+    // ---- 既存設定の変更（Phase 11）の共通ロジック ----
+    const sortedKeys = (list) => [...(list || [])].map(String).sort();
+    const sameKeys = (a, b) => same(sortedKeys(a), sortedKeys(b));
+    const targetKeysOf = (list) => (list || []).map(t => entityKey(t.entity));
+    /** 全体置換 API の検証: 対象 1 件以外が bit 単位で同じで、件数が変わっていないこと */
+    function preservationExceptIndex(beforeList, afterList, index) {
+      const b = beforeList || [], a = afterList || [];
+      const changedOthers = b.map((x, i) => i).filter(i => i !== index && !same(b[i], a[i]));
+      return [
+        { name: 'existingCountBefore', ok: true, expected: b.length, actual: b.length },
+        { name: 'countPreserved', ok: a.length === b.length, expected: b.length, actual: a.length },
+        { name: 'otherEntriesPreserved', ok: changedOthers.length === 0 && a.length === b.length, expected: [], actual: changedOthers },
+        { name: 'unexpectedRemoved', ok: a.length >= b.length, expected: 0, actual: Math.max(0, b.length - a.length) },
+        { name: 'unexpectedChanged', ok: changedOthers.length === 0, expected: 0, actual: changedOthers.length },
+      ];
+    }
+    /** Review 時点の同一性（diff.target.identity）と現在の通知を比較し、違う属性名を返す（空なら同一） */
+    function notificationIdentityMismatch(scope, entry, identity) {
+      if (!entry) return ['missing'];
+      const out = [];
+      if (scope === 'general') {
+        if (!sameKeys([entityKey(entry.entity)], identity.targets)) out.push('targets');
+        if (!sameKeys(NOTIFY_EVENTS.filter(k => entry[k]), identity.events)) out.push('events');
+      } else {
+        if (String(entry.title || '') !== String(identity.title || '')) out.push('title');
+        if (normCondE(entry.filterCond) !== normCondE(identity.filterCond)) out.push('filterCond');
+        if (!sameKeys(targetKeysOf(entry.targets), identity.targets)) out.push('targets');
+      }
+      return out;
+    }
+    function reminderIdentityMismatch(entry, identity) {
+      if (!entry) return ['missing'];
+      const out = [];
+      if (String(entry.title || '') !== String(identity.title || '')) out.push('title');
+      if (String(entry.timing?.code ?? '') !== String(identity.timing?.code ?? '') || String(entry.timing?.daysLater ?? '') !== String(identity.timing?.daysLater ?? '') || String(entry.timing?.time ?? '') !== String(identity.timing?.time ?? '')) out.push('timing');
+      if (normCondE(entry.filterCond) !== normCondE(identity.filterCond)) out.push('filterCond');
+      if (!sameKeys(targetKeysOf(entry.targets), identity.targets)) out.push('targets');
+      return out;
+    }
+    function viewIdentityMismatch(entry, identity) {
+      if (!entry) return ['missing'];
+      const out = [];
+      if (identity.id != null && entry.id != null && String(entry.id) !== String(identity.id)) out.push('id');
+      if ((entry.type || 'LIST') !== (identity.type || 'LIST')) out.push('type');
+      if (!same(entry.fields || [], identity.fields || [])) out.push('fields');
+      if (normCondE(entry.filterCond) !== normCondE(identity.filterCond)) out.push('filterCond');
+      if (normCondE(entry.sort) !== normCondE(identity.sort)) out.push('sort');
+      return out;
+    }
+    const targetChanged = (what, mismatch) => Object.assign(new Error(`対象の${what}が Review 時点から変わっています（${mismatch.join(', ')}）。再レビューしてください`), { code: 'TARGET_CHANGED', detail: mismatch });
+    /** 実行直前の再取得と prepare 時の snapshot を bit 単位で比べる（prepare → 実行の間の変更も止める） */
+    const changedSincePrepare = (what, cur, snap) => (snap !== undefined && !same(cur, snap)) ? Object.assign(new Error(`対象の${what}が実行直前に変更されています（確認時点と一致しません）。もう一度確認してください`), { code: 'TARGET_CHANGED', detail: ['sincePrepare'] }) : null;
+    const sensitiveFrom = (stepReview, codes) => (stepReview?.issues || []).filter(i => codes.includes(i.code)).map(i => ({ code: i.code, message: i.message }));
+    const JA_ATTR = { targets: '通知先', filterCond: '条件', events: 'イベント', title: '名前', timing: 'タイミング', fields: '表示フィールド', sort: '並び順' };
+    const attrText = (k, v) => (v == null ? '—' : Array.isArray(v) ? (v.length ? v.join(', ') : '（なし）') : typeof v === 'object' ? (k === 'timing' ? `${v.code ?? '—'} の ${KTPlanReview.daysText(v.daysLater)}${v.time ? ' ' + v.time : ''}` : JSON.stringify(v)) : String(v) || '（なし）');
+    const changesText = (changes) => Object.entries(changes).map(([k, c]) => `${JA_ATTR[k] || k}: ${attrText(k, c.from)} → ${attrText(k, c.to)}`).join('・');
+
+    /**
+     * UPDATE_NOTIFICATION（Phase 11）: Review が固定した対象（scope / index / id / title / 条件 / イベント）の 1 件だけを変更する。
+     * payload は「現在の一覧の対象 1 件を差し替えた完全な形」。他の通知は bit 単位でそのまま。対象が Review 時点と 1 属性でも違えば TARGET_CHANGED
+     */
+    HANDLERS.UPDATE_NOTIFICATION = {
+      prepare(step, { stepReview, fieldsNow = null }) {
+        const before = stepReview?.diff?.before, after = stepReview?.diff?.after, identity = stepReview?.diff?.target?.identity;
+        if (!before || !after || !identity || !before.scope || identity.index == null) return { unsupported: 'NO_NOTIFICATION_SPEC', message: 'Review に変更前後の通知定義（対象の同一性）がありません。計画を作り直してください' };
+        const scope = before.scope === 'general' ? 'general' : 'perRecord';
+        const changes = {};
+        if (!sameKeys(before.targets, after.targets)) changes.targets = { from: [...before.targets], to: [...after.targets] };
+        if (scope === 'perRecord' && normCondE(before.filterCond) !== normCondE(after.filterCond)) changes.filterCond = { from: before.filterCond || '', to: String(after.filterCond || '').trim() };
+        if (scope === 'general' && !sameKeys(before.events, after.events)) changes.events = { from: [...(before.events || [])], to: (after.events || []).filter(e => NOTIFY_EVENTS.includes(e)) };
+        if (scope === 'perRecord' && String(before.title || '') !== String(after.title || '')) changes.title = { from: before.title || '', to: String(after.title || '') };
+        if (!Object.keys(changes).length) return { unsupported: 'NO_CHANGE', message: '変更内容がありません' };
+        const targets = [];
+        for (const t of after.targets || []) { const r = recipientEntity(t, fieldsNow); if (r.error) return { unsupported: r.error, message: r.message }; targets.push(r.entity); }
+        if (!targets.length) return { unsupported: 'TARGETS_MISSING', message: '通知先が決まっていません（通知先を全て外す変更は反映しません）' };
+        if (scope === 'general' && targets.length !== 1) return { unsupported: 'GENERAL_NOTIFICATION_MULTI_TARGET', message: 'アプリの条件通知は通知先 1 件ごとの設定です（通知先を増やすには追加の step にします）' };
+        if (scope === 'general' && changes.events && !changes.events.to.length) return { unsupported: 'EVENTS_MISSING', message: 'アプリの条件通知のイベントを全て外す変更は反映しません' };
+        if (scope === 'perRecord') {
+          const cond = changes.filterCond ? changes.filterCond.to : String(before.filterCond || '').trim();
+          if (!cond) return { unsupported: 'CONDITION_MISSING', message: 'レコードの条件通知には条件式が必要です' };
+          if (changes.filterCond && fieldsNow) { const qc = KTQueryCheck.check(cond, { fields: fieldsNow, usage: 'perRecordNotification' }); if (!qc.ok) return { unsupported: 'INVALID_CONDITION', message: `条件式が kintone で受理されません: ${qc.errors.map(e => e.message).join('／')}` }; }
+        }
+        const label = before.title || before.id;
+        const payloadChanges = {};
+        if (changes.targets) payloadChanges.targets = targets;
+        if (changes.filterCond) payloadChanges.filterCond = changes.filterCond.to;
+        if (changes.events) payloadChanges.events = changes.events.to;
+        if (changes.title) payloadChanges.title = changes.title.to;
+        return {
+          payload: { scope, index: identity.index, identity: clone(identity), changes: payloadChanges },
+          expect: { scope, index: identity.index, title: scope === 'perRecord' ? String(after.title || '') : '', filterCond: scope === 'perRecord' ? String(after.filterCond || '').trim() : '', targets: targets.map(entityKey), events: scope === 'general' ? (changes.events ? changes.events.to : [...(before.events || [])]) : [] },
+          summary: `✎ ${scope === 'general' ? 'アプリの条件通知' : 'レコードの条件通知'}「${label}」: ${changesText(changes)}`,
+          sensitive: sensitiveFrom(stepReview, ['NOTIFICATION_RECIPIENTS_REMOVED', 'NOTIFICATION_EVENTS_REMOVED', 'NOTIFICATION_CONDITION_CHANGE']),
+          before: Object.fromEntries(Object.entries(changes).map(([k, c]) => [k, c.from])), after: Object.fromEntries(Object.entries(changes).map(([k, c]) => [k, c.to])),
+          targetLabel: label, changeKind: 'UPDATE', condition: changes.filterCond ? changes.filterCond.to : null,
+        };
+      },
+      async apply({ api, appId, revision, snapshot }, p) {
+        const scope = p.payload.scope, idx = p.payload.index;
+        const cur = scope === 'general' ? await api.getPreviewGeneralNotifications(appId) : await api.getPreviewPerRecordNotifications(appId);
+        const list = Array.isArray(cur?.notifications) ? cur.notifications : [];
+        const entry = list[idx];
+        const mismatch = notificationIdentityMismatch(scope, entry, p.payload.identity);
+        if (mismatch.length) throw targetChanged(`通知「${p.targetLabel}」`, mismatch);
+        const snapList = scope === 'general' ? snapshot?.generalNotify?.notifications : snapshot?.perRecordNotify?.notifications;
+        const since = changedSincePrepare(`通知「${p.targetLabel}」`, entry, Array.isArray(snapList) ? snapList[idx] : undefined);
+        if (since) throw since;
+        // 対象 1 件だけを差し替える（変更しない属性・他の通知はそのまま）
+        const next = clone(entry);
+        const ch = p.payload.changes;
+        if (scope === 'general') {
+          if (ch.targets) { if (entityKey(entry.entity) !== entityKey(ch.targets[0])) { next.entity = clone(ch.targets[0]); next.includeSubs = false; } }
+          if (ch.events) for (const k of NOTIFY_EVENTS) next[k] = ch.events.includes(k);
+        } else {
+          if (ch.targets) next.targets = ch.targets.map(en => { const old = (entry.targets || []).find(t => entityKey(t.entity) === entityKey(en)); return old ? clone(old) : { entity: clone(en), includeSubs: false }; });
+          if (ch.filterCond != null) next.filterCond = ch.filterCond;
+          if (ch.title != null) next.title = ch.title;
+        }
+        const all = list.map((n, i) => (i === idx ? next : clone(n)));
+        const path = scope === 'general' ? '/k/v1/preview/app/notifications/general.json' : '/k/v1/preview/app/notifications/perRecord.json';
+        const res = scope === 'general'
+          ? await api.putPreviewGeneralNotifications(appId, { notifications: all, ...(cur?.notifyToCommenter != null ? { notifyToCommenter: cur.notifyToCommenter } : {}) }, String(cur?.revision ?? revision ?? ''))
+          : await api.putPreviewPerRecordNotifications(appId, { notifications: all }, String(cur?.revision ?? revision ?? ''));
+        return { revision: String(res?.revision ?? ''), requests: [{ method: 'PUT', path, index: idx, total: all.length, changedKeys: Object.keys(ch) }], before: p.before, after: p.after, existingList: clone(list), targetIndex: idx, expectedEntry: clone(next) };
+      },
+      async verify({ api, appId }, p, applied) {
+        const scope = p.payload.scope;
+        const cur = scope === 'general' ? await api.getPreviewGeneralNotifications(appId) : await api.getPreviewPerRecordNotifications(appId);
+        const list = Array.isArray(cur?.notifications) ? cur.notifications : [];
+        const idx = applied.targetIndex;
+        const checks = preservationExceptIndex(applied.existingList, list, idx);
+        const check = (name, ok, expected, actual) => checks.push({ name, ok, expected, actual });
+        const found = list[idx];
+        check('targetExists', !!found, true, !!found);
+        if (found) {
+          const ch = p.payload.changes;
+          if (scope === 'general') {
+            if (ch.targets) check('changed:targets', entityKey(found.entity) === entityKey(ch.targets[0]), entityKey(ch.targets[0]), entityKey(found.entity));
+            if (ch.events) check('changed:events', sameKeys(NOTIFY_EVENTS.filter(k => found[k]), ch.events), ch.events, NOTIFY_EVENTS.filter(k => found[k]));
+          } else {
+            if (ch.targets) check('changed:targets', sameKeys(targetKeysOf(found.targets), ch.targets.map(entityKey)), ch.targets.map(entityKey), targetKeysOf(found.targets));
+            if (ch.filterCond != null) check('changed:filterCond', normCondE(found.filterCond) === normCondE(ch.filterCond), ch.filterCond, found.filterCond);
+            if (ch.title != null) check('changed:title', String(found.title || '') === ch.title, ch.title, found.title || '');
+          }
+          check('unchangedAttributesPreserved', same(found, applied.expectedEntry), applied.expectedEntry, found);
+        }
+        return { ok: checks.every(c => c.ok), checks, revision: String(cur?.revision ?? '') };
+      },
+      rollback({ appId, snapshot }, p) {
+        const scope = p.payload.scope;
+        return { actionType: 'RESTORE_NOTIFICATION_SETTINGS', collection: scope === 'general' ? 'generalNotify' : 'perRecordNotify', target: p.targetLabel, api: { method: 'PUT', path: scope === 'general' ? '/k/v1/preview/app/notifications/general.json' : '/k/v1/preview/app/notifications/perRecord.json', payload: { app: appId, notifications: `<snapshot.${scope === 'general' ? 'generalNotify' : 'perRecordNotify'}.notifications>` } }, note: `snapshot の${scope === 'general' ? 'アプリ' : 'レコード'}の条件通知（${(scope === 'general' ? snapshot?.generalNotify?.notifications : snapshot?.perRecordNotify?.notifications)?.length ?? 0} 件）を PUT で戻す（「${p.targetLabel}」が変更前の内容に戻る）` };
+      },
+    };
+
+    /** UPDATE_REMINDER（Phase 11）: タイミング（基準日 / 日数 / 時刻）・条件・通知先・名前の変更。対象 1 件だけ差し替えた完全 payload */
+    HANDLERS.UPDATE_REMINDER = {
+      prepare(step, { stepReview, fieldsNow = null }) {
+        const before = stepReview?.diff?.before, after = stepReview?.diff?.after, identity = stepReview?.diff?.target?.identity;
+        if (!before || !after || !identity || identity.index == null) return { unsupported: 'NO_REMINDER_SPEC', message: 'Review に変更前後のリマインダー定義（対象の同一性）がありません。計画を作り直してください' };
+        const changes = {};
+        const tB = { code: before.timingField ?? null, daysLater: before.daysLater ?? null, time: before.time ?? null }, tA = { code: after.timingField ?? null, daysLater: after.daysLater ?? null, time: after.time ?? null };
+        if (!same(tB, tA)) changes.timing = { from: tB, to: tA };
+        if (normCondE(before.filterCond) !== normCondE(after.filterCond)) changes.filterCond = { from: before.filterCond || '', to: String(after.filterCond || '').trim() };
+        if (!sameKeys(before.targets, after.targets)) changes.targets = { from: [...before.targets], to: [...after.targets] };
+        if (String(before.title || '') !== String(after.title || '')) changes.title = { from: before.title || '', to: String(after.title || '') };
+        if (!Object.keys(changes).length) return { unsupported: 'NO_CHANGE', message: '変更内容がありません' };
+        if (changes.timing) {
+          const code = tA.code;
+          if (!code) return { unsupported: 'TIMING_FIELD_MISSING', message: '基準となる日付フィールドが決まっていません' };
+          if (fieldsNow) {
+            const fd = fieldsNow[code]; if (!fd) return { unsupported: 'TIMING_FIELD_MISSING', message: `基準フィールド「${code}」が動作テスト環境にありません` };
+            if (!['DATE', 'DATETIME', 'CREATED_TIME', 'UPDATED_TIME'].includes(fd.type)) return { unsupported: 'REMINDER_FIELD_TYPE', message: `基準フィールド「${code}」（${fd.type}）はリマインダーの基準にできません（日付 / 日時 / 作成日時 / 更新日時）` };
+            // 日付（time 指定）と日時（hoursLater 指定）の間で基準日を変えると通知時刻の指定方法が変わる → 反映しない（計画のみ）
+            const mode = (t) => (t === 'DATE' ? 'time' : 'hours');
+            const old = tB.code ? fieldsNow[tB.code] : null;
+            if (old && tB.code !== code && mode(old.type) !== mode(fd.type)) return { unsupported: 'REMINDER_TIMING_MODE_CHANGE', message: `基準日を「${tB.code}」（${old.type}）から「${code}」（${fd.type}）へ変えると通知時刻の指定方法（時刻 / 時間後）が変わるため反映しません` };
+          }
+          if (tA.daysLater == null || !/^-?\d+$/.test(String(tA.daysLater))) return { unsupported: 'REMINDER_DAYS_INVALID', message: '何日前 / 後かが整数で決まっていません' };
+          if (Math.abs(Number(tA.daysLater)) > 10000) return { unsupported: 'REMINDER_DAYS_INVALID', message: '日数は -10,000〜10,000 の範囲です' };
+          if (tA.time != null && !/^\d{2}:\d0$/.test(String(tA.time))) return { unsupported: 'REMINDER_TIME_MISSING', message: '通知時刻（HH:M0・10 分単位）が決まっていません' };
+        }
+        const targets = [];
+        for (const t of after.targets || []) { const r = recipientEntity(t, fieldsNow); if (r.error) return { unsupported: r.error, message: r.message }; targets.push(r.entity); }
+        if (!targets.length) return { unsupported: 'TARGETS_MISSING', message: '通知先が決まっていません（通知先を全て外す変更は反映しません）' };
+        if (changes.filterCond && changes.filterCond.to && fieldsNow) { const qc = KTQueryCheck.check(changes.filterCond.to, { fields: fieldsNow, usage: 'reminder' }); if (!qc.ok) return { unsupported: 'INVALID_CONDITION', message: `条件式が kintone で受理されません: ${qc.errors.map(e => e.message).join('／')}` }; }
+        const label = before.title || before.id;
+        const payloadChanges = {};
+        if (changes.timing) payloadChanges.timing = { code: tA.code, daysLater: String(Number(tA.daysLater)), ...(tA.time != null ? { time: String(tA.time) } : {}) };
+        if (changes.filterCond) payloadChanges.filterCond = changes.filterCond.to;
+        if (changes.targets) payloadChanges.targets = targets;
+        if (changes.title) payloadChanges.title = changes.title.to;
+        return {
+          payload: { index: identity.index, identity: clone(identity), changes: payloadChanges },
+          expect: { index: identity.index, title: String(after.title || ''), timing: payloadChanges.timing || tB, filterCond: String(after.filterCond || '').trim(), targets: targets.map(entityKey) },
+          summary: `✎ リマインダー「${label}」: ${changesText(changes)}`,
+          sensitive: sensitiveFrom(stepReview, ['REMINDER_BASE_FIELD_CHANGE', 'REMINDER_RECIPIENTS_REMOVED', 'REMINDER_CONDITION_CHANGE']),
+          before: Object.fromEntries(Object.entries(changes).map(([k, c]) => [k, c.from])), after: Object.fromEntries(Object.entries(changes).map(([k, c]) => [k, c.to])),
+          targetLabel: label, changeKind: 'UPDATE', condition: changes.filterCond ? changes.filterCond.to : null,
+        };
+      },
+      async apply({ api, appId, revision, snapshot }, p) {
+        const idx = p.payload.index;
+        const cur = await api.getPreviewReminders(appId);
+        const list = Array.isArray(cur?.notifications) ? cur.notifications : [];
+        const entry = list[idx];
+        const mismatch = reminderIdentityMismatch(entry, p.payload.identity);
+        if (mismatch.length) throw targetChanged(`リマインダー「${p.targetLabel}」`, mismatch);
+        const since = changedSincePrepare(`リマインダー「${p.targetLabel}」`, entry, Array.isArray(snapshot?.reminderNotify?.notifications) ? snapshot.reminderNotify.notifications[idx] : undefined);
+        if (since) throw since;
+        const next = clone(entry);
+        const ch = p.payload.changes;
+        if (ch.timing) { next.timing = { ...clone(entry.timing || {}), code: ch.timing.code, daysLater: ch.timing.daysLater }; if (ch.timing.time != null) { next.timing.time = ch.timing.time; delete next.timing.hoursLater; } }
+        if (ch.filterCond != null) next.filterCond = ch.filterCond;
+        if (ch.targets) next.targets = ch.targets.map(en => { const old = (entry.targets || []).find(t => entityKey(t.entity) === entityKey(en)); return old ? clone(old) : { entity: clone(en), includeSubs: false }; });
+        if (ch.title != null) next.title = ch.title;
+        const all = list.map((n, i) => (i === idx ? next : clone(n)));
+        const res = await api.putPreviewReminders(appId, { notifications: all, ...(cur?.timezone ? { timezone: cur.timezone } : {}) }, String(cur?.revision ?? revision ?? ''));
+        return { revision: String(res?.revision ?? ''), requests: [{ method: 'PUT', path: '/k/v1/preview/app/notifications/reminder.json', index: idx, total: all.length, changedKeys: Object.keys(ch) }], before: p.before, after: p.after, existingList: clone(list), targetIndex: idx, expectedEntry: clone(next) };
+      },
+      async verify({ api, appId }, p, applied) {
+        const cur = await api.getPreviewReminders(appId);
+        const list = Array.isArray(cur?.notifications) ? cur.notifications : [];
+        const idx = applied.targetIndex;
+        const checks = preservationExceptIndex(applied.existingList, list, idx);
+        const check = (name, ok, expected, actual) => checks.push({ name, ok, expected, actual });
+        const found = list[idx];
+        check('targetExists', !!found, true, !!found);
+        if (found) {
+          const ch = p.payload.changes;
+          if (ch.timing) check('changed:timing', String(found.timing?.code) === ch.timing.code && String(found.timing?.daysLater) === ch.timing.daysLater && (ch.timing.time == null || String(found.timing?.time) === ch.timing.time), ch.timing, found.timing);
+          if (ch.filterCond != null) check('changed:filterCond', normCondE(found.filterCond) === normCondE(ch.filterCond), ch.filterCond, found.filterCond || '');
+          if (ch.targets) check('changed:targets', sameKeys(targetKeysOf(found.targets), ch.targets.map(entityKey)), ch.targets.map(entityKey), targetKeysOf(found.targets));
+          if (ch.title != null) check('changed:title', String(found.title || '') === ch.title, ch.title, found.title || '');
+          check('unchangedAttributesPreserved', same(found, applied.expectedEntry), applied.expectedEntry, found);
+        }
+        return { ok: checks.every(c => c.ok), checks, revision: String(cur?.revision ?? '') };
+      },
+      rollback({ appId, snapshot }, p) {
+        return { actionType: 'RESTORE_REMINDER_SETTINGS', collection: 'reminderNotify', target: p.targetLabel, api: { method: 'PUT', path: '/k/v1/preview/app/notifications/reminder.json', payload: { app: appId, notifications: '<snapshot.reminderNotify.notifications>' } }, note: `snapshot のリマインダー（${snapshot?.reminderNotify?.notifications?.length ?? 0} 件）を PUT で戻す（「${p.targetLabel}」が変更前の内容に戻る）` };
+      },
+    };
+
+    /** UPDATE_VIEW（Phase 11）: 表形式の一覧の表示フィールド / 絞り込み / 並び順だけ。形式・カレンダー・カスタマイズ HTML は対象外 */
+    const SORT_RE = /^[^\s,]+\s+(asc|desc)$/i;
+    HANDLERS.UPDATE_VIEW = {
+      prepare(step, { stepReview, fieldsNow = null }) {
+        const before = stepReview?.diff?.before, after = stepReview?.diff?.after, identity = stepReview?.diff?.target?.identity;
+        if (!before || !after || !before.name) return { unsupported: 'NO_VIEW_SPEC', message: 'Review に変更前後の一覧定義がありません。計画を作り直してください' };
+        if ((before.type || 'LIST') !== 'LIST' || (after.type || 'LIST') !== 'LIST') return { unsupported: 'VIEW_TYPE_NOT_SUPPORTED', message: `${before.type === 'CALENDAR' ? 'カレンダー形式' : before.type === 'CUSTOM' ? 'カスタマイズ形式' : before.type} の一覧は変更しません（表形式のみ）` };
+        if (before.builtinType) return { unsupported: 'BUILTIN_VIEW_NOT_SUPPORTED', message: 'kintone 組み込みの一覧は変更しません' };
+        if (!identity) return { unsupported: 'NO_VIEW_SPEC', message: 'Review に対象の同一性（identity）がありません。計画を作り直してください' };
+        const changes = {};
+        if (!same(before.fields || [], after.fields || [])) changes.fields = { from: [...(before.fields || [])], to: [...(after.fields || [])] };
+        if (normCondE(before.filterCond) !== normCondE(after.filterCond)) changes.filterCond = { from: before.filterCond || '', to: String(after.filterCond || '').trim() };
+        if (normCondE(before.sort) !== normCondE(after.sort)) changes.sort = { from: before.sort || '', to: String(after.sort || '').trim() };
+        if (!Object.keys(changes).length) return { unsupported: 'NO_CHANGE', message: '変更内容がありません' };
+        if (changes.fields) {
+          if (!changes.fields.to.length) return { unsupported: 'VIEW_FIELDS_MISSING', message: '表示フィールドを全て外す変更は反映しません' };
+          if (fieldsNow) for (const c of changes.fields.to) if (!fieldsNow[c] && !BUILTIN_VIEW_CODES.includes(c)) return { unsupported: 'VIEW_FIELD_MISSING', message: `表示フィールド「${c}」が動作テスト環境にありません` };
+        }
+        if (changes.filterCond && changes.filterCond.to && fieldsNow) { const qc = KTQueryCheck.check(changes.filterCond.to, { fields: fieldsNow, usage: 'view' }); if (!qc.ok) return { unsupported: 'INVALID_CONDITION', message: `絞り込み条件が kintone で受理されません: ${qc.errors.map(e => e.message).join('／')}` }; }
+        if (changes.sort && changes.sort.to) {
+          for (const part of changes.sort.to.split(',').map(x => x.trim()).filter(Boolean)) {
+            if (!SORT_RE.test(part)) return { unsupported: 'INVALID_SORT', message: `並び順「${part}」は「フィールドコード asc|desc」の形ではありません` };
+            const code = part.split(/\s+/)[0];
+            if (fieldsNow && !fieldsNow[code] && !BUILTIN_VIEW_CODES.includes(code)) return { unsupported: 'INVALID_SORT', message: `並び順のフィールド「${code}」が動作テスト環境にありません` };
+          }
+        }
+        const payloadChanges = {};
+        if (changes.fields) payloadChanges.fields = [...changes.fields.to];
+        if (changes.filterCond) payloadChanges.filterCond = changes.filterCond.to;
+        if (changes.sort) payloadChanges.sort = changes.sort.to;
+        return {
+          payload: { name: before.name, identity: clone(identity), changes: payloadChanges },
+          expect: { name: before.name, type: 'LIST', fields: [...(after.fields || [])], filterCond: String(after.filterCond || '').trim(), sort: String(after.sort || '').trim() },
+          summary: `✎ 一覧「${before.name}」: ${changesText(changes)}`,
+          sensitive: sensitiveFrom(stepReview, ['VIEW_FIELDS_REMOVED', 'VIEW_FILTER_CHANGE']),
+          before: Object.fromEntries(Object.entries(changes).map(([k, c]) => [k, c.from])), after: Object.fromEntries(Object.entries(changes).map(([k, c]) => [k, c.to])),
+          targetLabel: before.name, changeKind: 'UPDATE', condition: changes.filterCond ? changes.filterCond.to : null,
+        };
+      },
+      async apply({ api, appId, revision, snapshot }, p) {
+        const name = p.payload.name;
+        const cur = await api.getPreviewViews(appId);
+        const existing = cur?.views && typeof cur.views === 'object' ? cur.views : {};
+        const entry = existing[name];
+        const mismatch = viewIdentityMismatch(entry, p.payload.identity);
+        if (mismatch.length) throw targetChanged(`一覧「${name}」`, mismatch);
+        const since = changedSincePrepare(`一覧「${name}」`, entry, snapshot?.views?.views ? snapshot.views.views[name] : undefined);
+        if (since) throw since;
+        const views = {};
+        for (const [n, v] of Object.entries(existing)) { const { id, ...rest } = v || {}; views[n] = rest; }   // id は応答プロパティ。builtinType・index・その他は保持
+        views[name] = { ...views[name], ...p.payload.changes };
+        const res = await api.putPreviewViews(appId, views, String(cur?.revision ?? revision ?? ''));
+        const { id: _id, ...expectedEntry } = { ...clone(entry), ...p.payload.changes };
+        return { revision: String(res?.revision ?? ''), requests: [{ method: 'PUT', path: '/k/v1/preview/app/views.json', name, total: Object.keys(views).length, changedKeys: Object.keys(p.payload.changes) }], before: p.before, after: p.after, existingViews: clone(existing), targetName: name, expectedEntry };
+      },
+      async verify({ api, appId }, p, applied) {
+        const cur = await api.getPreviewViews(appId);
+        const now = cur?.views && typeof cur.views === 'object' ? cur.views : {};
+        const beforeV = applied.existingViews || {};
+        const name = applied.targetName;
+        const stripId = (v) => { if (!v) return v; const { id, ...rest } = v; return rest; };
+        const checks = [];
+        const check = (n, ok, expected, actual) => checks.push({ name: n, ok, expected, actual });
+        const others = Object.keys(beforeV).filter(n => n !== name);
+        const changedOthers = others.filter(n => !same(stripId(beforeV[n]), stripId(now[n])));
+        check('existingCountBefore', true, Object.keys(beforeV).length, Object.keys(beforeV).length);
+        check('countPreserved', Object.keys(now).length === Object.keys(beforeV).length, Object.keys(beforeV).length, Object.keys(now).length);
+        check('otherViewsPreserved', changedOthers.length === 0 && Object.keys(now).length === Object.keys(beforeV).length, [], changedOthers);
+        check('unexpectedRemoved', others.every(n => now[n]), 0, others.filter(n => !now[n]).length);
+        check('unexpectedChanged', changedOthers.length === 0, 0, changedOthers.length);
+        const found = now[name];
+        check('targetExists', !!found, true, !!found);
+        if (found) {
+          const ch = p.payload.changes;
+          if (ch.fields) check('changed:fields', same(found.fields || [], ch.fields), ch.fields, found.fields || []);
+          if (ch.filterCond != null) check('changed:filterCond', normCondE(found.filterCond) === normCondE(ch.filterCond), ch.filterCond, found.filterCond || '');
+          if (ch.sort != null) check('changed:sort', normCondE(found.sort) === normCondE(ch.sort), ch.sort, found.sort || '');
+          check('unchangedAttributesPreserved', same(stripId(found), applied.expectedEntry), applied.expectedEntry, stripId(found));
+          check('idPreserved', beforeV[name]?.id == null || String(found.id) === String(beforeV[name].id), beforeV[name]?.id ?? null, found.id ?? null);
+        }
+        return { ok: checks.every(c => c.ok), checks, revision: String(cur?.revision ?? '') };
+      },
+      rollback({ appId, snapshot }, p) {
+        return { actionType: 'RESTORE_VIEWS', collection: 'views', target: p.payload.name, api: { method: 'PUT', path: '/k/v1/preview/app/views.json', payload: { app: appId, views: '<snapshot.views.views（id を除く）>' } }, note: `snapshot の一覧設定（${Object.keys(snapshot?.views?.views || {}).length} 件）を PUT で戻す（「${p.payload.name}」が変更前の内容に戻る）` };
       },
     };
 
@@ -6963,6 +7296,7 @@
       EXECUTOR_VERSION, ENV, STEP, RUN, PREVIEW_FIELD_TYPES, ACTION_CAPABILITIES, HANDLERS,
       classifySteps, prepare, executePreview, buildRollbackPlan, buildAudit, compareSimulation, diffBefore, previewDataFrom, layoutHasCode, createKintoneApi,
       recipientEntity, notificationDuplicate, reminderDuplicate, preservationChecks, UPDATABLE_FIELD_KEYS,
+      preservationExceptIndex, notificationIdentityMismatch, reminderIdentityMismatch, viewIdentityMismatch,
     };
   })();
 

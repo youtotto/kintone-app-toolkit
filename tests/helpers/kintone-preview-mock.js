@@ -15,7 +15,9 @@ function makeKintoneMock(data, { permission = true, autoPlace = true } = {}) {
   };
   const calls = [];
   const err = (code, message) => Object.assign(new Error(message), { code, message });
-  const ctl = { failAddField: null, mangleLabel: false, failPut: null, dropOneExistingOnPut: null, mangleReminderTime: false, onWrite: null };
+  // mutateList(what, list): 全体置換 API が受け取った一覧を保存直前に書き換える（検証の mutant。what = 'general' | 'perRecord' | 'reminders' | 'views'）
+  const ctl = { failAddField: null, mangleLabel: false, failPut: null, dropOneExistingOnPut: null, mangleReminderTime: false, onWrite: null, mutateList: null, failDelete: null };
+  const mutate = (what, list) => (ctl.mutateList ? ctl.mutateList(what, list) : list);
   const guard = () => { if (!permission) throw err('CB_NO02', '権限がありません。'); };
   const checkRev = (revision) => { if (revision != null && revision !== '' && String(revision) !== String(st.revision)) throw err('GAIA_CO02', '指定したリビジョンが最新ではありません。'); };
   const write = (what) => { calls.push(what); if (ctl.onWrite) ctl.onWrite(what); if (ctl.failPut === what.split(' ')[1]) throw err('GAIA_XX', `モックの失敗（${what}）`); };
@@ -54,6 +56,19 @@ function makeKintoneMock(data, { permission = true, autoPlace = true } = {}) {
       st.revision += 1;
       return { revision: String(st.revision) };
     },
+    async deletePreviewFields(app, fields, revision) {
+      write('DELETE fields'); guard(); checkRev(revision);
+      if (ctl.failDelete) throw err('GAIA_XX', 'モックの失敗（DELETE fields）');
+      for (const code of fields || []) {
+        const cur = st.fields[code];
+        if (!cur) throw err('GAIA_IL04', `フィールド「${code}」が存在しません`);
+        if (['STATUS', 'STATUS_ASSIGNEE', 'CATEGORY'].includes(cur.type)) throw err('GAIA_IL04', 'このフィールドは削除できません');
+        delete st.fields[code];
+        st.layout = st.layout.map(r => ({ ...r, fields: (r.fields || []).filter(x => x.code !== code) })).filter(r => (r.fields || []).length || r.type !== 'ROW');
+      }
+      st.revision += 1;
+      return { revision: String(st.revision) };
+    },
     async putPreviewLayout(app, layout, revision) {
       write('PUT layout'); guard(); checkRev(revision);
       const codes = new Set(); const walk = (rows) => { for (const r of rows) { for (const f of r.fields || []) if (f.code) { if (!st.fields[f.code] && !['LABEL', 'SPACER', 'HR'].includes(f.type)) throw err('GAIA_IL03', `レイアウトのフィールド「${f.code}」が存在しません`); codes.add(f.code); } if (r.layout) walk(r.layout); } };
@@ -69,7 +84,7 @@ function makeKintoneMock(data, { permission = true, autoPlace = true } = {}) {
         if ('id' in v) throw err('GAIA_IL01', 'id は指定できません（モックの厳格化）');
       }
       let seq = 900; const next = {};
-      for (const [name, v] of Object.entries(views)) next[name] = { id: st.views[name]?.id || String(seq++), ...clone(v) };
+      for (const [name, v] of Object.entries(mutate('views', clone(views)))) next[name] = { id: st.views[name]?.id || String(seq++), ...clone(v) };
       st.views = next; st.revision += 1;
       return { views: Object.fromEntries(Object.entries(next).map(([n, v]) => [n, { id: v.id }])), revision: String(st.revision) };
     },
@@ -78,6 +93,7 @@ function makeKintoneMock(data, { permission = true, autoPlace = true } = {}) {
       let list = clone(body.notifications || []);
       for (const n of list) { if (!n.entity?.type || !['USER', 'GROUP', 'ORGANIZATION', 'FIELD_ENTITY'].includes(n.entity.type)) throw err('GAIA_IL02', 'entity.type が不正です'); if (n.entity.type === 'FIELD_ENTITY' && !st.fields[n.entity.code]) throw err('GAIA_IL04', `通知先フィールド「${n.entity.code}」が存在しません`); }
       if (ctl.dropOneExistingOnPut === 'general') list = list.slice(1);   // バグの注入: 既存 1 件が抜ける
+      list = mutate('general', list);
       st.general = list.map(n => ({ entity: n.entity, includeSubs: !!n.includeSubs, recordAdded: !!n.recordAdded, recordEdited: !!n.recordEdited, commentAdded: !!n.commentAdded, statusChanged: !!n.statusChanged, fileImported: !!n.fileImported }));
       if (body.notifyToCommenter != null) st.notifyToCommenter = !!body.notifyToCommenter;
       st.revision += 1;
@@ -92,6 +108,7 @@ function makeKintoneMock(data, { permission = true, autoPlace = true } = {}) {
         for (const t of n.targets || []) if (t.entity?.type === 'FIELD_ENTITY' && !st.fields[t.entity.code]) throw err('GAIA_IL04', `通知先フィールド「${t.entity.code}」が存在しません`);
       }
       if (ctl.dropOneExistingOnPut === 'perRecord') list = list.slice(1);
+      list = mutate('perRecord', list);
       st.perRecord = list.map(n => ({ filterCond: n.filterCond, title: n.title || '', targets: (n.targets || []).map(t => ({ entity: t.entity, includeSubs: !!t.includeSubs })) }));
       st.revision += 1;
       return { revision: String(st.revision) };
@@ -106,6 +123,7 @@ function makeKintoneMock(data, { permission = true, autoPlace = true } = {}) {
         if (/LOGINUSER|PRIMARY_ORGANIZATION/.test(n.filterCond || '')) throw err('GAIA_IL08', 'クエリの指定が不正です。');
       }
       if (ctl.dropOneExistingOnPut === 'reminders') list = list.slice(1);
+      list = mutate('reminders', list);
       st.reminders = list.map((n, i) => ({ timing: { code: n.timing.code, daysLater: String(n.timing.daysLater), ...(n.timing.time != null ? { time: (ctl.mangleReminderTime && i === list.length - 1) ? '23:50' : n.timing.time } : { hoursLater: String(n.timing.hoursLater) }) }, filterCond: n.filterCond || '', title: n.title || '', targets: (n.targets || []).map(t => ({ entity: t.entity, includeSubs: !!t.includeSubs })) }));   // mangleReminderTime: 追加した 1 件だけ時刻を壊す（検証の mutant）
       if (body.timezone) st.timezone = body.timezone;
       st.revision += 1;
