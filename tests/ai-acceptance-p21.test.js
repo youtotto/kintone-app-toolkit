@@ -413,6 +413,25 @@ console.log('\n--- G7（画面）. 古い版からは登録しない・確認の
   assert(panel.jsExecState().execution && panel.jsExecState().execution.status === 'DONE' && mock.calls.includes('PUT customize'), '確認した後は登録できる');
 }
 
+// =========================================================
+console.log('\n--- G5 / G6. Generator への受け渡し（条件・利用者の補足）とクライアント（長い待ち時間・coverage）---');
+{
+  const data = FX.makeData();
+  const cust = { customizationId: 'C1', requirement: '承認済みでは金額を編集不可', whyStandardInsufficient: 'w', strategy: 'NEW_JS_FILE', platform: ['desktop'], implementation: 'JAVASCRIPT', events: ['app.record.edit.show'], fields: [{ code: 'amount', access: 'CONTROL', condition: 'ステータス in ("承認済み")' }], apis: [], existingFiles: [] };
+  const ctx = KTContext.buildGenerator({ customization: cust, plan: { goal: 'g', steps: [] }, planId: 'p', version: 1, data, userRequests: ['承認済みでは金額を変更できなくして', '', '差戻し後は編集できるように'] });
+  assert(ctx.customization.fields[0].condition === 'ステータス in ("承認済み")' && JSON.stringify(ctx.plan.userRequests) === JSON.stringify(['承認済みでは金額を変更できなくして', '差戻し後は編集できるように']), 'G5: Generator Context に制御の条件と、利用者の依頼・補足の原文（空は除く）');
+  const RESP = { ok: true, contractVersion: '2.1', meta: { requestId: 'g1', gateway: { product: 'toolkit', feature: 'customization-generator', promptVersion: '1', contextVersion: 'customization-1' }, normalization: { warnings: [] }, ai: { model: 'm' } }, generated: { strategy: 'NEW_JS_FILE', targetFile: 'a.js', summary: 's', code: "(function () {\n  'use strict';\n  kintone.events.on(['app.record.edit.show'], function (event) { return event; });\n})();", patch: null, events: ['app.record.edit.show'], fields: [{ code: 'amount', access: 'CONTROL' }], apis: [], assumptions: [], warnings: [], coverage: [{ requirement: '明細の行の追加・削除', status: 'NOT_MET', note: 'JS では止められない' }, { requirement: 'x', status: 'BOGUS', note: '' }], gatewayChecks: { security: [] } } };
+  const slow = (ms) => async () => { await new Promise(r => setTimeout(r, ms)); return { status: 200, body: JSON.stringify(RESP) }; };
+  const c1 = KTAiClient.createAiClient({ apiBase: 'https://gw.test', customerToken: 't', hostname: 't.cybozu.com', transport: slow(120), timeoutMs: 50, longTimeoutMs: 2000 });
+  let g = null, e1 = null;
+  try { g = await c1.generate({ ctx }); } catch (e) { e1 = e; }
+  assert(!e1 && g && g.coverage && g.coverage[0].status === 'NOT_MET' && g.coverage[1].status === 'PARTIAL', `G6: コード生成は長い待ち時間で待ち、coverage（要件ごとの達成）を受け取る（語彙外は PARTIAL）${e1 ? `: ${e1.code} ${e1.message}` : ''}`);
+  const c2 = KTAiClient.createAiClient({ apiBase: 'https://gw.test', customerToken: 't', hostname: 't.cybozu.com', transport: slow(120), timeoutMs: 50 });
+  let e2 = null;
+  try { await c2.generate({ ctx }); } catch (e) { e2 = e; }
+  assert(e2 && e2.code === 'TIMEOUT', 'timeoutMs だけを指定したときは計画・生成もその値（テスト・旧呼び出しとの互換）');
+}
+
 console.log(`\n${state.failed ? 'FAILED' : 'ALL PASSED'}: ${state.passed} passed / ${state.failed} failed`);
 process.exit(state.failed ? 1 : 0);
 })().catch((e) => { console.error(e); process.exit(1); });

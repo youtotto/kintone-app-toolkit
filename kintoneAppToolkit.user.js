@@ -11945,6 +11945,8 @@
           strategy: g.strategy, targetFile: String(g.targetFile || ''), summary: String(g.summary || ''), code: g.code, patch: g.patch && typeof g.patch === 'object' ? g.patch : null,
           events: Array.isArray(g.events) ? g.events.filter(x => typeof x === 'string') : [], fields: Array.isArray(g.fields) ? g.fields.filter(f => f && typeof f.code === 'string') : [], apis: Array.isArray(g.apis) ? g.apis.filter(x => typeof x === 'string') : [],
           assumptions: Array.isArray(g.assumptions) ? g.assumptions.filter(x => typeof x === 'string') : [], warnings: Array.isArray(g.warnings) ? g.warnings.filter(x => typeof x === 'string') : [],
+          // Phase 21: 要件ごとの達成（AI の自己申告。KTCodeReview が検査結果と照合して、満たせない部分を要約より先に出す）
+          coverage: Array.isArray(g.coverage) ? g.coverage.filter(x => x && typeof x.requirement === 'string' && x.requirement.trim()).slice(0, 12).map(x => ({ requirement: String(x.requirement), status: ['MET', 'PARTIAL', 'NOT_MET'].includes(x.status) ? x.status : 'PARTIAL', note: String(x.note || '') })) : [],
           gatewayChecks: g.gatewayChecks && typeof g.gatewayChecks === 'object' ? g.gatewayChecks : null,
           // Phase 18: Gateway が決定的に選んだ Pattern Library の pattern（表示・Audit 用。知識本体は来ない）
           patterns: Array.isArray(g.patterns) ? g.patterns.filter(p => p && typeof p.id === 'string').map(p => ({ id: p.id, purpose: String(p.purpose ?? ''), implementation: typeof p.implementation === 'string' ? p.implementation : null, preferredStandardAlternatives: Array.isArray(p.preferredStandardAlternatives) ? p.preferredStandardAlternatives.filter(x => typeof x === 'string') : [] })) : [],
@@ -12062,7 +12064,10 @@
      * @param {object} p apiBase（必須）/ customerToken（固定 token。staging 等）または getToken()（短命 Access Token の供給。async 可）/
      *   onAuthExpired()（AUTH_TOKEN_EXPIRED のとき 1 回だけ呼んで再試行。Refresh に使う）/ hostname / transport / timeoutMs / pluginVersion
      */
-    function createAiClient({ apiBase, customerToken = null, getToken = null, onAuthExpired = null, hostname = null, transport = null, timeoutMs = 60000, pluginVersion = SCRIPT_VERSION, nowFn = null } = {}) {
+    function createAiClient({ apiBase, customerToken = null, getToken = null, onAuthExpired = null, hostname = null, transport = null, timeoutMs: timeoutOpt = undefined, longTimeoutMs: longOpt = undefined, pluginVersion = SCRIPT_VERSION, nowFn = null } = {}) {
+      // 既定: 質問・接続は 60 秒、計画・コード生成は 240 秒（Phase 21: 推論モデル）。timeoutMs だけを指定したときは両方その値（テスト・旧呼び出しの互換）
+      const timeoutMs = timeoutOpt ?? 60000;
+      const longTimeoutMs = longOpt ?? (timeoutOpt != null ? timeoutOpt : 240000);
       if (!apiBase || !String(apiBase).trim()) throw new AiClientError({ code: ERROR_CODES.INVALID_ENVELOPE, message: 'apiBase は必須です' });
       const base = String(apiBase).replace(/\/+$/, '');
       const send = transport || createDefaultTransport();
@@ -12079,8 +12084,10 @@
        * timeout と外部の AbortSignal（Phase 15: 利用者のキャンセル）。どちらかで内側の fetch を abort する。
        * kintone.proxy は中断できないため、その場合は応答を待たずに CANCELLED で返し、遅れて届いた応答は捨てる
        */
-      const withTimeout = (run, outer = null) => {
+      // Phase 21: 計画・コード生成は推論モデルで時間がかかるので要求ごとに長い待ち時間（longTimeoutMs）を使う
+      const withTimeout = (run, outer = null, limitMs = timeoutMs) => {
         if (outer && outer.aborted) return Promise.reject(cancelled());
+        const timeoutMs = limitMs;
         const hasTimeout = Number.isFinite(timeoutMs) && timeoutMs > 0;
         if (!hasTimeout && !outer) return run(null);
         const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
@@ -12108,25 +12115,25 @@
         const legacy = typeof we === 'string' ? we : '';
         throw new AiClientError({ code: normalizeLegacyErrorCode(legacy) ?? ERROR_CODES.WORKER_ERROR, httpStatus: status, message: legacy || `AI API error: ${status}`, details: json, retryAfterSeconds: pickRetryAfter(null, json) });
       };
-      const rawRequest = async ({ path, method, body, token, signal: outer = null }) => {
+      const rawRequest = async ({ path, method, body, token, signal: outer = null, limitMs = timeoutMs }) => {
         let result;
         try {
-          result = await withTimeout((signal) => send({ url: `${base}${path}`, method, headers: headers(method === 'POST', token), body, signal }), outer);
+          result = await withTimeout((signal) => send({ url: `${base}${path}`, method, headers: headers(method === 'POST', token), body, signal }), outer, limitMs);
         } catch (e) {
           if (isAiClientError(e)) throw e;
-          if (e?.name === 'AbortError') throw outer?.aborted ? cancelled() : new AiClientError({ code: ERROR_CODES.TIMEOUT, message: `AI サービスが ${timeoutMs}ms 以内に応答しませんでした` });
+          if (e?.name === 'AbortError') throw outer?.aborted ? cancelled() : new AiClientError({ code: ERROR_CODES.TIMEOUT, message: `AI サービスが ${limitMs}ms 以内に応答しませんでした` });
           throw new AiClientError({ code: ERROR_CODES.TRANSPORT_ERROR, message: e?.message || String(e) });
         }
         return settle(result);
       };
       /** 認証付き request。Access Token の期限切れは onAuthExpired（Refresh）後に 1 回だけ再試行。signal（任意）でキャンセル */
-      const request = async ({ path, method, body, signal = null }) => {
+      const request = async ({ path, method, body, signal = null, limitMs = timeoutMs }) => {
         try {
-          return await rawRequest({ path, method, body, token: await resolveToken(), signal });
+          return await rawRequest({ path, method, body, token: await resolveToken(), signal, limitMs });
         } catch (e) {
           if (isAiClientError(e) && e.code === ERROR_CODES.AUTH_TOKEN_EXPIRED && typeof onAuthExpired === 'function') {
             const refreshed = await onAuthExpired(e);
-            if (refreshed) return rawRequest({ path, method, body, token: await resolveToken(), signal });
+            if (refreshed) return rawRequest({ path, method, body, token: await resolveToken(), signal, limitMs });
           }
           throw e;
         }
@@ -12163,7 +12170,7 @@
         /** POST /v2/review（toolkit.change-planner）。Planner Context を送り、Change Plan を再検証して返す（計画のみ。設定変更はしない） */
         async plan({ ctx, requestId = newRequestId(), signal = null } = {}) {
           const envelope = buildPlanEnvelope({ ctx, requestId, pluginVersion, now: nowFn ? nowFn() : new Date().toISOString() });
-          const response = await request({ path: '/v2/review', method: 'POST', body: JSON.stringify(envelope), signal });
+          const response = await request({ path: '/v2/review', method: 'POST', body: JSON.stringify(envelope), signal, limitMs: longTimeoutMs });
           const v = validatePlan(response, ctx);
           if (!v.ok) throw new AiClientError({ code: v.errors[0].code, message: v.errors[0].message, details: { errors: v.errors }, requestId });
           return { ...v.normalized, requestId: v.normalized.requestId || requestId, clientWarnings: v.warnings };
@@ -12171,7 +12178,7 @@
         /** POST /v2/review（toolkit.customization-generator）。Generator Context を送り、生成コードを再検証して返す（登録はしない） */
         async generate({ ctx, requestId = newRequestId(), signal = null } = {}) {
           const envelope = buildGenerateEnvelope({ ctx, requestId, pluginVersion, now: nowFn ? nowFn() : new Date().toISOString() });
-          const response = await request({ path: '/v2/review', method: 'POST', body: JSON.stringify(envelope), signal });
+          const response = await request({ path: '/v2/review', method: 'POST', body: JSON.stringify(envelope), signal, limitMs: longTimeoutMs });
           const v = validateGenerated(response, ctx);
           if (!v.ok) throw new AiClientError({ code: v.errors[0].code, message: v.errors[0].message, details: { errors: v.errors }, requestId });
           return { ...v.normalized, requestId: v.normalized.requestId || requestId, clientWarnings: v.warnings };
