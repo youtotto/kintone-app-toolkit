@@ -7116,10 +7116,14 @@
           execUsers.forEach(en => executableUserOk(en));
           if (r.status === STATUS.INVALID) return r;
           for (const fr of froms) {
-            // 重なりの候補は作業者が実行する PRIMARY だけ（作業者以外でも実行できる SECONDARY の差し戻し等は分岐の相手ではない）
-            for (const a of model.process.actions.filter(a => a.from === fr && (a.type || 'PRIMARY') !== 'SECONDARY')) {
+            // 重なりの候補は作業者が実行する PRIMARY だけ（作業者以外でも実行できる SECONDARY の差し戻し等は分岐の相手ではない）。
+            // Phase 20（実機 CX-1）: 前のステータスへ戻すアクション（差し戻し）と進むアクションは、利用者が選ぶ別のボタンなので比べない
+            //   （kintone の条件は表示するボタンを切り替える。［承認する］と［差し戻す］が両方とも条件なしなのは普通）
+            const dist = processDistances({ states: model.process.states, actions: [...model.process.actions, { from: fr, to }] });
+            const newBackward = isBackwardAction(dist, { from: fr, to }, model.process.states);
+            for (const a of model.process.actions.filter(a => a.from === fr && (a.type || 'PRIMARY') !== 'SECONDARY' && !newBackward && !isBackwardAction(dist, a, model.process.states))) {
               const ov = condsOverlap(a.filterCond, cond);
-              if (normCond(a.filterCond) === normCond(cond)) issue('ACTION_SAME_CONDITION', 'high', `同じ遷移元「${fr}」に同じ条件のアクション「${a.name}」が既にあります（どちらが実行されるか曖昧）`);
+              if (normCond(a.filterCond) === normCond(cond)) issue('ACTION_SAME_CONDITION', 'high', `同じ遷移元「${fr}」に同じ条件のアクション「${a.name}」が既にあります（両方のボタンが同じ条件で表示され、どちらのルートへ進むかを条件で分けられていません）`);
               else if (ov === true) issue('ACTION_CONDITION_OVERLAP', 'medium', `遷移元「${fr}」の既存アクション「${a.name}」（${a.filterCond || '条件なし'}）と条件が重なる可能性があります`);
               else if (ov === null) issue('ACTION_CONDITION_UNPARSED', 'low', `既存アクション「${a.name}」との条件の重なりを判定できません（条件式が複雑）`);
             }
@@ -7659,13 +7663,39 @@
      * 条件の分割判定（Phase 12 §10）: 同じ遷移元のアクション群について、条件の重複（overlap）・漏れ（gap）・同一（identical）を判定する。
      * 単純な比較式（同じ数値フィールド）だけ評価し、評価できない条件は UNKNOWN（安全と断定しない）。無条件のアクションは全域を覆う
      */
+    /**
+     * Phase 20（実機 CX-1）: 前のステータスへ戻すアクション（差し戻し等）か。最初のステータスからの距離で、遷移先が遷移元より手前なら戻し。
+     * kintone の条件は「表示するアクションボタン」を切り替えるもの（同じステータスの［承認する］と［差し戻す］は利用者が選ぶボタン）なので、
+     * 戻しのアクションは分岐（どのルートへ進むか）の相手にしない
+     */
+    function processDistances(process) {
+      const states = [...(process?.states || [])].sort((a, b) => Number(a.index ?? 0) - Number(b.index ?? 0));
+      const dist = new Map();
+      if (!states.length) return dist;
+      dist.set(states[0].name, 0);
+      const queue = [states[0].name];
+      while (queue.length) {
+        const s = queue.shift();
+        for (const a of (process.actions || []).filter(x => x.from === s)) if (!dist.has(a.to)) { dist.set(a.to, dist.get(s) + 1); queue.push(a.to); }
+      }
+      return dist;
+    }
+    // 到達できないステータス（計画の途中で遷移がまだ無い等）は、ステータスの並び順（index）で前後を判断する
+    const isBackwardAction = (dist, a, states = null) => {
+      if (dist.has(a.from) && dist.has(a.to)) return dist.get(a.to) < dist.get(a.from);
+      const idx = (n) => { const s = (states || []).find(x => x.name === n); return s ? Number(s.index ?? -1) : -1; };
+      const f = idx(a.from), t = idx(a.to);
+      return f >= 0 && t >= 0 && t < f;
+    };
     function partitionCheck(process) {
       const out = [];
       const byFrom = new Map();
+      const dist = processDistances(process);
       for (const a of process?.actions || []) byFrom.set(a.from, [...(byFrom.get(a.from) || []), a]);
       for (const [from, acts] of byFrom) {
-        // 分岐の判定は作業者が実行する PRIMARY だけ（作業者以外でも実行できる SECONDARY の差し戻し等は分岐ではない）。条件付きが無ければ判定しない
-        const primary = acts.filter(a => (a.type || 'PRIMARY') !== 'SECONDARY');
+        // 分岐の判定は作業者が実行する PRIMARY だけ（作業者以外でも実行できる SECONDARY の差し戻し等は分岐ではない）。条件付きが無ければ判定しない。
+        // Phase 20: 前のステータスへ戻すアクション（作業者が実行する差し戻し）も分岐の相手ではない（別のボタンとして選ぶ）
+        const primary = acts.filter(a => (a.type || 'PRIMARY') !== 'SECONDARY' && !isBackwardAction(dist, a, process.states));
         const conditional = primary.filter(a => a.filterCond), unconditional = primary.filter(a => !a.filterCond);
         if (primary.length < 2 || !conditional.length) continue;
         const parsed = conditional.map(a => ({ name: a.name, cond: a.filterCond || '', p: parseCond(a.filterCond), origin: a.origin, stepId: a.stepId ?? null }));

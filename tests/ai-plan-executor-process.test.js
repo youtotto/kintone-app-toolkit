@@ -161,7 +161,8 @@ console.log('\n--- 3. §38 ADD_ACTION ---');
   const rvI = reviewOf(ident); const mI = makeKintoneMock(DATA);
   const prI = await E.prepare(approveAll(ident, rvI), { api: mI.api, appId: '341' });
   assert(rvI.steps[0].issues.some(i => i.code === 'ACTION_SAME_CONDITION') && rvI.steps[0].safety === 'REVIEW_REQUIRED' && prI.status === 'PREPARED', 'identical transition（同じ遷移元・同じ条件）: 高リスク警告付きで承認すれば実行可');
-  const ov = plan([step('P1', 'ADD_PROCESS_ACTION', 'PROCESS_ACTION', '部長へ', { name: '部長へ', from: '承認待ち', to: '未処理', filterCond: 'amount >= "1000000"' })]);
+  // Phase 20: 前のステータス（未処理）へ戻すアクションは分岐の相手にしない（kintone の条件は表示するボタンの切り替え）→ 分岐は進む方向（完了）で確かめる
+  const ov = plan([step('P1', 'ADD_PROCESS_ACTION', 'PROCESS_ACTION', '部長へ', { name: '部長へ', from: '承認待ち', to: '完了', filterCond: 'amount >= "1000000"' })]);
   const rvO = reviewOf(ov);
   assert(rvO.steps[0].issues.some(i => i.code === 'ACTION_CONDITION_OVERLAP') && rvO.steps[0].issues.some(i => i.code === 'PROCESS_CONDITION_OVERLAP'), 'overlapping condition: 既存の無条件「承認する」と重なる警告（分岐が強制されない）');
   const inv = plan([step('P1', 'ADD_PROCESS_ACTION', 'PROCESS_ACTION', 'x', { name: 'x', from: '承認待ち', to: '完了', filterCond: 'owner in (LOGINUSER())' })]);

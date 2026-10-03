@@ -564,6 +564,29 @@ console.log('\n--- CX-2a / CX-7 / XA-5（再実行）. 通知の種類・未確�
 }
 
 // =========================================================
+console.log('\n--- F31（CX-1 実機）. プロセス: 承認と差し戻しは利用者が選ぶ別のボタン（同じ条件でも分岐の衝突にしない）---');
+{
+  // fixture のプロセス: 未処理 →［申請する］→ 承認待ち →［承認する］→ 完了、承認待ち →［取り下げる］（SECONDARY）→ 未処理
+  const p = plan([
+    step('P1', 'ADD_PROCESS_STATUS', 'PROCESS_STATUS', '部長承認待ち', { name: '部長承認待ち', assignees: ['FIELD_ENTITY:owner'], assigneeType: 'ONE' }),
+    step('P2', 'ADD_PROCESS_ACTION', 'PROCESS_ACTION', '部長へ回す', { name: '部長へ回す', from: '承認待ち', to: '部長承認待ち', filterCond: 'amount >= "1000000"' }, { dependsOn: ['P1'] }),
+    step('P3', 'ADD_PROCESS_ACTION', 'PROCESS_ACTION', '承認する（部長）', { name: '承認する（部長）', from: '部長承認待ち', to: '完了' }, { dependsOn: ['P1'] }),
+    step('P4', 'ADD_PROCESS_ACTION', 'PROCESS_ACTION', '差し戻す（部長）', { name: '差し戻す（部長）', from: '部長承認待ち', to: '未処理' }, { dependsOn: ['P1'] }),
+  ]);
+  const rv = reviewOf(p);
+  const p4 = rv.steps.find(x => x.stepId === 'P4');
+  assert(!p4.issues.some(i => i.code === 'ACTION_SAME_CONDITION') && !rv.conflicts.some(c => c.code === 'ACTION_SAME_CONDITION'), 'F31: 部長承認待ちの［承認する］と［差し戻す］（前のステータスへ戻す）は、両方とも条件なしでも同じ条件の衝突にしない');
+  assert(!rv.warnings.some(w => /部長承認待ち/.test(w.message) && /PROCESS_CONDITION_(OVERLAP|IDENTICAL)/.test(w.code)), 'F31: 分岐の判定（partition）でも差し戻しは相手にしない');
+  // 進む方向の 2 つのアクションが同じ条件（両方とも条件なし）→ どちらのルートへ進むかを条件で分けていない → 従来どおり指摘
+  const p2 = plan([
+    step('P1', 'ADD_PROCESS_STATUS', 'PROCESS_STATUS', '課長承認待ち', { name: '課長承認待ち', assignees: ['FIELD_ENTITY:owner'], assigneeType: 'ONE' }),
+    step('P2', 'ADD_PROCESS_ACTION', 'PROCESS_ACTION', '課長へ回す', { name: '課長へ回す', from: '承認待ち', to: '課長承認待ち' }, { dependsOn: ['P1'] }),
+  ]);
+  const s2 = reviewOf(p2).steps.find(x => x.stepId === 'P2');
+  assert(s2.issues.some(i => i.code === 'ACTION_SAME_CONDITION' && /ルート/.test(i.message)), '進む方向のアクション同士が同じ条件なら従来どおり指摘（どちらのルートへ進むかを条件で分けていない）');
+}
+
+// =========================================================
 console.log('\n--- U5. ［新しい会話］: 続けて書いた別の依頼が今の計画の修正にならないよう、画面から会話を始め直せる ---');
 {
   const HEALTH = { ok: true, supportedContractVersions: ['2.0', '2.1'], entitlements: [{ product: 'toolkit', features: ['assistant-qa', 'change-planner'] }], registry: { toolkit: { 'assistant-qa': { implemented: true, promptVersions: ['1'] }, 'change-planner': { implemented: true, promptVersions: ['1'] } } }, usage: { monthlyLimit: 200, usedThisMonth: 1 } };
