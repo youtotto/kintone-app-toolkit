@@ -15,7 +15,7 @@
 'use strict';
 const { loadToolkit, makeAssert } = require('./helpers/load-toolkit.js');
 const { makeFakeHost } = require('./helpers/fake-dom.js');
-const { KTDeps, KTScan, KTContext, KTContextUi, KTAiClient, KTAiConversation, KTAiWorkspaceViewModel: VM, KTAiChatUi, KTPlanReview, KTPlanExecutor, KTCodeReview, mountAiWorkspace } = loadToolkit();
+const { KTDeps, KTScan, KTContext, KTContextUi, KTAiClient, KTAiConversation, KTAiWorkspaceViewModel: VM, KTAiChatUi, KTPlanReview, KTPlanExecutor, KTCodeReview, KTJsExecutor, mountAiWorkspace } = loadToolkit();
 const { assert, state } = makeAssert();
 const FX = require('./fixtures/ai-context-app.js');
 const { makeKintoneMock } = require('./helpers/kintone-preview-mock.js');
@@ -665,6 +665,43 @@ console.log('\n--- F38（CX-1 2 回目・実機）. 既存ファイルの即時�
   // 即時関数の中（閉じる行の前）に入れたコードは従来どおり
   const inside = KTCodeReview.review({ generated: genOf({ type: 'INSERT_BEFORE', anchor: '})();', content: ADD }), customization: cust, plan: null, data: DATA, scan: null, existingSource: { name: 'dealLock.js', target: 'desktop', text: DL } });
   assert(chk(inside, 'patch').ok && chk(inside, 'globals').ok, `F38: 即時関数の中に入れたコードは指摘しない: ${JSON.stringify(inside.checks.filter(c => !c.ok).map(c => c.name))}`);
+}
+
+// =========================================================
+console.log('\n--- F39（CX-1 2 回目・実機）. PC とモバイルの計画: モバイルのイベントを含むコードはモバイルにも登録する ---');
+{
+  // 実機: dealLock.js（PC だけに登録されている）へモバイルのイベントを統合 → 登録の確認は「PC：2 件変更・Mobile：変更なし」= モバイルでは読み込まれない
+  const DL = ["(function () {", "  'use strict';", "  kintone.events.on(['app.record.create.show', 'app.record.edit.show'], function (event) {", "    var record = event.record;", "    if (record['ステータス'] && record['ステータス'].value === '承認済み') {", "      record['amount'].disabled = true;", "    }", "    return event;", "  });", "})();", ""].join('\n');
+  const ADD = "  kintone.events.on(['mobile.app.record.create.show', 'mobile.app.record.edit.show'], function (event) {\n    if (event.record['ステータス'] && event.record['ステータス'].value === '承認済み') { event.record['amount'].disabled = true; }\n    return event;\n  });\n";
+  const SRC = { name: 'dealLock.js', target: 'desktop', text: DL };
+  const baseHash = KTScan.analyzeFile({ name: 'dealLock.js', target: 'desktop', kind: 'js', text: DL }, { fields: [], selfAppId: null }).file.hash;
+  const cust = { customizationId: 'C1', requirement: '承認済みは金額を編集不可（PC・モバイル）', strategy: 'EXTEND_EXISTING_JS', platform: ['desktop', 'mobile'], events: ['app.record.create.show', 'app.record.edit.show', 'mobile.app.record.create.show', 'mobile.app.record.edit.show'], fields: [{ code: 'amount', access: 'CONTROL' }], apis: [], existingFiles: [{ name: 'dealLock.js', target: 'desktop' }] };
+  const gen = { strategy: 'EXTEND_EXISTING_JS', targetFile: 'dealLock.js', summary: 'モバイルでも金額を編集不可', code: ADD, patch: { baseHash, operations: [{ type: 'INSERT_BEFORE', anchor: '})();', content: ADD }] }, events: cust.events, fields: cust.fields, apis: ['kintone.events.on'], assumptions: [], warnings: [] };
+  const rv = KTCodeReview.review({ generated: gen, customization: cust, plan: null, data: DATA, scan: null, existingSource: SRC });
+  const r = KTJsExecutor.changeFromGenerated({ customization: cust, generated: gen, review: rv, existingSource: SRC });
+  assert(r.ok && r.change.target === 'desktop' && r.change.kind === 'REPLACE_FILE', '前提: PC の dealLock.js を差し替える変更');
+  const mob = typeof KTJsExecutor.mobileCompanionOf === 'function' ? KTJsExecutor.mobileCompanionOf(r.change, { customization: cust, mobileNames: [] }) : { ok: false };
+  assert(mob.ok && mob.change.target === 'mobile' && mob.change.kind === 'ADD_FILE' && mob.change.name === 'dealLock.js' && mob.change.content === r.change.content && mob.change.changeId !== r.change.changeId, 'F39: PC とモバイルの計画でモバイルのイベントを含むコード → モバイルにも同じ本文を追加する変更');
+  // 登録（mock）: PC は差し替え・モバイルは追加 → 復元で両方とも元に戻る
+  const data = clone(DATA);
+  data.customize = { scope: 'ALL', desktop: { js: [{ type: 'FILE', file: { contentType: 'text/javascript', fileKey: 'dl:lock', name: 'dealLock.js', size: '100' } }], css: [] }, mobile: { js: [], css: [] }, revision: '5' };
+  const m = makeKintoneMock(data, { jsSources: [{ name: 'dealLock.js', target: 'desktop', text: DL }] });
+  const rows = KTDeps.normalizeFields(data.fields).map(f => ({ code: f.code, label: f.label, type: f.rawType }));
+  if (mob.ok) {
+    const prep = await KTJsExecutor.prepare({ appId: '310', changes: [r.change, mob.change] }, { api: m.api });
+    assert(prep.status === 'PREPARED' && prep.summary.byTarget.desktop.replace === 1 && prep.summary.byTarget.mobile.add === 1, `F39: 確認画面の件数は PC：差し替え 1・モバイル：追加 1（${JSON.stringify(prep.summary.byTarget)}）`);
+    const ex = await KTJsExecutor.executePreview(prep, { api: m.api, fieldRows: rows });
+    const mobJs = m.st.customize.mobile.js;
+    assert(ex.status === 'DONE' && ex.steps.every(s => s.status === 'VERIFIED') && mobJs.length === 1 && m.st.files.get(mobJs[0].fileKey).content.includes("mobile.app.record.edit.show"), `F39: 登録で PC・モバイルとも VERIFIED、モバイルの一覧に dealLock.js（${ex.status} / ${ex.steps.map(s => s.target + ':' + s.status).join(',')}）`);
+    const rb = await KTJsExecutor.prepareRollback(ex, { api: m.api });
+    await KTJsExecutor.executeRollback(rb, { api: m.api, execution: ex });
+    assert(m.st.customize.mobile.js.length === 0 && m.st.customize.desktop.js.length === 1 && m.st.files.get(m.st.customize.desktop.js[0].fileKey).content === DL, 'F39: 復元でモバイルの追加も取り消し、PC は元の本文');
+  }
+  // モバイルのイベントが無い・PC だけの計画・モバイルに同じ名前のファイルがある → 追加しない（最後は理由を返す）
+  const pcOnly = KTJsExecutor.mobileCompanionOf ? KTJsExecutor.mobileCompanionOf({ ...r.change, content: DL }, { customization: cust, mobileNames: [] }) : { ok: true };
+  const notMobile = KTJsExecutor.mobileCompanionOf ? KTJsExecutor.mobileCompanionOf(r.change, { customization: { ...cust, platform: ['desktop'] }, mobileNames: [] }) : { ok: true };
+  const exists = KTJsExecutor.mobileCompanionOf ? KTJsExecutor.mobileCompanionOf(r.change, { customization: cust, mobileNames: ['dealLock.js'] }) : { ok: true };
+  assert(!pcOnly.ok && !notMobile.ok && !exists.ok && exists.reason === 'MOBILE_FILE_EXISTS' && /手作業/.test(exists.message || ''), 'F39: モバイルのイベントが無い / PC だけの計画では追加しない。モバイルに同じ名前のファイルがあれば自動では更新せず理由を示す');
 }
 
 // =========================================================

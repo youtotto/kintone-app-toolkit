@@ -10678,6 +10678,19 @@
       if (strategy === 'NEW_JS_FILE') return { ok: true, change: { ...base, kind: CHANGE.ADD_FILE, name: safeFileName(fileName || generated.targetFile, { existingNames }), proposedName: generated.targetFile ?? null } };
       return { ok: false, reason: 'STRATEGY_NOT_REGISTERED', message: `方針 ${String(strategy)} は登録の対象外です` };
     }
+    /**
+     * Phase 20（CX-1 2 回目・実機）: PC とモバイルの計画で、モバイルのイベントを含むコードを PC の一覧にだけ登録すると、モバイルでは読み込まれない
+     * （kintone はモバイル用の JavaScript を別の一覧から読む。確認画面は「Mobile：変更なし」だった）→ モバイルの一覧にも同じ本文を追加する変更を作る。
+     * モバイルに同じ名前のファイルが既にあるときは、その本文を確かめずに置き換えないので自動では追加しない（理由を返す）
+     */
+    function mobileCompanionOf(change, { customization = null, mobileNames = [] } = {}) {
+      if (!change || change.target !== 'desktop') return { ok: false, reason: 'NOT_DESKTOP' };
+      if (!(Array.isArray(customization?.platform) && customization.platform.includes('mobile'))) return { ok: false, reason: 'NOT_MOBILE' };
+      if (!/\bmobile\.app\./.test(String(change.content || ''))) return { ok: false, reason: 'NO_MOBILE_EVENTS' };
+      if ((mobileNames || []).includes(change.name)) return { ok: false, reason: 'MOBILE_FILE_EXISTS', message: `モバイルの一覧にも「${change.name}」があります。モバイル側は Toolkit では更新しません（PC と同じ本文になるよう手作業で更新してください）` };
+      const { baseHash, existingName, position, oldFileKey, currentHash, ...rest } = change;
+      return { ok: true, change: { ...rest, changeId: newId('chg'), kind: CHANGE.ADD_FILE, target: 'mobile', name: change.name, companionOf: change.changeId } };
+    }
 
     // ---- 完全な payload（Current ＋ Approved Change = After）----
     /** uploads: changeId → fileKey（未アップロードなら '<pending>'）。REPLACE は同じ位置の fileKey だけ差し替え、ADD は末尾に足す。他は不変 */
@@ -10992,7 +11005,7 @@
       };
     }
 
-    return { EXECUTOR_VERSION, ENV, MAX_FILES, CHANGE, ST, RUN, RB, snapshotOf, payloadOf, diffSnapshots, safeFileName, changeFromGenerated, buildAfter, prepare, executePreview, verifyAfter, prepareRollback, executeRollback, buildAudit, classifyUpload, classifyPut };
+    return { EXECUTOR_VERSION, ENV, MAX_FILES, CHANGE, ST, RUN, RB, snapshotOf, payloadOf, diffSnapshots, safeFileName, changeFromGenerated, mobileCompanionOf, buildAfter, prepare, executePreview, verifyAfter, prepareRollback, executeRollback, buildAudit, classifyUpload, classifyPut };
   })();
 
   // ==========================================
@@ -14549,7 +14562,16 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
         const c = (v.plan?.customizations || []).find(x => x.customizationId === cid) || null;
         const target = g.existingSource?.target || (Array.isArray(c?.platform) && c.platform.length === 1 ? c.platform[0] : 'desktop');
         const r = KTJsExecutor.changeFromGenerated({ customization: c, generated: g.generated, review: g.review, existingSource: g.existingSource ? { name: g.existingSource.name, target: g.existingSource.target, text: g.existingSource.text } : null, target, existingNames: files.filter(f => f.target === target).map(f => f.name) });
-        if (r.ok) { if (g.existingSource?.from === 'url' || g.existingSource?.external) blocked.push({ code: 'EXTERNAL_JS_NOT_WRITABLE', message: `${cid}: 「${g.generated.targetFile}」は URL 指定の JavaScript です。外部サーバーのファイルは Toolkit から書き換えられません（コード / Diff を手動で反映するか、新規の補助 JS として設計し直してください）` }); else changes.push(r.change); }
+        if (r.ok) {
+          if (g.existingSource?.from === 'url' || g.existingSource?.external) blocked.push({ code: 'EXTERNAL_JS_NOT_WRITABLE', message: `${cid}: 「${g.generated.targetFile}」は URL 指定の JavaScript です。外部サーバーのファイルは Toolkit から書き換えられません（コード / Diff を手動で反映するか、新規の補助 JS として設計し直してください）` });
+          else {
+            changes.push(r.change);
+            // Phase 20（CX-1 2 回目・実機）: PC とモバイルの計画 → モバイルの一覧にも同じ本文を登録する（PC にだけ登録するとモバイルでは読み込まれない）
+            const mob = KTJsExecutor.mobileCompanionOf(r.change, { customization: c, mobileNames: files.filter(f => f.target === 'mobile').map(f => f.name) });
+            if (mob.ok) changes.push(mob.change);
+            else if (mob.reason === 'MOBILE_FILE_EXISTS') blocked.push({ code: 'MOBILE_FILE_EXISTS', message: `${cid}: ${mob.message}` });
+          }
+        }
         else blocked.push({ code: r.reason, message: `${cid}: ${r.message}` });
       }
       if (!changes.length) { jsExec.prepared = { executionId: null, status: 'BLOCKED', blockers: blocked.length ? blocked : [{ code: 'NOTHING_TO_REGISTER', message: '登録できる JavaScript がありません（仕様を確定してコードを生成してください）' }], warnings: [], changes: [], summary: { add: 0, replace: 0, byTarget: { desktop: { add: 0, replace: 0 }, mobile: { add: 0, replace: 0 } }, preservedJs: 0, preservedCss: 0 }, snapshot: null }; jsExec.stage = 'blocked'; renderJsReg(); return jsExec.prepared; }
