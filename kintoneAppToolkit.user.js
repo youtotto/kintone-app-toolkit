@@ -6757,6 +6757,10 @@
       const extText = [c.requirement, c.whyStandardInsufficient, ...(c.risks || []), ...(c.questions || []), step.title].filter(Boolean).join(' ');
       const externalHit = /Slack|Teams|Chatwork|LINE ?WORKS|[Ww]ebhook|外部の?(システム|サービス|サーバー|API)|会計(システム|ソフト)|基幹システム|他の?システム|SaaS|メールを?(送信|配信)|外部へ(送|連携)/.exec(extText);
       if (externalHit) add('JS_EXTERNAL_INTEGRATION', 'medium', `外部サービス / 外部システムとの連携（「${externalHit[0]}」）は Toolkit のコード生成の対象外です（認証情報と外部への通信が必要なため JavaScript には書きません）。kintone の Webhook・プラグイン・連携サービスなど別の手段で行ってください`);
+      // 7c. Phase 20（実機 CX-2a 4 回目）: 「営業担当がいれば営業担当に通知、いなければ担当者に通知」を JavaScript の分岐にした。kintone の JavaScript では
+      //     kintone の通知（宛先を決めて送る）を出せない（Planner の規則があっても出た）→ 生成の対象外にし、標準の通知設定で表すよう案内する
+      const notifyHit = /(担当者|営業担当|作業者|承認者|上長|ユーザー|メンバー|宛先|関係者|申請者|作成者)(に|へ)(通知|メール)|通知先を(切り替|変え|決め|分け)|通知を(送信|送る|送っ|飛ば)/.exec([c.requirement, step.title].filter(Boolean).join(' '));
+      if (notifyHit && !externalHit) add('JS_NOTIFICATION_NOT_POSSIBLE', 'medium', `kintone の JavaScript では kintone の通知を送れず、通知先も選べません（「${notifyHit[0]}」）。通知は標準の通知設定（レコードの条件通知・アプリの条件通知・リマインダー）で、宛先のフィールドと条件として表してください`);
       // 8. 判定
       if (worst === 'high') { r.status = STATUS.INVALID; r.safety = SAFETY.BLOCKED; r.diff.changeType = CHANGE.INVALID; }
       else if (worst === 'medium') r.status = STATUS.NEEDS_CONFIRMATION;
@@ -6764,8 +6768,8 @@
       r.codeGeneration.strategy = c.strategy || null;
       const targetOk = c.strategy !== 'EXTEND_EXISTING_JS' || !!r.codeGeneration.existingFile;
       r.codeGeneration.implementation = impl;
-      r.codeGeneration.supported = r.status !== STATUS.INVALID && impl !== 'CSS' && !externalHit && GENERATABLE_STRATEGIES.includes(c.strategy) && platform.length > 0 && events.length > 0 && targetOk;
-      r.codeGeneration.reason = r.codeGeneration.supported ? null : (r.status === STATUS.INVALID ? 'INVALID' : impl === 'CSS' ? 'CSS_NOT_GENERATED' : externalHit ? 'EXTERNAL_INTEGRATION' : !GENERATABLE_STRATEGIES.includes(c.strategy) ? 'STRATEGY_NOT_GENERATED' : !platform.length ? 'PLATFORM_UNSPECIFIED' : !events.length ? 'EVENT_MISSING' : 'TARGET_FILE_MISSING');
+      r.codeGeneration.supported = r.status !== STATUS.INVALID && impl !== 'CSS' && !externalHit && !notifyHit && GENERATABLE_STRATEGIES.includes(c.strategy) && platform.length > 0 && events.length > 0 && targetOk;
+      r.codeGeneration.reason = r.codeGeneration.supported ? null : (r.status === STATUS.INVALID ? 'INVALID' : impl === 'CSS' ? 'CSS_NOT_GENERATED' : externalHit ? 'EXTERNAL_INTEGRATION' : notifyHit ? 'NOTIFICATION_BY_JS' : !GENERATABLE_STRATEGIES.includes(c.strategy) ? 'STRATEGY_NOT_GENERATED' : !platform.length ? 'PLATFORM_UNSPECIFIED' : !events.length ? 'EVENT_MISSING' : 'TARGET_FILE_MISSING');
       return r;
     }
 
@@ -12079,7 +12083,7 @@
       const [sfText, sfColor] = RSAFETY[r.safety] || [r.safety, '#555'];
       const lines = (r.diff?.human || []).map(l => `<div style="font-size:11px;">${esc(l)}</div>`).join('');
       const issues = (r.issues || []).map(i => `<div style="font-size:11px; color:${i.severity === 'high' ? '#b00020' : i.severity === 'medium' ? '#b26a00' : '#555'};">${i.severity === 'high' ? '⚠' : '・'} ${esc(i.message)}</div>`).join('');
-      const GEN_REASON_JA = { INVALID: '計画が無効', EXTERNAL_INTEGRATION: '外部サービス / 外部システムとの連携は対象外', CSS_NOT_GENERATED: 'CSS は生成の対象外', STRATEGY_NOT_GENERATED: '方針が生成の対象外', PLATFORM_UNSPECIFIED: 'PC / モバイル未定', EVENT_MISSING: 'イベント未定', TARGET_FILE_MISSING: '統合先の JS 未指定', BLOCKED_BY_DEPENDENCY: '依存する標準設定が無効', CUSTOMIZATION_NOT_FOUND: 'customization が無い' };
+      const GEN_REASON_JA = { INVALID: '計画が無効', EXTERNAL_INTEGRATION: '外部サービス / 外部システムとの連携は対象外', NOTIFICATION_BY_JS: 'JavaScript では kintone の通知を送れない（標準の通知設定で）', CSS_NOT_GENERATED: 'CSS は生成の対象外', STRATEGY_NOT_GENERATED: '方針が生成の対象外', PLATFORM_UNSPECIFIED: 'PC / モバイル未定', EVENT_MISSING: 'イベント未定', TARGET_FILE_MISSING: '統合先の JS 未指定', BLOCKED_BY_DEPENDENCY: '依存する標準設定が無効', CUSTOMIZATION_NOT_FOUND: 'customization が無い' };
       const gen = r.codeGeneration ? `<div style="font-size:11px; margin-top:2px; color:${r.codeGeneration.supported ? '#2e7d32' : '#b26a00'};">${r.codeGeneration.supported ? '✓ コード生成できます（標準設定の反映とは別に、右「コード」から動作テスト環境へ登録）' : `△ コード生成はまだできません（${esc(GEN_REASON_JA[r.codeGeneration.reason] || r.codeGeneration.reason || '要確認')}）`}</div>${r.codeGeneration.supported ? `<div style="margin-top:4px;"><button type="button" class="btn kt-ai-act" data-act="generate" data-cid="${esc(r.customization?.customizationId || '')}" style="height:24px; font-size:11px; border-color:#6a1b9a;">コードを作る</button></div>` : ''}` : '';
       return `<div class="kt-ai-review-step" data-step="${esc(r.stepId)}" style="margin-top:6px; padding:6px 8px; border-radius:6px; background:rgba(0,0,0,.04); border-left:3px solid ${stColor};">
         <div><b>Toolkit で確認した結果</b> ${badge(stText, stColor)}${badge(sfText, sfColor)}${changeBadges(r)}${r.blockedBy?.length ? badge(`依存: ${r.blockedBy.join(', ')}`, '#b00020') : ''}${r.solution === 'CUSTOMIZATION' ? badge('JavaScript', '#6a1b9a') : ''}</div>

@@ -437,6 +437,11 @@ console.log('\n--- CX-7. 外部サービス / 外部システムとの連携は�
   assert(slack.codeGeneration.supported === false && slack.codeGeneration.reason === 'EXTERNAL_INTEGRATION', 'Slack への通知も対象外');
   const local = reviewOf(plan([step('C1', 'CUSTOMIZATION_REQUIRED', 'JS', '', { customizationId: 'C1' }, { solution: 'CUSTOMIZATION' })], [], { solution: 'CUSTOMIZATION', customizations: [{ ...cust, requirement: '金額が100万円を超えたら警告を表示する', whyStandardInsufficient: '条件付きの画面警告は標準にない', events: ['app.record.edit.show'], fields: [{ code: 'amount', access: 'CONTROL' }] }] })).steps[0];
   assert(local.codeGeneration.supported === true, '画面内の処理（外部連携の語なし）は従来どおり生成できる');
+  // F28（CX-2a 4 回目）: 「営業担当がいれば営業担当に通知、いなければ担当者に通知」の JS は生成の対象外（JavaScript では kintone の通知を送れない）
+  const byJs = reviewOf(plan([step('C1', 'CUSTOMIZATION_REQUIRED', 'JS', '', { customizationId: 'C1' }, { solution: 'CUSTOMIZATION' })], [], { solution: 'CUSTOMIZATION', customizations: [{ ...cust, requirement: '営業担当が空でない場合は営業担当に通知し、空の場合は担当者に通知する条件分岐を実装する', whyStandardInsufficient: '通知先を条件で切り替える標準機能がない', events: ['app.record.detail.process.proceed'], fields: [{ code: 'owner', access: 'READ' }] }] })).steps[0];
+  assert(byJs.codeGeneration.supported === false && byJs.codeGeneration.reason === 'NOTIFICATION_BY_JS' && byJs.issues.some(i => i.code === 'JS_NOTIFICATION_NOT_POSSIBLE' && /標準の通知設定/.test(i.message)), 'F28: JavaScript で通知を送る / 通知先を切り替える要件は生成の対象外（NOTIFICATION_BY_JS）');
+  const uiMsg = reviewOf(plan([step('C1', 'CUSTOMIZATION_REQUIRED', 'JS', '', { customizationId: 'C1' }, { solution: 'CUSTOMIZATION' })], [], { solution: 'CUSTOMIZATION', customizations: [{ ...cust, requirement: '承認済みのレコードを開いたら画面の上部に注意メッセージを表示する', whyStandardInsufficient: '標準にない', events: ['app.record.detail.show'], fields: [{ code: 'amount', access: 'READ' }] }] })).steps[0];
+  assert(!uiMsg.issues.some(i => i.code === 'JS_NOTIFICATION_NOT_POSSIBLE'), '画面のメッセージ表示は対象外にしない');
   const conv = KTAiConversation.create({ services: {} });
   conv.registerPlan({ plan: p, ctx: null, review: rv });
   const intro = conv.messages().find(m => m.data && m.data.kind === 'spec-intro');
