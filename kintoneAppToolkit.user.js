@@ -10964,6 +10964,23 @@
     /** ループと hasOwnProperty だけ（要件の条件が構造化されていないときに「条件なし」と同じに扱う狭い形） */
     const structuralOnly = (conds) => conds.length > 0 && conds.map(t => String(t).replace(/\s*\/\*[\s\S]*?\*\/\s*$/, '')).every(t => /^(for|while)$/.test(t) || /^\s*!?\s*\(?\s*(?:[\w$.[\]'"`]+\.hasOwnProperty|Object\.prototype\.hasOwnProperty\.call)\s*\([^()]*\)\s*\)?\s*$/.test(t));
     const pathsOfSite = (x) => (x.paths && x.paths.length ? x.paths : [x.conds]);
+    /** 位置 idx が kintone.events.on の handler（その場で渡した関数・名前で渡した関数）の中か */
+    function insideHandler(s, idx) {
+      const stack = [];
+      for (let k = 0; k < idx; k++) { const ch = s[k]; if (ch === '{') stack.push(k); else if (ch === '}') stack.pop(); }
+      return stack.some(open => {
+        const before = s.slice(Math.max(0, open - 400), open).replace(/\s+$/, '');
+        if (/=>$/.test(before)) return /kintone\s*\.\s*events\s*\.\s*on\s*\([^;{}]*,\s*(?:async\s*)?\(?[^()]*\)?\s*=>$/.test(before);
+        if (!/\)$/.test(before)) return false;
+        const head = before.slice(0, -1);
+        let depth = 1, k = head.length - 1;
+        for (; k >= 0 && depth > 0; k--) { if (head[k] === ')') depth++; else if (head[k] === '(') depth--; }
+        const kw = head.slice(0, k + 1).replace(/\s+$/, '');
+        if (/kintone\s*\.\s*events\s*\.\s*on\s*\([^;{}]*,\s*(?:async\s+)?function\s*[\w$]*\s*$/.test(kw)) return true;
+        const name = (/\bfunction\s+([A-Za-z_$][\w$]*)\s*$/.exec(kw) || /\b(?:var|let|const)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s+)?function\s*[\w$]*\s*$/.exec(kw) || [])[1];
+        return !!name && new RegExp(`kintone\\s*\\.\\s*events\\s*\\.\\s*on\\s*\\([^;]*?,\\s*${name.replace(/\$/g, '\\$')}\\s*\\)`).test(s);
+      });
+    }
     /** Phase 21: コードがフィールドに対して行う操作（値の代入 value / 編集可否 disabled / エラー error / 表示切替 shown）。code → Set(kind) */
     function writeTargets(clean) {
       const s = String(clean || '');
@@ -11269,6 +11286,13 @@
       if (dupInAdded.length) add('duplicate-handler', false, 'review', `同じイベントを 2 回登録しています: ${[...new Set(dupInAdded)].join(', ')}`);
       else if (dupWithExisting.length) add('duplicate-handler', false, 'review', `既存ファイルが既に登録しているイベントに別の handler を足します: ${dupWithExisting.join(', ')}（同じイベントの handler は登録順に動きます）`);
       else add('duplicate-handler', true, 'info', '重複した handler はありません');
+      // Phase 21（基準モデルの CX-1 3 回目）: 既存の handler の if の後ろに、新しい kintone.events.on（PC ＋ モバイル）を丸ごと差し込んだ。
+      //   登録は外側の handler が動いたときに初めて行われ、最初の表示では動かず、表示のたびに重複して登録される。外側が PC のイベントだけなら
+      //   モバイルでは一度も登録されない。Code Review は内側の登録をモバイル対応と数えて「確認」止まりにしていた
+      const nestedRegs = (text) => [...String(text || '').matchAll(/kintone\s*\.\s*events\s*\.\s*on\s*\(/g)].map(m => m.index).filter(i => insideHandler(String(text), i));
+      const nested = nestedRegs(clean);
+      const baseNested = g.strategy === 'EXTEND_EXISTING_JS' && existingSource && typeof existingSource.text === 'string' ? nestedRegs(KTScan.stripCommentsOnly(existingSource.text)).length : 0;
+      if (nested.length > baseNested) add('nested-registration', false, 'block', `イベントの登録（kintone.events.on）が、別のイベントの handler の中にあります（${nested.length - baseNested} 件）。外側の handler が動いた後で登録されるため、最初の表示では動かず、表示のたびに重複して登録されます（外側が PC のイベントだけなら、モバイルでは一度も登録されません）。登録は即時関数の直下に置いてください`);
       // ---- 9. 既存 JS との競合（統合先以外の既存ファイルが同じフィールドを WRITE / CONTROL）----
       // 同じ platform（PC / モバイル）のファイルだけが競合し得る（実機: モバイル JS への統合で PC の fieldOnOff.js が競合扱いになった）
       const files = KTScan.summarizeFiles(scan, data).filter(f => f.analyzed && f.target === target && !(existingSource && f.name === existingSource.name && f.target === existingSource.target));
