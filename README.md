@@ -23,7 +23,7 @@
   - [Customize](#customize)
   - [Plugins](#plugins)
   - [Field Scanner](#field-scanner)
-  - [AI](#ai)
+  - [開発支援（AI Workspace）](#開発支援ai-workspace)
 - [導入方法](#-導入方法)
 - [使い方](#-使い方)
 - [解析範囲と確度](#-解析範囲と確度)
@@ -49,9 +49,9 @@ Toolkitは、kintone開発を標準化・効率化するための **Tampermonkey
 - ✅ **Customize**: 登録済み JS / CSS の確認・解析（PC / モバイル・FILE / URL）＋ 「AIに相談」
 - ✅ **Plugins**: プレビュー / 本番差分管理
 - ✅ **Field Scanner**: JS/CSS解析（ファイル起点ビュー / 自動解析）
-- ✅ **AI**: 解析結果を AI 向けに変換（AI Context / Prompt / Markdown / JSON / ドキュメント。無料）。Nest Rec AI に接続すると、実現したい業務から変更計画 → Toolkit Review → 動作テスト環境への反映 → 検証 → 元に戻す、JavaScript の生成 → 登録まで
+- ✅ **開発支援**（内部名 AI Workspace）: 解析結果を AI 向けに変換（AI Context / Prompt / Markdown / JSON / ドキュメント。無料）。Nest Rec AI に接続すると、実現したい業務から変更計画 → Toolkit Review → 動作テスト環境への反映 → 検証 → 元に戻す、JavaScript の生成 → 登録まで
 
-> Templates タブ（GitHub のテンプレート / Snippets / CSS / Documents）は廃止しました。テンプレートを人が選んで貼り付ける方式から、
+> Templates タブ（GitHub のテンプレート / Snippets / CSS / Documents）は廃止し、AI タブは「開発支援」に改名しました。テンプレートを人が選んで貼り付ける方式から、
 > **実現したい業務を起点に AI が標準設定・既存コード・Pattern Library を組み合わせて実装方法を判断する**方式へ移行しています。
 > Documents（仕様書・要件定義・レビュー依頼の Prompt）は AI タブの「ドキュメントを作る」へ、Snippets / CSS テンプレートは AI が参照する Pattern Library（Nest Rec AI Gateway 側）へ移しました。
 
@@ -80,9 +80,9 @@ Toolkit は、設定を「見る」ツールから **「実現したい業務」
 |---|---|---|
 | **Analyze** | 今どうなっているか | Health / Fields / Views / Graphs / Notices / Access Control / Customize / Field Scanner / Plugins |
 | **Understand** | 何がどこに依存しているか | Relations / Deps / Fields（変更影響） |
-| **Plan** | 実現したい業務をどう作るか（標準設定 → 不足分だけ JavaScript） | AI（変更計画・実装仕様・Toolkit Review） |
-| **Build** | 計画どおりに作る | AI（動作テスト環境への反映・JavaScript の生成と登録）/ Customize（登録済みコードの確認） |
-| **Verify** | 作ったものが計画どおりか・戻せるか | AI（検証・再解析・元に戻す）/ Customize（動作テスト環境と運用環境の差） |
+| **Plan** | 実現したい業務をどう作るか（標準設定 → 不足分だけ JavaScript） | 開発支援（変更計画・実装仕様・Toolkit で確認した結果） |
+| **Build** | 計画どおりに作る | 開発支援（動作テスト環境への反映・JavaScript の生成と登録）/ Customize（登録済みコードの確認） |
+| **Verify** | 作ったものが計画どおりか・戻せるか | 開発支援（検証・再解析・元に戻す）/ Customize（動作テスト環境と運用環境の差） |
 
 **開発思想（AI-first）**: Toolkit AI は、標準設定と JavaScript カスタマイズを別々に選択するツールではありません。
 実現したい業務を起点に、現在のアプリ構成を解析し、標準設定で実現できる部分は標準設定で、不足する部分だけカスタマイズで補います。
@@ -90,7 +90,8 @@ AI は 1) 現在のフィールド・設定で実現できるか → 2) 標準�
 4) 不足する部分だけ JavaScript / CSS で補えるか → 5) 再利用性が高ければ将来プラグイン化すべきか、の順に判断します。
 利用者が最初に「標準設定にしますか、JavaScript にしますか」と選ぶことはありません。
 
-> Fact（現在どうなっているかを見る: 解析タブ）と Build（次にどうするか考え、作る: AI）を分け、AI の機能は AI タブに集めています。
+> Fact（現在どうなっているかを見る: 解析タブ）と Build（次にどうするか考え、作る: 開発支援）を分け、AI の機能は開発支援タブに集めています。
+> 開発支援タブは **左 = 相談の履歴（Conversation）／右 = 現在の計画・検証・コード・実行結果（Workspace）** です。承認・最終確認は右の画面だけで行い、チャットの文章では実行されません。
 > 無料で使える出力（AI Context / Prompt / Markdown / JSON / ドキュメント）は Nest Rec AI の契約が無くても利用できます。
 
 ---
@@ -239,7 +240,7 @@ Markdownは仕様書として貼り付けやすい形式で、利用箇所・他
 ### Customize
 現在登録されている JavaScript / CSS を**確認・解析する場所**です（設計・生成・修正は AI タブへ）。
 - 登録済みファイルの一覧（desktop / mobile、JS / CSS、FILE / URL を kintone の登録順で）と Monaco エディタでの表示・編集
-- **「AIに相談」**: 行のボタンから AI タブへ。そのファイルを対象にした会話（相談 → 実装仕様の確定 → コード生成 → 動作テスト環境への登録）を始めます
+- **「AIに相談」**: 行のボタンから開発支援タブへ。そのファイルを対象にした会話（相談 → 実装仕様の確定 → コード生成 → 動作テスト環境への登録）を始めます
 - 動作テスト環境と運用環境のカスタマイズ設定の差（未反映の変更・動作テスト環境だけのファイル）を表示
 - **JSEdit互換**の保存＋デプロイ（preview更新 / deploy完了検知。利用者の明示操作のみ）
 - フィールドコードの補完（`record['CODE'].value`）
@@ -287,8 +288,9 @@ custom.js  [desktop] [JS]
 
 ---
 
-### AI
-Toolkit が解析した kintone を使って、**次の仕事を行う場所**です（内部名: AI Workspace）。
+### 開発支援（AI Workspace）
+Toolkit が解析した kintone を使って、**次の仕事を行う場所**です（タブ名「開発支援」、内部名 AI Workspace）。
+左は相談の履歴（会話は要約のカード）、右は現在の成果物の正本（計画 / 検証 / コード / 実行 / 根拠 / Context / 接続）です。
 
 **無料（Nest Rec AI の契約なし）**
 - **AI Context / AI Prompt / Markdown / JSON**: 解析結果（フィールド・設定・依存関係・JavaScript の参照）を根拠ID付きで AI 向けに変換。ChatGPT / Claude などへ貼り付けて質問・変更計画に使えます。Toolkit から AI へ送信することはありません
@@ -299,7 +301,7 @@ Toolkit が解析した kintone を使って、**次の仕事を行う場所**�
 - **Toolkit Review**（決定的な検証: 存在しないフィールド・競合・安全性）→ 人間の承認 → **動作テスト環境への反映** → 検証 → **元に戻す**（運用環境へは反映しません）
 - **JavaScript カスタマイズ**: Customize の既存 JS から相談 → 実装仕様の確定 → コード生成（Pattern Library を参考に現在のアプリに合わせて生成）→ Toolkit Code Review → 動作テスト環境への登録 → 再解析・検証 → 復元
 
-> 承認・最終確認・元に戻す操作は、すべて画面のボタンで行います（チャットの文章では実行されません）。
+> 承認・最終確認・元に戻す操作は、すべて右の画面（検証・実行・計画）のボタンで行います（チャットの文章では実行されません）。
 
 ---
 

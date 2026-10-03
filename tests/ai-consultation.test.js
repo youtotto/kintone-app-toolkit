@@ -145,7 +145,7 @@ console.log('\n--- §44-2. 会話の開始 / 再開 / 別 JS の確認 / Planner
   const r2 = m.panel.consult(seed);
   await clickChat(m, 'consult-new');
   const sub = m.conv().subject();
-  assert(sub && sub.sourceId === 'desktop:js:fieldOnOff.js' && m.msgs().length === 1 && m.msgs()[0].data?.kind === 'consultation-start' && /fieldOnOff\.js について相談します/.test(m.chat()) && /PC用 JavaScript/.test(m.chat()) && /イベント：2件/.test(m.chat()) && /参照フィールド：2件/.test(m.chat()) && /CONTROL：1件/.test(m.chat()) && /何を変更したいですか/.test(m.chat()), '［新しい会話を始める］: 会話を新しくして subject を設定・初期メッセージ（ファイル名・PC用・イベント / 参照フィールド / CONTROL の件数・何を変更したいですか？）');
+  assert(sub && sub.sourceId === 'desktop:js:fieldOnOff.js' && m.msgs().length === 1 && m.msgs()[0].data?.kind === 'consultation-start' && /fieldOnOff\.js について相談します/.test(m.chat()) && /PC用 JavaScript/.test(m.chat()) && !/イベント：2件/.test(m.chat()) && /何を変更したいですか/.test(m.chat()) && /相談中の JavaScript/.test(m.$('kt-ai-subject-info').innerHTML) && /app\.record\.create\.show/.test(m.$('kt-ai-subject-info').innerHTML) && /制御<\/span><span>amount/.test(m.$('kt-ai-subject-info').innerHTML), '［新しい会話を始める］: 会話を新しくして subject を設定。左は「〜について相談します。何を変更したいですか？」だけ（§20）、現在情報（イベント / 制御 / 本文）は右「計画」');
   assert(/相談中: fieldOnOff\.js（PC）/.test(m.$('kt-ai-header').innerHTML), 'ヘッダーに相談対象');
   const r3 = m.panel.consult(seed);
   assert(r3.ok && r3.resumed === true && m.msgs().length === 1, '同じ JS の「AIに相談」: 再開（会話を残す・初期メッセージを重ねない）');
@@ -179,21 +179,22 @@ console.log('\n--- §45. 実装仕様: v1 DRAFT → チャットでは確定し�
   await m.panel.send('承認済みになったら金額を編集できなくしたい');
   const v1 = m.conv().activePlan();
   assert(v1.spec && v1.spec.version === 1 && v1.spec.status === 'DRAFT' && v1.spec.specId === `${v1.planId}:spec` && v1.spec.subject?.name === 'fieldOnOff.js' && m.types().includes('SPEC'), '計画 v1 → 実装仕様 v1（DRAFT・相談対象付き）');
-  const html = m.chat();
-  assert(/実装仕様 v1/.test(html) && /確認待ち/.test(html) && /目的/.test(html) && /承認済みになったら金額を編集できなくしたい/.test(html) && /✎ fieldOnOff\.js を変更/.test(html) && /amount（CONTROL）/.test(html) && /app\.record\.edit\.show/.test(html) && /data-act="confirm-spec"/.test(html) && /data-act="revise-spec"/.test(html) && /チャットの「それでいい」では確定になりません/.test(html), '仕様カード: 目的 / PC ✎ fieldOnOff.js を変更 / 対象フィールド / イベント / ［仕様を修正］［この仕様で確定］');
+  const html = m.$('kt-ai-spec').innerHTML;
+  assert(/実装仕様 v1/.test(html) && /確認待ち/.test(html) && /目的/.test(html) && /承認済みになったら金額を編集できなくしたい/.test(html) && /✎ fieldOnOff\.js を変更/.test(html) && /amount（CONTROL）/.test(html) && /app\.record\.edit\.show/.test(html) && /data-act="confirm-spec"/.test(html) && /data-act="revise-spec"/.test(html) && /チャットの「それでいい」では確定になりません/.test(html), '仕様カード（右「計画」）: 目的 / PC ✎ fieldOnOff.js を変更 / 対象フィールド / イベント / ［仕様を修正］［この仕様で確定］');
+  assert(/実装仕様 v1 をまとめました/.test(m.chat()) && /✎ fieldOnOff\.js を変更（PC）/.test(m.chat()) && !/data-act="confirm-spec"/.test(m.chat()), '会話の仕様カードは要約だけ（確定ボタンは右）');
   const c1 = await m.panel.send('それでいい');
   assert(c1.intent === KTAiConversation.INTENT.CONFIRM_SPEC && v1.spec.status === 'DRAFT' && /この仕様で確定］ボタンで行います/.test(m.chat()) && writes(m).length === 0, '「それでいい」: 確定しない（案内だけ）');
   const g0 = await m.panel.send('コードを作って');
   assert(g0.ok === false && m.calls.generate.length === 0 && m.msgs().some(x => x.data?.kind === 'spec-required'), '確定前の「コードを作って」: 生成しない');
   await confirmSpec(m);
-  assert(v1.spec.status === 'CONFIRMED' && v1.spec.confirmedAt && v1.spec.customizeRevision === '12' && /確定済み/.test(m.chat()) && /JavaScript を生成（C1）/.test(m.chat()) && m.msgs().some(x => x.data?.kind === 'spec-confirmed'), '［この仕様で確定］→ CONFIRMED・customize revision 12 を記録・［JavaScript を生成（C1）］');
+  assert(v1.spec.status === 'CONFIRMED' && v1.spec.confirmedAt && v1.spec.customizeRevision === '12' && /確定済み/.test(m.chat()) && /JavaScript を生成（C1）/.test(m.$('kt-ai-spec').innerHTML) && m.msgs().some(x => x.data?.kind === 'spec-confirmed'), '［この仕様で確定］→ CONFIRMED・customize revision 12 を記録・右「計画」に［JavaScript を生成（C1）］');
   assert(m.mock.calls.filter(c => c === 'GET customize').length >= 1 && writes(m).length === 0, '確定時に動作テスト環境の設定を読むだけ（書き込み 0）');
   // 修正 → v2（PC は既存へ統合・mobile は新規）
   const rv = await m.panel.send('モバイルでも同じようにしたい');
   assert(rv.intent === KTAiConversation.INTENT.REVISE_PLAN && m.calls.plan.length === 2 && m.calls.plan[1].ctx.revision && m.calls.plan[1].ctx.subject?.sourceId === 'desktop:js:fieldOnOff.js', '修正の依頼: REVISE_PLAN（subject 付き）');
   const v2 = m.conv().activePlan();
   assert(v2.version === 2 && v2.spec.version === 2 && v2.spec.status === 'DRAFT' && v1.spec.status === 'SUPERSEDED' && v1.status === 'SUPERSEDED', 'v2 の仕様は DRAFT・v1 の仕様は SUPERSEDED');
-  assert(/実装仕様 v2/.test(m.chat()) && /Mobile/.test(m.chat()) && /＋ 新規 JS/.test(m.chat()) && /✎ fieldOnOff\.js を変更/.test(m.chat()), '仕様 v2 のカード: PC は既存へ統合・Mobile は新規 JS（§6）');
+  assert(/実装仕様 v2/.test(m.chat()) && /モバイル/.test(m.chat()) && /＋ 新規 JS/.test(m.chat()) && /✎ fieldOnOff\.js を変更/.test(m.chat()) && /Mobile/.test(m.$('kt-ai-spec').innerHTML) && /実装仕様 v2/.test(m.$('kt-ai-spec').innerHTML), '仕様 v2 のカード: PC は既存へ統合・Mobile は新規 JS（§6）。右は v2 だけ');
   const old = KTAiConversation.MSG.SPEC;
   const v1Card = m.chat().match(/実装仕様 v1[\s\S]*?kt-ai-card/)?.[0] || '';
   assert(/旧版/.test(m.chat()) && !/実装仕様 v1[\s\S]{0,2000}data-act="confirm-spec"/.test(m.chat().split('実装仕様 v2')[0]), '旧版（v1）のカードに確定ボタンは無い');
@@ -221,7 +222,7 @@ console.log('\n--- §46〜§53（UI 経由）: 既存 FILE の差し替え登録
   const v = m.conv().activePlan();
   const entry = m.panel.generated('C1');
   assert(entry && entry.review.status === 'OK' && entry.existingSource?.from === 'seed' && entry.existingSource.text === FIELD_ON_OFF && m.calls.generate[0].ctx.existingFile?.source === FIELD_ON_OFF, '生成: 統合先の本文は相談の seed から（取り直さない）・Code Review OK');
-  assert(/data-act="open-js-register"/.test(m.chat()) && /動作テスト環境へ登録/.test(m.chat()), 'コードカードに［動作テスト環境へ登録］');
+  assert(!/data-act="open-js-register"/.test(m.chat()) && /動作テスト環境へ登録/.test(m.chat()) && m.$('kt-ai-code-register').style.display === '', '［動作テスト環境へ登録］は右「コード」（会話は案内だけ）');
   const r1 = await m.panel.send('JS を登録して');
   assert(r1.intent === KTAiConversation.INTENT.REQUEST_JS_PREVIEW && m.msgs().some(x => x.data?.kind === 'js-preview-ready' && x.data.registrable === 1) && /登録の確認を開く/.test(m.chat()) && writes(m).length === 0 && m.panel.jsExecState().stage === 'idle', '「JS を登録して」: 案内カードだけ（登録しない・書き込み 0）');
   // 登録の確認（Human Approval）
@@ -231,7 +232,7 @@ console.log('\n--- §46〜§53（UI 経由）: 既存 FILE の差し替え登録
   assert(jx.stage === 'confirm' && jx.prepared.status === 'PREPARED' && jx.prepared.changes[0].kind === 'REPLACE_FILE' && jx.prepared.changes[0].position === 1 && jx.prepared.changes[0].currentHash === KTScan.hashText(FIELD_ON_OFF) && writes(m).length === 0, '［動作テスト環境へ登録］→ prepare（読み取りだけ）→ 確認画面');
   const pane = m.pane();
   assert(/JavaScript を動作テスト環境へ登録します。/.test(pane) && /✎ <b>fieldOnOff\.js<\/b>（PC）　既存ファイルを更新/.test(pane) && /PC：1件変更　Mobile：変更なし/.test(pane) && /既存の CSS（1 件）・その他の JS（2 件）・適用範囲（ALL）は変更しません/.test(pane) && /運用環境には反映されません/.test(pane) && /id="kt-ai-jsreg-cancel"/.test(pane) && /id="kt-ai-jsreg-go"/.test(pane) && /revision 12/.test(pane), '最終確認（§21）: 変更の一覧・PC / Mobile の件数・保持する設定・運用環境には反映しない・［キャンセル］［動作テスト環境へ登録］');
-  assert(m.panel.drawerState().open && m.panel.drawerState().pane === 'code', '確認はコードペイン（drawer）で');
+  assert(m.panel.drawerState().open && m.panel.drawerState().pane === 'exec' && m.panel.activeArtifact()?.type === 'EXECUTION' && m.panel.activeArtifact()?.js === true, '確認は右「実行」ペイン（activeArtifact EXECUTION / js）');
   await clickPane(m, 'kt-ai-jsreg-cancel');
   assert(m.panel.jsExecState().stage === 'idle' && m.pane() === '' && writes(m).length === 0, '［キャンセル］: 何も書かない');
   await clickChat(m, 'open-js-register', { plan: v.planId, version: String(v.version) });
@@ -242,7 +243,7 @@ console.log('\n--- §46〜§53（UI 経由）: 既存 FILE の差し替え登録
   assert(m.panel.jsExecState().stage === 'done' && ex && ex.status === 'DONE' && ex.steps[0].status === 'VERIFIED' && writes(m).join(',') === 'POST file,PUT customize', '［動作テスト環境へ登録］→ upload → PUT → 検証 → DONE（書き込みは upload ＋ PUT だけ）');
   const after = jsNames(m, 'desktop');
   assert(after.length === before.length && after[0] === before[0] && after[1] === 'fieldOnOff.js' && m.mock.st.customize.desktop.js[1].fileKey !== 'dl:fieldOnOff' && m.mock.st.files.get(m.mock.st.customize.desktop.js[1].fileKey).content.includes("value === '承認済'") && jsNames(m, 'mobile').join() === 'mobileLock.js' && m.mock.st.customize.desktop.css.length === 1, '動作テスト環境: 同じ位置の fieldOnOff.js だけ新しい本文（承認済の分岐入り）。URL / mobile / CSS はそのまま');
-  assert(m.types().includes('JS_EXECUTION') && /JavaScript を動作テスト環境へ登録しました/.test(m.chat()) && /✓ ✎ fieldOnOff\.js（PC） 更新/.test(m.chat()) && /Code Review<\/span><b>✓/.test(m.chat()) && /Preview 設定<\/span><b>✓/.test(m.chat()) && /再解析<\/span><b>✓/.test(m.chat()) && /Plan との一致<\/span><b>✓/.test(m.chat()) && /運用環境には反映されていません/.test(m.chat()) && /data-act="js-rollback"/.test(m.chat()) && /登録内容を見る/.test(m.chat()), '結果カード（§31）: ✓ 更新・Code Review / Preview 設定 / 再解析 / Plan との一致 ✓・運用環境には反映されていません・［登録内容を見る］［変更前の状態に戻す］');
+  assert(m.types().includes('JS_EXECUTION') && /JavaScript を動作テスト環境へ登録しました/.test(m.chat()) && /✎ fieldOnOff\.js（PC）/.test(m.chat()) && /✓ 1 \/ 1 件 VERIFIED/.test(m.chat()) && !/Plan との一致/.test(m.chat()) && /運用環境には反映されていません/.test(m.chat()) && /data-act="js-rollback"/.test(m.chat()) && /登録結果を見る/.test(m.chat()) && /planVsActual/.test(m.pane()), '結果カード（§8 / §31）: ✎ fieldOnOff.js（PC）✓ 1 / 1 件 VERIFIED・運用環境には反映されていません・［登録結果を見る］［変更前の状態に戻す］。検証の内訳（planVsActual 等）は右「実行」');
   assert(m.conv().activeJsExecution()?.written === true && m.msgs().some(x => x.data?.kind === 'js-preview-changed') && m.rescans.length === 1 && v.jsExecutionId === ex.executionId, '会話の状態: 登録済み（written）・SYSTEM 通知・再スキャンを 1 回');
   assert(/PUT \/preview\/app\/customize: ✓（revision 12 → 13）/.test(m.pane()) && /sourceHash/.test(m.pane()) && /planVsActual/.test(m.pane()) && /id="kt-ai-jsreg-audit-copy"/.test(m.pane()) && /id="kt-ai-jsreg-rollback-start"/.test(m.pane()), 'コードペインの結果: PUT の revision・検証項目・［Audit JSON をコピー］［変更前の状態に戻す］');
   await clickPane(m, 'kt-ai-jsreg-audit-copy');
@@ -302,7 +303,7 @@ console.log('\n--- 新規 JS（desktop）の登録 / mobile（desktop を変え�
   const m = mount({ planResponse: PLAN_EXT });
   await ticks();
   m.panel.consult(seedFor('ext.js', 'desktop', { url: 'https://example.com/lib/ext.js' }));
-  assert(/本文は取得できません（外部 URL）/.test(m.chat()), '外部 URL の相談: 本文が無い旨');
+  assert(/URL 指定/.test(m.chat()) && /取得できません（外部 URL/.test(m.$('kt-ai-subject-info').innerHTML), '外部 URL の相談: 左は URL 指定の印、本文が無い旨は右「計画」の相談カード');
   await m.panel.send('承認済みでは担当者を編集不可にしたい');
   await confirmSpec(m);
   const g = await m.panel.send('コードを作って');
@@ -315,7 +316,7 @@ console.log('\n--- 新規 JS（desktop）の登録 / mobile（desktop を変え�
   await confirmSpec(m2);
   await clickChat(m2, 'generate', { cid: 'C1' });
   const e2 = m2.panel.generated('C1');
-  assert(e2 && e2.existingSource?.from === 'url' && e2.existingSource.external === true && /EXTERNAL_JS_NOT_WRITABLE/.test(m2.chat()) && !/data-act="open-js-register"/.test(m2.chat()) && /新規 JS として設計し直す/.test(m2.chat()), 'URL の JS への patch: 生成はできるが、カードは「外部サーバーのファイルは書き換えられない」・登録ボタン無し・［新規 JS として設計し直す］');
+  assert(e2 && e2.existingSource?.from === 'url' && e2.existingSource.external === true && /書き換えられません/.test(m2.chat()) && m2.$('kt-ai-code-register').style.display === 'none' && /新規 JS として設計し直す/.test(m2.chat()), 'URL の JS への patch: 生成はできるが、カードは「Toolkit からは書き換えられない」・右の登録ボタンは出ない・［新規 JS として設計し直す］');
   const v2 = m2.conv().activePlan();
   await m2.panel.startJsRegister(v2);
   await ticks(6);

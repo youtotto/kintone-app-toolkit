@@ -166,7 +166,7 @@ console.log('\n--- §33. Migration Notice（初回だけ・閉じると保存）
   const T2 = loadToolkit({ document: doc, localStorage: store });
   const wrap = T2.mountRoot();
   const n = byId.get('kt-migration-notice');
-  assert(n && n.classList.contains('is-shown') && /Templates タブの機能は/.test(wrap.innerHTML) && /<b>AI<\/b>/.test(wrap.innerHTML) && /<b>Customize<\/b>/.test(wrap.innerHTML), '初回: 案内（Templates の機能は AI / Customize へ移動）が表示される');
+  assert(n && n.classList.contains('is-shown') && /Templates タブの機能は/.test(wrap.innerHTML) && /<b>開発支援<\/b>/.test(wrap.innerHTML) && /<b>Customize<\/b>/.test(wrap.innerHTML), '初回: 案内（Templates の機能は 開発支援 / Customize へ移動）が表示される');
   assert(/#kt-toolkit\.is-mini #kt-migration-notice\{ display:none !important; \}/.test(wrap.innerHTML), '最小化中は案内も隠れる（CSS）');
   await byId.get('kt-migration-close').dispatch('click');
   assert(!n.classList.contains('is-shown') && store.getItem('ktTemplatesMovedNotice.v1') === '1', '× で閉じる → 非表示・localStorage に保存');
@@ -260,7 +260,8 @@ console.log('\n--- §38. Pattern Library（Gateway の generated.patterns）: �
   assert(g.ok && m.calls.generate.length === 1, 'コード生成（Gateway が patterns を返す）');
   const entry = m.panel.generated('C1');
   assert(entry && Array.isArray(entry.generated.patterns) && entry.generated.patterns[0].id === 'field-disable' && entry.generated.patterns[0].preferredStandardAlternatives.length === 2 && !('implementationNotes' in entry.generated.patterns[0]), 'validateGenerated: patterns（id / purpose / implementation / preferredStandardAlternatives）を通す。知識本体は無い');
-  assert(/参考パターン: <span class="kt-ai-pattern" title="条件に応じてフィールドの編集可否を制御する">field-disable<\/span>/.test(m.chat()) && /標準設定で代替できないか再確認: フィールドのアクセス権 \/ プロセス管理の「作業者だけ編集可」/.test(m.chat()), 'コードカード: 参考パターンと「標準設定で代替できないか再確認」（人間への standard-first の再確認）');
+  const codePane = m.$('kt-ai-code-review').innerHTML;
+  assert(/参考パターン: <span class="kt-ai-pattern" title="条件に応じてフィールドの編集可否を制御する">field-disable<\/span>/.test(codePane) && /標準設定で代替できないか再確認: フィールドのアクセス権 \/ プロセス管理の「作業者だけ編集可」/.test(codePane) && !/参考パターン/.test(m.chat()), '右「コード」: 参考パターンと「標準設定で代替できないか再確認」（人間への standard-first の再確認）。会話には出さない（Phase 19）');
   const noPat = KTAiClient.validateGenerated({ ok: true, contractVersion: '2.1', meta: {}, generated: { strategy: 'NEW_JS_FILE', code: 'x', patterns: 'bad' } }, { customization: { strategy: 'NEW_JS_FILE' } });
   assert(noPat.ok && Array.isArray(noPat.normalized.patterns) && noPat.normalized.patterns.length === 0, 'patterns が無い / 不正でも空配列（表示なし）');
   assert(!/参考パターン/.test(KTAiChatUi.messageHtml({ id: 'x', type: 'CODE', role: 'toolkit', text: 'JavaScript', data: { planId: 'p', version: 1, customizationId: 'C1' } }, { plans: new Map([['p:1', { planId: 'p', version: 1, plan: PLAN_HYBRID.plan, generated: { C1: { generated: { ...genPatch(), patterns: [] }, review: entry.review } } }]]) })), 'patterns が空なら参考パターンの行は出ない');
@@ -285,9 +286,9 @@ console.log('\n--- §38b. implementation（JAVASCRIPT / CSS / JS_CSS）: validat
   assert(jscss.js.codeGeneration.supported === true && jscss.js.codeGeneration.implementation === 'JS_CSS' && jscss.js.issues.some(i => i.code === 'JS_CSS_PART_MANUAL' && i.severity === 'low'), 'implementation JS_CSS: JavaScript 部分は生成可（CSS は手動の注記）');
   const plain = reviewOf(cust());
   assert(plain.js.codeGeneration.supported === true && plain.js.codeGeneration.implementation === 'JAVASCRIPT' && !plain.js.issues.some(i => /^JS_CSS/.test(i.code)), 'implementation JAVASCRIPT: 従来どおり');
-  const cardCss = KTAiChatUi.messageHtml({ id: 'x', type: 'PLAN', role: 'toolkit', text: '', data: { planId: 'p', version: 1 } }, { plans: new Map([['p:1', { planId: 'p', version: 1, status: 'ACTIVE', goal: GOAL_HYBRID, plan: css.plan, review: css.review }]]) });
-  assert(/実装<\/span><span>CSS（見た目だけ・生成対象外）/.test(cardCss) && /生成不可/.test(cardCss), 'Customization Card: 実装 CSS（見た目だけ・生成対象外）・生成不可');
-  const cardJs = KTAiChatUi.messageHtml({ id: 'x', type: 'PLAN', role: 'toolkit', text: '', data: { planId: 'p', version: 1 } }, { plans: new Map([['p:1', { planId: 'p', version: 1, status: 'ACTIVE', goal: GOAL_HYBRID, plan: plain.plan, review: plain.review }]]) });
+  const cardCss = KTAiChatUi.specCardHtml({ planId: 'p', version: 1, status: 'ACTIVE', goal: GOAL_HYBRID, plan: css.plan, review: css.review, spec: { specId: 'p:spec', version: 1, status: 'DRAFT', customizations: css.plan.customizations } });
+  assert(/実装<\/span><span>CSS（見た目だけ・生成対象外）/.test(cardCss) && /要確認/.test(cardCss), '実装仕様カード（右「計画」）: 実装 CSS（見た目だけ・生成対象外）・要確認（生成不可）');
+  const cardJs = KTAiChatUi.specCardHtml({ planId: 'p', version: 1, status: 'ACTIVE', goal: GOAL_HYBRID, plan: plain.plan, review: plain.review, spec: { specId: 'p:spec', version: 1, status: 'DRAFT', customizations: plain.plan.customizations } });
   assert(!/実装<\/span>/.test(cardJs), 'JAVASCRIPT のときは実装の行を出さない（既定）');
 }
 
@@ -325,7 +326,7 @@ console.log('\n--- §35. AI-first の開発思想（UI の文言: 標準設定 /
   const m = mount();
   await ticks();
   assert(/何を実現したいですか？/.test(m.host.innerHTML) && /このアプリの仕様書を作って/.test(m.host.innerHTML), 'composer: 「何を実現したいですか？」（手段を選ばせない）とドキュメントの例');
-  assert(/標準設定か JavaScript かは AI が判断します/.test(m.chat()), '空の会話: 実現したい業務を伝える（標準設定か JavaScript かは AI が判断）');
+  assert(/標準設定か JavaScript かは Toolkit と AI が判断します/.test(m.chat()) && /何を実現したいですか？/.test(m.chat()), '空の会話: 実現したい業務を伝える（標準設定か JavaScript かは Toolkit と AI が判断）');
   assert(!/<option value="snippets">/.test(SRC_TEXT) && !/CSS templates|Css  \(GitHub/.test(SRC_TEXT), 'ユーザーが CSS テンプレート / Snippet を選ぶ UI は無い');
   assert(/function detectDocumentKind\(/.test(SRC_TEXT) && /DOCUMENT_KINDS/.test(SRC_TEXT), 'Documents は AI タブの DOCUMENT（種類の判定は決定的）');
 }

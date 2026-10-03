@@ -250,8 +250,8 @@ console.log('\n--- 3. AI タブ（mountRoot / switch / minimized / 旧 Templates
   const wrap = T.mountRoot();
   assert(wrap.ktTabs && wrap.ktTabs.TABS.includes('ai') && wrap.ktTabs.TABS[wrap.ktTabs.TABS.length - 1] === 'ai', 'TABS に ai（トップレベルの独立タブ）');
   const tabAi = byId.get('tab-ai'), viewAi = byId.get('view-ai');
-  assert(tabAi && tabAi.tagName === 'BUTTON' && viewAi && viewAi.style.display === 'none' && viewAi.classList.contains('kt-fill-view') && /質問・変更計画・Toolkit Review/.test(tabAi.title), 'AI タブのボタンと view（初期は非表示・高さ追従の view）');
-  assert(wrap.innerHTML.includes('>AI</button>') && !wrap.innerHTML.includes('>Templates</button>') && !wrap.ktTabs.TABS.includes('templates') && !byId.has('tab-templates') && !byId.has('view-templates'), 'タブ列に AI はあり Templates は無い（Phase 18: 廃止）');
+  assert(tabAi && tabAi.tagName === 'BUTTON' && viewAi && viewAi.style.display === 'none' && viewAi.classList.contains('kt-fill-view') && /開発支援/.test(tabAi.title) && /変更計画/.test(tabAi.title), '開発支援タブのボタンと view（初期は非表示・高さ追従の view。Phase 19: 表示名「開発支援」）');
+  assert(wrap.innerHTML.includes('>開発支援</button>') && !wrap.innerHTML.includes('>AI</button>') && !wrap.innerHTML.includes('>Templates</button>') && !wrap.ktTabs.TABS.includes('templates') && !byId.has('tab-templates') && !byId.has('view-templates'), 'タブ列に AI はあり Templates は無い（Phase 18: 廃止）');
   let switched = null; wrap.ktTabs.onSwitch((id) => { switched = id; });
   await tabAi.dispatch('click');
   assert(viewAi.style.display === 'block' && tabAi.classList.contains('active') && byId.get('view-health').style.display === 'none' && !byId.get('tab-health').classList.contains('active') && switched === 'ai', 'switch: AI タブで view-ai を表示・他を隠す・onSwitch が呼ばれる');
@@ -287,7 +287,7 @@ console.log('\n--- 3. AI タブ（mountRoot / switch / minimized / 旧 Templates
   assert(Object.values(MIGRATED).every(id => html.includes(`id="${id}"`)), `移行一覧: ${Object.keys(MIGRATED).join(' / ')} の要素が AI タブにある`);
   await m.panel.send(GOAL); await ticks();
   const plan = m.$('kt-ai-plan-result').innerHTML;
-  assert(plan.includes('id="kt-ai-review"') && m.$('kt-ai-exec').innerHTML.includes('id="kt-ai-exec-start"'), 'Review / Executor（動作テスト環境へ反映）は AI タブの計画ペインに出る');
+  assert(!plan.includes('id="kt-ai-review"') && m.$('kt-ai-review-result').innerHTML.includes('id="kt-ai-review"') && m.$('kt-ai-exec').innerHTML.includes('id="kt-ai-exec-start"'), 'Phase 19: 計画ペインは AI の提案だけ。Toolkit で確認した結果は「検証」、動作テスト環境への反映は「実行」ペイン');
   assert(html.includes(KTContextUi_INTRO()) , '無料の説明文（KTContextUi.INTRO_TEXT）も AI タブに移行');
   function KTContextUi_INTRO() { return loadToolkit().KTContextUi.INTRO_TEXT.slice(0, 20); }
 }
@@ -297,7 +297,7 @@ console.log('\n--- 4. AI Workspace: free / connected / responsive / header ---')
 {
   const f = mount({ paid: false });
   const free = f.$('kt-ai-free');
-  assert(free.style.display === '' && /AI開発支援/.test(free.innerHTML) && /Nest Rec AI：<b>未接続<\/b>/.test(free.innerHTML) && /無料で利用できます/.test(free.innerHTML) && ['✓ AI Context', '✓ AI Prompt', '✓ Markdown', '✓ JSON'].every(t => free.innerHTML.includes(t)) && free.innerHTML.includes('id="kt-ai-free-generate"'), 'free state（接続機能なし）: AI開発支援 / 未接続 / 無料で利用できます ✓ AI Context ✓ AI Prompt ✓ Markdown ✓ JSON / [AI用Promptを生成]');
+  assert(free.style.display === '' && /開発支援/.test(free.innerHTML) && /Nest Rec AI：<b>未接続<\/b>/.test(free.innerHTML) && /無料で利用できます/.test(free.innerHTML) && ['✓ AI Context', '✓ AI Prompt', '✓ Markdown', '✓ JSON'].every(t => free.innerHTML.includes(t)) && free.innerHTML.includes('id="kt-ai-free-generate"'), 'free state（接続機能なし）: AI開発支援 / 未接続 / 無料で利用できます ✓ AI Context ✓ AI Prompt ✓ Markdown ✓ JSON / [AI用Promptを生成]');
   assert(!free.innerHTML.includes('kt-ai-free-connect') && f.$('kt-ai-send').disabled === true && f.$('kt-ai-paid').style.display === 'none', 'free state（接続機能なし）: 接続ボタン無し・composer 無効・接続ペイン無し');
   await f.$('kt-ai-free').dispatch({ type: 'click', target: { id: 'kt-ai-free-generate' } });
   assert(f.panel.drawerState().open && f.panel.drawerState().pane === 'context', '[AI用Promptを生成] → Context ペインを開く');
@@ -320,7 +320,7 @@ console.log('\n--- 4. AI Workspace: free / connected / responsive / header ---')
   assert(c.$('kt-ai-free').style.display === 'none' && c.$('kt-ai-send').disabled === false && c.$('kt-ai-input').disabled === false && /Enter で送信/.test(c.$('kt-ai-composer-note').textContent), 'connected state: composer 有効（Enter で送信）');
   { const h = c.host.innerHTML; const i = (t) => h.indexOf(t); assert(i('id="kt-ai-pane-context"') > 0 && i('id="kt-ai-pane-context"') < i('id="kt-ai-generate"') && i('id="kt-ai-generate"') < i('id="kt-ai-pane-connection"') && i('id="kt-ai-pane-connection"') < i('id="kt-ai-connect-start"') && i('id="kt-ai-pane-plan"') < i('id="kt-ai-plan-result"') && i('id="kt-ai-plan-result"') < i('id="kt-ai-pane-evidence"'), '無料出力は Context ペイン・接続は接続ペイン・計画は計画ペイン（削除していない）'); }
   const header = c.$('kt-ai-header').innerHTML;
-  assert(/案件管理/.test(header) && new RegExp(`App ${FX.SELF_APP}`).test(header) && /Fields<\/span> 23/.test(header) && /Relations<\/span> \d+/.test(header) && /JS<\/span> ✓/.test(header) && /Incoming<\/span> ✓/.test(header) && /Health<\/span>/.test(header) && /Nest Rec AI<\/span> ✓/.test(header), 'Context ヘッダー: アプリ名 / App 341 / Fields / Relations / JS ✓ / Incoming ✓ / Health / Nest Rec AI ✓');
+  assert(/開発支援/.test(header) && /案件管理/.test(header) && new RegExp(`App ${FX.SELF_APP}`).test(header) && /解析<\/span> ✓/.test(header) && /JavaScript<\/span> ✓/.test(header) && /AI<\/span> ✓/.test(header) && !/Fields<\/span>/.test(header) && /フィールド 23/.test(header), 'ヘッダー（Phase 19 §22）: 開発支援 / App 341 案件管理 / 解析 ✓ JavaScript ✓ AI ✓。件数は「詳細」に');
   assert(c.$('kt-ai-header-detail').style.display === 'none' || c.$('kt-ai-header-detail').style.display === undefined, 'ヘッダーの詳細は展開式（初期は閉）');
   await c.$('kt-ai-header').dispatch({ type: 'click', target: { id: 'kt-ai-header-toggle' } });
   assert(c.$('kt-ai-header-detail').style.display === '', '詳細を展開できる');
@@ -329,16 +329,16 @@ console.log('\n--- 4. AI Workspace: free / connected / responsive / header ---')
   assert(/@media \(max-width: 760px\)\{[^}]*#kt-ai-workspace \.kt-ai-ws-body\{ flex-direction:column; \}/.test(css) && /\.kt-ai-drawer\{ flex:0 0 auto; max-height:55%; \}/.test(css) && /\.kt-ai-card \.kt-ai-mermaid-row\{ flex-direction:column; \}/.test(css), 'narrow width: 会話と drawer は縦積み・Mermaid は縦表示（Edge 半幅）');
   assert(/\.kt-ai-card \.kt-ai-mermaid-row > div\{[^}]*overflow-x:auto/.test(css), 'Mermaid は横スクロール可');
   // drawer
-  assert(c.$('kt-ai-drawer').style.display === 'flex' && c.panel.drawerState().open === true && c.panel.drawerState().pane === 'plan' && c.$('kt-ai-pane-plan').style.display === 'block' && c.$('kt-ai-pane-context').style.display === 'none' && /詳細パネルを閉じる/.test(c.$('kt-ai-header').innerHTML), 'drawer（計画 / レビューのペイン）は既定で開いている');
+  assert(c.$('kt-ai-drawer').style.display === 'flex' && c.panel.drawerState().open === true && c.panel.drawerState().pane === 'plan' && c.$('kt-ai-pane-plan').style.display === 'block' && c.$('kt-ai-pane-context').style.display === 'none' && /作業パネルを隠す/.test(c.$('kt-ai-header').innerHTML), 'Workspace（右）は常設で既定は「計画」ペイン（toggle は狭い幅だけ。CSS）');
   await c.$('kt-ai-header').dispatch({ type: 'click', target: { id: 'kt-ai-drawer-toggle' } });
-  assert(c.panel.drawerState().open === false && c.$('kt-ai-drawer').style.display === 'none' && /計画 \/ レビューを開く/.test(c.$('kt-ai-header').innerHTML), 'ヘッダーの開閉ボタンで閉じる');
+  assert(c.panel.drawerState().open === false && /作業パネルを表示/.test(c.$('kt-ai-header').innerHTML), 'ヘッダーの toggle で折りたたむ（狭い幅用。is-drawer-collapsed）');
   await c.$('kt-ai-header').dispatch({ type: 'click', target: { id: 'kt-ai-drawer-toggle' } });
   assert(c.panel.drawerState().open === true && c.$('kt-ai-drawer').style.display === 'flex' && c.$('kt-ai-pane-plan').style.display === 'block' && c.$('kt-ai-pane-context').style.display === 'none', 'ヘッダーの開閉ボタンで drawer（計画ペイン）を開く');
   await c.$('kt-ai-drawer-tabs').dispatch({ type: 'click', target: { dataset: { pane: 'evidence' } } });
   assert(c.panel.drawerState().pane === 'evidence' && c.$('kt-ai-pane-evidence').style.display === 'block' && /kt-ai-dtab active" data-pane="evidence"/.test(c.$('kt-ai-drawer-tabs').innerHTML), 'drawer のタブ切り替え（根拠）');
   await c.$('kt-ai-drawer-tabs').dispatch({ type: 'click', target: { id: 'kt-ai-drawer-close' } });
-  assert(c.panel.drawerState().open === false && c.$('kt-ai-drawer').style.display === 'none', '閉じる');
-  assert(/このアプリについて質問したり、実現したいことを伝えてください/.test(c.chat()), '会話が空のときの案内');
+  assert(c.panel.drawerState().open === false, '閉じる（折りたたみ）');
+  assert(/何を実現したいですか？/.test(c.chat()) && /100万円以上なら部長承認にしたい/.test(c.chat()) && /既存JavaScriptを修正したい/.test(c.chat()), '会話が空のときの案内（§21: やりたいことが入口）');
 }
 
 // =========================================================
@@ -363,18 +363,20 @@ console.log('\n--- 5. AI Workspace: 会話（ASK / PLAN / REVISE / EXPLAIN / PRE
   const v1 = m.conv().activePlan();
   assert(v1.version === 1 && m.panel.lastPlan() === v1.plan && m.panel.lastReview() === v1.review && v1.review.steps.length === 2, 'PLAN → v1。lastPlan / lastReview（Review / Decision / Executor の入力）は v1 に同期');
   const chat1 = m.chat();
-  assert(/変更計画 v1<\/b>/.test(chat1) && /kt-ai-plan-card/.test(chat1) && /＋ 更新状況フィールドを追加/.test(chat1) && /＋ 一覧「担当者別」を追加/.test(chat1) && /Toolkit Review<\/b>/.test(chat1) && /data-act="open-plan"/.test(chat1) && /data-act="before-after"/.test(chat1) && /data-act="open-review"/.test(chat1), 'Plan Card: 変更計画 v1 / ＋ 手順 / Toolkit Review の件数 / [詳細][Before / After][Reviewを開く]');
-  assert(/＋ 新規フィールド<\/b>/.test(chat1) && /<b>更新状況<\/b>/.test(chat1) && /DROP_DOWN/.test(chat1) && /理由：更新状況を表すフィールドが無いため/.test(chat1) && /＋ 一覧<\/b>/.test(chat1) && /提案の内容（2 件）/.test(chat1), 'Proposed Asset Cards: ＋ 新規フィールド（名前 / 型 / 理由）・＋ 一覧（共通カード）');
-  assert(/Toolkitで確認した結果<\/b>/.test(chat1) && /✓ 安全に反映可能<\/span><b>\d+ 件/.test(chat1) && /△ 確認が必要<\/span><b>\d+ 件/.test(chat1) && /× 実行不可<\/span><b>0 件/.test(chat1) && /競合候補<\/span><b>\d+ 件/.test(chat1) && /実行前レビューを開く/.test(chat1), 'Review Card: Toolkitで確認した結果 ✓ / △ / × / 競合候補 / [実行前レビューを開く]');
+  assert(/変更計画 v1 を作成しました。/.test(chat1) && /kt-ai-plan-card/.test(chat1) && /標準設定<\/span><b>2件/.test(chat1) && /JavaScript<\/span><b>0件/.test(chat1) && /確認が必要<\/span><b>1件/.test(chat1) && /data-act="open-plan"/.test(chat1) && !/＋ 更新状況フィールドを追加/.test(chat1), 'Plan Card（§5）: 要約だけ（標準設定 2 / JavaScript 0 / 確認が必要 1）と［計画を見る］。手順の本文は出さない');
+  assert(!/提案の内容（/.test(chat1) && /＋ 新規フィールド<\/b>/.test(m.$('kt-ai-plan-result').innerHTML) && /更新状況/.test(m.$('kt-ai-plan-result').innerHTML) && /DROP_DOWN/.test(m.$('kt-ai-plan-result').innerHTML), '提案資産（新規フィールド / 一覧）の詳細は右「計画」だけ（WORKSPACE_ONLY）');
+  assert(/Toolkitで変更計画を検証しました。/.test(chat1) && /✓ 実行可能<\/span><b>\d+件/.test(chat1) && /△ 確認必要<\/span><b>\d+件/.test(chat1) && /× 実行不可<\/span><b>0件/.test(chat1) && /検証結果を見る/.test(chat1) && !/kt-ai-decision/.test(chat1), 'Review Card（§6）: 件数と［検証結果を見る］だけ。判断の select は会話に無い');
   assert(/チャットの文章では承認になりません/.test(chat1), 'Review Card に「チャットの文章では承認になりません」');
-  assert(m.$('kt-ai-plan-result').innerHTML.includes('実行前レビュー（Toolkit 検証）') && m.$('kt-ai-plan-result').innerHTML.includes('kt-ai-decision') && m.panel.drawerState().open === true && m.panel.drawerState().pane === 'plan', 'Review 統合: drawer の計画ペインに実行前レビュー（判断 select）が出て、計画受信で開く');
+  assert(m.$('kt-ai-review-result').innerHTML.includes('Toolkit で確認した結果') && m.$('kt-ai-review-result').innerHTML.includes('kt-ai-decision') && !m.$('kt-ai-plan-result').innerHTML.includes('kt-ai-decision') && m.panel.drawerState().open === true && m.panel.drawerState().pane === 'plan' && m.panel.activeArtifact()?.type === 'CHANGE_PLAN', 'Review 統合: 右「検証」に Toolkit で確認した結果（判断 select）。計画受信で右は「計画」（activeArtifact CHANGE_PLAN）');
   // Before / After
   await clickChat(m, 'before-after', { plan: v1.planId, version: '1' }); await ticks();
-  assert(m.types()[m.types().length - 1] === 'DIFF' && /kt-ai-diff-card/.test(m.chat()) && /Before \/ After<\/b>/.test(m.chat()) && /P2<\/b>/.test(m.chat()), '[Before / After] → DIFF カード（Review の diff を会話に展開）');
+  assert(m.types()[m.types().length - 1] === 'DIFF' && /kt-ai-diff-card/.test(m.chat()) && /変更前後の比較（Before \/ After）<\/b>/.test(m.chat()) && /data-act="open-diff"/.test(m.chat()) && !/P2<\/b>/.test(m.chat()), '[Before / After] → DIFF カードは案内だけ（本文は右「検証」の変更前後）');
+  await clickChat(m, 'open-diff', { plan: m.conv().activePlan().planId, version: '1' });
+  assert(m.panel.drawerState().pane === 'review' && m.$('kt-ai-review-diff') && m.$('kt-ai-review-diff').style.display === '' && /P2<\/b>/.test(m.$('kt-ai-review-result').innerHTML), '［変更前後を見る］→ 右「検証」の変更前後が開く');
   // Reviewを開く
   m.panel.closeDrawer();
   await clickChat(m, 'open-review', { plan: v1.planId, version: '1' });
-  assert(m.panel.drawerState().open === true && m.panel.drawerState().pane === 'plan', '[Reviewを開く] → drawer の計画ペイン');
+  assert(m.panel.drawerState().open === true && m.panel.drawerState().pane === 'review', '[検証結果を見る] → 右「検証」ペイン');
   // REVISE
   await m.panel.send('新しい承認者は作らず既存の承認者を使って'); await ticks();
   const rv = m.calls.plan[1];
@@ -382,7 +384,8 @@ console.log('\n--- 5. AI Workspace: 会話（ASK / PLAN / REVISE / EXPLAIN / PRE
   assert(rv.ctx.retrieval.fields.some(f => f.code === 'approver') || rv.ctx.retrieval.matchedTerms.some(t => /承認者/.test(t.key)), 'revision の語（承認者）も辞書照合に使う');
   const v2 = m.conv().activePlan();
   assert(v2.version === 2 && v2.basedOnVersion === 1 && v1.status === 'SUPERSEDED' && m.panel.lastPlan() === v2.plan && m.panel.lastReview() === v2.review && v2.plan.steps[0].actionType === 'REUSE_FIELD', 'REVISE → v2 が最新。lastPlan / lastReview は v2（v1 は SUPERSEDED）');
-  assert(/変更計画 v2<\/b>/.test(m.chat()) && /v1 の修正/.test(m.chat()) && /旧版（SUPERSEDED）/.test(m.chat()) && /この版は最新ではありません/.test(m.chat()) && /↻ 既存「担当者」を利用/.test(m.chat()), 'v2 カード（v1 の修正）・v1 カードは旧版の表示');
+  assert(/変更計画 v2 を見直しました。/.test(m.chat()) && /v2 に更新済み/.test(m.chat()) && /is-old/.test(m.chat()) && !/↻ 既存「担当者」を利用/.test(m.chat()), 'v2 カード（見直し）・v1 カードは「v2 に更新済み」（§15）。手順の本文は会話に無い');
+  assert(m.conv().planHistory().length === 2 && !/kt-ai-new-field/.test(m.$('kt-ai-plan-result').innerHTML) && /担当者/.test(m.$('kt-ai-plan-result').innerHTML) && m.panel.activeArtifact()?.version === 2, '右「計画」は最新版 v2 だけ（v1 の新規フィールド枠は無い・activeArtifact は v2）');
   // EXPLAIN_PLAN
   await m.panel.send('P1って何してる？'); await ticks();
   const ex = m.calls.ask[m.calls.ask.length - 1];
@@ -398,7 +401,7 @@ console.log('\n--- 5. AI Workspace: 会話（ASK / PLAN / REVISE / EXPLAIN / PRE
   const w0 = writes(m).length;
   await m.panel.send('これで進めたい'); await ticks();
   const pr = m.msgs()[m.msgs().length - 1];
-  assert(pr.data.kind === 'preview-ready' && pr.data.readiness.approved === 0 && pr.data.readiness.undecided === 2 && /承認された手順がまだありません/.test(pr.text) && /実行前レビューを開く/.test(m.chat()) && m.panel.executorState().stage === 'idle' && writes(m).length === w0, 'REQUEST_PREVIEW（承認前）: 「承認された手順がまだありません」＋[実行前レビューを開く]。Executor は動かない・書き込み 0');
+  assert(pr.data.kind === 'preview-ready' && pr.data.readiness.approved === 0 && pr.data.readiness.undecided === 2 && /承認された手順がまだありません/.test(pr.text) && /検証と判断を開く/.test(m.chat()) && m.panel.executorState().stage === 'idle' && writes(m).length === w0, 'REQUEST_PREVIEW（承認前）: 「承認された手順がまだありません」＋[実行前レビューを開く]。Executor は動かない・書き込み 0');
   // 承認してから「これで進めたい」
   m.panel.decide('P1', 'approve'); m.panel.decide('P2', 'approve');
   await m.panel.send('これで進めたい'); await ticks();
@@ -427,7 +430,7 @@ console.log('\n--- 6. Executor / Rollback 統合と Versioning（v1 は Executor
   const st = m.panel.executorState();
   assert(st.stage === 'done' && st.execution.status === 'DONE' && m.mock.st.views['担当者別'] && !m.mock.st.fields.progress, '最終確認 → 反映: v2 の一覧だけが入る（v1 の新規フィールドは作られない）');
   const chat = m.chat();
-  assert(m.msgs().filter(x => x.type === 'EXECUTION').length === 1 && /動作テスト環境への反映が完了しました。/.test(chat) && /✓ 1 件 VERIFIED/.test(chat) && /Simulation一致 ✓/.test(chat) && /運用環境には反映されていません。/.test(chat) && /data-act="exec-details"/.test(chat) && /data-act="rollback"/.test(chat), 'Execution Result カード: 完了 / ✓ 1 件 VERIFIED / Simulation一致 ✓ / 運用環境には反映されていません / [詳細][変更前の状態に戻す]');
+  assert(m.msgs().filter(x => x.type === 'EXECUTION').length === 1 && /動作テスト環境へ反映しました。/.test(chat) && /✓ 1 件 VERIFIED/.test(chat) && !/Simulation一致/.test(chat) && /運用環境には反映されていません。/.test(chat) && /data-act="exec-details"/.test(chat) && /data-act="rollback"/.test(chat) && /Simulationとの一致：✓/.test(m.$('kt-ai-exec').innerHTML), 'Execution カード（§8）: ✓ 1 件 VERIFIED / 運用環境には反映されていません / [実行結果を見る][変更前の状態に戻す]。Simulation・進捗は右「実行」');
   assert(m.msgs().some(x => x.type === 'SYSTEM_NOTICE' && /動作テスト環境の設定が変更されました/.test(x.text)) && v2.status === 'EXECUTED' && v2.executionId === st.execution.executionId && v1.status === 'SUPERSEDED', 'SYSTEM: 動作テスト環境の設定が変更されました。v2 は EXECUTED（実行 ID を保持）');
   const audit = m.panel.auditJson();
   assert(audit.plan.steps[0].actionType === 'REUSE_FIELD' && audit.execution.executionId === st.execution.executionId, '監査 JSON は実行した版（v2）の計画');
@@ -439,7 +442,7 @@ console.log('\n--- 6. Executor / Rollback 統合と Versioning（v1 は Executor
   await clickChat(m, 'rollback', { execution: st.execution.executionId }); await ticks();
   assert(m.panel.executorState().stage === 'rollback-confirm' && writes(m).length === w1 && m.$('kt-ai-exec').innerHTML.includes('id="kt-ai-exec-rollback-go"') && m.msgs().filter(x => x.type === 'ROLLBACK').length === 1 && /確認画面で「変更前の状態に戻す」を押すと戻します/.test(m.chat()), 'カードの [変更前の状態に戻す] → 現在の設定を確認（書き込みなし）→ 既存の Rollback 確認（drawer）。会話には ROLLBACK カード');
   await clickPlan(m, 'kt-ai-exec-rollback-go'); await ticks(8);
-  assert(m.panel.executorState().stage === 'rolled-back' && !m.mock.st.views['担当者別'] && /(変更前の状態へ戻しました|実行前の状態に戻しました)/.test(m.chat()) && /✓ 1 件 ROLLBACK_VERIFIED/.test(m.chat()) && v2.status === 'ROLLED_BACK' && m.msgs().some(x => x.type === 'SYSTEM_NOTICE' && /変更前の状態に戻しました/.test(x.text)), 'Rollback 確認 → 戻す → Rollback Result カード「変更前の状態へ戻しました。✓ 1 件 ROLLBACK_VERIFIED」・v2 は ROLLED_BACK');
+  assert(m.panel.executorState().stage === 'rolled-back' && !m.mock.st.views['担当者別'] && /(変更前の状態へ戻しました|実行前の状態に戻しました)/.test(m.chat()) && /✓ 1 件 ROLLBACK_VERIFIED/.test(m.$('kt-ai-exec').innerHTML) && v2.status === 'ROLLED_BACK' && m.msgs().some(x => x.type === 'SYSTEM_NOTICE' && /変更前の状態に戻しました/.test(x.text)), 'Rollback 確認 → 戻す → Rollback Result カード「変更前の状態へ戻しました。✓ 1 件 ROLLBACK_VERIFIED」・v2 は ROLLED_BACK');
   assert(m.panel.auditJson().rollback && m.panel.auditJson().plan.steps[0].actionType === 'REUSE_FIELD', 'rollback は正しい実行（v2）に結び付く（監査 JSON）');
   // 反映後に新しい計画を作っても、戻していない実行は失わない（別シナリオ）
   const n = mount();

@@ -68,7 +68,8 @@ async function runPlan(m) {
   m.$('kt-ai-goal').value = GOAL;
   await m.$('kt-ai-generate').dispatch('click');
   await m.$('kt-ai-plan').dispatch('click'); await tick(); await tick();
-  return m.$('kt-ai-plan-result').innerHTML;
+  // Phase 19: 右 Workspace は 計画 / 検証 / 実行 のペインに分かれた。従来どおり 1 つの文字列として検証する
+  return m.$('kt-ai-plan-result').innerHTML + m.$('kt-ai-review-result').innerHTML + m.$('kt-ai-exec').innerHTML;
 }
 const click = (m, id) => m.$('kt-ai-plan-result').dispatch({ type: 'click', target: { id } });
 const execHtml = (m) => m.$('kt-ai-exec').innerHTML;
@@ -80,13 +81,13 @@ console.log('\n--- 1. 実行前レビューに「動作テスト環境へ反映�
   const m = mount();
   await tick();
   const h = await runPlan(m);
-  assert(h.includes('id="kt-ai-exec"'), '実行前レビューの中に Executor ブロックの枠がある');
+  assert(m.$('kt-ai-exec') && m.$('kt-ai-pane-exec'), '動作テスト環境への反映のブロックは右「実行」ペインの固定要素（Phase 19）');
   const e0 = execHtml(m);
   assert(e0.includes('動作テスト環境への反映') && e0.includes('承認済み・実行可能') && e0.includes('承認済みだが未対応') && e0.includes('実行不可') && /id="kt-ai-exec-start"[^>]*disabled/.test(e0) && e0.includes('承認済みで実行できる step がありません'), '承認が無ければ件数 0 でボタンは押せない');
   assert(hasButton(e0, '動作テスト環境へ反映') && !hasButton(e0, '運用環境へ反映') && !/<button[^>]*>(実行|反映)<\/button>/.test(e0), 'ボタンには必ず「動作テスト環境」と明記（「実行」「反映」だけのボタンは無い）');
   m.panel.decide('P1', 'approve'); m.panel.decide('P2', 'approve'); m.panel.decide('P3', 'approve');
   const e1 = execHtml(m);
-  assert(/承認済み・実行可能[\s\S]*?<b>2 件（P1, P2）/.test(e1) && /承認済みだが未対応[\s\S]*?<b>1 件（P3）/.test(e1) && e1.includes('P3') && e1.includes('PLAN_ONLY') && e1.includes('現在の Executor では自動反映できません'), '承認すると「✓ 承認済み・実行可能 2 件 / △ 承認済みだが未対応 1 件」。未対応は無視せず PLAN_ONLY と明示');
+  assert(/承認済み・実行可能[\s\S]*?<b>2 件（P1, P2）/.test(e1) && /承認済みだが未対応[\s\S]*?<b>1 件（P3）/.test(e1) && e1.includes('P3') && e1.includes('PLAN_ONLY') && e1.includes('Toolkit からは自動で反映できません'), '承認すると「✓ 承認済み・実行可能 2 件 / △ 承認済みだが未対応 1 件」。未対応は無視せず PLAN_ONLY と明示');
   assert(/id="kt-ai-exec-start"(?![^>]*disabled)/.test(e1) && m.mock.calls.length === 0, '実行可能な step があればボタンが有効。ここまで kintone API は呼ばない');
   m.panel.decide('P2', 'hold');
   assert(/承認済み・実行可能[\s\S]*?<b>1 件（P1）/.test(execHtml(m)), '判断を変えると件数が追従する（保留は実行しない）');
@@ -108,7 +109,7 @@ console.log('\n--- 1. 実行前レビューに「動作テスト環境へ反映�
   assert(progressSeen && progressSeen.includes('動作テスト環境へ反映しています') && /P1[\s\S]*処理中/.test(progressSeen) && /P2[\s\S]*待機中/.test(progressSeen), '実行中: P1 処理中... / P2 待機中 の進捗表示（画面を固めない）');
   const e3 = execHtml(m);
   assert(st2.stage === 'done' && st2.execution.status === 'DONE' && e3.includes('動作テスト環境への反映が完了しました。') && e3.includes('✓ 2 件 VERIFIED') && e3.includes('⚠ 0 件') && e3.includes('× 0 件') && e3.includes('Simulationとの一致：✓') && e3.includes('運用環境にはまだ反映されていません。'), '完了: ✓ 2 件 VERIFIED / Simulationとの一致 ✓ / 運用環境にはまだ反映されていません');
-  assert(/P1[\s\S]*VERIFIED[\s\S]*P2[\s\S]*VERIFIED[\s\S]*P3[\s\S]*PLAN_ONLY/.test(e3) && e3.includes('現在の Executor では自動反映できません'), '結果一覧: P1 / P2 VERIFIED・P3 は PLAN_ONLY と表示');
+  assert(/P1[\s\S]*VERIFIED[\s\S]*P2[\s\S]*VERIFIED[\s\S]*P3[\s\S]*PLAN_ONLY/.test(e3) && e3.includes('Toolkit からは自動で反映できません'), '結果一覧: P1 / P2 VERIFIED・P3 は PLAN_ONLY と表示');
   assert(m.mock.st.fields.progress && m.mock.st.views['担当者別'] && m.mock.st.views['担当者別'].fields.join() === 'owner,case_name,progress', 'モックの動作テスト環境にフィールドと一覧が入った（一覧の NEW_FIELD_1 は実コード）');
   assert(!hasButton(e3, '運用環境へ反映') && !/<button[^>]*>[^<]*deploy/i.test(e3), '完了画面に「運用環境へ反映」ボタンは無い（Never Auto Deploy）');
   assert(e3.includes('再解析：フィールド 24 件（実行前 23）'), '再解析の要約（フィールド数 23 → 24）');
@@ -481,7 +482,7 @@ console.log('\n--- 3. 回帰: Review UI の既存要素は変わらない ---');
   const m = mount();
   await tick();
   const h = await runPlan(m);
-  assert(h.includes('実行前レビュー（Toolkit 検証）') && h.includes('kt-ai-review-json-copy') && h.includes('kt-ai-review-decisions'), 'Review の表示・Review JSON・判断の集計は従来どおり');
+  assert(h.includes('Toolkit で確認した結果') && h.includes('kt-ai-review-json-copy') && h.includes('kt-ai-review-decisions'), 'Review の表示・Review JSON・判断の集計は従来どおり');
   assert(JSON.stringify(INPUTS.data) === JSON.stringify(FX.makeData()), 'UI 経由でも DATA は変更しない');
 }
 

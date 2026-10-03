@@ -74,7 +74,8 @@ async function runPlan(m) {
   m.$('kt-ai-goal').value = GOAL;
   await m.$('kt-ai-generate').dispatch('click');
   await m.$('kt-ai-plan').dispatch('click'); await tick(); await tick();
-  return m.$('kt-ai-plan-result').innerHTML;
+  // Phase 19: 右 Workspace は 計画 / 検証 / 実行 のペインに分かれた。従来どおり 1 つの文字列として検証する
+  return m.$('kt-ai-plan-result').innerHTML + m.$('kt-ai-review-result').innerHTML + m.$('kt-ai-exec').innerHTML;
 }
 
 (async () => {
@@ -85,7 +86,7 @@ console.log('\n--- 1. 実行前レビューの表示 ---');
   const h = await runPlan(m);
   const rev = m.panel.lastReview();
   assert(rev && rev.reviewVersion === '1' && rev.steps.length === 8, 'plan 受信後に KTPlanReview.review が実行される');
-  assert(h.includes('実行前レビュー（Toolkit 検証）') && h.includes('安全に追加できる変更') && h.includes('確認が必要') && h.includes('実行不可') && h.includes('計画のみ'), 'review summary: ✓ 安全 / △ 確認 / × 実行不可 / ○ 計画のみ');
+  assert(h.includes('Toolkit で確認した結果') && h.includes('安全に追加できる変更') && h.includes('確認が必要') && h.includes('実行不可') && h.includes('計画のみ'), 'review summary: ✓ 安全 / △ 確認 / × 実行不可 / ○ 計画のみ');
   assert(h.includes('追加：') && h.includes('既存変更：') && h.includes('高リスク変更：') && h.includes('競合候補：') && h.includes('確認事項：') && h.includes('無効：'), 'Change Risk Summary は件数で表示');
   const er = rev.executionReadiness;
   assert(er.safeSteps.includes('P1') && er.reviewSteps.includes('P2') && er.reviewSteps.includes('P4') && er.blockedSteps.includes('P7') && er.planOnlySteps.includes('P8'), `safe / review / blocked / plan-only の振り分け（${JSON.stringify(er)}）`);
@@ -126,7 +127,7 @@ console.log('\n--- 2. 回帰（Planner UI / Q&A / Free）---');
   const m = mount({ planResponse: { ...PLAN_B, plan: { ...PLAN_B.plan, steps: [mkStep('P1', 'ADD_FIELD', 'PROPOSED_FIELD', 'NEW_FIELD_1', { fieldType: 'USER_SELECT' })] } } });
   await tick();
   const h = await runPlan(m);
-  assert(h.includes('変更計画（AI Change Planner）') && h.includes('＋ 新規フィールド') && h.includes('kt-ai-plan-json-toggle') && h.includes('実行前レビュー'), '既存 Planner UI（AI 提案の表示・JSON）は維持されつつレビューが付く');
+  assert(h.includes('変更計画（AI の提案）') && h.includes('＋ 新規フィールド') && h.includes('kt-ai-plan-json-toggle') && h.includes('Toolkit で確認した結果'), '既存 Planner UI（AI 提案の表示・JSON）は維持されつつレビューが付く');
   assert(m.panel.lastReview().executionReadiness.status === 'REVIEW_REQUIRED' || m.panel.lastReview().executionReadiness.status === 'SAFE', '単純な追加計画は SAFE / REVIEW_REQUIRED');
   // Q&A（質問する）は変わらない
   const qa = mount();
