@@ -625,6 +625,41 @@ console.log('\n--- F32 / F33（CX-1 実機）. 1 つの手順の説明に書か�
 }
 
 // =========================================================
+console.log('\n--- F35 / F36（XA-7 / XA-9 実機）. 関連レコードの設定の場所・別のアプリへの手順 ---');
+{
+  // F35a: 関連レコードの fact に並び順・件数・絞り込み（実機 XA-7a で AI が「今の表示設定（表示項目と並び順）を教えて」と利用者に聞いた）
+  const ctx = KTContext.buildPlan({ goal: '見積一覧に担当も表示して新しい順にして', data: DATA, deps: DEPS, scan: null, incoming: null, options: { now: '2026-10-02T00:00:00.000Z' } });
+  const rf = ctx.facts.find(f => f.kind === 'field' && f.field?.code === 'quotes');
+  assert(rf && rf.field.referenceTable && rf.field.referenceTable.size === '5' && 'sort' in rf.field.referenceTable && /関連レコード/.test(rf.statement) && /quote_no/.test(rf.statement), `F35: 関連レコードの fact に表示項目・並び順・件数（statement にも）: ${rf && rf.statement}`);
+  // F35b: 一覧（ビュー）の手順の対象が関連レコードのフィールド（実機 XA-7a: UPDATE_VIEW の targetRef に support_history。Gateway の「存在しない VIEW」だけでは理由が分からない）
+  const pB = plan([step('P1', 'UPDATE_VIEW', 'VIEW', 'quotes', { fields: ['quote_no', 'amount', 'owner_q'], sort: 'レコード番号 desc' }, { validation: { status: 'invalid', issues: ['存在しないVIEW「quotes」を既存として参照しています'] } })]);
+  const sB = reviewOf(pB).steps[0];
+  assert(sB.issues.some(i => i.code === 'REFERENCE_TABLE_NOT_VIEW' && /関連レコード/.test(i.message) && /反映しません/.test(i.message)), 'F35: 一覧の手順の対象が関連レコード（フィールド）→ 設定の場所と、Toolkit は反映しないことを示す');
+  const pB2 = plan([step('P1', 'UPDATE_VIEW', 'VIEW', '見積一覧', { fields: ['quote_no', 'amount'], sort: 'レコード番号 desc' })]);
+  const rvB2 = reviewOf(pB2);
+  assert(rvB2.steps[0].issues.some(i => i.code === 'REFERENCE_TABLE_NOT_VIEW') && KTPlanExecutor.applyReadiness(pB2, rvB2)[0].apply !== 'AUTO', 'F35: Gateway が通しても（ラベルで指定）関連レコードを一覧として反映しない');
+  // F35c: 依頼が参照元アプリの画面の関連レコード一覧を指すのに、計画はこのアプリの一覧を追加（実機 XA-7b: 対応履歴から「案件の画面に出ている対応履歴の一覧」→ 対応履歴アプリに一覧を追加・「問題は見つかりませんでした」）
+  const data2 = clone(DATA);
+  data2.relatedApps['500'].fields.deal_history = { type: 'REFERENCE_TABLE', code: 'deal_history', label: '案件履歴', referenceTable: { relatedApp: { app: String(FX.SELF_APP), code: '' }, condition: { field: 'code', relatedField: 'customer_code' }, displayFields: ['case_name'], sort: 'レコード番号 desc', filterCond: '', size: '5' } };
+  const stepsC = [step('P1', 'ADD_VIEW', 'VIEW', '案件履歴（担当表示）', { name: '案件履歴（担当表示）', fields: ['case_name', 'owner'], sort: 'レコード番号 desc' })];
+  const rvC = reviewOf(plan(stepsC, [], { goal: '顧客マスタの画面に出ている案件履歴の一覧に、担当も表示して新しい順にしたい' }), data2);
+  const wC = rvC.warnings.find(w => w.code === 'RELATED_RECORDS_IN_OTHER_APP');
+  assert(wC && /App 500/.test(wC.message) && /案件履歴/.test(wC.message) && wC.stepIds.includes('P1'), `F35: 依頼の一覧は参照元アプリの関連レコード → このアプリの一覧を変えても変わらないと指摘: ${wC && wC.message}`);
+  assert(!reviewOf(plan(stepsC, [], { goal: '案件履歴の一覧に担当も表示して新しい順にしたい' }), data2).warnings.some(w => w.code === 'RELATED_RECORDS_IN_OTHER_APP'), 'F35: 依頼に別のアプリの名前が無ければ（このアプリの一覧の話）指摘しない');
+
+  // F36: 別のアプリへの手順（実機 XA-9: 「顧客マスタに顧客ランクを追加」を ADD_FIELD ＋ destApp 351 で書き、Toolkit は「自動で反映できる」= このアプリに追加する状態だった）
+  const p36 = plan([
+    step('P1', 'ADD_FIELD', 'PROPOSED_FIELD', 'NEW_FIELD_1', { name: '顧客ランク', fieldType: 'DROP_DOWN', options: ['A', 'B'], destApp: '500' }),
+    step('P2', 'ADD_FIELD', 'PROPOSED_FIELD', 'NEW_FIELD_2', { name: '顧客ランク', fieldType: 'SINGLE_LINE_TEXT', destApp: String(FX.SELF_APP) }),
+  ], [pf('NEW_FIELD_1', '顧客ランク', 'customer_rank', 'DROP_DOWN', { options: ['A', 'B'] }), pf('NEW_FIELD_2', '顧客ランク', 'customer_rank', 'SINGLE_LINE_TEXT')], { goal: '顧客マスタに顧客ランクを追加して、案件にも表示したい' });
+  const rv36 = reviewOf(p36);
+  const s1 = rv36.steps.find(x => x.stepId === 'P1'), s2 = rv36.steps.find(x => x.stepId === 'P2');
+  const ar36 = KTPlanExecutor.applyReadiness(p36, rv36);
+  assert(s1.issues.some(i => i.code === 'OTHER_APP_STEP' && /App 500/.test(i.message) && /顧客マスタ/.test(i.message)) && s1.safety === 'PLAN_ONLY' && ar36.find(a => a.stepId === 'P1').apply === 'MANUAL', `F36: 別のアプリ（App 500）への ADD_FIELD は計画のみ（このアプリには追加しない）: ${s1.safety} ${ar36.find(a => a.stepId === 'P1').apply}`);
+  assert(!s2.issues.some(i => /DUPLICATE/.test(i.code)) && ar36.find(a => a.stepId === 'P2').apply === 'AUTO', `F36: このアプリへの手順（コピー先の新規フィールド）は従来どおり。別のアプリの同じコードと重複扱いにしない: ${JSON.stringify(s2.issues.map(i => i.code))} ${ar36.find(a => a.stepId === 'P2').apply}`);
+}
+
+// =========================================================
 console.log('\n--- U5. ［新しい会話］: 続けて書いた別の依頼が今の計画の修正にならないよう、画面から会話を始め直せる ---');
 {
   const HEALTH = { ok: true, supportedContractVersions: ['2.0', '2.1'], entitlements: [{ product: 'toolkit', features: ['assistant-qa', 'change-planner'] }], registry: { toolkit: { 'assistant-qa': { implemented: true, promptVersions: ['1'] }, 'change-planner': { implemented: true, promptVersions: ['1'] } } }, usage: { monthlyLimit: 200, usedThisMonth: 1 } };

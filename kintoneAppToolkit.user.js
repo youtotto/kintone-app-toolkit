@@ -5010,7 +5010,8 @@
           mappings: (raw.lookup.fieldMappings || []).map(m => ({ to: m.field, from: m.relatedField })),
           pickerFields: Array.isArray(raw.lookup.lookupPickerFields) ? [...raw.lookup.lookupPickerFields] : [], filterCond: raw.lookup.filterCond || '', sort: raw.lookup.sort || '',
         } : null;
-        const refTable = raw.referenceTable ? { app: String(raw.referenceTable.relatedApp?.app ?? ''), condition: raw.referenceTable.condition ?? null, displayFields: raw.referenceTable.displayFields || [] } : null;
+        // Phase 20（XA-7 実機）: 並び順・絞り込み・件数も渡す（無いと AI が「今の表示設定を教えて」と利用者に聞いた）
+        const refTable = raw.referenceTable ? { app: String(raw.referenceTable.relatedApp?.app ?? ''), condition: raw.referenceTable.condition ?? null, displayFields: raw.referenceTable.displayFields || [], sort: raw.referenceTable.sort || '', filterCond: raw.referenceTable.filterCond || '', size: raw.referenceTable.size ?? null } : null;
         const type = f.type === 'LOOKUP' ? `${f.rawType}（ルックアップ）` : f.rawType;
         return {
           kind: 'field', key: `FIELD:${f.code}`, confidence: 'CERTAIN',
@@ -5022,7 +5023,7 @@
             ...(refTable ? { referenceTable: refTable } : {}),
             ...(raw.enabled === false ? { enabled: false } : {}),
           },
-          statement: `フィールド「${f.label}」（コード ${f.code}・${type}${f.required ? '・必須' : ''}${f.unique ? '・重複禁止' : ''}${f.parent ? `・テーブル ${f.parent} 内` : ''}${opts ? `・選択肢 ${opts.length} 件` : ''}${lookup ? `・ルックアップ: アプリ ${lookup.app}${lookup.appName ? `「${lookup.appName}」` : ''} のキー ${lookup.keyField} から ${lookup.mappings.length} 項目を取得（${lookup.mappings.map(m => `${m.from}→${m.to}`).join(', ') || '取得項目なし'}）` : ''}${raw.expression ? `・計算式 ${bounded(raw.expression, 60)}` : ''}）はフォームに存在する`,
+          statement: `フィールド「${f.label}」（コード ${f.code}・${type}${f.required ? '・必須' : ''}${f.unique ? '・重複禁止' : ''}${f.parent ? `・テーブル ${f.parent} 内` : ''}${opts ? `・選択肢 ${opts.length} 件` : ''}${lookup ? `・ルックアップ: アプリ ${lookup.app}${lookup.appName ? `「${lookup.appName}」` : ''} のキー ${lookup.keyField} から ${lookup.mappings.length} 項目を取得（${lookup.mappings.map(m => `${m.from}→${m.to}`).join(', ') || '取得項目なし'}）` : ''}${refTable ? `・関連レコード: アプリ ${refTable.app} のレコードを表示（表示 ${refTable.displayFields.join(', ') || 'なし'}・並び順 ${refTable.sort || '指定なし'}${refTable.size ? `・${refTable.size} 件` : ''}。表示項目・並び順はこのフィールドの設定）` : ''}${raw.expression ? `・計算式 ${bounded(raw.expression, 60)}` : ''}）はフォームに存在する`,
           _score: sc.score, _reasons: sc.reasons,
         };
       });
@@ -6492,6 +6493,30 @@
      * （例:「P20 顧客マスタ」）と途中まで一致し、依頼の側にだけ（旧）・番号・コピー等の区別の語が付いているとき、別のアプリの可能性がある。
      * Planner への規則だけでは AI が同じアプリと決めつけて「既存の設定で足りる」と答えたため、Toolkit が決定的に指摘する（Toolkit はアプリ一覧を持たない）
      */
+    /**
+     * Phase 20（実機 XA-7b）: 依頼が参照元アプリの画面に出る関連レコード一覧（例: 対応履歴アプリで「案件・見積管理の画面に表示される対応履歴の一覧」）を指すのに、
+     * 計画はこのアプリの一覧を追加・変更している（関連レコードの表示項目・並び順は表示する側のアプリのフィールド設定で、このアプリの一覧では変わらない）。
+     * 参照元アプリ（data.relatedApps）の関連レコードのうち、このアプリのレコードを表示するもので、依頼にそのアプリ名とフィールド名が出てくるものを指摘する
+     */
+    function relatedRecordsElsewhereWarnings(goal, data, steps = []) {
+      const out = [];
+      const nz = (s) => String(s ?? '').normalize('NFKC').replace(/\s+/g, '');
+      const g = nz(goal), self = String(data?.appId ?? '');
+      const viewSteps = (steps || []).filter(st => st && (st.actionType === 'ADD_VIEW' || st.actionType === 'UPDATE_VIEW')).map(st => st.id);
+      if (!g || !self || !viewSteps.length) return out;
+      for (const e of Object.values((data && data.relatedApps && typeof data.relatedApps === 'object') ? data.relatedApps : {})) {
+        const name = nz(e && e.name);
+        if (!name) continue;
+        const s = g.includes(name) ? name : lcsText(g, name);
+        if (s.length < 3 || s.length < Math.ceil(name.length / 2)) continue;
+        for (const f of Object.values((e && e.fields) || {})) {
+          if (!f || f.type !== 'REFERENCE_TABLE' || String(f.referenceTable?.relatedApp?.app ?? '') !== self) continue;
+          if (!nz(f.label) || !g.includes(nz(f.label))) continue;
+          out.push({ code: 'RELATED_RECORDS_IN_OTHER_APP', severity: 'medium', stepIds: viewSteps, message: `依頼の「${f.label}」の一覧は、App ${e.appId}「${e.name}」の画面に出る関連レコード（${f.code}）かもしれません。関連レコードの表示項目・並び順は、表示している側のアプリ（App ${e.appId}）のフィールドの設定です。このアプリの一覧を追加・変更しても、その画面の一覧は変わりません（Toolkit は他のアプリの設定を変更しません）`, detail: { appId: String(e.appId ?? ''), field: f.code } });
+        }
+      }
+      return out;
+    }
     function relatedAppNameWarnings(goal, data, steps = []) {
       const out = [];
       const nz = (s) => String(s ?? '').normalize('NFKC').replace(/\s+/g, '');
@@ -6596,6 +6621,8 @@
       }
       // ---- 5a. 依頼で名前を挙げたアプリと、参照先アプリの名前の不一致（Phase 20 XA-5）----
       warnings.push(...relatedAppNameWarnings(plan?.goal, data, steps));
+      // ---- 5a2. 依頼が参照元アプリの画面の関連レコード一覧を指すのに、計画はこのアプリの一覧を変える（Phase 20 XA-7b）----
+      warnings.push(...relatedRecordsElsewhereWarnings(plan?.goal, data, steps));
       // ---- 5b. 依頼の中の「全体の禁止」と「例外」（Phase 20 CX-4）: 「承認後は誰も変更できない。ただし営業担当はいつでも変更できる」を AI が 3 回とも
       //      黙って例外として解釈した（優先の確認なし）。依頼に両方があり、計画の確認事項がそれに触れていなければ、計画全体の指摘にする ----
       {
@@ -6815,6 +6842,16 @@
       for (const n of (Array.isArray(step.toolkitNotes) ? step.toolkitNotes : [])) if (n && n.code && n.message) issue(n.code, 'low', n.message);
       // Gateway 側の判定を引き継ぐ（AI の文章より Toolkit を優先するが、Gateway の検証は決定的なので尊重する）
       if (step.validation?.status === 'invalid') invalid('GATEWAY_INVALID', (step.validation.issues || []).join('；') || 'Gateway の検証で無効と判定されています');
+      // Phase 20（XA-7 実機）: 一覧（ビュー）の手順の対象が関連レコードのフィールド（AI が UPDATE_VIEW の targetRef に support_history と書いた）。
+      //   関連レコードの表示項目・並び順はフィールドの設定で、Toolkit は反映しない。Gateway の「存在しない VIEW」だけでは利用者に理由が分からない
+      if (step.actionType === 'ADD_VIEW' || step.actionType === 'UPDATE_VIEW') {
+        const ref = String(step.targetRef ?? '').trim();
+        const rt = Object.values(model.fields).find(f => f.type === 'REFERENCE_TABLE' && ref && (ref === f.code || (step.actionType === 'UPDATE_VIEW' && ref === f.label && !model.views.some(v => v.name === ref))));
+        if (rt) {
+          issue('REFERENCE_TABLE_NOT_VIEW', 'high', `「${rt.label}」（${rt.code}）は一覧（ビュー）ではなく関連レコード（フィールド）です。関連レコードの表示項目・並び順・絞り込みはこのフィールドの設定で、一覧の追加・変更では変わりません。Toolkit は関連レコードの設定を反映しません（kintone のフォームの設定で手作業）`);
+          if (r.status !== STATUS.INVALID) { r.status = STATUS.NEEDS_CONFIRMATION; r.safety = SAFETY.PLAN_ONLY; r.diff.changeType = CHANGE.NO_CHANGE; r.diff.human.push(`関連レコード「${rt.label}」の表示設定の変更（計画のみ）`); return r; }
+        }
+      }
       if (cyc.has(step.id)) invalid('CIRCULAR_DEPENDENCY', '依存関係が循環しています');
       if (!cap) { invalid('UNSUPPORTED_ACTION_TYPE', `語彙外の actionType「${String(step.actionType)}」`); return r; }
       // Phase 16: JavaScript カスタマイズの step は専用の検証（Executor は反映しない。コード生成の可否と既存 JS との競合を判定）
@@ -6835,6 +6872,21 @@
         const list = specNotes.multiple.map(m => `${LABEL[m.key] || m.key} ${m.values.map(x => `「${x}」`).join(' / ')}`).join('、');
         issue('STEP_MULTIPLE_SETTINGS', 'high', `この手順の説明に、1 つの手順では表せない複数の設定が書かれています（${list}）。Toolkit は 1 つ目の値だけを検証し、2 つ目以降は検証も反映もしません。設定ごとに手順を分けるよう計画の修正を依頼してください`, { values: specNotes.multiple });
         if (STATUS_RANK[r.status] < STATUS_RANK[STATUS.NEEDS_CONFIRMATION]) r.status = STATUS.NEEDS_CONFIRMATION;
+      }
+      // Phase 20（XA-9 実機）: 別のアプリ（参照元のマスタ等）への変更を、AI が ADD_FIELD 等に destApp を付けて書いた。Toolkit が反映できるのはこのアプリだけで、
+      //   そのまま仮適用・反映すると「顧客マスタに追加」の手順がこのアプリに追加される（「自動で反映できる」と表示された）→ 計画のみ（そのアプリで手作業）
+      const otherApp = (() => {
+        if (step.actionType === 'ADD_APP_ACTION' || step.actionType === 'UPDATE_APP_ACTION') return null;   // destApp はアプリアクションのコピー先
+        const m = String(spec.destApp ?? '').match(/^\s*(?:app\s*)?([0-9]+)\s*$/i);
+        return m && model.appId && m[1] !== String(model.appId) ? m[1] : null;
+      })();
+      if (otherApp) {
+        const rel = ctx.relatedApps?.[otherApp];
+        issue('OTHER_APP_STEP', 'high', `この手順は別のアプリ（App ${otherApp}${rel?.name ? `「${rel.name}」` : ''}）への変更です。Toolkit が反映できるのはこのアプリ（App ${model.appId}）の動作テスト環境だけなので、この手順は計画のみです。そのアプリで手作業で設定して運用環境へ反映してから、このアプリの手順を進めてください`);
+        r.status = STATUS.NEEDS_CONFIRMATION; r.safety = SAFETY.PLAN_ONLY; r.simulated = false; r.diff.changeType = CHANGE.NO_CHANGE; r.spec = spec;
+        r.diff.target = { kind: 'OTHER_APP', id: otherApp };
+        r.diff.human.push(`${step.title || step.actionType}（App ${otherApp}${rel?.name ? `「${rel.name}」` : ''} の変更・計画のみ）`);
+        return r;
       }
       // 条件式・並び順の中の NEW_FIELD_n を、先行 step で仮適用した実コードに置き換える（未適用なら実行不可）
       for (const k of ['filterCond', 'sort']) {
