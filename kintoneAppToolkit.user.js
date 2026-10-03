@@ -10383,7 +10383,10 @@
         // handler が呼ぶ同じファイル内の関数（1 段）
         const called = [...new Set([...body.matchAll(/\b([A-Za-z_$][\w$]*)\s*\(/g)].map(x => x[1]).filter(n => !['function', 'if', 'for', 'while', 'switch', 'return', 'catch', 'Number', 'String', 'parseInt', 'parseFloat'].includes(n)))];
         const inlined = body + called.map(n => fnBody(n)).join('\n');
-        const events = [...firstArg.matchAll(/['"`]((?:mobile\.)?app\.(?:record|report|event)\.[A-Za-z0-9_.]+)['"`]/g)].map(x => x[1]);
+        // イベントを変数（var EVENTS = [...]）で渡す登録は、同じファイルの配列の定義をたどる（Phase 20: 画面ごとの判定で誤って「PC だけ」としないため）
+        const evVar = /^\s*([A-Za-z_$][\w$]*)\s*$/.exec(firstArg);
+        const evDef = evVar ? new RegExp(`\\b(?:var|let|const)\\s+${evVar[1]}\\s*=\\s*\\[([\\s\\S]*?)\\]`).exec(s) : null;
+        const events = [...(evDef ? evDef[1] : firstArg).matchAll(/['"`]((?:mobile\.)?app\.(?:record|report|event)\.[A-Za-z0-9_.]+)['"`]/g)].map(x => x[1]);
         const error = /\.error\s*=(?!=)\s*(?!null\b|undefined\b|(['"`])\1)/.test(inlined);
         out.push({
           events: events.length ? events : ['（イベント名を特定できない登録）'],
@@ -10397,6 +10400,32 @@
         });
       }
       return out;
+    }
+    /**
+     * Phase 20（F42・実機）: handler の本体で、条件（if / else / for / while / switch / ? :）の外にある「フィールドを編集不可にする」代入のフィールドコード。
+     * 既存の if の閉じ括弧の後ろに足した record['owner'].disabled = true は、すべてのステータスで編集不可になった
+     */
+    function unconditionalDisables(clean) {
+      const s = String(clean || '');
+      const out = new Set();
+      const rx = /\.disabled\s*=(?!=)\s*true\b/g;
+      let m;
+      while ((m = rx.exec(s)) !== null) {
+        // この位置を囲むブロックを外側へたどる（文字列とコメントは stripComments 済みの前提）
+        const stack = [];
+        for (let k = 0; k < m.index; k++) { const ch = s[k]; if (ch === '{') stack.push(k); else if (ch === '}') stack.pop(); }
+        const kinds = stack.map(open => { const before = s.slice(Math.max(0, open - 200), open).replace(/\s+$/, ''); if (/\belse$/.test(before)) return 'cond'; if (/\)$/.test(before)) { const head = before.slice(0, -1); let depth = 1, k = head.length - 1; for (; k >= 0 && depth > 0; k--) { if (head[k] === ')') depth++; else if (head[k] === '(') depth--; } const kw = head.slice(0, k + 1).replace(/\s+$/, ''); if (/\b(if|for|while|switch|catch|with)$/.test(kw)) return 'cond'; if (/\bfunction(\s+[A-Za-z_$][\w$]*)?$/.test(kw) || /=>$/.test(kw)) return 'func'; return 'func'; } if (/=>$/.test(before)) return 'func'; return 'other'; });
+        // handler（関数）の中で、関数より内側に条件のブロックが無い = 条件なし。三項演算子の行は条件付きとみなす
+        const lastFunc = kinds.lastIndexOf('func');
+        if (lastFunc < 0) continue;
+        const inner = kinds.slice(lastFunc + 1);
+        const lineStart = s.lastIndexOf('\n', m.index) + 1;
+        const line = s.slice(lineStart, s.indexOf('\n', m.index) < 0 ? s.length : s.indexOf('\n', m.index));
+        if (inner.includes('cond') || /\?/.test(line) || /\bif\s*\(/.test(line)) continue;
+        const ref = /(?:\[\s*['"`]([^'"`\]]+)['"`]\s*\]|\brecord\s*\.\s*([A-Za-z_$][\w$]*))\s*$/.exec(s.slice(Math.max(0, m.index - 120), m.index));
+        if (ref) out.add(ref[1] || ref[2]);
+      }
+      return [...out];
     }
     /** str の open（'{' の位置）に対応する '}' の位置 / '(' に対応する ')' の位置 */
     const closeBrace = (str, open) => { let d = 0; for (let k = open; k < str.length; k++) { const ch = str[k]; if (ch === '{') d++; else if (ch === '}') { d--; if (d === 0) return k; } } return str.length - 1; };
@@ -10556,6 +10585,13 @@
       const baseGlobals = g.strategy === 'EXTEND_EXISTING_JS' && existingSource && typeof existingSource.text === 'string' ? globalDeclarations(KTScan.stripCommentsOnly(existingSource.text)) : [];
       const globals = g.strategy === 'NEW_JS_FILE' ? globalDeclarations(clean) : g.strategy === 'EXTEND_EXISTING_JS' ? globalDeclarations(clean).filter(n => !baseGlobals.includes(n)) : [];
       add('globals', !globals.length, 'review', globals.length ? (g.strategy === 'EXTEND_EXISTING_JS' ? `追加したコードがファイル直下（既存の即時関数の外）に宣言を置いています（グローバル汚染）: ${globals.join(', ')}。既存の即時関数の中に入れてください（ほかの JavaScript と名前がぶつかると動作が変わります）` : `ファイル直下に宣言があります（グローバル汚染）: ${globals.join(', ')}。即時関数で包んでください`) : '即時関数の外に宣言はありません');
+      // Phase 20（F42・実機）: 要件に条件（承認済み・〜の場合 など）があるのに、条件（if）の外でフィールドを編集不可にしている（既存ファイルに元から無いもの）。
+      //   既存の if の閉じ括弧の後ろに足した担当者のロックが、すべてのステータスで効いた（Code Review は計画のイベントの不足だけを指摘）
+      if (/承認|ステータス|状態|場合|とき|時に|なら|以上|以下|超|未満/.test([c.requirement, g.summary].filter(Boolean).join(' '))) {
+        const baseUncond = g.strategy === 'EXTEND_EXISTING_JS' && existingSource && typeof existingSource.text === 'string' ? unconditionalDisables(KTScan.stripCommentsOnly(existingSource.text)) : [];
+        const newUncond = unconditionalDisables(clean).filter(x => !baseUncond.includes(x));
+        if (newUncond.length) add('unconditional-control', false, 'review', `次のフィールドを条件なしで編集不可にしています: ${newUncond.join(', ')}（if の外にあるため、すべてのレコード・ステータスで編集できなくなります）。要件の条件のときだけにするなら、既存の if ブロックの中に入れてください`);
+      }
       const handlers = inspectHandlers(cleanAdded);
       const noReturn = handlers.filter(h => !h.returnEvent);
       add('return-event', !noReturn.length, 'review', noReturn.length ? `${noReturn.length} 件の handler に return event がありません（表示イベントで無いと画面が止まります）` : handlers.length ? `${handlers.length} 件の handler は return event しています` : '追加分に新しい handler はありません（既存 handler の中に追加。既存の return event をそのまま使います）');

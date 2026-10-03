@@ -678,6 +678,28 @@ console.log('\n--- F41（F39 の確認・実機）. PC とモバイルの計画�
   const BOTH = "  kintone.events.on(['app.record.create.show', 'app.record.edit.show', 'mobile.app.record.create.show', 'mobile.app.record.edit.show'], function (event) {\n    var record = event.record;\n    if (record['ステータス'] && record['ステータス'].value === '承認済み') {\n      record['owner'].disabled = true;\n    }\n    return event;\n  });\n";
   const good = KTCodeReview.review({ generated: genOf(BOTH), customization: cust, plan: null, data: DATA, scan: null, existingSource: SRC });
   assert(!(good.mismatches || []).some(m => m.code === 'PLATFORM_FIELD_MISSING'), `F41: PC とモバイルの両方で制御するコードは指摘しない: ${JSON.stringify((good.mismatches || []).map(m => m.code))}`);
+  // イベントを変数（var EVENTS = [...]）で渡す書き方でも、配列の定義をたどって両方の画面と判定する（誤って「PC だけ」にしない）
+  const VARS = "  var EVENTS = ['app.record.create.show', 'app.record.edit.show', 'mobile.app.record.create.show', 'mobile.app.record.edit.show'];\n  kintone.events.on(EVENTS, function (event) {\n    var record = event.record;\n    if (record['ステータス'] && record['ステータス'].value === '承認済み') {\n      record['owner'].disabled = true;\n    }\n    return event;\n  });\n";
+  const viaVar = KTCodeReview.review({ generated: genOf(VARS), customization: cust, plan: null, data: DATA, scan: null, existingSource: SRC });
+  assert(!(viaVar.mismatches || []).some(m => m.code === 'PLATFORM_FIELD_MISSING'), `F41: イベントを変数で渡しても両方の画面と判定する: ${JSON.stringify((viaVar.mismatches || []).map(m => m.code + ':' + m.message))}`);
+}
+
+// =========================================================
+console.log('\n--- F42（F41 の再生成・実機）. 既存の条件（if）の外に足した編集不可（すべてのステータスで編集できなくなる）---');
+{
+  const DL = ["(function () {", "  'use strict';", "  kintone.events.on(['app.record.create.show', 'app.record.edit.show'], function (event) {", "    var record = event.record;", "    if (record['ステータス'] && record['ステータス'].value === '承認済み') {", "      record['amount'].disabled = true;", "    }", "    return event;", "  });", "})();", ""].join('\n');
+  const SRC = { name: 'dealLock.js', target: 'desktop', text: DL };
+  const baseHash = KTScan.analyzeFile({ name: 'dealLock.js', target: 'desktop', kind: 'js', text: DL }, { fields: [], selfAppId: null }).file.hash;
+  const cust = { customizationId: 'C1', requirement: '承認済みでは担当者も編集不可', strategy: 'EXTEND_EXISTING_JS', platform: ['desktop'], events: ['app.record.create.show', 'app.record.edit.show'], fields: [{ code: 'owner', access: 'CONTROL' }, { code: 'ステータス', access: 'READ' }], apis: [], existingFiles: [{ name: 'dealLock.js', target: 'desktop' }] };
+  const genOf = (op) => ({ strategy: 'EXTEND_EXISTING_JS', targetFile: 'dealLock.js', code: op.content, patch: { baseHash, operations: [op] }, events: cust.events, fields: cust.fields, apis: [] });
+  const chk = (r, n) => r.checks.find(c => c.name === n) || null;
+  // 実機の生成と同じ: 閉じ括弧「    }」の後ろに足した → 条件の外
+  const out = KTCodeReview.review({ generated: genOf({ type: 'INSERT_AFTER', anchor: "      record['amount'].disabled = true;\n    }", content: "\n      record['owner'].disabled = true;" }), customization: cust, plan: null, data: DATA, scan: null, existingSource: SRC });
+  const c1 = chk(out, 'unconditional-control');
+  assert(c1 && !c1.ok && /owner/.test(c1.message) && /条件/.test(c1.message) && out.status !== 'OK', `F42: 既存の if の外に足した「owner を編集不可」→ 要確認（すべてのステータスで編集できなくなる）: ${c1 && c1.message}`);
+  // 条件の中（同じ if のブロックの中）に足したコードは指摘しない
+  const inside = KTCodeReview.review({ generated: genOf({ type: 'INSERT_AFTER', anchor: "      record['amount'].disabled = true;", content: "\n      record['owner'].disabled = true;" }), customization: cust, plan: null, data: DATA, scan: null, existingSource: SRC });
+  assert(!chk(inside, 'unconditional-control') || chk(inside, 'unconditional-control').ok, `F42: 同じ if の中に足したコードは指摘しない: ${JSON.stringify(inside.checks.filter(c => !c.ok).map(c => c.name))}`);
 }
 
 // =========================================================
