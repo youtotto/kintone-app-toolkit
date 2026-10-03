@@ -11562,7 +11562,8 @@
       if (k.needsPlan && !(version && version.plan)) return { ok: false, reason: 'no-plan', message: 'まとめる変更計画がありません。先に実現したいことを入力して計画を作るか、別の種類（アプリ仕様書など）を選んでください。' };
       let ctx;
       try {
-        ctx = KTContext.build({ question: null, focus: null, data: inputs.data, deps: inputs.deps || null, scan: inputs.scan || null, incoming: inputs.incoming || null, options: { ...(limits ? { limits } : {}), ...(now !== undefined ? { now } : {}) } });
+        // アプリ全体の L1（facts に根拠ID）。質問が無くても L0 だけにしない（ドキュメントは設定の事実が材料）
+        ctx = KTContext.build({ question: null, focus: null, data: inputs.data, deps: inputs.deps || null, scan: inputs.scan || null, incoming: inputs.incoming || null, options: { level: KTContext.LEVELS.L1, ...(limits ? { limits } : {}), ...(now !== undefined ? { now } : {}) } });
       } catch (e) { return { ok: false, reason: 'error', message: `Context の生成に失敗しました: ${e?.message || e}` }; }
       const contextMd = KTContext.toMarkdown(ctx);
       const changeMd = version && version.plan ? changeSummaryMarkdown(version, { execState, jsExecState }) : '';
