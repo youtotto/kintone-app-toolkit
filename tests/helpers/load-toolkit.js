@@ -6,12 +6,13 @@ const path = require('path');
 const vm = require('vm');
 
 function loadToolkit({ document: docOverride = null, localStorage: lsOverride = null } = {}) {
-  const SRC = path.join(__dirname, '..', '..', 'kintoneAppToolkit.user.js');
+  // KT_SRC: 別のビルド（修正前の版など）で同じテストを走らせるとき（RED の確認）に使う
+  const SRC = process.env.KT_SRC || path.join(__dirname, '..', '..', 'kintoneAppToolkit.user.js');
   let code = fs.readFileSync(SRC, 'utf8');
   const lastClose = code.lastIndexOf('})();');
   if (lastClose < 0) throw new Error('IIFE close not found');
   code = code.slice(0, lastClose)
-    + '\n  globalThis.__TEST__ = { KTDeps, KTScan, KTIncoming, KTContext, KTContextUi, KTAiClient, KTQueryCheck, KTPlanReview, KTPlanExecutor, KTAiConversation, KTAiWorkspaceViewModel, KTAiChatUi, KTJsCatalog, KTCodeReview, KTJsExecutor, mountAiWorkspace, mountRoot, renderCustomize, renderAiWorkspace, SCRIPT_VERSION };\n'
+    + '\n  globalThis.__TEST__ = { KTDeps, KTScan, KTIncoming, KTDevBase: typeof KTDevBase !== "undefined" ? KTDevBase : undefined, KTContext, KTContextUi, KTAiClient, KTQueryCheck, KTPlanReview, KTPlanExecutor, KTAiConversation, KTAiWorkspaceViewModel, KTAiChatUi, KTJsCatalog, KTCodeReview, KTJsExecutor, mountAiWorkspace, mountRoot, renderCustomize, renderAiWorkspace, SCRIPT_VERSION };\n'
     + code.slice(lastClose);
 
   const noop = () => { };

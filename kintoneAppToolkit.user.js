@@ -24,6 +24,8 @@
   // 1. 定数・グローバル状態
   // ==========================================
   const SCRIPT_VERSION = '2.2.6';
+  // Phase 21: ビルドの識別（開発中の配信でコミットと本文の指紋に置き換える。公開版は 'dev' のまま。動作には使わない）
+  const KT_BUILD = 'dev';
   const CONTAINER_TYPES = new Set(['GROUP', 'SUBTABLE', 'LABEL', 'CATEGORY']);
   const SYSTEM_TYPES = new Set(['RECORD_NUMBER', 'CREATOR', 'CREATED_TIME', 'MODIFIER', 'UPDATED_TIME', 'STATUS', 'STATUS_ASSIGNEE']);
 
@@ -1759,9 +1761,73 @@
       return [...out.values()].sort((a, b) => (a.target === b.target ? 0 : a.target === 'desktop' ? -1 : 1) || String(a.name).localeCompare(String(b.name), 'ja'));
     }
 
+    /**
+     * Phase 21: フィールド定義（form/fields の properties）とレイアウト → Field Scanner の既知コード一覧（純関数）。
+     *   Field Scanner と開発支援の作業基準（KTDevBase。動作テスト環境の設定で解析する）で共用する。
+     *   グループ・テーブル・スペースなどレイアウトにしか無い識別子も既知に入れる（存在しないコードと誤検出しない）
+     */
+    function fieldList(props, layoutNodes) {
+      const out = [];
+      for (const p of Object.values(props || {})) {
+        if (!p) continue;
+        if (p.type === 'SUBTABLE') {
+          if (p.code) out.push({ code: p.code, label: p.label, type: 'SUBTABLE' });
+          for (const sf of Object.values(p.fields || {})) out.push({ code: sf.code, label: sf.label, type: sf.type, parent: p.code });
+        } else out.push({ code: p.code, label: p.label, type: p.type });
+      }
+      const seen = new Set(out.map(f => f.code));
+      const add = (code, label, type) => { if (!code || seen.has(code)) return; seen.add(code); out.push({ code, label: label || code, type }); };
+      const walk = (nodes) => {
+        for (const n of nodes || []) {
+          if (!n) continue;
+          if (n.type === 'GROUP') { add(n.code, n.label, 'GROUP'); walk(n.layout); continue; }
+          if (n.type === 'SUBTABLE') { add(n.code, n.label, 'SUBTABLE'); for (const sf of n.fields || []) { if (sf?.code) add(sf.code, sf.label, sf.type || 'FIELD'); else if (sf?.elementId) add(sf.elementId, sf.label, `ELEMENT_${sf.type || ''}`); } continue; }
+          if (n.type === 'ROW') {
+            for (const f of n.fields || []) {
+              if (!f) continue;
+              if (f.type === 'SUBTABLE') { add(f.code, f.label, 'SUBTABLE'); for (const sf of f.fields || []) if (sf?.code) add(sf.code, sf.label, sf.type || 'FIELD'); continue; }
+              if (f.code) { add(f.code, f.label, f.type || 'FIELD'); continue; }
+              if (f.elementId) add(f.elementId, f.label || `(${f.type || 'ELEMENT'})`, `ELEMENT_${f.type || ''}`);
+            }
+            continue;
+          }
+          if (Array.isArray(n.layout)) walk(n.layout);
+        }
+      };
+      walk(Array.isArray(layoutNodes) ? layoutNodes : (layoutNodes?.layout || []));
+      return out;
+    }
+
+    /**
+     * Phase 21: 本文つきのファイル（[{ name, target, kind, text, note? }]）→ Field Scanner の payload（純関数）。
+     *   Field Scanner（scanOnce）と開発支援の作業基準（KTDevBase）で同じ解析にする。source = 本文を取った環境（preview / production）
+     */
+    function buildPayload({ appId, fields, files, deps = null, include = { desktop: true, mobile: true }, kinds = ['js'], scannedAt = null, source = null } = {}) {
+      const list = Array.isArray(files) ? files : [];
+      const results = analyze({ fields, files: list, snippet: { before: 24, after: 48 } });
+      const appRefs = [];
+      const fileEvents = {};
+      for (const f of list) {
+        if (f.kind !== 'js' || !f.text) continue;
+        const clean = stripCommentsOnly(f.text);
+        const li = buildLineIndex(clean);
+        for (const ref of KTDeps.extractAppIdRefs(clean, (i) => lineAt(li, i))) {
+          if (ref.appId && String(ref.appId) === String(appId)) continue;
+          appRefs.push({ ...ref, file: f.name, target: f.target });
+        }
+        const evs = extractEventTypes(clean);
+        if (evs.length) fileEvents[`${f.target}:js:${f.name}`] = evs;
+      }
+      const depsKnown = (deps?.nodes || []).filter(n => n.type === 'FIELD').map(n => String(n.id).replace(/^FIELD:/, ''));
+      const unknownRefs = collectUnknownFieldRefs(list, fields, depsKnown, appId);
+      const externalRefs = collectExternalFieldRefs(list, appId);
+      const unknownStatuses = collectUnknownStatusRefs(list, deps?.meta?.statusStates, deps?.meta?.statusFieldCodes);
+      return { results, files: list, fields, appRefs, fileEvents, unknownRefs, unknownStatuses, externalRefs, meta: { appId, include, kinds, scannedAt: scannedAt || new Date().toISOString(), ...(source ? { source } : {}) } };
+    }
+
     return {
       register, run, scheduleAuto, onChange, getStatus, setLastPayload, getLastPayload,
-      hashText, analyzeFile, summarizeFiles,
+      hashText, analyzeFile, summarizeFiles, fieldList, buildPayload,
       buildSignature, loadCache, saveCache, clearCache,
       isAutoEnabled, setAutoEnabled,
       CACHE_TTL_MS, ANALYZER_VERSION,
@@ -1969,6 +2035,274 @@
     }
 
     return { run, analyzeApp, loadCache, clearCache, CACHE_TTL_MS, MAX_APPS };
+  })();
+
+  // ==========================================
+  // 2.7 開発支援の作業基準 (KTDevBase) — Phase 21
+  //   開発支援（AI の質問・変更計画・コード生成・反映・JavaScript の登録）が「現在の状態」とみなすものを 1 か所で決める。
+  //   - 基準は最新の動作テスト環境（preview）の設定と JavaScript の本文。運用環境（production）は比較のためだけに取得し、
+  //     差（運用環境に未反映の変更）を区別して持つ。運用環境へ反映済みとは扱わない
+  //   - 取得の失敗を「設定が無い」「変更が無い」と読まない（errors に残す）。基準に必須の設定が取れなければ ok:false にし、
+  //     運用環境へ黙って切り替えない（開発支援は計画・生成・登録を止める）
+  //   - JavaScript の本文は動作テスト環境の fileKey でダウンロードする（運用環境の本文と混ぜない）。取れないファイルは sourceAvailable:false
+  //   - 他アプリ（ルックアップの参照元・アプリアクションのコピー先）は運用環境の定義を読み取り専用で取得し、取得時刻と環境を残す
+  //   - Toolkit は会話・承認・変更の理由を保存しない。基準から分かるのは設定と本文の事実だけ（意図・過去の承認は復元しない）
+  //   kintone API（getImpl / download）は注入する。差分・facts・DATA の組み立ては純関数（Node でテストできる）
+  // ==========================================
+  const KTDevBase = (() => {
+    const BASE_VERSION = 'dev-base-1';
+    const ENV = Object.freeze({ PREVIEW: 'preview', PRODUCTION: 'production' });
+    const ENV_JA = Object.freeze({ preview: '動作テスト環境', production: '運用環境' });
+    // 作業の基準に必須の設定（どれかが取れなければ基準にしない）
+    const CORE = Object.freeze({ fields: 'app/form/fields', layout: 'app/form/layout', views: 'app/views', status: 'app/status', generalNotify: 'app/notifications/general', perRecordNotify: 'app/notifications/perRecord', reminderNotify: 'app/notifications/reminder', actions: 'app/actions', customize: 'app/customize', settings: 'app/settings' });
+    // 取れなくても基準にはする（取得できなかったことを facts と画面に出し、「無い」とは扱わない）
+    const OPTIONAL = Object.freeze({ appAcl: 'app/acl', recordAcl: 'record/acl', fieldAcl: 'field/acl', reports: 'app/reports', appPlugins: 'app/plugins' });
+    const LABEL = Object.freeze({ fields: 'フィールド', layout: 'フォームの配置', views: '一覧', status: 'プロセス管理', generalNotify: 'アプリの条件通知', perRecordNotify: 'レコードの条件通知', reminderNotify: 'リマインダー', actions: 'アプリアクション', customize: 'JavaScript / CSS カスタマイズ', settings: 'アプリの一般設定', appAcl: 'アプリのアクセス権', recordAcl: 'レコードのアクセス権', fieldAcl: 'フィールドのアクセス権', reports: 'グラフ', appPlugins: 'プラグイン' });
+    const pathOf = (env, p) => `/k/v1/${env === ENV.PREVIEW ? 'preview/' : ''}${p}`;
+    const errOf = (e) => ({ code: e?.code ?? null, message: String(e?.message ?? e ?? '').slice(0, 300), status: e?.status ?? null });
+    const isPermission = (x) => x.status === 403 || x.code === 'CB_NO02' || /権限|permission/i.test(String(x.message || ''));
+    /** 比較用の正規化（キーを並べ替え、revision と環境ごとに違う値（fileKey）を除く） */
+    const stable = (v) => {
+      if (Array.isArray(v)) return v.map(stable);
+      if (v && typeof v === 'object') { const o = {}; for (const k of Object.keys(v).sort()) { if (k === 'revision' || k === 'fileKey' || v[k] === undefined) continue; o[k] = stable(v[k]); } return o; }
+      return v;
+    };
+    const same = (a, b) => JSON.stringify(stable(a ?? null)) === JSON.stringify(stable(b ?? null));
+    const changedKeys = (a, b) => [...new Set([...Object.keys(a || {}), ...Object.keys(b || {})])].filter(k => !['revision', 'fileKey', 'id'].includes(k) && !same(a?.[k], b?.[k]));
+    const without = (o, keys) => { const x = { ...(o || {}) }; for (const k of keys) delete x[k]; return x; };
+    const timeText = (iso) => { try { const d = new Date(iso); return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`; } catch (e) { return String(iso ?? ''); } };
+
+    /** 1 つの環境の設定をまとめて取得する。失敗は設定ごとに errors へ（null を「設定なし」と読まない） */
+    async function fetchEnv(env, appId, getImpl, { optional = true } = {}) {
+      const raw = {}, errors = [];
+      const all = { ...CORE, ...(optional ? OPTIONAL : {}) };
+      await Promise.all(Object.entries(all).map(async ([k, p]) => {
+        try { raw[k] = await getImpl(pathOf(env, p), { app: appId }); }
+        catch (e) { raw[k] = null; errors.push({ env, what: k, label: LABEL[k] || k, path: pathOf(env, p), core: Object.prototype.hasOwnProperty.call(CORE, k), ...errOf(e) }); }
+      }));
+      return { raw, errors };
+    }
+    /** 取得した設定 → prefetchAppData と同じ形の DATA（Review / Context / Executor がそのまま使える） */
+    function dataFrom(raw, { appId, relatedApps = {}, plugins = null } = {}) {
+      const r = raw || {};
+      return {
+        appId: String(appId ?? ''), relatedApps: relatedApps || {},
+        fields: r.fields?.properties || {}, layout: Array.isArray(r.layout?.layout) ? r.layout.layout : [],
+        views: r.views ?? null, reports: r.reports ?? null, status: r.status ?? null,
+        generalNotify: r.generalNotify ?? null, perRecordNotify: r.perRecordNotify ?? null, reminderNotify: r.reminderNotify ?? null,
+        customize: r.customize ?? null, settings: r.settings ?? null, appPlugins: r.appPlugins ?? null,
+        appAcl: r.appAcl ?? null, recordAcl: r.recordAcl ?? null, fieldAcl: r.fieldAcl ?? null, actions: r.actions ?? null, plugins,
+      };
+    }
+    /** 登録済みの JavaScript（その環境の fileKey）の本文。取れないファイルは sourceAvailable:false（別の環境の本文で補わない） */
+    async function loadFiles(customize, download, { env = ENV.PREVIEW } = {}) {
+      const out = [];
+      for (const target of ['desktop', 'mobile']) for (const e of (customize?.[target]?.js || [])) {
+        if (!e) continue;
+        if (e.type === 'URL') out.push({ env, target, kind: 'js', type: 'URL', name: String(e.url || '').split('/').pop() || String(e.url || ''), url: String(e.url || ''), sourceAvailable: false, note: 'URL 指定（本文は取得しない）' });
+        else out.push({ env, target, kind: 'js', type: 'FILE', name: String(e.file?.name ?? ''), fileKey: e.file?.fileKey ?? null, size: e.file?.size ?? null, sourceAvailable: false });
+      }
+      await Promise.all(out.filter(f => f.type === 'FILE').map(async (f) => {
+        try {
+          const t = f.fileKey && typeof download === 'function' ? await download(f.fileKey) : null;
+          if (typeof t === 'string') { f.text = t; f.hash = KTScan.hashText(t); f.bytes = t.length; f.sourceAvailable = true; }
+          else f.error = { code: null, message: '本文を取得できませんでした', status: null };
+        } catch (e) { f.error = errOf(e); }
+      }));
+      return out;
+    }
+
+    /** 動作テスト環境と運用環境の差（運用環境に未反映の変更）。比べた事実だけを返す（理由・承認の有無は分からない） */
+    function diffEnvs({ preview, production, previewFiles = [], productionFiles = [] } = {}) {
+      const items = [];
+      const push = (kind, id, change, message, extra = {}) => items.push({ kind, id: String(id), change, message, ...extra });
+      // フィールド（テーブルの中のフィールドも 1 件ずつ。テーブル自体は中身を除いて比べる）
+      const flat = (props) => { const m = new Map(); for (const f of Object.values(props || {})) { if (!f || !f.code) continue; if (f.type === 'SUBTABLE') { m.set(f.code, without(f, ['fields'])); for (const c of Object.values(f.fields || {})) if (c && c.code) m.set(c.code, { ...c, subtable: f.code }); } else m.set(f.code, f); } return m; };
+      const pf = flat(preview?.fields), qf = flat(production?.fields);
+      for (const [code, f] of pf) {
+        const q = qf.get(code);
+        if (!q) push('field', code, 'PREVIEW_ONLY', `フィールド「${f.label}」（${code}・${f.type}${f.subtable ? `・テーブル ${f.subtable} 内` : ''}）は動作テスト環境にだけあります（運用環境には未反映）`, { label: f.label, type: f.type });
+        else if (!same(f, q)) { const keys = changedKeys(q, f); push('field', code, 'CHANGED', `フィールド「${f.label}」（${code}）の設定が運用環境と違います（${keys.join('・') || '詳細'}）`, { label: f.label, keys }); }
+      }
+      for (const [code, q] of qf) if (!pf.has(code)) push('field', code, 'PRODUCTION_ONLY', `フィールド「${q.label}」（${code}）は運用環境にありますが、動作テスト環境では削除されています（未反映の削除）`, { label: q.label, type: q.type });
+      // フォームの配置（追加・削除したフィールドだけで説明できる違いは重ねて出さない）
+      if (!same(preview?.layout || [], production?.layout || [])) {
+        const codes = (layout) => { const out = []; const walk = (rows) => { for (const r of rows || []) { if (!r) continue; if (r.type === 'GROUP') { out.push(`G:${r.code}`); walk(r.layout); continue; } if (r.type === 'SUBTABLE') { out.push(`T:${r.code}`); continue; } for (const x of r.fields || []) out.push(x?.code ? `F:${x.code}` : `E:${x?.type}:${x?.elementId || ''}`); out.push('|'); } }; walk(layout); return out; };
+        const moved = new Set(items.filter(x => x.kind === 'field' && x.change !== 'CHANGED').map(x => `F:${x.id}`));
+        const a = codes(preview?.layout).filter(c => !moved.has(c)), b = codes(production?.layout).filter(c => !moved.has(c));
+        const explained = moved.size > 0 && JSON.stringify(a.filter(c => c !== '|')) === JSON.stringify(b.filter(c => c !== '|'));
+        if (!explained) push('layout', 'form', 'CHANGED', 'フォームの配置（並び・行・幅・グループ）が運用環境と違います');
+      }
+      // 一覧
+      const pv = preview?.views?.views || {}, qv = production?.views?.views || {};
+      for (const [name, v] of Object.entries(pv)) { const q = qv[name]; if (!q) push('view', name, 'PREVIEW_ONLY', `一覧「${name}」は動作テスト環境にだけあります`); else if (!same(without(v, ['id']), without(q, ['id']))) push('view', name, 'CHANGED', `一覧「${name}」の設定が運用環境と違います（${changedKeys(q, v).join('・') || '詳細'}）`); }
+      for (const name of Object.keys(qv)) if (!pv[name]) push('view', name, 'PRODUCTION_ONLY', `一覧「${name}」は運用環境にありますが、動作テスト環境では削除されています`);
+      // プロセス管理
+      const ps = preview?.status, qs = production?.status;
+      if (ps && qs) {
+        if (!!ps.enable !== !!qs.enable) push('process', 'enable', 'CHANGED', `プロセス管理が動作テスト環境では${ps.enable ? '有効' : '無効'}です（運用環境は${qs.enable ? '有効' : '無効'}）`);
+        const pst = ps.states || {}, qst = qs.states || {};
+        for (const [name, s] of Object.entries(pst)) { const q = qst[name]; if (!q) push('process-state', name, 'PREVIEW_ONLY', `ステータス「${name}」は動作テスト環境にだけあります`); else if (!same(s, q)) push('process-state', name, 'CHANGED', `ステータス「${name}」（順序・作業者）が運用環境と違います`); }
+        for (const name of Object.keys(qst)) if (!pst[name]) push('process-state', name, 'PRODUCTION_ONLY', `ステータス「${name}」は運用環境にありますが、動作テスト環境では削除されています`);
+        const ak = (x) => `${x.name}|${x.from}`;
+        const pa = new Map((ps.actions || []).map(x => [ak(x), x])), qa = new Map((qs.actions || []).map(x => [ak(x), x]));
+        const actText = (x) => `→ ${x.to}${x.filterCond ? `・条件 ${x.filterCond}` : ''}`;
+        for (const [k, x] of pa) { const q = qa.get(k); if (!q) push('process-action', k, 'PREVIEW_ONLY', `アクション「${x.name}」（${x.from} ${actText(x)}）は動作テスト環境にだけあります`); else if (!same(x, q)) push('process-action', k, 'CHANGED', `アクション「${x.name}」（${x.from} から）が運用環境と違います（運用環境 ${actText(q)} / 動作テスト環境 ${actText(x)}${!same(x.executableUser, q.executableUser) ? '・実行できるユーザー' : ''}）`); }
+        for (const [k, q] of qa) if (!pa.has(k)) push('process-action', k, 'PRODUCTION_ONLY', `アクション「${q.name}」（${q.from} ${actText(q)}）は運用環境にありますが、動作テスト環境では削除されています`);
+      }
+      // 通知・リマインダー（同じ識別子が無いので、内容が同じものを対応させ、残りを追加 / 削除として出す）
+      const listDiff = (kind, label, pl, ql, title) => {
+        const a = (pl || []).map(x => JSON.stringify(stable(x))), b = (ql || []).map(x => JSON.stringify(stable(x)));
+        (pl || []).forEach((x, i) => { if (!b.includes(a[i])) push(kind, title(x), 'PREVIEW_ONLY', `${label}「${title(x)}」は動作テスト環境にだけあります（追加または内容の変更）`); });
+        (ql || []).forEach((x, i) => { if (!a.includes(b[i])) push(kind, title(x), 'PRODUCTION_ONLY', `${label}「${title(x)}」は運用環境の内容です（動作テスト環境では削除または変更）`); });
+      };
+      if (preview?.generalNotify && production?.generalNotify) {
+        listDiff('notification', 'アプリの条件通知', preview.generalNotify.notifications, production.generalNotify.notifications, (n) => `${n.entity?.type ?? ''}:${n.entity?.code ?? ''}`);
+        if (!!preview.generalNotify.notifyToCommenter !== !!production.generalNotify.notifyToCommenter) push('notification', 'notifyToCommenter', 'CHANGED', 'アプリの条件通知の「コメントの書き込み者への通知」が運用環境と違います');
+      }
+      if (preview?.perRecordNotify && production?.perRecordNotify) listDiff('notification', 'レコードの条件通知', preview.perRecordNotify.notifications, production.perRecordNotify.notifications, (n) => n.title || '（無題）');
+      if (preview?.reminderNotify && production?.reminderNotify) {
+        listDiff('reminder', 'リマインダー', preview.reminderNotify.notifications, production.reminderNotify.notifications, (n) => n.title || '（無題）');
+        if ((preview.reminderNotify.timezone ?? null) !== (production.reminderNotify.timezone ?? null)) push('reminder', 'timezone', 'CHANGED', `リマインダーのタイムゾーンが運用環境と違います（運用環境 ${production.reminderNotify.timezone ?? '未設定'} → 動作テスト環境 ${preview.reminderNotify.timezone ?? '未設定'}）`);
+      }
+      // アプリアクション（名前で対応）
+      const pact = preview?.actions?.actions || {}, qact = production?.actions?.actions || {};
+      for (const [name, x] of Object.entries(pact)) { const q = qact[name]; if (!q) push('app-action', name, 'PREVIEW_ONLY', `アプリアクション「${name}」は動作テスト環境にだけあります`); else if (!same(without(x, ['id']), without(q, ['id']))) push('app-action', name, 'CHANGED', `アプリアクション「${name}」の設定が運用環境と違います（${changedKeys(q, x).join('・') || '詳細'}）`); }
+      for (const name of Object.keys(qact)) if (!pact[name]) push('app-action', name, 'PRODUCTION_ONLY', `アプリアクション「${name}」は運用環境にありますが、動作テスト環境では削除されています`);
+      // JavaScript / CSS（名前・順序・本文の指紋。本文が片方でも取れなければサイズで比べ、その旨を書く）
+      const pc = preview?.customize, qc = production?.customize;
+      if (pc && qc) {
+        if ((pc.scope ?? 'ALL') !== (qc.scope ?? 'ALL')) push('customize', 'scope', 'CHANGED', `カスタマイズの適用範囲が運用環境と違います（${qc.scope ?? 'ALL'} → ${pc.scope ?? 'ALL'}）`);
+        const nameOf = (e) => (e?.type === 'URL' ? String(e.url ?? '') : String(e?.file?.name ?? ''));
+        for (const target of ['desktop', 'mobile']) for (const fk of ['js', 'css']) {
+          const pl = (pc[target]?.[fk] || []), ql = (qc[target]?.[fk] || []);
+          const pn = pl.map(nameOf), qn = ql.map(nameOf);
+          const where = `${target === 'mobile' ? 'モバイル' : 'PC'}の${fk === 'js' ? ' JavaScript' : ' CSS'}`;
+          for (const n of pn) if (!qn.includes(n)) push('customize', `${target}:${fk}:${n}`, 'PREVIEW_ONLY', `${where}「${n}」は動作テスト環境にだけあります（運用環境には未反映）`, { target, fileKind: fk, name: n });
+          for (const n of qn) if (!pn.includes(n)) push('customize', `${target}:${fk}:${n}`, 'PRODUCTION_ONLY', `${where}「${n}」は運用環境にありますが、動作テスト環境では外されています`, { target, fileKind: fk, name: n });
+          for (const n of pn.filter(x => qn.includes(x))) {
+            const pf2 = (previewFiles || []).find(f => f.target === target && f.kind === fk && f.name === n), qf2 = (productionFiles || []).find(f => f.target === target && f.kind === fk && f.name === n);
+            if (pf2?.hash && qf2?.hash) { if (pf2.hash !== qf2.hash) push('customize', `${target}:${fk}:${n}`, 'CHANGED', `${where}「${n}」の内容が運用環境と違います（指紋 運用環境 ${qf2.hash} → 動作テスト環境 ${pf2.hash}）`, { target, fileKind: fk, name: n, previewHash: pf2.hash, productionHash: qf2.hash }); continue; }
+            const pe = pl.find(e => nameOf(e) === n), qe = ql.find(e => nameOf(e) === n);
+            if (pe?.type === 'FILE' && qe?.type === 'FILE' && String(pe.file?.size ?? '') !== String(qe.file?.size ?? '')) push('customize', `${target}:${fk}:${n}`, 'CHANGED', `${where}「${n}」の内容が運用環境と違います（サイズ ${qe.file?.size ?? '?'} → ${pe.file?.size ?? '?'} バイト。本文は比べていません）`, { target, fileKind: fk, name: n });
+          }
+          const cp = pn.filter(x => qn.includes(x)), cq = qn.filter(x => pn.includes(x));
+          if (JSON.stringify(cp) !== JSON.stringify(cq)) push('customize', `${target}:${fk}:order`, 'CHANGED', `${where}の読み込み順が運用環境と違います`, { target, fileKind: fk });
+        }
+      }
+      // 一般設定・アクセス権・グラフ・プラグイン（どちらかが取れていなければ比べない）
+      if (preview?.settings && production?.settings && !same(preview.settings, production.settings)) push('settings', 'app', 'CHANGED', `アプリの一般設定が運用環境と違います（${changedKeys(production.settings, preview.settings).join('・') || '詳細'}）`);
+      for (const [k, label] of [['appAcl', 'アプリのアクセス権'], ['recordAcl', 'レコードのアクセス権'], ['fieldAcl', 'フィールドのアクセス権']]) if (preview?.[k] && production?.[k] && !same(preview[k], production[k])) push('acl', k, 'CHANGED', `${label}が運用環境と違います`);
+      if (preview?.reports && production?.reports) { const pr = preview.reports.reports || {}, qr = production.reports.reports || {}; for (const n of Object.keys(pr)) if (!qr[n]) push('report', n, 'PREVIEW_ONLY', `グラフ「${n}」は動作テスト環境にだけあります`); else if (!same(without(pr[n], ['id']), without(qr[n], ['id']))) push('report', n, 'CHANGED', `グラフ「${n}」の設定が運用環境と違います`); for (const n of Object.keys(qr)) if (!pr[n]) push('report', n, 'PRODUCTION_ONLY', `グラフ「${n}」は運用環境にありますが、動作テスト環境では削除されています`); }
+      if (preview?.appPlugins && production?.appPlugins) { const ids = (x) => (x.plugins || []).map(p => p.id).sort(); if (JSON.stringify(ids(preview.appPlugins)) !== JSON.stringify(ids(production.appPlugins))) push('plugin', 'app', 'CHANGED', 'このアプリに追加されているプラグインが運用環境と違います'); }
+      const byKind = {};
+      for (const it of items) byKind[it.kind] = (byKind[it.kind] || 0) + 1;
+      return { items, counts: { total: items.length, byKind } };
+    }
+
+    /** 計画・生成の版に残す基準の要約（いつ・どの revision の動作テスト環境で作ったか）と内容の指紋 */
+    function fingerprint(base) {
+      if (!base || !base.ok || !base.data) return null;
+      const d = base.data;
+      const files = (base.files || []).map(f => `${f.target}:${f.name}:${f.hash || f.url || ''}`).sort();
+      return KTScan.hashText(JSON.stringify(stable({ fields: d.fields, layout: d.layout, views: d.views, status: d.status, g: d.generalNotify, p: d.perRecordNotify, r: d.reminderNotify, a: d.actions, c: d.customize ? { scope: d.customize.scope, desktop: d.customize.desktop, mobile: d.customize.mobile } : null, files })));
+    }
+    function stamp(base) {
+      if (!base) return null;
+      return { baseVersion: BASE_VERSION, env: base.ok ? ENV.PREVIEW : ENV.PRODUCTION, ok: !!base.ok, loadedAt: base.loadedAt ?? null, revision: base.revision ? { ...base.revision } : null, diffCount: base.diff?.available ? base.diff.items.length : null, fingerprint: fingerprint(base) };
+    }
+
+    /** Context 用の facts（kind environment / env-diff）。作業の基準・運用環境との差・取得できなかったもの・履歴が無いこと */
+    function facts(base, { maxDiff = 40 } = {}) {
+      const out = [];
+      if (!base) return out;
+      if (!base.ok) {
+        out.push({ kind: 'environment', key: 'ENV:base', confidence: 'CERTAIN', environment: { env: ENV.PRODUCTION, previewAvailable: false, status: base.status ?? null }, statement: `動作テスト環境の設定を取得できませんでした（${base.message || base.status || '不明'}）。この Context は運用環境の設定（画面を開いた時点）です。動作テスト環境にある未反映の変更は含みません（「無い」とは言えません）。` });
+        return out;
+      }
+      const d = base.diff || { available: false, items: [] };
+      out.push({ kind: 'environment', key: 'ENV:base', confidence: 'CERTAIN', environment: { env: ENV.PREVIEW, loadedAt: base.loadedAt, revision: base.revision }, statement: `作業の基準は動作テスト環境（preview）の現在の設定と JavaScript です（${timeText(base.loadedAt)} に取得・revision ${base.revision?.preview ?? '?'}。運用環境は revision ${base.revision?.production ?? '?'}）。ここにある設定・ファイルは存在するものとして扱い、運用環境へ反映済みとは扱わないこと。` });
+      if (!d.available) out.push({ kind: 'environment', key: 'ENV:diff', confidence: 'CERTAIN', environment: { diffAvailable: false }, statement: `運用環境の設定を取得できなかったため、運用環境との差は分かりません（${d.reason || '不明'}）。差が無いとは言えません。` });
+      else if (!d.items.length) out.push({ kind: 'environment', key: 'ENV:diff', confidence: 'CERTAIN', environment: { diffAvailable: true, count: 0 }, statement: '動作テスト環境の設定と JavaScript は運用環境と同じです（運用環境へ未反映の変更はありません）。' });
+      else {
+        out.push({ kind: 'environment', key: 'ENV:diff', confidence: 'CERTAIN', environment: { diffAvailable: true, count: d.items.length, byKind: d.counts?.byKind || null }, statement: `動作テスト環境には運用環境へ未反映の変更が ${d.items.length} 件あります（kind env-diff の facts）。運用環境の利用者にはまだ見えていません。` });
+        d.items.slice(0, maxDiff).forEach((it, i) => out.push({ kind: 'env-diff', key: `ENV_DIFF:${String(i + 1).padStart(3, '0')}:${it.kind}:${it.id}`, confidence: 'CERTAIN', envDiff: { kind: it.kind, id: it.id, change: it.change }, statement: it.message }));
+        if (d.items.length > maxDiff) out.push({ kind: 'environment', key: 'ENV:diff-more', confidence: 'CERTAIN', statement: `運用環境との差のうち ${d.items.length - maxDiff} 件は省略しました（省略したものは「差が無い」とは言えません）。` });
+      }
+      for (const e of (base.errors || []).filter(x => x.env === ENV.PREVIEW && !x.core)) out.push({ kind: 'environment', key: `ENV:missing:${e.what}`, confidence: 'CERTAIN', statement: `動作テスト環境の${e.label}を取得できませんでした（${e.message || e.code || '不明'}）。この設定は「無い」とは判断しないこと。` });
+      for (const f of (base.files || []).filter(x => x.type === 'FILE' && !x.sourceAvailable)) out.push({ kind: 'environment', key: `ENV:file:${f.target}:${f.name}`, confidence: 'CERTAIN', statement: `JavaScript「${f.name}」（${f.target === 'mobile' ? 'モバイル' : 'PC'}）の動作テスト環境の本文を取得できませんでした（${f.error?.message || '不明'}）。運用環境の本文で代用しないこと。` });
+      const rel = Object.entries(base.data?.relatedApps || {});
+      if (rel.length) out.push({ kind: 'environment', key: 'ENV:related', confidence: 'CERTAIN', statement: `他アプリ（${rel.map(([id, r]) => `${id}${r?.name ? `「${r.name}」` : ''}${r?.error ? '・取得できず' : ''}`).join('、')}）の定義は運用環境から読み取り専用で取得したものです（${timeText(base.relatedLoadedAt || base.loadedAt)} 時点。フィールド定義だけで、相手アプリの JavaScript・通知は含みません）。` });
+      out.push({ kind: 'environment', key: 'ENV:history', confidence: 'CERTAIN', statement: 'Toolkit は会話・承認・変更の理由を保存していません。分かるのは設定と JavaScript の現在の内容と運用環境との差だけです（誰が・なぜ変えたか、承認済みかどうかは分かりません。推測で述べないこと）。' });
+      return out;
+    }
+    /** Context の各 fact に付ける注記（動作テスト環境にだけある / 運用環境と違う）。key = フィールドコード / `${target}:${name}` */
+    function notesOf(base) {
+      const fieldNotes = {}, fileNotes = {};
+      for (const it of (base?.ok && base.diff?.available ? base.diff.items : [])) {
+        if (it.kind === 'field') fieldNotes[it.id] = it.change === 'PREVIEW_ONLY' ? '動作テスト環境にだけある（運用環境には未反映）' : it.change === 'CHANGED' ? `運用環境と設定が違う（${(it.keys || []).join('・')}）` : '';
+        if (it.kind === 'customize' && it.fileKind === 'js' && it.name) fileNotes[`${it.target}:${it.name}`] = it.change === 'PREVIEW_ONLY' ? '動作テスト環境にだけある（運用環境には未反映）' : it.change === 'CHANGED' ? '動作テスト環境で内容が変わっている（運用環境には未反映）' : '';
+      }
+      return { fieldNotes, fileNotes };
+    }
+    /** 開発支援の inputs（Context / Review / Generator / Code Review に渡す形）。基準が取れていなければ null（運用環境で代用しない） */
+    function inputsOf(base, legacy = {}) {
+      if (!base || !base.ok) return null;
+      return { data: base.data, deps: base.deps ?? null, scan: base.scan ?? null, incoming: base.incoming ?? legacy.incoming ?? null, environment: environmentOf(base) };
+    }
+    function environmentOf(base) {
+      if (!base) return null;
+      return { env: base.ok ? ENV.PREVIEW : ENV.PRODUCTION, ok: !!base.ok, loadedAt: base.loadedAt ?? null, revision: base.revision ?? null, diffAvailable: !!base.diff?.available, diffCount: base.diff?.available ? base.diff.items.length : null, facts: facts(base), ...notesOf(base) };
+    }
+
+    /**
+     * 作業の基準を取得する（動作テスト環境 ＋ 比較用の運用環境。並列で GET だけ）。
+     * @param {object} p { appId, getImpl(path, params), download(fileKey), fetchRelated(fields, actions) → relatedApps, incoming, appNames（Map）, plugins, now }
+     * @returns base { baseVersion, env, ok, status, message, loadedAt, appId, revision { preview, production }, data, files, productionData, productionFiles, errors, diff, deps, scan, incoming }
+     */
+    async function load({ appId, getImpl, download = null, fetchRelated = null, incoming = null, appNames = null, plugins = null, now = () => Date.now() } = {}) {
+      const started = now();
+      const [prev, prod] = await Promise.all([fetchEnv(ENV.PREVIEW, appId, getImpl), fetchEnv(ENV.PRODUCTION, appId, getImpl)]);
+      const coreErr = prev.errors.filter(e => e.core);
+      const base = {
+        baseVersion: BASE_VERSION, env: ENV.PREVIEW, appId: String(appId ?? ''), loadedAt: new Date(started).toISOString(),
+        ok: !coreErr.length, status: !coreErr.length ? 'OK' : coreErr.some(isPermission) ? 'PERMISSION_DENIED' : 'FETCH_FAILED', message: null,
+        errors: [...prev.errors, ...prod.errors], revision: { preview: prev.raw.fields?.revision != null ? String(prev.raw.fields.revision) : null, production: prod.raw.fields?.revision != null ? String(prod.raw.fields.revision) : null },
+        data: null, files: [], productionData: null, productionFiles: [], diff: { available: false, items: [], counts: { total: 0, byKind: {} }, reason: null }, deps: null, scan: null, incoming: incoming || null, relatedLoadedAt: null,
+      };
+      if (!base.ok) {
+        base.message = base.status === 'PERMISSION_DENIED' ? '動作テスト環境の設定を読む権限がありません（アプリ管理権限が必要です）' : `動作テスト環境の設定を取得できませんでした（${coreErr.map(e => `${e.label}: ${e.message || e.code || '不明'}`).join(' / ')}）`;
+        base.elapsedMs = now() - started;
+        return base;
+      }
+      let relatedApps = {};
+      if (typeof fetchRelated === 'function') { try { relatedApps = await fetchRelated(prev.raw.fields?.properties || {}, prev.raw.actions || null) || {}; } catch (e) { relatedApps = {}; base.errors.push({ env: ENV.PRODUCTION, what: 'relatedApps', label: '他アプリの定義', core: false, ...errOf(e) }); } }
+      base.relatedLoadedAt = new Date(now()).toISOString();
+      base.data = dataFrom(prev.raw, { appId, relatedApps, plugins });
+      base.files = await loadFiles(prev.raw.customize, download, { env: ENV.PREVIEW });
+      const prodCoreErr = prod.errors.filter(e => e.core);
+      if (!prodCoreErr.length) {
+        base.productionData = dataFrom(prod.raw, { appId, plugins });   // 差の説明用（基準ではない）
+        base.productionFiles = await loadFiles(prod.raw.customize, download, { env: ENV.PRODUCTION });
+        base.diff = { available: true, reason: null, ...diffEnvs({ preview: base.data, production: base.productionData, previewFiles: base.files, productionFiles: base.productionFiles }) };
+      } else base.diff = { available: false, items: [], counts: { total: 0, byKind: {} }, reason: prodCoreErr.map(e => `${e.label}: ${e.message || e.code || '不明'}`).join(' / ') };
+      // Field Scanner と同じ解析・依存関係を動作テスト環境の設定と本文で作り直す（運用環境の解析結果・キャッシュと混ぜない）
+      try {
+        const fieldsN = KTDeps.normalizeFields(base.data.fields);
+        const deps = KTDeps.buildDependencyData(base.data, fieldsN);
+        // 本文が取れないファイルは text を持たせない（summarizeFiles が「本文あり（空）」と読まないように）
+        const files = base.files.map(f => (f.sourceAvailable ? { name: f.name, target: f.target, kind: 'js', text: f.text } : { name: f.name, target: f.target, kind: 'js', note: f.note || `本文を取得できません（${f.error?.message || '不明'}）` }));
+        const scan = KTScan.buildPayload({ appId: String(appId ?? ''), fields: KTScan.fieldList(base.data.fields, base.data.layout), files, deps, scannedAt: base.loadedAt, source: ENV.PREVIEW });
+        KTDeps.mergeScannerEdges(deps, scan);
+        if (incoming) { try { KTDeps.applyIncomingRefs(deps, incoming); } catch (e) { } }
+        if (appNames && typeof appNames.size === 'number' && appNames.size) { try { KTDeps.applyAppNames(deps, appNames); } catch (e) { } }
+        base.deps = deps; base.scan = scan;
+      } catch (e) { base.analysisError = errOf(e); }
+      base.elapsedMs = now() - started;
+      return base;
+    }
+
+    return { BASE_VERSION, ENV, ENV_JA, CORE, OPTIONAL, LABEL, fetchEnv, dataFrom, loadFiles, diffEnvs, fingerprint, stamp, facts, notesOf, inputsOf, environmentOf, load, stable, timeText };
   })();
 
   // ==========================================
@@ -4258,6 +4592,7 @@
 
     // 事実の種別と並び順（根拠IDの採番順。同じ入力なら常に同じ順になる）
     const FACT_KIND_ORDER = [
+      'environment', 'env-diff',   // Phase 21: 作業の基準（動作テスト環境）と運用環境との差（KTDevBase.facts）。上限で削られないよう先頭に置く（渡されたときだけ）
       'field', 'dependency', 'indirect-dependency', 'incoming-reference', 'js-reference', 'js-app-reference',
       'js-external-field', 'calc-chain', 'change-impact', 'broken-reference', 'app-link', 'js-file', 'js-match', 'code-excerpt',
       'overview',   // L0 の要点（AI が引用できるよう根拠ID を持たせる。末尾に置き、他の ID を動かさない）
@@ -4836,6 +5171,8 @@
       else if (!target && level !== LEVELS.L0) facts = buildAppFacts({ data, deps, limits, trunc });
       // L1 以上では L0 の要点にも根拠ID を付ける（AI が概要を引用できる。順序は末尾なので他の ID は不変）
       if (level !== LEVELS.L0) facts.push(...buildOverviewFacts(app, coverage));
+      // Phase 21: 作業の基準と運用環境との差（どの level でも入れる。「現在の状態と運用環境との差」を設定の比較から答えられるように）
+      if (options.environment && Array.isArray(options.environment.facts)) facts.push(...options.environment.facts);
 
       // 重複排除（同じ key は 1 件）→ 決定的な並び → 根拠ID採番
       const seen = new Set();
@@ -4910,7 +5247,7 @@
       maxFacts: 400, maxBytes: 64 * 1024, maxGoalChars: 2000,
     };
     const PLANNER_KIND_ORDER = [
-      'overview', 'field', 'process-state', 'process-action', 'notification', 'reminder', 'view', 'report', 'record-acl', 'field-acl', 'app-action',
+      'overview', 'environment', 'env-diff', 'field', 'process-state', 'process-action', 'notification', 'reminder', 'view', 'report', 'record-acl', 'field-acl', 'app-action',
       'js-file', 'dependency', 'js-reference', 'incoming-reference', 'broken-reference', 'app-link',
     ];
     const plannerKindRank = (k) => { const i = PLANNER_KIND_ORDER.indexOf(k); return i < 0 ? 99 : i; };
@@ -4998,6 +5335,9 @@
       const push = (fact, relevance) => facts.push({ ...fact, relevance });
       // overview
       for (const o of buildOverviewFacts(app, coverage)) push(o, 100);   // 概要は省略しない（関連度を最大にする）
+      // Phase 21: 作業の基準（動作テスト環境）・運用環境との差・取得できなかったもの・履歴が無いこと（KTDevBase.facts）。省略しない
+      const envInfo = options.environment && typeof options.environment === 'object' ? options.environment : null;
+      for (const ef of (envInfo?.facts || [])) push(ef, 100);
       // fields
       const fieldRows = fieldsN.filter(f => f.rawType !== 'SUBTABLE' || true);
       const fieldFacts = fieldRows.map(f => {
@@ -5013,17 +5353,18 @@
         // Phase 20（XA-7 実機）: 並び順・絞り込み・件数も渡す（無いと AI が「今の表示設定を教えて」と利用者に聞いた）
         const refTable = raw.referenceTable ? { app: String(raw.referenceTable.relatedApp?.app ?? ''), condition: raw.referenceTable.condition ?? null, displayFields: raw.referenceTable.displayFields || [], sort: raw.referenceTable.sort || '', filterCond: raw.referenceTable.filterCond || '', size: raw.referenceTable.size ?? null } : null;
         const type = f.type === 'LOOKUP' ? `${f.rawType}（ルックアップ）` : f.rawType;
+        const envNote = envInfo?.fieldNotes?.[f.code] || '';   // Phase 21: 動作テスト環境にだけある / 運用環境と違う
         return {
           kind: 'field', key: `FIELD:${f.code}`, confidence: 'CERTAIN',
           field: {
-            code: f.code, label: f.label, type: f.rawType, ...(f.type === 'LOOKUP' ? { lookup } : {}),
+            code: f.code, label: f.label, type: f.rawType, ...(f.type === 'LOOKUP' ? { lookup } : {}), ...(envNote ? { environment: envNote } : {}),
             ...(f.required ? { required: true } : {}), ...(f.unique ? { unique: true } : {}), ...(f.parent ? { subtable: f.parent } : {}),
             ...(opts ? { options: opts.slice(0, limits.maxOptions), optionCount: opts.length } : {}),
             ...(raw.expression ? { expression: bounded(raw.expression, 160) } : {}),
             ...(refTable ? { referenceTable: refTable } : {}),
             ...(raw.enabled === false ? { enabled: false } : {}),
           },
-          statement: `フィールド「${f.label}」（コード ${f.code}・${type}${f.required ? '・必須' : ''}${f.unique ? '・重複禁止' : ''}${f.parent ? `・テーブル ${f.parent} 内` : ''}${opts ? `・選択肢 ${opts.length} 件` : ''}${lookup ? `・ルックアップ: アプリ ${lookup.app}${lookup.appName ? `「${lookup.appName}」` : ''} のキー ${lookup.keyField} から ${lookup.mappings.length} 項目を取得（${lookup.mappings.map(m => `${m.from}→${m.to}`).join(', ') || '取得項目なし'}）` : ''}${refTable ? `・関連レコード: アプリ ${refTable.app} のレコードを表示（表示 ${refTable.displayFields.join(', ') || 'なし'}・並び順 ${refTable.sort || '指定なし'}${refTable.size ? `・${refTable.size} 件` : ''}。表示項目・並び順はこのフィールドの設定）` : ''}${raw.expression ? `・計算式 ${bounded(raw.expression, 60)}` : ''}）はフォームに存在する`,
+          statement: `フィールド「${f.label}」（コード ${f.code}・${type}${f.required ? '・必須' : ''}${f.unique ? '・重複禁止' : ''}${f.parent ? `・テーブル ${f.parent} 内` : ''}${opts ? `・選択肢 ${opts.length} 件` : ''}${lookup ? `・ルックアップ: アプリ ${lookup.app}${lookup.appName ? `「${lookup.appName}」` : ''} のキー ${lookup.keyField} から ${lookup.mappings.length} 項目を取得（${lookup.mappings.map(m => `${m.from}→${m.to}`).join(', ') || '取得項目なし'}）` : ''}${refTable ? `・関連レコード: アプリ ${refTable.app} のレコードを表示（表示 ${refTable.displayFields.join(', ') || 'なし'}・並び順 ${refTable.sort || '指定なし'}${refTable.size ? `・${refTable.size} 件` : ''}。表示項目・並び順はこのフィールドの設定）` : ''}${raw.expression ? `・計算式 ${bounded(raw.expression, 60)}` : ''}）はフォームに存在する${envNote ? `（${envNote}）` : ''}`,
           _score: sc.score, _reasons: sc.reasons,
         };
       });
@@ -5154,12 +5495,13 @@
         const isSubject = !!subject && subject.name === jf.name && subject.target === jf.target;
         if (isSubject) for (const t of touched) bump(t.code, 4, '相談中の JavaScript が扱うフィールド');
         const rel = 3 + (touched.some(t => fieldScore.has(t.code) && (fieldScore.get(t.code).score >= 3)) ? 6 : 0) + (jsWords ? 4 : 0) + (settingHit(jf.name) ? 5 : 0) + (isSubject ? 40 : 0);
+        const fileNote = envInfo?.fileNotes?.[`${jf.target}:${jf.name}`] || '';   // Phase 21: 動作テスト環境にだけある / 内容が運用環境と違う
         push({
           kind: 'js-file', key: `JS_FILE:${jf.target}:${jf.name}`, confidence: jf.analyzed ? 'CERTAIN' : 'NOT_ANALYZED',
-          jsFile: { name: jf.name, target: jf.target, analyzed: jf.analyzed, sourceAvailable: !!jf.sourceAvailable, ...(jf.url ? { url: jf.url, external: !!jf.external } : {}), events: jf.events, fields: touched, appRefs: jf.appRefs },
-          statement: jf.analyzed
+          jsFile: { name: jf.name, target: jf.target, analyzed: jf.analyzed, sourceAvailable: !!jf.sourceAvailable, ...(jf.url ? { url: jf.url, external: !!jf.external } : {}), events: jf.events, fields: touched, appRefs: jf.appRefs, ...(fileNote ? { environment: fileNote } : {}) },
+          statement: (jf.analyzed
             ? `JavaScript「${jf.name}」（${jf.target === 'mobile' ? 'モバイル' : 'PC'}）はイベント ${jf.events.length ? jf.events.join(', ') : '（検出なし）'} で動き、${touched.length ? touched.map(t => `${t.code}（${t.label}）を ${accText(t.access)}`).join('、') : 'フィールドの参照は検出されていない'}${jf.appRefs.length ? `。他アプリ ${jf.appRefs.join(', ')} を参照` : ''}。本文は${jf.sourceAvailable ? '取得済み' : '未取得（統合するときは生成時に取得する）'}`
-            : `JavaScript「${jf.name}」（${jf.target === 'mobile' ? 'モバイル' : 'PC'}）は${jf.url ? `URL 指定（${jf.external ? '外部' : '同一ドメイン'}）で` : ''}未解析（イベント・フィールドは不明。統合先に選ばないこと）`,
+            : `JavaScript「${jf.name}」（${jf.target === 'mobile' ? 'モバイル' : 'PC'}）は${jf.url ? `URL 指定（${jf.external ? '外部' : '同一ドメイン'}）で` : ''}未解析（イベント・フィールドは不明。統合先に選ばないこと）`) + (fileNote ? `（${fileNote}）` : ''),
         }, rel);
       }
       if (jsFiles.length > (limits.maxJsFiles || 20)) trunc('facts.js-file', jsFiles.length, limits.maxJsFiles || 20);
@@ -9255,29 +9597,29 @@
     const procActionKey = (a) => ({ name: a.name, from: a.from, to: a.to, filterCond: normCondE(a.filterCond), type: a.type || 'PRIMARY', executableUsers: (a.executableUsers || []).map(e => `${e.type}:${e.code ?? ''}`).sort() });
     /** アプリアクションの比較キー（Phase 14。id は環境で揺れるので除く。全体置換 API なので 1 件の違いで stale） */
     const appActionKey = (a) => ({ name: a.name, index: a.index != null ? String(a.index) : null, destApp: String(a.destApp?.app ?? ''), destUnavailable: !!a.destUnavailable, mappings: (a.mappings || []).map(m => `${m.srcType}:${m.srcType === 'RECORD_URL' ? '' : (m.srcField ?? '')}>${m.destField}`), entities: (a.entities || []).map(e => `${e.type}:${e.code ?? ''}`).sort(), filterCond: normCondE(a.filterCond) });
-    function diffBefore(before, current, { kinds = ['fields', 'views', 'notifications', 'reminders', 'process'], baseline = 'Review 時点' } = {}) {
+    function diffBefore(before, current, { kinds = ['fields', 'views', 'notifications', 'reminders', 'process'], baseline = 'Review 時点', addedNote = '（未反映の変更）' } = {}) {
       const diffs = [];
       if (kinds.includes('process') && (before.process || current.process)) {
         const bp = before.process || { enabled: false, states: [], actions: [] }, cp = current.process || { enabled: false, states: [], actions: [] };
         if (!!bp.enabled !== !!cp.enabled) diffs.push({ kind: 'PROCESS', id: 'enable', change: 'CHANGED', message: `プロセス管理の有効 / 無効が${baseline}と違います（${bp.enabled ? '有効' : '無効'} → ${cp.enabled ? '有効' : '無効'}）` });
         const bs = new Map((bp.states || []).map(x => [x.name, x])), cs = new Map((cp.states || []).map(x => [x.name, x]));
         for (const [name, x] of bs) { const c = cs.get(name); if (!c) diffs.push({ kind: 'PROCESS_STATUS', id: name, change: 'REMOVED', message: `ステータス「${name}」が動作テスト環境にありません` }); else if (!same(procStateKey(x), procStateKey(c))) diffs.push({ kind: 'PROCESS_STATUS', id: name, change: 'CHANGED', message: `ステータス「${name}」（順序 / 作業者）が${baseline}と違います`, before: procStateKey(x), after: procStateKey(c) }); }
-        for (const [name] of cs) if (!bs.has(name)) diffs.push({ kind: 'PROCESS_STATUS', id: name, change: 'ADDED', message: `動作テスト環境にステータス「${name}」が追加されています（未反映の変更）` });
+        for (const [name] of cs) if (!bs.has(name)) diffs.push({ kind: 'PROCESS_STATUS', id: name, change: 'ADDED', message: `動作テスト環境にステータス「${name}」が追加されています${addedNote}` });
         const ak = (a) => `${a.name}|${a.from}`;
         const ba = new Map((bp.actions || []).map(a => [ak(a), a])), ca = new Map((cp.actions || []).map(a => [ak(a), a]));
         for (const [k, a] of ba) { const c = ca.get(k); if (!c) diffs.push({ kind: 'PROCESS_ACTION', id: a.name, change: 'REMOVED', message: `アクション「${a.name}」（${a.from} から）が動作テスト環境にありません` }); else if (!same(procActionKey(a), procActionKey(c))) diffs.push({ kind: 'PROCESS_ACTION', id: a.name, change: 'CHANGED', message: `アクション「${a.name}」（${a.from} から）の遷移先 / 条件 / 実行可能ユーザーが${baseline}と違います`, before: procActionKey(a), after: procActionKey(c) }); }
-        for (const [k, c] of ca) if (!ba.has(k)) diffs.push({ kind: 'PROCESS_ACTION', id: c.name, change: 'ADDED', message: `動作テスト環境にアクション「${c.name}」（${c.from} から）が追加されています（未反映の変更）` });
+        for (const [k, c] of ca) if (!ba.has(k)) diffs.push({ kind: 'PROCESS_ACTION', id: c.name, change: 'ADDED', message: `動作テスト環境にアクション「${c.name}」（${c.from} から）が追加されています${addedNote}` });
       }
       if (kinds.includes('notifications')) {
         const bn = [...(before.notifications?.general || []), ...(before.notifications?.perRecord || [])].map(notifKey).map(k => JSON.stringify(k));
         const cn = [...(current.notifications?.general || []), ...(current.notifications?.perRecord || [])].map(notifKey).map(k => JSON.stringify(k));
         for (const k of bn) if (!cn.includes(k)) diffs.push({ kind: 'NOTIFICATION', id: JSON.parse(k).title || JSON.parse(k).targets.join(','), change: 'REMOVED', message: `通知（${JSON.parse(k).scope === 'general' ? 'アプリ' : 'レコード'}の条件通知・${JSON.parse(k).targets.join(', ')}）が動作テスト環境にありません、または変更されています` });
-        for (const k of cn) if (!bn.includes(k)) diffs.push({ kind: 'NOTIFICATION', id: JSON.parse(k).title || JSON.parse(k).targets.join(','), change: 'ADDED', message: `動作テスト環境に通知（${JSON.parse(k).scope === 'general' ? 'アプリ' : 'レコード'}の条件通知・${JSON.parse(k).targets.join(', ')}）が追加または変更されています（未反映の変更）` });
+        for (const k of cn) if (!bn.includes(k)) diffs.push({ kind: 'NOTIFICATION', id: JSON.parse(k).title || JSON.parse(k).targets.join(','), change: 'ADDED', message: `動作テスト環境に通知（${JSON.parse(k).scope === 'general' ? 'アプリ' : 'レコード'}の条件通知・${JSON.parse(k).targets.join(', ')}）が追加または変更されています${addedNote}` });
       }
       if (kinds.includes('reminders')) {
         const bn = (before.reminders || []).map(remKey).map(k => JSON.stringify(k)), cn = (current.reminders || []).map(remKey).map(k => JSON.stringify(k));
         for (const k of bn) if (!cn.includes(k)) diffs.push({ kind: 'REMINDER', id: JSON.parse(k).title || JSON.parse(k).timing?.code, change: 'REMOVED', message: `リマインダー（${JSON.parse(k).timing?.code}・${JSON.parse(k).targets.join(', ')}）が動作テスト環境にありません、または変更されています` });
-        for (const k of cn) if (!bn.includes(k)) diffs.push({ kind: 'REMINDER', id: JSON.parse(k).title || JSON.parse(k).timing?.code, change: 'ADDED', message: `動作テスト環境にリマインダー（${JSON.parse(k).timing?.code}・${JSON.parse(k).targets.join(', ')}）が追加または変更されています（未反映の変更）` });
+        for (const k of cn) if (!bn.includes(k)) diffs.push({ kind: 'REMINDER', id: JSON.parse(k).title || JSON.parse(k).timing?.code, change: 'ADDED', message: `動作テスト環境にリマインダー（${JSON.parse(k).timing?.code}・${JSON.parse(k).targets.join(', ')}）が追加または変更されています${addedNote}` });
       }
       if (kinds.includes('fields')) {
         for (const [code, f] of Object.entries(before.fields || {})) {
@@ -9287,17 +9629,17 @@
           else if (f.lookup && c.lookupUnavailable) diffs.push({ kind: 'FIELD', id: code, change: 'UNAVAILABLE', code: 'RELATED_APP_SETTINGS_UNAVAILABLE', message: `ルックアップ「${f.label}」（${code}）の設定を kintone が返しません（参照元アプリへのアクセス権を確認してください）` });
           else if (!same(fieldKey(f), fieldKey(c))) diffs.push({ kind: 'FIELD', id: code, change: 'CHANGED', message: `フィールド「${f.label}」（${code}）の設定が${baseline}と違います`, before: fieldKey(f), after: fieldKey(c) });
         }
-        for (const [code, c] of Object.entries(current.fields || {})) if (!before.fields?.[code] && !isSystemField(c)) diffs.push({ kind: 'FIELD', id: code, change: 'ADDED', message: `動作テスト環境にフィールド「${c.label}」（${code}）が追加されています（未反映の変更）` });
+        for (const [code, c] of Object.entries(current.fields || {})) if (!before.fields?.[code] && !isSystemField(c)) diffs.push({ kind: 'FIELD', id: code, change: 'ADDED', message: `動作テスト環境にフィールド「${c.label}」（${code}）が追加されています${addedNote}` });
       }
       if (kinds.includes('appActions')) {
         const ba = new Map((before.appActions || []).map(a => [a.name, a])), ca = new Map((current.appActions || []).map(a => [a.name, a]));
         for (const [name, a] of ba) { const c = ca.get(name); if (!c) diffs.push({ kind: 'APP_ACTION', id: name, change: 'REMOVED', message: `アプリアクション「${name}」が動作テスト環境にありません` }); else if (!same(appActionKey(a), appActionKey(c))) diffs.push({ kind: 'APP_ACTION', id: name, change: 'CHANGED', message: `アプリアクション「${name}」の設定（並び順 / コピー先 / 転記 / 利用者 / 利用条件）が${baseline}と違います`, before: appActionKey(a), after: appActionKey(c) }); }
-        for (const [name] of ca) if (!ba.has(name)) diffs.push({ kind: 'APP_ACTION', id: name, change: 'ADDED', message: `動作テスト環境にアプリアクション「${name}」が追加されています（未反映の変更）` });
+        for (const [name] of ca) if (!ba.has(name)) diffs.push({ kind: 'APP_ACTION', id: name, change: 'ADDED', message: `動作テスト環境にアプリアクション「${name}」が追加されています${addedNote}` });
       }
       if (kinds.includes('views')) {
         const bv = new Map((before.views || []).map(v => [v.name, v])), cv = new Map((current.views || []).map(v => [v.name, v]));
         for (const [name, v] of bv) { const c = cv.get(name); if (!c) diffs.push({ kind: 'VIEW', id: name, change: 'REMOVED', message: `一覧「${name}」が動作テスト環境にありません` }); else if (!same(viewKey(v), viewKey(c))) diffs.push({ kind: 'VIEW', id: name, change: 'CHANGED', message: `一覧「${name}」の設定が${baseline}と違います`, before: viewKey(v), after: viewKey(c) }); }
-        for (const [name] of cv) if (!bv.has(name)) diffs.push({ kind: 'VIEW', id: name, change: 'ADDED', message: `動作テスト環境に一覧「${name}」が追加されています（未反映の変更）` });
+        for (const [name] of cv) if (!bv.has(name)) diffs.push({ kind: 'VIEW', id: name, change: 'ADDED', message: `動作テスト環境に一覧「${name}」が追加されています${addedNote}` });
       }
       return diffs;
     }
@@ -9485,12 +9827,19 @@
       }
       pending.length = 0; pending.push(...prepared.steps.filter(s => s.status === STEP.PENDING));
       if (!pending.length) { block('NOTHING_TO_EXECUTE', '承認済みで実行できる step がありません'); }
-      prepared.revision = { production: prodViews?.revision != null ? String(prodViews.revision) : null, preview: fields?.revision != null ? String(fields.revision) : null, reviewed: before.revision != null ? String(before.revision) : null };
+      // Phase 21: Review の基準の環境（開発支援は最新の動作テスト環境で計画する。古い Review は運用環境の設定が基準）
+      const reviewedEnv = review.base?.env === 'preview' ? 'preview' : 'production';
+      prepared.revision = { production: prodViews?.revision != null ? String(prodViews.revision) : null, preview: fields?.revision != null ? String(fields.revision) : null, reviewed: before.revision != null ? String(before.revision) : null, reviewedEnv, reviewedAt: review.base?.loadedAt ?? null };
+      prepared.warnings = [];
 
       // ---- 3. stale 判定（Review 時点との差異があれば止める。古い計画を当て直さない）----
+      //   基準が動作テスト環境なら「計画を作った時点の動作テスト環境」と今の動作テスト環境を内容で比べる（運用環境との差は計画の前提なので止めない）
       const currentModel = KTPlanReview.buildBeforeModel(previewNow);
-      const diffs = diffBefore(before, currentModel, { kinds: ['fields', 'views', 'notifications', 'reminders', ...(status ? ['process'] : []), ...(actions ? ['appActions'] : [])] });
-      if (prepared.revision.reviewed && prepared.revision.production && prepared.revision.reviewed !== prepared.revision.production) diffs.unshift({ kind: 'APP', id: 'revision', change: 'CHANGED', message: `運用環境の設定が Review 後に変更されています（revision ${prepared.revision.reviewed} → ${prepared.revision.production}）` });
+      const diffs = diffBefore(before, currentModel, { kinds: ['fields', 'views', 'notifications', 'reminders', ...(status ? ['process'] : []), ...(actions ? ['appActions'] : [])], ...(reviewedEnv === 'preview' ? { baseline: '計画を作った時点の動作テスト環境', addedNote: '（計画を作った後の変更）' } : {}) });
+      if (reviewedEnv === 'preview') {
+        // revision は内容が同じでも進む（同じ内容の PUT など）。内容の差が無ければ止めずに記録だけする
+        if (prepared.revision.reviewed && prepared.revision.preview && prepared.revision.reviewed !== prepared.revision.preview && !diffs.length) prepared.warnings.push({ code: 'PREVIEW_REVISION_ADVANCED', message: `計画を作った後に動作テスト環境の revision が進んでいます（${prepared.revision.reviewed} → ${prepared.revision.preview}）が、この計画に関係する設定の内容は同じです` });
+      } else if (prepared.revision.reviewed && prepared.revision.production && prepared.revision.reviewed !== prepared.revision.production) diffs.unshift({ kind: 'APP', id: 'revision', change: 'CHANGED', message: `運用環境の設定が Review 後に変更されています（revision ${prepared.revision.reviewed} → ${prepared.revision.production}）` });
       // ---- 3a. 参照元アプリの指紋（Phase 13）: フィールド定義（fieldsHash）が Review 時点と違えば STALE（LOOKUP_RELATED_APP_CHANGED）。revision だけの違い（一覧・通知など）は警告に留める ----
       prepared.crossApp = [];
       for (const st of prepared.steps.filter(x => ['UPDATE_LOOKUP', 'ADD_APP_ACTION', 'UPDATE_APP_ACTION'].includes(x.actionType) && x.status !== STEP.SKIPPED)) {
@@ -11920,7 +12269,7 @@
       try {
         ctx = KTContext.build({
           ...req, data: inputs.data, deps: inputs.deps || null, scan: inputs.scan || null, incoming: inputs.incoming || null,
-          options: { ...(limits ? { limits } : {}), ...(now !== undefined ? { now } : {}) },
+          options: { ...(limits ? { limits } : {}), ...(now !== undefined ? { now } : {}), ...(inputs.environment ? { environment: inputs.environment } : {}) },
         });
       } catch (e) {
         return { ok: false, reason: 'error', message: `Context の生成に失敗しました: ${e?.message || e}` };
@@ -11961,7 +12310,7 @@
       let ctx;
       try {
         // Phase 15: revision（計画の修正）があれば Planner Context に載せる（goal は同じ。Gateway が再計画する）
-        ctx = KTContext.buildPlan({ goal: g, data: inputs.data, deps: inputs.deps || null, scan: inputs.scan || null, incoming: inputs.incoming || null, options: { ...(limits ? { limits } : {}), ...(now !== undefined ? { now } : {}), ...(revision ? { revision } : {}), ...(subject ? { subject } : {}) } });
+        ctx = KTContext.buildPlan({ goal: g, data: inputs.data, deps: inputs.deps || null, scan: inputs.scan || null, incoming: inputs.incoming || null, options: { ...(limits ? { limits } : {}), ...(now !== undefined ? { now } : {}), ...(revision ? { revision } : {}), ...(subject ? { subject } : {}), ...(inputs.environment ? { environment: inputs.environment } : {}) } });
       } catch (e) {
         return { ok: false, reason: 'error', message: `Context の生成に失敗しました: ${e?.message || e}` };
       }
@@ -12084,11 +12433,14 @@
       let ctx;
       try {
         // アプリ全体の L1（facts に根拠ID）。質問が無くても L0 だけにしない（ドキュメントは設定の事実が材料）
-        ctx = KTContext.build({ question: null, focus: null, data: inputs.data, deps: inputs.deps || null, scan: inputs.scan || null, incoming: inputs.incoming || null, options: { level: KTContext.LEVELS.L1, ...(limits ? { limits } : {}), ...(now !== undefined ? { now } : {}) } });
+        ctx = KTContext.build({ question: null, focus: null, data: inputs.data, deps: inputs.deps || null, scan: inputs.scan || null, incoming: inputs.incoming || null, options: { level: KTContext.LEVELS.L1, ...(limits ? { limits } : {}), ...(now !== undefined ? { now } : {}), ...(inputs.environment ? { environment: inputs.environment } : {}) } });
       } catch (e) { return { ok: false, reason: 'error', message: `Context の生成に失敗しました: ${e?.message || e}` }; }
-      // Phase 20（実機）: Context は運用環境の設定から作る。動作テスト環境へ反映した変更は Context に入らないので、変更の記録（状態つき）と区別して明記する
-      const envNote = '> この Context は運用環境の設定（画面を開いた時点）から作っています。動作テスト環境へ反映した変更・提案中の変更は含みません（それらは「変更計画（Toolkit の記録）」の状態を見てください）。';
-      const contextMd = `${KTContext.toMarkdown(ctx)}${version && version.plan ? `\n\n${envNote}` : ''}`;
+      // Phase 20（実機）: Context がどの環境の設定かを明記する。Phase 21: 開発支援の作業基準（動作テスト環境）で作ったときはそう書き、運用環境に未反映の変更を含むことを示す
+      const envInfo = inputs.environment || null;
+      const envNote = envInfo && envInfo.env === 'preview'
+        ? `> この Context は動作テスト環境の設定（${KTDevBase.timeText(envInfo.loadedAt)} に取得）から作っています。運用環境へ未反映の変更を${envInfo.diffAvailable ? ` ${envInfo.diffCount} 件` : ''}含みます（運用環境の利用者にはまだ見えていません）${envInfo.diffAvailable ? '' : '。運用環境との差は取得できませんでした'}。`
+        : '> この Context は運用環境の設定（画面を開いた時点）から作っています。動作テスト環境へ反映した変更・提案中の変更は含みません（それらは「変更計画（Toolkit の記録）」の状態を見てください）。';
+      const contextMd = `${KTContext.toMarkdown(ctx)}${(version && version.plan) || (envInfo && envInfo.env === 'preview') ? `\n\n${envNote}` : ''}`;
       const changeMd = version && version.plan ? changeSummaryMarkdown(version, { execState, jsExecState }) : '';
       const instruction = [k.role, ...k.rules, '出力は日本語 Markdown（H1〜H3・箇条書き中心・表は最小限）。10〜15 分でレビューできる密度にし、曖昧な点は「未確定事項」に列挙する。', ...(changeMd ? ['変更計画（Toolkit の記録）の状態（提案中 / 動作テスト環境へ反映済み / 元に戻し済み）をそのまま書き、運用環境へ反映したとは書かない（Toolkit は運用環境へ反映しない）。確認事項は未確定事項として残す。'] : []), '', '## 出力の構成', ...k.outline.map((o, i) => `${i + 1}. ${o}`)].join('\n');
       const prompt = `${instruction}\n${changeMd ? `\n## 変更計画（Toolkit の記録）\n${changeMd}\n` : ''}\n## Context\n${contextMd}\n`;
@@ -13638,7 +13990,7 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
               <div id="kt-ai-pane-review" class="kt-ai-pane"><div id="kt-ai-review-empty" style="opacity:.7; padding:6px;">Toolkit で確認した結果はまだありません。変更計画ができると、Toolkit が決定的に検証した結果（反映可否・競合・変更前後）と、手順ごとの判断（承認 / 保留 / 却下）がここに出ます。</div><div id="kt-ai-review-result" style="display:none; border:1px solid ${esc(c.border)}; border-radius:8px; padding:8px; background:${esc(c.bg)}; line-height:1.6;"></div></div>
               <div id="kt-ai-pane-code" class="kt-ai-pane"><div id="kt-ai-code-head" style="opacity:.7; padding:6px; font-size:11px;">生成した JavaScript はまだありません。実装仕様を確定して［JavaScript を生成］を押すか、チャットで「コードを作って」と伝えると生成します（kintone への登録は実行ペインの確認を経ます）。</div><div id="kt-ai-code-actions" style="display:none; gap:6px; flex-wrap:wrap; margin:4px 0;"><button type="button" id="kt-ai-code-copy" class="btn" style="height:26px; font-size:11px;">コードをコピー</button><button type="button" id="kt-ai-diff-copy" class="btn" style="height:26px; font-size:11px;">Diff をコピー</button><button type="button" id="kt-ai-cplan-copy" class="btn" style="height:26px; font-size:11px;">Customization Plan JSON をコピー</button><button type="button" id="kt-ai-code-download" class="btn" style="height:26px; font-size:11px;">ファイルとして保存</button><button type="button" id="kt-ai-code-register" class="btn" style="height:26px; font-size:11px; font-weight:600; border-color:#6a1b9a; display:none;">動作テスト環境へ登録</button></div><div id="kt-ai-code-review" style="font-size:11px;"></div><div id="kt-ai-code-tabs" style="display:none; gap:4px; margin-top:6px;"><button type="button" class="btn kt-ai-ctab active" data-code-view="code" style="height:24px; font-size:11px;">コード</button><button type="button" class="btn kt-ai-ctab" data-code-view="diff" style="height:24px; font-size:11px;">Diff（Before / After）</button></div><pre id="kt-ai-code-view" style="margin-top:4px; max-height:60vh; overflow:auto; white-space:pre; font-size:11px; border:1px solid ${esc(c.border)}; border-radius:8px; padding:8px; display:none;"></pre><pre id="kt-ai-diff-view" style="margin-top:4px; max-height:60vh; overflow:auto; white-space:pre; font-size:11px; border:1px solid ${esc(c.border)}; border-radius:8px; padding:8px; display:none;"></pre></div>
               <div id="kt-ai-pane-exec" class="kt-ai-pane"><div id="kt-ai-exec-empty" style="opacity:.7; padding:6px;">動作テスト環境への反映はまだありません。検証ペインで手順を承認すると、ここから反映（最終確認 → 反映 → 検証 → 元に戻す）を行います。JavaScript の登録もここで確認します。運用環境には反映しません。</div><div id="kt-ai-exec"></div><div id="kt-ai-jsreg" style="margin-top:8px;"></div></div>
-              <div id="kt-ai-pane-evidence" class="kt-ai-pane"><div style="opacity:.7; padding:6px; font-size:11px;">回答・計画の根拠ID（E1 など）をクリックすると、Toolkit が解析した事実（statement / 利用元 / 関係 / 確度 / 設定 / ファイルと行）をここに表示します。</div>${KTContextUi.evidencePaneHtml(c)}</div>
+              <div id="kt-ai-pane-evidence" class="kt-ai-pane"><div id="kt-ai-base-diff"></div><div style="opacity:.7; padding:6px; font-size:11px;">回答・計画の根拠ID（E1 など）をクリックすると、Toolkit が解析した事実（statement / 利用元 / 関係 / 確度 / 設定 / ファイルと行）をここに表示します。</div>${KTContextUi.evidencePaneHtml(c)}</div>
               <div id="kt-ai-pane-context" class="kt-ai-pane">${KTContextUi.generatorHtml(c)}<div style="margin-top:8px; display:flex; gap:6px; align-items:center;"><b style="font-size:12px;">プレビュー</b><button type="button" id="kt-ai-download" class="btn" style="height:26px; font-size:11px;" disabled>⬇ ローカルに保存</button></div><pre id="kt-ai-preview" style="margin-top:4px; max-height:320px; overflow:auto; white-space:pre-wrap; font-size:11px; border:1px solid ${esc(c.border)}; border-radius:8px; padding:8px;"></pre></div>
               <div id="kt-ai-pane-connection" class="kt-ai-pane">${paidEnabled ? KTContextUi.connectionHtml(c) : '<div id="kt-ai-paid" style="display:none;"></div>'}</div>
             </div>
@@ -13647,11 +13999,42 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
     }
 
     // ---- ヘッダー（§22: 技術情報を並べすぎない。詳細は展開式）----
-    function headerHtml({ app = {}, overview = null, connection = {}, drawerOpen = true, jsFiles = [], subject = null } = {}) {
+    /**
+     * Phase 21: 今回の変更の基準（開発支援が何を現在の状態として扱っているか）。base は KTDevBase.load の結果、loading = 取得中
+     *   基準が取れなければ赤で理由を出し、計画・生成・登録を止めていることを書く（運用環境で代用しない）
+     */
+    function baseHtml(base, { loading = false } = {}) {
+      const btn = (act, label, title = '') => `<button type="button" class="btn kt-ai-base-btn" data-act="${act}"${title ? ` title="${esc(title)}"` : ''} style="height:22px; padding:0 8px; font-size:11px;">${esc(label)}</button>`;
+      if (!base) return `<div id="kt-ai-base" class="kt-ai-base is-loading">今回の変更の基準：<b>動作テスト環境</b>（${loading ? '取得中…' : 'まだ取得していません'}）${loading ? '' : btn('refresh-base', '取得', '動作テスト環境の現在の設定と JavaScript を取得します')}</div>`;
+      if (!base.ok) return `<div id="kt-ai-base" class="kt-ai-base is-error">今回の変更の基準：<b>動作テスト環境を取得できませんでした</b>（${esc(base.message || base.status || '不明')}）。変更の計画・コード生成・登録は止めています（運用環境の設定では進めません）。${btn('refresh-base', '再取得')}</div>`;
+      const d = base.diff || {};
+      const diffText = !d.available ? `運用環境との差：<b>取得できませんでした</b>（差が無いとは言えません）` : d.items.length ? `運用環境との差：<b>${d.items.length} 件</b>（未反映）` : '運用環境との差：なし';
+      const warn = (base.errors || []).filter(e => e.env === 'preview' && !e.core).length + (base.files || []).filter(f => f.type === 'FILE' && !f.sourceAvailable).length;
+      return `<div id="kt-ai-base" class="kt-ai-base is-ok">今回の変更の基準：<b>動作テスト環境</b>（${esc(KTDevBase.timeText(base.loadedAt))} 取得・revision ${esc(String(base.revision?.preview ?? '?'))}${loading ? '・更新中…' : ''}）｜${diffText}${warn ? `｜<span style="color:#b26a00;">取得できなかった設定・本文 ${warn} 件</span>` : ''} ${btn('open-base-diff', '差分を見る', '運用環境との差を右の「根拠」に表示します')} ${btn('refresh-base', '再取得', '動作テスト環境の現在の設定と JavaScript を取り直します')}</div>`;
+    }
+    /** Phase 21: 右「根拠」の先頭に出す、作業の基準の内容（運用環境との差・取得できなかったもの・履歴が無いこと） */
+    function baseDiffHtml(base) {
+      if (!base) return '';
+      const head = `<div style="font-weight:600; margin:4px 0;">今回の変更の基準（動作テスト環境）</div>`;
+      if (!base.ok) return `<div id="kt-ai-base-detail" class="kt-ai-base-detail">${head}<div style="color:#c62828;">${esc(base.message || '取得できませんでした')}</div><div style="opacity:.8; margin-top:4px;">変更の計画・コード生成・登録は止めています。質問には運用環境の設定（画面を開いた時点）で答えます。</div></div>`;
+      const d = base.diff || {};
+      const CH = { PREVIEW_ONLY: '動作テスト環境だけ', PRODUCTION_ONLY: '運用環境だけ', CHANGED: '内容が違う' };
+      const rows = (d.items || []).map(it => `<li><span class="kt-ai-base-chip">${esc(CH[it.change] || it.change)}</span> ${esc(it.message)}</li>`).join('');
+      const missing = [...(base.errors || []).filter(e => e.env === 'preview' && !e.core).map(e => `${e.label}（${e.message || e.code || '不明'}）`), ...(base.files || []).filter(f => f.type === 'FILE' && !f.sourceAvailable).map(f => `JavaScript「${f.name}」の本文（${f.error?.message || '不明'}）`)];
+      const rel = Object.entries(base.data?.relatedApps || {});
+      return `<div id="kt-ai-base-detail" class="kt-ai-base-detail">${head}
+        <div>${esc(KTDevBase.timeText(base.loadedAt))} 取得・動作テスト環境 revision ${esc(String(base.revision?.preview ?? '?'))} / 運用環境 revision ${esc(String(base.revision?.production ?? '?'))}。AI の質問・計画・コード生成・検証はこの内容で行います。</div>
+        ${!d.available ? `<div style="color:#b26a00; margin-top:4px;">運用環境の設定を取得できなかったため、運用環境との差は分かりません（${esc(d.reason || '不明')}）。差が無いとは言えません。</div>` : d.items.length ? `<div style="margin-top:4px;">運用環境へ未反映の変更（${d.items.length} 件）:</div><ul class="kt-ai-base-list">${rows}</ul>` : '<div style="margin-top:4px;">運用環境との差はありません。</div>'}
+        ${missing.length ? `<div style="color:#b26a00; margin-top:4px;">取得できなかったもの（「無い」とは扱いません）: ${missing.map(esc).join('、')}</div>` : ''}
+        ${rel.length ? `<div style="opacity:.85; margin-top:4px;">他アプリ（${rel.map(([id, r]) => `${esc(id)}${r?.name ? `「${esc(r.name)}」` : ''}`).join('、')}）の定義は運用環境から読み取り専用で取得（${esc(KTDevBase.timeText(base.relatedLoadedAt || base.loadedAt))}）。</div>` : ''}
+        <div style="opacity:.75; margin-top:4px;">Toolkit は会話・承認・変更の理由を保存していません。ここにあるのは設定と JavaScript の比較で分かる事実だけです。</div>
+      </div>`;
+    }
+    function headerHtml({ app = {}, overview = null, connection = {}, drawerOpen = true, jsFiles = [], subject = null, base = undefined, baseLoading = false } = {}) {
       const o = overview || {};
       const conn = connection.paidEnabled === false ? '—' : connection.checking ? '確認中' : connection.connected ? (connection.available ? '✓' : '△') : '未接続';
       const items = [['解析', o.fieldCount != null ? '✓' : '—'], ['JavaScript', o.javascript?.analyzed ? '✓' : '—'], ['AI', conn]];
-      return `<div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap; min-width:0;">
+      return `${base !== undefined ? baseHtml(base, { loading: baseLoading }) : ''}<div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap; min-width:0;">
           <b style="font-size:13px;">開発支援</b><span style="opacity:.85;">App ${esc(String(app.id ?? '—'))} ${esc(app.name || '')}</span>${subject ? `<span id="kt-ai-subject" style="font-size:11px; border:1px solid #6a1b9a; color:#6a1b9a; border-radius:8px; padding:0 6px;">相談中: ${esc(subject.name)}（${subject.platform === 'mobile' ? 'モバイル' : 'PC'}${subject.customizationType === 'URL' ? '・URL' : ''}）</span>` : ''}
           <span id="kt-ai-header-status" style="display:flex; gap:10px; flex-wrap:wrap; font-size:11px; opacity:.9;">${items.map(([k, v]) => `<span><span style="opacity:.7;">${esc(k)}</span> ${esc(String(v))}</span>`).join('')}</span>
         </div>
@@ -13663,7 +14046,7 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
           <div>フィールド ${esc(String(o.fieldCount ?? '—'))}　依存関係 ${esc(String(o.dependencies?.edgeCount ?? '—'))}　一覧 ${esc(String(o.views?.count ?? '—'))}　グラフ ${esc(String(o.reports?.count ?? '—'))}　通知 ${esc(String((o.notifications?.general ?? 0) + (o.notifications?.perRecord ?? 0) + (o.notifications?.reminder ?? 0)))}　プロセス管理 ${o.process?.enabled ? `有効（ステータス ${esc(String(o.process.stateCount))}・アクション ${esc(String(o.process.actionCount))}）` : '無効'}　アプリアクション ${esc(String(o.actions?.count ?? '—'))}　プラグイン ${esc(String(o.plugins?.count ?? '不明'))}　壊れた参照 ${esc(String(o.brokenRefs?.total ?? '—'))}</div>
           <div>JavaScript: PC ${esc(String(o.customize?.desktop?.js?.length ?? 0))} / モバイル ${esc(String(o.customize?.mobile?.js?.length ?? 0))}（解析 ${o.javascript?.analyzed ? '済' : '未'}）　他アプリからの参照: ${o.incoming?.scanned ? `走査済（${esc(String(o.incoming.referencingApps ?? 0))} アプリ）` : '未走査'}　アプリ間連携 ${esc(String(o.appLinks?.count ?? 0))}</div>
           ${(jsFiles || []).length ? `<div id="kt-ai-header-js">登録済み JS: ${jsFiles.map(f => `<span style="white-space:nowrap;">${esc(f.target === 'mobile' ? 'モバイル' : 'PC')}: <b>${esc(f.name)}</b>${f.analyzed ? `（${esc((f.events || []).slice(0, 4).join(', ') || 'イベント検出なし')}${(f.events || []).length > 4 ? ' …' : ''}${Object.keys(f.fields || {}).length ? `・フィールド ${Object.keys(f.fields).length}` : ''}）` : '（未解析）'}</span>`).join('　')}</div>` : ''}
-          <div>Nest Rec AI: ${esc(connection.text || '—')}（詳細は右の「接続」）　／　解析は運用環境の設定。AI の提案の反映先は動作テスト環境だけで、運用環境には反映しません。</div>
+          <div>Nest Rec AI: ${esc(connection.text || '—')}（詳細は右の「接続」）　／　この欄の件数は${base && base.ok ? '動作テスト環境（今回の変更の基準）' : '運用環境（画面を開いた時点）'}の設定です。AI の提案の反映先は動作テスト環境だけで、運用環境には反映しません。</div>
         </div>`;
     }
     /** Workspace 上部の作業状態（§10）: KTAiWorkspaceViewModel.workspaceState の行を chip で */
@@ -14081,7 +14464,7 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
         diff: rv?.diff ? (rv.diff.lines || []).map(l => `${l.type}${l.text}`).join('\n') : '',
       };
     }
-    return { INTENT_JA, STATUS_JA, STRATEGY_JA, CHECK_JA, SPEC_STATUS_JA, workspaceHtml, headerHtml, freePanelHtml, chatHtml, messageHtml, questionList, questionsCardHtml, planCardHtml, reviewCardHtml, diffCardHtml, codeCardHtml, codePaneHtml, previewReadyHtml, rollbackReadyHtml, executionCardHtml, rollbackCardHtml, answerCardHtml, errorCardHtml, readinessCounts, patternsHtml,
+    return { INTENT_JA, STATUS_JA, STRATEGY_JA, CHECK_JA, SPEC_STATUS_JA, workspaceHtml, headerHtml, baseHtml, baseDiffHtml, freePanelHtml, chatHtml, messageHtml, questionList, questionsCardHtml, planCardHtml, reviewCardHtml, diffCardHtml, codeCardHtml, codePaneHtml, previewReadyHtml, rollbackReadyHtml, executionCardHtml, rollbackCardHtml, answerCardHtml, errorCardHtml, readinessCounts, patternsHtml,
       // Phase 17
       consultationStartHtml, specCardHtml, jsPreviewReadyHtml, jsRollbackReadyHtml, jsExecutionCardHtml, jsRollbackCardHtml, consultChoicesHtml, jsRegisterPaneHtml,
       // Phase 19: 会話は要約、右 Workspace が正本
@@ -14204,7 +14587,47 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
     // ==================================================================
     // 会話（KTAiConversation）。AI へ送るのは intent ごとの Context だけ（会話履歴は送らない）
     // ==================================================================
-    const inputsNow = () => (typeof d.getInputs === 'function' ? (d.getInputs() || {}) : {});
+    // Phase 21: 開発支援の作業基準（最新の動作テスト環境。KTDevBase）。d.loadDevBase があれば、AI の質問・計画・生成・Review・Code Review はこの基準で行う。
+    //   基準を取れないときは計画・生成・登録を止める（運用環境の設定へ黙って切り替えない）。質問だけは運用環境の設定で答え、そのことを Context（environment）に入れる
+    const devBaseLoader = typeof d.loadDevBase === 'function' ? d.loadDevBase : null;
+    let devBase = null, devBasePromise = null, devBaseAt = 0, devBaseSeq = 0;
+    const DEV_BASE_ASK_MAX_AGE_MS = 30 * 1000;
+    const legacyInputs = () => (typeof d.getInputs === 'function' ? (d.getInputs() || {}) : {});
+    const inputsNow = () => {
+      const legacy = legacyInputs();
+      if (!devBaseLoader || !devBase) return legacy;
+      return KTDevBase.inputsOf(devBase, legacy) || { ...legacy, environment: KTDevBase.environmentOf(devBase) };
+    };
+    /** 作業の基準を取り直す（同時に 1 回だけ）。maxAgeMs 以内に取ったものがあればそれを使う */
+    async function refreshDevBase({ maxAgeMs = 0, reason = null } = {}) {
+      if (!devBaseLoader) return null;
+      if (devBase && maxAgeMs > 0 && (nowMs() - devBaseAt) < maxAgeMs) return devBase;
+      if (devBasePromise) return devBasePromise;
+      const seq = ++devBaseSeq;
+      devBasePromise = (async () => {
+        let b = null;
+        try { b = await devBaseLoader({ reason }); }
+        catch (e) { b = { ok: false, status: 'FETCH_FAILED', message: e?.message || String(e), loadedAt: new Date(nowMs()).toISOString(), errors: [] }; }
+        if (seq === devBaseSeq) { devBase = b || { ok: false, status: 'FETCH_FAILED', message: '作業の基準を取得できませんでした', loadedAt: new Date(nowMs()).toISOString(), errors: [] }; devBaseAt = nowMs(); }
+        devBasePromise = null;
+        try { renderHeader(); renderBaseDiff(); } catch (e) { }
+        return devBase;
+      })();
+      return devBasePromise;
+    }
+    const BASE_KIND_JA = { plan: '変更計画の作成', generate: 'コードの生成', register: 'JavaScript の登録', execute: '動作テスト環境への反映' };
+    /** 計画・生成・登録の前に基準を取り直す。取れなければ理由つきで止める（運用環境の設定で代用しない） */
+    async function ensureDevBase(kind) {
+      if (!devBaseLoader) return { ok: true, legacy: true, base: null };
+      const b = await refreshDevBase({ reason: kind });
+      if (b && b.ok) return { ok: true, base: b };
+      return { ok: false, base: b, message: `動作テスト環境の設定を取得できなかったため、${BASE_KIND_JA[kind] || '処理'}を止めました（${b?.message || '不明'}）。運用環境の設定で代わりに進めることはしません。上の［再取得］で取り直してください。` };
+    }
+    /** 右「根拠」の先頭: 運用環境との差（作業の基準の内容） */
+    function renderBaseDiff() {
+      const el = host.querySelector('#kt-ai-base-diff');
+      if (el) el.innerHTML = devBaseLoader && isConnected() ? KTAiChatUi.baseDiffHtml(devBase) : '';
+    }
     /**
      * Phase 20（実機）: 相談中の JS は相談開始時に本文を取得済み（seed）。Field Scanner がキャッシュ復元（本文なし）だと、計画の Context（js-file facts）と
      * Review が「本文は未取得」と判断し、AI が利用者に「ソースを取得できるか」と聞いていた。そのファイルだけ取得済みの本文を重ねる（本文は AI へ送らない）
@@ -14267,6 +14690,8 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
     const services = {
       /** ASK: 質問 → KTContext.build（focus は質問から解決。曖昧なら候補を返す）→ assistant-qa。Planner は起動しない */
       async ask({ question, signal = null, focus = null }) {
+        // Phase 21: 質問も最新の動作テスト環境を基準に答える（30 秒以内に取ったものは使い回す）。取れなければ運用環境の設定で答え、そのことを Context に入れる
+        if (devBaseLoader) await refreshDevBase({ maxAgeMs: DEV_BASE_ASK_MAX_AGE_MS, reason: 'ask' });
         const gen = KTContextUi.generate({ targetType: focus?.type || 'app', targetId: focus?.id ?? null, targetLabel: focus?.label ?? null, question, inputs: inputsNow() });
         if (!gen.ok) return gen;
         const client = await ensureReady();
@@ -14276,6 +14701,9 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
       },
       /** PLAN / REVISE_PLAN: goal（＋修正）→ KTContext.buildPlan → change-planner → KTPlanReview（Toolkit 検証） */
       async plan({ goal, revision = null, signal = null, subject = null }) {
+        // Phase 21: 計画は最新の動作テスト環境を基準に作る（毎回取り直す）。取れなければ止める（運用環境の設定で計画しない）
+        const gate = await ensureDevBase('plan');
+        if (!gate.ok) return { ok: false, reason: 'DEV_BASE_UNAVAILABLE', message: gate.message };
         // Phase 17: 相談中の JS（subject）を Planner Context に付ける（統合先の第一候補。本文は送らない）
         const sub = subject ? KTContext.compactSubject({ sourceId: subject.sourceId, name: subject.name, target: subject.platform, customizationType: subject.customizationType, sourceAvailable: !!subject.sourceAvailable, events: subject.events || [], fields: Object.entries(subject.fieldAccess || {}).map(([code, acc]) => ({ code, access: acc.CONTROL || acc.SHOW_HIDE ? 'CONTROL' : acc.WRITE ? 'WRITE' : 'READ' })) }) : null;
         const inputs = subject ? withConsultedSource(inputsNow()) : inputsNow();
@@ -14289,6 +14717,8 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
         normalizePlanConditions(p, (inputs && inputs.data) || null);
         let review = null;
         try { review = KTPlanReview.review({ plan: p, ...(subject ? withConsultedSource(inputsNow()) : inputsNow()) }); } catch (e) { review = null; }
+        // Phase 21: どの基準で検証したか（反映の直前に、この時点の動作テスト環境と今を比べる）
+        if (review) review.base = gate.base ? KTDevBase.stamp(gate.base) : null;
         return { plan: p, ctx: gen.ctx, review };
       },
       /** EXPLAIN_PLAN / EXPLAIN_REVIEW: 計画の要約 ＋ Review の写し ＋ 計画が引用した根拠 → assistant-qa（説明だけ。計画は変えない） */
@@ -14324,6 +14754,9 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
         const rv = (v.review?.steps || []).find(r => r.customization?.customizationId === customizationId) || null;
         if (rv && !rv.codeGeneration?.supported) return { ok: false, reason: 'GENERATE_BLOCKED', message: `${customizationId} は Toolkit Review でコード生成できない状態です（${rv.codeGeneration?.reason || '要確認'}）。` };
         if (!rv && !['NEW_JS_FILE', 'EXTEND_EXISTING_JS'].includes(c.strategy)) return { ok: false, reason: 'STRATEGY_NOT_GENERATED', message: `方針 ${c.strategy || '（未定）'} はコード生成の対象外です。` };
+        // Phase 21: 生成の基準（統合先の本文・フィールド）は、生成の直前に取り直した動作テスト環境。取れなければ止める（運用環境の本文で生成しない）
+        const gate = await ensureDevBase('generate');
+        if (!gate.ok) return { ok: false, reason: 'DEV_BASE_UNAVAILABLE', message: gate.message };
         const inputs = inputsNow();
         let existingSource = null;
         if (c.strategy === 'EXTEND_EXISTING_JS') {
@@ -14331,9 +14764,18 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
           if (!t) return { ok: false, reason: 'JS_TARGET_FILE_MISSING', message: '統合先の既存 JS が指定されていません。計画を修正してください。' };
           const target = t.target || 'desktop';
           const seed = conv?.state?.consultation?.seed || null;
-          if (seed && seed.name === t.name && seed.platform === target && seed.source?.available && typeof seed.source.text === 'string') existingSource = { name: t.name, target, text: seed.source.text, from: seed.customizationType === 'URL' ? 'url' : 'seed', ...(seed.customizationType === 'URL' ? { external: !!seed.external, url: seed.url ?? null } : {}) };
-          else existingSource = await loadJsSource(t.name, target, inputs);
-          if (!existingSource) return { ok: false, reason: 'JS_SOURCE_UNAVAILABLE', file: { name: t.name, target } };
+          if (gate.base) {
+            // 作業の基準（動作テスト環境）の本文を使う。相談を始めた時の本文と違っていれば、その旨を残す（新しい方で作る）
+            const bf = (gate.base.files || []).find(f => f.name === t.name && f.target === target) || null;
+            // URL 指定の JS は Toolkit から書き換えない（登録は止まる）。相談時に同一ドメインから取れた本文があれば、手で反映するコード / Diff のために使う
+            if (bf && bf.type === 'URL') existingSource = { name: t.name, target, text: seed && seed.name === t.name && seed.platform === target && typeof seed.source?.text === 'string' ? seed.source.text : null, from: 'url', external: seed ? !!seed.external : true, url: bf.url };
+            else if (bf && bf.sourceAvailable) existingSource = { name: t.name, target, text: bf.text, from: 'preview-base', env: 'preview', hash: bf.hash, ...(seed && seed.name === t.name && seed.platform === target && seed.source?.hash && seed.source.hash !== bf.hash ? { changedSinceConsult: { consulted: seed.source.hash, current: bf.hash } } : {}) };
+            if (!existingSource || typeof existingSource.text !== 'string') return { ok: false, reason: 'JS_SOURCE_UNAVAILABLE', file: { name: t.name, target }, message: bf ? (bf.type === 'URL' ? `統合先「${t.name}」は URL 指定の JavaScript です（本文を取得しません）。` : `統合先「${t.name}」の動作テスト環境の本文を取得できませんでした（${bf.error?.message || '不明'}）。運用環境の本文では生成しません。`) : `統合先「${t.name}」（${target === 'mobile' ? 'モバイル' : 'PC'}）は動作テスト環境に登録されていません。` };
+          } else {
+            if (seed && seed.name === t.name && seed.platform === target && seed.source?.available && typeof seed.source.text === 'string') existingSource = { name: t.name, target, text: seed.source.text, from: seed.customizationType === 'URL' ? 'url' : 'seed', ...(seed.customizationType === 'URL' ? { external: !!seed.external, url: seed.url ?? null } : {}) };
+            else existingSource = await loadJsSource(t.name, target, inputs);
+            if (!existingSource) return { ok: false, reason: 'JS_SOURCE_UNAVAILABLE', file: { name: t.name, target } };
+          }
         }
         const ctx = KTContext.buildGenerator({ customization: c, plan, planId: v.planId, version: v.version, data: inputs.data || null, deps: inputs.deps || null, scan: inputs.scan || null, existingSource });
         const client = await ensureReady({ generator: true });
@@ -14455,7 +14897,9 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
       try { const inputs = inputsNow(); if (inputs.data) { overview = KTContext.buildAppOverview({ data: inputs.data, deps: inputs.deps || null, scan: inputs.scan || null, incoming: inputs.incoming || null, limits: { ...KTContext.DEFAULT_LIMITS, maxFields: 0, maxViewNames: 0 }, trunc: () => { } }); app = { id: overview.id, name: overview.name }; } else app = { id: d.appId ?? executor?.appId ?? '' }; } catch (e) { overview = null; }
       let jsFiles = [];
       try { const inputs = inputsNow(); jsFiles = KTScan.summarizeFiles(inputs.scan || null, inputs.data || null); } catch (e) { jsFiles = []; }
-      $header.innerHTML = KTAiChatUi.headerHtml({ app, overview, connection: connectionInfo(), drawerOpen, jsFiles, subject: conv ? conv.subject() : null });
+      // Phase 21: 接続して開発支援を使うときだけ「今回の変更の基準」を出す（未接続の無料機能は運用環境の設定のまま）
+      const showBase = !!devBaseLoader && isConnected();
+      $header.innerHTML = KTAiChatUi.headerHtml({ app, overview, connection: connectionInfo(), drawerOpen, jsFiles, subject: conv ? conv.subject() : null, ...(showBase ? { base: devBase, baseLoading: !!devBasePromise } : {}) });
     }
     /** composer（送信欄）: 接続済みで利用できるときだけ送れる。無料ユーザーは無料パネルを出す（§22 / §23） */
     function renderComposer() {
@@ -14612,6 +15056,9 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
         pendingSeed = seed;
         conv.pushMessage(KTAiConversation.MSG.ASSISTANT_TEXT, KTAiConversation.ROLE.TOOLKIT, r.current ? `現在は「${r.current.name}」の相談中です。${seed.name} について新しい会話を始めますか？` : `現在の会話を続けますか、${seed.name} について新しい会話を始めますか？`, { kind: 'consult-choices', current: r.current, next: { sourceId: seed.sourceId, name: seed.name }, hasPlan: r.hasPlan, pendingExecution: r.pendingExecution });
       }
+      // Phase 21: Customize タブが動作テスト環境の設定を取れず運用環境の内容を表示していたときは、そのことを会話に出す（計画・生成の前に動作テスト環境を取り直し、取れなければ止める）
+      if (r.ok && !r.resumed && seed.customizeSource && seed.customizeSource !== 'preview') conv.notice(`「${seed.name}」は運用環境の内容を表示しています（動作テスト環境のカスタマイズ設定を取得できませんでした）。計画・コード生成の前に動作テスト環境を取り直し、取れなければ止めます（運用環境の本文では生成しません）。`, { kind: 'consult-production-source' });
+      if (r.ok && !r.resumed && devBaseLoader) refreshDevBase({ maxAgeMs: DEV_BASE_ASK_MAX_AGE_MS, reason: 'consult' });
       renderHeader(); renderSpec(); renderChat(); renderWsState();
       // 相談を始めたら右は「計画」（相談対象の現在情報）
       if (r.ok && !r.resumed) setArtifact({ type: VM.ARTIFACT.CONSULTATION, id: seed.sourceId, version: null, name: seed.name }, { auto: true });
@@ -14680,6 +15127,7 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
       const v = planIndex().get(`${jsExec.planId}:${jsExec.version}`); if (v && jsExec.execution?.put?.ok) v.jsExecutionId = jsExec.execution.executionId;
       renderJsReg();
       if (jsExec.execution?.put?.ok && typeof d.rescanJs === 'function') { try { await d.rescanJs(); fillTargets(); renderHeader(); } catch (e) { } }
+      if (devBaseLoader) refreshDevBase({ reason: 'after-js-register' });   // Phase 21: 登録した後の動作テスト環境を次の基準にする
       return jsExec.execution;
     }
     async function startJsRollback() {
@@ -14698,6 +15146,7 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
       catch (e) { jsExec.error = e?.message || String(e); }
       jsExec.stage = 'rolled-back'; renderJsReg();
       if (typeof d.rescanJs === 'function') { try { await d.rescanJs(); fillTargets(); renderHeader(); } catch (e) { } }
+      if (devBaseLoader) refreshDevBase({ reason: 'after-js-rollback' });   // Phase 21
       return jsExec.rollback;
     }
     /** Customization Audit（§37）。相談対象・仕様の版・承認した仕様・生成の出所・Code Review・登録前後・検証・復元。token / cookie / 本文は含めない */
@@ -14810,6 +15259,10 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
       const id = t?.id || (typeof t?.getAttribute === 'function' ? t.getAttribute('id') : null);
       if (id === 'kt-ai-drawer-toggle') { if (drawerOpen) closeDrawer(); else showPane(activePane); return; }
       if (id === 'kt-ai-header-toggle') { headerDetailOpen = !headerDetailOpen; const el = host.querySelector('#kt-ai-header-detail'); if (el) el.style.display = headerDetailOpen ? '' : 'none'; }
+      // Phase 21: 今回の変更の基準（再取得 / 差分を見る）
+      const act = dataOf(actEl(t), 'act');
+      if (act === 'refresh-base') { refreshDevBase({ reason: 'manual' }); renderHeader(); return; }
+      if (act === 'open-base-diff') { renderBaseDiff(); showPane('evidence', { scrollTo: '#kt-ai-base-diff' }); return; }
     });
     $free.addEventListener('click', async (ev) => {
       const t = ev?.target;
@@ -14862,6 +15315,8 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
         capability = { available: false, reason: KTAiClient.isAiClientError(e) ? e.code : KTAiClient.ERROR_CODES.TRANSPORT_ERROR };
       }
       setPaidStatus(KTContextUi.capabilityStatusText(capability)); setAskEnabled(); renderSession();
+      // Phase 21: 接続できたら開発支援の作業基準（最新の動作テスト環境）を取得しておく（質問・計画の前にも取り直す）
+      if (capability.available && devBaseLoader && !devBase && !devBasePromise) refreshDevBase({ reason: 'connect' });
       return capability;
     }
     /** Context ペインの「AIに質問」の回答（明示 focus）。会話にも ANSWER として出す */
@@ -14876,7 +15331,8 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
     /** Context ペインの「変更計画を作成」の結果 → 会話の計画バージョンとして登録（Review / Decision / Executor はそこに追従） */
     function renderPlan(p) {
       let review = null;
-      try { review = KTPlanReview.review({ plan: p, ...(d.getInputs() || {}) }); } catch (e) { review = null; }
+      try { review = KTPlanReview.review({ plan: p, ...inputsNow() }); } catch (e) { review = null; }
+      if (review) review.base = devBase && devBase.ok ? KTDevBase.stamp(devBase) : null;   // Phase 21: 検証した基準
       conv.pushMessage(KTAiConversation.MSG.USER, KTAiConversation.ROLE.USER, p?.goal || last?.ctx?.goal || '（変更計画の作成）');
       conv.registerPlan({ plan: p, ctx: last?.ctx || null, review });
       openDrawer('plan');
@@ -14923,12 +15379,14 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
       if (!executor || execState.stage !== 'confirm' || !execState.prepared) return null;
       execState.stage = 'running'; renderExec();
       try {
-        const inputs = d.getInputs ? (d.getInputs() || {}) : {};
+        const inputs = inputsNow();   // Phase 21: 作業の基準（動作テスト環境）があればそれで再解析する
         const execution = await KTPlanExecutor.executePreview(execState.prepared, { api: executor.api, review: lastReview, data: inputs.data || null, onProgress: (step, partial) => { execState.execution = partial; renderExec(); } });
         execState.execution = execution;
         execState.rollbackPlan = KTPlanExecutor.buildRollbackPlan(execution, execState.prepared);
       } catch (e) { execState.error = e?.message || String(e); execState.execution = execState.execution || { status: 'FAILED', steps: execState.prepared.steps, simulation: null, reanalysis: null }; }
       execState.stage = 'done'; renderExec();
+      // Phase 21: 反映した後の動作テスト環境を次の作業の基準にする（取り直す）
+      if (devBaseLoader) refreshDevBase({ reason: 'after-apply' });
       return execState.execution;
     }
     /** 監査 JSON。実行した計画の版（最新の版とは限らない）の plan / review を使う */
@@ -14959,6 +15417,7 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
         await KTPlanExecutor.executeRollback(execState.rollback, { api: executor.api, execution: execState.execution, onProgress: () => renderExec() });
       } catch (e) { execState.error = e?.message || String(e); }
       execState.stage = 'rolled-back'; renderExec();
+      if (devBaseLoader) refreshDevBase({ reason: 'after-rollback' });   // Phase 21
       return execState.rollback;
     }
     /** 判断を記録し、表示中の Review JSON・判断の集計・Executor の件数を追従させる */
@@ -15342,6 +15801,8 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
     }
     return {
       unrevertedPreviewChange,
+      // Phase 21: 開発支援の作業基準（最新の動作テスト環境）
+      devBase: () => devBase, refreshDevBase, inputs: inputsNow,
       regenerate: () => (last ? generate() : null),
       refreshTargets: fillTargets,
       refreshCapability, ask, plan, showEvidence,
@@ -15386,6 +15847,7 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
 
     const wrap = document.createElement('div');
     wrap.id = 'kt-toolkit';
+    try { wrap.setAttribute('data-kt-build', KT_BUILD); } catch (e) { }   // Phase 21: 実機に入っているビルドの照合用（画面には出さない）
     wrap.style.cssText = `
       position:fixed; right:16px; z-index:9998;
       background:${C.bg}; color:${C.text}; border-radius:12px;
@@ -19784,6 +20246,12 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
         session: KTAiClient.createSession({ store: KTAiClient.createSettingsStore() }),
         // Preview Executor: このユーザーのセッション権限で動作テスト環境だけを書く（運用環境への反映関数は無い）
         executor: (() => { try { return { api: KTPlanExecutor.createKintoneApi(), appId: appId ?? (typeof kintone !== 'undefined' ? kintone.app.getId() : null) }; } catch (e) { return null; } })(),
+        // Phase 21: 開発支援の作業基準（最新の動作テスト環境 ＋ 比較用の運用環境）。GET だけ（設定は変更しない）。本文は動作テスト環境の fileKey で取る
+        loadDevBase: () => {
+          const inputs = (typeof getContextInputs === 'function' ? getContextInputs() : null) || {};
+          const names = inputs.deps?.meta?.appNames && typeof inputs.deps.meta.appNames === 'object' ? new Map(Object.entries(inputs.deps.meta.appNames)) : null;
+          return KTDevBase.load({ appId: appId ?? kintone.app.getId(), getImpl: kGet, download: (fk) => KTApi.downloadFile(fk), fetchRelated: (fields, actions) => fetchRelatedApps(fields, kGet, actions), incoming: inputs.incoming || null, appNames: names, plugins: DATA?.plugins ?? null });
+        },
       });
     } catch (e) {
       console.error('[Toolkit AI] AI タブの初期化に失敗しました', e);
@@ -19791,7 +20259,8 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
       return null;
     }
     // タブを開いたときに対象一覧・ヘッダーを最新の解析結果へ（Scanner / 他アプリ走査は後から入る）
-    try { root.ktTabs?.onSwitch?.((id) => { if (id === 'ai' && panel) { panel.refreshTargets(); panel.renderHeader(); } }); } catch (e) { }
+    // Phase 21: タブを開いたとき、1 分より古い作業基準（動作テスト環境）は取り直す（別の画面で変えた設定も拾う）
+    try { root.ktTabs?.onSwitch?.((id) => { if (id === 'ai' && panel) { panel.refreshTargets(); panel.renderHeader(); if (panel.isConnected && panel.isConnected() && panel.refreshDevBase) panel.refreshDevBase({ maxAgeMs: 60 * 1000, reason: 'tab' }); } }); } catch (e) { }
     return panel;
   }
 
@@ -19953,9 +20422,9 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
       const kind = getKindByName(name);     // ← js or css
       const { data, source } = await KTApi.getCustomize(app);
       if (source !== 'preview') {
-        // previewを取得できなかった場合、production をベースにPUTすることになる。
-        // preview側の未反映の変更が失われる可能性があるため明示的に警告する。
-        console.warn('[Customize] preview設定を取得できなかったため、production設定をベースに更新します');
+        // Phase 21: 動作テスト環境の設定を取得できなかったときは更新しない。以前は運用環境の設定を元に PUT していたため、
+        //   動作テスト環境だけにある未反映の JS / CSS が黙って消えることがあった（取得失敗を「変更なし」と扱わない）
+        throw new Error('動作テスト環境のカスタマイズ設定を取得できなかったため、反映を中止しました（運用環境の設定を元に上書きすると、動作テスト環境にだけある変更が消えます）。権限と通信を確認してください');
       }
 
       const desk = data.desktop || { js: [], css: [] };
@@ -21170,85 +21639,19 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
           }
         }
 
-        const out = [];
-        for (const p of Object.values(props)) {
-          if (p.type === 'SUBTABLE') {
-            if (p.code) out.push({ code: p.code, label: p.label, type: 'SUBTABLE' });
-            for (const sf of Object.values(p.fields || {})) {
-              out.push({ code: sf.code, label: sf.label, type: sf.type, parent: p.code });
-            }
-          } else {
-            out.push({ code: p.code, label: p.label, type: p.type });
-          }
-        }
-
-        // ★レイアウトにしか現れない識別子を追加する
-        //   JavaScriptは以下も「コード」として指定するが、いずれも form/fields には含まれない。
-        //     - グループコード      : setFieldShown('group02', false)
-        //     - サブテーブルコード  : setFieldShown('明細', false)
-        //     - 要素ID（スペース等）: getSpaceElement('TAG_MENU')
-        //   これらを既知リストに入れておかないと、すべて「存在しないコード」と誤検出される。
-        const seen = new Set(out.map(f => f.code));
-        const add = (code, label, type) => {
-          if (!code || seen.has(code)) return;
-          seen.add(code);
-          out.push({ code, label: label || code, type });
-        };
-
-        const walkLayout = (nodes) => {
-          for (const n of nodes || []) {
-            if (!n) continue;
-
-            if (n.type === 'GROUP') {
-              add(n.code, n.label, 'GROUP');
-              walkLayout(n.layout);          // グループ内の行を辿る
-              continue;
-            }
-
-            if (n.type === 'SUBTABLE') {
-              add(n.code, n.label, 'SUBTABLE');
-              for (const sf of n.fields || []) {
-                if (sf?.code) add(sf.code, sf.label, sf.type || 'FIELD');
-                else if (sf?.elementId) add(sf.elementId, sf.label, `ELEMENT_${sf.type || ''}`);
-              }
-              continue;
-            }
-
-            if (n.type === 'ROW') {
-              for (const f of n.fields || []) {
-                if (!f) continue;
-                if (f.type === 'SUBTABLE') {
-                  add(f.code, f.label, 'SUBTABLE');
-                  for (const sf of f.fields || []) {
-                    if (sf?.code) add(sf.code, sf.label, sf.type || 'FIELD');
-                  }
-                  continue;
-                }
-                // 通常フィールド（form/fields にもあるが、念のため）
-                if (f.code) { add(f.code, f.label, f.type || 'FIELD'); continue; }
-                // ★スペース・ラベル・罫線などの要素ID（codeを持たない）
-                if (f.elementId) add(f.elementId, f.label || `(${f.type || 'ELEMENT'})`, `ELEMENT_${f.type || ''}`);
-              }
-              continue;
-            }
-
-            // 想定外のノードでも layout / fields があれば辿る
-            if (Array.isArray(n.layout)) walkLayout(n.layout);
-          }
-        };
-        walkLayout(layoutNodes);
-
-        return out;
+        // ★レイアウトにしか現れない識別子（グループ・テーブル・スペースの要素 ID）も既知に入れる。実体は KTScan.fieldList（Phase 21: 開発支援の作業基準と共用）
+        return KTScan.fieldList(props, layoutNodes);
       }
 
       // ---- テキスト取得（URLは既定でスキップ、FILEのみ実体取得）----
-      async function fetchTexts({ appId, include, kinds }) {
+      async function fetchTexts({ appId, include, kinds, customize = null }) {
         const apiUrl = (p) => kintone.api.url(p, true);
 
         // ★共通化：preview優先 → production（実体は KTApi）
         const downloadByKey = (fileKey) => KTApi.downloadFile(fileKey);
 
-        const { data } = await KTApi.getCustomize(appId);
+        // Phase 21: 署名を作った設定と同じもの（customize）から本文を取る（設定と本文の環境を揃える）
+        const { data } = customize || await KTApi.getCustomize(appId);
         const desk = data.desktop || { js: [], css: [] };
         const mobi = data.mobile || { js: [], css: [] };
 
@@ -21572,10 +21975,14 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
         const kinds = resolveKinds($kinds.value);
 
         // --- キャッシュ確認（API呼び出しを増やさないための要）---
-        // 署名は prefetch 済みの customize 設定から作るため、追加のAPI取得は発生しない
+        // Phase 21: 署名は「本文を取る設定」（動作テスト環境を優先）から作る。以前は運用環境の設定（DATA.customize）から作っていたため、
+        //   動作テスト環境だけで JS を差し替えても古いキャッシュ（本文なし）が使われ続け、開発支援が運用環境の本文を基準にしていた。
+        //   どちらの環境の本文かは payload.meta.source に残す
         // 解析ロジックのバージョンを含めることで、Toolkit更新時にキャッシュが自動的に無効になる
-        const signature = `v${KTScan.ANALYZER_VERSION}|`
-          + KTScan.buildSignature(DATA.customize)
+        let cz = null;
+        try { cz = await KTApi.getCustomize(appId); } catch (e) { cz = null; }
+        const signature = `v${KTScan.ANALYZER_VERSION}|${cz ? cz.source : 'production'}|`
+          + KTScan.buildSignature(cz ? cz.data : DATA.customize)
           + `|${$target.value}|${$kinds.value}`;
         if (!force) {
           const cached = KTScan.loadCache(appId, signature);
@@ -21588,42 +21995,11 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
         if (!silent) $meta.textContent = 'Scanning...';
 
         const fields = await fetchFieldList(DATA.fields, DATA.layout);
-        const files = await fetchTexts({ appId, include, kinds });
-        const results = analyze({ fields, files, snippet: { before: 24, after: 48 } });
-
-        // JS本文からアプリID参照とイベント種別を抽出（自アプリIDは除外）
-        // コメント除去済みテキストを使い、行番号は原文と一致させる
-        const appRefs = [];
-        const fileEvents = {};
-        for (const f of files) {
-          if (f.kind !== 'js' || !f.text) continue;
-          const clean = stripCommentsOnly(f.text);
-          const li = buildLineIndex(clean);
-          for (const ref of KTDeps.extractAppIdRefs(clean, (i) => lineAt(li, i))) {
-            if (ref.appId && String(ref.appId) === String(appId)) continue;
-            appRefs.push({ ...ref, file: f.name, target: f.target });
-          }
-          const evs = extractEventTypes(clean);
-          if (evs.length) fileEvents[`${f.target}:js:${f.name}`] = evs;
-        }
-
-        // ★存在しないフィールドコードの検出（JSに残った古い参照を洗い出す）
-        // 依存関係データが持つフィールドコードも既知として渡す
-        const depsKnown = (deps?.nodes || [])
-          .filter(n => n.type === 'FIELD')
-          .map(n => String(n.id).replace(/^FIELD:/, ''));
-        const unknownRefs = collectUnknownFieldRefs(files, fields, depsKnown, appId);
-        // REST APIパラメータで別アプリが明示されたフィールド参照（{ app: 1112, fields / record }）
-        const externalRefs = collectExternalFieldRefs(files, appId);
-        // 存在しないステータス名との比較も検出する（プロセス管理が有効な場合のみ）
-        const unknownStatuses = collectUnknownStatusRefs(
-          files, deps?.meta?.statusStates, deps?.meta?.statusFieldCodes);
-
+        const files = await fetchTexts({ appId, include, kinds, customize: cz });
+        // 解析（アプリID参照・イベント種別・存在しないフィールド / ステータス・外部アプリのフィールド参照）は KTScan.buildPayload（Phase 21: 開発支援の作業基準と共用）
         const scannedAt = new Date().toISOString();
-        const payload = {
-          results, files, fields, appRefs, fileEvents, unknownRefs, unknownStatuses, externalRefs,
-          meta: { appId, include, kinds, scannedAt },
-        };
+        const payload = KTScan.buildPayload({ appId, fields, files, deps, include, kinds, scannedAt, source: cz ? cz.source : 'production' });
+        const { results, appRefs, fileEvents, unknownRefs, unknownStatuses, externalRefs } = payload;
 
         const elapsedSec = ((Date.now() - t0) / 1000).toFixed(2);
         applyScanResult(payload, { fromCache: false, elapsedSec, silent });
