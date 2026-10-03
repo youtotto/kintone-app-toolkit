@@ -326,7 +326,7 @@ console.log('\n--- 4. AI Workspace: free / connected / responsive / header ---')
   assert(c.$('kt-ai-header-detail').style.display === '', '詳細を展開できる');
   // レスポンシブ（CSS）
   const css = c.host.innerHTML;
-  assert(/@media \(max-width: 760px\)\{[^}]*#kt-ai-workspace \.kt-ai-ws-body\{ flex-direction:column; \}/.test(css) && /\.kt-ai-drawer\{ flex:0 0 auto; max-height:55%; \}/.test(css) && /\.kt-ai-card \.kt-ai-mermaid-row\{ flex-direction:column; \}/.test(css), 'narrow width: 会話と drawer は縦積み・Mermaid は縦表示（Edge 半幅）');
+  assert(/@container kt-ai-ws \(max-width: 760px\)\{[^}]*#kt-ai-workspace \.kt-ai-ws-body\{ flex-direction:column; \}/.test(css) && /\.kt-ai-drawer\{ flex:0 0 auto; max-height:55%; \}/.test(css) && /\.kt-ai-card \.kt-ai-mermaid-row\{ flex-direction:column; \}/.test(css), 'narrow width（container query）: 会話と Workspace は縦積み・Mermaid は縦表示（Edge 半幅・パネル表示）');
   assert(/\.kt-ai-card \.kt-ai-mermaid-row > div\{[^}]*overflow-x:auto/.test(css), 'Mermaid は横スクロール可');
   // drawer
   assert(c.$('kt-ai-drawer').style.display === 'flex' && c.panel.drawerState().open === true && c.panel.drawerState().pane === 'plan' && c.$('kt-ai-pane-plan').style.display === 'block' && c.$('kt-ai-pane-context').style.display === 'none' && /作業パネルを隠す/.test(c.$('kt-ai-header').innerHTML), 'Workspace（右）は常設で既定は「計画」ペイン（toggle は狭い幅だけ。CSS）');
