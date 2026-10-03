@@ -10818,29 +10818,42 @@
      *   if / else / ループ / switch のブロック、同じ行の if・三項演算子、手前の「if (条件) { return … }」（早い return で除外）を条件として集める。
      *   条件が変数だけ（if (locked)）なら、その変数の代入式も添える（条件の項目を照合するため）
      */
-    function siteConds(s, idx) {
+    function siteConds(s, idx, depth = 0) {
       const stack = [];
       for (let k = 0; k < idx; k++) { const ch = s[k]; if (ch === '{') stack.push(k); else if (ch === '}') stack.pop(); }
+      const escRx = (x) => String(x).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      // 名前で kintone.events.on に渡している関数（function onShow(event) {…} ＋ kintone.events.on(EV, onShow)）は handler
+      const handlerByName = (name) => !!name && new RegExp(`kintone\\s*\\.\\s*events\\s*\\.\\s*on\\s*\\([^;]*?,\\s*${escRx(name)}\\s*\\)`).test(s);
       const blocks = stack.map(open => {
         const before = s.slice(Math.max(0, open - 400), open).replace(/\s+$/, '');
-        if (/\belse$/.test(before)) return { kind: 'cond', cond: 'else', open };
+        // Phase 21: else は対応する if の条件を添える（else of (条件)）。条件の項目を照合するため
+        if (/\belse$/.test(before)) return { kind: 'cond', cond: elseCondOf(s, open), open };
         if (/\)$/.test(before)) {
           const head = before.slice(0, -1);
           let depth = 1, k = head.length - 1;
           for (; k >= 0 && depth > 0; k--) { if (head[k] === ')') depth++; else if (head[k] === '(') depth--; }
           const kw = head.slice(0, k + 1).replace(/\s+$/, '');
           const kwm = /\b(if|for|while|switch|catch|with)$/.exec(kw);
-          if (kwm) return { kind: 'cond', cond: kwm[1] === 'if' ? head.slice(k + 2) : kwm[1], open };
+          // Phase 21: switch は判定する式を添える（switch (record['ステータス'].value) の case の中を条件つきとして照合する）
+          if (kwm) return { kind: 'cond', cond: kwm[1] === 'if' ? head.slice(k + 2) : kwm[1] === 'switch' ? `switch (${head.slice(k + 2)})` : kwm[1], open };
           // 即時関数: 「(function」の「(」が呼び出しの括弧ではない（直前が識別子・)・] でない）。forEach(function … は即時関数ではない
           const iifeM = /([\s\S]?)\s*\(\s*(?:async\s+)?function\s*$/.exec(kw);
-          return { kind: 'func', open, iife: !!iifeM && !/[\w$)\]]/.test(iifeM[1] || ''), handler: /kintone\s*\.\s*events\s*\.\s*on\s*\([^;{}]*,\s*(?:async\s+)?function\s*[\w$]*\s*$/.test(kw) };
+          const name = (/\bfunction\s+([A-Za-z_$][\w$]*)\s*$/.exec(kw) || /\b(?:var|let|const)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s+)?function\s*[\w$]*\s*$/.exec(kw) || [])[1] || null;
+          return { kind: 'func', open, name, iife: !!iifeM && !/[\w$)\]]/.test(iifeM[1] || ''), handler: /kintone\s*\.\s*events\s*\.\s*on\s*\([^;{}]*,\s*(?:async\s+)?function\s*[\w$]*\s*$/.test(kw) || handlerByName(name) };
         }
-        if (/=>$/.test(before)) return { kind: 'func', open, iife: false, handler: /kintone\s*\.\s*events\s*\.\s*on\s*\([^;{}]*,\s*(?:async\s*)?\(?[^()]*\)?\s*=>$/.test(before) };
+        if (/=>$/.test(before)) {
+          const name = (/\b(?:var|let|const)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s*)?(?:\([^()]*\)|[A-Za-z_$][\w$]*)\s*=>$/.exec(before) || [])[1] || null;
+          return { kind: 'func', open, name, iife: false, handler: /kintone\s*\.\s*events\s*\.\s*on\s*\([^;{}]*,\s*(?:async\s*)?\(?[^()]*\)?\s*=>$/.test(before) || handlerByName(name) };
+        }
         return { kind: 'other', open };
       });
       let hi = blocks.map(b => b.kind === 'func' && b.handler).lastIndexOf(true);
       if (hi < 0) hi = blocks.findIndex(b => b.kind === 'func' && !b.iife);
       if (hi < 0) hi = blocks.map(b => b.kind).lastIndexOf('func');
+      // Phase 21: 名前付きの関数（handler でない）の中なら、その関数の呼び出し元の条件も見る（if (承認済み) lockAll(record); の書き方を「条件の外」と誤って止めない）
+      const hp = blocks.map(b => b.kind === 'func' && !!b.name && !b.handler && !b.iife).lastIndexOf(true);
+      const helper = hp >= 0 && hp >= hi ? blocks[hp] : null;
+      if (helper) hi = hp;
       const inner = hi >= 0 ? blocks.slice(hi + 1) : blocks;
       const lineStart = s.lastIndexOf('\n', idx) + 1;
       const lineEnd = s.indexOf('\n', idx) < 0 ? s.length : s.indexOf('\n', idx);
@@ -10859,9 +10872,98 @@
           if (/^\s*\{?\s*return\b/.test(rest)) conds.push(`!(${body.slice(po + 1, pc)})`);
         }
       }
-      conds = conds.map(t => { const id = /^\s*!?\s*\(?\s*!?\s*([A-Za-z_$][\w$]*)\s*\)?\s*$/.exec(String(t)); if (!id) return t; const def = new RegExp(`\\b(?:var|let|const)\\s+${id[1].replace(/\$/g, '\\$')}\\s*=\\s*([^;\\n]+)`).exec(s); return def ? `${t} /* ${def[1].trim()} */` : t; });
-      return { unconditional: hi >= 0 && !conds.length, conds, line: line.trim().slice(0, 160) };
+      // 条件に出てくる変数・関数は、その定義を添える（if (locked) / if (isApproved(record)) の項目を照合するため）
+      conds = conds.map(t => decorateCond(s, t));
+      const own = { unconditional: hi >= 0 && !conds.length, conds, line: line.trim().slice(0, 160) };
+      if (!helper || depth >= 2) return own;
+      // Phase 21: 名前付きの関数の中 → 呼び出し元（関数の本体の外の NAME(…)）ごとに、呼び出し元の条件 ＋ 関数の中の条件を 1 つの経路として返す
+      const bodyEnd = closeBrace(s, helper.open);
+      const callIdx = [...s.matchAll(new RegExp(`(?<![\\w$.])${escRx(helper.name)}\\s*\\(`, 'g'))].map(m => m.index).filter(i => !(i > helper.open && i < bodyEnd) && !/\bfunction\s+$/.test(s.slice(Math.max(0, i - 12), i)));
+      // 直接の呼び出しが無い（参照で渡している など）→ 呼び出し元の条件が分からない（条件の外とは言えない）
+      if (!callIdx.length) return { ...own, unconditional: false, conds: [...conds, 'unknown:caller'], via: helper.name };
+      const callers = callIdx.map(i => siteConds(s, i, depth + 1));
+      const paths = callers.flatMap(c => (c.paths && c.paths.length ? c.paths : [c.conds]).map(p => [...conds, ...p]));
+      return { unconditional: !conds.length && callers.every(c => c.unconditional), conds, paths, line: own.line, via: helper.name };
     }
+    // ---- Phase 21（基準モデルの CX-1 で見つけた見落とし）: 囲む条件が、計画の条件（ステータス など）を見ているか ----
+    //   明細のロックが承認済みの if の閉じ括弧の後ろに入り、ループの中の if (row.value.hasOwnProperty(key)) を「条件」と数えて「要確認」にしていた
+    //   （実際にはどのステータスでも明細が編集できなくなる）。ループ・存在確認・別の項目だけの条件は、計画の条件の外と同じに扱う
+    const COND_NEUTRAL = new Set(['record', 'event', 'true', 'false', 'null', 'undefined', 'typeof', 'instanceof', 'in', 'of', 'new', 'this', 'void', 'function', 'return', 'var', 'let', 'const', 'if', 'else', 'for', 'while', 'switch', 'case', 'break', 'continue', 'do', 'try', 'catch', 'finally', 'throw', 'async', 'await', 'delete', 'Object', 'Array', 'Number', 'String', 'Boolean', 'Math', 'JSON', 'parseInt', 'parseFloat', 'isNaN', 'isFinite']);
+    const STRUCT_CALLS = new Set(['hasOwnProperty', 'call', 'isArray', 'keys', 'values', 'entries', 'indexOf', 'includes', 'some', 'every', 'filter', 'find', 'trim', 'toString', 'Number', 'String', 'Boolean', 'parseInt', 'parseFloat', 'isNaN', 'isFinite']);
+    const stripCondText = (t) => String(t).replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/(['"`])(?:\\.|(?!\1)[^\\])*\1/g, ' ');
+    /** else ブロックの条件: 対応する if の条件を「else of (条件)」で返す（分からなければ 'else'） */
+    function elseCondOf(s, open) {
+      let k = open - 1;
+      while (k >= 0 && /\s/.test(s[k])) k--;
+      k -= 4;
+      while (k >= 0 && /\s/.test(s[k])) k--;
+      if (s[k] !== '}') return 'else';
+      let d = 0, j = k;
+      for (; j >= 0; j--) { if (s[j] === '}') d++; else if (s[j] === '{') { d--; if (d === 0) break; } }
+      if (j < 0) return 'else';
+      let p = j - 1; while (p >= 0 && /\s/.test(s[p])) p--;
+      if (s[p] !== ')') return 'else';
+      let d2 = 0, q = p;
+      for (; q >= 0; q--) { if (s[q] === ')') d2++; else if (s[q] === '(') { d2--; if (d2 === 0) break; } }
+      if (q < 0 || !/\bif\s*$/.test(s.slice(Math.max(0, q - 10), q))) return 'else';
+      return `else of (${s.slice(q + 1, p)})`;
+    }
+    /** 名前の定義（var / let / const の右辺、function 宣言の本体）。無ければ null */
+    function defOfIdent(s, id) {
+      const e = String(id).replace(/\$/g, '\\$');
+      const v = new RegExp(`\\b(?:var|let|const)\\s+${e}\\s*=\\s*([^;\\n]+)`).exec(s);
+      if (v) return v[1].trim();
+      const f = new RegExp(`\\bfunction\\s+${e}\\s*\\(`).exec(s);
+      if (f) { const o = s.indexOf('{', f.index); if (o >= 0) return s.slice(o, Math.min(closeBrace(s, o) + 1, o + 400)); }
+      return null;
+    }
+    /** 条件の中の名前（プロパティ名・文字列・注釈を除く） */
+    function condIdents(t) {
+      const out = new Set();
+      for (const m of stripCondText(t).matchAll(/(^|[^\w$.])([A-Za-z_$][\w$]*)/g)) out.add(m[2]);
+      return [...out];
+    }
+    function decorateCond(s, t) {
+      const str = String(t);
+      if (/^(for|while|catch|with|\?|else|unknown:caller)$/.test(str)) return str;
+      const defs = condIdents(str).filter(id => !COND_NEUTRAL.has(id) && !STRUCT_CALLS.has(id)).map(id => [id, defOfIdent(s, id)]).filter(([, d]) => d).slice(0, 4);
+      return defs.length ? `${str} /* ${defs.map(([id, d]) => `${id} = ${d.replace(/\s+/g, ' ').slice(0, 200)}`).join('; ')} */` : str;
+    }
+    /** ループの変数（for (var key in …) / for (let i = 0 …) / .forEach(function (row) / (row) => / row =>） */
+    function loopVarsOf(s) {
+      const out = new Set();
+      const str = String(s || '');
+      for (const m of str.matchAll(/\bfor\s*\(\s*(?:var|let|const)?\s*([A-Za-z_$][\w$]*)\s*(?:in\b|of\b|=)/g)) out.add(m[1]);
+      for (const m of str.matchAll(/\.\s*(?:forEach|map|some|every|filter|find|findIndex|reduce|flatMap)\s*\(\s*(?:async\s+)?(?:function\s*[\w$]*\s*\(([^)]*)\)|\(([^)]*)\)\s*=>|([A-Za-z_$][\w$]*)\s*=>)/g)) {
+        for (const p of String(m[1] ?? m[2] ?? m[3] ?? '').split(',')) { const n = p.replace(/=.*$/, '').trim(); if (/^[A-Za-z_$][\w$]*$/.test(n)) out.add(n); }
+      }
+      return out;
+    }
+    /**
+     * 計画の条件（refs: 項目・値）を見ない条件か。ループ・hasOwnProperty・存在確認・別の項目だけなら true（どのステータスでも同じに通る）。
+     * 中身が分からないもの（else / 三項演算子 / 呼び出し元の不明な関数 / 定義の無い名前 = 関数の引数など）は false（条件の外とは言えない）
+     */
+    function blindCond(t, s, loopVars, refs, depth = 0) {
+      const str = String(t);
+      if (/^(for|while|catch|with)$/.test(str)) return true;
+      if (str === 'else' || str === '?' || /^unknown:/.test(str)) return false;
+      if (refs.some(r => r && str.includes(r))) return false;
+      const bare = stripCondText(str);
+      for (const m of bare.matchAll(/(?<![\w$.])([A-Za-z_$][\w$]*)\s*\(/g)) {
+        if (STRUCT_CALLS.has(m[1]) || COND_NEUTRAL.has(m[1])) continue;
+        const def = defOfIdent(s, m[1]);
+        if (!def || depth >= 2 || !blindCond(def, s, loopVars, refs, depth + 1)) return false;
+      }
+      for (const id of condIdents(str)) {
+        if (COND_NEUTRAL.has(id) || STRUCT_CALLS.has(id) || loopVars.has(id)) continue;
+        const def = defOfIdent(s, id);
+        if (!def || depth >= 2 || !blindCond(def, s, loopVars, refs, depth + 1)) return false;
+      }
+      return true;
+    }
+    /** ループと hasOwnProperty だけ（要件の条件が構造化されていないときに「条件なし」と同じに扱う狭い形） */
+    const structuralOnly = (conds) => conds.length > 0 && conds.map(t => String(t).replace(/\s*\/\*[\s\S]*?\*\/\s*$/, '')).every(t => /^(for|while)$/.test(t) || /^\s*!?\s*\(?\s*(?:[\w$.[\]'"`]+\.hasOwnProperty|Object\.prototype\.hasOwnProperty\.call)\s*\([^()]*\)\s*\)?\s*$/.test(t));
+    const pathsOfSite = (x) => (x.paths && x.paths.length ? x.paths : [x.conds]);
     /** Phase 21: コードがフィールドに対して行う操作（値の代入 value / 編集可否 disabled / エラー error / 表示切替 shown）。code → Set(kind) */
     function writeTargets(clean) {
       const s = String(clean || '');
@@ -11071,16 +11173,24 @@
       const baseText = g.strategy === 'EXTEND_EXISTING_JS' && existingSource && typeof existingSource.text === 'string' ? KTScan.stripCommentsOnly(existingSource.text) : '';
       // テーブルはセル（行のループの row.value[…] / テーブル内フィールド）を編集不可にする場所も、そのテーブルの制御として数える
       const tableSites = (text, code) => [...disableSites(text, code), ...(fieldsN.some(f => f.code === code && f.rawType === 'SUBTABLE') ? [...subtableCellSites(text, code), ...[...subtableOf.entries()].filter(([, p]) => p === code).flatMap(([ch]) => disableSites(text, ch))] : [])];
+      // Phase 21: 「条件の外」には、ループ・存在確認・別の項目だけの条件の中（計画の条件の項目・値を見ない）も含める（blindCond）。
+      //   名前付きの関数の中は呼び出し元ごとの経路（pathsOfSite）で見る。中身が分からない条件（関数の引数・else など）は確認に回す
+      const lvClean = loopVarsOf(clean);
+      const lvBase = baseText ? loopVarsOf(baseText) : new Set();
+      const plainCond = (t) => String(t).replace(/\s*\/\*[\s\S]*?\*\/\s*$/, '');
       for (const [code, cond] of planCond) {
         if (planFields.get(code) !== 'CONTROL') continue;
         const sites = tableSites(clean, code);
         const refs = condRefsOf(cond);
-        const unc = sites.filter(x => x.unconditional);
-        const baseUnc = baseText ? tableSites(baseText, code).some(x => x.unconditional) : false;
+        const blindPath = (x, text, lv) => (refs.length ? pathsOfSite(x).find(p => p.every(t => blindCond(t, text, lv, refs))) : null) || null;
+        const outside = (x, text, lv) => x.unconditional || !!blindPath(x, text, lv);
+        const unc = sites.filter(x => outside(x, clean, lvClean));
+        const baseUnc = baseText ? tableSites(baseText, code).some(x => outside(x, baseText, lvBase)) : false;
+        const where = (x) => { if (x.unconditional) return x.line; const p = blindPath(x, clean, lvClean) || []; return `${x.line}（囲む条件 ${p.length ? p.map(plainCond).join(' / ') : 'なし'} は ${refs.join(' / ')} を見ていません）`; };
         if (!sites.length) add('conditional-control', false, 'review', `${code} は「${cond}」のときだけ編集不可にする計画ですが、「.disabled = true」の設定が見つかりません（別の書き方なら、動作テスト環境で条件どおりか確かめてください）`);
-        else if (unc.length && !baseUnc) add('conditional-control', false, 'block', `${code} は「${cond}」のときだけ編集不可にする計画ですが、条件の外で編集不可にしています（${unc.map(x => x.line).join(' / ')}）。すべてのレコード・ステータスで編集できなくなります`);
+        else if (unc.length && !baseUnc) add('conditional-control', false, 'block', `${code} は「${cond}」のときだけ編集不可にする計画ですが、条件の外で編集不可にしています（${unc.map(where).join(' / ')}）。すべてのレコード・ステータスで編集できなくなります`);
         else if (unc.length) add('conditional-control', false, 'review', `${code} は既存のコードで条件なしに編集不可になっています（「${cond}」の条件と合うか確認してください）`);
-        else if (refs.length && !sites.every(x => x.conds.some(t => refs.some(r => String(t).includes(r))))) add('conditional-control', false, 'review', `${code} は条件の中で編集不可にしていますが、計画の条件「${cond}」（${refs.join(' / ')}）を見ているか確かめられません`);
+        else if (refs.length && !sites.every(x => pathsOfSite(x).every(p => p.some(t => refs.some(r => String(t).includes(r)))))) add('conditional-control', false, 'review', `${code} は条件の中で編集不可にしていますが、計画の条件「${cond}」（${refs.join(' / ')}）を見ているか確かめられません`);
         else add('conditional-control', true, 'info', `${code} は「${cond}」の条件の中でだけ編集不可にしています`);
       }
       const hardMismatch = mismatches.filter(m => ['ACCESS_ESCALATED', 'EXTRA_EVENT'].includes(m.code) || (m.code === 'EXTRA_FIELD_WRITE' && !offTarget.some(([code]) => m.items.includes(code))));
@@ -11109,7 +11219,8 @@
       if (/承認|ステータス|状態|場合|とき|時に|なら|以上|以下|超|未満/.test([c.requirement, g.summary].filter(Boolean).join(' '))) {
         // Phase 21: 早い return で除外する書き方（if (条件) { return event; } の後ろ）は条件つきとして扱う（siteConds）。
         //   実装仕様に条件（fields[].condition）があるフィールドは conditional-control が判定する（ここでは重ねない）
-        const uncondOf = (text) => [...writeTargets(text).entries()].filter(([, kinds]) => kinds.has('disabled')).map(([code]) => code).filter(code => disableSites(text, code).some(x => x.unconditional));
+        //   ループと hasOwnProperty だけに囲まれたもの（for (var key in row.value) { if (row.value.hasOwnProperty(key)) … }）も条件なしと同じ
+        const uncondOf = (text) => [...writeTargets(text).entries()].filter(([, kinds]) => kinds.has('disabled')).map(([code]) => code).filter(code => disableSites(text, code).some(x => x.unconditional || pathsOfSite(x).some(structuralOnly)));
         const baseUncond = g.strategy === 'EXTEND_EXISTING_JS' && existingSource && typeof existingSource.text === 'string' ? uncondOf(KTScan.stripCommentsOnly(existingSource.text)) : [];
         const newUncond = uncondOf(clean).filter(x => !baseUncond.includes(x) && !planCond.has(x));
         if (newUncond.length) add('unconditional-control', false, 'review', `次のフィールドを条件なしで編集不可にしています: ${newUncond.join(', ')}（if の外にあるため、すべてのレコード・ステータスで編集できなくなります）。要件の条件のときだけにするなら、既存の if ブロックの中に入れてください`);
@@ -11228,7 +11339,7 @@
     }
     const ACCESS_W = (acc) => Object.keys(acc || {}).filter(k => k === 'WRITE' || k === 'CONTROL' || k === 'SHOW_HIDE');
 
-    return { REVIEW_VERSION, STATUS, applyPatch, diffLines, diffText, diffHunks, checkSyntax, inspectHandlers, globalDeclarations, kintoneFieldOps, layoutSpaceIds, review, disableSites, subtableCellSites, siteConds, writeTargets, restCalls, condRefsOf, HOW_TO_CHECK };
+    return { REVIEW_VERSION, STATUS, applyPatch, diffLines, diffText, diffHunks, checkSyntax, inspectHandlers, globalDeclarations, kintoneFieldOps, layoutSpaceIds, review, disableSites, subtableCellSites, siteConds, blindCond, loopVarsOf, writeTargets, restCalls, condRefsOf, HOW_TO_CHECK };
   })();
 
   // ==========================================
