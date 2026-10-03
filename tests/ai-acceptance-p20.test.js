@@ -587,6 +587,44 @@ console.log('\n--- F31（CX-1 実機）. プロセス: 承認と差し戻しは�
 }
 
 // =========================================================
+console.log('\n--- F32 / F33（CX-1 実機）. 1 つの手順の説明に書かれた複数の設定・既存のステータスへ進む道が無くなる ---');
+{
+  const statusStep = (id, name) => step(id, 'ADD_PROCESS_STATUS', 'PROCESS_STATUS', name, { name, assignees: ['FIELD_ENTITY:owner'], assigneeType: 'ONE' });
+  // 実機の v2 の P3 と同じ形: spec は name / from / changeKind だけで、説明（details）に 2 つの分岐（遷移先・条件）を続けて書いた
+  const det = [['name', '申請する'], ['from', '未処理'], ['to', '部長承認待ち'], ['filterCond', 'amount >= "1000000"'], ['name', '申請する'], ['from', '未処理'], ['to', '課長承認待ち'], ['filterCond', 'amount < "1000000"']].map(([key, value]) => ({ key, value }));
+  const p = plan([
+    statusStep('P1', '部長承認待ち'), statusStep('P2', '課長承認待ち'),
+    step('P3', 'UPDATE_PROCESS', 'PROCESS_ACTION', '申請する', { name: '申請する', from: '未処理', changeKind: 'ACTION_CONDITION' }, { proposal: { summary: '申請するの遷移先を金額で部長承認待ち / 課長承認待ちに分ける', details: det } }),
+    step('P4', 'ADD_PROCESS_ACTION', 'PROCESS_ACTION', '承認する（部長）', { name: '承認する（部長）', from: '部長承認待ち', to: '完了' }, { dependsOn: ['P1'] }),
+    step('P5', 'ADD_PROCESS_ACTION', 'PROCESS_ACTION', '承認する（課長）', { name: '承認する（課長）', from: '課長承認待ち', to: '完了' }, { dependsOn: ['P2'] }),
+  ]);
+  const rv = reviewOf(p);
+  const s3 = rv.steps.find(x => x.stepId === 'P3');
+  const multi = s3.issues.find(i => i.code === 'STEP_MULTIPLE_SETTINGS');
+  assert(multi && multi.severity === 'high' && /課長承認待ち/.test(multi.message) && /amount < "1000000"/.test(multi.message) && /部長承認待ち/.test(multi.message), 'F32: 説明に遷移先・条件が 2 組 → STEP_MULTIPLE_SETTINGS（以前は 1 組目だけを黙って使い、2 組目は検証も表示もされなかった）');
+  const ar = KTPlanExecutor.applyReadiness(p, rv).find(a => a.stepId === 'P3');
+  assert(ar.apply === 'BLOCKED' && ar.reason === 'MULTIPLE_SETTINGS_IN_STEP', `F32: その手順は自動で反映しない（1 組目だけを反映すると 100 万円未満を申請できなくなる。依存の書き方に頼らない）: ${ar.apply} ${ar.reason}`);
+  // 同じ値の繰り返し（name / from）だけなら指摘しない
+  const same = plan([statusStep('P1', '部長承認待ち'), step('P2', 'UPDATE_PROCESS', 'PROCESS_ACTION', '申請する', { name: '申請する', from: '未処理', changeKind: 'ACTION_CONDITION' }, { dependsOn: ['P1'], proposal: { summary: '', details: [['to', '部長承認待ち'], ['filterCond', 'amount >= "1000000"'], ['遷移先', '部長承認待ち'], ['条件', 'amount >= "1000000"']].map(([key, value]) => ({ key, value })) } })]);
+  assert(!reviewOf(same).steps.find(x => x.stepId === 'P2').issues.some(i => i.code === 'STEP_MULTIPLE_SETTINGS'), 'F32: 同じ値の繰り返し（表記違いの同じ条件を含む）は指摘しない');
+  // 一覧の項目（通知先など）は行が分かれていても全部使う（2 行目を黙って捨てない）
+  const n = reviewOf(plan([step('P1', 'ADD_NOTIFICATION', 'NEW_SETTING', '高額案件', { name: '高額案件' }, { proposal: { summary: '', details: [['通知先', 'FIELD_ENTITY:owner'], ['通知先', 'CREATOR'], ['条件', 'amount >= "1000000"']].map(([key, value]) => ({ key, value })) } })])).steps.find(x => x.stepId === 'P1');
+  assert(n.spec.targets.length === 2 && !n.issues.some(i => i.code === 'STEP_MULTIPLE_SETTINGS'), `F32: 通知先の行が 2 つ → 2 人とも通知先（以前は 1 行目だけ）: ${JSON.stringify(n.spec.targets)}`);
+
+  // F33: 「申請する」の遷移先を新しいステータスへ変えると、既存の「承認待ち」へ進むアクションが無くなる（実機では指摘が無かった）
+  const orphan = plan([
+    statusStep('P1', '部長承認待ち'),
+    step('P2', 'UPDATE_PROCESS', 'PROCESS_ACTION', '申請する', { name: '申請する', from: '未処理', to: '部長承認待ち', changeKind: 'ACTION_CONDITION' }, { dependsOn: ['P1'] }),
+    step('P3', 'ADD_PROCESS_ACTION', 'PROCESS_ACTION', '承認する（部長）', { name: '承認する（部長）', from: '部長承認待ち', to: '完了' }, { dependsOn: ['P1'] }),
+  ]);
+  const w = reviewOf(orphan).warnings.find(x => x.code === 'STATUS_ORPHANED');
+  assert(w && /「承認待ち」/.test(w.message) && /残/.test(w.message) && w.stepIds.includes('P2'), `F33: 既存の「承認待ち」へ進むアクションが無くなる → 指摘（今あるレコードは残る・新しいレコードは入らない）: ${w && w.message}`);
+  // 既存のステータスへ進む道が残るなら指摘しない（承認待ち → 部長承認待ちへ回す）
+  const kept = plan([statusStep('P1', '部長承認待ち'), step('P2', 'ADD_PROCESS_ACTION', 'PROCESS_ACTION', '部長へ回す', { name: '部長へ回す', from: '承認待ち', to: '部長承認待ち', filterCond: 'amount >= "1000000"' }, { dependsOn: ['P1'] }), step('P3', 'ADD_PROCESS_ACTION', 'PROCESS_ACTION', '承認する（部長）', { name: '承認する（部長）', from: '部長承認待ち', to: '完了' }, { dependsOn: ['P1'] })]);
+  assert(!reviewOf(kept).warnings.some(x => x.code === 'STATUS_ORPHANED'), 'F33: 既存のステータスへ進む道が残る計画では指摘しない');
+}
+
+// =========================================================
 console.log('\n--- U5. ［新しい会話］: 続けて書いた別の依頼が今の計画の修正にならないよう、画面から会話を始め直せる ---');
 {
   const HEALTH = { ok: true, supportedContractVersions: ['2.0', '2.1'], entitlements: [{ product: 'toolkit', features: ['assistant-qa', 'change-planner'] }], registry: { toolkit: { 'assistant-qa': { implemented: true, promptVersions: ['1'] }, 'change-planner': { implemented: true, promptVersions: ['1'] } } }, usage: { monthlyLimit: 200, usedThisMonth: 1 } };

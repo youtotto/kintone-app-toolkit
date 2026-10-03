@@ -6070,7 +6070,7 @@
       CUSTOMIZATION_REQUIRED: { simulate: false, validate: false, defaultSafety: 'PLAN_ONLY', execution: 'NONE', changeType: 'NO_CHANGE', kind: 'JS' },
     });
     /** 高リスクの変更（安全分類を REVIEW_REQUIRED に上げ、status は NEEDS_CONFIRMATION） */
-    const HIGH_RISK = ['TYPE_CHANGE', 'OPTIONS_REMOVED', 'EXISTING_PATH_RESTRICTED', 'ACL_CHANGE', 'LOOKUP_MAPPING_OVERWRITE', 'NOTIFICATION_EVENTS_REMOVED', 'NOTIFICATION_RECIPIENTS_REMOVED', 'REMINDER_BASE_FIELD_CHANGE', 'REMINDER_RECIPIENTS_REMOVED', 'EXECUTABLE_USER_CHANGE', 'APP_ACTION_ENTITIES_REMOVED'];
+    const HIGH_RISK = ['TYPE_CHANGE', 'OPTIONS_REMOVED', 'EXISTING_PATH_RESTRICTED', 'ACL_CHANGE', 'LOOKUP_MAPPING_OVERWRITE', 'NOTIFICATION_EVENTS_REMOVED', 'NOTIFICATION_RECIPIENTS_REMOVED', 'REMINDER_BASE_FIELD_CHANGE', 'REMINDER_RECIPIENTS_REMOVED', 'EXECUTABLE_USER_CHANGE', 'APP_ACTION_ENTITIES_REMOVED', 'STEP_MULTIPLE_SETTINGS'];
     const KINTONE_FIELD_TYPES = ['SINGLE_LINE_TEXT', 'MULTI_LINE_TEXT', 'RICH_TEXT', 'NUMBER', 'CALC', 'CHECK_BOX', 'RADIO_BUTTON', 'DROP_DOWN', 'MULTI_SELECT', 'DATE', 'TIME', 'DATETIME', 'FILE', 'LINK', 'USER_SELECT', 'ORGANIZATION_SELECT', 'GROUP_SELECT', 'LOOKUP', 'REFERENCE_TABLE', 'SUBTABLE', 'GROUP', 'SPACER', 'LABEL', 'HR'];
     const OPTION_TYPES = ['CHECK_BOX', 'RADIO_BUTTON', 'DROP_DOWN', 'MULTI_SELECT'];
     const ENTITY_TYPES = ['USER', 'GROUP', 'ORGANIZATION', 'FIELD_ENTITY', 'CREATOR', 'CUSTOM_FIELD'];
@@ -6357,7 +6357,12 @@
       for (const r of model.acl.field) push(r.entities);
       return out;
     }
-    function normalizeSpec(step, model, proposedMap) {
+    // Phase 20（CX-1 実機）: 説明（details）で同じ項目が違う値で繰り返す = 1 つの手順に複数の設定（「申請する」の分岐 2 組を 1 手順に書いた）
+    const DETAIL_SCALAR_KEYS = ['name', 'from', 'to', 'filterCond', 'timingField', 'daysLater', 'time', 'sort', 'sourceApp', 'keyField', 'fieldType', 'destApp'];
+    const DETAIL_LIST_KEYS = ['assignees', 'targets', 'events', 'fields', 'options', 'entities', 'addPickerFields', 'mappings', 'addMappings', 'actionMappings'];
+    const sameDetailValue = (k, a, b) => (k === 'filterCond' ? normCond(String(a).replace(/^(条件|condition)[:：]\s*/i, '')) === normCond(String(b).replace(/^(条件|condition)[:：]\s*/i, '')) : norm(a) === norm(b));
+    /** @param {object} [notes] 出力: notes.multiple = [{ key, values[] }]（説明に同じ項目が違う値で複数ある。1 つ目だけを spec に使う） */
+    function normalizeSpec(step, model, proposedMap, notes = null) {
       const spec = {};
       const s = step.spec && typeof step.spec === 'object' ? step.spec : null;
       // AI が「なし」「none」「—」などを値として書くことがある（staging E2E で filterCond: "なし"）。空と同じ意味なので捨てる
@@ -6377,21 +6382,32 @@
           else put(k, String(v).trim());
         }
       }
+      // 説明文から読んだ項目（構造化した値が無いもの）。同じ項目の 2 行目以降: 一覧の項目は合わせて使い、1 つの値の項目は違う値なら notes.multiple に返す
+      //   （以前は 2 行目以降を黙って捨て、2 つ目の分岐は検証も表示もされなかった）
+      const fromDetails = new Map();   // canon → 1 つ目の値（説明文の文字列）
+      const multiple = new Map();
       for (const d of (step.proposal?.details || [])) {
         const k = keyOf(d.key);
-        if (!k || spec[k] != null) continue;
+        if (!k) continue;
+        const again = fromDetails.has(k);
+        if (spec[k] != null && !again) continue;   // 構造化した値を優先
         // Phase 20（実機）: 構造化した取得項目（mappings / addMappings のどちらか）があれば、説明文から取得項目を作らない
         //   （説明文の「address → 新規フィールド customer_address」を addMappings として二重に取り込み、コピー先が無いと誤判定した）
-        if ((k === 'mappings' || k === 'addMappings') && (spec.mappings != null || spec.addMappings != null)) continue;
+        if (!again && (k === 'mappings' || k === 'addMappings') && (spec.mappings != null || spec.addMappings != null)) continue;
         const v = String(d.value ?? '').trim();
         if (!v || isPlaceholder(v)) continue;   // details の「なし」も捨てる（spec で捨てた項目を details から拾い直さない）
         const cleanRef = (x) => String(x).replace(/^新規(フィールド|項目)\s*/, '').replace(/[（(][^）)]*[）)]\s*$/, '').trim();   // 説明文の飾り（新規フィールド X・X（新規追加））を除く
-        if (k === 'mappings' || k === 'addMappings') spec[k] = splitList(v).map(x => { const m = x.match(/^(.+?)\s*(?:→|->|=>|:|：)\s*(.+)$/); return m ? { from: cleanRef(m[1]), to: cleanRef(m[2]) } : { from: cleanRef(x), to: '' }; });
-        else if (k === 'actionMappings') spec[k] = splitList(v).map(x => { const m = x.match(/^(.+?)\s*(?:→|->|=>|:|：)\s*(.+)$/); return actionMappingOf(m ? { srcField: m[1].trim(), destField: m[2].trim() } : { srcField: x, destField: '' }); }).filter(Boolean);
-        else if (['assignees', 'targets', 'events', 'fields', 'options', 'entities', 'addPickerFields'].includes(k)) { const list = dropPh(splitList(v)); if (list.length) spec[k] = list; }
-        else if (k === 'required') spec.required = /^(true|yes|必須|はい)$/i.test(v) ? true : /^(false|no|任意|いいえ)$/i.test(v) ? false : undefined;
-        else spec[k] = v;
+        let val;
+        if (k === 'mappings' || k === 'addMappings') val = splitList(v).map(x => { const m = x.match(/^(.+?)\s*(?:→|->|=>|:|：)\s*(.+)$/); return m ? { from: cleanRef(m[1]), to: cleanRef(m[2]) } : { from: cleanRef(x), to: '' }; });
+        else if (k === 'actionMappings') val = splitList(v).map(x => { const m = x.match(/^(.+?)\s*(?:→|->|=>|:|：)\s*(.+)$/); return actionMappingOf(m ? { srcField: m[1].trim(), destField: m[2].trim() } : { srcField: x, destField: '' }); }).filter(Boolean);
+        else if (DETAIL_LIST_KEYS.includes(k)) { val = dropPh(splitList(v)); if (!val.length) continue; }
+        else if (k === 'required') val = /^(true|yes|必須|はい)$/i.test(v) ? true : /^(false|no|任意|いいえ)$/i.test(v) ? false : undefined;
+        else val = v;
+        if (!again) { spec[k] = val; if (spec[k] != null) fromDetails.set(k, v); continue; }
+        if (DETAIL_LIST_KEYS.includes(k)) { const have = new Set(spec[k].map(x => JSON.stringify(x))); spec[k] = [...spec[k], ...val.filter(x => !have.has(JSON.stringify(x)))]; }
+        else if (DETAIL_SCALAR_KEYS.includes(k)) { const vals = multiple.get(k) || [fromDetails.get(k)]; if (!vals.some(x => sameDetailValue(k, x, v))) multiple.set(k, [...vals, v]); }
       }
+      if (notes && multiple.size) notes.multiple = [...multiple].map(([key, values]) => ({ key, values }));
       if (spec.events) spec.events = spec.events.map(e => { const n = norm(e); const exact = NOTIFY_EVENTS.find(x => norm(x) === n); if (exact) return exact; const hit = EVENT_SYNONYMS.find(([, syn]) => syn.some(s => n.includes(norm(s)))); return hit ? hit[0] : e; });
       if (spec.filterCond) spec.filterCond = String(spec.filterCond).replace(/^(条件|condition)[:：]\s*/i, '');
       // Phase 12: 作業者の指定形式と変更種別は語彙に揃える（AI の自由文を API 値に使わない。語彙外は Review が指摘する）
@@ -6542,6 +6558,18 @@
       }
       // ---- 3. plan 内部の競合（複数 step の組み合わせ）----
       planLevelConflicts(steps, results, model, conflicts);
+      // ---- 3b. 既存のステータスへ進むアクションが計画で無くなる（Phase 20 CX-1: 「申請する」の遷移先を新しいステータスへ変え、
+      //      既存の「承認待ち」へ入る道が無くなったのに指摘が無かった。最初のステータスは除く）----
+      {
+        const firstOf = (proc) => [...(proc.states || [])].sort((a, b) => Number(a.index ?? 0) - Number(b.index ?? 0))[0]?.name;
+        const inbound = (proc, name) => (proc.actions || []).some(a => a.to === name && a.from !== name);
+        const first = firstOf(before.process);
+        for (const s of (before.process.states || [])) {
+          if (s.name === first || !inbound(before.process, s.name) || inbound(model.process, s.name) || !model.process.states.some(x => x.name === s.name)) continue;
+          const stepIds = [...results.values()].filter(r => r.diff.target.kind === 'PROCESS_ACTION' && before.process.actions.some(a => a.name === r.diff.target.id && a.to === s.name)).map(r => r.stepId);
+          warnings.push({ code: 'STATUS_ORPHANED', severity: 'medium', stepIds, message: `計画の後、既存のステータス「${s.name}」へ進むアクションが無くなります。今「${s.name}」にあるレコードはそのまま残り、新しいレコードは入りません（使わなくなるステータスの削除は Toolkit では行わず手作業です）` });
+        }
+      }
       // ---- 3a. 条件の分割判定（Phase 12 §10）。計画が追加・変更したアクションのある遷移元だけ警告する ----
       const partition = partitionCheck(model.process);
       for (const item of partition) {
@@ -6799,7 +6827,15 @@
         if (!cap.simulate) { r.diff.human.unshift(`${step.title || step.actionType}（仮適用なし）`); return r; }
       }
       if (r.status === STATUS.INVALID) return r;
-      const spec = normalizeSpec(step, model, proposedMap);
+      const specNotes = {};
+      const spec = normalizeSpec(step, model, proposedMap, specNotes);
+      // Phase 20（CX-1 実機）: 説明に複数の設定（遷移先・条件の 2 組など）→ 1 組目だけを検証・反映すると残りが黙って消える。手順ごとに分けてもらう
+      if (specNotes.multiple) {
+        const LABEL = { name: '名前', from: '遷移元', to: '遷移先', filterCond: '条件', timingField: '基準日', daysLater: '日数', time: '時刻', sort: '並び順', sourceApp: '参照元アプリ', keyField: 'キー', fieldType: '種類', destApp: 'コピー先アプリ' };
+        const list = specNotes.multiple.map(m => `${LABEL[m.key] || m.key} ${m.values.map(x => `「${x}」`).join(' / ')}`).join('、');
+        issue('STEP_MULTIPLE_SETTINGS', 'high', `この手順の説明に、1 つの手順では表せない複数の設定が書かれています（${list}）。Toolkit は 1 つ目の値だけを検証し、2 つ目以降は検証も反映もしません。設定ごとに手順を分けるよう計画の修正を依頼してください`, { values: specNotes.multiple });
+        if (STATUS_RANK[r.status] < STATUS_RANK[STATUS.NEEDS_CONFIRMATION]) r.status = STATUS.NEEDS_CONFIRMATION;
+      }
       // 条件式・並び順の中の NEW_FIELD_n を、先行 step で仮適用した実コードに置き換える（未適用なら実行不可）
       for (const k of ['filterCond', 'sort']) {
         if (typeof spec[k] !== 'string') continue;
@@ -9219,6 +9255,8 @@
         else if (r.status === KTPlanReview.STATUS.INVALID || r.status === KTPlanReview.STATUS.BLOCKED_BY_DEPENDENCY || r.safety === KTPlanReview.SAFETY.BLOCKED) set(STEP.BLOCKED, 'REVIEW_BLOCKED', 'Review で実行不可と判定されています');
         else if (r.safety === KTPlanReview.SAFETY.PLAN_ONLY) set(STEP.UNSUPPORTED, 'PLAN_ONLY', '計画のみ（自動反映の対象外）');
         else if ((r.issues || []).some(i => i.code === 'COND_UNKNOWN_FUNCTION' || i.code === 'COND_NOT_EXPRESSION' || i.code === 'COND_INVALID')) set(STEP.BLOCKED, 'INVALID_CONDITION', '条件式が kintone で評価できないため反映しません（計画の条件式を直してください）');
+        // Phase 20（CX-1 実機）: 説明に複数の設定がある手順は 1 つ目しか検証していない（反映すると残りの設定が消えた計画になる）
+        else if ((r.issues || []).some(i => i.code === 'STEP_MULTIPLE_SETTINGS')) set(STEP.BLOCKED, 'MULTIPLE_SETTINGS_IN_STEP', '1 つの手順に複数の設定が書かれているため反映しません（設定ごとに手順を分けるよう計画を直してください）');
         else if (!cap || !cap.previewExecute || !HANDLERS[step.actionType]) set(STEP.UNSUPPORTED, 'PREVIEW_NOT_SUPPORTED', 'Toolkit からは自動で反映できません（計画のみ）');
         else if (step.actionType === 'ADD_PROCESS_STATUS' && (review?.conflicts || []).some(c => c.code === 'STATUS_UNREACHABLE' && (c.stepIds || []).includes(id))) set(STEP.BLOCKED, 'STATUS_UNREACHABLE', 'このステータスへ遷移するアクションが計画に無く孤立するため反映しません（遷移するアクションの step を足してください）');
         else {
