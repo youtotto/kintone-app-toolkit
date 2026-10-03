@@ -10181,7 +10181,8 @@
       else if (dupWithExisting.length) add('duplicate-handler', false, 'review', `既存ファイルが既に登録しているイベントに別の handler を足します: ${dupWithExisting.join(', ')}（同じイベントの handler は登録順に動きます）`);
       else add('duplicate-handler', true, 'info', '重複した handler はありません');
       // ---- 9. 既存 JS との競合（統合先以外の既存ファイルが同じフィールドを WRITE / CONTROL）----
-      const files = KTScan.summarizeFiles(scan, data).filter(f => f.analyzed && !(existingSource && f.name === existingSource.name && f.target === existingSource.target));
+      // 同じ platform（PC / モバイル）のファイルだけが競合し得る（実機: モバイル JS への統合で PC の fieldOnOff.js が競合扱いになった）
+      const files = KTScan.summarizeFiles(scan, data).filter(f => f.analyzed && f.target === target && !(existingSource && f.name === existingSource.name && f.target === existingSource.target));
       const conflicts = [];
       for (const f of files) {
         for (const fld of addedScan.fields) {
@@ -10191,7 +10192,9 @@
       }
       add('existing-conflict', !conflicts.length, 'review', conflicts.length ? `既存 JS と同じフィールドを制御します（JS_FIELD_CONFLICT）: ${conflicts.map(x => `${x.file}（${x.code}: ${x.theirs.join('/')}）`).join(', ')}` : '既存 JS との書き換え・制御の重なりはありません');
       // ---- 10. platform ----
-      const mobileEvents = codeEvents.filter(e => KTJsCatalog.isMobileEvent(e.name)).length;
+      // 既存 handler の中への追加（追加分に kintone.events.on が無い）は、最終的なファイルのイベントで platform を判定する
+      const platformEvents = codeEvents.length ? codeEvents : fileEvents;
+      const mobileEvents = platformEvents.filter(e => KTJsCatalog.isMobileEvent(e.name)).length;
       if (Array.isArray(c.platform) && c.platform.includes('mobile') && !mobileEvents) add('platform', false, 'review', '計画はモバイルも対象ですが、mobile.app.record.* のイベントがありません');
       else if (Array.isArray(c.platform) && c.platform.length && !c.platform.includes('mobile') && mobileEvents) add('platform', false, 'review', '計画は PC だけですが、モバイルのイベントが含まれています');
       else add('platform', true, 'info', `対象 ${(c.platform || []).join(' / ') || '—'} と整合`);

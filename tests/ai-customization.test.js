@@ -312,6 +312,12 @@ console.log('\n--- §52-2. KTCodeReview: 構文 / 未知イベント / 未知フ
   // 既存 JS との競合（統合先以外）
   const conflict = KTCodeReview.review({ generated: genNew(), customization: NEW_JS_CUST(), plan: PLAN_NEW_JS.plan, data: INPUTS.data, scan: INPUTS.scan, existingSource: null });
   assert(conflict.status === 'REVIEW_REQUIRED' && !check(conflict, 'existing-conflict').ok && /fieldOnOff\.js/.test(check(conflict, 'existing-conflict').message), '新規 JS が既存 fieldOnOff.js と同じ amount を制御: JS_FIELD_CONFLICT（確認が必要）');
+  // 実機（Phase 17 E2E C）: モバイル JS への統合（patch。追加分に handler なし）では、PC の既存 JS は競合にならず、platform は最終ファイルのイベントで判定する
+  const MOBILE_LOCK_SRC = ['(function () {', "  'use strict';", "  kintone.events.on('mobile.app.record.edit.show', function (event) {", "    event.record['owner'].disabled = true;", '    return event;', '  });', '})();'].join(String.fromCharCode(10));
+  const mobCust = { customizationId: 'C1', requirement: '承認待ちは金額も編集不可', strategy: 'EXTEND_EXISTING_JS', platform: ['mobile'], events: ['mobile.app.record.edit.show'], fields: [{ code: 'amount', access: 'CONTROL' }], apis: [], existingFiles: [{ name: 'mobileLock.js', target: 'mobile' }] };
+  const mobPatch = { baseHash: hash(MOBILE_LOCK_SRC), operations: [{ type: 'INSERT_AFTER', anchor: "    event.record['owner'].disabled = true;", content: ["    if (event.record['ステータス'].value === '承認待ち') {", "      event.record['amount'].disabled = true;", '    }'].join(String.fromCharCode(10)) }] };
+  const mobRv = KTCodeReview.review({ generated: { strategy: 'EXTEND_EXISTING_JS', targetFile: 'mobileLock.js', summary: 'm', code: mobPatch.operations[0].content, patch: mobPatch, events: ['mobile.app.record.edit.show'], fields: [{ code: 'amount', access: 'CONTROL' }], apis: [] }, customization: mobCust, plan: PLAN_HYBRID.plan, data: INPUTS.data, scan: INPUTS.scan, existingSource: { name: 'mobileLock.js', target: 'mobile', text: MOBILE_LOCK_SRC } });
+  assert(mobRv.status === 'OK' && check(mobRv, 'existing-conflict').ok && check(mobRv, 'platform').ok, `モバイル JS への統合: PC の fieldOnOff.js は競合にならず、platform は最終ファイルの mobile イベントで整合（${(mobRv.checks || []).filter(c => !c.ok).map(c => c.name).join(',') || 'すべて ✓'}）`);
   // platform
   const mobilePlan = KTCodeReview.review({ generated: genNew(), customization: { ...NEW_JS_CUST(), platform: ['desktop', 'mobile'] }, plan: PLAN_NEW_JS.plan, data: INPUTS_PLAIN.data, scan: INPUTS_PLAIN.scan });
   assert(!check(mobilePlan, 'platform').ok, '計画はモバイルも対象なのに mobile.* のイベントが無い: 確認が必要');
