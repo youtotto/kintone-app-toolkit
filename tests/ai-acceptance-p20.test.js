@@ -460,7 +460,8 @@ console.log('\n--- CX-2a / CX-7 / XA-5（再実行）. 通知の種類・未確�
   assert(sAmb.status === 'NEEDS_CONFIRMATION' && sAmb.issues.some(i => i.code === 'NOTIFICATION_SCOPE_AMBIGUOUS' && i.severity === 'medium') && !sAmb.issues.some(i => i.code === 'NOTIFICATION_EVENTS_IGNORED') && /通知（種類 未定）/.test(sAmb.diff.human[0]) && aAmb.apply === 'MANUAL' && aAmb.reason === 'NOTIFICATION_SCOPE_AMBIGUOUS', 'CX-2a / CX-7: 条件式とイベントの両方 → Review も要確認（種類 未定）。反映の判定（MANUAL・NOTIFICATION_SCOPE_AMBIGUOUS）と食い違わない');
   // 受信時: 「ステータスの更新」＋「ステータス in (…)」だけはレコードの条件通知として直す（意味が一致する）
   {
-    const m = mountWith(respOf('承認されたら担当者に通知したい', [step('P1', 'ADD_NOTIFICATION', 'NEW_SETTING', '承認済み通知', { name: '承認済み通知', filterCond: 'ステータス = "承認済み"', events: ['statusChanged'], targets: ['FIELD_ENTITY:owner'] })]));
+    // 実機（CX-2a 3 回目）と同じ形: 説明文（details）にも「イベント: statusChanged」がある（Review は構造化した値が空だと説明文から取り込む）
+    const m = mountWith(respOf('承認されたら担当者に通知したい', [step('P1', 'ADD_NOTIFICATION', 'NEW_SETTING', '承認済み通知', { name: '承認済み通知', filterCond: 'ステータス = "承認済み"', events: ['statusChanged'], targets: ['FIELD_ENTITY:owner'] }, { proposal: { summary: '承認済みステータスに変更されたときに担当者フィールドへ通知を送る設定を追加します。', details: [{ key: '通知名', value: '承認済み通知' }, { key: '通知先', value: 'FIELD_ENTITY:owner' }, { key: 'イベント', value: 'statusChanged' }, { key: '条件式', value: 'ステータス = "承認済み"' }] } })]));
     await ticks();
     await m.panel.send('承認されたら担当者に通知したい');
     const v = m.panel.conversation().activePlan();

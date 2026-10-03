@@ -13916,6 +13916,8 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
           const isStatus = (code) => (fields[code] ? fields[code].type === 'STATUS' : KTQueryCheck.SYSTEM_CODES[code] === 'STATUS');
           if (qc.ok && qc.conds.length && qc.conds.every(c => c.op === 'in' && isStatus(c.field)) && qc.logical !== 'or') {
             st.spec.events = [];
+            // 説明文（details）の「イベント: statusChanged」も外す（Review は構造化した値が空だと説明文から取り込むため。実機で正規化が戻された）
+            if (st.proposal && Array.isArray(st.proposal.details)) st.proposal.details = st.proposal.details.filter(d => !(d && /^(events?|イベント|通知イベント|trigger|タイミング|通知タイミング)$/i.test(String(d.key ?? '').trim())));
             st.toolkitNotes = [...(Array.isArray(st.toolkitNotes) ? st.toolkitNotes : []), { code: 'NOTIFICATION_EVENTS_DROPPED', message: `イベント（statusChanged: ステータスの更新）と条件式「${st.spec.filterCond}」の両方が書かれていました。そのステータスになったときに届く「レコードの条件通知」として扱います（イベントは外しました）` }];
           }
         }
