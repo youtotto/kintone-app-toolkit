@@ -146,7 +146,8 @@ console.log('\n--- 1. KTAiConversation.classifyIntent（決定的規則） ---')
   assert(cls('ありがとう') === I.GENERAL && cls('') === I.GENERAL, 'GENERAL: 挨拶・空');
   // 実行済みの計画
   const executed = { activePlan: { ...v1, status: 'EXECUTED' } };
-  assert(cls('通知はいらない', executed) === I.REVISE_PLAN && KTAiConversation.classifyIntent('通知はいらない', executed).revisable === false, '反映済みの計画への「修正だけ」の文は intent REVISE_PLAN（revisable false。送信側が作り直しを案内する）');
+  // Phase 21（実機 §2）: 反映済みの計画の後は、修正の文・計画の語に触れる依頼も新しい計画（以前は REVISE →「改めて入力」→ 入れ直しても同じ判定で先へ進めなかった）
+  assert(cls('通知はいらない', executed) === I.PLAN && KTAiConversation.classifyIntent('通知はいらない', executed).reason === 'NEW_PLAN_AFTER_EXECUTION', '反映済みの計画への「修正だけ」の文は新しい計画（基準は反映後の動作テスト環境）');
   assert(cls('顧客マスタから住所と電話番号も取って', executed) === I.PLAN && cls('顧客マスタから住所と電話番号も取って', { activePlan: { ...v1, status: 'ROLLED_BACK' } }) === I.PLAN, '反映済み / 戻し済みの計画のあとの新しい要望は新しい計画（実機: 「〜も取って」が修正扱いになっていた）');
   assert(KTAiConversation.planTerms(PLAN_V1.plan).includes('更新状況') && KTAiConversation.planTerms(PLAN_V1.plan).includes('担当者別'), 'planTerms: 新規フィールドのラベル・手順の対象');
 }
@@ -209,7 +210,7 @@ console.log('\n--- 2. KTAiConversation.create（fake services。履歴は送ら�
   const r11 = await c.send('やっぱり元に戻して');
   assert(r11.intent === 'REQUEST_ROLLBACK' && c.messages()[c.messages().length - 1].data.kind === 'rollback-ready' && c.messages()[c.messages().length - 1].data.executionId === 'ex_1', 'REQUEST_ROLLBACK → 「変更前の状態へ戻せます」（即 Rollback しない）');
   const r12 = await c.send('通知はいらない');
-  assert(r12.intent === 'REVISE_PLAN' && r12.ok === false && /反映済み/.test(c.messages()[c.messages().length - 1].text) && c.planHistory().length === 2, '反映済みの計画は修正しない（AI を呼ばず、新しい計画として作り直す案内）');
+  assert(r12.intent === 'PLAN' && r12.reason === 'NEW_PLAN_AFTER_EXECUTION' && c.messages().some(m => m.data && m.data.kind === 'new-plan-after-execution' && /反映済み/.test(m.text) && /新しい計画として作ります/.test(m.text)) && log[log.length - 1][0] === 'plan' && log[log.length - 1][1] === '通知はいらない' && !log[log.length - 1][2] && c.planHistory().length === 3 && v2.status === 'EXECUTED', '反映済みの計画は修正しない: 新しい計画として作る（旧計画は EXECUTED のまま・何を基準にするかを先に伝える）');
   c.noteExecution({ stage: 'rollback-confirm', prepared: exec.prepared, execution: exec.execution, rollback: { status: 'PREPARED', steps: [] } });
   c.noteExecution({ stage: 'rolled-back', prepared: exec.prepared, execution: exec.execution, rollback: { status: 'ROLLED_BACK_VERIFIED', steps: [{ stepId: 'R1', status: 'ROLLBACK_VERIFIED' }] } });
   assert(c.messages().filter(m => m.type === 'ROLLBACK').length === 1 && v2.status === 'ROLLED_BACK' && c.state.activeExecution.rolledBack === true && /変更前の状態に戻しました/.test(c.messages()[c.messages().length - 1].text), 'rollback → ROLLBACK メッセージ 1 件・rolled-back → 計画は ROLLED_BACK・通知');

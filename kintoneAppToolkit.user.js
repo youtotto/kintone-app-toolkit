@@ -13825,9 +13825,12 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
       }
       // 3) 進める（「全部承認」「そのまま実行」等も含む。承認・最終確認にはならない）
       if (RE.preview.test(t) && !(q && RE.questionWord.test(t))) return plan ? { intent: INTENT.REQUEST_PREVIEW, reason: 'PREVIEW_WORDS' } : { intent: INTENT.GENERAL, reason: 'NO_PLAN' };
-      // 4) 計画の修正（現在の計画の語に触れる、または修正の動詞）。反映済み / 戻し済みの計画は、その計画の語に触れるか「修正だけ」の文
-      //    （既存 / いらない / ではなく 等）のときだけ REVISE_PLAN（送信側で「作り直し」を案内する）。それ以外の新しい要望は新しい計画（6）へ
-      if (plan && (canRevise ? (RE.reviseVerb.test(t) || mentionsPlan(t, plan.plan)) : (mentionsPlan(t, plan.plan) || RE.reviseOnly.test(t))) && !(q && !RE.reviseVerb.test(t))) return { intent: INTENT.REVISE_PLAN, reason: mentionsPlan(t, plan.plan) ? 'MENTIONS_PLAN' : 'REVISE_VERB', revisable: canRevise };
+      // 4) 計画の修正（現在の計画の語に触れる、または修正の動詞）。修正できる計画（ACTIVE / STALE）だけ。
+      //    Phase 21（実機 §2）: 反映済み / 戻し済みの計画の後は、その計画の語（追加したフィールドの名前など）に触れる依頼も新しい計画（6）にする。
+      //    以前は REVISE_PLAN →「改めて入力してください」と案内し、同じ依頼を入れ直すとまた同じ判定になって先へ進めなかった
+      //    （「顧客区分が既存のときは紹介元を隠して」を 2 回送っても計画にならなかった）。新しい計画は最新の動作テスト環境（反映した変更を含む）が基準
+      if (plan && canRevise && (RE.reviseVerb.test(t) || mentionsPlan(t, plan.plan)) && !(q && !RE.reviseVerb.test(t))) return { intent: INTENT.REVISE_PLAN, reason: mentionsPlan(t, plan.plan) ? 'MENTIONS_PLAN' : 'REVISE_VERB', revisable: canRevise };
+      if (plan && !canRevise && (mentionsPlan(t, plan.plan) || RE.reviseOnly.test(t)) && !q) return { intent: INTENT.PLAN, reason: 'NEW_PLAN_AFTER_EXECUTION' };
       // 5) 曖昧（「これどう？」）
       if (RE.ambiguous.test(t)) return plan ? { intent: INTENT.AMBIGUOUS, reason: 'VAGUE_REFERENCE', choices: [INTENT.EXPLAIN_PLAN, ...(review ? [INTENT.EXPLAIN_REVIEW] : []), INTENT.REQUEST_PREVIEW] } : { intent: INTENT.GENERAL, reason: 'VAGUE_NO_PLAN' };
       // 6) 実現したいこと（計画）。計画があり、その計画の語に触れないなら「修正か新規か」を聞く
@@ -14078,6 +14081,11 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
             }
             case INTENT.DISCUSS_JS:
             case INTENT.PLAN: {
+              // Phase 21: 反映済み（または戻し済み）の計画の後の依頼は新しい計画。何を基準にするかを先に伝える（反映した変更は動作テスト環境にあるものとして扱う）
+              const prev = state.activePlan;
+              if (prev && (prev.status === PLAN_STATUS.EXECUTED || prev.status === PLAN_STATUS.ROLLED_BACK) && (cls.reason === 'NEW_PLAN_AFTER_EXECUTION' || cls.reason === 'DESIRE_AFTER_EXECUTION')) {
+                toolkit(`${planLabel(prev)}は${prev.status === PLAN_STATUS.ROLLED_BACK ? '動作テスト環境へ反映したあと元に戻しました' : '動作テスト環境へ反映済みです'}。この依頼は新しい計画として作ります（基準は今の動作テスト環境${prev.status === PLAN_STATUS.ROLLED_BACK ? '' : '。反映した変更を含みます'}）。`, { kind: 'new-plan-after-execution', planId: prev.planId, version: prev.version });
+              }
               loading = push(MSG.LOADING, ROLE.ASSISTANT, state.subject ? LOADING_TEXT.DISCUSS_JS : LOADING_TEXT.PLAN, { intent: cls.intent });
               const r = await services.plan({ goal: t, signal, ...(state.subject ? { subject: state.subject } : {}) });
               if (late()) { discard(); break; }

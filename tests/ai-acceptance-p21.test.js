@@ -524,6 +524,17 @@ console.log('\n--- G9 / G10. Generator Context の欠落（モデル比較の候
   assert(tableReq.registration.confirmations.some(x => x.code === 'requirement-scope' && /行の追加・削除/.test(x.message) && /運用/.test(x.howToCheck)) && !tableReq.registration.confirmations.some(x => x.code === 'summary-scope'), '要件は明細の変更禁止・要約は正確 → 要件の側の確認（requirement-scope）。要約の問題にはしない');
 }
 {
+  // §2 の実機: 反映した計画（顧客区分・紹介元・一覧）の後、その計画のフィールドに触れる新しい依頼が「改めて入力してください」から抜けられなかった
+  const executedPlan = { planId: 'p1', version: 1, status: 'EXECUTED', goal: '顧客区分と紹介元を追加', plan: plan([step('P1', 'ADD_FIELD', 'FIELD', 'NEW_FIELD_1', { name: '顧客区分', fieldType: 'DROP_DOWN' }), step('P2', 'ADD_FIELD', 'FIELD', 'NEW_FIELD_2', { name: '紹介元', fieldType: 'SINGLE_LINE_TEXT' })], [pf('NEW_FIELD_1', '顧客区分', 'customer_category', 'DROP_DOWN'), pf('NEW_FIELD_2', '紹介元', 'referral_source', 'SINGLE_LINE_TEXT')]) };
+  const t = '顧客区分が「既存」のときは紹介元を隠して、「新規」のときだけ表示するようにして（PCの作成・編集画面。顧客区分を変えたときも切り替える）';
+  const c1 = KTAiConversation.classifyIntent(t, { activePlan: executedPlan });
+  assert(c1.intent === KTAiConversation.INTENT.PLAN && c1.reason === 'NEW_PLAN_AFTER_EXECUTION', `反映済みの計画のフィールドに触れる新しい依頼は新しい計画（以前は REVISE_PLAN →「改めて入力」→ 同じ判定の繰り返し）: ${c1.intent}/${c1.reason}`);
+  const active = { ...executedPlan, status: 'ACTIVE' };
+  assert(KTAiConversation.classifyIntent(t, { activePlan: active }).intent === KTAiConversation.INTENT.REVISE_PLAN, 'まだ反映していない計画（ACTIVE）なら、従来どおりその計画の修正');
+  const q = KTAiConversation.classifyIntent('顧客区分はいつ追加されましたか？', { activePlan: executedPlan });
+  assert(q.intent !== KTAiConversation.INTENT.PLAN, `反映済みの計画の語に触れる質問は計画にしない: ${q.intent}`);
+}
+{
   // §5 モバイルの実機: 作成画面のイベントの record にはステータス等のシステムフィールドが無い → 確かめずに .value を読むコードは登録不可
   const data = clone(REG.data);
   data.fields['ステータス'] = { type: 'STATUS', code: 'ステータス', label: 'ステータス', enabled: true };
