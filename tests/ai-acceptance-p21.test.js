@@ -535,6 +535,48 @@ console.log('\n--- G9 / G10. Generator Context の欠落（モデル比較の候
   assert(q.intent !== KTAiConversation.INTENT.PLAN, `反映済みの計画の語に触れる質問は計画にしない: ${q.intent}`);
 }
 {
+  // §2 の実機（続き）: 「動作テスト」の語だけで反映の依頼にしない
+  const active = { planId: 'p2', version: 1, status: 'ACTIVE', goal: 'g', plan: plan([step('C1', 'CUSTOMIZATION_REQUIRED', 'JS', 'dealValidate.js', { customizationId: 'C1' })], [], { solution: 'CUSTOMIZATION', customizations: [{ customizationId: 'C1', requirement: 'r', strategy: 'EXTEND_EXISTING_JS', platform: ['desktop'], events: [], fields: [], apis: [], existingFiles: [{ name: 'dealValidate.js', target: 'desktop' }] }] }) };
+  const I = KTAiConversation.INTENT;
+  const t1 = KTAiConversation.classifyIntent('dealValidate.js が別の担当者に直されたので、今の動作テスト環境の本文を元に、同じ内容で作り直して', { activePlan: active });
+  assert(t1.intent !== I.REQUEST_PREVIEW, `「今の動作テスト環境の本文を元に…作り直して」は反映の依頼ではない: ${t1.intent}/${t1.reason}`);
+  assert(KTAiConversation.classifyIntent('動作テスト環境へ反映して', { activePlan: active }).intent === I.REQUEST_PREVIEW && KTAiConversation.classifyIntent('この計画で動作テストして', { activePlan: active }).intent === I.REQUEST_PREVIEW, '「動作テスト環境へ反映して」「動作テストして」は従来どおり反映の依頼');
+}
+{
+  // §2 の実機（続き）: JS を登録したら計画は「反映済み」（標準設定の手順が無く、カスタマイズをすべて生成して登録したとき）。次の依頼は新しい計画
+  const mkPlan = (custs) => plan([], [], { solution: 'CUSTOMIZATION', customizations: custs.map(id => ({ customizationId: id, requirement: 'r', strategy: 'NEW_JS_FILE', platform: ['desktop'], events: [], fields: [], apis: [], existingFiles: [] })) });
+  const svc = (p) => ({ async plan() { return { plan: p, ctx: null, review: null }; }, async ask() { return { ok: true, answer: { answer: 'a' } }; } });
+  const one = KTAiConversation.create({ services: svc(mkPlan(['C1'])) });
+  await one.send('紹介元を顧客区分で切り替えて表示したい');
+  const v1 = one.activePlan(); v1.generated = { C1: { generated: { strategy: 'NEW_JS_FILE' } } };
+  one.noteJsExecution({ stage: 'running', execution: { executionId: 'jx1', status: 'RUNNING', put: null } });
+  one.noteJsExecution({ stage: 'done', execution: { executionId: 'jx1', status: 'DONE', put: { ok: true } } });
+  assert(v1.status === 'EXECUTED' && v1.jsExecutionId === 'jx1', `カスタマイズだけの計画で、すべて生成して登録 → 計画は反映済み: ${v1.status}`);
+  const next = KTAiConversation.classifyIntent('顧客区分を既存に変えたら紹介元を空にして', { activePlan: { ...v1, plan: { ...v1.plan, proposedFields: [{ temporaryId: 'NEW_FIELD_1', label: '紹介元', suggestedCode: 'referral_source' }] } } });
+  assert(next.intent === KTAiConversation.INTENT.PLAN, `登録の後の依頼は新しい計画（登録済みのカスタマイズを含む見直しにしない）: ${next.intent}/${next.reason}`);
+  const two = KTAiConversation.create({ services: svc(mkPlan(['C1', 'C2'])) });
+  await two.send('紹介元を顧客区分で切り替えて表示したい');
+  const v2 = two.activePlan(); v2.generated = { C1: { generated: { strategy: 'NEW_JS_FILE' } } };
+  two.noteJsExecution({ stage: 'running', execution: { executionId: 'jx2', status: 'RUNNING', put: null } });
+  two.noteJsExecution({ stage: 'done', execution: { executionId: 'jx2', status: 'DONE', put: { ok: true } } });
+  assert(v2.status === 'ACTIVE', `まだ生成していないカスタマイズ（C2）が残る計画は反映済みにしない: ${v2.status}`);
+}
+{
+  // §2 の実機（続き）: 表示の切り替え・入力チェックで条件つきに制御するコードを「編集不可が見つかりません」としない
+  const data = clone(REG.data);
+  data.fields.customer_category = { type: 'DROP_DOWN', code: 'customer_category', label: '顧客区分', options: { '新規': { label: '新規', index: '0' }, '既存': { label: '既存', index: '1' } } };
+  data.fields.referral_source = { type: 'SINGLE_LINE_TEXT', code: 'referral_source', label: '紹介元' };
+  const c = (events, cond) => ({ customizationId: 'C1', requirement: '顧客区分が新規のときだけ紹介元を表示 / 必須', strategy: 'NEW_JS_FILE', platform: ['desktop'], implementation: 'JAVASCRIPT', events, fields: [{ code: 'customer_category', access: 'READ' }, { code: 'referral_source', access: 'CONTROL', condition: cond }], apis: [], existingFiles: [] });
+  const rv = (events, body, cond) => KTCodeReview.review({ generated: REG.gen(`(function () {\n  'use strict';\n  kintone.events.on(${JSON.stringify(events).replace(/"/g, "'")}, function (event) {\n${body}\n    return event;\n  });\n})();`, { summary: 's' }), customization: c(events, cond), plan: null, data, scan: null, existingSource: null });
+  const shown = rv(['app.record.create.show', 'app.record.edit.show', 'app.record.create.change.customer_category', 'app.record.edit.change.customer_category'], "    kintone.app.record.setFieldShown('referral_source', event.record['customer_category'].value === '新規');", 'customer_category not in ("新規")');
+  const sc = shown.checks.find(x => x.name === 'conditional-control');
+  assert(sc && sc.ok && /表示の切り替え/.test(sc.message) && !shown.registration.confirmations.some(x => x.code === 'conditional-control'), `表示の切り替え（setFieldShown）が条件の項目を見ている → 確認にしない: ${sc && sc.message}`);
+  const err = rv(['app.record.create.submit', 'app.record.edit.submit'], "    if (event.record['customer_category'].value === '新規' && !event.record['referral_source'].value) {\n      event.record['referral_source'].error = '紹介元を入力してください';\n    } else {\n      event.record['referral_source'].error = null;\n    }", 'customer_category in ("新規")');
+  assert(err.checks.find(x => x.name === 'conditional-control').ok && !err.registration.confirmations.some(x => x.code === 'conditional-control'), '入力チェック（.error）が条件の中 → 確認にしない');
+  const blindShown = rv(['app.record.edit.show'], "    kintone.app.record.setFieldShown('referral_source', false);", 'customer_category not in ("新規")');
+  assert(blindShown.registration.confirmations.some(x => x.code === 'conditional-control' && /表示の切り替えで制御していますが/.test(x.message)), '条件を見ない表示の切り替え → 確かめられないので確認');
+}
+{
   // §5 モバイルの実機: 作成画面のイベントの record にはステータス等のシステムフィールドが無い → 確かめずに .value を読むコードは登録不可
   const data = clone(REG.data);
   data.fields['ステータス'] = { type: 'STATUS', code: 'ステータス', label: 'ステータス', enabled: true };

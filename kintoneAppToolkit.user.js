@@ -11298,7 +11298,22 @@
         const unc = sites.filter(x => outside(x, clean, lvClean));
         const baseUnc = baseText ? tableSites(baseText, code).some(x => outside(x, baseText, lvBase)) : false;
         const where = (x) => { if (x.unconditional) return x.line; const p = blindPath(x, clean, lvClean) || []; return `${x.line}（囲む条件 ${p.length ? p.map(plainCond).join(' / ') : 'なし'} は ${refs.join(' / ')} を見ていません）`; };
-        if (!sites.length) add('conditional-control', false, 'review', `${code} は「${cond}」のときだけ編集不可にする計画ですが、「.disabled = true」の設定が見つかりません（別の書き方なら、動作テスト環境で条件どおりか確かめてください）`);
+        // Phase 21（実機 §2）: 編集不可（disabled）ではなく、表示の切り替え（setFieldShown）・入力チェック（.error）で制御するコードもある。
+        //   以前は disabled だけを探し、「編集不可にする計画ですが .disabled = true が見つかりません」と実態に合わない確認を出した
+        if (!sites.length) {
+          const esc = String(code).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+          const alt = [];
+          for (const m of clean.matchAll(new RegExp(`setFieldShown\\s*\\(\\s*['"\`]${esc}['"\`]\\s*,\\s*([^;]*?)\\)\\s*;?`, 'g'))) alt.push({ kind: 'shown', arg: m[1], ...siteConds(clean, m.index) });
+          for (const m of clean.matchAll(new RegExp(`\\[\\s*['"\`]${esc}['"\`]\\s*\\]\\s*\\.\\s*error\\s*=(?!=)\\s*(?!null\\b)`, 'g'))) alt.push({ kind: 'error', arg: '', ...siteConds(clean, m.index) });
+          if (alt.length) {
+            const seen = (x) => refs.length && (refs.some(r => String(x.arg).includes(r)) || pathsOfSite(x).every(p => p.some(t => refs.some(r => String(t).includes(r)))));
+            const kinds = [...new Set(alt.map(x => (x.kind === 'shown' ? '表示の切り替え' : '入力チェック（エラー表示）')))].join('・');
+            if (!refs.length || alt.every(seen)) add('conditional-control', true, 'info', `${code} は${kinds}で、「${cond}」の条件（${refs.join(' / ') || '—'}）を見て制御しています`);
+            else add('conditional-control', false, 'review', `${code} は${kinds}で制御していますが、計画の条件「${cond}」（${refs.join(' / ')}）を見ているか確かめられません`);
+            continue;
+          }
+        }
+        if (!sites.length) add('conditional-control', false, 'review', `${code} は「${cond}」のときだけ制御する計画ですが、編集不可（.disabled = true）・表示の切り替え・入力チェックのどれも見つかりません（別の書き方なら、動作テスト環境で条件どおりか確かめてください）`);
         else if (unc.length && !baseUnc) add('conditional-control', false, 'block', `${code} は「${cond}」のときだけ編集不可にする計画ですが、条件の外で編集不可にしています（${unc.map(where).join(' / ')}）。すべてのレコード・ステータスで編集できなくなります`);
         else if (unc.length) add('conditional-control', false, 'review', `${code} は既存のコードで条件なしに編集不可になっています（「${cond}」の条件と合うか確認してください）`);
         else if (refs.length && !sites.every(x => pathsOfSite(x).every(p => p.some(t => refs.some(r => String(t).includes(r)))))) add('conditional-control', false, 'review', `${code} は条件の中で編集不可にしていますが、計画の条件「${cond}」（${refs.join(' / ')}）を見ているか確かめられません`);
@@ -13742,7 +13757,9 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
       aboutPlan: /\bP[0-9]+\b|手順|ステップ|step|計画|プラン|提案|新規|追加|変更|代替|案\b|必要|依存|順番/i,
       aboutReview: /危ない|危険|リスク|警告|注意|確認が必要|確認必要|確認事項|実行不可|無効|問題|競合|重複|安全|レビュー|review|判定|ブロック|blocked|止ま|だめ|ダメ|反映できない|できないの|△|×|✓/i,
       rollback: /(元|もと)に戻|戻して|戻したい|戻せ|取り消(し|して|したい)|ロールバック|rollback|undo/i,
-      preview: /(これ|この(計画|内容|案|まま)|それ)で(進め|すすめ|お願い|いい|OK|反映|実行|決定|確定)|進めて|進めたい|進めよう|反映して|反映したい|反映を|反映お願い|動作テスト|テストして|テストしたい|実行して|実行したい|実行しろ|適用して|承認して|承認する$|承認します|^承認$|全部承認|全て承認|すべて承認|そのまま(実行|反映|進め)|いいから|やって(ください|$)|お願いします$|^(OK|ok|オッケー|はい|いいよ|それで)(、|。|\s)*(進めて|お願い|反映|実行)?$|Preview|プレビュー/i,
+      // Phase 21（実機 §2）: 「動作テスト」の語だけでは反映の依頼にしない（「今の動作テスト環境の本文を元に作り直して」が反映の依頼になった）。
+      //   「動作テスト環境へ反映 / 登録」「動作テストして」のように反映・試す動詞と一緒のときだけ
+      preview: /(これ|この(計画|内容|案|まま)|それ)で(進め|すすめ|お願い|いい|OK|反映|実行|決定|確定)|進めて|進めたい|進めよう|反映して|反映したい|反映を|反映お願い|動作テスト(環境)?(へ|に|で)(反映|適用|進め|試)|動作テスト(して|したい|する$|をお願い)|テストして|テストしたい|実行して|実行したい|実行しろ|適用して|承認して|承認する$|承認します|^承認$|全部承認|全て承認|すべて承認|そのまま(実行|反映|進め)|いいから|やって(ください|$)|お願いします$|^(OK|ok|オッケー|はい|いいよ|それで)(、|。|\s)*(進めて|お願い|反映|実行)?$|Preview|プレビュー/i,
       // 「使って」は依頼（使ってください / 使って）。「使ってる / 使っている / 使われている」は現在の設定の質問なので含めない
       // Phase 20（実機 CX-5）: 「やっぱり税込150万円以上。既存フィールドは増やさないで」が修正と判定されなかった → 「やっぱり / やはり」と「〜ないで」（否定の依頼）も修正
       reviseVerb: /使って(?!る|い|ます|た)|使えない|使える|使う|使いたい|使えば|いらない|不要|なし(で|に|にして)|やめ|外して|除いて|削除|消して|ではなく|じゃなく|代わり|かわり|変えて|変更して|減らし|増やし|作らず|作らない|作らないで|追加せず|追加しない|にして|のほう|の方で|だけ(で|に)|も(追加|つけ|付け|入れ|取|転記|通知|欲しい|ほしい|して)|にしたい|に変え|やっぱり|やっぱ|やはり|(増やさ|足さ|作ら|使わ|変え|入れ|付け|つけ|送ら|通知し|追加し|含め)ないで/,
@@ -13997,15 +14014,25 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
         const ae = state.activeJsExecution;
         ae.stage = stage;
         ae.written = ae.written || !!ex?.put?.ok;
+        // Phase 21（実機 §2）: JS を登録した計画の版。標準設定の手順が無い（または反映済み）なら、登録で計画は「反映済み」になる。
+        //   以前は ACTIVE のままで、次の依頼がその計画の見直しになり、登録済みのカスタマイズがもう一度計画に入った（生成し直すと同じ処理が重なる）
+        const jv = state.planHistory.find(x => x.planId === ae.planId && x.version === ae.version) || null;
+        //   生成していないカスタマイズ（C2 など）が残っていれば、まだ反映済みにしない（登録はその時点で生成済みのものをまとめて行う）
+        const standardLeft = (pv) => ((pv?.plan?.steps || []).some(st => st.actionType !== 'CUSTOMIZATION_REQUIRED' && !st.alternativeId) && !pv.executionId)
+          || (pv?.plan?.customizations || []).some(c => ['NEW_JS_FILE', 'EXTEND_EXISTING_JS'].includes(c.strategy) && !(pv.generated && pv.generated[c.customizationId]));
         if (stage === 'done' && ae.status !== (ex?.status || 'DONE')) {
           ae.status = ex?.status || 'DONE';
+          if (jv && ae.written) { jv.jsExecutionId = executionId; if (!standardLeft(jv) && jv.status !== PLAN_STATUS.SUPERSEDED) jv.status = PLAN_STATUS.EXECUTED; }
           if (ae.written) push(MSG.SYSTEM_NOTICE, ROLE.SYSTEM, '動作テスト環境の JavaScript カスタマイズ設定が変更されました。運用環境には反映されていません。', { executionId, kind: 'js-preview-changed' });
         }
         if (/^roll/.test(stage) && !ae.rollbackMessage) ae.rollbackMessage = push(MSG.JS_ROLLBACK, ROLE.TOOLKIT, 'JavaScript の登録を元に戻します。', { executionId, planId: ae.planId, version: ae.version }).id;
         if (stage === 'rolled-back' && !ae.rolledBack) {
           const rb = jsState?.rollback || ex?.rollback || null;
           ae.rolledBack = rb?.status === 'ROLLED_BACK_VERIFIED';
-          if (ae.rolledBack) push(MSG.SYSTEM_NOTICE, ROLE.SYSTEM, 'JavaScript カスタマイズ設定を登録前の状態に戻しました。', { executionId, kind: 'js-rolled-back' });
+          if (ae.rolledBack) {
+            if (jv && jv.jsExecutionId === executionId && jv.status === PLAN_STATUS.EXECUTED && !jv.executionId) jv.status = PLAN_STATUS.ROLLED_BACK;
+            push(MSG.SYSTEM_NOTICE, ROLE.SYSTEM, 'JavaScript カスタマイズ設定を登録前の状態に戻しました。', { executionId, kind: 'js-rolled-back' });
+          }
         }
         emit();
       }
