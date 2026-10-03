@@ -10731,7 +10731,8 @@
         const hasReturnEvent = /\breturn\s+event\b/.test(body) || /\breturn\s+\w+\s*;\s*$/.test(body.trim()) && /\breturn\s+(event|e|ev)\b/.test(body);
         const usesPromiseThen = /\.then\s*\(/.test(body);
         const usesAwait = /\bawait\b/.test(body);
-        out.push({ index: m.index, async: isAsync, named, returnEvent: /\breturn\s+(event|e|ev)\b/.test(body) || hasReturnEvent, promiseThen: usesPromiseThen, awaitInNonAsync: usesAwait && !isAsync, handlerLength: body.length, firstArg: s.slice(m.index + m[0].length, comma >= 0 ? comma : m.index + m[0].length + 60).trim().slice(0, 600) });
+        // Phase 21: complete = 呼び出しの括弧が閉じた（差分の断片が登録の行だけ = REPLACE で第 1 引数だけを書き換えたときは false）
+        out.push({ index: m.index, async: isAsync, named, complete: depth === 0, returnEvent: /\breturn\s+(event|e|ev)\b/.test(body) || hasReturnEvent, promiseThen: usesPromiseThen, awaitInNonAsync: usesAwait && !isAsync, handlerLength: body.length, firstArg: s.slice(m.index + m[0].length, comma >= 0 ? comma : m.index + m[0].length + 60).trim().slice(0, 600) });
       }
       return out;
     }
@@ -11278,7 +11279,14 @@
         const newUncond = uncondOf(clean).filter(x => !baseUncond.includes(x) && !planCond.has(x));
         if (newUncond.length) add('unconditional-control', false, 'review', `次のフィールドを条件なしで編集不可にしています: ${newUncond.join(', ')}（if の外にあるため、すべてのレコード・ステータスで編集できなくなります）。要件の条件のときだけにするなら、既存の if ブロックの中に入れてください`);
       }
-      const handlers = inspectHandlers(cleanAdded);
+      // Phase 21（モデル比較の INTEG）: 差分が登録の行だけ（REPLACE でイベントを足す）なら、handler の本体は既存のまま → 最終コードの同じ登録で見る
+      //   （断片だけを見て「return event がありません」と誤って表示した）
+      const handlersFinal = inspectHandlers(clean);
+      const handlers = inspectHandlers(cleanAdded).map(h => {
+        if (h.complete !== false) return h;
+        const full = handlersFinal.find(f => f.firstArg === h.firstArg) || null;
+        return full ? { ...full, fromFinal: true } : h;
+      });
       const noReturn = handlers.filter(h => !h.returnEvent);
       add('return-event', !noReturn.length, 'review', noReturn.length ? `${noReturn.length} 件の handler に return event がありません（表示イベントで無いと画面が止まります）` : handlers.length ? `${handlers.length} 件の handler は return event しています` : '追加分に新しい handler はありません（既存 handler の中に追加。既存の return event をそのまま使います）');
       const asyncIssues = handlers.filter(h => h.awaitInNonAsync);
@@ -11318,7 +11326,10 @@
       const dupInAdded = regs.filter((e, i) => regs.indexOf(e) !== i);
       const existingEvents = existingSource ? KTScan.extractEventTypes(KTScan.stripCommentsOnly(existingSource.text)).map(e => e.name) : [];
       // 既存の handler の中に追加しただけ（追加分に kintone.events.on が無い）なら「別の handler を足す」ではない（Phase 20 実機で誤表示）
-      const dupWithExisting = g.strategy === 'EXTEND_EXISTING_JS' && addedRegisters ? [...new Set(regs.filter(e => existingEvents.includes(e)))] : [];
+      // Phase 21（モデル比較の INTEG）: 既存の登録の行を書き換えただけ（REPLACE でイベントを足す。登録の数は変わらない）なら、別の handler を足したのではない
+      const regCount = (text) => (String(text || '').match(/kintone\s*\.\s*events\s*\.\s*on\s*\(/g) || []).length;
+      const replacedOnly = g.strategy === 'EXTEND_EXISTING_JS' && existingSource && typeof existingSource.text === 'string' && regCount(clean) === regCount(KTScan.stripCommentsOnly(existingSource.text));
+      const dupWithExisting = g.strategy === 'EXTEND_EXISTING_JS' && addedRegisters && !replacedOnly ? [...new Set(regs.filter(e => existingEvents.includes(e)))] : [];
       if (dupInAdded.length) add('duplicate-handler', false, 'review', `同じイベントを 2 回登録しています: ${[...new Set(dupInAdded)].join(', ')}`);
       else if (dupWithExisting.length) add('duplicate-handler', false, 'review', `既存ファイルが既に登録しているイベントに別の handler を足します: ${dupWithExisting.join(', ')}（同じイベントの handler は登録順に動きます）`);
       else add('duplicate-handler', true, 'info', '重複した handler はありません');
