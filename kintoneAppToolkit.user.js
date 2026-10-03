@@ -13754,7 +13754,7 @@
     /** 旧 API（利用者の操作として扱う） */
     function openDrawer(pane = activePane, opt = {}) { return showPane(pane, { ...opt, auto: false }); }
     /** 狭い幅で Workspace を折りたたむ（desktop は常設。CSS でだけ隠れる） */
-    function closeDrawer() { drawerOpen = false; if (workspace && workspace.classList) workspace.classList.add('is-drawer-collapsed'); renderHeader(); }
+    function closeDrawer() { drawerOpen = false; if (workspace && workspace.classList) workspace.classList.add('is-drawer-collapsed'); $drawer.style.display = 'none'; renderHeader(); }   // showPane が inline で flex にするので、折りたたみも inline で消す
     /** チャットからの送信（§17: 文章だけでは承認・最終確認・書き込みにならない。Executor / Rollback は既存 UI の確認を通る） */
     async function sendChat(text, { intent = null } = {}) {
       const t = String(text ?? '').trim();
