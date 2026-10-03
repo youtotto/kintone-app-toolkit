@@ -6908,10 +6908,12 @@
         return pending ? { missingProposed: pending.temporaryId } : null;
       };
       const addingStepOf = (temporaryId) => { const s = (ctx.steps || []).find(x => x.targetRef === temporaryId && /^ADD_/.test(String(x.actionType))); return s ? `（${s.id} で追加予定）` : ''; };
+      // Phase 20（CX-1 実機）: 新規フィールドを提案しただけで追加の手順（ADD_FIELD）が無い計画が 2 回あった。「順序を確認」ではなく、追加の手順が無いことを伝える
+      const notAppliedMsg = (prefix, temporaryId) => (addingStepOf(temporaryId) ? `${prefix} ${temporaryId}${addingStepOf(temporaryId)} はこの step より前に追加されていません（順序 / dependsOn を確認）` : `${prefix} ${temporaryId} を追加する手順が計画にありません（新規フィールドの提案だけで ADD_FIELD の手順が無い。追加する手順を足すよう計画の修正を依頼してください）`);
       const requireField = (ref, role) => {
         const f = resolveField(ref);
         if (!f) { invalid('UNKNOWN_FIELD', `${role}のフィールド「${ref}」が存在しません`); return null; }
-        if (f.missingProposed) { invalid('PROPOSED_FIELD_NOT_APPLIED', `${role}の新規フィールド ${f.missingProposed}${addingStepOf(f.missingProposed)} はこの step より前に追加されていません（順序 / dependsOn を確認）`); return null; }
+        if (f.missingProposed) { invalid('PROPOSED_FIELD_NOT_APPLIED', notAppliedMsg(`${role}の新規フィールド`, f.missingProposed)); return null; }
         return f;
       };
       /** 条件式の構文検査: kintone に無い関数が含まれていれば要確認（評価できない条件は設定できない） */
@@ -6995,7 +6997,7 @@
                 relatedForType = related;
               }
             }
-            validateLookupMappings(lk, step, r, { model, resolveField, requireField, invalid, issue, selfCode: code, addingStepOf });
+            validateLookupMappings(lk, step, r, { model, resolveField, requireField, invalid, issue, selfCode: code, addingStepOf, notAppliedMsg });
             if (relatedForType) for (const m of lk.mappings) { const dest = resolveField(m.to), src = relatedForType.fields[m.from]; if (!dest || dest.missingProposed || !src) continue; inheritLinkProtocol(dest, src, results); const tc = lookupTypeCheck(src, dest); if (tc) invalid(tc.code, tc.message); }
           }
           model.fields[code] = field;
@@ -7561,7 +7563,7 @@
             if (m.srcType === 'FIELD') {
               const f = resolveField(m.srcField);
               if (!f) { invalid('UNKNOWN_FIELD', `転記元フィールド「${m.srcField}」が存在しません`); continue; }
-              if (f.missingProposed) { invalid('PROPOSED_FIELD_NOT_APPLIED', `転記元の新規フィールド ${f.missingProposed}${addingStepOf(f.missingProposed)} はこの step より前に追加されていません（順序 / dependsOn を確認）`); continue; }
+              if (f.missingProposed) { invalid('PROPOSED_FIELD_NOT_APPLIED', notAppliedMsg('転記元の新規フィールド', f.missingProposed)); continue; }
               src = f;
               if (['FILE', 'REFERENCE_TABLE', 'SUBTABLE', 'GROUP', 'SPACER', 'LABEL', 'HR', 'STATUS', 'STATUS_ASSIGNEE', 'CATEGORY'].includes(src.baseType || src.type)) { invalid('APP_ACTION_MAPPING_TYPE_MISMATCH', `「${src.code}」（${src.baseType || src.type}）はアプリアクションで転記できません`); continue; }
             }
@@ -7658,13 +7660,13 @@
       if (r.status !== STATUS.INVALID) r.status = STATUS.NEEDS_CONFIRMATION;
     }
 
-    function validateLookupMappings(lk, step, r, { model, resolveField, requireField, invalid, issue, selfCode, addingStepOf = () => '' }) {
+    function validateLookupMappings(lk, step, r, { model, resolveField, requireField, invalid, issue, selfCode, addingStepOf = () => '', notAppliedMsg = null }) {
       const seen = new Map();
       for (const m of lk.mappings) {
         if (!m.to) { issue('LOOKUP_DEST_MISSING', 'medium', `取得項目「${m.from}」のコピー先が指定されていません`); continue; }
         const f = resolveField(m.to);
         if (!f) { invalid('LOOKUP_DEST_UNKNOWN', `コピー先フィールド「${m.to}」が存在しません`); continue; }
-        if (f.missingProposed) { invalid('PROPOSED_FIELD_NOT_APPLIED', `コピー先の新規フィールド ${f.missingProposed}${addingStepOf(f.missingProposed)} はこの step より前に追加されていません（順序 / dependsOn を確認）`); continue; }
+        if (f.missingProposed) { invalid('PROPOSED_FIELD_NOT_APPLIED', notAppliedMsg ? notAppliedMsg('コピー先の新規フィールド', f.missingProposed) : `コピー先の新規フィールド ${f.missingProposed}${addingStepOf(f.missingProposed)} はこの step より前に追加されていません（順序 / dependsOn を確認）`); continue; }
         m.to = f.code;
         if (seen.has(m.to)) invalid('LOOKUP_DEST_DUPLICATE', `コピー先「${m.to}」に複数の取得元（${seen.get(m.to)}, ${m.from}）があります`); else seen.set(m.to, m.from);
         if (f.type === 'LOOKUP' && f.code !== selfCode) issue('LOOKUP_DEST_IS_LOOKUP', 'medium', `コピー先「${m.to}」はルックアップフィールドです`);
@@ -9343,7 +9345,17 @@
       //   進む手順が反映されない新しいステータスと、そこから出る / へ入るアクションも反映しない（孤立させない）。変化が無くなるまで繰り返す
       const pend = (id) => states.get(id)?.status === STEP.PENDING;
       const specOf = (id) => rv.get(id)?.spec || byId.get(id)?.spec || {};
-      const branchStep = (id) => { const s = byId.get(id); if (!s) return false; if (s.actionType === 'ADD_PROCESS_ACTION') return true; if (s.actionType !== 'UPDATE_PROCESS') return false; const dk = rv.get(id)?.diff; return [...(dk?.changeKinds || []), dk?.changeKind, specOf(id).changeKind].some(k => /^ACTION_(CONDITION|TRANSITION)$/.test(String(k || ''))); };
+      // 変更種別が無い / 無効な UPDATE_PROCESS でも、遷移元と遷移先・条件があるアクションの変更なら分岐の相手（実機 CX-5 3 回目: 相手が無効でも片方だけ自動反映できた）
+      const branchStep = (id) => {
+        const s = byId.get(id); if (!s) return false;
+        if (s.actionType === 'ADD_PROCESS_ACTION') return true;
+        if (s.actionType !== 'UPDATE_PROCESS') return false;
+        const dk = rv.get(id)?.diff, sp = specOf(id), raw = s.spec || {};
+        if ([...(dk?.changeKinds || []), dk?.changeKind, sp.changeKind, raw.changeKind].some(k => /^ACTION_(CONDITION|TRANSITION)$/.test(String(k || '')))) return true;
+        if ([sp.changeKind, raw.changeKind].some(k => /^(ASSIGNEE|EXECUTABLE_USER)$/.test(String(k || '')))) return false;
+        const f = sp.from ?? raw.from, to = sp.to ?? raw.to, cond = sp.filterCond ?? raw.filterCond;
+        return !!(f && (to || (cond != null && String(cond).trim() !== '')));
+      };
       const newStatusName = (id) => String(specOf(id).name ?? byId.get(id)?.targetRef ?? '').trim();
       const block = (st, reason, message) => { st.status = STEP.BLOCKED; st.reason = reason; st.message = message; };
       for (let changed = true, guard = 0; changed && guard < 20; guard++) {

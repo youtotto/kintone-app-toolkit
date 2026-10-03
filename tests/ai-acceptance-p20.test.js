@@ -644,6 +644,17 @@ console.log('\n--- F37（CX-1 2 回目・実機）. 同じ遷移元の分岐は�
   const good = mk('amount <= "999999"');
   const arGood = KTPlanExecutor.applyReadiness(good, reviewOf(good));
   assert(['P1', 'P2', 'P3', 'P4', 'P5'].every(id => by(arGood, id).apply === 'AUTO'), `F37: 条件が正しければ 5 手順とも自動で反映できる: ${arGood.map(a => a.stepId + ':' + a.apply + (a.reason ? '(' + a.reason + ')' : '')).join(' ')}`);
+  // 実機 CX-5 3 回目: 分岐の相手が「無効な UPDATE_PROCESS（存在しないアクション・変更種別なし）」でも同じ遷移元の分岐として扱う（以前は P1 だけ自動反映できた）
+  const inv = plan([
+    step('P1', 'UPDATE_PROCESS', 'PROCESS_ACTION', '申請する', { name: '申請する', from: '未処理', to: '承認待ち', filterCond: 'amount >= "1500000"', changeKind: 'ACTION_CONDITION' }),
+    step('P2', 'UPDATE_PROCESS', 'PROCESS_ACTION', '申請する（少額）', { name: '申請する（少額）', from: '未処理', to: '完了', filterCond: 'amount <= "1499999"' }, { dependsOn: ['P1'] }),
+  ]);
+  const arInv = KTPlanExecutor.applyReadiness(inv, reviewOf(inv));
+  assert(by(arInv, 'P2').apply === 'BLOCKED' && by(arInv, 'P1').apply === 'BLOCKED' && by(arInv, 'P1').reason === 'PROCESS_BRANCH_PARTIAL', `F37: 分岐の相手が無効な UPDATE_PROCESS（変更種別なし）でも、もう片方を反映しない: ${arInv.map(a => a.stepId + ':' + a.apply + (a.reason ? '(' + a.reason + ')' : '')).join(' ')}`);
+  // 実機 CX-1 2・4 回目: 承認者のフィールドを提案しただけで ADD_FIELD の手順が無い → 「順序を確認」ではなく、追加の手順が無いと伝える
+  const noAdd = plan([step('P1', 'ADD_PROCESS_STATUS', 'PROCESS_STATUS', '部長承認待ち', { name: '部長承認待ち', assignees: ['NEW_FIELD_1'], assigneeType: 'ONE' })], [pf('NEW_FIELD_1', '部長承認者', 'director_approver', 'USER_SELECT')]);
+  const na = reviewOf(noAdd).steps[0].issues.find(i => i.code === 'PROPOSED_FIELD_NOT_APPLIED');
+  assert(na && /追加する手順が計画にありません/.test(na.message) && !/順序/.test(na.message), `PROPOSED_FIELD_NOT_APPLIED: 追加の手順が無いときはそう伝える: ${na && na.message}`);
   // 片方だけを承認した場合も同じ（承認しなかった分岐があると、承認した分岐も反映しない）
   const cls = KTPlanExecutor.classifySteps({ plan: good, review: reviewOf(good), approvedSteps: ['P1', 'P2', 'P4', 'P5'] });
   const st = (id) => cls.find(x => x.stepId === id) || {};
