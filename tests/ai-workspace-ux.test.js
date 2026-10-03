@@ -260,7 +260,7 @@ console.log('\n--- §23 / §24. Narrow Width: 縦積み・折りたたみ ---');
   const m = mount();
   await ticks();
   const html = m.host.innerHTML;
-  assert(/@media \(max-width: 760px\)\{[\s\S]*\.kt-ai-ws-body\{ flex-direction:column; \}[\s\S]*\.kt-ai-drawer\{ flex:0 0 auto; max-height:55%; \}[\s\S]*is-drawer-collapsed \.kt-ai-drawer\{ display:none; \}[\s\S]*#kt-ai-drawer-toggle\{ display:inline-block; \}/.test(html), '狭い幅: Conversation → Workspace の縦積み・Workspace は折りたためる・toggle は狭い幅だけ');
+  assert(/container-type:inline-size; container-name:kt-ai-ws;/.test(html) && /@container kt-ai-ws \(max-width: 760px\)\{[\s\S]*\.kt-ai-ws-body\{ flex-direction:column; \}[\s\S]*\.kt-ai-drawer\{ flex:0 0 auto; max-height:55%; \}[\s\S]*is-drawer-collapsed \.kt-ai-drawer\{ display:none; \}[\s\S]*#kt-ai-drawer-toggle\{ display:inline-block; \}/.test(html), '狭い幅（container query: 開発支援タブ自身の幅 ≤ 760px）: Conversation → Workspace の縦積み・Workspace は折りたためる・toggle は狭い幅だけ');
   await m.$('kt-ai-header').dispatch({ type: 'click', target: { id: 'kt-ai-drawer-toggle' } });
   assert(m.panel.drawerState().open === false && /作業パネルを表示/.test(m.$('kt-ai-header').innerHTML), '折りたたむ（is-drawer-collapsed）');
   await m.$('kt-ai-header').dispatch({ type: 'click', target: { id: 'kt-ai-drawer-toggle' } });

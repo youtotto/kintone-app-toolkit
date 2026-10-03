@@ -12938,7 +12938,7 @@
     // ---- レイアウト（Phase 19: 左 Conversation / 右 Workspace。desktop は常設の右ペイン、狭い幅は縦積み）----
     function styleHtml() {
       return `<style>
-        #kt-ai-workspace{ --kt-ai-border:#ccc; display:flex; flex-direction:column; height:100%; min-height:0; font-size:12px; }
+        #kt-ai-workspace{ --kt-ai-border:#ccc; display:flex; flex-direction:column; height:100%; min-height:0; font-size:12px; container-type:inline-size; container-name:kt-ai-ws; }
         #kt-ai-workspace .kt-ai-ws-header{ flex:none; display:flex; align-items:center; justify-content:space-between; gap:8px; padding:6px 8px; border:1px solid var(--kt-ai-border); border-radius:8px; margin-bottom:8px; flex-wrap:wrap; }
         #kt-ai-workspace .kt-ai-ws-body{ flex:1 1 0%; min-height:0; display:flex; gap:10px; }
         #kt-ai-workspace .kt-ai-ws-main{ flex:1 1 0%; min-width:0; min-height:0; display:flex; flex-direction:column; }
@@ -12968,8 +12968,8 @@
         #kt-ai-workspace .kt-ai-free{ border:2px solid #2563eb; border-radius:8px; padding:10px; margin-top:6px; }
         #kt-ai-workspace .kt-ai-tech{ margin-top:8px; font-size:11px; opacity:.85; }
         #kt-ai-workspace .kt-ai-tech > summary{ cursor:pointer; }
-        /* 狭い幅: Conversation → Workspace の縦積み。Workspace は折りたためる（toggle は狭い幅だけ出す） */
-        @media (max-width: 760px){
+        /* 狭い幅（パネル表示や半幅。viewport ではなく開発支援タブ自身の幅で判定 = container query）: Conversation → Workspace の縦積み。Workspace は折りたためる（toggle は狭い幅だけ出す） */
+        @container kt-ai-ws (max-width: 760px){
           #kt-ai-workspace .kt-ai-ws-body{ flex-direction:column; }
           #kt-ai-workspace .kt-ai-drawer{ flex:0 0 auto; max-height:55%; }
           #kt-ai-workspace.is-drawer-collapsed .kt-ai-drawer{ display:none; }
@@ -13812,7 +13812,7 @@
       if (act === 'open-js-result') { jsExec.paneClosed = false; renderJsReg(); showPane('exec', { scrollTo: '#kt-ai-jsreg' }); return; }
       if (act === 'js-rollback') { setArtifact({ type: VM.ARTIFACT.ROLLBACK, id: jsExec.execution?.executionId ?? null, version: null, js: true }, { scrollTo: '#kt-ai-jsreg' }); await startJsRollback(); return; }
       if (act === 'consult-resume') { const m = conv.state.messages.find(x => x.data?.kind === 'consult-choices'); if (m) conv.state.messages.splice(conv.state.messages.indexOf(m), 1); pendingSeed = null; renderChat(); return; }
-      if (act === 'consult-new') { const seed = pendingSeed; pendingSeed = null; if (seed) { conv.startConsultation(seed, { force: true }); renderHeader(); renderSpec(); renderChat(); renderWsState(); } return; }
+      if (act === 'consult-new') { const seed = pendingSeed; pendingSeed = null; if (seed) { const r = conv.startConsultation(seed, { force: true }); renderHeader(); renderSpec(); renderChat(); if (r.ok) setArtifact({ type: VM.ARTIFACT.CONSULTATION, id: seed.sourceId, version: null, name: seed.name }, { auto: true }); renderWsState(); } return; }
     }
     $chat.addEventListener('click', async (ev) => {
       const t = actEl(ev?.target);
