@@ -5832,7 +5832,39 @@
       return { ok: errors.length === 0, errors, conds: parsed.conds.map(c => ({ field: c.field, op: c.op, value: c.value })), logical: parsed.logicals[0] || null };
     }
 
-    return { SETTINGS_OPS, TYPE_FUNCS, ALL_FUNCS, USAGE, SYSTEM_CODES, tokenize, parse, check };
+    /**
+     * Phase 20（実機）: in / not in しか使えない種類（ステータス・ユーザー選択・ドロップダウン等）に AI が書いた「= "値"」「!= "値"」を、
+     * 意味が一意に決まる書き換え（in ("値") / not in ("値")）に直す。それ以外は触らない（直せないものは check が指摘する）
+     * @returns {{ text, changes: [{ field, from, to }] }}
+     */
+    function normalize(cond, { fields = {} } = {}) {
+      const text = String(cond ?? '');
+      const changes = [];
+      if (!text.trim()) return { text, changes };
+      let parsed;
+      try { parsed = parse(tokenize(text)); } catch (e) { return { text, changes }; }
+      const esc = (x) => String(x).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      let out = text;
+      for (const c of parsed.conds) {
+        if (c.op !== '=' && c.op !== '!=') continue;
+        const f = fields[c.field] || null;
+        const type = f ? (f.type === 'LOOKUP' ? (f.baseType || 'SINGLE_LINE_TEXT') : f.type) : (SYSTEM_CODES[c.field] || null);
+        const ops = type ? SETTINGS_OPS[type] : null;
+        const want = c.op === '=' ? 'in' : 'not in';
+        if (!ops || ops.includes(c.op) || !ops.includes(want)) continue;
+        if (c.value.kind !== 'str' && c.value.kind !== 'func') continue;
+        const valueSrc = c.value.kind === 'str' ? '("(?:[^"\\\\]|\\\\.)*"|“[^”]*”)' : `(${esc(c.value.name)}\\(\\s*\\))`;
+        const re = new RegExp(`(^|[\\s(])(${esc(c.field)})\\s*${c.op === '=' ? '=' : '!='}\\s*${valueSrc}`);
+        const m = re.exec(out);
+        if (!m) continue;
+        const from = m[0].slice(m[1].length);
+        const to = `${c.field} ${want} (${m[3]})`;
+        out = out.slice(0, m.index) + m[1] + to + out.slice(m.index + m[0].length);
+        changes.push({ field: c.field, from, to });
+      }
+      return { text: out, changes };
+    }
+    return { SETTINGS_OPS, TYPE_FUNCS, ALL_FUNCS, USAGE, SYSTEM_CODES, tokenize, parse, check, normalize };
   })();
 
   // ==========================================
@@ -6345,9 +6377,13 @@
       for (const d of (step.proposal?.details || [])) {
         const k = keyOf(d.key);
         if (!k || spec[k] != null) continue;
+        // Phase 20（実機）: 構造化した取得項目（mappings / addMappings のどちらか）があれば、説明文から取得項目を作らない
+        //   （説明文の「address → 新規フィールド customer_address」を addMappings として二重に取り込み、コピー先が無いと誤判定した）
+        if ((k === 'mappings' || k === 'addMappings') && (spec.mappings != null || spec.addMappings != null)) continue;
         const v = String(d.value ?? '').trim();
         if (!v || isPlaceholder(v)) continue;   // details の「なし」も捨てる（spec で捨てた項目を details から拾い直さない）
-        if (k === 'mappings' || k === 'addMappings') spec[k] = splitList(v).map(x => { const m = x.match(/^(.+?)\s*(?:→|->|=>|:|：)\s*(.+)$/); return m ? { from: m[1].trim(), to: m[2].trim() } : { from: x, to: '' }; });
+        const cleanRef = (x) => String(x).replace(/^新規(フィールド|項目)\s*/, '').replace(/[（(][^）)]*[）)]\s*$/, '').trim();   // 説明文の飾り（新規フィールド X・X（新規追加））を除く
+        if (k === 'mappings' || k === 'addMappings') spec[k] = splitList(v).map(x => { const m = x.match(/^(.+?)\s*(?:→|->|=>|:|：)\s*(.+)$/); return m ? { from: cleanRef(m[1]), to: cleanRef(m[2]) } : { from: cleanRef(x), to: '' }; });
         else if (k === 'actionMappings') spec[k] = splitList(v).map(x => { const m = x.match(/^(.+?)\s*(?:→|->|=>|:|：)\s*(.+)$/); return actionMappingOf(m ? { srcField: m[1].trim(), destField: m[2].trim() } : { srcField: x, destField: '' }); }).filter(Boolean);
         else if (['assignees', 'targets', 'events', 'fields', 'options', 'entities', 'addPickerFields'].includes(k)) { const list = dropPh(splitList(v)); if (list.length) spec[k] = list; }
         else if (k === 'required') spec.required = /^(true|yes|必須|はい)$/i.test(v) ? true : /^(false|no|任意|いいえ)$/i.test(v) ? false : undefined;
@@ -6655,6 +6691,11 @@
       if ((c.dependsOn || []).length) h(`依存: ${c.dependsOn.join(', ')} の後`);
       for (const q of (c.questions || [])) add('JS_QUESTION', 'medium', `確認: ${q}`);
       for (const rk of (c.risks || [])) h(`リスク: ${rk}`);
+      // 7b. Phase 20（実機）: 外部サービス・外部システムとの連携（Slack / 会計システム / Webhook / メール送信 など）は、認証情報と外部への通信が要るため
+      //     Toolkit のコード生成の対象外（JavaScript に書かない）。kintone の Webhook・プラグイン・連携サービスなど別の手段で行う
+      const extText = [c.requirement, c.whyStandardInsufficient, ...(c.risks || []), ...(c.questions || []), step.title].filter(Boolean).join(' ');
+      const externalHit = /Slack|Teams|Chatwork|LINE ?WORKS|[Ww]ebhook|外部の?(システム|サービス|サーバー|API)|会計(システム|ソフト)|基幹システム|他の?システム|SaaS|メールを?(送信|配信)|外部へ(送|連携)/.exec(extText);
+      if (externalHit) add('JS_EXTERNAL_INTEGRATION', 'medium', `外部サービス / 外部システムとの連携（「${externalHit[0]}」）は Toolkit のコード生成の対象外です（認証情報と外部への通信が必要なため JavaScript には書きません）。kintone の Webhook・プラグイン・連携サービスなど別の手段で行ってください`);
       // 8. 判定
       if (worst === 'high') { r.status = STATUS.INVALID; r.safety = SAFETY.BLOCKED; r.diff.changeType = CHANGE.INVALID; }
       else if (worst === 'medium') r.status = STATUS.NEEDS_CONFIRMATION;
@@ -6662,8 +6703,8 @@
       r.codeGeneration.strategy = c.strategy || null;
       const targetOk = c.strategy !== 'EXTEND_EXISTING_JS' || !!r.codeGeneration.existingFile;
       r.codeGeneration.implementation = impl;
-      r.codeGeneration.supported = r.status !== STATUS.INVALID && impl !== 'CSS' && GENERATABLE_STRATEGIES.includes(c.strategy) && platform.length > 0 && events.length > 0 && targetOk;
-      r.codeGeneration.reason = r.codeGeneration.supported ? null : (r.status === STATUS.INVALID ? 'INVALID' : impl === 'CSS' ? 'CSS_NOT_GENERATED' : !GENERATABLE_STRATEGIES.includes(c.strategy) ? 'STRATEGY_NOT_GENERATED' : !platform.length ? 'PLATFORM_UNSPECIFIED' : !events.length ? 'EVENT_MISSING' : 'TARGET_FILE_MISSING');
+      r.codeGeneration.supported = r.status !== STATUS.INVALID && impl !== 'CSS' && !externalHit && GENERATABLE_STRATEGIES.includes(c.strategy) && platform.length > 0 && events.length > 0 && targetOk;
+      r.codeGeneration.reason = r.codeGeneration.supported ? null : (r.status === STATUS.INVALID ? 'INVALID' : impl === 'CSS' ? 'CSS_NOT_GENERATED' : externalHit ? 'EXTERNAL_INTEGRATION' : !GENERATABLE_STRATEGIES.includes(c.strategy) ? 'STRATEGY_NOT_GENERATED' : !platform.length ? 'PLATFORM_UNSPECIFIED' : !events.length ? 'EVENT_MISSING' : 'TARGET_FILE_MISSING');
       return r;
     }
 
@@ -6677,6 +6718,8 @@
         diff: { stepId: step.id, changeType: cap ? cap.changeType : CHANGE.NO_CHANGE, target: { kind: step.targetKind || 'NONE', id: step.targetRef ?? null }, before: null, after: null, human: [] },
         simulated: false, spec: null };
       const invalid = (code, message) => { issue(code, 'high', message); r.status = STATUS.INVALID; r.safety = SAFETY.BLOCKED; r.diff.changeType = CHANGE.INVALID; };
+      // Phase 20: Toolkit が受信時に直した点（条件式の in / not in など）を、その手順の注記として見せる（黙って直さない）
+      for (const n of (Array.isArray(step.toolkitNotes) ? step.toolkitNotes : [])) if (n && n.code && n.message) issue(n.code, 'low', n.message);
       // Gateway 側の判定を引き継ぐ（AI の文章より Toolkit を優先するが、Gateway の検証は決定的なので尊重する）
       if (step.validation?.status === 'invalid') invalid('GATEWAY_INVALID', (step.validation.issues || []).join('；') || 'Gateway の検証で無効と判定されています');
       if (cyc.has(step.id)) invalid('CIRCULAR_DEPENDENCY', '依存関係が循環しています');
@@ -11900,7 +11943,7 @@
       const [sfText, sfColor] = RSAFETY[r.safety] || [r.safety, '#555'];
       const lines = (r.diff?.human || []).map(l => `<div style="font-size:11px;">${esc(l)}</div>`).join('');
       const issues = (r.issues || []).map(i => `<div style="font-size:11px; color:${i.severity === 'high' ? '#b00020' : i.severity === 'medium' ? '#b26a00' : '#555'};">${i.severity === 'high' ? '⚠' : '・'} ${esc(i.message)}</div>`).join('');
-      const GEN_REASON_JA = { INVALID: '計画が無効', STRATEGY_NOT_GENERATED: '方針が生成の対象外', PLATFORM_UNSPECIFIED: 'PC / モバイル未定', EVENT_MISSING: 'イベント未定', TARGET_FILE_MISSING: '統合先の JS 未指定', BLOCKED_BY_DEPENDENCY: '依存する標準設定が無効', CUSTOMIZATION_NOT_FOUND: 'customization が無い' };
+      const GEN_REASON_JA = { INVALID: '計画が無効', EXTERNAL_INTEGRATION: '外部サービス / 外部システムとの連携は対象外', CSS_NOT_GENERATED: 'CSS は生成の対象外', STRATEGY_NOT_GENERATED: '方針が生成の対象外', PLATFORM_UNSPECIFIED: 'PC / モバイル未定', EVENT_MISSING: 'イベント未定', TARGET_FILE_MISSING: '統合先の JS 未指定', BLOCKED_BY_DEPENDENCY: '依存する標準設定が無効', CUSTOMIZATION_NOT_FOUND: 'customization が無い' };
       const gen = r.codeGeneration ? `<div style="font-size:11px; margin-top:2px; color:${r.codeGeneration.supported ? '#2e7d32' : '#b26a00'};">${r.codeGeneration.supported ? '✓ コード生成できます（標準設定の反映とは別に、右「コード」から動作テスト環境へ登録）' : `△ コード生成はまだできません（${esc(GEN_REASON_JA[r.codeGeneration.reason] || r.codeGeneration.reason || '要確認')}）`}</div>${r.codeGeneration.supported ? `<div style="margin-top:4px;"><button type="button" class="btn kt-ai-act" data-act="generate" data-cid="${esc(r.customization?.customizationId || '')}" style="height:24px; font-size:11px; border-color:#6a1b9a;">コードを作る</button></div>` : ''}` : '';
       return `<div class="kt-ai-review-step" data-step="${esc(r.stepId)}" style="margin-top:6px; padding:6px 8px; border-radius:6px; background:rgba(0,0,0,.04); border-left:3px solid ${stColor};">
         <div><b>Toolkit で確認した結果</b> ${badge(stText, stColor)}${badge(sfText, sfColor)}${changeBadges(r)}${r.blockedBy?.length ? badge(`依存: ${r.blockedBy.join(', ')}`, '#b00020') : ''}${r.solution === 'CUSTOMIZATION' ? badge('JavaScript', '#6a1b9a') : ''}</div>
@@ -12595,7 +12638,11 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
         if ((p.questions || []).length) assistant(`確認したいことが ${p.questions.length} 件あります。${p.questions.slice(0, 3).map(q => `${q.id}: ${q.question}`).join(' / ')}${p.questions.length > 3 ? ' …' : ''}`, { planId: v.planId, version: v.version, kind: 'questions' });
         // Phase 17: 実装仕様（JS がある計画）。会話から即コード生成へ進まず、仕様を確定してから生成する
         if (v.spec) {
-          toolkit(`JavaScript カスタマイズの実装仕様 v${v.spec.version} をまとめました。内容を確認して［この仕様で確定］を押すとコードを生成できます（修正があればそのまま伝えてください）。`, { planId: v.planId, version: v.version, kind: 'spec-intro' });
+          // Phase 20（実機）: Toolkit がコードを生成できない項目（外部連携・CSS・方針未定など）があるときは「生成できます」と言わない
+          const genOk = (v.review?.steps || []).filter(r => r.customization && r.codeGeneration?.supported).length;
+          const total = (Array.isArray(p.customizations) ? p.customizations : []).length;
+          const genNote = v.review && genOk === 0 ? 'この内容は Toolkit ではコードを生成できません（理由は右の「検証」）。仕様の確認と方針の相談に使ってください。' : v.review && genOk < total ? `内容を確認して［この仕様で確定］を押すとコードを生成できます（${total - genOk} 件はコード生成の対象外。理由は右の「検証」）。` : '内容を確認して［この仕様で確定］を押すとコードを生成できます（修正があればそのまま伝えてください）。';
+          toolkit(`JavaScript カスタマイズの実装仕様 v${v.spec.version} をまとめました。${genNote}`, { planId: v.planId, version: v.version, kind: 'spec-intro' });
           push(MSG.SPEC, ROLE.TOOLKIT, `実装仕様 v${v.spec.version}`, { planId: v.planId, version: v.version });
         }
       }
@@ -13655,6 +13702,23 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
      * Phase 20（実機）: 相談中の JS は相談開始時に本文を取得済み（seed）。Field Scanner がキャッシュ復元（本文なし）だと、計画の Context（js-file facts）と
      * Review が「本文は未取得」と判断し、AI が利用者に「ソースを取得できるか」と聞いていた。そのファイルだけ取得済みの本文を重ねる（本文は AI へ送らない）
      */
+    /**
+     * Phase 20（実機）: AI がステータス・ユーザー選択などに「= "値"」と書いた条件式（kintone は in / not in だけ）を、意味が一意に決まる範囲で直す。
+     * ルックアップの絞り込み（参照元アプリのフィールド）は対象外。直した内容は step.toolkitNotes → Review の手順に「条件式を直しました」と出す
+     */
+    function normalizePlanConditions(plan, data) {
+      const fields = data && data.fields && typeof data.fields === 'object' ? (data.fields.properties || data.fields) : null;
+      if (!plan || !Array.isArray(plan.steps) || !fields) return plan;
+      for (const st of plan.steps) {
+        if (!st || !st.spec || typeof st.spec.filterCond !== 'string' || !st.spec.filterCond.trim()) continue;
+        if (st.actionType === 'UPDATE_LOOKUP' || st.actionType === 'ADD_LOOKUP' || (st.actionType === 'ADD_FIELD' && st.spec.fieldType === 'LOOKUP')) continue;
+        const n = KTQueryCheck.normalize(st.spec.filterCond, { fields });
+        if (!n.changes.length) continue;
+        st.spec.filterCond = n.text;
+        st.toolkitNotes = [...(Array.isArray(st.toolkitNotes) ? st.toolkitNotes : []), ...n.changes.map(c => ({ code: 'COND_NORMALIZED', message: `条件式を kintone の書き方に直しました: ${c.from} → ${c.to}（この種類のフィールドは in / not in で比べます）` }))];
+      }
+      return plan;
+    }
     function withConsultedSource(inputs) {
       const seed = conv && conv.state && conv.state.consultation ? conv.state.consultation.seed : null;
       const text = seed && seed.source && seed.source.available ? seed.source.text : null;
@@ -13700,6 +13764,7 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
         let p;
         try { p = await client.plan({ ctx: gen.ctx, requestId, signal }); }
         catch (e) { noteAuthError(e); throw e; }
+        normalizePlanConditions(p, (inputs && inputs.data) || null);
         let review = null;
         try { review = KTPlanReview.review({ plan: p, ...(subject ? withConsultedSource(inputsNow()) : inputsNow()) }); } catch (e) { review = null; }
         return { plan: p, ctx: gen.ctx, review };

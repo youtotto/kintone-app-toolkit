@@ -153,6 +153,19 @@ console.log('\n--- F3. 承認の前の「自動で反映できるか」と、ル
   assert(VM.reviewSummary(v4).notAuto.join() === 'P1,P2,P3' && /自動で反映できない手順：P1, P2, P3/.test(KTAiChatUi.reviewCardHtml(v4)), '会話の検証カード: 自動で反映できない手順を要約に出す（✓ 実行可能 だけで安心させない）');
 }
 
+{
+  // 実機 BF-B（2 回目）: 取得項目を mappings（コピー先は新規フィールドの予定コード）で書き、説明文に「address → 新規フィールド customer_address」
+  const pR2 = plan([
+    step('P1', 'ADD_FIELD', 'PROPOSED_FIELD', 'NEW_FIELD_1', { fieldType: 'SINGLE_LINE_TEXT' }),
+    step('P2', 'ADD_FIELD', 'PROPOSED_FIELD', 'NEW_FIELD_2', { fieldType: 'LINK' }),
+    step('P3', 'UPDATE_LOOKUP', 'LOOKUP', 'customer_lookup', { sourceApp: '500', keyField: 'code', mappings: [{ from: 'address', to: 'customer_address' }, { from: 'phone', to: 'customer_phone' }] }, { dependsOn: ['P1', 'P2'], proposal: { summary: '', details: [{ key: '追加取得項目', value: 'address → 新規フィールド customer_address, phone → 新規フィールド customer_phone' }] } }),
+  ], [pf('NEW_FIELD_1', '顧客住所', 'customer_address', 'SINGLE_LINE_TEXT'), pf('NEW_FIELD_2', '顧客電話番号', 'customer_phone', 'LINK')]);
+  const rvR2 = reviewOf(pR2);
+  const p3R2 = rvR2.steps.find(r => r.stepId === 'P3');
+  assert(p3R2.status !== 'INVALID' && !p3R2.issues.some(i => i.code === 'LOOKUP_DEST_UNKNOWN' || i.code === 'LOOKUP_SOURCE_ALREADY_MAPPED') && rvR2.simulation.after.fields.customer_lookup.lookup.mappings.filter(m => m.to === 'customer_address' || m.to === 'customer_phone').length === 2, 'BF-B（2 回目）: 構造化した mappings があれば説明文の「新規フィールド X」を二重に取り込まない（コピー先が無いと誤判定しない）');
+  assert(KTPlanExecutor.applyReadiness(pR2, rvR2).every(a => a.apply === 'AUTO'), 'BF-B（2 回目）: 3 手順とも自動で反映できる');
+}
+
 // =========================================================
 console.log('\n--- F1. 文書: 計画のある会話の引継ぎ資料 / 仕様書にも変更の記録と状態 ---');
 {
@@ -281,6 +294,55 @@ console.log('\n--- CX-4（intent）. 「誰も」「いつでも」などの不�
   assert(C('承認後は誰も金額を変更できないようにして。ただし営業担当はいつでも変更できるようにして') === 'PLAN', '「承認後は誰も…変更できないようにして。…いつでも変更できるようにして」は計画（実機で質問扱いになった）');
   assert(C('誰でも編集できるようにして') === 'PLAN' && C('何も入力しなくても通知されるようにしたい') === 'PLAN' && C('どこでも見られるようにして') === 'PLAN' && C('いつも担当者に通知したい') === 'PLAN', '「誰でも / 何も / どこでも / いつも」を含む依頼は計画');
   assert(C('このフィールドは何に使ってる？') === 'ASK' && C('誰が承認するの') === 'ASK' && C('いつ通知されますか') === 'ASK' && C('通知は何件ある？') === 'ASK' && C('どこで使われている？') === 'ASK', '「何に / 誰が / いつ / 何件 / どこで」の質問は従来どおり質問');
+}
+
+// =========================================================
+console.log('\n--- CX-2a / CX-3 / CX-7. 条件式の in / not in への正規化（AI が繰り返し「ステータス = "承認済み"」と書いた）---');
+{
+  const { KTQueryCheck } = loadToolkit();
+  const F = DATA.fields;
+  const n1 = KTQueryCheck.normalize('ステータス = "承認済み"', { fields: F });
+  assert(n1.text === 'ステータス in ("承認済み")' && n1.changes.length === 1 && n1.changes[0].from === 'ステータス = "承認済み"', 'ステータス = "承認済み" → ステータス in ("承認済み")');
+  const n2 = KTQueryCheck.normalize('owner != LOGINUSER()', { fields: F });
+  assert(n2.text === 'owner not in (LOGINUSER())', 'ユーザー選択 != LOGINUSER() → not in (LOGINUSER())');
+  const n3 = KTQueryCheck.normalize('ステータス = "承認済み" and amount >= "1000000"', { fields: F });
+  assert(n3.text === 'ステータス in ("承認済み") and amount >= "1000000"' && n3.changes.length === 1, '数値の比較はそのまま・ステータスだけ直す');
+  assert(KTQueryCheck.normalize('amount = "100"', { fields: F }).changes.length === 0 && KTQueryCheck.normalize('ステータス in ("承認済み")', { fields: F }).changes.length === 0 && KTQueryCheck.normalize('ステータス = ', { fields: F }).changes.length === 0, '= が使える種類・既に in・解釈できない式は触らない');
+  assert(KTQueryCheck.check(n1.text, { fields: F, usage: 'perRecordNotification' }).ok, '直した式は kintone の条件として受理される（check）');
+  // 画面経由: 計画の受信時に直し、Review の手順に「条件式を直しました」と出す（黙って直さない）
+  const storage = (() => { const m = new Map(); return { getItem: (k) => (m.has(k) ? m.get(k) : null), setItem: (k, v) => m.set(k, String(v)), removeItem: (k) => m.delete(k) }; })();
+  const settings = KTAiClient.createSettingsStore({ storage, host: 't.cybozu.com' });
+  settings.setConsent(true);
+  const HEALTH = { ok: true, supportedContractVersions: ['2.0', '2.1'], entitlements: [{ product: 'toolkit', features: ['assistant-qa', 'change-planner', 'customization-generator'] }], registry: { toolkit: { 'assistant-qa': { implemented: true, promptVersions: ['1'] }, 'change-planner': { implemented: true, promptVersions: ['1'] }, 'customization-generator': { implemented: true, promptVersions: ['1'] } } }, contract: { usage: { usedThisMonth: 1, monthlyLimit: 200 } } };
+  const RESP = { ok: true, contractVersion: '2.1', meta: { requestId: 'pl-n', gateway: { product: 'toolkit', feature: 'change-planner', promptVersion: '1', contextVersion: 'planner-1' }, normalization: { warnings: [] }, ai: { model: 'm' }, usage: { usedThisMonth: 1, monthlyLimit: 200 } }, plan: { goal: '承認されたら担当者に通知したい', solution: 'STANDARD', assessment: { summary: 's', usableExistingFields: [], usableExistingSettings: [], gaps: [], evidenceIds: [] }, relevantFields: [], proposedFields: [], steps: [step('P1', 'ADD_NOTIFICATION', 'NEW_SETTING', '承認済み通知', { name: '承認済み通知', filterCond: 'ステータス = "承認済み"', targets: ['FIELD_ENTITY:owner'] })], alternatives: [], impact: [], questions: [], unknowns: [], planConfidence: 'INFERRED', customizations: [] } };
+  const client = { async getHealth() { return HEALTH; }, async plan({ ctx, requestId }) { const v = KTAiClient.validatePlan(RESP, ctx); if (!v.ok) throw new Error(JSON.stringify(v.errors)); return { ...v.normalized, requestId, clientWarnings: v.warnings }; } };
+  const session = { status() { return { connected: true, apiBase: 'https://gw.test', refreshExpiresAt: '2099-01-01T00:00:00Z', scope: { product: 'toolkit', feature: 'assistant-qa,change-planner,customization-generator', domain: 't.cybozu.com' } }; }, async migrateLegacy() { return false; }, async refresh() { return {}; }, async disconnect() { return { revoked: true }; }, client };
+  const host = makeFakeHost();
+  const panel = mountAiWorkspace(host, { getInputs: () => ({ data: DATA, deps: DEPS, scan: null, incoming: null }), copyText: async () => true, downloadText: () => { }, colors: { border: '#ccc', bg: '#fff' }, settings, session, hostname: 't.cybozu.com', connectFlow: { start: async () => ({}), cancel() { }, reopen: () => false, state: () => ({ phase: 'idle' }), isRunning: () => false }, executor: { api: makeKintoneMock(DATA).api, appId: '310' } });
+  for (let i = 0; i < 4; i++) await new Promise(r => setTimeout(r, 0));
+  await panel.send('承認されたら担当者に通知したい');
+  const v = panel.conversation().activePlan();
+  const rP1 = v.review.steps.find(x => x.stepId === 'P1');
+  assert(v.plan.steps[0].spec.filterCond === 'ステータス in ("承認済み")' && rP1.issues.some(i => i.code === 'COND_NORMALIZED' && /ステータス = "承認済み" → ステータス in \("承認済み"\)/.test(i.message)) && !rP1.issues.some(i => i.code === 'COND_INVALID'), '受信時に直し、Review の手順に COND_NORMALIZED（直した前後）を出す・COND_INVALID にならない');
+  assert(KTPlanExecutor.applyReadiness(v.plan, v.review).find(a => a.stepId === 'P1').apply === 'AUTO', '直した条件で自動反映できる');
+}
+
+// =========================================================
+console.log('\n--- CX-7. 外部サービス / 外部システムとの連携はコード生成の対象外・案内文 ---');
+{
+  const cust = { customizationId: 'C1', requirement: '承認済みになったら会計システムに請求データを自動送信する', whyStandardInsufficient: 'kintone標準機能に会計システムへの自動送信機能がないため', strategy: 'NEW_JS_FILE', platform: ['desktop'], implementation: 'JAVASCRIPT', events: ['app.record.detail.process.proceed'], fields: [{ code: 'amount', access: 'READ' }], apis: [], existingFiles: [], risks: [], questions: [], dependsOn: [] };
+  const p = plan([step('C1', 'CUSTOMIZATION_REQUIRED', 'JS', '', { customizationId: 'C1' }, { solution: 'CUSTOMIZATION', execution: { mode: 'PLAN_ONLY', supported: false, reason: 'x' } })], [], { solution: 'CUSTOMIZATION', customizations: [cust] });
+  const rv = reviewOf(p);
+  const r = rv.steps.find(x => x.stepId === 'C1');
+  assert(r.codeGeneration.supported === false && r.codeGeneration.reason === 'EXTERNAL_INTEGRATION' && r.issues.some(i => i.code === 'JS_EXTERNAL_INTEGRATION' && /会計システム/.test(i.message)), 'CX-7: 会計システムへの送信はコード生成の対象外（EXTERNAL_INTEGRATION）');
+  const slack = reviewOf(plan([step('C1', 'CUSTOMIZATION_REQUIRED', 'JS', '', { customizationId: 'C1' }, { solution: 'CUSTOMIZATION' })], [], { solution: 'CUSTOMIZATION', customizations: [{ ...cust, requirement: '承認されたらSlackに通知する', whyStandardInsufficient: '標準の通知はSlackに送れない' }] })).steps[0];
+  assert(slack.codeGeneration.supported === false && slack.codeGeneration.reason === 'EXTERNAL_INTEGRATION', 'Slack への通知も対象外');
+  const local = reviewOf(plan([step('C1', 'CUSTOMIZATION_REQUIRED', 'JS', '', { customizationId: 'C1' }, { solution: 'CUSTOMIZATION' })], [], { solution: 'CUSTOMIZATION', customizations: [{ ...cust, requirement: '金額が100万円を超えたら警告を表示する', whyStandardInsufficient: '条件付きの画面警告は標準にない', events: ['app.record.edit.show'], fields: [{ code: 'amount', access: 'CONTROL' }] }] })).steps[0];
+  assert(local.codeGeneration.supported === true, '画面内の処理（外部連携の語なし）は従来どおり生成できる');
+  const conv = KTAiConversation.create({ services: {} });
+  conv.registerPlan({ plan: p, ctx: null, review: rv });
+  const intro = conv.messages().find(m => m.data && m.data.kind === 'spec-intro');
+  assert(intro && /この内容は Toolkit ではコードを生成できません/.test(intro.text) && !/押すとコードを生成できます/.test(intro.text), '案内: 生成できない項目しか無ければ「コードを生成できます」と言わない');
 }
 
 // =========================================================
