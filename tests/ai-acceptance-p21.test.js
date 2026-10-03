@@ -484,6 +484,35 @@ console.log('\n--- G5 / G6. Generator への受け渡し（条件・利用者の
   assert(e2 && e2.code === 'TIMEOUT', 'timeoutMs だけを指定したときは計画・生成もその値（テスト・旧呼び出しとの互換）');
 }
 
+// =========================================================
+console.log('\n--- G9 / G10. Generator Context の欠落（モデル比較の候補モデルで発見）: テーブルの中のフィールドには親のテーブル・要件が名前で挙げる既存ファイルは本文 ---');
+{
+  const data = REG.data;   // items: { item_name, qty }
+  const cust = { customizationId: 'C2', requirement: 'モバイルで承認済みのとき明細の品名・数量を編集不可にし、PC の dealValidate.js と同等の検証をモバイルの保存時にも行う', whyStandardInsufficient: 'w', strategy: 'NEW_JS_FILE', platform: ['mobile'], implementation: 'JAVASCRIPT', events: ['mobile.app.record.edit.show', 'mobile.app.record.edit.submit'], fields: [{ code: 'item_name', access: 'CONTROL', condition: 'ステータス in ("承認済み")' }, { code: 'qty', access: 'CONTROL', condition: 'ステータス in ("承認済み")' }, { code: 'amount', access: 'READ' }], apis: [], existingFiles: [] };
+  const VALIDATE = "(function () {\n  'use strict';\n  kintone.events.on(['app.record.create.submit', 'app.record.edit.submit'], function (event) {\n    if (!event.record['amount'].value) event.record['amount'].error = '金額を入力してください';\n    return event;\n  });\n})();";
+  const scan = { files: [{ name: 'dealValidate.js', target: 'desktop', kind: 'js', text: VALIDATE }, { name: 'unrelated.js', target: 'desktop', kind: 'js', text: '// 別の処理' }], fileEvents: { 'desktop:js:dealValidate.js': ['app.record.create.submit', 'app.record.edit.submit'], 'desktop:js:unrelated.js': [] }, results: [] };
+  const ctx = KTContext.buildGenerator({ customization: cust, plan: { goal: 'g', steps: [] }, planId: 'p', version: 1, data, scan });
+  const items = ctx.fields.find(f => f.code === 'items');
+  assert(items && items.type === 'SUBTABLE' && items.plannedColumns.includes('qty') && ctx.constraints.allowedFields.includes('items') && ctx.constraints.tables && ctx.constraints.tables[0].code === 'items' && /row\.value/.test(ctx.constraints.tables[0].how), `G9: テーブルの中のフィールドだけを計画しても、行を回す親のテーブル（items）を fields / allowedFields / tables で渡す: ${JSON.stringify(ctx.constraints.allowedFields)}`);
+  const ref = ctx.otherFiles.find(f => f.name === 'dealValidate.js'); const un = ctx.otherFiles.find(f => f.name === 'unrelated.js');
+  assert(ref && ref.source === VALIDATE && ref.sourceUse === 'reference-only' && (!un || !un.source) && /参照用/.test(ctx.constraints.referenceFiles || ''), 'G10: 要件が名前で挙げる既存ファイル（dealValidate.js）は本文を参照用に渡す（挙げていないファイルは要約だけ）');
+  const plain = KTContext.buildGenerator({ customization: { ...cust, requirement: '承認済みでは金額を編集不可', fields: [{ code: 'amount', access: 'CONTROL' }] }, plan: { goal: 'g', steps: [] }, planId: 'p', version: 1, data, scan });
+  assert(!plain.constraints.tables && !plain.otherFiles.some(f => f.source) && !plain.constraints.referenceFiles && !plain.fields.some(f => f.code === 'items'), 'テーブルも既存ファイルも挙げない計画の Context は従来どおり');
+}
+{
+  // Code Review: 全列のループ（row.value[key]）は計画した列の制御。条件の中なら通し、条件の外なら止める
+  const { cust, wrap, review } = REG;
+  const c = cust({ requirement: '承認済みでは明細の品名・数量を編集不可にする', fields: [{ code: 'item_name', access: 'CONTROL', condition: 'ステータス in ("承認済み")' }, { code: 'qty', access: 'CONTROL', condition: 'ステータス in ("承認済み")' }] });
+  const inside = review(wrap(['app.record.edit.show'], "    if (record['ステータス'].value === '承認済み') {\n      record['items'].value.forEach(function (row) {\n        Object.keys(row.value).forEach(function (key) { row.value[key].disabled = true; });\n      });\n    }"), c);
+  assert(inside.registration.verdict !== 'BLOCKED' && !inside.registration.blockers.some(b => b.code === 'planned-fields'), `G9: 計画した列（item_name / qty）を全列のループで条件の中でロック → 要件の処理がある（planned-fields で止めない）: ${JSON.stringify(inside.registration.blockers)}`);
+  const outside = review(wrap(['app.record.edit.show'], "    record['items'].value.forEach(function (row) {\n      Object.keys(row.value).forEach(function (key) { row.value[key].disabled = true; });\n    });"), c);
+  assert(outside.registration.verdict === 'BLOCKED' && outside.registration.blockers.some(b => b.code === 'conditional-control' && /item_name|qty/.test(b.message)), '全列のループが条件の外 → 計画した列も条件の外として登録不可');
+  const both = review(wrap(['app.record.edit.show', 'mobile.app.record.edit.show'], "    if (record['ステータス'].value === '承認済み') {\n      record['items'].value.forEach(function (row) {\n        for (var key in row.value) { row.value[key].disabled = true; }\n      });\n    }"), cust({ platform: ['desktop', 'mobile'], events: ['app.record.edit.show', 'mobile.app.record.edit.show'], requirement: '承認済みでは明細を編集不可（PC とモバイル）', fields: [{ code: 'item_name', access: 'CONTROL', condition: 'ステータス in ("承認済み")' }, { code: 'qty', access: 'CONTROL', condition: 'ステータス in ("承認済み")' }] }));
+  assert(!both.registration.blockers.some(b => b.code === 'platform-fields' || b.code === 'planned-fields'), `PC とモバイルの 1 つの handler で全列をロック → 両方の画面で扱っている: ${JSON.stringify(both.registration.blockers)}`);
+  const oneCol = review(wrap(['app.record.edit.show'], "    if (record['ステータス'].value === '承認済み') {\n      record['items'].value.forEach(function (row) { row.value['item_name'].disabled = true; });\n    }"), c);
+  assert(oneCol.registration.verdict === 'BLOCKED' && oneCol.registration.blockers.some(b => b.code === 'planned-fields' && /qty/.test(b.message)), '計画した列の一部（qty）しかロックしていない → 要件の処理が無い（登録不可）');
+}
+
 console.log(`\n${state.failed ? 'FAILED' : 'ALL PASSED'}: ${state.passed} passed / ${state.failed} failed`);
 process.exit(state.failed ? 1 : 0);
 })().catch((e) => { console.error(e); process.exit(1); });

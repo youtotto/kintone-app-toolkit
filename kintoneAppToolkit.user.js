@@ -5724,6 +5724,15 @@
       // ステータス（プロセス管理）は条件に使うので常に渡す
       const statusField = fieldsN.find(x => x.rawType === 'STATUS');
       if (statusField && !fields.some(f => f.code === statusField.code)) fields.push({ code: statusField.code, label: statusField.label, type: 'STATUS' });
+      // Phase 21（G9・モデル比較の CX-1）: 計画がテーブルの中のフィールド（item_name / qty / unit_price）だけを挙げると、行を回すための親のテーブル（items）が
+      //   fields にも allowedFields にも無く、制約を守るモデルは「items が許可されていないので実装できない」と NOT_MET にした（行のセルは record['items'].value の各行からしか触れない）。
+      //   親のテーブルを読み取り用に渡し、計画の列を添える
+      const tables = new Map();
+      for (const f of fields) { if (f.subtable) { if (!tables.has(f.subtable)) tables.set(f.subtable, []); tables.get(f.subtable).push(f.code); } }
+      for (const [tcode, cols] of tables) {
+        const tf = fieldsN.find(x => x.code === tcode);
+        if (tf && !fields.some(f => f.code === tcode)) fields.push({ code: tf.code, label: tf.label, type: 'SUBTABLE', columns: fieldsN.filter(x => x.parent === tcode).map(x => x.code), plannedColumns: cols, readOnlyForRows: true });
+      }
       const statuses = data?.status?.enable ? Object.values(data.status.states || {}).filter(Boolean).sort((a, b) => Number(a.index ?? 0) - Number(b.index ?? 0)).map(s => s.name) : [];
       const dictionary = { fieldCodes: [...new Set([...fieldsN.map(x => x.code), ...fields.filter(f => f.proposed).map(f => f.code)])].sort(cmp), statuses, fieldTypes: Object.fromEntries(fields.map(f => [f.code, f.type])) };
       const cust = {
@@ -5740,7 +5749,15 @@
         const an = KTScan.analyzeFile({ name: existingSource.name, target: existingSource.target || 'desktop', kind: 'js', text: existingSource.text }, { fields: scanFields, selfAppId: data?.appId ?? null });
         existingFile = { name: existingSource.name, target: existingSource.target || 'desktop', hash: an.file.hash, source: existingSource.text, analysis: { events: an.events.map(e => e.name), fields: an.fields.map(f => ({ code: f.code, access: f.access })), apis: [...new Set(an.apis.map(a => a.name))], lines: an.file.lines } };
       }
-      const otherFiles = jsFiles.filter(f => f.analyzed && !(existingFile && f.name === existingFile.name && f.target === existingFile.target)).map(f => ({ name: f.name, target: f.target, events: f.events, fields: Object.entries(f.fields).map(([code, acc]) => ({ code, access: Object.keys(acc) })) })).slice(0, 10);
+      // Phase 21（G10・モデル比較の CX-1）: 要件が名前で挙げる既存ファイル（例:「PC の dealValidate.js と同等の検証をモバイルでも」）は本文を参照用に添える
+      //   （要約だけでは同じ検証を書けず、制約を守るモデルは NOT_MET にした）。小さいファイルだけ（1 件 16 KB・合計 48 KB まで）。書き換え対象ではない
+      const named = new Set([c.requirement, ...(c.existingFiles || []).map(e => e.name), ...(c.risks || [])].join('\n').match(/[\w.-]+\.js\b/g) || []);
+      let refBudget = 48 * 1024;
+      const otherFiles = jsFiles.filter(f => f.analyzed && !(existingFile && f.name === existingFile.name && f.target === existingFile.target)).map(f => {
+        const row = { name: f.name, target: f.target, events: f.events, fields: Object.entries(f.fields).map(([code, acc]) => ({ code, access: Object.keys(acc) })) };
+        if (named.has(f.name) && typeof f.text === 'string' && f.text.length <= 16 * 1024 && f.text.length <= refBudget) { refBudget -= f.text.length; row.source = f.text; row.sourceUse = 'reference-only'; }
+        return row;
+      }).slice(0, 10);
       const app = (() => { try { const o = buildAppOverview({ data, deps, scan, incoming: null, limits: { ...DEFAULT_LIMITS, maxFields: 0, maxViewNames: 0 }, trunc: () => { } }); return { id: o.id, name: o.name }; } catch (e) { return { id: String(data?.appId ?? ''), name: null }; } })();
       const ctx = {
         contextVersion: GENERATOR_CONTEXT_VERSION,
@@ -5752,7 +5769,9 @@
         customization: cust,
         fields, dictionary, existingFile, otherFiles,
         // Phase 20（実機）: spaces = フォームに実在するスペース要素の ID（getSpaceElement に使える ID はこれだけ。無いスペースを前提にしたコードは使えない）
-        constraints: { style: "即時関数 (function () { 'use strict'; … })(); で包む。ハンドラは必ず return event。ライブラリは使わない。フィールドコード・ステータス名は dictionary の表記のまま", platform: cust.platform, noNetwork: true, noSecrets: true, allowedEvents: cust.events, allowedFields: cust.fields.map(f => f.code), allowedApis: cust.apis, patchOnly: cust.strategy === 'EXTEND_EXISTING_JS', spaces: (typeof KTCodeReview !== 'undefined' && KTCodeReview.layoutSpaceIds) ? KTCodeReview.layoutSpaceIds(data?.layout) : [] },
+        constraints: { style: "即時関数 (function () { 'use strict'; … })(); で包む。ハンドラは必ず return event。ライブラリは使わない。フィールドコード・ステータス名は dictionary の表記のまま", platform: cust.platform, noNetwork: true, noSecrets: true, allowedEvents: cust.events, allowedFields: [...new Set([...cust.fields.map(f => f.code), ...tables.keys()])], allowedApis: cust.apis, patchOnly: cust.strategy === 'EXTEND_EXISTING_JS', spaces: (typeof KTCodeReview !== 'undefined' && KTCodeReview.layoutSpaceIds) ? KTCodeReview.layoutSpaceIds(data?.layout) : [],
+          ...(tables.size ? { tables: [...tables].map(([code, cols]) => ({ code, columns: cols, access: 'READ', how: `行は record['${code}'].value の配列。列は row.value['<列のコード>']（例: row.value['${cols[0]}'].disabled = true）。テーブル自体の値は書き換えない。行の追加・削除は JavaScript では止められない` })) } : {}),
+          ...(otherFiles.some(f => f.source) ? { referenceFiles: 'otherFiles[].source は参照用（同じ検証・処理を別の画面に用意するときの元）。そのファイル自体は書き換えない' } : {}) },
         size: null,
       };
       const m = measureText(JSON.stringify(ctx));
@@ -10800,16 +10819,18 @@
      * Phase 21: テーブル（tableCode）のセルを編集不可にしている場所（行のループで row.value[key] / row.value['qty'] に .disabled = true）。
      *   直前（同じ handler の中）で tableCode の value を回しているものだけ
      */
-    function subtableCellSites(clean, tableCode) {
+    function subtableCellSites(clean, tableCode, col = null) {
       const s = String(clean || '');
       const out = [];
-      const rx = /\.value\s*\[\s*[^\]]+\]\s*\.\s*disabled\s*=(?!=)\s*true\b/g;
+      const rx = /\.value\s*\[\s*([^\]]+)\]\s*\.\s*disabled\s*=(?!=)\s*true\b/g;
       const iter = new RegExp(`(?:\\[\\s*['"\`]${String(tableCode).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}['"\`]\\s*\\]|\\.\\s*${String(tableCode).replace(/[^A-Za-z0-9_$]/g, '') || '\\u0000'})\\s*\\.\\s*value\\b`);
       let m;
       while ((m = rx.exec(s)) !== null) {
         const before = s.slice(Math.max(0, m.index - 1200), m.index);
         if (!iter.test(before)) continue;
-        out.push({ index: m.index, ...siteConds(s, m.index) });
+        // Phase 21: 列を指定したときは、その列（row.value['qty']）と全列のループ（row.value[key]）だけ
+        if (col != null) { const lit = /^\s*['"`]([^'"`]+)['"`]\s*$/.exec(m[1]); if (lit && lit[1] !== col) continue; }
+        out.push({ index: m.index, allColumns: !/^\s*['"`]/.test(m[1]), ...siteConds(s, m.index) });
       }
       return out;
     }
@@ -11146,31 +11167,36 @@
       const planCode = (code) => proposedCodes.get(code) ?? code;
       const planFields = new Map((c.fields || []).map(f => [planCode(f.code), f.access]));
       const planCond = new Map((c.fields || []).filter(f => typeof f.condition === 'string' && f.condition.trim()).map(f => [planCode(f.code), f.condition.trim()]));
+      // Phase 21（G9）: テーブルの中のフィールドを計画したときは、親のテーブルを読む（行を回す）のは計画の範囲。全列のループ（row.value[key].disabled = true）は各列の制御
+      const subtableOf = new Map(fieldsN.filter(f => f.parent).map(f => [f.code, f.parent]));
+      const tableOfPlanned = new Set([...planFields.keys()].filter(code => subtableOf.has(code)).map(code => subtableOf.get(code)));
+      const allCellsLocked = (text, code) => subtableOf.has(code) && subtableCellSites(text, subtableOf.get(code), code).some(x => x.allColumns);
       for (const f of addedScan.fields) {
         const writes = ACCESS_W(f.access);
         const planned = planFields.get(f.code) || null;
+        if (!planned && !writes.length && tableOfPlanned.has(f.code)) continue;
         if (!planned) mismatches.push({ kind: 'field', code: writes.length ? 'EXTRA_FIELD_WRITE' : 'EXTRA_FIELD_READ', items: [f.code], message: `計画に無いフィールド ${f.code} を${writes.length ? `書き換え・制御（${writes.join('/')}）` : '参照'}しています` });
         else if (writes.length && planned === 'READ') mismatches.push({ kind: 'field', code: 'ACCESS_ESCALATED', items: [f.code], message: `${f.code} は計画では READ ですがコードは ${writes.join('/')} しています` });
       }
-      for (const [code, access] of planFields) if (!addedScan.fields.some(f => f.code === code)) mismatches.push({ kind: 'field', code: 'MISSING_FIELD', items: [code], message: `計画のフィールド ${code}（${access}）が追加したコードに現れません${rescan.fields.some(f => f.code === code) ? '（既存のコードにはあります）' : ''}` });
+      for (const [code, access] of planFields) if (!addedScan.fields.some(f => f.code === code) && !(access === 'CONTROL' && allCellsLocked(cleanAdded, code))) mismatches.push({ kind: 'field', code: 'MISSING_FIELD', items: [code], message: `計画のフィールド ${code}（${access}）が追加したコードに現れません${rescan.fields.some(f => f.code === code) ? '（既存のコードにはあります）' : ''}` });
       // ---- Phase 21: 登録の可否。静的に確かめられる要件違反は block（登録不可）、静的には確かめられないことは review（登録前に確認する項目）----
       const handlersAll = kintoneFieldOps(clean);
       const unresolvedEvents = handlersAll.some(h => h.events.includes('（イベント名を特定できない登録）')) || dynamicEventNames(clean);
       // (1) 計画のイベントがファイルに無い（そのタイミングでは動かない）。Phase 20 F41 / BF-C: change が無く入力中に警告が切り替わらなかった
       if (missingEvents.length) add('planned-events', false, unresolvedEvents ? 'review' : 'block', `計画のイベントがコードにありません: ${missingEvents.join(', ')}（${missingEvents.some(ev => /\.change\./.test(ev)) ? '値の変更時に動かないため、入力中に切り替わりません' : 'そのタイミングでは動きません'}）${unresolvedEvents ? '。イベント名を組み立てている登録があり、静的には確かめられません' : ''}`);
       // (2) 計画で制御・書き換えするフィールドが、ファイルのどこにも無い（要件の処理が無い）
-      const absent = [...planFields.entries()].filter(([code, access]) => (access === 'CONTROL' || access === 'WRITE') && !rescan.fields.some(f => f.code === code));
+      const absent = [...planFields.entries()].filter(([code, access]) => (access === 'CONTROL' || access === 'WRITE') && !rescan.fields.some(f => f.code === code) && !(access === 'CONTROL' && allCellsLocked(clean, code)));
       if (absent.length) add('planned-fields', false, 'block', `計画では ${absent.map(([code, a]) => `${code} を${a === 'CONTROL' ? '制御' : '書き換え'}`).join('、')}することになっていますが、コードに現れません（要件の処理がありません）`);
       // (3) PC とモバイルの両方が対象: 制御・書き換えするフィールドが片方の画面の処理にしか無い（Phase 20 F41: 担当者のロックがモバイルだけ）。ファイル全体（既存の handler を含む）で見る
       if (Array.isArray(c.platform) && c.platform.includes('desktop') && c.platform.includes('mobile')) {
-        const covered = (code, mobile) => handlersAll.some(h => h.events.some(e => (mobile ? /^mobile\./ : /^app\./).test(e)) && (h.refs || []).includes(code));
+        // テーブルの中のフィールドは、親のテーブルを参照して編集可否を設定する handler（全列のループ）でも扱っている
+        const covered = (code, mobile) => handlersAll.some(h => h.events.some(e => (mobile ? /^mobile\./ : /^app\./).test(e)) && ((h.refs || []).includes(code) || (subtableOf.has(code) && (h.refs || []).includes(subtableOf.get(code)) && h.disabled)));
         const gaps = [];
         for (const [code, access] of planFields) { if (access !== 'CONTROL' && access !== 'WRITE') continue; const pc = covered(code, false), mob = covered(code, true); if (pc !== mob) gaps.push({ code, access, pc }); }
         for (const x of gaps) mismatches.push({ kind: 'platform', code: 'PLATFORM_FIELD_MISSING', items: [x.code], message: `${x.code} は${x.pc ? 'モバイル' : 'PC'} の画面の処理で${x.access === 'CONTROL' ? '制御' : '書き換え'}していません（${x.pc ? 'PC' : 'モバイル'} だけ）` });
         if (gaps.length) add('platform-fields', false, unresolvedEvents ? 'review' : 'block', `PC とモバイルの両方が対象ですが、${gaps.map(x => `${x.code} は${x.pc ? 'モバイル' : 'PC'}の画面の処理で${x.access === 'CONTROL' ? '制御' : '書き換え'}していません（${x.pc ? 'PC' : 'モバイル'}だけ）`).join('、')}${unresolvedEvents ? '。イベント名を特定できない登録があり、静的には確かめられません' : ''}`);
       }
       // (4) 計画に無いフィールドの操作（対象と異なるフィールド）。テーブルの中のフィールドは、テーブルが計画にあれば対象。エラー表示だけは要確認
-      const subtableOf = new Map(fieldsN.filter(f => f.parent).map(f => [f.code, f.parent]));
       const inPlan = (code) => planFields.has(code) || (subtableOf.has(code) && planFields.has(subtableOf.get(code)));
       const OP_JA = { value: '値の書き換え', disabled: '編集可否', shown: '表示切替', error: 'エラー表示' };
       const fieldWrites = writeTargets(cleanAdded);
@@ -11189,7 +11215,8 @@
       //     条件の中でも、条件の項目・値を見ているか分からなければ要確認（条件の向きまでは判定しない）
       const baseText = g.strategy === 'EXTEND_EXISTING_JS' && existingSource && typeof existingSource.text === 'string' ? KTScan.stripCommentsOnly(existingSource.text) : '';
       // テーブルはセル（行のループの row.value[…] / テーブル内フィールド）を編集不可にする場所も、そのテーブルの制御として数える
-      const tableSites = (text, code) => [...disableSites(text, code), ...(fieldsN.some(f => f.code === code && f.rawType === 'SUBTABLE') ? [...subtableCellSites(text, code), ...[...subtableOf.entries()].filter(([, p]) => p === code).flatMap(([ch]) => disableSites(text, ch))] : [])];
+      //   テーブルの中のフィールド（qty など）は、その列（row.value['qty']）と全列のループ（row.value[key]）の場所も数える（Phase 21 G9）
+      const tableSites = (text, code) => [...disableSites(text, code), ...(fieldsN.some(f => f.code === code && f.rawType === 'SUBTABLE') ? [...subtableCellSites(text, code), ...[...subtableOf.entries()].filter(([, p]) => p === code).flatMap(([ch]) => disableSites(text, ch))] : []), ...(subtableOf.has(code) ? subtableCellSites(text, subtableOf.get(code), code) : [])];
       // Phase 21: 「条件の外」には、ループ・存在確認・別の項目だけの条件の中（計画の条件の項目・値を見ない）も含める（blindCond）。
       //   名前付きの関数の中は呼び出し元ごとの経路（pathsOfSite）で見る。中身が分からない条件（関数の引数・else など）は確認に回す
       const lvClean = loopVarsOf(clean);
