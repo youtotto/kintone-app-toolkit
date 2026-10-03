@@ -651,6 +651,27 @@ console.log('\n--- F37（CX-1 2 回目・実機）. 同じ遷移元の分岐は�
 }
 
 // =========================================================
+console.log('\n--- F40（CX-3 3 回目・実機）. 同じ既存の設定を 2 つの手順が変更する（後の手順が前を上書きする）---');
+{
+  // 実機と同じ形: 「申請する」を P1 で 100 万円以上 → 承認待ち、P2 で 100 万円未満 → 承認済み（どちらも UPDATE_PROCESS。分岐なら 2 本目は ADD_PROCESS_ACTION）
+  const p = plan([
+    step('P1', 'UPDATE_PROCESS', 'PROCESS_ACTION', '申請する', { name: '申請する', from: '未処理', to: '承認待ち', filterCond: 'amount >= "1000000"', changeKind: 'ACTION_CONDITION' }),
+    step('P2', 'UPDATE_PROCESS', 'PROCESS_ACTION', '申請する', { name: '申請する', from: '未処理', to: '完了', filterCond: 'amount <= "999999"', changeKind: 'ACTION_CONDITION' }, { dependsOn: ['P1'] }),
+  ]);
+  const rv = reviewOf(p);
+  const c = rv.conflicts.find(x => x.code === 'PLAN_INTERNAL_SAME_TARGET');
+  assert(c && c.severity === 'high' && c.stepIds.includes('P1') && c.stepIds.includes('P2') && /申請する/.test(c.message) && /上書き/.test(c.message), `F40: 同じアクション「申請する」を 2 つの手順が変更 → PLAN_INTERNAL_SAME_TARGET（以前は副作用の「承認待ちへ進む道が無くなる」だけ）: ${c && c.message}`);
+  const ar = KTPlanExecutor.applyReadiness(p, rv);
+  assert(ar.every(a => a.apply === 'BLOCKED') && ar.some(a => a.reason === 'SAME_TARGET_IN_PLAN'), `F40: その手順はどちらも自動で反映しない: ${ar.map(a => a.stepId + ':' + a.apply + '(' + a.reason + ')').join(' ')}`);
+  // 別々の設定（別のアクション）を変える手順は従来どおり
+  const ok = plan([
+    step('P1', 'UPDATE_PROCESS', 'PROCESS_ACTION', '申請する', { name: '申請する', from: '未処理', to: '承認待ち', filterCond: 'amount >= "1000000"', changeKind: 'ACTION_CONDITION' }),
+    step('P2', 'ADD_PROCESS_ACTION', 'PROCESS_ACTION', '申請する（少額）', { name: '申請する（少額）', from: '未処理', to: '完了', filterCond: 'amount <= "999999"' }),
+  ]);
+  assert(!reviewOf(ok).conflicts.some(x => x.code === 'PLAN_INTERNAL_SAME_TARGET'), 'F40: 既存アクションの変更 ＋ 新しいアクションの追加（分岐の正しい書き方）は指摘しない');
+}
+
+// =========================================================
 console.log('\n--- F38（CX-1 2 回目・実機）. 既存ファイルの即時関数の外に足したコード（ファイル直下の宣言）を見逃さない ---');
 {
   const DL = ["(function () {", "  'use strict';", "  kintone.events.on(['app.record.create.show', 'app.record.edit.show'], function (event) {", "    var record = event.record;", "    if (record['ステータス'] && record['ステータス'].value === '承認済み') {", "      record['amount'].disabled = true;", "    }", "    return event;", "  });", "})();", ""].join('\n');

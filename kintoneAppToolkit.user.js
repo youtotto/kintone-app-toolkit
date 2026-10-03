@@ -7684,6 +7684,23 @@
       const lookups = new Map();
       for (const r of results.values()) if (r.diff.changeType === CHANGE.ADD && r.diff.after && r.diff.after.lookup && r.diff.after.lookup.app) { const k = `${r.diff.after.lookup.app}|${r.diff.after.lookup.keyField || ''}`; lookups.set(k, [...(lookups.get(k) || []), r.stepId]); }
       for (const [k, ids] of lookups) if (ids.length > 1) conflicts.push({ code: 'LOOKUP_SPLIT', severity: 'medium', stepIds: ids, message: `${ids.join(', ')} は同じ参照元（アプリ ${k.split('|')[0]} / キー ${k.split('|')[1] || '—'}）のルックアップです。1 つのルックアップで複数の項目を取得できます（分けると利用者が ${ids.length} 回選ぶことになります）` });
+      // Phase 20（CX-3 3 回目・実機）: 同じ既存のアクションの条件・遷移先を 2 つの手順が変更する（P1:「申請する」を 100 万円以上 → 承認待ち、P2: 同じ「申請する」を
+      //   100 万円未満 → 承認済み）。仮適用も反映も後の手順が前を上書きし、計画の分岐にならない（以前は副作用の「承認待ちへ進む道が無くなる」だけが出た）
+      const sameAction = new Map();
+      for (const st of steps) {
+        if (st.actionType !== 'UPDATE_PROCESS') continue;
+        const r = results.get(st.id); const t = r?.diff?.target;
+        if (!r || r.status === STATUS.INVALID || t?.kind !== 'PROCESS_ACTION') continue;
+        const kinds = [...(r.diff.changeKinds || []), r.diff.changeKind].filter(Boolean);
+        if (!kinds.some(k => /^ACTION_(CONDITION|TRANSITION)$/.test(k))) continue;
+        const key = `${t.identity?.name ?? t.id}\u0000${t.identity?.from ?? ''}`;
+        sameAction.set(key, [...(sameAction.get(key) || []), st.id]);
+      }
+      for (const [key, ids] of sameAction) {
+        if (ids.length < 2) continue;
+        const [name, from] = key.split('\u0000');
+        conflicts.push({ code: 'PLAN_INTERNAL_SAME_TARGET', severity: 'high', stepIds: ids, message: `${ids.join(' と ')} が同じアクション「${name}」${from ? `（${from} から）` : ''}の条件・遷移先を変更します。後の手順が前の手順の変更を上書きするので、計画の分岐にはなりません（分岐なら 2 本目は新しいアクション（ADD_PROCESS_ACTION）にするよう計画を直してください）` });
+      }
       // プロセス: 到達不能なステータス（遷移先として現れない新規ステータス）・遷移先の無いステータス
       const states = model.process.states, actions = model.process.actions;
       for (const s of states.filter(x => x.origin === 'proposed')) {
@@ -9311,6 +9328,8 @@
         else if ((r.issues || []).some(i => i.code === 'STEP_MULTIPLE_SETTINGS')) set(STEP.BLOCKED, 'MULTIPLE_SETTINGS_IN_STEP', '1 つの手順に複数の設定が書かれているため反映しません（設定ごとに手順を分けるよう計画を直してください）');
         else if (!cap || !cap.previewExecute || !HANDLERS[step.actionType]) set(STEP.UNSUPPORTED, 'PREVIEW_NOT_SUPPORTED', 'Toolkit からは自動で反映できません（計画のみ）');
         else if (step.actionType === 'ADD_PROCESS_STATUS' && (review?.conflicts || []).some(c => c.code === 'STATUS_UNREACHABLE' && (c.stepIds || []).includes(id))) set(STEP.BLOCKED, 'STATUS_UNREACHABLE', 'このステータスへ遷移するアクションが計画に無く孤立するため反映しません（遷移するアクションの step を足してください）');
+        // Phase 20（CX-3 3 回目・実機）: 同じアクションを別の手順も変更する（後の手順が前を上書きする）計画は反映しない
+        else if ((review?.conflicts || []).some(c => c.code === 'PLAN_INTERNAL_SAME_TARGET' && (c.stepIds || []).includes(id))) set(STEP.BLOCKED, 'SAME_TARGET_IN_PLAN', '同じアクションを別の手順も変更するため反映しません（後の手順が前の変更を上書きします。計画を直してください）');
         else {
           const p = HANDLERS[step.actionType].prepare(step, { stepReview: r, plan, fieldsNow: ahead, processNow, relatedNow, actionsNow });
           if (p.unsupported) set(p.unsupported === 'INVALID_CONDITION' || (step.actionType === 'UPDATE_LOOKUP' && LOOKUP_BLOCKING.includes(p.unsupported)) || ((step.actionType === 'ADD_APP_ACTION' || step.actionType === 'UPDATE_APP_ACTION') && APP_ACTION_BLOCKING.includes(p.unsupported)) ? STEP.BLOCKED : STEP.UNSUPPORTED, p.unsupported, p.message);
