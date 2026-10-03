@@ -18,6 +18,7 @@ const { assert, state } = makeAssert();
 const FX = require('./fixtures/ai-context-app.js');
 const { makeKintoneMock } = require('./helpers/kintone-preview-mock.js');
 const X = KTJsExecutor;
+const clone = (v) => JSON.parse(JSON.stringify(v));
 
 const FIELD_ON_OFF = [
   "(function () {",
@@ -175,6 +176,7 @@ console.log('\n--- 4. §47 / §48 / §51 登録と検証: replace（全保持）
   const m3 = mk();
   const mobCh = { ...newChange(['common.js', 'mobileLock.js']).change, target: 'mobile', content: NEW_JS.replace(/app\.record\.(create|edit)\.change\.amount/g, 'mobile.app.record.$1.change.amount'), planEvents: ['mobile.app.record.create.change.amount', 'mobile.app.record.edit.change.amount'] };
   mobCh.contentHash = KTScan.hashText(mobCh.content); mobCh.bytes = mobCh.content.length;
+  mobCh.registration = { ...mobCh.registration, codeHash: mobCh.contentHash };   // Phase 21: 検査したコードの指紋（本文を差し替えた変更は、検査し直した指紋が無いと登録しない）
   mobCh.codeReview.rescan = { events: ['mobile.app.record.create.change.amount', 'mobile.app.record.edit.change.amount'], fieldAccess: { amount: { CONTROL: 1, READ: 1 } }, apis: ['kintone.events.on'] };
   const prep3 = await X.prepare({ appId: '310', changes: [mobCh] }, { api: m3.api });
   const ex3 = await X.executePreview(prep3, { api: m3.api, fieldRows: FIELD_ROWS });
@@ -198,6 +200,11 @@ console.log('\n--- 4. §47 / §48 / §51 登録と検証: replace（全保持）
   const m7 = mk(); m7.ctl.mutateCustomize = (next) => next;
   const bad = { ...newChange().change, content: NEW_JS.replace("    return event;", "    record['owner'].value = [];\n    return event;") };
   bad.contentHash = KTScan.hashText(bad.content); bad.bytes = bad.content.length;
+  // Phase 21: 検査の後に本文を差し替えた変更は、登録の準備で止まる（CONTENT_CHANGED_AFTER_REVIEW）
+  const prep7a = await X.prepare({ appId: '310', changes: [clone(bad)] }, { api: mk().api });
+  assert(prep7a.status === 'BLOCKED' && prep7a.blockers.some(b => b.code === 'CONTENT_CHANGED_AFTER_REVIEW'), 'Phase 21: 検査の後に本文を差し替えた変更は登録の準備で止まる（CONTENT_CHANGED_AFTER_REVIEW）');
+  // 登録後の検証（多重の防御）が計画との違いを見つけることも確かめる: 検査済みの指紋を付けたことにして準備を通す
+  bad.registration = { ...bad.registration, codeHash: bad.contentHash };
   const prep7 = await X.prepare({ appId: '310', changes: [bad] }, { api: m7.api });
   const ex7 = await X.executePreview(prep7, { api: m7.api, fieldRows: FIELD_ROWS });
   const pv = ex7.steps[0].verification.checks.find(c => c.name === 'planVsActual');

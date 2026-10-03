@@ -105,6 +105,8 @@ function mount({ inputs = INPUTS, planResponse = PLAN_REPLACE, generatedFor = ge
 }
 const clickChat = (m, act, extra = {}) => m.$('kt-ai-chat').dispatch({ type: 'click', target: { dataset: { act, ...extra } } });
 const clickPane = (m, id) => m.$('kt-ai-pane-code').dispatch({ type: 'click', target: { id } });
+// Phase 21: 登録の前に確認が必要な項目を 1 件ずつ確認する（確認しないと Executor が登録しない）
+const ackAll = async (m) => { for (const x of (m.panel.jsExecState().prepared?.confirmations || [])) await m.$('kt-ai-pane-exec').dispatch({ type: 'change', target: { dataset: { ackKey: x.key }, checked: true } }); };
 const writes = (m) => m.mock.calls.filter(c => !c.startsWith('GET'));
 const seedFor = (name, target = 'desktop', { text, url } = {}) => KTContext.buildConsultationSeed({ data: INPUTS.data, deps: INPUTS.deps, scan: INPUTS.scan, file: url ? { name, target, type: 'URL', url } : { name, target, type: 'FILE', fileKey: name === 'fieldOnOff.js' ? 'dl:fieldOnOff' : 'dl:mlock', size: '290' }, sourceText: text ?? null, appName: '案件管理' });
 const confirmSpec = async (m) => { const v = m.conv().activePlan(); await clickChat(m, 'confirm-spec', { plan: v.planId, version: String(v.version) }); };
@@ -237,6 +239,7 @@ console.log('\n--- §46〜§53（UI 経由）: 既存 FILE の差し替え登録
   assert(m.panel.jsExecState().stage === 'idle' && m.pane() === '' && writes(m).length === 0, '［キャンセル］: 何も書かない');
   await clickChat(m, 'open-js-register', { plan: v.planId, version: String(v.version) });
   await ticks(6);
+  await ackAll(m);
   await clickPane(m, 'kt-ai-jsreg-go');
   await ticks(10);
   const ex = m.panel.jsExecState().execution;
@@ -277,6 +280,7 @@ console.log('\n--- 新規 JS（desktop）の登録 / mobile（desktop を変え�
   await clickChat(m, 'open-js-register', { plan: v.planId, version: String(v.version) });
   await ticks(6);
   assert(m.panel.jsExecState().stage === 'confirm' && m.panel.jsExecState().prepared.changes[0].kind === 'ADD_FILE' && m.panel.jsExecState().prepared.changes[0].name === 'amount-warning.js' && /＋ <b>amount-warning\.js<\/b>（PC）　新規追加（3 番目・末尾）/.test(m.pane()) && /PC：1件追加/.test(m.pane()), '新規 JS: ADD_FILE・末尾（3 番目）・確認画面');
+  await ackAll(m);
   await clickPane(m, 'kt-ai-jsreg-go');
   await ticks(10);
   assert(m.panel.jsExecState().execution.status === 'DONE' && jsNames(m, 'desktop').join() === 'https://example.com/lib/ext.js,fieldOnOff.js,amount-warning.js' && jsNames(m, 'mobile').join() === 'mobileLock.js', '§48 desktop JS 2 → 3（URL と既存を保持・mobile は不変）');
@@ -294,6 +298,7 @@ console.log('\n--- 新規 JS（desktop）の登録 / mobile（desktop を変え�
   await clickChat(m, 'open-js-register', { plan: v.planId, version: String(v.version) });
   await ticks(6);
   assert(m.panel.jsExecState().prepared.changes[0].target === 'mobile' && /（モバイル）　新規追加/.test(m.pane()) && /PC：変更なし　Mobile：1件追加/.test(m.pane()), 'mobile の新規 JS: Mobile 1 件追加・PC 変更なし');
+  await ackAll(m);
   await clickPane(m, 'kt-ai-jsreg-go');
   await ticks(10);
   assert(m.panel.jsExecState().execution.status === 'DONE' && jsNames(m, 'mobile').join() === 'mobileLock.js,approved-lock-mobile.js' && jsNames(m, 'desktop').join() === before.join(), '§56 mobile に登録・desktop は変更なし');
@@ -349,6 +354,7 @@ console.log('\n--- 新規 JS（desktop）の登録 / mobile（desktop を変え�
   const v = m.conv().activePlan();
   await clickChat(m, 'open-js-register', { plan: v.planId, version: String(v.version) });
   await ticks(6);
+  await ackAll(m);
   await clickPane(m, 'kt-ai-jsreg-go');
   await ticks(10);
   const cur = await m.mock.api.getPreviewCustomize('310');

@@ -206,6 +206,7 @@ console.log('\n--- §7 / §20. Customize → 開発支援（JS 相談）: 左は
   assert(/コード生成済み/.test(m.$('kt-ai-ws-state').innerHTML), '作業状態: コード生成済み');
   await clickPane(m, 'code', { id: 'kt-ai-code-register' }); await ticks();
   assert(m.panel.jsExecState().stage === 'confirm' && m.panel.drawerState().pane === 'exec' && /JavaScript を動作テスト環境へ登録します。/.test(m.$('kt-ai-jsreg').innerHTML), '［動作テスト環境へ登録］（右「コード」）→ 右「実行」の最終確認（Final Confirmation は従来どおり）');
+  for (const x of (m.panel.jsExecState().prepared?.confirmations || [])) await m.host.querySelector('#kt-ai-pane-exec').dispatch({ type: 'change', target: { dataset: { ackKey: x.key }, checked: true } });   // Phase 21: 確認が必要な項目を 1 件ずつ確認
   await clickPane(m, 'exec', { id: 'kt-ai-jsreg-go' }); await ticks(8);
   const c4 = m.chat();
   assert(m.panel.jsExecState().stage === 'done' && /JavaScript を動作テスト環境へ登録しました。/.test(c4) && /✎ fieldOnOff\.js（PC）/.test(c4) && /✓ 1 \/ 1 件 VERIFIED/.test(c4) && /data-act="open-js-result"/.test(c4) && /data-act="open-customize"/.test(c4) && !/planVsActual/.test(c4) && !/Audit/.test(c4), 'JS 登録の要約（左）: ファイル・✓ 1 / 1・［登録結果を見る］［Customize で確認］。検証の内訳・監査は無い');

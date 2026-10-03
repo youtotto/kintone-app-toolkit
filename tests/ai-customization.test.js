@@ -245,14 +245,14 @@ console.log('\n--- §52-2. KTCodeReview: 構文 / 未知イベント / 未知フ
   assert(badField.status === 'BLOCKED' && !check(badField, 'fields').ok && /GENERATED_JS_UNKNOWN_FIELD/.test(check(badField, 'fields').message) && /amount_total/.test(check(badField, 'fields').message), '存在しないフィールド amount_total: GENERATED_JS_UNKNOWN_FIELD（BLOCKED）');
   // Phase 20: 計画外の書き換えは error を設定しない別の handler で確かめる（同じ change イベントで error と value を設定すると、kintone が value を取り消すので別の検査で BLOCKED になる）
   const extraWrite = run(NEW_JS_GOOD.replace("})();", "  kintone.events.on(['app.record.create.show'], function (event) {\n    event.record['approver'].value = [];\n    return event;\n  });\n})();"));
-  assert(extraWrite.status === 'REVIEW_REQUIRED' && !check(extraWrite, 'plan-consistency').ok && extraWrite.mismatches.some(m => m.code === 'EXTRA_FIELD_WRITE' && m.items.includes('approver')), '計画に無いフィールド（approver）の書き換え: CUSTOMIZATION_PLAN_MISMATCH（確認が必要）');
+  assert(extraWrite.status === 'BLOCKED' && !check(extraWrite, 'target-fields').ok && check(extraWrite, 'target-fields').severity === 'block' && /approver/.test(check(extraWrite, 'target-fields').message) && extraWrite.registration.verdict === 'BLOCKED' && extraWrite.mismatches.some(m => m.code === 'EXTRA_FIELD_WRITE' && m.items.includes('approver')), '計画に無いフィールド（approver）の書き換え: 対象と異なるフィールド → 登録不可（Phase 21。以前は確認が必要の扱い）');
   const errorAndValue = run(NEW_JS_GOOD.replace("    return event;", "    record['approver'].value = [];\n    return event;"));
   assert(errorAndValue.status === 'BLOCKED' && check(errorAndValue, 'error-cancels-edit') && !check(errorAndValue, 'error-cancels-edit').ok && /value/.test(check(errorAndValue, 'error-cancels-edit').message), 'Phase 20: 同じ change イベントで error と value（approver）を設定: kintone が値の変更を取り消すので BLOCKED（error-cancels-edit）');
   const extraApi = run(NEW_JS_GOOD.replace("    return event;", "    kintone.api(kintone.api.url('/k/v1/records.json', true), 'GET', { app: 600 });\n    return event;"));
   assert(extraApi.status === 'REVIEW_REQUIRED' && check(extraApi, 'apis-network') && !check(extraApi, 'apis-network').ok && /kintone\.api/.test(check(extraApi, 'apis-network').message), '計画に無い REST API（kintone.api）: 確認が必要（単純な制御には不要）');
   const missingEv = run(NEW_JS_GOOD.replace("['app.record.create.change.amount', 'app.record.edit.change.amount']", "'app.record.create.change.amount'"));
   // Phase 20（実機 BF-C 4 回目）: 計画の change を登録しないコードは入力中に切り替わらない → 軽微な差ではなく要確認に変更
-  assert(missingEv.mismatches.some(m => m.code === 'MISSING_EVENT' && m.items.includes('app.record.edit.change.amount')) && !check(missingEv, 'plan-consistency').ok && /入力中に切り替わりません/.test(check(missingEv, 'plan-consistency').message) && missingEv.status === 'REVIEW_REQUIRED', '計画のイベントがコードに無い: 要確認（CUSTOMIZATION_PLAN_MISMATCH。change が無いと入力中に切り替わらない）');
+  assert(missingEv.mismatches.some(m => m.code === 'MISSING_EVENT' && m.items.includes('app.record.edit.change.amount')) && !check(missingEv, 'planned-events').ok && check(missingEv, 'planned-events').severity === 'block' && /入力中に切り替わりません/.test(check(missingEv, 'planned-events').message) && missingEv.status === 'BLOCKED' && missingEv.registration.verdict === 'BLOCKED', '計画のイベントがコードに無い: 登録不可（Phase 21。change が無いと入力中に切り替わらない。以前は確認が必要の扱い）');
   const extraEv = run(NEW_JS_GOOD.replace("['app.record.create.change.amount', 'app.record.edit.change.amount']", "['app.record.create.change.amount', 'app.record.edit.change.amount', 'app.record.detail.show']"));
   assert(extraEv.status === 'REVIEW_REQUIRED' && extraEv.mismatches.some(m => m.code === 'EXTRA_EVENT'), '計画に無いイベントの登録: 計画との不一致（確認が必要）');
   const dangerous = run(NEW_JS_GOOD.replace("    return event;", "    eval('1 + 1');\n    return event;"));
@@ -477,8 +477,8 @@ console.log('\n--- §53-2. カスタマイズの修正 / 複数カスタマイ�
   await clickChat(m, 'generate', { cid: 'C2' });
   assert(m.calls.generate.length === 1 && m.calls.generate[0].ctx.customization.customizationId === 'C2' && m.panel.generated('C2') && !m.panel.generated('C1'), 'ボタンから C2 だけを生成（会話の GENERATE_CODE を通る）');
   const c2 = m.panel.generated('C2');
-  assert(c2.review.status === 'REVIEW_REQUIRED' && c2.review.mismatches.some(x => x.code === 'MISSING_FIELD' && x.items.includes('owner')) && c2.review.mismatches.some(x => x.code === 'EXTRA_FIELD_WRITE' && x.items.includes('amount')), 'C2 なのに amount を制御する patch: 計画との不一致（owner が無い・amount は計画外）→ 要確認');
-  assert(/△ 要確認/.test(m.chat()) && /確認が必要な点があります/.test(m.chat()), 'コードカード: △ 要確認');
+  assert(c2.review.status === 'BLOCKED' && c2.review.registration.verdict === 'BLOCKED' && c2.review.checks.some(x => x.name === 'planned-fields' && !x.ok && /owner/.test(x.message)) && c2.review.checks.some(x => x.name === 'target-fields' && !x.ok && /amount/.test(x.message)) && c2.review.mismatches.some(x => x.code === 'MISSING_FIELD' && x.items.includes('owner')), 'C2 なのに amount を制御する patch: owner の処理が無い・amount は計画外 → 登録不可（Phase 21。以前は確認が必要の扱い）');
+  assert(/× 採用不可/.test(m.chat()) && /登録：× 登録できません/.test(m.chat()) && /要件との不一致・採用できない問題が見つかりました/.test(m.chat()), 'コードカード: × 採用不可・登録できません（Phase 21）');
   // 計画の修正（カスタマイズの対象をモバイルにも）→ v2。生成結果は v1 に残り v2 には無い
   const rv = await m.panel.send('金額のロックはモバイルでも動くようにして');
   assert(rv.intent === KTAiConversation.INTENT.REVISE_PLAN && m.calls.plan.length === 2 && m.calls.plan[1].ctx.revision && m.conv().activePlan().version === 2, 'カスタマイズの修正 → REVISE_PLAN → v2');

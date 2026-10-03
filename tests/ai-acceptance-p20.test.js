@@ -114,7 +114,7 @@ console.log('\n--- BF-C（再 3）/ F24. エラー表示と編集不可: 条件�
   const PATCH4 = { baseHash: KTScan.hashText(DL_SRC), operations: [{ type: 'INSERT_AFTER', anchor: "    if (record['ステータス'] && record['ステータス'].value === '承認済み') {\n      record['amount'].disabled = true;\n    }", content: "\n    // 金額が100万円を超えたら警告を表示する\n    if (record['amount'].value > 1000000 && !record['amount'].disabled) {\n      record['amount'].error = '金額が100万円を超えています。';\n    } else {\n      record['amount'].error = null;\n    }\n" }] };
   const cust4 = { ...custom, strategy: 'EXTEND_EXISTING_JS', existingFiles: [{ name: 'dealLock.js', target: 'desktop' }] };
   const r4 = KTCodeReview.review({ generated: { strategy: 'EXTEND_EXISTING_JS', targetFile: 'dealLock.js', summary: 's', code: PATCH4.operations[0].content, patch: PATCH4, events: custom.events, fields: custom.fields, apis: ['kintone.events.on'] }, customization: cust4, plan: null, data: DATA, scan: null, existingSource: { name: 'dealLock.js', target: 'desktop', text: DL_SRC } });
-  assert(chk(r4, 'patch').ok && chk(r4, 'error-cancels-edit').severity === 'review' && !chk(r4, 'plan-consistency').ok && /入力中に切り替わりません/.test(chk(r4, 'plan-consistency').message) && r4.status === 'REVIEW_REQUIRED', 'F26（BF-C 4 回目）: 計画の change をコードが登録していない → 計画との不一致（要確認）。以前は「軽微な差」で合格扱い');
+  assert(chk(r4, 'patch').ok && chk(r4, 'error-cancels-edit').severity === 'review' && !chk(r4, 'planned-events').ok && chk(r4, 'planned-events').severity === 'block' && /入力中に切り替わりません/.test(chk(r4, 'planned-events').message) && r4.status === 'BLOCKED' && r4.registration.verdict === 'BLOCKED', 'F26（BF-C 4 回目）: 計画の change をコードが登録していない → 登録不可（Phase 21。Phase 20 は要確認、それ以前は「軽微な差」で合格扱い）');
   assert(chk(r4, 'duplicate-handler').ok, '既存の handler の中に追加しただけなら「別の handler を足す」と言わない');
   // F27（BF-C 4 回目）: 「C1 のコードを作り直して。金額を変更したときにも…」の後半は生成に渡らない → 黙って捨てず、仕様を直すか今の仕様のまま作るかを選ぶ
   {
@@ -673,7 +673,7 @@ console.log('\n--- F41（F39 の確認・実機）. PC とモバイルの計画�
   const genOf = (add) => ({ strategy: 'EXTEND_EXISTING_JS', targetFile: 'dealLock.js', code: add, patch: { baseHash, operations: [{ type: 'INSERT_BEFORE', anchor: '})();', content: add }] }, events: cust.events, fields: cust.fields, apis: ['kintone.events.on'] });
   const chk = (r, n) => r.checks.find(c => c.name === n) || null;
   const bad = KTCodeReview.review({ generated: genOf(ADD), customization: cust, plan: null, data: DATA, scan: null, existingSource: SRC });
-  assert(chk(bad, 'plan-consistency') && !chk(bad, 'plan-consistency').ok && /owner/.test(chk(bad, 'plan-consistency').message) && /PC の画面/.test(chk(bad, 'plan-consistency').message) && bad.status !== 'OK', `F41: 担当者のロックがモバイルの処理だけ → 計画との不一致（PC では制御していない）。以前は OK: ${chk(bad, 'plan-consistency') && chk(bad, 'plan-consistency').message}`);
+  assert(chk(bad, 'platform-fields') && !chk(bad, 'platform-fields').ok && chk(bad, 'platform-fields').severity === 'block' && /owner/.test(chk(bad, 'platform-fields').message) && /PC ?の画面/.test(chk(bad, 'platform-fields').message) && bad.status === 'BLOCKED' && bad.registration.verdict === 'BLOCKED', `F41: 担当者のロックがモバイルの処理だけ → 登録不可（Phase 21。PC では制御していない。Phase 20 は要確認）: ${chk(bad, 'platform-fields') && chk(bad, 'platform-fields').message}`);
   // 両方の画面で制御するコード（PC の handler にも担当者）は従来どおり
   const BOTH = "  kintone.events.on(['app.record.create.show', 'app.record.edit.show', 'mobile.app.record.create.show', 'mobile.app.record.edit.show'], function (event) {\n    var record = event.record;\n    if (record['ステータス'] && record['ステータス'].value === '承認済み') {\n      record['owner'].disabled = true;\n    }\n    return event;\n  });\n";
   const good = KTCodeReview.review({ generated: genOf(BOTH), customization: cust, plan: null, data: DATA, scan: null, existingSource: SRC });
@@ -780,8 +780,9 @@ console.log('\n--- F39（CX-1 2 回目・実機）. PC とモバイルの計画:
   // 実機（F39 の確認）: 計画のフィールドは担当者だけ・既存の dealLock.js は金額を編集不可にしている → モバイルの追加ファイルには既存の処理も入るので、
   //   新規ファイルとして厳密に照合すると「計画に無い書き込み amount」で VERIFY_FAILED になった。既存ファイルを写したモバイル側は統合と同じ照合にする
   {
-    const ADD2 = "  kintone.events.on(['mobile.app.record.create.show', 'mobile.app.record.edit.show'], function (event) {\n    if (event.record['ステータス'] && event.record['ステータス'].value === '承認済み') { event.record['owner'].disabled = true; }\n    return event;\n  });\n";
-    const cust2 = { ...cust, fields: [{ code: 'owner', access: 'CONTROL' }], events: ['mobile.app.record.create.show', 'mobile.app.record.edit.show'] };
+    // Phase 21: PC とモバイルの両方が対象なら、担当者のロックは両方の画面の処理に入れる（モバイルだけだと F41 の不具合として登録不可）
+    const ADD2 = "  kintone.events.on(['app.record.create.show', 'app.record.edit.show', 'mobile.app.record.create.show', 'mobile.app.record.edit.show'], function (event) {\n    if (event.record['ステータス'] && event.record['ステータス'].value === '承認済み') { event.record['owner'].disabled = true; }\n    return event;\n  });\n";
+    const cust2 = { ...cust, fields: [{ code: 'owner', access: 'CONTROL' }], events: ['app.record.create.show', 'app.record.edit.show', 'mobile.app.record.create.show', 'mobile.app.record.edit.show'] };
     const gen2 = { ...gen, code: ADD2, patch: { baseHash, operations: [{ type: 'INSERT_BEFORE', anchor: '})();', content: ADD2 }] }, events: cust2.events, fields: cust2.fields };
     const rv2 = KTCodeReview.review({ generated: gen2, customization: cust2, plan: null, data: DATA, scan: null, existingSource: SRC });
     const r2 = KTJsExecutor.changeFromGenerated({ customization: cust2, generated: gen2, review: rv2, existingSource: SRC });
@@ -789,7 +790,7 @@ console.log('\n--- F39（CX-1 2 回目・実機）. PC とモバイルの計画:
     const data2 = clone(data); data2.customize.mobile.js = [];
     const m2 = makeKintoneMock(data2, { jsSources: [{ name: 'dealLock.js', target: 'desktop', text: DL }] });
     const prep2 = await KTJsExecutor.prepare({ appId: '310', changes: [r2.change, mob2.change] }, { api: m2.api });
-    const ex2 = await KTJsExecutor.executePreview(prep2, { api: m2.api, fieldRows: rows });
+    const ex2 = await KTJsExecutor.executePreview(prep2, { api: m2.api, fieldRows: rows, acknowledged: (prep2.confirmations || []).map(x => x.key) });   // Phase 21: 確認が必要な項目（既存のイベントに handler を足す）を確認した
     const ms = ex2.steps.find(s => s.target === 'mobile') || {};
     assert(ex2.status === 'DONE' && ms.status === 'VERIFIED', `F39: 既存ファイルを写したモバイル側は、既存の処理（amount）を計画外の書き込みとして扱わない: ${ex2.status} / ${ms.status} ${JSON.stringify((ms.verification?.checks || []).filter(c => !c.ok).map(c => c.name + ':' + JSON.stringify(c.actual)))}`);
   }

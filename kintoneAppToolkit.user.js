@@ -5703,7 +5703,7 @@
      * 承認済みの Customization Plan ＋ 関係するフィールド ＋ 統合先の既存 JS（本文・解析）＋ 他の JS の要約 ＋ 規約。アプリ全体の facts は送らない。
      * @param {object} p { customization, plan, planId, version, data, deps, scan, existingSource: { name, target, text } | null, options }
      */
-    function buildGenerator({ customization, plan = null, planId = null, version = null, data = null, deps = null, scan = null, existingSource = null, options = {} } = {}) {
+    function buildGenerator({ customization, plan = null, planId = null, version = null, data = null, deps = null, scan = null, existingSource = null, userRequests = [], options = {} } = {}) {
       const c = customization;
       if (!c || typeof c !== 'object') throw new Error('customization（Customization Plan）がありません');
       const fieldsN = KTDeps.normalizeFields(data?.fields || {});
@@ -5729,7 +5729,7 @@
       const cust = {
         customizationId: c.customizationId, requirement: c.requirement, whyStandardInsufficient: c.whyStandardInsufficient ?? '', strategy: c.strategy, platform: [...(c.platform || [])],
         events: (c.events || []).map(ev => { const chk = KTJsCatalog.checkEvent(ev); return chk.field && proposed.has(chk.field) ? `${chk.base.replace('<fieldCode>', '')}${mapCode(chk.field)}` : ev; }),
-        fields: (c.fields || []).map(f => ({ code: mapCode(String(f.code)), access: f.access })), apis: [...(c.apis || [])],
+        fields: (c.fields || []).map(f => ({ code: mapCode(String(f.code)), access: f.access, ...(typeof f.condition === 'string' && f.condition.trim() ? { condition: f.condition.trim() } : {}) })), apis: [...(c.apis || [])],
         existingFiles: (c.existingFiles || []).map(e => ({ name: e.name, target: e.target, reason: e.reason ?? '' })), dependsOn: [...(c.dependsOn || [])], risks: [...(c.risks || [])],
       };
       const standardSteps = (plan?.steps || []).filter(st => st.actionType !== 'CUSTOMIZATION_REQUIRED' && !st.alternativeId).map(st => ({ id: st.id, actionType: st.actionType, title: st.title, summary: st.proposal?.summary || '', ...(st.targetRef ? { targetRef: st.targetRef } : {}) })).slice(0, 12);
@@ -5747,7 +5747,8 @@
         generatedAt: options.now ?? new Date().toISOString(),
         generator: { name: 'kintone App Toolkit', version: SCRIPT_VERSION, analyzerVersion: KTScan?.ANALYZER_VERSION ?? null, catalogVersion: KTJsCatalog.CATALOG_VERSION },
         app,
-        plan: { planId, version, goal: plan?.goal ?? '', standardSteps },
+        // Phase 21: 利用者の依頼と補足（回答・修正）の原文。計画の要件 1 文に入りきらなかった条件（例: 差戻し後は再編集できる）を Generator が取り落とさないように
+        plan: { planId, version, goal: plan?.goal ?? '', standardSteps, ...(Array.isArray(userRequests) && userRequests.filter(x => typeof x === 'string' && x.trim()).length ? { userRequests: userRequests.filter(x => typeof x === 'string' && x.trim()).slice(-8).map(x => x.slice(0, 1000)) } : {}) },
         customization: cust,
         fields, dictionary, existingFile, otherFiles,
         // Phase 20（実機）: spaces = フォームに実在するスペース要素の ID（getSpaceElement に使える ID はこれだけ。無いスペースを前提にしたコードは使えない）
@@ -7114,6 +7115,8 @@
       const valueFields = fields.filter(f => { const m = model.fields?.[f.code]; return m && INPUT_TYPES.includes(m.baseType || m.type); });
       const reqText = `${c.requirement || ''} ${step.title || ''}`;
       if (valueFields.length && controls.length && evInfo.some(e => e.ok && /\.(create|edit)\.show$/.test(e.name)) && !events.some(ev => /\.change\./.test(ev)) && /(超え|超過|以上|以下|未満|より(大き|小さ|多|少|前|後)|を過ぎ|が空|未入力|入力され|選ばれ|選択され|に応じ)/.test(reqText)) add('JS_CHANGE_EVENT_MISSING', 'medium', `値（${valueFields.map(f => f.code).join(', ')}）に応じた表示・警告・編集可否を、画面を開いたとき（create.show / edit.show）だけで判定する計画です。入力中に値を変えても切り替わりません（app.record.*.change.<フィールド> がありません）。入力中にも切り替えるなら「入力したときにもすぐ切り替えて」と伝えて計画を修正してください`);
+      // 5c. Phase 21: kintone の JavaScript では実現できない部分（生成の前に利用者が分かるように）。明細（テーブル）の行の追加・削除は disabled では止められない
+      if (/(明細|テーブル|行)/.test(reqText) && /(行の?(追加|削除)|追加・削除|追加や削除|行(を|の)?(増や|減ら))[^。]{0,16}(禁止|できない|できなく|不可|させない|止め)/.test(reqText)) add('JS_LIMIT_SUBTABLE_ROWS', 'medium', '明細（テーブル）の行の追加・削除は、kintone の JavaScript では止められません（disabled はセルの編集だけに効き、行の ＋ / − は残ります）。この部分は要件を満たせないので、運用（手順・権限）での扱いを決めてください。生成するコードが止められるのはセルの編集だけです');
       // 6. 既存 JS（統合先・競合）
       const files = (typeof KTScan !== 'undefined' && KTScan.summarizeFiles) ? KTScan.summarizeFiles(scan, data) : [];
       const targets = Array.isArray(c.existingFiles) ? c.existingFiles : [];
@@ -10776,6 +10779,130 @@
       }
       return [...out];
     }
+    /**
+     * Phase 21: フィールド code を編集不可（.disabled = true）にしている場所と、それを囲む条件。
+     *   unconditional = handler（関数）の中で if / else / ループ / switch / 三項演算子 に囲まれていない（どのレコードでも編集不可になる）
+     *   conds = 囲んでいる if の条件式（else は 'else'、ループなどはそのキーワード）
+     */
+    function disableSites(clean, code) {
+      const s = String(clean || '');
+      const out = [];
+      const rx = /\.disabled\s*=(?!=)\s*true\b/g;
+      let m;
+      while ((m = rx.exec(s)) !== null) {
+        const ref = /(?:\[\s*['"`]([^'"`\]]+)['"`]\s*\]|\brecord\s*\.\s*([A-Za-z_$][\w$]*))\s*$/.exec(s.slice(Math.max(0, m.index - 120), m.index));
+        if (!ref || (ref[1] || ref[2]) !== code) continue;
+        out.push({ index: m.index, ...siteConds(s, m.index) });
+      }
+      return out;
+    }
+    /**
+     * Phase 21: テーブル（tableCode）のセルを編集不可にしている場所（行のループで row.value[key] / row.value['qty'] に .disabled = true）。
+     *   直前（同じ handler の中）で tableCode の value を回しているものだけ
+     */
+    function subtableCellSites(clean, tableCode) {
+      const s = String(clean || '');
+      const out = [];
+      const rx = /\.value\s*\[\s*[^\]]+\]\s*\.\s*disabled\s*=(?!=)\s*true\b/g;
+      const iter = new RegExp(`(?:\\[\\s*['"\`]${String(tableCode).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}['"\`]\\s*\\]|\\.\\s*${String(tableCode).replace(/[^A-Za-z0-9_$]/g, '') || '\\u0000'})\\s*\\.\\s*value\\b`);
+      let m;
+      while ((m = rx.exec(s)) !== null) {
+        const before = s.slice(Math.max(0, m.index - 1200), m.index);
+        if (!iter.test(before)) continue;
+        out.push({ index: m.index, ...siteConds(s, m.index) });
+      }
+      return out;
+    }
+    /**
+     * Phase 21: 位置 idx を囲む条件（handler の中だけ）。handler = kintone.events.on に渡した関数（名前付き関数なら即時関数以外の一番外の関数）。
+     *   if / else / ループ / switch のブロック、同じ行の if・三項演算子、手前の「if (条件) { return … }」（早い return で除外）を条件として集める。
+     *   条件が変数だけ（if (locked)）なら、その変数の代入式も添える（条件の項目を照合するため）
+     */
+    function siteConds(s, idx) {
+      const stack = [];
+      for (let k = 0; k < idx; k++) { const ch = s[k]; if (ch === '{') stack.push(k); else if (ch === '}') stack.pop(); }
+      const blocks = stack.map(open => {
+        const before = s.slice(Math.max(0, open - 400), open).replace(/\s+$/, '');
+        if (/\belse$/.test(before)) return { kind: 'cond', cond: 'else', open };
+        if (/\)$/.test(before)) {
+          const head = before.slice(0, -1);
+          let depth = 1, k = head.length - 1;
+          for (; k >= 0 && depth > 0; k--) { if (head[k] === ')') depth++; else if (head[k] === '(') depth--; }
+          const kw = head.slice(0, k + 1).replace(/\s+$/, '');
+          const kwm = /\b(if|for|while|switch|catch|with)$/.exec(kw);
+          if (kwm) return { kind: 'cond', cond: kwm[1] === 'if' ? head.slice(k + 2) : kwm[1], open };
+          // 即時関数: 「(function」の「(」が呼び出しの括弧ではない（直前が識別子・)・] でない）。forEach(function … は即時関数ではない
+          const iifeM = /([\s\S]?)\s*\(\s*(?:async\s+)?function\s*$/.exec(kw);
+          return { kind: 'func', open, iife: !!iifeM && !/[\w$)\]]/.test(iifeM[1] || ''), handler: /kintone\s*\.\s*events\s*\.\s*on\s*\([^;{}]*,\s*(?:async\s+)?function\s*[\w$]*\s*$/.test(kw) };
+        }
+        if (/=>$/.test(before)) return { kind: 'func', open, iife: false, handler: /kintone\s*\.\s*events\s*\.\s*on\s*\([^;{}]*,\s*(?:async\s*)?\(?[^()]*\)?\s*=>$/.test(before) };
+        return { kind: 'other', open };
+      });
+      let hi = blocks.map(b => b.kind === 'func' && b.handler).lastIndexOf(true);
+      if (hi < 0) hi = blocks.findIndex(b => b.kind === 'func' && !b.iife);
+      if (hi < 0) hi = blocks.map(b => b.kind).lastIndexOf('func');
+      const inner = hi >= 0 ? blocks.slice(hi + 1) : blocks;
+      const lineStart = s.lastIndexOf('\n', idx) + 1;
+      const lineEnd = s.indexOf('\n', idx) < 0 ? s.length : s.indexOf('\n', idx);
+      const line = s.slice(lineStart, lineEnd);
+      // 同じ文の中だけを見る（直前の { ; } より後ろ〜次の ; まで）。1 行に書かれた外側の if を、この文の条件と取り違えない
+      let stmtStart = idx; while (stmtStart > 0 && !/[{};]/.test(s[stmtStart - 1])) stmtStart--;
+      const stmtEnd = s.indexOf(';', idx) < 0 ? lineEnd : s.indexOf(';', idx);
+      const inlineIf = /\bif\s*\(([\s\S]*)\)\s*[^)]*$/.exec(s.slice(stmtStart, idx));
+      let conds = [...inner.filter(b => b.kind === 'cond').map(b => b.cond), ...(inlineIf ? [inlineIf[1]] : []), ...(/\?/.test(s.slice(stmtStart, stmtEnd)) ? ['?'] : [])];
+      if (hi >= 0) {
+        const body = s.slice(blocks[hi].open + 1, idx);
+        for (const g of body.matchAll(/\bif\s*\(/g)) {
+          const po = g.index + g[0].length - 1, pc = closeParen(body, po);
+          if (pc < 0) continue;
+          const rest = body.slice(pc + 1, pc + 60);
+          if (/^\s*\{?\s*return\b/.test(rest)) conds.push(`!(${body.slice(po + 1, pc)})`);
+        }
+      }
+      conds = conds.map(t => { const id = /^\s*!?\s*\(?\s*!?\s*([A-Za-z_$][\w$]*)\s*\)?\s*$/.exec(String(t)); if (!id) return t; const def = new RegExp(`\\b(?:var|let|const)\\s+${id[1].replace(/\$/g, '\\$')}\\s*=\\s*([^;\\n]+)`).exec(s); return def ? `${t} /* ${def[1].trim()} */` : t; });
+      return { unconditional: hi >= 0 && !conds.length, conds, line: line.trim().slice(0, 160) };
+    }
+    /** Phase 21: コードがフィールドに対して行う操作（値の代入 value / 編集可否 disabled / エラー error / 表示切替 shown）。code → Set(kind) */
+    function writeTargets(clean) {
+      const s = String(clean || '');
+      const out = new Map();
+      const put = (code, kind) => { if (!code) return; if (!out.has(code)) out.set(code, new Set()); out.get(code).add(kind); };
+      let m;
+      const rx = /(?:\[\s*['"`]([^'"`\]]+)['"`]\s*\]|\brecord\s*\.\s*([A-Za-z_$][\w$]*))\s*\.\s*(value|disabled|error)\s*(?:=(?!=)|\+=|-=)/g;
+      while ((m = rx.exec(s)) !== null) put(m[1] || m[2], m[3]);
+      const show = /setFieldShown\s*\(\s*['"`]([^'"`]+)['"`]/g;
+      while ((m = show.exec(s)) !== null) put(m[1], 'shown');
+      return out;
+    }
+    /** Phase 21: kintone.api の呼び出し（メソッド・対象アプリ。app が数値の文字列か、kintone.app.getId() か、変数か） */
+    function restCalls(clean) {
+      const s = String(clean || '');
+      const out = [];
+      const rx = /kintone\s*\.\s*api\s*\(/g;
+      let m;
+      while ((m = rx.exec(s)) !== null) {
+        const open = m.index + m[0].length - 1;
+        const close = closeParen(s, open);
+        const args = s.slice(open + 1, close < 0 ? Math.min(s.length, open + 600) : close);
+        const method = (/['"`](GET|POST|PUT|DELETE)['"`]/.exec(args) || [])[1] || null;
+        const lit = /\b(?:app|appId)\s*:\s*['"`]?(\d{1,7})['"`]?/.exec(args);
+        const vr = lit ? null : /\b(?:app|appId)\s*:\s*([A-Za-z_$][\w$.]*(?:\s*\(\s*\))?)/.exec(args);
+        const self = !!(vr && /kintone\s*\.\s*(?:mobile\s*\.\s*)?app\s*\.\s*getId\s*\(\s*\)/.test(vr[1]));
+        out.push({ method, app: lit ? lit[1] : null, appExpr: vr && !self ? vr[1] : null, self, path: (/['"`](\/k\/v1\/[^'"`]+)['"`]/.exec(args) || [])[1] || null });
+      }
+      return out;
+    }
+    /** Phase 21: kintone の条件式（例: ステータス in ("承認済み") / amount >= "1000000"）から、条件の項目と値を取り出す（コードの if の条件と照合する語） */
+    function condRefsOf(cond) {
+      const s = String(cond || '');
+      const refs = [];
+      for (const m of s.matchAll(/(?:^|\b(?:and|or)\s+|\()\s*([^\s=!<>()"]+)\s*(?:not\s+in|in|not\s+like|like|!=|>=|<=|=|>|<)/gi)) refs.push(m[1]);
+      for (const m of s.matchAll(/"([^"]+)"/g)) refs.push(m[1]);
+      return [...new Set(refs.filter(Boolean))];
+    }
+    /** Phase 21: イベント名を文字列の連結・テンプレートで組み立てている（静的にイベントを特定できない） */
+    const dynamicEventNames = (clean) => /['"`](?:mobile\.)?app\.(?:record|report)\.[A-Za-z0-9_.]*['"`]\s*\+|`(?:mobile\.)?app\.(?:record|report)\.[^`]*\$\{/.test(String(clean || ''));
+
     /** str の open（'{' の位置）に対応する '}' の位置 / '(' に対応する ')' の位置 */
     const closeBrace = (str, open) => { let d = 0; for (let k = open; k < str.length; k++) { const ch = str[k]; if (ch === '{') d++; else if (ch === '}') { d--; if (d === 0) return k; } } return str.length - 1; };
     const closeParen = (str, open) => { let d = 0; for (let k = open; k < str.length; k++) { const ch = str[k]; if (ch === '(') d++; else if (ch === ')') { d--; if (d === 0) return k; } } return -1; };
@@ -10871,10 +10998,12 @@
       const clean = KTScan.stripCommentsOnly(finalCode);
       const cleanAdded = KTScan.stripCommentsOnly(addedCode);
       // ---- 4. イベント（Event Catalog・計画との一致）----
-      const planEvents = new Set(c.events || []);
+      // Phase 21: 新規フィールド（NEW_FIELD_n）の値の変更イベントは提案コードに読み替える（Generator Context と同じ）
+      const planEvents = new Set((c.events || []).map(ev => { try { const chk = KTJsCatalog.checkEvent(ev); return chk && chk.field && proposedCodes.has(chk.field) ? `${chk.base.replace('<fieldCode>', '')}${proposedCodes.get(chk.field)}` : ev; } catch (e) { return ev; } }));
       const codeEvents = addedScan.events;            // 追加したコードが登録するイベント
       const fileEvents = rescan.events;               // 最終的なファイル全体のイベント（統合では既存 handler のものを含む）
-      const badEvents = codeEvents.filter(e => e.valid === false);
+      // Phase 21: イベント名を組み立てている（'app.record.edit.change.' + code）ときの前半だけの文字列は、無いイベントとは数えない（静的に特定できない → 確認）
+      const badEvents = codeEvents.filter(e => e.valid === false && !(/\.$/.test(e.name) && dynamicEventNames(clean)));
       add('events', !badEvents.length, 'block', badEvents.length ? `kintone に無いイベント: ${badEvents.map(e => e.name).join(', ')}` : `イベント ${(codeEvents.length ? codeEvents : fileEvents).map(e => e.name).join(', ') || '（検出なし）'} は目録にあります`);
       const extraEvents = codeEvents.filter(e => e.valid !== false && !planEvents.has(e.name)).map(e => e.name);
       const missingEvents = [...planEvents].filter(ev => !fileEvents.some(e => e.name === ev));
@@ -10894,26 +11023,67 @@
       const unknownRefs = (addedScan.unknownRefs || []).map(u => u.code || u.value || u.ref).filter(Boolean).filter(code => !missingSpaces.includes(code));
       add('fields', !unknownRefs.length, 'block', unknownRefs.length ? `存在しないフィールドコードを参照しています（GENERATED_JS_UNKNOWN_FIELD）: ${unknownRefs.join(', ')}` : `参照するフィールド ${addedScan.fields.map(f => f.code).filter(code => !spaceCalls.includes(code)).join(', ') || '（なし）'} は存在します`);
       if (spaceCalls.length) add('space-element', !missingSpaces.length, 'block', missingSpaces.length ? `スペース要素「${missingSpaces.join('」「')}」はフォームにありません（getSpaceElement が null を返し、警告などは表示されません）。フォームの設定でスペースを追加するか、別の表示方法にしてください` : `スペース要素 ${spaceCalls.join(', ')} はフォームにあります`);
-      const planFields = new Map((c.fields || []).map(f => [f.code, f.access]));
+      // Phase 21: 計画の新規フィールド（NEW_FIELD_n）は提案コードに読み替える（Generator へは提案コードで渡している）。condition = そのフィールドを制御・変更する条件（任意）
+      const planCode = (code) => proposedCodes.get(code) ?? code;
+      const planFields = new Map((c.fields || []).map(f => [planCode(f.code), f.access]));
+      const planCond = new Map((c.fields || []).filter(f => typeof f.condition === 'string' && f.condition.trim()).map(f => [planCode(f.code), f.condition.trim()]));
       for (const f of addedScan.fields) {
         const writes = ACCESS_W(f.access);
         const planned = planFields.get(f.code) || null;
         if (!planned) mismatches.push({ kind: 'field', code: writes.length ? 'EXTRA_FIELD_WRITE' : 'EXTRA_FIELD_READ', items: [f.code], message: `計画に無いフィールド ${f.code} を${writes.length ? `書き換え・制御（${writes.join('/')}）` : '参照'}しています` });
         else if (writes.length && planned === 'READ') mismatches.push({ kind: 'field', code: 'ACCESS_ESCALATED', items: [f.code], message: `${f.code} は計画では READ ですがコードは ${writes.join('/')} しています` });
       }
-      for (const [code, access] of planFields) if (!addedScan.fields.some(f => f.code === code)) mismatches.push({ kind: 'field', code: 'MISSING_FIELD', items: [code], message: `計画のフィールド ${code}（${access}）がコードに現れません` });
-      // Phase 20（F41・実機）: PC とモバイルの計画で、制御・書き換えするフィールドが片方の画面の処理（イベント）にしか無い。担当者のロックがモバイルの handler だけに入り、
-      //   PC では承認済みでも担当者を編集できた（以前は「計画と一致」）。ファイル全体（既存の handler を含む）で、PC のイベントとモバイルのイベントの両方に現れるかを見る
+      for (const [code, access] of planFields) if (!addedScan.fields.some(f => f.code === code)) mismatches.push({ kind: 'field', code: 'MISSING_FIELD', items: [code], message: `計画のフィールド ${code}（${access}）が追加したコードに現れません${rescan.fields.some(f => f.code === code) ? '（既存のコードにはあります）' : ''}` });
+      // ---- Phase 21: 登録の可否。静的に確かめられる要件違反は block（登録不可）、静的には確かめられないことは review（登録前に確認する項目）----
+      const handlersAll = kintoneFieldOps(clean);
+      const unresolvedEvents = handlersAll.some(h => h.events.includes('（イベント名を特定できない登録）')) || dynamicEventNames(clean);
+      // (1) 計画のイベントがファイルに無い（そのタイミングでは動かない）。Phase 20 F41 / BF-C: change が無く入力中に警告が切り替わらなかった
+      if (missingEvents.length) add('planned-events', false, unresolvedEvents ? 'review' : 'block', `計画のイベントがコードにありません: ${missingEvents.join(', ')}（${missingEvents.some(ev => /\.change\./.test(ev)) ? '値の変更時に動かないため、入力中に切り替わりません' : 'そのタイミングでは動きません'}）${unresolvedEvents ? '。イベント名を組み立てている登録があり、静的には確かめられません' : ''}`);
+      // (2) 計画で制御・書き換えするフィールドが、ファイルのどこにも無い（要件の処理が無い）
+      const absent = [...planFields.entries()].filter(([code, access]) => (access === 'CONTROL' || access === 'WRITE') && !rescan.fields.some(f => f.code === code));
+      if (absent.length) add('planned-fields', false, 'block', `計画では ${absent.map(([code, a]) => `${code} を${a === 'CONTROL' ? '制御' : '書き換え'}`).join('、')}することになっていますが、コードに現れません（要件の処理がありません）`);
+      // (3) PC とモバイルの両方が対象: 制御・書き換えするフィールドが片方の画面の処理にしか無い（Phase 20 F41: 担当者のロックがモバイルだけ）。ファイル全体（既存の handler を含む）で見る
       if (Array.isArray(c.platform) && c.platform.includes('desktop') && c.platform.includes('mobile')) {
-        const handlers = kintoneFieldOps(clean);
-        const covered = (code, mobile) => handlers.some(h => h.events.some(e => (mobile ? /^mobile\./ : /^app\./).test(e)) && (h.refs || []).includes(code));
-        for (const [code, access] of planFields) {
-          if (access !== 'CONTROL' && access !== 'WRITE') continue;
-          const pc = covered(code, false), mob = covered(code, true);
-          if (pc !== mob) mismatches.push({ kind: 'platform', code: 'PLATFORM_FIELD_MISSING', items: [code], message: `${code} は${pc ? 'モバイル' : 'PC'} の画面の処理で${access === 'CONTROL' ? '制御' : '書き換え'}していません（${pc ? 'PC' : 'モバイル'} だけ）` });
-        }
+        const covered = (code, mobile) => handlersAll.some(h => h.events.some(e => (mobile ? /^mobile\./ : /^app\./).test(e)) && (h.refs || []).includes(code));
+        const gaps = [];
+        for (const [code, access] of planFields) { if (access !== 'CONTROL' && access !== 'WRITE') continue; const pc = covered(code, false), mob = covered(code, true); if (pc !== mob) gaps.push({ code, access, pc }); }
+        for (const x of gaps) mismatches.push({ kind: 'platform', code: 'PLATFORM_FIELD_MISSING', items: [x.code], message: `${x.code} は${x.pc ? 'モバイル' : 'PC'} の画面の処理で${x.access === 'CONTROL' ? '制御' : '書き換え'}していません（${x.pc ? 'PC' : 'モバイル'} だけ）` });
+        if (gaps.length) add('platform-fields', false, unresolvedEvents ? 'review' : 'block', `PC とモバイルの両方が対象ですが、${gaps.map(x => `${x.code} は${x.pc ? 'モバイル' : 'PC'}の画面の処理で${x.access === 'CONTROL' ? '制御' : '書き換え'}していません（${x.pc ? 'PC' : 'モバイル'}だけ）`).join('、')}${unresolvedEvents ? '。イベント名を特定できない登録があり、静的には確かめられません' : ''}`);
       }
-      const hardMismatch = mismatches.filter(m => ['EXTRA_FIELD_WRITE', 'ACCESS_ESCALATED', 'EXTRA_EVENT', 'MISSING_EVENT', 'PLATFORM_FIELD_MISSING'].includes(m.code));
+      // (4) 計画に無いフィールドの操作（対象と異なるフィールド）。テーブルの中のフィールドは、テーブルが計画にあれば対象。エラー表示だけは要確認
+      const subtableOf = new Map(fieldsN.filter(f => f.parent).map(f => [f.code, f.parent]));
+      const inPlan = (code) => planFields.has(code) || (subtableOf.has(code) && planFields.has(subtableOf.get(code)));
+      const OP_JA = { value: '値の書き換え', disabled: '編集可否', shown: '表示切替', error: 'エラー表示' };
+      const fieldWrites = writeTargets(cleanAdded);
+      const offTarget = [...fieldWrites.entries()].filter(([code, kinds]) => knownCodes.has(code) && !inPlan(code) && [...kinds].some(k => k !== 'error'));
+      if (offTarget.length) add('target-fields', false, 'block', `計画に無いフィールドを操作しています（対象と異なるフィールド）: ${offTarget.map(([code, kinds]) => `${code}（${[...kinds].map(k => OP_JA[k]).join('・')}）`).join('、')}。計画（実装仕様）に入れるか、コードを作り直してください`);
+      const offError = [...fieldWrites.entries()].filter(([code, kinds]) => knownCodes.has(code) && !inPlan(code) && [...kinds].every(k => k === 'error'));
+      if (offError.length) add('target-fields-error', false, 'review', `計画に無いフィールドにエラーを表示しています: ${offError.map(([code]) => code).join(', ')}（要件どおりか確認してください）`);
+      // (5) 対象と異なるアプリ: このアプリ以外のレコードを書き換える REST 呼び出しは登録不可。読み取り・アプリが静的に決まらない呼び出しは要確認
+      const selfId = data?.appId != null && String(data.appId) !== '' ? String(data.appId) : null;
+      const calls = restCalls(cleanAdded);
+      const otherWrites = calls.filter(x => x.app && x.app !== selfId && ['POST', 'PUT', 'DELETE'].includes(x.method));
+      if (otherWrites.length) add('target-app', false, 'block', `このアプリ（${selfId ?? '?'}）以外のアプリ ${[...new Set(otherWrites.map(x => x.app))].join(', ')} のデータを書き換えます（${otherWrites.map(x => `${x.method} ${x.path || ''}`.trim()).join('、')}）。Toolkit が扱うのはこのアプリの変更だけです`);
+      const otherReads = calls.filter(x => !otherWrites.includes(x) && ((x.app && x.app !== selfId) || x.appExpr));
+      if (otherReads.length) add('target-app-read', false, 'review', `他のアプリ、または静的に決まらないアプリへの API 呼び出しがあります: ${otherReads.map(x => `${x.method || '?'} app ${x.app || x.appExpr}`).join('、')}（対象アプリと権限を確認してください）`);
+      // (6) 条件つきの制御（実装仕様の fields[].condition）: 条件の外で編集不可にしていれば違反（既存のコードに元からあるものは除く）。
+      //     条件の中でも、条件の項目・値を見ているか分からなければ要確認（条件の向きまでは判定しない）
+      const baseText = g.strategy === 'EXTEND_EXISTING_JS' && existingSource && typeof existingSource.text === 'string' ? KTScan.stripCommentsOnly(existingSource.text) : '';
+      // テーブルはセル（行のループの row.value[…] / テーブル内フィールド）を編集不可にする場所も、そのテーブルの制御として数える
+      const tableSites = (text, code) => [...disableSites(text, code), ...(fieldsN.some(f => f.code === code && f.rawType === 'SUBTABLE') ? [...subtableCellSites(text, code), ...[...subtableOf.entries()].filter(([, p]) => p === code).flatMap(([ch]) => disableSites(text, ch))] : [])];
+      for (const [code, cond] of planCond) {
+        if (planFields.get(code) !== 'CONTROL') continue;
+        const sites = tableSites(clean, code);
+        const refs = condRefsOf(cond);
+        const unc = sites.filter(x => x.unconditional);
+        const baseUnc = baseText ? tableSites(baseText, code).some(x => x.unconditional) : false;
+        if (!sites.length) add('conditional-control', false, 'review', `${code} は「${cond}」のときだけ編集不可にする計画ですが、「.disabled = true」の設定が見つかりません（別の書き方なら、動作テスト環境で条件どおりか確かめてください）`);
+        else if (unc.length && !baseUnc) add('conditional-control', false, 'block', `${code} は「${cond}」のときだけ編集不可にする計画ですが、条件の外で編集不可にしています（${unc.map(x => x.line).join(' / ')}）。すべてのレコード・ステータスで編集できなくなります`);
+        else if (unc.length) add('conditional-control', false, 'review', `${code} は既存のコードで条件なしに編集不可になっています（「${cond}」の条件と合うか確認してください）`);
+        else if (refs.length && !sites.every(x => x.conds.some(t => refs.some(r => String(t).includes(r))))) add('conditional-control', false, 'review', `${code} は条件の中で編集不可にしていますが、計画の条件「${cond}」（${refs.join(' / ')}）を見ているか確かめられません`);
+        else add('conditional-control', true, 'info', `${code} は「${cond}」の条件の中でだけ編集不可にしています`);
+      }
+      const hardMismatch = mismatches.filter(m => ['ACCESS_ESCALATED', 'EXTRA_EVENT'].includes(m.code) || (m.code === 'EXTRA_FIELD_WRITE' && !offTarget.some(([code]) => m.items.includes(code))));
       add('plan-consistency', !hardMismatch.length, 'review', hardMismatch.length ? `計画と生成コードが一致しません（CUSTOMIZATION_PLAN_MISMATCH）: ${hardMismatch.map(m => m.message).join('／')}` : mismatches.length ? `計画との軽微な差: ${mismatches.map(m => m.message).join('／')}` : '計画（イベント・フィールド・アクセス）と一致');
       // ---- 6. API（API Catalog・通信）----
       const apis = addedScan.apis;
@@ -10937,8 +11107,11 @@
       // Phase 20（F42・実機）: 要件に条件（承認済み・〜の場合 など）があるのに、条件（if）の外でフィールドを編集不可にしている（既存ファイルに元から無いもの）。
       //   既存の if の閉じ括弧の後ろに足した担当者のロックが、すべてのステータスで効いた（Code Review は計画のイベントの不足だけを指摘）
       if (/承認|ステータス|状態|場合|とき|時に|なら|以上|以下|超|未満/.test([c.requirement, g.summary].filter(Boolean).join(' '))) {
-        const baseUncond = g.strategy === 'EXTEND_EXISTING_JS' && existingSource && typeof existingSource.text === 'string' ? unconditionalDisables(KTScan.stripCommentsOnly(existingSource.text)) : [];
-        const newUncond = unconditionalDisables(clean).filter(x => !baseUncond.includes(x));
+        // Phase 21: 早い return で除外する書き方（if (条件) { return event; } の後ろ）は条件つきとして扱う（siteConds）。
+        //   実装仕様に条件（fields[].condition）があるフィールドは conditional-control が判定する（ここでは重ねない）
+        const uncondOf = (text) => [...writeTargets(text).entries()].filter(([, kinds]) => kinds.has('disabled')).map(([code]) => code).filter(code => disableSites(text, code).some(x => x.unconditional));
+        const baseUncond = g.strategy === 'EXTEND_EXISTING_JS' && existingSource && typeof existingSource.text === 'string' ? uncondOf(KTScan.stripCommentsOnly(existingSource.text)) : [];
+        const newUncond = uncondOf(clean).filter(x => !baseUncond.includes(x) && !planCond.has(x));
         if (newUncond.length) add('unconditional-control', false, 'review', `次のフィールドを条件なしで編集不可にしています: ${newUncond.join(', ')}（if の外にあるため、すべてのレコード・ステータスで編集できなくなります）。要件の条件のときだけにするなら、既存の if ブロックの中に入れてください`);
       }
       const handlers = inspectHandlers(cleanAdded);
@@ -10997,21 +11170,65 @@
       }
       add('existing-conflict', !conflicts.length, 'review', conflicts.length ? `既存 JS と同じフィールドを制御します（JS_FIELD_CONFLICT）: ${conflicts.map(x => `${x.file}（${x.code}: ${x.theirs.join('/')}）`).join(', ')}` : '既存 JS との書き換え・制御の重なりはありません');
       // ---- 10. platform ----
-      // 既存 handler の中への追加（追加分に kintone.events.on が無い）は、最終的なファイルのイベントで platform を判定する
-      const platformEvents = codeEvents.length ? codeEvents : fileEvents;
-      const mobileEvents = platformEvents.filter(e => KTJsCatalog.isMobileEvent(e.name)).length;
-      if (Array.isArray(c.platform) && c.platform.includes('mobile') && !mobileEvents) add('platform', false, 'review', '計画はモバイルも対象ですが、mobile.app.record.* のイベントがありません');
-      else if (Array.isArray(c.platform) && c.platform.length && !c.platform.includes('mobile') && mobileEvents) add('platform', false, 'review', '計画は PC だけですが、モバイルのイベントが含まれています');
-      else add('platform', true, 'info', `対象 ${(c.platform || []).join(' / ') || '—'} と整合`);
-      return finish({ rescan, mismatches, security, finalCode, addedCode, diff, patchResult });
+      // Phase 21: 最終的なファイルのイベントで判定する（PC とモバイルの両方が対象なら、両方のイベントが要る。片方が無ければその画面では動かない）
+      const mobileEvents = fileEvents.filter(e => KTJsCatalog.isMobileEvent(e.name)).length, pcEvents = fileEvents.length - mobileEvents;
+      const plat = Array.isArray(c.platform) ? c.platform : [];
+      if (plat.includes('mobile') && !mobileEvents) add('platform', false, unresolvedEvents ? 'review' : 'block', `計画はモバイルも対象ですが、モバイル（mobile.app.record.*）のイベントがありません（モバイルでは動きません）${unresolvedEvents ? '。イベント名を特定できない登録があり、静的には確かめられません' : ''}`);
+      else if (plat.includes('desktop') && plat.includes('mobile') && !pcEvents) add('platform', false, unresolvedEvents ? 'review' : 'block', `計画は PC も対象ですが、PC（app.record.*）のイベントがありません（PC では動きません）`);
+      else if (plat.length && !plat.includes('mobile') && mobileEvents) add('platform', false, 'review', '計画は PC だけですが、モバイルのイベントが含まれています');
+      else add('platform', true, 'info', `対象 ${plat.join(' / ') || '—'} と整合`);
+      // ---- 11. 達成範囲（Phase 21）: kintone の JavaScript で実現できない部分を、要約とは別に Toolkit が示す ----
+      //   明細（テーブル）の編集を止める要件: JavaScript の disabled はセルにだけ効き、行の追加・削除（＋ / −）は止められない
+      const coverage = { achieved: [], notAchieved: [], declared: Array.isArray(g.coverage) ? g.coverage : [] };
+      const subtables = fieldsN.filter(f => f.rawType === 'SUBTABLE').map(f => f.code);
+      const tableLockReq = /(明細|テーブル|行の|行追加|行削除)/.test(String(c.requirement || '')) && /(編集|変更|入力|追加|削除)[^。]{0,20}(不可|禁止|できない|できなく|させない|ロック)/.test(String(c.requirement || ''));
+      // セルのロック: テーブル内フィールドの .disabled = true と、行のループ（row.value[key]）の .disabled = true
+      const lockedTables = subtables.filter(t => subtableCellSites(clean, t).length || [...subtableOf.entries()].some(([ch, p]) => p === t && disableSites(clean, ch).length));
+      const tableControlled = subtables.filter(t => planFields.get(t) === 'CONTROL' || [...subtableOf.entries()].some(([ch, p]) => p === t && planFields.get(ch) === 'CONTROL'));
+      if ((tableControlled.length || tableLockReq) && lockedTables.length) {
+        coverage.achieved.push(`明細（テーブル ${lockedTables.join(', ')}）のセルを編集不可にする`);
+        coverage.notAchieved.push({ code: 'SUBTABLE_ROWS', message: '明細（テーブル）の行の追加・削除は止められません（kintone の JavaScript の disabled はセルにだけ効き、行の ＋ / − ボタンは残ります）' });
+        // 要約が「行の追加・削除も禁止」と言う、または明細の禁止を行の扱いに触れずに言い切る → 要件を満たしたように見える要約（要確認）
+        const sum = String(g.summary || '');
+        const rowClaim = /(行の?(追加|削除)|追加・削除|追加や削除)[^。]{0,12}(も)?(禁止|できない|できなく|不可|させない|止め)/.test(sum);
+        const tableClaim = /(明細|テーブル)/.test(sum) && /(禁止|変更できない|変更不可|編集不可|編集できない|ロック)/.test(sum) && !/(行の?(追加|削除)|追加・削除)/.test(sum);
+        if (rowClaim || tableClaim) add('summary-scope', false, 'review', `AI の要約は「${sum.slice(0, 100)}${sum.length > 100 ? '…' : ''}」ですが、止められるのはセルの編集だけで、行の追加・削除は止まりません（要件を完全には満たしていません）`);
+      }
+      for (const d of coverage.declared) if (d && /NOT_MET|PARTIAL/.test(String(d.status || '')) && d.requirement) coverage.notAchieved.push({ code: `AI_${String(d.status)}`, message: `${d.requirement}${d.note ? `（${d.note}）` : ''}` });
+      return finish({ rescan, mismatches, security, finalCode, addedCode, diff, patchResult, coverage });
       function finish(extra = {}) {
         const status = checks.some(x => !x.ok && x.severity === 'block') ? STATUS.BLOCKED : checks.some(x => !x.ok) ? STATUS.REVIEW_REQUIRED : STATUS.OK;
-        return { reviewVersion: REVIEW_VERSION, status, checks, finalCode: extra.finalCode ?? null, addedCode: extra.addedCode ?? null, diff: extra.diff ?? null, diffText: extra.diff ? diffHunks(extra.diff) : null, rescan: extra.rescan ?? null, mismatches: extra.mismatches ?? [], security: extra.security ?? [], patch: extra.patchResult ? { applied: extra.patchResult.applied, afterHash: extra.patchResult.afterHash } : null, provenance: provenance ? { ...provenance, reviewedAt: new Date().toISOString(), codeHash: extra.finalCode ? hash(extra.finalCode) : null } : null };
+        const finalCode2 = extra.finalCode ?? null;
+        return { reviewVersion: REVIEW_VERSION, status, checks, finalCode: finalCode2, addedCode: extra.addedCode ?? null, diff: extra.diff ?? null, diffText: extra.diff ? diffHunks(extra.diff) : null, rescan: extra.rescan ?? null, mismatches: extra.mismatches ?? [], security: extra.security ?? [], patch: extra.patchResult ? { applied: extra.patchResult.applied, afterHash: extra.patchResult.afterHash } : null, provenance: provenance ? { ...provenance, reviewedAt: new Date().toISOString(), codeHash: finalCode2 ? hash(finalCode2) : null } : null,
+          // Phase 21: 登録の判定（登録不可 / 確認が必要 / 動作は未確認）と達成範囲。KTJsExecutor は登録の直前にもこれを確かめる
+          coverage: extra.coverage ?? null, registration: registrationOf(status, checks, c, finalCode2) };
       }
+    }
+    /** Phase 21: 静的には確かめられないこと（review）に添える「登録の前・後に何を確かめるか」 */
+    const HOW_TO_CHECK = Object.freeze({
+      'conditional-control': '動作テスト環境で、条件に当てはまるレコードでは編集できず、当てはまらないレコード（例: 承認前）では編集できることを確かめる',
+      'unconditional-control': '動作テスト環境で、条件に当てはまらないレコード（例: 承認前）を開き、編集できることを確かめる',
+      'error-cancels-edit': '動作テスト環境で、編集不可のレコードが編集不可のまま・警告が出ないことを確かめる',
+      'error-cancels-other-js': '動作テスト環境で、他の JavaScript が編集不可にしたフィールドが編集不可のままかを確かめる',
+      'existing-conflict': '同じフィールドを扱う既存の JavaScript と動きがぶつからないか、動作テスト環境で確かめる',
+      'summary-scope': '要件を満たせない部分（行の追加・削除など）を、運用（手順・権限）でどう扱うか決める',
+      'platform-fields': 'PC とモバイルの両方の画面で、同じ制御になっているかを確かめる',
+      'planned-events': '計画のタイミング（値の変更時など）で動くかを、動作テスト環境で確かめる',
+      'target-app-read': '呼び出すアプリが正しいか、利用者に読み取り権限があるかを確かめる',
+      'patch-removal': '置き換え・削除される既存の行が不要かを確かめる',
+    });
+    /** Phase 21: Code Review の結果 → 登録の判定。BLOCKED = 登録不可（同意しても登録できない）、NEEDS_CONFIRMATION = 確認が必要な項目がある、RUNTIME_UNVERIFIED = 静的な検査は通ったが動作は未確認 */
+    function registrationOf(status, checks, c, finalCode) {
+      const blockers = checks.filter(x => !x.ok && x.severity === 'block').map(x => ({ code: x.name, message: x.message }));
+      const confirmations = checks.filter(x => !x.ok && x.severity === 'review').map((x, i) => ({ id: `${x.name}#${i + 1}`, code: x.name, message: x.message, howToCheck: HOW_TO_CHECK[x.name] || '動作テスト環境で、対象のレコード・ステータスで動きを確かめる' }));
+      const unverified = [{ code: 'RUNTIME_NOT_RUN', message: '動作はまだ確かめていません（Toolkit の検査はコードを実行しない静的な確認です）。登録した後、動作テスト環境で確かめてください' }];
+      if (Array.isArray(c?.platform) && c.platform.includes('mobile')) unverified.push({ code: 'MOBILE_RUNTIME_NOT_VERIFIABLE', message: 'モバイルの画面は kintone の動作テスト環境に無いため、この流れでは動作を確かめられません（運用環境のモバイル画面か実機で確かめる必要があります）' });
+      const verdict = blockers.length || status === STATUS.BLOCKED ? 'BLOCKED' : confirmations.length ? 'NEEDS_CONFIRMATION' : 'RUNTIME_UNVERIFIED';
+      return { version: '1', verdict, blockers, confirmations, unverified, codeHash: typeof finalCode === 'string' && finalCode ? hash(finalCode) : null };
     }
     const ACCESS_W = (acc) => Object.keys(acc || {}).filter(k => k === 'WRITE' || k === 'CONTROL' || k === 'SHOW_HIDE');
 
-    return { REVIEW_VERSION, STATUS, applyPatch, diffLines, diffText, diffHunks, checkSyntax, inspectHandlers, globalDeclarations, kintoneFieldOps, layoutSpaceIds, review };
+    return { REVIEW_VERSION, STATUS, applyPatch, diffLines, diffText, diffHunks, checkSyntax, inspectHandlers, globalDeclarations, kintoneFieldOps, layoutSpaceIds, review, disableSites, subtableCellSites, siteConds, writeTargets, restCalls, condRefsOf, HOW_TO_CHECK };
   })();
 
   // ==========================================
@@ -11095,11 +11312,17 @@
      */
     function changeFromGenerated({ customization = null, generated, review, existingSource = null, target = null, fileName = null, existingNames = [] } = {}) {
       if (!generated || typeof generated.code !== 'string') return { ok: false, reason: 'NO_CODE', message: '生成コードがありません' };
-      if (!review || review.status === KTCodeReview.STATUS.BLOCKED) return { ok: false, reason: 'CODE_REVIEW_BLOCKED', message: 'Toolkit Code Review で採用不可の問題があるため登録できません' };
+      // Phase 21: 登録の判定（Code Review の registration）。要件違反・不整合（BLOCKED）は、注意事項に同意しても登録しない
+      const reg = review?.registration || null;
+      if (!review || review.status === KTCodeReview.STATUS.BLOCKED) return { ok: false, reason: 'CODE_REVIEW_BLOCKED', message: `Toolkit Code Review で採用不可・要件との不一致が確認されたため登録できません${reg && (reg.blockers || []).length ? `: ${reg.blockers.map(b => b.message).join('／')}` : ''}` };
+      if (reg && reg.verdict === 'BLOCKED') return { ok: false, reason: 'REGISTRATION_BLOCKED', message: `Toolkit の検査で要件との不一致・不整合が確認されたため登録できません: ${(reg.blockers || []).map(b => b.message).join('／') || '（詳細は Code Review）'}` };
       const content = typeof review.finalCode === 'string' && review.finalCode ? review.finalCode : generated.code;
+      // registration を持たない古い Code Review の結果: 状態から作る（REVIEW_REQUIRED の項目は「確認が必要」にする。同意だけで登録できる OK 扱いにしない）
+      const registration = reg ? { version: reg.version, verdict: reg.verdict, blockers: reg.blockers || [], confirmations: reg.confirmations || [], unverified: reg.unverified || [], codeHash: reg.codeHash || hash(content) }
+        : { version: '0', verdict: review.status === KTCodeReview.STATUS.OK ? 'RUNTIME_UNVERIFIED' : 'NEEDS_CONFIRMATION', blockers: [], confirmations: (review.checks || []).filter(x => !x.ok && x.severity === 'review').map((x, i) => ({ id: `${x.name}#${i + 1}`, code: x.name, message: x.message, howToCheck: '動作テスト環境で、対象のレコード・ステータスで動きを確かめる' })), unverified: [{ code: 'RUNTIME_NOT_RUN', message: '動作はまだ確かめていません' }], codeHash: hash(content) };
       const strategy = generated.strategy;
       const tgt = target || existingSource?.target || (Array.isArray(customization?.platform) && customization.platform.length === 1 ? customization.platform[0] : 'desktop');
-      const base = { changeId: newId('chg'), customizationId: customization?.customizationId ?? null, strategy, target: tgt === 'mobile' ? 'mobile' : 'desktop', summary: generated.summary ?? customization?.requirement ?? '', content, contentHash: hash(content), bytes: content.length, codeReview: { status: review.status, checks: (review.checks || []).map(c => ({ name: c.name, ok: c.ok, severity: c.severity })), rescan: review.rescan ? { events: (review.rescan.events || []).map(e => e.name), fieldAccess: review.rescan.fieldAccess || {}, apis: (review.rescan.apis || []).map(a => a.name) } : null }, provenance: review.provenance ?? null, planFields: (customization?.fields || []).map(f => ({ code: f.code, access: f.access })), planEvents: [...(customization?.events || [])] };
+      const base = { changeId: newId('chg'), customizationId: customization?.customizationId ?? null, strategy, target: tgt === 'mobile' ? 'mobile' : 'desktop', summary: generated.summary ?? customization?.requirement ?? '', content, contentHash: hash(content), bytes: content.length, codeReview: { status: review.status, checks: (review.checks || []).map(c => ({ name: c.name, ok: c.ok, severity: c.severity })), rescan: review.rescan ? { events: (review.rescan.events || []).map(e => e.name), fieldAccess: review.rescan.fieldAccess || {}, apis: (review.rescan.apis || []).map(a => a.name) } : null }, provenance: review.provenance ?? null, planFields: (customization?.fields || []).map(f => ({ code: f.code, access: f.access })), planEvents: [...(customization?.events || [])], registration };
       if (strategy === 'EXTEND_EXISTING_JS') {
         if (!existingSource || typeof existingSource.text !== 'string') return { ok: false, reason: 'JS_SOURCE_UNAVAILABLE', message: '統合先の本文が無いため、既存ファイルの更新として登録できません' };
         return { ok: true, change: { ...base, kind: CHANGE.REPLACE_FILE, name: existingSource.name, baseHash: hash(existingSource.text), existingName: existingSource.name } };
@@ -11140,7 +11363,7 @@
      */
     async function prepare(input, { api, now = Date.now } = {}) {
       const changes = clone(Array.isArray(input?.changes) ? input.changes : []);
-      const prepared = { executorVersion: EXECUTOR_VERSION, executionId: newId('jsx'), appId: String(input?.appId ?? ''), env: ENV, preparedAt: nowIso(now), status: RUN.PREPARED, blockers: [], warnings: [], snapshot: null, changes, after: null, summary: { add: 0, replace: 0, byTarget: { desktop: { add: 0, replace: 0 }, mobile: { add: 0, replace: 0 } }, preservedJs: 0, preservedCss: 0 }, spec: input?.spec ?? null, provenance: input?.provenance ?? null };
+      const prepared = { executorVersion: EXECUTOR_VERSION, executionId: newId('jsx'), appId: String(input?.appId ?? ''), env: ENV, preparedAt: nowIso(now), status: RUN.PREPARED, blockers: [], warnings: [], snapshot: null, changes, after: null, summary: { add: 0, replace: 0, byTarget: { desktop: { add: 0, replace: 0 }, mobile: { add: 0, replace: 0 } }, preservedJs: 0, preservedCss: 0 }, spec: input?.spec ?? null, provenance: input?.provenance ?? null, confirmations: [], unverified: [], verdict: null };
       const block = (code, message, detail = null) => { prepared.blockers.push({ code, message, ...(detail ? { detail } : {}) }); prepared.status = RUN.BLOCKED; };
       if (!api || typeof api.getPreviewCustomize !== 'function' || typeof api.putPreviewCustomize !== 'function' || typeof api.uploadFile !== 'function') { block('NO_API', 'kintone API（カスタマイズ設定）がありません'); return prepared; }
       if (!prepared.appId) { block('NO_APP', 'appId がありません'); return prepared; }
@@ -11155,6 +11378,19 @@
       const addCount = { desktop: 0, mobile: 0 };
       for (const ch of changes) {
         ch.status = ST.PENDING; ch.reason = null; ch.message = '';
+        // Phase 21: 登録の判定を登録処理の側でも確かめる（画面のボタンだけに頼らない。古い画面・再操作でも回避できない）
+        //   Code Review の結果が無い・要件との不一致（BLOCKED）・検査の後にコードが変わった → 登録しない。recheck があれば最新の作業基準で検査し直す
+        const reg = ch.registration || null;
+        if (!reg) { ch.status = ST.BLOCKED; ch.reason = 'REGISTRATION_UNKNOWN'; ch.message = 'Toolkit の検査結果がありません（コードを生成し直してください）'; block('REGISTRATION_UNKNOWN', `${ch.name}: ${ch.message}`); continue; }
+        if (reg.verdict === 'BLOCKED') { ch.status = ST.BLOCKED; ch.reason = 'REQUIREMENT_VIOLATION'; ch.message = (reg.blockers || []).map(b => b.message).join('／') || '要件との不一致'; block('REQUIREMENT_VIOLATION', `${ch.name}: 要件との不一致・不整合が確認されています（${ch.message}）`); continue; }
+        if (typeof ch.content === 'string' && reg.codeHash && reg.codeHash !== hash(ch.content)) { ch.status = ST.BLOCKED; ch.reason = 'CONTENT_CHANGED_AFTER_REVIEW'; ch.message = '検査した後にコードが変わっています（もう一度生成・検査してください）'; block('CONTENT_CHANGED_AFTER_REVIEW', `${ch.name}: ${ch.message}`); continue; }
+        if (typeof input?.recheck === 'function') {
+          let fresh = null;
+          try { fresh = await input.recheck(ch); } catch (e) { fresh = null; }
+          if (!fresh) { ch.status = ST.BLOCKED; ch.reason = 'RECHECK_FAILED'; ch.message = '最新の設定で検査し直せませんでした'; block('RECHECK_FAILED', `${ch.name}: ${ch.message}`); continue; }
+          if (fresh.verdict === 'BLOCKED') { ch.status = ST.BLOCKED; ch.reason = 'REQUIREMENT_VIOLATION'; ch.message = (fresh.blockers || []).map(b => b.message).join('／') || '要件との不一致'; block('REQUIREMENT_VIOLATION', `${ch.name}: 最新の設定で検査し直すと、要件との不一致・不整合があります（${ch.message}）`); continue; }
+          ch.registration = { ...fresh, codeHash: fresh.codeHash || reg.codeHash };
+        }
         if (!TARGETS.includes(ch.target)) { ch.status = ST.BLOCKED; ch.reason = 'INVALID_TARGET'; ch.message = 'PC / モバイルの指定が不正です'; block('INVALID_CHANGE', ch.message); continue; }
         if (typeof ch.content !== 'string' || !ch.content.trim()) { ch.status = ST.BLOCKED; ch.reason = 'NO_CODE'; ch.message = 'コードが空です'; block('INVALID_CHANGE', ch.message); continue; }
         const list = snap[ch.target].js;
@@ -11184,6 +11420,12 @@
         } else { ch.status = ST.BLOCKED; ch.reason = 'INVALID_KIND'; ch.message = '変更の種類が不正です'; block('INVALID_CHANGE', ch.message); }
       }
       if (changes.some((c, i) => changes.findIndex(x => x.target === c.target && x.name === c.name) !== i)) block('DUPLICATE_CHANGE', '同じファイルへの変更が複数あります');
+      // Phase 21: 確認が必要な項目（静的には確かめられないこと。登録の前に利用者が 1 件ずつ確認する）と、動作が未確認であること
+      const pend = changes.filter(c => c.status === ST.PENDING);
+      const seenC = new Set(), seenU = new Set();
+      prepared.confirmations = pend.flatMap(ch => (ch.registration?.confirmations || []).map(x => ({ ...x, key: `${ch.customizationId || ch.name}:${x.id}`, file: ch.name }))).filter(x => (seenC.has(x.key) ? false : (seenC.add(x.key), true)));
+      prepared.unverified = pend.flatMap(ch => ch.registration?.unverified || []).filter(x => (seenU.has(x.code) ? false : (seenU.add(x.code), true)));
+      prepared.verdict = prepared.status === RUN.BLOCKED ? 'BLOCKED' : prepared.confirmations.length ? 'NEEDS_CONFIRMATION' : 'RUNTIME_UNVERIFIED';
       prepared.after = buildAfter(snap, changes.filter(c => c.status === ST.PENDING));
       prepared.summary.preservedJs = TARGETS.reduce((n, t) => n + snap[t].js.filter(e => !changes.some(c => c.target === t && c.kind === CHANGE.REPLACE_FILE && c.name === e.name)).length, 0);
       prepared.summary.preservedCss = TARGETS.reduce((n, t) => n + snap[t].css.length, 0);
@@ -11262,9 +11504,18 @@
     }
 
     // ---- executePreview（書き込み: upload → PUT 1 回 → 再取得して検証）----
-    async function executePreview(prepared, { api, now = Date.now, onProgress = null, fieldRows = [] } = {}) {
+    async function executePreview(prepared, { api, now = Date.now, onProgress = null, fieldRows = [], acknowledged = [] } = {}) {
       if (!prepared || prepared.status !== RUN.PREPARED) throw Object.assign(new Error('登録の準備ができていない、または登録できない状態です'), { code: 'NOT_PREPARED' });
       if (prepared.executed) throw Object.assign(new Error('この準備は既に実行されています（やり直すには準備からやり直してください）'), { code: 'ALREADY_EXECUTED' });
+      // Phase 21: 書き込みの前に、登録の判定をもう一度確かめる。要件との不一致（BLOCKED）・検査の後に変わったコードは登録しない。
+      //   確認が必要な項目は、利用者が 1 件ずつ確認したもの（acknowledged = 項目の key）がそろっているときだけ登録する（まとめての同意では通さない）
+      for (const ch of (prepared.changes || []).filter(c => c.status === ST.PENDING)) {
+        const reg = ch.registration || null;
+        if (!reg || reg.verdict === 'BLOCKED' || (typeof ch.content === 'string' && reg.codeHash && reg.codeHash !== hash(ch.content))) throw Object.assign(new Error(`「${ch.name}」は Toolkit の検査で登録できない状態です（${!reg ? '検査結果がありません' : reg.verdict === 'BLOCKED' ? (reg.blockers || []).map(b => b.message).join('／') : '検査の後にコードが変わっています'}）。登録していません`), { code: !reg ? 'REGISTRATION_UNKNOWN' : reg.verdict === 'BLOCKED' ? 'REQUIREMENT_VIOLATION' : 'CONTENT_CHANGED_AFTER_REVIEW' });
+      }
+      const ack = new Set(Array.isArray(acknowledged) ? acknowledged : []);
+      const missingAck = (prepared.confirmations || []).filter(x => !ack.has(x.key));
+      if (missingAck.length) throw Object.assign(new Error(`確認が必要な項目（${missingAck.length} 件）を確認していないため、登録していません: ${missingAck.map(x => x.message).join('／').slice(0, 300)}`), { code: 'CONFIRMATION_REQUIRED', missing: missingAck.map(x => x.key) });
       prepared.executed = true;
       const execution = { executorVersion: EXECUTOR_VERSION, executionId: prepared.executionId, appId: prepared.appId, env: ENV, startedAt: nowIso(now), finishedAt: null, status: RUN.RUNNING, lifecycle: RUN.RUNNING, snapshot: clone(prepared.snapshot), steps: clone(prepared.changes).filter(c => c.status === ST.PENDING), uploads: [], put: null, previewUnchanged: null, afterRevision: null, actualAfterRaw: null, verification: null, error: null, fieldRows: clone(fieldRows), spec: prepared.spec ?? null, provenance: prepared.provenance ?? null };
       const progress = () => { if (typeof onProgress === 'function') { try { onProgress(clone(execution)); } catch (e) { } } };
@@ -11742,7 +11993,7 @@
         customizationId: c.customizationId, requirement: String(c.requirement ?? ''), whyStandardInsufficient: String(c.whyStandardInsufficient ?? ''),
         strategy: typeof c.strategy === 'string' ? c.strategy : null, platform: strs(c.platform).filter(x => x === 'desktop' || x === 'mobile'),
         implementation: ['JAVASCRIPT', 'CSS', 'JS_CSS'].includes(c.implementation) ? c.implementation : 'JAVASCRIPT',   // Phase 18（Gateway validate-plan と同じ既定）
-        events: strs(c.events), fields: (Array.isArray(c.fields) ? c.fields : []).filter(f => f && typeof f.code === 'string').map(f => ({ code: f.code, access: ['READ', 'WRITE', 'CONTROL'].includes(f.access) ? f.access : 'READ' })),
+        events: strs(c.events), fields: (Array.isArray(c.fields) ? c.fields : []).filter(f => f && typeof f.code === 'string').map(f => ({ code: f.code, access: ['READ', 'WRITE', 'CONTROL'].includes(f.access) ? f.access : 'READ', ...(typeof f.condition === 'string' && f.condition.trim() ? { condition: f.condition.trim().slice(0, 300) } : {}) })),   // Phase 21: condition = そのフィールドを制御・変更する条件（任意）
         apis: strs(c.apis), existingFiles: (Array.isArray(c.existingFiles) ? c.existingFiles : []).filter(f => f && typeof f.name === 'string').map(f => ({ name: f.name, target: f.target === 'mobile' ? 'mobile' : 'desktop', reason: String(f.reason ?? '') })),
         risks: strs(c.risks), questions: strs(c.questions), dependsOn: strs(c.dependsOn), evidenceIds: ids(c.evidenceIds, `customizations[${i}]`),
       })).map((c, i) => {
@@ -13620,7 +13871,7 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
                 v.generated = v.generated || {};
                 v.generated[cid] = { generated: r.generated, review: r.review, ctx: r.ctx || null, existingSource: r.existingSource || null, at: now() };
                 const st = r.review?.status;
-                toolkit(st === 'BLOCKED' ? 'JavaScript を生成しましたが、Toolkit の検査で採用できない問題があります。' : st === 'REVIEW_REQUIRED' ? 'JavaScript を生成しました。確認が必要な点があります。' : 'JavaScript を生成しました。Toolkit の検査を通過しています。', { planId: v.planId, version: v.version, customizationId: cid });
+                toolkit((st === 'BLOCKED' ? 'JavaScript を生成しましたが、Toolkit の検査で要件との不一致・採用できない問題が見つかりました（登録できません）。' : st === 'REVIEW_REQUIRED' ? 'JavaScript を生成しました。登録の前に確認が必要な点があります。' : 'JavaScript を生成しました。静的な検査は通過しています（動作は未確認）。') + ((r.review?.coverage?.notAchieved || []).length ? ` 要件のうち満たせない部分があります: ${r.review.coverage.notAchieved.map(x => x.message).join('／')}` : ''), { planId: v.planId, version: v.version, customizationId: cid });
                 push(MSG.CODE, ROLE.TOOLKIT, 'JavaScript', { planId: v.planId, version: v.version, customizationId: cid });
               } else if (r && r.reason === 'JS_SOURCE_UNAVAILABLE') {
                 toolkit(`統合先「${r.file?.name || ''}」の本文を取得できませんでした（JS_SOURCE_UNAVAILABLE）。既存ファイルへの自動生成は行いません。`, { kind: 'source-unavailable', planId: v.planId, version: v.version, customizationId: cid, file: r.file || null });
@@ -13749,6 +14000,8 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
     const STRATEGY_JA = { NEW_JS_FILE: '＋ 新規 JS', EXTEND_EXISTING_JS: '✎ 既存 JS を変更', REPLACE_EXISTING_LOGIC: '既存処理の置き換え（計画のみ）', PLUGIN_CANDIDATE: 'プラグイン候補（計画のみ）', NOT_RECOMMENDED: '推奨しない' };
     const SPEC_STATUS_JA = { DRAFT: '確認待ち', CONFIRMED: '確定済み', SUPERSEDED: '旧版' };
     const CODE_STATUS_JA = { OK: '✓ 検査を通過', REVIEW_REQUIRED: '△ 要確認', BLOCKED: '× 採用不可' };
+    // Phase 21: JS の登録の判定（KTCodeReview の registration.verdict）
+    const VERDICT_JA = { BLOCKED: '× 登録できません（要件との不一致・不整合）', NEEDS_CONFIRMATION: '△ 登録の前に確認が必要', RUNTIME_UNVERIFIED: '✓ 静的な検査は通過（動作は未確認）' };
     const num = (v) => (Number.isFinite(Number(v)) ? Number(v) : 0);
 
     /** 計画の版 → 要約（手順の件数は標準設定 / JavaScript に分ける。superseded は履歴表示用） */
@@ -13800,10 +14053,15 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
       const g = entry.generated, rv = entry.review || null;
       const c = v ? ((v.plan?.customizations || []).find(x => x.customizationId === customizationId) || null) : null;
       const status = rv?.status || 'REVIEW_REQUIRED';
+      // Phase 21: 登録の判定（登録不可 / 登録前に確認が必要 / 静的な検査は通過・動作は未確認）と、要件のうち満たせない部分
+      const reg = rv?.registration || null;
+      const verdict = reg?.verdict || (status === 'BLOCKED' ? 'BLOCKED' : status === 'OK' ? 'RUNTIME_UNVERIFIED' : 'NEEDS_CONFIRMATION');
       return {
         customizationId, targetFile: g.targetFile || '', strategy: g.strategy || null, strategyJa: STRATEGY_JA[g.strategy] || g.strategy || '',
         target: entry.existingSource?.target || (Array.isArray(c?.platform) && c.platform.length === 1 ? c.platform[0] : null),
-        status, statusJa: CODE_STATUS_JA[status] || status, ok: status === 'OK', blocked: status === 'BLOCKED',
+        verdict, verdictJa: VERDICT_JA[verdict] || verdict, blockers: reg?.blockers || [], confirmCount: (reg?.confirmations || []).length, unverified: reg?.unverified || [],
+        achieved: rv?.coverage?.achieved || [], notAchieved: rv?.coverage?.notAchieved || [],
+        status, statusJa: CODE_STATUS_JA[status] || status, ok: status === 'OK', blocked: status === 'BLOCKED' || verdict === 'BLOCKED',
         added: rv?.diff?.added ?? null, removed: rv?.diff?.removed ?? null, hasDiff: !!rv?.diff,
         patterns: (g.patterns || []).map(p => p.id), external: !!(entry.existingSource?.from === 'url' || entry.existingSource?.external),
         summary: g.summary || c?.requirement || '', requirement: c?.requirement || '',
@@ -14274,9 +14532,12 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
         <div style="display:flex; align-items:center; justify-content:space-between; gap:6px; flex-wrap:wrap;"><b>JavaScript を生成しました。</b>${oldNote(ps)}</div>
         <div style="margin-top:4px; font-size:12px;">${esc(cs.strategy === 'EXTEND_EXISTING_JS' ? '✎' : '＋')} <b>${esc(cs.targetFile)}</b>${cs.target ? `（${cs.target === 'mobile' ? 'モバイル' : 'PC'}）` : ''}${cs.hasDiff ? `　＋${esc(String(cs.added))} / −${esc(String(cs.removed))} 行` : ''}</div>
         <div style="margin-top:2px; font-size:12px;">Toolkit Code Review：${stBadge}</div>
+        <div class="kt-ai-code-verdict" style="margin-top:2px; font-size:12px; color:${cs.verdict === 'BLOCKED' ? '#b00020' : cs.verdict === 'NEEDS_CONFIRMATION' ? '#b26a00' : '#2e7d32'};">登録：${esc(cs.verdictJa)}${cs.verdict === 'NEEDS_CONFIRMATION' ? `（${esc(String(cs.confirmCount))} 件）` : ''}</div>
+        ${cs.blockers.length ? `<div style="margin-top:2px; font-size:11px; color:#b00020;">${cs.blockers.slice(0, 3).map(b => `× ${esc(b.message)}`).join('<br>')}${cs.blockers.length > 3 ? ' …' : ''}</div>` : ''}
+        ${cs.notAchieved.length ? `<div class="kt-ai-code-not-achieved" style="margin-top:2px; font-size:11px; color:#b00020;">要件のうち満たせない部分（Toolkit の確認）: ${cs.notAchieved.map(x => esc(x.message)).join('／')}</div>` : ''}
         ${cs.external ? `<div style="margin-top:4px; font-size:11px; color:#b26a00;">統合先は URL 指定の JavaScript です。Toolkit からは書き換えられません（コード / Diff を手動で反映するか、新規 JS として設計し直す）。</div>` : ''}
         <div style="margin-top:6px; display:flex; gap:6px; flex-wrap:wrap;">${btn('open-code', 'コードを見る', `data-cid="${esc(cid)}" data-view="code"`, 'font-weight:600;')}${cs.hasDiff ? btn('open-code', 'Diffを見る', `data-cid="${esc(cid)}" data-view="diff"`) : ''}${cs.external ? btn('choice', '新規 JS として設計し直す', `data-intent="REVISE_PLAN" data-text="${esc(`${cid} は ${cs.targetFile} を変更せず、新規の JavaScript ファイルとして設計して`)}"`) : ''}</div>
-        <div style="font-size:10px; opacity:.6; margin-top:4px;">${cs.blocked ? '採用できない問題があるため登録できません。計画を修正して再生成してください。' : '登録は右の「コード」の［動作テスト環境へ登録］→「実行」の確認画面の順です。運用環境には反映しません。'}</div>`, cs.ok ? '#2e7d32' : cs.blocked ? '#b00020' : '#6a1b9a');
+        <div style="font-size:10px; opacity:.6; margin-top:4px;">${cs.blocked ? '要件との不一致・採用できない問題があるため登録できません（確認や同意では登録できません）。計画を修正して再生成してください。' : '登録は右の「コード」の［動作テスト環境へ登録］→「実行」の確認画面の順です。運用環境には反映しません。'}</div>`, cs.ok && cs.verdict !== 'BLOCKED' ? '#2e7d32' : cs.blocked ? '#b00020' : '#6a1b9a');
     }
     function customizationChoicesHtml(m) {
       const d = m.data || {};
@@ -14408,8 +14669,9 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
     }
 
     /** JS 登録セクション（コードペイン）: 最終確認（§21）/ 進捗 / 結果（§23〜§27）/ 復元の確認・結果（§28〜§30）。Human Approval はここだけ */
-    function jsRegisterPaneHtml(jx, v = null) {
+    function jsRegisterPaneHtml(jx, v = null, opts = {}) {
       const stage = jx?.stage || 'idle';
+      const acked = opts.acknowledged || new Set();
       const pr = jx?.prepared || null, ex = jx?.execution || null, rb = jx?.rollback || ex?.rollback || null;
       const name = (c) => `${c.kind === 'REPLACE_FILE' ? '✎' : '＋'} <b>${esc(c.name)}</b>（${c.target === 'mobile' ? 'モバイル' : 'PC'}）${c.kind === 'REPLACE_FILE' ? '　既存ファイルを更新' : `　新規追加（${c.position != null ? `${c.position + 1} 番目・末尾` : '末尾'}）`}`;
       const blockers = (list) => (list || []).map(b => `<div style="font-size:12px; color:#b00020;">× ${esc(b.message)} <span style="opacity:.7;">[${esc(b.code)}]</span></div>`).join('');
@@ -14425,8 +14687,14 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
           <div style="margin-top:6px; font-size:12px;">PC：${by.desktop.replace ? `${by.desktop.replace}件変更` : ''}${by.desktop.replace && by.desktop.add ? '・' : ''}${by.desktop.add ? `${by.desktop.add}件追加` : ''}${!by.desktop.replace && !by.desktop.add ? '変更なし' : ''}　Mobile：${by.mobile.replace ? `${by.mobile.replace}件変更` : ''}${by.mobile.replace && by.mobile.add ? '・' : ''}${by.mobile.add ? `${by.mobile.add}件追加` : ''}${!by.mobile.replace && !by.mobile.add ? '変更なし' : ''}</div>
           <div style="font-size:12px; margin-top:2px;">既存の CSS（${pr.summary.preservedCss} 件）・その他の JS（${pr.summary.preservedJs} 件）・適用範囲（${esc(pr.snapshot.scope)}）は変更しません。</div>
           ${warns(pr.warnings)}
+          ${(() => {
+            // Phase 21: 確認が必要な項目（静的には確かめられないこと）を 1 件ずつ確認してから登録する。要件との不一致は「登録できません」で止まりここには来ない
+            const confs = pr.confirmations || [];
+            const unv = pr.unverified || [];
+            return `${confs.length ? `<div id="kt-ai-jsreg-confirms" style="margin-top:6px; border:1px solid #b26a00; border-radius:6px; padding:6px;"><b style="font-size:12px;">登録の前に確認が必要な項目（${confs.length} 件。Toolkit の静的な検査では確かめられないこと）</b>${confs.map(x => `<label style="display:flex; gap:6px; align-items:flex-start; font-size:12px; margin-top:4px;"><input type="checkbox" class="kt-ai-jsreg-ack" data-ack-key="${esc(x.key)}"${acked.has(x.key) ? ' checked' : ''}><span>△ ${esc(x.message)}<br><span style="opacity:.8;">確かめること: ${esc(x.howToCheck || '')}</span></span></label>`).join('')}</div>` : ''}${unv.length ? `<div id="kt-ai-jsreg-unverified" style="font-size:11px; margin-top:6px;"><b>動作は未確認</b>: ${unv.map(u => esc(u.message)).join('／')}</div>` : ''}${pr.notice ? `<div style="font-size:12px; color:#b00020; margin-top:4px;">${esc(pr.notice)}</div>` : ''}`;
+          })()}
           <div style="font-size:12px; margin-top:4px;"><b>運用環境には反映されません。</b><span style="opacity:.7;">（登録先は動作テスト環境のカスタマイズ設定だけ。revision ${esc(pr.snapshot.revision || '—')} を指定して登録し、直前にもう一度確認します）</span></div>
-          <div style="margin-top:8px; display:flex; gap:6px;"><button type="button" id="kt-ai-jsreg-cancel" class="btn" style="height:28px;">キャンセル</button><button type="button" id="kt-ai-jsreg-go" class="btn" style="height:28px; font-weight:600; border-color:#6a1b9a;">動作テスト環境へ登録</button></div></div>`;
+          <div style="margin-top:8px; display:flex; gap:6px;"><button type="button" id="kt-ai-jsreg-cancel" class="btn" style="height:28px;">キャンセル</button><button type="button" id="kt-ai-jsreg-go" class="btn" style="height:28px; font-weight:600; border-color:#6a1b9a;"${(pr.confirmations || []).every(x => acked.has(x.key)) ? '' : ' disabled title="確認が必要な項目をすべて確認してください"'}>動作テスト環境へ登録</button></div></div>`;
       }
       if (stage === 'running') return `${head('JavaScript を動作テスト環境へ登録しています...')}<div style="margin-top:4px; display:grid; gap:1px; font-size:12px;">${(ex?.steps || []).map(c => `<div>${esc(JS_ST_MARK[c.status] || '・')} ${esc(c.name)}（${c.target === 'mobile' ? 'モバイル' : 'PC'}）${esc(c.status)}</div>`).join('')}</div></div>`;
       const resultHtml = () => {
@@ -14457,8 +14725,14 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
       const g = entry.generated, rv = entry.review;
       const mark = (ch) => (ch.ok ? '✓' : ch.severity === 'block' ? '×' : '△');
       const color = (ch) => (ch.ok ? '#2e7d32' : ch.severity === 'block' ? '#b00020' : '#b26a00');
+      // Phase 21: 要約・詳細・検査結果をそろえる。登録の判定と、要件のうち満たせない部分（Toolkit の確認）を AI の要約より先に出す
+      const reg = rv?.registration || null;
+      const VJ = { BLOCKED: '× 登録できません（要件との不一致・不整合）', NEEDS_CONFIRMATION: '△ 登録の前に確認が必要', RUNTIME_UNVERIFIED: '✓ 静的な検査は通過（動作は未確認）' };
+      const notAch = rv?.coverage?.notAchieved || [], ach = rv?.coverage?.achieved || [];
+      const regHtml = reg ? `<div class="kt-ai-code-verdict" style="margin-top:2px; color:${reg.verdict === 'BLOCKED' ? '#b00020' : reg.verdict === 'NEEDS_CONFIRMATION' ? '#b26a00' : '#2e7d32'};">登録：${esc(VJ[reg.verdict] || reg.verdict)}${reg.verdict === 'NEEDS_CONFIRMATION' ? `（確認 ${esc(String((reg.confirmations || []).length))} 件）` : ''}</div>${(reg.blockers || []).map(b => `<div style="color:#b00020;">× ${esc(b.message)}</div>`).join('')}${(reg.unverified || []).map(u => `<div style="opacity:.8;">・${esc(u.message)}</div>`).join('')}` : '';
+      const covHtml = `${ach.length ? `<div style="margin-top:2px;">Toolkit が確かめた範囲: ${ach.map(esc).join('／')}</div>` : ''}${notAch.length ? `<div class="kt-ai-code-not-achieved" style="margin-top:2px; color:#b00020;">要件のうち満たせない部分（Toolkit の確認）: ${notAch.map(x => esc(x.message)).join('／')}</div>` : ''}`;
       return {
-        head: `<b>${esc(g.strategy === 'EXTEND_EXISTING_JS' ? '✎ 既存 JS を変更' : '＋ 新規 JS')}: ${esc(g.targetFile)}</b>　${rv?.status === 'OK' ? '✓ 検査を通過' : rv?.status === 'BLOCKED' ? '× 採用不可' : '△ 要確認'}<br><span style="opacity:.85;">${esc(g.summary || '')}</span>`,
+        head: `<b>${esc(g.strategy === 'EXTEND_EXISTING_JS' ? '✎ 既存 JS を変更' : '＋ 新規 JS')}: ${esc(g.targetFile)}</b>　${rv?.status === 'OK' ? '✓ 検査を通過' : rv?.status === 'BLOCKED' ? '× 採用不可' : '△ 要確認'}${regHtml}${covHtml}${notAch.length ? `<details style="margin-top:2px;"><summary style="cursor:pointer; opacity:.75;">AI の要約（Toolkit の確認と食い違う部分があります。そのまま採用しないでください）</summary><span style="opacity:.85;">${esc(g.summary || '')}</span></details>` : `<div style="margin-top:2px;"><span style="opacity:.7;">AI の要約:</span> <span style="opacity:.85;">${esc(g.summary || '')}</span></div>`}`,
         review: (rv?.checks || []).map(ch => `<div style="color:${color(ch)};">${mark(ch)} ${esc(CHECK_JA[ch.name] || ch.name)}: ${esc(ch.message)}</div>`).join('') + ((rv?.mismatches || []).length ? `<div style="margin-top:4px; opacity:.85;">計画との照合: ${rv.mismatches.map(x => esc(x.message)).join('／')}</div>` : '') + ((g.assumptions || []).length ? `<div style="margin-top:4px; opacity:.85;">前提: ${esc(g.assumptions.join('／'))}</div>` : '') + ((g.warnings || []).length ? `<div style="color:#b26a00;">${g.warnings.map(w => `⚠ ${esc(w)}`).join('<br>')}</div>` : '') + patternsHtml(g),
         code: rv?.finalCode ?? g.code ?? '',
         diff: rv?.diff ? (rv.diff.lines || []).map(l => `${l.type}${l.text}`).join('\n') : '',
@@ -14777,7 +15051,7 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
             if (!existingSource) return { ok: false, reason: 'JS_SOURCE_UNAVAILABLE', file: { name: t.name, target } };
           }
         }
-        const ctx = KTContext.buildGenerator({ customization: c, plan, planId: v.planId, version: v.version, data: inputs.data || null, deps: inputs.deps || null, scan: inputs.scan || null, existingSource });
+        const ctx = KTContext.buildGenerator({ customization: c, plan, planId: v.planId, version: v.version, data: inputs.data || null, deps: inputs.deps || null, scan: inputs.scan || null, existingSource, userRequests: [v.goal, ...(v.revisionRequests || [])] });
         const client = await ensureReady({ generator: true });
         const requestId = KTAiClient.newRequestId();
         let generated;
@@ -15040,10 +15314,12 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
     // ==================================================================
     let pendingSeed = null;
     const jsExec = { stage: 'idle', prepared: null, execution: null, rollback: null, error: null, planId: null, version: null, paneClosed: false };
-    const resetJsExec = () => { jsExec.stage = 'idle'; jsExec.prepared = null; jsExec.execution = null; jsExec.rollback = null; jsExec.error = null; jsExec.planId = null; jsExec.version = null; jsExec.paneClosed = false; };
+    // Phase 21: 登録の前に利用者が 1 件ずつ確認した項目（prepared.confirmations[].key）。準備をやり直すと空に戻る
+    const jsAck = new Set();
+    const resetJsExec = () => { jsExec.stage = 'idle'; jsExec.prepared = null; jsExec.execution = null; jsExec.rollback = null; jsExec.error = null; jsExec.planId = null; jsExec.version = null; jsExec.paneClosed = false; jsAck.clear(); };
     function renderJsReg() {
       const el = $('kt-ai-jsreg');
-      if (el) el.innerHTML = jsExec.paneClosed ? '' : KTAiChatUi.jsRegisterPaneHtml(jsExec, jsExec.planId != null ? planIndex().get(`${jsExec.planId}:${jsExec.version}`) : null);
+      if (el) el.innerHTML = jsExec.paneClosed ? '' : KTAiChatUi.jsRegisterPaneHtml(jsExec, jsExec.planId != null ? planIndex().get(`${jsExec.planId}:${jsExec.version}`) : null, { acknowledged: jsAck });
       if ($execEmpty) $execEmpty.style.display = (jsExec.stage !== 'idle' && !jsExec.paneClosed) || (execState.stage !== 'idle') || !!lastReview ? 'none' : '';
       if (conv) { conv.noteJsExecution(jsExec); renderChat(); }
       renderWsState();
@@ -15084,16 +15360,20 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
       if (!executor || typeof executor.api.getPreviewCustomize !== 'function') { conv.notice('この環境では動作テスト環境への登録ができません（kintone API がありません）。', { kind: 'js-register-unavailable' }); return null; }
       resetJsExec();
       jsExec.planId = v.planId; jsExec.version = v.version; jsExec.stage = 'preparing'; renderJsReg(); setArtifact({ type: VM.ARTIFACT.EXECUTION, id: null, version: v.version, js: true }, { scrollTo: '#kt-ai-jsreg' });
+      // Phase 21: 古い版（会話の上の方のカード・旧版のコードペイン）からは登録しない。最新の版の生成コードだけ
+      const latest = conv.activePlan();
+      if (!latest || latest !== v) { jsExec.prepared = { executionId: null, status: 'BLOCKED', blockers: [{ code: 'NOT_LATEST_VERSION', message: `この計画は最新の版ではありません（v${v.version}${latest ? `。最新は v${latest.version}` : ''}）。最新の版のコードを登録してください` }], warnings: [], changes: [], summary: { add: 0, replace: 0, byTarget: { desktop: { add: 0, replace: 0 }, mobile: { add: 0, replace: 0 } }, preservedJs: 0, preservedCss: 0 }, snapshot: null, confirmations: [], unverified: [] }; jsExec.stage = 'blocked'; renderJsReg(); return jsExec.prepared; }
       const inputs = inputsNow();
       const files = KTScan.summarizeFiles(inputs.scan || null, inputs.data || null);
       const changes = [], blocked = [];
       for (const [cid, g] of Object.entries(v.generated || {})) {
         const c = (v.plan?.customizations || []).find(x => x.customizationId === cid) || null;
         const target = g.existingSource?.target || (Array.isArray(c?.platform) && c.platform.length === 1 ? c.platform[0] : 'desktop');
+        // URL 指定の JS は検査の結果にかかわらず書き換えない（構造上の理由を先に出す）
+        if (g.existingSource?.from === 'url' || g.existingSource?.external) { blocked.push({ code: 'EXTERNAL_JS_NOT_WRITABLE', message: `${cid}: 「${g.generated.targetFile}」は URL 指定の JavaScript です。外部サーバーのファイルは Toolkit から書き換えられません（コード / Diff を手動で反映するか、新規の補助 JS として設計し直してください）` }); continue; }
         const r = KTJsExecutor.changeFromGenerated({ customization: c, generated: g.generated, review: g.review, existingSource: g.existingSource ? { name: g.existingSource.name, target: g.existingSource.target, text: g.existingSource.text } : null, target, existingNames: files.filter(f => f.target === target).map(f => f.name) });
         if (r.ok) {
-          if (g.existingSource?.from === 'url' || g.existingSource?.external) blocked.push({ code: 'EXTERNAL_JS_NOT_WRITABLE', message: `${cid}: 「${g.generated.targetFile}」は URL 指定の JavaScript です。外部サーバーのファイルは Toolkit から書き換えられません（コード / Diff を手動で反映するか、新規の補助 JS として設計し直してください）` });
-          else {
+          {
             changes.push(r.change);
             // Phase 20（CX-1 2 回目・実機）: PC とモバイルの計画 → モバイルの一覧にも同じ本文を登録する（PC にだけ登録するとモバイルでは読み込まれない）
             const mob = KTJsExecutor.mobileCompanionOf(r.change, { customization: c, mobileNames: files.filter(f => f.target === 'mobile').map(f => f.name) });
@@ -15104,8 +15384,20 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
         else blocked.push({ code: r.reason, message: `${cid}: ${r.message}` });
       }
       if (!changes.length) { jsExec.prepared = { executionId: null, status: 'BLOCKED', blockers: blocked.length ? blocked : [{ code: 'NOTHING_TO_REGISTER', message: '登録できる JavaScript がありません（仕様を確定してコードを生成してください）' }], warnings: [], changes: [], summary: { add: 0, replace: 0, byTarget: { desktop: { add: 0, replace: 0 }, mobile: { add: 0, replace: 0 } }, preservedJs: 0, preservedCss: 0 }, snapshot: null }; jsExec.stage = 'blocked'; renderJsReg(); return jsExec.prepared; }
+      // Phase 21: 登録の直前に、生成したコードを最新の作業基準（動作テスト環境）で検査し直す（生成の後にフィールドが消えた・変わったなども登録不可にする）
+      if (devBaseLoader) await refreshDevBase({ reason: 'register' });
+      const recheck = async (ch) => {
+        const g = v.generated?.[ch.customizationId] || null;
+        if (!g) return null;
+        const c = (v.plan?.customizations || []).find(x => x.customizationId === ch.customizationId) || null;
+        const inp = inputsNow();
+        const rv2 = KTCodeReview.review({ generated: g.generated, customization: c, plan: v.plan, data: inp.data || null, scan: inp.scan || null, existingSource: g.existingSource ? { name: g.existingSource.name, target: g.existingSource.target, text: g.existingSource.text } : null, provenance: null });
+        const reg = rv2.registration || null;
+        if (reg && reg.codeHash && reg.codeHash !== ch.contentHash) return { ...reg, verdict: 'BLOCKED', blockers: [...(reg.blockers || []), { code: 'CONTENT_MISMATCH', message: '検査し直したコードと登録しようとしているコードが一致しません（もう一度生成してください）' }] };
+        return reg;
+      };
       try {
-        const prepared = await KTJsExecutor.prepare({ appId: executor.appId, changes, expectedRevision: v.spec?.customizeRevision ?? null, spec: conv.specSummary(v), provenance: { planId: v.planId, planVersion: v.version, specVersion: v.spec?.version ?? null, subject: conv.subject() ? { sourceId: conv.subject().sourceId, name: conv.subject().name } : null } }, { api: executor.api });
+        const prepared = await KTJsExecutor.prepare({ appId: executor.appId, changes, recheck, expectedRevision: v.spec?.customizeRevision ?? null, spec: conv.specSummary(v), provenance: { planId: v.planId, planVersion: v.version, specVersion: v.spec?.version ?? null, subject: conv.subject() ? { sourceId: conv.subject().sourceId, name: conv.subject().name } : null } }, { api: executor.api });
         if (blocked.length) prepared.warnings.push(...blocked.map(b => ({ code: b.code, message: `登録対象外: ${b.message}` })));
         jsExec.prepared = prepared;
         jsExec.stage = prepared.status === 'PREPARED' ? 'confirm' : 'blocked';
@@ -15117,12 +15409,20 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
     /** 最終確認の後: upload → 完全な payload で PUT → 再取得して検証。運用環境へは反映しない */
     async function confirmJsRegister() {
       if (!executor || jsExec.stage !== 'confirm' || !jsExec.prepared) return null;
+      // Phase 21: 準備した版が今も最新か（準備の後に計画・コードが新しくなっていたら登録しない）。確認の未完了は Executor が止める
+      const vNow = conv.activePlan();
+      if (!vNow || vNow.planId !== jsExec.planId || String(vNow.version) !== String(jsExec.version)) { jsExec.stage = 'blocked'; jsExec.prepared = { ...jsExec.prepared, status: 'BLOCKED', blockers: [{ code: 'NOT_LATEST_VERSION', message: '準備の後に計画が新しい版になりました。最新の版で準備からやり直してください' }] }; renderJsReg(); return null; }
       jsExec.stage = 'running'; renderJsReg();
       const inputs = inputsNow();
       const fieldRows = KTDeps.normalizeFields(inputs.data?.fields || {}).map(f => ({ code: f.code, label: f.label, type: f.rawType }));
       try {
-        jsExec.execution = await KTJsExecutor.executePreview(jsExec.prepared, { api: executor.api, fieldRows, onProgress: (ex) => { jsExec.execution = ex; renderJsReg(); } });
-      } catch (e) { jsExec.error = e?.message || String(e); jsExec.execution = jsExec.execution || { executionId: jsExec.prepared.executionId, status: 'FAILED', steps: jsExec.prepared.changes, put: null, error: { code: 'EXECUTE_FAILED', message: jsExec.error }, previewUnchanged: null }; }
+        jsExec.execution = await KTJsExecutor.executePreview(jsExec.prepared, { api: executor.api, fieldRows, acknowledged: [...jsAck], onProgress: (ex) => { jsExec.execution = ex; renderJsReg(); } });
+      } catch (e) {
+        jsExec.error = e?.message || String(e);
+        // 確認の不足・要件との不一致は、書き込む前に止まる（動作テスト環境は変わっていない）→ 確認画面に戻す
+        if (['CONFIRMATION_REQUIRED', 'REQUIREMENT_VIOLATION', 'CONTENT_CHANGED_AFTER_REVIEW', 'REGISTRATION_UNKNOWN'].includes(e?.code)) { jsExec.stage = e.code === 'CONFIRMATION_REQUIRED' ? 'confirm' : 'blocked'; jsExec.prepared = { ...jsExec.prepared, ...(e.code === 'CONFIRMATION_REQUIRED' ? { notice: jsExec.error } : { status: 'BLOCKED', blockers: [{ code: e.code, message: jsExec.error }] }) }; renderJsReg(); return null; }
+        jsExec.execution = jsExec.execution || { executionId: jsExec.prepared.executionId, status: 'FAILED', steps: jsExec.prepared.changes, put: null, error: { code: e?.code || 'EXECUTE_FAILED', message: jsExec.error }, previewUnchanged: null };
+      }
       jsExec.stage = 'done';
       const v = planIndex().get(`${jsExec.planId}:${jsExec.version}`); if (v && jsExec.execution?.put?.ok) v.jsExecutionId = jsExec.execution.executionId;
       renderJsReg();
@@ -15633,6 +15933,8 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
       if (eid) showEvidence(eid);
     }
     for (const p of ['plan', 'review', 'code', 'exec']) { const el = $pane(p); if (el) el.addEventListener('click', onPaneClick); }
+    // Phase 21: JS 登録の確認項目（登録の前に 1 件ずつ確認する）。チェックの状態は jsAck（Executor は acknowledged で受け、足りなければ登録しない）
+    { const exPane = $pane('exec'); if (exPane) exPane.addEventListener('change', (ev) => { const t = ev?.target; const key = dataOf(t, 'ackKey'); if (!key) return; if (t.checked) jsAck.add(key); else jsAck.delete(key); renderJsReg(); }); }
     if ($reviewResult) $reviewResult.addEventListener('click', onPaneClick);
     $planResult.addEventListener('click', onPaneClick);
     const onDecisionChange = (ev) => {
