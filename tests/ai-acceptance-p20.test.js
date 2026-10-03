@@ -662,6 +662,25 @@ console.log('\n--- F37（CX-1 2 回目・実機）. 同じ遷移元の分岐は�
 }
 
 // =========================================================
+console.log('\n--- F41（F39 の確認・実機）. PC とモバイルの計画で、制御するフィールドが片方の画面の処理にしか無い ---');
+{
+  // 実機の生成そのまま: 既存の PC の handler（金額）はそのまま、担当者のロックはモバイルの handler だけ → PC では承認済みでも担当者を編集できた（Code Review は OK）
+  const DL = ["(function () {", "  'use strict';", "  kintone.events.on(['app.record.create.show', 'app.record.edit.show'], function (event) {", "    var record = event.record;", "    if (record['ステータス'] && record['ステータス'].value === '承認済み') {", "      record['amount'].disabled = true;", "    }", "    return event;", "  });", "})();", ""].join('\n');
+  const ADD = "  kintone.events.on(['mobile.app.record.create.show', 'mobile.app.record.edit.show'], function (event) {\n    var record = event.record;\n    if (record['ステータス'] && record['ステータス'].value === '承認済み') {\n      record['owner'].disabled = true;\n    }\n    return event;\n  });\n";
+  const SRC = { name: 'dealLock.js', target: 'desktop', text: DL };
+  const baseHash = KTScan.analyzeFile({ name: 'dealLock.js', target: 'desktop', kind: 'js', text: DL }, { fields: [], selfAppId: null }).file.hash;
+  const cust = { customizationId: 'C1', requirement: '承認済みでは担当者も編集不可（PC・スマホ）', strategy: 'EXTEND_EXISTING_JS', platform: ['desktop', 'mobile'], events: ['app.record.create.show', 'app.record.edit.show', 'mobile.app.record.create.show', 'mobile.app.record.edit.show'], fields: [{ code: 'owner', access: 'CONTROL' }, { code: 'ステータス', access: 'READ' }], apis: [], existingFiles: [{ name: 'dealLock.js', target: 'desktop' }] };
+  const genOf = (add) => ({ strategy: 'EXTEND_EXISTING_JS', targetFile: 'dealLock.js', code: add, patch: { baseHash, operations: [{ type: 'INSERT_BEFORE', anchor: '})();', content: add }] }, events: cust.events, fields: cust.fields, apis: ['kintone.events.on'] });
+  const chk = (r, n) => r.checks.find(c => c.name === n) || null;
+  const bad = KTCodeReview.review({ generated: genOf(ADD), customization: cust, plan: null, data: DATA, scan: null, existingSource: SRC });
+  assert(chk(bad, 'plan-consistency') && !chk(bad, 'plan-consistency').ok && /owner/.test(chk(bad, 'plan-consistency').message) && /PC の画面/.test(chk(bad, 'plan-consistency').message) && bad.status !== 'OK', `F41: 担当者のロックがモバイルの処理だけ → 計画との不一致（PC では制御していない）。以前は OK: ${chk(bad, 'plan-consistency') && chk(bad, 'plan-consistency').message}`);
+  // 両方の画面で制御するコード（PC の handler にも担当者）は従来どおり
+  const BOTH = "  kintone.events.on(['app.record.create.show', 'app.record.edit.show', 'mobile.app.record.create.show', 'mobile.app.record.edit.show'], function (event) {\n    var record = event.record;\n    if (record['ステータス'] && record['ステータス'].value === '承認済み') {\n      record['owner'].disabled = true;\n    }\n    return event;\n  });\n";
+  const good = KTCodeReview.review({ generated: genOf(BOTH), customization: cust, plan: null, data: DATA, scan: null, existingSource: SRC });
+  assert(!(good.mismatches || []).some(m => m.code === 'PLATFORM_FIELD_MISSING'), `F41: PC とモバイルの両方で制御するコードは指摘しない: ${JSON.stringify((good.mismatches || []).map(m => m.code))}`);
+}
+
+// =========================================================
 console.log('\n--- U9（使い勝手・実機）. キーボード操作でフォーカスの位置が見える（kintone の CSS が枠を消していた）---');
 {
   const SRC = require('fs').readFileSync(require('path').join(__dirname, '..', 'kintoneAppToolkit.user.js'), 'utf8');

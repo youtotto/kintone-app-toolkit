@@ -10392,6 +10392,8 @@
           emptyErrorClear: /\.error\s*=(?!=)\s*(['"`])\1/.test(inlined),
           disabled: /\.disabled\s*=(?!=)/.test(inlined),
           value: /\.value\s*=(?!=)/.test(inlined),
+          // Phase 20（F41）: この handler が参照するフィールドコード（record['code'] / record.code）。画面（PC / モバイル）ごとの制御の有無に使う
+          refs: [...new Set([...[...inlined.matchAll(/\[\s*['"`]([^'"`\]]+)['"`]\s*\]/g)].map(x => x[1]), ...[...inlined.matchAll(/\brecord\s*\.\s*([A-Za-z_$][\w$]*)/g)].map(x => x[1])])],
         });
       }
       return out;
@@ -10522,7 +10524,18 @@
         else if (writes.length && planned === 'READ') mismatches.push({ kind: 'field', code: 'ACCESS_ESCALATED', items: [f.code], message: `${f.code} は計画では READ ですがコードは ${writes.join('/')} しています` });
       }
       for (const [code, access] of planFields) if (!addedScan.fields.some(f => f.code === code)) mismatches.push({ kind: 'field', code: 'MISSING_FIELD', items: [code], message: `計画のフィールド ${code}（${access}）がコードに現れません` });
-      const hardMismatch = mismatches.filter(m => ['EXTRA_FIELD_WRITE', 'ACCESS_ESCALATED', 'EXTRA_EVENT', 'MISSING_EVENT'].includes(m.code));
+      // Phase 20（F41・実機）: PC とモバイルの計画で、制御・書き換えするフィールドが片方の画面の処理（イベント）にしか無い。担当者のロックがモバイルの handler だけに入り、
+      //   PC では承認済みでも担当者を編集できた（以前は「計画と一致」）。ファイル全体（既存の handler を含む）で、PC のイベントとモバイルのイベントの両方に現れるかを見る
+      if (Array.isArray(c.platform) && c.platform.includes('desktop') && c.platform.includes('mobile')) {
+        const handlers = kintoneFieldOps(clean);
+        const covered = (code, mobile) => handlers.some(h => h.events.some(e => (mobile ? /^mobile\./ : /^app\./).test(e)) && (h.refs || []).includes(code));
+        for (const [code, access] of planFields) {
+          if (access !== 'CONTROL' && access !== 'WRITE') continue;
+          const pc = covered(code, false), mob = covered(code, true);
+          if (pc !== mob) mismatches.push({ kind: 'platform', code: 'PLATFORM_FIELD_MISSING', items: [code], message: `${code} は${pc ? 'モバイル' : 'PC'} の画面の処理で${access === 'CONTROL' ? '制御' : '書き換え'}していません（${pc ? 'PC' : 'モバイル'} だけ）` });
+        }
+      }
+      const hardMismatch = mismatches.filter(m => ['EXTRA_FIELD_WRITE', 'ACCESS_ESCALATED', 'EXTRA_EVENT', 'MISSING_EVENT', 'PLATFORM_FIELD_MISSING'].includes(m.code));
       add('plan-consistency', !hardMismatch.length, 'review', hardMismatch.length ? `計画と生成コードが一致しません（CUSTOMIZATION_PLAN_MISMATCH）: ${hardMismatch.map(m => m.message).join('／')}` : mismatches.length ? `計画との軽微な差: ${mismatches.map(m => m.message).join('／')}` : '計画（イベント・フィールド・アクセス）と一致');
       // ---- 6. API（API Catalog・通信）----
       const apis = addedScan.apis;
