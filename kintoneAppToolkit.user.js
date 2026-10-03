@@ -11353,8 +11353,12 @@
         // 要約が「行の追加・削除も禁止」と言う、または明細の禁止を行の扱いに触れずに言い切る → 要件を満たしたように見える要約（要確認）
         const sum = String(g.summary || '');
         const rowClaim = /(行の?(追加|削除)|追加・削除|追加や削除)[^。]{0,12}(も)?(禁止|できない|できなく|不可|させない|止め)/.test(sum);
-        const tableClaim = /(明細|テーブル)/.test(sum) && /(禁止|変更できない|変更不可|編集不可|編集できない|ロック)/.test(sum) && !/(行の?(追加|削除)|追加・削除)/.test(sum);
+        // Phase 21: 「セル」と書いた要約（「明細の品名・数量のセルを編集不可」）は正確なので要約の問題にしない（モデル比較: 正確な要約まで「要約が言い切っている」と表示していた）
+        const tableClaim = /(明細|テーブル)/.test(sum) && /(禁止|変更できない|変更不可|編集不可|編集できない|ロック)/.test(sum) && !/(行の?(追加|削除)|追加・削除)/.test(sum) && !/セル/.test(sum);
         if (rowClaim || tableClaim) add('summary-scope', false, 'review', `AI の要約は「${sum.slice(0, 100)}${sum.length > 100 ? '…' : ''}」ですが、止められるのはセルの編集だけで、行の追加・削除は止まりません（要件を完全には満たしていません）`);
+        // 要約は正確でも、要件が明細の変更そのものを止めることなら、行の追加・削除が残ることは利用者が決める（運用・権限で扱うか）
+        //   （要件が「セル」に限っていれば、行が残ることは要件どおり。達成範囲には SUBTABLE_ROWS として出す）
+        else if (tableLockReq && (!/セル/.test(String(c.requirement || '')) || /(行の?(追加|削除)|追加・削除)/.test(String(c.requirement || '')))) add('requirement-scope', false, 'review', `要件「${String(c.requirement || '').slice(0, 80)}${String(c.requirement || '').length > 80 ? '…' : ''}」のうち、明細の行の追加・削除は JavaScript では止められません（このコードが止めるのはセルの編集だけです）`);
       }
       for (const d of coverage.declared) if (d && /NOT_MET|PARTIAL/.test(String(d.status || '')) && d.requirement) coverage.notAchieved.push({ code: `AI_${String(d.status)}`, message: `${d.requirement}${d.note ? `（${d.note}）` : ''}` });
       return finish({ rescan, mismatches, security, finalCode, addedCode, diff, patchResult, coverage });
@@ -11374,6 +11378,7 @@
       'error-cancels-other-js': '動作テスト環境で、他の JavaScript が編集不可にしたフィールドが編集不可のままかを確かめる',
       'existing-conflict': '同じフィールドを扱う既存の JavaScript と動きがぶつからないか、動作テスト環境で確かめる',
       'summary-scope': '要件を満たせない部分（行の追加・削除など）を、運用（手順・権限）でどう扱うか決める',
+      'requirement-scope': '要件を満たせない部分（行の追加・削除など）を、運用（手順・権限）でどう扱うか決める',
       'platform-fields': 'PC とモバイルの両方の画面で、同じ制御になっているかを確かめる',
       'planned-events': '計画のタイミング（値の変更時など）で動くかを、動作テスト環境で確かめる',
       'target-app-read': '呼び出すアプリが正しいか、利用者に読み取り権限があるかを確かめる',

@@ -511,6 +511,12 @@ console.log('\n--- G9 / G10. Generator Context の欠落（モデル比較の候
   assert(!both.registration.blockers.some(b => b.code === 'platform-fields' || b.code === 'planned-fields'), `PC とモバイルの 1 つの handler で全列をロック → 両方の画面で扱っている: ${JSON.stringify(both.registration.blockers)}`);
   const oneCol = review(wrap(['app.record.edit.show'], "    if (record['ステータス'].value === '承認済み') {\n      record['items'].value.forEach(function (row) { row.value['item_name'].disabled = true; });\n    }"), c);
   assert(oneCol.registration.verdict === 'BLOCKED' && oneCol.registration.blockers.some(b => b.code === 'planned-fields' && /qty/.test(b.message)), '計画した列の一部（qty）しかロックしていない → 要件の処理が無い（登録不可）');
+  // G8 の表示: 正確な要約（「セル」と書く）を「要約が言い切っている」としない。要件が明細そのものの変更禁止なら、行が残ることを要件の側の確認にする
+  const CELL_LOCK = "    if (record['ステータス'].value === '承認済み') {\n      record['items'].value.forEach(function (row) { row.value['item_name'].disabled = true; row.value['qty'].disabled = true; });\n    }";
+  const cellsOnly = review(wrap(['app.record.edit.show'], CELL_LOCK), cust({ requirement: '承認済みでは明細の品名・数量のセルを編集不可にする', fields: [{ code: 'item_name', access: 'CONTROL', condition: 'ステータス in ("承認済み")' }, { code: 'qty', access: 'CONTROL', condition: 'ステータス in ("承認済み")' }] }), { summary: '承認済みのとき明細の品名・数量のセルを編集不可にします' });
+  assert(!cellsOnly.registration.confirmations.some(x => x.code === 'summary-scope' || x.code === 'requirement-scope') && cellsOnly.coverage.notAchieved.some(x => x.code === 'SUBTABLE_ROWS'), `要件も要約も「セル」に限る → 確認にしない（行が残ることは達成範囲に出す）: ${JSON.stringify(cellsOnly.registration.confirmations.map(x => x.code))}`);
+  const tableReq = review(wrap(['app.record.edit.show'], CELL_LOCK), cust({ requirement: '承認済みでは明細を変更できないようにする', fields: [{ code: 'item_name', access: 'CONTROL', condition: 'ステータス in ("承認済み")' }, { code: 'qty', access: 'CONTROL', condition: 'ステータス in ("承認済み")' }] }), { summary: '承認済みのとき明細の品名・数量のセルを編集不可にします' });
+  assert(tableReq.registration.confirmations.some(x => x.code === 'requirement-scope' && /行の追加・削除/.test(x.message) && /運用/.test(x.howToCheck)) && !tableReq.registration.confirmations.some(x => x.code === 'summary-scope'), '要件は明細の変更禁止・要約は正確 → 要件の側の確認（requirement-scope）。要約の問題にはしない');
 }
 
 console.log(`\n${state.failed ? 'FAILED' : 'ALL PASSED'}: ${state.passed} passed / ${state.failed} failed`);
