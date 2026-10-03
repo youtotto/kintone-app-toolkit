@@ -6,8 +6,6 @@
 // @match        https://*.cybozu.com/k/*/
 // @match        https://*.cybozu.com/k/*/?*view=*
 // @exclude      https://*.cybozu.com/k/admin/*
-// @connect      api.github.com
-// @connect      raw.githubusercontent.com
 // @connect      cdn.jsdelivr.net
 // @connect      unpkg.com
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=cybozu.com
@@ -239,55 +237,6 @@
     return p;
   };
 
-  let monacoEditor = null;
-  // ★レイアウト修正：Templates/Customize で同名IDを使っていたため、document全体からの
-  //   getElementById をやめ、呼び出し側からホスト要素を受け取る（Templatesタブにスコープ）。
-  //   高さは親のflexレイアウト（ホスト要素の .kt-flex-fill: flex:1; min-height:0）に任せる。
-  //   ResizeObserver / resizeリスナーは再生成時に前回分を破棄し、多重登録を防ぐ。
-  let monacoEditorResizeCleanup = null;
-  async function initEditor(initialCode = '', hostEl = null) {
-    const monaco = await loadMonaco();
-    // JSバリデーション（構文/セマンティック）をON
-    monaco.languages.typescript.javascriptDefaults.setDiagnosticsOptions({
-      noSyntaxValidation: false,
-      noSemanticValidation: false,
-    });
-    const el = hostEl || document.getElementById('kt-template-editor');
-    if (!el) throw new Error('editor host element not found');
-
-    // 前回分（observer/リスナー/エディタ）を破棄してから作り直す
-    if (typeof monacoEditorResizeCleanup === 'function') { try { monacoEditorResizeCleanup(); } catch { } }
-    monacoEditorResizeCleanup = null;
-    if (monacoEditor) { try { monacoEditor.dispose(); } catch { } monacoEditor = null; }
-
-    const editor = monaco.editor.create(el, {
-      value: initialCode,
-      language: 'javascript',
-      theme: getThemeColors().isDark ? 'vs-dark' : 'vs',
-      automaticLayout: true,
-      fontSize: 12,
-      minimap: { enabled: false },
-      wordWrap: 'on',
-    });
-    monacoEditor = editor;
-
-    // 🔽 サイズ変化に確実に追従させる（automaticLayout の保険。全画面切替/タブ切替直後など）
-    const relayout = () => { try { if (monacoEditor === editor) editor.layout(); } catch { } };
-    const ro = new ResizeObserver(relayout);
-    ro.observe(el);
-    window.addEventListener('resize', relayout);
-    monacoEditorResizeCleanup = () => {
-      try { ro.disconnect(); } catch { }
-      window.removeEventListener('resize', relayout);
-    };
-
-    // タブ切替直後の遅延レイアウト（描画完了後に1回）
-    setTimeout(relayout, 0);
-
-    return editor;
-  }
-
-
   // ==========================================
   // 3. Kintone API・データ取得層
   // ==========================================
@@ -306,7 +255,7 @@
 
   // ==========================================
   // 2.2 kintone REST 共通クライアント (KTApi)
-  //  - Customize / Templates / Field Scanner / Plugins に散在していた
+  //  - Customize / Field Scanner / Plugins に散在していた
   //    getCustomize・downloadByKey・uploadOnce・waitDeploy を一本化する
   //  - preview（動作テスト環境）と production（運用環境）の区別を明示する
   // ==========================================
@@ -490,11 +439,6 @@
     return { url, wait, getCustomize, downloadFile, uploadFile, putPreviewCustomize, deploy, waitDeploy, deployAndWait, getAppNames, appUrl,
       getAppList, getFormFieldsOf, getActionsOf };
   })();
-
-  // カスタマイズデプロイ用（後方互換のための薄いラッパ。実体は KTApi.uploadFile）
-  async function uploadOnce(name, content, mime) {
-    return await KTApi.uploadFile(name, content, mime);
-  }
 
   /**
    * 指定アプリの各種定義をまとめて取得（生レスポンスのみを返す）
@@ -6638,6 +6582,11 @@
       // 2. strategy
       if (!c.strategy) add('JS_STRATEGY_UNKNOWN', 'medium', '実装方針（新規 JS / 既存 JS へ統合）が決まっていません');
       else if (!GENERATABLE_STRATEGIES.includes(c.strategy)) add('JS_STRATEGY_NOT_GENERATED', 'low', `方針 ${c.strategy} はコード生成の対象外です（計画のみ）`);
+      // 2b. Phase 18: implementation（JAVASCRIPT / CSS / JS_CSS）。CSS だけは生成しない（計画に残して手動）。JS_CSS は JavaScript 部分だけ生成
+      const impl = ['JAVASCRIPT', 'CSS', 'JS_CSS'].includes(c.implementation) ? c.implementation : 'JAVASCRIPT';
+      if (impl === 'CSS') add('JS_CSS_ONLY', 'low', '見た目だけ（CSS）のカスタマイズです。CSS の生成は未対応のため計画のみ（手動で登録）');
+      else if (impl === 'JS_CSS') add('JS_CSS_PART_MANUAL', 'low', 'JavaScript と CSS の組み合わせです。生成するのは JavaScript の部分だけ（CSS は手動）');
+      if (impl !== 'JAVASCRIPT') h(`実装: ${impl === 'CSS' ? 'CSS（見た目だけ）' : 'JavaScript + CSS'}`);
       // 3. platform（勝手に desktop だけにしない）
       const platform = Array.isArray(c.platform) ? c.platform : [];
       if (!platform.length) add('JS_PLATFORM_UNSPECIFIED', 'medium', 'PC / モバイルのどちらが対象か決まっていません（確認してから生成）');
@@ -6646,7 +6595,7 @@
       const knownCodes = [...Object.keys(model.fields || {}), ...proposedMap.keys(), ...resolvedCodes.values(), ...[...proposedMap.values()].map(p => p.suggestedCode).filter(Boolean)];
       const events = Array.isArray(c.events) ? c.events : [];
       const evInfo = events.map(ev => KTJsCatalog.checkEvent(ev, { fields: knownCodes }));
-      if (!events.length) add('JS_EVENT_MISSING', 'medium', 'イベントが決まっていません');
+      if (!events.length && impl !== 'CSS') add('JS_EVENT_MISSING', 'medium', 'イベントが決まっていません');
       for (const e of evInfo) if (!e.ok) add('JS_EVENT_UNKNOWN', 'high', `イベント「${e.name}」は kintone のイベント目録にありません${e.reason === 'UNKNOWN_FIELD' ? `（フィールド ${e.field} が無い）` : ''}`);
       if (events.length) h(`イベント: ${events.join(', ')}`);
       if (platform.length && !platform.includes('mobile') && evInfo.some(e => e.platform === 'mobile')) add('JS_PLATFORM_EVENT_MISMATCH', 'low', 'PC だけが対象なのにモバイルのイベントが含まれています');
@@ -6702,8 +6651,9 @@
       else if (worst === 'low') r.status = STATUS.WARNING;
       r.codeGeneration.strategy = c.strategy || null;
       const targetOk = c.strategy !== 'EXTEND_EXISTING_JS' || !!r.codeGeneration.existingFile;
-      r.codeGeneration.supported = r.status !== STATUS.INVALID && GENERATABLE_STRATEGIES.includes(c.strategy) && platform.length > 0 && events.length > 0 && targetOk;
-      r.codeGeneration.reason = r.codeGeneration.supported ? null : (r.status === STATUS.INVALID ? 'INVALID' : !GENERATABLE_STRATEGIES.includes(c.strategy) ? 'STRATEGY_NOT_GENERATED' : !platform.length ? 'PLATFORM_UNSPECIFIED' : !events.length ? 'EVENT_MISSING' : 'TARGET_FILE_MISSING');
+      r.codeGeneration.implementation = impl;
+      r.codeGeneration.supported = r.status !== STATUS.INVALID && impl !== 'CSS' && GENERATABLE_STRATEGIES.includes(c.strategy) && platform.length > 0 && events.length > 0 && targetOk;
+      r.codeGeneration.reason = r.codeGeneration.supported ? null : (r.status === STATUS.INVALID ? 'INVALID' : impl === 'CSS' ? 'CSS_NOT_GENERATED' : !GENERATABLE_STRATEGIES.includes(c.strategy) ? 'STRATEGY_NOT_GENERATED' : !platform.length ? 'PLATFORM_UNSPECIFIED' : !events.length ? 'EVENT_MISSING' : 'TARGET_FILE_MISSING');
       return r;
     }
 
@@ -10605,7 +10555,7 @@
         consultationSubject: subject ? { type: subject.type ?? 'javascript', sourceId: subject.sourceId ?? null, name: subject.name ?? null, target: subject.target ?? subject.platform ?? null, customizationType: subject.customizationType ?? null, sourceHash: subject.source?.hash ?? subject.sourceHash ?? null } : null,
         specVersions: (specs || []).map(sp => ({ specId: sp.specId, version: sp.version, status: sp.status, planVersion: sp.planVersion ?? null, confirmedAt: sp.confirmedAt ?? null, customizations: (sp.customizations || []).map(c => ({ customizationId: c.customizationId, requirement: c.requirement, strategy: c.strategy, platform: c.platform, events: c.events, fields: c.fields, existingFiles: c.existingFiles })) })),
         approvedSpec: approvedSpec ? { specId: approvedSpec.specId, version: approvedSpec.version, confirmedAt: approvedSpec.confirmedAt ?? null } : null,
-        generated: (generated || []).map(g => ({ customizationId: g.customizationId ?? null, strategy: g.generated?.strategy ?? null, targetFile: g.generated?.targetFile ?? null, codeHash: g.review?.provenance?.codeHash ?? (g.review?.finalCode ? hash(g.review.finalCode) : null), codeReview: g.review ? { status: g.review.status, checks: (g.review.checks || []).map(c => ({ name: c.name, ok: c.ok, severity: c.severity, message: c.message })), mismatches: g.review.mismatches || [] } : null, provenance: g.review?.provenance ?? null, sourceBeforeHash: g.existingSource?.text ? hash(g.existingSource.text) : null, sourceAfterHash: g.review?.finalCode ? hash(g.review.finalCode) : null })),
+        generated: (generated || []).map(g => ({ customizationId: g.customizationId ?? null, strategy: g.generated?.strategy ?? null, targetFile: g.generated?.targetFile ?? null, patterns: (g.generated?.patterns || []).map(p => p.id), codeHash: g.review?.provenance?.codeHash ?? (g.review?.finalCode ? hash(g.review.finalCode) : null), codeReview: g.review ? { status: g.review.status, checks: (g.review.checks || []).map(c => ({ name: c.name, ok: c.ok, severity: c.severity, message: c.message })), mismatches: g.review.mismatches || [] } : null, provenance: g.review?.provenance ?? null, sourceBeforeHash: g.existingSource?.text ? hash(g.existingSource.text) : null, sourceAfterHash: g.review?.finalCode ? hash(g.review.finalCode) : null })),
         prepared: prepared ? { executionId: prepared.executionId, appId: prepared.appId, env: ENV, status: prepared.status, blockers: prepared.blockers, warnings: prepared.warnings, summary: prepared.summary, changes: prepared.changes.map(stepOut) } : null,
         customizationBefore: execution?.snapshot ?? prepared?.snapshot ?? null,
         customizationAfter: execution?.actualAfterRaw ?? null,
@@ -10875,6 +10825,8 @@
           events: Array.isArray(g.events) ? g.events.filter(x => typeof x === 'string') : [], fields: Array.isArray(g.fields) ? g.fields.filter(f => f && typeof f.code === 'string') : [], apis: Array.isArray(g.apis) ? g.apis.filter(x => typeof x === 'string') : [],
           assumptions: Array.isArray(g.assumptions) ? g.assumptions.filter(x => typeof x === 'string') : [], warnings: Array.isArray(g.warnings) ? g.warnings.filter(x => typeof x === 'string') : [],
           gatewayChecks: g.gatewayChecks && typeof g.gatewayChecks === 'object' ? g.gatewayChecks : null,
+          // Phase 18: Gateway が決定的に選んだ Pattern Library の pattern（表示・Audit 用。知識本体は来ない）
+          patterns: Array.isArray(g.patterns) ? g.patterns.filter(p => p && typeof p.id === 'string').map(p => ({ id: p.id, purpose: String(p.purpose ?? ''), implementation: typeof p.implementation === 'string' ? p.implementation : null, preferredStandardAlternatives: Array.isArray(p.preferredStandardAlternatives) ? p.preferredStandardAlternatives.filter(x => typeof x === 'string') : [] })) : [],
           requestId: r.meta?.requestId ?? null, usage: r.meta?.usage ?? null, ai: r.meta?.ai ?? null, gatewayWarnings: r.meta?.normalization?.warnings ?? [],
         },
       };
@@ -10919,6 +10871,7 @@
       const customizations = (Array.isArray(p.customizations) ? p.customizations : []).filter(c => c && typeof c === 'object' && typeof c.customizationId === 'string').map((c, i) => ({
         customizationId: c.customizationId, requirement: String(c.requirement ?? ''), whyStandardInsufficient: String(c.whyStandardInsufficient ?? ''),
         strategy: typeof c.strategy === 'string' ? c.strategy : null, platform: strs(c.platform).filter(x => x === 'desktop' || x === 'mobile'),
+        implementation: ['JAVASCRIPT', 'CSS', 'JS_CSS'].includes(c.implementation) ? c.implementation : 'JAVASCRIPT',   // Phase 18（Gateway validate-plan と同じ既定）
         events: strs(c.events), fields: (Array.isArray(c.fields) ? c.fields : []).filter(f => f && typeof f.code === 'string').map(f => ({ code: f.code, access: ['READ', 'WRITE', 'CONTROL'].includes(f.access) ? f.access : 'READ' })),
         apis: strs(c.apis), existingFiles: (Array.isArray(c.existingFiles) ? c.existingFiles : []).filter(f => f && typeof f.name === 'string').map(f => ({ name: f.name, target: f.target === 'mobile' ? 'mobile' : 'desktop', reason: String(f.reason ?? '') })),
         risks: strs(c.risks), questions: strs(c.questions), dependsOn: strs(c.dependsOn), evidenceIds: ids(c.evidenceIds, `customizations[${i}]`),
@@ -11502,9 +11455,137 @@
       };
     }
 
+    // ---- Phase 18: ドキュメント（旧 Templates タブの Documents の移行先。LLM は使わず Toolkit が Prompt / Markdown / JSON を作る。無料）----
+    //   旧 documents/*.md（現状整理 / 要件定義書 / 開発レビュー依頼）の見出しを outline として内部化。問題提起 / 改善提案 / 議論整理は
+    //   アプリ構成に依存しない汎用テンプレートなので Toolkit では持たない（改善提案だけは解析結果から作れるので残す）
+    const DOCUMENT_KINDS = [
+      { id: 'spec', label: 'アプリ仕様書（現状整理）', hint: 'このアプリの仕様書を作って', role: 'あなたは kintone の設計者です。Toolkit が解析した Context（事実）だけを根拠に、このアプリの現状を整理した仕様書のドラフトを作ります。',
+        rules: ['Context に無い業務ルール・運用は推測で補わず「未確定事項」に列挙する。', '根拠は Context の根拠ID（E1 など）を引用する。', '表は Context の値をそのまま使い、フィールドコードと表示名を併記する。'],
+        outline: ['基本情報（アプリ名 / アプリID / 利用部門は未確定なら TODO）', 'フィールド構成（コード・表示名・型・必須 / 重複禁止・テーブル所属）', 'ビュー構成（一覧 / グラフ）', 'プロセス管理（ステータスとアクション・条件・作業者）', '通知・リマインダー設定', '関連アプリ・ルックアップ構成（アプリ間構造図は Mermaid）', 'カスタマイズ / プラグイン構成（JavaScript はイベント・触るフィールド）', '外部連携（JavaScript の REST / 外部参照から分かる範囲）', '運用・管理メモ（変更時に確認すべき箇所 = 依存関係）', '未確定事項・補足'] },
+      { id: 'requirements', label: '要件定義書（ドラフト）', hint: '要件定義書のドラフトを作って', role: 'あなたは kintone の要件定義を支援する SE です。現在のアプリ構成（Context）を AS-IS として、要件定義書のドラフトを作ります。',
+        rules: ['AS-IS は Context の事実から書き、TO-BE・目的・業務フローは利用者が記入する欄（TODO）として空ける。', '既存フィールド・設定の再利用を優先し、新規のカスタマイズは最後の手段として扱う。', 'Context に無い設定を推測で追加しない。'],
+        outline: ['プロジェクト概要（目的 / 対象部署 / 担当: TODO）', '業務フロー（AS-IS は Context から、TO-BE は TODO）', 'アプリ構成（アプリ一覧・相関図）', 'アプリ詳細定義', 'フィールド定義', 'プロセス管理・ステータス定義', '通知・権限設定', 'カスタマイズ・拡張仕様（既存 JavaScript / プラグイン）', '非機能要件（レコード数・API 利用は TODO）', '付録（ER 図 Mermaid・用語集・改訂履歴）'] },
+      { id: 'review-request', label: '開発レビュー依頼', hint: 'このアプリのレビューを依頼する文章を作って', role: 'あなたは kintone アプリの開発レビューを行うレビュアーです。Context を読み、カテゴリごとに「良い点 / 指摘事項 / 改善提案」をコメントします。',
+        rules: ['指摘は Context の根拠ID を引用し、推測は推測と明示する。', 'カテゴリ: フィールド命名（表示名とコードの一致）/ 通知設定（重複・抜け）/ 権限設定の整合性 / ビュー・グラフ構成 / カスタマイズ構成（JS の重複・依存・壊れた参照）/ プロセス管理（条件の複雑さ・保守性）/ 関連アプリ連携。', '最後に「総評」として保守性・再利用性・運用負荷の 3 観点で ★1〜5 の簡易スコア。'],
+        outline: ['フィールド命名', '通知設定', '権限設定', 'ビュー・グラフ構成', 'カスタマイズ構成', 'プロセス管理', '関連アプリ連携', '総評（★）'] },
+      { id: 'changes', label: '変更内容のまとめ（改修記録）', hint: 'この改修内容をまとめて', needsPlan: true, role: 'あなたは kintone アプリの改修記録を書くエンジニアです。Toolkit の変更計画・Toolkit Review・動作テスト環境への反映結果（下の「変更計画」）を、関係者に共有できる改修内容のまとめにします。',
+        rules: ['記録にある手順・判定・結果だけを書き、実施していないこと（運用環境への反映など）を実施したと書かない。', '標準設定の変更と JavaScript カスタマイズを分けて書く。', '確認事項・未確定の点はそのまま残す。'],
+        outline: ['目的（実現したいこと）', '変更の概要（標準設定 / JavaScript）', '手順と結果（Toolkit Review の判定・動作テスト環境への反映・検証）', 'JavaScript の変更点（ファイル・イベント・触るフィールド）', '影響範囲と確認事項', '運用環境への反映について（未反映）'] },
+      { id: 'handover', label: '引継ぎ資料', hint: '引継ぎ資料を作って', role: 'あなたは kintone アプリの管理を引き継ぐための資料を書く担当者です。後任者が「何がどこで決まり、何を触ると何に影響するか」を把握できる引継ぎ資料のドラフトを作ります。',
+        rules: ['Context の事実だけを書き、業務上の判断基準・担当者は TODO として空ける。', '変更時に確認すべき箇所（依存関係・他アプリからの参照・JavaScript が触るフィールド）を必ず載せる。', '壊れた参照・未解析の範囲は注意として明示する。'],
+        outline: ['アプリの役割（分かる範囲）と利用部門（TODO）', '業務の流れ（プロセス管理から）', '主要フィールドと意味（コード・表示名）', '通知・リマインダー（誰にいつ）', '関連アプリ（参照 / 被参照）', 'JavaScript / プラグイン（何をしているか・触るフィールド）', '変更時の注意（依存関係・壊れた参照）', '未確定事項・引継ぎ時に確認すること'] },
+      { id: 'plain', label: '非エンジニア向けの説明', hint: '非エンジニア向けに説明して', role: 'あなたは kintone に詳しくない利用者へアプリの説明をする担当者です。専門用語（フィールドコード・イベント名・API）を使わず、Context の事実を日常の言葉で説明します。',
+        rules: ['フィールドはコードではなく表示名で呼ぶ。JavaScript は「自動で〜する仕組み」のように動きで説明する。', '確度が「要確認」の事実は「〜のようです」と区別する。', 'Context に無いことは説明しない。'],
+        outline: ['このアプリは何のためのものか', 'どんな情報を入力するか', '入力した後に何が起きるか（承認の流れ・通知）', '自動で動く仕組み（JavaScript・プラグイン）', '他のアプリとのつながり', '気をつけること'] },
+      { id: 'improvement', label: '改善提案（ドラフト）', hint: 'このアプリの改善案を整理して', role: 'あなたは kintone アプリの改善を提案するコンサルタントです。Context の事実（壊れた参照・未使用フィールド・重複する通知や一覧・複雑なプロセス・JavaScript の依存）から改善テーマを整理します。',
+        rules: ['課題は根拠ID を引いて事実として書き、効果・KPI は仮説として書く。', '改善案は kintone 標準設定で実現できるものを優先し、JavaScript は最後の手段にする。', 'Context から判断できないことは「要ヒアリング」にする。'],
+        outline: ['改善テーマ', '現状の課題（根拠付き）', '根本原因（仮説）', '改善目的と指標（仮説）', '改善案（A / B 案。標準設定 → カスタマイズの順）', '実施プラン・リスク', '次のステップ・要ヒアリング'] },
+    ];
+    const documentKind = (id) => DOCUMENT_KINDS.find(k => k.id === id) || null;
+    /**
+     * 文章 → ドキュメントの種類（決定的）。文書の名詞 ＋ 依頼の語で判定する（「この計画を説明して」のような計画の説明は含めない）。
+     * @returns {string|null} DOCUMENT_KINDS の id
+     */
+    function detectDocumentKind(text) {
+      const t = String(text ?? '').replace(/\s+/g, ' ').trim();
+      if (!t) return null;
+      const ask = /作って|作成|作りたい|出して|出力|書いて|まとめて|まとめたい|生成|ほしい|欲しい|ください|お願い|にして|用意|したい$/;
+      if (/(非エンジニア|エンジニア以外|現場の人|初心者|経営|上司|役員|わかりやす|分かりやす|やさしく|易しく|平易)/.test(t) && /(説明|教え|わかるように|分かるように|伝え)/.test(t)) return 'plain';
+      const noun = /(仕様書|設計書|現状整理|ドキュメント|資料|引継|引き継ぎ|要件定義|レビュー依頼|改善(提案|案)|説明書|Markdown|マークダウン|改修(内容|記録|履歴)|変更(内容|履歴)の?(まとめ|記録)|実装内容)/i;
+      if (!noun.test(t) || !ask.test(t)) return null;
+      if (/レビュー依頼|レビューを依頼/.test(t)) return 'review-request';
+      if (/要件定義/.test(t)) return 'requirements';
+      if (/引継|引き継ぎ/.test(t)) return 'handover';
+      if (/改善(提案|案)/.test(t)) return 'improvement';
+      if (/改修|変更(内容|点|履歴)|実装内容|まとめ/.test(t)) return 'changes';
+      return 'spec';
+    }
+    /** 変更計画の版（会話の version）→ 関係者に共有できる Markdown（Toolkit の記録だけ。AI の文章は含めない） */
+    function changeSummaryMarkdown(v, { execState = null, jsExecState = null } = {}) {
+      if (!v || !v.plan) return '';
+      const p = v.plan;
+      const out = [];
+      const esc1 = (x) => String(x ?? '').replace(/\|/g, '\\|').replace(/\r?\n/g, ' ').trim();
+      const STATUS_JA = { ACTIVE: '最新', SUPERSEDED: '旧版', STALE: '要再作成', EXECUTED: '動作テスト環境へ反映済み', ROLLED_BACK: '元に戻し済み' };
+      const SOL = { STANDARD: '標準設定', CUSTOMIZATION: 'JavaScript', HYBRID: '標準設定 + JavaScript', UNKNOWN: '判断できない' };
+      const reviewOf = (sid) => (v.review?.steps || []).find(r => r.stepId === sid) || null;
+      out.push(`# 変更内容のまとめ — 計画 v${v.version ?? 1}`);
+      out.push('');
+      out.push(`**実現したいこと**: ${esc1(v.goal || p.goal)}`);
+      out.push(`**状態**: ${STATUS_JA[v.status] || v.status || '—'}　**実現方法**: ${SOL[p.solution] || p.solution || '—'}　**作成**: ${String(v.createdAt || '').replace('T', ' ').slice(0, 16)}`);
+      if (p.assessment?.summary) out.push(`**現状の評価**: ${esc1(p.assessment.summary)}`);
+      out.push('');
+      const main = (p.steps || []).filter(st => !st.alternativeId);
+      if (main.length) {
+        out.push('## 手順（標準設定 / JavaScript）');
+        out.push('');
+        out.push('| ID | 内容 | 種別 | 方式 | Toolkit Review | 依存 |');
+        out.push('|---|---|---|---|---|---|');
+        for (const st of main) { const r = reviewOf(st.id); out.push(`| ${st.id} | ${esc1(st.title || '')} | ${esc1(st.actionType)} | ${st.solution === 'CUSTOMIZATION' || st.actionType === 'CUSTOMIZATION_REQUIRED' ? 'JavaScript' : '標準設定'} | ${r ? esc1(r.status) : '—'} | ${(st.dependsOn || []).join(', ') || '—'} |`); }
+        out.push('');
+      }
+      if ((p.proposedFields || []).length) { out.push('## 新規フィールド'); for (const f of p.proposedFields) out.push(`- ${esc1(f.label)}（${esc1(f.suggestedCode || f.temporaryId)}・${esc1(f.type)}）: ${esc1(f.reason || '')}`); out.push(''); }
+      const custs = p.customizations || [];
+      if (custs.length) {
+        out.push('## JavaScript カスタマイズ');
+        for (const c of custs) {
+          const g = v.generated?.[c.customizationId] || null;
+          out.push(`- **${c.customizationId}** ${esc1(c.requirement)}（${c.strategy === 'EXTEND_EXISTING_JS' ? `既存 ${(c.existingFiles || []).map(f => f.name).join(', ') || 'JS'} を変更` : c.strategy === 'NEW_JS_FILE' ? '新規 JS' : esc1(c.strategy || '方針未定')}・${(c.platform || []).map(x => (x === 'mobile' ? 'モバイル' : 'PC')).join(' / ') || '対象未定'}・${c.implementation === 'CSS' ? 'CSS' : c.implementation === 'JS_CSS' ? 'JavaScript + CSS' : 'JavaScript'}）`);
+          out.push(`  - 標準設定で不足する理由: ${esc1(c.whyStandardInsufficient || '（未記載）')}`);
+          out.push(`  - イベント: ${(c.events || []).join(', ') || '（未定）'}　フィールド: ${(c.fields || []).map(f => `${f.code}（${f.access}）`).join(', ') || '（なし）'}`);
+          if (g) out.push(`  - 生成コード: ${esc1(g.generated?.targetFile || '')}（Toolkit Code Review: ${esc1(g.review?.status || '—')}${(g.generated?.patterns || []).length ? `・参考パターン ${g.generated.patterns.map(x => x.id).join(', ')}` : ''}）`);
+        }
+        out.push('');
+      }
+      if (v.spec) { out.push('## 実装仕様'); out.push(`- v${v.spec.version} ${v.spec.status === 'CONFIRMED' ? `確定（${String(v.spec.confirmedAt || '').replace('T', ' ').slice(0, 16)}）` : v.spec.status === 'DRAFT' ? '確認待ち' : '旧版'}`); out.push(''); }
+      const ex = execState?.execution || null;
+      const jx = jsExecState?.execution || null;
+      if (ex || jx) {
+        out.push('## 動作テスト環境への反映');
+        if (ex) { out.push(`- 標準設定: ${esc1(ex.status || '')}${ex.executionId ? `（${ex.executionId}）` : ''}`); for (const st of (ex.steps || [])) out.push(`  - ${st.stepId}: ${esc1(st.status)}${st.message ? ` — ${esc1(st.message)}` : ''}`); if (execState?.rollback || ex.rollback) out.push(`  - 元に戻す: ${esc1((execState?.rollback || ex.rollback).status || '')}`); }
+        if (jx) { out.push(`- JavaScript: ${esc1(jx.status || '')}${jx.put ? `（PUT ${jx.put.ok ? '成功' : '失敗'}）` : ''}`); for (const st of (jx.steps || [])) out.push(`  - ${st.kind === 'REPLACE_FILE' ? '✎' : '＋'} ${esc1(st.name)}（${st.target === 'mobile' ? 'モバイル' : 'PC'}）: ${esc1(st.status)}`); if (jsExecState?.rollback || jx.rollback) out.push(`  - 元に戻す: ${esc1((jsExecState?.rollback || jx.rollback).status || '')}`); }
+        out.push('');
+      }
+      const qs = [...new Set([...(p.questions || []).map(q => q.question || q.text || q), ...custs.flatMap(c => c.questions || [])].map(q => String(q || '').trim()).filter(Boolean))];
+      if (qs.length) { out.push('## 確認事項'); for (const q of qs) out.push(`- ${esc1(q)}`); out.push(''); }
+      out.push('## 運用環境');
+      out.push('- 運用環境には反映していません（Toolkit が書くのは動作テスト環境だけ）。');
+      return out.join('\n');
+    }
+    /**
+     * ドキュメント用の出力（純関数。LLM は使わない）。prompt = 役割・規則・構成 ＋（変更計画）＋ Context、markdown = 構成の骨格 ＋ Context（changes は改修記録そのもの）、json = Context
+     * @returns {{ ok:true, mode:'document', kind, label, ctx, outputs:{prompt,markdown,json}, coverage, truncation, size, warnings }|{ ok:false, reason, message }}
+     */
+    function generateDocument({ kind, inputs, version = null, execState = null, jsExecState = null, limits = null, now = undefined }) {
+      const k = documentKind(kind) || DOCUMENT_KINDS[0];
+      if (!inputs || !inputs.data) return { ok: false, reason: 'no-data', message: 'アプリ設定の取得が完了していません。' };
+      if (k.needsPlan && !(version && version.plan)) return { ok: false, reason: 'no-plan', message: 'まとめる変更計画がありません。先に実現したいことを入力して計画を作るか、別の種類（アプリ仕様書など）を選んでください。' };
+      let ctx;
+      try {
+        ctx = KTContext.build({ question: null, focus: null, data: inputs.data, deps: inputs.deps || null, scan: inputs.scan || null, incoming: inputs.incoming || null, options: { ...(limits ? { limits } : {}), ...(now !== undefined ? { now } : {}) } });
+      } catch (e) { return { ok: false, reason: 'error', message: `Context の生成に失敗しました: ${e?.message || e}` }; }
+      const contextMd = KTContext.toMarkdown(ctx);
+      const changeMd = version && version.plan ? changeSummaryMarkdown(version, { execState, jsExecState }) : '';
+      const instruction = [k.role, ...k.rules, '出力は日本語 Markdown（H1〜H3・箇条書き中心・表は最小限）。10〜15 分でレビューできる密度にし、曖昧な点は「未確定事項」に列挙する。', '', '## 出力の構成', ...k.outline.map((o, i) => `${i + 1}. ${o}`)].join('\n');
+      const prompt = `${instruction}\n${changeMd ? `\n## 変更計画（Toolkit の記録）\n${changeMd}\n` : ''}\n## Context\n${contextMd}\n`;
+      const skeleton = `# ${k.label}（ドラフトの骨格）\n\n${k.outline.map(o => `## ${o}\n\n（TODO: 下の Context を基に記入）\n`).join('\n')}\n---\n\n${contextMd}`;
+      const markdown = k.id === 'changes' ? `${changeMd}\n\n---\n\n${contextMd}` : skeleton;
+      const json = k.id === 'changes' && version ? JSON.stringify({ document: k.id, plan: KTContext.compactPlan(version.plan), spec: version.spec || null, review: version.review ? KTContext.compactReview(version.review) : null, context: ctx }, null, 2) : KTContext.toJSON(ctx, { pretty: true });
+      const warnings = [];
+      if (!ctx.coverage.javascript) warnings.push('JavaScript は未解析です（Field Scanner の Scan 実行で反映されます）。');
+      if (!ctx.coverage.incoming) warnings.push('他アプリからの参照は未走査です（Relations タブで走査できます）。');
+      warnings.push('ドキュメントの本文は生成していません（Prompt を ChatGPT / Claude などへ貼り付けるか、Markdown の骨格に記入してください）。Nest Rec AI は使っていません。');
+      const size = KTContext.measureText(prompt);
+      return {
+        ok: true, mode: 'document', kind: k.id, label: k.label, ctx, outputs: { prompt, markdown, json },
+        coverage: coverageRows(ctx), truncation: truncationSummary(ctx), size: { tokens: size.approxTokens ?? 0, bytes: size.bytes ?? 0, facts: ctx.facts.length, text: `約 ${(size.approxTokens ?? 0).toLocaleString()} tokens（近似） / ${Math.max(1, Math.round((size.bytes || 0) / 1024))} KB / Facts: ${ctx.facts.length}` }, warnings,
+      };
+    }
+
     /** 出力ファイル名（ローカル保存用） */
-    function outputFilename(ctx, view) {
+    function outputFilename(ctx, view, { document = null } = {}) {
       const ext = view === 'json' ? 'json' : 'md';
+      if (document) return `ai-document_${document}_app${ctx?.app?.id ?? ''}_${view}.${ext}`;
       const tgt = ctx?.focus?.target ? `_${String(ctx.focus.target.id).replace(/[^\w.\-]+/g, '_')}` : (ctx?.goal != null ? '_plan' : '');
       return `ai-context_app${ctx?.app?.id ?? ''}${tgt}_${view}.${ext}`;
     }
@@ -11521,6 +11602,7 @@
           <div id="kt-ai-mode" style="display:flex; gap:12px; align-items:center;">
             <label style="display:flex; align-items:center; gap:4px; cursor:pointer;"><input type="radio" name="kt-ai-mode" id="kt-ai-mode-qa" value="qa" checked> 質問する</label>
             <label style="display:flex; align-items:center; gap:4px; cursor:pointer;"><input type="radio" name="kt-ai-mode" id="kt-ai-mode-plan" value="plan"> 変更計画を作る</label>
+            <label style="display:flex; align-items:center; gap:4px; cursor:pointer;"><input type="radio" name="kt-ai-mode" id="kt-ai-mode-doc" value="doc"> ドキュメントを作る</label>
           </div>
           <div id="kt-ai-qa-inputs" style="display:flex; flex-direction:column; gap:8px;">
           <label style="display:flex; align-items:center; gap:6px; white-space:nowrap;">対象
@@ -11540,6 +11622,13 @@
             <textarea id="kt-ai-goal" rows="3" placeholder="実現したいことを入力（例: 契約更新を管理して、終了30日前に担当者へ通知したい）"
               style="width:100%; box-sizing:border-box; border:1px solid ${border}; border-radius:8px; padding:6px; background:${bg}; color:inherit; font:inherit; resize:vertical;"></textarea>
             <div style="opacity:.75; font-size:11px;">Toolkit がアプリ全体の既存資産（フィールド・プロセス・通知・一覧・権限・依存関係）を解析し、既存資産の再利用を最優先に変更計画を作ります。設定の自動変更はしません。</div>
+          </div>
+          <!-- Phase 18: ドキュメント（旧 Templates の Documents）。種類を選び、Prompt（役割・規則・構成 ＋ Context）/ Markdown（骨格 ＋ Context）/ JSON を作る。無料・LLM 不使用 -->
+          <div id="kt-ai-doc-inputs" style="display:none; flex-direction:column; gap:8px;">
+            <label style="display:flex; align-items:center; gap:6px; white-space:nowrap;">種類
+              <select id="kt-ai-doc-kind" class="btn" style="padding:3px 4px; height:28px; flex:1;">${DOCUMENT_KINDS.map(k => `<option value="${esc(k.id)}">${esc(k.label)}</option>`).join('')}</select>
+            </label>
+            <div id="kt-ai-doc-note" style="opacity:.75; font-size:11px;">Toolkit の解析結果（Context）と、この種類の文書の構成・規則を 1 つの Prompt にします。ChatGPT / Claude などへ貼り付けると本文のドラフトができます。Markdown は骨格 ＋ Context、「変更内容のまとめ」は Toolkit の記録（計画・Review・反映結果）そのものです。チャットで「このアプリの仕様書を作って」と伝えても同じものを作ります。</div>
           </div>
           <div style="display:flex; gap:6px; align-items:center;">
             <button id="kt-ai-generate" class="btn" style="flex:1; height:32px; font-weight:600;">AI Prompt を生成</button>
@@ -11631,7 +11720,7 @@
               </div>
             </div>`;
     }
-    /** 旧レイアウト（Templates 内のパネル）。Phase 15 以降は AI Workspace（KTAiChatUi.workspaceHtml）が部品を配置する */
+    /** 旧レイアウト（Phase 15 以前の 1 枚パネル）。AI Workspace（KTAiChatUi.workspaceHtml）が部品を配置する */
     function panelHtml(colors) {
       return `<div id="kt-ai-panel" style="display:flex; flex-direction:column; gap:8px; font-size:12px;">${generatorHtml(colors)}${planPaneHtml(colors)}${evidencePaneHtml(colors)}${connectionHtml(colors)}${consentHtml(colors)}</div>`;
     }
@@ -12153,7 +12242,7 @@
       const warn = gen.warnings.length ? `<div style="margin-top:6px; opacity:.85;">${gen.warnings.map(w => `<div>※ ${esc(w)}</div>`).join('')}</div>` : '';
       const help = `<details style="margin-top:6px;"><summary style="cursor:pointer;">確度（confidence）の意味</summary><div style="padding-left:8px;">${CONFIDENCE_HELP.map(h => `<div><b>${esc(h.label)}</b>（${esc(h.code)}）: ${esc(h.text)}</div>`).join('')}</div></details>`;
       const focus = gen.ctx.focus || {};
-      const target = focus.target ? `${esc(focus.target.type)} <code>${esc(focus.target.id)}</code>` : (gen.ctx.goal != null ? '変更計画（アプリ全体の既存資産）' : 'アプリ全体');
+      const target = gen.mode === 'document' ? `ドキュメント: ${esc(gen.label || gen.kind)}（アプリ全体の Context）` : focus.target ? `${esc(focus.target.type)} <code>${esc(focus.target.id)}</code>` : (gen.ctx.goal != null ? '変更計画（アプリ全体の既存資産）' : 'アプリ全体');
       const levelText = Array.isArray(gen.ctx.levels) ? gen.ctx.levels.join(' + ') : 'planner';
       return `
         <div><b>対象</b>: ${target}　<b>階層</b>: ${esc(levelText)}</div>
@@ -12169,6 +12258,8 @@
       ACTION_JA, RSTATUS, RSAFETY, EXEC_STEP_JA, EXEC_STEP_COLOR, EXEC_REASON_JA, badge, chips,
       // AI Change Planner（Phase 7）/ Review（Phase 8）
       PLANNER_PRESETS, generatePlan, planHtml, planJson, reviewHtml, reviewStepHtml, decisionSummary, executorHtml,
+      // Phase 18: ドキュメント（旧 Templates の Documents の移行先。無料・LLM 不使用）
+      DOCUMENT_KINDS, documentKind, detectDocumentKind, changeSummaryMarkdown, generateDocument,
     };
   })();
 
@@ -12185,10 +12276,12 @@
       // Phase 16: JavaScript カスタマイズ（コード生成は明示の意図だけ。「これで進めて」では生成しない）
       GENERATE_CODE: 'GENERATE_CODE', EXPLAIN_CUSTOMIZATION: 'EXPLAIN_CUSTOMIZATION',
       // Phase 17: JS 相談（Customize タブからの相談は PLAN と同じ経路で subject を付けて送る）・仕様の確定（チャットでは確定しない）・JS の登録 / 復元の依頼（UI の確認へ案内するだけ）
-      DISCUSS_JS: 'DISCUSS_JS', CONFIRM_SPEC: 'CONFIRM_SPEC', REQUEST_JS_PREVIEW: 'REQUEST_JS_PREVIEW', REQUEST_JS_ROLLBACK: 'REQUEST_JS_ROLLBACK' };
+      DISCUSS_JS: 'DISCUSS_JS', CONFIRM_SPEC: 'CONFIRM_SPEC', REQUEST_JS_PREVIEW: 'REQUEST_JS_PREVIEW', REQUEST_JS_ROLLBACK: 'REQUEST_JS_ROLLBACK',
+      // Phase 18: ドキュメント（仕様書 / 要件定義 / レビュー依頼 / 変更内容のまとめ / 引継ぎ / 非エンジニア向け説明 / 改善提案）。Toolkit が Prompt / Markdown を作る（LLM 不使用・無料）
+      DOCUMENT: 'DOCUMENT' };
     const MSG = { USER: 'USER', ASSISTANT_TEXT: 'ASSISTANT_TEXT', ANSWER: 'ANSWER', PLAN: 'PLAN', REVIEW: 'REVIEW', DIFF: 'DIFF', EXECUTION: 'EXECUTION', ROLLBACK: 'ROLLBACK', SYSTEM_NOTICE: 'SYSTEM_NOTICE', ERROR: 'ERROR', LOADING: 'LOADING', CODE: 'CODE',
-      // Phase 17: 実装仕様カード・JS 登録 / 復元の写し
-      SPEC: 'SPEC', JS_EXECUTION: 'JS_EXECUTION', JS_ROLLBACK: 'JS_ROLLBACK' };
+      // Phase 17: 実装仕様カード・JS 登録 / 復元の写し。Phase 18: ドキュメントの出力カード
+      SPEC: 'SPEC', JS_EXECUTION: 'JS_EXECUTION', JS_ROLLBACK: 'JS_ROLLBACK', DOCUMENT: 'DOCUMENT' };
     const SPEC_STATUS = { DRAFT: 'DRAFT', CONFIRMED: 'CONFIRMED', SUPERSEDED: 'SUPERSEDED' };
     const PLAN_STATUS = { ACTIVE: 'ACTIVE', SUPERSEDED: 'SUPERSEDED', STALE: 'STALE', EXECUTED: 'EXECUTED', ROLLED_BACK: 'ROLLED_BACK' };
     const ROLE = { USER: 'user', ASSISTANT: 'assistant', TOOLKIT: 'toolkit', SYSTEM: 'system' };
@@ -12258,6 +12351,9 @@
       }
       // 0b) 仕様の確定の言葉: 実装仕様があれば「ボタンで確定」を案内（文章では確定しない）
       if (plan && plan.spec && plan.spec.status !== SPEC_STATUS.SUPERSEDED && RE.confirmSpec.test(t) && !q) return { intent: INTENT.CONFIRM_SPEC, reason: 'CONFIRM_WORDS' };
+      // 0c) Phase 18: ドキュメント（「このアプリの仕様書を作って」「この改修内容をまとめて」「引継ぎ資料を作って」「非エンジニア向けに説明して」）。LLM は使わない
+      const docKind = typeof KTContextUi !== 'undefined' && KTContextUi.detectDocumentKind ? KTContextUi.detectDocumentKind(t) : null;
+      if (docKind) return { intent: INTENT.DOCUMENT, reason: 'DOCUMENT_WORDS', documentKind: docKind === 'changes' && !plan ? 'spec' : docKind };
       // 1) 計画 / Review についての質問（計画があるとき）。「このフィールドは何に使ってる？」は現在の設定の質問 → ASK
       if (plan && RE.questionWord.test(t) && (RE.aboutReview.test(t) || RE.aboutPlan.test(t) || stepIdsIn(t).length || (RE.aboutCustomization.test(t) && (plan.plan?.customizations || []).length))) {
         const aboutCust = (plan.plan?.customizations || []).length && (RE.aboutCustomization.test(t) || /\bC[0-9]+\b/.test(t)) && !RE.aboutReview.test(t);
@@ -12600,6 +12696,15 @@
               push(MSG.ASSISTANT_TEXT, ROLE.TOOLKIT, 'JavaScript の登録を登録前の状態へ戻せます。', { kind: 'js-rollback-ready', executionId: jx.executionId, planId: jx.planId, version: jx.version });
               break;
             }
+            // Phase 18: ドキュメント（Toolkit が作る。AI へは送らない）
+            case INTENT.DOCUMENT: {
+              const kind = cls.documentKind || 'spec';
+              if (typeof services.document !== 'function') { toolkit('ドキュメント用の Prompt / Markdown は詳細パネルの「Context」→「ドキュメントを作る」から作れます。', { kind: 'document-hint' }); break; }
+              const r = await services.document({ kind, text: t, version: state.activePlan });
+              if (r && r.ok) push(MSG.DOCUMENT, ROLE.TOOLKIT, `${r.label} 用の Prompt / Markdown を用意しました（Toolkit の解析結果から作成。Nest Rec AI は使っていません）。`, { kind: r.kind, label: r.label, outputs: r.outputs, size: r.size, warnings: r.warnings || [], planId: state.activePlan?.planId ?? null, version: state.activePlan?.version ?? null });
+              else { result.ok = false; toolkit(r?.message || 'ドキュメントを用意できませんでした。', { kind: 'document-failed', reason: r?.reason || 'ERROR' }); }
+              break;
+            }
             case INTENT.AMBIGUOUS: {
               const v = state.activePlan;
               const text2 = cls.reason === 'NEW_OR_REVISE' ? `現在の${planLabel(v)}の修正ですか、新しい計画ですか？` : v ? `何についてでしょうか。現在は${planLabel(v)}${v.review ? '（Toolkit Review あり）' : ''}があります。` : '何についてでしょうか。';
@@ -12655,7 +12760,7 @@
   const KTAiChatUi = (() => {
     const esc = (v) => escapeHtml(v);
     const { MSG, INTENT, PLAN_STATUS } = KTAiConversation;
-    const INTENT_JA_P17 = { DISCUSS_JS: 'この JS の相談として計画を作る', CONFIRM_SPEC: '仕様を確定（ボタンで）', REQUEST_JS_PREVIEW: 'JS を動作テスト環境へ登録', REQUEST_JS_ROLLBACK: 'JS の登録を元に戻す' };
+    const INTENT_JA_P17 = { DISCUSS_JS: 'この JS の相談として計画を作る', CONFIRM_SPEC: '仕様を確定（ボタンで）', REQUEST_JS_PREVIEW: 'JS を動作テスト環境へ登録', REQUEST_JS_ROLLBACK: 'JS の登録を元に戻す', DOCUMENT: 'ドキュメントを作る' };
     const INTENT_JA = { ...INTENT_JA_P17, ASK: '質問する', PLAN: '新しい計画を作る', REVISE_PLAN: '現在の計画を修正する', EXPLAIN_PLAN: '計画の説明を聞く', EXPLAIN_REVIEW: 'Toolkit Review の説明を聞く', REQUEST_PREVIEW: '動作テスト環境への反映へ進む', REQUEST_ROLLBACK: '変更前の状態に戻す', GENERAL: 'その他' };
     const STATUS_JA = { ACTIVE: '最新', SUPERSEDED: '旧版（SUPERSEDED）', STALE: '要再作成（STALE）', EXECUTED: '動作テスト環境へ反映済み', ROLLED_BACK: '元に戻し済み' };
     const stepMark = (st) => (/^ADD_/.test(st.actionType) ? '＋' : st.actionType === 'REUSE_FIELD' ? '↻' : /^UPDATE_/.test(st.actionType) ? '✎' : st.actionType === 'CUSTOMIZATION_REQUIRED' ? '⚙' : '？');
@@ -12709,7 +12814,7 @@
               <div id="kt-ai-free" style="display:none;"></div>
               <div id="kt-ai-chat" class="kt-ai-chat" aria-live="polite"></div>
               <div id="kt-ai-composer" class="kt-ai-composer">
-                <textarea id="kt-ai-input" rows="2" placeholder="何をしたいですか？（例: 100万円以上なら部長承認を追加したい / このフィールドは何に使ってる？）"></textarea>
+                <textarea id="kt-ai-input" rows="2" placeholder="何を実現したいですか？（例: 100万円以上なら部長承認を追加したい / このフィールドは何に使ってる？ / このアプリの仕様書を作って）"></textarea>
                 <div style="display:flex; gap:6px; align-items:center; justify-content:space-between;">
                   <span id="kt-ai-composer-note" style="font-size:11px; opacity:.8; flex:1; min-width:0;"></span>
                   <button id="kt-ai-cancel" type="button" class="btn" style="height:28px; display:none;">キャンセル</button>
@@ -12766,7 +12871,7 @@
           <div style="font-size:14px; font-weight:700;">AI開発支援</div>
           <div style="margin-top:4px;">Nest Rec AI：<b>${connecting ? '接続中' : '未接続'}</b></div>
           <div style="margin-top:8px; font-weight:600;">無料で利用できます</div>
-          <div style="margin-top:2px; line-height:1.7;">✓ AI Context（Toolkit の解析結果を AI 向けに変換）<br>✓ AI Prompt（ChatGPT / Claude などへ貼り付け）<br>✓ Markdown<br>✓ JSON</div>
+          <div style="margin-top:2px; line-height:1.7;">✓ AI Context（Toolkit の解析結果を AI 向けに変換）<br>✓ AI Prompt（ChatGPT / Claude などへ貼り付け）<br>✓ Markdown<br>✓ JSON<br>✓ ドキュメント（仕様書・要件定義・レビュー依頼・引継ぎ資料・変更内容のまとめの Prompt / Markdown）</div>
           <div style="margin-top:8px; display:flex; gap:6px; flex-wrap:wrap;">
             <button type="button" id="kt-ai-free-generate" class="btn" style="height:32px; font-weight:600; flex:1 1 180px;">AI用Promptを生成</button>
             ${paidEnabled ? `<button type="button" id="kt-ai-free-connect" class="btn" style="height:32px; font-weight:600; flex:1 1 180px; border-color:#2563eb;"${connecting ? ' disabled' : ''}>Nest Rec AIに接続</button>` : ''}
@@ -12792,6 +12897,15 @@
       return items.length ? `<details class="kt-ai-assets" style="margin-top:6px;"><summary style="cursor:pointer; font-size:11px;">提案の内容（${items.length} 件）</summary>${items.join('')}</details>` : '';
     }
     const STRATEGY_JA = { NEW_JS_FILE: '＋ 新規 JS', EXTEND_EXISTING_JS: '✎ 既存 JS を変更', REPLACE_EXISTING_LOGIC: '既存処理の置き換え（計画のみ）', PLUGIN_CANDIDATE: 'プラグイン候補（計画のみ）', NOT_RECOMMENDED: '推奨しない' };
+    // Phase 18: 実装手段（JAVASCRIPT が既定。CSS は生成対象外・JS_CSS は JavaScript 部分だけ生成）
+    const IMPL_JA = { JAVASCRIPT: 'JavaScript', CSS: 'CSS（見た目だけ・生成対象外）', JS_CSS: 'JavaScript + CSS（CSS は手動）' };
+    /** 生成コードが参照した Pattern Library の pattern（Gateway が決定的に選んだもの）。標準設定の代替候補は人間への再確認用 */
+    function patternsHtml(gen) {
+      const ps = Array.isArray(gen?.patterns) ? gen.patterns : [];
+      if (!ps.length) return '';
+      const alts = [...new Set(ps.flatMap(p => p.preferredStandardAlternatives || []))].slice(0, 3);
+      return `<div style="margin-top:4px; font-size:11px; opacity:.85;">参考パターン: ${ps.map(p => `<span class="kt-ai-pattern" title="${esc(p.purpose || '')}">${esc(p.id)}</span>`).join('、')}<span style="opacity:.7;">（Pattern Library。コードは現在のアプリに合わせて生成）</span></div>${alts.length ? `<div style="font-size:11px; color:#b26a00;">標準設定で代替できないか再確認: ${esc(alts.join(' / '))}</div>` : ''}`;
+    }
     /** JS カスタマイズのカード（§19 / §20 / §42）: 要件 / 対象 / イベント / フィールド / 方針（既存を変更 or 新規）/ 不足する理由 / リスク / 質問 / [コードを作る] */
     function customizationCardHtml(c, plan = null, { review = null, registered = null } = {}) {
       const r = review || null;
@@ -12807,6 +12921,7 @@
           <span style="opacity:.7;">フィールド</span><span>${esc((c.fields || []).map(f => `${f.code}（${f.access}）`).join(', ') || '（なし）')}</span>
           ${(c.apis || []).length ? `<span style="opacity:.7;">API</span><span>${esc(c.apis.join(', '))}</span>` : ''}
           <span style="opacity:.7;">方針</span><span>${esc(strategy)}</span>
+          ${c.implementation && c.implementation !== 'JAVASCRIPT' ? `<span style="opacity:.7;">実装</span><span>${esc(IMPL_JA[c.implementation] || c.implementation)}</span>` : ''}
         </div>
         <div style="margin-top:4px; font-size:12px;">標準設定で不足する理由: ${esc(c.whyStandardInsufficient || '（未記載）')}</div>
         ${(c.risks || []).length ? `<div style="font-size:11px; color:#b26a00; margin-top:2px;">${c.risks.map(x => `⚠ ${esc(x)}`).join('<br>')}</div>` : ''}
@@ -12942,6 +13057,7 @@
           <div style="display:grid; grid-template-columns:auto 1fr; gap:2px 10px; font-size:12px; margin-top:2px;">
             <span style="opacity:.7;">対象フィールド</span><span>${esc((c.fields || []).map(f => `${f.code}（${f.access}）`).join('、') || '（なし）')}</span>
             <span style="opacity:.7;">イベント</span><span>${esc((c.events || []).join(', ') || '（未定）')}</span>
+            ${c.implementation && c.implementation !== 'JAVASCRIPT' ? `<span style="opacity:.7;">実装</span><span>${esc(IMPL_JA[c.implementation] || c.implementation)}</span>` : ''}
             ${c.whyStandardInsufficient ? `<span style="opacity:.7;">標準で不足</span><span>${esc(c.whyStandardInsufficient)}</span>` : ''}
           </div></div>`;
       }).join('');
@@ -12982,7 +13098,7 @@
         <div style="margin-top:4px; display:grid; gap:1px;">${steps.map(line).join('')}</div>
         <div style="margin-top:6px; display:grid; grid-template-columns:auto auto; gap:2px 12px; font-size:12px; width:max-content;"><span>Code Review</span><b>${mark(ex.steps.every(st => st.codeReview?.status !== 'BLOCKED'))}</b><span>Preview 設定</span><b>${mark(chk('unrelatedPreserved') && chk('scopePreserved') && chk('revisionAdvanced'))}</b><span>再解析</span><b>${mark(stepChk('reanalysisMatchesCodeReview'))}</b><span>Plan との一致</span><b>${mark(stepChk('planVsActual'))}</b></div>
         <div style="margin-top:4px; font-size:12px;"><b>運用環境には反映されていません。</b></div>
-        <div style="margin-top:6px; display:flex; gap:6px; flex-wrap:wrap;">${btn('open-js-result', '登録内容を見る', '')}${!ex.rollback && stage === 'done' ? btn('js-rollback', '変更前の状態に戻す', `data-execution="${esc(ex.executionId || '')}"`, 'border-color:#6a1b9a;') : ''}</div>`, ok ? '#2e7d32' : '#b26a00');
+        <div style="margin-top:6px; display:flex; gap:6px; flex-wrap:wrap;">${btn('open-js-result', '登録内容を見る', '')}${ex.steps.length ? btn('open-customize', 'Customize で確認', `data-target="${esc(ex.steps[0].target)}" data-name="${esc(ex.steps[0].name)}"`) : ''}${!ex.rollback && stage === 'done' ? btn('js-rollback', '変更前の状態に戻す', `data-execution="${esc(ex.executionId || '')}"`, 'border-color:#6a1b9a;') : ''}</div>`, ok ? '#2e7d32' : '#b26a00');
     }
     function jsRollbackCardHtml(m, jx) {
       const stage = jx?.stage || '';
@@ -13023,6 +13139,7 @@
         <div style="margin-top:2px; display:grid; gap:1px;">${checks}</div>
         ${(gen.assumptions || []).length ? `<div style="margin-top:4px; font-size:11px; opacity:.85;">前提: ${esc(gen.assumptions.join('／'))}</div>` : ''}
         ${(gen.warnings || []).length ? `<div style="font-size:11px; color:#b26a00;">${gen.warnings.map(w => `⚠ ${esc(w)}`).join('<br>')}</div>` : ''}
+        ${patternsHtml(gen)}
         ${g.existingSource?.from === 'url' || g.existingSource?.external ? `<div style="margin-top:6px; font-size:11px; color:#b26a00; border:1px solid #b26a00; border-radius:6px; padding:4px 6px;">統合先「${esc(gen.targetFile)}」は URL 指定の JavaScript です。外部サーバーのファイルは Toolkit から書き換えられません（EXTERNAL_JS_NOT_WRITABLE）。コード / Diff を手動で反映するか、新規の補助 JS として設計し直してください。</div>` : ''}
         <div style="margin-top:6px; display:flex; gap:6px; flex-wrap:wrap;">${btn('open-code', 'コードを見る', `data-cid="${esc(cid)}" data-view="code"`, 'font-weight:600;')}${rv?.diff ? btn('open-code', 'Diffを見る', `data-cid="${esc(cid)}" data-view="diff"`) : ''}${btn('copy-code', 'コピー', `data-cid="${esc(cid)}"`)}${rv?.diff ? btn('copy-diff', 'Diffをコピー', `data-cid="${esc(cid)}"`) : ''}${btn('copy-cplan', 'Plan JSON', `data-cid="${esc(cid)}"`)}${st !== 'BLOCKED' && !(g.existingSource?.from === 'url' || g.existingSource?.external) ? btn('open-js-register', '動作テスト環境へ登録', `data-plan="${esc(v.planId)}" data-version="${esc(String(v.version))}"`, 'font-weight:600; border-color:#6a1b9a;') : ''}${g.existingSource?.from === 'url' || g.existingSource?.external ? btn('choice', '新規 JS として設計し直す', `data-intent="REVISE_PLAN" data-text="${esc(`${cid} は ${gen.targetFile} を変更せず、新規の JavaScript ファイルとして設計して`)}"`) : ''}</div>
         <div style="font-size:10px; opacity:.6; margin-top:4px;">${st === 'BLOCKED' ? '採用できない問題があるため登録できません。計画を修正して再生成してください。' : '登録は［動作テスト環境へ登録］→ 確認画面 →［動作テスト環境へ登録］の順です。運用環境には反映しません。'}</div>`, st === 'OK' ? '#2e7d32' : st === 'BLOCKED' ? '#b00020' : '#6a1b9a');
@@ -13034,6 +13151,16 @@
     function sourceUnavailableHtml(m) {
       const d = m.data || {};
       return card('kt-ai-source-unavailable', `<div>${esc(m.text)}</div><div style="font-size:11px; opacity:.85; margin-top:2px;">次のいずれかを選んでください。</div><div style="margin-top:6px; display:flex; gap:6px; flex-wrap:wrap;">${btn('rescan', '再スキャン（JS を取得し直す）', `data-cid="${esc(d.customizationId || '')}"`)}${btn('choice', '新規 JS として設計', `data-intent="REVISE_PLAN" data-text="${esc(`${d.customizationId || ''} は既存ファイルに統合せず、新規の JS ファイルとして設計して`)}"`)}<span style="font-size:11px; opacity:.7; align-self:center;">／ 手動で確認する</span></div>`, '#b26a00');
+    }
+    /** Phase 18: ドキュメントカード（Toolkit が作った Prompt / Markdown / JSON。AI へは送っていない） */
+    function documentCardHtml(m) {
+      const d = m.data || {};
+      const mid = esc(m.id);
+      return card('kt-ai-document-card', `<div style="display:flex; align-items:center; justify-content:space-between; gap:6px; flex-wrap:wrap;"><b>${esc(d.label || 'ドキュメント')}</b>${KTContextUi.badge('無料・AI 送信なし', '#2e7d32')}</div>
+        <div style="margin-top:2px; font-size:12px;">${esc(m.text)}</div>
+        ${d.size?.text ? `<div style="font-size:11px; opacity:.75; margin-top:2px;">Prompt のサイズ: ${esc(d.size.text)}</div>` : ''}
+        <div style="margin-top:6px; display:flex; gap:6px; flex-wrap:wrap;">${btn('copy-doc', 'Prompt をコピー', `data-mid="${mid}" data-key="prompt"`, 'font-weight:600;')}${btn('copy-doc', 'Markdown をコピー', `data-mid="${mid}" data-key="markdown"`)}${btn('copy-doc', 'JSON をコピー', `data-mid="${mid}" data-key="json"`)}${btn('open-doc-context', 'Context ペインで開く（保存）', `data-kind="${esc(d.kind || 'spec')}"`)}</div>
+        <div style="font-size:10px; opacity:.6; margin-top:4px;">Prompt は ChatGPT / Claude などへ貼り付けると本文のドラフトになります。Markdown は ${d.kind === 'changes' ? 'Toolkit の記録（計画・Review・反映結果）そのもの' : '構成の骨格 ＋ Context'}です。${(d.warnings || []).filter(w => !/本文は生成していません/.test(w)).map(w => ` ${esc(w)}`).join('')}</div>`, '#2e7d32');
     }
     /** 回答カード（Q&A / 説明）。根拠チップはそのまま（クリックで根拠ペイン） */
     function answerCardHtml(m) {
@@ -13074,6 +13201,7 @@
         case MSG.SPEC: { const v = planOf(); return wrap(v ? specCardHtml(v, { active: view.activePlan ? view.activePlan === v : true }) : `<div class="kt-ai-bubble">${esc(m.text)}</div>`); }
         case MSG.JS_EXECUTION: return wrap(jsExecutionCardHtml(m, view.jsExecState));
         case MSG.JS_ROLLBACK: return wrap(jsRollbackCardHtml(m, view.jsExecState));
+        case MSG.DOCUMENT: return wrap(documentCardHtml(m));
         case MSG.EXECUTION: return wrap(executionCardHtml(m, view.execState));
         case MSG.ROLLBACK: return wrap(rollbackCardHtml(m, view.execState));
         case MSG.ERROR: return wrap(errorCardHtml(m));
@@ -13100,7 +13228,7 @@
       const hidden = showAll ? 0 : Math.max(0, list.length - limit);
       const shown = list.slice(hidden);
       const head = hidden || dropped ? `<div style="text-align:center; margin-top:4px;">${hidden ? btn('show-all', `以前のメッセージ ${hidden} 件を表示`) : ''}${dropped ? `<div style="font-size:10px; opacity:.6;">古いメッセージ ${dropped} 件はこの会話から外しました（セッション上限）</div>` : ''}</div>` : '';
-      if (!shown.length) return `${head}<div style="opacity:.7; padding:12px 4px; line-height:1.7;">このアプリについて質問したり、実現したいことを伝えてください。<br><span style="font-size:11px;">例: 「このフィールドは何に使ってる？」「100万円以上なら部長承認を追加したい」「契約終了30日前に担当者へ通知したい」。既存の JavaScript の相談は Customize タブの［AIに相談］から。</span></div>`;
+      if (!shown.length) return `${head}<div style="opacity:.7; padding:12px 4px; line-height:1.7;">このアプリについて質問したり、実現したいことを伝えてください。<br><span style="font-size:11px;">例: 「このフィールドは何に使ってる？」「100万円以上なら部長承認を追加したい」「契約終了30日前に担当者へ通知したい」「このアプリの仕様書を作って」。既存の JavaScript の相談は Customize タブの［AIに相談］から。実現したい業務を伝えてください（標準設定か JavaScript かは AI が判断します）。</span></div>`;
       return head + shown.map(m => messageHtml(m, view)).join('');
     }
 
@@ -13136,7 +13264,7 @@
       if (stage === 'done') {
         const ok = ex?.status === 'DONE';
         return `${head(ok ? 'JavaScript を動作テスト環境へ登録しました。' : ex?.put?.ok ? '登録しましたが、検証で一致しない点があります。' : 'JavaScript を登録できませんでした。', ok ? '#2e7d32' : '#b00020')}${ex?.error ? `<div style="font-size:12px; color:#b00020; margin-top:4px;">${esc(ex.error.message)} <span style="opacity:.7;">[${esc(ex.error.code)}]</span></div>` : ''}${resultHtml()}<div style="margin-top:4px; font-size:12px;"><b>運用環境には反映されていません。</b></div>
-          <div style="margin-top:8px; display:flex; gap:6px; flex-wrap:wrap;"><button type="button" id="kt-ai-jsreg-audit-copy" class="btn" style="height:26px; font-size:11px;">Customization Audit JSON をコピー</button>${ex?.put?.ok && !ex.rollback ? '<button type="button" id="kt-ai-jsreg-rollback-start" class="btn" style="height:26px; font-size:11px; border-color:#6a1b9a;">変更前の状態に戻す</button>' : ''}<button type="button" id="kt-ai-jsreg-close" class="btn" style="height:26px; font-size:11px;">閉じる</button></div></div>`;
+          <div style="margin-top:8px; display:flex; gap:6px; flex-wrap:wrap;"><button type="button" id="kt-ai-jsreg-audit-copy" class="btn" style="height:26px; font-size:11px;">Customization Audit JSON をコピー</button>${ex?.put?.ok ? '<button type="button" id="kt-ai-jsreg-open-customize" class="btn" style="height:26px; font-size:11px;">Customize で確認</button>' : ''}${ex?.put?.ok && !ex.rollback ? '<button type="button" id="kt-ai-jsreg-rollback-start" class="btn" style="height:26px; font-size:11px; border-color:#6a1b9a;">変更前の状態に戻す</button>' : ''}<button type="button" id="kt-ai-jsreg-close" class="btn" style="height:26px; font-size:11px;">閉じる</button></div></div>`;
       }
       if (stage === 'rollback-preparing') return `${head('現在のカスタマイズ設定を確認しています...')}<div style="font-size:11px; opacity:.7; margin-top:4px;">書き込みはしません</div></div>`;
       if (stage === 'rollback-blocked') return `${head('自動では元に戻せません', '#b00020')}<div style="margin-top:4px;">${blockers(rb?.blockers)}${(rb?.stale?.diffs || []).slice(0, 8).map(d => `<div style="font-size:11px; margin-left:8px;">${esc(d.where)}: ${esc(String(d.before ?? '（なし）'))} → ${esc(String(d.after ?? '（なし）'))}</div>`).join('')}</div><div style="font-size:11px; opacity:.8; margin-top:4px;">設定は変更していません。</div><div style="margin-top:6px; display:flex; gap:6px;"><button type="button" id="kt-ai-jsreg-rollback-cancel" class="btn" style="height:26px; font-size:11px;">閉じる</button></div></div>`;
@@ -13198,9 +13326,10 @@
     const $actions = $('kt-ai-actions'), $view = $('kt-ai-view'), $result = $('kt-ai-result');
     const $copyPrompt = $('kt-ai-copy-prompt'), $copyMd = $('kt-ai-copy-md'), $copyJson = $('kt-ai-copy-json');
     const $modeQa = $('kt-ai-mode-qa'), $modePlan = $('kt-ai-mode-plan'), $qaInputs = $('kt-ai-qa-inputs'), $planInputs = $('kt-ai-plan-inputs');
+    const $modeDoc = $('kt-ai-mode-doc'), $docInputs = $('kt-ai-doc-inputs'), $docKind = $('kt-ai-doc-kind');   // Phase 18: ドキュメント
     const $goal = $('kt-ai-goal'), $goalPreset = $('kt-ai-goal-preset');
     const $preview = $('kt-ai-preview'), $download = $('kt-ai-download');
-    const mode = () => ($modePlan && $modePlan.checked ? 'plan' : 'qa');
+    const mode = () => ($modePlan && $modePlan.checked ? 'plan' : $modeDoc && $modeDoc.checked ? 'doc' : 'qa');
     // ---- AI Workspace（Phase 15）: ヘッダー / 会話 / composer / drawer ----
     const $header = $('kt-ai-header'), $free = $('kt-ai-free'), $chat = $('kt-ai-chat'), $input = $('kt-ai-input'), $send = $('kt-ai-send'), $cancel = $('kt-ai-cancel'), $note = $('kt-ai-composer-note');
     const $drawer = $('kt-ai-drawer'), $dtabs = $('kt-ai-drawer-tabs'), $planEmpty = $('kt-ai-pane-plan-empty');
@@ -13260,13 +13389,15 @@
     const isConnected = () => { try { return paidEnabled && !!session.status()?.connected; } catch (e) { return false; } };
     /** モードに応じて入力欄・ボタン・結果の表示を切り替える（Q&A と Planner を同時に出さない） */
     function applyMode() {
-      const plan = mode() === 'plan';
-      $qaInputs.style.display = plan ? 'none' : 'flex';
+      const m = mode();
+      const plan = m === 'plan', doc = m === 'doc';
+      $qaInputs.style.display = plan || doc ? 'none' : 'flex';
       $planInputs.style.display = plan ? 'flex' : 'none';
-      $gen.textContent = plan ? '変更計画 Prompt を生成' : 'AI Prompt を生成';
-      $ask.style.display = plan ? 'none' : '';
+      if ($docInputs) $docInputs.style.display = doc ? 'flex' : 'none';
+      $gen.textContent = plan ? '変更計画 Prompt を生成' : doc ? 'ドキュメント Prompt を生成' : 'AI Prompt を生成';
+      $ask.style.display = plan || doc ? 'none' : '';
       $planBtn.style.display = plan ? '' : 'none';
-      $answer.style.display = (!plan && lastAnswer) ? '' : 'none';
+      $answer.style.display = (!plan && !doc && lastAnswer) ? '' : 'none';
       $factDetail.style.display = 'none';
     }
 
@@ -13318,6 +13449,12 @@
         const client = await ensureReady();
         try { return await client.ask({ ctx: ectx, requestId: KTAiClient.newRequestId(), signal }); }
         catch (e) { noteAuthError(e); throw e; }
+      },
+      /** Phase 18 DOCUMENT: Toolkit がドキュメント用の Prompt / Markdown / JSON を作る（LLM 不使用・無料）。Context ペインにも同じ結果を出す */
+      async document({ kind, version = null }) {
+        const gen = KTContextUi.generateDocument({ kind, inputs: inputsNow(), version: version || (conv ? conv.activePlan() : null), execState, jsExecState: jsExec });
+        if (gen.ok) { try { setMode('doc', { kind: gen.kind }); render(gen); } catch (e) { } }
+        return gen;
       },
       /** REQUEST_PREVIEW の表示用: 承認状況と Executor の分類（読み取りだけ。Executor は開始しない） */
       readiness(v) {
@@ -13435,7 +13572,7 @@
       const showFree = !paidEnabled || !conn.connected;
       $free.style.display = showFree ? '' : 'none';
       if (showFree) $free.innerHTML = KTAiChatUi.freePanelHtml({ paidEnabled, connecting });
-      $note.textContent = busy ? '' : !paidEnabled ? 'この環境ではチャットは利用できません。無料の AI Prompt / Markdown / JSON は「Context」から生成できます。' : !conn.connected ? 'Nest Rec AI に接続するとチャットで質問・変更計画ができます。無料の AI Prompt / Markdown / JSON は「Context」から。' : capability.checking ? '接続を確認しています...' : !capability.available ? KTContextUi.capabilityStatusText(capability) : (plannerAvailable() ? 'Enter で送信・Shift+Enter で改行。質問・変更計画・修正・「これで進めたい」に対応します。' : 'Enter で送信。この契約では質問だけ利用できます（変更計画は契約に含まれていません）。');
+      $note.textContent = busy ? '' : !paidEnabled ? 'この環境ではチャットは利用できません。無料の AI Prompt / Markdown / JSON / ドキュメントは「Context」から生成できます。' : !conn.connected ? 'Nest Rec AI に接続するとチャットで質問・変更計画ができます。無料の AI Prompt / Markdown / JSON / ドキュメントは「Context」から。' : capability.checking ? '接続を確認しています...' : !capability.available ? KTContextUi.capabilityStatusText(capability) : (plannerAvailable() ? 'Enter で送信・Shift+Enter で改行。質問・変更計画・修正・「これで進めたい」に対応します。' : 'Enter で送信。この契約では質問だけ利用できます（変更計画は契約に含まれていません）。');
     }
     function renderDrawerTabs() {
       $dtabs.innerHTML = `${PANES.map(p => `<button type="button" class="btn kt-ai-dtab${activePane === p ? ' active' : ''}" data-pane="${p}"${p === 'connection' && !paidEnabled ? ' style="display:none;"' : ''}>${{ plan: '計画 / レビュー', evidence: '根拠', code: 'コード', context: 'Context', connection: '接続' }[p]}</button>`).join('')}<button type="button" id="kt-ai-drawer-close" class="btn" style="margin-left:auto;" title="閉じる">×</button>`;
@@ -13490,6 +13627,10 @@
       if (act === 'choice') { const text = dataOf(t, 'text'), intent = dataOf(t, 'intent'); if (text && intent) await sendChat(text, { intent }); return; }
       if (act === 'candidate') { const text = dataOf(t, 'text'); const focus = { type: dataOf(t, 'type'), id: dataOf(t, 'id') }; if (focus.type && focus.id) await askWithFocus(text, focus); return; }
       if (act === 'show-all') { showAll = true; renderChat(); return; }
+      // Phase 18: ドキュメントカード（コピー / Context ペインで開く）・Customize で確認（登録済み JS を一覧で示す）
+      if (act === 'copy-doc') { const m = conv.state.messages.find(x => x.id === dataOf(t, 'mid')); const text = m?.data?.outputs?.[dataOf(t, 'key') || 'prompt']; const ok = text ? await d.copyText(text) : false; if (t && t.textContent != null) flashBtnText(t, ok ? 'Copied!' : 'Failed'); return; }
+      if (act === 'open-doc-context') { setMode('doc', { kind: dataOf(t, 'kind') || 'spec' }); generate(); openDrawer('context'); return; }
+      if (act === 'open-customize') { if (typeof d.openCustomize === 'function') await d.openCustomize({ target: dataOf(t, 'target') || 'desktop', kind: 'js', name: dataOf(t, 'name') || null }); return; }
       // Phase 16: JavaScript Generator（ボタンからの生成も会話の GENERATE_CODE を通る。登録はしない）
       if (act === 'generate') { const cid = dataOf(t, 'cid'); await sendChat(cid ? `${cid} のコードを作って` : 'コードを作って', { intent: KTAiConversation.INTENT.GENERATE_CODE }); return; }
       if (act === 'open-code') { showCode(dataOf(t, 'cid'), { view: dataOf(t, 'view') || 'code' }); return; }
@@ -13613,6 +13754,7 @@
       if (id === 'kt-ai-jsreg-cancel') { cancelJsRegister(); return; }
       if (id === 'kt-ai-jsreg-go') { await confirmJsRegister(); return; }
       if (id === 'kt-ai-jsreg-close') { jsExec.paneClosed = true; renderJsReg(); return; }
+      if (id === 'kt-ai-jsreg-open-customize') { const st = (jsExec.execution?.steps || [])[0] || null; if (typeof d.openCustomize === 'function') await d.openCustomize({ target: st?.target || 'desktop', kind: 'js', name: st?.name || null }); return; }
       if (id === 'kt-ai-jsreg-rollback-start') { await startJsRollback(); return; }
       if (id === 'kt-ai-jsreg-rollback-cancel') { cancelJsRollback(); return; }
       if (id === 'kt-ai-jsreg-rollback-go') { await confirmJsRollback(); return; }
@@ -14120,6 +14262,13 @@
         render(gen);
         return gen;
       }
+      if (mode() === 'doc') {
+        // Phase 18: ドキュメント（無料・LLM 不使用）。「変更内容のまとめ」は現在の計画・反映結果から
+        setStatus('生成中...');
+        const gen = KTContextUi.generateDocument({ kind: $docKind ? $docKind.value : 'spec', inputs: d.getInputs(), version: conv ? conv.activePlan() : null, execState, jsExecState: jsExec });
+        render(gen);
+        return gen;
+      }
       const type = override?.type || $type.value || 'app';
       const id = override?.id ?? (type === 'app' ? null : $target.value);
       // 表示名（ラベル（コード）/ PC: name）を focus.label に渡す。識別子は常に id（フィールドコード / sourceId）
@@ -14137,6 +14286,16 @@
     const onMode = () => { last = null; $actions.style.display = 'none'; $result.style.display = 'none'; $candWrap.style.display = 'none'; $preview.textContent = ''; $download.disabled = true; setStatus(''); applyMode(); setAskEnabled(); };
     $modeQa.addEventListener('change', onMode);
     $modePlan.addEventListener('change', onMode);
+    if ($modeDoc) $modeDoc.addEventListener('change', onMode);
+    if ($docKind) $docKind.addEventListener('change', () => { if (last && last.mode === 'document') generate(); });
+    /** モードの切り替え（Context ペイン）。doc は種類も指定できる */
+    function setMode(m, { kind = null } = {}) {
+      if ($modePlan) $modePlan.checked = (m === 'plan');
+      if ($modeDoc) $modeDoc.checked = (m === 'doc');
+      if ($modeQa) $modeQa.checked = (m !== 'plan' && m !== 'doc');
+      if (m === 'doc' && kind && $docKind) $docKind.value = kind;
+      onMode();
+    }
     $gen.addEventListener('click', () => generate());
     $candApply.addEventListener('click', () => {
       const v = String($cand.value || '');
@@ -14159,7 +14318,7 @@
     const currentOutput = () => {
       if (!last || !last.ok) return null;
       const view = $view.value || 'prompt';
-      return { text: last.outputs[view], filename: KTContextUi.outputFilename(last.ctx, view), mime: view === 'json' ? 'application/json' : 'text/markdown' };
+      return { text: last.outputs[view], filename: KTContextUi.outputFilename(last.ctx, view, { document: last.mode === 'document' ? last.kind : null }), mime: view === 'json' ? 'application/json' : 'text/markdown' };
     };
     $download.addEventListener('click', () => {
       const out = currentOutput();
@@ -14191,7 +14350,7 @@
       regenerate: () => (last ? generate() : null),
       refreshTargets: fillTargets,
       refreshCapability, ask, plan, showEvidence,
-      mode, setMode: (m) => { if ($modePlan) $modePlan.checked = (m === 'plan'); if ($modeQa) $modeQa.checked = (m !== 'plan'); onMode(); },
+      mode, setMode,
       lastPlan: () => lastPlan,
       lastReview: () => lastReview,
       reviewOutput,
@@ -14303,13 +14462,13 @@
         #kt-toolkit .body > div[id^="view-"]{
           min-height: 100%;
         }
-        /* flexで高さ追従させるタブ（Templates / Customize / Field Scanner / Plugins） */
+        /* flexで高さ追従させるタブ（Customize / Field Scanner / Plugins / AI） */
         #kt-toolkit .body > .kt-fill-view{
           height: 100%;
           min-height: 0;
         }
 
-        /* ===== 共通レイアウトクラス（4タブで同じサイズ制御ルールを使う） ===== */
+        /* ===== 共通レイアウトクラス（高さ追従のタブで同じサイズ制御ルールを使う） ===== */
         /* 2カラム分割のルート：親Viewの高さを使い切る */
         #kt-toolkit .kt-split-layout{
           height: 100%;
@@ -14358,6 +14517,11 @@
         #kt-toolkit.is-mini .body{ display:none !important; }
         #kt-toolkit.is-mini .tabs{ display:none !important; }
         #kt-toolkit.is-mini #kt-full{ display:none !important; }
+
+        /* Phase 18: Templates 廃止の軽い案内（初回だけ。閉じると localStorage に保存） */
+        #kt-toolkit #kt-migration-notice{ display:none; flex:none; align-items:center; gap:8px; padding:4px 12px; font-size:11px; border-bottom:1px solid ${C.border}; background:${C.bgSub}; color:${C.textSub}; }
+        #kt-toolkit #kt-migration-notice.is-shown{ display:flex; }
+        #kt-toolkit.is-mini #kt-migration-notice{ display:none !important; }
 
         /* Version 表示（控えめ） */
         #kt-toolkit .version-info{
@@ -14470,7 +14634,6 @@
           <button id="tab-deps" class="tab" title="依存関係グラフ（フィールド・設定・JS・他アプリ）">Deps</button>
           <button id="tab-notice" class="tab">Notices</button>
           <button id="tab-acl" class="tab">Access Control</button>
-          <button id="tab-templates" class="tab">Templates</button>
           <button id="tab-customize" class="tab">Customize</button>
           <button id="tab-field-scanner" class="tab">Field Scanner</button>
           <button id="tab-plugins" class="tab">Plugins</button>
@@ -14486,6 +14649,7 @@
           </div>
         </div>
       </div>
+      <div id="kt-migration-notice" role="status"><span style="flex:1;">Templates タブの機能は <b>AI</b>（ドキュメント・AI Prompt・JavaScript の生成）と <b>Customize</b>（登録済み JS / CSS の確認・AI への相談）へ移動しました。</span><button type="button" id="kt-migration-close" class="btn" style="height:22px; padding:0 8px; font-size:11px;" title="この案内を閉じる（次回から表示しません）">×</button></div>
       <div class="body">
         <div id="view-health"></div>
         <div id="view-fields" style="display:none"></div>
@@ -14495,7 +14659,6 @@
         <div id="view-deps" style="display:none"></div>
         <div id="view-notice" style="display:none"></div>
         <div id="view-acl" style="display:none"></div>
-        <div id="view-templates" class="kt-fill-view" style="display:none"></div>
         <div id="view-customize" class="kt-fill-view" style="display:none"></div>
         <div id="view-field-scanner" class="kt-fill-view" style="display:none"></div>
         <div id="view-plugins" class="kt-fill-view" style="display:none;"></div>
@@ -14569,11 +14732,16 @@
 
     const btnMini = wrap.querySelector('#kt-mini');
     btnMini && btnMini.addEventListener('click', toggleMini, { passive: true });
+    // Phase 18: Templates 廃止の案内（初回だけ。永続的なバナーにはしない）
+    const MIGRATION_KEY = 'ktTemplatesMovedNotice.v1';
+    const notice = wrap.querySelector('#kt-migration-notice');
+    try { if (notice && localStorage.getItem(MIGRATION_KEY) !== '1') notice.classList.add('is-shown'); } catch (e) { if (notice) notice.classList.add('is-shown'); }
+    wrap.querySelector('#kt-migration-close')?.addEventListener('click', () => { try { localStorage.setItem(MIGRATION_KEY, '1'); } catch (e) { } notice?.classList.remove('is-shown'); }, { passive: true });
     const btnVer = wrap.querySelector('#kt-version');
     btnVer && btnVer.addEventListener('click', () => window.open(githubURL, '_blank', 'noopener'), { passive: true });
 
-    // Phase 15: 'ai' = AI 開発ワークスペース（Templates から AI 関連機能を移した独立タブ）
-    const TABS = ['health', 'fields', 'views', 'graphs', 'relations', 'deps', 'notice', 'acl', 'templates', 'customize', 'field-scanner', 'plugins', 'ai'];
+    // Phase 15: 'ai' = AI 開発ワークスペース（AI 関連機能の独立タブ）。Phase 18: 'templates' は廃止（Fact = 解析タブ / Build = AI。docs/contracts/22）
+    const TABS = ['health', 'fields', 'views', 'graphs', 'relations', 'deps', 'notice', 'acl', 'customize', 'field-scanner', 'plugins', 'ai'];
     const tabListeners = new Set();
 
     const switchTab = (idShow) => {
@@ -18437,7 +18605,8 @@
 
 
   // ----------------------------
-  // [Feature] Templates
+  // [Shared] Customize エディタのフィールド補完（Phase 18: 旧 Templates タブから Customize へ移動）と、
+  //          Common Context Model（KTContext が再利用。旧 Documents 機能の由来）
   // ----------------------------
   function fetchFieldMeta(fields) {
     const resp = fields;
@@ -18585,38 +18754,13 @@
     };
   }
 
-  function buildRequirementsPromptFromEditor({ payload, editorMarkdown }) {
-    const system = [
-      'あなたはkintoneのシステムエンジニアです。',
-      '根拠は与えられたJSONのみ。推測で仕様を追加しない。',
-      '出力は日本語Markdown。H1〜H3、箇条書き中心、表は最小限。',
-      'ユーザー向け要件(What/Why)と開発向け要件(How/Constraints)を分ける。'
-    ].join(' ');
-
-    const user = `
-      # 目的
-      このアプリ用の**ドラフト**を作成してください。10〜15分でレビューできる密度に抑え、曖昧な点は「未確定事項」として列挙してください。
-
-      # テンプレ（エディタの内容を骨格として使用）
-      \`\`\`markdown
-      ${editorMarkdown}
-      \`\`\`
-
-      # 入力（アプリ定義の要約JSON）
-      \`\`\`json
-      ${JSON.stringify(payload, null, 2)}
-      \`\`\`
-      `.trim();
-
-    return `SYSTEM:\n${system}\n\nUSER:\n${user}`;
-  }
-
   // ----------------------------
   // [Feature] AI（AI Workspace。Phase 15）
-  //   Templates にあった AI 関連機能（AI Prompt / Markdown / JSON・接続・Assistant・Planner・Review・Executor・Rollback）の移行先。
+  //   旧 Templates タブにあった AI 関連機能（AI Prompt / Markdown / JSON・接続・Assistant・Planner・Review・Executor・Rollback）の移行先。
+  //   Phase 18: Templates タブは廃止。Documents（仕様書 / 要件定義 / レビュー依頼の Prompt）も Context ペインの「ドキュメントを作る」へ統合。
   //   チャット（KTAiConversation）を入口に、Review / Decision / 最終確認 / Rollback 確認は既存 UI（drawer）で行う。
   // ----------------------------
-  function renderAiWorkspace(root, DATA, appId = null, { getContextInputs = null, runScan = null } = {}) {
+  function renderAiWorkspace(root, DATA, appId = null, { getContextInputs = null, runScan = null, openCustomize = null } = {}) {
     const view = root.querySelector('#view-ai');
     if (!view) return null;
     const C = getThemeColors();
@@ -18633,6 +18777,7 @@
         downloadText: (name, text, mime) => KTExport.downloadText(name, text, mime),
         runScan,
         rescanJs: () => KTScan.run({ force: true, silent: true }),   // Phase 16: 統合先 JS の本文を取り直す（キャッシュを無視）
+        openCustomize,                                                // Phase 18 §30: AI → Customize（登録内容の確認）
         appId,
         colors: { border: BD, bg: isDark ? '#1b1b1b' : '#fff' },
         // 有料: Nest Rec AI（接続情報は Refresh Token のみ localStorage・Customer Token は保存しない）
@@ -18651,662 +18796,25 @@
     return panel;
   }
 
-  // Templates（GitHub のテンプレート / CSS / スニペット / ドキュメント）。AI 関連機能は Phase 15 で AI タブ（renderAiWorkspace）へ移した
-  async function renderTemplates(root, DATA, appId = null) {
-    const view = root.querySelector('#view-templates');
-    if (!view) return;
-    let currentFileName = 'template.js';
+  // ----------------------------
+  // [Feature] Customize
+  // 現在登録されている JS / CSS を確認・解析する場所（Phase 18: Fact 側。設計・生成・修正は AI タブへ「AIに相談」で遷移）。
+  // JSEdit 互換の編集・保存＋デプロイは従来どおり（利用者の明示操作だけ）。GitHub の Snippets 一覧は廃止（Pattern Library として AI 側へ）。
+  // ----------------------------
+  async function renderCustomize(root, DATA, appId, { consult = null, getInputs = null } = {}) {
+    const view = root.querySelector('#view-customize');
+    if (!view) return null;
 
-    // GitHub設定
-    const GH = {
-      owner: 'youtotto',
-      repo: 'kintone-Customize-template',
-      dirs: { templates: 'js', css: 'CSS', snippets: 'snippets', documents: 'documents' },
-      endpoint(dir) { return `https://api.github.com/repos/${this.owner}/${this.repo}/contents/${encodeURIComponent(dir)}`; },
-      cacheKey(kind) { return `kt_tpl_cache_ui_${kind}`; }
-    };
-    const GH_BASE = `https://github.com/${GH.owner}/${GH.repo}`;
-
-    // UI色
+    // === カラースキーム ===
     const C = getThemeColors();
     const BG = C.bgSub2; // または C.bg
     const BD = C.border2;
     const isDark = C.isDark;
 
-    // レイアウト
-    //   ★高さは vh 固定ではなく、親View（.kt-fill-view）→ .kt-split-layout → 各カラム → flex:1 の連鎖で追従させる。
-    //   ID は Customize タブと重複しないよう kt-template-* に統一。
-    view.innerHTML = `
-      <div id="kt-template" class="kt-split-layout">
-        <!-- 左：エディタ -->
-        <div class="kt-split-col kt-flex-column" style="flex:2; --kt-col-min:380px; gap:10px;">
-          <div class="kt-flex-fixed" style="display:flex; align-items:center; gap:10px; justify-content:space-between;">
-            <div style="display:flex; align-items:center; gap:8px;">
-              <button id="kt-template-download" class="btn" disabled style="height:32px; padding:0 10px;">⬇ ローカルに保存</button>
-              <button id="kt-template-upload" class="btn" disabled style="height:32px; padding:0 10px;">⬆ アプリに反映</button>
-            </div>
-            <span id="kt-template-meta"
-                  style="opacity:.75; max-width:55%; text-overflow:ellipsis; overflow:hidden; white-space:nowrap; text-align:right;"></span>
-          </div>
-
-          <div id="kt-template-editor" class="kt-flex-fill"
-            style="
-              border:1px solid ${BD};
-              border-radius:8px;
-              background:${isDark ? '#0f0f0f' : '#fafafa'};
-            ">
-          </div>
-        </div>
-
-        <!-- 右：ファイル一覧 -->
-        <div class="kt-split-col kt-flex-column" style="flex:1; --kt-col-min:240px; gap:10px;">
-          <div class="kt-flex-fixed" style="display:flex; align-items:center; justify-content:space-between;
-            padding:6px 0; background:${isDark ? '#1b1b1b' : '#fff'};">
-            <div style="font-weight:600; padding-left:12px; margin:6px 0;">Files</div>
-            <select id="kt-template-source" class="btn" style="padding:3px 4px; height:32px;">
-              <option value="templates">Templates (GitHub: ${GH.dirs.templates})</option>
-              <option value="css">Css  (GitHub: ${GH.dirs.css})</option>
-              <option value="snippets">Snippets  (GitHub: ${GH.dirs.snippets})</option>
-              <option value="documents">Documents (GitHub: ${GH.dirs.documents})</option>
-            </select>
-          </div>
-
-          <div class="kt-flex-fixed" style="display:flex; gap:8px;">
-            <button id="kt-template-insert" class="btn" disabled style="flex:1; height:32px;">⤴︎ 挿入</button>
-            <button id="kt-template-refresh" class="btn" style="flex:1; height:32px;">↻ 一覧更新</button>
-            <button id="kt-template-github" class="btn" style="flex:1; height:32px;">🔗 Github</button>
-            <button id="kt-template-ai-req" class="btn" style="flex:1; height:32px; display:none;">AI prompt</button>
-          </div>
-
-          <div id="kt-template-list" class="kt-scroll-area"
-            style="
-              border:1px solid ${BD};
-              border-radius:8px;
-              background:${BG};
-              padding:6px;
-            ">
-          </div>
-          <div id="kt-template-overview" class="kt-flex-fixed"></div>
-        </div>
-      </div>
-    `;
-
-    // 要素参照
-    const $list = view.querySelector('#kt-template-list');
-    const $download = view.querySelector('#kt-template-download');
-    const $meta = view.querySelector('#kt-template-meta');
-    const $refresh = view.querySelector('#kt-template-refresh');
-    const $insert = view.querySelector('#kt-template-insert');
-    const $sourceSel = view.querySelector('#kt-template-source');
-    const $overview = view.querySelector('#kt-template-overview');
-    const $btnAIReq = view.querySelector('#kt-template-ai-req');
-    const $upload = view.querySelector('#kt-template-upload');
-    const $btnGithub = view.querySelector('#kt-template-github');
-    const $editorHost = view.querySelector('#kt-template-editor');
-
-    function updateAIReqVisibility() {
-      const isDocs = ($sourceSel.value === 'documents');
-      // 表示/非表示
-      $btnAIReq.style.display = isDocs ? '' : 'none';
-      $insert.style.display = isDocs ? 'none' : '';
-      if (!isDocs) return;
-
-      // documents のときは内容があれば有効化
-      const text = (monacoEditor ? monacoEditor.getValue() : '').trim();
-      $btnAIReq.disabled = !text;
-    }
-
-    // 状態
-    let selectedItem = null;        // 選択中ファイル
-    let selectedKind = 'templates'; // 'templates' | 'snippets' | 'documents'
-
-    // ヘルパ
-    // 現在の種別に応じて GitHub へ飛ばす
-    function openGithubForCurrent() {
-      const kind = $sourceSel.value;
-      let url = '';
-
-      if (kind === 'templates') {
-        // Templates → js ディレクトリ
-        url = `${GH_BASE}/tree/main/${GH.dirs.templates}/README.md`; // https://github.com/.../tree/main/js
-      } else if (kind === 'css') {
-        // css → css ディレクトリ
-        url = `${GH_BASE}/tree/main/${GH.dirs.css}/README.md`;  // https://github.com/.../tree/main/css
-      } else if (kind === 'snippets') {
-        // Snippets → snippets ディレクトリ
-        url = `${GH_BASE}/tree/main/${GH.dirs.snippets}/README.md`;  // https://github.com/.../tree/main/snippets
-      } else if (kind === 'documents') {
-        // Documents のときは、選択中があればそのファイル、なければディレクトリ
-        if (selectedItem) {
-          url = `${GH_BASE}/blob/main/${GH.dirs.documents}/${encodeURIComponent(selectedItem.name)}`;
-        } else {
-          url = `${GH_BASE}/tree/main/${GH.dirs.documents}`;
-        }
-      } else {
-        // フォールバック：リポジトリTOP
-        url = GH_BASE;
-      }
-
-      window.open(url, '_blank', 'noopener');
-    }
-
-    async function loadCode(file) {
-      const res = await fetch(file.download_url);
-      if (!res.ok) throw new Error(`raw fetch ${res.status}`);
-      return await res.text();
-    }
-
-    function setEditorLanguage(lang = 'javascript') {
-      if (!window.monaco || !monacoEditor) return;
-      const model = monacoEditor.getModel();
-      if (model) window.monaco.editor.setModelLanguage(model, lang);
-    }
-
-    async function fetchList(kind, useCacheFirst = true) {
-      const dir = GH.dirs[kind];
-      const api = GH.endpoint(dir);
-      const cKey = GH.cacheKey(kind);
-
-      if (useCacheFirst) {
-        const c = sessionStorage.getItem(cKey);
-        if (c) { try { return JSON.parse(c); } catch { } }
-      }
-
-      const res = await fetch(api, { headers: { 'Accept': 'application/vnd.github+json' } });
-      if (!res.ok) throw new Error(`GitHub API ${res.status}`);
-      const json = await res.json();
-
-      const files = (Array.isArray(json) ? json : []).filter(x => {
-        if (x.type !== 'file' || !x.name) return false;
-        const n = x.name.toLowerCase();
-
-        if (kind === 'templates' || kind === 'snippets') return n.endsWith('.js');
-        if (kind === 'css') return n.endsWith('.css'); // ★追加
-        if (kind === 'documents') return (n.endsWith('.md') || n.endsWith('.mdx') || n.endsWith('.markdown') || n.endsWith('.txt'));
-        return false;
-      });
-
-      sessionStorage.setItem(cKey, JSON.stringify(files));
-      return files;
-    }
-
-    function fileRow(file, kind) {
-      const el = document.createElement('div');
-      el.style.cssText = `display:flex;align-items:center;gap:8px;padding:8px 10px;border-bottom:1px solid ${BD};cursor:pointer;`;
-      const size = (file.size || 0).toLocaleString();
-
-      const tag =
-        kind === 'snippets' ? 'SNIP' :
-          kind === 'documents' ? 'DOC' :
-            kind === 'css' ? 'CSS' : 'JS';
-
-      el.innerHTML = `
-        <div style="border:1px solid ${BD};border-radius:999px;padding:2px 6px;font-size:11px">${tag}</div>
-        <div style="flex:1">${escapeHtml(file.name)}</div>
-        <div style="opacity:.6;font-size:11px">${size ? size + ' Bytes' : ''}</div>
-      `;
-
-      // ★言語切替は「クリック時」に統一すると事故が減ります（ここで切るなら kindごとに）
-      // if (kind === 'templates' || kind === 'snippets') setEditorLanguage('javascript');
-      // else if (kind === 'css') setEditorLanguage('css');
-      // else if (kind === 'documents') setEditorLanguage('markdown');
-
-      el.addEventListener('click', async () => {
-        selectedItem = file;
-        selectedKind = kind;
-
-        if (window.monaco && monacoEditor && !monacoEditor._aiReqHooked) {
-          monacoEditor._aiReqHooked = true;
-          monacoEditor.onDidChangeModelContent(() => updateAIReqVisibility());
-        }
-
-        // ★ここで言語決定（確実）
-        if (kind === 'documents') setEditorLanguage('markdown');
-        else if (kind === 'css') setEditorLanguage('css');
-        else setEditorLanguage('javascript');
-
-        if (kind === 'templates') {
-          $overview.style.display = 'none';
-          $overview.innerHTML = '';
-          const code = await loadCode(file);
-          currentFileName = file.name;
-          if (monacoEditor) monacoEditor.setValue(code);
-          else await initEditor(code, $editorHost);
-          updateAIReqVisibility();
-          $meta.textContent = `選択中（Template表示）：${file.name}`;
-          [$download, $upload].forEach(b => b.disabled = false);
-          $insert.disabled = false;
-
-        } else if (kind === 'css') {
-          // ★CSSは「エディタで表示」「ローカル保存」「アプリに反映」まで
-          $overview.style.display = 'none';
-          $overview.innerHTML = '';
-          const code = await loadCode(file);
-          currentFileName = file.name;
-          if (monacoEditor) monacoEditor.setValue(code);
-          else await initEditor(code, $editorHost);
-          updateAIReqVisibility();
-          $meta.textContent = `選択中（CSS表示）：${file.name}`;
-          [$download, $upload].forEach(b => b.disabled = false);
-          $insert.disabled = true; // CSSをJSへ挿入するのは事故るので無効推奨
-
-        } else if (kind === 'snippets') {
-          await showSnippetOverview(file);
-          [$insert, $upload].forEach(b => b.disabled = false);
-
-        } else if (kind === 'documents') {
-          $overview.style.display = 'none';
-          $overview.innerHTML = '';
-          const code = await loadCode(file);
-          currentFileName = file.name;
-          if (monacoEditor) monacoEditor.setValue(code);
-          else await initEditor(code, $editorHost);
-          updateAIReqVisibility();
-          $meta.textContent = `選択中（document表示）：${file.name}`;
-          [$download].forEach(b => b.disabled = false);
-          [$upload].forEach(b => b.disabled = true);
-          $insert.disabled = false;
-        }
-      }, { passive: true });
-
-      return el;
-    }
-
-    function renderList(kind, files) {
-      $list.innerHTML = '';
-      if (!files.length) {
-        $list.innerHTML = `<div style="padding:12px; opacity:.7">対象のファイルが見つかりませんでした。</div>`;
-        $overview.style.display = 'none';
-        $overview.innerHTML = '';
-        return;
-      }
-
-      const frag = document.createDocumentFragment();
-      files.forEach(f => frag.appendChild(fileRow(f, kind)));
-      $list.appendChild(frag);
-
-      selectedItem = null;
-      // ★初期は全部OFF（クリックでONにする）
-      [$download, $insert, $upload].forEach(b => { if (b) b.disabled = true; });
-      $meta.textContent = '';
-
-      if (kind === 'snippets') {
-        $overview.style.display = 'block';
-        $overview.innerHTML = `<div style="opacity:.7; padding:8px; border:1px dashed ${BD}; border-radius:8px;">
-          スニペットを選択するとプレビューが表示されます
-        </div>`;
-      } else {
-        $overview.style.display = 'none';
-        $overview.innerHTML = '';
-      }
-    }
-
-    async function showSnippetOverview(file) {
-      try {
-        const code = await loadCode(file);
-        const head = code.split('\n').slice(0, 20).join('\n'); // 先頭20行
-        $overview.style.display = 'block';
-        $overview.innerHTML = `
-          <div style="margin-top:8px; border:1px solid ${BD}; border-radius:8px; overflow:hidden;">
-            <div style="padding:6px 8px; font-weight:600; ${isDark ? 'background:#101010;color:#eee;' : 'background:#f7f7f7;color:#111;'}">
-              Snippet Overview
-              <span>（ファイル:</span> <strong>${escapeHtml(file.name)}）</strong>
-            </div>
-            <div style="padding:8px; ${isDark ? 'background:#0f0f0f;color:#ddd;' : 'background:#fafafa;color:#333;'}">
-              <pre style="margin:0; white-space:pre-wrap; font-size:12px; line-height:1.4; max-height:180px; overflow:auto;">${escapeHtml(head)}</pre>
-            </div>
-          </div>`;
-      } catch (e) {
-        $overview.style.display = 'block';
-        $overview.innerHTML = `<div style="margin-top:8px; color:#c00">プレビュー取得に失敗しました。</div>`;
-      }
-    }
-
-    // 初期テンプレ（kintone CustomizeJS）
-    const KINTONE_TEMPLATE = String.raw`
-    (function () {
-        'use strict';
-
-        kintone.events.on('app.record.index.show', (event) => {
-
-            const rec = event.record;
-
-            return event;
-        });
-    })();`;
-    // どこかの初期化処理内で
-    await initEditor(KINTONE_TEMPLATE, $editorHost);
-    if (window.monaco && !window.monaco._kintoneFieldsReady) {
-      try {
-        // 既存の registerFieldCompletions(monaco, props?) があれば fields.properties を渡す
-        await registerFieldCompletions(window.monaco, DATA?.fields);
-      } catch (e) {
-        // 旧シグネチャ（monacoのみ）互換
-        try { await registerFieldCompletions(window.monaco); } catch { }
-      }
-      window.monaco._kintoneFieldsReady = true;
-    }
-
-    // ボタン挙動
-    $download.addEventListener('click', async () => {
-      if (!selectedItem) return;
-
-      let name = currentFileName || 'template.js';
-      let content = '';
-
-      if (selectedKind === 'templates' || selectedKind === 'documents' || selectedKind === 'css') {
-        content = monacoEditor ? monacoEditor.getValue() : '';
-      } else {
-        name = selectedItem.name;
-        content = await loadCode(selectedItem);
-      }
-
-      const mime =
-        selectedKind === 'documents' ? 'text/markdown' :
-          selectedKind === 'css' ? 'text/css' :
-            'text/javascript';
-
-      const blob = new Blob([content], { type: mime });
-      const a = document.createElement('a');
-      a.href = URL.createObjectURL(blob);
-      a.download = name;
-      a.click();
-      URL.revokeObjectURL(a.href);
-    });
-
-    // ------ モーダル：入力ダイアログ（ファイル名＆アップ先） ------
-    function openUploadDialog({ defaultName, defaultDesktop = true, defaultMobile = false }) {
-      return new Promise((resolve) => {
-        // ラッパ
-        const wrap = document.createElement('div');
-        wrap.id = 'kt-upload-dialog';
-        wrap.style.cssText = `
-          position: fixed; inset: 0; z-index: 9999;
-          background: rgba(0,0,0,.35); display:flex; align-items:center; justify-content:center;
-        `;
-
-        // ダイアログ
-        const box = document.createElement('div');
-        box.style.cssText = `
-          width: 520px; max-width: 92vw; border-radius: 12px;
-          background: ${document.documentElement.matches('[data-theme="dark"]') ? '#1c1c1c' : '#fff'};
-          color: inherit; padding: 16px 18px; box-shadow: 0 12px 30px rgba(0,0,0,.25);
-          border: 1px solid ${document.documentElement.matches('[data-theme="dark"]') ? '#333' : '#ddd'};
-        `;
-        box.innerHTML = `
-          <div style="font-weight:700; font-size:16px; margin-bottom:10px;">ファイルをアップロード</div>
-
-          <label style="display:block; font-size:12px; opacity:.8; margin:6px 0 4px;">ファイル名</label>
-          <input id="kt-up-name" type="text" value="${defaultName || 'template.js'}"
-            style="display:block; width:100%; max-width:100%; box-sizing:border-box; padding:8px 10px; border-radius:8px; border:1px solid #8882; background:transparent; color:inherit" />
-
-          <div style="display:flex; gap:14px; margin-top:12px;">
-            <label style="display:flex; gap:8px; align-items:center;">
-              <input id="kt-up-desktop" type="checkbox" ${defaultDesktop ? 'checked' : ''}/>
-              <span>デスクトップ（JS）</span>
-            </label>
-            <label style="display:flex; gap:8px; align-items:center;">
-              <input id="kt-up-mobile" type="checkbox" ${defaultMobile ? 'checked' : ''}/>
-              <span>モバイル（JS）</span>
-            </label>
-          </div>
-          <div role="alert"
-              style="margin-top:12px; font-size:12px; line-height:1.6; border:1px solid #f59e0b55; background:#f59e0b0f; border-radius:8px; padding:10px 12px;">
-            <div style="font-weight:700; margin-bottom:6px;">⚠️ 同名ファイルについて</div>
-            <ul style="margin:0 0 0 18px; padding:0;">
-              <li>同名のファイルの重複チェックは行いません。そのままアップロードされます。</li>
-              <li>重複を避けたい場合は<b>ファイル名を変更</b>してください。</li>
-            </ul>
-          </div>
-          <div style="display:flex; gap:8px; justify-content:flex-end; margin-top:16px;">
-            <button id="kt-up-cancel" class="btn" style="height:32px; padding:0 12px;">キャンセル</button>
-            <button id="kt-up-ok" class="btn" style="height:32px; padding:0 14px; font-weight:600;">OK</button>
-          </div>
-        `;
-
-        wrap.appendChild(box);
-        document.body.appendChild(wrap);
-
-        const $name = box.querySelector('#kt-up-name');
-        const $desktop = box.querySelector('#kt-up-desktop');
-        const $mobile = box.querySelector('#kt-up-mobile');
-        const $ok = box.querySelector('#kt-up-ok');
-        const $cancel = box.querySelector('#kt-up-cancel');
-
-        const close = (result) => {
-          wrap.remove();
-          resolve(result);
-        };
-
-        $ok.addEventListener('click', () => {
-          const name = ($name.value || '').trim();
-          if (!name) { $name.focus(); return; }
-          if (!$desktop.checked && !$mobile.checked) {
-            // どちらも未選択は不可
-            alert('アップロード先を少なくとも1つ選択してください。');
-            return;
-          }
-          close({ name, toDesktop: $desktop.checked, toMobile: $mobile.checked });
-        });
-        $cancel.addEventListener('click', () => close(null));
-        wrap.addEventListener('click', (e) => { if (e.target === wrap) close(null); });
-        $name.select();
-      });
-    }
-    // ★共通化：実体は KTApi.waitDeploy
-    const waitDeploy = (appId) => KTApi.waitDeploy(appId);
-
-    async function putAppendFileToCustomizeWithTargets(app, keys, { toDesktop, toMobile }, assetType) {
-      // assetType: 'js' | 'css'
-      const slot = (assetType === 'css') ? 'css' : 'js';
-
-      // preview現行
-      let base;
-      try {
-        base = await kintone.api(kintone.api.url('/k/v1/preview/app/customize.json', true), 'GET', { app });
-      } catch { base = null; }
-
-      // preview無ければ本番からURLだけ
-      if (!base) {
-        const prod = await kintone.api(kintone.api.url('/k/v1/app/customize.json', true), 'GET', { app });
-        const onlyURL = (arr = []) => (arr || []).filter(x => x?.type === 'URL');
-        base = {
-          app, scope: prod.scope || 'ALL',
-          desktop: { js: onlyURL(prod.desktop?.js), css: onlyURL(prod.desktop?.css) },
-          mobile: { js: onlyURL(prod.mobile?.js), css: onlyURL(prod.mobile?.css) }
-        };
-      }
-
-      const toFileItem = (fileKey) => ({ type: 'FILE', file: { fileKey } });
-
-      const next = {
-        app,
-        scope: base.scope || 'ALL',
-        desktop: {
-          js: [...(base.desktop?.js ?? [])],
-          css: [...(base.desktop?.css ?? [])]
-        },
-        mobile: {
-          js: [...(base.mobile?.js ?? [])],
-          css: [...(base.mobile?.css ?? [])]
-        }
-      };
-
-      // ★追記先を slot で切替
-      if (toDesktop && keys.fileKeyDesktop) next.desktop[slot].push(toFileItem(keys.fileKeyDesktop));
-      if (toMobile && keys.fileKeyMobile) next.mobile[slot].push(toFileItem(keys.fileKeyMobile));
-
-      await kintone.api(kintone.api.url('/k/v1/preview/app/customize.json', true), 'PUT', next);
-      await kintone.api(kintone.api.url('/k/v1/preview/app/deploy.json', true), 'POST', { apps: [{ app, revision: -1 }], revert: false });
-    }
-    $upload?.addEventListener('click', async (ev) => {
-      const btn = ev.currentTarget; btn.disabled = true;
-      try {
-        const app = kintone.app.getId();
-
-        const assetType = (selectedKind === 'css') ? 'css' : 'js';
-        const defaultName =
-          currentFileName ||
-          (selectedKind === 'css' ? 'style.css' :
-            selectedKind === 'documents' ? 'document.md' : 'template.js');
-
-        // 1) ダイアログ
-        const form = await openUploadDialog({
-          defaultName,
-          defaultDesktop: true,
-          defaultMobile: false
-        });
-        if (!form) return;
-
-        const mime =
-          (selectedKind === 'css') ? 'text/css' :
-            (selectedKind === 'documents') ? 'text/markdown' :
-              'text/javascript';
-
-        const content = monacoEditor ? monacoEditor.getValue() : '';
-        if (!content.trim()) throw new Error('editor is empty');
-
-        Spinner.show();
-
-        // 2) アップロード（desktop/mobileで fileKey 分ける）
-        let fileKeyDesktop = null, fileKeyMobile = null;
-
-        if (form.toDesktop && form.toMobile) {
-          const [fk1, fk2] = await Promise.all([
-            uploadOnce(form.name, content, mime),
-            uploadOnce(form.name, content, mime)
-          ]);
-          fileKeyDesktop = fk1;
-          fileKeyMobile = fk2;
-        } else if (form.toDesktop) {
-          fileKeyDesktop = await uploadOnce(form.name, content, mime);
-        } else if (form.toMobile) {
-          fileKeyMobile = await uploadOnce(form.name, content, mime);
-        }
-
-        // 3) 追記PUT → デプロイ待ち（★assetType渡す）
-        await putAppendFileToCustomizeWithTargets(
-          app,
-          { fileKeyDesktop, fileKeyMobile },
-          { toDesktop: form.toDesktop, toMobile: form.toMobile },
-          assetType
-        );
-
-        await waitDeploy(app);
-
-        const label = (assetType === 'css') ? 'CSS' : 'JS';
-        alert(`✅ 追記＆デプロイ完了：${form.name}\n[Desktop ${label}: ${form.toDesktop ? 'Yes' : 'No'} / Mobile ${label}: ${form.toMobile ? 'Yes' : 'No'}]`);
-
-      } catch (e) {
-        console.error('[upload]', e);
-        alert(`❌ 失敗：${e?.message || e}`);
-      } finally {
-        btn.disabled = false;
-        Spinner.hide();
-      }
-    });
-
-    $insert.addEventListener('click', async () => {
-      if (!selectedItem || !monacoEditor) return;
-      if (selectedKind === 'documents') return; // ドキュメントは挿入不可のままにするなら return
-      const code = await loadCode(selectedItem);
-      monacoEditor.focus();
-      const sel = monacoEditor.getSelection();
-      monacoEditor.executeEdits('tpl-insert', [{ range: sel, text: `\n${code}\n` }]);
-      $meta.textContent = (selectedKind === 'snippets')
-        ? `✅ Snippet を挿入しました：${selectedItem.name}`
-        : `✅ Template を挿入しました（追記）：${selectedItem.name}`;
-      setTimeout(() => ($meta.textContent = ''), 1500);
-    });
-
-    $refresh.addEventListener('click', async () => {
-      sessionStorage.removeItem(GH.cacheKey($sourceSel.value));
-      await loadList();
-    });
-
-    $btnGithub.addEventListener('click', (e) => {
-      e.preventDefault();
-      e.stopPropagation();
-      openGithubForCurrent();
-    });
-
-    $btnAIReq.addEventListener('click', async () => {
-      try {
-        // 1) エディタの内容（要件テンプレ）
-        const editorMarkdown = (monacoEditor ? monacoEditor.getValue() : '').trim();
-        if (!editorMarkdown) {
-          $meta.textContent = '⚠️ エディタが空です。先に要件テンプレ（Markdown）を開く/入力してください。';
-          setTimeout(() => ($meta.textContent = ''), 2500);
-          return;
-        }
-
-        // 2) 既取得の DATA から整形（API再呼び出ししない）
-        const payload = buildDocPayloadLiteFromPrefetch(DATA);
-
-        // 3) プロンプト組み立て
-        const prompt = buildRequirementsPromptFromEditor({ payload, editorMarkdown });
-
-        // 4) テキストファイルとしてダウンロード
-        const downloadText = (filename, text) => {
-          const blob = new Blob([text], { type: 'text/plain;charset=utf-8' });
-          const url = URL.createObjectURL(blob);
-          const a = document.createElement('a');
-          a.href = url;
-          a.download = filename;
-          document.body.appendChild(a);
-          a.click();
-          // 後片付け
-          setTimeout(() => {
-            URL.revokeObjectURL(url);
-            a.remove();
-          }, 0);
-        };
-
-        // 任意：ファイル名（日時＋アプリID入り）
-        const pad = (n) => String(n).padStart(2, '0');
-        const d = new Date();
-        const ts = `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}_${pad(d.getHours())}${pad(d.getMinutes())}`;
-        const appId = (window.kintone && kintone.app && kintone.app.getId && kintone.app.getId()) || 'app';
-        const filename = `requirements_prompt_${appId}_${ts}.txt`;
-
-        downloadText(filename, prompt);
-
-        $meta.textContent = '✅ 生成プロンプトをテキストとしてダウンロードしました。';
-        setTimeout(() => ($meta.textContent = ''), 3000);
-      } catch (e) {
-        console.warn(e);
-        $meta.textContent = '⚠️ 生成用プロンプトの準備に失敗しました。';
-        setTimeout(() => ($meta.textContent = ''), 2500);
-      }
-    }, { passive: true });
-
-    // ソース切替
-    $sourceSel.addEventListener('change', async () => {
-      await loadList();
-      updateAIReqVisibility();
-    });
-
-    // 初回ロード
-    await loadList();
-
-    // リスト読み込み完了後
-    async function loadList() {
-      const kind = $sourceSel.value;
-      selectedKind = kind;
-      $list.innerHTML = `<div style="padding:12px; opacity:.7">読み込み中...</div>`;
-      try {
-        const files = await fetchList(kind, true);
-        renderList(kind, files);
-      } catch (e) {
-        // ...既存のエラーハンドリング...
-      }
-      updateAIReqVisibility();
-    }
-
-    // どこか1回だけ実行（存在すればスキップ）
-    if (!document.getElementById('kt-template-inline-style')) {
+    // === ダイアログ（document.body 直下）用の .btn 共通 style（旧 Templates タブから移管。1 回だけ） ===
+    if (!document.getElementById('kt-customize-inline-style')) {
       const st = document.createElement('style');
-      st.id = 'kt-template-inline-style';
+      st.id = 'kt-customize-inline-style';
       st.textContent = `
       .btn {
         border: 1px solid ${BD};
@@ -19322,34 +18830,8 @@
       document.head.appendChild(st);
     }
 
-  }
-
-
-  // ----------------------------
-  // [Feature] Customize
-  // kintone JS/CSS カスタマイズ編集機能（Toolkit版 JSEditタブ）
-  // ----------------------------
-  async function renderCustomize(root, DATA, appId, { consult = null, getInputs = null } = {}) {
-    const view = root.querySelector('#view-customize');
-    if (!view) return;
-
-    // === カラースキーム ===
-    const C = getThemeColors();
-    const BG = C.bgSub2; // または C.bg
-    const BD = C.border2;
-    const isDark = C.isDark;
-
-    // === GitHub: snippetsのみ ===
-    const GH = {
-      owner: 'youtotto',
-      repo: 'kintone-Customize-template',
-      dirs: { snippets: 'snippets' },
-      endpoint(dir) { return `https://api.github.com/repos/${this.owner}/${this.repo}/contents/${encodeURIComponent(dir)}`; },
-    };
-
-    // === レイアウト（Templatesタブと同じ見た目・同じサイズ制御） ===
+    // === レイアウト ===
     //   ★高さは vh 固定ではなく、親View（.kt-fill-view）→ .kt-split-layout → 各カラム → flex:1 の連鎖で追従させる。
-    //   ID は Templates タブと重複しないよう kt-customize-* に統一。
     view.innerHTML = `
       <div id="kt-customize" class="kt-split-layout">
         <!-- 左：エディタ -->
@@ -19373,7 +18855,7 @@
           </div>
         </div>
 
-        <!-- 右：ファイル一覧（Customize / Snippets） -->
+        <!-- 右：ファイル一覧（登録済みの JS / CSS。PC / モバイル） -->
         <div class="kt-split-col kt-flex-column" style="flex:1; --kt-col-min:240px; gap:10px;">
           <div class="kt-flex-fixed" style="display:flex; align-items:center; justify-content:space-between;
             padding:6px 0; background:${isDark ? '#1b1b1b' : '#fff'};">
@@ -19383,13 +18865,11 @@
               <option value="css">CSS (desktop)</option>
               <option value="JavaScriptMobile">JavaScript (mobile)</option>
               <option value="cssMobile">CSS (mobile)</option>
-              <option value="snippets">Snippets (GitHub: ${GH.dirs.snippets})</option>
             </select>
           </div>
 
           <div class="kt-flex-fixed" style="display:flex; gap:8px;">
-            <button id="kt-customize-insert"  class="btn" disabled style="flex:1; height:32px;">⤴︎ 挿入</button>
-            <button id="kt-customize-refresh" class="btn"          style="flex:1; height:32px;">↻ 一覧更新</button>
+            <button id="kt-customize-refresh" class="btn" style="flex:1; height:32px;">↻ 一覧更新</button>
           </div>
 
           <div id="kt-customize-env" class="kt-flex-fixed" style="font-size:11px; opacity:.85; padding:0 4px; display:none;"></div>
@@ -19414,7 +18894,6 @@
     const $new = $('#kt-customize-new');
     const $meta = $('#kt-customize-meta');
     const $refresh = $('#kt-customize-refresh');
-    const $insert = $('#kt-customize-insert');
     const $sourceSel = $('#kt-customize-source');
     const $overview = $('#kt-customize-overview');
     const $editorHost = $('#kt-customize-editor');
@@ -19431,6 +18910,11 @@
       minimap: { enabled: false },
     });
     window.monacoEditor = editor;
+    // フィールドコード / record['CODE'].value の補完（旧 Templates タブから移動。1 回だけ登録）
+    if (monaco && !monaco._kintoneFieldsReady) {
+      try { await registerFieldCompletions(monaco, DATA?.fields); } catch (e) { }
+      monaco._kintoneFieldsReady = true;
+    }
     const setEditorLanguage = (lang = 'javascript') => {
       const model = editor.getModel();
       if (model) monaco.editor.setModelLanguage(model, lang);
@@ -19446,8 +18930,8 @@
       css: { kind: 'css', target: 'desktop' },
       JavaScriptMobile: { kind: 'js', target: 'mobile' },
       cssMobile: { kind: 'css', target: 'mobile' },
-      snippets: { kind: 'js', target: 'desktop' } // エディタ言語の既定用
     };
+    const srcOf = (target, kind) => (kind === 'css' ? (target === 'mobile' ? 'cssMobile' : 'css') : (target === 'mobile' ? 'JavaScriptMobile' : 'JavaScript'));
 
     const getMimeByName = (name) =>
       /\.css$/i.test(name) ? 'text/css'
@@ -19506,16 +18990,9 @@
     const deployAndWait = (app, pollMs = 1500, timeoutMs = 60000) =>
       KTApi.deployAndWait(app, { pollMs, timeoutMs });
 
-    // GitHub snippets
-    async function loadSnippets() {
-      const res = await fetch(GH.endpoint(GH.dirs.snippets), { headers: { 'Accept': 'application/vnd.github+json' } });
-      const json = await res.json();
-      if (!Array.isArray(json)) return [];
-      return json.filter(x => x.type === 'file' && /\.js$/i.test(x.name));
-    }
     // ★修正：引用符未対応のローカル escapeHtml を廃止し、共通の escapeHtml を使用する
 
-    // === ファイル行：Templatesタブの見た目に合わせたデザイン ===
+    // === ファイル行 ===
     function fileRow({ name, size, badge = 'JS', note = '', onConsult = null, title = '' }) {
       const el = document.createElement('div');
       el.style.cssText = `display:flex;align-items:center;gap:8px;padding:8px 10px;border-bottom:1px solid ${BD};cursor:pointer;`;
@@ -19572,71 +19049,18 @@
       } catch (e) { $env.style.display = 'none'; }
     }
 
-    // === リスト描画（Customize / Snippets） ===
+    // === リスト描画（登録済みの JS / CSS） ===
     let currentFileName = null;
+    const rowsByName = new Map();   // Phase 18 §30: AI タブから「Customize で確認」→ 該当ファイルの行を示す
     async function refreshList() {
       const src = $sourceSel.value;
       const conf = SRC[src] || { kind: 'js', target: 'desktop' };
       CURRENT.target = conf.target; // ← 重要：選択に合わせて更新
       $list.innerHTML = '<div style="padding:12px; opacity:.7">Loading...</div>';
       $overview.style.display = 'none'; $overview.innerHTML = '';
-      $download.disabled = false; $upload.disabled = false; $insert.disabled = true;
+      $download.disabled = false; $upload.disabled = false;
       CURRENT.name = null;
-
-      // --- Customize (App) list ---
-      if (src === 'snippets') { // --- Snippets (GitHub) list ---
-        const items = await loadSnippets();
-        $list.innerHTML = '';
-        if (!items.length) {
-          $list.innerHTML = `<div style="padding:12px; opacity:.7">対象のファイルが見つかりませんでした。</div>`;
-          // エディタに何かあればデプロイしたいケースもあるため、アップロードは無効化しない
-          $upload.disabled = false;
-          return;
-        }
-        setEditorLanguage('javascript');
-
-        // Snippets表示時は常にデプロイ可能（上書き先は currentFileName を使う）
-        $upload.disabled = false;
-
-        items.forEach((f) => {
-          const row = fileRow({ name: f.name, size: f.size, badge: 'SNIP' });
-          row.addEventListener('click', async () => {
-            const res = await fetch(f.download_url);
-            const code = await res.text();
-
-            // プレビュー
-            const head = code.split('\n').slice(0, 20).join('\n');
-            $overview.style.display = 'block';
-            $overview.innerHTML = /* …（既存のプレビューHTMLそのまま）… */ `
-              <div style="margin-top:8px; border:1px solid ${BD}; border-radius:8px; overflow:hidden;">
-                <div style="padding:6px 8px; font-weight:600; ${isDark ? 'background:#101010;color:#eee;' : 'background:#f7f7f7;color:#111;'}">
-                  Snippet Overview <strong>${escapeHtml(f.name)}</strong>
-                </div>
-                <div style="padding:8px; ${isDark ? 'background:#0f0f0f;color:#ddd;' : 'background:#fafafa;color:#333;'}">
-                  <pre style="margin:0; white-space:pre-wrap; font-size:12px; line-height:1.4; max-height:180px; overflow:auto;">${escapeHtml(head)}</pre>
-                </div>
-              </div>`;
-
-            // エディタへは「挿入」ボタンで追記（currentFileName はいじらない）
-            //$meta.textContent = `Snippet: ${f.name}`;
-            $insert.disabled = false;
-            $download.disabled = false;
-
-            $insert.onclick = () => {
-              const model = editor.getModel();
-              const sel = editor.getSelection();
-              const pos = sel ? sel.getStartPosition() : model.getFullModelRange().getEndPosition();
-              model.pushEditOperations([], [{
-                range: new monaco.Range(pos.lineNumber, pos.column, pos.lineNumber, pos.column),
-                text: code + '\n'
-              }]);
-              editor.focus();
-            };
-          }, { passive: true });
-          $list.appendChild(row);
-        });
-        return;
-      }
+      rowsByName.clear();
 
       // --- Customize (App) list: desktop/mobile × js/css 共通 ---
       const got = await getCustomize(appId);
@@ -19684,10 +19108,24 @@
           $meta.textContent = `${i}: ${f.file.name} (${conf.target})`;
           $download.disabled = false;
           $upload.disabled = false;        // 保存+デプロイ可
-          $insert.disabled = true;
         }, { passive: true });
+        rowsByName.set(f.file.name, row);
         $list.appendChild(row);
       });
+    }
+    /** Phase 18 §30: AI タブの結果カードから。対象の一覧（PC / モバイル × JS / CSS）へ切り替えて、ファイル名の行を示す（選択はしない・書き込みなし） */
+    async function show({ target = 'desktop', kind = 'js', name = null } = {}) {
+      const src = srcOf(target, kind);
+      if ($sourceSel.value !== src) $sourceSel.value = src;
+      await refreshList();
+      const row = name ? rowsByName.get(name) || null : null;
+      if (row) {
+        row.style.outline = '2px solid #6a1b9a';
+        try { row.scrollIntoView?.({ block: 'nearest' }); } catch (e) { }
+        setTimeout(() => { row.style.outline = ''; }, 2500);
+      }
+      $meta.textContent = name ? (row ? `AI タブから: ${name}（${target === 'mobile' ? 'モバイル' : 'PC'}）` : `${name} は現在の一覧にありません（復元済み、または別の環境）`) : '';
+      return { found: !!row, src };
     }
 
     // === 保存+デプロイ（ワンボタン） ===
@@ -19759,12 +19197,6 @@
     // === 新規ファイル作成 ===
     $new.addEventListener('click', async () => {
       const src = $sourceSel.value;
-
-      if (src === 'snippets') {
-        alert('Snippets からは新規ファイルを作成できません。\n上部のセレクトで JavaScript / CSS を選択してください。');
-        return;
-      }
-
       const conf = SRC[src] || { kind: 'js', target: 'desktop' };
       const kindLabel = conf.target === 'mobile'
         ? (conf.kind === 'js' ? 'モバイル JS' : 'モバイル CSS')
@@ -19792,7 +19224,6 @@
       $meta.textContent = `新規: ${name} (${conf.target})`;
       $upload.disabled = false;   // すぐ保存＆デプロイできる
       $download.disabled = false; // ローカル保存も可能
-      $insert.disabled = true;
     });
 
     function openUploadDialog(defaultName, fileType) {
@@ -19905,6 +19336,7 @@
 
     // 初期
     await refreshList();
+    return { show, refresh: refreshList };
   }
 
 
@@ -21744,13 +21176,16 @@
       'fieldAcl',
     ]));
     // Phase 17: Customize タブ「AIに相談」→ AI タブで、そのファイルを対象にした会話を始める（ファイルを選び直させない）
+    // Phase 18: Customize は「登録済みコードを確認・解析する場所」、AI は「次に何をするか考え、作る場所」。Templates タブは廃止
+    root.ktCustomize = null;
     renderCustomize(root, DATA, appId, {
       consult: (seed) => { let r = null; try { r = root.ktAi?.consult?.(seed) ?? null; } catch (e) { console.error('[Toolkit AI] 相談の開始に失敗しました', e); } try { root.ktTabs?.switchTab?.('ai'); } catch (e) { } return r; },
       getInputs: () => ({ data: DATA, deps: DEPS, scan: KTScan.getLastPayload() }),
-    });
-    renderTemplates(root, DATA, appId);
-    // AI タブ（Phase 15: AI 開発ワークスペース。Templates にあった AI 関連機能の移行先）
+    }).then((c) => { root.ktCustomize = c || null; }).catch((e) => { console.error('[Toolkit] Customize タブの初期化に失敗しました', e); });
+    // AI タブ（Phase 15: AI 開発ワークスペース。旧 Templates にあった AI 関連機能の移行先）
     root.ktAi = renderAiWorkspace(root, DATA, appId, {
+      // Phase 18 §30: AI の結果カードから Customize タブで登録内容を確認する（登録済みの JS を一覧で選ぶ）
+      openCustomize: ({ target = 'desktop', kind = 'js', name = null } = {}) => { try { root.ktTabs?.switchTab?.('customize'); } catch (e) { } try { return root.ktCustomize?.show?.({ target, kind, name }) ?? null; } catch (e) { return null; } },
       // 呼び出し時点の最新の解析結果を渡す（Scanner / 他アプリ走査の結果は後から入る）
       getContextInputs: () => ({
         data: DATA,

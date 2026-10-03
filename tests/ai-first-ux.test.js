@@ -1,0 +1,335 @@
+// AI-first UX Refactoring（Phase 18）: Templates タブ廃止・Documents / AI Context の AI タブ統合・Customize の Snippets 廃止・
+// Pattern Library（Gateway）の表示・implementation（JAVASCRIPT / CSS / JS_CSS）・AI → Customize 導線・移行案内
+//
+// 検証内容:
+//   §36 Templates Removal: tab 不存在 / tab count / AI tab 正常 / Customize 正常 / 旧 Templates への参照なし / dead mount なし
+//   §37 Feature Migration: AI Prompt / Markdown / JSON（Context ペイン）・Documents（ドキュメントを作る・DOCUMENT intent・カード）・
+//        CSS / Snippet 資産（Toolkit には無い → Gateway の Pattern Library。応答の generated.patterns を表示・Audit）
+//   §38 Pattern 表示 / implementation / standard-first（Toolkit 側）
+//   §33 Migration Notice / §30 AI → Customize
+//
+// 実行方法: node tests/ai-first-ux.test.js
+'use strict';
+const fs = require('fs');
+const path = require('path');
+const { loadToolkit, makeAssert } = require('./helpers/load-toolkit.js');
+const { makeFakeHost, makeFakeDocument } = require('./helpers/fake-dom.js');
+const T = loadToolkit();
+const { KTDeps, KTScan, KTContext, KTContextUi, KTAiClient, KTAiConversation, KTAiChatUi, KTPlanReview, KTJsExecutor, mountAiWorkspace, renderCustomize } = T;
+const { assert, state } = makeAssert();
+const FX = require('./fixtures/ai-context-app.js');
+const { buildScanPayload } = require('./helpers/scan-payload.js');
+const { makeKintoneMock } = require('./helpers/kintone-preview-mock.js');
+const SRC_TEXT = fs.readFileSync(path.join(__dirname, '..', 'kintoneAppToolkit.user.js'), 'utf8');
+
+// ---- fixtures（ai-customization.test.js と同じ形。既存 JS fieldOnOff.js ＋ Hybrid の計画） ----
+const FIELD_ON_OFF = ["(function () {", "  'use strict';", "  kintone.events.on(['app.record.create.show', 'app.record.edit.show'], function (event) {", "    var record = event.record;", "    if (record['ステータス'].value === '承認待ち') {", "      record['amount'].disabled = true;", "    }", "    return event;", "  });", "})();"].join('\n');
+function buildInputs() {
+  const data = FX.makeData();
+  data.customize.desktop.js.push({ type: 'FILE', file: { contentType: 'text/javascript', fileKey: '20261003000000EEEE', name: 'fieldOnOff.js', size: '300' } });
+  const fieldsN = KTDeps.normalizeFields(data.fields);
+  const deps = KTDeps.buildDependencyData(data, fieldsN);
+  const files = [...FX.files, { name: 'fieldOnOff.js', target: 'desktop', kind: 'js', text: FIELD_ON_OFF }];
+  const fieldRows = fieldsN.map(f => ({ code: f.code, label: f.label, type: f.rawType }));
+  const scan = buildScanPayload({ KTScan, KTDeps }, { appId: FX.SELF_APP, files, fields: fieldRows, deps, skippedUrlFiles: FX.skippedUrlFiles });
+  scan.results = KTScan.analyze({ fields: fieldRows, files: files.filter(f => f.kind === 'js'), snippet: { before: 24, after: 48 } });
+  KTDeps.mergeScannerEdges(deps, scan);
+  KTDeps.applyIncomingRefs(deps, FX.incoming);
+  return { data, deps, scan, incoming: FX.incoming };
+}
+const INPUTS = buildInputs();
+const GOAL_HYBRID = '100万円以上なら部長承認にして、承認後は金額を編集できなくしたい';
+const spec = (o) => ({ name: null, from: null, to: null, filterCond: null, assignees: [], targets: [], events: [], timingField: null, daysLater: null, time: null, fields: [], sort: null, sourceApp: null, keyField: null, mappings: [], fieldType: null, required: null, options: [], destApp: null, accessibility: null, entities: [], customizationId: null, ...o });
+const mkStep = (id, actionType, targetKind, targetRef, sp, extra = {}) => ({ id, actionType, targetKind, targetRef, targetExists: null, title: `${id} ${actionType}`, proposal: { summary: '', details: [] }, spec: spec(sp), dependsOn: [], reason: '', evidenceIds: [], confidence: 'INFERRED', alternativeId: null, validation: { status: 'ok', issues: [] }, execution: { mode: 'PLAN_ONLY', supported: false, reason: 'x' }, ...extra });
+const META = { requestId: 'pl-h1', gateway: { product: 'toolkit', feature: 'change-planner', promptVersion: '1', contextVersion: 'planner-1' }, normalization: { warnings: [] }, ai: { model: 'm' }, usage: { usedThisMonth: 1, monthlyLimit: 20 } };
+const cust = (o = {}) => ({ customizationId: 'C1', requirement: '承認後（完了）は金額を編集できなくする', whyStandardInsufficient: 'フィールドのアクセス権はステータスで切り替えられない', strategy: 'EXTEND_EXISTING_JS', platform: ['desktop'], events: ['app.record.edit.show'], fields: [{ code: 'amount', access: 'CONTROL' }], apis: [], existingFiles: [{ name: 'fieldOnOff.js', target: 'desktop', reason: '同じフィールド（金額）を制御している' }], risks: [], questions: [], dependsOn: [], evidenceIds: [], ...o });
+const STD_STEP = () => mkStep('P1', 'ADD_VIEW', 'VIEW', '承認済み', { name: '承認済み', fields: ['case_name', 'amount', 'approver'], filterCond: 'ステータス in ("完了")', sort: 'due_date asc' }, { title: '一覧「承認済み」を追加', solution: 'STANDARD' });
+const JS_STEP = (cid = 'C1', extra = {}) => mkStep('P2', 'CUSTOMIZATION_REQUIRED', 'JS', 'fieldOnOff.js', { customizationId: cid }, { title: '承認後は金額を編集できなくする（JavaScript）', solution: 'CUSTOMIZATION', ...extra });
+const planOf = ({ steps, customizations = [], solution = null, goal = GOAL_HYBRID, questions = [], requestId = 'pl-h1' }) => ({ ok: true, contractVersion: '2.1', meta: { ...META, requestId }, plan: { goal, ...(solution ? { solution } : {}), assessment: { summary: '承認フローは標準のプロセス管理、承認後のロックは JavaScript が必要です。', usableExistingFields: [], usableExistingSettings: [], missingCapabilities: [], uncertainties: [] }, relevantFields: [], proposedFields: [], steps, customizations, alternatives: [], impact: [], questions, unknowns: [], planConfidence: 'INFERRED' } });
+const PLAN_HYBRID = planOf({ steps: [STD_STEP(), JS_STEP()], customizations: [cust()], solution: 'HYBRID' });
+const hash = (t) => KTScan.hashText(t);
+const PATCH_GOOD = { baseHash: hash(FIELD_ON_OFF), operations: [{ type: 'INSERT_AFTER', anchor: "      record['amount'].disabled = true;\n    }", content: "    if (record['ステータス'].value === '完了') {\n      record['amount'].disabled = true;\n    }" }] };
+const PATTERNS = [{ id: 'field-disable', purpose: '条件に応じてフィールドの編集可否を制御する', implementation: 'JAVASCRIPT', preferredStandardAlternatives: ['フィールドのアクセス権', 'プロセス管理の「作業者だけ編集可」'], matched: { triggers: ['編集(不可|でき|させ|制限|ロック)'], events: ['app.record.edit.show'], fieldAccess: ['CONTROL'], apis: [] }, score: 7 }];
+const genResponse = (ctx, g) => ({ ok: true, contractVersion: '2.1', meta: { requestId: 'gen-1', usage: { usedThisMonth: 3, monthlyLimit: 20 }, normalization: { warnings: [] }, gateway: { feature: 'customization-generator' }, patternLibrary: { version: '1', selected: ['field-disable'] } }, generated: { strategy: ctx.customization.strategy, targetFile: ctx.existingFile?.name || 'amountWarning.js', summary: ctx.customization.requirement, events: ctx.customization.events, fields: ctx.customization.fields, apis: [], assumptions: [], warnings: [], gatewayChecks: { security: [] }, patterns: PATTERNS, ...g } });
+const genPatch = (patch = PATCH_GOOD) => ({ strategy: 'EXTEND_EXISTING_JS', targetFile: 'fieldOnOff.js', summary: '完了でも金額を編集不可にする', code: patch.operations.map(o => o.content).join('\n'), patch, events: ['app.record.edit.show'], fields: [{ code: 'amount', access: 'CONTROL' }], apis: [], assumptions: [], warnings: [] });
+const HEALTH = { ok: true, supportedContractVersions: ['2.0', '2.1'], entitlements: [{ product: 'toolkit', features: ['assistant-qa', 'change-planner', 'customization-generator'] }], registry: { toolkit: { 'assistant-qa': { implemented: true, promptVersions: ['1'] }, 'change-planner': { implemented: true, promptVersions: ['1'] }, 'customization-generator': { implemented: true, promptVersions: ['1'] } } }, usage: { monthlyLimit: 20, usedThisMonth: 1 } };
+const makeStorage = () => { const m = new Map(); return { getItem: (k) => (m.has(k) ? m.get(k) : null), setItem: (k, v) => m.set(k, String(v)), removeItem: (k) => m.delete(k) }; };
+const answerFor = (ctx, text) => ({ ok: true, contractVersion: '2.1', meta: { requestId: 'qa-1', usage: { usedThisMonth: 2, monthlyLimit: 20 }, normalization: { warnings: [] } }, answer: text, facts: [], analysis: [], recommendations: [], unknowns: [] });
+const tick = () => new Promise(r => setTimeout(r, 0));
+const ticks = async (n = 4) => { for (let i = 0; i < n; i++) await tick(); };
+function mount({ inputs = INPUTS, paid = true, planResponse = PLAN_HYBRID, openCustomize = undefined } = {}) {
+  const storage = makeStorage();
+  const settings = KTAiClient.createSettingsStore({ storage, host: 't.cybozu.com' });
+  settings.setConsent(true);
+  const calls = { ask: [], plan: [], generate: [], health: 0 };
+  const client = {
+    async getHealth() { calls.health++; return HEALTH; },
+    async ask({ ctx, requestId, signal }) { calls.ask.push({ ctx }); const v = KTAiClient.validateAnswer(answerFor(ctx, 'このフィールドは金額です。'), ctx); return { ...v.normalized, requestId, clientWarnings: v.warnings }; },
+    async plan({ ctx, requestId }) { calls.plan.push({ ctx }); const v = KTAiClient.validatePlan(planResponse, ctx); return { ...v.normalized, requestId, clientWarnings: v.warnings }; },
+    async generate({ ctx, requestId }) { calls.generate.push({ ctx }); const v = KTAiClient.validateGenerated(genResponse(ctx, genPatch({ ...PATCH_GOOD, baseHash: ctx.existingFile?.hash || PATCH_GOOD.baseHash })), ctx); if (!v.ok) throw new Error(v.errors[0].message); return { ...v.normalized, requestId, clientWarnings: v.warnings }; },
+  };
+  const session = { status() { return { connected: true, apiBase: 'https://gw.test', refreshExpiresAt: '2099-01-01T00:00:00Z', scope: { product: 'toolkit', feature: 'assistant-qa,change-planner,customization-generator', domain: 't.cybozu.com' } }; }, async migrateLegacy() { return false; }, async refresh() { return {}; }, async disconnect() { return { revoked: true }; }, client };
+  const flow = { start: async () => ({}), cancel() { }, reopen: () => false, state: () => ({ phase: 'idle' }), isRunning: () => false };
+  const host = makeFakeHost();
+  const copies = [], downloads = [], opened = [];
+  const mock = makeKintoneMock(inputs.data, { jsSources: [{ name: 'fieldOnOff.js', target: 'desktop', text: FIELD_ON_OFF }] });
+  const panel = mountAiWorkspace(host, {
+    getInputs: () => inputs, copyText: async (t) => { copies.push(t); return true; }, downloadText: (name, text) => downloads.push({ name, text }), colors: { border: '#ccc', bg: '#fff' },
+    ...(paid ? { settings, session, hostname: 't.cybozu.com', connectFlow: flow } : {}),
+    executor: { api: mock.api, appId: '310' },
+    openCustomize: openCustomize === undefined ? (x) => { opened.push(x); return { found: true }; } : openCustomize,
+  });
+  const $ = (id) => host.querySelector(`#${id}`);
+  return { host, panel, $, calls, copies, downloads, opened, mock, conv: () => panel.conversation(), chat: () => $('kt-ai-chat').innerHTML, msgs: () => panel.conversation().state.messages, types: () => panel.conversation().state.messages.map(m => m.type) };
+}
+const clickChat = (m, act, extra = {}) => m.$('kt-ai-chat').dispatch({ type: 'click', target: { dataset: { act, ...extra } } });
+const confirmSpec = async (m) => { const v = m.conv().activePlan(); if (v?.spec) await clickChat(m, 'confirm-spec', { plan: v.planId, version: String(v.version) }); };
+const writes = (m) => m.mock.calls.filter(c => !c.startsWith('GET'));
+
+/** Customize タブの mount 用: Monaco とドキュメントの最小スタブ */
+function fakeMonacoWindow(sandboxDoc) {
+  const editor = { value: '', setValue(v) { this.value = v; }, getValue() { return this.value; }, getModel() { return {}; }, focus() { }, getSelection() { return null; } };
+  const monaco = { editor: { create: () => editor, setModelLanguage: () => { } }, languages: { registerCompletionItemProvider: () => { monaco._completions = (monaco._completions || 0) + 1; }, CompletionItemKind: { Field: 1, Snippet: 2 } }, Range: function () { } };
+  return { editor, monaco };
+}
+
+(async () => {
+// =========================================================
+console.log('\n--- §36. Templates Removal: タブ構成 / 参照なし / dead mount なし ---');
+{
+  const { doc, byId } = makeFakeDocument();
+  const T2 = loadToolkit({ document: doc });
+  const wrap = T2.mountRoot();
+  const TABS = wrap.ktTabs.TABS;
+  assert(!TABS.includes('templates') && !byId.has('tab-templates') && !byId.has('view-templates') && !wrap.innerHTML.includes('>Templates</button>'), 'Templates タブ（ボタン / view / TABS）が無い');
+  assert(TABS.length === 12 && TABS.join(',') === 'health,fields,views,graphs,relations,deps,notice,acl,customize,field-scanner,plugins,ai', `tab count 12・順序（Fact の解析タブ → Customize → Field Scanner → Plugins → AI）: ${TABS.join(',')}`);
+  assert(TABS.every(id => byId.has(`tab-${id}`) && byId.has(`view-${id}`)), '全タブにボタンと view がある（dead なタブ無し）');
+  const tabAi = byId.get('tab-ai'), viewAi = byId.get('view-ai');
+  await tabAi.dispatch('click');
+  assert(viewAi.style.display === 'block' && tabAi.classList.contains('active'), 'AI タブ正常（切り替え）');
+  await byId.get('tab-customize').dispatch('click');
+  assert(byId.get('view-customize').style.display === 'block' && viewAi.style.display === 'none' && byId.get('view-customize').classList.contains('kt-fill-view'), 'Customize タブ正常（切り替え・高さ追従）');
+  // 旧 Templates への参照（コード）が無い
+  const refs = ['renderTemplates', 'kt-template-', '#view-templates', 'tab-templates', 'kintone-Customize-template', 'api.github.com', 'KINTONE_TEMPLATE', 'buildRequirementsPromptFromEditor', 'async function initEditor', 'monacoEditorResizeCleanup', 'kt_tpl_cache', 'loadSnippets', 'kt-customize-insert', 'Snippet Overview'];
+  const found = refs.filter(r => SRC_TEXT.includes(r));
+  assert(found.length === 0, `旧 Templates / GitHub Snippets への参照がソースに無い${found.length ? `（残: ${found.join(', ')}）` : ''}`);
+  assert(!/async function uploadOnce\(/.test(SRC_TEXT), 'Templates だけが使っていた uploadOnce ラッパは無い（Customize は KTApi.uploadFile）');
+  assert(/function buildDocPayloadLiteFromPrefetch\(/.test(SRC_TEXT) && /buildDocPayloadLiteFromPrefetch\(\{ \.\.\.\(data/.test(SRC_TEXT), 'Documents 由来の Common Context Model（buildDocPayloadLiteFromPrefetch）は KTContext が使うので残す');
+  assert(/function registerFieldCompletions\(/.test(SRC_TEXT) && /registerFieldCompletions\(monaco, DATA\?\.fields\)/.test(SRC_TEXT), 'フィールド補完（registerFieldCompletions）は Customize のエディタへ移動');
+  assert(!/renderTemplates\(root/.test(SRC_TEXT) && /renderCustomize\(root, DATA, appId, \{/.test(SRC_TEXT) && /root\.ktCustomize = c/.test(SRC_TEXT), 'boot: renderTemplates の mount 無し・renderCustomize の戻り（show）を root.ktCustomize に保持');
+}
+
+// =========================================================
+console.log('\n--- §36b. Customize 正常（Snippets 無し・［AIに相談］・show()） ---');
+{
+  const { doc, byId } = makeFakeDocument();
+  const { monaco } = fakeMonacoWindow(doc);
+  const T2 = loadToolkit({ document: doc });
+  // renderCustomize は root.querySelector('#view-customize') と loadMonaco（window.loadMonaco）を使う
+  const wrap = T2.mountRoot();
+  const g = T2.__sandbox;   // vm の global（window）。Customize は window.loadMonaco / kintone.api / fetch を使う
+  g.loadMonaco = async () => monaco;
+  const data = INPUTS.data;
+  let consulted = null;
+  const api = makeKintoneMock(data, { jsSources: [{ name: 'fieldOnOff.js', target: 'desktop', text: FIELD_ON_OFF }] }).api;
+  // KTApi は kintone.api を直接呼ぶので、mock のカスタマイズ設定を kintone.api に見せる（preview / production とも同じ内容）
+  const kapi = async (url, method, body) => { if (/app\/customize\.json/.test(url) && method === 'GET') return api.getPreviewCustomize(body); throw new Error(`unexpected ${method} ${url}`); };
+  kapi.url = (p) => p;
+  g.kintone = { api: kapi, getRequestToken: () => 'tok' };
+  g.fetch = async () => ({ ok: true, status: 200, text: async () => FIELD_ON_OFF });
+  const c = await T2.renderCustomize(wrap, data, '310', { consult: (seed) => { consulted = seed; return { ok: true }; }, getInputs: () => INPUTS });
+  const sel = byId.get('kt-customize-source');
+  const selHtml = (/<select id="kt-customize-source"[\s\S]*?<\/select>/.exec(byId.get('view-customize').innerHTML) || [''])[0];
+  assert(sel && [...selHtml.matchAll(/<option value="([^"]+)"/g)].map(m => m[1]).join(',') === 'JavaScript,css,JavaScriptMobile,cssMobile', 'Customize の一覧の種類は JS / CSS × PC / モバイルだけ（GitHub Snippets は無い）');
+  assert(!byId.has('kt-customize-insert') && byId.has('kt-customize-refresh') && byId.has('kt-customize-env'), '［挿入］ボタンは無い。一覧更新と環境差分の表示はある');
+  assert(c && typeof c.show === 'function' && typeof c.refresh === 'function', 'renderCustomize は { show, refresh } を返す（AI → Customize 導線用）');
+  assert(doc.head.children.some(el => el.id === 'kt-customize-inline-style' && /\.btn \{/.test(el.textContent)), 'ダイアログ用の .btn 共通 style は Customize が 1 回だけ付ける（旧 Templates から移管）');
+  assert(monaco._completions === 1, 'フィールド補完は Customize のエディタに 1 回登録');
+  const list = byId.get('kt-customize-list');
+  const rows = list.children;
+  assert(rows.length >= 1 && rows.some(r => /fieldOnOff\.js/.test(r.innerHTML)) && rows.every(r => r.children.some(b => b.className.includes('kt-customize-consult'))), 'JS 一覧: 登録済みファイル（fieldOnOff.js）の行に［AIに相談］');
+  const r = await c.show({ target: 'desktop', kind: 'js', name: 'fieldOnOff.js' });
+  assert(r && r.found === true && r.src === 'JavaScript' && /AI タブから: fieldOnOff\.js（PC）/.test(byId.get('kt-customize-meta').textContent), 'show({ desktop, js, fieldOnOff.js }): 一覧を切り替えて該当行を示す（書き込みなし）');
+  const r2 = await c.show({ target: 'mobile', kind: 'js', name: 'nope.js' });
+  assert(r2.found === false && sel.value === 'JavaScriptMobile' && /現在の一覧にありません/.test(byId.get('kt-customize-meta').textContent), 'show: 無いファイルは found false（モバイルの一覧に切り替わる）');
+  // ［AIに相談］→ consult（seed）
+  const consultBtn = rows.find(r => /fieldOnOff\.js/.test(r.innerHTML)).children.find(b => b.className.includes('kt-customize-consult'));
+  await consultBtn.dispatch('click', { stopPropagation() { }, preventDefault() { } });
+  assert(consulted && consulted.name === 'fieldOnOff.js' && consulted.platform === 'desktop' && consulted.source?.available === true, '［AIに相談］→ JsConsultationSeed（本文あり）を AI へ');
+}
+
+// =========================================================
+console.log('\n--- §33. Migration Notice（初回だけ・閉じると保存） ---');
+{
+  const { doc, byId } = makeFakeDocument();
+  const store = makeStorage();
+  const T2 = loadToolkit({ document: doc, localStorage: store });
+  const wrap = T2.mountRoot();
+  const n = byId.get('kt-migration-notice');
+  assert(n && n.classList.contains('is-shown') && /Templates タブの機能は/.test(wrap.innerHTML) && /<b>AI<\/b>/.test(wrap.innerHTML) && /<b>Customize<\/b>/.test(wrap.innerHTML), '初回: 案内（Templates の機能は AI / Customize へ移動）が表示される');
+  assert(/#kt-toolkit\.is-mini #kt-migration-notice\{ display:none !important; \}/.test(wrap.innerHTML), '最小化中は案内も隠れる（CSS）');
+  await byId.get('kt-migration-close').dispatch('click');
+  assert(!n.classList.contains('is-shown') && store.getItem('ktTemplatesMovedNotice.v1') === '1', '× で閉じる → 非表示・localStorage に保存');
+  const { doc: doc2, byId: byId2 } = makeFakeDocument();
+  const T3 = loadToolkit({ document: doc2, localStorage: store });
+  T3.mountRoot();
+  assert(!byId2.get('kt-migration-notice').classList.contains('is-shown'), '2 回目以降: 表示しない（永続バナーにしない）');
+}
+
+// =========================================================
+console.log('\n--- §37. Feature Migration: AI Prompt / Markdown / JSON / Documents（Context ペイン・無料） ---');
+{
+  const f = mount({ paid: false });
+  await ticks();
+  const html = f.host.innerHTML;
+  for (const id of ['kt-ai-copy-prompt', 'kt-ai-copy-md', 'kt-ai-copy-json', 'kt-ai-mode-qa', 'kt-ai-mode-plan', 'kt-ai-mode-doc', 'kt-ai-doc-kind', 'kt-ai-download']) assert(html.includes(`id="${id}"`), `Context ペインに ${id}`);
+  const kinds = [...((/<select id="kt-ai-doc-kind"[\s\S]*?<\/select>/.exec(html) || [''])[0]).matchAll(/<option value="([^"]+)"/g)].map(m => m[1]);
+  assert(kinds.join(',') === 'spec,requirements,review-request,changes,handover,plain,improvement', `ドキュメントの種類 7 件: ${kinds.join(',')}`);
+  assert(/ドキュメント（仕様書・要件定義・レビュー依頼・引継ぎ資料・変更内容のまとめの Prompt \/ Markdown）/.test(f.$('kt-ai-free').innerHTML), '無料パネルにドキュメントが載る（Templates 廃止で無料機能が失われない）');
+  // 無料（未接続）でもドキュメントを作れる
+  f.panel.setMode('doc', { kind: 'spec' });
+  f.$('kt-ai-generate').dispatch('click');
+  await ticks();
+  assert(f.$('kt-ai-generate').textContent === 'ドキュメント Prompt を生成' && f.$('kt-ai-doc-inputs').style.display === 'flex' && f.$('kt-ai-qa-inputs').style.display === 'none', 'ドキュメントモード: 入力欄とボタン名');
+  const out = f.panel.currentOutput();
+  assert(out && /あなたは kintone の設計者です/.test(out.text) && /## 出力の構成/.test(out.text) && /1\. 基本情報/.test(out.text) && /## Context/.test(out.text) && /AI Context/.test(out.text), 'アプリ仕様書の Prompt: 役割・規則・構成（旧 documents の見出し）＋ Context（Toolkit の解析結果）');
+  assert(out.filename === 'ai-document_spec_app310_prompt.md', `保存ファイル名: ${out.filename}`);
+  f.$('kt-ai-view').value = 'markdown'; f.$('kt-ai-view').dispatch('change');
+  assert(/# アプリ仕様書（現状整理）（ドラフトの骨格）/.test(f.panel.currentOutput().text) && /## フィールド構成/.test(f.panel.currentOutput().text) && /— AI Context/.test(f.panel.currentOutput().text), 'Markdown: 構成の骨格 ＋ Context');
+  f.$('kt-ai-view').value = 'json'; f.$('kt-ai-view').dispatch('change');
+  assert(JSON.parse(f.panel.currentOutput().text).contextVersion === '1', 'JSON: Context');
+  assert(f.calls.ask.length === 0 && f.calls.plan.length === 0, 'ドキュメントの生成で AI（Gateway）は呼ばない');
+  // 種類を変えると作り直す / changes は計画が無いと作れない
+  f.$('kt-ai-doc-kind').value = 'changes'; f.$('kt-ai-doc-kind').dispatch('change');
+  await ticks();
+  assert(/まとめる変更計画がありません/.test(f.$('kt-ai-status').textContent), '「変更内容のまとめ」は計画が無いと作れない（案内）');
+  for (const k of ['requirements', 'review-request', 'handover', 'plain', 'improvement']) {
+    const g = KTContextUi.generateDocument({ kind: k, inputs: INPUTS });
+    const kd = KTContextUi.documentKind(k);
+    assert(g.ok && g.kind === k && g.outputs.prompt.includes(kd.role) && kd.outline.every(o => g.outputs.prompt.includes(o)) && g.outputs.prompt.includes('## Context') && g.outputs.markdown.includes(`# ${kd.label}`), `generateDocument(${k}): 役割・構成・Context`);
+  }
+  assert(KTContextUi.generateDocument({ kind: 'spec', inputs: null }).ok === false, 'データが無ければ no-data');
+}
+
+// =========================================================
+console.log('\n--- §37b. DOCUMENT intent（チャット）: LLM を使わずカード・コピー・Context ペインで開く ---');
+{
+  const I = KTAiConversation.INTENT;
+  const cls = (t, st = {}) => KTAiConversation.classifyIntent(t, st);
+  const v1 = { planId: 'p1', version: 1, status: 'ACTIVE', plan: PLAN_HYBRID.plan, review: { steps: [] } };
+  assert(cls('このアプリの仕様書を作って').intent === I.DOCUMENT && cls('このアプリの仕様書を作って').documentKind === 'spec', '「このアプリの仕様書を作って」→ DOCUMENT(spec)');
+  assert(cls('引継ぎ資料を作って').documentKind === 'handover' && cls('要件定義書のドラフトを出して').documentKind === 'requirements' && cls('開発のレビュー依頼を書いて').documentKind === 'review-request' && cls('改善提案をまとめて').documentKind === 'improvement', '種類の判定: 引継ぎ / 要件定義 / レビュー依頼 / 改善提案');
+  assert(cls('非エンジニア向けに説明して').intent === I.DOCUMENT && cls('非エンジニア向けに説明して').documentKind === 'plain' && cls('現場の人にもわかるように説明して').documentKind === 'plain', '「非エンジニア向けに説明して」→ DOCUMENT(plain)');
+  assert(cls('この改修内容をまとめて', { activePlan: v1 }).documentKind === 'changes' && cls('変更内容を Markdown にして', { activePlan: v1 }).documentKind === 'changes', '計画があるとき「改修内容をまとめて」→ changes');
+  assert(cls('この改修内容をまとめて').documentKind === 'spec', '計画が無いとき「改修内容をまとめて」→ spec に落とす');
+  assert(cls('この計画を説明して', { activePlan: v1 }).intent === I.EXPLAIN_PLAN && cls('コードを作って', { activePlan: { ...v1, spec: { status: 'CONFIRMED', version: 1 } } }).intent === I.GENERATE_CODE && cls('このフィールドは何に使ってる？').intent === I.ASK && cls('100万円以上なら部長承認を追加したい').intent === I.PLAN, 'DOCUMENT は文書の名詞 ＋ 依頼の語だけ（計画の説明 / コード生成 / 質問 / 計画は従来どおり）');
+  assert(KTContextUi.detectDocumentKind('仕様書') === null && KTContextUi.detectDocumentKind('資料はどこ？') === null, '名詞だけ・質問は DOCUMENT ではない');
+  // チャット
+  const m = mount();
+  await ticks();
+  const r = await m.panel.send('このアプリの仕様書を作って');
+  assert(r && r.ok && r.intent === I.DOCUMENT && m.calls.ask.length === 0 && m.calls.plan.length === 0 && m.calls.generate.length === 0, 'チャットの DOCUMENT: Gateway を呼ばない（無料）');
+  const dm = m.msgs().find(x => x.type === 'DOCUMENT');
+  assert(dm && dm.data.kind === 'spec' && dm.data.outputs.prompt.includes('## Context') && /kt-ai-document-card/.test(m.chat()) && /無料・AI 送信なし/.test(m.chat()) && /data-act="copy-doc"/.test(m.chat()) && /data-act="open-doc-context"/.test(m.chat()), 'DOCUMENT カード: 種類・Prompt / Markdown / JSON のコピー・Context ペインで開く');
+  await clickChat(m, 'copy-doc', { mid: dm.id, key: 'prompt' });
+  assert(m.copies.length === 1 && m.copies[0] === dm.data.outputs.prompt, '［Prompt をコピー］');
+  await clickChat(m, 'copy-doc', { mid: dm.id, key: 'markdown' });
+  assert(m.copies.length === 2 && m.copies[1] === dm.data.outputs.markdown, '［Markdown をコピー］');
+  assert(m.panel.mode() === 'doc' && m.$('kt-ai-doc-kind').value === 'spec' && m.panel.currentOutput()?.text === dm.data.outputs.prompt, 'Context ペインも同じ結果（モード doc・種類 spec・保存できる）');
+  await clickChat(m, 'open-doc-context', { kind: 'handover' });
+  assert(m.panel.drawerState().pane === 'context' && m.$('kt-ai-doc-kind').value === 'handover' && /引継ぎ資料/.test(m.panel.currentOutput().text), '［Context ペインで開く］: ペインを開き、その種類で作り直す');
+  // 計画 → 変更内容のまとめ（Toolkit の記録）
+  await m.panel.send(GOAL_HYBRID); await ticks();
+  await confirmSpec(m);
+  await m.panel.send('コードを作って'); await ticks();
+  const r2 = await m.panel.send('この改修内容をまとめて');
+  const dm2 = m.msgs().filter(x => x.type === 'DOCUMENT').pop();
+  assert(r2.ok && dm2.data.kind === 'changes' && /# 変更内容のまとめ — 計画 v1/.test(dm2.data.outputs.markdown) && /\| P1 \| 一覧「承認済み」を追加 \| ADD_VIEW \| 標準設定 \|/.test(dm2.data.outputs.markdown) && /\*\*C1\*\* 承認後（完了）は金額を編集できなくする（既存 fieldOnOff\.js を変更・PC・JavaScript）/.test(dm2.data.outputs.markdown) && /生成コード: fieldOnOff\.js（Toolkit Code Review: OK・参考パターン field-disable）/.test(dm2.data.outputs.markdown) && /運用環境には反映していません/.test(dm2.data.outputs.markdown), '「この改修内容をまとめて」: 計画 v1 の手順表・JS カスタマイズ・生成コード（Code Review・参考パターン）・運用環境は未反映');
+  assert(/## 変更計画（Toolkit の記録）/.test(dm2.data.outputs.prompt) && /改修記録を書くエンジニア/.test(dm2.data.outputs.prompt) && JSON.parse(dm2.data.outputs.json).plan.goal === GOAL_HYBRID, 'changes の Prompt は記録 ＋ Context、JSON は計画（compact）＋ Context');
+  assert(writes(m).length === 0, 'ドキュメントで kintone への書き込みは 0 件');
+}
+
+// =========================================================
+console.log('\n--- §38. Pattern Library（Gateway の generated.patterns）: 表示 / Audit / Standard-first の再確認 ---');
+{
+  const m = mount();
+  await ticks();
+  await m.panel.send(GOAL_HYBRID); await ticks();
+  await confirmSpec(m);
+  const g = await m.panel.send('コードを作って'); await ticks();
+  assert(g.ok && m.calls.generate.length === 1, 'コード生成（Gateway が patterns を返す）');
+  const entry = m.panel.generated('C1');
+  assert(entry && Array.isArray(entry.generated.patterns) && entry.generated.patterns[0].id === 'field-disable' && entry.generated.patterns[0].preferredStandardAlternatives.length === 2 && !('implementationNotes' in entry.generated.patterns[0]), 'validateGenerated: patterns（id / purpose / implementation / preferredStandardAlternatives）を通す。知識本体は無い');
+  assert(/参考パターン: <span class="kt-ai-pattern" title="条件に応じてフィールドの編集可否を制御する">field-disable<\/span>/.test(m.chat()) && /標準設定で代替できないか再確認: フィールドのアクセス権 \/ プロセス管理の「作業者だけ編集可」/.test(m.chat()), 'コードカード: 参考パターンと「標準設定で代替できないか再確認」（人間への standard-first の再確認）');
+  const noPat = KTAiClient.validateGenerated({ ok: true, contractVersion: '2.1', meta: {}, generated: { strategy: 'NEW_JS_FILE', code: 'x', patterns: 'bad' } }, { customization: { strategy: 'NEW_JS_FILE' } });
+  assert(noPat.ok && Array.isArray(noPat.normalized.patterns) && noPat.normalized.patterns.length === 0, 'patterns が無い / 不正でも空配列（表示なし）');
+  assert(!/参考パターン/.test(KTAiChatUi.messageHtml({ id: 'x', type: 'CODE', role: 'toolkit', text: 'JavaScript', data: { planId: 'p', version: 1, customizationId: 'C1' } }, { plans: new Map([['p:1', { planId: 'p', version: 1, plan: PLAN_HYBRID.plan, generated: { C1: { generated: { ...genPatch(), patterns: [] }, review: entry.review } } }]]) })), 'patterns が空なら参考パターンの行は出ない');
+  // Audit に patterns
+  const audit = KTJsExecutor.buildAudit({ generated: [{ customizationId: 'C1', generated: entry.generated, review: entry.review, existingSource: entry.existingSource }] });
+  assert(audit.generated[0].patterns.length === 1 && audit.generated[0].patterns[0] === 'field-disable', 'Customization Audit の generated に patterns（id だけ）');
+  assert(!SRC_TEXT.includes('implementationNotes:') && !SRC_TEXT.includes('pitfalls:'), 'Toolkit（公開 MIT）には Pattern の知識本体（implementationNotes / pitfalls）を持たない（Gateway 側）');
+}
+
+// =========================================================
+console.log('\n--- §38b. implementation（JAVASCRIPT / CSS / JS_CSS）: validatePlan の既定・Review・表示 ---');
+{
+  const gen = KTContextUi.generatePlan({ goal: GOAL_HYBRID, inputs: INPUTS });
+  const v = KTAiClient.validatePlan(PLAN_HYBRID, gen.ctx);
+  assert(v.ok && v.normalized.customizations[0].implementation === 'JAVASCRIPT', 'implementation 省略 → JAVASCRIPT（Gateway validate-plan と同じ既定）');
+  const vc = KTAiClient.validatePlan(planOf({ steps: [STD_STEP(), JS_STEP()], customizations: [cust({ implementation: 'CSS', events: [], fields: [] })], solution: 'HYBRID' }), gen.ctx);
+  assert(vc.normalized.customizations[0].implementation === 'CSS' && KTAiClient.validatePlan(planOf({ steps: [JS_STEP()], customizations: [cust({ implementation: 'SASS' })] }), gen.ctx).normalized.customizations[0].implementation === 'JAVASCRIPT', 'CSS はそのまま・語彙外は JAVASCRIPT');
+  const reviewOf = (c) => { const p = { ...KTAiClient.validatePlan(planOf({ steps: [STD_STEP(), JS_STEP()], customizations: [c], solution: 'HYBRID' }), gen.ctx).normalized, requestId: 'x' }; const rv = KTPlanReview.review({ plan: p, ...INPUTS }); return { plan: p, review: rv, js: (rv.steps || []).find(r => r.solution === 'CUSTOMIZATION') }; };
+  const css = reviewOf(cust({ implementation: 'CSS', events: [], fields: [], strategy: 'NEW_JS_FILE', existingFiles: [] }));
+  assert(css.js.codeGeneration.supported === false && css.js.codeGeneration.reason === 'CSS_NOT_GENERATED' && css.js.codeGeneration.implementation === 'CSS' && css.js.issues.some(i => i.code === 'JS_CSS_ONLY') && !css.js.issues.some(i => i.code === 'JS_EVENT_MISSING') && css.js.status !== 'INVALID', 'implementation CSS: 生成不可（CSS_NOT_GENERATED）・イベント無しでも要確認にしない・計画には残る');
+  const jscss = reviewOf(cust({ implementation: 'JS_CSS' }));
+  assert(jscss.js.codeGeneration.supported === true && jscss.js.codeGeneration.implementation === 'JS_CSS' && jscss.js.issues.some(i => i.code === 'JS_CSS_PART_MANUAL' && i.severity === 'low'), 'implementation JS_CSS: JavaScript 部分は生成可（CSS は手動の注記）');
+  const plain = reviewOf(cust());
+  assert(plain.js.codeGeneration.supported === true && plain.js.codeGeneration.implementation === 'JAVASCRIPT' && !plain.js.issues.some(i => /^JS_CSS/.test(i.code)), 'implementation JAVASCRIPT: 従来どおり');
+  const cardCss = KTAiChatUi.messageHtml({ id: 'x', type: 'PLAN', role: 'toolkit', text: '', data: { planId: 'p', version: 1 } }, { plans: new Map([['p:1', { planId: 'p', version: 1, status: 'ACTIVE', goal: GOAL_HYBRID, plan: css.plan, review: css.review }]]) });
+  assert(/実装<\/span><span>CSS（見た目だけ・生成対象外）/.test(cardCss) && /生成不可/.test(cardCss), 'Customization Card: 実装 CSS（見た目だけ・生成対象外）・生成不可');
+  const cardJs = KTAiChatUi.messageHtml({ id: 'x', type: 'PLAN', role: 'toolkit', text: '', data: { planId: 'p', version: 1 } }, { plans: new Map([['p:1', { planId: 'p', version: 1, status: 'ACTIVE', goal: GOAL_HYBRID, plan: plain.plan, review: plain.review }]]) });
+  assert(!/実装<\/span>/.test(cardJs), 'JAVASCRIPT のときは実装の行を出さない（既定）');
+}
+
+// =========================================================
+console.log('\n--- §30. AI → Customize（結果カード / コードペインの「Customize で確認」） ---');
+{
+  const m = mount();
+  await ticks();
+  await m.panel.send(GOAL_HYBRID); await ticks();
+  await confirmSpec(m);
+  await m.panel.send('コードを作って'); await ticks();
+  const v = m.conv().activePlan();
+  await m.panel.startJsRegister(v); await ticks();
+  assert(m.panel.jsExecState().stage === 'confirm', '登録の確認');
+  await m.panel.confirmJsRegister(); await ticks(8);
+  const jx = m.panel.jsExecState();
+  assert(jx.stage === 'done' && jx.execution.status === 'DONE', `登録 → DONE（${jx.stage} / ${jx.execution?.status}）`);
+  assert(/data-act="open-customize" data-target="desktop" data-name="fieldOnOff\.js"/.test(m.chat()) && /Customize で確認/.test(m.chat()), 'JS 登録カードに［Customize で確認］（登録したファイルの platform と名前）');
+  assert(/id="kt-ai-jsreg-open-customize"/.test(m.$('kt-ai-jsreg').innerHTML), 'コードペインの結果にも［Customize で確認］');
+  await clickChat(m, 'open-customize', { target: 'desktop', name: 'fieldOnOff.js' });
+  assert(m.opened.length === 1 && m.opened[0].target === 'desktop' && m.opened[0].kind === 'js' && m.opened[0].name === 'fieldOnOff.js', 'クリック → openCustomize({ desktop, js, fieldOnOff.js })（タブ切替と一覧の表示は boot 側）');
+  await m.$('kt-ai-pane-code').dispatch({ type: 'click', target: { id: 'kt-ai-jsreg-open-customize' } });
+  assert(m.opened.length === 2 && m.opened[1].name === 'fieldOnOff.js', 'コードペインの［Customize で確認］も同じ');
+  const m2 = mount({ openCustomize: null });
+  await ticks();
+  await m2.panel.send(GOAL_HYBRID); await ticks(); await confirmSpec(m2); await m2.panel.send('コードを作って'); await ticks();
+  await m2.panel.startJsRegister(m2.conv().activePlan()); await ticks(); await m2.panel.confirmJsRegister(); await ticks(8);
+  await clickChat(m2, 'open-customize', { target: 'desktop', name: 'fieldOnOff.js' });
+  assert(m2.panel.jsExecState().stage === 'done', 'openCustomize が無い環境ではクリックしても何も起きない（エラーにしない）');
+}
+
+// =========================================================
+console.log('\n--- §35. AI-first の開発思想（UI の文言: 標準設定 / JavaScript を先に選ばせない） ---');
+{
+  const m = mount();
+  await ticks();
+  assert(/何を実現したいですか？/.test(m.host.innerHTML) && /このアプリの仕様書を作って/.test(m.host.innerHTML), 'composer: 「何を実現したいですか？」（手段を選ばせない）とドキュメントの例');
+  assert(/標準設定か JavaScript かは AI が判断します/.test(m.chat()), '空の会話: 実現したい業務を伝える（標準設定か JavaScript かは AI が判断）');
+  assert(!/<option value="snippets">/.test(SRC_TEXT) && !/CSS templates|Css  \(GitHub/.test(SRC_TEXT), 'ユーザーが CSS テンプレート / Snippet を選ぶ UI は無い');
+  assert(/function detectDocumentKind\(/.test(SRC_TEXT) && /DOCUMENT_KINDS/.test(SRC_TEXT), 'Documents は AI タブの DOCUMENT（種類の判定は決定的）');
+}
+
+console.log(`\n${state.failed ? 'FAILED' : 'ALL PASSED'}: ${state.passed} passed / ${state.failed} failed`);
+process.exit(state.failed ? 1 : 0);
+})().catch(e => { console.error(e); process.exit(1); });

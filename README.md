@@ -10,6 +10,7 @@
 ## 目次
 - [概要](#-概要)
 - [依存関係分析でできること](#-依存関係分析でできること)
+- [Toolkit の流れ（Analyze → Understand → Plan → Build → Verify）](#-toolkit-の流れ)
 - [主要タブの機能](#-主要タブの機能)
   - [Health](#health)
   - [Fields](#fields)
@@ -19,10 +20,10 @@
   - [Deps](#deps)
   - [Notices](#notices)
   - [Access Control](#access-control)
-  - [Templates](#templates)
   - [Customize](#customize)
   - [Plugins](#plugins)
   - [Field Scanner](#field-scanner)
+  - [AI](#ai)
 - [導入方法](#-導入方法)
 - [使い方](#-使い方)
 - [解析範囲と確度](#-解析範囲と確度)
@@ -45,9 +46,14 @@ Toolkitは、kintone開発を標準化・効率化するための **Tampermonkey
 - ✅ **Views / Graphs / Notices / Access Control**: 設定の可読化とエクスポート
 - ✅ **Relations**: アプリ間依存の一覧化 + **他アプリからの被参照の走査**
 - ✅ **Deps**: 依存関係グラフ + 横断検索 + 依存関係レポート出力
-- ✅ **Templates / Customize**: GitHub連携 + Monaco + Upload & Deploy
+- ✅ **Customize**: 登録済み JS / CSS の確認・解析（PC / モバイル・FILE / URL）＋ 「AIに相談」
 - ✅ **Plugins**: プレビュー / 本番差分管理
 - ✅ **Field Scanner**: JS/CSS解析（ファイル起点ビュー / 自動解析）
+- ✅ **AI**: 解析結果を AI 向けに変換（AI Context / Prompt / Markdown / JSON / ドキュメント。無料）。Nest Rec AI に接続すると、実現したい業務から変更計画 → Toolkit Review → 動作テスト環境への反映 → 検証 → 元に戻す、JavaScript の生成 → 登録まで
+
+> Templates タブ（GitHub のテンプレート / Snippets / CSS / Documents）は廃止しました。テンプレートを人が選んで貼り付ける方式から、
+> **実現したい業務を起点に AI が標準設定・既存コード・Pattern Library を組み合わせて実装方法を判断する**方式へ移行しています。
+> Documents（仕様書・要件定義・レビュー依頼の Prompt）は AI タブの「ドキュメントを作る」へ、Snippets / CSS テンプレートは AI が参照する Pattern Library（Nest Rec AI Gateway 側）へ移しました。
 
 ---
 
@@ -63,6 +69,29 @@ Toolkitは、kintone開発を標準化・効率化するための **Tampermonkey
 | **計算式の参照ツリー**（Fields） | この計算式はどこまで遡って依存しているか |
 
 詳細は [リリースノート](./RELEASE_NOTES_v2.2.0.md) を参照してください。
+
+---
+
+## 🧭 Toolkit の流れ
+
+Toolkit は、設定を「見る」ツールから **「実現したい業務」を起点に次の一手を決めるツール** へ向かっています。タブは次の流れで使います。
+
+| 段階 | 問い | タブ |
+|---|---|---|
+| **Analyze** | 今どうなっているか | Health / Fields / Views / Graphs / Notices / Access Control / Customize / Field Scanner / Plugins |
+| **Understand** | 何がどこに依存しているか | Relations / Deps / Fields（変更影響） |
+| **Plan** | 実現したい業務をどう作るか（標準設定 → 不足分だけ JavaScript） | AI（変更計画・実装仕様・Toolkit Review） |
+| **Build** | 計画どおりに作る | AI（動作テスト環境への反映・JavaScript の生成と登録）/ Customize（登録済みコードの確認） |
+| **Verify** | 作ったものが計画どおりか・戻せるか | AI（検証・再解析・元に戻す）/ Customize（動作テスト環境と運用環境の差） |
+
+**開発思想（AI-first）**: Toolkit AI は、標準設定と JavaScript カスタマイズを別々に選択するツールではありません。
+実現したい業務を起点に、現在のアプリ構成を解析し、標準設定で実現できる部分は標準設定で、不足する部分だけカスタマイズで補います。
+AI は 1) 現在のフィールド・設定で実現できるか → 2) 標準設定の追加・変更で実現できるか → 3) 標準設定の組み合わせで実現できるか →
+4) 不足する部分だけ JavaScript / CSS で補えるか → 5) 再利用性が高ければ将来プラグイン化すべきか、の順に判断します。
+利用者が最初に「標準設定にしますか、JavaScript にしますか」と選ぶことはありません。
+
+> Fact（現在どうなっているかを見る: 解析タブ）と Build（次にどうするか考え、作る: AI）を分け、AI の機能は AI タブに集めています。
+> 無料で使える出力（AI Context / Prompt / Markdown / JSON / ドキュメント）は Nest Rec AI の契約が無くても利用できます。
 
 ---
 
@@ -207,23 +236,13 @@ Markdownは仕様書として貼り付けやすい形式で、利用箇所・他
 
 ---
 
-### Templates
-ブラウザだけで完結する kintone カスタマイズ体験。
-- **GitHub連携**：`youtotto/kintoneCustomizeJS` から Templates / Snippets / CSS / Documents を取得
-- **エディタ**：Monaco + Markdown / 補完 / 自動レイアウト
-- **サジェスト**：アプリのフィールドコード・ラベル補完
-- **AIプロンプト生成**：Documents の Markdown から要件定義プロンプト生成
-- **Upload & Deploy**：プレビュー保存→デプロイのワンボタン
-
-<img width="638" height="380" alt="image" src="https://github.com/user-attachments/assets/a1b8c367-f696-45d0-b349-a00a157cec7c" />
-
----
-
 ### Customize
-- **JSEdit互換** + Toolkit UIに統合
-- Snippets 連携（GitHub `snippets/` / プレビュー→エディタ挿入）
-- **保存＋デプロイ**のワンボタン化（preview更新 / deploy完了検知）
-- desktop / mobile、JS / CSS に対応
+現在登録されている JavaScript / CSS を**確認・解析する場所**です（設計・生成・修正は AI タブへ）。
+- 登録済みファイルの一覧（desktop / mobile、JS / CSS、FILE / URL を kintone の登録順で）と Monaco エディタでの表示・編集
+- **「AIに相談」**: 行のボタンから AI タブへ。そのファイルを対象にした会話（相談 → 実装仕様の確定 → コード生成 → 動作テスト環境への登録）を始めます
+- 動作テスト環境と運用環境のカスタマイズ設定の差（未反映の変更・動作テスト環境だけのファイル）を表示
+- **JSEdit互換**の保存＋デプロイ（preview更新 / deploy完了検知。利用者の明示操作のみ）
+- フィールドコードの補完（`record['CODE'].value`）
 
 <img width="638" height="380" alt="image" src="https://github.com/user-attachments/assets/fec0ef11-af0c-4cb2-9723-ac6ddbf5b757" />
 
@@ -268,6 +287,22 @@ custom.js  [desktop] [JS]
 
 ---
 
+### AI
+Toolkit が解析した kintone を使って、**次の仕事を行う場所**です（内部名: AI Workspace）。
+
+**無料（Nest Rec AI の契約なし）**
+- **AI Context / AI Prompt / Markdown / JSON**: 解析結果（フィールド・設定・依存関係・JavaScript の参照）を根拠ID付きで AI 向けに変換。ChatGPT / Claude などへ貼り付けて質問・変更計画に使えます。Toolkit から AI へ送信することはありません
+- **ドキュメントを作る**: アプリ仕様書（現状整理）/ 要件定義書 / 開発レビュー依頼 / 変更内容のまとめ / 引継ぎ資料 / 非エンジニア向けの説明 / 改善提案 の Prompt（役割・規則・構成 ＋ Context）と Markdown（骨格 ＋ Context）。チャットで「このアプリの仕様書を作って」と伝えても同じものを作ります
+
+**Nest Rec AI に接続すると**
+- チャットで質問・**実現したい業務から変更計画**（標準設定 ＋ 不足分だけの JavaScript を 1 つの計画に）・計画の修正・説明
+- **Toolkit Review**（決定的な検証: 存在しないフィールド・競合・安全性）→ 人間の承認 → **動作テスト環境への反映** → 検証 → **元に戻す**（運用環境へは反映しません）
+- **JavaScript カスタマイズ**: Customize の既存 JS から相談 → 実装仕様の確定 → コード生成（Pattern Library を参考に現在のアプリに合わせて生成）→ Toolkit Code Review → 動作テスト環境への登録 → 再解析・検証 → 復元
+
+> 承認・最終確認・元に戻す操作は、すべて画面のボタンで行います（チャットの文章では実行されません）。
+
+---
+
 ## 🚀 導入方法
 
 ### 1) 前提
@@ -297,7 +332,7 @@ custom.js  [desktop] [JS]
 4. 他アプリからの被参照が必要な場合は、Relations の「走査する」を実行
 
 > **Health** のしきい値は「基準 / Thresholds」から編集（LocalStorage保存）。
-> **Templates / Customize** は Monaco エディタで編集 → 保存（場合によりデプロイ）。
+> **Customize** は Monaco エディタで編集 → 保存（場合によりデプロイ）。AI の提案の反映先は動作テスト環境だけです。
 
 ---
 
@@ -326,7 +361,8 @@ custom.js  [desktop] [JS]
 - 権限に基づくアクセス（権限外の情報は取得されません。取得できなかった件数は明示します）
 - 他アプリの走査は **明示的なボタン操作のみ**（自動実行しません）
 - ローカル保存（LocalStorage／SessionStorage）を使用
-- 読み取り専用の分析と、設定変更を伴う機能（Templates / Customize / Plugins）を明確に分離
+- 読み取り専用の分析と、設定変更を伴う機能（Customize / Plugins / AI の動作テスト環境への反映）を明確に分離
+- AI が提案した変更は人間が画面で承認したものだけを**動作テスト環境**へ反映し、運用環境へは反映しません。AI の出力をそのまま API に渡すことはありません（Toolkit が検証・正規化）
 
 ---
 
@@ -361,6 +397,9 @@ custom.js  [desktop] [JS]
 | `KTScan` | JavaScript 自動解析とキャッシュ管理 |
 | `KTIncoming` | 他アプリからの被参照の走査 |
 | `KTExport` | Markdown / CSV / JSON の生成とダウンロード |
+| `KTContext` / `KTContextUi` | AI 向け Context（facts・根拠ID）/ Prompt / Markdown / JSON / ドキュメントの生成（無料） |
+| `KTAiClient` / `KTAiConversation` / `KTAiChatUi` | Nest Rec AI Gateway クライアント・会話の意図分類・AI タブの表示 |
+| `KTPlanReview` / `KTPlanExecutor` / `KTCodeReview` / `KTJsExecutor` | Toolkit Review・動作テスト環境への反映 / 元に戻す・生成コードの検査・JavaScript の登録 / 復元 |
 
 ---
 

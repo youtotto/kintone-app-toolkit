@@ -5,13 +5,13 @@ const fs = require('fs');
 const path = require('path');
 const vm = require('vm');
 
-function loadToolkit({ document: docOverride = null } = {}) {
+function loadToolkit({ document: docOverride = null, localStorage: lsOverride = null } = {}) {
   const SRC = path.join(__dirname, '..', '..', 'kintoneAppToolkit.user.js');
   let code = fs.readFileSync(SRC, 'utf8');
   const lastClose = code.lastIndexOf('})();');
   if (lastClose < 0) throw new Error('IIFE close not found');
   code = code.slice(0, lastClose)
-    + '\n  globalThis.__TEST__ = { KTDeps, KTScan, KTIncoming, KTContext, KTContextUi, KTAiClient, KTQueryCheck, KTPlanReview, KTPlanExecutor, KTAiConversation, KTAiChatUi, KTJsCatalog, KTCodeReview, KTJsExecutor, mountAiWorkspace, mountRoot, renderTemplates, renderAiWorkspace, SCRIPT_VERSION };\n'
+    + '\n  globalThis.__TEST__ = { KTDeps, KTScan, KTIncoming, KTContext, KTContextUi, KTAiClient, KTQueryCheck, KTPlanReview, KTPlanExecutor, KTAiConversation, KTAiChatUi, KTJsCatalog, KTCodeReview, KTJsExecutor, mountAiWorkspace, mountRoot, renderCustomize, renderAiWorkspace, SCRIPT_VERSION };\n'
     + code.slice(lastClose);
 
   const noop = () => { };
@@ -20,7 +20,7 @@ function loadToolkit({ document: docOverride = null } = {}) {
     console, setTimeout, clearTimeout,
     setInterval: () => 0, clearInterval: noop,
     AbortController, TextEncoder, TextDecoder, URL, btoa, atob, Uint8Array,   // ブラウザにもある標準 API（timeout の中断・サイズ計測・PKCE で使う）
-    localStorage: fakeStorage, sessionStorage: fakeStorage,
+    localStorage: lsOverride || fakeStorage, sessionStorage: fakeStorage,   // Phase 18: 移行案内（localStorage）のテストでは差し替える
     navigator: {},
     // Phase 15: mountRoot（タブ構成）のテストでは fake-dom.js の makeFakeDocument() を渡す
     document: docOverride || {
@@ -40,6 +40,7 @@ function loadToolkit({ document: docOverride = null } = {}) {
   sandbox.globalThis = sandbox;
   vm.createContext(sandbox);
   vm.runInContext(code, sandbox, { filename: 'kintoneAppToolkit.user.js' });
+  sandbox.__TEST__.__sandbox = sandbox;   // Phase 18: Customize タブのテストで window.loadMonaco / kintone / fetch を差し込む
   return sandbox.__TEST__;
 }
 

@@ -10,7 +10,7 @@
 'use strict';
 const { loadToolkit, makeAssert } = require('./helpers/load-toolkit.js');
 const { makeFakeHost, makeFakeDocument } = require('./helpers/fake-dom.js');
-const { KTDeps, KTScan, KTContext, KTAiClient, KTAiConversation, KTAiChatUi, KTPlanReview, mountAiWorkspace, renderTemplates } = loadToolkit();
+const { KTDeps, KTScan, KTContext, KTAiClient, KTAiConversation, KTAiChatUi, KTPlanReview, mountAiWorkspace, renderCustomize } = loadToolkit();
 const { assert, state } = makeAssert();
 const FX = require('./fixtures/ai-context-app.js');
 const { buildScanPayload } = require('./helpers/scan-payload.js');
@@ -243,7 +243,7 @@ console.log('\n--- 2. KTAiConversation.create（fake services。履歴は送ら�
 }
 
 // =========================================================
-console.log('\n--- 3. AI タブ（mountRoot / switch / minimized / Templates から移行）---');
+console.log('\n--- 3. AI タブ（mountRoot / switch / minimized / 旧 Templates からの移行。Phase 18: Templates タブは無い）---');
 {
   const { doc, byId } = makeFakeDocument();
   const T = loadToolkit({ document: doc });
@@ -251,12 +251,12 @@ console.log('\n--- 3. AI タブ（mountRoot / switch / minimized / Templates か
   assert(wrap.ktTabs && wrap.ktTabs.TABS.includes('ai') && wrap.ktTabs.TABS[wrap.ktTabs.TABS.length - 1] === 'ai', 'TABS に ai（トップレベルの独立タブ）');
   const tabAi = byId.get('tab-ai'), viewAi = byId.get('view-ai');
   assert(tabAi && tabAi.tagName === 'BUTTON' && viewAi && viewAi.style.display === 'none' && viewAi.classList.contains('kt-fill-view') && /質問・変更計画・Toolkit Review/.test(tabAi.title), 'AI タブのボタンと view（初期は非表示・高さ追従の view）');
-  assert(wrap.innerHTML.includes('>AI</button>') && wrap.innerHTML.includes('>Templates</button>'), 'タブ列に AI と Templates の両方');
+  assert(wrap.innerHTML.includes('>AI</button>') && !wrap.innerHTML.includes('>Templates</button>') && !wrap.ktTabs.TABS.includes('templates') && !byId.has('tab-templates') && !byId.has('view-templates'), 'タブ列に AI はあり Templates は無い（Phase 18: 廃止）');
   let switched = null; wrap.ktTabs.onSwitch((id) => { switched = id; });
   await tabAi.dispatch('click');
   assert(viewAi.style.display === 'block' && tabAi.classList.contains('active') && byId.get('view-health').style.display === 'none' && !byId.get('tab-health').classList.contains('active') && switched === 'ai', 'switch: AI タブで view-ai を表示・他を隠す・onSwitch が呼ばれる');
-  await byId.get('tab-templates').dispatch('click');
-  assert(viewAi.style.display === 'none' && byId.get('view-templates').style.display === 'block', 'switch: 戻せる');
+  await byId.get('tab-customize').dispatch('click');
+  assert(viewAi.style.display === 'none' && byId.get('view-customize').style.display === 'block', 'switch: 戻せる（Customize）');
   await byId.get('kt-mini').dispatch('click');
   assert(wrap.classList.contains('is-mini'), 'minimized: is-mini（body / tabs は CSS で隠れる）');
   await byId.get('kt-mini').dispatch('click');
@@ -276,10 +276,9 @@ console.log('\n--- 3. AI タブ（mountRoot / switch / minimized / Templates か
   assert(wrap.classList.contains('is-full'), '全画面: is-full（zoom は CSS で bar / body に効く）');
   await byId.get('kt-full').dispatch('click');
   assert(!wrap.classList.contains('is-full'), '全画面: 戻る');
-  // Templates 側に AI mode は無い
-  const src = renderTemplates.toString();
-  assert(!src.includes('value="ai"') && !src.includes('mountAiDocsPanel') && !src.includes('mountAiWorkspace') && !src.includes('id="kt-template-ai"') && !src.includes('getContextInputs') && !src.includes("=== 'ai'"), 'Templates: AI mode（source=ai / AI パネルの mount / #kt-template-ai / getContextInputs）は無い');
-  assert(src.includes('Templates (GitHub') && src.includes('Css') && src.includes('Snippets') && src.includes('Documents'), 'Templates は Templates / CSS / Snippets / Documents だけ（本来の用途）');
+  // Phase 18: Customize 側に AI mode・GitHub の Snippets は無い（Customize は登録済みコードの確認・解析と AI への相談だけ）
+  const src = renderCustomize.toString();
+  assert(!src.includes('value="ai"') && !src.includes('mountAiWorkspace') && !src.includes('api.github.com') && !src.includes('Snippets') && src.includes('kt-customize-consult'), 'Customize: AI mode / GitHub Snippets は無く、［AIに相談］だけが AI への導線');
   // AI タブ側に移行済みの機能（最低限の一覧）
   const m = mount();
   await ticks();
