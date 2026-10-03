@@ -79,6 +79,23 @@ console.log('\n--- F4 / F5. KTCodeReview: kintone のエラー表示の作法（
 }
 
 // =========================================================
+console.log('\n--- BF-C（再）. スペース要素: 実在するスペースは通す・無いスペースは専用の理由で止める・Generator にスペース一覧を渡す ---');
+{
+  const SPACE_JS = "(function () {\n  'use strict';\n  kintone.events.on(['app.record.edit.change.amount'], function (event) {\n    var sp = kintone.app.record.getSpaceElement('amount_warning_space');\n    if (!sp) return event;\n    sp.textContent = Number(event.record['amount'].value || 0) > 1000000 ? '金額が100万円を超えています' : '';\n    return event;\n  });\n})();";
+  const cust = { customizationId: 'C1', requirement: '金額が100万円を超えたら警告', strategy: 'NEW_JS_FILE', platform: ['desktop'], events: ['app.record.edit.change.amount'], fields: [{ code: 'amount', access: 'READ' }], apis: ['kintone.events.on', 'kintone.app.record.getSpaceElement'], existingFiles: [] };
+  const gen = { strategy: 'NEW_JS_FILE', targetFile: 'warn.js', code: SPACE_JS, patch: null, events: cust.events, fields: cust.fields, apis: cust.apis };
+  const chk = (r, n) => r.checks.find(c => c.name === n) || null;
+  const noSpace = KTCodeReview.review({ generated: gen, customization: cust, plan: null, data: DATA, scan: null, existingSource: null });
+  assert(noSpace.status === 'BLOCKED' && chk(noSpace, 'space-element') && !chk(noSpace, 'space-element').ok && /amount_warning_space/.test(chk(noSpace, 'space-element').message) && chk(noSpace, 'fields').ok, 'フォームに無いスペース → space-element で止める（「存在しないフィールド」とは言わない）');
+  const withLayout = clone(DATA); withLayout.layout = [{ type: 'ROW', fields: [{ type: 'NUMBER', code: 'amount' }, { type: 'SPACER', elementId: 'amount_warning_space', size: { width: '200' } }] }];
+  const ok = KTCodeReview.review({ generated: gen, customization: cust, plan: null, data: withLayout, scan: null, existingSource: null });
+  assert(chk(ok, 'space-element').ok && chk(ok, 'fields').ok && ok.status !== 'BLOCKED', 'フォームに実在するスペースは通す（存在しないフィールドと数えない）');
+  assert(KTCodeReview.layoutSpaceIds([{ type: 'GROUP', code: 'g', layout: [{ type: 'ROW', fields: [{ type: 'SPACER', elementId: 'inner' }] }] }, { type: 'ROW', fields: [{ type: 'SPACER', elementId: 'top' }, { type: 'LABEL', elementId: 'lbl' }] }]).sort().join() === 'inner,top', 'layoutSpaceIds: グループ内のスペースも・ラベルは含めない');
+  const gctx = KTContext.buildGenerator({ customization: cust, plan: null, data: withLayout, deps: null, scan: null });
+  assert(Array.isArray(gctx.constraints.spaces) && gctx.constraints.spaces.join() === 'amount_warning_space', 'Generator の Context: constraints.spaces にフォームのスペース要素 ID');
+}
+
+// =========================================================
 console.log('\n--- F2. 復元: リマインダー未設定（timezone null）のアプリでも ROLLED_BACK_VERIFIED ---');
 {
   const data = clone(DATA);
@@ -294,6 +311,17 @@ console.log('\n--- CX-4（intent）. 「誰も」「いつでも」などの不�
   assert(C('承認後は誰も金額を変更できないようにして。ただし営業担当はいつでも変更できるようにして') === 'PLAN', '「承認後は誰も…変更できないようにして。…いつでも変更できるようにして」は計画（実機で質問扱いになった）');
   assert(C('誰でも編集できるようにして') === 'PLAN' && C('何も入力しなくても通知されるようにしたい') === 'PLAN' && C('どこでも見られるようにして') === 'PLAN' && C('いつも担当者に通知したい') === 'PLAN', '「誰でも / 何も / どこでも / いつも」を含む依頼は計画');
   assert(C('このフィールドは何に使ってる？') === 'ASK' && C('誰が承認するの') === 'ASK' && C('いつ通知されますか') === 'ASK' && C('通知は何件ある？') === 'ASK' && C('どこで使われている？') === 'ASK', '「何に / 誰が / いつ / 何件 / どこで」の質問は従来どおり質問');
+  // XA-4（実機）: 文末の「〜たい / 〜てほしい / 〜てください」は依頼
+  assert(C('顧客マスタの電話番号を連絡先電話にも入れたい') === 'PLAN' && C('承認済みの案件だけ一覧に出したいです') === 'PLAN' && C('金額の入力欄を分けてほしい') === 'PLAN' && C('担当者を必須にしてください') === 'PLAN', 'XA-4: 「入れたい / 出したいです / 分けてほしい / してください」は計画（実機で質問扱いになった）');
+  assert(C('このアプリの通知の仕組みを知りたい') === 'ASK' && C('どこで金額を使っているか聞きたい') === 'ASK', '「知りたい / 聞きたい」は質問のまま');
+  // XA-11（実機）: 計画の語（新規フィールドのラベル）に触れる質問は計画の説明（反映済みの変更を踏まえて答える）
+  const planSt = { activePlan: { status: 'EXECUTED', plan: { proposedFields: [{ temporaryId: 'NEW_FIELD_1', label: '住所', suggestedCode: 'address' }, { temporaryId: 'NEW_FIELD_2', label: '電話番号', suggestedCode: 'phone' }], steps: [{ id: 'P3', actionType: 'UPDATE_LOOKUP', targetRef: 'customer_lookup', title: '顧客コードルックアップに住所と電話番号の取得項目を追加' }] } } };
+  assert(KTAiConversation.classifyIntent('既存の案件にも住所と電話番号は自動で入りますか？', planSt).intent === 'EXPLAIN_PLAN', 'XA-11: 計画の語を含む質問は EXPLAIN_PLAN（ASK にしない）');
+  assert(KTAiConversation.classifyIntent('このアプリの通知先は誰ですか？', planSt).intent === 'ASK', '計画の語を含まない現在の設定の質問は ASK のまま');
+  // XA-11: ルックアップの取得項目を足す Review / 最終確認に「既存のレコードの値は自動では入りません」
+  const pX = plan([step('P1', 'ADD_FIELD', 'PROPOSED_FIELD', 'NEW_FIELD_1', { fieldType: 'SINGLE_LINE_TEXT' }), step('P2', 'UPDATE_LOOKUP', 'LOOKUP', 'customer_lookup', { sourceApp: '500', keyField: 'code', addMappings: [{ relatedField: 'address', field: 'NEW_FIELD_1' }] }, { dependsOn: ['P1'] })], [pf('NEW_FIELD_1', '顧客住所', 'cust_addr', 'SINGLE_LINE_TEXT')]);
+  const rX = reviewOf(pX).steps.find(r => r.stepId === 'P2');
+  assert(rX.diff.human.some(l => /既存のレコード: 取得項目を足しても、保存済みのレコードの値は自動では入りません/.test(l)), 'XA-11: ルックアップの取得項目を足す手順に、既存レコードは自動では更新されない旨');
 }
 
 // =========================================================

@@ -5407,7 +5407,8 @@
         plan: { planId, version, goal: plan?.goal ?? '', standardSteps },
         customization: cust,
         fields, dictionary, existingFile, otherFiles,
-        constraints: { style: "即時関数 (function () { 'use strict'; … })(); で包む。ハンドラは必ず return event。ライブラリは使わない。フィールドコード・ステータス名は dictionary の表記のまま", platform: cust.platform, noNetwork: true, noSecrets: true, allowedEvents: cust.events, allowedFields: cust.fields.map(f => f.code), allowedApis: cust.apis, patchOnly: cust.strategy === 'EXTEND_EXISTING_JS' },
+        // Phase 20（実機）: spaces = フォームに実在するスペース要素の ID（getSpaceElement に使える ID はこれだけ。無いスペースを前提にしたコードは使えない）
+        constraints: { style: "即時関数 (function () { 'use strict'; … })(); で包む。ハンドラは必ず return event。ライブラリは使わない。フィールドコード・ステータス名は dictionary の表記のまま", platform: cust.platform, noNetwork: true, noSecrets: true, allowedEvents: cust.events, allowedFields: cust.fields.map(f => f.code), allowedApis: cust.apis, patchOnly: cust.strategy === 'EXTEND_EXISTING_JS', spaces: (typeof KTCodeReview !== 'undefined' && KTCodeReview.layoutSpaceIds) ? KTCodeReview.layoutSpaceIds(data?.layout) : [] },
         size: null,
       };
       const m = measureText(JSON.stringify(ctx));
@@ -6277,6 +6278,8 @@
       if (rr && rr.diff) { if (rr.diff.after && typeof rr.diff.after === 'object') rr.diff.after = { ...rr.diff.after, protocol: src.protocol }; if (Array.isArray(rr.diff.human)) rr.diff.human.push(`リンクの種類: ${LINK_PROTOCOL_JA[src.protocol] || src.protocol}（ルックアップの取得元「${src.code}」に合わせる）`); }
       return true;
     }
+    /** Phase 20（XA-11）: ルックアップの取得項目を足しても、保存済みレコードの値は自動では入らない */
+    const LOOKUP_EXISTING_RECORDS_NOTE = '既存のレコード: 取得項目を足しても、保存済みのレコードの値は自動では入りません（各レコードで［取得］し直すか、CSV の読み込みなどで更新します）';
     /** 並び順に使えない種類（kintone の order by） */
     const NOT_SORTABLE = ['MULTI_LINE_TEXT', 'RICH_TEXT', 'CHECK_BOX', 'MULTI_SELECT', 'FILE', 'USER_SELECT', 'ORGANIZATION_SELECT', 'GROUP_SELECT', 'CREATOR', 'MODIFIER', 'STATUS_ASSIGNEE', 'SUBTABLE', 'REFERENCE_TABLE', 'CATEGORY'];
     /** Review 時点の同一性（Executor が実行直前の現在値と照合する）。参照元アプリの指紋（revision / fieldsHash）も含める */
@@ -6983,6 +6986,8 @@
             h(`✎ ルックアップ「${f.label}」（${f.code}）を変更`);
             h(`参照元: ${appLabel} / キー: ${lk.keyField}${keyF?.label && keyF.label !== lk.keyField ? `（${keyF.label}）` : ''}`);
             for (const m of changes.mappings) { const dest = model.fields[m.to]; h(`${m.overwrite ? '✎' : '＋'} 取得項目: ${m.from}${m.label && m.label !== m.from ? `（${m.label}）` : ''} → ${m.to}${dest?.label && dest.label !== m.to ? `（${dest.label}）` : ''}${m.proposed ? '・この計画で追加' : ''}${m.overwrite ? `（取得元を ${m.overwrite} から変更）` : ''}`); }
+            // Phase 20（XA-11）: 設定の変更だけで既存データまで更新されたと誤解させない（kintone はルックアップの取得し直しでだけ値を入れる）
+            if (changes.mappings.length) h(LOOKUP_EXISTING_RECORDS_NOTE);
             for (const c of changes.pickerFields) h(`＋ 選択時に表示: ${c}${related.fields[c]?.label && related.fields[c].label !== c ? `（${related.fields[c].label}）` : ''}`);
             if (changes.filterCond) h(`絞り込み: ${changes.filterCond.from || 'なし'} → ${changes.filterCond.to}`);
             if (changes.sort) h(`並び順: ${changes.sort.from || 'なし'} → ${changes.sort.to}`);
@@ -10134,6 +10139,14 @@
       }
       return out;
     }
+    /** Phase 20: フォームのスペース要素の ID（kintone.app.getFormLayout() / REST layout の SPACER.elementId。グループ内も） */
+    function layoutSpaceIds(layout) {
+      const rows = Array.isArray(layout) ? layout : (Array.isArray(layout?.layout) ? layout.layout : []);
+      const out = new Set();
+      const walk = (rs) => { for (const r of rs || []) { for (const f of (r?.fields || [])) if (f && f.type === 'SPACER' && f.elementId) out.add(String(f.elementId)); if (Array.isArray(r?.layout)) walk(r.layout); } };
+      walk(rows);
+      return [...out];
+    }
     /** グローバル汚染: 即時関数の外（ネスト 0）に var / let / const / function / class の宣言があるか */
     function globalDeclarations(clean) {
       const s = stripStrings(String(clean || ''));
@@ -10166,7 +10179,9 @@
       const fieldsN = KTDeps.normalizeFields(data?.fields || {});
       const proposedCodes = new Map((plan?.proposedFields || []).map(p => [p.temporaryId, p.suggestedCode]));
       const knownCodes = new Set([...fieldsN.map(f => f.code), ...proposedCodes.values()]);
-      const fieldRows = [...fieldsN.map(f => ({ code: f.code, label: f.label, type: f.rawType })), ...(plan?.proposedFields || []).map(p => ({ code: p.suggestedCode, label: p.label, type: p.type }))];
+      // Phase 20（実機）: フォームのスペース要素（getSpaceElement の ID）はフィールドではないが実在する。存在しないフィールドと数えない
+      const spaceIds = layoutSpaceIds(data?.layout);
+      const fieldRows = [...fieldsN.map(f => ({ code: f.code, label: f.label, type: f.rawType })), ...(plan?.proposedFields || []).map(p => ({ code: p.suggestedCode, label: p.label, type: p.type })), ...spaceIds.map(id => ({ code: id, label: id, type: 'SPACER' }))];
       // ---- 1. コードの確定（新規: 全文 / 統合: patch を適用）----
       let finalCode = String(g.code ?? '');
       let addedCode = finalCode;
@@ -10209,8 +10224,12 @@
         else add('handler', false, 'review', 'kintone.events.on の登録が見つかりません');
       }
       // ---- 5. フィールド（dictionary ＋ 計画の新規・計画との一致）----
-      const unknownRefs = (addedScan.unknownRefs || []).map(u => u.code || u.value || u.ref).filter(Boolean);
-      add('fields', !unknownRefs.length, 'block', unknownRefs.length ? `存在しないフィールドコードを参照しています（GENERATED_JS_UNKNOWN_FIELD）: ${unknownRefs.join(', ')}` : `参照するフィールド ${addedScan.fields.map(f => f.code).join(', ') || '（なし）'} は存在します`);
+      // Phase 20（実機）: getSpaceElement の ID はフォームのスペース要素。無ければ null が返り何も表示されない → 専用の理由で止める（存在しないフィールドとは言わない）
+      const spaceCalls = [...new Set([...String(cleanAdded).matchAll(/getSpaceElement\s*\(\s*['"`]([^'"`]+)['"`]/g)].map(x => x[1]))];
+      const missingSpaces = spaceCalls.filter(id => !spaceIds.includes(id));
+      const unknownRefs = (addedScan.unknownRefs || []).map(u => u.code || u.value || u.ref).filter(Boolean).filter(code => !missingSpaces.includes(code));
+      add('fields', !unknownRefs.length, 'block', unknownRefs.length ? `存在しないフィールドコードを参照しています（GENERATED_JS_UNKNOWN_FIELD）: ${unknownRefs.join(', ')}` : `参照するフィールド ${addedScan.fields.map(f => f.code).filter(code => !spaceCalls.includes(code)).join(', ') || '（なし）'} は存在します`);
+      if (spaceCalls.length) add('space-element', !missingSpaces.length, 'block', missingSpaces.length ? `スペース要素「${missingSpaces.join('」「')}」はフォームにありません（getSpaceElement が null を返し、警告などは表示されません）。フォームの設定でスペースを追加するか、別の表示方法にしてください` : `スペース要素 ${spaceCalls.join(', ')} はフォームにあります`);
       const planFields = new Map((c.fields || []).map(f => [f.code, f.access]));
       for (const f of addedScan.fields) {
         const writes = ACCESS_W(f.access);
@@ -10288,7 +10307,7 @@
     }
     const ACCESS_W = (acc) => Object.keys(acc || {}).filter(k => k === 'WRITE' || k === 'CONTROL' || k === 'SHOW_HIDE');
 
-    return { REVIEW_VERSION, STATUS, applyPatch, diffLines, diffText, diffHunks, checkSyntax, inspectHandlers, globalDeclarations, kintoneFieldOps, review };
+    return { REVIEW_VERSION, STATUS, applyPatch, diffLines, diffText, diffHunks, checkSyntax, inspectHandlers, globalDeclarations, kintoneFieldOps, layoutSpaceIds, review };
   })();
 
   // ==========================================
@@ -12095,6 +12114,7 @@
       if (pp.after?.sort != null) out.push(`並び順: ${pp.before?.sort || 'なし'} → ${pp.after.sort || 'なし'}`);
       const kept = (idn.mappings || []).filter(m => !adds.some(a => a.to === m.to));
       out.push(kept.length ? `既存の取得項目 ${kept.length} 件（${kept.map(m => `${m.from} → ${m.to}`).join(', ')}）はそのまま` : '既存の取得項目はありません');
+      if (adds.length) out.push('既存のレコードの値は自動では入りません（各レコードで［取得］し直すか、CSV の読み込みなどで更新します）');
       out.push(`参照元アプリ${ca.name ? `「${ca.name}」` : ''}の設定は変更しません${cur?.current ? (cur.current.fieldsHash === cur.reviewed?.fieldsHash ? `（フィールド定義は Review 時点と同じ・revision ${cur.current.revision ?? '—'}）` : '（フィールド定義が Review 時点と違います）') : ''}`);
       return out;
     }
@@ -12461,7 +12481,9 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
       reviseVerb: /使って(?!る|い|ます|た)|使えない|使える|使う|使いたい|使えば|いらない|不要|なし(で|に|にして)|やめ|外して|除いて|削除|消して|ではなく|じゃなく|代わり|かわり|変えて|変更して|減らし|増やし|作らず|作らない|作らないで|追加せず|追加しない|にして|のほう|の方で|だけ(で|に)|も(追加|つけ|付け|入れ|取|転記|通知|欲しい|ほしい|して)|にしたい|に変え/,
       // 「修正だけ」の文（単独では新しい計画の goal にならない）。反映済みの計画に対しては作り直しの案内に使う
       reviseOnly: /既存|いらない|不要|やめ|外して|除いて|削除|消して|ではなく|じゃなく|代わり|かわり|作らず|作らない|追加せず|追加しない|だけ(で|に)|のほう|の方で/,
-      desire: /したい|欲しい|ほしい|追加(して|する|を)|作成|作って|作りたい|設定(して|したい)|変更(して|したい)|変えて|にして|できるように|ようにしたい|つけて|付けて|入れて|取って|取得(して|したい)|通知(して|したい|を)|転記(して|したい)|コピー(して|したい)|連携(して|したい)|自動(で|化)|必要$|増やし|減らし|外して|削除して|消して|なくして|いらない|不要|やめて|使って(ください|ほしい|欲しい|$)|使え(ない|る)[?？]?$|ではなく|じゃなく|代わり|かわり|のほう|の方/,
+      // Phase 20（実機）: 文末の「〜たい」「〜てほしい」「〜てください」は依頼（「顧客マスタの電話番号を連絡先電話にも入れたい」が質問扱いになった）。
+      //   「知りたい / 聞きたい / わかりたい」は質問なので含めない
+      desire: /したい|欲しい|ほしい|追加(して|する|を)|作成|作って|作りたい|設定(して|したい)|変更(して|したい)|変えて|にして|できるように|ようにしたい|つけて|付けて|入れて|取って|取得(して|したい)|通知(して|したい|を)|転記(して|したい)|コピー(して|したい)|連携(して|したい)|自動(で|化)|必要$|増やし|減らし|外して|削除して|消して|なくして|いらない|不要|やめて|使って(ください|ほしい|欲しい|$)|使え(ない|る)[?？]?$|ではなく|じゃなく|代わり|かわり|のほう|の方|(?<!知り|聞き|わかり|分かり)たい(です|んです|のです)?[。．！!]*$|て(ほしい|欲しい|ください|下さい)[。．！!]*$/,
       // Phase 20（実機）: 「誰も」「いつでも」「何も」「どこでも」などの不定の言い方は疑問ではない（「承認後は誰も金額を変更できないように」が質問扱いになった）
       question: /[?？]$|(か|の|かな|かしら)[?？]$|ですか|ますか|でしょうか|のか$|何(?!も|でも|か)|なに(?!も|でも|か)|どこ(?!でも|も|か)|どれ(?!でも|も|か)|誰(?!も|でも|か)|だれ(?!も|でも|か)|いつ(?!でも|も)|教えて|説明して|使って(い|)る|使われて|わかる|分かる|ありますか|ある[?？]|いる[?？]|ている[?？]|している/,
       ambiguous: /^(これ|それ|この|その|あれ)?(は)?(どう|どうですか|どう思う|どうかな|いい|いいの|大丈夫|OK|ok|問題ない)(ですか|かな|か|？|\?)?[?？]?$/,
@@ -12516,6 +12538,9 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
         return { intent: review && RE.aboutReview.test(t) ? INTENT.EXPLAIN_REVIEW : aboutCust ? INTENT.EXPLAIN_CUSTOMIZATION : INTENT.EXPLAIN_PLAN, reason: 'QUESTION_ABOUT_PLAN', stepIds: stepIdsIn(t) };
       }
       if (plan && stepIdsIn(t).length && q) return { intent: INTENT.EXPLAIN_PLAN, reason: 'STEP_ID_QUESTION', stepIds: stepIdsIn(t) };
+      // Phase 20（XA-11）: 計画の語（新規フィールドのラベル・手順の対象）に触れる質問は、現在の設定（運用環境）ではなく計画の説明として答える
+      //   （「既存の案件にも住所と電話番号は自動で入りますか？」が反映済みの計画を見ない質問として扱われた）
+      if (plan && q && !RE.reviseVerb.test(t) && mentionsPlan(t, plan.plan)) return { intent: INTENT.EXPLAIN_PLAN, reason: 'QUESTION_MENTIONS_PLAN', stepIds: stepIdsIn(t) };
       // 1b) コード生成（Phase 16）: 計画があり、カスタマイズがあるときだけ。文の中の C1 等で対象を指定できる
       if (RE.generate.test(t) && !(q && RE.questionWord.test(t))) {
         const custs = plan?.plan?.customizations || [];
