@@ -384,6 +384,13 @@ console.log('\n--- CX-4（intent）. 「誰も」「いつでも」などの不�
   // XA-4（実機）: 文末の「〜たい / 〜てほしい / 〜てください」は依頼
   assert(C('顧客マスタの電話番号を連絡先電話にも入れたい') === 'PLAN' && C('承認済みの案件だけ一覧に出したいです') === 'PLAN' && C('金額の入力欄を分けてほしい') === 'PLAN' && C('担当者を必須にしてください') === 'PLAN', 'XA-4: 「入れたい / 出したいです / 分けてほしい / してください」は計画（実機で質問扱いになった）');
   assert(C('このアプリの通知の仕組みを知りたい') === 'ASK' && C('どこで金額を使っているか聞きたい') === 'ASK', '「知りたい / 聞きたい」は質問のまま');
+  // F29（CX-5 実機）: 計画がある会話の途中変更「やっぱり税込150万円以上。既存フィールドは増やさないで」は修正
+  {
+    const withPlan = { activePlan: { status: 'ACTIVE', plan: { steps: [{ id: 'P1', actionType: 'ADD_PROCESS_STATUS', targetRef: '部長承認待ち', title: 'ステータスの追加', spec: { name: '部長承認待ち' } }], proposedFields: [{ label: '部長承認者', suggestedCode: 'manager_approver' }] } } };
+    const CI = (t) => KTAiConversation.classifyIntent(t, withPlan).intent;
+    assert(CI('やっぱり税込150万円以上。既存フィールドは増やさないで') === 'REVISE_PLAN' && CI('やはり200万円以上にして') === 'REVISE_PLAN' && CI('通知は送らないで') === 'REVISE_PLAN', 'F29: 「やっぱり / やはり」「〜ないで」は計画の修正');
+    assert(KTAiConversation.classifyIntent('既存フィールドは増やさないで', {}).intent !== 'REVISE_PLAN', '計画が無ければ修正にはならない');
+  }
   // XA-11（実機）: 計画の語（新規フィールドのラベル）に触れる質問は計画の説明（反映済みの変更を踏まえて答える）
   const planSt = { activePlan: { status: 'EXECUTED', plan: { proposedFields: [{ temporaryId: 'NEW_FIELD_1', label: '住所', suggestedCode: 'address' }, { temporaryId: 'NEW_FIELD_2', label: '電話番号', suggestedCode: 'phone' }], steps: [{ id: 'P3', actionType: 'UPDATE_LOOKUP', targetRef: 'customer_lookup', title: '顧客コードルックアップに住所と電話番号の取得項目を追加' }] } } };
   assert(KTAiConversation.classifyIntent('既存の案件にも住所と電話番号は自動で入りますか？', planSt).intent === 'EXPLAIN_PLAN', 'XA-11: 計画の語を含む質問は EXPLAIN_PLAN（ASK にしない）');
