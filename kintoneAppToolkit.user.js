@@ -6461,6 +6461,47 @@
     const similarLabel = (a, b) => { const x = norm(a), y = norm(b); if (!x || !y) return false; if (x === y) return true; return (x.includes(y) || y.includes(x)) || KTContext.longestSharedSubstring(x, y) >= Math.max(2, Math.min(x.length, y.length) - 1); };
     const sameTargets = (a, b) => a.length === b.length && a.every(x => b.some(y => sameEntity(x, y)));
     const overlapTargets = (a, b) => a.some(x => b.some(y => sameEntity(x, y)));
+    /** 2 つの文字列に共通する最長の部分文字列（短い文字列どうし用） */
+    function lcsText(a, b) {
+      let best = '';
+      for (let i = 0; i < a.length; i++) for (let j = 0; j < b.length; j++) {
+        let k = 0;
+        while (i + k < a.length && j + k < b.length && a[i + k] === b[j + k]) k++;
+        if (k > best.length) best = a.slice(i, i + k);
+      }
+      return best;
+    }
+    /**
+     * Phase 20（実機 XA-5）: 依頼で名前を挙げたアプリ（例:「顧客マスタ（旧）」）が、このアプリの参照先（ルックアップの参照元・アプリアクションのコピー先）の名前
+     * （例:「P20 顧客マスタ」）と途中まで一致し、依頼の側にだけ（旧）・番号・コピー等の区別の語が付いているとき、別のアプリの可能性がある。
+     * Planner への規則だけでは AI が同じアプリと決めつけて「既存の設定で足りる」と答えたため、Toolkit が決定的に指摘する（Toolkit はアプリ一覧を持たない）
+     */
+    function relatedAppNameWarnings(goal, data, steps = []) {
+      const out = [];
+      const nz = (s) => String(s ?? '').normalize('NFKC').replace(/\s+/g, '');
+      const g = nz(goal);
+      if (!g) return out;
+      const related = (data && data.relatedApps && typeof data.relatedApps === 'object') ? data.relatedApps : {};
+      const relatedIds = Object.values(related).map(e => String(e?.appId ?? '')).concat(Object.keys(related));
+      // 計画が参照先以外のアプリ（ID）を明示しているなら、AI は別のアプリとして扱っている（利用者が ID を伝えた後の修正など）
+      if ((steps || []).some(st => { const a = String(st?.spec?.sourceApp ?? st?.spec?.destApp ?? '').trim(); return /^\d+$/.test(a) && !relatedIds.includes(a); })) return out;
+      for (const e of Object.values(related)) {
+        const name = nz(e && e.name);
+        if (!name) continue;
+        // 名前の全体（無ければ最長の共通部分）が依頼に出てくる位置ごとに、その直後に区別の語（（旧）・番号・コピー等）が付いているかを見る
+        const s = g.includes(name) ? name : lcsText(g, name);
+        if (s.length < 3 || s.length < Math.ceil(name.length / 2)) continue;
+        const nameAfter = name.slice(name.indexOf(s) + s.length);
+        let m = null;
+        for (let at = g.indexOf(s); at >= 0 && !m; at = g.indexOf(s, at + 1)) {
+          const hit = g.slice(at + s.length).match(/^(?:\([^)]{1,12}\)|【[^】]{1,12}】|\[[^\]]{1,12}\]|旧|新|[0-9]+|ver\.?[0-9]+|v[0-9]+|コピー|copy|テスト|test|old|bk|バックアップ)/i);
+          if (hit && !nameAfter.startsWith(hit[0])) m = hit;
+        }
+        if (!m) continue;
+        out.push({ code: 'RELATED_APP_NAME_MISMATCH', severity: 'medium', stepIds: [], message: `依頼の「${s}${m[0]}」は、このアプリが参照している「${e.name}」（App ${e.appId}）と名前が一致しません（「${m[0]}」の有無）。名前の似た別のアプリかもしれません。Toolkit はアプリの一覧を持たないので同じアプリか判別できません。どのアプリか（アプリ ID か URL）を確かめてから進めてください`, detail: { mention: `${s}${m[0]}`, relatedApp: { appId: String(e.appId ?? ''), name: e.name } } });
+      }
+      return out;
+    }
 
     // ================= review =================
     /**
@@ -6525,6 +6566,8 @@
           for (const sid of stepIds) { const rr = results.get(sid); if (rr && rr.status === STATUS.VALID) { rr.status = STATUS.WARNING; rr.issues.push({ code: 'POSSIBLE_EXISTING_REUSE', severity: 'medium', message: `既存の「${f.label}」（${f.code}）で代用できる可能性` }); } }
         }
       }
+      // ---- 5a. 依頼で名前を挙げたアプリと、参照先アプリの名前の不一致（Phase 20 XA-5）----
+      warnings.push(...relatedAppNameWarnings(plan?.goal, data, steps));
       // ---- 6. 依存先が INVALID / BLOCKED の step は BLOCKED_BY_DEPENDENCY ----
       for (const id of order) {
         const r = results.get(id);
@@ -6787,6 +6830,12 @@
         if (!en) return;
         if (en.type === 'FIELD_ENTITY') { const f = requireField(en.temporaryId || en.code, role); if (f) en.code = f.code; }
         else if (en.type === 'UNKNOWN') { issue('UNKNOWN_ENTITY', 'medium', `${role}「${en.code}」はフィールド・ユーザー・グループ・組織のどれか判別できません（要確認）`); if (r.status === STATUS.VALID) r.status = STATUS.NEEDS_CONFIRMATION; }
+        // Phase 20（実機 CX-7）: AI が「USER:SLACK_WEBHOOK_USER」のような実在しないユーザーを宛先にした。Toolkit はユーザー一覧を持たないので、
+        // このアプリの設定（プロセス管理・通知・リマインダー・アクセス権）に出てこないユーザー / グループ / 組織のコードは要確認にする（実在は kintone が判定する）
+        else if (['USER', 'GROUP', 'ORGANIZATION'].includes(en.type) && en.code && !(en.type === 'GROUP' && /^everyone$/i.test(String(en.code))) && !knownEntities(model).some(k => k.type === en.type && String(k.code) === String(en.code))) {
+          issue('ENTITY_UNVERIFIED', 'medium', `${role}の${{ USER: 'ユーザー', GROUP: 'グループ', ORGANIZATION: '組織' }[en.type]}「${en.code}」は、このアプリの設定（プロセス管理・通知・アクセス権）に出てこないコードです。kintone に存在するかを Toolkit は確かめていません（要確認）`);
+          if (r.status === STATUS.VALID || r.status === STATUS.WARNING) r.status = STATUS.NEEDS_CONFIRMATION;
+        }
       };
       /** 作業者（プロセス管理）に使えるフィールド: 作成者・更新者・ユーザー選択・組織選択・グループ選択（API 仕様） */
       const assigneeFieldOk = (en, role) => { if (en && en.type === 'FIELD_ENTITY' && en.code && model.fields[en.code] && !ENTITY_FIELD_TYPES.includes(model.fields[en.code].baseType || model.fields[en.code].type)) invalid('ASSIGNEE_FIELD_INVALID', `${role}のフィールド「${en.code}」（${model.fields[en.code].type}）は作業者に使えません（作成者 / 更新者 / ユーザー選択 / 組織選択 / グループ選択）`); };
@@ -7212,7 +7261,9 @@
           if (!targets.length) { issue('TARGETS_MISSING', 'medium', '通知先が指定されていません（要確認）'); r.status = STATUS.NEEDS_CONFIRMATION; }
           if (r.status === STATUS.INVALID) return r;
           const scope = cond || !events.length ? 'perRecord' : 'general';
-          if (scope === 'perRecord' && events.length) issue('NOTIFICATION_EVENTS_IGNORED', 'low', `レコードの条件通知にはイベント（${events.join(', ')}）の指定はありません（アプリの条件通知の項目。条件式で判定します）`);
+          // Phase 20（実機 CX-2a / CX-7）: 条件式とイベントの両方があると反映（Executor）はどちらの通知か決めずに止める。Review も同じ判定にする
+          // （以前は「イベントは無視」として ✓ 問題なしと表示し、承認後に反映できなかった）
+          if (scope === 'perRecord' && events.length) { issue('NOTIFICATION_SCOPE_AMBIGUOUS', 'medium', `条件式（レコードの条件通知）とイベント（${events.join(', ')}。アプリの条件通知）の両方が書かれていて、どちらの通知か決められません。「〜になったら通知」ならレコードの条件通知（条件式だけ）、「追加・編集・コメントのたびに通知」ならアプリの条件通知（イベントだけ）です。チャットでどちらかを伝えて計画を修正してください`); if (r.status === STATUS.VALID || r.status === STATUS.WARNING) r.status = STATUS.NEEDS_CONFIRMATION; }
           const n = { id: `${scope}#new:${step.id}`, index: model.notifications[scope].length, scope, title: spec.name || step.targetRef || step.title || '', filterCond: cond, targets, events: scope === 'perRecord' ? [] : events, origin: 'proposed', stepId: step.id };
           // 重複 / 類似（既存・plan 内）
           for (const ex of [...model.notifications.general, ...model.notifications.perRecord]) {
@@ -7223,7 +7274,8 @@
           }
           model.notifications[scope].push(n); r.simulated = true;
           r.diff.target = { kind: 'NOTIFICATION', id: n.title || n.id }; r.diff.before = null; r.diff.after = notifView(n);
-          h(`＋ ${scope === 'general' ? 'アプリの条件通知' : 'レコードの条件通知'}「${n.title || '（無題）'}」`); h(`通知先: ${targets.map(entityText).join(', ') || '（未指定）'}`); if (cond) h(`条件: ${cond}`); if (n.events.length) h(`イベント: ${n.events.join(', ')}`);
+          const scopeAmbiguous = issues.some(i => i.code === 'NOTIFICATION_SCOPE_AMBIGUOUS');
+          h(`＋ ${scopeAmbiguous ? '通知（種類 未定）' : scope === 'general' ? 'アプリの条件通知' : 'レコードの条件通知'}「${n.title || '（無題）'}」`); h(`通知先: ${targets.map(entityText).join(', ') || '（未指定）'}`); if (cond) h(`条件: ${cond}`); if (n.events.length) h(`イベント: ${n.events.join(', ')}`); else if (scopeAmbiguous) h(`イベント: ${events.join(', ')}`);
           if (issues.some(i => i.code === 'DUPLICATE' || i.code === 'PLAN_INTERNAL_DUPLICATE')) r.status = STATUS.NEEDS_CONFIRMATION; else if (issues.some(i => i.code.includes('POSSIBLE_DUPLICATE')) && r.status === STATUS.VALID) r.status = STATUS.WARNING;
           break;
         }
@@ -12468,6 +12520,26 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
     let seq = 0;
     const newId = (p) => `${p}_${Date.now().toString(36)}_${(++seq).toString(36)}`;
 
+    // ---- Phase 20（実機 CX-7）: 秘密情報 ----
+    // AI が「Slack の Webhook URL を教えて」と質問した。チャットに書いた内容は AI（Gateway）へ送られ、会話・出力した資料にも残るので、
+    // 秘密情報らしい文字列を含む入力は送らない（会話にも残さない）。過剰に止める側に倒す（止めた理由を表示し、入力欄の文は残る）
+    const SECRET_PATTERNS = [
+      { label: 'Webhook URL', re: /https?:\/\/(?:hooks\.slack\.com\/(?:services|workflows|triggers)\/|discord(?:app)?\.com\/api\/webhooks\/|[\w.-]+\.webhook\.office\.com\/|outlook\.office(?:365)?\.com\/webhook|chat\.googleapis\.com\/v1\/spaces\/)\S*/i },
+      { label: 'トークン付きの URL', re: /https?:\/\/\S*[?&](?:token|access_token|api_key|apikey|key|secret|sig|signature)=[^\s&#]{8,}/i },
+      { label: 'Bearer トークン', re: /\bBearer\s+[A-Za-z0-9\-._~+/=]{16,}/i },
+      { label: 'API キー / トークン', re: /(?<![\w-])(?:xox[abposr]-[A-Za-z0-9-]{10,}|sk-[A-Za-z0-9_-]{20,}|gh[pousr]_[A-Za-z0-9]{20,}|AKIA[0-9A-Z]{16}|AIza[0-9A-Za-z_-]{30,})/ },
+      { label: '秘密情報（キー: 値）', re: /(?:api[_-]?key|apikey|access[_-]?token|client[_-]?secret|secret|password|passwd|パスワード|ＡＰＩキー|APIキー|API キー|アクセストークン|トークン|シークレット)\s*[:=：]\s*[\x21-\x7E]{6,}/i },
+      { label: 'トークンらしい長い文字列', re: /(?<![\w-])(?=[A-Za-z0-9_\-]*[a-z])(?=[A-Za-z0-9_\-]*[A-Z])(?=[A-Za-z0-9_\-]*[0-9])[A-Za-z0-9_\-]{40,}(?![\w-])/ },
+    ];
+    /** 秘密情報らしい文字列の種類（無ければ null）。中身は返さない */
+    function secretLikeIn(text) {
+      const s = String(text ?? '');
+      for (const p of SECRET_PATTERNS) if (p.re.test(s)) return p.label;
+      return null;
+    }
+    /** AI の確認事項が秘密情報（Webhook URL・API キー・パスワード等）の値を求めているか */
+    const SECRET_REQUEST_RE = /webhook\s*(?:の)?\s*url|ウェブフック\s*url|api\s*キー|apiキー|api[_ ]?key|アクセストークン|トークン|パスワード|password|シークレット|secret|認証情報|資格情報|credential/i;
+
     // ---- intent の決定的規則（順序が意味を持つ。質問 → 戻す → 進める → 修正 → 計画 → 質問 → 既定）----
     const RE = {
       // 説明の依頼（計画 / Review について）。「このフィールドは何に使ってる？」のような現在の設定の質問は含めない
@@ -12650,7 +12722,8 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
       function announcePlan(v, { revised = false } = {}) {
         const p = v.plan || {};
         const custs = Array.isArray(p.customizations) ? p.customizations : [];
-        const solutionText = p.solution === 'HYBRID' ? '標準設定と JavaScript の組み合わせで実現できます。' : p.solution === 'CUSTOMIZATION' ? '標準設定では実現できないため、JavaScript カスタマイズで実現します。' : custs.length ? '' : (p.solution === 'STANDARD' && /JavaScript|JS|カスタマイズ/.test(v.goal || '') ? '標準設定だけで実現できます（JavaScript は不要です）。' : '');
+        // Phase 20（実機 CX-7）: 外部連携や計画のみの手順を含む計画でも「実現できます」と言い切っていた。方式だけを伝え、できる範囲は検証の結果で示す
+        const solutionText = p.solution === 'HYBRID' ? '標準設定と JavaScript を組み合わせる計画です。' : p.solution === 'CUSTOMIZATION' ? '標準設定では足りないため、JavaScript カスタマイズを使う計画です。' : custs.length ? '' : (p.solution === 'STANDARD' && /JavaScript|JS|カスタマイズ/.test(v.goal || '') ? '標準設定だけで実現できます（JavaScript は不要です）。' : '');
         const summary = revised ? `${planLabel(v)} に見直しました（v${v.basedOnVersion} の修正）。${solutionText}${p.assessment?.summary || ''}` : `変更計画を作成しました。${solutionText}${p.assessment?.summary || ''}`;
         assistant(summary, { planId: v.planId, version: v.version, solution: p.solution || null });
         push(MSG.PLAN, ROLE.ASSISTANT, planLabel(v), { planId: v.planId, version: v.version });
@@ -12659,10 +12732,19 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
           // Phase 16: JavaScript の step は PLAN_ONLY なので safety の件数には出ない。hybrid の判定（実行不可 / 要確認）を文言に反映する
           const hc = v.review.hybrid?.customization || null;
           const jsBlocked = (hc?.blocked || []).length, jsNeeds = (hc?.needsConfirmation || []).length;
-          toolkit(`${planLabel(v)} を検証しました。${c.blocked ? '実行できない手順があります。' : c.review ? '確認が必要な手順があります。' : jsBlocked ? 'JavaScript カスタマイズに実行できない問題があります。' : jsNeeds ? 'JavaScript カスタマイズに確認が必要な点があります。' : '問題は見つかりませんでした。'}`, { planId: v.planId, version: v.version });
+          // Phase 20（実機 XA-5 / CX-7）: 計画全体への指摘（依頼のアプリ名が参照先と一致しない等）と、承認したら自動で反映できる手順の件数も伝える
+          const planWarn = (v.review.warnings || []).filter(w => w && w.severity === 'medium').length;
+          let ready = []; try { ready = KTPlanExecutor.applyReadiness(p, v.review); } catch (e) { ready = []; }
+          const settingSteps = ready.filter(x => x.apply !== 'JS' && x.apply !== 'CONFIRM');
+          const autoN = settingSteps.filter(x => x.apply === 'AUTO').length;
+          const readyText = settingSteps.length ? (autoN === settingSteps.length ? '' : autoN ? `設定の手順 ${settingSteps.length} 件のうち、動作テスト環境へ自動で反映できるのは ${autoN} 件です（残りは右の「検証」に理由）。` : '設定の手順は、どれも Toolkit からは自動で反映できません（理由は右の「検証」）。') : '';
+          toolkit(`${planLabel(v)} を検証しました。${c.blocked ? '実行できない手順があります。' : c.review ? '確認が必要な手順があります。' : jsBlocked ? 'JavaScript カスタマイズに実行できない問題があります。' : jsNeeds ? 'JavaScript カスタマイズに確認が必要な点があります。' : planWarn ? '計画全体に確認が必要な点があります（右の「検証」の「Toolkit からの指摘」）。' : '問題は見つかりませんでした。'}${readyText}`, { planId: v.planId, version: v.version });
           push(MSG.REVIEW, ROLE.TOOLKIT, 'Toolkit Review', { planId: v.planId, version: v.version, counts: c });
         }
         if ((p.questions || []).length) assistant(`確認したいことが ${p.questions.length} 件あります。${p.questions.slice(0, 3).map(q => `${q.id}: ${q.question}`).join(' / ')}${p.questions.length > 3 ? ' …' : ''}`, { planId: v.planId, version: v.version, kind: 'questions' });
+        // Phase 20（実機 CX-7）: AI が Webhook URL などの秘密情報を質問したら、チャットに書かないよう Toolkit が伝える（入力は送信前にも止める）
+        const secretQs = [...(p.questions || []).map(q => q && q.question), ...custs.flatMap(c => (Array.isArray(c.questions) ? c.questions : []))].filter(q => typeof q === 'string' && SECRET_REQUEST_RE.test(q));
+        if (secretQs.length) toolkit('確認事項に Webhook URL・API キー・パスワードなどの秘密情報を求めるものがあります。秘密情報はチャットに書かないでください（AI へ送られ、会話や資料に残ります）。外部サービスとの連携の設定は kintone の Webhook・プラグイン・連携サービスの画面で行い、ここでは方式だけを相談してください。', { planId: v.planId, version: v.version, kind: 'secret-question' });
         // Phase 17: 実装仕様（JS がある計画）。会話から即コード生成へ進まず、仕様を確定してから生成する
         if (v.spec) {
           // Phase 20（実機）: Toolkit がコードを生成できない項目（外部連携・CSS・方針未定など）があるときは「生成できます」と言わない
@@ -12773,6 +12855,12 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
       async function send(text, { signal = null, intentOverride = null } = {}) {
         const t = norm(text);
         if (!t || busy) return null;
+        // Phase 20（CX-7）: 秘密情報らしい文字列を含む入力は送らない・会話に残さない（入力欄の文は UI が残す）
+        const secret = secretLikeIn(t);
+        if (secret) {
+          push(MSG.SYSTEM_NOTICE, ROLE.SYSTEM, `秘密情報らしい文字列（${secret}）が含まれているため、送信しませんでした。Webhook URL・API キー・パスワード・トークンはチャットに書かないでください（AI へ送られ、会話や出力した資料にも残ります）。外部サービスとの連携は kintone の Webhook・プラグイン・連携サービスの設定画面で行います。`, { kind: 'secret-blocked', label: secret });
+          return { intent: null, reason: 'SECRET_LIKE', text: '', ok: false, cancelled: false, error: { code: 'SECRET_LIKE', message: secret } };
+        }
         busy = true;
         push(MSG.USER, ROLE.USER, t);
         const cls = intentOverride ? { intent: intentOverride, reason: 'USER_CHOICE', customizationId: (t.match(/\bC[0-9]+\b/g) || [])[0] || null } : classifyIntent(t, state);
@@ -12948,7 +13036,7 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
       };
     }
 
-    return { INTENT, MSG, PLAN_STATUS, SPEC_STATUS, ROLE, MAX_MESSAGES, classifyIntent, planTerms, create };
+    return { INTENT, MSG, PLAN_STATUS, SPEC_STATUS, ROLE, MAX_MESSAGES, classifyIntent, planTerms, secretLikeIn, create };
   })();
 
   // ==========================================
@@ -13740,9 +13828,22 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
         if (!st || !st.spec || typeof st.spec.filterCond !== 'string' || !st.spec.filterCond.trim()) continue;
         if (st.actionType === 'UPDATE_LOOKUP' || st.actionType === 'ADD_LOOKUP' || (st.actionType === 'ADD_FIELD' && st.spec.fieldType === 'LOOKUP')) continue;
         const n = KTQueryCheck.normalize(st.spec.filterCond, { fields });
-        if (!n.changes.length) continue;
-        st.spec.filterCond = n.text;
-        st.toolkitNotes = [...(Array.isArray(st.toolkitNotes) ? st.toolkitNotes : []), ...n.changes.map(c => ({ code: 'COND_NORMALIZED', message: `条件式を kintone の書き方に直しました: ${c.from} → ${c.to}（この種類のフィールドは in / not in で比べます）` }))];
+        if (n.changes.length) {
+          st.spec.filterCond = n.text;
+          st.toolkitNotes = [...(Array.isArray(st.toolkitNotes) ? st.toolkitNotes : []), ...n.changes.map(c => ({ code: 'COND_NORMALIZED', message: `条件式を kintone の書き方に直しました: ${c.from} → ${c.to}（この種類のフィールドは in / not in で比べます）` }))];
+        }
+        // Phase 20（実機 CX-2a / CX-7）: 「承認されたら通知」で AI がアプリの条件通知のイベント statusChanged と条件「ステータス in (…)」を両方書く
+        // （1 つの通知では両方を指定できない）。条件がステータスの in だけなら「そのステータスになったら届く」レコードの条件通知と意味が一致するので、
+        // イベントを外す。それ以外の組み合わせは直さない（Review が要確認にし、反映しない）
+        const ev = Array.isArray(st.spec.events) ? st.spec.events : [];
+        if (st.actionType === 'ADD_NOTIFICATION' && ev.length && ev.every(e => e === 'statusChanged')) {
+          const qc = KTQueryCheck.check(st.spec.filterCond, { fields, usage: 'perRecordNotification' });
+          const isStatus = (code) => (fields[code] ? fields[code].type === 'STATUS' : KTQueryCheck.SYSTEM_CODES[code] === 'STATUS');
+          if (qc.ok && qc.conds.length && qc.conds.every(c => c.op === 'in' && isStatus(c.field)) && qc.logical !== 'or') {
+            st.spec.events = [];
+            st.toolkitNotes = [...(Array.isArray(st.toolkitNotes) ? st.toolkitNotes : []), { code: 'NOTIFICATION_EVENTS_DROPPED', message: `イベント（statusChanged: ステータスの更新）と条件式「${st.spec.filterCond}」の両方が書かれていました。そのステータスになったときに届く「レコードの条件通知」として扱います（イベントは外しました）` }];
+          }
+        }
       }
       return plan;
     }
@@ -14431,6 +14532,7 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
       if (!paidEnabled) return null;
       if (!last || !last.ok || last.ctx?.contextVersion !== KTContext.PLANNER_CONTEXT_VERSION) { setPaidStatus('先に「変更計画 Prompt を生成」で実現したいことの Context を作成してください。'); return null; }
       if (sending) return null;
+      { const secret = KTAiConversation.secretLikeIn(`${last.ctx?.goal ?? ''}`); if (secret) { setPaidStatus(`秘密情報らしい文字列（${secret}）が含まれているため送信しませんでした。Webhook URL・API キー・パスワードは書かないでください。`); return null; } }
       if (!capability.available && isTransient()) await refreshCapability({ force: true });
       if (!capability.available) { setPaidStatus(KTContextUi.capabilityStatusText(capability)); return null; }
       if (!plannerAvailable()) { capability = { ...capability }; setPaidStatus(`${KTAiClient.errorText(KTAiClient.ERROR_CODES.PLANNER_NOT_AVAILABLE)} [${capability.features?.[KTAiClient.FEATURE_PLANNER]?.reason || 'NOT_ENTITLED'}]`); return null; }
@@ -14470,6 +14572,7 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
       if (!paidEnabled) return null;
       if (!last || !last.ok) { setPaidStatus(KTAiClient.errorText(KTAiClient.ERROR_CODES.NO_CONTEXT)); return null; }
       if (sending) return null;
+      { const secret = KTAiConversation.secretLikeIn(`${last.ctx?.question ?? ''}`); if (secret) { setPaidStatus(`秘密情報らしい文字列（${secret}）が含まれているため送信しませんでした。Webhook URL・API キー・パスワードは書かないでください。`); return null; } }
       if (!capability.available && isTransient()) await refreshCapability({ force: true });   // 一時的な失敗は再判定してから送る
       if (!capability.available) { setPaidStatus(KTContextUi.capabilityStatusText(capability)); return null; }
       const client = makeClient();

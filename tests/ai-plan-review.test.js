@@ -229,10 +229,11 @@ console.log('\n--- 9. staging E2E（2026-10-02）で見つかった実データ�
   assert(!codes(st(okFn, 'P1')).includes('COND_UNKNOWN_FUNCTION'), 'kintone の関数（TODAY / LOGINUSER）は指摘しない');
   const fnAct = review(plan([step('P1', 'ADD_PROCESS_ACTION', 'PROCESS_ACTION', '差戻し', [], { spec: { name: '差戻し', from: '承認待ち', to: '未処理', filterCond: 'ISBLANK(approver)' } })]));
   assert(codes(st(fnAct, 'P1')).includes('COND_UNKNOWN_FUNCTION'), 'プロセスアクションの条件式でも同じ検査');
-  // A: レコードの条件通知に events が混在 → NOTIFICATION_EVENTS_IGNORED（イベントは After モデルに載せない）
+  // A: 条件式（レコードの条件通知）と events（アプリの条件通知）が混在 → Phase 20: 反映（Executor）と同じく「どちらの通知か決められない」要確認
+  //    （以前は NOTIFICATION_EVENTS_IGNORED として ✓ のまま見せ、承認後に反映できなかった）。After のイベントは載せない
   const mixed = st(fn, 'P1');
   const mixed2 = review(plan([step('P1', 'ADD_NOTIFICATION', 'NOTIFICATION', '設定通知', [], { spec: { targets: ['FIELD_ENTITY:owner_group'], filterCond: 'amount > "5"', events: ['recordEdited'] } })]));
-  assert(codes(st(mixed2, 'P1')).includes('NOTIFICATION_EVENTS_IGNORED') && st(mixed2, 'P1').diff.after.scope === 'perRecord' && st(mixed2, 'P1').diff.after.events.length === 0 && !codes(mixed).includes('NOTIFICATION_EVENTS_IGNORED'), 'perRecord 通知に events → 無視した旨を指摘し After には載せない');
+  assert(codes(st(mixed2, 'P1')).includes('NOTIFICATION_SCOPE_AMBIGUOUS') && st(mixed2, 'P1').status === 'NEEDS_CONFIRMATION' && st(mixed2, 'P1').diff.after.scope === 'perRecord' && st(mixed2, 'P1').diff.after.events.length === 0 && !codes(mixed).includes('NOTIFICATION_SCOPE_AMBIGUOUS'), '条件式と events の混在 → 要確認（NOTIFICATION_SCOPE_AMBIGUOUS）・After にイベントは載せない');
   // C: ルックアップのコピー先が「後の step で追加する新規フィールドのコード」→ UNKNOWN ではなく PROPOSED_FIELD_NOT_APPLIED（順序 / dependsOn の問題と分かる）
   const order = review(plan([
     step('P1', 'ADD_FIELD', 'PROPOSED_FIELD', 'NEW_FIELD_1', [], { spec: { fieldType: 'LOOKUP', sourceApp: '999999', keyField: '顧客コード', mappings: [{ from: '住所', to: 'address' }, { from: '電話番号', to: 'phone_number' }] } }),

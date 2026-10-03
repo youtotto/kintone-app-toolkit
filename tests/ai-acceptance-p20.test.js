@@ -8,6 +8,8 @@
 //   F7 相談: 相談開始時に取得した本文を Planner Context と Review に使う（Scanner がキャッシュ復元で本文なしでも「未取得」と言わない）
 //   GM-6 / FR-9: 会話を切り替えた後に遅れて返った応答・エラーを新しい会話に入れない。新しい相談を始めると送信中の要求を中断する
 //   U2 / U3: 利用者向けの文言に Executor / Tier を出さない・最終確認に未回答の確認事項を出す
+//   FR-1 / FR-2 / FR-6 / FR-7: 計画の要求のタイムアウト・不完全な応答・Gateway の MODEL_OUTPUT_INVALID で計画を登録せず入力を残す。
+//     送信中の再クリックで要求を重ねない。再試行で計画が 1 件だけ登録される（実際の AI client と transport を通す）
 //
 // 実行方法: node tests/ai-acceptance-p20.test.js
 'use strict';
@@ -392,6 +394,160 @@ console.log('\n--- U2 / U3. 文言と最終確認の確認事項 ---');
   const log = await KTPlanExecutor.executePreview(prepared, { api: mock.api, review: rv, data: DATA });
   const doneHtml = KTContextUi.executorHtml({ stage: 'done', prepared, execution: log, classified: [], available: true, review: rv });
   assert(/運用環境への反映は kintone のアプリ設定画面の［アプリを更新］で行います。Toolkit は運用環境へ反映しません/.test(doneHtml) && !/Executor/.test(doneHtml), 'U2: 結果の文言に Executor を出さない');
+}
+
+// =========================================================
+console.log('\n--- CX-2a / CX-7 / XA-5（再実行）. 通知の種類・未確認のユーザー・言い切り・秘密情報・依頼のアプリ名 ---');
+{
+  const HEALTH = { ok: true, supportedContractVersions: ['2.0', '2.1'], entitlements: [{ product: 'toolkit', features: ['assistant-qa', 'change-planner'] }], registry: { toolkit: { 'assistant-qa': { implemented: true, promptVersions: ['1'] }, 'change-planner': { implemented: true, promptVersions: ['1'] } } }, usage: { monthlyLimit: 200, usedThisMonth: 1 } };
+  const respOf = (goal, steps, extra = {}) => ({ ok: true, contractVersion: '2.1', meta: { requestId: 'pl-r', gateway: { product: 'toolkit', feature: 'change-planner', promptVersion: '1', contextVersion: 'planner-1' }, normalization: { warnings: [] }, ai: { model: 'm' }, usage: { usedThisMonth: 1, monthlyLimit: 200 } }, plan: { goal, solution: 'STANDARD', assessment: { summary: 's', usableExistingFields: [], usableExistingSettings: [], gaps: [], evidenceIds: [] }, relevantFields: [], proposedFields: [], steps, alternatives: [], impact: [], questions: [], unknowns: [], planConfidence: 'INFERRED', customizations: [], ...extra } });
+  const mountWith = (resp) => {
+    const storage = (() => { const m = new Map(); return { getItem: (k) => (m.has(k) ? m.get(k) : null), setItem: (k, v) => m.set(k, String(v)), removeItem: (k) => m.delete(k) }; })();
+    const settings = KTAiClient.createSettingsStore({ storage, host: 't.cybozu.com' });
+    settings.setConsent(true);
+    const calls = [];
+    const client = { async getHealth() { return HEALTH; }, async plan({ ctx, requestId }) { calls.push(ctx); const v = KTAiClient.validatePlan(resp, ctx); if (!v.ok) throw new Error(JSON.stringify(v.errors)); return { ...v.normalized, requestId, clientWarnings: v.warnings }; } };
+    const session = { status() { return { connected: true, apiBase: 'https://gw.test', refreshExpiresAt: '2099-01-01T00:00:00Z', scope: { product: 'toolkit', feature: 'assistant-qa,change-planner', domain: 't.cybozu.com' } }; }, async migrateLegacy() { return false; }, async refresh() { return {}; }, async disconnect() { return { revoked: true }; }, client };
+    const host = makeFakeHost();
+    const panel = mountAiWorkspace(host, { getInputs: () => ({ data: DATA, deps: DEPS, scan: null, incoming: null }), copyText: async () => true, downloadText: () => { }, colors: { border: '#ccc', bg: '#fff' }, settings, session, hostname: 't.cybozu.com', connectFlow: { start: async () => ({}), cancel() { }, reopen: () => false, state: () => ({ phase: 'idle' }), isRunning: () => false }, executor: { api: makeKintoneMock(DATA).api, appId: '310' } });
+    return { panel, host, calls, $: (id) => host.querySelector(`#${id}`) };
+  };
+  const ticks = async (n = 4) => { for (let i = 0; i < n; i++) await new Promise(r => setTimeout(r, 0)); };
+
+  // 通知の種類: 条件式とイベントの両方 → Review も「要確認・種類 未定」（反映できない判定と一致させる）
+  const amb = plan([step('P1', 'ADD_NOTIFICATION', 'NEW_SETTING', '高額案件の登録', { name: '高額案件の登録', filterCond: 'amount >= "1000000"', events: ['recordAdded'], targets: ['FIELD_ENTITY:owner'] })]);
+  const rvAmb = reviewOf(amb);
+  const sAmb = rvAmb.steps.find(x => x.stepId === 'P1');
+  const aAmb = KTPlanExecutor.applyReadiness(amb, rvAmb).find(x => x.stepId === 'P1');
+  assert(sAmb.status === 'NEEDS_CONFIRMATION' && sAmb.issues.some(i => i.code === 'NOTIFICATION_SCOPE_AMBIGUOUS' && i.severity === 'medium') && !sAmb.issues.some(i => i.code === 'NOTIFICATION_EVENTS_IGNORED') && /通知（種類 未定）/.test(sAmb.diff.human[0]) && aAmb.apply === 'MANUAL' && aAmb.reason === 'NOTIFICATION_SCOPE_AMBIGUOUS', 'CX-2a / CX-7: 条件式とイベントの両方 → Review も要確認（種類 未定）。反映の判定（MANUAL・NOTIFICATION_SCOPE_AMBIGUOUS）と食い違わない');
+  // 受信時: 「ステータスの更新」＋「ステータス in (…)」だけはレコードの条件通知として直す（意味が一致する）
+  {
+    const m = mountWith(respOf('承認されたら担当者に通知したい', [step('P1', 'ADD_NOTIFICATION', 'NEW_SETTING', '承認済み通知', { name: '承認済み通知', filterCond: 'ステータス = "承認済み"', events: ['statusChanged'], targets: ['FIELD_ENTITY:owner'] })]));
+    await ticks();
+    await m.panel.send('承認されたら担当者に通知したい');
+    const v = m.panel.conversation().activePlan();
+    const r1 = v.review.steps.find(x => x.stepId === 'P1');
+    assert(v.plan.steps[0].spec.events.length === 0 && v.plan.steps[0].spec.filterCond === 'ステータス in ("承認済み")' && r1.issues.some(i => i.code === 'NOTIFICATION_EVENTS_DROPPED' && /レコードの条件通知/.test(i.message)) && !r1.issues.some(i => i.code === 'NOTIFICATION_SCOPE_AMBIGUOUS') && KTPlanExecutor.applyReadiness(v.plan, v.review).find(a => a.stepId === 'P1').apply === 'AUTO', 'CX-2a: statusChanged ＋ ステータス in (…) は受信時にレコードの条件通知へ（イベントを外したと表示）→ 自動で反映できる');
+    const m2 = mountWith(respOf('高額案件が登録されたら通知したい', [step('P1', 'ADD_NOTIFICATION', 'NEW_SETTING', '高額', { name: '高額', filterCond: 'amount >= "1000000"', events: ['statusChanged'], targets: ['FIELD_ENTITY:owner'] })]));
+    await ticks();
+    await m2.panel.send('高額案件が登録されたら通知したい');
+    const v2 = m2.panel.conversation().activePlan();
+    assert(v2.plan.steps[0].spec.events.length === 1 && v2.review.steps.find(x => x.stepId === 'P1').issues.some(i => i.code === 'NOTIFICATION_SCOPE_AMBIGUOUS'), 'ステータス以外の条件との組み合わせは直さない（要確認のまま）');
+  }
+  // 未確認のユーザー（CX-7: USER:SLACK_WEBHOOK_USER）
+  const fake = reviewOf(plan([step('P1', 'ADD_NOTIFICATION', 'NEW_SETTING', 'Slack承認通知', { name: 'Slack承認通知', filterCond: 'ステータス in ("承認済み")', targets: ['USER:SLACK_WEBHOOK_USER'] })]));
+  const sFake = fake.steps.find(x => x.stepId === 'P1');
+  assert(sFake.status === 'NEEDS_CONFIRMATION' && sFake.issues.some(i => i.code === 'ENTITY_UNVERIFIED' && /SLACK_WEBHOOK_USER/.test(i.message) && /確かめていません/.test(i.message)), 'CX-7: このアプリの設定に出てこないユーザーを宛先にした通知は要確認（ENTITY_UNVERIFIED）');
+  const known = reviewOf(plan([step('P1', 'ADD_NOTIFICATION', 'NEW_SETTING', '通知', { name: '通知', filterCond: 'ステータス in ("承認済み")', targets: ['USER:user1', 'GROUP:everyone'] })])).steps.find(x => x.stepId === 'P1');
+  assert(!known.issues.some(i => i.code === 'ENTITY_UNVERIFIED'), '既存の設定に出てくるユーザー（user1）と Everyone は要確認にしない');
+  // 案内の言い切り（CX-7）: 自動で反映できる手順が無ければそう伝える
+  {
+    const conv = KTAiConversation.create({ services: {} });
+    const p = plan([step('P1', 'UPDATE_RECORD_ACL', 'NEW_SETTING', '', { filterCond: 'ステータス in ("承認済み")', entities: ['FIELD_ENTITY:owner'] }), step('P2', 'REQUIRE_CONFIRMATION', 'NEW_SETTING', '', {})], [], { solution: 'HYBRID' });
+    conv.registerPlan({ plan: p, ctx: null, review: reviewOf(p) });
+    const texts = conv.messages().map(x => x.text).join('\n');
+    assert(!/組み合わせで実現できます/.test(texts) && /標準設定と JavaScript を組み合わせる計画です/.test(texts) && /設定の手順は、どれも Toolkit からは自動で反映できません/.test(texts), 'CX-7: 「実現できます」と言い切らず、自動で反映できる手順が無いことを伝える');
+  }
+  // 秘密情報（CX-7: AI が Webhook URL を質問した）
+  {
+    const S = KTAiConversation.secretLikeIn;
+    const pos = ['https://hooks.slack.com/services/T0000/B0000/XXXXXXXXXXXXXXXX', 'Authorization: Bearer abcdefghijklmnop1234567890', 'xoxb-1234567890-abcdefghij', 'APIキー: a1B2c3D4e5', 'password=hunter22', 'トークンは AbCdEfGhIjKlMnOpQrStUvWxYz0123456789AbCd です', 'https://example.com/hook?token=abcdef123456'];
+    const neg = ['承認されたらSlackに通知して', 'パスワード：まだ決めていません', 'API キーは使わない方式にしたい', "kintone.app.record.getSpaceElement('amount_warning_space')", '顧客マスタ（旧）の顧客コードで会社名を取ってきたい', 'https://qlcmsgqzf8g1.cybozu.com/k/357/'];
+    assert(pos.every(t => S(t)) && neg.every(t => !S(t)), `秘密情報らしい文字列だけを検出する（誤検出なし）: ${pos.filter(t => !S(t)).concat(neg.filter(t => S(t))).join(' | ') || 'ok'}`);
+    let called = 0;
+    const conv = KTAiConversation.create({ services: { plan: async () => { called++; return { plan: null }; }, ask: async () => { called++; return { ok: true, answer: { answer: 'x' } }; } } });
+    const res = await conv.send('Slack の Webhook URL は https://hooks.slack.com/services/T0000/B0000/XXXXXXXXXXXXXXXX です');
+    assert(res.ok === false && res.reason === 'SECRET_LIKE' && called === 0 && !conv.messages().some(x => x.type === 'USER') && conv.messages().some(x => x.type === 'SYSTEM_NOTICE' && x.data.kind === 'secret-blocked' && /送信しませんでした/.test(x.text) && !/hooks\.slack\.com/.test(x.text)), 'CX-7: Webhook URL を含む入力は AI へ送らず会話にも残さない（理由だけ表示）');
+    const m = mountWith(respOf('x', []));
+    await ticks();
+    m.$('kt-ai-input').value = 'APIキー: a1B2c3D4e5f6 を使って会計システムに送って';
+    await m.$('kt-ai-send').dispatch('click'); await ticks();
+    assert(m.calls.length === 0 && m.$('kt-ai-input').value === 'APIキー: a1B2c3D4e5f6 を使って会計システムに送って' && /送信しませんでした/.test(m.$('kt-ai-chat').innerHTML) && !/a1B2c3D4e5f6/.test(m.$('kt-ai-chat').innerHTML), '画面: 送信しない・入力欄の文は残る（直して送れる）・会話には秘密情報を出さない');
+    const conv2 = KTAiConversation.create({ services: {} });
+    const pq = plan([step('P1', 'REQUIRE_CONFIRMATION', 'NEW_SETTING', '', {})], [], { questions: [{ id: 'Q1', question: 'Slack通知の送信先Webhook URLや通知内容の詳細は？', relatedEvidenceIds: [] }] });
+    conv2.registerPlan({ plan: pq, ctx: null, review: reviewOf(pq) });
+    assert(conv2.messages().some(x => x.data && x.data.kind === 'secret-question' && /チャットに書かないでください/.test(x.text)), 'CX-7: AI が秘密情報を質問したら、チャットに書かないよう Toolkit が伝える');
+  }
+  // 依頼のアプリ名と参照先アプリの名前（XA-5）
+  {
+    const W = (goal, steps = []) => reviewOf(plan(steps, [], { goal })).warnings.filter(w => w.code === 'RELATED_APP_NAME_MISMATCH');
+    const w1 = W('顧客マスタ（旧）の顧客コードで会社名を取ってきたい');
+    assert(w1.length === 1 && w1[0].severity === 'medium' && /顧客マスタ\(旧\)/.test(w1[0].message) && /「顧客マスタ」（App 500）/.test(w1[0].message), 'XA-5: 「顧客マスタ（旧）」は参照先「顧客マスタ」と名前が一致しない → 計画全体の指摘（medium）');
+    assert(W('顧客マスタ2から電話番号を取得したい').length === 1 && W('顧客マスタから住所と電話番号も取得したい').length === 0 && W('見積管理にも金額を転記したい').length === 0, '番号付きの名前は指摘・同じ名前（参照先そのもの）は指摘しない');
+    assert(W('顧客マスタ（旧）の顧客コードで会社名を取ってきたい', [step('P1', 'ADD_FIELD', 'PROPOSED_FIELD', 'NEW_FIELD_1', { fieldType: 'LOOKUP', sourceApp: '357', keyField: 'cust_cd' })]).length === 0, '計画が参照先以外のアプリ（ID）を明示していれば指摘しない（利用者が ID を伝えた後）');
+    const conv = KTAiConversation.create({ services: {} });
+    const p0 = plan([], [], { goal: '顧客マスタ（旧）の顧客コードで会社名を取ってきたい' });
+    conv.registerPlan({ plan: p0, ctx: null, review: reviewOf(p0) });
+    assert(conv.messages().some(x => /計画全体に確認が必要な点があります/.test(x.text)) && !conv.messages().some(x => /問題は見つかりませんでした/.test(x.text)), 'XA-5: 手順が無く「既存の設定で足りる」計画でも「問題は見つかりませんでした」と言わない');
+  }
+}
+
+// =========================================================
+console.log('\n--- FR-1 / FR-2 / FR-6 / FR-7（UI・実際の AI client と transport）. 計画の要求の失敗・二重クリック・再試行 ---');
+{
+  const data = FX.makeData();
+  const fieldsN = KTDeps.normalizeFields(data.fields);
+  const deps = KTDeps.buildDependencyData(data, fieldsN);
+  const scan = buildScanPayload({ KTScan, KTDeps }, { appId: FX.SELF_APP, files: FX.files, fields: fieldsN.map(f => ({ code: f.code, label: f.label, type: f.rawType })), deps, skippedUrlFiles: FX.skippedUrlFiles });
+  KTDeps.mergeScannerEdges(deps, scan);
+  const inputs = { data, deps, scan, incoming: null };
+  const GOAL = '承認済みの案件だけの一覧を追加したい';
+  const HEALTH = { ok: true, supportedContractVersions: ['2.0', '2.1'], entitlements: [{ product: 'toolkit', features: ['assistant-qa', 'change-planner'] }], registry: { toolkit: { 'assistant-qa': { implemented: true, promptVersions: ['1'] }, 'change-planner': { implemented: true, promptVersions: ['1'] } } }, usage: { monthlyLimit: 200, usedThisMonth: 1 } };
+  const META = { requestId: 'pl-fr', gateway: { product: 'toolkit', feature: 'change-planner', promptVersion: '1', contextVersion: 'planner-1' }, normalization: { warnings: [] }, ai: { model: 'm' }, usage: { usedThisMonth: 2, monthlyLimit: 200 } };
+  const GOOD = { ok: true, contractVersion: '2.1', meta: META, plan: { goal: GOAL, solution: 'STANDARD', assessment: { summary: 's', usableExistingFields: [], usableExistingSettings: [], gaps: [], evidenceIds: [] }, relevantFields: [], proposedFields: [], steps: [step('P1', 'ADD_VIEW', 'VIEW', '承認済みの案件', { name: '承認済みの案件', fields: ['amount'] })], alternatives: [], impact: [], questions: [], unknowns: [], planConfidence: 'INFERRED', customizations: [] } };
+  // POST /v2/review の応答を順に切り替える: hang（応答なし → client の timeout）/ malformed（plan.steps が無い）/ model-invalid（Gateway 502）/ gate（保留）/ ok
+  const queue = [], posts = []; let release = null;
+  const transport = async (req) => {
+    if (req.method === 'GET') return { status: 200, body: JSON.stringify(HEALTH) };
+    posts.push(req.url);
+    const next = queue.shift() || 'ok';
+    if (next === 'hang') return new Promise(() => { });
+    if (next === 'gate') await new Promise((res) => { release = res; });
+    if (next === 'malformed') return { status: 200, body: JSON.stringify({ ok: true, contractVersion: '2.1', meta: META, plan: { goal: GOAL, assessment: { summary: 's' } } }) };
+    if (next === 'model-invalid') return { status: 502, body: JSON.stringify({ ok: false, contractVersion: '2.1', error: { code: 'MODEL_OUTPUT_INVALID', message: 'm', requestId: 'e-mi' } }) };
+    return { status: 200, body: JSON.stringify(GOOD) };
+  };
+  const client = KTAiClient.createAiClient({ apiBase: 'https://gw.test', customerToken: 't', hostname: 't.cybozu.com', transport, timeoutMs: 400 });   // gate（保留）の間に timeout しない長さ
+  const storage = (() => { const m = new Map(); return { getItem: (k) => (m.has(k) ? m.get(k) : null), setItem: (k, v) => m.set(k, String(v)), removeItem: (k) => m.delete(k) }; })();
+  const settings = KTAiClient.createSettingsStore({ storage, host: 't.cybozu.com' });
+  settings.setConsent(true);
+  const session = { status() { return { connected: true, apiBase: 'https://gw.test', refreshExpiresAt: '2099-01-01T00:00:00Z', scope: { product: 'toolkit', feature: 'assistant-qa,change-planner', domain: 't.cybozu.com' } }; }, async migrateLegacy() { return false; }, async refresh() { return {}; }, async disconnect() { return { revoked: true }; }, client };
+  const flow = { start: async () => ({}), cancel() { }, reopen: () => false, state: () => ({ phase: 'idle' }), isRunning: () => false };
+  const host = makeFakeHost();
+  const mock = makeKintoneMock(data);
+  const panel = mountAiWorkspace(host, { getInputs: () => inputs, copyText: async () => true, downloadText: () => { }, colors: { border: '#ccc', bg: '#fff' }, settings, session, hostname: 't.cybozu.com', connectFlow: flow, executor: { api: mock.api, appId: '310' } });
+  const $ = (id) => host.querySelector(`#${id}`);
+  const ticks = async (n = 6) => { for (let i = 0; i < n; i++) await new Promise(r => setTimeout(r, 0)); };
+  const msgs = () => panel.conversation().messages();
+  const last = () => msgs()[msgs().length - 1];
+  const chat = () => $('kt-ai-chat').innerHTML;
+  const plans = () => panel.conversation().planHistory().length;
+  const retry = () => $('kt-ai-chat').dispatch({ type: 'click', target: { dataset: { act: 'retry', text: GOAL } } });
+  // 応答（timeout を含む）が返って送信中でなくなるまで待つ / 要求が n 件送られるまで待つ
+  const settle = async (ms = 3000) => { const t0 = Date.now(); await ticks(); while (panel.conversation().isBusy() && Date.now() - t0 < ms) await new Promise(r => setTimeout(r, 10)); await ticks(); };
+  const sentCount = async (n, ms = 3000) => { const t0 = Date.now(); while (posts.length < n && Date.now() - t0 < ms) await new Promise(r => setTimeout(r, 5)); await ticks(); };
+  await ticks();
+  // FR-1: 応答が返らない → client の timeout
+  queue.push('hang');
+  $('kt-ai-input').value = GOAL;
+  $('kt-ai-send').dispatch('click'); await settle();
+  assert(posts.length === 1 && last().type === 'ERROR' && last().data.code === 'TIMEOUT' && /data-act="retry"/.test(chat()) && $('kt-ai-input').value === GOAL && plans() === 0 && !msgs().some(m => m.type === 'PLAN') && !panel.conversation().isBusy() && $('kt-ai-send').disabled === false, 'FR-1: タイムアウト → エラーカード（再試行）・入力欄の文は残る・計画は登録しない・続けて送信できる');
+  // FR-2: 不完全な応答（plan.steps が無い）→ client の検証で拒否 / Gateway の MODEL_OUTPUT_INVALID
+  queue.push('malformed');
+  retry(); await settle();
+  assert(posts.length === 2 && last().type === 'ERROR' && last().data.code === 'INVALID_RESPONSE' && /\[INVALID_RESPONSE\]/.test(chat()) && plans() === 0, 'FR-2: plan の形が不完全な応答 → INVALID_RESPONSE（計画として登録しない・理由の code を表示）');
+  queue.push('model-invalid');
+  retry(); await settle();
+  assert(posts.length === 3 && last().type === 'ERROR' && last().data.code === 'MODEL_OUTPUT_INVALID' && /\[MODEL_OUTPUT_INVALID\]/.test(chat()) && plans() === 0 && $('kt-ai-input').value === GOAL, 'FR-2: Gateway が AI 出力を契約違反と判定（502 MODEL_OUTPUT_INVALID）→ 登録しない・入力は残る');
+  // FR-7 / FR-6: 再試行の応答待ちに［再試行］と［送信］をもう一度押しても要求は 1 回。応答が来たら計画は 1 件だけ
+  queue.push('gate');
+  const p1 = retry(); await sentCount(4);
+  assert(panel.conversation().isBusy() && posts.length === 4, '前提: 再試行の要求を送信中（応答待ち）');
+  const p2 = retry(); const p3 = $('kt-ai-send').dispatch('click'); await ticks();
+  assert(posts.length === 4, 'FR-6: 送信中の［再試行］［送信］の再クリックで要求を重ねない（POST は 4 回のまま）');
+  release(); await p1; await p2; await p3; await settle();
+  assert(posts.length === 4 && plans() === 1 && msgs().filter(m => m.type === 'PLAN').length === 1 && panel.conversation().activePlan().version === 1 && $('kt-ai-input').value === '', 'FR-7: 失敗の後の再試行で計画 v1 が 1 件だけ登録される（重複しない）・成功後に入力欄は空');
+  assert(mock.calls.every(c => c.startsWith('GET')), 'FR-1 / FR-2 / FR-7: AI の失敗・再試行で kintone の設定へ書き込まない');
 }
 
 console.log(`\n${state.failed ? 'FAILED' : 'ALL PASSED'}: ${state.passed} passed / ${state.failed} failed`);
