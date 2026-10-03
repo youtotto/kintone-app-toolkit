@@ -662,6 +662,13 @@ console.log('\n--- F37（CX-1 2 回目・実機）. 同じ遷移元の分岐は�
 }
 
 // =========================================================
+console.log('\n--- U9（使い勝手・実機）. キーボード操作でフォーカスの位置が見える（kintone の CSS が枠を消していた）---');
+{
+  const SRC = require('fs').readFileSync(require('path').join(__dirname, '..', 'kintoneAppToolkit.user.js'), 'utf8');
+  assert(/#kt-toolkit button:focus-visible[^{]*\{outline:2px solid #2563eb !important/.test(SRC) && /#kt-toolkit textarea:focus-visible/.test(SRC), 'U9: Toolkit のボタン・入力欄・タブはキーボードで移ったときに枠を出す（:focus-visible・!important で kintone の outline:none より優先）');
+}
+
+// =========================================================
 console.log('\n--- F40（CX-3 3 回目・実機）. 同じ既存の設定を 2 つの手順が変更する（後の手順が前を上書きする）---');
 {
   // 実機と同じ形: 「申請する」を P1 で 100 万円以上 → 承認待ち、P2 で 100 万円未満 → 承認済み（どちらも UPDATE_PROCESS。分岐なら 2 本目は ADD_PROCESS_ACTION）

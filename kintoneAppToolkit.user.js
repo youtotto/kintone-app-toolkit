@@ -15404,6 +15404,8 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
         #kt-toolkit .tab{padding:6px 10px;border:1px solid ${C.border};background:${C.bgSub};color:${C.text};border-radius:8px;cursor:pointer}
         #kt-toolkit .tab.active{background:#2563eb;border-color:#2563eb;color:#fff;} /* Activeは色固定 */
         #kt-toolkit .btn{padding:6px 10px;border:1px solid ${C.border};background:${C.bgSub};color:${C.text};border-radius:8px;cursor:pointer}
+        /* Phase 20（実機）: kintone のページの CSS がフォーカスの枠を消すため、キーボード操作でいまの位置が分からなかった。Toolkit の操作部品にだけ明示する */
+        #kt-toolkit button:focus-visible, #kt-toolkit select:focus-visible, #kt-toolkit input:focus-visible, #kt-toolkit textarea:focus-visible, #kt-toolkit a:focus-visible, #kt-toolkit summary:focus-visible, #kt-toolkit [tabindex]:focus-visible{outline:2px solid #2563eb !important;outline-offset:2px !important;}
         /* body が唯一の縦スクロール領域（bar は固定） */
         #kt-toolkit .body{padding:12px; flex:1 1 0%; min-height:0; overflow:auto;}
         /* 各タブ内 view の高さをそろえる（bodyの利用可能高さ基準。vh固定はやめる） */
