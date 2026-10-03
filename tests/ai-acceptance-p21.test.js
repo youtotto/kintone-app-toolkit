@@ -524,6 +524,21 @@ console.log('\n--- G9 / G10. Generator Context の欠落（モデル比較の候
   assert(tableReq.registration.confirmations.some(x => x.code === 'requirement-scope' && /行の追加・削除/.test(x.message) && /運用/.test(x.howToCheck)) && !tableReq.registration.confirmations.some(x => x.code === 'summary-scope'), '要件は明細の変更禁止・要約は正確 → 要件の側の確認（requirement-scope）。要約の問題にはしない');
 }
 {
+  // §5 モバイルの実機: 作成画面のイベントの record にはステータス等のシステムフィールドが無い → 確かめずに .value を読むコードは登録不可
+  const data = clone(REG.data);
+  data.fields['ステータス'] = { type: 'STATUS', code: 'ステータス', label: 'ステータス', enabled: true };
+  const c = { customizationId: 'C2', requirement: 'モバイルで承認済みのとき金額を編集不可にする', strategy: 'NEW_JS_FILE', platform: ['mobile'], implementation: 'JAVASCRIPT', events: ['mobile.app.record.create.show', 'mobile.app.record.edit.show'], fields: [{ code: 'amount', access: 'CONTROL', condition: 'ステータス in ("承認済み")' }], apis: [], existingFiles: [] };
+  const rv = (body, events = ['mobile.app.record.create.show', 'mobile.app.record.edit.show']) => KTCodeReview.review({ generated: REG.gen(`(function () {\n  'use strict';\n  const EVENTS = ${JSON.stringify(events).replace(/"/g, "'")};\n  kintone.events.on(EVENTS, (event) => {\n    const record = event.record;\n${body}\n    return event;\n  });\n})();`, { targetFile: 'mobile-approved-lock.js', summary: 'モバイルで承認済みのとき金額を編集不可' }), customization: { ...c, events }, plan: null, data, scan: null, existingSource: null });
+  // 候補モデル CX-1 1 回目のモバイルのコードの形そのもの（実機で作成画面を開くたびに TypeError）
+  const bare = rv("    if (record['ステータス'].value === '承認済み') {\n      record['amount'].disabled = true;\n    }");
+  assert(bare.registration.verdict === 'BLOCKED' && bare.registration.blockers.some(b => b.code === 'create-missing-field' && /mobile\.app\.record\.create\.show/.test(b.message) && /TypeError/.test(b.message)), `作成画面のイベントでステータスを確かめずに読む → 登録不可（create-missing-field）: ${JSON.stringify(bare.registration.blockers.map(b => b.code))}`);
+  const guarded = rv("    if (record['ステータス'] && record['ステータス'].value === '承認済み') {\n      record['amount'].disabled = true;\n    }");
+  const optional = rv("    if (record['ステータス']?.value === '承認済み') {\n      record['amount'].disabled = true;\n    }");
+  const early = rv("    if (!record['ステータス']) {\n      return event;\n    }\n    if (record['ステータス'].value === '承認済み') {\n      record['amount'].disabled = true;\n    }");
+  const editOnly = rv("    if (record['ステータス'].value === '承認済み') {\n      record['amount'].disabled = true;\n    }", ['mobile.app.record.edit.show']);
+  assert([guarded, optional, early, editOnly].every(r => !r.registration.blockers.some(b => b.code === 'create-missing-field')), `存在を確かめる書き方（&&・?.・早い return）と、編集画面だけのイベントは止めない: ${[guarded, optional, early, editOnly].map(r => r.registration.verdict).join(',')}`);
+}
+{
   // 計画の Review: ステータス名の後ろの注釈（「承認待ち（課長承認として再利用）」）を名前として読まない（モデル比較の CX-1 で「遷移先が存在しません（high）」）
   const data = clone(REG.data);
   data.status = { enable: true, revision: '5', states: { '作成中': { name: '作成中', index: '0', assignee: { type: 'ONE', entities: [] } }, '承認待ち': { name: '承認待ち', index: '1', assignee: { type: 'ONE', entities: [{ entity: { type: 'USER', code: 'u1' }, includeSubs: false }] } }, '承認済み': { name: '承認済み', index: '2', assignee: { type: 'ONE', entities: [] } } }, actions: [{ name: '申請する', from: '作成中', to: '承認待ち', filterCond: '', type: 'PRIMARY' }, { name: '承認する', from: '承認待ち', to: '承認済み', filterCond: '', type: 'PRIMARY' }, { name: '差し戻す', from: '承認待ち', to: '作成中', filterCond: '', type: 'PRIMARY' }] };

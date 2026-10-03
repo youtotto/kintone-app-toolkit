@@ -92,7 +92,7 @@ const NEW_JS_GOOD = [
 ].join('\n');
 const PATCH_GOOD = {
   baseHash: hash(FIELD_ON_OFF),
-  operations: [{ type: 'INSERT_AFTER', anchor: "      record['amount'].disabled = true;\n    }", content: "    if (record['ステータス'].value === '完了') {\n      record['amount'].disabled = true;\n    }" }],
+  operations: [{ type: 'INSERT_AFTER', anchor: "      record['amount'].disabled = true;\n    }", content: "    if (record['ステータス'] && record['ステータス'].value === '完了') {\n      record['amount'].disabled = true;\n    }" }],
 };
 const PATCH_ADDED = PATCH_GOOD.operations[0].content;
 /** Gateway の応答（generated）。validateGenerated を通して会話経路と同じ形にする */
@@ -227,7 +227,7 @@ console.log('\n--- §52-1. KTCodeReview: 新規 JS OK / patch OK ---');
   assert(rp.status === 'OK', `既存 JS への patch（妥当）: status OK（${(rp.checks || []).filter(c => !c.ok).map(c => `${c.name}: ${c.message}`).join(' / ') || 'すべて ✓'}）`);
   assert(check(rp, 'patch')?.ok && rp.diff.added === 3 && rp.diff.removed === 0 && rp.finalCode.includes(FIELD_ON_OFF.split('\n')[2]) && rp.finalCode.includes("value === '完了'"), 'patch: 既存の行は保持（削除 0）・3 行追加・最終コードは既存 ＋ 追加');
   assert(check(rp, 'handler')?.ok && /既存の handler/.test(check(rp, 'handler').message), '既存 handler の中へ追加（kintone.events.on を重複登録しない）');
-  assert(rp.patch?.applied === 1 && rp.patch.afterHash === hash(rp.finalCode) && typeof rp.diffText === 'string' && /\+\s*if \(record\['ステータス'\]\.value === '完了'\)/.test(rp.diffText), 'patch の適用結果（afterHash）と Before / After の diff テキスト');
+  assert(rp.patch?.applied === 1 && rp.patch.afterHash === hash(rp.finalCode) && typeof rp.diffText === 'string' && /\+\s*if \(record\['ステータス'\] && record\['ステータス'\]\.value === '完了'\)/.test(rp.diffText), 'patch の適用結果（afterHash）と Before / After の diff テキスト');
   assert(!check(rp, 'duplicate-handler') || check(rp, 'duplicate-handler').ok, '重複 handler なし');
 }
 
@@ -307,7 +307,7 @@ console.log('\n--- §52-2. KTCodeReview: 構文 / 未知イベント / 未知フ
   assert(hashBad.status === 'BLOCKED' && check(hashBad, 'patch').detail?.code === 'PATCH_BASE_MISMATCH', 'baseHash が現在の本文と違う（既存ファイルが変わった）: BLOCKED');
   const noSrc = runP(PATCH_GOOD, null);
   assert(noSrc.status === 'BLOCKED' && /JS_SOURCE_UNAVAILABLE/.test(check(noSrc, 'patch').message), '統合先の本文が無い: BLOCKED（JS_SOURCE_UNAVAILABLE）');
-  const replace = runP({ baseHash: hash(FIELD_ON_OFF), operations: [{ type: 'REPLACE', anchor: "    if (record['ステータス'].value === '承認待ち') {", content: "    if (record['ステータス'].value === '承認待ち' || record['ステータス'].value === '完了') {" }] });
+  const replace = runP({ baseHash: hash(FIELD_ON_OFF), operations: [{ type: 'REPLACE', anchor: "    if (record['ステータス'].value === '承認待ち') {", content: "    if (record['ステータス'] && (record['ステータス'].value === '承認待ち' || record['ステータス'].value === '完了')) {" }] });
   assert(replace.status === 'REVIEW_REQUIRED' && check(replace, 'patch-removal') && !check(replace, 'patch-removal').ok && replace.diff.removed === 1 && replace.diff.added === 1, 'REPLACE で既存行を置き換える: 既存処理が失われないか確認（確認が必要）');
   const emptyPatch = runP({ baseHash: hash(FIELD_ON_OFF), operations: [] });
   assert(emptyPatch.status === 'BLOCKED', '操作の無い patch: BLOCKED');
@@ -428,7 +428,7 @@ const writes = (m) => m.mock.calls.filter(c => !c.startsWith('GET'));
   assert(m.panel.drawerState().open && m.panel.drawerState().pane === 'code' && m.$('kt-ai-code-view').textContent === entry.review.finalCode && m.$('kt-ai-code-view').style.display === '' && m.$('kt-ai-diff-view').style.display === 'none', '［コードを見る］→ コードペインに最終コード');
   assert(/✎ 既存 JS を変更/.test(m.$('kt-ai-code-head').innerHTML) && /Patch/.test(m.$('kt-ai-code-review').innerHTML) && /Security/.test(m.$('kt-ai-code-review').innerHTML), 'コードペイン: 見出しと Code Review の一覧');
   await clickChat(m, 'open-code', { cid: 'C1', view: 'diff' });
-  assert(m.$('kt-ai-diff-view').style.display === '' && /^\+\s*if \(record\['ステータス'\]\.value === '完了'\)/m.test(m.$('kt-ai-diff-view').textContent) && / {0,}kintone\.events\.on/.test(m.$('kt-ai-diff-view').textContent), '［Diffを見る］→ Before / After（追加行は +・既存行は保持）');
+  assert(m.$('kt-ai-diff-view').style.display === '' && /^\+\s*if \(record\['ステータス'\] && record\['ステータス'\]\.value === '完了'\)/m.test(m.$('kt-ai-diff-view').textContent) && / {0,}kintone\.events\.on/.test(m.$('kt-ai-diff-view').textContent), '［Diffを見る］→ Before / After（追加行は +・既存行は保持）');
   // コピー
   await clickChat(m, 'copy-code', { cid: 'C1' });
   assert(m.copies.length === 1 && m.copies[0] === entry.review.finalCode && m.copies[0].includes("value === '完了'") && m.copies[0].startsWith('(function () {'), '［コピー］: 最終コード（既存 ＋ 追加）');

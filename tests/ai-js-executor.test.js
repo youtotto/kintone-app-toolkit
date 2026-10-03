@@ -43,7 +43,7 @@ const NEW_JS = [
   "  });",
   "})();",
 ].join('\n');
-const PATCH = { baseHash: KTScan.hashText(FIELD_ON_OFF), operations: [{ type: 'INSERT_AFTER', anchor: "      record['amount'].disabled = true;\n    }", content: "    if (record['ステータス'].value === '完了') {\n      record['amount'].disabled = true;\n    }" }] };
+const PATCH = { baseHash: KTScan.hashText(FIELD_ON_OFF), operations: [{ type: 'INSERT_AFTER', anchor: "      record['amount'].disabled = true;\n    }", content: "    if (record['ステータス'] && record['ステータス'].value === '完了') {\n      record['amount'].disabled = true;\n    }" }] };
 
 /** 検証アプリの形: desktop JS 4（URL 1 ＋ FILE 3）・desktop CSS 2・mobile JS 2・mobile CSS 1 */
 function makeData() {

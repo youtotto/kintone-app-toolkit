@@ -10995,6 +10995,63 @@
     /** ループと hasOwnProperty だけ（要件の条件が構造化されていないときに「条件なし」と同じに扱う狭い形） */
     const structuralOnly = (conds) => conds.length > 0 && conds.map(t => String(t).replace(/\s*\/\*[\s\S]*?\*\/\s*$/, '')).every(t => /^(for|while)$/.test(t) || /^\s*!?\s*\(?\s*(?:[\w$.[\]'"`]+\.hasOwnProperty|Object\.prototype\.hasOwnProperty\.call)\s*\([^()]*\)\s*\)?\s*$/.test(t));
     const pathsOfSite = (x) => (x.paths && x.paths.length ? x.paths : [x.conds]);
+    /** Phase 21（実機）: 作成画面（create）のイベントの record に無いフィールドの型（PC・モバイルとも record.get() / event.record に無かった） */
+    const CREATE_ABSENT_TYPES = Object.freeze(['RECORD_NUMBER', 'CREATOR', 'CREATED_TIME', 'MODIFIER', 'UPDATED_TIME', 'STATUS', 'STATUS_ASSIGNEE', 'CATEGORY']);
+    /** kintone.events.on ごとのイベント名と handler の本体の範囲（その場の関数・名前で渡した関数） */
+    function handlerRanges(s) {
+      const out = [];
+      const rx = /kintone\s*\.\s*events\s*\.\s*on\s*\(/g;
+      let m;
+      while ((m = rx.exec(s)) !== null) {
+        let i = m.index + m[0].length, depth = 1, comma = -1;
+        for (; i < s.length && depth > 0; i++) { const ch = s[i]; if (ch === '(' || ch === '[' || ch === '{') depth++; else if (ch === ')' || ch === ']' || ch === '}') depth--; else if (ch === ',' && depth === 1 && comma < 0) comma = i; }
+        if (comma < 0) continue;
+        const firstArg = s.slice(m.index + m[0].length, comma);
+        const evVar = /^\s*([A-Za-z_$][\w$]*)\s*$/.exec(firstArg);
+        const evDef = evVar ? new RegExp(`\\b(?:var|let|const)\\s+${evVar[1].replace(/\$/g, '\\$')}\\s*=\\s*\\[([\\s\\S]*?)\\]`).exec(s) : null;
+        const events = [...(evDef ? evDef[1] : firstArg).matchAll(/['"`]((?:mobile\.)?app\.(?:record|report)\.[A-Za-z0-9_.]+)['"`]/g)].map(x => x[1]);
+        let start = comma + 1, end = i - 1;
+        const named = /^\s*([A-Za-z_$][\w$]*)\s*$/.exec(s.slice(comma + 1, i - 1));
+        if (named) {
+          const n = named[1].replace(/\$/g, '\\$');
+          const d = new RegExp(`(?:\\bfunction\\s+${n}\\s*\\(|\\b${n}\\s*=\\s*(?:async\\s+)?(?:function\\b[^{]*|\\([^)]*\\)\\s*=>|[A-Za-z_$][\\w$]*\\s*=>))`).exec(s);
+          if (!d) continue;
+          const open = s.indexOf('{', d.index + d[0].length - (d[0].endsWith('(') ? 1 : 0));
+          if (open < 0) continue;
+          start = open; end = closeBrace(s, open);
+        }
+        out.push({ events, start, end });
+      }
+      return out;
+    }
+    /** 作成画面のイベントの handler で、record に無いフィールド（codes）の .value を、存在を確かめずに読んでいる場所 */
+    function unguardedCreateReads(text, codes) {
+      const s = String(text || '');
+      const out = [];
+      if (!codes || !codes.length) return out;
+      const ranges = handlerRanges(s).filter(h => h.events.some(e => /^(mobile\.)?app\.record\.create\./.test(e)));
+      if (!ranges.length) return out;
+      for (const code of codes) {
+        const esc = String(code).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        const rx = new RegExp(`\\[\\s*['"\`]${esc}['"\`]\\s*\\]\\s*\\.\\s*value\\b`, 'g');
+        const existRef = new RegExp(`\\[\\s*['"\`]${esc}['"\`]\\s*\\]\\s*(?:&&|\\?(?!\\.)|\\|\\|)`);
+        const existCond = new RegExp(`\\[\\s*['"\`]${esc}['"\`]\\s*\\](?!\\s*\\.\\s*value)`);
+        let m;
+        while ((m = rx.exec(s)) !== null) {
+          const h = ranges.find(r => m.index > r.start && m.index < r.end);
+          if (!h) continue;
+          // 同じ式の手前で存在を確かめている（record['ステータス'] && … / ? : / || {}）
+          let st = m.index; while (st > 0 && !/[{};]/.test(s[st - 1])) st--;
+          if (existRef.test(s.slice(st, m.index))) continue;
+          // 囲む条件・早い return が存在を確かめている（if (record['ステータス']) { … } / if (!record['ステータス']) return event;）
+          const sc = siteConds(s, m.index);
+          if ([...sc.conds, ...((sc.paths || []).flat())].map(String).some(t => existCond.test(t))) continue;
+          const ls = s.lastIndexOf('\n', m.index) + 1, le = s.indexOf('\n', m.index);
+          out.push({ code, index: m.index, events: h.events.filter(e => /\.create\./.test(e)), line: s.slice(ls, le < 0 ? s.length : le).trim().slice(0, 120) });
+        }
+      }
+      return out;
+    }
     /** 位置 idx が kintone.events.on の handler（その場で渡した関数・名前で渡した関数）の中か */
     function insideHandler(s, idx) {
       const stack = [];
@@ -11340,6 +11397,15 @@
       const nested = nestedRegs(clean);
       const baseNested = g.strategy === 'EXTEND_EXISTING_JS' && existingSource && typeof existingSource.text === 'string' ? nestedRegs(KTScan.stripCommentsOnly(existingSource.text)).length : 0;
       if (nested.length > baseNested) add('nested-registration', false, 'block', `イベントの登録（kintone.events.on）が、別のイベントの handler の中にあります（${nested.length - baseNested} 件）。外側の handler が動いた後で登録されるため、最初の表示では動かず、表示のたびに重複して登録されます（外側が PC のイベントだけなら、モバイルでは一度も登録されません）。登録は即時関数の直下に置いてください`);
+      // Phase 21（モバイルの実機 §5）: 作成画面のイベントの record には、ステータス・作業者・レコード番号などのシステムフィールドが無い（実機: PC・モバイルとも）。
+      //   生成したモバイルの handler が record['ステータス'].value を確かめずに読み、作成画面を開くたびに TypeError で止まった（既存の dealLock.js は存在を確かめていた）
+      const sysCodes = fieldsN.filter(f => CREATE_ABSENT_TYPES.includes(f.rawType)).map(f => f.code);
+      const createReads = unguardedCreateReads(clean, sysCodes);
+      const baseCreateReads = g.strategy === 'EXTEND_EXISTING_JS' && existingSource && typeof existingSource.text === 'string' ? unguardedCreateReads(KTScan.stripCommentsOnly(existingSource.text), sysCodes).length : 0;
+      if (createReads.length > baseCreateReads) {
+        const x = createReads[0];
+        add('create-missing-field', false, 'block', `作成画面のイベント（${[...new Set(createReads.flatMap(r => r.events))].join(', ')}）では ${[...new Set(createReads.map(r => r.code))].join(' / ')} がレコードにありません（実機: PC・モバイルとも、新しいレコードにはステータス・作業者・レコード番号などのシステムフィールドが無い）。存在を確かめずに .value を読むと TypeError で処理が止まります（${x.line}）。record['${x.code}'] && record['${x.code}'].value のように確かめてください`);
+      }
       // ---- 9. 既存 JS との競合（統合先以外の既存ファイルが同じフィールドを WRITE / CONTROL）----
       // 同じ platform（PC / モバイル）のファイルだけが競合し得る（実機: モバイル JS への統合で PC の fieldOnOff.js が競合扱いになった）
       const files = KTScan.summarizeFiles(scan, data).filter(f => f.analyzed && f.target === target && !(existingSource && f.name === existingSource.name && f.target === existingSource.target));
