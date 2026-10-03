@@ -10507,8 +10507,11 @@
       add('security', !blocks.length, 'block', blocks.length ? blocks.map(x => `${x.message} [${x.code}]`).join('／') : '秘密情報・eval・cookie・外部通信はありません');
       if (reviews.length) add('security-review', false, 'review', reviews.map(x => `${x.message} [${x.code}]`).join('／'));
       // ---- 8. 作法: グローバル汚染 / return event / async / 重複 handler ----
-      const globals = g.strategy === 'NEW_JS_FILE' ? globalDeclarations(clean) : [];
-      add('globals', !globals.length, 'review', globals.length ? `ファイル直下に宣言があります（グローバル汚染）: ${globals.join(', ')}。即時関数で包んでください` : '即時関数の外に宣言はありません');
+      // Phase 20（CX-1 2 回目・実機）: 既存ファイルへの統合でも見る。AI が APPEND（anchor「})();」）で既存の即時関数の外に var EVENTS を足し、
+      //   以前は新規ファイルだけを見ていたので「即時関数の外に宣言はありません」と表示した。既存ファイルに元からある宣言は除く（統合したコードの責任ではない）
+      const baseGlobals = g.strategy === 'EXTEND_EXISTING_JS' && existingSource && typeof existingSource.text === 'string' ? globalDeclarations(KTScan.stripCommentsOnly(existingSource.text)) : [];
+      const globals = g.strategy === 'NEW_JS_FILE' ? globalDeclarations(clean) : g.strategy === 'EXTEND_EXISTING_JS' ? globalDeclarations(clean).filter(n => !baseGlobals.includes(n)) : [];
+      add('globals', !globals.length, 'review', globals.length ? (g.strategy === 'EXTEND_EXISTING_JS' ? `追加したコードがファイル直下（既存の即時関数の外）に宣言を置いています（グローバル汚染）: ${globals.join(', ')}。既存の即時関数の中に入れてください（ほかの JavaScript と名前がぶつかると動作が変わります）` : `ファイル直下に宣言があります（グローバル汚染）: ${globals.join(', ')}。即時関数で包んでください`) : '即時関数の外に宣言はありません');
       const handlers = inspectHandlers(cleanAdded);
       const noReturn = handlers.filter(h => !h.returnEvent);
       add('return-event', !noReturn.length, 'review', noReturn.length ? `${noReturn.length} 件の handler に return event がありません（表示イベントで無いと画面が止まります）` : handlers.length ? `${handlers.length} 件の handler は return event しています` : '追加分に新しい handler はありません（既存 handler の中に追加。既存の return event をそのまま使います）');

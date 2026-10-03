@@ -651,6 +651,23 @@ console.log('\n--- F37（CX-1 2 回目・実機）. 同じ遷移元の分岐は�
 }
 
 // =========================================================
+console.log('\n--- F38（CX-1 2 回目・実機）. 既存ファイルの即時関数の外に足したコード（ファイル直下の宣言）を見逃さない ---');
+{
+  const DL = ["(function () {", "  'use strict';", "  kintone.events.on(['app.record.create.show', 'app.record.edit.show'], function (event) {", "    var record = event.record;", "    if (record['ステータス'] && record['ステータス'].value === '承認済み') {", "      record['amount'].disabled = true;", "    }", "    return event;", "  });", "})();", ""].join('\n');
+  const baseHash = KTScan.analyzeFile({ name: 'dealLock.js', target: 'desktop', kind: 'js', text: DL }, { fields: [], selfAppId: null }).file.hash;
+  const ADD = "  // 承認済みはモバイルでも金額を編集不可\n  var EVENTS = ['mobile.app.record.create.show', 'mobile.app.record.edit.show'];\n  kintone.events.on(EVENTS, function (event) {\n    if (event.record['ステータス'] && event.record['ステータス'].value === '承認済み') { event.record['amount'].disabled = true; }\n    return event;\n  });\n";
+  const cust = { customizationId: 'C1', requirement: '承認済みは金額を編集不可（PC・モバイル）', strategy: 'EXTEND_EXISTING_JS', platform: ['desktop', 'mobile'], events: ['app.record.create.show', 'app.record.edit.show', 'mobile.app.record.create.show', 'mobile.app.record.edit.show'], fields: [{ code: 'amount', access: 'CONTROL' }], apis: [], existingFiles: [{ name: 'dealLock.js', target: 'desktop' }] };
+  const genOf = (op) => ({ strategy: 'EXTEND_EXISTING_JS', targetFile: 'dealLock.js', code: ADD, patch: { baseHash, operations: [op] }, events: cust.events, fields: cust.fields, apis: ['kintone.events.on'] });
+  const chk = (r, n) => r.checks.find(c => c.name === n) || null;
+  // 実機と同じ: APPEND（anchor「})();」）→ 即時関数の外（ファイル直下）に var EVENTS
+  const out = KTCodeReview.review({ generated: genOf({ type: 'APPEND', anchor: '})();\n', content: ADD }), customization: cust, plan: null, data: DATA, scan: null, existingSource: { name: 'dealLock.js', target: 'desktop', text: DL } });
+  assert(chk(out, 'globals') && !chk(out, 'globals').ok && /EVENTS/.test(chk(out, 'globals').message) && /即時関数の中/.test(chk(out, 'globals').message) && out.status !== 'OK', `F38: 既存ファイルへの統合でも、即時関数の外に足した宣言はグローバル汚染として要確認（以前は「即時関数の外に宣言はありません」）: ${chk(out, 'globals') && chk(out, 'globals').message}`);
+  // 即時関数の中（閉じる行の前）に入れたコードは従来どおり
+  const inside = KTCodeReview.review({ generated: genOf({ type: 'INSERT_BEFORE', anchor: '})();', content: ADD }), customization: cust, plan: null, data: DATA, scan: null, existingSource: { name: 'dealLock.js', target: 'desktop', text: DL } });
+  assert(chk(inside, 'patch').ok && chk(inside, 'globals').ok, `F38: 即時関数の中に入れたコードは指摘しない: ${JSON.stringify(inside.checks.filter(c => !c.ok).map(c => c.name))}`);
+}
+
+// =========================================================
 console.log('\n--- F35 / F36（XA-7 / XA-9 実機）. 関連レコードの設定の場所・別のアプリへの手順 ---');
 {
   // F35a: 関連レコードの fact に並び順・件数・絞り込み（実機 XA-7a で AI が「今の表示設定（表示項目と並び順）を教えて」と利用者に聞いた）
