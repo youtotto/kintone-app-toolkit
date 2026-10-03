@@ -10314,7 +10314,8 @@
       const missingEvents = [...planEvents].filter(ev => !fileEvents.some(e => e.name === ev));
       const mismatches = [];
       if (extraEvents.length) mismatches.push({ kind: 'event', code: 'EXTRA_EVENT', items: extraEvents, message: `計画に無いイベント: ${extraEvents.join(', ')}` });
-      if (missingEvents.length) mismatches.push({ kind: 'event', code: 'MISSING_EVENT', items: missingEvents, message: `計画のイベントがコードに無い: ${missingEvents.join(', ')}` });
+      // Phase 20（実機 BF-C 4 回目）: 計画の change イベントを生成コードが登録せず、入力中に警告が切り替わらなかった（以前は軽微な差として合格）→ 要確認
+      if (missingEvents.length) mismatches.push({ kind: 'event', code: 'MISSING_EVENT', items: missingEvents, message: `計画のイベントがコードに無い: ${missingEvents.join(', ')}（そのタイミングでは動きません${missingEvents.some(ev => /\.change\./.test(ev)) ? '。値の変更時が無いと入力中に切り替わりません' : ''}）` });
       const addedRegisters = /kintone\s*\.\s*events\s*\.\s*on/.test(cleanAdded);
       if (!addedRegisters) {
         if (g.strategy === 'EXTEND_EXISTING_JS' && fileEvents.length) add('handler', true, 'info', `既存の handler（${fileEvents.map(e => e.name).join(', ')}）の中に処理を追加します`);
@@ -10335,7 +10336,7 @@
         else if (writes.length && planned === 'READ') mismatches.push({ kind: 'field', code: 'ACCESS_ESCALATED', items: [f.code], message: `${f.code} は計画では READ ですがコードは ${writes.join('/')} しています` });
       }
       for (const [code, access] of planFields) if (!addedScan.fields.some(f => f.code === code)) mismatches.push({ kind: 'field', code: 'MISSING_FIELD', items: [code], message: `計画のフィールド ${code}（${access}）がコードに現れません` });
-      const hardMismatch = mismatches.filter(m => ['EXTRA_FIELD_WRITE', 'ACCESS_ESCALATED', 'EXTRA_EVENT'].includes(m.code));
+      const hardMismatch = mismatches.filter(m => ['EXTRA_FIELD_WRITE', 'ACCESS_ESCALATED', 'EXTRA_EVENT', 'MISSING_EVENT'].includes(m.code));
       add('plan-consistency', !hardMismatch.length, 'review', hardMismatch.length ? `計画と生成コードが一致しません（CUSTOMIZATION_PLAN_MISMATCH）: ${hardMismatch.map(m => m.message).join('／')}` : mismatches.length ? `計画との軽微な差: ${mismatches.map(m => m.message).join('／')}` : '計画（イベント・フィールド・アクセス）と一致');
       // ---- 6. API（API Catalog・通信）----
       const apis = addedScan.apis;
@@ -10392,7 +10393,8 @@
       const regs = literalRegs.length ? literalRegs : codeEvents.map(e => e.name);
       const dupInAdded = regs.filter((e, i) => regs.indexOf(e) !== i);
       const existingEvents = existingSource ? KTScan.extractEventTypes(KTScan.stripCommentsOnly(existingSource.text)).map(e => e.name) : [];
-      const dupWithExisting = g.strategy === 'EXTEND_EXISTING_JS' ? [...new Set(regs.filter(e => existingEvents.includes(e)))] : [];
+      // 既存の handler の中に追加しただけ（追加分に kintone.events.on が無い）なら「別の handler を足す」ではない（Phase 20 実機で誤表示）
+      const dupWithExisting = g.strategy === 'EXTEND_EXISTING_JS' && addedRegisters ? [...new Set(regs.filter(e => existingEvents.includes(e)))] : [];
       if (dupInAdded.length) add('duplicate-handler', false, 'review', `同じイベントを 2 回登録しています: ${[...new Set(dupInAdded)].join(', ')}`);
       else if (dupWithExisting.length) add('duplicate-handler', false, 'review', `既存ファイルが既に登録しているイベントに別の handler を足します: ${dupWithExisting.join(', ')}（同じイベントの handler は登録順に動きます）`);
       else add('duplicate-handler', true, 'info', '重複した handler はありません');
@@ -12598,6 +12600,19 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
       for (const p of SECRET_PATTERNS) if (p.re.test(s)) return p.label;
       return null;
     }
+    /**
+     * Phase 20（実機 BF-C）: コード生成の指示に付いた要望（「…のコードを作り直して。金額を変更したときにも切り替わるように」の後半）。
+     * 生成の言い回し・対象（C1 / ファイル名）・依頼の語尾を除いて、意味のある文が 6 文字以上残れば返す
+     */
+    function extraRequestIn(t) {
+      const rest = String(t || '')
+        .replace(/\bC[0-9]+\b\s*(の|を|は)?/g, '')
+        .replace(/[\w.-]+\.(js|css)\s*(の|を|に|へ)?/gi, '')
+        .replace(/(コード|JS|JavaScript|スクリプト|カスタマイズ)\s*(を|も|は)?\s*(もう一度|もう1回|再度)?\s*(作り直|作|生成し直|生成|書き直|書|出|実装)[^\s。．!！、,]*/gi, '')
+        .replace(/(実装して|生成して|お願いします?|お願い|ください|下さい|ほしい|欲しい|して)[。．!！]*/g, '')
+        .replace(/[\s、。．,.!！?？「」『』（）()・]/g, '');
+      return rest.length >= 6 ? rest : null;
+    }
     /** AI の確認事項が秘密情報（Webhook URL・API キー・パスワード等）の値を求めているか */
     const SECRET_REQUEST_RE = /webhook\s*(?:の)?\s*url|ウェブフック\s*url|api\s*キー|apiキー|api[_ ]?key|アクセストークン|トークン|パスワード|password|シークレット|secret|認証情報|資格情報|credential/i;
 
@@ -12987,6 +13002,10 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
               if (!c) { toolkit(`カスタマイズ ${cid} は現在の計画にありません。`); result.ok = false; break; }
               const rv = reviewOf(cid);
               if (rv && !rv.codeGeneration?.supported) { toolkit(`${cid}「${c.requirement}」はまだコードを生成できません（${(rv.issues || []).filter(i => i.severity !== 'low').map(i => i.message).join('／') || rv.codeGeneration?.reason || '要確認'}）。計画を修正するか、確認事項に答えてください。`, { kind: 'generate-blocked', planId: v.planId, version: v.version, customizationId: cid }); result.ok = false; break; }
+              // Phase 20（実機 BF-C 4 回目）: 「C1 のコードを作り直して。金額を変更したときにも警告が切り替わるように」の後半（要望）は生成に渡らない
+              //   （生成は確定した実装仕様だけを元にする）。黙って捨てず、仕様を直してから作るか・今の仕様のまま作るかを選んでもらう（選んだ後は聞かない）
+              const extra = intentOverride === INTENT.GENERATE_CODE ? null : extraRequestIn(t);
+              if (extra) { assistant(`コードは確定した実装仕様 v${v.spec?.version ?? v.version} から作ります。「${extra}」は仕様に入っていないため、このまま作っても反映されません。仕様を直してから作りますか？`, { kind: 'generate-extra-choices', planId: v.planId, version: v.version, customizationId: cid, extra, reviseText: extra, generateText: `${cid} のコードを作って` }); break; }
               loading = push(MSG.LOADING, ROLE.ASSISTANT, LOADING_TEXT.GENERATE_CODE, { intent: cls.intent });
               const r = await services.generate({ version: v, customizationId: cid, signal });
               if (late()) { discard(); break; }
@@ -13104,7 +13123,7 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
       };
     }
 
-    return { INTENT, MSG, PLAN_STATUS, SPEC_STATUS, ROLE, MAX_MESSAGES, classifyIntent, planTerms, secretLikeIn, create };
+    return { INTENT, MSG, PLAN_STATUS, SPEC_STATUS, ROLE, MAX_MESSAGES, classifyIntent, planTerms, secretLikeIn, extraRequestIn, create };
   })();
 
   // ==========================================
@@ -13224,19 +13243,20 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
       const ps = planSummary(v), rs = reviewSummary(v), sp = specSummary(v), ex = executionSummary(execState), jx = jsExecutionSummary(jsExec);
       const generated = v && v.generated ? Object.keys(v.generated).length : 0;
       // Phase 20（実機）: 元に戻す処理が失敗・検証不一致なら「反映済み」と出さない（状態は要確認）。反映が途中で止まったときも同じ
-      const previewText = (s2, { done, rolled, none }) => (!s2 || !s2.written ? none : s2.rolledBack ? rolled : /^ROLLBACK_(VERIFY_)?FAILED$/.test(String(s2.rollbackStatus || '')) ? '元に戻せず（要確認）' : s2.done && s2.ok === false ? '一部だけ反映（要確認）' : done);
+      // JS の登録は 1 回の PUT なので「一部だけ」ではなく、登録済みで検証が一致しない（実機 BF-C 4 回目: 計画の change がコードに無く VERIFY_FAILED）
+      const previewText = (s2, { done, rolled, none, partial = '一部だけ反映（要確認）' }) => (!s2 || !s2.written ? none : s2.rolledBack ? rolled : /^ROLLBACK_(VERIFY_)?FAILED$/.test(String(s2.rollbackStatus || '')) ? '元に戻せず（要確認）' : s2.done && s2.ok === false ? partial : done);
       if (subject && (!v || sp)) {
         const lines = [subject.name];
         lines.push(sp ? `仕様 v${sp.specVersion} ${sp.status === 'CONFIRMED' ? '確定' : sp.status === 'DRAFT' ? '確認待ち' : '旧版'}` : '相談中');
         if (sp) lines.push(generated ? 'コード生成済み' : 'コード未生成');
-        if (sp) lines.push(previewText(jx, { done: 'Preview登録済み', rolled: '登録を元に戻し済み', none: 'Preview未登録' }));
+        if (sp) lines.push(previewText(jx, { done: 'Preview登録済み', rolled: '登録を元に戻し済み', none: 'Preview未登録', partial: 'Preview登録済み・検証で不一致（要確認）' }));
         return { lines, kind: 'js' };
       }
       if (ps) {
         const lines = [`変更計画 v${ps.version}`];
         lines.push(rs ? 'Review済み' : 'Review未実施');
         lines.push(previewText(ex, { done: 'Preview反映済み', rolled: '元に戻し済み', none: 'Preview未反映' }));
-        if (sp) { lines.push(`仕様 v${sp.specVersion} ${sp.status === 'CONFIRMED' ? '確定' : '確認待ち'}`); lines.push(generated ? 'コード生成済み' : 'コード未生成'); if (generated) lines.push(previewText(jx, { done: 'Preview登録済み', rolled: '登録を元に戻し済み', none: 'Preview未登録' })); }
+        if (sp) { lines.push(`仕様 v${sp.specVersion} ${sp.status === 'CONFIRMED' ? '確定' : '確認待ち'}`); lines.push(generated ? 'コード生成済み' : 'コード未生成'); if (generated) lines.push(previewText(jx, { done: 'Preview登録済み', rolled: '登録を元に戻し済み', none: 'Preview未登録', partial: 'Preview登録済み・検証で不一致（要確認）' })); }
         return { lines, kind: 'plan' };
       }
       return { lines: [], kind: 'none' };
@@ -13622,6 +13642,11 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
       const d = m.data || {};
       return card('kt-ai-choices-card', `<div>${esc(m.text)}</div><div style="margin-top:6px; display:flex; gap:6px; flex-wrap:wrap;">${(d.choices || []).map(c => btn('generate', `${c.customizationId} ${c.requirement}`, `data-cid="${esc(c.customizationId)}"`, c.supported ? '' : 'opacity:.5;')).join('')}</div>`, '#555');
     }
+    /** Phase 20（BF-C）: 生成の指示に付いた要望 → 仕様を直してから作る / 今の仕様のまま作る */
+    function generateExtraChoicesHtml(m) {
+      const d = m.data || {};
+      return card('kt-ai-choices-card', `<div>${esc(m.text)}</div><div style="margin-top:6px; display:flex; gap:6px; flex-wrap:wrap;">${btn('choice', '仕様を直してから作る', `data-intent="REVISE_PLAN" data-text="${esc(d.reviseText || '')}"`, 'font-weight:600;')}${btn('choice', '今の仕様のまま作る', `data-intent="GENERATE_CODE" data-text="${esc(d.generateText || 'コードを作って')}"`)}</div><div style="font-size:10px; opacity:.6; margin-top:4px;">仕様を直すと実装仕様が新しい版になり、確定してからコードを作ります。</div>`, '#555');
+    }
     function sourceUnavailableHtml(m) {
       const d = m.data || {};
       return card('kt-ai-source-unavailable', `<div>${esc(m.text)}</div><div style="font-size:11px; opacity:.85; margin-top:2px;">次のいずれかを選んでください。</div><div style="margin-top:6px; display:flex; gap:6px; flex-wrap:wrap;">${btn('rescan', '再スキャン（JS を取得し直す）', `data-cid="${esc(d.customizationId || '')}"`)}${btn('choice', '新規 JS として設計', `data-intent="REVISE_PLAN" data-text="${esc(`${d.customizationId || ''} は既存ファイルに統合せず、新規の JS ファイルとして設計して`)}"`)}<span style="font-size:11px; opacity:.7; align-self:center;">／ 手動で確認する</span></div>`, '#b26a00');
@@ -13686,6 +13711,7 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
           if (kind === 'rollback-ready') return wrap(rollbackReadyHtml(m));
           if (kind === 'choices') return wrap(choicesHtml(m));
           if (kind === 'customization-choices') return wrap(customizationChoicesHtml(m));
+          if (kind === 'generate-extra-choices') return wrap(generateExtraChoicesHtml(m));
           if (kind === 'source-unavailable') return wrap(sourceUnavailableHtml(m));
           if (kind === 'consultation-start') return wrap(consultationStartHtml(m));
           if (kind === 'consult-choices') return wrap(consultChoicesHtml(m));

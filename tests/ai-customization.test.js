@@ -251,7 +251,8 @@ console.log('\n--- §52-2. KTCodeReview: 構文 / 未知イベント / 未知フ
   const extraApi = run(NEW_JS_GOOD.replace("    return event;", "    kintone.api(kintone.api.url('/k/v1/records.json', true), 'GET', { app: 600 });\n    return event;"));
   assert(extraApi.status === 'REVIEW_REQUIRED' && check(extraApi, 'apis-network') && !check(extraApi, 'apis-network').ok && /kintone\.api/.test(check(extraApi, 'apis-network').message), '計画に無い REST API（kintone.api）: 確認が必要（単純な制御には不要）');
   const missingEv = run(NEW_JS_GOOD.replace("['app.record.create.change.amount', 'app.record.edit.change.amount']", "'app.record.create.change.amount'"));
-  assert(missingEv.mismatches.some(m => m.code === 'MISSING_EVENT' && m.items.includes('app.record.edit.change.amount')) && check(missingEv, 'plan-consistency').ok, '計画のイベントがコードに無い: 軽微な差として記録（計画との照合）');
+  // Phase 20（実機 BF-C 4 回目）: 計画の change を登録しないコードは入力中に切り替わらない → 軽微な差ではなく要確認に変更
+  assert(missingEv.mismatches.some(m => m.code === 'MISSING_EVENT' && m.items.includes('app.record.edit.change.amount')) && !check(missingEv, 'plan-consistency').ok && /入力中に切り替わりません/.test(check(missingEv, 'plan-consistency').message) && missingEv.status === 'REVIEW_REQUIRED', '計画のイベントがコードに無い: 要確認（CUSTOMIZATION_PLAN_MISMATCH。change が無いと入力中に切り替わらない）');
   const extraEv = run(NEW_JS_GOOD.replace("['app.record.create.change.amount', 'app.record.edit.change.amount']", "['app.record.create.change.amount', 'app.record.edit.change.amount', 'app.record.detail.show']"));
   assert(extraEv.status === 'REVIEW_REQUIRED' && extraEv.mismatches.some(m => m.code === 'EXTRA_EVENT'), '計画に無いイベントの登録: 計画との不一致（確認が必要）');
   const dangerous = run(NEW_JS_GOOD.replace("    return event;", "    eval('1 + 1');\n    return event;"));

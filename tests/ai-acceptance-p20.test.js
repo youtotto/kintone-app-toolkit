@@ -109,6 +109,31 @@ console.log('\n--- BF-C（再 3）/ F24. エラー表示と編集不可: 条件�
   assert(chk(rOther, 'error-cancels-other-js') && chk(rOther, 'error-cancels-other-js').severity === 'review' && /dealLock\.js（app\.record\.create\.show, app\.record\.edit\.show）/.test(chk(rOther, 'error-cancels-other-js').message) && !/change\.amount/.test(chk(rOther, 'error-cancels-other-js').message), '別ファイル: 既存の dealLock.js が同じ表示イベントで disabled → こちらの error が取り消すことを要確認で示す（change は対象外）');
   const rOtherOk = KTCodeReview.review({ generated: gen(WARN_ONLY.replace("'app.record.create.show', 'app.record.edit.show', ", '')), customization: { ...custom, events: ['app.record.edit.change.amount'] }, plan: null, data: data2, scan: scan2, existingSource: null });
   assert(!chk(rOtherOk, 'error-cancels-other-js'), '警告が値の変更時だけなら、他ファイルの show の disabled とは重ならない');
+  // BF-C 4 回目（実機の生成そのまま）: 既存の show handler の中に「編集不可でないときだけ警告」を追加。計画の change は登録していない
+  const DL_SRC = "(function () {\n  'use strict';\n  // 承認済みの案件は金額を変更できないようにする（既存の運用ルール）\n  kintone.events.on(['app.record.create.show', 'app.record.edit.show'], function (event) {\n    var record = event.record;\n    if (record['ステータス'] && record['ステータス'].value === '承認済み') {\n      record['amount'].disabled = true;\n    }\n    return event;\n  });\n})();\n";
+  const PATCH4 = { baseHash: KTScan.hashText(DL_SRC), operations: [{ type: 'INSERT_AFTER', anchor: "    if (record['ステータス'] && record['ステータス'].value === '承認済み') {\n      record['amount'].disabled = true;\n    }", content: "\n    // 金額が100万円を超えたら警告を表示する\n    if (record['amount'].value > 1000000 && !record['amount'].disabled) {\n      record['amount'].error = '金額が100万円を超えています。';\n    } else {\n      record['amount'].error = null;\n    }\n" }] };
+  const cust4 = { ...custom, strategy: 'EXTEND_EXISTING_JS', existingFiles: [{ name: 'dealLock.js', target: 'desktop' }] };
+  const r4 = KTCodeReview.review({ generated: { strategy: 'EXTEND_EXISTING_JS', targetFile: 'dealLock.js', summary: 's', code: PATCH4.operations[0].content, patch: PATCH4, events: custom.events, fields: custom.fields, apis: ['kintone.events.on'] }, customization: cust4, plan: null, data: DATA, scan: null, existingSource: { name: 'dealLock.js', target: 'desktop', text: DL_SRC } });
+  assert(chk(r4, 'patch').ok && chk(r4, 'error-cancels-edit').severity === 'review' && !chk(r4, 'plan-consistency').ok && /入力中に切り替わりません/.test(chk(r4, 'plan-consistency').message) && r4.status === 'REVIEW_REQUIRED', 'F26（BF-C 4 回目）: 計画の change をコードが登録していない → 計画との不一致（要確認）。以前は「軽微な差」で合格扱い');
+  assert(chk(r4, 'duplicate-handler').ok, '既存の handler の中に追加しただけなら「別の handler を足す」と言わない');
+  // F27（BF-C 4 回目）: 「C1 のコードを作り直して。金額を変更したときにも…」の後半は生成に渡らない → 黙って捨てず、仕様を直すか今の仕様のまま作るかを選ぶ
+  {
+    const E = KTAiConversation.extraRequestIn;
+    assert(/金額を変更したときにも警告が切り替わるように/.test(E('C1 のコードを作り直して。金額を変更したときにも警告が切り替わるようにしてください') || '') && !E('コードを作って') && !E('C1 のコードを作って') && !E('dealLock.js のコードを作り直して') && !E('JavaScript を生成して') && !E('コードを作ってください'), 'extraRequestIn: 生成の言い回し・対象・語尾を除いて要望が残るときだけ返す');
+    let gens = 0;
+    const conv = KTAiConversation.create({ services: { generate: async () => { gens++; return { ok: true, generated: { code: '' }, review: { status: 'PASSED' } }; } } });
+    const cp = plan([step('C1', 'CUSTOMIZATION_REQUIRED', 'JS', '', { customizationId: 'C1' }, { solution: 'CUSTOMIZATION', execution: { mode: 'PLAN_ONLY', supported: false, reason: 'x' } })], [], { solution: 'CUSTOMIZATION', customizations: [{ customizationId: 'C1', requirement: '金額が100万円を超えたら金額の下に警告', whyStandardInsufficient: '標準設定に無い', strategy: 'NEW_JS_FILE', platform: ['desktop'], implementation: 'JAVASCRIPT', events: ['app.record.create.show', 'app.record.edit.show', 'app.record.create.change.amount', 'app.record.edit.change.amount'], fields: [{ code: 'amount', access: 'CONTROL' }], apis: [], existingFiles: [], risks: [], questions: [], dependsOn: [] }] });
+    const v = conv.registerPlan({ plan: cp, ctx: null, review: reviewOf(cp) });
+    conv.confirmSpec({ planId: v.planId, version: v.version });
+    await conv.send('C1 のコードを作り直して。金額を変更したときにも警告が切り替わるようにしてください');
+    const ask = conv.messages().find(x => x.data && x.data.kind === 'generate-extra-choices');
+    assert(gens === 0 && ask && /仕様に入っていない/.test(ask.text) && ask.data.reviseText && ask.data.generateText === 'C1 のコードを作って', 'F27: 要望付きの生成の指示 → まだ生成せず「仕様を直してから作る / 今の仕様のまま作る」を聞く');
+    await conv.send('C1 のコードを作って', { intentOverride: 'GENERATE_CODE' });
+    assert(gens === 1, '［今の仕様のまま作る］（選んだ後）は聞き直さずに生成する');
+    // U6: JS の登録が検証で一致しない（VERIFY_FAILED。PUT は成功）→ 作業状態は「一部だけ反映」ではなく「登録済み・検証で不一致」
+    const ws = VM.workspaceState({ version: conv.activePlan(), execState: null, jsExec: { stage: 'done', execution: { status: 'VERIFY_FAILED', put: { ok: true }, steps: [{ name: 'dealLock.js', target: 'desktop', status: 'VERIFY_FAILED' }] } }, subject: null });
+    assert(ws.lines.includes('Preview登録済み・検証で不一致（要確認）') && !ws.lines.includes('一部だけ反映（要確認）'), 'U6: JS 登録の検証不一致は「Preview登録済み・検証で不一致（要確認）」');
+  }
   // 計画の段階（Review）: 値に応じた警告を show だけで判定する計画は、入力中に切り替わらないと指摘する（実機 BF-C で 2 回続けて change が抜けた）
   const custPlan = (requirement, events, fields) => plan([step('C1', 'CUSTOMIZATION_REQUIRED', 'JS', '', { customizationId: 'C1' }, { solution: 'CUSTOMIZATION', execution: { mode: 'PLAN_ONLY', supported: false, reason: 'x' } })], [], { solution: 'CUSTOMIZATION', customizations: [{ customizationId: 'C1', requirement, whyStandardInsufficient: '標準設定に無い', strategy: 'NEW_JS_FILE', platform: ['desktop'], implementation: 'JAVASCRIPT', events, fields, apis: [], existingFiles: [], risks: [], questions: [], dependsOn: [] }] });
   const showOnly = reviewOf(custPlan('画面表示時に金額が100万円を超えた場合に金額フィールドの下に警告メッセージを表示する', ['app.record.create.show', 'app.record.edit.show'], [{ code: 'amount', access: 'CONTROL' }])).steps[0];
