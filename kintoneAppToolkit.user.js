@@ -13632,13 +13632,15 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
       return card('kt-ai-rollback-ready', `<div><b>${esc(m.text)}</b></div><div style="font-size:11px; opacity:.8; margin-top:2px;">反映前の設定（snapshot）へ戻します。第三者の変更があれば止まります。</div><div style="margin-top:6px; display:flex; gap:6px;">${btn('rollback', '変更前の状態に戻す', `data-execution="${esc(m.data?.executionId || '')}"`, 'border-color:#6a1b9a; font-weight:600;')}</div><div style="font-size:10px; opacity:.6; margin-top:4px;">押すと現在の動作テスト環境を確認（書き込みなし）し、確認画面で「変更前の状態に戻す」を押したときだけ戻します。</div>`, '#6a1b9a');
     }
     const STEP_MARK = { VERIFIED: '✓', APPLIED: '…', RUNNING: '…', PENDING: '・', VERIFY_FAILED: '⚠', FAILED: '×', BLOCKED: '×', SKIPPED: '－', UNSUPPORTED: '○', ROLLBACK_VERIFIED: '✓', ROLLED_BACK: '…', ROLLING_BACK: '…', ROLLBACK_PENDING: '・', ROLLBACK_VERIFY_FAILED: '⚠', ROLLBACK_FAILED: '×', ROLLBACK_STALE: '×', ROLLBACK_SKIPPED: '－' };
+    /** Phase 20（実機）: 反映・登録して戻していない間の注意（会話と「変更前の状態に戻す」はこのページの中だけ） */
+    const LEAVE_NOTE = '<div style="font-size:11px; opacity:.8; margin-top:2px;">このページを離れる・再読み込みすると、この会話と「変更前の状態に戻す」は使えなくなります（動作テスト画面は別のタブで開いてください）。その後に取り消すときは、kintone のアプリの設定の［変更を中止］を使います（ほかの未反映の変更もまとめて取り消されます）。</div>';
     /** 実行カード（§8）: 件数と運用環境への注意だけ。進捗 / Before・After / 監査は右「実行」 */
     function executionCardHtml(m, execState) {
       const ex = VM.executionSummary(execState);
       if (!ex || ex.running || !execState?.execution) return card('kt-ai-execution-card', `<div><b>動作テスト環境へ反映しています。</b></div><div style="font-size:11px; opacity:.7; margin-top:4px;">運用環境には反映されません。進捗は右の「実行」で確認できます。</div>`, '#1a73e8');
       return card('kt-ai-execution-card', `<div><b>${ex.ok ? '動作テスト環境へ反映しました。' : `${ex.verified} 件反映済み・${ex.failed + ex.warn} 件失敗（以降は未実行）`}</b></div>
         <div style="margin-top:4px; font-size:12px;">✓ ${ex.verified} 件 VERIFIED${ex.warn ? `　⚠ ${ex.warn} 件` : ''}${ex.failed ? `　× ${ex.failed} 件` : ''}</div>
-        <div style="margin-top:4px; font-size:12px;"><b>運用環境には反映されていません。</b></div>
+        <div style="margin-top:4px; font-size:12px;"><b>運用環境には反映されていません。</b></div>${ex.written && !ex.rollbackStatus && ex.done ? LEAVE_NOTE : ''}
         <div style="margin-top:6px; display:flex; gap:6px; flex-wrap:wrap;">${btn('exec-details', '実行結果を見る', `data-execution="${esc(ex.executionId || '')}"`, 'font-weight:600;')}${ex.written && !ex.rollbackStatus && ex.done ? btn('rollback', '変更前の状態に戻す', `data-execution="${esc(ex.executionId || '')}"`, 'border-color:#6a1b9a;') : ''}</div>`, ex.ok ? '#2e7d32' : '#b00020');
     }
     /** Rollback カード（§8）: 結果だけ。確認画面・進捗は右「実行」 */
@@ -13724,7 +13726,7 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
       if (!s.put) return card('kt-ai-js-execution-card', `<div><b>JavaScript を登録できませんでした。</b></div><div style="font-size:12px; margin-top:4px;">${files}</div><div style="margin-top:4px; font-size:12px;"><b>${s.previewUnchanged === true ? '動作テスト環境の設定は変更されていません。' : s.previewUnchanged === false ? '動作テスト環境の設定が変わっている可能性があります。Customize タブで確認してください。' : '動作テスト環境の設定を確認できませんでした。'}</b></div><div style="margin-top:6px;">${btn('open-js-result', '詳細を見る', '')}</div>`, '#b00020');
       return card('kt-ai-js-execution-card', `<div><b>${s.ok ? 'JavaScript を動作テスト環境へ登録しました。' : 'JavaScript を登録しましたが、検証で一致しない点があります。'}</b></div>
         <div style="margin-top:4px; font-size:12px;">${files}　✓ ${s.verified} / ${s.steps.length} 件 VERIFIED</div>
-        <div style="margin-top:4px; font-size:12px;"><b>運用環境には反映されていません。</b></div>
+        <div style="margin-top:4px; font-size:12px;"><b>運用環境には反映されていません。</b></div>${!s.rollbackStatus && s.done ? LEAVE_NOTE : ''}
         <div style="margin-top:6px; display:flex; gap:6px; flex-wrap:wrap;">${btn('open-js-result', '登録結果を見る', '', 'font-weight:600;')}${s.firstStep ? btn('open-customize', 'Customize で確認', `data-target="${esc(s.firstStep.target)}" data-name="${esc(s.firstStep.name)}"`) : ''}${!s.rollbackStatus && s.done ? btn('js-rollback', '変更前の状態に戻す', `data-execution="${esc(s.executionId || '')}"`, 'border-color:#6a1b9a;') : ''}</div>`, s.ok ? '#2e7d32' : '#b26a00');
     }
     function jsRollbackCardHtml(m, jx) {
@@ -15125,7 +15127,17 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
     if ($reviewResult) $reviewResult.style.display = 'none';
     showPane('plan');
     renderComposer(); renderChat(); renderWsState();
+    // Phase 20（実機）: 会話・計画・承認・生成コードと「変更前の状態に戻す」の情報はこのページの中にだけある（ページの移動・再読み込みで消える）。
+    //   動作テスト環境へ反映・登録して戻していない間は、ページを離れる前にブラウザの確認を出す（戻す手段を黙って失わない）
+    const unrevertedPreviewChange = () => {
+      const ex = VM.executionSummary(execState), js = VM.jsExecutionSummary(jsExec);
+      return !!((ex && ex.done && ex.written && !ex.rollbackStatus) || (js && js.done && js.put && !js.rollbackStatus));
+    };
+    if (typeof window !== 'undefined' && typeof window.addEventListener === 'function') {
+      window.addEventListener('beforeunload', (e) => { if (!unrevertedPreviewChange()) return undefined; e.preventDefault(); e.returnValue = ''; return ''; });
+    }
     return {
+      unrevertedPreviewChange,
       regenerate: () => (last ? generate() : null),
       refreshTargets: fillTargets,
       refreshCapability, ask, plan, showEvidence,

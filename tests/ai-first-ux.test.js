@@ -321,6 +321,20 @@ console.log('\n--- §30. AI → Customize（結果カード / コードペイン
 }
 
 // =========================================================
+console.log('\n--- U7（Phase 20 実機）. 会話・「変更前の状態に戻す」はこのページの中だけ: 戻していない間は離れる前に確認し、カードで知らせる ---');
+{
+  const m = mount();
+  await ticks();
+  await m.panel.send(GOAL_HYBRID); await ticks(); await confirmSpec(m); await m.panel.send('コードを作って'); await ticks();
+  assert(typeof m.panel.unrevertedPreviewChange === 'function' && m.panel.unrevertedPreviewChange() === false, '登録前は確認しない');
+  await m.panel.startJsRegister(m.conv().activePlan()); await ticks(); await m.panel.confirmJsRegister(); await ticks(8);
+  assert(m.panel.jsExecState().stage === 'done' && m.panel.unrevertedPreviewChange() === true, '登録して戻していない間は、ページを離れる前に確認する（ページを離れると戻す手段が消える）');
+  assert(/このページを離れる/.test(m.chat()) && /変更を中止/.test(m.chat()), 'JS 登録カード: このページを離れると会話と「変更前の状態に戻す」が使えない・その後は kintone の［変更を中止］');
+  await m.panel.startJsRollback(); await ticks(); await m.panel.confirmJsRollback(); await ticks(8);
+  assert(/rolled-back/.test(m.panel.jsExecState().stage) && m.panel.unrevertedPreviewChange() === false, `戻した後は確認しない（${m.panel.jsExecState().stage}）`);
+}
+
+// =========================================================
 console.log('\n--- §35. AI-first の開発思想（UI の文言: 標準設定 / JavaScript を先に選ばせない） ---');
 {
   const m = mount();
