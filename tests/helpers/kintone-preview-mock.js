@@ -17,7 +17,7 @@ function makeKintoneMock(data, { permission = true, autoPlace = true, jsSources 
   const st = {
     fields: clone(data.fields), layout: rowsFrom(data.fields), views: clone(data.views?.views || {}),
     general: clone(data.generalNotify?.notifications || []), notifyToCommenter: data.generalNotify?.notifyToCommenter ?? false,
-    perRecord: clone(data.perRecordNotify?.notifications || []), reminders: clone(data.reminderNotify?.notifications || []), timezone: data.reminderNotify?.timezone || 'Asia/Tokyo',
+    perRecord: clone(data.perRecordNotify?.notifications || []), reminders: clone(data.reminderNotify?.notifications || []), timezone: data.reminderNotify && Object.prototype.hasOwnProperty.call(data.reminderNotify, 'timezone') && data.reminderNotify.timezone === null ? null : (data.reminderNotify?.timezone || 'Asia/Tokyo'),   // Phase 20: リマインダーを一度も設定していないアプリは null（実機）
     revision: Number(data.views?.revision || 1), prodRevision: Number(data.views?.revision || 1), prodViews: clone(data.views?.views || {}),
     // プロセス管理（Phase 12）: GET /preview/app/status と同じ形（enable / states / actions）。states / actions は PUT で全体置換
     status: data.status ? normalizeStatus({ enable: !!data.status.enable, states: clone(data.status.states || {}), actions: clone(data.status.actions || []) }) : { enable: false, states: null, actions: null },
@@ -312,6 +312,7 @@ function makeKintoneMock(data, { permission = true, autoPlace = true, jsSources 
       list = mutate('reminders', list);
       st.reminders = list.map((n, i) => ({ timing: { code: n.timing.code, daysLater: String(n.timing.daysLater), ...(n.timing.time != null ? { time: (ctl.mangleReminderTime && i === list.length - 1) ? '23:50' : n.timing.time } : { hoursLater: String(n.timing.hoursLater) }) }, filterCond: n.filterCond || '', title: n.title || '', targets: (n.targets || []).map(t => ({ entity: t.entity, includeSubs: !!t.includeSubs })) }));   // mangleReminderTime: 追加した 1 件だけ時刻を壊す（検証の mutant）
       if (body.timezone) st.timezone = body.timezone;
+      else if (st.timezone == null) st.timezone = 'Asia/Tokyo';   // Phase 20（実機）: 未設定（null）のアプリは最初の保存で既定の timezone が入る（API で null には戻せない）
       st.revision += 1;
       return { revision: String(st.revision) };
     },

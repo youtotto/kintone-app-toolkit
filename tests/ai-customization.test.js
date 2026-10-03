@@ -243,8 +243,11 @@ console.log('\n--- §52-2. KTCodeReview: 構文 / 未知イベント / 未知フ
   assert(badEv.status === 'BLOCKED' && !check(badEv, 'events').ok && /app\.record\.update\.show/.test(check(badEv, 'events').message), '存在しないイベント app.record.update.show: BLOCKED');
   const badField = run(NEW_JS_GOOD.replace("record['amount'].value", "record['amount_total'].value"));
   assert(badField.status === 'BLOCKED' && !check(badField, 'fields').ok && /GENERATED_JS_UNKNOWN_FIELD/.test(check(badField, 'fields').message) && /amount_total/.test(check(badField, 'fields').message), '存在しないフィールド amount_total: GENERATED_JS_UNKNOWN_FIELD（BLOCKED）');
-  const extraWrite = run(NEW_JS_GOOD.replace("    return event;", "    record['approver'].value = [];\n    return event;"));
+  // Phase 20: 計画外の書き換えは error を設定しない別の handler で確かめる（同じ change イベントで error と value を設定すると、kintone が value を取り消すので別の検査で BLOCKED になる）
+  const extraWrite = run(NEW_JS_GOOD.replace("})();", "  kintone.events.on(['app.record.create.show'], function (event) {\n    event.record['approver'].value = [];\n    return event;\n  });\n})();"));
   assert(extraWrite.status === 'REVIEW_REQUIRED' && !check(extraWrite, 'plan-consistency').ok && extraWrite.mismatches.some(m => m.code === 'EXTRA_FIELD_WRITE' && m.items.includes('approver')), '計画に無いフィールド（approver）の書き換え: CUSTOMIZATION_PLAN_MISMATCH（確認が必要）');
+  const errorAndValue = run(NEW_JS_GOOD.replace("    return event;", "    record['approver'].value = [];\n    return event;"));
+  assert(errorAndValue.status === 'BLOCKED' && check(errorAndValue, 'error-cancels-edit') && !check(errorAndValue, 'error-cancels-edit').ok && /value/.test(check(errorAndValue, 'error-cancels-edit').message), 'Phase 20: 同じ change イベントで error と value（approver）を設定: kintone が値の変更を取り消すので BLOCKED（error-cancels-edit）');
   const extraApi = run(NEW_JS_GOOD.replace("    return event;", "    kintone.api(kintone.api.url('/k/v1/records.json', true), 'GET', { app: 600 });\n    return event;"));
   assert(extraApi.status === 'REVIEW_REQUIRED' && check(extraApi, 'apis-network') && !check(extraApi, 'apis-network').ok && /kintone\.api/.test(check(extraApi, 'apis-network').message), '計画に無い REST API（kintone.api）: 確認が必要（単純な制御には不要）');
   const missingEv = run(NEW_JS_GOOD.replace("['app.record.create.change.amount', 'app.record.edit.change.amount']", "'app.record.create.change.amount'"));

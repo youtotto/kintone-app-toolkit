@@ -6235,6 +6235,16 @@
       if (dt === 'LINK' && src.protocol && dest.protocol && src.protocol !== dest.protocol) return { code: 'LOOKUP_TYPE_MISMATCH', message: `リンク「${src.code}」（${src.protocol}）と「${dest.code}」（${dest.protocol}）のリンクの種類が違います` };
       return null;
     }
+    /** Phase 20（実機）: 新規のリンク型フィールドがルックアップのコピー先なら、リンクの種類（Web / 電話 / メール）を取得元に合わせる（決まらないと Executor が追加できない）。追加する step の Review（diff.after）も更新する */
+    const LINK_PROTOCOL_JA = { WEB: 'Web サイトのアドレス', CALL: '電話番号', MAIL: 'メールアドレス' };
+    function inheritLinkProtocol(dest, src, results) {
+      if (!dest || !src || dest.origin !== 'proposed' || (dest.baseType || dest.type) !== 'LINK' || dest.protocol) return false;
+      if ((src.baseType || src.type) !== 'LINK' || !src.protocol) return false;
+      dest.protocol = src.protocol;
+      const rr = results && dest.stepId ? results.get(dest.stepId) : null;
+      if (rr && rr.diff) { if (rr.diff.after && typeof rr.diff.after === 'object') rr.diff.after = { ...rr.diff.after, protocol: src.protocol }; if (Array.isArray(rr.diff.human)) rr.diff.human.push(`リンクの種類: ${LINK_PROTOCOL_JA[src.protocol] || src.protocol}（ルックアップの取得元「${src.code}」に合わせる）`); }
+      return true;
+    }
     /** 並び順に使えない種類（kintone の order by） */
     const NOT_SORTABLE = ['MULTI_LINE_TEXT', 'RICH_TEXT', 'CHECK_BOX', 'MULTI_SELECT', 'FILE', 'USER_SELECT', 'ORGANIZATION_SELECT', 'GROUP_SELECT', 'CREATOR', 'MODIFIER', 'STATUS_ASSIGNEE', 'SUBTABLE', 'REFERENCE_TABLE', 'CATEGORY'];
     /** Review 時点の同一性（Executor が実行直前の現在値と照合する）。参照元アプリの指紋（revision / fieldsHash）も含める */
@@ -6753,7 +6763,8 @@
           if (OPTION_TYPES.includes(type) && !(p.options || spec.options || []).length) issue('OPTIONS_MISSING', 'medium', '選択肢が指定されていません（要確認）');
           if ([...resolvedCodes.entries()].some(([tid, c]) => tid !== p.temporaryId && c === code)) invalid('PLAN_INTERNAL_DUPLICATE', `同じコード「${code}」を別の step でも追加しています`);
           if (r.status === STATUS.INVALID) return r;
-          const field = { code, label: p.label, type, baseType: type === 'LOOKUP' ? (spec.fieldType && spec.fieldType !== 'LOOKUP' ? spec.fieldType : 'SINGLE_LINE_TEXT') : type, required: !!(p.required || spec.required), unique: false, subtable: null, ...(((p.options || spec.options) || []).length ? { options: [...(p.options?.length ? p.options : spec.options)] } : {}), origin: 'proposed', temporaryId: p.temporaryId, stepId: step.id };
+          const linkProtocol = type === 'LINK' ? String(p.protocol || spec.protocol || '').toUpperCase() : '';
+          const field = { code, label: p.label, type, baseType: type === 'LOOKUP' ? (spec.fieldType && spec.fieldType !== 'LOOKUP' ? spec.fieldType : 'SINGLE_LINE_TEXT') : type, required: !!(p.required || spec.required), unique: false, subtable: null, ...(['WEB', 'CALL', 'MAIL'].includes(linkProtocol) ? { protocol: linkProtocol } : {}), ...(((p.options || spec.options) || []).length ? { options: [...(p.options?.length ? p.options : spec.options)] } : {}), origin: 'proposed', temporaryId: p.temporaryId, stepId: step.id };
           if (type === 'LOOKUP') {
             const lk = { app: spec.sourceApp ? String(spec.sourceApp).trim() : null, code: '', keyField: spec.keyField || null, mappings: [...(spec.mappings || []), ...(spec.addMappings || [])].map(m => ({ from: m.from, to: m.to })), pickerFields: [...(spec.addPickerFields || [])], filterCond: spec.filterCond || '', sort: spec.sort || '' };
             field.lookup = lk;
@@ -6783,7 +6794,7 @@
               }
             }
             validateLookupMappings(lk, step, r, { model, resolveField, requireField, invalid, issue, selfCode: code, addingStepOf });
-            if (relatedForType) for (const m of lk.mappings) { const dest = resolveField(m.to), src = relatedForType.fields[m.from]; if (!dest || dest.missingProposed || !src) continue; const tc = lookupTypeCheck(src, dest); if (tc) invalid(tc.code, tc.message); }
+            if (relatedForType) for (const m of lk.mappings) { const dest = resolveField(m.to), src = relatedForType.fields[m.from]; if (!dest || dest.missingProposed || !src) continue; inheritLinkProtocol(dest, src, results); const tc = lookupTypeCheck(src, dest); if (tc) invalid(tc.code, tc.message); }
           }
           model.fields[code] = field;
           resolvedCodes.set(p.temporaryId, code);
@@ -6872,6 +6883,7 @@
               const dest = model.fields[m.to], src = related.fields[m.from];
               if (!dest || !src) continue;
               if (dest.code === f.code) { invalid('LOOKUP_DEST_IS_SELF', `コピー先「${dest.code}」はこのルックアップ自身です（キーの値はルックアップ自身に入ります）`); continue; }
+              inheritLinkProtocol(dest, src, results);
               const tc = lookupTypeCheck(src, dest); if (tc) invalid(tc.code, tc.message);
               // 既存フィールドをコピー先にするとき、同じ種類で似た名前の既存フィールドが他にもあれば、どちらへ取得するかは人が決める（AI が黙って片方を選んだ可能性）
               if (dest.origin !== 'proposed' && !m.overwrite) {
@@ -7496,7 +7508,7 @@
     }
 
     // ================= 表示用 =================
-    const fieldView = (f) => ({ code: f.code, label: f.label, type: f.type, required: !!f.required, ...(f.unique ? { unique: true } : {}), ...(f.options ? { options: [...f.options] } : {}), ...(f.expression ? { expression: f.expression } : {}), ...(f.lookup ? { lookup: clone(f.lookup) } : {}), ...(f.temporaryId ? { temporaryId: f.temporaryId } : {}) });
+    const fieldView = (f) => ({ code: f.code, label: f.label, type: f.type, required: !!f.required, ...(f.protocol ? { protocol: f.protocol } : {}), ...(f.unique ? { unique: true } : {}), ...(f.options ? { options: [...f.options] } : {}), ...(f.expression ? { expression: f.expression } : {}), ...(f.lookup ? { lookup: clone(f.lookup) } : {}), ...(f.temporaryId ? { temporaryId: f.temporaryId } : {}) });
     const notifView = (n) => ({ id: n.id, scope: n.scope, title: n.title, targets: n.targets.map(entityText), filterCond: n.filterCond, events: [...(n.events || [])], ...(n.stepId ? { stepId: n.stepId } : {}) });
     /** リマインダーの表示（Phase 11: UPDATE_REMINDER の Before / After。属性単位の差分が出せる平らな形） */
     const ASSIGNEE_TYPE_JA = { ONE: '次のユーザーから作業者を選択', ALL: '全員', ANY: '一人' };
@@ -7608,8 +7620,10 @@
     /** Rollback（Phase 11）の step 状態と run 状態。ROLLBACK_STALE = 反映直後と現在の設定が違うため戻さない */
     const RB = Object.freeze({ PENDING: 'ROLLBACK_PENDING', RUNNING: 'ROLLING_BACK', ROLLED_BACK: 'ROLLED_BACK', VERIFIED: 'ROLLBACK_VERIFIED', VERIFY_FAILED: 'ROLLBACK_VERIFY_FAILED', FAILED: 'ROLLBACK_FAILED', STALE: 'ROLLBACK_STALE', SKIPPED: 'ROLLBACK_SKIPPED' });
     const RB_RUN = Object.freeze({ PREPARED: 'PREPARED', BLOCKED: 'BLOCKED', RUNNING: 'ROLLING_BACK', VERIFIED: 'ROLLED_BACK_VERIFIED', VERIFY_FAILED: 'ROLLBACK_VERIFY_FAILED', FAILED: 'ROLLBACK_FAILED' });
-    /** Tier 1 で preview へ追加できるフィールド型（API 仕様が単純で、追加パラメーターが要らないもの。CALC / LINK / LOOKUP / 関連レコード / テーブル / グループは対象外） */
-    const PREVIEW_FIELD_TYPES = ['SINGLE_LINE_TEXT', 'MULTI_LINE_TEXT', 'RICH_TEXT', 'NUMBER', 'DATE', 'TIME', 'DATETIME', 'DROP_DOWN', 'RADIO_BUTTON', 'CHECK_BOX', 'MULTI_SELECT', 'USER_SELECT', 'ORGANIZATION_SELECT', 'GROUP_SELECT', 'FILE'];
+    /** Tier 1 で preview へ追加できるフィールド型（API 仕様が単純で、追加パラメーターが要らないもの。CALC / LOOKUP / 関連レコード / テーブル / グループは対象外）。
+     *  Phase 20: LINK はリンクの種類（protocol）が決まっているときだけ（ルックアップの取得元から引き継ぐ等。決まらなければ LINK_PROTOCOL_UNKNOWN） */
+    const PREVIEW_FIELD_TYPES = ['SINGLE_LINE_TEXT', 'MULTI_LINE_TEXT', 'RICH_TEXT', 'NUMBER', 'DATE', 'TIME', 'DATETIME', 'DROP_DOWN', 'RADIO_BUTTON', 'CHECK_BOX', 'MULTI_SELECT', 'USER_SELECT', 'ORGANIZATION_SELECT', 'GROUP_SELECT', 'FILE', 'LINK'];
+    const LINK_PROTOCOLS = ['WEB', 'CALL', 'MAIL'];
     const OPTION_TYPES = ['DROP_DOWN', 'RADIO_BUTTON', 'CHECK_BOX', 'MULTI_SELECT'];
     const BUILTIN_VIEW_CODES = ['レコード番号', '作成者', '作成日時', '更新者', '更新日時', 'ステータス', '作業者', 'カテゴリー'];
     const clone = (v) => JSON.parse(JSON.stringify(v ?? null));
@@ -7661,16 +7675,17 @@
         const after = stepReview?.diff?.after;
         if (!after || !after.code) return { unsupported: 'NO_FIELD_SPEC', message: 'Review に追加後のフィールド定義がありません' };
         const type = after.type;
-        if (!PREVIEW_FIELD_TYPES.includes(type)) return { unsupported: 'FIELD_TYPE_NOT_SUPPORTED', message: `フィールド型 ${type} は現在の Executor では動作テスト環境へ追加できません（Tier 1: ${PREVIEW_FIELD_TYPES.join(', ')}）` };
+        if (!PREVIEW_FIELD_TYPES.includes(type)) return { unsupported: 'FIELD_TYPE_NOT_SUPPORTED', message: `フィールドの種類「${type}」は Toolkit から自動で追加できません（kintone のフォームの設定で追加してください）` };
         const options = Array.isArray(after.options) ? after.options : [];
         if (OPTION_TYPES.includes(type) && !options.length) return { unsupported: 'OPTIONS_MISSING', message: '選択肢が決まっていないため追加できません' };
-        const prop = { type, code: after.code, label: after.label, noLabel: false, required: !!after.required };
+        if (type === 'LINK' && !LINK_PROTOCOLS.includes(String(after.protocol || ''))) return { unsupported: 'LINK_PROTOCOL_UNKNOWN', message: 'リンクの種類（Web サイト / 電話番号 / メールアドレス）が決まっていないため追加できません' };
+        const prop = { type, code: after.code, label: after.label, noLabel: false, required: !!after.required, ...(type === 'LINK' ? { protocol: after.protocol } : {}) };
         if (OPTION_TYPES.includes(type)) prop.options = Object.fromEntries(options.map((o, i) => [o, { label: o, index: String(i) }]));
         if (type === 'SINGLE_LINE_TEXT' || type === 'NUMBER') prop.unique = !!after.unique;
         return {
           payload: { properties: { [after.code]: prop } },
-          expect: { code: after.code, type, label: after.label, required: !!after.required, ...(OPTION_TYPES.includes(type) ? { options } : {}) },
-          summary: `＋ フィールド「${after.label}」（${after.code}・${type}${after.required ? '・必須' : ''}${options.length ? `・選択肢 ${options.length} 件` : ''}）`,
+          expect: { code: after.code, type, label: after.label, required: !!after.required, ...(OPTION_TYPES.includes(type) ? { options } : {}), ...(type === 'LINK' ? { protocol: after.protocol } : {}) },
+          summary: `＋ フィールド「${after.label}」（${after.code}・${type}${type === 'LINK' ? `・${({ WEB: 'Web サイト', CALL: '電話番号', MAIL: 'メール' })[after.protocol] || after.protocol}` : ''}${after.required ? '・必須' : ''}${options.length ? `・選択肢 ${options.length} 件` : ''}）`,
           temporaryId: after.temporaryId || null,
         };
       },
@@ -7708,6 +7723,7 @@
           check('type', f.type === p.expect.type, p.expect.type, f.type);
           check('label', f.label === p.expect.label, p.expect.label, f.label);
           check('required', !!f.required === p.expect.required, p.expect.required, !!f.required);
+          if (p.expect.protocol) check('protocol', f.protocol === p.expect.protocol, p.expect.protocol, f.protocol ?? null);
           if (p.expect.options) {
             const actual = Object.keys(f.options || {}).sort((a, b) => Number(f.options[a]?.index ?? 0) - Number(f.options[b]?.index ?? 0));
             check('options', same(actual, p.expect.options), p.expect.options, actual);
@@ -7737,7 +7753,7 @@
       prepare(step, { stepReview }) {
         const after = stepReview?.diff?.after;
         if (!after || !after.name) return { unsupported: 'NO_VIEW_SPEC', message: 'Review に追加後の一覧定義がありません' };
-        if ((after.type || 'LIST') !== 'LIST') return { unsupported: 'VIEW_TYPE_NOT_SUPPORTED', message: `一覧の形式 ${after.type} は現在の Executor では追加できません（表形式のみ）` };
+        if ((after.type || 'LIST') !== 'LIST') return { unsupported: 'VIEW_TYPE_NOT_SUPPORTED', message: `一覧の形式 ${after.type} は Toolkit から自動で追加できません（表形式のみ）` };
         if (!Array.isArray(after.fields) || !after.fields.length) return { unsupported: 'VIEW_FIELDS_MISSING', message: '表示フィールドが決まっていないため追加できません' };
         return {
           payload: { view: { type: 'LIST', name: after.name, fields: [...after.fields], filterCond: after.filterCond || '', sort: after.sort || '' } },
@@ -7978,7 +7994,7 @@
         if (after.code && after.code !== before.code) return { unsupported: 'FIELD_CODE_CHANGE_NOT_SUPPORTED', message: 'フィールドコードの変更は反映しません（計画のみ）' };
         const changed = Object.keys({ ...before, ...after }).filter(k => k !== 'temporaryId' && !same(before[k], after[k]));
         const unsupported = changed.filter(k => !UPDATABLE_FIELD_KEYS.includes(k));
-        if (unsupported.length) return { unsupported: 'FIELD_CHANGE_NOT_SUPPORTED', message: `${unsupported.map(k => ({ type: '型', options: '選択肢', unique: '重複禁止', expression: '計算式', lookup: 'ルックアップ' }[k] || k)).join('・')}の変更は現在の Executor では反映しません（表示名・必須のみ）` };
+        if (unsupported.length) return { unsupported: 'FIELD_CHANGE_NOT_SUPPORTED', message: `${unsupported.map(k => ({ type: '型', options: '選択肢', unique: '重複禁止', expression: '計算式', lookup: 'ルックアップ' }[k] || k)).join('・')}の変更は Toolkit から自動で反映できません（表示名・必須のみ）` };
         if (!changed.length) return { unsupported: 'NO_CHANGE', message: '変更内容がありません' };
         if (fieldsNow) { const f = fieldsNow[before.code]; if (!f) return { unsupported: 'TARGET_MISSING', message: `フィールド「${before.code}」が動作テスト環境にありません` }; if (['STATUS', 'STATUS_ASSIGNEE', 'CATEGORY'].includes(f.type)) return { unsupported: 'SYSTEM_FIELD_IMMUTABLE', message: 'システムフィールドは変更できません' }; }
         const changes = Object.fromEntries(changed.map(k => [k, { from: before[k], to: after[k] }]));
@@ -9070,6 +9086,27 @@
       return [...states.values()];
     }
 
+    /**
+     * Phase 20（実機）: 承認の前に「動作テスト環境へ自動で反映できるか」を手順ごとに返す（全手順を承認したと仮定した classifySteps）。
+     * Review は手順の妥当性、ここは今の Executor の対応範囲（フィールドの種類・計画のみの手順・依存先）。設定値の実在は反映の直前にもう一度確かめる
+     * @returns {Array<{ stepId, actionType, apply: 'AUTO'|'MANUAL'|'BLOCKED'|'JS'|'CONFIRM', reason, message }>}
+     */
+    function applyReadiness(plan, review) {
+      const steps = Array.isArray(plan?.steps) ? plan.steps.filter(st => !st.alternativeId) : [];
+      if (!steps.length || !review) return [];
+      let cls = [];
+      try { cls = classifySteps({ plan: { ...plan, steps }, review, approvedSteps: steps.map(st => st.id) }); } catch (e) { return []; }
+      return cls.map(x => {
+        const st = steps.find(y => y.id === x.stepId) || {};
+        const base = { stepId: x.stepId, actionType: st.actionType || x.actionType };
+        if (st.actionType === 'CUSTOMIZATION_REQUIRED') return { ...base, apply: 'JS', reason: null, message: 'JavaScript（コードを生成して右「コード」から登録）' };
+        if (st.actionType === 'REQUIRE_CONFIRMATION') return { ...base, apply: 'CONFIRM', reason: null, message: '確認事項（設定の変更はありません）' };
+        if (x.status === STEP.PENDING) return { ...base, apply: 'AUTO', reason: null, message: '動作テスト環境へ自動で反映できます' };
+        if (x.status === STEP.UNSUPPORTED) return { ...base, apply: 'MANUAL', reason: x.reason, message: x.message || 'Toolkit からは自動で反映できません（計画のみ）' };
+        return { ...base, apply: 'BLOCKED', reason: x.reason, message: x.message || '反映できません' };
+      });
+    }
+
     // ================= prepare =================
     /**
      * @param {object} input executorOutput() の { plan, review, approvedSteps }（review は simulation.before / after を含んでよい）
@@ -9566,7 +9603,10 @@
     const eqViews = (a, b) => same(stripViewIds(a?.views), stripViewIds(b?.views));
     const eqGeneral = (a, b) => same(listOf(a), listOf(b)) && (a?.notifyToCommenter ?? null) === (b?.notifyToCommenter ?? null);
     const eqPerRecord = (a, b) => same(listOf(a), listOf(b));
-    const eqReminders = (a, b) => same(listOf(a), listOf(b)) && String(a?.timezone ?? '') === String(b?.timezone ?? '');
+    // Phase 20（実機）: リマインダーを一度も設定していないアプリは timezone が null。kintone は最初の保存で既定の timezone を入れ、API では null に戻せない。
+    //   通知が 0 件なら timezone は動作に関係しないので比べない。未設定（null）と設定済みの比較は一致とみなす（設定済み同士だけ比べる）
+    const tzOf = (x) => String(x?.timezone ?? '');
+    const eqReminders = (a, b) => same(listOf(a), listOf(b)) && (!listOf(a).length || !tzOf(a) || !tzOf(b) || tzOf(a) === tzOf(b));
     const putStatus = (api, appId, snap, revision) => api.putPreviewStatus(appId, { enable: snap?.enable, states: clone(snap?.states || {}), actions: clone(snap?.actions || []) }, revision); putStatus.path = '/k/v1/preview/app/status.json';
     const eqProcess = (a, b) => same(stripRevision(a), stripRevision(b));
     // Phase 14: アプリアクション全体（全体置換 API。id は送らず、snapshot の全アクションを PUT 形に）
@@ -9891,7 +9931,7 @@
 
     return {
       EXECUTOR_VERSION, ENV, STEP, RUN, RB, RB_RUN, PREVIEW_FIELD_TYPES, ACTION_CAPABILITIES, HANDLERS, ROLLBACK_STRATEGIES,
-      classifySteps, prepare, executePreview, buildRollbackPlan, prepareRollback, executeRollback, rollbackSection, fieldReferences, buildAudit, compareSimulation, diffBefore, previewDataFrom, layoutHasCode, createKintoneApi,
+      classifySteps, applyReadiness, prepare, executePreview, buildRollbackPlan, prepareRollback, executeRollback, rollbackSection, fieldReferences, buildAudit, compareSimulation, diffBefore, previewDataFrom, layoutHasCode, createKintoneApi,
       recipientEntity, notificationDuplicate, reminderDuplicate, preservationChecks, UPDATABLE_FIELD_KEYS,
       preservationExceptIndex, notificationIdentityMismatch, reminderIdentityMismatch, viewIdentityMismatch,
       PROCESS_GROUP, PROCESS_ACTIONS, processEntity, processIdentityMismatch, formProcessGroups,
@@ -10012,6 +10052,45 @@
       }
       return out;
     }
+    /**
+     * Phase 20（実機で確認した kintone の制約）: handler ごとの「イベント名」と、その handler（と handler が呼ぶ同じファイル内の関数 1 段）が
+     * フィールドの error / disabled / value を設定しているか。kintone は error を表示したイベントでは disabled・value の設定を取り消し、
+     * error は null を設定したときだけ消える（'' では前の表示が残る）
+     * @returns {Array<{ events: string[], error: boolean, emptyErrorClear: boolean, disabled: boolean, value: boolean }>}
+     */
+    function kintoneFieldOps(clean) {
+      const s = String(clean || '');
+      const bodyOf = (open) => { let d = 0, k = open; for (; k < s.length; k++) { const ch = s[k]; if (ch === '{') d++; else if (ch === '}') { d--; if (d === 0) break; } } return s.slice(open, k + 1); };
+      const fnBody = (name) => {
+        const defRx = new RegExp(`(?:\\bfunction\\s+${name}\\s*\\(|\\b${name}\\s*=\\s*(?:async\\s+)?(?:function\\b[^{]*|\\([^)]*\\)\\s*=>|[A-Za-z_$][\\w$]*\\s*=>))`);
+        const dm = defRx.exec(s); if (!dm) return '';
+        const open = s.indexOf('{', dm.index + dm[0].length - (dm[0].endsWith('(') ? 1 : 0));
+        return open >= 0 ? bodyOf(open) : '';
+      };
+      const out = [];
+      const rx = /kintone\s*\.\s*events\s*\.\s*on\s*\(/g;
+      let m;
+      while ((m = rx.exec(s)) !== null) {
+        let i = m.index + m[0].length, depth = 1, comma = -1;
+        for (; i < s.length && depth > 0; i++) { const ch = s[i]; if (ch === '(' || ch === '[' || ch === '{') depth++; else if (ch === ')' || ch === ']' || ch === '}') depth--; else if (ch === ',' && depth === 1 && comma < 0) comma = i; }
+        const firstArg = s.slice(m.index + m[0].length, comma >= 0 ? comma : i);
+        let body = comma >= 0 ? s.slice(comma + 1, i - 1) : '';
+        const idm = /^\s*([A-Za-z_$][\w$]*)\s*$/.exec(body);
+        if (idm) body = fnBody(idm[1]);
+        // handler が呼ぶ同じファイル内の関数（1 段）
+        const called = [...new Set([...body.matchAll(/\b([A-Za-z_$][\w$]*)\s*\(/g)].map(x => x[1]).filter(n => !['function', 'if', 'for', 'while', 'switch', 'return', 'catch', 'Number', 'String', 'parseInt', 'parseFloat'].includes(n)))];
+        const inlined = body + called.map(n => fnBody(n)).join('\n');
+        const events = [...firstArg.matchAll(/['"`]((?:mobile\.)?app\.(?:record|report|event)\.[A-Za-z0-9_.]+)['"`]/g)].map(x => x[1]);
+        out.push({
+          events: events.length ? events : ['（イベント名を特定できない登録）'],
+          error: /\.error\s*=(?!=)\s*(?!null\b|undefined\b|(['"`])\1)/.test(inlined),
+          emptyErrorClear: /\.error\s*=(?!=)\s*(['"`])\1/.test(inlined),
+          disabled: /\.disabled\s*=(?!=)/.test(inlined),
+          value: /\.value\s*=(?!=)/.test(inlined),
+        });
+      }
+      return out;
+    }
     /** グローバル汚染: 即時関数の外（ネスト 0）に var / let / const / function / class の宣言があるか */
     function globalDeclarations(clean) {
       const s = stripStrings(String(clean || ''));
@@ -10121,6 +10200,16 @@
       const asyncIssues = handlers.filter(h => h.awaitInNonAsync);
       add('async', !asyncIssues.length, 'block', asyncIssues.length ? 'async でない handler の中で await を使っています（構文エラーになります）' : handlers.some(h => h.async) ? 'async handler は return event を Promise で返します' : 'async は使っていません');
       if (handlers.some(h => h.promiseThen && !h.async)) add('async-then', false, 'review', '.then() を使う handler は Promise を return しないと kintone が結果を待ちません');
+      // Phase 20（実機）: error の解除は null だけ（'' では残る）・同じイベントで error を表示すると disabled / value の設定が取り消される（既存の「編集不可」が外れる）
+      const fieldOps = kintoneFieldOps(clean);
+      if (fieldOps.some(o => o.error || o.emptyErrorClear)) {
+        const clears = [...new Set(fieldOps.filter(o => o.emptyErrorClear).flatMap(o => o.events))];
+        add('error-clear', !clears.length, 'block', clears.length ? `エラー表示を空文字（''）で消そうとしています（${clears.join(', ')}）。kintone は error に null を設定したときだけ表示を消します（'' では前のエラーが残り、条件を満たさなくなっても警告が消えません）` : 'エラー表示の解除は null です');
+        const byEvent = new Map();
+        for (const o of fieldOps) for (const ev of o.events) { const g = byEvent.get(ev) || { error: false, disabled: false, value: false }; g.error = g.error || o.error; g.disabled = g.disabled || o.disabled; g.value = g.value || o.value; byEvent.set(ev, g); }
+        const cancels = [...byEvent.entries()].filter(([ev, g]) => /\.show$|\.change\./.test(ev) && g.error && (g.disabled || g.value));   // 保存時（submit）はエラーで保存自体が止まるので対象外
+        add('error-cancels-edit', !cancels.length, 'block', cancels.length ? `同じイベント（${cancels.map(([ev, g]) => `${ev}: error と ${[g.disabled ? 'disabled' : null, g.value ? 'value' : null].filter(Boolean).join(' / ')}`).join('、')}）でエラー表示と編集可否・値の変更を設定しています。kintone はエラーを表示すると、そのイベントでの編集可否（disabled）と値の変更を取り消します（既存の「編集不可」が外れます）。警告は別のイベント（値の変更時など）や別の表示方法に分けてください` : 'エラー表示と編集可否・値の変更は同じイベントで重なっていません');
+      }
       // 登録ごとのイベント名（第 1 引数の文字列リテラル。変数経由なら解析結果の名前で代用）
       const literalRegs = handlers.flatMap(h => [...String(h.firstArg || '').matchAll(/['"`]((?:mobile\.)?app\.(?:record|report|event)\.[A-Za-z0-9_.]+)['"`]/g)].map(x => x[1]));
       const regs = literalRegs.length ? literalRegs : codeEvents.map(e => e.name);
@@ -10156,7 +10245,7 @@
     }
     const ACCESS_W = (acc) => Object.keys(acc || {}).filter(k => k === 'WRITE' || k === 'CONTROL' || k === 'SHOW_HIDE');
 
-    return { REVIEW_VERSION, STATUS, applyPatch, diffLines, diffText, diffHunks, checkSyntax, inspectHandlers, globalDeclarations, review };
+    return { REVIEW_VERSION, STATUS, applyPatch, diffLines, diffText, diffHunks, checkSyntax, inspectHandlers, globalDeclarations, kintoneFieldOps, review };
   })();
 
   // ==========================================
@@ -11565,13 +11654,16 @@
         // アプリ全体の L1（facts に根拠ID）。質問が無くても L0 だけにしない（ドキュメントは設定の事実が材料）
         ctx = KTContext.build({ question: null, focus: null, data: inputs.data, deps: inputs.deps || null, scan: inputs.scan || null, incoming: inputs.incoming || null, options: { level: KTContext.LEVELS.L1, ...(limits ? { limits } : {}), ...(now !== undefined ? { now } : {}) } });
       } catch (e) { return { ok: false, reason: 'error', message: `Context の生成に失敗しました: ${e?.message || e}` }; }
-      const contextMd = KTContext.toMarkdown(ctx);
+      // Phase 20（実機）: Context は運用環境の設定から作る。動作テスト環境へ反映した変更は Context に入らないので、変更の記録（状態つき）と区別して明記する
+      const envNote = '> この Context は運用環境の設定（画面を開いた時点）から作っています。動作テスト環境へ反映した変更・提案中の変更は含みません（それらは「変更計画（Toolkit の記録）」の状態を見てください）。';
+      const contextMd = `${KTContext.toMarkdown(ctx)}${version && version.plan ? `\n\n${envNote}` : ''}`;
       const changeMd = version && version.plan ? changeSummaryMarkdown(version, { execState, jsExecState }) : '';
-      const instruction = [k.role, ...k.rules, '出力は日本語 Markdown（H1〜H3・箇条書き中心・表は最小限）。10〜15 分でレビューできる密度にし、曖昧な点は「未確定事項」に列挙する。', '', '## 出力の構成', ...k.outline.map((o, i) => `${i + 1}. ${o}`)].join('\n');
+      const instruction = [k.role, ...k.rules, '出力は日本語 Markdown（H1〜H3・箇条書き中心・表は最小限）。10〜15 分でレビューできる密度にし、曖昧な点は「未確定事項」に列挙する。', ...(changeMd ? ['変更計画（Toolkit の記録）の状態（提案中 / 動作テスト環境へ反映済み / 元に戻し済み）をそのまま書き、運用環境へ反映したとは書かない（Toolkit は運用環境へ反映しない）。確認事項は未確定事項として残す。'] : []), '', '## 出力の構成', ...k.outline.map((o, i) => `${i + 1}. ${o}`)].join('\n');
       const prompt = `${instruction}\n${changeMd ? `\n## 変更計画（Toolkit の記録）\n${changeMd}\n` : ''}\n## Context\n${contextMd}\n`;
-      const skeleton = `# ${k.label}（ドラフトの骨格）\n\n${k.outline.map(o => `## ${o}\n\n（TODO: 下の Context を基に記入）\n`).join('\n')}\n---\n\n${contextMd}`;
+      // Phase 20（実機）: 計画がある会話では、どの種類のドキュメントでも Markdown / JSON に変更の記録を入れる（「この変更を引継ぎ資料に」で Prompt にしか入らなかった）
+      const skeleton = `# ${k.label}（ドラフトの骨格）\n\n${k.outline.map(o => `## ${o}\n\n（TODO: 下の Context を基に記入）\n`).join('\n')}\n---\n\n${changeMd ? `## 変更計画（Toolkit の記録）\n\n${changeMd.replace(/^# /m, '### ')}\n\n---\n\n` : ''}${contextMd}`;
       const markdown = k.id === 'changes' ? `${changeMd}\n\n---\n\n${contextMd}` : skeleton;
-      const json = k.id === 'changes' && version ? JSON.stringify({ document: k.id, plan: KTContext.compactPlan(version.plan), spec: version.spec || null, review: version.review ? KTContext.compactReview(version.review) : null, context: ctx }, null, 2) : KTContext.toJSON(ctx, { pretty: true });
+      const json = version && version.plan ? JSON.stringify({ document: k.id, plan: KTContext.compactPlan(version.plan), planStatus: version.status || null, planVersion: version.version ?? null, spec: version.spec || null, review: version.review ? KTContext.compactReview(version.review) : null, execution: execState?.execution ? { status: execState.execution.status || null, steps: (execState.execution.steps || []).map(x => ({ stepId: x.stepId, status: x.status })), rollback: (execState.rollback || execState.execution.rollback) ? { status: (execState.rollback || execState.execution.rollback).status || null } : null, environment: 'preview' } : null, jsExecution: jsExecState?.execution ? { status: jsExecState.execution.status || null, rollback: (jsExecState.rollback || jsExecState.execution.rollback) ? { status: (jsExecState.rollback || jsExecState.execution.rollback).status || null } : null, environment: 'preview' } : null, production: { deployed: false, note: 'Toolkit は運用環境へ反映しない' }, contextEnvironment: 'production', context: ctx }, null, 2) : KTContext.toJSON(ctx, { pretty: true });
       const warnings = [];
       if (!ctx.coverage.javascript) warnings.push('JavaScript は未解析です（Field Scanner の Scan 実行で反映されます）。');
       if (!ctx.coverage.incoming) warnings.push('他アプリからの参照は未走査です（Relations タブで走査できます）。');
@@ -11799,7 +11891,10 @@
     const CHANGE_BADGE = { ADD: ['＋ 新規', '#1a73e8'], UPDATE: ['✎ 既存変更', '#6a1b9a'], REUSE: ['↻ 再利用', '#2e7d32'], REMOVE: ['− 削除', '#b00020'], NO_CHANGE: ['変更なし', '#555'], INVALID: ['× 無効', '#b00020'] };
     const changeBadges = (r) => { const [t, c] = CHANGE_BADGE[r?.diff?.changeType] || [r?.diff?.changeType || '', '#555']; return badge(t, c) + ((r?.status === 'NEEDS_CONFIRMATION' || r?.status === 'WARNING') ? badge('△ 確認必要', '#b26a00') : ''); };
     /** step 1 件分の Toolkit 検証（AI の提案とは分けて表示する） */
-    function reviewStepHtml(r) {
+    const APPLY_LINE = { AUTO: ['✓', '#2e7d32'], MANUAL: ['△', '#b26a00'], BLOCKED: ['×', '#b00020'] };
+    /** Phase 20: 手順が動作テスト環境へ自動で反映できるか（KTPlanExecutor.applyReadiness の 1 件） */
+    const applyLineHtml = (a) => { if (!a || !APPLY_LINE[a.apply]) return ''; const [mark, color] = APPLY_LINE[a.apply]; return `<div class="kt-ai-apply" data-apply="${esc(a.apply)}" style="font-size:11px; margin-top:2px; color:${color};">${mark} ${a.apply === 'AUTO' ? '動作テスト環境へ自動で反映できます（承認すると反映の対象）' : a.apply === 'MANUAL' ? `Toolkit からは自動で反映できません — ${esc(a.message)}（承認しても反映されません。kintone の画面で設定してください）` : `反映できません — ${esc(a.message)}`}</div>`; };
+    function reviewStepHtml(r, apply = null) {
       if (!r) return '';
       const [stText, stColor] = RSTATUS[r.status] || [r.status, '#555'];
       const [sfText, sfColor] = RSAFETY[r.safety] || [r.safety, '#555'];
@@ -11809,7 +11904,7 @@
       const gen = r.codeGeneration ? `<div style="font-size:11px; margin-top:2px; color:${r.codeGeneration.supported ? '#2e7d32' : '#b26a00'};">${r.codeGeneration.supported ? '✓ コード生成できます（標準設定の反映とは別に、右「コード」から動作テスト環境へ登録）' : `△ コード生成はまだできません（${esc(GEN_REASON_JA[r.codeGeneration.reason] || r.codeGeneration.reason || '要確認')}）`}</div>${r.codeGeneration.supported ? `<div style="margin-top:4px;"><button type="button" class="btn kt-ai-act" data-act="generate" data-cid="${esc(r.customization?.customizationId || '')}" style="height:24px; font-size:11px; border-color:#6a1b9a;">コードを作る</button></div>` : ''}` : '';
       return `<div class="kt-ai-review-step" data-step="${esc(r.stepId)}" style="margin-top:6px; padding:6px 8px; border-radius:6px; background:rgba(0,0,0,.04); border-left:3px solid ${stColor};">
         <div><b>Toolkit で確認した結果</b> ${badge(stText, stColor)}${badge(sfText, sfColor)}${changeBadges(r)}${r.blockedBy?.length ? badge(`依存: ${r.blockedBy.join(', ')}`, '#b00020') : ''}${r.solution === 'CUSTOMIZATION' ? badge('JavaScript', '#6a1b9a') : ''}</div>
-        ${lines}${issues}${gen}
+        ${lines}${issues}${gen}${applyLineHtml(apply)}
         <label style="display:flex; align-items:center; gap:6px; margin-top:4px; font-size:11px;">判断
           <select class="btn kt-ai-decision" data-step="${esc(r.stepId)}" style="font-size:11px; height:24px; padding:0 4px;"><option value="">（未定）</option><option value="approve"${r.safety === 'BLOCKED' ? ' disabled' : ''}>承認</option><option value="hold">保留</option><option value="reject">却下</option></select>
         </label>
@@ -11855,7 +11950,12 @@
       const covText = Object.entries(cov).filter(([k]) => k !== 'notes').map(([k, v]) => `${k}: ${v === true ? '✓' : v === false ? '—' : esc(String(v))}`).join('　');
       // Phase 19: 手順ごとの判定と判断（承認 / 保留 / 却下）はここだけ（計画ペインには置かない）
       const mainSteps = (plan?.steps || []).filter(st => !st.alternativeId);
-      const stepDecisions = mainSteps.map(st => { const r = steps.find(x => x.stepId === st.id); return r ? `<div class="kt-ai-review-item" data-step="${esc(st.id)}" style="margin-top:6px;"><div style="font-size:12px;"><b>${esc(st.id)}</b> ${esc(st.title || '')}</div>${reviewStepHtml(r)}</div>` : ''; }).join('');
+      // Phase 20（実機）: 承認の前に、自動で反映できる手順とできない手順（フィールドの種類・計画のみ・依存先）を分けて見せる
+      const applyList = (typeof KTPlanExecutor !== 'undefined' && KTPlanExecutor.applyReadiness) ? KTPlanExecutor.applyReadiness(plan, review) : [];
+      const applyOf = new Map(applyList.map(a => [a.stepId, a]));
+      const stdApply = applyList.filter(a => ['AUTO', 'MANUAL', 'BLOCKED'].includes(a.apply));
+      const applySummary = stdApply.length ? `<div id="kt-ai-review-apply" style="margin-top:6px; font-size:11px;"><b>動作テスト環境への自動反映</b>　できる：${stdApply.filter(a => a.apply === 'AUTO').length} 件${stdApply.some(a => a.apply === 'AUTO') ? `（${esc(stdApply.filter(a => a.apply === 'AUTO').map(a => a.stepId).join(', '))}）` : ''}　${stdApply.some(a => a.apply !== 'AUTO') ? `<span style="color:#b26a00;">できない：${stdApply.filter(a => a.apply !== 'AUTO').length} 件（${esc(stdApply.filter(a => a.apply !== 'AUTO').map(a => a.stepId).join(', '))}）</span>` : 'できない：0 件'}</div>` : '';
+      const stepDecisions = mainSteps.map(st => { const r = steps.find(x => x.stepId === st.id); return r ? `<div class="kt-ai-review-item" data-step="${esc(st.id)}" style="margin-top:6px;"><div style="font-size:12px;"><b>${esc(st.id)}</b> ${esc(st.title || '')}</div>${reviewStepHtml(r, applyOf.get(st.id) || null)}</div>` : ''; }).join('');
       return `<div id="kt-ai-review" style="margin-top:4px; border:2px solid #1a73e8; border-radius:8px; padding:8px;">
         <div style="display:flex; align-items:center; justify-content:space-between;"><b>Toolkit で確認した結果</b><span style="font-size:11px; opacity:.7;">AI の提案を Toolkit が決定的に検証した結果です。AI の説明より優先します</span></div>
         <div style="margin-top:6px; display:grid; gap:2px;">
@@ -11865,6 +11965,7 @@
           ${stepLine(er.planOnlySteps || [], '計画のみ（仮適用・自動検証の対象外）', '#555', '○')}
         </div>
         <div style="margin-top:6px; font-size:11px;">追加：${c.additions ?? 0}　既存変更：${c.updates ?? 0}　既存利用：${c.reuse ?? 0}　高リスク変更：${c.highRisk ?? 0}　競合候補：${c.conflicts ?? 0}　確認事項：${c.confirmations ?? 0}　無効：${c.invalid ?? 0}</div>
+        ${applySummary}
         <div id="kt-ai-review-decisions" style="margin-top:4px; font-size:11px;">${esc(decisionSummary(review, {}))}</div>
         <div id="kt-ai-review-steps" style="margin-top:6px;"><b>手順ごとの判定と判断</b>${stepDecisions || '<div style="opacity:.6; margin-top:4px;">手順はありません</div>'}</div>
         ${updatesHtml}
@@ -12047,6 +12148,7 @@
         return `${head}<div id="kt-ai-exec-confirm" style="margin-top:8px; border:2px solid ${procSteps.length || lkSteps.length || aaSteps.length ? '#6a1b9a' : '#b26a00'}; border-radius:6px; padding:8px;">
           <b>動作テスト環境へ以下を反映します。</b>${procHtml}${lkHtml}${aaHtml}
           <div style="margin-top:4px;">${lines}</div><div style="margin-top:4px; display:grid; gap:2px;">${details}</div>${sensitiveHtml}
+${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top:6px; border:1px solid #b26a00; border-radius:6px; padding:6px;"><b style="color:#b26a00;">⚠ 未回答の確認事項が ${s.questions.length} 件あります</b><div style="font-size:11px;">AI は確認事項を仮の値で計画している場合があります。このまま反映すると、計画に書かれた値（時刻・通知先・しきい値など）で設定されます。</div>${s.questions.slice(0, 5).map(q => `<div style="font-size:11px; margin-left:8px;">・${esc(q)}</div>`).join('')}${s.questions.length > 5 ? `<div style="font-size:11px; margin-left:8px;">… ほか ${s.questions.length - 5} 件</div>` : ''}</div>` : ''}
           <div style="margin-top:6px; font-size:12px;"><b>運用環境には反映されません。</b>（動作テスト環境 revision ${esc(String(p?.revision?.preview ?? '—'))}・実行前の設定は snapshot として保持します）</div>
           <div style="margin-top:8px; display:flex; gap:6px;"><button type="button" id="kt-ai-exec-cancel" class="btn" style="height:28px;">キャンセル</button><button type="button" id="kt-ai-exec-go" class="btn" style="height:28px; font-weight:600; border-color:#b26a00;">動作テスト環境へ反映</button></div>
         </div>${foot}`;
@@ -12094,7 +12196,7 @@
           <div style="font-size:11px; opacity:.8;">${esc(reText)}</div>${lkDoneHtml}${aaDoneHtml}
           ${ex?.process ? `<div id="kt-ai-exec-process" style="margin-top:6px;"><b>プロセス管理の Before / Planned / Actual</b><div style="display:flex; gap:6px; flex-wrap:wrap; margin-top:4px;">${mermaidBox('Before（実行前）', ex.process.mermaid?.before, '#ccc')}${mermaidBox('Planned（Review の After）', ex.process.mermaid?.planned, '#1a73e8')}${mermaidBox('Actual（反映後の動作テスト環境。青＝実行前との差）', ex.process.mermaid?.actual, '#2e7d32')}</div><div style="font-size:11px; opacity:.8; margin-top:2px;">Actual: ステータス ${(ex.process.actual?.states || []).map(x => x.name).join(' → ')}　アクション ${(ex.process.actual?.actions || []).length} 件（実行前 ${(ex.process.before?.actions || []).length} 件）</div>${partitionHtml(ex.process.partition)}</div>` : ''}
           ${list}
-          <div style="margin-top:6px; font-size:12px;"><b>運用環境にはまだ反映されていません。</b>（反映は kintone のアプリ設定画面から行ってください。Executor は運用環境へ反映しません）</div>
+          <div style="margin-top:6px; font-size:12px;"><b>運用環境にはまだ反映されていません。</b>（運用環境への反映は kintone のアプリ設定画面の［アプリを更新］で行います。Toolkit は運用環境へ反映しません）</div>
           <div style="margin-top:8px; display:flex; gap:6px; flex-wrap:wrap;">
             <button type="button" id="kt-ai-exec-audit-copy" class="btn" style="height:26px; font-size:11px;">監査 JSON をコピー</button>
             <button type="button" id="kt-ai-exec-audit-download" class="btn" style="height:26px; font-size:11px;">監査 JSON を保存</button>
@@ -12422,7 +12524,9 @@
     function create({ services = {}, now = () => new Date().toISOString(), maxMessages = MAX_MESSAGES } = {}) {
       const state = { messages: [], activePlan: null, activeReview: null, activeExecution: null, planHistory: [], dropped: 0,
         // Phase 17: 相談対象の JS（Customize タブから。無ければ null）と、JS の登録（KTJsExecutor の写し）
-        subject: null, consultation: null, activeJsExecution: null };
+        subject: null, consultation: null, activeJsExecution: null,
+        // Phase 20（GM-6 / FR-9）: 会話の世代。新しい会話を始めると進む。送信中に会話が変わったら、遅れて返った応答・エラーをこの会話に入れない
+        epoch: 0 };
       const listeners = new Set();
       const emit = () => { for (const fn of listeners) { try { fn(state); } catch (e) { } } };
       const push = (type, role, text = '', data = null) => {
@@ -12499,6 +12603,7 @@
         return { type: 'javascript', sourceId: seed.sourceId, name: seed.name, platform: seed.platform, customizationType: seed.customizationType, sourceAvailable: !!seed.source?.available, sourceHash: seed.source?.hash ?? null, customizeRevision: seed.customizeRevision ?? null, counts: seed.counts || {}, events: seed.analysis?.events || [], fields: seed.analysis?.fields || { READ: [], WRITE: [], CONTROL: [] }, fieldAccess: seed.analysis?.fieldAccess || {}, appId: seed.appId ?? null, appName: seed.appName ?? null };
       }
       function resetConversation() {
+        state.epoch += 1;
         state.messages.length = 0; state.dropped = 0;
         // 反映済み（未復元）の実行は残す（「戻して」と drawer の Rollback 確認は引き続き使える）。計画・仕様・生成コードは消える
         state.planHistory.length = 0; state.activePlan = null; state.activeReview = null;
@@ -12598,11 +12703,15 @@
         const cls = intentOverride ? { intent: intentOverride, reason: 'USER_CHOICE', customizationId: (t.match(/\bC[0-9]+\b/g) || [])[0] || null } : classifyIntent(t, state);
         const result = { intent: cls.intent, reason: cls.reason, text: t, ok: true, cancelled: false, error: null };
         let loading = null;
+        const epoch = state.epoch;
+        const late = () => state.epoch !== epoch;   // 送信中に新しい会話が始まった（この応答は前の会話のもの）
+        const discard = () => { result.ok = false; result.discarded = true; };
         try {
           switch (cls.intent) {
             case INTENT.ASK: {
               loading = push(MSG.LOADING, ROLE.ASSISTANT, LOADING_TEXT.ASK, { intent: cls.intent });
               const r = await services.ask({ question: t, signal });
+              if (late()) { discard(); break; }
               remove(loading); loading = null;
               if (r && r.ok) push(MSG.ANSWER, ROLE.ASSISTANT, r.answer?.answer || '', { answer: r.answer, ctxFacts: r.ctx?.facts || [] });
               else if (r && r.reason === 'ambiguous') assistant('対象を特定できませんでした。どちらについてですか？', { kind: 'candidates', candidates: r.candidates || [], question: t });
@@ -12613,6 +12722,7 @@
             case INTENT.PLAN: {
               loading = push(MSG.LOADING, ROLE.ASSISTANT, state.subject ? LOADING_TEXT.DISCUSS_JS : LOADING_TEXT.PLAN, { intent: cls.intent });
               const r = await services.plan({ goal: t, signal, ...(state.subject ? { subject: state.subject } : {}) });
+              if (late()) { discard(); break; }
               remove(loading); loading = null;
               if (r && r.plan) announcePlan(registerPlan({ plan: r.plan, ctx: r.ctx || null, review: r.review || null }));
               else { result.ok = false; push(MSG.ERROR, ROLE.TOOLKIT, r?.message || '変更計画を作成できませんでした。', { code: r?.reason || 'ERROR', retryText: t }); }
@@ -12626,6 +12736,7 @@
               }
               loading = push(MSG.LOADING, ROLE.ASSISTANT, LOADING_TEXT.REVISE_PLAN, { intent: cls.intent });
               const r = await services.plan({ goal: base.goal, revision: { basedOnVersion: base.version, request: t, previousPlan: base.plan, previousRequests: base.revisionRequests }, signal, ...(state.subject ? { subject: state.subject } : {}) });
+              if (late()) { discard(); break; }
               remove(loading); loading = null;
               if (r && r.plan) announcePlan(registerPlan({ plan: r.plan, ctx: r.ctx || null, review: r.review || null, revisionRequest: t, basedOn: base }), { revised: true });
               else { result.ok = false; push(MSG.ERROR, ROLE.TOOLKIT, r?.message || '変更計画を見直せませんでした。', { code: r?.reason || 'ERROR', retryText: t }); }
@@ -12652,6 +12763,7 @@
               if (rv && !rv.codeGeneration?.supported) { toolkit(`${cid}「${c.requirement}」はまだコードを生成できません（${(rv.issues || []).filter(i => i.severity !== 'low').map(i => i.message).join('／') || rv.codeGeneration?.reason || '要確認'}）。計画を修正するか、確認事項に答えてください。`, { kind: 'generate-blocked', planId: v.planId, version: v.version, customizationId: cid }); result.ok = false; break; }
               loading = push(MSG.LOADING, ROLE.ASSISTANT, LOADING_TEXT.GENERATE_CODE, { intent: cls.intent });
               const r = await services.generate({ version: v, customizationId: cid, signal });
+              if (late()) { discard(); break; }
               remove(loading); loading = null;
               if (r && r.ok) {
                 v.generated = v.generated || {};
@@ -12672,6 +12784,7 @@
               if (!v) { toolkit('説明する計画がありません。'); result.ok = false; break; }
               loading = push(MSG.LOADING, ROLE.ASSISTANT, LOADING_TEXT.ASK, { intent: cls.intent });
               const a = await services.explain({ question: t, kind: cls.intent === INTENT.EXPLAIN_REVIEW ? INTENT.EXPLAIN_REVIEW : INTENT.EXPLAIN_PLAN, plan: v.plan, review: v.review, ctx: v.ctx, version: v.version, stepIds: cls.stepIds || [], signal });
+              if (late()) { discard(); break; }
               remove(loading); loading = null;
               push(MSG.ANSWER, ROLE.ASSISTANT, a?.answer || '', { answer: a, kind: cls.intent, planId: v.planId, version: v.version, ctxFacts: v.ctx?.facts || [] });
               break;
@@ -12711,6 +12824,7 @@
               const kind = cls.documentKind || 'spec';
               if (typeof services.document !== 'function') { toolkit('ドキュメント用の Prompt / Markdown は詳細パネルの「Context」→「ドキュメントを作る」から作れます。', { kind: 'document-hint' }); break; }
               const r = await services.document({ kind, text: t, version: state.activePlan });
+              if (late()) { discard(); break; }
               if (r && r.ok) push(MSG.DOCUMENT, ROLE.TOOLKIT, `${r.label} 用の Prompt / Markdown を用意しました（Toolkit の解析結果から作成。Nest Rec AI は使っていません）。`, { kind: r.kind, label: r.label, outputs: r.outputs, size: r.size, warnings: r.warnings || [], planId: state.activePlan?.planId ?? null, version: state.activePlan?.version ?? null });
               else { result.ok = false; toolkit(r?.message || 'ドキュメントを用意できませんでした。', { kind: 'document-failed', reason: r?.reason || 'ERROR' }); }
               break;
@@ -12731,7 +12845,8 @@
           if (loading) remove(loading);
           const err = errorOf(e);
           result.ok = false; result.error = err;
-          if (err.code === 'CANCELLED' || e?.name === 'AbortError') { result.cancelled = true; push(MSG.SYSTEM_NOTICE, ROLE.SYSTEM, 'キャンセルしました。入力は残しています。', { kind: 'cancelled', text: t }); }
+          if (late()) { discard(); }   // 前の会話の失敗・中断は新しい会話に出さない
+          else if (err.code === 'CANCELLED' || e?.name === 'AbortError') { result.cancelled = true; push(MSG.SYSTEM_NOTICE, ROLE.SYSTEM, 'キャンセルしました。入力は残しています。', { kind: 'cancelled', text: t }); }
           else push(MSG.ERROR, ROLE.TOOLKIT, err.message, { code: err.code, retryable: TRANSIENT.includes(err.code), retryAfterSeconds: err.retryAfterSeconds, requestId: err.requestId, retryText: t, intent: cls.intent });
         } finally {
           busy = false; emit();
@@ -12808,6 +12923,8 @@
         safe: (er.safeSteps || []).length, review: (er.reviewSteps || []).length, blocked: (er.blockedSteps || []).length, planOnly: (er.planOnlySteps || []).length,
         conflicts: (review.conflicts || []).length, highRisk: num(c.highRisk), confirmations: num(c.confirmations),
         js: hc && hc.steps?.length ? { total: hc.steps.length, generatable: (hc.generatable || []).length, needsConfirmation: (hc.needsConfirmation || []).length, blocked: (hc.blocked || []).length, conflicts: (hc.conflicts || []).length } : null,
+        // Phase 20: 自動で反映できない標準設定の手順（Toolkit の対象外の種類・計画のみ・依存先）
+        notAuto: (typeof KTPlanExecutor !== 'undefined' && KTPlanExecutor.applyReadiness ? KTPlanExecutor.applyReadiness(v.plan, review) : []).filter(a => a.apply === 'MANUAL' || a.apply === 'BLOCKED').map(a => a.stepId),
       };
     }
     /** 実装仕様 → 要約（確定は UI だけ。ここは状態を読むだけ） */
@@ -12875,18 +12992,20 @@
       const v = version;
       const ps = planSummary(v), rs = reviewSummary(v), sp = specSummary(v), ex = executionSummary(execState), jx = jsExecutionSummary(jsExec);
       const generated = v && v.generated ? Object.keys(v.generated).length : 0;
+      // Phase 20（実機）: 元に戻す処理が失敗・検証不一致なら「反映済み」と出さない（状態は要確認）。反映が途中で止まったときも同じ
+      const previewText = (s2, { done, rolled, none }) => (!s2 || !s2.written ? none : s2.rolledBack ? rolled : /^ROLLBACK_(VERIFY_)?FAILED$/.test(String(s2.rollbackStatus || '')) ? '元に戻せず（要確認）' : s2.done && s2.ok === false ? '一部だけ反映（要確認）' : done);
       if (subject && (!v || sp)) {
         const lines = [subject.name];
         lines.push(sp ? `仕様 v${sp.specVersion} ${sp.status === 'CONFIRMED' ? '確定' : sp.status === 'DRAFT' ? '確認待ち' : '旧版'}` : '相談中');
         if (sp) lines.push(generated ? 'コード生成済み' : 'コード未生成');
-        if (sp) lines.push(jx && jx.written ? (jx.rolledBack ? '登録を元に戻し済み' : 'Preview登録済み') : 'Preview未登録');
+        if (sp) lines.push(previewText(jx, { done: 'Preview登録済み', rolled: '登録を元に戻し済み', none: 'Preview未登録' }));
         return { lines, kind: 'js' };
       }
       if (ps) {
         const lines = [`変更計画 v${ps.version}`];
         lines.push(rs ? 'Review済み' : 'Review未実施');
-        lines.push(ex && ex.written ? (ex.rolledBack ? '元に戻し済み' : 'Preview反映済み') : 'Preview未反映');
-        if (sp) { lines.push(`仕様 v${sp.specVersion} ${sp.status === 'CONFIRMED' ? '確定' : '確認待ち'}`); lines.push(generated ? 'コード生成済み' : 'コード未生成'); if (generated) lines.push(jx && jx.written ? (jx.rolledBack ? '登録を元に戻し済み' : 'Preview登録済み') : 'Preview未登録'); }
+        lines.push(previewText(ex, { done: 'Preview反映済み', rolled: '元に戻し済み', none: 'Preview未反映' }));
+        if (sp) { lines.push(`仕様 v${sp.specVersion} ${sp.status === 'CONFIRMED' ? '確定' : '確認待ち'}`); lines.push(generated ? 'コード生成済み' : 'コード未生成'); if (generated) lines.push(previewText(jx, { done: 'Preview登録済み', rolled: '登録を元に戻し済み', none: 'Preview未登録' })); }
         return { lines, kind: 'plan' };
       }
       return { lines: [], kind: 'none' };
@@ -13110,7 +13229,7 @@
       const ps = VM.planSummary(v);
       return card(`kt-ai-review-card${ps?.superseded ? ' is-old' : ''}`, `
         <div style="display:flex; align-items:center; justify-content:space-between; gap:6px; flex-wrap:wrap;"><b>Toolkitで変更計画を検証しました。</b><span style="font-size:10px; opacity:.7;">v${esc(String(v.version))}</span>${oldNote(ps)}</div>
-        <div style="margin-top:4px; display:grid; grid-template-columns:auto auto; gap:1px 12px; width:max-content; font-size:12px;"><span style="color:#2e7d32;">✓ 実行可能</span><b>${rs.safe}件</b><span style="color:#b26a00;">△ 確認必要</span><b>${rs.review}件</b><span style="color:#b00020;">× 実行不可</span><b>${rs.blocked}件</b>${rs.js ? `<span style="color:#6a1b9a;">JavaScript 生成可</span><b>${rs.js.generatable} / ${rs.js.total}件</b>` : ''}${rs.conflicts ? `<span>競合候補</span><b>${rs.conflicts}件</b>` : ''}</div>
+        <div style="margin-top:4px; display:grid; grid-template-columns:auto auto; gap:1px 12px; width:max-content; font-size:12px;"><span style="color:#2e7d32;">✓ 実行可能</span><b>${rs.safe}件</b><span style="color:#b26a00;">△ 確認必要</span><b>${rs.review}件</b><span style="color:#b00020;">× 実行不可</span><b>${rs.blocked}件</b>${rs.js ? `<span style="color:#6a1b9a;">JavaScript 生成可</span><b>${rs.js.generatable} / ${rs.js.total}件</b>` : ''}${rs.conflicts ? `<span>競合候補</span><b>${rs.conflicts}件</b>` : ''}</div>${(rs.notAuto || []).length ? `<div class="kt-ai-review-notauto" style="font-size:11px; margin-top:2px; color:#b26a00;">△ 自動で反映できない手順：${esc(rs.notAuto.join(', '))}（右の「検証」に理由）</div>` : ''}
         <div style="margin-top:6px; display:flex; gap:6px; flex-wrap:wrap;">${btn('open-review', '検証結果を見る', `data-plan="${esc(v.planId)}" data-version="${esc(String(v.version))}"`, 'font-weight:600;')}</div>
         <div style="font-size:10px; opacity:.6; margin-top:4px;">手順ごとの判断（承認 / 保留 / 却下）は右の「検証」で行います。チャットの文章では承認になりません。</div>`, '#1a73e8');
     }
@@ -13245,7 +13364,7 @@
       const d = m.data || {};
       return card('kt-ai-choices-card', `<div>${esc(m.text)}</div><div style="margin-top:6px; display:flex; gap:6px; flex-wrap:wrap;">${btn('consult-resume', d.current?.name ? `現在の会話に戻る（${d.current.name}）` : '現在の会話に戻る', '')}${btn('consult-new', `${d.next?.name || 'この JS'} で新しい会話を始める`, '', 'font-weight:600;')}</div>${d.pendingExecution ? '<div style="font-size:11px; color:#b26a00; margin-top:4px;">動作テスト環境に反映済み（未復元）の変更があります。元に戻す操作は新しい会話でも「戻して」や詳細パネルから続けられます。</div>' : ''}<div style="font-size:10px; opacity:.6; margin-top:4px;">新しい会話を始めると、現在の会話・計画・生成コードはこの画面から消えます（kintone の設定は変わりません）。</div>`, '#6a1b9a');
     }
-    const CHECK_JA = { patch: 'Patch', 'patch-removal': '既存行の置換', syntax: 'Syntax', events: 'Event', handler: 'Handler', fields: 'Field references', 'plan-consistency': '計画との一致', apis: 'API', 'apis-network': '通信 API', security: 'Security', 'security-review': 'Security（確認）', globals: 'グローバル汚染', 'return-event': 'return event', async: 'async', 'async-then': 'Promise', 'duplicate-handler': '重複 handler', 'existing-conflict': '既存 JS との競合', platform: 'PC / モバイル', strategy: '方針', code: 'コード' };
+    const CHECK_JA = { patch: 'Patch', 'patch-removal': '既存行の置換', syntax: 'Syntax', events: 'Event', handler: 'Handler', fields: 'Field references', 'plan-consistency': '計画との一致', apis: 'API', 'apis-network': '通信 API', security: 'Security', 'security-review': 'Security（確認）', globals: 'グローバル汚染', 'return-event': 'return event', async: 'async', 'async-then': 'Promise', 'duplicate-handler': '重複 handler', 'error-clear': 'エラー表示の解除', 'error-cancels-edit': 'エラー表示と編集不可', 'existing-conflict': '既存 JS との競合', platform: 'PC / モバイル', strategy: '方針', code: 'コード' };
     /** 生成コードのカード（§7）: ファイル名と Toolkit Code Review の結果だけ。コード全文・Diff・検査の内訳・参考パターンは右「コード」 */
     function codeCardHtml(m, v) {
       const cid = m.data?.customizationId;
@@ -13531,6 +13650,21 @@
     // 会話（KTAiConversation）。AI へ送るのは intent ごとの Context だけ（会話履歴は送らない）
     // ==================================================================
     const inputsNow = () => (typeof d.getInputs === 'function' ? (d.getInputs() || {}) : {});
+    /**
+     * Phase 20（実機）: 相談中の JS は相談開始時に本文を取得済み（seed）。Field Scanner がキャッシュ復元（本文なし）だと、計画の Context（js-file facts）と
+     * Review が「本文は未取得」と判断し、AI が利用者に「ソースを取得できるか」と聞いていた。そのファイルだけ取得済みの本文を重ねる（本文は AI へ送らない）
+     */
+    function withConsultedSource(inputs) {
+      const seed = conv && conv.state && conv.state.consultation ? conv.state.consultation.seed : null;
+      const text = seed && seed.source && seed.source.available ? seed.source.text : null;
+      if (!seed || typeof text !== 'string' || !inputs) return inputs;
+      const scan = inputs.scan && typeof inputs.scan === 'object' ? inputs.scan : { files: [] };
+      const files = Array.isArray(scan.files) ? scan.files.slice() : [];
+      const i = files.findIndex(f => f && f.kind === 'js' && f.name === seed.name && f.target === seed.platform);
+      if (i >= 0) { if (typeof files[i].text === 'string') return inputs; files[i] = { ...files[i], text }; }
+      else files.push({ name: seed.name, target: seed.platform, kind: 'js', text });
+      return { ...inputs, scan: { ...scan, files } };
+    }
     /** 送信の共通前段（接続 / 利用可否 / 二重送信）。だめなら理由（AiClientError 相当）を投げる */
     async function ensureReady({ planner = false, generator = false } = {}) {
       if (!paidEnabled) throw new KTAiClient.AiClientError({ code: KTAiClient.ERROR_CODES.NO_CONFIG, message: KTAiClient.errorText(KTAiClient.ERROR_CODES.NO_CONFIG) });
@@ -13557,7 +13691,8 @@
       async plan({ goal, revision = null, signal = null, subject = null }) {
         // Phase 17: 相談中の JS（subject）を Planner Context に付ける（統合先の第一候補。本文は送らない）
         const sub = subject ? KTContext.compactSubject({ sourceId: subject.sourceId, name: subject.name, target: subject.platform, customizationType: subject.customizationType, sourceAvailable: !!subject.sourceAvailable, events: subject.events || [], fields: Object.entries(subject.fieldAccess || {}).map(([code, acc]) => ({ code, access: acc.CONTROL || acc.SHOW_HIDE ? 'CONTROL' : acc.WRITE ? 'WRITE' : 'READ' })) }) : null;
-        const gen = KTContextUi.generatePlan({ goal, inputs: inputsNow(), revision, subject: sub });
+        const inputs = subject ? withConsultedSource(inputsNow()) : inputsNow();
+        const gen = KTContextUi.generatePlan({ goal, inputs, revision, subject: sub });
         if (!gen.ok) return gen;
         const client = await ensureReady({ planner: true });
         const requestId = KTAiClient.newRequestId();
@@ -13565,7 +13700,7 @@
         try { p = await client.plan({ ctx: gen.ctx, requestId, signal }); }
         catch (e) { noteAuthError(e); throw e; }
         let review = null;
-        try { review = KTPlanReview.review({ plan: p, ...inputsNow() }); } catch (e) { review = null; }
+        try { review = KTPlanReview.review({ plan: p, ...(subject ? withConsultedSource(inputsNow()) : inputsNow()) }); } catch (e) { review = null; }
         return { plan: p, ctx: gen.ctx, review };
       },
       /** EXPLAIN_PLAN / EXPLAIN_REVIEW: 計画の要約 ＋ Review の写し ＋ 計画が引用した根拠 → assistant-qa（説明だけ。計画は変えない） */
@@ -13814,7 +13949,7 @@
       if (act === 'open-js-result') { jsExec.paneClosed = false; renderJsReg(); showPane('exec', { scrollTo: '#kt-ai-jsreg' }); return; }
       if (act === 'js-rollback') { setArtifact({ type: VM.ARTIFACT.ROLLBACK, id: jsExec.execution?.executionId ?? null, version: null, js: true }, { scrollTo: '#kt-ai-jsreg' }); await startJsRollback(); return; }
       if (act === 'consult-resume') { const m = conv.state.messages.find(x => x.data?.kind === 'consult-choices'); if (m) conv.state.messages.splice(conv.state.messages.indexOf(m), 1); pendingSeed = null; renderChat(); return; }
-      if (act === 'consult-new') { const seed = pendingSeed; pendingSeed = null; if (seed) { const r = conv.startConsultation(seed, { force: true }); renderHeader(); renderSpec(); renderChat(); if (r.ok) setArtifact({ type: VM.ARTIFACT.CONSULTATION, id: seed.sourceId, version: null, name: seed.name }, { auto: true }); renderWsState(); } return; }
+      if (act === 'consult-new') { const seed = pendingSeed; pendingSeed = null; if (seed) { try { currentAbort?.abort(); } catch (e) { } const r = conv.startConsultation(seed, { force: true }); renderHeader(); renderSpec(); renderChat(); if (r.ok) setArtifact({ type: VM.ARTIFACT.CONSULTATION, id: seed.sourceId, version: null, name: seed.name }, { auto: true }); renderWsState(); } return; }
     }
     $chat.addEventListener('click', async (ev) => {
       const t = actEl(ev?.target);
@@ -14119,7 +14254,9 @@
     const execClassified = () => { const out = reviewOutput(); return out ? KTPlanExecutor.classifySteps(out) : []; };
     function renderExec() {
       const el = host.querySelector('#kt-ai-exec');
-      if (el) { el.innerHTML = lastReview ? KTContextUi.executorHtml({ ...execState, classified: execClassified(), available: !!executor, review: lastReview }) : ''; renderMermaid(el); }
+      // Phase 20（実機）: 最終確認に未回答の確認事項を出す（仮の値のまま承認・反映できてしまう）
+      const questions = [...new Set((lastPlan?.questions || []).map(q => String(q?.question || q?.text || q || '').trim()).filter(Boolean))];
+      if (el) { el.innerHTML = lastReview ? KTContextUi.executorHtml({ ...execState, classified: execClassified(), available: !!executor, review: lastReview, questions }) : ''; renderMermaid(el); }
       if ($execEmpty) $execEmpty.style.display = lastReview || execState.stage !== 'idle' || jsExec.stage !== 'idle' ? 'none' : '';
       if (conv) { conv.noteExecution(execState); renderChat(); }
       renderWsState();
