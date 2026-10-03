@@ -7244,9 +7244,11 @@
             if (same) issue(ex.origin === 'proposed' ? 'PLAN_INTERNAL_DUPLICATE' : 'DUPLICATE', 'high', `${ex.origin === 'proposed' ? 'この計画の別の step' : '既存'}のリマインダー「${ex.title || ex.id}」と同一です`, { existing: ex, proposed: rem });
             else if (similar) issue(ex.origin === 'proposed' ? 'PLAN_INTERNAL_POSSIBLE_DUPLICATE' : 'POSSIBLE_DUPLICATE', 'medium', `${ex.origin === 'proposed' ? 'この計画の別の step' : '既存'}のリマインダー「${ex.title || ex.id}」（${ex.timing.code} の ${ex.timing.daysLater} 日後・通知先 ${ex.targets.map(entityText).join(', ')}）と類似しています`, { existing: ex, proposed: rem });
           }
+          // Phase 20（実機 354）: 通知時刻が無いリマインダーは kintone に設定できない（Executor も反映しない）。「問題なし」と出さず確認事項にする
+          if (!rem.timing.time || !/^\d{1,2}:\d{2}$/.test(String(rem.timing.time))) { issue('REMINDER_TIME_MISSING', 'medium', '通知する時刻が決まっていません（例:「9時に通知」と伝えて計画を修正してください。時刻は 10 分単位）'); if (r.status === STATUS.VALID) r.status = STATUS.NEEDS_CONFIRMATION; if (r.safety === SAFETY.SAFE) r.safety = SAFETY.REVIEW_REQUIRED; }
           model.reminders.push(rem); r.simulated = true;
           r.diff.target = { kind: 'REMINDER', id: rem.title || rem.id }; r.diff.before = null; r.diff.after = clone(rem);
-          h(`＋ リマインダー「${rem.title || '（無題）'}」: ${rem.timing.code || '（基準日 要確認）'} の ${rem.timing.daysLater ?? '?'} 日後${rem.timing.time ? ` ${rem.timing.time}` : ''} に ${targets.map(entityText).join(', ') || '（通知先 未指定）'} へ`);
+          h(`＋ リマインダー「${rem.title || '（無題）'}」: ${rem.timing.code || '（基準日 要確認）'} の ${rem.timing.daysLater ?? '?'} 日後${rem.timing.time ? ` ${rem.timing.time}` : '（時刻 未定）'} に ${targets.map(entityText).join(', ') || '（通知先 未指定）'} へ`);
           if (issues.some(i => i.code === 'DUPLICATE' || i.code === 'PLAN_INTERNAL_DUPLICATE')) r.status = STATUS.NEEDS_CONFIRMATION; else if (issues.some(i => i.code.includes('POSSIBLE_DUPLICATE')) && r.status === STATUS.VALID) r.status = STATUS.WARNING;
           break;
         }
@@ -11955,7 +11957,7 @@
     /** step 1 件分の Toolkit 検証（AI の提案とは分けて表示する） */
     const APPLY_LINE = { AUTO: ['✓', '#2e7d32'], MANUAL: ['△', '#b26a00'], BLOCKED: ['×', '#b00020'] };
     /** Phase 20: 手順が動作テスト環境へ自動で反映できるか（KTPlanExecutor.applyReadiness の 1 件） */
-    const applyLineHtml = (a) => { if (!a || !APPLY_LINE[a.apply]) return ''; const [mark, color] = APPLY_LINE[a.apply]; return `<div class="kt-ai-apply" data-apply="${esc(a.apply)}" style="font-size:11px; margin-top:2px; color:${color};">${mark} ${a.apply === 'AUTO' ? '動作テスト環境へ自動で反映できます（承認すると反映の対象）' : a.apply === 'MANUAL' ? `Toolkit からは自動で反映できません — ${esc(a.message)}（承認しても反映されません。kintone の画面で設定してください）` : `反映できません — ${esc(a.message)}`}</div>`; };
+    const applyLineHtml = (a) => { if (!a || !APPLY_LINE[a.apply]) return ''; const [mark, color] = APPLY_LINE[a.apply]; return `<div class="kt-ai-apply" data-apply="${esc(a.apply)}" style="font-size:11px; margin-top:2px; color:${color};">${mark} ${a.apply === 'AUTO' ? '動作テスト環境へ自動で反映できます（承認すると反映の対象）' : a.apply === 'MANUAL' ? `Toolkit からは自動で反映できません — ${esc(a.message)}（承認しても反映されません。足りない値はチャットで伝えて計画を修正するか、kintone の画面で設定してください）` : `反映できません — ${esc(a.message)}`}</div>`; };
     function reviewStepHtml(r, apply = null) {
       if (!r) return '';
       const [stText, stColor] = RSTATUS[r.status] || [r.status, '#555'];

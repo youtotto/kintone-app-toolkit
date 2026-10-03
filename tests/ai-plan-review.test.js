@@ -90,7 +90,7 @@ console.log('\n--- 3. Notification / Reminder ---');
   assert(st(unk, 'P1').status === 'INVALID' && codes(st(unk, 'P1')).includes('PROPOSED_FIELD_NOT_APPLIED'), '通知先の新規フィールドが未追加 → INVALID');
   const rem = review(plan([step('P1', 'ADD_REMINDER', 'REMINDER', '期限前日', [['基準日', 'due_date'], ['日数', '-1'], ['通知先', 'owner, owner_group, user1'], ['条件', 'amount > "0"']])]));
   assert(st(rem, 'P1').status === 'NEEDS_CONFIRMATION' && codes(st(rem, 'P1')).includes('DUPLICATE'), 'reminder duplicate（基準日・日数・通知先・条件が一致）');
-  const rem2 = review(plan([step('P1', 'ADD_REMINDER', 'REMINDER', '期限30日前', [['基準日', '期限'], ['日数', '-30'], ['通知先', '担当者']])]));
+  const rem2 = review(plan([step('P1', 'ADD_REMINDER', 'REMINDER', '期限30日前', [['基準日', '期限'], ['日数', '-30'], ['時刻', '09:00'], ['通知先', '担当者']])]));
   const r2 = st(rem2, 'P1');
   assert(r2.status === 'WARNING' && codes(r2).includes('POSSIBLE_DUPLICATE') && r2.diff.after.timing.code === 'due_date' && r2.diff.after.timing.daysLater === '-30' && r2.diff.after.targets[0].code === 'owner', 'reminder: ラベル（期限・担当者）で解決・既存と類似');
   const remBad = review(plan([step('P1', 'ADD_REMINDER', 'REMINDER', 'x', [['基準日', 'amount'], ['日数', '-1'], ['通知先', 'owner']])]));

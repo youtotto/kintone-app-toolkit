@@ -118,6 +118,11 @@ console.log('\n--- F2. 復元: リマインダー未設定（timezone null）の
   const rb2 = await KTPlanExecutor.prepareRollback(log2, prep2, { api: mock2.api });
   const rolled2 = await KTPlanExecutor.executeRollback(rb2, { api: mock2.api, execution: log2 });
   assert(rolled2.status === 'ROLLED_BACK_VERIFIED' && mock2.st.timezone === 'UTC', 'timezone が設定済み（UTC）のアプリは snapshot の timezone で戻す');
+  // 実機 354: 通知時刻の無いリマインダーは「問題なし」と出さず確認事項（Executor は時刻が無いと反映しない）
+  const pNoTime = plan([step('P1', 'ADD_REMINDER', 'NEW_SETTING', '対応日7日後', { name: '対応日7日後', timingField: 'due_date', daysLater: 7, targets: ['FIELD_ENTITY:owner'] })]);
+  const rNoTime = reviewOf(pNoTime).steps[0];
+  assert(rNoTime.status === 'NEEDS_CONFIRMATION' && rNoTime.safety === 'REVIEW_REQUIRED' && rNoTime.issues.some(i => i.code === 'REMINDER_TIME_MISSING' && /9時に通知/.test(i.message)) && rNoTime.diff.human.some(l => /時刻 未定/.test(l)), '実機 354: 時刻の無いリマインダー → 確認が必要（REMINDER_TIME_MISSING・「時刻 未定」）');
+  assert(/チャットで伝えて計画を修正/.test(KTContextUi.reviewHtml(reviewOf(pNoTime), pNoTime)), '自動で反映できない理由に「チャットで伝えて計画を修正」を案内');
   // 作業状態: 復元の失敗・検証不一致は「反映済み」と出さない
   const v = { planId: 'p', version: 1, status: 'EXECUTED', plan: p, review: rv };
   const failedRb = { stage: 'rolled-back', execution: { ...log, rollback: { status: 'ROLLBACK_VERIFY_FAILED' } }, rollback: { status: 'ROLLBACK_VERIFY_FAILED' } };
