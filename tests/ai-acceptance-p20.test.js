@@ -729,6 +729,22 @@ console.log('\n--- F39（CX-1 2 回目・実機）. PC とモバイルの計画:
     await KTJsExecutor.executeRollback(rb, { api: m.api, execution: ex });
     assert(m.st.customize.mobile.js.length === 0 && m.st.customize.desktop.js.length === 1 && m.st.files.get(m.st.customize.desktop.js[0].fileKey).content === DL, 'F39: 復元でモバイルの追加も取り消し、PC は元の本文');
   }
+  // 実機（F39 の確認）: 計画のフィールドは担当者だけ・既存の dealLock.js は金額を編集不可にしている → モバイルの追加ファイルには既存の処理も入るので、
+  //   新規ファイルとして厳密に照合すると「計画に無い書き込み amount」で VERIFY_FAILED になった。既存ファイルを写したモバイル側は統合と同じ照合にする
+  {
+    const ADD2 = "  kintone.events.on(['mobile.app.record.create.show', 'mobile.app.record.edit.show'], function (event) {\n    if (event.record['ステータス'] && event.record['ステータス'].value === '承認済み') { event.record['owner'].disabled = true; }\n    return event;\n  });\n";
+    const cust2 = { ...cust, fields: [{ code: 'owner', access: 'CONTROL' }], events: ['mobile.app.record.create.show', 'mobile.app.record.edit.show'] };
+    const gen2 = { ...gen, code: ADD2, patch: { baseHash, operations: [{ type: 'INSERT_BEFORE', anchor: '})();', content: ADD2 }] }, events: cust2.events, fields: cust2.fields };
+    const rv2 = KTCodeReview.review({ generated: gen2, customization: cust2, plan: null, data: DATA, scan: null, existingSource: SRC });
+    const r2 = KTJsExecutor.changeFromGenerated({ customization: cust2, generated: gen2, review: rv2, existingSource: SRC });
+    const mob2 = KTJsExecutor.mobileCompanionOf(r2.change, { customization: cust2, mobileNames: [] });
+    const data2 = clone(data); data2.customize.mobile.js = [];
+    const m2 = makeKintoneMock(data2, { jsSources: [{ name: 'dealLock.js', target: 'desktop', text: DL }] });
+    const prep2 = await KTJsExecutor.prepare({ appId: '310', changes: [r2.change, mob2.change] }, { api: m2.api });
+    const ex2 = await KTJsExecutor.executePreview(prep2, { api: m2.api, fieldRows: rows });
+    const ms = ex2.steps.find(s => s.target === 'mobile') || {};
+    assert(ex2.status === 'DONE' && ms.status === 'VERIFIED', `F39: 既存ファイルを写したモバイル側は、既存の処理（amount）を計画外の書き込みとして扱わない: ${ex2.status} / ${ms.status} ${JSON.stringify((ms.verification?.checks || []).filter(c => !c.ok).map(c => c.name + ':' + JSON.stringify(c.actual)))}`);
+  }
   // モバイルのイベントが無い・PC だけの計画・モバイルに同じ名前のファイルがある → 追加しない（最後は理由を返す）
   const pcOnly = KTJsExecutor.mobileCompanionOf ? KTJsExecutor.mobileCompanionOf({ ...r.change, content: DL }, { customization: cust, mobileNames: [] }) : { ok: true };
   const notMobile = KTJsExecutor.mobileCompanionOf ? KTJsExecutor.mobileCompanionOf(r.change, { customization: { ...cust, platform: ['desktop'] }, mobileNames: [] }) : { ok: true };

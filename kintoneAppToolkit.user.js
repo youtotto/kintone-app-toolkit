@@ -10720,7 +10720,7 @@
       if (!/\bmobile\.app\./.test(String(change.content || ''))) return { ok: false, reason: 'NO_MOBILE_EVENTS' };
       if ((mobileNames || []).includes(change.name)) return { ok: false, reason: 'MOBILE_FILE_EXISTS', message: `モバイルの一覧にも「${change.name}」があります。モバイル側は Toolkit では更新しません（PC と同じ本文になるよう手作業で更新してください）` };
       const { baseHash, existingName, position, oldFileKey, currentHash, ...rest } = change;
-      return { ok: true, change: { ...rest, changeId: newId('chg'), kind: CHANGE.ADD_FILE, target: 'mobile', name: change.name, companionOf: change.changeId } };
+      return { ok: true, change: { ...rest, changeId: newId('chg'), kind: CHANGE.ADD_FILE, target: 'mobile', name: change.name, companionOf: change.changeId, companionOfKind: change.kind } };
     }
 
     // ---- 完全な payload（Current ＋ Approved Change = After）----
@@ -10849,7 +10849,9 @@
           const planEv = new Set(st.planEvents || []), planW = new Set((st.planFields || []).filter(f => f.access === 'WRITE' || f.access === 'CONTROL').map(f => f.code));
           const extraEv = st.reanalysis.events.filter(x => !planEv.has(x)), extraW = Object.entries(st.reanalysis.fieldAccess).filter(([c, acc]) => (acc.WRITE || acc.CONTROL || acc.SHOW_HIDE) && !planW.has(c)).map(([c]) => c);
           const missingEv = [...planEv].filter(x => !st.reanalysis.events.includes(x));
-          const strict = st.kind === CHANGE.ADD_FILE;   // 既存ファイルへの統合は既存の handler / フィールドが残るので、計画との一致は「計画のイベントとフィールドが含まれる」で判定
+          // 既存ファイルへの統合は既存の handler / フィールドが残るので、計画との一致は「計画のイベントとフィールドが含まれる」で判定。
+          // Phase 20（実機）: 既存ファイルを統合した本文をモバイルへ追加する変更（companionOfKind = REPLACE_FILE）も同じ（新規扱いで厳密に照合して VERIFY_FAILED になった）
+          const strict = st.kind === CHANGE.ADD_FILE && st.companionOfKind !== CHANGE.REPLACE_FILE;
           const planOk = strict ? (extraEv.length === 0 && extraW.length === 0 && missingEv.length === 0) : (missingEv.length === 0 && (st.planFields || []).every(f => !!st.reanalysis.fieldAccess[f.code]));
           sc('planVsActual', planOk, { events: [...planEv], writes: [...planW] }, { extraEvents: extraEv, extraWrites: extraW, missingEvents: missingEv }, planOk ? null : 'JS_VERIFY_MISMATCH');
           sc('securityOnActual', st.reanalysis.security.length === 0, [], st.reanalysis.security);
