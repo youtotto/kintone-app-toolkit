@@ -6771,6 +6771,15 @@
         else if (DETAIL_SCALAR_KEYS.includes(k)) { const vals = multiple.get(k) || [fromDetails.get(k)]; if (!vals.some(x => sameDetailValue(k, x, v))) multiple.set(k, [...vals, v]); }
       }
       if (notes && multiple.size) notes.multiple = [...multiple].map(([key, values]) => ({ key, values }));
+      // Phase 21（モデル比較の CX-1）: ステータス名の後ろの注釈（「承認待ち（課長承認として再利用）」）を名前として読まない。
+      //   注釈つきの名前が実在しなければ、注釈を除いた名前を使う（説明文の飾りで「遷移先ステータスが存在しません（high）」になり、正しい手順が反映できなかった）
+      for (const k of ['from', 'to']) {
+        if (typeof spec[k] !== 'string') continue;
+        const states = (model?.process?.states || []).map(st => st.name);
+        if (states.includes(spec[k])) continue;
+        const bare = spec[k].replace(/\s*[（(][^（）()]*[）)]\s*$/, '').trim();
+        if (bare && bare !== spec[k]) spec[k] = bare;
+      }
       if (spec.events) spec.events = spec.events.map(e => { const n = norm(e); const exact = NOTIFY_EVENTS.find(x => norm(x) === n); if (exact) return exact; const hit = EVENT_SYNONYMS.find(([, syn]) => syn.some(s => n.includes(norm(s)))); return hit ? hit[0] : e; });
       if (spec.filterCond) spec.filterCond = String(spec.filterCond).replace(/^(条件|condition)[:：]\s*/i, '');
       // Phase 12: 作業者の指定形式と変更種別は語彙に揃える（AI の自由文を API 値に使わない。語彙外は Review が指摘する）
