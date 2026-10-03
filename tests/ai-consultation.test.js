@@ -257,7 +257,8 @@ console.log('\n--- §46〜§53（UI 経由）: 既存 FILE の差し替え登録
   await clickPane(m, 'kt-ai-jsreg-rollback-go');
   await ticks(10);
   const rb = m.panel.jsExecState().rollback;
-  assert(m.panel.jsExecState().stage === 'rolled-back' && rb.status === 'ROLLED_BACK_VERIFIED' && m.mock.st.customize.desktop.js[1].fileKey === 'dl:fieldOnOff' && m.mock.st.files.get('dl:fieldOnOff').content === FIELD_ON_OFF && writes(m).join(',') === 'POST file,PUT customize,PUT customize', 'Rollback: 旧 fileKey を含む snapshot へ戻り検証 ✓（PUT 1 回）');
+  const restoredKey = m.mock.st.customize.desktop.js[1].fileKey;
+  assert(m.panel.jsExecState().stage === 'rolled-back' && rb.status === 'ROLLED_BACK_VERIFIED' && restoredKey !== 'dl:fieldOnOff' && m.mock.st.files.get(restoredKey).content === FIELD_ON_OFF && m.mock.st.files.get(restoredKey).name === 'fieldOnOff.js' && writes(m).join(',') === 'POST file,PUT customize,POST file,PUT customize', 'Rollback: 登録前の本文を再アップロードして同じ位置に戻し、検証 ✓（upload 1 ＋ PUT 1。実機: 旧 fileKey は再指定できない）');
   assert(m.types().includes('JS_ROLLBACK') && /登録前の状態に戻しました/.test(m.chat()) && m.conv().activeJsExecution().rolledBack === true && m.msgs().some(x => x.data?.kind === 'js-rolled-back') && m.rescans.length === 2, '復元カード・SYSTEM 通知・再スキャン');
   const again = await m.panel.send('戻して');
   assert(again.intent === KTAiConversation.INTENT.GENERAL && again.reason === 'NO_EXECUTION', '戻した後は戻すものが無い');

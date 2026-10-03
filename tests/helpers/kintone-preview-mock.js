@@ -102,6 +102,9 @@ function makeKintoneMock(data, { permission = true, autoPlace = true, jsSources 
       }
       if (ctl.dropOneExistingOnPut === 'customize') next.desktop.js = next.desktop.js.slice(1);   // バグの注入: 既存 1 件が抜ける
       const final = ctl.mutateCustomize ? ctl.mutateCustomize(next) : next;
+      // kintone の実挙動（Phase 17 実機）: 設定から外れた FILE の fileKey は以後の PUT で「指定したファイルが見つかりません」になる（ダウンロードもできない）
+      const stillUsed = new Set(['desktop', 'mobile'].flatMap(t => ['js', 'css'].flatMap(k => final[t][k].filter(e => e.type === 'FILE').map(e => e.fileKey))));
+      for (const t of ['desktop', 'mobile']) for (const k of ['js', 'css']) for (const e of st.customize[t][k]) if (e.type === 'FILE' && !stillUsed.has(e.fileKey)) st.files.delete(e.fileKey);
       st.customize = final; st.revision += 1;
       return { revision: String(st.revision) };
     },

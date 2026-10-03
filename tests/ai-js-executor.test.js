@@ -257,9 +257,15 @@ console.log('\n--- 6. §52 / §53 Rollback: new → 元の設定、replace → �
   const prep2 = await X.prepare({ appId: '310', changes: [replaceChange().change] }, { api: m2.api });
   const ex2 = await X.executePreview(prep2, { api: m2.api, fieldRows: FIELD_ROWS });
   const rb2 = await X.prepareRollback(ex2, { api: m2.api });
-  assert(rb2.status === 'PREPARED' && rb2.restores[0].kind === 'REPLACE_FILE' && rb2.restores[0].restoreFileKey === 'dl:fieldOnOff' && rb2.restores[0].restoreHash === KTScan.hashText(FIELD_ON_OFF), 'prepareRollback（replace）: 旧 fileKey と旧本文の指紋');
+  assert(rb2.status === 'PREPARED' && rb2.restores[0].kind === 'REPLACE_FILE' && rb2.restores[0].restoreFileKey === 'dl:fieldOnOff' && rb2.restores[0].restoreHash === KTScan.hashText(FIELD_ON_OFF) && rb2.restores[0].restoreSource === FIELD_ON_OFF && rb2.restores[0].position === 2, 'prepareRollback（replace）: 旧 fileKey・旧本文（保持したもの）とその指紋・位置');
+  assert(!m2.st.files.has('dl:fieldOnOff'), '（kintone の実挙動）差し替えで設定から外れた旧ファイルの fileKey はもう使えない');
   const r2 = await X.executeRollback(rb2, { api: m2.api, execution: ex2 });
-  assert(r2.status === 'ROLLED_BACK_VERIFIED' && keysOf(m2, 'desktop')[2] === 'dl:fieldOnOff' && m2.st.files.get('dl:fieldOnOff').content === FIELD_ON_OFF && r2.verification.checks.find(c => c.name === 'sourceRestored:fieldOnOff.js').ok, 'rollback（replace）: 旧 fileKey を含む snapshot へ戻り、本文の指紋も一致');
+  const restoredKey = keysOf(m2, 'desktop')[2];
+  assert(r2.status === 'ROLLED_BACK_VERIFIED' && restoredKey !== 'dl:fieldOnOff' && m2.st.files.get(restoredKey).content === FIELD_ON_OFF && m2.st.files.get(restoredKey).name === 'fieldOnOff.js' && r2.uploads.length === 1 && r2.verification.checks.find(c => c.name === 'sourceRestored:fieldOnOff.js').ok && writes(m2).join(',') === 'POST file,PUT customize,POST file,PUT customize', 'rollback（replace）: 登録前の本文を再アップロードして同じ位置に戻し、本文の指紋も一致（実機: 旧 fileKey は再指定できない）');
+  // 本文を保持していない実行（旧い形）は自動では戻せない
+  const ex2b = JSON.parse(JSON.stringify(ex2)); ex2b.rollback = null; ex2b.executionId = 'jsx_other'; for (const st of ex2b.steps) delete st.currentSource;
+  const rb2b = await X.prepareRollback(ex2b, { api: mk().api });
+  assert(rb2b.status === 'BLOCKED' && rb2b.blockers.some(b => b.code === 'NO_SOURCE_FOR_RESTORE' || b.code === 'ROLLBACK_STALE'), '登録前の本文を保持していなければ自動では戻さない（NO_SOURCE_FOR_RESTORE）');
   // §53 stale: 登録後に人間が JS を足した
   const m3 = mk();
   const prep3 = await X.prepare({ appId: '310', changes: [newChange().change] }, { api: m3.api });

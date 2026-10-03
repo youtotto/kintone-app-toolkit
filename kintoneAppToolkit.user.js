@@ -10350,7 +10350,7 @@
           try {
             const cur = typeof api.downloadFile === 'function' ? await api.downloadFile(list[i].fileKey) : null;
             if (typeof cur !== 'string') { ch.status = ST.BLOCKED; ch.reason = 'JS_SOURCE_UNAVAILABLE'; ch.message = `統合先「${ch.name}」の現在の本文を取得できません`; block('JS_SOURCE_UNAVAILABLE', ch.message); continue; }
-            ch.currentHash = hash(cur);
+            ch.currentHash = hash(cur); ch.currentSource = cur;   // 復元（§28）は旧 fileKey を再指定できない（実機: 差し替え後の旧ファイルは PUT で「見つかりません」）ので、本文を保持して再アップロードする
             if (ch.baseHash && ch.currentHash !== ch.baseHash) { ch.status = ST.BLOCKED; ch.reason = 'JS_SOURCE_CHANGED'; ch.message = `統合先「${ch.name}」の本文がコード生成の時点から変わっています（指紋 ${ch.baseHash} → ${ch.currentHash}）。自動では統合しません。再スキャンして計画からやり直してください`; block('JS_SOURCE_CHANGED', ch.message, { name: ch.name, baseHash: ch.baseHash, currentHash: ch.currentHash }); continue; }
           } catch (e) { const x = strErr(e); ch.status = ST.BLOCKED; ch.reason = 'JS_SOURCE_UNAVAILABLE'; ch.message = `統合先「${ch.name}」の現在の本文を取得できません: ${x.message}`; block('JS_SOURCE_UNAVAILABLE', ch.message, x); continue; }
           prepared.summary.replace++; prepared.summary.byTarget[ch.target].replace++;
@@ -10531,7 +10531,10 @@
       const diffs = diffSnapshots(execution.actualAfterRaw, current);
       if (diffs.length) { rb.stale = { status: 'STALE', diffs }; block('ROLLBACK_STALE', '登録後に動作テスト環境のカスタマイズ設定が変更されているため、自動では元に戻せません（第三者の変更は上書きしません）。Customize タブで現在の設定を確認してください', { diffs }); return rb; }
       if (String(current.revision) !== String(execution.afterRevision)) rb.warnings.push({ code: 'OTHER_CHANGES_SINCE_EXECUTION', message: `登録後に他の設定が変更されています（revision ${execution.afterRevision} → ${current.revision}）。カスタマイズ設定は登録直後と同じなので戻せますが、それ以外の変更には触れません` });
-      rb.restores = execution.steps.filter(st => [ST.APPLIED, ST.VERIFIED, ST.VERIFY_FAILED].includes(st.status)).map(st => ({ changeId: st.changeId, kind: st.kind, target: st.target, name: st.name, ...(st.kind === CHANGE.REPLACE_FILE ? { restoreFileKey: st.oldFileKey, restoreHash: st.currentHash ?? st.baseHash ?? null } : { removeName: st.name }) }));
+      rb.restores = execution.steps.filter(st => [ST.APPLIED, ST.VERIFIED, ST.VERIFY_FAILED].includes(st.status)).map(st => ({ changeId: st.changeId, kind: st.kind, target: st.target, name: st.name, position: st.position ?? null, ...(st.kind === CHANGE.REPLACE_FILE ? { restoreFileKey: st.oldFileKey, restoreHash: st.currentHash ?? st.baseHash ?? null, restoreSource: typeof st.currentSource === 'string' ? st.currentSource : null } : { removeName: st.name }) }));
+      // 差し替えた既存ファイルは、登録前の本文を再アップロードして戻す（旧 fileKey は PUT で受け付けられない）。本文を保持していなければ自動では戻せない
+      const noSource = rb.restores.filter(r => r.kind === CHANGE.REPLACE_FILE && (typeof r.restoreSource !== 'string' || !r.restoreSource || hash(r.restoreSource) !== r.restoreHash));
+      if (noSource.length) block('NO_SOURCE_FOR_RESTORE', `登録前の本文を保持していないため、自動では元に戻せません（${noSource.map(r => r.name).join(', ')}）。Customize タブで登録前の本文を手動で戻してください`, { names: noSource.map(r => r.name) });
       rb.payloadPreview = { scope: execution.snapshot.scope, counts: Object.fromEntries(TARGETS.map(t => [t, { js: execution.snapshot[t].js.length, css: execution.snapshot[t].css.length }])) };
       return rb;
     }
@@ -10548,7 +10551,20 @@
         const current = snapshotOf(await api.getPreviewCustomize(rb.appId));
         const diffs = diffSnapshots(execution.actualAfterRaw, current);
         if (diffs.length) { rb.stale = { status: 'STALE', diffs }; rb.status = RB.FAILED; rb.reason = 'ROLLBACK_STALE'; rb.message = '登録後に設定が変更されたため、元に戻しませんでした'; rb.finishedAt = nowIso(now); execution.lifecycle = rb.status; progress(); return rb; }
-        const body = payloadOf(execution.snapshot, rb.appId, current.revision);
+        // 更新したファイルは登録前の本文を再アップロードして同じ位置に入れる。その他は snapshot の fileKey（触っていないので有効）をそのまま
+        const restoreSnap = clone(execution.snapshot);
+        rb.uploads = [];
+        for (const rs of rb.restores) {
+          if (rs.kind !== CHANGE.REPLACE_FILE) continue;
+          const key = await api.uploadFile(rs.name, rs.restoreSource, 'text/javascript');
+          if (typeof key !== 'string' || !key) throw Object.assign(new Error('復元用ファイルの fileKey が返りませんでした'), { code: 'NO_FILE_KEY' });
+          rb.uploads.push({ name: rs.name, target: rs.target, hash: rs.restoreHash, ok: true });
+          const list = restoreSnap[rs.target].js;
+          const i = rs.position != null && list[rs.position]?.name === rs.name ? rs.position : list.findIndex(e => e.type === 'FILE' && e.name === rs.name);
+          if (i < 0) throw Object.assign(new Error(`snapshot に「${rs.name}」がありません`), { code: 'INVALID_SNAPSHOT' });
+          list[i] = { ...list[i], fileKey: key };
+        }
+        const body = payloadOf(restoreSnap, rb.appId, current.revision);
         const r = await api.putPreviewCustomize(rb.appId, body, current.revision);
         rb.put = { ok: true, revision: r?.revision != null ? String(r.revision) : null };
         const after = snapshotOf(await api.getPreviewCustomize(rb.appId));
@@ -12910,7 +12926,7 @@
       const reviewOf = (cid) => (v.review?.steps || []).find(r => r.customization?.customizationId === cid) || null;
       const custs = sp.customizations || [];
       const conflictFiles = [...new Set(custs.flatMap(c => (reviewOf(c.customizationId)?.issues || []).filter(i => i.code === 'JS_FIELD_CONFLICT').map(i => `${i.file}（${(i.fields || []).join(', ')}）`)))];
-      const questions = [...(p.questions || []).map(q => q.question), ...custs.flatMap(c => c.questions || [])];
+      const questions = [...new Set([...(p.questions || []).map(q => q.question), ...custs.flatMap(c => c.questions || [])].map(q => String(q || '').trim()).filter(Boolean))];   // 計画の questions と customization の questions は同じ内容が重なりやすいので重複を除く
       const status = sp.status === 'SUPERSEDED' || !active ? 'SUPERSEDED' : sp.status;
       const badgeColor = status === 'CONFIRMED' ? '#2e7d32' : status === 'DRAFT' ? '#b26a00' : '#999';
       const rows = custs.map(c => {
@@ -13121,7 +13137,7 @@
       }
       if (stage === 'rollback-preparing') return `${head('現在のカスタマイズ設定を確認しています...')}<div style="font-size:11px; opacity:.7; margin-top:4px;">書き込みはしません</div></div>`;
       if (stage === 'rollback-blocked') return `${head('自動では元に戻せません', '#b00020')}<div style="margin-top:4px;">${blockers(rb?.blockers)}${(rb?.stale?.diffs || []).slice(0, 8).map(d => `<div style="font-size:11px; margin-left:8px;">${esc(d.where)}: ${esc(String(d.before ?? '（なし）'))} → ${esc(String(d.after ?? '（なし）'))}</div>`).join('')}</div><div style="font-size:11px; opacity:.8; margin-top:4px;">設定は変更していません。</div><div style="margin-top:6px; display:flex; gap:6px;"><button type="button" id="kt-ai-jsreg-rollback-cancel" class="btn" style="height:26px; font-size:11px;">閉じる</button></div></div>`;
-      if (stage === 'rollback-confirm') return `${head('登録前の状態に戻します。')}<div style="margin-top:6px; display:grid; gap:2px; font-size:12px;">${(rb?.restores || []).map(r => `<div>${r.kind === 'REPLACE_FILE' ? `✎ <b>${esc(r.name)}</b>（${r.target === 'mobile' ? 'モバイル' : 'PC'}）を登録前の本文に戻す（指紋 ${esc(r.restoreHash || '—')}）` : `－ <b>${esc(r.name)}</b>（${r.target === 'mobile' ? 'モバイル' : 'PC'}）を外す`}</div>`).join('')}</div>${warns(rb?.warnings)}<div style="font-size:12px; margin-top:4px;">登録前の snapshot（revision ${esc(rb?.snapshotRevision || '—')}）のカスタマイズ設定全体を PUT します。その他の JS / CSS / 適用範囲は snapshot のとおりです。<b>運用環境には反映されません。</b></div><div style="margin-top:8px; display:flex; gap:6px;"><button type="button" id="kt-ai-jsreg-rollback-cancel" class="btn" style="height:28px;">キャンセル</button><button type="button" id="kt-ai-jsreg-rollback-go" class="btn" style="height:28px; font-weight:600; border-color:#6a1b9a;">変更前の状態に戻す</button></div></div>`;
+      if (stage === 'rollback-confirm') return `${head('登録前の状態に戻します。')}<div style="margin-top:6px; display:grid; gap:2px; font-size:12px;">${(rb?.restores || []).map(r => `<div>${r.kind === 'REPLACE_FILE' ? `✎ <b>${esc(r.name)}</b>（${r.target === 'mobile' ? 'モバイル' : 'PC'}）を登録前の本文に戻す（指紋 ${esc(r.restoreHash || '—')}）` : `－ <b>${esc(r.name)}</b>（${r.target === 'mobile' ? 'モバイル' : 'PC'}）を外す`}</div>`).join('')}</div>${warns(rb?.warnings)}<div style="font-size:12px; margin-top:4px;">登録前の snapshot（revision ${esc(rb?.snapshotRevision || '—')}）のカスタマイズ設定全体を PUT します（更新したファイルは登録前の本文を再アップロードして同じ位置に戻します）。その他の JS / CSS / 適用範囲は snapshot のとおりです。<b>運用環境には反映されません。</b></div><div style="margin-top:8px; display:flex; gap:6px;"><button type="button" id="kt-ai-jsreg-rollback-cancel" class="btn" style="height:28px;">キャンセル</button><button type="button" id="kt-ai-jsreg-rollback-go" class="btn" style="height:28px; font-weight:600; border-color:#6a1b9a;">変更前の状態に戻す</button></div></div>`;
       if (stage === 'rolling-back') return `${head('登録前の状態に戻しています...')}</div>`;
       if (stage === 'rolled-back') {
         const ok = rb?.status === 'ROLLED_BACK_VERIFIED';
