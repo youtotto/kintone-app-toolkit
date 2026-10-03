@@ -703,6 +703,42 @@ console.log('\n--- U5. ［新しい会話］: 続けて書いた別の依頼が�
 }
 
 // =========================================================
+console.log('\n--- U8（Phase 20・利用者の指摘）. 確認事項は質問ごとの回答欄で答え、入力した回答だけを計画の修正として送る ---');
+{
+  const HEALTH = { ok: true, supportedContractVersions: ['2.0', '2.1'], entitlements: [{ product: 'toolkit', features: ['assistant-qa', 'change-planner'] }], registry: { toolkit: { 'assistant-qa': { implemented: true, promptVersions: ['1'] }, 'change-planner': { implemented: true, promptVersions: ['1'] } } }, usage: { monthlyLimit: 200, usedThisMonth: 1 } };
+  const respOf = (goal) => ({ ok: true, contractVersion: '2.1', meta: { requestId: 'pl-u8', gateway: { product: 'toolkit', feature: 'change-planner', promptVersion: '1', contextVersion: 'planner-1' }, normalization: { warnings: [] }, ai: { model: 'm' }, usage: { usedThisMonth: 1, monthlyLimit: 200 } }, plan: { goal, solution: 'STANDARD', assessment: { summary: 's', usableExistingFields: [], usableExistingSettings: [], gaps: [], evidenceIds: [] }, relevantFields: [], proposedFields: [], steps: [step('P1', 'ADD_VIEW', 'VIEW', '高額案件', { name: '高額案件', fields: ['amount'] })], alternatives: [], impact: [], questions: [{ id: 'Q1', question: '高額とはいくらからですか？' }, { id: 'Q2', question: '一覧に表示する項目は金額だけでよいですか？' }], unknowns: [], planConfidence: 'INFERRED', customizations: [] } });
+  const calls = [];
+  const client = { async getHealth() { return HEALTH; }, async plan({ ctx, requestId }) { calls.push(ctx); const v = KTAiClient.validatePlan(respOf(ctx.goal), ctx); return { ...v.normalized, requestId, clientWarnings: v.warnings }; } };
+  const storage = (() => { const m = new Map(); return { getItem: (k) => (m.has(k) ? m.get(k) : null), setItem: (k, v) => m.set(k, String(v)), removeItem: (k) => m.delete(k) }; })();
+  const settings = KTAiClient.createSettingsStore({ storage, host: 't.cybozu.com' }); settings.setConsent(true);
+  const session = { status() { return { connected: true, apiBase: 'https://gw.test', refreshExpiresAt: '2099-01-01T00:00:00Z', scope: { product: 'toolkit', feature: 'assistant-qa,change-planner', domain: 't.cybozu.com' } }; }, async migrateLegacy() { return false; }, async refresh() { return {}; }, async disconnect() { return { revoked: true }; }, client };
+  const host = makeFakeHost();
+  const panel = mountAiWorkspace(host, { getInputs: () => ({ data: DATA, deps: DEPS, scan: null, incoming: null }), copyText: async () => true, downloadText: () => { }, colors: { border: '#ccc', bg: '#fff' }, settings, session, hostname: 't.cybozu.com', connectFlow: { start: async () => ({}), cancel() { }, reopen: () => false, state: () => ({ phase: 'idle' }), isRunning: () => false }, executor: { api: makeKintoneMock(DATA).api, appId: '310' } });
+  const $ = (id) => host.querySelector(`#${id}`);
+  const ticks = async (n = 6) => { for (let i = 0; i < n; i++) await new Promise(r => setTimeout(r, 0)); };
+  const click = (dataset) => $('kt-ai-chat').dispatch({ type: 'click', target: { dataset } });
+  await ticks();
+  await panel.send('高額案件の一覧を作りたい'); await ticks();
+  const v1 = panel.conversation().activePlan();
+  const html1 = $('kt-ai-chat').innerHTML;
+  assert(/kt-ai-questions-card/.test(html1) && (html1.match(/class="kt-ai-qa-input"/g) || []).length === 2 && /data-act="answer-questions"/.test(html1) && /高額とはいくらからですか？/.test(html1), 'U8: 確認事項ごとに回答欄（2 件）と［回答を送って計画を直す］');
+  // 空のまま押しても送らない（AI の利用回数を使わない）
+  await click({ act: 'answer-questions', plan: v1.planId, version: String(v1.version) }); await ticks();
+  assert(calls.length === 1 && /回答を 1 つ以上入力してください/.test($('kt-ai-composer-note').textContent || ''), 'U8: 回答が空なら送らない');
+  // 入力した回答は再描画しても残る
+  await $('kt-ai-chat').dispatch({ type: 'input', target: { dataset: { qkey: `${v1.planId}:${v1.version}:Q1` }, value: '100万円以上' } });
+  await click({ act: 'show-all' }); await ticks();
+  assert(/>100万円以上<\/textarea>/.test($('kt-ai-chat').innerHTML), 'U8: 入力中の回答は再描画しても残る');
+  // 送る: 入力した回答だけ（未回答も伝える）を計画の修正として 1 回だけ AI へ
+  await click({ act: 'answer-questions', plan: v1.planId, version: String(v1.version) }); await ticks(8);
+  const last = calls[calls.length - 1];
+  assert(calls.length === 2 && last.revision && /Q1「高額とはいくらからですか？」→ 100万円以上/.test(last.revision.request) && /未回答: Q2/.test(last.revision.request) && panel.conversation().activePlan().version === 2, `U8: 回答は計画の修正として送られ v2 になる（未回答の Q2 も伝える）: ${last.revision && last.revision.request}`);
+  assert(panel.conversation().messages().some(m => m.type === 'USER' && /確認事項への回答/.test(m.text)), 'U8: 送った回答は会話に利用者の発言として残る');
+  const html2 = $('kt-ai-chat').innerHTML;
+  assert((html2.match(/class="kt-ai-qa-input"/g) || []).length === 2 && /新しい版があります/.test(html2), 'U8: 回答欄は最新の版の確認事項だけ（古い版は読むだけ）');
+}
+
+// =========================================================
 console.log('\n--- FR-1 / FR-2 / FR-6 / FR-7（UI・実際の AI client と transport）. 計画の要求の失敗・二重クリック・再試行 ---');
 {
   const data = FX.makeData();

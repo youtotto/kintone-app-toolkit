@@ -13440,6 +13440,7 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
         #kt-ai-workspace .kt-ai-chat{ flex:1 1 0%; min-height:0; overflow:auto; padding:4px 2px; }
         #kt-ai-workspace .kt-ai-composer{ flex:none; margin-top:6px; display:flex; flex-direction:column; gap:4px; }
         #kt-ai-workspace .kt-ai-composer textarea{ width:100%; box-sizing:border-box; border:1px solid var(--kt-ai-border); border-radius:8px; padding:6px 8px; font:inherit; color:inherit; background:transparent; resize:vertical; min-height:2.6em; }
+        #kt-ai-workspace .kt-ai-qa-input{ display:block; width:100%; box-sizing:border-box; margin-top:2px; border:1px solid var(--kt-ai-border); border-radius:6px; padding:4px 6px; font:inherit; font-size:12px; color:inherit; background:transparent; resize:vertical; min-height:2em; }
         /* 右: Workspace（現在の成果物の正本）。desktop では常設 */
         #kt-ai-workspace .kt-ai-drawer{ flex:0 0 46%; min-width:0; min-height:0; display:flex; flex-direction:column; border:1px solid var(--kt-ai-border); border-radius:8px; padding:6px; }
         #kt-ai-workspace .kt-ai-ws-state{ flex:none; display:flex; align-items:center; gap:6px; flex-wrap:wrap; font-size:11px; padding:2px 4px 6px; border-bottom:1px dashed var(--kt-ai-border); margin-bottom:6px; min-height:1.4em; }
@@ -13804,6 +13805,39 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
       const d = m.data || {};
       return card('kt-ai-choices-card', `<div>${esc(m.text)}</div><div style="margin-top:6px; display:flex; gap:6px; flex-wrap:wrap;">${(d.choices || []).map(i => btn('choice', INTENT_JA[i] || i, `data-intent="${esc(i)}" data-text="${esc(d.text || '')}"`)).join('')}</div>`, '#555');
     }
+    /**
+     * Phase 20（U8・利用者の指摘）: 計画の確認事項（plan.questions ＋ JavaScript カスタマイズの questions）を 1 件ずつ並べる。
+     * 回答欄の key は「planId:version:質問の key」（入力中の回答を版ごとに保つ）
+     */
+    function questionList(v) {
+      const p = v?.plan || {};
+      const out = [];
+      for (const [i, q] of (Array.isArray(p.questions) ? p.questions : []).entries()) {
+        const text = String(q?.question ?? q ?? '').trim();
+        if (text) out.push({ key: String(q?.id || `Q${i + 1}`), id: String(q?.id || `Q${i + 1}`), text });
+      }
+      for (const c of (Array.isArray(p.customizations) ? p.customizations : [])) {
+        (Array.isArray(c?.questions) ? c.questions : []).forEach((q, i) => {
+          const text = String(q ?? '').trim();
+          if (text && !out.some(x => x.text === text)) out.push({ key: `${c.customizationId || 'C'}-${i + 1}`, id: `${c.customizationId || 'C'}-${i + 1}`, text });
+        });
+      }
+      return out;
+    }
+    /** 確認事項のカード（U8）: 最新の版だけ回答欄と［回答を送って計画を直す］。入力した回答だけを計画の修正としてまとめて送る */
+    function questionsCardHtml(m, view = {}) {
+      const d = m.data || {};
+      const v = view.plans && d.planId ? view.plans.get(`${d.planId}:${d.version}`) : null;
+      const qs = v ? questionList(v) : [];
+      if (!qs.length) return `<div class="kt-ai-bubble">${esc(m.text)}</div>`;
+      const active = !!(view.activePlan && view.activePlan === v && v.status !== 'SUPERSEDED');
+      const keyOf = (q) => `${v.planId}:${v.version}:${q.key}`;
+      const rows = qs.map(q => `<div style="margin-top:6px;"><div style="font-size:12px;"><b>${esc(q.id)}</b>　${esc(q.text)}</div>${active ? `<textarea class="kt-ai-qa-input" data-qkey="${esc(keyOf(q))}" rows="1" placeholder="回答（空欄の質問は送りません）">${esc(view.answers?.get?.(keyOf(q)) || '')}</textarea>` : ''}</div>`).join('');
+      const foot = active
+        ? `<div style="margin-top:6px; display:flex; gap:6px; align-items:center; flex-wrap:wrap;">${btn('answer-questions', '回答を送って計画を直す', `data-plan="${esc(v.planId)}" data-version="${esc(String(v.version))}"`, 'font-weight:600;')}<span style="font-size:10px; opacity:.65;">入力した回答だけを、計画の修正としてまとめて送ります（Ctrl+Enter でも送れます）。</span></div>`
+        : '<div style="font-size:10px; opacity:.6; margin-top:4px;">この版の確認事項です（新しい版があります）。</div>';
+      return card('kt-ai-questions-card', `<div>確認したいことが ${qs.length} 件あります。</div>${rows}${foot}`, '#555');
+    }
     function candidatesHtml(m) {
       const d = m.data || {};
       return card('kt-ai-candidates-card', `<div>${esc(m.text)}</div><div style="margin-top:6px; display:flex; gap:6px; flex-wrap:wrap;">${(d.candidates || []).map(c => btn('candidate', c.label || c.id, `data-type="${esc(c.type)}" data-id="${esc(c.id)}" data-text="${esc(d.question || '')}"`)).join('')}</div>`, '#555');
@@ -13846,6 +13880,7 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
           if (kind === 'js-preview-ready') return wrap(jsPreviewReadyHtml(m));
           if (kind === 'js-rollback-ready') return wrap(jsRollbackReadyHtml(m));
           if (kind === 'candidates') return wrap(candidatesHtml(m));
+          if (kind === 'questions') return wrap(questionsCardHtml(m, view));
           return wrap(`<div class="kt-ai-bubble">${esc(m.text)}</div>`);
         }
       }
@@ -13917,7 +13952,7 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
         diff: rv?.diff ? (rv.diff.lines || []).map(l => `${l.type}${l.text}`).join('\n') : '',
       };
     }
-    return { INTENT_JA, STATUS_JA, STRATEGY_JA, CHECK_JA, SPEC_STATUS_JA, workspaceHtml, headerHtml, freePanelHtml, chatHtml, messageHtml, planCardHtml, reviewCardHtml, diffCardHtml, codeCardHtml, codePaneHtml, previewReadyHtml, rollbackReadyHtml, executionCardHtml, rollbackCardHtml, answerCardHtml, errorCardHtml, readinessCounts, patternsHtml,
+    return { INTENT_JA, STATUS_JA, STRATEGY_JA, CHECK_JA, SPEC_STATUS_JA, workspaceHtml, headerHtml, freePanelHtml, chatHtml, messageHtml, questionList, questionsCardHtml, planCardHtml, reviewCardHtml, diffCardHtml, codeCardHtml, codePaneHtml, previewReadyHtml, rollbackReadyHtml, executionCardHtml, rollbackCardHtml, answerCardHtml, errorCardHtml, readinessCounts, patternsHtml,
       // Phase 17
       consultationStartHtml, specCardHtml, jsPreviewReadyHtml, jsRollbackReadyHtml, jsExecutionCardHtml, jsRollbackCardHtml, consultChoicesHtml, jsRegisterPaneHtml,
       // Phase 19: 会話は要約、右 Workspace が正本
@@ -14213,12 +14248,33 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
     let currentAbort = null;
     let pendingChat = null;      // 同意待ちの入力（{ text, intent }）
     const planIndex = () => new Map(conv.planHistory().map(v => [`${v.planId}:${v.version}`, v]));
+    // Phase 20（U8・利用者の指摘）: 確認事項の回答欄。入力中の回答は「planId:version:質問」ごとに保ち、再描画で消さない
+    const answerDrafts = new Map();
     function renderChat() {
       const st = conv.state;
-      $chat.innerHTML = KTAiChatUi.chatHtml(st.messages, { plans: planIndex(), activePlan: st.activePlan, execState, jsExecState: jsExec }, { showAll, dropped: st.dropped });
+      let focusKey = null, caret = null;
+      try { const ae = typeof document !== 'undefined' ? document.activeElement : null; if (ae && ae.dataset && ae.dataset.qkey) { focusKey = ae.dataset.qkey; caret = ae.selectionStart ?? null; } } catch (e) { }
+      $chat.innerHTML = KTAiChatUi.chatHtml(st.messages, { plans: planIndex(), activePlan: st.activePlan, execState, jsExecState: jsExec, answers: answerDrafts }, { showAll, dropped: st.dropped });
       renderMermaid($chat);
-      try { if (typeof $chat.scrollHeight === 'number') $chat.scrollTop = $chat.scrollHeight; } catch (e) { }
+      // 回答を入力中なら、その欄にフォーカスを戻す（会話の末尾へは移動しない）
+      const back = focusKey ? (() => { try { return [...($chat.querySelectorAll ? $chat.querySelectorAll('.kt-ai-qa-input') : [])].find(x => x.dataset && x.dataset.qkey === focusKey) || null; } catch (e) { return null; } })() : null;
+      if (back) { try { back.focus(); if (caret != null && typeof back.setSelectionRange === 'function') back.setSelectionRange(caret, caret); } catch (e) { } }
+      else { try { if (typeof $chat.scrollHeight === 'number') $chat.scrollTop = $chat.scrollHeight; } catch (e) { } }
       renderComposer();
+    }
+    /** 確認事項への回答（U8）: 入力した回答だけを「Qn「質問」→ 回答」にまとめ、未回答の番号も添えて計画の修正として送る（AI の利用は 1 回） */
+    async function answerQuestions(planId, version) {
+      const v = conv.activePlan();
+      if (!v || v.planId !== planId || String(v.version) !== String(version)) { $note.textContent = '最新の版の確認事項に回答してください。'; return null; }
+      const qs = KTAiChatUi.questionList(v);
+      const keyOf = (q) => `${v.planId}:${v.version}:${q.key}`;
+      const answered = qs.map(q => ({ q, a: String(answerDrafts.get(keyOf(q)) || '').trim() })).filter(x => x.a);
+      if (!answered.length) { $note.textContent = '回答を 1 つ以上入力してください（空欄の質問は送りません）。'; return null; }
+      const rest = qs.filter(q => !answered.some(x => x.q === q)).map(q => q.id);
+      const text = ['確認事項への回答です。', ...answered.map(x => `${x.q.id}「${x.q.text}」→ ${x.a}`), ...(rest.length ? [`未回答: ${rest.join(', ')}`] : [])].join('\n');
+      const r = await sendChat(text, { intent: KTAiConversation.INTENT.REVISE_PLAN });
+      if (r && r.ok) for (const q of qs) answerDrafts.delete(keyOf(q));
+      return r;
     }
     /** 会話側で計画の版が変わったら、Review / Decision / Executor をその版に合わせる（旧版は Executor へ進めない） */
     function adoptActivePlan() {
@@ -14366,6 +14422,7 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
       if (act === 'choice') { const text = dataOf(t, 'text'), intent = dataOf(t, 'intent'); if (text && intent) await sendChat(text, { intent }); return; }
       if (act === 'candidate') { const text = dataOf(t, 'text'); const focus = { type: dataOf(t, 'type'), id: dataOf(t, 'id') }; if (focus.type && focus.id) await askWithFocus(text, focus); return; }
       if (act === 'show-all') { showAll = true; renderChat(); return; }
+      if (act === 'answer-questions') { await answerQuestions(dataOf(t, 'plan'), dataOf(t, 'version')); return; }
       // Phase 18: ドキュメントカード（コピー / Context ペインで開く）・Customize で確認（登録済み JS を一覧で示す）
       if (act === 'copy-doc') { const m = conv.state.messages.find(x => x.id === dataOf(t, 'mid')); const text = m?.data?.outputs?.[dataOf(t, 'key') || 'prompt']; const ok = text ? await d.copyText(text) : false; if (t && t.textContent != null) flashBtnText(t, ok ? 'Copied!' : 'Failed'); return; }
       if (act === 'open-doc-context') { setMode('doc', { kind: dataOf(t, 'kind') || 'spec' }); generate(); setArtifact({ type: VM.ARTIFACT.DOCUMENT, id: dataOf(t, 'kind') || 'spec', version: null, kind: dataOf(t, 'kind') || 'spec' }); return; }
@@ -14394,6 +14451,15 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
       if (eid) { showEvidence(eid); return; }
       const act = dataOf(t, 'act');
       if (act) await handleAct(act, t);
+    });
+    // U8: 回答欄の入力を保つ・Ctrl+Enter（Mac は ⌘+Enter）で送る（Enter だけでは送らない＝改行）
+    $chat.addEventListener('input', (ev) => { const t = ev?.target; const k = dataOf(t, 'qkey'); if (k) answerDrafts.set(k, String(t.value ?? '')); });
+    $chat.addEventListener('keydown', (ev) => {
+      const t = ev?.target; const k = dataOf(t, 'qkey');
+      if (!k || !ev || ev.key !== 'Enter' || !(ev.ctrlKey || ev.metaKey) || ev.isComposing) return;
+      if (typeof ev.preventDefault === 'function') ev.preventDefault();
+      answerDrafts.set(k, String(t.value ?? ''));
+      const parts = k.split(':'); parts.pop(); const version = parts.pop(); answerQuestions(parts.join(':'), version);
     });
     // ==================================================================
     // Phase 17: JS 相談（Customize タブから）・実装仕様の確定・JavaScript の動作テスト環境への登録 / 復元（KTJsExecutor）
