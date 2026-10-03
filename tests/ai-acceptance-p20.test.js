@@ -81,6 +81,44 @@ console.log('\n--- F4 / F5. KTCodeReview: kintone のエラー表示の作法（
 }
 
 // =========================================================
+console.log('\n--- BF-C（再 3）/ F24. エラー表示と編集不可: 条件で分けたコードは要確認・別 handler / 別ファイルも見る（実機の生成コード 2 本）---');
+{
+  const DEAL_LOCK = "(function () {\n  'use strict';\n  // 承認済みの案件は金額を変更できないようにする（既存の運用ルール）\n  kintone.events.on(['app.record.create.show', 'app.record.edit.show'], function (event) {\n    var record = event.record;\n    if (record['ステータス'] && record['ステータス'].value === '承認済み') {\n      record['amount'].disabled = true;\n    }\n    return event;\n  });\n})();";
+  // 1 本目（実機: 承認済み・1,000,001 で金額が編集できるようになった）: 別 handler で、条件なしに error を設定
+  const SEPARATE = DEAL_LOCK.replace("})();", "  // 金額が100万円を超えたら警告を表示する\n  function checkAmountWarning(event) {\n    var record = event.record;\n    if (record['amount']) {\n      record['amount'].error = (record['amount'].value > 1000000) ? '100万円を超えています' : null;\n    }\n    return event;\n  }\n\n  kintone.events.on([\n    'app.record.create.show',\n    'app.record.edit.show',\n    'app.record.create.change.amount',\n    'app.record.edit.change.amount'\n  ], checkAmountWarning);\n})();");
+  // 2 本目（実機: 承認済みは編集不可のまま・警告なし。編集できるときだけ警告）: disabled を読む条件で分け、編集不可なら null
+  const GUARDED = "(function () {\n  'use strict';\n  // 金額が100万円超なら警告表示（承認済みかつ編集不可なら非表示）\n  function checkAmountWarning(event) {\n    var record = event.record;\n    var amount = record['amount'].value;\n    var status = record['ステータス'] ? record['ステータス'].value : '';\n    var disabled = record['amount'].disabled;\n    if (amount > 1000000 && !(status === '承認済み' && disabled)) {\n      record['amount'].error = '100万円を超えています';\n    } else {\n      record['amount'].error = null;\n    }\n    return event;\n  }\n\n  // 画面表示時の処理に警告表示を追加\n  kintone.events.on(['app.record.create.show', 'app.record.edit.show'], function(event) {\n    var record = event.record;\n    if (record['ステータス'] && record['ステータス'].value === '承認済み') {\n      record['amount'].disabled = true;\n    }\n    return checkAmountWarning(event);\n  });\n\n  // 金額変更時の警告表示更新\n  kintone.events.on(['app.record.create.change.amount', 'app.record.edit.change.amount'], checkAmountWarning);\n})();\n";
+  const ops = KTCodeReview.kintoneFieldOps(KTScan.stripCommentsOnly(GUARDED));
+  assert(ops.find(o => o.events.includes('app.record.edit.show')).errorGuarded === true && KTCodeReview.kintoneFieldOps(KTScan.stripCommentsOnly(SEPARATE)).every(o => !o.errorGuarded), 'kintoneFieldOps: disabled を読む条件の中だけで error を出すコードは errorGuarded（条件なしの別 handler は guarded ではない）');
+  const custom = { customizationId: 'C1', requirement: '金額が100万円を超えたら警告', strategy: 'NEW_JS_FILE', platform: ['desktop'], events: ['app.record.create.show', 'app.record.edit.show', 'app.record.create.change.amount', 'app.record.edit.change.amount'], fields: [{ code: 'amount', access: 'CONTROL' }], apis: [], existingFiles: [] };
+  const gen = (code) => ({ strategy: 'NEW_JS_FILE', targetFile: 'warn.js', code, patch: null, events: custom.events, fields: custom.fields, apis: [] });
+  const chk = (r, n) => r.checks.find(c => c.name === n) || null;
+  const rSep = KTCodeReview.review({ generated: gen(SEPARATE), customization: custom, plan: null, data: DATA, scan: null, existingSource: null });
+  assert(rSep.status === 'BLOCKED' && chk(rSep, 'error-cancels-edit').severity === 'block' && /別の handler で設定したものも/.test(chk(rSep, 'error-cancels-edit').message), 'F5（実機 1 本目）: 別 handler でも条件なしに同じ表示イベントで error → 停止（kintone が編集不可を取り消す）');
+  const rGuard = KTCodeReview.review({ generated: gen(GUARDED), customization: custom, plan: null, data: DATA, scan: null, existingSource: null });
+  assert(rGuard.status !== 'BLOCKED' && chk(rGuard, 'error-cancels-edit').ok === false && chk(rGuard, 'error-cancels-edit').severity === 'review' && /動作テスト環境/.test(chk(rGuard, 'error-cancels-edit').message), 'F24（実機 2 本目）: 編集不可を見る条件で分けたコードは停止しない（要確認・動作テストで確かめる）');
+  // 別ファイル: 新規 JS が条件なしに show で error、既存の dealLock.js が同じ show で disabled → 要確認（以前は同じファイルの中しか見ず見逃していた）
+  const WARN_ONLY = "(function () {\n  'use strict';\n  kintone.events.on(['app.record.create.show', 'app.record.edit.show', 'app.record.edit.change.amount'], function (event) {\n    var f = event.record['amount'];\n    f.error = Number(f.value || 0) > 1000000 ? '100万円を超えています' : null;\n    return event;\n  });\n})();";
+  const data2 = FX.makeData();
+  data2.customize = { scope: 'ALL', desktop: { js: [{ type: 'FILE', file: { contentType: 'text/javascript', fileKey: 'dl:lock', name: 'dealLock.js', size: '422' } }], css: [] }, mobile: { js: [], css: [] }, revision: '5' };
+  const fieldsN = KTDeps.normalizeFields(data2.fields);
+  const deps2 = KTDeps.buildDependencyData(data2, fieldsN);
+  const FILES = [{ name: 'dealLock.js', target: 'desktop', kind: 'js', text: DEAL_LOCK }];
+  const scan2 = buildScanPayload({ KTScan, KTDeps }, { appId: FX.SELF_APP, files: FILES, fields: fieldsN.map(f => ({ code: f.code, label: f.label, type: f.rawType })), deps: deps2 });
+  const rOther = KTCodeReview.review({ generated: gen(WARN_ONLY), customization: custom, plan: null, data: data2, scan: scan2, existingSource: null });
+  assert(chk(rOther, 'error-cancels-other-js') && chk(rOther, 'error-cancels-other-js').severity === 'review' && /dealLock\.js（app\.record\.create\.show, app\.record\.edit\.show）/.test(chk(rOther, 'error-cancels-other-js').message) && !/change\.amount/.test(chk(rOther, 'error-cancels-other-js').message), '別ファイル: 既存の dealLock.js が同じ表示イベントで disabled → こちらの error が取り消すことを要確認で示す（change は対象外）');
+  const rOtherOk = KTCodeReview.review({ generated: gen(WARN_ONLY.replace("'app.record.create.show', 'app.record.edit.show', ", '')), customization: { ...custom, events: ['app.record.edit.change.amount'] }, plan: null, data: data2, scan: scan2, existingSource: null });
+  assert(!chk(rOtherOk, 'error-cancels-other-js'), '警告が値の変更時だけなら、他ファイルの show の disabled とは重ならない');
+  // 計画の段階（Review）: 値に応じた警告を show だけで判定する計画は、入力中に切り替わらないと指摘する（実機 BF-C で 2 回続けて change が抜けた）
+  const custPlan = (requirement, events, fields) => plan([step('C1', 'CUSTOMIZATION_REQUIRED', 'JS', '', { customizationId: 'C1' }, { solution: 'CUSTOMIZATION', execution: { mode: 'PLAN_ONLY', supported: false, reason: 'x' } })], [], { solution: 'CUSTOMIZATION', customizations: [{ customizationId: 'C1', requirement, whyStandardInsufficient: '標準設定に無い', strategy: 'NEW_JS_FILE', platform: ['desktop'], implementation: 'JAVASCRIPT', events, fields, apis: [], existingFiles: [], risks: [], questions: [], dependsOn: [] }] });
+  const showOnly = reviewOf(custPlan('画面表示時に金額が100万円を超えた場合に金額フィールドの下に警告メッセージを表示する', ['app.record.create.show', 'app.record.edit.show'], [{ code: 'amount', access: 'CONTROL' }])).steps[0];
+  assert(showOnly.issues.some(i => i.code === 'JS_CHANGE_EVENT_MISSING' && /amount/.test(i.message)) && showOnly.status === 'NEEDS_CONFIRMATION', 'BF-C: 「100万円を超えた場合に警告」を show だけで判定 → JS_CHANGE_EVENT_MISSING（入力中に切り替わらない）');
+  const withChange = reviewOf(custPlan('金額が100万円を超えた場合に警告を表示する', ['app.record.create.show', 'app.record.edit.show', 'app.record.create.change.amount', 'app.record.edit.change.amount'], [{ code: 'amount', access: 'CONTROL' }])).steps[0];
+  const lockOnly = reviewOf(custPlan('承認済みステータスのとき、金額に加えて担当者も編集不可にする', ['app.record.create.show', 'app.record.edit.show'], [{ code: 'amount', access: 'CONTROL' }, { code: 'owner', access: 'CONTROL' }])).steps[0];
+  assert(!withChange.issues.some(i => i.code === 'JS_CHANGE_EVENT_MISSING') && !lockOnly.issues.some(i => i.code === 'JS_CHANGE_EVENT_MISSING'), 'change がある計画・ステータスで決まるロック（BF-D）は指摘しない');
+}
+
+// =========================================================
 console.log('\n--- BF-C（再）. スペース要素: 実在するスペースは通す・無いスペースは専用の理由で止める・Generator にスペース一覧を渡す ---');
 {
   const SPACE_JS = "(function () {\n  'use strict';\n  kintone.events.on(['app.record.edit.change.amount'], function (event) {\n    var sp = kintone.app.record.getSpaceElement('amount_warning_space');\n    if (!sp) return event;\n    sp.textContent = Number(event.record['amount'].value || 0) > 1000000 ? '金額が100万円を超えています' : '';\n    return event;\n  });\n})();";

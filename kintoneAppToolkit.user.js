@@ -6702,6 +6702,12 @@
       const controls = fields.filter(f => f.access === 'CONTROL' || f.access === 'WRITE');
       if (fields.length && !fields.some(f => f.access === 'CONTROL') && /編集不可|編集でき|警告|エラー|メッセージ|非表示|表示しない|必須に|disabled|error/.test(`${c.requirement || ''} ${step.title || ''}`)) add('JS_ACCESS_HINT', 'low', '要件は編集可否 / 警告（エラー表示）/ 表示の制御ですが、CONTROL のフィールドがありません。生成コードが計画（READ）と不一致になる可能性があります（計画の access を CONTROL にするか、生成後の照合で確認）');
       if (controls.length && evInfo.length && evInfo.every(e => e.ok && e.editable === false)) add('JS_SCREEN_MISMATCH', 'medium', `${controls.map(f => f.code).join(', ')} を ${controls[0].access} するのに、編集できない画面のイベント（${events.join(', ')}）だけが選ばれています（create.show / edit.show が必要）`);
+      // 5b. Phase 20（実機 BF-C で 2 回続けて）: 入力できるフィールドの値（「100万円を超えたら」等）に応じた警告・表示・編集可否を、画面を開いたとき（show）
+      //     だけで判定する計画 → 入力中に値を変えても切り替わらない。Planner の規則だけでは守られなかったので Toolkit が指摘する（表示時だけでよい場合もあるので要確認）
+      const INPUT_TYPES = ['NUMBER', 'SINGLE_LINE_TEXT', 'MULTI_LINE_TEXT', 'DROP_DOWN', 'RADIO_BUTTON', 'CHECK_BOX', 'MULTI_SELECT', 'DATE', 'DATETIME', 'TIME', 'USER_SELECT', 'ORGANIZATION_SELECT', 'GROUP_SELECT', 'LINK'];
+      const valueFields = fields.filter(f => { const m = model.fields?.[f.code]; return m && INPUT_TYPES.includes(m.baseType || m.type); });
+      const reqText = `${c.requirement || ''} ${step.title || ''}`;
+      if (valueFields.length && controls.length && evInfo.some(e => e.ok && /\.(create|edit)\.show$/.test(e.name)) && !events.some(ev => /\.change\./.test(ev)) && /(超え|超過|以上|以下|未満|より(大き|小さ|多|少|前|後)|を過ぎ|が空|未入力|入力され|選ばれ|選択され|に応じ)/.test(reqText)) add('JS_CHANGE_EVENT_MISSING', 'medium', `値（${valueFields.map(f => f.code).join(', ')}）に応じた表示・警告・編集可否を、画面を開いたとき（create.show / edit.show）だけで判定する計画です。入力中に値を変えても切り替わりません（app.record.*.change.<フィールド> がありません）。入力中にも切り替えるなら「入力したときにもすぐ切り替えて」と伝えて計画を修正してください`);
       // 6. 既存 JS（統合先・競合）
       const files = (typeof KTScan !== 'undefined' && KTScan.summarizeFiles) ? KTScan.summarizeFiles(scan, data) : [];
       const targets = Array.isArray(c.existingFiles) ? c.existingFiles : [];
@@ -10183,15 +10189,43 @@
         const called = [...new Set([...body.matchAll(/\b([A-Za-z_$][\w$]*)\s*\(/g)].map(x => x[1]).filter(n => !['function', 'if', 'for', 'while', 'switch', 'return', 'catch', 'Number', 'String', 'parseInt', 'parseFloat'].includes(n)))];
         const inlined = body + called.map(n => fnBody(n)).join('\n');
         const events = [...firstArg.matchAll(/['"`]((?:mobile\.)?app\.(?:record|report|event)\.[A-Za-z0-9_.]+)['"`]/g)].map(x => x[1]);
+        const error = /\.error\s*=(?!=)\s*(?!null\b|undefined\b|(['"`])\1)/.test(inlined);
         out.push({
           events: events.length ? events : ['（イベント名を特定できない登録）'],
-          error: /\.error\s*=(?!=)\s*(?!null\b|undefined\b|(['"`])\1)/.test(inlined),
+          error,
+          errorGuarded: error && errorGuardedByDisabled(inlined),
           emptyErrorClear: /\.error\s*=(?!=)\s*(['"`])\1/.test(inlined),
           disabled: /\.disabled\s*=(?!=)/.test(inlined),
           value: /\.value\s*=(?!=)/.test(inlined),
         });
       }
       return out;
+    }
+    /** str の open（'{' の位置）に対応する '}' の位置 / '(' に対応する ')' の位置 */
+    const closeBrace = (str, open) => { let d = 0; for (let k = open; k < str.length; k++) { const ch = str[k]; if (ch === '{') d++; else if (ch === '}') { d--; if (d === 0) return k; } } return str.length - 1; };
+    const closeParen = (str, open) => { let d = 0; for (let k = open; k < str.length; k++) { const ch = str[k]; if (ch === '(') d++; else if (ch === ')') { d--; if (d === 0) return k; } } return -1; };
+    /**
+     * Phase 20（実機 BF-C）: エラーの表示（null 以外の代入）が、すべて編集可否（disabled）を読む条件の if / else の中にあるか。
+     * 「編集不可のときはエラーを出さず null にする」と分けたコードでは kintone の取り消しが起きない（実機: 承認済みは編集不可のまま・警告なし。
+     * null の代入は取り消しを起こさない）。条件の向きまでは判定しないので、guarded でも要確認（動作テスト環境で確かめる）にする
+     */
+    function errorGuardedByDisabled(code) {
+      const errAt = [...code.matchAll(/\.error\s*=(?!=)\s*(?!null\b|undefined\b|(['"`])\1)/g)].map(x => x.index);
+      if (!errAt.length) return false;
+      const vars = [...code.matchAll(/\b(?:var|let|const)\s+([A-Za-z_$][\w$]*)\s*=\s*[^;\n]*?\.disabled\b(?!\s*=(?!=))/g)].map(x => x[1]);
+      const readsDisabled = (cond) => /\.disabled\b(?!\s*=(?!=))/.test(cond) || vars.some(v => new RegExp(`(^|[^\\w$.])${v.replace(/\$/g, '\\$')}(?![\\w$])`).test(cond));
+      const ranges = [];
+      for (const m of code.matchAll(/\bif\s*\(/g)) {
+        const po = m.index + m[0].length - 1, pc = closeParen(code, po);
+        if (pc < 0 || !readsDisabled(code.slice(po + 1, pc))) continue;
+        let k = pc + 1; while (k < code.length && /\s/.test(code[k])) k++;
+        const thenEnd = code[k] === '{' ? closeBrace(code, k) : code.indexOf(';', k);
+        if (thenEnd < 0) continue;
+        ranges.push([k, thenEnd]);
+        let e = thenEnd + 1; while (e < code.length && /\s/.test(code[e])) e++;
+        if (code.startsWith('else', e)) { let b = e + 4; while (b < code.length && /\s/.test(code[b])) b++; const elseEnd = code[b] === '{' ? closeBrace(code, b) : code.indexOf(';', b); if (elseEnd >= 0) ranges.push([b, elseEnd]); }
+      }
+      return errAt.every(p => ranges.some(([a, b]) => p >= a && p <= b));
     }
     /** Phase 20: フォームのスペース要素の ID（kintone.app.getFormLayout() / REST layout の SPACER.elementId。グループ内も） */
     function layoutSpaceIds(layout) {
@@ -10324,7 +10358,25 @@
         const byEvent = new Map();
         for (const o of fieldOps) for (const ev of o.events) { const g = byEvent.get(ev) || { error: false, disabled: false, value: false }; g.error = g.error || o.error; g.disabled = g.disabled || o.disabled; g.value = g.value || o.value; byEvent.set(ev, g); }
         const cancels = [...byEvent.entries()].filter(([ev, g]) => /\.show$|\.change\./.test(ev) && g.error && (g.disabled || g.value));   // 保存時（submit）はエラーで保存自体が止まるので対象外
-        add('error-cancels-edit', !cancels.length, 'block', cancels.length ? `同じイベント（${cancels.map(([ev, g]) => `${ev}: error と ${[g.disabled ? 'disabled' : null, g.value ? 'value' : null].filter(Boolean).join(' / ')}`).join('、')}）でエラー表示と編集可否・値の変更を設定しています。kintone はエラーを表示すると、そのイベントでの編集可否（disabled）と値の変更を取り消します（既存の「編集不可」が外れます）。警告は別のイベント（値の変更時など）や別の表示方法に分けてください` : 'エラー表示と編集可否・値の変更は同じイベントで重なっていません');
+        // Phase 20（実機 BF-C）: そのイベントでエラーを出す handler がすべて「編集不可（disabled）を読む条件」で分けていれば停止にせず要確認にする
+        const unguarded = cancels.filter(([ev]) => fieldOps.some(o => o.events.includes(ev) && o.error && !o.errorGuarded));
+        const evText = (list) => list.map(([ev, g]) => `${ev}: error と ${[g.disabled ? 'disabled' : null, g.value ? 'value' : null].filter(Boolean).join(' / ')}`).join('、');
+        if (unguarded.length) add('error-cancels-edit', false, 'block', `同じイベント（${evText(unguarded)}）でエラー表示と編集可否・値の変更を設定しています。kintone はエラーを表示すると、そのイベントでの編集可否（disabled）と値の変更を取り消します（別の handler で設定したものも。既存の「編集不可」が外れます）。編集不可のときはエラーを出さない（null にする）条件で分けるか、警告を値の変更時だけにしてください`);
+        else if (cancels.length) add('error-cancels-edit', false, 'review', `同じイベント（${evText(cancels)}）でエラー表示と編集可否・値の変更を設定していますが、エラーは編集不可（disabled）を見る条件で分けられています。kintone はエラーを表示したイベントで編集不可・値の変更を取り消すので、動作テスト環境で「編集不可のレコードが編集不可のまま・警告が出ない」ことを確かめてください`);
+        else add('error-cancels-edit', true, 'info', 'エラー表示と編集可否・値の変更は同じイベントで重なっていません');
+        // 他の既存 JS（同じ platform・統合先以外）が同じ表示 / 変更イベントで編集可否・値を設定していると、こちらのエラー表示がそれも取り消す
+        // （kintone は同じイベントの handler の結果をまとめて反映する。Code Review はこれまで同じファイルの中しか見ていなかった）
+        const errEvents = [...new Set(fieldOps.filter(o => o.error && !o.errorGuarded).flatMap(o => o.events))].filter(ev => /\.show$|\.change\./.test(ev));
+        if (errEvents.length) {
+          const otherFiles = KTScan.summarizeFiles(scan, data).filter(f => f.analyzed && f.target === target && !(existingSource && f.name === existingSource.name && f.target === existingSource.target) && !(g.strategy === 'NEW_JS_FILE' && f.name === g.targetFile));
+          const hits = [];
+          for (const f of otherFiles) {
+            const ops = typeof f.text === 'string' ? kintoneFieldOps(KTScan.stripCommentsOnly(f.text)) : null;
+            const evs = ops ? errEvents.filter(ev => ops.some(o => o.events.includes(ev) && (o.disabled || o.value))) : errEvents.filter(ev => (f.events || []).includes(ev) && Object.values(f.fields || {}).some(a => ACCESS_W(a).length));
+            if (evs.length) hits.push(`${f.name}（${evs.join(', ')}${ops ? '' : '・本文未取得のため推定'}）`);
+          }
+          if (hits.length) add('error-cancels-other-js', false, 'review', `他の JavaScript ${hits.join('、')} も同じイベントで編集可否・値を設定しています。kintone は、どれかの handler がエラーを表示したイベントでは、他のファイルが設定した編集不可・値の変更も取り消します。編集不可のときはエラーを出さない条件で分けるか、動作テスト環境で編集不可が外れないかを確かめてください`);
+        }
       }
       // 登録ごとのイベント名（第 1 引数の文字列リテラル。変数経由なら解析結果の名前で代用）
       const literalRegs = handlers.flatMap(h => [...String(h.firstArg || '').matchAll(/['"`]((?:mobile\.)?app\.(?:record|report|event)\.[A-Za-z0-9_.]+)['"`]/g)].map(x => x[1]));
