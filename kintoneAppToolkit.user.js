@@ -11811,7 +11811,7 @@
         <div><b>Toolkit で確認した結果</b> ${badge(stText, stColor)}${badge(sfText, sfColor)}${changeBadges(r)}${r.blockedBy?.length ? badge(`依存: ${r.blockedBy.join(', ')}`, '#b00020') : ''}${r.solution === 'CUSTOMIZATION' ? badge('JavaScript', '#6a1b9a') : ''}</div>
         ${lines}${issues}${gen}
         <label style="display:flex; align-items:center; gap:6px; margin-top:4px; font-size:11px;">判断
-          <select class="kt-ai-decision" data-step="${esc(r.stepId)}" style="font-size:11px;"><option value="">（未定）</option><option value="approve"${r.safety === 'BLOCKED' ? ' disabled' : ''}>承認</option><option value="hold">保留</option><option value="reject">却下</option></select>
+          <select class="btn kt-ai-decision" data-step="${esc(r.stepId)}" style="font-size:11px; height:24px; padding:0 4px;"><option value="">（未定）</option><option value="approve"${r.safety === 'BLOCKED' ? ' disabled' : ''}>承認</option><option value="hold">保留</option><option value="reject">却下</option></select>
         </label>
       </div>`;
     }
@@ -12952,6 +12952,8 @@
         #kt-ai-workspace .kt-ai-ws-state .kt-ai-ws-chip.is-head{ font-weight:600; border-color:#2563eb; color:#2563eb; }
         #kt-ai-workspace .kt-ai-drawer-tabs{ flex:none; display:flex; gap:4px; flex-wrap:wrap; margin-bottom:6px; }
         #kt-ai-workspace .kt-ai-dtab.active{ background:#2563eb; border-color:#2563eb; color:#fff; }
+        #kt-ai-workspace select.kt-ai-decision, #kt-ai-workspace select.kt-ai-decision option{ background:var(--kt-ai-card-bg, #fff); color:inherit; }
+        #kt-ai-workspace select.kt-ai-decision{ border:1px solid var(--kt-ai-border); border-radius:6px; }
         #kt-ai-workspace .kt-ai-dtab .kt-ai-dtab-dot{ display:inline-block; width:6px; height:6px; border-radius:50%; background:#b26a00; margin-left:4px; vertical-align:middle; }
         #kt-ai-workspace .kt-ai-pane{ display:none; flex:1 1 0%; min-height:0; overflow:auto; }
         #kt-ai-workspace .kt-ai-pane.active{ display:block; }
