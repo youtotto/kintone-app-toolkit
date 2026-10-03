@@ -9318,11 +9318,42 @@
         }
         states.set(id, st);
       }
-      // 依存: 依存先が実行されない（SKIPPED / UNSUPPORTED / BLOCKED）なら BLOCKED
-      for (const st of states.values()) {
-        if (st.status !== STEP.PENDING) continue;
-        const bad = st.dependsOn.filter(d => { const ds = states.get(d); return !ds || ds.status !== STEP.PENDING; });
-        if (bad.length) { st.status = STEP.BLOCKED; st.reason = 'DEPENDENCY_NOT_EXECUTABLE'; st.message = `依存する ${bad.join(', ')} が実行されないため反映できません`; }
+      // 依存: 依存先が実行されない（SKIPPED / UNSUPPORTED / BLOCKED）なら BLOCKED。
+      // Phase 20（CX-1 2 回目・実機）: プロセスの分岐は一緒に反映する。同じ遷移元の条件・遷移先を変える / 足す手順の片方だけ（例:「申請する」を 100 万円以上だけにする）
+      //   を反映すると、残りの条件のレコードが先へ進めなくなる（実機では課長側の条件が `<` で無効なのに、部長側は「自動で反映できる」と表示された）。
+      //   進む手順が反映されない新しいステータスと、そこから出る / へ入るアクションも反映しない（孤立させない）。変化が無くなるまで繰り返す
+      const pend = (id) => states.get(id)?.status === STEP.PENDING;
+      const specOf = (id) => rv.get(id)?.spec || byId.get(id)?.spec || {};
+      const branchStep = (id) => { const s = byId.get(id); if (!s) return false; if (s.actionType === 'ADD_PROCESS_ACTION') return true; if (s.actionType !== 'UPDATE_PROCESS') return false; const dk = rv.get(id)?.diff; return [...(dk?.changeKinds || []), dk?.changeKind, specOf(id).changeKind].some(k => /^ACTION_(CONDITION|TRANSITION)$/.test(String(k || ''))); };
+      const newStatusName = (id) => String(specOf(id).name ?? byId.get(id)?.targetRef ?? '').trim();
+      const block = (st, reason, message) => { st.status = STEP.BLOCKED; st.reason = reason; st.message = message; };
+      for (let changed = true, guard = 0; changed && guard < 20; guard++) {
+        changed = false;
+        for (const st of states.values()) {
+          if (st.status !== STEP.PENDING) continue;
+          const bad = st.dependsOn.filter(d => { const ds = states.get(d); return !ds || ds.status !== STEP.PENDING; });
+          if (bad.length) { block(st, 'DEPENDENCY_NOT_EXECUTABLE', `依存する ${bad.join(', ')} が実行されないため反映できません`); changed = true; }
+        }
+        const groups = new Map();
+        for (const id of states.keys()) if (branchStep(id)) { const f = String(specOf(id).from ?? '').trim(); if (f) groups.set(f, [...(groups.get(f) || []), id]); }
+        for (const [from, ids] of groups) {
+          const stuck = ids.filter(id => !pend(id));
+          if (ids.length < 2 || !stuck.length) continue;
+          for (const id of ids.filter(pend)) { block(states.get(id), 'PROCESS_BRANCH_PARTIAL', `同じ遷移元「${from}」の分岐 ${stuck.join(', ')} が反映されないため、この手順だけは反映しません（一部の条件のレコードが先へ進めなくなるのを防ぐ）。分岐の手順をそろえて承認・修正してから反映してください`); changed = true; }
+        }
+        const droppedNew = new Set();
+        for (const [id, st] of states) {
+          if (byId.get(id)?.actionType !== 'ADD_PROCESS_STATUS') continue;
+          const name = newStatusName(id);
+          if (st.status !== STEP.PENDING) { if (name) droppedNew.add(name); continue; }
+          const incoming = [...states.keys()].filter(x => branchStep(x) && String(specOf(x).to ?? '').trim() === name);
+          if (incoming.length && !incoming.some(pend)) { block(st, 'STATUS_UNREACHABLE', `ステータス「${name}」へ進む手順 ${incoming.join(', ')} が反映されないため、このステータスだけは追加しません（孤立する）`); droppedNew.add(name); changed = true; }
+        }
+        for (const [id, st] of states) {
+          if (st.status !== STEP.PENDING || !branchStep(id)) continue;
+          const sp = specOf(id), hit = [sp.from, sp.to].map(x => String(x ?? '').trim()).filter(x => droppedNew.has(x));
+          if (hit.length) { block(st, 'DEPENDENCY_NOT_EXECUTABLE', `ステータス「${hit.join('・')}」を追加しないため反映できません`); changed = true; }
+        }
       }
       return [...states.values()];
     }

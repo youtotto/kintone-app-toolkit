@@ -625,6 +625,32 @@ console.log('\n--- F32 / F33（CX-1 実機）. 1 つの手順の説明に書か�
 }
 
 // =========================================================
+console.log('\n--- F37（CX-1 2 回目・実機）. 同じ遷移元の分岐は一緒に反映する（片方が反映できないなら、もう片方も反映しない）---');
+{
+  const statusStep = (id, name) => step(id, 'ADD_PROCESS_STATUS', 'PROCESS_STATUS', name, { name, assignees: ['FIELD_ENTITY:owner'], assigneeType: 'ONE' });
+  // 実機の v2 と同じ形: 申請するを 100 万円以上だけ部長承認待ちへ・課長用の申請を追加（条件が < で無効）・部長承認待ちの承認 / 差し戻し
+  const mk = (cond2) => plan([
+    statusStep('P1', '部長承認待ち'),
+    step('P2', 'UPDATE_PROCESS', 'PROCESS_ACTION', '申請する', { name: '申請する', from: '未処理', to: '部長承認待ち', filterCond: 'amount >= "1000000"', changeKind: 'ACTION_CONDITION' }),
+    step('P3', 'ADD_PROCESS_ACTION', 'PROCESS_ACTION', '申請する（課長）', { name: '申請する（課長）', from: '未処理', to: '承認待ち', filterCond: cond2 }),
+    step('P4', 'ADD_PROCESS_ACTION', 'PROCESS_ACTION', '承認する（部長）', { name: '承認する（部長）', from: '部長承認待ち', to: '完了' }, { dependsOn: ['P1'] }),
+    step('P5', 'ADD_PROCESS_ACTION', 'PROCESS_ACTION', '差し戻す（部長）', { name: '差し戻す（部長）', from: '部長承認待ち', to: '未処理' }, { dependsOn: ['P1'] }),
+  ]);
+  const by = (ar, id) => ar.find(a => a.stepId === id) || {};
+  const bad = mk('amount < "1000000"');
+  const arBad = KTPlanExecutor.applyReadiness(bad, reviewOf(bad));
+  assert(by(arBad, 'P3').apply === 'BLOCKED' && by(arBad, 'P2').apply === 'BLOCKED' && by(arBad, 'P2').reason === 'PROCESS_BRANCH_PARTIAL' && /P3/.test(by(arBad, 'P2').message || ''), `F37: 分岐の片方（P3: < で無効）が反映できない → もう片方（P2: 申請を 100 万円以上だけにする）も反映しない（以前は P2 を自動で反映できると表示）: ${arBad.map(a => a.stepId + ':' + a.apply + (a.reason ? '(' + a.reason + ')' : '')).join(' ')}`);
+  assert(['P1', 'P4', 'P5'].every(id => by(arBad, id).apply === 'BLOCKED'), `F37: 進む手順が反映されない新しいステータスと、そこから出るアクションも反映しない（孤立させない）: ${arBad.map(a => a.stepId + ':' + a.apply).join(' ')}`);
+  const good = mk('amount <= "999999"');
+  const arGood = KTPlanExecutor.applyReadiness(good, reviewOf(good));
+  assert(['P1', 'P2', 'P3', 'P4', 'P5'].every(id => by(arGood, id).apply === 'AUTO'), `F37: 条件が正しければ 5 手順とも自動で反映できる: ${arGood.map(a => a.stepId + ':' + a.apply + (a.reason ? '(' + a.reason + ')' : '')).join(' ')}`);
+  // 片方だけを承認した場合も同じ（承認しなかった分岐があると、承認した分岐も反映しない）
+  const cls = KTPlanExecutor.classifySteps({ plan: good, review: reviewOf(good), approvedSteps: ['P1', 'P2', 'P4', 'P5'] });
+  const st = (id) => cls.find(x => x.stepId === id) || {};
+  assert(st('P3').status === 'SKIPPED' && st('P2').status === 'BLOCKED' && st('P2').reason === 'PROCESS_BRANCH_PARTIAL', `F37: 分岐の片方だけ承認 → 承認した方も反映しない（理由を表示）: P2 ${st('P2').status} ${st('P2').reason}`);
+}
+
+// =========================================================
 console.log('\n--- F35 / F36（XA-7 / XA-9 実機）. 関連レコードの設定の場所・別のアプリへの手順 ---');
 {
   // F35a: 関連レコードの fact に並び順・件数・絞り込み（実機 XA-7a で AI が「今の表示設定（表示項目と並び順）を教えて」と利用者に聞いた）
