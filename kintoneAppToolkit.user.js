@@ -6568,6 +6568,15 @@
       }
       // ---- 5a. 依頼で名前を挙げたアプリと、参照先アプリの名前の不一致（Phase 20 XA-5）----
       warnings.push(...relatedAppNameWarnings(plan?.goal, data, steps));
+      // ---- 5b. 依頼の中の「全体の禁止」と「例外」（Phase 20 CX-4）: 「承認後は誰も変更できない。ただし営業担当はいつでも変更できる」を AI が 3 回とも
+      //      黙って例外として解釈した（優先の確認なし）。依頼に両方があり、計画の確認事項がそれに触れていなければ、計画全体の指摘にする ----
+      {
+        const g = String(plan?.goal ?? '');
+        const universal = /(誰も|だれも|全員|みんな|すべての(人|ユーザー)|全ての(人|ユーザー)|一切|絶対に?)[^。]{0,30}(できない|できなく|不可|禁止|させない|させなく|変更できな|編集できな|見られな)/.exec(g);
+        const exception = /(ただし|但し|ただ、|例外|を除いて|以外は)[^。]{0,40}(できる|できるよう|可能|許可|変更でき|編集でき|見られる|見られるよう)/.exec(g);
+        const asked = [...(plan?.questions || []).map(q => q?.question), ...(plan?.customizations || []).flatMap(c => c?.questions || [])].some(q => /例外|優先|どちら|ただし|但し|除いて|以外/.test(String(q || '')));
+        if (universal && exception && !asked) warnings.push({ code: 'REQUEST_EXCEPTION_UNCONFIRMED', severity: 'medium', stepIds: [], message: `依頼に「${universal[0]}」（全体の禁止）と「${exception[0]}」（例外）が両方あります。例外として扱ってよいか、例外の範囲（誰が・いつ・どの操作）とどちらを優先するかを確かめてください（計画の確認事項はこの点に触れていません）` });
+      }
       // ---- 6. 依存先が INVALID / BLOCKED の step は BLOCKED_BY_DEPENDENCY ----
       for (const id of order) {
         const r = results.get(id);
@@ -12790,7 +12799,9 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
           const settingSteps = ready.filter(x => x.apply !== 'JS' && x.apply !== 'CONFIRM');
           const autoN = settingSteps.filter(x => x.apply === 'AUTO').length;
           const readyText = settingSteps.length ? (autoN === settingSteps.length ? '' : autoN ? `設定の手順 ${settingSteps.length} 件のうち、動作テスト環境へ自動で反映できるのは ${autoN} 件です（残りは右の「検証」に理由）。` : '設定の手順は、どれも Toolkit からは自動で反映できません（理由は右の「検証」）。') : '';
-          toolkit(`${planLabel(v)} を検証しました。${c.blocked ? '実行できない手順があります。' : c.review ? '確認が必要な手順があります。' : jsBlocked ? 'JavaScript カスタマイズに実行できない問題があります。' : jsNeeds ? 'JavaScript カスタマイズに確認が必要な点があります。' : planWarn ? '計画全体に確認が必要な点があります（右の「検証」の「Toolkit からの指摘」）。' : '問題は見つかりませんでした。'}${readyText}`, { planId: v.planId, version: v.version });
+          const stepText = c.blocked ? '実行できない手順があります。' : c.review ? '確認が必要な手順があります。' : jsBlocked ? 'JavaScript カスタマイズに実行できない問題があります。' : jsNeeds ? 'JavaScript カスタマイズに確認が必要な点があります。' : '';
+          const warnText = planWarn ? (stepText ? '計画全体への指摘もあります（右の「検証」の「Toolkit からの指摘」）。' : '計画全体に確認が必要な点があります（右の「検証」の「Toolkit からの指摘」）。') : '';
+          toolkit(`${planLabel(v)} を検証しました。${stepText}${warnText}${!stepText && !warnText ? '問題は見つかりませんでした。' : ''}${readyText}`, { planId: v.planId, version: v.version });
           push(MSG.REVIEW, ROLE.TOOLKIT, 'Toolkit Review', { planId: v.planId, version: v.version, counts: c });
         }
         if ((p.questions || []).length) assistant(`確認したいことが ${p.questions.length} 件あります。${p.questions.slice(0, 3).map(q => `${q.id}: ${q.question}`).join(' / ')}${p.questions.length > 3 ? ' …' : ''}`, { planId: v.planId, version: v.version, kind: 'questions' });
@@ -13083,6 +13094,11 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
         startConsultation, confirmSpec, noteJsExecution, specSummary, subject: () => state.subject, activeJsExecution: () => state.activeJsExecution,
         notice: (text, data) => push(MSG.SYSTEM_NOTICE, ROLE.SYSTEM, text, data),
         pushMessage: push,
+        /**
+         * Phase 20（実機 U5）: 新しい会話を始める（画面の［新しい会話］）。計画・仕様・生成コードは会話から消え、動作テスト環境へ反映済みで未復元の実行は
+         * 残す（resetConversation と同じ）。相談中の JS も外す。以前は再読み込みしか方法が無く、続けて書いた別の依頼が今の計画の修正として扱われた
+         */
+        startNew: () => { resetConversation(); state.subject = null; state.consultation = null; emit(); return { ok: true, epoch: state.epoch }; },
         /** Before / After を会話に出す（計画カードの操作。Review の diff を写す） */
         showDiff: (v = state.activePlan) => (v ? push(MSG.DIFF, ROLE.TOOLKIT, `${planLabel(v)} の Before / After`, { planId: v.planId, version: v.version }) : null),
       };
@@ -13333,6 +13349,7 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
                 <textarea id="kt-ai-input" rows="2" placeholder="何を実現したいですか？（例: 100万円以上なら部長承認にしたい / このフィールドの使われ方を知りたい / このアプリの仕様書を作って）"></textarea>
                 <div style="display:flex; gap:6px; align-items:center; justify-content:space-between;">
                   <span id="kt-ai-composer-note" style="font-size:11px; opacity:.8; flex:1; min-width:0;"></span>
+                  <button id="kt-ai-new-conv" type="button" class="btn" style="height:28px;" title="今の会話を終えて、新しい依頼を始めます（kintone の設定は変わりません）" disabled>新しい会話</button>
                   <button id="kt-ai-cancel" type="button" class="btn" style="height:28px; display:none;">キャンセル</button>
                   <button id="kt-ai-send" type="button" class="btn" style="height:28px; font-weight:600;" disabled>送信</button>
                 </div>
@@ -13575,6 +13592,11 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
       if (!s || !s.rollbackStatus) return card('kt-ai-js-rollback-card', `<div><b>${esc(m.text)}</b></div>`, '#6a1b9a');
       return card('kt-ai-js-rollback-card', `<div><b>${s.rolledBack ? 'JavaScript を登録前の状態へ戻しました。' : '元に戻せませんでした。'}</b></div>${s.rollbackRestored != null ? `<div style="font-size:12px; margin-top:4px;">登録前 snapshot との比較：${s.rollbackRestored ? '✓ 一致' : '× 差分あり'}</div>` : ''}<div style="margin-top:4px; font-size:12px;"><b>運用環境には影響していません。</b></div><div style="margin-top:6px;">${btn('open-js-result', '結果を見る', '')}</div>`, s.rolledBack ? '#2e7d32' : '#b00020');
     }
+    /** Phase 20（U5）: ［新しい会話］の確認（今の会話に戻る / 新しい会話を始める） */
+    function newConvChoicesHtml(m) {
+      const d = m.data || {};
+      return card('kt-ai-choices-card', `<div>${esc(m.text)}</div><div style="margin-top:6px; display:flex; gap:6px; flex-wrap:wrap;">${btn('new-conv-cancel', 'このまま続ける', '')}${btn('new-conv', '新しい会話を始める', '', 'font-weight:600;')}</div>${d.pendingExecution ? '<div style="font-size:11px; color:#b26a00; margin-top:4px;">動作テスト環境に反映済み（未復元）の変更があります。元に戻す操作は新しい会話でも「戻して」や詳細パネルから続けられます。</div>' : ''}<div style="font-size:10px; opacity:.6; margin-top:4px;">新しい会話を始めると、現在の会話・計画・生成コードはこの画面から消えます（kintone の設定は変わりません）。</div>`, '#6a1b9a');
+    }
     function consultChoicesHtml(m) {
       const d = m.data || {};
       return card('kt-ai-choices-card', `<div>${esc(m.text)}</div><div style="margin-top:6px; display:flex; gap:6px; flex-wrap:wrap;">${btn('consult-resume', d.current?.name ? `現在の会話に戻る（${d.current.name}）` : '現在の会話に戻る', '')}${btn('consult-new', `${d.next?.name || 'この JS'} で新しい会話を始める`, '', 'font-weight:600;')}</div>${d.pendingExecution ? '<div style="font-size:11px; color:#b26a00; margin-top:4px;">動作テスト環境に反映済み（未復元）の変更があります。元に戻す操作は新しい会話でも「戻して」や詳細パネルから続けられます。</div>' : ''}<div style="font-size:10px; opacity:.6; margin-top:4px;">新しい会話を始めると、現在の会話・計画・生成コードはこの画面から消えます（kintone の設定は変わりません）。</div>`, '#6a1b9a');
@@ -13667,6 +13689,7 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
           if (kind === 'source-unavailable') return wrap(sourceUnavailableHtml(m));
           if (kind === 'consultation-start') return wrap(consultationStartHtml(m));
           if (kind === 'consult-choices') return wrap(consultChoicesHtml(m));
+          if (kind === 'new-conv-choices') return wrap(newConvChoicesHtml(m));
           if (kind === 'js-preview-ready') return wrap(jsPreviewReadyHtml(m));
           if (kind === 'js-rollback-ready') return wrap(jsRollbackReadyHtml(m));
           if (kind === 'candidates') return wrap(candidatesHtml(m));
@@ -13785,7 +13808,7 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
     const $preview = $('kt-ai-preview'), $download = $('kt-ai-download');
     const mode = () => ($modePlan && $modePlan.checked ? 'plan' : $modeDoc && $modeDoc.checked ? 'doc' : 'qa');
     // ---- AI Workspace（Phase 15）: ヘッダー / 会話 / composer / drawer ----
-    const $header = $('kt-ai-header'), $free = $('kt-ai-free'), $chat = $('kt-ai-chat'), $input = $('kt-ai-input'), $send = $('kt-ai-send'), $cancel = $('kt-ai-cancel'), $note = $('kt-ai-composer-note');
+    const $header = $('kt-ai-header'), $free = $('kt-ai-free'), $chat = $('kt-ai-chat'), $input = $('kt-ai-input'), $send = $('kt-ai-send'), $cancel = $('kt-ai-cancel'), $note = $('kt-ai-composer-note'), $newConv = $('kt-ai-new-conv');
     const $drawer = $('kt-ai-drawer'), $dtabs = $('kt-ai-drawer-tabs'), $planEmpty = $('kt-ai-pane-plan-empty');
     // Phase 19: 右 Workspace のペイン（計画 / 検証 / コード / 実行 / 根拠 / Context / 接続）。現在の成果物（activeArtifact）の正本
     const PANES = KTAiWorkspaceViewModel.PANES;
@@ -14102,6 +14125,7 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
       $send.disabled = !canChat || busy;
       $input.disabled = !canChat && !busy;
       $cancel.style.display = busy ? '' : 'none';
+      if ($newConv) $newConv.disabled = !(conv && conv.messages().length);
       const connecting = !!(flow && flow.isRunning());
       const showFree = !paidEnabled || !conn.connected;
       $free.style.display = showFree ? '' : 'none';
@@ -14160,6 +14184,14 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
     }
     $send.addEventListener('click', () => { sendChat($input.value); });
     $cancel.addEventListener('click', () => { try { currentAbort?.abort(); } catch (e) { } });
+    // Phase 20（U5）: ［新しい会話］→ 確認カード（このまま続ける / 新しい会話を始める）
+    if ($newConv) $newConv.addEventListener('click', () => {
+      if (!conv.messages().length || conv.state.messages.some(x => x.data?.kind === 'new-conv-choices')) return;
+      const ex = conv.state.activeExecution, jx = conv.state.activeJsExecution;
+      const pendingExecution = !!((ex && ex.written && !ex.rolledBack) || (jx && jx.written && !jx.rolledBack));
+      conv.pushMessage(KTAiConversation.MSG.ASSISTANT_TEXT, KTAiConversation.ROLE.TOOLKIT, '今の会話を終えて、新しい会話を始めますか？', { kind: 'new-conv-choices', pendingExecution });
+      renderChat();
+    });
     $input.addEventListener('keydown', (ev) => { if (ev && ev.key === 'Enter' && !ev.shiftKey && !ev.isComposing) { if (typeof ev.preventDefault === 'function') ev.preventDefault(); sendChat($input.value); } });
     const dataOf = (t, key) => (t?.dataset?.[key] ?? (typeof t?.getAttribute === 'function' ? t.getAttribute(`data-${key.replace(/[A-Z]/g, c => `-${c.toLowerCase()}`)}`) : null)) ?? null;
     const actEl = (t) => (t && typeof t.closest === 'function' ? (t.closest('[data-act]') || t.closest('[data-eid]') || t) : t);
@@ -14195,6 +14227,10 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
       if (act === 'open-js-result') { jsExec.paneClosed = false; renderJsReg(); showPane('exec', { scrollTo: '#kt-ai-jsreg' }); return; }
       if (act === 'js-rollback') { setArtifact({ type: VM.ARTIFACT.ROLLBACK, id: jsExec.execution?.executionId ?? null, version: null, js: true }, { scrollTo: '#kt-ai-jsreg' }); await startJsRollback(); return; }
       if (act === 'consult-resume') { const m = conv.state.messages.find(x => x.data?.kind === 'consult-choices'); if (m) conv.state.messages.splice(conv.state.messages.indexOf(m), 1); pendingSeed = null; renderChat(); return; }
+      // Phase 20（U5）: 新しい会話。送信中の要求は中断し、まだ反映していない準備（最終確認の画面）は取り消す（前の会話の計画を新しい会話から反映しない）。
+      // 反映済み・未復元の実行は残す（「戻して」や詳細パネルから元に戻せる）
+      if (act === 'new-conv-cancel') { const m = conv.state.messages.find(x => x.data?.kind === 'new-conv-choices'); if (m) conv.state.messages.splice(conv.state.messages.indexOf(m), 1); renderChat(); renderComposer(); return; }
+      if (act === 'new-conv') { try { currentAbort?.abort(); } catch (e) { } pendingSeed = null; cancelExecutor(); cancelJsRegister(); conv.startNew(); renderHeader(); renderSpec(); renderChat(); renderComposer(); renderWsState(); return; }
       if (act === 'consult-new') { const seed = pendingSeed; pendingSeed = null; if (seed) { try { currentAbort?.abort(); } catch (e) { } const r = conv.startConsultation(seed, { force: true }); renderHeader(); renderSpec(); renderChat(); if (r.ok) setArtifact({ type: VM.ARTIFACT.CONSULTATION, id: seed.sourceId, version: null, name: seed.name }, { auto: true }); renderWsState(); } return; }
     }
     $chat.addEventListener('click', async (ev) => {

@@ -513,11 +513,59 @@ console.log('\n--- CX-2a / CX-7 / XA-5（再実行）. 通知の種類・未確�
     assert(w1.length === 1 && w1[0].severity === 'medium' && /顧客マスタ\(旧\)/.test(w1[0].message) && /「顧客マスタ」（App 500）/.test(w1[0].message), 'XA-5: 「顧客マスタ（旧）」は参照先「顧客マスタ」と名前が一致しない → 計画全体の指摘（medium）');
     assert(W('顧客マスタ2から電話番号を取得したい').length === 1 && W('顧客マスタから住所と電話番号も取得したい').length === 0 && W('見積管理にも金額を転記したい').length === 0, '番号付きの名前は指摘・同じ名前（参照先そのもの）は指摘しない');
     assert(W('顧客マスタ（旧）の顧客コードで会社名を取ってきたい', [step('P1', 'ADD_FIELD', 'PROPOSED_FIELD', 'NEW_FIELD_1', { fieldType: 'LOOKUP', sourceApp: '357', keyField: 'cust_cd' })]).length === 0, '計画が参照先以外のアプリ（ID）を明示していれば指摘しない（利用者が ID を伝えた後）');
+    // CX-4: 全体の禁止と例外が両方ある依頼で、計画の確認事項が触れていなければ計画全体の指摘
+    const X = (goal, questions = []) => reviewOf(plan([], [], { goal, questions: questions.map((q, i) => ({ id: `Q${i + 1}`, question: q, relatedEvidenceIds: [] })) })).warnings.filter(w => w.code === 'REQUEST_EXCEPTION_UNCONFIRMED');
+    const x1 = X('承認後は誰も金額を変更できないようにして。ただし営業担当はいつでも変更できるようにして', ['営業担当フィールドは文字列です。ログインユーザーとの照合方法は？']);
+    assert(x1.length === 1 && x1[0].severity === 'medium' && /誰も/.test(x1[0].message) && /ただし/.test(x1[0].message), 'CX-4: 「誰も…できない」と「ただし…できる」が両方・確認事項が触れていない → 計画全体の指摘');
+    assert(X('承認後は誰も金額を変更できないようにして。ただし営業担当はいつでも変更できるようにして', ['営業担当を例外として扱ってよいですか？']).length === 0 && X('承認後は金額を変更できないようにして').length === 0 && X('担当者以外は見られないようにして').length === 0, '確認事項が例外に触れている・例外の無い依頼は指摘しない');
     const conv = KTAiConversation.create({ services: {} });
     const p0 = plan([], [], { goal: '顧客マスタ（旧）の顧客コードで会社名を取ってきたい' });
     conv.registerPlan({ plan: p0, ctx: null, review: reviewOf(p0) });
     assert(conv.messages().some(x => /計画全体に確認が必要な点があります/.test(x.text)) && !conv.messages().some(x => /問題は見つかりませんでした/.test(x.text)), 'XA-5: 手順が無く「既存の設定で足りる」計画でも「問題は見つかりませんでした」と言わない');
   }
+}
+
+// =========================================================
+console.log('\n--- U5. ［新しい会話］: 続けて書いた別の依頼が今の計画の修正にならないよう、画面から会話を始め直せる ---');
+{
+  const HEALTH = { ok: true, supportedContractVersions: ['2.0', '2.1'], entitlements: [{ product: 'toolkit', features: ['assistant-qa', 'change-planner'] }], registry: { toolkit: { 'assistant-qa': { implemented: true, promptVersions: ['1'] }, 'change-planner': { implemented: true, promptVersions: ['1'] } } }, usage: { monthlyLimit: 200, usedThisMonth: 1 } };
+  const RESP = { ok: true, contractVersion: '2.1', meta: { requestId: 'pl-u5', gateway: { product: 'toolkit', feature: 'change-planner', promptVersion: '1', contextVersion: 'planner-1' }, normalization: { warnings: [] }, ai: { model: 'm' }, usage: { usedThisMonth: 1, monthlyLimit: 200 } }, plan: { goal: '承認済みの案件だけの一覧を追加したい', solution: 'STANDARD', assessment: { summary: 's', usableExistingFields: [], usableExistingSettings: [], gaps: [], evidenceIds: [] }, relevantFields: [], proposedFields: [], steps: [step('P1', 'ADD_VIEW', 'VIEW', '承認済みの案件', { name: '承認済みの案件', fields: ['amount'] })], alternatives: [], impact: [], questions: [], unknowns: [], planConfidence: 'INFERRED', customizations: [] } };
+  let gate = null; const calls = [];
+  const client = { async getHealth() { return HEALTH; }, async plan({ ctx, requestId, signal }) { calls.push({ ctx, signal }); if (gate) await new Promise((res, rej) => { gate.res = res; signal?.addEventListener?.('abort', () => rej(Object.assign(new Error('aborted'), { name: 'AbortError', code: 'CANCELLED' }))); }); const v = KTAiClient.validatePlan(RESP, ctx); return { ...v.normalized, requestId, clientWarnings: v.warnings }; } };
+  const storage = (() => { const m = new Map(); return { getItem: (k) => (m.has(k) ? m.get(k) : null), setItem: (k, v) => m.set(k, String(v)), removeItem: (k) => m.delete(k) }; })();
+  const settings = KTAiClient.createSettingsStore({ storage, host: 't.cybozu.com' }); settings.setConsent(true);
+  const session = { status() { return { connected: true, apiBase: 'https://gw.test', refreshExpiresAt: '2099-01-01T00:00:00Z', scope: { product: 'toolkit', feature: 'assistant-qa,change-planner', domain: 't.cybozu.com' } }; }, async migrateLegacy() { return false; }, async refresh() { return {}; }, async disconnect() { return { revoked: true }; }, client };
+  const host = makeFakeHost();
+  const mock = makeKintoneMock(DATA);
+  const panel = mountAiWorkspace(host, { getInputs: () => ({ data: DATA, deps: DEPS, scan: null, incoming: null }), copyText: async () => true, downloadText: () => { }, colors: { border: '#ccc', bg: '#fff' }, settings, session, hostname: 't.cybozu.com', connectFlow: { start: async () => ({}), cancel() { }, reopen: () => false, state: () => ({ phase: 'idle' }), isRunning: () => false }, executor: { api: mock.api, appId: '310' } });
+  const $ = (id) => host.querySelector(`#${id}`);
+  const ticks = async (n = 6) => { for (let i = 0; i < n; i++) await new Promise(r => setTimeout(r, 0)); };
+  const act = (a) => $('kt-ai-chat').dispatch({ type: 'click', target: { dataset: { act: a } } });
+  await ticks();
+  assert($('kt-ai-new-conv') && $('kt-ai-new-conv').disabled === true, '会話が空のうちは［新しい会話］は押せない');
+  await panel.send('承認済みの案件だけの一覧を追加したい'); await ticks();
+  assert(panel.conversation().planHistory().length === 1 && $('kt-ai-new-conv').disabled === false, '前提: 計画 v1 がある・［新しい会話］が押せる');
+  await panel.startExecutor(); await ticks();
+  // 承認してから準備（最終確認の画面）まで進める
+  panel.decide && panel.decide('P1', 'approve');
+  await panel.startExecutor(); await ticks();
+  const stageBefore = panel.executorState().stage;
+  await $('kt-ai-new-conv').dispatch('click'); await ticks();
+  assert(panel.conversation().messages().some(m => m.data && m.data.kind === 'new-conv-choices') && /新しい会話を始める/.test($('kt-ai-chat').innerHTML) && panel.conversation().planHistory().length === 1, '［新しい会話］→ 確認カード（まだ消さない）');
+  await act('new-conv-cancel'); await ticks();
+  assert(!panel.conversation().messages().some(m => m.data && m.data.kind === 'new-conv-choices') && panel.conversation().planHistory().length === 1, '［このまま続ける］→ カードだけ消え、計画は残る');
+  await $('kt-ai-new-conv').dispatch('click'); await ticks();
+  await act('new-conv'); await ticks();
+  assert(panel.conversation().messages().length === 0 && panel.conversation().planHistory().length === 0 && !panel.conversation().activePlan() && $('kt-ai-new-conv').disabled === true, '［新しい会話を始める］→ 会話・計画が消え、ボタンは押せない状態に戻る');
+  assert(['confirm', 'blocked'].includes(stageBefore) ? panel.executorState().stage === 'idle' : true, `未反映の準備（最終確認）は取り消す（前の会話の計画を新しい会話から反映しない）: ${stageBefore} → ${panel.executorState().stage}`);
+  assert(mock.calls.every(c => c.startsWith('GET')), '新しい会話の操作で kintone の設定へ書き込まない');
+  // 送信中に新しい会話 → 要求を中断し、遅れた応答を新しい会話に入れない
+  gate = {};
+  const pending = panel.send('承認済みの案件だけの一覧を追加したい');
+  for (let i = 0; i < 8; i++) await new Promise(r => setTimeout(r, 0));
+  await $('kt-ai-new-conv').dispatch('click'); await ticks();
+  await act('new-conv'); await pending; await ticks();
+  assert(calls[calls.length - 1].signal && calls[calls.length - 1].signal.aborted === true && panel.conversation().planHistory().length === 0 && !panel.conversation().isBusy(), '送信中なら要求を中断し、新しい会話に前の応答を入れない');
 }
 
 // =========================================================
