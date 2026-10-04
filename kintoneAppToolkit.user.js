@@ -15983,6 +15983,8 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
       $drawer.style.display = 'flex';
       for (const p of PANES) { const el = $pane(p); if (!el) continue; el.style.display = p === activePane ? 'block' : 'none'; if (el.classList && typeof el.classList.toggle === 'function') el.classList.toggle('active', p === activePane); }
       renderDrawerTabs(); renderHeader(); renderWsState();
+      // Phase 22（実機）: 隠れている間は描かずに残したプロセス図（pre.kt-ai-mermaid）を、ペインが見えたこの時点で描く
+      const shown = $pane(activePane); if (shown) renderMermaid(shown);
       if (scrollTo) { try { const el = host.querySelector(scrollTo); if (el && typeof el.scrollIntoView === 'function') el.scrollIntoView({ block: 'start' }); } catch (e) { } }
       return activePane;
     }
@@ -16413,7 +16415,9 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
     function renderMermaid(root) {
       const m = (typeof window !== 'undefined') ? window.mermaid : null;
       if (!m || typeof m.run !== 'function' || typeof root.querySelectorAll !== 'function') return;
-      const nodes = [...root.querySelectorAll('pre.kt-ai-mermaid')];
+      // Phase 22（実機）: 隠れているペイン（display:none）で描くと Mermaid は大きさを 0 と計算し、図が 16px に潰れた（検証ペインの Before / After が見えなかった）。
+      //   いま表示されている図だけを描き、隠れている図は pre のまま残して、ペインを開いたとき（showPane）に描く
+      const nodes = [...root.querySelectorAll('pre.kt-ai-mermaid')].filter(pre => typeof pre.getClientRects !== 'function' || pre.getClientRects().length > 0);
       if (!nodes.length) return;
       // Phase 22: ダークテーマのときは暗い配色で描く（ライトのときは変えない）
       const dark = typeof getThemeColors === 'function' && !!getThemeColors().isDark;

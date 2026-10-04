@@ -346,6 +346,23 @@ console.log('\n--- ダークテーマのプロセス図: 暗い配色で描く�
     const html = String(inner.innerHTML || '');
     assert(/id="kt-ai-workspace"/.test(html) && (dark ? /id="kt-ai-workspace" data-theme="dark"/.test(html) : !/id="kt-ai-workspace" data-theme="dark"/.test(html)), `開発支援タブの組み立て（renderAiWorkspace）でも、${dark ? 'ダークのときは印（data-theme="dark"）を付ける' : 'ライトのときは印を付けない'}`);
   }
+  // 実機で見つけた描画の問題: 隠れているペインで描くと Mermaid が大きさを 0 と計算し、図が 16px に潰れた（検証ペインの Before / After が見えなかった。ライトでも同じ）。
+  //   表示されている図だけを描き、隠れている図はペインを開いたとき（showPane）に描く
+  {
+    const T4 = loadToolkit();
+    const ran = [];
+    T4.__sandbox.mermaid = { run: ({ nodes }) => { ran.push(...nodes); return Promise.resolve(); } };
+    const host = makeFakeHost();
+    const panel = T4.mountAiWorkspace(host, { getInputs: () => ({ data: FX.makeData() }), copyText: async () => true, downloadText: () => { }, colors: { border: '#ccc', bg: '#fff' } });
+    const mk = (visible) => ({ textContent: 'flowchart LR\n  S0["作成中"]\n  S1["承認待ち"]\n  S0 -->|申請する| S1', visible, getClientRects() { return this.visible ? [{ width: 100 }] : []; }, replaceWith(d) { this.replaced = d; } });
+    const shownPre = mk(true), hiddenPre = mk(false);
+    host.querySelector('#kt-ai-pane-review').querySelectorAll = (sel) => (sel === 'pre.kt-ai-mermaid' ? [shownPre, hiddenPre].filter(p => !p.replaced) : []);
+    panel.showPane('review');
+    assert(shownPre.replaced && !hiddenPre.replaced && ran.length === 1 && /flowchart LR/.test(ran[0].textContent), `表示されている図だけを描く（隠れている図は pre のまま残す）: ${ran.length}`);
+    hiddenPre.visible = true;
+    panel.showPane('review');
+    assert(hiddenPre.replaced && ran.length === 2, `ペインを開いた（見えた）ときに、残しておいた図を描く: ${ran.length}`);
+  }
 }
 
 console.log(`\n${state.failed === 0 ? 'ALL PASSED' : 'FAILED'}: ${state.passed} passed / ${state.failed} failed`);
