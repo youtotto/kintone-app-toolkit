@@ -657,7 +657,7 @@
     // ★解析ロジックのバージョン。
     //   解析内容（検出パターン・保存する項目）を変更したら必ず上げること。
     //   これを署名に含めないと、Toolkit更新後も古い解析結果が使われ続ける。
-    const ANALYZER_VERSION = '14'; // 解析ロジックを変更したら上げる（キャッシュが自動的に無効になる）。14: Phase 22 変数に入れたフィールド・日本語コードのドット記法
+    const ANALYZER_VERSION = '15'; // 解析ロジックを変更したら上げる（キャッシュが自動的に無効になる）。14: Phase 22 変数に入れたフィールド・日本語コードのドット記法。15: API の目録にモバイルの getFieldElement / getFieldElements（RC E2E）
     const CACHE_TTL_MS = 6 * 60 * 60 * 1000; // 6時間（プレビュー編集を拾えないため長くしすぎない）
 
     // Scannerタブが登録する実行関数（renderScannerから設定される）
@@ -6529,7 +6529,7 @@
   //   2026-10-03 確認）の語彙を正本にし、AI の自由文からイベント名・API 名を作らせない。
   // ==========================================
   const KTJsCatalog = (() => {
-    const CATALOG_VERSION = '1';
+    const CATALOG_VERSION = '2';   // 2: API の使える画面（screens）・モバイルの getFieldElement / getFieldElements（RC E2E）
     /** 固定名のイベント（desktop）。mobile は同じ名前に mobile. を付ける（一覧の編集・印刷・ポータルは mobile に無いものがある） */
     const DESKTOP_EVENTS = [
       'app.record.index.show', 'app.record.index.edit.show', 'app.record.index.edit.submit', 'app.record.index.edit.submit.success', 'app.record.index.delete.submit',
@@ -6584,19 +6584,24 @@
      * JavaScript API 目録（生成コードが使ってよい kintone.* の呼び出し）。
      *   review: true = 利用は可だが人のレビューを要する（REST / proxy など通信を伴う・権限に依存する）
      *   network: true = 通信を伴う
+     *   screens = 使える画面（screenOf の画面の種類。cybozu developer network「利用できる画面」2026-10-04 確認）。書いていない API は照合しない。
+     *     RC E2E（実機）: BF-C の生成コードが作成・編集画面のイベントで getFieldElement（詳細・印刷画面だけ）を使い、null が返って警告が出なかった
      */
+    const REC_UI = ['create', 'edit', 'detail', 'print'], MREC_UI = ['create', 'edit', 'detail'], LIST_TABLE = ['index', 'index-edit'];
     const APIS = Object.freeze([
       { name: 'kintone.events.on', kind: 'events' }, { name: 'kintone.events.off', kind: 'events' },
       { name: 'kintone.app.getId', kind: 'app' }, { name: 'kintone.app.getQueryCondition', kind: 'app' }, { name: 'kintone.app.getQuery', kind: 'app' },
       { name: 'kintone.app.getLookupTargetAppId', kind: 'app' }, { name: 'kintone.app.getRelatedRecordsTargetAppId', kind: 'app' },
-      { name: 'kintone.app.getFieldElements', kind: 'ui' }, { name: 'kintone.app.getHeaderMenuSpaceElement', kind: 'ui' }, { name: 'kintone.app.getHeaderSpaceElement', kind: 'ui' },
+      { name: 'kintone.app.getFieldElements', kind: 'ui', screens: LIST_TABLE }, { name: 'kintone.app.getHeaderMenuSpaceElement', kind: 'ui' }, { name: 'kintone.app.getHeaderSpaceElement', kind: 'ui' },
       { name: 'kintone.app.record.get', kind: 'record' }, { name: 'kintone.app.record.set', kind: 'record' }, { name: 'kintone.app.record.getId', kind: 'record' },
-      { name: 'kintone.app.record.getFieldElement', kind: 'ui' }, { name: 'kintone.app.record.getSpaceElement', kind: 'ui' }, { name: 'kintone.app.record.getHeaderMenuSpaceElement', kind: 'ui' },
-      { name: 'kintone.app.record.setFieldShown', kind: 'ui' }, { name: 'kintone.app.record.setGroupFieldOpen', kind: 'ui' },
+      { name: 'kintone.app.record.getFieldElement', kind: 'ui', screens: ['detail', 'print'] }, { name: 'kintone.app.record.getSpaceElement', kind: 'ui', screens: REC_UI }, { name: 'kintone.app.record.getHeaderMenuSpaceElement', kind: 'ui', screens: ['create', 'edit', 'detail'] },
+      { name: 'kintone.app.record.setFieldShown', kind: 'ui', screens: REC_UI }, { name: 'kintone.app.record.setGroupFieldOpen', kind: 'ui', screens: REC_UI },
       { name: 'kintone.mobile.app.getId', kind: 'app' }, { name: 'kintone.mobile.app.getQueryCondition', kind: 'app' }, { name: 'kintone.mobile.app.getQuery', kind: 'app' },
       { name: 'kintone.mobile.app.getHeaderSpaceElement', kind: 'ui' }, { name: 'kintone.mobile.app.getLookupTargetAppId', kind: 'app' }, { name: 'kintone.mobile.app.getRelatedRecordsTargetAppId', kind: 'app' },
+      { name: 'kintone.mobile.app.getFieldElements', kind: 'ui', screens: LIST_TABLE },
       { name: 'kintone.mobile.app.record.get', kind: 'record' }, { name: 'kintone.mobile.app.record.set', kind: 'record' }, { name: 'kintone.mobile.app.record.getId', kind: 'record' },
-      { name: 'kintone.mobile.app.record.getSpaceElement', kind: 'ui' }, { name: 'kintone.mobile.app.record.setFieldShown', kind: 'ui' }, { name: 'kintone.mobile.app.record.setGroupFieldOpen', kind: 'ui' },
+      { name: 'kintone.mobile.app.record.getFieldElement', kind: 'ui', screens: ['detail'] },
+      { name: 'kintone.mobile.app.record.getSpaceElement', kind: 'ui', screens: MREC_UI }, { name: 'kintone.mobile.app.record.setFieldShown', kind: 'ui', screens: MREC_UI }, { name: 'kintone.mobile.app.record.setGroupFieldOpen', kind: 'ui', screens: MREC_UI },
       { name: 'kintone.api', kind: 'api', review: true, network: true }, { name: 'kintone.api.url', kind: 'api' }, { name: 'kintone.api.urlForGet', kind: 'api' },
       { name: 'kintone.proxy', kind: 'api', review: true, network: true, external: true }, { name: 'kintone.proxy.upload', kind: 'api', review: true, network: true, external: true },
       { name: 'kintone.getLoginUser', kind: 'user' }, { name: 'kintone.getUiVersion', kind: 'user' }, { name: 'kintone.getRequestToken', kind: 'api', review: true },
@@ -6605,6 +6610,10 @@
       { name: 'kintone.plugin.app.setProxyConfig', kind: 'plugin', review: true }, { name: 'kintone.plugin.app.getProxyConfig', kind: 'plugin', review: true },
     ]);
     const API_BY_NAME = new Map(APIS.map(a => [a.name, a]));
+    /** API の使える画面（screenOf の種類の配列）。目録に使える画面を書いていない API は null（照合しない） */
+    const apiScreens = (name) => { const a = API_BY_NAME.get(String(name || '')); return a && Array.isArray(a.screens) ? [...a.screens] : null; };
+    /** 画面の種類の表示名 */
+    const SCREEN_JA = Object.freeze({ create: '作成画面', edit: '編集画面', detail: 'レコード詳細画面', print: '印刷画面', index: '一覧画面', 'index-edit': '一覧のインライン編集', report: 'グラフ', portal: 'ポータル' });
     /**
      * コードから kintone.* の呼び出し（メンバー連鎖）を抽出し、目録と照合する。
      *   kintone.app.record.get() → kintone.app.record.get / kintone.api.url(...) → kintone.api.url / kintone.api(...) → kintone.api
@@ -6678,7 +6687,7 @@
     const PLATFORMS = Object.freeze(['desktop', 'mobile']);
     const ACCESS = Object.freeze(['READ', 'WRITE', 'CONTROL']);
     const SOLUTIONS = Object.freeze(['STANDARD', 'CUSTOMIZATION', 'HYBRID', 'UNKNOWN']);
-    return { CATALOG_VERSION, EVENTS, DESKTOP_EVENTS, MOBILE_EVENTS, CHANGE_PREFIXES, APIS, STRATEGIES, PLATFORMS, ACCESS, SOLUTIONS, SECURITY_RULES, checkEvent, isMobileEvent, eventPlatform, screenOf, extractApis, extractNetwork, scanSecurity };
+    return { CATALOG_VERSION, EVENTS, DESKTOP_EVENTS, MOBILE_EVENTS, CHANGE_PREFIXES, APIS, STRATEGIES, PLATFORMS, ACCESS, SOLUTIONS, SECURITY_RULES, checkEvent, isMobileEvent, eventPlatform, screenOf, extractApis, extractNetwork, scanSecurity, apiScreens, SCREEN_JA };
   })();
 
   // ==========================================
@@ -11195,6 +11204,142 @@
     function inputChecks(clean) {
       return fieldOperations(clean).filter(o => (o.op === 'error' || o.op === 'event-error') && o.reads.length).map(o => ({ target: o.code, checks: o.reads, kind: o.op === 'error' ? 'field-error' : 'event-error', via: o.via, events: o.events, line: o.line, index: o.index }));
     }
+    const lineOf = (s, i) => { const a = s.lastIndexOf('\n', i - 1) + 1; const b = s.indexOf('\n', i); return s.slice(a, b < 0 ? s.length : b).trim(); };
+    /** 今回足したものだけ（既存のコードに同じもの（key が同じ）が同じ数だけあれば、その分は既存として除く） */
+    const freshOnly = (cur, base, key) => {
+      const pool = new Map();
+      for (const b of base) pool.set(key(b), (pool.get(key(b)) || 0) + 1);
+      return cur.filter(x => { const n = pool.get(key(x)) || 0; if (n > 0) { pool.set(key(x), n - 1); return false; } return true; });
+    };
+    /**
+     * RC E2E（N3・2026-10-04 実機）: 使える画面が決まっている API（KTJsCatalog の screens）の呼び出しと、囲む handler のイベントの画面。
+     *   BF-C の生成コードは作成・編集画面のイベントで getFieldElement（詳細・印刷画面だけ）を使い、null が返って警告が出なかった
+     *   （API の検査は目録にあるかだけを見ていた）。どの handler から呼ばれるか分からない関数の中は画面が分からないので返さない
+     * @returns {Array<{ name: string, index: number, line: string, events: string[], screens: string[], eventScreens: string[], badScreens: string[] }>}
+     */
+    function apiScreenUses(clean) {
+      const s = String(clean || '');
+      const ranges = handlerRanges(s);
+      const out = [];
+      for (const a of KTJsCatalog.extractApis(s)) {
+        const screens = KTJsCatalog.apiScreens(a.name);
+        if (!screens) continue;
+        const events = [...new Set(ranges.filter(r => a.index > r.start && a.index <= r.end).flatMap(r => r.events))];
+        if (!events.length) continue;
+        const eventScreens = [...new Set(events.map(e => KTJsCatalog.checkEvent(e).screen))];
+        out.push({ name: a.name, index: a.index, line: lineOf(s, a.index), events, screens, eventScreens, badScreens: eventScreens.filter(x => !screens.includes(x)) });
+      }
+      return out;
+    }
+    /**
+     * RC E2E（N2・2026-10-04 実機）: 作成画面では空のフィールドの value が undefined になる（入力して消した後も・保存時のイベントでも。既存のフィールドも同じ）。
+     *   §2 手順 4 の生成（v3）は `=== null` と空文字だけで判定し、紹介元が空のまま保存できた。
+     *   作成画面のイベントの handler の中で、フィールドの値（直接・変数に入れたフィールド・値のコピー var v = record.f.value）を空文字と比べる判定を集め、
+     *   同じ文の中で undefined を扱っているか（=== undefined / == null / typeof … 'undefined' / !v / v || … / v ?? … / v && …、
+     *   コピーの時点で || '' / ?? '' にそろえている）を添える。比べる値は Phase 22 の解決（fieldRefAt）で決める
+     * @returns {Array<{ code: string, operand: string, index: number, line: string, events: string[], safe: boolean }>}
+     */
+    function emptyChecks(clean) {
+      const s = String(clean || '');
+      const ctx = KTScan.fieldRefContext(s);
+      const m = ctx.m;
+      const ranges = handlerRanges(s);
+      const ID = KTScan.ID_SRC;
+      const isId = (t) => new RegExp(`^${ID}$`, 'u').test(t);
+      const esc = (t) => t.replace(/[$]/g, '\\$');
+      const NB = '(?<![$\\u200C\\u200D\\p{ID_Continue}.])', NA = '(?![$\\u200C\\u200D\\p{ID_Continue}])';
+      // 対応する開き括弧（後ろから）
+      const openBack = (k) => { const close = m[k], open = close === ')' ? '(' : '['; let d = 0; for (let j = k; j >= 0; j--) { if (m[j] === ')' || m[j] === ']' || m[j] === '}') d++; else if (m[j] === '(' || m[j] === '[' || m[j] === '{') { d--; if (d === 0) return m[j] === open ? j : -1; } } return -1; };
+      const closeFwd = (k) => { let d = 0; for (let j = k; j < m.length; j++) { if (m[j] === '(' || m[j] === '[' || m[j] === '{') d++; else if (m[j] === ')' || m[j] === ']' || m[j] === '}') { d--; if (d === 0) return j; } } return -1; };
+      const OPERAND_CH = /[$\w.?\u0080-￿]/;
+      const operandBefore = (end) => {
+        let k = end - 1; while (k >= 0 && /\s/.test(m[k])) k--;
+        const last = k;
+        while (k >= 0) { if (m[k] === ')' || m[k] === ']') { const o = openBack(k); if (o < 0) break; k = o - 1; continue; } if (OPERAND_CH.test(m[k])) { k--; continue; } break; }
+        return { start: k + 1, end: last + 1 };
+      };
+      const operandAfter = (begin) => {
+        let k = begin; while (k < m.length && /\s/.test(m[k])) k++;
+        const first = k;
+        while (k < m.length) { if (m[k] === '(' || m[k] === '[') { const c = closeFwd(k); if (c < 0) break; k = c + 1; continue; } if (OPERAND_CH.test(m[k]) && m[k] !== '?') { k++; continue; } if (m[k] === '?' && m[k + 1] === '.') { k += 2; continue; } break; }
+        return { start: first, end: k };
+      };
+      // 値のコピー: var v = <フィールド>.value（|| '' / ?? '' で空文字にそろえたものは normalized）
+      const copies = [];
+      for (const x of m.matchAll(new RegExp(`${NB}(?:(?:var|let|const)\\s+)?(${ID})\\s*=(?![=>])`, 'gu'))) {
+        const rs = x.index + x[0].length;
+        let d = 0, k = rs;
+        for (; k < m.length; k++) { const ch = m[k]; if ('([{'.includes(ch)) d++; else if (')]}'.includes(ch)) { if (d === 0) break; d--; } else if ((ch === ';' || ch === ',' || ch === '\n') && d === 0) break; }
+        const rhs = m.slice(rs, k);
+        const vi = rhs.search(/\.\s*value\b/);
+        if (vi < 0) continue;
+        const ref = KTScan.fieldRefAt(s, rs + vi, ctx);
+        const pre = ref ? m.slice(rs, ref.start).trim() : '';
+        if (!ref || (pre && !/^[$\w.\u0080-￿]+$/.test(pre))) continue;   // event.record['f'].value はコピー。String(record.f.value) / Number(…) などの加工はコピーではない
+        const after = rhs.slice(vi).replace(/^\.\s*value\b/, '').trim();
+        const normalized = /^(?:\|\||\?\?)\s*(?:''|""|``)$/.test(after);
+        if (after && !normalized) continue;
+        copies.push({ name: x[1], code: ref.code, index: x.index, normalized });
+      }
+      const copyAt = (name, at) => copies.filter(c => c.name === name && c.index < at).pop() || null;
+      // 比べている値: フィールドの値（.value）か、値のコピーの変数
+      const subjectOf = (op) => {
+        const text = m.slice(op.start, op.end);
+        if (!text || /(?:\|\||\?\?)/.test(text)) return null;   // (v || '') / String(v ?? '') は空文字にそろえている
+        const vs = [...text.matchAll(/\.\s*value\b/g)];
+        if (vs.length) { const ref = KTScan.fieldRefAt(s, op.start + vs[vs.length - 1].index, ctx); return ref ? { code: ref.code, kind: 'field', at: op.start } : null; }
+        const w = new RegExp(`^(?:String\\s*\\(\\s*)?\\(?\\s*(${ID})\\s*\\)?\\s*\\)?(?:\\s*\\.\\s*trim\\s*\\(\\s*\\))?$`, 'u').exec(text.trim());
+        if (!w || !isId(w[1])) return null;
+        const c = copyAt(w[1], op.start);
+        return c ? { code: c.code, kind: 'copy', name: w[1], normalized: c.normalized, at: op.start } : null;
+      };
+      const spanOf = (i) => { let a = i; while (a > 0 && !';{}'.includes(m[a - 1])) a--; let b = i; while (b < m.length && !';{}'.includes(m[b])) b++; return [a, b]; };
+      const NUM = '(?:Number|parseInt|parseFloat)\\s*\\(\\s*';
+      const safeIn = (sub, a, b, negated) => {
+        if (sub.normalized) return true;
+        const sm = m.slice(a, b), ss = s.slice(a, b);
+        if (sub.kind === 'copy') {
+          const v = esc(sub.name);
+          // 「入力あり」の判定（v !== '' && … && Number(v) > 1000000）で同じ値を数値に変えて比べていれば、undefined は NaN になり条件が成り立たない
+          if (negated && new RegExp(`${NUM}${v}${NA}`, 'u').test(sm)) return true;
+          return new RegExp(`${NB}${v}\\s*(?:===|!==|==|!=)\\s*undefined${NA}|${NB}undefined\\s*(?:===|!==|==|!=)\\s*${v}${NA}`, 'u').test(sm)
+            || new RegExp(`${NB}${v}\\s*(?:==|!=)\\s*null${NA}|${NB}null\\s*(?:==|!=)\\s*${v}${NA}`, 'u').test(sm)
+            || new RegExp(`typeof\\s+${v}\\s*(?:===|!==|==|!=)\\s*(['"\`])undefined\\1`, 'u').test(ss)
+            || new RegExp(`!\\s*${v}(?![$\\u200C\\u200D\\p{ID_Continue}.\\[])`, 'u').test(sm)
+            || new RegExp(`${NB}${v}\\s*(?:\\|\\||\\?\\?|&&)`, 'u').test(sm);
+        }
+        // フィールドの値: 同じ文の中の同じフィールドの .value に undefined の扱いがあるか
+        for (const x of sm.matchAll(/\.\s*value\b/g)) {
+          const at = a + x.index;
+          const ref = KTScan.fieldRefAt(s, at, ctx);
+          if (!ref || ref.code !== sub.code) continue;
+          const tail = m.slice(at + x[0].length, Math.min(m.length, at + x[0].length + 40));
+          if (/^\s*(?:(?:===|!==|==|!=)\s*undefined(?![\w$])|(?:==|!=)\s*null(?![\w$])|\|\||\?\?|&&)/.test(tail)) return true;
+          let p = ref.start - 1; while (p >= 0 && /\s/.test(m[p])) p--;
+          if (p >= 0 && m[p] === '!' && m[p + 1] !== '=') return true;
+          if (/typeof\s*$/.test(m.slice(Math.max(0, ref.start - 12), ref.start))) return true;
+          if (negated && new RegExp(`${NUM}$`).test(m.slice(Math.max(0, ref.start - 20), ref.start).replace(/[$\w.]+$/, ''))) return true;
+        }
+        return false;
+      };
+      const out = [];
+      const seen = new Set();
+      const EMPTY = "(?:''|\"\"|``)", OP = '(?:===|!==|==|!=)';
+      const hits = [...[...m.matchAll(new RegExp(`${OP}\\s*${EMPTY}`, 'g'))].map(x => ({ at: x.index, op: operandBefore(x.index), negated: x[0][0] === '!' })),
+        ...[...m.matchAll(new RegExp(`${EMPTY}\\s*${OP}`, 'g'))].map(x => ({ at: x.index, op: operandAfter(x.index + x[0].length), negated: /!/.test(x[0]) }))];
+      for (const h of hits.sort((p, q) => p.at - q.at)) {
+        const sub = subjectOf(h.op);
+        if (!sub) continue;
+        const events = [...new Set(ranges.filter(r => h.at > r.start && h.at <= r.end).flatMap(r => r.events))];
+        if (!events.some(e => KTJsCatalog.checkEvent(e).screen === 'create')) continue;
+        const [a, b] = spanOf(h.at);
+        const key = `${sub.code}|${a}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        out.push({ code: sub.code, operand: s.slice(h.op.start, h.op.end).trim(), index: h.at, line: lineOf(s, h.at), events, safe: safeIn(sub, a, b, h.negated) });
+      }
+      return out;
+    }
     /**
      * Phase 21: テーブル（tableCode）のセルを編集不可にしている場所（行のループで row.value[key] / row.value['qty'] に .disabled = true）。
      *   直前（同じ handler の中）で tableCode の value を回しているものだけ
@@ -11735,6 +11880,21 @@
       const planApis = new Set(c.apis || []);
       const unplannedNet = netApis.filter(a => !planApis.has(a));
       if (unplannedNet.length) add('apis-network', false, 'review', `計画に無い通信 API を使っています: ${unplannedNet.join(', ')}（単純な制御なら不要）`);
+      // RC E2E（N3・実機）: 使える画面の違う API。handler のどのイベントの画面でも使えない → 登録不可、一部の画面で使えない → 確認。
+      //   今回足した呼び出しだけ（既存のコードに元からある呼び出しは数えない）
+      const baseClean = g.strategy === 'EXTEND_EXISTING_JS' && existingSource && typeof existingSource.text === 'string' ? KTScan.stripCommentsOnly(existingSource.text) : '';
+      const screensJa = (list) => list.map(x => KTJsCatalog.SCREEN_JA[x] || x).join('・');
+      for (const u of freshOnly(apiScreenUses(clean), baseClean ? apiScreenUses(baseClean) : [], (x) => `${x.name}|${x.line}|${x.events.join(',')}`)) {
+        if (!u.badScreens.length) continue;
+        const all = u.badScreens.length === u.eventScreens.length;
+        add('api-screen', false, all ? 'block' : 'review', `${u.name} は${screensJa(u.badScreens)}では使えません（使える画面: ${screensJa(u.screens)}。使えない画面では null を返すので、この処理は${all ? '動きません' : 'その画面では動きません'}）: ${u.line}${/getFieldElement$/.test(u.name) ? '。作成・編集画面のフィールドへの注意は event.record の error（またはスペース要素の getSpaceElement）で出します' : ''}`);
+      }
+      // RC E2E（N2・実機）: 作成画面では空のフィールドの値が undefined。空の判定が undefined を扱っていないと、空のままでも空と判定されない
+      const freshEmpty = freshOnly(emptyChecks(clean).filter(x => !x.safe), baseClean ? emptyChecks(baseClean).filter(x => !x.safe) : [], (x) => `${x.code}|${x.line}`);
+      for (const code of [...new Set(freshEmpty.map(x => x.code))]) {
+        const x = freshEmpty.find(y => y.code === code);
+        add('empty-undefined', false, 'review', `${code} の空の判定（${x.line}）は undefined を扱っていません。作成画面では空のフィールドの値が undefined になる（入力して消した後も同じ）ため、空のままでも空と判定されず、この判定に頼る処理（必須のチェックなど）は動きません。value === undefined か value == null も判定してください`);
+      }
       // ---- 7. セキュリティ / 外部通信 ----
       const security = addedScan.security;
       const blocks = security.filter(x => x.severity === 'block'), reviews = security.filter(x => x.severity === 'review');
@@ -11890,6 +12050,9 @@
       'planned-events': '計画のタイミング（値の変更時など）で動くかを、動作テスト環境で確かめる',
       'target-app-read': '呼び出すアプリが正しいか、利用者に読み取り権限があるかを確かめる',
       'patch-removal': '置き換え・削除される既存の行が不要かを確かめる',
+      // RC E2E（実機）
+      'api-screen': '動作テスト環境で、その API が使えない画面（作成・編集など）を開いて、処理が表示・動作するかを確かめる（使えない画面では null が返り、何も起きない）',
+      'empty-undefined': '動作テスト環境の作成画面で、そのフィールドを空のまま保存して、チェックが効く（保存が止まる）ことを確かめる',
     });
     /** Phase 21: Code Review の結果 → 登録の判定。BLOCKED = 登録不可（同意しても登録できない）、NEEDS_CONFIRMATION = 確認が必要な項目がある、RUNTIME_UNVERIFIED = 静的な検査は通ったが動作は未確認 */
     function registrationOf(status, checks, c, finalCode) {
@@ -11904,7 +12067,9 @@
 
     return { REVIEW_VERSION, STATUS, applyPatch, diffLines, diffText, diffHunks, checkSyntax, inspectHandlers, globalDeclarations, kintoneFieldOps, layoutSpaceIds, review, disableSites, subtableCellSites, siteConds, blindCond, loopVarsOf, writeTargets, restCalls, condRefsOf, HOW_TO_CHECK,
       // Phase 22（F-F2）: フィールドの操作（直接・ブラケット・変数経由）と入力チェック
-      fieldOperations, inputChecks, fieldRefsIn, unguardedCreateReads };
+      fieldOperations, inputChecks, fieldRefsIn, unguardedCreateReads,
+      // RC E2E: 使える画面の違う API・作成画面の空の値（undefined）
+      apiScreenUses, emptyChecks };
   })();
 
   // ==========================================

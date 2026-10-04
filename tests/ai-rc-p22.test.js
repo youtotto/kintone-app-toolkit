@@ -209,7 +209,7 @@ console.log('\n--- F-F2 Field Scanner（KTScan）: 日本語のコードのド�
   assert(a1.fieldAccess['金額'] && a1.fieldAccess['金額'].CONTROL >= 1, `record.金額.disabled（日本語のコードのドット記法）→ 金額の CONTROL: ${JSON.stringify(a1.fieldAccess)}`);
   const a2 = KTScan.analyzeFile({ name: 'b.js', target: 'desktop', kind: 'js', text: handler(EDIT, "    const field = record['金額'];\n    field.disabled = true;\n    const memo = record['備考'];\n    console.log(memo.value);") }, { fields });
   assert(a2.fieldAccess['金額'] && a2.fieldAccess['金額'].CONTROL >= 1 && a2.fieldAccess['備考'] && a2.fieldAccess['備考'].READ >= 1 && !a2.fieldAccess['備考'].CONTROL, `変数に入れたフィールド: 金額は CONTROL・備考は READ（使われ方で数える）: ${JSON.stringify(a2.fieldAccess)}`);
-  assert(KTScan.ANALYZER_VERSION === '14', '解析ロジックの版を上げた（古い Field Scanner のキャッシュを使わない）');
+  assert(Number(KTScan.ANALYZER_VERSION) >= 14, '解析ロジックの版を上げた（古い Field Scanner のキャッシュを使わない。後の版で上がっていてもよい）');
 }
 
 // =========================================================
