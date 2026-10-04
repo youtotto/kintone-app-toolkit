@@ -8499,21 +8499,30 @@
       }
       return out;
     }
+    /**
+     * Mermaid（flowchart）のノード・矢印のラベル。引用符で囲み、中の " は #quot;、# は #35;、` は #96;（Mermaid の文字コード。表示は元の文字）にする。
+     * 実機（App 349・2026-10-04）: 引用符の無い矢印のラベル（-->|…|）に半角のかっこ（条件 not in ("") など）があると Mermaid 10.9.8 は構文エラーになり、
+     *   図の代わりに「Syntax error in text」が出た。引用符で囲めば、かっこ・[ ]・{ }・|・; なども描ける。< > は HTML として扱われないよう全角にする
+     */
+    const mermaidLabel = (s) => `"${String(s ?? '').replace(/\r?\n/g, ' ').replace(/\s+/g, ' ').trim().replace(/#/g, '#35;').replace(/"/g, '#quot;').replace(/`/g, '#96;').replace(/</g, '＜').replace(/>/g, '＞')}"`;
     /** プロセスの Mermaid（flowchart LR）。before を渡すと新規・変更分を強調する */
     function processMermaid(p, before = null) {
       if (!p || !p.states.length) return '';
-      const esc = (s) => String(s || '').replace(/>=/g, '≧').replace(/<=/g, '≦').replace(/>/g, '＞').replace(/</g, '＜').replace(/["`]/g, '').replace(/[{}[\]|]/g, ' ').replace(/\r?\n/g, ' ').replace(/\s+/g, ' ').trim();
+      // 比較の記号は読みやすい記号にする（残りの < > は mermaidLabel が全角にする）
+      const sym = (s) => String(s || '').replace(/>=/g, '≧').replace(/<=/g, '≦');
       const idOf = new Map(p.states.map((s, i) => [s.name, `S${i}`]));
       const lines = ['flowchart LR'];
-      for (const s of p.states) lines.push(`  ${idOf.get(s.name)}["${esc(s.name)}"]`);
+      for (const s of p.states) lines.push(`  ${idOf.get(s.name)}[${mermaidLabel(sym(s.name))}]`);
       const beforeActs = before ? before.actions : null;
-      p.actions.forEach((a, i) => {
+      let edges = 0;   // linkStyle の番号は矢印の順番（行の文字を調べずに、書いた矢印の数で数える）
+      p.actions.forEach((a) => {
         const f = idOf.get(a.from), t = idOf.get(a.to);
         if (!f || !t) return;
-        const label = esc(a.filterCond ? `${a.name} [${a.filterCond}]` : a.name);
+        const label = sym(a.filterCond ? `${a.name} [${a.filterCond}]` : a.name).trim();
         const existed = beforeActs ? beforeActs.some(b => b.name === a.name && b.from === a.from && b.to === a.to && normCond(b.filterCond) === normCond(a.filterCond)) : true;
-        lines.push(`  ${f} ${existed ? '-->' : '==>'}|${label}| ${t}`);
-        if (!existed) lines.push(`  linkStyle ${lines.filter(l => /-->|==>/.test(l)).length - 1} stroke:#1a73e8,stroke-width:3px`);
+        lines.push(`  ${f} ${existed ? '-->' : '==>'}${label ? `|${mermaidLabel(label)}|` : ''} ${t}`);
+        if (!existed) lines.push(`  linkStyle ${edges} stroke:#1a73e8,stroke-width:3px`);
+        edges++;
       });
       for (const s of p.states) if (s.origin === 'proposed') lines.push(`  style ${idOf.get(s.name)} fill:#e3f0ff,stroke:#1a73e8,stroke-width:2px`);
       return lines.join('\n');
@@ -8528,7 +8537,7 @@
 
     return {
       REVIEW_VERSION, STATUS, SAFETY, CHANGE, ACTION_CAPABILITIES, HIGH_RISK,
-      buildBeforeModel, normalizeSpec, parseEntity, parseCond, condsOverlap, condNarrower, review, processMermaid, processSummary, objDiffLines, executorOutput,
+      buildBeforeModel, normalizeSpec, parseEntity, parseCond, condsOverlap, condNarrower, review, processMermaid, mermaidLabel, processSummary, objDiffLines, executorOutput,
       remView, viewView, daysText, actionView, stateView, partitionCheck, assigneeTypeOf, ASSIGNEE_TYPES, ASSIGNEE_TYPE_JA, CHANGE_KINDS, ENTITY_FIELD_TYPES,
       lookupModel, relatedAppModel, fieldsHash, relatedFieldOf, relatedKeyCheck, lookupTypeCheck, lookupIdentity, LOOKUP_COPY_COMPAT, LOOKUP_KEY_TYPES, NOT_SORTABLE,
       appActionModel, appActionView, appActionIdentity, appActionTypeCheck, destRequiredUnmapped, parseActionEntity, APP_ACTION_COPY_COMPAT, APP_ACTION_ENTITY_TYPES, EVERYONE,
@@ -16614,17 +16623,42 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
       openDrawer('plan');
     }
     /** プロセスの Before / After を Mermaid で描く（mermaid があるときだけ。無ければコードのまま表示） */
+    let mermaidSeq = 0;
     function renderMermaid(root) {
       const m = (typeof window !== 'undefined') ? window.mermaid : null;
-      if (!m || typeof m.run !== 'function' || typeof root.querySelectorAll !== 'function') return;
+      if (!m || (typeof m.render !== 'function' && typeof m.run !== 'function') || typeof root.querySelectorAll !== 'function') return;
       // Phase 22（実機）: 隠れているペイン（display:none）で描くと Mermaid は大きさを 0 と計算し、図が 16px に潰れた（検証ペインの Before / After が見えなかった）。
       //   いま表示されている図だけを描き、隠れている図は pre のまま残して、ペインを開いたとき（showPane）に描く
       const nodes = [...root.querySelectorAll('pre.kt-ai-mermaid')].filter(pre => typeof pre.getClientRects !== 'function' || pre.getClientRects().length > 0);
       if (!nodes.length) return;
       // Phase 22: ダークテーマのときは暗い配色で描く（ライトのときは変えない）
       const dark = typeof getThemeColors === 'function' && !!getThemeColors().isDark;
-      const divs = nodes.map(pre => { const div = document.createElement('div'); div.className = 'mermaid'; div.style.fontSize = '11px'; div.textContent = KTAiChatUi.themedMermaid(pre.textContent, dark); pre.replaceWith(div); return div; });
-      try { const r = m.run({ nodes: divs }); if (r && typeof r.catch === 'function') r.catch(() => { }); } catch (e) { }
+      const items = nodes.map(pre => { const src = pre.textContent; const div = document.createElement('div'); div.className = 'mermaid'; div.style.fontSize = '11px'; div.textContent = KTAiChatUi.themedMermaid(src, dark); pre.replaceWith(div); return { div, src }; });
+      // 実機（App 349・2026-10-04）: 描き始めた後に（Mermaid の描画を待つ間に）ペインが隠れると、ペインの中で測る m.run は大きさを 0 と計算し、
+      //   Before の図が 16px に潰れた（見えているかは描き始めた時点でしか確かめられない）。m.render はページ（body）の一時的な要素で測るので、
+      //   ペインが隠れても大きさが正しい。描けた SVG を枠に入れる。描けなかった図は Mermaid のエラー画像ではなく、理由とコードを出す
+      if (typeof m.render !== 'function') { try { const r = m.run({ nodes: items.map(x => x.div) }); if (r && typeof r.catch === 'function') r.catch(() => { }); } catch (e) { } return; }
+      const showCode = (div, src, e) => {
+        const reason = String((e && (e.message || e)) || '').split('\n')[0].slice(0, 120);
+        const note = document.createElement('div'); note.style.fontSize = '11px'; note.style.color = '#b26a00';
+        note.textContent = `図を描けませんでした${reason ? `（${reason}）` : ''}。コードをそのまま表示します。`;
+        const pre = document.createElement('pre'); pre.style.fontSize = '11px'; pre.style.whiteSpace = 'pre-wrap'; pre.style.margin = '0'; pre.textContent = src;
+        div.className = 'kt-ai-mermaid-fallback'; div.textContent = ''; div.appendChild(note); div.appendChild(pre);
+      };
+      for (const { div, src } of items) {
+        // id はページの中で一意にする（Mermaid は同じ id の要素を消してから描く。開発支援タブを組み立て直しても重ならないよう時刻も入れる）
+        const id = `kt-ai-mermaid-${Date.now().toString(36)}-${++mermaidSeq}`;
+        let p;
+        try { p = m.render(id, div.textContent); } catch (e) { p = Promise.reject(e); }
+        Promise.resolve(p).then((out) => {
+          if (!out || typeof out.svg !== 'string') { showCode(div, src, null); return; }
+          div.innerHTML = out.svg; div.setAttribute('data-processed', 'true');
+        }, (e) => {
+          // 描画の途中で失敗すると、Mermaid の一時的な要素（d + id）が body に残ることがある
+          try { const tmp = document.getElementById(`d${id}`); if (tmp && typeof tmp.remove === 'function') tmp.remove(); } catch (x) { }
+          showCode(div, src, e);
+        });
+      }
     }
     const reviewOutput = () => (lastPlan && lastReview) ? KTPlanReview.executorOutput(lastPlan, lastReview, [...decisions.entries()].filter(([, v]) => v === 'approve').map(([k]) => k)) : null;
     // ---- Preview Executor の表示・操作（状態は execState が正本。会話カードはこれを写す）----
@@ -17562,21 +17596,15 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
       idMap[key] = `S${idx}`; // Mermaid用ノードID
     });
 
-    // Mermaidのラベルを壊す文字とHTMLタグ由来の文字をまとめて除去する
-    const esc = (s) => String(s || '')
-      .replace(/["`]/g, "'")
-      .replace(/[<>{}[\]|]/g, ' ')
-      .replace(/\r?\n/g, ' ')
-      .replace(/\s+/g, ' ')
-      .trim();
+    // ラベルは引用符で囲む（KTPlanReview.mermaidLabel）。引用符の無い矢印のラベルに半角のかっこがあると、Mermaid は構文エラーになる
+    const label = (s) => KTPlanReview.mermaidLabel(s);
 
     const lines = ['flowchart LR'];
 
     // ノード定義
     for (const [key, st] of entries) {
       const id = idMap[key];
-      const label = esc(st.name || key);
-      lines.push(`  ${id}["${label}"]`);
+      lines.push(`  ${id}[${label(st.name || key)}]`);
     }
 
     // アクション（遷移）定義
@@ -17584,9 +17612,9 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
       const fromId = idMap[a.from];
       const toId = idMap[a.to];
       if (!fromId || !toId) continue;
-      const name = esc(a.name || '');
+      const name = String(a.name || '').trim();
       if (name) {
-        lines.push(`  ${fromId} -->|${name}| ${toId}`);
+        lines.push(`  ${fromId} -->|${label(name)}| ${toId}`);
       } else {
         lines.push(`  ${fromId} --> ${toId}`);
       }
