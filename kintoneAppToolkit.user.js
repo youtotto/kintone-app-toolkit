@@ -9996,6 +9996,8 @@
         if (!st.approved) set(STEP.SKIPPED, 'NOT_APPROVED', '承認されていません');
         else if (!r) set(STEP.BLOCKED, 'NO_REVIEW', 'Review の結果がありません');
         else if (r.status === KTPlanReview.STATUS.INVALID || r.status === KTPlanReview.STATUS.BLOCKED_BY_DEPENDENCY || r.safety === KTPlanReview.SAFETY.BLOCKED) set(STEP.BLOCKED, 'REVIEW_BLOCKED', 'Review で実行不可と判定されています');
+        // モデル更新の評価（gpt-6.1-sol の CX-1）: 既存フィールドを使う手順（REUSE_FIELD）は設定を変えない。確認の手順と同じく、承認されれば依存を満たす（下の satisfied）
+        else if (step.actionType === 'REUSE_FIELD') set(STEP.UNSUPPORTED, 'NO_CHANGE', '既存フィールドを使う手順（設定の変更はありません。承認すると、これに依存する手順も反映できます）');
         else if (r.safety === KTPlanReview.SAFETY.PLAN_ONLY) set(STEP.UNSUPPORTED, 'PLAN_ONLY', step.actionType === 'REQUIRE_CONFIRMATION' ? '確認の手順（承認で確認済み。設定の変更はありません）' : '計画のみ（自動反映の対象外）');
         else if ((r.issues || []).some(i => i.code === 'COND_UNKNOWN_FUNCTION' || i.code === 'COND_NOT_EXPRESSION' || i.code === 'COND_INVALID')) set(STEP.BLOCKED, 'INVALID_CONDITION', '条件式が kintone で評価できないため反映しません（計画の条件式を直してください）');
         // Phase 20（CX-1 実機）: 説明に複数の設定がある手順は 1 つ目しか検証していない（反映すると残りの設定が消えた計画になる）
@@ -10033,14 +10035,17 @@
       // Phase 22（余計な確認）: 確認の手順（REQUIRE_CONFIRMATION）は設定を変えないので「実行」されない（計画のみ）。以前はこれも「依存先が実行されない」と数え、
       //   利用者が確認の手順を承認しても依存する手順を止めていた（チャットで補足して AI に計画を作り直させるしかなく、補足が 1 回余計に要った）。
       //   承認された確認の手順は「確認済み」として依存を満たす。依存する手順そのものの検証（必要な値が無い・条件式が無効など）は従来どおり止める
-      const satisfied = (d) => { const ds = states.get(d); return !!ds && (ds.status === STEP.PENDING || (ds.actionType === 'REQUIRE_CONFIRMATION' && ds.approved)); };
+      //   モデル更新の評価: 既存フィールドを使う手順（REUSE_FIELD・検証で無効でないもの）も同じ（設定を変えない手順）
+      const noChangeStep = (ds) => !!ds && (ds.actionType === 'REQUIRE_CONFIRMATION' || (ds.actionType === 'REUSE_FIELD' && (ds.reason === 'NO_CHANGE' || ds.reason === 'NOT_APPROVED')));
+      const satisfied = (d) => { const ds = states.get(d); return !!ds && (ds.status === STEP.PENDING || (noChangeStep(ds) && ds.approved)); };
       for (let changed = true, guard = 0; changed && guard < 20; guard++) {
         changed = false;
         for (const st of states.values()) {
           if (st.status !== STEP.PENDING) continue;
           const bad = st.dependsOn.filter(d => !satisfied(d));
-          const conf = bad.filter(d => states.get(d)?.actionType === 'REQUIRE_CONFIRMATION');
-          if (bad.length) { block(st, 'DEPENDENCY_NOT_EXECUTABLE', conf.length === bad.length ? `確認の手順 ${conf.join(', ')} を承認すると反映できます（承認で確認済みとして扱います）` : `依存する ${bad.join(', ')} が実行されないため反映できません`); changed = true; }
+          const conf = bad.filter(d => noChangeStep(states.get(d)));
+          const allConfirm = conf.every(d => states.get(d)?.actionType === 'REQUIRE_CONFIRMATION');
+          if (bad.length) { block(st, 'DEPENDENCY_NOT_EXECUTABLE', conf.length === bad.length ? `${allConfirm ? '確認の手順' : '設定を変えない手順'} ${conf.join(', ')} を承認すると反映できます（承認で確認済みとして扱います）` : `依存する ${bad.join(', ')} が実行されないため反映できません`); changed = true; }
         }
         const groups = new Map();
         for (const id of states.keys()) if (branchStep(id)) { const f = String(specOf(id).from ?? '').trim(); if (f) groups.set(f, [...(groups.get(f) || []), id]); }
@@ -10081,6 +10086,7 @@
         const base = { stepId: x.stepId, actionType: st.actionType || x.actionType };
         if (st.actionType === 'CUSTOMIZATION_REQUIRED') return { ...base, apply: 'JS', reason: null, message: 'JavaScript（コードを生成して右「コード」から登録）' };
         if (st.actionType === 'REQUIRE_CONFIRMATION') return { ...base, apply: 'CONFIRM', reason: null, message: '確認事項（設定の変更はありません。承認すると確認済みとして扱い、これに依存する手順も反映できます）' };
+        if (st.actionType === 'REUSE_FIELD' && x.reason === 'NO_CHANGE') return { ...base, apply: 'CONFIRM', reason: null, message: '既存フィールドの利用（設定の変更はありません。承認すると、これに依存する手順も反映できます）' };
         if (x.status === STEP.PENDING) return { ...base, apply: 'AUTO', reason: null, message: '動作テスト環境へ自動で反映できます' };
         if (x.status === STEP.UNSUPPORTED) return { ...base, apply: 'MANUAL', reason: x.reason, message: x.message || 'Toolkit からは自動で反映できません（計画のみ）' };
         return { ...base, apply: 'BLOCKED', reason: x.reason, message: x.message || '反映できません' };
@@ -10258,7 +10264,8 @@
       const groups = Array.isArray(prepared.groups) ? prepared.groups : formProcessGroups(prepared.steps);
       const stepById = new Map(prepared.steps.map(x => [x.stepId, x]));
       // Phase 22（余計な確認）: 承認された確認の手順（REQUIRE_CONFIRMATION。設定を変えない）は、依存を満たす「確認済み」（classifySteps と同じ）
-      const depMet = (d) => { const dl = stepLogs.get(d); if (!dl || dl.status === STEP.VERIFIED) return true; const ds = stepById.get(d); return !!ds && ds.actionType === 'REQUIRE_CONFIRMATION' && ds.approved; };
+      //   モデル更新の評価: 既存フィールドを使う手順（REUSE_FIELD・NO_CHANGE）も同じ
+      const depMet = (d) => { const dl = stepLogs.get(d); if (!dl || dl.status === STEP.VERIFIED) return true; const ds = stepById.get(d); return !!ds && ds.approved && (ds.actionType === 'REQUIRE_CONFIRMATION' || (ds.actionType === 'REUSE_FIELD' && ds.reason === 'NO_CHANGE')); };
       for (const st of prepared.steps) {
         const l = stepLogs.get(st.stepId);
         if (done.has(st.stepId)) continue;
@@ -11074,7 +11081,8 @@
         const evVar = /^\s*([A-Za-z_$][\w$]*)\s*$/.exec(firstArg);
         const evDef = evVar ? new RegExp(`\\b(?:var|let|const)\\s+${evVar[1]}\\s*=\\s*\\[([\\s\\S]*?)\\]`).exec(s) : null;
         const events = [...(evDef ? evDef[1] : firstArg).matchAll(/['"`]((?:mobile\.)?app\.(?:record|report|event)\.[A-Za-z0-9_.\u00C0-\uFFFF]+)['"`]/g)].map(x => x[1]);
-        const error = /\.error\s*=(?!=)\s*(?!null\b|undefined\b|(['"`])\1)/.test(inlined);
+        // モデル更新の評価（gpt-6.1-sol）: 空白を挟んだ x.error = null を「エラーの設定」と数えない（\s* を先読みの中に入れて、空白で null の判定を飛ばさない）
+        const error = /\.error\s*=(?!=)(?!\s*(?:null\b|undefined\b|(['"`])\1))/.test(inlined);
         out.push({
           events: events.length ? events : ['（イベント名を特定できない登録）'],
           error,
@@ -11651,7 +11659,7 @@
      * null の代入は取り消しを起こさない）。条件の向きまでは判定しないので、guarded でも要確認（動作テスト環境で確かめる）にする
      */
     function errorGuardedByDisabled(code) {
-      const errAt = [...code.matchAll(/\.error\s*=(?!=)\s*(?!null\b|undefined\b|(['"`])\1)/g)].map(x => x.index);
+      const errAt = [...code.matchAll(/\.error\s*=(?!=)(?!\s*(?:null\b|undefined\b|(['"`])\1))/g)].map(x => x.index);
       if (!errAt.length) return false;
       const vars = [...code.matchAll(/\b(?:var|let|const)\s+([A-Za-z_$][\w$]*)\s*=\s*[^;\n]*?\.disabled\b(?!\s*=(?!=))/g)].map(x => x[1]);
       const readsDisabled = (cond) => /\.disabled\b(?!\s*=(?!=))/.test(cond) || vars.some(v => new RegExp(`(^|[^\\w$.])${v.replace(/\$/g, '\\$')}(?![\\w$])`).test(cond));
@@ -11742,7 +11750,9 @@
       const codeEvents = addedScan.events;            // 追加したコードが登録するイベント
       const fileEvents = rescan.events;               // 最終的なファイル全体のイベント（統合では既存 handler のものを含む）
       // Phase 21: イベント名を組み立てている（'app.record.edit.change.' + code）ときの前半だけの文字列は、無いイベントとは数えない（静的に特定できない → 確認）
-      const badEvents = codeEvents.filter(e => e.valid === false && !(/\.$/.test(e.name) && dynamicEventNames(clean)));
+      // モデル更新の評価（gpt-6.1-sol）: 画面を見分ける前方一致の文字列（event.type.indexOf('app.record.index.')）は登録しているイベントではない。
+      //   「.」で終わる名前は、登録の引数に直接書いたもの（direct）だけを無いイベントとして止める
+      const badEvents = codeEvents.filter(e => e.valid === false && !(/\.$/.test(e.name) && (!e.direct || dynamicEventNames(clean))));
       add('events', !badEvents.length, 'block', badEvents.length ? `kintone に無いイベント: ${badEvents.map(e => e.name).join(', ')}` : `イベント ${(codeEvents.length ? codeEvents : fileEvents).map(e => e.name).join(', ') || '（検出なし）'} は目録にあります`);
       const extraEvents = codeEvents.filter(e => e.valid !== false && !planEvents.has(e.name)).map(e => e.name);
       const missingEvents = [...planEvents].filter(ev => !fileEvents.some(e => e.name === ev));

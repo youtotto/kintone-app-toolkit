@@ -168,6 +168,66 @@ console.log('\n--- N2 空の判定の書き方 ---');
   assert(!flagged(notField) && !flagged(existing), 'フィールドの値ではない変数・既存のコードに元からある判定は数えない');
 }
 
+// =========================================================
+console.log('\n--- モデル更新（gpt-6.1-sol）の評価で見つけた誤検知: 正しいコードを登録不可にしない ---');
+{
+  const M = require('./fixtures/rc-model-replay.js');
+  const data = JSON.parse(JSON.stringify(DATA));
+  const run = (x) => KTCodeReview.review({ generated: x.generated, customization: x.customization, plan: null, data, scan: null, existingSource: { name: 'dealLock.js', target: 'desktop', text: R.DEAL_LOCK } });
+  // 1) error = null（空白を挟む普通の書き方）をエラーの設定と数えない
+  const bfc = run(M.SOL_BFC);
+  const ec = (bfc.checks || []).find(x => x.name === 'error-cancels-edit') || {};
+  assert(M.SOL_BFC.verdictAtRun === 'BLOCKED' && /field\.error = null/.test(M.SOL_BFC.generated.code), '前提: 実行時の判定は登録不可（保存時の分岐の field.error = null を数えた）');
+  assert(!codesOf(bfc.registration.blockers).includes('error-cancels-edit') && ec.severity === 'review', `SOL_BFC: 注意は編集不可（!field.disabled）を見る条件の中だけ・保存時は null で消すだけ → 確認（登録不可にしない）: ${ec.severity} ${String(ec.message || '').slice(0, 80)}`);
+  const ops = safe(() => KTCodeReview.kintoneFieldOps(KTScan.stripCommentsOnly("(function () {\n  kintone.events.on(['app.record.edit.show'], function (event) {\n    event.record['amount'].disabled = true;\n    event.record['amount'].error = null;\n    return event;\n  });\n})();")), []);
+  assert(ops.length === 1 && ops[0].error === false && ops[0].disabled === true, `error = null だけの handler はエラーを出す handler ではない: ${JSON.stringify(ops.map(o => [o.error, o.disabled]))}`);
+  const genuine = review(handler(['app.record.edit.show'], "    if (record['ステータス'].value === '承認済み') {\n      record['amount'].disabled = true;\n    }\n    if (Number(record['amount'].value) > 1000000) {\n      record['amount'].error = '金額が大きい';\n    } else {\n      record['amount'].error = null;\n    }"), cust({ fields: [{ code: 'amount', access: 'CONTROL' }] }));
+  assert(codesOf(genuine.registration.blockers).includes('error-cancels-edit'), '編集不可を見ずにエラーを出す（同じイベントで disabled）→ 従来どおり登録不可');
+  // 2) 画面を見分ける前方一致の文字列（'app.record.index.'）を、登録しているイベント名と取り違えない
+  const cx1 = run(M.SOL_CX1);
+  assert(M.SOL_CX1.blockersAtRun.includes('events') && /indexOf\('app\.record\.index\.'\)/.test(M.SOL_CX1.generated.code), '前提: 実行時は「kintone に無いイベント: app.record.index.」で登録不可');
+  assert(!codesOf(cx1.registration.blockers).includes('events'), `SOL_CX1: event.type.indexOf('app.record.index.') は登録しているイベントではない → events で止めない: ${JSON.stringify(codesOf(cx1.registration.blockers))}`);
+  assert(!codesOf(cx1.registration.blockers).includes('error-cancels-edit'), `SOL_CX1: 表示時のエラーは null で消すだけ（エラーを出すのは保存時のレコード全体のエラー）→ error-cancels-edit で止めない: ${JSON.stringify(codesOf(cx1.registration.blockers))}`);
+  const directBad = review("(function () {\n  kintone.events.on('app.record.update.show', function (event) {\n    return event;\n  });\n})();");
+  const prefixReg = review("(function () {\n  kintone.events.on('app.record.index.', function (event) {\n    return event;\n  });\n})();");
+  assert(codesOf(directBad.registration.blockers).includes('events') && codesOf(prefixReg.registration.blockers).includes('events'), '登録しているイベント名が kintone に無い（app.record.update.show・前方一致の文字列を直接登録）→ 従来どおり登録不可');
+}
+
+// =========================================================
+console.log('\n--- モデル更新の評価: 既存フィールドを使う手順（REUSE_FIELD・設定の変更なし）を承認すれば、依存する手順を反映できる ---');
+{
+  const { KTPlanReview: PR, KTPlanExecutor: PE } = T;
+  const { makeKintoneMock } = require('./helpers/kintone-preview-mock.js');
+  const sp = (o) => ({ name: null, from: null, to: null, filterCond: null, assignees: [], targets: [], events: [], timingField: null, daysLater: null, time: null, fields: [], sort: null, sourceApp: null, keyField: null, mappings: [], addMappings: [], fieldType: null, required: null, options: [], destApp: null, accessibility: null, entities: [], ...o });
+  const stp = (id, actionType, targetKind, targetRef, s = {}, extra = {}) => ({ id, actionType, targetKind, targetRef, targetExists: null, title: `${id} ${actionType}`, proposal: { summary: '', details: [] }, spec: sp(s), dependsOn: [], reason: '', evidenceIds: [], confidence: 'INFERRED', alternativeId: null, validation: { status: 'ok', issues: [] }, execution: { mode: 'PREVIEW_SUPPORTED', supported: true, reason: 'x' }, ...extra });
+  const pfd = (temporaryId, label, suggestedCode, type) => ({ temporaryId, label, suggestedCode, type, typeValid: true, required: false, options: [], reason: '', evidenceIds: [], alternativeExistingFieldCode: null, codeConflict: false, labelDuplicate: false });
+  const mk = (steps, proposedFields = []) => ({ planVersion: '1', requestId: 'tk-rc-reuse', goal: 'g', assessment: { summary: '' }, relevantFields: [], proposedFields, steps, alternatives: [], impact: [], questions: [], unknowns: [], planConfidence: 'INFERRED', solution: 'STANDARD', customizations: [] });
+  const data = FX.makeData();
+  const deps = KTDeps.buildDependencyData(data, KTDeps.normalizeFields(data.fields));
+  const reuse = (ref) => stp('P1', 'REUSE_FIELD', 'FIELD', ref, {}, { execution: { mode: 'PLAN_ONLY', supported: false, reason: '既存フィールドを使う' } });
+  const addField = stp('P2', 'ADD_FIELD', 'PROPOSED_FIELD', 'NEW_FIELD_1', { fieldType: 'DATE' }, { dependsOn: ['P1'] });
+  const p = mk([reuse('owner'), addField], [pfd('NEW_FIELD_1', '確認日', 'checked_on', 'DATE')]);
+  const rv = PR.review({ plan: p, data, deps, scan: null, incoming: null });
+  const s2 = (list) => list.find(x => x.stepId === 'P2') || {};
+  const both = safe(() => PE.classifySteps({ plan: p, review: rv, approvedSteps: ['P1', 'P2'] }), []);
+  const only2 = safe(() => PE.classifySteps({ plan: p, review: rv, approvedSteps: ['P2'] }), []);
+  assert(s2(both).status === 'PENDING', `既存フィールドを使う手順（P1・owner）も承認 → 依存する P2 を反映できる（以前は「依存する P1 が実行されない」で止まった）: ${s2(both).status} ${s2(both).message}`);
+  assert(s2(only2).status === 'BLOCKED' && /P1 を承認すると反映できます/.test(s2(only2).message || ''), `P1 を承認していなければ止め、承認すれば進めることを示す: ${s2(only2).status} ${s2(only2).message}`);
+  const rd = safe(() => PE.applyReadiness(p, rv), []);
+  const rdOf = (id) => rd.find(x => x.stepId === id) || {};
+  assert(rdOf('P1').apply === 'CONFIRM' && /設定の変更はありません/.test(rdOf('P1').message || '') && rdOf('P2').apply === 'AUTO', `承認前の見込み: P1 は確認（既存フィールドの利用）・P2 は自動で反映できる: ${JSON.stringify(rd.map(x => [x.stepId, x.apply]))}`);
+  const mock = makeKintoneMock(data);
+  const prepared = await PE.prepare(PR.executorOutput(p, rv, ['P1', 'P2']), { api: mock.api, appId: '310' });
+  const log = prepared.status === 'PREPARED' ? await PE.executePreview(prepared, { api: mock.api, review: rv, data }) : null;
+  const p2 = log ? (log.steps || []).find(x => x.stepId === 'P2') : null;
+  assert(prepared.status === 'PREPARED' && p2 && p2.status === 'VERIFIED', `反映: P1（設定の変更なし）を承認して P2（確認日）を動作テスト環境へ追加・検証: ${prepared.status} ${p2 && p2.status}`);
+  // 無いフィールドを「使う」手順は検証で無効 → 依存する手順も止める（従来どおり）
+  const bad = mk([reuse('no_such_field'), addField], [pfd('NEW_FIELD_1', '確認日', 'checked_on', 'DATE')]);
+  const rvBad = PR.review({ plan: bad, data, deps, scan: null, incoming: null });
+  const badCls = safe(() => PE.classifySteps({ plan: bad, review: rvBad, approvedSteps: ['P1', 'P2'] }), []);
+  assert(s2(badCls).status === 'BLOCKED', `無いフィールドを使う手順（検証で無効）に依存する手順は止める: ${s2(badCls).status} ${s2(badCls).reason}`);
+}
+
 console.log(`\n${state.failed === 0 ? 'ALL PASSED' : 'FAILED'}: ${state.passed} passed / ${state.failed} failed`);
 process.exit(state.failed === 0 ? 0 : 1);
 })().catch((e) => { console.error(e); process.exit(1); });
