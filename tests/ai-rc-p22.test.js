@@ -5,11 +5,13 @@
 //          条件なし（E）と条件つき（D）を区別し、条件とロックの関係を保ったまま判定する
 //   F-F2-2 変数経由のフィールド参照: const field = record['金額']; の field.disabled / field.error / field.value を、
 //          直接（record.金額）・ブラケット（record['金額']）と同じに数える（入力チェック・エラー表示・編集不可・値の参照・条件つきの処理）
+//   生成の拒否 AI がコード生成を断った（GENERATION_DECLINED）ことを、通信・認証・契約・時間切れ・応答形式の異常と区別して表示する。
+//          前に生成したコード・計画の状態は変えず、再試行できる
 //
 // 実行方法: node tests/ai-rc-p22.test.js（KT_SRC=<別ビルド> で修正前の版に対して走らせると RED になる）
 'use strict';
 const { loadToolkit, makeAssert } = require('./helpers/load-toolkit.js');
-const { KTDeps, KTScan, KTCodeReview } = loadToolkit();
+const { KTDeps, KTScan, KTCodeReview, KTAiClient, KTAiConversation, KTAiChatUi } = loadToolkit();
 const { assert, state } = makeAssert();
 const FX = require('./fixtures/ai-context-app.js');
 const R = require('./fixtures/p21-bfc-replay.js');
@@ -25,6 +27,7 @@ const handler = (events, body) => `(function () {\n  'use strict';\n  kintone.ev
 const EDIT = ['app.record.edit.show'];
 const SUBMIT = ['app.record.create.submit', 'app.record.edit.submit'];
 
+(async () => {
 // =========================================================
 console.log('\n--- F-F2 ロック判定 1〜8: 直接・ブラケット・変数経由・条件つき（if / else / && / || / 入れ子）・条件なし ---');
 {
@@ -207,5 +210,76 @@ console.log('\n--- F-F2 Field Scanner（KTScan）: 日本語のコードのド�
   assert(KTScan.ANALYZER_VERSION === '14', '解析ロジックの版を上げた（古い Field Scanner のキャッシュを使わない）');
 }
 
+// =========================================================
+console.log('\n--- 生成の拒否（GENERATION_DECLINED）: AI が生成しなかったことを、通信・認証・契約・時間切れ・応答形式の異常と区別する ---');
+const GCTX = { contextVersion: 'customization-1', customization: { customizationId: 'C1', strategy: 'NEW_JS_FILE' } };
+const reply = (status, body) => async () => ({ status, body: typeof body === 'string' ? body : JSON.stringify(body) });
+const gwError = (status, code, detail = null) => reply(status, { ok: false, contractVersion: '2.1', error: { code, message: code, requestId: 'gen-x', ...(detail ? { detail } : {}) } });
+const DECLINE_DETAIL = { reason: 'items が許可されたフィールドに無いため実装できません', coverage: [{ requirement: '承認済みでは明細を編集不可', status: 'NOT_MET', note: 'items が許可されたフィールドに無いため実装できません' }], warnings: [] };
+const OK_BODY = { ok: true, contractVersion: '2.1', meta: { requestId: 'gen-x' }, generated: { strategy: 'NEW_JS_FILE', targetFile: 'a.js', summary: 's', code: "(function () {\n  kintone.events.on('app.record.edit.show', function (event) { return event; });\n})();", patch: null, events: ['app.record.edit.show'], fields: [], apis: ['kintone.events.on'], assumptions: [], warnings: [] } };
+const aiClient = (transport) => KTAiClient.createAiClient({ apiBase: 'https://gw.test', customerToken: 't', hostname: 't.cybozu.com', transport, timeoutMs: 150 });
+const tryGenerate = async (transport) => { try { return { ok: true, r: await aiClient(transport).generate({ ctx: GCTX, requestId: 'gen-x' }) }; } catch (e) { return { ok: false, e }; } };
+{
+  const hang = async ({ signal }) => new Promise((res, rej) => { if (signal) signal.addEventListener('abort', () => { const e = new Error('aborted'); e.name = 'AbortError'; rej(e); }); });
+  const cases = [
+    ['AI が生成しなかった（422 GENERATION_DECLINED）', gwError(422, 'GENERATION_DECLINED', DECLINE_DETAIL), 'GENERATION_DECLINED', 'declined'],
+    ['通信（送れない）', async () => { throw new TypeError('Failed to fetch'); }, 'TRANSPORT_ERROR', 'network'],
+    ['AI サービス（502 UPSTREAM_ERROR）', gwError(502, 'UPSTREAM_ERROR'), 'UPSTREAM_ERROR', 'network'],
+    ['認証（401）', gwError(401, 'AUTH_INVALID_TOKEN'), 'AUTH_INVALID_TOKEN', 'auth'],
+    ['契約・利用範囲（403 FEATURE_NOT_ENTITLED）', gwError(403, 'FEATURE_NOT_ENTITLED'), 'FEATURE_NOT_ENTITLED', 'license'],
+    ['契約・利用範囲（429 MONTHLY_LIMIT_EXCEEDED）', gwError(429, 'MONTHLY_LIMIT_EXCEEDED'), 'MONTHLY_LIMIT_EXCEEDED', 'license'],
+    ['時間切れ', hang, 'TIMEOUT', 'timeout'],
+    ['応答形式の異常（502 MODEL_OUTPUT_INVALID）', gwError(502, 'MODEL_OUTPUT_INVALID'), 'MODEL_OUTPUT_INVALID', 'format'],
+    ['応答形式の異常（JSON でない）', reply(200, '<html>maintenance</html>'), 'INVALID_RESPONSE', 'format'],
+  ];
+  const ok = await tryGenerate(reply(200, OK_BODY));
+  assert(ok.ok && ok.r && typeof ok.r.code === 'string' && /kintone\.events\.on/.test(ok.r.code), '成功: AI が正常にコードを返した（例外なし・generated を返す）');
+  for (const [label, transport, code, cat] of cases) {
+    const r = await tryGenerate(transport);
+    const e = r.e || {};
+    assert(!r.ok && e.code === code && safe(() => KTAiClient.errorCategory(e.code)) === cat, `${label} → ${code}（種類 ${cat}）: ${e.code} / ${safe(() => KTAiClient.errorCategory(e.code))}`);
+  }
+  const d = await tryGenerate(gwError(422, 'GENERATION_DECLINED', DECLINE_DETAIL));
+  assert(safe(() => KTAiClient.declineReasonOf(d.e)) === DECLINE_DETAIL.reason, 'AI の説明（Gateway が長さで切った理由）を取り出せる');
+  const text = KTAiClient.errorText('GENERATION_DECLINED');
+  assert(/AI はこの依頼に対するコード生成を行いませんでした/.test(text) && /通信や契約の問題ではありません/.test(text), `生成しなかったことが分かる文言（通信・契約の障害としない）: ${text}`);
+  assert(!/契約形式/.test(KTAiClient.errorText('MODEL_OUTPUT_INVALID')) && /応答の形式/.test(KTAiClient.errorText('MODEL_OUTPUT_INVALID')), `応答形式の異常の文言に「契約」を使わない: ${KTAiClient.errorText('MODEL_OUTPUT_INVALID')}`);
+  assert(Object.values(KTAiClient.CATEGORY_JA || {}).length === 8 && KTAiClient.CATEGORY_JA.declined === 'AI が生成しなかった' && KTAiClient.CATEGORY_JA.license === '契約・利用範囲', '種類の表示名（AI が生成しなかった・契約・利用範囲 …）');
+}
+{
+  // 会話: 生成済みのコードがある状態で作り直しが拒否されても、前のコード・計画の状態は変わらない。拒否は再試行できる
+  const custPlan = { planVersion: '1', requestId: 'tk-p22', goal: 'g', assessment: { summary: '' }, relevantFields: [], proposedFields: [], steps: [], alternatives: [], impact: [], questions: [], unknowns: [], planConfidence: 'INFERRED', solution: 'CUSTOMIZATION', customizations: [{ customizationId: 'C1', requirement: '承認済みでは明細を編集不可', strategy: 'NEW_JS_FILE', platform: ['desktop'], events: ['app.record.edit.show'], fields: [], apis: [], existingFiles: [] }] };
+  let declineNext = false;
+  const services = {
+    async plan() { return { plan: custPlan, ctx: null, review: null }; },
+    async ask() { return { ok: true, answer: { answer: 'a' } }; },
+    async generate() {
+      if (declineNext) await aiClient(gwError(422, 'GENERATION_DECLINED', DECLINE_DETAIL)).generate({ ctx: GCTX, requestId: 'gen-y' });
+      return { ok: true, generated: OK_BODY.generated, review: { status: 'OK', checks: [], registration: { verdict: 'RUNTIME_UNVERIFIED', blockers: [], confirmations: [], unverified: [] } }, ctx: null, existingSource: null };
+    },
+  };
+  const conv = KTAiConversation.create({ services });
+  await conv.send('承認済みでは明細を編集不可にしたい');
+  const v = conv.activePlan();
+  if (v && v.spec) conv.confirmSpec({ planId: v.planId, version: v.version });
+  await conv.send('C1 のコードを作って');
+  const first = v && v.generated && v.generated.C1 ? v.generated.C1 : null;
+  assert(first && first.generated && /kintone\.events\.on/.test(first.generated.code), `前提: 1 回目の生成でコードがある: ${JSON.stringify(Object.keys((v && v.generated) || {}))}`);
+  const statusBefore = v.status;
+  declineNext = true;
+  const res = await conv.send('C1 のコードを作り直して');
+  const msgs = conv.messages();
+  const last = msgs[msgs.length - 1];
+  assert(res && res.ok === false && last.type === 'ERROR' && last.data.code === 'GENERATION_DECLINED' && last.data.category === 'declined' && last.data.reason === DECLINE_DETAIL.reason, `拒否 → エラーのカードに種類（AI が生成しなかった）と AI の説明: ${JSON.stringify(last && last.data)}`);
+  assert(last.data.retryable === true && !!last.data.retryText, '拒否は再試行できる（再試行のボタン）');
+  assert(v.generated.C1 === first && v.status === statusBefore, '前に生成したコード・計画の状態は変わらない');
+  const html = KTAiChatUi.messageHtml(last, { plans: new Map() });
+  assert(/AI が生成しなかった/.test(html) && /AI の説明: items が許可されたフィールドに無いため実装できません/.test(html) && /kt-ai-declined-card/.test(html) && /再試行/.test(html) && !/ネットワークエラー/.test(html), 'カード: 種類・AI の説明・再試行。障害の色（赤）にしない（kt-ai-declined-card）');
+  declineNext = false;
+  const again = await conv.send('C1 のコードを作って');
+  assert(again && again.ok === true && v.generated.C1 && v.generated.C1 !== first, '再試行（もう一度作る）で生成できる');
+}
+
 console.log(`\n${state.failed === 0 ? 'ALL PASSED' : 'FAILED'}: ${state.passed} passed / ${state.failed} failed`);
 process.exit(state.failed === 0 ? 0 : 1);
+})().catch((e) => { console.error(e); process.exit(1); });

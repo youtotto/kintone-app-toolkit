@@ -12399,6 +12399,8 @@
       UNSUPPORTED_CONTRACT_VERSION: 'UNSUPPORTED_CONTRACT_VERSION', UNKNOWN_PROMPT_VERSION: 'UNKNOWN_PROMPT_VERSION',
       INVALID_ENVELOPE: 'INVALID_ENVELOPE', INVALID_CONTEXT: 'INVALID_CONTEXT', PAYLOAD_TOO_LARGE: 'PAYLOAD_TOO_LARGE',
       UPSTREAM_ERROR: 'UPSTREAM_ERROR', MODEL_OUTPUT_INVALID: 'MODEL_OUTPUT_INVALID', INTERNAL_ERROR: 'INTERNAL_ERROR',
+      // Phase 22: AI が理由を添えてコードを生成しなかった（toolkit.customization-generator の 422）。通信・認証・契約の障害ではない
+      GENERATION_DECLINED: 'GENERATION_DECLINED',
       // client 側のみ
       TRANSPORT_ERROR: 'TRANSPORT_ERROR', TIMEOUT: 'TIMEOUT', INVALID_RESPONSE: 'INVALID_RESPONSE', WORKER_ERROR: 'WORKER_ERROR',
       NO_CONFIG: 'NO_CONFIG', NOT_ENTITLED: 'NOT_ENTITLED', CONTRACT_INCOMPATIBLE: 'CONTRACT_INCOMPATIBLE', NO_CONTEXT: 'NO_CONTEXT', PLANNER_NOT_AVAILABLE: 'PLANNER_NOT_AVAILABLE', GENERATOR_NOT_AVAILABLE: 'GENERATOR_NOT_AVAILABLE',
@@ -12431,7 +12433,9 @@
       RATE_LIMITED: 'アクセスが集中しています。しばらく待ってから再実行してください。',
       MONTHLY_LIMIT_EXCEEDED: '今月の AI 利用回数の上限に達しています。',
       UPSTREAM_ERROR: 'AI プロバイダが応答しませんでした。時間をおいて再実行してください。',
-      MODEL_OUTPUT_INVALID: 'AI の応答が契約形式を満たしませんでした。再実行しても解決しない場合はお問い合わせください。',
+      // Phase 22: 「契約形式」は利用契約の障害と読まれる → 応答の形式の異常と書く
+      MODEL_OUTPUT_INVALID: 'AI の応答の形式が正しくありませんでした（応答形式の異常。通信や契約の問題ではありません）。もう一度実行してください。続く場合はお問い合わせください。',
+      GENERATION_DECLINED: 'AI はこの依頼に対するコード生成を行いませんでした（通信や契約の問題ではありません）。AI の説明を確かめ、実装仕様を直してから作り直すか、もう一度作ってください。',
       INTERNAL_ERROR: 'AI サービス内部でエラーが発生しました。時間をおいて再実行してください。',
       TIMEOUT: 'AI サービスが時間内に応答しませんでした。時間をおいて再実行してください。',
       INVALID_RESPONSE: 'AI サービスの応答を解釈できませんでした。',
@@ -12444,6 +12448,24 @@
       CANCELLED: 'キャンセルしました。',
     };
     const errorText = (code) => ERROR_TEXT[code] || 'AI への質問に失敗しました。';
+    /**
+     * Phase 22: エラーの種類（利用者が原因を区別できるように）。AI が生成しなかった / 通信・AI サービス / 接続・認証 / 契約・利用範囲 /
+     * 時間切れ / 応答形式の異常 / バージョンの不一致 / 送信データ。AI の拒否を通信や契約の障害として見せない
+     */
+    const ERROR_CATEGORY = Object.freeze({
+      GENERATION_DECLINED: 'declined',
+      TRANSPORT_ERROR: 'network', UPSTREAM_ERROR: 'network', INTERNAL_ERROR: 'network', WORKER_ERROR: 'network', RATE_LIMITED: 'network',
+      AUTH_INVALID_TOKEN: 'auth', AUTH_TOKEN_EXPIRED: 'auth', AUTH_DOMAIN_MISMATCH: 'auth', NOT_CONNECTED: 'auth', SESSION_EXPIRED: 'auth',
+      NO_CONFIG: 'license', NOT_ENTITLED: 'license', PRODUCT_NOT_ENTITLED: 'license', FEATURE_NOT_ENTITLED: 'license', PLANNER_NOT_AVAILABLE: 'license', GENERATOR_NOT_AVAILABLE: 'license', MONTHLY_LIMIT_EXCEEDED: 'license', FEATURE_NOT_IMPLEMENTED: 'license',
+      TIMEOUT: 'timeout',
+      MODEL_OUTPUT_INVALID: 'format', INVALID_RESPONSE: 'format',
+      CONTRACT_INCOMPATIBLE: 'version', UNSUPPORTED_CONTRACT_VERSION: 'version', UNKNOWN_PROMPT_VERSION: 'version',
+      INVALID_CONTEXT: 'input', INVALID_ENVELOPE: 'input', PAYLOAD_TOO_LARGE: 'input',
+    });
+    const CATEGORY_JA = Object.freeze({ declined: 'AI が生成しなかった', network: '通信・AI サービスのエラー', auth: '接続・認証', license: '契約・利用範囲', timeout: '時間切れ', format: '応答形式の異常', version: 'バージョンの不一致', input: '送信データ' });
+    const errorCategory = (code) => ERROR_CATEGORY[code] || 'other';
+    /** Phase 22: GENERATION_DECLINED の AI の説明（Gateway が長さで切った理由）。AiClientError の details は Gateway の応答そのもの */
+    const declineReasonOf = (e) => { const d = e?.details?.error?.detail; return d && typeof d.reason === 'string' && d.reason.trim() ? d.reason.trim().slice(0, 600) : null; };
 
     class AiClientError extends Error {
       constructor({ code, message, httpStatus = null, details = null, retryAfterSeconds = null, requestId = null }) {
@@ -13079,6 +13101,8 @@
     return {
       CONTRACT_VERSION, PRODUCT, FEATURE, FEATURE_PLANNER, FEATURES, PROMPT_VERSION, PLANNER_PROMPT_VERSION, DEFAULT_API_BASE, HEALTH_TTL_MS, ACCESS_SKEW_MS,
       ERROR_CODES, ERROR_TEXT, errorText, AiClientError, isAiClientError,
+      // Phase 22: エラーの種類・AI が生成しなかった理由
+      ERROR_CATEGORY, CATEGORY_JA, errorCategory, declineReasonOf,
       createSettingsStore, createDefaultTransport, normalizeLegacyErrorCode,
       buildAskEnvelope, buildPlanEnvelope, buildGenerateEnvelope, capabilityFromHealth, validateAnswer, validatePlan, validateGenerated, createAiClient, createSession, newRequestId,
       FEATURE_GENERATOR, GENERATOR_PROMPT_VERSION,
@@ -14502,7 +14526,8 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
       // ---- 送信 ----
       let busy = false;
       /** 利用者向けの文言（KTAiClient の code 表にあればそれ。無ければ例外の message） */
-      const errorOf = (e) => { const code = e?.code || 'ERROR'; const known = typeof KTAiClient !== 'undefined' && KTAiClient.ERROR_CODES && KTAiClient.ERROR_CODES[code]; return { code, message: known ? KTAiClient.errorText(code) : (e?.message || String(e)), retryAfterSeconds: e?.retryAfterSeconds ?? null, requestId: e?.requestId ?? null }; };
+      // Phase 22: エラーの種類（category）と、AI が生成しなかったときの AI の説明（reason）を添える
+      const errorOf = (e) => { const code = e?.code || 'ERROR'; const kc = typeof KTAiClient !== 'undefined' ? KTAiClient : null; const known = kc && kc.ERROR_CODES && kc.ERROR_CODES[code]; return { code, message: known ? kc.errorText(code) : (e?.message || String(e)), category: kc && kc.errorCategory ? kc.errorCategory(code) : null, reason: code === 'GENERATION_DECLINED' && kc && kc.declineReasonOf ? kc.declineReasonOf(e) : null, retryAfterSeconds: e?.retryAfterSeconds ?? null, requestId: e?.requestId ?? null }; };
       async function send(text, { signal = null, intentOverride = null } = {}) {
         const t = norm(text);
         if (!t || busy) return null;
@@ -14670,7 +14695,7 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
           result.ok = false; result.error = err;
           if (late()) { discard(); }   // 前の会話の失敗・中断は新しい会話に出さない
           else if (err.code === 'CANCELLED' || e?.name === 'AbortError') { result.cancelled = true; push(MSG.SYSTEM_NOTICE, ROLE.SYSTEM, 'キャンセルしました。入力は残しています。', { kind: 'cancelled', text: t }); }
-          else push(MSG.ERROR, ROLE.TOOLKIT, err.message, { code: err.code, retryable: TRANSIENT.includes(err.code), retryAfterSeconds: err.retryAfterSeconds, requestId: err.requestId, retryText: t, intent: cls.intent });
+          else push(MSG.ERROR, ROLE.TOOLKIT, err.message, { code: err.code, category: err.category, ...(err.reason ? { reason: err.reason } : {}), retryable: TRANSIENT.includes(err.code) || err.code === 'GENERATION_DECLINED', retryAfterSeconds: err.retryAfterSeconds, requestId: err.requestId, retryText: t, intent: cls.intent });
         } finally {
           busy = false; emit();
         }
@@ -15293,7 +15318,12 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
     function errorCardHtml(m) {
       const d = m.data || {};
       const retry = d.retryAfterSeconds ? `（約${esc(String(d.retryAfterSeconds))}秒後に再実行できます）` : '';
-      return card('kt-ai-error-card', `<div style="color:#b00020;"><b>${esc(m.text)}</b>${retry} <span style="opacity:.7; font-size:11px;">[${esc(d.code || 'ERROR')}]${d.requestId ? ` requestId: ${esc(d.requestId)}` : ''}</span></div>${d.retryText ? `<div style="margin-top:6px; display:flex; gap:6px;">${btn('retry', '再試行', `data-text="${esc(d.retryText)}"${d.intent ? ` data-intent="${esc(d.intent)}"` : ''}`)}</div>` : ''}`, '#b00020');
+      // Phase 22: エラーの種類を出す（AI が生成しなかった / 通信 / 接続・認証 / 契約・利用範囲 / 時間切れ / 応答形式の異常 …）。
+      //   AI の拒否は障害の色（赤）にせず、AI の説明（理由）を添える
+      const catJa = d.category && typeof KTAiClient !== 'undefined' && KTAiClient.CATEGORY_JA ? KTAiClient.CATEGORY_JA[d.category] || null : null;
+      const declined = d.code === 'GENERATION_DECLINED';
+      const color = declined ? 'var(--kt-ai-declined, #8a5a00)' : '#b00020';
+      return card(`kt-ai-error-card${declined ? ' kt-ai-declined-card' : ''}`, `<div style="color:${color};">${catJa ? `<span class="kt-ai-error-category" data-category="${esc(d.category)}" style="display:inline-block; font-size:11px; border:1px solid currentColor; border-radius:9px; padding:0 6px; margin-right:4px;">${esc(catJa)}</span>` : ''}<b>${esc(m.text)}</b>${retry} <span style="opacity:.7; font-size:11px;">[${esc(d.code || 'ERROR')}]${d.requestId ? ` requestId: ${esc(d.requestId)}` : ''}</span></div>${declined && d.reason ? `<div class="kt-ai-decline-reason" style="margin-top:4px;">AI の説明: ${esc(d.reason)}</div>` : ''}${d.retryText ? `<div style="margin-top:6px; display:flex; gap:6px;">${btn('retry', '再試行', `data-text="${esc(d.retryText)}"${d.intent ? ` data-intent="${esc(d.intent)}"` : ''}`)}</div>` : ''}`, declined ? '#c08a2b' : '#b00020');
     }
     function choicesHtml(m) {
       const d = m.data || {};

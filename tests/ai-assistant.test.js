@@ -306,7 +306,8 @@ console.log('\n--- 4. 根拠チップ / 未知根拠 / エラー ---');
     [new KTAiClient.AiClientError({ code: C.TIMEOUT, message: 'x' }), '時間内に応答しません', 'TIMEOUT'],
     [new KTAiClient.AiClientError({ code: C.INVALID_RESPONSE, message: 'x' }), '応答を解釈できません', 'INVALID_RESPONSE'],
     [new KTAiClient.AiClientError({ code: C.INVALID_CONTEXT, message: 'x' }), '検証を通りませんでした', 'INVALID_CONTEXT'],
-    [new KTAiClient.AiClientError({ code: C.MODEL_OUTPUT_INVALID, message: 'x' }), '契約形式を満たしません', 'MODEL_OUTPUT_INVALID'],
+    // Phase 22: 「契約形式」は利用契約の障害と読まれるので、応答の形式の異常と書く
+    [new KTAiClient.AiClientError({ code: C.MODEL_OUTPUT_INVALID, message: 'x' }), '応答の形式が正しくありませんでした', 'MODEL_OUTPUT_INVALID'],
     [new Error('plain'), 'ネットワークエラー', 'TRANSPORT_ERROR'],
   ];
   for (const [e, text, code] of errs) {
