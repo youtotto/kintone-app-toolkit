@@ -577,6 +577,41 @@ console.log('\n--- G9 / G10. Generator Context の欠落（モデル比較の候
   assert(blindShown.registration.confirmations.some(x => x.code === 'conditional-control' && /表示の切り替えで制御していますが/.test(x.message)), '条件を見ない表示の切り替え → 確かめられないので確認');
 }
 {
+  // §6 の実機: kintone.proxy は約 60 秒で打ち切る（GAIA_PR03）。推論モデルの計画（見直し）が「ネットワークエラー」になった
+  const calls = [];
+  const okResp = { status: 200, text: async () => '{"ok":true}' };
+  const proxyOk = { proxy: async (url, method) => { calls.push(['proxy', method]); return ['{"ok":true}', 200, {}]; } };
+  const fetchOk = async (url, init) => { calls.push(['fetch', init.method]); return okResp; };
+  const t1 = KTAiClient.createDefaultTransport({ kintoneApi: proxyOk, fetchFn: fetchOk });
+  const r1 = await t1({ url: 'https://gw.test/v2/review', method: 'POST', headers: {}, body: '{}', preferDirect: true });
+  assert(r1.via === 'direct' && calls.length === 1 && calls[0][0] === 'fetch', '時間のかかる要求（preferDirect）はページから直接送る（kintone.proxy を使わない）');
+  calls.length = 0;
+  const r2 = await t1({ url: 'https://gw.test/v2/review', method: 'POST', headers: {}, body: '{}' });
+  assert(r2.via === 'proxy' && calls.length === 1 && calls[0][0] === 'proxy', 'それ以外（質問・接続）は従来どおり kintone.proxy');
+  calls.length = 0;
+  const blocked = async () => { calls.push(['fetch', 'blocked']); throw new TypeError('Failed to fetch'); };
+  const r3 = await KTAiClient.createDefaultTransport({ kintoneApi: proxyOk, fetchFn: blocked })({ url: 'https://gw.test/v2/review', method: 'POST', headers: {}, body: '{}', preferDirect: true });
+  assert(r3.via === 'proxy' && calls.map(c => c[0]).join() === 'fetch,proxy', '直接送れない（すぐに失敗）→ kintone.proxy に切り替える');
+  calls.length = 0;
+  let now = 0;
+  const lateFail = async () => { calls.push(['fetch', 'late']); now += 90000; throw new TypeError('network reset'); };
+  let e4 = null;
+  try { await KTAiClient.createDefaultTransport({ kintoneApi: proxyOk, fetchFn: lateFail, nowFn: () => now })({ url: 'https://gw.test/v2/review', method: 'POST', headers: {}, body: '{}', preferDirect: true }); } catch (e) { e4 = e; }
+  assert(e4 && calls.map(c => c[0]).join() === 'fetch', 'Gateway に届いた後の失敗（時間がたってから）では送り直さない（二重に使わない）');
+  const proxyTimeout = { proxy: async () => { throw new Error('{"code":"GAIA_PR03","message":"kintoneとプロキシーAPIとの通信がタイムアウトしました。"}'); } };
+  let e5 = null;
+  try { await KTAiClient.createDefaultTransport({ kintoneApi: proxyTimeout, fetchFn: null })({ url: 'https://gw.test/v2/review', method: 'POST', headers: {}, body: '{}' }); } catch (e) { e5 = e; }
+  assert(e5 && e5.code === 'TIMEOUT' && /約 60 秒/.test(e5.message), `kintone.proxy の打ち切り（GAIA_PR03）は「ネットワークエラー」ではなく上限を超えた TIMEOUT: ${e5 && e5.code}`);
+  // client: 計画・生成は preferDirect、質問は使わない
+  const seen = [];
+  const rec = async (req) => { seen.push(req.preferDirect === true); return { status: 200, body: JSON.stringify({ ok: true, contractVersion: '2.1', meta: { requestId: 'r', gateway: {}, normalization: { warnings: [] }, ai: { model: 'm' } }, answer: { answer: 'a', facts: [], analysis: [], recommendations: [], unknowns: [] } }) }; };
+  const cl = KTAiClient.createAiClient({ apiBase: 'https://gw.test', customerToken: 't', hostname: 'h', transport: rec });
+  try { await cl.ask({ ctx: { contextVersion: '1', facts: [] }, question: 'q' }); } catch (e) { }
+  const gctx = KTContext.buildGenerator({ customization: { customizationId: 'C1', requirement: 'r', whyStandardInsufficient: 'w', strategy: 'NEW_JS_FILE', platform: ['desktop'], implementation: 'JAVASCRIPT', events: ['app.record.edit.show'], fields: [{ code: 'amount', access: 'CONTROL' }], apis: [], existingFiles: [] }, plan: { goal: 'g', steps: [] }, planId: 'p', version: 1, data: FX.makeData() });
+  try { await cl.generate({ ctx: gctx }); } catch (e) { }
+  assert(seen[0] === false && seen[1] === true, `質問は短い要求（kintone.proxy）・コード生成は長い要求（直接）: ${JSON.stringify(seen)}`);
+}
+{
   // §5 モバイルの実機: 作成画面のイベントの record にはステータス等のシステムフィールドが無い → 確かめずに .value を読むコードは登録不可
   const data = clone(REG.data);
   data.fields['ステータス'] = { type: 'STATUS', code: 'ステータス', label: 'ステータス', enabled: true };

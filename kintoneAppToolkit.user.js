@@ -12098,11 +12098,35 @@
     }
 
     // ---- transport（AppInsight と同じ: kintone.proxy 優先・fetch フォールバック・signal 対応）----
-    function createDefaultTransport({ kintoneApi = (typeof kintone !== 'undefined' ? kintone : null), fetchFn = (typeof fetch !== 'undefined' ? fetch : null) } = {}) {
-      return async ({ url, method, headers, body, signal = null }) => {
-        if (kintoneApi && typeof kintoneApi.proxy === 'function') {
-          const [respBody, status] = await kintoneApi.proxy(url, method, headers, body ?? '');
-          return { status: Number(status), body: String(respBody ?? '') };
+    /**
+     * Phase 21（実機 §6）: kintone.proxy は約 60 秒で打ち切る（GAIA_PR03「kintoneとプロキシーAPIとの通信がタイムアウトしました」）。
+     *   推論モデルの計画・コード生成は 40〜70 秒かかるので、時間のかかる要求（preferDirect）はページから Gateway へ直接送る
+     *   （Gateway の CORS は kintone のドメインを既定で許可している）。直接送れない環境（通信の制限・CORS）で、すぐに失敗したときだけ
+     *   kintone.proxy に切り替える（Gateway に届いた後の失敗で送り直さない = 二重に使わない）
+     */
+    const DIRECT_FALLBACK_WITHIN_MS = 5000;
+    function createDefaultTransport({ kintoneApi = (typeof kintone !== 'undefined' ? kintone : null), fetchFn = (typeof fetch !== 'undefined' ? fetch : null), nowFn = () => Date.now() } = {}) {
+      return async ({ url, method, headers, body, signal = null, preferDirect = false }) => {
+        const hasProxy = !!(kintoneApi && typeof kintoneApi.proxy === 'function');
+        if (preferDirect && fetchFn) {
+          const t0 = nowFn();
+          try {
+            const resp = await fetchFn(url, { method, headers, body: body || undefined, ...(signal ? { signal } : {}) });
+            return { status: resp.status, body: await resp.text(), via: 'direct' };
+          } catch (e) {
+            if (e?.name === 'AbortError' || !hasProxy || nowFn() - t0 > DIRECT_FALLBACK_WITHIN_MS) throw e;
+          }
+        }
+        if (hasProxy) {
+          let res;
+          try { res = await kintoneApi.proxy(url, method, headers, body ?? ''); }
+          catch (e) {
+            const raw = typeof e === 'string' ? e : (e?.message || (() => { try { return JSON.stringify(e); } catch (x) { return String(e); } })());
+            if (/GAIA_PR03|プロキシーAPIとの通信がタイムアウト/.test(raw)) throw new AiClientError({ code: ERROR_CODES.TIMEOUT, message: 'AI の処理が kintone の外部通信の上限（約 60 秒）を超えました。もう一度実行するか、依頼を分けてください' });
+            throw e;
+          }
+          const [respBody, status] = res;
+          return { status: Number(status), body: String(respBody ?? ''), via: 'proxy' };
         }
         if (!fetchFn) throw new AiClientError({ code: ERROR_CODES.TRANSPORT_ERROR, message: '利用可能な transport がありません' });
         const resp = await fetchFn(url, { method, headers, body: body || undefined, ...(signal ? { signal } : {}) });
@@ -12386,7 +12410,8 @@
       const rawRequest = async ({ path, method, body, token, signal: outer = null, limitMs = timeoutMs }) => {
         let result;
         try {
-          result = await withTimeout((signal) => send({ url: `${base}${path}`, method, headers: headers(method === 'POST', token), body, signal }), outer, limitMs);
+          // Phase 21: 計画・コード生成（長い待ち時間の要求）は kintone.proxy の約 60 秒の上限を避けて直接送る（createDefaultTransport）
+          result = await withTimeout((signal) => send({ url: `${base}${path}`, method, headers: headers(method === 'POST', token), body, signal, preferDirect: limitMs > timeoutMs }), outer, limitMs);
         } catch (e) {
           if (isAiClientError(e)) throw e;
           if (e?.name === 'AbortError') throw outer?.aborted ? cancelled() : new AiClientError({ code: ERROR_CODES.TIMEOUT, message: `AI サービスが ${limitMs}ms 以内に応答しませんでした` });
