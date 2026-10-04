@@ -111,13 +111,18 @@ console.log('\n--- 3. 描画: mermaid.render（body で測る）で描き、描�
   const T4 = loadToolkit();
   const calls = { render: [], run: 0 };
   T4.__sandbox.mermaid = {
-    render: (id, code, container) => { calls.render.push({ id, code, container }); return /not in/.test(code) ? Promise.reject(new Error('Parse error on line 7:\n...申請する 課長承認者 not in (')) : Promise.resolve({ svg: `<svg id="${id}"></svg>` }); },
+    // Mermaid と同じく、SVG は width 100%・max-width に本来の幅を入れて返す
+    render: (id, code, container) => { calls.render.push({ id, code, container }); return /not in/.test(code) ? Promise.reject(new Error('Parse error on line 7:\n...申請する 課長承認者 not in (')) : Promise.resolve({ svg: `<svg id="${id}" width="100%" style="max-width: 741.234px;"></svg>` }); },
     run: () => { calls.run++; return Promise.resolve(); },
   };
   const host = makeFakeHost();
   const panel = T4.mountAiWorkspace(host, { getInputs: () => ({ data: FX.makeData() }), copyText: async () => true, downloadText: () => { }, colors: { border: '#ccc', bg: '#fff' } });
-  // 子要素を持つ要素（理由とコードの表示を確かめる）
-  T4.__sandbox.document.createElement = (tag) => ({ tagName: String(tag).toUpperCase(), style: {}, children: [], attrs: {}, className: '', textContent: '', innerHTML: '', setAttribute(k, v) { this.attrs[k] = v; }, appendChild(c) { this.children.push(c); return c; }, addEventListener() { } });
+  // 子要素を持つ要素（理由とコードの表示を確かめる）。innerHTML に入れた SVG は querySelector('svg') で引ける（style の max-width だけを持つ）
+  T4.__sandbox.document.createElement = (tag) => ({
+    tagName: String(tag).toUpperCase(), style: {}, children: [], attrs: {}, className: '', textContent: '', innerHTML: '',
+    setAttribute(k, v) { this.attrs[k] = v; }, appendChild(c) { this.children.push(c); return c; }, addEventListener() { },
+    querySelector(sel) { if (sel !== 'svg' || !/<svg/.test(this.innerHTML)) return null; if (!this._svg) { const m = this.innerHTML.match(/max-width:\s*([\d.]+)px/); this._svg = { style: { maxWidth: m ? `${m[1]}px` : '' } }; } return this._svg; },
+  });
   const mk = (code) => ({ textContent: code, getClientRects() { return [{ width: 100 }]; }, replaceWith(d) { this.replaced = d; } });
   // 修正前の構文エラーになるコード（引用符の無いラベル）を After として描かせる
   const brokenAfter = 'flowchart LR\n  S0["申請前"]\n  S3["課長承認待ち"]\n  S0 ==>|申請する 課長承認者 not in () and 部長承認者 not in ()| S3';
@@ -129,6 +134,8 @@ console.log('\n--- 3. 描画: mermaid.render（body で測る）で描き、描�
   assert(calls.run === 0 && calls.render.length === 2 && calls.render.every((c) => c.container === undefined),
     `mermaid.render で描く（ペインの中の要素を渡さず、ページの body で測る。ペインが隠れても大きさが 0 にならない）・mermaid.run は使わない: render ${calls.render.length} / run ${calls.run}`);
   assert(!!d1 && /^<svg id="kt-ai-mermaid-/.test(d1.innerHTML || '') && d1.attrs && d1.attrs['data-processed'] === 'true', '描けた図は SVG を枠に入れる');
+  const svg1 = d1 && typeof d1.querySelector === 'function' ? d1.querySelector('svg') : null;
+  assert(!!svg1 && svg1.style.minWidth === '741px', `図を縮めない: 本来の幅（max-width 741.234px）を最小の幅にする（枠より広ければ枠の中で横にスクロール）: ${svg1 && svg1.style.minWidth}`);
   const kids = (d2 && d2.children) || [];
   assert(!!d2 && d2.className === 'kt-ai-mermaid-fallback' && kids.some((c) => /^図を描けませんでした（Parse error on line 7:）。コードをそのまま表示します。$/.test(c.textContent)) && kids.some((c) => c.tagName === 'PRE' && c.textContent === brokenAfter),
     '描けなかった図は Mermaid のエラー画像ではなく、理由（1 行目）と元のコードを出す（もう一度描こうとしない class にする）');
@@ -138,6 +145,30 @@ console.log('\n--- 3. 描画: mermaid.render（body で測る）で描き、描�
   panel.showPane('review');
   await tick();
   assert(calls.render.length === 2, `描き直さない: ${calls.render.length}`);
+}
+
+// =========================================================
+console.log('\n--- 4. 並べ方: Before / After を縦に並べる（実機: 横に並べると枠が半分の幅になり、図が縮んで文字が読めなかった）---');
+{
+  const { KTDeps, KTContextUi } = T;
+  const data = FX.makeData();
+  const deps = KTDeps.buildDependencyData(data, KTDeps.normalizeFields(data.fields));
+  const step = (id, actionType, targetKind, targetRef, details = [], extra = {}) => ({ id, actionType, targetKind, targetRef, title: `${id} ${actionType}`, proposal: { summary: '', details: details.map(([key, value]) => ({ key, value })) }, dependsOn: [], reason: '', evidenceIds: [], confidence: 'INFERRED', alternativeId: null, validation: { status: 'ok', issues: [] }, ...extra });
+  const plan = {
+    planVersion: '1', goal: 'g', assessment: { summary: '' }, relevantFields: [], proposedFields: [], alternatives: [], impact: [], questions: [], unknowns: [], planConfidence: 'INFERRED',
+    steps: [
+      step('P1', 'ADD_PROCESS_STATUS', 'PROCESS_STATUS', '部長承認待ち', [['作業者', 'approver']]),
+      step('P2', 'ADD_PROCESS_ACTION', 'PROCESS_ACTION', '部長へ', [['遷移元', '承認待ち'], ['遷移先', '部長承認待ち'], ['条件', 'amount >= "1000000"']], { dependsOn: ['P1'] }),
+    ],
+  };
+  const rv = safe(() => PR.review({ plan, data, deps, scan: null, incoming: null }), null);
+  const h = rv ? String(safe(() => KTContextUi.reviewHtml(rv, plan), '')) : '';
+  const at = h.indexOf('プロセス管理の変更前後');
+  const end = at >= 0 ? h.indexOf('After: ', at) : -1;
+  const sec = at >= 0 ? h.slice(at, end > at ? end : at + 4000) : '';
+  assert(!!rv && rv.simulation.process.changed && /data-side="before"/.test(sec) && /data-side="after"/.test(sec), '前提: 検証ペインにプロセスの Before / After がある');
+  assert(/display:grid/.test(sec) && !/flex:1 1/.test(sec) && !/flex-wrap/.test(sec), `Before / After は縦に並べる（横に並べない）: ${sec.slice(0, 160)}`);
+  assert((sec.match(/min-width:0; overflow-x:auto;/g) || []).length === 2, '枠は横にスクロールできる（図は縮めない）');
 }
 
 console.log(`\n${state.failed === 0 ? 'ALL PASSED' : 'FAILED'}: ${state.passed} passed / ${state.failed} failed`);

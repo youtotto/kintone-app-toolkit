@@ -13906,10 +13906,11 @@
       const updates = steps.filter(r => r.diff?.changeType === 'UPDATE' && r.status !== 'INVALID' && r.status !== 'BLOCKED_BY_DEPENDENCY');
       const updatesHtml = updates.length ? `<div id="kt-ai-review-updates" style="margin-top:8px;"><b>✎ 既存設定を変更</b>${updates.map(r => `<div style="font-size:11px; margin-left:8px; margin-top:2px;"><span style="color:${r.safety === 'SAFE' ? '#2e7d32' : '#b26a00'}; font-weight:600;">${r.safety === 'SAFE' ? '✓' : '△'}</span> ${esc(r.stepId)} ${esc((r.diff.human[0] || '').replace(/^✎ /, ''))}${r.diff.human.slice(1).map(l => `<div style="margin-left:16px; opacity:.85;">${esc(l)}</div>`).join('')}</div>`).join('')}</div>` : '';
       const proc = review.simulation?.process;
+      // 実機（2026-10-04）: Before / After を横に並べると、それぞれ枠の半分の幅に縮んで文字が読めなかった → 縦に並べる（図は縮めずに横へスクロール）
       const procHtml = proc && proc.changed ? `<div style="margin-top:8px;"><b>プロセス管理の変更前後</b>
-        <div style="display:flex; gap:8px; flex-wrap:wrap; margin-top:4px;">
-          <div style="flex:1 1 280px; border:1px solid var(--kt-ai-border, #ccc); border-radius:6px; padding:6px;"><div style="font-size:11px; opacity:.7;">Before</div><pre class="kt-ai-mermaid" data-side="before" style="font-size:11px; white-space:pre-wrap; margin:0;">${esc(proc.mermaid.before)}</pre></div>
-          <div style="flex:1 1 280px; border:1px solid #1a73e8; border-radius:6px; padding:6px;"><div style="font-size:11px; opacity:.7;">After（青＝追加・変更）</div><pre class="kt-ai-mermaid" data-side="after" style="font-size:11px; white-space:pre-wrap; margin:0;">${esc(proc.mermaid.after)}</pre></div>
+        <div style="display:grid; gap:8px; margin-top:4px;">
+          <div style="border:1px solid var(--kt-ai-border, #ccc); border-radius:6px; padding:6px; min-width:0; overflow-x:auto;"><div style="font-size:11px; opacity:.7;">Before</div><pre class="kt-ai-mermaid" data-side="before" style="font-size:11px; white-space:pre-wrap; margin:0;">${esc(proc.mermaid.before)}</pre></div>
+          <div style="border:1px solid #1a73e8; border-radius:6px; padding:6px; min-width:0; overflow-x:auto;"><div style="font-size:11px; opacity:.7;">After（青＝追加・変更）</div><pre class="kt-ai-mermaid" data-side="after" style="font-size:11px; white-space:pre-wrap; margin:0;">${esc(proc.mermaid.after)}</pre></div>
         </div>
         <div style="font-size:11px; opacity:.8; margin-top:4px;">After: ${esc(proc.after.states.map(x => x.name).join(' → '))}　アクション ${proc.after.actions.length} 件（Before ${proc.before.actions.length} 件）</div>
       </div>` : '';
@@ -13993,8 +13994,10 @@
     const PROCESS_KIND_JA = { ACTION_CONDITION: '条件変更', ACTION_TRANSITION: '遷移の変更', ASSIGNEE: '作業者の変更', EXECUTABLE_USER: '実行可能ユーザーの変更', ACTION_BRANCH: '分岐の追加', ADD_STATUS: 'ステータス追加', ADD_ACTION: 'アクション追加' };
     /** プロセス管理の変更 1 件分の行（§22: ＋ ステータス「部長承認」 / ✎ 「承認する」の条件変更） */
     const processLine = (x) => { const pp = x.prepared || {}; const label = pp.targetLabel || x.title || x.stepId; return x.actionType === 'ADD_PROCESS_STATUS' ? `＋ ステータス「${label}」` : x.actionType === 'ADD_PROCESS_ACTION' ? `＋ アクション「${label}」` : `✎ 「${label}」の${PROCESS_KIND_JA[pp.changeKind] || '変更'}`; };
-    /** Mermaid（Before / Planned / Actual）の枠。描画は mountAiWorkspace の renderMermaid */
-    const mermaidBox = (title, code, color) => (code ? `<div style="flex:1 1 220px; border:1px solid ${color}; border-radius:6px; padding:6px; min-width:0;"><div style="font-size:11px; opacity:.7;">${esc(title)}</div><pre class="kt-ai-mermaid" style="font-size:11px; white-space:pre-wrap; margin:0;">${esc(code)}</pre></div>` : '');
+    /** Mermaid（Before / Planned / Actual）の枠。描画は mountAiWorkspace の renderMermaid。
+     *  枠は縦に並べる（横に並べると枠の幅が分かれて図が縮み、文字が読めなかった）。図は縮めずに枠の中で横へスクロールする */
+    const mermaidBox = (title, code, color) => (code ? `<div style="border:1px solid ${color}; border-radius:6px; padding:6px; min-width:0; overflow-x:auto;"><div style="font-size:11px; opacity:.7;">${esc(title)}</div><pre class="kt-ai-mermaid" style="font-size:11px; white-space:pre-wrap; margin:0;">${esc(code)}</pre></div>` : '');
+    const MERMAID_STACK = 'display:grid; gap:6px;';
     const partitionHtml = (items) => (Array.isArray(items) && items.length ? `<div style="margin-top:4px; display:grid; gap:2px;">${items.map(it => `<div style="font-size:11px; color:${it.verdict === 'PARTITION_OK' ? '#2e7d32' : it.verdict === 'UNKNOWN' ? '#555' : '#b26a00'};">${it.verdict === 'PARTITION_OK' ? '✓' : it.verdict === 'UNKNOWN' ? '？' : '⚠'} 条件の分割（${esc(it.from)}）: ${esc(it.message)}</div>`).join('')}</div>` : '');
     /** 最終確認・rollback 確認の件数表示に使う名詞（§36: ＋ フィールド 1 件 / ✎ 通知 1 件） */
     const EXEC_NOUN = { ADD_FIELD: 'フィールド', ADD_VIEW: '一覧', ADD_NOTIFICATION: '通知', ADD_REMINDER: 'リマインダー', UPDATE_FIELD: 'フィールド', UPDATE_NOTIFICATION: '通知', UPDATE_REMINDER: 'リマインダー', UPDATE_VIEW: '一覧', ADD_PROCESS_STATUS: 'ステータス', ADD_PROCESS_ACTION: 'アクション', UPDATE_PROCESS: 'プロセス管理', UPDATE_LOOKUP: 'ルックアップ', ADD_APP_ACTION: 'アプリアクション', UPDATE_APP_ACTION: 'アプリアクション' };
@@ -14106,7 +14109,7 @@
             <div style="font-size:12px; margin-top:2px;">動作テスト環境の承認フローを変更します。${(p?.groups || []).length ? `（${p.groups.map(g => `${g.groupId}: ${g.stepIds.length} step を 1 回の更新にまとめます`).join('・')}）` : ''}</div>
             ${procSteps.some(x => !isUpdateAction(x.actionType)) ? `<div style="font-size:12px; margin-top:4px; font-weight:600;">追加：</div>${procSteps.filter(x => !isUpdateAction(x.actionType)).map(x => `<div style="font-size:12px; margin-left:8px;">${esc(processLine(x))}</div>`).join('')}` : ''}
             ${procSteps.some(x => isUpdateAction(x.actionType)) ? `<div style="font-size:12px; margin-top:4px; font-weight:600;">既存変更：</div>${procSteps.filter(x => isUpdateAction(x.actionType)).map(x => `<div style="font-size:12px; margin-left:8px;">${esc(processLine(x))}</div>`).join('')}` : ''}
-            ${s.review?.simulation?.process?.mermaid ? `<div style="display:flex; gap:6px; flex-wrap:wrap; margin-top:6px;">${mermaidBox('Before', s.review.simulation.process.mermaid.before, 'var(--kt-ai-border, #ccc)')}${mermaidBox('Proposed After（青＝追加・変更）', s.review.simulation.process.mermaid.after, '#1a73e8')}</div>` : ''}
+            ${s.review?.simulation?.process?.mermaid ? `<div style="${MERMAID_STACK} margin-top:6px;">${mermaidBox('Before', s.review.simulation.process.mermaid.before, 'var(--kt-ai-border, #ccc)')}${mermaidBox('Proposed After（青＝追加・変更）', s.review.simulation.process.mermaid.after, '#1a73e8')}</div>` : ''}
             ${partitionHtml(s.review?.simulation?.process?.partition)}
           </div>` : '';
         // ルックアップ（Phase 13 §39）: 参照元 / キー / 追加する取得項目 / 既存はそのまま / 参照元アプリは変更しない
@@ -14173,7 +14176,7 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
           <div style="margin-top:4px; font-size:12px;">✓ ${verified} 件 VERIFIED　⚠ ${warn} 件　× ${failed} 件</div>
           <div style="font-size:12px;">${esc(simText)}</div>
           <div style="font-size:11px; opacity:.8;">${esc(reText)}</div>${lkDoneHtml}${aaDoneHtml}
-          ${ex?.process ? `<div id="kt-ai-exec-process" style="margin-top:6px;"><b>プロセス管理の Before / Planned / Actual</b><div style="display:flex; gap:6px; flex-wrap:wrap; margin-top:4px;">${mermaidBox('Before（実行前）', ex.process.mermaid?.before, 'var(--kt-ai-border, #ccc)')}${mermaidBox('Planned（Review の After）', ex.process.mermaid?.planned, '#1a73e8')}${mermaidBox('Actual（反映後の動作テスト環境。青＝実行前との差）', ex.process.mermaid?.actual, '#2e7d32')}</div><div style="font-size:11px; opacity:.8; margin-top:2px;">Actual: ステータス ${(ex.process.actual?.states || []).map(x => x.name).join(' → ')}　アクション ${(ex.process.actual?.actions || []).length} 件（実行前 ${(ex.process.before?.actions || []).length} 件）</div>${partitionHtml(ex.process.partition)}</div>` : ''}
+          ${ex?.process ? `<div id="kt-ai-exec-process" style="margin-top:6px;"><b>プロセス管理の Before / Planned / Actual</b><div style="${MERMAID_STACK} margin-top:4px;">${mermaidBox('Before（実行前）', ex.process.mermaid?.before, 'var(--kt-ai-border, #ccc)')}${mermaidBox('Planned（Review の After）', ex.process.mermaid?.planned, '#1a73e8')}${mermaidBox('Actual（反映後の動作テスト環境。青＝実行前との差）', ex.process.mermaid?.actual, '#2e7d32')}</div><div style="font-size:11px; opacity:.8; margin-top:2px;">Actual: ステータス ${(ex.process.actual?.states || []).map(x => x.name).join(' → ')}　アクション ${(ex.process.actual?.actions || []).length} 件（実行前 ${(ex.process.before?.actions || []).length} 件）</div>${partitionHtml(ex.process.partition)}</div>` : ''}
           ${list}
           <div style="margin-top:6px; font-size:12px;"><b>運用環境にはまだ反映されていません。</b>（運用環境への反映は kintone のアプリ設定画面の［アプリを更新］で行います。Toolkit は運用環境へ反映しません）</div>
           <div style="margin-top:8px; display:flex; gap:6px; flex-wrap:wrap;">
@@ -16653,6 +16656,11 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
         Promise.resolve(p).then((out) => {
           if (!out || typeof out.svg !== 'string') { showCode(div, src, null); return; }
           div.innerHTML = out.svg; div.setAttribute('data-processed', 'true');
+          // 図を縮めて読めなくしない（実機: 枠に合わせて半分ほどに縮み、文字が読めなかった）。Mermaid は width 100%・max-width に本来の幅を入れるので、
+          //   本来の幅を最小の幅にする。枠より広い図は枠（overflow-x:auto）の中で横にスクロールする
+          const svg = typeof div.querySelector === 'function' ? div.querySelector('svg') : null;
+          const natural = svg && svg.style ? parseFloat(svg.style.maxWidth) : NaN;
+          if (natural > 0) svg.style.minWidth = `${Math.round(natural)}px`;
         }, (e) => {
           // 描画の途中で失敗すると、Mermaid の一時的な要素（d + id）が body に残ることがある
           try { const tmp = document.getElementById(`d${id}`); if (tmp && typeof tmp.remove === 'function') tmp.remove(); } catch (x) { }

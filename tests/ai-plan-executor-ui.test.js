@@ -362,11 +362,14 @@ console.log('\n--- 2e. Phase 12: プロセス管理の最終確認（§22）・B
   assert(/追加：[\s\S]*?＋ ステータス「部長承認」[\s\S]*?＋ アクション「部長へ申請」[\s\S]*?＋ アクション「部長承認する」/.test(e1) && /既存変更：[\s\S]*?✎ 「承認する」の条件変更/.test(e1), '§22: 追加（＋ ステータス / ＋ アクション）と既存変更（✎ 「承認する」の条件変更）');
   assert(e1.includes('既存の操作可能条件を変更します') && e1.includes('現在はすべての「承認待ち」で実行できます') && e1.includes('変更後は「amount &lt;= &quot;999999&quot;」の場合のみ実行可能になります') && e1.includes('⚠ 既存の設定を変更します'), '§9: 既存の操作可能条件を変更します… を最終確認に表示');
   assert((e1.match(/class="kt-ai-mermaid"/g) || []).length >= 2 && e1.includes('Proposed After') && e1.includes('条件の分割（承認待ち）') && e1.includes('明らかな重複・欠落なし') && e1.includes('運用環境には反映されません。'), '最終確認に Before / Proposed After の Mermaid と条件の分割判定・運用環境には反映されません');
+  // 実機（2026-10-04）: 横に並べると枠の幅が分かれて図が縮み、文字が読めなかった → 縦に並べ、枠の中で横にスクロール（図は縮めない）
+  assert(/<div style="display:grid; gap:6px; margin-top:6px;"><div style="border:1px solid [^"]*; border-radius:6px; padding:6px; min-width:0; overflow-x:auto;"><div style="font-size:11px; opacity:.7;">Before</.test(e1) && !/flex:1 1 220px/.test(e1), '最終確認の Before / Proposed After は縦に並べる（横に並べない）');
   await click(m, 'kt-ai-exec-go'); await tick(); await tick();
   const ex = m.panel.executorState().execution;
   assert(m.panel.executorState().stage === 'done' && ex.status === 'DONE' && ex.steps.every(s => s.status === 'VERIFIED' && s.groupId === 'PROCESS_CHANGE_1') && Object.keys(m.mock.st.status.states).length === 4 && m.mock.calls.filter(c => c === 'PUT status').length === 1, '反映: 4 step が 1 回の PUT で VERIFIED');
   const e2 = execHtml(m);
   assert(e2.includes('✓ 4 件 VERIFIED') && e2.includes('id="kt-ai-exec-process"') && e2.includes('プロセス管理の Before / Planned / Actual') && (e2.match(/class="kt-ai-mermaid"/g) || []).length >= 3 && e2.includes('Actual: ステータス 未処理 → 承認待ち → 完了 → 部長承認') && e2.includes('[PROCESS_CHANGE_1]') && hasButton(e2, '変更前の状態に戻す'), '§18: 完了画面に Before / Planned / Actual の Mermaid・Actual の要約・グループ表示・[変更前の状態に戻す]');
+  assert(/プロセス管理の Before \/ Planned \/ Actual<\/b><div style="display:grid; gap:6px; margin-top:4px;">/.test(e2) && (e2.match(/min-width:0; overflow-x:auto;"><div style="font-size:11px; opacity:.7;">(Before|Planned|Actual)/g) || []).length === 3 && !/flex:1 1 220px/.test(e2), '完了画面の Before / Planned / Actual は縦に並べる（3 つを横に並べない）');
   await click(m, 'kt-ai-exec-rollback-start'); await tick();
   const r1 = execHtml(m);
   assert(m.panel.executorState().stage === 'rollback-confirm' && r1.includes('・プロセス管理の変更 1 件') && r1.includes('実行前のプロセス管理（ステータス・アクション・作業者）全体に戻す') && r1.includes('運用環境には影響しません。'), 'rollback 確認: プロセス管理の変更 1 件 → 全体に戻す');
