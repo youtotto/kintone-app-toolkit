@@ -228,6 +228,32 @@ console.log('\n--- モデル更新の評価: 既存フィールドを使う手�
   assert(s2(badCls).status === 'BLOCKED', `無いフィールドを使う手順（検証で無効）に依存する手順は止める: ${s2(badCls).status} ${s2(badCls).reason}`);
 }
 
+// =========================================================
+console.log('\n--- モデル更新の評価（実機）: 「error が自分の文言なら null」の条件では、前のイベントの表示は消えない（event.record に残らない）---');
+{
+  // 実機（gpt-6.1-sol / medium の BF-C）で生成されたコード。1,000,001 で警告 → 999,999 や空にしても警告が消えなかった
+  //   （表示中も kintone.app.record.get() の amount.error は undefined、次の change でも event.record.amount.error は undefined。実機で確認）
+  const SOL_DEVICE = "(function () {\n  'use strict';\n  var amountNotice = '注意：金額が100万円を超えています（この注意では保存を止めません）。';\n  kintone.events.on([\n    'app.record.create.show',\n    'app.record.edit.show',\n    'app.record.create.change.amount',\n    'app.record.edit.change.amount'\n  ], function (event) {\n    var field = event.record['amount'];\n    if (Number(field.value) > 1000000 && !field.disabled) {\n      if (!field.error || field.error === amountNotice) {\n        field.error = amountNotice;\n      }\n    } else if (field.error === amountNotice) {\n      field.error = null;\n    }\n    return event;\n  });\n  kintone.events.on(['app.record.create.submit', 'app.record.edit.submit'], function (event) {\n    var field = event.record['amount'];\n    if (field.error === amountNotice) {\n      field.error = null;\n    }\n    return event;\n  });\n})();";
+  const EV = ['app.record.create.show', 'app.record.edit.show', 'app.record.create.change.amount', 'app.record.edit.change.amount'];
+  const c = cust({ events: EV, fields: [{ code: 'amount', access: 'CONTROL', condition: 'amount > "1000000"' }] });
+  const flagged = (rv) => (rv.checks || []).filter(x => x.name === 'error-clear-compare' && !x.ok);
+  const sol = review(SOL_DEVICE, c);
+  const x = flagged(sol)[0] || {};
+  assert(x.severity === 'review' && /amount/.test(x.message || '') && /前のイベント/.test(x.message || '') && /undefined/.test(x.message || ''), `実機の sol のコード: 表示を消す条件が error の今の値を見ている → 確認（理由つき）: ${x.message}`);
+  assert(codesOf(sol.registration.confirmations).includes('error-clear-compare') && !codesOf(sol.registration.blockers).includes('error-clear-compare'), '登録の判定は確認が必要（登録不可にはしない）');
+  // 正しい書き方: 条件に当てはまらなければ比べずに null（RC 実機の terra のコード）・直接の参照でも比べていれば数える
+  const ok1 = review(handler(EV, "    if (Number(record['amount'].value) > 1000000 && !record['amount'].disabled) {\n      record['amount'].error = '金額が100万円を超えています。';\n    } else {\n      record['amount'].error = null;\n    }"), c);
+  const ng2 = review(handler(EV, "    if (Number(record['amount'].value) > 1000000) {\n      record['amount'].error = 'over';\n    } else if (record['amount'].error === 'over') {\n      record['amount'].error = null;\n    }"), c);
+  const ng3 = review(handler(EV, "    if (record.amount.error) {\n      record.amount.error = null;\n    }\n    if (Number(record.amount.value) > 1000000) {\n      record.amount.error = 'over';\n    }"), c);
+  assert(!flagged(ok1).length && flagged(ng2).length && flagged(ng3).length, `条件に当てはまらなければ null → 数えない／error を比べて消す（直接の参照・ドット記法）→ 数える: ${[ok1, ng2, ng3].map(r => flagged(r).length).join('/')}`);
+  // 保存時（submit）の比較は数えない（保存は止まらず、表示も保存の後に消える）・既存のコードに元からあるものは数えない
+  const sub = review(handler(['app.record.create.submit'], "    var f = record['amount'];\n    if (f.error === 'over') {\n      f.error = null;\n    }"), cust({ events: ['app.record.create.submit'] }));
+  const base = handler(EV, "    if (record['amount'].error === 'over') {\n      record['amount'].error = null;\n    }");
+  const existing = ext(base, "  kintone.events.on(['app.record.edit.submit'], function (event) {\n    return event;\n  });\n", cust({ strategy: 'EXTEND_EXISTING_JS', events: EV }));
+  assert(!flagged(sub).length && !flagged(existing).length, '保存時の比較・既存のコードに元からある比較は数えない');
+  assert(/警告が出る値から出ない値/.test((KTCodeReview.HOW_TO_CHECK || {})['error-clear-compare'] || ''), '確かめること: 警告が出る値から出ない値に変えて、表示が消えることを確かめる');
+}
+
 console.log(`\n${state.failed === 0 ? 'ALL PASSED' : 'FAILED'}: ${state.passed} passed / ${state.failed} failed`);
 process.exit(state.failed === 0 ? 0 : 1);
 })().catch((e) => { console.error(e); process.exit(1); });

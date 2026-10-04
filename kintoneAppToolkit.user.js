@@ -11240,6 +11240,26 @@
       return out;
     }
     /**
+     * RC のモデル更新の評価（gpt-6.1-sol の BF-C・2026-10-04 実機）: 表示・変更イベントの event.record の error には、前のイベントで表示したエラーは入っていない
+     *   （表示中も kintone.app.record.get() の error は undefined、次の change の event.record の error も undefined）。
+     *   「error が自分の文言なら null」の条件（else if (field.error === notice) { field.error = null; }）は成り立たず、警告が消えなかった。
+     *   表示・変更イベントで、エラーを消す（null）場所の囲む条件が、同じフィールドの .error（直接・変数に入れたフィールド）を読んでいるものを返す
+     * @returns {Array<{ code: string, cond: string, line: string, events: string[], index: number }>}
+     */
+    function errorClearByCompare(clean) {
+      const s = String(clean || '');
+      const rxEsc = (t) => String(t).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const out = [];
+      for (const o of fieldOperations(s)) {
+        if (o.op !== 'error-clear' || !o.code || !(o.events || []).some(e => /\.show$|\.change\./.test(e))) continue;
+        const ref = new RegExp(`(?:${o.alias ? `(?<![$\\w.])${rxEsc(o.alias)}` : '(?!)'}|\\[\\s*(['"\`])${rxEsc(o.code)}\\1\\s*\\]|\\.${rxEsc(o.code)}(?![$\\w]))\\s*\\.\\s*error\\b`, 'u');
+        const plain = (t) => String(t).replace(/\s*\/\*[\s\S]*?\*\/\s*$/, '');
+        const hit = pathsOfSite(o).flat().map(plain).find(t => ref.test(t));
+        if (hit) out.push({ code: o.code, cond: hit, line: o.line, events: o.events, index: o.index });
+      }
+      return out;
+    }
+    /**
      * RC E2E（N2・2026-10-04 実機）: 作成画面では空のフィールドの value が undefined になる（入力して消した後も・保存時のイベントでも。既存のフィールドも同じ）。
      *   §2 手順 4 の生成（v3）は `=== null` と空文字だけで判定し、紹介元が空のまま保存できた。
      *   作成画面のイベントの handler の中で、フィールドの値（直接・変数に入れたフィールド・値のコピー var v = record.f.value）を空文字と比べる判定を集め、
@@ -11905,6 +11925,12 @@
         const x = freshEmpty.find(y => y.code === code);
         add('empty-undefined', false, 'review', `${code} の空の判定（${x.line}）は undefined を扱っていません。作成画面では空のフィールドの値が undefined になる（入力して消した後も同じ）ため、空のままでも空と判定されず、この判定に頼る処理（必須のチェックなど）は動きません。value === undefined か value == null も判定してください`);
       }
+      // RC のモデル更新の評価（実機）: 前のイベントで表示したエラーは event.record に残らない。error の今の値を比べて消す条件は成り立たず、表示が消えない
+      const freshClear = freshOnly(errorClearByCompare(clean), baseClean ? errorClearByCompare(baseClean) : [], (x) => `${x.code}|${x.line}`);
+      for (const code of [...new Set(freshClear.map(x => x.code))]) {
+        const x = freshClear.find(y => y.code === code);
+        add('error-clear-compare', false, 'review', `${code} の表示を消す条件が error の今の値を見ています（${x.cond}）。kintone は前のイベントで表示したエラーを event.record に残さない（undefined）ため、この条件は成り立たず、表示が消えません。条件に当てはまらないときは、error を比べずに null を設定してください`);
+      }
       // ---- 7. セキュリティ / 外部通信 ----
       const security = addedScan.security;
       const blocks = security.filter(x => x.severity === 'block'), reviews = security.filter(x => x.severity === 'review');
@@ -12063,6 +12089,7 @@
       // RC E2E（実機）
       'api-screen': '動作テスト環境で、その API が使えない画面（作成・編集など）を開いて、処理が表示・動作するかを確かめる（使えない画面では null が返り、何も起きない）',
       'empty-undefined': '動作テスト環境の作成画面で、そのフィールドを空のまま保存して、チェックが効く（保存が止まる）ことを確かめる',
+      'error-clear-compare': '動作テスト環境で、警告が出る値から出ない値（空も）に変えて、表示が消えることを確かめる',
     });
     /** Phase 21: Code Review の結果 → 登録の判定。BLOCKED = 登録不可（同意しても登録できない）、NEEDS_CONFIRMATION = 確認が必要な項目がある、RUNTIME_UNVERIFIED = 静的な検査は通ったが動作は未確認 */
     function registrationOf(status, checks, c, finalCode) {
@@ -12079,7 +12106,7 @@
       // Phase 22（F-F2）: フィールドの操作（直接・ブラケット・変数経由）と入力チェック
       fieldOperations, inputChecks, fieldRefsIn, unguardedCreateReads,
       // RC E2E: 使える画面の違う API・作成画面の空の値（undefined）
-      apiScreenUses, emptyChecks };
+      apiScreenUses, emptyChecks, errorClearByCompare };
   })();
 
   // ==========================================
