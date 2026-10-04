@@ -9987,7 +9987,7 @@
         if (!st.approved) set(STEP.SKIPPED, 'NOT_APPROVED', '承認されていません');
         else if (!r) set(STEP.BLOCKED, 'NO_REVIEW', 'Review の結果がありません');
         else if (r.status === KTPlanReview.STATUS.INVALID || r.status === KTPlanReview.STATUS.BLOCKED_BY_DEPENDENCY || r.safety === KTPlanReview.SAFETY.BLOCKED) set(STEP.BLOCKED, 'REVIEW_BLOCKED', 'Review で実行不可と判定されています');
-        else if (r.safety === KTPlanReview.SAFETY.PLAN_ONLY) set(STEP.UNSUPPORTED, 'PLAN_ONLY', '計画のみ（自動反映の対象外）');
+        else if (r.safety === KTPlanReview.SAFETY.PLAN_ONLY) set(STEP.UNSUPPORTED, 'PLAN_ONLY', step.actionType === 'REQUIRE_CONFIRMATION' ? '確認の手順（承認で確認済み。設定の変更はありません）' : '計画のみ（自動反映の対象外）');
         else if ((r.issues || []).some(i => i.code === 'COND_UNKNOWN_FUNCTION' || i.code === 'COND_NOT_EXPRESSION' || i.code === 'COND_INVALID')) set(STEP.BLOCKED, 'INVALID_CONDITION', '条件式が kintone で評価できないため反映しません（計画の条件式を直してください）');
         // Phase 20（CX-1 実機）: 説明に複数の設定がある手順は 1 つ目しか検証していない（反映すると残りの設定が消えた計画になる）
         else if ((r.issues || []).some(i => i.code === 'STEP_MULTIPLE_SETTINGS')) set(STEP.BLOCKED, 'MULTIPLE_SETTINGS_IN_STEP', '1 つの手順に複数の設定が書かれているため反映しません（設定ごとに手順を分けるよう計画を直してください）');
@@ -10021,12 +10021,17 @@
       };
       const newStatusName = (id) => String(specOf(id).name ?? byId.get(id)?.targetRef ?? '').trim();
       const block = (st, reason, message) => { st.status = STEP.BLOCKED; st.reason = reason; st.message = message; };
+      // Phase 22（余計な確認）: 確認の手順（REQUIRE_CONFIRMATION）は設定を変えないので「実行」されない（計画のみ）。以前はこれも「依存先が実行されない」と数え、
+      //   利用者が確認の手順を承認しても依存する手順を止めていた（チャットで補足して AI に計画を作り直させるしかなく、補足が 1 回余計に要った）。
+      //   承認された確認の手順は「確認済み」として依存を満たす。依存する手順そのものの検証（必要な値が無い・条件式が無効など）は従来どおり止める
+      const satisfied = (d) => { const ds = states.get(d); return !!ds && (ds.status === STEP.PENDING || (ds.actionType === 'REQUIRE_CONFIRMATION' && ds.approved)); };
       for (let changed = true, guard = 0; changed && guard < 20; guard++) {
         changed = false;
         for (const st of states.values()) {
           if (st.status !== STEP.PENDING) continue;
-          const bad = st.dependsOn.filter(d => { const ds = states.get(d); return !ds || ds.status !== STEP.PENDING; });
-          if (bad.length) { block(st, 'DEPENDENCY_NOT_EXECUTABLE', `依存する ${bad.join(', ')} が実行されないため反映できません`); changed = true; }
+          const bad = st.dependsOn.filter(d => !satisfied(d));
+          const conf = bad.filter(d => states.get(d)?.actionType === 'REQUIRE_CONFIRMATION');
+          if (bad.length) { block(st, 'DEPENDENCY_NOT_EXECUTABLE', conf.length === bad.length ? `確認の手順 ${conf.join(', ')} を承認すると反映できます（承認で確認済みとして扱います）` : `依存する ${bad.join(', ')} が実行されないため反映できません`); changed = true; }
         }
         const groups = new Map();
         for (const id of states.keys()) if (branchStep(id)) { const f = String(specOf(id).from ?? '').trim(); if (f) groups.set(f, [...(groups.get(f) || []), id]); }
@@ -10066,7 +10071,7 @@
         const st = steps.find(y => y.id === x.stepId) || {};
         const base = { stepId: x.stepId, actionType: st.actionType || x.actionType };
         if (st.actionType === 'CUSTOMIZATION_REQUIRED') return { ...base, apply: 'JS', reason: null, message: 'JavaScript（コードを生成して右「コード」から登録）' };
-        if (st.actionType === 'REQUIRE_CONFIRMATION') return { ...base, apply: 'CONFIRM', reason: null, message: '確認事項（設定の変更はありません）' };
+        if (st.actionType === 'REQUIRE_CONFIRMATION') return { ...base, apply: 'CONFIRM', reason: null, message: '確認事項（設定の変更はありません。承認すると確認済みとして扱い、これに依存する手順も反映できます）' };
         if (x.status === STEP.PENDING) return { ...base, apply: 'AUTO', reason: null, message: '動作テスト環境へ自動で反映できます' };
         if (x.status === STEP.UNSUPPORTED) return { ...base, apply: 'MANUAL', reason: x.reason, message: x.message || 'Toolkit からは自動で反映できません（計画のみ）' };
         return { ...base, apply: 'BLOCKED', reason: x.reason, message: x.message || '反映できません' };
@@ -10243,6 +10248,8 @@
       let actionsBaseline = undefined;   // Phase 14: 直前のアプリアクション step が検証したアクション全体（2 つ目以降の bit 比較の基準）
       const groups = Array.isArray(prepared.groups) ? prepared.groups : formProcessGroups(prepared.steps);
       const stepById = new Map(prepared.steps.map(x => [x.stepId, x]));
+      // Phase 22（余計な確認）: 承認された確認の手順（REQUIRE_CONFIRMATION。設定を変えない）は、依存を満たす「確認済み」（classifySteps と同じ）
+      const depMet = (d) => { const dl = stepLogs.get(d); if (!dl || dl.status === STEP.VERIFIED) return true; const ds = stepById.get(d); return !!ds && ds.actionType === 'REQUIRE_CONFIRMATION' && ds.approved; };
       for (const st of prepared.steps) {
         const l = stepLogs.get(st.stepId);
         if (done.has(st.stepId)) continue;
@@ -10254,7 +10261,7 @@
           const members = group.stepIds.map(id => stepById.get(id)).filter(Boolean);
           const logs = members.map(m => stepLogs.get(m.stepId));
           for (const m of members) { done.add(m.stepId); stepLogs.get(m.stepId).groupId = group.groupId; }
-          const unmet = members.flatMap(m => m.dependsOn.filter(d => !group.stepIds.includes(d)).filter(d => { const dl = stepLogs.get(d); return dl && dl.status !== STEP.VERIFIED; }));
+          const unmet = members.flatMap(m => m.dependsOn.filter(d => !group.stepIds.includes(d)).filter(d => !depMet(d)));
           if (unmet.length) { for (const gl of logs) { gl.status = STEP.SKIPPED; gl.reason = 'DEPENDENCY_NOT_VERIFIED'; gl.message = `依存する ${[...new Set(unmet)].join(', ')} が検証済みでないため実行していません`; progress(gl); } continue; }
           for (const gl of logs) { gl.status = STEP.RUNNING; progress(gl); }
           await yieldUi();
@@ -10290,7 +10297,7 @@
           await yieldUi();
           continue;
         }
-        const depsOk = st.dependsOn.every(d => { const dl = stepLogs.get(d); return !dl || dl.status === STEP.VERIFIED; });
+        const depsOk = st.dependsOn.every(d => depMet(d));
         if (!depsOk) { l.status = STEP.SKIPPED; l.reason = 'DEPENDENCY_NOT_VERIFIED'; l.message = '依存する step が検証済みでないため実行していません'; progress(l); continue; }
         l.status = STEP.RUNNING; progress(l); await yieldUi();
         const handler = HANDLERS[st.actionType];

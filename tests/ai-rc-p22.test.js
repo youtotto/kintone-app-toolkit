@@ -11,7 +11,8 @@
 // 実行方法: node tests/ai-rc-p22.test.js（KT_SRC=<別ビルド> で修正前の版に対して走らせると RED になる）
 'use strict';
 const { loadToolkit, makeAssert } = require('./helpers/load-toolkit.js');
-const { KTDeps, KTScan, KTCodeReview, KTAiClient, KTAiConversation, KTAiChatUi } = loadToolkit();
+const T2 = loadToolkit();
+const { KTDeps, KTScan, KTCodeReview, KTAiClient, KTAiConversation, KTAiChatUi } = T2;
 const { assert, state } = makeAssert();
 const FX = require('./fixtures/ai-context-app.js');
 const R = require('./fixtures/p21-bfc-replay.js');
@@ -278,6 +279,43 @@ const tryGenerate = async (transport) => { try { return { ok: true, r: await aiC
   declineNext = false;
   const again = await conv.send('C1 のコードを作って');
   assert(again && again.ok === true && v.generated.C1 && v.generated.C1 !== first, '再試行（もう一度作る）で生成できる');
+}
+
+// =========================================================
+console.log('\n--- 余計な確認: 確認の手順（REQUIRE_CONFIRMATION）を承認すれば、依存する手順を反映できる（必要な値が無い手順は従来どおり止める）---');
+{
+  const { KTPlanReview: PR, KTPlanExecutor: PE } = T2;
+  const { makeKintoneMock } = require('./helpers/kintone-preview-mock.js');
+  const sp = (o) => ({ name: null, from: null, to: null, filterCond: null, assignees: [], targets: [], events: [], timingField: null, daysLater: null, time: null, fields: [], sort: null, sourceApp: null, keyField: null, mappings: [], addMappings: [], fieldType: null, required: null, options: [], destApp: null, accessibility: null, entities: [], ...o });
+  const stp = (id, actionType, targetKind, targetRef, s = {}, extra = {}) => ({ id, actionType, targetKind, targetRef, targetExists: null, title: `${id} ${actionType}`, proposal: { summary: '', details: [] }, spec: sp(s), dependsOn: [], reason: '', evidenceIds: [], confidence: 'INFERRED', alternativeId: null, validation: { status: 'ok', issues: [] }, execution: { mode: 'PREVIEW_SUPPORTED', supported: true, reason: 'x' }, ...extra });
+  const pfd = (temporaryId, label, suggestedCode, type, extra = {}) => ({ temporaryId, label, suggestedCode, type, typeValid: true, required: false, options: [], reason: '', evidenceIds: [], alternativeExistingFieldCode: null, codeConflict: false, labelDuplicate: false, ...extra });
+  const mk = (steps, proposedFields = []) => ({ planVersion: '1', requestId: 'tk-p22-conf', goal: 'g', assessment: { summary: '' }, relevantFields: [], proposedFields, steps, alternatives: [], impact: [], questions: [{ id: 'Q1', question: '「確認日」は日付のフィールドでよいですか？', reason: '種類の指定が無い', relatedEvidenceIds: [] }], unknowns: [], planConfidence: 'INFERRED', solution: 'STANDARD', customizations: [] });
+  const data = FX.makeData();
+  const deps = KTDeps.buildDependencyData(data, KTDeps.normalizeFields(data.fields));
+  const confirm = stp('P1', 'REQUIRE_CONFIRMATION', 'NONE', null, {}, { execution: { mode: 'PLAN_ONLY', supported: false, reason: '確認事項' } });
+  const addField = stp('P2', 'ADD_FIELD', 'PROPOSED_FIELD', 'NEW_FIELD_1', { fieldType: 'DATE' }, { dependsOn: ['P1'] });
+  const p = mk([confirm, addField], [pfd('NEW_FIELD_1', '確認日', 'checked_on', 'DATE')]);
+  const rv = PR.review({ plan: p, data, deps, scan: null, incoming: null });
+  const both = PE.classifySteps({ plan: p, review: rv, approvedSteps: ['P1', 'P2'] });
+  const only2 = PE.classifySteps({ plan: p, review: rv, approvedSteps: ['P2'] });
+  const s2 = (list) => list.find(x => x.stepId === 'P2') || {};
+  assert(s2(both).status === 'PENDING', `確認の手順（P1）も承認 → 依存する P2 を反映できる（以前は「依存する P1 が実行されない」で止まった）: ${s2(both).status} ${s2(both).message}`);
+  assert(s2(only2).status === 'BLOCKED' && s2(only2).reason === 'DEPENDENCY_NOT_EXECUTABLE' && /確認の手順 P1 を承認すると反映できます/.test(s2(only2).message), `確認の手順を承認していなければ止め、承認すれば進めることを示す: ${s2(only2).message}`);
+  const rd = PE.applyReadiness(p, rv);
+  const rdOf = (id) => rd.find(x => x.stepId === id) || {};
+  assert(rdOf('P1').apply === 'CONFIRM' && /承認すると確認済み/.test(rdOf('P1').message || '') && rdOf('P2').apply === 'AUTO', `承認前の見込み: P1 は確認事項・P2 は自動で反映できる: ${JSON.stringify(rd.map(x => [x.stepId, x.apply]))}`);
+  // 反映: P2 だけを書き込む（確認の手順は設定を変えない）
+  const mock = makeKintoneMock(data);
+  const prepared = await PE.prepare(PR.executorOutput(p, rv, ['P1', 'P2']), { api: mock.api, appId: '310' });
+  const log = prepared.status === 'PREPARED' ? await PE.executePreview(prepared, { api: mock.api, review: rv, data }) : null;
+  const p2 = log ? (log.steps || []).find(x => x.stepId === 'P2') : null;
+  assert(prepared.status === 'PREPARED' && log && p2 && p2.status === 'VERIFIED', `確認の手順を承認して反映 → P2（確認日）を動作テスト環境へ追加・検証: ${prepared.status} ${JSON.stringify(prepared.blockers)} ${p2 && p2.status}`);
+  // 必須の確認（回答が無いと安全に変更できない）: 依存する手順そのものに必要な値が無ければ、確認の手順を承認しても反映しない
+  const remind = stp('P2', 'ADD_REMINDER', 'REMINDER', '期日の前日', { name: '期日の前日', timingField: 'due_date', daysLater: '-1', time: null, targets: ['FIELD_ENTITY:owner'], filterCond: '' }, { dependsOn: ['P1'] });
+  const p3 = mk([confirm, remind]);
+  const rv3 = PR.review({ plan: p3, data, deps, scan: null, incoming: null });
+  const r3 = PE.classifySteps({ plan: p3, review: rv3, approvedSteps: ['P1', 'P2'] }).find(x => x.stepId === 'P2') || {};
+  assert(r3.status !== 'PENDING', `必要な値（通知時刻）が無い手順は、確認の手順を承認しても反映しない: ${r3.status} ${r3.reason}`);
 }
 
 console.log(`\n${state.failed === 0 ? 'ALL PASSED' : 'FAILED'}: ${state.passed} passed / ${state.failed} failed`);
