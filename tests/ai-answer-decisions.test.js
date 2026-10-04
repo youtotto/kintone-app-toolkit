@@ -98,7 +98,7 @@ await section(async () => {
   const cls = (t, s = st) => KTAiConversation.classifyIntent(t, s);
   assert(cls('PCだけ').intent === 'ANSWER' && cls('PCだけ').reason === 'ANSWERS' && cls('いいえ').reason === 'ANSWER_TARGET_UNCLEAR', 'classifyIntent: 「PCだけ」は ANSWER（AMBIGUOUS にしない）・対応先が決まらない「いいえ」も ANSWER（対応先を聞く）');
   const stA = { activePlan: { ...v, plan: planWith(qs(QP, QA)) }, ledgers: new Map() };
-  assert(cls('はい').intent === 'REQUEST_PREVIEW' && cls('これで進めて').intent === 'REQUEST_PREVIEW' && cls('部長でお願いします', stA).intent === 'ANSWER' && cls('部長でお願いします').intent === 'REQUEST_PREVIEW','進める言葉（「はい」「これで進めて」）は確認事項があっても回答にしない（承認・反映の意図を取り違えない）。文末の「お願いします」だけでは進める言葉にしない');
+  assert(cls('はい').intent === 'REQUEST_PREVIEW' && cls('これで進めて').intent === 'REQUEST_PREVIEW' && cls('部長でお願いします', stA).intent === 'ANSWER' && cls('部長でお願いします').intent === 'ANSWER', '進める言葉（「はい」「これで進めて」）は確認事項があっても回答にしない（承認・反映の意図を取り違えない）。文末の「お願いします」だけでは進める言葉にしない（承認者の質問が無ければ「部長」は追加の条件）');
   assert(cls('更新状況は3段階ではなく5段階にして').intent === 'REVISE_PLAN' && cls('これで進めたい').intent === 'REQUEST_PREVIEW' && cls('P1って何してる？').intent === 'EXPLAIN_PLAN' && cls('このフィールドは何に使ってる？').intent === 'ASK', '従来の判定は変えない（修正の依頼・進める・説明・質問）');
   const noQ = { activePlan: { ...v, plan: planWith([]) }, ledgers: new Map() };
   assert(cls('PCだけ', noQ).intent !== 'ANSWER', '確認事項も決定事項も無い計画への短い文は回答にしない（短い文をすべて計画の修正・回答へ押し込まない）');
@@ -505,6 +505,16 @@ await section(async () => {
   const r = await c.send('やっぱり両方');
   const d = calls.plan[2] && calls.plan[2].decisions.find(x => x.topic === 'platform');
   assert(r.intent === 'ANSWER' && d && d.value.join() === 'desktop,mobile' && d.previousAnswer === 'PCだけ', `R2: 「やっぱり両方」は PC / モバイルの決定事項の更新: ${JSON.stringify(d)}`);
+});
+await section(async () => {
+  // E1（固定会話の評価で発見）: 質問の無い論点についての答えだけの文（「保存は止めない」）は追加の条件として記録して作り直す（選び直しを要らなくする）
+  const { c, calls } = makeConv([planWith(qs(QP, QT)), planWith(qs(QT)), planWith([])]);
+  await c.send('金額が大きい案件に注意を出したい');
+  await c.send('PCだけ');
+  const r = await c.send('保存は止めない');
+  assert(r.intent === 'ANSWER' && calls.plan.length === 3 && calls.plan[2].decisions.some(d => d.kind === 'condition' && d.topic === 'save_block' && d.answer === '保存は止めない') && /追加の条件：保存は止めない/.test(calls.plan[2].revision.request), `E1: 「保存は止めない」は追加の条件として作り直す: ${r.intent} ${calls.plan[2] && calls.plan[2].revision.request}`);
+  const st = { activePlan: c.activePlan(), ledgers: c.state.ledgers };
+  assert(KTAiConversation.classifyIntent('モバイルの通知はいらない', st).intent !== 'ANSWER' && KTAiConversation.classifyIntent('保存時の警告の文言を変えて', st).intent !== 'ANSWER', 'E1: 論点の語を含むだけの依頼は従来どおり（条件にしない）');
 });
 await section(async () => {
   // R2b: 決定済みの論点を修正の依頼で言い直したら、新しい依頼が正（古い決定事項を送り続けない）。PC / モバイルは範囲をはっきり言う文のときだけ

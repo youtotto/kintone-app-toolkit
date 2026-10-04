@@ -14595,6 +14595,10 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
       if (res.answers.length || res.updates.length) res.kind = 'answers';
       else if (res.unresolved.length) res.kind = 'unclear';
       else if (restated && !res.extras.length && res.notes.length === restated) res.kind = 'restated';
+      // 質問の無い論点についての答えだけの文（「保存は止めない」「モバイルは不要」）は、追加の条件として記録して作り直す
+      //   （固定会話の評価で、保存の質問が無い版に「保存は止めない」と書くと「何についてでしょうか」になり、選び直しが要った）。
+      //   依頼の言い方・ほかの記述を含む文は従来どおり（修正 / 新規の確認へ）
+      else if (res.extras.length && !res.notes.length && res.extras.every(x => isPure(x.clause))) res.kind = 'answers';
       else return none;
       return res;
     }
