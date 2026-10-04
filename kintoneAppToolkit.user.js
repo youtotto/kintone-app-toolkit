@@ -657,7 +657,7 @@
     // ★解析ロジックのバージョン。
     //   解析内容（検出パターン・保存する項目）を変更したら必ず上げること。
     //   これを署名に含めないと、Toolkit更新後も古い解析結果が使われ続ける。
-    const ANALYZER_VERSION = '13'; // 解析ロジックを変更したら上げる（キャッシュが自動的に無効になる）
+    const ANALYZER_VERSION = '14'; // 解析ロジックを変更したら上げる（キャッシュが自動的に無効になる）。14: Phase 22 変数に入れたフィールド・日本語コードのドット記法
     const CACHE_TTL_MS = 6 * 60 * 60 * 1000; // 6時間（プレビュー編集を拾えないため長くしすぎない）
 
     // Scannerタブが登録する実行関数（renderScannerから設定される）
@@ -1541,9 +1541,284 @@
         .sort((a, b) => String(a.value).localeCompare(String(b.value), 'ja'));
     }
 
+    // ==========================================
+    // Phase 22（F-F2）: フィールドを指す式の解決（直接 record.CODE / ブラケット record['CODE'] / 変数に入れたフィールド）
+    //  Phase 21 の実機（BF-C）: var amount = event.record['amount']; … amount.error = … の入力チェックをフィールドの操作として数えず、
+    //  既存の条件つきのロック（ステータスが承認済みのとき）だけを見て「条件なしに編集不可」と表示した。
+    //  ここでフィールドを指す式を 1 か所で解決し、Field Scanner（アクセス種別）と Code Review（ロック・エラー表示・値の参照）が同じ規則で数える。
+    //  追うのは静的に確かめられる代入だけ: 宣言（var / let / const）・代入・レコードからの分割代入・別の変数（2 段まで）。
+    //  値のコピー（record.x.value）・別のプロパティ・再代入の後・同じ名前の引数や別の宣言（影）は追わない
+    // ==========================================
+    const ID_SRC = '[$_\\p{ID_Start}][$\\u200C\\u200D\\p{ID_Continue}]*';
+    const ID_FULL_RX = new RegExp(`^${ID_SRC}$`, 'u');
+    const ID_HEAD_RX = new RegExp(`^${ID_SRC}`, 'u');
+    const ID_TAIL_RX = new RegExp(`(?:^|[^$\\u200C\\u200D\\p{ID_Continue}])(${ID_SRC})$`, 'u');
+    const ID_ALL_RX = () => new RegExp(`(?<![$\\u200C\\u200D\\p{ID_Continue}])(${ID_SRC})(?![$\\u200C\\u200D\\p{ID_Continue}])`, 'gu');
+    // フィールドのプロパティ名（record.CODE の CODE ではない）
+    const FIELD_PROPS = new Set(['value', 'type', 'disabled', 'error', 'lookup']);
+    /** 文字列の中身を空白に置き換える（長さ・位置は同じ）。括弧の対応・キーワードの検索を文字列の中身に惑わされないため */
+    const maskStrings = (s) => String(s || '').replace(/`(?:\\[\s\S]|[^`\\])*`|'(?:\\.|[^'\\\n])*'|"(?:\\.|[^"\\\n])*"/g, (q) => q[0] + ' '.repeat(Math.max(0, q.length - 2)) + q[q.length - 1]);
+    /** { の位置 → 対応する } の位置（閉じていない断片は末尾） */
+    function braceMap(m) {
+      const close = new Map(), stack = [];
+      for (let k = 0; k < m.length; k++) { const ch = m[k]; if (ch === '{') stack.push(k); else if (ch === '}') { const o = stack.pop(); if (o != null) close.set(o, k); } }
+      for (const o of stack) close.set(o, m.length);
+      return close;
+    }
+    /** open（( [ {）に対応する閉じ括弧の位置。無ければ -1 */
+    function closeOf(m, open) {
+      const pair = { '(': ')', '[': ']', '{': '}' }[m[open]];
+      if (!pair) return -1;
+      let d = 0;
+      for (let k = open; k < m.length; k++) { const ch = m[k]; if (ch === m[open]) d++; else if (ch === pair) { d--; if (d === 0) return k; } }
+      return -1;
+    }
+    /** close（) ]）に対応する開き括弧の位置。無ければ -1 */
+    function openOf(m, close) {
+      const pair = { ')': '(', ']': '[' }[m[close]];
+      if (!pair) return -1;
+      let d = 0;
+      for (let k = close; k >= 0; k--) { const ch = m[k]; if (ch === m[close]) d++; else if (ch === pair) { d--; if (d === 0) return k; } }
+      return -1;
+    }
+    /** 括弧の外の区切り（sep）で分ける */
+    function splitTop(text, sep) { const out = []; let d = 0, last = 0; for (let k = 0; k < text.length; k++) { const ch = text[k]; if ('([{'.includes(ch)) d++; else if (')]}'.includes(ch)) d--; else if (ch === sep && d === 0) { out.push(text.slice(last, k)); last = k + 1; } } out.push(text.slice(last)); return out; }
+    /** 括弧の外の代入の = の位置（== / => / <= などは除く）。無ければ -1 */
+    function assignTop(text) { let d = 0; for (let k = 0; k < text.length; k++) { const ch = text[k]; if ('([{'.includes(ch)) d++; else if (')]}'.includes(ch)) d--; else if (ch === '=' && d === 0 && !/[=>]/.test(text[k + 1] || '') && !/[=!<>+\-*/%&|^]/.test(text[k - 1] || '')) return k; } return -1; }
+    /** 引数の並び（a, b = 1, { c, d: e }, ...rest）から変数名 */
+    function paramNames(text) {
+      const out = [];
+      for (const raw of splitTop(String(text || ''), ',')) {
+        let p = raw.trim().replace(/^\.\.\./, '');
+        const eq = assignTop(p); if (eq >= 0) p = p.slice(0, eq).trim();
+        if (/^[{[]/.test(p)) { for (const x of p.matchAll(ID_ALL_RX())) if (!/^\s*:/.test(p.slice(x.index + x[1].length))) out.push(x[1]); }
+        else { const id = ID_HEAD_RX.exec(p); if (id) out.push(id[0]); }
+      }
+      return out;
+    }
+    /** { が関数の本体なら { params }（function (a, b) { / (a) => { / a => { / method(a) {）。if / for などのブロックは null */
+    function funcHead(m, open) {
+      const before = m.slice(Math.max(0, open - 400), open).replace(/\s+$/, '');
+      if (/=>$/.test(before)) {
+        const h = before.slice(0, -2).replace(/\s+$/, '');
+        if (h.endsWith(')')) { const po = openOf(h, h.length - 1); return { params: po < 0 ? [] : paramNames(h.slice(po + 1, h.length - 1)) }; }
+        const id = ID_TAIL_RX.exec(h);
+        return { params: id ? [id[1]] : [] };
+      }
+      if (!before.endsWith(')')) return null;
+      const po = openOf(before, before.length - 1);
+      if (po < 0) return null;
+      const head = before.slice(0, po).replace(/\s+$/, '');
+      if (/(?:^|[^$\w])(?:if|for|while|switch|catch|with)$/.test(head)) return null;
+      if (/(?:^|[^$\w])function(?:\s*\*)?(?:\s+[$\w\u0080-￿]+)?$/.test(head) || ID_TAIL_RX.test(head)) return { params: paramNames(before.slice(po + 1, before.length - 1)) };
+      return null;
+    }
+    /** 式の終わり（括弧の外の , ; 閉じ括弧、続きの無い改行）。m は文字列を伏せた本文 */
+    function exprEnd(m, start) {
+      let d = 0;
+      for (let k = start; k < m.length; k++) {
+        const ch = m[k];
+        if (ch === '(' || ch === '[' || ch === '{') d++;
+        else if (ch === ')' || ch === ']' || ch === '}') { if (d === 0) return k; d--; }
+        else if (d === 0 && (ch === ',' || ch === ';')) return k;
+        else if (d === 0 && ch === '\n') {
+          if (!m.slice(start, k).trim()) continue;
+          const rest = m.slice(k + 1).replace(/^\s+/, '');
+          if (/^(?:[.[(?:+\-*/%&|^<>=,]|instanceof\b|in\b)/.test(rest)) continue;
+          return k;
+        }
+      }
+      return m.length;
+    }
+    const KINTONE_RECORD_RX = /kintone\s*\.\s*(?:mobile\s*\.\s*)?app\s*\.\s*record\s*\.\s*get\s*\(\s*\)\s*\.\s*record$/;
+    /** e がレコードのオブジェクトか（record / event.record / kintone.app.record.get().record / レコードを入れた変数） */
+    function isRecordExpr(e, recNames) {
+      const t = String(e || '').trim();
+      if (!t) return false;
+      if (KINTONE_RECORD_RX.test(t) || /\.\s*record$/.test(t) || /\[\s*(['"`])record\1\s*\]$/.test(t)) return true;
+      return ID_FULL_RX.test(t) && !!recNames && recNames.has(t);
+    }
+    /** レコードのオブジェクトを入れた変数の名前（record は既定。var rec = event.record / const { record: r } = event） */
+    function recordNames(s) {
+      const names = new Set(['record']);
+      const rx = new RegExp(`\\b(?:var|let|const)\\s+(${ID_SRC})\\s*=\\s*([^;\\n,]+)`, 'gu');
+      for (let pass = 0; pass < 2; pass++) for (const x of s.matchAll(rx)) if (isRecordExpr(x[2], names)) names.add(x[1]);
+      const part = new RegExp(`^\\s*record\\s*(?::\\s*(${ID_SRC}))?\\s*(?:=[\\s\\S]*)?$`, 'u');
+      for (const x of s.matchAll(/\b(?:var|let|const)\s*\{([^{}]*)\}\s*=/g)) for (const p of x[1].split(',')) { const r = part.exec(p); if (r) names.add(r[1] || 'record'); }
+      return names;
+    }
+    /** 式 e が「フィールドそのもの」か（record['CODE'] / record.CODE / row.value['CODE']）。値（.value）・別のプロパティは null */
+    function fieldRefOfExpr(e, recNames) {
+      const t = String(e || '').trim();
+      let x = /^([\s\S]+?)\[\s*(['"`])((?:\\.|(?!\2)[^\\])*)\2\s*\]$/.exec(t);
+      if (x && !/\$\{/.test(x[3]) && (isRecordExpr(x[1], recNames) || /\.\s*value$/.test(x[1].trim()))) return { code: x[3], via: 'bracket' };
+      x = new RegExp(`^([\\s\\S]+?)\\s*\\.\\s*(${ID_SRC})$`, 'u').exec(t);
+      if (x && !FIELD_PROPS.has(x[2]) && isRecordExpr(x[1], recNames)) return { code: x[2], via: 'dot' };
+      return null;
+    }
+    /**
+     * 変数の表（宣言・代入・分割代入・関数の引数）。フィールドを入れた変数は code を、それ以外（値・別の式・引数）は shadow を持つ。
+     *   scope = 有効な範囲（let / const: 囲むブロック、var: 囲む関数、引数: その関数の本体）
+     */
+    function aliasTable(s, m, braces, recNames) {
+      const entries = [];
+      const opens = [...braces.keys()].sort((a, b) => a - b);
+      const funcs = new Map();
+      for (const o of opens) { const h = funcHead(m, o); if (h) funcs.set(o, h); }
+      const innermost = (idx, onlyFunc) => { let best = -1; for (const o of opens) { if (o >= idx) break; if (braces.get(o) >= idx && (!onlyFunc || funcs.has(o))) best = o; } return best; };
+      const scopeOf = (idx, kw) => { const o = innermost(idx, kw === 'var'); return o < 0 ? [0, m.length] : [o, braces.get(o)]; };
+      const declared = new Set();
+      const skip = [];
+      const entryOfRhs = (name, index, scope, rhsStart, rhsEnd) => {
+        const rhs = s.slice(rhsStart, rhsEnd).trim();
+        const ref = fieldRefOfExpr(rhs, recNames);
+        if (ref) return { name, index, scope, code: ref.code, via: ref.via, rhsStart, rhsEnd };
+        if (ID_FULL_RX.test(rhs) && rhs !== name) return { name, index, scope, chain: rhs, rhsStart, rhsEnd };
+        return { name, index, scope, shadow: true };
+      };
+      // 1. 関数の引数（その関数の中では別の変数）。first = 最初の引数（kintone.events.on の handler なら event）
+      for (const [o, h] of funcs) h.params.forEach((name, i) => entries.push({ name, index: o, scope: [o, braces.get(o)], shadow: true, param: true, first: i === 0 }));
+      // 2. 宣言（var / let / const。複数の宣言子・分割代入）
+      const kwRx = /(^|[^$\w.])(var|let|const)(?=\s)/g;
+      let k;
+      while ((k = kwRx.exec(m)) !== null) {
+        const kwIdx = k.index + k[1].length, kw = k[2];
+        const scope = scopeOf(kwIdx, kw);
+        let i = kwIdx + kw.length;
+        for (let guard = 0; guard < 64; guard++) {
+          while (i < m.length && /\s/.test(m[i])) i++;
+          if (m[i] === '{' || m[i] === '[') {
+            const close = closeOf(m, i);
+            if (close < 0) break;
+            skip.push([i, close]);
+            let j = close + 1; while (j < m.length && /\s/.test(m[j])) j++;
+            let rhsStart = -1, rhsEnd = close + 1;
+            if (m[j] === '=' && !/[=>]/.test(m[j + 1] || '')) { rhsStart = j + 1; while (rhsStart < m.length && /\s/.test(m[rhsStart])) rhsStart++; rhsEnd = exprEnd(m, rhsStart); }
+            const fromRecord = m[i] === '{' && rhsStart >= 0 && isRecordExpr(s.slice(rhsStart, rhsEnd), recNames);
+            const kv = new RegExp(`^(?:(['"\`])((?:(?!\\1).)+)\\1|(${ID_SRC}))\\s*:\\s*(${ID_SRC})$`, 'u');
+            for (const part of splitTop(s.slice(i + 1, close), ',')) {
+              const p = part.trim().replace(/^\.\.\./, '');
+              if (!p) continue;
+              const eq = assignTop(p);
+              const left = (eq >= 0 ? p.slice(0, eq) : p).trim();
+              const x = m[i] === '{' ? kv.exec(left) : null;
+              const key = x ? (x[2] || x[3]) : (m[i] === '{' && ID_FULL_RX.test(left) ? left : null);
+              const name = x ? x[4] : key;
+              if (name) entries.push(fromRecord && !FIELD_PROPS.has(key) ? { name, index: kwIdx, scope, code: key, via: 'destructure', rhsStart, rhsEnd } : { name, index: kwIdx, scope, shadow: true });
+              else for (const y of left.matchAll(ID_ALL_RX())) if (!/^\s*:/.test(left.slice(y.index + y[1].length))) entries.push({ name: y[1], index: kwIdx, scope, shadow: true });
+            }
+            i = rhsStart >= 0 ? rhsEnd : close + 1;
+          } else {
+            const idm = ID_HEAD_RX.exec(s.slice(i, i + 256));
+            if (!idm) break;
+            const name = idm[0];
+            declared.add(i);
+            let j = i + name.length; while (j < m.length && /\s/.test(m[j])) j++;
+            if (m[j] === '=' && !/[=>]/.test(m[j + 1] || '')) {
+              let rhsStart = j + 1; while (rhsStart < m.length && /\s/.test(m[rhsStart])) rhsStart++;
+              const rhsEnd = exprEnd(m, rhsStart);
+              entries.push(entryOfRhs(name, kwIdx, scope, rhsStart, rhsEnd));
+              i = rhsEnd;
+            } else { entries.push({ name, index: kwIdx, scope, shadow: true }); i = j; }   // 初期化なし・for (var key in …)
+          }
+          while (i < m.length && /\s/.test(m[i])) i++;
+          if (m[i] === ',') { i++; continue; }
+          break;
+        }
+      }
+      // 3. 代入（宣言の外）: NAME = <フィールド> は以後その変数がフィールド、NAME = <別の値> は以後フィールドではない
+      const asRx = new RegExp(`(?<![$\\u200C\\u200D\\p{ID_Continue}.])(${ID_SRC})\\s*=(?![=>])`, 'gu');
+      for (const x of m.matchAll(asRx)) {
+        const at = x.index, name = x[1];
+        if (declared.has(at) || skip.some(([a, b]) => at > a && at < b) || /^(?:var|let|const|return|typeof|case|default|else|in|of|new|delete|void|throw|await|yield)$/.test(name)) continue;
+        let b = at - 1; while (b >= 0 && /\s/.test(m[b])) b--;
+        if (b >= 0 && m[b] === '.') continue;   // obj.name = …（プロパティへの代入）
+        const own = entries.filter(e => e.name === name && e.index < at && at >= e.scope[0] && at <= e.scope[1]).sort((p, q) => q.index - p.index)[0];
+        const scope = own ? own.scope : [0, m.length];
+        let rhsStart = at + x[0].length; while (rhsStart < m.length && /\s/.test(m[rhsStart])) rhsStart++;
+        entries.push(entryOfRhs(name, at, scope, rhsStart, exprEnd(m, rhsStart)));
+      }
+      return entries;
+    }
+    const refCtxCache = new Map();
+    /** 本文ごとの解析の準備（文字列を伏せた本文・括弧の対応・レコードの変数・変数の表）。同じ本文は再利用する */
+    function fieldRefContext(text) {
+      const s = String(text || '');
+      if (refCtxCache.has(s)) return refCtxCache.get(s);
+      const m = maskStrings(s);
+      const braces = braceMap(m);
+      const recNames = recordNames(s);
+      const ctx = { s, m, braces, recNames, entries: aliasTable(s, m, braces, recNames) };
+      if (refCtxCache.size >= 24) refCtxCache.delete(refCtxCache.keys().next().value);
+      refCtxCache.set(s, ctx);
+      return ctx;
+    }
+    /** 位置 at で変数 name がフィールドを指しているなら、その宣言・代入（別の変数を経由したものは元の宣言）。指していなければ null */
+    function resolveAlias(ctx, name, at, depth = 0) {
+      let best = null;
+      for (const e of ctx.entries) {
+        if (e.name !== name || e.index >= at || at < e.scope[0] || at > e.scope[1]) continue;
+        if (!best || e.index > best.index || (e.index === best.index && (e.scope[1] - e.scope[0]) < (best.scope[1] - best.scope[0]))) best = e;
+      }
+      if (!best || best.shadow) return null;
+      if (best.code != null) return best;
+      if (best.chain && depth < 2) return resolveAlias(ctx, best.chain, best.rhsStart, depth + 1);
+      return null;
+    }
+    /**
+     * プロパティの参照（.value / .disabled / .error）の「.」の位置 dot の手前の式が指すフィールド。
+     * @returns {{ code: string, via: 'dot'|'bracket'|'alias', alias?: string, decl?: object, start: number }|null}
+     */
+    function fieldRefAt(text, dot, ctx = null) {
+      const c = ctx && ctx.s === String(text || '') ? ctx : fieldRefContext(text);
+      const s = c.s, m = c.m;
+      let k = dot - 1; while (k >= 0 && /\s/.test(m[k])) k--;
+      if (k >= 0 && m[k] === '?') { k--; while (k >= 0 && /\s/.test(m[k])) k--; }   // ?.
+      if (k < 0) return null;
+      if (m[k] === ']') {
+        const o = openOf(m, k);
+        if (o < 0) return null;
+        const lit = /^\s*(['"`])((?:\\.|(?!\1)[^\\])*)\1\s*$/.exec(s.slice(o + 1, k));
+        return lit && !/\$\{/.test(lit[2]) ? { code: lit[2], via: 'bracket', start: o } : null;
+      }
+      const tail = ID_TAIL_RX.exec(s.slice(Math.max(0, k - 255), k + 1));
+      if (!tail) return null;
+      const name = tail[1], start = k + 1 - name.length;
+      let b = start - 1; while (b >= 0 && /\s/.test(m[b])) b--;
+      if (b >= 0 && m[b] === '.') {
+        // <レコード>.NAME の NAME がフィールドコード（event.record.金額 / record.amount / rec.amount）
+        if (FIELD_PROPS.has(name)) return null;
+        let e = b - 1; while (e >= 0 && /\s/.test(m[e])) e--;
+        if (e >= 0 && m[e] === '?') { e--; while (e >= 0 && /\s/.test(m[e])) e--; }
+        const bt = e >= 0 ? ID_TAIL_RX.exec(s.slice(Math.max(0, e - 255), e + 1)) : null;
+        if (!bt) return null;
+        let bb = e - bt[1].length; while (bb >= 0 && /\s/.test(m[bb])) bb--;
+        const member = bb >= 0 && m[bb] === '.';
+        return bt[1] === 'record' || (!member && c.recNames.has(bt[1])) ? { code: name, via: 'dot', start: e + 1 - bt[1].length } : null;
+      }
+      if (b >= 0 && m[b] === '?' && m[b - 1] === '?') return null;
+      const a = resolveAlias(c, name, start);
+      return a ? { code: a.code, via: 'alias', alias: name, decl: a, start } : null;
+    }
+    /** Phase 22: 変数に入れたフィールドの使われ方（宣言 → Set('READ' | 'WRITE' | 'CONTROL')）。Field Scanner のアクセス種別に使う */
+    function aliasAccesses(ctx) {
+      const out = new Map();
+      const rx = /\.\s*(value|disabled|error)\b(\s*(?:=(?![=>])|\+=|-=|\*=|\/=))?/g;
+      for (const x of ctx.m.matchAll(rx)) {
+        const ref = fieldRefAt(ctx.s, x.index, ctx);
+        if (!ref || ref.via !== 'alias' || !ref.decl) continue;
+        const after = ctx.m.slice(x.index + x[0].length, x.index + x[0].length + 40);
+        const acc = x[1] === 'value' ? (x[2] || /^\s*\.\s*(push|pop|shift|unshift|splice|sort|reverse|fill)\s*\(/.test(after) ? 'WRITE' : 'READ') : (x[2] ? 'CONTROL' : null);
+        if (!acc) continue;
+        if (!out.has(ref.decl)) out.set(ref.decl, new Set());
+        out.get(ref.decl).add(acc);
+      }
+      return out;
+    }
 
     // パターン種別付きの正規表現を作る
     //   ELEMENT: getFieldElement(s)('code') / BRACKET: ['code'] / QUOTED: 'code' / BARE: 裸の識別子
+    //   DOT（Phase 22）: 識別子として書ける ASCII 以外のコード（日本語など）の record.CODE（ASCII のコードは BARE が拾う）
     function buildRegexps(code) {
       const safe = String(code || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
       const pats = [
@@ -1553,6 +1828,8 @@
       ];
       if (/^[A-Za-z_$][A-Za-z0-9_$]*$/.test(code)) {
         pats.push({ kind: 'BARE', rx: new RegExp(`(?<![A-Za-z0-9_$])${safe}(?![A-Za-z0-9_$])`, 'g') });
+      } else if (ID_FULL_RX.test(String(code || ''))) {
+        pats.push({ kind: 'DOT', rx: new RegExp(`\\.\\s*${safe}(?![$\\u200C\\u200D\\p{ID_Continue}])`, 'gu') });
       }
       return pats;
     }
@@ -1566,8 +1843,8 @@
 
       if (/setFieldShown\(\s*$/.test(before)) return { access: 'SHOW_HIDE', confidence: 'HIGH' };
 
-      // 裸の識別子は同名変数・関数名の可能性があるため確度を1段下げる
-      const cap = (c) => (kind === 'BARE')
+      // 裸の識別子は同名変数・関数名の可能性があるため確度を1段下げる（ドット記法もレコード以外のオブジェクトの可能性がある）
+      const cap = (c) => (kind === 'BARE' || kind === 'DOT')
         ? (c === 'HIGH' ? 'MEDIUM' : 'LOW')
         : c;
 
@@ -1624,6 +1901,15 @@
       return kept;
     }
 
+    /** Phase 22: hit（フィールドの参照）が「フィールドを変数に入れる宣言」の右辺なら、その変数の使われ方のアクセス種別（CONTROL > WRITE > READ） */
+    function aliasAccessOf(f, code, h) {
+      if (!f.alias) { const ctx = fieldRefContext(f.clean); f.alias = { ctx, acc: aliasAccesses(ctx) }; }
+      const decl = f.alias.ctx.entries.find(e => e.code === code && e.rhsStart != null && e.rhsStart >= 0 && h.start >= e.rhsStart && h.end <= e.rhsEnd);
+      const set = decl ? f.alias.acc.get(decl) : null;
+      if (!set || !set.size) return null;
+      return { access: set.has('CONTROL') ? 'CONTROL' : set.has('WRITE') ? 'WRITE' : 'READ', confidence: 'MEDIUM' };
+    }
+
     function analyze({ fields, files, snippet }) {
       const { before = 24, after = 48 } = snippet || {};
       const cleans = files.map(f => {
@@ -1648,7 +1934,9 @@
           usedIn.push(`${f.target}: ${f.name}`);
           let sampled = 0;
           for (const h of hits) {
-            const cls = classifyAccess(f.clean, h.start, h.end, h.kind);
+            let cls = classifyAccess(f.clean, h.start, h.end, h.kind);
+            // Phase 22（F-F2）: フィールドを変数に入れた宣言（var amount = record['amount'];）は、その変数の使われ方で数える
+            if (cls.access === 'OTHER') { const viaAlias = aliasAccessOf(f, fld.code, h); if (viaAlias) cls = viaAlias; }
             const line = lineAt(f.lineIdx, h.start);
             accessCounts[cls.access] = (accessCounts[cls.access] || 0) + 1;
             const s = Math.max(0, h.start - before);
@@ -1838,6 +2126,8 @@
       scanObjectProps, resolveAppExpr, collectDeclarations, isRestCallee,
       stripCommentsOnly, buildLineIndex, lineAt, normalizeCode,
       collectUnknownFieldRefs, collectExternalFieldRefs,
+      // Phase 22（F-F2）: フィールドを指す式の解決（Code Review と共用）
+      maskStrings, fieldRefContext, fieldRefAt, fieldRefOfExpr, resolveAlias, recordNames, isRecordExpr, aliasAccesses, ID_SRC,
     };
   })();
 
@@ -10767,7 +11057,7 @@
         // イベントを変数（var EVENTS = [...]）で渡す登録は、同じファイルの配列の定義をたどる（Phase 20: 画面ごとの判定で誤って「PC だけ」としないため）
         const evVar = /^\s*([A-Za-z_$][\w$]*)\s*$/.exec(firstArg);
         const evDef = evVar ? new RegExp(`\\b(?:var|let|const)\\s+${evVar[1]}\\s*=\\s*\\[([\\s\\S]*?)\\]`).exec(s) : null;
-        const events = [...(evDef ? evDef[1] : firstArg).matchAll(/['"`]((?:mobile\.)?app\.(?:record|report|event)\.[A-Za-z0-9_.]+)['"`]/g)].map(x => x[1]);
+        const events = [...(evDef ? evDef[1] : firstArg).matchAll(/['"`]((?:mobile\.)?app\.(?:record|report|event)\.[A-Za-z0-9_.\u00C0-\uFFFF]+)['"`]/g)].map(x => x[1]);
         const error = /\.error\s*=(?!=)\s*(?!null\b|undefined\b|(['"`])\1)/.test(inlined);
         out.push({
           events: events.length ? events : ['（イベント名を特定できない登録）'],
@@ -10777,7 +11067,8 @@
           disabled: /\.disabled\s*=(?!=)/.test(inlined),
           value: /\.value\s*=(?!=)/.test(inlined),
           // Phase 20（F41）: この handler が参照するフィールドコード（record['code'] / record.code）。画面（PC / モバイル）ごとの制御の有無に使う
-          refs: [...new Set([...[...inlined.matchAll(/\[\s*['"`]([^'"`\]]+)['"`]\s*\]/g)].map(x => x[1]), ...[...inlined.matchAll(/\brecord\s*\.\s*([A-Za-z_$][\w$]*)/g)].map(x => x[1])])],
+          //   Phase 22（F-F2）: 変数に入れたフィールド・日本語のコードのドット記法（record.金額）も数える
+          refs: fieldRefsIn(inlined),
         });
       }
       return out;
@@ -10815,15 +11106,87 @@
      */
     function disableSites(clean, code) {
       const s = String(clean || '');
+      // Phase 22（F-F2）: フィールドを指す式は KTScan.fieldRefAt で解決する（直接・ブラケット・変数に入れたフィールド・日本語のコードのドット記法）
+      const ctx = KTScan.fieldRefContext(s);
       const out = [];
-      const rx = /\.disabled\s*=(?!=)\s*true\b/g;
+      const rx = /\.\s*disabled\s*=(?!=)\s*true\b/g;
       let m;
-      while ((m = rx.exec(s)) !== null) {
-        const ref = /(?:\[\s*['"`]([^'"`\]]+)['"`]\s*\]|\brecord\s*\.\s*([A-Za-z_$][\w$]*))\s*$/.exec(s.slice(Math.max(0, m.index - 120), m.index));
-        if (!ref || (ref[1] || ref[2]) !== code) continue;
-        out.push({ index: m.index, ...siteConds(s, m.index) });
+      while ((m = rx.exec(ctx.m)) !== null) {
+        const ref = KTScan.fieldRefAt(s, m.index, ctx);
+        if (!ref || ref.code !== code) continue;
+        out.push({ index: m.index, via: ref.via, ...(ref.alias ? { alias: ref.alias } : {}), ...siteConds(s, m.index) });
       }
       return out;
+    }
+    /** Phase 22（F-F2）: 本文が参照するフィールドコード（ブラケット・record.CODE（日本語のコードも）・変数に入れたフィールド） */
+    function fieldRefsIn(text) {
+      const t = String(text || '');
+      const ctx = KTScan.fieldRefContext(t);
+      const out = new Set([...t.matchAll(/\[\s*['"`]([^'"`\]]+)['"`]\s*\]/g)].map(x => x[1]));
+      for (const x of ctx.m.matchAll(new RegExp(`\\.\\s*(${KTScan.ID_SRC})(?![$\\u200C\\u200D\\p{ID_Continue}])(?!\\s*\\()`, 'gu'))) { const r = KTScan.fieldRefAt(t, x.index + x[0].length, ctx); if (r && r.via === 'dot') out.add(r.code); }
+      for (const e of ctx.entries) if (e.code != null) out.add(e.code);
+      return [...out];
+    }
+    /** Phase 22（F-F2）: 条件の文字列（siteConds の conds・paths。変数の定義の注釈を含む）で値を読んでいるフィールドコード */
+    function condCodesOf(text, recNames) {
+      const t = String(text || '');
+      const out = new Set();
+      for (const x of t.matchAll(/\[\s*(['"`])([^'"`\]]+)\1\s*\]\s*\.\s*value\b/g)) out.add(x[2]);
+      for (const x of t.matchAll(new RegExp(`(?:^|[^$\\u200C\\u200D\\p{ID_Continue}.])(${KTScan.ID_SRC})\\s*\\.\\s*(${KTScan.ID_SRC})\\s*\\.\\s*value\\b`, 'gu'))) if (x[1] === 'record' || recNames.has(x[1])) out.add(x[2]);
+      // 注釈（decorateCond）の「変数 = フィールド」: 条件はその変数（フィールド）を読んでいる
+      for (const d of t.matchAll(/\/\*([\s\S]*?)\*\//g)) for (const part of d[1].split(';')) { const eq = part.indexOf('='); if (eq < 0) continue; const ref = KTScan.fieldRefOfExpr(part.slice(eq + 1), recNames); if (ref) out.add(ref.code); }
+      return [...out];
+    }
+    /**
+     * Phase 22（F-F2）: フィールドの操作の一覧。直接（record.CODE / record['CODE']）と変数に入れたフィールドを同じに数える。
+     *   op: read（.value を読む）/ write（.value への代入・push など）/ disabled（= true）/ enabled（= false）/ disabled-expr（= その他の式）/
+     *       error（null・''・undefined 以外のエラー）/ error-clear / shown（setFieldShown）/ event-error・event-error-clear（event.error = …。レコード全体のエラー）
+     *   各操作に、囲む条件（siteConds）・handler のイベント・条件と代入の右辺で値を読んでいるフィールド（reads）を添える
+     */
+    function fieldOperations(clean) {
+      const s = String(clean || '');
+      const ctx = KTScan.fieldRefContext(s);
+      const m = ctx.m;
+      const ranges = handlerRanges(s);
+      const eventsAt = (idx) => [...new Set(ranges.filter(r => idx > r.start && idx <= r.end).flatMap(r => r.events))];
+      const stmtEnd = (idx) => { let d = 0; for (let k = idx; k < m.length; k++) { const ch = m[k]; if ('([{'.includes(ch)) d++; else if (')]}'.includes(ch)) { if (d === 0) return k; d--; } else if (ch === ';' && d === 0) return k; } return m.length; };
+      // kintone.events.on の handler の最初の引数（event / e …）。それ以外のオブジェクトの .error（result.error など）はフィールドのエラーではない
+      const handlerOpens = new Set(ranges.map(r => m.indexOf('{', r.start)).filter(i => i >= 0));
+      const eventParamAt = (name, at) => ctx.entries.some(e => e.param && e.first && e.name === name && at >= e.scope[0] && at <= e.scope[1] && handlerOpens.has(e.index)) || (/^(?:event|e|ev|evt)$/.test(name) && ranges.some(r => at > r.start && at <= r.end));
+      const ops = [];
+      for (const x of m.matchAll(/\.\s*(value|disabled|error)\b(\s*(?:=(?![=>])|\+=|-=|\*=|\/=))?/g)) {
+        const at = x.index, prop = x[1], assign = !!x[2];
+        const rhsAt = at + x[0].length;
+        const rhs = assign ? s.slice(rhsAt, stmtEnd(rhsAt)).trim() : '';
+        const op = prop === 'value' ? (assign || /^\s*\.\s*(push|pop|shift|unshift|splice|sort|reverse|fill)\s*\(/.test(m.slice(rhsAt, rhsAt + 40)) ? 'write' : 'read')
+          : prop === 'disabled' ? (!assign ? 'disabled-read' : /^true\b/.test(rhs) ? 'disabled' : /^false\b/.test(rhs) ? 'enabled' : 'disabled-expr')
+          : (!assign ? 'error-read' : /^(?:null|undefined)\b|^(['"`])\1/.test(rhs) ? 'error-clear' : 'error');
+        const ref = KTScan.fieldRefAt(s, at, ctx);
+        if (ref) { ops.push({ code: ref.code, op, via: ref.via, ...(ref.alias ? { alias: ref.alias } : {}), index: at, rhs }); continue; }
+        if (prop === 'error' && assign) {
+          const obj = new RegExp(`(${KTScan.ID_SRC})\\s*$`, 'u').exec(s.slice(Math.max(0, at - 80), at));
+          let b = at - 1; while (b >= 0 && /\s/.test(m[b])) b--;
+          const before = obj ? b - obj[1].length : -1;
+          if (obj && !(before >= 0 && m[before] === '.') && eventParamAt(obj[1], at)) ops.push({ code: null, op: op === 'error' ? 'event-error' : 'event-error-clear', via: 'event', index: at, rhs });
+        }
+      }
+      for (const x of s.matchAll(/setFieldShown\s*\(\s*(['"`])([^'"`]+)\1\s*,\s*([^;]*?)\)\s*;?/g)) if (m.startsWith('setFieldShown', x.index)) ops.push({ code: x[2], op: 'shown', via: 'api', index: x.index, rhs: x[3] });
+      const reads = ops.filter(o => o.op === 'read');
+      return ops.sort((a, b) => a.index - b.index).map(o => {
+        const sc = siteConds(s, o.index);
+        const condText = [...(sc.conds || []), ...((sc.paths || []).flat())].map(String).join('\n');
+        const end = stmtEnd(o.index);
+        const inRhs = reads.filter(r => r.index > o.index && r.index < end).map(r => r.code);
+        return { ...o, ...sc, events: eventsAt(o.index), reads: [...new Set([...condCodesOf(condText, ctx.recNames), ...inRhs])] };
+      });
+    }
+    /**
+     * Phase 22（F-F2）: 入力チェック = 値を読む条件（または右辺）の中で、エラーを表示する場所（フィールドの error / レコード全体の event.error）。
+     *   値を読むだけ（エラーを出さない）は入力チェックではない
+     * @returns {Array<{ target: string|null, checks: string[], kind: 'field-error'|'event-error', events: string[], line: string, index: number }>}
+     */
+    function inputChecks(clean) {
+      return fieldOperations(clean).filter(o => (o.op === 'error' || o.op === 'event-error') && o.reads.length).map(o => ({ target: o.code, checks: o.reads, kind: o.op === 'error' ? 'field-error' : 'event-error', via: o.via, events: o.events, line: o.line, index: o.index }));
     }
     /**
      * Phase 21: テーブル（tableCode）のセルを編集不可にしている場所（行のループで row.value[key] / row.value['qty'] に .disabled = true）。
@@ -10904,7 +11267,7 @@
         }
       }
       // 条件に出てくる変数・関数は、その定義を添える（if (locked) / if (isApproved(record)) の項目を照合するため）
-      conds = conds.map(t => decorateCond(s, t));
+      conds = conds.map(t => decorateCond(s, t, idx));
       const own = { unconditional: hi >= 0 && !conds.length, conds, line: line.trim().slice(0, 160) };
       if (!helper || depth >= 2) return own;
       // Phase 21: 名前付きの関数の中 → 呼び出し元（関数の本体の外の NAME(…)）ごとに、呼び出し元の条件 ＋ 関数の中の条件を 1 つの経路として返す
@@ -10939,25 +11302,34 @@
       if (q < 0 || !/\bif\s*$/.test(s.slice(Math.max(0, q - 10), q))) return 'else';
       return `else of (${s.slice(q + 1, p)})`;
     }
-    /** 名前の定義（var / let / const の右辺、function 宣言の本体）。無ければ null */
-    function defOfIdent(s, id) {
+    /**
+     * 名前の定義（var / let / const の右辺、function 宣言の本体）。無ければ null。
+     * Phase 22（F-F2）: at（使う位置）があれば、その手前で一番近い宣言（同じ名前の変数が別の handler にもあるとき、別のほうと取り違えない）
+     */
+    function defOfIdent(s, id, at = null) {
       const e = String(id).replace(/\$/g, '\\$');
-      const v = new RegExp(`\\b(?:var|let|const)\\s+${e}\\s*=\\s*([^;\\n]+)`).exec(s);
+      const all = [...s.matchAll(new RegExp(`(?<![$\\w\\u0080-\\uffff.])(?:var|let|const)\\s+${e}\\s*=\\s*([^;\\n]+)`, 'g'))];
+      const v = at == null ? all[0] : (all.filter(x => x.index < at).pop() || all[0]);
       if (v) return v[1].trim();
       const f = new RegExp(`\\bfunction\\s+${e}\\s*\\(`).exec(s);
       if (f) { const o = s.indexOf('{', f.index); if (o >= 0) return s.slice(o, Math.min(closeBrace(s, o) + 1, o + 400)); }
       return null;
     }
-    /** 条件の中の名前（プロパティ名・文字列・注釈を除く） */
+    /** 条件の中の名前（プロパティ名・文字列・注釈を除く）。Phase 22: 日本語の変数名も */
     function condIdents(t) {
       const out = new Set();
-      for (const m of stripCondText(t).matchAll(/(^|[^\w$.])([A-Za-z_$][\w$]*)/g)) out.add(m[2]);
+      for (const m of stripCondText(t).matchAll(new RegExp(`(^|[^$\\u200C\\u200D\\p{ID_Continue}.])(${KTScan.ID_SRC})`, 'gu'))) out.add(m[2]);
       return [...out];
     }
-    function decorateCond(s, t) {
+    function decorateCond(s, t, at = null) {
       const str = String(t);
       if (/^(for|while|catch|with|\?|else|unknown:caller)$/.test(str)) return str;
-      const defs = condIdents(str).filter(id => !COND_NEUTRAL.has(id) && !STRUCT_CALLS.has(id)).map(id => [id, defOfIdent(s, id)]).filter(([, d]) => d).slice(0, 4);
+      // Phase 22（F-F2）: 変数に入れたフィールド（const field = record['金額']; if (field.value > …)）は、その位置で有効な宣言（スコープ・影・再代入を見る）で添える
+      const ctx = at != null ? KTScan.fieldRefContext(s) : null;
+      const defs = condIdents(str).filter(id => !COND_NEUTRAL.has(id) && !STRUCT_CALLS.has(id)).map(id => {
+        const a = ctx ? KTScan.resolveAlias(ctx, id, at) : null;
+        return [id, a ? `record['${a.code}']` : defOfIdent(s, id, at)];
+      }).filter(([, d]) => d).slice(0, 4);
       return defs.length ? `${str} /* ${defs.map(([id, d]) => `${id} = ${d.replace(/\s+/g, ' ').slice(0, 200)}`).join('; ')} */` : str;
     }
     /** ループの変数（for (var key in …) / for (let i = 0 …) / .forEach(function (row) / (row) => / row =>） */
@@ -11009,7 +11381,7 @@
         const firstArg = s.slice(m.index + m[0].length, comma);
         const evVar = /^\s*([A-Za-z_$][\w$]*)\s*$/.exec(firstArg);
         const evDef = evVar ? new RegExp(`\\b(?:var|let|const)\\s+${evVar[1].replace(/\$/g, '\\$')}\\s*=\\s*\\[([\\s\\S]*?)\\]`).exec(s) : null;
-        const events = [...(evDef ? evDef[1] : firstArg).matchAll(/['"`]((?:mobile\.)?app\.(?:record|report)\.[A-Za-z0-9_.]+)['"`]/g)].map(x => x[1]);
+        const events = [...(evDef ? evDef[1] : firstArg).matchAll(/['"`]((?:mobile\.)?app\.(?:record|report)\.[A-Za-z0-9_.\u00C0-\uFFFF]+)['"`]/g)].map(x => x[1]);
         let start = comma + 1, end = i - 1;
         const named = /^\s*([A-Za-z_$][\w$]*)\s*$/.exec(s.slice(comma + 1, i - 1));
         if (named) {
@@ -11031,24 +11403,31 @@
       if (!codes || !codes.length) return out;
       const ranges = handlerRanges(s).filter(h => h.events.some(e => /^(mobile\.)?app\.record\.create\./.test(e)));
       if (!ranges.length) return out;
-      for (const code of codes) {
-        const esc = String(code).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-        const rx = new RegExp(`\\[\\s*['"\`]${esc}['"\`]\\s*\\]\\s*\\.\\s*value\\b`, 'g');
-        const existRef = new RegExp(`\\[\\s*['"\`]${esc}['"\`]\\s*\\]\\s*(?:&&|\\?(?!\\.)|\\|\\|)`);
-        const existCond = new RegExp(`\\[\\s*['"\`]${esc}['"\`]\\s*\\](?!\\s*\\.\\s*value)`);
-        let m;
-        while ((m = rx.exec(s)) !== null) {
-          const h = ranges.find(r => m.index > r.start && m.index < r.end);
-          if (!h) continue;
-          // 同じ式の手前で存在を確かめている（record['ステータス'] && … / ? : / || {}）
-          let st = m.index; while (st > 0 && !/[{};]/.test(s[st - 1])) st--;
-          if (existRef.test(s.slice(st, m.index))) continue;
-          // 囲む条件・早い return が存在を確かめている（if (record['ステータス']) { … } / if (!record['ステータス']) return event;）
-          const sc = siteConds(s, m.index);
-          if ([...sc.conds, ...((sc.paths || []).flat())].map(String).some(t => existCond.test(t))) continue;
-          const ls = s.lastIndexOf('\n', m.index) + 1, le = s.indexOf('\n', m.index);
-          out.push({ code, index: m.index, events: h.events.filter(e => /\.create\./.test(e)), line: s.slice(ls, le < 0 ? s.length : le).trim().slice(0, 120) });
-        }
+      // Phase 22（F-F2）: ブラケット（record['ステータス'].value）だけでなく、ドット記法（record.ステータス.value）・変数に入れたフィールド
+      //   （var st = record['ステータス']; st.value）も同じに見る。存在の確かめ方も、その書き方（ブラケット・ドット・変数）で照合する
+      const want = new Set(codes);
+      const ctx = KTScan.fieldRefContext(s);
+      const esc = (v) => String(v).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      for (const x of ctx.m.matchAll(/\.\s*value\b/g)) {
+        let q = x.index - 1; while (q >= 0 && /\s/.test(ctx.m[q])) q--;
+        if (q >= 0 && ctx.m[q] === '?') continue;   // record['ステータス']?.value（無ければ undefined。止まらない）
+        const ref = KTScan.fieldRefAt(s, x.index, ctx);
+        if (!ref || !want.has(ref.code)) continue;
+        const h = ranges.find(r => x.index > r.start && x.index < r.end);
+        if (!h) continue;
+        const c = esc(ref.code);
+        const forms = [`\\[\\s*['"\`]${c}['"\`]\\s*\\]`, `\\.\\s*${c}(?![$\\u200C\\u200D\\p{ID_Continue}])`];
+        if (ref.alias) forms.push(`(?<![$\\u200C\\u200D\\p{ID_Continue}.])${esc(ref.alias)}(?![$\\u200C\\u200D\\p{ID_Continue}])`);
+        const existRef = new RegExp(`(?:${forms.join('|')})\\s*(?:&&|\\?(?!\\.)|\\|\\|)`, 'u');
+        const existCond = new RegExp(`(?:${forms.join('|')})(?!\\s*\\.\\s*value)`, 'u');
+        // 同じ式の手前で存在を確かめている（record['ステータス'] && … / ? : / || {}）
+        let st = ref.start; while (st > 0 && !/[{};]/.test(s[st - 1])) st--;
+        if (existRef.test(s.slice(st, ref.start))) continue;
+        // 囲む条件・早い return が存在を確かめている（if (record['ステータス']) { … } / if (!record['ステータス']) return event;）
+        const sc = siteConds(s, x.index);
+        if ([...sc.conds, ...((sc.paths || []).flat())].map(String).some(t => existCond.test(t))) continue;
+        const ls = s.lastIndexOf('\n', x.index) + 1, le = s.indexOf('\n', x.index);
+        out.push({ code: ref.code, index: ref.start, via: ref.via, events: h.events.filter(e => /\.create\./.test(e)), line: s.slice(ls, le < 0 ? s.length : le).trim().slice(0, 120) });
       }
       return out;
     }
@@ -11074,9 +11453,10 @@
       const s = String(clean || '');
       const out = new Map();
       const put = (code, kind) => { if (!code) return; if (!out.has(code)) out.set(code, new Set()); out.get(code).add(kind); };
+      // Phase 22（F-F2）: 変数に入れたフィールド（const field = record['金額']; field.disabled = true）・日本語のコードのドット記法も数える
+      const ctx = KTScan.fieldRefContext(s);
+      for (const m of ctx.m.matchAll(/\.\s*(value|disabled|error)\s*(?:=(?![=>])|\+=|-=)/g)) { const ref = KTScan.fieldRefAt(s, m.index, ctx); if (ref) put(ref.code, m[1]); }
       let m;
-      const rx = /(?:\[\s*['"`]([^'"`\]]+)['"`]\s*\]|\brecord\s*\.\s*([A-Za-z_$][\w$]*))\s*\.\s*(value|disabled|error)\s*(?:=(?!=)|\+=|-=)/g;
-      while ((m = rx.exec(s)) !== null) put(m[1] || m[2], m[3]);
       const show = /setFieldShown\s*\(\s*['"`]([^'"`]+)['"`]/g;
       while ((m = show.exec(s)) !== null) put(m[1], 'shown');
       return out;
@@ -11287,37 +11667,56 @@
       // Phase 21: 「条件の外」には、ループ・存在確認・別の項目だけの条件の中（計画の条件の項目・値を見ない）も含める（blindCond）。
       //   名前付きの関数の中は呼び出し元ごとの経路（pathsOfSite）で見る。中身が分からない条件（関数の引数・else など）は確認に回す
       const lvClean = loopVarsOf(clean);
-      const lvBase = baseText ? loopVarsOf(baseText) : new Set();
       const plainCond = (t) => String(t).replace(/\s*\/\*[\s\S]*?\*\/\s*$/, '');
+      // Phase 22（F-F2）: 制御の場所を「編集不可（disabled）・表示の切り替え（setFieldShown）・入力チェック（フィールドの error / そのフィールドの値を読む条件の
+      //   event.error）」として集め（変数に入れたフィールドも数える）、新しく足した場所と、既存のコードに元からある場所（同じ行・同じ囲む条件）を分けて判定する。
+      //   Phase 21 の実機 BF-C: 既存の「承認済みのときの編集不可」（条件つき）を、計画の条件（金額）を見ないので「条件なしに編集不可」と表示し、
+      //   計画の制御（変数に入れた金額の error）は数えていなかった。条件なし（E）と別の条件の中（D）を同じに扱わない
+      let opsClean = null, opsBase = null;
+      const opsOf = (text) => (text === clean ? (opsClean = opsClean || fieldOperations(clean)) : (opsBase = opsBase || fieldOperations(text)));
+      const altSitesOf = (text, code) => (text ? opsOf(text) : []).filter(o => ((o.op === 'shown' || o.op === 'error') && o.code === code) || (o.op === 'event-error' && o.reads.includes(code))).map(o => ({ ...o, kind: o.op === 'shown' ? 'shown' : 'error' }));
+      const siteKey = (x) => `${x.kind}|${x.line}|${pathsOfSite(x).map(p => p.map(plainCond).join(' && ')).join(' || ')}`;
+      const markExisting = (sites, baseSites) => {
+        const pool = new Map();
+        for (const b of baseSites) pool.set(siteKey(b), (pool.get(siteKey(b)) || 0) + 1);
+        return sites.map(x => { const n = pool.get(siteKey(x)) || 0; if (n > 0) pool.set(siteKey(x), n - 1); return { ...x, existing: n > 0 }; });
+      };
+      const KIND_JA = { disabled: '編集不可', shown: '表示の切り替え', error: '入力チェック（エラー表示）' };
+      const kindsJa = (list) => [...new Set(list.map(x => KIND_JA[x.kind]))].join('・');
       for (const [code, cond] of planCond) {
         if (planFields.get(code) !== 'CONTROL') continue;
-        const sites = tableSites(clean, code);
         const refs = condRefsOf(cond);
-        const blindPath = (x, text, lv) => (refs.length ? pathsOfSite(x).find(p => p.every(t => blindCond(t, text, lv, refs))) : null) || null;
-        const outside = (x, text, lv) => x.unconditional || !!blindPath(x, text, lv);
-        const unc = sites.filter(x => outside(x, clean, lvClean));
-        const baseUnc = baseText ? tableSites(baseText, code).some(x => outside(x, baseText, lvBase)) : false;
-        const where = (x) => { if (x.unconditional) return x.line; const p = blindPath(x, clean, lvClean) || []; return `${x.line}（囲む条件 ${p.length ? p.map(plainCond).join(' / ') : 'なし'} は ${refs.join(' / ')} を見ていません）`; };
-        // Phase 21（実機 §2）: 編集不可（disabled）ではなく、表示の切り替え（setFieldShown）・入力チェック（.error）で制御するコードもある。
-        //   以前は disabled だけを探し、「編集不可にする計画ですが .disabled = true が見つかりません」と実態に合わない確認を出した
-        if (!sites.length) {
-          const esc = String(code).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-          const alt = [];
-          for (const m of clean.matchAll(new RegExp(`setFieldShown\\s*\\(\\s*['"\`]${esc}['"\`]\\s*,\\s*([^;]*?)\\)\\s*;?`, 'g'))) alt.push({ kind: 'shown', arg: m[1], ...siteConds(clean, m.index) });
-          for (const m of clean.matchAll(new RegExp(`\\[\\s*['"\`]${esc}['"\`]\\s*\\]\\s*\\.\\s*error\\s*=(?!=)\\s*(?!null\\b)`, 'g'))) alt.push({ kind: 'error', arg: '', ...siteConds(clean, m.index) });
-          if (alt.length) {
-            const seen = (x) => refs.length && (refs.some(r => String(x.arg).includes(r)) || pathsOfSite(x).every(p => p.some(t => refs.some(r => String(t).includes(r)))));
-            const kinds = [...new Set(alt.map(x => (x.kind === 'shown' ? '表示の切り替え' : '入力チェック（エラー表示）')))].join('・');
-            if (!refs.length || alt.every(seen)) add('conditional-control', true, 'info', `${code} は${kinds}で、「${cond}」の条件（${refs.join(' / ') || '—'}）を見て制御しています`);
-            else add('conditional-control', false, 'review', `${code} は${kinds}で制御していますが、計画の条件「${cond}」（${refs.join(' / ')}）を見ているか確かめられません`);
-            continue;
-          }
-        }
-        if (!sites.length) add('conditional-control', false, 'review', `${code} は「${cond}」のときだけ制御する計画ですが、編集不可（.disabled = true）・表示の切り替え・入力チェックのどれも見つかりません（別の書き方なら、動作テスト環境で条件どおりか確かめてください）`);
-        else if (unc.length && !baseUnc) add('conditional-control', false, 'block', `${code} は「${cond}」のときだけ編集不可にする計画ですが、条件の外で編集不可にしています（${unc.map(where).join(' / ')}）。すべてのレコード・ステータスで編集できなくなります`);
-        else if (unc.length) add('conditional-control', false, 'review', `${code} は既存のコードで条件なしに編集不可になっています（「${cond}」の条件と合うか確認してください）`);
-        else if (refs.length && !sites.every(x => pathsOfSite(x).every(p => p.some(t => refs.some(r => String(t).includes(r)))))) add('conditional-control', false, 'review', `${code} は条件の中で編集不可にしていますが、計画の条件「${cond}」（${refs.join(' / ')}）を見ているか確かめられません`);
-        else add('conditional-control', true, 'info', `${code} は「${cond}」の条件の中でだけ編集不可にしています`);
+        const blindPath = (x) => (refs.length ? pathsOfSite(x).find(p => p.every(t => blindCond(t, clean, lvClean, refs))) : null) || null;
+        // none = 条件なし（ループ・hasOwnProperty だけの中を含む）/ other = 計画の条件の項目・値を見ない別の条件の中 / plan = 計画の条件を見る / unclear = 静的には分からない
+        const classOf = (x) => {
+          // 表示の切り替えは、表示する条件が引数にある（setFieldShown('紹介元', record['顧客区分'].value === '新規')）
+          if (x.kind === 'shown' && refs.some(r => String(x.rhs || '').includes(r))) return 'plan';
+          if (x.unconditional || pathsOfSite(x).some(p => !p.length || structuralOnly(p))) return 'none';
+          if (blindPath(x)) return 'other';
+          if (!refs.length || pathsOfSite(x).every(p => p.some(t => refs.some(r => String(t).includes(r))))) return 'plan';
+          return 'unclear';
+        };
+        const tag = (x) => ({ ...x, cls: classOf(x) });
+        const locks = markExisting(tableSites(clean, code).map(x => ({ ...x, kind: 'disabled' })), baseText ? tableSites(baseText, code).map(x => ({ ...x, kind: 'disabled' })) : []).map(tag);
+        const alts = markExisting(altSitesOf(clean, code), altSitesOf(baseText, code)).map(tag);
+        const fresh = [...locks, ...alts].filter(x => !x.existing), old = [...locks, ...alts].filter(x => x.existing);
+        const freshLocks = fresh.filter(x => x.kind === 'disabled'), freshAlts = fresh.filter(x => x.kind !== 'disabled');
+        const outsideLocks = freshLocks.filter(x => x.cls === 'none' || x.cls === 'other');
+        const oldNone = old.filter(x => x.kind === 'disabled' && x.cls === 'none'), oldOther = old.filter(x => x.kind === 'disabled' && x.cls === 'other');
+        const where = (x) => { if (x.unconditional) return x.line; const p = blindPath(x) || []; return `${x.line}（囲む条件 ${p.length ? p.map(plainCond).join(' / ') : 'なし'} は ${refs.join(' / ')} を見ていません）`; };
+        const condOf = (x) => (pathsOfSite(x).find(p => p.length) || []).map(plainCond).join(' かつ ') || '—';
+        const oldNote = oldOther.length ? `。既存のコードの「${condOf(oldOther[0])}」のときの編集不可は別の条件の制御です（変更していません）` : '';
+        if (!locks.length && !alts.length) add('conditional-control', false, 'review', `${code} は「${cond}」のときだけ制御する計画ですが、編集不可（.disabled = true）・表示の切り替え・入力チェックのどれも見つかりません（別の書き方なら、動作テスト環境で条件どおりか確かめてください）`);
+        else if (outsideLocks.length) add('conditional-control', false, 'block', `${code} は「${cond}」のときだけ編集不可にする計画ですが、条件の外で編集不可にしています（${outsideLocks.map(where).join(' / ')}）。すべてのレコード・ステータスで編集できなくなります`);
+        else if (freshLocks.some(x => x.cls === 'unclear')) add('conditional-control', false, 'review', `${code} は条件の中で編集不可にしていますが、計画の条件「${cond}」（${refs.join(' / ')}）を見ているか確かめられません`);
+        else if (freshAlts.some(x => x.cls !== 'plan')) add('conditional-control', false, 'review', `${code} は${kindsJa(freshAlts)}で制御していますが、計画の条件「${cond}」（${refs.join(' / ')}）を見ているか確かめられません`);
+        else if (oldNone.length) add('conditional-control', false, 'review', `${code} は既存のコードで条件なしに編集不可になっています（「${cond}」の条件と合うか確認してください。${oldNone[0].line}）`);
+        else if (oldOther.length && freshLocks.length) add('conditional-control', false, 'review', `${code} は計画の条件「${cond}」の中で編集不可にしていますが、既存のコードは別の条件「${condOf(oldOther[0])}」のときにも編集不可にしています（両方が効きます）。意図どおりか確認してください`);
+        else if (fresh.length) add('conditional-control', true, 'info', freshLocks.length && !freshAlts.length ? `${code} は「${cond}」の条件の中でだけ編集不可にしています${oldNote}` : `${code} は${kindsJa(fresh)}で、「${cond}」の条件（${refs.join(' / ') || '—'}）を見て制御しています${oldNote}`);
+        // 新しく足した制御が無い: 既存のコードの制御で判定する
+        else if (old.some(x => x.cls === 'plan')) add('conditional-control', true, 'info', `${code} は既存のコードで、「${cond}」の条件の中で制御しています（${kindsJa(old.filter(x => x.cls === 'plan'))}）`);
+        else if (old.some(x => x.cls === 'unclear')) add('conditional-control', false, 'review', `${code} は条件の中で制御（${kindsJa(old.filter(x => x.cls === 'unclear'))}）していますが、計画の条件「${cond}」（${refs.join(' / ')}）を見ているか確かめられません`);
+        else add('conditional-control', false, 'review', `${code} を「${cond}」のときに制御する処理が見つかりません（既存のコードの制御は「${condOf(old[0])}」のときの${KIND_JA[old[0].kind]}です）。動作テスト環境で条件どおりか確かめてください`);
       }
       const hardMismatch = mismatches.filter(m => ['ACCESS_ESCALATED', 'EXTRA_EVENT'].includes(m.code) || (m.code === 'EXTRA_FIELD_WRITE' && !offTarget.some(([code]) => m.items.includes(code))));
       add('plan-consistency', !hardMismatch.length, 'review', hardMismatch.length ? `計画と生成コードが一致しません（CUSTOMIZATION_PLAN_MISMATCH）: ${hardMismatch.map(m => m.message).join('／')}` : mismatches.length ? `計画との軽微な差: ${mismatches.map(m => m.message).join('／')}` : '計画（イベント・フィールド・アクセス）と一致');
@@ -11393,7 +11792,7 @@
         }
       }
       // 登録ごとのイベント名（第 1 引数の文字列リテラル。変数経由なら解析結果の名前で代用）
-      const literalRegs = handlers.flatMap(h => [...String(h.firstArg || '').matchAll(/['"`]((?:mobile\.)?app\.(?:record|report|event)\.[A-Za-z0-9_.]+)['"`]/g)].map(x => x[1]));
+      const literalRegs = handlers.flatMap(h => [...String(h.firstArg || '').matchAll(/['"`]((?:mobile\.)?app\.(?:record|report|event)\.[A-Za-z0-9_.\u00C0-\uFFFF]+)['"`]/g)].map(x => x[1]));
       const regs = literalRegs.length ? literalRegs : codeEvents.map(e => e.name);
       const dupInAdded = regs.filter((e, i) => regs.indexOf(e) !== i);
       const existingEvents = existingSource ? KTScan.extractEventTypes(KTScan.stripCommentsOnly(existingSource.text)).map(e => e.name) : [];
@@ -11496,7 +11895,9 @@
     }
     const ACCESS_W = (acc) => Object.keys(acc || {}).filter(k => k === 'WRITE' || k === 'CONTROL' || k === 'SHOW_HIDE');
 
-    return { REVIEW_VERSION, STATUS, applyPatch, diffLines, diffText, diffHunks, checkSyntax, inspectHandlers, globalDeclarations, kintoneFieldOps, layoutSpaceIds, review, disableSites, subtableCellSites, siteConds, blindCond, loopVarsOf, writeTargets, restCalls, condRefsOf, HOW_TO_CHECK };
+    return { REVIEW_VERSION, STATUS, applyPatch, diffLines, diffText, diffHunks, checkSyntax, inspectHandlers, globalDeclarations, kintoneFieldOps, layoutSpaceIds, review, disableSites, subtableCellSites, siteConds, blindCond, loopVarsOf, writeTargets, restCalls, condRefsOf, HOW_TO_CHECK,
+      // Phase 22（F-F2）: フィールドの操作（直接・ブラケット・変数経由）と入力チェック
+      fieldOperations, inputChecks, fieldRefsIn, unguardedCreateReads };
   })();
 
   // ==========================================
