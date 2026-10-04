@@ -21316,7 +21316,7 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
         rescanJs: () => KTScan.run({ force: true, silent: true }),   // Phase 16: 統合先 JS の本文を取り直す（キャッシュを無視）
         openCustomize,                                                // Phase 18 §30: AI → Customize（登録内容の確認）
         appId,
-        colors: { border: BD, bg: isDark ? '#1b1b1b' : '#fff' },
+        colors: { border: BD, bg: isDark ? '#1b1b1b' : '#fff', isDark },   // Phase 22: ダークテーマの印（data-theme）とプロセス図の背景
         // 有料: Nest Rec AI（接続情報は Refresh Token のみ localStorage・Customer Token は保存しない）
         settings: KTAiClient.createSettingsStore(),
         session: KTAiClient.createSession({ store: KTAiClient.createSettingsStore() }),

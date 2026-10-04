@@ -335,6 +335,17 @@ console.log('\n--- ダークテーマのプロセス図: 暗い配色で描く�
   const wsDark = KTAiChatUi.workspaceHtml({ isDark: true, border: '#2a2a2a', bg: '#111' });
   const wsLight = KTAiChatUi.workspaceHtml({ isDark: false, border: '#ccc', bg: '#F5F5F5' });
   assert(/id="kt-ai-workspace" data-theme="dark"/.test(wsDark) && !/data-theme="dark"/.test(wsLight.replace(/#kt-ai-workspace\[data-theme="dark"\]/g, '')) && /#kt-ai-workspace\[data-theme="dark"\] \.mermaid svg\{ background:transparent !important; \}/.test(wsDark), '開発支援のタブにテーマを付け、ダークのときだけプロセス図の背景を透明にする');
+  // 実機で見つけた漏れ: 開発支援タブの組み立て（renderAiWorkspace → mountAiWorkspace）が isDark を渡しておらず、ダークでも印が付かなかった
+  const { makeFakeHost } = require('./helpers/fake-dom.js');
+  for (const dark of [true, false]) {
+    const T3 = loadToolkit();
+    T3.__sandbox.matchMedia = () => ({ matches: dark, addEventListener() { } });
+    const inner = makeFakeHost();
+    const view = { innerHTML: '', querySelector: (sel) => (sel === '#kt-ai-host' ? inner : null) };
+    T3.renderAiWorkspace({ querySelector: (sel) => (sel === '#view-ai' ? view : null) }, FX.makeData(), '310', { getContextInputs: () => ({ data: FX.makeData() }) });
+    const html = String(inner.innerHTML || '');
+    assert(/id="kt-ai-workspace"/.test(html) && (dark ? /id="kt-ai-workspace" data-theme="dark"/.test(html) : !/id="kt-ai-workspace" data-theme="dark"/.test(html)), `開発支援タブの組み立て（renderAiWorkspace）でも、${dark ? 'ダークのときは印（data-theme="dark"）を付ける' : 'ライトのときは印を付けない'}`);
+  }
 }
 
 console.log(`\n${state.failed === 0 ? 'ALL PASSED' : 'FAILED'}: ${state.passed} passed / ${state.failed} failed`);
