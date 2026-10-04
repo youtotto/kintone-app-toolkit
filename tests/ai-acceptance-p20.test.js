@@ -903,16 +903,21 @@ console.log('\n--- U8（Phase 20・利用者の指摘）. 確認事項は質問�
   await click({ act: 'answer-questions', plan: v1.planId, version: String(v1.version) }); await ticks();
   assert(calls.length === 1 && /回答を 1 つ以上入力してください/.test($('kt-ai-composer-note').textContent || ''), 'U8: 回答が空なら送らない');
   // 入力した回答は再描画しても残る
-  await $('kt-ai-chat').dispatch({ type: 'input', target: { dataset: { qkey: `${v1.planId}:${v1.version}:Q1` }, value: '100万円以上' } });
+  // 会話の応答性（2026-10-05）で意図して更新: 回答欄のキーは台帳の項目（版をまたいで同じ。Q 番号は版ごとに振り直される）
+  const q1 = panel.conversation().answerContext().open.find(q => q.key === 'Q1');
+  await $('kt-ai-chat').dispatch({ type: 'input', target: { dataset: { qkey: `${v1.planId}:e:${q1.entryId}` }, value: '100万円以上' } });
   await click({ act: 'show-all' }); await ticks();
   assert(/>100万円以上<\/textarea>/.test($('kt-ai-chat').innerHTML), 'U8: 入力中の回答は再描画しても残る');
   // 送る: 入力した回答だけ（未回答も伝える）を計画の修正として 1 回だけ AI へ
   await click({ act: 'answer-questions', plan: v1.planId, version: String(v1.version) }); await ticks(8);
   const last = calls[calls.length - 1];
-  assert(calls.length === 2 && last.revision && /Q1「高額とはいくらからですか？」→ 100万円以上/.test(last.revision.request) && /未回答: Q2/.test(last.revision.request) && panel.conversation().activePlan().version === 2, `U8: 回答は計画の修正として送られ v2 になる（未回答の Q2 も伝える）: ${last.revision && last.revision.request}`);
+  // 会話の応答性（2026-10-05）で意図して更新: 送る文は版ごとに振り直される番号（Q1 / 未回答: Q2）ではなく質問文で書き、回答は構造化した決定事項（ctx.decisions）でも送る
+  assert(calls.length === 2 && last.revision && /質問「高額とはいくらからですか？」）：100万円以上/.test(last.revision.request) && /まだ答えていない確認事項：「一覧に表示する項目は金額だけでよいですか？」/.test(last.revision.request) && !/\bQ[12]\b/.test(last.revision.request) && panel.conversation().activePlan().version === 2, `U8: 回答は計画の修正として送られ v2 になる（未回答の質問も質問文で伝える。Q 番号は使わない）: ${last.revision && last.revision.request}`);
+  assert(Array.isArray(last.decisions) && last.decisions.length === 1 && last.decisions[0].answer === '100万円以上' && last.decisions[0].source === 'answer-card' && last.decisions[0].status === 'answered' && /^D[1-9]/.test(last.decisions[0].id), `U8: 回答欄の回答は決定事項（出典 answer-card）として Planner Context に載る: ${JSON.stringify(last.decisions)}`);
   assert(panel.conversation().messages().some(m => m.type === 'USER' && /確認事項への回答/.test(m.text)), 'U8: 送った回答は会話に利用者の発言として残る');
   const html2 = $('kt-ai-chat').innerHTML;
-  assert((html2.match(/class="kt-ai-qa-input"/g) || []).length === 2 && /新しい版があります/.test(html2), 'U8: 回答欄は最新の版の確認事項だけ（古い版は読むだけ）');
+  // 同じ Q1・Q2 を AI がもう一度質問した（respOf は毎回同じ質問を返す）→ 回答済みの Q1 は回答欄を出さず「回答済み」と示す（再質問として数える）。Q2 だけ回答欄
+  assert((html2.match(/class="kt-ai-qa-input"/g) || []).length === 1 && /回答済み：[^<]*→ 100万円以上/.test(html2) && /新しい版があります/.test(html2) && panel.conversation().metrics().reasked === 1, `U8: 回答欄は最新の版の未回答の確認事項だけ（回答済みの再質問は出さない・古い版は読むだけ）: reasked=${panel.conversation().metrics().reasked}`);
 }
 
 // =========================================================
