@@ -318,6 +318,25 @@ console.log('\n--- 余計な確認: 確認の手順（REQUIRE_CONFIRMATION）を
   assert(r3.status !== 'PENDING', `必要な値（通知時刻）が無い手順は、確認の手順を承認しても反映しない: ${r3.status} ${r3.reason}`);
 }
 
+// =========================================================
+console.log('\n--- ダークテーマのプロセス図: 暗い配色で描く（ライトは変えない）---');
+{
+  const { KTPlanReview: PR } = T2;
+  const before = { states: [{ name: '作成中' }, { name: '承認待ち' }, { name: '承認済み' }], actions: [{ name: '申請する', from: '作成中', to: '承認待ち', filterCond: '' }, { name: '承認する', from: '承認待ち', to: '承認済み', filterCond: '' }] };
+  const after = { states: [...before.states, { name: '部長承認待ち', origin: 'proposed' }], actions: [...before.actions, { name: '部長へ申請', from: '作成中', to: '部長承認待ち', filterCond: 'amount >= "1000000"' }] };
+  const code = PR.processMermaid(after, before);
+  assert(/fill:#e3f0ff,stroke:#1a73e8/.test(code) && /linkStyle \d+ stroke:#1a73e8,stroke-width:3px/.test(code), '前提: プロセス図は追加・変更を明るい青で強調する（ライトの配色）');
+  const light = KTAiChatUi.themedMermaid(code, false);
+  assert(light === code, 'ライトテーマでは何も変えない（既存の表示のまま）');
+  const dark = KTAiChatUi.themedMermaid(code, true);
+  assert(/^%%\{init: \{"theme": "base", "themeVariables": \{/.test(dark) && /"background": "transparent"/.test(dark) && /"primaryColor": "#1f2a3a"/.test(dark) && /"primaryTextColor": "#eef2f8"/.test(dark) && /"lineColor": "#9aa4b2"/.test(dark) && /"edgeLabelBackground": "#1b1b1b"/.test(dark), 'ダーク: 背景（透明）・ノード・文字・線・辺のラベルを暗い配色に');
+  assert(!/#e3f0ff/.test(dark) && /fill:#16325c,stroke:#7fb2ff,color:#f5f8ff/.test(dark) && /stroke:#7fb2ff,stroke-width:3px/.test(dark) && !/stroke:#1a73e8/.test(dark), 'ダーク: 追加・変更の強調（明るい青）を暗い背景で読める色に替える');
+  assert(KTAiChatUi.themedMermaid(dark, true) === dark && KTAiChatUi.themedMermaid('', true) === '', '二重に変換しない・空はそのまま');
+  const wsDark = KTAiChatUi.workspaceHtml({ isDark: true, border: '#2a2a2a', bg: '#111' });
+  const wsLight = KTAiChatUi.workspaceHtml({ isDark: false, border: '#ccc', bg: '#F5F5F5' });
+  assert(/id="kt-ai-workspace" data-theme="dark"/.test(wsDark) && !/data-theme="dark"/.test(wsLight.replace(/#kt-ai-workspace\[data-theme="dark"\]/g, '')) && /#kt-ai-workspace\[data-theme="dark"\] \.mermaid svg\{ background:transparent !important; \}/.test(wsDark), '開発支援のタブにテーマを付け、ダークのときだけプロセス図の背景を透明にする');
+}
+
 console.log(`\n${state.failed === 0 ? 'ALL PASSED' : 'FAILED'}: ${state.passed} passed / ${state.failed} failed`);
 process.exit(state.failed === 0 ? 0 : 1);
 })().catch((e) => { console.error(e); process.exit(1); });

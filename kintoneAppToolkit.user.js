@@ -13697,7 +13697,7 @@
       const proc = review.simulation?.process;
       const procHtml = proc && proc.changed ? `<div style="margin-top:8px;"><b>プロセス管理の変更前後</b>
         <div style="display:flex; gap:8px; flex-wrap:wrap; margin-top:4px;">
-          <div style="flex:1 1 280px; border:1px solid #ccc; border-radius:6px; padding:6px;"><div style="font-size:11px; opacity:.7;">Before</div><pre class="kt-ai-mermaid" data-side="before" style="font-size:11px; white-space:pre-wrap; margin:0;">${esc(proc.mermaid.before)}</pre></div>
+          <div style="flex:1 1 280px; border:1px solid var(--kt-ai-border, #ccc); border-radius:6px; padding:6px;"><div style="font-size:11px; opacity:.7;">Before</div><pre class="kt-ai-mermaid" data-side="before" style="font-size:11px; white-space:pre-wrap; margin:0;">${esc(proc.mermaid.before)}</pre></div>
           <div style="flex:1 1 280px; border:1px solid #1a73e8; border-radius:6px; padding:6px;"><div style="font-size:11px; opacity:.7;">After（青＝追加・変更）</div><pre class="kt-ai-mermaid" data-side="after" style="font-size:11px; white-space:pre-wrap; margin:0;">${esc(proc.mermaid.after)}</pre></div>
         </div>
         <div style="font-size:11px; opacity:.8; margin-top:4px;">After: ${esc(proc.after.states.map(x => x.name).join(' → '))}　アクション ${proc.after.actions.length} 件（Before ${proc.before.actions.length} 件）</div>
@@ -13895,7 +13895,7 @@
             <div style="font-size:12px; margin-top:2px;">動作テスト環境の承認フローを変更します。${(p?.groups || []).length ? `（${p.groups.map(g => `${g.groupId}: ${g.stepIds.length} step を 1 回の更新にまとめます`).join('・')}）` : ''}</div>
             ${procSteps.some(x => !isUpdateAction(x.actionType)) ? `<div style="font-size:12px; margin-top:4px; font-weight:600;">追加：</div>${procSteps.filter(x => !isUpdateAction(x.actionType)).map(x => `<div style="font-size:12px; margin-left:8px;">${esc(processLine(x))}</div>`).join('')}` : ''}
             ${procSteps.some(x => isUpdateAction(x.actionType)) ? `<div style="font-size:12px; margin-top:4px; font-weight:600;">既存変更：</div>${procSteps.filter(x => isUpdateAction(x.actionType)).map(x => `<div style="font-size:12px; margin-left:8px;">${esc(processLine(x))}</div>`).join('')}` : ''}
-            ${s.review?.simulation?.process?.mermaid ? `<div style="display:flex; gap:6px; flex-wrap:wrap; margin-top:6px;">${mermaidBox('Before', s.review.simulation.process.mermaid.before, '#ccc')}${mermaidBox('Proposed After（青＝追加・変更）', s.review.simulation.process.mermaid.after, '#1a73e8')}</div>` : ''}
+            ${s.review?.simulation?.process?.mermaid ? `<div style="display:flex; gap:6px; flex-wrap:wrap; margin-top:6px;">${mermaidBox('Before', s.review.simulation.process.mermaid.before, 'var(--kt-ai-border, #ccc)')}${mermaidBox('Proposed After（青＝追加・変更）', s.review.simulation.process.mermaid.after, '#1a73e8')}</div>` : ''}
             ${partitionHtml(s.review?.simulation?.process?.partition)}
           </div>` : '';
         // ルックアップ（Phase 13 §39）: 参照元 / キー / 追加する取得項目 / 既存はそのまま / 参照元アプリは変更しない
@@ -13962,7 +13962,7 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
           <div style="margin-top:4px; font-size:12px;">✓ ${verified} 件 VERIFIED　⚠ ${warn} 件　× ${failed} 件</div>
           <div style="font-size:12px;">${esc(simText)}</div>
           <div style="font-size:11px; opacity:.8;">${esc(reText)}</div>${lkDoneHtml}${aaDoneHtml}
-          ${ex?.process ? `<div id="kt-ai-exec-process" style="margin-top:6px;"><b>プロセス管理の Before / Planned / Actual</b><div style="display:flex; gap:6px; flex-wrap:wrap; margin-top:4px;">${mermaidBox('Before（実行前）', ex.process.mermaid?.before, '#ccc')}${mermaidBox('Planned（Review の After）', ex.process.mermaid?.planned, '#1a73e8')}${mermaidBox('Actual（反映後の動作テスト環境。青＝実行前との差）', ex.process.mermaid?.actual, '#2e7d32')}</div><div style="font-size:11px; opacity:.8; margin-top:2px;">Actual: ステータス ${(ex.process.actual?.states || []).map(x => x.name).join(' → ')}　アクション ${(ex.process.actual?.actions || []).length} 件（実行前 ${(ex.process.before?.actions || []).length} 件）</div>${partitionHtml(ex.process.partition)}</div>` : ''}
+          ${ex?.process ? `<div id="kt-ai-exec-process" style="margin-top:6px;"><b>プロセス管理の Before / Planned / Actual</b><div style="display:flex; gap:6px; flex-wrap:wrap; margin-top:4px;">${mermaidBox('Before（実行前）', ex.process.mermaid?.before, 'var(--kt-ai-border, #ccc)')}${mermaidBox('Planned（Review の After）', ex.process.mermaid?.planned, '#1a73e8')}${mermaidBox('Actual（反映後の動作テスト環境。青＝実行前との差）', ex.process.mermaid?.actual, '#2e7d32')}</div><div style="font-size:11px; opacity:.8; margin-top:2px;">Actual: ステータス ${(ex.process.actual?.states || []).map(x => x.name).join(' → ')}　アクション ${(ex.process.actual?.actions || []).length} 件（実行前 ${(ex.process.before?.actions || []).length} 件）</div>${partitionHtml(ex.process.partition)}</div>` : ''}
           ${list}
           <div style="margin-top:6px; font-size:12px;"><b>運用環境にはまだ反映されていません。</b>（運用環境への反映は kintone のアプリ設定画面の［アプリを更新］で行います。Toolkit は運用環境へ反映しません）</div>
           <div style="margin-top:8px; display:flex; gap:6px; flex-wrap:wrap;">
@@ -14955,6 +14955,8 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
         #kt-ai-workspace .kt-ai-card.is-old{ opacity:.7; }
         #kt-ai-workspace .kt-ai-card .kt-ai-mermaid-row{ display:flex; gap:6px; flex-wrap:wrap; margin-top:4px; }
         #kt-ai-workspace .kt-ai-card .kt-ai-mermaid-row > div{ flex:1 1 220px; min-width:0; overflow-x:auto; }
+        /* Phase 22: ダークテーマのプロセス図は背景を透明にする（枠の中だけ白くならない）。配色は themedMermaid */
+        #kt-ai-workspace[data-theme="dark"] .mermaid svg{ background:transparent !important; }
         #kt-ai-workspace .kt-ai-free{ border:2px solid #2563eb; border-radius:8px; padding:10px; margin-top:6px; }
         #kt-ai-workspace .kt-ai-tech{ margin-top:8px; font-size:11px; opacity:.85; }
         #kt-ai-workspace .kt-ai-tech > summary{ cursor:pointer; }
@@ -14977,7 +14979,7 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
       const c = colors || { border: '#ccc', bg: 'transparent' };
       const tabs = KTAiWorkspaceViewModel.PANES.map(p => `<button type="button" class="btn kt-ai-dtab${p === 'plan' ? ' active' : ''}" data-pane="${p}"${p === 'connection' && !paidEnabled ? ' style="display:none;"' : ''}>${esc(KTAiWorkspaceViewModel.PANE_JA[p])}</button>`).join('');
       return `${styleHtml()}
-        <div id="kt-ai-workspace" style="--kt-ai-border:${esc(c.border)}; --kt-ai-card-bg:${esc(c.bg)};">
+        <div id="kt-ai-workspace"${c.isDark ? ' data-theme="dark"' : ''} style="--kt-ai-border:${esc(c.border)}; --kt-ai-card-bg:${esc(c.bg)};">
           <div id="kt-ai-header" class="kt-ai-ws-header"></div>
           <div class="kt-ai-ws-body">
             <div class="kt-ai-ws-main">
@@ -15496,7 +15498,19 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
         diff: rv?.diff ? (rv.diff.lines || []).map(l => `${l.type}${l.text}`).join('\n') : '',
       };
     }
-    return { INTENT_JA, STATUS_JA, STRATEGY_JA, CHECK_JA, SPEC_STATUS_JA, workspaceHtml, headerHtml, baseHtml, baseDiffHtml, freePanelHtml, chatHtml, messageHtml, questionList, questionsCardHtml, planCardHtml, reviewCardHtml, diffCardHtml, codeCardHtml, codePaneHtml, previewReadyHtml, rollbackReadyHtml, executionCardHtml, rollbackCardHtml, answerCardHtml, errorCardHtml, readinessCounts, patternsHtml,
+    /**
+     * Phase 22（ダークテーマ）: プロセス図（Mermaid）をダークテーマで描くための変換。Phase 21 の実機で、画面は暗いのにプロセス図のノードだけが
+     * Mermaid の既定（ライト）の明るい色のままだった。ダークのときだけ、暗い配色（背景・ノード・文字・線・辺のラベル）を指定し、
+     * 追加・変更の強調（明るい青の塗り・線）を暗い背景で読める色に替える。ライトのときは何も変えない（既存の表示のまま）
+     */
+    const MERMAID_DARK_INIT = '%%{init: {"theme": "base", "themeVariables": {"background": "transparent", "primaryColor": "#1f2a3a", "primaryBorderColor": "#6b8fd6", "primaryTextColor": "#eef2f8", "secondaryColor": "#252525", "tertiaryColor": "#1b1b1b", "lineColor": "#9aa4b2", "textColor": "#e6e9ef", "edgeLabelBackground": "#1b1b1b", "clusterBkg": "#1b1b1b", "clusterBorder": "#444444", "fontSize": "11px"}}}%%';
+    function themedMermaid(code, dark) {
+      const src = String(code ?? '');
+      if (!dark || !src.trim() || /^\s*%%\{\s*init/.test(src)) return src;
+      const body = src.replace(/fill:#e3f0ff,stroke:#1a73e8/g, 'fill:#16325c,stroke:#7fb2ff,color:#f5f8ff').replace(/stroke:#1a73e8,stroke-width:3px/g, 'stroke:#7fb2ff,stroke-width:3px');
+      return `${MERMAID_DARK_INIT}\n${body}`;
+    }
+    return { INTENT_JA, STATUS_JA, STRATEGY_JA, CHECK_JA, SPEC_STATUS_JA, themedMermaid, workspaceHtml, headerHtml, baseHtml, baseDiffHtml, freePanelHtml, chatHtml, messageHtml, questionList, questionsCardHtml, planCardHtml, reviewCardHtml, diffCardHtml, codeCardHtml, codePaneHtml, previewReadyHtml, rollbackReadyHtml, executionCardHtml, rollbackCardHtml, answerCardHtml, errorCardHtml, readinessCounts, patternsHtml,
       // Phase 17
       consultationStartHtml, specCardHtml, jsPreviewReadyHtml, jsRollbackReadyHtml, jsExecutionCardHtml, jsRollbackCardHtml, consultChoicesHtml, jsRegisterPaneHtml,
       // Phase 19: 会話は要約、右 Workspace が正本
@@ -16401,7 +16415,9 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
       if (!m || typeof m.run !== 'function' || typeof root.querySelectorAll !== 'function') return;
       const nodes = [...root.querySelectorAll('pre.kt-ai-mermaid')];
       if (!nodes.length) return;
-      const divs = nodes.map(pre => { const div = document.createElement('div'); div.className = 'mermaid'; div.style.fontSize = '11px'; div.textContent = pre.textContent; pre.replaceWith(div); return div; });
+      // Phase 22: ダークテーマのときは暗い配色で描く（ライトのときは変えない）
+      const dark = typeof getThemeColors === 'function' && !!getThemeColors().isDark;
+      const divs = nodes.map(pre => { const div = document.createElement('div'); div.className = 'mermaid'; div.style.fontSize = '11px'; div.textContent = KTAiChatUi.themedMermaid(pre.textContent, dark); pre.replaceWith(div); return div; });
       try { const r = m.run({ nodes: divs }); if (r && typeof r.catch === 'function') r.catch(() => { }); } catch (e) { }
     }
     const reviewOutput = () => (lastPlan && lastReview) ? KTPlanReview.executorOutput(lastPlan, lastReview, [...decisions.entries()].filter(([, v]) => v === 'approve').map(([k]) => k)) : null;
