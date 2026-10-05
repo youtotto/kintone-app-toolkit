@@ -271,7 +271,7 @@ console.log('\n--- 4. UI（mountAiWorkspace）---');
     assert(u.opened.length === 1 && u.opened[0].includes(`session=${sid}`), '承認ページを開く');
     assert(u.$('kt-ai-session').style.display === 'flex' && u.$('kt-ai-connecting').style.display === 'none' && u.$('kt-ai-conn-badge').textContent === '✓ 接続済み' && u.$('kt-ai-paid-status').textContent.includes('Nest Rec AIに接続しました') && u.$('kt-ai-ask').disabled === false, '接続完了: ✓ 接続済み・AIに質問が有効');
     const lines = u.$('kt-ai-session-lines').innerHTML;
-    assert(lines.includes('AI Assistant') && lines.includes('利用可能') && lines.includes('接続先') && lines.includes('>h<') && lines.includes('契約') && lines.includes('有効（') && lines.includes('2099') && !lines.includes('2026/10/2') && lines.includes('AI利用') && lines.includes('6 / 100'), '接続後の表示: AI Assistant / 接続先 / 契約（契約の期限であって Access の期限ではない）/ AI利用');
+    assert(lines.includes('AI Assistant') && lines.includes('利用可能') && lines.includes('接続先') && lines.includes('>h<') && lines.includes('契約') && lines.includes('有効（') && lines.includes('2099') && !/2026\/10\/2(?!\d)/.test(lines) && lines.includes('AI利用') && lines.includes('6 / 100'), '接続後の表示: AI Assistant / 接続先 / 契約（契約の期限であって Access の期限ではない）/ AI利用');
     const allText = u.host.innerHTML + u.$('kt-ai-paid-status').textContent + lines;
     assert(!/AT-\d|RT-\d|v1\.AT|v1\.RT/.test(allText), 'UI に Access / Refresh の文字列が出ない');
     // 接続解除
