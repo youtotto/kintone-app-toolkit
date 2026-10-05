@@ -729,6 +729,68 @@ await section(async () => {
   assert(/通知先の作業者は、変わった後のステータスの作業者/.test(st) && /「承認待ち」になったとき → [^／）]*フィールド「承認者（approver）」/.test(st) && /作業者の無いステータス（[^）]*「完了」[^）]*）になったときは届かない/.test(st), `U2: 作業者の宛先を設定から書く: ${st}`);
 });
 
+console.log('\n--- V. 4 回目の差分レビューの指摘（2026-10-05）: 語尾つきのフィールドの質問・「？」・抜粋の上限・「はい」「いいえ」の語の順・委ねる部分 ---');
+await section(async () => {
+  // V1: フィールドそのものの質問は「教えて」「分かりますか」「当日」「前日」が付いても通知の相談にしない。「届かない」は通知の相談
+  const ip = inputsWith({ ...LABEL_FIELDS, mail: fld('LINK', 'mail', 'メール') });
+  const not = ['期限の型を教えてください', '期限の初期値を当日にしたい', '期限の初期値を前日にできる？', '期限フィールドはどこで使われているか分かりますか？', '期限を削除する前に確認することは？', '期限の選択肢を教えて', '申請書類が届いたら担当に回したい'];
+  const wrong = not.filter(q => isNotify(gen(q, { inputs: ip })));
+  assert(!wrong.length, `V1: 語尾つきのフィールドの質問は通知の相談にしない: ${wrong.join(' / ')}`);
+  const amb = gen('連絡先と承認者の違いが分からない', { inputs: ip });
+  assert(!amb.ok && amb.reason === 'ambiguous', `V1: 違いの質問は候補を選ぶ: ${amb.ok}/${amb.reason}`);
+  const yes = ['お知らせが届かない', 'メールが届かない', '申請が上長に届かない', '承認申請が承認者に届いていない'];
+  const missed = yes.filter(q => !isNotify(gen(q, { inputs: ip })));
+  assert(!missed.length, `V1: 「届かない」は通知の相談: ${missed.join(' / ')}`);
+});
+await section(async () => {
+  // V2: 行の長いファイルでも、抜粋の本文は範囲の最後の行まで入り、優先の行（承認者）が抜粋に入る。まとめただけの抜粋を「削った」と記録しない
+  const pad = (s) => `${s}${' '.repeat(Math.max(0, 66 - s.length))}// ${'x'.repeat(20)}`;
+  const LONG = Array.from({ length: 32 }, (_, i) => {
+    const n = i + 1;
+    if (n === 1) return '(() => {';
+    if (n === 2) return "  kintone.events.on('app.record.edit.submit', (event) => {";
+    if (n === 5) return pad("    const a = event.record['case_name'].value;");
+    if (n === 12) return pad("    const b = event.record['customer_code'].value;");
+    if (n === 20) return pad("    event.record['approver'].value = [{ code: a + b }];");
+    if (n === 31) return '  });';
+    if (n === 32) return '})();';
+    return pad(`    // ${n} 行目`);
+  }).join('\n');
+  const ip = inputsWith({}, { files: [{ name: 'long.js', target: 'desktop', kind: 'js', text: LONG }] });
+  const g = gen('承認漏れを防ぐ通知はある？', { inputs: ip });
+  const ex = g.ctx.facts.filter(f => f.kind === 'code-excerpt' && f.file?.name === 'long.js');
+  assert(ex.some(f => /(^|\n)20: +event\.record\['approver'\]/.test(f.text)), `V2: 優先の行（20 行目の承認者）が抜粋に入る: ${ex.map(f => `${f.lines.from}-${f.lines.to}`).join(',')}`);
+  assert(ex.every(f => new RegExp(`(^|\\n)${f.lines.to}: `).test(f.text) && f.lines.to - f.lines.from + 1 <= 20), `V2: 本文は範囲の最後の行まで・範囲は上限以内: ${ex.map(f => `${f.lines.from}-${f.lines.to}`).join(',')}`);
+  const tr = (g.ctx.truncation.sections || []).find(s => s.name === 'facts.code-excerpt');
+  assert(!tr || tr.total > tr.included, 'V2: 記録は実際に落とした抜粋があるときだけ');
+});
+await section(async () => {
+  // V3: 「おすすめでいい？」「任せる？」は質問（委ねない）。「おすすめで進めてもらえますか？」「おすすめで行きましょう」は委ねる
+  const { c } = makeConv([planWith([])]);
+  await c.send('承認待ちの案件を見落とさないようにするには？');
+  const q = ['おすすめでいい？', 'おすすめで大丈夫？', '提案でいい？', '任せる？'].filter(s => c.classify(s).reason === 'ADOPT_CONSULTATION');
+  assert(!q.length, `V3: 質問は委ねない: ${q.join(' / ')}`);
+  const y = ['おすすめで進めてもらえますか？', 'おすすめで行きましょう', 'おすすめでよろしく'].filter(s => c.classify(s).reason !== 'ADOPT_CONSULTATION');
+  assert(!y.length, `V3: 頼む言い方は委ねる: ${y.join(' / ')}`);
+});
+await section(async () => {
+  // V4: 「はい」「いいえ」は、未回答の確認事項が初めから 1 件のときだけ回答にする（語の順に関係なく）。委ねる部分「そちらに任せます」も推奨の文を回答に
+  const qs = [QREC({ id: 'Q1', question: '既存のメール通知は残しますか？', topic: 'other', recommendation: '' }), QREC({ id: 'Q2', question: '何日たったら催促しますか？', topic: 'threshold', recommendation: '3 日' })];
+  for (const say of ['いいえ。5日で', '5日で。いいえ']) {
+    const { c, calls } = makeConv([planWith(qs), planWith([])]);
+    await c.send('承認漏れを防ぎたい');
+    await c.send(say);
+    const ds = (calls.plan[1] && calls.plan[1].decisions) || [];
+    assert(!ds.some(d => d.answer === 'いいえ'), `V4: 「${say}」の「いいえ」を残りの確認事項の回答にしない: ${JSON.stringify(ds.map(d => d.answer))}`);
+  }
+  const qs2 = [QREC({ id: 'Q1', question: '経過期間は、どの時点から数えますか？', topic: 'timing', recommendation: '更新日時から数える' }), QREC({ id: 'Q2', question: '起算日から何日後に通知しますか？', topic: 'threshold', recommendation: '3 日後' })];
+  const k = makeConv([planWith(qs2), planWith([])]);
+  await k.c.send('承認漏れを防ぎたい');
+  await k.c.send('5日で、数え方はそちらに任せます');
+  const ds2 = (k.calls.plan[1] && k.calls.plan[1].decisions) || [];
+  assert(ds2.some(d => d.answer === '更新日時から数える') && ds2.some(d => /5日/.test(d.answer)), `V4: 「数え方はそちらに任せます」も推奨の文を回答に: ${JSON.stringify(ds2.map(d => d.answer))}`);
+});
+
 console.log(`\n${state.failed ? 'FAILED' : 'ALL PASSED'}: ${state.passed} passed / ${state.failed} failed`);
 process.exit(state.failed ? 1 : 0);
 })().catch(e => { console.error(e); process.exit(1); });

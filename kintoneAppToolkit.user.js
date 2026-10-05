@@ -5480,32 +5480,29 @@
         //   範囲に入る行・範囲と重なる行は、範囲を広げてまとめる（行の後ろ half 行も残す。広げるのは maxCodeExcerptLines の 2 倍まで）。広げられないときは重ならないようにずらす
         const windows = [];
         const cap = limits.maxCodeExcerptLines * 2;
-        let uncovered = 0;
         for (const ln of anchors) {
-          const s0 = Math.max(1, ln - half), e0 = Math.min(lines.length, ln + half);
-          const hit = windows.find(w => s0 <= w.e && w.s <= e0);
-          if (hit) {
-            const s1 = Math.min(hit.s, s0), e1 = Math.max(hit.e, e0);
-            if (e1 - s1 + 1 <= cap) { hit.s = s1; hit.e = e1; continue; }
-            if (ln >= hit.s && ln <= hit.e) continue;   // 行は既にある範囲に入っている（広げると長すぎる）
-          }
-          uncovered++;
+          let s = Math.max(1, ln - half), e = Math.min(lines.length, ln + half);
+          // 重なる範囲（行が既にある範囲に入るときも）は、まとめた長さが cap 以内のときだけ広げてまとめる（行の後ろも残す。範囲の中心の行（優先の行）はそのまま）
+          const hit = windows.find(w => s <= w.e && w.s <= e);
+          if (hit && Math.max(hit.e, e) - Math.min(hit.s, s) + 1 <= cap) { hit.s = Math.min(hit.s, s); hit.e = Math.max(hit.e, e); continue; }
+          if (windows.some(w => ln >= w.s && ln <= w.e)) continue;   // 既にある範囲に入っている（広げると長すぎる）
           if (windows.length >= limits.maxCodeExcerpts) continue;
-          let s = s0, e = e0;
           for (const w of windows) { if (s <= w.e && w.s <= e) { if (ln > w.e) s = w.e + 1; else e = w.s - 1; } }
           if (s <= ln && ln <= e) windows.push({ ln, s, e });
         }
-        // 広げた範囲どうしが重なったら 1 つにまとめる
+        // 広げた範囲が別の範囲と重なったら、後ろの範囲を前の範囲の後ろに寄せる（中心の行が外れたら、範囲の先頭を中心にする）
         windows.sort((a, b) => a.s - b.s);
-        for (let i = windows.length - 1; i > 0; i--) if (windows[i].s <= windows[i - 1].e) { windows[i - 1].e = Math.max(windows[i - 1].e, windows[i].e); windows.splice(i, 1); }
-        if (uncovered > windows.length) trunc('facts.code-excerpt', uncovered, windows.length);
+        for (let i = 1; i < windows.length; i++) if (windows[i].s <= windows[i - 1].e) { windows[i].s = windows[i - 1].e + 1; if (windows[i].ln < windows[i].s) windows[i].ln = windows[i].s; }
+        for (let i = windows.length - 1; i >= 0; i--) if (windows[i].s > windows[i].e) windows.splice(i, 1);
+        const uncovered = anchors.filter(ln => !windows.some(w => ln >= w.s && ln <= w.e)).length;
+        if (uncovered) trunc('facts.code-excerpt', windows.length + uncovered, windows.length);
         for (const { ln, s, e: e2 } of windows) {
           const text0 = lines.slice(s - 1, e2).map((t, i) => `${s + i}: ${t}`).join('\n');
           // 範囲を広げてまとめた抜粋は、文字数の上限も行数に合わせて広げる（後ろが切れて、範囲の表記と食い違わないように）
           const text = bounded(text0, limits.maxSnippetLen * 8 * Math.max(1, Math.ceil((e2 - s + 1) / Math.max(1, limits.maxCodeExcerptLines))));
           facts.push({
             kind: 'code-excerpt', key: `CODE|${id}|${ln}`, confidence: 'CERTAIN',
-            file: { id, name, target: tgt }, lines: { from: s, to: e2, anchor: ln }, text: bounded(text, limits.maxSnippetLen * 8),
+            file: { id, name, target: tgt }, lines: { from: s, to: e2, anchor: ln }, text,
             statement: `「${name}」${s}〜${e2} 行目の抜粋（${ln} 行目付近。秘密情報らしき値は伏字）`,
           });
         }
@@ -5536,11 +5533,15 @@
     //   各 fact に確かめ方（basis: setting = 設定の取得 / code = コードの読解 / runtime = 動作の確認）を持たせ、断定の強さを分ける
     //   話題の語（2026-10-05 差分レビュー: 「承認依頼が届かない」「見逃し」「放置されている」「対応漏れ」「締切」の言い方でも通知の相談にする）。
     //   「届」「放置」は、知らせ・承認・案件の語と組んだときだけ（「注文が届いたら」「届け先」「放置自転車」は通知の相談ではない）
-    const NOTIFY_TOPIC = /通知|知らせ|連絡|メール|リマインド|リマインダー|催促|期限|宛先|アラート|承認漏れ|見落とし|見逃し|(?:依頼|メール|連絡|知らせ|リマインダー)[^。、]{0,8}届(?:く|か|け|い)|伝わ|気づ[かけ]|気付[かけ]|放置(?:され|状態)|(?:承認|案件|申請)[^。、]{0,8}放置|(?:対応|承認)の?(?:漏れ|忘れ)|締切|締め切り|期日/;
+    //   「承認・申請が届かない」は通知の相談（「申請書類が届いたら」は違う）
+    const NOTIFY_TOPIC = /通知|知らせ|連絡|メール|リマインド|リマインダー|催促|期限|宛先|アラート|承認漏れ|見落とし|見逃し|(?:依頼|メール|連絡|知らせ|リマインダー)[^。、]{0,8}届(?:く|か|け|い)|(?:承認|申請)(?!書)[^。、]{0,8}届(?:か|い|け)|伝わ|気づ[かけ]|気付[かけ]|放置(?:され|状態)|(?:承認|案件|申請)[^。、]{0,8}放置|(?:対応|承認)の?(?:漏れ|忘れ)|締切|締め切り|期日/;
     // フィールドそのものを聞く言い方（型・必須・削除・どこで使われる・違い など）
     const FIELD_QUESTION = /型|必須|削除|消し|消す|消して|使われ|どこで|ラベル|フィールドコード|初期値|選択肢|桁|文字数|形式|入力チェック|重複|違い|違う|名前を変え|並び順/;
     // 知らせ方・時期の言い方（「期限が近づいたら教えて」「期限切れ」「過ぎた案件がわかる？」）
-    const NOTICE_WORDS = /教え|知ら|わか|分か|把握|気づ|気付|近づ|近く|迫|過ぎ|超え|切れ|前に|前日|当日|経過|たったら|漏れ|忘れ|見逃|見落|届|伝わ|催促|促/;
+    //   質問の語尾に出る語（教えて・分かる？）は入れない（2026-10-05 差分レビュー: 「期限の型を教えてください」が通知の相談になった）
+    const NOTICE_WORDS = /近づ|近く|迫|過ぎ|超え|切れ|前日|経過|たったら|漏れ|忘れ|見逃|見落|催促|促/;
+    // 知らせが来ないことをはっきり言う語（「お知らせが届かない」「メールが届かない」）。除いたフィールドの型に関係なく通知の相談
+    const NOTICE_STRONG = /届(?:か|い|け)|伝わ|気づ|気付/;
     /**
      * 通知の相談か（話題の語があるか）。フィールドのラベル・コードとして出てくる語（「メールアドレス」「期限」「連絡先」「お知らせ」）は除いて判定する
      * （2026-10-05 差分レビュー: フィールドの名前だけで通知の相談と判定され、Context が 2 倍になり、候補も選ばせなくなった）。ただし、除いたフィールドが
@@ -5556,8 +5557,13 @@
       if (NOTIFY_TOPIC.test(s)) return true;
       if (!hits.length) return false;
       const usedByNotify = new Set((deps?.edges || []).filter(e => e.sourceType === 'NOTIFICATION' && e.targetType === 'FIELD').map(e => String(e.targetId)));
-      if (hits.some(h => usedByNotify.has(String(h.id)) || /DATE|TIME/.test(String(h.fieldType || ''))) && NOTICE_WORDS.test(s)) return true;
-      if (hits.some(h => /通知|リマインド|リマインダー|アラート|催促/.test(h.key)) && !FIELD_QUESTION.test(s0)) return true;
+      // フィールドそのものを聞く言い方（型・初期値・削除・違い など）は通知の相談にしない（「期限の型を教えてください」「期限の初期値を前日にできる？」）
+      if (FIELD_QUESTION.test(s0)) return false;
+      // 判定に使うのは、名前に通知の語を含んでいたために除いたフィールドだけ（文の中のほかのフィールド（承認者など）では当てない）
+      const named = hits.filter(h => NOTIFY_TOPIC.test(h.key));
+      if (named.length && NOTICE_STRONG.test(s)) return true;
+      if (named.some(h => usedByNotify.has(String(h.id)) || /DATE|TIME/.test(String(h.fieldType || ''))) && NOTICE_WORDS.test(s)) return true;
+      if (named.some(h => /通知|リマインド|リマインダー|アラート|催促/.test(h.key))) return true;
       return false;
     }
     //   確かめ方の意味（setting = kintone の API で取得した設定 / code = JavaScript から読んだ処理。動いているかは確かめていない / runtime = 実際に動かして確かめた結果）は
@@ -5831,8 +5837,21 @@
       //   上限を超えたら、優先度の低い種類から削る（概要・作業の基準は最後まで残す。以前は末尾から削り、概要の 7 件が先に落ちた）
       let baseFacts = facts;
       // 削るときに残す事実: 質問の対象・候補のフィールドを条件・通知先・基準に使う通知・リマインダー・プロセス管理と、選んだ設定の中身
-      const keepCodes = [...(target?.type === 'field' ? [String(target.id)] : []), ...(mergedCandidates ? mergedCandidates.filter(c => c.type === 'field').slice(0, 3).map(c => String(c.id)) : [])];
-      const codeRes = keepCodes.map(c => new RegExp(`(?:^|[^A-Za-z0-9_])${c.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?:[^A-Za-z0-9_]|$)`));
+      const keepCodes = new Set([...(target?.type === 'field' ? [String(target.id)] : []), ...(mergedCandidates ? mergedCandidates.filter(c => c.type === 'field').slice(0, 3).map(c => String(c.id)) : [])]);
+      //   対象のフィールドを使う通知・プロセス管理は、依存関係の辺から決める（文の中の語では探さない。日本語のフィールドコードの部分一致を避ける）
+      const keepKeys = new Set();
+      const keepGeneral = { v: false };
+      for (const e of (deps?.edges || [])) {
+        if (e.targetType !== 'FIELD' || !keepCodes.has(String(e.targetId))) continue;
+        const sid = String(e.sourceId);
+        if (e.sourceType === 'NOTIFICATION') {
+          if (sid === 'general') keepGeneral.v = true;
+          const m = /^(perRecord|reminder):(\d+)$/.exec(sid);
+          if (m) keepKeys.add(m[1] === 'perRecord' ? `NOTIFY:perRecord#${Number(m[2]) + 1}` : `REMINDER#${Number(m[2]) + 1}`);
+        }
+        if (e.sourceType === 'PROCESS_STATE') keepKeys.add(`state:${sid}`);
+        if (e.sourceType === 'PROCESS_ACTION') keepKeys.add(`action:${sid.replace(/:\d+$/, '')}`);
+      }
       const focusSetting = target?.type === 'setting' ? String(target.id) : null;
       const keepFact = (f) => {
         if (focusSetting) {
@@ -5847,7 +5866,10 @@
             if (scope === 'reminder' && f.key === `REMINDER#${Number(idx) + 1}`) return true;
           }
         }
-        if (codeRes.length && ['notification', 'reminder', 'process-state', 'process-action'].includes(f.kind)) return codeRes.some(re => re.test(String(f.statement || '')));
+        if (keepKeys.has(f.key)) return true;
+        if (keepGeneral.v && String(f.key).startsWith('NOTIFY:general#')) return true;
+        if (f.kind === 'process-state' && keepKeys.has(`state:${f.state?.name}`)) return true;
+        if (f.kind === 'process-action' && keepKeys.has(`action:${f.action?.name}`)) return true;
         return false;
       };
       if (baseFacts.length > maxFacts) {
@@ -7954,7 +7976,12 @@
       //     kintone の通知（宛先を決めて送る）を出せない（Planner の規則があっても出た）→ 生成の対象外にし、標準の通知設定で表すよう案内する
       //     2026-10-05: メンション付きのコメントの登録による通知も対象外（Gateway の計画の AI・質問の AI と同じ方針）。メンションでは通知が届くので「送れない」とは書かない
       //     コメントの読み取り・メンション無しの履歴の登録・メンションされた人の一覧は対象外にしない（通知を目的にした言い方だけ）
-      const notifyHit = /(担当者|営業担当|作業者|承認者|上長|ユーザー|メンバー|宛先|関係者|申請者|作成者)(に|へ)(通知|メール)|通知先を(切り替|変え|決め|分け)|通知を(送信|送る|送っ|飛ば)|メンション(?:して|付き|を付け)[^。]{0,20}(?:コメント|知らせ|通知|伝え)|コメント[^。]{0,12}(?:で|を(?:登録|投稿|書き込ん|書き込み|書込ん)(?:で|して)?)[^。]{0,8}(?:知らせ|通知|伝え)/.exec([c.requirement, step.title].filter(Boolean).join(' '));
+      //     メンション・コメントは、人の宛先に知らせる・投稿する動作の形だけ（画面の表示・コメントの集計・メンションされた人の一覧は止めない）
+      const PEOPLE = '(?:担当者|営業担当|作業者|承認者|上長|ユーザー|メンバー|宛先|関係者|申請者|作成者)';
+      const notifyHit = new RegExp(`${PEOPLE}(に|へ)(通知|メール|知らせ|連絡(?!先))|通知先を(切り替|変え|決め|分け)|通知を(送信|送る|送っ|飛ば)|`
+        + `メンション(?:して|した|する|で|付きで|を付けて)[^。]{0,20}(?:コメント|知らせ|通知|伝え|連絡)|メンション付きの?コメントを(?:登録|投稿|書き込|書く|書い|残|送|追加)|`
+        + `${PEOPLE}(?:に|へ)(?:メンション付きの)?コメントで(?:知らせ|通知|伝え|連絡)|コメント(?:で|を(?:登録|投稿|書き込ん|書き込み|書込ん)(?:で|して)?)[^。]{0,4}${PEOPLE}(?:に|へ)(?:知らせ|通知|伝え|連絡)`)
+        .exec([c.requirement, step.title].filter(Boolean).join(' '));
       if (notifyHit && !externalHit) add('JS_NOTIFICATION_NOT_POSSIBLE', 'medium', `Toolkit が作る JavaScript では通知を扱いません（メンション付きのコメントの登録による通知も対象外。「${notifyHit[0]}」）。通知は標準の通知設定（レコードの条件通知・アプリの条件通知・リマインダー）で、宛先のフィールドと条件として表してください`);
       // 8. 判定
       if (worst === 'high') { r.status = STATUS.INVALID; r.safety = SAFETY.BLOCKED; r.diff.changeType = CHANGE.INVALID; }
@@ -21963,10 +21990,14 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
           continue;
         }
         if (GREETING.test(clause)) continue;
-        if (answerLike(clause, isRequest)) {
+        //   委ねる部分（「数え方はそちらに任せます」「残りは任せます」）も、回答の形として扱う（残る確認事項が 1 件なら、その確認事項の推奨を回答にする）
+        if (answerLike(clause, isRequest) || DELEGATE.test(clause)) {
           const free = open.filter(q => !taken.has(q.key));
-          if (free.length === 1) { res.answers.push({ clause, key: free[0].key, topics: free[0].topics || [] }); taken.add(free[0].key); }
-          else if (free.length > 1) res.unresolved.push({ clause, topics: [], candidates: free.map(q => q.key) });
+          // 「はい」「いいえ」は、未回答の確認事項が初めから 1 件のときだけ、その確認事項への回答にする（同じ発言のほかの節が埋めた後の残り 1 件には割り当てない。
+          //   2026-10-05 差分レビュー: 「5日で。いいえ」「PCだけ。はい」が語の順で残りの確認事項の回答になった）
+          const yn = YESNO.test(String(clause).trim());
+          if (free.length === 1 && (!yn || open.length === 1)) { res.answers.push({ clause, key: free[0].key, topics: free[0].topics || [] }); taken.add(free[0].key); }
+          else if (free.length > 1 || (free.length === 1 && yn)) res.unresolved.push({ clause, topics: [], candidates: free.map(q => q.key) });
           else res.notes.push(clause);
           continue;
         }
@@ -22540,7 +22571,8 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
     //   「おすすめの通りで」「AIのおすすめで」「おすすめ通りにして」も委ねる言い方にする（以前は質問の AI がもう一度答え、計画に進まなかった）
     //   「提案で」「提案を採用して」「ご提案のとおりで」「おすすめ案で」「おすすめのままで」「あなたに任せます」も委ねる言い方。
     //   「提案して」「おすすめして」（提案を頼む言い方）は委ねる言い方にしない（「提案」「おすすめ」の後の助詞が無い「して」は認めない）
-    const ADOPT = /^(?:(?:はい|うん|ええ|じゃあ|じゃ|では|それでは|それなら|なら|OK|ok|オッケー)[、,。．！!\s]*)?(?:(?:全部|すべて|残り|ほか|あと)(?:は|も)?[、,\s]*)?(?:(?:AI|あなた|そちら)(?:の|に)\s*)?(?:(?:おすすめ|お勧め|お薦め|オススメ|推奨)(?:の案|の方|の通り|のとおり|どおり|通り|のまま|案)?(?:で|に(?:して(?:ください|下さい)?)?|を採用(?:して)?)?|ご?提案(?:(?:の案|の通り|のとおり|どおり|通り|のまま)(?:で|に(?:して(?:ください|下さい)?)?|を採用(?:して)?)?|で|に(?:して(?:ください|下さい)?)?|を採用(?:して)?)|(?:お任せ|おまかせ|任せ)(?:ます|します|いたします|る|で|に)?)(?:\s*(?:お願い(?:します|いたします|できますか)?|進めて(?:ください|下さい)?|(?:い|良)い(?:です)?(?:よ|ね)?|いこう|行こう|OK(?:です)?|ok(?:です)?|大丈夫(?:です)?|構いません|かまいません|します|決めて(?:ください|下さい)?|いたします))*[。．！!？?\s]*$/;
+    //   文末の「？」は、頼む言い方（「お願いできますか？」「進めてもらえますか？」）のときだけ（「おすすめでいい？」「任せる？」は質問。2026-10-05 差分レビュー）
+    const ADOPT = /^(?:(?:はい|うん|ええ|じゃあ|じゃ|では|それでは|それなら|なら|OK|ok|オッケー)[、,。．！!\s]*)?(?:(?:全部|すべて|残り|ほか|あと)(?:は|も)?[、,\s]*)?(?:(?:AI|あなた|そちら)(?:の|に)\s*)?(?:(?:おすすめ|お勧め|お薦め|オススメ|推奨)(?:の案|の方|の通り|のとおり|どおり|通り|のまま|案)?(?:で|に(?:して(?:ください|下さい)?)?|を採用(?:して)?)?|ご?提案(?:(?:の案|の通り|のとおり|どおり|通り|のまま)(?:で|に(?:して(?:ください|下さい)?)?|を採用(?:して)?)?|で|に(?:して(?:ください|下さい)?)?|を採用(?:して)?)|(?:お任せ|おまかせ|任せ)(?:ます|します|いたします|る|で|に)?)(?:\s*(?:お願い(?:します|いたします)?|(?:お願いできますか|進めてもらえますか|お願いできる)[？?]?|進めて(?:ください|下さい)?|(?:い|良)い(?:です)?(?:よ|ね)?|いこう|行こう|いきましょう|行きましょう|よろしく(?:お願いします)?|OK(?:です)?|ok(?:です)?|大丈夫(?:です)?|構いません|かまいません|します|決めて(?:ください|下さい)?|いたします))*[。．！!\s]*$/;
     /** 確認事項 1 つへの委ねる答え（「数え方はおすすめで」「通知先はおまかせ」）。論点の前置き（〜は）を除いて ADOPT で判定する */
     const isAdoptAnswer = (s) => { const x = String(s ?? '').trim(); return ADOPT.test(x) || ADOPT.test(x.replace(/^[^、。]{1,20}?は[、,\s]*/, '')); };
     /** 直前の相談の答えのおすすめで進めるときの計画の依頼（goal）と修正の依頼に添える文（adoptText）。相談の答えが無ければ null */
