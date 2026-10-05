@@ -97,9 +97,12 @@ function measureAll(n) {
   const l1 = KTContext.build({ question: 'field_000 を削除して大丈夫？', data, deps, scan, options: { now: NOW } });
   const l1Loose = KTContext.build({ question: 'field_000 を削除して大丈夫？', data, deps, scan, options: { now: NOW, limits: { maxDependencyFacts: 10000, maxJsMatchFacts: 10000, maxFacts: 10000 } } });
   const l2 = KTContext.build({ focus: { type: 'file', id: 'desktop:js:common.js' }, data, deps, scan, options: { now: NOW } });
+  // 2026-10-05: 通知の相談（関連設定の詳細・関係する JS）。フィールドの名前と一緒の通知の相談も（以前は上限が無く、通知の多いアプリで Gateway の 256 KiB を超えた）
+  const notify = KTContext.build({ question: '承認漏れを防ぐ通知は足りている？', data, deps, scan, options: { now: NOW } });
+  const notifyField = KTContext.build({ question: 'field_000 の通知を見直したい', data, deps, scan, options: { now: NOW } });
   const l1Md = KTContext.measureText(KTContext.toMarkdown(l1));
   const l1Prompt = KTContext.measureText(KTContext.toPrompt(l1));
-  return { n, fieldCount: fieldsN.length, edgeCount: deps.edges.length, full, l0, l1, l1Loose, l2, l1Md, l1Prompt };
+  return { n, fieldCount: fieldsN.length, edgeCount: deps.edges.length, full, l0, l1, l1Loose, l2, l1Md, l1Prompt, notify, notifyField };
 }
 
 const fmt = (m) => `${String(m.bytes).padStart(9)} bytes ${String(m.chars).padStart(8)} chars ${String(m.approxTokens).padStart(7)} tokens`;
@@ -120,6 +123,9 @@ for (const n of [150, 400]) {
   // 2026-10-05: JavaScript からの依存関係の fact に確かめ方（basis: code）を付けた分（400 フィールドで約 15 tokens）を見込み、目安の上限を 12.1k にした（目安は L1 ≒ 5〜12k）
   assert(r.l1.size.approxTokens <= 12100, `[${n}] L1（既定）は 12.1k tokens 以内（approx ${r.l1.size.approxTokens}）`);
   assert(r.l2.size.approxTokens <= 20000, `[${n}] L2（既定）は 20k tokens 以内（approx ${r.l2.size.approxTokens}）`);
+  console.log(`  通知の相談            : ${fmt(r.notify.size)}  facts=${r.notify.facts.length}`);
+  console.log(`  通知の相談（フィールド）: ${fmt(r.notifyField.size)}  facts=${r.notifyField.facts.length}`);
+  assert(r.notify.size.bytes <= 64 * 1024 && r.notifyField.size.bytes <= 64 * 1024 && r.notify.facts.some(f => f.kind === 'overview') && r.notifyField.facts.some(f => f.kind === 'overview'), `[${n}] 通知の相談は 64 KiB 以内・概要は残る（${r.notify.size.bytes} / ${r.notifyField.size.bytes} bytes）`);
   assert(r.l1.size.bytes < r.full.bytes * 0.5, `[${n}] L1 は full DEPS の半分未満（${pct(r.l1.size.bytes, r.full.bytes)}）`);
   assert(r.l0.truncation.sections.some(s => s.name === 'app.fields' && s.total === r.fieldCount), `[${n}] L0 のフィールド一覧省略が記録される（全 ${r.fieldCount} 件）`);
   assert(r.l1Loose.facts.length >= r.l1.facts.length && (r.l1Loose.facts.length === r.l1.facts.length || r.l1.truncation.applied), `[${n}] 既定上限で省いた分は truncation に記録される`);
