@@ -38,7 +38,7 @@ console.log('\n--- F4 / F5. KTCodeReview: kintone のエラー表示の作法（
     "(function () {",
     "  'use strict';",
     "  kintone.events.on(['app.record.create.show', 'app.record.edit.show'], function (event) {",
-    "    var record = event.record;",
+    "    const record = event.record;",
     "    if (record['ステータス'] && record['ステータス'].value === '承認済み') {",
     "      record['amount'].disabled = true;",
     "    }",
@@ -49,7 +49,7 @@ console.log('\n--- F4 / F5. KTCodeReview: kintone のエラー表示の作法（
   // 実機（P20 案件・見積管理 / BF-C v2）で生成されたパッチと同じ構造: 補助関数 checkAmountWarning を show の既存 handler から呼び、change でも使う。消すときは ''
   const WARN_FN = [
     "  function checkAmountWarning(event) {",
-    "    var amountField = event.record['amount'];",
+    "    const amountField = event.record['amount'];",
     "    if (amountField.value > 1000000) {",
     "      amountField.error = '金額が100万円を超えています。';",
     "    } else {",
@@ -69,11 +69,11 @@ console.log('\n--- F4 / F5. KTCodeReview: kintone のエラー表示の作法（
   assert(rv.status === 'BLOCKED' && chk(rv, 'error-clear') && !chk(rv, 'error-clear').ok && /null/.test(chk(rv, 'error-clear').message), "F4: error を '' で消すコード → BLOCKED（error-clear。kintone は null を設定したときだけ消える）");
   assert(chk(rv, 'error-cancels-edit') && !chk(rv, 'error-cancels-edit').ok && /app\.record\.edit\.show: error と disabled/.test(chk(rv, 'error-cancels-edit').message) && !/change\.amount: error/.test(chk(rv, 'error-cancels-edit').message), 'F5: 同じ show イベントで error と disabled → BLOCKED（error-cancels-edit）。change だけで error を出すのは対象外');
   // 直したコード: 消すのは null、警告は change だけ（show の disabled と重ねない）
-  const GOOD = DEAL_LOCK.replace("})();", "  kintone.events.on(['app.record.create.change.amount', 'app.record.edit.change.amount'], function (event) {\n    var f = event.record['amount'];\n    f.error = Number(f.value || 0) > 1000000 ? '金額が100万円を超えています。' : null;\n    return event;\n  });\n})();");
+  const GOOD = DEAL_LOCK.replace("})();", "  kintone.events.on(['app.record.create.change.amount', 'app.record.edit.change.amount'], function (event) {\n    const f = event.record['amount'];\n    f.error = Number(f.value || 0) > 1000000 ? '金額が100万円を超えています。' : null;\n    return event;\n  });\n})();");
   const ok = KTCodeReview.review({ generated: gen(GOOD), customization: { ...custom, strategy: 'NEW_JS_FILE' }, plan: null, data: DATA, scan: null, existingSource: null });
   assert(chk(ok, 'error-clear').ok && chk(ok, 'error-cancels-edit').ok, '直したコード（null で消す・警告は change だけ）は 2 つの検査を通る');
   // 保存時（submit）の検証: エラーで保存自体が止まるので、error と value の組み合わせは対象外
-  const SUBMIT = "(function () {\n  'use strict';\n  kintone.events.on(['app.record.create.submit'], function (event) {\n    var r = event.record;\n    if (!r['amount'].value) { r['amount'].error = '金額を入力してください'; } else { r['case_name'].value = r['case_name'].value || '（無題）'; }\n    return event;\n  });\n})();";
+  const SUBMIT = "(function () {\n  'use strict';\n  kintone.events.on(['app.record.create.submit'], function (event) {\n    const r = event.record;\n    if (!r['amount'].value) { r['amount'].error = '金額を入力してください'; } else { r['case_name'].value = r['case_name'].value || '（無題）'; }\n    return event;\n  });\n})();";
   const sub = KTCodeReview.review({ generated: { strategy: 'NEW_JS_FILE', targetFile: 'v.js', code: SUBMIT, patch: null, events: ['app.record.create.submit'], fields: [{ code: 'amount', access: 'CONTROL' }, { code: 'case_name', access: 'WRITE' }], apis: [] }, customization: { ...custom, strategy: 'NEW_JS_FILE', events: ['app.record.create.submit'], fields: [{ code: 'amount', access: 'CONTROL' }, { code: 'case_name', access: 'WRITE' }] }, plan: null, data: DATA, scan: null, existingSource: null });
   assert(chk(sub, 'error-cancels-edit').ok, 'submit の error と value は error-cancels-edit の対象外（保存が止まるだけ）');
   const none = KTCodeReview.review({ generated: gen(DEAL_LOCK), customization: { ...custom, strategy: 'NEW_JS_FILE' }, plan: null, data: DATA, scan: null, existingSource: null });
@@ -83,11 +83,11 @@ console.log('\n--- F4 / F5. KTCodeReview: kintone のエラー表示の作法（
 // =========================================================
 console.log('\n--- BF-C（再 3）/ F24. エラー表示と編集不可: 条件で分けたコードは要確認・別 handler / 別ファイルも見る（実機の生成コード 2 本）---');
 {
-  const DEAL_LOCK = "(function () {\n  'use strict';\n  // 承認済みの案件は金額を変更できないようにする（既存の運用ルール）\n  kintone.events.on(['app.record.create.show', 'app.record.edit.show'], function (event) {\n    var record = event.record;\n    if (record['ステータス'] && record['ステータス'].value === '承認済み') {\n      record['amount'].disabled = true;\n    }\n    return event;\n  });\n})();";
+  const DEAL_LOCK = "(function () {\n  'use strict';\n  // 承認済みの案件は金額を変更できないようにする（既存の運用ルール）\n  kintone.events.on(['app.record.create.show', 'app.record.edit.show'], function (event) {\n    const record = event.record;\n    if (record['ステータス'] && record['ステータス'].value === '承認済み') {\n      record['amount'].disabled = true;\n    }\n    return event;\n  });\n})();";
   // 1 本目（実機: 承認済み・1,000,001 で金額が編集できるようになった）: 別 handler で、条件なしに error を設定
-  const SEPARATE = DEAL_LOCK.replace("})();", "  // 金額が100万円を超えたら警告を表示する\n  function checkAmountWarning(event) {\n    var record = event.record;\n    if (record['amount']) {\n      record['amount'].error = (record['amount'].value > 1000000) ? '100万円を超えています' : null;\n    }\n    return event;\n  }\n\n  kintone.events.on([\n    'app.record.create.show',\n    'app.record.edit.show',\n    'app.record.create.change.amount',\n    'app.record.edit.change.amount'\n  ], checkAmountWarning);\n})();");
+  const SEPARATE = DEAL_LOCK.replace("})();", "  // 金額が100万円を超えたら警告を表示する\n  function checkAmountWarning(event) {\n    const record = event.record;\n    if (record['amount']) {\n      record['amount'].error = (record['amount'].value > 1000000) ? '100万円を超えています' : null;\n    }\n    return event;\n  }\n\n  kintone.events.on([\n    'app.record.create.show',\n    'app.record.edit.show',\n    'app.record.create.change.amount',\n    'app.record.edit.change.amount'\n  ], checkAmountWarning);\n})();");
   // 2 本目（実機: 承認済みは編集不可のまま・警告なし。編集できるときだけ警告）: disabled を読む条件で分け、編集不可なら null
-  const GUARDED = "(function () {\n  'use strict';\n  // 金額が100万円超なら警告表示（承認済みかつ編集不可なら非表示）\n  function checkAmountWarning(event) {\n    var record = event.record;\n    var amount = record['amount'].value;\n    var status = record['ステータス'] ? record['ステータス'].value : '';\n    var disabled = record['amount'].disabled;\n    if (amount > 1000000 && !(status === '承認済み' && disabled)) {\n      record['amount'].error = '100万円を超えています';\n    } else {\n      record['amount'].error = null;\n    }\n    return event;\n  }\n\n  // 画面表示時の処理に警告表示を追加\n  kintone.events.on(['app.record.create.show', 'app.record.edit.show'], function(event) {\n    var record = event.record;\n    if (record['ステータス'] && record['ステータス'].value === '承認済み') {\n      record['amount'].disabled = true;\n    }\n    return checkAmountWarning(event);\n  });\n\n  // 金額変更時の警告表示更新\n  kintone.events.on(['app.record.create.change.amount', 'app.record.edit.change.amount'], checkAmountWarning);\n})();\n";
+  const GUARDED = "(function () {\n  'use strict';\n  // 金額が100万円超なら警告表示（承認済みかつ編集不可なら非表示）\n  function checkAmountWarning(event) {\n    const record = event.record;\n    const amount = record['amount'].value;\n    const status = record['ステータス'] ? record['ステータス'].value : '';\n    const disabled = record['amount'].disabled;\n    if (amount > 1000000 && !(status === '承認済み' && disabled)) {\n      record['amount'].error = '100万円を超えています';\n    } else {\n      record['amount'].error = null;\n    }\n    return event;\n  }\n\n  // 画面表示時の処理に警告表示を追加\n  kintone.events.on(['app.record.create.show', 'app.record.edit.show'], function(event) {\n    const record = event.record;\n    if (record['ステータス'] && record['ステータス'].value === '承認済み') {\n      record['amount'].disabled = true;\n    }\n    return checkAmountWarning(event);\n  });\n\n  // 金額変更時の警告表示更新\n  kintone.events.on(['app.record.create.change.amount', 'app.record.edit.change.amount'], checkAmountWarning);\n})();\n";
   const ops = KTCodeReview.kintoneFieldOps(KTScan.stripCommentsOnly(GUARDED));
   assert(ops.find(o => o.events.includes('app.record.edit.show')).errorGuarded === true && KTCodeReview.kintoneFieldOps(KTScan.stripCommentsOnly(SEPARATE)).every(o => !o.errorGuarded), 'kintoneFieldOps: disabled を読む条件の中だけで error を出すコードは errorGuarded（条件なしの別 handler は guarded ではない）');
   const custom = { customizationId: 'C1', requirement: '金額が100万円を超えたら警告', strategy: 'NEW_JS_FILE', platform: ['desktop'], events: ['app.record.create.show', 'app.record.edit.show', 'app.record.create.change.amount', 'app.record.edit.change.amount'], fields: [{ code: 'amount', access: 'CONTROL' }], apis: [], existingFiles: [] };
@@ -98,7 +98,7 @@ console.log('\n--- BF-C（再 3）/ F24. エラー表示と編集不可: 条件�
   const rGuard = KTCodeReview.review({ generated: gen(GUARDED), customization: custom, plan: null, data: DATA, scan: null, existingSource: null });
   assert(rGuard.status !== 'BLOCKED' && chk(rGuard, 'error-cancels-edit').ok === false && chk(rGuard, 'error-cancels-edit').severity === 'review' && /動作テスト環境/.test(chk(rGuard, 'error-cancels-edit').message), 'F24（実機 2 本目）: 編集不可を見る条件で分けたコードは停止しない（要確認・動作テストで確かめる）');
   // 別ファイル: 新規 JS が条件なしに show で error、既存の dealLock.js が同じ show で disabled → 要確認（以前は同じファイルの中しか見ず見逃していた）
-  const WARN_ONLY = "(function () {\n  'use strict';\n  kintone.events.on(['app.record.create.show', 'app.record.edit.show', 'app.record.edit.change.amount'], function (event) {\n    var f = event.record['amount'];\n    f.error = Number(f.value || 0) > 1000000 ? '100万円を超えています' : null;\n    return event;\n  });\n})();";
+  const WARN_ONLY = "(function () {\n  'use strict';\n  kintone.events.on(['app.record.create.show', 'app.record.edit.show', 'app.record.edit.change.amount'], function (event) {\n    const f = event.record['amount'];\n    f.error = Number(f.value || 0) > 1000000 ? '100万円を超えています' : null;\n    return event;\n  });\n})();";
   const data2 = FX.makeData();
   data2.customize = { scope: 'ALL', desktop: { js: [{ type: 'FILE', file: { contentType: 'text/javascript', fileKey: 'dl:lock', name: 'dealLock.js', size: '422' } }], css: [] }, mobile: { js: [], css: [] }, revision: '5' };
   const fieldsN = KTDeps.normalizeFields(data2.fields);
@@ -110,7 +110,7 @@ console.log('\n--- BF-C（再 3）/ F24. エラー表示と編集不可: 条件�
   const rOtherOk = KTCodeReview.review({ generated: gen(WARN_ONLY.replace("'app.record.create.show', 'app.record.edit.show', ", '')), customization: { ...custom, events: ['app.record.edit.change.amount'] }, plan: null, data: data2, scan: scan2, existingSource: null });
   assert(!chk(rOtherOk, 'error-cancels-other-js'), '警告が値の変更時だけなら、他ファイルの show の disabled とは重ならない');
   // BF-C 4 回目（実機の生成そのまま）: 既存の show handler の中に「編集不可でないときだけ警告」を追加。計画の change は登録していない
-  const DL_SRC = "(function () {\n  'use strict';\n  // 承認済みの案件は金額を変更できないようにする（既存の運用ルール）\n  kintone.events.on(['app.record.create.show', 'app.record.edit.show'], function (event) {\n    var record = event.record;\n    if (record['ステータス'] && record['ステータス'].value === '承認済み') {\n      record['amount'].disabled = true;\n    }\n    return event;\n  });\n})();\n";
+  const DL_SRC = "(function () {\n  'use strict';\n  // 承認済みの案件は金額を変更できないようにする（既存の運用ルール）\n  kintone.events.on(['app.record.create.show', 'app.record.edit.show'], function (event) {\n    const record = event.record;\n    if (record['ステータス'] && record['ステータス'].value === '承認済み') {\n      record['amount'].disabled = true;\n    }\n    return event;\n  });\n})();\n";
   const PATCH4 = { baseHash: KTScan.hashText(DL_SRC), operations: [{ type: 'INSERT_AFTER', anchor: "    if (record['ステータス'] && record['ステータス'].value === '承認済み') {\n      record['amount'].disabled = true;\n    }", content: "\n    // 金額が100万円を超えたら警告を表示する\n    if (record['amount'].value > 1000000 && !record['amount'].disabled) {\n      record['amount'].error = '金額が100万円を超えています。';\n    } else {\n      record['amount'].error = null;\n    }\n" }] };
   const cust4 = { ...custom, strategy: 'EXTEND_EXISTING_JS', existingFiles: [{ name: 'dealLock.js', target: 'desktop' }] };
   const r4 = KTCodeReview.review({ generated: { strategy: 'EXTEND_EXISTING_JS', targetFile: 'dealLock.js', summary: 's', code: PATCH4.operations[0].content, patch: PATCH4, events: custom.events, fields: custom.fields, apis: ['kintone.events.on'] }, customization: cust4, plan: null, data: DATA, scan: null, existingSource: { name: 'dealLock.js', target: 'desktop', text: DL_SRC } });
@@ -146,7 +146,7 @@ console.log('\n--- BF-C（再 3）/ F24. エラー表示と編集不可: 条件�
 // =========================================================
 console.log('\n--- BF-C（再）. スペース要素: 実在するスペースは通す・無いスペースは専用の理由で止める・Generator にスペース一覧を渡す ---');
 {
-  const SPACE_JS = "(function () {\n  'use strict';\n  kintone.events.on(['app.record.edit.change.amount'], function (event) {\n    var sp = kintone.app.record.getSpaceElement('amount_warning_space');\n    if (!sp) return event;\n    sp.textContent = Number(event.record['amount'].value || 0) > 1000000 ? '金額が100万円を超えています' : '';\n    return event;\n  });\n})();";
+  const SPACE_JS = "(function () {\n  'use strict';\n  kintone.events.on(['app.record.edit.change.amount'], function (event) {\n    const sp = kintone.app.record.getSpaceElement('amount_warning_space');\n    if (!sp) return event;\n    sp.textContent = Number(event.record['amount'].value || 0) > 1000000 ? '金額が100万円を超えています' : '';\n    return event;\n  });\n})();";
   const cust = { customizationId: 'C1', requirement: '金額が100万円を超えたら警告', strategy: 'NEW_JS_FILE', platform: ['desktop'], events: ['app.record.edit.change.amount'], fields: [{ code: 'amount', access: 'READ' }], apis: ['kintone.events.on', 'kintone.app.record.getSpaceElement'], existingFiles: [] };
   const gen = { strategy: 'NEW_JS_FILE', targetFile: 'warn.js', code: SPACE_JS, patch: null, events: cust.events, fields: cust.fields, apis: cust.apis };
   const chk = (r, n) => r.checks.find(c => c.name === n) || null;
@@ -314,7 +314,7 @@ console.log('\n--- GM-6 / FR-9. 会話の切り替え後に遅れて返った応
 // =========================================================
 console.log('\n--- F7 / GM-6（UI）. 相談: 取得済みの本文を Context と Review に使う・新しい相談で送信中の要求を中断 ---');
 {
-  const FIELD_ON_OFF = "(function () {\n  'use strict';\n  kintone.events.on(['app.record.create.show', 'app.record.edit.show'], function (event) {\n    var record = event.record;\n    if (record['ステータス'].value === '承認待ち') {\n      record['amount'].disabled = true;\n    }\n    return event;\n  });\n})();";
+  const FIELD_ON_OFF = "(function () {\n  'use strict';\n  kintone.events.on(['app.record.create.show', 'app.record.edit.show'], function (event) {\n    const record = event.record;\n    if (record['ステータス'].value === '承認待ち') {\n      record['amount'].disabled = true;\n    }\n    return event;\n  });\n})();";
   const FILES = [{ name: 'fieldOnOff.js', target: 'desktop', kind: 'js', text: FIELD_ON_OFF }];
   const data = FX.makeData();
   data.customize = { scope: 'ALL', desktop: { js: [{ type: 'FILE', file: { contentType: 'text/javascript', fileKey: 'dl:fieldOnOff', name: 'fieldOnOff.js', size: '290' } }], css: [] }, mobile: { js: [], css: [] }, revision: '12' };
@@ -665,8 +665,8 @@ console.log('\n--- F37（CX-1 2 回目・実機）. 同じ遷移元の分岐は�
 console.log('\n--- F41（F39 の確認・実機）. PC とモバイルの計画で、制御するフィールドが片方の画面の処理にしか無い ---');
 {
   // 実機の生成そのまま: 既存の PC の handler（金額）はそのまま、担当者のロックはモバイルの handler だけ → PC では承認済みでも担当者を編集できた（Code Review は OK）
-  const DL = ["(function () {", "  'use strict';", "  kintone.events.on(['app.record.create.show', 'app.record.edit.show'], function (event) {", "    var record = event.record;", "    if (record['ステータス'] && record['ステータス'].value === '承認済み') {", "      record['amount'].disabled = true;", "    }", "    return event;", "  });", "})();", ""].join('\n');
-  const ADD = "  kintone.events.on(['mobile.app.record.create.show', 'mobile.app.record.edit.show'], function (event) {\n    var record = event.record;\n    if (record['ステータス'] && record['ステータス'].value === '承認済み') {\n      record['owner'].disabled = true;\n    }\n    return event;\n  });\n";
+  const DL = ["(function () {", "  'use strict';", "  kintone.events.on(['app.record.create.show', 'app.record.edit.show'], function (event) {", "    const record = event.record;", "    if (record['ステータス'] && record['ステータス'].value === '承認済み') {", "      record['amount'].disabled = true;", "    }", "    return event;", "  });", "})();", ""].join('\n');
+  const ADD = "  kintone.events.on(['mobile.app.record.create.show', 'mobile.app.record.edit.show'], function (event) {\n    const record = event.record;\n    if (record['ステータス'] && record['ステータス'].value === '承認済み') {\n      record['owner'].disabled = true;\n    }\n    return event;\n  });\n";
   const SRC = { name: 'dealLock.js', target: 'desktop', text: DL };
   const baseHash = KTScan.analyzeFile({ name: 'dealLock.js', target: 'desktop', kind: 'js', text: DL }, { fields: [], selfAppId: null }).file.hash;
   const cust = { customizationId: 'C1', requirement: '承認済みでは担当者も編集不可（PC・スマホ）', strategy: 'EXTEND_EXISTING_JS', platform: ['desktop', 'mobile'], events: ['app.record.create.show', 'app.record.edit.show', 'mobile.app.record.create.show', 'mobile.app.record.edit.show'], fields: [{ code: 'owner', access: 'CONTROL' }, { code: 'ステータス', access: 'READ' }], apis: [], existingFiles: [{ name: 'dealLock.js', target: 'desktop' }] };
@@ -675,11 +675,11 @@ console.log('\n--- F41（F39 の確認・実機）. PC とモバイルの計画�
   const bad = KTCodeReview.review({ generated: genOf(ADD), customization: cust, plan: null, data: DATA, scan: null, existingSource: SRC });
   assert(chk(bad, 'platform-fields') && !chk(bad, 'platform-fields').ok && chk(bad, 'platform-fields').severity === 'block' && /owner/.test(chk(bad, 'platform-fields').message) && /PC ?の画面/.test(chk(bad, 'platform-fields').message) && bad.status === 'BLOCKED' && bad.registration.verdict === 'BLOCKED', `F41: 担当者のロックがモバイルの処理だけ → 登録不可（Phase 21。PC では制御していない。Phase 20 は要確認）: ${chk(bad, 'platform-fields') && chk(bad, 'platform-fields').message}`);
   // 両方の画面で制御するコード（PC の handler にも担当者）は従来どおり
-  const BOTH = "  kintone.events.on(['app.record.create.show', 'app.record.edit.show', 'mobile.app.record.create.show', 'mobile.app.record.edit.show'], function (event) {\n    var record = event.record;\n    if (record['ステータス'] && record['ステータス'].value === '承認済み') {\n      record['owner'].disabled = true;\n    }\n    return event;\n  });\n";
+  const BOTH = "  kintone.events.on(['app.record.create.show', 'app.record.edit.show', 'mobile.app.record.create.show', 'mobile.app.record.edit.show'], function (event) {\n    const record = event.record;\n    if (record['ステータス'] && record['ステータス'].value === '承認済み') {\n      record['owner'].disabled = true;\n    }\n    return event;\n  });\n";
   const good = KTCodeReview.review({ generated: genOf(BOTH), customization: cust, plan: null, data: DATA, scan: null, existingSource: SRC });
   assert(!(good.mismatches || []).some(m => m.code === 'PLATFORM_FIELD_MISSING'), `F41: PC とモバイルの両方で制御するコードは指摘しない: ${JSON.stringify((good.mismatches || []).map(m => m.code))}`);
-  // イベントを変数（var EVENTS = [...]）で渡す書き方でも、配列の定義をたどって両方の画面と判定する（誤って「PC だけ」にしない）
-  const VARS = "  var EVENTS = ['app.record.create.show', 'app.record.edit.show', 'mobile.app.record.create.show', 'mobile.app.record.edit.show'];\n  kintone.events.on(EVENTS, function (event) {\n    var record = event.record;\n    if (record['ステータス'] && record['ステータス'].value === '承認済み') {\n      record['owner'].disabled = true;\n    }\n    return event;\n  });\n";
+  // イベントを変数（const EVENTS = [...]）で渡す書き方でも、配列の定義をたどって両方の画面と判定する（誤って「PC だけ」にしない）
+  const VARS = "  const EVENTS = ['app.record.create.show', 'app.record.edit.show', 'mobile.app.record.create.show', 'mobile.app.record.edit.show'];\n  kintone.events.on(EVENTS, function (event) {\n    const record = event.record;\n    if (record['ステータス'] && record['ステータス'].value === '承認済み') {\n      record['owner'].disabled = true;\n    }\n    return event;\n  });\n";
   const viaVar = KTCodeReview.review({ generated: genOf(VARS), customization: cust, plan: null, data: DATA, scan: null, existingSource: SRC });
   assert(!(viaVar.mismatches || []).some(m => m.code === 'PLATFORM_FIELD_MISSING'), `F41: イベントを変数で渡しても両方の画面と判定する: ${JSON.stringify((viaVar.mismatches || []).map(m => m.code + ':' + m.message))}`);
 }
@@ -687,7 +687,7 @@ console.log('\n--- F41（F39 の確認・実機）. PC とモバイルの計画�
 // =========================================================
 console.log('\n--- F42（F41 の再生成・実機）. 既存の条件（if）の外に足した編集不可（すべてのステータスで編集できなくなる）---');
 {
-  const DL = ["(function () {", "  'use strict';", "  kintone.events.on(['app.record.create.show', 'app.record.edit.show'], function (event) {", "    var record = event.record;", "    if (record['ステータス'] && record['ステータス'].value === '承認済み') {", "      record['amount'].disabled = true;", "    }", "    return event;", "  });", "})();", ""].join('\n');
+  const DL = ["(function () {", "  'use strict';", "  kintone.events.on(['app.record.create.show', 'app.record.edit.show'], function (event) {", "    const record = event.record;", "    if (record['ステータス'] && record['ステータス'].value === '承認済み') {", "      record['amount'].disabled = true;", "    }", "    return event;", "  });", "})();", ""].join('\n');
   const SRC = { name: 'dealLock.js', target: 'desktop', text: DL };
   const baseHash = KTScan.analyzeFile({ name: 'dealLock.js', target: 'desktop', kind: 'js', text: DL }, { fields: [], selfAppId: null }).file.hash;
   const cust = { customizationId: 'C1', requirement: '承認済みでは担当者も編集不可', strategy: 'EXTEND_EXISTING_JS', platform: ['desktop'], events: ['app.record.create.show', 'app.record.edit.show'], fields: [{ code: 'owner', access: 'CONTROL' }, { code: 'ステータス', access: 'READ' }], apis: [], existingFiles: [{ name: 'dealLock.js', target: 'desktop' }] };
@@ -733,13 +733,13 @@ console.log('\n--- F40（CX-3 3 回目・実機）. 同じ既存の設定を 2 �
 // =========================================================
 console.log('\n--- F38（CX-1 2 回目・実機）. 既存ファイルの即時関数の外に足したコード（ファイル直下の宣言）を見逃さない ---');
 {
-  const DL = ["(function () {", "  'use strict';", "  kintone.events.on(['app.record.create.show', 'app.record.edit.show'], function (event) {", "    var record = event.record;", "    if (record['ステータス'] && record['ステータス'].value === '承認済み') {", "      record['amount'].disabled = true;", "    }", "    return event;", "  });", "})();", ""].join('\n');
+  const DL = ["(function () {", "  'use strict';", "  kintone.events.on(['app.record.create.show', 'app.record.edit.show'], function (event) {", "    const record = event.record;", "    if (record['ステータス'] && record['ステータス'].value === '承認済み') {", "      record['amount'].disabled = true;", "    }", "    return event;", "  });", "})();", ""].join('\n');
   const baseHash = KTScan.analyzeFile({ name: 'dealLock.js', target: 'desktop', kind: 'js', text: DL }, { fields: [], selfAppId: null }).file.hash;
-  const ADD = "  // 承認済みはモバイルでも金額を編集不可\n  var EVENTS = ['mobile.app.record.create.show', 'mobile.app.record.edit.show'];\n  kintone.events.on(EVENTS, function (event) {\n    if (event.record['ステータス'] && event.record['ステータス'].value === '承認済み') { event.record['amount'].disabled = true; }\n    return event;\n  });\n";
+  const ADD = "  // 承認済みはモバイルでも金額を編集不可\n  const EVENTS = ['mobile.app.record.create.show', 'mobile.app.record.edit.show'];\n  kintone.events.on(EVENTS, function (event) {\n    if (event.record['ステータス'] && event.record['ステータス'].value === '承認済み') { event.record['amount'].disabled = true; }\n    return event;\n  });\n";
   const cust = { customizationId: 'C1', requirement: '承認済みは金額を編集不可（PC・モバイル）', strategy: 'EXTEND_EXISTING_JS', platform: ['desktop', 'mobile'], events: ['app.record.create.show', 'app.record.edit.show', 'mobile.app.record.create.show', 'mobile.app.record.edit.show'], fields: [{ code: 'amount', access: 'CONTROL' }], apis: [], existingFiles: [{ name: 'dealLock.js', target: 'desktop' }] };
   const genOf = (op) => ({ strategy: 'EXTEND_EXISTING_JS', targetFile: 'dealLock.js', code: ADD, patch: { baseHash, operations: [op] }, events: cust.events, fields: cust.fields, apis: ['kintone.events.on'] });
   const chk = (r, n) => r.checks.find(c => c.name === n) || null;
-  // 実機と同じ: APPEND（anchor「})();」）→ 即時関数の外（ファイル直下）に var EVENTS
+  // 実機と同じ: APPEND（anchor「})();」）→ 即時関数の外（ファイル直下）に const EVENTS
   const out = KTCodeReview.review({ generated: genOf({ type: 'APPEND', anchor: '})();\n', content: ADD }), customization: cust, plan: null, data: DATA, scan: null, existingSource: { name: 'dealLock.js', target: 'desktop', text: DL } });
   assert(chk(out, 'globals') && !chk(out, 'globals').ok && /EVENTS/.test(chk(out, 'globals').message) && /即時関数の中/.test(chk(out, 'globals').message) && out.status !== 'OK', `F38: 既存ファイルへの統合でも、即時関数の外に足した宣言はグローバル汚染として要確認（以前は「即時関数の外に宣言はありません」）: ${chk(out, 'globals') && chk(out, 'globals').message}`);
   // 即時関数の中（閉じる行の前）に入れたコードは従来どおり
@@ -751,7 +751,7 @@ console.log('\n--- F38（CX-1 2 回目・実機）. 既存ファイルの即時�
 console.log('\n--- F39（CX-1 2 回目・実機）. PC とモバイルの計画: モバイルのイベントを含むコードはモバイルにも登録する ---');
 {
   // 実機: dealLock.js（PC だけに登録されている）へモバイルのイベントを統合 → 登録の確認は「PC：2 件変更・Mobile：変更なし」= モバイルでは読み込まれない
-  const DL = ["(function () {", "  'use strict';", "  kintone.events.on(['app.record.create.show', 'app.record.edit.show'], function (event) {", "    var record = event.record;", "    if (record['ステータス'] && record['ステータス'].value === '承認済み') {", "      record['amount'].disabled = true;", "    }", "    return event;", "  });", "})();", ""].join('\n');
+  const DL = ["(function () {", "  'use strict';", "  kintone.events.on(['app.record.create.show', 'app.record.edit.show'], function (event) {", "    const record = event.record;", "    if (record['ステータス'] && record['ステータス'].value === '承認済み') {", "      record['amount'].disabled = true;", "    }", "    return event;", "  });", "})();", ""].join('\n');
   const ADD = "  kintone.events.on(['mobile.app.record.create.show', 'mobile.app.record.edit.show'], function (event) {\n    if (event.record['ステータス'] && event.record['ステータス'].value === '承認済み') { event.record['amount'].disabled = true; }\n    return event;\n  });\n";
   const SRC = { name: 'dealLock.js', target: 'desktop', text: DL };
   const baseHash = KTScan.analyzeFile({ name: 'dealLock.js', target: 'desktop', kind: 'js', text: DL }, { fields: [], selfAppId: null }).file.hash;

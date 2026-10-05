@@ -28,7 +28,7 @@ const DATA = (() => {
   d.fields.referral_source = { type: 'SINGLE_LINE_TEXT', code: 'referral_source', label: '紹介元', noLabel: false, required: false, defaultValue: '' };
   return d;
 })();
-const handler = (events, body) => `(function () {\n  'use strict';\n  kintone.events.on(${JSON.stringify(events).replace(/"/g, "'")}, function (event) {\n    var record = event.record;\n${body}\n    return event;\n  });\n})();`;
+const handler = (events, body) => `(function () {\n  'use strict';\n  kintone.events.on(${JSON.stringify(events).replace(/"/g, "'")}, function (event) {\n    const record = event.record;\n${body}\n    return event;\n  });\n})();`;
 const cust = (o = {}) => ({ customizationId: 'C1', requirement: 'r', strategy: 'NEW_JS_FILE', platform: ['desktop'], implementation: 'JAVASCRIPT', events: [], fields: [{ code: 'amount', access: 'CONTROL' }], apis: [], existingFiles: [], ...o });
 const gen = (code, o = {}) => ({ strategy: 'NEW_JS_FILE', targetFile: 'gen.js', summary: 's', code, patch: null, events: [], fields: [], apis: [], ...o });
 const review = (code, c = cust(), g = {}, existing = null) => KTCodeReview.review({ generated: gen(code, g), customization: c, plan: null, data: DATA, scan: null, existingSource: existing });
@@ -67,32 +67,32 @@ console.log('\n--- N3 実機の再生（RC E2E の BF-C）: 作成・編集画�
 console.log('\n--- N3 handler のイベントと使える画面の照合 ---');
 {
   const code = (events, line) => handler(events, `    ${line}`);
-  const gfe = "var el = kintone.app.record.getFieldElement('amount');\n    if (el) { el.style.color = 'red'; }";
+  const gfe = "const el = kintone.app.record.getFieldElement('amount');\n    if (el) { el.style.color = 'red'; }";
   const detail = review(code(['app.record.detail.show'], gfe));
   assert(!check(detail, 'api-screen').length, '詳細画面のイベントで getFieldElement → 問題なし');
   const mixed = review(code(['app.record.detail.show', 'app.record.edit.show'], gfe));
   const xm = check(mixed, 'api-screen')[0] || {};
   assert(xm.severity === 'review' && /編集/.test(xm.message || '') && !codesOf(mixed.registration.blockers).includes('api-screen') && codesOf(mixed.registration.confirmations).includes('api-screen'), `詳細と編集の両方のイベント → 編集画面では動かないので確認（登録不可にはしない）: ${xm.severity} ${xm.message}`);
-  const space = review(code(['app.record.create.show'], "var sp = kintone.app.record.getSpaceElement('warn');\n    if (sp) { sp.textContent = '注意'; }"));
+  const space = review(code(['app.record.create.show'], "const sp = kintone.app.record.getSpaceElement('warn');\n    if (sp) { sp.textContent = '注意'; }"));
   assert(!check(space, 'api-screen').length, '作成画面のイベントで getSpaceElement → 問題なし（使える画面）');
   const shownIndex = review(code(['app.record.index.show'], "kintone.app.record.setFieldShown('amount', false);"));
   assert((check(shownIndex, 'api-screen')[0] || {}).severity === 'block', '一覧画面のイベントで setFieldShown → 登録不可');
-  const listOk = review(code(['app.record.index.show'], "var els = kintone.app.getFieldElements('amount');"));
-  const listNg = review(code(['app.record.edit.show'], "var els = kintone.app.getFieldElements('amount');"));
+  const listOk = review(code(['app.record.index.show'], "const els = kintone.app.getFieldElements('amount');"));
+  const listNg = review(code(['app.record.edit.show'], "const els = kintone.app.getFieldElements('amount');"));
   assert(!check(listOk, 'api-screen').length && (check(listNg, 'api-screen')[0] || {}).severity === 'block', '一覧のフィールド要素は一覧画面なら問題なし・編集画面なら登録不可');
-  const mob = (events) => review(code(events, "var el = kintone.mobile.app.record.getFieldElement('amount');"), cust({ platform: ['mobile'] }));
+  const mob = (events) => review(code(events, "const el = kintone.mobile.app.record.getFieldElement('amount');"), cust({ platform: ['mobile'] }));
   assert((check(mob(['mobile.app.record.edit.show']), 'api-screen')[0] || {}).severity === 'block' && !check(mob(['mobile.app.record.detail.show']), 'api-screen').length && !check(mob(['mobile.app.record.detail.show']), 'apis').length, 'モバイルの getFieldElement: 編集画面は登録不可・詳細画面は問題なし（目録に無い API とも言わない）');
   // 名前で渡した handler の中も見る
-  const named = review("(function () {\n  'use strict';\n  function paint(event) {\n    var el = kintone.app.record.getFieldElement('amount');\n    if (el) { el.style.color = 'red'; }\n    return event;\n  }\n  kintone.events.on(['app.record.create.show', 'app.record.edit.show'], paint);\n})();");
+  const named = review("(function () {\n  'use strict';\n  function paint(event) {\n    const el = kintone.app.record.getFieldElement('amount');\n    if (el) { el.style.color = 'red'; }\n    return event;\n  }\n  kintone.events.on(['app.record.create.show', 'app.record.edit.show'], paint);\n})();");
   assert((check(named, 'api-screen')[0] || {}).severity === 'block', '名前で渡した handler（function paint）の中の getFieldElement も照合する');
   // どの handler から呼ばれるか分からない関数の中は照合しない（画面が分からない）
-  const helper = review("(function () {\n  'use strict';\n  function paint() {\n    var el = kintone.app.record.getFieldElement('amount');\n    if (el) { el.style.color = 'red'; }\n  }\n  window.ktPaint = paint;\n})();");
+  const helper = review("(function () {\n  'use strict';\n  function paint() {\n    const el = kintone.app.record.getFieldElement('amount');\n    if (el) { el.style.color = 'red'; }\n  }\n  window.ktPaint = paint;\n})();");
   assert(!check(helper, 'api-screen').length, '呼び出し元の画面が分からない関数の中は照合しない');
   // 既存のコードに元からある呼び出しは数えない（今回足したコードだけを照合する）
-  const base = handler(['app.record.edit.show'], "    var el = kintone.app.record.getFieldElement('amount');\n    if (el) { el.style.color = 'red'; }");
+  const base = handler(['app.record.edit.show'], "    const el = kintone.app.record.getFieldElement('amount');\n    if (el) { el.style.color = 'red'; }");
   const added = ext(base, "  kintone.events.on(['app.record.edit.submit'], function (event) {\n    return event;\n  });\n");
   assert(!check(added, 'api-screen').length, '既存のコードに元からある getFieldElement は数えない');
-  const added2 = ext(base, "  kintone.events.on(['app.record.create.show'], function (event) {\n    var el2 = kintone.app.record.getFieldElement('amount');\n    return event;\n  });\n");
+  const added2 = ext(base, "  kintone.events.on(['app.record.create.show'], function (event) {\n    const el2 = kintone.app.record.getFieldElement('amount');\n    return event;\n  });\n");
   assert((check(added2, 'api-screen')[0] || {}).severity === 'block', '今回足した handler の getFieldElement は照合する');
 }
 
@@ -101,7 +101,14 @@ console.log('\n--- N2 実機の再生（RC E2E の §2 手順 4）: 空の判定
 {
   const edited = R.DEAL_VALIDATE.replace(/\s*$/, '') + '\n// 別の担当者のメモ（RC E2E: 外部からの変更の確認）\n';
   assert(KTScan.hashText(edited) === '17734541' && KTScan.hashText(R.DEAL_VALIDATE) === '6a64035a', `前提: 別の担当者の変更の後の dealValidate.js を再現（指紋 17734541）: ${KTScan.hashText(edited)}`);
-  const v3 = KTCodeReview.review({ generated: E2E.S2_V3.generated, customization: E2E.S2_V3.customization, plan: null, data: JSON.parse(JSON.stringify(DATA)), scan: null, existingSource: { name: 'dealValidate.js', target: 'desktop', text: edited } });
+  // 実機の流れと同じく、生成の直後に modern JavaScript の安全な修正を通してから検査する（記録した AI の出力は var を含む。2026-10-05）
+  const src3 = { name: 'dealValidate.js', target: 'desktop', text: edited };
+  const g3 = T.KTModernJs.fixGenerated({ generated: E2E.S2_V3.generated, existingSource: src3 });
+  assert(g3.status === 'fixed' && g3.fixed.length > 0 && !(g3.generated.patch.operations || []).some(o => /\bvar\b/.test(o.content)), `記録した出力（var を含む）は生成の直後に直る: ${g3.status} ${JSON.stringify(g3.fixed.map(f => f.name))}`);
+  const v3 = KTCodeReview.review({ generated: g3.generated, customization: E2E.S2_V3.customization, plan: null, data: JSON.parse(JSON.stringify(DATA)), scan: null, existingSource: src3 });
+  const raw3 = KTCodeReview.review({ generated: E2E.S2_V3.generated, customization: E2E.S2_V3.customization, plan: null, data: JSON.parse(JSON.stringify(DATA)), scan: null, existingSource: src3 });
+  assert(raw3.status === 'BLOCKED' && raw3.checks.some(x => x.name === 'modern-js' && !x.ok && /const に直せます/.test(x.message)), '直していない出力（新しい var）は登録できない（以前は var のまま確認が必要で通った）');
+  assert(/var amount = event\.record\['amount'\]\.value;/.test(v3.finalCode || ''), '既存の dealValidate.js の var はそのまま（一括置換しない）');
   const x = check(v3, 'empty-undefined')[0] || {};
   assert(!check(v3, 'patch').length, '再生の前提: パッチは適用できる');
   assert(x.severity === 'review' && /referral_source/.test(x.message || '') && /undefined/.test(x.message || '') && /作成画面/.test(x.message || ''), `v3: referral_source の空の判定が undefined を扱っていない → 確認（理由つき）: ${x.message}`);
@@ -117,7 +124,7 @@ console.log('\n--- N2 実機の再生（RC E2E の §2 手順 4）: 空の判定
 console.log('\n--- N2 空の判定の書き方 ---');
 {
   const SUB = ['app.record.create.submit', 'app.record.edit.submit'];
-  const req = (cond, pre = "    var v = record['referral_source'].value;") => review(handler(SUB, `${pre}\n    if (${cond}) {\n      record['referral_source'].error = '紹介元を入力してください';\n    }`), cust({ fields: [{ code: 'referral_source', access: 'CONTROL' }] }));
+  const req = (cond, pre = "    const v = record['referral_source'].value;") => review(handler(SUB, `${pre}\n    if (${cond}) {\n      record['referral_source'].error = '紹介元を入力してください';\n    }`), cust({ fields: [{ code: 'referral_source', access: 'CONTROL' }] }));
   const flagged = (rv) => check(rv, 'empty-undefined').length > 0;
   const okCases = {
     '!v': req('!v'),
@@ -127,8 +134,8 @@ console.log('\n--- N2 空の判定の書き方 ---');
     "v == undefined || String(v).trim() === ''": req("v == undefined || String(v).trim() === ''"),
     "(v || '') === ''": req("(v || '') === ''"),
     "String(v || '').trim() === ''": req("String(v || '').trim() === ''"),
-    "var v = …value || ''; v === ''": req("v === ''", "    var v = record['referral_source'].value || '';"),
-    "var v = …value ?? ''; v.trim() === ''": req("v.trim() === ''", "    var v = record['referral_source'].value ?? '';"),
+    "const v = …value || ''; v === ''": req("v === ''", "    const v = record['referral_source'].value || '';"),
+    "const v = …value ?? ''; v.trim() === ''": req("v.trim() === ''", "    const v = record['referral_source'].value ?? '';"),
   };
   const okBad = Object.entries(okCases).filter(([, rv]) => flagged(rv)).map(([k]) => k);
   assert(!okBad.length, `undefined を扱っている書き方は確認しない: ${okBad.join(' / ') || 'すべて通過'}`);
@@ -146,24 +153,24 @@ console.log('\n--- N2 空の判定の書き方 ---');
   // 「入力あり」の判定で同じ値を数値に変えて比べる形（実機の BF-C の生成コード: amount !== '' && amount !== null && Number(amount) > 1000000）は、
   //   undefined が NaN になって条件が成り立たないので数えない（数値に変えずに使う形は数える）
   const amt = (body) => review(handler(['app.record.create.show', 'app.record.create.change.amount'], body), cust({ fields: [{ code: 'amount', access: 'CONTROL' }] }));
-  const numCopy = amt("    var amount = record['amount'].value;\n    if (amount !== '' && amount !== null && Number(amount) > 1000000) {\n      record['amount'].error = '金額が1,000,000円を超えています。';\n    }");
+  const numCopy = amt("    const amount = record['amount'].value;\n    if (amount !== '' && amount !== null && Number(amount) > 1000000) {\n      record['amount'].error = '金額が1,000,000円を超えています。';\n    }");
   const numField = amt("    if (record.amount.value !== '' && Number(record.amount.value) > 0) {\n      record['amount'].error = 'x';\n    }");
-  const strUse = amt("    var amount = record['amount'].value;\n    if (amount !== '' && amount !== null) {\n      record['amount'].error = amount + ' 円';\n    }");
+  const strUse = amt("    const amount = record['amount'].value;\n    if (amount !== '' && amount !== null) {\n      record['amount'].error = amount + ' 円';\n    }");
   assert(!flagged(numCopy) && !flagged(numField) && flagged(strUse), `入力ありの判定で同じ値を Number() で比べる形は数えない・数値に変えずに使う形は数える: ${[numCopy, numField, strUse].map(flagged).join(' / ')}`);
   // 変数に入れたフィールド（Phase 22 の解決）
-  const alias = review(handler(SUB, "    var f = record['referral_source'];\n    if (f.value === '' || f.value === null) {\n      f.error = '紹介元を入力してください';\n    }"), cust({ fields: [{ code: 'referral_source', access: 'CONTROL' }] }));
-  const aliasOk = review(handler(SUB, "    var f = record['referral_source'];\n    if (!f.value) {\n      f.error = '紹介元を入力してください';\n    }"), cust({ fields: [{ code: 'referral_source', access: 'CONTROL' }] }));
+  const alias = review(handler(SUB, "    const f = record['referral_source'];\n    if (f.value === '' || f.value === null) {\n      f.error = '紹介元を入力してください';\n    }"), cust({ fields: [{ code: 'referral_source', access: 'CONTROL' }] }));
+  const aliasOk = review(handler(SUB, "    const f = record['referral_source'];\n    if (!f.value) {\n      f.error = '紹介元を入力してください';\n    }"), cust({ fields: [{ code: 'referral_source', access: 'CONTROL' }] }));
   assert(flagged(alias) && /referral_source/.test((check(alias, 'empty-undefined')[0] || {}).message || '') && !flagged(aliasOk), '変数に入れたフィールドの value も同じに見る（f.value === \'\' は確認・!f.value は通過）');
   // 三項演算子で error を設定する書き方（実機の v3 と同じ形）
-  const tern = review(handler(SUB, "    var v = record['referral_source'].value;\n    record['referral_source'].error = v === null || String(v).trim() === '' ? '紹介元を入力してください' : null;"), cust({ fields: [{ code: 'referral_source', access: 'CONTROL' }] }));
+  const tern = review(handler(SUB, "    const v = record['referral_source'].value;\n    record['referral_source'].error = v === null || String(v).trim() === '' ? '紹介元を入力してください' : null;"), cust({ fields: [{ code: 'referral_source', access: 'CONTROL' }] }));
   assert(flagged(tern), '三項演算子の条件の中の空の判定も見る');
   // 作成画面のイベントだけ（編集画面だけの handler は数えない。実機で確かめたのは作成画面）
-  const editOnly = review(handler(['app.record.edit.submit'], "    var v = record['referral_source'].value;\n    if (v === '') {\n      record['referral_source'].error = 'x';\n    }"), cust({ fields: [{ code: 'referral_source', access: 'CONTROL' }] }));
-  const mobileCreate = review(handler(['mobile.app.record.create.submit'], "    var v = record['referral_source'].value;\n    if (v === '') {\n      record['referral_source'].error = 'x';\n    }"), cust({ platform: ['mobile'], fields: [{ code: 'referral_source', access: 'CONTROL' }] }));
+  const editOnly = review(handler(['app.record.edit.submit'], "    const v = record['referral_source'].value;\n    if (v === '') {\n      record['referral_source'].error = 'x';\n    }"), cust({ fields: [{ code: 'referral_source', access: 'CONTROL' }] }));
+  const mobileCreate = review(handler(['mobile.app.record.create.submit'], "    const v = record['referral_source'].value;\n    if (v === '') {\n      record['referral_source'].error = 'x';\n    }"), cust({ platform: ['mobile'], fields: [{ code: 'referral_source', access: 'CONTROL' }] }));
   assert(!flagged(editOnly) && flagged(mobileCreate), '編集画面だけの handler は数えない・モバイルの作成画面は数える');
   // フィールドの値ではない変数・既存のコードに元からある判定は数えない
-  const notField = review(handler(SUB, "    var s = 'abc';\n    if (s === '') {\n      record['referral_source'].error = 'x';\n    }"), cust({ fields: [{ code: 'referral_source', access: 'CONTROL' }] }));
-  const base = handler(SUB, "    var v = record['referral_source'].value;\n    if (v === '') {\n      record['referral_source'].error = 'x';\n    }");
+  const notField = review(handler(SUB, "    const s = 'abc';\n    if (s === '') {\n      record['referral_source'].error = 'x';\n    }"), cust({ fields: [{ code: 'referral_source', access: 'CONTROL' }] }));
+  const base = handler(SUB, "    const v = record['referral_source'].value;\n    if (v === '') {\n      record['referral_source'].error = 'x';\n    }");
   const existing = ext(base, "  kintone.events.on(['app.record.create.show'], function (event) {\n    return event;\n  });\n", cust({ strategy: 'EXTEND_EXISTING_JS', fields: [{ code: 'referral_source', access: 'CONTROL' }] }));
   assert(!flagged(notField) && !flagged(existing), 'フィールドの値ではない変数・既存のコードに元からある判定は数えない');
 }
@@ -233,7 +240,7 @@ console.log('\n--- モデル更新の評価（実機）: 「error が自分の�
 {
   // 実機（gpt-6.1-sol / medium の BF-C）で生成されたコード。1,000,001 で警告 → 999,999 や空にしても警告が消えなかった
   //   （表示中も kintone.app.record.get() の amount.error は undefined、次の change でも event.record.amount.error は undefined。実機で確認）
-  const SOL_DEVICE = "(function () {\n  'use strict';\n  var amountNotice = '注意：金額が100万円を超えています（この注意では保存を止めません）。';\n  kintone.events.on([\n    'app.record.create.show',\n    'app.record.edit.show',\n    'app.record.create.change.amount',\n    'app.record.edit.change.amount'\n  ], function (event) {\n    var field = event.record['amount'];\n    if (Number(field.value) > 1000000 && !field.disabled) {\n      if (!field.error || field.error === amountNotice) {\n        field.error = amountNotice;\n      }\n    } else if (field.error === amountNotice) {\n      field.error = null;\n    }\n    return event;\n  });\n  kintone.events.on(['app.record.create.submit', 'app.record.edit.submit'], function (event) {\n    var field = event.record['amount'];\n    if (field.error === amountNotice) {\n      field.error = null;\n    }\n    return event;\n  });\n})();";
+  const SOL_DEVICE = "(function () {\n  'use strict';\n  const amountNotice = '注意：金額が100万円を超えています（この注意では保存を止めません）。';\n  kintone.events.on([\n    'app.record.create.show',\n    'app.record.edit.show',\n    'app.record.create.change.amount',\n    'app.record.edit.change.amount'\n  ], function (event) {\n    const field = event.record['amount'];\n    if (Number(field.value) > 1000000 && !field.disabled) {\n      if (!field.error || field.error === amountNotice) {\n        field.error = amountNotice;\n      }\n    } else if (field.error === amountNotice) {\n      field.error = null;\n    }\n    return event;\n  });\n  kintone.events.on(['app.record.create.submit', 'app.record.edit.submit'], function (event) {\n    const field = event.record['amount'];\n    if (field.error === amountNotice) {\n      field.error = null;\n    }\n    return event;\n  });\n})();";
   const EV = ['app.record.create.show', 'app.record.edit.show', 'app.record.create.change.amount', 'app.record.edit.change.amount'];
   const c = cust({ events: EV, fields: [{ code: 'amount', access: 'CONTROL', condition: 'amount > "1000000"' }] });
   const flagged = (rv) => (rv.checks || []).filter(x => x.name === 'error-clear-compare' && !x.ok);
@@ -247,7 +254,7 @@ console.log('\n--- モデル更新の評価（実機）: 「error が自分の�
   const ng3 = review(handler(EV, "    if (record.amount.error) {\n      record.amount.error = null;\n    }\n    if (Number(record.amount.value) > 1000000) {\n      record.amount.error = 'over';\n    }"), c);
   assert(!flagged(ok1).length && flagged(ng2).length && flagged(ng3).length, `条件に当てはまらなければ null → 数えない／error を比べて消す（直接の参照・ドット記法）→ 数える: ${[ok1, ng2, ng3].map(r => flagged(r).length).join('/')}`);
   // 保存時（submit）の比較は数えない（保存は止まらず、表示も保存の後に消える）・既存のコードに元からあるものは数えない
-  const sub = review(handler(['app.record.create.submit'], "    var f = record['amount'];\n    if (f.error === 'over') {\n      f.error = null;\n    }"), cust({ events: ['app.record.create.submit'] }));
+  const sub = review(handler(['app.record.create.submit'], "    const f = record['amount'];\n    if (f.error === 'over') {\n      f.error = null;\n    }"), cust({ events: ['app.record.create.submit'] }));
   const base = handler(EV, "    if (record['amount'].error === 'over') {\n      record['amount'].error = null;\n    }");
   const existing = ext(base, "  kintone.events.on(['app.record.edit.submit'], function (event) {\n    return event;\n  });\n", cust({ strategy: 'EXTEND_EXISTING_JS', events: EV }));
   assert(!flagged(sub).length && !flagged(existing).length, '保存時の比較・既存のコードに元からある比較は数えない');

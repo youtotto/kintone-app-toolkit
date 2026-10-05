@@ -12,6 +12,7 @@
 // @run-at       document-idle
 // @grant        none
 // @require     https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js
+// @require     https://cdn.jsdelivr.net/npm/acorn@8.18.0/dist/acorn.js
 // @license      MIT
 // @updateURL    https://github.com/youtotto/kintone-app-toolkit/raw/refs/heads/main/kintoneAppToolkit.user.js
 // @downloadURL  https://github.com/youtotto/kintone-app-toolkit/raw/refs/heads/main/kintoneAppToolkit.user.js
@@ -11001,6 +11002,443 @@
   })();
 
   // ==========================================
+  // 3.6e0 modern JavaScript の検査 (KTModernJs) — 2026-10-05
+  //   生成コードの新規・追加・変更した範囲で var を使わない（原則 const、再代入が必要なときだけ let）ことを、構文解析（acorn。@require で読み込む）・
+  //   スコープ解析で確かめ、意味が変わらない箇所だけを直す。本体（createModernJs）・合成（applyPatchWithRanges）・書き戻し（modernizeGenerated）は
+  //   Gateway の worker/src/v2/toolkit/modern-js.mjs と同じ（同じ例のテストを両方に置く）。
+  //   acorn を読み込めないときは検査できない（KTCodeReview は登録できないと判定する。推測で通さない）
+  // ==========================================
+  const KTModernJs = (() => {
+    const MODERN_JS_VERSION = '1';
+    /**
+     * modern JavaScript の検査と安全な自動修正（構文解析・スコープ解析。acorn の AST を使う）。Gateway と Toolkit で同じ実装。
+     *   規則（新規・追加・変更した範囲だけ。既存の未変更の箇所は対象外）:
+     *     no-var        var で宣言しない（const、再代入が必要なときだけ let）
+     *     prefer-const  再代入しない let は const にする
+     *     const-assign  const に代入しない（実行すると TypeError）。宣言が新しいコードなら let に直す
+     *   自動修正は、意味が変わらないと確かめられたときだけ行う（巻き上げ・ブロックの外での参照・繰り返しの中の関数・switch・
+     *   関数の外での宣言・with / eval などは直さずに理由を返す）。コメント・文字列・正規表現・テンプレートの中の「var」は構文上の宣言ではないので数えない。
+     * @param {object} acorn acorn（8.x）の名前空間（parse を持つ）
+     */
+    function createModernJs(acorn) {
+      const PARSE = { ecmaVersion: 'latest', sourceType: 'script', locations: true, allowHashBang: false };
+      const REASON = {
+        TOP_LEVEL: '関数の外（ファイルの直下）で宣言しているため（グローバル変数になり、ほかのファイルからの参照を確かめられません）',
+        REDECLARED: '同じ名前を引数・関数・別の var としても宣言しているため',
+        SWITCH_CASE: 'switch の case の中で宣言しているため',
+        USED_OUTSIDE_BLOCK: '宣言したブロックの外でも使っているため',
+        USED_BEFORE_DECLARATION: '宣言より前（または自分の初期値の中）で使っているため',
+        LOOP_NO_INIT: '繰り返しの中で初期値なしに宣言しているため（前の回の値を引き継ぐ書き方なので、let にすると意味が変わります）',
+        LOOP_CLOSURE: '繰り返しの中で宣言し、関数の中から参照しているため（let にすると回ごとに別の変数になります）',
+        HOISTED_FUNCTION_REF: '巻き上げられる関数（function 宣言）の中から参照しているため',
+        DYNAMIC_SCOPE: '同じ関数に with または eval があるため',
+        SINGLE_STATEMENT_CONTEXT: 'ブロックの無い if / for / while の本体やラベルの直後で宣言しているため',
+        DESTRUCTURING_PARTIAL: '分割代入で宣言した変数の一部だけを再代入しているため',
+        CONST_ASSIGN_EXISTING: '既存のコードで const として宣言した変数に、新しいコードで代入しているため（実行すると TypeError で止まります）',
+      };
+      const isNode = (x) => !!x && typeof x === 'object' && typeof x.type === 'string';
+      const SKIP_KEYS = new Set(['type', 'start', 'end', 'loc', 'range', 'raw', 'regex', 'bigint', 'sourceType', 'kind', 'operator', 'prefix', 'computed', 'optional', 'method', 'shorthand', 'static', 'async', 'generator', 'delegate', 'tail', 'cooked', 'name', 'directive']);
+      const childrenOf = (node) => { const out = []; for (const k of Object.keys(node)) { if (SKIP_KEYS.has(k)) continue; const v = node[k]; if (Array.isArray(v)) { for (const x of v) if (isNode(x)) out.push([k, x]); } else if (isNode(v)) out.push([k, v]); } return out; };
+      const LOOPS = new Set(['ForStatement', 'ForInStatement', 'ForOfStatement', 'WhileStatement', 'DoWhileStatement']);
+      const FUNCS = new Set(['FunctionDeclaration', 'FunctionExpression', 'ArrowFunctionExpression']);
+
+      /** 範囲の中か（範囲 = [{ start, end }]。'all' はファイル全体） */
+      const inRanges = (pos, ranges) => ranges === 'all' || (Array.isArray(ranges) && ranges.some(r => pos >= r.start && pos < r.end));
+
+      /** スコープとバインディング、参照（読み書き）を作る */
+      function analyzeScopes(ast) {
+        const scopes = [];
+        const scopeOf = new Map();
+        const parentOf = new Map();
+        let dynamicFns = new Set();
+        const mk = (type, node, parent) => { const s = { type, node, parent, names: new Map(), fn: null }; s.fn = type === 'program' || type === 'function' || type === 'static' ? s : parent.fn; scopes.push(s); scopeOf.set(node, s); return s; };
+        const declare = (scope, name, kind, info = {}) => {
+          let b = scope.names.get(name);
+          if (!b) { b = { name, scope, kinds: new Set(), decls: [], refs: [] }; scope.names.set(name, b); }
+          b.kinds.add(kind); b.decls.push({ kind, ...info });
+          return b;
+        };
+        const patternIds = (p, out = []) => {
+          if (!p) return out;
+          if (p.type === 'Identifier') out.push(p);
+          else if (p.type === 'ObjectPattern') for (const pr of p.properties) patternIds(pr.type === 'RestElement' ? pr.argument : pr.value, out);
+          else if (p.type === 'ArrayPattern') for (const el of p.elements) patternIds(el, out);
+          else if (p.type === 'RestElement') patternIds(p.argument, out);
+          else if (p.type === 'AssignmentPattern') patternIds(p.left, out);
+          return out;
+        };
+        // ---- 1. 宣言 ----
+        const visit1 = (node, scope, parent) => {
+          if (!isNode(node)) return;
+          parentOf.set(node, parent);
+          switch (node.type) {
+            case 'Program': { const s = mk('program', node, null); for (const st of node.body) visit1(st, s, node); return; }
+            case 'FunctionDeclaration': case 'FunctionExpression': case 'ArrowFunctionExpression': {
+              if (node.type === 'FunctionDeclaration' && node.id) { declare(scope, node.id.name, 'function', { node }); parentOf.set(node.id, node); }
+              const fs = mk('function', node, scope);
+              if (node.type === 'FunctionExpression' && node.id) { declare(fs, node.id.name, 'fname', { node }); parentOf.set(node.id, node); }
+              for (const p of node.params) { for (const id of patternIds(p)) declare(fs, id.name, 'param', { node: p, id }); visit1(p, fs, node); }
+              if (node.body.type === 'BlockStatement') { scopeOf.set(node.body, fs); parentOf.set(node.body, node); for (const st of node.body.body) visit1(st, fs, node.body); }
+              else visit1(node.body, fs, node);
+              return;
+            }
+            case 'ClassDeclaration': if (node.id) { declare(scope, node.id.name, 'class', { node }); parentOf.set(node.id, node); } if (node.superClass) visit1(node.superClass, scope, node); visit1(node.body, scope, node); return;
+            case 'ClassExpression': { const cs = mk('block', node, scope); if (node.id) { declare(cs, node.id.name, 'class', { node }); parentOf.set(node.id, node); } if (node.superClass) visit1(node.superClass, cs, node); visit1(node.body, cs, node); return; }
+            case 'StaticBlock': { const ss = mk('static', node, scope); for (const st of node.body) visit1(st, ss, node); return; }
+            case 'BlockStatement': { const bs = mk('block', node, scope); for (const st of node.body) visit1(st, bs, node); return; }
+            case 'ForStatement': case 'ForInStatement': case 'ForOfStatement': { const fs = mk('for', node, scope); for (const [, c] of childrenOf(node)) visit1(c, fs, node); return; }
+            case 'SwitchStatement': { visit1(node.discriminant, scope, node); const ss = mk('switch', node, scope); for (const c of node.cases) visit1(c, ss, node); return; }
+            case 'CatchClause': { const cs = mk('catch', node, scope); if (node.param) { for (const id of patternIds(node.param)) declare(cs, id.name, 'catch', { node: node.param, id }); visit1(node.param, cs, node); } visit1(node.body, cs, node); return; }
+            case 'VariableDeclaration': {
+              const target = node.kind === 'var' ? scope.fn : scope;
+              for (const d of node.declarations) { parentOf.set(d, node); for (const id of patternIds(d.id)) declare(target, id.name, node.kind, { decl: node, declarator: d, id, lexScope: scope }); visit1(d.id, scope, d); if (d.init) visit1(d.init, scope, d); }
+              return;
+            }
+            case 'WithStatement': dynamicFns.add(scope.fn); break;
+            case 'CallExpression': if (node.callee.type === 'Identifier' && node.callee.name === 'eval') dynamicFns.add(scope.fn); break;
+            default: break;
+          }
+          for (const [, c] of childrenOf(node)) visit1(c, scope, node);
+        };
+        visit1(ast, null, null);
+        // ---- 2. 参照（読み / 書き）----
+        const resolve = (scope, name) => { for (let s = scope; s; s = s.parent) if (s.names.has(name)) return s.names.get(name); return null; };
+        const ref = (id, scope, write) => { const b = resolve(scope, id.name); if (b) b.refs.push({ node: id, scope, write }); };
+        const writePattern = (p, scope) => {
+          if (!p) return;
+          if (p.type === 'Identifier') ref(p, scope, true);
+          else if (p.type === 'ObjectPattern') for (const pr of p.properties) { if (pr.type === 'RestElement') writePattern(pr.argument, scope); else { if (pr.computed) visit2(pr.key, scope); writePattern(pr.value, scope); } }
+          else if (p.type === 'ArrayPattern') for (const el of p.elements) writePattern(el, scope);
+          else if (p.type === 'RestElement') writePattern(p.argument, scope);
+          else if (p.type === 'AssignmentPattern') { writePattern(p.left, scope); visit2(p.right, scope); }
+          else visit2(p, scope);   // MemberExpression などは読み
+        };
+        // 宣言の位置のパターン（既定値・計算されたキーだけ読む）
+        const declPattern = (p, scope) => {
+          if (!p) return;
+          if (p.type === 'ObjectPattern') for (const pr of p.properties) { if (pr.type === 'RestElement') declPattern(pr.argument, scope); else { if (pr.computed) visit2(pr.key, scope); declPattern(pr.value, scope); } }
+          else if (p.type === 'ArrayPattern') for (const el of p.elements) declPattern(el, scope);
+          else if (p.type === 'RestElement') declPattern(p.argument, scope);
+          else if (p.type === 'AssignmentPattern') { declPattern(p.left, scope); visit2(p.right, scope); }
+        };
+        const visit2 = (node, scope) => {
+          if (!isNode(node)) return;
+          const own = scopeOf.get(node);
+          const s = own || scope;
+          switch (node.type) {
+            case 'Identifier': ref(node, scope, false); return;
+            case 'FunctionDeclaration': case 'FunctionExpression': case 'ArrowFunctionExpression':
+              for (const p of node.params) declPattern(p, s);
+              if (node.body.type === 'BlockStatement') for (const st of node.body.body) visit2(st, s); else visit2(node.body, s);
+              return;
+            case 'ClassDeclaration': case 'ClassExpression': if (node.superClass) visit2(node.superClass, s); visit2(node.body, s); return;
+            case 'VariableDeclaration': for (const d of node.declarations) { declPattern(d.id, s); if (d.init) visit2(d.init, s); } return;
+            case 'CatchClause': if (node.param) declPattern(node.param, s); visit2(node.body, s); return;
+            case 'AssignmentExpression': if (node.left.type === 'Identifier' || /Pattern$/.test(node.left.type)) { if (node.operator !== '=' && node.left.type === 'Identifier') ref(node.left, scope, false); writePattern(node.left, scope); } else visit2(node.left, scope); visit2(node.right, scope); return;
+            case 'UpdateExpression': if (node.argument.type === 'Identifier') { ref(node.argument, scope, false); ref(node.argument, scope, true); } else visit2(node.argument, scope); return;
+            case 'ForInStatement': case 'ForOfStatement':
+              if (node.left.type === 'VariableDeclaration') visit2(node.left, s); else writePattern(node.left, s);
+              visit2(node.right, s); visit2(node.body, s); return;
+            case 'MemberExpression': visit2(node.object, scope); if (node.computed) visit2(node.property, scope); return;
+            case 'Property': if (node.computed) visit2(node.key, scope); visit2(node.value, scope); return;
+            case 'MethodDefinition': case 'PropertyDefinition': if (node.computed) visit2(node.key, scope); if (node.value) visit2(node.value, scope); return;
+            case 'LabeledStatement': visit2(node.body, scope); return;
+            case 'BreakStatement': case 'ContinueStatement': return;
+            case 'MetaProperty': return;
+            case 'PrivateIdentifier': return;
+            default: break;
+          }
+          for (const [, c] of childrenOf(node)) visit2(c, s);
+        };
+        visit2(ast, null);
+        return { scopes, scopeOf, parentOf, dynamicFns };
+      }
+
+      /** 祖先をたどる（関数の境界まで / 全部） */
+      const ancestors = (node, parentOf) => { const out = []; for (let p = parentOf.get(node); p; p = parentOf.get(p)) out.push(p); return out; };
+
+      /** var の宣言を let / const に直してよいか（直せないときは理由） */
+      function varFixOf(decl, A, bindingsOfDecl) {
+        const parent = A.parentOf.get(decl);
+        const lexScope = bindingsOfDecl[0]?.decls.find(d => d.decl === decl)?.lexScope;
+        if (!lexScope) return { ok: false, reason: 'REDECLARED' };
+        const fnScope = lexScope.fn;
+        if (fnScope.type === 'program') return { ok: false, reason: 'TOP_LEVEL' };
+        if (A.dynamicFns.has(fnScope)) return { ok: false, reason: 'DYNAMIC_SCOPE' };
+        const okParent = parent && (parent.type === 'BlockStatement' || parent.type === 'Program' || parent.type === 'StaticBlock' || (parent.type === 'ForStatement' && parent.init === decl) || ((parent.type === 'ForInStatement' || parent.type === 'ForOfStatement') && parent.left === decl));
+        if (parent && parent.type === 'SwitchCase') return { ok: false, reason: 'SWITCH_CASE' };
+        if (!okParent) return { ok: false, reason: 'SINGLE_STATEMENT_CONTEXT' };
+        const head = parent.type === 'ForInStatement' || parent.type === 'ForOfStatement' || parent.type === 'ForStatement';
+        const ancs = ancestors(decl, A.parentOf);
+        const fnIdx = ancs.indexOf(fnScope.node);
+        const inLoop = ancs.slice(0, fnIdx < 0 ? ancs.length : fnIdx).some(a => LOOPS.has(a.type));
+        const blockNode = lexScope.node;
+        let writes = 0;
+        for (const b of bindingsOfDecl) {
+          if (b.decls.length !== 1 || [...b.kinds].some(k => k !== 'var')) return { ok: false, reason: 'REDECLARED' };
+          const d = b.decls[0];
+          for (const r of b.refs) {
+            if (r.node.start < blockNode.start || r.node.end > blockNode.end) return { ok: false, reason: 'USED_OUTSIDE_BLOCK' };
+            // for (var x of a) の x は回ごとの代入（宣言の後扱い）。それ以外は宣言（初期値を含む）の後でだけ使う
+            if (!head || parent.type === 'ForStatement') { if (r.node.start < d.declarator.end) return { ok: false, reason: 'USED_BEFORE_DECLARATION' }; }
+            // 参照が入れ子の関数の中か（この宣言の関数より内側の関数）
+            const rAnc = ancestors(r.node, A.parentOf);
+            const fi = rAnc.indexOf(fnScope.node);
+            const inner = rAnc.slice(0, fi < 0 ? rAnc.length : fi).filter(a => FUNCS.has(a.type));
+            if (inner.some(f => f.type === 'FunctionDeclaration')) return { ok: false, reason: 'HOISTED_FUNCTION_REF' };
+            if (inLoop && inner.length) return { ok: false, reason: 'LOOP_CLOSURE' };
+            if (r.write) writes++;
+          }
+          if (inLoop && !head && !d.declarator.init) return { ok: false, reason: 'LOOP_NO_INIT' };
+        }
+        const allInit = decl.declarations.every(x => !!x.init) || (head && parent.type !== 'ForStatement');
+        return { ok: true, keyword: writes === 0 && allInit ? 'const' : 'let' };
+      }
+
+      /**
+       * 検査。
+       * @param {string} code 検査するコード（既存ファイルへの変更は合成後の全文）
+       * @param {{ changed?: 'all' | Array<{start,end}> }} o changed = 新規・追加・変更した範囲
+       * @returns {{ ok, parsed, parseError, findings: [{ rule, kind, name, start, end, line, column, fix|null, reason|null, reasonText|null }] }}
+       */
+      function analyze(code, { changed = 'all' } = {}) {
+        const src = String(code ?? '');
+        let ast;
+        try { ast = acorn.parse(src, PARSE); }
+        catch (e) { return { ok: false, parsed: false, parseError: { message: String(e && e.message || e), line: e?.loc?.line ?? null, column: e?.loc?.column ?? null }, findings: [] }; }
+        const A = analyzeScopes(ast);
+        const findings = [];
+        const decls = [];
+        const walk = (n) => { if (!isNode(n)) return; if (n.type === 'VariableDeclaration') decls.push(n); for (const [, c] of childrenOf(n)) walk(c); };
+        walk(ast);
+        const bindingsOf = (decl) => { const out = []; for (const s of A.scopes) for (const b of s.names.values()) if (b.decls.some(d => d.decl === decl)) out.push(b); return out; };
+        for (const decl of decls) {
+          if (!inRanges(decl.start, changed)) continue;
+          if (decl.kind !== 'var' && decl.kind !== 'let') continue;
+          const bs = bindingsOf(decl);
+          const names = bs.map(b => b.name);
+          const at = { start: decl.start, end: decl.start + decl.kind.length, line: decl.loc.start.line, column: decl.loc.start.column };
+          if (decl.kind === 'var') {
+            const f = varFixOf(decl, A, bs);
+            findings.push({ rule: 'no-var', kind: 'var', name: names.join(', '), ...at, fix: f.ok ? { start: at.start, end: at.end, text: f.keyword } : null, reason: f.ok ? null : f.reason, reasonText: f.ok ? null : REASON[f.reason] });
+          } else {
+            const parent = A.parentOf.get(decl);
+            const head = parent && (parent.type === 'ForInStatement' || parent.type === 'ForOfStatement') && parent.left === decl;
+            const allInit = head || decl.declarations.every(d => !!d.init);
+            if (!allInit) continue;
+            const written = bs.filter(b => b.refs.some(r => r.write));
+            if (written.length === bs.length) continue;
+            if (written.length) { findings.push({ rule: 'prefer-const', kind: 'let', name: bs.filter(b => !written.includes(b)).map(b => b.name).join(', '), ...at, fix: null, reason: 'DESTRUCTURING_PARTIAL', reasonText: REASON.DESTRUCTURING_PARTIAL, advisory: true }); continue; }
+            findings.push({ rule: 'prefer-const', kind: 'let', name: names.join(', '), ...at, fix: { start: at.start, end: at.end, text: 'const' }, reason: null, reasonText: null });
+          }
+        }
+        // const への代入（実行すると TypeError で止まる）: 宣言が新しいコードなら let に直す。既存の const に新しいコードで代入するのは直せない
+        for (const s of A.scopes) for (const b of s.names.values()) {
+          if (!b.kinds.has('const') || b.decls.length !== 1) continue;
+          const writes = b.refs.filter(r => r.write);
+          if (!writes.length) continue;
+          const d = b.decls[0].decl;
+          const at = { start: d.start, end: d.start + 5, line: d.loc.start.line, column: d.loc.start.column };
+          if (inRanges(d.start, changed)) {
+            if (findings.some(f => f.start === d.start)) continue;
+            findings.push({ rule: 'const-assign', kind: 'const', name: bindingsOf(d).map(x => x.name).join(', '), ...at, fix: { start: at.start, end: at.end, text: 'let' }, reason: null, reasonText: null });
+          } else if (writes.some(r => inRanges(r.node.start, changed))) {
+            const w = writes.find(r => inRanges(r.node.start, changed));
+            findings.push({ rule: 'const-assign', kind: 'const', name: b.name, start: w.node.start, end: w.node.end, line: w.node.loc.start.line, column: w.node.loc.start.column, fix: null, reason: 'CONST_ASSIGN_EXISTING', reasonText: REASON.CONST_ASSIGN_EXISTING });
+          }
+        }
+        // 分割代入の一部だけ再代入する let は const にできない（書き方として正しい）ので、違反に数えない
+        const blocking = findings.filter(f => !f.advisory);
+        return { ok: blocking.length === 0, parsed: true, parseError: null, findings: blocking, advisories: findings.filter(f => f.advisory) };
+      }
+
+      /** 修正を適用（後ろから。重なりは無い前提で、重なれば後の方を捨てる） */
+      function applyFixes(code, fixes) {
+        const src = String(code ?? '');
+        const list = [...(fixes || [])].filter(Boolean).sort((a, b) => b.start - a.start);
+        let out = src, lastStart = Infinity;
+        const applied = [];
+        for (const f of list) { if (f.end > lastStart) continue; out = out.slice(0, f.start) + f.text + out.slice(f.end); lastStart = f.start; applied.push(f); }
+        return { code: out, applied };
+      }
+
+      /**
+       * 検査して、安全に直せる箇所だけ直し、もう一度検査する。直した後のコードが構文として通らなければ直さない（安全側）。
+       * @returns {{ code, fixed: [finding], remaining: [finding], before, after, parseError }}
+       */
+      function fix(code, { changed = 'all' } = {}) {
+        const before = analyze(code, { changed });
+        if (!before.parsed) return { code, fixed: [], remaining: [], before, after: before, parseError: before.parseError };
+        const fixable = before.findings.filter(f => f.fix);
+        if (!fixable.length) return { code, fixed: [], remaining: before.findings, before, after: before, parseError: null };
+        const r = applyFixes(code, fixable.map(f => ({ ...f.fix, finding: f })));
+        // 範囲は修正で長さが変わる（var → const は +2）。後ろの範囲をずらす
+        const shift = (pos) => r.applied.reduce((a, f) => a + (f.start < pos ? f.text.length - (f.end - f.start) : 0), 0);
+        const changed2 = changed === 'all' ? 'all' : changed.map(x => ({ start: x.start + shift(x.start), end: x.end + shift(x.end) }));
+        const after = analyze(r.code, { changed: changed2 });
+        if (!after.parsed) return { code, fixed: [], remaining: before.findings, before, after: before, parseError: null, revertedBecause: after.parseError };
+        return { code: r.code, fixed: r.applied.map(f => f.finding), remaining: after.findings, before, after, parseError: null, changed: changed2, edits: r.applied.map(f => ({ start: f.start, end: f.end, text: f.text })) };
+      }
+
+      /** 利用者向けの 1 行（「12 行目: var total — 理由」） */
+      const describe = (f, { lineOffset = 0 } = {}) => f.rule === 'no-var'
+        ? `${f.line + lineOffset} 行目: var ${f.name} — 自動で直せません（${f.reasonText || '理由不明'}）`
+        : `${f.line + lineOffset} 行目: let ${f.name} — 再代入していないので const にします`;
+
+      return { analyze, fix, applyFixes, describe, REASON, inRanges, available: () => !!(acorn && typeof acorn.parse === 'function') };
+    }
+    // acorn（@require。テストでは tests/vendor/acorn.js を vm に渡す）
+    const lib = (() => {
+      try { if (typeof acorn !== 'undefined' && acorn && typeof acorn.parse === 'function') return acorn; } catch (e) { }
+      try { if (typeof window !== 'undefined' && window.acorn && typeof window.acorn.parse === 'function') return window.acorn; } catch (e) { }
+      return null;
+    })();
+    const M = lib ? createModernJs(lib) : null;
+
+    /**
+     * Toolkit の KTCodeReview.applyPatch と同じ規則で patch を合成する（baseHash は照合しない。照合と適用の正本は Toolkit）。
+     * 各操作の content が入った区間（LF にそろえた全文 normText の中の [start, end)。off = 区間の先頭が content の何文字目か）を返す。
+     * 後の操作が前の操作の content の途中に入ると、前の区間は 2 つに分かれる。
+     * @returns {{ ok, normText, ranges: [{ op, start, end, off }], errors }}
+     */
+    function applyPatchWithRanges(source, patch) {
+      const errors = [];
+      let norm = String(source ?? '').replace(/\r\n/g, '\n');
+      let segs = [];
+      const ops = Array.isArray(patch?.operations) ? patch.operations : [];
+      if (!ops.length) return { ok: false, normText: norm, ranges: [], errors: [{ code: 'PATCH_EMPTY' }] };
+      const splice = (a, b, ins, cStart, cLen, op) => {
+        const delta = ins.length - (b - a);
+        const next = [];
+        for (const s of segs) {
+          if (s.end <= a) { next.push(s); continue; }
+          if (s.start >= b) { next.push({ ...s, start: s.start + delta, end: s.end + delta }); continue; }
+          if (s.start < a) next.push({ ...s, end: a });
+          if (s.end > b) next.push({ ...s, start: b + delta, end: s.end + delta, off: s.off + (b - s.start) });
+        }
+        norm = norm.slice(0, a) + ins + norm.slice(b);
+        if (cLen > 0) next.push({ op, start: a + cStart, end: a + cStart + cLen, off: 0 });
+        segs = next;
+      };
+      ops.forEach((op, i) => {
+        const type = op?.type;
+        const anchor = String(op?.anchor ?? '').replace(/\r\n/g, '\n');
+        const content = String(op?.content ?? '').replace(/\r\n/g, '\n');
+        if (type === 'APPEND') {
+          const sep = norm.endsWith('\n') || !norm ? '' : '\n';
+          const tail = content.endsWith('\n') ? '' : '\n';
+          splice(norm.length, norm.length, sep + content + tail, sep.length, content.length, i);
+          return;
+        }
+        if (!['INSERT_AFTER', 'INSERT_BEFORE', 'REPLACE'].includes(type) || !anchor.trim()) { errors.push({ code: 'PATCH_OP_INVALID', op: i }); return; }
+        let count = 0, idx = -1, from = 0;
+        while ((from = norm.indexOf(anchor, from)) >= 0) { count++; if (idx < 0) idx = from; from += anchor.length; }
+        if (count !== 1) { errors.push({ code: count === 0 ? 'PATCH_ANCHOR_NOT_FOUND' : 'PATCH_ANCHOR_AMBIGUOUS', op: i }); return; }
+        const end = idx + anchor.length;
+        if (type === 'INSERT_AFTER') {
+          const rest = norm.slice(end);
+          const pre = norm[end - 1] === '\n' ? '' : '\n';
+          const body = content.replace(/\n$/, '');
+          const post = rest.startsWith('\n') || !rest ? '' : '\n';
+          splice(end, end, pre + body + post, pre.length, body.length, i);
+        } else if (type === 'INSERT_BEFORE') {
+          const body = content.endsWith('\n') ? content : `${content}\n`;
+          splice(idx, idx, body, 0, content.length, i);
+        } else splice(idx, end, content, 0, content.length, i);
+      });
+      return { ok: errors.length === 0, normText: norm, ranges: segs.filter(r => r.end > r.start), errors };
+    }
+
+    /** 追加した部分（code。表示用）の var / let を、全文で直した宣言と同じ語に直す（字句だけ見る。読めなければそのまま） */
+    function retokenFix(code, fixedFindings) {
+      const src = String(code ?? '');
+      if (!fixedFindings.length) return src;
+      const want = new Map();
+      for (const f of fixedFindings) { const first = String(f.name || '').split(',')[0].trim(); if (first && f.fix) want.set(`${f.kind}:${first}`, f.fix.text); }
+      let toks;
+      try { toks = [...lib.tokenizer(src, { ecmaVersion: 'latest', allowReturnOutsideFunction: true })]; } catch (e) { return src; }
+      const edits = [];
+      for (let i = 0; i < toks.length; i++) {
+        const t = toks[i];
+        const kw = t.type.keyword === 'var' ? 'var' : (t.type.label === 'name' && t.value === 'let' ? 'let' : null);
+        if (!kw) continue;
+        // 宣言の最初の名前（分割代入は括弧の中の最初の名前）
+        let name = null;
+        for (let k = i + 1; k < Math.min(toks.length, i + 6); k++) { if (toks[k].type.label === 'name') { name = toks[k].value; break; } }
+        const text = name ? want.get(`${kw}:${name}`) : null;
+        if (text) edits.push({ start: t.start, end: t.end, text });
+      }
+      return M.applyFixes(src, edits).code;
+    }
+
+    /**
+     * 生成物（normalizeGenerated の normalized）の modern JavaScript の検査と安全な自動修正。
+     *   NEW_JS_FILE は全文、EXTEND_EXISTING_JS は既存ソースに patch を合成した全文のうち、操作の content が入った区間だけを見る（既存の未変更の var は対象外）。
+     *   直した宣言は、その操作の content（と表示用の code）に書き戻す。書き戻した patch をもう一度合成して、直した全文と一致しなければ直さない（安全側）。
+     * @returns {{ status: 'ok'|'fixed'|'failed'|'unchecked', fixed: [finding], remaining: [finding], parseError, reason?, gen, source }}
+     */
+    function modernizeGenerated(gen, { existingFile = null } = {}) {
+      if (!M) return { status: 'unchecked', fixed: [], remaining: [], parseError: null, gen, reason: 'PARSER_UNAVAILABLE' };
+      const none = (status, extra = {}) => ({ status, fixed: [], remaining: [], parseError: null, gen, ...extra });
+      if (!gen || typeof gen !== 'object') return none('unchecked', { reason: 'NO_GENERATED' });
+      if (gen.strategy === 'NEW_JS_FILE') {
+        const r = M.fix(gen.code, { changed: 'all' });
+        if (r.parseError) return none('failed', { parseError: r.parseError, source: gen.code });
+        return { status: r.remaining.length ? 'failed' : r.fixed.length ? 'fixed' : 'ok', fixed: r.fixed, remaining: r.remaining, parseError: null, gen: { ...gen, code: r.code }, source: r.code };
+      }
+      if (gen.strategy !== 'EXTEND_EXISTING_JS') return none('unchecked', { reason: 'STRATEGY' });
+      if (!existingFile || typeof existingFile.source !== 'string') return none('unchecked', { reason: 'NO_SOURCE' });
+      const ap = applyPatchWithRanges(existingFile.source, gen.patch);
+      if (!ap.ok) return none('unchecked', { reason: 'PATCH_NOT_APPLICABLE' });
+      const r = M.fix(ap.normText, { changed: ap.ranges });
+      if (r.parseError) return none('failed', { parseError: r.parseError, source: ap.normText });
+      if (!r.fixed.length) return { status: r.remaining.length ? 'failed' : 'ok', fixed: [], remaining: r.remaining, parseError: null, gen, source: ap.normText };
+      const ops = gen.patch.operations.map(o => ({ ...o, content: String(o.content ?? '').replace(/\r\n/g, '\n') }));
+      const byOp = new Map();
+      for (const e of r.edits || []) {
+        const rg = ap.ranges.find(x => e.start >= x.start && e.end <= x.end);
+        if (!rg) continue;
+        if (!byOp.has(rg.op)) byOp.set(rg.op, []);
+        byOp.get(rg.op).push({ start: rg.off + e.start - rg.start, end: rg.off + e.end - rg.start, text: e.text });
+      }
+      for (const [i, es] of byOp) {
+        const old = ops[i].content;
+        ops[i].content = M.applyFixes(old, es).code;
+        // 後の操作が、この操作で入れた行を anchor にしているときは、anchor も同じように直す（直さないと anchor が見つからない）
+        for (let j = i + 1; j < ops.length; j++) {
+          const an = String(ops[j].anchor ?? '').replace(/\r\n/g, '\n');
+          if (!an || ops[j].type === 'APPEND') continue;
+          const at = old.indexOf(an);
+          if (at < 0 || old.indexOf(an, at + 1) >= 0) continue;
+          const inside = es.filter(e => e.start >= at && e.end <= at + an.length).map(e => ({ ...e, start: e.start - at, end: e.end - at }));
+          if (inside.length) ops[j].anchor = M.applyFixes(an, inside).code;
+        }
+      }
+      const patch = { ...gen.patch, operations: ops };
+      const re = applyPatchWithRanges(existingFile.source, patch);
+      if (!re.ok || re.normText !== r.code) return { status: 'failed', fixed: [], remaining: r.before.findings, parseError: null, gen, source: ap.normText, reason: 'WRITE_BACK_MISMATCH' };
+      return { status: r.remaining.length ? 'failed' : 'fixed', fixed: r.fixed, remaining: r.remaining, parseError: null, gen: { ...gen, code: retokenFix(gen.code, r.fixed), patch }, source: r.code };
+    }
+
+    /** 検査結果 → 利用者・AI に示す行（行番号は検査した全文。該当行の文を添える） */
+    function describeFindings(m) {
+      const lines = String(m?.source ?? '').split('\n');
+      const at = (line) => { const t = String(lines[(line || 1) - 1] ?? '').trim(); return t ? `「${t.slice(0, 80)}」` : ''; };
+      const out = [];
+      if (m?.parseError) out.push(`構文エラー（${m.parseError.line ?? '?'} 行目${at(m.parseError.line)}）: ${m.parseError.message}`);
+      for (const f of m?.remaining || []) out.push(`${f.line} 行目${at(f.line)}: ${f.rule === 'no-var' ? (f.fix ? `var ${f.name} — ${f.fix.text} に直せます（自動修正を通っていないコードです）` : `var ${f.name} — 自動で直せません（${f.reasonText || f.reason}）`) : f.rule === 'const-assign' ? (f.fix ? `const ${f.name} — 再代入しているので let に直せます（自動修正を通っていないコードです）` : `${f.name} への代入 — 直せません（${f.reasonText || f.reason}）`) : `let ${f.name} — const にできます`}`);
+      return out;
+    }
+    /** Toolkit の生成結果（existingSource = { name, target, text }）を検査し、安全に直す */
+    const fixGenerated = ({ generated, existingSource = null } = {}) => { const r = modernizeGenerated(generated, { existingFile: existingSource && typeof existingSource.text === 'string' ? { source: existingSource.text } : null }); return { ...r, generated: r.gen }; };
+    return {
+      VERSION: MODERN_JS_VERSION, available: () => !!M,
+      analyze: (code, o) => (M ? M.analyze(code, o) : null), fix: (code, o) => (M ? M.fix(code, o) : null), applyFixes: (code, f) => (M ? M.applyFixes(code, f) : { code, applied: [] }),
+      applyPatchWithRanges, fixGenerated, describeFindings, REASON: M ? M.REASON : {},
+    };
+  })();
+
+  // ==========================================
   // 3.6e 生成コードの静的検査 (KTCodeReview) — Phase 16
   //   JavaScript Generator が返したコード（新規ファイルの全文、または既存ファイルへの patch）を Toolkit 側で決定的に検査する層。
   //   - patch の適用（baseHash の照合・anchor は 1 回だけ一致・全文の書き換えはしない）と Before / After の行差分
@@ -11822,6 +12260,21 @@
       const syn = checkSyntax(finalCode);
       add('syntax', syn.ok, 'block', syn.ok ? '構文エラーなし' : `構文エラー: ${syn.message}`);
       if (!syn.ok) return finish();
+      // ---- 2b. modern JavaScript（2026-10-05）: 新規・追加・変更した範囲で var を使わない・再代入しない let は const ----
+      //   構文解析・スコープ解析（KTModernJs）。統合（EXTEND）は既存ソースに patch を合成した全文のうち、操作の content が入った区間だけを見る。
+      //   直せる箇所は生成の直後に直してある（ここでは直さない）。残った箇所は具体的な理由とともに登録できない（block）
+      modernJsCheck();
+      function modernJsCheck() {
+        const fixedBy = [...((g.gatewayChecks && g.gatewayChecks.modernJs && g.gatewayChecks.modernJs.fixed) || []), ...((g.toolkitModernJs && g.toolkitModernJs.fixed) || [])];
+        if (!KTModernJs.available()) { add('modern-js', false, 'block', '構文解析器（acorn）を読み込めないため、新しいコードで var を使っていないかを確かめられません（登録できません）。Toolkit を入れ直すか、cdn.jsdelivr.net への接続の制限を確かめてください'); return; }
+        const merged = g.strategy === 'EXTEND_EXISTING_JS' ? KTModernJs.applyPatchWithRanges(existingSource.text, g.patch) : null;
+        const code = merged ? merged.normText : finalCode.replace(/\r\n/g, '\n');
+        const a = KTModernJs.analyze(code, { changed: merged ? merged.ranges : 'all' });
+        if (!a || !a.parsed) { add('modern-js', false, 'block', `構文を解析できません（${a?.parseError?.line ?? '?'} 行目）: ${a?.parseError?.message || '不明'}`); return; }
+        if (!a.findings.length) { add('modern-js', true, 'info', `新しいコードに var はありません（const / let）${fixedBy.length ? `。生成の後に ${fixedBy.length} か所を const / let に直しました（意味が変わらない箇所だけ）` : ''}`); return; }
+        const lines = KTModernJs.describeFindings({ source: code, remaining: a.findings });
+        for (const l of lines) add('modern-js', false, 'block', `記法: ${l}。直してから登録してください（コードを作り直すか、計画を修正してください）`);
+      }
       // ---- 3. 再解析（KTScan の仮想ファイル）----
       const target = Array.isArray(c.platform) && c.platform.length === 1 && c.platform[0] === 'mobile' ? 'mobile' : (existingSource?.target || 'desktop');
       const rescan = KTScan.analyzeFile({ name: g.targetFile || existingSource?.name || 'generated.js', target, kind: 'js', text: finalCode }, { fields: fieldRows, selfAppId: data?.appId ?? null });
@@ -17125,6 +17578,10 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
         let generated;
         try { generated = await client.generate({ ctx, requestId, signal }); }
         catch (e) { noteAuthError(e); throw e; }
+        // modern JavaScript（2026-10-05）: 新規・追加・変更した範囲の var / 再代入しない let を、意味が変わらない箇所だけ直す（Gateway も直すが、
+        //   古い Gateway・記録した応答でも同じにする）。直した後のコードで Code Review の全部の検査を行う。書式・記法の修正は利用者に聞かない
+        const mf = KTModernJs.fixGenerated({ generated, existingSource });
+        if (mf.fixed.length) generated = { ...mf.generated, toolkitModernJs: { version: KTModernJs.VERSION, fixed: mf.fixed.map(f => ({ line: f.line, rule: f.rule, name: f.name, to: f.fix ? f.fix.text : null })) } };
         const provenance = { planId: v.planId, planVersion: v.version, customizationId, generatedAt: new Date().toISOString(), appId: String(inputs.data?.appId ?? d.appId ?? executor?.appId ?? ''), requestId: generated.requestId || requestId, generator: 'nest-rec-ai/customization-generator', toolkitVersion: SCRIPT_VERSION };
         let review;
         try { review = KTCodeReview.review({ generated, customization: c, plan, data: inputs.data || null, scan: inputs.scan || null, existingSource, provenance }); }

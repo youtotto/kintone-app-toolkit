@@ -19,7 +19,7 @@ const FIELD_ON_OFF = [
   "(function () {",
   "  'use strict';",
   "  kintone.events.on(['app.record.create.show', 'app.record.edit.show'], function (event) {",
-  "    var record = event.record;",
+  "    const record = event.record;",
   "    if (record['ステータス'].value === '承認待ち') {",
   "      record['amount'].disabled = true;",
   "    }",
@@ -33,7 +33,7 @@ const NEW_JS = [
   "(function () {",
   "  'use strict';",
   "  kintone.events.on(['app.record.create.change.amount', 'app.record.edit.change.amount'], function (event) {",
-  "    var record = event.record;",
+  "    const record = event.record;",
   "    record['amount'].error = Number(record['amount'].value || 0) >= 1000000 ? '100万円以上は部長の承認が必要です' : null;",
   "    return event;",
   "  });",
@@ -364,6 +364,42 @@ console.log('\n--- 新規 JS（desktop）の登録 / mobile（desktop を変え�
   await ticks(6);
   assert(m.panel.jsExecState().stage === 'rollback-blocked' && m.panel.jsExecState().rollback.blockers[0].code === 'ROLLBACK_STALE' && /自動では元に戻せません/.test(m.pane()) && /desktop\.js\[2\]/.test(m.pane()) && jsNames(m, 'desktop').length === 3, '§53 登録後に人間が JS を追加 → ROLLBACK_STALE（上書きしない）');
   assert(/自動では元に戻せません/.test(m.chat()), '会話にも案内');
+}
+
+console.log('\n--- §54 modern JavaScript（2026-10-05）: 生成の直後に var を直し、直したコードを登録する。直せなければ登録できない ---');
+{
+  // AI が var を含むコードを返した（古い Gateway・Gateway の修正の前と同じ）
+  const VAR_JS = NEW_JS.replace('    const record = event.record;', '    var record = event.record;');
+  const m = mount({ planResponse: PLAN_NEW_DESKTOP, generatedFor: (ctx) => ({ ...genFor(ctx), code: VAR_JS }) });
+  await ticks();
+  await m.panel.send('100万円以上なら警告を表示したい');
+  await confirmSpec(m);
+  await clickChat(m, 'generate', { cid: 'C1' });
+  const v = m.conv().activePlan();
+  const g = v.generated.C1;
+  assert(g && !/\bvar\b/.test(g.generated.code) && /    const record = event\.record;/.test(g.generated.code) && g.generated.toolkitModernJs.fixed.length === 1 && g.review.status !== 'BLOCKED' && g.review.checks.some(c => c.name === 'modern-js' && c.ok && /1 か所を const \/ let に直しました/.test(c.message)), `§54 AI の var は生成の直後に const に直り、直したコードで検査する（利用者に書式を聞かない）: ${g && g.review.status}`);
+  await clickChat(m, 'open-js-register', { plan: v.planId, version: String(v.version) });
+  await ticks(6);
+  await ackAll(m);
+  await clickPane(m, 'kt-ai-jsreg-go');
+  await ticks(10);
+  const up = [...m.mock.st.files.values()].find(f => f.name === 'amount-warning.js');
+  assert(m.panel.jsExecState().execution.status === 'DONE' && up && !/\bvar\b/.test(up.content) && /const record = event\.record;/.test(up.content), '§54 登録したファイルの本文に var が無い（直したコードを登録する）');
+}
+{
+  // ファイル直下の var（グローバル）: 自動では直せない → 登録できない（具体的な理由）
+  const TOP_JS = `var LIMIT = 1000000;\n${NEW_JS}`;
+  const m = mount({ planResponse: PLAN_NEW_DESKTOP, generatedFor: (ctx) => ({ ...genFor(ctx), code: TOP_JS }) });
+  await ticks();
+  await m.panel.send('100万円以上なら警告を表示したい');
+  await confirmSpec(m);
+  await clickChat(m, 'generate', { cid: 'C1' });
+  const v = m.conv().activePlan();
+  const g = v.generated.C1;
+  const blocker = g && g.review.registration.blockers.find(b => b.code === 'modern-js');
+  assert(g && g.review.status === 'BLOCKED' && blocker && /1 行目「var LIMIT = 1000000;」: var LIMIT — 自動で直せません（関数の外/.test(blocker.message), `§54 直せない var は登録できない（行・文・理由）: ${blocker && blocker.message}`);
+  const r = KTJsExecutor.changeFromGenerated ? KTJsExecutor.changeFromGenerated({ generated: g.generated, review: g.review }) : null;
+  assert(!r || r.ok === false, '§54 登録の準備もできない');
 }
 
 console.log(`\n${state.failed ? 'FAILED' : 'ALL PASSED'}: ${state.passed} passed / ${state.failed} failed`);

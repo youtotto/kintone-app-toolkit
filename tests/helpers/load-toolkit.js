@@ -5,14 +5,17 @@ const fs = require('fs');
 const path = require('path');
 const vm = require('vm');
 
-function loadToolkit({ document: docOverride = null, localStorage: lsOverride = null } = {}) {
+// modern JavaScript の検査（KTModernJs）の構文解析器。実機は @require（https://cdn.jsdelivr.net/npm/acorn@8.18.0/dist/acorn.js）、テストは同じ版の写し
+const ACORN = require('../vendor/acorn.js');
+
+function loadToolkit({ document: docOverride = null, localStorage: lsOverride = null, acorn = ACORN } = {}) {
   // KT_SRC: 別のビルド（修正前の版など）で同じテストを走らせるとき（RED の確認）に使う
   const SRC = process.env.KT_SRC || path.join(__dirname, '..', '..', 'kintoneAppToolkit.user.js');
   let code = fs.readFileSync(SRC, 'utf8');
   const lastClose = code.lastIndexOf('})();');
   if (lastClose < 0) throw new Error('IIFE close not found');
   code = code.slice(0, lastClose)
-    + '\n  globalThis.__TEST__ = { KTDeps, KTScan, KTIncoming, KTDevBase: typeof KTDevBase !== "undefined" ? KTDevBase : undefined, KTContext, KTContextUi, KTAiClient, KTQueryCheck, KTPlanReview, KTPlanExecutor, KTAiConversation, KTAiAnswers: typeof KTAiAnswers !== "undefined" ? KTAiAnswers : undefined, KTAiWorkspaceViewModel, KTAiChatUi, KTJsCatalog, KTCodeReview, KTJsExecutor, mountAiWorkspace, mountRoot, renderCustomize, renderAiWorkspace, SCRIPT_VERSION, buildProcessMermaid: typeof buildProcessMermaid !== "undefined" ? buildProcessMermaid : undefined };\n'
+    + '\n  globalThis.__TEST__ = { KTDeps, KTScan, KTIncoming, KTDevBase: typeof KTDevBase !== "undefined" ? KTDevBase : undefined, KTContext, KTContextUi, KTAiClient, KTQueryCheck, KTPlanReview, KTPlanExecutor, KTAiConversation, KTAiAnswers: typeof KTAiAnswers !== "undefined" ? KTAiAnswers : undefined, KTAiWorkspaceViewModel, KTAiChatUi, KTJsCatalog, KTCodeReview, KTModernJs: typeof KTModernJs !== "undefined" ? KTModernJs : undefined, KTJsExecutor, mountAiWorkspace, mountRoot, renderCustomize, renderAiWorkspace, SCRIPT_VERSION, buildProcessMermaid: typeof buildProcessMermaid !== "undefined" ? buildProcessMermaid : undefined };\n'
     + code.slice(lastClose);
 
   const noop = () => { };
@@ -36,6 +39,8 @@ function loadToolkit({ document: docOverride = null, localStorage: lsOverride = 
     requestIdleCallback: noop,
     ResizeObserver: class { observe() { } disconnect() { } },
     addEventListener: noop, removeEventListener: noop,
+    // acorn: false で「構文解析器を読み込めない」状態を作る
+    ...(acorn ? { acorn } : {}),
   };
   sandbox.window = sandbox;
   sandbox.globalThis = sandbox;

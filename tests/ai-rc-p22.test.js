@@ -25,7 +25,7 @@ const ops = (text) => safe(() => KTCodeReview.fieldOperations(clean(text)), []);
 const checksOf = (text) => safe(() => KTCodeReview.inputChecks(clean(text)), []);
 const locks = (text, code) => safe(() => KTCodeReview.disableSites(clean(text), code), []);
 const writes = (text) => safe(() => KTCodeReview.writeTargets(clean(text)), new Map());
-const handler = (events, body) => `(function () {\n  'use strict';\n  kintone.events.on(${JSON.stringify(events).replace(/"/g, "'")}, function (event) {\n    var record = event.record;\n${body}\n    return event;\n  });\n})();`;
+const handler = (events, body) => `(function () {\n  'use strict';\n  kintone.events.on(${JSON.stringify(events).replace(/"/g, "'")}, function (event) {\n    const record = event.record;\n${body}\n    return event;\n  });\n})();`;
 const EDIT = ['app.record.edit.show'];
 const SUBMIT = ['app.record.create.submit', 'app.record.edit.submit'];
 
@@ -56,13 +56,13 @@ console.log('\n--- F-F2 ロック判定 1〜8: 直接・ブラケット・変数
   assert(e6b.length === 1 && e6b[0].via === 'bracket' && e6a.length === 1 && e6a[0].via === 'dot' && e6e.length === 1 && e6e[0].via === 'dot', `6. ブラケット記法・ドット記法（record.金額 / event.record.金額）を数える: ${JSON.stringify([e6b, e6a, e6e].map(l => l.map(x => x.via)))}`);
   // 7. 変数経由（C）
   const e7 = locks(handler(EDIT, "    const field = record.金額;\n    if (record['ステータス'].value === '承認済み') {\n      field.disabled = true;\n    }"), '金額');
-  const e7b = locks(handler(EDIT, "    var f = event.record['金額'];\n    f.disabled = true;"), '金額');
+  const e7b = locks(handler(EDIT, "    const f = event.record['金額'];\n    f.disabled = true;"), '金額');
   assert(e7.length === 1 && e7[0].via === 'alias' && e7[0].alias === 'field' && !e7[0].unconditional && e7b.length === 1 && e7b[0].via === 'alias' && e7b[0].unconditional, `7. 変数に入れたフィールドの disabled を数える（条件つき / 条件なしも区別）: ${JSON.stringify([e7, e7b].map(l => l.map(x => [x.via, x.unconditional])))}`);
   // 8. 別フィールドの変数との混同が起きない（別の handler の同じ名前・同じ handler の別の変数）
   const two = "(function () {\n  'use strict';\n  kintone.events.on('app.record.edit.show', function (event) {\n    const field = event.record['金額'];\n    if (event.record['ステータス'].value === '承認済み') {\n      field.disabled = true;\n    }\n    return event;\n  });\n  kintone.events.on('app.record.create.show', function (event) {\n    const field = event.record['備考'];\n    field.disabled = true;\n    return event;\n  });\n})();";
   const amt = locks(two, '金額'), memo = locks(two, '備考');
   assert(amt.length === 1 && !amt[0].unconditional && memo.length === 1 && memo[0].unconditional, `8a. 別の handler の同じ名前の変数（field）を取り違えない（金額は条件つき・備考は条件なし）: ${JSON.stringify([amt.map(x => x.unconditional), memo.map(x => x.unconditional)])}`);
-  const same = handler(EDIT, "    var a = record['金額'];\n    var b = record['備考'];\n    b.disabled = true;");
+  const same = handler(EDIT, "    const a = record['金額'];\n    const b = record['備考'];\n    b.disabled = true;");
   assert(locks(same, '金額').length === 0 && locks(same, '備考').length === 1, '8b. 同じ handler の別の変数（a = 金額 / b = 備考）: b.disabled は備考だけ');
 }
 
@@ -79,7 +79,7 @@ console.log('\n--- F-F2 入力チェック 9〜15: 直接・変数経由の .val
   const c11 = checksOf(handler(SUBMIT, "    const amountField = record.金額;\n    if (!amountField.value) {\n      event.error = '金額を入力してください';\n    }"));
   assert(c11.length === 1 && c11[0].kind === 'event-error' && c11[0].target === null && c11[0].checks.includes('金額'), `11. event.error（条件で金額を読む）→ 金額の入力チェック: ${JSON.stringify(c11)}`);
   // 12. field.error（括弧なしの if）
-  const c12 = checksOf(handler(SUBMIT, "    var f = event.record['備考'];\n    if (f.value && f.value.length > 100) f.error = '100 文字までです';"));
+  const c12 = checksOf(handler(SUBMIT, "    const f = event.record['備考'];\n    if (f.value && f.value.length > 100) f.error = '100 文字までです';"));
   assert(c12.length === 1 && c12[0].target === '備考' && c12[0].kind === 'field-error' && c12[0].checks.includes('備考'), `12. 変数の field.error（括弧なしの if）→ 備考の入力チェック: ${JSON.stringify(c12)}`);
   // 13. 保存イベントの中
   assert(c9[0] && c9[0].events.includes('app.record.create.submit') && c9[0].events.includes('app.record.edit.submit') && c11[0] && c11[0].events.includes('app.record.edit.submit'), '13. 保存時（submit）のイベントの中の入力チェック（イベントを添える）');
@@ -96,7 +96,7 @@ console.log('\n--- F-F2 入力チェック 9〜15: 直接・変数経由の .val
 console.log('\n--- F-F2 誤検知の防止 16〜18: 値を読むだけ・コメント・別の変数への代入 ---');
 {
   // 16. 値を読むだけ（入力チェックではない）
-  const t16 = handler(SUBMIT, "    var v = record['金額'].value;\n    console.log(v);\n    var total = Number(record.金額.value) * 2;\n    if (total > 0) console.log(total);");
+  const t16 = handler(SUBMIT, "    const v = record['金額'].value;\n    console.log(v);\n    const total = Number(record.金額.value) * 2;\n    if (total > 0) console.log(total);");
   const o16 = ops(t16);
   assert(checksOf(t16).length === 0 && o16.length >= 2 && o16.every(o => o.op === 'read' && o.code === '金額'), `16. 値を読むだけのコードを入力チェック扱いしない（操作は値の参照だけ）: ${JSON.stringify(o16.map(o => [o.op, o.code]))}`);
   // 17. コメントの中の文字列は解析しない
@@ -144,9 +144,9 @@ const cc = (rv) => (rv.checks || []).filter(x => x.name === 'conditional-control
 }
 {
   // 既存のコード（統合先）にあるロック: 条件なし（E）と別の条件の中（D）を分ける
-  const BASE_E = "(function () {\n  'use strict';\n  kintone.events.on(['app.record.edit.show'], function (event) {\n    var record = event.record;\n    record['金額'].disabled = true;\n    return event;\n  });\n})();\n";
-  const BASE_D = "(function () {\n  'use strict';\n  kintone.events.on(['app.record.edit.show'], function (event) {\n    var record = event.record;\n    if (record['ステータス'] && record['ステータス'].value === '承認済み') {\n      record['金額'].disabled = true;\n    }\n    return event;\n  });\n})();\n";
-  const warn = "  kintone.events.on(['app.record.edit.show', 'app.record.edit.change.金額'], function (event) {\n    var amount = event.record['金額'];\n    if (Number(amount.value) > 1000000 && !amount.disabled) {\n      amount.error = '金額が1,000,000円を超えています。';\n    } else {\n      amount.error = null;\n    }\n    return event;\n  });\n";
+  const BASE_E = "(function () {\n  'use strict';\n  kintone.events.on(['app.record.edit.show'], function (event) {\n    const record = event.record;\n    record['金額'].disabled = true;\n    return event;\n  });\n})();\n";
+  const BASE_D = "(function () {\n  'use strict';\n  kintone.events.on(['app.record.edit.show'], function (event) {\n    const record = event.record;\n    if (record['ステータス'] && record['ステータス'].value === '承認済み') {\n      record['金額'].disabled = true;\n    }\n    return event;\n  });\n})();\n";
+  const warn = "  kintone.events.on(['app.record.edit.show', 'app.record.edit.change.金額'], function (event) {\n    const amount = event.record['金額'];\n    if (Number(amount.value) > 1000000 && !amount.disabled) {\n      amount.error = '金額が1,000,000円を超えています。';\n    } else {\n      amount.error = null;\n    }\n    return event;\n  });\n";
   const warnCust = cust({ requirement: '金額が100万円を超えたら警告する', strategy: 'EXTEND_EXISTING_JS', events: ['app.record.edit.show', 'app.record.edit.change.金額'], fields: [{ code: '金額', access: 'CONTROL', condition: '金額 >= "1000000" and 金額 != "1000000"' }], existingFiles: [{ name: 'lock.js', target: 'desktop' }] });
   const ext = (base, content, c) => KTCodeReview.review({ generated: gen(content, { strategy: 'EXTEND_EXISTING_JS', targetFile: 'lock.js', patch: { baseHash: KTScan.hashText(base), operations: [{ type: 'INSERT_BEFORE', anchor: '})();', content }] } }), customization: c, plan: null, data: DATA, scan: null, existingSource: { name: 'lock.js', target: 'desktop', text: base } });
   const rD = ext(BASE_D, warn, warnCust);
@@ -172,7 +172,11 @@ console.log('\n--- F-F2 実機の再生（Phase 21 BF-C）: 実際の生成コ�
   const files = [{ name: 'dealLock.js', target: 'desktop', kind: 'js', text: R.DEAL_LOCK }, { name: 'dealValidate.js', target: 'desktop', kind: 'js', text: R.DEAL_VALIDATE }];
   // 実機の Field Scanner と同じ解析（KTScan.buildPayload）で作る（テスト用の簡易版 buildScanPayload は .error = を CONTROL と数えない）
   const scan = KTScan.buildPayload({ appId: 353, files, fields: fieldsN.map(f => ({ code: f.code, label: f.label, type: f.rawType })), deps: KTDeps.buildDependencyData(data, fieldsN), scannedAt: '2026-10-04T00:16:00.000Z' });
-  const rv = KTCodeReview.review({ generated: R.GENERATED, customization: R.CUSTOMIZATION, plan: null, data, scan, existingSource: { name: 'dealLock.js', target: 'desktop', text: R.DEAL_LOCK } });
+  // 実機の流れと同じく、生成の直後に modern JavaScript の安全な修正を通してから検査する（記録した AI の出力は var を含む。2026-10-05）
+  const srcL = { name: 'dealLock.js', target: 'desktop', text: R.DEAL_LOCK };
+  const gL = T2.KTModernJs.fixGenerated({ generated: R.GENERATED, existingSource: srcL });
+  assert(['fixed', 'ok'].includes(gL.status), `記録した出力は生成の直後に直る（または直すものが無い）: ${gL.status} ${JSON.stringify(gL.remaining)}`);
+  const rv = KTCodeReview.review({ generated: gL.generated, customization: R.CUSTOMIZATION, plan: null, data, scan, existingSource: srcL });
   const c = cc(rv)[0] || {};
   const codes = rv.registration.confirmations.map(x => x.code);
   assert(R.P21_CONFIRMATIONS.length === 4 && R.P21_CONFIRMATIONS.includes('conditional-control'), '前提: Phase 21 の判定は確認 4 件（conditional-control を含む）');
