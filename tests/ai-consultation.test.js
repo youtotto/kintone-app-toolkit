@@ -402,6 +402,22 @@ console.log('\n--- §54 modern JavaScript（2026-10-05）: 生成の直後に va
   assert(!r || r.ok === false, '§54 登録の準備もできない');
 }
 
+console.log('\n--- §55 確定と生成を 1 回の操作に（2026-10-05 第 3 段）: ［確定してコードを作る］・古い版のボタンでは作らない ---');
+{
+  const m = mount({ planResponse: PLAN_NEW_DESKTOP });
+  await ticks();
+  await m.panel.send('100万円以上なら警告を表示したい');
+  const v = m.conv().activePlan();
+  assert(/確定してコードを作る/.test(m.$('kt-ai-spec').innerHTML) && /data-cid="C1"/.test(m.$('kt-ai-spec').innerHTML), '§55 仕様（下書き）に［確定してコードを作る］がある（生成できるカスタマイズが 1 つなら、その id）');
+  await clickChat(m, 'confirm-generate', { plan: v.planId, version: String(v.version), cid: 'C1' });
+  await ticks(10);
+  assert(m.calls.generate.length === 1 && m.conv().activePlan().spec.status === 'CONFIRMED' && m.conv().activePlan().generated && m.conv().activePlan().generated.C1, '§55 1 回の操作で仕様を確定してコードを作る（以前は確定 → 生成の 2 回）。kintone への登録は別の確認のまま');
+  const before = m.calls.generate.length;
+  await clickChat(m, 'confirm-generate', { plan: v.planId, version: String(v.version - 1 || 99), cid: 'C1' });
+  await ticks(6);
+  assert(m.calls.generate.length === before, '§55 最新でない版のボタンでは作らない');
+}
+
 console.log(`\n${state.failed ? 'FAILED' : 'ALL PASSED'}: ${state.passed} passed / ${state.failed} failed`);
 process.exit(state.failed ? 1 : 0);
 })().catch(e => { console.error(e); process.exit(1); });

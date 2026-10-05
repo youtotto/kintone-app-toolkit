@@ -142,7 +142,9 @@ console.log('\n--- 1. KTAiConversation.classifyIntent（決定的規則） ---')
   assert(cls('元に戻して', withPlan) === I.GENERAL && KTAiConversation.classifyIntent('元に戻して', withPlan).reason === 'NO_EXECUTION', '反映していなければ戻すものがない（GENERAL / NO_EXECUTION）');
   // 曖昧
   assert(cls('これどう？', withPlan) === I.AMBIGUOUS && (KTAiConversation.classifyIntent('これどう？', withPlan).choices || []).includes(I.EXPLAIN_PLAN), 'AMBIGUOUS: 「これどう？」は何を指すか聞く（選択肢に計画の説明）');
-  assert(cls('契約終了30日前に担当者へ通知したい', withPlan) === I.AMBIGUOUS && KTAiConversation.classifyIntent('契約終了30日前に担当者へ通知したい', withPlan).reason === 'NEW_OR_REVISE', '計画があるときの新しい要望は「修正か新規か」を聞く（勝手に計画を変えない）');
+  // 2026-10-05 第 3 段で変更: 計画があるときの新しい要望は、聞き返さずに計画の AI に読ませる（要件として追加し、計画の更新・返答を 1 回の応答で返す。
+  //   以前は「修正か新規か」を聞き返し、言い回しによっては指示が落ちた）。計画は AI が返した要件の操作と差分で変わり、kintone には何も書き込まない
+  assert(cls('契約終了30日前に担当者へ通知したい', withPlan) === I.REVISE_PLAN && KTAiConversation.classifyIntent('契約終了30日前に担当者へ通知したい', withPlan).reason === 'TURN', '計画があるときの新しい要望は、聞き返さずに計画の AI へ（TURN）');
   assert(cls('ありがとう') === I.GENERAL && cls('') === I.GENERAL, 'GENERAL: 挨拶・空');
   // 実行済みの計画
   const executed = { activePlan: { ...v1, status: 'EXECUTED' } };

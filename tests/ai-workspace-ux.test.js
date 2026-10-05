@@ -638,7 +638,8 @@ await section(async () => {
   assert(m.$('kt-ai-input').value === '' && m.calls.plan.length === 2 && /いま作り直している計画の後に、続けて計画に入れます/.test(m.chat()), 'U3: 途中の回答は受け付けて入力欄を空にする（AI はまだ呼ばない）');
   m.$('kt-ai-input').value = 'このフィールドは何に使ってる？';
   await m.$('kt-ai-send').dispatch('click'); await ticks();
-  assert(m.$('kt-ai-input').value === 'このフィールドは何に使ってる？' && /作り直しの後に送ってください。下書きとして残しています/.test(m.$('kt-ai-composer-note').textContent), 'U4: 途中の質問は送らず、下書きとして残す');
+  // 2026-10-05 第 3 段で変更: 途中の質問は、作業と並べてすぐ答える（以前は送らず下書きとして残した）
+  assert(m.$('kt-ai-input').value === '' && /このフィールドは何に使ってる？/.test(m.chat()) && !/作り直しの後に送ってください。下書きとして残しています/.test(m.$('kt-ai-composer-note').textContent), 'U4: 途中の質問は送って、作業と並べて答える（下書きにしない）');
   m.$('kt-ai-input').value = '';
   open1(); await p; await ticks(12);
   assert(m.calls.plan.length === 3 && /3段階でよいです/.test(m.calls.plan[2].ctx.revision.request) && conv.activePlan().version === 2 && conv.planHistory().length === 2 && !conv.isBusy(), `U5: 作り直しが終わったら続けて入れ、版は v2 だけ: calls=${m.calls.plan.length} v=${conv.activePlan().version}`);

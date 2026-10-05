@@ -5584,6 +5584,8 @@
       // 会話の応答性（2026-10-05）: 利用者が確認事項に答えた決定事項（構造化。計画の修正と一緒に送る。新しい計画には持ち込まない）。
       //   辞書照合のヒントにも回答の語を使う（「部長です」→ 承認者のフィールドを候補に）
       const decisions = revision ? compactDecisions(options.decisions) : [];
+      // 2026-10-05 第 3 段: 会話から保持している要件（Toolkit の台帳。取り消し済みも送る。KTAiAnswers.requirementsForContext の形）
+      const requirements = Array.isArray(options.requirements) ? options.requirements.slice(-40) : [];
       const rt = revision ? `${g} ${revision.request}${decisions.length ? ` ${decisions.map(x => x.answer).join(' ')}` : ''}` : g;
       const sections = new Map();
       const trunc = (name, total, included) => {
@@ -5862,6 +5864,7 @@
         goal: g,
         ...(revision ? { revision } : {}),
         ...(decisions.length ? { decisions } : {}),
+        ...(requirements.length ? { requirements } : {}),
         ...(subject ? { subject } : {}),
         app,
         retrieval: candidates,
@@ -5964,7 +5967,7 @@
       return out.slice(-30);
     }
     /** revision（計画の修正）の入力を bounded な形にする */
-    function compactRevision({ basedOnVersion, request, previousPlan, previousRequests = [], mode = null, focus = null } = {}, limits = {}) {
+    function compactRevision({ basedOnVersion, request, previousPlan, previousRequests = [], mode = null, focus = null, utterances = null, questionsAnsweredSeparately = null } = {}, limits = {}) {
       // 上限ちょうどに収める（cut は「…」を足すので 1 文字超え、Gateway の上限 2000 文字を超えて INVALID_CONTEXT になっていた）
       const cut = (s, n) => { const t = String(s ?? ''); return t.length > n ? `${t.slice(0, n - 1)}…` : t; };
       const req = cut(String(request ?? '').trim(), REVISION_LIMITS.maxRequestChars);
@@ -5978,6 +5981,9 @@
         //   回答に関係する箇所（P1 / C1 / Q2 / C1-1。Gateway の検証と同じ形だけ・20 件まで）
         ...(mode === 'patch' || mode === 'full' ? { mode } : {}),
         ...(Array.isArray(focus) && focus.length ? { focus: [...new Set(focus.filter(x => typeof x === 'string' && /^[A-Z][0-9]{1,3}(-[0-9]{1,2})?$/.test(x)))].slice(0, 20) } : {}),
+        // 2026-10-05 第 3 段: 今回の利用者の発言の原文（要件の根拠・発言の扱いの照合に使う。Gateway の上限: 8 件・各 2000 文字）と、発言の中の質問に Toolkit が別に答えるか
+        ...(Array.isArray(utterances) && utterances.length ? { utterances: utterances.filter(x => typeof x === 'string' && x.trim()).slice(-8).map(x => cut(x, 2000)) } : {}),
+        ...(questionsAnsweredSeparately === true ? { questionsAnsweredSeparately: true } : {}),
       };
     }
     /**
@@ -19751,7 +19757,7 @@
       if (!reg || reg.implemented !== true) return { available: false, reason: ERROR_CODES.FEATURE_NOT_IMPLEMENTED };
       if (!(reg.promptVersions || []).includes(promptVersion)) return { available: false, reason: ERROR_CODES.UNKNOWN_PROMPT_VERSION };
       // 会話の応答性（2026-10-05）: 計画の修正の方式（full / patch）。古い Gateway は返さない（patch を送っても全体を作り直す）
-      return { available: true, reason: null, ...(Array.isArray(reg.revisionModes) ? { revisionModes: reg.revisionModes.filter(x => typeof x === 'string') } : {}) };
+      return { available: true, reason: null, ...(Array.isArray(reg.revisionModes) ? { revisionModes: reg.revisionModes.filter(x => typeof x === 'string') } : {}), ...(Array.isArray(reg.conversation) ? { conversation: reg.conversation.filter(x => typeof x === 'string') } : {}), ...(reg.requirements === true ? { requirements: true } : {}) };
     }
     /**
      * 質問の誤抑制の修正（2026-10-05）: PC / モバイルだけを聞く質問か（PC / モバイルの語と、要否・対象・どちらなどの一般的な語を除くと、何も残らない）。
@@ -19915,6 +19921,8 @@
           decisionsMeta: r.meta?.decisions ?? null,
           // 計画の修正の方式（patch = 変わる箇所だけ / full = 全体。差分から全体に切り替えた理由）。古い Gateway は返さない
           revisionMeta: r.meta?.revision ?? null,
+          // 2026-10-05 第 3 段: 今回の発言の扱い（返答・要件の追加 / 変更 / 取り消し・発言の各部分の扱い）と、要件を受け取った証。古い Gateway は返さない
+          turn: r.turn && typeof r.turn === 'object' ? r.turn : null, requirementsMeta: r.meta?.requirements ?? null,
         },
       };
     }
@@ -20478,14 +20486,14 @@
      * 変更計画用の Context 生成（純関数）。無料側でも Prompt / Markdown / JSON をコピーできる
      * @returns {{ ok:true, ctx, outputs, coverage, truncation, size, warnings }|{ ok:false, reason, message }}
      */
-    function generatePlan({ goal, inputs, limits = null, now = undefined, revision = null, subject = null, decisions = null }) {
+    function generatePlan({ goal, inputs, limits = null, now = undefined, revision = null, subject = null, decisions = null, requirements = null }) {
       if (!inputs || !inputs.data) return { ok: false, reason: 'no-data', message: 'アプリ設定の取得が完了していません。' };
       const g = String(goal ?? '').trim();
       if (!g) return { ok: false, reason: 'no-goal', message: '実現したいことを入力してください。' };
       let ctx;
       try {
         // Phase 15: revision（計画の修正）があれば Planner Context に載せる（goal は同じ。Gateway が再計画する）
-        ctx = KTContext.buildPlan({ goal: g, data: inputs.data, deps: inputs.deps || null, scan: inputs.scan || null, incoming: inputs.incoming || null, options: { ...(limits ? { limits } : {}), ...(now !== undefined ? { now } : {}), ...(revision ? { revision } : {}), ...(subject ? { subject } : {}), ...(Array.isArray(decisions) && decisions.length ? { decisions } : {}), ...(inputs.environment ? { environment: inputs.environment } : {}) } });
+        ctx = KTContext.buildPlan({ goal: g, data: inputs.data, deps: inputs.deps || null, scan: inputs.scan || null, incoming: inputs.incoming || null, options: { ...(limits ? { limits } : {}), ...(now !== undefined ? { now } : {}), ...(revision ? { revision } : {}), ...(subject ? { subject } : {}), ...(Array.isArray(decisions) && decisions.length ? { decisions } : {}), ...(Array.isArray(requirements) && requirements.length ? { requirements } : {}), ...(inputs.environment ? { environment: inputs.environment } : {}) } });
       } catch (e) {
         return { ok: false, reason: 'error', message: `Context の生成に失敗しました: ${e?.message || e}` };
       }
@@ -21414,7 +21422,10 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
     const ANSWER_END = /(?:です|でいい|でよい|で大丈夫|でお願いします?|にして(?:ください)?|だけ|のみ|で)$/;
     // 指示語で始まる短い文（「これで」「この計画で」）は回答にしない（進める言葉・計画への言及）
     const DEMONSTRATIVE = /^(?:これ|それ|あれ|この|その|あの)/;
-    const GREETING = /^(?:ありがとう(?:ございます)?|ありがと|よろしく(?:お願いします)?|お願いします|助かります|了解(?:です)?|わかりました|分かりました)$/;
+    // 挨拶・相づち（回答・指示として数えない）。「はい」「OK」「うん」は、はい / いいえの質問への答えになるので含めない
+    const GREETING = /^(?:ありがとう(?:ございます|ございました)?|ありがと|どうも(?:ありがとう(?:ございます|ございました)?)?|よろしく(?:お願いします|お願いいたします)?|お願いします|助かります|助かりました|了解(?:です|しました)?|承知(?:です|しました|いたしました)?|かしこまりました|わかりました|分かりました|わかった|分かった|なるほど(?:です|ね)?|うーん|ふむ(?:ふむ)?|そうですね|そうなんですね|そうなんだ|お疲れ(?:様|さま)(?:です)?|おつかれ(?:さま)?(?:です)?|こんにちは|こんばんは|おはよう(?:ございます)?|はじめまして|以上です)$/;
+    /** 挨拶・相づちだけの文か（文末の句読点・伸ばす記号は除いて比べる。「なるほどー」「うーーん」） */
+    const isGreeting = (s) => GREETING.test(String(s ?? '').trim().replace(/[。．！!、,\s…]+$/, '').replace(/[ー〜～]{2,}/g, 'ー').replace(/(?<=[ぁ-ん])[ー〜～]$/, ''));
     // 回答ではなく修正・新しい要望の言い方（論点の語があっても回答にしない。計画の修正・新規かの確認の経路へ）。
     //   「新しい承認者は作らず既存の承認者を使って」「100万円以上なら部長承認を追加したい」「モバイルでは金額を非表示にして」「いや、P2はいらない」
     const REQUEST = /追加|作って|作りたい|作成|作らず|作らない|設定して|設定したい|できるように|つけて|付けて|取って|取得|通知して|通知したい|転記|コピー|連携|自動(?:で|化)|使って|使えない|使える|使いたい|外して|除いて|削除|消して|代わり|かわり|増やし|減らし|非表示|必須に|(?:増やさ|足さ|作ら|使わ|変え|入れ|付け|つけ|送ら|通知し|追加し|含め)ないで|\b[PC][0-9]+\b/;
@@ -21628,7 +21639,7 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
         const covering = byRef.length ? byRef : decidedKnown.filter(e => e.topics.some(x => topics.includes(x)));
         if (q.reconfirm === true && covering.length) {
           for (const e of covering) { e.status = 'reconfirm'; e.reconfirmReason = normText(q.reason || '') || '前の回答と計画の条件が合わない可能性があります'; e.question = q.text; e.questionKey = q.key; seen.add(e.id); }
-          open.push({ key: q.key, id: q.id, text: q.text, topics, entryId: covering[0].id, reconfirm: true, reason: covering[0].reconfirmReason });
+          open.push({ key: q.key, id: q.id, text: q.text, topics, entryId: covering[0].id, reconfirm: true, reason: covering[0].reconfirmReason, ...questionExtras(q) });
           continue;
         }
         // 前の版から未回答のまま同じ文で聞かれている質問は、その項目で出す（聞き直しの判定より先。数字だけ違う前の版の質問を消さない）
@@ -21651,7 +21662,7 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
         seen.add(e.id);
         // 同じ論点の回答済みの決定事項（別の点の質問）。質問に添えて出す（回答済みの内容を踏まえて答えられるように）
         const related = decided.filter(d => d.kind !== 'condition' && d.topics.some(x => topics.includes(x) && !String(x).startsWith('sig:'))).map(d => ({ entryId: d.id, label: d.label, answer: d.answer }));
-        open.push({ key: q.key, id: q.id, text: q.text, topics, entryId: e.id, reconfirm: false, ...(related.length ? { related } : {}) });
+        open.push({ key: q.key, id: q.id, text: q.text, topics, entryId: e.id, reconfirm: false, ...(related.length ? { related } : {}), ...questionExtras(q) });
       }
       // この版で聞かれなくなった未回答の質問は「取り下げ」（AI が別の形で解決した。回答済みにはしない）
       for (const e of lg.entries) if (e.status === 'open' && !seen.has(e.id)) e.status = 'dropped';
@@ -21756,6 +21767,144 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
      * 計画の確認事項（plan.questions ＋ customizations の questions）。key は版の中で一意にする
      * （Gateway の番号の振り直しで同じ id が並ぶと、回答欄の入力が 2 つの質問で混ざった）
      */
+    /** 確認事項の項目に添える、答えで何が変わるか・候補・推奨・先に聞くか（2026-10-05 第 3 段。古い Gateway の質問には無い） */
+    const questionExtras = (q) => ({ impact: q.impact || '', options: Array.isArray(q.options) ? q.options : [], recommendation: q.recommendation || '', priority: q.priority || null });
+    // ---- 要件（複雑な指示を取りこぼさない。2026-10-05 第 3 段）----
+    //   完成した計画だけで会話を管理せず、その元になる要件を台帳に持つ（ページの中だけ。保存しない）。計画の AI が返した追加・変更・取り消し（requirementOps）を適用する。
+    //   lg.requirements: [{ id: 'R1', target, condition, behavior, exceptions[{ condition, behavior }], decision, disposition, sourceQuotes[], planRefs[], note,
+    //                       origin: 'ai' | 'toolkit', createdIn, updatedIn, revokedIn, history[{ ...前の内容, version }] }]
+    //   decision: decided（利用者が明示。根拠の発言が利用者の文にあるものだけ）/ proposed（AI の提案・仮の案）/ undecided（未決定）/ revoked（取り消し。消さずに残し、
+    //   計画の AI にも渡して戻させない）。disposition: adopted（計画に入れた）/ unresolved（確認待ち・扱いが示されなかった）/ unsupported（できない）
+    //   論点（topic）が同じというだけで書き換えない（書き換えるのは、計画の AI が id を指して update / revoke したものだけ）
+    const REQ_DECISIONS = Object.freeze(['decided', 'proposed', 'undecided', 'revoked']);
+    const REQ_DISPOSITIONS = Object.freeze(['adopted', 'unresolved', 'unsupported']);
+    const MAX_REQUIREMENTS = 40;
+    const reqNorm = (s) => String(s ?? '').replace(/[\s\u3000、。．，,.!！?？「」『』（）()・:：]/g, '');
+    const reqText = (v, max = 600) => (typeof v === 'string' ? v.replace(/\s+/g, ' ').trim().slice(0, max) : '');
+    const reqsOf = (lg) => { if (!Array.isArray(lg.requirements)) { lg.requirements = []; lg.reqSeq = 0; } return lg.requirements; };
+    const reqSnapshot = (e) => ({ target: e.target, condition: e.condition, behavior: e.behavior, exceptions: e.exceptions.map(x => ({ ...x })), decision: e.decision, disposition: e.disposition, sourceQuotes: [...e.sourceQuotes], planRefs: [...e.planRefs], note: e.note });
+    /** 上限の数え方: 取り消し済みは数えない（取り消し済みが増えても、新しい要件を記録できる） */
+    const activeCount = (list) => list.filter(e => e.decision !== 'revoked').length;
+    /** 要件の内容（対象・条件・動作・例外）が同じか（言い換えの空白・句読点は無視） */
+    const sameReqContent = (e, f) => reqNorm(e.target) === reqNorm(f.target) && reqNorm(e.condition) === reqNorm(f.condition) && reqNorm(e.behavior) === reqNorm(f.behavior)
+      && JSON.stringify(e.exceptions.map(x => [reqNorm(x.condition), reqNorm(x.behavior)])) === JSON.stringify(f.exceptions.map(x => [reqNorm(x.condition), reqNorm(x.behavior)]));
+    /**
+     * 計画の AI の要件の操作を台帳に適用する（Gateway の正規化の後にもう一度確かめる）。
+     * @param {object} o { version, userTexts（利用者の文の全部）, utterances（今回の発言。取り消しの根拠） }
+     * @returns {{ added, updated, revoked, downgraded, overflow（上限で記録できなかった追加の数） }}
+     */
+    function applyRequirementOps(lg, ops, { version = null, userTexts = [], utterances = [] } = {}) {
+      const list = reqsOf(lg);
+      const users = userTexts.map(reqNorm).filter(Boolean), now = utterances.map(reqNorm).filter(Boolean);
+      const sentencesNow = utterances.flatMap(u => String(u ?? '').split(/[。．！!？?\n]+/)).map(reqNorm).filter(Boolean);
+      const inUser = (q) => { const n = reqNorm(q); return n.length >= 2 && users.some(u => u.includes(n)); };
+      const inNow = (q) => { const n = reqNorm(q); return n.length >= 2 && now.some(u => u.includes(n)); };
+      // 取り消し・取り消し済みを戻す根拠: 今回の発言にあり、4 文字以上か、発言の 1 文そのもの（「金額」のような語だけでは取り消さない。「やめて」は取り消せる）
+      const strongNow = (q) => { const n = reqNorm(q); return inNow(q) && (n.length >= 4 || sentencesNow.includes(n)); };
+      const res = { added: [], updated: [], revoked: [], downgraded: [], overflow: 0 };
+      for (const o of (Array.isArray(ops) ? ops : [])) {
+        if (!o || typeof o !== 'object' || !['add', 'update', 'revoke'].includes(o.op)) continue;
+        const quotes = (Array.isArray(o.sourceQuotes) ? o.sourceQuotes : []).filter(q => typeof q === 'string' && inUser(q)).map(q => reqText(q, 300)).slice(0, 5);
+        let decision = REQ_DECISIONS.includes(o.decision) && o.decision !== 'revoked' ? o.decision : 'proposed';
+        if (decision === 'decided' && !quotes.length) { decision = 'proposed'; res.downgraded.push(o); }
+        const fields = {
+          target: reqText(o.target, 200), condition: reqText(o.condition, 300), behavior: reqText(o.behavior),
+          exceptions: (Array.isArray(o.exceptions) ? o.exceptions : []).filter(x => x && (x.condition || x.behavior)).slice(0, 5).map(x => ({ condition: reqText(x.condition, 300), behavior: reqText(x.behavior, 300) })),
+          decision, disposition: REQ_DISPOSITIONS.includes(o.disposition) ? o.disposition : 'unresolved', sourceQuotes: quotes,
+          planRefs: (Array.isArray(o.planRefs) ? o.planRefs : []).filter(x => typeof x === 'string' && /^[A-Z][0-9]{1,3}$/.test(x)).slice(0, 8), note: reqText(o.note, 300),
+        };
+        if (o.op === 'add') {
+          if (!fields.behavior) continue;
+          // 上限を超えた分は黙って捨てず、数を返す（画面に出す）
+          if (activeCount(list) >= MAX_REQUIREMENTS) { res.overflow += 1; continue; }
+          const e = { id: `R${++lg.reqSeq}`, ...fields, origin: 'ai', createdIn: version, updatedIn: version, revokedIn: null, history: [] };
+          list.push(e); res.added.push(e); continue;
+        }
+        const e = list.find(x => x.id === o.id);
+        if (!e) continue;
+        if (o.op === 'revoke') {
+          // 取り消しは今回の発言に根拠が要る（AI が勝手に要件を消さない）
+          if (!quotes.some(strongNow)) continue;
+          e.history.push({ ...reqSnapshot(e), version: e.updatedIn });
+          e.decision = 'revoked'; e.revokedIn = version; e.updatedIn = version; e.sourceQuotes = [...new Set([...e.sourceQuotes, ...quotes])].slice(-5);
+          res.revoked.push(e); continue;
+        }
+        if (!fields.behavior) continue;
+        // 取り消し済みの要件は、今回の発言に根拠があるときだけ戻す（AI が取り消し済みを復活させない）
+        if (e.decision === 'revoked' && !quotes.some(strongNow)) continue;
+        // 根拠の発言の無い update で内容が変わらないときは、前の決定の状態を残す（言い換えただけで、利用者の決定を AI の提案に下げない）
+        if (!quotes.length && sameReqContent(e, fields)) {
+          fields.decision = e.decision;
+          const k = res.downgraded.indexOf(o);
+          if (k >= 0) res.downgraded.splice(k, 1);
+        }
+        e.history.push({ ...reqSnapshot(e), version: e.updatedIn });
+        // 根拠の発言は前の分も残す（変更の根拠を足す）
+        Object.assign(e, fields, { sourceQuotes: [...new Set([...e.sourceQuotes, ...quotes])].slice(-5), updatedIn: version, revokedIn: null });
+        res.updated.push(e);
+      }
+      return res;
+    }
+    // 節の末尾の丁寧な言い方（「保存は止めないでください」「PCだけでお願いします」の「でください」「でお願いします」は内容ではない）
+    const POLITE_END = /(?:でお願いします|でお願いいたします|お願いします|お願いいたします|でください|ください|下さい|です|ます|ね|よ)+$/;
+    // 内容を表す文字（漢字・カタカナ・英数字）。ひらがなは助詞・語尾が多いので、言い換えの照合に使わない
+    const CONTENT_CHAR = /[㐀-䶿一-鿿々ァ-ヶーA-Za-z0-9０-９Ａ-Ｚａ-ｚ]/;
+    /**
+     * 今回の発言のうち、計画の AI が扱いを示さなかった部分（黙って落とさないために、未解決の要件として残す）。
+     * 扱いの印 = utteranceCoverage の quote と、要件の操作の根拠の発言。印が覆わない連続部分（読点・句読点の無い文の後半も）ごとに見る:
+     *   丁寧な語尾を除いて 4 文字に満たない部分は数えない。内容の文字（漢字・カタカナ・英数字）の 7 割以上が、要件の条件・動作・例外の文（AI が言い換えて
+     *   構造化したもの）か印にあれば、扱った部分とみなす（言い換えただけで未解決と出さない）。質問の文（isQuestion。質問の AI が答える）・挨拶は数えない
+     */
+    function uncoveredClauses(utterances, coverage = [], ops = [], { isQuestion = null } = {}) {
+      const marks = [...(coverage || []).map(c => c && c.quote), ...(ops || []).flatMap(o => (o && o.sourceQuotes) || [])].map(reqNorm).filter(q => q.length >= 2);
+      const para = (ops || []).flatMap(o => (o ? [o.condition, o.behavior, ...(o.exceptions || []).flatMap(x => [x && x.condition, x && x.behavior])] : [])).map(reqNorm).filter(q => q.length >= 2);
+      const known = new Set([...[...marks, ...para].join('')].filter(ch => CONTENT_CHAR.test(ch)));
+      const out = [];
+      for (const u of utterances || []) for (const sen of String(u ?? '').split(/[。．！!？?\n]+/).map(x => x.trim()).filter(Boolean)) {
+        if (typeof isQuestion === 'function' && isQuestion(sen)) continue;
+        if (isGreeting(sen)) continue;
+        const n = reqNorm(sen);
+        if (n.length < 4 || /^(?:以上です|ところで)$/.test(n)) continue;
+        const covered = new Array(n.length).fill(false);
+        for (const q of marks) for (let i = n.indexOf(q); i >= 0; i = n.indexOf(q, i + 1)) for (let k = i; k < i + q.length; k++) covered[k] = true;
+        const runs = [];
+        let run = '';
+        for (let k = 0; k <= n.length; k++) { if (k < n.length && !covered[k]) run += n[k]; else if (run) { runs.push(run); run = ''; } }
+        for (const r0 of runs) {
+          const r = r0.replace(POLITE_END, '');
+          if (r.length < 4) continue;
+          const chars = [...r].filter(ch => CONTENT_CHAR.test(ch));
+          if (!chars.length || chars.filter(ch => known.has(ch)).length / chars.length >= 0.7) continue;
+          out.push(r0);
+        }
+      }
+      return out;
+    }
+    /** 扱いが示されなかった文を、未解決の要件として台帳に残す（同じ文は 1 つだけ） */
+    function addUnresolvedRequirement(lg, sentence, { version = null } = {}) {
+      const list = reqsOf(lg);
+      const s = reqText(sentence);
+      if (!s) return null;
+      const dup = list.find(e => e.decision !== 'revoked' && e.origin === 'toolkit' && reqNorm(e.behavior) === reqNorm(s));
+      if (dup) return dup;
+      if (activeCount(list) >= MAX_REQUIREMENTS) return null;   // 上限（呼び出し側が数えて画面に出す）
+      const e = { id: `R${++lg.reqSeq}`, target: '', condition: '', behavior: s, exceptions: [], decision: 'undecided', disposition: 'unresolved', sourceQuotes: [s.slice(0, 300)], planRefs: [], note: '計画の AI の応答で扱いが示されなかった指示（計画に入っていない可能性があります）', origin: 'toolkit', createdIn: version, updatedIn: version, revokedIn: null, history: [] };
+      list.push(e);
+      return e;
+    }
+    /**
+     * Gateway に送る要件（取り消しも送る。計画の AI に戻させないため）。上限 40 件・文字数は Gateway の検証の内側。
+     * 取り消し済みでない要件を先に入れ、残りの枠に新しい取り消し済みを入れる（取り消し済みが多くても、有効な要件を落とさない。順は記録の順）
+     */
+    function requirementsForContext(lg) {
+      const all = reqsOf(lg);
+      const active = all.filter(e => e.decision !== 'revoked').slice(-MAX_REQUIREMENTS);
+      const room = MAX_REQUIREMENTS - active.length;
+      const keep = new Set([...active, ...(room > 0 ? all.filter(e => e.decision === 'revoked').slice(-room) : [])]);
+      return all.filter(e => keep.has(e)).map(e => ({ id: e.id, target: e.target.slice(0, 600), condition: e.condition.slice(0, 600), behavior: e.behavior.slice(0, 600), exceptions: e.exceptions.slice(0, 5).map(x => ({ condition: x.condition.slice(0, 600), behavior: x.behavior.slice(0, 600) })), decision: e.decision, disposition: e.disposition, sourceQuotes: e.sourceQuotes.slice(0, 5).map(q => q.slice(0, 600)), planRefs: e.planRefs.slice(0, 8) }));
+    }
+    const requirementsOf = (lg) => reqsOf(lg);
+
     function questionList(plan) {
       const p = plan || {};
       const out = [];
@@ -21768,7 +21917,9 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
         const obj = q && typeof q === 'object' ? q : {};
         // AI が「決定事項の再確認」とした質問だけ decisionRef（D1…）を持つ（矛盾・条件の変化の理由は reason）
         const decisionRef = /^D[1-9][0-9]{0,3}$/.test(String(obj.decisionRef || '')) ? String(obj.decisionRef) : null;
-        out.push({ key: uniq(id), id, text, topic: obj.topic ?? null, decisionRef, reconfirm: !!decisionRef || obj.reconfirm === true, reason: String(obj.reason || '') });
+        out.push({ key: uniq(id), id, text, topic: obj.topic ?? null, decisionRef, reconfirm: !!decisionRef || obj.reconfirm === true, reason: String(obj.reason || ''),
+          // 2026-10-05 第 3 段: 答えで何が変わるか・候補・推奨とその理由・先に聞くか（blocking は計画の AI が 2 問まで。古い Gateway は無い）
+          impact: String(obj.impact || ''), options: Array.isArray(obj.options) ? obj.options.filter(x => typeof x === 'string' && x.trim()).slice(0, 5) : [], recommendation: String(obj.recommendation || ''), priority: obj.priority === 'blocking' ? 'blocking' : (obj.priority === 'later' ? 'later' : null) });
       }
       for (const c of (Array.isArray(p.customizations) ? p.customizations : [])) {
         (Array.isArray(c?.questions) ? c.questions : []).forEach((q, i) => {
@@ -21778,7 +21929,10 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
       }
       return out;
     }
-    return { TOPICS, AI_TOPICS: Object.freeze([...TOPICS.map(t => t.key), 'other']), labelOf, canonTopic, topicsOf, questionTopics, topicKey, splitClauses, interpret, isPure, isChange: (s) => CHANGE.test(String(s ?? '')), sameAnswer, createLedger, touch, syncQuestions, sameQuestionText, sameAsDecided, recordAnswer, settleCovered, pendingAnswers, decisionsForContext, decisionIdOf, platformValueOf, isDecided, questionList, MAX_DECISIONS, MAX_ANSWER_CHARS };
+    return { TOPICS, AI_TOPICS: Object.freeze([...TOPICS.map(t => t.key), 'other']), labelOf, canonTopic, topicsOf, questionTopics, topicKey, splitClauses, interpret, isPure, isChange: (s) => CHANGE.test(String(s ?? '')), sameAnswer, createLedger, touch, syncQuestions, sameQuestionText, sameAsDecided, recordAnswer, settleCovered, pendingAnswers, decisionsForContext, decisionIdOf, platformValueOf, isDecided, questionList, MAX_DECISIONS, MAX_ANSWER_CHARS,
+      // 2026-10-05 第 3 段: 要件・はい / いいえの形の答えか
+      isYesNo: (s) => YESNO.test(String(s ?? '').trim()), applyRequirementOps, uncoveredClauses, addUnresolvedRequirement, requirementsForContext, requirementsOf, REQ_DECISIONS, REQ_DISPOSITIONS,
+      isGreeting, MAX_REQUIREMENTS };
   })();
 
   // ==========================================
@@ -21806,7 +21960,7 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
     const PLAN_STATUS = { ACTIVE: 'ACTIVE', SUPERSEDED: 'SUPERSEDED', STALE: 'STALE', EXECUTED: 'EXECUTED', ROLLED_BACK: 'ROLLED_BACK' };
     const ROLE = { USER: 'user', ASSISTANT: 'assistant', TOOLKIT: 'toolkit', SYSTEM: 'system' };
     const MAX_MESSAGES = 200;
-    const LOADING_TEXT = { ASK: '確認しています...', EXPLAIN_PLAN: '確認しています...', EXPLAIN_REVIEW: '確認しています...', EXPLAIN_CUSTOMIZATION: '確認しています...', PLAN: '現在の設定を確認し、変更計画を作っています...', REVISE_PLAN: '変更計画を見直しています...', REVISE_AFTER_ANSWER: '回答を入れて計画を作り直しています（計画全体を作り直すため、1 分前後かかります）...', REVISE_AFTER_ANSWER_PATCH: '回答を入れて、変わる箇所だけを作り直しています（十数秒ほどかかります）...', REVISE_CHAIN: '作り直しの間に受け付けた指示も、続けて計画に入れています...', GENERATE_CODE: '既存の JavaScript を確認し、コードを生成しています...', DISCUSS_JS: 'この JavaScript と現在の設定を確認し、実装案を作っています...' };
+    const LOADING_TEXT = { ASK: '確認しています...', EXPLAIN_PLAN: '確認しています...', EXPLAIN_REVIEW: '確認しています...', EXPLAIN_CUSTOMIZATION: '確認しています...', PLAN: '現在の設定を確認し、変更計画を作っています...', REVISE_PLAN: '変更計画を見直しています...', REVISE_AFTER_ANSWER: '回答を入れて計画を作り直しています（計画全体を作り直すため、1 分前後かかります）...', REVISE_AFTER_ANSWER_PATCH: '回答を入れて、変わる箇所だけを作り直しています（十数秒ほどかかります）...', REVISE_PLAN_PATCH: '変更を入れて、変わる箇所だけを作り直しています（十数秒ほどかかります）...', REVISE_CHAIN: '作り直しの間に受け付けた指示も、続けて計画に入れています...', GENERATE_CODE: '既存の JavaScript を確認し、コードを生成しています...', DISCUSS_JS: 'この JavaScript と現在の設定を確認し、実装案を作っています...' };
     const TRANSIENT = ['RATE_LIMITED', 'TIMEOUT', 'TRANSPORT_ERROR', 'UPSTREAM_ERROR', 'INTERNAL_ERROR', 'WORKER_ERROR', 'INVALID_RESPONSE', 'MODEL_OUTPUT_INVALID'];
     let seq = 0;
     const newId = (p) => `${p}_${Date.now().toString(36)}_${(++seq).toString(36)}`;
@@ -21874,6 +22028,38 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
       jsRegister: /(JS|JavaScript|コード|スクリプト|ファイル)\s*(を|も)?\s*(登録|反映|アップロード|置いて|入れて|適用)|登録して|登録したい|登録をお願い|動作テスト環境(へ|に)登録/i,
     };
     const norm = (t) => String(t ?? '').replace(/\s+/g, ' ').trim();
+    /**
+     * 2026-10-05 第 3 段（複雑な指示を取りこぼさない）: 発言を文に分け、質問の文とそれ以外を分ける（質問と回答・依頼が 1 つの発言に混ざる）。
+     * 正規表現で決めるのは文の形（質問か）と、はっきりした操作の命令だけ。自由な文の意味は計画の AI が読む
+     */
+    //   話題を変える言葉（「、ところで」「、ちなみに」）の前でも分ける（「PCだけにして、ところでCSVにも効きますか？」）
+    const sentencesOf = (t) => String(t ?? '').split(/(?<=[。．！!？?])|\n+|[、，,]\s*(?=ところで|ちなみに|それと|あと[、，,])/).map(x => x.trim()).filter(Boolean);
+    // 質問の文か（文の形で決める）: 文末が問いの形（？・か・かな・の・でしょう）か「教えて」「説明して」、または疑問の語（何・どこ・誰・いつ・どう…）があり
+    //   依頼・言い切りの語尾で終わらない文。文の途中の「している」「わかる」「使って」では質問にしない（「完了している案件にも警告を出して」は指示）。
+    //   疑問の語の無い問いの言い方（「このフィールドは使われてる」）は、依頼・修正の言い方を含まないときだけ質問とみなす（以前の判定を残す）
+    const Q_END = /(?:[?？]|(?<![ほと])か|かな|かしら|っけ|の|でしょう|だろう)$/;
+    const Q_ASK = /(?:教えて|説明して)(?:ください|下さい|ほしい|欲しい|もらえる|くれる)?$/;
+    const Q_WORD = /何(?!も|でも|か)|なに(?!も|でも|か)|どこ(?!でも|も|か)|どれ(?!でも|も|か)|誰(?!も|でも|か)|だれ(?!も|でも|か)|いつ(?!でも|も)|どう(?!ぞ|しても|か)|なぜ|どんな|どの(?:よう|くらい|ぐらい|程度)|いくら|いくつ/;
+    const STATEMENT_END = /(?:て|で|た|だ|ます|です|ない|ません|たい|ほしい|欲しい|ください|下さい|お願い(?:します|いたします)?|する|します|だけ|のみ|こと)$/;
+    const isQuestionSentence = (s) => {
+      const x = String(s ?? '').trim().replace(/[。．！!\s]+$/, '');
+      if (!x) return false;
+      if (Q_END.test(x) || Q_ASK.test(x)) return true;
+      if (STATEMENT_END.test(x)) return false;
+      return Q_WORD.test(x) || (RE.question.test(x) && !RE.reviseVerb.test(x) && !RE.desire.test(x));
+    };
+    /** 挨拶・相づちだけの文（「了解しました」「ありがとうございました」「うーん」「なるほど」）。回答・指示として計画の AI に読ませない */
+    const isGreetingSentence = (s) => KTAiAnswers.isGreeting(s);
+    // 操作の命令の言い方（命令の語を除いた残りがこれだけなら命令。「C1 のコードを作って」の C1 も残りに数えない）
+    const COMMAND_FILLER = /やっぱり|やっぱ|やはり|もう一度|もう|いったん|一旦|今すぐ|すぐに?|今|早く|早速|さっそく|試しに|ちょっと|とりあえず|いいから|(?:り|き|し)?直し|反映|実行|適用|この(計画|内容|案|まま|仕様|コード|JS|JavaScript|変更)?|その(まま|計画|内容)?|これ|それ|今の|全部|すべて|全て|\b[CP][0-9]+\b|動作テスト(環境)?|環境|ください|下さい|お願い(します|いたします)?|して|って|てほしい|たい|て|で|を|も|に|へ|は|の|ね|よ|です|ます|。|、|！|!|\s/g;
+    /**
+     * はっきりした操作の命令だけの文か（「反映して」「元に戻して」「コードを作って」「これで進めて」）。命令の語が要件の文に混ざっているだけなら命令にしない。
+     * 命令の語と言い方を除いた残りは、ひらがな 2 文字までだけ許す（「警告を取り消して」の「警告」のような名詞が残れば、要件の取り消し・変更の指示）
+     */
+    const pureCommand = (t, re) => { if (!re.test(t)) return false; const rest = String(t).replace(new RegExp(re.source, `${re.flags.replace('g', '')}g`), '').replace(COMMAND_FILLER, ''); return /^[ぁ-ゖー]{0,2}$/.test(rest); };
+    /** 作業中には行えない操作の命令・資料の作成か（反映・元に戻す・コードの生成・JS の登録・仕様の確定・ドキュメント） */
+    const isOperationCommand = (s) => [RE.preview, RE.rollback, RE.generate, RE.jsRegister, RE.confirmSpec].some(re => re.test(s) && pureCommand(s, re))
+      || !!(typeof KTContextUi !== 'undefined' && KTContextUi.detectDocumentKind && KTContextUi.detectDocumentKind(s));
     /** 計画の語（新規フィールドのラベル / 手順の対象 / タイトルの語）が文に含まれるか（修正の対象が現在の計画か判断する材料） */
     function planTerms(plan) {
       const out = new Set();
@@ -21925,40 +22111,56 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
       const jx = state.activeJsExecution;
       const canJsRollback = !!(jx && jx.written && !jx.rolledBack);
       const hasGenerated = !!(plan && plan.generated && Object.keys(plan.generated).length);
-      const q = RE.question.test(t);
-      // 0) Phase 17: JS の登録 / 復元の依頼（生成コードがあるときだけ。UI の確認へ案内するだけで登録はしない）
-      if (RE.jsRegister.test(t) && !(q && RE.questionWord.test(t)) && !RE.rollback.test(t)) {
-        if (hasGenerated) return { intent: INTENT.REQUEST_JS_PREVIEW, reason: 'JS_REGISTER_WORDS' };
-        if (plan && (plan.plan?.customizations || []).length) return { intent: INTENT.GENERAL, reason: 'NO_GENERATED_CODE' };
+      // 2026-10-05 第 3 段: 文ごとに質問か分ける。質問の文だけの発言は説明・質問（計画は作り直さない）。質問とそれ以外が混ざった発言は、
+      //   質問の部分を質問の AI に同時に送り（askText）、それ以外を回答・計画の更新として扱う（以前は全体が ASK になり、回答の部分が失われた）。
+      //   挨拶・相づちの文（「ありがとう。CSVにも効きますか？」の「ありがとう。」）は、回答・指示として数えない（計画の AI を呼ばない）
+      const sens = sentencesOf(t);
+      const qSens = sens.filter(isQuestionSentence);
+      const restSens = sens.filter(s => !isQuestionSentence(s) && !isGreetingSentence(s));
+      const greetingOnly = sens.length > 0 && sens.every(isGreetingSentence);
+      const q = qSens.length > 0;
+      const mixed = qSens.length > 0 && restSens.length > 0;
+      const askText = mixed ? qSens.join(' ') : null;
+      const restText = restSens.join(' ');
+      // 操作の命令は、質問の文を除いた部分で判定する（「これで進めて。CSVにも効きますか？」は進める命令＋質問。質問は askText で答える）
+      const cmdText = mixed ? restText : t;
+      const qCmd = mixed ? false : q;
+      // 0) Phase 17: JS の登録 / 復元の依頼（生成コードがあるときだけ。UI の確認へ案内するだけで登録はしない）。命令だけの文のときだけ
+      if (RE.jsRegister.test(cmdText) && pureCommand(cmdText, RE.jsRegister) && !(qCmd && RE.questionWord.test(cmdText)) && !RE.rollback.test(cmdText)) {
+        if (hasGenerated) return { intent: INTENT.REQUEST_JS_PREVIEW, reason: 'JS_REGISTER_WORDS', askText };
+        if (plan && (plan.plan?.customizations || []).length) return { intent: INTENT.GENERAL, reason: 'NO_GENERATED_CODE', askText };
       }
       // 0b) 仕様の確定の言葉: 実装仕様があれば「ボタンで確定」を案内（文章では確定しない）
-      if (plan && plan.spec && plan.spec.status !== SPEC_STATUS.SUPERSEDED && RE.confirmSpec.test(t) && !q) return { intent: INTENT.CONFIRM_SPEC, reason: 'CONFIRM_WORDS' };
+      if (plan && plan.spec && plan.spec.status !== SPEC_STATUS.SUPERSEDED && RE.confirmSpec.test(cmdText) && pureCommand(cmdText, RE.confirmSpec) && !qCmd) return { intent: INTENT.CONFIRM_SPEC, reason: 'CONFIRM_WORDS', askText };
       // 0c) Phase 18: ドキュメント（「このアプリの仕様書を作って」「この改修内容をまとめて」「引継ぎ資料を作って」「非エンジニア向けに説明して」）。LLM は使わない
       const docKind = typeof KTContextUi !== 'undefined' && KTContextUi.detectDocumentKind ? KTContextUi.detectDocumentKind(t) : null;
       if (docKind) return { intent: INTENT.DOCUMENT, reason: 'DOCUMENT_WORDS', documentKind: docKind === 'changes' && !plan ? 'spec' : docKind };
       // 1) 計画 / Review についての質問（計画があるとき）。「このフィールドは何に使ってる？」は現在の設定の質問 → ASK
-      if (plan && RE.questionWord.test(t) && (RE.aboutReview.test(t) || RE.aboutPlan.test(t) || stepIdsIn(t).length || (RE.aboutCustomization.test(t) && (plan.plan?.customizations || []).length))) {
+      if (plan && !mixed && RE.questionWord.test(t) && (RE.aboutReview.test(t) || RE.aboutPlan.test(t) || stepIdsIn(t).length || (RE.aboutCustomization.test(t) && (plan.plan?.customizations || []).length))) {
         const aboutCust = (plan.plan?.customizations || []).length && (RE.aboutCustomization.test(t) || /\bC[0-9]+\b/.test(t)) && !RE.aboutReview.test(t);
         return { intent: review && RE.aboutReview.test(t) ? INTENT.EXPLAIN_REVIEW : aboutCust ? INTENT.EXPLAIN_CUSTOMIZATION : INTENT.EXPLAIN_PLAN, reason: 'QUESTION_ABOUT_PLAN', stepIds: stepIdsIn(t) };
       }
-      if (plan && stepIdsIn(t).length && q) return { intent: INTENT.EXPLAIN_PLAN, reason: 'STEP_ID_QUESTION', stepIds: stepIdsIn(t) };
+      if (plan && !mixed && stepIdsIn(t).length && q) return { intent: INTENT.EXPLAIN_PLAN, reason: 'STEP_ID_QUESTION', stepIds: stepIdsIn(t) };
       // Phase 20（XA-11）: 計画の語（新規フィールドのラベル・手順の対象）に触れる質問は、現在の設定（運用環境）ではなく計画の説明として答える
       //   （「既存の案件にも住所と電話番号は自動で入りますか？」が反映済みの計画を見ない質問として扱われた）
-      if (plan && q && !RE.reviseVerb.test(t) && mentionsPlan(t, plan.plan)) return { intent: INTENT.EXPLAIN_PLAN, reason: 'QUESTION_MENTIONS_PLAN', stepIds: stepIdsIn(t) };
+      if (plan && !mixed && q && !RE.reviseVerb.test(t) && mentionsPlan(t, plan.plan)) return { intent: INTENT.EXPLAIN_PLAN, reason: 'QUESTION_MENTIONS_PLAN', stepIds: stepIdsIn(t) };
       // 1b) コード生成（Phase 16）: 計画があり、カスタマイズがあるときだけ。文の中の C1 等で対象を指定できる
-      if (RE.generate.test(t) && !(q && RE.questionWord.test(t))) {
+      if (RE.generate.test(cmdText) && !(qCmd && RE.questionWord.test(cmdText))) {
         const custs = plan?.plan?.customizations || [];
-        if (!plan) return { intent: INTENT.GENERAL, reason: 'NO_PLAN' };
-        if (!custs.length) return { intent: INTENT.GENERAL, reason: 'NO_CUSTOMIZATION' };
-        const cid = (t.match(/\bC[0-9]+\b/g) || [])[0] || null;
-        return { intent: INTENT.GENERATE_CODE, reason: 'GENERATE_WORDS', customizationId: cid };
+        const cid = (cmdText.match(/\bC[0-9]+\b/g) || [])[0] || null;
+        // 2026-10-05 第 3 段: 「条件を変えて、コードも作って」は、先に計画を更新して検証し、最新の仕様でコードを作る（古い仕様のコードを作らない）
+        if (!pureCommand(cmdText, RE.generate) && plan && canRevise && custs.length) return { intent: INTENT.REVISE_PLAN, reason: 'TURN_THEN_GENERATE', alsoGenerate: true, customizationId: cid, askText, utterance: t };
+        if (!plan) return { intent: INTENT.GENERAL, reason: 'NO_PLAN', askText };
+        if (!custs.length) return { intent: INTENT.GENERAL, reason: 'NO_CUSTOMIZATION', askText };
+        return { intent: INTENT.GENERATE_CODE, reason: 'GENERATE_WORDS', customizationId: cid, askText, ...(mixed ? { commandText: restText } : {}) };
       }
       // 2) 元に戻す（反映済みの実行があるときだけ意味を持つ。即 Rollback はしない）
-      if (RE.rollback.test(t)) {
+      //   手順・カスタマイズの番号を指す取り消し（「P2は取り消して」）は、修正できる計画があれば計画の修正（反映の取り消しではない）
+      if (RE.rollback.test(cmdText) && ((pureCommand(cmdText, RE.rollback) && !(plan && canRevise && /\b[CP][0-9]+\b/.test(cmdText))) || !(plan && canRevise))) {
         // Phase 17: JS の登録だけがあれば JS の復元。両方あれば標準設定の Rollback を優先し、JS は言葉（JS / コード / ファイル）で指定したときだけ
-        const wantsJs = /JS|JavaScript|コード|スクリプト|ファイル/i.test(t);
-        if (canJsRollback && (!canRollback || wantsJs)) return { intent: INTENT.REQUEST_JS_ROLLBACK, reason: 'JS_ROLLBACK_WORDS' };
-        return canRollback ? { intent: INTENT.REQUEST_ROLLBACK, reason: 'ROLLBACK_WORDS' } : { intent: INTENT.GENERAL, reason: 'NO_EXECUTION' };
+        const wantsJs = /JS|JavaScript|コード|スクリプト|ファイル/i.test(cmdText);
+        if (canJsRollback && (!canRollback || wantsJs)) return { intent: INTENT.REQUEST_JS_ROLLBACK, reason: 'JS_ROLLBACK_WORDS', askText };
+        return canRollback ? { intent: INTENT.REQUEST_ROLLBACK, reason: 'ROLLBACK_WORDS', askText } : { intent: INTENT.GENERAL, reason: 'NO_EXECUTION', askText };
       }
       // 2b) 会話の応答性（2026-10-05）: 確認事項への回答。未回答の確認事項と決定事項の論点で対応づける（「PCだけ」「部長です」「保存時です」「PCだけ。保存は止めない」）。
       //     以前は計画があると「何についてでしょうか」（AMBIGUOUS）になり、用途の選び直しや言い直しが要った。対応先が決まらない部分は確定せず、
@@ -21966,20 +22168,27 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
       //     進める言葉（「これで進めて」「全部承認」「はい」「この計画でお願いします」）は回答にしない（承認・反映の意図を取り違えない）。
       //     文末の「お願いします」は、残りが論点の語を含む答えのときだけ外して判定する（「部長でお願いします」は回答、「これでお願いします」は進める言葉）。
       //     質問の形（RE.question。「どこに表示されるの」「承認者は誰がいい」）も回答にしない（従来の ASK / EXPLAIN へ）
-      const stripped = t.replace(/(?:で|を|に)?お願い(?:します|いたします)?[。．！!]*$/, '').trim();
-      const previewish = RE.preview.test(t) && !(stripped && KTAiAnswers.topicsOf(stripped).length && !RE.preview.test(stripped));
-      if (plan && canRevise && !q && !previewish) {
+      const stripped = cmdText.replace(/(?:で|を|に)?お願い(?:します|いたします)?[。．！!]*$/, '').trim();
+      const previewish = RE.preview.test(cmdText) && !(stripped && KTAiAnswers.topicsOf(stripped).length && !RE.preview.test(stripped));
+      //     2026-10-05 第 3 段: 質問の文が混ざっていても、質問以外の部分（restText）が回答なら回答として扱い、質問の部分は同時に質問の AI に送る
+      if (plan && canRevise && restSens.length && !(mixed ? false : q) && !previewish) {
         const ac = answerContext(state);
         if (ac.open.length || ac.decided.length) {
-          const it = KTAiAnswers.interpret({ text: t, open: ac.open, decided: ac.decided, isRequest: (c) => RE.reviseVerb.test(c) || RE.desire.test(c) });
-          if (it.kind === 'answers') return { intent: INTENT.ANSWER, reason: 'ANSWERS', answers: it };
-          if (it.kind === 'unclear') return { intent: INTENT.ANSWER, reason: 'ANSWER_TARGET_UNCLEAR', answers: it };
+          const it = KTAiAnswers.interpret({ text: mixed ? restText : t, open: ac.open, decided: ac.decided, isRequest: (c) => RE.reviseVerb.test(c) || RE.desire.test(c) });
+          if (it.kind === 'answers') return { intent: INTENT.ANSWER, reason: 'ANSWERS', answers: it, askText, restText: mixed ? restText : null };
+          // 回答先を決められない短い答えは、回答先だけを聞く。回答として読めない部分（そのほかの記述）があれば回答ではなく、計画の AI に読ませる（下の 3b。
+          //   「警告の文の指定は取り消します。文はおまかせで」の「おまかせで」を回答の形と読んで、回答先を聞き返していた）
+          if (it.kind === 'unclear' && (!(it.notes || []).length || (it.unresolved || []).every(u => KTAiAnswers.isYesNo(u.clause)))) return { intent: INTENT.ANSWER, reason: 'ANSWER_TARGET_UNCLEAR', answers: it, askText, restText: mixed ? restText : null };
           // 記録済みの言い直し。まだ計画に入っていない回答（作り直しの失敗・取り消しの後）があれば、言い直しで作り直す（「記録済み」で止めない）
-          if (it.kind === 'restated') return { intent: INTENT.ANSWER, reason: ac.pending ? 'ANSWER_PENDING' : 'ANSWER_RESTATED', answers: it };
+          if (it.kind === 'restated' && !mixed) return { intent: INTENT.ANSWER, reason: ac.pending ? 'ANSWER_PENDING' : 'ANSWER_RESTATED', answers: it };
         }
       }
-      // 3) 進める（「全部承認」「そのまま実行」等も含む。承認・最終確認にはならない）
-      if (RE.preview.test(t) && !(q && RE.questionWord.test(t))) return plan ? { intent: INTENT.REQUEST_PREVIEW, reason: 'PREVIEW_WORDS' } : { intent: INTENT.GENERAL, reason: 'NO_PLAN' };
+      // 3) 進める（「全部承認」「そのまま実行」等も含む。承認・最終確認にはならない）。命令だけの文のときだけ（「副部長が承認します」は進める言葉ではない）
+      if (RE.preview.test(cmdText) && !(qCmd && RE.questionWord.test(cmdText)) && (pureCommand(cmdText, RE.preview) || !(plan && canRevise))) return plan ? { intent: INTENT.REQUEST_PREVIEW, reason: 'PREVIEW_WORDS', askText } : { intent: INTENT.GENERAL, reason: 'NO_PLAN', askText };
+      // 3b) 2026-10-05 第 3 段: 修正できる計画があり、質問以外の文がある発言は、計画の AI に読ませる（1 回の応答で、返答・要件の追加 / 変更 / 取り消し・計画の更新）。
+      //     以前は修正の動詞・計画の語が無いと「何についてでしょうか」「修正ですか、新しい計画ですか」と聞き返し、言い回しによっては指示が落ちた
+      //     （「取り消します」が GENERAL、「副部長が承認します」が反映へ進む言葉になった）。挨拶・あいまいな文は除く
+      if (plan && canRevise && restSens.length && !RE.greeting.test(t) && !RE.ambiguous.test(t)) return { intent: INTENT.REVISE_PLAN, reason: 'TURN', askText, utterance: t, revisable: canRevise };
       // 4) 計画の修正（現在の計画の語に触れる、または修正の動詞）。修正できる計画（ACTIVE / STALE）だけ。
       //    Phase 21（実機 §2）: 反映済み / 戻し済みの計画の後は、その計画の語（追加したフィールドの名前など）に触れる依頼も新しい計画（6）にする。
       //    以前は REVISE_PLAN →「改めて入力してください」と案内し、同じ依頼を入れ直すとまた同じ判定になって先へ進めなかった
@@ -21989,14 +22198,14 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
       // 5) 曖昧（「これどう？」）
       if (RE.ambiguous.test(t)) return plan ? { intent: INTENT.AMBIGUOUS, reason: 'VAGUE_REFERENCE', choices: [INTENT.EXPLAIN_PLAN, ...(review ? [INTENT.EXPLAIN_REVIEW] : []), INTENT.REQUEST_PREVIEW] } : { intent: INTENT.GENERAL, reason: 'VAGUE_NO_PLAN' };
       // 6) 実現したいこと（計画）。計画があり、その計画の語に触れないなら「修正か新規か」を聞く
-      if (RE.desire.test(t) && !q) {
-        if (!plan) return { intent: state.subject ? INTENT.DISCUSS_JS : INTENT.PLAN, reason: state.subject ? 'CONSULTATION' : 'DESIRE' };
+      if (RE.desire.test(mixed ? restText : t) && (!q || mixed)) {
+        if (!plan) return { intent: state.subject ? INTENT.DISCUSS_JS : INTENT.PLAN, reason: state.subject ? 'CONSULTATION' : 'DESIRE', askText };
         if (canRevise) return { intent: INTENT.AMBIGUOUS, reason: 'NEW_OR_REVISE', choices: [INTENT.REVISE_PLAN, INTENT.PLAN] };
         return { intent: INTENT.PLAN, reason: 'DESIRE_AFTER_EXECUTION' };
       }
       // 7) 質問（現在の設定について。Planner は起動しない）
       if (q) return { intent: INTENT.ASK, reason: 'QUESTION' };
-      if (RE.greeting.test(t)) return { intent: INTENT.GENERAL, reason: 'GREETING' };
+      if (greetingOnly || RE.greeting.test(t)) return { intent: INTENT.GENERAL, reason: 'GREETING' };
       // 8) 既定: 計画があれば何を指すか聞く。無ければ現在の設定への質問として扱う（Planner は起動しない）
       if (plan) return { intent: INTENT.AMBIGUOUS, reason: 'UNCLEAR', choices: [INTENT.ASK, ...(canRevise ? [INTENT.REVISE_PLAN] : []), INTENT.PLAN] };
       // Phase 17: JS の相談中は、質問でない短い文（「承認済みでは金額を編集不可」）も相談（計画）として扱う
@@ -22019,7 +22228,7 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
     //   latencyMs（AI プロバイダの応答全体の時間）とは別に、画面の側で測る。「最初の応答までの時間」ではない
     // 会話の応答性（2026-10-05）: queuedAccepted = 作り直しの途中に受け付けた指示 / chainedJobs = 続けてまとめて入れた作業 /
     //   instructionWaits = 指示を受け付けてから、その指示を入れた版ができるまで（{ kind: initial | queued, waitMs, jobs }）/ revisionModes = 版の作り方（patch / full）の記録
-    const newMetrics = () => ({ aiCalls: 0, roundTrips: 0, answersRecorded: 0, clarifications: 0, reasked: 0, reaskedLog: [], timings: [], gatewayDecisionsUnconfirmed: 0, platformConflicts: 0, queuedAccepted: 0, chainedJobs: 0, instructionWaits: [], revisionModes: [] });
+    const newMetrics = () => ({ aiCalls: 0, roundTrips: 0, answersRecorded: 0, clarifications: 0, reasked: 0, reaskedLog: [], timings: [], gatewayDecisionsUnconfirmed: 0, platformConflicts: 0, queuedAccepted: 0, chainedJobs: 0, instructionWaits: [], revisionModes: [], requirementOps: 0, unresolvedClauses: 0, asideAsks: 0 });
     // まとめて入れる作業の上限（1 回の送信で続ける作業の数。超えた指示は記録したまま「まだ計画に入っていません」と出す）
     const MAX_CHAIN = 4;
     /**
@@ -22030,6 +22239,9 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
       const state = { messages: [], activePlan: null, activeReview: null, activeExecution: null, planHistory: [], dropped: 0,
         // Phase 17: 相談対象の JS（Customize タブから。無ければ null）と、JS の登録（KTJsExecutor の写し）
         subject: null, consultation: null, activeJsExecution: null,
+        // 2026-10-05 第 3 段（作業中も会話を続ける）: 最初の計画・コードの生成の途中に受け付けた指示（{ kind: 'PLAN' | 'GENERATE', epoch, texts[{ text, kind, ack }] }）と、
+        //   作業と並べて走らせている質問（答えを待つため）
+        workInbox: null, sideAsks: [],
         // Phase 20（GM-6 / FR-9）: 会話の世代。新しい会話を始めると進む。送信中に会話が変わったら、遅れて返った応答・エラーをこの会話に入れない
         epoch: 0,
         // 会話の応答性（2026-10-05）: 確認事項と決定事項の台帳（planId → KTAiAnswers.createLedger。版が変わっても引き継ぐ）・
@@ -22038,6 +22250,20 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
         // 会話の応答性（2026-10-05）: 計画の作り直しの作業（作業中だけ）と、作業中に受け付けた指示の受け口
         job: null, inbox: null };
       const ledgerOf = (planId) => { if (!state.ledgers.has(planId)) state.ledgers.set(planId, KTAiAnswers.createLedger(planId)); return state.ledgers.get(planId); };
+      /**
+       * 2026-10-05 第 3 段: 質問の AI に渡す会話の現在の要件と計画（計画は変えない）。作業中（計画の作成・更新・コードの生成）の質問にも、今の要件と計画で答える
+       */
+      const conversationContext = () => {
+        // 新しい計画を作っている間は、前の計画を今の計画として渡さない（作成中と伝える）
+        const v = state.working !== 'PLAN' && state.activePlan && state.activePlan.status !== PLAN_STATUS.SUPERSEDED ? state.activePlan : null;
+        const lg = v ? state.ledgers.get(v.planId) : null;
+        const p = v ? v.plan || {} : null;
+        return {
+          requirements: lg ? KTAiAnswers.requirementsForContext(lg) : [],
+          plan: p ? { goal: v.goal, version: v.version, summary: String(p.assessment?.summary || '').slice(0, 600), steps: (p.steps || []).slice(0, 24).map(s => ({ id: s.id, title: s.title })), customizations: (p.customizations || []).map(c => ({ customizationId: c.customizationId, requirement: c.requirement, platform: c.platform, events: c.events, risks: (c.risks || []).slice(0, 6) })), provisionals: p.provisionals || [], questions: (v.openQuestions || []).map(q => ({ id: q.id, question: q.text })) } : null,
+          working: state.working || null,
+        };
+      };
       const listeners = new Set();
       const emit = () => { for (const fn of listeners) { try { fn(state); } catch (e) { } } };
       const push = (type, role, text = '', data = null) => {
@@ -22052,9 +22278,9 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
       const assistant = (text, data) => push(MSG.ASSISTANT_TEXT, ROLE.ASSISTANT, text, data);
 
       // ---- 計画のバージョン ----
-      function registerPlan({ plan, ctx = null, review = null, revisionRequest = null, basedOn = null, decisionsSent = null, appliedEntryIds = [], gatewayPlan = null, revisionMeta = null, answeredAfter = null }) {
+      function registerPlan({ plan, ctx = null, review = null, revisionRequest = null, basedOn = null, decisionsSent = null, appliedEntryIds = [], gatewayPlan = null, revisionMeta = null, answeredAfter = null, turnInfo = null, planId: planIdIn = null }) {
         const parent = basedOn || null;
-        const planId = parent ? parent.planId : newId('plan');
+        const planId = parent ? parent.planId : (planIdIn || newId('plan'));
         const version = parent ? parent.version + 1 : 1;
         for (const v of state.planHistory) if (v.planId === planId && v.status !== PLAN_STATUS.SUPERSEDED) v.status = PLAN_STATUS.SUPERSEDED;
         const v = {
@@ -22063,6 +22289,8 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
           plan, ctx, review, status: PLAN_STATUS.ACTIVE, createdAt: now(), executionId: null,
           // 会話の応答性（2026-10-05）: Gateway が返した計画そのもの（次の差分の土台）と、この版の作り方（patch / full・切り替えた理由）
           gatewayPlan: gatewayPlan || null, revisionMeta: revisionMeta || null,
+          // 2026-10-05 第 3 段: この版を作ったときの計画の AI の返答と要件の変化（表示用）
+          turnInfo: turnInfo || null,
         };
         // 会話の応答性（2026-10-05）: この版を作るときに送った決定事項（生成にも同じものを使う）と、確認事項の台帳への反映。
         //   回答済みの論点だけを聞く質問は出さずに記録する（理由つきの再確認だけ出す）。AI の計画の前提は決定事項にしない
@@ -22108,12 +22336,59 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
       const specSummary = (v) => (v?.spec ? { specId: v.spec.specId, version: v.spec.version, status: v.spec.status, confirmedAt: v.spec.confirmedAt } : null);
       const planLabel = (v) => `変更計画 v${v.version}`;
       const counts = (review) => { const er = review?.executionReadiness || {}; return { safe: (er.safeSteps || []).length, review: (er.reviewSteps || []).length, blocked: (er.blockedSteps || []).length, planOnly: (er.planOnlySteps || []).length, conflicts: (review?.conflicts || []).length }; };
+      /**
+       * 2026-10-05 第 3 段: 計画の AI の今回の発言の扱いを台帳に入れる（要件の追加・変更・取り消し。扱いが示されなかった文は未解決の要件として残す）。
+       * 古い Gateway（turn が無い）は何もしない。戻り値は表示用の要約
+       */
+      function noteTurn(lg, turn, { version, goal = '', utterances = [] } = {}) {
+        if (!turn || typeof turn !== 'object') return null;
+        // 根拠の照合は利用者の原文だけ（最初の依頼・これまでの発言・回答。ページの中だけに持つ）。Toolkit が組み立てた依頼文（確認事項の文を含む）は数えない
+        //   （AI が自分の質問文を引用して「利用者の決定」にしない）
+        const said = utterances.filter(x => typeof x === 'string' && x.trim());
+        lg.userTexts = [...(lg.userTexts || []), ...said].slice(-40);
+        const answers = lg.entries.filter(e => e.answer).map(e => e.answer);
+        const userTexts = [goal, ...lg.userTexts, ...answers].filter(x => typeof x === 'string' && x.trim());
+        const ops = Array.isArray(turn.requirementOps) ? turn.requirementOps : [];
+        const ch = KTAiAnswers.applyRequirementOps(lg, ops, { version, userTexts, utterances: said });
+        const missed = KTAiAnswers.uncoveredClauses(said, turn.utteranceCoverage || [], ops, { isQuestion: isQuestionSentence });
+        const unresolved = missed.map(s => KTAiAnswers.addUnresolvedRequirement(lg, s, { version })).filter(Boolean);
+        state.metrics.requirementOps += ops.length; state.metrics.unresolvedClauses += missed.length;
+        // 上限（取り消し済みを除いて 40 件）で記録できなかった追加・未解決の数（黙って落とさず画面に出す）
+        const overflow = ch.overflow + (missed.length - unresolved.length);
+        return { reply: String(turn.reply || '').trim(), added: ch.added, updated: ch.updated, revoked: ch.revoked, downgraded: ch.downgraded.length, unresolved, overflow };
+      }
+      /** 作業を続けたとき（途中の結果は版にしない）の要約をまとめる */
+      const mergeTurnInfo = (list) => {
+        const xs = (list || []).filter(Boolean);
+        if (!xs.length) return null;
+        const uniq = (a) => [...new Map(a.map(e => [e.id, e])).values()];
+        // この版で追加した要件は「追加」だけに出す（続けた作業で変えても「変更」に重ねない）。返答は、版として出さなかった土台の計画の返答（hidden）を除く
+        const added = uniq(xs.flatMap(x => x.added)), addedIds = new Set(added.map(e => e.id));
+        return { reply: xs.filter(x => !x.hidden).map(x => x.reply).filter(Boolean).join('\n'), added, updated: uniq(xs.flatMap(x => x.updated)).filter(e => !addedIds.has(e.id)), revoked: uniq(xs.flatMap(x => x.revoked)), downgraded: xs.reduce((a, x) => a + x.downgraded, 0), unresolved: uniq(xs.flatMap(x => x.unresolved)), overflow: xs.reduce((a, x) => a + (x.overflow || 0), 0) };
+      };
+      /** 要件の 1 行（「R2「金額が 100 万円未満 → 課長が承認する（ただし …）」」） */
+      const requirementLine = (e) => `${e.id}「${[e.condition, e.behavior].filter(Boolean).join(' → ')}${(e.exceptions || []).length ? `（ただし ${e.exceptions.map(x => [x.condition, x.behavior].filter(Boolean).join(' → ')).join('、')}）` : ''}」${e.decision === 'proposed' ? '（AI の提案）' : ''}`;
+      function announceTurn(v) {
+        const ti = v.turnInfo;
+        if (!ti) return;
+        if (ti.reply) assistant(ti.reply, { kind: 'turn-reply', planId: v.planId, version: v.version });
+        const parts = [];
+        if (ti.added.length) parts.push(`追加 ${ti.added.map(requirementLine).join('、')}`);
+        if (ti.updated.length) parts.push(`変更 ${ti.updated.map(requirementLine).join('、')}`);
+        if (ti.revoked.length) parts.push(`取り消し ${ti.revoked.map(requirementLine).join('、')}`);
+        const unsupported = [...ti.added, ...ti.updated].filter(e => e.disposition === 'unsupported');
+        if (unsupported.length) parts.push(`できないこと ${unsupported.map(e => `${e.id}（${e.note || '理由は右の検証'}）`).join('、')}`);
+        if (parts.length) toolkit(`要件：${parts.join('　')}`, { kind: 'requirements-changes', planId: v.planId, version: v.version, added: ti.added.map(e => e.id), updated: ti.updated.map(e => e.id), revoked: ti.revoked.map(e => e.id) });
+        if (ti.unresolved.length) toolkit(`計画に入っていない可能性がある指示があります：${ti.unresolved.map(e => `「${e.behavior}」`).join('、')}。入れる場合はそのように伝えてください（黙って捨てずに要件の未解決として残しています）。`, { kind: 'requirements-unresolved', planId: v.planId, version: v.version, ids: ti.unresolved.map(e => e.id) });
+        if (ti.overflow) toolkit(`要件の数が上限（${KTAiAnswers.MAX_REQUIREMENTS} 件。取り消し済みは数えません）に達したため、記録できなかった指示が ${ti.overflow} 件あります。不要になった要件を取り消すか、新しい計画として依頼してください。`, { kind: 'requirements-overflow', planId: v.planId, version: v.version, count: ti.overflow });
+      }
       function announcePlan(v, { revised = false } = {}) {
         const p = v.plan || {};
+        announceTurn(v);
         const custs = Array.isArray(p.customizations) ? p.customizations : [];
         // Phase 20（実機 CX-7）: 外部連携や計画のみの手順を含む計画でも「実現できます」と言い切っていた。方式だけを伝え、できる範囲は検証の結果で示す
         const solutionText = p.solution === 'HYBRID' ? '標準設定と JavaScript を組み合わせる計画です。' : p.solution === 'CUSTOMIZATION' ? '標準設定では足りないため、JavaScript カスタマイズを使う計画です。' : custs.length ? '' : (p.solution === 'STANDARD' && /JavaScript|JS|カスタマイズ/.test(v.goal || '') ? '標準設定だけで実現できます（JavaScript は不要です）。' : '');
-        const summary = revised ? `${planLabel(v)} に見直しました（v${v.basedOnVersion} の修正）。${solutionText}${p.assessment?.summary || ''}` : `変更計画を作成しました。${solutionText}${p.assessment?.summary || ''}`;
+        const summary = revised && v.basedOnVersion === 0 ? `変更計画を作成しました（作成中に受け付けた指示も入れました）。${solutionText}${p.assessment?.summary || ''}` : revised ? `${planLabel(v)} に見直しました（v${v.basedOnVersion} の修正）。${solutionText}${p.assessment?.summary || ''}` : `変更計画を作成しました。${solutionText}${p.assessment?.summary || ''}`;
         assistant(summary, { planId: v.planId, version: v.version, solution: p.solution || null });
         push(MSG.PLAN, ROLE.ASSISTANT, planLabel(v), { planId: v.planId, version: v.version });
         if (v.review) {
@@ -22135,7 +22410,10 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
         // 会話の応答性（2026-10-05）: 確認事項は、決定事項で答えが出ていないものだけを出す（回答済みの論点の再質問は出さない）。
         //   AI が「前の回答と矛盾する・条件が変わった」として再確認を求めたものだけは、理由とともに出す
         const openQs = Array.isArray(v.openQuestions) ? v.openQuestions : KTAiAnswers.questionList(p);
-        if (openQs.length) assistant(`確認したいことが ${openQs.length} 件あります。${openQs.slice(0, 3).map(q => `${q.id}: ${q.text}${q.reconfirm ? '（前の回答の再確認）' : ''}`).join(' / ')}${openQs.length > 3 ? ' …' : ''}`, { planId: v.planId, version: v.version, kind: 'questions' });
+        // 2026-10-05 第 3 段: 仮の案（後から容易に変えられる点。質問せずに計画に入れた。利用者の決定ではない）
+        const provs = Array.isArray(p.provisionals) ? p.provisionals : [];
+        if (provs.length) toolkit(`仮の案で進めています（変えたいときはそのまま伝えてください）：${provs.map(x => `${x.choice}${x.changeHint ? `（${x.changeHint}）` : ''}`).join('／')}`, { kind: 'provisionals', planId: v.planId, version: v.version, provisionals: provs });
+        if (openQs.length) assistant(`確認したいことが ${openQs.length} 件あります。${[...openQs.filter(q => q.priority === 'blocking'), ...openQs.filter(q => q.priority !== 'blocking')].slice(0, 3).map(q => `${q.id}: ${q.text}${q.reconfirm ? '（前の回答の再確認）' : ''}`).join(' / ')}${openQs.length > 3 ? ' …' : ''}`, { planId: v.planId, version: v.version, kind: 'questions' });
         for (const c of v.decisionConflicts || []) toolkit(`計画の対象（${c.plan.map(x => (x === 'desktop' ? 'PC' : x === 'mobile' ? 'モバイル' : x)).join('・')}）が、決定事項（${c.label}：${c.decision}）と合いません。計画の内容を確認してください（直すときは、そのまま伝えてください）。`, { planId: v.planId, version: v.version, kind: 'decision-conflict', topic: c.topic });
         const reasked = Array.isArray(v.reaskedQuestions) ? v.reaskedQuestions : [];
         if (reasked.length) {
@@ -22359,7 +22637,9 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
         if (!m || !m.data || m.data.stage === 'done') return;
         const body = ackBody(m);
         m.data = { ...m.data, stage };
-        if (stage === 'queued') m.text = `${body}。いま作り直している計画の後に、続けて計画に入れます。kintone にはまだ何も反映していません。`;
+        if (stage === 'queued') m.text = m.data.work === 'PLAN' ? `${body}。いま作っている計画に、続けて入れます（この指示が入っていない計画は出しません）。kintone にはまだ何も反映していません。`
+          : m.data.work === 'GENERATE' ? `${body}。いま作っているコードの後に、計画に入れます（前の仕様のコードは登録の対象にしません）。kintone にはまだ何も反映していません。`
+          : `${body}。いま作り直している計画の後に、続けて計画に入れます。kintone にはまだ何も反映していません。`;
         else if (stage === 'revising' && m.data.queued) m.text = `${body}。先に受け付けた指示と合わせて、計画に入れています。kintone にはまだ何も反映していません。`;
         else if (stage === 'done' && m.data.queued) m.text = `${body}。${version != null ? `変更計画 v${version} に` : '計画に'}入れました。kintone にはまだ何も反映していません。`;
         else if (stage === 'pending') m.text = `${body}。続けて入れられる作業の数を超えたため、まだ計画に入っていません（記録したままです。同じ内容をもう一度送ると計画に入れます）。kintone にはまだ何も反映していません。`;
@@ -22368,7 +22648,38 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
         emit();
       }
       /** 作り直しの途中に、回答・修正の依頼を受け付けられるか（計画の作り直しの作業中で、会話も計画も変わっていない） */
-      const canQueue = () => { const j = state.job; return !!(busy && j && j.epoch === state.epoch && state.activePlan === j.base && state.inbox && state.inbox.planId === j.planId); };
+      const canQueue = () => {
+        const j = state.job;
+        // 作り直しの土台がまだ版になっていない（最初の計画に、作成中に受け付けた指示を続けて入れている）ときも受け付ける
+        //   （その間の最新の計画は、作り始めた時点の計画のまま。反映済みの前の計画があっても有効）
+        if (busy && j && j.epoch === state.epoch && state.activePlan === (j.base.unregistered ? (j.base.activeAtStart ?? null) : j.base) && state.inbox && state.inbox.planId === j.planId) return true;
+        const w = state.workInbox;
+        return !!(busy && w && w.epoch === state.epoch);
+      };
+      /**
+       * 2026-10-05 第 3 段: 質問の AI に今すぐ聞く（作業と並べて走らせる。計画は変えない）。答えはメッセージに出す。
+       * brief = 最初の計画を作り始めた直後の先回りの返答（理解した目的・提案する方向・重要な未決事項。計画ができたら計画が正）
+       */
+      function askNow(question, { brief = false, signal = null } = {}) {
+        if (!question || typeof services.ask !== 'function') return null;
+        const epoch = state.epoch;
+        state.metrics.asideAsks += 1; state.metrics.aiCalls += 1;
+        const p = (async () => {
+          try {
+            const r = await services.ask({ question, signal, conversation: { ...conversationContext(), ...(brief ? { brief: true } : {}) } });
+            if (state.epoch !== epoch) return;
+            // 先回りの返答は、計画の作成中に届いたときだけ出す（計画の後に出ると、計画より古い理解が後から出る）
+            if (brief && !(busy && state.working === 'PLAN')) return;
+            if (r && r.ok) push(MSG.ANSWER, ROLE.ASSISTANT, r.answer?.answer || '', { answer: r.answer, ctxFacts: r.ctx?.facts || [], kind: brief ? 'plan-brief' : 'aside-answer', question });
+            else if (!brief) push(MSG.ERROR, ROLE.TOOLKIT, r?.message || '質問への回答を取得できませんでした（作業は続けています）。', { code: r?.reason || 'ERROR', retryText: question, intent: INTENT.ASK });
+          } catch (e) {
+            if (state.epoch === epoch && !brief && !(e?.name === 'AbortError' || e?.code === 'CANCELLED')) push(MSG.ERROR, ROLE.TOOLKIT, '質問への回答を取得できませんでした（作業は続けています）。', { code: e?.code || 'ERROR', retryText: question, intent: INTENT.ASK });
+          } finally { emit(); }
+        })();
+        state.sideAsks.push(p);
+        p.finally(() => { const i = state.sideAsks.indexOf(p); if (i >= 0) state.sideAsks.splice(i, 1); });
+        return p;
+      }
       /**
        * 修正の依頼が決定済みの論点を言い直している（その論点をすべて含み、答えが違う）ときは、新しい依頼が正なので、その決定事項を置き換え済みにする
        * （「保存時です」の後の「保存時と金額の変更時」。残すと「決定事項が正」の規則で古い答えに戻った）。PC / モバイルは、範囲をはっきり言う文のときだけ
@@ -22393,6 +22704,49 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
         if (!canQueue()) return null;
         const secret = secretLikeIn(t);
         if (secret) return null;   // 秘密情報らしい文は、処理中でも送らない（画面が下書きとして残す。送れる時点で同じ案内を出す）
+        // 2026-10-05 第 3 段: 最初の計画・コードの生成の途中と、版になる前の最初の計画に指示を続けて入れている途中は、文の形だけで分ける。
+        //   質問の文は作業と並べて今の要件と計画で答え、それ以外は指示としてためて、作業の後にまとめて計画に入れる（古い条件の計画・コードを最新として出さない）。
+        //   （以前は計画が無い状態の既定の判定で「保存は止めない」「PCだけ」が質問の AI に回り、計画に入らなかった）
+        const job0 = state.job && state.job.base.unregistered ? state.job : null;
+        if ((state.workInbox && !state.job) || job0) {
+          if (answerPayload || intentOverride) return null;
+          const sens = sentencesOf(t);
+          const qs = sens.filter(isQuestionSentence);
+          const rs = sens.filter(s => !isQuestionSentence(s) && !isGreetingSentence(s));
+          if (!rs.length) {
+            if (!qs.length) return null;   // 挨拶・相づちだけ（作業の後に送れるよう下書きに残す）
+            push(MSG.USER, ROLE.USER, t);
+            askNow(t);
+            return { intent: INTENT.ASK, reason: 'ASKED_WHILE_BUSY', text: t, ok: true, cancelled: false, error: null, queued: false, asked: true };
+          }
+          const restT = rs.join(' ');
+          // 操作の命令（反映・元に戻す・コードの生成・登録・仕様の確定）と資料の作成は、作業の後に（下書きに残す）
+          if (isOperationCommand(restT)) return null;
+          const w = job0 ? null : state.workInbox;
+          const kind = w ? w.kind : 'PLAN';
+          // いま進めている作業と同じ文（［再試行］・二重クリック）・受け付け済みの指示と同じ文は、追加の指示として積まない（要求を重ねない）
+          const dupNow = w ? !!(w.text && norm(w.text) === t) : (job0.texts || []).some(x => norm(x) === t || norm(x) === restT);
+          const queuedTexts = w ? w.texts : state.inbox.texts;
+          if (dupNow || queuedTexts.some(x => x.text === t || x.text === restT)) {
+            toolkit(dupNow ? '同じ依頼を、いま進めています。' : '同じ指示を、いま受け付けています。', { kind: 'revise-in-progress' });
+            return { intent: INTENT.REVISE_PLAN, reason: 'DUPLICATE', text: t, ok: true, cancelled: false, error: null, queued: false };
+          }
+          push(MSG.USER, ROLE.USER, t);
+          if (qs.length) askNow(qs.join(' '));
+          const ack = toolkit('', { kind: 'answers-ack', planId: null, version: null, texts: [restT], stage: null, queued: true, revise: true, work: kind, acceptedAt: clock() });
+          setAckStage(ack, 'queued');
+          queuedTexts.push({ text: restT, kind: 'revise', ack });
+          if (!w) state.inbox.acks.push(ack);
+          state.metrics.queuedAccepted += 1;
+          return { intent: INTENT.REVISE_PLAN, reason: `QUEUED_DURING_${kind}`, text: t, ok: true, cancelled: false, error: null, queued: true };
+        }
+        // 質問だけの文は、作業と並べて今の要件と計画で答える（計画は変えない・作業を止めない）
+        const clsW = intentOverride ? null : classifyIntent(t, state);
+        if (clsW && [INTENT.ASK, INTENT.EXPLAIN_PLAN, INTENT.EXPLAIN_REVIEW, INTENT.EXPLAIN_CUSTOMIZATION].includes(clsW.intent)) {
+          push(MSG.USER, ROLE.USER, t);
+          askNow(t);
+          return { intent: clsW.intent, reason: 'ASKED_WHILE_BUSY', text: t, ok: true, cancelled: false, error: null, queued: false, asked: true };
+        }
         // 対応先の確認（どの質問への回答かの選択）は、作り直しの後に（確認のカードは作業中の版のもの。二重に選ぶと同じ回答が 2 件になった）
         if (answerPayload && Array.isArray(answerPayload.remaining)) return null;
         const base = state.job.base, lg = ledgerOf(base.planId);
@@ -22453,6 +22807,7 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
         const cls = intentOverride === INTENT.ANSWER ? { intent: INTENT.ANSWER, reason: answerPayload ? 'ANSWER_PAYLOAD' : 'USER_CHOICE', answers: answerPayload ? null : KTAiAnswers.interpret({ text: t, open: answerContext(state).open, decided: answerContext(state).decided, isRequest: (c) => RE.reviseVerb.test(c) || RE.desire.test(c) }) }
           : intentOverride ? { intent: intentOverride, reason: 'USER_CHOICE', customizationId: (t.match(/\bC[0-9]+\b/g) || [])[0] || null } : classifyIntent(t, state);
         const result = { intent: cls.intent, reason: cls.reason, text: t, ok: true, cancelled: false, error: null };
+        state.working = cls.intent === INTENT.PLAN || cls.intent === INTENT.DISCUSS_JS ? 'PLAN' : cls.intent === INTENT.REVISE_PLAN || cls.intent === INTENT.ANSWER ? 'REVISE' : cls.intent === INTENT.GENERATE_CODE ? 'GENERATE' : null;
         let loading = null;
         const epoch = state.epoch;
         const late = () => state.epoch !== epoch;   // 送信中に新しい会話が始まった（この応答は前の会話のもの）
@@ -22472,6 +22827,17 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
         const timing = { intent: cls.intent, reason: cls.reason, ackMs: null, doneMs: null, ok: null, aiCalls: 0 };
         const aiCall = () => { state.metrics.aiCalls += 1; timing.aiCalls += 1; };
         /**
+         * 2026-10-05 第 3 段: 質問と回答・依頼が混ざった発言の質問の部分は、計画の更新と同時に質問の AI へ送って先に答える（計画は変えない）。
+         * 計画の AI には「質問には別に答える」と伝える（同じ質問に二重に答えない）
+         */
+        // 答えは待たない（計画ができたら次の入力を受け付ける。答えは届いたときに出す）
+        const askAside = (question, o = {}) => {
+          const p = askNow(question, { signal, ...o });
+          if (!p) return false;
+          timing.aiCalls += 1;
+          return true;
+        };
+        /**
          * 計画の作り直し（REVISE_PLAN と回答の共通）。決定事項（利用者の回答）を構造化して一緒に送り、応答の版にその写しを持たせる。
          * 遅れて返った応答（新しい会話・別の版が最新になった）は、この会話にも決定事項にも入れない。
          * 会話の応答性（2026-10-05）:
@@ -22481,20 +22847,24 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
          *     （古い結果で最新の指示を上書きしない）。最後に、すべての指示を入れた版だけを登録する。途中で失敗・取り消したら、そこまでにできた版を登録し、
          *     入っていない指示は記録したまま「計画に入っていません」と出す
          */
-        const reviseWith = async (base, request, { afterAnswer = false, ack = null, rawTexts = [] } = {}) => {
+        const reviseWith = async (base, request, { afterAnswer = false, ack = null, rawTexts = [], askSeparately = false, extraAcks = [], priorTurnInfos = [] } = {}) => {
           const lg = ledgerOf(base.planId);
+          // この作業が有効な間の最新の計画（版になる前の最初の計画が土台のときは、作り始めた時点の計画のまま）
+          const expectedActive = base.unregistered ? (base.activeAtStart ?? null) : base;
           state.inbox = { planId: base.planId, texts: [], acks: [] };
-          const acks = () => [ack, ...(state.inbox ? state.inbox.acks : [])].filter(Boolean);
+          const acks = () => [ack, ...extraAcks, ...(state.inbox ? state.inbox.acks : [])].filter(Boolean);
           let prev = { plan: base.plan, gatewayPlan: base.gatewayPlan || null, ctx: base.ctx || null };
           const requests = [];
-          let done = null, req = request, patchOk = afterAnswer, jobs = 0, jobTexts = rawTexts;
+          // 2026-10-05 第 3 段: 自由な修正の依頼も差分で更新する（変わる箇所だけ。大きな変更は Gateway が同じ依頼の中で全体の作り直しに切り替える）
+          let done = null, req = request, patchOk = true, jobs = 0, jobTexts = rawTexts;
+          const turnInfos = [...priorTurnInfos];
           const usePatchFor = (p) => patchOk && revisionMode !== 'full' && !!p.gatewayPlan;
-          loading = push(MSG.LOADING, ROLE.ASSISTANT, afterAnswer ? (usePatchFor(prev) && patchExpected() ? LOADING_TEXT.REVISE_AFTER_ANSWER_PATCH : LOADING_TEXT.REVISE_AFTER_ANSWER) : LOADING_TEXT.REVISE_PLAN, { intent: cls.intent });
+          loading = push(MSG.LOADING, ROLE.ASSISTANT, usePatchFor(prev) && patchExpected() ? (afterAnswer ? LOADING_TEXT.REVISE_AFTER_ANSWER_PATCH : LOADING_TEXT.REVISE_PLAN_PATCH) : (afterAnswer ? LOADING_TEXT.REVISE_AFTER_ANSWER : LOADING_TEXT.REVISE_PLAN), { intent: cls.intent });
           /** 作業の結果を版として登録する（その作業を始めた時点までに受け付けた指示が、この版に入った） */
           const commit = (job) => {
             if (loading) { remove(loading); loading = null; }
             const applied = KTAiAnswers.pendingAnswers(lg).filter(e => (e.rev || 0) <= job.snap).map(e => e.id);
-            const v = registerPlan({ plan: job.r.plan, ctx: job.r.ctx || null, review: job.r.review || null, revisionRequest: job.requests.join('\n'), basedOn: base, decisionsSent: job.decisions, appliedEntryIds: applied, gatewayPlan: job.r.gatewayPlan || null, revisionMeta: job.r.revisionMeta || null, answeredAfter: job.snap });
+            const v = registerPlan({ plan: job.r.plan, ctx: job.r.ctx || null, review: job.r.review || null, revisionRequest: job.requests.join('\n'), basedOn: base, decisionsSent: job.decisions, appliedEntryIds: applied, gatewayPlan: job.r.gatewayPlan || null, revisionMeta: job.r.revisionMeta || null, answeredAfter: job.snap, turnInfo: mergeTurnInfo(turnInfos) });
             announcePlan(v, { revised: true });
             const t1 = clock();
             for (const m of acks()) {
@@ -22507,6 +22877,8 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
           };
           /** まだ入っていない受け付けた指示の受領の表示 */
           const rest = (stage) => { for (const m of acks()) if (m.data?.stage !== 'done') setAckStage(m, stage); };
+          /** 版になる前の最初の計画を、そのまま版にする（指示を続けて入れる作業の失敗・取り消しで、できていた最初の計画まで失わない） */
+          const commitInitial = () => { if (loading) { remove(loading); loading = null; } return base.registerInitial(); };
           try {
             while (true) {
               jobs += 1;
@@ -22518,20 +22890,26 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
               state.job = { epoch: state.epoch, planId: base.planId, base, ledgerRev: snap, n: jobs, texts: jobTexts };
               emit();
               aiCall();
-              const r = await services.plan({ goal: base.goal, revision: { basedOnVersion: base.version, request: req, previousPlan: usePatch ? prev.gatewayPlan : prev.plan, previousRequests: [...(base.revisionRequests || []), ...requests], ...(usePatch ? { mode: 'patch', ...(focus.length ? { focus } : {}) } : {}) }, decisions, signal, baseCtx: prev.ctx, ...(state.subject ? { subject: state.subject } : {}) });
+              const utterancesNow = (jobTexts || []).filter(x => typeof x === 'string' && x.trim());
+              const r = await services.plan({ goal: base.goal, revision: { basedOnVersion: base.version, request: req, previousPlan: usePatch ? prev.gatewayPlan : prev.plan, previousRequests: [...(base.revisionRequests || []), ...requests], ...(usePatch ? { mode: 'patch', ...(focus.length ? { focus } : {}) } : {}), ...(utterancesNow.length ? { utterances: utterancesNow } : {}), ...(askSeparately && jobs === 1 ? { questionsAnsweredSeparately: true } : {}) }, decisions, requirements: KTAiAnswers.requirementsForContext(lg), signal, baseCtx: prev.ctx, ...(state.subject ? { subject: state.subject } : {}) });
               state.job = null;
               // 別の経路で計画が最新になった（会話は同じ）ときは、待ちの表示を片づけてから捨てる（残ると「作り直しています」が消えなかった）
-              if (late() || state.activePlan !== base) { if (!late() && loading) { remove(loading); loading = null; result.superseded = true; rest('superseded'); } discard(); return; }
+              if (late() || state.activePlan !== expectedActive) { if (!late() && loading) { remove(loading); loading = null; result.superseded = true; rest('superseded'); } discard(); return; }
               if (!r || !r.plan) {
-                if (done) { const v0 = commit(done); result.partial = { version: v0.version, pendingRequest: req }; } else if (loading) { remove(loading); loading = null; }
+                // 版になる前の最初の計画が土台のときは、最初の計画を版にする（入っていないのは、続けて入れる指示だけ。再試行はその指示の原文で）
+                const v0 = done ? commit(done) : base.unregistered ? commitInitial() : null;
+                if (v0) result.partial = { version: v0.version, pendingRequest: req }; else if (loading) { remove(loading); loading = null; }
                 rest('failed');
-                result.ok = false; push(MSG.ERROR, ROLE.TOOLKIT, r?.message || '変更計画を見直せませんでした。', { code: r?.reason || 'ERROR', retryText: req, intent: INTENT.REVISE_PLAN });
+                result.ok = false; push(MSG.ERROR, ROLE.TOOLKIT, r?.message || '変更計画を見直せませんでした。', { code: r?.reason || 'ERROR', retryText: base.unregistered && jobTexts.length ? jobTexts.join('\n') : req, intent: INTENT.REVISE_PLAN });
                 return;
               }
               // 決定事項を受け取ったことを Gateway が返さない（古い Gateway は黙って無視する）→ 計測に残す（表示では「反映済み」と言い切らない）
               if (decisions.length && !r.decisionsMeta) state.metrics.gatewayDecisionsUnconfirmed += 1;
               requests.push(req);
               done = { r, decisions, snap, n: jobs, requests: [...requests] };
+              // 2026-10-05 第 3 段: 要件の追加・変更・取り消しは作業ごとに台帳へ（続けた作業の途中の結果は版にしないが、利用者の発言の扱いは残す）
+              //   今回の発言は利用者の原文だけ（Toolkit が組み立てた依頼文を利用者の発言として数えない）
+              turnInfos.push(noteTurn(lg, r.turn, { version: base.version + 1, goal: base.goal, utterances: utterancesNow }));
               // この作業を始めた後に受け付けた指示（回答・修正の依頼）。無ければ、この結果を版にする
               const newer = KTAiAnswers.pendingAnswers(lg).filter(e => (e.rev || 0) > snap);
               const waiting = state.inbox ? state.inbox.texts.length : 0;
@@ -22555,27 +22933,32 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
               if (putBack.length) state.inbox.texts.unshift(...putBack);
               for (const x of included) { supersedeByRequest(lg, x.text, base); x.ack.data.includedJob = jobs + 1; }
               req = parts.join('\n').slice(0, 1900);
-              jobTexts = included.map(x => x.text);
-              patchOk = !included.length;   // 自由な修正の依頼を含むときは全体を作り直す
+              // 続けた作業の今回の発言: 後から受け付けた回答・そのほかの記述・修正の依頼の原文
+              jobTexts = [...recs.map(x => x.answer), ...notesQ, ...included.map(x => x.text)];
+              patchOk = true;   // 2026-10-05 第 3 段: 修正の依頼を含むときも差分（大きな変更は Gateway が全体に切り替える）
               for (const m of acks()) if (m.data?.stage === 'queued') setAckStage(m, 'revising');
               if (loading) { loading.text = LOADING_TEXT.REVISE_CHAIN; emit(); }
             }
           } catch (e) {
             state.job = null;
             // 続けて作り直す途中の失敗・取り消し: そこまでにできた版を登録する（先に受け付けた指示は入った。後の指示は記録したまま）
-            if (done && !late() && state.activePlan === base) { const v0 = commit(done); result.partial = { version: v0.version, pendingRequest: req }; rest(e?.name === 'AbortError' || e?.code === 'CANCELLED' ? 'cancelled' : 'failed'); }
-            else rest(e?.name === 'AbortError' || e?.code === 'CANCELLED' ? 'cancelled' : 'failed');
+            //   版になる前の最初の計画が土台のときは、続けた作業の結果が無くても最初の計画を版にする
+            const v0 = !late() && state.activePlan === expectedActive ? (done ? commit(done) : base.unregistered ? commitInitial() : null) : null;
+            if (v0) result.partial = { version: v0.version, pendingRequest: req };
+            rest(e?.name === 'AbortError' || e?.code === 'CANCELLED' ? 'cancelled' : 'failed');
             throw e;
           } finally {
             state.job = null; state.inbox = null;
           }
         };
         try {
+          // 命令と質問が混ざった発言（「これで進めて。CSVにも効きますか？」）: 質問の部分は質問の AI へ（回答・計画・修正の経路は、それぞれの分岐で送る）
+          if (cls.askText && ![INTENT.ANSWER, INTENT.PLAN, INTENT.DISCUSS_JS, INTENT.REVISE_PLAN].includes(cls.intent)) askAside(cls.askText);
           switch (cls.intent) {
             case INTENT.ASK: {
               loading = push(MSG.LOADING, ROLE.ASSISTANT, LOADING_TEXT.ASK, { intent: cls.intent });
               aiCall();
-              const r = await services.ask({ question: t, signal });
+              const r = await services.ask({ question: t, signal, conversation: conversationContext() });
               if (late()) { discard(); break; }
               remove(loading); loading = null;
               if (r && r.ok) push(MSG.ANSWER, ROLE.ASSISTANT, r.answer?.answer || '', { answer: r.answer, ctxFacts: r.ctx?.facts || [] });
@@ -22591,6 +22974,8 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
                 result.ok = false; break;
               }
               const lg = ledgerOf(base.planId);
+              // 質問の部分は、回答の扱い（対応先の聞き返し・記録済み）に関係なく先に質問の AI へ送る（対応先を聞き返す経路で質問が捨てられていた）
+              const askedA = askAside(cls.askText);
               if (cls.reason === 'ANSWER_RESTATED') {
                 const ds = lg.entries.filter(KTAiAnswers.isDecided).filter(e => (cls.answers?.notes || []).includes(e.answer));
                 toolkit(`その内容は記録済みです（${ds.map(e => `${e.label}：${e.answer}`).join('／') || t}）。計画は作り直しません。`, { kind: 'answers-restated', planId: base.planId, version: base.version });
@@ -22626,7 +23011,7 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
               ackMsg = toolkit(`回答を受け付けました：${records.map(answerLine).join('／')}。この条件で計画を作り直しています（${patchNow ? '変わる箇所だけを作り直します。十数秒ほどかかります' : '計画全体を作り直すため、1 分前後かかります'}）。kintone にはまだ何も反映していません。`, { kind: 'answers-ack', planId: base.planId, version: base.version, records, stage: 'revising', rev: lg.rev || 0, acceptedAt: clock() });
               timing.ackMs = clock() - t0;
               const openLeft = answerContext(state).open;
-              await reviseWith(base, answersRequestText(records, { notes, open: openLeft }), { afterAnswer: true, ack: ackMsg });
+              await reviseWith(base, answersRequestText(records, { notes, open: openLeft }), { afterAnswer: true, ack: ackMsg, rawTexts: answerPayload ? records.map(x => x.answer) : [cls.restText || t], askSeparately: askedA });
               markAck(result.ok ? 'done' : result.superseded ? 'superseded' : 'failed');
               break;
             }
@@ -22639,11 +23024,37 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
               }
               loading = push(MSG.LOADING, ROLE.ASSISTANT, state.subject ? LOADING_TEXT.DISCUSS_JS : LOADING_TEXT.PLAN, { intent: cls.intent });
               aiCall();
+              askAside(cls.askText);
+              // 2026-10-05 第 3 段: 計画の完成を待たせない。理解した目的・提案する方向・重要な未決事項を先に返す（質問の AI。計画ができたら計画が正）
+              //   先回りの返答は Gateway が対応しているときだけ（古い Gateway は依頼の文を普通の質問として答えてしまう）
+              if (!cls.askText && typeof services.conversationFeatures === 'function' && (services.conversationFeatures() || []).includes('brief')) askNow(t, { brief: true, signal });
+              // 作成中の質問はすぐ答え、指示はためる（acceptWhileBusy）
+              state.workInbox = { kind: 'PLAN', epoch: state.epoch, texts: [], text: t };
               const r = await services.plan({ goal: t, signal, ...(state.subject ? { subject: state.subject } : {}) });
+              const wP = state.workInbox; state.workInbox = null;
               if (late()) { discard(); break; }
               remove(loading); loading = null;
-              if (r && r.plan) announcePlan(registerPlan({ plan: r.plan, ctx: r.ctx || null, review: r.review || null, gatewayPlan: r.gatewayPlan || null, revisionMeta: r.revisionMeta || null }));
-              else { result.ok = false; push(MSG.ERROR, ROLE.TOOLKIT, r?.message || '変更計画を作成できませんでした。', { code: r?.reason || 'ERROR', retryText: t, intent: cls.intent }); }
+              if (r && r.plan) {
+                // 2026-10-05 第 3 段: 最初の依頼の要件（計画の AI が分けたもの）を新しい計画の系列の台帳へ
+                const planIdNext = newId('plan');
+                const lgNew = ledgerOf(planIdNext);
+                const ti = noteTurn(lgNew, r.turn, { version: 1, goal: t, utterances: [t] });
+                const queuedP = wP && wP.epoch === state.epoch ? wP.texts : [];
+                if (queuedP.length) {
+                  // 作成中に受け付けた指示: この計画を版として出す前に、差分で続けて入れる（その指示が入っていない計画を最新として出さない）
+                  state.metrics.chainedJobs += 1;
+                  for (const x of queuedP) { x.ack.data.includedJob = 1; setAckStage(x.ack, 'revising'); }
+                  //   土台はまだ版にしない。作り始めた時点の計画（activeAtStart。反映済みの前の計画のこともある）が最新のままなら有効。
+                  //   続けた作業が失敗・取り消しになったら、この最初の計画を版にする（registerInitial）
+                  const base0 = { planId: planIdNext, version: 0, goal: t, revisionRequests: [], plan: r.plan, gatewayPlan: r.gatewayPlan || null, ctx: r.ctx || null, review: r.review || null, unregistered: true, activeAtStart: prev ?? null,
+                    registerInitial: () => { const v1 = registerPlan({ plan: r.plan, ctx: r.ctx || null, review: r.review || null, gatewayPlan: r.gatewayPlan || null, revisionMeta: r.revisionMeta || null, turnInfo: ti, planId: planIdNext }); announcePlan(v1); return v1; } };
+                  await reviseWith(base0, queuedP.map(x => `修正の依頼：${String(x.text).replace(/\s+/g, ' ').trim()}`).join('\n').slice(0, 1900), { rawTexts: queuedP.map(x => x.text), extraAcks: queuedP.map(x => x.ack), priorTurnInfos: [ti ? { ...ti, hidden: true } : null] });
+                } else announcePlan(registerPlan({ plan: r.plan, ctx: r.ctx || null, review: r.review || null, gatewayPlan: r.gatewayPlan || null, revisionMeta: r.revisionMeta || null, turnInfo: ti, planId: planIdNext }));
+              } else {
+                // 計画を作れなかった: 作成中に受け付けた指示は入っていない（受領の表示を失敗に）。計画を作れなかったこと自体もエラーとして出す
+                if (wP) for (const x of wP.texts) setAckStage(x.ack, 'failed');
+                result.ok = false; push(MSG.ERROR, ROLE.TOOLKIT, r?.message || '変更計画を作成できませんでした。', { code: r?.reason || 'ERROR', retryText: t, intent: cls.intent });
+              }
               break;
             }
             case INTENT.REVISE_PLAN: {
@@ -22656,7 +23067,13 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
               //   依頼が決定済みの論点を言い直している（その論点をすべて含み、答えが違う）ときは、新しい依頼が正なので、その決定事項を置き換え済みにする
               //   （「保存時です」の後の「保存時と金額の変更時」。残すと「決定事項が正」の規則で古い答えに戻った）。PC / モバイルは、範囲をはっきり言う文のときだけ
               supersedeByRequest(ledgerOf(base.planId), t, base);
-              await reviseWith(base, t, { rawTexts: [t] });
+              const asked = askAside(cls.askText);
+              await reviseWith(base, t, { rawTexts: [t], askSeparately: asked });
+              // 2026-10-05 第 3 段: 「条件を変えて、コードも作って」: 計画を更新して検証した後、変わった仕様を確かめてコードを作る 1 回の操作を出す（古い仕様のコードは作らない）
+              const nv = state.activePlan;
+              if (cls.alsoGenerate && result.ok && nv && nv !== base && nv.spec && !late()) {
+                assistant(`変更を入れた${planLabel(nv)}と実装仕様 v${nv.spec.version} ができました。仕様の変更を確かめて［この変更で確定してコードを作る］を押すと、最新の仕様でコードを作ります（前の仕様のコードは作りません）。`, { kind: 'confirm-generate', planId: nv.planId, version: nv.version, customizationId: cls.customizationId || null });
+              }
               break;
             }
             case INTENT.GENERATE_CODE: {
@@ -22680,7 +23097,8 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
               if (rv && !rv.codeGeneration?.supported) { toolkit(`${cid}「${c.requirement}」はまだコードを生成できません（${(rv.issues || []).filter(i => i.severity !== 'low').map(i => i.message).join('／') || rv.codeGeneration?.reason || '要確認'}）。計画を修正するか、確認事項に答えてください。`, { kind: 'generate-blocked', planId: v.planId, version: v.version, customizationId: cid }); result.ok = false; break; }
               // Phase 20（実機 BF-C 4 回目）: 「C1 のコードを作り直して。金額を変更したときにも警告が切り替わるように」の後半（要望）は生成に渡らない
               //   （生成は確定した実装仕様だけを元にする）。黙って捨てず、仕様を直してから作るか・今の仕様のまま作るかを選んでもらう（選んだ後は聞かない）
-              const extra = intentOverride === INTENT.GENERATE_CODE ? null : extraRequestIn(t);
+              //   質問の文（askText。同時に答える）は、仕様に無い追加の依頼として数えない
+              const extra = intentOverride === INTENT.GENERATE_CODE ? null : extraRequestIn(cls.commandText || t);
               if (extra) { assistant(`コードは確定した実装仕様 v${v.spec?.version ?? v.version} から作ります。「${extra}」は仕様に入っていないため、このまま作っても反映されません。仕様を直してから作りますか？`, { kind: 'generate-extra-choices', planId: v.planId, version: v.version, customizationId: cid, extra, reviseText: extra, generateText: `${cid} のコードを作って` }); break; }
               // 会話の応答性（2026-10-05）: 記録したのにまだ計画に入っていない回答があれば生成しない（その回答を無視したコードになる）
               const lgG = state.ledgers.get(v.planId);
@@ -22691,6 +23109,7 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
               // この版を作ったときに送った決定事項（利用者の回答）を、コード生成にも渡す。生成の時点でも回答済みのものだけ
               //   （この版で AI が再確認を求めた決定事項・置き換わった決定事項は送らない。写しは送った時点の状態のため、台帳で絞る）
               const liveIds = new Set(lgG ? lgG.entries.filter(e => e.status === 'answered').map(KTAiAnswers.decisionIdOf) : []);
+              state.workInbox = { kind: 'GENERATE', epoch: state.epoch, texts: [], text: t };
               const r = await services.generate({ version: v, customizationId: cid, signal, decisions: (v.decisionsSent || []).filter(d => liveIds.has(d.id)).map(({ reconfirmReason, ...d }) => ({ ...d, status: 'answered' })) });   // 再確認を取り下げて回答済みに戻ったものも渡す
               if (late()) { discard(); break; }
               remove(loading); loading = null;
@@ -22704,6 +23123,17 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
                 toolkit(`統合先「${r.file?.name || ''}」の本文を取得できませんでした（JS_SOURCE_UNAVAILABLE）。既存ファイルへの自動生成は行いません。`, { kind: 'source-unavailable', planId: v.planId, version: v.version, customizationId: cid, file: r.file || null });
                 result.ok = false;
               } else { result.ok = false; push(MSG.ERROR, ROLE.TOOLKIT, r?.message || 'JavaScript を生成できませんでした。', { code: r?.reason || 'ERROR', retryText: t, intent: cls.intent }); }
+              // 2026-10-05 第 3 段: 生成中に受け付けた指示を計画に入れる（生成を止めたり繰り返したりしない）。いま作ったコードは前の仕様のもの
+              const wG = state.workInbox; state.workInbox = null;
+              const queuedG = wG && wG.epoch === state.epoch ? wG.texts : [];
+              if (queuedG.length && !late() && state.activePlan === v && (v.status === PLAN_STATUS.ACTIVE || v.status === PLAN_STATUS.STALE)) {
+                toolkit(`コードの生成中に受け付けた指示を計画に入れます。${r && r.ok ? `いま作ったコードは前の仕様（v${v.version}）のものなので、登録の対象にしません。` : ''}`, { kind: 'generated-stale', planId: v.planId, version: v.version });
+                for (const x of queuedG) { x.ack.data.includedJob = 1; setAckStage(x.ack, 'revising'); }
+                result.ok = true;
+                await reviseWith(v, queuedG.map(x => `修正の依頼：${String(x.text).replace(/\s+/g, ' ').trim()}`).join('\n').slice(0, 1900), { rawTexts: queuedG.map(x => x.text), extraAcks: queuedG.map(x => x.ack) });
+                const nvG = state.activePlan;
+                if (result.ok && nvG && nvG !== v && nvG.spec && !late()) assistant(`変更を入れた${planLabel(nvG)}と実装仕様 v${nvG.spec.version} ができました。仕様の変更を確かめて［この変更で確定してコードを作る］を押すと、最新の仕様でコードを作り直します。`, { kind: 'confirm-generate', planId: nvG.planId, version: nvG.version, customizationId: cid });
+              } else if (queuedG.length) for (const x of queuedG) setAckStage(x.ack, 'failed');
               break;
             }
             case INTENT.EXPLAIN_CUSTOMIZATION:
@@ -22780,6 +23210,8 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
           else { markAck('failed'); push(MSG.ERROR, ROLE.TOOLKIT, err.message, { code: err.code, category: err.category, ...(err.reason ? { reason: err.reason } : {}), retryable: TRANSIENT.includes(err.code) || err.code === 'GENERATION_DECLINED', retryAfterSeconds: err.retryAfterSeconds, requestId: err.requestId, retryText: result.partial ? result.partial.pendingRequest : t, intent: cls.intent === INTENT.ANSWER || result.partial ? INTENT.REVISE_PLAN : cls.intent }); }
         } finally {
           busy = false;
+          state.working = null;
+          if (state.workInbox) { for (const x of state.workInbox.texts) setAckStage(x.ack, result.cancelled ? 'cancelled' : 'failed'); state.workInbox = null; }
           timing.doneMs = clock() - t0; timing.ok = !!result.ok;
           if (!late()) { state.metrics.timings.push(timing); if (state.metrics.timings.length > 100) state.metrics.timings.shift(); }
           emit();
@@ -22840,7 +23272,7 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
       };
     }
 
-    return { INTENT, MSG, PLAN_STATUS, SPEC_STATUS, ROLE, MAX_MESSAGES, classifyIntent, planTerms, secretLikeIn, extraRequestIn, create };
+    return { INTENT, MSG, PLAN_STATUS, SPEC_STATUS, ROLE, MAX_MESSAGES, classifyIntent, planTerms, secretLikeIn, extraRequestIn, isQuestionSentence, create };
   })();
 
   // ==========================================
@@ -23317,7 +23749,9 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
             ${c.whyStandardInsufficient ? `<span style="opacity:.7;">標準で不足</span><span>${esc(c.whyStandardInsufficient)}</span>` : ''}
           </div></div>`;
       }).join('');
-      const actions = status === 'DRAFT' ? `${btn('revise-spec', '仕様を修正', `data-plan="${esc(v.planId)}" data-version="${esc(String(v.version))}"`)}${btn('confirm-spec', 'この仕様で確定', `data-plan="${esc(v.planId)}" data-version="${esc(String(v.version))}"`, 'font-weight:600; border-color:#2e7d32;')}`
+      // 2026-10-05 第 3 段: 確定と生成を 1 回の操作に（コードの生成は下書き。kintone への登録は、コードの検査の後の［動作テスト環境へ登録］で別に確認する）
+      const genOk = custs.filter(c => reviewOf(c.customizationId)?.codeGeneration?.supported !== false);
+      const actions = status === 'DRAFT' ? `${btn('revise-spec', '仕様を修正', `data-plan="${esc(v.planId)}" data-version="${esc(String(v.version))}"`)}${btn('confirm-spec', 'この仕様で確定', `data-plan="${esc(v.planId)}" data-version="${esc(String(v.version))}"`, 'font-weight:600; border-color:#2e7d32;')}${genOk.length ? btn('confirm-generate', '確定してコードを作る', `data-plan="${esc(v.planId)}" data-version="${esc(String(v.version))}" data-cid="${esc(genOk.length === 1 ? genOk[0].customizationId : '')}"`, 'font-weight:600; border-color:#6a1b9a;') : ''}`
         : status === 'CONFIRMED' ? `${custs.filter(c => reviewOf(c.customizationId)?.codeGeneration?.supported !== false).map(c => btn('generate', `JavaScript を生成（${c.customizationId}）`, `data-cid="${esc(c.customizationId)}"`, 'font-weight:600; border-color:#6a1b9a;')).join('')}${btn('revise-spec', '仕様を修正', `data-plan="${esc(v.planId)}" data-version="${esc(String(v.version))}"`)}` : '';
       return card('kt-ai-spec-card', `
         <div style="display:flex; align-items:center; justify-content:space-between; gap:6px; flex-wrap:wrap;"><b>実装仕様 v${esc(String(sp.version))}</b><span>${KTContextUi.badge(SPEC_STATUS_JA[status] || status, badgeColor)}${sp.subject ? KTContextUi.badge(`相談: ${sp.subject.name}`, '#6a1b9a') : ''}</span></div>
@@ -23408,6 +23842,10 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
       return card('kt-ai-choices-card', `<div>${esc(m.text)}</div><div style="margin-top:6px; display:flex; gap:6px; flex-wrap:wrap;">${(d.choices || []).map(c => btn('generate', `${c.customizationId} ${c.requirement}`, `data-cid="${esc(c.customizationId)}"`, c.supported ? '' : 'opacity:.5;')).join('')}</div>`, '#555');
     }
     /** Phase 20（BF-C）: 生成の指示に付いた要望 → 仕様を直してから作る / 今の仕様のまま作る */
+    function confirmGenerateHtml(m) {
+      const d = m.data || {};
+      return card('kt-ai-choices-card', `<div>${esc(m.text)}</div><div style="margin-top:6px; display:flex; gap:6px; flex-wrap:wrap;">${btn('confirm-generate', 'この変更で確定してコードを作る', `data-plan="${esc(d.planId || '')}" data-version="${esc(String(d.version ?? ''))}" data-cid="${esc(d.customizationId || '')}"`, 'font-weight:600;')}</div><div style="font-size:10px; opacity:.65; margin-top:4px;">押すと、右の実装仕様（変更を入れた版）を確定して、その仕様でコードを作ります。kintone への登録は、コードの検査の後の［動作テスト環境へ登録］で別に確認します。</div>`, '#6a1b9a');
+    }
     function generateExtraChoicesHtml(m) {
       const d = m.data || {};
       return card('kt-ai-choices-card', `<div>${esc(m.text)}</div><div style="margin-top:6px; display:flex; gap:6px; flex-wrap:wrap;">${btn('choice', '仕様を直してから作る', `data-intent="REVISE_PLAN" data-text="${esc(d.reviseText || '')}"`, 'font-weight:600;')}${btn('choice', '今の仕様のまま作る', `data-intent="GENERATE_CODE" data-text="${esc(d.generateText || 'コードを作って')}"`)}</div><div style="font-size:10px; opacity:.6; margin-top:4px;">仕様を直すと実装仕様が新しい版になり、確定してからコードを作ります。</div>`, '#555');
@@ -23470,12 +23908,23 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
       const keyOf = (q) => (q.entryId && !q.reconfirm ? `${v.planId}:e:${q.entryId}` : `${v.planId}:${v.version}:${q.key}`);
       // 質問の誤抑制の修正（2026-10-05）: 同じ論点の回答済みの内容があれば添える（別の点の質問。回答済みの内容を踏まえて答えられるように）
       const relatedHtml = (q) => (!q.reconfirm && Array.isArray(q.related) && q.related.length ? `<div class="kt-ai-qa-related" style="font-size:11px; opacity:.8;">関係する回答済みの内容：${q.related.map(r => `${esc(r.label)} → ${esc(r.answer)}`).join('／')}（同じ内容を聞いている質問なら、回答は不要です）</div>` : '');
-      const rows = qs.map(q => `<div style="margin-top:6px;"><div style="font-size:12px;"><b>${esc(q.id)}</b>　${esc(q.text)}</div>${relatedHtml(q)}${q.reconfirm ? `<div class="kt-ai-qa-reconfirm" style="font-size:11px; color:#b26a00;">前の回答の再確認：${esc(q.reason || '前の回答と計画の条件が合わない可能性があります')}</div>` : ''}${active ? `<textarea class="kt-ai-qa-input" data-qkey="${esc(keyOf(q))}" data-plan="${esc(v.planId)}" data-version="${esc(String(v.version))}" rows="1" placeholder="回答（空欄の質問は送りません）">${esc(view.answers?.get?.(keyOf(q)) || '')}</textarea>` : ''}</div>`).join('');
+      // 2026-10-05 第 3 段: 先に聞く質問（blocking）を前に並べ、あとで決めてよい質問（later）は「あとで決めてもよい」として出す（隠さない）
+      const qsAll = qs;
+      const blockingN = qsAll.filter(q => q.priority === 'blocking').length, laterN = qsAll.filter(q => q.priority === 'later').length;
+      const ordered = [...qsAll.filter(q => q.priority === 'blocking'), ...qsAll.filter(q => q.priority !== 'blocking' && q.priority !== 'later'), ...qsAll.filter(q => q.priority === 'later')];
+      const extraHtml = (q) => [
+        q.priority === 'blocking' ? '<div class="kt-ai-qa-priority" style="font-size:10px; color:#b26a00;">先に確認したいこと（答えで計画の中心が変わります）</div>' : '',
+        q.impact ? `<div class="kt-ai-qa-impact" style="font-size:11px; opacity:.85;">答えで変わること：${esc(q.impact)}</div>` : '',
+        Array.isArray(q.options) && q.options.length ? `<div class="kt-ai-qa-options" style="font-size:11px; opacity:.85;">候補：${q.options.map(esc).join(' ／ ')}</div>` : '',
+        q.recommendation ? `<div class="kt-ai-qa-recommendation" style="font-size:11px; opacity:.85;">推奨：${esc(q.recommendation)}</div>` : '',
+      ].join('');
+      const laterHead = laterN && blockingN ? `<div style="margin-top:8px; font-size:11px; opacity:.75;">あとで決めてもよいこと（答えなくても、仮の案で計画を進められます）</div>` : '';
+      const rows = ordered.map((q, i) => `${i === ordered.length - laterN && laterHead ? laterHead : ''}<div style="margin-top:6px;"><div style="font-size:12px;"><b>${esc(q.id)}</b>　${esc(q.text)}</div>${extraHtml(q)}${relatedHtml(q)}${q.reconfirm ? `<div class="kt-ai-qa-reconfirm" style="font-size:11px; color:#b26a00;">前の回答の再確認：${esc(q.reason || '前の回答と計画の条件が合わない可能性があります')}</div>` : ''}${active ? `<textarea class="kt-ai-qa-input" data-qkey="${esc(keyOf(q))}" data-plan="${esc(v.planId)}" data-version="${esc(String(v.version))}" rows="1" placeholder="回答（空欄の質問は送りません）">${esc(view.answers?.get?.(keyOf(q)) || '')}</textarea>` : ''}</div>`).join('');
       const done = answeredRows.length ? `<div class="kt-ai-qa-answered" style="margin-top:6px; font-size:11px; opacity:.85;">${answeredRows.map(e => `<div>回答済み：${esc(e.label)} → ${esc(e.answer)}${e.appliedInVersion == null ? '（まだ計画に入っていません）' : ''}</div>`).join('')}</div>` : '';
       const foot = active
         ? (qs.length ? `<div style="margin-top:6px; display:flex; gap:6px; align-items:center; flex-wrap:wrap;">${btn('answer-questions', '回答を送って計画を直す', `data-plan="${esc(v.planId)}" data-version="${esc(String(v.version))}"`, 'font-weight:600;')}<span style="font-size:10px; opacity:.65;">入力した回答だけを、計画の修正としてまとめて送ります（Ctrl+Enter でも送れます。チャット欄に「PCだけ」のように書いても同じです）。</span></div>` : '')
         : '<div style="font-size:10px; opacity:.6; margin-top:4px;">この版の確認事項です（新しい版があります）。</div>';
-      const head = qs.length ? `確認したいことが ${qs.length} 件あります。` : '確認事項にはすべて回答しました。';
+      const head = qs.length ? (blockingN && laterN ? `先に確認したいことが ${blockingN} 件あります（ほかに ${laterN} 件は、あとで決めても進められます）。` : `確認したいことが ${qs.length} 件あります。`) : '確認事項にはすべて回答しました。';
       return card('kt-ai-questions-card', `<div>${head}</div>${rows}${done}${foot}`, '#555');
     }
     /** 会話の応答性: 対応先を決められなかった回答 → 対応する確認事項を選ぶカード（選んだ部分から記録。最新の確認だけ押せる） */
@@ -23524,6 +23973,7 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
           if (kind === 'choices') return wrap(choicesHtml(m));
           if (kind === 'customization-choices') return wrap(customizationChoicesHtml(m));
           if (kind === 'generate-extra-choices') return wrap(generateExtraChoicesHtml(m));
+          if (kind === 'confirm-generate') return wrap(confirmGenerateHtml(m));
           if (kind === 'source-unavailable') return wrap(sourceUnavailableHtml(m));
           if (kind === 'consultation-start') return wrap(consultationStartHtml(m));
           if (kind === 'consult-choices') return wrap(consultChoicesHtml(m));
@@ -23897,18 +24347,20 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
     const noteAuthError = (e) => { const code = KTAiClient.isAiClientError(e) ? e.code : null; if (code && AUTH_CODES.includes(code)) { capability = { available: false, reason: code }; renderSession(); } };
     const services = {
       /** ASK: 質問 → KTContext.build（focus は質問から解決。曖昧なら候補を返す）→ assistant-qa。Planner は起動しない */
-      async ask({ question, signal = null, focus = null }) {
+      async ask({ question, signal = null, focus = null, conversation = null }) {
         // Phase 21: 質問も最新の動作テスト環境を基準に答える（30 秒以内に取ったものは使い回す）。取れなければ運用環境の設定で答え、そのことを Context に入れる
         if (devBaseLoader) await refreshDevBase({ maxAgeMs: DEV_BASE_ASK_MAX_AGE_MS, reason: 'ask' });
         const gen = KTContextUi.generate({ targetType: focus?.type || 'app', targetId: focus?.id ?? null, targetLabel: focus?.label ?? null, question, inputs: inputsNow() });
         if (!gen.ok) return gen;
+        // 2026-10-05 第 3 段: 会話の現在の要件と計画（作業中の質問にも、今の要件と計画を踏まえて答える。計画は変えない）
+        if (conversation && typeof conversation === 'object') gen.ctx.conversation = conversation;
         const client = await ensureReady();
         const requestId = KTAiClient.newRequestId();
         try { const a = await client.ask({ ctx: gen.ctx, requestId, signal }); lastAnswer = a; return { ok: true, answer: a, ctx: gen.ctx }; }
         catch (e) { noteAuthError(e); throw e; }
       },
       /** PLAN / REVISE_PLAN: goal（＋修正）→ KTContext.buildPlan → change-planner → KTPlanReview（Toolkit 検証） */
-      async plan({ goal, revision = null, signal = null, subject = null, decisions = null, baseCtx = null }) {
+      async plan({ goal, revision = null, signal = null, subject = null, decisions = null, baseCtx = null, requirements = null }) {
         // Phase 21: 計画は最新の動作テスト環境を基準に作る（毎回取り直す）。取れなければ止める（運用環境の設定で計画しない）
         const gate = await ensureDevBase('plan');
         if (!gate.ok) return { ok: false, reason: 'DEV_BASE_UNAVAILABLE', message: gate.message };
@@ -23916,7 +24368,7 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
         const sub = subject ? KTContext.compactSubject({ sourceId: subject.sourceId, name: subject.name, target: subject.platform, customizationType: subject.customizationType, sourceAvailable: !!subject.sourceAvailable, events: subject.events || [], fields: Object.entries(subject.fieldAccess || {}).map(([code, acc]) => ({ code, access: acc.CONTROL || acc.SHOW_HIDE ? 'CONTROL' : acc.WRITE ? 'WRITE' : 'READ' })) }) : null;
         const inputs = subject ? withConsultedSource(inputsNow()) : inputsNow();
         // 会話の応答性（2026-10-05）: 決定事項（利用者の回答）は修正の依頼と一緒に Planner Context へ（ctx.decisions）
-        const gen = KTContextUi.generatePlan({ goal, inputs, revision, subject: sub, decisions: revision ? decisions : null });
+        const gen = KTContextUi.generatePlan({ goal, inputs, revision, subject: sub, decisions: revision ? decisions : null, requirements });
         if (!gen.ok) return gen;
         // 会話の応答性（2026-10-05）: 差分の土台（前の版の Gateway の計画）の根拠ID を、今回の Context の番号に付け替える（Context は作り直しのたびに番号を振り直す）
         if (gen.ctx?.revision?.mode === 'patch' && gen.ctx.revision.previousPlan) gen.ctx.revision.previousPlan = KTContext.remapPlanEvidence(gen.ctx.revision.previousPlan, baseCtx, gen.ctx);
@@ -23930,10 +24382,15 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
         try { review = KTPlanReview.review({ plan: p, ...(subject ? withConsultedSource(inputsNow()) : inputsNow()) }); } catch (e) { review = null; }
         // Phase 21: どの基準で検証したか（反映の直前に、この時点の動作テスト環境と今を比べる）
         if (review) review.base = gate.base ? KTDevBase.stamp(gate.base) : null;
-        return { plan: p, ctx: gen.ctx, review, decisionsMeta: p?.decisionsMeta ?? null, gatewayPlan: p?.gatewayPlan ?? null, revisionMeta: p?.revisionMeta ?? null };
+        // 2026-10-05 第 3 段: 今回の発言の扱い（turn）は計画の一部ではない（版の計画に残さない。台帳と表示だけに使う）
+        const turn = p?.turn ?? null, requirementsMeta = p?.requirementsMeta ?? null;
+        if (p) { delete p.turn; delete p.requirementsMeta; }
+        return { plan: p, ctx: gen.ctx, review, decisionsMeta: p?.decisionsMeta ?? null, gatewayPlan: p?.gatewayPlan ?? null, revisionMeta: p?.revisionMeta ?? null, turn, requirementsMeta };
       },
       /** 会話の応答性（2026-10-05）: Gateway の計画の修正の方式（health。返さない古い Gateway は全体の作り直しだけ） */
       revisionModes() { return capability?.features?.[KTAiClient.FEATURE_PLANNER || 'change-planner']?.revisionModes || ['full']; },
+      /** 2026-10-05 第 3 段: 質問の AI が受け取れる会話の文脈（requirements / brief。返さない古い Gateway は無し = 先回りの返答を使わない） */
+      conversationFeatures() { return capability?.features?.['assistant-qa']?.conversation || []; },
       /** EXPLAIN_PLAN / EXPLAIN_REVIEW: 計画の要約 ＋ Review の写し ＋ 計画が引用した根拠 → assistant-qa（説明だけ。計画は変えない） */
       async explain({ question, kind, plan, review, ctx, version, signal = null }) {
         if (!ctx) throw new KTAiClient.AiClientError({ code: KTAiClient.ERROR_CODES.NO_CONTEXT, message: 'この計画の Context がありません（Context ペインから作った計画は説明の対象外です）' });
@@ -24322,6 +24779,17 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
       if (act === 'rescan') { const cid = dataOf(t, 'cid'); await rescanAndGenerate(cid); return; }
       // Phase 17: 仕様の確定（Human Approval の SoT = 右「計画」の仕様カード）・修正・JS 登録の確認・復元・相談の選択
       if (act === 'confirm-spec') { await confirmSpec(dataOf(t, 'plan'), Number(dataOf(t, 'version'))); return; }
+      // 2026-10-05 第 3 段: 変更を入れた最新の版の仕様を確定し、その仕様でコードを作る（古い版のボタンでは作らない）
+      if (act === 'confirm-generate') {
+        const pid = dataOf(t, 'plan'), ver = Number(dataOf(t, 'version'));
+        const cur = conv.activePlan();
+        if (!cur || cur.planId !== pid || cur.version !== ver) { composerHint = 'このボタンの版は最新ではありません。最新の版の仕様を確かめてから操作してください。'; renderComposer(); return; }
+        const r = await confirmSpec(pid, ver);
+        if (!r || !r.ok) return;
+        const cid = dataOf(t, 'cid');
+        await sendChat(cid ? `${cid} のコードを作って` : 'コードを作って', { intent: KTAiConversation.INTENT.GENERATE_CODE });
+        return;
+      }
       if (act === 'revise-spec') { $input.placeholder = '仕様の修正内容を入力（例: モバイルでも同じようにしたい / 条件は承認済みではなく完了にして）'; try { $input.focus?.(); } catch (e) { } return; }
       if (act === 'open-js-register') { const v = planIndex().get(`${dataOf(t, 'plan')}:${dataOf(t, 'version')}`) || conv.activePlan(); await startJsRegister(v); return; }
       if (act === 'open-js-result') { jsExec.paneClosed = false; renderJsReg(); showPane('exec', { scrollTo: '#kt-ai-jsreg' }); return; }

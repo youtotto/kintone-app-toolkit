@@ -121,15 +121,19 @@ console.log('\n--- BF-C（再 3）/ F24. エラー表示と編集不可: 条件�
     const E = KTAiConversation.extraRequestIn;
     assert(/金額を変更したときにも警告が切り替わるように/.test(E('C1 のコードを作り直して。金額を変更したときにも警告が切り替わるようにしてください') || '') && !E('コードを作って') && !E('C1 のコードを作って') && !E('dealLock.js のコードを作り直して') && !E('JavaScript を生成して') && !E('コードを作ってください'), 'extraRequestIn: 生成の言い回し・対象・語尾を除いて要望が残るときだけ返す');
     let gens = 0;
-    const conv = KTAiConversation.create({ services: { generate: async () => { gens++; return { ok: true, generated: { code: '' }, review: { status: 'PASSED' } }; } } });
+    // 2026-10-05 第 3 段: 要望付きの生成の指示は、先に計画を更新して検証する（計画の AI の差分の応答を返す）
+    let planNext = null;
+    const conv = KTAiConversation.create({ services: { generate: async () => { gens++; return { ok: true, generated: { code: '' }, review: { status: 'PASSED' } }; }, plan: async () => ({ plan: JSON.parse(JSON.stringify(planNext)), ctx: null, review: reviewOf(planNext) }) } });
     const cp = plan([step('C1', 'CUSTOMIZATION_REQUIRED', 'JS', '', { customizationId: 'C1' }, { solution: 'CUSTOMIZATION', execution: { mode: 'PLAN_ONLY', supported: false, reason: 'x' } })], [], { solution: 'CUSTOMIZATION', customizations: [{ customizationId: 'C1', requirement: '金額が100万円を超えたら金額の下に警告', whyStandardInsufficient: '標準設定に無い', strategy: 'NEW_JS_FILE', platform: ['desktop'], implementation: 'JAVASCRIPT', events: ['app.record.create.show', 'app.record.edit.show', 'app.record.create.change.amount', 'app.record.edit.change.amount'], fields: [{ code: 'amount', access: 'CONTROL' }], apis: [], existingFiles: [], risks: [], questions: [], dependsOn: [] }] });
+    planNext = cp;
     const v = conv.registerPlan({ plan: cp, ctx: null, review: reviewOf(cp) });
     conv.confirmSpec({ planId: v.planId, version: v.version });
     await conv.send('C1 のコードを作り直して。金額を変更したときにも警告が切り替わるようにしてください');
-    const ask = conv.messages().find(x => x.data && x.data.kind === 'generate-extra-choices');
-    assert(gens === 0 && ask && /仕様に入っていない/.test(ask.text) && ask.data.reviseText && ask.data.generateText === 'C1 のコードを作って', 'F27: 要望付きの生成の指示 → まだ生成せず「仕様を直してから作る / 今の仕様のまま作る」を聞く');
+    const ask = conv.messages().find(x => x.data && x.data.kind === 'confirm-generate');
+    assert(gens === 0 && ask && conv.activePlan().version === 2 && conv.activePlan().spec.status === 'DRAFT' && ask.data.version === 2, 'F27（2026-10-05 第 3 段で変更）: 要望付きの生成の指示 → まだ生成せず、先に計画を更新して検証し、［この変更で確定してコードを作る］を出す（以前は「仕様を直してから作る / 今の仕様のまま作る」を聞いた。古い仕様のコードは作らない）');
+    const v2 = conv.activePlan(); conv.confirmSpec({ planId: v2.planId, version: v2.version });
     await conv.send('C1 のコードを作って', { intentOverride: 'GENERATE_CODE' });
-    assert(gens === 1, '［今の仕様のまま作る］（選んだ後）は聞き直さずに生成する');
+    assert(gens === 1, '確定した最新の仕様で生成する');
     // U6: JS の登録が検証で一致しない（VERIFY_FAILED。PUT は成功）→ 作業状態は「一部だけ反映」ではなく「登録済み・検証で不一致」
     const ws = VM.workspaceState({ version: conv.activePlan(), execState: null, jsExec: { stage: 'done', execution: { status: 'VERIFY_FAILED', put: { ok: true }, steps: [{ name: 'dealLock.js', target: 'desktop', status: 'VERIFY_FAILED' }] } }, subject: null });
     assert(ws.lines.includes('Preview登録済み・検証で不一致（要確認）') && !ws.lines.includes('一部だけ反映（要確認）'), 'U6: JS 登録の検証不一致は「Preview登録済み・検証で不一致（要確認）」');

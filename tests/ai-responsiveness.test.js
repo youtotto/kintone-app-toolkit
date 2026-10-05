@@ -76,7 +76,8 @@ await section(async () => {
   assert(/変わる箇所だけを作り直します。十数秒ほどかかります/.test(acks()[0].text) && !/1 分前後/.test(acks()[0].text), `P1: 受領の表示は差分の待ち時間（十数秒）: ${acks()[0].text}`);
   assert(c.activePlan().revisionMeta?.mode === 'patch' && c.metrics().revisionModes.slice(-1)[0].mode === 'patch', 'P1: 版の作り方（patch）を版と計測に記録する');
   await c.send('更新状況は3段階ではなく5段階にして');
-  assert(!calls[2].revision.mode && calls[2].revision.previousPlan.gw === undefined, 'P2: 自由な修正の依頼は全体を作り直す（mode を付けない・前の版の計画は Toolkit の計画）');
+  // 2026-10-05 第 3 段で変更: 自由な修正の依頼も差分（大きな変更は Gateway が同じ依頼の中で全体の作り直しに切り替える）
+  assert(calls[2].revision.mode === 'patch' && calls[2].revision.previousPlan.gw === 2 && !calls[2].revision.focus, `P2: 自由な修正の依頼も差分（前の版の Gateway の計画を土台に・回答の focus は付けない）: ${JSON.stringify({ mode: calls[2].revision.mode, focus: calls[2].revision.focus })}`);
 });
 await section(async () => {
   const { c, calls, acks } = makeConv([planWith(qs(QP, QS)), planWith(qs(QS))], { revisionMode: 'full' });
@@ -198,14 +199,17 @@ await section(async () => {
   assert(x.c.planHistory().length === 0 && x.c.messages().length === 0 && x.calls.length === 2 && !x.c.canQueue(), 'Q6: 作り直しの途中に新しい会話にしたら、続けて入れる作業はしない');
 });
 await section(async () => {
-  // 受け付けないもの: 質問・新しい依頼・対応先の確認が要る回答・質問の作業中・秘密情報
+  // 受け付けないもの: 対応先の確認が要る回答・秘密情報（2026-10-05 第 3 段で変更: 作り直しの途中の質問は、作業と並べてすぐ答える）
   const { c, ctl } = makeConv([planWith(qs(QP, QS, '承認の設定も必要ですか？')), planWith(qs(QS))]);
   await c.send('金額が大きい案件に注意を出したい');
   const open1 = ctl.hold();
   const p = c.send('PCだけ');
   await ticks();
+  const qa = await c.send('このフィールドは何に使ってる？');
+  await ticks();
   const n0 = c.messages().length;
-  assert(await c.send('このフィールドは何に使ってる？') === null && await c.send('はい') === null && await c.send('Webhook は https://hooks.slack.com/services/T000/B000/XXXX です') === null && c.messages().length === n0, 'Q7: 質問・対応先の決まらない「はい」・秘密情報は受け付けない（下書きとして残す。会話に出さない）');
+  assert(qa && qa.asked === true && c.messages().some(m => m.data?.kind === 'aside-answer'), 'Q7: 作り直しの途中の質問は、作業と並べてすぐ答える（作業は止めない。以前は受け付けず下書きのまま）');
+  assert(await c.send('はい') === null && await c.send('Webhook は https://hooks.slack.com/services/T000/B000/XXXX です') === null && c.messages().length === n0, 'Q7: 対応先の決まらない「はい」・秘密情報は受け付けない（下書きとして残す。会話に出さない）');
   const re = await c.send('PCだけ');
   assert(re && !re.queued && /いま作り直している計画に入れています/.test(c.messages()[c.messages().length - 1].text), 'Q8: 作り直しに入っている回答の言い直しは積まない（いま入れていると伝える）');
   open1(); await p; await ticks();
@@ -218,7 +222,7 @@ await section(async () => {
   oa(); await pa;
 });
 await section(async () => {
-  // 修正の依頼を途中に受け付けたら、続けて入れる作業は全体の作り直し（自由な依頼は差分にしない）
+  // 修正の依頼を途中に受け付けたら、続けて入れる作業に入れる（2026-10-05 第 3 段で変更: 修正の依頼を含むときも差分）
   const { c, calls, ctl, acks } = makeConv([planWith(qs(QP, QS)), planWith(qs(QS)), planWith(qs(QS))]);
   await c.send('金額が大きい案件に注意を出したい');
   const open1 = ctl.hold();
@@ -227,7 +231,7 @@ await section(async () => {
   const q = await c.send('一覧の名前は「高額」にして');
   assert(q && q.queued && q.intent === 'REVISE_PLAN' && /修正の依頼を受け付けました/.test(acks()[1].text), 'Q9: 途中の修正の依頼も受け付ける');
   open1(); await p; await ticks();
-  assert(calls.length === 3 && !calls[2].revision.mode && /修正の依頼：一覧の名前は「高額」にして/.test(calls[2].revision.request) && acks()[1].data.stage === 'done' && JSON.stringify(versions(c)) === '[1,2]', `Q9: 修正の依頼を含む続けた作業は全体の作り直し・依頼文に入れる: ${calls[2] && calls[2].revision.request}`);
+  assert(calls.length === 3 && calls[2].revision.mode === 'patch' && /修正の依頼：一覧の名前は「高額」にして/.test(calls[2].revision.request) && acks()[1].data.stage === 'done' && JSON.stringify(versions(c)) === '[1,2]', `Q9: 修正の依頼を含む続けた作業も差分・依頼文に入れる: ${calls[2] && calls[2].revision.request}`);
   const hist = c.activePlan().revisionRequests;
   assert(hist.length === 1 && /PC \/ モバイル/.test(hist[0]) && /一覧の名前/.test(hist[0]), 'Q9: 版の修正の依頼の履歴には、続けた作業の依頼文もまとめて残す（次の全体の作り直しで「反映済み」として送る）');
 });
