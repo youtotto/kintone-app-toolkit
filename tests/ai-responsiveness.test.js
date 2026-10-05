@@ -424,6 +424,32 @@ await section(async () => {
 });
 
 
+// =========================================================
+console.log('\n--- T. 実機（App 353）で見つかった回答の判定（統合先の質問への「〜にまとめて」） ---');
+await section(async () => {
+  // T1: 統合先のファイルを聞く質問への「〜にまとめて」「〜に入れて」「〜に寄せて」は回答（以前は文末の「て」で依頼と見なし、
+  //     「何についてでしょうか」と聞き返した。［現在の計画を修正する］を選ぶと全体の作り直しで 52 秒かかった）
+  const QW = '警告は作成・編集画面で金額を変更したときに出せばよいですか。詳細画面や一覧画面でも必要ですか？';
+  const QF = 'PC用の既存処理へ統合する場合、入力中の制御を扱うdealLock.jsを統合先にしてよいですか。それともdealValidate.jsへまとめたいですか？';
+  const isRequest = (c) => /ではなく|じゃなく|にして|使って|いらない|不要|やめ|外して|入れて|つけて|付けて/.test(c);
+  const O1 = [{ key: 'Q2', text: QW, topics: KTAiAnswers.questionTopics({ text: QW }) }, { key: 'Q4', text: QF, topics: KTAiAnswers.questionTopics({ text: QF }) }];
+  const O2 = [{ key: 'Q2', text: QW, topics: KTAiAnswers.questionTopics({ text: QW, topic: 'screens' }) }, { key: 'Q4', text: QF, topics: KTAiAnswers.questionTopics({ text: QF, topic: 'integration_target' }) }];
+  const it = (text, open) => KTAiAnswers.interpret({ text, open, decided: [], isRequest });
+  const yes = ['統合先はdealValidate.jsにまとめて', 'dealValidate.jsにまとめて', 'dealValidate.jsに入れて', 'dealLock.jsに寄せて', 'dealValidate.jsにまとめてください'];
+  const bad = yes.flatMap(t => [O1, O2].map((o, i) => ({ t, i, r: it(t, o) }))).filter(x => !(x.r.kind === 'answers' && x.r.answers.length === 1 && x.r.answers[0].key === 'Q4'));
+  assert(!bad.length, `T1: 統合先の質問への「〜にまとめて」は Q4 への回答（AI の topic の有無どちらも）: ${JSON.stringify(bad.map(x => [x.t, x.i, x.r.kind]))}`);
+  // T2: 中身を足す依頼（「〜に金額チェックを入れて」）・表示の仕方の依頼（「金額欄の下にまとめて表示して」）は回答にしない
+  const no = ['dealValidate.jsに金額チェックを入れて', '金額欄の下にまとめて表示して', 'PCの画面で金額を赤くして'];
+  const wrong = no.filter(t => it(t, O1).kind !== 'none');
+  assert(!wrong.length, `T2: 内容を足す依頼・表示の仕方の依頼は回答にしない: ${JSON.stringify(wrong)}`);
+  // T3: 会話: 聞き返さずに回答として受け付け、差分（patch・回答した質問を focus）で作り直す
+  const { c, calls, acks, kinds } = makeConv([planWith(qs(QW, QF), { customizations: [cust()] }), planWith(qs(QW), { customizations: [cust()] })]);
+  await c.send('金額が100万円を超えたら画面に警告を出したい');
+  const cls = KTAiConversation.classifyIntent('統合先はdealValidate.jsにまとめて', { activePlan: c.activePlan(), ledgers: new Map() });
+  await c.send('統合先はdealValidate.jsにまとめて');
+  assert(cls.intent === 'ANSWER' && calls.length === 2 && calls[1].revision.mode === 'patch' && (calls[1].revision.focus || []).includes('Q2') && acks().length === 1 && !kinds().includes('choices'), `T3: 聞き返さずに回答として差分で作り直す: ${JSON.stringify({ intent: cls.intent, reason: cls.reason, calls: calls.length, mode: calls[1] && calls[1].revision.mode, focus: calls[1] && calls[1].revision.focus, kinds: kinds().slice(-3) })}`);
+});
+
 console.log(`\n${state.failed ? 'FAILED' : 'ALL PASSED'}: ${state.passed} passed / ${state.failed} failed`);
 process.exit(state.failed ? 1 : 0);
 })().catch(e => { console.error(e); process.exit(1); });
