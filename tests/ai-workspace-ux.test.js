@@ -59,15 +59,15 @@ const makeStorage = () => { const m = new Map(); return { getItem: (k) => (m.has
 const answerFor = (ctx, text) => ({ ok: true, contractVersion: '2.1', meta: { requestId: 'qa-1', usage: { usedThisMonth: 2, monthlyLimit: 20 }, normalization: { warnings: [] } }, answer: text, facts: ctx.facts.length ? [{ text: 'fact', evidenceIds: [ctx.facts[0].id] }] : [], analysis: [], recommendations: [], unknowns: [] });
 const tick = () => new Promise(r => setTimeout(r, 0));
 const ticks = async (n = 4) => { for (let i = 0; i < n; i++) await tick(); };
-function mount({ inputs = INPUTS, paid = true, plans = null, now = null, extra = {} } = {}) {
+function mount({ inputs = INPUTS, paid = true, plans = null, now = null, extra = {}, planGate = null, health = HEALTH, gatewayPlan = false } = {}) {
   const storage = makeStorage();
   const settings = KTAiClient.createSettingsStore({ storage, host: 't.cybozu.com' });
   settings.setConsent(true);
   const calls = { ask: [], plan: [], generate: [] };
   const client = {
-    async getHealth() { return HEALTH; },
+    async getHealth() { return health; },
     async ask({ ctx, requestId }) { calls.ask.push({ ctx }); const v = KTAiClient.validateAnswer(answerFor(ctx, 'このフィールドは金額です。'), ctx); return { ...v.normalized, requestId, clientWarnings: v.warnings }; },
-    async plan({ ctx, requestId }) { calls.plan.push({ ctx }); const resp = plans ? plans(ctx) : (ctx.revision ? PLAN_V2 : PLAN_V1); const v = KTAiClient.validatePlan(resp, ctx); return { ...v.normalized, requestId, clientWarnings: v.warnings }; },
+    async plan({ ctx, requestId }) { calls.plan.push({ ctx }); if (planGate) await planGate(ctx); const resp = plans ? plans(ctx) : (ctx.revision ? PLAN_V2 : PLAN_V1); const v = KTAiClient.validatePlan(resp, ctx); const out = { ...v.normalized, requestId, clientWarnings: v.warnings }; if (gatewayPlan) Object.defineProperty(out, 'gatewayPlan', { value: JSON.parse(JSON.stringify(resp.plan)), enumerable: false }); return out; },
     async generate({ ctx, requestId }) { calls.generate.push({ ctx }); const v = KTAiClient.validateGenerated(genResponse(ctx, genPatch({ ...PATCH_GOOD, baseHash: ctx.existingFile?.hash || PATCH_GOOD.baseHash })), ctx); if (!v.ok) throw new Error(v.errors[0].message); return { ...v.normalized, requestId, clientWarnings: v.warnings }; },
   };
   const session = { status() { return { connected: true, apiBase: 'https://gw.test', refreshExpiresAt: '2099-01-01T00:00:00Z', scope: { product: 'toolkit', feature: 'assistant-qa,change-planner,customization-generator', domain: 't.cybozu.com' } }; }, async migrateLegacy() { return false; }, async refresh() { return {}; }, async disconnect() { return { revoked: true }; }, client };
@@ -612,6 +612,37 @@ await section(async () => {
   await clickChat(m2, 'new-conv'); await ticks();
   await clickPane(m2, 'exec', { dataset: { act: 'log-open', log: logId } }); await ticks();
   assert(m2.panel.executorState().stage === 'rolled-back' && !m2.msgs().some(x => x.data?.kind === 'apply-log-rolled-back'), 'L9: 戻し済みの反映を記録から開いただけでは「戻しました」を出さない');
+});
+
+// =========================================================
+// 2026-10-05（応答性の第 2 段）: 回答の後は変わる箇所だけを作り直す・作り直しの途中の回答を受け付けてまとめて入れる（画面）
+console.log('\n--- §23. 作り直しの途中の送信（画面）・計画の差分更新の依頼（Context） ---');
+await section(async () => {
+  const PLAN_Q = JSON.parse(JSON.stringify(PLAN_V1));
+  PLAN_Q.plan.questions = [{ id: 'Q1', question: '更新状況の選択肢は 3 段階でよいですか', reason: 'goal から決められない', relatedEvidenceIds: [] }, { id: 'Q2', question: '通知はいつ送りますか？', reason: 'タイミング', relatedEvidenceIds: [], topic: 'timing', decisionRef: '' }];
+  const PLAN_Q2 = JSON.parse(JSON.stringify(PLAN_Q)); PLAN_Q2.plan.questions = [];
+  const HEALTH_P = JSON.parse(JSON.stringify(HEALTH)); HEALTH_P.registry.toolkit['change-planner'].revisionModes = ['full', 'patch'];
+  const gates = [];
+  const m = mount({ plans: (ctx) => (ctx.revision ? PLAN_Q2 : PLAN_Q), gatewayPlan: true, health: HEALTH_P, planGate: () => gates.shift() });
+  await ticks();
+  await m.panel.send(GOAL); await ticks();
+  let open1; gates.push(new Promise(r => { open1 = r; }));
+  m.$('kt-ai-input').value = '保存時です';
+  const p = m.$('kt-ai-send').dispatch('click'); await ticks(6);
+  const conv = m.conv();
+  assert(conv.isBusy() && conv.canQueue() && m.$('kt-ai-send').disabled === false && /回答・修正の依頼はこのまま送れます/.test(m.$('kt-ai-composer-note').textContent), `U1: 計画の作り直しの途中は送信ボタンを止めない（回答・修正の依頼は送れる）: ${m.$('kt-ai-composer-note').textContent}`);
+  const rev = m.calls.plan[1].ctx.revision;
+  assert(rev.mode === 'patch' && rev.focus.includes('Q2') && rev.previousPlan.goal === GOAL && !('validation' in (rev.previousPlan.steps[0] || {})) && /十数秒/.test(m.chat()), `U2: 回答の後の作り直しは、Gateway の計画（正規化の付けた項目なし）を土台に mode patch で送る・受領の表示は十数秒: ${JSON.stringify({ mode: rev.mode, focus: rev.focus })}`);
+  m.$('kt-ai-input').value = '3段階でよいです';
+  await m.$('kt-ai-send').dispatch('click'); await ticks();
+  assert(m.$('kt-ai-input').value === '' && m.calls.plan.length === 2 && /いま作り直している計画の後に、続けて計画に入れます/.test(m.chat()), 'U3: 途中の回答は受け付けて入力欄を空にする（AI はまだ呼ばない）');
+  m.$('kt-ai-input').value = 'このフィールドは何に使ってる？';
+  await m.$('kt-ai-send').dispatch('click'); await ticks();
+  assert(m.$('kt-ai-input').value === 'このフィールドは何に使ってる？' && /作り直しの後に送ってください。下書きとして残しています/.test(m.$('kt-ai-composer-note').textContent), 'U4: 途中の質問は送らず、下書きとして残す');
+  m.$('kt-ai-input').value = '';
+  open1(); await p; await ticks(12);
+  assert(m.calls.plan.length === 3 && /3段階でよいです/.test(m.calls.plan[2].ctx.revision.request) && conv.activePlan().version === 2 && conv.planHistory().length === 2 && !conv.isBusy(), `U5: 作り直しが終わったら続けて入れ、版は v2 だけ: calls=${m.calls.plan.length} v=${conv.activePlan().version}`);
+  assert(conv.ledger().filter(e => e.status === 'answered').every(e => e.appliedInVersion === 2) && m.$('kt-ai-send').disabled === false, 'U5: 2 つの回答が v2 に入った');
 });
 
 console.log(`\n${state.failed ? 'FAILED' : 'ALL PASSED'}: ${state.passed} passed / ${state.failed} failed`);
