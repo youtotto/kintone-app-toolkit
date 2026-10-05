@@ -434,13 +434,16 @@ await section(async () => {
   assert(cls.intent === I.REVISE_PLAN && cls.reason === 'ADOPT_CONSULTATION_REVISE' && rev && /相談の答えのおすすめで進めたい: 承認待ちになったら作業者（承認者）へ通知する/.test(rev.request) && JSON.stringify(rev.utterances || []) === '["おすすめで"]', `E5: 修正の依頼に相談のおすすめ・発言は原文のまま: ${cls.reason} / ${rev && rev.request}`);
 });
 await section(async () => {
-  // E6: 推奨の無い確認事項（業務の判断）だけが残っているときの「おすすめで」は、回答にせず、その判断が要ると伝える（AI は呼ばない）
-  const { c, calls, ledger } = makeConv([planWith([QREC({ question: '承認されなかった案件はどうしますか？', topic: 'other', recommendation: '' })])]);
+  // E6: 推奨の無い確認事項（業務の判断）だけが残っているときの「おすすめで」は、計画の AI が候補から仮の案を選ぶ（止めない。2026-10-05 実機:
+  //   「回答にしていません」で止まり、任せた部分が進まなかった）。決定事項としては記録しない（仮の案は利用者の決定ではない）
+  const { c, calls, ledger } = makeConv([planWith([QREC({ question: '承認されなかった案件はどうしますか？', topic: 'other', recommendation: '' })]), planWith([])]);
   await c.send('承認漏れを防ぎたい');
   const cls = c.classify('おすすめで');
   await c.send('おすすめで');
-  const last = c.messages()[c.messages().length - 1];
-  assert(cls.reason === 'ADOPT_NO_RECOMMENDATION' && calls.plan.length === 1 && !ledger().entries.some(e => e.answer) && /承認されなかった案件はどうしますか/.test(last.text) && /推奨がありません/.test(last.text), `E6: 業務の判断は残し、答えが要ると伝える: ${cls.reason} / ${last.text}`);
+  const rev = calls.plan[1] && calls.plan[1].revision;
+  const msg = c.messages().find(m => m.data?.kind === 'adopt-delegated');
+  assert(cls.reason === 'ADOPT_DELEGATE' && calls.plan.length === 2 && rev && /委ねられた確認事項（推奨が無い）：質問「承認されなかった案件はどうしますか？」/.test(rev.request) && JSON.stringify(rev.utterances || []) === '["おすすめで"]'
+    && !ledger().entries.some(e => e.answer) && msg && /仮の案を選びます/.test(msg.text), `E6: 推奨の無い確認事項は計画の AI に仮の案を選ばせる: ${cls.reason} / ${rev && rev.request}`);
 });
 await section(async () => {
   // E7: 最初の計画の作成中の「おすすめで」は同意と同じ（作り直しを増やさない）
@@ -563,14 +566,15 @@ await section(async () => {
   assert(k.calls.plan.length === 2 && ds2.some(d => d.answer === '更新日時から数える') && ds2.some(d => /5日/.test(d.answer)) && !k.c.messages().some(m => m.data?.kind === 'answer-target'), `S8: 委ねる部分が先でも両方に答える: ${JSON.stringify(ds2.map(d => d.answer))}`);
 });
 await section(async () => {
-  // S9: 推奨の無い確認事項への「残りはおすすめで」は回答にしない（確認事項は残し、答えが要ると伝える）
+  // S9: 推奨の無い確認事項への「残りはおすすめで」は決定事項にしない。計画の AI に、その確認事項を委ねられたと伝える（仮の案を選ばせる）
   const qs = [QREC({ id: 'Q1', question: '承認されなかった案件はどうしますか？', topic: 'other', recommendation: '' }), QREC({ id: 'Q2', question: '何日たったら催促しますか？', topic: 'threshold', recommendation: '3 日' })];
   const { c, calls, ledger } = makeConv([planWith(qs), planWith([qs[0]])]);
   await c.send('承認漏れを防ぎたい');
   await c.send('5日で、残りはおすすめで');
   const ds = (calls.plan[1] && calls.plan[1].decisions) || [];
-  const msg = c.messages().find(m => m.data?.kind === 'adopt-no-recommendation');
-  assert(ds.some(d => /5日/.test(d.answer)) && !ds.some(d => /おすすめ/.test(d.answer)) && msg && /承認されなかった案件はどうしますか/.test(msg.text) && c.answerContext().open.some(q => /承認されなかった/.test(q.text)), `S9: 業務の判断は残す: ${JSON.stringify(ds.map(d => d.answer))} / ${msg && msg.text}`);
+  const ack = c.messages().find(m => m.data?.kind === 'answers-ack');
+  const req = (calls.plan[1] && calls.plan[1].revision && calls.plan[1].revision.request) || '';
+  assert(ds.some(d => /5日/.test(d.answer)) && !ds.some(d => /おすすめ/.test(d.answer)) && /委ねられた確認事項（推奨が無い）：質問「承認されなかった案件はどうしますか？」/.test(req) && ack && /おまかせ（仮の案を選びます）/.test(ack.text), `S9: 決定事項にせず、計画の AI に委ねられたと伝える: ${JSON.stringify(ds.map(d => d.answer))} / ${ack && ack.text}`);
 });
 await section(async () => {
   // S10: 計画の後の相談に「おすすめで。承認者は誰になりますか？」→ 質問の文で決定事項を置き換えない。推奨の無い確認事項より、直前の相談のおすすめを使う
@@ -698,6 +702,31 @@ await section(async () => {
   const planAt = kinds.lastIndexOf('PLAN'), ansAt = kinds.lastIndexOf('ANSWER');
   const r = c.classify('おすすめで');
   assert(planAt >= 0 && (ansAt < planAt || r.reason === 'ADOPT_RECOMMENDATIONS'), `T6: 遅れて届いた答えではなく、計画の確認事項の推奨を使う: ${r.reason} / plan ${planAt} answer ${ansAt}`);
+});
+
+console.log('\n--- U. 実機の確認（2026-10-05 夜）: 推奨の無い確認事項を委ねる・作業者の宛先の事実 ---');
+await section(async () => {
+  // U1: 推奨のある確認事項と無い確認事項が混ざっていても「おすすめで」で進む（推奨のある方は推奨の文を回答に、無い方は計画の AI に仮の案を選ばせる）
+  const qs = [QREC({ id: 'Q1', question: '「一定期間」は、どの時点から数えますか？', topic: 'timing', recommendation: '' }), QREC({ id: 'Q2', question: '起算点から何日後に通知しますか？', topic: 'threshold', recommendation: '3 暦日後' })];
+  const { c, calls } = makeConv([planWith(qs), planWith([])]);
+  await c.send('承認漏れを防ぎたい');
+  const cls = c.classify('おすすめで');
+  await c.send('おすすめで');
+  const req = (calls.plan[1] && calls.plan[1].revision && calls.plan[1].revision.request) || '';
+  assert(cls.reason === 'ADOPT_RECOMMENDATIONS' && (calls.plan[1].decisions || []).some(d => d.answer === '3 暦日後') && /委ねられた確認事項（推奨が無い）：質問「「一定期間」は、どの時点から数えますか？」/.test(req), `U1: 推奨の案と委任を一緒に送る: ${cls.reason} / ${req}`);
+  // 実機と同じ「3日で、作業者だけでいいです。数え方はおすすめで」（数え方に推奨が無い）: 止めずに、数え方は計画の AI に仮の案を選ばせる
+  const k = makeConv([planWith(qs), planWith([])]);
+  await k.c.send('承認漏れを防ぎたい');
+  await k.c.send('3日で、作業者だけでいいです。数え方はおすすめで');
+  const req2 = (k.calls.plan[1] && k.calls.plan[1].revision && k.calls.plan[1].revision.request) || '';
+  assert(k.calls.plan.length === 2 && /委ねられた確認事項（推奨が無い）/.test(req2) && /3日で/.test(req2) && !k.c.messages().some(m => m.data?.kind === 'answer-target'), `U1: 実機の答えでも止まらない: ${req2}`);
+});
+await section(async () => {
+  // U2: 「ステータスの更新」の通知の通知先が作業者なら、だれにいつ届くかを設定から書く（AI が「承認待ちから承認済みに変わったときに届く」と読み違えた）
+  const ip = inputsWith({}, { mutate: (data) => { data.generalNotify.notifications.push({ entity: { type: 'FIELD_ENTITY', code: '作業者' }, includeSubs: false, recordAdded: false, recordEdited: false, commentAdded: false, statusChanged: true, fileImported: false }); } });
+  const g = gen('承認漏れを防ぐ通知はある？', { inputs: ip });
+  const st = g.ctx.facts.filter(f => f.kind === 'notification').map(f => f.statement).find(x => /ステータスの更新/.test(x) && /作業者/.test(x)) || '';
+  assert(/通知先の作業者は、変わった後のステータスの作業者/.test(st) && /「承認待ち」になったとき → [^／）]*フィールド「承認者（approver）」/.test(st) && /作業者の無いステータス（[^）]*「完了」[^）]*）になったときは届かない/.test(st), `U2: 作業者の宛先を設定から書く: ${st}`);
 });
 
 console.log(`\n${state.failed ? 'FAILED' : 'ALL PASSED'}: ${state.passed} passed / ${state.failed} failed`);

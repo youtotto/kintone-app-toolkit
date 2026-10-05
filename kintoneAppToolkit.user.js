@@ -5615,6 +5615,21 @@
       return at.trim();
     }
     /**
+     * 「ステータスの更新」の通知の通知先が作業者（プロセス管理の作業者のフィールド）のとき、だれにいつ届くかを設定から書く（2026-10-05 実機: AI が
+     * 「承認待ちから承認済みに変わったときに作業者へ届く」と読み違えた。通知先「作業者」は、変わった後のステータスの作業者）
+     */
+    function assigneeNoticeText(target, data) {
+      if (!target || target.type !== 'FIELD_ENTITY') return '';
+      const ftype = (() => { const fs = data?.fields; if (!fs) return null; const p = Array.isArray(fs) ? fs.find(f => f && f.code === target.code) : (fs.properties || fs)[target.code]; return p ? (p.type || p.rawType || null) : null; })();
+      if (!(ftype === 'STATUS_ASSIGNEE' || target.code === '作業者')) return '';
+      const st = data?.status;
+      if (!st?.enable) return '。通知先の作業者は、変わった後のステータスの作業者';
+      const states = Object.values(st.states || {}).filter(Boolean).sort((a, b) => Number(a.index ?? 0) - Number(b.index ?? 0));
+      const withA = states.filter(s => notifyTargets(s.assignee?.entities).length).slice(0, 6);
+      const noA = states.filter(s => !notifyTargets(s.assignee?.entities).length).slice(0, 4);
+      return `。通知先の作業者は、変わった後のステータスの作業者（${[...withA.map(s => `「${s.name}」になったとき → ${targetsText(notifyTargets(s.assignee?.entities), data)}`), ...(noA.length ? [`作業者の無いステータス（${noA.map(s => `「${s.name}」`).join('・')}）になったときは届かない`] : [])].join('／')}）`;
+    }
+    /**
      * プロセス管理の facts（ステータス・作業者・アクション。上限を超えた分は truncation に記録する）。
      * focusId（「PROCESS_STATE:承認待ち」「PROCESS_ACTION:申請する:0」）があれば、そのステータス・アクションは上限の外でも入れる（選んだ対象の中身を落とさない）
      */
@@ -5670,7 +5685,7 @@
             : `${who}へ、${events.map(k => NOTIFY_EVENT_JA[k]).join('・')}のときに通知する`;
         facts.push({ kind: 'notification', key: `NOTIFY:general#${i + 1}`, confidence: 'CERTAIN',
           notification: { id: `general#${i + 1}`, scope: 'general', target, events },
-          statement: `アプリの条件通知 #${i + 1}: ${body}` });
+          statement: `アプリの条件通知 #${i + 1}: ${body}${events.includes('statusChanged') ? assigneeNoticeText(target, data) : ''}` });
       });
       if (gn && typeof gn.notifyToCommenter === 'boolean') facts.push({ kind: 'notification', key: 'NOTIFY:general:commenter', confidence: 'CERTAIN', notification: { scope: 'general', notifyToCommenter: gn.notifyToCommenter }, statement: `コメントの書き込み者への通知: ${gn.notifyToCommenter ? 'する' : 'しない'}` });
       (pn?.notifications || []).slice(0, 30).forEach((n, i) => {
@@ -22690,11 +22705,13 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
         const goalC = consultationGoal(state);
         // 推奨のある未回答の確認事項は、推奨の文そのものを回答にする（前置きを付けない。再確認の質問でも決定事項の変更として扱う: adopted）
         const items = ac.open.filter(q => q.recommendation).map(q => ({ key: q.key, answer: String(q.recommendation).trim(), adopted: true }));
-        if (items.length) return { intent: INTENT.ANSWER, reason: 'ADOPT_RECOMMENDATIONS', adoptItems: items, askText, ...(goalC ? { adoptText: goalC.adoptText } : {}) };
+        // 推奨の無い確認事項も委ねられた: 計画の AI が候補から妥当な案を選んで仮の案にする（2026-10-05 実機: 「回答にしていません」で止まり、任せた部分が進まなかった）
+        const noRec = ac.open.filter(q => !q.recommendation).map(q => ({ question: q.text, clause: adoptT }));
+        const delegateText = noRec.length ? `委ねられた確認事項（推奨が無い）：${noRec.map(x => `質問「${String(x.question).slice(0, 80)}」`).join('、')}。候補から妥当な案を選び、仮の案として計画に入れてください` : null;
+        const adoptText = [goalC ? goalC.adoptText : null, delegateText].filter(Boolean).join('\n') || null;
+        if (items.length) return { intent: INTENT.ANSWER, reason: 'ADOPT_RECOMMENDATIONS', adoptItems: items, askText, ...(adoptText ? { adoptText } : {}) };
         //   質問の文が混ざっていれば、決定事項の置き換えには質問以外の部分を使う（TURN と同じ。質問で決定事項を置き換えない）
-        if (goalC) return { intent: INTENT.REVISE_PLAN, reason: 'ADOPT_CONSULTATION_REVISE', utterance: t, revisable: canRevise, adoptText: goalC.adoptText, askText, ...(mixed ? { decisionText: restText } : {}) };
-        // 推奨の無い確認事項（業務の判断）だけが残っているときは、回答にしない（「おすすめで」を業務の判断の答えとして記録しない。AI は呼ばない）
-        if (ac.open.length) return { intent: INTENT.GENERAL, reason: 'ADOPT_NO_RECOMMENDATION', openTexts: ac.open.map(q => q.text).slice(0, 3), askText };
+        if (goalC || delegateText) return { intent: INTENT.REVISE_PLAN, reason: goalC ? 'ADOPT_CONSULTATION_REVISE' : 'ADOPT_DELEGATE', utterance: t, revisable: canRevise, adoptText, askText, ...(mixed ? { decisionText: restText } : {}) };
       }
       if (!(plan && canRevise) && (ADOPT.test(adoptT) || AGREEMENT.test(adoptT))) {
         const goalC = consultationGoal(state);
@@ -23098,7 +23115,11 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
       /** 記録した回答 → 受領の表示の 1 行（利用者の言葉のまま。受け取っていない条件を補って言い切らない） */
       const answerLine = (r) => (r.previous ? `${r.label}：${r.answer}（前の回答「${r.previous}」から変更）` : r.kind === 'condition' ? `追加の条件：${r.answer}` : `${r.label}：${r.answer}`);
       /** 推奨の無い確認事項への委ねる答えの案内（AI は呼ばない） */
-      const adoptNoRecText = (xs) => `「${xs.map(x => String(x.clause)).join('」「')}」は、推奨の無い確認事項（業務の判断）への答えなので、回答にしていません：「${[...new Set(xs.map(x => x.question))].join('」「')}」。答えを書いてください（確認事項のカードの回答欄からも送れます）。`;
+      // 2026-10-05 実機: 推奨の無い確認事項に「数え方はおすすめで」と委ねると「回答にしていません」で止まった（任せた部分が進まない）。
+      //   委ねられたら、計画の AI が候補から妥当な案を選んで仮の案として入れる（あとから変えられる）。決定事項としては記録しない
+      const adoptNoRecText = (xs) => `「${xs.map(x => String(x.clause)).join('」「')}」：推奨の無い確認事項（「${[...new Set(xs.map(x => x.question))].join('」「')}」）なので、計画の AI が候補から仮の案を選びます（あとから変えられます）。`;
+      /** 委ねられた推奨の無い確認事項 → 計画の AI への依頼の文（そのほかの記述として送る） */
+      const delegateNote = (xs) => `委ねられた確認事項（推奨が無い）：${xs.map(x => `質問「${String(x.question).slice(0, 80)}」（発言「${String(x.clause).slice(0, 40)}」）`).join('、')}。候補から妥当な案を選び、仮の案として計画に入れてください`;
       /** まだ計画に入れていない回答（この作り直しで送るもの）→ 表示用の行 */
       const recordOf = (e) => ({ kind: e.kind, label: e.label, answer: e.answer, question: e.question, previous: e.history.length ? e.history[e.history.length - 1].answer : null, entryId: e.id });
       const pendingRecords = (lg) => KTAiAnswers.pendingAnswers(lg).map(recordOf);
@@ -23187,7 +23208,7 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
       }
       /** 受領の表示の 1 件 → 行（回答 / 修正の依頼） */
       const ackBody = (m) => (Array.isArray(m?.data?.texts) && m.data.texts.length ? `修正の依頼を受け付けました：「${m.data.texts.map(x => String(x).replace(/\s+/g, ' ').slice(0, 80)).join('」「')}」`
-        : `回答を受け付けました：${[...(m?.data?.records || []).map(answerLine), ...(m?.data?.notes || []).map(n => `そのほかの記述：${String(n).replace(/\s+/g, ' ').slice(0, 80)}`)].join('／')}`);
+        : `回答を受け付けました：${[...(m?.data?.records || []).map(answerLine), ...(m?.data?.delegated || []).map(d => `「${String(d.question).slice(0, 40)}」：おまかせ（仮の案を選びます）`), ...(m?.data?.notes || []).map(n => `そのほかの記述：${String(n).replace(/\s+/g, ' ').slice(0, 80)}`)].join('／')}`);
       /**
        * 受領の表示の段階を書き換える（queued = 作り直しの途中に受け付けた / revising = 計画に入れている / done / failed / cancelled / superseded /
        * pending = まとめて入れる上限を超えた）。done から別の段階には戻さない
@@ -23349,8 +23370,9 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
           const outA = applyAnswers(base, lg, cls.reason === 'ANSWER_PENDING' ? null : cls.answers, answerPayload || (cls.adoptItems ? { items: cls.adoptItems, source: 'chat' } : null));
           const recs = KTAiAnswers.pendingAnswers(lg).filter(e => (e.rev || 0) > before).map(recordOf);
           // 回答と一緒に書かれた依頼の部分（そのほかの記述）も、次の作業の依頼文に入れる（以前は黙って捨てていた）
-          const notes = [...carried, ...(outA.notes || []), ...(cls.adoptText ? [cls.adoptText] : [])].map(x => String(x).trim()).filter(Boolean);
-          if (outA.adoptNoRec && outA.adoptNoRec.length) toolkit(adoptNoRecText(outA.adoptNoRec), { kind: 'adopt-no-recommendation', planId: base.planId, version: base.version });
+          const delegatedA = (outA.adoptNoRec || []);
+          const notes = [...carried, ...(outA.notes || []), ...(cls.adoptText ? [cls.adoptText] : []), ...(delegatedA.length ? [delegateNote(delegatedA)] : [])].map(x => String(x).trim()).filter(Boolean);
+          if (delegatedA.length) toolkit(adoptNoRecText(delegatedA), { kind: 'adopt-delegated', planId: base.planId, version: base.version });
           if (!recs.length && !notes.length) {
             if (cls.reason === 'ANSWER_PENDING') { toolkit('その回答は、いま作り直している計画に入れています。', { kind: 'answers-in-progress', planId: base.planId, version: base.version }); return out; }
             if (!(outA.adoptNoRec && outA.adoptNoRec.length)) toolkit('回答として記録できる内容がありませんでした。作り直しの後に、確認事項のカードの回答欄から送ってください。', { kind: 'answers-none', planId: base.planId, version: base.version });
@@ -23601,30 +23623,31 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
               if (out.unresolved.length) {
                 // 対応先を決められない部分は確定せず、その部分の対応先だけを聞く（理解できた部分は記録したまま。AI はまだ呼ばない）
                 state.metrics.clarifications += 1;
-                if (out.adoptNoRec.length) toolkit(adoptNoRecText(out.adoptNoRec), { kind: 'adopt-no-recommendation', planId: base.planId, version: base.version });
+                if (out.adoptNoRec.length) toolkit(adoptNoRecText(out.adoptNoRec), { kind: 'adopt-delegated', planId: base.planId, version: base.version });
                 const head = out.recorded.length ? `記録しました：${out.recorded.map(answerLine).join('／')}。` : '';
                 const card = assistant(`${head}「${out.unresolved.map(u => u.clause).join('」「')}」は、どの確認事項への回答か決められませんでした。対応する確認事項を選んでください（計画の作り直しは、選んだ後に行います）。`, { kind: 'answer-target', planId: base.planId, version: base.version, items: out.unresolved });
                 // 確認のカードの id を持つ（古いカードのボタンでは選べない）
-                state.pendingClarification = { planId: base.planId, version: base.version, items: out.unresolved, notes: [...carried, ...out.notes], messageId: card.id };
+                //   委ねられた推奨の無い確認事項も、対応先を選んだ後の依頼に入れる（黙って捨てない）
+                state.pendingClarification = { planId: base.planId, version: base.version, items: out.unresolved, notes: [...carried, ...out.notes, ...(out.adoptNoRec.length ? [delegateNote(out.adoptNoRec)] : [])], messageId: card.id };
                 emit();
                 if (out.recorded.length) timing.ackMs = clock() - t0;
                 break;
               }
-              // 計画の後の相談のおすすめ（「おすすめで」）は、そのほかの記述として一緒に送る
-              const notes = [...carried, ...out.notes, ...(cls.adoptText ? [cls.adoptText] : [])];
+              // 計画の後の相談のおすすめ（「おすすめで」）・委ねられた推奨の無い確認事項は、そのほかの記述として一緒に送る
+              const delegated = out.adoptNoRec;
+              const notes = [...carried, ...out.notes, ...(cls.adoptText ? [cls.adoptText] : []), ...(delegated.length ? [delegateNote(delegated)] : [])];
               state.pendingClarification = null;
               const records = pendingRecords(lg);
-              if (out.adoptNoRec.length) toolkit(adoptNoRecText(out.adoptNoRec), { kind: 'adopt-no-recommendation', planId: base.planId, version: base.version });
-              if (!records.length) { if (!out.adoptNoRec.length) toolkit('回答として記録できる内容がありませんでした。確認事項のカードの回答欄から送るか、質問への答えをそのまま書いてください。', { kind: 'answers-none', planId: base.planId, version: base.version }); result.ok = false; break; }
+              if (!records.length && !delegated.length) { toolkit('回答として記録できる内容がありませんでした。確認事項のカードの回答欄から送るか、質問への答えをそのまま書いてください。', { kind: 'answers-none', planId: base.planId, version: base.version }); result.ok = false; break; }
               // 受領の表示: 何を理解したかを、計画の完成の前に出す（AI は呼ばない。計画の更新完了・kintone への反映とは別の表示）。
               //   計画全体の作り直しの待ち時間は、今回の改善では残る（その旨を書く）
               state.metrics.roundTrips += 1;
               //   変わる箇所だけを作り直せるとき（Gateway が対応・前の版の Gateway の計画がある）は、その待ち時間を書く
               const patchNow = revisionMode !== 'full' && !!base.gatewayPlan && patchExpected();
-              ackMsg = toolkit(`回答を受け付けました：${records.map(answerLine).join('／')}。この条件で計画を作り直しています（${patchNow ? '変わる箇所だけを作り直します。十数秒ほどかかります' : '計画全体を作り直すため、1 分前後かかります'}）。kintone にはまだ何も反映していません。`, { kind: 'answers-ack', planId: base.planId, version: base.version, records, stage: 'revising', rev: lg.rev || 0, acceptedAt: clock() });
+              ackMsg = toolkit(`回答を受け付けました：${[...records.map(answerLine), ...delegated.map(d => `「${String(d.question).slice(0, 40)}」：おまかせ（仮の案を選びます）`)].join('／')}。この条件で計画を作り直しています（${patchNow ? '変わる箇所だけを作り直します。十数秒ほどかかります' : '計画全体を作り直すため、1 分前後かかります'}）。kintone にはまだ何も反映していません。`, { kind: 'answers-ack', planId: base.planId, version: base.version, records, ...(delegated.length ? { delegated } : {}), stage: 'revising', rev: lg.rev || 0, acceptedAt: clock() });
               timing.ackMs = clock() - t0;
               const openLeft = answerContext(state).open;
-              await reviseWith(base, answersRequestText(records, { notes, open: openLeft }), { afterAnswer: true, ack: ackMsg, rawTexts: answerPayload ? records.map(x => x.answer) : [cls.restText || t], askSeparately: askedA });
+              await reviseWith(base, answersRequestText(records, { notes, open: openLeft }), { afterAnswer: true, ack: ackMsg, rawTexts: answerPayload ? [...records.map(x => x.answer), ...delegated.map(d => d.clause)] : [cls.restText || t], askSeparately: askedA });
               markAck(result.ok ? 'done' : result.superseded ? 'superseded' : 'failed');
               offerConfirmGenerate(base);
               break;
@@ -23692,7 +23715,8 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
               const asked = askAside(cls.askText);
               // 計画の後の相談の答えに「おすすめで」: 修正の依頼にはおすすめの文を添える（発言は原文のまま）
               //   ［再試行］は発言を振り分け直す（相談のおすすめを添え直す。以前は「おすすめで」だけを計画の AI に渡した）
-              const adoptRetry = cls.reason === 'ADOPT_CONSULTATION_REVISE' ? { retry: { text: t, intent: null } } : {};
+              const adoptRetry = cls.reason === 'ADOPT_CONSULTATION_REVISE' || cls.reason === 'ADOPT_DELEGATE' ? { retry: { text: t, intent: null } } : {};
+              if (cls.reason === 'ADOPT_DELEGATE') toolkit(`推奨の無い確認事項は、計画の AI が候補から仮の案を選びます（あとから変えられます）。kintone にはまだ何も反映していません。`, { kind: 'adopt-delegated', planId: base.planId, version: base.version });
               await reviseWith(base, cls.adoptText ? `${t}\n${cls.adoptText}` : t, { rawTexts: [t], askSeparately: asked, generateAfter: ttg, ...(ttg ? { retry: { text: cls.restText || t, intent: null } } : adoptRetry) });
               // 2026-10-05 第 3 段: 計画を更新して検証した後、変わった仕様を確かめてコードを作る 1 回の操作を出す（作り直しの途中に受け付けた「…コードも作って」も）
               offerConfirmGenerate(base);
