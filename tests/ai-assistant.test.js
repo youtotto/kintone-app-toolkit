@@ -261,7 +261,7 @@ console.log('\n--- 3. ask: 同意 → 送信 → loading → 回答 ---');
   resolveAsk(); await p; await tick();
   assert(m.$('kt-ai-ask').disabled === false && m.$('kt-ai-paid-status').textContent.includes('回答を受信しました') && m.$('kt-ai-paid-status').textContent.includes('4 / 100'), '完了: ボタン復帰・利用量');
   const html = m.$('kt-ai-answer').innerHTML;
-  assert(m.$('kt-ai-answer').style.display === '' && html.includes('AI回答') && html.includes('<b>回答</b>') && html.includes('確認できた事実') && html.includes('AIによる分析') && html.includes('<b>提案</b>') && html.includes('確認できないこと'), '回答の 5 区分を表示');
+  assert(m.$('kt-ai-answer').style.display === '' && html.includes('AI回答') && html.includes('kt-ai-answer-text') && html.includes('根拠と詳細') && html.includes('このアプリで確かめた事実') && html.includes('<b>見立て</b>') && html.includes('<b>おすすめ</b>'), '回答は短い本文と、開いて見る根拠と詳細（確かめた事実・見立て・おすすめ。2026-10-05）');
   assert(html.includes('ルックアップ「顧客マスタ参照」のコピー先') && html.includes('data-eid="E8"') && html.includes('data-eid="E10"') && html.includes('data-eid="E4"'), '事実・分析・提案に根拠チップ');
   assert(html.includes('requestId: tk-x') && html.includes('プラグイン設定は確認できない'), 'requestId と unknowns');
   assert(m.panel.lastAnswer().facts.length === 2, 'lastAnswer を保持');

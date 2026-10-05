@@ -117,7 +117,8 @@ for (const n of [150, 400]) {
   console.log(`  L1 Prompt             : ${fmt(r.l1Prompt)}`);
 
   assert(r.l0.size.approxTokens <= 2000, `[${n}] L0 は 2k tokens 以内（approx ${r.l0.size.approxTokens}）`);
-  assert(r.l1.size.approxTokens <= 12000, `[${n}] L1（既定）は 12k tokens 以内（approx ${r.l1.size.approxTokens}）`);
+  // 2026-10-05: JavaScript からの依存関係の fact に確かめ方（basis: code）を付けた分（400 フィールドで約 15 tokens）を見込み、目安の上限を 12.1k にした（目安は L1 ≒ 5〜12k）
+  assert(r.l1.size.approxTokens <= 12100, `[${n}] L1（既定）は 12.1k tokens 以内（approx ${r.l1.size.approxTokens}）`);
   assert(r.l2.size.approxTokens <= 20000, `[${n}] L2（既定）は 20k tokens 以内（approx ${r.l2.size.approxTokens}）`);
   assert(r.l1.size.bytes < r.full.bytes * 0.5, `[${n}] L1 は full DEPS の半分未満（${pct(r.l1.size.bytes, r.full.bytes)}）`);
   assert(r.l0.truncation.sections.some(s => s.name === 'app.fields' && s.total === r.fieldCount), `[${n}] L0 のフィールド一覧省略が記録される（全 ${r.fieldCount} 件）`);
