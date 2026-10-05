@@ -22671,6 +22671,8 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
             // 先回りの返答は、計画の作成中に届いたときだけ出す（計画の後に出ると、計画より古い理解が後から出る）
             if (brief && !(busy && state.working === 'PLAN')) return;
             if (r && r.ok) push(MSG.ANSWER, ROLE.ASSISTANT, r.answer?.answer || '', { answer: r.answer, ctxFacts: r.ctx?.facts || [], kind: brief ? 'plan-brief' : 'aside-answer', question });
+            // 対象を決められない作業中の質問は、普通の質問と同じく候補を選んでもらう（作業は続ける）
+            else if (!brief && r && r.reason === 'ambiguous') assistant('対象を特定できませんでした。どちらについてですか？', { kind: 'candidates', candidates: r.candidates || [], question });
             else if (!brief) push(MSG.ERROR, ROLE.TOOLKIT, r?.message || '質問への回答を取得できませんでした（作業は続けています）。', { code: r?.reason || 'ERROR', retryText: question, intent: INTENT.ASK });
           } catch (e) {
             if (state.epoch === epoch && !brief && !(e?.name === 'AbortError' || e?.code === 'CANCELLED')) push(MSG.ERROR, ROLE.TOOLKIT, '質問への回答を取得できませんでした（作業は続けています）。', { code: e?.code || 'ERROR', retryText: question, intent: INTENT.ASK });
@@ -24350,7 +24352,13 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
       async ask({ question, signal = null, focus = null, conversation = null }) {
         // Phase 21: 質問も最新の動作テスト環境を基準に答える（30 秒以内に取ったものは使い回す）。取れなければ運用環境の設定で答え、そのことを Context に入れる
         if (devBaseLoader) await refreshDevBase({ maxAgeMs: DEV_BASE_ASK_MAX_AGE_MS, reason: 'ask' });
-        const gen = KTContextUi.generate({ targetType: focus?.type || 'app', targetId: focus?.id ?? null, targetLabel: focus?.label ?? null, question, inputs: inputsNow() });
+        let gen = KTContextUi.generate({ targetType: focus?.type || 'app', targetId: focus?.id ?? null, targetLabel: focus?.label ?? null, question, inputs: inputsNow() });
+        // 先回りの返答（brief）は依頼の全体についての返答なので、対象（フィールド）を 1 つに決められなくてもアプリ全体の Context で答える
+        //   （長い依頼は複数のフィールドに触れ、対象の候補を選ばせる応答になって、先回りの返答が黙って出なかった）
+        if (!gen.ok && gen.reason === 'ambiguous' && conversation && conversation.brief) {
+          gen = KTContextUi.generate({ targetType: 'app', targetId: null, targetLabel: null, question: '', inputs: inputsNow() });
+          if (gen.ok) gen.ctx.question = question;
+        }
         if (!gen.ok) return gen;
         // 2026-10-05 第 3 段: 会話の現在の要件と計画（作業中の質問にも、今の要件と計画を踏まえて答える。計画は変えない）
         if (conversation && typeof conversation === 'object') gen.ctx.conversation = conversation;

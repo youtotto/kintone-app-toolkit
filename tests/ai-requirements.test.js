@@ -33,7 +33,7 @@ const OP = (o = {}) => ({ op: 'add', id: '', target: '金額フィールド', co
 /**
  * 会話（fake services）。steps[n] = 計画の n+1 回目の呼び出しの { plan, turn }。ask は呼ばれた引数を記録して答える
  */
-function makeConv(steps, { askAnswer = 'JavaScript は画面の操作だけで動き、CSV の読み込みでは動きません。' } = {}) {
+function makeConv(steps, { askAnswer = 'JavaScript は画面の操作だけで動き、CSV の読み込みでは動きません。', askResult = null } = {}) {
   const calls = { plan: [], ask: [], generate: 0 };
   let t = 1000;
   // hold(): 次の計画・生成の呼び出しを待たせる / holdAsk(): 次の質問の呼び出しを待たせる
@@ -54,7 +54,7 @@ function makeConv(steps, { askAnswer = 'JavaScript は画面の操作だけで�
     },
     revisionModes: () => ['full', 'patch'],
     conversationFeatures: () => ['requirements', 'brief'],
-    async ask(args) { const ga = askGates.shift(); if (ga) await ga; calls.ask.push(JSON.parse(JSON.stringify({ question: args.question, conversation: args.conversation || null }))); return { ok: true, answer: { answer: askAnswer, facts: [], analysis: [], recommendations: [], unknowns: [] }, ctx: { facts: [] } }; },
+    async ask(args) { const ga = askGates.shift(); if (ga) await ga; calls.ask.push(JSON.parse(JSON.stringify({ question: args.question, conversation: args.conversation || null }))); if (askResult) { const x = askResult(args); if (x) return x; } return { ok: true, answer: { answer: askAnswer, facts: [], analysis: [], recommendations: [], unknowns: [] }, ctx: { facts: [] } }; },
     async generate() { const g = gates.shift(); if (g) await g; calls.generate++; return { ok: true, generated: { code: '' }, review: { status: 'OK', checks: [] } }; },
     readiness(v) { return { approved: 0, executable: 0, unsupported: 0, blocked: 0, undecided: v.plan.steps.length }; },
   };
@@ -418,6 +418,18 @@ await section(async () => {
   const { c, byKind } = makeConv([{ plan: planWith([]), turn: t1 }]);
   await c.send('金額が100万円を超えたら画面に警告を出したい');
   assert(byKind('requirements-overflow').length === 1 && /上限（40 件/.test(byKind('requirements-overflow')[0].text), 'R14: 上限で記録できなかった指示があることを知らせる（黙って落とさない）');
+});
+await section(async () => {
+  // R15: 作業中の質問の対象を決められないときは、普通の質問と同じく候補を選んでもらう（エラーにしない。作業は続ける）。先回りの返答は出さないだけ
+  const amb = { ok: false, reason: 'ambiguous', candidates: [{ type: 'field', id: 'amount', label: '金額（amount）' }, { type: 'field', id: 'total', label: '合計（total）' }], message: '対象を特定できませんでした。' };
+  const { c, ctl, byKind } = makeConv([{ plan: planWith([]) }], { askResult: (a) => (a.conversation && a.conversation.brief ? null : amb) });
+  const open = ctl.hold();
+  const p = c.send('金額が100万円を超えたら画面に警告を出したい');
+  await ticks();
+  await c.send('金額と合計はどう違いますか？');
+  await ticks();
+  open(); await p; await ticks();
+  assert(byKind('candidates').length === 1 && byKind('candidates')[0].data.candidates.length === 2 && !c.messages().some(m => m.type === 'ERROR') && c.planHistory().length === 1, 'R15: 作業中の質問の対象の候補を出す（エラーにしない）・計画はできる');
 });
 
 console.log(`\n${state.failed ? 'FAILED' : 'ALL PASSED'}: ${state.passed} passed / ${state.failed} failed`);
