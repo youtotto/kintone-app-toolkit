@@ -630,7 +630,7 @@ await section(async () => {
   m.$('kt-ai-input').value = '保存時です';
   const p = m.$('kt-ai-send').dispatch('click'); await ticks(6);
   const conv = m.conv();
-  assert(conv.isBusy() && conv.canQueue() && m.$('kt-ai-send').disabled === false && /回答・修正の依頼はこのまま送れます/.test(m.$('kt-ai-composer-note').textContent), `U1: 計画の作り直しの途中は送信ボタンを止めない（回答・修正の依頼は送れる）: ${m.$('kt-ai-composer-note').textContent}`);
+  assert(conv.isBusy() && conv.canQueue() && m.$('kt-ai-send').disabled === false && /^計画を作り直しています。質問にはすぐ答えます。追加の指示・回答もこのまま送れます/.test(m.$('kt-ai-composer-note').textContent), `U1: 計画の作り直しの途中は送信ボタンを止めない（回答・修正の依頼は送れる）: ${m.$('kt-ai-composer-note').textContent}`);
   const rev = m.calls.plan[1].ctx.revision;
   assert(rev.mode === 'patch' && rev.focus.includes('Q2') && rev.previousPlan.goal === GOAL && !('validation' in (rev.previousPlan.steps[0] || {})) && /十数秒/.test(m.chat()), `U2: 回答の後の作り直しは、Gateway の計画（正規化の付けた項目なし）を土台に mode patch で送る・受領の表示は十数秒: ${JSON.stringify({ mode: rev.mode, focus: rev.focus })}`);
   m.$('kt-ai-input').value = '3段階でよいです';

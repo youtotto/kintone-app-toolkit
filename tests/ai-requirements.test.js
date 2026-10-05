@@ -12,7 +12,7 @@
 'use strict';
 process.on('unhandledRejection', (e) => { if (/kintone is not defined/.test(String(e && e.message))) return; console.error(e); process.exit(1); });
 const { loadToolkit, makeAssert } = require('./helpers/load-toolkit.js');
-const { KTDeps, KTAiConversation, KTAiAnswers, KTPlanReview } = loadToolkit();
+const { KTDeps, KTAiConversation, KTAiAnswers, KTPlanReview, KTAiChatUi } = loadToolkit();
 const { assert, state } = makeAssert();
 const FX = require('./fixtures/ai-context-app.js');
 
@@ -150,6 +150,8 @@ await section(async () => {
   await c.send('100万円ちょうども警告の対象に変えて、コードも作って');
   const card = byKind('confirm-generate')[0];
   assert(calls.generate === 0 && c.activePlan().version === 2 && card && card.data.version === 2 && c.activePlan().spec.status === 'DRAFT' && calls.plan[1].revision.mode === 'patch', 'F4: 先に計画を更新して検証し、変わった仕様を確かめてから作る 1 回の操作を出す（古い仕様のコードは作らない）');
+  // 実機（2026-10-05）で見つけた: 「コードも作って」が要件「コードを生成する」になった。発言は原文のまま渡し、コードの生成は Toolkit が計画の後に行うと伝える
+  assert(calls.plan[1].revision.request === '100万円ちょうども警告の対象に変えて、コードも作って' && calls.plan[1].revision.generateAfter === true, `F4: 発言は原文のまま・コードの生成は計画の後と伝える（generateAfter）: ${JSON.stringify(calls.plan[1].revision)}`);
 });
 await section(async () => {
   // F5: 「部長が不在のときは副部長が承認します」は計画の AI へ（反映へ進まない）。仮の案を出す
@@ -186,6 +188,9 @@ await section(async () => {
   open(); await p; await ticks();
   const vs = c.planHistory();
   assert(vs.length === 1 && vs[0].version === 1 && vs[0].basedOnVersion === 0 && calls.plan.length === 2 && calls.plan[1].revision.mode === 'patch' && /100万円ちょうども/.test(calls.plan[1].revision.utterances[0]), `W2: 指示の入っていない計画は出さず、差分で続けて入れた版だけを v1 として出す: ${JSON.stringify(vs.map(v => v.version))}`);
+  // 実機（2026-10-05）で見つけた表示: 最初の計画のカードが「v1 を見直しました ／ 修正: 修正の依頼：…」と出た
+  const cardHtml = KTAiChatUi.planCardHtml(vs[0]);
+  assert(/変更計画 v1 を作成しました/.test(cardHtml) && !/見直しました/.test(cardHtml) && /作成中に受け付けた指示: 100万円ちょうども警告の対象にして/.test(cardHtml) && !/修正の依頼：/.test(cardHtml), `W2: 最初の計画のカードは「作成しました」・作成中に受け付けた指示として出す: ${cardHtml.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').slice(0, 160)}`);
   const r1 = KTAiAnswers.requirementsOf(ledger()).find(e => e.id === 'R1');
   assert(r1 && r1.condition === '金額が100万円以上' && r1.history.length === 1 && byKind('answers-ack').every(m => m.data.stage === 'done') && c.messages().some(m => /作成中に受け付けた指示も入れました/.test(m.text)), 'W2: 要件は続けた作業で更新（履歴に前の条件）・受領は「入れました」・告知は「作成中に受け付けた指示も入れました」');
   // 順番: 先回りの返答 → 作成中の質問の答え → 計画
@@ -262,7 +267,7 @@ await section(async () => {
   await c.send('100万円ちょうども警告の対象にして');
   open(); const r = await p; await ticks();
   const err = c.messages().find(m => m.type === 'ERROR');
-  assert(r.ok === false && c.planHistory().length === 1 && c.activePlan().version === 1 && err && err.data.retryText === '100万円ちょうども警告の対象にして' && err.data.intent === I.REVISE_PLAN && byKind('answers-ack').every(m => m.data.stage === 'failed'), `R3: 続けた作業の失敗でも最初の計画は v1。指示の受領は「失敗」・再試行は指示の原文: ${JSON.stringify({ hist: c.planHistory().length, retry: err && err.data.retryText })}`);
+  assert(r.ok === false && c.planHistory().length === 1 && c.activePlan().version === 1 && err && err.data.retryText === '100万円ちょうども警告の対象にして' && !err.data.intent && byKind('answers-ack').every(m => m.data.stage === 'failed'), `R3: 続けた作業の失敗でも最初の計画は v1。指示の受領は「失敗」・再試行は指示の原文（振り分け直す）: ${JSON.stringify({ hist: c.planHistory().length, retry: err && err.data.retryText, intent: err && err.data.intent })}`);
   const rr = await c.send(err.data.retryText, { intentOverride: err.data.intent });
   assert(rr.ok === true && c.activePlan().version === 2, 'R3: 再試行で、その指示を v1 に入れた v2 ができる（以前は「修正する計画がありません」）');
   // 取り消し（例外）でも同じ
@@ -430,6 +435,247 @@ await section(async () => {
   await ticks();
   open(); await p; await ticks();
   assert(byKind('candidates').length === 1 && byKind('candidates')[0].data.candidates.length === 2 && !c.messages().some(m => m.type === 'ERROR') && c.planHistory().length === 1, 'R15: 作業中の質問の対象の候補を出す（エラーにしない）・計画はできる');
+});
+await section(async () => {
+  // R16（実機 2026-10-05）: 仕様が未確定のまま「C1 のコードを作って」→「先に確定してください」と仕様カード → 確定。同じ「確定しました」のカードを 2 枚続けて出さない
+  const { c, calls } = makeConv([{ plan: planWith([]) }]);
+  await c.send('金額が100万円を超えたら画面に警告を出したい');
+  await c.send('C1 のコードを作って');
+  const v1 = c.activePlan();
+  const lastUser = () => { const ms = c.messages(); let k = -1; ms.forEach((m, i) => { if (m.type === 'USER') k = i; }); return k; };
+  const specsAfter = () => c.messages().slice(lastUser() + 1).filter(m => m.type === 'SPEC').length;
+  assert(calls.generate === 0 && specsAfter() === 1, `R16: 前提: 未確定なので生成せず、仕様カードを 1 枚出す: ${specsAfter()}`);
+  const r = c.confirmSpec({ planId: v1.planId, version: v1.version });
+  const tail = c.messages().slice(lastUser() + 1);
+  assert(r.ok && v1.spec.status === 'CONFIRMED' && specsAfter() === 1 && tail.some(m => m.type === 'SYSTEM_NOTICE' && m.data?.kind === 'spec-confirmed' && /JavaScript を生成できるようになりました/.test(m.text) && !/実装仕様 v1 を確定しました/.test(m.text)), `R16: 確定ではカードを足さず（いまのカードが確定済みに変わる）、カードの見出しと同じ文を繰り返さないお知らせを 1 行出す: ${tail.map(m => `${m.type}:${String(m.text).slice(0, 20)}`).join(',')}`);
+  // 利用者の発言の後に仕様カードが無いとき（確定の前に別の発言をした）は、確定の後にカードを出す
+  const k = makeConv([{ plan: planWith([]) }]);
+  await k.c.send('金額が100万円を超えたら画面に警告を出したい');
+  await k.c.send('ありがとう');
+  const w1 = k.c.activePlan();
+  k.c.confirmSpec({ planId: w1.planId, version: w1.version });
+  const ms = k.c.messages(); let lu = -1; ms.forEach((m, i) => { if (m.type === 'USER') lu = i; });
+  assert(ms.slice(lu + 1).filter(m => m.type === 'SPEC').length === 1, 'R16: 利用者の最後の発言の後に仕様カードが無ければ、確定の後にカードを出す');
+});
+// =========================================================
+console.log('\n--- G. 「…変えて、コードも作って」の命令の節（実機 2026-10-05 と差分レビューの指摘） ---');
+await section(async () => {
+  // G1: コードを作る依頼（目的語つき）がある変更は、言い方・区切り方によらず「計画を更新してから作る」。発言は切り取らない（原文のまま計画の AI へ）
+  const v = { planId: 'p', version: 1, status: 'ACTIVE', plan: planWith([]), review: { steps: [] }, spec: { status: 'DRAFT', version: 1 } };
+  const cls = (t) => KTAiConversation.classifyIntent(t, { activePlan: v, ledgers: new Map() });
+  const ttg = ['条件を変えて、コードも作って', '条件を変えて、コードも作成して', '条件を変えて、コードを再生成して', '条件を変えて、コードも作ってほしい', '条件を変えて、あわせてコードも作って',
+    '条件を変えて、C1 のコードも作って', '条件を変えてコードも作って', '条件を変えて コードも作って', '条件を変えて.コードも作って', 'コードも作って、条件を変えて', '改めてコードを作って、条件も変えて',
+    '保存は止めないでコードも作って', '条件を変えて、コードも作ってもらえる？', '警告の文は「高額案件です」に変えて、修正後のコードも作って', '条件を変えて、コードも作って。CSVにも効きますか？'];
+  const bad = ttg.map(t => ({ t, r: cls(t).reason })).filter(x => x.r !== 'TURN_THEN_GENERATE');
+  assert(!bad.length, `G1: コードを作る依頼つきの変更は、計画を更新してから作る（言い方・区切り方・依頼の問いの形によらない）: ${JSON.stringify(bad)}`);
+  const notCode = ['見積書をPDFで生成して', '管理番号を自動で生成して', '承認者は部長にして'];
+  const bad2 = notCode.map(t => ({ t, c: cls(t) })).filter(x => x.c.alsoGenerate || x.c.intent === I.GENERATE_CODE);
+  assert(!bad2.length && cls('見積書をPDFで生成して').reason === 'TURN', `G1: 目的語がコードでない「生成して」は要件の文（計画の AI へ。コードの依頼にしない）: ${JSON.stringify(bad2.map(x => ({ t: x.t, i: x.c.intent, r: x.c.reason })))}`);
+  const mixed = cls('条件を変えて、コードも作って。CSVにも効きますか？');
+  assert(mixed.decisionText === '条件を変えて' && mixed.restText === '条件を変えて、コードも作って。' && /CSV/.test(mixed.askText || ''), `G1: 決定事項の置き換えには質問の文とコードを作る命令の節を除いた部分、再試行には質問の文を除いた部分を使う: ${mixed.decisionText}`);
+  assert(cls('コードを作った？').intent !== I.GENERATE_CODE && cls('コードはもう作ってある？').intent !== I.GENERATE_CODE, 'G1: 状態を聞く問い（「コードを作った？」）は命令ではない');
+  assert(!KTAiConversation.isQuestionSentence('保存を止めてもらえる？') && !KTAiConversation.isQuestionSentence('コードも作ってくれますか？') && KTAiConversation.isQuestionSentence('違いを教えてもらえる？'), 'G1: 依頼の問いの形（〜してもらえる？）は質問ではなく依頼（「教えてもらえる？」は質問）');
+});
+await section(async () => {
+  // G2: コードを作る命令だけの文は、言い方によらず GENERATE_CODE（計画を見直さない）
+  const v = { planId: 'p', version: 1, status: 'ACTIVE', plan: planWith([]), review: { steps: [] }, spec: { status: 'CONFIRMED', version: 1 } };
+  const cls = (t) => KTAiConversation.classifyIntent(t, { activePlan: v, ledgers: new Map() });
+  const ts = ['コードを作って', 'コードを作成して', 'コードも作成して', 'コードを作ってほしい', 'コードも作ってもらえる？', 'C1 のコードを作成してください', 'コードを再生成して', 'コードを書き出して',
+    '改めてコードを作って', '再度コードを作って', 'コードを作っていただけますか？', 'コードを作ってくれませんか', '最新のコードを作って', '修正後のコードを作って'];
+  const bad = ts.map(t => ({ t, i: cls(t).intent })).filter(x => x.i !== I.GENERATE_CODE);
+  assert(!bad.length, `G2: 命令だけの文は言い方によらずコードの生成（計画は見直さない）: ${JSON.stringify(bad)}`);
+  assert(cls('顧客コードを生成して').intent !== I.GENERATE_CODE, 'G2: 「顧客コードを生成して」はコードの生成の命令ではない');
+});
+await section(async () => {
+  // G3: 作り直しの途中に受け付けた「…変えて、コードも作って」: 原文のまま積み、計画の AI にはコードの生成は計画の後と伝え、作業の後に［この変更で確定してコードを作る］を出す
+  const { c, calls, ctl, byKind } = makeConv([{ plan: planWith([]) }, { plan: planWith([]) }, { plan: planWith([]) }]);
+  await c.send('金額が100万円を超えたら画面に警告を出したい');
+  const open = ctl.hold();
+  const p = c.send('100万円ちょうども警告の対象に変えて');
+  await ticks();
+  const q = await c.send('警告の文は「高額案件です」に変えて、コードも作って');
+  open(); await p; await ticks();
+  assert(q && q.queued === true && calls.plan.length === 3 && calls.plan[2].revision.request === '修正の依頼：警告の文は「高額案件です」に変えて、コードも作って' && calls.plan[2].revision.generateAfter === true && !calls.plan[1].revision.generateAfter && calls.generate === 0, `G3: 作り直しの途中の「…コードも作って」は、その指示を入れる作業だけに generateAfter: ${JSON.stringify(calls.plan.map(x => x.revision && x.revision.generateAfter))}`);
+  const card = byKind('confirm-generate').slice(-1)[0];
+  assert(card && card.data.version === c.activePlan().version, `G3: 作業の後に［この変更で確定してコードを作る］を出す: ${byKind('confirm-generate').length}`);
+});
+await section(async () => {
+  // G4: 最初の計画の作成中に受け付けた「…変えて、コードも作って」も同じ（v1 の後に確定して作る操作）。依頼の問いの形（〜もらえる？）も指示としてためる
+  const { c, calls, ctl, byKind } = makeConv([{ plan: planWith([]) }, { plan: planWith([]) }]);
+  const open = ctl.hold();
+  const p = c.send('金額が100万円を超えたら画面に警告を出したい');
+  await ticks();
+  const q = await c.send('100万円ちょうども警告の対象に変えて、コードも作ってもらえる？');
+  open(); await p; await ticks();
+  assert(q && q.queued === true && calls.plan.length === 2 && calls.plan[1].revision.request === '修正の依頼：100万円ちょうども警告の対象に変えて、コードも作ってもらえる？' && calls.plan[1].revision.generateAfter === true && c.planHistory().length === 1 && byKind('confirm-generate').length === 1 && calls.generate === 0, `G4: 作成中の「…コードも作ってもらえる？」はためて v1 に入れ、v1 の後に確定して作る操作: ${JSON.stringify(calls.plan[1] && calls.plan[1].revision)}`);
+});
+await section(async () => {
+  // G5: 「…変えて、コードも作って」の作り直しの途中に同じ文をもう一度送っても積まない（二重の作り直しにしない）
+  const { c, calls, ctl } = makeConv([{ plan: planWith([]) }, { plan: planWith([]) }, { plan: planWith([]) }]);
+  await c.send('金額が100万円を超えたら画面に警告を出したい');
+  const open = ctl.hold();
+  const p = c.send('警告の文は「高額案件です」に変えて、コードも作って');
+  await ticks();
+  const again = await c.send('警告の文は「高額案件です」に変えて、コードも作って');
+  open(); await p; await ticks();
+  assert(again && again.queued === false && calls.plan.length === 2, `G5: 同じ文の二重の送信は積まない（計画の呼び出し 2 回）: ${JSON.stringify({ again: again && again.reason, plans: calls.plan.length })}`);
+});
+await section(async () => {
+  // G6: 「…変えて、コードも作って」の作り直しが失敗したら、再試行は元の発言を振り分け直す（コードの生成は計画の後と伝える・確定して作る操作を出す）
+  const { c, calls } = makeConv([{ plan: planWith([]) }, { fail: { ok: false, reason: 'ERROR', message: '計画の修正に失敗しました' } }, { plan: planWith([]) }]);
+  await c.send('金額が100万円を超えたら画面に警告を出したい');
+  await c.send('100万円ちょうども警告の対象に変えて、コードも作って');
+  const err = c.messages().filter(m => m.type === 'ERROR').slice(-1)[0];
+  assert(err && err.data.retryText === '100万円ちょうども警告の対象に変えて、コードも作って' && !err.data.intent, `G6: 再試行の文は元の発言（意図は振り分け直す）: ${JSON.stringify(err && { t: err.data.retryText, i: err.data.intent })}`);
+  await c.send(err.data.retryText, { intentOverride: err.data.intent || null });
+  assert(calls.plan.length === 3 && calls.plan[2].revision.generateAfter === true && c.messages().some(m => m.data?.kind === 'confirm-generate'), `G6: 再試行でも generateAfter を付け、確定して作る操作を出す: ${JSON.stringify(calls.plan[2] && calls.plan[2].revision.generateAfter)}`);
+});
+await section(async () => {
+  // G7: 作り直しの版のカードにも Toolkit が付けた「修正の依頼：」を出さない（複数の指示は「／」でつなぐ）
+  const { c, ctl } = makeConv([{ plan: planWith([]) }, { plan: planWith([]) }, { plan: planWith([]) }]);
+  await c.send('金額が100万円を超えたら画面に警告を出したい');
+  const open = ctl.hold();
+  const p = c.send('警告の文は「高額案件です」に変えて');
+  await ticks();
+  await c.send('PC だけで動くようにして');
+  open(); await p; await ticks();
+  const html = KTAiChatUi.planCardHtml(c.activePlan()).replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ');
+  assert(/見直しました/.test(html) && !/修正の依頼：/.test(html) && /修正: 警告の文は「高額案件です」に変えて ?／ ?PC だけで動くようにして/.test(html), `G7: 作り直しの版のカードは「修正: …／…」: ${html.slice(0, 200)}`);
+});
+await section(async () => {
+  // G8: 質問の文で決定事項を置き換えない（TURN でも、質問を除いた部分で置き換えを判断する）
+  const { c, ledger } = makeConv([{ plan: planWith(qs(QP, QS)) }, { plan: planWith(qs(QS)) }, { plan: planWith(qs(QS)) }]);
+  await c.send('金額が100万円を超えたら画面に警告を出したい');
+  await c.send('PCだけ');
+  const dPlat = () => ledger().entries.find(e => e.topics.includes('platform') && e.answer);
+  assert(dPlat() && dPlat().status === 'answered', '前提: PC / モバイルは「PCだけ」で回答済み');
+  await c.send('警告は赤字にして。モバイルでも出ますか？');
+  assert(dPlat().status === 'answered', `G8: 質問の文（モバイルでも出ますか？）で PC だけの決定事項を置き換えない: ${dPlat().status}`);
+});
+await section(async () => {
+  // G0（実機 2026-10-05）: Gateway に送る作り直しの情報（compactRevision の後）にも generateAfter が残る（以前はここで落ち、計画の AI が「コードを作成する」を要件にした）
+  const { KTContext } = require('./helpers/load-toolkit.js').loadToolkit();
+  const rev = KTContext.compactRevision({ basedOnVersion: 1, request: '警告の文を変えて、コードも作って', previousPlan: { steps: [], summary: {} }, mode: 'patch', utterances: ['警告の文を変えて、コードも作って'], generateAfter: true });
+  const rev0 = KTContext.compactRevision({ basedOnVersion: 1, request: '警告の文を変えて', previousPlan: { steps: [], summary: {} } });
+  assert(rev.generateAfter === true && !('generateAfter' in rev0), `G0: 作り直しの情報に generateAfter を残す（印が無ければ送らない）: ${JSON.stringify({ a: rev.generateAfter, b: rev0.generateAfter })}`);
+  const { KTContextUi } = require('./helpers/load-toolkit.js').loadToolkit();
+  const first = KTContextUi.generatePlan({ goal: '金額が大きいときに警告を出したい。コードも作って', inputs: { data: DATA, deps: DEPS }, generateAfter: true });
+  const first0 = KTContextUi.generatePlan({ goal: '金額が大きいときに警告を出したい', inputs: { data: DATA, deps: DEPS } });
+  assert(first.ok && first.ctx.generateAfter === true && !('generateAfter' in first0.ctx), 'G0: 最初の計画の Context にも generateAfter を載せる（印が無ければ載せない）');
+});
+await section(async () => {
+  // G9: 作業中に受け付けた「…変えて、コードも作って」を入れる作業が失敗したら、再試行はその原文を振り分け直す（コードの依頼を落とさない）
+  const { c, calls, ctl } = makeConv([{ plan: planWith([]) }, { plan: planWith([]) }, { fail: { ok: false, reason: 'ERROR', message: '計画の修正に失敗しました' } }, { plan: planWith([]) }]);
+  await c.send('金額が100万円を超えたら画面に警告を出したい');
+  const open = ctl.hold();
+  const p = c.send('100万円ちょうども警告の対象に変えて');
+  await ticks();
+  await c.send('警告の文は「高額案件です」に変えて、コードも作って');
+  open(); await p; await ticks();
+  const err = c.messages().filter(m => m.type === 'ERROR').slice(-1)[0];
+  assert(err && err.data.retryText === '警告の文は「高額案件です」に変えて、コードも作って' && !err.data.intent && c.activePlan().version === 2, `G9: 作業中に受けた指示の作業の失敗: 再試行はその原文（振り分け直す）: ${JSON.stringify(err && { t: err.data.retryText, i: err.data.intent })}`);
+  await c.send(err.data.retryText, { intentOverride: err.data.intent || null });
+  assert(calls.plan.length === 4 && calls.plan[3].revision.generateAfter === true && c.messages().some(m => m.data?.kind === 'confirm-generate'), 'G9: 再試行で計画を更新し、確定して作る操作を出す');
+});
+await section(async () => {
+  // G10: 作り直した計画に JavaScript が無ければ、コードは作らないことを知らせる（コードの依頼を黙って捨てない）
+  const { c, byKind } = makeConv([{ plan: planWith([]) }, { plan: planWith([], { customizations: [], steps: [step('P1', 'ADD_VIEW', 'VIEW', '高額案件', { name: '高額案件', fields: ['amount'] })], solution: 'STANDARD' }) }]);
+  await c.send('金額が100万円を超えたら画面に警告を出したい');
+  await c.send('警告はやめて一覧だけにして、コードも作って');
+  assert(byKind('generate-not-needed').length === 1 && byKind('confirm-generate').length === 0, `G10: JavaScript の無い計画では、コードは作らないと知らせる: ${byKind('generate-not-needed').length}`);
+});
+await section(async () => {
+  // G11: コードの生成中に受け付けた「…変えて、C2 のコードも作って」: 確定して作る操作の対象は C2
+  const two = planWith([], { customizations: [cust(), cust({ customizationId: 'C2', requirement: '明細の合計を確かめる' })], steps: [step('P1', 'ADD_VIEW', 'VIEW', '高額案件', { name: '高額案件', fields: ['amount'] }), CSTEP, step('C2', 'CUSTOMIZATION_REQUIRED', 'JS', '', { customizationId: 'C2' }, { solution: 'CUSTOMIZATION' })] });
+  const { c, ctl, byKind } = makeConv([{ plan: two }, { plan: two }]);
+  await c.send('金額が100万円を超えたら画面に警告を出したい');
+  const v1 = c.activePlan(); c.confirmSpec({ planId: v1.planId, version: v1.version });
+  const open = ctl.hold();
+  const g = c.send('C1 のコードを作って');
+  await ticks();
+  await c.send('明細の合計は税込みで比べるように変えて、C2 のコードも作って');
+  open(); await g; await ticks();
+  const card = byKind('confirm-generate').slice(-1)[0];
+  assert(card && card.data.customizationId === 'C2', `G11: 生成中に受けた「C2 のコードも作って」は、確定して作る操作の対象を C2 にする: ${card && card.data.customizationId}`);
+});
+await section(async () => {
+  // W6（実機 2026-10-05）: 作業中の入力欄の案内は作業の種類ごと。最初の計画の作成中に「作り直しています」・質問は「応答の後に」と出さない
+  const h = KTAiChatUi.busyHintText;
+  assert(/^計画を作っています。質問にはすぐ答えます/.test(h('PLAN')) && /できた計画に続けて入れます/.test(h('PLAN')) && /^コードを作っています/.test(h('GENERATE')) && /^計画を作り直しています/.test(h('REVISE'))
+    && ![h('PLAN'), h('GENERATE'), h('REVISE')].some(x => /応答の後に送れます/.test(x)) && /下書きとして残しています/.test(h('PLAN', { accepted: false })) && /^計画を作っています/.test(h('PLAN', { accepted: false })), `W6: 作業の種類ごとの案内: ${h('PLAN')} ｜ ${h('PLAN', { accepted: false })}`);
+});
+await section(async () => {
+  // W7（実機 2026-10-05）: 最初の計画の作成中の同意（「その案でお願いします。」）は修正の依頼として積まない（計画の AI を余計に呼ばない）
+  const { c, calls, ctl, byKind } = makeConv([{ plan: planWith([]) }, { plan: planWith([]) }]);
+  const open = ctl.hold();
+  const p = c.send('承認漏れを防ぐ通知を入れたい');
+  await ticks();
+  const a = await c.send('その案でお願いします。');
+  const b = await c.send('その方向でいいです');
+  const op = await c.send('それで進めて');   // 反映へ進む命令は作業の後に（下書きに残す。計画ができた後に送れば反映の確認へ）
+  open(); await p; await ticks();
+  assert(a && a.reason === 'AGREED_WHILE_PLAN' && b && b.reason === 'AGREED_WHILE_PLAN' && calls.plan.length === 1 && op === null && byKind('agree-while-plan').length === 2 && !byKind('answers-ack').length && c.planHistory().length === 1, `W7: 作成中の同意は積まない（計画の呼び出し 1 回）: ${JSON.stringify({ a: a && a.reason, plans: calls.plan.length })}`);
+  // 同意に見えても指示がある文は積む
+  const k = makeConv([{ plan: planWith([]) }, { plan: planWith([]) }]);
+  const open2 = k.ctl.hold();
+  const p2 = k.c.send('承認漏れを防ぐ通知を入れたい');
+  await ticks();
+  const d = await k.c.send('部長宛てでお願いします');
+  open2(); await p2; await ticks();
+  assert(d && d.queued === true && k.calls.plan.length === 2, 'W7: 「部長宛てでお願いします」は指示としてためる');
+});
+// =========================================================
+console.log('\n--- G2. 3 回目の差分レビューの指摘（依頼の問いの形・コードについての質問・複合語・計画が無いとき・コードの依頼を残す） ---');
+await section(async () => {
+  const v = { planId: 'p', version: 1, status: 'ACTIVE', plan: planWith([]), review: { steps: [] }, spec: { status: 'CONFIRMED', version: 1 } };
+  const withExec = { activePlan: v, ledgers: new Map(), activeExecution: { executionId: 'x', written: true, rolledBack: false } };
+  const cls = (t, s = { activePlan: v, ledgers: new Map() }) => KTAiConversation.classifyIntent(t, s);
+  const isQ = KTAiConversation.isQuestionSentence;
+  // 依頼の問いの形: 変更・操作は依頼、説明・情報を求めるもの・疑問の語・「〜か確認して」は質問
+  assert(!isQ('保存を止めてもらえる？') && !isQ('反映してもらえますか？') && isQ('今の計画の手順を見せてもらえる？') && isQ('調べてもらえますか？') && isQ('ご説明いただけますか？') && isQ('誰が承認してくれる？') && isQ('保存が止まるか確認してもらえますか？'), 'G2-1: 依頼の問いの形は、変更・操作のときだけ依頼（説明・情報・疑問の語・「〜か確認して」は質問）');
+  assert(cls('反映してもらえますか？').intent === I.REQUEST_PREVIEW && cls('元に戻してもらえる？', withExec).intent === I.REQUEST_ROLLBACK, 'G2-2: 操作の命令を依頼の問いの形で言っても、操作の案内（計画を作り直さない）');
+  // コードについての質問は、コードの生成にも計画の作り直しにもしない
+  const qs2 = ['コードを作った？', 'コードを作れますか？', 'コードを作る必要はありますか？', 'コードを作ってある？'];
+  const bad = qs2.map(t => ({ t, c: cls(t) })).filter(x => x.c.intent === I.GENERATE_CODE || x.c.reason === 'TURN_THEN_GENERATE' || x.c.alsoGenerate);
+  assert(!bad.length, `G2-3: コードについての質問は質問として答える: ${JSON.stringify(bad.map(x => ({ t: x.t, i: x.c.intent, r: x.c.reason })))}`);
+  // 複合語の「…コード」・否定・保留はコードの依頼ではない。「プログラムも作って」はコードの依頼
+  const notCode = ['顧客コードを生成して', 'QRコードを作って', '商品コードも出して', '条件を変えて、コードを作るのはまだ待って', '条件を変えて、JSを作らずに標準で'];
+  const bad2 = notCode.map(t => ({ t, c: cls(t) })).filter(x => x.c.alsoGenerate);
+  assert(!bad2.length && cls('条件を変えて、プログラムも作って').reason === 'TURN_THEN_GENERATE' && cls('プログラムを作って').intent === I.GENERATE_CODE, `G2-4: 複合語・否定・保留はコードの依頼にしない（プログラムは依頼）: ${JSON.stringify(bad2.map(x => x.t))}`);
+  // 計画が無い・反映済みの計画の後の「…したい。コードも作って」は新しい計画（コードの依頼は計画の後）
+  const np = cls('金額が大きいときに警告を出したい。コードも作ってもらえますか？', { activePlan: null, ledgers: new Map() });
+  const ex = cls('金額が大きいときに警告を出したい。コードも作って', { activePlan: { ...v, status: 'EXECUTED' }, ledgers: new Map() });
+  assert(np.intent === I.PLAN && np.alsoGenerate === true && ex.intent === I.PLAN && ex.alsoGenerate === true, `G2-5: 計画が無い・反映済みのときのコードの依頼つきの依頼は新しい計画: ${np.intent}/${ex.intent}`);
+});
+await section(async () => {
+  // G2-6: 最初の依頼に「コードも作って」: 計画の AI に「コードの生成は計画の後」と伝え（generateAfter）、計画の後に確定して作る操作を出す
+  const { c, calls, byKind } = makeConv([{ plan: planWith([]) }]);
+  const seen = [];
+  const r = await c.send('金額が100万円を超えたら画面に警告を出したい。コードも作って');
+  assert(r.intent === I.PLAN && byKind('confirm-generate').length === 1 && calls.generate === 0, `G2-6: 最初の依頼のコードの依頼は、計画の後に確定して作る操作: ${JSON.stringify({ i: r.intent, card: byKind('confirm-generate').length })}`);
+  void seen;
+});
+await section(async () => {
+  // G2-7: 「…変えて、コードも作って」の作り直しが失敗したら、コードの依頼を残し、次に計画ができたときに確定して作る操作を出す
+  const { c, byKind } = makeConv([{ plan: planWith([]) }, { fail: { ok: false, reason: 'ERROR', message: '計画の修正に失敗しました' } }, { plan: planWith([]) }]);
+  await c.send('金額が100万円を超えたら画面に警告を出したい');
+  await c.send('警告の文を「高額案件です」に変えて、コードも作って');
+  assert(byKind('confirm-generate').length === 0 && c.state.pendingGenerate && c.state.pendingGenerate.planId === c.activePlan().planId, 'G2-7: 失敗したときはコードの依頼を残す');
+  await c.send('警告は赤字にして');
+  assert(byKind('confirm-generate').length === 1 && !c.state.pendingGenerate, 'G2-7: 次に計画ができたときに確定して作る操作を出す');
+});
+await section(async () => {
+  // G2-8: コードの生成中に計画を変えて JavaScript が無くなったら、コードは作らないと知らせる（生成の経路も同じ処理）
+  const std = planWith([], { customizations: [], steps: [step('P1', 'ADD_VIEW', 'VIEW', '高額案件', { name: '高額案件', fields: ['amount'] })], solution: 'STANDARD' });
+  const { c, ctl, byKind } = makeConv([{ plan: planWith([]) }, { plan: std }]);
+  await c.send('金額が100万円を超えたら画面に警告を出したい');
+  const v1 = c.activePlan(); c.confirmSpec({ planId: v1.planId, version: v1.version });
+  const open = ctl.hold();
+  const g = c.send('コードを作って');
+  await ticks();
+  await c.send('警告はやめて一覧だけにして');
+  open(); await g; await ticks();
+  assert(byKind('generate-not-needed').length === 1 && byKind('confirm-generate').length === 0, `G2-8: 生成中の変更で JavaScript が無くなったら、コードは作らないと知らせる: ${byKind('generate-not-needed').length}`);
 });
 
 console.log(`\n${state.failed ? 'FAILED' : 'ALL PASSED'}: ${state.passed} passed / ${state.failed} failed`);
