@@ -5482,6 +5482,16 @@
       });
       const total = (gn?.notifications || []).length + (pn?.notifications || []).length + (rn?.notifications || []).length;
       if (gn && pn && rn && !total) facts.push({ kind: 'notification', key: 'NOTIFY:(none)', confidence: 'CERTAIN', notification: null, statement: '通知（アプリの条件通知・レコードの条件通知・リマインダー）は設定されていない' });
+      // 種類ごとの有無（2026-10-05 実機: 「リマインダーが無い」の根拠に、アプリの条件通知の fact を挙げていた）。
+      //   取得できた種類は「設定されていない」、取得できなかった種類は「取得できていない（無いとは限らない）」
+      else if (gn || pn || rn) {
+        const kinds = [['general', 'アプリの条件通知', gn, 'notification'], ['perRecord', 'レコードの条件通知', pn, 'notification'], ['reminder', 'リマインダー', rn, 'reminder']];
+        for (const [id, ja, v, kind] of kinds) {
+          const key = kind === 'reminder' ? 'REMINDER' : `NOTIFY:${id}`;
+          if (!v) facts.push({ kind, key: `${key}:(unavailable)`, confidence: 'NOT_ANALYZED', [kind]: null, statement: `${ja}の設定を取得できていない（無いとは限らない）` });
+          else if (!(v.notifications || []).length) facts.push({ kind, key: `${key}:(none)`, confidence: 'CERTAIN', [kind]: null, statement: `${ja}は設定されていない` });
+        }
+      }
       if ((gn?.notifications || []).length > 30) trunc('facts.notification.general', gn.notifications.length, 30);
       if ((pn?.notifications || []).length > 30) trunc('facts.notification.perRecord', pn.notifications.length, 30);
       if ((rn?.notifications || []).length > 20) trunc('facts.reminder', rn.notifications.length, 20);
@@ -6030,7 +6040,8 @@
         proposedFields: (plan.proposedFields || []).slice(0, maxItems).map(p => ({ temporaryId: p.temporaryId, label: cut(p.label, 100), suggestedCode: p.suggestedCode ?? null, type: p.type ?? null, required: !!p.required, ...(Array.isArray(p.options) && p.options.length ? { options: strList(p.options, 20) } : {}), reason: cut(p.reason, REVISION_LIMITS.maxText), ...(p.alternativeExistingFieldCode ? { alternativeExistingFieldCode: p.alternativeExistingFieldCode } : {}) })),
         steps,
         alternatives: (plan.alternatives || []).slice(0, 3).map(a => ({ id: a.id, title: cut(a.title, 100), summary: cut(a.summary, REVISION_LIMITS.maxText), stepIds: strList(a.stepIds) })),
-        questions: (plan.questions || []).slice(0, maxItems).map(q => ({ id: q.id, question: cut(q.question, REVISION_LIMITS.maxText), reason: cut(q.reason, REVISION_LIMITS.maxText) })),
+        // 推奨（recommendation）も渡す: 「数え方はおすすめで」のように確認事項の推奨を採用する答えを、計画の AI が読めるように（2026-10-05）
+        questions: (plan.questions || []).slice(0, maxItems).map(q => ({ id: q.id, question: cut(q.question, REVISION_LIMITS.maxText), reason: cut(q.reason, REVISION_LIMITS.maxText), ...(q.recommendation ? { recommendation: cut(q.recommendation, REVISION_LIMITS.maxText) } : {}) })),
         unknowns: strList(plan.unknowns, 8).map(u => cut(u, REVISION_LIMITS.maxText)),
         planConfidence: plan.planConfidence ?? null,
         // Phase 16: 標準設定 / JavaScript の分類とカスタマイズの計画（修正・説明の対象）
@@ -22383,9 +22394,11 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
         if (ac.open.length || ac.decided.length) {
           const it = KTAiAnswers.interpret({ text: mixed ? restText : t, open: ac.open, decided: ac.decided, isRequest: (c) => RE.reviseVerb.test(c) || RE.desire.test(c) });
           if (it.kind === 'answers') return { intent: INTENT.ANSWER, reason: 'ANSWERS', answers: it, askText, restText: mixed ? restText : null };
-          // 回答先を決められない短い答えは、回答先だけを聞く。回答として読めない部分（そのほかの記述）があれば回答ではなく、計画の AI に読ませる（下の 3b。
-          //   「警告の文の指定は取り消します。文はおまかせで」の「おまかせで」を回答の形と読んで、回答先を聞き返していた）
-          if (it.kind === 'unclear' && (!(it.notes || []).length || (it.unresolved || []).every(u => KTAiAnswers.isYesNo(u.clause)))) return { intent: INTENT.ANSWER, reason: 'ANSWER_TARGET_UNCLEAR', answers: it, askText, restText: mixed ? restText : null };
+          // 回答先を聞き返すのは、確認事項が複数あるときの「はい」「いいえ」の答え（文脈からも決められない）に限る（一緒に示した条件・そのほかの記述は、回答先が決まったときに一緒に送る）。
+          //   それ以外（論点の語を含む答え・「数え方はおすすめで」）は、計画の AI に確認事項の文脈で読ませる（下の 3b）。
+          //   2026-10-05 実機: 「3日で、作業者だけでいいです。数え方はおすすめで」で回答先を聞き返し、短く答えても先へ進めなかった
+          //   （以前: 「警告の文の指定は取り消します。文はおまかせで」の「おまかせで」でも聞き返していた）
+          if (it.kind === 'unclear' && (it.unresolved || []).every(u => KTAiAnswers.isYesNo(u.clause))) return { intent: INTENT.ANSWER, reason: 'ANSWER_TARGET_UNCLEAR', answers: it, askText, restText: mixed ? restText : null };
           // 記録済みの言い直し。まだ計画に入っていない回答（作り直しの失敗・取り消しの後）があれば、言い直しで作り直す（「記録済み」で止めない）
           if (it.kind === 'restated' && !mixed) return { intent: INTENT.ANSWER, reason: ac.pending ? 'ANSWER_PENDING' : 'ANSWER_RESTATED', answers: it };
         }

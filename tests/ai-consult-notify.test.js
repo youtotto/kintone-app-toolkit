@@ -87,6 +87,17 @@ await section(async () => {
   const u = gen('通知はある？', { inputs: ip });
   assert(u.ctx.facts.some(f => f.key === 'NOTIFY:(unavailable)' && f.confidence === 'NOT_ANALYZED') && !u.ctx.facts.some(f => f.key === 'NOTIFY:(none)'), 'N4: 通知を取得できていないときは「取得できていない（無いとは限らない）」');
 });
+await section(async () => {
+  // N5: 種類ごとの有無（実機: 「リマインダーが無い」の根拠にアプリの条件通知の fact を挙げていた）
+  const ip = inputs(); ip.data.reminderNotify = { ...ip.data.reminderNotify, notifications: [] }; ip.data.perRecordNotify = null;
+  const g = gen('承認漏れを防ぐ通知はある？', { inputs: ip });
+  const none = g.ctx.facts.find(f => f.key === 'REMINDER:(none)');
+  const un = g.ctx.facts.find(f => f.key === 'NOTIFY:perRecord:(unavailable)');
+  assert(g.ok && none && none.kind === 'reminder' && none.confidence === 'CERTAIN' && /リマインダーは設定されていない/.test(none.statement), `N5: 取得できて空の種類は「設定されていない」（リマインダーの事実として）: ${none && none.statement}`);
+  assert(un && un.confidence === 'NOT_ANALYZED' && /取得できていない（無いとは限らない）/.test(un.statement) && !g.ctx.facts.some(f => f.key === 'NOTIFY:general:(none)'), `N5: 取得できなかった種類は「取得できていない」。設定のある種類には付けない: ${un && un.statement}`);
+  const all = gen('承認漏れを防ぐ通知はある？');
+  assert(!all.ctx.facts.some(f => /:\(none\)$|:\(unavailable\)$/.test(f.key || '')), 'N5: 3 種とも設定があるときは付けない');
+});
 
 console.log('\n--- A. 答えの表示 ---');
 await section(async () => {
@@ -143,6 +154,29 @@ await section(async () => {
   const k = makeConv([planWith([])]);
   const r = k.c.classify('おすすめで');
   assert(r.reason !== 'ADOPT_CONSULTATION' && r.intent !== I.PLAN, `D2: 相談の答えが無いときの「おすすめで」は計画にしない: ${r.intent}/${r.reason}`);
+});
+
+await section(async () => {
+  // D3: 実機（App 353）の会話: 確認事項（数え方・通知先）への短い答え「3日で、作業者だけでいいです。数え方はおすすめで」は、
+  //   回答先を聞き返さず、計画の AI に原文のまま渡す（前回の確認事項は推奨つきで渡し、「数え方はおすすめで」を推奨の採用として読ませる）
+  const qs = [{ id: 'Q1', question: '「承認待ちのまま何日」は、何を基準に数えますか？', reason: '', relatedEvidenceIds: [], topic: 'status_condition', recommendation: '承認待ちに入ってからの日数（更新日時を基準にする）', options: ['承認待ちに入ってから', '作成日から'], priority: 'blocking' },
+    { id: 'Q2', question: '催促の通知先は誰にしますか？', reason: '', relatedEvidenceIds: [], topic: 'notify_target', recommendation: '作業者と申請者の両方', options: ['作業者だけ', '作業者と申請者'], priority: 'blocking' }];
+  const { c, calls } = makeConv([planWith(qs), planWith([])]);
+  await c.send('承認漏れを防ぎたい');
+  const say = '3日で、作業者だけでいいです。数え方はおすすめで';
+  const cls = c.classify(say);
+  await c.send(say);
+  const rev = calls.plan[1] && calls.plan[1].revision;
+  const kinds = c.messages().map(m => m.data?.kind || m.type);
+  assert(cls.intent === I.REVISE_PLAN && cls.reason === 'TURN' && !kinds.includes('answer-target') && !c.pendingClarification(), `D3: 確認事項への短い答えは聞き返さず、計画の AI に読ませる: ${cls.intent}/${cls.reason}`);
+  // 前回の計画の要約（Gateway に送る previousPlan）に推奨を入れる（以前は id・question・reason だけで、「おすすめで」の中身を計画の AI が読めなかった）
+  const cq = KTContext.compactPlan(planWith(qs)).questions;
+  assert(rev && (rev.utterances || [rev.request]).some(u => u === say) && cq.length === 2 && /更新日時を基準/.test(cq[0].recommendation || '') && cq[1].recommendation === '作業者と申請者の両方', `D3: 発言は原文のまま・前回の確認事項の要約は推奨つき: ${JSON.stringify(cq)}`);
+  assert(!('recommendation' in KTContext.compactPlan(planWith([{ ...qs[0], recommendation: '' }])).questions[0]), 'D3: 推奨の無い確認事項には付けない');
+  // 「はい」「いいえ」だけの答えは、確認事項が複数なら従来どおり回答先を聞く
+  const k = makeConv([planWith(qs)]);
+  await k.c.send('承認漏れを防ぎたい');
+  assert(k.c.classify('いいえ').reason === 'ANSWER_TARGET_UNCLEAR', 'D3: 「いいえ」だけは回答先を聞く（文脈からも決められない）');
 });
 
 console.log(`\n${state.failed ? 'FAILED' : 'ALL PASSED'}: ${state.passed} passed / ${state.failed} failed`);

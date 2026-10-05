@@ -425,16 +425,17 @@ await section(async () => {
   assert(ds.some(d => d.id === 'D1' && d.answer === '部長です' && d.status === 'answered' && !d.previousAnswer) && ds.some(d => d.kind === 'condition' && d.answer === '承認者フィールドを使う' && /ユーザー選択フィールド/.test(d.question || '')), `G3: 元の回答（部長です）は変更扱いにせず、答えは質問への補足として記録: ${JSON.stringify(ds)}`);
 });
 await section(async () => {
-  // S3b: 同じ論点の質問が 2 つあり、対応先を選んだら、選ばなかった方は未回答のまま
+  // S3b: 同じ論点の質問が 2 つあるときの「部長です」は、回答先を聞き返さず、計画の AI に確認事項の文脈で読ませる（2026-10-05。
+  //   聞き返すのは「はい」「いいえ」の答えだけ）。回答欄で対応先を選んだら、選ばなかった方は未回答のまま
   const QD = { question: '代理の承認者は誰にしますか？', topic: 'approver' };
-  const { c, calls, last } = makeConv([planWith(qs({ question: QA, topic: 'approver' }, QD)), planWith([])]);
+  const { c, calls, last } = makeConv([planWith(qs({ question: QA, topic: 'approver' }, QD)), planWith(qs({ question: QA, topic: 'approver' }, QD)), planWith([])]);
   await c.send('金額が大きい案件に注意を出したい');
+  const r1 = KTAiConversation.classifyIntent('部長です', c.state);
   await c.send('部長です');
-  const card = last();
-  assert(card.data.kind === 'answer-target' && card.data.items[0].candidates.length === 2 && c.pendingClarification().messageId === card.id, 'S3b: 同じ論点の質問が 2 つなら対応先を聞く（確認のカードの id を持つ）');
-  const target = card.data.items[0].candidates.find(x => x.text === QA);
+  assert(r1.reason === 'TURN' && last().data?.kind !== 'answer-target' && !c.pendingClarification() && calls.plan.length === 2 && /部長です/.test(calls.plan[1].revision.request || ''), `S3b: 同じ論点の質問が 2 つでも、論点の語を含む答えは聞き返さず計画の AI に読ませる: ${JSON.stringify({ r: r1.reason, req: calls.plan[1] && calls.plan[1].revision.request })}`);
+  const target = c.answerContext().open.find(x => x.text === QA);
   await c.send(`「部長です」は「${QA}」への回答です。`, { intentOverride: 'ANSWER', answerPayload: { source: 'chat', items: [{ key: target.key, answer: '部長です' }], remaining: [] } });
-  assert(/まだ答えていない確認事項：「代理の承認者は誰にしますか？」/.test(calls.plan[1].revision.request), `S3b: 選ばなかった同じ論点の質問は未回答のまま伝える: ${calls.plan[1].revision.request}`);
+  assert(/まだ答えていない確認事項：「代理の承認者は誰にしますか？」/.test(calls.plan[2].revision.request), `S3b: 選ばなかった同じ論点の質問は未回答のまま伝える: ${calls.plan[2].revision.request}`);
 });
 await section(async () => {
   // S4: 作り直しの失敗・キャンセルの後に同じ回答を送り直すと、作り直す（「記録済み」で止めない）
@@ -582,9 +583,7 @@ await section(async () => {
   const QD = { question: '代理の承認者は誰にしますか？', topic: 'approver' };
   const { c, calls, last } = makeConv([planWith(qs({ question: QA, topic: 'approver' }, QD)), planWith(qs(QD)), planWith([])]);
   await c.send('金額が大きい案件に注意を出したい');
-  await c.send('部長です');
-  const card = last();
-  const target = card.data.items[0].candidates.find(x => x.text === QA);
+  const target = c.answerContext().open.find(x => x.text === QA);
   await c.send('選択', { intentOverride: 'ANSWER', answerPayload: { source: 'chat', items: [{ key: target.key, answer: '部長です' }], remaining: [] } });
   assert(open(c).includes(QD.question) && c.metrics().reasked === 0, `R8: 次の版で聞かれた同じ論点のまだ答えていない質問は、再質問として隠さない: open=${open(c).join(' / ')}`);
   await c.send('課長です');
