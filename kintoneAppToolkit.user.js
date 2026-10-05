@@ -12731,6 +12731,8 @@
       const legacyKey = `${SETTINGS_KEY}.${host}`;
       const key = `${SESSION_KEY}.${host}`;
       return {
+        /** 保存の名前（タブ間の refresh のロックの名前に使う。同じ kintone の画面どうしで同じ値） */
+        name: key,
         /** 接続情報（Refresh Token・scope・期限）。Customer Token / Access Token は含めない */
         load() {
           try {
@@ -12756,6 +12758,18 @@
           } catch (e) { return false; }
         },
         clear() { try { storage?.removeItem(key); } catch (e) { } },
+        /**
+         * 接続情報（Refresh Token・scope・期限・進行中の refresh）だけを消し、接続先（apiBase）は残す。
+         * 2026-10-05 の実機: staging に接続していて Refresh が拒否されたとき clear() で接続先も消え、既定の production に戻ったまま
+         * ［Nest Rec AIに接続］が production へ送られた。接続先は利用者（運用者）が選んだ設定で、credential ではない
+         */
+        clearTokens() {
+          try {
+            const raw = storage?.getItem(key); const j = raw ? JSON.parse(raw) : {};
+            if (j && typeof j.apiBase === 'string' && j.apiBase) storage?.setItem(key, JSON.stringify({ apiBase: j.apiBase }));
+            else storage?.removeItem(key);
+          } catch (e) { try { storage?.removeItem(key); } catch (e2) { } }
+        },
         /** 旧形式（Customer Token を localStorage に保存）を 1 回だけ取り出して削除する（exchange に使う） */
         takeLegacyCustomerToken() {
           try {
@@ -13167,10 +13181,18 @@
      * 接続セッション（Phase 5）。Customer Token → exchange → Access Token（memory）＋ Refresh Token（store）。
      * @param {object} p store（createSettingsStore 互換）/ hostname / transport / nowFn / apiBase（省略時は store の値）
      */
-    function createSession({ store, hostname = null, transport = null, nowFn = null, apiBase = null, pluginVersion = SCRIPT_VERSION, timeoutMs = undefined } = {}) {
+    function createSession({ store, hostname = null, transport = null, nowFn = null, apiBase = null, pluginVersion = SCRIPT_VERSION, timeoutMs = undefined, locks = undefined } = {}) {
       const now = () => (nowFn ? nowFn() : Date.now());
       let access = { token: null, expiresAt: null };   // memory のみ
-      let refreshing = null;                            // 同時更新の抑止
+      let refreshing = null;                            // 同時更新の抑止（このタブの中）
+      // タブ間の同時更新の抑止（2026-10-05 の実機）: Access Token はタブごとの memory なので、kintone の画面を複数開いていると、読み込みのたびに
+      //   各タブが同じ Refresh Token で refresh する。別々の requestId で同時に送ると、Gateway は再使用として family を失効する（refresh_reuse）。
+      //   ブラウザの Web Locks で refresh をタブ間で 1 つずつにし、ロックの中で store を読み直す（先のタブが回転した新しい Refresh を使う）。
+      //   Web Locks が無い環境では従来どおり（このタブの中だけ抑止）
+      const lockApi = locks !== undefined ? locks : ((typeof navigator !== 'undefined' && navigator && navigator.locks && typeof navigator.locks.request === 'function') ? navigator.locks : null);
+      const withRefreshLock = (fn) => (lockApi ? lockApi.request(`ktAi.refresh:${store && store.name ? store.name : 'default'}`, { mode: 'exclusive' }, fn) : fn());
+      // 接続情報を消すときも接続先（apiBase）は残す（消すと既定の production に戻る）
+      const clearTokens = () => { if (typeof store.clearTokens === 'function') store.clearTokens(); else store.clear(); };
       const cfg = () => store.load();
       const base = () => apiBase || cfg().apiBase || DEFAULT_API_BASE;
       const clientOpts = () => ({ apiBase: base(), hostname, transport, pluginVersion, ...(timeoutMs != null ? { timeoutMs } : {}) });
@@ -13193,8 +13215,8 @@
        */
       async function refresh() {
         if (refreshing) return refreshing;
-        refreshing = (async () => {
-          const c = cfg();
+        refreshing = withRefreshLock(async () => {
+          const c = cfg();   // ロックの中で読む（ほかのタブが回転した後なら、その新しい Refresh と進行中の requestId）
           if (!refreshValid(c)) { access = { token: null, expiresAt: null }; throw new AiClientError({ code: c.refreshToken ? ERROR_CODES.SESSION_EXPIRED : ERROR_CODES.NOT_CONNECTED, message: 'refresh unavailable' }); }
           const attempt = c.refreshAttempt && c.refreshAttempt.requestId ? c.refreshAttempt : { requestId: newRefreshRequestId(), at: new Date(now()).toISOString() };
           if (!c.refreshAttempt || c.refreshAttempt.requestId !== attempt.requestId) store.save({ ...c, refreshAttempt: attempt });
@@ -13205,13 +13227,13 @@
             return ex;
           } catch (e) {
             if (isAiClientError(e) && [ERROR_CODES.AUTH_INVALID_TOKEN, ERROR_CODES.AUTH_TOKEN_EXPIRED].includes(e.code)) {
-              store.clear(); access = { token: null, expiresAt: null };
+              clearTokens(); access = { token: null, expiresAt: null };
               throw new AiClientError({ code: ERROR_CODES.SESSION_EXPIRED, message: e.message, httpStatus: e.httpStatus, requestId: e.requestId });
             }
             // それ以外（TIMEOUT / TRANSPORT_ERROR / RATE_LIMITED / 5xx）: 旧 Refresh と requestId を保持し、次回同じ要求として再送する
             throw e;
           }
-        })().finally(() => { refreshing = null; });
+        }).finally(() => { refreshing = null; });
         return refreshing;
       }
       /** 有効な Access Token を返す（memory → Refresh の順。無ければ NOT_CONNECTED） */
@@ -13258,8 +13280,8 @@
         async disconnect() {
           const c = cfg();
           const rt = c.refreshToken || '';
-          const gateway = bare();   // store を消す前に接続先を確定する（消した後は既定の production URL に戻ってしまう）
-          store.clear(); access = { token: null, expiresAt: null };
+          const gateway = bare();   // store を消す前に接続先を確定する
+          clearTokens(); access = { token: null, expiresAt: null };   // 接続先（apiBase）は残す（次の［接続］が既定の production へ行かないように）
           if (!rt) return { revoked: false };
           try { await gateway.connectDisconnect({ refreshToken: rt }); return { revoked: true }; }
           catch (e) { return { revoked: false, error: isAiClientError(e) ? e.code : ERROR_CODES.TRANSPORT_ERROR }; }
@@ -13790,6 +13812,7 @@
                  Customer Token の旧方式は開発モード（localStorage ktAi.devMode = "1"）のときだけ表示する -->
             <div id="kt-ai-connect" style="display:none; flex-direction:column; gap:6px;">
               <button id="kt-ai-connect-start" class="btn" style="height:32px; font-weight:600;">Nest Rec AIに接続</button>
+              <div id="kt-ai-connect-target" style="display:none; font-size:11px; color:#b26a00;"></div>
               <div style="opacity:.7; font-size:11px;">AI向けドキュメント機能は接続しなくても無料で利用できます。</div>
               <div id="kt-ai-dev" style="display:none; flex-direction:column; gap:4px; border:1px dashed ${border}; border-radius:6px; padding:6px;">
                 <div style="font-size:11px; opacity:.7;">開発モード: Customer Token で接続（運用者向け。接続後は保存されません）</div>
@@ -16481,7 +16504,7 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
     // ---- 有料: Nest Rec AI。無料側（生成・コピー）はこのブロックに依存しない ----
     const $paid = $('kt-ai-paid'), $ask = $('kt-ai-ask'), $paidStatus = $('kt-ai-paid-status'), $badge = $('kt-ai-conn-badge');
     const $connect = $('kt-ai-connect'), $apiBase = $('kt-ai-api-base'), $token = $('kt-ai-token'), $connectBtn = $('kt-ai-connect-btn');
-    const $connectStart = $('kt-ai-connect-start'), $dev = $('kt-ai-dev');
+    const $connectStart = $('kt-ai-connect-start'), $dev = $('kt-ai-dev'), $connectTarget = $('kt-ai-connect-target');
     const $connecting = $('kt-ai-connecting'), $connectingText = $('kt-ai-connecting-text'), $openAuthorize = $('kt-ai-open-authorize'), $connectCancel = $('kt-ai-connect-cancel');
     const $session = $('kt-ai-session'), $sessionLines = $('kt-ai-session-lines'), $sessionRefresh = $('kt-ai-session-refresh'), $sessionDisconnect = $('kt-ai-session-disconnect');
     const $consent = $('kt-ai-consent'), $consentOk = $('kt-ai-consent-ok'), $consentCancel = $('kt-ai-consent-cancel');
@@ -17308,6 +17331,8 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
       $session.style.display = connected ? 'flex' : 'none';
       $dev.style.display = devMode ? 'flex' : 'none';
       $badge.textContent = connected ? '✓ 接続済み' : connecting ? '接続中' : '未接続';
+      // 既定と違う接続先（staging など）に接続しようとしているときは、接続の前に接続先を示す（どこへ送るかを利用者が確かめられる）
+      if ($connectTarget) { const ab = String(st?.apiBase || ''); const other = !!ab && ab !== KTAiClient.DEFAULT_API_BASE; $connectTarget.style.display = other ? '' : 'none'; $connectTarget.textContent = other ? `接続先: ${ab.replace(/^https?:\/\//, '')}（既定の接続先とは別）` : ''; }
       if (connected) $sessionLines.innerHTML = KTContextUi.sessionLinesHtml(st, capability);
       renderComposer(); renderHeader();
       return st;

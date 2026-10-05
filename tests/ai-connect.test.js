@@ -141,7 +141,7 @@ console.log('\n--- 2. connect flow（start → open → polling → complete →
   const rtBefore = store.load().refreshToken;
   const r = await s2.disconnect();
   const dReq = gw.reqs.filter(r => r.url.endsWith('/v2/connect/disconnect')).pop();
-  assert(r.revoked === true && dReq && JSON.parse(dReq.body).refreshToken === rtBefore && !s2.status().connected && storage.dump() === '' && gw.revokedFamilies.size === 1, 'disconnect: /v2/connect/disconnect に Refresh を送って family 失効・local は空');
+  assert(r.revoked === true && dReq && JSON.parse(dReq.body).refreshToken === rtBefore && !s2.status().connected && !/refreshToken":"[^"]|RT-d/.test(storage.dump()) && gw.revokedFamilies.size === 1, 'disconnect: /v2/connect/disconnect に Refresh を送って family 失効・local の接続情報は空（2026-10-05 で意図して更新: 接続先は残す）');
   let after = null; try { await s2.client.getHealth(); } catch (e) { after = e; }
   assert(after && after.code === C.NOT_CONNECTED, 'disconnect 後は NOT_CONNECTED');
   // 実機で発生: apiBase を store だけが持つ構成で disconnect すると、store.clear() の後に接続先が既定（production）に戻り、
@@ -276,7 +276,9 @@ console.log('\n--- 4. UI（mountAiWorkspace）---');
     assert(!/AT-\d|RT-\d|v1\.AT|v1\.RT/.test(allText), 'UI に Access / Refresh の文字列が出ない');
     // 接続解除
     await u.$('kt-ai-session-disconnect').dispatch('click'); await tick(); await tick();
-    assert(u.$('kt-ai-connect').style.display === 'flex' && u.$('kt-ai-session').style.display === 'none' && u.$('kt-ai-ask').disabled === true && u.gw.revokedFamilies.size === 1 && u.storage.dump() === '' && u.$('kt-ai-paid-status').textContent.includes('接続を解除しました'), '接続解除: UI は未接続へ・Gateway family 失効・local 消去');
+    assert(u.$('kt-ai-connect').style.display === 'flex' && u.$('kt-ai-session').style.display === 'none' && u.$('kt-ai-ask').disabled === true && u.gw.revokedFamilies.size === 1 && !/refreshToken":"[^"]|RT-d/.test(u.storage.dump()) && u.$('kt-ai-paid-status').textContent.includes('接続を解除しました'), '接続解除: UI は未接続へ・Gateway family 失効・local の接続情報を消去（接続先は残す）');
+    // 2026-10-05: 既定と違う接続先なら、未接続の画面に接続先を示す（どこへ接続するかを利用者が確かめられる）
+    assert(u.$('kt-ai-connect-target').style.display === '' && /接続先: gw.test（既定の接続先とは別）/.test(u.$('kt-ai-connect-target').textContent), `未接続の画面に、既定と違う接続先を示す: ${u.$('kt-ai-connect-target').textContent}`);
   }
   {
     const u = mountUi({ blocked: true });

@@ -141,7 +141,8 @@ console.log('\n--- 4. exchange unauthorized / disconnect / 旧形式の移行 --
   const session = KTAiClient.createSession({ store, hostname: 'h', transport: gw.transport, apiBase: 'https://gw.test' });
   await session.connect('CUSTOMER-TOKEN-1');
   session.disconnect();
-  assert(session.status().connected === false && storage.dump() === '', 'disconnect → store を消す');
+  // 2026-10-05 で意図して更新: 接続情報は消すが、接続先（apiBase）は残す（消すと既定の production に戻った）
+  assert(session.status().connected === false && !/RT-|refreshToken":"[^"]/.test(storage.dump()) && store.load().apiBase === 'https://gw.test', 'disconnect → 接続情報を消す（接続先は残す）');
   let err = null; try { await session.client.getHealth(); } catch (e) { err = e; }
   assert(err && err.code === C.NOT_CONNECTED, '切断後は NOT_CONNECTED');
 }
@@ -246,7 +247,8 @@ console.log('\n--- 6. Refresh robustness（Phase 8.5: 応答喪失 ≠ replay）
   try { await session.client.getHealth(); } catch (e) { }
   store.save({ ...store.load(), refreshAttempt: { requestId: 'rf_someone-else-0001', at: new Date(t).toISOString() } });
   let err = null; try { await session.client.getHealth(); } catch (e) { err = e; }
-  assert(err && err.code === C.SESSION_EXPIRED && session.status().connected === false && storage.dump() === '', 'Gateway が reused（family 失効）→ SESSION_EXPIRED・接続情報を破棄');
+  // 2026-10-05 で意図して更新: 接続先（apiBase）は残す
+  assert(err && err.code === C.SESSION_EXPIRED && session.status().connected === false && !/RT-|refreshAttempt/.test(storage.dump()) && store.load().apiBase === 'https://gw.test', 'Gateway が reused（family 失効）→ SESSION_EXPIRED・接続情報を破棄（接続先は残す）');
 }
 {
   // browser sleep: 猶予（Gateway 側 30 分）内に起きれば回復、超えれば失効（client はループしない）
@@ -288,6 +290,69 @@ console.log('\n--- 6. Refresh robustness（Phase 8.5: 応答喪失 ≠ replay）
   assert(h.ok && gw.ctl.lastRefreshBody.requestId === rid && !store.load().refreshAttempt, '再送（Gateway は未使用なので通常発行）→ 回復・attempt を消す');
   assert(!storage.dump().includes('AT-') && !storage.dump().includes('CUSTOMER-TOKEN'), 'store に Access / Customer Token は無い');
 }
+
+// 2026-10-05 の実機（App 353・staging）: 再読み込みで 2 つのタブがほぼ同時に refresh し、Gateway が再使用（refresh_reuse）として family を失効した。
+// その Refresh の拒否で接続情報を消すとき接続先（apiBase）も消え、既定の production に戻ったまま［Nest Rec AIに接続］が production へ送られた
+console.log('\n--- 7. 接続先（apiBase）の保持 ---');
+try {
+  const storage = makeStorage();
+  const store = KTAiClient.createSettingsStore({ storage, host: 'h' });
+  store.save({ apiBase: 'https://staging.test', refreshToken: 'r', refreshExpiresAt: '2099-01-01T00:00:00Z', scope: { product: 'toolkit' }, connectedAt: 'c', refreshAttempt: { requestId: 'rf_1', at: 'x' } });
+  store.clearTokens();
+  const c = store.load();
+  assert(c.apiBase === 'https://staging.test' && c.refreshToken === '' && c.scope === null && !c.refreshAttempt, 'clearTokens: 接続情報（Refresh・scope・進行中の要求）だけを消し、接続先は残す');
+  const storage2 = makeStorage(); const store2 = KTAiClient.createSettingsStore({ storage: storage2, host: 'h' });
+  store2.clearTokens();
+  assert(storage2.getItem('ktAi.v2.h') === null && store2.load().apiBase === KTAiClient.DEFAULT_API_BASE, 'clearTokens: 接続先を保存していなければ何も残さない（既定の接続先のまま）');
+  // Refresh が拒否された（SESSION_EXPIRED）後も接続先は staging のまま。次の［接続］も staging へ
+  const gw = makeGateway();
+  const s3 = makeStorage(); const st3 = KTAiClient.createSettingsStore({ storage: s3, host: 'h' });
+  const session = KTAiClient.createSession({ store: st3, hostname: 'h', transport: gw.transport });   // apiBase は store から
+  await session.connect('CUSTOMER-TOKEN-1', { apiBase: 'https://staging.test' });
+  st3.save({ ...st3.load(), refreshToken: 'RT-unknown' });   // Gateway が知らない Refresh（拒否される）
+  let err = null; try { await session.refresh(); } catch (e) { err = e; }
+  assert(err && err.code === C.SESSION_EXPIRED && session.status().connected === false && session.status().apiBase === 'https://staging.test' && st3.load().apiBase === 'https://staging.test', `Refresh の拒否 → SESSION_EXPIRED・接続は切れるが接続先は staging のまま: ${session.status().apiBase}`);
+  const flowReqs = [];
+  const flow = KTAiClient.createConnectFlow({ session, hostname: 'h', transport: async (req) => { flowReqs.push(req.url); return { status: 503, body: JSON.stringify({ ok: false, contractVersion: '2.1', error: { code: 'UPSTREAM_ERROR', message: 'x' } }) }; }, openUrl: () => true, sleep: async () => { }, cryptoObj: require('crypto').webcrypto });
+  try { await flow.start(); } catch (e) { }
+  assert(flowReqs.length >= 1 && flowReqs.every(u => u.startsWith('https://staging.test/')), `その後の［Nest Rec AIに接続］は staging へ送る（既定の production へ送らない）: ${flowReqs.join(' ')}`);
+  await session.disconnect();
+  assert(st3.load().apiBase === 'https://staging.test' && st3.load().refreshToken === '', '接続解除の後も接続先は残す');
+} catch (e) { assert(false, `例外: ${e && e.message}`); }
+
+console.log('\n--- 8. タブ間の refresh（Web Locks で 1 つずつ・ロックの中で読み直す） ---');
+try {
+  const storage = makeStorage();   // 同じ kintone の 2 つのタブは同じ localStorage を見る
+  const mk = () => KTAiClient.createSettingsStore({ storage, host: 'h' });
+  let t = Date.parse('2026-10-05T00:00:00Z');
+  const gw = makeGateway({ now: () => t, accessTtlSec: 120 });
+  let releaseFirst = null, held = 0;
+  const sentRefresh = [];   // client が送った refresh（Gateway に届く前に数える）
+  const transport = async (req) => {
+    if (req.url.endsWith('/v2/token/exchange') && JSON.parse(req.body).grantType === 'refresh_token') sentRefresh.push(JSON.parse(req.body).refreshToken);
+    if (req.url.endsWith('/v2/token/exchange') && JSON.parse(req.body).grantType === 'refresh_token' && !held++) await new Promise(r => { releaseFirst = r; });   // 最初の refresh の応答を待たせる
+    return gw.transport(req);
+  };
+  // Web Locks の代わり（同じ名前の要求を 1 つずつ実行する）
+  const names = [];
+  const queues = new Map();
+  const locks = { request(name, opts, fn) { names.push(name); const prev = queues.get(name) || Promise.resolve(); const run = prev.then(() => fn()); queues.set(name, run.catch(() => { })); return run; } };
+  const tabA = KTAiClient.createSession({ store: mk(), hostname: 'h', transport, apiBase: 'https://gw.test', nowFn: () => t, locks });
+  const tabB = KTAiClient.createSession({ store: mk(), hostname: 'h', transport, apiBase: 'https://gw.test', nowFn: () => t, locks });
+  await tabA.connect('CUSTOMER-TOKEN-1');
+  t += 70 * 1000;   // Access の期限が近い（両方のタブが refresh する）
+  const refreshBodies = () => gw.reqs.filter(r => r.url.endsWith('/v2/token/exchange')).map(r => JSON.parse(r.body)).filter(b => b.grantType === 'refresh_token');
+  const pA = tabA.client.getHealth();
+  for (let i = 0; i < 5; i++) await new Promise(r => setTimeout(r, 0));
+  const pB = tabB.client.getHealth();   // タブ B は、タブ A の refresh の途中で読み込まれた
+  for (let i = 0; i < 5; i++) await new Promise(r => setTimeout(r, 0));
+  const beforeRelease = sentRefresh.length;   // A の refresh を待たせている間に、B は送っていない
+  releaseFirst();
+  const [hA, hB] = await Promise.all([pA, pB]);
+  const bodies = refreshBodies();
+  assert(beforeRelease === 1 && bodies.length === 2 && bodies[0].refreshToken !== bodies[1].refreshToken && hA.ok && hB.ok && tabA.status().connected && tabB.status().connected, `タブ B はタブ A の refresh が終わるまで待ち、A が回転した新しい Refresh で更新する（同じ Refresh を 2 回送らない）: ${beforeRelease} / ${bodies.map(b => b.refreshToken).join(' → ')}`);
+  assert(names.length >= 2 && names.every(n => n === 'ktAi.refresh:ktAi.v2.h'), `ロックの名前は保存の名前（同じ kintone の画面どうしで同じ）: ${[...new Set(names)].join(',')}`);
+} catch (e) { assert(false, `例外: ${e && e.message}`); }
 
 console.log(`\n${state.failed ? 'FAILED' : 'ALL PASSED'}: ${state.passed} passed / ${state.failed} failed`);
 process.exit(state.failed ? 1 : 0);
