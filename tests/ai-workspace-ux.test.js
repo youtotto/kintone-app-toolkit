@@ -7,6 +7,8 @@
 //
 // 実行方法: node tests/ai-workspace-ux.test.js
 'use strict';
+// 実行が 10 秒を超えると、スクリプトの入口（waitReady の 10 秒の待ちの後に kintone.app.getId() を呼ぶ）が動く。テストには kintone が無いので、その 1 件だけを無視する
+process.on('unhandledRejection', (e) => { if (/kintone is not defined/.test(String(e && e.message))) return; console.error(e); process.exit(1); });
 const fs = require('fs');
 const path = require('path');
 const { loadToolkit, makeAssert } = require('./helpers/load-toolkit.js');
@@ -57,7 +59,7 @@ const makeStorage = () => { const m = new Map(); return { getItem: (k) => (m.has
 const answerFor = (ctx, text) => ({ ok: true, contractVersion: '2.1', meta: { requestId: 'qa-1', usage: { usedThisMonth: 2, monthlyLimit: 20 }, normalization: { warnings: [] } }, answer: text, facts: ctx.facts.length ? [{ text: 'fact', evidenceIds: [ctx.facts[0].id] }] : [], analysis: [], recommendations: [], unknowns: [] });
 const tick = () => new Promise(r => setTimeout(r, 0));
 const ticks = async (n = 4) => { for (let i = 0; i < n; i++) await tick(); };
-function mount({ inputs = INPUTS, paid = true, plans = null, now = null } = {}) {
+function mount({ inputs = INPUTS, paid = true, plans = null, now = null, extra = {} } = {}) {
   const storage = makeStorage();
   const settings = KTAiClient.createSettingsStore({ storage, host: 't.cybozu.com' });
   settings.setConsent(true);
@@ -79,6 +81,7 @@ function mount({ inputs = INPUTS, paid = true, plans = null, now = null } = {}) 
     ...(paid ? { settings, session, hostname: 't.cybozu.com', connectFlow: flow } : {}),
     executor: { api: mock.api, appId: '341' }, openCustomize: (x) => { opened.push(x); return { found: true }; },
     now: now || (() => clock.t),
+    ...extra,
   });
   const $ = (id) => host.querySelector(`#${id}`);
   const ws = () => ['kt-ai-subject-info', 'kt-ai-spec', 'kt-ai-plan-result', 'kt-ai-review-result', 'kt-ai-exec', 'kt-ai-jsreg', 'kt-ai-code-head', 'kt-ai-code-review'].map(id => $(id).innerHTML).join('\n');
@@ -305,6 +308,311 @@ console.log('\n--- §27. ViewModel（純関数）: Chat と Workspace は同じ�
   assert(new RegExp(`✓ 実行可能</span><b>${rs.safe}件`).test(rc), 'reviewCardHtml は reviewSummary の値をそのまま使う');
   assert(!/function assetCardsHtml|function customizationCardHtml/.test(SRC_TEXT), '重複レンダラー（資産カード / Customization カード）は削除');
 }
+
+// =========================================================
+// 2026-10-05（利用者の指摘）: 「新しい会話を始めたら新しい会話の内容だけを見たい。一方、あとから検証環境に反映した内容をまとめて確認したい」
+console.log('\n--- §21. 新しい会話は新しい会話の内容だけ・動作テスト環境への反映の記録（会話をまたいで、このページを開いている間） ---');
+const section = async (fn) => { try { await fn(); } catch (e) { assert(false, `例外: ${e && e.stack ? e.stack.split('\n').slice(0, 2).join(' / ') : e}`); } };
+await section(async () => {
+  // N1: 新しい会話で右を空にし、前の会話の計画は新しい会話から反映できない
+  const m = mount();
+  await ticks();
+  await m.panel.send(GOAL); await ticks();
+  await m.$('kt-ai-review-result').dispatch({ type: 'change', target: { dataset: { step: 'P1' }, value: 'approve' } });
+  assert(/kt-ai-exec-start/.test(m.$('kt-ai-exec').innerHTML) && /更新状況/.test(m.$('kt-ai-plan-result').innerHTML), '前提: 計画 v1 と承認（［動作テスト環境へ反映］が出ている）');
+  await clickChat(m, 'new-conv'); await ticks();
+  assert(m.msgs().length === 0 && m.$('kt-ai-plan-result').innerHTML === '' && m.$('kt-ai-plan-result').style.display === 'none' && m.$('kt-ai-pane-plan-empty').style.display === '' && m.$('kt-ai-review-result').innerHTML === '' && m.$('kt-ai-review-empty').style.display === '', 'N1: 新しい会話では右「計画」「検証」に前の会話の計画を残さない');
+  assert(!/kt-ai-exec-start/.test(m.$('kt-ai-exec').innerHTML) && /作業中の成果物はありません/.test(m.$('kt-ai-ws-state').innerHTML) && m.panel.drawerState().pane === 'plan' && !m.panel.activeArtifact(), 'N1: 右「実行」に前の計画の［反映］を出さない・作業状態も空・表示中の成果物も無し');
+  const r = await m.panel.startExecutor();
+  assert(r === null && m.panel.executorState().stage === 'idle' && writes(m).length === 0, 'N1: 前の会話の計画は新しい会話から反映できない（以前は検証と承認が残り、そのまま反映できた）');
+});
+await section(async () => {
+  // N2: 反映の準備の途中で新しい会話になったら、その準備は使わない（確認に進めない）
+  const m = mount();
+  await ticks();
+  await m.panel.send(GOAL); await ticks();
+  m.panel.decide('P1', 'approve');
+  const p = m.panel.startExecutor();
+  await clickChat(m, 'new-conv');
+  const r = await p; await ticks();
+  assert(r === null && m.panel.executorState().stage === 'idle' && !/kt-ai-exec-go/.test(m.$('kt-ai-exec').innerHTML) && writes(m).length === 0, `N2: 準備の途中で新しい会話 → 準備を捨て、前の計画の最終確認を出さない: ${m.panel.executorState().stage}`);
+});
+await section(async () => {
+  // N3〜N5: 反映の記録（会話をまたぐ）・記録から戻す・監査 JSON・2 つめの会話の反映
+  const m = mount();
+  await ticks();
+  await m.panel.send(GOAL); await ticks();
+  await m.$('kt-ai-review-result').dispatch({ type: 'change', target: { dataset: { step: 'P1' }, value: 'approve' } });
+  await clickPane(m, 'exec', { id: 'kt-ai-exec-start' }); await ticks();
+  await clickPane(m, 'exec', { id: 'kt-ai-exec-go' }); await ticks(8);
+  const exId = m.panel.executorState().execution?.executionId;
+  let log = m.$('kt-ai-apply-log').innerHTML;
+  assert(m.mock.st.fields.progress && exId && /動作テスト環境への反映の記録/.test(log) && /反映済み（未復元）/.test(log) && /この会話/.test(log) && /計画 v1/.test(log) && /依頼: 更新状況を管理したい/.test(log) && /更新状況フィールドを追加/.test(log) && /上で表示中/.test(log), 'N3: 反映すると記録に出る（いつ・どの依頼・何を・状態）');
+  const logId = (log.match(/data-log="([^"]+)"/) || [])[1];
+  await clickChat(m, 'new-conv'); await ticks();
+  log = m.$('kt-ai-apply-log').innerHTML;
+  assert(m.msgs().length === 0 && !/Simulationとの一致/.test(m.$('kt-ai-exec').innerHTML) && /前の会話/.test(log) && /反映済み（未復元）/.test(log) && /data-act="log-open"/.test(log) && /詳細・元に戻す/.test(log) && !/上で表示中/.test(log), 'N3: 新しい会話の右「実行」に前の会話の反映結果は出さず、反映の記録に「前の会話」として残す');
+  assert(m.panel.unrevertedPreviewChange() === true, 'N3: 戻していない反映がある間は、ページを離れる前の確認を続ける（記録の分も含む）');
+  // 監査 JSON（記録から）: 反映した時点の計画と判断（新しい会話の後も）
+  m.copies.length = 0;
+  await clickPane(m, 'exec', { dataset: { act: 'log-audit', log: logId } }); await ticks();
+  const audit = m.copies.length ? JSON.parse(m.copies[m.copies.length - 1]) : null;
+  assert(audit && /更新状況を管理したい/.test(JSON.stringify(audit)) && JSON.stringify(audit).includes(exId) && /approve/.test(JSON.stringify(audit.humanDecisions || {})), 'N4: 記録の監査 JSON は、反映した時点の計画・判断（新しい会話の後も）');
+  // 新しい会話でも「戻して」→ カード → 記録から開いて、既存の確認（現在の設定との照合）を通して戻す
+  await m.panel.send('やっぱり元に戻して'); await ticks();
+  const card = m.msgs().find(x => x.data?.kind === 'rollback-ready');
+  assert(card && card.data.executionId === exId, 'N3: 新しい会話でも「戻して」で前の会話の反映を戻す案内');
+  await clickChat(m, 'rollback', { execution: exId }); await ticks(8);
+  assert(m.panel.executorState().stage === 'rollback-confirm' && /反映の記録から開いた反映です（前の会話・依頼: 更新状況を管理したい）/.test(m.$('kt-ai-exec').innerHTML) && !m.msgs().some(x => x.type === 'EXECUTION'), `N3: 記録から開いて戻す確認へ（新しい会話に前の反映の「反映しています」カードを出さない）: ${m.panel.executorState().stage}`);
+  await clickPane(m, 'exec', { id: 'kt-ai-exec-rollback-go' }); await ticks(8);
+  log = m.$('kt-ai-apply-log').innerHTML;
+  assert(m.panel.executorState().stage === 'rolled-back' && !m.mock.st.fields.progress && /元に戻し済み/.test(log) && m.panel.unrevertedPreviewChange() === false && m.conv().state.activeExecution?.rolledBack === true && m.msgs().some(x => x.data?.kind === 'apply-log-rolled-back'), 'N3: 前の会話の反映を記録から戻せる（記録は「元に戻し済み」・「戻して」の判定も更新・会話に結果の一言）');
+  // N5: この会話で別の計画を反映すると、記録は 2 件（右上は今の会話の反映）
+  await m.panel.send(GOAL, { intent: 'PLAN' }); await ticks();
+  await m.$('kt-ai-review-result').dispatch({ type: 'change', target: { dataset: { step: 'P1' }, value: 'approve' } });
+  await clickPane(m, 'exec', { id: 'kt-ai-exec-start' }); await ticks();
+  await clickPane(m, 'exec', { id: 'kt-ai-exec-go' }); await ticks(8);
+  log = m.$('kt-ai-apply-log').innerHTML;
+  const items = (log.match(/class="kt-ai-apply-log-item"/g) || []).length;
+  assert(items === 2 && /元に戻し済み/.test(log) && /反映済み（未復元）/.test(log) && /この会話/.test(log) && /前の会話/.test(log) && m.panel.executorState().stage === 'done' && !/反映の記録から開いた/.test(m.$('kt-ai-exec').innerHTML), `N5: 会話をまたいだ反映が記録にまとまる（${items} 件）。右上は今の会話の反映`);
+});
+await section(async () => {
+  // N6: 同じ会話で別の計画になったら、前の計画の生成コードをコードペインに残さない
+  const m = mount({ plans: (ctx) => (ctx.goal === GOAL_HYBRID ? PLAN_HYBRID : PLAN_V1) });
+  await ticks();
+  await m.panel.send(GOAL_HYBRID); await ticks();
+  await confirmSpec(m);
+  await clickPane(m, 'plan', { dataset: { act: 'generate', cid: 'C1' } }); await ticks();
+  assert(m.$('kt-ai-code-view').textContent.includes("value === '完了'") && m.$('kt-ai-code-register').style.display === '', '前提: 計画 A（JS あり）のコードがコードペインにある');
+  await m.panel.send(GOAL, { intent: 'PLAN' }); await ticks();
+  assert(m.conv().activePlan().plan.goal === GOAL && !/fieldOnOff\.js/.test(m.$('kt-ai-code-head').innerHTML) && m.$('kt-ai-code-view').style.display === 'none' && m.$('kt-ai-code-register').style.display === 'none', `N6: 別の計画 B になったら、計画 A のコードと登録ボタンを残さない: ${m.$('kt-ai-code-head').innerHTML.slice(0, 80)}`);
+});
+await section(async () => {
+  // N7: JavaScript の登録も記録に残し、新しい会話の後に記録から開ける
+  const m = mount({ plans: () => PLAN_HYBRID });
+  await ticks();
+  const seed = KTContext.buildConsultationSeed({ data: INPUTS.data, deps: INPUTS.deps, scan: INPUTS.scan, file: { name: 'fieldOnOff.js', target: 'desktop', type: 'FILE', fileKey: '20261003000000EEEE', size: '300' }, sourceText: FIELD_ON_OFF, appName: '案件管理' });
+  m.panel.consult(seed);
+  await m.panel.send('承認済みでは金額を編集できなくしたい'); await ticks();
+  await confirmSpec(m);
+  await clickPane(m, 'plan', { dataset: { act: 'generate', cid: 'C1' } }); await ticks();
+  await clickPane(m, 'code', { id: 'kt-ai-code-register' }); await ticks();
+  for (const x of (m.panel.jsExecState().prepared?.confirmations || [])) await m.host.querySelector('#kt-ai-pane-exec').dispatch({ type: 'change', target: { dataset: { ackKey: x.key }, checked: true } });
+  await clickPane(m, 'exec', { id: 'kt-ai-jsreg-go' }); await ticks(8);
+  const log = m.$('kt-ai-apply-log').innerHTML;
+  assert(m.panel.jsExecState().stage === 'done' && /JavaScript の登録/.test(log) && /PC「fieldOnOff\.js」/.test(log) && /反映済み（未復元）/.test(log), 'N7: JavaScript の登録も記録に出る');
+  const logId = (log.match(/data-log="([^"]+)"/) || [])[1];
+  await clickChat(m, 'new-conv'); await ticks();
+  assert(m.msgs().length === 0 && m.panel.jsExecState().stage === 'idle' && !/planVsActual/.test(m.$('kt-ai-jsreg').innerHTML) && /前の会話/.test(m.$('kt-ai-apply-log').innerHTML) && m.panel.unrevertedPreviewChange() === true, 'N7: 新しい会話の右「実行」に前の会話の登録結果を出さず、記録に残す');
+  await clickPane(m, 'exec', { dataset: { act: 'log-open', log: logId } }); await ticks();
+  assert(m.panel.jsExecState().stage === 'done' && /反映の記録から開いた JavaScript の登録です（前の会話・依頼:/.test(m.$('kt-ai-jsreg').innerHTML) && /planVsActual/.test(m.$('kt-ai-jsreg').innerHTML) && m.msgs().length === 0, 'N7: 記録から開くと、登録の結果を右「実行」に出す（新しい会話に前の会話のカードは出さない）');
+});
+
+// =========================================================
+// 2026-10-05（§21 の差分レビューの指摘）: 記録を開く・閉じる・処理の途中・会話の写し・表示
+console.log('\n--- §22. 反映の記録の差分レビューの指摘（処理の途中に開く・閉じる・途中で新しい会話・手順・状態・古いコードカード・運用環境との差） ---');
+const gate = () => { let open; const p = new Promise(r => { open = r; }); return { p, open }; };
+const logItems = (html) => [...html.matchAll(/<li class="kt-ai-apply-log-item" data-log="([^"]+)"[\s\S]*?<\/li>/g)].map(x => ({ id: x[1], html: x[0], label: (x[0].match(/font-weight:600;">([^<]+)<\/span>/) || [])[1] }));
+const execHas = (m, id) => new RegExp(`id="${id}"`).test(m.$('kt-ai-exec').innerHTML);
+const applyP1 = async (m, goal = GOAL, opts = {}) => {
+  await m.panel.send(goal, opts); await ticks();
+  await m.$('kt-ai-review-result').dispatch({ type: 'change', target: { dataset: { step: 'P1' }, value: 'approve' } });
+  await clickPane(m, 'exec', { id: 'kt-ai-exec-start' }); await ticks();
+  await clickPane(m, 'exec', { id: 'kt-ai-exec-go' }); await ticks(8);
+};
+await section(async () => {
+  // L1（high）: 反映の途中に記録の同じ項目・別の項目を開いても、途中の反映を「完了」にせず、別の記録を上書きしない
+  const PLAN_VIEW = JSON.parse(JSON.stringify(PLAN_V1));
+  PLAN_VIEW.plan.proposedFields = [];
+  PLAN_VIEW.plan.steps = [{ ...PLAN_V1.plan.steps[1], id: 'P1', dependsOn: [], spec: { ...PLAN_V1.plan.steps[1].spec, fields: ['owner', 'case_name'] }, title: '一覧「担当者別」を追加' }];
+  PLAN_VIEW.plan.questions = [];
+  let n = 0;
+  const inputs = buildInputs();
+  const m = mount({ inputs, plans: () => (++n === 1 ? PLAN_VIEW : PLAN_V1) });
+  await ticks();
+  await m.panel.send(GOAL); await ticks();
+  m.panel.decide('P1', 'approve');
+  await m.panel.startExecutor(); await m.panel.confirmExecutor(); await ticks(4);
+  const exB = m.panel.executorState().execution.executionId;
+  inputs.data.views.views['担当者別'] = JSON.parse(JSON.stringify(m.mock.st.views['担当者別']));
+  await clickChat(m, 'new-conv'); await ticks();
+  await m.panel.send(GOAL); await ticks();
+  m.panel.decide('P1', 'approve');
+  await m.panel.startExecutor();
+  const g = gate();
+  { const o = m.mock.api.addPreviewFields; let first = true; m.mock.api.addPreviewFields = async (...a) => { if (first) { first = false; await g.p; } return o.apply(m.mock.api, a); }; }
+  const run = m.panel.confirmExecutor(); await ticks(6);
+  const exA = m.panel.executorState().prepared.executionId;
+  const items = logItems(m.$('kt-ai-apply-log').innerHTML);
+  const idA = items.find(x => /この会話/.test(x.html)).id, idB = items.find(x => /前の会話/.test(x.html)).id;
+  assert(m.panel.executorState().stage === 'running' && items.find(x => x.id === idA).label === '処理中', '前提: 反映の途中（記録は「処理中」）');
+  await clickPane(m, 'exec', { dataset: { act: 'log-open', log: idA } }); await ticks();
+  assert(m.panel.executorState().stage === 'running', `L1: 反映の途中に同じ記録を開いても、途中のまま（「完了」にしない）: ${m.panel.executorState().stage}`);
+  await clickPane(m, 'exec', { dataset: { act: 'log-open', log: idB } }); await ticks();
+  assert(m.panel.executorState().stage === 'running' && m.panel.executorState().prepared.executionId === exA && m.msgs().some(x => x.data?.kind === 'apply-log-busy'), 'L1: 反映の途中は別の記録を開かない（案内を出す）');
+  g.open(); await run; await ticks(8);
+  const st = m.panel.executorState();
+  const items2 = logItems(m.$('kt-ai-apply-log').innerHTML);
+  assert(st.stage === 'done' && st.execution.executionId === exA && st.prepared.executionId === exA && m.mock.st.fields.progress && items2.find(x => x.id === idA).label === '反映済み（未復元）' && items2.find(x => x.id === idB).label === '反映済み（未復元）', 'L1: 反映が終わると、結果はその反映の記録に入る（別の記録を上書きしない）');
+  await clickPane(m, 'exec', { dataset: { act: 'log-open', log: idB } }); await ticks();
+  const rbB = await m.panel.startRollback();
+  assert(m.panel.executorState().execution.executionId === exB && rbB && rbB.status === 'PREPARED', `L1: 前の反映（B）も記録から開いて戻す確認へ進める: ${rbB && rbB.status}`);
+  m.panel.cancelRollback();
+  // 戻している途中に同じ記録を開いても、途中のまま
+  await clickPane(m, 'exec', { dataset: { act: 'log-open', log: idA } }); await ticks();
+  await m.panel.startRollback();
+  const g2 = gate();
+  for (const k of Object.keys(m.mock.api)) { if (/^(get|download)/.test(k)) continue; const o = m.mock.api[k]; let first = true; m.mock.api[k] = async (...a) => { if (first) { first = false; await g2.p; } return o.apply(m.mock.api, a); }; }
+  const rb = m.panel.confirmRollback(); await ticks(4);
+  const busyStage = m.panel.executorState().stage;
+  assert(logItems(m.$('kt-ai-apply-log').innerHTML).find(x => x.id === idA).label === '処理中', `L5: 戻している途中は、記録を「処理中」と出す（「元に戻せず（要確認）」にしない）: ${busyStage}`);
+  await clickPane(m, 'exec', { dataset: { act: 'log-open', log: idA } }); await ticks();
+  assert(m.panel.executorState().stage === busyStage && busyStage === 'rolling-back', `L1: 戻している途中に同じ記録を開いても、途中のまま: ${m.panel.executorState().stage}`);
+  g2.open(); await rb; await ticks(8);
+  assert(m.panel.executorState().stage === 'rolled-back' && m.panel.executorState().execution.executionId === exA && logItems(m.$('kt-ai-apply-log').innerHTML).find(x => x.id === idA).label === '元に戻し済み', 'L1: 戻し終わった結果は、その反映の記録に入る');
+});
+await section(async () => {
+  // L2（medium）: 記録から開いた前の会話の反映は［閉じる（今の計画に戻る）］で閉じられ、今の計画の［動作テスト環境へ反映］が戻る
+  for (const rolled of [true, false]) {
+    const m = mount();
+    await ticks();
+    await applyP1(m);
+    if (rolled) { await clickPane(m, 'exec', { id: 'kt-ai-exec-rollback-start' }); await ticks(8); await clickPane(m, 'exec', { id: 'kt-ai-exec-rollback-go' }); await ticks(8); }
+    const logId = logItems(m.$('kt-ai-apply-log').innerHTML)[0].id;
+    await clickChat(m, 'new-conv'); await ticks();
+    await m.panel.send(GOAL, { intent: 'PLAN' }); await ticks();
+    await m.$('kt-ai-review-result').dispatch({ type: 'change', target: { dataset: { step: 'P1' }, value: 'approve' } });
+    assert(execHas(m, 'kt-ai-exec-start'), `前提（${rolled ? '戻し済み' : '未復元'}）: 新しい会話の計画を承認すると［動作テスト環境へ反映］が出る`);
+    await clickPane(m, 'exec', { dataset: { act: 'log-open', log: logId } }); await ticks();
+    assert(!execHas(m, 'kt-ai-exec-start') && /data-act="log-close"/.test(m.$('kt-ai-exec').innerHTML) && /反映の記録から開いた反映です（前の会話・/.test(m.$('kt-ai-exec').innerHTML), `L2（${rolled ? '戻し済み' : '未復元'}）: 記録から開くと、右「実行」に［閉じる（今の計画に戻る）］が出る`);
+    await clickPane(m, 'exec', { dataset: { act: 'log-close' } }); await ticks();
+    const label = logItems(m.$('kt-ai-apply-log').innerHTML)[0].label;
+    assert(execHas(m, 'kt-ai-exec-start') && m.panel.executorState().stage === 'idle' && label === (rolled ? '元に戻し済み' : '反映済み（未復元）') && m.panel.unrevertedPreviewChange() === !rolled, `L2（${rolled ? '戻し済み' : '未復元'}）: 閉じると今の計画の［動作テスト環境へ反映］に戻る（反映は記録に残る: ${label}）`);
+    // 判断の変更・新しい版でも、記録から開いた反映は今の計画に戻る
+    await clickPane(m, 'exec', { dataset: { act: 'log-open', log: logId } }); await ticks();
+    m.panel.decide('P1', 'approve');
+    assert(execHas(m, 'kt-ai-exec-start'), `L2（${rolled ? '戻し済み' : '未復元'}）: 記録から開いた後に今の計画の判断を変えると、今の計画に戻る`);
+    await clickPane(m, 'exec', { dataset: { act: 'log-open', log: logId } }); await ticks();
+    await m.panel.send('担当者は既存のフィールドを使って', { intent: 'REVISE_PLAN' }); await ticks(8);
+    assert(m.conv().activePlan().version === 2 && m.panel.executorState().stage === 'idle', `L2（${rolled ? '戻し済み' : '未復元'}）: 新しい版になると、記録から開いた反映は記録に戻し、右上は今の計画: ${m.panel.executorState().stage}`);
+  }
+  // 同じ会話の自分の反映は、今までどおり次の計画でも右上に残す（閉じるボタンも出さない。反映済みの計画の修正は新しい計画になる）
+  const m = mount();
+  await ticks();
+  await applyP1(m);
+  const p0 = m.conv().activePlan().planId;
+  await m.panel.send('別件で、一覧を追加したい', { intent: 'PLAN' }); await ticks(8);
+  assert(m.conv().activePlan().planId !== p0 && m.panel.executorState().stage === 'done' && !/data-act="log-close"/.test(m.$('kt-ai-exec').innerHTML), 'L2: 同じ会話の反映は、次の計画でも右上に残す（今までどおり）');
+});
+await section(async () => {
+  // L3（medium）: 反映の途中に新しい会話にしても、終わった後の「戻して」は前の反映を戻す案内を出す（HEAD と同じ）
+  const m = mount();
+  await ticks();
+  await m.panel.send(GOAL); await ticks();
+  await m.$('kt-ai-review-result').dispatch({ type: 'change', target: { dataset: { step: 'P1' }, value: 'approve' } });
+  await clickPane(m, 'exec', { id: 'kt-ai-exec-start' }); await ticks();
+  const g = gate();
+  for (const k of Object.keys(m.mock.api)) { if (/^(get|download)/.test(k)) continue; const f = m.mock.api[k]; m.mock.api[k] = async (...a) => { await g.p; return f.apply(m.mock.api, a); }; }
+  const p = clickPane(m, 'exec', { id: 'kt-ai-exec-go' }); await ticks();
+  assert(m.panel.executorState().stage === 'running' && m.conv().state.activeExecution?.written === false, '前提: 反映の途中（まだ書き込んでいない）');
+  await clickChat(m, 'new-conv'); await ticks();
+  g.open(); await p; await ticks(12);
+  const exId = m.panel.executorState().execution.executionId;
+  assert(m.mock.st.fields.progress && m.conv().state.activeExecution?.executionId === exId && m.conv().state.activeExecution.written === true && m.msgs().length === 0, 'L3: 書き込んで終わったら、「戻して」の判定の写しだけを置く（新しい会話にメッセージは足さない）');
+  assert(/前の会話（依頼: 更新状況を管理したい）の反映です。/.test(m.$('kt-ai-exec').innerHTML) && !/反映の記録から開いた/.test(m.$('kt-ai-exec').innerHTML), 'L8: 記録から開いていない反映に「記録から開いた」と書かない');
+  await m.panel.send('やっぱり元に戻して'); await ticks();
+  const card = m.msgs().find(x => x.data?.kind === 'rollback-ready');
+  assert(card && card.data.executionId === exId, 'L3: 「戻して」で前の反映を戻す案内（以前は「反映はまだ行っていません」）');
+});
+await section(async () => {
+  // L4（medium）: 記録の「手順:」は、承認して反映した手順だけ
+  const m = mount();
+  await ticks();
+  await m.panel.send(GOAL); await ticks();
+  await m.$('kt-ai-review-result').dispatch({ type: 'change', target: { dataset: { step: 'P1' }, value: 'approve' } });
+  await m.$('kt-ai-review-result').dispatch({ type: 'change', target: { dataset: { step: 'P2' }, value: 'reject' } });
+  await clickPane(m, 'exec', { id: 'kt-ai-exec-start' }); await ticks();
+  await clickPane(m, 'exec', { id: 'kt-ai-exec-go' }); await ticks(8);
+  const it = logItems(m.$('kt-ai-apply-log').innerHTML)[0];
+  assert(/更新状況フィールドを追加/.test(it.html) && !/担当者別/.test(it.html) && !m.mock.st.views['担当者別'], 'L4: 却下した手順（一覧「担当者別」）は記録の手順に出さない');
+});
+await section(async () => {
+  // L5（medium）: 戻す確認の画面は「元に戻せず（要確認）」にしない。確認のまま新しい会話にしても同じ
+  const m = mount();
+  await ticks();
+  await applyP1(m);
+  await clickPane(m, 'exec', { id: 'kt-ai-exec-rollback-start' }); await ticks(8);
+  assert(m.panel.executorState().stage === 'rollback-confirm' && logItems(m.$('kt-ai-apply-log').innerHTML)[0].label === '反映済み（未復元）', `L5: 戻す確認の画面の間は「反映済み（未復元）」: ${logItems(m.$('kt-ai-apply-log').innerHTML)[0].label}`);
+  await clickChat(m, 'new-conv'); await ticks();
+  const it = logItems(m.$('kt-ai-apply-log').innerHTML)[0];
+  assert(it.label === '反映済み（未復元）' && /詳細・元に戻す/.test(it.html) && m.panel.unrevertedPreviewChange() === true, `L5: 確認のまま新しい会話にしても「反映済み（未復元）」のまま: ${it.label}`);
+  await clickPane(m, 'exec', { dataset: { act: 'log-open', log: it.id } }); await ticks();
+  const rb = await m.panel.startRollback();
+  assert(rb && rb.status === 'PREPARED', 'L5: 記録から開いて、もう一度戻す確認へ進める');
+});
+await section(async () => {
+  // L6（medium）: 同じ会話で別の計画になっても、会話に残る前の計画のコードカードからそのコードを見られる（登録はできない）
+  const m = mount({ plans: (ctx) => (ctx.goal === GOAL_HYBRID ? PLAN_HYBRID : PLAN_V1) });
+  await ticks();
+  await m.panel.send(GOAL_HYBRID); await ticks();
+  await confirmSpec(m);
+  await clickPane(m, 'plan', { dataset: { act: 'generate', cid: 'C1' } }); await ticks();
+  const vA = m.conv().activePlan();
+  await m.panel.send(GOAL, { intent: 'PLAN' }); await ticks();
+  const btn = (m.chat().match(/<button[^>]*data-act="open-code"[^>]*data-view="code"[^>]*>/) || [''])[0];
+  assert(new RegExp(`data-plan="${vA.planId}" data-version="${vA.version}"`).test(btn), 'L6: コードカードのボタンに、カードの計画の版を付ける');
+  await clickChat(m, 'open-code', { cid: 'C1', view: 'code', plan: vA.planId, version: String(vA.version) }); await ticks();
+  assert(m.$('kt-ai-code-view').textContent.includes("value === '完了'") && m.$('kt-ai-code-view').style.display !== 'none' && m.$('kt-ai-code-register').style.display === 'none', 'L6: 前の計画のカードからコードを見られる（登録ボタンは出さない）');
+  m.copies.length = 0;
+  await clickChat(m, 'copy-code', { cid: 'C1', plan: vA.planId, version: String(vA.version) }); await ticks();
+  assert(m.copies.length === 1 && m.copies[0].includes("value === '完了'"), 'L6: 前の計画のカードからコードをコピーできる');
+  await clickChat(m, 'open-code', { cid: 'C1', view: 'code' }); await ticks();
+  assert(m.$('kt-ai-code-view').textContent.includes("value === '完了'") && m.$('kt-ai-code-register').style.display === 'none', 'L6: 版の付いていない古いカードも、会話の版から探して見られる');
+});
+await section(async () => {
+  // L7（medium）: 記録の「運用環境との差」: ［差分を見る］が効く・title は属性・読み込み直した直後も出す・反映後の件数
+  const { makeEnvGetter } = require('./helpers/dev-base-fake.js');
+  const clone = (v) => JSON.parse(JSON.stringify(v));
+  const PROD = FX.makeData();
+  let changed = false;
+  const prevData = () => { const d = clone(PROD); if (changed) d.fields.progress = { type: 'DROP_DOWN', code: 'progress', label: '更新状況', noLabel: false, required: false, options: { '未着手': { label: '未着手', index: '0' } } }; return d; };
+  const loadDevBase = async () => { const g = makeEnvGetter({ preview: prevData(), production: PROD, files: {} }); return T.KTDevBase.load({ appId: String(FX.SELF_APP), getImpl: g.getImpl, download: g.download, now: () => new Date('2026-10-05T00:00:00Z') }); };
+  const text = (html) => html.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+  const m = mount({ extra: { loadDevBase } });
+  await ticks(12);
+  const log0 = m.$('kt-ai-apply-log').innerHTML;
+  assert(/運用環境との差：/.test(text(log0)) && /このページではまだ反映していません/.test(log0), 'L7: 読み込み直した直後も、記録に「運用環境との差」を出す');
+  const b = (log0.match(/<button[^>]*data-act="open-base-diff"[^>]*>/) || [''])[0];
+  assert(/title="運用環境との差を右の「根拠」に表示します"/.test(b), `L7: ［差分を見る］の説明は title 属性: ${b}`);
+  await clickPane(m, 'exec', { dataset: { act: 'open-base-diff' } }); await ticks();
+  assert(m.panel.drawerState().pane === 'evidence', 'L7: 記録の［差分を見る］で右「根拠」の差分へ');
+  const before = (text(m.$('kt-ai-apply-log').innerHTML).match(/運用環境との差：\s*(\d+) 件/) || [])[1];
+  await m.panel.send(GOAL); await ticks(12);
+  await m.$('kt-ai-review-result').dispatch({ type: 'change', target: { dataset: { step: 'P1' }, value: 'approve' } });
+  await clickPane(m, 'exec', { id: 'kt-ai-exec-start' }); await ticks();
+  changed = true;
+  await clickPane(m, 'exec', { id: 'kt-ai-exec-go' }); await ticks(16);
+  const after = (text(m.$('kt-ai-apply-log').innerHTML).match(/運用環境との差：\s*(\d+) 件/) || [])[1];
+  const head = (text(m.$('kt-ai-header').innerHTML).match(/運用環境との差：\s*(\d+) 件/) || [])[1];
+  assert(before != null && after != null && Number(after) === Number(before) + 1 && after === head, `L7: 反映後の取り直しで、記録の件数もヘッダーと同じになる（${before} → ${after}・ヘッダー ${head}）`);
+});
+await section(async () => {
+  // L8（low）・L9（low）: 同じ会話の前の計画の反映の注記・戻し済みの記録を開いただけで「戻しました」を出さない
+  const m = mount();
+  await ticks();
+  await applyP1(m);
+  await m.panel.send('別件で、一覧を追加したい', { intent: 'PLAN' }); await ticks();
+  assert(/前の計画（依頼: 更新状況を管理したい）の反映です。/.test(m.$('kt-ai-exec').innerHTML) && !/反映の記録から開いた/.test(m.$('kt-ai-exec').innerHTML), 'L8: 同じ会話の前の計画の反映は「前の計画の反映」と書く（記録から開いていない）');
+  const m2 = mount();
+  await ticks();
+  await applyP1(m2);
+  await clickPane(m2, 'exec', { id: 'kt-ai-exec-rollback-start' }); await ticks(8);
+  await clickPane(m2, 'exec', { id: 'kt-ai-exec-rollback-go' }); await ticks(8);
+  const logId = logItems(m2.$('kt-ai-apply-log').innerHTML)[0].id;
+  await clickChat(m2, 'new-conv'); await ticks();
+  await clickPane(m2, 'exec', { dataset: { act: 'log-open', log: logId } }); await ticks();
+  assert(m2.panel.executorState().stage === 'rolled-back' && !m2.msgs().some(x => x.data?.kind === 'apply-log-rolled-back'), 'L9: 戻し済みの反映を記録から開いただけでは「戻しました」を出さない');
+});
 
 console.log(`\n${state.failed ? 'FAILED' : 'ALL PASSED'}: ${state.passed} passed / ${state.failed} failed`);
 process.exit(state.failed ? 1 : 0);
