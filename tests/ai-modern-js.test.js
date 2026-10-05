@@ -93,5 +93,19 @@ console.log('\n--- M5 構文解析器を読み込めないとき ---');
   assert(f.status === 'unchecked' && f.generated.code === NEW('var'), 'M5: 直さずにそのまま返す（Code Review が止める）');
 }
 
+console.log('\n--- M6 kintone のページ（AMD の define がある）・差分レビューの指摘 ---');
+{
+  // kintone のページには define.amd がある（実機で確認）。同梱の acorn は define に登録されず、Toolkit の中で使える
+  const T3 = loadToolkit({ pageDefine: true });
+  assert(T3.KTModernJs.available() && T3.KTModernJs.analyze('(function () { const a = 1; return a; })();').parsed, 'M6: ページに AMD の define があっても、同梱の acorn で検査できる（以前の @require の UMD 版は define に登録され、グローバルに出なかった）');
+  // REPLACE: anchor の行をそのまま残した行（既存の var）は変更していない行。足した行だけを直す
+  const SRC = "(function () {\n  kintone.events.on('app.record.create.submit', function (event) {\n    var amount = event.record['amount'].value;\n    if (!amount) { event.record['amount'].error = '必須'; }\n    return event;\n  });\n})();\n";
+  const anchor = "    var amount = event.record['amount'].value;\n    if (!amount) { event.record['amount'].error = '必須'; }";
+  const content = "    var amount = event.record['amount'].value;\n    var limit = 1000000;\n    if (!amount) { event.record['amount'].error = '必須'; }";
+  const g = { strategy: 'EXTEND_EXISTING_JS', targetFile: 'dealValidate.js', code: '    var limit = 1000000;\n', patch: { baseHash: KTScan.hashText(SRC), operations: [{ type: 'REPLACE', anchor, content }] }, events: [], fields: [], apis: [] };
+  const f = KTModernJs.fixGenerated({ generated: g, existingSource: { name: 'dealValidate.js', target: 'desktop', text: SRC } });
+  assert(f.status === 'fixed' && f.fixed.map(x => x.name).join() === 'limit' && f.generated.patch.operations[0].content.startsWith("    var amount = event.record['amount'].value;\n    const limit = 1000000;") && f.generated.code === '    const limit = 1000000;\n', `M6: REPLACE で残した既存の var は直さず、足した var だけを直す（表示用の code も同じ）: ${JSON.stringify(f.fixed.map(x => x.name))}`);
+}
+
 console.log(`\n${state.failed ? 'FAILED' : 'ALL PASSED'}: ${state.passed} passed / ${state.failed} failed`);
 process.exit(state.failed ? 1 : 0);

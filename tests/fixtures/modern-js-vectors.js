@@ -82,15 +82,14 @@ module.exports = { MODERN_JS_VECTORS: [
  },
  {
   "id": "V9",
-  "title": "switch の case・巻き上げる関数からの参照・引数と同じ名前・ブロックの無い if・eval は直さない",
-  "code": "(function (p) {\n  switch (p) { case 1: var a = 1; break; }\n  helper();\n  var h = 1;\n  function helper() { return h; }\n  var p = 2;\n  if (p) var q = 1;\n})(1);\n(function () { var e = 1; eval('e'); })();\n",
+  "title": "switch の case・巻き上げる関数からの参照・引数と同じ名前・ブロックの無い if は直さない",
+  "code": "(function (p) {\n  switch (p) { case 1: var a = 1; break; }\n  helper();\n  var h = 1;\n  function helper() { return h; }\n  var p = 2;\n  if (p) var q = 1;\n})(1);\n",
   "fixed": [],
   "remaining": [
    "a:SWITCH_CASE",
    "h:HOISTED_FUNCTION_REF",
    "p:REDECLARED",
-   "q:SINGLE_STATEMENT_CONTEXT",
-   "e:DYNAMIC_SCOPE"
+   "q:SINGLE_STATEMENT_CONTEXT"
   ]
  },
  {
@@ -126,6 +125,74 @@ module.exports = { MODERN_JS_VECTORS: [
   "code": "(function () {\n  const count = 0;\n  count += 1;\n  const done = false;\n  return [count, done];\n})();\n",
   "fixed": [
    "count:let"
+  ],
+  "remaining": []
+ },
+ {
+  "id": "V14",
+  "title": "with / eval がファイルのどこかにあれば直さない（入れ子の関数の eval からも見える）",
+  "code": "(function () { var a = 1; return a; })();\n(function () { var b = 2; (() => eval('b'))(); })();\n",
+  "fixed": [],
+  "remaining": [
+   "a:DYNAMIC_SCOPE",
+   "b:DYNAMIC_SCOPE"
+  ]
+ },
+ {
+  "id": "V15",
+  "title": "catch の引数と同じ名前の var・ブロックの関数宣言と同じ名前の var は直さない（Annex B）",
+  "code": "(function () {\n  'use strict';\n  try { throw 1; } catch (e) { if (true) { var e = 2; } }\n  var x = 1;\n  { function x() {} }\n  var ok = 3;\n  return ok;\n})();\n",
+  "fixed": [
+   "ok:const"
+  ],
+  "remaining": [
+   "e:SHADOWED",
+   "x:SHADOWED"
+  ]
+ },
+ {
+  "id": "V16",
+  "title": "for...of の右辺で同じ名前を使う var は直さない（let にすると TDZ）",
+  "code": "(function () {\n  for (var x of [x, 1]) { console.log(x); }\n})();\n",
+  "fixed": [],
+  "remaining": [
+   "x:USED_BEFORE_DECLARATION"
+  ]
+ },
+ {
+  "id": "V17",
+  "title": "繰り返しの中で、クラスのフィールドの初期化子から参照する var は直さない",
+  "code": "(function () {\n  const out = [];\n  for (let i = 0; i < 3; i++) {\n    var v = i;\n    out.push(class { x = v; });\n  }\n  return out;\n})();\n",
+  "fixed": [],
+  "remaining": [
+   "v:LOOP_CLOSURE"
+  ]
+ },
+ {
+  "id": "V18",
+  "title": "繰り返しの中の for の頭の初期値の無い var は直さない",
+  "code": "(function () {\n  for (let k = 0; k < 2; k++) {\n    for (var i; !(i >= 2); i = (i || 0) + 1) { console.log(k, i); }\n  }\n})();\n",
+  "fixed": [],
+  "remaining": [
+   "i:LOOP_NO_INIT"
+  ]
+ },
+ {
+  "id": "V19",
+  "title": "引数の既定値・switch の判別式は外側の変数を指す（外側の let を const にしない）",
+  "code": "(function () {\n  let x = 0;\n  function f(a = (x = 5)) { let x = 1; return [a, x]; }\n  let y = 1;\n  switch ((y = 2)) { default: { let y = 3; console.log(y); } }\n  return [f(), x, y];\n})();\n",
+  "fixed": [
+   "x:const",
+   "y:const"
+  ],
+  "remaining": []
+ },
+ {
+  "id": "V20",
+  "title": "ファイル直下の let は const にしない（ほかのファイルから代入されることがある）",
+  "code": "let retryCount = 0;\n(function () { let local = 1; return retryCount + local; })();\n",
+  "fixed": [
+   "local:const"
   ],
   "remaining": []
  }

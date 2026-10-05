@@ -5,10 +5,11 @@ const fs = require('fs');
 const path = require('path');
 const vm = require('vm');
 
-// modern JavaScript の検査（KTModernJs）の構文解析器。実機は @require（https://cdn.jsdelivr.net/npm/acorn@8.18.0/dist/acorn.js）、テストは同じ版の写し
-const ACORN = require('../vendor/acorn.js');
-
-function loadToolkit({ document: docOverride = null, localStorage: lsOverride = null, acorn = ACORN } = {}) {
+/**
+ * acorn: false で「構文解析器を使えない」状態を作る（KTModernJs は userscript に同梱した acorn を使う。window.__ktAcornOverride で差し替える）。
+ * pageDefine: true でページに AMD の define（define.amd）がある状態を作る（kintone のページと同じ。同梱の acorn が define に登録されないことを確かめる）
+ */
+function loadToolkit({ document: docOverride = null, localStorage: lsOverride = null, acorn = true, pageDefine = false } = {}) {
   // KT_SRC: 別のビルド（修正前の版など）で同じテストを走らせるとき（RED の確認）に使う
   const SRC = process.env.KT_SRC || path.join(__dirname, '..', '..', 'kintoneAppToolkit.user.js');
   let code = fs.readFileSync(SRC, 'utf8');
@@ -39,8 +40,8 @@ function loadToolkit({ document: docOverride = null, localStorage: lsOverride = 
     requestIdleCallback: noop,
     ResizeObserver: class { observe() { } disconnect() { } },
     addEventListener: noop, removeEventListener: noop,
-    // acorn: false で「構文解析器を読み込めない」状態を作る
-    ...(acorn ? { acorn } : {}),
+    ...(acorn === false ? { __ktAcornOverride: null } : {}),
+    ...(pageDefine ? { define: Object.assign(function define() { throw new Error('ページの define が呼ばれた'); }, { amd: {} }) } : {}),
   };
   sandbox.window = sandbox;
   sandbox.globalThis = sandbox;
