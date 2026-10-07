@@ -443,7 +443,7 @@ await section(async () => {
   const rev = calls.plan[1] && calls.plan[1].revision;
   const msg = c.messages().find(m => m.data?.kind === 'adopt-delegated');
   assert(cls.reason === 'ADOPT_DELEGATE' && calls.plan.length === 2 && rev && /委ねられた確認事項（推奨が無い）：質問「承認されなかった案件はどうしますか？」/.test(rev.request) && JSON.stringify(rev.utterances || []) === '["おすすめで"]'
-    && !ledger().entries.some(e => e.answer) && msg && /仮の案を選びます/.test(msg.text), `E6: 推奨の無い確認事項は計画の AI に仮の案を選ばせる: ${cls.reason} / ${rev && rev.request}`);
+    && !ledger().entries.some(e => e.answer) && msg && /候補からこちらの提案を選んで進めます/.test(msg.text) && !/仮の案/.test(msg.text), `E6: 推奨の無い確認事項は計画の AI に提案を選ばせる（利用者には「こちらの提案」と伝える）: ${cls.reason} / ${rev && rev.request}`);
 });
 await section(async () => {
   // E7: 最初の計画の作成中の「おすすめで」は同意と同じ（作り直しを増やさない）
@@ -581,7 +581,7 @@ await section(async () => {
   const ds = (calls.plan[1] && calls.plan[1].decisions) || [];
   const ack = c.messages().find(m => m.data?.kind === 'answers-ack');
   const req = (calls.plan[1] && calls.plan[1].revision && calls.plan[1].revision.request) || '';
-  assert(ds.some(d => /5日/.test(d.answer)) && !ds.some(d => /おすすめ/.test(d.answer)) && /委ねられた確認事項（推奨が無い）：質問「承認されなかった案件はどうしますか？」/.test(req) && ack && /おまかせ（仮の案を選びます）/.test(ack.text), `S9: 決定事項にせず、計画の AI に委ねられたと伝える: ${JSON.stringify(ds.map(d => d.answer))} / ${ack && ack.text}`);
+  assert(ds.some(d => /5日/.test(d.answer)) && !ds.some(d => /おすすめ/.test(d.answer)) && /委ねられた確認事項（推奨が無い）：質問「承認されなかった案件はどうしますか？」/.test(req) && ack && /おまかせ（こちらの提案で進めます）/.test(ack.text), `S9: 決定事項にせず、計画の AI に委ねられたと伝える: ${JSON.stringify(ds.map(d => d.answer))} / ${ack && ack.text}`);
   // 2026-10-06: 受け付けの知らせは記録に残すが、変更案に入った（done）ら会話には出さない（まだ入っていないときだけ出す）
   assert(ack && ack.data.stage === 'done' && (ack.data.queued ? KTAiChatUi.isHiddenMessage(ack) : (/変更案に入れました。/.test(KTAiChatUi.messageHtml(ack)) && !/受け付けました/.test(KTAiChatUi.messageHtml(ack)))) && !KTAiChatUi.isHiddenMessage({ ...ack, data: { ...ack.data, stage: 'failed' } }), `S9: 受け付けの知らせは出さない（回答を送った直後は「…変更案に入れました。」、失敗は「まだ変更案に入っていません」）: ${ack && ack.data.stage}`);
 });

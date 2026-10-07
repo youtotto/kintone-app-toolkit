@@ -1,0 +1,457 @@
+// 有料確認（2026-10-07）の回帰: 計画の AI が承認者・通知先が未確定のとき、確定している金額条件・日数・遷移まで REQUIRE_CONFIRMATION の details の文章に畳み
+//   spec を {} にした。利用者の指示: 確認待ちでも決まっている条件は spec に残す。未確定の承認者だけ保留。実行に必要な情報が揃うまでは反映を許可しない。
+//   要件が文章に登場するだけでなく、対応する手順・spec・JS 仕様・未解決事項のどこに保持されているかを確認する。C1 の対象外の要件は「この JS の担当範囲外」。
+//   再利用フィールドの警告は、読むだけと、値の書き込み・制御変更を分ける
+//
+// 検証内容（2026-10-07 独立レビューの指摘 1〜5 の修正を含む）:
+//   §1 要件の保持（KTPlanReview.traceRequirements）: 新ケース 1（3 日は spec・100 万円は未解決と文章だけ → 警告）/ 旧 §10（100 万円が spec:P2.filterCond・警告なし）。
+//      数の anchor は単位付きだけ（「1回目」「2件以上」は警告なし）・比較語の境界の同値（100万円未満 ↔ amount <= "999999"）・午前 9 時 ↔ "09:00"・planRefs の手順を heldIn の先頭に
+//   §2 要件の保持: 新ケース 2（100 万円が spec に無く警告・承認済み は js:C1 / C2 の condition）/ 旧 CX-1 初版（1000000 が spec:P5.filterCond・警告なし）
+//   §3 反映の制限（T1）: ADD_PROCESS_STATUS の assignees [] ＋ 確認待ち（validation.pending ACTOR、または NEEDS_CONFIRMATION ＋ 承認者 / 作業者の blocking 質問 ＋ 中間ステータス）
+//      → Review に ASSIGNEES_PENDING・Executor は Review の issue だけを見て UNSUPPORTED。終端ステータス・質問なし・回答後（assignees あり）は止めない。
+//      ADD_REMINDER / ADD_NOTIFICATION の targets [] は TARGETS_MISSING
+//   §4 確認待ちの spec を見せる（T2）: REQUIRE_CONFIRMATION に spec があれば r.spec。「確認してから決める：…」は proposal.summary があるときだけ。右の要約は normalizeSpec を通す
+//   §5 再利用の読み書き（T3）: READ と確定したときだけ PLANNER_IMPACT_MISSING を出さない。customizations が空は従来どおり警告・ADD_PROCESS_STATUS がある ステータス REUSE は警告・
+//      標準手順の spec が書き込む（アプリアクションの転記先・ルックアップの取得項目）は WRITE
+//   §6 担当範囲（T4）: coverage の OUT_OF_SCOPE は outOfScope・他の customization の担当は「正規化後に同一」か「2-gram の Dice 係数 0.6 以上かつ自分より 0.2 以上高い」ときだけ・
+//      担当の無い OUT_OF_SCOPE は unowned（check coverage-owner）・code-intro / コードカードで別に出す・buildGenerator の otherCustomizations
+//   §7 会話（T5）: 台帳が requirementOps で更新された後に trace が取れ、右の「確認結果」の警告一覧に出る（二重に出さない）。trace の件数が台帳と違えば作り直す
+//
+// 実行方法: node tests/ai-spec-retention.test.js
+'use strict';
+process.on('unhandledRejection', (e) => { if (/kintone is not defined/.test(String(e && e.message))) return; console.error(e); process.exit(1); });
+const { loadToolkit, makeAssert } = require('./helpers/load-toolkit.js');
+const T = loadToolkit();
+const { KTPlanReview, KTPlanExecutor, KTPlanText, KTCodeReview, KTContext, KTContextUi, KTAiClient, KTAiConversation, KTAiChatUi, KTAiWorkspaceViewModel: VM } = T;
+const { assert, state } = makeAssert();
+const FX = require('./fixtures/ai-context-app.js');
+const SR = require('./fixtures/spec-retention-cases.js');
+const R = KTPlanReview, E = KTPlanExecutor;
+
+const INPUTS = SR.inputs353(T);
+const clone = SR.clone;
+const review = (p, extra = {}) => R.review({ plan: clone(p), ...INPUTS, ...extra });
+const st = (rv, id) => rv.steps.find(s => s.stepId === id);
+const codes = (s) => (s?.issues || []).map(i => i.code);
+const traceOf = (rv, id) => (rv.requirementTrace?.requirements || []).find(r => r.id === id) || null;
+const anchor = (tr, kind, value) => (tr?.anchors || []).find(a => a.kind === kind && String(a.value) === String(value)) || null;
+const held = (a, prefix) => (a?.heldIn || []).filter(h => h.startsWith(prefix));
+const notInSpec = (rv) => (rv.warnings || []).filter(w => w.code === 'REQUIREMENT_CONDITION_NOT_IN_SPEC');
+const spec = (o) => ({ name: null, from: null, to: null, filterCond: null, assignees: [], targets: [], events: [], timingField: null, daysLater: null, time: null, fields: [], sort: null, sourceApp: null, keyField: null, mappings: [], fieldType: null, required: null, options: [], destApp: null, accessibility: null, entities: [], changeKind: null, assigneeType: null, customizationId: null, ...o });
+const mkStep = (id, actionType, targetKind, targetRef, sp = {}, extra = {}) => ({ id, actionType, targetKind, targetRef, targetExists: null, title: `${id} ${actionType}`, proposal: { summary: '', details: [] }, spec: spec(sp), dependsOn: [], reason: '', evidenceIds: [], confidence: 'INFERRED', alternativeId: null, validation: { status: 'ok', issues: [] }, ...extra });
+const mkPlan = (steps, extra = {}) => ({ planVersion: '1', goal: 'g', assessment: { summary: '', usableExistingFields: [], usableExistingSettings: [], missingCapabilities: [], uncertainties: [] }, relevantFields: [], proposedFields: [], steps, alternatives: [], impact: [], questions: [], provisionals: [], unknowns: [], planConfidence: 'INFERRED', solution: 'STANDARD', customizations: [], ...extra });
+const classify = (p, rv, extra = {}) => E.classifySteps({ plan: p, review: rv, approvedSteps: p.steps.map(s => s.id), fieldsNow: INPUTS.data.fields, processNow: INPUTS.data.status, ...extra });
+const tick = () => new Promise(r => setTimeout(r, 0));
+const ticks = async (n = 6) => { for (let i = 0; i < n; i++) await tick(); };
+
+(async () => {
+async function section(fn) { try { await fn(); } catch (e) { assert(false, `例外: ${e && e.stack ? e.stack.split('\n').slice(0, 3).join(' / ') : e}`); } }
+
+// =========================================================
+console.log('\n--- §0. 前提: App 353 の設定と計画の fixture ---');
+await section(async () => {
+  assert(Object.keys(INPUTS.data.fields).length === 18 && INPUTS.data.status.enable === true && Object.keys(INPUTS.data.status.states).length === 3 && INPUTS.scan && INPUTS.deps.edges.length > 0, 'App 353: フィールド 18・プロセス 3 ステータス・JS 2 本の解析（依存関係あり）');
+  assert(!/@|https?:\/\/|cybozu/.test(JSON.stringify(SR)), 'fixture にメールアドレス・URL・ドメインを含まない');
+  assert(SR.CASE1_PLAN.steps[1].actionType === 'REQUIRE_CONFIRMATION' && Object.keys(SR.CASE1_PLAN.steps[1].spec).length === 0 && SR.CASE2_PLAN.steps[0].actionType === 'REQUIRE_CONFIRMATION' && Object.keys(SR.CASE2_PLAN.steps[0].spec).length === 0, '新ケース 1・2: 確認待ちの手順の spec が {}（有料確認で観測した形）');
+  assert(SR.OLD_S10_PLAN.steps[1].spec.filterCond === 'ステータス in ("承認待ち") and amount >= "1000000"' && SR.OLD_CX1_PLAN.steps.length === 11 && SR.OLD_CX1_PLAN.steps[4].spec.filterCond === 'amount >= "1000000"', '旧 §10・旧 CX-1 初版: 確認待ちでも spec に条件がある');
+});
+
+// =========================================================
+console.log('\n--- §1. 要件の保持: 新ケース 1 と旧 §10（3 日・100 万円・承認待ち がどこにあるか）---');
+await section(async () => {
+  const rv = review(SR.CASE1_PLAN, { requirements: SR.REQUIREMENTS.case1 });
+  const r1 = traceOf(rv, 'R1'), r2 = traceOf(rv, 'R2');
+  assert(rv.requirementTrace && rv.requirementTrace.requirements.length === 2 && r1 && r2, 'review({ requirements }) → review.requirementTrace（要件ごと）');
+  const d3 = anchor(r1, 'number', 3), yen = anchor(r1, 'number', 1000000), wait = anchor(r1, 'name', '承認待ち');
+  assert(d3 && d3.heldIn.includes('spec:P1.daysLater'), `R1: 3 日は spec:P1.daysLater にある: ${JSON.stringify(d3 && d3.heldIn)}`);
+  assert(wait && wait.heldIn.includes('spec:P1.filterCond'), `R1: 承認待ち は spec:P1.filterCond にある: ${JSON.stringify(wait && wait.heldIn)}`);
+  assert(yen && !held(yen, 'spec:').length && !held(yen, 'js:').length && held(yen, 'unresolved:').includes('unresolved:P2.details') && held(yen, 'unresolved:').includes('unresolved:Q1') && held(yen, 'prose:').includes('prose:assessment.summary'), `R1: 100 万円は spec にも js にも無く、未解決（P2 の details・Q1）と文章（assessment.summary）だけ: ${JSON.stringify(yen && yen.heldIn)}`);
+  const ws = notInSpec(rv);
+  assert(ws.length === 1 && ws[0].requirementId === 'R1' && ws[0].where === 'exceptions[0]' && ws[0].severity === 'medium' && ws[0].message === '「金額が100万円以上」の条件が手順の spec にも JavaScript の条件にもありません（文章と確認事項にだけあります）', `REQUIREMENT_CONDITION_NOT_IN_SPEC が R1 の例外（金額が100万円以上）に出る: ${JSON.stringify(ws)}`);
+  assert(r1.status === 'unresolved' && r2.status === 'unanchored' && !ws.some(w => w.requirementId === 'R2'), `R1 の状態は unresolved（いちばん弱い置き場所）、R2（条件なしの AI の提案）は unanchored で警告なし: ${r1.status} / ${r2.status}`);
+  assert(JSON.stringify(ws[0].values) === '["100万円","金額"]', `警告に足りない値（100万円・金額）を添える: ${JSON.stringify(ws[0].values)}`);
+  // 独立レビュー 2: 個数・序数（件・回目）と単位の無い裸の数は anchor にしない（警告が出ない）
+  const req = (id, condition, extra = {}) => ({ id, target: '', condition, behavior: 'x', exceptions: [], decision: 'decided', disposition: 'adopted', planRefs: [], ...extra });
+  const cnt = R.traceRequirements({ plan: SR.CASE1_PLAN, requirements: [req('R1', '1回目の差戻し'), req('R2', '2件以上'), req('R3', '5を超える'), req('R4', '3人以上・2つ目・10個・4行目')], data: INPUTS.data });
+  assert(cnt.warnings.length === 0 && cnt.requirements.every(r => r.status === 'unanchored' && !r.anchors.some(a => a.kind === 'number')), `「1回目の差戻し」「2件以上」「5を超える」「3人以上…」: 数は anchor にせず警告なし: ${JSON.stringify(cnt.requirements.map(r => [r.id, r.status, r.anchors.length]))}`);
+  // 比較語の境界の同値: 100万円未満 ↔ amount <= "999999"（spec 扱い）、100万円超 ↔ >= "1000001"、100万円以下 ↔ <= "1000000"
+  const bplan = (cond) => mkPlan([mkStep('P1', 'ADD_PROCESS_ACTION', 'PROCESS_ACTION', '課長へ申請', { name: '課長へ申請', from: '作成中', to: '承認待ち', filterCond: cond }, { confidence: 'CONFIRMED' })]);
+  const b1 = R.traceRequirements({ plan: bplan('amount <= "999999"'), requirements: [req('R1', '金額が100万円未満')], data: INPUTS.data });
+  const b1a = anchor(b1.requirements[0], 'number', 1000000);
+  assert(b1.warnings.length === 0 && b1.requirements[0].status === 'spec' && b1a && JSON.stringify(b1a.values) === '[1000000,999999]' && b1a.heldIn.includes('spec:P1.filterCond'), `「100万円未満」＋ amount <= "999999" → spec 扱い（values に 999999）: ${JSON.stringify(b1a)}`);
+  const b2 = R.traceRequirements({ plan: bplan('amount >= "1000001"'), requirements: [req('R1', '金額が100万円超')], data: INPUTS.data });
+  const b3 = R.traceRequirements({ plan: bplan('amount <= "1000000"'), requirements: [req('R1', '金額が100万円以下')], data: INPUTS.data });
+  const b4 = R.traceRequirements({ plan: bplan('amount >= "1000001"'), requirements: [req('R1', '金額が100万円以上')], data: INPUTS.data });
+  const b4a = anchor(b4.requirements[0], 'number', 1000000);
+  assert(anchor(b2.requirements[0], 'number', 1000000).heldIn.includes('spec:P1.filterCond') && anchor(b3.requirements[0], 'number', 1000000).heldIn.includes('spec:P1.filterCond') && b4a && JSON.stringify(b4a.values) === '[1000000,999999]' && b4a.heldIn.length === 0, `「超」は N+1、「以下」は N も一致。「以上」は N+1（1000001）を認めない: ${JSON.stringify([anchor(b2.requirements[0], 'number', 1000000).heldIn, anchor(b3.requirements[0], 'number', 1000000).heldIn, b4a])}`);
+  // 時刻: 午前9時 ↔ time "09:00"（CASE1 の P1）、午後3時 ↔ "15:00"
+  const t1 = R.traceRequirements({ plan: SR.CASE1_PLAN, requirements: [req('R1', '午前9時')], data: INPUTS.data });
+  assert(t1.requirements[0].status === 'spec' && anchor(t1.requirements[0], 'number', 9).heldIn.includes('spec:P1.time'), `「午前9時」は spec の time "09:00" と一致: ${JSON.stringify(anchor(t1.requirements[0], 'number', 9))}`);
+  const pm = clone(SR.CASE1_PLAN); pm.steps[0].spec.time = '15:00';
+  const t2 = R.traceRequirements({ plan: pm, requirements: [req('R1', '午後3時')], data: INPUTS.data });
+  // 再レビュー 2026-10-07: 「午後 3 時」の値は 15 だけ（素の 3 を残すと daysLater の 3 などと偶然一致する）
+  assert(t2.requirements[0].status === 'spec' && anchor(t2.requirements[0], 'number', 15).heldIn.includes('spec:P1.time') && !anchor(t2.requirements[0], 'number', 3), `「午後3時」は "15:00" と一致し、素の 3 は値にしない: ${JSON.stringify(t2.requirements[0].anchors)}`);
+  const pm3 = clone(SR.CASE1_PLAN); pm3.steps[0].spec.time = '09:00';   // daysLater 3 のまま。午後 3 時は 15 なので daysLater の 3 とは一致しない
+  const t3 = R.traceRequirements({ plan: pm3, requirements: [req('R1', '午後3時')], data: INPUTS.data });
+  assert(t3.requirements[0].status !== 'spec' && !anchor(t3.requirements[0], 'number', 15).heldIn.some(h => h.startsWith('spec:')), `「午後3時」が daysLater の 3 と一致して spec 扱いにならない: ${JSON.stringify(anchor(t3.requirements[0], 'number', 15))}`);
+  // planRefs: 対応する手順の置き場所を heldIn の先頭にする（旧 CX-1: 100 万円は P4 / P5 の両方にある）
+  const pr = R.traceRequirements({ plan: SR.OLD_CX1_PLAN, requirements: [req('R1', '金額が100万円以上', { planRefs: ['P5'] }), req('R2', '金額が100万円未満', { planRefs: ['P4'] }), req('R3', '金額が100万円以上', { planRefs: ['P9'] })], data: INPUTS.data });
+  const h = (id) => anchor(pr.requirements.find(r => r.id === id), 'number', 1000000).heldIn;
+  assert(h('R1')[0] === 'spec:P5.filterCond' && h('R2')[0] === 'spec:P4.filterCond' && h('R2').includes('spec:P5.filterCond') && !h('R3')[0].startsWith('spec:P9') && h('R3').includes('spec:P5.filterCond') && pr.requirements[2].status === 'spec', `planRefs の手順を先頭に（その手順に無ければ計画全体の順のまま）: ${JSON.stringify({ R1: h('R1').slice(0, 2), R2: h('R2').slice(0, 2), R3: h('R3').slice(0, 2) })}`);
+  // 旧 §10: 同じ依頼で P2 が spec を持っていた → 100 万円は spec:P2.filterCond・警告なし
+  const old = review(SR.OLD_S10_PLAN, { requirements: SR.REQUIREMENTS.case1 });
+  const o1 = traceOf(old, 'R1'), oyen = anchor(o1, 'number', 1000000);
+  assert(oyen && oyen.heldIn.includes('spec:P2.filterCond') && anchor(o1, 'field', 'amount') && anchor(o1, 'field', 'amount').heldIn.includes('spec:P2.filterCond'), `旧 §10: 100 万円（と金額 = amount）は spec:P2.filterCond にある: ${JSON.stringify(oyen && oyen.heldIn)}`);
+  assert(notInSpec(old).length === 0 && o1.status === 'spec', `旧 §10: 警告なし・R1 は spec: ${o1.status}`);
+  // 新ケース 1 の v2（上長は部長グループに）: 通知先は決まったが P2 の spec はまだ {} → R3（承認待ちで金額100万円以上、3日経過）も警告
+  const v2 = review(SR.CASE1_V2_PLAN, { requirements: SR.REQUIREMENTS.case1v2 });
+  assert(notInSpec(v2).some(w => w.requirementId === 'R3' && /承認待ちで金額100万円以上、3日経過/.test(w.message)) && notInSpec(v2).some(w => w.requirementId === 'R1'), `新ケース 1 v2: R3 も R1 の例外も警告（spec はまだ {}）: ${JSON.stringify(notInSpec(v2).map(w => w.requirementId))}`);
+  // 直接呼ぶ（data から）・台帳が無い・採用されていない要件・取り消した要件
+  const direct = R.traceRequirements({ plan: SR.CASE1_PLAN, requirements: SR.REQUIREMENTS.case1, data: INPUTS.data });
+  assert(direct.warnings.length === 1 && direct.requirements[0].status === 'unresolved', 'traceRequirements は data からも同じ結果（純関数）');
+  assert(JSON.stringify(R.traceRequirements({ plan: SR.CASE1_PLAN, requirements: [], data: INPUTS.data })) === '{"requirements":[],"warnings":[]}' && JSON.stringify(R.traceRequirements({ plan: SR.CASE1_PLAN })) === '{"requirements":[],"warnings":[]}', '台帳が無ければ空（例外にしない）');
+  const unres = R.traceRequirements({ plan: SR.CASE1_PLAN, requirements: SR.REQUIREMENTS.case1.map(e => ({ ...e, disposition: 'unresolved' })), data: INPUTS.data });
+  const revoked = R.traceRequirements({ plan: SR.CASE1_PLAN, requirements: SR.REQUIREMENTS.case1.map(e => ({ ...e, decision: 'revoked' })), data: INPUTS.data });
+  assert(unres.warnings.length === 0 && unres.requirements[0].status === 'unresolved' && revoked.warnings.length === 0, '確認待ち（unresolved）・取り消し（revoked）の要件は状態だけ出し、警告は出さない');
+  const noReview = review(SR.CASE1_PLAN);
+  assert(!('requirementTrace' in noReview) && notInSpec(noReview).length === 0, 'requirements を渡さなければ従来どおり（requirementTrace は無い）');
+});
+
+// =========================================================
+console.log('\n--- §2. 要件の保持: 新ケース 2 と旧 CX-1 初版（100 万円の分岐・承認済み のロック）---');
+await section(async () => {
+  const rv = review(SR.CASE2_PLAN, { requirements: SR.REQUIREMENTS.case2 });
+  const ws = notInSpec(rv);
+  assert(ws.some(w => w.requirementId === 'R1' && /「金額が100万円以上」/.test(w.message)) && ws.some(w => w.requirementId === 'R2' && /「金額が100万円未満」/.test(w.message)), `新ケース 2: 100 万円の条件（R1 / R2）が spec に無く警告: ${JSON.stringify(ws.map(w => w.requirementId))}`);
+  const r1 = traceOf(rv, 'R1'), yen = anchor(r1, 'number', 1000000);
+  assert(yen && !held(yen, 'spec:').length && !held(yen, 'js:').length && held(yen, 'unresolved:').includes('unresolved:P1.details'), `R1: 100 万円は P1（確認待ち）の details にだけある: ${JSON.stringify(yen && yen.heldIn)}`);
+  const r3 = traceOf(rv, 'R3'), ok = anchor(r3, 'name', '承認済み');
+  assert(ok && ok.heldIn.includes('js:C1.amount.condition') && ok.heldIn.includes('js:C2.amount.condition') && ok.heldIn.includes('js:C1.item_name.condition') && r3.status === 'js' && !ws.some(w => w.requirementId === 'R3'), `R3: 承認済み は js:C1 / C2 の condition にある（警告なし・状態 js）: ${JSON.stringify(ok && ok.heldIn)}`);
+  assert(['R4', 'R5', 'R6'].every(id => traceOf(rv, id).status === 'unanchored') && !ws.some(w => ['R4', 'R5', 'R6'].includes(w.requirementId)), '値を取り出せない要件（差戻し後・既存の判定を残す・PC とモバイル）は unanchored で警告なし');
+  // 旧 CX-1 初版: 分岐が spec にある
+  const old = review(SR.OLD_CX1_PLAN, { requirements: SR.REQUIREMENTS.case2 });
+  const o1 = traceOf(old, 'R1'), oyen = anchor(o1, 'number', 1000000), o2 = traceOf(old, 'R2');
+  assert(oyen && oyen.heldIn.includes('spec:P5.filterCond') && anchor(o1, 'field', 'amount').heldIn.includes('spec:P4.filterCond') && anchor(o1, 'field', 'amount').heldIn.includes('spec:P5.filterCond'), `旧 CX-1: 1000000 が spec:P5.filterCond（金額 = amount は P4 / P5）にある: ${JSON.stringify(oyen && oyen.heldIn.filter(h => /^spec/.test(h)))}`);
+  assert(notInSpec(old).length === 0 && o1.status === 'spec' && o2.status === 'spec' && anchor(traceOf(old, 'R3'), 'name', '承認済み').heldIn.includes('spec:P6.to'), `旧 CX-1: 警告なし・R1 / R2 は spec・承認済み は P6 の遷移先: ${o1.status} / ${o2.status}`);
+});
+
+// =========================================================
+console.log('\n--- §3. 反映の制限（T1）: 承認者が確認待ちのステータスは反映しない ---');
+await section(async () => {
+  // 承認者の blocking の質問（確認待ちの条件 (ii) の材料）
+  const Q_APPROVER = [{ id: 'Q1', question: '部長承認待ちの承認者（部長）に当たる kintone のユーザーまたはグループを教えてください', reason: '', relatedEvidenceIds: [], priority: 'blocking', topic: 'approver', options: [], recommendation: '' }];
+  const branch = (extra, planExtra = { questions: Q_APPROVER }) => mkPlan([
+    mkStep('P1', 'ADD_PROCESS_STATUS', 'PROCESS_STATUS', '部長承認待ち', { name: '部長承認待ち', assigneeType: 'ONE' }, extra),
+    mkStep('P2', 'ADD_PROCESS_ACTION', 'PROCESS_ACTION', '部長へ申請', { name: '部長へ申請', from: '作成中', to: '部長承認待ち', filterCond: 'amount >= "1000000"' }, { dependsOn: ['P1'] }),
+    mkStep('P3', 'ADD_PROCESS_ACTION', 'PROCESS_ACTION', '部長が承認する', { name: '部長が承認する', from: '部長承認待ち', to: '承認済み' }, { dependsOn: ['P1'] }),
+  ], planExtra);
+  const pending = branch({ confidence: 'NEEDS_CONFIRMATION', validation: { status: 'needs_confirmation', issues: [] } });
+  const rvP = review(pending);
+  const p1 = st(rvP, 'P1');
+  assert(codes(p1).includes('ASSIGNEES_PENDING') && p1.issues.find(i => i.code === 'ASSIGNEES_PENDING').severity === 'medium' && p1.status === 'NEEDS_CONFIRMATION' && /（作業者 確認待ち）/.test(p1.diff.human[0]) && !/作業者の指定なし/.test(p1.diff.human[0]), `Review: assignees [] ＋ 確認待ち（承認者の blocking 質問・中間ステータス）→ ASSIGNEES_PENDING（medium）・「（作業者 確認待ち）」: ${JSON.stringify({ codes: codes(p1), human: p1.diff.human[0] })}`);
+  const clsP = classify(pending, rvP);
+  const c1 = clsP.find(x => x.stepId === 'P1');
+  assert(c1.status === 'UNSUPPORTED' && c1.reason === 'ASSIGNEES_PENDING' && c1.message === '作業者が決まっていません（確認待ち。回答すると反映できます）' && !c1.prepared, `Executor: classify が UNSUPPORTED ASSIGNEES_PENDING（作業者なしで反映しない）: ${JSON.stringify({ status: c1.status, reason: c1.reason })}`);
+  assert(clsP.filter(x => x.stepId !== 'P1').every(x => x.status === 'BLOCKED'), 'P1 に依存する遷移の手順も反映しない（情報が揃うまで止める）');
+  const ready = E.applyReadiness(pending, rvP).find(a => a.stepId === 'P1');
+  assert(ready && ready.apply !== 'AUTO' && /確認待ち/.test(ready.message || ''), `反映の可否の表示も「自動で反映できる」にならない: ${JSON.stringify(ready)}`);
+  // confidence だけ NEEDS_CONFIRMATION（Gateway の validation は ok）でも、承認者の blocking 質問 ＋ 中間ステータスなら同じ
+  const rvC = review(branch({ confidence: 'NEEDS_CONFIRMATION' }));
+  assert(codes(st(rvC, 'P1')).includes('ASSIGNEES_PENDING') && classify(branch({ confidence: 'NEEDS_CONFIRMATION' }), rvC).find(x => x.stepId === 'P1').reason === 'ASSIGNEES_PENDING', 'confidence NEEDS_CONFIRMATION ＋ 承認者の blocking 質問 ＋ 中間ステータス → 止める');
+  // (i) Gateway の validation.pending === 'ACTOR' だけで止まる（質問が無くても。confidence も書き換えられていない）
+  const actor = branch({ confidence: 'INFERRED', validation: { status: 'needs_confirmation', pending: 'ACTOR', issues: ['承認者が未確定'] } }, { questions: [] });
+  const rvA = review(actor);
+  assert(codes(st(rvA, 'P1')).includes('ASSIGNEES_PENDING') && classify(actor, rvA).find(x => x.stepId === 'P1').reason === 'ASSIGNEES_PENDING', `validation.pending = ACTOR だけで止まる: ${JSON.stringify(codes(st(rvA, 'P1')))}`);
+  // 再レビュー 2026-10-07（実害 1）: Gateway の応答 → KTAiClient.validatePlan → Review → classify の経路でも印が落ちない
+  //   （以前は validatePlan が validation を { status, issues } に作り直していて pending が消え、Gateway の印だけでは止まらなかった）
+  const ctxE = KTContext.buildPlan({ goal: 'g', data: INPUTS.data, deps: INPUTS.deps, scan: INPUTS.scan, incoming: null });
+  const vE = KTAiClient.validatePlan({ ok: true, contractVersion: '2.1', meta: { requestId: 'r' }, plan: clone(actor) }, ctxE);
+  const pE = vE.ok ? vE.normalized.steps.find(s => s.id === 'P1') : null;
+  assert(vE.ok && pE && pE.validation.pending === 'ACTOR' && pE.validation.status === 'needs_confirmation' && pE.confidence === 'INFERRED', `validatePlan は validation.pending = 'ACTOR' を運ぶ（confidence は変えない）: ${JSON.stringify(vE.ok ? pE && pE.validation : vE.errors)}`);
+  const rvE = vE.ok ? review(vE.normalized) : null, cE = rvE ? classify(vE.normalized, rvE).find(x => x.stepId === 'P1') : null;
+  assert(rvE && codes(st(rvE, 'P1')).includes('ASSIGNEES_PENDING') && cE.status === 'UNSUPPORTED' && cE.reason === 'ASSIGNEES_PENDING', `Gateway の印だけの計画が、正規化を通しても Review と Executor で確認待ちになる: ${JSON.stringify(rvE && { codes: codes(st(rvE, 'P1')), status: cE && cE.status })}`);
+  const vE2 = KTAiClient.validatePlan({ ok: true, contractVersion: '2.1', meta: { requestId: 'r' }, plan: clone(branch({ confidence: 'INFERRED', validation: { status: 'needs_confirmation', pending: 'OTHER', issues: [] } }, { questions: [] })) }, ctxE);
+  assert(vE2.ok && !('pending' in vE2.normalized.steps.find(s => s.id === 'P1').validation), 'validatePlan は pending の値が ACTOR 以外なら運ばない（契約の値だけ受ける）');
+  // 独立レビュー 1・4: 承認者 / 作業者の blocking 質問が無ければ、confidence NEEDS_CONFIRMATION でも止めない（別の理由の確認待ちを作業者の確認待ちにしない）
+  const noQ = branch({ confidence: 'NEEDS_CONFIRMATION', validation: { status: 'needs_confirmation', issues: [] } }, { questions: [{ ...Q_APPROVER[0], topic: 'threshold', question: '金額の境界は 100 万円ちょうどを含みますか' }] });
+  const rvQ = review(noQ);
+  assert(!codes(st(rvQ, 'P1')).includes('ASSIGNEES_PENDING') && classify(noQ, rvQ).find(x => x.stepId === 'P1').status === 'PENDING', '承認者 / 作業者以外の質問だけなら止めない（Executor も Review の issue だけを見る）');
+  // 独立レビュー 5: 終端のステータス（遷移元になるアクションが無い）は confidence NEEDS_CONFIRMATION でも止めない（作業者なしが正しい）
+  const terminal = mkPlan([
+    mkStep('P1', 'ADD_PROCESS_STATUS', 'PROCESS_STATUS', '完了', { name: '完了', assigneeType: 'ONE' }, { confidence: 'NEEDS_CONFIRMATION', validation: { status: 'needs_confirmation', issues: [] } }),
+    mkStep('P2', 'ADD_PROCESS_ACTION', 'PROCESS_ACTION', '完了にする', { name: '完了にする', from: '承認済み', to: '完了' }, { dependsOn: ['P1'] }),
+  ], { questions: Q_APPROVER });
+  const rvT = review(terminal), cT = classify(terminal, rvT).find(x => x.stepId === 'P1');
+  assert(!codes(st(rvT, 'P1')).includes('ASSIGNEES_PENDING') && /（作業者の指定なし）/.test(st(rvT, 'P1').diff.human[0]) && cT.status === 'PENDING' && /（作業者なし）/.test(cT.prepared.summary), `終端ステータスは confidence NEEDS_CONFIRMATION でも止めない: ${JSON.stringify({ codes: codes(st(rvT, 'P1')), status: cT.status })}`);
+  // 回答後（assignees が入った版）は止めない
+  const answered = branch({ confidence: 'CONFIRMED', validation: { status: 'ok', issues: [] } });
+  answered.steps[0].spec.assignees = ['FIELD_ENTITY:owner'];   // owner はユーザー選択フィールド
+  const rvAns = review(answered), cAns = classify(answered, rvAns).find(x => x.stepId === 'P1');
+  assert(!codes(st(rvAns, 'P1')).includes('ASSIGNEES_PENDING') && /作業者: /.test(st(rvAns, 'P1').diff.human[0]) && cAns.status === 'PENDING' && cAns.prepared.expect.assignees.length === 1, `回答後（assignees が入った版）は止めない: ${JSON.stringify({ codes: codes(st(rvAns, 'P1')), status: cAns.status, reason: cAns.reason })}`);
+  // Executor は条件を再計算しない: Review に ASSIGNEES_PENDING があれば、計画の confidence が HIGH でも止まる（理由が混ざらない）
+  const cMix = classify(branch({ confidence: 'HIGH' }), rvP).find(x => x.stepId === 'P1');
+  assert(cMix.status === 'UNSUPPORTED' && cMix.reason === 'ASSIGNEES_PENDING', 'Executor は Review の issue だけで判定する（自分で再計算しない）');
+  // 確認待ちでない空（終端のステータスなど）は従来どおり「作業者なし」で反映できる
+  const high = branch({ confidence: 'HIGH' });
+  const rvH = review(high);
+  const h1 = st(rvH, 'P1');
+  assert(!codes(h1).includes('ASSIGNEES_PENDING') && /（作業者の指定なし）/.test(h1.diff.human[0]), `確認待ちでない空: Review は従来どおり「（作業者の指定なし）」: ${JSON.stringify({ codes: codes(h1), human: h1.diff.human[0] })}`);
+  const ch1 = classify(high, rvH).find(x => x.stepId === 'P1');
+  assert(ch1.status === 'PENDING' && ch1.prepared && /（作業者なし）/.test(ch1.prepared.summary) && ch1.prepared.expect.assignees.length === 0, `確認待ちでない空: Executor は従来どおり「（作業者なし）」で反映できる: ${JSON.stringify({ status: ch1.status, reason: ch1.reason, summary: ch1.prepared && ch1.prepared.summary })}`);
+  const closed = classify(branch({ confidence: 'CONFIRMED' }), review(branch({ confidence: 'CONFIRMED' }))).find(x => x.stepId === 'P1');
+  assert(closed.status === 'PENDING', 'CONFIRMED の空も反映できる（終端のステータスは作業者なしが正しい）');
+  // ADD_REMINDER / ADD_NOTIFICATION の targets 空は TARGETS_MISSING で止まる（既存の動きの固定）
+  const rem = mkPlan([mkStep('P1', 'ADD_REMINDER', 'REMINDER', '停滞リマインダー', { name: '停滞リマインダー', filterCond: 'ステータス in ("承認待ち")', timingField: '更新日時', daysLater: '3', time: '09:00' }, { confidence: 'NEEDS_CONFIRMATION' })]);
+  const rvR = review(rem), cR = classify(rem, rvR)[0];
+  // リマインダーの Review は通知先の空を issue にしない（反映は Executor の prepare が TARGETS_MISSING で止める）
+  assert(st(rvR, 'P1').status !== 'INVALID' && cR.status === 'UNSUPPORTED' && cR.reason === 'TARGETS_MISSING' && cR.message === '通知先が決まっていません', `ADD_REMINDER の通知先 [] → Executor が TARGETS_MISSING（反映しない）: ${cR.status}/${cR.reason}`);
+  const ntf = mkPlan([mkStep('P1', 'ADD_NOTIFICATION', 'NOTIFICATION', '高額案件の通知', { name: '高額案件の通知', filterCond: 'amount >= "1000000"' }, { confidence: 'NEEDS_CONFIRMATION' })]);
+  const rvN = review(ntf), cN = classify(ntf, rvN)[0];
+  assert(codes(st(rvN, 'P1')).includes('TARGETS_MISSING') && cN.status === 'UNSUPPORTED' && cN.reason === 'TARGETS_MISSING', `ADD_NOTIFICATION の通知先 [] → TARGETS_MISSING（反映しない）: ${cN.status}/${cN.reason}`);
+});
+
+// =========================================================
+console.log('\n--- §4. 確認待ちの spec を見せる（T2）---');
+await section(async () => {
+  const old = review(SR.OLD_S10_PLAN);
+  const p2 = st(old, 'P2');
+  const line = (p2.diff.human || []).find(l => l.startsWith('確認してから決める：'));
+  assert(p2.spec && p2.spec.filterCond === 'ステータス in ("承認待ち") and amount >= "1000000"' && p2.spec.daysLater === '3' && p2.spec.time === '09:00' && p2.spec.timingField === '更新日時', `REQUIRE_CONFIRMATION に spec があれば r.spec に正規化して残す: ${JSON.stringify(p2.spec)}`);
+  assert(line && /条件 ステータス in \("承認待ち"\) and amount >= "1000000"/.test(line) && /基準日 更新日時/.test(line) && /3 日後/.test(line) && /09:00/.test(line), `diff.human に「確認してから決める：条件 …・基準日 …・3 日後・09:00」: ${line}`);
+  assert(p2.diff.human[0] === '100万円以上の案件の上長宛通知先を確定する（仮適用なし）' && p2.safety === 'PLAN_ONLY' && p2.diff.changeType === 'NO_CHANGE' && p2.simulated === false, '定型の行・計画のみ（仮適用しない）は従来どおり');
+  const p2new = st(review(SR.CASE1_PLAN), 'P2');
+  assert(p2new.spec === null && !(p2new.diff.human || []).some(l => /確認してから決める/.test(l)), 'spec が {} なら従来どおり（spec null・1 行を足さない）');
+  // details の文章（未確定事項・確定後の設定）からは spec を作らない（説明文の語を条件にしない）
+  const withDetails = clone(SR.CASE2_PLAN);
+  const p1 = st(review(withDetails), 'P1');
+  assert(p1.spec === null, '確認待ちの手順の details（承認者・経路の方針…）は spec にしない');
+  // 右の要約（変更内容）の「反映の前に確かめること」: title に加えて spec の条件を添える
+  const vOld = { planId: 'p', version: 1, goal: SR.OLD_S10_PLAN.goal, plan: SR.OLD_S10_PLAN, review: old, ctx: null };
+  const sumOld = KTAiChatUi.changeSummaryHtml(vOld, { open: [] });
+  const mOld = /反映の前に確かめること<\/div><div class="kt-ai-sum-warn"><ul><li>([^<]*)<\/li>/.exec(sumOld);
+  assert(mOld && /^100万円以上の案件の上長宛通知先を確定する（/.test(mOld[1]) && /条件 ステータス in \(&quot;承認待ち&quot;\) and amount &gt;= &quot;1000000&quot;/.test(mOld[1]) && /3 日後/.test(mOld[1]) && /09:00/.test(mOld[1]), `右の要約: 「反映の前に確かめること」に条件・日数・時刻を添える: ${mOld && mOld[1]}`);
+  const vNew = { planId: 'p', version: 1, goal: SR.CASE1_PLAN.goal, plan: SR.CASE1_PLAN, review: review(SR.CASE1_PLAN), ctx: null };
+  const mNew = /反映の前に確かめること<\/div><div class="kt-ai-sum-warn"><ul><li>([^<]*)<\/li>/.exec(KTAiChatUi.changeSummaryHtml(vNew, { open: [] }));
+  assert(mNew && mNew[1] === '高額案件の上長通知先を確定', `spec が {} なら title だけ（従来どおり）: ${mNew && mNew[1]}`);
+  const det = KTPlanText.specDetails(SR.OLD_S10_PLAN.steps[1], { data: INPUTS.data });
+  assert(det.map(d => d.key).join('・') === '条件・基準日・タイミング・時刻' && det[1].value === '更新日時' && det[2].value === '3 日後', `KTPlanText.specDetails は actionType で絞らない（REQUIRE_CONFIRMATION でも作れる）: ${JSON.stringify(det)}`);
+  // 独立レビュー 5: proposal.summary が空（手順カードの要約が spec から作られる）なら「確認してから決める：…」の 1 行は足さない（二重になる）。r.spec は残す
+  const noSum = clone(SR.OLD_S10_PLAN); noSum.steps[1].proposal.summary = '';
+  const p2ns = st(review(noSum), 'P2');
+  assert(p2ns.spec && p2ns.spec.daysLater === '3' && !(p2ns.diff.human || []).some(l => /確認してから決める/.test(l)), `summary が空なら 1 行を足さない（spec は残す）: ${JSON.stringify(p2ns.diff.human)}`);
+  // 右の要約は normalizeSpec を通す（プレースホルダ「なし」を落とす）: filterCond "なし" は出さず、日数だけ添える
+  const ph = clone(SR.OLD_S10_PLAN); ph.steps[1].spec = { filterCond: 'なし', daysLater: '3' }; ph.steps[1].proposal.details = [{ key: '未確定事項', value: '上長の通知先（条件 amount >= "5000000"）' }];
+  const mPh = /反映の前に確かめること<\/div><div class="kt-ai-sum-warn"><ul><li>([^<]*)<\/li>/.exec(KTAiChatUi.changeSummaryHtml({ planId: 'p', version: 1, goal: ph.goal, plan: ph, review: null, ctx: null }, { open: [] }));
+  assert(mPh && /3 日後/.test(mPh[1]) && !/なし/.test(mPh[1]) && !/5000000/.test(mPh[1]), `右の要約: 「なし」は落とし、details の文からは spec を作らない: ${mPh && mPh[1]}`);
+});
+
+// =========================================================
+console.log('\n--- §5. 再利用フィールドの警告（T3）: 読むだけと、値の書き込み・制御変更を分ける ---');
+await section(async () => {
+  const cust = (access) => ({ customizationId: 'C1', requirement: '承認済みでは金額を編集不可にする', whyStandardInsufficient: 'ステータスで切り替えるアクセス権は無い', strategy: 'NEW_JS_FILE', implementation: 'JAVASCRIPT', platform: ['desktop'], events: ['app.record.edit.show'], fields: [{ code: 'ステータス', access }, { code: 'amount', access: 'CONTROL', condition: 'ステータス in ("承認済み")' }], apis: ['kintone.events.on'], existingFiles: [], risks: [], questions: [], dependsOn: [], evidenceIds: [] });
+  const planOf = (access) => mkPlan([
+    mkStep('P1', 'REUSE_FIELD', 'FIELD', 'ステータス', { fields: ['ステータス'] }, { confidence: 'CONFIRMED' }),
+    mkStep('C1', 'CUSTOMIZATION_REQUIRED', 'JS', null, { customizationId: 'C1' }, { dependsOn: ['P1'], confidence: 'CONFIRMED' }),
+  ], { solution: 'HYBRID', customizations: [cust(access)] });
+  const rd = review(planOf('READ'));
+  const item = (rd.impactCheck || []).find(x => x.fieldCode === 'ステータス');
+  assert(item && item.toolkit.direct > 0 && item.toolkit.js >= 1, `前提: ステータス は既存の設定・JS（dealLock.js）から参照されている: ${JSON.stringify(item && item.toolkit)}`);
+  assert(!rd.warnings.some(w => /^PLANNER_IMPACT_(MISSING|MISMATCH)$/.test(w.code) && w.stepIds.includes('P1')) && !codes(st(rd, 'P1')).some(c => /^PLANNER_IMPACT/.test(c)) && st(rd, 'P1').status === 'VALID', `JS が READ するだけ → PLANNER_IMPACT_MISSING を出さない（手順も VALID のまま）: ${JSON.stringify(rd.warnings.map(w => w.code))}`);
+  assert(item.access === 'READ' && item.note === '読むだけなので依存先は変わらない', `items には access READ と「読むだけなので依存先は変わらない」を残す: ${JSON.stringify({ access: item.access, note: item.note })}`);
+  const ct = review(planOf('CONTROL'));
+  const w = ct.warnings.find(x => x.code === 'PLANNER_IMPACT_MISSING' && x.stepIds.includes('P1'));
+  assert(w && /JavaScript が編集可否を変える/.test(w.message) && codes(st(ct, 'P1')).includes('PLANNER_IMPACT_MISSING') && st(ct, 'P1').status === 'WARNING', `JS が CONTROL する → 従来どおり PLANNER_IMPACT_MISSING（message に「JavaScript が編集可否を変える」）: ${w && w.message}`);
+  const wr = review(planOf('WRITE'));
+  assert(wr.warnings.some(x => x.code === 'PLANNER_IMPACT_MISSING' && /JavaScript が値を変える/.test(x.message)) && (wr.impactCheck || []).find(x => x.fieldCode === 'ステータス').access === 'WRITE', 'JS が WRITE する → 警告（message に「JavaScript が値を変える」）');
+  // 影響範囲を挙げていれば CONTROL でも MISSING は出ない（従来どおり）。参照の無いフィールドへの影響の主張は OVERSTATED（従来どおり）
+  const said = review({ ...planOf('CONTROL'), impact: [{ targetKind: 'FIELD', targetRef: 'ステータス', description: 'dealLock.js（JavaScript）と一覧がステータスを参照', evidenceIds: [], confidence: 'CONFIRMED' }] });
+  assert(!said.warnings.some(x => /^PLANNER_IMPACT_(MISSING|MISMATCH)$/.test(x.code)), 'Planner が JS を含む影響範囲を挙げていれば CONTROL でも警告なし');
+  // 作成日時 は App 353 のどの設定・JS からも参照されていない（memo は一覧が参照している）
+  const over = review({ ...mkPlan([mkStep('P1', 'REUSE_FIELD', 'FIELD', '作成日時', { fields: ['作成日時'] }, { confidence: 'CONFIRMED' })]), impact: [{ targetKind: 'FIELD', targetRef: '作成日時', description: '多くの設定が参照', evidenceIds: [], confidence: 'INFERRED' }] });
+  const overItem = (over.impactCheck || []).find(x => x.fieldCode === '作成日時');
+  assert(overItem && overItem.toolkit.direct === 0 && over.warnings.some(x => x.code === 'PLANNER_IMPACT_OVERSTATED' && x.stepIds.includes('P1')), `OVERSTATED は従来どおり（参照が無いのに影響を主張）: ${JSON.stringify({ item: overItem && overItem.toolkit, codes: over.warnings.map(w => w.code) })}`);
+  // 独立レビュー 3: READ と確定したときだけ警告を出さない。customizations が空（JS にも標準手順にも出ない）の REUSE_FIELD は判定不能 → 従来どおり警告
+  const bare = review(mkPlan([mkStep('P1', 'REUSE_FIELD', 'FIELD', 'ステータス', { fields: ['ステータス'] }, { confidence: 'CONFIRMED' })]));
+  const bareItem = (bare.impactCheck || []).find(x => x.fieldCode === 'ステータス');
+  assert(bare.warnings.some(x => x.code === 'PLANNER_IMPACT_MISSING' && x.stepIds.includes('P1')) && bareItem && bareItem.access === null && /判定できない/.test(bareItem.note), `customizations が空の REUSE_FIELD は従来どおり警告（access null・判定不能）: ${JSON.stringify({ codes: bare.warnings.map(w => w.code), item: bareItem })}`);
+  // ステータス型のフィールドで、計画に ADD_PROCESS_STATUS があれば値の集合が変わる → JS が READ だけでも警告（WRITE 扱い）
+  const withStatus = planOf('READ');
+  withStatus.steps.push(mkStep('P2', 'ADD_PROCESS_STATUS', 'PROCESS_STATUS', '部長承認待ち', { name: '部長承認待ち', assigneeType: 'ONE' }, { confidence: 'CONFIRMED' }));
+  const ws = review(withStatus);
+  const wsItem = (ws.impactCheck || []).find(x => x.fieldCode === 'ステータス');
+  assert(ws.warnings.some(x => x.code === 'PLANNER_IMPACT_MISSING' && x.stepIds.includes('P1') && /ステータスの追加・変更で値の集合が変わる/.test(x.message)) && wsItem.access === 'WRITE' && wsItem.accessVia === 'status', `ADD_PROCESS_STATUS がある計画の ステータス REUSE は警告あり（WRITE 扱い）: ${JSON.stringify({ item: { access: wsItem.access, via: wsItem.accessVia }, msg: (ws.warnings.find(x => x.code === 'PLANNER_IMPACT_MISSING') || {}).message })}`);
+  const withUpd = planOf('READ');
+  withUpd.steps.push(mkStep('P2', 'UPDATE_PROCESS', 'PROCESS_STATUS', '承認待ち', { name: '承認待ち', changeKind: 'STATUS', assignees: ['FIELD_ENTITY:作業者'] }, { confidence: 'CONFIRMED' }));
+  assert(((review(withUpd).impactCheck || []).find(x => x.fieldCode === 'ステータス') || {}).access === 'WRITE', 'UPDATE_PROCESS（changeKind STATUS）でも同じ');
+  // 標準手順の spec がフィールドに値を書き込む（アプリアクションの転記先・ルックアップの取得項目）→ WRITE 扱い
+  const withAct = mkPlan([
+    mkStep('P1', 'REUSE_FIELD', 'FIELD', 'amount', { fields: ['amount'] }, { confidence: 'CONFIRMED' }),
+    mkStep('P2', 'ADD_APP_ACTION', 'APP_ACTION', '見積を複製', { name: '見積を複製', destApp: '353', actionMappings: [{ srcType: 'FIELD', srcField: 'amount', destField: 'amount' }] }, { confidence: 'CONFIRMED' }),
+  ]);
+  const wa = review(withAct);
+  const waItem = (wa.impactCheck || []).find(x => x.fieldCode === 'amount');
+  assert(waItem && waItem.access === 'WRITE' && waItem.accessVia === 'spec' && wa.warnings.some(x => x.code === 'PLANNER_IMPACT_MISSING' && x.stepIds.includes('P1') && /値を書き込む/.test(x.message)), `アプリアクションの転記先 → WRITE（spec）で警告: ${JSON.stringify(waItem && { access: waItem.access, via: waItem.accessVia })}`);
+  const withLk = mkPlan([
+    mkStep('P1', 'REUSE_FIELD', 'FIELD', 'amount', { fields: ['amount'] }, { confidence: 'CONFIRMED' }),
+    mkStep('P2', 'UPDATE_LOOKUP', 'FIELD', 'customer_code', { addMappings: [{ relatedField: 'price', field: 'amount' }] }, { confidence: 'CONFIRMED' }),
+  ]);
+  const wl = review(withLk);
+  assert((((wl.impactCheck || []).find(x => x.fieldCode === 'amount')) || {}).accessVia === 'spec', `ルックアップの取得項目（addMappings[].field）→ WRITE（spec）: ${JSON.stringify((wl.impactCheck || []).find(x => x.fieldCode === 'amount'))}`);
+  // 有料確認の新ケース 2 そのもの: P3（REUSE_FIELD ステータス）に PLANNER_IMPACT_MISSING が出ていたが、C1 / C2 は READ なので出ない
+  const c2 = review(SR.CASE2_PLAN);
+  assert(!c2.warnings.some(x => x.code === 'PLANNER_IMPACT_MISSING' && x.stepIds.includes('P3')) && st(c2, 'P3').status === 'VALID', `新ケース 2 の P3（REUSE_FIELD ステータス・JS は READ）に PLANNER_IMPACT_MISSING を出さない: ${JSON.stringify(c2.warnings.map(w => w.code))}`);
+  // 設定を変える手順（UPDATE_FIELD）は従来どおり警告する（ai-plan-review.test.js §8 と同じ）
+  const FX310 = (() => { const { KTDeps } = T; const data = FX.makeData(); const deps = KTDeps.buildDependencyData(data, KTDeps.normalizeFields(data.fields)); return { data, deps }; })();
+  const upd = R.review({ plan: mkPlan([mkStep('P1', 'UPDATE_FIELD', 'FIELD', 'customer_code', { required: true })]), ...FX310, scan: null, incoming: null });
+  assert(upd.warnings.some(x => x.code === 'PLANNER_IMPACT_MISSING' && x.stepIds.includes('P1')), 'UPDATE_FIELD（設定を変える）は従来どおり PLANNER_IMPACT_MISSING');
+});
+
+// =========================================================
+console.log('\n--- §6. coverage の担当範囲（T4）---');
+await section(async () => {
+  const C1 = SR.CASE2_PLAN.customizations[0], C2 = SR.CASE2_PLAN.customizations[1];
+  const CODE = "(function () {\n  'use strict';\n  kintone.events.on(['mobile.app.record.create.show', 'mobile.app.record.edit.show', 'mobile.app.record.create.change.items', 'mobile.app.record.edit.change.items'], function (event) {\n    var record = event.record;\n    if (record['ステータス'].value === '承認済み') {\n      record['amount'].disabled = true;\n      var rows = record['items'].value;\n      for (var i = 0; i < rows.length; i++) {\n        rows[i].value['item_name'].disabled = true;\n        rows[i].value['qty'].disabled = true;\n        rows[i].value['unit_price'].disabled = true;\n      }\n    }\n    return event;\n  });\n})();\n";
+  const gen = (coverage) => ({ strategy: 'NEW_JS_FILE', targetFile: 'mobileDealLock.js', summary: 'モバイルで承認済みの金額と明細セルを編集不可にする', code: CODE, patch: null, events: C2.events, fields: C2.fields.map(f => ({ code: f.code, access: f.access })), apis: ['kintone.events.on'], assumptions: [], warnings: [], coverage });
+  const rvOf = (coverage, plan = SR.CASE2_PLAN) => KTCodeReview.review({ generated: gen(coverage), customization: C2, plan, data: INPUTS.data, scan: INPUTS.scan, existingSource: null });
+  // 従来の形（AI が NOT_MET / PARTIAL で返した）は従来どおり notAchieved
+  const asIs = rvOf(SR.CASE2_GENERATED_COVERAGE);
+  assert(asIs.coverage && Array.isArray(asIs.coverage.outOfScope) && asIs.coverage.outOfScope.length === 0 && asIs.coverage.notAchieved.some(x => x.code === 'AI_NOT_MET' && /100万円以上は部長承認/.test(x.message)) && asIs.coverage.notAchieved.some(x => x.code === 'AI_PARTIAL' && /PCとモバイルの両方で使う/.test(x.message)), `従来の coverage（NOT_MET / PARTIAL）は notAchieved のまま: ${JSON.stringify(asIs.coverage.notAchieved.map(x => x.code))}`);
+  // Gateway の新しい規則（OUT_OF_SCOPE）＋ 決定的な補助（他の customization の requirement と同じ文の NOT_MET）
+  const cov = SR.CASE2_GENERATED_COVERAGE.map(x => (x.status === 'NOT_MET' ? { ...x, status: 'OUT_OF_SCOPE', note: 'P1 で承認者を確定し、標準のプロセス管理で分岐を設定する' } : x));
+  cov.push({ requirement: C1.requirement, status: 'NOT_MET', note: 'PC は対象外' });
+  cov.push({ requirement: C2.requirement.replace(/。/g, ''), status: 'PARTIAL', note: '自分の担当（句読点だけ違う）' });
+  const rv = rvOf(cov);
+  const oos = rv.coverage.outOfScope, na = rv.coverage.notAchieved;
+  // 再レビュー 2026-10-07: 利用者に見える message には内部の番号（P1 / C1）を出さず、手順の名前・別の JavaScript の要件で言う（判定用の note は元のまま）
+  const oosP = oos.find(x => x.code === 'AI_OUT_OF_SCOPE' && /100万円以上は部長承認/.test(x.requirement));
+  assert(oosP && /P1 で承認者を確定/.test(oosP.note) && /手順「/.test(oosP.message) && !/\bP1\b/.test(oosP.message) && !na.some(x => /100万円以上は部長承認/.test(x.message)), `OUT_OF_SCOPE は outOfScope に入り notAchieved に入れない。message の P1 は手順の名前に: ${JSON.stringify({ oos: oos.map(x => x.code), na: na.map(x => x.code), message: oosP && oosP.message })}`);
+  const oosC1 = oos.find(x => x.code === 'OTHER_CUSTOMIZATION' && x.customizationId === 'C1' && x.requirement === C1.requirement);
+  assert(oosC1 && /（別の JavaScript「.+」の担当）$/.test(oosC1.message) && !/\bC1\b/.test(oosC1.message) && !na.some(x => x.message.startsWith(C1.requirement)), `C1 の requirement と同じ文の NOT_MET は outOfScope（message は「別の JavaScript「…」の担当」）: ${JSON.stringify(oosC1 && oosC1.message)}`);
+  assert(na.some(x => x.code === 'AI_PARTIAL' && x.message.startsWith(C2.requirement.replace(/。/g, ''))) && na.some(x => x.code === 'AI_PARTIAL' && /PCとモバイルの両方で使う/.test(x.message)), '自分（C2）の requirement と同じ文・どの customization とも違う文の PARTIAL は従来どおり notAchieved');
+  assert(rvOf(cov, null).coverage.outOfScope.every(x => x.code === 'AI_OUT_OF_SCOPE') && rvOf(cov, null).coverage.unowned.length === 0, 'plan が無ければ決定的な補助は働かない（AI の OUT_OF_SCOPE だけ・unowned も無い）');
+  // 独立レビュー 3: 部分一致で付け替えない。レビューの例: C1「承認済みでは金額と明細を編集不可にする」・C2「モバイルでも承認済みの金額を編集不可にする」・
+  //   coverage「金額を編集不可にする」PARTIAL（C2 を検査中）→ 自分の requirement との類似が同等以上なので範囲内のまま（notAchieved）
+  const revPlan = clone(SR.CASE2_PLAN);
+  revPlan.customizations[0].requirement = '承認済みでは金額と明細を編集不可にする';
+  revPlan.customizations[1].requirement = 'モバイルでも承認済みの金額を編集不可にする';
+  const rvRev = (coverage) => KTCodeReview.review({ generated: gen(coverage), customization: revPlan.customizations[1], plan: revPlan, data: INPUTS.data, scan: INPUTS.scan, existingSource: null });
+  const partial = rvRev([{ requirement: '金額を編集不可にする', status: 'PARTIAL', note: '一覧のインライン編集では止めない' }]);
+  assert(partial.coverage.notAchieved.some(x => x.code === 'AI_PARTIAL' && /^金額を編集不可にする/.test(x.message)) && partial.coverage.outOfScope.length === 0, `部分一致（「金額を編集不可にする」）は付け替えない（範囲内のまま notAchieved）: ${JSON.stringify({ na: partial.coverage.notAchieved.map(x => x.message), oos: partial.coverage.outOfScope })}`);
+  const sameText = rvRev([{ requirement: '承認済みでは金額と明細を編集不可にする', status: 'NOT_MET', note: 'PC は対象外' }]);
+  assert(sameText.coverage.outOfScope.some(x => x.code === 'OTHER_CUSTOMIZATION' && x.customizationId === 'C1') && !sameText.coverage.notAchieved.some(x => /^AI_/.test(x.code)), `同一文（正規化後）は outOfScope（C1 の担当）: ${JSON.stringify(sameText.coverage.notAchieved.map(x => x.code))}`);
+  const nearC1 = rvRev([{ requirement: '承認済みでは金額と明細を編集不可にすること', status: 'NOT_MET', note: '' }]);
+  assert(nearC1.coverage.outOfScope.some(x => x.code === 'OTHER_CUSTOMIZATION' && x.customizationId === 'C1'), '2-gram の Dice 係数が C1 と 0.6 以上で、自分より 0.2 以上高ければ C1 の担当');
+  // 担当範囲外とされた要件の担当が計画に無ければ unowned ＋ check coverage-owner（review）。P1 / 標準設定 の担当があれば unowned にしない
+  const un = rvRev([{ requirement: '承認後に Slack へ知らせる', status: 'OUT_OF_SCOPE', note: '別の仕組みで扱う' }, { requirement: '100万円以上は部長承認', status: 'OUT_OF_SCOPE', note: 'P1 で承認者を確定し、標準のプロセス管理で分岐を設定する' }, { requirement: '承認待ちの通知', status: 'OUT_OF_SCOPE', note: '標準設定で対応' }, { requirement: '帳票の出力', status: 'OUT_OF_SCOPE', note: 'C9 の担当' }]);
+  const owner = un.checks.filter(ch => ch.name === 'coverage-owner');
+  assert(un.coverage.unowned.map(x => x.requirement).join('|') === '承認後に Slack へ知らせる|帳票の出力' && un.coverage.outOfScope.length === 4, `担当（P1 / 標準設定）の無い OUT_OF_SCOPE は unowned（C9 は計画に無い）: ${JSON.stringify(un.coverage.unowned)}`);
+  assert(owner.length === 2 && owner.every(ch => !ch.ok && ch.severity === 'review') && owner[0].message === '担当範囲外とされた要件「承認後に Slack へ知らせる」の担当が計画に見つかりません。計画全体の確認に残します' && un.status !== 'OK', `check coverage-owner（review）: ${JSON.stringify(owner)}`);
+  const csUn = VM.codeSummary({ generated: gen([]), review: un, existingSource: null }, 'C2', { planId: 'p', version: 1, plan: revPlan });
+  assert(Array.isArray(csUn.unowned) && csUn.unowned.length === 2, 'codeSummary に unowned');
+  let cardUn = '';
+  try { cardUn = KTAiChatUi.messageHtml({ id: 'm1', type: 'CODE', role: 'toolkit', text: 'JavaScript', at: '', data: { planId: 'p', version: 1, customizationId: 'C2' } }, { plans: new Map([['p:1', { planId: 'p', version: 1, goal: revPlan.goal, plan: revPlan, review: null, ctx: null, status: 'ACTIVE', generated: { C2: { generated: gen([]), review: un, existingSource: null } } }]]) }); } catch (e) { cardUn = `例外: ${e && e.stack}`; }
+  assert(/kt-ai-code-unowned[^>]*>計画で担当が決まっていない要件: 承認後に Slack へ知らせる／帳票の出力</.test(cardUn), `コードカードに「計画で担当が決まっていない要件」を別に出す: ${cardUn.slice(0, 400)}`);
+  // クライアントの検証は OUT_OF_SCOPE を語彙として受け取る（語彙外は従来どおり PARTIAL）
+  const gctx = KTContext.buildGenerator({ customization: C2, plan: SR.CASE2_PLAN, planId: 'p', version: 1, data: INPUTS.data, deps: INPUTS.deps, scan: INPUTS.scan });
+  const RESP = { ok: true, contractVersion: '2.1', meta: { requestId: 'g1', gateway: { product: 'toolkit', feature: 'customization-generator', promptVersion: '1', contextVersion: 'customization-1' }, normalization: { warnings: [] }, ai: { model: 'm' } }, generated: { ...gen([{ requirement: '100万円以上は部長承認', status: 'OUT_OF_SCOPE', note: 'P1' }, { requirement: 'x', status: 'BOGUS', note: '' }]), gatewayChecks: { security: [] } } };
+  const vg = KTAiClient.validateGenerated(RESP, gctx);
+  const covN = vg.normalized?.coverage || vg.normalized?.generated?.coverage || [];
+  assert(vg.ok && covN[0]?.status === 'OUT_OF_SCOPE' && covN[1]?.status === 'PARTIAL', `validateGenerated: OUT_OF_SCOPE を残す（語彙外は PARTIAL）: ${JSON.stringify({ ok: vg.ok, errors: vg.errors, cov: covN })}`);
+  // buildGenerator の plan.otherCustomizations（この customization 以外。無ければ []）
+  const other = gctx.plan.otherCustomizations;
+  assert(Array.isArray(other) && other.length === 2 && other.map(x => x.customizationId).join(',') === 'C1,C3' && other[0].requirement === C1.requirement && JSON.stringify(other[0].platform) === '["desktop"]' && Object.keys(other[0]).sort().join(',') === 'customizationId,platform,requirement', `buildGenerator: plan.otherCustomizations = C1 / C3（customizationId・requirement・platform）: ${JSON.stringify(other)}`);
+  const solo = KTContext.buildGenerator({ customization: C2, plan: { ...SR.CASE2_PLAN, customizations: [C2] }, planId: 'p', version: 1, data: INPUTS.data });
+  assert(Array.isArray(solo.plan.otherCustomizations) && solo.plan.otherCustomizations.length === 0 && Array.isArray(KTContext.buildGenerator({ customization: C2, plan: null, data: INPUTS.data }).plan.otherCustomizations), '他に customization が無ければ []（plan が無くても []）');
+  // 表示: コードカード（VM.codeSummary）に outOfScope
+  const cs = VM.codeSummary({ generated: gen(cov), review: rv, existingSource: null }, 'C2', { planId: 'p', version: 1, plan: SR.CASE2_PLAN });
+  assert(Array.isArray(cs.outOfScope) && cs.outOfScope.length === 2 && cs.notAchieved.length >= 2, `codeSummary: outOfScope と notAchieved を分けて持つ: ${JSON.stringify({ oos: cs.outOfScope.length, na: cs.notAchieved.length })}`);
+  // 会話の code-intro: 満たせない部分と担当範囲外を分けて出す
+  const custStep = mkStep('C1', 'CUSTOMIZATION_REQUIRED', 'JS', null, { customizationId: 'C1' }, { solution: 'CUSTOMIZATION', confidence: 'CONFIRMED' });
+  const custC1 = { customizationId: 'C1', requirement: '承認済みでは金額を編集不可にする', whyStandardInsufficient: 'ステータスで切り替えるアクセス権は無い', strategy: 'NEW_JS_FILE', implementation: 'JAVASCRIPT', platform: ['desktop'], events: ['app.record.edit.show'], fields: [{ code: 'amount', access: 'CONTROL' }], apis: [], existingFiles: [], risks: [], questions: [], dependsOn: [], evidenceIds: [] };
+  const hybrid = mkPlan([custStep], { goal: '承認済みでは金額を編集できなくして', solution: 'HYBRID', customizations: [custC1] });
+  const makeConv = (genReview) => {
+    const services = {
+      async plan() { const p = clone(hybrid); return { plan: p, ctx: { facts: [] }, review: R.review({ plan: p, ...INPUTS }), turn: null }; },
+      revisionModes: () => ['full', 'patch'], conversationFeatures: () => ['requirements', 'brief'],
+      async ask() { return { ok: true, answer: { answer: 'a', facts: [], analysis: [], recommendations: [], unknowns: [] }, ctx: { facts: [] } }; },
+      async generate() { return { ok: true, generated: { code: '', strategy: 'NEW_JS_FILE', targetFile: 'a.js', summary: 's' }, review: genReview }; },
+      readiness(v) { return { approved: 0, executable: 0, unsupported: 0, blocked: 0, undecided: v.plan.steps.length }; },
+    };
+    return KTAiConversation.create({ services, now: () => '2026-10-07T00:00:00.000Z', clock: () => 1000 });
+  };
+  const c = makeConv({ status: 'REVIEW_REQUIRED', checks: [], coverage: { achieved: [], notAchieved: [{ code: 'SUBTABLE_ROWS', message: '明細の行の追加・削除は止められません' }], outOfScope: [{ code: 'AI_OUT_OF_SCOPE', requirement: '100万円以上は部長承認', message: '100万円以上は部長承認（P1 の標準設定で扱う）' }] } });
+  await c.send('承認済みでは金額を編集できなくして'); await ticks();
+  const v1 = c.activePlan(); c.confirmSpec({ planId: v1.planId, version: v1.version });
+  await c.send('コードを作って'); await ticks();
+  const intro = c.messages().find(m => m.data?.kind === 'code-intro');
+  assert(intro && /要件のうち満たせない部分があります: 明細の行の追加・削除は止められません/.test(intro.text) && / この JavaScript の担当範囲外（計画の他の手順・JavaScript で扱います）: 100万円以上は部長承認（P1 の標準設定で扱う）/.test(intro.text) && intro.text.indexOf('満たせない部分') < intro.text.indexOf('担当範囲外'), `code-intro: 満たせない部分と担当範囲外を分けて出す: ${intro && intro.text}`);
+  const c2 = makeConv({ status: 'OK', checks: [], coverage: { achieved: [], notAchieved: [], outOfScope: [{ code: 'OTHER_CUSTOMIZATION', requirement: 'r', message: 'モバイルの編集制御（C2 の担当）' }] } });
+  await c2.send('承認済みでは金額を編集できなくして'); await ticks();
+  const v2 = c2.activePlan(); c2.confirmSpec({ planId: v2.planId, version: v2.version });
+  await c2.send('コードを作って'); await ticks();
+  const intro2 = c2.messages().find(m => m.data?.kind === 'code-intro');
+  assert(intro2 && !/満たせない部分/.test(intro2.text) && /担当範囲外（計画の他の手順・JavaScript で扱います）: モバイルの編集制御（C2 の担当）/.test(intro2.text), `code-intro: 担当範囲外だけのときは「満たせない部分」と言わない: ${intro2 && intro2.text}`);
+  // 担当が計画に無い要件（unowned）は「計画で担当が決まっていない要件: …」として別に出す
+  const c3 = makeConv({ status: 'REVIEW_REQUIRED', checks: [{ name: 'coverage-owner', ok: false, severity: 'review', message: 'x' }], coverage: { achieved: [], notAchieved: [], outOfScope: [{ code: 'AI_OUT_OF_SCOPE', requirement: '承認後に Slack へ知らせる', note: '別の仕組み', message: '承認後に Slack へ知らせる（別の仕組み）' }], unowned: [{ code: 'UNOWNED', requirement: '承認後に Slack へ知らせる', message: '承認後に Slack へ知らせる' }] } });
+  await c3.send('承認済みでは金額を編集できなくして'); await ticks();
+  const v3 = c3.activePlan(); c3.confirmSpec({ planId: v3.planId, version: v3.version });
+  await c3.send('コードを作って'); await ticks();
+  const intro3 = c3.messages().find(m => m.data?.kind === 'code-intro');
+  assert(intro3 && / 計画で担当が決まっていない要件: 承認後に Slack へ知らせる$/.test(intro3.text) && intro3.text.indexOf('担当範囲外') < intro3.text.indexOf('担当が決まっていない'), `code-intro: 担当の無い要件は別に出す: ${intro3 && intro3.text}`);
+});
+
+// =========================================================
+console.log('\n--- §7. 会話（T5）: 台帳の更新の後に要件の保持を調べ、右の「確認結果」の警告一覧に出る ---');
+await section(async () => {
+  const goal = SR.CASE1_PLAN.goal;
+  const turn = { reply: '3日の数え方は更新日時から暦日で3日後の午前9時とする案にしました。', requirementOps: [
+    { op: 'add', id: '', target: '承認待ちの案件', condition: '承認待ちのまま3日経過', behavior: '作業者だけに知らせる', exceptions: [{ condition: '金額が100万円以上', behavior: '上長にも知らせる' }], decision: 'decided', disposition: 'adopted', sourceQuotes: ['3日たったら作業者だけに知らせて', '金額が100万円以上の案件は上長にも知らせて'], planRefs: ['P1', 'P2'], note: '' },
+    { op: 'add', id: '', target: '', condition: '', behavior: '更新日時から暦日で3日後の午前9時', exceptions: [], decision: 'proposed', disposition: 'adopted', sourceQuotes: [], planRefs: ['P1'], note: '' },
+  ], utteranceCoverage: [{ quote: goal, as: 'requirement', refs: ['R1'], note: '' }] };
+  const makeConv = ({ withRequirements = false, staleTrace = false } = {}) => {
+    const calls = { plan: 0 };
+    const services = {
+      // staleTrace: 検証が台帳の更新より前に（古い台帳 = 空で）要件を照合した形（requirementTrace はあるが requirement 数が台帳と違う）
+      async plan(args) { calls.plan += 1; const p = clone(SR.CASE1_PLAN); const review = R.review({ plan: p, ...INPUTS, ...(withRequirements ? { requirements: args.requirements || [] } : staleTrace ? { requirements: [] } : {}) }); return { plan: p, ctx: { facts: [] }, review, gatewayPlan: clone(p), turn: clone(turn) }; },
+      revisionModes: () => ['full', 'patch'], conversationFeatures: () => ['requirements', 'brief'],
+      async ask() { return { ok: true, answer: { answer: 'a', facts: [], analysis: [], recommendations: [], unknowns: [] }, ctx: { facts: [] } }; },
+      async generate() { return { ok: true, generated: { code: '' }, review: { status: 'OK', checks: [] } }; },
+      readiness(v) { return { approved: 0, executable: 0, unsupported: 0, blocked: 0, undecided: v.plan.steps.length }; },
+    };
+    const c = KTAiConversation.create({ services, now: () => '2026-10-07T00:00:00.000Z', clock: () => 1000 });
+    return { c, calls };
+  };
+  const { c } = makeConv();
+  await c.send(goal); await ticks();
+  const v = c.activePlan();
+  const lg = c.state.ledgers.get(v.planId);
+  assert(v && lg && Array.isArray(lg.requirements) && lg.requirements.length === 2 && lg.requirements[0].id === 'R1' && lg.requirements[0].decision === 'decided' && lg.requirements[0].exceptions[0].condition === '金額が100万円以上', `前提: 台帳に R1（決定・例外つき）と R2（AI の提案）が入った: ${JSON.stringify((lg?.requirements || []).map(e => [e.id, e.decision, e.disposition]))}`);
+  const tr = v.review && v.review.requirementTrace;
+  assert(tr && tr.requirements.length === 2 && tr.requirements[0].id === 'R1' && anchor(tr.requirements[0], 'number', 3).heldIn.includes('spec:P1.daysLater'), `計画の検証が台帳の更新より前でも、登録のときに要件の保持（review.requirementTrace）が取れる: ${JSON.stringify(tr && tr.requirements.map(r => [r.id, r.status]))}`);
+  const ws = notInSpec(v.review);
+  assert(ws.length === 1 && ws[0].requirementId === 'R1' && /「金額が100万円以上」/.test(ws[0].message), `review.warnings に REQUIREMENT_CONDITION_NOT_IN_SPEC（1 件・二重に出ない）: ${JSON.stringify(ws.map(w => w.requirementId))}`);
+  const html = KTContextUi.reviewHtml(v.review, v.plan);
+  assert(/「金額が100万円以上」の条件が手順の spec にも JavaScript の条件にもありません（文章と確認事項にだけあります）/.test(html) && /\(REQUIREMENT_CONDITION_NOT_IN_SPEC\)/.test(html) && /Toolkit からの指摘/.test(html), '右の「確認結果」（reviewHtml）の「Toolkit からの指摘」に出る');
+  assert((html.match(/\(REQUIREMENT_CONDITION_NOT_IN_SPEC\)/g) || []).length === 1, '「Toolkit からの指摘」の一覧には 1 回だけ描く（技術情報の JSON の写しは別）');
+  const rs = VM.reviewSummary(v);
+  assert(rs && typeof rs.confirmations === 'number' && rs.planId === v.planId, `要約の生成は壊れない: ${JSON.stringify(rs)}`);
+  // services.plan が requirements つきで検証していれば（review.requirementTrace あり）、登録のときに重ねない
+  const { c: c2 } = makeConv({ withRequirements: true });
+  await c2.send(goal); await ticks();
+  const v2 = c2.activePlan();
+  assert(v2.review.requirementTrace && v2.review.requirementTrace.requirements.length === 2 && notInSpec(v2.review).length === 1, `検証が先に要件を照合していれば二重に出さない（警告は 1 件・trace は台帳の 2 件）: ${notInSpec(v2.review).length} 件 / ${v2.review.requirementTrace.requirements.length}`);
+  // 検証の時点の台帳が古い（trace はあるが requirement 数が台帳と違う）→ 登録のときに作り直す（「trace が無い」だけで判定しない）
+  const { c: cS } = makeConv({ staleTrace: true });
+  await cS.send(goal); await ticks();
+  const vS = cS.activePlan();
+  assert(vS.review.requirementTrace.requirements.length === 2 && notInSpec(vS.review).length === 1 && notInSpec(vS.review)[0].requirementId === 'R1', `trace の requirement 数が台帳（2 件）と違えば作り直す: ${vS.review.requirementTrace.requirements.length} / ${notInSpec(vS.review).length}`);
+  // 計画のみの版（Context ペインから登録。turn なし）は台帳が空 → 警告なし・例外にならない
+  const c3 = KTAiConversation.create({ services: { async plan() { const p = clone(SR.OLD_S10_PLAN); return { plan: p, ctx: { facts: [] }, review: R.review({ plan: p, ...INPUTS }), turn: null }; }, revisionModes: () => ['full'], conversationFeatures: () => [], async ask() { return { ok: true, answer: { answer: 'a', facts: [], analysis: [], recommendations: [], unknowns: [] }, ctx: { facts: [] } }; }, readiness(v) { return { approved: 0, executable: 0, unsupported: 0, blocked: 0, undecided: v.plan.steps.length }; } }, now: () => '2026-10-07T00:00:00.000Z', clock: () => 1000 });
+  await c3.send(SR.OLD_S10_PLAN.goal); await ticks();
+  const v3 = c3.activePlan();
+  assert(v3 && v3.review.requirementTrace && v3.review.requirementTrace.requirements.length === 0 && notInSpec(v3.review).length === 0, '台帳が空なら警告なし（例外にしない）');
+});
+
+console.log(`\n${state.failed === 0 ? 'ALL PASS' : 'SOME FAILED'}: ${state.passed} passed, ${state.failed} failed`);
+process.exit(state.failed ? 1 : 0);
+})();

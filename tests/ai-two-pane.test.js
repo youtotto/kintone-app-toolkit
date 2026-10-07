@@ -305,7 +305,7 @@ console.log('\n--- §12. 会話の表示の決まり（部品）: 出さない�
   const ans = KTAiChatUi.messageHtml(mk(MSG.ANSWER, 'assistant', '', { answer: { answer: '金額は承認の条件で使っています [E1]。', facts: [{ text: '条件で使用', evidenceIds: ['E1'] }], analysis: [], recommendations: [], unknowns: [], requestId: 'qa-7' } }));
   assert(/金額は承認の条件で使っています。/.test(ans) && !/E1|qa-7|AI回答/.test(outsideDetails(ans)) && /data-eid="E1"/.test(ans), '回答: 本文に根拠の番号・requestId を出さない（［根拠と詳細］の中に残す）');
   const plainAssistant = KTAiChatUi.messageHtml(mk(MSG.ASSISTANT_TEXT, 'toolkit', '計画の AI が候補から仮の案を選びます'));
-  assert(/候補から仮の案を選んで変更案に入れます/.test(plainAssistant) && !/kt-ai-who/.test(plainAssistant), 'Toolkit の文は発言者の名前を出さず、内部の処理の名前を言い換える');
+  assert(/候補からこちらの提案を選んで変更案に入れます/.test(plainAssistant) && !/仮の案/.test(plainAssistant) && !/kt-ai-who/.test(plainAssistant), 'Toolkit の文は発言者の名前を出さず、内部の処理の名前を言い換える（前に記録した「仮の案」も「提案」で出す）');
 }
 
 // =========================================================
@@ -706,6 +706,32 @@ console.log('\n--- §23. 出力削減（2026-10-07）: 計画の AI が書かな
   assert(/確かめられなかったこと/.test(sum) && /レコードの実データ・添付ファイルは含まない/.test(sum), '右の「変更内容」に、解析範囲から分かる「確かめられなかったこと」を Toolkit が出す');
   const detail = m.$('kt-ai-plan-result').innerHTML;
   assert(/kt-ai-step/.test(detail) && /レコードの実データ・添付ファイルは含まない/.test(detail), '計画の詳細の「解析できないこと」にも coverage の注意');
+  assert(!INTERNAL_IN_CHAT.test(outsideDetails(m.chat())), '会話には内部の番号・処理の通知を出さない');
+}
+
+// =========================================================
+console.log('\n--- §21. こちらの提案で進めている点・確認したいこと: 見出し 1 行 ＋ 1 件 1 行（「／」で詰めない。2026-10-07 利用者の指摘）---');
+{
+  const { MSG } = KTAiConversation;
+  const mk = (type, role, text, data = null) => ({ id: `m${Math.random()}`, type, role, text, at: '', ...(data ? { data } : {}) });
+  const prov = (n) => Array.from({ length: n }, (_, i) => ({ id: `A${i + 1}`, topic: 'other', choice: `提案 ${i + 1}`, reason: '', changeHint: `変え方 ${i + 1}` }));
+  const html3 = KTAiChatUi.messageHtml(mk(MSG.ASSISTANT_TEXT, 'toolkit', 'x', { kind: 'provisionals', planId: 'p', version: 1, provisionals: prov(3) }));
+  assert(/<details class="kt-ai-card kt-ai-old-card kt-ai-provisionals-card"><summary>こちらの提案で進めている点が 3 件あります（変えたいときはそのまま伝えてください）<\/summary>/.test(html3) && !/<details[^>]*\sopen/.test(html3) && (html3.match(/<li>/g) || []).length === 3 && /<li><strong>提案 1<\/strong><span class="kt-ai-prov-hint">（変え方 1）<\/span><\/li>/.test(html3) && !/／/.test(html3) && !/仮の案/.test(html3) && !/kt-ai-who/.test(html3), `提案 3 件: details で畳まれ（見出しだけ）、開くと 1 件 1 行（太字の choice ＋ 小さく灰色の変え方）: ${html3}`);
+  const html2 = KTAiChatUi.messageHtml(mk(MSG.ASSISTANT_TEXT, 'toolkit', 'x', { kind: 'provisionals', planId: 'p', version: 1, provisionals: prov(2) }));
+  assert(/<details class="kt-ai-card kt-ai-old-card kt-ai-provisionals-card" open><summary>こちらの提案で進めている点が 2 件あります/.test(html2) && (html2.match(/<li>/g) || []).length === 2, `提案 2 件: 開いた状態: ${html2}`);
+  const html1 = KTAiChatUi.messageHtml(mk(MSG.ASSISTANT_TEXT, 'toolkit', 'x', { kind: 'provisionals', planId: 'p', version: 1, provisionals: [{ id: 'A1', topic: 'other', choice: '暦日 3 日後', reason: '', changeHint: '' }] }));
+  assert(/ open><summary>こちらの提案で進めている点が 1 件あります/.test(html1) && /<li><strong>暦日 3 日後<\/strong><\/li>/.test(html1) && !/kt-ai-prov-hint/.test(html1), '変え方の無い提案は choice だけ');
+  assert(/\.kt-ai-provisionals-card > summary\{ color:inherit; font-size:inherit; \}/.test(SRC_TEXT) && /\.kt-ai-prov-hint\{ font-size:11px; color:var\(--kt-ai-muted\);/.test(SRC_TEXT), '見出しの文字色は本文と同じ（薄くしない）・変え方は小さく灰色（CSS）');
+  // 確認したいことが 2 件: 文は見出し 1 行 ＋ 「- 」の行。変更案の無い描画（記録）でも箇条書き。会話のカードは従来どおり番号付き
+  const P = JSON.parse(JSON.stringify(PLAN_V2));
+  P.plan.questions = [{ id: 'Q1', question: '担当者別の一覧は全員に見せますか', reason: '公開範囲', relatedEvidenceIds: [], priority: 'blocking', recommendation: '' }, { id: 'Q2', question: '並び順は期限の昇順でよいですか', reason: '並び順', relatedEvidenceIds: [], priority: 'later', recommendation: '' }];
+  const m = mount({ plans: () => P });
+  await ticks(); await m.panel.send(GOAL); await ticks(8);
+  const qm = m.msgs().find(x => x.data?.kind === 'questions');
+  assert(qm && qm.text === '確認したいことが 2 件あります。\n- 「担当者別の一覧は全員に見せますか」\n- 「並び順は期限の昇順でよいですか」', `質問 2 件の文: 見出し 1 行 ＋ 1 件 1 行（先に確認したいことが前）: ${JSON.stringify(qm && qm.text)}`);
+  const plainQ = KTAiChatUi.messageHtml(qm);
+  assert(/<p>確認したいことが 2 件あります。<\/p><ul><li>「担当者別の一覧は全員に見せますか」<\/li><li>「並び順は期限の昇順でよいですか」<\/li><\/ul>/.test(plainQ), `変更案の無い描画でも箇条書き: ${plainQ}`);
+  assert(/1．担当者別の一覧は全員に見せますか/.test(m.chat()) && /2．並び順は期限の昇順でよいですか/.test(m.chat()), '会話のカードは番号付きの一覧（従来どおり）');
   assert(!INTERNAL_IN_CHAT.test(outsideDetails(m.chat())), '会話には内部の番号・処理の通知を出さない');
 }
 

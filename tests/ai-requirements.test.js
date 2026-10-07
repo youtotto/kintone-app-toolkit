@@ -165,7 +165,8 @@ await section(async () => {
   await c.send('部長が不在のときは副部長が承認します');
   // 2026-10-06: 返答は会話に出す。要件の変化は記録に残す（会話には出さない）
   assert(calls.plan.length === 2 && !kinds().includes('preview-ready') && byKind('turn-reply').some(m => /副部長/.test(m.text) && KTAiChatUi.messageHtml(m) !== '') && byKind('requirements-changes').some(m => /副部長が代わりに承認する/.test(m.text) && KTAiChatUi.isHiddenMessage(m)), 'F5: 代理の承認者の指示は計画の AI へ（反映へ進む言葉にしない）・返答を出し、要件の変化を記録する');
-  assert(byKind('provisionals').length === 1 && /仮の案で進めています/.test(byKind('provisionals')[0].text) && /警告は金額欄に表示/.test(byKind('provisionals')[0].text), 'F5: 後から変えられる点は仮の案として知らせる（質問しない）');
+  // 2026-10-07 利用者の指摘: 言い回しは「提案」、見出し 1 行 ＋ 1 件 1 行（「／」で詰めない）
+  assert(byKind('provisionals').length === 1 && byKind('provisionals')[0].text === 'こちらの提案で進めている点が 1 件あります（変えたいときはそのまま伝えてください）\n- 警告は金額欄に表示（別の場所にしたいときは伝えてください）' && !/仮の案/.test(byKind('provisionals')[0].text), `F5: 後から変えられる点は「こちらの提案で進めている点」として知らせる（質問しない。見出し 1 行 ＋ 1 件 1 行）: ${JSON.stringify(byKind('provisionals')[0] && byKind('provisionals')[0].text)}`);
 });
 await section(async () => {
   // F6: 確認事項の追加の項目（答えで何が変わるか・候補・推奨・先に聞くか）を台帳の確認事項に持ち回る

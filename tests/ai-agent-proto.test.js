@@ -260,7 +260,7 @@ await section('I 画面（通常の入口は会話・入力欄・送信だけ。
   const html = KTAgentUi.messagesHtml(S.eng, { mode: 'demo' });
   const cards = html.split('class="kt-agent-proposal"').length - 1;
   const outside = html.replace(/<details[\s\S]*?<\/details>/g, '');
-  assert(cards === 1 && /おまかせ/.test(html) && /仮の案/.test(html) && /決定/.test(html), `I1: 変更案のカードは 1 枚・条件に出どころ（決定・おまかせ・仮の案）: cards=${cards}`);
+  assert(cards === 1 && /おまかせ/.test(html) && /提案/.test(html) && !/仮の案/.test(html) && /決定/.test(html), `I1: 変更案のカードは 1 枚・条件に出どころ（決定・おまかせ・提案。「仮の案」の語は使わない）: cards=${cards}`);
   assert(!/\bV1\b|\bQ\d\b|\bC\d+\b|E\d+/.test(outside) && /過去の版/.test(html) && /V1（条件の版/.test(html), 'I1: 内部の番号・過去の版は詳細の中だけ');
   assert(/確認したいこと/.test(outside) && /上長/.test(outside), 'I1: 必要な確認はカードに出す');
   assert(S.eng.metrics().every(m => m.replyMs != null && Array.isArray(m.calls)), 'I2: 計測は会話の仕組みの中に残す（画面には出さない）');
