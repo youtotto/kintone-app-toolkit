@@ -39,7 +39,7 @@ const GOAL = '更新状況を管理したい';
 const GOAL_HYBRID = '100万円以上なら部長承認にして、承認後は金額を編集できなくしたい';
 const spec = (o) => ({ name: null, from: null, to: null, filterCond: null, assignees: [], targets: [], events: [], timingField: null, daysLater: null, time: null, fields: [], sort: null, sourceApp: null, keyField: null, mappings: [], fieldType: null, required: null, options: [], destApp: null, accessibility: null, entities: [], customizationId: null, ...o });
 const mkStep = (id, actionType, targetKind, targetRef, sp, extra = {}) => ({ id, actionType, targetKind, targetRef, targetExists: null, title: `${id} ${actionType}`, proposal: { summary: '', details: [] }, spec: spec(sp), dependsOn: [], reason: '', evidenceIds: [], confidence: 'INFERRED', alternativeId: null, validation: { status: 'ok', issues: [] }, execution: { mode: 'PLAN_ONLY', supported: false, reason: 'x' }, ...extra });
-const META = { requestId: 'pl-1', gateway: { product: 'toolkit', feature: 'change-planner', promptVersion: '1', contextVersion: 'planner-1' }, normalization: { warnings: [] }, ai: { model: 'm' }, usage: { usedThisMonth: 1, monthlyLimit: 20 } };
+const META = { requestId: 'pl-1', gateway: { product: 'toolkit', feature: 'change-planner', promptVersion: '1', contextVersion: 'planner-1' }, normalization: { warnings: [] }, ai: { model: 'm', latencyMs: 30, usage: { input_tokens: 500, output_tokens: 200, output_tokens_details: { reasoning_tokens: 10 } } }, usage: { usedThisMonth: 1, monthlyLimit: 20 } };
 const OPTIONS = ['未着手', '進行中', '完了'];
 const PLAN_V1 = { ok: true, contractVersion: '2.1', meta: META, plan: { goal: GOAL, assessment: { summary: '更新状況を表すフィールドが無いので追加します。', usableExistingFields: [], usableExistingSettings: [], missingCapabilities: ['更新状況'], uncertainties: [] }, relevantFields: [], proposedFields: [{ temporaryId: 'NEW_FIELD_1', label: '更新状況', suggestedCode: 'progress', type: 'DROP_DOWN', typeValid: true, required: false, options: OPTIONS, reason: '更新状況を表すフィールドが無いため', evidenceIds: [], alternativeExistingFieldCode: null, codeConflict: false, labelDuplicate: false }], steps: [mkStep('P1', 'ADD_FIELD', 'PROPOSED_FIELD', 'NEW_FIELD_1', { fieldType: 'DROP_DOWN', options: OPTIONS }, { title: '更新状況フィールドを追加' }), mkStep('P2', 'ADD_VIEW', 'VIEW', '担当者別', { name: '担当者別', fields: ['owner', 'case_name', 'NEW_FIELD_1'], filterCond: 'owner in (LOGINUSER())', sort: 'due_date asc' }, { dependsOn: ['P1'], title: '一覧「担当者別」を追加' })], alternatives: [], impact: [], questions: [{ id: 'Q1', question: '更新状況の選択肢は 3 段階でよいですか', reason: 'goal から決められない', relatedEvidenceIds: [] }], unknowns: [], planConfidence: 'INFERRED' } };
 const PLAN_V2 = { ok: true, contractVersion: '2.1', meta: { ...META, requestId: 'pl-2' }, plan: { goal: GOAL, assessment: { summary: '既存の担当者を使い、一覧の追加だけにします。', usableExistingFields: [], usableExistingSettings: [], missingCapabilities: [], uncertainties: [] }, relevantFields: [], proposedFields: [], steps: [mkStep('P1', 'REUSE_FIELD', 'FIELD', 'owner', {}, { title: '既存「担当者」を利用' }), mkStep('P2', 'ADD_VIEW', 'VIEW', '担当者別', { name: '担当者別', fields: ['owner', 'case_name'], filterCond: 'owner in (LOGINUSER())', sort: 'due_date asc' }, { title: '一覧「担当者別」を追加' })], alternatives: [], impact: [], questions: [], unknowns: [], planConfidence: 'INFERRED' } };
@@ -54,7 +54,7 @@ const genResponse = (ctx, g) => ({ ok: true, contractVersion: '2.1', meta: { req
 const genPatch = (patch = PATCH_GOOD) => ({ strategy: 'EXTEND_EXISTING_JS', targetFile: 'fieldOnOff.js', summary: '完了でも金額を編集不可にする', code: patch.operations.map(o => o.content).join('\n'), patch, events: ['app.record.edit.show'], fields: [{ code: 'amount', access: 'CONTROL' }], apis: [], assumptions: [], warnings: [] });
 const HEALTH = { ok: true, supportedContractVersions: ['2.0', '2.1'], entitlements: [{ product: 'toolkit', features: ['assistant-qa', 'change-planner', 'customization-generator'] }], registry: { toolkit: { 'assistant-qa': { implemented: true, promptVersions: ['1'] }, 'change-planner': { implemented: true, promptVersions: ['1'] }, 'customization-generator': { implemented: true, promptVersions: ['1'] } } }, usage: { monthlyLimit: 20, usedThisMonth: 1 } };
 const makeStorage = () => { const m = new Map(); return { getItem: (k) => (m.has(k) ? m.get(k) : null), setItem: (k, v) => m.set(k, String(v)), removeItem: (k) => m.delete(k) }; };
-const answerFor = (ctx, text) => ({ ok: true, contractVersion: '2.1', meta: { requestId: 'qa-1', usage: { usedThisMonth: 2, monthlyLimit: 20 }, normalization: { warnings: [] } }, answer: text, facts: ctx.facts.length ? [{ text: 'fact', evidenceIds: [ctx.facts[0].id] }] : [], analysis: [], recommendations: [], unknowns: [] });
+const answerFor = (ctx, text) => ({ ok: true, contractVersion: '2.1', meta: { requestId: 'qa-1', usage: { usedThisMonth: 2, monthlyLimit: 20 }, normalization: { warnings: [] }, ai: { model: 'm', latencyMs: 12, streamed: true, firstTextMs: 4, usage: { input_tokens: 100, output_tokens: 20, input_tokens_details: { cached_tokens: 40 }, output_tokens_details: { reasoning_tokens: 3 } } } }, answer: text, facts: ctx.facts.length ? [{ text: 'fact', evidenceIds: [ctx.facts[0].id] }] : [], analysis: [], recommendations: [], unknowns: [] });
 const tick = () => new Promise(r => setTimeout(r, 0));
 const ticks = async (n = 4) => { for (let i = 0; i < n; i++) await tick(); };
 function mount({ inputs = INPUTS, paid = true, plans = null, now = null, extra = {}, planGate = null, health = HEALTH, gatewayPlan = false, askGate = null, genGate = null, askStream = null } = {}) {
@@ -635,6 +635,26 @@ const HEALTH_STREAM = JSON.parse(JSON.stringify(HEALTH)); HEALTH_STREAM.registry
   // 逐次表示の吹き出しの中身は 1 つの関数で作る（描画の差し替えと同じ HTML）
   const html = KTAiChatUi.streamingInnerHtml({ text: '結論です。\n\n理由 [E3] です。' });
   assert(/結論です。/.test(html) && /理由 です。|理由です。/.test(html) && !/\[E3\]/.test(html) && /kt-ai-stream-cursor/.test(html), 'streamingInnerHtml: 段落・根拠の番号の除去・生成中の印');
+}
+
+// =========================================================
+console.log('\n--- §22. 区間の記録（2026-10-07）: 送信ごとの timings に perf（基準の待ち・Context・往復・検証）と ai（モデル・待ち時間・token）、先回りの見立ては asideTimings ---');
+{
+  const m = mount({ health: HEALTH_STREAM });
+  await ticks(); await m.panel.send('金額フィールドは何に使われていますか？'); await ticks(6);
+  const t1 = m.panel.metrics().timings.slice(-1)[0];
+  assert(t1 && t1.perf && ['baseWaitMs', 'contextMs', 'requestMs'].every(k => Number.isFinite(t1.perf[k])) && t1.calls.length === 1 && t1.calls[0].kind === 'ask', `質問: perf と calls: ${JSON.stringify({ perf: t1 && t1.perf, calls: t1 && t1.calls })}`);
+  assert(t1.ai && t1.ai.model === 'm' && t1.ai.latencyMs === 12 && t1.ai.inputTokens === 100 && t1.ai.cachedTokens === 40 && t1.ai.outputTokens === 20 && t1.ai.reasoningTokens === 3 && t1.ai.firstTextMs === 4 && t1.ai.streamed === true, `質問: ai（モデル・待ち時間・token）: ${JSON.stringify(t1.ai)}`);
+  await m.panel.send(GOAL); await ticks(10);
+  const t2 = m.panel.metrics().timings.slice(-1)[0];
+  assert(t2 && t2.intent === 'PLAN' && t2.perf && Number.isFinite(t2.perf.reviewMs) && Number.isFinite(t2.perf.baseWaitMs) && t2.calls.some(c => c.kind === 'plan') && t2.ai && t2.ai.model === 'm' && t2.ai.latencyMs === 30 && t2.ai.outputTokens === 200 && t2.ai.reasoningTokens === 10, `新しい依頼: perf と ai: ${JSON.stringify({ perf: t2 && t2.perf, ai: t2 && t2.ai })}`);
+  const aside = m.panel.metrics().asideTimings;
+  const last = aside[aside.length - 1];
+  assert(Array.isArray(aside) && last && last.kind === 'brief' && last.ok === true && Number.isFinite(last.doneMs) && last.perf && last.ai && last.ai.model === 'm', `先回りの見立ての記録（asideTimings）: ${JSON.stringify(last)}`);
+  await m.panel.send('担当者は既存のフィールドを使って、一覧の追加だけにして'); await ticks(10);
+  const t3 = m.panel.metrics().timings.slice(-1)[0];
+  assert(t3 && t3.intent === 'REVISE_PLAN' && t3.calls.some(c => c.kind === 'plan') && t3.perf && Number.isFinite(t3.perf.requestMs) && t3.ai && t3.ai.model === 'm', `修正: perf と ai: ${JSON.stringify({ intent: t3 && t3.intent, perf: t3 && t3.perf })}`);
+  assert(!INTERNAL_IN_CHAT.test(outsideDetails(m.chat())), '記録は会話に出ない');
 }
 
 console.log(`\n${state.failed ? 'FAILED' : 'ALL PASSED'}: ${state.passed} passed / ${state.failed} failed`);

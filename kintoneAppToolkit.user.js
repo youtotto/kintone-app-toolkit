@@ -22963,7 +22963,24 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
     //   latencyMs（AI プロバイダの応答全体の時間）とは別に、画面の側で測る。「最初の応答までの時間」ではない
     // 会話の応答性（2026-10-05）: queuedAccepted = 作り直しの途中に受け付けた指示 / chainedJobs = 続けてまとめて入れた作業 /
     //   instructionWaits = 指示を受け付けてから、その指示を入れた版ができるまで（{ kind: initial | queued, waitMs, jobs }）/ revisionModes = 版の作り方（patch / full）の記録
-    const newMetrics = () => ({ aiCalls: 0, roundTrips: 0, answersRecorded: 0, clarifications: 0, reasked: 0, reaskedLog: [], timings: [], gatewayDecisionsUnconfirmed: 0, platformConflicts: 0, queuedAccepted: 0, chainedJobs: 0, instructionWaits: [], revisionModes: [], requirementOps: 0, unresolvedClauses: 0, asideAsks: 0 });
+    const newMetrics = () => ({ aiCalls: 0, roundTrips: 0, answersRecorded: 0, clarifications: 0, reasked: 0, reaskedLog: [], timings: [], gatewayDecisionsUnconfirmed: 0, platformConflicts: 0, queuedAccepted: 0, chainedJobs: 0, instructionWaits: [], revisionModes: [], requirementOps: 0, unresolvedClauses: 0, asideAsks: 0, asideTimings: [] });
+    /**
+     * 区間の記録（2026-10-07・利用者の指示）: Gateway の応答の ai（provider の meta）から、モデル・AI の待ち時間・最初の文字まで・
+     * token（入力・キャッシュ・出力・推論）・計画の差分 / 全体の方式と差分の試みを取り出す（timings[].ai / asideTimings[].ai）
+     */
+    const aiOf = (x) => {
+      const ai = x && x.ai;
+      if (!ai || typeof ai !== 'object') return null;
+      const u = ai.usage || {};
+      const n = (v) => (Number.isFinite(Number(v)) ? Number(v) : null);
+      const rm = x.revisionMeta && typeof x.revisionMeta === 'object' ? x.revisionMeta : null;
+      return {
+        model: ai.model || null, latencyMs: n(ai.latencyMs), firstTextMs: n(ai.firstTextMs), streamed: !!ai.streamed,
+        inputTokens: n(u.input_tokens), cachedTokens: n(u.input_tokens_details && u.input_tokens_details.cached_tokens),
+        outputTokens: n(u.output_tokens), reasoningTokens: n(u.output_tokens_details && u.output_tokens_details.reasoning_tokens),
+        ...(rm ? { mode: rm.mode || null, fallbackReason: rm.fallbackReason || null, patchAttempt: rm.patchAttempt ? { latencyMs: n(rm.patchAttempt.latencyMs), outputTokens: n(rm.patchAttempt.usage && rm.patchAttempt.usage.output_tokens) } : null } : {}),
+      };
+    };
     // まとめて入れる作業の上限（1 回の送信で続ける作業の数。超えた指示は記録したまま「まだ計画に入っていません」と出す）
     const MAX_CHAIN = 4;
     /**
@@ -23446,12 +23463,13 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
         state.metrics.asideAsks += 1; state.metrics.aiCalls += 1;
         const p = (async () => {
           // 会話の返答の逐次表示（2026-10-07）: 届いた部分を読み込み中の吹き出しに出し、そろったら答えのカードに置き換える
-          let partial = null, timer = null, stale = false;
+          let partial = null, timer = null, stale = false, firstAt = null;
+          const ta = clock();   // 区間の記録: この質問の開始
           const onText = (text) => {
             if (state.epoch !== epoch || !text) return;
             // 計画が先にできたら、見立ての続きは出さず、途中の吹き出しも外す（古い理解を計画の後に出さない）
             if (brief && !(busy && state.working === 'PLAN')) { stale = true; dropPartial(); return; }
-            if (!partial) { partial = push(MSG.LOADING, ROLE.ASSISTANT, text, { kind: brief ? 'plan-brief' : 'aside-answer', partial: true, question }); if (typeof onFirstText === 'function') { try { onFirstText(); } catch (e) { } } return; }
+            if (!partial) { firstAt = clock(); partial = push(MSG.LOADING, ROLE.ASSISTANT, text, { kind: brief ? 'plan-brief' : 'aside-answer', partial: true, question }); if (typeof onFirstText === 'function') { try { onFirstText(); } catch (e) { } } return; }
             partial.text = text;
             if (timer) return;
             timer = setTimeout(() => { timer = null; if (state.epoch === epoch) emit(); }, STREAM_RENDER_MS);
@@ -23460,6 +23478,9 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
           try {
             const r = await services.ask({ question, signal, conversation: { ...conversationContext(), ...(brief ? { brief: true } : {}) }, onText });
             dropPartial();
+            // 区間の記録（2026-10-07）: 先回りの見立て・作業中の質問は timings とは別に残す（送信の計測には含まれない）
+            state.metrics.asideTimings.push({ kind: brief ? 'brief' : 'aside', ok: !!(r && r.ok), firstTextMs: firstAt == null ? null : firstAt - ta, doneMs: clock() - ta, perf: r && r.perf || null, ai: r && r.ok ? aiOf(r.answer) : null });
+            if (state.metrics.asideTimings.length > 100) state.metrics.asideTimings.shift();
             if (state.epoch !== epoch) return;
             // 先回りの返答は、計画の作成中に届いたときだけ出す（計画の後に出ると、計画より古い理解が後から出る）
             if (brief && (stale || !(busy && state.working === 'PLAN'))) return;
@@ -23645,9 +23666,11 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
         // 会話の応答性（2026-10-05）: 計測（受け付けてから理解した内容を出すまで・完了まで・AI の呼び出し回数）
         const t0 = clock();
         //   firstTextMs（2026-10-07）: 意味のある返答（質問の答え・先回りの返答）が出始めるまで
-        const timing = { intent: cls.intent, reason: cls.reason, ackMs: null, firstTextMs: null, doneMs: null, ok: null, aiCalls: 0 };
+        //   calls / perf / ai（2026-10-07）: AI の呼び出しごとの区間（基準の待ち・Context・往復・検証）と Gateway の ai（モデル・待ち時間・token）。perf / ai は最後の呼び出し
+        const timing = { intent: cls.intent, reason: cls.reason, ackMs: null, firstTextMs: null, doneMs: null, ok: null, aiCalls: 0, calls: [], perf: null, ai: null };
         const aiCall = () => { state.metrics.aiCalls += 1; timing.aiCalls += 1; };
         const noteFirstText = () => { if (timing.firstTextMs == null) timing.firstTextMs = clock() - t0; };
+        const noteCall = (kind, r) => { if (!r || typeof r !== 'object') return; const e = { kind, perf: r.perf || null, ai: aiOf(r.answer || r.plan || null) }; timing.calls.push(e); timing.perf = e.perf; timing.ai = e.ai; };
         // 会話の返答の逐次表示（2026-10-07）: 届いた部分を読み込み中の吹き出しに出す（最初はすぐ、その後は STREAM_RENDER_MS に 1 回描く）
         let streamTimer = null;
         const streamInto = (msg) => (text) => {
@@ -23745,6 +23768,7 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
               const utterancesNow = (jobTexts || []).filter(x => typeof x === 'string' && x.trim());
               const r = await services.plan({ goal: base.goal, revision: { basedOnVersion: base.version, request: req, previousPlan: usePatch ? prev.gatewayPlan : prev.plan, previousRequests: [...(base.revisionRequests || []), ...requests], ...(usePatch ? { mode: 'patch', ...(focus.length ? { focus } : {}) } : {}), ...(utterancesNow.length ? { utterances: utterancesNow } : {}), ...(askSeparately && jobs === 1 ? { questionsAnsweredSeparately: true } : {}), ...(genNow ? { generateAfter: true } : {}) }, decisions, requirements: KTAiAnswers.requirementsForContext(lg), signal, baseCtx: prev.ctx, ...(state.subject ? { subject: state.subject } : {}) });
               state.job = null;
+              noteCall('plan', r);
               // 別の経路で計画が最新になった（会話は同じ）ときは、待ちの表示を片づけてから捨てる（残ると「作り直しています」が消えなかった）
               if (late() || state.activePlan !== expectedActive) { if (!late() && loading) { remove(loading); loading = null; result.superseded = true; rest('superseded'); } discard(); return; }
               if (!r || !r.plan) {
@@ -23819,6 +23843,7 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
               loading = push(MSG.LOADING, ROLE.ASSISTANT, LOADING_TEXT.ASK, { intent: cls.intent });
               aiCall();
               const r = await services.ask({ question: t, signal, conversation: conversationContext(), onText: streamInto(loading) });
+              noteCall('ask', r);
               if (late()) { discard(); break; }
               remove(loading); loading = null;
               if (r && r.ok) push(MSG.ANSWER, ROLE.ASSISTANT, r.answer?.answer || '', { answer: r.answer, ctxFacts: r.ctx?.facts || [] });
@@ -23902,6 +23927,7 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
               // 作成中の質問はすぐ答え、指示はためる（acceptWhileBusy）
               state.workInbox = { kind: 'PLAN', epoch: state.epoch, texts: [], text: t };
               const r = await services.plan({ goal: goalT, signal, ...(state.subject ? { subject: state.subject } : {}), ...(cls.alsoGenerate ? { generateAfter: true } : {}) });
+              noteCall('plan', r);
               const wP = state.workInbox; state.workInbox = null;
               if (late()) { discard(); break; }
               remove(loading); loading = null;
@@ -26225,12 +26251,17 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
     const services = {
       /** ASK: 質問 → KTContext.build（focus は質問から解決。曖昧なら候補を返す）→ assistant-qa。Planner は起動しない */
       async ask({ question, signal = null, focus = null, conversation = null, onText = null }) {
+        // 区間の記録（2026-10-07）: 基準の待ち・Context の生成・Gateway の往復（ms）。会話の timings / asideTimings に残す
+        const perf = { baseWaitMs: 0, contextMs: 0, requestMs: 0 };
+        const tb = nowMs();
         // Phase 21: 質問も最新の動作テスト環境を基準に答える（30 秒以内に取ったものは使い回す）。取れなければ運用環境の設定で答え、そのことを Context に入れる
         // 応答の速さ（2026-10-07）: 取得済みの基準があれば待たずに使い、古ければ裏で取り直す（取り直しが走っている間＝反映・登録の直後は、それを待つ）
         if (devBaseLoader) {
           if (devBase && devBase.ok && !devBasePromise) { if (nowMs() - devBaseAt >= DEV_BASE_ASK_MAX_AGE_MS) refreshDevBase({ reason: 'ask' }); }
           else await (devBasePromise || refreshDevBase({ maxAgeMs: DEV_BASE_ASK_MAX_AGE_MS, reason: 'ask' }));   // 取り直し中はその完了を待つ（refreshDevBase は 30 秒以内の基準を即返すので、Promise を直接待つ）
         }
+        perf.baseWaitMs = nowMs() - tb;
+        const tc = nowMs();
         let gen = KTContextUi.generate({ targetType: focus?.type || 'app', targetId: focus?.id ?? null, targetLabel: focus?.label ?? null, question, inputs: inputsNow() });
         // 先回りの返答（brief）は依頼の全体についての返答なので、対象（フィールド）を 1 つに決められなくてもアプリ全体の Context で答える
         //   （長い依頼は複数のフィールドに触れ、対象の候補を選ばせる応答になって、先回りの返答が黙って出なかった）
@@ -26239,20 +26270,26 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
           if (gen.ok) gen.ctx.question = question;
         }
         if (!gen.ok) return gen;
+        perf.contextMs = nowMs() - tc;
         // 2026-10-05 第 3 段: 会話の現在の要件と計画（作業中の質問にも、今の要件と計画を踏まえて答える。計画は変えない）
         if (conversation && typeof conversation === 'object') gen.ctx.conversation = conversation;
         const client = await ensureReady();
         const requestId = KTAiClient.newRequestId();
         // 逐次表示は Gateway が対応している（health の conversation に stream）ときだけ求める（古い Gateway には従来どおり kintone.proxy で送る）
         const streamOn = typeof onText === 'function' && (services.conversationFeatures() || []).includes('stream');
-        try { const a = await client.ask({ ctx: gen.ctx, requestId, signal, ...(streamOn ? { onText } : {}) }); lastAnswer = a; return { ok: true, answer: a, ctx: gen.ctx }; }
+        const tr = nowMs();
+        try { const a = await client.ask({ ctx: gen.ctx, requestId, signal, ...(streamOn ? { onText } : {}) }); perf.requestMs = nowMs() - tr; lastAnswer = a; return { ok: true, answer: a, ctx: gen.ctx, perf }; }
         catch (e) { noteAuthError(e); throw e; }
       },
       /** PLAN / REVISE_PLAN: goal（＋修正）→ KTContext.buildPlan → change-planner → KTPlanReview（Toolkit 検証） */
       async plan({ goal, revision = null, signal = null, subject = null, decisions = null, baseCtx = null, requirements = null, generateAfter = false }) {
         // Phase 21: 計画は最新の動作テスト環境を基準に作る（毎回取り直す）。取れなければ止める（運用環境の設定で計画しない）
+        const perf = { baseWaitMs: 0, contextMs: 0, requestMs: 0, reviewMs: 0 };   // 区間の記録（2026-10-07）
+        const tb = nowMs();
         const gate = await ensureDevBase('plan');
+        perf.baseWaitMs = nowMs() - tb;
         if (!gate.ok) return { ok: false, reason: 'DEV_BASE_UNAVAILABLE', message: gate.message };
+        const tc = nowMs();
         // Phase 17: 相談中の JS（subject）を Planner Context に付ける（統合先の第一候補。本文は送らない）
         const sub = subject ? KTContext.compactSubject({ sourceId: subject.sourceId, name: subject.name, target: subject.platform, customizationType: subject.customizationType, sourceAvailable: !!subject.sourceAvailable, events: subject.events || [], fields: Object.entries(subject.fieldAccess || {}).map(([code, acc]) => ({ code, access: acc.CONTROL || acc.SHOW_HIDE ? 'CONTROL' : acc.WRITE ? 'WRITE' : 'READ' })) }) : null;
         const inputs = subject ? withConsultedSource(inputsNow()) : inputsNow();
@@ -26261,20 +26298,25 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
         if (!gen.ok) return gen;
         // 会話の応答性（2026-10-05）: 差分の土台（前の版の Gateway の計画）の根拠ID を、今回の Context の番号に付け替える（Context は作り直しのたびに番号を振り直す）
         if (gen.ctx?.revision?.mode === 'patch' && gen.ctx.revision.previousPlan) gen.ctx.revision.previousPlan = KTContext.remapPlanEvidence(gen.ctx.revision.previousPlan, baseCtx, gen.ctx);
+        perf.contextMs = nowMs() - tc;
         const client = await ensureReady({ planner: true });
         const requestId = KTAiClient.newRequestId();
         let p;
+        const tr = nowMs();
         try { p = await client.plan({ ctx: gen.ctx, requestId, signal }); }
         catch (e) { noteAuthError(e); throw e; }
+        perf.requestMs = nowMs() - tr;
         normalizePlanConditions(p, (inputs && inputs.data) || null);
         let review = null;
+        const tv = nowMs();
         try { review = KTPlanReview.review({ plan: p, ...(subject ? withConsultedSource(inputsNow()) : inputsNow()) }); } catch (e) { review = null; }
+        perf.reviewMs = nowMs() - tv;
         // Phase 21: どの基準で検証したか（反映の直前に、この時点の動作テスト環境と今を比べる）
         if (review) review.base = gate.base ? KTDevBase.stamp(gate.base) : null;
         // 2026-10-05 第 3 段: 今回の発言の扱い（turn）は計画の一部ではない（版の計画に残さない。台帳と表示だけに使う）
         const turn = p?.turn ?? null, requirementsMeta = p?.requirementsMeta ?? null;
         if (p) { delete p.turn; delete p.requirementsMeta; }
-        return { plan: p, ctx: gen.ctx, review, decisionsMeta: p?.decisionsMeta ?? null, gatewayPlan: p?.gatewayPlan ?? null, revisionMeta: p?.revisionMeta ?? null, turn, requirementsMeta };
+        return { plan: p, ctx: gen.ctx, review, decisionsMeta: p?.decisionsMeta ?? null, gatewayPlan: p?.gatewayPlan ?? null, revisionMeta: p?.revisionMeta ?? null, turn, requirementsMeta, perf };
       },
       /** 会話の応答性（2026-10-05）: Gateway の計画の修正の方式（health。返さない古い Gateway は全体の作り直しだけ） */
       revisionModes() { return capability?.features?.[KTAiClient.FEATURE_PLANNER || 'change-planner']?.revisionModes || ['full']; },
