@@ -313,9 +313,10 @@ await section(async () => {
   const CODE = "(function () {\n  'use strict';\n  kintone.events.on(['mobile.app.record.create.show', 'mobile.app.record.edit.show', 'mobile.app.record.create.change.items', 'mobile.app.record.edit.change.items'], function (event) {\n    var record = event.record;\n    if (record['ステータス'].value === '承認済み') {\n      record['amount'].disabled = true;\n      var rows = record['items'].value;\n      for (var i = 0; i < rows.length; i++) {\n        rows[i].value['item_name'].disabled = true;\n        rows[i].value['qty'].disabled = true;\n        rows[i].value['unit_price'].disabled = true;\n      }\n    }\n    return event;\n  });\n})();\n";
   const gen = (coverage) => ({ strategy: 'NEW_JS_FILE', targetFile: 'mobileDealLock.js', summary: 'モバイルで承認済みの金額と明細セルを編集不可にする', code: CODE, patch: null, events: C2.events, fields: C2.fields.map(f => ({ code: f.code, access: f.access })), apis: ['kintone.events.on'], assumptions: [], warnings: [], coverage });
   const rvOf = (coverage, plan = SR.CASE2_PLAN) => KTCodeReview.review({ generated: gen(coverage), customization: C2, plan, data: INPUTS.data, scan: INPUTS.scan, existingSource: null });
-  // 従来の形（AI が NOT_MET / PARTIAL で返した）は従来どおり notAchieved
+  // 従来の形（AI が NOT_MET / PARTIAL で返した）: PARTIAL は notAchieved のまま。独立レビュー B-2: NOT_MET でも note が計画の手順（P1）・標準設定を担当に名指ししていて
+  //   その手順が計画にあれば担当範囲外（AI_OUT_OF_SCOPE）に読み替える（登録不可にしない）
   const asIs = rvOf(SR.CASE2_GENERATED_COVERAGE);
-  assert(asIs.coverage && Array.isArray(asIs.coverage.outOfScope) && asIs.coverage.outOfScope.length === 0 && asIs.coverage.notAchieved.some(x => x.code === 'AI_NOT_MET' && /100万円以上は部長承認/.test(x.message)) && asIs.coverage.notAchieved.some(x => x.code === 'AI_PARTIAL' && /PCとモバイルの両方で使う/.test(x.message)), `従来の coverage（NOT_MET / PARTIAL）は notAchieved のまま: ${JSON.stringify(asIs.coverage.notAchieved.map(x => x.code))}`);
+  assert(asIs.coverage && Array.isArray(asIs.coverage.outOfScope) && asIs.coverage.outOfScope.length === 1 && asIs.coverage.outOfScope[0].code === 'AI_OUT_OF_SCOPE' && /100万円以上は部長承認/.test(asIs.coverage.outOfScope[0].requirement) && /手順「/.test(asIs.coverage.outOfScope[0].message) && !/\bP1\b/.test(asIs.coverage.outOfScope[0].message) && !asIs.coverage.notAchieved.some(x => x.code === 'AI_NOT_MET') && asIs.coverage.notAchieved.some(x => x.code === 'AI_PARTIAL' && /PCとモバイルの両方で使う/.test(x.message)) && !(asIs.checks || []).some(x => x.name === 'coverage-unmet' && x.severity === 'block'), `従来の coverage: PARTIAL は notAchieved のまま・標準設定を担当に名指しした NOT_MET は担当範囲外に読み替え: ${JSON.stringify({ na: asIs.coverage.notAchieved.map(x => x.code), oos: asIs.coverage.outOfScope.map(x => [x.code, x.message]) })}`);
   // Gateway の新しい規則（OUT_OF_SCOPE）＋ 決定的な補助（他の customization の requirement と同じ文の NOT_MET）
   const cov = SR.CASE2_GENERATED_COVERAGE.map(x => (x.status === 'NOT_MET' ? { ...x, status: 'OUT_OF_SCOPE', note: 'P1 で承認者を確定し、標準のプロセス管理で分岐を設定する' } : x));
   cov.push({ requirement: C1.requirement, status: 'NOT_MET', note: 'PC は対象外' });
@@ -344,13 +345,15 @@ await section(async () => {
   // 担当範囲外とされた要件の担当が計画に無ければ unowned ＋ check coverage-owner（review）。P1 / 標準設定 の担当があれば unowned にしない
   const un = rvRev([{ requirement: '承認後に Slack へ知らせる', status: 'OUT_OF_SCOPE', note: '別の仕組みで扱う' }, { requirement: '100万円以上は部長承認', status: 'OUT_OF_SCOPE', note: 'P1 で承認者を確定し、標準のプロセス管理で分岐を設定する' }, { requirement: '承認待ちの通知', status: 'OUT_OF_SCOPE', note: '標準設定で対応' }, { requirement: '帳票の出力', status: 'OUT_OF_SCOPE', note: 'C9 の担当' }]);
   const owner = un.checks.filter(ch => ch.name === 'coverage-owner');
-  assert(un.coverage.unowned.map(x => x.requirement).join('|') === '承認後に Slack へ知らせる|帳票の出力' && un.coverage.outOfScope.length === 4, `担当（P1 / 標準設定）の無い OUT_OF_SCOPE は unowned（C9 は計画に無い）: ${JSON.stringify(un.coverage.unowned)}`);
-  assert(owner.length === 2 && owner.every(ch => !ch.ok && ch.severity === 'review') && owner[0].message === '担当範囲外とされた要件「承認後に Slack へ知らせる」の担当が計画に見つかりません。計画全体の確認に残します' && un.status !== 'OK', `check coverage-owner（review）: ${JSON.stringify(owner)}`);
+  // 再レビュー 2026-10-07: 担当は「設定を実際に変える手順」だけ。P1 は REQUIRE_CONFIRMATION（確認待ち）なので担当にならず、「標準のプロセス管理」も PROCESS 系の手順が無いので
+  //   担当にならない → 「100万円以上は部長承認」も unowned（計画全体の確認に残す。登録不可にはしない）。「標準設定で対応」は P3（REUSE_FIELD）があるので担当あり
+  assert(un.coverage.unowned.map(x => x.requirement).join('|') === '承認後に Slack へ知らせる|100万円以上は部長承認|帳票の出力' && un.coverage.outOfScope.length === 4 && !(un.checks || []).some(ch => ch.name === 'coverage-unmet'), `担当（設定を変える手順 / 標準設定）の無い OUT_OF_SCOPE は unowned（P1 は確認待ち・C9 は計画に無い）: ${JSON.stringify(un.coverage.unowned)}`);
+  assert(owner.length === 3 && owner.every(ch => !ch.ok && ch.severity === 'review') && owner[0].message === '担当範囲外とされた要件「承認後に Slack へ知らせる」の担当が計画に見つかりません。計画全体の確認に残します' && un.status !== 'OK', `check coverage-owner（review）: ${JSON.stringify(owner)}`);
   const csUn = VM.codeSummary({ generated: gen([]), review: un, existingSource: null }, 'C2', { planId: 'p', version: 1, plan: revPlan });
-  assert(Array.isArray(csUn.unowned) && csUn.unowned.length === 2, 'codeSummary に unowned');
+  assert(Array.isArray(csUn.unowned) && csUn.unowned.length === 3, 'codeSummary に unowned');
   let cardUn = '';
   try { cardUn = KTAiChatUi.messageHtml({ id: 'm1', type: 'CODE', role: 'toolkit', text: 'JavaScript', at: '', data: { planId: 'p', version: 1, customizationId: 'C2' } }, { plans: new Map([['p:1', { planId: 'p', version: 1, goal: revPlan.goal, plan: revPlan, review: null, ctx: null, status: 'ACTIVE', generated: { C2: { generated: gen([]), review: un, existingSource: null } } }]]) }); } catch (e) { cardUn = `例外: ${e && e.stack}`; }
-  assert(/kt-ai-code-unowned[^>]*>計画で担当が決まっていない要件: 承認後に Slack へ知らせる／帳票の出力</.test(cardUn), `コードカードに「計画で担当が決まっていない要件」を別に出す: ${cardUn.slice(0, 400)}`);
+  assert(/kt-ai-code-unowned[^>]*>計画で担当が決まっていない要件: 承認後に Slack へ知らせる／100万円以上は部長承認／帳票の出力</.test(cardUn), `コードカードに「計画で担当が決まっていない要件」を別に出す: ${cardUn.slice(0, 400)}`);
   // クライアントの検証は OUT_OF_SCOPE を語彙として受け取る（語彙外は従来どおり PARTIAL）
   const gctx = KTContext.buildGenerator({ customization: C2, plan: SR.CASE2_PLAN, planId: 'p', version: 1, data: INPUTS.data, deps: INPUTS.deps, scan: INPUTS.scan });
   const RESP = { ok: true, contractVersion: '2.1', meta: { requestId: 'g1', gateway: { product: 'toolkit', feature: 'customization-generator', promptVersion: '1', contextVersion: 'customization-1' }, normalization: { warnings: [] }, ai: { model: 'm' } }, generated: { ...gen([{ requirement: '100万円以上は部長承認', status: 'OUT_OF_SCOPE', note: 'P1' }, { requirement: 'x', status: 'BOGUS', note: '' }]), gatewayChecks: { security: [] } } };
@@ -384,7 +387,8 @@ await section(async () => {
   const v1 = c.activePlan(); c.confirmSpec({ planId: v1.planId, version: v1.version });
   await c.send('コードを作って'); await ticks();
   const intro = c.messages().find(m => m.data?.kind === 'code-intro');
-  assert(intro && /要件のうち満たせない部分があります: 明細の行の追加・削除は止められません/.test(intro.text) && / この JavaScript の担当範囲外（計画の他の手順・JavaScript で扱います）: 100万円以上は部長承認（P1 の標準設定で扱う）/.test(intro.text) && intro.text.indexOf('満たせない部分') < intro.text.indexOf('担当範囲外'), `code-intro: 満たせない部分と担当範囲外を分けて出す: ${intro && intro.text}`);
+  // 独立レビュー C: Toolkit の確認（SUBTABLE_ROWS）は「（Toolkit の確認）」と書く（AI の申告は「（AI の申告）」）
+  assert(intro && /要件のうち満たせない部分があります（Toolkit の確認）: 明細の行の追加・削除は止められません/.test(intro.text) && / この JavaScript の担当範囲外（計画の他の手順・JavaScript で扱います）: 100万円以上は部長承認（P1 の標準設定で扱う）/.test(intro.text) && intro.text.indexOf('満たせない部分') < intro.text.indexOf('担当範囲外'), `code-intro: 満たせない部分と担当範囲外を分けて出す: ${intro && intro.text}`);
   const c2 = makeConv({ status: 'OK', checks: [], coverage: { achieved: [], notAchieved: [], outOfScope: [{ code: 'OTHER_CUSTOMIZATION', requirement: 'r', message: 'モバイルの編集制御（C2 の担当）' }] } });
   await c2.send('承認済みでは金額を編集できなくして'); await ticks();
   const v2 = c2.activePlan(); c2.confirmSpec({ planId: v2.planId, version: v2.version });

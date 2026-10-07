@@ -181,7 +181,8 @@ console.log('\n--- F-F2 実機の再生（Phase 21 BF-C）: 実際の生成コ�
   const codes = rv.registration.confirmations.map(x => x.code);
   assert(R.P21_CONFIRMATIONS.length === 4 && R.P21_CONFIRMATIONS.includes('conditional-control'), '前提: Phase 21 の判定は確認 4 件（conditional-control を含む）');
   assert(c.ok === true && /入力チェック（エラー表示）/.test(c.message) && /承認済み/.test(c.message) && !/条件なし/.test(c.message), `BF-C: conditional-control は通過（金額の入力チェックは計画の条件の中・既存の承認済みのロックは別の条件の制御）: ${c.message}`);
-  assert(rv.registration.verdict === 'NEEDS_CONFIRMATION' && !codes.includes('conditional-control') && ['error-cancels-edit', 'duplicate-handler', 'existing-conflict'].every(x => codes.includes(x)) && codes.length === 3, `BF-C: 確認は 4 件 → 3 件（不要な conditional-control が無くなる。残りは実際に確かめること）: ${codes.join(', ')}`);
+  // 段階 A（5.4）: AI の申告の PARTIAL（承認済みでは警告を出さない）は確認（coverage-unmet・review）として登録の判定に入る（以前は検査に無く「静的な検査は通過」と並んだ）
+  assert(rv.registration.verdict === 'NEEDS_CONFIRMATION' && !codes.includes('conditional-control') && ['error-cancels-edit', 'duplicate-handler', 'existing-conflict', 'coverage-unmet'].every(x => codes.includes(x)) && codes.length === 4, `BF-C: 不要な conditional-control が無くなる（残りは実際に確かめること）。AI の申告の PARTIAL は coverage-unmet の確認として残る: ${codes.join(', ')}`);
   assert(!rv.registration.blockers.length, '登録不可にはならない（動作テスト環境での確認は残る）');
 }
 

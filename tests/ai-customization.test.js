@@ -426,13 +426,13 @@ const writes = (m) => m.mock.calls.filter(c => !c.startsWith('GET'));
   assert(entry && entry.generated.strategy === 'EXTEND_EXISTING_JS' && entry.review.status === 'OK' && entry.existingSource?.text === FIELD_ON_OFF, '生成結果を版に保持: Toolkit Code Review OK');
   assert(m.types().includes('CODE') && /JavaScript を作りました。/.test(m.chat()) && /コードの確認：/.test(m.chat()) && /✓ 検査を通過/.test(m.chat()) && /登録できるか：✓/.test(m.chat()) && /✎ <b>fieldOnOff\.js<\/b>（PC）/.test(m.chat()) && !/✓ Patch/.test(m.chat()) && !/Toolkit Code Review/.test(m.chat()), 'コードカード（§7）: ファイル名と「コードの確認：✓ 検査を通過」「登録できるか」だけ（検査の内訳・内部の処理名は会話に無い）');
   assert(/data-act="open-code" data-cid="C1" data-view="code"[^>]*>コードを見る</.test(m.chat()) && /data-act="open-code" data-cid="C1" data-view="diff"[^>]*>差分を見る</.test(m.chat()) && m.host.innerHTML.includes('id="kt-ai-code-copy"') && m.host.innerHTML.includes('id="kt-ai-diff-copy"') && /差分をコピー/.test(m.host.innerHTML) && /変更前後（差分）/.test(m.host.innerHTML), 'コードカードの操作: コードを見る / 差分を見る。コピー（コードをコピー / 差分をコピー）と変更前後（差分）は右の「コード」');
-  assert(/＋3 \/ −0 行/.test(m.chat()) && m.panel.drawerState().pane === 'code' && /元のコードは保持/.test(m.$('kt-ai-code-review').innerHTML) && /✓ Patch/.test(m.$('kt-ai-code-review').innerHTML), 'Diff の要約: 会話は ＋3 / −0 行。生成後は右の「コード」が自動で開き（§13）、検査の内訳（Patch / 元のコードは保持）はそこに');
+  assert(/＋3 \/ −0 行/.test(m.chat()) && m.panel.drawerState().pane === 'code' && /元のコードは保持/.test(m.$('kt-ai-code-review').innerHTML) && /✓ 既存ファイルへの統合/.test(m.$('kt-ai-code-review').innerHTML), 'Diff の要約: 会話は ＋3 / −0 行。生成後は右の「コード」が自動で開き（§13）、検査の内訳（既存ファイルへの統合 / 元のコードは保持）はそこに');
   assert(/登録は右の「コード」の［動作テスト環境へ登録］→ 右の「反映」の確認の順/.test(m.chat()) && /運用環境には反映しません/.test(m.chat()) && m.$('kt-ai-code-register').style.display === '' && m.$('kt-ai-code-register').disabled === false, 'コードカード: 登録は右の「コード」の［動作テスト環境へ登録］→ 右の「反映」の確認の順（運用環境には反映しない）。登録ボタンは右に（反映を止める理由が無いので押せる）');
   assert(writes(m).length === 0, 'コード生成で kintone への書き込みは 0 件');
   // コードを見る / Diff
   await clickChat(m, 'open-code', { cid: 'C1', view: 'code' });
   assert(m.panel.drawerState().open && m.panel.drawerState().pane === 'code' && m.$('kt-ai-code-view').textContent === entry.review.finalCode && m.$('kt-ai-code-view').style.display === '' && m.$('kt-ai-diff-view').style.display === 'none', '［コードを見る］→ コードペインに最終コード');
-  assert(/✎ 既存 JS を変更/.test(m.$('kt-ai-code-head').innerHTML) && /Patch/.test(m.$('kt-ai-code-review').innerHTML) && /Security/.test(m.$('kt-ai-code-review').innerHTML), 'コードペイン: 見出しと Code Review の一覧');
+  assert(/✎ 既存 JS を変更/.test(m.$('kt-ai-code-head').innerHTML) && /既存ファイルへの統合/.test(m.$('kt-ai-code-review').innerHTML) && /安全性/.test(m.$('kt-ai-code-review').innerHTML) && !/Patch|Security/.test(m.$('kt-ai-code-review').innerHTML), 'コードペイン: 見出しと Code Review の一覧（検査名は日本語）');
   await clickChat(m, 'open-code', { cid: 'C1', view: 'diff' });
   assert(m.$('kt-ai-diff-view').style.display === '' && /^\+\s*if \(record\['ステータス'\] && record\['ステータス'\]\.value === '完了'\)/m.test(m.$('kt-ai-diff-view').textContent) && / {0,}kintone\.events\.on/.test(m.$('kt-ai-diff-view').textContent), '［差分を見る］→ Before / After（追加行は +・既存行は保持）');
   // コピー
@@ -603,7 +603,7 @@ console.log('\n--- §53-4. KTAiChatUi（純関数）---');
   const rv = KTCodeReview.review({ generated: genPatch(), customization: hy.plan.customizations[0], plan: hy.plan, data: INPUTS.data, scan: INPUTS.scan, existingSource: SRC });
   v.generated.C1 = { generated: genPatch(), review: rv, existingSource: SRC };
   const withGen = KTAiChatUi.messageHtml(m, { plans: new Map([['p:1', v]]) });
-  assert(/kt-ai-code-card/.test(withGen) && /JavaScript を作りました。/.test(withGen) && /コードの確認：/.test(withGen) && /✓ 検査を通過/.test(withGen) && !/✓ Patch/.test(withGen) && /✓ Patch/.test(KTAiChatUi.codePaneHtml(v.generated.C1).review) && /✓ Syntax/.test(KTAiChatUi.codePaneHtml(v.generated.C1).review), 'codeCardHtml は要約（コードの確認：✓ 検査を通過）。Toolkit Code Review の ✓ 一覧は codePaneHtml（右の「コード」）');
+  assert(/kt-ai-code-card/.test(withGen) && /JavaScript を作りました。/.test(withGen) && /コードの確認：/.test(withGen) && /✓ 検査を通過/.test(withGen) && !/✓ 既存ファイルへの統合/.test(withGen) && /✓ 既存ファイルへの統合/.test(KTAiChatUi.codePaneHtml(v.generated.C1).review) && /✓ 構文/.test(KTAiChatUi.codePaneHtml(v.generated.C1).review), 'codeCardHtml は要約（コードの確認：✓ 検査を通過）。Toolkit Code Review の ✓ 一覧は codePaneHtml（右の「コード」。検査名は日本語）');
   const pane = KTAiChatUi.codePaneHtml(v.generated.C1, { view: 'diff' });
   assert(pane.code === rv.finalCode && /^\+/m.test(pane.diff) && /fieldOnOff\.js/.test(pane.head), 'codePaneHtml: code / diff / head');
   assert(KTAiChatUi.STRATEGY_JA.EXTEND_EXISTING_JS === '✎ 既存 JS を変更' && KTAiChatUi.STRATEGY_JA.NEW_JS_FILE === '＋ 新規 JS', 'STRATEGY_JA');

@@ -108,7 +108,8 @@ console.log('\n--- N2 実機の再生（RC E2E の §2 手順 4）: 空の判定
   const v3 = KTCodeReview.review({ generated: g3.generated, customization: E2E.S2_V3.customization, plan: null, data: JSON.parse(JSON.stringify(DATA)), scan: null, existingSource: src3 });
   const raw3 = KTCodeReview.review({ generated: E2E.S2_V3.generated, customization: E2E.S2_V3.customization, plan: null, data: JSON.parse(JSON.stringify(DATA)), scan: null, existingSource: src3 });
   assert(raw3.status === 'BLOCKED' && raw3.checks.some(x => x.name === 'modern-js' && !x.ok && /const に直せます/.test(x.message)), '直していない出力（新しい var）は登録できない（以前は var のまま確認が必要で通った）');
-  assert(/var amount = event\.record\['amount'\]\.value;/.test(v3.finalCode || ''), '既存の dealValidate.js の var はそのまま（一括置換しない）');
+  // 段階 A（5.5）: patch を入れる handler（保存時の入力チェック）の中の既存の var record は const に更新する（安全な判定を通ったものだけ）。handler の外・別の handler は触らない（一括置換ではない）
+  assert(/const amount = event\.record\['amount'\]\.value;/.test(v3.finalCode || '') && !/\bvar\b/.test(KTScan.stripCommentsOnly(v3.finalCode || '')) && g3.handlerVars === 1 && v3.checks.some(x => x.name === 'patch' && /既存の宣言 1 行を const \/ let に更新/.test(x.message)), `既存の dealValidate.js の var は、patch を入れた handler の中だけ const に更新（宣言 1 行の更新として数え、置き換えとはみなさない）: ${g3.handlerVars} ${JSON.stringify(v3.checks.filter(x => /^patch/.test(x.name)).map(x => x.message))}`);
   const x = check(v3, 'empty-undefined')[0] || {};
   assert(!check(v3, 'patch').length, '再生の前提: パッチは適用できる');
   assert(x.severity === 'review' && /referral_source/.test(x.message || '') && /undefined/.test(x.message || '') && /作成画面/.test(x.message || ''), `v3: referral_source の空の判定が undefined を扱っていない → 確認（理由つき）: ${x.message}`);

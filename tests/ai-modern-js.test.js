@@ -73,7 +73,9 @@ const mj = (r) => r.checks.filter(c => c.name === 'modern-js');
   const f = KTModernJs.fixGenerated({ generated: ext('var'), existingSource: src });
   assert(f.status === 'fixed' && /^    const limit = 1000000;/.test(f.generated.patch.operations[0].content) && f.generated.code === '    const limit = 1000000;\n' && f.generated.patch.operations[0].anchor === "    var amount = event.record['amount'].value;", `M4: 追加した var だけ const にして content と表示用の code に書き戻す（anchor の既存の var はそのまま）: ${JSON.stringify(f.generated.patch.operations[0])}`);
   const after = KTCodeReview.review({ generated: f.generated, customization: custE, data: DATA, existingSource: src });
-  assert(after.status !== 'BLOCKED' && mj(after)[0].ok && /var amount = event\.record\['amount'\]\.value;/.test(after.finalCode), `M4: 直した後は全部の検査を通り、登録する全文に既存の var はそのまま: ${after.status}`);
+  // 段階 A（5.5）: patch を入れた handler の中の既存の var は const に更新し、patch の検査は「既存の宣言 1 行を const / let に更新」として数える（全文の書き換えではない）
+  assert(after.status !== 'BLOCKED' && mj(after)[0].ok && /const amount = event\.record\['amount'\]\.value;/.test(after.finalCode) && !/\bvar amount\b/.test(after.finalCode) && after.checks.some(c => c.name === 'patch' && /既存の宣言 1 行を const \/ let に更新/.test(c.message)) && !after.checks.some(c => c.name === 'patch-removal'), `M4: 直した後は全部の検査を通り、patch を入れた handler の中の既存の var は const に更新（既存の宣言 1 行。置き換えとは数えない）: ${after.status} ${JSON.stringify(after.checks.filter(c => /^patch/.test(c.name)).map(c => c.message))}`);
+  assert(f.handlerVars === 1 && f.fixed.some(x => x.name === 'amount' && x.scope === 'handler') && f.generated.patch.operations.length === 2 && f.generated.patch.operations[1].type === 'REPLACE' && f.generated.patch.operations[1].anchor === "    var amount = event.record['amount'].value;" && f.generated.patch.operations[1].content === "    const amount = event.record['amount'].value;", `M4（段階 A 5.5）: handler の既存の var は REPLACE の操作として patch に足す: ${JSON.stringify(f.generated.patch.operations[1])}`);
   const fNew = KTModernJs.fixGenerated({ generated: gen(NEW('var')) });
   assert(fNew.status === 'fixed' && /    const v = Number/.test(fNew.generated.code), 'M4: 新規ファイルの var も直す');
   const fTop = KTModernJs.fixGenerated({ generated: gen(`var LIMIT = 1000000;\n${NEW('var')}`) });
@@ -104,7 +106,9 @@ console.log('\n--- M6 kintone のページ（AMD の define がある）・差�
   const content = "    var amount = event.record['amount'].value;\n    var limit = 1000000;\n    if (!amount) { event.record['amount'].error = '必須'; }";
   const g = { strategy: 'EXTEND_EXISTING_JS', targetFile: 'dealValidate.js', code: '    var limit = 1000000;\n', patch: { baseHash: KTScan.hashText(SRC), operations: [{ type: 'REPLACE', anchor, content }] }, events: [], fields: [], apis: [] };
   const f = KTModernJs.fixGenerated({ generated: g, existingSource: { name: 'dealValidate.js', target: 'desktop', text: SRC } });
-  assert(f.status === 'fixed' && f.fixed.map(x => x.name).join() === 'limit' && f.generated.patch.operations[0].content.startsWith("    var amount = event.record['amount'].value;\n    const limit = 1000000;") && f.generated.code === '    const limit = 1000000;\n', `M6: REPLACE で残した既存の var は直さず、足した var だけを直す（表示用の code も同じ）: ${JSON.stringify(f.fixed.map(x => x.name))}`);
+  // 段階 A（5.5）: REPLACE で残した既存の行（var amount）は content の修正の対象外のまま（content は足した var だけ直す）。ただし同じ handler の中の既存の var なので、
+  //   安全な判定を通れば REPLACE の操作を別に足して const に更新する（表示用の code は足した部分だけ）
+  assert(f.status === 'fixed' && f.fixed.filter(x => !x.scope).map(x => x.name).join() === 'limit' && f.fixed.some(x => x.name === 'amount' && x.scope === 'handler') && f.generated.patch.operations[0].content.startsWith("    var amount = event.record['amount'].value;\n    const limit = 1000000;") && f.generated.patch.operations[1].type === 'REPLACE' && f.generated.patch.operations[1].content === "    const amount = event.record['amount'].value;" && f.generated.code === '    const limit = 1000000;\n', `M6: content では足した var だけを直し、REPLACE で残した既存の var は同じ handler の宣言として別の操作で const に更新（表示用の code は足した部分だけ）: ${JSON.stringify(f.fixed.map(x => [x.name, x.scope || 'content']))}`);
 }
 
 console.log(`\n${state.failed ? 'FAILED' : 'ALL PASSED'}: ${state.passed} passed / ${state.failed} failed`);

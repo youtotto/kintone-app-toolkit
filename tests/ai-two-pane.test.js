@@ -334,9 +334,14 @@ console.log('\n--- §14. 登録の確認を出した後に同じ版でコード�
   const w0 = writes(m).length;
   const r = await m.panel.confirmJsRegister(); await ticks();
   assert(r === null && m.panel.jsExecState().stage === 'blocked' && /準備の後にコードが作り直されました/.test(m.$('kt-ai-jsreg').innerHTML) && writes(m).length === w0, `作り直したコードは、準備からやり直すまで登録しない: ${m.panel.jsExecState().stage}`);
-  // 同じ版で作り直す（会話から）→ 前のコードで準備した確認画面を取り消す
+  // 同じ版・同じ入力で作り直しを頼む（会話から）→ 独立レビュー B3（5.6）: AI を呼ばず「同じ入力・同じ指摘」の案内。コードは変わらないので前のコードの確認はそのまま
   await m.panel.startJsRegister(m.conv().activePlan()); await ticks(6);
   assert(m.panel.jsExecState().stage === 'confirm', '前提: もう一度、登録の確認を出した');
+  const repeatsBefore = m.conv().messages().filter(x => x.data?.kind === 'generate-repeat').length;
+  await m.panel.generate('C1'); await ticks(10);
+  assert(m.panel.jsExecState().stage === 'confirm' && m.conv().messages().filter(x => x.data?.kind === 'generate-repeat').length === repeatsBefore + 1 && writes(m).length === w0, `同じ入力の作り直しは AI を呼ばず案内だけ（コードが変わらないので確認はそのまま）: ${m.panel.jsExecState().stage}`);
+  // 入力が変わって（追加の指示）同じ版で作り直す → 前のコードで準備した確認画面を取り消す
+  const vNow = m.conv().activePlan(); vNow.revisionRequests = [...(vNow.revisionRequests || []), '差戻し後は編集できるようにして'];
   await m.panel.generate('C1'); await ticks(10);
   assert(m.panel.jsExecState().stage === 'idle' && !/id="kt-ai-jsreg-go"/.test(m.$('kt-ai-jsreg').innerHTML) && writes(m).length === w0, `同じ版で作り直したら、前のコードの登録の確認を消す: ${m.panel.jsExecState().stage}`);
 }
