@@ -324,7 +324,10 @@ await section(async () => {
   const ctx = KTContext.buildPlan({ goal: 'g', data: DATA, deps: DEPS, scan: null, incoming: null, options: { revision: rev, decisions } });
   assert(Array.isArray(ctx.decisions) && ctx.decisions.map(d => d.id).join() === 'D1,D2' && ctx.decisions[0].value.join() === 'desktop', `Planner Context: 決定事項は revision と一緒に送る（形の不正・利用者の入力でないものは落とす）: ${JSON.stringify(ctx.decisions)}`);
   const ctx0 = KTContext.buildPlan({ goal: 'g', data: DATA, deps: DEPS, scan: null, incoming: null, options: { decisions } });
-  assert(!('decisions' in ctx0), 'Planner Context: 新しい計画（revision 無し）には決定事項を載せない');
+  // 再設計 段階 B（2026-10-07・契約 16）: 仮案で答えた決定事項は、採用後の最初の計画（revision 無し）にも載せる（以前は revision と一緒のときだけ）
+  assert(Array.isArray(ctx0.decisions) && ctx0.decisions.map(d => d.id).join() === 'D1,D2' && !('revision' in ctx0), `Planner Context: 新しい計画（revision 無し）にも渡された決定事項を載せる（形の不正・利用者の入力でないものは落とす）: ${JSON.stringify(ctx0.decisions)}`);
+  const ctx00 = KTContext.buildPlan({ goal: 'g', data: DATA, deps: DEPS, scan: null, incoming: null, options: {} });
+  assert(!('decisions' in ctx00), 'Planner Context: 決定事項が無ければ decisions を付けない');
   const r2 = KTContext.compactRevision({ basedOnVersion: 1, request: 'あ'.repeat(2100), previousPlan: planWith([]) });
   assert(r2.request.length === 2000, `依頼文は Gateway の上限（2000 文字）ちょうどに収める（以前は 2001 文字で INVALID_CONTEXT）: ${r2.request.length}`);
   const custObj = { customizationId: 'C1', requirement: 'r', whyStandardInsufficient: 'w', strategy: 'NEW_JS_FILE', implementation: 'JAVASCRIPT', platform: ['desktop'], events: ['app.record.create.show'], fields: [], apis: [], existingFiles: [], risks: [], questions: [], dependsOn: [], evidenceIds: [], confidence: 'INFERRED' };
