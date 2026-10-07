@@ -59,6 +59,17 @@ function makeConv(plans, { revisionModes = ['full', 'patch'], revisionMode, fail
   return { c, calls, ctl, acks: () => c.messages().filter(m => m.data?.kind === 'answers-ack'), kinds: () => c.messages().map(m => m.data?.kind || m.type) };
 }
 const versions = (c) => c.planHistory().map(v => v.version);
+/**
+ * 作業を待たせて送り、作業中に会話に出ている読み込み中の文を返す（2026-10-06: 受領の記録は会話に出さないため、待ち時間は読み込み中の文で伝える）
+ */
+async function sendHeld(x, text, opts) {
+  const open = x.ctl.hold();
+  const p = x.c.send(text, opts);
+  await ticks();
+  const loading = x.c.messages().filter(m => m.type === 'LOADING' && !KTAiChatUi.isHiddenMessage(m)).map(m => m.text).join(' / ');
+  open(); const r = await p; await ticks();
+  return { r, loading };
+}
 
 (async () => {
 async function section(fn) { try { await fn(); } catch (e) { assert(false, `例外: ${e && e.stack ? e.stack.split('\n').slice(0, 2).join(' / ') : e}`); } }
@@ -67,29 +78,33 @@ async function section(fn) { try { await fn(); } catch (e) { assert(false, `例�
 console.log('\n--- P. 計画の差分更新の依頼（回答の後は変わる箇所だけ） ---');
 await section(async () => {
   const v1 = planWith(qs(QP, QS), { customizations: [cust({ questions: [] })] });
-  const { c, calls, acks } = makeConv([v1, planWith(qs(QS))]);
+  const x = makeConv([v1, planWith(qs(QS))]);
+  const { c, calls, acks } = x;
   await c.send('金額が大きい案件に注意を出したい');
   assert(c.activePlan().gatewayPlan && c.activePlan().gatewayPlan.gw === 1, 'P1: 版に Gateway の計画（次の差分の土台）を持つ');
-  await c.send('PCだけ');
+  const { loading } = await sendHeld(x, 'PCだけ');
   const r = calls[1].revision;
   assert(r.mode === 'patch' && r.previousPlan.gw === 1 && Array.isArray(r.focus) && r.focus.includes('Q1') && calls[1].baseCtx && calls[1].baseCtx.n === 1, `P1: 回答の後の作り直しは mode patch・前の版の Gateway の計画・回答した質問（Q1）を focus・前の版の Context: ${JSON.stringify({ mode: r.mode, focus: r.focus })}`);
-  assert(/変わる箇所だけを作り直します。十数秒ほどかかります/.test(acks()[0].text) && !/1 分前後/.test(acks()[0].text), `P1: 受領の表示は差分の待ち時間（十数秒）: ${acks()[0].text}`);
+  // 2026-10-06: 受領の記録は会話に出さない。待ち時間は作業中の読み込み中の文で伝える（記録の文も同じ待ち時間）
+  assert(/変わる箇所だけを作り直します。十数秒ほどかかります/.test(acks()[0].text) && !/1 分前後/.test(acks()[0].text) && /十数秒ほどかかります/.test(loading) && !/1 分前後/.test(loading), `P1: 作業中の表示は差分の待ち時間（十数秒）: ${loading} ｜ ${acks()[0].text}`);
   assert(c.activePlan().revisionMeta?.mode === 'patch' && c.metrics().revisionModes.slice(-1)[0].mode === 'patch', 'P1: 版の作り方（patch）を版と計測に記録する');
   await c.send('更新状況は3段階ではなく5段階にして');
   // 2026-10-05 第 3 段で変更: 自由な修正の依頼も差分（大きな変更は Gateway が同じ依頼の中で全体の作り直しに切り替える）
   assert(calls[2].revision.mode === 'patch' && calls[2].revision.previousPlan.gw === 2 && !calls[2].revision.focus, `P2: 自由な修正の依頼も差分（前の版の Gateway の計画を土台に・回答の focus は付けない）: ${JSON.stringify({ mode: calls[2].revision.mode, focus: calls[2].revision.focus })}`);
 });
 await section(async () => {
-  const { c, calls, acks } = makeConv([planWith(qs(QP, QS)), planWith(qs(QS))], { revisionMode: 'full' });
+  const x = makeConv([planWith(qs(QP, QS)), planWith(qs(QS))], { revisionMode: 'full' });
+  const { c, calls, acks } = x;
   await c.send('金額が大きい案件に注意を出したい');
-  await c.send('PCだけ');
-  assert(!calls[1].revision.mode && /1 分前後/.test(acks()[0].text), 'P3: revisionMode full（評価の対照・戻すとき）はいつも全体の作り直し');
+  const { loading } = await sendHeld(x, 'PCだけ');
+  assert(!calls[1].revision.mode && /1 分前後/.test(acks()[0].text) && /1 分前後/.test(loading), `P3: revisionMode full（評価の対照・戻すとき）はいつも全体の作り直し（作業中の表示も 1 分前後）: ${loading}`);
 });
 await section(async () => {
-  const { c, calls, acks } = makeConv([planWith(qs(QP, QS)), planWith(qs(QS))], { revisionModes: ['full'] });
+  const x = makeConv([planWith(qs(QP, QS)), planWith(qs(QS))], { revisionModes: ['full'] });
+  const { c, calls, acks } = x;
   await c.send('金額が大きい案件に注意を出したい');
-  await c.send('PCだけ');
-  assert(calls[1].revision.mode === 'patch' && /1 分前後/.test(acks()[0].text), 'P4: health が patch を示さない古い Gateway では、差分を頼んでも全体を作り直す前提の文（古い Gateway は mode を無視する）');
+  const { loading } = await sendHeld(x, 'PCだけ');
+  assert(calls[1].revision.mode === 'patch' && /1 分前後/.test(acks()[0].text) && /1 分前後/.test(loading) && !/十数秒/.test(loading), `P4: health が patch を示さない古い Gateway では、差分を頼んでも全体を作り直す前提の文（古い Gateway は mode を無視する）: ${loading}`);
 });
 await section(async () => {
   // 根拠ID の付け替え（Context は作り直しのたびに予算で facts を削って番号を振り直す）
@@ -124,12 +139,14 @@ await section(async () => {
   await ticks();
   assert(c.isBusy() && c.canQueue() && c.job() && c.job().version === 1, 'Q1: 作り直しの途中は、回答・修正の依頼を受け付けられる（作業中の版と何回目の作業か）');
   const q = await c.send('保存は止めない');
-  assert(q && q.ok && q.queued && acks().length === 2 && acks()[1].data.stage === 'queued' && /続けて計画に入れます/.test(acks()[1].text) && calls.length === 2, `Q1: 途中の回答は受け付けて受領を出す（AI はすぐには呼ばない）: ${acks()[1] && acks()[1].text}`);
+  // 2026-10-06: 受け付けた・入れた の知らせは記録に残し、会話には出さない（まだ変更案に入っていないときだけ出す）
+  assert(q && q.ok && q.queued && acks().length === 2 && acks()[1].data.stage === 'queued' && /続けて計画に入れます/.test(acks()[1].text) && KTAiChatUi.isHiddenMessage(acks()[1]) && calls.length === 2, `Q1: 途中の回答は受け付けて受領を記録する（会話には出さない。AI はすぐには呼ばない）: ${acks()[1] && acks()[1].text}`);
   open1(); await p; await ticks();
   assert(calls.length === 3 && /保存は止めない/.test(calls[2].revision.request) && !/PCだけ/.test(calls[2].revision.request) && calls[2].revision.previousPlan.gw === 2 && calls[2].revision.mode === 'patch' && calls[2].decisions.some(d => d.answer === 'PCだけ') && calls[2].decisions.some(d => d.answer === '保存は止めない'), `Q1: 続けて入れる作業は、後の指示だけを依頼文にし、前の作業の結果を土台にする（決定事項はすべて送る）: ${calls[2] && calls[2].revision.request}`);
   assert(JSON.stringify(versions(c)) === '[1,2]' && c.activePlan().plan.questions.length === 0, `Q1: 登録する版は最後の 1 つだけ（途中の結果は最新の計画として出さない）: ${JSON.stringify(versions(c))}`);
   assert(c.ledger().filter(e => e.status === 'answered').every(e => e.appliedInVersion === 2), 'Q1: 両方の回答が v2 に入った');
-  assert(acks().every(m => m.data.stage === 'done') && /変更計画 v2 に入れました/.test(acks()[1].text), 'Q1: 受領の表示は両方とも完了（後の指示は「v2 に入れました」）');
+  // 2026-10-06: 会話の文に版の番号を出さない（「変更計画 v2 に入れました」→「変更案に入れました」）。入った版は記録（appliedInVersion）で確かめる
+  assert(acks().every(m => m.data.stage === 'done' && (m.data.queued ? KTAiChatUi.isHiddenMessage(m) : (/変更案に入れました。/.test(KTAiChatUi.messageHtml(m)) && !/受け付けました/.test(KTAiChatUi.messageHtml(m))))) && /変更案に入れました/.test(acks()[1].text) && /kintone にはまだ何も反映していません/.test(acks()[1].text) && !/v\d/.test(acks()[1].text), `Q1: 受領の記録は両方とも完了（後の指示は「変更案に入れました」・版の番号は出さない。入れた知らせは会話に出さない）: ${acks()[1] && acks()[1].text}`);
   const mt = c.metrics();
   assert(mt.queuedAccepted === 1 && mt.chainedJobs === 1 && mt.instructionWaits.length === 2 && mt.instructionWaits.every(w => w.waitMs > 0) && mt.aiCalls === 3, `Q1: 計測（受け付けた数・続けた作業・指示ごとの待ち時間）: ${JSON.stringify({ q: mt.queuedAccepted, ch: mt.chainedJobs, w: mt.instructionWaits })}`);
   assert(kinds().filter(k => k === 'PLAN').length === 2, 'Q1: 計画のカードは v1 と最後の v2 だけ');
@@ -160,7 +177,9 @@ await section(async () => {
   open1(); const r = await p; await ticks();
   const lg = c.ledger();
   assert(JSON.stringify(versions(c)) === '[1,2]' && lg.find(e => e.answer === 'PCだけ').appliedInVersion === 2 && lg.find(e => e.answer === '保存は止めない').appliedInVersion == null, `Q3: 続けた作業の失敗では、先の作業の結果を v2 にし、後の回答は記録したまま: ${JSON.stringify(lg.map(e => [e.answer, e.appliedInVersion]))}`);
-  assert(acks()[0].data.stage === 'done' && acks()[1].data.stage === 'failed' && /完了していません/.test(acks()[1].text) && kinds().includes('ERROR') && r && r.ok === false, 'Q3: 受領の表示は先が完了・後が失敗（エラーと再試行）');
+  // 2026-10-06: 会話に出すのは、まだ変更案に入っていない方（失敗）だけ
+  const failedHtml = KTAiChatUi.messageHtml(acks()[1]);
+  assert(acks()[0].data.stage === 'done' && acks()[1].data.stage === 'failed' && /完了していません/.test(acks()[1].text) && (acks()[0].data.queued ? KTAiChatUi.isHiddenMessage(acks()[0]) : (/変更案に入れました。/.test(KTAiChatUi.messageHtml(acks()[0])) && !/受け付けました/.test(KTAiChatUi.messageHtml(acks()[0])))) && /保存は止めない/.test(failedHtml) && /まだ変更案に入っていません（作り直しに失敗しました）/.test(failedHtml) && /［再試行］/.test(failedHtml) && kinds().includes('ERROR') && r && r.ok === false, `Q3: 受領は先が完了・後が失敗（失敗した方だけ「まだ変更案に入っていません」と会話に出す。エラーと再試行）: ${failedHtml.replace(/<[^>]+>/g, '')}`);
   assert(c.answerContext().pending === 1, 'Q3: 後の回答は「まだ計画に入っていない回答」として残る（次の送信・再試行で入れる）');
 });
 await section(async () => {
@@ -175,7 +194,7 @@ await section(async () => {
   open1(); await ticks(6);
   assert(c.isBusy() && c.job() && c.job().n === 2, 'Q4: 先の作業の後、続けて 2 回目の作業をしている');
   ac.abort(); open2(); const r = await p; await ticks();
-  assert(JSON.stringify(versions(c)) === '[1,2]' && acks()[0].data.stage === 'done' && acks()[1].data.stage === 'cancelled' && r && r.cancelled, `Q4: 取り消したら、先の結果は v2・後の指示は取り消し: ${JSON.stringify(acks().map(m => m.data.stage))}`);
+  assert(JSON.stringify(versions(c)) === '[1,2]' && acks()[0].data.stage === 'done' && acks()[1].data.stage === 'cancelled' && (acks()[0].data.queued ? KTAiChatUi.isHiddenMessage(acks()[0]) : (/変更案に入れました。/.test(KTAiChatUi.messageHtml(acks()[0])) && !/受け付けました/.test(KTAiChatUi.messageHtml(acks()[0])))) && /まだ変更案に入っていません（作り直しを取り消しました）/.test(KTAiChatUi.messageHtml(acks()[1])) && r && r.cancelled, `Q4: 取り消したら、先の結果は v2・後の指示は取り消し（取り消した方だけ会話に出す）: ${JSON.stringify(acks().map(m => m.data.stage))}`);
 });
 await section(async () => {
   // 新しい会話・別の版が最新になった: 途中の結果も続けた作業も入れない
@@ -187,7 +206,7 @@ await section(async () => {
   await c.send('保存は止めない');
   c.registerPlan({ plan: planWith(qs('別の質問ですか？')), ctx: null, review: null, basedOn: c.activePlan() });
   open1(); await p; await ticks();
-  assert(c.activePlan().plan.questions[0].question === '別の質問ですか？' && acks().every(m => m.data.stage === 'superseded'), `Q5: 別の経路で版が最新になったら、途中の結果を入れず、受領の表示は「置き換わった」: ${JSON.stringify(acks().map(m => m.data.stage))}`);
+  assert(c.activePlan().plan.questions[0].question === '別の質問ですか？' && acks().every(m => m.data.stage === 'superseded' && /まだ変更案に入っていません（作り直しの間に変更案が置き換わりました）/.test(KTAiChatUi.messageHtml(m))), `Q5: 別の経路で版が最新になったら、途中の結果を入れず、受領は「置き換わった」（まだ変更案に入っていないと会話に出す）: ${JSON.stringify(acks().map(m => m.data.stage))}`);
   const x = makeConv([planWith(qs(QP, QS)), planWith(qs(QS))]);
   await x.c.send('金額が大きい案件に注意を出したい');
   const o = x.ctl.hold();
@@ -211,7 +230,7 @@ await section(async () => {
   assert(qa && qa.asked === true && c.messages().some(m => m.data?.kind === 'aside-answer'), 'Q7: 作り直しの途中の質問は、作業と並べてすぐ答える（作業は止めない。以前は受け付けず下書きのまま）');
   assert(await c.send('はい') === null && await c.send('Webhook は https://hooks.slack.com/services/T000/B000/XXXX です') === null && c.messages().length === n0, 'Q7: 対応先の決まらない「はい」・秘密情報は受け付けない（下書きとして残す。会話に出さない）');
   const re = await c.send('PCだけ');
-  assert(re && !re.queued && /いま作り直している計画に入れています/.test(c.messages()[c.messages().length - 1].text), 'Q8: 作り直しに入っている回答の言い直しは積まない（いま入れていると伝える）');
+  assert(re && !re.queued && /いま直している変更案に入れています/.test(c.messages()[c.messages().length - 1].text), 'Q8: 作り直しに入っている回答の言い直しは積まない（いま入れていると伝える）');
   open1(); await p; await ticks();
   const a = makeConv([planWith(qs(QP))]);
   await a.c.send('金額が大きい案件に注意を出したい');
@@ -244,7 +263,7 @@ await section(async () => {
   const more = ['保存は止めない', '部長です', '保存時です', '一覧は不要です'];
   for (let i = 0; i < 4; i++) { await ticks(); await c.send(more[i]); opens[i](); }
   await p; await ticks();
-  assert(JSON.stringify(versions(c)) === '[1,2]' && acks().slice(-1)[0].data.stage === 'pending' && /まだ計画に入っていません/.test(acks().slice(-1)[0].text) && c.metrics().chainedJobs === 3, `Q10: 続ける作業は 4 回まで（超えた指示は記録したまま）: ${JSON.stringify(acks().map(m => m.data.stage))}`);
+  assert(JSON.stringify(versions(c)) === '[1,2]' && acks().slice(-1)[0].data.stage === 'pending' && /まだ計画に入っていません/.test(acks().slice(-1)[0].text) && /まだ変更案に入っていません（続けて入れられる数を超えました）/.test(KTAiChatUi.messageHtml(acks().slice(-1)[0])) && c.metrics().chainedJobs === 3, `Q10: 続ける作業は 4 回まで（超えた指示は記録したまま・まだ変更案に入っていないと会話に出す）: ${JSON.stringify(acks().map(m => m.data.stage))}`);
 });
 await section(async () => {
   // 途中で答えた回答は、途中の結果が同じ質問を聞いても「AI がもう一度確認してきた」と数えない
@@ -313,7 +332,8 @@ await section(async () => {
   await c.send('部長です');
   assert(c.answerContext().open.map(q => q.text).join() === '部長が不在のときの代理の承認者は誰にしますか？', 'S7: v2 で代理の承認者の質問は出る（同じ承認者の質問は出さない）');
   const notice = c.messages().find(m => m.data?.kind === 'reasked');
-  assert(notice && /出さなかった質問: 「承認者は誰にしますか？」/.test(notice.text), `S7: 出さなかった聞き直しの質問の文を案内に出す: ${notice && notice.text}`);
+  // 2026-10-06: AI の再質問を出さなかった経緯（reasked）は記録に残し、通常の会話には出さない
+  assert(notice && /出さなかった質問: 「承認者は誰にしますか？」/.test(notice.text) && KTAiChatUi.isHiddenMessage(notice) && !/出さなかった質問/.test(KTAiChatUi.chatHtml(c.messages())), `S7: 出さなかった聞き直しの質問の文を記録に残す（会話には出さない）: ${notice && notice.text}`);
   const card = KTAiChatUi.questionsCardHtml(c.messages().filter(m => m.data?.kind === 'questions').slice(-1)[0], { plans: new Map(c.planHistory().map(v => [`${v.planId}:${v.version}`, v])), activePlan: c.activePlan(), answerState: c.answerContext(), ledger: c.ledger() });
   assert(/関係する回答済みの内容：承認者 → 部長です（同じ内容を聞いている質問なら、回答は不要です）/.test(card), 'S7: 確認事項のカードに、関係する回答済みの内容を添える');
   await c.send('課長です');
@@ -343,7 +363,7 @@ await section(async () => {
   const p = c.send('一覧「担当者別」に期日の列を追加して', { intentOverride: 'REVISE_PLAN' });
   await ticks();
   const d = await c.send('一覧「担当者別」に期日の列を追加して', { intentOverride: 'REVISE_PLAN' });
-  assert(d && !d.queued && /同じ修正の依頼を、いま計画に入れています/.test(c.messages()[c.messages().length - 1].text), 'R2: いまの作業と同じ修正の依頼は積まない');
+  assert(d && !d.queued && /同じ修正は、いま変更案に入れているところです/.test(c.messages()[c.messages().length - 1].text), 'R2: いまの作業と同じ修正の依頼は積まない');
   const sel = await c.send('選択', { intentOverride: 'ANSWER', answerPayload: { source: 'chat', items: [{ key: 'Q1', answer: 'PCだけ' }], remaining: [] } });
   assert(sel === null, 'R3: 対応先の確認の選択は、作り直しの途中は受け付けない（下書きとして残す）');
   o(); await p; await ticks();
@@ -376,7 +396,7 @@ await section(async () => {
   assert(calls.length === 4 && /締め切りの列/.test(calls[3].revision.request) && !/締め切りの列/.test(calls[2].revision.request) && acks().every(m => m.data.stage === 'done'), `R5: 入りきらない依頼は次の作業で入れる: calls=${calls.length} ${JSON.stringify(acks().map(m => m.data.stage))}`);
 });
 await section(async () => {
-  // R6: 続けた作業の取り消し: 先の版は登録・案内は「v2 までは入れました」・再試行の対象は入らなかった指示
+  // R6: 続けた作業の取り消し: 先の版は登録・案内は「途中までの内容は変更案に入れました」（版の番号は出さない）・再試行の対象は入らなかった指示
   const { c, ctl } = makeConv([planWith(qs(QP, QS)), planWith(qs(QS)), planWith(qs())]);
   await c.send('金額が大きい案件に注意を出したい');
   const ac = new AbortController();
@@ -387,7 +407,7 @@ await section(async () => {
   o1(); await ticks(6);
   ac.abort(); o2(); const r = await p; await ticks();
   const n = c.messages().find(m => m.data?.kind === 'cancelled');
-  assert(r && r.partial && r.partial.version === 2 && n && /v2 までは計画に入れました/.test(n.text) && /保存は止めない/.test(n.data.text) && !/PCだけ/.test(n.data.text), `R6: 取り消しの案内と、入らなかった指示: ${n && n.text} / ${n && n.data.text}`);
+  assert(r && r.partial && r.partial.version === 2 && c.activePlan().version === 2 && n && /途中までの内容は変更案に入れました/.test(n.text) && /そのあとに送った指示は、まだ入っていません/.test(n.text) && !/v\d/.test(n.text) && /保存は止めない/.test(n.data.text) && !/PCだけ/.test(n.data.text), `R6: 取り消しの案内と、入らなかった指示: ${n && n.text} / ${n && n.data.text}`);
 });
 await section(async () => {
   // R7: 回答に関係する箇所（focus）は最初の作業だけに付ける

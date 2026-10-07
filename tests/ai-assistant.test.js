@@ -347,6 +347,66 @@ console.log('\n--- 5. 送信内容 / secret / 無料機能 ---');
   assert(m.$('kt-ai-result').innerHTML.includes('✓ フィールド'), 'coverage 等のサマリも無料側のまま');
 }
 
+// ---- 2026-10-07: 会話の返答の逐次表示（Gateway の SSE を直接 fetch で受ける）----
+{
+  const sse = (events) => events.map(([ev, data]) => `event: ${ev}\ndata: ${JSON.stringify(data)}\n\n`).join('');
+  // fetch の応答の偽物: content-type が event-stream・body は getReader() で chunks 個に分けて届く
+  const sseResp = (text, { chunks = 1 } = {}) => {
+    const parts = []; const n = Math.max(1, Math.ceil(text.length / chunks)); for (let i = 0; i < text.length; i += n) parts.push(text.slice(i, i + n));
+    let k = 0; const enc = new TextEncoder();
+    return { status: 200, headers: { get: (h) => (String(h).toLowerCase() === 'content-type' ? 'text/event-stream; charset=utf-8' : null) }, body: { getReader: () => ({ read: async () => (k < parts.length ? { value: enc.encode(parts[k++]), done: false } : { value: undefined, done: true }) }) }, text: async () => text };
+  };
+  const proxyOk = () => { const st = { calls: 0 }; st.api = { proxy: async () => { st.calls += 1; return [JSON.stringify(GOOD_RESPONSE), 200]; } }; return st; };
+  {
+    const text = ': start\n\n' + sse([['delta', { text: '顧客コードは' }], ['delta', { text: '一覧で使われています。' }]]) + ': keepalive\n\n' + sse([['done', GOOD_RESPONSE]]);
+    let sentHeaders = null; const seen = [];
+    const client = KTAiClient.createAiClient({ apiBase: 'https://gw.test', customerToken: 't', hostname: 'h', transport: KTAiClient.createDefaultTransport({ kintoneApi: null, fetchFn: async (url, init) => { sentHeaders = init.headers; return sseResp(text, { chunks: 7 }); } }) });
+    const out = await client.ask({ ctx: CTX, onText: (t) => seen.push(t) });
+    assert(sentHeaders.Accept === 'text/event-stream' && sentHeaders.Authorization === 'Bearer t' && sentHeaders['X-Kintone-Domain'] === 'h', 'onText 付きの質問は Accept: text/event-stream を付けて直接送る（認証のヘッダーは同じ）');
+    assert(seen.length === 2 && seen[0] === '顧客コードは' && seen[1] === '顧客コードは一覧で使われています。', `届いた部分をここまでの全文として渡す（chunk の境目・コメント行は無視）: ${JSON.stringify(seen)}`);
+    assert(out.answer === GOOD_RESPONSE.answer && out.requestId && out.facts.length === GOOD_RESPONSE.facts.length, 'done の本文を通常の応答と同じに検証して返す');
+  }
+  {
+    const px = proxyOk();
+    const text = sse([['delta', { text: '途中' }], ['error', { status: 429, body: JSON.stringify({ ok: false, contractVersion: '2.1', error: { code: 'RATE_LIMITED', message: 'm', requestId: 'e-2', retryAfterSeconds: 9 } }) }]]);
+    const client = KTAiClient.createAiClient({ apiBase: 'https://gw.test', customerToken: 't', hostname: 'h', transport: KTAiClient.createDefaultTransport({ kintoneApi: px.api, fetchFn: async () => sseResp(text) }) });
+    let err = null; try { await client.ask({ ctx: CTX, onText: () => { } }); } catch (e) { err = e; }
+    assert(err && err.code === 'RATE_LIMITED' && err.httpStatus === 429 && err.retryAfterSeconds === 9 && px.calls === 0, `error イベントは通常のエラー（code・status・retryAfter）。proxy へは切り替えない: ${err && err.code}`);
+  }
+  {
+    const px = proxyOk(); const seen = [];
+    const client = KTAiClient.createAiClient({ apiBase: 'https://gw.test', customerToken: 't', hostname: 'h', transport: KTAiClient.createDefaultTransport({ kintoneApi: px.api, fetchFn: async () => { throw new Error('net'); } }) });
+    const out = await client.ask({ ctx: CTX, onText: (t) => seen.push(t) });
+    assert(px.calls === 1 && out.answer === GOOD_RESPONSE.answer && seen.length === 0, '届く前の失敗（接続できない）は kintone.proxy で通常どおり答える');
+  }
+  {
+    const seen = [];
+    const client = KTAiClient.createAiClient({ apiBase: 'https://gw.test', customerToken: 't', hostname: 'h', transport: KTAiClient.createDefaultTransport({ kintoneApi: null, fetchFn: async () => ({ status: 200, headers: { get: () => 'application/json; charset=utf-8' }, text: async () => JSON.stringify(GOOD_RESPONSE) }) }) });
+    const out = await client.ask({ ctx: CTX, onText: (t) => seen.push(t) });
+    assert(out.answer === GOOD_RESPONSE.answer && seen.length === 0, '古い Gateway（JSON を返す）には従来どおり（逐次表示なし）');
+  }
+  {
+    const px = proxyOk();
+    const client = KTAiClient.createAiClient({ apiBase: 'https://gw.test', customerToken: 't', hostname: 'h', transport: KTAiClient.createDefaultTransport({ kintoneApi: px.api, fetchFn: async () => sseResp(sse([['delta', { text: 'a' }]])) }) });
+    let err = null; try { await client.ask({ ctx: CTX, onText: () => { } }); } catch (e) { err = e; }
+    assert(err && err.code === C.TRANSPORT_ERROR && px.calls === 0, '途中で途切れた（done も error も無い）応答は TRANSPORT_ERROR。AI を二重に呼ばない');
+  }
+  {
+    const px = proxyOk(); let fetchCalls = 0;
+    const client = KTAiClient.createAiClient({ apiBase: 'https://gw.test', customerToken: 't', hostname: 'h', transport: KTAiClient.createDefaultTransport({ kintoneApi: px.api, fetchFn: async () => { fetchCalls += 1; return sseResp(''); } }) });
+    const out = await client.ask({ ctx: CTX });
+    assert(px.calls === 1 && fetchCalls === 0 && out.answer === GOOD_RESPONSE.answer, 'onText の無い質問は kintone.proxy のまま（従来どおり）');
+  }
+  {
+    // body に getReader が無い環境（まとめて届く）でも同じに読める
+    const text = sse([['delta', { text: 'A' }], ['done', GOOD_RESPONSE]]);
+    const seen = [];
+    const client = KTAiClient.createAiClient({ apiBase: 'https://gw.test', customerToken: 't', hostname: 'h', transport: KTAiClient.createDefaultTransport({ kintoneApi: null, fetchFn: async () => ({ status: 200, headers: { get: () => 'text/event-stream' }, text: async () => text }) }) });
+    const out = await client.ask({ ctx: CTX, onText: (t) => seen.push(t) });
+    assert(seen.join('|') === 'A' && out.answer === GOOD_RESPONSE.answer, 'まとめて届いた SSE も同じに読む');
+  }
+}
+
 console.log(`\n${state.failed ? 'FAILED' : 'ALL PASSED'}: ${state.passed} passed / ${state.failed} failed`);
 process.exit(state.failed ? 1 : 0);
 })().catch(e => { console.error(e); process.exit(1); });

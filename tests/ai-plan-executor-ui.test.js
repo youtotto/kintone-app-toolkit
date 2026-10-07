@@ -81,9 +81,12 @@ console.log('\n--- 1. 実行前レビューに「動作テスト環境へ反映�
   const m = mount();
   await tick();
   const h = await runPlan(m);
-  assert(m.$('kt-ai-exec') && m.$('kt-ai-pane-exec'), '動作テスト環境への反映のブロックは右「実行」ペインの固定要素（Phase 19）');
+  // 2026-10-06 利用者の指示で意図して更新: 反映（exec）はタブではなく、右下の「右の「反映」」（#kt-ai-pane-exec.kt-ai-apply-area）。#kt-ai-exec はこの欄の中
+  //   （fake の host は #id の要素を引くたびに作るので、配置は画面の HTML で確かめる）
+  assert(/<div id="kt-ai-pane-exec" class="kt-ai-pane">[\s\S]*?<div id="kt-ai-exec"><\/div>/.test(m.host.innerHTML) && /data-pane="exec"[^>]*>反映</.test(m.host.innerHTML), '動作テスト環境への反映のブロックは右のタブ「反映」（#kt-ai-pane-exec）の中の固定要素');
   const e0 = execHtml(m);
-  assert(e0.includes('動作テスト環境への反映') && e0.includes('承認済み・実行可能') && e0.includes('承認済みだが未対応') && e0.includes('実行不可') && /id="kt-ai-exec-start"[^>]*disabled/.test(e0) && e0.includes('承認済みで実行できる step がありません'), '承認が無ければ件数 0 でボタンは押せない');
+  // 2026-10-06 利用者の指示で意図して更新: 承認が 0 件のときの文は「承認済みで反映できる手順がありません（右の「確認結果」で手順を承認してください）」（旧「承認済みで実行できる step がありません」）
+  assert(e0.includes('動作テスト環境への反映') && e0.includes('承認済み・実行可能') && e0.includes('承認済みだが未対応') && e0.includes('実行不可') && /id="kt-ai-exec-start"[^>]*disabled/.test(e0) && e0.includes('承認済みで反映できる手順がありません（右の「確認結果」で手順を承認してください）') && !e0.includes('step がありません'), '承認が無ければ件数 0 でボタンは押せない（承認する場所は右の「確認結果」と案内する）');
   assert(hasButton(e0, '動作テスト環境へ反映') && !hasButton(e0, '運用環境へ反映') && !/<button[^>]*>(実行|反映)<\/button>/.test(e0), 'ボタンには必ず「動作テスト環境」と明記（「実行」「反映」だけのボタンは無い）');
   m.panel.decide('P1', 'approve'); m.panel.decide('P2', 'approve'); m.panel.decide('P3', 'approve');
   const e1 = execHtml(m);
@@ -414,7 +417,7 @@ console.log('\n--- 2f. Phase 13: ルックアップ（§38 参照元の表示 / 
   m.panel.decide('P2', 'approve');
   await click(m, 'kt-ai-exec-rollback-start'); await tick();
   const r1 = execHtml(m);
-  assert(m.panel.executorState().stage === 'rollback-confirm' && r1.includes('・ルックアップ変更 1 件') && r1.includes('・フィールド追加 2 件') && r1.includes('実行前のルックアップ設定（取得項目・選択時表示・絞り込み・並び順）に戻す。参照元アプリには触れない') && r1.indexOf('ルックアップ変更') < r1.indexOf('フィールドを削除'), 'rollback 確認: ルックアップの復元（先）とフィールド削除（後）');
+  assert(m.panel.executorState().stage === 'rollback-confirm' && r1.includes('・ルックアップ変更 1 件') && r1.includes('・フィールド追加 2 件') && r1.includes('実行前のルックアップ設定（取得項目・選択時表示・絞り込み・並び順）に戻す。参照元アプリには触れない') && (() => { const rb1 = r1.slice(r1.indexOf('id="kt-ai-rollback"')); return rb1.indexOf('ルックアップ変更') < rb1.indexOf('フィールドを削除'); })(), 'rollback 確認: ルックアップの復元（先）とフィールド削除（後）（元に戻す確認の中の順）');
   await click(m, 'kt-ai-exec-rollback-go'); await tick(); await tick();
   const r2 = execHtml(m);
   assert(m.panel.executorState().stage === 'rolled-back' && m.panel.executorState().rollback.status === 'ROLLED_BACK_VERIFIED' && r2.includes('動作テスト環境を実行前の状態に戻しました。') && m.mock.st.fields.customer_lookup.lookup.fieldMappings.length === 2 && !m.mock.st.fields.customer_address && !m.mock.st.fields.customer_credit, 'rollback: 取得項目 2 件・追加フィールドなしに戻る');

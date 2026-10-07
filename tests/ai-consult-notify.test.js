@@ -465,12 +465,19 @@ await section(async () => {
   assert(ds.some(d => d.answer === '更新日時から数える') && ds.some(d => /5日/.test(d.answer)) && !ds.some(d => /おすすめ/.test(d.answer)), `E8: 「数え方はおすすめで」は推奨の文を回答に: ${JSON.stringify(ds.map(d => d.answer))}`);
 });
 await section(async () => {
-  // E9: チャットに出す計画の要約から根拠ID・内部の語を外す（右の「計画」には残る）
+  // E9: チャットに出す計画の要約から根拠ID・内部の語を外す（右の「変更内容」には残る）
+  //   2026-10-06: 会話に出す要約は変更案のカード（PLAN の data.summaryText）。要約の文（kind 'plan-summary'）は記録に残し、会話には出さない
   const p = planWith([]); p.assessment.summary = '現在は通知がありません（E44、dictionary.reminders）。決定事項D1の推奨の数え方、D2の暦日3日を反映しました。（E42〜E44）';
   const { c } = makeConv([p]);
   await c.send('承認漏れを防ぎたい');
-  const msg = c.messages().find(m => /変更計画を作成しました/.test(m.text || ''));
-  assert(msg && !/E44|dictionary|D1|D2/.test(msg.text) && /決定事項の推奨の数え方、暦日3日を反映しました/.test(msg.text) && /E44/.test(c.activePlan().plan.assessment.summary), `E9: チャットの要約から根拠ID・内部の語を外す: ${msg && msg.text}`);
+  const v = c.activePlan();
+  const card = c.messages().find(m => m.type === KTAiConversation.MSG.PLAN);
+  const sum = c.messages().find(m => m.data?.kind === 'plan-summary');
+  // 会話に描く文（タグ・属性を除いた本文）
+  const html = card ? KTAiChatUi.messageHtml(card, { plans: new Map([[`${v.planId}:${v.version}`, v]]), activePlan: v }).replace(/<[^>]*>/g, '') : '';
+  const summaryText = (card && card.data && card.data.summaryText) || '';
+  assert(card && !/E44|dictionary|D1|D2/.test(summaryText) && /決定事項の推奨の数え方、暦日3日を反映しました/.test(summaryText) && /決定事項の推奨の数え方、暦日3日を反映しました/.test(html) && !/E4\d|dictionary|D1|D2/.test(html)
+    && sum && !/E44|dictionary|D1|D2/.test(sum.text) && KTAiChatUi.isHiddenMessage(sum) && /E44/.test(v.plan.assessment.summary), `E9: チャットの要約から根拠ID・内部の語を外す: ${summaryText}`);
 });
 
 console.log('\n--- S. 2 回目の差分レビューの指摘（2026-10-05）: 削る順・話題の語・抜粋・伏字・設定の対象・「おすすめで」 ---');
@@ -575,6 +582,8 @@ await section(async () => {
   const ack = c.messages().find(m => m.data?.kind === 'answers-ack');
   const req = (calls.plan[1] && calls.plan[1].revision && calls.plan[1].revision.request) || '';
   assert(ds.some(d => /5日/.test(d.answer)) && !ds.some(d => /おすすめ/.test(d.answer)) && /委ねられた確認事項（推奨が無い）：質問「承認されなかった案件はどうしますか？」/.test(req) && ack && /おまかせ（仮の案を選びます）/.test(ack.text), `S9: 決定事項にせず、計画の AI に委ねられたと伝える: ${JSON.stringify(ds.map(d => d.answer))} / ${ack && ack.text}`);
+  // 2026-10-06: 受け付けの知らせは記録に残すが、変更案に入った（done）ら会話には出さない（まだ入っていないときだけ出す）
+  assert(ack && ack.data.stage === 'done' && (ack.data.queued ? KTAiChatUi.isHiddenMessage(ack) : (/変更案に入れました。/.test(KTAiChatUi.messageHtml(ack)) && !/受け付けました/.test(KTAiChatUi.messageHtml(ack)))) && !KTAiChatUi.isHiddenMessage({ ...ack, data: { ...ack.data, stage: 'failed' } }), `S9: 受け付けの知らせは出さない（回答を送った直後は「…変更案に入れました。」、失敗は「まだ変更案に入っていません」）: ${ack && ack.data.stage}`);
 });
 await section(async () => {
   // S10: 計画の後の相談に「おすすめで。承認者は誰になりますか？」→ 質問の文で決定事項を置き換えない。推奨の無い確認事項より、直前の相談のおすすめを使う
@@ -628,8 +637,12 @@ await section(async () => {
   const p = planWith([]); p.assessment.summary = '日付フィールド D2 の値を初期値にします。D2の値が空のときは通知しません。決定事項D1の推奨、D3の作業者を反映しました。';
   const { c } = makeConv([p]);
   await c.send('承認漏れを防ぎたい');
-  const msg = c.messages().find(m => /変更計画を作成しました/.test(m.text || ''));
-  assert(msg && /日付フィールド D2 の値を初期値にします/.test(msg.text) && /D2の値が空のときは通知しません/.test(msg.text) && /決定事項の推奨、作業者を反映しました/.test(msg.text), `S13: ${msg && msg.text}`);
+  // 2026-10-06: 会話に出す要約は変更案のカード（PLAN の data.summaryText）
+  const card = c.messages().find(m => m.type === KTAiConversation.MSG.PLAN);
+  const text = (card && card.data && card.data.summaryText) || '';
+  const v = c.activePlan();
+  const shown = card ? KTAiChatUi.messageHtml(card, { plans: new Map([[`${v.planId}:${v.version}`, v]]), activePlan: v }).replace(/<[^>]*>/g, '') : '';
+  assert(card && /日付フィールド D2 の値を初期値にします/.test(text) && /D2の値が空のときは通知しません/.test(text) && /決定事項の推奨、作業者を反映しました/.test(text) && /日付フィールド D2 の値を初期値にします/.test(shown) && /決定事項の推奨、作業者を反映しました/.test(shown), `S13: ${text}`);
 });
 
 console.log('\n--- T. 3 回目の差分レビューの指摘（2026-10-05）: 通知の範囲ごとに削る・フィールドの名前の語・「はい」「いいえ」・抜粋・伏字・遅れて届いた答え ---');

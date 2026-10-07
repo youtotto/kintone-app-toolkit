@@ -10,7 +10,7 @@
 //   F 同じ仕組みが、分野の部品を足すだけでフィールドの変更・JS の修正にも使える（確認用の小さな部品）
 //   G 会話を理解する担当の応答の正規化（根拠の無い決定は仮の案・根拠の無い取り消しは捨てる・意図が更新でない発言は条件を変えない）
 //   H Toolkit Review: プロセス管理のアクションの実行時のイベントでの値の記録（WRITE）は「編集できない画面」にしない（公式で確認）
-//   I 画面: チャットは短い返答と最新の変更案 1 枚。内部の番号・過去の版は詳細に。会話の方式を切り替えても従来の会話は残る
+//   I 画面: 通常の入口は会話・入力欄・送信だけ（会話の方式・例の発言・模擬応答・計測は出さない。検証用の画面も作らない）。試作の変更案のカードは短い返答と最新の 1 枚
 //
 // 実行方法: node tests/ai-agent-proto.test.js
 'use strict';
@@ -22,7 +22,8 @@ const { buildScanPayload } = require('./helpers/scan-payload.js');
 const { makeKintoneMock } = require('./helpers/kintone-preview-mock.js');
 const { makeFakeHost } = require('./helpers/fake-dom.js');
 const T = loadToolkit();
-const { KTDeps, KTScan, KTPlanReview, KTAgent, KTAgentDomains, KTAgentDemo, KTAgentUi, mountAiWorkspace } = T;
+const { KTDeps, KTScan, KTPlanReview, KTAgent, KTAgentDomains, KTAgentUi, mountAiWorkspace } = T;
+const { KTAgentDemo } = require('./helpers/agent-demo.js');   // 模擬応答はテスト専用（本体に入れない）
 const { assert, state } = makeAssert();
 const FX = require('./fixtures/ai-context-app.js');
 const P = KTAgent.PSTATUS;
@@ -230,7 +231,7 @@ await section('F 同じ仕組みでフィールドの変更・JS の修正（確
   assert(!/NG/.test(S2.eng.state.messages.filter(m => m.type === 'reply').pop().text) && p2.status === P.READY && p2.checks[0].status === 'ok', `F2: JS の修正も同じ会話・照合で進む: ${p2.status}`);
   // 分野の言い回しに依存しない: 共通の部分（KTAgent）の本文に、通知・承認などの分野の語が無い
   const src = fs.readFileSync(process.env.KT_SRC || path.join(__dirname, '..', 'kintoneAppToolkit.user.js'), 'utf8');
-  const core = src.slice(src.indexOf('  const KTAgent = (() => {'), src.indexOf('  const KTAgentDemo = (() => {'));
+  const core = src.slice(src.indexOf('  const KTAgent = (() => {'), src.indexOf('  const KTAgentUi = (() => {'));
   // kintone の設定の目録（SETTING_REFS: 通知・プロセス管理などの設定の種類）は全分野で共通の語彙なので外す
   const code = core.split('\n').filter(l => !/^\s*(\/\/|\*|\/\*\*)/.test(l) && !/ref: 'setting:/.test(l)).join('\n');
   assert(core.length > 1000 && !/通知|リマインダー|承認|ステータス|reminder|notification/.test(code), 'F3: 共通の部分（KTAgent）のコードは分野の語に依存しない（分野の知識は KTAgentDomains）');
@@ -253,7 +254,7 @@ await section('H Toolkit Review: アクションの実行時のイベントで�
   assert(off.steps[0].reason === 'RECIPIENT_FIELD_INVALID' && /プロセス管理が有効でない/.test(off.steps[0].message), 'H3: プロセス管理が無効なら作業者は通知先に使えない');
 });
 
-await section('I 画面（短い返答と最新の変更案 1 枚・詳細・会話の方式の切り替え）', async () => {
+await section('I 画面（通常の入口は会話・入力欄・送信だけ。試作の変更案のカードは短い返答と最新の 1 枚・詳細）', async () => {
   const S = setup();
   await S.say(SAY('request', S.ip.data));
   const html = KTAgentUi.messagesHtml(S.eng, { mode: 'demo' });
@@ -262,27 +263,20 @@ await section('I 画面（短い返答と最新の変更案 1 枚・詳細・会
   assert(cards === 1 && /おまかせ/.test(html) && /仮の案/.test(html) && /決定/.test(html), `I1: 変更案のカードは 1 枚・条件に出どころ（決定・おまかせ・仮の案）: cards=${cards}`);
   assert(!/\bV1\b|\bQ\d\b|\bC\d+\b|E\d+/.test(outside) && /過去の版/.test(html) && /V1（条件の版/.test(html), 'I1: 内部の番号・過去の版は詳細の中だけ');
   assert(/確認したいこと/.test(outside) && /上長/.test(outside), 'I1: 必要な確認はカードに出す');
-  assert(/計測/.test(KTAgentUi.barHtml({ mode: 'demo', examples: KTAgentDemo.examples(S.ip.data), engine: S.eng })) && /<td>[\d.]+<\/td>/.test(KTAgentUi.metricsHtml(S.eng)), 'I2: 例の発言と計測');
-  // mountAiWorkspace: 試作に切り替え → 送ると試作の会話。従来に戻すと従来の会話（消えていない）
+  assert(S.eng.metrics().every(m => m.replyMs != null && Array.isArray(m.calls)), 'I2: 計測は会話の仕組みの中に残す（画面には出さない）');
+
+  // 通常の入口（2026-10-06 利用者の指示）: 会話の方式・例の発言・再現・計測を出さない。開いた直後から自分の言葉を書ける。［新しい会話］は 1 か所
   const ip = inputs();
   const host = makeFakeHost();
   const mock = makeKintoneMock(ip.data);
-  const panel = mountAiWorkspace(host, { getInputs: () => ip, copyText: async () => true, downloadText: () => { }, colors: { border: '#ccc', bg: '#fff' }, executor: { api: mock.api, appId: '310' }, agentMode: 'demo', agentDemoDelays: { turn: 0, plan: 0 } });
+  const panel = mountAiWorkspace(host, { getInputs: () => ip, copyText: async () => true, downloadText: () => { }, colors: { border: '#ccc', bg: '#fff' }, executor: { api: mock.api, appId: '310' }, devMode: false });
   const $ = (id) => host.querySelector(`#${id}`);
-  assert(panel.agentMode() === 'demo' && $('kt-ai-agent-bar').style.display === '' && /例の発言/.test($('kt-ai-agent-bar').innerHTML) && $('kt-ai-send').disabled === false, 'I3: 試作（模擬応答）は未接続でも送れる・例の発言が出る');
-  await panel.send(SAY('request', ip.data));
-  await panel.agent().idle(); await ticks();
-  assert(/kt-agent-proposal/.test($('kt-ai-chat').innerHTML) && panel.agent().proposals().length >= 2 && writes(mock).length === 0 && panel.conversation().messages().length === 0, `I3: 送った発言は試作の会話へ（従来の会話には入らない・書き込み 0 回）: ${panel.agent().proposals().map(p => p.status)}`);
-  panel.setAgentMode('off', { persist: false });
-  assert(!/kt-agent-proposal/.test($('kt-ai-chat').innerHTML) && panel.agentMode() === 'off', 'I4: 従来に戻すと従来の会話を描く（切り替えて戻せる）');
-  panel.setAgentMode('demo', { persist: false });
-  assert(/kt-agent-proposal/.test($('kt-ai-chat').innerHTML), 'I4: 試作に戻すと試作の会話が残っている');
-  await $('kt-ai-agent-bar').dispatch({ type: 'click', target: { dataset: { agentAct: 'new' } } });
-  assert(panel.agent().state.messages.length === 0, 'I5: 新しい会話（試作）');
-  // 既定は従来（試作の欄も出さない）
-  const host2 = makeFakeHost();
-  const panel2 = mountAiWorkspace(host2, { getInputs: () => ip, copyText: async () => true, downloadText: () => { }, colors: { border: '#ccc', bg: '#fff' }, devMode: false });
-  assert(panel2.agentMode() === 'off' && !panel2.agent() && host2.querySelector('#kt-ai-agent-bar').style.display === 'none', 'I6: 既定は従来の会話（試作の欄も出さない）');
+  const page = host.innerHTML;
+  assert(!/会話の方式|例の発言|kt-ai-agent-bar|模擬応答|計測/.test(page) && !/会話の方式|例の発言|模擬応答/.test($('kt-ai-chat').innerHTML), 'I3: 通常の画面に、会話の方式・例の発言・模擬応答・計測が無い');
+  assert(/このアプリについて、相談したいことや変更したいことを入力してください/.test($('kt-ai-chat').innerHTML) && /placeholder="このアプリについて、相談したいことや変更したいことを入力してください"/.test(page), 'I3: 初期表示と入力欄の案内');
+  assert((page.match(/>新しい会話</g) || []).length === 1, `I3: ［新しい会話］は 1 か所: ${(page.match(/>新しい会話</g) || []).length}`);
+  assert(!/data-pane="dev"|kt-ai-pane-dev|kt-agent-dev/.test(page + $('kt-ai-drawer-tabs').innerHTML) && typeof panel.agent === 'undefined' && typeof T.KTAgentDemo === 'undefined', 'I3: 本体に試作の検証用の画面・模擬応答の台本は無い');
+  assert(!/data-pane="context"[^>]*style="display:none;"/.test(host.querySelector('#kt-ai-drawer-tabs').innerHTML), 'I6: 接続機能の無い環境では「Context」を出す（そこだけが使える機能）');
 });
 
 await section('JS の書き方（新しい部品に var が無い）', async () => {

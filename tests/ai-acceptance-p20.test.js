@@ -886,22 +886,29 @@ console.log('\n--- U5. ［新しい会話］: 続けて書いた別の依頼が�
   panel.decide && panel.decide('P1', 'approve');
   await panel.startExecutor(); await ticks();
   const stageBefore = panel.executorState().stage;
+  // 2026-10-06 利用者の指示で意図して更新: 確認のカード（new-conv-choices・［このまま続ける］）は廃止。［新しい会話］はすぐ新しい会話を始める
+  //   （ここでは右の「確認結果」を開いた状態から押し、右も新しい会話の分に片づくことを確かめる）
+  panel.showPane('review'); await ticks();
+  const summaryBefore = $('kt-ai-change-summary').innerHTML;
+  assert(panel.drawerState().pane === 'review' && /承認済みの案件/.test(summaryBefore), `前提: 右に前の変更案の内容がある（「確認結果」を表示中）: ${panel.drawerState().pane}`);
   await $('kt-ai-new-conv').dispatch('click'); await ticks();
-  assert(panel.conversation().messages().some(m => m.data && m.data.kind === 'new-conv-choices') && /新しい会話を始める/.test($('kt-ai-chat').innerHTML) && panel.conversation().planHistory().length === 1, '［新しい会話］→ 確認カード（まだ消さない）');
-  await act('new-conv-cancel'); await ticks();
-  assert(!panel.conversation().messages().some(m => m.data && m.data.kind === 'new-conv-choices') && panel.conversation().planHistory().length === 1, '［このまま続ける］→ カードだけ消え、計画は残る');
-  await $('kt-ai-new-conv').dispatch('click'); await ticks();
-  await act('new-conv'); await ticks();
-  assert(panel.conversation().messages().length === 0 && panel.conversation().planHistory().length === 0 && !panel.conversation().activePlan() && $('kt-ai-new-conv').disabled === true, '［新しい会話を始める］→ 会話・計画が消え、ボタンは押せない状態に戻る');
+  assert(!panel.conversation().messages().some(m => m.data && m.data.kind === 'new-conv-choices') && !/data-act="new-conv-cancel"/.test($('kt-ai-chat').innerHTML), '［新しい会話］→ 確認のカードは出さない');
+  assert(panel.conversation().messages().length === 0 && panel.conversation().planHistory().length === 0 && !panel.conversation().activePlan() && $('kt-ai-new-conv').disabled === true, '［新しい会話］→ すぐ会話・計画が消え、ボタンは押せない状態に戻る');
+  assert(panel.drawerState().open === true && panel.drawerState().pane === 'plan' && !panel.activeArtifact() && !/承認済みの案件/.test($('kt-ai-change-summary').innerHTML) && !/承認済みの案件/.test($('kt-ai-plan-result').innerHTML), `新しい会話では右を片づける（表示中のタブは「変更内容」に戻り、前の変更案の内容を残さない。右は常に表示）: ${panel.drawerState().pane}`);
   assert(['confirm', 'blocked'].includes(stageBefore) ? panel.executorState().stage === 'idle' : true, `未反映の準備（最終確認）は取り消す（前の会話の計画を新しい会話から反映しない）: ${stageBefore} → ${panel.executorState().stage}`);
   assert(mock.calls.every(c => c.startsWith('GET')), '新しい会話の操作で kintone の設定へ書き込まない');
+  // 会話のカードなどからの act 'new-conv' も今までどおり使える（ボタンと同じく、すぐ新しい会話）
+  await panel.send('承認済みの案件だけの一覧を追加したい'); await ticks();
+  assert(panel.conversation().planHistory().length === 1, '前提: 新しい会話で計画 v1 ができた');
+  await act('new-conv'); await ticks();
+  assert(panel.conversation().messages().length === 0 && panel.conversation().planHistory().length === 0 && !panel.conversation().activePlan() && $('kt-ai-new-conv').disabled === true, 'act「new-conv」でも、すぐ会話・計画が消える');
   // 送信中に新しい会話 → 要求を中断し、遅れた応答を新しい会話に入れない
   gate = {};
   const pending = panel.send('承認済みの案件だけの一覧を追加したい');
   for (let i = 0; i < 8; i++) await new Promise(r => setTimeout(r, 0));
-  await $('kt-ai-new-conv').dispatch('click'); await ticks();
-  await act('new-conv'); await pending; await ticks();
-  assert(calls[calls.length - 1].signal && calls[calls.length - 1].signal.aborted === true && panel.conversation().planHistory().length === 0 && !panel.conversation().isBusy(), '送信中なら要求を中断し、新しい会話に前の応答を入れない');
+  await $('kt-ai-new-conv').dispatch('click'); await pending; await ticks();
+  assert(calls[calls.length - 1].signal && calls[calls.length - 1].signal.aborted === true && panel.conversation().planHistory().length === 0 && panel.conversation().messages().length === 0 && !panel.conversation().isBusy(), '送信中なら［新しい会話］で要求を中断し、新しい会話に前の応答を入れない');
+  assert(mock.calls.every(c => c.startsWith('GET')), '新しい会話の操作（送信中を含む）で kintone の設定へ書き込まない');
 }
 
 // =========================================================
@@ -923,7 +930,8 @@ console.log('\n--- U8（Phase 20・利用者の指摘）. 確認事項は質問�
   await panel.send('高額案件の一覧を作りたい'); await ticks();
   const v1 = panel.conversation().activePlan();
   const html1 = $('kt-ai-chat').innerHTML;
-  assert(/kt-ai-questions-card/.test(html1) && (html1.match(/class="kt-ai-qa-input"/g) || []).length === 2 && /data-act="answer-questions"/.test(html1) && /高額とはいくらからですか？/.test(html1), 'U8: 確認事項ごとに回答欄（2 件）と［回答を送って計画を直す］');
+  // 2026-10-06 利用者の指示で意図して更新: 番号（Q1 など）は出さず「1．」で並べ、ボタンは［回答を送って変更案を直す］
+  assert(/kt-ai-questions-card/.test(html1) && (html1.match(/class="kt-ai-qa-input"/g) || []).length === 2 && /data-act="answer-questions"[^>]*>回答を送って変更案を直す</.test(html1) && /1．高額とはいくらからですか？/.test(html1) && /2．一覧に表示する項目は金額だけでよいですか？/.test(html1) && !/\bQ[12]\b/.test(html1.replace(/data-[a-z-]+="[^"]*"/g, '')), 'U8: 確認事項ごとに回答欄（2 件）と［回答を送って変更案を直す］（Q 番号は出さない）');
   // 空のまま押しても送らない（AI の利用回数を使わない）
   await click({ act: 'answer-questions', plan: v1.planId, version: String(v1.version) }); await ticks();
   assert(calls.length === 1 && /回答を 1 つ以上入力してください/.test($('kt-ai-composer-note').textContent || ''), 'U8: 回答が空なら送らない');
@@ -942,7 +950,7 @@ console.log('\n--- U8（Phase 20・利用者の指摘）. 確認事項は質問�
   assert(panel.conversation().messages().some(m => m.type === 'USER' && /確認事項への回答/.test(m.text)), 'U8: 送った回答は会話に利用者の発言として残る');
   const html2 = $('kt-ai-chat').innerHTML;
   // 同じ Q1・Q2 を AI がもう一度質問した（respOf は毎回同じ質問を返す）→ 回答済みの Q1 は回答欄を出さず「回答済み」と示す（再質問として数える）。Q2 だけ回答欄
-  assert((html2.match(/class="kt-ai-qa-input"/g) || []).length === 1 && /回答済み：[^<]*→ 100万円以上/.test(html2) && /新しい版があります/.test(html2) && panel.conversation().metrics().reasked === 1, `U8: 回答欄は最新の版の未回答の確認事項だけ（回答済みの再質問は出さない・古い版は読むだけ）: reasked=${panel.conversation().metrics().reasked}`);
+  assert((html2.match(/class="kt-ai-qa-input"/g) || []).length === 1 && /回答済み：[^<]*→ 100万円以上/.test(html2) && /前の変更案の確認事項です（直した案があります）。/.test(html2) && panel.conversation().metrics().reasked === 1, `U8: 回答欄は最新の版の未回答の確認事項だけ（回答済みの再質問は出さない・古い版は読むだけで「前の変更案の確認事項です（直した案があります）。」）: reasked=${panel.conversation().metrics().reasked}`);
 }
 
 // =========================================================
@@ -986,6 +994,12 @@ console.log('\n--- FR-1 / FR-2 / FR-6 / FR-7（UI・実際の AI client と tran
   const chat = () => $('kt-ai-chat').innerHTML;
   const plans = () => panel.conversation().planHistory().length;
   const retry = () => $('kt-ai-chat').dispatch({ type: 'click', target: { dataset: { act: 'retry', text: GOAL } } });
+  // 2026-10-06 利用者の指示で意図して更新: エラーのカードの code（と requestId）は本文ではなく［詳細情報］（details.kt-ai-tech）の中。[CODE] の形では出さない
+  const techCode = (code, { requestId = false } = {}) => {
+    const h = chat();
+    const inTech = new RegExp(`<details class="kt-ai-tech"><summary>詳細情報</summary><div class="kt-ai-error-code">${code}${requestId ? ' / requestId: [^<]+' : '( / requestId: [^<]+)?'}</div></details>`).test(h);
+    return inTech && !h.includes(`[${code}]`);
+  };
   // 応答（timeout を含む）が返って送信中でなくなるまで待つ / 要求が n 件送られるまで待つ
   const settle = async (ms = 3000) => { const t0 = Date.now(); await ticks(); while (panel.conversation().isBusy() && Date.now() - t0 < ms) await new Promise(r => setTimeout(r, 10)); await ticks(); };
   const sentCount = async (n, ms = 3000) => { const t0 = Date.now(); while (posts.length < n && Date.now() - t0 < ms) await new Promise(r => setTimeout(r, 5)); await ticks(); };
@@ -998,10 +1012,10 @@ console.log('\n--- FR-1 / FR-2 / FR-6 / FR-7（UI・実際の AI client と tran
   // FR-2: 不完全な応答（plan.steps が無い）→ client の検証で拒否 / Gateway の MODEL_OUTPUT_INVALID
   queue.push('malformed');
   retry(); await settle();
-  assert(posts.length === 2 && last().type === 'ERROR' && last().data.code === 'INVALID_RESPONSE' && /\[INVALID_RESPONSE\]/.test(chat()) && plans() === 0, 'FR-2: plan の形が不完全な応答 → INVALID_RESPONSE（計画として登録しない・理由の code を表示）');
+  assert(posts.length === 2 && last().type === 'ERROR' && last().data.code === 'INVALID_RESPONSE' && techCode('INVALID_RESPONSE') && plans() === 0, 'FR-2: plan の形が不完全な応答 → INVALID_RESPONSE（計画として登録しない・理由の code は［詳細情報］の中に表示し、本文に [CODE] の形では出さない）');
   queue.push('model-invalid');
   retry(); await settle();
-  assert(posts.length === 3 && last().type === 'ERROR' && last().data.code === 'MODEL_OUTPUT_INVALID' && /\[MODEL_OUTPUT_INVALID\]/.test(chat()) && plans() === 0 && $('kt-ai-input').value === GOAL, 'FR-2: Gateway が AI 出力を契約違反と判定（502 MODEL_OUTPUT_INVALID）→ 登録しない・入力は残る');
+  assert(posts.length === 3 && last().type === 'ERROR' && last().data.code === 'MODEL_OUTPUT_INVALID' && techCode('MODEL_OUTPUT_INVALID', { requestId: true }) && plans() === 0 && $('kt-ai-input').value === GOAL, 'FR-2: Gateway が AI 出力を契約違反と判定（502 MODEL_OUTPUT_INVALID）→ 登録しない・入力は残る（code と requestId は［詳細情報］の中）');
   // FR-7 / FR-6: 再試行の応答待ちに［再試行］と［送信］をもう一度押しても要求は 1 回。応答が来たら計画は 1 件だけ
   queue.push('gate');
   const p1 = retry(); await sentCount(4);

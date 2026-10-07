@@ -167,7 +167,7 @@ console.log('\n--- §51-3. Toolkit Review: 統合先が曖昧 / 本文なし / P
   // 実機（Scenario A 2 回目）: 依存する標準設定（新しいステータス等）が無効 → JS は BLOCKED_BY_DEPENDENCY で生成不可（存在しない設定名を前提にしたコードを作らない）
   const depBad = reviewPlan(planOf({ steps: [mkStep('P1', 'ADD_FIELD', 'PROPOSED_FIELD', 'NEW_FIELD_9', { fieldType: 'DROP_DOWN', options: ['a'] }, { title: '提案に無い新規フィールド' }), JS_STEP('C1', { dependsOn: ['P1'] })], customizations: [cust({ dependsOn: ['P1'] })], solution: 'HYBRID' }));
   assert(depBad.jsReview.status === 'BLOCKED_BY_DEPENDENCY' && depBad.jsReview.codeGeneration.supported === false && depBad.jsReview.codeGeneration.reason === 'BLOCKED_BY_DEPENDENCY' && depBad.review.hybrid.customization.blocked.includes('P2') && !depBad.review.hybrid.customization.generatable.includes('P2'), '依存する標準設定が無効: JS は BLOCKED_BY_DEPENDENCY・生成不可（generatable に入らない）');
-  assert(/依存する標準設定が無効/.test(KTContextUi.planHtml(depBad.plan, depBad.review)), '実行前レビュー: 生成できない理由を日本語で');
+  assert(/前提の標準設定が無効/.test(KTContextUi.planHtml(depBad.plan, depBad.review)), '確認結果: 生成できない理由を日本語で');
   // 実機（Scenario C）: 「警告メッセージを表示」なのに amount が READ → 生成コード（error = CONTROL）と計画が不一致になる → ヒント（低）
   const readOnly = reviewPlan(planOf({ steps: [JS_STEP('C1', { title: '金額が100万円以上なら警告メッセージを表示（JavaScript）' })], customizations: [{ ...NEW_JS_CUST(), fields: [{ code: 'amount', access: 'READ' }, { code: 'ステータス', access: 'READ' }] }] }), INPUTS_PLAIN);
   assert(readOnly.jsReview.issues.some(i => i.code === 'JS_ACCESS_HINT' && i.severity === 'low') && readOnly.jsReview.codeGeneration.supported === true, '要件が警告表示なのに CONTROL のフィールドが無い（複数フィールドで自動調整の対象外）: JS_ACCESS_HINT（低。生成は可能）');
@@ -376,6 +376,8 @@ function mount({ inputs = INPUTS, planResponse = PLAN_HYBRID, generatedFor = nul
   return { host, panel, $, calls, copies, downloads, mock, conv: () => panel.conversation(), chat: () => $('kt-ai-chat').innerHTML, msgs: () => panel.conversation().state.messages, types: () => panel.conversation().state.messages.map(m => m.type) };
 }
 const clickChat = (m, act, extra = {}) => m.$('kt-ai-chat').dispatch({ type: 'click', target: { dataset: { act, ...extra } } });
+/** 2026-10-06: 会話に見える文（タグと data 属性を除く）。内部の番号（C1・v1 など）が出ていないことを確かめる */
+const textOf = (html) => String(html).replace(/<[^>]*>/g, '');
 /** Phase 17: 実装仕様の確定（Human Approval の SoT は仕様カードの［この仕様で確定］）。仕様が無い（JS のない）計画では何もしない */
 const confirmSpec = async (m) => { const v = m.conv().activePlan(); if (v?.spec) await clickChat(m, 'confirm-spec', { plan: v.planId, version: String(v.version) }); };
 const writes = (m) => m.mock.calls.filter(c => !c.startsWith('GET'));
@@ -387,14 +389,18 @@ const writes = (m) => m.mock.calls.filter(c => !c.startsWith('GET'));
   const v = m.conv().activePlan();
   assert(v && v.plan.solution === 'HYBRID' && v.plan.customizations.length === 1 && v.review && v.review.hybrid.solution === 'HYBRID', '計画の版: solution HYBRID・customizations 1・Toolkit Review に hybrid');
   const html = m.chat();
-  assert(/標準設定/.test(html) && /JavaScript カスタマイズ/.test(html) && /標準設定 ＋ JavaScript/.test(html), '計画カード: 標準設定 / JavaScript カスタマイズ の 2 段と solution 表示');
-  // Phase 19: カスタマイズの詳細（統合先・イベント・フィールド・不足する理由）は右「計画」の実装仕様カードだけ。会話は要約
+  // 2026-10-06: 会話の変更案のカードは 1 枚（標準設定と JavaScript を組み合わせる計画である旨・設定の変更と JavaScript の件数）。内訳は右の「変更内容」の要約（対象）と「確認結果」
+  assert(/変わる内容：設定の変更 1 件・JavaScript 1 件/.test(html) && /標準設定と JavaScript を組み合わせる計画です/.test(html) && /対象：一覧／JavaScript（PC：編集画面）/.test(m.$('kt-ai-change-summary').innerHTML), '変更案のカード: 標準設定と JavaScript を組み合わせる計画である旨と、設定の変更 1 件・JavaScript 1 件。右の「変更内容」の要約に対象（一覧／JavaScript の画面）');
+  // Phase 19: カスタマイズの詳細（統合先・イベント・フィールド・不足する理由）は右の「変更内容」の実装仕様カードだけ。会話は要約（要件と統合先・PC / モバイル）
   const specPane = m.$('kt-ai-spec').innerHTML;
-  assert(!/kt-ai-customization-card/.test(html) && /JavaScript<\/span><b>1件/.test(html) && /kt-ai-spec-card/.test(specPane) && /✎ fieldOnOff\.js を変更/.test(specPane) && /標準で不足/.test(specPane) && /app\.record\.edit\.show/.test(specPane) && /amount（CONTROL）/.test(specPane), '実装仕様カード（右「計画」）: ✎ fieldOnOff.js を変更・イベント・フィールド（access）・不足する理由。会話は JavaScript 1件の要約');
+  assert(!/kt-ai-customization-card/.test(html) && /・承認後（完了）は金額を編集できなくする（fieldOnOff\.js を変更・PC）/.test(html) && !/app\.record\.edit\.show/.test(html) && !/amount（CONTROL）/.test(html) && /kt-ai-spec-card/.test(specPane) && /✎ fieldOnOff\.js を変更/.test(specPane) && /標準で不足/.test(specPane) && /app\.record\.edit\.show/.test(specPane) && /amount（CONTROL）/.test(specPane), '実装仕様カード（右の「変更内容」）: ✎ fieldOnOff.js を変更・イベント・フィールド（access）・不足する理由。会話は要件と統合先の要約だけ（イベント・フィールドの内訳は出さない）');
+  assert(!/C1|v1/.test(textOf(html)), '会話の変更案・実装の内容のカードに内部の番号（C1・版の v1）を出さない');
   const reviewPane = m.$('kt-ai-review-result').innerHTML;
-  assert(/data-act="generate" data-cid="C1"/.test(reviewPane) && /コードを作る/.test(reviewPane) && !/data-act="generate"/.test(html), '［コードを作る］は右「検証」の JS の判定（会話には無い）');
-  assert(/JavaScript 生成可<\/span><b>1 \/ 1件/.test(html), 'Review カード（会話）: JavaScript 生成可 1 / 1件');
-  assert(/kt-ai-review-hybrid/.test(reviewPane) && /実装計画（標準設定 ＋ JavaScript）/.test(reviewPane) && /コード生成可能: 1 件/.test(reviewPane) && !/kt-ai-review-hybrid/.test(m.$('kt-ai-plan-result').innerHTML), 'Toolkit で確認した結果（右「検証」）: Hybrid Review ブロック（標準設定 / JavaScript / 全体）。計画ペインには無い');
+  assert(/data-act="generate" data-cid="C1"/.test(reviewPane) && /コードを作る/.test(reviewPane) && !/data-act="generate"/.test(html), '［コードを作る］は右の「確認結果」の JS の判定（会話には無い）');
+  // 2026-10-06: Toolkit の確認（REVIEW）のカードは会話に出さない（conv.messages には残る）。結果は変更案のカードの「Toolkit の確認：…」、件数は右の「確認結果」
+  const reviewMsg = m.msgs().find(x => x.type === 'REVIEW');
+  assert(reviewMsg && KTAiChatUi.isHiddenMessage(reviewMsg) && !/kt-ai-review-card/.test(html) && /Toolkit の確認：問題は見つかりませんでした。/.test(html) && /実行可能な標準設定: 1 件　コード生成可能: 1 件/.test(reviewPane), 'Toolkit の確認: 会話はカードを出さず変更案のカードの 1 行だけ（REVIEW は記録に残る）。標準設定 1 件・JavaScript のコード生成可能 1 件は右の「確認結果」で別に数える');
+  assert(/kt-ai-review-hybrid/.test(reviewPane) && /実装計画（標準設定 ＋ JavaScript）/.test(reviewPane) && /コード生成可能: 1 件/.test(reviewPane) && !/kt-ai-review-hybrid/.test(m.$('kt-ai-plan-result').innerHTML), 'Toolkit で確認した結果（右の「確認結果」）: Hybrid Review ブロック（標準設定 / JavaScript / 全体）。変更内容のペインには無い');
   assert(/登録済み JS/.test(m.$('kt-ai-header').innerHTML) && /fieldOnOff\.js/.test(m.$('kt-ai-header').innerHTML), 'ヘッダー詳細: 登録済み JS（既存カスタマイズ設定）');
   // 「これで進めて」はコードを作らない
   const pv = await m.panel.send('これで進めて');
@@ -404,13 +410,13 @@ const writes = (m) => m.mock.calls.filter(c => !c.startsWith('GET'));
   assert(ex.intent === KTAiConversation.INTENT.EXPLAIN_CUSTOMIZATION && m.calls.ask.length === 1 && m.calls.ask[0].ctx.planContext?.kind === 'EXPLAIN_PLAN' && /JavaScript カスタマイズの説明/.test(m.chat()), 'EXPLAIN_CUSTOMIZATION: planContext（EXPLAIN_PLAN）で説明だけ。計画は変えない');
   assert(m.conv().activePlan() === v && m.calls.plan.length === 1 && m.calls.generate.length === 0, '説明では Planner / Generator を呼ばない');
   // Phase 17: 仕様の確定前はコードを作らない（spec-required）。チャットの「それでいい」でも確定しない。確定は仕様カードの［この仕様で確定］だけ
-  assert(v.spec && v.spec.status === 'DRAFT' && m.types().includes('SPEC') && /実装仕様 v1 をまとめました/.test(m.chat()) && /data-act="open-spec"/.test(m.chat()) && !/data-act="confirm-spec"/.test(m.chat()) && /data-act="confirm-spec"/.test(m.$('kt-ai-spec').innerHTML) && /data-act="revise-spec"/.test(m.$('kt-ai-spec').innerHTML), '計画に JS があれば実装仕様 v1（DRAFT）: 会話は要約（［仕様を見る］）、［仕様を修正］［この仕様で確定］は右「計画」だけ（Human Approval の SoT は右）');
+  assert(v.spec && v.spec.status === 'DRAFT' && m.types().includes('SPEC') && /JavaScript の実装の内容をまとめました。/.test(m.chat()) && !/実装仕様 v1/.test(m.chat()) && /data-act="open-spec"[^>]*>内容を見る</.test(m.chat()) && !/data-act="confirm-spec"/.test(m.chat()) && /data-act="confirm-spec"/.test(m.$('kt-ai-spec').innerHTML) && /data-act="revise-spec"/.test(m.$('kt-ai-spec').innerHTML), '計画に JS があれば実装仕様 v1（DRAFT）: 会話は「JavaScript の実装の内容をまとめました。」の要約（版の番号は出さない・［内容を見る］）、［仕様を修正］［この仕様で確定］は右の「変更内容」だけ（Human Approval の SoT は右）');
   const g0 = await m.panel.send('コードを作って');
   assert(g0.ok === false && m.calls.generate.length === 0 && m.msgs().some(x => x.data?.kind === 'spec-required'), '仕様の確定前の「コードを作って」: Generator を呼ばず、確定を案内');
   const c0 = await m.panel.send('それでいい');
   assert(c0.intent === KTAiConversation.INTENT.CONFIRM_SPEC && v.spec.status === 'DRAFT' && /この仕様で確定］ボタン/.test(m.chat()), '「それでいい」は CONFIRM_SPEC（案内だけ。仕様は DRAFT のまま）');
   await confirmSpec(m);
-  assert(v.spec.status === 'CONFIRMED' && v.spec.customizeRevision === '12' && m.msgs().some(x => x.data?.kind === 'spec-confirmed') && /確定済み/.test(m.chat()) && /JavaScript を生成（C1）/.test(m.$('kt-ai-spec').innerHTML) && m.panel.activeArtifact()?.type === 'CUSTOMIZATION_SPEC', '［この仕様で確定］→ CONFIRMED・動作テスト環境の customize revision（12）を記録・右「計画」に［JavaScript を生成（C1）］');
+  assert(v.spec.status === 'CONFIRMED' && v.spec.customizeRevision === '12' && m.msgs().some(x => x.data?.kind === 'spec-confirmed') && /確定済み/.test(m.chat()) && /JavaScript の実装の内容を確定しました。/.test(m.chat()) && /JavaScript を生成（C1）/.test(m.$('kt-ai-spec').innerHTML) && m.panel.activeArtifact()?.type === 'CUSTOMIZATION_SPEC', '［この仕様で確定］→ CONFIRMED・動作テスト環境の customize revision（12）を記録・会話は「確定しました」・右の「変更内容」に［JavaScript を生成（C1）］');
   // コード生成
   const g = await m.panel.send('コードを作って');
   assert(g && g.ok && g.intent === KTAiConversation.INTENT.GENERATE_CODE && m.calls.generate.length === 1, '「コードを作って」→ GENERATE_CODE → Generator を 1 回呼ぶ');
@@ -418,22 +424,22 @@ const writes = (m) => m.mock.calls.filter(c => !c.startsWith('GET'));
   assert(gctx.contextVersion === 'customization-1' && gctx.customization.customizationId === 'C1' && gctx.existingFile?.name === 'fieldOnOff.js' && gctx.existingFile.source === FIELD_ON_OFF && gctx.facts === undefined, 'Generator Context: C1 ＋ 統合先の本文（解析結果から）。アプリ全体の facts なし');
   const entry = m.panel.generated('C1');
   assert(entry && entry.generated.strategy === 'EXTEND_EXISTING_JS' && entry.review.status === 'OK' && entry.existingSource?.text === FIELD_ON_OFF, '生成結果を版に保持: Toolkit Code Review OK');
-  assert(m.types().includes('CODE') && /JavaScript を生成しました。/.test(m.chat()) && /Toolkit Code Review：/.test(m.chat()) && /✓ 検査を通過/.test(m.chat()) && /✎ <b>fieldOnOff\.js<\/b>（PC）/.test(m.chat()) && !/✓ Patch/.test(m.chat()), 'コードカード（§7）: ファイル名と Toolkit Code Review ✓ だけ（検査の内訳は会話に無い）');
-  assert(/data-act="open-code" data-cid="C1" data-view="code"/.test(m.chat()) && /data-act="open-code" data-cid="C1" data-view="diff"/.test(m.chat()) && m.host.innerHTML.includes('id="kt-ai-code-copy"') && m.host.innerHTML.includes('id="kt-ai-diff-copy"'), 'コードカードの操作: コードを見る / Diffを見る。コピーは右「コード」');
-  assert(/＋3 \/ −0 行/.test(m.chat()) && m.panel.drawerState().pane === 'code' && /元のコードは保持/.test(m.$('kt-ai-code-review').innerHTML) && /✓ Patch/.test(m.$('kt-ai-code-review').innerHTML), 'Diff の要約: 会話は ＋3 / −0 行。生成後は右「コード」が自動で開き（§13）、検査の内訳（Patch / 元のコードは保持）はそこに');
-  assert(/登録は右の「コード」の［動作テスト環境へ登録］/.test(m.chat()) && /運用環境には反映しません/.test(m.chat()) && m.$('kt-ai-code-register').style.display === '', 'コードカード: 登録は右「コード」の［動作テスト環境へ登録］→「実行」の確認画面の順（運用環境には反映しない）。登録ボタンは右に');
+  assert(m.types().includes('CODE') && /JavaScript を作りました。/.test(m.chat()) && /コードの確認：/.test(m.chat()) && /✓ 検査を通過/.test(m.chat()) && /登録できるか：✓/.test(m.chat()) && /✎ <b>fieldOnOff\.js<\/b>（PC）/.test(m.chat()) && !/✓ Patch/.test(m.chat()) && !/Toolkit Code Review/.test(m.chat()), 'コードカード（§7）: ファイル名と「コードの確認：✓ 検査を通過」「登録できるか」だけ（検査の内訳・内部の処理名は会話に無い）');
+  assert(/data-act="open-code" data-cid="C1" data-view="code"[^>]*>コードを見る</.test(m.chat()) && /data-act="open-code" data-cid="C1" data-view="diff"[^>]*>差分を見る</.test(m.chat()) && m.host.innerHTML.includes('id="kt-ai-code-copy"') && m.host.innerHTML.includes('id="kt-ai-diff-copy"') && /差分をコピー/.test(m.host.innerHTML) && /変更前後（差分）/.test(m.host.innerHTML), 'コードカードの操作: コードを見る / 差分を見る。コピー（コードをコピー / 差分をコピー）と変更前後（差分）は右の「コード」');
+  assert(/＋3 \/ −0 行/.test(m.chat()) && m.panel.drawerState().pane === 'code' && /元のコードは保持/.test(m.$('kt-ai-code-review').innerHTML) && /✓ Patch/.test(m.$('kt-ai-code-review').innerHTML), 'Diff の要約: 会話は ＋3 / −0 行。生成後は右の「コード」が自動で開き（§13）、検査の内訳（Patch / 元のコードは保持）はそこに');
+  assert(/登録は右の「コード」の［動作テスト環境へ登録］→ 右の「反映」の確認の順/.test(m.chat()) && /運用環境には反映しません/.test(m.chat()) && m.$('kt-ai-code-register').style.display === '' && m.$('kt-ai-code-register').disabled === false, 'コードカード: 登録は右の「コード」の［動作テスト環境へ登録］→ 右の「反映」の確認の順（運用環境には反映しない）。登録ボタンは右に（反映を止める理由が無いので押せる）');
   assert(writes(m).length === 0, 'コード生成で kintone への書き込みは 0 件');
   // コードを見る / Diff
   await clickChat(m, 'open-code', { cid: 'C1', view: 'code' });
   assert(m.panel.drawerState().open && m.panel.drawerState().pane === 'code' && m.$('kt-ai-code-view').textContent === entry.review.finalCode && m.$('kt-ai-code-view').style.display === '' && m.$('kt-ai-diff-view').style.display === 'none', '［コードを見る］→ コードペインに最終コード');
   assert(/✎ 既存 JS を変更/.test(m.$('kt-ai-code-head').innerHTML) && /Patch/.test(m.$('kt-ai-code-review').innerHTML) && /Security/.test(m.$('kt-ai-code-review').innerHTML), 'コードペイン: 見出しと Code Review の一覧');
   await clickChat(m, 'open-code', { cid: 'C1', view: 'diff' });
-  assert(m.$('kt-ai-diff-view').style.display === '' && /^\+\s*if \(record\['ステータス'\] && record\['ステータス'\]\.value === '完了'\)/m.test(m.$('kt-ai-diff-view').textContent) && / {0,}kintone\.events\.on/.test(m.$('kt-ai-diff-view').textContent), '［Diffを見る］→ Before / After（追加行は +・既存行は保持）');
+  assert(m.$('kt-ai-diff-view').style.display === '' && /^\+\s*if \(record\['ステータス'\] && record\['ステータス'\]\.value === '完了'\)/m.test(m.$('kt-ai-diff-view').textContent) && / {0,}kintone\.events\.on/.test(m.$('kt-ai-diff-view').textContent), '［差分を見る］→ Before / After（追加行は +・既存行は保持）');
   // コピー
   await clickChat(m, 'copy-code', { cid: 'C1' });
   assert(m.copies.length === 1 && m.copies[0] === entry.review.finalCode && m.copies[0].includes("value === '完了'") && m.copies[0].startsWith('(function () {'), '［コピー］: 最終コード（既存 ＋ 追加）');
   await clickChat(m, 'copy-diff', { cid: 'C1' });
-  assert(m.copies.length === 2 && /^\+/m.test(m.copies[1]), '［Diffをコピー］');
+  assert(m.copies.length === 2 && /^\+/m.test(m.copies[1]), '［差分をコピー］');
   await clickChat(m, 'copy-cplan', { cid: 'C1' });
   const cplan = JSON.parse(m.copies[2]);
   assert(cplan.customization.customizationId === 'C1' && cplan.generated.strategy === 'EXTEND_EXISTING_JS' && cplan.codeReview.status === 'OK' && cplan.provenance.planId === v.planId && cplan.provenance.customizationId === 'C1' && cplan.provenance.requestId, '［Plan JSON］: Customization Plan ＋ 生成要約 ＋ Code Review ＋ 出所（provenance）');
@@ -450,14 +456,17 @@ const writes = (m) => m.mock.calls.filter(c => !c.startsWith('GET'));
   const rd = m.panel.conversation() && (await m.panel.send('これで進めて'));
   const ready = m.msgs().filter(x => x.data?.kind === 'preview-ready').pop();
   assert(rd.intent === KTAiConversation.INTENT.REQUEST_PREVIEW && ready.data.readiness.executable === 1 && ready.data.readiness.unsupported === 1 && ready.data.readiness.customizations === 1, '承認後の readiness: 実行可 1（P1）・未対応 1（JS の P2）・JS 1');
-  await m.$('kt-ai-plan-result').dispatch({ type: 'click', target: { id: 'kt-ai-exec-start' } });
+  // 2026-10-06: 反映の操作は右下の右の「反映」（#kt-ai-pane-exec）。確認事項の無い変更案なので反映は止まらない（applyHold は null）
+  assert(m.panel.applyHold() === null && /id="kt-ai-exec-start"/.test(m.$('kt-ai-exec').innerHTML) && !/id="kt-ai-exec-start"[^>]*disabled/.test(m.$('kt-ai-exec').innerHTML), '右の「反映」: 止める理由は無く［動作テスト環境へ反映］を押せる');
+  await m.$('kt-ai-pane-exec').dispatch({ type: 'click', target: { id: 'kt-ai-exec-start' } });
   await ticks(8);
   assert(m.panel.executorState().stage === 'confirm', 'Executor: prepare → 最終確認');
-  await m.$('kt-ai-plan-result').dispatch({ type: 'click', target: { id: 'kt-ai-exec-go' } });
+  await m.$('kt-ai-pane-exec').dispatch({ type: 'click', target: { id: 'kt-ai-exec-go' } });
   await ticks(12);
   const ex2 = m.panel.executorState().execution;
   assert(ex2 && ex2.status === 'DONE' && ex2.steps.find(s => s.stepId === 'P1')?.status === 'VERIFIED' && ex2.steps.find(s => s.stepId === 'P2')?.status === 'UNSUPPORTED', 'Preview Executor: P1（一覧）は VERIFIED・JS の P2 は UNSUPPORTED（反映しない）');
   assert(writes(m).length > 0 && !writes(m).some(c => /customize/.test(c)), `Executor の書き込みに customize.json（JS 登録）は無い（${writes(m).length} 件）`);
+  assert(/反映後の確認：✓ 1 件一致/.test(m.chat()) && !/VERIFIED/.test(textOf(m.chat())), '反映のカード: 「反映後の確認：✓ 1 件一致」（VERIFIED の語は会話に出さない）');
   // 版が変わっても生成結果は版に紐づく
   assert(m.panel.generated('C1') === entry, '生成結果は計画の版に保持されたまま');
 }
@@ -476,14 +485,19 @@ console.log('\n--- §53-2. カスタマイズの修正 / 複数カスタマイ�
   assert(/data-act="generate" data-cid="C2"/.test(m.chat()), '選択肢のボタン（data-cid）');
   await clickChat(m, 'generate', { cid: 'C2' });
   assert(m.calls.generate.length === 1 && m.calls.generate[0].ctx.customization.customizationId === 'C2' && m.panel.generated('C2') && !m.panel.generated('C1'), 'ボタンから C2 だけを生成（会話の GENERATE_CODE を通る）');
+  // 2026-10-06: ボタンからの依頼は、会話には要件の文で出す（送る文と判定は元のまま。C2 の番号は出さない）
+  const uGen = m.msgs().filter(x => x.type === 'USER').pop();
+  assert(/C2/.test(uGen.text) && uGen.data?.displayText === '「承認済みなら担当者も編集できなくする」のコードを作って' && /「承認済みなら担当者も編集できなくする」のコードを作って/.test(m.chat()) && !/C1|C2/.test(textOf(m.chat())), '選択肢から作る: 会話の発言は「「要件」のコードを作って」と表示（内部の番号 C1 / C2 は会話に出さない）');
   const c2 = m.panel.generated('C2');
   assert(c2.review.status === 'BLOCKED' && c2.review.registration.verdict === 'BLOCKED' && c2.review.checks.some(x => x.name === 'planned-fields' && !x.ok && /owner/.test(x.message)) && c2.review.checks.some(x => x.name === 'target-fields' && !x.ok && /amount/.test(x.message)) && c2.review.mismatches.some(x => x.code === 'MISSING_FIELD' && x.items.includes('owner')), 'C2 なのに amount を制御する patch: owner の処理が無い・amount は計画外 → 登録不可（Phase 21。以前は確認が必要の扱い）');
-  assert(/× 採用不可/.test(m.chat()) && /登録：× 登録できません/.test(m.chat()) && /要件との不一致・採用できない問題が見つかりました/.test(m.chat()), 'コードカード: × 採用不可・登録できません（Phase 21）');
+  assert(/コードの確認：<span[^>]*>× 採用不可/.test(m.chat()) && /登録できるか：× 登録できません/.test(m.chat()) && /要件との不一致・採用できない問題があるため登録できません/.test(m.chat()) && m.$('kt-ai-code-register').style.display === 'none', 'コードカード: × 採用不可・登録できるか：× 登録できません（Phase 21）。登録ボタンは出ない');
   // 計画の修正（カスタマイズの対象をモバイルにも）→ v2。生成結果は v1 に残り v2 には無い
   const rv = await m.panel.send('金額のロックはモバイルでも動くようにして');
   assert(rv.intent === KTAiConversation.INTENT.REVISE_PLAN && m.calls.plan.length === 2 && m.calls.plan[1].ctx.revision && m.conv().activePlan().version === 2, 'カスタマイズの修正 → REVISE_PLAN → v2');
   const v2 = m.conv().activePlan();
   assert(v2.plan.customizations[0].platform.join() === 'desktop,mobile' && v2.review.steps.find(r => r.solution === 'CUSTOMIZATION')?.codeGeneration?.supported === true && !m.panel.generated('C1', v2) && !m.panel.generated('C2', v2), 'v2: platform desktop / mobile。v1 の生成コードは v2 に引き継がない（再生成が必要）');
+  // 2026-10-06: 同じ計画の新しい版になったら、前の版のコードは右の「コード」に残さない（古いコードを最新として見せない・登録しない）
+  assert(/変更案が新しくなったため、前の変更案のコードは表示していません。/.test(m.$('kt-ai-code-head').innerHTML) && m.$('kt-ai-code-view').style.display === 'none' && m.$('kt-ai-diff-view').style.display === 'none' && m.$('kt-ai-code-register').style.display === 'none', 'v2: 右の「コード」から v1 のコードを消し、その旨を出す（登録ボタンも出さない）');
   assert(m.calls.plan[1].ctx.revision.previousPlan && JSON.stringify(m.calls.plan[1].ctx.revision.previousPlan).includes('C1'), 'revision の previousPlan に customization（C1）が含まれる');
 }
 {
@@ -492,22 +506,23 @@ console.log('\n--- §53-2. カスタマイズの修正 / 複数カスタマイ�
   await ticks();
   await m.panel.send(GOAL_HYBRID);
   await confirmSpec(m);
-  assert(/要確認/.test(m.$('kt-ai-spec').innerHTML) && /コード生成はまだできません/.test(m.$('kt-ai-review-result').innerHTML) && /PC \/ モバイルのどちらが対象か決まっていません/.test(m.$('kt-ai-review-result').innerHTML), 'PC / モバイル未定: 右「計画」の仕様は「要確認」・右「検証」に確認事項');
-  assert(/JavaScript 生成可<\/span><b>0 \/ 1件/.test(m.chat()), 'Review カードの JS 行: 生成可 0 / 1件（JS の確認事項は Executor の △ とは別に数える）');
-  assert(/JavaScript カスタマイズに確認が必要な点があります/.test(m.chat()) && !/問題は見つかりませんでした/.test(m.chat()), 'Review の案内: JS の要確認を文言に反映（「問題は見つかりませんでした」にしない。実機で確認）');
+  assert(/要確認/.test(m.$('kt-ai-spec').innerHTML) && /コード生成はまだできません/.test(m.$('kt-ai-review-result').innerHTML) && /PC \/ モバイルのどちらが対象か決まっていません/.test(m.$('kt-ai-review-result').innerHTML), 'PC / モバイル未定: 右の「変更内容」の仕様は「要確認」・右の「確認結果」に確認事項');
+  // 2026-10-06: Toolkit の確認のカードは会話に出さない。JS のコード生成の可否は右の「確認結果」で標準設定とは別に数え、会話の実装の内容のカードに作れない旨を出す
+  assert(/実行可能な標準設定: 1 件　コード生成可能: 0 件/.test(m.$('kt-ai-review-result').innerHTML) && !/kt-ai-review-card/.test(m.chat()) && /・承認後（完了）は金額を編集できなくする（fieldOnOff\.js を変更・PC かモバイルかは未定）/.test(m.chat()) && /この内容は Toolkit ではコードを生成できません（理由は右の「確認結果」）/.test(m.chat()), 'JS のコード生成の可否: 右の「確認結果」で標準設定 1 件とは別に「コード生成可能: 0 件」。会話の実装の内容のカードに PC かモバイルかは未定・コードを作れない旨');
+  assert(/Toolkit の確認：JavaScript カスタマイズに確認が必要な点があります/.test(m.chat()) && !/問題は見つかりませんでした/.test(m.chat()), 'Toolkit の確認の案内（変更案のカード）: JS の要確認を文言に反映（「問題は見つかりませんでした」にしない。実機で確認）');
   const g = await m.panel.send('コードを作って');
-  assert(g.ok === false && m.calls.generate.length === 0 && m.msgs().some(x => x.data?.kind === 'generate-blocked') && /まだコードを生成できません/.test(m.chat()), '生成不可の step は Generator を呼ばない（計画の修正か確認事項への回答を促す）');
+  assert(g.ok === false && m.calls.generate.length === 0 && m.msgs().some(x => x.data?.kind === 'generate-blocked') && /まだコードを作れません/.test(m.chat()) && !/\bC1\b/.test(m.chat().replace(/<details[\s\S]*?<\/details>/g, '').replace(/data-[a-z-]+="[^"]*"/g, '')), '生成不可の step は Generator を呼ばない（変更案の修正か確認したいことへの回答を促す。カスタマイズの番号は出さない）');
 }
 {
   // BLOCKED なコード（未知フィールド）→ 採用不可
   const m = mount({ inputs: INPUTS_PLAIN, planResponse: PLAN_NEW_JS, generatedFor: () => genNew(NEW_JS_GOOD.replace("record['amount'].value", "record['amount_total'].value")) });
   await ticks();
   await m.panel.send('金額が100万円以上なら警告メッセージを表示したい');
-  assert(/＋ 新規 JS/.test(m.chat()) && m.conv().activePlan().plan.solution === 'CUSTOMIZATION', '新規 JS の計画: ＋ 新規 JS・solution CUSTOMIZATION');
+  assert(/・金額が100万円以上なら警告メッセージを表示する（新しい JavaScript・PC）/.test(m.chat()) && /標準設定では足りないため、JavaScript カスタマイズを使う計画です/.test(m.chat()) && /変わる内容：JavaScript 1 件</.test(m.chat()) && /＋ 新規 JS/.test(m.$('kt-ai-review-result').innerHTML) && m.conv().activePlan().plan.solution === 'CUSTOMIZATION', '新規 JS の計画: 会話は「新しい JavaScript」・JavaScript カスタマイズを使う計画（設定の変更は無い）。右の「確認結果」に ＋ 新規 JS・solution CUSTOMIZATION');
   await confirmSpec(m);
   const g = await m.panel.send('JS を書いて');
   assert(g.ok && m.calls.generate.length === 1 && m.panel.generated('C1').review.status === 'BLOCKED', 'Generator の応答に未知フィールド → Toolkit Code Review BLOCKED');
-  assert(/× 採用不可/.test(m.chat()) && /採用できない問題/.test(m.chat()) && /GENERATED_JS_UNKNOWN_FIELD/.test(m.$('kt-ai-code-review').innerHTML) && /計画を修正して再生成/.test(m.chat()) && m.$('kt-ai-code-register').style.display === 'none', 'コードカード: × 採用不可・再生成の案内。理由（GENERATED_JS_UNKNOWN_FIELD）は右「コード」。登録ボタンは出ない');
+  assert(/× 採用不可/.test(m.chat()) && /採用できない問題/.test(m.chat()) && /GENERATED_JS_UNKNOWN_FIELD/.test(m.$('kt-ai-code-review').innerHTML) && /変更案を直して、もう一度作ってください。/.test(m.chat()) && m.$('kt-ai-code-register').style.display === 'none', 'コードカード: × 採用不可・作り直しの案内（変更案を直して、もう一度作る）。理由（GENERATED_JS_UNKNOWN_FIELD）は右の「コード」。登録ボタンは出ない');
   await clickChat(m, 'copy-code', { cid: 'C1' });
   assert(m.copies.length === 1, 'BLOCKED でもコードの確認（コピー）はできる（登録はしない）');
 }
@@ -523,8 +538,9 @@ console.log('\n--- §53-3. JS_SOURCE_UNAVAILABLE → 再スキャン / 契約に
   assert(v.review.steps.find(r => r.solution === 'CUSTOMIZATION').codeGeneration.sourceAvailable === false && v.review.steps.find(r => r.solution === 'CUSTOMIZATION').codeGeneration.supported === true, 'キャッシュ payload: 本文なし（生成は試みる）');
   await confirmSpec(m);
   const g = await m.panel.send('コードを作って');
-  assert(g.ok === false && m.calls.generate.length === 0 && m.msgs().some(x => x.data?.kind === 'source-unavailable' && x.data.file?.name === 'fieldOnOff.js') && /JS_SOURCE_UNAVAILABLE/.test(m.chat()), '本文を取得できない: Generator を呼ばず JS_SOURCE_UNAVAILABLE（既存ファイルへの自動生成はしない）');
-  assert(/data-act="rescan"/.test(m.chat()) && /新規 JS として設計/.test(m.chat()) && /手動で確認する/.test(m.chat()), '選択肢: 再スキャン / 新規 JS として設計 / 手動確認');
+  // 2026-10-06: 会話は利用者の言葉だけ（JS_SOURCE_UNAVAILABLE の文字は出さない。種類 source-unavailable と統合先のファイルは記録に残る）
+  assert(g.ok === false && m.calls.generate.length === 0 && m.msgs().some(x => x.data?.kind === 'source-unavailable' && x.data.file?.name === 'fieldOnOff.js') && /統合先「fieldOnOff\.js」の本文を取得できませんでした。既存のファイルへの自動生成は行いません。/.test(m.chat()) && !/JS_SOURCE_UNAVAILABLE/.test(m.chat()), '本文を取得できない: Generator を呼ばず、統合先の本文を取得できない旨（既存ファイルへの自動生成はしない。内部の名前 JS_SOURCE_UNAVAILABLE は会話に出さない）');
+  assert(/data-act="rescan"[^>]*>再スキャン（JavaScript を取り直す）</.test(m.chat()) && /data-act="choice" data-intent="REVISE_PLAN"[^>]*data-display="既存のファイルに入れずに、新しい JavaScript ファイルとして作って"[^>]*>新しい JavaScript として作る</.test(m.chat()) && /手動で確認する/.test(m.chat()), '選択肢: 再スキャン / 新しい JavaScript として作る（計画の修正）/ 手動確認');
   await clickChat(m, 'rescan', { cid: 'C1' });
   await ticks(4);
   assert(available === true && m.calls.generate.length === 1 && m.calls.generate[0].ctx.existingFile?.source === FIELD_ON_OFF && m.panel.generated('C1')?.review.status === 'OK', '再スキャン → 本文を取得 → 同じカスタマイズのコードを生成（OK）');
@@ -533,8 +549,9 @@ console.log('\n--- §53-3. JS_SOURCE_UNAVAILABLE → 再スキャン / 契約に
   await m2.panel.send(GOAL_HYBRID);
   await confirmSpec(m2);
   await m2.panel.send('コードを作って');
-  await clickChat(m2, 'choice', { intent: 'REVISE_PLAN', text: 'C1 は既存ファイルに統合せず、新規の JS ファイルとして設計して' });
-  assert(m2.calls.plan.length === 2 && m2.calls.plan[1].ctx.revision?.request.includes('新規の JS ファイルとして設計'), '「新規 JS として設計」→ 計画の修正（REVISE_PLAN）として Planner へ');
+  await clickChat(m2, 'choice', { intent: 'REVISE_PLAN', text: 'C1 は既存ファイルに統合せず、新規の JS ファイルとして設計して', display: '既存のファイルに入れずに、新しい JavaScript ファイルとして作って' });
+  assert(m2.calls.plan.length === 2 && m2.calls.plan[1].ctx.revision?.request.includes('新規の JS ファイルとして設計'), '「新しい JavaScript として作る」→ 計画の修正（REVISE_PLAN）として Planner へ（送る文は元のまま）');
+  assert(/<div class="kt-ai-msg role-user"[^>]*><div class="kt-ai-bubble">既存のファイルに入れずに、新しい JavaScript ファイルとして作って<\/div>/.test(m2.chat()) && !/C1 は既存ファイルに統合せず/.test(textOf(m2.chat())), '会話の発言はボタンの表示の文（data-display）。内部の番号 C1 を含む送る文は出さない');
 }
 {
   const m = mount({ health: HEALTH_NO_GEN });
@@ -543,6 +560,8 @@ console.log('\n--- §53-3. JS_SOURCE_UNAVAILABLE → 再スキャン / 契約に
   await confirmSpec(m);
   const g = await m.panel.send('コードを作って');
   assert(g.ok === false && m.calls.generate.length === 0 && m.msgs().some(x => x.type === 'ERROR' && x.data.code === 'GENERATOR_NOT_AVAILABLE') && /JavaScript の生成」を利用できません/.test(m.chat()), '契約に customization-generator が無い: GENERATOR_NOT_AVAILABLE（Planner / Q&A は使える）');
+  // 2026-10-06: エラーの番号は本文に出さず、［詳細情報］の中だけ（[CODE] の形では出さない）
+  assert(/<details class="kt-ai-tech"><summary>詳細情報<\/summary><div class="kt-ai-error-code">GENERATOR_NOT_AVAILABLE/.test(m.chat()) && !/\[GENERATOR_NOT_AVAILABLE\]/.test(m.chat()), 'エラーカード: GENERATOR_NOT_AVAILABLE は［詳細情報］の中だけ');
   assert(m.panel.capability().features['customization-generator']?.available === false && m.panel.capability().features['change-planner']?.available === true, 'capability: generator だけ利用不可');
 }
 {
@@ -553,6 +572,7 @@ console.log('\n--- §53-3. JS_SOURCE_UNAVAILABLE → 再スキャン / 契約に
   const g = await m.panel.send('コードを作って');
   assert(g.ok === false && m.calls.generate.length === 1 && m.msgs().some(x => x.type === 'ERROR' && x.data.code === 'RATE_LIMITED' && x.data.retryText === 'コードを作って') && !m.panel.generated('C1'), 'Gateway の RATE_LIMITED: エラーカード（再試行）。生成結果は無い');
   assert(/data-act="retry"/.test(m.chat()) && /data-intent="GENERATE_CODE"/.test(m.chat()), '再試行ボタンは GENERATE_CODE を保持');
+  assert(/<div class="kt-ai-error-code">RATE_LIMITED[^<]*<\/div><\/details>/.test(m.chat()) && !/\[RATE_LIMITED\]/.test(m.chat()), 'エラーカード: RATE_LIMITED は［詳細情報］の中だけ');
   assert(writes(m).length === 0, 'エラー時も書き込み 0 件');
 }
 {
@@ -569,12 +589,12 @@ console.log('\n--- §53-4. KTAiChatUi（純関数）---');
 {
   const hy = reviewPlan(PLAN_HYBRID);
   const v = { planId: 'p', version: 1, status: 'ACTIVE', goal: GOAL_HYBRID, plan: hy.plan, review: hy.review, generated: {} };
-  // Phase 19: カスタマイズの詳細は実装仕様カード（右「計画」）に一本化。会話の仕様カードは要約
+  // Phase 19: カスタマイズの詳細は実装仕様カード（右の「変更内容」）に一本化。会話の仕様カードは要約
   const vSpec = { ...v, spec: { specId: 'p:spec', version: 1, status: 'DRAFT', customizations: hy.plan.customizations } };
   const card = KTAiChatUi.specCardHtml(vSpec);
   assert(/生成可/.test(card) && /✎ fieldOnOff\.js を変更/.test(card) && /data-act="confirm-spec"/.test(card), 'specCardHtml（右）: 生成可バッジ・統合先・［この仕様で確定］');
   const chatSpec = KTAiChatUi.specChatCardHtml(vSpec);
-  assert(/実装仕様 v1 をまとめました/.test(chatSpec) && /✎ fieldOnOff\.js を変更（PC）/.test(chatSpec) && !/confirm-spec/.test(chatSpec) && /data-act="open-spec"/.test(chatSpec), 'specChatCardHtml（会話）: 要約と［仕様を見る］だけ');
+  assert(/JavaScript の実装の内容をまとめました。/.test(chatSpec) && /・承認後（完了）は金額を編集できなくする（fieldOnOff\.js を変更・PC）/.test(chatSpec) && !/C1|v1/.test(textOf(chatSpec)) && !/confirm-spec/.test(chatSpec) && /data-act="open-spec"[^>]*>内容を見る</.test(chatSpec), 'specChatCardHtml（会話）: 要件と統合先・PC / モバイルの要約と［内容を見る］だけ（C1・版の番号は出さない）');
   const cardNew = KTAiChatUi.specCardHtml({ planId: 'p', version: 1, status: 'ACTIVE', plan: PLAN_NEW_JS.plan, review: null, spec: { specId: 'p:spec', version: 1, status: 'DRAFT', customizations: [NEW_JS_CUST()] } });
   assert(/＋ 新規 JS/.test(cardNew) && /app\.record\.create\.change\.amount/.test(cardNew), 'specCardHtml（新規 JS）');
   const m = { id: 'x', role: 'toolkit', type: 'CODE', text: 'JavaScript', data: { planId: 'p', version: 1, customizationId: 'C1' } };
@@ -583,7 +603,7 @@ console.log('\n--- §53-4. KTAiChatUi（純関数）---');
   const rv = KTCodeReview.review({ generated: genPatch(), customization: hy.plan.customizations[0], plan: hy.plan, data: INPUTS.data, scan: INPUTS.scan, existingSource: SRC });
   v.generated.C1 = { generated: genPatch(), review: rv, existingSource: SRC };
   const withGen = KTAiChatUi.messageHtml(m, { plans: new Map([['p:1', v]]) });
-  assert(/kt-ai-code-card/.test(withGen) && /✓ 検査を通過/.test(withGen) && !/✓ Patch/.test(withGen) && /✓ Patch/.test(KTAiChatUi.codePaneHtml(v.generated.C1).review) && /✓ Syntax/.test(KTAiChatUi.codePaneHtml(v.generated.C1).review), 'codeCardHtml は要約。Toolkit Code Review の ✓ 一覧は codePaneHtml（右「コード」）');
+  assert(/kt-ai-code-card/.test(withGen) && /JavaScript を作りました。/.test(withGen) && /コードの確認：/.test(withGen) && /✓ 検査を通過/.test(withGen) && !/✓ Patch/.test(withGen) && /✓ Patch/.test(KTAiChatUi.codePaneHtml(v.generated.C1).review) && /✓ Syntax/.test(KTAiChatUi.codePaneHtml(v.generated.C1).review), 'codeCardHtml は要約（コードの確認：✓ 検査を通過）。Toolkit Code Review の ✓ 一覧は codePaneHtml（右の「コード」）');
   const pane = KTAiChatUi.codePaneHtml(v.generated.C1, { view: 'diff' });
   assert(pane.code === rv.finalCode && /^\+/m.test(pane.diff) && /fieldOnOff\.js/.test(pane.head), 'codePaneHtml: code / diff / head');
   assert(KTAiChatUi.STRATEGY_JA.EXTEND_EXISTING_JS === '✎ 既存 JS を変更' && KTAiChatUi.STRATEGY_JA.NEW_JS_FILE === '＋ 新規 JS', 'STRATEGY_JA');

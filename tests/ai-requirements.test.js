@@ -102,7 +102,9 @@ await section(async () => {
   const { c, calls, byKind, ledger } = makeConv([{ plan: planWith(qs(QP, QS)), turn: t1 }, { plan: planWith([]), turn: t2 }]);
   await c.send(goal);
   const lg1 = ledger();
-  assert(KTAiAnswers.requirementsOf(lg1).map(e => `${e.id}:${e.decision}`).join() === 'R1:decided' && byKind('turn-reply').length === 1 && byKind('requirements-changes').length === 1, `F1: 最初の依頼の要件を台帳へ（根拠の発言は依頼の文）・返答と要件の変化を出す: ${JSON.stringify(KTAiAnswers.requirementsOf(lg1).map(e => e.id + ':' + e.decision))}`);
+  // 2026-10-06: 要件の変化（要件の番号つき）は記録に残し、通常の会話には出さない（対応できないことがあるときだけ出す）。返答は会話に出す
+  const shown = (m) => !!m && KTAiChatUi.messageHtml(m) !== '';
+  assert(KTAiAnswers.requirementsOf(lg1).map(e => `${e.id}:${e.decision}`).join() === 'R1:decided' && byKind('turn-reply').length === 1 && byKind('requirements-changes').length === 1 && shown(byKind('turn-reply')[0]) && !shown(byKind('requirements-changes')[0]), `F1: 最初の依頼の要件を台帳へ（根拠の発言は依頼の文）・返答は会話に出し、要件の変化は記録する（会話には出さない）: ${JSON.stringify(KTAiAnswers.requirementsOf(lg1).map(e => e.id + ':' + e.decision))}`);
   await c.send('PCだけ。保存は止めない。ところでCSVの読み込みにも効きますか？');
   await ticks();
   const rev = calls.plan[1].revision;
@@ -121,7 +123,9 @@ await section(async () => {
   const reqs = KTAiAnswers.requirementsOf(ledger());
   assert(reqs[0].decision === 'decided' && reqs[1].decision === 'proposed', `F2: 利用者の文に無い根拠の「決定」は提案（proposed）に下げる: ${reqs.map(e => e.decision).join()}`);
   const un = reqs.filter(e => e.disposition === 'unresolved' && e.origin === 'toolkit');
-  assert(un.length === 1 && /明細の小計の合計と金額がずれていたら/.test(un[0].behavior) && byKind('requirements-unresolved').length === 1 && /計画に入っていない可能性がある指示/.test(byKind('requirements-unresolved')[0].text), `F2: 計画の AI が扱いを示さなかった文は、黙って捨てずに未解決の要件として残し知らせる: ${JSON.stringify(un.map(e => e.behavior))}`);
+  // 2026-10-06: 会話の文は「変更案」（右のペインの名前に合わせた）。知らせる文は会話に出す（出さない種類にしない）
+  const unMsg = byKind('requirements-unresolved')[0];
+  assert(un.length === 1 && /明細の小計の合計と金額がずれていたら/.test(un[0].behavior) && byKind('requirements-unresolved').length === 1 && /変更案に入っていない可能性がある指示があります：「[^」]*明細の小計の合計と金額がずれていたら[^」]*」/.test(unMsg.text) && /入れる場合は、そのように伝えてください/.test(unMsg.text) && !KTAiChatUi.isHiddenMessage(unMsg), `F2: 計画の AI が扱いを示さなかった文は、黙って捨てずに未解決の要件として残し知らせる: ${JSON.stringify(un.map(e => e.behavior))} / ${unMsg && unMsg.text}`);
   assert(c.metrics().unresolvedClauses === 1, 'F2: 計測（扱いが示されなかった文）');
 });
 await section(async () => {
@@ -159,7 +163,8 @@ await section(async () => {
   const { c, calls, byKind, kinds } = makeConv([{ plan: planWith([]) }, { plan: planWith([], { provisionals: [{ id: 'A1', topic: 'location', choice: '警告は金額欄に表示', reason: '入力中に気づける', changeHint: '別の場所にしたいときは伝えてください' }] }), turn: t2 }]);
   await c.send('100万円以上の案件は承認を必須にしたい');
   await c.send('部長が不在のときは副部長が承認します');
-  assert(calls.plan.length === 2 && !kinds().includes('preview-ready') && byKind('turn-reply').some(m => /副部長/.test(m.text)) && byKind('requirements-changes').some(m => /副部長が代わりに承認する/.test(m.text)), 'F5: 代理の承認者の指示は計画の AI へ（反映へ進む言葉にしない）・返答と要件の変化を出す');
+  // 2026-10-06: 返答は会話に出す。要件の変化は記録に残す（会話には出さない）
+  assert(calls.plan.length === 2 && !kinds().includes('preview-ready') && byKind('turn-reply').some(m => /副部長/.test(m.text) && KTAiChatUi.messageHtml(m) !== '') && byKind('requirements-changes').some(m => /副部長が代わりに承認する/.test(m.text) && KTAiChatUi.isHiddenMessage(m)), 'F5: 代理の承認者の指示は計画の AI へ（反映へ進む言葉にしない）・返答を出し、要件の変化を記録する');
   assert(byKind('provisionals').length === 1 && /仮の案で進めています/.test(byKind('provisionals')[0].text) && /警告は金額欄に表示/.test(byKind('provisionals')[0].text), 'F5: 後から変えられる点は仮の案として知らせる（質問しない）');
 });
 await section(async () => {
@@ -167,6 +172,22 @@ await section(async () => {
   const lg = KTAiAnswers.createLedger('q');
   const s = KTAiAnswers.syncQuestions(lg, KTAiAnswers.questionList(planWith(qs({ question: '100万円以上の承認者は誰にしますか？', topic: 'approver', impact: '承認の流れの作業者が変わる', options: ['部長', '課長'], recommendation: '部長（金額が大きいため）', priority: 'blocking' }, { question: '警告の文は何にしますか？', topic: 'other', priority: 'later' }))), { version: 1 });
   assert(s.open[0].priority === 'blocking' && s.open[0].impact === '承認の流れの作業者が変わる' && s.open[0].options.join() === '部長,課長' && /部長/.test(s.open[0].recommendation) && s.open[1].priority === 'later', `F6: 確認事項に答えで変わること・候補・推奨・先に聞くかを持たせる: ${JSON.stringify(s.open.map(q => q.priority))}`);
+});
+await section(async () => {
+  // F7（2026-10-06）: 要件の変化は通常の会話に出さないが、対応できないことがあるときだけ「この依頼のうち、対応できないことがあります」を出す（要件の番号は出さない）
+  const goal = '金額が100万円を超えたら画面に警告を出し、CSV の読み込みでも保存を止めたい';
+  const t1 = { reply: '画面の警告の計画にしました。', requirementOps: [OP({ condition: '金額が100万円を超える', behavior: '画面に警告を出す', sourceQuotes: [goal] }), OP({ condition: 'CSV の読み込み', behavior: '保存を止める', disposition: 'unsupported', note: 'CSV の読み込みでは JavaScript が動かないため', sourceQuotes: [goal] })], utteranceCoverage: [{ quote: goal, as: 'requirement', refs: [], note: '' }] };
+  const { c, byKind } = makeConv([{ plan: planWith([]), turn: t1 }]);
+  await c.send(goal);
+  const m = byKind('requirements-changes')[0];
+  const html = m ? KTAiChatUi.messageHtml(m).replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ') : '';
+  assert(m && Array.isArray(m.data.unsupported) && m.data.unsupported.length === 1 && !KTAiChatUi.isHiddenMessage(m) && /この依頼のうち、対応できないことがあります：「CSV の読み込み → 保存を止める」（CSV の読み込みでは JavaScript が動かないため）/.test(html) && !/R\d/.test(html), `F7: 対応できないことがある要件の変化だけ会話に出す（理由つき・要件の番号なし）: ${html}`);
+  // 対応できないことが無い要件の変化は出さない（chatHtml も数えない）
+  const k = makeConv([{ plan: planWith([]), turn: { reply: 'r', requirementOps: [OP({ behavior: '画面に警告を出す', sourceQuotes: [goal] })], utteranceCoverage: [{ quote: goal, as: 'requirement', refs: [], note: '' }] } }]);
+  await k.c.send(goal);
+  const rc = k.byKind('requirements-changes');
+  const chat = KTAiChatUi.chatHtml(k.c.messages()).replace(/<[^>]+>/g, ' ');
+  assert(rc.length === 1 && KTAiChatUi.isHiddenMessage(rc[0]) && !/要件：/.test(chat) && !/追加 R1/.test(chat), `F7: 対応できないことが無い要件の変化は記録だけ（会話に出さない）: ${rc.map(x => x.text).join(' / ')}`);
 });
 
 // =========================================================
@@ -184,15 +205,20 @@ await section(async () => {
   await ticks();
   assert(q && q.asked === true && calls.ask.length === 2 && calls.ask[1].conversation.working === 'PLAN' && calls.ask[1].conversation.plan === null && byKind('aside-answer').length === 1 && c.planHistory().length === 0, 'W1: 作成中の質問はすぐ答える（作業は止めない・作成中と伝え、前の計画を今の計画として渡さない）。以前は受け付けず下書きのまま');
   const ch = await c.send('100万円ちょうども警告の対象にして');
-  assert(ch && ch.queued === true && byKind('answers-ack').some(m => m.data.work === 'PLAN' && /いま作っている計画に、続けて入れます/.test(m.text)), 'W2: 作成中の指示は受け付けてためる（受領の表示）');
+  // 2026-10-06: 受け付けた・入れた の知らせは会話に出さない（記録には残る。まだ変更案に入っていないときだけ出す）
+  assert(ch && ch.queued === true && byKind('answers-ack').some(m => m.data.work === 'PLAN' && /いま作っている計画に、続けて入れます/.test(m.text) && KTAiChatUi.isHiddenMessage(m)), 'W2: 作成中の指示は受け付けてためる（受領は記録に残し、会話には出さない）');
   open(); await p; await ticks();
   const vs = c.planHistory();
   assert(vs.length === 1 && vs[0].version === 1 && vs[0].basedOnVersion === 0 && calls.plan.length === 2 && calls.plan[1].revision.mode === 'patch' && /100万円ちょうども/.test(calls.plan[1].revision.utterances[0]), `W2: 指示の入っていない計画は出さず、差分で続けて入れた版だけを v1 として出す: ${JSON.stringify(vs.map(v => v.version))}`);
   // 実機（2026-10-05）で見つけた表示: 最初の計画のカードが「v1 を見直しました ／ 修正: 修正の依頼：…」と出た
-  const cardHtml = KTAiChatUi.planCardHtml(vs[0]);
-  assert(/変更計画 v1 を作成しました/.test(cardHtml) && !/見直しました/.test(cardHtml) && /作成中に受け付けた指示: 100万円ちょうども警告の対象にして/.test(cardHtml) && !/修正の依頼：/.test(cardHtml), `W2: 最初の計画のカードは「作成しました」・作成中に受け付けた指示として出す: ${cardHtml.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').slice(0, 160)}`);
+  // 2026-10-06: 会話のカードは版の番号・「修正: …」の行を出さない。最初の変更案は「直しました」ではなく「できました（作っている間に送った内容も入れました）」
+  const planMsg = c.messages().find(m => m.type === 'PLAN' && m.data?.version === 1);
+  const cardText = KTAiChatUi.planCardHtml(vs[0], { m: planMsg }).replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ');
+  assert(/変更案ができました（作っている間に送った内容も入れました）。/.test(cardText) && !/直しました/.test(cardText) && !/修正の依頼：/.test(cardText) && !/修正: /.test(cardText) && !/v\d/.test(cardText), `W2: 最初の変更案のカードは「できました」・作成中に送った内容も入れたと出す（版の番号・「修正の依頼：」は出さない）: ${cardText.slice(0, 160)}`);
   const r1 = KTAiAnswers.requirementsOf(ledger()).find(e => e.id === 'R1');
-  assert(r1 && r1.condition === '金額が100万円以上' && r1.history.length === 1 && byKind('answers-ack').every(m => m.data.stage === 'done') && c.messages().some(m => /作成中に受け付けた指示も入れました/.test(m.text)), 'W2: 要件は続けた作業で更新（履歴に前の条件）・受領は「入れました」・告知は「作成中に受け付けた指示も入れました」');
+  const acksW2 = byKind('answers-ack');
+  const summaryW2 = byKind('plan-summary')[0];
+  assert(r1 && r1.condition === '金額が100万円以上' && r1.history.length === 1 && acksW2.length && acksW2.every(m => m.data.stage === 'done' && /変更案に入れました/.test(m.text)) && summaryW2 && /作っている間に送られた内容も入れました/.test(summaryW2.text), `W2: 要件は続けた作業で更新（履歴に前の条件）・受領は「変更案に入れました」・変更案の要約の記録に「作っている間に送られた内容も入れました」: ${acksW2.map(m => m.text).join(' / ')} ｜ ${summaryW2 && summaryW2.text}`);
   // 順番: 先回りの返答 → 作成中の質問の答え → 計画
   const idx = (k) => c.messages().findIndex(m => (m.data?.kind || m.type) === k);
   assert(idx('plan-brief') < idx('aside-answer') && idx('aside-answer') < idx('PLAN'), 'W2: 先回りの返答と作成中の質問の答えは、計画より先に出る');
@@ -267,7 +293,8 @@ await section(async () => {
   await c.send('100万円ちょうども警告の対象にして');
   open(); const r = await p; await ticks();
   const err = c.messages().find(m => m.type === 'ERROR');
-  assert(r.ok === false && c.planHistory().length === 1 && c.activePlan().version === 1 && err && err.data.retryText === '100万円ちょうども警告の対象にして' && !err.data.intent && byKind('answers-ack').every(m => m.data.stage === 'failed'), `R3: 続けた作業の失敗でも最初の計画は v1。指示の受領は「失敗」・再試行は指示の原文（振り分け直す）: ${JSON.stringify({ hist: c.planHistory().length, retry: err && err.data.retryText, intent: err && err.data.intent })}`);
+  // 2026-10-06: 失敗した受領（まだ変更案に入っていない）は会話に出す
+  assert(r.ok === false && c.planHistory().length === 1 && c.activePlan().version === 1 && err && err.data.retryText === '100万円ちょうども警告の対象にして' && !err.data.intent && byKind('answers-ack').length && byKind('answers-ack').every(m => m.data.stage === 'failed' && !KTAiChatUi.isHiddenMessage(m) && /まだ変更案に入っていません/.test(KTAiChatUi.messageHtml(m))), `R3: 続けた作業の失敗でも最初の計画は v1。指示の受領は「失敗」（まだ変更案に入っていないと会話に出す）・再試行は指示の原文（振り分け直す）: ${JSON.stringify({ hist: c.planHistory().length, retry: err && err.data.retryText, intent: err && err.data.intent, ack: byKind('answers-ack').map(m => KTAiChatUi.messageHtml(m).replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim()) })}`);
   const rr = await c.send(err.data.retryText, { intentOverride: err.data.intent });
   assert(rr.ok === true && c.activePlan().version === 2, 'R3: 再試行で、その指示を v1 に入れた v2 ができる（以前は「修正する計画がありません」）');
   // 取り消し（例外）でも同じ
@@ -447,7 +474,10 @@ await section(async () => {
   assert(calls.generate === 0 && specsAfter() === 1, `R16: 前提: 未確定なので生成せず、仕様カードを 1 枚出す: ${specsAfter()}`);
   const r = c.confirmSpec({ planId: v1.planId, version: v1.version });
   const tail = c.messages().slice(lastUser() + 1);
-  assert(r.ok && v1.spec.status === 'CONFIRMED' && specsAfter() === 1 && tail.some(m => m.type === 'SYSTEM_NOTICE' && m.data?.kind === 'spec-confirmed' && /JavaScript を生成できるようになりました/.test(m.text) && !/実装仕様 v1 を確定しました/.test(m.text)), `R16: 確定ではカードを足さず（いまのカードが確定済みに変わる）、カードの見出しと同じ文を繰り返さないお知らせを 1 行出す: ${tail.map(m => `${m.type}:${String(m.text).slice(0, 20)}`).join(',')}`);
+  // 2026-10-06: 会話のカードの見出しは「JavaScript の実装の内容を確定しました。」（版の番号は出さない）。お知らせはその文を繰り返さない
+  const notices = tail.filter(m => m.type === 'SYSTEM_NOTICE' && m.data?.kind === 'spec-confirmed');
+  const specCard = KTAiChatUi.specChatCardHtml(v1).replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ');
+  assert(r.ok && v1.spec.status === 'CONFIRMED' && specsAfter() === 1 && notices.length === 1 && /JavaScript を作れるようになりました/.test(notices[0].text) && !/実装の内容を確定しました/.test(notices[0].text) && !/v\d/.test(notices[0].text) && /JavaScript の実装の内容を確定しました。/.test(specCard), `R16: 確定ではカードを足さず（いまのカードが確定済みに変わる）、カードの見出しと同じ文を繰り返さないお知らせを 1 行出す: ${tail.map(m => `${m.type}:${String(m.text).slice(0, 20)}`).join(',')}`);
   // 利用者の発言の後に仕様カードが無いとき（確定の前に別の発言をした）は、確定の後にカードを出す
   const k = makeConv([{ plan: planWith([]) }]);
   await k.c.send('金額が100万円を超えたら画面に警告を出したい');
@@ -531,7 +561,8 @@ await section(async () => {
   assert(calls.plan.length === 3 && calls.plan[2].revision.generateAfter === true && c.messages().some(m => m.data?.kind === 'confirm-generate'), `G6: 再試行でも generateAfter を付け、確定して作る操作を出す: ${JSON.stringify(calls.plan[2] && calls.plan[2].revision.generateAfter)}`);
 });
 await section(async () => {
-  // G7: 作り直しの版のカードにも Toolkit が付けた「修正の依頼：」を出さない（複数の指示は「／」でつなぐ）
+  // G7: 作り直しの版のカードにも Toolkit が付けた「修正の依頼：」を出さない
+  //   2026-10-06: 会話のカードは版の番号・「修正: …」の行を出さない（指示は利用者の発言として会話に残り、版の修正の依頼の履歴にも残る）
   const { c, ctl } = makeConv([{ plan: planWith([]) }, { plan: planWith([]) }, { plan: planWith([]) }]);
   await c.send('金額が100万円を超えたら画面に警告を出したい');
   const open = ctl.hold();
@@ -539,8 +570,12 @@ await section(async () => {
   await ticks();
   await c.send('PC だけで動くようにして');
   open(); await p; await ticks();
-  const html = KTAiChatUi.planCardHtml(c.activePlan()).replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ');
-  assert(/見直しました/.test(html) && !/修正の依頼：/.test(html) && /修正: 警告の文は「高額案件です」に変えて ?／ ?PC だけで動くようにして/.test(html), `G7: 作り直しの版のカードは「修正: …／…」: ${html.slice(0, 200)}`);
+  const v = c.activePlan();
+  const planMsg = c.messages().filter(m => m.type === 'PLAN' && m.data?.version === v.version).slice(-1)[0];
+  const html = KTAiChatUi.planCardHtml(v, { m: planMsg }).replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ');
+  assert(/変更案を直しました。/.test(html) && !/修正の依頼：/.test(html) && !/修正: /.test(html) && !/v\d/.test(html), `G7: 作り直しの版のカードは「変更案を直しました。」だけ（「修正の依頼：」・「修正: …」の行・版の番号を出さない）: ${html.slice(0, 200)}`);
+  const reqs = (v.revisionRequests || []).join(' ');
+  assert(/警告の文は「高額案件です」に変えて/.test(reqs) && /PC だけで動くようにして/.test(reqs), `G7: カードに出さなくても、2 つの指示は版の修正の依頼の履歴に残る: ${JSON.stringify(v.revisionRequests)}`);
 });
 await section(async () => {
   // G8: 質問の文で決定事項を置き換えない（TURN でも、質問を除いた部分で置き換えを判断する）

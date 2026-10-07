@@ -172,7 +172,13 @@ console.log('\n--- G1 / G2 / G3（画面）. 再読み込みした後の新し�
   await tick(10);
   assert(loads >= 1 && panel.devBase() && panel.devBase().ok, '接続を確認したら作業の基準（動作テスト環境）を取得する');
   const head = host.querySelector('#kt-ai-header').innerHTML;
-  assert(/今回の変更の基準：<b>動作テスト環境<\/b>/.test(head) && /運用環境との差：<b>4 件<\/b>/.test(head) && /data-act="refresh-base"/.test(head), '画面: 「今回の変更の基準：動作テスト環境」と運用環境との差の件数・再取得');
+  // 2026-10-06 利用者の指示で意図して更新: ヘッダーは「反映先：動作テスト環境（運用環境は変更しません）」の後ろに作業の基準
+  //   「HH:MM 取得・運用環境との差 N 件」［差分を見る］［再取得］。「今回の変更の基準」「revision」の語は出さない（詳しい内容は右の「詳細情報」）
+  assert(/反映先：<b>動作テスト環境<\/b>（運用環境は変更しません）/.test(head) && /<span id="kt-ai-base" class="kt-ai-base is-ok">\d{2}:\d{2} 取得・運用環境との差 4 件</.test(head) && /data-act="open-base-diff"[^>]*>差分を見る</.test(head) && /data-act="refresh-base"[^>]*>再取得</.test(head) && !/今回の変更の基準|revision/.test(head), `画面: 反映先（動作テスト環境）と、作業の基準の取得時刻・運用環境との差の件数（4 件）・［差分を見る］［再取得］（「今回の変更の基準」「revision」は出さない）: ${head.replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').slice(0, 200)}`);
+  // ［差分を見る］→ 右の「詳細情報」に作業の基準の内容（運用環境へ未反映の変更 4 件・revision）を出す
+  await host.querySelector('#kt-ai-header').dispatch({ type: 'click', target: { dataset: { act: 'open-base-diff' } } }); await tick();
+  const baseDetail = host.querySelector('#kt-ai-base-diff').innerHTML;
+  assert(panel.drawerState().pane === 'evidence' && /運用環境へ未反映の変更（4 件）/.test(baseDetail) && /動作テスト環境 revision 12/.test(baseDetail), `画面: ［差分を見る］で右の「詳細情報」に運用環境との差（4 件）と revision を出す（ヘッダーには出さない詳しい内容）: ${panel.drawerState().pane}`);
   // 新しい会話（会話履歴なし）で、現在の状態と運用環境との差を聞く → 質問の Context に作業の基準と差
   await panel.send('現在の状態と運用環境との差分を説明して');
   const qctx = askCalls[askCalls.length - 1];
@@ -198,7 +204,9 @@ console.log('\n--- G1 / G2 / G3（画面）. 再読み込みした後の新し�
   const r1 = await panel.send('値引率を必須にしたい');
   const errMsg = [...panel.conversation().messages()].reverse().find(m => m.type === 'ERROR');
   assert(planCalls.length === nPlan && errMsg && /動作テスト環境の設定を取得できなかったため、変更計画の作成を止めました/.test(errMsg.text) && /運用環境の設定で代わりに進めることはしません/.test(errMsg.text), '基準が取れない: 計画を作らない（AI を呼ばない）。理由と「運用環境で代用しない」を表示');
-  assert(/動作テスト環境を取得できませんでした/.test(host.querySelector('#kt-ai-header').innerHTML), '画面: 基準を取得できなかったことを赤で表示');
+  // 2026-10-06 利用者の指示で意図して更新: 文は「動作テスト環境の設定を取得できませんでした（…）。変更案・コードの作成と反映は止めています（運用環境の設定では進めません）。」
+  const headErr = host.querySelector('#kt-ai-header').innerHTML;
+  assert(/<span id="kt-ai-base" class="kt-ai-base is-error" style="color:#c62828;">動作テスト環境の設定を取得できませんでした（/.test(headErr) && /変更案・コードの作成と反映は止めています（運用環境の設定では進めません）。/.test(headErr) && /data-act="refresh-base"[^>]*>再取得</.test(headErr) && !/今回の変更の基準/.test(headErr), `画面: 基準を取得できなかったことと、変更案・コードの作成と反映を止めていること（運用環境で代用しない）を赤で表示・［再取得］: ${headErr.replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').slice(0, 300)}`);
   await panel.send('C1 のコードを作って');
   assert(genCalls.length === nGen, '基準が取れない: コード生成もしない');
   await panel.send('このアプリの通知先は誰ですか？');

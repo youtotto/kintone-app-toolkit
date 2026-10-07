@@ -185,7 +185,7 @@ await section(async () => {
   // 記録済みの言い直しは作り直さない
   const n = calls.plan.length;
   const rr = await c.send('部長です');
-  assert(rr.intent === 'ANSWER' && rr.reason === 'ANSWER_RESTATED' && calls.plan.length === n && /記録済み/.test(last().text), '記録済みの回答の言い直しは「記録済み」と返し、AI を呼ばない');
+  assert(rr.intent === 'ANSWER' && rr.reason === 'ANSWER_RESTATED' && calls.plan.length === n && /その内容は、いま直している変更案に入れます|前の回答と同じです/.test(last().text) && !/記録済み/.test(last().text), '前の回答の言い直しは、そう伝えて AI を呼ばない（「記録済み」の語は使わない）');
   // 計測: 受領の表示までと完成までを分けて測る（latencyMs は AI の応答全体。ここは画面の側）
   const mt = c.metrics();
   const ans = mt.timings.filter(x => x.intent === 'ANSWER' && x.aiCalls === 1);
@@ -227,7 +227,7 @@ await section(async () => {
   const { c, calls, last } = makeConv([V1, planWith([])]);
   await c.send('金額が大きい案件に注意を出したい');
   const r = await c.send('PCだけ。いいえ');
-  assert(r.reason === 'ANSWERS' && calls.plan.length === 1 && answered(c).map(e => e.answer).join() === 'PCだけ' && last().data.kind === 'answer-target' && /記録しました：PC \/ モバイル：PCだけ/.test(last().text) && last().data.items[0].clause === 'いいえ', `理解できた部分（PCだけ）は記録し、対応先が決まらない部分（いいえ）だけを聞く: ${last().text}`);
+  assert(r.reason === 'ANSWERS' && calls.plan.length === 1 && answered(c).map(e => e.answer).join() === 'PCだけ' && last().data.kind === 'answer-target' && /PC \/ モバイル：PCだけ として受け取りました。/.test(last().text) && !/記録しました/.test(last().text) && last().data.items[0].clause === 'いいえ', `理解できた部分（PCだけ）は記録し、対応先が決まらない部分（いいえ）だけを聞く: ${last().text}`);
   // チャット欄から別の答えを書いて続けても、記録した回答は失われない
   await c.send(`「いいえ」は追加の条件です。`, { intentOverride: 'ANSWER', answerPayload: { source: 'chat', items: [{ key: null, answer: 'いいえ' }], remaining: [] } });
   assert(calls.plan.length === 2 && calls.plan[1].decisions.some(d => d.topic === 'platform' && d.answer === 'PCだけ'), '後から対応先を選んで作り直すとき、先に記録した回答も一緒に送る');

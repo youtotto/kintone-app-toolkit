@@ -185,7 +185,8 @@ console.log('\n--- §37. Feature Migration: AI Prompt / Markdown / JSON / Docume
   for (const id of ['kt-ai-copy-prompt', 'kt-ai-copy-md', 'kt-ai-copy-json', 'kt-ai-mode-qa', 'kt-ai-mode-plan', 'kt-ai-mode-doc', 'kt-ai-doc-kind', 'kt-ai-download']) assert(html.includes(`id="${id}"`), `Context ペインに ${id}`);
   const kinds = [...((/<select id="kt-ai-doc-kind"[\s\S]*?<\/select>/.exec(html) || [''])[0]).matchAll(/<option value="([^"]+)"/g)].map(m => m[1]);
   assert(kinds.join(',') === 'spec,requirements,review-request,changes,handover,plain,improvement', `ドキュメントの種類 7 件: ${kinds.join(',')}`);
-  assert(/ドキュメント（仕様書・要件定義・レビュー依頼・引継ぎ資料・変更内容のまとめの Prompt \/ Markdown）/.test(f.$('kt-ai-free').innerHTML), '無料パネルにドキュメントが載る（Templates 廃止で無料機能が失われない）');
+  // 2026-10-06（利用者の指示）: 未接続の案内は短く（接続の状況と接続の操作だけ。ほかの体験へ誘わない）。無料の資料づくりは右の「Context」（接続機能の無い環境では出す）
+  assert(!/無料で利用できます|AI用Promptを生成/.test(f.$('kt-ai-free').innerHTML) && f.$('kt-ai-free').innerHTML.length < 600, '未接続の案内は短い（無料機能の一覧・ほかの体験への誘いを出さない）');
   // 無料（未接続）でもドキュメントを作れる
   f.panel.setMode('doc', { kind: 'spec' });
   f.$('kt-ai-generate').dispatch('click');
@@ -339,8 +340,8 @@ console.log('\n--- §35. AI-first の開発思想（UI の文言: 標準設定 /
 {
   const m = mount();
   await ticks();
-  assert(/何を実現したいですか？/.test(m.host.innerHTML) && /このアプリの仕様書を作って/.test(m.host.innerHTML), 'composer: 「何を実現したいですか？」（手段を選ばせない）とドキュメントの例');
-  assert(/標準設定か JavaScript かは Toolkit と AI が判断します/.test(m.chat()) && /何を実現したいですか？/.test(m.chat()), '空の会話: 実現したい業務を伝える（標準設定か JavaScript かは Toolkit と AI が判断）');
+  assert(/このアプリについて、相談したいことや変更したいことを入力してください/.test(m.host.innerHTML) && !/会話の方式|例の発言/.test(m.host.innerHTML), 'composer: 「このアプリについて、相談したいことや変更したいことを入力してください」（手段・会話の方式を選ばせない）');
+  assert(/このアプリについて、相談したいことや変更したいことを入力してください/.test(m.chat()) && !/<button/.test(m.chat()), '空の会話: 相談・変更したいことを入力する案内だけ（例文のボタンなし）');
   assert(!/<option value="snippets">/.test(SRC_TEXT) && !/CSS templates|Css  \(GitHub/.test(SRC_TEXT), 'ユーザーが CSS テンプレート / Snippet を選ぶ UI は無い');
   assert(/function detectDocumentKind\(/.test(SRC_TEXT) && /DOCUMENT_KINDS/.test(SRC_TEXT), 'Documents は AI タブの DOCUMENT（種類の判定は決定的）');
 }
