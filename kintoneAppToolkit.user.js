@@ -4811,6 +4811,91 @@
   //   DOM / kintone API には依存しない純関数（Node の vm sandbox でテストできる）。
   //   有料 AI 専用ではなく、無料版の「AI 向けドキュメント / Prompt のコピー」でも同じ Context を使う。
   // ==========================================
+  // ==========================================
+  // 2.x 計画の説明文を spec・設定・Toolkit の検証から作る（出力削減・2026-10-07・利用者の指示）
+  //   計画の AI は、spec で表せる手順では proposal（summary / details）を書かない（出力の token を減らして変更案の完成を早める）。
+  //   表示・コード生成（Generator Context の standardSteps）・計画の修正の土台（compactPlan）に渡す説明は、ここで spec・現在の設定・
+  //   Toolkit の検証（diff.human）から作る。proposal があればそれを優先する（古い計画・REQUIRE_CONFIRMATION の補足）。
+  //   「確かめられなかったこと」のうち解析範囲（coverage / truncation）に由来するものも、AI に書かせず Context から作る。
+  //   DOM / kintone API に依存しない純関数。
+  // ==========================================
+  const KTPlanText = (() => {
+    const KEY_JA = Object.freeze({ name: '名前', from: '遷移元', to: '遷移先', filterCond: '条件', assignees: '作業者', assigneeType: '作業者の指定', targets: '通知先', events: 'イベント', timingField: '基準日', daysLater: 'タイミング', time: '時刻', fields: 'フィールド', sort: '並び順', sourceApp: '参照元アプリ', keyField: '参照キー', mappings: '取得項目', addMappings: '追加する取得項目', addPickerFields: '選択時に表示', fieldType: '種類', required: '必須', options: '選択肢', destApp: 'コピー先アプリ', actionMappings: '転記', entities: '利用者', accessibility: 'アクセス権', changeKind: '変更の種別', customizationId: 'カスタマイズ' });
+    const ASSIGNEE_TYPE_JA = { ONE: '次のユーザーから作業者を選択', ALL: '全員', ANY: '一人' };
+    const CHANGE_KIND_JA = { ACTION_CONDITION: 'アクションの条件', ACTION_TRANSITION: 'アクションの遷移先', ASSIGNEE: 'ステータスの作業者', EXECUTABLE_USER: '実行可能ユーザー', STATUS: 'ステータス' };
+    const ACTION_JA = Object.freeze({ ADD_FIELD: 'フィールドを追加', UPDATE_FIELD: 'フィールドを変更', REUSE_FIELD: '既存のフィールドを使う', ADD_PROCESS_STATUS: 'ステータスを追加', UPDATE_PROCESS: 'プロセス管理を変更', ADD_PROCESS_ACTION: 'アクションを追加', ADD_NOTIFICATION: '通知を追加', UPDATE_NOTIFICATION: '通知を変更', ADD_REMINDER: 'リマインダーを追加', UPDATE_REMINDER: 'リマインダーを変更', ADD_VIEW: '一覧を追加', UPDATE_VIEW: '一覧を変更', UPDATE_RECORD_ACL: 'レコードのアクセス権を変更', UPDATE_FIELD_ACL: 'フィールドのアクセス権を変更', ADD_APP_ACTION: 'アプリアクションを追加', UPDATE_APP_ACTION: 'アプリアクションを変更', ADD_LOOKUP: 'ルックアップを追加', UPDATE_LOOKUP: 'ルックアップを変更', REQUIRE_CONFIRMATION: '確認してから決める', CUSTOMIZATION_REQUIRED: 'JavaScript カスタマイズ' });
+    /** spec の主な項目の表示順（1 行の説明に入れる順） */
+    const MAIN_KEYS = ['from', 'to', 'filterCond', 'targets', 'assignees', 'assigneeType', 'timingField', 'daysLater', 'time', 'events', 'fields', 'sort', 'fieldType', 'required', 'options', 'sourceApp', 'keyField', 'mappings', 'addMappings', 'addPickerFields', 'actionMappings', 'destApp', 'entities', 'accessibility', 'changeKind'];
+    const isEmpty = (v) => v == null || v === '' || (Array.isArray(v) && !v.length);
+    const daysText = (v) => { const n = Number(v); return Number.isFinite(n) ? (n < 0 ? `${-n} 日前` : n === 0 ? '当日' : `${n} 日後`) : String(v); };
+    /** フィールドの一覧（テーブルの中も）。data が無ければ空 */
+    const flatFields = (data) => { const m = new Map(); for (const f of Object.values(data?.fields || {})) { if (!f || !f.code) continue; m.set(f.code, f); if (f.type === 'SUBTABLE') for (const c of Object.values(f.fields || {})) if (c && c.code) m.set(c.code, c); } return m; };
+    /** フィールドコード → 「ラベル（コード）」。設定に無ければコードのまま（新規フィールドの仮の番号も） */
+    const labelOf = (code, data) => { const f = data ? flatFields(data).get(String(code)) : null; return f && f.label && f.label !== code ? `${f.label}（${code}）` : String(code); };
+    /** 既存フィールドの表示（note が空でもラベルと型を出す） */
+    const fieldText = (code, data) => { const f = data ? flatFields(data).get(String(code)) : null; return f ? `${f.label || code}（${code}${f.type ? `・${f.type}` : ''}）` : String(code); };
+    const fmt = (k, v, data) => {
+      if (k === 'assigneeType') return ASSIGNEE_TYPE_JA[v] || String(v);
+      if (k === 'changeKind') return CHANGE_KIND_JA[v] || String(v);
+      if (k === 'required') return v ? '必須' : '任意';
+      if (k === 'daysLater') return daysText(v);
+      if (k === 'timingField' || k === 'keyField') return labelOf(v, data);
+      if (Array.isArray(v)) return v.map(x => {
+        if (x && typeof x === 'object') { if (x.from != null) return `${x.from} → ${x.to}`; if (x.relatedField != null) return `${x.relatedField} → ${x.field}`; if (x.destField != null) return `${x.srcType === 'RECORD_URL' ? 'レコードの URL' : x.srcField} → ${x.destField}`; return JSON.stringify(x); }
+        return k === 'fields' ? labelOf(x, data) : String(x);
+      }).join('、');
+      return String(v);
+    };
+    /** spec の値のある項目を key / value（日本語の項目名）に。表示（手順の設定項目）に使う */
+    function specDetails(step, { data = null } = {}) {
+      const spec = step?.spec && typeof step.spec === 'object' ? step.spec : {};
+      const out = [];
+      for (const k of [...MAIN_KEYS, 'name']) { const v = spec[k]; if (isEmpty(v)) continue; if (k === 'name' && v === step.targetRef) continue; out.push({ key: KEY_JA[k] || k, value: fmt(k, v, data) }); }
+      return out;
+    }
+    /** 手順の 1 行の説明。proposal.summary があればそれ、無ければ対象と spec の主な値から（CUSTOMIZATION_REQUIRED は customizations[].requirement） */
+    function stepSummary(step, { customizations = [], data = null } = {}) {
+      if (!step) return '';
+      const given = step.proposal && typeof step.proposal.summary === 'string' ? step.proposal.summary.trim() : '';
+      if (given) return given;
+      const spec = step.spec && typeof step.spec === 'object' ? step.spec : {};
+      const act = ACTION_JA[step.actionType] || String(step.actionType || '');
+      if (step.actionType === 'CUSTOMIZATION_REQUIRED') {
+        const cid = spec.customizationId || null;
+        const c = (customizations || []).find(x => x && ((cid && x.customizationId === cid) || x.stepId === step.id)) || null;
+        if (c && c.requirement) return `JavaScript：${c.requirement}`;
+        return step.title || act;
+      }
+      const target = step.targetKind === 'PROPOSED_FIELD' ? `新しいフィールド ${step.targetRef || ''}`.trim() : step.targetRef ? `「${step.targetRef}」` : '';
+      const name = spec.name && spec.name !== step.targetRef ? `「${spec.name}」` : '';
+      const parts = [];
+      for (const k of MAIN_KEYS) { if (isEmpty(spec[k])) continue; parts.push(`${KEY_JA[k]} ${fmt(k, spec[k], data)}`); }
+      return `${act}${target || name ? `：${target}${name}` : ''}${parts.length ? `（${parts.join('・')}）` : ''}`;
+    }
+    /**
+     * 表示・計画の修正の土台・コード生成に渡す説明。proposal があればそれ（summary / details）、無ければ spec から作る。
+     * review（KTPlanReview.review の結果）があれば、その手順の変更前後の文（diff.human）を human に添える。derived = spec から作った
+     */
+    function describeStep(step, { review = null, customizations = [], data = null } = {}) {
+      if (!step) return { summary: '', details: [], human: [], derived: false };
+      const r = review && Array.isArray(review.steps) ? review.steps.find(x => x && x.stepId === step.id) : null;
+      const human = r && r.diff && Array.isArray(r.diff.human) ? r.diff.human.filter(l => typeof l === 'string' && l.trim()) : [];
+      const givenSummary = step.proposal && typeof step.proposal.summary === 'string' ? step.proposal.summary.trim() : '';
+      const givenDetails = step.proposal && Array.isArray(step.proposal.details) ? step.proposal.details.filter(d => d && typeof d.key === 'string') : [];
+      const summary = givenSummary || stepSummary(step, { customizations, data });
+      const details = givenDetails.length ? givenDetails : specDetails(step, { data });
+      return { summary, details, human, derived: !givenSummary && !givenDetails.length };
+    }
+    /** 解析範囲から分かる「確かめられなかったこと」（Context の coverage.notes と truncation。計画の AI には書かせない） */
+    function coverageNotes(ctx) {
+      const notes = Array.isArray(ctx?.coverage?.notes) ? ctx.coverage.notes.filter(x => typeof x === 'string' && x.trim()) : [];
+      const tr = ctx?.truncation;
+      if (tr && tr.applied && Array.isArray(tr.sections) && tr.sections.length) notes.push(`入力の上限で省略した項目があります（${tr.sections.map(s => s && s.name).filter(Boolean).join('・')}）`);
+      return [...new Set(notes)];
+    }
+    return { KEY_JA, ACTION_JA, specDetails, stepSummary, describeStep, coverageNotes, labelOf, fieldText };
+  })();
+
   const KTContext = (() => {
     const CONTEXT_VERSION = '1';
     const LEVELS = { L0: 'L0', L1: 'L1', L2: 'L2' };
@@ -6329,11 +6414,12 @@
     /** spec のうち値のある項目だけ（null / [] / '' は落とす）。AI の提案を機械的に写すだけで、解釈はしない */
     const compactSpec = (spec) => Object.fromEntries(Object.entries(spec || {}).filter(([, v]) => v != null && v !== '' && !(Array.isArray(v) && !v.length)));
     /** Change Plan の要約（再計画・説明の入力）。plan は KTAiClient.validatePlan の normalized */
-    function compactPlan(plan, { version = null, maxSteps = REVISION_LIMITS.maxSteps, maxItems = REVISION_LIMITS.maxItems, withSpec = true } = {}) {
+    function compactPlan(plan, { version = null, maxSteps = REVISION_LIMITS.maxSteps, maxItems = REVISION_LIMITS.maxItems, withSpec = true, review = null } = {}) {
       if (!plan) return null;
+      // 出力削減（2026-10-07）: proposal の無い手順は、spec・Toolkit の検証から作った 1 行の説明を summary にする（spec を渡すので details は作らない）
       const steps = (plan.steps || []).slice(0, maxSteps).map(st => ({
         id: st.id, actionType: st.actionType, targetKind: st.targetKind ?? null, targetRef: st.targetRef ?? null, title: cut(st.title, REVISION_LIMITS.maxText),
-        summary: cut(st.proposal?.summary, REVISION_LIMITS.maxText), ...(Array.isArray(st.proposal?.details) && st.proposal.details.length ? { details: st.proposal.details.slice(0, 12).map(d => ({ key: cut(d.key, 60), value: cut(d.value, 160) })) } : {}),
+        summary: cut(KTPlanText.describeStep(st, { review, customizations: plan.customizations || [] }).summary, REVISION_LIMITS.maxText), ...(Array.isArray(st.proposal?.details) && st.proposal.details.length ? { details: st.proposal.details.slice(0, 12).map(d => ({ key: cut(d.key, 60), value: cut(d.value, 160) })) } : {}),
         ...(withSpec ? { spec: compactSpec(st.spec) } : {}),
         dependsOn: strList(st.dependsOn), reason: cut(st.reason, REVISION_LIMITS.maxText), confidence: st.confidence ?? null, alternativeId: st.alternativeId || '', evidenceIds: strList(st.evidenceIds),
         ...(st.validation && st.validation.status && st.validation.status !== 'ok' ? { validation: { status: st.validation.status, issues: strList(st.validation.issues, 6) } } : {}),
@@ -6346,12 +6432,15 @@
         steps,
         alternatives: (plan.alternatives || []).slice(0, 3).map(a => ({ id: a.id, title: cut(a.title, 100), summary: cut(a.summary, REVISION_LIMITS.maxText), stepIds: strList(a.stepIds) })),
         // 推奨（recommendation）も渡す: 「数え方はおすすめで」のように確認事項の推奨を採用する答えを、計画の AI が読めるように（2026-10-05）
-        questions: (plan.questions || []).slice(0, maxItems).map(q => ({ id: q.id, question: cut(q.question, REVISION_LIMITS.maxText), reason: cut(q.reason, REVISION_LIMITS.maxText), ...(q.recommendation ? { recommendation: cut(q.recommendation, REVISION_LIMITS.maxText) } : {}) })),
+        questions: (plan.questions || []).slice(0, maxItems).map(q => ({ id: q.id, question: cut(q.question, REVISION_LIMITS.maxText), reason: cut(q.reason, REVISION_LIMITS.maxText), ...(q.recommendation ? { recommendation: cut(q.recommendation, REVISION_LIMITS.maxText) } : {}), ...(Array.isArray(q.options) && q.options.length ? { options: strList(q.options, 5).map(x => cut(x, 120)) } : {}), ...(q.priority ? { priority: q.priority } : {}) })),
         unknowns: strList(plan.unknowns, 8).map(u => cut(u, REVISION_LIMITS.maxText)),
+        // 仮の案（後から変えられる点の AI の案）も土台に残す（2026-10-07。正規化済みの計画を要約して送るようになったので落とさない）
+        ...(Array.isArray(plan.provisionals) && plan.provisionals.length ? { provisionals: plan.provisionals.slice(0, 8).map(x => ({ id: x.id, topic: cut(x.topic, 60), choice: cut(x.choice, 200), reason: cut(x.reason, 200), changeHint: cut(x.changeHint, 200) })) } : {}),
         planConfidence: plan.planConfidence ?? null,
         // Phase 16: 標準設定 / JavaScript の分類とカスタマイズの計画（修正・説明の対象）
         ...(plan.solution ? { solution: plan.solution } : {}),
-        ...(Array.isArray(plan.customizations) && plan.customizations.length ? { customizations: plan.customizations.slice(0, 6).map(c => ({ customizationId: c.customizationId, requirement: cut(c.requirement, REVISION_LIMITS.maxText), whyStandardInsufficient: cut(c.whyStandardInsufficient, REVISION_LIMITS.maxText), strategy: c.strategy ?? null, platform: strList(c.platform), events: strList(c.events), fields: (c.fields || []).slice(0, 12).map(f => ({ code: f.code, access: f.access })), apis: strList(c.apis), existingFiles: (c.existingFiles || []).slice(0, 4).map(e => ({ name: e.name, target: e.target })), risks: strList(c.risks, 6).map(x => cut(x, 200)), questions: strList(c.questions, 6).map(x => cut(x, 200)), dependsOn: strList(c.dependsOn) })) } : {}),
+        //   2026-10-07: fields の条件（condition）と実装手段（implementation）も残す（説明・文書の要約でも条件を落とさない）
+        ...(Array.isArray(plan.customizations) && plan.customizations.length ? { customizations: plan.customizations.slice(0, 6).map(c => ({ customizationId: c.customizationId, requirement: cut(c.requirement, REVISION_LIMITS.maxText), whyStandardInsufficient: cut(c.whyStandardInsufficient, REVISION_LIMITS.maxText), strategy: c.strategy ?? null, ...(c.implementation ? { implementation: c.implementation } : {}), platform: strList(c.platform), events: strList(c.events), fields: (c.fields || []).slice(0, 12).map(f => ({ code: f.code, access: f.access, ...(typeof f.condition === 'string' && f.condition.trim() ? { condition: cut(f.condition, 200) } : {}) })), apis: strList(c.apis), existingFiles: (c.existingFiles || []).slice(0, 4).map(e => ({ name: e.name, target: e.target })), risks: strList(c.risks, 6).map(x => cut(x, 200)), questions: strList(c.questions, 6).map(x => cut(x, 200)), dependsOn: strList(c.dependsOn) })) } : {}),
       };
     }
     /** Toolkit Review（KTPlanReview.review）の写し。判定（status / safety / issue code）は正本なので値を変えずに写す */
@@ -6390,11 +6479,17 @@
       return out.slice(-30);
     }
     /** revision（計画の修正）の入力を bounded な形にする */
-    function compactRevision({ basedOnVersion, request, previousPlan, previousRequests = [], mode = null, focus = null, utterances = null, questionsAnsweredSeparately = null, generateAfter = null } = {}, limits = {}) {
+    function compactRevision({ basedOnVersion, request, previousPlan, previousReview = null, previousRequests = [], mode = null, focus = null, utterances = null, questionsAnsweredSeparately = null, generateAfter = null } = {}, limits = {}) {
       // 上限ちょうどに収める（cut は「…」を足すので 1 文字超え、Gateway の上限 2000 文字を超えて INVALID_CONTEXT になっていた）
       const cut = (s, n) => { const t = String(s ?? ''); return t.length > n ? `${t.slice(0, n - 1)}…` : t; };
       const req = cut(String(request ?? '').trim(), REVISION_LIMITS.maxRequestChars);
-      const prev = previousPlan && Array.isArray(previousPlan.steps) && 'summary' in previousPlan ? previousPlan : compactPlan(previousPlan, { version: Number(basedOnVersion) || 1 });
+      // 土台はそのまま送る: 要約済み（compactPlan の形。summary は文字列）か、正規化済みの計画全体（goal・assessment.summary・各手順に proposal と spec。
+      //   Gateway の plan-patch の isFullPlan と同じ条件。差分更新はこの形の土台でないと全体の作り直しに落ちる）。それ以外（古い形）だけ要約する。
+      //   2026-10-07 の差分レビュー: 一度「正規化済みの計画は要約する」に変えたところ、差分更新が毎回 BASE_NOT_FULL_PLAN で全体の作り直しになり、
+      //   土台から impact・customizations の条件・questions の候補も落ちていたので戻した。出力削減で proposal が空になるぶん、土台は自然に小さくなる
+      const isFullPlanBase = (p) => !!p && typeof p.goal === 'string' && !!p.assessment && typeof p.assessment.summary === 'string' && Array.isArray(p.steps)
+        && p.steps.every(s => s && typeof s.id === 'string' && s.proposal && typeof s.proposal === 'object' && s.spec && typeof s.spec === 'object');
+      const prev = previousPlan && Array.isArray(previousPlan.steps) && 'summary' in previousPlan ? previousPlan : compactPlan(previousPlan, { version: Number(basedOnVersion) || 1, review: previousReview });   // 'summary' があれば従来どおりそのまま（Toolkit の正規化済み・Gateway の計画は top-level summary を持つ）。isFullPlanBase は確認用
       return {
         basedOnVersion: Number(basedOnVersion) || 1,
         request: req,
@@ -6463,7 +6558,8 @@
         confidenceVocabulary: plannerCtx.confidenceVocabulary,
         coverage: plannerCtx.coverage,
         truncation: { applied: facts.length > kept.length, sections: facts.length > kept.length ? [{ name: 'facts', total: facts.length, included: kept.length }] : [] },
-        planContext: { kind: kind === 'EXPLAIN_REVIEW' ? 'EXPLAIN_REVIEW' : 'EXPLAIN_PLAN', plan: compactPlan(plan, { version, withSpec: false }), review: compactReview(review) },
+        // 出力削減（2026-10-07）: 計画の AI が説明文（proposal）を書かなくなったので、説明の AI には spec から作った手順の説明（summary。設定値を含む）を渡す。spec そのものは従来どおり送らない（説明の Context は根拠と要約だけ）
+        planContext: { kind: kind === 'EXPLAIN_REVIEW' ? 'EXPLAIN_REVIEW' : 'EXPLAIN_PLAN', plan: compactPlan(plan, { version, withSpec: false, review }), review: compactReview(review) },
         size: null,
       };
       const m = measureText(JSON.stringify(ctx));
@@ -6477,7 +6573,7 @@
      * 承認済みの Customization Plan ＋ 関係するフィールド ＋ 統合先の既存 JS（本文・解析）＋ 他の JS の要約 ＋ 規約。アプリ全体の facts は送らない。
      * @param {object} p { customization, plan, planId, version, data, deps, scan, existingSource: { name, target, text } | null, options }
      */
-    function buildGenerator({ customization, plan = null, planId = null, version = null, data = null, deps = null, scan = null, existingSource = null, userRequests = [], decisions = [], options = {} } = {}) {
+    function buildGenerator({ customization, plan = null, review = null, planId = null, version = null, data = null, deps = null, scan = null, existingSource = null, userRequests = [], decisions = [], options = {} } = {}) {
       const c = customization;
       if (!c || typeof c !== 'object') throw new Error('customization（Customization Plan）がありません');
       const fieldsN = KTDeps.normalizeFields(data?.fields || {});
@@ -6515,7 +6611,9 @@
         fields: (c.fields || []).map(f => ({ code: mapCode(String(f.code)), access: f.access, ...(typeof f.condition === 'string' && f.condition.trim() ? { condition: f.condition.trim() } : {}) })), apis: [...(c.apis || [])],
         existingFiles: (c.existingFiles || []).map(e => ({ name: e.name, target: e.target, reason: e.reason ?? '' })), dependsOn: [...(c.dependsOn || [])], risks: [...(c.risks || [])],
       };
-      const standardSteps = (plan?.steps || []).filter(st => st.actionType !== 'CUSTOMIZATION_REQUIRED' && !st.alternativeId).map(st => ({ id: st.id, actionType: st.actionType, title: st.title, summary: st.proposal?.summary || '', ...(st.targetRef ? { targetRef: st.targetRef } : {}) })).slice(0, 12);
+      // 出力削減（2026-10-07）: 標準設定の手順の説明は、proposal が無ければ spec・Toolkit の検証から作る（JS 生成の AI に渡す情報を減らさない）
+      //   spec（値のある項目だけ）も添える: 新しいステータス名・遷移・条件・通知先など、生成が前提にする具体値（説明の文だけに頼らない）
+      const standardSteps = (plan?.steps || []).filter(st => st.actionType !== 'CUSTOMIZATION_REQUIRED' && !st.alternativeId).map(st => { const sp = compactSpec(st.spec); return { id: st.id, actionType: st.actionType, title: st.title, summary: KTPlanText.describeStep(st, { review, customizations: plan?.customizations || [], data }).summary, ...(st.targetRef ? { targetRef: st.targetRef } : {}), ...(Object.keys(sp).length ? { spec: sp } : {}) }; }).slice(0, 12);
       const jsFiles = KTScan.summarizeFiles(scan, data);
       const scanFields = fieldsN.map(f => ({ code: f.code, label: f.label, type: f.rawType }));
       let existingFile = null;
@@ -8902,7 +9000,10 @@
         const byCat = {};
         for (const d of direct) byCat[d.category] = (byCat[d.category] || 0) + 1;
         const plannerSaid = plannerImpact.filter(x => x.targetRef === code);
-        const plannerMentionsJs = plannerSaid.some(x => /JavaScript|JS|スクリプト/i.test(x.description || ''));
+        // 影響範囲の検証を説明文だけに頼らない（2026-10-07）: このフィールドを参照する JS ファイル（Toolkit の依存関係の sourceName）を対象にした
+        //   targetKind JS の項目があれば「JS を挙げた」とみなす（計画のどこかの JS 項目では成立させない。差分レビューの指摘）。説明文の言及も従来どおり見る
+        const jsFilesOfField = new Set(direct.filter(d => d.sourceType === 'CUSTOMIZE').map(d => String(d.sourceName || '')).filter(Boolean));
+        const plannerMentionsJs = plannerSaid.some(x => /JavaScript|JS|スクリプト/i.test(x.description || '')) || plannerImpact.some(x => x && x.targetKind === 'JS' && jsFilesOfField.has(String(x.targetRef || '')));
         items.push({ fieldCode: code, stepIds, toolkit: { direct: direct.length, byCategory: byCat, js: jsCount, indirect: (impact.indirect || []).length, crossApp: (impact.crossApp || []).length }, planner: plannerSaid.map(x => x.description) });
         if (!plannerSaid.length && direct.length) warnings.push({ code: 'PLANNER_IMPACT_MISSING', severity: 'medium', stepIds, message: `「${code}」は ${direct.length} 件の設定・JS から参照されていますが、Planner の影響範囲に挙がっていません（${Object.entries(byCat).map(([k, v]) => `${k} ${v}`).join('・')}）` });
         else if (jsCount && !plannerMentionsJs) warnings.push({ code: 'PLANNER_IMPACT_MISMATCH', severity: 'medium', stepIds, message: `「${code}」を参照する JavaScript が ${jsCount} 件ありますが、Planner の影響範囲に JS が含まれていません` });
@@ -21833,14 +21934,14 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
       return `判断: 承認 ${n('approve')}　保留 ${n('hold')}　却下 ${n('reject')}　未定 ${undecided}（承認した手順だけを動作テスト環境へ反映します。判断は保存しません）`;
     }
     /** Change Plan → HTML（実現したいこと / 現在利用できるもの / 追加が必要なもの / 変更計画 / 代替案 / 影響範囲 / 確認したいこと / 解析できないこと / JSON）。review を渡すと Toolkit 検証を併記 */
-    function planHtml(plan, review = null) {
+    function planHtml(plan, review = null, { data = null, ctx = null } = {}) {
       if (!plan) return '';
       const reviewOf = (id) => (review?.steps || []).find(r => r.stepId === id) || null;
       const li = (items, render, empty) => (items && items.length) ? `<ul style="margin:4px 0 0 18px; padding:0;">${items.map(render).join('')}</ul>` : `<div style="opacity:.6; margin-top:4px;">${esc(empty)}</div>`;
       const sec = (title, body) => `<div style="margin-top:8px;"><b>${esc(title)}</b>${body}</div>`;
       const a = plan.assessment || {};
       const existing = [
-        ...(a.usableExistingFields || []).map(x => `<li>${badge('既存', '#2e7d32')}<code>${esc(x.fieldCode)}</code> ${esc(x.note)}${chips(x.evidenceIds)}</li>`),
+        ...(a.usableExistingFields || []).map(x => `<li>${badge('既存', '#2e7d32')}${data ? esc(KTPlanText.fieldText(x.fieldCode, data)) : `<code>${esc(x.fieldCode)}</code>`} ${esc(x.note || '')}${chips(x.evidenceIds)}</li>`),
         ...(a.usableExistingSettings || []).map(x => `<li>${badge('既存', '#2e7d32')}${esc(x.kind)}「${esc(x.name)}」 ${esc(x.note)}${chips(x.evidenceIds)}</li>`),
       ];
       const proposed = (plan.proposedFields || []).map(p => `
@@ -21853,12 +21954,14 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
         </div>`).join('');
       const stepHtml = (st) => {
         const [bt, bc] = STEP_BADGE(st);
-        const details = (st.proposal?.details || []).map(dd => `<div style="font-size:11px; opacity:.85;">・${esc(dd.key)}: ${esc(dd.value)}</div>`).join('');
+        // 出力削減（2026-10-07）: proposal が無い手順は spec から説明と設定項目を作る（計画の AI は spec で表せる手順に説明文を書かない）
+        const desc = KTPlanText.describeStep(st, { review, customizations: plan.customizations || [], data });
+        const details = (desc.details || []).map(dd => `<div style="font-size:11px; opacity:.85;">・${esc(dd.key)}: ${esc(dd.value)}</div>`).join('');
         const issues = (st.validation?.issues || []).map(x => `<div style="font-size:11px; color:#b00020;">※ ${esc(x)}</div>`).join('');
         return `<div class="kt-ai-step" data-step="${esc(st.id)}" style="border:1px solid ${bc}; border-left:4px solid ${bc}; border-radius:6px; padding:6px 8px; margin-top:6px;">
           <div><b>${esc(st.id)}</b> ${STEP_STATUS_BADGE(st) ? badge(...STEP_STATUS_BADGE(st)) : ''}${badge(...STEP_KIND_BADGE(st))}${badge(ACTION_JA[st.actionType] || st.actionType, '#555')}${badge(CONF_JA_PLAN[st.confidence] || st.confidence, '#555')} ${esc(st.title)}</div>
           <div style="margin-top:2px;">対象：${st.targetKind === 'PROPOSED_FIELD' ? `${badge('新規', '#1a73e8')}${esc(st.targetRef || '')}` : st.targetRef ? `${st.targetExists === false ? (/^ADD_/.test(st.actionType) ? badge('新規', '#1a73e8') : badge('不明', '#b00020')) : badge('既存', '#2e7d32')}${esc(st.targetKind)} <code>${esc(st.targetRef)}</code>` : '（なし）'}</div>
-          <div style="margin-top:2px;">${esc(st.proposal?.summary || '')}</div>${details}
+          <div style="margin-top:2px;">${esc(desc.summary || '')}</div>${details}
           <div style="margin-top:2px; opacity:.85;">理由：${esc(st.reason)}${chips(st.evidenceIds)}</div>
           ${(st.dependsOn || []).length ? `<div style="font-size:11px; opacity:.7;">依存：${esc(st.dependsOn.join(', '))} の後</div>` : ''}${issues}
           ${reviewStepHtml(reviewOf(st.id))}
@@ -21877,7 +21980,7 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
         ${(plan.alternatives || []).length ? sec('代替案', plan.alternatives.map(alt => `<div style="margin-top:6px;"><b>${esc(alt.id)}</b> ${esc(alt.title)} <span style="opacity:.8;">${esc(alt.summary)}</span>${(alt.stepIds || []).length ? `<div style="font-size:11px; opacity:.7;">対象の手順: ${esc(alt.stepIds.join(', '))}</div>` : ''}${altSteps(alt).map(stepHtml).join('')}</div>`).join('')) : ''}
         ${sec('影響範囲', li(plan.impact || [], x => `<li>${x.validation?.status === 'invalid' ? badge('不明な対象', '#b00020') : (x.validation?.status === 'proposed' || x.targetKind === 'PROPOSED_FIELD') ? badge('新規提案', '#1a73e8') : badge('既存', '#2e7d32')}${esc(x.targetKind)}${x.targetRef ? ` <code>${esc(x.targetRef)}</code>` : ''}: ${esc(x.description)}${chips(x.evidenceIds)}</li>`, '既存設定への影響は挙げられていません'))}
         ${sec('確認したいこと', li(plan.questions || [], q => `<li>${badge('確認必要', '#b26a00')}<b>${esc(q.id)}</b> ${esc(q.question)} <span style="opacity:.7;">（${esc(q.reason)}）</span>${chips(q.relatedEvidenceIds)}</li>`, '確認事項はありません'))}
-        ${sec('解析できないこと', li(plan.unknowns || [], u => `<li>${esc(u)}</li>`, 'なし'))}
+        ${sec('解析できないこと', li([...new Set([...(plan.unknowns || []), ...KTPlanText.coverageNotes(ctx)])], u => `<li>${esc(u)}</li>`, 'なし'))}
         ${warn.length ? `<details style="margin-top:6px; font-size:11px;"><summary style="cursor:pointer;">検証で除去・調整した項目（${warn.length}）</summary>${warn.map(w => `<div>${esc(w.code)}: ${esc(w.message)}</div>`).join('')}</details>` : ''}
         ${review ? reviewHtml(review, plan) : ''}
         <details class="kt-ai-tech"><summary>技術者向け（requestId / Change Plan JSON）</summary>
@@ -23726,7 +23829,7 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
           const expectedActive = base.unregistered ? (base.activeAtStart ?? null) : base;
           state.inbox = { planId: base.planId, texts: [], acks: [] };
           const acks = () => [ack, ...extraAcks, ...(state.inbox ? state.inbox.acks : [])].filter(Boolean);
-          let prev = { plan: base.plan, gatewayPlan: base.gatewayPlan || null, ctx: base.ctx || null };
+          let prev = { plan: base.plan, gatewayPlan: base.gatewayPlan || null, ctx: base.ctx || null, review: base.review || null };
           const requests = [];
           // 2026-10-05 第 3 段: 自由な修正の依頼も差分で更新する（変わる箇所だけ。大きな変更は Gateway が同じ依頼の中で全体の作り直しに切り替える）
           let done = null, req = request, patchOk = true, jobs = 0, jobTexts = rawTexts;
@@ -23766,7 +23869,7 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
               emit();
               aiCall();
               const utterancesNow = (jobTexts || []).filter(x => typeof x === 'string' && x.trim());
-              const r = await services.plan({ goal: base.goal, revision: { basedOnVersion: base.version, request: req, previousPlan: usePatch ? prev.gatewayPlan : prev.plan, previousRequests: [...(base.revisionRequests || []), ...requests], ...(usePatch ? { mode: 'patch', ...(focus.length ? { focus } : {}) } : {}), ...(utterancesNow.length ? { utterances: utterancesNow } : {}), ...(askSeparately && jobs === 1 ? { questionsAnsweredSeparately: true } : {}), ...(genNow ? { generateAfter: true } : {}) }, decisions, requirements: KTAiAnswers.requirementsForContext(lg), signal, baseCtx: prev.ctx, ...(state.subject ? { subject: state.subject } : {}) });
+              const r = await services.plan({ goal: base.goal, revision: { basedOnVersion: base.version, request: req, previousPlan: usePatch ? prev.gatewayPlan : prev.plan, previousReview: prev.review || null, previousRequests: [...(base.revisionRequests || []), ...requests], ...(usePatch ? { mode: 'patch', ...(focus.length ? { focus } : {}) } : {}), ...(utterancesNow.length ? { utterances: utterancesNow } : {}), ...(askSeparately && jobs === 1 ? { questionsAnsweredSeparately: true } : {}), ...(genNow ? { generateAfter: true } : {}) }, decisions, requirements: KTAiAnswers.requirementsForContext(lg), signal, baseCtx: prev.ctx, ...(state.subject ? { subject: state.subject } : {}) });
               state.job = null;
               noteCall('plan', r);
               // 別の経路で計画が最新になった（会話は同じ）ときは、待ちの表示を片づけてから捨てる（残ると「作り直しています」が消えなかった）
@@ -23794,7 +23897,7 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
               if (jobs >= MAX_CHAIN) { commit(done); rest('pending'); return; }
               // 続けて、まとめて入れる（この結果は最新の計画として出さない。次の作業の土台にする）
               state.metrics.chainedJobs += 1;
-              prev = { plan: r.plan, gatewayPlan: r.gatewayPlan || null, ctx: r.ctx || null };
+              prev = { plan: r.plan, gatewayPlan: r.gatewayPlan || null, ctx: r.ctx || null, review: r.review || null };
               const items = state.inbox.texts.splice(0);
               const recs = newer.map(recordOf);
               const notesQ = items.filter(x => x.kind === 'note').map(x => x.text);
@@ -25462,7 +25565,7 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
       const reviewOf = (id) => (review?.steps || []).find(r => r.stepId === id) || null;
       const steps = (p.steps || []).filter(st => !st.alternativeId && st.actionType !== 'REQUIRE_CONFIRMATION');
       // 反映の前に確かめる手順（承認しないと、後の手順も反映できない）
-      const confirmSteps = uniq((p.steps || []).filter(st => !st.alternativeId && st.actionType === 'REQUIRE_CONFIRMATION').map(st => plainText(st.title || st.proposal?.summary || '')));
+      const confirmSteps = uniq((p.steps || []).filter(st => !st.alternativeId && st.actionType === 'REQUIRE_CONFIRMATION').map(st => plainText(st.title || KTPlanText.stepSummary(st, { customizations: p.customizations || [] }))));
       const custs = Array.isArray(p.customizations) ? p.customizations : [];
       // 対象: 設定の種類・JavaScript（PC / モバイル と画面）
       const settings = uniq(steps.filter(st => st.actionType !== 'CUSTOMIZATION_REQUIRED').map(st => settingOfAction(st.actionType)));
@@ -25476,8 +25579,10 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
       const changeRows = steps.map(st => {
         const r = reviewOf(st.id);
         const c = st.actionType === 'CUSTOMIZATION_REQUIRED' ? custs.find(x => x.stepId === st.id || x.customizationId === st.customizationId) || null : null;
-        const title = st.actionType === 'CUSTOMIZATION_REQUIRED' && c?.requirement ? `JavaScript：${c.requirement}` : (st.title || st.proposal?.summary || '');
-        const lines = (r?.diff?.human || []).slice(0, 3);
+        const title = st.actionType === 'CUSTOMIZATION_REQUIRED' && c?.requirement ? `JavaScript：${c.requirement}` : (st.title || KTPlanText.stepSummary(st, { customizations: custs }));
+        // Toolkit の確認が無いときは、spec から作った説明（AI の提案）を添える（出力削減・2026-10-07: 計画の AI は説明文を書かない）
+        const spec1 = !r && st.actionType !== 'CUSTOMIZATION_REQUIRED' ? KTPlanText.stepSummary(st, { customizations: custs }) : '';
+        const lines = (r?.diff?.human || []).slice(0, 3).concat(!r && spec1 && spec1 !== title ? [spec1] : []);
         return title ? `<li><span>${esc(plainText(title))}</span>${lines.length ? `<div class="kt-ai-sum-diff">${lines.map(l => esc(l)).join('<br>')}</div>` : ''}</li>` : '';
       }).filter(Boolean);
       const newFields = (p.proposedFields || []).map(f => `${f.label}${f.type ? `（${f.type}${f.required ? '・必須' : ''}）` : ''}`);
@@ -25486,12 +25591,13 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
       // 反映できないこと（Toolkit の判定）・確かめられなかったこと
       let ready = [];
       try { ready = typeof KTPlanExecutor !== 'undefined' && KTPlanExecutor.applyReadiness && review ? KTPlanExecutor.applyReadiness(p, review) : []; } catch (e) { ready = []; }
-      const titleOf = (id) => { const st = (p.steps || []).find(x => x.id === id); return st ? (st.title || st.proposal?.summary || '') : ''; };
+      const titleOf = (id) => { const st = (p.steps || []).find(x => x.id === id); return st ? (st.title || KTPlanText.stepSummary(st, { customizations: custs })) : ''; };
       const cannot = [
         ...ready.filter(a => a.apply === 'MANUAL' || a.apply === 'BLOCKED').map(a => `${titleOf(a.stepId) || '設定の変更'}：${a.apply === 'MANUAL' ? 'Toolkit からは自動で反映できません' : '反映できません'}${a.message ? `（${a.message}）` : ''}`),
         ...(review?.steps || []).filter(r => r.customization && r.codeGeneration && r.codeGeneration.supported === false).map(r => `${r.customization?.requirement || 'JavaScript'}：Toolkit ではコードを作れません（理由は右の「確認結果」）`),
       ];
-      const unknowns = uniq((p.unknowns || []).map(u => plainText(u)));
+      // 確かめられなかったこと: AI が書いた不明点 ＋ 解析範囲（coverage / truncation）から Toolkit が分かること（出力削減・2026-10-07: 後者は AI に書かせない）
+      const unknowns = uniq([...(p.unknowns || []).map(u => plainText(u)), ...KTPlanText.coverageNotes(v.ctx)]);
       const openQs = (open || []).filter(q => q && q.text);
       const list = (xs) => `<ul>${xs.map(x => `<li>${typeof x === 'string' ? esc(x) : x}</li>`).join('')}</ul>`;
       return `<div class="kt-ai-sum">
@@ -26378,7 +26484,7 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
             if (!existingSource) return { ok: false, reason: 'JS_SOURCE_UNAVAILABLE', file: { name: t.name, target } };
           }
         }
-        const ctx = KTContext.buildGenerator({ customization: c, plan, planId: v.planId, version: v.version, data: inputs.data || null, deps: inputs.deps || null, scan: inputs.scan || null, existingSource, userRequests: [v.goal, ...(v.revisionRequests || [])], decisions: Array.isArray(decisions) ? decisions : [] });
+        const ctx = KTContext.buildGenerator({ customization: c, plan, review: v.review || null, planId: v.planId, version: v.version, data: inputs.data || null, deps: inputs.deps || null, scan: inputs.scan || null, existingSource, userRequests: [v.goal, ...(v.revisionRequests || [])], decisions: Array.isArray(decisions) ? decisions : [] });
         const client = await ensureReady({ generator: true });
         const requestId = KTAiClient.newRequestId();
         let generated;
@@ -26529,7 +26635,7 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
       adopted = v;
       lastPlan = v.plan; lastReview = v.review;
       decisions.clear();
-      if (v.plan) { $planResult.innerHTML = KTContextUi.planHtml(v.plan, null); $planResult.style.display = ''; renderMermaid($planResult); } else { $planResult.style.display = 'none'; }
+      if (v.plan) { let dataNow = null; try { dataNow = inputsNow().data || null; } catch (e) { dataNow = null; } $planResult.innerHTML = KTContextUi.planHtml(v.plan, null, { data: dataNow, ctx: v.ctx || null }); $planResult.style.display = ''; renderMermaid($planResult); } else { $planResult.style.display = 'none'; }
       if ($planEmpty) $planEmpty.style.display = v.plan ? 'none' : '';
       // 2026-10-06: 右「変更内容」の先頭に、利用者の言葉の要約（何が変わるか・対象・影響範囲・対応できないこと・確認したいこと）。計画の全文は［計画の詳細と根拠］
       if ($summary) $summary.innerHTML = v.plan ? KTAiChatUi.changeSummaryHtml(v, { open: conv.answerContext().open }) : '';

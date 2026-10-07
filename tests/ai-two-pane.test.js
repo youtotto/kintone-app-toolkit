@@ -657,6 +657,58 @@ console.log('\n--- §22. 区間の記録（2026-10-07）: 送信ごとの timing
   assert(!INTERNAL_IN_CHAT.test(outsideDetails(m.chat())), '記録は会話に出ない');
 }
 
+// =========================================================
+console.log('\n--- §23. 出力削減（2026-10-07）: 計画の AI が書かない説明文を、spec・設定・Toolkit の検証から作る（表示・JS 生成・計画の修正・確かめられなかったこと）---');
+{
+  const { KTPlanText, KTContext } = T;
+  const rem = { id: 'P1', actionType: 'ADD_REMINDER', targetKind: 'REMINDER', targetRef: '承認待ち停滞通知', title: '承認待ち案件の3日後通知を追加する', proposal: { summary: '', details: [] }, spec: { name: '承認待ち停滞通知', filterCond: 'ステータス in ("承認待ち")', targets: ['FIELD_ENTITY:作業者'], timingField: '更新日時', daysLater: '3', time: '09:00' }, dependsOn: [], reason: '', evidenceIds: [], confidence: 'INFERRED', alternativeId: null };
+  const d1 = KTPlanText.describeStep(rem, {});
+  assert(d1.derived && /リマインダーを追加：「承認待ち停滞通知」/.test(d1.summary) && /条件 ステータス in \("承認待ち"\)/.test(d1.summary) && /通知先 FIELD_ENTITY:作業者/.test(d1.summary) && /基準日 更新日時/.test(d1.summary) && /タイミング 3 日後/.test(d1.summary) && /時刻 09:00/.test(d1.summary), `spec から 1 行の説明: ${d1.summary}`);
+  assert(d1.details.length === 5 && d1.details.map(x => x.key).join(',') === '条件,通知先,基準日,タイミング,時刻', `spec から設定項目（日本語の項目名）: ${JSON.stringify(d1.details)}`);
+  const given = { ...rem, proposal: { summary: 'AI の説明です。', details: [{ key: '注意', value: '編集すると起算日が変わる' }] } };
+  const d2 = KTPlanText.describeStep(given, {});
+  assert(!d2.derived && d2.summary === 'AI の説明です。' && d2.details.length === 1, 'proposal があればそれを優先する（REQUIRE_CONFIRMATION の補足・古い計画）');
+  const js = { id: 'C1', actionType: 'CUSTOMIZATION_REQUIRED', targetKind: 'JS', targetRef: 'dealLock.js', title: 'PC でロック', proposal: { summary: '', details: [] }, spec: { customizationId: 'C1', filterCond: 'ステータス in ("承認済み")', fields: ['amount'] } };
+  const d3 = KTPlanText.describeStep(js, { customizations: [{ customizationId: 'C1', requirement: '承認済みのときに金額を編集不可にする' }] });
+  assert(d3.summary === 'JavaScript：承認済みのときに金額を編集不可にする', `JavaScript の手順は customizations の要件を説明にする: ${d3.summary}`);
+  const proc = { id: 'P3', actionType: 'UPDATE_PROCESS', targetKind: 'PROCESS_ACTION', targetRef: '申請する', title: '', proposal: { summary: '', details: [] }, spec: { name: '申請する', from: '作成中', to: '承認待ち', filterCond: 'amount <= "999999"', changeKind: 'ACTION_CONDITION' } };
+  const d4 = KTPlanText.describeStep(proc, { review: { steps: [{ stepId: 'P3', diff: { human: ['「申請する」の条件を「なし」→「amount <= "999999"」に変更'] } }] } });
+  assert(/プロセス管理を変更：「申請する」（遷移元 作成中・遷移先 承認待ち・条件 amount <= "999999"・変更の種別 アクションの条件）/.test(d4.summary) && d4.human.length === 1, `プロセスの手順の説明と、Toolkit の変更前後の文: ${d4.summary}`);
+  const data = { fields: { end_date: { code: 'end_date', label: '契約終了日', type: 'DATE' }, items: { code: 'items', type: 'SUBTABLE', fields: { qty: { code: 'qty', label: '数量', type: 'NUMBER' } } } } };
+  assert(KTPlanText.labelOf('end_date', data) === '契約終了日（end_date）' && KTPlanText.labelOf('qty', data) === '数量（qty）' && KTPlanText.labelOf('NEW_FIELD_1', data) === 'NEW_FIELD_1' && KTPlanText.fieldText('end_date', data) === '契約終了日（end_date・DATE）', '設定からラベル・型を引く（テーブルの中も。無ければコードのまま）');
+  const notes = KTPlanText.coverageNotes({ coverage: { notes: ['他アプリからこのアプリへの参照は未走査。被参照は含まれていない', 'レコードの実データ・添付ファイルは含まない'] }, truncation: { applied: true, sections: [{ name: 'facts' }] } });
+  assert(notes.length === 3 && /入力の上限で省略した項目があります（facts）/.test(notes[2]), `coverage と truncation から「確かめられなかったこと」: ${notes.join(' / ')}`);
+  // 計画の要約（説明・文書の入力）: 説明は spec から作られ、spec・仮の案・条件・候補は残る
+  const plan = { goal: 'g', assessment: { summary: '方針。' }, steps: [rem, proc], proposedFields: [], questions: [{ id: 'Q1', question: 'q', reason: 'r', options: ['a', 'b'], priority: 'blocking' }], unknowns: [], provisionals: [{ id: 'A1', topic: '日数', choice: '暦日 3 日後', reason: 'r', changeHint: 'h' }], customizations: [{ customizationId: 'C1', requirement: 'r', strategy: 'NEW_JS_FILE', implementation: 'JAVASCRIPT', platform: ['desktop'], events: [], fields: [{ code: 'amount', access: 'CONTROL', condition: 'ステータス in ("承認済み")' }], apis: [], existingFiles: [], risks: [], questions: [], dependsOn: [] }], solution: 'HYBRID', summary: { steps: 2 } };
+  const cp = KTContext.compactPlan(plan, { version: 1 });
+  assert(typeof cp.summary === 'string' && cp.steps.length === 2 && /リマインダーを追加/.test(cp.steps[0].summary) && cp.steps[0].spec && cp.steps[0].spec.daysLater === '3' && !cp.steps[0].details && cp.provisionals && cp.provisionals[0].choice === '暦日 3 日後', `要約: 説明は spec から・spec は残す・details は作らない・仮の案を残す: ${JSON.stringify(cp.steps[0]).slice(0, 160)}`);
+  assert(cp.customizations[0].fields[0].condition === 'ステータス in ("承認済み")' && cp.customizations[0].implementation === 'JAVASCRIPT' && cp.questions[0].options.length === 2 && cp.questions[0].priority === 'blocking', '要約でも JS の条件・実装手段・確認事項の候補を落とさない');
+  // 計画の修正の土台: 正規化済みの計画全体（Gateway の形。top-level summary は件数・各手順に proposal と spec）はそのまま送る（差分更新の土台は Gateway の isFullPlan を満たす必要がある）
+  const gw = { goal: 'g', assessment: { summary: '方針。', usableExistingFields: [], usableExistingSettings: [], missingCapabilities: [], uncertainties: [] }, relevantFields: [], proposedFields: [], steps: [rem, proc], alternatives: [], impact: [{ targetKind: 'FIELD', targetRef: 'amount', description: 'd', evidenceIds: ['E1'], confidence: 'INFERRED' }], questions: [], provisionals: [], unknowns: [], planConfidence: 'INFERRED', solution: 'STANDARD', customizations: [], summary: { steps: 2 } };
+  const rv = KTContext.compactRevision({ basedOnVersion: 1, request: '直して', previousPlan: gw, mode: 'patch' });
+  const fullOk = (p) => typeof p.goal === 'string' && typeof p.assessment?.summary === 'string' && p.steps.every(s => s.proposal && typeof s.proposal === 'object' && s.spec && typeof s.spec === 'object');
+  assert(rv.previousPlan === gw && fullOk(rv.previousPlan) && rv.previousPlan.impact.length === 1, '差分更新の土台: 正規化済みの計画はそのまま（proposal・spec・impact を持ったまま。要約しない）');
+  const rvFull = KTContext.compactRevision({ basedOnVersion: 1, request: '直して', previousPlan: gw, mode: 'full' });
+  assert(rvFull.previousPlan === gw, '全体の作り直しの土台も正規化済みの計画はそのまま');
+  const legacy = { goal: 'g', steps: [{ id: 'P1', actionType: 'ADD_REMINDER', title: 't', spec: { name: 'x' }, dependsOn: [] }] };
+  const rvLegacy = KTContext.compactRevision({ basedOnVersion: 1, request: '直して', previousPlan: legacy });
+  assert(rvLegacy.previousPlan !== legacy && typeof rvLegacy.previousPlan.summary === 'string' && /リマインダーを追加/.test(rvLegacy.previousPlan.steps[0].summary), '古い形（proposal が無い）の土台だけ要約する');
+  // JS 生成へ渡す Context: 標準設定の手順の説明と spec
+  const gctx = KTContext.buildGenerator({ customization: { customizationId: 'C1', requirement: 'r', strategy: 'NEW_JS_FILE', platform: ['desktop'], events: ['app.record.edit.show'], fields: [{ code: 'amount', access: 'CONTROL', condition: '' }], apis: ['kintone.events.on'] }, plan, data: { appId: '1', fields: { amount: { code: 'amount', label: '金額', type: 'NUMBER' } } }, deps: null, scan: null });
+  const ss = gctx.plan.standardSteps;
+  assert(ss.length === 2 && /リマインダーを追加/.test(ss[0].summary) && ss[0].spec && ss[0].spec.timingField === '更新日時' && ss[1].spec && ss[1].spec.filterCond === 'amount <= "999999"', `JS 生成へ渡す標準手順: 説明と spec: ${JSON.stringify(ss[1])}`);
+}
+{
+  // 画面: 右の「変更内容」の確かめられなかったことに coverage の注意が入る。計画の詳細の手順に spec からの説明が出る
+  const m = mount();
+  await ticks(); await m.panel.send(GOAL); await ticks(8);
+  const sum = m.$('kt-ai-change-summary').innerHTML;
+  assert(/確かめられなかったこと/.test(sum) && /レコードの実データ・添付ファイルは含まない/.test(sum), '右の「変更内容」に、解析範囲から分かる「確かめられなかったこと」を Toolkit が出す');
+  const detail = m.$('kt-ai-plan-result').innerHTML;
+  assert(/kt-ai-step/.test(detail) && /レコードの実データ・添付ファイルは含まない/.test(detail), '計画の詳細の「解析できないこと」にも coverage の注意');
+  assert(!INTERNAL_IN_CHAT.test(outsideDetails(m.chat())), '会話には内部の番号・処理の通知を出さない');
+}
+
 console.log(`\n${state.failed ? 'FAILED' : 'ALL PASSED'}: ${state.passed} passed / ${state.failed} failed`);
 process.exit(state.failed ? 1 : 0);
 })().catch(e => { console.error(e); process.exit(1); });
