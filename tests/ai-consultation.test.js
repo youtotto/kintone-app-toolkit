@@ -43,11 +43,11 @@ const MOBILE_NEW = "(function () {\n  'use strict';\n  kintone.events.on('mobile
 const FILES = [{ name: 'fieldOnOff.js', target: 'desktop', kind: 'js', text: FIELD_ON_OFF }, { name: 'mobileLock.js', target: 'mobile', kind: 'js', text: MOBILE_LOCK }];
 function buildInputs() {
   const data = FX.makeData();
-  //   §0c.8（2026-10-08）: URL 指定の ext.js は既知のライブラリの配布元（jsDelivr の /npm/）に置く。それ以外の URL は業務の JavaScript かもしれないので
+  //   §0c.8（2026-10-08）: URL 指定の ext.js は既知のライブラリの配布元に置く（§0d.3: jsDelivr・unpkg は既知の配布元から外したので cdnjs の /ajax/libs/）。それ以外の URL は業務の JavaScript かもしれないので
   //   動作テストでは「イベントが分からない」（events null）になり、その platform の必須の効果を確かめられない（この試験の主題ではない）
   data.customize = {
     scope: 'ALL',
-    desktop: { js: [{ type: 'URL', url: 'https://cdn.jsdelivr.net/npm/ext-lib@1.0.0/ext.js' }, { type: 'FILE', file: { contentType: 'text/javascript', fileKey: 'dl:fieldOnOff', name: 'fieldOnOff.js', size: '290' } }], css: [{ type: 'FILE', file: { contentType: 'text/css', fileKey: 'dl:style', name: 'style.css', size: '10' } }] },
+    desktop: { js: [{ type: 'URL', url: 'https://cdnjs.cloudflare.com/ajax/libs/ext-lib/1.0.0/ext.js' }, { type: 'FILE', file: { contentType: 'text/javascript', fileKey: 'dl:fieldOnOff', name: 'fieldOnOff.js', size: '290' } }], css: [{ type: 'FILE', file: { contentType: 'text/css', fileKey: 'dl:style', name: 'style.css', size: '10' } }] },
     mobile: { js: [{ type: 'FILE', file: { contentType: 'text/javascript', fileKey: 'dl:mlock', name: 'mobileLock.js', size: '120' } }], css: [] },
     revision: '12',
   };
@@ -129,8 +129,8 @@ console.log('\n--- §44-1. JsConsultationSeed（KTContext.buildConsultationSeed�
   assert(seed.dependencies.some(d => d.targetType === 'FIELD' && d.targetId === 'amount'), 'deps の edge（関連する依存の事実）');
   const mob = seedFor('mobileLock.js', 'mobile', { text: MOBILE_LOCK });
   assert(mob.platform === 'mobile' && mob.sourceId === 'mobile:js:mobileLock.js' && mob.analysis.fields.CONTROL.includes('owner') && mob.analysis.events.join() === 'mobile.app.record.edit.show', 'mobile の FILE');
-  const url = seedFor('ext.js', 'desktop', { url: 'https://cdn.jsdelivr.net/npm/ext-lib@1.0.0/ext.js' });
-  assert(url.customizationType === 'URL' && url.url === 'https://cdn.jsdelivr.net/npm/ext-lib@1.0.0/ext.js' && url.external === true && url.source.available === false && url.source.hash === null && url.analysis.analyzed === false, 'URL（外部）: 本文なし・external');
+  const url = seedFor('ext.js', 'desktop', { url: 'https://cdnjs.cloudflare.com/ajax/libs/ext-lib/1.0.0/ext.js' });
+  assert(url.customizationType === 'URL' && url.url === 'https://cdnjs.cloudflare.com/ajax/libs/ext-lib/1.0.0/ext.js' && url.external === true && url.source.available === false && url.source.hash === null && url.analysis.analyzed === false, 'URL（外部）: 本文なし・external');
   const noText = seedFor('fieldOnOff.js', 'desktop');
   assert(noText.source.available && noText.analysis.events.length === 2, '本文を渡さなくても Scanner の結果に本文があればそれを使う');
   const sub = KTContext.subjectFromSeed(seed);
@@ -308,7 +308,7 @@ console.log('\n--- 新規 JS（desktop）の登録 / mobile（desktop を変え�
   await ackAll(m);
   await clickPane(m, 'kt-ai-jsreg-go');
   await ticks(10);
-  assert(m.panel.jsExecState().execution.status === 'DONE' && jsNames(m, 'desktop').join() === 'https://cdn.jsdelivr.net/npm/ext-lib@1.0.0/ext.js,fieldOnOff.js,amount-warning.js' && jsNames(m, 'mobile').join() === 'mobileLock.js', '§48 desktop JS 2 → 3（URL と既存を保持・mobile は不変）');
+  assert(m.panel.jsExecState().execution.status === 'DONE' && jsNames(m, 'desktop').join() === 'https://cdnjs.cloudflare.com/ajax/libs/ext-lib/1.0.0/ext.js,fieldOnOff.js,amount-warning.js' && jsNames(m, 'mobile').join() === 'mobileLock.js', '§48 desktop JS 2 → 3（URL と既存を保持・mobile は不変）');
 }
 {
   const m = mount({ planResponse: PLAN_MOBILE_NEW });
@@ -332,7 +332,7 @@ console.log('\n--- 新規 JS（desktop）の登録 / mobile（desktop を変え�
   // URL（外部）: 本文なし → JS_SOURCE_UNAVAILABLE
   const m = mount({ planResponse: PLAN_EXT });
   await ticks();
-  m.panel.consult(seedFor('ext.js', 'desktop', { url: 'https://cdn.jsdelivr.net/npm/ext-lib@1.0.0/ext.js' }));
+  m.panel.consult(seedFor('ext.js', 'desktop', { url: 'https://cdnjs.cloudflare.com/ajax/libs/ext-lib/1.0.0/ext.js' }));
   assert(/URL 指定/.test(m.chat()) && /取得できません（外部 URL/.test(m.$('kt-ai-subject-info').innerHTML), '外部 URL の相談: 左は URL 指定の印、本文が無い旨は右の「変更内容」の相談カード');
   await m.panel.send('承認済みでは担当者を編集不可にしたい');
   await confirmSpec(m);
@@ -344,7 +344,7 @@ console.log('\n--- 新規 JS（desktop）の登録 / mobile（desktop を変え�
   // URL（本文は読める想定）: 生成はできるが登録は EXTERNAL_JS_NOT_WRITABLE
   const m2 = mount({ planResponse: PLAN_EXT });
   await ticks();
-  m2.panel.consult(seedFor('ext.js', 'desktop', { url: 'https://cdn.jsdelivr.net/npm/ext-lib@1.0.0/ext.js', text: EXT_SRC }));
+  m2.panel.consult(seedFor('ext.js', 'desktop', { url: 'https://cdnjs.cloudflare.com/ajax/libs/ext-lib/1.0.0/ext.js', text: EXT_SRC }));
   await m2.panel.send('承認済みでは担当者を編集不可にしたい');
   await confirmSpec(m2);
   await clickChat(m2, 'generate', { cid: 'C1' });
@@ -394,9 +394,11 @@ console.log('\n--- 新規 JS（desktop）の登録 / mobile（desktop を変え�
   assert(/自動では元に戻せません/.test(m.chat()), '会話にも案内');
 }
 
-console.log('\n--- §54 modern JavaScript（2026-10-05）: 生成の直後に var を直し、直したコードを登録する。直せなければ登録できない ---');
+console.log('\n--- §54 modern JavaScript（2026-10-05。§0d.3 で変更）: Toolkit は生成工程が検証したコードを書き換えない。var は反映直前の形式確認で検出し、登録できない ---');
 {
   // AI が var を含むコードを返した（古い Gateway・Gateway の修正の前と同じ）
+  //   §0d.3（2026-10-08）の決定で期待値を変えた: 以前は Toolkit が生成の直後に const へ直して登録していたが、検証した候補と登録する候補（candidateHash）が
+  //   食い違うので書き換えをやめた。検出は残す（modern-js の block。直すのは生成工程の修復か作り直し）
   const VAR_JS = NEW_JS.replace('    const record = event.record;', '    var record = event.record;');
   const m = mount({ planResponse: PLAN_NEW_DESKTOP, generatedFor: (ctx) => ({ ...genFor(ctx), code: VAR_JS }) });
   await ticks();
@@ -405,14 +407,15 @@ console.log('\n--- §54 modern JavaScript（2026-10-05）: 生成の直後に va
   await clickChat(m, 'generate', { cid: 'C1' });
   const v = m.conv().activePlan();
   const g = v.generated.C1;
-  assert(g && !/\bvar\b/.test(g.generated.code) && /    const record = event\.record;/.test(g.generated.code) && g.generated.toolkitModernJs.fixed.length === 1 && g.review.status !== 'BLOCKED' && g.review.checks.some(c => c.name === 'modern-js' && c.ok && /1 か所を const \/ let に直しました/.test(c.message)), `§54 AI の var は生成の直後に const に直り、直したコードで検査する（利用者に書式を聞かない）: ${g && g.review.status}`);
+  const mj = g && g.review.registration.blockers.find(b => b.code === 'modern-js');
+  assert(g && g.generated.code === VAR_JS && !g.generated.toolkitModernJs && g.review.status === 'BLOCKED' && mj && /反映直前の形式確認（記法）/.test(mj.message) && /var record/.test(mj.message) && /書き換えない/.test(mj.message), `§54 AI の var は書き換えず（生成工程が返したコードのまま）、反映直前の形式確認で検出して登録できない: ${g && g.review.status} ${mj && mj.message}`);
   await clickChat(m, 'open-js-register', { plan: v.planId, version: String(v.version) });
   await ticks(6);
   await ackAll(m);
   await clickPane(m, 'kt-ai-jsreg-go');
   await ticks(10);
   const up = [...m.mock.st.files.values()].find(f => f.name === 'amount-warning.js');
-  assert(m.panel.jsExecState().execution.status === 'DONE' && up && !/\bvar\b/.test(up.content) && /const record = event\.record;/.test(up.content), '§54 登録したファイルの本文に var が無い（直したコードを登録する）');
+  assert(!up && !(m.panel.jsExecState().execution && m.panel.jsExecState().execution.status === 'DONE'), '§54 var の残る候補は登録しない（アップロードも PUT もしない）');
 }
 {
   // ファイル直下の var（グローバル）: 自動では直せない → 登録できない（具体的な理由）

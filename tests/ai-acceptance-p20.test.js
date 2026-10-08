@@ -95,7 +95,7 @@ console.log('\n--- BF-C（再 3）/ F24. エラー表示と編集不可: 条件�
   const chk = (r, n) => r.checks.find(c => c.name === n) || null;
   const rSep = KTCodeReview.review({ generated: gen(SEPARATE), customization: custom, plan: null, data: DATA, scan: null, existingSource: null });
   // 段階 C・確認 1: 模擬イベントの結果が無い review（従来の流れ）では従来（HEAD）どおり登録不可。模擬が動いたら確認に下げ、実際の競合は sim-conflict で決める（tests/ai-js-sim.test.js §3 / §6 / A7）
-  assert(rSep.status === 'BLOCKED' && chk(rSep, 'error-cancels-edit').severity === 'block' && chk(rSep, 'error-cancels-edit').simDecides === true && /別の handler で設定したものも/.test(chk(rSep, 'error-cancels-edit').message) && /生成工程の動作テスト/.test(chk(rSep, 'error-cancels-edit').message), 'F5（実機 1 本目）: 別 handler でも条件なしに同じ表示イベントで error → 動作テストの結果が無い間は登録不可（競合の断定は生成工程の動作テスト。2026-10-08）');
+  assert(rSep.status === 'BLOCKED' && chk(rSep, 'error-cancels-edit').severity === 'block' && chk(rSep, 'error-cancels-edit').simDecides === true && /別の handler で設定したものも/.test(chk(rSep, 'error-cancels-edit').message) && /生成工程の模擬テスト/.test(chk(rSep, 'error-cancels-edit').message), 'F5（実機 1 本目）: 別 handler でも条件なしに同じ表示イベントで error → 動作テストの結果が無い間は登録不可（競合の断定は生成工程の模擬テスト。2026-10-08）');
   const rSepSim = KTCodeReview.attachSim(rSep, { cases: [{ id: 'S1', verdict: 'pass', message: '' }], checks: [], unverified: [], existingUnverified: [], counts: { pass: 1, fail: 0, unverified: 0 }, passed: true }, { customization: custom });
   assert(chk(rSepSim, 'error-cancels-edit').severity === 'review' && rSepSim.status !== 'BLOCKED', 'F5: 模擬イベントが動いたら error-cancels-edit は確認に下がる（実際の競合は模擬の sim-conflict で判定）');
   const rGuard = KTCodeReview.review({ generated: gen(GUARDED), customization: custom, plan: null, data: DATA, scan: null, existingSource: null });
