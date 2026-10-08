@@ -112,7 +112,8 @@ console.log('\n--- 1. 実行前レビューに「動作テスト環境へ反映�
   assert(progressSeen && progressSeen.includes('動作テスト環境へ反映しています') && /P1[\s\S]*処理中/.test(progressSeen) && /P2[\s\S]*待機中/.test(progressSeen), '実行中: P1 処理中... / P2 待機中 の進捗表示（画面を固めない）');
   const e3 = execHtml(m);
   assert(st2.stage === 'done' && st2.execution.status === 'DONE' && e3.includes('動作テスト環境への反映が完了しました。') && e3.includes('✓ 2 件 VERIFIED') && e3.includes('⚠ 0 件') && e3.includes('× 0 件') && e3.includes('Simulationとの一致：✓') && e3.includes('運用環境にはまだ反映されていません。'), '完了: ✓ 2 件 VERIFIED / Simulationとの一致 ✓ / 運用環境にはまだ反映されていません');
-  assert(/P1[\s\S]*VERIFIED[\s\S]*P2[\s\S]*VERIFIED[\s\S]*P3[\s\S]*PLAN_ONLY/.test(e3) && e3.includes('Toolkit からは自動で反映できません'), '結果一覧: P1 / P2 VERIFIED・P3 は PLAN_ONLY と表示');
+  //   §0e.3（2026-10-09）: 手順の番号（P1）・状態の英語（VERIFIED / PLAN_ONLY）は出さず、並びの番号と画面の言葉にする
+  assert(/>1\.<[\s\S]*反映済み（確認で一致）[\s\S]*>2\.<[\s\S]*反映済み（確認で一致）[\s\S]*>3\.<[\s\S]*自動では反映できません/.test(e3) && e3.includes('Toolkit からは自動で反映できません') && !/>P[0-9]+</.test(e3), '結果一覧: 1・2 は反映済み（確認で一致）・3 は自動では反映できません（手順の番号 P1 は出さない）');
   assert(m.mock.st.fields.progress && m.mock.st.views['担当者別'] && m.mock.st.views['担当者別'].fields.join() === 'owner,case_name,progress', 'モックの動作テスト環境にフィールドと一覧が入った（一覧の NEW_FIELD_1 は実コード）');
   assert(!hasButton(e3, '運用環境へ反映') && !/<button[^>]*>[^<]*deploy/i.test(e3), '完了画面に「運用環境へ反映」ボタンは無い（Never Auto Deploy）');
   assert(e3.includes('再解析：フィールド 24 件（実行前 23）'), '再解析の要約（フィールド数 23 → 24）');
@@ -142,7 +143,7 @@ console.log('\n--- 2. 失敗 / 未対応のみ / stale / 権限 / Simulation mis
   await click(m, 'kt-ai-exec-start'); await tick();
   await click(m, 'kt-ai-exec-go'); await tick(); await tick();
   const e = execHtml(m);
-  assert(m.panel.executorState().execution.status === 'FAILED' && e.includes('0 件反映済み・1 件失敗・以降未実行（1 件）') && e.includes('× 1 件') && /P1[\s\S]*FAILED/.test(e) && /P2[\s\S]*未実行/.test(e) && !m.mock.st.views['担当者別'], '失敗: Fail Stop・「n 件反映済み / n 件失敗 / 以降未実行」・以降の step は未実行');
+  assert(m.panel.executorState().execution.status === 'FAILED' && e.includes('0 件反映済み・1 件失敗・以降未実行（1 件）') && e.includes('× 1 件') && />1\.<[\s\S]*失敗/.test(e) && />2\.<[\s\S]*未実行/.test(e) && !m.mock.st.views['担当者別'], '失敗: Fail Stop・「n 件反映済み / n 件失敗 / 以降未実行」・以降の step は未実行');
 }
 {
   const m = mount();
@@ -225,7 +226,7 @@ console.log('\n--- 2b. Tier 2（通知 / リマインダー / フィールド変
   assert(m.panel.executorState().stage === 'confirm' && e2.includes('＋ 通知 2 件') && e2.includes('＋ リマインダー 1 件') && /<div[^>]*>既存設定の変更<\/div>/.test(e2) && e2.includes('✎ フィールド 2 件'), '最終確認: 「追加」と「既存設定の変更」に分けた件数（§36）');
   assert(e2.includes('レコードの条件通知: Before 既存 2 件 → After 3 件') && e2.includes('リマインダー: Before 1 件 → After 2 件') && e2.includes('「担当者」 必須: いいえ → はい（フィールドコード owner は変わりません）') && e2.includes('表示名: 案件名 → 案件名（正式）'), 'Before / After: 通知（既存 2 → 3）・リマインダー（1 → 2）・フィールド（必須 いいえ → はい・表示名）');
   assert(e2.includes('⚠ 既存フィールドを変更します') && e2.includes('「担当者」を必須に変更します。この変更は今後の入力・保存に影響します。既存レコードの値は Toolkit では確認していません。') && e2.includes('フィールドコード（case_name）は変わりません'), 'Sensitive: 必須化と表示名変更を確認ダイアログで目立たせる（指定の文言）');
-  assert(/P5[\s\S]*⚠ 既存の設定と似ています[\s\S]*既存: 「高額案件の登録」/.test(e2), 'POSSIBLE_DUPLICATE を最終確認で再度人間に見せる');
+  assert(/⚠ 既存の設定と似ています[\s\S]*既存: 「高額案件の登録」/.test(e2), 'POSSIBLE_DUPLICATE を最終確認で再度人間に見せる');
   await click(m, 'kt-ai-exec-go'); await tick(); await tick();
   const e3 = execHtml(m);
   const st = m.panel.executorState();
@@ -307,7 +308,7 @@ const PLAN_U = { ...PLAN_X, plan: { ...PLAN_X.plan, proposedFields: [], steps: [
   await click(m, 'kt-ai-exec-rollback-go'); await tick(); await tick();
   const r2 = execHtml(m);
   const rb = m.panel.executorState().rollback;
-  assert(m.panel.executorState().stage === 'rolled-back' && rb.status === 'ROLLED_BACK_VERIFIED' && r2.includes('動作テスト環境を実行前の状態に戻しました。') && r2.includes('✓ 3 件 ROLLBACK_VERIFIED') && r2.includes('実行前 snapshot との比較：✓ 一致') && r2.includes('運用環境には影響していません。') && !r2.includes('id="kt-ai-exec-rollback-start"'), 'rollback 結果: ROLLED_BACK_VERIFIED・snapshot と一致・ボタンは消える');
+  assert(m.panel.executorState().stage === 'rolled-back' && rb.status === 'ROLLED_BACK_VERIFIED' && r2.includes('動作テスト環境を実行前の状態に戻しました。') && r2.includes('✓ 3 件 ROLLBACK_VERIFIED') && r2.includes('反映する前の設定との比較：✓ 一致') && r2.includes('運用環境には影響していません。') && !r2.includes('id="kt-ai-exec-rollback-start"'), 'rollback 結果: ROLLED_BACK_VERIFIED・snapshot と一致・ボタンは消える');
   assert(m.mock.st.perRecord[0].filterCond === 'amount >= "1000000"' && m.mock.st.views['承認待ち'].fields.join() === 'case_name,approver' && !m.mock.st.views['担当者別'], '動作テスト環境が実行前に戻っている');
   await click(m, 'kt-ai-exec-audit-copy'); await tick();
   const audit = JSON.parse(m.copies[m.copies.length - 1]);
@@ -323,7 +324,7 @@ const PLAN_U = { ...PLAN_X, plan: { ...PLAN_X.plan, proposedFields: [], steps: [
   m.mock.st.perRecord[0].title = '人間が変更'; m.mock.st.revision += 1;
   await click(m, 'kt-ai-exec-rollback-start'); await tick();
   const r = execHtml(m);
-  assert(m.panel.executorState().stage === 'rollback-blocked' && r.includes('自動では元に戻せません') && r.includes('[ROLLBACK_STALE]') && r.includes('反映後にレコードの条件通知の設定が変更されています') && r.includes('現在の動作テスト環境を確認してください') && hasButton(r, '閉じる') && hasButton(r, 'もう一度確認する'), 'ROLLBACK_STALE: 止まる・理由と差分・設定は変更していません');
+  assert(m.panel.executorState().stage === 'rollback-blocked' && r.includes('自動では元に戻せません') && r.includes('data-code="ROLLBACK_STALE"') && !r.includes('[ROLLBACK_STALE]') && r.includes('反映後にレコードの条件通知の設定が変更されています') && r.includes('現在の動作テスト環境を確認してください') && hasButton(r, '閉じる') && hasButton(r, 'もう一度確認する'), 'ROLLBACK_STALE: 止まる・理由と差分・設定は変更していません');
   assert(m.mock.st.perRecord[0].title === '人間が変更' && m.mock.st.perRecord[0].filterCond === 'amount >= "2000000"', '人間の変更を消さない（PUT なし）');
   await click(m, 'kt-ai-exec-rollback-cancel'); await tick();
   assert(m.panel.executorState().stage === 'done' && hasButton(execHtml(m), '変更前の状態に戻す'), '閉じると完了画面へ');
@@ -361,7 +362,7 @@ console.log('\n--- 2e. Phase 12: プロセス管理の最終確認（§22）・B
   assert(e0.includes('＋ ステータス追加') && e0.includes('＋ アクション追加') && e0.includes('✎ プロセス管理変更') && /承認済み・実行可能[\s\S]*?<b>4 件/.test(e0), 'Executor の件数: ステータス追加 / アクション追加 / プロセス管理変更');
   await click(m, 'kt-ai-exec-start'); await tick();
   const e1 = execHtml(m);
-  assert(m.panel.executorState().stage === 'confirm' && e1.includes('id="kt-ai-exec-process-confirm"') && e1.includes('⚠ プロセス管理を変更します') && e1.includes('動作テスト環境の承認フローを変更します。') && e1.includes('PROCESS_CHANGE_1: 4 step を 1 回の更新にまとめます'), '§22: ⚠ プロセス管理を変更します / 承認フローを変更します / Change Group の説明');
+  assert(m.panel.executorState().stage === 'confirm' && e1.includes('id="kt-ai-exec-process-confirm"') && e1.includes('⚠ プロセス管理を変更します') && e1.includes('動作テスト環境の承認フローを変更します。') && e1.includes('プロセス管理の 4 件の変更を 1 回の更新にまとめます') && !e1.includes('PROCESS_CHANGE_1'), '§22: ⚠ プロセス管理を変更します / 承認フローを変更します / Change Group の説明');
   assert(/追加：[\s\S]*?＋ ステータス「部長承認」[\s\S]*?＋ アクション「部長へ申請」[\s\S]*?＋ アクション「部長承認する」/.test(e1) && /既存変更：[\s\S]*?✎ 「承認する」の条件変更/.test(e1), '§22: 追加（＋ ステータス / ＋ アクション）と既存変更（✎ 「承認する」の条件変更）');
   assert(e1.includes('既存の操作可能条件を変更します') && e1.includes('現在はすべての「承認待ち」で実行できます') && e1.includes('変更後は「amount &lt;= &quot;999999&quot;」の場合のみ実行可能になります') && e1.includes('⚠ 既存の設定を変更します'), '§9: 既存の操作可能条件を変更します… を最終確認に表示');
   assert((e1.match(/class="kt-ai-mermaid"/g) || []).length >= 2 && e1.includes('Proposed After') && e1.includes('条件の分割（承認待ち）') && e1.includes('明らかな重複・欠落なし') && e1.includes('運用環境には反映されません。'), '最終確認に Before / Proposed After の Mermaid と条件の分割判定・運用環境には反映されません');
@@ -371,8 +372,8 @@ console.log('\n--- 2e. Phase 12: プロセス管理の最終確認（§22）・B
   const ex = m.panel.executorState().execution;
   assert(m.panel.executorState().stage === 'done' && ex.status === 'DONE' && ex.steps.every(s => s.status === 'VERIFIED' && s.groupId === 'PROCESS_CHANGE_1') && Object.keys(m.mock.st.status.states).length === 4 && m.mock.calls.filter(c => c === 'PUT status').length === 1, '反映: 4 step が 1 回の PUT で VERIFIED');
   const e2 = execHtml(m);
-  assert(e2.includes('✓ 4 件 VERIFIED') && e2.includes('id="kt-ai-exec-process"') && e2.includes('プロセス管理の Before / Planned / Actual') && (e2.match(/class="kt-ai-mermaid"/g) || []).length >= 3 && e2.includes('Actual: ステータス 未処理 → 承認待ち → 完了 → 部長承認') && e2.includes('[PROCESS_CHANGE_1]') && hasButton(e2, '変更前の状態に戻す'), '§18: 完了画面に Before / Planned / Actual の Mermaid・Actual の要約・グループ表示・[変更前の状態に戻す]');
-  assert(/プロセス管理の Before \/ Planned \/ Actual<\/b><div style="display:grid; gap:6px; margin-top:4px;">/.test(e2) && (e2.match(/min-width:0; overflow-x:auto;"><div style="font-size:11px; opacity:.7;">(Before|Planned|Actual)/g) || []).length === 3 && !/flex:1 1 220px/.test(e2), '完了画面の Before / Planned / Actual は縦に並べる（3 つを横に並べない）');
+  assert(e2.includes('✓ 4 件 VERIFIED') && e2.includes('id="kt-ai-exec-process"') && e2.includes('プロセス管理（反映前 / 計画 / 反映後）') && (e2.match(/class="kt-ai-mermaid"/g) || []).length >= 3 && e2.includes('反映後: ステータス 未処理 → 承認待ち → 完了 → 部長承認') && !/Planned|Actual|Before（/.test(e2) && e2.includes('（プロセス管理の変更はまとめて 1 回で更新）') && !e2.includes('[PROCESS_CHANGE_1]') && hasButton(e2, '変更前の状態に戻す'), '§18: 完了画面に Before / Planned / Actual の Mermaid・Actual の要約・グループ表示・[変更前の状態に戻す]');
+  assert(/プロセス管理（反映前 \/ 計画 \/ 反映後）<\/b><div style="display:grid; gap:6px; margin-top:4px;">/.test(e2) && (e2.match(/min-width:0; overflow-x:auto;"><div style="font-size:11px; opacity:.7;">(反映前|計画（反映後の予定）|反映後（)/g) || []).length === 3 && !/flex:1 1 220px/.test(e2), '完了画面の Before / Planned / Actual は縦に並べる（3 つを横に並べない）');
   await click(m, 'kt-ai-exec-rollback-start'); await tick();
   const r1 = execHtml(m);
   assert(m.panel.executorState().stage === 'rollback-confirm' && r1.includes('・プロセス管理の変更 1 件') && r1.includes('実行前のプロセス管理（ステータス・アクション・作業者）全体に戻す') && r1.includes('運用環境には影響しません。'), 'rollback 確認: プロセス管理の変更 1 件 → 全体に戻す');
@@ -403,7 +404,7 @@ console.log('\n--- 2f. Phase 13: ルックアップ（§38 参照元の表示 / 
   assert(e0.includes('✓ フィールド追加') && e0.includes('✎ ルックアップ変更') && /承認済み・実行可能[\s\S]*?<b>3 件/.test(e0), 'Executor の件数: フィールド追加 2 / ルックアップ変更 1');
   await click(m, 'kt-ai-exec-start'); await tick();
   const e1 = execHtml(m);
-  assert(m.panel.executorState().stage === 'confirm' && e1.includes('id="kt-ai-exec-lookup-confirm"') && e1.includes('⚠ ルックアップを変更します') && e1.includes('参照元アプリの設定・レコードは変更しません。') && e1.includes('P3 ルックアップ「顧客マスタ参照」（customer_lookup）'), '§39: ⚠ ルックアップを変更します / 参照元アプリは変更しない');
+  assert(m.panel.executorState().stage === 'confirm' && e1.includes('id="kt-ai-exec-lookup-confirm"') && e1.includes('⚠ ルックアップを変更します') && e1.includes('参照元アプリの設定・レコードは変更しません。') && e1.includes('ルックアップ「顧客マスタ参照」</div>') && !e1.includes('（customer_lookup）'), '§39: ⚠ ルックアップを変更します / 参照元アプリは変更しない');
   assert(e1.includes('参照元: App 500「顧客マスタ」 / キー: code') && e1.includes('＋ 取得項目: address（住所） → customer_address（この計画で追加）') && e1.includes('＋ 取得項目: credit（与信枠） → customer_credit（この計画で追加）') && e1.includes('既存の取得項目 2 件（code → customer_code, name → case_name）はそのまま') && e1.includes('参照元アプリ「顧客マスタ」の設定は変更しません（フィールド定義は Review 時点と同じ・revision 21）'), '§39: 参照元 / キー / ＋ 取得項目（この計画で追加）/ 既存はそのまま / 参照元の定義は Review 時点と同じ');
   assert(/既存設定の変更[\s\S]*?✎ ルックアップ 1 件/.test(e1) && /追加[\s\S]*?＋ フィールド 2 件/.test(e1) && e1.includes('変更する属性: 取得項目（参照元アプリ・参照キー・既存の取得項目・表示名・必須はそのまま') && e1.includes('検索方法は kintone が管理するため検証の対象外'), '§39: 追加 2 / 既存設定の変更 1・変更する属性・検索方法の注記');
   await click(m, 'kt-ai-exec-go'); await tick(); await tick();
@@ -431,7 +432,7 @@ console.log('\n--- 2f. Phase 13: ルックアップ（§38 参照元の表示 / 
   m2.mock.ctl.relatedUnavailable = '500';
   await click(m2, 'kt-ai-exec-start'); await tick();
   const b1 = execHtml(m2);
-  assert(m2.panel.executorState().stage === 'blocked' && b1.includes('P3 顧客マスタ参照で住所と与信枠も取得：<b>実行不可</b>') && b1.includes('顧客マスタのフィールド設定を確認できません。参照元アプリへのアクセス権を確認してください') && b1.includes('[RELATED_APP_SETTINGS_UNAVAILABLE]') && b1.includes('設定は変更していません。'), '§40: 参照元を読めない → 実行不可・「顧客マスタのフィールド設定を確認できません。参照元アプリへのアクセス権を確認してください」');
+  assert(m2.panel.executorState().stage === 'blocked' && b1.includes('>顧客マスタ参照で住所と与信枠も取得：<b>実行不可</b>') && b1.includes('顧客マスタのフィールド設定を確認できません。参照元アプリへのアクセス権を確認してください') && b1.includes('data-code="RELATED_APP_SETTINGS_UNAVAILABLE"') && !b1.includes('[RELATED_APP_SETTINGS_UNAVAILABLE]') && b1.includes('設定は変更していません。'), '§40: 参照元を読めない → 実行不可・「顧客マスタのフィールド設定を確認できません。参照元アプリへのアクセス権を確認してください」');
   // §38: Review 時点で参照元が読めない → 実行不可（推測しない）
   const inputs3 = buildInputs(); inputs3.data.relatedApps['500'] = { appId: '500', name: null, code: null, revision: null, fields: null, error: { code: 'CB_NO02', message: '権限がありません。', status: 403 } };
   const m3 = mount({ planResponse: PLAN_LK, inputs: inputs3 });
@@ -456,8 +457,8 @@ console.log('\n--- 2g. Phase 14: アプリアクション（§34〜37 コピー�
   await click(m, 'kt-ai-exec-start'); await tick();
   const e1 = execHtml(m);
   assert(m.panel.executorState().stage === 'confirm' && e1.includes('id="kt-ai-exec-app-action-confirm"') && e1.includes('⚠ アプリアクションを追加・変更します') && e1.includes('コピー先アプリの設定・レコードは変更しません。'), '§34: ⚠ アプリアクションを追加・変更します / コピー先は変更しない');
-  assert(e1.includes('P1 ✎ 既存アプリアクションを変更「見積を作成」') && e1.includes('コピー先: App 311「見積管理」') && e1.includes('＋ 追加する転記: secret_memo（機密メモ） → note（備考）') && e1.includes('既存の転記 2 件（case_name→quote_title, レコードURL→source_url）はそのまま') && e1.includes('コピー先アプリ「見積管理」の設定・レコードは変更しません（フィールド定義は Review 時点と同じ・revision 7）'), '§34 / §35: 既存変更の行（コピー先 / 追加する転記 / 既存はそのまま / コピー先の指紋）');
-  assert(e1.includes('P2 ＋ 新規アプリアクション「請求書作成」') && e1.includes('＋ 転記: case_name（案件名） → quote_title（見積件名）') && e1.includes('＋ 転記: レコードURL → source_url（元案件URL）') && e1.includes('利用者: GROUP:everyone') && e1.includes('class="kt-ai-exec-required-warning"') && e1.includes('⚠ コピー先に必須項目があります') && e1.includes('「見積日」（issue_date）') && e1.includes('このアクションでは値を設定しません。作成時に入力・自動設定されるか確認してください。'), '§36 / §37: 新規アクションの行と必須項目の警告（見積日）');
+  assert(e1.includes('>✎ 既存アプリアクションを変更「見積を作成」') && e1.includes('コピー先: App 311「見積管理」') && e1.includes('＋ 追加する転記: secret_memo（機密メモ） → note（備考）') && e1.includes('既存の転記 2 件（case_name→quote_title, レコードURL→source_url）はそのまま') && e1.includes('コピー先アプリ「見積管理」の設定・レコードは変更しません（フィールド定義は Review 時点と同じ・revision 7）'), '§34 / §35: 既存変更の行（コピー先 / 追加する転記 / 既存はそのまま / コピー先の指紋）');
+  assert(e1.includes('>＋ 新規アプリアクション「請求書作成」') && e1.includes('＋ 転記: case_name（案件名） → quote_title（見積件名）') && e1.includes('＋ 転記: レコードURL → source_url（元案件URL）') && e1.includes('利用者: グループ（everyone）') && e1.includes('class="kt-ai-exec-required-warning"') && e1.includes('⚠ コピー先に必須項目があります') && e1.includes('「見積日」（issue_date）') && e1.includes('このアクションでは値を設定しません。作成時に入力・自動設定されるか確認してください。'), `§36 / §37: 新規アクションの行と必須項目の警告（見積日）: ${(e1.match(/利用者: [^<]*/) || [''])[0]}`);
   assert(/既存設定の変更[\s\S]*?✎ アプリアクション 1 件/.test(e1) && /追加[\s\S]*?＋ アプリアクション 1 件/.test(e1) && e1.includes('変更する属性: 転記（名前・コピー先・既存の転記はそのまま') && e1.includes('アプリアクション: Before 1 件 → After 2 件') && e1.includes('他のアクションが bit 単位で保持されたことを反映後に検証します'), '§34: 追加 1 / 既存設定の変更 1・全体置換の注記');
   await click(m, 'kt-ai-exec-go'); await tick(); await tick();
   const ex = m.panel.executorState().execution;
@@ -480,7 +481,7 @@ console.log('\n--- 2g. Phase 14: アプリアクション（§34〜37 コピー�
   m2.mock.ctl.destUnavailable = '311';
   await click(m2, 'kt-ai-exec-start'); await tick();
   const b1 = execHtml(m2);
-  assert(m2.panel.executorState().stage === 'blocked' && b1.includes('P1 見積を作成に備考も転記：<b>実行不可</b>') && b1.includes('コピー先アプリへのアクセス権を確認してください') && b1.includes('[DEST_APP_SETTINGS_UNAVAILABLE]'), 'コピー先を読めない → 実行不可（DEST_APP_SETTINGS_UNAVAILABLE）');
+  assert(m2.panel.executorState().stage === 'blocked' && b1.includes('>見積を作成に備考も転記：<b>実行不可</b>') && b1.includes('コピー先アプリへのアクセス権を確認してください') && b1.includes('data-code="DEST_APP_SETTINGS_UNAVAILABLE"') && !b1.includes('[DEST_APP_SETTINGS_UNAVAILABLE]'), 'コピー先を読めない → 実行不可（DEST_APP_SETTINGS_UNAVAILABLE）');
 }
 
 console.log('\n--- 3. 回帰: Review UI の既存要素は変わらない ---');

@@ -877,7 +877,7 @@ console.log('\n--- U5. ［新しい会話］: 続けて書いた別の依頼が�
   const HEALTH = { ok: true, supportedContractVersions: ['2.0', '2.1'], entitlements: [{ product: 'toolkit', features: ['assistant-qa', 'change-planner'] }], registry: { toolkit: { 'assistant-qa': { implemented: true, promptVersions: ['1'] }, 'change-planner': { implemented: true, promptVersions: ['1'] } } }, usage: { monthlyLimit: 200, usedThisMonth: 1 } };
   const RESP = { ok: true, contractVersion: '2.1', meta: { requestId: 'pl-u5', gateway: { product: 'toolkit', feature: 'change-planner', promptVersion: '1', contextVersion: 'planner-1' }, normalization: { warnings: [] }, ai: { model: 'm' }, usage: { usedThisMonth: 1, monthlyLimit: 200 } }, plan: { goal: '承認済みの案件だけの一覧を追加したい', solution: 'STANDARD', assessment: { summary: 's', usableExistingFields: [], usableExistingSettings: [], gaps: [], evidenceIds: [] }, relevantFields: [], proposedFields: [], steps: [step('P1', 'ADD_VIEW', 'VIEW', '承認済みの案件', { name: '承認済みの案件', fields: ['amount'] })], alternatives: [], impact: [], questions: [], unknowns: [], planConfidence: 'INFERRED', customizations: [] } };
   let gate = null; const calls = [];
-  //   C-1 第 3 段（2026-10-08）: 依頼は仮案の流れ（共有の部品の台本で採用 → 計画）。反映は最終案の承認（［この内容で反映する］）の後
+  //   C-1 第 3 段（2026-10-08）: 依頼は仮案の流れ（共有の部品の台本で採用 → 計画）。反映は最終案のカードの［動作テスト環境へ反映］（承認と反映を 1 回）
   const client = { async getHealth() { return withProposal(HEALTH); }, propose: proposeByScript, async plan({ ctx, requestId, signal }) { calls.push({ ctx, signal }); if (gate) await new Promise((res, rej) => { gate.res = res; signal?.addEventListener?.('abort', () => rej(Object.assign(new Error('aborted'), { name: 'AbortError', code: 'CANCELLED' }))); }); const v = KTAiClient.validatePlan(RESP, ctx); return { ...v.normalized, requestId, clientWarnings: v.warnings }; } };
   const storage = (() => { const m = new Map(); return { getItem: (k) => (m.has(k) ? m.get(k) : null), setItem: (k, v) => m.set(k, String(v)), removeItem: (k) => m.delete(k) }; })();
   const settings = KTAiClient.createSettingsStore({ storage, host: 't.cybozu.com' }); settings.setConsent(true);
@@ -893,8 +893,9 @@ console.log('\n--- U5. ［新しい会話］: 続けて書いた別の依頼が�
   await adoptOnPanel(panel); await ticks();
   assert(panel.conversation().planHistory().length === 1 && $('kt-ai-new-conv').disabled === false, '前提: 計画 v1 がある・［新しい会話］が押せる');
   await panel.startExecutor(); await ticks();
-  // 承認してから準備（最終確認の画面）まで進める（最終案のカードの［この内容で反映する］）
-  { const v0 = panel.conversation().activePlan(); await $('kt-ai-chat').dispatch({ type: 'click', target: { dataset: { act: 'final-approve', plan: v0.planId, version: String(v0.version) } } }); await ticks(); }
+  // 承認してから準備（最終確認の段）まで進める。§0e.1（2026-10-09）: 画面の承認は［動作テスト環境へ反映］1 回で反映まで進むので、
+  //   ここでは承認の記録（会話コントローラ）と準備の部品（startExecutor）で「未反映の準備がある」状態を作る（新しい会話がそれを取り消すことを確かめる）
+  { const v0 = panel.conversation().activePlan(); panel.conversation().approveFinal({ planId: v0.planId, version: v0.version }); await ticks(); }
   await panel.startExecutor(); await ticks();
   const stageBefore = panel.executorState().stage;
   // 2026-10-06 利用者の指示で意図して更新: 確認のカード（new-conv-choices・［このまま続ける］）は廃止。［新しい会話］はすぐ新しい会話を始める

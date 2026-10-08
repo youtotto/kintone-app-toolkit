@@ -95,8 +95,8 @@ function mount({ inputs = INPUTS, paid = true, planResponse = PLAN_HYBRID, openC
 const clickChat = (m, act, extra = {}) => m.$('kt-ai-chat').dispatch({ type: 'click', target: { dataset: { act, ...extra } } });
 /** 新しい流れ: 台本の 4 発言で仮案 → 採用 → 最終案（JavaScript は生成工程で検証済み）まで進める */
 const adoptFinal = async (m) => { const v = await K.adoptOnScreen(m); return v; };
-/** 最終案のカードの［この内容で反映する］で承認する（登録の準備は承認の後だけ） */
-const approveFinal = async (m) => { const v = m.conv().activePlan(); await clickChat(m, 'final-approve', { plan: v.planId, version: String(v.version) }); await ticks(); return v; };
+/** §0e.1（2026-10-09）: 最終案のカードの［動作テスト環境へ反映］を 1 回押す（承認の欄の準備を待ってから。承認と登録を 1 回で行う） */
+const applyFinal = (m) => K.applyOnScreen(m);
 const writes = (m) => m.mock.calls.filter(c => !c.startsWith('GET'));
 
 /** Customize タブの mount 用: Monaco とドキュメントの最小スタブ */
@@ -314,13 +314,11 @@ console.log('\n--- §30. AI → Customize（結果カード / コードペイン
   const m = mount();
   await ticks();
   await adoptFinal(m);
-  const v = await approveFinal(m);
-  await m.panel.startJsRegister(v); await ticks();
-  assert(m.panel.jsExecState().stage === 'confirm', '登録の確認');
-  await m.panel.confirmJsRegister(); await ticks(8);
+  const ar = await applyFinal(m);
+  assert(ar.button && !ar.button.disabled && ar.v.approval && ar.pre.items.files.length === 1, '［動作テスト環境へ反映］1 回で承認と登録（承認の欄に登録するファイル）');
   const jx = m.panel.jsExecState();
   assert(jx.stage === 'done' && jx.execution.status === 'DONE', `登録 → DONE（${jx.stage} / ${jx.execution?.status}）`);
-  assert(/data-act="open-customize" data-target="desktop" data-name="fieldOnOff\.js"/.test(m.chat()) && /Customize で確認/.test(m.chat()), 'JS 登録カードに［Customize で確認］（登録したファイルの platform と名前）');
+  assert(/data-act="open-customize" data-target="desktop" data-name="fieldOnOff\.js"/.test(ar.cardHtml) && /Customize で確認/.test(ar.cardHtml), '反映の結果のカードに［Customize で確認］（登録したファイルの platform と名前）');
   assert(/id="kt-ai-jsreg-open-customize"/.test(m.$('kt-ai-jsreg').innerHTML), 'コードペインの結果にも［Customize で確認］');
   await clickChat(m, 'open-customize', { target: 'desktop', name: 'fieldOnOff.js' });
   assert(m.opened.length === 1 && m.opened[0].target === 'desktop' && m.opened[0].kind === 'js' && m.opened[0].name === 'fieldOnOff.js', 'クリック → openCustomize({ desktop, js, fieldOnOff.js })（タブ切替と一覧の表示は boot 側）');
@@ -328,8 +326,7 @@ console.log('\n--- §30. AI → Customize（結果カード / コードペイン
   assert(m.opened.length === 2 && m.opened[1].name === 'fieldOnOff.js', 'コードペインの［Customize で確認］も同じ');
   const m2 = mount({ openCustomize: null });
   await ticks();
-  await adoptFinal(m2); await approveFinal(m2);
-  await m2.panel.startJsRegister(m2.conv().activePlan()); await ticks(); await m2.panel.confirmJsRegister(); await ticks(8);
+  await adoptFinal(m2); await applyFinal(m2);
   await clickChat(m2, 'open-customize', { target: 'desktop', name: 'fieldOnOff.js' });
   assert(m2.panel.jsExecState().stage === 'done', 'openCustomize が無い環境ではクリックしても何も起きない（エラーにしない）');
 }
@@ -339,13 +336,22 @@ console.log('\n--- U7（Phase 20 実機）. 会話・「変更前の状態に戻
 {
   const m = mount();
   await ticks();
-  await adoptFinal(m); await approveFinal(m);
-  assert(typeof m.panel.unrevertedPreviewChange === 'function' && m.panel.unrevertedPreviewChange() === false, '登録前は確認しない');
-  await m.panel.startJsRegister(m.conv().activePlan()); await ticks(); await m.panel.confirmJsRegister(); await ticks(8);
+  await adoptFinal(m);
+  await K.waitUntil(() => m.panel.finalPrecheck().status === 'ready', 60);
+  assert(typeof m.panel.unrevertedPreviewChange === 'function' && m.panel.unrevertedPreviewChange() === false, '登録前は確認しない（承認の欄の準備は読み取りだけ）');
+  await applyFinal(m);
   assert(m.panel.jsExecState().stage === 'done' && m.panel.unrevertedPreviewChange() === true, '登録して戻していない間は、ページを離れる前に確認する（ページを離れると戻す手段が消える）');
   assert(/このページを離れる/.test(m.chat()) && /変更を中止/.test(m.chat()), 'JS 登録カード: このページを離れると会話と「変更前の状態に戻す」が使えない・その後は kintone の［変更を中止］');
-  await m.panel.startJsRollback(); await ticks(); await m.panel.confirmJsRollback(); await ticks(8);
-  assert(/rolled-back/.test(m.panel.jsExecState().stage) && m.panel.unrevertedPreviewChange() === false, `戻した後は確認しない（${m.panel.jsExecState().stage}）`);
+  //   §0e.1: 標準設定と JavaScript を 1 回で反映したので、戻すのも結果のカードから JavaScript → 設定の順（JavaScript を戻すまで設定の［戻す］は出さない）
+  const fa = () => { const h = m.chat(); const i = h.lastIndexOf('kt-ai-final-apply-card'); return i >= 0 ? h.slice(i) : ''; };
+  const jsId = m.panel.jsExecState().execution.executionId, exId = m.panel.executorState().execution.executionId;
+  assert(/data-act="js-rollback"/.test(fa()) && !/data-act="rollback"/.test(fa()) && /JavaScript を先に戻してから設定を戻します/.test(fa()), '結果のカード: 戻すときは JavaScript を先に（設定の［戻す］はまだ出さない）');
+  await clickChat(m, 'js-rollback', { execution: jsId }); await ticks(6);
+  await m.$('kt-ai-pane-exec').dispatch({ type: 'click', target: { id: 'kt-ai-jsreg-rollback-go' } }); await ticks(8);
+  assert(/rolled-back/.test(m.panel.jsExecState().stage) && m.panel.unrevertedPreviewChange() === true && /data-act="rollback"/.test(fa()) && /登録前の状態に戻し済み/.test(fa()), `JavaScript を戻した後も、設定が残る間は確認を続ける（結果のカードに設定の［戻す］が出る）（${m.panel.jsExecState().stage}）`);
+  await clickChat(m, 'rollback', { execution: exId }); await ticks(6);
+  await m.$('kt-ai-pane-exec').dispatch({ type: 'click', target: { id: 'kt-ai-exec-rollback-go' } }); await ticks(8);
+  assert(m.panel.executorState().stage === 'rolled-back' && m.panel.unrevertedPreviewChange() === false, `設定も戻した後は確認しない（${m.panel.executorState().stage}）`);
 }
 
 // =========================================================

@@ -102,8 +102,11 @@ function mount({ inputs = INPUTS, paid = true, plans = null, now = null, extra =
 const clickChat = (m, act, extra = {}) => m.$('kt-ai-chat').dispatch({ type: 'click', target: { dataset: { act, ...extra } } });
 /** 新しい流れ: 台本の 4 発言で仮案 → 採用 → 最終案まで進める（共有の部品） */
 const adopt = (m) => K.adoptOnScreen(m);
-/** 最終案のカードの［この内容で反映する］で承認する */
-const approve = async (m) => { const v = m.conv().activePlan(); await clickChat(m, 'final-approve', { plan: v.planId, version: String(v.version) }); await ticks(); return v; };
+/**
+ * §0e.1（2026-10-09）: 画面の承認は最終案のカードの［動作テスト環境へ反映］1 回（承認と反映）。準備・登録の部品の照合を確かめる節では、承認の記録だけを作る
+ *   （会話コントローラの approveFinal。承認できない最終案は承認されない）。画面のボタンで結果まで進める節は K.applyOnScreen を使う
+ */
+const approve = async (m) => { const v = m.conv().activePlan(); m.conv().approveFinal({ planId: v.planId, version: v.version }); await ticks(); return v; };
 const clickPane = (m, pane, target) => m.$(`kt-ai-pane-${pane}`).dispatch({ type: 'click', target });
 const clickTab = (m, pane) => m.$('kt-ai-drawer-tabs').dispatch({ type: 'click', target: { dataset: { pane } } });
 const writes = (m) => m.mock.calls.filter(c => !c.startsWith('GET'));
@@ -171,7 +174,7 @@ console.log('\n--- §3. 相談中 → 変更案あり: 会話は変更案のカ�
   const sum = m.$('kt-ai-change-summary').innerHTML;
   assert(new RegExp(`<h3>${NF_GOAL}</h3>`).test(sum) && /対象：フィールド・一覧/.test(sum) && /何が変わるか/.test(sum) && /更新状況フィールドを追加/.test(sum) && /確認したいこと（1 件）/.test(sum) && !/\bP[12]\b|\bE[0-9]+\b/.test(sum), `右「変更内容」の要約（対象・何が変わるか・確認したいこと。番号は出さない）: ${sum.slice(0, 200)}`);
   assert(m.$('kt-ai-plan-detail').style.display === '' && /変更計画（AI の提案）/.test(m.$('kt-ai-plan-result').innerHTML), '計画の全文は［計画の詳細と根拠］の中に残す');
-  assert(m.$('kt-ai-exec-empty').style.display === 'none' && /id="kt-ai-exec-start"[^>]*disabled/.test(m.$('kt-ai-exec').innerHTML) && /承認済みで反映できる手順がありません/.test(m.$('kt-ai-exec').innerHTML), '右の「反映」: 承認が無いうちは押せない（理由を出す）');
+  assert(m.$('kt-ai-exec-empty').style.display === 'none' && !/id="kt-ai-exec-start"/.test(m.$('kt-ai-exec').innerHTML) && /最終案のカードの［動作テスト環境へ反映］/.test(m.$('kt-ai-exec').innerHTML), '右の「反映」: 最終案の流れでは準備・最終確認の段を出さず、最終案のカードの［動作テスト環境へ反映］を案内する（§0e.1）');
   assert(m.panel.applyHold() === null, '優先度の無い確認事項（あとで決めてよい扱い）は反映を止めない');
 }
 
@@ -186,9 +189,10 @@ console.log('\n--- §4. 先に確認したいこと（blocking）が残ってい
   const hold = m.panel.applyHold();
   assert(/先に確認したいことが 1 件残っています/.test(hold || ''), `反映を止める理由: ${hold}`);
   //   C-1 第 3 段: 手順ごとの承認（decide）ではなく最終案の承認。先に決めたいことが残る最終案は承認できない
+  const ar4 = await K.applyOnScreen(m);
   await approve(m);
   const r = await m.panel.startExecutor();
-  assert(r === null && !m.conv().activePlan().approval && m.panel.executorState().stage === 'idle' && /id="kt-ai-exec-start"[^>]*disabled/.test(m.$('kt-ai-exec').innerHTML) && /先に確認したいことが 1 件残っています/.test(m.$('kt-ai-exec').innerHTML), '承認しても準備しない・ボタンは押せない・理由を出す');
+  assert(r === null && ar4.button && ar4.button.disabled && !m.conv().activePlan().approval && m.panel.executorState().stage === 'idle' && writes(m).length === 0 && !/id="kt-ai-exec-start"/.test(m.$('kt-ai-exec').innerHTML) && /先に確認したいことが 1 件残っています/.test(m.$('kt-ai-exec').innerHTML), '［動作テスト環境へ反映］は押せず、承認も準備もしない（書き込み 0）・右の「反映」に理由を出す');
   //   C-1 第 3 段: 確認したいことのカード（questions）は削除した。最終案のカードの「残る判断」と［この内容で反映する］の理由で知らせる（R10-1・R19-5）。
   //   計画の確認事項のおすすめ（recommendation）は、最終案のカードの「残る判断」に添える（以前は確認したいことのカードに出た）
   const fin = K.stripC(m.chat());
@@ -206,7 +210,7 @@ console.log('\n--- §5. 更新中: 右は前の内容として示し、反映を
   const sending = m.panel.send('担当者は既存のフィールドを使って、一覧の追加だけにして'); await ticks(6);
   assert(m.conv().isBusy() && m.conv().state.working === 'REVISE', `前提: 直している途中: ${m.conv().state.working}`);
   assert(/data-status="updating">更新中</.test(m.$('kt-ai-ws-state').innerHTML) && m.$('kt-ai-right-banner').style.display === '' && /できるまで、変更内容・確認結果・コードは前の内容です（反映はできません）。/.test(m.$('kt-ai-right-banner').textContent), `右の見出しは「更新中」・前の内容であることを示す: ${m.$('kt-ai-ws-state').innerHTML} / ${m.$('kt-ai-right-banner').textContent}`);
-  assert(/新しい内容の確認が終わるまで/.test(m.panel.applyHold() || '') && /id="kt-ai-exec-start"[^>]*disabled/.test(m.$('kt-ai-exec').innerHTML), `直している間は反映できない: ${m.panel.applyHold()}`);
+  assert(/新しい内容の確認が終わるまで/.test(m.panel.applyHold() || '') && !/id="kt-ai-exec-start"/.test(m.$('kt-ai-exec').innerHTML) && /新しい内容の確認が終わるまで/.test(m.$('kt-ai-exec').innerHTML) && K.applyButtonOf(m) && K.applyButtonOf(m).disabled, `直している間は反映できない（最終案のカードの［動作テスト環境へ反映］は押せず、右の「反映」に理由）: ${m.panel.applyHold()}`);
   g.open(); await sending; await ticks(8);
   assert(/data-status="ready">未反映</.test(m.$('kt-ai-ws-state').innerHTML) && m.$('kt-ai-right-banner').style.display === 'none' && m.panel.applyHold() === null, `直し終わったら最新の内容（案内を消す・反映できる状態に戻す）: ${m.panel.applyHold()}`);
   //   C-1 第 3 段: 直した案のカードは最終案のカード（「最終案を直しました。」）。前のカードは 1 行に畳む（R10-4・F2-2 と同じ表示）
@@ -221,11 +225,10 @@ console.log('\n--- §6. 反映後 → 反映の記録（ヘッダーから開く
   await ticks();
   await adopt(m);
   //   C-1 第 3 段: 手順ごとの承認（decide）ではなく最終案の承認（［この内容で反映する］）の後に反映する
-  await approve(m);
-  await m.panel.startExecutor(); await m.panel.confirmExecutor(); await ticks(6);
-  assert(m.panel.executorState().stage === 'done' && /data-status="applied">反映済み</.test(m.$('kt-ai-ws-state').innerHTML), `反映後: 右の見出しは「反映済み」: ${m.$('kt-ai-ws-state').innerHTML}`);
+  const ar6 = await K.applyOnScreen(m);   // §0e.1: 最終案のカードの［動作テスト環境へ反映］1 回で承認と反映
+  assert(ar6.run && ar6.run.ok && m.panel.executorState().stage === 'done' && /data-status="applied">反映済み</.test(m.$('kt-ai-ws-state').innerHTML), `反映後: 右の見出しは「反映済み」: ${m.$('kt-ai-ws-state').innerHTML}`);
   const chat = m.chat();
-  assert(/動作テスト環境へ反映しました。/.test(chat) && /反映後の確認：✓ 1 件一致/.test(chat) && /運用環境には反映されていません/.test(chat) && !/VERIFIED|snapshot/.test(outsideDetails(chat)), '会話: 反映の結果（利用者の言葉）・運用環境は変えていない');
+  assert(/動作テスト環境へ反映しました。/.test(chat) && /標準設定: ✓ 1 件を反映（反映後の確認で一致）/.test(chat) && /運用環境には反映されていません/.test(chat) && !/VERIFIED|snapshot/.test(outsideDetails(chat)), '会話: 反映の結果（利用者の言葉）・運用環境は変えていない');
   assert(/<span class="kt-ai-count">1<\/span>/.test(m.$('kt-ai-header').innerHTML), 'ヘッダーの［反映の記録］に件数');
   await m.$('kt-ai-header').dispatch({ type: 'click', target: { id: 'kt-ai-log-open', dataset: { act: 'open-log' } } }); await ticks();
   assert(m.panel.drawerState().pane === 'log' && /反映済み（未復元）/.test(m.$('kt-ai-apply-log').innerHTML), '［反映の記録］で右に記録を開く');

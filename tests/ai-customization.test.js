@@ -390,7 +390,7 @@ const clickCode = (m, id) => m.$('kt-ai-pane-code').dispatch({ type: 'click', ta
   assert(/設定の手順 1 件（Toolkit から自動で反映できるのは 1 件）/.test(fin) && /既存の「fieldOnOff\.js」に統合/.test(fin) && /対象：一覧／JavaScript（PC：編集画面）/.test(m.$('kt-ai-change-summary').innerHTML), '最終案のカード: 設定の手順 1 件と JavaScript（fieldOnOff.js に統合）。右の「変更内容」の要約に対象（一覧／JavaScript の画面）');
   // Phase 19: カスタマイズの詳細（統合先・イベント・フィールド・不足する理由）は右の「変更内容」の実装仕様カードだけ。会話にはイベント・フィールドの内訳を出さない
   const specPane = m.$('kt-ai-spec').innerHTML;
-  assert(!/kt-ai-customization-card/.test(html) && !/app\.record\.edit\.show/.test(html) && !/amount（CONTROL）/.test(html) && /kt-ai-spec-card/.test(specPane) && /✎ fieldOnOff\.js を変更/.test(specPane) && /標準で不足/.test(specPane) && /app\.record\.edit\.show/.test(specPane) && /amount（CONTROL）/.test(specPane), '実装仕様カード（右の「変更内容」）: ✎ fieldOnOff.js を変更・イベント・フィールド（access）・不足する理由。会話にはイベント・フィールドの内訳を出さない');
+  assert(!/kt-ai-customization-card/.test(html) && !/app\.record\.edit\.show/.test(html) && !/amount（CONTROL）/.test(html) && /kt-ai-spec-card/.test(specPane) && /✎ fieldOnOff\.js を変更/.test(specPane) && /標準で不足/.test(specPane) && /編集画面/.test(specPane) && /「[^」]+」（制御）/.test(specPane) && !/app\.record\.|amount（CONTROL）|<b>C1<\/b>/.test(specPane), '実装仕様カード（右の「変更内容」）: ✎ fieldOnOff.js を変更・画面・フィールド（名前と扱い）・不足する理由（§0e.3: イベント名・コード・扱いの英語・番号 C1 は出さない）。会話にはイベント・フィールドの内訳を出さない');
   assert(!/C1|v1/.test(textOf(html)), '会話（最終案のカード）に内部の番号（C1・版の v1）を出さない');
   const reviewPane = m.$('kt-ai-review-result').innerHTML;
   assert(/data-act="generate" data-cid="C1"/.test(reviewPane) && /コードを作る/.test(reviewPane) && !/data-act="generate"/.test(html), '［コードを作る］は右の「確認結果」の JS の判定（会話には無い。押すと最終案の作り直し: ai-flow-redesign F2-6）');
@@ -400,7 +400,7 @@ const clickCode = (m, id) => m.$('kt-ai-pane-code').dispatch({ type: 'click', ta
   assert(/登録済み JS/.test(m.$('kt-ai-header').innerHTML) && /fieldOnOff\.js/.test(m.$('kt-ai-header').innerHTML), 'ヘッダー詳細: 登録済み JS（既存カスタマイズ設定）');
   // 「これで進めて」はコードを作らない。承認の前は最終案の承認へ案内する（C-1 第 3 段: 手順ごとの承認・仕様の確定へは案内しない）
   const pv = await m.panel.send('これで進めて');
-  assert(pv.intent === KTAiConversation.INTENT.REQUEST_PREVIEW && m.calls2.generate.length === 1 && m.msgs().some(x => x.data?.kind === 'preview-needs-approval') && /［この内容で反映する］/.test(m.chat()), '「これで進めて」: REQUEST_PREVIEW。コードは生成しない・承認の前は最終案の承認へ案内');
+  assert(pv.intent === KTAiConversation.INTENT.REQUEST_PREVIEW && m.calls2.generate.length === 1 && m.msgs().some(x => x.data?.kind === 'preview-needs-approval') && /［動作テスト環境へ反映］/.test(m.chat()), '「これで進めて」: REQUEST_PREVIEW。コードは生成しない・承認の前は最終案のカードの［動作テスト環境へ反映］へ案内');
   // 説明（EXPLAIN_CUSTOMIZATION）
   const ex = await m.panel.send('C1 はなぜ JavaScript が必要？');
   assert(ex.intent === KTAiConversation.INTENT.EXPLAIN_CUSTOMIZATION && m.calls.ask.length === 1 && m.calls.ask[0].ctx.planContext?.kind === 'EXPLAIN_PLAN' && /JavaScript カスタマイズの説明/.test(m.chat()), 'EXPLAIN_CUSTOMIZATION: planContext（EXPLAIN_PLAN）で説明だけ。計画は変えない');
@@ -415,7 +415,7 @@ const clickCode = (m, id) => m.$('kt-ai-pane-code').dispatch({ type: 'click', ta
   m.panel.showCode('C1', { view: 'code' });
   assert(m.panel.drawerState().open && m.panel.drawerState().pane === 'code' && m.$('kt-ai-code-view').textContent === entry.review.finalCode && m.$('kt-ai-code-view').style.display === '' && m.$('kt-ai-diff-view').style.display === 'none', '右の「コード」: 最終コード');
   assert(/✎ 既存 JS を変更/.test(m.$('kt-ai-code-head').innerHTML) && /✓ 検査を通過/.test(m.$('kt-ai-code-head').innerHTML) && /既存ファイルへの統合/.test(m.$('kt-ai-code-review').innerHTML) && /元のコードは保持/.test(m.$('kt-ai-code-review').innerHTML) && /＋3 行 \/ −0 行/.test(m.$('kt-ai-code-review').innerHTML) && /安全性/.test(m.$('kt-ai-code-review').innerHTML) && !/Patch|Security/.test(m.$('kt-ai-code-review').innerHTML), '右の「コード」: 見出し（✓ 検査を通過）と Code Review の一覧（既存ファイルへの統合 ＋3 / −0 行・元のコードは保持。検査名は日本語）');
-  assert(m.$('kt-ai-code-register').style.display === '' && m.$('kt-ai-code-register').disabled === false, '登録ボタンは右の「コード」に（採用不可でなければ出る。登録は最終案の承認の後: ai-flow-redesign F10-2）');
+  assert(m.$('kt-ai-code-register').style.display === 'none', '右の「コード」に登録ボタンは出さない（§0e.1: 仮案から作った最終案の登録は、最終案のカードの［動作テスト環境へ反映］で標準設定と続けて行う）');
   m.panel.showCode('C1', { view: 'diff' });
   assert(m.$('kt-ai-diff-view').style.display === '' && /^\+\s*if \(record\['ステータス'\] && record\['ステータス'\]\.value === '完了'\)/m.test(m.$('kt-ai-diff-view').textContent) && / {0,}kintone\.events\.on/.test(m.$('kt-ai-diff-view').textContent), '差分 → Before / After（追加行は +・既存行は保持）');
   // コピー（右の「コード」のボタン）
@@ -431,23 +431,17 @@ const clickCode = (m, id) => m.$('kt-ai-pane-code').dispatch({ type: 'click', ta
   // Q&A は影響なし
   const qa = await m.panel.send('このフィールドは何に使ってる？');
   assert(qa.intent === KTAiConversation.INTENT.ASK && m.calls.ask.length === 2 && !m.calls.ask[1].ctx.planContext, 'Q&A は影響なし（ASK → assistant-qa。planContext なし）');
-  // 最終案の承認 → 反映（Preview Executor は JS を反映しない）
-  await K.clickChat(m, 'final-approve', { plan: v.planId, version: String(v.version) }); await ticks(4);
-  assert(v.approval && m.conv().approvalValid().ok, '前提: 最終案のカードの［この内容で反映する］で承認した');
-  const rd = await m.panel.send('これで進めて');
-  const ready = m.msgs().filter(x => x.data?.kind === 'preview-ready').pop();
-  assert(rd.intent === KTAiConversation.INTENT.REQUEST_PREVIEW && ready && ready.data.readiness.executable === 1 && ready.data.readiness.unsupported === 1 && ready.data.readiness.customizations === 1, '承認後の readiness: 実行可 1（P1）・未対応 1（JS の P2）・JS 1');
-  // 2026-10-06: 反映の操作は右下の右の「反映」（#kt-ai-pane-exec）。確認事項の無い変更案なので反映は止まらない（applyHold は null）
-  assert(m.panel.applyHold() === null && /id="kt-ai-exec-start"/.test(m.$('kt-ai-exec').innerHTML) && !/id="kt-ai-exec-start"[^>]*disabled/.test(m.$('kt-ai-exec').innerHTML), '右の「反映」: 止める理由は無く［動作テスト環境へ反映］を押せる');
-  await m.$('kt-ai-pane-exec').dispatch({ type: 'click', target: { id: 'kt-ai-exec-start' } });
-  await ticks(8);
-  assert(m.panel.executorState().stage === 'confirm', 'Executor: prepare → 最終確認');
-  await m.$('kt-ai-pane-exec').dispatch({ type: 'click', target: { id: 'kt-ai-exec-go' } });
-  await ticks(12);
+  // 最終案の承認と反映（§0e.1: ［動作テスト環境へ反映］1 回。標準設定（Preview Executor は JS を反映しない）→ JavaScript の登録の順）
+  await K.waitUntil(() => m.panel.finalPrecheck().status === 'ready', 60);
+  { const pre = m.panel.finalPrecheck();
+    assert(m.panel.applyHold() === null && pre.items.settings.length === 1 && pre.items.files.join() === '✎ fieldOnOff.js（PC）既存ファイルを更新（同じ位置）' && pre.items.manual.length === 0 && !v.approval && writes(m).length === 0, '承認の欄: 標準設定 1 件（一覧）・JavaScript 1 件（既存ファイルの更新）。JS の手順は「自動では反映しない手順」に数えない・まだ承認しない・書き込み 0'); }
+  const ar = await K.applyOnScreen(m);
+  assert(ar.button && !ar.button.disabled && v.approval && m.conv().approvalValid().ok, '前提: 最終案のカードの［動作テスト環境へ反映］1 回で承認した（止める理由は無い）');
   const ex2 = m.panel.executorState().execution;
   assert(ex2 && ex2.status === 'DONE' && ex2.steps.find(s => s.stepId === 'P1')?.status === 'VERIFIED' && ex2.steps.find(s => s.stepId === 'P2')?.status === 'UNSUPPORTED', 'Preview Executor: P1（一覧）は VERIFIED・JS の P2 は UNSUPPORTED（反映しない）');
-  assert(writes(m).length > 0 && !writes(m).some(c => /customize/.test(c)), `Executor の書き込みに customize.json（JS 登録）は無い（${writes(m).length} 件）`);
-  assert(/反映後の確認：✓ 1 件一致/.test(m.chat()) && !/VERIFIED/.test(textOf(m.chat())), '反映のカード: 「反映後の確認：✓ 1 件一致」（VERIFIED の語は会話に出さない）');
+  { const w = writes(m); const k = w.indexOf('POST file');
+    assert(k > 0 && !w.slice(0, k).some(c => /customize/.test(c)) && w.slice(k).join() === 'POST file,PUT customize' && m.panel.jsExecState().stage === 'done', `標準設定の書き込み（Executor）に customize.json は無く、その後に JavaScript を登録する（${w.join(',')}）`); }
+  assert(/標準設定: ✓ 1 件を反映（反映後の確認で一致）/.test(ar.card) && /JavaScript: ✎ fieldOnOff\.js（PC） を登録/.test(ar.card) && ar.cardCount === 1 && !/VERIFIED/.test(textOf(m.chat())), '反映のカード 1 枚: 標準設定 ✓ 1 件・JavaScript を登録（VERIFIED の語は会話に出さない）');
   assert(m.panel.generated('C1') === entry, '生成結果は計画の版に保持されたまま');
 }
 
@@ -569,7 +563,7 @@ console.log('\n--- §53-4. KTAiChatUi（純関数）---');
   const card = KTAiChatUi.specCardHtml(vSpec);
   assert(/生成可/.test(card) && /✎ fieldOnOff\.js を変更/.test(card) && !/data-act="confirm-spec"/.test(card), 'specCardHtml（右）: 生成可バッジ・統合先（閲覧だけ）');
   const cardNew = KTAiChatUi.specCardHtml({ planId: 'p', version: 1, status: 'ACTIVE', plan: PLAN_NEW_JS.plan, review: null, spec: { specId: 'p:spec', version: 1, status: 'DRAFT', customizations: [NEW_JS_CUST()] } });
-  assert(/＋ 新規 JS/.test(cardNew) && /app\.record\.create\.change\.amount/.test(cardNew), 'specCardHtml（新規 JS）');
+  assert(/＋ 新規 JS/.test(cardNew) && /追加画面/.test(cardNew) && !/app\.record\./.test(cardNew), 'specCardHtml（新規 JS）: イベントは画面の名前で出す（§0e.3）');
   //   会話のコードのカード（MSG.CODE・codeCardHtml）は削除した（F7-1・F7-2）。検査の一覧は右の「コード」（codePaneHtml）
   const rv = KTCodeReview.review({ generated: genPatch(), customization: hy.plan.customizations[0], plan: hy.plan, data: INPUTS.data, scan: INPUTS.scan, existingSource: SRC });
   v.generated.C1 = { generated: genPatch(), review: rv, existingSource: SRC };

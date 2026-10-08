@@ -1,4 +1,4 @@
-// 新しい流れ（依頼 → 仮案 → 採用 → 計画 → 生成 → 最終案 → 承認 → 反映の準備）を偽の services で通す共有の部品（C-1 第 3 段・2026-10-08）。
+// 新しい流れ（依頼 → 仮案 → 採用 → 計画 → 生成 → 最終案 → 承認と反映）を偽の services で通す共有の部品（C-1 第 3 段・2026-10-08。§0e.1 の 1 回の反映は 2026-10-09）。
 //   tests/ai-flow-redesign.test.js の部品（台本・偽の計画と生成工程・会話コントローラの偽 services・画面の偽 client）を、同じ本文のまま共通にしたもの。
 //   古い確認の流れ（質問カード・仕様の確定・従来の生成）を前提にしたテストを移し替えるときに使う。
 //
@@ -14,7 +14,10 @@
 //   // 画面（mountAiWorkspace と偽 client）: health に proposal。K.mount({ planImpl, generateImpl, health })
 //   const m = K.mount();
 //   const v = await K.adoptOnScreen(m);                  // 台本の 4 発言 → 最終案のカード
-//   const { approved, exec, js } = await K.prepareOnScreen(m);   // ［この内容で反映する］→ 反映の準備（startExecutor / startJsRegister。書き込みはしない）
+//   const { ready, pre, exec, js } = await K.prepareOnScreen(m);   // 承認の欄の準備（書き込みなし。設定の手順と JavaScript の登録の準備）が終わるまで待つ（押さない）
+//   // §0e.1（2026-10-09）: 承認と反映は最終案のカードの［動作テスト環境へ反映］1 回。押して結果まで進める部品:
+//   const r = await K.applyOnScreen(m, { before });          // 押す前のボタン・承認の欄、押した後の結果（finalRun）・書き込み・結果のカード
+//   //   混在（標準設定と JavaScript）の画面: const { m } = await K.mountFinal({ kind: 'mixed' | 'js' | 'settings' })（作業の基準はモックの今の状態。liveBase）
 //   //   K.HEALTH の conversation から 'proposal' を外すと「接続先が非対応」の経路（計画・生成・登録に進まない）
 //   //   計画の偽物: K.planJs（JavaScript あり。cust・questions・requirementOps を変えられる）・K.PLAN_V1（画面用。設定の手順だけ）・K.planOk / planFail / planThrow
 //   // 台本（K.script）の発言: 課長・部長の承認者を選ぶ運用にしたい / 100円未満は部長不要、100万円以上は必要 / 7営業日で。会社独自の休業日は今回はなし / おすすめで
@@ -135,7 +138,33 @@ function createNewFlowKit(T) {
   const answerFor = (ctx, text) => ({ ok: true, contractVersion: '2.1', meta: { requestId: 'qa-1', usage: { usedThisMonth: 2, monthlyLimit: 20 }, normalization: { warnings: [] } }, answer: text, facts: [], analysis: [], recommendations: [], unknowns: [] });
   const makeStorage = () => { const m = new Map(); return { getItem: (k) => (m.has(k) ? m.get(k) : null), setItem: (k, v) => m.set(k, String(v)), removeItem: (k) => m.delete(k) }; };
   const gate = () => { let open; const p = new Promise(r => { open = r; }); return { p, open }; };
-  function mount({ health = HEALTH, proposeGate = null, planImpl = null, generateImpl = null, extra = null } = {}) {
+  /**
+   * §0e.1（2026-10-09）: 作業の基準（KTDevBase）をモックの今の状態から作る loadDevBase（動作テスト環境 = モックの API の GET。運用環境 = 固定の INPUTS）。
+   *   設定を反映した後の基準の取り直し・登録前の再検査が、新設したフィールドを含む今の設定で行われる（実機と同じ順序を画面で確かめるため）
+   */
+  function loadDevBaseFromMock(mockRef) {
+    const PROD = {
+      'app/form/fields': (d) => ({ properties: clone(d.fields || {}) }), 'app/form/layout': (d) => ({ layout: clone(d.layout || []) }), 'app/views': (d) => ({ views: clone(d.views?.views || {}) }),
+      'app/status': (d) => clone(d.status || { enable: false, states: null, actions: null }), 'app/notifications/general': (d) => clone(d.generalNotify || { notifications: [], notifyToCommenter: false }),
+      'app/notifications/perRecord': (d) => clone(d.perRecordNotify || { notifications: [] }), 'app/notifications/reminder': (d) => clone(d.reminderNotify || { notifications: [], timezone: 'Asia/Tokyo' }),
+      'app/actions': (d) => clone(d.actions || { actions: {} }), 'app/customize': (d) => clone(d.customize || { scope: 'ALL', desktop: { js: [], css: [] }, mobile: { js: [], css: [] } }),
+      'app/settings': (d) => clone(d.settings || { name: 'app' }), 'app/acl': (d) => clone(d.appAcl || { rights: [] }), 'record/acl': (d) => clone(d.recordAcl || { rights: [] }), 'field/acl': (d) => clone(d.fieldAcl || { rights: [] }),
+      'app/reports': (d) => clone(d.reports || { reports: {} }), 'app/plugins': (d) => clone(d.appPlugins || { plugins: [] }),
+    };
+    return async () => {
+      const api = mockRef().api;
+      const PREV = { 'app/form/fields': () => api.getPreviewFields('341'), 'app/form/layout': () => api.getPreviewLayout('341'), 'app/views': () => api.getPreviewViews('341'), 'app/status': () => api.getPreviewStatus('341'), 'app/notifications/general': () => api.getPreviewGeneralNotifications('341'), 'app/notifications/perRecord': () => api.getPreviewPerRecordNotifications('341'), 'app/notifications/reminder': () => api.getPreviewReminders('341'), 'app/actions': () => api.getPreviewActions('341'), 'app/customize': () => api.getPreviewCustomize('341') };
+      const getImpl = async (path) => {
+        const mm = /^\/k\/v1\/(preview\/)?(.+)$/.exec(path);
+        const key = mm[2];
+        if (mm[1] && PREV[key]) return PREV[key]();
+        const fn = PROD[key]; if (!fn) throw Object.assign(new Error(`unknown path ${path}`), { code: 'TEST' });
+        return { ...fn(INPUTS.data), revision: '1' };
+      };
+      return T.KTDevBase.load({ appId: '341', getImpl, download: async (k) => api.downloadFile(k), now: () => new Date('2026-10-09T00:00:00Z').getTime() });
+    };
+  }
+  function mount({ health = HEALTH, proposeGate = null, planImpl = null, generateImpl = null, extra = null, liveBase = false } = {}) {
     const storage = makeStorage();
     const settings = KTAiClient.createSettingsStore({ storage, host: 't.cybozu.com' });
     settings.setConsent(true);
@@ -162,7 +191,7 @@ function createNewFlowKit(T) {
     const flow = { start: async () => ({}), cancel() { }, reopen: () => false, state: () => ({ phase: 'idle' }), isRunning: () => false };
     const host = makeFakeHost();
     const mock = makeKintoneMock(INPUTS.data, { jsSources: [] });
-    const panel = mountAiWorkspace(host, { getInputs: () => INPUTS, copyText: async () => true, downloadText: () => { }, colors: { border: '#ccc', bg: '#fff' }, settings, session, hostname: 't.cybozu.com', connectFlow: flow, executor: { api: mock.api, appId: '341' }, now: () => clock.t, clock: () => clock.t, ...(extra || {}) });
+    const panel = mountAiWorkspace(host, { getInputs: () => INPUTS, copyText: async () => true, downloadText: () => { }, colors: { border: '#ccc', bg: '#fff' }, settings, session, hostname: 't.cybozu.com', connectFlow: flow, executor: { api: mock.api, appId: '341' }, now: () => clock.t, clock: () => clock.t, ...(liveBase ? { loadDevBase: loadDevBaseFromMock(() => mock) } : {}), ...(extra || {}) });
     const $ = (id) => host.querySelector(`#${id}`);
     return Object.assign(mx, { host, panel, $, calls, clock, mock, conv: () => panel.conversation(), chat: () => $('kt-ai-chat').innerHTML, msgs: () => panel.conversation().state.messages });
   }
@@ -295,23 +324,98 @@ function createNewFlowKit(T) {
   /** 画面: 台本の 4 つの発言で仮案 → 採用 → 最終案まで進める（mount の結果 m） */
   const adoptOnScreen = async (m, { requests = REQUESTS } = {}) => { for (const s of requests) { await m.panel.send(s); await ticks(10); } await ticks(8); return m.conv().activePlan(); };
   /**
-   * 画面: 最終案のカードの［この内容で反映する］で承認し、反映の準備（設定の手順は startExecutor・JavaScript は startJsRegister）まで進める。
-   *   承認できない最終案はボタンを押しても承認されない（approved: false）。準備は書き込まない（最終確認の前で止まる）
-   * @returns {{ v, approved, exec, js }}
+   * 画面: 最終案ができた後の承認の欄の準備（書き込みなし。設定の手順は KTPlanExecutor.prepare・JavaScript は登録の準備）が終わるまで待つ。
+   *   §0e.1（2026-10-09）: 承認と反映は最終案のカードの［動作テスト環境へ反映］1 回になったので、この部品は押さない（押して結果まで進めるのは applyOnScreen）。
+   *   承認できない最終案は準備しない（ready: false・exec / js は null）
+   * @returns {{ v, approved, ready, pre, exec, js, button }}
    */
   const prepareOnScreen = async (m) => {
     const v = m.conv().activePlan();
-    if (!v || !v.final) return { v, approved: false, exec: null, js: null };
-    await clickChat(m, 'final-approve', { plan: v.planId, version: String(v.version) }); await ticks(4);
-    const approved = !!(v.approval && m.conv().approvalValid().ok);
-    const hasSteps = (v.plan && Array.isArray(v.plan.steps) ? v.plan.steps : []).some(st => st && st.actionType !== 'CUSTOMIZATION_REQUIRED');
-    const exec = hasSteps ? await m.panel.startExecutor() : null; await ticks(4);
-    if (exec) m.panel.cancelExecutor();
-    const js = Object.keys(v.generated || {}).length ? await m.panel.startJsRegister(v) : null; await ticks(4);
-    return { v, approved, exec, js };
+    if (!v || !v.final) return { v, approved: false, ready: false, pre: null, exec: null, js: null, button: null };
+    for (let i = 0; i < 60; i++) { const p = m.panel.finalPrecheck(); if (p.planId === v.planId && ['ready', 'blocked', 'unavailable'].includes(p.status)) break; await tick(); }
+    const pre = clone(m.panel.finalPrecheck());
+    return { v, approved: !!v.approval, ready: pre.status === 'ready', pre, exec: pre.settingsStatus ? { status: pre.settingsStatus } : null, js: pre.jsStatus ? { status: pre.jsStatus } : null, button: applyButtonOf(m) };
   };
 
-  return { tick, ticks, clone, buildInputs, INPUTS, META, B, A, Q, APPROVER, ROUTE, BASE, CSV, Q_THRESHOLD, Q_MIDDLE, Q_DAYS, Q_HOLIDAYS, Q_LOCK, Q_TIMING, B_SELECT, B_ROUTE, B_UNDER, B_OVER, B_NOTIFY_TO, B_NOTIFY_IF, B_LOCK, STD, req, idBy, reqIdBy, script, normalized, planOk, planFail, planThrow, gateMk, HEALTH, spec, mkStep, PLAN_META, PLAN_V1, answerFor, makeStorage, gate, mount, clickChat, RP, KTCodeReview, DATA_C, LABELS_C, custOf, CUST_C1, ST_C, handlerC, GOOD, BAD, WARN, VALUE, LOCKSAVE, CAND, GEN_EFFECT_FEATURES, GW_SCOPE, EXPECT_OF, NOMATCH_OF, fakeVerification, planJs, makeGenerate, makeConvC, adoptC, finalHtml, stripC, REQUESTS, approveC, adoptOnScreen, prepareOnScreen };
+
+  // ---- §0e.1（2026-10-09）: 承認から結果まで画面のボタンで進める部品 ----
+  /** 生成工程が必須の効果の検証に対応している接続先（health の customization-generator.verification） */
+  const HEALTH_V = (() => { const h = clone(HEALTH); h.registry.toolkit['customization-generator'].verification = ['requirementId', 'feedback', ...GEN_EFFECT_FEATURES]; return h; })();
+  /** 新設するフィールド（承認メモ。コードは approval_memo） */
+  const NEW_MEMO = { temporaryId: 'NEW_FIELD_1', label: '承認メモ', suggestedCode: 'approval_memo', type: 'SINGLE_LINE_TEXT', typeValid: true, required: false, options: [], reason: '承認の記録を残すフィールドが無いため', evidenceIds: [], alternativeExistingFieldCode: null, codeConflict: false, labelDuplicate: false };
+  const ST_S = "record['ステータス'] && record['ステータス'].value === '承認待ち'";
+  const lockCode = (field) => `(function () {\n  'use strict';\n  kintone.events.on(['app.record.edit.show'], function (event) {\n    const record = event.record;\n    if (${ST_S}) record['${field}'].disabled = true;\n    return event;\n  });\n})();`;
+  /** 画面の計画（契約の形）の JavaScript: field（計画の中の名前。新設なら NEW_FIELD_1）を承認待ちで編集不可にする */
+  const custLock = (field, o = {}) => ({ customizationId: 'C1', requirement: '承認待ちでは編集できないようにする', whyStandardInsufficient: 'ステータスで切り替えるアクセス権は無い', strategy: 'NEW_JS_FILE', platform: ['desktop'], implementation: 'JAVASCRIPT', events: ['app.record.edit.show'], fields: [{ code: 'ステータス', access: 'READ' }, { code: field, access: 'CONTROL', condition: 'ステータス in ("承認待ち")', effects: ['lock'] }], apis: [], existingFiles: [], risks: [], questions: [], dependsOn: [], evidenceIds: [], ...o });
+  /**
+   * 画面の計画（契約の形）。kind = 'mixed'（承認メモの追加・一覧の追加・承認メモを編集不可にする JavaScript。JavaScript は承認メモの追加に依存）/
+   *   'js'（既存の案件名を編集不可にする JavaScript だけ）/ 'settings'（一覧の追加だけ）
+   */
+  const screenPlan = (kind = 'mixed') => (goal) => {
+    const b = PLAN_V1(goal);
+    const view = mkStep('P2', 'ADD_VIEW', 'VIEW', '承認待ち一覧', { name: '承認待ち一覧', fields: ['owner', 'case_name'], filterCond: 'owner in (LOGINUSER())', sort: 'due_date asc' }, { title: '一覧「承認待ち一覧」を追加' });
+    if (kind === 'settings') return { ...b, plan: { ...b.plan, steps: [view] } };
+    if (kind === 'js') return { ...b, plan: { ...b.plan, solution: 'CUSTOMIZATION', assessment: { ...b.plan.assessment, summary: '承認待ちでは案件名を編集できないようにします。' }, steps: [mkStep('C1', 'CUSTOMIZATION_REQUIRED', 'JS', null, { customizationId: 'C1' }, { title: 'JavaScript', solution: 'CUSTOMIZATION' })], customizations: [custLock('case_name')] } };
+    return { ...b, plan: { ...b.plan, solution: 'HYBRID', assessment: { ...b.plan.assessment, summary: '承認メモを追加し、承認待ちでは編集できないようにします。' }, proposedFields: [clone(NEW_MEMO)],
+      steps: [mkStep('P1', 'ADD_FIELD', 'PROPOSED_FIELD', 'NEW_FIELD_1', { fieldType: 'SINGLE_LINE_TEXT' }, { title: '承認メモフィールドを追加' }), view, mkStep('C1', 'CUSTOMIZATION_REQUIRED', 'JS', null, { customizationId: 'C1' }, { title: 'JavaScript', solution: 'CUSTOMIZATION', dependsOn: ['P1'] })],
+      customizations: [custLock('NEW_FIELD_1', { requirement: '承認待ちでは承認メモを編集できないようにする', dependsOn: ['P1'] })] } };
+  };
+  /** 画面の client.plan の偽物（契約の形を validatePlan に通す） */
+  const planImplOf = (raw) => ({ ctx, requestId }) => { const vv = KTAiClient.validatePlan(raw(ctx.goal), ctx); if (!vv.ok) throw new Error(JSON.stringify(vv.errors)); return { ...vv.normalized, requestId, clientWarnings: vv.warnings }; };
+  /** 画面の client.generate の偽物（生成工程の応答の形を validateGenerated に通す）。field = 生成したコードが編集不可にするフィールドのコード */
+  const screenGenerate = ({ field = 'approval_memo', targetFile = 'memoLock.js' } = {}) => {
+    const calls = [];
+    const impl = async ({ ctx, requestId }) => {
+      calls.push(clone(ctx));
+      const code = lockCode(field);
+      const req0 = (ctx.verification && ctx.verification.requiredEffects) || [];
+      const candidateHash = KTScan.candidateHashOf({ strategy: 'NEW_JS_FILE', targetFile, code, customizationId: 'C1' });
+      const resp = { ok: true, contractVersion: '2.1', meta: { requestId, gateway: { product: 'toolkit', feature: 'customization-generator', promptVersion: '1', contextVersion: 'customization-1' }, normalization: { warnings: [] }, ai: { model: 'm' } }, generated: { strategy: 'NEW_JS_FILE', targetFile, summary: '承認待ちでは編集できないようにします。', code, patch: null, events: ['app.record.edit.show'], fields: [{ code: field, access: 'CONTROL' }], apis: [], assumptions: [], warnings: [], coverage: [{ requirementId: 'C1', status: 'MET', note: '' }] }, verification: fakeVerification({ code, has: { [field]: ['lock'] } }, req0, { candidateHash }) };
+      const vv = KTAiClient.validateGenerated(resp, ctx);
+      if (!vv.ok) throw new Error(JSON.stringify(vv.errors));
+      return { ...vv.normalized, requestId };
+    };
+    return { impl, calls };
+  };
+  /** 画面: 計画の種類 kind で台本の 4 発言 → 最終案まで（作業の基準はモックの今の状態） */
+  const mountFinal = async ({ kind = 'mixed', field = null, health = HEALTH_V, liveBase = true } = {}) => {
+    const gen = screenGenerate({ field: field || (kind === 'js' ? 'case_name' : 'approval_memo'), targetFile: kind === 'js' ? 'caseLock.js' : 'memoLock.js' });
+    const m = mount({ health, planImpl: planImplOf(screenPlan(kind)), generateImpl: gen.impl, liveBase });
+    await ticks();
+    const v = await adoptOnScreen(m);
+    await ticks(20);
+    return { m, v, gen };
+  };
+  /** 最終案のカードの［動作テスト環境へ反映］の状態（押せるか・横の文） */
+  const applyButtonOf = (m) => {
+    const h = m.chat();
+    const b = /<button[^>]*data-act="final-approve"([^>]*)>([^<]*)<\/button><span[^>]*>([^<]*)<\/span>/.exec(h);
+    return b ? { label: b[2], disabled: /\sdisabled/.test(b[1]), note: b[3] } : null;
+  };
+  /** cond が真になるまで（最大 max 回）待つ */
+  const waitUntil = async (cond, max = 200) => { for (let i = 0; i < max && !cond(); i++) await tick(); };
+  /** 書き込みの呼び出し（GET 以外） */
+  const writesOf = (m) => m.mock.calls.filter(c => !/^GET/.test(c));
+  /**
+   * 画面: 承認の欄の準備（書き込みなし）が終わるのを待ち、最終案のカードの［動作テスト環境へ反映］を 1 回押して、結果のカードまで進める。
+   *   before = 押す前に呼ぶ（基準・候補を変える回帰用）。返す: 押す前のボタン・準備の状態、押した後の結果（finalRun）・書き込み・結果のカードの文
+   */
+  const applyOnScreen = async (m, { before = null, wait = 400 } = {}) => {
+    const v = m.conv().activePlan();
+    if (!v || !v.final) return { v, clicked: false };
+    //   承認の欄の準備（書き込みなし）が終わるまで待つ（固定の回数ではなく状態で待つ）
+    await waitUntil(() => !['base', 'running'].includes(m.panel.finalPrecheck().status) && m.panel.finalPrecheck().planId === v.planId, 60); await ticks(2);
+    const button = applyButtonOf(m), pre = clone(m.panel.finalPrecheck());
+    const w0 = writesOf(m).length;
+    if (before) { await before({ m, v }); await ticks(4); }
+    const runBefore = m.panel.finalRun();
+    await clickChat(m, 'final-approve', { plan: v.planId, version: String(v.version) });
+    await waitUntil(() => { const r = m.panel.finalRun(); return !r || r === runBefore || r.stage !== 'running'; }, wait); await ticks(4);
+    const cards = [...m.chat().matchAll(/<div class="kt-ai-msg[^"]*" data-mid="[^"]*">([\s\S]*?)(?=<div class="kt-ai-msg|$)/g)].map(x => x[1]).filter(x => /kt-ai-final-apply-card/.test(x));
+    return { v, clicked: true, button, pre, run: m.panel.finalRun(), writes: writesOf(m).slice(w0), card: cards.length ? stripC(cards[cards.length - 1]) : '', cardHtml: cards.length ? cards[cards.length - 1] : '', cardCount: cards.length, exec: m.panel.executorState(), js: m.panel.jsExecState() };
+  };
+
+  return { tick, ticks, clone, buildInputs, INPUTS, META, B, A, Q, APPROVER, ROUTE, BASE, CSV, Q_THRESHOLD, Q_MIDDLE, Q_DAYS, Q_HOLIDAYS, Q_LOCK, Q_TIMING, B_SELECT, B_ROUTE, B_UNDER, B_OVER, B_NOTIFY_TO, B_NOTIFY_IF, B_LOCK, STD, req, idBy, reqIdBy, script, normalized, planOk, planFail, planThrow, gateMk, HEALTH, spec, mkStep, PLAN_META, PLAN_V1, answerFor, makeStorage, gate, mount, clickChat, RP, KTCodeReview, DATA_C, LABELS_C, custOf, CUST_C1, ST_C, handlerC, GOOD, BAD, WARN, VALUE, LOCKSAVE, CAND, GEN_EFFECT_FEATURES, GW_SCOPE, EXPECT_OF, NOMATCH_OF, fakeVerification, planJs, makeGenerate, makeConvC, adoptC, finalHtml, stripC, REQUESTS, approveC, adoptOnScreen, prepareOnScreen, loadDevBaseFromMock, HEALTH_V, NEW_MEMO, lockCode, custLock, screenPlan, planImplOf, screenGenerate, mountFinal, applyButtonOf, writesOf, applyOnScreen, waitUntil };
 }
 
 module.exports = { createNewFlowKit };

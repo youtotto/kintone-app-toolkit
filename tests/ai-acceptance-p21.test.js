@@ -42,8 +42,12 @@ const withProposal = (health, client) => {
 };
 /** 画面: 依頼 → 仮案 →「これで進めて」で採用 → 最終案（最初の計画と JavaScript の生成・検証） */
 const planOnScreen = async (panel, goal) => { await panel.send(goal); await tick(10); await panel.send('これで進めて'); await tick(16); return panel.conversation().activePlan(); };
-/** 画面: 最終案のカードの［この内容で反映する］で承認する */
-const approveOnScreen = async (host, panel) => { const v = panel.conversation().activePlan(); await host.querySelector('#kt-ai-chat').dispatch({ type: 'click', target: { dataset: { act: 'final-approve', plan: v.planId, version: String(v.version) } } }); await tick(4); return !!(v.approval && panel.conversation().approvalValid().ok); };
+/**
+ * 最終案の承認の記録（会話コントローラの approveFinal。承認できない最終案は承認されない）。
+ *   §0e.1（2026-10-09）: 画面の承認は最終案のカードの［動作テスト環境へ反映］1 回で登録まで進むので、登録の準備・確認の部品の照合（古い版・確認の項目）を
+ *   確かめるこの節では、承認の記録だけを作って部品（startJsRegister / confirmJsRegister）を呼ぶ。画面のボタンで結果まで進める回帰は ai-flow-redesign の §G
+ */
+const approveOnScreen = async (host, panel) => { void host; const v = panel.conversation().activePlan(); const r = panel.conversation().approveFinal({ planId: v.planId, version: v.version }); await tick(4); return !!(r.ok && v.approval && panel.conversation().approvalValid().ok); };
 /** 会話コントローラ: 依頼 → 仮案 →「これで進めて」で採用 → 最初の計画 */
 const startPlan = async (c, goal) => { await c.send(goal); return c.send('これで進めて'); };
 
