@@ -3,6 +3,8 @@
 // 検証内容:
 //   F-F2-1 条件つきロックの誤判定: 既存の条件つきの編集不可（承認済みのとき）を「条件なしに編集不可」と扱わない。
 //          条件なし（E）と条件つき（D）を区別し、条件とロックの関係を保ったまま判定する
+//          （§0d.4・2026-10-08: 条件とロックの関係の合否は生成工程（Gateway の機械検査と模擬テスト）が行う。Toolkit は disableSites などの解析を残し、
+//           登録の可否は生成工程の結果の取り込み（明示された失敗・返却の欠落）で決める。ここではその取り込みを、今の契約の形の結果で確かめる）
 //   F-F2-2 変数経由のフィールド参照: const field = record['金額']; の field.disabled / field.error / field.value を、
 //          直接（record.金額）・ブラケット（record['金額']）と同じに数える（入力チェック・エラー表示・編集不可・値の参照・条件つきの処理）
 //   生成の拒否 AI がコード生成を断った（GENERATION_DECLINED）ことを、通信・認証・契約・時間切れ・応答形式の異常と区別して表示する。
@@ -127,20 +129,52 @@ const DATA = (() => {
 const cust = (o = {}) => ({ customizationId: 'C1', requirement: '承認済みでは金額を編集不可にする', strategy: 'NEW_JS_FILE', platform: ['desktop'], implementation: 'JAVASCRIPT', events: EDIT, fields: [{ code: '金額', access: 'CONTROL', condition: 'ステータス in ("承認済み")' }], apis: [], existingFiles: [], ...o });
 const gen = (code, o = {}) => ({ strategy: 'NEW_JS_FILE', targetFile: 'lock.js', summary: 's', code, patch: null, events: [], fields: [], apis: [], ...o });
 const review = (code, c = cust(), g = {}, existing = null) => KTCodeReview.review({ generated: gen(code, g), customization: c, plan: null, data: DATA, scan: null, existingSource: existing });
-const cc = (rv) => (rv.checks || []).filter(x => x.name === 'conditional-control');
+// §0d.4（2026-10-08）: 条件とロックの関係（条件の外・別の条件・既存のコードの条件）を Toolkit が推定する判定（conditional-control・
+//   unconditional-control・existing-conflict・error-cancels-edit）は削除した。判定は生成工程（Gateway の機械検査と模擬テスト）が行い、
+//   Toolkit はその結果（必須の効果の照合・模擬テストの明示された失敗・返却の欠落）を取り込んで登録の可否を決める。
+//   下の偽の生成工程の結果は、今の契約の Gateway の形（requiredEffects[].status・check・checkReason・events と behavior.cases の side・expect・verdict）。
+//   どのケースが fail になるかは、AI版の回帰で確かめた Gateway の代表条件（条件に合う → lock・合わない → not-locked、警告は warn・not-warned・warn-unlocked）に合わせた。
+const DELETED_CHECKS = ['conditional-control', 'unconditional-control', 'existing-conflict', 'error-cancels-edit', 'error-cancels-other-js'];
+const deletedIn = (rv) => (rv.checks || []).filter(x => DELETED_CHECKS.includes(x.name)).map(x => x.name);
+const LOCK_COND = 'ステータス in ("承認済み")';
+const effOf = (o) => ({ requirementId: 'C1', field: '金額', effect: 'lock', events: EDIT, condition: LOCK_COND, ...o });
+/** Gateway の代表条件の結果（効果のイベントごとに「合う」と「合わない」。警告は「編集不可にしていない」warn-unlocked も）。fails: 不合格にするケースの [side, expect] */
+const gwCasesOf = (e, fails = []) => {
+  const exp = e.effect === 'warn' ? [['match', 'warn'], ['nomatch', 'not-warned'], ['match', 'not-locked']] : [['match', 'lock'], ['nomatch', 'not-locked']];
+  return e.events.flatMap((ev, i) => exp.map(([side, expect], j) => {
+    const fail = fails.some(([s, x]) => s === side && x === expect);
+    return { id: `k${i}-${j}`, requirementId: e.requirementId, field: e.field, effect: e.effect, event: ev, side, expect, verdict: fail ? 'fail' : 'pass', message: fail ? `「${e.field}」が期待（${expect}）と違いました（${side === 'match' ? '条件に合う' : '条件に合わない'}レコード）` : '' };
+  }));
+};
+const gwVerOf = (effects, cases) => ({
+  requiredEffects: effects.map(e => ({ requirementId: e.requirementId, field: e.field, effect: e.effect, status: 'present', check: 'behavior', checkReason: e.effect === 'warn' ? ['effect-kind'] : ['conditional'], events: e.events.map(ev => ({ event: ev, status: 'present' })) })),
+  behavior: { status: cases.some(k => k.verdict === 'fail') ? 'failed' : 'passed', cases },
+});
+const withGw = (rv, effects, cases, c = cust()) => KTCodeReview.attachBehavior(rv, cases === null ? null : gwVerOf(effects, cases), { requiredEffects: effects, customization: c });
+const blockNames = (rv) => (rv.checks || []).filter(x => !x.ok && x.severity === 'block').map(x => x.name);
 {
-  // 新しいコード: 条件なし（E）→ 登録不可 / 計画の条件の中（D）→ 通過 / 別の条件の中 → 計画の条件を見ていないので登録不可
+  // 新しいコード: 条件なし（E）・別の条件の中（DO）・変数経由の条件の外（AE）のロックは、Gateway の模擬テストの「合わない」（または「合う」）の
+  //   不合格を取り込んで登録不可。計画の条件の中（D・AD）は Gateway の合格のまま通す。Toolkit は条件の推定による検査を出さない
   const E = review(handler(EDIT, "    record['金額'].disabled = true;"));
   const D = review(handler(EDIT, "    if (record['ステータス'].value === '承認済み') {\n      record['金額'].disabled = true;\n    }"));
   const DO = review(handler(EDIT, "    if (record['備考'].value) {\n      record['金額'].disabled = true;\n    }"));
-  assert(E.registration.verdict === 'BLOCKED' && cc(E).some(x => x.severity === 'block' && /条件の外/.test(x.message)), `E（条件なし）の新しいロック → 登録不可: ${E.registration.verdict}`);
-  assert(D.registration.verdict === 'RUNTIME_UNVERIFIED' && cc(D).every(x => x.ok), `D（計画の条件の中）の新しいロック → 通過: ${D.registration.verdict} ${JSON.stringify(cc(D).map(x => x.message))}`);
-  assert(DO.registration.verdict === 'BLOCKED' && cc(DO).some(x => x.severity === 'block' && /備考/.test(x.message) && /見ていません/.test(x.message)), `別の条件（備考）の中の新しいロック → 計画の条件（ステータス）を見ていないので登録不可: ${JSON.stringify(cc(DO).map(x => x.message))}`);
-  // 変数経由の条件の外のロック（修正前は数えず「見つかりません」の確認止まり）→ 登録不可
   const AE = review(handler(EDIT, "    const field = record['金額'];\n    if (record['ステータス'].value === '承認済み') {\n      console.log('approved');\n    }\n    field.disabled = true;"));
-  assert(AE.registration.verdict === 'BLOCKED' && cc(AE).some(x => x.severity === 'block' && /field\.disabled = true/.test(x.message)), `変数経由の条件の外のロック → 登録不可（本当に危険なコードは止める）: ${JSON.stringify(cc(AE).map(x => [x.severity, x.message]))}`);
   const AD = review(handler(EDIT, "    const field = record['金額'];\n    if (record['ステータス'].value === '承認済み') {\n      field.disabled = true;\n    }"));
-  assert(AD.registration.verdict === 'RUNTIME_UNVERIFIED' && cc(AD).every(x => x.ok), `変数経由の条件の中のロック → 通過: ${AD.registration.verdict}`);
+  const L = [effOf()];
+  assert([E, D, DO, AE, AD].every(r => !deletedIn(r).length && r.registration.verdict === 'RUNTIME_UNVERIFIED'), `形式確認だけでは条件とロックの関係を推定しない（削除した検査を出さない。生成工程の結果が無ければ動作は未確認）: ${JSON.stringify([E, D, DO, AE, AD].map(r => [r.registration.verdict, deletedIn(r)]))}`);
+  const gE = withGw(E, L, gwCasesOf(L[0], [['nomatch', 'not-locked']]));
+  assert(gE.registration.verdict === 'BLOCKED' && blockNames(gE).includes('behavior-fail'), `E（条件なし）の新しいロック → 生成工程の模擬テストの「合わない」の不合格で登録不可: ${gE.registration.verdict} ${JSON.stringify(blockNames(gE))}`);
+  const gD = withGw(D, L, gwCasesOf(L[0]));
+  assert(gD.registration.verdict === 'RUNTIME_UNVERIFIED' && !blockNames(gD).length, `D（計画の条件の中）の新しいロック → 生成工程の合格のまま通過（動作テスト環境での確認は残る）: ${gD.registration.verdict} ${JSON.stringify(blockNames(gD))}`);
+  const gDO = withGw(DO, L, gwCasesOf(L[0], [['nomatch', 'not-locked']]));
+  assert(gDO.registration.verdict === 'BLOCKED' && blockNames(gDO).includes('behavior-fail'), `別の条件（備考）の中の新しいロック → 生成工程の「合わない」（作成中・備考あり）の不合格で登録不可: ${JSON.stringify(blockNames(gDO))}`);
+  const gAE = withGw(AE, L, gwCasesOf(L[0], [['nomatch', 'not-locked']]));
+  assert(gAE.registration.verdict === 'BLOCKED' && blockNames(gAE).includes('behavior-fail'), `変数経由の条件の外のロック → 生成工程の不合格で登録不可（本当に危険なコードは止める）: ${JSON.stringify(blockNames(gAE))}`);
+  const gAD = withGw(AD, L, gwCasesOf(L[0]));
+  assert(gAD.registration.verdict === 'RUNTIME_UNVERIFIED' && !blockNames(gAD).length, `変数経由の条件の中のロック → 通過: ${gAD.registration.verdict}`);
+  // 生成工程の結果が返らない（返却の欠落）ときは、Toolkit が自分で合否を作らずに登録不可（未確認を合格に読み替えない）
+  const nE = withGw(E, L, null), nD = withGw(D, L, null);
+  assert([nE, nD].every(r => r.registration.verdict === 'BLOCKED' && blockNames(r).includes('required-effects') && blockNames(r).includes('behavior-untested')), `生成工程の結果が無い → 条件の中のロックでも登録不可（required-effects・behavior-untested）: ${JSON.stringify([nE, nD].map(blockNames))}`);
 }
 {
   // 既存のコード（統合先）にあるロック: 条件なし（E）と別の条件の中（D）を分ける
@@ -149,17 +183,25 @@ const cc = (rv) => (rv.checks || []).filter(x => x.name === 'conditional-control
   const warn = "  kintone.events.on(['app.record.edit.show', 'app.record.edit.change.金額'], function (event) {\n    const amount = event.record['金額'];\n    if (Number(amount.value) > 1000000 && !amount.disabled) {\n      amount.error = '金額が1,000,000円を超えています。';\n    } else {\n      amount.error = null;\n    }\n    return event;\n  });\n";
   const warnCust = cust({ requirement: '金額が100万円を超えたら警告する', strategy: 'EXTEND_EXISTING_JS', events: ['app.record.edit.show', 'app.record.edit.change.金額'], fields: [{ code: '金額', access: 'CONTROL', condition: '金額 >= "1000000" and 金額 != "1000000"' }], existingFiles: [{ name: 'lock.js', target: 'desktop' }] });
   const ext = (base, content, c) => KTCodeReview.review({ generated: gen(content, { strategy: 'EXTEND_EXISTING_JS', targetFile: 'lock.js', patch: { baseHash: KTScan.hashText(base), operations: [{ type: 'INSERT_BEFORE', anchor: '})();', content }] } }), customization: c, plan: null, data: DATA, scan: null, existingSource: { name: 'lock.js', target: 'desktop', text: base } });
+  // 警告の必須の効果（Gateway の代表条件: 合う → warn・合わない → not-warned・編集不可にしていない → not-locked。表示と金額の変更の両方のイベント）
+  const W = [effOf({ effect: 'warn', events: ['app.record.edit.show', 'app.record.edit.change.金額'], condition: '金額 > 1000000' })];
+  // 既存の条件つきロック（承認済みのとき）＋ 新しい入力チェック: Gateway の代表条件（作成中・100 万円超）では既存のロックは効かず、警告が出て編集もできる → 合格のまま
   const rD = ext(BASE_D, warn, warnCust);
-  const mD = cc(rD).map(x => x.message).join(' / ');
-  assert(cc(rD).length === 1 && cc(rD)[0].ok && /入力チェック/.test(mD) && /別の条件の制御/.test(mD) && !/条件なし/.test(mD) && !rD.registration.confirmations.some(x => x.code === 'conditional-control'), `既存の条件つきロック（D: 承認済みのとき）＋ 新しい入力チェック → 「条件なし」と言わず確認にもしない: ${mD}`);
+  const gD = withGw(rD, W, gwCasesOf(W[0]), warnCust);
+  assert(!deletedIn(rD).length && gD.registration.verdict !== 'BLOCKED' && !blockNames(gD).length, `既存の条件つきロック（D: 承認済みのとき）＋ 新しい入力チェック → Toolkit は条件の推定で確認・登録不可にしない（生成工程の合格のまま）: ${gD.registration.verdict} ${JSON.stringify(deletedIn(rD))}`);
+  // 既存の条件なしロック（E）＋ 新しい入力チェック: 統合した候補では金額が常に編集不可なので、Gateway の warn-unlocked（not-locked）と「合う」の警告が不合格 → 登録不可
   const rE = ext(BASE_E, warn, warnCust);
-  const xE = cc(rE)[0] || {};
-  assert(!xE.ok && xE.severity === 'review' && /既存のコードで条件なしに編集不可/.test(xE.message || ''), `既存の条件なしロック（E）＋ 新しい入力チェック → 「条件なし」の確認は残す（E は本当に条件なし）: ${xE.message}`);
-  // 既存の別の条件のロック ＋ 新しいロック（計画の条件の中）= 同じ種類の制御が両方効く → 確認（「条件なし」とは言わない）
+  const gE = withGw(rE, W, gwCasesOf(W[0], [['match', 'warn'], ['match', 'not-locked']]), warnCust);
+  assert(!deletedIn(rE).length && gE.registration.verdict === 'BLOCKED' && blockNames(gE).includes('behavior-fail'), `既存の条件なしロック（E）＋ 新しい入力チェック → 生成工程の warn-unlocked の不合格を取り込んで登録不可（Toolkit の推定の確認は出さない）: ${gE.registration.verdict} ${JSON.stringify(blockNames(gE))}`);
+  // 既存の別の条件のロック ＋ 新しいロック（計画の条件の中）: 計画の効果（100 万円以上で編集不可）は Gateway の代表条件で合格。既存の承認済みのロックは計画の外の既存の動作で、
+  //   Toolkit は「別の条件のときにも編集不可」を推定で確認にしない（隔離環境は統合した候補を動かして観測する: AI版 sandbox/test/run.mjs の R15）
   const lockCust = cust({ requirement: '金額が100万円以上なら金額を編集不可にする', strategy: 'EXTEND_EXISTING_JS', fields: [{ code: '金額', access: 'CONTROL', condition: '金額 >= "1000000"' }], existingFiles: [{ name: 'lock.js', target: 'desktop' }] });
   const both = ext(BASE_D, "  kintone.events.on(['app.record.edit.show'], function (event) {\n    if (Number(event.record['金額'].value) >= 1000000) {\n      event.record['金額'].disabled = true;\n    }\n    return event;\n  });\n", lockCust);
-  const xB = cc(both)[0] || {};
-  assert(!xB.ok && xB.severity === 'review' && /別の条件「record\['ステータス'\] && record\['ステータス'\]\.value === '承認済み'」のときにも編集不可/.test(xB.message || '') && !/条件なし/.test(xB.message || ''), `既存の別の条件のロック ＋ 新しいロック → 「別の条件のときにも編集不可」の確認（条件なしとは言わない）: ${xB.message}`);
+  const BL = [effOf({ condition: '金額 >= 1000000' })];
+  const gB = withGw(both, BL, gwCasesOf(BL[0]), lockCust);
+  assert(!deletedIn(both).length && gB.registration.verdict !== 'BLOCKED' && !blockNames(gB).length, `既存の別の条件のロック ＋ 新しいロック → Toolkit は推定の確認を出さず、生成工程の合格のまま: ${gB.registration.verdict} ${JSON.stringify(deletedIn(both))}`);
+  const fB = withGw(both, BL, gwCasesOf(BL[0], [['nomatch', 'not-locked']]), lockCust);
+  assert(fB.registration.verdict === 'BLOCKED' && blockNames(fB).includes('behavior-fail'), `同じ統合で、生成工程が「合わない」の不合格を返したら登録不可（明示された失敗は取り込む）: ${JSON.stringify(blockNames(fB))}`);
 }
 
 // =========================================================
@@ -177,12 +219,14 @@ console.log('\n--- F-F2 実機の再生（Phase 21 BF-C）: 実際の生成コ�
   const gL = T2.KTModernJs.fixGenerated({ generated: R.GENERATED, existingSource: srcL });
   assert(['fixed', 'ok'].includes(gL.status), `記録した出力は生成の直後に直る（または直すものが無い）: ${gL.status} ${JSON.stringify(gL.remaining)}`);
   const rv = KTCodeReview.review({ generated: gL.generated, customization: R.CUSTOMIZATION, plan: null, data, scan, existingSource: srcL });
-  const c = cc(rv)[0] || {};
   const codes = rv.registration.confirmations.map(x => x.code);
   assert(R.P21_CONFIRMATIONS.length === 4 && R.P21_CONFIRMATIONS.includes('conditional-control'), '前提: Phase 21 の判定は確認 4 件（conditional-control を含む）');
-  assert(c.ok === true && /入力チェック（エラー表示）/.test(c.message) && /承認済み/.test(c.message) && !/条件なし/.test(c.message), `BF-C: conditional-control は通過（金額の入力チェックは計画の条件の中・既存の承認済みのロックは別の条件の制御）: ${c.message}`);
-  // 段階 A（5.4）: AI の申告の PARTIAL（承認済みでは警告を出さない）は確認（coverage-unmet・review）として登録の判定に入る（以前は検査に無く「静的な検査は通過」と並んだ）
-  assert(rv.registration.verdict === 'NEEDS_CONFIRMATION' && !codes.includes('conditional-control') && ['error-cancels-edit', 'duplicate-handler', 'existing-conflict', 'coverage-unmet'].every(x => codes.includes(x)) && codes.length === 4, `BF-C: 不要な conditional-control が無くなる（残りは実際に確かめること）。AI の申告の PARTIAL は coverage-unmet の確認として残る: ${codes.join(', ')}`);
+  // §0d.4: 条件とロックの関係・同じイベントの error と編集不可・既存のファイルとの重なりの推定（conditional-control・error-cancels-edit・existing-conflict）は削除。
+  //   BF-C の候補（承認済みは既存のロック・作成中の 100 万円超は警告だけ）の実際の動きは、AI版の隔離環境の回帰（sandbox/test/run.mjs §4 の p21）で確かめている
+  assert(!deletedIn(rv).length, `BF-C: Toolkit は条件・競合の推定の検査を出さない: ${JSON.stringify(deletedIn(rv))}`);
+  // 段階 A（5.4）: AI の申告の PARTIAL（承認済みでは警告を出さない）は確認（coverage-unmet・review）として登録の判定に入る（以前は検査に無く「静的な検査は通過」と並んだ）。
+  //   形式確認の重複した handler（duplicate-handler）も確認のまま残る
+  assert(rv.registration.verdict === 'NEEDS_CONFIRMATION' && !codes.some(x => DELETED_CHECKS.includes(x)) && ['duplicate-handler', 'coverage-unmet'].every(x => codes.includes(x)) && codes.length === 2, `BF-C: 確認は形式確認（duplicate-handler）と AI の申告の PARTIAL（coverage-unmet）だけ: ${codes.join(', ')}`);
   assert(!rv.registration.blockers.length, '登録不可にはならない（動作テスト環境での確認は残る）');
 }
 

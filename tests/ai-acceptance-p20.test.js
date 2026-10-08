@@ -4,7 +4,8 @@
 //   F1 文書: 計画のある会話では、どの種類のドキュメントでも Markdown / JSON に変更の記録（手順・状態・確認事項・運用環境は未反映）を入れる。Context が運用環境の設定であることを明記
 //   F2 復元: リマインダーを一度も設定していないアプリ（timezone null）で ADD_REMINDER → 復元しても ROLLBACK_VERIFIED（timezone は API で null に戻せない）。復元の失敗は作業状態で「要確認」
 //   F3 反映の可否: 承認の前に手順ごとの「自動で反映できるか」（KTPlanExecutor.applyReadiness）。ルックアップのコピー先の新規リンクは取得元のリンクの種類を引き継いで追加できる
-//   F4 / F5 Code Review: error を '' で消す（kintone は null だけ）・同じ show / change イベントで error と disabled / value を設定（kintone が取り消す）を BLOCKED
+//   F4 / F5 Code Review: error を '' で消す（kintone は null だけ）を BLOCKED。同じ show / change イベントで error と disabled / value を設定（kintone が取り消す）は、
+//     C-1 第 2 段（§0d.4）から生成工程（Gateway の check behavior と模擬テスト）が判定し、Toolkit はその結果（返却の欠落・behavior の fail）を取り込んで登録不可にする
 //   F7 相談: 相談開始時に取得した本文を Planner Context と Review に使う（Scanner がキャッシュ復元で本文なしでも「未取得」と言わない）
 //   GM-6 / FR-9: 会話を切り替えた後に遅れて返った応答・エラーを新しい会話に入れない。新しい相談を始めると送信中の要求を中断する
 //   U2 / U3: 利用者向けの文言に Executor / Tier を出さない・最終確認に未回答の確認事項を出す
@@ -67,17 +68,16 @@ console.log('\n--- F4 / F5. KTCodeReview: kintone のエラー表示の作法（
   const rv = KTCodeReview.review({ generated: gen(BAD), customization: { ...custom, strategy: 'NEW_JS_FILE' }, plan: null, data: DATA, scan: null, existingSource: null });
   const chk = (r, n) => r.checks.find(c => c.name === n) || null;
   assert(rv.status === 'BLOCKED' && chk(rv, 'error-clear') && !chk(rv, 'error-clear').ok && /null/.test(chk(rv, 'error-clear').message), "F4: error を '' で消すコード → BLOCKED（error-clear。kintone は null を設定したときだけ消える）");
-  assert(chk(rv, 'error-cancels-edit') && !chk(rv, 'error-cancels-edit').ok && /app\.record\.edit\.show: error と disabled/.test(chk(rv, 'error-cancels-edit').message) && !/change\.amount: error/.test(chk(rv, 'error-cancels-edit').message), 'F5: 同じ show イベントで error と disabled → BLOCKED（error-cancels-edit）。change だけで error を出すのは対象外');
+  // F5（同じ show イベントで error と disabled → kintone が disabled を取り消す）の判定は、C-1 第 2 段（§0d.4）で Toolkit の形式確認から外した。
+  //   生成工程で守る: AI版 worker/test/cases/required-effects.mjs「§0d.1 S7（既知の競合）」（check behavior・candidate-error-same-event）・
+  //   「取り消し: 候補が同じイベントで error を表示すると…lock は fail」、sandbox/test/run.mjs「R13 同じ handler」、sandbox/test/cross-toolkit.mjs「5-3」
   // 直したコード: 消すのは null、警告は change だけ（show の disabled と重ねない）
   const GOOD = DEAL_LOCK.replace("})();", "  kintone.events.on(['app.record.create.change.amount', 'app.record.edit.change.amount'], function (event) {\n    const f = event.record['amount'];\n    f.error = Number(f.value || 0) > 1000000 ? '金額が100万円を超えています。' : null;\n    return event;\n  });\n})();");
   const ok = KTCodeReview.review({ generated: gen(GOOD), customization: { ...custom, strategy: 'NEW_JS_FILE' }, plan: null, data: DATA, scan: null, existingSource: null });
-  assert(chk(ok, 'error-clear').ok && chk(ok, 'error-cancels-edit').ok, '直したコード（null で消す・警告は change だけ）は 2 つの検査を通る');
-  // 保存時（submit）の検証: エラーで保存自体が止まるので、error と value の組み合わせは対象外
-  const SUBMIT = "(function () {\n  'use strict';\n  kintone.events.on(['app.record.create.submit'], function (event) {\n    const r = event.record;\n    if (!r['amount'].value) { r['amount'].error = '金額を入力してください'; } else { r['case_name'].value = r['case_name'].value || '（無題）'; }\n    return event;\n  });\n})();";
-  const sub = KTCodeReview.review({ generated: { strategy: 'NEW_JS_FILE', targetFile: 'v.js', code: SUBMIT, patch: null, events: ['app.record.create.submit'], fields: [{ code: 'amount', access: 'CONTROL' }, { code: 'case_name', access: 'WRITE' }], apis: [] }, customization: { ...custom, strategy: 'NEW_JS_FILE', events: ['app.record.create.submit'], fields: [{ code: 'amount', access: 'CONTROL' }, { code: 'case_name', access: 'WRITE' }] }, plan: null, data: DATA, scan: null, existingSource: null });
-  assert(chk(sub, 'error-cancels-edit').ok, 'submit の error と value は error-cancels-edit の対象外（保存が止まるだけ）');
+  assert(chk(ok, 'error-clear').ok, '直したコード（null で消す）は error-clear の検査を通る');
+  // 保存時（submit）の error は取り消しの規則の対象外（保存が止まるだけ）。生成工程で守る: sandbox/test/run.mjs「保存のイベント: error が残る（保存を止める）・取り消しの規則は表示 / 変更のイベントだけ」
   const none = KTCodeReview.review({ generated: gen(DEAL_LOCK), customization: { ...custom, strategy: 'NEW_JS_FILE' }, plan: null, data: DATA, scan: null, existingSource: null });
-  assert(!chk(none, 'error-clear') && !chk(none, 'error-cancels-edit'), 'error を使わないコードには 2 つの検査行を出さない（ノイズにしない）');
+  assert(!chk(none, 'error-clear'), 'error を使わないコードには error-clear の検査行を出さない（ノイズにしない）');
 }
 
 // =========================================================
@@ -88,17 +88,27 @@ console.log('\n--- BF-C（再 3）/ F24. エラー表示と編集不可: 条件�
   const SEPARATE = DEAL_LOCK.replace("})();", "  // 金額が100万円を超えたら警告を表示する\n  function checkAmountWarning(event) {\n    const record = event.record;\n    if (record['amount']) {\n      record['amount'].error = (record['amount'].value > 1000000) ? '100万円を超えています' : null;\n    }\n    return event;\n  }\n\n  kintone.events.on([\n    'app.record.create.show',\n    'app.record.edit.show',\n    'app.record.create.change.amount',\n    'app.record.edit.change.amount'\n  ], checkAmountWarning);\n})();");
   // 2 本目（実機: 承認済みは編集不可のまま・警告なし。編集できるときだけ警告）: disabled を読む条件で分け、編集不可なら null
   const GUARDED = "(function () {\n  'use strict';\n  // 金額が100万円超なら警告表示（承認済みかつ編集不可なら非表示）\n  function checkAmountWarning(event) {\n    const record = event.record;\n    const amount = record['amount'].value;\n    const status = record['ステータス'] ? record['ステータス'].value : '';\n    const disabled = record['amount'].disabled;\n    if (amount > 1000000 && !(status === '承認済み' && disabled)) {\n      record['amount'].error = '100万円を超えています';\n    } else {\n      record['amount'].error = null;\n    }\n    return event;\n  }\n\n  // 画面表示時の処理に警告表示を追加\n  kintone.events.on(['app.record.create.show', 'app.record.edit.show'], function(event) {\n    const record = event.record;\n    if (record['ステータス'] && record['ステータス'].value === '承認済み') {\n      record['amount'].disabled = true;\n    }\n    return checkAmountWarning(event);\n  });\n\n  // 金額変更時の警告表示更新\n  kintone.events.on(['app.record.create.change.amount', 'app.record.edit.change.amount'], checkAmountWarning);\n})();\n";
-  const ops = KTCodeReview.kintoneFieldOps(KTScan.stripCommentsOnly(GUARDED));
-  assert(ops.find(o => o.events.includes('app.record.edit.show')).errorGuarded === true && KTCodeReview.kintoneFieldOps(KTScan.stripCommentsOnly(SEPARATE)).every(o => !o.errorGuarded), 'kintoneFieldOps: disabled を読む条件の中だけで error を出すコードは errorGuarded（条件なしの別 handler は guarded ではない）');
+  // 条件で分けた警告（kintoneFieldOps の errorGuarded）・別 handler の条件なしの警告（error-cancels-edit）の判定は、C-1 第 2 段（§0d.4）で Toolkit の形式確認から外した。
+  //   生成工程で守る: AI版 worker/test/cases/required-effects.mjs「§0d.1 S7（既知の競合）」（排他的な分岐の正しい候補を機械検査で止めない・判定は動作テスト）、
+  //   sandbox/test/run.mjs「R12 …: 承認待ちでは amount が編集不可（取り消し無し）」「R13 同じファイルの別 handler」「p21 分けた警告」「p21 分けない警告」
   const custom = { customizationId: 'C1', requirement: '金額が100万円を超えたら警告', strategy: 'NEW_JS_FILE', platform: ['desktop'], events: ['app.record.create.show', 'app.record.edit.show', 'app.record.create.change.amount', 'app.record.edit.change.amount'], fields: [{ code: 'amount', access: 'CONTROL' }], apis: [], existingFiles: [] };
   const gen = (code) => ({ strategy: 'NEW_JS_FILE', targetFile: 'warn.js', code, patch: null, events: custom.events, fields: custom.fields, apis: [] });
   const chk = (r, n) => r.checks.find(c => c.name === n) || null;
+  // F5（実機 1 本目・SEPARATE）: 動作テストの結果が無い間は登録不可・模擬テストで編集不可の取り消しが見つかれば登録不可。
+  //   §0d.4: 競合の断定は生成工程（Gateway の check behavior・candidate-error-same-event と模擬テスト）。Toolkit は返却の欠落と明示された失敗を取り込む（attachBehavior）
   const rSep = KTCodeReview.review({ generated: gen(SEPARATE), customization: custom, plan: null, data: DATA, scan: null, existingSource: null });
-  // 段階 C・確認 1: 動作テストの結果が無い review（従来の流れ）では従来（HEAD）どおり登録不可。確認に下げるのは生成工程の動作テストで必須の効果がすべて合格したときだけ（attachBehavior。ai-flow-redesign の「HEAD で登録不可だった 4 通り」）。C-1 第 2 段で Toolkit の模擬実行（attachSim）は削除した
-  assert(rSep.status === 'BLOCKED' && chk(rSep, 'error-cancels-edit').severity === 'block' && chk(rSep, 'error-cancels-edit').simDecides === true && /別の handler で設定したものも/.test(chk(rSep, 'error-cancels-edit').message) && /生成工程の模擬テスト/.test(chk(rSep, 'error-cancels-edit').message), 'F5（実機 1 本目）: 別 handler でも条件なしに同じ表示イベントで error → 動作テストの結果が無い間は登録不可（競合の断定は生成工程の模擬テスト。2026-10-08）');
+  const REQ_SEP = [{ requirementId: 'C1', field: 'amount', effect: 'lock', events: ['app.record.edit.show'], condition: 'ステータス in ("承認済み")' }];
+  const GW_SEP_RE = [{ requirementId: 'C1', field: 'amount', effect: 'lock', status: 'present', check: 'behavior', checkReason: ['candidate-error-same-event'], events: [{ event: 'app.record.edit.show', status: 'present' }] }];
+  const GW_SEP_FAIL = { requiredEffects: GW_SEP_RE, behavior: { status: 'failed', reason: null, cases: [{ id: 'k1', field: 'amount', effect: 'lock', expect: 'lock', event: 'app.record.edit.show', side: 'match', verdict: 'fail', message: '承認済みで金額が編集できます（同じイベントの error で編集不可が取り消されました）' }] } };
+  const sepNone = KTCodeReview.attachBehavior(rSep, null, { requiredEffects: REQ_SEP, customization: custom });
+  const sepFail = KTCodeReview.attachBehavior(rSep, GW_SEP_FAIL, { requiredEffects: REQ_SEP, customization: custom });
+  assert(sepNone.status === 'BLOCKED' && sepNone.registration.verdict === 'BLOCKED' && (chk(sepNone, 'required-effects') || {}).severity === 'block', `F5（実機 1 本目）: 別 handler でも条件なしに同じ表示イベントで error → 生成工程の結果が無い間は登録不可（返却の欠落）: ${sepNone.registration.verdict}`);
+  assert(sepFail.status === 'BLOCKED' && sepFail.registration.verdict === 'BLOCKED' && (chk(sepFail, 'behavior-fail') || {}).severity === 'block' && /取り消され/.test((chk(sepFail, 'behavior-fail') || {}).message || ''), `F5（実機 1 本目）: 模擬テストで編集不可の取り消しが見つかった（Gateway の behavior の fail）→ 登録不可: ${sepFail.registration.verdict} ${(chk(sepFail, 'behavior-fail') || {}).message}`);
   const rGuard = KTCodeReview.review({ generated: gen(GUARDED), customization: custom, plan: null, data: DATA, scan: null, existingSource: null });
-  assert(rGuard.status !== 'BLOCKED' && chk(rGuard, 'error-cancels-edit').ok === false && chk(rGuard, 'error-cancels-edit').severity === 'review' && /動作テスト環境/.test(chk(rGuard, 'error-cancels-edit').message), 'F24（実機 2 本目）: 編集不可を見る条件で分けたコードは停止しない（要確認・動作テストで確かめる）');
+  assert(rGuard.status !== 'BLOCKED', 'F24（実機 2 本目）: 編集不可を見る条件で分けたコードは形式確認で停止しない（競合の有無は生成工程の模擬テストで確かめる）');
   // 別ファイル: 新規 JS が条件なしに show で error、既存の dealLock.js が同じ show で disabled → 要確認（以前は同じファイルの中しか見ず見逃していた）
+  //   C-1 第 2 段: 既存 JS の編集不可（計画の必須の効果ではないもの）を候補の error が取り消すことは、生成工程の模擬テストでは不合格にならない
+  //   （Gateway の verdictOf は警告の要件の代表条件で既存 JS の編集不可の取り消しを見ない）ため、本体の error-cancels-other-js（要確認だけ）は残している（扱いは設計で決める）
   const WARN_ONLY = "(function () {\n  'use strict';\n  kintone.events.on(['app.record.create.show', 'app.record.edit.show', 'app.record.edit.change.amount'], function (event) {\n    const f = event.record['amount'];\n    f.error = Number(f.value || 0) > 1000000 ? '100万円を超えています' : null;\n    return event;\n  });\n})();";
   const data2 = FX.makeData();
   data2.customize = { scope: 'ALL', desktop: { js: [{ type: 'FILE', file: { contentType: 'text/javascript', fileKey: 'dl:lock', name: 'dealLock.js', size: '422' } }], css: [] }, mobile: { js: [], css: [] }, revision: '5' };
@@ -115,7 +125,7 @@ console.log('\n--- BF-C（再 3）/ F24. エラー表示と編集不可: 条件�
   const PATCH4 = { baseHash: KTScan.hashText(DL_SRC), operations: [{ type: 'INSERT_AFTER', anchor: "    if (record['ステータス'] && record['ステータス'].value === '承認済み') {\n      record['amount'].disabled = true;\n    }", content: "\n    // 金額が100万円を超えたら警告を表示する\n    if (record['amount'].value > 1000000 && !record['amount'].disabled) {\n      record['amount'].error = '金額が100万円を超えています。';\n    } else {\n      record['amount'].error = null;\n    }\n" }] };
   const cust4 = { ...custom, strategy: 'EXTEND_EXISTING_JS', existingFiles: [{ name: 'dealLock.js', target: 'desktop' }] };
   const r4 = KTCodeReview.review({ generated: { strategy: 'EXTEND_EXISTING_JS', targetFile: 'dealLock.js', summary: 's', code: PATCH4.operations[0].content, patch: PATCH4, events: custom.events, fields: custom.fields, apis: ['kintone.events.on'] }, customization: cust4, plan: null, data: DATA, scan: null, existingSource: { name: 'dealLock.js', target: 'desktop', text: DL_SRC } });
-  assert(chk(r4, 'patch').ok && chk(r4, 'error-cancels-edit').severity === 'review' && !chk(r4, 'planned-events').ok && chk(r4, 'planned-events').severity === 'block' && /入力中に切り替わりません/.test(chk(r4, 'planned-events').message) && r4.status === 'BLOCKED' && r4.registration.verdict === 'BLOCKED', 'F26（BF-C 4 回目）: 計画の change をコードが登録していない → 登録不可（Phase 21。Phase 20 は要確認、それ以前は「軽微な差」で合格扱い）');
+  assert(chk(r4, 'patch').ok && !chk(r4, 'planned-events').ok && chk(r4, 'planned-events').severity === 'block' && /入力中に切り替わりません/.test(chk(r4, 'planned-events').message) && r4.status === 'BLOCKED' && r4.registration.verdict === 'BLOCKED', 'F26（BF-C 4 回目）: 計画の change をコードが登録していない → 登録不可（Phase 21。Phase 20 は要確認、それ以前は「軽微な差」で合格扱い）');
   assert(chk(r4, 'duplicate-handler').ok, '既存の handler の中に追加しただけなら「別の handler を足す」と言わない');
   // F27（BF-C 4 回目）: 「C1 のコードを作り直して。金額を変更したときにも…」の後半は生成に渡らない → 黙って捨てず、仕様を直すか今の仕様のまま作るかを選ぶ
   {
@@ -710,23 +720,9 @@ console.log('\n--- F41（F39 の確認・実機）. PC とモバイルの計画�
   assert(!(viaVar.mismatches || []).some(m => m.code === 'PLATFORM_FIELD_MISSING'), `F41: イベントを変数で渡しても両方の画面と判定する: ${JSON.stringify((viaVar.mismatches || []).map(m => m.code + ':' + m.message))}`);
 }
 
-// =========================================================
-console.log('\n--- F42（F41 の再生成・実機）. 既存の条件（if）の外に足した編集不可（すべてのステータスで編集できなくなる）---');
-{
-  const DL = ["(function () {", "  'use strict';", "  kintone.events.on(['app.record.create.show', 'app.record.edit.show'], function (event) {", "    const record = event.record;", "    if (record['ステータス'] && record['ステータス'].value === '承認済み') {", "      record['amount'].disabled = true;", "    }", "    return event;", "  });", "})();", ""].join('\n');
-  const SRC = { name: 'dealLock.js', target: 'desktop', text: DL };
-  const baseHash = KTScan.analyzeFile({ name: 'dealLock.js', target: 'desktop', kind: 'js', text: DL }, { fields: [], selfAppId: null }).file.hash;
-  const cust = { customizationId: 'C1', requirement: '承認済みでは担当者も編集不可', strategy: 'EXTEND_EXISTING_JS', platform: ['desktop'], events: ['app.record.create.show', 'app.record.edit.show'], fields: [{ code: 'owner', access: 'CONTROL' }, { code: 'ステータス', access: 'READ' }], apis: [], existingFiles: [{ name: 'dealLock.js', target: 'desktop' }] };
-  const genOf = (op) => ({ strategy: 'EXTEND_EXISTING_JS', targetFile: 'dealLock.js', code: op.content, patch: { baseHash, operations: [op] }, events: cust.events, fields: cust.fields, apis: [] });
-  const chk = (r, n) => r.checks.find(c => c.name === n) || null;
-  // 実機の生成と同じ: 閉じ括弧「    }」の後ろに足した → 条件の外
-  const out = KTCodeReview.review({ generated: genOf({ type: 'INSERT_AFTER', anchor: "      record['amount'].disabled = true;\n    }", content: "\n      record['owner'].disabled = true;" }), customization: cust, plan: null, data: DATA, scan: null, existingSource: SRC });
-  const c1 = chk(out, 'unconditional-control');
-  assert(c1 && !c1.ok && /owner/.test(c1.message) && /条件/.test(c1.message) && out.status !== 'OK', `F42: 既存の if の外に足した「owner を編集不可」→ 要確認（すべてのステータスで編集できなくなる）: ${c1 && c1.message}`);
-  // 条件の中（同じ if のブロックの中）に足したコードは指摘しない
-  const inside = KTCodeReview.review({ generated: genOf({ type: 'INSERT_AFTER', anchor: "      record['amount'].disabled = true;", content: "\n      record['owner'].disabled = true;" }), customization: cust, plan: null, data: DATA, scan: null, existingSource: SRC });
-  assert(!chk(inside, 'unconditional-control') || chk(inside, 'unconditional-control').ok, `F42: 同じ if の中に足したコードは指摘しない: ${JSON.stringify(inside.checks.filter(c => !c.ok).map(c => c.name))}`);
-}
+// F42（F41 の再生成・実機。既存の if の外に足した編集不可 → すべてのステータスで編集できなくなる）の unconditional-control は、C-1 第 2 段（§0d.4）で Toolkit の形式確認から外した。
+//   生成工程で守る: AI版 worker/test/cases/required-effects.mjs「lock: 条件に合う（承認済）→ lock・合わない（作成中）→ not-locked…」「A3 F5（本物の隔離環境）: 一覧の編集だけ条件を見ずに編集不可にする誤った候補 → 一覧の編集の「合わない」で failed」、
+//   sandbox/test/cross-toolkit.mjs「7-8」「7-9」（条件の片方だけの誤った候補は failed）と「7-8b」「7-9b」（Toolkit の effectResults でも不合格）
 
 // =========================================================
 console.log('\n--- U9（使い勝手・実機）. キーボード操作でフォーカスの位置が見える（kintone の CSS が枠を消していた）---');

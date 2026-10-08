@@ -6,8 +6,11 @@
 //      API の検査は「目録にあります」で通した。API の目録に使える画面を持たせ、handler のイベントの画面と照合する
 //      （どのイベントでも使えない → 登録不可、一部で使えない → 確認。既存のコードに元からある呼び出しは数えない）
 //   N2 空の判定の undefined: 作成画面では空のフィールドの value が undefined になる（入力して消した後・保存時のイベントでも。実機）。
-//      §2 手順 4 の生成（v3）は `=== null` と空文字だけで判定し、保存時の必須チェックが効かなかった。作成画面の handler で、
-//      フィールドの値を空文字と比べる判定に undefined の扱い（=== undefined / == null / !value / || '' など）が無いものを確認に回す
+//      §2 手順 4 の生成（v3）は `=== null` と空文字だけで判定し、保存時の必須チェックが効かなかった。
+//      C-1 第 2 段（§0d.4）で Toolkit の推定による判定（empty-undefined）は外した。生成工程で守る: AI版 sandbox/test/run.mjs §5
+//      「S2_V3（実機 N2）: 作成画面の空（undefined）を見逃し、保存は止まらない」「S2_V3: 編集画面の空（''）では止まり、入力ありでは止まらない」
+//      「S2_V2: undefined も判定して作成画面でも保存を止める」、worker/test/cases/required-effects.mjs「lock: …作成画面の空 → not-locked（…空は undefined の印）」。
+//      ここに残すのは、記録した出力が生成の直後の modern JavaScript の修正とパッチの適用を通ること
 //
 // 実行方法: node tests/ai-rc-e2e.test.js（KT_SRC=<別ビルド> で修正前の版に対して走らせると RED になる）
 'use strict';
@@ -97,7 +100,7 @@ console.log('\n--- N3 handler のイベントと使える画面の照合 ---');
 }
 
 // =========================================================
-console.log('\n--- N2 実機の再生（RC E2E の §2 手順 4）: 空の判定に undefined が無い必須チェック → 確認 ---');
+console.log('\n--- N2 実機の再生（RC E2E の §2 手順 4）: 記録した出力は生成の直後に直り、パッチを適用できる（空の判定の undefined は生成工程の模擬テスト）---');
 {
   const edited = R.DEAL_VALIDATE.replace(/\s*$/, '') + '\n// 別の担当者のメモ（RC E2E: 外部からの変更の確認）\n';
   assert(KTScan.hashText(edited) === '17734541' && KTScan.hashText(R.DEAL_VALIDATE) === '6a64035a', `前提: 別の担当者の変更の後の dealValidate.js を再現（指紋 17734541）: ${KTScan.hashText(edited)}`);
@@ -110,71 +113,12 @@ console.log('\n--- N2 実機の再生（RC E2E の §2 手順 4）: 空の判定
   assert(raw3.status === 'BLOCKED' && raw3.checks.some(x => x.name === 'modern-js' && !x.ok && /const に直せます/.test(x.message)), '直していない出力（新しい var）は登録できない（以前は var のまま確認が必要で通った）');
   // 段階 C（5.5 の縮小）: 既存の handler の var は自動では変えない（直すのは追加した var だけ）。既存の var amount は変更していない行なので記法の検査の対象外
   assert(/var amount = event\.record\['amount'\]\.value;/.test(v3.finalCode || '') && !/\bvar\b/.test(g3.generated.patch.operations.map(o => o.content).join('\n')) && !('handlerVars' in g3) && v3.checks.some(x => x.name === 'patch' && /元のコードは保持（全文の書き換えなし）$/.test(x.message)), `既存の dealValidate.js の var amount はそのまま・追加した var だけ const: ${JSON.stringify(v3.checks.filter(x => /^patch/.test(x.name)).map(x => x.message))}`);
-  const x = check(v3, 'empty-undefined')[0] || {};
   assert(!check(v3, 'patch').length, '再生の前提: パッチは適用できる');
-  assert(x.severity === 'review' && /referral_source/.test(x.message || '') && /undefined/.test(x.message || '') && /作成画面/.test(x.message || ''), `v3: referral_source の空の判定が undefined を扱っていない → 確認（理由つき）: ${x.message}`);
-  assert(codesOf(v3.registration.confirmations).includes('empty-undefined') && v3.registration.verdict === 'NEEDS_CONFIRMATION', `登録の判定は確認が必要（確認の項目に入る）: ${JSON.stringify(codesOf(v3.registration.confirmations))}`);
-  const v2 = KTCodeReview.review({ generated: E2E.S2_V2.generated, customization: E2E.S2_V2.customization, plan: null, data: JSON.parse(JSON.stringify(DATA)), scan: null, existingSource: { name: 'dealValidate.js', target: 'desktop', text: R.DEAL_VALIDATE } });
-  assert(/=== undefined/.test(E2E.S2_V2.generated.code) && !check(v2, 'empty-undefined').length, 'v2（undefined も判定）→ 確認しない。既存の金額のチェック（undefined を判定）も数えない');
-  const hint = KTCodeReview.HOW_TO_CHECK && KTCodeReview.HOW_TO_CHECK['empty-undefined'];
-  assert(/作成画面/.test(hint || '') && /空/.test(hint || ''), `確かめること: 作成画面で空のまま保存する: ${hint}`);
+  // v3 の空の判定（undefined を扱わない）・v2（undefined も判定）の違いは、生成工程の模擬テストが確かめる（sandbox/test/run.mjs §5 の S2_V3・S2_V2）
   assert(/画面/.test((KTCodeReview.HOW_TO_CHECK || {})['api-screen'] || ''), '確かめること（api-screen）がある');
 }
 
-// =========================================================
-console.log('\n--- N2 空の判定の書き方 ---');
-{
-  const SUB = ['app.record.create.submit', 'app.record.edit.submit'];
-  const req = (cond, pre = "    const v = record['referral_source'].value;") => review(handler(SUB, `${pre}\n    if (${cond}) {\n      record['referral_source'].error = '紹介元を入力してください';\n    }`), cust({ fields: [{ code: 'referral_source', access: 'CONTROL' }] }));
-  const flagged = (rv) => check(rv, 'empty-undefined').length > 0;
-  const okCases = {
-    '!v': req('!v'),
-    "v == null || v === ''": req("v == null || v === ''"),
-    "v === undefined || v === null || v === ''": req("v === undefined || v === null || v === ''"),
-    "typeof v === 'undefined' || v === ''": req("typeof v === 'undefined' || v === ''"),
-    "v == undefined || String(v).trim() === ''": req("v == undefined || String(v).trim() === ''"),
-    "(v || '') === ''": req("(v || '') === ''"),
-    "String(v || '').trim() === ''": req("String(v || '').trim() === ''"),
-    "const v = …value || ''; v === ''": req("v === ''", "    const v = record['referral_source'].value || '';"),
-    "const v = …value ?? ''; v.trim() === ''": req("v.trim() === ''", "    const v = record['referral_source'].value ?? '';"),
-  };
-  const okBad = Object.entries(okCases).filter(([, rv]) => flagged(rv)).map(([k]) => k);
-  assert(!okBad.length, `undefined を扱っている書き方は確認しない: ${okBad.join(' / ') || 'すべて通過'}`);
-  const ngCases = {
-    "v === ''": req("v === ''"),
-    "v === null || v === ''": req("v === null || v === ''"),
-    "String(v).trim() === ''": req("String(v).trim() === ''"),
-    "v.trim() === ''": req("v.trim() === ''"),
-    "record['referral_source'].value === ''": req("record['referral_source'].value === ''", ''),
-    "record.referral_source.value === ''": req("record.referral_source.value === '' || record.referral_source.value === null", ''),
-    "v !== '' && v !== null（入力ありの判定）": req("v !== '' && v !== null"),
-  };
-  const ngMiss = Object.entries(ngCases).filter(([, rv]) => !flagged(rv)).map(([k]) => k);
-  assert(!ngMiss.length, `undefined を扱っていない書き方は確認に回す: ${ngMiss.join(' / ') || 'すべて検出'}`);
-  // 「入力あり」の判定で同じ値を数値に変えて比べる形（実機の BF-C の生成コード: amount !== '' && amount !== null && Number(amount) > 1000000）は、
-  //   undefined が NaN になって条件が成り立たないので数えない（数値に変えずに使う形は数える）
-  const amt = (body) => review(handler(['app.record.create.show', 'app.record.create.change.amount'], body), cust({ fields: [{ code: 'amount', access: 'CONTROL' }] }));
-  const numCopy = amt("    const amount = record['amount'].value;\n    if (amount !== '' && amount !== null && Number(amount) > 1000000) {\n      record['amount'].error = '金額が1,000,000円を超えています。';\n    }");
-  const numField = amt("    if (record.amount.value !== '' && Number(record.amount.value) > 0) {\n      record['amount'].error = 'x';\n    }");
-  const strUse = amt("    const amount = record['amount'].value;\n    if (amount !== '' && amount !== null) {\n      record['amount'].error = amount + ' 円';\n    }");
-  assert(!flagged(numCopy) && !flagged(numField) && flagged(strUse), `入力ありの判定で同じ値を Number() で比べる形は数えない・数値に変えずに使う形は数える: ${[numCopy, numField, strUse].map(flagged).join(' / ')}`);
-  // 変数に入れたフィールド（Phase 22 の解決）
-  const alias = review(handler(SUB, "    const f = record['referral_source'];\n    if (f.value === '' || f.value === null) {\n      f.error = '紹介元を入力してください';\n    }"), cust({ fields: [{ code: 'referral_source', access: 'CONTROL' }] }));
-  const aliasOk = review(handler(SUB, "    const f = record['referral_source'];\n    if (!f.value) {\n      f.error = '紹介元を入力してください';\n    }"), cust({ fields: [{ code: 'referral_source', access: 'CONTROL' }] }));
-  assert(flagged(alias) && /referral_source/.test((check(alias, 'empty-undefined')[0] || {}).message || '') && !flagged(aliasOk), '変数に入れたフィールドの value も同じに見る（f.value === \'\' は確認・!f.value は通過）');
-  // 三項演算子で error を設定する書き方（実機の v3 と同じ形）
-  const tern = review(handler(SUB, "    const v = record['referral_source'].value;\n    record['referral_source'].error = v === null || String(v).trim() === '' ? '紹介元を入力してください' : null;"), cust({ fields: [{ code: 'referral_source', access: 'CONTROL' }] }));
-  assert(flagged(tern), '三項演算子の条件の中の空の判定も見る');
-  // 作成画面のイベントだけ（編集画面だけの handler は数えない。実機で確かめたのは作成画面）
-  const editOnly = review(handler(['app.record.edit.submit'], "    const v = record['referral_source'].value;\n    if (v === '') {\n      record['referral_source'].error = 'x';\n    }"), cust({ fields: [{ code: 'referral_source', access: 'CONTROL' }] }));
-  const mobileCreate = review(handler(['mobile.app.record.create.submit'], "    const v = record['referral_source'].value;\n    if (v === '') {\n      record['referral_source'].error = 'x';\n    }"), cust({ platform: ['mobile'], fields: [{ code: 'referral_source', access: 'CONTROL' }] }));
-  assert(!flagged(editOnly) && flagged(mobileCreate), '編集画面だけの handler は数えない・モバイルの作成画面は数える');
-  // フィールドの値ではない変数・既存のコードに元からある判定は数えない
-  const notField = review(handler(SUB, "    const s = 'abc';\n    if (s === '') {\n      record['referral_source'].error = 'x';\n    }"), cust({ fields: [{ code: 'referral_source', access: 'CONTROL' }] }));
-  const base = handler(SUB, "    const v = record['referral_source'].value;\n    if (v === '') {\n      record['referral_source'].error = 'x';\n    }");
-  const existing = ext(base, "  kintone.events.on(['app.record.create.show'], function (event) {\n    return event;\n  });\n", cust({ strategy: 'EXTEND_EXISTING_JS', fields: [{ code: 'referral_source', access: 'CONTROL' }] }));
-  assert(!flagged(notField) && !flagged(existing), 'フィールドの値ではない変数・既存のコードに元からある判定は数えない');
-}
+// N2 空の判定の書き方（empty-undefined の検出の範囲）は C-1 第 2 段（§0d.4）で判定ごと外した。生成工程で守る回帰はファイルの先頭の説明のとおり
 
 // =========================================================
 console.log('\n--- モデル更新（gpt-6.1-sol）の評価で見つけた誤検知: 正しいコードを登録不可にしない ---');
@@ -184,20 +128,25 @@ console.log('\n--- モデル更新（gpt-6.1-sol）の評価で見つけた誤�
   const run = (x) => KTCodeReview.review({ generated: x.generated, customization: x.customization, plan: null, data, scan: null, existingSource: { name: 'dealLock.js', target: 'desktop', text: R.DEAL_LOCK } });
   // 1) error = null（空白を挟む普通の書き方）をエラーの設定と数えない
   const bfc = run(M.SOL_BFC);
-  const ec = (bfc.checks || []).find(x => x.name === 'error-cancels-edit') || {};
   assert(M.SOL_BFC.verdictAtRun === 'BLOCKED' && /field\.error = null/.test(M.SOL_BFC.generated.code), '前提: 実行時の判定は登録不可（保存時の分岐の field.error = null を数えた）');
-  assert(!codesOf(bfc.registration.blockers).includes('error-cancels-edit') && ec.severity === 'review', `SOL_BFC: 注意は編集不可（!field.disabled）を見る条件の中だけ・保存時は null で消すだけ → 確認（登録不可にしない）: ${ec.severity} ${String(ec.message || '').slice(0, 80)}`);
+  // 同じイベントの error と編集不可の判定（error-cancels-edit）は §0d.4 で外した。生成工程で守る: AI版 worker/test/cases/required-effects.mjs「§0d.1 S7（既知の競合）」（排他的な分岐の正しい候補を機械検査で止めない）
+  assert(bfc.registration.verdict !== 'BLOCKED', `SOL_BFC: 注意は編集不可（!field.disabled）を見る条件の中だけ・保存時は null で消すだけ → 形式確認では登録不可にしない: ${bfc.registration.verdict} ${JSON.stringify(codesOf(bfc.registration.blockers))}`);
   const ops = safe(() => KTCodeReview.kintoneFieldOps(KTScan.stripCommentsOnly("(function () {\n  kintone.events.on(['app.record.edit.show'], function (event) {\n    event.record['amount'].disabled = true;\n    event.record['amount'].error = null;\n    return event;\n  });\n})();")), []);
   assert(ops.length === 1 && ops[0].error === false && ops[0].disabled === true, `error = null だけの handler はエラーを出す handler ではない: ${JSON.stringify(ops.map(o => [o.error, o.disabled]))}`);
   const genuine = review(handler(['app.record.edit.show'], "    if (record['ステータス'].value === '承認済み') {\n      record['amount'].disabled = true;\n    }\n    if (Number(record['amount'].value) > 1000000) {\n      record['amount'].error = '金額が大きい';\n    } else {\n      record['amount'].error = null;\n    }"), cust({ fields: [{ code: 'amount', access: 'CONTROL' }] }));
-  // 段階 C・確認 1: 模擬の結果が無い review では従来どおり登録不可（simDecides）。模擬が動いたら確認に下げ、実際の競合（登録不可）は模擬イベント（sim-conflict。tests/ai-js-sim.test.js §6 の p21 GENERATED の分けない版）で決める
-  const ecG = genuine.checks.find(x => x.name === 'error-cancels-edit') || {};
-  assert(codesOf(genuine.registration.blockers).includes('error-cancels-edit') && ecG.severity === 'block' && ecG.simDecides === true, '編集不可を見ずにエラーを出す（同じイベントで disabled）→ 模擬の結果が無い間は登録不可（競合の断定は模擬イベント）');
+  // §0d.4: 競合の断定は生成工程（Gateway の check behavior・candidate-error-same-event と模擬テスト。AI版 required-effects.mjs「§0d.1 S7」・sandbox/test/run.mjs「R13 同じ handler」）。
+  //   Toolkit は生成工程の結果を取り込み、結果が無い（返却の欠落）・模擬テストの fail（明示された失敗）なら登録不可にする（attachBehavior）
+  const REQ_G = [{ requirementId: 'C1', field: 'amount', effect: 'lock', events: ['app.record.edit.show'], condition: 'ステータス in ("承認済み")' }];
+  const GW_G = { requiredEffects: [{ requirementId: 'C1', field: 'amount', effect: 'lock', status: 'present', check: 'behavior', checkReason: ['candidate-error-same-event'], events: [{ event: 'app.record.edit.show', status: 'present' }] }],
+    behavior: { status: 'failed', reason: null, cases: [{ id: 'k1', field: 'amount', effect: 'lock', expect: 'lock', event: 'app.record.edit.show', side: 'match', verdict: 'fail', message: '承認済みで金額が編集できます（同じイベントの error で編集不可が取り消されました）' }] } };
+  const gNone = KTCodeReview.attachBehavior(genuine, null, { requiredEffects: REQ_G, customization: cust() });
+  const gFail = KTCodeReview.attachBehavior(genuine, GW_G, { requiredEffects: REQ_G, customization: cust() });
+  assert(gNone.registration.verdict === 'BLOCKED' && check(gNone, 'required-effects').some(x => x.severity === 'block'), `編集不可を見ずにエラーを出す（同じイベントで disabled）→ 生成工程の結果が無い間は登録不可（返却の欠落）: ${gNone.registration.verdict}`);
+  assert(gFail.registration.verdict === 'BLOCKED' && check(gFail, 'behavior-fail').some(x => x.severity === 'block'), `同じ候補で模擬テストが編集不可の取り消しを見つけた（Gateway の behavior の fail）→ 登録不可: ${gFail.registration.verdict}`);
   // 2) 画面を見分ける前方一致の文字列（'app.record.index.'）を、登録しているイベント名と取り違えない
   const cx1 = run(M.SOL_CX1);
   assert(M.SOL_CX1.blockersAtRun.includes('events') && /indexOf\('app\.record\.index\.'\)/.test(M.SOL_CX1.generated.code), '前提: 実行時は「kintone に無いイベント: app.record.index.」で登録不可');
   assert(!codesOf(cx1.registration.blockers).includes('events'), `SOL_CX1: event.type.indexOf('app.record.index.') は登録しているイベントではない → events で止めない: ${JSON.stringify(codesOf(cx1.registration.blockers))}`);
-  assert(!codesOf(cx1.registration.blockers).includes('error-cancels-edit'), `SOL_CX1: 表示時のエラーは null で消すだけ（エラーを出すのは保存時のレコード全体のエラー）→ error-cancels-edit で止めない: ${JSON.stringify(codesOf(cx1.registration.blockers))}`);
   const directBad = review("(function () {\n  kintone.events.on('app.record.update.show', function (event) {\n    return event;\n  });\n})();");
   const prefixReg = review("(function () {\n  kintone.events.on('app.record.index.', function (event) {\n    return event;\n  });\n})();");
   assert(codesOf(directBad.registration.blockers).includes('events') && codesOf(prefixReg.registration.blockers).includes('events'), '登録しているイベント名が kintone に無い（app.record.update.show・前方一致の文字列を直接登録）→ 従来どおり登録不可');

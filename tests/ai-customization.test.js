@@ -246,8 +246,9 @@ console.log('\n--- §52-2. KTCodeReview: 構文 / 未知イベント / 未知フ
   // Phase 20: 計画外の書き換えは error を設定しない別の handler で確かめる（同じ change イベントで error と value を設定すると、kintone が value を取り消すので別の検査で BLOCKED になる）
   const extraWrite = run(NEW_JS_GOOD.replace("})();", "  kintone.events.on(['app.record.create.show'], function (event) {\n    event.record['approver'].value = [];\n    return event;\n  });\n})();"));
   assert(extraWrite.status === 'BLOCKED' && !check(extraWrite, 'target-fields').ok && check(extraWrite, 'target-fields').severity === 'block' && /approver/.test(check(extraWrite, 'target-fields').message) && extraWrite.registration.verdict === 'BLOCKED' && extraWrite.mismatches.some(m => m.code === 'EXTRA_FIELD_WRITE' && m.items.includes('approver')), '計画に無いフィールド（approver）の書き換え: 対象と異なるフィールド → 登録不可（Phase 21。以前は確認が必要の扱い）');
-  const errorAndValue = run(NEW_JS_GOOD.replace("    return event;", "    record['approver'].value = [];\n    return event;"));
-  assert(errorAndValue.status === 'BLOCKED' && check(errorAndValue, 'error-cancels-edit') && !check(errorAndValue, 'error-cancels-edit').ok && /value/.test(check(errorAndValue, 'error-cancels-edit').message), 'Phase 20: 同じ change イベントで error と value（approver）を設定: kintone が値の変更を取り消すので BLOCKED（error-cancels-edit）');
+  // C-1 第 2 段（設計 §0d.4）: 同じ表示・変更のイベントで error と value を設定したときの取り消し（旧 error-cancels-edit）は Toolkit の推定では判定しない。
+  // 生成工程の回帰で守る: 隔離環境 sandbox/test/run.mjs「R13 値の変更と error: 値の変更も取り消される（元の値に戻る）」、
+  // Gateway worker/test/cases/required-effects.mjs「§0d.1 S7（既知の競合）」（同じイベントの error は check behavior。判定は模擬テスト）
   const extraApi = run(NEW_JS_GOOD.replace("    return event;", "    kintone.api(kintone.api.url('/k/v1/records.json', true), 'GET', { app: 600 });\n    return event;"));
   assert(extraApi.status === 'REVIEW_REQUIRED' && check(extraApi, 'apis-network') && !check(extraApi, 'apis-network').ok && /kintone\.api/.test(check(extraApi, 'apis-network').message), '計画に無い REST API（kintone.api）: 確認が必要（単純な制御には不要）');
   const missingEv = run(NEW_JS_GOOD.replace("['app.record.create.change.amount', 'app.record.edit.change.amount']", "'app.record.create.change.amount'"));
@@ -313,15 +314,16 @@ console.log('\n--- §52-2. KTCodeReview: 構文 / 未知イベント / 未知フ
   assert(emptyPatch.status === 'BLOCKED', '操作の無い patch: BLOCKED');
   const otherStrategy = KTCodeReview.review({ generated: genNew(NEW_JS_GOOD, { strategy: 'PLUGIN_CANDIDATE' }), customization: hy.plan.customizations[0], plan: hy.plan, data: INPUTS.data, scan: INPUTS.scan });
   assert(otherStrategy.status === 'BLOCKED' && check(otherStrategy, 'strategy') && !check(otherStrategy, 'strategy').ok, 'PLUGIN_CANDIDATE 等はコード生成の対象外: BLOCKED');
-  // 既存 JS との競合（統合先以外）
-  const conflict = KTCodeReview.review({ generated: genNew(), customization: NEW_JS_CUST(), plan: PLAN_NEW_JS.plan, data: INPUTS.data, scan: INPUTS.scan, existingSource: null });
-  assert(conflict.status === 'REVIEW_REQUIRED' && !check(conflict, 'existing-conflict').ok && /fieldOnOff\.js/.test(check(conflict, 'existing-conflict').message), '新規 JS が既存 fieldOnOff.js と同じ amount を制御: JS_FIELD_CONFLICT（確認が必要）');
+  // C-1 第 2 段（設計 §0d.4）: 既存 JS と同じフィールドを扱うだけで確認にする判定（旧 existing-conflict）はコードの確認では行わない。
+  // 計画の段階の JS_FIELD_CONFLICT（§51 の上の期待）は残る。実際の競合は生成工程の回帰で守る:
+  // Gateway worker/test/cases/required-effects.mjs「§0d.1 の 2: 同じ platform の既存 JS（送ったもの）がそのイベントを登録する…→ behavior（existing-same-event）」・
+  // 「レビュー S11: 既存 JS の error で候補の編集不可が取り消される → not-run（existing…）」、隔離環境 sandbox/test/run.mjs「R13 別ファイル: 既存の disabled が候補の error で取り消される」
   // 実機（Phase 17 E2E C）: モバイル JS への統合（patch。追加分に handler なし）では、PC の既存 JS は競合にならず、platform は最終ファイルのイベントで判定する
   const MOBILE_LOCK_SRC = ['(function () {', "  'use strict';", "  kintone.events.on('mobile.app.record.edit.show', function (event) {", "    event.record['owner'].disabled = true;", '    return event;', '  });', '})();'].join(String.fromCharCode(10));
   const mobCust = { customizationId: 'C1', requirement: '承認待ちは金額も編集不可', strategy: 'EXTEND_EXISTING_JS', platform: ['mobile'], events: ['mobile.app.record.edit.show'], fields: [{ code: 'amount', access: 'CONTROL' }], apis: [], existingFiles: [{ name: 'mobileLock.js', target: 'mobile' }] };
   const mobPatch = { baseHash: hash(MOBILE_LOCK_SRC), operations: [{ type: 'INSERT_AFTER', anchor: "    event.record['owner'].disabled = true;", content: ["    if (event.record['ステータス'].value === '承認待ち') {", "      event.record['amount'].disabled = true;", '    }'].join(String.fromCharCode(10)) }] };
   const mobRv = KTCodeReview.review({ generated: { strategy: 'EXTEND_EXISTING_JS', targetFile: 'mobileLock.js', summary: 'm', code: mobPatch.operations[0].content, patch: mobPatch, events: ['mobile.app.record.edit.show'], fields: [{ code: 'amount', access: 'CONTROL' }], apis: [] }, customization: mobCust, plan: PLAN_HYBRID.plan, data: INPUTS.data, scan: INPUTS.scan, existingSource: { name: 'mobileLock.js', target: 'mobile', text: MOBILE_LOCK_SRC } });
-  assert(mobRv.status === 'OK' && check(mobRv, 'existing-conflict').ok && check(mobRv, 'platform').ok, `モバイル JS への統合: PC の fieldOnOff.js は競合にならず、platform は最終ファイルの mobile イベントで整合（${(mobRv.checks || []).filter(c => !c.ok).map(c => c.name).join(',') || 'すべて ✓'}）`);
+  assert(mobRv.status === 'OK' && check(mobRv, 'platform').ok, `モバイル JS への統合: PC の fieldOnOff.js は競合にならず（確認に出ない）、platform は最終ファイルの mobile イベントで整合（${(mobRv.checks || []).filter(c => !c.ok).map(c => c.name).join(',') || 'すべて ✓'}）`);
   // platform
   const mobilePlan = KTCodeReview.review({ generated: genNew(), customization: { ...NEW_JS_CUST(), platform: ['desktop', 'mobile'] }, plan: PLAN_NEW_JS.plan, data: INPUTS_PLAIN.data, scan: INPUTS_PLAIN.scan });
   assert(!check(mobilePlan, 'platform').ok, '計画はモバイルも対象なのに mobile.* のイベントが無い: 確認が必要');

@@ -269,23 +269,42 @@ const REG = (() => {
   const wrap = (events, body) => `(function () {\n  'use strict';\n  kintone.events.on(${JSON.stringify(events).replace(/"/g, "'")}, function (event) {\n    const record = event.record;\n${body}\n    return event;\n  });\n})();`;
   const review = (code, c = cust(), g = {}) => KTCodeReview.review({ generated: gen(code, g), customization: c, plan: null, data, scan: null, existingSource: null });
   const chk = (rv, name) => (rv.checks || []).find(x => x.name === name) || null;
-  return { data, cust, gen, wrap, review, chk };
+  //   §0d.4（2026-10-08）: 今の契約の生成工程（Gateway）の結果を取り込んだ判定。必須の効果は Toolkit が計画から固定したもの（KTAiConversation.requiredEffectsOf）。
+  //   代表条件は効果のイベントごとに「合う」と、条件つきなら「合わない」。fail = 不合格にする代表条件（`フィールド|side`）。Gateway の requiredEffects は present・check behavior
+  const gw = (rv, c, { fail = [] } = {}) => {
+    const req = KTAiConversation.requiredEffectsOf({ customizations: [c] }, c.customizationId, []).effects;
+    let n = 0;
+    const cases = req.flatMap(x => x.events.flatMap(ev => (x.condition ? ['match', 'nomatch'] : ['match']).map(side => {
+      const bad = fail.includes(`${x.field}|${side}`);
+      return { id: `K${++n}`, requirementIds: x.requirementIds, field: x.field, effect: x.effect, expect: side === 'match' ? x.effect : 'not-locked', side, kind: side, event: ev, verdict: bad ? 'fail' : 'pass', observed: {}, message: bad ? `条件に合わないレコードで「${x.field}」が編集できなくなりました` : '期待どおり' };
+    })));
+    const ver = { version: '1', candidateHash: '0123456789abcdef', passed: true, machine: [], requiredEffects: req.map(x => ({ requirementIds: x.requirementIds, field: x.field, effect: x.effect, status: 'present', check: 'behavior', checkReason: ['conditional'], events: x.events.map(ev => ({ event: ev, status: 'present' })) })), behavior: { status: cases.some(y => y.verdict === 'fail') ? 'failed' : 'passed', reason: null, cases } };
+    return KTCodeReview.attachBehavior(rv, ver, { requiredEffects: req, customization: c, effectCheck: true });
+  };
+  return { data, cust, gen, wrap, review, chk, gw };
 })();
 {
   const { cust, wrap, review, chk } = REG;
   const IF_LOCK = "    if (record['ステータス'].value === '承認済み') {\n      record['amount'].disabled = true;\n    }";
   const ok = review(wrap(['app.record.edit.show'], IF_LOCK));
-  assert(ok.registration && ok.registration.verdict === 'RUNTIME_UNVERIFIED' && ok.registration.blockers.length === 0 && ok.registration.unverified.some(u => u.code === 'RUNTIME_NOT_RUN') && chk(ok, 'conditional-control').ok, '条件（承認済み）の中でだけロック: 静的な検査は通過・動作は未確認（RUNTIME_UNVERIFIED）');
+  //   §0d.4（2026-10-08）: 条件の内外の照合（conditional-control・unconditional-control）は Toolkit の業務の推定による判定として削除した。
+  //   条件の外の編集不可は生成工程の代表条件の「合わない」側（expect not-locked）で不合格になる（AI版 worker/test/cases/required-effects.mjs の
+  //   「lock: 条件に合う（承認済）→ lock・合わない（作成中）→ not-locked」「A3 F5」「A1 E1c」「A1 E1b」）。ここでは形式確認の判定（止めない・動作は未確認）だけを確かめる
+  assert(ok.registration && ok.registration.verdict === 'RUNTIME_UNVERIFIED' && ok.registration.blockers.length === 0 && ok.registration.unverified.some(u => u.code === 'RUNTIME_NOT_RUN') && !chk(ok, 'conditional-control'), '条件（承認済み）の中でだけロック: 静的な検査は通過・動作は未確認（RUNTIME_UNVERIFIED）');
   // 条件の書き方が違っても誤って止めない: 変数に入れた条件・早い return で除外・名前付き関数
   const varLocked = review(wrap(['app.record.edit.show'], "    const locked = record['ステータス'].value === '承認済み';\n    if (locked) {\n      record['amount'].disabled = true;\n    }"));
   const guard = review(wrap(['app.record.edit.show'], "    if (record['ステータス'].value !== '承認済み') {\n      return event;\n    }\n    record['amount'].disabled = true;"));
   assert(varLocked.registration.verdict === 'RUNTIME_UNVERIFIED' && guard.registration.verdict === 'RUNTIME_UNVERIFIED', '条件を変数に入れる書き方・早い return で除外する書き方は通す（正常な書き方を一律に拒否しない）');
   // F42（実機）: 要件は承認済みのときだけ → 条件の外でロック → 登録不可
-  const outside = review(wrap(['app.record.edit.show'], IF_LOCK + "\n    record['owner'].disabled = true;"), cust({ fields: [{ code: 'amount', access: 'CONTROL', condition: 'ステータス in ("承認済み")' }, { code: 'owner', access: 'CONTROL', condition: 'ステータス in ("承認済み")' }] }));
-  assert(outside.registration.verdict === 'BLOCKED' && chk(outside, 'conditional-control') && outside.checks.some(x => x.name === 'conditional-control' && !x.ok && x.severity === 'block' && /owner/.test(x.message) && /条件の外/.test(x.message)), 'F42: 条件つきの要件なのに条件の外でロック → 登録不可（conditional-control）');
-  // 条件が実装仕様に構造化されていない（要件の文だけ）→ 証明できないので確認（従来の F42 の検査）
-  const outsideNoCond = review(wrap(['app.record.edit.show'], IF_LOCK + "\n    record['owner'].disabled = true;"), cust({ requirement: '承認済みでは金額と担当者を編集不可にする', fields: [{ code: 'amount', access: 'CONTROL' }, { code: 'owner', access: 'CONTROL' }] }));
-  assert(outsideNoCond.registration.verdict === 'NEEDS_CONFIRMATION' && outsideNoCond.registration.confirmations.some(x => x.code === 'unconditional-control' && /動作テスト環境で/.test(x.howToCheck)), '条件が構造化されていなければ「確認が必要」（静的に証明できる範囲と区別する）');
+  //   §0d.4: 旧 conditional-control（Toolkit の静的な block）の期待は外した。今は生成工程の代表条件「合わない」（作成中のレコードで担当者が編集できる）の不合格を
+  //   Toolkit が取り込んで登録不可にする（Gateway の結果の取り込みは tests/ai-flow-redesign.test.js の D38-5・D46-1〜3）
+  const fieldsAO = [{ code: 'amount', access: 'CONTROL', condition: 'ステータス in ("承認済み")', effects: ['lock'] }, { code: 'owner', access: 'CONTROL', condition: 'ステータス in ("承認済み")', effects: ['lock'] }];
+  const outsideG = REG.gw(review(wrap(['app.record.edit.show'], IF_LOCK + "\n    record['owner'].disabled = true;"), cust({ fields: fieldsAO })), cust({ fields: fieldsAO }), { fail: ['owner|nomatch'] });
+  assert(outsideG.registration.verdict === 'BLOCKED' && outsideG.checks.some(x => x.name === 'behavior-fail' && !x.ok && x.severity === 'block' && /owner/.test(x.message)), `F42: 条件つきの要件なのに条件の外でロック → 生成工程の「合わない」の不合格で登録不可: ${JSON.stringify(outsideG.registration.blockers.map(b => b.code))}`);
+  // 条件が実装仕様に構造化されていない（要件の文だけ）→ 旧 unconditional-control（要件の文から条件を推定して確認にする）の期待は外した。
+  //   今は Toolkit が必須の効果を固定する段階で、計画のフィールドに構造化した効果・条件が無ければ未特定（field-unspecified）・台帳の要件に条件があるのに計画に無ければ
+  //   condition-unknown として準備未完了にする（tests/ai-flow-redesign.test.js の D6-4・D16-1・D22-1・D34。Gateway は文から効果・条件を推定しない:
+  //   required-effects.mjs「互換: 効果の無い CONTROL は [] のまま EFFECT_UNSPECIFIED（文から推定しない）」）
   // F41: PC とモバイルの両方が対象なのに片方の画面の処理が無い → 登録不可
   const pcOnly = review(wrap(['app.record.edit.show', 'mobile.app.record.edit.show'], "    if (record['ステータス'].value === '承認済み') { record['amount'].disabled = true; }") + "\n" + wrap(['mobile.app.record.edit.show'], "    if (record['ステータス'].value === '承認済み') { record['owner'].disabled = true; }"), cust({ platform: ['desktop', 'mobile'], events: ['app.record.edit.show', 'mobile.app.record.edit.show'], fields: [{ code: 'amount', access: 'CONTROL' }, { code: 'owner', access: 'CONTROL' }] }));
   assert(pcOnly.registration.verdict === 'BLOCKED' && pcOnly.registration.blockers.some(b => b.code === 'platform-fields' && /owner/.test(b.message)), 'F41: PC とモバイルの両方が対象で担当者のロックがモバイルだけ → 登録不可');
@@ -314,42 +333,37 @@ console.log('\n--- G7b. 条件の外のロックの見落とし（モデル比�
 {
   const { cust, wrap, review, chk } = REG;
   const both = cust({ requirement: '承認済みでは金額と明細を編集不可にする', fields: [{ code: 'amount', access: 'CONTROL', condition: 'ステータス in ("承認済み")' }, { code: 'items', access: 'CONTROL', condition: 'ステータス in ("承認済み")' }] });
+  //   §0d.4（2026-10-08）: 条件の外のロックの静的な照合（conditional-control。ループ・存在確認・別の項目の条件・条件なしで呼ぶ関数）と、静的に追えない書き方を
+  //   確認にする判定（switch・引数の条件）は、Toolkit の業務の推定による判定として削除した。条件の外のロックは生成工程の代表条件「合わない」（expect not-locked）で
+  //   不合格になる（AI版 worker/test/cases/required-effects.mjs の「lock: 条件に合う（承認済）→ lock・合わない（作成中）→ not-locked」「A3 F5」「A1 E1c」。
+  //   明細のループのロックは隔離環境がセルごとに記録する: sandbox/test/run.mjs の R15）。正常な書き方を止めないことも生成工程の側で守る（Gateway は if の中・早い return・
+  //   関数の中の処理を機械検査の block にせず check behavior にする: required-effects.mjs「§0d.1 の 2: handler の直下で無条件でない形は behavior」）。
+  //   ここでは Toolkit の形式確認が正常な書き方を止めないこと（登録不可にしない）と、生成工程の不合格を取り込んで登録不可にすることだけを確かめる
   // 基準側（gpt-4.1-mini）の差分そのもの: 承認済みの if の閉じ括弧の後ろに明細のループを足した（どのステータスでも明細が編集できなくなる）
   const leaked = "    if (record['ステータス'] && record['ステータス'].value === '承認済み') {\n      record['amount'].disabled = true;\n    }\n      record['items'].value.forEach(function(row) {\n        for (const key in row.value) {\n          if (row.value.hasOwnProperty(key)) {\n            row.value[key].disabled = true;\n          }\n        }\n      });";
-  const rvLeak = review(wrap(['app.record.edit.show'], leaked), both);
-  const cc = rvLeak.checks.find(x => x.name === 'conditional-control' && !x.ok && /items/.test(x.message));
-  assert(rvLeak.registration.verdict === 'BLOCKED' && cc && cc.severity === 'block' && /条件の外/.test(cc.message) && /見ていません/.test(cc.message), `ループ・hasOwnProperty だけの条件の中のロック → 計画の条件の外として登録不可: ${cc && cc.message}`);
-  assert(!rvLeak.registration.confirmations.some(x => x.code === 'conditional-control' && /items/.test(x.message)), '「確かめられません」（同意すれば登録できる確認）に落とさない');
+  const bothE = cust({ requirement: '承認済みでは金額と明細を編集不可にする', fields: [{ code: 'amount', access: 'CONTROL', condition: 'ステータス in ("承認済み")', effects: ['lock'] }, { code: 'items', access: 'CONTROL', condition: 'ステータス in ("承認済み")', effects: ['lock'] }] });
+  const rvLeakG = REG.gw(review(wrap(['app.record.edit.show'], leaked), bothE), bothE, { fail: ['items|nomatch'] });
+  assert(rvLeakG.registration.verdict === 'BLOCKED' && rvLeakG.checks.some(x => x.name === 'behavior-fail' && x.severity === 'block' && /items/.test(x.message)) && !rvLeakG.registration.confirmations.some(x => /items/.test(x.message || '')), `ループ・hasOwnProperty だけの条件の中のロック → 生成工程の「合わない」の不合格で登録不可（同意すれば登録できる確認に落とさない）: ${JSON.stringify(rvLeakG.registration.blockers.map(b => b.code))}`);
   // 正しい位置（if の中）なら止めない
   const inside = "    if (record['ステータス'] && record['ステータス'].value === '承認済み') {\n      record['amount'].disabled = true;\n      record['items'].value.forEach(function(row) {\n        for (const key in row.value) {\n          if (row.value.hasOwnProperty(key)) {\n            row.value[key].disabled = true;\n          }\n        }\n      });\n    }";
   const rvIn = review(wrap(['app.record.edit.show'], inside), both);
-  assert(rvIn.registration.verdict !== 'BLOCKED' && rvIn.checks.filter(x => x.name === 'conditional-control').every(x => x.ok), `if の中のループ・hasOwnProperty は条件（承認済み）の中として認める: ${JSON.stringify(rvIn.registration.blockers)}`);
-  // 存在確認だけの if（明細があれば）の中 → 計画の条件の外
-  const exist = "    if (record['ステータス'].value === '承認済み') { record['amount'].disabled = true; }\n    if (record['items'] && record['items'].value) {\n      record['items'].value.forEach(function (row) { row.value['qty'].disabled = true; });\n    }";
-  const rvExist = review(wrap(['app.record.edit.show'], exist), both);
-  assert(rvExist.registration.verdict === 'BLOCKED' && rvExist.registration.blockers.some(b => b.code === 'conditional-control' && /items/.test(b.message)), '存在確認（if (record.items && record.items.value)）だけの中のロック → 登録不可');
-  // 別の項目の条件だけ（ステータスを見ない）→ 計画の条件の外
-  const otherField = review(wrap(['app.record.edit.show'], "    if (record['owner'].value.length) {\n      record['amount'].disabled = true;\n    }"));
-  assert(otherField.registration.verdict === 'BLOCKED' && otherField.registration.blockers.some(b => b.code === 'conditional-control'), '別の項目（担当者）の条件だけでロック → 計画の条件（ステータス）を見ていないので登録不可');
+  assert(rvIn.registration.verdict !== 'BLOCKED', `if の中のループ・hasOwnProperty は止めない: ${JSON.stringify(rvIn.registration.blockers)}`);
+  //   存在確認だけの if（明細があれば）の中・別の項目（担当者）の条件だけ・条件なしで呼ぶ関数の中のロック（旧 conditional-control の block）は、上と同じく生成工程の代表条件で扱う
   // 正常な書き方は止めない: 条件の中から呼ぶ関数・switch・else・関数で判定
   const helperCalled = review("(function () {\n  'use strict';\n  function lockAll(record) {\n    record['amount'].disabled = true;\n  }\n  kintone.events.on(['app.record.edit.show'], function (event) {\n    if (event.record['ステータス'].value === '承認済み') {\n      lockAll(event.record);\n    }\n    return event;\n  });\n})();");
-  assert(helperCalled.registration.verdict === 'RUNTIME_UNVERIFIED' && chk(helperCalled, 'conditional-control').ok, `条件の中から呼ぶ関数の中のロックは止めない（呼び出し元の条件を見る）: ${JSON.stringify(helperCalled.registration)}`);
-  const helperAlways = review("(function () {\n  'use strict';\n  function lockAll(record) {\n    record['amount'].disabled = true;\n  }\n  kintone.events.on(['app.record.edit.show'], function (event) {\n    lockAll(event.record);\n    return event;\n  });\n})();");
-  assert(helperAlways.registration.verdict === 'BLOCKED' && helperAlways.registration.blockers.some(b => b.code === 'conditional-control'), '条件なしで呼ぶ関数の中のロック → 登録不可');
+  assert(helperCalled.registration.verdict === 'RUNTIME_UNVERIFIED', `条件の中から呼ぶ関数の中のロックは止めない: ${JSON.stringify(helperCalled.registration)}`);
   const helperRef = review("(function () {\n  'use strict';\n  function lockAll(event) {\n    event.record['amount'].disabled = true;\n    return event;\n  }\n  const guarded = function (event) { return event.record['ステータス'].value === '承認済み' ? lockAll(event) : event; };\n  kintone.events.on(['app.record.edit.show'], guarded);\n})();");
-  assert(helperRef.registration.verdict !== 'BLOCKED', `呼び出し方を静的に追えない関数の中のロックは止めない（確認に回す）: ${JSON.stringify(helperRef.registration.blockers)}`);
+  assert(helperRef.registration.verdict !== 'BLOCKED', `呼び出し方を静的に追えない関数の中のロックは止めない: ${JSON.stringify(helperRef.registration.blockers)}`);
   const sw = review(wrap(['app.record.edit.show'], "    switch (record['ステータス'].value) {\n      case '承認済み':\n        record['amount'].disabled = true;\n        break;\n      default:\n        break;\n    }"));
-  // 段階 C: switch の case のラベル（値）は静的に読まない → 条件の中かは確認（review）。条件どおりに動くかは模擬イベントで確かめる
-  assert(sw.registration.verdict === 'NEEDS_CONFIRMATION' && chk(sw, 'conditional-control').severity === 'review', 'switch (ステータス) の case の中は条件の中（値は模擬イベントで確かめる）');
+  // 段階 C: switch の case のラベル（値）は静的に読まない。条件どおりに動くかは生成工程の模擬テストで確かめる
+  assert(sw.registration.verdict !== 'BLOCKED', 'switch (ステータス) の case の中のロックは止めない（値は生成工程の模擬テストで確かめる）');
   const els = review(wrap(['app.record.edit.show'], "    if (record['ステータス'].value !== '承認済み') {\n      record['amount'].disabled = false;\n    } else {\n      record['amount'].disabled = true;\n    }"));
-  assert(els.registration.verdict === 'RUNTIME_UNVERIFIED' && chk(els, 'conditional-control').ok, 'ステータスの if の else の中は条件の中（else of (…)）');
+  assert(els.registration.verdict === 'RUNTIME_UNVERIFIED', 'ステータスの if の else の中のロックは止めない');
   const fnCond = review("(function () {\n  'use strict';\n  function isApproved(record) {\n    return record['ステータス'].value === '承認済み';\n  }\n  kintone.events.on(['app.record.edit.show'], function (event) {\n    if (isApproved(event.record)) {\n      event.record['amount'].disabled = true;\n    }\n    return event;\n  });\n})();");
-  assert(fnCond.registration.verdict === 'RUNTIME_UNVERIFIED' && chk(fnCond, 'conditional-control').ok, '判定を関数にした書き方（isApproved(record)）は関数の中身で照合して止めない');
+  assert(fnCond.registration.verdict === 'RUNTIME_UNVERIFIED', '判定を関数にした書き方（isApproved(record)）は止めない');
   const param = review("(function () {\n  'use strict';\n  function lockIf(record, locked) {\n    if (locked) record['amount'].disabled = true;\n  }\n  kintone.events.on(['app.record.edit.show'], function (event) {\n    lockIf(event.record, event.record['ステータス'].value === '承認済み');\n    return event;\n  });\n})();");
-  assert(param.registration.verdict === 'NEEDS_CONFIRMATION' && param.registration.confirmations.some(x => x.code === 'conditional-control'), '引数で渡した条件（中身を静的に追えない）→ 止めずに確認が必要');
-  // 構造化されていない要件（条件は文だけ）でも、ループと hasOwnProperty だけに囲まれたロックは「条件なし」と同じ（確認に回す）
-  const noCondLoop = review(wrap(['app.record.edit.show'], "    if (record['ステータス'].value === '承認済み') { record['amount'].disabled = true; }\n    record['items'].value.forEach(function (row) {\n      for (const key in row.value) {\n        if (row.value.hasOwnProperty(key)) { row.value['qty'].disabled = true; }\n      }\n    });"), cust({ requirement: '承認済みでは金額と明細を編集不可にする', fields: [{ code: 'amount', access: 'CONTROL' }, { code: 'items', access: 'CONTROL' }] }));
-  assert(noCondLoop.registration.confirmations.some(x => x.code === 'unconditional-control' && /qty/.test(x.message)), `条件が構造化されていない要件: ループと hasOwnProperty だけの中のロックも「条件なし」と指摘: ${JSON.stringify(noCondLoop.registration.confirmations.map(x => x.code))}`);
+  assert(param.registration.verdict !== 'BLOCKED', '引数で渡した条件（中身を静的に追えない）→ 止めない');
+  //   構造化されていない要件（条件は文だけ）のループのロック（旧 unconditional-control の確認）は、G7 の注のとおり必須の効果を固定する段階（field-unspecified・condition-unknown）で扱う
   // 基準側（gpt-4.1-mini）CX-1 3 回目の差分そのもの: 既存の PC の handler の中に、新しい登録（PC ＋ モバイル）を丸ごと差し込んだ
   const LOCK_BASE = "(function () {\n  'use strict';\n  // 承認済みの案件は金額を変更できないようにする（既存の運用ルール）\n  kintone.events.on(['app.record.create.show', 'app.record.edit.show'], function (event) {\n    const record = event.record;\n    if (record['ステータス'] && record['ステータス'].value === '承認済み') {\n      record['amount'].disabled = true;\n    }\n    return event;\n  });\n})();\n";
   const nestedPatch = { baseHash: null, operations: [{ type: 'INSERT_AFTER', anchor: "    if (record['ステータス'] && record['ステータス'].value === '承認済み') {\n      record['amount'].disabled = true;\n    }", content: "\n  // PCとモバイルの両方のレコード作成・編集画面で承認済みなら金額と明細を編集不可にする\n  const EVENTS = ['app.record.create.show', 'app.record.edit.show', 'mobile.app.record.create.show', 'mobile.app.record.edit.show'];\n  kintone.events.on(EVENTS, function(event) {\n    const record = event.record;\n    if (record['ステータス'] && record['ステータス'].value === '承認済み') {\n      record['amount'].disabled = true;\n      if (record['items'] && Array.isArray(record['items'].value)) {\n        record['items'].value.forEach(function(row) {\n          for (const col in row.value) {\n            row.value[col].disabled = true;\n          }\n        });\n      }\n    }\n    return event;\n  });" }] };
@@ -375,8 +389,9 @@ console.log('\n--- G8. 要約・詳細・検査結果の整合（明細の行の
   const c = cust({ requirement: '承認済みでは金額と明細を編集不可にし、明細の行の追加・削除も禁止する', fields: [{ code: 'amount', access: 'CONTROL', condition: 'ステータス in ("承認済み")' }, { code: 'items', access: 'CONTROL', condition: 'ステータス in ("承認済み")' }] });
   const rv = review(wrap(['app.record.edit.show'], CELLS), c, { summary: '承認済みでは金額と明細を編集不可にし、明細の行追加・削除も禁止する' });
   assert(rv.coverage && rv.coverage.notAchieved.some(x => x.code === 'SUBTABLE_ROWS' && /行の追加・削除は止められません/.test(x.message)) && rv.coverage.achieved.some(x => /セルを編集不可/.test(x)), '達成範囲: セルの編集不可は達成・行の追加・削除は未達（Toolkit が示す）');
-  assert(chk(rv, 'summary-scope') && !chk(rv, 'summary-scope').ok && /行の追加・削除は止まりません/.test(chk(rv, 'summary-scope').message) && rv.registration.verdict === 'NEEDS_CONFIRMATION', 'AI の要約「行追加・削除も禁止する」は満たせない → 確認が必要（要件を満たした扱いにしない）');
-  assert(chk(rv, 'conditional-control') && rv.checks.filter(x => x.name === 'conditional-control').every(x => x.ok), '行のループでのセルのロックも、条件（locked = 承認済み）の中として認める');
+  //   §0d.4（2026-10-08）: AI の要約・要件の文を正規表現で読んで確認にする判定（summary-scope・requirement-scope）と、条件の内外の照合（conditional-control）は削除した。
+  //   「行の追加・削除は止められない」ことは、構造の判定（達成範囲の SUBTABLE_ROWS・コードペインの「満たせない部分」・計画の Review の JS_LIMIT_SUBTABLE_ROWS）で示す（上の 1 件と下の 2 件）
+  assert(!chk(rv, 'summary-scope') && rv.registration.verdict !== 'BLOCKED', `行のループでのセルのロック（条件の中）は止めない: ${rv.registration.verdict}`);
   const { KTAiChatUi } = loadToolkit();
   const entry = { generated: REG.gen(wrap(['app.record.edit.show'], CELLS), { summary: '承認済みでは金額と明細を編集不可にし、明細の行追加・削除も禁止する' }), review: rv, existingSource: null };
   const pane = KTAiChatUi.codePaneHtml(entry);
@@ -396,9 +411,12 @@ console.log('\n--- G7. 登録処理の側での判定（KTJsExecutor）: 古い�
   const okCode = wrap(['app.record.edit.show'], IF_LOCK);
   const badCode = okCode.replace("      record['amount'].disabled = true;\n    }", "    }\n    record['amount'].disabled = true;");
   const c = cust();
-  const rvBad = review(badCode, c);
-  const refused = KTJsExecutor.changeFromGenerated({ customization: c, generated: REG.gen(badCode), review: rvBad });
-  assert(!refused.ok && /登録できません/.test(refused.message), '要件違反（BLOCKED）のコードは登録の変更にできない');
+  //   §0d.4（2026-10-08）: 条件の外のロック（badCode）を登録不可にしていた Toolkit の静的な判定（conditional-control）は削除した。今の契約では、生成工程の
+  //   代表条件「合わない」（作成中のレコードで金額が編集できる）が不合格を返し、Toolkit がそれを取り込んで BLOCKED にする。その判定の結果（rvBad）で登録処理の側を確かめる
+  const cE = cust({ fields: [{ code: 'amount', access: 'CONTROL', condition: 'ステータス in ("承認済み")', effects: ['lock'] }] });
+  const rvBad = REG.gw(review(badCode, cE), cE, { fail: ['amount|nomatch'] });
+  const refused = KTJsExecutor.changeFromGenerated({ customization: cE, generated: REG.gen(badCode), review: rvBad });
+  assert(rvBad.registration.verdict === 'BLOCKED' && !refused.ok && /登録できません/.test(refused.message), `要件違反（BLOCKED）のコードは登録の変更にできない: ${rvBad.registration.verdict}`);
   // 古い画面・直接の呼び出し: 判定が BLOCKED の変更を prepare に渡しても止まる
   const rvOk = review(okCode, c);
   const good = KTJsExecutor.changeFromGenerated({ customization: c, generated: REG.gen(okCode), review: rvOk });
@@ -522,22 +540,24 @@ console.log('\n--- G9 / G10. Generator Context の欠落（モデル比較の候
 }
 {
   // Code Review: 全列のループ（row.value[key]）は計画した列の制御。条件の中なら通し、条件の外なら止める
+  //   §0d.4（2026-10-08）: 条件の外の判定は生成工程の代表条件「合わない」の不合格を取り込む形に直した（旧 conditional-control は削除）
   const { cust, wrap, review } = REG;
   const c = cust({ requirement: '承認済みでは明細の品名・数量を編集不可にする', fields: [{ code: 'item_name', access: 'CONTROL', condition: 'ステータス in ("承認済み")' }, { code: 'qty', access: 'CONTROL', condition: 'ステータス in ("承認済み")' }] });
   const inside = review(wrap(['app.record.edit.show'], "    if (record['ステータス'].value === '承認済み') {\n      record['items'].value.forEach(function (row) {\n        Object.keys(row.value).forEach(function (key) { row.value[key].disabled = true; });\n      });\n    }"), c);
   assert(inside.registration.verdict !== 'BLOCKED' && !inside.registration.blockers.some(b => b.code === 'planned-fields'), `G9: 計画した列（item_name / qty）を全列のループで条件の中でロック → 要件の処理がある（planned-fields で止めない）: ${JSON.stringify(inside.registration.blockers)}`);
-  const outside = review(wrap(['app.record.edit.show'], "    record['items'].value.forEach(function (row) {\n      Object.keys(row.value).forEach(function (key) { row.value[key].disabled = true; });\n    });"), c);
-  assert(outside.registration.verdict === 'BLOCKED' && outside.registration.blockers.some(b => b.code === 'conditional-control' && /item_name|qty/.test(b.message)), '全列のループが条件の外 → 計画した列も条件の外として登録不可');
+  const cE = cust({ requirement: '承認済みでは明細の品名・数量を編集不可にする', fields: [{ code: 'item_name', access: 'CONTROL', condition: 'ステータス in ("承認済み")', effects: ['lock'] }, { code: 'qty', access: 'CONTROL', condition: 'ステータス in ("承認済み")', effects: ['lock'] }] });
+  const outside = REG.gw(review(wrap(['app.record.edit.show'], "    record['items'].value.forEach(function (row) {\n      Object.keys(row.value).forEach(function (key) { row.value[key].disabled = true; });\n    });"), cE), cE, { fail: ['item_name|nomatch', 'qty|nomatch'] });
+  assert(outside.registration.verdict === 'BLOCKED' && outside.checks.some(x => x.name === 'behavior-fail' && x.severity === 'block' && /item_name|qty/.test(x.message)), `全列のループが条件の外 → 生成工程の「合わない」の不合格で、計画した列も登録不可: ${JSON.stringify(outside.registration.blockers.map(b => b.code))}`);
   const both = review(wrap(['app.record.edit.show', 'mobile.app.record.edit.show'], "    if (record['ステータス'].value === '承認済み') {\n      record['items'].value.forEach(function (row) {\n        for (const key in row.value) { row.value[key].disabled = true; }\n      });\n    }"), cust({ platform: ['desktop', 'mobile'], events: ['app.record.edit.show', 'mobile.app.record.edit.show'], requirement: '承認済みでは明細を編集不可（PC とモバイル）', fields: [{ code: 'item_name', access: 'CONTROL', condition: 'ステータス in ("承認済み")' }, { code: 'qty', access: 'CONTROL', condition: 'ステータス in ("承認済み")' }] }));
   assert(!both.registration.blockers.some(b => b.code === 'platform-fields' || b.code === 'planned-fields'), `PC とモバイルの 1 つの handler で全列をロック → 両方の画面で扱っている: ${JSON.stringify(both.registration.blockers)}`);
   const oneCol = review(wrap(['app.record.edit.show'], "    if (record['ステータス'].value === '承認済み') {\n      record['items'].value.forEach(function (row) { row.value['item_name'].disabled = true; });\n    }"), c);
   assert(oneCol.registration.verdict === 'BLOCKED' && oneCol.registration.blockers.some(b => b.code === 'planned-fields' && /qty/.test(b.message)), '計画した列の一部（qty）しかロックしていない → 要件の処理が無い（登録不可）');
-  // G8 の表示: 正確な要約（「セル」と書く）を「要約が言い切っている」としない。要件が明細そのものの変更禁止なら、行が残ることを要件の側の確認にする
+  // G8 の表示: 行が残ること（明細の行の追加・削除は止められない）は、構造の判定（達成範囲の SUBTABLE_ROWS）で示す
+  //   §0d.4（2026-10-08）: 要件の文・AI の要約を正規表現で読んで確認にする判定（requirement-scope・summary-scope）は削除した（要件の文の読み取りは計画の Review の
+  //   JS_LIMIT_SUBTABLE_ROWS と、達成範囲の SUBTABLE_ROWS が持つ。G8 の計画の Review の回帰を参照）
   const CELL_LOCK = "    if (record['ステータス'].value === '承認済み') {\n      record['items'].value.forEach(function (row) { row.value['item_name'].disabled = true; row.value['qty'].disabled = true; });\n    }";
   const cellsOnly = review(wrap(['app.record.edit.show'], CELL_LOCK), cust({ requirement: '承認済みでは明細の品名・数量のセルを編集不可にする', fields: [{ code: 'item_name', access: 'CONTROL', condition: 'ステータス in ("承認済み")' }, { code: 'qty', access: 'CONTROL', condition: 'ステータス in ("承認済み")' }] }), { summary: '承認済みのとき明細の品名・数量のセルを編集不可にします' });
-  assert(!cellsOnly.registration.confirmations.some(x => x.code === 'summary-scope' || x.code === 'requirement-scope') && cellsOnly.coverage.notAchieved.some(x => x.code === 'SUBTABLE_ROWS'), `要件も要約も「セル」に限る → 確認にしない（行が残ることは達成範囲に出す）: ${JSON.stringify(cellsOnly.registration.confirmations.map(x => x.code))}`);
-  const tableReq = review(wrap(['app.record.edit.show'], CELL_LOCK), cust({ requirement: '承認済みでは明細を変更できないようにする', fields: [{ code: 'item_name', access: 'CONTROL', condition: 'ステータス in ("承認済み")' }, { code: 'qty', access: 'CONTROL', condition: 'ステータス in ("承認済み")' }] }), { summary: '承認済みのとき明細の品名・数量のセルを編集不可にします' });
-  assert(tableReq.registration.confirmations.some(x => x.code === 'requirement-scope' && /行の追加・削除/.test(x.message) && /運用/.test(x.howToCheck)) && !tableReq.registration.confirmations.some(x => x.code === 'summary-scope'), '要件は明細の変更禁止・要約は正確 → 要件の側の確認（requirement-scope）。要約の問題にはしない');
+  assert(cellsOnly.registration.verdict !== 'BLOCKED' && cellsOnly.coverage.notAchieved.some(x => x.code === 'SUBTABLE_ROWS'), `要件も要約も「セル」に限る → 止めない（行が残ることは達成範囲に出す）: ${JSON.stringify(cellsOnly.registration.confirmations.map(x => x.code))}`);
 }
 {
   // §2 の実機: 反映した計画（顧客区分・紹介元・一覧）の後、その計画のフィールドに触れる新しい依頼が「改めて入力してください」から抜けられなかった
@@ -585,12 +605,12 @@ console.log('\n--- G9 / G10. Generator Context の欠落（モデル比較の候
   const c = (events, cond) => ({ customizationId: 'C1', requirement: '顧客区分が新規のときだけ紹介元を表示 / 必須', strategy: 'NEW_JS_FILE', platform: ['desktop'], implementation: 'JAVASCRIPT', events, fields: [{ code: 'customer_category', access: 'READ' }, { code: 'referral_source', access: 'CONTROL', condition: cond }], apis: [], existingFiles: [] });
   const rv = (events, body, cond) => KTCodeReview.review({ generated: REG.gen(`(function () {\n  'use strict';\n  kintone.events.on(${JSON.stringify(events).replace(/"/g, "'")}, function (event) {\n${body}\n    return event;\n  });\n})();`, { summary: 's' }), customization: c(events, cond), plan: null, data, scan: null, existingSource: null });
   const shown = rv(['app.record.create.show', 'app.record.edit.show', 'app.record.create.change.customer_category', 'app.record.edit.change.customer_category'], "    kintone.app.record.setFieldShown('referral_source', event.record['customer_category'].value === '新規');", 'customer_category not in ("新規")');
-  const sc = shown.checks.find(x => x.name === 'conditional-control');
-  assert(sc && sc.ok && /表示の切り替え/.test(sc.message) && !shown.registration.confirmations.some(x => x.code === 'conditional-control'), `表示の切り替え（setFieldShown）が条件の項目を見ている → 確認にしない: ${sc && sc.message}`);
+  //   §0d.4（2026-10-08）: 条件の内外の照合（conditional-control）は削除した。ここでは形式確認が表示の切り替え・入力チェックの正しいコードを止めないこと
+  //   （「編集不可が見つかりません」の planned-fields にしない・登録不可にしない）だけを確かめる。条件を見ない表示の切り替え（旧: 確認）は、生成工程の代表条件で
+  //   扱う（AI版 worker/test/cases/required-effects.mjs の「§0c.10 G2（本物の隔離環境）: show-hide の condition は隠す条件…逆向きの候補は failed」と「lock: 条件に合う…・合わない…」の組）
+  assert(shown.registration.verdict !== 'BLOCKED' && !shown.registration.blockers.some(b => b.code === 'planned-fields') && !shown.checks.some(x => x.name === 'conditional-control'), `表示の切り替え（setFieldShown）が条件の項目を見ている → 止めない: ${JSON.stringify(shown.registration.blockers)}`);
   const err = rv(['app.record.create.submit', 'app.record.edit.submit'], "    if (event.record['customer_category'].value === '新規' && !event.record['referral_source'].value) {\n      event.record['referral_source'].error = '紹介元を入力してください';\n    } else {\n      event.record['referral_source'].error = null;\n    }", 'customer_category in ("新規")');
-  assert(err.checks.find(x => x.name === 'conditional-control').ok && !err.registration.confirmations.some(x => x.code === 'conditional-control'), '入力チェック（.error）が条件の中 → 確認にしない');
-  const blindShown = rv(['app.record.edit.show'], "    kintone.app.record.setFieldShown('referral_source', false);", 'customer_category not in ("新規")');
-  assert(blindShown.registration.confirmations.some(x => x.code === 'conditional-control' && /表示の切り替えで制御していますが/.test(x.message)), '条件を見ない表示の切り替え → 確かめられないので確認');
+  assert(err.registration.verdict !== 'BLOCKED' && !err.registration.blockers.some(b => b.code === 'planned-fields'), `入力チェック（.error）が条件の中 → 止めない: ${JSON.stringify(err.registration.blockers)}`);
 }
 {
   // §6 の実機: kintone.proxy は約 60 秒で打ち切る（GAIA_PR03）。推論モデルの計画（見直し）が「ネットワークエラー」になった

@@ -19144,21 +19144,6 @@
       const code = codeN.replace(/\n+$/, '') === joined(gen.patch.operations) ? joined(ops) + (/\n$/.test(codeN) ? '\n' : '') : retokenFix(gen.code, r.fixed);
       return { status: r.remaining.length ? 'failed' : 'fixed', fixed: r.fixed, remaining: r.remaining, parseError: null, gen: { ...gen, code, patch }, source: r.code };
     }
-    /** 構文解析（acorn）。読めなければ null（検査の呼び出し側は文字の走査に戻す） */
-    function parseAst(text) {
-      if (!lib || typeof lib.parse !== 'function') return null;
-      try { return lib.parse(String(text ?? ''), { ecmaVersion: 'latest', sourceType: 'script', allowReturnOutsideFunction: true }); } catch (e) { return null; }
-    }
-    /** AST の全ノードを深さ優先で回す（loc / start / end は辿らない） */
-    function walkAst(node, fn) {
-      if (!node || typeof node.type !== 'string') return;
-      fn(node);
-      for (const k of Object.keys(node)) {
-        if (k === 'type' || k === 'loc' || k === 'start' || k === 'end') continue;
-        const v = node[k];
-        if (Array.isArray(v)) { for (const x of v) walkAst(x, fn); } else if (v && typeof v.type === 'string') walkAst(v, fn);
-      }
-    }
     /** 検査結果 → 利用者・AI に示す行（行番号は検査した全文。該当行の文を添える） */
     function describeFindings(m) {
       const lines = String(m?.source ?? '').split('\n');
@@ -19173,8 +19158,7 @@
     return {
       VERSION: MODERN_JS_VERSION, available: () => !!M,
       analyze: (code, o) => (M ? M.analyze(code, o) : null), fix: (code, o) => (M ? M.fix(code, o) : null), applyFixes: (code, f) => (M ? M.applyFixes(code, f) : { code, applied: [] }),
-      applyPatchWithRanges, fixGenerated, describeFindings, REASON: M ? M.REASON : {}, parseAst, walkAst,
-      // 検査の側が同じ構文解析器を使うために出す（C-1 第 2 段で KTJsSim を消した後、本体に呼び出し元は無い。テストだけが使う）
+      applyPatchWithRanges, fixGenerated, describeFindings, REASON: M ? M.REASON : {},
     };
   })();
 
@@ -19267,8 +19251,9 @@
    * §0d.1（2026-10-08）: 模擬テストが要る理由（生成工程の requiredEffects[].checkReason の語）の言い方。語の名前は利用者に出さない。
    *   語彙外の語は、文字が英小文字・数字・ハイフンだけなら共通の言い方にし（語の名前は詳細表示だけ）、それ以外（生成工程が文で返したもの）はそのまま使う
    */
-  //   語は生成工程の CHECK_REASON_ORDER（AI版 worker/src/v2/toolkit/verify-generated.mjs・契約 20 §13）と、Toolkit が構造から足す語（condition・warn・block-save・
-  //   same-event-error）。effect-kind（警告・保存禁止）は、Toolkit が効果の種類（warn・block-save）から足す語と重なるので、文にしない（空文字）
+  //   語は生成工程の CHECK_REASON_ORDER（AI版 worker/src/v2/toolkit/verify-generated.mjs・契約 20 §13）と、Toolkit が構造から足す語（condition・warn・block-save）。
+  //   effect-kind（警告・保存禁止）は、Toolkit が効果の種類（warn・block-save）から足す語と重なるので、文にしない（空文字）。
+  //   §0d.4（2026-10-08）: 既知の競合（同じ表示のイベントの error と編集不可）は生成工程の candidate-error-same-event だけで受ける（Toolkit の形式確認では判定しない）
   const KT_CHECK_REASON_JA = Object.freeze({
     'event-missing': '効果のイベントの一部に処理が無い', 'candidate-error-same-event': '同じ表示のイベントで error と編集不可の両方を設定している',
     'existing-same-event': '既存の JavaScript が同じイベントを登録している（または登録を読めない）', 'platform-omitted': '模擬テストに渡せなかった既存の JavaScript が同じ画面にある',
@@ -19276,8 +19261,8 @@
     conditional: '条件つき', 'no-event': '効果のイベントが無い', 'event-unreadable': '登録するイベントを本文から読めない処理がある',
     'not-top-level': '処理の登録がトップレベルにない（ループの中など）', nested: '処理（handler）の直下で設定していない（条件・try・入れ子の関数の中など）',
     'early-return': '設定の前に処理を抜ける return がある（または event を返さない）', 'not-constant': '設定する値が定数ではない（表示の切り替えが隠すでない）', unchecked: '本文を解析できない',
-    //   Toolkit が構造から足す語（Toolkit が固定した必須の効果の条件・効果の種類、形式確認の既知の競合）
-    condition: '条件つき', warn: '警告', 'block-save': '保存を止める', 'same-event-error': '同じ表示のイベントで error と編集不可の両方を設定している',
+    //   Toolkit が構造から足す語（Toolkit が固定した必須の効果の条件・効果の種類）
+    condition: '条件つき', warn: '警告', 'block-save': '保存を止める',
   });
   const ktCheckReasonJa = (r) => (Object.prototype.hasOwnProperty.call(KT_CHECK_REASON_JA, r) ? KT_CHECK_REASON_JA[r] : (/^[a-z0-9-]+$/.test(String(r)) ? '機械検査だけでは確かめられない形' : String(r)));
   /** §0d.1: 模擬テストが要る効果を、模擬テストの環境が使えないために確かめられないときの理由（一度にまとめて出す。labels = 効果の言い方、reasons = checkReason の語） */
@@ -19497,122 +19482,10 @@
       return out;
     }
     /**
-     * 段階 C（正しさの反証 A7）: 同じ handler の中で、条件の外（handler の本体の直下の文）で error を設定し、同じ handler で disabled か value も設定している表示・変更のイベント。
-     *   模擬イベントの結果が無い review（従来の流れ・登録前の再検査で模擬が動かなかった）では、これを従来どおり登録不可にする（構文の位置だけを見る。業務の意味は推定しない）
-     */
-    function unconditionalErrorEdits(clean, { lib = typeof KTAcornLib !== 'undefined' ? KTAcornLib : null } = {}) {
-      if (!lib || typeof lib.parse !== 'function') return [];
-      let ast; try { ast = lib.parse(String(clean || ''), { ecmaVersion: 'latest', sourceType: 'script', allowReturnOutsideFunction: true }); } catch (e) { return []; }
-      const prop = (m) => (m && m.type === 'MemberExpression' ? (m.computed ? (m.property.type === 'Literal' ? String(m.property.value) : null) : m.property.name) : null);
-      const empty = (n) => !n || (n.type === 'Literal' && (n.value === null || n.value === '')) || (n.type === 'Identifier' && n.name === 'undefined') || (n.type === 'TemplateLiteral' && !n.expressions.length && n.quasis.every(q => !q.value.cooked));
-      const isErrSet = (st) => st && st.type === 'ExpressionStatement' && st.expression.type === 'AssignmentExpression' && st.expression.operator === '=' && prop(st.expression.left) === 'error' && !empty(st.expression.right);
-      const hasEdit = (n) => { let hit = false; const w = (x) => { if (hit || !x || typeof x.type !== 'string') return; if (x.type === 'AssignmentExpression' && ['disabled', 'value'].includes(prop(x.left)) && !(prop(x.left) === 'disabled' && x.right.type === 'Literal' && x.right.value === false)) { hit = true; return; } for (const k of Object.keys(x)) { if (k === 'type' || k === 'start' || k === 'end') continue; const v = x[k]; if (Array.isArray(v)) v.forEach(w); else if (v && typeof v.type === 'string') w(v); } }; w(n); return hit; };
-      const out = new Set();
-      const walk = (n) => {
-        if (!n || typeof n.type !== 'string') return;
-        if (n.type === 'CallExpression' && n.callee.type === 'MemberExpression' && prop(n.callee) === 'on' && prop(n.callee.object) === 'events') {
-          const a0 = n.arguments[0], h = n.arguments[1];
-          const evs = a0 && a0.type === 'ArrayExpression' ? a0.elements.filter(x => x && x.type === 'Literal').map(x => String(x.value)) : a0 && a0.type === 'Literal' ? [String(a0.value)] : [];
-          if (h && /FunctionExpression$/.test(h.type) && h.body && h.body.type === 'BlockStatement' && h.body.body.some(isErrSet) && hasEdit(h.body)) for (const ev of evs) if (/\.show$|\.change\./.test(ev)) out.add(ev);
-        }
-        for (const k of Object.keys(n)) { if (k === 'type' || k === 'start' || k === 'end') continue; const v = n[k]; if (Array.isArray(v)) v.forEach(walk); else if (v && typeof v.type === 'string') walk(v); }
-      };
-      walk(ast);
-      return [...out];
-    }
-    /**
-     * Phase 20（F42・実機）: handler の本体で、条件（if / else / for / while / switch / ? :）の外にある「フィールドを編集不可にする」代入のフィールドコード。
-     * 既存の if の閉じ括弧の後ろに足した record['owner'].disabled = true は、すべてのステータスで編集不可になった
-     */
-    function unconditionalDisables(clean) {
-      const s = String(clean || '');
-      const out = new Set();
-      const rx = /\.disabled\s*=(?!=)\s*true\b/g;
-      let m;
-      while ((m = rx.exec(s)) !== null) {
-        // この位置を囲むブロックを外側へたどる（文字列とコメントは stripComments 済みの前提）
-        const stack = [];
-        for (let k = 0; k < m.index; k++) { const ch = s[k]; if (ch === '{') stack.push(k); else if (ch === '}') stack.pop(); }
-        const kinds = stack.map(open => { const before = s.slice(Math.max(0, open - 200), open).replace(/\s+$/, ''); if (/\belse$/.test(before)) return 'cond'; if (/\)$/.test(before)) { const head = before.slice(0, -1); let depth = 1, k = head.length - 1; for (; k >= 0 && depth > 0; k--) { if (head[k] === ')') depth++; else if (head[k] === '(') depth--; } const kw = head.slice(0, k + 1).replace(/\s+$/, ''); if (/\b(if|for|while|switch|catch|with)$/.test(kw)) return 'cond'; if (/\bfunction(\s+[A-Za-z_$][\w$]*)?$/.test(kw) || /=>$/.test(kw)) return 'func'; return 'func'; } if (/=>$/.test(before)) return 'func'; return 'other'; });
-        // handler（関数）の中で、関数より内側に条件のブロックが無い = 条件なし。三項演算子の行は条件付きとみなす
-        const lastFunc = kinds.lastIndexOf('func');
-        if (lastFunc < 0) continue;
-        const inner = kinds.slice(lastFunc + 1);
-        const lineStart = s.lastIndexOf('\n', m.index) + 1;
-        const line = s.slice(lineStart, s.indexOf('\n', m.index) < 0 ? s.length : s.indexOf('\n', m.index));
-        if (inner.includes('cond') || /\?/.test(line) || /\bif\s*\(/.test(line)) continue;
-        const ref = /(?:\[\s*['"`]([^'"`\]]+)['"`]\s*\]|\brecord\s*\.\s*([A-Za-z_$][\w$]*))\s*$/.exec(s.slice(Math.max(0, m.index - 120), m.index));
-        if (ref) out.add(ref[1] || ref[2]);
-      }
-      return [...out];
-    }
-    /**
      * Phase 21: フィールド code を編集不可（.disabled = true）にしている場所と、それを囲む条件。
      *   unconditional = handler（関数）の中で if / else / ループ / switch / 三項演算子 に囲まれていない（どのレコードでも編集不可になる）
      *   conds = 囲んでいる if の条件式（else は 'else'、ループなどはそのキーワード）
      */
-    /**
-     * §0c.10（2026-10-08）: 本文の位置 index を囲む handler（kintone.events.on の第 2 引数の関数・名前で渡した関数・handler から名前で呼ぶ同じファイルの関数 1 段）の
-     *   イベント名（構文解析。第 1 引数が文字列・式の無いテンプレート・それらの配列・それらを入れた変数のとき）。handler の外・イベント名を読めない・構文解析できないときは null
-     */
-    const handlerSpanMemo = new Map();
-    function handlerSpansOf(text) {
-      const src = String(text || '');
-      if (handlerSpanMemo.has(src)) return handlerSpanMemo.get(src);
-      let spans = null;
-      try {
-        const lib = typeof KTAcornLib !== 'undefined' ? KTAcornLib : null;
-        const ast = lib && typeof lib.parse === 'function' ? lib.parse(src, { ecmaVersion: 'latest', sourceType: 'script', allowReturnOutsideFunction: true, allowHashBang: true }) : null;
-        if (ast) {
-          const isNode = (n) => !!n && typeof n === 'object' && typeof n.type === 'string';
-          const kids = (n) => { const r = []; for (const k of Object.keys(n)) { if (k === 'type' || k === 'start' || k === 'end' || k === 'loc') continue; const v = n[k]; if (Array.isArray(v)) { for (const x of v) if (isNode(x)) r.push(x); } else if (isNode(v)) r.push(v); } return r; };
-          const all = []; const st = [ast]; while (st.length) { const n = st.pop(); all.push(n); for (const c of kids(n)) st.push(c); }
-          const FN = new Set(['FunctionExpression', 'ArrowFunctionExpression', 'FunctionDeclaration']);
-          const named = new Map(), inits = new Map();
-          for (const n of all) {
-            if (n.type === 'FunctionDeclaration' && n.id) named.set(n.id.name, n);
-            if (n.type === 'VariableDeclarator' && n.id && n.id.type === 'Identifier' && n.init) { if (FN.has(n.init.type)) named.set(n.id.name, n.init); inits.set(n.id.name, inits.has(n.id.name) ? null : n.init); }
-          }
-          const prop = (m) => (m && m.type === 'MemberExpression' ? (!m.computed && m.property.type === 'Identifier' ? m.property.name : (m.computed && m.property.type === 'Literal' ? String(m.property.value) : null)) : null);
-          const strs = (n, depth = 0) => {
-            if (!n || depth > 3) return null;
-            if (n.type === 'Literal') return typeof n.value === 'string' ? [n.value] : null;
-            if (n.type === 'TemplateLiteral') return n.expressions.length ? null : [n.quasis.map(q => q.value.cooked ?? '').join('')];
-            if (n.type === 'ArrayExpression') { const r = []; for (const el of n.elements) { const x = el && el.type !== 'SpreadElement' ? strs(el, depth + 1) : null; if (!x) return null; r.push(...x); } return r; }
-            if (n.type === 'Identifier' && inits.get(n.name)) return strs(inits.get(n.name), depth + 1);
-            return null;
-          };
-          spans = [];
-          for (const n of all) {
-            if (n.type !== 'CallExpression' || prop(n.callee) !== 'on' || prop(n.callee.object) !== 'events') continue;
-            const evs = n.arguments.length ? strs(n.arguments[0]) : null;
-            const h = n.arguments[1];
-            const fn = h && FN.has(h.type) ? h : h && h.type === 'Identifier' ? named.get(h.name) || null : null;
-            if (!fn) continue;
-            spans.push({ start: fn.start, end: fn.end, events: evs });
-            //   handler から名前で呼ぶ同じファイルの関数（1 段）
-            const inner = []; const st2 = [fn.body]; while (st2.length) { const x = st2.pop(); if (!isNode(x)) continue; inner.push(x); for (const c of kids(x)) st2.push(c); }
-            for (const x of inner) if (x.type === 'CallExpression' && x.callee.type === 'Identifier' && named.has(x.callee.name)) { const g = named.get(x.callee.name); if (g !== fn) spans.push({ start: g.start, end: g.end, events: evs }); }
-          }
-        }
-      } catch (e) { spans = null; }
-      if (handlerSpanMemo.size >= 100) handlerSpanMemo.delete(handlerSpanMemo.keys().next().value);
-      handlerSpanMemo.set(src, spans);
-      return spans;
-    }
-    function handlerEventsAt(text, index) {
-      const spans = handlerSpansOf(text);
-      if (!spans || !Number.isFinite(index)) return null;
-      const hit = spans.filter(sp => index >= sp.start && index < sp.end);
-      if (!hit.length || hit.some(h => !h.events)) return null;
-      return [...new Set(hit.flatMap(h => h.events))];
-    }
-    /** 複数の場所のイベント（どれかが分からなければ null） */
-    function eventsOfSites(text, sites) {
-      const out = new Set();
-      for (const x of (sites || [])) { const at = handlerEventsAt(text, x && x.index); if (!at) return null; for (const e of at) out.add(e); }
-      return [...out];
-    }
     function disableSites(clean, code) {
       const s = String(clean || '');
       // Phase 22（F-F2）: フィールドを指す式は KTScan.fieldRefAt で解決する（直接・ブラケット・変数に入れたフィールド・日本語のコードのドット記法）
@@ -19745,115 +19618,6 @@
       return out;
     }
     /**
-     * RC E2E（N2・2026-10-04 実機）: 作成画面では空のフィールドの value が undefined になる（入力して消した後も・保存時のイベントでも。既存のフィールドも同じ）。
-     *   §2 手順 4 の生成（v3）は `=== null` と空文字だけで判定し、紹介元が空のまま保存できた。
-     *   作成画面のイベントの handler の中で、フィールドの値（直接・変数に入れたフィールド・値のコピー var v = record.f.value）を空文字と比べる判定を集め、
-     *   同じ文の中で undefined を扱っているか（=== undefined / == null / typeof … 'undefined' / !v / v || … / v ?? … / v && …、
-     *   コピーの時点で || '' / ?? '' にそろえている）を添える。比べる値は Phase 22 の解決（fieldRefAt）で決める
-     * @returns {Array<{ code: string, operand: string, index: number, line: string, events: string[], safe: boolean }>}
-     */
-    function emptyChecks(clean) {
-      const s = String(clean || '');
-      const ctx = KTScan.fieldRefContext(s);
-      const m = ctx.m;
-      const ranges = handlerRanges(s);
-      const ID = KTScan.ID_SRC;
-      const isId = (t) => new RegExp(`^${ID}$`, 'u').test(t);
-      const esc = (t) => t.replace(/[$]/g, '\\$');
-      const NB = '(?<![$\\u200C\\u200D\\p{ID_Continue}.])', NA = '(?![$\\u200C\\u200D\\p{ID_Continue}])';
-      // 対応する開き括弧（後ろから）
-      const openBack = (k) => { const close = m[k], open = close === ')' ? '(' : '['; let d = 0; for (let j = k; j >= 0; j--) { if (m[j] === ')' || m[j] === ']' || m[j] === '}') d++; else if (m[j] === '(' || m[j] === '[' || m[j] === '{') { d--; if (d === 0) return m[j] === open ? j : -1; } } return -1; };
-      const closeFwd = (k) => { let d = 0; for (let j = k; j < m.length; j++) { if (m[j] === '(' || m[j] === '[' || m[j] === '{') d++; else if (m[j] === ')' || m[j] === ']' || m[j] === '}') { d--; if (d === 0) return j; } } return -1; };
-      const OPERAND_CH = /[$\w.?\u0080-￿]/;
-      const operandBefore = (end) => {
-        let k = end - 1; while (k >= 0 && /\s/.test(m[k])) k--;
-        const last = k;
-        while (k >= 0) { if (m[k] === ')' || m[k] === ']') { const o = openBack(k); if (o < 0) break; k = o - 1; continue; } if (OPERAND_CH.test(m[k])) { k--; continue; } break; }
-        return { start: k + 1, end: last + 1 };
-      };
-      const operandAfter = (begin) => {
-        let k = begin; while (k < m.length && /\s/.test(m[k])) k++;
-        const first = k;
-        while (k < m.length) { if (m[k] === '(' || m[k] === '[') { const c = closeFwd(k); if (c < 0) break; k = c + 1; continue; } if (OPERAND_CH.test(m[k]) && m[k] !== '?') { k++; continue; } if (m[k] === '?' && m[k + 1] === '.') { k += 2; continue; } break; }
-        return { start: first, end: k };
-      };
-      // 値のコピー: var v = <フィールド>.value（|| '' / ?? '' で空文字にそろえたものは normalized）
-      const copies = [];
-      for (const x of m.matchAll(new RegExp(`${NB}(?:(?:var|let|const)\\s+)?(${ID})\\s*=(?![=>])`, 'gu'))) {
-        const rs = x.index + x[0].length;
-        let d = 0, k = rs;
-        for (; k < m.length; k++) { const ch = m[k]; if ('([{'.includes(ch)) d++; else if (')]}'.includes(ch)) { if (d === 0) break; d--; } else if ((ch === ';' || ch === ',' || ch === '\n') && d === 0) break; }
-        const rhs = m.slice(rs, k);
-        const vi = rhs.search(/\.\s*value\b/);
-        if (vi < 0) continue;
-        const ref = KTScan.fieldRefAt(s, rs + vi, ctx);
-        const pre = ref ? m.slice(rs, ref.start).trim() : '';
-        if (!ref || (pre && !/^[$\w.\u0080-￿]+$/.test(pre))) continue;   // event.record['f'].value はコピー。String(record.f.value) / Number(…) などの加工はコピーではない
-        const after = rhs.slice(vi).replace(/^\.\s*value\b/, '').trim();
-        const normalized = /^(?:\|\||\?\?)\s*(?:''|""|``)$/.test(after);
-        if (after && !normalized) continue;
-        copies.push({ name: x[1], code: ref.code, index: x.index, normalized });
-      }
-      const copyAt = (name, at) => copies.filter(c => c.name === name && c.index < at).pop() || null;
-      // 比べている値: フィールドの値（.value）か、値のコピーの変数
-      const subjectOf = (op) => {
-        const text = m.slice(op.start, op.end);
-        if (!text || /(?:\|\||\?\?)/.test(text)) return null;   // (v || '') / String(v ?? '') は空文字にそろえている
-        const vs = [...text.matchAll(/\.\s*value\b/g)];
-        if (vs.length) { const ref = KTScan.fieldRefAt(s, op.start + vs[vs.length - 1].index, ctx); return ref ? { code: ref.code, kind: 'field', at: op.start } : null; }
-        const w = new RegExp(`^(?:String\\s*\\(\\s*)?\\(?\\s*(${ID})\\s*\\)?\\s*\\)?(?:\\s*\\.\\s*trim\\s*\\(\\s*\\))?$`, 'u').exec(text.trim());
-        if (!w || !isId(w[1])) return null;
-        const c = copyAt(w[1], op.start);
-        return c ? { code: c.code, kind: 'copy', name: w[1], normalized: c.normalized, at: op.start } : null;
-      };
-      const spanOf = (i) => { let a = i; while (a > 0 && !';{}'.includes(m[a - 1])) a--; let b = i; while (b < m.length && !';{}'.includes(m[b])) b++; return [a, b]; };
-      const NUM = '(?:Number|parseInt|parseFloat)\\s*\\(\\s*';
-      const safeIn = (sub, a, b, negated) => {
-        if (sub.normalized) return true;
-        const sm = m.slice(a, b), ss = s.slice(a, b);
-        if (sub.kind === 'copy') {
-          const v = esc(sub.name);
-          // 「入力あり」の判定（v !== '' && … && Number(v) > 1000000）で同じ値を数値に変えて比べていれば、undefined は NaN になり条件が成り立たない
-          if (negated && new RegExp(`${NUM}${v}${NA}`, 'u').test(sm)) return true;
-          return new RegExp(`${NB}${v}\\s*(?:===|!==|==|!=)\\s*undefined${NA}|${NB}undefined\\s*(?:===|!==|==|!=)\\s*${v}${NA}`, 'u').test(sm)
-            || new RegExp(`${NB}${v}\\s*(?:==|!=)\\s*null${NA}|${NB}null\\s*(?:==|!=)\\s*${v}${NA}`, 'u').test(sm)
-            || new RegExp(`typeof\\s+${v}\\s*(?:===|!==|==|!=)\\s*(['"\`])undefined\\1`, 'u').test(ss)
-            || new RegExp(`!\\s*${v}(?![$\\u200C\\u200D\\p{ID_Continue}.\\[])`, 'u').test(sm)
-            || new RegExp(`${NB}${v}\\s*(?:\\|\\||\\?\\?|&&)`, 'u').test(sm);
-        }
-        // フィールドの値: 同じ文の中の同じフィールドの .value に undefined の扱いがあるか
-        for (const x of sm.matchAll(/\.\s*value\b/g)) {
-          const at = a + x.index;
-          const ref = KTScan.fieldRefAt(s, at, ctx);
-          if (!ref || ref.code !== sub.code) continue;
-          const tail = m.slice(at + x[0].length, Math.min(m.length, at + x[0].length + 40));
-          if (/^\s*(?:(?:===|!==|==|!=)\s*undefined(?![\w$])|(?:==|!=)\s*null(?![\w$])|\|\||\?\?|&&)/.test(tail)) return true;
-          let p = ref.start - 1; while (p >= 0 && /\s/.test(m[p])) p--;
-          if (p >= 0 && m[p] === '!' && m[p + 1] !== '=') return true;
-          if (/typeof\s*$/.test(m.slice(Math.max(0, ref.start - 12), ref.start))) return true;
-          if (negated && new RegExp(`${NUM}$`).test(m.slice(Math.max(0, ref.start - 20), ref.start).replace(/[$\w.]+$/, ''))) return true;
-        }
-        return false;
-      };
-      const out = [];
-      const seen = new Set();
-      const EMPTY = "(?:''|\"\"|``)", OP = '(?:===|!==|==|!=)';
-      const hits = [...[...m.matchAll(new RegExp(`${OP}\\s*${EMPTY}`, 'g'))].map(x => ({ at: x.index, op: operandBefore(x.index), negated: x[0][0] === '!' })),
-        ...[...m.matchAll(new RegExp(`${EMPTY}\\s*${OP}`, 'g'))].map(x => ({ at: x.index, op: operandAfter(x.index + x[0].length), negated: /!/.test(x[0]) }))];
-      for (const h of hits.sort((p, q) => p.at - q.at)) {
-        const sub = subjectOf(h.op);
-        if (!sub) continue;
-        const events = [...new Set(ranges.filter(r => h.at > r.start && h.at <= r.end).flatMap(r => r.events))];
-        if (!events.some(e => KTJsCatalog.checkEvent(e).screen === 'create')) continue;
-        const [a, b] = spanOf(h.at);
-        const key = `${sub.code}|${a}`;
-        if (seen.has(key)) continue;
-        seen.add(key);
-        out.push({ code: sub.code, operand: s.slice(h.op.start, h.op.end).trim(), index: h.at, line: lineOf(s, h.at), events, safe: safeIn(sub, a, b, h.negated) });
-      }
-      return out;
-    }
-    /**
      * Phase 21: テーブル（tableCode）のセルを編集不可にしている場所（行のループで row.value[key] / row.value['qty'] に .disabled = true）。
      *   直前（同じ handler の中）で tableCode の value を回しているものだけ
      */
@@ -19938,7 +19702,7 @@
         //   if が内側の関数のブロックの中にあれば数えない（if と handler の間に関数の境界が無いことを確かめる）
         const funcOpens = new Set(inner.filter(b => b.kind === 'func').map(b => b.open - base));
         // 「if の本文の最後の文が直接の return」だけを早い return と見る（字句: return の手前が ; { } のどれか。入れ子の文の return は除く）。
-        //   段階 C: acorn による判定（段階 A）は外した。条件の向き・排他の断定は生成工程の動作テスト（Gateway の隔離環境）の結果で行う（attachBehavior）
+        //   段階 C: acorn による判定（段階 A）は外した。条件の向き・排他の断定は生成工程の模擬テスト（Gateway の隔離環境）で行う
         const endsWithReturn = (innerText) => /(^|[;{}])\s*return\b[^;{}]*;\s*$/.test(innerText);
         for (const g of body.matchAll(/\bif\s*\(/g)) {
           const po = g.index + g[0].length - 1, pc = closeParen(body, po);
@@ -19969,9 +19733,9 @@
       const paths = callers.flatMap(c => (c.paths && c.paths.length ? c.paths : [c.conds]).map(p => [...conds, ...p]));
       return { unconditional: !conds.length && callers.every(c => c.unconditional), conds, paths, line: own.line, via: helper.name };
     }
-    // ---- Phase 21（基準モデルの CX-1 で見つけた見落とし）: 囲む条件が、計画の条件（ステータス など）を見ているか ----
-    //   明細のロックが承認済みの if の閉じ括弧の後ろに入り、ループの中の if (row.value.hasOwnProperty(key)) を「条件」と数えて「要確認」にしていた
-    //   （実際にはどのステータスでも明細が編集できなくなる）。ループ・存在確認・別の項目だけの条件は、計画の条件の外と同じに扱う
+    // ---- 囲む条件の注釈（siteConds の decorateCond）で、変数・関数の定義を添えない名前 ----
+    //   §0d.4（2026-10-08）: 囲む条件が計画の条件を見ているかの判定（条件つきの制御 conditional-control・blindCond）は削除した。
+    //   条件の向きは生成工程の模擬テスト（条件に合う・合わないレコード）で確かめる
     const COND_NEUTRAL = new Set(['record', 'event', 'true', 'false', 'null', 'undefined', 'typeof', 'instanceof', 'in', 'of', 'new', 'this', 'void', 'function', 'return', 'var', 'let', 'const', 'if', 'else', 'for', 'while', 'switch', 'case', 'break', 'continue', 'do', 'try', 'catch', 'finally', 'throw', 'async', 'await', 'delete', 'Object', 'Array', 'Number', 'String', 'Boolean', 'Math', 'JSON', 'parseInt', 'parseFloat', 'isNaN', 'isFinite']);
     const STRUCT_CALLS = new Set(['hasOwnProperty', 'call', 'isArray', 'keys', 'values', 'entries', 'indexOf', 'includes', 'some', 'every', 'filter', 'find', 'trim', 'toString', 'Number', 'String', 'Boolean', 'parseInt', 'parseFloat', 'isNaN', 'isFinite']);
     const stripCondText = (t) => String(t).replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/(['"`])(?:\\.|(?!\1)[^\\])*\1/g, ' ');
@@ -20019,40 +19783,6 @@
       }).filter(([, d]) => d).slice(0, 4);
       return defs.length ? `${str} /* ${defs.map(([id, d]) => `${id} = ${d.replace(/\s+/g, ' ').slice(0, 200)}`).join('; ')} */` : str;
     }
-    /** ループの変数（for (var key in …) / for (let i = 0 …) / .forEach(function (row) / (row) => / row =>） */
-    function loopVarsOf(s) {
-      const out = new Set();
-      const str = String(s || '');
-      for (const m of str.matchAll(/\bfor\s*\(\s*(?:var|let|const)?\s*([A-Za-z_$][\w$]*)\s*(?:in\b|of\b|=)/g)) out.add(m[1]);
-      for (const m of str.matchAll(/\.\s*(?:forEach|map|some|every|filter|find|findIndex|reduce|flatMap)\s*\(\s*(?:async\s+)?(?:function\s*[\w$]*\s*\(([^)]*)\)|\(([^)]*)\)\s*=>|([A-Za-z_$][\w$]*)\s*=>)/g)) {
-        for (const p of String(m[1] ?? m[2] ?? m[3] ?? '').split(',')) { const n = p.replace(/=.*$/, '').trim(); if (/^[A-Za-z_$][\w$]*$/.test(n)) out.add(n); }
-      }
-      return out;
-    }
-    /**
-     * 計画の条件（refs: 項目・値）を見ない条件か。ループ・hasOwnProperty・存在確認・別の項目だけなら true（どのステータスでも同じに通る）。
-     * 中身が分からないもの（else / 三項演算子 / 呼び出し元の不明な関数 / 定義の無い名前 = 関数の引数など）は false（条件の外とは言えない）
-     */
-    function blindCond(t, s, loopVars, refs, depth = 0) {
-      const str = String(t);
-      if (/^(for|while|catch|with)$/.test(str)) return true;
-      if (str === 'else' || str === '?' || /^unknown:/.test(str)) return false;
-      if (refs.some(r => r && str.includes(r))) return false;
-      const bare = stripCondText(str);
-      for (const m of bare.matchAll(/(?<![\w$.])([A-Za-z_$][\w$]*)\s*\(/g)) {
-        if (STRUCT_CALLS.has(m[1]) || COND_NEUTRAL.has(m[1])) continue;
-        const def = defOfIdent(s, m[1]);
-        if (!def || depth >= 2 || !blindCond(def, s, loopVars, refs, depth + 1)) return false;
-      }
-      for (const id of condIdents(str)) {
-        if (COND_NEUTRAL.has(id) || STRUCT_CALLS.has(id) || loopVars.has(id)) continue;
-        const def = defOfIdent(s, id);
-        if (!def || depth >= 2 || !blindCond(def, s, loopVars, refs, depth + 1)) return false;
-      }
-      return true;
-    }
-    /** ループと hasOwnProperty だけ（要件の条件が構造化されていないときに「条件なし」と同じに扱う狭い形） */
-    const structuralOnly = (conds) => conds.length > 0 && conds.map(t => String(t).replace(/\s*\/\*[\s\S]*?\*\/\s*$/, '')).every(t => /^(for|while)$/.test(t) || /^\s*!?\s*\(?\s*(?:[\w$.[\]'"`]+\.hasOwnProperty|Object\.prototype\.hasOwnProperty\.call)\s*\([^()]*\)\s*\)?\s*$/.test(t));
     const pathsOfSite = (x) => (x.paths && x.paths.length ? x.paths : [x.conds]);
     /** Phase 21（実機）: 作成画面（create）のイベントの record に無いフィールドの型（PC・モバイルとも record.get() / event.record に無かった） */
     const CREATE_ABSENT_TYPES = Object.freeze(['RECORD_NUMBER', 'CREATOR', 'CREATED_TIME', 'MODIFIER', 'UPDATED_TIME', 'STATUS', 'STATUS_ASSIGNEE', 'CATEGORY']);
@@ -20165,14 +19895,6 @@
         out.push({ method, app: lit ? lit[1] : null, appExpr: vr && !self ? vr[1] : null, self, path: (/['"`](\/k\/v1\/[^'"`]+)['"`]/.exec(args) || [])[1] || null });
       }
       return out;
-    }
-    /** Phase 21: kintone の条件式（例: ステータス in ("承認済み") / amount >= "1000000"）から、条件の項目と値を取り出す（コードの if の条件と照合する語） */
-    function condRefsOf(cond) {
-      const s = String(cond || '');
-      const refs = [];
-      for (const m of s.matchAll(/(?:^|\b(?:and|or)\s+|\()\s*([^\s=!<>()"]+)\s*(?:not\s+in|in|not\s+like|like|!=|>=|<=|=|>|<)/gi)) refs.push(m[1]);
-      for (const m of s.matchAll(/"([^"]+)"/g)) refs.push(m[1]);
-      return [...new Set(refs.filter(Boolean))];
     }
     /** Phase 21: イベント名を文字列の連結・テンプレートで組み立てている（静的にイベントを特定できない） */
     const dynamicEventNames = (clean) => /['"`](?:mobile\.)?app\.(?:record|report)\.[A-Za-z0-9_.]*['"`]\s*\+|`(?:mobile\.)?app\.(?:record|report)\.[^`]*\$\{/.test(String(clean || ''));
@@ -20337,8 +20059,6 @@
       // Phase 21: 計画の新規フィールド（NEW_FIELD_n）は提案コードに読み替える（Generator へは提案コードで渡している）。condition = そのフィールドを制御・変更する条件（任意）
       const planCode = (code) => proposedCodes.get(code) ?? code;
       const planFields = new Map((c.fields || []).map(f => [planCode(f.code), f.access]));
-      // 段階 A（5.2）: 条件の中の NEW_FIELD_n も採番後のコードに置き換えてから照合する（Generator Context と同じ対応表）
-      const planCond = new Map((c.fields || []).filter(f => typeof f.condition === 'string' && f.condition.trim()).map(f => [planCode(f.code), KTContext.resolveProposedRefs(f.condition.trim(), proposedCodes)]));
       // Phase 21（G9）: テーブルの中のフィールドを計画したときは、親のテーブルを読む（行を回す）のは計画の範囲。全列のループ（row.value[key].disabled = true）は各列の制御
       const subtableOf = new Map(fieldsN.filter(f => f.parent).map(f => [f.code, f.parent]));
       const tableOfPlanned = new Set([...planFields.keys()].filter(code => subtableOf.has(code)).map(code => subtableOf.get(code)));
@@ -20386,83 +20106,6 @@
       if (otherWrites.length) add('target-app', false, 'block', `このアプリ（${selfId ?? '?'}）以外のアプリ ${[...new Set(otherWrites.map(x => x.app))].join(', ')} のデータを書き換えます（${otherWrites.map(x => `${x.method} ${x.path || ''}`.trim()).join('、')}）。Toolkit が扱うのはこのアプリの変更だけです`);
       const otherReads = calls.filter(x => !otherWrites.includes(x) && ((x.app && x.app !== selfId) || x.appExpr));
       if (otherReads.length) add('target-app-read', false, 'review', `他のアプリ、または静的に決まらないアプリへの API 呼び出しがあります: ${otherReads.map(x => `${x.method || '?'} app ${x.app || x.appExpr}`).join('、')}（対象アプリと権限を確認してください）`);
-      // (6) 条件つきの制御（実装仕様の fields[].condition）: 条件の外で編集不可にしていれば違反（既存のコードに元からあるものは除く）。
-      //     条件の中でも、条件の項目・値を見ているか分からなければ要確認（条件の向きまでは判定しない）
-      const baseText = g.strategy === 'EXTEND_EXISTING_JS' && existingSource && typeof existingSource.text === 'string' ? KTScan.stripCommentsOnly(existingSource.text) : '';
-      // テーブルはセル（行のループの row.value[…] / テーブル内フィールド）を編集不可にする場所も、そのテーブルの制御として数える
-      //   テーブルの中のフィールド（qty など）は、その列（row.value['qty']）と全列のループ（row.value[key]）の場所も数える（Phase 21 G9）
-      const tableSites = (text, code) => [...disableSites(text, code), ...(fieldsN.some(f => f.code === code && f.rawType === 'SUBTABLE') ? [...subtableCellSites(text, code), ...[...subtableOf.entries()].filter(([, p]) => p === code).flatMap(([ch]) => disableSites(text, ch))] : []), ...(subtableOf.has(code) ? subtableCellSites(text, subtableOf.get(code), code) : [])];
-      // Phase 21: 「条件の外」には、ループ・存在確認・別の項目だけの条件の中（計画の条件の項目・値を見ない）も含める（blindCond）。
-      //   名前付きの関数の中は呼び出し元ごとの経路（pathsOfSite）で見る。中身が分からない条件（関数の引数・else など）は確認に回す
-      const lvClean = loopVarsOf(clean);
-      const plainCond = (t) => String(t).replace(/\s*\/\*[\s\S]*?\*\/\s*$/, '');
-      // Phase 22（F-F2）: 制御の場所を「編集不可（disabled）・表示の切り替え（setFieldShown）・入力チェック（フィールドの error / そのフィールドの値を読む条件の
-      //   event.error）」として集め（変数に入れたフィールドも数える）、新しく足した場所と、既存のコードに元からある場所（同じ行・同じ囲む条件）を分けて判定する。
-      //   Phase 21 の実機 BF-C: 既存の「承認済みのときの編集不可」（条件つき）を、計画の条件（金額）を見ないので「条件なしに編集不可」と表示し、
-      //   計画の制御（変数に入れた金額の error）は数えていなかった。条件なし（E）と別の条件の中（D）を同じに扱わない
-      let opsClean = null, opsBase = null;
-      const opsOf = (text) => (text === clean ? (opsClean = opsClean || fieldOperations(clean)) : (opsBase = opsBase || fieldOperations(text)));
-      const altSitesOf = (text, code) => (text ? opsOf(text) : []).filter(o => ((o.op === 'shown' || o.op === 'error') && o.code === code) || (o.op === 'event-error' && o.reads.includes(code))).map(o => ({ ...o, kind: o.op === 'shown' ? 'shown' : 'error' }));
-      const siteKey = (x) => `${x.kind}|${x.line}|${pathsOfSite(x).map(p => p.map(plainCond).join(' && ')).join(' || ')}`;
-      const markExisting = (sites, baseSites) => {
-        const pool = new Map();
-        for (const b of baseSites) pool.set(siteKey(b), (pool.get(siteKey(b)) || 0) + 1);
-        return sites.map(x => { const n = pool.get(siteKey(x)) || 0; if (n > 0) pool.set(siteKey(x), n - 1); return { ...x, existing: n > 0 }; });
-      };
-      const KIND_JA = { disabled: '編集不可', shown: '表示の切り替え', error: '入力チェック（エラー表示）' };
-      const kindsJa = (list) => [...new Set(list.map(x => KIND_JA[x.kind]))].join('・');
-      for (const [code, cond] of planCond) {
-        if (planFields.get(code) !== 'CONTROL') continue;
-        const refs = condRefsOf(cond);
-        // 段階 A（5.2）: 条件の値（"承認済み" などのリテラル）も照合する。項目は見ていても値が違う（別のステータス）なら、計画の条件ではなく別の条件（other）
-        //   独立レビュー A-2: 値の照合は肯定の演算子（in / = / like）の項だけ。not in / != / not like の項の値は「その値でないとき」なので、項目を見ていれば従来どおり計画の条件
-        //   再レビュー 2026-10-07: 括弧で囲んだ否定（not (ステータス in ("承認済み"))）も肯定の項から除く（括弧は 1 段の入れ子まで）
-        const positiveCond = String(cond).replace(/\bnot\s*\((?:[^()]|\([^()]*\))*\)/gi, ' ').replace(/\S+\s+(?:not\s+in|not\s+like)\s*(?:\([^)]*\)|"[^"]*")|\S+\s*!=\s*(?:"[^"]*"|\S+)/gi, ' ');
-        const valueRefs = [...positiveCond.matchAll(/"([^"]+)"/g)].map(m => m[1]);
-        const itemRefs = refs.filter(r => !valueRefs.includes(r));
-        const seesValue = (p) => !valueRefs.length || p.some(t => valueRefs.some(v => String(t).includes(v)));
-        const seesItem = (p) => !itemRefs.length || p.some(t => itemRefs.some(r => String(t).includes(r)));
-        const blindPath = (x) => (refs.length ? pathsOfSite(x).find(p => p.every(t => blindCond(t, clean, lvClean, refs))) : null) || null;
-        // 段階 C: switch (項目) の中は case のラベル（値）を静的に読まないので「別の値」とは言えない（確かめられない → 確認）。模擬イベントが値ごとの動きを確かめる
-        const wrongValuePath = (x) => (valueRefs.length ? pathsOfSite(x).find(p => seesItem(p) && p.some(t => !/^switch \(/.test(String(t)) && itemRefs.some(r => String(t).includes(r))) && !seesValue(p)) : null) || null;
-        // none = 条件なし（ループ・hasOwnProperty だけの中を含む）/ other = 計画の条件の項目・値を見ない別の条件の中 / plan = 計画の条件を見る / unclear = 静的には分からない
-        const classOf = (x) => {
-          // 表示の切り替えは、表示する条件が引数にある（setFieldShown('紹介元', record['顧客区分'].value === '新規')）
-          if (x.kind === 'shown' && refs.some(r => String(x.rhs || '').includes(r))) return 'plan';
-          if (x.unconditional || pathsOfSite(x).some(p => !p.length || structuralOnly(p))) return 'none';
-          if (blindPath(x)) return 'other';
-          if (wrongValuePath(x)) return 'other';
-          if (!refs.length || pathsOfSite(x).every(p => p.some(t => refs.some(r => String(t).includes(r))) && seesValue(p))) return 'plan';
-          return 'unclear';
-        };
-        const tag = (x) => ({ ...x, cls: classOf(x) });
-        const locks = markExisting(tableSites(clean, code).map(x => ({ ...x, kind: 'disabled' })), baseText ? tableSites(baseText, code).map(x => ({ ...x, kind: 'disabled' })) : []).map(tag);
-        const alts = markExisting(altSitesOf(clean, code), altSitesOf(baseText, code)).map(tag);
-        const fresh = [...locks, ...alts].filter(x => !x.existing), old = [...locks, ...alts].filter(x => x.existing);
-        const freshLocks = fresh.filter(x => x.kind === 'disabled'), freshAlts = fresh.filter(x => x.kind !== 'disabled');
-        const outsideLocks = freshLocks.filter(x => x.cls === 'none' || x.cls === 'other');
-        const oldNone = old.filter(x => x.kind === 'disabled' && x.cls === 'none'), oldOther = old.filter(x => x.kind === 'disabled' && x.cls === 'other');
-        const where = (x) => {
-          if (x.unconditional) return x.line;
-          const wv = blindPath(x) ? null : wrongValuePath(x);
-          if (wv) return `${x.line}（囲む条件 ${wv.map(plainCond).join(' / ')} は ${itemRefs.join(' / ')} を見ていますが、計画の値「${valueRefs.join('」「')}」ではなく別の値と比べています）`;
-          const p = blindPath(x) || [];
-          return `${x.line}（囲む条件 ${p.length ? p.map(plainCond).join(' / ') : 'なし'} は ${refs.join(' / ')} を見ていません）`;
-        };
-        const condOf = (x) => (pathsOfSite(x).find(p => p.length) || []).map(plainCond).join(' かつ ') || '—';
-        const oldNote = oldOther.length ? `。既存のコードの「${condOf(oldOther[0])}」のときの編集不可は別の条件の制御です（変更していません）` : '';
-        if (!locks.length && !alts.length) add('conditional-control', false, 'review', `${code} は「${cond}」のときだけ制御する計画ですが、編集不可（.disabled = true）・表示の切り替え・入力チェックのどれも見つかりません（別の書き方なら、動作テスト環境で条件どおりか確かめてください）`);
-        else if (outsideLocks.length) add('conditional-control', false, 'block', `${code} は「${cond}」のときだけ編集不可にする計画ですが、条件の外で編集不可にしています（${outsideLocks.map(where).join(' / ')}）。すべてのレコード・ステータスで編集できなくなります`, { field: code, events: eventsOfSites(clean, outsideLocks) });
-        else if (freshLocks.some(x => x.cls === 'unclear')) add('conditional-control', false, 'review', `${code} は条件の中で編集不可にしていますが、計画の条件「${cond}」（${refs.join(' / ')}）を見ているか確かめられません`);
-        else if (freshAlts.some(x => x.cls !== 'plan')) add('conditional-control', false, 'review', `${code} は${kindsJa(freshAlts)}で制御していますが、計画の条件「${cond}」（${refs.join(' / ')}）を見ているか確かめられません`);
-        else if (oldNone.length) add('conditional-control', false, 'review', `${code} は既存のコードで条件なしに編集不可になっています（「${cond}」の条件と合うか確認してください。${oldNone[0].line}）`);
-        else if (oldOther.length && freshLocks.length) add('conditional-control', false, 'review', `${code} は計画の条件「${cond}」の中で編集不可にしていますが、既存のコードは別の条件「${condOf(oldOther[0])}」のときにも編集不可にしています（両方が効きます）。意図どおりか確認してください`);
-        else if (fresh.length) add('conditional-control', true, 'info', freshLocks.length && !freshAlts.length ? `${code} は「${cond}」の条件の中でだけ編集不可にしています${oldNote}` : `${code} は${kindsJa(fresh)}で、「${cond}」の条件（${refs.join(' / ') || '—'}）を見て制御しています${oldNote}`);
-        // 新しく足した制御が無い: 既存のコードの制御で判定する
-        else if (old.some(x => x.cls === 'plan')) add('conditional-control', true, 'info', `${code} は既存のコードで、「${cond}」の条件の中で制御しています（${kindsJa(old.filter(x => x.cls === 'plan'))}）`);
-        else if (old.some(x => x.cls === 'unclear')) add('conditional-control', false, 'review', `${code} は条件の中で制御（${kindsJa(old.filter(x => x.cls === 'unclear'))}）していますが、計画の条件「${cond}」（${refs.join(' / ')}）を見ているか確かめられません`);
-        else add('conditional-control', false, 'review', `${code} を「${cond}」のときに制御する処理が見つかりません（既存のコードの制御は「${condOf(old[0])}」のときの${KIND_JA[old[0].kind]}です）。動作テスト環境で条件どおりか確かめてください`);
-      }
       const hardMismatch = mismatches.filter(m => ['ACCESS_ESCALATED', 'EXTRA_EVENT'].includes(m.code) || (m.code === 'EXTRA_FIELD_WRITE' && !offTarget.some(([code]) => m.items.includes(code))));
       add('plan-consistency', !hardMismatch.length, 'review', hardMismatch.length ? `計画と生成コードが一致しません（CUSTOMIZATION_PLAN_MISMATCH）: ${hardMismatch.map(m => m.message).join('／')}` : mismatches.length ? `計画との軽微な差: ${mismatches.map(m => m.message).join('／')}` : '計画（イベント・フィールド・アクセス）と一致');
       // ---- 6. API（API Catalog・通信）----
@@ -20482,12 +20125,6 @@
         const all = u.badScreens.length === u.eventScreens.length;
         add('api-screen', false, all ? 'block' : 'review', `${u.name} は${screensJa(u.badScreens)}では使えません（使える画面: ${screensJa(u.screens)}。使えない画面では null を返すので、この処理は${all ? '動きません' : 'その画面では動きません'}）: ${u.line}${/getFieldElement$/.test(u.name) ? '。作成・編集画面のフィールドへの注意は event.record の error（またはスペース要素の getSpaceElement）で出します' : ''}`);
       }
-      // RC E2E（N2・実機）: 作成画面では空のフィールドの値が undefined。空の判定が undefined を扱っていないと、空のままでも空と判定されない
-      const freshEmpty = freshOnly(emptyChecks(clean).filter(x => !x.safe), baseClean ? emptyChecks(baseClean).filter(x => !x.safe) : [], (x) => `${x.code}|${x.line}`);
-      for (const code of [...new Set(freshEmpty.map(x => x.code))]) {
-        const x = freshEmpty.find(y => y.code === code);
-        add('empty-undefined', false, 'review', `${code} の空の判定（${x.line}）は undefined を扱っていません。作成画面では空のフィールドの値が undefined になる（入力して消した後も同じ）ため、空のままでも空と判定されず、この判定に頼る処理（必須のチェックなど）は動きません。value === undefined か value == null も判定してください`);
-      }
       // RC のモデル更新の評価（実機）: 前のイベントで表示したエラーは event.record に残らない。error の今の値を比べて消す条件は成り立たず、表示が消えない
       const freshClear = freshOnly(errorClearByCompare(clean), baseClean ? errorClearByCompare(baseClean) : [], (x) => `${x.code}|${x.line}`);
       for (const code of [...new Set(freshClear.map(x => x.code))]) {
@@ -20505,17 +20142,6 @@
       const baseGlobals = g.strategy === 'EXTEND_EXISTING_JS' && existingSource && typeof existingSource.text === 'string' ? globalDeclarations(KTScan.stripCommentsOnly(existingSource.text)) : [];
       const globals = g.strategy === 'NEW_JS_FILE' ? globalDeclarations(clean) : g.strategy === 'EXTEND_EXISTING_JS' ? globalDeclarations(clean).filter(n => !baseGlobals.includes(n)) : [];
       add('globals', !globals.length, 'review', globals.length ? (g.strategy === 'EXTEND_EXISTING_JS' ? `追加したコードがファイル直下（既存の即時関数の外）に宣言を置いています（グローバル汚染）: ${globals.join(', ')}。既存の即時関数の中に入れてください（ほかの JavaScript と名前がぶつかると動作が変わります）` : `ファイル直下に宣言があります（グローバル汚染）: ${globals.join(', ')}。即時関数で包んでください`) : '即時関数の外に宣言はありません');
-      // Phase 20（F42・実機）: 要件に条件（承認済み・〜の場合 など）があるのに、条件（if）の外でフィールドを編集不可にしている（既存ファイルに元から無いもの）。
-      //   既存の if の閉じ括弧の後ろに足した担当者のロックが、すべてのステータスで効いた（Code Review は計画のイベントの不足だけを指摘）
-      if (/承認|ステータス|状態|場合|とき|時に|なら|以上|以下|超|未満/.test([c.requirement, g.summary].filter(Boolean).join(' '))) {
-        // Phase 21: 早い return で除外する書き方（if (条件) { return event; } の後ろ）は条件つきとして扱う（siteConds）。
-        //   実装仕様に条件（fields[].condition）があるフィールドは conditional-control が判定する（ここでは重ねない）
-        //   ループと hasOwnProperty だけに囲まれたもの（for (var key in row.value) { if (row.value.hasOwnProperty(key)) … }）も条件なしと同じ
-        const uncondOf = (text) => [...writeTargets(text).entries()].filter(([, kinds]) => kinds.has('disabled')).map(([code]) => code).filter(code => disableSites(text, code).some(x => x.unconditional || pathsOfSite(x).some(structuralOnly)));
-        const baseUncond = g.strategy === 'EXTEND_EXISTING_JS' && existingSource && typeof existingSource.text === 'string' ? uncondOf(KTScan.stripCommentsOnly(existingSource.text)) : [];
-        const newUncond = uncondOf(clean).filter(x => !baseUncond.includes(x) && !planCond.has(x));
-        if (newUncond.length) add('unconditional-control', false, 'review', `次のフィールドを条件なしで編集不可にしています: ${newUncond.join(', ')}（if の外にあるため、すべてのレコード・ステータスで編集できなくなります）。要件の条件のときだけにするなら、既存の if ブロックの中に入れてください`);
-      }
       // Phase 21（モデル比較の INTEG）: 差分が登録の行だけ（REPLACE でイベントを足す）なら、handler の本体は既存のまま → 最終コードの同じ登録で見る
       //   （断片だけを見て「return event がありません」と誤って表示した）
       const handlersFinal = inspectHandlers(clean);
@@ -20529,34 +20155,16 @@
       const asyncIssues = handlers.filter(h => h.awaitInNonAsync);
       add('async', !asyncIssues.length, 'block', asyncIssues.length ? 'async でない handler の中で await を使っています（構文エラーになります）' : handlers.some(h => h.async) ? 'async handler は return event を Promise で返します' : 'async は使っていません');
       if (handlers.some(h => h.promiseThen && !h.async)) add('async-then', false, 'review', '.then() を使う handler は Promise を return しないと kintone が結果を待ちません');
-      // Phase 20（実機）: error の解除は null だけ（'' では残る）・同じイベントで error を表示すると disabled / value の設定が取り消される（既存の「編集不可」が外れる）
-      const fieldOps = kintoneFieldOps(clean);
-      if (fieldOps.some(o => o.error || o.emptyErrorClear)) {
-        const clears = [...new Set(fieldOps.filter(o => o.emptyErrorClear).flatMap(o => o.events))];
+      // Phase 20（実機）: error の解除は null だけ（'' では前の表示が残る）。kintone の規則の形式確認
+      //   §0d.4（2026-10-08）: 同じイベントの error と disabled / value の重なり（error-cancels-edit）は生成工程に移した（Gateway の checkReason candidate-error-same-event → 模擬テスト）。
+      //   他の JavaScript の編集不可・値の設定を候補の error が取り消すこと（error-cancels-other-js）は残す（要確認だけ・登録の可否は変えない）。
+      //   生成工程の模擬テストは警告の要件の代表条件で既存 JS の編集不可の取り消しを不合格にしないので、ほかに守る所が無い（担当 V の確認・2026-10-08）
+      if (handlersAll.some(o => o.error || o.emptyErrorClear)) {
+        const clears = [...new Set(handlersAll.filter(o => o.emptyErrorClear).flatMap(o => o.events))];
         add('error-clear', !clears.length, 'block', clears.length ? `エラー表示を空文字（''）で消そうとしています（${clears.join(', ')}）。kintone は error に null を設定したときだけ表示を消します（'' では前のエラーが残り、条件を満たさなくなっても警告が消えません）` : 'エラー表示の解除は null です');
-        const byEvent = new Map();
-        for (const o of fieldOps) for (const ev of o.events) { const g = byEvent.get(ev) || { error: false, disabled: false, value: false }; g.error = g.error || o.error; g.disabled = g.disabled || o.disabled; g.value = g.value || o.value; byEvent.set(ev, g); }
-        const cancels = [...byEvent.entries()].filter(([ev, g]) => /\.show$|\.change\./.test(ev) && g.error && (g.disabled || g.value));   // 保存時（submit）はエラーで保存自体が止まるので対象外
-        // Phase 20（実機 BF-C）: そのイベントでエラーを出す handler がすべて「編集不可（disabled）を読む条件」で分けていれば停止にせず要確認にする
-        const unguardedAll = cancels.filter(([ev]) => fieldOps.some(o => o.events.includes(ev) && o.error && !o.errorGuarded));
-        // 段階 C（改訂 2）: 同じイベントに error と disabled / value の記述があることは確認（review）として残し、実際に同時に起きるか（競合）の断定は生成工程の動作テストで行う。
-        //   段階 A の静的な排他判定（早い return の否定・同じ判別式と別の値・switch の別の case・if / else の別の枝）は削除した（任意の分岐の解析で採用可否を決めない）
-        const unguarded = unguardedAll;
-        const evText = (list) => list.map(([ev, g]) => `${ev}: error と ${[g.disabled ? 'disabled' : null, g.value ? 'value' : null].filter(Boolean).join(' / ')}`).join('、');
-        //   正しさの反証 A7・確認 1: 動作テストの結果が無い review（従来の生成・登録前の再検査・動作テストを実行できなかった）では、
-        //   同じ handler・同じファイルの別の handler・event.error のどれでも、編集不可を見る条件で分けていない error と disabled / value の組は従来（HEAD）どおり登録不可。
-        //   生成工程の動作テストで必須の効果がすべて合格したときだけ attachBehavior が確認に下げる（静的な排他の解析では下げない）
-        const hardEvs = unconditionalErrorEdits(clean);
-        const hard = unguarded.filter(([ev]) => hardEvs.includes(ev));
-        //   §0c.10（2026-10-08）: 動作テストの合格で確認に下げてよいかを、イベントと編集不可にするフィールドで判定できるようにする（attachBehavior の fieldVerified）
-        const cancelDetail = (list) => { const evs = list.map(([ev]) => ev); const fields = [...writeTargets(clean).entries()].filter(([, kinds]) => kinds.has('disabled')).map(([code]) => code).filter(code => disableSites(clean, code).some(x => { const at = handlerEventsAt(clean, x.index); return at == null || at.some(e => evs.includes(e)); })); return { events: evs, fields }; };
-        if (hard.length) checks.push({ name: 'error-cancels-edit', ok: false, severity: 'block', simDecides: true, detail: cancelDetail(hard), message: `同じ handler で、条件に関係なくエラーを表示し、編集可否・値の変更も設定しています（${evText(hard)}）。kintone はエラーを表示したイベントで編集可否（disabled）と値の変更を取り消します（既存の「編集不可」も外れます）。編集不可のときはエラーを出さない（null にする）条件で分けるか、警告を値の変更時だけにしてください` });
-        else if (unguarded.length) checks.push({ name: 'error-cancels-edit', ok: false, severity: 'block', simDecides: true, detail: cancelDetail(unguarded), message: `同じイベント（${evText(unguarded)}）にエラー表示と編集可否・値の変更の記述があります。kintone はエラーを表示したイベントで編集可否（disabled）と値の変更を取り消す（別の handler で設定したものも）ため、実際に同時に起きるかを生成工程の模擬テスト（代表条件）で確かめます。模擬テストで確かめられない間は登録できません` });
-        else if (cancels.length) add('error-cancels-edit', false, 'review', `同じイベント（${evText(cancels)}）でエラー表示と編集可否・値の変更を設定していますが、エラーは編集不可（disabled）を見る条件で分けられています。kintone はエラーを表示したイベントで編集不可・値の変更を取り消すので、動作テスト環境で「編集不可のレコードが編集不可のまま・警告が出ない」ことを確かめてください`);
-        else add('error-cancels-edit', true, 'info', 'エラー表示と編集可否・値の変更は同じイベントで重なっていません');
         // 他の既存 JS（同じ platform・統合先以外）が同じ表示 / 変更イベントで編集可否・値を設定していると、こちらのエラー表示がそれも取り消す
         // （kintone は同じイベントの handler の結果をまとめて反映する。Code Review はこれまで同じファイルの中しか見ていなかった）
-        const errEvents = [...new Set(fieldOps.filter(o => o.error && !o.errorGuarded).flatMap(o => o.events))].filter(ev => /\.show$|\.change\./.test(ev));
+        const errEvents = [...new Set(handlersAll.filter(o => o.error && !o.errorGuarded).flatMap(o => o.events))].filter(ev => /\.show$|\.change\./.test(ev));
         if (errEvents.length) {
           const otherFiles = KTScan.summarizeFiles(scan, data).filter(f => f.analyzed && f.target === target && !(existingSource && f.name === existingSource.name && f.target === existingSource.target) && !(g.strategy === 'NEW_JS_FILE' && f.name === g.targetFile));
           const hits = [];
@@ -20597,17 +20205,6 @@
         const x = createReads[0];
         add('create-missing-field', false, 'block', `作成画面のイベント（${[...new Set(createReads.flatMap(r => r.events))].join(', ')}）では ${[...new Set(createReads.map(r => r.code))].join(' / ')} がレコードにありません（実機: PC・モバイルとも、新しいレコードにはステータス・作業者・レコード番号などのシステムフィールドが無い）。存在を確かめずに .value を読むと TypeError で処理が止まります（${x.line}）。record['${x.code}'] && record['${x.code}'].value のように確かめてください`);
       }
-      // ---- 9. 既存 JS との競合（統合先以外の既存ファイルが同じフィールドを WRITE / CONTROL）----
-      // 同じ platform（PC / モバイル）のファイルだけが競合し得る（実機: モバイル JS への統合で PC の fieldOnOff.js が競合扱いになった）
-      const files = KTScan.summarizeFiles(scan, data).filter(f => f.analyzed && f.target === target && !(existingSource && f.name === existingSource.name && f.target === existingSource.target));
-      const conflicts = [];
-      for (const f of files) {
-        for (const fld of addedScan.fields) {
-          const mine = ACCESS_W(fld.access); const theirs = ACCESS_W(f.fields[fld.code] || {});
-          if (mine.length && theirs.length) conflicts.push({ file: f.name, target: f.target, code: fld.code, theirs });
-        }
-      }
-      add('existing-conflict', !conflicts.length, 'review', conflicts.length ? `既存 JS と同じフィールドを制御します（JS_FIELD_CONFLICT）: ${conflicts.map(x => `${x.file}（${x.code}: ${x.theirs.join('/')}）`).join(', ')}` : '既存 JS との書き換え・制御の重なりはありません');
       // ---- 10. platform ----
       // Phase 21: 最終的なファイルのイベントで判定する（PC とモバイルの両方が対象なら、両方のイベントが要る。片方が無ければその画面では動かない）
       const mobileEvents = fileEvents.filter(e => KTJsCatalog.isMobileEvent(e.name)).length, pcEvents = fileEvents.length - mobileEvents;
@@ -20620,22 +20217,14 @@
       //   明細（テーブル）の編集を止める要件: JavaScript の disabled はセルにだけ効き、行の追加・削除（＋ / −）は止められない
       const coverage = { achieved: [], notAchieved: [], declared: Array.isArray(g.coverage) ? g.coverage : [] };
       const subtables = fieldsN.filter(f => f.rawType === 'SUBTABLE').map(f => f.code);
-      const tableLockReq = /(明細|テーブル|行の|行追加|行削除)/.test(String(c.requirement || '')) && /(編集|変更|入力|追加|削除)[^。]{0,20}(不可|禁止|できない|できなく|させない|ロック)/.test(String(c.requirement || ''));
       // セルのロック: テーブル内フィールドの .disabled = true と、行のループ（row.value[key]）の .disabled = true
       const lockedTables = subtables.filter(t => subtableCellSites(clean, t).length || [...subtableOf.entries()].some(([ch, p]) => p === t && disableSites(clean, ch).length));
       const tableControlled = subtables.filter(t => planFields.get(t) === 'CONTROL' || [...subtableOf.entries()].some(([ch, p]) => p === t && planFields.get(ch) === 'CONTROL'));
-      if ((tableControlled.length || tableLockReq) && lockedTables.length) {
+      //   §0d.4（2026-10-08）: 計画の構造（テーブルを制御する）とコードの構造（セルを編集不可にする）だけで決める。要件の文・AI の要約の文を読んで
+      //   「明細の変更を止める要件か」「要約が言い切っているか」を推定する判定（requirement-scope・summary-scope）は削除した
+      if (tableControlled.length && lockedTables.length) {
         coverage.achieved.push(`明細（テーブル ${lockedTables.join(', ')}）のセルを編集不可にする`);
         coverage.notAchieved.push({ code: 'SUBTABLE_ROWS', message: '明細（テーブル）の行の追加・削除は止められません（kintone の JavaScript の disabled はセルにだけ効き、行の ＋ / − ボタンは残ります）' });
-        // 要約が「行の追加・削除も禁止」と言う、または明細の禁止を行の扱いに触れずに言い切る → 要件を満たしたように見える要約（要確認）
-        const sum = String(g.summary || '');
-        const rowClaim = /(行の?(追加|削除)|追加・削除|追加や削除)[^。]{0,12}(も)?(禁止|できない|できなく|不可|させない|止め)/.test(sum);
-        // Phase 21: 「セル」と書いた要約（「明細の品名・数量のセルを編集不可」）は正確なので要約の問題にしない（モデル比較: 正確な要約まで「要約が言い切っている」と表示していた）
-        const tableClaim = /(明細|テーブル)/.test(sum) && /(禁止|変更できない|変更不可|編集不可|編集できない|ロック)/.test(sum) && !/(行の?(追加|削除)|追加・削除)/.test(sum) && !/セル/.test(sum);
-        if (rowClaim || tableClaim) add('summary-scope', false, 'review', `AI の要約は「${sum.slice(0, 100)}${sum.length > 100 ? '…' : ''}」ですが、止められるのはセルの編集だけで、行の追加・削除は止まりません（要件を完全には満たしていません）`);
-        // 要約は正確でも、要件が明細の変更そのものを止めることなら、行の追加・削除が残ることは利用者が決める（運用・権限で扱うか）
-        //   （要件が「セル」に限っていれば、行が残ることは要件どおり。達成範囲には SUBTABLE_ROWS として出す）
-        else if (tableLockReq && (!/セル/.test(String(c.requirement || '')) || /(行の?(追加|削除)|追加・削除)/.test(String(c.requirement || '')))) add('requirement-scope', false, 'review', `要件「${String(c.requirement || '').slice(0, 80)}${String(c.requirement || '').length > 80 ? '…' : ''}」のうち、明細の行の追加・削除は JavaScript では止められません（このコードが止めるのはセルの編集だけです）`);
       }
       // 段階 C（改訂 2・5.3 / 5.4）: coverage は requirementId で判定する（契約 20 §5）。文の照合・同義語の読み替え・note のキーワードからの担当の推定・plannedHint（段階 A）は削除した。
       //   この customization の id → 範囲内（NOT_MET は登録不可・PARTIAL は確認）。要件 R… / 手順 P… / 別の C… → 範囲外（担当は計画の構造（steps / customizations）と要件の planRefs で引く。
@@ -20722,23 +20311,18 @@
       }
     }
     /** Phase 21: 静的には確かめられないこと（review）に添える「登録の前・後に何を確かめるか」 */
+    //   §0d.4（2026-10-08）: 業務の推定による判定（conditional-control・unconditional-control・error-cancels-edit・existing-conflict・
+    //   empty-undefined・summary-scope・requirement-scope）は削除したので、その確かめ方も持たない（error-cancels-other-js は残した）
     const HOW_TO_CHECK = Object.freeze({
-      'conditional-control': '動作テスト環境で、条件に当てはまるレコードでは編集できず、当てはまらないレコード（例: 承認前）では編集できることを確かめる',
-      'unconditional-control': '動作テスト環境で、条件に当てはまらないレコード（例: 承認前）を開き、編集できることを確かめる',
-      'error-cancels-edit': '動作テスト環境で、編集不可のレコードが編集不可のまま・警告が出ないことを確かめる（kintone はエラーを表示したイベントで編集可否・値の変更を取り消す。実際に同時に起きるかは生成工程の模擬テストの結果を見る）',
       'coverage-unmet': '要件の一部を満たしていない部分（AI の申告）を、計画・実装仕様・運用のどれで扱うか決める',
       'status-names': 'コードが比べているステータス名が、プロセス管理のステータス名（新設する分を含む）と同じ表記かを確かめる',
       'error-cancels-other-js': '動作テスト環境で、他の JavaScript が編集不可にしたフィールドが編集不可のままかを確かめる',
-      'existing-conflict': '同じフィールドを扱う既存の JavaScript と動きがぶつからないか、動作テスト環境で確かめる',
-      'summary-scope': '要件を満たせない部分（行の追加・削除など）を、運用（手順・権限）でどう扱うか決める',
-      'requirement-scope': '要件を満たせない部分（行の追加・削除など）を、運用（手順・権限）でどう扱うか決める',
       'platform-fields': 'PC とモバイルの両方の画面で、同じ制御になっているかを確かめる',
       'planned-events': '計画のタイミング（値の変更時など）で動くかを、動作テスト環境で確かめる',
       'target-app-read': '呼び出すアプリが正しいか、利用者に読み取り権限があるかを確かめる',
       'patch-removal': '置き換え・削除される既存の行が不要かを確かめる',
       // RC E2E（実機）
       'api-screen': '動作テスト環境で、その API が使えない画面（作成・編集など）を開いて、処理が表示・動作するかを確かめる（使えない画面では null が返り、何も起きない）',
-      'empty-undefined': '動作テスト環境の作成画面で、そのフィールドを空のまま保存して、チェックが効く（保存が止まる）ことを確かめる',
       'error-clear-compare': '動作テスト環境で、警告が出る値から出ない値（空も）に変えて、表示が消えることを確かめる',
     });
     /** Phase 21: Code Review の結果 → 登録の判定。BLOCKED = 登録不可（同意しても登録できない）、NEEDS_CONFIRMATION = 確認が必要な項目がある、RUNTIME_UNVERIFIED = 静的な検査は通ったが動作は未確認 */
@@ -20914,8 +20498,7 @@
      *   behavior-not-run: 必須の効果に結び付く代表条件を実行できなかった → 登録不可（理由の区分を書く。コードの誤りとは言わない・修復の対象にしない。noRepair。環境の区分だけ environment）
      *   behavior-untested: 必須の効果に代表条件が無い・動作テストの結果が無い → 登録不可（未確認を合格に読み替えない）
      *   coverage-unmet（PARTIAL）: 必須の効果に結び付く要件（この customization の id・要件の id）の PARTIAL は要件未達（登録不可）。SUBTABLE_ROWS の印があるものは確認のまま（実現できない点）
-     *   必須の効果がすべて処理あり・動作テストで合格のときだけ、静的な「同じイベントの error と disabled / value」（simDecides）と条件の外の制御の登録不可を確認に下げる
-     *   （動作テストの結果が無い旧い Gateway・機能非対応・実行できないときは、従来（HEAD）どおり登録不可のまま）
+     *   §0d.4（2026-10-08）: Toolkit は業務の合否を作らない（構造の照合と、返却の欠落・明示された失敗の検出だけ）。静的な block を模擬テストの結果で確認に下げる処理は無い
      * @param {object} o { requiredEffects, customization, omitted: 動作テストに渡せなかった既存 JS }
      */
     function attachBehavior(review, verification, { requiredEffects = [], customization = null, omitted = [], effectCheck = false } = {}) {
@@ -20951,41 +20534,8 @@
       const linkedIds = new Set(er.items.flatMap(i => i.requirementIds));
       const partialUp = (x) => x.name === 'coverage-unmet' && x.partial && !x.limit && !x.ok && x.severity === 'review' && linkedIds.has(String(x.requirementId || (customization && customization.customizationId) || ''));
       const passedAll = req.length > 0 && er.ok;
-      //   §0c.9（2026-10-08）: 静的に見つけた block（conditional-control など）を確認に下げるのは、二重の安全の確かめ（効果のイベントごとの合う・合わない）が揃ったときだけ。
-      //   その検査がフィールドを持つ（条件の外で編集不可にしているフィールド）なら、そのフィールドの必須の効果を動作テストで確かめたときだけ（確かめていないフィールドの block を下げない）
-      //   §0c.10（2026-10-08）: 編集不可に関わる静的な block は、そのフィールドの必須の効果に lock があり、そのフィールドの必須の効果がすべて合格（イベントごとの確かめが揃う）で、
-      //   block の場所のイベントのそれぞれで lock の代表条件が合格したときだけ下げる（警告だけ・値の設定だけのフィールドを編集不可にする候補は、必ず要件違反なので下げない）。
-      //   場所のイベントが分からない（handler の外・イベント名を読めない）ときも下げない
-      const sideOfCase = (y) => (y && (y.side === 'match' || y.side === 'nomatch') ? y.side : (y && KT_MATCH_EXPECTS.includes(y.expect) ? 'match' : 'nomatch'));
-      const fieldItemsOk = (code) => { const mine = er.items.filter(i => i.field === String(code)); return mine.some(i => i.effect === 'lock') && mine.every(i => i.behavior === 'pass' && !i.lacking); };
-      const lockPassedAt = (code, ev, side) => er.items.some(i => i.field === String(code) && i.effect === 'lock' && i.behavior === 'pass' && i.cases.some(y => y.verdict === 'pass' && y.event === ev && (side == null || sideOfCase(y) === side)));
-      //   §0c.10: 必須の効果があるのに lock が無いフィールド（警告だけ・値の設定だけ）を編集不可にする静的な block（条件の外の編集不可・error と同じイベントの編集不可）は、
-      //   確かめを待つもの（静的に確かめられないもの）ではなく要件違反として扱う（verdictOf で修復・計画の見直しの対象。確認に下げない）
-      const lockNotRequired = (x) => {
-        if (!x || x.ok || x.severity !== 'block' || !x.detail || !(x.name === 'conditional-control' || (x.name === 'error-cancels-edit' && x.simDecides))) return null;
-        const codes = x.name === 'conditional-control' ? (x.detail.field ? [String(x.detail.field)] : []) : (Array.isArray(x.detail.fields) ? x.detail.fields.map(String) : []);
-        const hit = codes.filter(code => { const mine = er.items.filter(i => i.field === code); return mine.length > 0 && !mine.some(i => i.effect === 'lock'); });
-        return hit.length ? hit : null;
-      };
-      const fieldVerified = (x) => {
-        const d = x && x.detail;
-        if (!d || typeof d !== 'object') return false;
-        const evs = Array.isArray(d.events) ? d.events.map(String) : null;
-        if (!evs || !evs.length) return false;
-        if (x.name === 'conditional-control') {
-          if (!d.field || !fieldItemsOk(d.field)) return false;
-          //   条件の外の編集不可: 条件に合わないレコード（条件の無い lock は合うレコード）で、その場所のイベントの lock の確かめが合格していること
-          const conditioned = er.items.some(i => i.field === String(d.field) && i.effect === 'lock' && i.condition);
-          return evs.every(ev => lockPassedAt(d.field, ev, conditioned ? 'nomatch' : 'match'));
-        }
-        if (x.name === 'error-cancels-edit') {
-          const fields = Array.isArray(d.fields) ? d.fields.map(String) : [];
-          if (fields.length) return fields.every(fieldItemsOk) && evs.every(ev => fields.some(f => lockPassedAt(f, ev, 'match')));
-          //   値の変更だけの競合: 値の設定の必須の効果が、そのイベントで合格していること
-          return evs.every(ev => er.items.some(i => i.effect === 'set-value' && i.behavior === 'pass' && !i.lacking && i.cases.some(y => y.verdict === 'pass' && y.event === ev)));
-        }
-        return false;
-      };
+      //   §0d.4（2026-10-08）: 模擬テストの合格で静的な block（conditional-control・error-cancels-edit）を確認に下げる処理は、その判定ごと削除した。
+      //   条件の外の編集不可・同じイベントの error と編集不可は、生成工程の機械検査（check behavior）と模擬テストの結果（behavior-fail・behavior-not-run）で扱う
       //   §0c.11（2026-10-08）: 保存だけの警告（そのフィールドの効果がすべて、保存のイベントだけの warn）は、保存の handler で確認・警告のダイアログを出すだけで満たせる（§0c.6）。
       //   フィールドのコードが候補に現れなくてもよいので、Gateway の必須の効果がすべて present なら planned-fields の対象から外す（動作テストの判定は behavior-* のまま）。
       //   照合は構造化データだけ（必須の効果の field・effect・events と計画の fields[].effects）。Gateway が非対応・返らない・missing のときは外さない
@@ -21011,20 +20561,18 @@
         return rest.length ? { ...x, message: `${plannedFieldsMessage(rest)}（${note}）`, detail: { ...x.detail, fields: rest, saveOnlyWarn: excluded } }
           : { ...x, ok: true, severity: 'info', message: note, detail: { ...x.detail, fields: [], saveOnlyWarn: excluded } };
       };
-      const merged = checks.map(plannedFieldsOf).map(x => (partialUp(x) ?{ ...x, severity: 'block', noRepair: true, partialRequired: true, message: `${x.message}（必須の動作に関わる要件のため、要件未達として扱います）` }
-        : lockNotRequired(x) ? { ...x, lockNotRequired: true, message: `${x.message}（${lockNotRequired(x).map(c => `「${c}」`).join('・')}を編集できないようにする要件はありません（警告・値の設定などの要件です）。編集不可にする処理は要件に反するため、模擬テストの結果にかかわらず登録できません）` }
-        : passedAll && !x.ok && x.severity === 'block' && (x.name === 'conditional-control' || (x.name === 'error-cancels-edit' && x.simDecides)) && fieldVerified(x) ? { ...x, severity: 'review', message: `${x.message}（模擬テストでは必須の動作のとおりに動いたため、確認に下げました）` } : x));
+      const merged = checks.map(plannedFieldsOf).map(x => (partialUp(x) ? { ...x, severity: 'block', noRepair: true, partialRequired: true, message: `${x.message}（必須の動作に関わる要件のため、要件未達として扱います）` } : x));
       const status = merged.some(x => !x.ok && x.severity === 'block') ? STATUS.BLOCKED : merged.some(x => !x.ok) ? STATUS.REVIEW_REQUIRED : STATUS.OK;
       const c = customization || { platform: review.registration && review.registration.platform } || {};
       const dependsOn = review.dependsOn || (review.registration && review.registration.dependsOn) || { statuses: [], fields: [] };
       return { ...review, checks: merged, status, effects: er, registration: { ...registrationOf(status, merged, c, review.finalCode, { behavior: req.length ? { ok: passedAll && !merged.some(x => x.partialRequired), machineOnly: er.items.length > 0 && er.items.every(i => i.checkedBy === 'machine'), machineSome: er.items.some(i => i.checkedBy === 'machine') } : null }), dependsOn } };
     }
 
-    return { REVIEW_VERSION, STATUS, applyPatch, diffLines, diffText, diffHunks, checkSyntax, inspectHandlers, globalDeclarations, kintoneFieldOps, layoutSpaceIds, review, disableSites, subtableCellSites, siteConds, blindCond, loopVarsOf, writeTargets, restCalls, condRefsOf, HOW_TO_CHECK,
+    return { REVIEW_VERSION, STATUS, applyPatch, diffLines, diffText, diffHunks, checkSyntax, inspectHandlers, globalDeclarations, kintoneFieldOps, layoutSpaceIds, review, disableSites, subtableCellSites, siteConds, writeTargets, restCalls, HOW_TO_CHECK,
       // Phase 22（F-F2）: フィールドの操作（直接・ブラケット・変数経由）と入力チェック
       fieldOperations, inputChecks, fieldRefsIn, unguardedCreateReads,
-      // RC E2E: 使える画面の違う API・作成画面の空の値（undefined）
-      apiScreenUses, emptyChecks, errorClearByCompare,
+      // RC E2E: 使える画面の違う API・エラー表示の解除の条件（kintone の規則の形式確認）
+      apiScreenUses, errorClearByCompare,
       // §0c（2026-10-08）: 生成工程の検証結果（必須の効果・動作テスト）の取り込み
       attachBehavior, effectResults };
   })();
@@ -26189,11 +25737,10 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
           const checks = (entry.review && entry.review.checks) || [];
           const blocks = checks.filter(ch => ch && !ch.ok && ch.severity === 'block');
           const machineBlocks = ((ver && Array.isArray(ver.machine)) ? ver.machine : []).filter(m => m && !m.ok && m.severity === 'block');
-          //   静的には確かめられず、動作テストの結果で決めるもの（動作テストが無い・実行できない間は登録不可のまま。従来（HEAD）と同じ）
-          //   §0c.10: 必須の効果に lock が無いフィールドを編集不可にする block（lockNotRequired）は要件違反（確かめを待つものに入れない）
-          const staticPending = blocks.filter(ch => ((ch.name === 'error-cancels-edit' && ch.simDecides) || ch.name === 'conditional-control') && !ch.lockNotRequired);
+          //   §0d.4（2026-10-08）: 静的には確かめられず模擬テストの結果で決める Toolkit の判定（conditional-control・error-cancels-edit。staticPending）は削除した。
+          //   その分は生成工程の check behavior（checkReason）と模擬テストの結果（er.notRun・er.failed）で扱う
           const partialBlocks = blocks.filter(ch => ch.partialRequired);
-          const codeBlocks = blocks.filter(ch => !['behavior-not-run', 'behavior-untested'].includes(ch.name) && !(ch.name === 'required-effects' && ch.noRepair) && !staticPending.includes(ch) && !ch.partialRequired);
+          const codeBlocks = blocks.filter(ch => !['behavior-not-run', 'behavior-untested'].includes(ch.name) && !(ch.name === 'required-effects' && ch.noRepair) && !ch.partialRequired);
           const details = [...new Set([...machineBlocks.map(m => String(m.message || '')), ...blocks.map(ch => String(ch.message || ''))].filter(Boolean))].slice(0, 8);
           const repairs = ver && ver.repairs && typeof ver.repairs === 'object' ? ver.repairs : null;
           const rc = repairs && repairs.count ? repairs.count : 0;
@@ -26241,12 +25788,12 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
             }
             const cat = er.reasonCategory || 'env';
             //   §0d.1（2026-10-08）: 模擬テストが要る効果（生成工程の check: behavior）を、模擬テストの環境が使えないために確かめられないときは、理由を一度にまとめて出す
-            //   （「環境の制約」とだけ言わない）。理由は生成工程の checkReason と、Toolkit が固定した必須の効果の構造（条件・効果の種類）と形式確認で見つけた既知の競合
-            //   （同じイベントの error と編集不可）だけから作る（文を解析しない）。修復は依頼しない。作り直しの操作がある理由（unsupported など）はこの形にしない
+            //   （「環境の制約」とだけ言わない）。理由は生成工程の checkReason（既知の競合は candidate-error-same-event）と、Toolkit が固定した必須の効果の構造
+            //   （条件・効果の種類）だけから作る（文を解析しない）。修復は依頼しない。作り直しの操作がある理由（unsupported など）はこの形にしない
             const needed = cat === 'env' && !er.notRun.some(i => (i.notRunReasons || []).some(r => (ktBehaviorReasonOf(r) || {}).fix)) ? er.notRun.filter(i => i.check === 'behavior') : [];
             if (needed.length) {
               const labels = needed.map(i => `${fieldName(i.field)}: ${KT_EFFECT_JA[i.effect] || i.effect}`);
-              const reasons = [...new Set([...needed.flatMap(i => i.checkReason || []), ...(needed.some(i => i.condition) ? ['condition'] : []), ...needed.filter(i => i.effect === 'warn' || i.effect === 'block-save').map(i => i.effect), ...(staticPending.some(ch => ch.name === 'error-cancels-edit') ? ['same-event-error'] : [])])];
+              const reasons = [...new Set([...needed.flatMap(i => i.checkReason || []), ...(needed.some(i => i.condition) ? ['condition'] : []), ...needed.filter(i => i.effect === 'warn' || i.effect === 'block-save').map(i => i.effect)])];
               const text = ktBehaviorNeededText(labels, reasons);
               return { status: 'not-run', kind: 'environment', category: 'env', reasonKey: er.reason || null, behaviorNeeded: { labels, reasons }, reason: text, readiness: `${text}。`, next: KT_REASON_CATEGORY.env.next, details: [...details, ...reasons.map(r => `模擬テストが要る理由（生成工程の語）: ${r}`), ...[...new Set(er.notRun.flatMap(i => i.notRunReasons || []))].map(r => `模擬テストを実行できなかった理由（生成工程の語）: ${r}`)].slice(0, 10) };
             }
@@ -26259,9 +25806,9 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
             return { status: 'not-run', kind: cat === 'env' ? 'environment' : cat, category: cat, reasonKey: er.reason || null, ...(fix ? { fix } : {}), reason: `模擬テストを実行できませんでした（${info.label}${er.reason ? `: ${envReasonJa(er.reason)}` : ''}${cat === 'existing' && files.length ? `。${files.slice(0, 3).join('・')}` : ''}）。作った JavaScript の誤りとは判定していません`, next: (rInfo && rInfo.next) || info.next, details: [...details, ...[...new Set(er.notRun.flatMap(i => i.notRunReasons || []))].map(r => `模擬テストを実行できなかった理由（生成工程の語）: ${r}`)].slice(0, 10) };
           }
           //   §0c.8: 代表条件の無い効果（untested）は、確かめられるようになるのを待たずに計画を直す（fix revise）。解析できない・返らない（unknown・unchecked）・
-          //   静的に確かめられないまま（staticPending）は、作り直しを依頼できる（fix regenerate。依頼の文が生成の入力に入る）
+          //   作り直しを依頼できる（fix regenerate。依頼の文が生成の入力に入る）
           if (er.untested.length) return { status: 'unverified', kind: 'unverified', fix: 'revise', reasonKey: 'no-cases', reason: '必須の動作を確かめた模擬テストの結果がありません（確かめる代表条件がありません）', next: KT_BEHAVIOR_REASONS['no-cases'].next, details };
-          if (er.unknown.length || er.unchecked.length || staticPending.length) return { status: 'unverified', kind: 'unverified', fix: 'regenerate', reason: er.unchecked.length && !er.unknown.length ? '必須の動作の処理があるかを、生成工程の検査で解析できませんでした（未確認。処理が無いとは判定していません）' : '必須の動作を確かめた模擬テストの結果がありません（未確認）', next: `同じ入力では同じ結果になるため、自動では作り直していません。${FIX_HINT.regenerate}`, details };
+          if (er.unknown.length || er.unchecked.length) return { status: 'unverified', kind: 'unverified', fix: 'regenerate', reason: er.unchecked.length && !er.unknown.length ? '必須の動作の処理があるかを、生成工程の検査で解析できませんでした（未確認。処理が無いとは判定していません）' : '必須の動作を確かめた模擬テストの結果がありません（未確認）', next: `同じ入力では同じ結果になるため、自動では作り直していません。${FIX_HINT.regenerate}`, details };
           return { status: 'verified', kind: null, reason: '', next: '', details };
         };
         /**
@@ -27224,8 +26771,6 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
       'coverage-unmet': '要件を満たしていない部分があります。計画で新設する項目を前提にできるものは計画と実装仕様をそろえ、それ以外は要件か実装仕様を直してください',
       'planned-fields': '計画のフィールドを扱う処理がコードにありません。実装仕様の対象（フィールド・条件）を見直してください',
       'planned-events': '計画のイベントがコードにありません。実装仕様のイベントを見直してください',
-      'conditional-control': '計画の条件の中で制御していません。実装仕様の条件（項目と値）を見直してください',
-      'error-cancels-edit': 'エラー表示と編集可否・値の変更が同じイベントで重なります。警告のタイミングか条件を実装仕様で分けてください',
       'modern-js': '直せない var が残っています。統合先のコードを見直すか、新規の JavaScript として設計してください',
       'target-fields': '計画に無いフィールドを操作しています。実装仕様の対象に入れるか、要件を直してください',
       events: 'kintone に無いイベントを使っています。実装仕様のイベントを見直してください',
@@ -28078,6 +27623,8 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
     // 再レビュー 2026-10-07: 検査の名前は日本語（会話の案内 repeatOf・コードペインの検査一覧の両方で使う。英語のままの値を残さない）
     const CHECK_JA = { patch: '既存ファイルへの統合', 'patch-removal': '既存行の置換', syntax: '構文', events: 'イベント', handler: 'handler の形', fields: 'フィールドの参照', 'plan-consistency': '計画との一致', apis: '使う API', 'apis-network': '通信 API', security: '安全性', 'security-review': '安全性（確認）', globals: 'グローバル汚染', 'return-event': 'return event の有無', async: 'async の使い方', 'async-then': 'Promise の扱い', 'modern-js': '新しい記法', 'duplicate-handler': '重複 handler', 'error-clear': 'エラー表示の解除', 'error-cancels-edit': 'エラー表示と編集不可', 'existing-conflict': '既存 JS との競合', platform: 'PC / モバイル', strategy: '方針', code: 'コード', 'coverage-owner': '要件の担当', 'coverage-unmet': '要件の達成', 'status-names': 'ステータス名',
       // 再確認 2026-10-07: Code Review が出す残りの検査名（内部名のまま画面に出さない）
+      //   §0d.4（2026-10-08）: 削除した検査（conditional-control・unconditional-control・error-cancels-*・existing-conflict・empty-undefined・summary-scope・
+      //   requirement-scope）の名前は、保存済みの会話に残った結果を表示するために残す（新しい検査では出さない）
       'conditional-control': '条件つきの制御', 'unconditional-control': '条件の無い制御', 'target-fields': '対象のフィールド', 'planned-fields': '計画のフィールド', 'planned-events': '計画のイベント', 'space-element': 'スペースの要素', 'api-screen': '画面の API', 'empty-undefined': '空の値の扱い', 'error-clear-compare': 'エラー表示の解除の条件', 'nested-registration': '入れ子の登録', 'create-missing-field': '作成画面に無いフィールド', 'summary-scope': '要約の範囲', 'requirement-scope': '要件の範囲', refetch: '再取得', 'error-cancels-other-js': '他の JavaScript の編集不可との競合', 'subtable-rows': '明細の行の操作', 'field-type': 'フィールドの型', 'event-field': 'イベントのフィールド', 'apis-unknown': '目録に無い API',
       // §0c（2026-10-08）: 生成工程の検証結果の取り込み（必須の効果・動作テスト）
       'required-effects': '必須の動作', behavior: '模擬テスト', 'behavior-fail': '模擬テスト: 不合格', 'behavior-not-run': '模擬テスト: 実行できない（環境）', 'behavior-untested': '模擬テスト: 結果なし' };
@@ -29870,12 +29417,12 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
         // 段階 A（R14）: 登録前の再検査は、計画の新規フィールドを「存在する」扱いにしない（実在するフィールドだけ。新設の依存は prepare の dependsOn で止める）
         let rv2 = KTCodeReview.review({ generated: g.generated, customization: c, plan: v.plan, data: inp.data || null, scan: inp.scan || null, existingSource: g.existingSource ? { name: g.existingSource.name, target: g.existingSource.target, text: g.existingSource.text } : null, provenance: null, existingOnly: true });
         // §0c（2026-10-08）: 登録前の再検査は形式確認（最新の作業基準で）＋ 生成工程の検証結果（同じ候補の必須の効果・動作テスト）の取り込み。Toolkit は模擬を実行しない。
-        //   動作テストの結果が無い（旧い Gateway・機能非対応・実行できない）ときは、既知の競合は従来（HEAD）どおり登録不可のまま（確認に下げない）
+        //   §0d.4（2026-10-08）: 既知の競合（同じイベントの error と編集不可）は生成工程の check behavior と模擬テストの結果で扱う（Toolkit の形式確認では判定しない）
         if (g.verification && ((Array.isArray(g.requiredEffects) && g.requiredEffects.length) || g.verification.behavior)) rv2 = KTCodeReview.attachBehavior(rv2, g.verification, { requiredEffects: g.requiredEffects || [], customization: c, omitted: g.relatedOmitted || [], effectCheck: g.effectCheck != null ? g.effectCheck === true : ktEffectCheckCapable(services.generatorFeatures() || []) });
         let reg = rv2.registration || null;
         //   §0c.6（2026-10-08）: 従来の流れ（仮案の能力が無い接続先。最終案の承認を通らない）では、READ 以外のフィールドを持つ JavaScript は、必須の効果を生成工程で
         //   確かめていないので登録しない（接続先が requiredEffects に非対応なら「接続先が非対応」）。警告だけの候補を「確認」で通して編集不可の要件を未達のまま登録しない。
-        //   既知の競合（同じ handler の error と disabled など）の登録不可は従来どおり（形式確認の blocker のまま）
+        //   必須の効果を生成工程で確かめていない JavaScript は、既知の競合（同じイベントの error と編集不可）があっても無くても、ここで登録不可になる
         if (reg && !finalFlow() && ((c && Array.isArray(c.fields)) ? c.fields : []).some(f => f && f.access && f.access !== 'READ') && !(Array.isArray(g.requiredEffects) && g.requiredEffects.length && !(Array.isArray(g.requiredUnresolved) && g.requiredUnresolved.length) && rv2.effects && rv2.effects.ok)) {
           const capable = ktEffectsCapable(services.generatorFeatures() || []);   // §0c.7: health の印がすべてあるときだけ（欠ければ「接続先が非対応」）
           const why = !capable ? '接続先が非対応です: 接続先（生成工程）が必須の動作（編集できない・警告・保存を止めるなど）の確認に対応していないため、フィールドを操作する JavaScript は登録できません（接続先が更新されてから作り直してください）'

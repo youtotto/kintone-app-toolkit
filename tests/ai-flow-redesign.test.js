@@ -810,6 +810,9 @@ const LOCKSAVE = `(function () {\n  'use strict';\n  kintone.events.on(['app.rec
 const CAND = {
   good: { code: GOOD, has: { amount: ['lock'] } },
   bad: { code: BAD, has: { amount: ['lock', 'warn'] }, fails: ['amount|lock'], failMsg: '承認待ちの編集画面で、エラー表示のため編集不可が取り消されました' },
+  //   §0d.1（2026-10-08）: 同じ候補を今の契約の Gateway が分類した形（同じ表示のイベントで error と編集不可 → check behavior・candidate-error-same-event。
+  //   AI版 worker/test/cases/required-effects.mjs の §0d.1 S7 と同じ分類）
+  badChecked: { code: BAD, has: { amount: ['lock', 'warn'] }, fails: ['amount|lock'], failMsg: '承認待ちの編集画面で、エラー表示のため編集不可が取り消されました', check: { 'amount|lock': { check: 'behavior', checkReason: ['candidate-error-same-event'] } } },
   warn: { code: WARN, has: { amount: ['warn'] } },
   value: { code: VALUE, has: { amount: ['set-value'] } },
   lockonly: { code: GOOD, has: { amount: ['lock'] } },
@@ -827,7 +830,11 @@ const NOMATCH_OF = { lock: 'not-locked', warn: 'not-warned', 'block-save': 'save
 function fakeVerification(cand, requiredEffects, { env = null, repairs = 0, stoppedBy = null, supported = true, candidateHash, dropCaseFor = null, statusOverride = null, extraCases = [], caseReason = null } = {}) {
   const req = Array.isArray(requiredEffects) ? requiredEffects : [];
   const has = (x) => (cand.has[x.field] || []).includes(x.effect);
-  const re = req.map(x => ({ requirementId: x.requirementId, requirementIds: x.requirementIds, field: x.field, effect: x.effect, status: statusOverride || (has(x) ? 'present' : 'missing') }));
+  //   §0d.1（2026-10-08）: cand.check（`フィールド|効果` → { check, checkReason }）があれば、今の契約の Gateway と同じく効果ごとの確かめ方とイベントごとの有無も返す
+  //   （checkReason は Toolkit の正規化の後の形 = 語の配列。raw: true なら Gateway の応答そのものの形 = 先頭の理由の文字列 checkReason と全部の配列 checkReasons。
+  //   KTAiClient.validateGenerated を通す偽物で使う。cand.check が無ければ check を返さない旧い形のまま）
+  const checkOf = (x) => { const k = cand.check && cand.check[`${x.field}|${x.effect}`]; return k ? { check: k.check, ...(k.raw ? { checkReason: k.checkReason[0], checkReasons: [...k.checkReason] } : { checkReason: [...k.checkReason] }), events: (Array.isArray(x.events) ? x.events : []).map(ev => ({ event: ev, status: has(x) ? 'present' : 'missing' })) } : {}; };
+  const re = req.map(x => ({ requirementId: x.requirementId, requirementIds: x.requirementIds, field: x.field, effect: x.effect, status: statusOverride || (has(x) ? 'present' : 'missing'), ...checkOf(x) }));
   const uniq = [...new Map(req.map(x => [`${x.field}|${x.effect}`, x])).values()].filter(x => `${x.field}|${x.effect}` !== dropCaseFor);
   //   §0c.9: Gateway と同じく、効果のイベントごとに「合う」（side match）と、条件つきなら「合わない」（side nomatch）を 1 件ずつ作る。不合格の候補は「合う」側で fail
   let n = 0;
@@ -1382,11 +1389,30 @@ await section(async () => {
   assert(KTAiConversation.approvalValid(v, { baseStamp: { fingerprint: 'fp-1' } }).reason === 'CANDIDATE_CHANGED', 'D8-5: 古い候補（承認の後に候補が変わった）→ 旧承認を流用しない');
   v.generated.C1 = { ...v.generated.C1, candidateHash: oldHash };
   // 機能非対応（requiredEffects・behavior を返さない旧い接続先）: 既知の競合を「確認」に下げず、反映できる最終案にしない
+  //   §0d.4（2026-10-08）: Toolkit の業務の推定による判定（error-cancels-edit）は削除した。旧い接続先では、生成工程の結果（必須の効果・模擬テスト）が返らないこと
+  //   （返却の欠落）を Toolkit が検出して登録不可にする（required-effects の block・修復しない印 noRepair）。既知の競合の候補も「確認」に下がらない
   const y = makeConvC({ supported: false, generate: makeGenerate({ sequence: ['bad'], supported: false }) });
   await adoptC(y);
   const vy = y.c.activePlan(), ey = vy.generated.C1;
-  assert(y.gen.calls.length === 1 && ey.status === 'unsupported' && vy.final.approvable === false && /接続先（生成工程）が必須の動作の確認に対応していない/.test(vy.final.blockingReason) && ey.review.status === 'BLOCKED' && ey.review.checks.some(ch => ch.name === 'error-cancels-edit' && ch.severity === 'block'), `D8-6: 機能非対応 → 準備未完了・既知の競合（error-cancels-edit）は登録不可のまま: ${JSON.stringify({ status: ey.status, checks: ey.review.checks.filter(ch => !ch.ok).map(ch => `${ch.name}/${ch.severity}`) })}`);
-  // HEAD で登録不可だった 4 通りは、動作テストの結果が無い・実行できない・旧い接続先のどれでも登録不可のまま（合格のときだけ確認に下げる）
+  const apY = y.c.approveFinal({ planId: vy.planId, version: vy.version, baseStamp: { fingerprint: 'fp-1' } });
+  assert(y.gen.calls.length === 1 && ey.status === 'unsupported' && vy.final.approvable === false && /接続先（生成工程）が必須の動作の確認に対応していない/.test(vy.final.blockingReason) && ey.review.status === 'BLOCKED' && ey.review.registration.verdict === 'BLOCKED' && ey.review.checks.some(ch => ch.name === 'required-effects' && !ch.ok && ch.severity === 'block' && ch.noRepair === true) && apY.ok === false && !vy.approval, `D8-6: 機能非対応 → 準備未完了・既知の競合の候補も生成工程の結果の欠落で登録不可のまま（確認に下げない・承認できない）: ${JSON.stringify({ status: ey.status, verdict: ey.review.registration.verdict, checks: ey.review.checks.filter(ch => !ch.ok).map(ch => `${ch.name}/${ch.severity}`), ap: apY })}`);
+  //   今の契約の接続先（health の印 effectCheck あり）: 生成工程は既知の競合を check behavior（candidate-error-same-event）にする。
+  //   模擬テストの環境が使えなければ準備未完了（機械検査で足りる効果として合格に数えない）、模擬テストで不合格なら未解決（どちらも承認できない）
+  const GEN_EC = [...GEN_EFFECT_FEATURES, 'effectCheck'];
+  const z = makeConvC({ supported: GEN_EC, generate: makeGenerate({ sequence: ['badChecked'], env: 'unavailable' }) });
+  await adoptC(z);
+  const vz = z.c.activePlan(), ez = vz.generated.C1;
+  const itZ = ez.review.effects && ez.review.effects.items.find(i => i.field === 'amount' && i.effect === 'lock');
+  assert(ez.status === 'not-run' && vz.final.approvable === false && ez.review.registration.verdict === 'BLOCKED' && ez.review.checks.some(ch => ch.name === 'behavior-not-run' && ch.severity === 'block' && ch.noRepair === true) && itZ && itZ.check === 'behavior' && itZ.checkReason.includes('candidate-error-same-event') && itZ.checkedBy !== 'machine' && /error と編集不可の両方/.test(ez.verdict.reason) && z.gen.calls.length === 1 && z.c.approveFinal({ planId: vz.planId, version: vz.version, baseStamp: { fingerprint: 'fp-1' } }).ok === false, `D8-6b: 今の契約の接続先で既知の競合（check behavior）を模擬テストで確かめられない → 準備未完了（機械検査の合格に数えない・修復しない・承認できない）: ${JSON.stringify({ status: ez.status, verdict: ez.review.registration.verdict, item: itZ && { check: itZ.check, checkReason: itZ.checkReason, checkedBy: itZ.checkedBy }, reason: ez.verdict.reason })}`);
+  const w = makeConvC({ supported: GEN_EC, generate: makeGenerate({ sequence: ['badChecked'] }) });
+  await adoptC(w);
+  const vw = w.c.activePlan(), ew = vw.generated.C1;
+  assert(ew.status === 'unresolved' && ew.verdict.kind === 'behavior-fail' && vw.final.approvable === false && ew.review.registration.verdict === 'BLOCKED' && ew.review.checks.some(ch => ch.name === 'behavior-fail' && ch.severity === 'block' && /取り消/.test(ch.message)) && w.c.approveFinal({ planId: vw.planId, version: vw.version, baseStamp: { fingerprint: 'fp-1' } }).ok === false, `D8-6c: 今の契約の接続先で既知の競合が模擬テストで不合格（error で編集不可が取り消される）→ 未解決・登録不可（承認できない）: ${JSON.stringify({ status: ew.status, verdict: ew.verdict && ew.verdict.kind, checks: ew.review.checks.filter(ch => !ch.ok).map(ch => `${ch.name}/${ch.severity}`) })}`);
+  // HEAD で登録不可だった 4 通りは、動作テストの結果が無い・実行できない・不合格・旧い接続先のどれでも登録不可のまま（合格のときだけ登録の準備に進める）
+  //   §0d.4（2026-10-08）: 生成工程の結果を通さない静的な形式確認だけの形（旧 mode none）は、Toolkit の業務の推定による判定（error-cancels-edit）を試していたので外した。
+  //   既知の競合の判定は生成工程（Gateway の required-effects.mjs §0d.1 S7 の check behavior・隔離環境の sandbox/test/run.mjs §3 R13 の cancelledByError・
+  //   cross-toolkit.mjs の 5-3 と 12-9）が持つ。ここでは、今の契約の Gateway が 4 通りすべてに返す形（check behavior・checkReason candidate-error-same-event・
+  //   イベントごとに present。AI版の verify-generated.mjs の machineChecks で確かめた分類）で、模擬テストが実行できない（gw-not-run）・不合格（gw-fail）も登録不可のままであることを足す
   const EDIT = ['app.record.edit.show'];
   const LOCK = `    if (${ST_C}) record['amount'].disabled = true;`;
   const H4 = (body) => `(function () {\n  'use strict';\n  kintone.events.on(${JSON.stringify(EDIT)}, function (event) {\n    const record = event.record;\n${body}\n    return event;\n  });\n})();`;
@@ -1397,17 +1423,26 @@ await section(async () => {
     'record-level-event-error': H4(`${LOCK}\n    if (${ST_C}) event.error = '承認待ちです';`),
   };
   const REQ = [{ requirementId: 'C1', field: 'amount', effect: 'lock', events: EDIT, condition: '' }];
-  const verOf = (mode) => (mode === 'legacy' ? { version: '0', legacy: true, machine: [] } : mode === 'not-run' ? { requiredEffects: [{ requirementId: 'C1', field: 'amount', effect: 'lock', status: 'present' }], behavior: { status: 'not-run', reason: 'unavailable', cases: [] } } : { requiredEffects: [{ requirementId: 'C1', field: 'amount', effect: 'lock', status: 'present' }] });
+  const GW_RE = { requirementId: 'C1', requirementIds: ['C1'], field: 'amount', effect: 'lock', status: 'present', check: 'behavior', checkReason: ['candidate-error-same-event', 'nested'], events: [{ event: EDIT[0], status: 'present' }] };
+  const gwCase = (verdict, o = {}) => ({ id: 'K1', requirementIds: ['C1'], field: 'amount', effect: 'lock', expect: 'lock', side: 'match', kind: 'match', event: EDIT[0], verdict, observed: verdict === 'fail' ? {} : null, message: verdict === 'fail' ? '承認待ちの編集画面で、エラー表示のため編集不可が取り消されました' : '隔離環境で実行できませんでした', ...o });
+  const verOf = (mode) => (mode === 'legacy' ? { version: '0', legacy: true, machine: [] }
+    : mode === 'not-run' ? { requiredEffects: [{ requirementId: 'C1', field: 'amount', effect: 'lock', status: 'present' }], behavior: { status: 'not-run', reason: 'unavailable', cases: [] } }
+    : mode === 'gw-not-run' ? { version: '1', passed: true, machine: [], requiredEffects: [clone(GW_RE)], behavior: { status: 'not-run', reason: 'unavailable', cases: [gwCase('not-run', { reason: 'unavailable' })] } }
+    : mode === 'gw-fail' ? { version: '1', passed: true, machine: [], requiredEffects: [clone(GW_RE)], behavior: { status: 'failed', reason: null, cases: [gwCase('fail')] } }
+    : { requiredEffects: [{ requirementId: 'C1', field: 'amount', effect: 'lock', status: 'present' }] });
   const out = [];
   for (const [k, code] of Object.entries(four)) {
     const g = { strategy: 'NEW_JS_FILE', targetFile: 'lock.js', summary: 's', code, patch: null, events: EDIT, fields: [{ code: 'amount', access: 'CONTROL' }], apis: [] };
     const rv = KTCodeReview.review({ generated: g, customization: CUST_C1, plan: null, data: clone(DATA_C), scan: null, existingSource: null });
-    for (const mode of ['none', 'legacy', 'not-run', 'no-behavior']) {
-      const merged = mode === 'none' ? rv : KTCodeReview.attachBehavior(rv, verOf(mode), { requiredEffects: REQ, customization: CUST_C1 });
-      out.push([k, mode, merged.registration.verdict]);
+    for (const mode of ['legacy', 'not-run', 'no-behavior', 'gw-not-run', 'gw-fail']) {
+      //   印 effectCheck の有無の両方で確かめる（印があっても check behavior の効果は機械検査の合格に数えない）
+      for (const effectCheck of [false, true]) {
+        const merged = KTCodeReview.attachBehavior(rv, verOf(mode), { requiredEffects: REQ, customization: CUST_C1, effectCheck });
+        out.push([k, mode, merged.registration.verdict, effectCheck]);
+      }
     }
   }
-  assert(out.every(r => r[2] === 'BLOCKED'), `D8-7: HEAD で登録不可の 4 通りは、動作テストの結果が無い・実行できない・旧い接続先で確認に下がらない: ${JSON.stringify(out.filter(r => r[2] !== 'BLOCKED'))}`);
+  assert(out.length === 40 && out.every(r => r[2] === 'BLOCKED'), `D8-7: HEAD で登録不可の 4 通りは、動作テストの結果が無い・実行できない・不合格・旧い接続先で確認に下がらない: ${JSON.stringify(out.filter(r => r[2] !== 'BLOCKED'))}`);
 });
 // D9: 採用済み要件に担当が無い → 最終案から消さず、自動で 1 回だけ計画の差分更新（その要件を focus に）に戻す
 await section(async () => {
@@ -1543,14 +1578,15 @@ await section(async () => {
   const planRespL = (goal) => { const b = PLAN_V1(goal); return { ...b, plan: { ...b.plan, solution: 'CUSTOMIZATION', assessment: { ...b.plan.assessment, summary: '承認待ちでは案件名を編集できないようにします。' }, steps: [mkStep('C1', 'CUSTOMIZATION_REQUIRED', 'JS', null, { customizationId: 'C1' }, { title: 'JavaScript', solution: 'CUSTOMIZATION' })], customizations: [CUST_L] } }; };
   const LOCK_L = "(function () {\n  'use strict';\n  kintone.events.on(['app.record.edit.show'], function (event) {\n    const record = event.record;\n    if (record['ステータス'] && record['ステータス'].value === '承認待ち') record['case_name'].disabled = true;\n    return event;\n  });\n})();";
   const CONFLICT_L = "(function () {\n  'use strict';\n  kintone.events.on(['app.record.edit.show'], function (event) {\n    const record = event.record;\n    if (record['ステータス'] && record['ステータス'].value === '承認待ち') record['case_name'].disabled = true;\n    record['case_name'].error = '確認してください';\n    return event;\n  });\n})();";
-  const run = async ({ capable = false, code = LOCK_L, has = ['lock'] } = {}) => {
+  //   cand = 偽の生成工程の候補の性質に足すもの（fails・failMsg・check。今の契約の Gateway の結果を返すときに使う）
+  const run = async ({ capable = false, code = LOCK_L, has = ['lock'], cand = {} } = {}) => {
     const h = clone(hLegacy);
     if (capable) h.registry.toolkit['customization-generator'].verification = ['requirementId', ...(Array.isArray(capable) ? capable : GEN_EFFECT_FEATURES)];
     const genCtx = [];
     const generateImpl = async ({ ctx, requestId }) => {
       genCtx.push(clone(ctx));
       const req = (ctx.verification && ctx.verification.requiredEffects) || [];
-      const resp = { ok: true, contractVersion: '2.1', meta: { requestId, gateway: { product: 'toolkit', feature: 'customization-generator', promptVersion: '1', contextVersion: 'customization-1' }, normalization: { warnings: [] }, ai: { model: 'm' } }, generated: { strategy: 'NEW_JS_FILE', targetFile: 'caseLock.js', summary: '承認待ちでは案件名を編集できないようにします。', code, patch: null, events: ['app.record.edit.show'], fields: [{ code: 'case_name', access: 'CONTROL' }], apis: [], assumptions: [], warnings: [], coverage: [{ requirementId: 'C1', status: 'MET', note: '' }] }, ...(req.length ? { verification: fakeVerification({ code, has: { case_name: has } }, req, {}) } : {}) };
+      const resp = { ok: true, contractVersion: '2.1', meta: { requestId, gateway: { product: 'toolkit', feature: 'customization-generator', promptVersion: '1', contextVersion: 'customization-1' }, normalization: { warnings: [] }, ai: { model: 'm' } }, generated: { strategy: 'NEW_JS_FILE', targetFile: 'caseLock.js', summary: '承認待ちでは案件名を編集できないようにします。', code, patch: null, events: ['app.record.edit.show'], fields: [{ code: 'case_name', access: 'CONTROL' }], apis: [], assumptions: [], warnings: [], coverage: [{ requirementId: 'C1', status: 'MET', note: '' }] }, ...(req.length ? { verification: fakeVerification({ code, has: { case_name: has }, ...cand }, req, {}) } : {}) };
       const vv = KTAiClient.validateGenerated(resp, ctx);
       if (!vv.ok) throw new Error(JSON.stringify(vv.errors));
       return { ...vv.normalized, requestId };
@@ -1567,8 +1603,12 @@ await section(async () => {
   };
   const a = await run();
   assert(a.draft === null && a.genCtx.length === 1 && !(a.genCtx[0].verification && a.genCtx[0].verification.requiredEffects) && a.pr && a.pr.status === 'BLOCKED' && /接続先が非対応/.test(a.blockText) && !a.m.mock.calls.some(c => c === 'PUT customize'), `D14-1: 従来の流れ・接続先が requiredEffects に非対応 → 編集不可の JavaScript は「接続先が非対応」で登録しない（警告だけの候補を「確認」で通す経路を残さない）: ${JSON.stringify({ status: a.pr && a.pr.status, blockers: a.pr && a.pr.blockers })}`);
-  const b = await run({ code: CONFLICT_L });
-  assert(b.pr && b.pr.status === 'BLOCKED' && /取り消/.test(b.blockText) && !b.m.mock.calls.some(c => c === 'PUT customize'), `D14-2: 既知の競合（同じ handler の無条件の error と disabled）は従来どおり登録不可: ${b.blockText.slice(0, 300)}`);
+  //   §0d.4（2026-10-08）: 既知の競合の判定は Toolkit の形式確認（error-cancels-edit）から生成工程へ移した。今の契約の Gateway は check behavior
+  //   （checkReason candidate-error-same-event）にして模擬テストで確かめ、error で編集不可が取り消されれば不合格を返す（隔離環境の sandbox/test/run.mjs §3 R13）。
+  //   Toolkit はその明示された失敗を取り込んで登録しない。旧い接続先では結果の欠落（接続先が非対応）で登録しない
+  const b0 = await run({ code: CONFLICT_L });
+  const b = await run({ capable: true, code: CONFLICT_L, has: ['lock', 'warn'], cand: { fails: ['case_name|lock'], failMsg: '承認待ちの編集画面で、エラー表示のため編集不可が取り消されました', check: { 'case_name|lock': { check: 'behavior', checkReason: ['candidate-error-same-event', 'nested'], raw: true } } } });
+  assert(b0.pr && b0.pr.status === 'BLOCKED' && !b0.m.mock.calls.some(c => c === 'PUT customize') && b.pr && b.pr.status === 'BLOCKED' && /取り消/.test(b.blockText) && !b.m.mock.calls.some(c => c === 'PUT customize'), `D14-2: 既知の競合（同じ handler の無条件の error と disabled）は従来どおり登録不可（今の契約の接続先では模擬テストの不合格・旧い接続先では結果の欠落）: ${b.blockText.slice(0, 300)}`);
   const c = await run({ capable: true });
   const sentL = c.genCtx[0] && c.genCtx[0].verification && c.genCtx[0].verification.requiredEffects;
   assert(c.draft === null && sentL && sentL.length === 1 && sentL[0].field === 'case_name' && sentL[0].effect === 'lock' && c.pr && c.pr.status === 'PREPARED', `D14-3: 従来の流れでも接続先が対応していれば必須の効果を渡し、合格した候補は登録の準備に進む: ${JSON.stringify({ sent: sentL, status: c.pr && c.pr.status, blockers: c.pr && c.pr.blockers })}`);
@@ -2112,7 +2152,7 @@ await section(async () => {
 });
 
 // D38（効果レビュー A2〜A5・§0c.9 の二重の安全）: 必須の効果ごとに、効果のイベントのそれぞれで「合う」の合格、条件つきなら「合わない」の合格も 1 件以上。
-//   足りなければ確かめていない（条件の形・件数の上限）。静的に見つけた block（conditional-control）を確認に下げるのは、この確かめが揃ったときだけ
+//   足りなければ確かめていない（条件の形・件数の上限）。§0d.4（2026-10-08）で Toolkit の静的な block（conditional-control）とその引き下げは削除した（D38-5 の注を参照）
 await section(async () => {
   const req = [reqLockOf('amount', [EV_E, EV_I], 'ステータス in ("承認待ち")')];
   const all = fullCases(['amount'], [EV_E, EV_I]);
@@ -2139,19 +2179,17 @@ await section(async () => {
   const wc = (id, event, side, expect, o = {}) => ({ id, requirementIds: ['C1'], field: 'amount', effect: 'warn', expect, event, side, verdict: 'pass', message: '', ...o });
   const verW = { requiredEffects: [{ requirementIds: ['C1'], field: 'amount', effect: 'warn', status: 'present' }], behavior: { status: 'passed', reason: null, cases: [wc('W1', EV_E, 'match', 'warn'), wc('W2', EV_E, 'nomatch', 'not-warned'), wc('W3', 'app.record.edit.submit', 'match', 'save-allowed', { kind: 'warn-save' }), wc('W4', 'app.record.edit.submit', 'nomatch', 'save-allowed')] } };
   assert(okU.ok && !missU.ok && JSON.stringify(missU.items[0].lacking) === JSON.stringify([{ event: EV_I, side: 'match' }]) && KTCodeReview.effectResults(verW, reqW).ok, 'D38-4: 条件の無い効果は合う側だけ（イベントごと）・警告の保存のイベントは「保存は止めない」が合う側');
-  //   静的な block（条件の外で編集不可）は、二重の安全が揃ったときだけ確認に下げる（rv5 F5: 一覧の編集だけ条件を見ない候補で、範囲の足りない合格で弱めない）
+  //   §0d.4（2026-10-08）: 静的な block（conditional-control）と、模擬テストの合格でそれを確認に下げる処理は削除した（Toolkit の業務の推定による判定）。
+  //   条件の外の編集不可は、生成工程の代表条件の「合わない」側（expect not-locked）が不合格を返す（AI版 worker/test/cases/required-effects.mjs の
+  //   「lock: 条件に合う（承認済）→ lock・合わない（作成中）→ not-locked」と「A3 F5（本物の隔離環境）: 一覧の編集だけ条件を見ずに編集不可にする誤った候補 → 一覧の編集の「合わない」で failed」）。
+  //   Toolkit に残るのは、イベントごとの合う・合わないが揃わないこと（返却の欠落）と、明示された不合格を登録不可にすること（rv5 F5 の候補で確かめる）
   const UNCOND = handlerC("    record['amount'].disabled = true;", [EV_E, EV_I]);
   const CUST_I = custOf(['lock'], { events: [EV_E, EV_I] });
   const rv = KTCodeReview.review({ generated: { strategy: 'NEW_JS_FILE', targetFile: 'lock.js', summary: 's', code: UNCOND, patch: null, events: [EV_E, EV_I], fields: [{ code: 'amount', access: 'CONTROL' }], apis: [], assumptions: [], warnings: [], coverage: [{ requirementId: 'C1', status: 'MET', note: '', text: 'x' }] }, customization: CUST_I, plan: null, data: clone(DATA_C), scan: null, existingSource: null });
-  const cc0 = rv.checks.find(ch => ch.name === 'conditional-control' && !ch.ok);
-  const mFull = KTCodeReview.attachBehavior(rv, verOfCases(['amount'], all), { requiredEffects: req, customization: CUST_I });
   const mPart = KTCodeReview.attachBehavior(rv, verOfCases(['amount'], all.filter(c => !(c.event === EV_I && c.side === 'nomatch'))), { requiredEffects: req, customization: CUST_I });
-  const ccFull = mFull.checks.find(ch => ch.name === 'conditional-control' && !ch.ok), ccPart = mPart.checks.find(ch => ch.name === 'conditional-control' && !ch.ok);
-  assert(cc0 && cc0.severity === 'block' && cc0.detail && cc0.detail.field === 'amount' && ccFull.severity === 'review' && ccPart.severity === 'block' && mPart.registration.verdict === 'BLOCKED' && mPart.checks.some(ch => ch.name === 'behavior-not-run' && ch.category === 'condition'), `D38-5（rv5 F5）: 条件の外の編集不可（静的な block）は、イベントごとの合う・合わないが揃ったときだけ確認に下げる: ${JSON.stringify({ c0: cc0 && cc0.severity, full: ccFull && ccFull.severity, part: ccPart && ccPart.severity, verdict: mPart.registration.verdict })}`);
-  //   その block のフィールドの効果を確かめていなければ下げない（ほかのフィールドの合格で弱めない）
-  const rvOther = { ...rv, checks: rv.checks.map(ch => (ch === cc0 ? { ...ch, detail: { field: 'memo' } } : ch)) };
-  const mOther = KTCodeReview.attachBehavior(rvOther, verOfCases(['amount'], all), { requiredEffects: req, customization: CUST_I });
-  assert(mOther.checks.find(ch => ch.name === 'conditional-control' && !ch.ok).severity === 'block', 'D38-6: 静的な block のフィールドの必須の効果を確かめていなければ確認に下げない');
+  //   今の契約の Gateway がこの候補に返す結果: 一覧の編集の「合わない」（編集できるはずのレコード）で不合格
+  const mFail = KTCodeReview.attachBehavior(rv, verOfCases(['amount'], all.map(c => (c.event === EV_I && c.side === 'nomatch' ? { ...c, verdict: 'fail', message: '条件に合わないレコードで「金額」が編集できなくなりました' } : c))), { requiredEffects: req, customization: CUST_I });
+  assert(mPart.registration.verdict === 'BLOCKED' && mPart.checks.some(ch => ch.name === 'behavior-not-run' && ch.category === 'condition') && mFail.registration.verdict === 'BLOCKED' && mFail.checks.some(ch => ch.name === 'behavior-fail' && ch.severity === 'block' && /編集できなくなりました/.test(ch.message)) && !mFail.effects.ok, `D38-5（rv5 F5）: 条件の外の編集不可の候補は、イベントごとの合う・合わないが揃わなければ準備未完了（条件の形）、生成工程の「合わない」の不合格なら登録不可: ${JSON.stringify({ part: mPart.registration.verdict, fail: mFail.registration.verdict, failChecks: mFail.checks.filter(ch => !ch.ok).map(ch => ch.name) })}`);
   //   会話: 一覧の編集の「合わない」が返らない → 準備未完了（条件の形）・次の手は［計画を直すよう依頼する］
   const y = makeConvC({ planImpl: (args) => planJs(args, { cust: CUST_I }), generate: makeGenerate({ sequence: ['good'], dropCaseFor: 'amount|lock', extraCases: all.filter(c => !(c.event === EV_I && c.side === 'nomatch')), generatedOf: (cust) => ({ strategy: 'NEW_JS_FILE', targetFile: 'lock.js', summary: '承認待ちでは金額を編集不可にします。', code: handlerC(`    if (${ST_C}) record['amount'].disabled = true;`, [EV_E, EV_I]), patch: null, events: cust.events, fields: [{ code: 'amount', access: 'CONTROL' }], apis: [], assumptions: [], warnings: [], coverage: [{ requirementId: 'C1', status: 'MET', note: '', text: cust.requirement }] }) }) });
   await adoptC(y);
@@ -2329,8 +2367,13 @@ await section(async () => {
   assert(fw && fw.kind === 'regenerate' && /原因の API: Date\.prototype\.toLocaleDateString/.test(fw.text) && /その書き方・機能（Date\.prototype\.toLocaleDateString）を使わない形で/.test(fw.text), `D45-5（rv6e G20）: 作り直しの依頼の文に原因の API の名前を入れる: ${JSON.stringify(fw)}`);
 });
 
-// D46（§0c.10・効果レビュー 1）: 必須の効果に lock が無いフィールド（警告だけ）の編集不可に関わる静的な block（conditional-control・error-cancels-edit）は、動作テストに合格しても確認に下げない。
-//   lock のフィールドでも、block の場所のイベントで lock の代表条件が合格していなければ下げない（fieldVerified はイベントごとの合格を見る）
+// D46（§0c.10・効果レビュー 1）: 必須の効果に lock が無いフィールド（警告だけ）を編集不可にする候補は、承認・登録できない。
+//   lock のフィールドでも、効果のイベントの一部（変更のイベント）で条件の外を編集不可にする候補は、承認・登録できない。
+//   §0d.4（2026-10-08）: Toolkit の静的な block（conditional-control・error-cancels-edit の lockNotRequired）と、模擬テストの合格で確認に下げる処理（fieldVerified）は削除した。
+//   今の契約の Gateway は、警告の効果に「編集不可にしていない」（kind warn-unlocked・expect not-locked）を customization の保存以外のすべてのイベント（変更のイベントを含む）で作り、
+//   誤った候補には不合格を返す（AI版 worker/test/cases/required-effects.mjs の「§0c.10 G10（本物の隔離環境）」「A5 F6」「A5 E7」）。条件つきの lock を変更のイベントで
+//   戻さない候補は機械検査 lock-revert の block（同「§0d.1 G4」）。Toolkit はその明示された失敗と、変更のイベントの代表条件を作らない旧い Gateway（health の印 eventCases が無い）を
+//   検出して承認・登録しない。下の Gateway の結果の形は、AI版の verify-generated.mjs（machineChecks）と behavior-cases.mjs で同じ候補・同じ計画から確かめたもの
 await section(async () => {
   const EV_CH = 'app.record.edit.change.amount';
   const CUST_W = custOf(null, { requirement: '承認待ちなら備考に警告・100 万以上なら金額に警告', events: [EV_E, EV_CH], fields: [{ code: 'ステータス', access: 'READ' }, { code: 'memo', access: 'CONTROL', condition: 'ステータス in ("承認待ち")', effects: [{ effect: 'warn', condition: '', events: [EV_E] }] }, { code: 'amount', access: 'CONTROL', condition: 'amount >= 1000000', effects: [{ effect: 'warn', condition: '', events: [EV_CH] }] }] });
@@ -2339,30 +2382,43 @@ await section(async () => {
   const rv = KTCodeReview.review({ generated: gen, customization: CUST_W, plan: null, data: clone(DATA_C), scan: null, existingSource: null });
   const REQ_W = [{ requirementId: 'C1', requirementIds: ['C1'], field: 'memo', effect: 'warn', events: [EV_E], condition: 'ステータス in ("承認待ち")' }, { requirementId: 'C1', requirementIds: ['C1'], field: 'amount', effect: 'warn', events: [EV_CH], condition: 'amount >= 1000000' }];
   const wc = (id, field, event, side, expect) => ({ id, requirementIds: ['C1'], field, effect: 'warn', expect, event, side, kind: side, verdict: 'pass', message: '期待どおり' });
-  //   警告の確かめはすべて合格（変更のイベントの「編集不可にしていない」を作らない旧い Gateway の形）
-  const VER_W = { version: '1', candidateHash: '0123456789abcdef', passed: true, machine: [], requiredEffects: REQ_W.map(x => ({ requirementIds: ['C1'], field: x.field, effect: 'warn', status: 'present' })), behavior: { status: 'passed', reason: null, cases: [wc('W1', 'memo', EV_E, 'match', 'warn'), wc('W2', 'memo', EV_E, 'nomatch', 'not-warned'), wc('W3', 'amount', EV_CH, 'match', 'warn'), wc('W4', 'amount', EV_CH, 'nomatch', 'not-warned')] } };
-  const m = KTCodeReview.attachBehavior(rv, VER_W, { requiredEffects: REQ_W, customization: CUST_W });
-  const cc = m.checks.find(ch => ch.name === 'conditional-control' && !ch.ok && ch.detail && ch.detail.field === 'memo');
-  const ec = m.checks.find(ch => ch.name === 'error-cancels-edit' && !ch.ok && ch.severity === 'block');
-  assert(m.effects.ok && cc && cc.severity === 'block' && cc.lockNotRequired === true && JSON.stringify(cc.detail.events) === JSON.stringify([EV_CH]) && ec && ec.lockNotRequired === true && ec.detail.fields.includes('memo') && m.registration.verdict === 'BLOCKED',
-    `D46-1（rv6e G10）: 警告だけのフィールドを編集不可にする静的な block は、動作テストが合格でも確認に下げない（要件違反）: ${JSON.stringify({ ok: m.effects.ok, cc: cc && [cc.severity, cc.lockNotRequired, cc.detail], ec: ec && [ec.severity, ec.lockNotRequired, ec.detail], verdict: m.registration.verdict })}`);
-  //   lock のフィールドでも、条件の外の編集不可が lock の代表条件の無いイベント（金額の変更）にあれば下げない（イベントごとの合格を見る）
+  //   警告の「編集不可にしていない」（warn-unlocked）。今の契約の Gateway は、備考の分を金額の変更のイベントで「合う」「合わない」の両方に作る（この候補では不合格）
+  const WU_MSG = '金額を変更すると「備考」が編集できなくなりました（警告だけの要件です）';
+  const wu = (id, field, event, side, verdict) => ({ id, requirementIds: ['C1'], field, effect: 'warn', expect: 'not-locked', event, side, kind: 'warn-unlocked', verdict, observed: {}, message: verdict === 'fail' ? WU_MSG : '期待どおり' });
+  const WU_CASES = [wu('W5', 'memo', EV_CH, 'match', 'fail'), wu('W6', 'memo', EV_CH, 'nomatch', 'fail'), wu('W7', 'amount', EV_E, 'match', 'pass'), wu('W8', 'amount', EV_E, 'nomatch', 'pass')];
+  const gwW = (x) => ({ requirementIds: ['C1'], field: x.field, effect: 'warn', status: 'present', check: 'behavior', checkReason: ['effect-kind', 'conditional'], events: x.events.map(ev => ({ event: ev, status: 'present' })) });
+  const VER_W = { version: '1', candidateHash: '0123456789abcdef', passed: true, machine: [], requiredEffects: REQ_W.map(gwW), behavior: { status: 'failed', reason: null, cases: [wc('W1', 'memo', EV_E, 'match', 'warn'), wc('W2', 'memo', EV_E, 'nomatch', 'not-warned'), wc('W3', 'amount', EV_CH, 'match', 'warn'), wc('W4', 'amount', EV_CH, 'nomatch', 'not-warned'), ...WU_CASES] } };
+  const m = KTCodeReview.attachBehavior(rv, VER_W, { requiredEffects: REQ_W, customization: CUST_W, effectCheck: true });
+  const memoI = m.effects.items.find(i => i.field === 'memo'), amountI = m.effects.items.find(i => i.field === 'amount');
+  const bf = m.checks.find(ch => ch.name === 'behavior-fail' && !ch.ok);
+  assert(!m.effects.ok && memoI && memoI.behavior === 'fail' && amountI && amountI.behavior === 'pass' && bf && bf.severity === 'block' && /備考/.test(bf.message) && m.registration.verdict === 'BLOCKED',
+    `D46-1（rv6e G10）: 警告だけのフィールドを編集不可にする候補は、生成工程の「編集不可にしていない」の不合格で登録不可（要件違反。警告の合格で通さない）: ${JSON.stringify({ ok: m.effects.ok, memo: memoI && memoI.behavior, amount: amountI && amountI.behavior, bf: bf && bf.message, verdict: m.registration.verdict })}`);
+  //   lock のフィールドでも、条件の外の編集不可が変更のイベント（備考の変更）にある候補。Toolkit が固定する必須の効果は customization のイベントの両方
   const CUST_L = custOf(['lock'], { events: [EV_E, 'app.record.edit.change.memo'] });
   const LCODE = `(function () {\n  'use strict';\n  kintone.events.on(['${EV_E}'], function (event) {\n    const record = event.record;\n    if (${ST_C}) record['amount'].disabled = true;\n    return event;\n  });\n  kintone.events.on(['app.record.edit.change.memo'], function (event) {\n    const record = event.record;\n    record['amount'].disabled = true;\n    return event;\n  });\n})();`;
   const rvL = KTCodeReview.review({ generated: { ...gen, targetFile: 'lock.js', code: LCODE, events: [EV_E, 'app.record.edit.change.memo'], fields: [{ code: 'amount', access: 'CONTROL' }] }, customization: CUST_L, plan: null, data: clone(DATA_C), scan: null, existingSource: null });
-  const REQ_L = [reqLockOf('amount', [EV_E], 'ステータス in ("承認待ち")')];
-  const mL = KTCodeReview.attachBehavior(rvL, verOfCases(['amount'], fullCases(['amount'], [EV_E])), { requiredEffects: REQ_L, customization: CUST_L });
-  const ccL = mL.checks.find(ch => ch.name === 'conditional-control' && !ch.ok);
-  assert(mL.effects.ok && ccL && ccL.severity === 'block' && !ccL.lockNotRequired && JSON.stringify(ccL.detail.events) === '["app.record.edit.change.memo"]' && mL.registration.verdict === 'BLOCKED', `D46-2: block の場所のイベントで lock の確かめが合格していなければ確認に下げない: ${JSON.stringify({ cc: ccL && [ccL.severity, ccL.detail], verdict: mL.registration.verdict })}`);
-  //   会話: 警告だけのフィールドを編集不可にする候補は、動作テストが合格でも承認できない（未確認ではなく、要件に反する問題として計画の見直しの対象）
+  const REQ_L = KTAiConversation.requiredEffectsOf({ customizations: [CUST_L] }, 'C1', [], { labels: LABELS_C }).effects;
+  const EV_M = 'app.record.edit.change.memo';
+  //   (i) 今の契約の Gateway: 機械検査 lock-revert の block（修復の上限まで直らなかった）・模擬テストは機械検査の不合格のため未実行（machine-blocked）
+  const VER_L = { version: '1', candidateHash: '0123456789abcdef', passed: false, machine: [{ name: 'lock-revert', ok: false, severity: 'block', message: '条件つきの編集不可を変更のイベントで設定していますが、条件が外れたときに戻していません' }], requiredEffects: [{ requirementIds: ['C1'], field: 'amount', effect: 'lock', status: 'present', check: 'behavior', checkReason: ['conditional', 'nested'], events: [{ event: EV_E, status: 'present' }, { event: EV_M, status: 'present' }] }], behavior: { status: 'not-run', reason: 'machine-blocked', cases: fullCases(['amount'], [EV_E, EV_M]).map(c => ({ ...c, verdict: 'not-run', reason: 'machine-blocked', message: '機械検査の不合格が残っているので実行していません' })) } };
+  const mL = KTCodeReview.attachBehavior(rvL, VER_L, { requiredEffects: REQ_L, customization: CUST_L, effectCheck: true });
+  //   (ii) 変更のイベントの代表条件が返らない（効果のイベントの一部だけで合格）→ 確かめていない（返却の欠落）
+  const mL2 = KTCodeReview.attachBehavior(rvL, verOfCases(['amount'], fullCases(['amount'], [EV_E])), { requiredEffects: REQ_L, customization: CUST_L, effectCheck: true });
+  assert(REQ_L.length === 1 && JSON.stringify(REQ_L[0].events) === JSON.stringify([EV_E, EV_M]) && mL.registration.verdict === 'BLOCKED' && mL.checks.some(ch => ch.name === 'behavior-not-run' && ch.category === 'machine') && mL2.registration.verdict === 'BLOCKED' && !mL2.effects.ok && JSON.stringify(mL2.effects.items[0].lacking) === JSON.stringify([{ event: EV_M, side: 'match' }, { event: EV_M, side: 'nomatch' }]),
+    `D46-2: 変更のイベントで条件の外を編集不可にする候補は、生成工程の機械検査の不合格（模擬テストは未実行）でも、そのイベントの代表条件が返らなくても登録不可: ${JSON.stringify({ events: REQ_L.map(e => e.events), verdict: mL.registration.verdict, verdict2: mL2.registration.verdict, lacking: mL2.effects.items[0] && mL2.effects.items[0].lacking })}`);
+  //   会話: 警告だけのフィールドを編集不可にする候補は承認できない（未確認ではなく、模擬テストで期待どおりに動かなかった問題として計画の見直しの対象）
   CAND.g10 = { code: G10, has: { memo: ['warn'], amount: ['warn'] } };
-  const x = makeConvC({ planImpl: (args) => planJs(args, { cust: CUST_W, summary: '承認待ちなら備考に警告を出します。' }), generate: makeGenerate({ sequence: ['g10'], generatedOf: () => clone(gen) }) });
+  const x = makeConvC({ planImpl: (args) => planJs(args, { cust: CUST_W, summary: '承認待ちなら備考に警告を出します。' }), generate: makeGenerate({ sequence: ['g10'], generatedOf: () => clone(gen), extraCases: WU_CASES }) });
   await adoptC(x);
   const vx = x.c.activePlan(), ex = vx.generated.C1;
-  assert(ex.status === 'unresolved' && vx.final.approvable === false && ex.review.checks.some(ch => ch.name === 'conditional-control' && ch.severity === 'block' && ch.lockNotRequired), `D46-3（rv6e G10）: 会話でも承認できない（要件に反する問題）: ${JSON.stringify({ status: ex.status, verdict: ex.verdict && ex.verdict.kind, approvable: vx.final.approvable })}`);
+  assert(ex.status === 'unresolved' && ex.verdict.kind === 'behavior-fail' && ex.verdict.fix === 'revise' && vx.final.approvable === false && ex.review.checks.some(ch => ch.name === 'behavior-fail' && ch.severity === 'block' && /備考/.test(ch.message)) && x.c.approveFinal({ planId: vx.planId, version: vx.version, baseStamp: { fingerprint: 'fp-1' } }).ok === false, `D46-3（rv6e G10）: 会話でも承認できない（模擬テストの不合格・次の手は計画を直す操作）: ${JSON.stringify({ status: ex.status, verdict: ex.verdict && ex.verdict.kind, approvable: vx.final.approvable })}`);
+  //   変更のイベントの「編集不可にしていない」を作らない旧い Gateway（health の印 eventCases が無い）は、警告がすべて合格でも新しい形として受け入れない（接続先が非対応）
+  const xo = makeConvC({ supported: GEN_EFFECT_FEATURES.filter(f => f !== 'eventCases'), planImpl: (args) => planJs(args, { cust: CUST_W, summary: '承認待ちなら備考に警告を出します。' }), generate: makeGenerate({ sequence: ['g10'], generatedOf: () => clone(gen) }) });
+  await adoptC(xo);
+  const vxo = xo.c.activePlan(), exo = vxo.generated.C1;
+  assert(exo.status === 'unsupported' && vxo.final.approvable === false, `D46-4: 変更のイベントの代表条件を作らない旧い接続先（印 eventCases が無い）では、警告の合格だけで承認できる最終案にしない: ${JSON.stringify({ status: exo.status, approvable: vxo.final.approvable })}`);
   delete CAND.g10;
 });
-
 // D47（§0c.10 の確かめない範囲）: 最終案の詳細表示に「動作テストの条件」（固定の利用者・日時・画面）と確かめていない範囲を短く出す。通常の画面には出さない。
 //   反映はプレビュー環境から始まり、実機での確かめはプレビューで行うことも詳細に書く
 await section(async () => {
