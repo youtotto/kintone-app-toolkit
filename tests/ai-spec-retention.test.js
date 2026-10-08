@@ -43,6 +43,19 @@ const mkPlan = (steps, extra = {}) => ({ planVersion: '1', goal: 'g', assessment
 const classify = (p, rv, extra = {}) => E.classifySteps({ plan: p, review: rv, approvedSteps: p.steps.map(s => s.id), fieldsNow: INPUTS.data.fields, processNow: INPUTS.data.status, ...extra });
 const tick = () => new Promise(r => setTimeout(r, 0));
 const ticks = async (n = 6) => { for (let i = 0; i < n; i++) await tick(); };
+// C-1 第 3 段（2026-10-08）: 古い確認の流れ（依頼 → すぐ計画 → 仕様の確定 →「コードを作って」→ コードのカード）は削除した。
+//   会話の節（§6 の後半・§7）は、共有の部品（tests/helpers/new-flow.js の makeConvC）で新しい流れ（依頼 → 仮案 → 採用 → 最終案）の上で試す
+const { createNewFlowKit } = require('./helpers/new-flow.js');
+const K = createNewFlowKit(T);
+/** 仮案の AI の偽物: どの依頼にも同じ仮案（判断・要件の操作なし）を返す（台帳には計画の turn の要件だけが入る） */
+const DRAFT_S = { reply: '依頼どおりの案です。', intent: 'propose', proposal: { behaviors: [{ text: '依頼どおりに設定する', origin: 'user' }], assumptions: [], decisions: [], approach: { standard: ['設定'], js: [] }, cannot: [] }, turn: { ops: [], answers: [], requirementOps: [] } };
+const makeConvN = ({ planImpl, generate = undefined }) => {
+  const x = K.makeConvC({ planImpl, ...(generate ? { generate } : {}) });
+  x.services.propose = async () => ({ ok: true, proposal: K.normalized(DRAFT_S), ctx: { facts: [] }, perf: { baseWaitMs: 0, contextMs: 1, requestMs: 1 } });
+  return x;
+};
+/** 依頼 → 仮案 →「この内容で進めて」で採用 → 計画 → 最終案 */
+const startN = async (x, goal) => { await x.c.send(goal); await x.c.send('この内容で進めて'); await ticks(); };
 
 (async () => {
 async function section(fn) { try { await fn(); } catch (e) { assert(false, `例外: ${e && e.stack ? e.stack.split('\n').slice(0, 3).join(' / ') : e}`); } }
@@ -349,9 +362,10 @@ await section(async () => {
   assert(owner.length === 3 && owner.every(ch => !ch.ok && ch.severity === 'review') && owner[0].message === '担当範囲外とされた要件「承認後に Slack へ知らせる」の担当が計画に見つかりません。計画全体の確認に残します' && un.status !== 'OK', `check coverage-owner（review）: ${JSON.stringify(owner)}`);
   const csUn = VM.codeSummary({ generated: gen([]), review: un, existingSource: null }, 'C2', { planId: 'p', version: 1, plan: revPlan });
   assert(Array.isArray(csUn.unowned) && csUn.unowned.length === 3, 'codeSummary に unowned');
+  //   C-1 第 3 段: 会話のコードのカード（MSG.CODE・codeCardHtml）は削除した。担当の決まっていない要件は右の「コード」の見出し（codePaneHtml）と最終案のカードに出す（最終案は §6 の下の会話の節）
   let cardUn = '';
-  try { cardUn = KTAiChatUi.messageHtml({ id: 'm1', type: 'CODE', role: 'toolkit', text: 'JavaScript', at: '', data: { planId: 'p', version: 1, customizationId: 'C2' } }, { plans: new Map([['p:1', { planId: 'p', version: 1, goal: revPlan.goal, plan: revPlan, review: null, ctx: null, status: 'ACTIVE', generated: { C2: { generated: gen([]), review: un, existingSource: null } } }]]) }); } catch (e) { cardUn = `例外: ${e && e.stack}`; }
-  assert(/kt-ai-code-unowned[^>]*>計画で担当が決まっていない要件: 承認後に Slack へ知らせる／100万円以上は部長承認／帳票の出力</.test(cardUn), `コードカードに「計画で担当が決まっていない要件」を別に出す: ${cardUn.slice(0, 400)}`);
+  try { cardUn = KTAiChatUi.codePaneHtml({ generated: gen([]), review: un, existingSource: null }).head; } catch (e) { cardUn = `例外: ${e && e.stack}`; }
+  assert(/kt-ai-code-unowned[^>]*>計画で担当が決まっていない要件: 承認後に Slack へ知らせる／100万円以上は部長承認／帳票の出力</.test(cardUn), `右の「コード」の見出しに「計画で担当が決まっていない要件」を別に出す: ${cardUn.slice(0, 400)}`);
   // クライアントの検証は OUT_OF_SCOPE を語彙として受け取る（語彙外は従来どおり PARTIAL）
   const gctx = KTContext.buildGenerator({ customization: C2, plan: SR.CASE2_PLAN, planId: 'p', version: 1, data: INPUTS.data, deps: INPUTS.deps, scan: INPUTS.scan });
   const RESP = { ok: true, contractVersion: '2.1', meta: { requestId: 'g1', gateway: { product: 'toolkit', feature: 'customization-generator', promptVersion: '1', contextVersion: 'customization-1' }, normalization: { warnings: [] }, ai: { model: 'm' } }, generated: { ...gen([{ requirement: '100万円以上は部長承認', status: 'OUT_OF_SCOPE', note: 'P1' }, { requirement: 'x', status: 'BOGUS', note: '' }]), gatewayChecks: { security: [] } } };
@@ -366,40 +380,30 @@ await section(async () => {
   // 表示: コードカード（VM.codeSummary）に outOfScope
   const cs = VM.codeSummary({ generated: gen(cov), review: rv, existingSource: null }, 'C2', { planId: 'p', version: 1, plan: SR.CASE2_PLAN });
   assert(Array.isArray(cs.outOfScope) && cs.outOfScope.length === 3 && cs.notAchieved.length >= 1, `codeSummary: outOfScope と notAchieved を分けて持つ: ${JSON.stringify({ oos: cs.outOfScope.length, na: cs.notAchieved.length })}`);
-  // 会話の code-intro: 満たせない部分と担当範囲外を分けて出す
+  // 会話: 満たせない部分と担当範囲外を分けて出す。
+  //   C-1 第 3 段: 従来の生成の案内（code-intro）は削除した。新しい流れでは最終案のカードの「実現できない点・対応範囲」に、満たせない部分（cannot）・
+  //   この JavaScript の対応範囲外（担当のある要件）・担当が計画に無い要件の順に分けて出す
   const custStep = mkStep('C1', 'CUSTOMIZATION_REQUIRED', 'JS', null, { customizationId: 'C1' }, { solution: 'CUSTOMIZATION', confidence: 'CONFIRMED' });
-  const custC1 = { customizationId: 'C1', requirement: '承認済みでは金額を編集不可にする', whyStandardInsufficient: 'ステータスで切り替えるアクセス権は無い', strategy: 'NEW_JS_FILE', implementation: 'JAVASCRIPT', platform: ['desktop'], events: ['app.record.edit.show'], fields: [{ code: 'amount', access: 'CONTROL' }], apis: [], existingFiles: [], risks: [], questions: [], dependsOn: [], evidenceIds: [] };
+  const custC1 = { customizationId: 'C1', requirement: '承認済みでは金額を編集不可にする', whyStandardInsufficient: 'ステータスで切り替えるアクセス権は無い', strategy: 'NEW_JS_FILE', implementation: 'JAVASCRIPT', platform: ['desktop'], events: ['app.record.edit.show'], fields: [{ code: 'ステータス', access: 'READ' }, { code: 'amount', access: 'CONTROL', condition: 'ステータス in ("承認済み")', effects: ['lock'] }], apis: [], existingFiles: [], risks: [], questions: [], dependsOn: [], evidenceIds: [] };
   const hybrid = mkPlan([custStep], { goal: '承認済みでは金額を編集できなくして', solution: 'HYBRID', customizations: [custC1] });
-  const makeConv = (genReview) => {
-    const services = {
-      async plan() { const p = clone(hybrid); return { plan: p, ctx: { facts: [] }, review: R.review({ plan: p, ...INPUTS }), turn: null }; },
-      revisionModes: () => ['full', 'patch'], conversationFeatures: () => ['requirements', 'brief'],
-      async ask() { return { ok: true, answer: { answer: 'a', facts: [], analysis: [], recommendations: [], unknowns: [] }, ctx: { facts: [] } }; },
-      async generate() { return { ok: true, generated: { code: '', strategy: 'NEW_JS_FILE', targetFile: 'a.js', summary: 's' }, review: genReview }; },
-      readiness(v) { return { approved: 0, executable: 0, unsupported: 0, blocked: 0, undecided: v.plan.steps.length }; },
-    };
-    return KTAiConversation.create({ services, now: () => '2026-10-07T00:00:00.000Z', clock: () => 1000 });
+  /** 偽の生成工程（共有の部品の makeGenerate）の結果の形式確認に、この節の coverage を入れる */
+  const runFinal = async (coverage) => {
+    const base = K.makeGenerate({ sequence: ['good'] });
+    const generate = { calls: base.calls, impl: async (args) => { const r = await base.impl(args); r.review = { ...r.review, coverage: { achieved: [], notAchieved: [], outOfScope: [], unowned: [], ...coverage } }; return r; } };
+    const x = makeConvN({ planImpl: () => { const p = clone(hybrid); return { plan: p, ctx: { facts: [] }, review: R.review({ plan: p, ...INPUTS }), turn: null }; }, generate });
+    await startN(x, '承認済みでは金額を編集できなくして');
+    const v = x.c.activePlan();
+    return { x, v, gen: base.calls.length, text: v && v.final ? K.stripC(K.finalHtml(x)) : '' };
   };
-  const c = makeConv({ status: 'REVIEW_REQUIRED', checks: [], coverage: { achieved: [], notAchieved: [{ code: 'SUBTABLE_ROWS', message: '明細の行の追加・削除は止められません' }], outOfScope: [{ code: 'AI_OUT_OF_SCOPE', requirement: '100万円以上は部長承認', message: '100万円以上は部長承認（P1 の標準設定で扱う）' }] } });
-  await c.send('承認済みでは金額を編集できなくして'); await ticks();
-  const v1 = c.activePlan(); c.confirmSpec({ planId: v1.planId, version: v1.version });
-  await c.send('コードを作って'); await ticks();
-  const intro = c.messages().find(m => m.data?.kind === 'code-intro');
-  // 独立レビュー C: Toolkit の確認（SUBTABLE_ROWS）は「（Toolkit の確認）」と書く（AI の申告は「（AI の申告）」）
-  assert(intro && /要件のうち満たせない部分があります（Toolkit の確認）: 明細の行の追加・削除は止められません/.test(intro.text) && / この JavaScript の担当範囲外（計画の他の手順・JavaScript で扱います）: 100万円以上は部長承認（P1 の標準設定で扱う）/.test(intro.text) && intro.text.indexOf('満たせない部分') < intro.text.indexOf('担当範囲外'), `code-intro: 満たせない部分と担当範囲外を分けて出す: ${intro && intro.text}`);
-  const c2 = makeConv({ status: 'OK', checks: [], coverage: { achieved: [], notAchieved: [], outOfScope: [{ code: 'OTHER_CUSTOMIZATION', requirement: 'r', message: 'モバイルの編集制御（C2 の担当）' }] } });
-  await c2.send('承認済みでは金額を編集できなくして'); await ticks();
-  const v2 = c2.activePlan(); c2.confirmSpec({ planId: v2.planId, version: v2.version });
-  await c2.send('コードを作って'); await ticks();
-  const intro2 = c2.messages().find(m => m.data?.kind === 'code-intro');
-  assert(intro2 && !/満たせない部分/.test(intro2.text) && /担当範囲外（計画の他の手順・JavaScript で扱います）: モバイルの編集制御（C2 の担当）/.test(intro2.text), `code-intro: 担当範囲外だけのときは「満たせない部分」と言わない: ${intro2 && intro2.text}`);
-  // 担当が計画に無い要件（unowned）は「計画で担当が決まっていない要件: …」として別に出す
-  const c3 = makeConv({ status: 'REVIEW_REQUIRED', checks: [{ name: 'coverage-owner', ok: false, severity: 'review', message: 'x' }], coverage: { achieved: [], notAchieved: [], outOfScope: [{ code: 'AI_OUT_OF_SCOPE', requirement: '承認後に Slack へ知らせる', note: '別の仕組み', message: '承認後に Slack へ知らせる（別の仕組み）' }], unowned: [{ code: 'UNOWNED', requirement: '承認後に Slack へ知らせる', message: '承認後に Slack へ知らせる' }] } });
-  await c3.send('承認済みでは金額を編集できなくして'); await ticks();
-  const v3 = c3.activePlan(); c3.confirmSpec({ planId: v3.planId, version: v3.version });
-  await c3.send('コードを作って'); await ticks();
-  const intro3 = c3.messages().find(m => m.data?.kind === 'code-intro');
-  assert(intro3 && / 計画で担当が決まっていない要件: 承認後に Slack へ知らせる$/.test(intro3.text) && intro3.text.indexOf('担当範囲外') < intro3.text.indexOf('担当が決まっていない'), `code-intro: 担当の無い要件は別に出す: ${intro3 && intro3.text}`);
+  const f1 = await runFinal({ notAchieved: [{ code: 'SUBTABLE_ROWS', message: '明細の行の追加・削除は止められません' }], outOfScope: [{ code: 'AI_OUT_OF_SCOPE', requirement: '100万円以上は部長承認', owner: 'step', message: '100万円以上は部長承認（P1 の標準設定で扱う）' }] });
+  const t1 = f1.text;
+  assert(f1.gen === 1 && /実現できない点・対応範囲/.test(t1) && /明細の行の追加・削除は止められません/.test(t1) && /この JavaScript の対応範囲外（ほかの手順・JavaScript で扱います）: 100万円以上は部長承認（P1 の標準設定で扱う）/.test(t1) && t1.indexOf('明細の行の追加・削除') < t1.indexOf('対応範囲外（ほかの手順'), `最終案のカード: 満たせない部分と担当範囲外を分けて出す（満たせない部分が先）: ${t1.slice(t1.indexOf('実現できない点'), t1.indexOf('実現できない点') + 300)}`);
+  const f2 = await runFinal({ outOfScope: [{ code: 'OTHER_OWNER', requirement: 'r', owner: 'customization', customizationId: 'C2', message: 'モバイルの編集制御（C2 の担当）' }] });
+  assert(f2.gen === 1 && !/明細の行の追加・削除/.test(f2.text) && /この JavaScript の対応範囲外（ほかの手順・JavaScript で扱います）: モバイルの編集制御（C2 の担当）/.test(f2.text), `最終案のカード: 担当範囲外だけのときは満たせない部分を出さない: ${f2.text.slice(f2.text.indexOf('実現できない点'), f2.text.indexOf('実現できない点') + 200)}`);
+  // 担当が計画に無い要件（unowned）は「担当が計画にありません」として、担当のある範囲外とは別の行に出す
+  const f3 = await runFinal({ outOfScope: [{ code: 'OTHER_OWNER', requirement: '承認待ちの通知', owner: 'step', message: '承認待ちの通知（標準設定で対応）' }, { code: 'AI_OUT_OF_SCOPE', requirement: '承認後に Slack へ知らせる', owner: 'unowned', note: '別の仕組み', message: '承認後に Slack へ知らせる（別の仕組み）' }], unowned: [{ code: 'UNOWNED', requirement: '承認後に Slack へ知らせる', message: '承認後に Slack へ知らせる' }] });
+  const t3 = f3.text;
+  assert(f3.gen === 1 && /担当が計画にありません（計画全体の確認に残します）: 承認後に Slack へ知らせる/.test(t3) && !/対応範囲外（ほかの手順・JavaScript で扱います）: 承認後に Slack/.test(t3) && t3.indexOf('対応範囲外（ほかの手順') < t3.indexOf('担当が計画にありません'), `最終案のカード: 担当の無い要件は別に出す: ${t3.slice(t3.indexOf('実現できない点'), t3.indexOf('実現できない点') + 300)}`);
 });
 
 // =========================================================
@@ -410,22 +414,17 @@ await section(async () => {
     { op: 'add', id: '', target: '承認待ちの案件', condition: '承認待ちのまま3日経過', behavior: '作業者だけに知らせる', exceptions: [{ condition: '金額が100万円以上', behavior: '上長にも知らせる' }], decision: 'decided', disposition: 'adopted', sourceQuotes: ['3日たったら作業者だけに知らせて', '金額が100万円以上の案件は上長にも知らせて'], planRefs: ['P1', 'P2'], note: '' },
     { op: 'add', id: '', target: '', condition: '', behavior: '更新日時から暦日で3日後の午前9時', exceptions: [], decision: 'proposed', disposition: 'adopted', sourceQuotes: [], planRefs: ['P1'], note: '' },
   ], utteranceCoverage: [{ quote: goal, as: 'requirement', refs: ['R1'], note: '' }] };
+  //   C-1 第 3 段: 新しい流れ（依頼 → 仮案 → 採用 → 計画 → 最終案）の上で試す（共有の部品 makeConvC。仮案は要件の操作なし・計画の turn が台帳に要件を入れる）
   const makeConv = ({ withRequirements = false, staleTrace = false } = {}) => {
     const calls = { plan: 0 };
-    const services = {
-      // staleTrace: 検証が台帳の更新より前に（古い台帳 = 空で）要件を照合した形（requirementTrace はあるが requirement 数が台帳と違う）
-      async plan(args) { calls.plan += 1; const p = clone(SR.CASE1_PLAN); const review = R.review({ plan: p, ...INPUTS, ...(withRequirements ? { requirements: args.requirements || [] } : staleTrace ? { requirements: [] } : {}) }); return { plan: p, ctx: { facts: [] }, review, gatewayPlan: clone(p), turn: clone(turn) }; },
-      revisionModes: () => ['full', 'patch'], conversationFeatures: () => ['requirements', 'brief'],
-      async ask() { return { ok: true, answer: { answer: 'a', facts: [], analysis: [], recommendations: [], unknowns: [] }, ctx: { facts: [] } }; },
-      async generate() { return { ok: true, generated: { code: '' }, review: { status: 'OK', checks: [] } }; },
-      readiness(v) { return { approved: 0, executable: 0, unsupported: 0, blocked: 0, undecided: v.plan.steps.length }; },
-    };
-    const c = KTAiConversation.create({ services, now: () => '2026-10-07T00:00:00.000Z', clock: () => 1000 });
-    return { c, calls };
+    // staleTrace: 検証が台帳の更新より前に（古い台帳 = 空で）要件を照合した形（requirementTrace はあるが requirement 数が台帳と違う）
+    const x = makeConvN({ planImpl: (args) => { calls.plan += 1; const p = clone(SR.CASE1_PLAN); const review = R.review({ plan: p, ...INPUTS, ...(withRequirements ? { requirements: args.requirements || [] } : staleTrace ? { requirements: [] } : {}) }); return { plan: p, ctx: { facts: [] }, review, gatewayPlan: clone(p), turn: clone(turn) }; } });
+    return { c: x.c, x, calls };
   };
-  const { c } = makeConv();
-  await c.send(goal); await ticks();
+  const send = async (k) => { await startN(k.x, goal); return k; };
+  const { c } = await send(makeConv());
   const v = c.activePlan();
+  assert(v && v.fromDraft && v.final, `前提: 新しい流れで最終案まで進んだ: ${JSON.stringify(v && { fromDraft: !!v.fromDraft, final: !!v.final })}`);
   const lg = c.state.ledgers.get(v.planId);
   assert(v && lg && Array.isArray(lg.requirements) && lg.requirements.length === 2 && lg.requirements[0].id === 'R1' && lg.requirements[0].decision === 'decided' && lg.requirements[0].exceptions[0].condition === '金額が100万円以上', `前提: 台帳に R1（決定・例外つき）と R2（AI の提案）が入った: ${JSON.stringify((lg?.requirements || []).map(e => [e.id, e.decision, e.disposition]))}`);
   const tr = v.review && v.review.requirementTrace;
@@ -438,19 +437,19 @@ await section(async () => {
   const rs = VM.reviewSummary(v);
   assert(rs && typeof rs.confirmations === 'number' && rs.planId === v.planId, `要約の生成は壊れない: ${JSON.stringify(rs)}`);
   // services.plan が requirements つきで検証していれば（review.requirementTrace あり）、登録のときに重ねない
-  const { c: c2 } = makeConv({ withRequirements: true });
-  await c2.send(goal); await ticks();
+  const { c: c2 } = await send(makeConv({ withRequirements: true }));
   const v2 = c2.activePlan();
   assert(v2.review.requirementTrace && v2.review.requirementTrace.requirements.length === 2 && notInSpec(v2.review).length === 1, `検証が先に要件を照合していれば二重に出さない（警告は 1 件・trace は台帳の 2 件）: ${notInSpec(v2.review).length} 件 / ${v2.review.requirementTrace.requirements.length}`);
   // 検証の時点の台帳が古い（trace はあるが requirement 数が台帳と違う）→ 登録のときに作り直す（「trace が無い」だけで判定しない）
-  const { c: cS } = makeConv({ staleTrace: true });
-  await cS.send(goal); await ticks();
+  const { c: cS } = await send(makeConv({ staleTrace: true }));
   const vS = cS.activePlan();
   assert(vS.review.requirementTrace.requirements.length === 2 && notInSpec(vS.review).length === 1 && notInSpec(vS.review)[0].requirementId === 'R1', `trace の requirement 数が台帳（2 件）と違えば作り直す: ${vS.review.requirementTrace.requirements.length} / ${notInSpec(vS.review).length}`);
   // 計画のみの版（Context ペインから登録。turn なし）は台帳が空 → 警告なし・例外にならない
-  const c3 = KTAiConversation.create({ services: { async plan() { const p = clone(SR.OLD_S10_PLAN); return { plan: p, ctx: { facts: [] }, review: R.review({ plan: p, ...INPUTS }), turn: null }; }, revisionModes: () => ['full'], conversationFeatures: () => [], async ask() { return { ok: true, answer: { answer: 'a', facts: [], analysis: [], recommendations: [], unknowns: [] }, ctx: { facts: [] } }; }, readiness(v) { return { approved: 0, executable: 0, unsupported: 0, blocked: 0, undecided: v.plan.steps.length }; } }, now: () => '2026-10-07T00:00:00.000Z', clock: () => 1000 });
-  await c3.send(SR.OLD_S10_PLAN.goal); await ticks();
-  const v3 = c3.activePlan();
+  //   C-1 第 3 段: 古い流れの「依頼 → すぐ計画」は無いので、Context ペインの「変更計画を作成」と同じ registerPlan で登録する
+  const x3 = makeConvN({ planImpl: () => { throw new Error('計画の AI は呼ばない'); } });
+  const p3 = clone(SR.OLD_S10_PLAN);
+  x3.c.registerPlan({ plan: p3, ctx: { facts: [] }, review: R.review({ plan: p3, ...INPUTS }) }); await ticks();
+  const v3 = x3.c.activePlan();
   assert(v3 && v3.review.requirementTrace && v3.review.requirementTrace.requirements.length === 0 && notInSpec(v3.review).length === 0, '台帳が空なら警告なし（例外にしない）');
 });
 

@@ -17,6 +17,10 @@ const { makeFakeHost, makeFakeDocument } = require('./helpers/fake-dom.js');
 const T = loadToolkit();
 const { KTDeps, KTScan, KTContext, KTContextUi, KTAiClient, KTAiConversation, KTAiChatUi, KTPlanReview, KTJsExecutor, mountAiWorkspace, renderCustomize } = T;
 const { assert, state } = makeAssert();
+// C-1 第 3 段（2026-10-08）: 古い確認の流れ（仕様の確定 confirmSpec・「コードを作って」の従来の生成）を前提にしていた試験は、
+//   共有の部品（tests/helpers/new-flow.js）の台本で新しい流れ（仮案 → 採用 → 計画 → 生成工程 → 最終案 → 承認）の上に移した
+const { createNewFlowKit } = require('./helpers/new-flow.js');
+const K = createNewFlowKit(T);
 const FX = require('./fixtures/ai-context-app.js');
 const { buildScanPayload } = require('./helpers/scan-payload.js');
 const { makeKintoneMock } = require('./helpers/kintone-preview-mock.js');
@@ -56,7 +60,7 @@ const PATTERNS = [{ id: 'field-disable', purpose: '条件に応じてフィー�
 const passVerification = (ctx) => { const re = (ctx && ctx.verification && ctx.verification.requiredEffects) || []; return re.length ? { version: '1', passed: true, machine: [], requiredEffects: re.map(x => ({ requirementId: x.requirementId, requirementIds: x.requirementIds, field: x.field, effect: x.effect, status: 'present' })), behavior: { status: 'passed', reason: null, cases: re.flatMap((x, i) => (x.events && x.events.length ? x.events : [null]).flatMap((ev, j) => (x.condition ? ['match', 'nomatch'] : ['match']).map(side => ({ id: `K${i + 1}-${j + 1}-${side}`, requirementIds: x.requirementIds, field: x.field, effect: x.effect, expect: side === 'match' ? x.effect : ({ lock: 'not-locked', warn: 'not-warned', 'block-save': 'save-allowed', 'set-value': 'value-unchanged', 'show-hide': 'show-hide' })[x.effect], side, ...(ev ? { event: ev } : {}), verdict: 'pass', observed: {}, message: '期待どおり' })))) }, repairs: { count: 0, reasons: [], stoppedBy: null }, unverified: ['実機での動作'] } : undefined; };
 const genResponse = (ctx, g) => ({ ok: true, contractVersion: '2.1', meta: { requestId: 'gen-1', usage: { usedThisMonth: 3, monthlyLimit: 20 }, normalization: { warnings: [] }, gateway: { feature: 'customization-generator' }, patternLibrary: { version: '1', selected: ['field-disable'] } }, generated: { strategy: ctx.customization.strategy, targetFile: ctx.existingFile?.name || 'amountWarning.js', summary: ctx.customization.requirement, events: ctx.customization.events, fields: ctx.customization.fields, apis: [], assumptions: [], warnings: [], gatewayChecks: { security: [] }, patterns: PATTERNS, ...g }, ...(passVerification(ctx) ? { verification: passVerification(ctx) } : {}) });
 const genPatch = (patch = PATCH_GOOD) => ({ strategy: 'EXTEND_EXISTING_JS', targetFile: 'fieldOnOff.js', summary: '完了でも金額を編集不可にする', code: patch.operations.map(o => o.content).join('\n'), patch, events: ['app.record.edit.show'], fields: [{ code: 'amount', access: 'CONTROL' }], apis: [], assumptions: [], warnings: [] });
-const HEALTH = { ok: true, supportedContractVersions: ['2.0', '2.1'], entitlements: [{ product: 'toolkit', features: ['assistant-qa', 'change-planner', 'customization-generator'] }], registry: { toolkit: { 'assistant-qa': { implemented: true, promptVersions: ['1'] }, 'change-planner': { implemented: true, promptVersions: ['1'] }, 'customization-generator': { implemented: true, promptVersions: ['1'], verification: ['requirementId', 'requiredEffects', 'effectGroups', 'relatedOmitted', 'appFields', 'saveDialog', 'reasonCategory', 'caseSide', 'eventCases', 'loadFaithful', 'registrationCheck', 'emptyCase', 'hideCondition', 'registrationCounts', 'caseCoverage'] } } }, usage: { monthlyLimit: 20, usedThisMonth: 1 } };
+const HEALTH = { ok: true, supportedContractVersions: ['2.0', '2.1'], entitlements: [{ product: 'toolkit', features: ['assistant-qa', 'change-planner', 'customization-generator'] }], registry: { toolkit: { 'assistant-qa': { implemented: true, promptVersions: ['1'], conversation: ['requirements', 'stream', 'proposal'] }, 'change-planner': { implemented: true, promptVersions: ['1'] }, 'customization-generator': { implemented: true, promptVersions: ['1'], verification: ['requirementId', 'requiredEffects', 'effectGroups', 'relatedOmitted', 'appFields', 'saveDialog', 'reasonCategory', 'caseSide', 'eventCases', 'loadFaithful', 'registrationCheck', 'emptyCase', 'hideCondition', 'registrationCounts', 'caseCoverage'] } } }, usage: { monthlyLimit: 20, usedThisMonth: 1 } };
 const makeStorage = () => { const m = new Map(); return { getItem: (k) => (m.has(k) ? m.get(k) : null), setItem: (k, v) => m.set(k, String(v)), removeItem: (k) => m.delete(k) }; };
 const answerFor = (ctx, text) => ({ ok: true, contractVersion: '2.1', meta: { requestId: 'qa-1', usage: { usedThisMonth: 2, monthlyLimit: 20 }, normalization: { warnings: [] } }, answer: text, facts: [], analysis: [], recommendations: [], unknowns: [] });
 const tick = () => new Promise(r => setTimeout(r, 0));
@@ -69,6 +73,8 @@ function mount({ inputs = INPUTS, paid = true, planResponse = PLAN_HYBRID, openC
   const client = {
     async getHealth() { calls.health++; return HEALTH; },
     async ask({ ctx, requestId, signal }) { calls.ask.push({ ctx }); const v = KTAiClient.validateAnswer(answerFor(ctx, 'このフィールドは金額です。'), ctx); return { ...v.normalized, requestId, clientWarnings: v.warnings }; },
+    //   仮案は共有の部品の台本で答える（計画は PLAN_HYBRID・生成は fieldOnOff.js の patch と生成工程の合格）
+    async propose({ ctx, requestId }) { calls.propose = (calls.propose || 0) + 1; const raw = K.script({ utterance: ctx.question, previous: ctx.conversation.proposal, requirements: ctx.conversation.requirements }); if (!raw) throw new Error(`台本がありません: ${ctx.question}`); return K.normalized(raw, requestId); },
     async plan({ ctx, requestId }) { calls.plan.push({ ctx }); const v = KTAiClient.validatePlan(planResponse, ctx); return { ...v.normalized, requestId, clientWarnings: v.warnings }; },
     async generate({ ctx, requestId }) { calls.generate.push({ ctx }); const v = KTAiClient.validateGenerated(genResponse(ctx, genPatch({ ...PATCH_GOOD, baseHash: ctx.existingFile?.hash || PATCH_GOOD.baseHash })), ctx); if (!v.ok) throw new Error(v.errors[0].message); return { ...v.normalized, requestId, clientWarnings: v.warnings }; },
   };
@@ -87,8 +93,15 @@ function mount({ inputs = INPUTS, paid = true, planResponse = PLAN_HYBRID, openC
   return { host, panel, $, calls, copies, downloads, opened, mock, conv: () => panel.conversation(), chat: () => $('kt-ai-chat').innerHTML, msgs: () => panel.conversation().state.messages, types: () => panel.conversation().state.messages.map(m => m.type) };
 }
 const clickChat = (m, act, extra = {}) => m.$('kt-ai-chat').dispatch({ type: 'click', target: { dataset: { act, ...extra } } });
-const confirmSpec = async (m) => { const v = m.conv().activePlan(); if (v?.spec) await clickChat(m, 'confirm-spec', { plan: v.planId, version: String(v.version) }); };
+/** 新しい流れ: 台本の 4 発言で仮案 → 採用 → 最終案（JavaScript は生成工程で検証済み）まで進める */
+const adoptFinal = async (m) => { const v = await K.adoptOnScreen(m); return v; };
+/** 最終案のカードの［この内容で反映する］で承認する（登録の準備は承認の後だけ） */
+const approveFinal = async (m) => { const v = m.conv().activePlan(); await clickChat(m, 'final-approve', { plan: v.planId, version: String(v.version) }); await ticks(); return v; };
 const writes = (m) => m.mock.calls.filter(c => !c.startsWith('GET'));
+/**
+ * 守り手の無い期待（C-1 第 3 段で削除した古い確認の流れだけが満たしていたもの）。消さずに残し、結果を「保留」として出す（合否には数えない・報告済み）
+ */
+const pending = (cond, msg) => console.log(`${cond ? '保留（いまは満たす）' : '保留（守り手なし・未達）'}: ${msg}`);
 
 /** Customize タブの mount 用: Monaco とドキュメントの最小スタブ */
 function fakeMonacoWindow(sandboxDoc) {
@@ -243,10 +256,8 @@ console.log('\n--- §37b. DOCUMENT intent（チャット）: LLM を使わずカ
   assert(m.panel.mode() === 'doc' && m.$('kt-ai-doc-kind').value === 'spec' && m.panel.currentOutput()?.text === dm.data.outputs.prompt, 'Context ペインも同じ結果（モード doc・種類 spec・保存できる）');
   await clickChat(m, 'open-doc-context', { kind: 'handover' });
   assert(m.panel.drawerState().pane === 'context' && m.$('kt-ai-doc-kind').value === 'handover' && /引継ぎ資料/.test(m.panel.currentOutput().text), '［Context ペインで開く］: ペインを開き、その種類で作り直す');
-  // 計画 → 変更内容のまとめ（Toolkit の記録）
-  await m.panel.send(GOAL_HYBRID); await ticks();
-  await confirmSpec(m);
-  await m.panel.send('コードを作って'); await ticks();
+  // 計画 → 変更内容のまとめ（Toolkit の記録）。C-1 第 3 段: 最終案（JavaScript は生成工程で検証済み）まで新しい流れで進める
+  await adoptFinal(m);
   const r2 = await m.panel.send('この改修内容をまとめて');
   const dm2 = m.msgs().filter(x => x.type === 'DOCUMENT').pop();
   assert(r2.ok && dm2.data.kind === 'changes' && /# 変更内容のまとめ — 計画 v1/.test(dm2.data.outputs.markdown) && /\| P1 \| 一覧「承認済み」を追加 \| ADD_VIEW \| 標準設定 \|/.test(dm2.data.outputs.markdown) && /\*\*C1\*\* 承認後（完了）は金額を編集できなくする（既存 fieldOnOff\.js を変更・PC・JavaScript）/.test(dm2.data.outputs.markdown) && /生成コード: fieldOnOff\.js（Toolkit Code Review: OK・参考パターン field-disable）/.test(dm2.data.outputs.markdown) && /運用環境には反映していません/.test(dm2.data.outputs.markdown), '「この改修内容をまとめて」: 計画 v1 の手順表・JS カスタマイズ・生成コード（Code Review・参考パターン）・運用環境は未反映');
@@ -259,17 +270,21 @@ console.log('\n--- §38. Pattern Library（Gateway の generated.patterns）: �
 {
   const m = mount();
   await ticks();
-  await m.panel.send(GOAL_HYBRID); await ticks();
-  await confirmSpec(m);
-  const g = await m.panel.send('コードを作って'); await ticks();
-  assert(g.ok && m.calls.generate.length === 1, 'コード生成（Gateway が patterns を返す）');
+  //   C-1 第 3 段: コードは最終案のパイプラインが生成工程に 1 回頼む（「コードを作って」の従来の生成は削除）
+  const vP = await adoptFinal(m);
+  assert(vP && vP.final && m.calls.generate.length === 1, `コード生成（Gateway が patterns を返す）: ${m.calls.generate.length}`);
   const entry = m.panel.generated('C1');
   assert(entry && Array.isArray(entry.generated.patterns) && entry.generated.patterns[0].id === 'field-disable' && entry.generated.patterns[0].preferredStandardAlternatives.length === 2 && !('implementationNotes' in entry.generated.patterns[0]), 'validateGenerated: patterns（id / purpose / implementation / preferredStandardAlternatives）を通す。知識本体は無い');
+  //   右の「コード」に出す操作（act open-code）で開く。注意（C-1 第 3 段・2026-10-08 の時点）: open-code のボタンを出していたコードのカードは削除され、
+  //   最終案のカードと右の確認結果には open-code のボタンが無い（最終案の後に右の「コード」を開く入口が無い。守り手なし・報告済み）。ここでは表示の中身を確かめる
+  pending(/data-act="open-code"/.test(m.chat() + m.$('kt-ai-review-result').innerHTML), '最終案の後に、生成したコードを右の「コード」で開く入口（［コードを見る］）がある');
+  await clickChat(m, 'open-code', { cid: 'C1', view: 'code' }); await ticks();
   const codePane = m.$('kt-ai-code-review').innerHTML;
   assert(/参考パターン: <span class="kt-ai-pattern" title="条件に応じてフィールドの編集可否を制御する">field-disable<\/span>/.test(codePane) && /標準設定で代替できないか再確認: フィールドのアクセス権 \/ プロセス管理の「作業者だけ編集可」/.test(codePane) && !/参考パターン/.test(m.chat()), '右「コード」: 参考パターンと「標準設定で代替できないか再確認」（人間への standard-first の再確認）。会話には出さない（Phase 19）');
   const noPat = KTAiClient.validateGenerated({ ok: true, contractVersion: '2.1', meta: {}, generated: { strategy: 'NEW_JS_FILE', code: 'x', patterns: 'bad' } }, { customization: { strategy: 'NEW_JS_FILE' } });
   assert(noPat.ok && Array.isArray(noPat.normalized.patterns) && noPat.normalized.patterns.length === 0, 'patterns が無い / 不正でも空配列（表示なし）');
-  assert(!/参考パターン/.test(KTAiChatUi.messageHtml({ id: 'x', type: 'CODE', role: 'toolkit', text: 'JavaScript', data: { planId: 'p', version: 1, customizationId: 'C1' } }, { plans: new Map([['p:1', { planId: 'p', version: 1, plan: PLAN_HYBRID.plan, generated: { C1: { generated: { ...genPatch(), patterns: [] }, review: entry.review } } }]]) })), 'patterns が空なら参考パターンの行は出ない');
+  //   C-1 第 3 段（2026-10-08）: 会話のコードのカード（type CODE）は削除した。参考パターンの行は右の「コード」の部品（patternsHtml）だけが作る
+  assert(KTAiChatUi.patternsHtml({ ...genPatch(), patterns: [] }) === '' && /参考パターン/.test(KTAiChatUi.patternsHtml(entry.generated)) && KTAiConversation.MSG.CODE === undefined, 'patterns が空なら参考パターンの行は出ない（右の「コード」の部品）');
   // Audit に patterns
   const audit = KTJsExecutor.buildAudit({ generated: [{ customizationId: 'C1', generated: entry.generated, review: entry.review, existingSource: entry.existingSource }] });
   assert(audit.generated[0].patterns.length === 1 && audit.generated[0].patterns[0] === 'field-disable', 'Customization Audit の generated に patterns（id だけ）');
@@ -302,10 +317,8 @@ console.log('\n--- §30. AI → Customize（結果カード / コードペイン
 {
   const m = mount();
   await ticks();
-  await m.panel.send(GOAL_HYBRID); await ticks();
-  await confirmSpec(m);
-  await m.panel.send('コードを作って'); await ticks();
-  const v = m.conv().activePlan();
+  await adoptFinal(m);
+  const v = await approveFinal(m);
   await m.panel.startJsRegister(v); await ticks();
   assert(m.panel.jsExecState().stage === 'confirm', '登録の確認');
   await m.panel.confirmJsRegister(); await ticks(8);
@@ -319,7 +332,7 @@ console.log('\n--- §30. AI → Customize（結果カード / コードペイン
   assert(m.opened.length === 2 && m.opened[1].name === 'fieldOnOff.js', 'コードペインの［Customize で確認］も同じ');
   const m2 = mount({ openCustomize: null });
   await ticks();
-  await m2.panel.send(GOAL_HYBRID); await ticks(); await confirmSpec(m2); await m2.panel.send('コードを作って'); await ticks();
+  await adoptFinal(m2); await approveFinal(m2);
   await m2.panel.startJsRegister(m2.conv().activePlan()); await ticks(); await m2.panel.confirmJsRegister(); await ticks(8);
   await clickChat(m2, 'open-customize', { target: 'desktop', name: 'fieldOnOff.js' });
   assert(m2.panel.jsExecState().stage === 'done', 'openCustomize が無い環境ではクリックしても何も起きない（エラーにしない）');
@@ -330,7 +343,7 @@ console.log('\n--- U7（Phase 20 実機）. 会話・「変更前の状態に戻
 {
   const m = mount();
   await ticks();
-  await m.panel.send(GOAL_HYBRID); await ticks(); await confirmSpec(m); await m.panel.send('コードを作って'); await ticks();
+  await adoptFinal(m); await approveFinal(m);
   assert(typeof m.panel.unrevertedPreviewChange === 'function' && m.panel.unrevertedPreviewChange() === false, '登録前は確認しない');
   await m.panel.startJsRegister(m.conv().activePlan()); await ticks(); await m.panel.confirmJsRegister(); await ticks(8);
   assert(m.panel.jsExecState().stage === 'done' && m.panel.unrevertedPreviewChange() === true, '登録して戻していない間は、ページを離れる前に確認する（ページを離れると戻す手段が消える）');

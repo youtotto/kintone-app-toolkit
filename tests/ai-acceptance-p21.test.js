@@ -7,12 +7,18 @@
 //   G3 取得の失敗を「設定なし」「変更なし」と読まない。動作テスト環境が取れなければ計画・生成を止める（運用環境の設定で代わりに進めない）。
 //      質問は運用環境の設定で答え、そのことを Context に入れる
 //   G4 反映の直前: 計画を作った時点の動作テスト環境と今を内容で比べる（運用環境の revision の差では止めない・別の操作で入った変更は止める）
+//   C-1 第 3 段（2026-10-08）: 会話・画面の節は新しい流れ（依頼 → 仮案 → 採用 → 計画 → 生成 → 最終案 → 承認 → 反映の準備）の上で確かめる。
+//      置き換えた古い確認の流れ（仕様の確定・「C1 のコードを作って」で作る従来の生成）は使わない（JavaScript は最終案のパイプラインが作る）
 //
 // 実行方法: node tests/ai-acceptance-p21.test.js（KT_SRC=<別ビルド> で修正前の版に対して走らせると RED になる）
 'use strict';
 const { loadToolkit, makeAssert } = require('./helpers/load-toolkit.js');
 const { makeFakeHost } = require('./helpers/fake-dom.js');
-const { KTDeps, KTScan, KTDevBase, KTContext, KTAiClient, KTAiConversation, KTPlanReview, KTPlanExecutor, KTCodeReview, KTJsExecutor, mountAiWorkspace } = loadToolkit();
+const T = loadToolkit();
+const { KTDeps, KTScan, KTDevBase, KTContext, KTAiClient, KTAiConversation, KTPlanReview, KTPlanExecutor, KTCodeReview, KTJsExecutor, mountAiWorkspace } = T;
+// C-1 第 3 段（2026-10-08）: 新しい流れの共有の部品（仮案の応答の正規化・生成工程の能力の印）
+const { createNewFlowKit } = require('./helpers/new-flow.js');
+const K = createNewFlowKit(T);
 const { assert, state } = makeAssert();
 const FX = require('./fixtures/ai-context-app.js');
 const { makeKintoneMock } = require('./helpers/kintone-preview-mock.js');
@@ -24,6 +30,22 @@ const step = (id, actionType, targetKind, targetRef, sp = {}, extra = {}) => ({ 
 const pf = (temporaryId, label, suggestedCode, type, extra = {}) => ({ temporaryId, label, suggestedCode, type, typeValid: true, required: false, options: [], reason: '', evidenceIds: [], alternativeExistingFieldCode: null, codeConflict: false, labelDuplicate: false, ...extra });
 const plan = (steps, proposedFields = [], extra = {}) => ({ planVersion: '1', requestId: 'tk-p21', goal: 'g', assessment: { summary: '' }, relevantFields: [], proposedFields, steps, alternatives: [], impact: [], questions: [], unknowns: [], planConfidence: 'INFERRED', solution: 'STANDARD', customizations: [], ...extra });
 const tick = async (n = 6) => { for (let i = 0; i < n; i++) await new Promise(r => setTimeout(r, 0)); };
+// ---- C-1 第 3 段（2026-10-08）: 新しい流れ（依頼 → 仮案 →「これで進めて」で採用 → 最終案）を通す部品 ----
+/** 仮案の台本: 依頼の文を実現する動作にした仮案（判断・要件は無い。採用まで 1 往復） */
+const draftRaw = (u) => ({ reply: `「${u}」を実現する変更案にできます。`, intent: 'propose', proposal: { behaviors: [{ text: u, origin: 'user' }], assumptions: [], decisions: [], approach: { standard: [], js: ['JavaScript で実現する'] }, cannot: [] }, turn: { ops: [], answers: [], requirementOps: [] } });
+/** 画面の接続先に仮案の能力（health の conversation の proposal と client.propose）と、生成工程の能力の印を足す */
+const withProposal = (health, client) => {
+  health.registry.toolkit['assistant-qa'].conversation = ['requirements', 'stream', 'proposal'];
+  if (!health.registry.toolkit['customization-generator'].verification) health.registry.toolkit['customization-generator'].verification = ['requirementId', ...K.GEN_EFFECT_FEATURES];
+  client.propose = async ({ ctx, requestId, onText }) => { const raw = draftRaw(ctx.question); if (typeof onText === 'function') onText(raw.reply); return K.normalized(raw, requestId); };
+  return client;
+};
+/** 画面: 依頼 → 仮案 →「これで進めて」で採用 → 最終案（最初の計画と JavaScript の生成・検証） */
+const planOnScreen = async (panel, goal) => { await panel.send(goal); await tick(10); await panel.send('これで進めて'); await tick(16); return panel.conversation().activePlan(); };
+/** 画面: 最終案のカードの［この内容で反映する］で承認する */
+const approveOnScreen = async (host, panel) => { const v = panel.conversation().activePlan(); await host.querySelector('#kt-ai-chat').dispatch({ type: 'click', target: { dataset: { act: 'final-approve', plan: v.planId, version: String(v.version) } } }); await tick(4); return !!(v.approval && panel.conversation().approvalValid().ok); };
+/** 会話コントローラ: 依頼 → 仮案 →「これで進めて」で採用 → 最初の計画 */
+const startPlan = async (c, goal) => { await c.send(goal); return c.send('これで進めて'); };
 
 // ---- 場面: 動作テスト環境に「フィールド追加・一覧追加・JS の変更と追加」が入っている（運用環境は元のまま）。ページを再読み込みした後 ----
 const LOCK_V1 = [
@@ -159,9 +181,13 @@ console.log('\n--- G1 / G2 / G3（画面）. 再読み込みした後の新し�
     async generate({ ctx, requestId }) {
       genCalls.push(ctx);
       const anchor = "      event.record['discount_rate'].disabled = true;";
-      return { requestId, strategy: 'EXTEND_EXISTING_JS', targetFile: 'dealLock.js', summary: '値引率の上限チェックを追加', code: '', patch: { baseHash: ctx.existingFile.hash, operations: [{ type: 'INSERT_AFTER', anchor: "  });", content: "\n  kintone.events.on(['app.record.edit.submit'], function (event) {\n    if (Number(event.record['discount_rate'].value || 0) > 30) event.error = '値引率は 30% までです';\n    return event;\n  });" }] }, events: ['app.record.edit.submit'], fields: [{ code: 'discount_rate', access: 'READ' }], apis: [], assumptions: [], warnings: [], gatewayChecks: {} , _anchorUsed: anchor };
+      return { requestId, strategy: 'EXTEND_EXISTING_JS', targetFile: 'dealLock.js', summary: '値引率の上限チェックを追加', code: '', patch: { baseHash: ctx.existingFile.hash, operations: [{ type: 'INSERT_AFTER', anchor: "  });", content: "\n  kintone.events.on(['app.record.edit.submit'], function (event) {\n    if (Number(event.record['discount_rate'].value || 0) > 30) event.error = '値引率は 30% までです';\n    return event;\n  });" }] }, events: ['app.record.edit.submit'], fields: [{ code: 'discount_rate', access: 'READ' }], apis: [], assumptions: [], warnings: [], gatewayChecks: {} , _anchorUsed: anchor,
+        //   C-1 第 3 段: 生成工程の機械検査で止まった候補にする（検証済みにならないので、後の「C1 のコードを作って」は作り直しの対象になる。
+        //   基準が取れないときに、その作り直しで生成工程を呼ばないことを確かめるため）
+        verification: { version: '1', passed: false, machine: [{ name: 'syntax', ok: false, severity: 'block', message: '構文エラー（テスト）' }], requiredEffects: [], behavior: { status: 'not-run', reason: null, cases: [] }, repairs: { count: 0, reasons: [], stoppedBy: null }, unverified: [] } };
     },
   };
+  withProposal(HEALTH, client);   // C-1 第 3 段: 仮案の能力がある接続先（無い接続先は「接続先が非対応」で計画・生成に進まない）
   const session = { status() { return { connected: true, apiBase: 'https://gw.test', refreshExpiresAt: '2099-01-01T00:00:00Z', scope: { product: 'toolkit', feature: 'assistant-qa,change-planner,customization-generator', domain: 't.cybozu.com' } }; }, async migrateLegacy() { return false; }, async refresh() { return {}; }, async disconnect() { return { revoked: true }; }, client };
   const flow = { start: async () => ({}), cancel() { }, reopen: () => false, state: () => ({ phase: 'idle' }), isRunning: () => false };
   let loaderMode = 'ok', loads = 0;
@@ -184,16 +210,16 @@ console.log('\n--- G1 / G2 / G3（画面）. 再読み込みした後の新し�
   const qctx = askCalls[askCalls.length - 1];
   assert(qctx && qctx.facts.some(f => f.key === 'ENV:base' && /動作テスト環境/.test(f.statement)) && qctx.facts.filter(f => f.kind === 'env-diff').length === 4, '質問: 作業の基準と差（4 件）を Context に入れて AI に渡す');
   // 追加したフィールドを指定して入力チェックを依頼 → 計画の Context は動作テスト環境
+  //   C-1 第 3 段: 依頼 → 仮案 → 採用で計画を作る（JavaScript は最終案のパイプラインが続けて作る）
   const before = loads;
-  await panel.send('値引率に入力チェックを追加したい');
+  await planOnScreen(panel, '値引率に入力チェックを追加したい');
   const pctx = planCalls[planCalls.length - 1];
   assert(loads > before, '計画の前に作業の基準を取り直す（別の操作で入った変更も拾う）');
   assert(pctx && pctx.dictionary.fieldCodes.includes('discount_rate') && pctx.facts.some(f => f.kind === 'field' && f.field.code === 'discount_rate' && /動作テスト環境にだけある/.test(f.statement)), '計画: 値引率は存在する（動作テスト環境にだけある）として AI に渡す');
   const v = panel.conversation().activePlan();
   assert(v && v.review && v.review.base && v.review.base.env === 'preview' && v.review.base.revision.preview === '12' && v.review.base.fingerprint === KTDevBase.fingerprint(panel.devBase()), '計画の Review に基準（動作テスト環境・revision・指紋）を残す');
-  // コード生成: 統合先の本文は動作テスト環境の本文（運用環境の本文でも、相談時の古い本文でもない）。仕様を確定してから生成する
-  await panel.confirmSpec(v.planId, v.version);
-  await panel.send('C1 のコードを作って');
+  // コード生成: 統合先の本文は動作テスト環境の本文（運用環境の本文でも、相談時の古い本文でもない）。
+  //   C-1 第 3 段: 仕様の確定と「C1 のコードを作って」は無くなり、最終案を作るときに生成する（tests/ai-flow-redesign.test.js の F7）
   const gctx = genCalls[genCalls.length - 1];
   assert(gctx && gctx.existingFile && gctx.existingFile.source === LOCK_V2 && gctx.existingFile.hash === KTScan.hashText(LOCK_V2) && !gctx.existingFile.source.includes('（運用環境）'), '生成: 統合先 dealLock.js の本文は動作テスト環境の版（値引率のロックを含む）');
   const ge = panel.generated('C1');
@@ -466,6 +492,7 @@ console.log('\n--- G7（画面）. 古い版からは登録しない・確認の
     async plan({ ctx, requestId }) { const v = KTAiClient.validatePlan(planResp(ctx.goal), ctx); if (!v.ok) throw new Error(JSON.stringify(v.errors)); return { ...v.normalized, requestId, clientWarnings: v.warnings }; },
     async generate({ ctx, requestId }) { return { requestId, strategy: 'NEW_JS_FILE', targetFile: 'lock.js', summary: '承認済みで金額を編集不可', code: CODE, patch: null, events: ['app.record.edit.show'], fields: [{ code: 'amount', access: 'CONTROL' }], apis: ['kintone.api'], assumptions: [], warnings: [], gatewayChecks: {}, ...(passVerification(ctx) ? { verification: passVerification(ctx) } : {}) }; },
   };
+  withProposal(HEALTH, client);   // C-1 第 3 段: 仮案の能力がある接続先
   const session = { status() { return { connected: true, apiBase: 'https://gw.test', refreshExpiresAt: '2099-01-01T00:00:00Z', scope: { product: 'toolkit', feature: 'assistant-qa,change-planner,customization-generator', domain: 't.cybozu.com' } }; }, async migrateLegacy() { return false; }, async refresh() { return {}; }, async disconnect() { return { revoked: true }; }, client };
   const flow = { start: async () => ({}), cancel() { }, reopen: () => false, state: () => ({ phase: 'idle' }), isRunning: () => false };
   const host = makeFakeHost();
@@ -476,26 +503,35 @@ console.log('\n--- G7（画面）. 古い版からは登録しない・確認の
   const scanG7 = (() => { const { buildScanPayload } = require('./helpers/scan-payload.js'); const fieldRows = KTDeps.normalizeFields(REG.data.fields).map(f => ({ code: f.code, label: f.label, type: f.rawType })); const sc = buildScanPayload({ KTScan, KTDeps }, { appId: FX.SELF_APP, files: FX.files, fields: fieldRows, deps, skippedUrlFiles: FX.skippedUrlFiles }); sc.results = KTScan.analyze({ fields: fieldRows, files: FX.files.filter(f => f.kind === 'js'), snippet: { before: 24, after: 48 } }); return sc; })();
   const panel = mountAiWorkspace(host, { getInputs: () => ({ data: REG.data, deps, scan: scanG7, incoming: null }), copyText: async () => true, downloadText: () => { }, colors: { border: '#ccc', bg: '#fff' }, settings, session, hostname: 't.cybozu.com', connectFlow: flow, executor: { api: mock.api, appId: '310' } });
   await tick(8);
-  await panel.send('承認済みでは金額を編集できなくしたい');
-  const v1 = panel.conversation().activePlan();
-  await panel.confirmSpec(v1.planId, v1.version);
-  await panel.send('C1 のコードを作って');
+  //   C-1 第 3 段: 依頼 → 仮案 → 採用 → 最終案（JavaScript は最終案のパイプラインが作る。仕様の確定と「C1 のコードを作って」は無い）→ 承認
+  const v1 = await planOnScreen(panel, '承認済みでは金額を編集できなくしたい');
   const g1 = panel.generated('C1');
   assert(g1 && g1.review.registration.verdict === 'NEEDS_CONFIRMATION', '前提: 生成したコードは「確認が必要」（他アプリの読み取り）');
+  const ok1 = await approveOnScreen(host, panel);
+  assert(ok1 && v1.final && v1.final.approvable, `前提: 最終案（v1）を承認した: ${v1.final && v1.final.blockingReason}`);
   // 計画を修正して新しい版ができた後に、古い版のカードから登録しようとする
-  await panel.send('承認待ちでも金額を編集不可にして', { intent: KTAiConversation.INTENT.REVISE_PLAN });
+  await panel.send('承認待ちでも金額を編集不可にして', { intent: KTAiConversation.INTENT.REVISE_PLAN }); await tick(16);
   const v2 = panel.conversation().activePlan();
-  assert(v2 !== v1 && v2.version > v1.version, '前提: 計画が新しい版になった');
+  assert(v2 !== v1 && v2.version > v1.version && v2.final && !v2.approval, '前提: 計画が新しい版になった（前の版の承認は新しい版に引き継がない）');
   await panel.startJsRegister(v1);
-  assert(panel.jsExecState().stage === 'blocked' && panel.jsExecState().prepared.blockers.some(b => b.code === 'NOT_LATEST_VERSION') && !mock.calls.some(x => x === 'PUT customize'), '古い版（v1）のカードからは登録しない（NOT_LATEST_VERSION）');
-  // 最新の版で生成して登録の確認へ: 確認の項目を 1 件ずつチェックするまで登録ボタンは押せない・押しても登録しない
-  await panel.confirmSpec(v2.planId, v2.version);
-  await panel.send('C1 のコードを作って');
+  assert(panel.jsExecState().stage === 'blocked' && panel.jsExecState().prepared.blockers.some(b => b.code === 'APPROVAL_REQUIRED') && !mock.calls.some(x => x === 'PUT customize'), `最新の版（v2）を承認する前は、古い版（v1）の承認では登録しない（APPROVAL_REQUIRED）: ${JSON.stringify(panel.jsExecState().prepared && panel.jsExecState().prepared.blockers.map(b => b.code))}`);
+  //   最新の版（最終案のパイプラインで生成済み）を承認しても、古い版（v1）のカードからは登録しない
+  const ok2 = await approveOnScreen(host, panel);
+  assert(ok2, '前提: 最新の版（v2）の最終案を承認した');
+  await panel.startJsRegister(v1);
+  assert(panel.jsExecState().stage === 'blocked' && panel.jsExecState().prepared.blockers.some(b => b.code === 'NOT_LATEST_VERSION') && !mock.calls.some(x => x === 'PUT customize'), `古い版（v1）のカードからは登録しない（NOT_LATEST_VERSION）: ${JSON.stringify(panel.jsExecState().prepared && panel.jsExecState().prepared.blockers.map(b => b.code))}`);
+  // 最新の版で登録の確認へ: 確認の項目を 1 件ずつチェックするまで登録ボタンは押せない・押しても登録しない
+  //   C-1 第 3 段: 最終案のカードで示して承認した確認の項目（承認の confirmations に記録した code）は、承認で確認済みとしてチェック済みで出る
+  //   （段階 C の R21・正しさ C2。tests/ai-flow-redesign.test.js の「正しさ C2」）。チェックを外すと押せず、押しても登録しない（Executor が止める）ことは変わらない
   await panel.startJsRegister(panel.conversation().activePlan());
   await tick(4);
   const jx = panel.jsExecState();
   const paneHtml = () => host.querySelector('#kt-ai-jsreg').innerHTML;
-  assert(jx.stage === 'confirm' && jx.prepared.confirmations.length >= 1 && /登録の前に確認が必要な項目/.test(paneHtml()) && /class="kt-ai-jsreg-ack"/.test(paneHtml()) && /id="kt-ai-jsreg-go"[^>]*disabled/.test(paneHtml()) && /動作は未確認/.test(paneHtml()), '確認画面: 確認が必要な項目（チェック欄）・動作は未確認・すべて確認するまで登録ボタンは無効');
+  const vA = panel.conversation().activePlan();
+  const seenC1 = (vA.approval && vA.approval.confirmations && vA.approval.confirmations.C1) || [];
+  assert(jx.stage === 'confirm' && jx.prepared.confirmations.length >= 1 && jx.prepared.confirmations.every(x => seenC1.includes(x.code)) && /登録の前に確認が必要な項目/.test(paneHtml()) && (paneHtml().match(/class="kt-ai-jsreg-ack"[^>]*checked/g) || []).length === jx.prepared.confirmations.length && /動作は未確認/.test(paneHtml()), '確認画面: 確認が必要な項目（チェック欄）・動作は未確認。最終案で示して承認した項目は承認で確認済み（チェック済み）');
+  for (const x of jx.prepared.confirmations) await host.querySelector('#kt-ai-pane-exec').dispatch({ type: 'change', target: { dataset: { ackKey: x.key }, checked: false } });
+  assert(/id="kt-ai-jsreg-go"[^>]*disabled/.test(paneHtml()), '確認画面: チェックを外すと、すべて確認するまで登録ボタンは無効');
   await panel.confirmJsRegister();
   assert(panel.jsExecState().stage === 'confirm' && !mock.calls.some(x => x === 'PUT customize') && /確認していないため、登録していません/.test(paneHtml()), '確認せずに登録を押しても登録しない（Executor が止める）');
   for (const x of panel.jsExecState().prepared.confirmations) await host.querySelector('#kt-ai-pane-exec').dispatch({ type: 'change', target: { dataset: { ackKey: x.key }, checked: true } });
@@ -581,9 +617,10 @@ console.log('\n--- G9 / G10. Generator Context の欠落（モデル比較の候
 {
   // §2 の実機（続き）: JS を登録したら計画は「反映済み」（標準設定の手順が無く、カスタマイズをすべて生成して登録したとき）。次の依頼は新しい計画
   const mkPlan = (custs) => plan([], [], { solution: 'CUSTOMIZATION', customizations: custs.map(id => ({ customizationId: id, requirement: 'r', strategy: 'NEW_JS_FILE', platform: ['desktop'], events: [], fields: [], apis: [], existingFiles: [] })) });
-  const svc = (p) => ({ async plan() { return { plan: p, ctx: null, review: null }; }, async ask() { return { ok: true, answer: { answer: 'a' } }; } });
+  //   C-1 第 3 段: 仮案の能力がある接続先で、依頼 → 仮案 → 採用で計画を作る（生成の services は無いので、生成の結果は手で置く）
+  const svc = (p) => ({ conversationFeatures: () => ['requirements', 'stream', 'proposal'], async propose(args) { return { ok: true, proposal: K.normalized(draftRaw(args.utterance)), ctx: { facts: [] } }; }, async plan() { return { plan: clone(p), ctx: null, review: null }; }, async ask() { return { ok: true, answer: { answer: 'a' } }; } });
   const one = KTAiConversation.create({ services: svc(mkPlan(['C1'])) });
-  await one.send('紹介元を顧客区分で切り替えて表示したい');
+  await startPlan(one, '紹介元を顧客区分で切り替えて表示したい');
   const v1 = one.activePlan(); v1.generated = { C1: { generated: { strategy: 'NEW_JS_FILE' } } };
   one.noteJsExecution({ stage: 'running', execution: { executionId: 'jx1', status: 'RUNNING', put: null } });
   one.noteJsExecution({ stage: 'done', execution: { executionId: 'jx1', status: 'DONE', put: { ok: true } } });
@@ -591,7 +628,7 @@ console.log('\n--- G9 / G10. Generator Context の欠落（モデル比較の候
   const next = KTAiConversation.classifyIntent('顧客区分を既存に変えたら紹介元を空にして', { activePlan: { ...v1, plan: { ...v1.plan, proposedFields: [{ temporaryId: 'NEW_FIELD_1', label: '紹介元', suggestedCode: 'referral_source' }] } } });
   assert(next.intent === KTAiConversation.INTENT.PLAN, `登録の後の依頼は新しい計画（登録済みのカスタマイズを含む見直しにしない）: ${next.intent}/${next.reason}`);
   const two = KTAiConversation.create({ services: svc(mkPlan(['C1', 'C2'])) });
-  await two.send('紹介元を顧客区分で切り替えて表示したい');
+  await startPlan(two, '紹介元を顧客区分で切り替えて表示したい');
   const v2 = two.activePlan(); v2.generated = { C1: { generated: { strategy: 'NEW_JS_FILE' } } };
   two.noteJsExecution({ stage: 'running', execution: { executionId: 'jx2', status: 'RUNNING', put: null } });
   two.noteJsExecution({ stage: 'done', execution: { executionId: 'jx2', status: 'DONE', put: { ok: true } } });

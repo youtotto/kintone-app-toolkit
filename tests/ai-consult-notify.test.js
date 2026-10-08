@@ -12,6 +12,7 @@
 process.on('unhandledRejection', (e) => { if (/kintone is not defined/.test(String(e && e.message))) return; console.error(e); process.exit(1); });
 const { loadToolkit, makeAssert } = require('./helpers/load-toolkit.js');
 const { buildScanPayload } = require('./helpers/scan-payload.js');
+const { createNewFlowKit } = require('./helpers/new-flow.js');
 const T = loadToolkit();
 const { KTDeps, KTScan, KTContext, KTContextUi, KTAiConversation, KTAiAnswers, KTPlanReview, KTAiChatUi } = T;
 const { assert, state } = makeAssert();
@@ -114,33 +115,45 @@ console.log('\n--- D. 「おすすめで」で進める ---');
 const spec = (o) => ({ name: null, from: null, to: null, filterCond: null, assignees: [], targets: [], events: [], timingField: null, daysLater: null, time: null, fields: [], sort: null, sourceApp: null, keyField: null, mappings: [], fieldType: null, required: null, options: [], destApp: null, accessibility: null, entities: [], ...o });
 const step = (id, actionType, targetKind, targetRef, sp = {}) => ({ id, actionType, targetKind, targetRef, targetExists: null, title: `${id} ${actionType}`, proposal: { summary: '', details: [] }, spec: spec(sp), dependsOn: [], reason: '', evidenceIds: [], confidence: 'INFERRED', alternativeId: null, validation: { status: 'ok', issues: [] }, execution: { mode: 'PLAN_ONLY', supported: false, reason: 'x' } });
 const planWith = (questions) => ({ goal: '承認漏れを防ぎたい', solution: 'STANDARD', assessment: { summary: 's', usableExistingFields: [], usableExistingSettings: [], missingCapabilities: [], uncertainties: [] }, relevantFields: [], proposedFields: [], steps: [step('P1', 'ADD_NOTIFICATION', 'NOTIFICATION', '', {})], alternatives: [], impact: [], questions, unknowns: [], planConfidence: 'NEEDS_CONFIRMATION', customizations: [], provisionals: [] });
+//   C-1 第 3 段（2026-10-08）: 古い確認の流れ（依頼 → すぐ計画 → 確認事項のカード）は削除した。会話は新しい流れ（依頼 → 仮案 → 採用 → 最終案）の上で試す。
+//   共有の部品（tests/helpers/new-flow.js の makeConvC。仮案の能力のある偽 services）に、この節の計画（steps）・仮案・相談の答えを差し込む。
+//   start(c) = 依頼「承認漏れを防ぎたい」→ 仮案 →「この内容で進めて」で採用 → 計画（steps の 1 つ目）→ 最終案。確認事項は最終案の後に答える
+const K = createNewFlowKit(T);
+const DRAFT_C = { reply: '承認待ちの案件を通知で知らせる案です。', intent: 'propose', proposal: { behaviors: [{ text: '承認待ちの案件を通知で知らせる', origin: 'user' }], assumptions: [], decisions: [], approach: { standard: ['通知の設定'], js: [] }, cannot: [] }, turn: { ops: [], answers: [], requirementOps: [] } };
 function makeConv(steps, { askResult = null } = {}) {
   const DATA = FX.makeData();
   const DEPS = KTDeps.buildDependencyData(DATA, KTDeps.normalizeFields(DATA.fields));
-  const calls = { plan: [], ask: [] };
-  // ctl.fail = 'TIMEOUT' で次の計画の呼び出しを失敗させる。ctl.hold() で計画の呼び出しを止め、戻り値の関数で再開する（作業中の発言を試す）
-  const ctl = { fail: null, gate: null, hold() { let open; ctl.gate = new Promise(r => { open = r; }); return () => { ctl.gate = null; open(); }; } };
-  const services = {
-    async plan(args) {
-      const n = calls.plan.length; calls.plan.push(JSON.parse(JSON.stringify({ goal: args.goal, revision: args.revision || null, decisions: args.decisions || null })));
-      if (ctl.gate) await ctl.gate;
-      if (ctl.fail) { const f = ctl.fail; ctl.fail = null; const e = new Error(f); e.code = f; throw e; }
-      const p = JSON.parse(JSON.stringify(steps[Math.min(n, steps.length - 1)]));
-      return { plan: p, ctx: { facts: [] }, review: KTPlanReview.review({ plan: p, data: DATA, deps: DEPS, scan: null, incoming: null }), gatewayPlan: { ...p }, revisionMeta: null, turn: null };
-    },
-    revisionModes: () => ['full', 'patch'], conversationFeatures: () => ['requirements'],
-    async ask(args) { calls.ask.push({ question: args.question }); if (ctl.askGate) await ctl.askGate; return askResult || { ok: true, answer: { answer: '承認待ちのときの通知はありません。承認者へ通知するのがおすすめです。', facts: [], analysis: [], recommendations: [{ text: '承認待ちになったら作業者（承認者）へ通知する', evidenceIds: [] }], unknowns: [] }, ctx: { facts: [] } }; },
-    readiness(v) { return { approved: 0, executable: 0, unsupported: 0, blocked: 0, undecided: v.plan.steps.length }; },
+  const calls = { plan: [], ask: [], propose: [] };
+  // ctl.fail = 'TIMEOUT' で次の計画の呼び出しを失敗させる。ctl.proposeFail = true で次の仮案の呼び出しを失敗させる。
+  //   ctl.hold() で計画の呼び出しを止め、戻り値の関数で再開する（作業中の発言を試す）
+  const ctl = { fail: null, proposeFail: false, gate: null, hold() { let open; ctl.gate = new Promise(r => { open = r; }); return () => { ctl.gate = null; open(); }; } };
+  const x = K.makeConvC({ planImpl: async (args) => {
+    const n = calls.plan.length; calls.plan.push(JSON.parse(JSON.stringify({ goal: args.goal, revision: args.revision || null, decisions: args.decisions || null })));
+    if (ctl.gate) await ctl.gate;
+    if (ctl.fail) { const f = ctl.fail; ctl.fail = null; const e = new Error(f); e.code = f; throw e; }
+    const p = JSON.parse(JSON.stringify(steps[Math.min(n, steps.length - 1)]));
+    return { plan: p, ctx: { facts: [] }, review: KTPlanReview.review({ plan: p, data: DATA, deps: DEPS, scan: null, incoming: null }), gatewayPlan: { ...p }, revisionMeta: null, turn: null };
+  } });
+  // 仮案の AI: どの依頼にも同じ仮案（判断なし）を返す。依頼の文を記録する
+  x.services.propose = async (args) => {
+    calls.propose.push({ utterance: args.utterance });
+    if (ctl.proposeFail) { ctl.proposeFail = false; return { ok: false, reason: 'TIMEOUT', message: '仮案を作れませんでした（テスト）' }; }
+    return { ok: true, proposal: K.normalized(DRAFT_C, `pp-${calls.propose.length}`), ctx: { facts: [] }, perf: { baseWaitMs: 0, contextMs: 1, requestMs: 1 } };
   };
-  const c = KTAiConversation.create({ services, now: () => '2026-10-05T00:00:00.000Z', clock: () => 1000 });
-  return { c, calls, ctl, ledger: () => c.state.ledgers.get(c.activePlan().planId) };
+  x.services.ask = async (args) => { calls.ask.push({ question: args.question }); if (ctl.askGate) await ctl.askGate; return askResult || { ok: true, answer: { answer: '承認待ちのときの通知はありません。承認者へ通知するのがおすすめです。', facts: [], analysis: [], recommendations: [{ text: '承認待ちになったら作業者（承認者）へ通知する', evidenceIds: [] }], unknowns: [] }, ctx: { facts: [] } }; };
+  const c = x.c;
+  return { c, calls, ctl, x, ledger: () => c.state.ledgers.get(c.activePlan().planId) };
 }
+/** 依頼 → 仮案 → 採用 → 最終案（計画は steps の 1 つ目） */
+const start = async (c) => { await c.send('承認漏れを防ぎたい'); return c.send('この内容で進めて'); };
+/** 相談の答えへの「おすすめで」: 新しい流れでは、相談の内容とおすすめを依頼の文にして仮案から作る（routeFlow の PROPOSE。理由は NEW_REQUEST_ADOPT_CONSULTATION） */
+const adoptsConsult = (r) => !!r && r.intent === I.PROPOSE && r.reason === 'NEW_REQUEST_ADOPT_CONSULTATION';
 await section(async () => {
   // D1: 計画の確認事項: 推奨のあるものは推奨の案を回答に。推奨の無いもの（業務の判断）は残す
   const qs = [{ id: 'Q1', question: '通知先は誰にしますか？', reason: '', relatedEvidenceIds: [], topic: 'notify_target', recommendation: '承認待ちの作業者（承認者）', options: ['承認者', '部長'], priority: 'blocking' },
     { id: 'Q2', question: '承認されなかった案件はどうしますか？', reason: '', relatedEvidenceIds: [], topic: 'other', recommendation: '', options: [], priority: 'later' }];
   const { c, calls, ledger } = makeConv([planWith(qs), planWith([qs[1]])]);
-  await c.send('承認漏れを防ぎたい');
+  await start(c);
   const cls = c.classify('おすすめで');
   assert(cls.intent === I.ANSWER && cls.reason === 'ADOPT_RECOMMENDATIONS' && cls.adoptItems.length === 1, `D1: 「おすすめで」は推奨のある確認事項への回答: ${cls.intent}/${cls.reason}`);
   assert(c.classify('おすすめでお願いします').reason === 'ADOPT_RECOMMENDATIONS' && c.classify('残りはおまかせで').reason === 'ADOPT_RECOMMENDATIONS', 'D1: 「おすすめでお願いします」「残りはおまかせで」も（反映へ進む言葉にしない）');
@@ -151,19 +164,22 @@ await section(async () => {
   assert(rec && calls.plan.length === 2 && (calls.plan[1].decisions || []).some(d => d.answer === '承認待ちの作業者（承認者）') && (!q2 || !q2.answer), `D1: 推奨の案を回答として記録し、計画の AI に決定事項として渡す。推奨の無い質問は残す: ${JSON.stringify((calls.plan[1].decisions || []).map(d => d.answer))}`);
 });
 await section(async () => {
-  // D2: 相談の答えの後の「おすすめで」: 相談の内容とおすすめで計画を作る
+  // D2: 相談の答えの後の「おすすめで」: 相談の内容とおすすめで変更案を作る。
+  //   C-1 第 3 段（2026-10-08）: 新しい流れでは、相談の内容とおすすめを依頼の文にして仮案から作る（計画の AI を直接呼ばない。仮案 → 採用 → 最終案）
   const { c, calls } = makeConv([planWith([])]);
   await c.send('承認待ちの案件を見落とさないようにするには？');
   assert(calls.ask.length === 1 && c.planHistory().length === 0, '前提: 質問の AI が答える（計画は作らない）');
   const cls = c.classify('おすすめで');
-  assert(cls.intent === I.PLAN && cls.reason === 'ADOPT_CONSULTATION' && /承認待ちの案件を見落とさない/.test(cls.goal) && /作業者（承認者）へ通知する/.test(cls.goal), `D2: 相談の答えの後の「おすすめで」は、相談とおすすめで計画: ${cls.intent}/${cls.reason}`);
-  assert(c.classify('その案でお願いします').reason === 'ADOPT_CONSULTATION', 'D2: 「その案でお願いします」も');
+  assert(adoptsConsult(cls) && /承認待ちの案件を見落とさない/.test(cls.utterance) && /作業者（承認者）へ通知する/.test(cls.utterance), `D2: 相談の答えの後の「おすすめで」は、相談とおすすめで仮案の依頼: ${cls.intent}/${cls.reason}`);
+  assert(adoptsConsult(c.classify('その案でお願いします')), 'D2: 「その案でお願いします」も');
   await c.send('おすすめで');
-  assert(calls.plan.length === 1 && /相談の答えのおすすめで進めたい/.test(calls.plan[0].goal) && c.planHistory().length === 1, `D2: 計画の依頼は相談とおすすめ: ${calls.plan[0] && calls.plan[0].goal}`);
-  // 相談の答えが無いとき（いきなり「おすすめで」）は計画を作らない
+  assert(calls.propose.length === 1 && /相談の答えのおすすめで進めたい/.test(calls.propose[0].utterance) && /見落とさない/.test(calls.propose[0].utterance) && calls.plan.length === 0 && c.draft() && c.draft().status === 'open', `D2: 仮案の依頼は相談とおすすめ（計画はまだ作らない）: ${calls.propose[0] && calls.propose[0].utterance}`);
+  await c.send('この内容で進めて');
+  assert(calls.plan.length === 1 && c.planHistory().length === 1 && c.activePlan().final, `D2: 採用すると計画と最終案を 1 回で作る: ${calls.plan.length}`);
+  // 相談の答えが無いとき（いきなり「おすすめで」）は変更案を作らない
   const k = makeConv([planWith([])]);
   const r = k.c.classify('おすすめで');
-  assert(r.reason !== 'ADOPT_CONSULTATION' && r.intent !== I.PLAN, `D2: 相談の答えが無いときの「おすすめで」は計画にしない: ${r.intent}/${r.reason}`);
+  assert(!adoptsConsult(r) && ![I.PLAN, I.PROPOSE].includes(r.intent), `D2: 相談の答えが無いときの「おすすめで」は変更案にしない: ${r.intent}/${r.reason}`);
 });
 
 await section(async () => {
@@ -172,21 +188,23 @@ await section(async () => {
   const qs = [{ id: 'Q1', question: '「承認待ちのまま何日」は、何を基準に数えますか？', reason: '', relatedEvidenceIds: [], topic: 'status_condition', recommendation: '承認待ちに入ってからの日数（更新日時を基準にする）', options: ['承認待ちに入ってから', '作成日から'], priority: 'blocking' },
     { id: 'Q2', question: '催促の通知先は誰にしますか？', reason: '', relatedEvidenceIds: [], topic: 'notify_target', recommendation: '作業者と申請者の両方', options: ['作業者だけ', '作業者と申請者'], priority: 'blocking' }];
   const { c, calls } = makeConv([planWith(qs), planWith([])]);
-  await c.send('承認漏れを防ぎたい');
+  await start(c);
   const say = '3日で、作業者だけでいいです。数え方はおすすめで';
   const cls = c.classify(say);
   await c.send(say);
   const rev = calls.plan[1] && calls.plan[1].revision;
   const kinds = c.messages().map(m => m.data?.kind || m.type);
-  assert(cls.intent === I.REVISE_PLAN && cls.reason === 'TURN' && !kinds.includes('answer-target') && !c.pendingClarification(), `D3: 確認事項への短い答えは聞き返さず、計画の AI に読ませる: ${cls.intent}/${cls.reason}`);
+  //   C-1 第 3 段: 対応先の確認（pendingClarification）は削除した（聞き返すカード answer-target も無い）
+  assert(cls.intent === I.REVISE_PLAN && cls.reason === 'TURN' && !kinds.includes('answer-target') && c.pendingClarification === undefined, `D3: 確認事項への短い答えは聞き返さず、計画の AI に読ませる: ${cls.intent}/${cls.reason}`);
   // 前回の計画の要約（Gateway に送る previousPlan）に推奨を入れる（以前は id・question・reason だけで、「おすすめで」の中身を計画の AI が読めなかった）
   const cq = KTContext.compactPlan(planWith(qs)).questions;
   assert(rev && (rev.utterances || [rev.request]).some(u => u === say) && cq.length === 2 && /更新日時を基準/.test(cq[0].recommendation || '') && cq[1].recommendation === '作業者と申請者の両方', `D3: 発言は原文のまま・前回の確認事項の要約は推奨つき: ${JSON.stringify(cq)}`);
   assert(!('recommendation' in KTContext.compactPlan(planWith([{ ...qs[0], recommendation: '' }])).questions[0]), 'D3: 推奨の無い確認事項には付けない');
-  // 「はい」「いいえ」だけの答えは、確認事項が複数なら従来どおり回答先を聞く
+  // 「はい」「いいえ」だけの答えは、確認事項が複数なら対応先が決まらない（ANSWER_TARGET_UNCLEAR）。
+  //   C-1 第 3 段: 聞き返すカードは削除し、候補の確認事項を添えて計画の AI に渡す（ai-flow-redesign の F4-1・F4-2）
   const k = makeConv([planWith(qs)]);
-  await k.c.send('承認漏れを防ぎたい');
-  assert(k.c.classify('いいえ').reason === 'ANSWER_TARGET_UNCLEAR', 'D3: 「いいえ」だけは回答先を聞く（文脈からも決められない）');
+  await start(k.c);
+  assert(k.c.classify('いいえ').reason === 'ANSWER_TARGET_UNCLEAR', 'D3: 「いいえ」だけは対応先が決まらない（文脈からも決められない）');
 });
 
 console.log('\n--- R. 差分レビューの指摘（2026-10-05）: 話題の判定・大きさ・関係する JS・伏字・設定の対象・確かめ方・文言 ---');
@@ -365,7 +383,7 @@ await section(async () => {
   // E1: 再確認の質問に「おすすめで」→ 決定事項の変更（前の回答を正として残さない・追加の条件にしない）
   const { c, calls, ledger } = makeConv([planWith([QREC({ question: '承認者は誰にしますか？', topic: 'approver', recommendation: '' })]),
     planWith([QREC({ question: '部長の承認は既存の流れと重なります。承認者は課長にしますか？', topic: 'approver', decisionRef: 'D1', reason: '既存の承認と重なる', recommendation: '課長' })]), planWith([])]);
-  await c.send('承認漏れを防ぎたい');
+  await start(c);
   const q = c.answerContext().open[0];
   await c.send('回答', { intentOverride: 'ANSWER', answerPayload: { source: 'answer-card', items: [{ key: q.key, answer: '部長です' }] } });
   assert(c.answerContext().open.some(x => x.reconfirm), '前提: 再確認の質問が出ている');
@@ -377,7 +395,7 @@ await section(async () => {
   // E2: 計画の作り直しの途中の「おすすめで」も記録して、次の作業に入れる（以前は「記録できる内容がありません」で断っていた）
   const qs = [QREC({ id: 'Q1' }), QREC({ id: 'Q2', question: '何日たったら催促しますか？', topic: 'threshold', recommendation: '3 日' })];
   const { c, calls, ctl, ledger } = makeConv([planWith(qs), planWith([qs[1]]), planWith([])]);
-  await c.send('承認漏れを防ぎたい');
+  await start(c);
   const k1 = c.answerContext().open.find(x => x.id === 'Q1' || /通知先/.test(x.text)).key;
   const rel = ctl.hold();
   const p = c.send('回答', { intentOverride: 'ANSWER', answerPayload: { source: 'answer-card', items: [{ key: k1, answer: '承認者' }] } });
@@ -388,45 +406,46 @@ await section(async () => {
   assert(calls.plan.some(x => (x.decisions || []).some(d => d.answer === '3 日')), 'E2: 次の作業で計画の AI に渡す');
 });
 await section(async () => {
-  // E3: 相談の後の「おすすめで」で計画の作成が失敗 → ［再試行］でも、打ち直しでも、相談の内容とおすすめで計画を作る
+  // E3: 相談の後の「おすすめで」で変更案の作成が失敗 → ［再試行］でも、打ち直しでも、相談の内容とおすすめで作る。
+  //   C-1 第 3 段: 新しい流れでは最初の AI の呼び出しは仮案（propose）。失敗するのも仮案の作成
   const { c, calls, ctl } = makeConv([planWith([])]);
   await c.send('承認待ちの案件を見落とさないようにするには？');
-  ctl.fail = 'TIMEOUT';
+  ctl.proposeFail = true;
   await c.send('おすすめで');
   const err = c.messages().filter(m => m.type === 'ERROR' || m.data?.retryText).pop();
-  assert(calls.plan.length === 1 && err && err.data.retryText, `前提: 計画の作成が失敗した: ${calls.plan.length}`);
+  assert(calls.propose.length === 1 && calls.plan.length === 0 && err && err.data.retryText, `前提: 仮案の作成が失敗した: ${calls.propose.length}`);
   await c.send(err.data.retryText, { intentOverride: err.data.intent });
-  assert(calls.plan.length === 2 && /相談の答えのおすすめで進めたい/.test(calls.plan[1].goal) && /見落とさない/.test(calls.plan[1].goal), `E3: ［再試行］でも相談の内容とおすすめで計画を作る: ${calls.plan[1] && calls.plan[1].goal}`);
+  assert(calls.propose.length === 2 && /相談の答えのおすすめで進めたい/.test(calls.propose[1].utterance) && /見落とさない/.test(calls.propose[1].utterance), `E3: ［再試行］でも相談の内容とおすすめで仮案を作る: ${calls.propose[1] && calls.propose[1].utterance}`);
   const k = makeConv([planWith([])]);
   await k.c.send('承認待ちの案件を見落とさないようにするには？');
-  k.ctl.fail = 'TIMEOUT';
+  k.ctl.proposeFail = true;
   await k.c.send('おすすめで');
   const r2 = k.c.classify('おすすめで');
-  assert(r2.reason === 'ADOPT_CONSULTATION' && /見落とさない/.test(r2.goal), `E3: 失敗の後に打ち直した「おすすめで」も相談のおすすめで計画: ${r2.intent}/${r2.reason}`);
+  assert(adoptsConsult(r2) && /見落とさない/.test(r2.utterance), `E3: 失敗の後に打ち直した「おすすめで」も相談のおすすめで仮案: ${r2.intent}/${r2.reason}`);
 });
 await section(async () => {
   // E4: 自然な委ね方（前置きの相づち・いろいろな語尾）も委ねる言い方。質問が混ざっても、質問は同時に答える
   const { c } = makeConv([planWith([])]);
   await c.send('承認待ちの案件を見落とさないようにするには？');
   const says = ['じゃあおすすめで', 'うん、おすすめで', 'では、おすすめで', 'おすすめでいいよ', 'おすすめでOKです', 'おすすめで構いません', 'おまかせでお願い', 'おまかせで大丈夫です', 'お任せいたします', 'お任せで進めてください', 'おすすめの通りで', 'AIのおすすめで', 'おすすめ通りにして'];
-  const ng = says.filter(s => c.classify(s).reason !== 'ADOPT_CONSULTATION');
+  const ng = says.filter(s => !adoptsConsult(c.classify(s)));
   assert(!ng.length, `E4: 委ねる言い方の違いでも相談のおすすめで計画: ${ng.join(' / ')}`);
-  const notAdopt = ['おすすめは？', 'おすすめの通知の種類を教えて'].filter(s => c.classify(s).reason === 'ADOPT_CONSULTATION');
+  const notAdopt = ['おすすめは？', 'おすすめの通知の種類を教えて'].filter(s => adoptsConsult(c.classify(s)));
   assert(!notAdopt.length, `E4: おすすめを聞く質問は委ねる言い方にしない: ${notAdopt.join(' / ')}`);
   // 「ありがとう」を挟んでも、直前の相談の答えを使う
   await c.send('ありがとう');
-  assert(c.classify('おすすめで').reason === 'ADOPT_CONSULTATION', 'E4: 相づちを挟んでも相談のおすすめで計画');
+  assert(adoptsConsult(c.classify('おすすめで')), 'E4: 相づちを挟んでも相談のおすすめで計画');
   // 推奨のある確認事項 2 件の計画: 前置き・質問の混在でも推奨の案を回答に（どの確認事項か選ばせない）
   const qs = [QREC({ id: 'Q1' }), QREC({ id: 'Q2', question: '何日たったら催促しますか？', topic: 'threshold', recommendation: '3 日' })];
   const k = makeConv([planWith(qs)]);
-  await k.c.send('承認漏れを防ぎたい');
+  await start(k.c);
   const a = k.c.classify('じゃあおすすめで'), b = k.c.classify('おすすめで。通知はいつ届きますか？');
   assert(a.reason === 'ADOPT_RECOMMENDATIONS' && a.adoptItems.length === 2 && b.reason === 'ADOPT_RECOMMENDATIONS' && /いつ届きますか/.test(b.askText || ''), `E4: 計画の確認事項でも（質問は同時に答える）: ${a.reason}/${b.reason}/${b.askText}`);
 });
 await section(async () => {
   // E5: 確認事項の無い計画の後の相談 →「おすすめで」: 修正の依頼に相談のおすすめを添える（計画の AI に「おすすめで」だけを渡さない）
   const { c, calls } = makeConv([planWith([]), planWith([])]);
-  await c.send('承認漏れを防ぎたい');
+  await start(c);
   await c.send('承認待ちの案件を見落とさないようにするには？');
   const cls = c.classify('おすすめで');
   await c.send('おすすめで');
@@ -437,7 +456,7 @@ await section(async () => {
   // E6: 推奨の無い確認事項（業務の判断）だけが残っているときの「おすすめで」は、計画の AI が候補から仮の案を選ぶ（止めない。2026-10-05 実機:
   //   「回答にしていません」で止まり、任せた部分が進まなかった）。決定事項としては記録しない（仮の案は利用者の決定ではない）
   const { c, calls, ledger } = makeConv([planWith([QREC({ question: '承認されなかった案件はどうしますか？', topic: 'other', recommendation: '' })]), planWith([])]);
-  await c.send('承認漏れを防ぎたい');
+  await start(c);
   const cls = c.classify('おすすめで');
   await c.send('おすすめで');
   const rev = calls.plan[1] && calls.plan[1].revision;
@@ -446,10 +465,11 @@ await section(async () => {
     && !ledger().entries.some(e => e.answer) && msg && /候補からこちらの提案を選んで進めます/.test(msg.text) && !/仮の案/.test(msg.text), `E6: 推奨の無い確認事項は計画の AI に提案を選ばせる（利用者には「こちらの提案」と伝える）: ${cls.reason} / ${rev && rev.request}`);
 });
 await section(async () => {
-  // E7: 最初の計画の作成中の「おすすめで」は同意と同じ（作り直しを増やさない）
+  // E7: 最初の計画の作成中の「おすすめで」は同意と同じ（作り直しを増やさない）。新しい流れでは、仮案を採用した後の計画の作成中
   const { c, calls, ctl } = makeConv([planWith([])]);
+  await c.send('承認漏れを防ぎたい');
   const rel = ctl.hold();
-  const p = c.send('承認漏れを防ぎたい');
+  const p = c.send('この内容で進めて');
   await tick2(); await tick2();
   const r = await c.send('おすすめで');
   rel(); await p; for (let i = 0; i < 6; i++) await tick2();
@@ -459,25 +479,25 @@ await section(async () => {
   // E8: 確認事項 1 つへの委ねる答え（「数え方はおすすめで」）は、その確認事項の推奨の文を回答にする
   const qs = [QREC({ id: 'Q1', question: '経過期間は、どの時点から数えますか？', topic: 'timing', recommendation: '更新日時から数える' }), QREC({ id: 'Q2', question: '起算日から何日後に通知しますか？', topic: 'threshold', recommendation: '3 日後' })];
   const { c, calls } = makeConv([planWith(qs), planWith([])]);
-  await c.send('承認漏れを防ぎたい');
+  await start(c);
   await c.send('5日で、数え方はおすすめで');
   const ds = (calls.plan[1] && calls.plan[1].decisions) || [];
   assert(ds.some(d => d.answer === '更新日時から数える') && ds.some(d => /5日/.test(d.answer)) && !ds.some(d => /おすすめ/.test(d.answer)), `E8: 「数え方はおすすめで」は推奨の文を回答に: ${JSON.stringify(ds.map(d => d.answer))}`);
 });
 await section(async () => {
   // E9: チャットに出す計画の要約から根拠ID・内部の語を外す（右の「変更内容」には残る）
-  //   2026-10-06: 会話に出す要約は変更案のカード（PLAN の data.summaryText）。要約の文（kind 'plan-summary'）は記録に残し、会話には出さない
+  //   2026-10-06: 会話に出す要約は変更案のカード（PLAN の data.summaryText）だった。
+  //   C-1 第 3 段（2026-10-08）: 変更案のカードと要約の文（kind 'plan-summary'）は削除し、会話の要約は最終案のカード 1 枚（final.behaviors「最終的にどう動くか」）
   const p = planWith([]); p.assessment.summary = '現在は通知がありません（E44、dictionary.reminders）。決定事項D1の推奨の数え方、D2の暦日3日を反映しました。（E42〜E44）';
-  const { c } = makeConv([p]);
-  await c.send('承認漏れを防ぎたい');
+  const { c, x } = makeConv([p]);
+  await start(c);
   const v = c.activePlan();
-  const card = c.messages().find(m => m.type === KTAiConversation.MSG.PLAN);
-  const sum = c.messages().find(m => m.data?.kind === 'plan-summary');
+  const card = x.finals().slice(-1)[0];
   // 会話に描く文（タグ・属性を除いた本文）
-  const html = card ? KTAiChatUi.messageHtml(card, { plans: new Map([[`${v.planId}:${v.version}`, v]]), activePlan: v }).replace(/<[^>]*>/g, '') : '';
-  const summaryText = (card && card.data && card.data.summaryText) || '';
+  const html = card ? K.stripC(K.finalHtml(x, card)) : '';
+  const summaryText = ((v && v.final && v.final.behaviors) || []).join('');
   assert(card && !/E44|dictionary|D1|D2/.test(summaryText) && /決定事項の推奨の数え方、暦日3日を反映しました/.test(summaryText) && /決定事項の推奨の数え方、暦日3日を反映しました/.test(html) && !/E4\d|dictionary|D1|D2/.test(html)
-    && sum && !/E44|dictionary|D1|D2/.test(sum.text) && KTAiChatUi.isHiddenMessage(sum) && /E44/.test(v.plan.assessment.summary), `E9: チャットの要約から根拠ID・内部の語を外す: ${summaryText}`);
+    && !c.messages().some(m => m.type === 'PLAN' || m.data?.kind === 'plan-summary') && /E44/.test(v.plan.assessment.summary), `E9: チャットの要約（最終案のカード）から根拠ID・内部の語を外す（計画の要約には残る）: ${summaryText}`);
 });
 
 console.log('\n--- S. 2 回目の差分レビューの指摘（2026-10-05）: 削る順・話題の語・抜粋・伏字・設定の対象・「おすすめで」 ---');
@@ -552,22 +572,22 @@ await section(async () => {
   const { c } = makeConv([planWith([])]);
   await c.send('承認待ちの案件を見落とさないようにするには？');
   const yes = ['提案で', '提案を採用して', '提案でお願いします', 'ご提案のとおりで', 'おすすめ案で', 'おすすめのままで', 'あなたに任せます', 'AIに任せます', 'おすすめ通りにして'];
-  const ng = yes.filter(s => c.classify(s).reason !== 'ADOPT_CONSULTATION');
+  const ng = yes.filter(s => !adoptsConsult(c.classify(s)));
   assert(!ng.length, `S7: 委ねる言い方: ${ng.join(' / ')}`);
-  const no = ['提案して', 'おすすめして', 'あなたに任せたい作業がある', '別の案を提案して'].filter(s => c.classify(s).reason === 'ADOPT_CONSULTATION');
+  const no = ['提案して', 'おすすめして', 'あなたに任せたい作業がある', '別の案を提案して'].filter(s => adoptsConsult(c.classify(s)));
   assert(!no.length, `S7: 頼む言い方は委ねない: ${no.join(' / ')}`);
 });
 await section(async () => {
   // S8: 「承認者は、部長に任せます」は人に任せる業務の答え（分けない）。「数え方はおすすめで、5日」は語の順に関係なく両方に答える
   const qs = [QREC({ id: 'Q1', question: '通知先は誰にしますか？' }), QREC({ id: 'Q2', question: '承認者は誰にしますか？', topic: 'approver', recommendation: '課長' })];
   const { c, calls } = makeConv([planWith(qs), planWith([])]);
-  await c.send('承認漏れを防ぎたい');
+  await start(c);
   await c.send('承認者は、部長に任せます');
   const ds = (calls.plan[1] && calls.plan[1].decisions) || [];
   assert(ds.some(d => d.answer === '承認者は、部長に任せます') && !ds.some(d => d.answer === '承認者は'), `S8: 人に任せる答えは 1 つの回答: ${JSON.stringify(ds.map(d => d.answer))}`);
   const qs2 = [QREC({ id: 'Q1', question: '経過期間は、どの時点から数えますか？', topic: 'timing', recommendation: '更新日時から数える' }), QREC({ id: 'Q2', question: '起算日から何日後に通知しますか？', topic: 'threshold', recommendation: '3 日後' })];
   const k = makeConv([planWith(qs2), planWith([])]);
-  await k.c.send('承認漏れを防ぎたい');
+  await start(k.c);
   await k.c.send('数え方はおすすめで、5日');
   const ds2 = (k.calls.plan[1] && k.calls.plan[1].decisions) || [];
   assert(k.calls.plan.length === 2 && ds2.some(d => d.answer === '更新日時から数える') && ds2.some(d => /5日/.test(d.answer)) && !k.c.messages().some(m => m.data?.kind === 'answer-target'), `S8: 委ねる部分が先でも両方に答える: ${JSON.stringify(ds2.map(d => d.answer))}`);
@@ -576,7 +596,7 @@ await section(async () => {
   // S9: 推奨の無い確認事項への「残りはおすすめで」は決定事項にしない。計画の AI に、その確認事項を委ねられたと伝える（仮の案を選ばせる）
   const qs = [QREC({ id: 'Q1', question: '承認されなかった案件はどうしますか？', topic: 'other', recommendation: '' }), QREC({ id: 'Q2', question: '何日たったら催促しますか？', topic: 'threshold', recommendation: '3 日' })];
   const { c, calls, ledger } = makeConv([planWith(qs), planWith([qs[0]])]);
-  await c.send('承認漏れを防ぎたい');
+  await start(c);
   await c.send('5日で、残りはおすすめで');
   const ds = (calls.plan[1] && calls.plan[1].decisions) || [];
   const ack = c.messages().find(m => m.data?.kind === 'answers-ack');
@@ -588,7 +608,7 @@ await section(async () => {
 await section(async () => {
   // S10: 計画の後の相談に「おすすめで。承認者は誰になりますか？」→ 質問の文で決定事項を置き換えない。推奨の無い確認事項より、直前の相談のおすすめを使う
   const { c, calls } = makeConv([planWith([QREC({ question: '承認者は誰にしますか？', topic: 'approver', recommendation: '' })]), planWith([]), planWith([])]);
-  await c.send('承認漏れを防ぎたい');
+  await start(c);
   const q = c.answerContext().open[0];
   await c.send('回答', { intentOverride: 'ANSWER', answerPayload: { source: 'answer-card', items: [{ key: q.key, answer: '部長です' }] } });
   await c.send('承認待ちの案件を見落とさないようにするには？');
@@ -596,14 +616,14 @@ await section(async () => {
   const last = calls.plan[calls.plan.length - 1];
   assert(calls.plan.length === 3 && (last.decisions || []).some(d => d.answer === '部長です') && /相談の答えのおすすめで進めたい/.test(last.revision.request), `S10: 決定事項は残り、相談のおすすめを添える: ${JSON.stringify((last.decisions || []).map(d => [d.answer, d.status]))}`);
   const k = makeConv([planWith([QREC({ question: '承認されなかった案件はどうしますか？', topic: 'other', recommendation: '' })])]);
-  await k.c.send('承認漏れを防ぎたい');
+  await start(k.c);
   await k.c.send('承認待ちの案件を見落とさないようにするには？');
   assert(k.c.classify('おすすめで').reason === 'ADOPT_CONSULTATION_REVISE', 'S10: 推奨の無い確認事項が残っていても、直前の相談のおすすめを使う');
 });
 await section(async () => {
   // S11: 計画の後の相談への「おすすめで」が失敗 →［再試行］でも相談のおすすめを添える（発言は原文）
   const { c, calls, ctl } = makeConv([planWith([]), planWith([])]);
-  await c.send('承認漏れを防ぎたい');
+  await start(c);
   await c.send('承認待ちの案件を見落とさないようにするには？');
   ctl.fail = 'TIMEOUT';
   await c.send('おすすめで');
@@ -615,14 +635,14 @@ await section(async () => {
 await section(async () => {
   // S12: 質問の混在: 推奨の無い確認事項だけの計画で質問の AI は 1 回だけ・作業中でも質問の部分に答える
   const { c, calls } = makeConv([planWith([QREC({ question: '承認されなかった案件はどうしますか？', topic: 'other', recommendation: '' })])]);
-  await c.send('承認漏れを防ぎたい');
+  await start(c);
   const n0 = calls.ask.length;
   await c.send('おすすめで。通知はいつ届きますか？');
   for (let i = 0; i < 4; i++) await tick2();
   assert(calls.ask.length - n0 === 1, `S12: 質問の AI は 1 回: ${calls.ask.length - n0}`);
   const qs = [QREC({ id: 'Q1' }), QREC({ id: 'Q2', question: '何日たったら催促しますか？', topic: 'threshold', recommendation: '3 日' })];
   const k = makeConv([planWith(qs), planWith([qs[1]]), planWith([])]);
-  await k.c.send('承認漏れを防ぎたい');
+  await start(k.c);
   const k1 = k.c.answerContext().open.find(x => /通知先/.test(x.text)).key;
   const rel = k.ctl.hold();
   const p = k.c.send('回答', { intentOverride: 'ANSWER', answerPayload: { source: 'answer-card', items: [{ key: k1, answer: '承認者' }] } });
@@ -635,13 +655,13 @@ await section(async () => {
 await section(async () => {
   // S13: チャットの要約で、フィールドコードの D1・D2 は消さない（「決定事項」を含む文の番号だけ外す）
   const p = planWith([]); p.assessment.summary = '日付フィールド D2 の値を初期値にします。D2の値が空のときは通知しません。決定事項D1の推奨、D3の作業者を反映しました。';
-  const { c } = makeConv([p]);
-  await c.send('承認漏れを防ぎたい');
-  // 2026-10-06: 会話に出す要約は変更案のカード（PLAN の data.summaryText）
-  const card = c.messages().find(m => m.type === KTAiConversation.MSG.PLAN);
-  const text = (card && card.data && card.data.summaryText) || '';
+  const { c, x } = makeConv([p]);
+  await start(c);
+  // 2026-10-06: 会話に出す要約は変更案のカード（PLAN の data.summaryText）だった。C-1 第 3 段: 最終案のカード（final.behaviors）
+  const card = x.finals().slice(-1)[0];
   const v = c.activePlan();
-  const shown = card ? KTAiChatUi.messageHtml(card, { plans: new Map([[`${v.planId}:${v.version}`, v]]), activePlan: v }).replace(/<[^>]*>/g, '') : '';
+  const text = ((v && v.final && v.final.behaviors) || []).join('');
+  const shown = card ? K.stripC(K.finalHtml(x, card)) : '';
   assert(card && /日付フィールド D2 の値を初期値にします/.test(text) && /D2の値が空のときは通知しません/.test(text) && /決定事項の推奨、作業者を反映しました/.test(text) && /日付フィールド D2 の値を初期値にします/.test(shown) && /決定事項の推奨、作業者を反映しました/.test(shown), `S13: ${text}`);
 });
 
@@ -670,7 +690,7 @@ await section(async () => {
   // T3: 「いいえ」は残りの確認事項に割り当てない（どの確認事項への答えか決められない）
   const qs = [QREC({ id: 'Q1', question: '既存のメール通知は残しますか？', topic: 'other', recommendation: '' }), QREC({ id: 'Q2', question: '何日たったら催促しますか？', topic: 'threshold', recommendation: '3 日' })];
   const { c, calls } = makeConv([planWith(qs), planWith([])]);
-  await c.send('承認漏れを防ぎたい');
+  await start(c);
   await c.send('いいえ。5日で');
   const ds = (calls.plan[1] && calls.plan[1].decisions) || [];
   assert(!ds.some(d => d.answer === 'いいえ'), `T3: 「いいえ」を別の確認事項の回答にしない: ${JSON.stringify(ds.map(d => d.answer))}`);
@@ -690,13 +710,13 @@ await section(async () => {
   // T5: 「5日で、数え方は提案で」・「あなたに任せる」「任せる」「おすすめでお願いできますか？」「おすすめでいこう」
   const qs2 = [QREC({ id: 'Q1', question: '経過期間は、どの時点から数えますか？', topic: 'timing', recommendation: '更新日時から数える' }), QREC({ id: 'Q2', question: '起算日から何日後に通知しますか？', topic: 'threshold', recommendation: '3 日後' })];
   const k = makeConv([planWith(qs2), planWith([])]);
-  await k.c.send('承認漏れを防ぎたい');
+  await start(k.c);
   await k.c.send('5日で、数え方は提案で');
   const ds2 = (k.calls.plan[1] && k.calls.plan[1].decisions) || [];
   assert(ds2.some(d => d.answer === '更新日時から数える') && ds2.some(d => /5日/.test(d.answer)), `T5: 「数え方は提案で」も推奨の文を回答に: ${JSON.stringify(ds2.map(d => d.answer))}`);
   const { c } = makeConv([planWith([])]);
   await c.send('承認待ちの案件を見落とさないようにするには？');
-  const ng = ['あなたに任せる', '任せる', 'おすすめでお願いできますか？', 'おすすめでいこう'].filter(s => c.classify(s).reason !== 'ADOPT_CONSULTATION');
+  const ng = ['あなたに任せる', '任せる', 'おすすめでお願いできますか？', 'おすすめでいこう'].filter(s => !adoptsConsult(c.classify(s)));
   assert(!ng.length, `T5: 委ねる言い方: ${ng.join(' / ')}`);
 });
 await section(async () => {
@@ -704,15 +724,17 @@ await section(async () => {
   const qs = [QREC({ id: 'Q1' })];
   const { c, calls, ctl } = makeConv([planWith(qs), planWith([])]);
   let openAsk; const askGate = new Promise(r => { openAsk = r; });
+  //   新しい流れでは、仮案を採用した後の計画の作成中に聞く。計画の後の会話のカードは最終案（FINAL。変更案のカード PLAN は削除した）
+  await c.send('承認漏れを防ぎたい');
   const relPlan = ctl.hold();
   ctl.askGate = askGate;
-  const p = c.send('承認漏れを防ぎたい');
+  const p = c.send('この内容で進めて');
   await tick2(); await tick2();
   await c.send('ところで、ステータスの更新の通知は誰に届きますか？');
   relPlan(); await p; for (let i = 0; i < 4; i++) await tick2();
   openAsk(); for (let i = 0; i < 6; i++) await tick2();
   const kinds = c.messages().map(m => m.type);
-  const planAt = kinds.lastIndexOf('PLAN'), ansAt = kinds.lastIndexOf('ANSWER');
+  const planAt = kinds.lastIndexOf('FINAL'), ansAt = kinds.lastIndexOf('ANSWER');
   const r = c.classify('おすすめで');
   assert(planAt >= 0 && (ansAt < planAt || r.reason === 'ADOPT_RECOMMENDATIONS'), `T6: 遅れて届いた答えではなく、計画の確認事項の推奨を使う: ${r.reason} / plan ${planAt} answer ${ansAt}`);
 });
@@ -722,14 +744,14 @@ await section(async () => {
   // U1: 推奨のある確認事項と無い確認事項が混ざっていても「おすすめで」で進む（推奨のある方は推奨の文を回答に、無い方は計画の AI に仮の案を選ばせる）
   const qs = [QREC({ id: 'Q1', question: '「一定期間」は、どの時点から数えますか？', topic: 'timing', recommendation: '' }), QREC({ id: 'Q2', question: '起算点から何日後に通知しますか？', topic: 'threshold', recommendation: '3 暦日後' })];
   const { c, calls } = makeConv([planWith(qs), planWith([])]);
-  await c.send('承認漏れを防ぎたい');
+  await start(c);
   const cls = c.classify('おすすめで');
   await c.send('おすすめで');
   const req = (calls.plan[1] && calls.plan[1].revision && calls.plan[1].revision.request) || '';
   assert(cls.reason === 'ADOPT_RECOMMENDATIONS' && (calls.plan[1].decisions || []).some(d => d.answer === '3 暦日後') && /委ねられた確認事項（推奨が無い）：質問「「一定期間」は、どの時点から数えますか？」/.test(req), `U1: 推奨の案と委任を一緒に送る: ${cls.reason} / ${req}`);
   // 実機と同じ「3日で、作業者だけでいいです。数え方はおすすめで」（数え方に推奨が無い）: 止めずに、数え方は計画の AI に仮の案を選ばせる
   const k = makeConv([planWith(qs), planWith([])]);
-  await k.c.send('承認漏れを防ぎたい');
+  await start(k.c);
   await k.c.send('3日で、作業者だけでいいです。数え方はおすすめで');
   const req2 = (k.calls.plan[1] && k.calls.plan[1].revision && k.calls.plan[1].revision.request) || '';
   assert(k.calls.plan.length === 2 && /委ねられた確認事項（推奨が無い）/.test(req2) && /3日で/.test(req2) && !k.c.messages().some(m => m.data?.kind === 'answer-target'), `U1: 実機の答えでも止まらない: ${req2}`);
@@ -781,9 +803,9 @@ await section(async () => {
   // V3: 「おすすめでいい？」「任せる？」は質問（委ねない）。「おすすめで進めてもらえますか？」「おすすめで行きましょう」は委ねる
   const { c } = makeConv([planWith([])]);
   await c.send('承認待ちの案件を見落とさないようにするには？');
-  const q = ['おすすめでいい？', 'おすすめで大丈夫？', '提案でいい？', '任せる？'].filter(s => c.classify(s).reason === 'ADOPT_CONSULTATION');
+  const q = ['おすすめでいい？', 'おすすめで大丈夫？', '提案でいい？', '任せる？'].filter(s => adoptsConsult(c.classify(s)));
   assert(!q.length, `V3: 質問は委ねない: ${q.join(' / ')}`);
-  const y = ['おすすめで進めてもらえますか？', 'おすすめで行きましょう', 'おすすめでよろしく'].filter(s => c.classify(s).reason !== 'ADOPT_CONSULTATION');
+  const y = ['おすすめで進めてもらえますか？', 'おすすめで行きましょう', 'おすすめでよろしく'].filter(s => !adoptsConsult(c.classify(s)));
   assert(!y.length, `V3: 頼む言い方は委ねる: ${y.join(' / ')}`);
 });
 await section(async () => {
@@ -791,14 +813,14 @@ await section(async () => {
   const qs = [QREC({ id: 'Q1', question: '既存のメール通知は残しますか？', topic: 'other', recommendation: '' }), QREC({ id: 'Q2', question: '何日たったら催促しますか？', topic: 'threshold', recommendation: '3 日' })];
   for (const say of ['いいえ。5日で', '5日で。いいえ']) {
     const { c, calls } = makeConv([planWith(qs), planWith([])]);
-    await c.send('承認漏れを防ぎたい');
+    await start(c);
     await c.send(say);
     const ds = (calls.plan[1] && calls.plan[1].decisions) || [];
     assert(!ds.some(d => d.answer === 'いいえ'), `V4: 「${say}」の「いいえ」を残りの確認事項の回答にしない: ${JSON.stringify(ds.map(d => d.answer))}`);
   }
   const qs2 = [QREC({ id: 'Q1', question: '経過期間は、どの時点から数えますか？', topic: 'timing', recommendation: '更新日時から数える' }), QREC({ id: 'Q2', question: '起算日から何日後に通知しますか？', topic: 'threshold', recommendation: '3 日後' })];
   const k = makeConv([planWith(qs2), planWith([])]);
-  await k.c.send('承認漏れを防ぎたい');
+  await start(k.c);
   await k.c.send('5日で、数え方はそちらに任せます');
   const ds2 = (k.calls.plan[1] && k.calls.plan[1].decisions) || [];
   assert(ds2.some(d => d.answer === '更新日時から数える') && ds2.some(d => /5日/.test(d.answer)), `V4: 「数え方はそちらに任せます」も推奨の文を回答に: ${JSON.stringify(ds2.map(d => d.answer))}`);

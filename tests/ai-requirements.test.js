@@ -8,11 +8,20 @@
 //      扱いが示されなかった文は未解決の要件として残し知らせる / 返答（理解した内容）と要件の変化を計画の前に出す / 質問の部分は同時に答え、計画の AI には
 //      「質問には別に答える」/ 質問の AI に会話の現在の要件と計画を渡す / 仮の案 / 確定して作る（古い版のコードを作らない）/ 確認事項の追加の項目
 //
+// C-1 第 3 段（2026-10-08・設計 §0d.4）: 古い確認の流れ（最初の依頼から直接の計画・先回りの返答・変更案のカード・要件の変化の知らせ・提案のカード・
+//   対応先の聞き返し・仕様の確定・［この変更で確定してコードを作る］）は削除した。会話の試験は新しい流れ（依頼 → 仮案 → 採用 → 計画 → 生成 → 最終案）の上で行う:
+//   最初の依頼は仮案の台本（tests/helpers/new-flow.js の 4 発言）で採用まで進め、steps[0] は採用の後の最初の計画、steps[1] 以降は最終案の後の差分更新。
+//   台本の仮案で要件が 4 件（R1〜R4）入るので、この試験の要件の番号は R5 から（rid）。消した古い流れの期待は、置き換えた新しい流れの回帰
+//   （tests/ai-flow-redesign.test.js の R01〜R21・B 系・F 系）に対応を書いた
+//
 // 実行方法: node tests/ai-requirements.test.js
 'use strict';
 process.on('unhandledRejection', (e) => { if (/kintone is not defined/.test(String(e && e.message))) return; console.error(e); process.exit(1); });
 const { loadToolkit, makeAssert } = require('./helpers/load-toolkit.js');
-const { KTDeps, KTAiConversation, KTAiAnswers, KTPlanReview, KTAiChatUi } = loadToolkit();
+const { createNewFlowKit } = require('./helpers/new-flow.js');
+const T = loadToolkit();
+const { KTDeps, KTAiConversation, KTAiAnswers, KTPlanReview, KTAiChatUi } = T;
+const K = createNewFlowKit(T);
 const { assert, state } = makeAssert();
 const FX = require('./fixtures/ai-context-app.js');
 
@@ -22,7 +31,7 @@ const I = KTAiConversation.INTENT;
 const spec = (o) => ({ name: null, from: null, to: null, filterCond: null, assignees: [], targets: [], events: [], timingField: null, daysLater: null, time: null, fields: [], sort: null, sourceApp: null, keyField: null, mappings: [], fieldType: null, required: null, options: [], destApp: null, accessibility: null, entities: [], ...o });
 const step = (id, actionType, targetKind, targetRef, sp = {}, extra = {}) => ({ id, actionType, targetKind, targetRef, targetExists: null, title: `${id} ${actionType}`, proposal: { summary: '', details: [] }, spec: spec(sp), dependsOn: [], reason: '', evidenceIds: [], confidence: 'INFERRED', alternativeId: null, validation: { status: 'ok', issues: [] }, execution: { mode: 'PLAN_ONLY', supported: false, reason: 'x' }, ...extra });
 const qs = (...texts) => texts.map((t, i) => (typeof t === 'string' ? { id: `Q${i + 1}`, question: t, reason: '', relatedEvidenceIds: [] } : { id: `Q${i + 1}`, reason: '', relatedEvidenceIds: [], ...t }));
-const cust = (o = {}) => ({ customizationId: 'C1', requirement: '金額が100万円を超えたら警告を出す', whyStandardInsufficient: '入力中の警告は標準設定に無い', strategy: 'NEW_JS_FILE', implementation: 'JAVASCRIPT', platform: ['desktop'], events: ['app.record.create.show'], fields: [{ code: 'amount', access: 'CONTROL' }], apis: [], existingFiles: [], risks: [], questions: [], dependsOn: [], evidenceIds: [], ...o });
+const cust = (o = {}) => ({ customizationId: 'C1', requirement: '金額が100万円を超えたら警告を出す', whyStandardInsufficient: '入力中の警告は標準設定に無い', strategy: 'NEW_JS_FILE', implementation: 'JAVASCRIPT', platform: ['desktop'], events: ['app.record.edit.show'], fields: [{ code: 'amount', access: 'CONTROL', condition: 'amount > "1000000"', effects: ['warn'] }], apis: [], existingFiles: [], risks: [], questions: [], dependsOn: [], evidenceIds: [], ...o });
 const CSTEP = step('C1', 'CUSTOMIZATION_REQUIRED', 'JS', '', { customizationId: 'C1' }, { solution: 'CUSTOMIZATION' });
 const planWith = (questions, extra = {}) => ({ goal: '金額が100万円を超えたら画面に警告を出したい', solution: 'HYBRID', assessment: { summary: 's', usableExistingFields: [], usableExistingSettings: [], missingCapabilities: [], uncertainties: [] }, relevantFields: [], proposedFields: [], steps: [step('P1', 'ADD_VIEW', 'VIEW', '高額案件', { name: '高額案件', fields: ['amount'] }), CSTEP], alternatives: [], impact: [], questions, unknowns: [], planConfidence: 'NEEDS_CONFIRMATION', customizations: [cust()], provisionals: [], ...extra });
 const QP = { question: '対象は PC だけですか？モバイルでも使いますか？', topic: 'platform' };
@@ -30,16 +39,24 @@ const QS = { question: '金額が大きいとき、保存を止めますか？',
 const tick = () => new Promise(r => setTimeout(r, 0));
 const ticks = async (n = 6) => { for (let i = 0; i < n; i++) await tick(); };
 const OP = (o = {}) => ({ op: 'add', id: '', target: '金額フィールド', condition: '', behavior: 'x', exceptions: [], decision: 'decided', disposition: 'adopted', sourceQuotes: [], planRefs: ['C1'], note: '', ...o });
+/** 台本の仮案（K.REQUESTS の 4 発言）で台帳に入る要件の数（R1〜R4）。この試験の計画の AI の要件は R5 から */
+const BASE_REQS = 4;
+const rid = (n) => `R${BASE_REQS + n}`;
 /**
- * 会話（fake services）。steps[n] = 計画の n+1 回目の呼び出しの { plan, turn }。ask は呼ばれた引数を記録して答える
+ * 会話（fake services）。C-1 第 3 段（2026-10-08）: 新しい流れ（仮案 → 採用 → 計画 → 生成工程 → 最終案）の偽 services。
+ *   仮案は共有の部品の台本（K.script）。steps[n] = 計画の n+1 回目の呼び出しの { plan, turn }（steps[0] は採用の後の最初の計画、以降は差分更新）。
+ *   生成は共有の部品の偽の生成工程（警告の候補）。generate を渡すとその実装を使う。ask は呼ばれた引数を記録して答える。
+ *   実効（customization の effects）を計画に入れているので、必須の効果を補う自動の差分更新は起きない（計画の呼び出しの回数は従来どおり）
  */
-function makeConv(steps, { askAnswer = 'JavaScript は画面の操作だけで動き、CSV の読み込みでは動きません。', askResult = null } = {}) {
-  const calls = { plan: [], ask: [], generate: 0 };
+function makeConv(steps, { askAnswer = 'JavaScript は画面の操作だけで動き、CSV の読み込みでは動きません。', askResult = null, generate = null } = {}) {
+  const calls = { plan: [], ask: [], generate: 0, propose: [] };
   let t = 1000;
   // hold(): 次の計画・生成の呼び出しを待たせる / holdAsk(): 次の質問の呼び出しを待たせる
   const gates = [], askGates = [];
   const ctl = { hold() { let o; gates.push(new Promise(r => { o = r; })); return o; }, holdAsk() { let o; askGates.push(new Promise(r => { o = r; })); return o; } };
+  const gen = generate || K.makeGenerate({ sequence: ['warn'] });
   const services = {
+    async propose(args) { calls.propose.push({ utterance: args.utterance }); const raw = K.script(args); if (!raw) return { ok: false, reason: 'NO_SCRIPT', message: `台本がありません: ${args.utterance}` }; t += 3000; return { ok: true, proposal: K.normalized(raw, `pp-${calls.propose.length}`), ctx: { facts: [] } }; },
     async plan(args) {
       const n = calls.plan.length;
       calls.plan.push(JSON.parse(JSON.stringify({ goal: args.goal, revision: args.revision || null, requirements: args.requirements || null, decisions: args.decisions || null })));
@@ -53,16 +70,25 @@ function makeConv(steps, { askAnswer = 'JavaScript は画面の操作だけで�
       return { plan: p, ctx: { facts: [] }, review: KTPlanReview.review({ plan: p, data: DATA, deps: DEPS, scan: null, incoming: null }), gatewayPlan: { ...JSON.parse(JSON.stringify(p)), gw: n + 1 }, revisionMeta: args.revision ? { requested: args.revision.mode || 'full', mode: args.revision.mode || 'full', fallbackReason: null } : null, turn: s.turn || null };
     },
     revisionModes: () => ['full', 'patch'],
-    conversationFeatures: () => ['requirements', 'brief'],
+    conversationFeatures: () => ['requirements', 'stream', 'proposal'],
+    generatorFeatures: () => ['requirementId', 'cases', 'feedback', ...K.GEN_EFFECT_FEATURES], plannerFeatures: () => ['reply'],
+    materials: () => '見ている設定: 一覧 1 件・既存の JavaScript 0 ファイル', fieldLabels: () => K.LABELS_C, async customizeRevision() { return '42'; },
     async ask(args) { const ga = askGates.shift(); if (ga) await ga; calls.ask.push(JSON.parse(JSON.stringify({ question: args.question, conversation: args.conversation || null }))); if (askResult) { const x = askResult(args); if (x) return x; } return { ok: true, answer: { answer: askAnswer, facts: [], analysis: [], recommendations: [], unknowns: [] }, ctx: { facts: [] } }; },
-    async generate() { const g = gates.shift(); if (g) await g; calls.generate++; return { ok: true, generated: { code: '' }, review: { status: 'OK', checks: [] } }; },
+    async generate(args) { const g = gates.shift(); if (g) await g; calls.generate++; t += 20000; return gen.impl(args); },
     readiness(v) { return { approved: 0, executable: 0, unsupported: 0, blocked: 0, undecided: v.plan.steps.length }; },
   };
   const c = KTAiConversation.create({ services, now: () => '2026-10-05T00:00:00.000Z', clock: () => t });
   const kinds = () => c.messages().map(m => m.data?.kind || m.type);
   const byKind = (k) => c.messages().filter(m => m.data?.kind === k);
-  return { c, calls, ctl, kinds, byKind, ledger: () => c.state.ledgers.get(c.activePlan().planId) };
+  const finals = () => c.messages().filter(m => m.type === 'FINAL');
+  return { c, calls, ctl, kinds, byKind, finals, ledger: () => c.state.ledgers.get(c.activePlan().planId) };
 }
+/** 台本の 3 発言で仮案を作る（4 発言目の「おすすめで」で採用する前まで） */
+const draftUntilAdopt = async (x) => { for (const s of K.REQUESTS.slice(0, 3)) await x.c.send(s); };
+/** 台本の 4 発言で仮案 → 採用 → 計画（steps[0]）→ 生成 → 最終案まで進める */
+const adopt = async (x) => { await draftUntilAdopt(x); await x.c.send(K.REQUESTS[3]); await ticks(); return x.c.activePlan(); };
+/** 最終案のカードの文（タグを外す） */
+const finalText = (x) => K.stripC(K.finalHtml(x));
 
 (async () => {
 async function section(fn) { try { await fn(); } catch (e) { assert(false, `例外: ${e && e.stack ? e.stack.split('\n').slice(0, 3).join(' / ') : e}`); } }
@@ -96,77 +122,95 @@ await section(async () => {
 console.log('\n--- F. 会話（要件の台帳・質問の部分を同時に・返答と要件の変化・仮の案・確定して作る） ---');
 await section(async () => {
   // F1: 回答＋条件＋質問。質問の部分は同時に質問の AI（会話の要件と計画つき）、回答の部分は差分で更新（計画の AI に「質問には別に答える」）
-  const goal = '金額が100万円を超えたら画面に警告を出したい';
-  const t1 = { reply: '金額が100万円を超えたら警告を出す計画にしました。', requirementOps: [OP({ condition: '金額が100万円を超える', behavior: '画面に警告を出す', sourceQuotes: ['金額が100万円を超えたら画面に警告を出したい'] })], utteranceCoverage: [{ quote: goal, as: 'requirement', refs: [], note: '' }] };
+  //   C-1 第 3 段（2026-10-08）: 最初の依頼は仮案 → 採用 → 最終案。回答＋条件＋質問は最終案の後の発言で確かめる。
+  //   最初の依頼の要件を台帳に入れることは仮案の台帳（ai-flow-redesign R01-4・B2-14）、最初の計画の返答と要件の変化の知らせ（削除した）は
+  //   最終案のカードの「変わった点」（R11-5）、先回りの返答（brief）は削除した（F7-5）
   const t2 = { reply: 'PC だけにし、保存は止めないようにしました。', requirementOps: [OP({ target: '作成・編集画面', behavior: 'PC だけで動く', sourceQuotes: ['PCだけ'] }), OP({ behavior: '保存は止めない', sourceQuotes: ['保存は止めない'] })], utteranceCoverage: [{ quote: 'PCだけ', as: 'answer', refs: [], note: '' }, { quote: '保存は止めない', as: 'answer', refs: [], note: '' }] };
-  const { c, calls, byKind, ledger } = makeConv([{ plan: planWith(qs(QP, QS)), turn: t1 }, { plan: planWith([]), turn: t2 }]);
-  await c.send(goal);
-  const lg1 = ledger();
-  // 2026-10-06: 要件の変化（要件の番号つき）は記録に残し、通常の会話には出さない（対応できないことがあるときだけ出す）。返答は会話に出す
-  const shown = (m) => !!m && KTAiChatUi.messageHtml(m) !== '';
-  assert(KTAiAnswers.requirementsOf(lg1).map(e => `${e.id}:${e.decision}`).join() === 'R1:decided' && byKind('turn-reply').length === 1 && byKind('requirements-changes').length === 1 && shown(byKind('turn-reply')[0]) && !shown(byKind('requirements-changes')[0]), `F1: 最初の依頼の要件を台帳へ（根拠の発言は依頼の文）・返答は会話に出し、要件の変化は記録する（会話には出さない）: ${JSON.stringify(KTAiAnswers.requirementsOf(lg1).map(e => e.id + ':' + e.decision))}`);
+  const x = makeConv([{ plan: planWith(qs(QP, QS)) }, { plan: planWith([]), turn: t2 }]);
+  const { c, calls, ledger } = x;
+  const v1 = await adopt(x);
+  const base = KTAiAnswers.requirementsOf(ledger());
+  assert(v1 && v1.final && v1.fromDraft && base.length === BASE_REQS && base.every(e => e.decision === 'decided') && calls.ask.length === 0 && calls.plan.length === 1, `前提: 仮案の要件（4 件・decided）は採用の後も計画の台帳にあり、最終案ができる。先回りの返答（質問の AI）は呼ばない: ${JSON.stringify(base.map(e => e.id + ':' + e.decision))}`);
+  const ops0 = c.metrics().requirementOps;
   await c.send('PCだけ。保存は止めない。ところでCSVの読み込みにも効きますか？');
   await ticks();
   const rev = calls.plan[1].revision;
   const aq = calls.ask.find(a => /CSV/.test(a.question));
-  assert(calls.ask.length === 2 && calls.ask[0].conversation.brief === true && aq && aq.conversation && aq.conversation.requirements.some(r => r.id === 'R1') && aq.conversation.plan && aq.conversation.working === 'REVISE', `F1: 質問の部分は同時に質問の AI へ（会話の現在の要件と計画・作業中を渡す。1 回目は最初の計画の先回りの返答）: ${JSON.stringify(calls.ask.map(a => ({ q: a.question.slice(0, 12), w: a.conversation && a.conversation.working })))}`);
+  assert(calls.ask.length === 1 && aq && aq.conversation && aq.conversation.requirements.some(r => r.id === 'R1') && aq.conversation.plan && aq.conversation.working === 'REVISE' && !aq.conversation.brief, `F1: 質問の部分は同時に質問の AI へ（会話の現在の要件と計画・作業中を渡す）: ${JSON.stringify(calls.ask.map(a => ({ q: a.question.slice(0, 12), w: a.conversation && a.conversation.working })))}`);
   assert(rev.mode === 'patch' && rev.questionsAnsweredSeparately === true && Array.isArray(rev.utterances) && /PCだけ/.test(rev.utterances[0]) && !/CSV/.test(rev.utterances[0]) && calls.plan[1].requirements.some(r => r.id === 'R1'), `F1: 回答の部分は差分で更新し、計画の AI には要件と今回の発言・「質問には別に答える」を渡す: ${JSON.stringify({ mode: rev.mode, sep: rev.questionsAnsweredSeparately, utt: rev.utterances })}`);
-  assert(c.messages().some(m => m.data?.kind === 'aside-answer' && /CSV/.test(m.text)) && c.activePlan().version === 2 && KTAiAnswers.requirementsOf(ledger()).length === 3, 'F1: 質問への答えを出し、計画は v2 に更新・要件は 3 件（回答の 2 つが要件にも入る）');
-  assert(c.metrics().asideAsks === 2 && c.metrics().requirementOps === 3, `F1: 計測（同時に答えた質問・要件の操作）: ${JSON.stringify({ asideAsks: c.metrics().asideAsks, requirementOps: c.metrics().requirementOps })}`);
+  assert(c.messages().some(m => m.data?.kind === 'aside-answer' && /CSV/.test(m.text)) && c.activePlan().version === 2 && c.activePlan().final && KTAiAnswers.requirementsOf(ledger()).length === BASE_REQS + 2, 'F1: 質問への答えを出し、計画は v2（最終案を置き換え）に更新・要件は 2 件増える（回答の 2 つが要件にも入る）');
+  assert(c.metrics().asideAsks === 1 && c.metrics().requirementOps === ops0 + 2, `F1: 計測（同時に答えた質問・要件の操作）: ${JSON.stringify({ asideAsks: c.metrics().asideAsks, requirementOps: c.metrics().requirementOps - ops0 })}`);
 });
 await section(async () => {
-  // F2: 根拠の発言が利用者の文に無い「決定」は提案に下げる・扱いが示されなかった文は未解決として残す
+  // F2: 根拠の発言が利用者の文に無い「決定」は提案に下げる・扱いが示されなかった文は未解決として残す（最終案の後の発言で確かめる）
   const goal = '見積の金額チェックを入れたいです。100万円を超える場合は警告だけ出して、保存はそのまま通してください。あと、明細の小計の合計と金額がずれていたら知らせてほしいです。';
-  const t1 = { reply: '金額のチェックと警告の計画にしました。', requirementOps: [OP({ condition: '100万円を超える', behavior: '警告だけ出し、保存は止めない', sourceQuotes: ['100万円を超える場合は警告だけ出して'] }), OP({ behavior: '承認者は部長', sourceQuotes: ['部長が承認する'] })], utteranceCoverage: [{ quote: '見積の金額チェックを入れたいです', as: 'requirement', refs: [], note: '' }, { quote: '100万円を超える場合は警告だけ出して、保存はそのまま通してください', as: 'requirement', refs: [], note: '' }] };
-  const { c, byKind, ledger } = makeConv([{ plan: planWith([]), turn: t1 }]);
-  await c.send(goal);
-  const reqs = KTAiAnswers.requirementsOf(ledger());
-  assert(reqs[0].decision === 'decided' && reqs[1].decision === 'proposed', `F2: 利用者の文に無い根拠の「決定」は提案（proposed）に下げる: ${reqs.map(e => e.decision).join()}`);
+  const t2 = { reply: '金額のチェックと警告の計画にしました。', requirementOps: [OP({ condition: '100万円を超える', behavior: '警告だけ出し、保存は止めない', sourceQuotes: ['100万円を超える場合は警告だけ出して'] }), OP({ behavior: '承認者は部長', sourceQuotes: ['部長が承認する'] })], utteranceCoverage: [{ quote: '見積の金額チェックを入れたいです', as: 'requirement', refs: [], note: '' }, { quote: '100万円を超える場合は警告だけ出して、保存はそのまま通してください', as: 'requirement', refs: [], note: '' }] };
+  const x = makeConv([{ plan: planWith([]) }, { plan: planWith([]), turn: t2 }]);
+  const { c, ledger } = x;
+  await adopt(x);
+  const un0 = c.metrics().unresolvedClauses;
+  await c.send(goal); await ticks();
+  const reqs = KTAiAnswers.requirementsOf(ledger()).slice(BASE_REQS);
+  assert(reqs[0] && reqs[0].decision === 'decided' && reqs[1] && reqs[1].decision === 'proposed', `F2: 利用者の文に無い根拠の「決定」は提案（proposed）に下げる: ${reqs.map(e => e.decision).join()}`);
   const un = reqs.filter(e => e.disposition === 'unresolved' && e.origin === 'toolkit');
-  // 2026-10-06: 会話の文は「変更案」（右のペインの名前に合わせた）。知らせる文は会話に出す（出さない種類にしない）
-  const unMsg = byKind('requirements-unresolved')[0];
-  assert(un.length === 1 && /明細の小計の合計と金額がずれていたら/.test(un[0].behavior) && byKind('requirements-unresolved').length === 1 && /変更案に入っていない可能性がある指示があります：「[^」]*明細の小計の合計と金額がずれていたら[^」]*」/.test(unMsg.text) && /入れる場合は、そのように伝えてください/.test(unMsg.text) && !KTAiChatUi.isHiddenMessage(unMsg), `F2: 計画の AI が扱いを示さなかった文は、黙って捨てずに未解決の要件として残し知らせる: ${JSON.stringify(un.map(e => e.behavior))} / ${unMsg && unMsg.text}`);
-  assert(c.metrics().unresolvedClauses === 1, 'F2: 計測（扱いが示されなかった文）');
+  assert(un.length === 1 && /明細の小計の合計と金額がずれていたら/.test(un[0].behavior), `F2: 計画の AI が扱いを示さなかった文は、黙って捨てずに未解決の要件として台帳に残す: ${JSON.stringify(un.map(e => e.behavior))}`);
+  //   2026-10-06 の会話の知らせ（「変更案に入っていない可能性がある指示があります：「…」」・「入れる場合は、そのように伝えてください」）は、C-1 第 3 段で
+  //   要件の変化の知らせと一緒に削除された。置き換え先の最終案のカードにも、この文を「入っていない」と知らせる行が無い（「入れた指示」に発言の全文が出るだけ）。
+  //   守り手が無いので期待は消さずに残す（報告済み）。会話の知らせか、最終案のカードのどちらかに出れば合格
+  const fin = finalText(x).replace(/入れた指示: [^\n]*/g, '');
+  const told = c.messages().some(m => /変更案に入っていない可能性がある指示があります：「[^」]*明細の小計の合計と金額がずれていたら/.test(m.text || '') && !KTAiChatUi.isHiddenMessage(m)) || (/明細の小計の合計と金額がずれていたら/.test(fin) && /入っていない|扱いが決まっていない|未解決/.test(fin));
+  assert(told, `F2: 扱いが示されなかった文を利用者に知らせる（会話の知らせ、または最終案のカード）: ${fin.slice(0, 200)}`);
+  assert(c.metrics().unresolvedClauses === un0 + 1, 'F2: 計測（扱いが示されなかった文）');
 });
 await section(async () => {
-  // F3: 取り消し（今回の発言に根拠が要る）。取り消した要件も計画の AI に渡す（戻させない）
-  const goal = '金額が100万円を超えたら画面に警告を出したい';
-  const t1 = { reply: 'r', requirementOps: [OP({ behavior: '警告の文は「高額案件です」', sourceQuotes: ['金額が100万円を超えたら画面に警告を出したい'] })], utteranceCoverage: [{ quote: goal, as: 'requirement', refs: [], note: '' }] };
-  const t2 = { reply: '警告の文の指定を取り消しました。', requirementOps: [OP({ op: 'revoke', id: 'R1', behavior: '', sourceQuotes: ['警告の文の指定は取り消します'] })], utteranceCoverage: [{ quote: '警告の文の指定は取り消します', as: 'revocation', refs: ['R1'], note: '' }, { quote: '文はおまかせで', as: 'revocation', refs: ['R1'], note: '' }] };
-  const t3 = { reply: 'x', requirementOps: [OP({ op: 'revoke', id: 'R1', behavior: '', sourceQuotes: ['警告の文の指定は取り消します'] })], utteranceCoverage: [] };
-  const { c, calls, byKind, ledger } = makeConv([{ plan: planWith([]), turn: t1 }, { plan: planWith([]), turn: t2 }, { plan: planWith([]), turn: t3 }]);
-  await c.send(goal);
-  await c.send('警告の文の指定は取り消します。文はおまかせで');
-  const r1 = KTAiAnswers.requirementsOf(ledger()).find(e => e.id === 'R1');
-  assert(r1.decision === 'revoked' && r1.history.length === 1 && byKind('requirements-changes').some(m => /取り消し R1/.test(m.text)), `F3: 今回の発言に根拠のある取り消しは要件を取り消し済みにする（消さずに残す・履歴）: ${r1.decision}`);
-  await c.send('一覧の列に金額を足して');
-  assert(calls.plan[2].requirements.some(r => r.id === 'R1' && r.decision === 'revoked'), 'F3: 取り消した要件も計画の AI に渡す（戻させない）');
+  // F3: 取り消し（今回の発言に根拠が要る）。取り消した要件も計画の AI に渡す（戻させない）（最終案の後の発言で確かめる）
+  //   C-1 第 3 段: 要件の変化の会話の知らせ（「取り消し R1」）は削除した（最終案のカードの「変わった点」: ai-flow-redesign R11-5）。台帳の取り消しと履歴は今のまま
+  const add = '警告の文は「高額案件です」にして';
+  const t2 = { reply: 'r', requirementOps: [OP({ behavior: '警告の文は「高額案件です」', sourceQuotes: [add] })], utteranceCoverage: [{ quote: add, as: 'requirement', refs: [], note: '' }] };
+  const t3 = { reply: '警告の文の指定を取り消しました。', requirementOps: [OP({ op: 'revoke', id: rid(1), behavior: '', sourceQuotes: ['警告の文の指定は取り消します'] })], utteranceCoverage: [{ quote: '警告の文の指定は取り消します', as: 'revocation', refs: [rid(1)], note: '' }, { quote: '文はおまかせで', as: 'revocation', refs: [rid(1)], note: '' }] };
+  const t4 = { reply: 'x', requirementOps: [OP({ op: 'revoke', id: rid(1), behavior: '', sourceQuotes: ['警告の文の指定は取り消します'] })], utteranceCoverage: [] };
+  const x = makeConv([{ plan: planWith([]) }, { plan: planWith([]), turn: t2 }, { plan: planWith([]), turn: t3 }, { plan: planWith([]), turn: t4 }]);
+  const { c, calls, ledger } = x;
+  await adopt(x);
+  await c.send(add); await ticks();
+  await c.send('警告の文の指定は取り消します。文はおまかせで'); await ticks();
+  const r1 = KTAiAnswers.requirementsOf(ledger()).find(e => e.id === rid(1));
+  assert(r1 && r1.decision === 'revoked' && r1.history.length === 1, `F3: 今回の発言に根拠のある取り消しは要件を取り消し済みにする（消さずに残す・履歴）: ${r1 && r1.decision}`);
+  await c.send('一覧の列に金額を足して'); await ticks();
+  assert(calls.plan[3].requirements.some(r => r.id === rid(1) && r.decision === 'revoked'), 'F3: 取り消した要件も計画の AI に渡す（戻させない）');
   const lg = KTAiAnswers.createLedger('x');
   KTAiAnswers.applyRequirementOps(lg, [OP({ behavior: 'a', sourceQuotes: ['abc def'] })], { version: 1, userTexts: ['abc def'], utterances: ['abc def'] });
   const r = KTAiAnswers.applyRequirementOps(lg, [OP({ op: 'revoke', id: 'R1', sourceQuotes: ['abc def'] })], { version: 2, userTexts: ['abc def', '別の文'], utterances: ['別の文'] });
   assert(!r.revoked.length && KTAiAnswers.requirementsOf(lg)[0].decision === 'decided', 'F3: 今回の発言に根拠の無い取り消しは適用しない（AI が勝手に要件を消さない）');
 });
 await section(async () => {
-  // F4: 「条件を変えて、コードも作って」→ 計画を更新 → ［この変更で確定してコードを作る］。古い版の仕様でコードを作らない
-  const { c, calls, byKind } = makeConv([{ plan: planWith([]) }, { plan: planWith([], { customizations: [cust({ requirement: '金額が100万円以上なら警告を出す', fields: [{ code: 'amount', access: 'CONTROL', condition: 'amount >= "1000000"' }] })] }) }]);
-  await c.send('金額が100万円を超えたら画面に警告を出したい');
-  const v1 = c.activePlan(); c.confirmSpec({ planId: v1.planId, version: v1.version });
-  await c.send('100万円ちょうども警告の対象に変えて、コードも作って');
-  const card = byKind('confirm-generate')[0];
-  assert(calls.generate === 0 && c.activePlan().version === 2 && card && card.data.version === 2 && c.activePlan().spec.status === 'DRAFT' && calls.plan[1].revision.mode === 'patch', 'F4: 先に計画を更新して検証し、変わった仕様を確かめてから作る 1 回の操作を出す（古い仕様のコードは作らない）');
+  // F4: 「条件を変えて、コードも作って」→ 計画を更新してから、変わった仕様で JavaScript を作る。古い版の仕様でコードを作らない
+  //   C-1 第 3 段: ［この変更で確定してコードを作る］のカード（confirm-generate）と仕様の確定は削除した。計画を直した版の JavaScript は最終案のパイプラインが
+  //   作り直す（ai-flow-redesign F3-1）。ここでは、作り直しが新しい条件の仕様で行われること（古い仕様のコードを使わない）を確かめる
+  const CUST_GE = cust({ requirement: '金額が100万円以上なら警告を出す', fields: [{ code: 'amount', access: 'CONTROL', condition: 'amount >= "1000000"', effects: ['warn'] }] });
+  const x = makeConv([{ plan: planWith([]) }, { plan: planWith([], { customizations: [CUST_GE] }) }]);
+  const { c, calls } = x;
+  await adopt(x);
+  const g0 = calls.generate;
+  const r = await c.send('100万円ちょうども警告の対象に変えて、コードも作って'); await ticks();
+  const v2 = c.activePlan();
+  const req2 = (v2.generated && v2.generated.C1 && v2.generated.C1.requiredEffects) || [];
+  assert(r.intent === I.REVISE_PLAN && r.reason === 'TURN_THEN_GENERATE' && v2.version === 2 && calls.plan[1].revision.mode === 'patch' && calls.generate === g0 + 1 && v2.generated.C1.reused !== true && req2.some(e => e.condition === 'amount >= "1000000"') && v2.final && !c.messages().some(m => m.data?.kind === 'confirm-generate'), `F4: 先に計画を更新し、変わった仕様（100万円以上）で JavaScript を作り直して最終案を置き換える（古い仕様のコードは使わない）: ${JSON.stringify({ v: v2.version, gen: calls.generate - g0, req: req2.map(e => e.condition) })}`);
   // 実機（2026-10-05）で見つけた: 「コードも作って」が要件「コードを生成する」になった。発言は原文のまま渡し、コードの生成は Toolkit が計画の後に行うと伝える
   assert(calls.plan[1].revision.request === '100万円ちょうども警告の対象に変えて、コードも作って' && calls.plan[1].revision.generateAfter === true, `F4: 発言は原文のまま・コードの生成は計画の後と伝える（generateAfter）: ${JSON.stringify(calls.plan[1].revision)}`);
 });
 await section(async () => {
-  // F5: 「部長が不在のときは副部長が承認します」は計画の AI へ（反映へ進まない）。仮の案を出す
+  // F5: 「部長が不在のときは副部長が承認します」は計画の AI へ（反映へ進まない）。後から変えられる点を知らせる（最終案の後の発言で確かめる）
+  //   C-1 第 3 段: 返答・要件の変化の会話の知らせと、提案のカード（provisionals）は削除した。返答と提案は最終案のカードの「仮案から変わった点と理由」に出る
+  //   （ai-flow-redesign R09-3: 提案は別のカードにしない）。カードの文の形（見出し 1 行 ＋ 1 件 1 行）の期待は消した
   const t2 = { reply: '代理の承認者を副部長にしました。', requirementOps: [OP({ target: '承認（プロセス管理）', condition: '部長が不在のとき', behavior: '副部長が代わりに承認する', sourceQuotes: ['部長が不在のときは副部長が承認します'] })], utteranceCoverage: [{ quote: '部長が不在のときは副部長が承認します', as: 'requirement', refs: [], note: '' }] };
-  const { c, calls, byKind, kinds } = makeConv([{ plan: planWith([]) }, { plan: planWith([], { provisionals: [{ id: 'A1', topic: 'location', choice: '警告は金額欄に表示', reason: '入力中に気づける', changeHint: '別の場所にしたいときは伝えてください' }] }), turn: t2 }]);
-  await c.send('100万円以上の案件は承認を必須にしたい');
-  await c.send('部長が不在のときは副部長が承認します');
-  // 2026-10-06: 返答は会話に出す。要件の変化は記録に残す（会話には出さない）
-  assert(calls.plan.length === 2 && !kinds().includes('preview-ready') && byKind('turn-reply').some(m => /副部長/.test(m.text) && KTAiChatUi.messageHtml(m) !== '') && byKind('requirements-changes').some(m => /副部長が代わりに承認する/.test(m.text) && KTAiChatUi.isHiddenMessage(m)), 'F5: 代理の承認者の指示は計画の AI へ（反映へ進む言葉にしない）・返答を出し、要件の変化を記録する');
-  // 2026-10-07 利用者の指摘: 言い回しは「提案」、見出し 1 行 ＋ 1 件 1 行（「／」で詰めない）
-  assert(byKind('provisionals').length === 1 && byKind('provisionals')[0].text === 'こちらの提案で進めている点が 1 件あります（変えたいときはそのまま伝えてください）\n- 警告は金額欄に表示（別の場所にしたいときは伝えてください）' && !/仮の案/.test(byKind('provisionals')[0].text), `F5: 後から変えられる点は「こちらの提案で進めている点」として知らせる（質問しない。見出し 1 行 ＋ 1 件 1 行）: ${JSON.stringify(byKind('provisionals')[0] && byKind('provisionals')[0].text)}`);
+  const x = makeConv([{ plan: planWith([]) }, { plan: planWith([], { provisionals: [{ id: 'A1', topic: 'location', choice: '警告は金額欄に表示', reason: '入力中に気づける', changeHint: '別の場所にしたいときは伝えてください' }] }), turn: t2 }]);
+  const { c, calls, kinds, byKind, ledger } = x;
+  await adopt(x);
+  const r = await c.send('部長が不在のときは副部長が承認します'); await ticks();
+  const fin = finalText(x);
+  assert(r.intent === I.REVISE_PLAN && calls.plan.length === 2 && !kinds().includes('preview-ready') && /代理の承認者を副部長にしました/.test(fin) && KTAiAnswers.requirementsOf(ledger()).some(e => /副部長が代わりに承認する/.test(e.behavior) && e.decision === 'decided') && !byKind('requirements-changes').length, 'F5: 代理の承認者の指示は計画の AI へ（反映へ進む言葉にしない）・返答を最終案のカードに出し、要件を台帳に記録する');
+  assert(/仮案から変わった点と理由[\s\S]*警告は金額欄に表示/.test(fin) && !/仮の案/.test(fin) && !byKind('provisionals').length && !c.messages().some(m => m.data?.kind === 'questions'), `F5: 後から変えられる点（計画が決めた提案）は最終案のカードで知らせる（質問しない・別のカードにしない）: ${(fin.match(/仮案から変わった点と理由[^\n]*/) || [''])[0]}`);
 });
 await section(async () => {
   // F6: 確認事項の追加の項目（答えで何が変わるか・候補・推奨・先に聞くか）を台帳の確認事項に持ち回る
@@ -175,133 +219,146 @@ await section(async () => {
   assert(s.open[0].priority === 'blocking' && s.open[0].impact === '承認の流れの作業者が変わる' && s.open[0].options.join() === '部長,課長' && /部長/.test(s.open[0].recommendation) && s.open[1].priority === 'later', `F6: 確認事項に答えで変わること・候補・推奨・先に聞くかを持たせる: ${JSON.stringify(s.open.map(q => q.priority))}`);
 });
 await section(async () => {
-  // F7（2026-10-06）: 要件の変化は通常の会話に出さないが、対応できないことがあるときだけ「この依頼のうち、対応できないことがあります」を出す（要件の番号は出さない）
+  // F7（2026-10-06）: 要件の変化は通常の会話に出さないが、対応できないことがあるときだけ知らせる（要件の番号は出さない）（最終案の後の発言で確かめる）
+  //   C-1 第 3 段: 会話の要件の変化の知らせ（requirements-changes）は削除した。対応できない要件は最終案のカードの「実現できない点」に出る（追加指示 §4）
   const goal = '金額が100万円を超えたら画面に警告を出し、CSV の読み込みでも保存を止めたい';
-  const t1 = { reply: '画面の警告の計画にしました。', requirementOps: [OP({ condition: '金額が100万円を超える', behavior: '画面に警告を出す', sourceQuotes: [goal] }), OP({ condition: 'CSV の読み込み', behavior: '保存を止める', disposition: 'unsupported', note: 'CSV の読み込みでは JavaScript が動かないため', sourceQuotes: [goal] })], utteranceCoverage: [{ quote: goal, as: 'requirement', refs: [], note: '' }] };
-  const { c, byKind } = makeConv([{ plan: planWith([]), turn: t1 }]);
-  await c.send(goal);
-  const m = byKind('requirements-changes')[0];
-  const html = m ? KTAiChatUi.messageHtml(m).replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ') : '';
-  assert(m && Array.isArray(m.data.unsupported) && m.data.unsupported.length === 1 && !KTAiChatUi.isHiddenMessage(m) && /この依頼のうち、対応できないことがあります：「CSV の読み込み → 保存を止める」（CSV の読み込みでは JavaScript が動かないため）/.test(html) && !/R\d/.test(html), `F7: 対応できないことがある要件の変化だけ会話に出す（理由つき・要件の番号なし）: ${html}`);
+  const t2 = { reply: '画面の警告の計画にしました。', requirementOps: [OP({ condition: '金額が100万円を超える', behavior: '画面に警告を出す', sourceQuotes: [goal] }), OP({ condition: 'CSV の読み込み', behavior: '保存を止める', disposition: 'unsupported', note: 'CSV の読み込みでは JavaScript が動かないため', sourceQuotes: [goal] })], utteranceCoverage: [{ quote: goal, as: 'requirement', refs: [], note: '' }] };
+  const x = makeConv([{ plan: planWith([]) }, { plan: planWith([]), turn: t2 }]);
+  await adopt(x);
+  await x.c.send(goal); await ticks();
+  const fin = finalText(x);
+  const cannotLine = (fin.match(/実現できない点・対応範囲[^\n]*/) || [''])[0];
+  assert(/計画では対応できないとされた要件/.test(cannotLine) && /CSV の読み込み/.test(cannotLine) && !/R\d/.test(fin) && !x.c.activePlan().final.approvable === false, `F7: 対応できないことがある要件を知らせる（最終案のカードの「実現できない点」・要件の番号なし）: ${cannotLine}`);
+  //   理由（計画の AI の note）は、従来の会話の知らせには出ていたが、最終案のカードの「実現できない点」には出ない（文は発言の引用だけ）。守り手が無いので期待は残す（報告済み）
+  assert(/CSV の読み込みでは JavaScript が動かないため/.test(cannotLine), `F7: 対応できない理由を添える（理由つき）: ${cannotLine}`);
   // 対応できないことが無い要件の変化は出さない（chatHtml も数えない）
-  const k = makeConv([{ plan: planWith([]), turn: { reply: 'r', requirementOps: [OP({ behavior: '画面に警告を出す', sourceQuotes: [goal] })], utteranceCoverage: [{ quote: goal, as: 'requirement', refs: [], note: '' }] } }]);
-  await k.c.send(goal);
-  const rc = k.byKind('requirements-changes');
+  const k = makeConv([{ plan: planWith([]) }, { plan: planWith([]), turn: { reply: 'r', requirementOps: [OP({ behavior: '画面に警告を出す', sourceQuotes: [goal] })], utteranceCoverage: [{ quote: goal, as: 'requirement', refs: [], note: '' }] } }]);
+  await adopt(k);
+  await k.c.send(goal); await ticks();
   const chat = KTAiChatUi.chatHtml(k.c.messages()).replace(/<[^>]+>/g, ' ');
-  assert(rc.length === 1 && KTAiChatUi.isHiddenMessage(rc[0]) && !/要件：/.test(chat) && !/追加 R1/.test(chat), `F7: 対応できないことが無い要件の変化は記録だけ（会話に出さない）: ${rc.map(x => x.text).join(' / ')}`);
+  assert(KTAiAnswers.requirementsOf(k.ledger()).some(e => e.behavior === '画面に警告を出す') && !/要件：/.test(chat) && !/追加 R\d/.test(chat) && !/計画では対応できないとされた要件/.test(finalText(k)), `F7: 対応できないことが無い要件の変化は台帳に記録するだけ（会話・最終案のカードに出さない）: ${(finalText(k).match(/実現できない点[^\n]*/) || [''])[0]}`);
 });
 
 // =========================================================
 console.log('\n--- W. 作業中も会話を続ける（最初の計画・コードの生成の途中の質問と指示・先回りの返答） ---');
 await section(async () => {
   // W1 / W2: 最初の計画の作成中。質問はすぐ答え（今の要件と計画: 作成中）、指示はためて、計画を版として出す前に差分で続けて入れる
-  const t1 = { reply: '警告の計画を作りました。', requirementOps: [OP({ condition: '金額が100万円を超える', behavior: '警告を出す', sourceQuotes: ['金額が100万円を超えたら画面に警告を出したい'] })], utteranceCoverage: [] };
-  const t2 = { reply: '100万円ちょうども対象にしました。', requirementOps: [OP({ op: 'update', id: 'R1', condition: '金額が100万円以上', behavior: '警告を出す', sourceQuotes: ['100万円ちょうども警告の対象にして'] })], utteranceCoverage: [{ quote: '100万円ちょうども警告の対象にして', as: 'requirement', refs: ['R1'], note: '' }] };
-  const { c, calls, ctl, byKind, ledger } = makeConv([{ plan: planWith([]), turn: t1 }, { plan: planWith([], { customizations: [cust({ fields: [{ code: 'amount', access: 'CONTROL', condition: 'amount >= "1000000"' }] })] }), turn: t2 }]);
+  //   C-1 第 3 段（2026-10-08）: 最初の計画は仮案の採用の後に作る（working PLAN）。その作成中で確かめる。
+  //   先回りの返答（plan-brief）は削除した（ai-flow-redesign F7-5）。変更案のカード（planCardHtml）と要約の記録（plan-summary）も削除した（F7-2・R09-3）。
+  //   指示を入れた計画で最終案を 1 回だけ作ることは ai-flow-redesign の「指示 A1」でも守る
+  const t1 = { reply: '警告の計画を作りました。', requirementOps: [OP({ condition: '金額が100万円を超える', behavior: '警告を出す', sourceQuotes: [K.REQUESTS[0]] })], utteranceCoverage: [] };
+  const t2 = { reply: '100万円ちょうども対象にしました。', requirementOps: [OP({ op: 'update', id: rid(1), condition: '金額が100万円以上', behavior: '警告を出す', sourceQuotes: ['100万円ちょうども警告の対象にして'] })], utteranceCoverage: [{ quote: '100万円ちょうども警告の対象にして', as: 'requirement', refs: [rid(1)], note: '' }] };
+  const x = makeConv([{ plan: planWith([]), turn: t1 }, { plan: planWith([], { customizations: [cust({ fields: [{ code: 'amount', access: 'CONTROL', condition: 'amount >= "1000000"', effects: ['warn'] }] })] }), turn: t2 }]);
+  const { c, calls, ctl, byKind, ledger } = x;
+  await draftUntilAdopt(x);
   const open = ctl.hold();
-  const p = c.send('金額が100万円を超えたら画面に警告を出したい');
+  const p = c.send(K.REQUESTS[3]);
   await ticks();
-  assert(calls.ask.length === 1 && calls.ask[0].conversation.brief === true && calls.ask[0].conversation.working === 'PLAN' && byKind('plan-brief').length === 1, `W1: 計画の完成を待たせない: 理解した目的・方向・未決事項を先に返す（先回りの返答）: ${JSON.stringify(calls.ask.map(a => a.conversation && a.conversation.brief))}`);
+  assert(c.isBusy() && c.state.working === 'PLAN' && calls.ask.length === 0 && byKind('plan-brief').length === 0, `前提: 採用の後の計画の作成中（working PLAN）。先回りの返答は無い: ${c.state.working}`);
   const q = await c.send('ところで、このアプリには今いくつJavaScriptが入っていますか？');
   await ticks();
-  assert(q && q.asked === true && calls.ask.length === 2 && calls.ask[1].conversation.working === 'PLAN' && calls.ask[1].conversation.plan === null && byKind('aside-answer').length === 1 && c.planHistory().length === 0, 'W1: 作成中の質問はすぐ答える（作業は止めない・作成中と伝え、前の計画を今の計画として渡さない）。以前は受け付けず下書きのまま');
+  const qc = calls.ask[0] && calls.ask[0].conversation;
+  assert(q && q.asked === true && calls.ask.length === 1 && qc && qc.working === 'PLAN' && qc.plan && /^採用した仮案（最終案を作成中）/.test(qc.plan.summary) && byKind('aside-answer').length === 1 && c.planHistory().length === 0, `W1: 作成中の質問はすぐ答える（作業は止めない・作成中と伝え、前の計画を今の計画として渡さない: 渡すのは採用した仮案で「最終案を作成中」と書く）: ${qc && qc.plan && qc.plan.summary.slice(0, 30)}`);
   const ch = await c.send('100万円ちょうども警告の対象にして');
   // 2026-10-06: 受け付けた・入れた の知らせは会話に出さない（記録には残る。まだ変更案に入っていないときだけ出す）
   assert(ch && ch.queued === true && byKind('answers-ack').some(m => m.data.work === 'PLAN' && /いま作っている計画に、続けて入れます/.test(m.text) && KTAiChatUi.isHiddenMessage(m)), 'W2: 作成中の指示は受け付けてためる（受領は記録に残し、会話には出さない）');
   open(); await p; await ticks();
   const vs = c.planHistory();
-  assert(vs.length === 1 && vs[0].version === 1 && vs[0].basedOnVersion === 0 && calls.plan.length === 2 && calls.plan[1].revision.mode === 'patch' && /100万円ちょうども/.test(calls.plan[1].revision.utterances[0]), `W2: 指示の入っていない計画は出さず、差分で続けて入れた版だけを v1 として出す: ${JSON.stringify(vs.map(v => v.version))}`);
-  // 実機（2026-10-05）で見つけた表示: 最初の計画のカードが「v1 を見直しました ／ 修正: 修正の依頼：…」と出た
-  // 2026-10-06: 会話のカードは版の番号・「修正: …」の行を出さない。最初の変更案は「直しました」ではなく「できました（作っている間に送った内容も入れました）」
-  const planMsg = c.messages().find(m => m.type === 'PLAN' && m.data?.version === 1);
-  const cardText = KTAiChatUi.planCardHtml(vs[0], { m: planMsg }).replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ');
-  assert(/変更案ができました（作っている間に送った内容も入れました）。/.test(cardText) && !/直しました/.test(cardText) && !/修正の依頼：/.test(cardText) && !/修正: /.test(cardText) && !/v\d/.test(cardText), `W2: 最初の変更案のカードは「できました」・作成中に送った内容も入れたと出す（版の番号・「修正の依頼：」は出さない）: ${cardText.slice(0, 160)}`);
-  const r1 = KTAiAnswers.requirementsOf(ledger()).find(e => e.id === 'R1');
+  assert(vs.length === 1 && vs[0].version === 1 && vs[0].basedOnVersion === 0 && calls.plan.length === 2 && calls.plan[1].revision.mode === 'patch' && /100万円ちょうども/.test(calls.plan[1].revision.utterances[0]) && x.finals().length === 1 && vs[0].final, `W2: 指示の入っていない計画は出さず、差分で続けて入れた版だけを v1 として出す（最終案は 1 枚）: ${JSON.stringify(vs.map(v => v.version))}`);
+  const r1 = KTAiAnswers.requirementsOf(ledger()).find(e => e.id === rid(1));
   const acksW2 = byKind('answers-ack');
-  const summaryW2 = byKind('plan-summary')[0];
-  assert(r1 && r1.condition === '金額が100万円以上' && r1.history.length === 1 && acksW2.length && acksW2.every(m => m.data.stage === 'done' && /変更案に入れました/.test(m.text)) && summaryW2 && /作っている間に送られた内容も入れました/.test(summaryW2.text), `W2: 要件は続けた作業で更新（履歴に前の条件）・受領は「変更案に入れました」・変更案の要約の記録に「作っている間に送られた内容も入れました」: ${acksW2.map(m => m.text).join(' / ')} ｜ ${summaryW2 && summaryW2.text}`);
-  // 順番: 先回りの返答 → 作成中の質問の答え → 計画
+  assert(r1 && r1.condition === '金額が100万円以上' && r1.history.length === 1 && acksW2.length && acksW2.every(m => m.data.stage === 'done' && /変更案に入れました/.test(m.text)), `W2: 要件は続けた作業で更新（履歴に前の条件）・受領は「変更案に入れました」: ${acksW2.map(m => m.text).join(' / ')}`);
+  // 順番: 作成中の質問の答え → 最終案
   const idx = (k) => c.messages().findIndex(m => (m.data?.kind || m.type) === k);
-  assert(idx('plan-brief') < idx('aside-answer') && idx('aside-answer') < idx('PLAN'), 'W2: 先回りの返答と作成中の質問の答えは、計画より先に出る');
+  assert(idx('aside-answer') >= 0 && idx('aside-answer') < idx('FINAL'), 'W2: 作成中の質問の答えは、最終案より先に出る');
 });
 await section(async () => {
-  // W3: コードの生成中の指示 → 生成の後に計画へ（前の仕様のコードは登録の対象にしない）→［この変更で確定してコードを作る］。生成を止めたり繰り返したりしない
-  const { c, calls, ctl, byKind } = makeConv([{ plan: planWith([]) }, { plan: planWith([], { customizations: [cust({ requirement: '金額が100万円以上なら警告' })] }) }]);
-  await c.send('金額が100万円を超えたら画面に警告を出したい');
-  const v1 = c.activePlan(); c.confirmSpec({ planId: v1.planId, version: v1.version });
-  const open = ctl.hold();
-  const g = c.send('コードを作って');
-  await ticks();
+  // W3: コードの生成中の指示 → 生成の後に計画へ（前の仕様のコードは使わない）。生成を止めたり繰り返したりしない
+  //   C-1 第 3 段: 仕様の確定と従来の生成は削除した。生成は採用の後の最終案のパイプラインで行う（working FINAL）。その生成中で確かめる。
+  //   前の仕様のコードの知らせ（generated-stale）と［この変更で確定してコードを作る］（confirm-generate）は削除した。生成の後の差分更新で
+  //   変わった JavaScript を作り直す（ai-flow-redesign R11-1〜R11-6・R18-1）
+  const x = makeConv([{ plan: planWith([]) }, { plan: planWith([], { customizations: [cust({ requirement: '金額が100万円以上なら警告', fields: [{ code: 'amount', access: 'CONTROL', condition: 'amount >= "1000000"', effects: ['warn'] }] })] }) }]);
+  const { c, calls, ctl, byKind } = x;
+  await draftUntilAdopt(x);
+  const gPlan = ctl.hold(), gGen = ctl.hold();
+  const g = c.send(K.REQUESTS[3]);
+  await ticks(); gPlan(); await ticks(10);
+  const v1 = c.activePlan();
+  assert(c.isBusy() && c.state.working === 'FINAL' && v1 && calls.plan.length === 1, `前提: 計画ができて生成中（working FINAL）: ${c.state.working}`);
   const ch = await c.send('警告は100万円ちょうども対象にして');
-  assert(ch && ch.queued === true && byKind('answers-ack').some(m => m.data.work === 'GENERATE'), 'W3: コードの生成中の指示も受け付けてためる');
+  assert(ch && ch.queued === true && byKind('answers-ack').some(m => m.data.work === 'FINAL'), `W3: コードの生成中の指示も受け付けてためる: ${JSON.stringify(byKind('answers-ack').map(m => m.data.work))}`);
   const q = await c.send('この警告は一覧画面でも出ますか？');
   assert(q && q.asked === true, 'W3: 生成中の質問はすぐ答える');
-  open(); await g; await ticks();
-  assert(calls.generate === 1 && c.activePlan().version === 2 && v1.status === 'SUPERSEDED' && byKind('generated-stale').length === 1 && byKind('confirm-generate').some(m => m.data.version === 2), `W3: 生成は 1 回だけ（止めない・繰り返さない）、生成の後に計画を v2 にし、前の仕様のコードは登録の対象にしない・確定して作る操作を出す: ${JSON.stringify({ gen: calls.generate, v: c.activePlan().version })}`);
+  gGen(); await g; await ticks(12);
+  const v2 = c.activePlan();
+  const req2 = (v2.generated && v2.generated.C1 && v2.generated.C1.requiredEffects) || [];
+  assert(calls.generate === 2 && v2.version === 2 && v1.status === 'SUPERSEDED' && v2.generated.C1.reused !== true && req2.some(e => e.condition === 'amount >= "1000000"') && x.finals().length === 2 && !byKind('generated-stale').length && !byKind('confirm-generate').length, `W3: 生成は止めずに 1 回で終え、生成の後に計画を v2 にし、v2 は新しい仕様で作り直す（前の仕様のコードは使わない）: ${JSON.stringify({ gen: calls.generate, v: v2.version })}`);
 });
-await section(async () => {
-  // W4: 先回りの返答が計画より後に届いたら出さない（計画より古い理解を後から出さない）
-  const { c, ctl, byKind } = makeConv([{ plan: planWith([]) }], { askHold: true });
-  const openAsk = ctl.holdAsk();
-  await c.send('金額が100万円を超えたら画面に警告を出したい');
-  openAsk(); await ticks();
-  assert(byKind('plan-brief').length === 0 && c.planHistory().length === 1, 'W4: 計画の後に届いた先回りの返答は出さない');
-});
+//   W4（先回りの返答が計画より後に届いたら出さない）: C-1 第 3 段で先回りの返答（assistant-qa の brief・plan-brief）そのものを削除した。
+//   対応する回帰: ai-flow-redesign の F7-5（先回りの返答は使わない）・R01-1（新しい依頼は仮案の AI へ。先回りの返答は呼ばない）
 
 await section(async () => {
-  // W5: 作成中の指示を続けて入れた v1 の表示: 版として出さなかった計画の返答は出さない・この版で追加した要件は「追加」だけ（「変更」に重ねない）
-  const t1 = { reply: '100万円を超えたら警告を出す計画にしました（100万円ちょうどは対象外）。', requirementOps: [OP({ condition: '金額が100万円を超える', behavior: '警告を出す', sourceQuotes: ['金額が100万円を超えたら画面に警告を出したい'] })], utteranceCoverage: [] };
-  const t2 = { reply: '100万円ちょうども対象にしました。', requirementOps: [OP({ op: 'update', id: 'R1', condition: '金額が100万円以上', behavior: '警告を出す', sourceQuotes: ['100万円ちょうども警告の対象にして'] })], utteranceCoverage: [{ quote: '100万円ちょうども警告の対象にして', as: 'requirement', refs: ['R1'], note: '' }] };
-  const { c, ctl, byKind } = makeConv([{ plan: planWith([]), turn: t1 }, { plan: planWith([]), turn: t2 }]);
+  // W5: 作成中の指示を続けて入れた v1 の表示: 版として出さなかった計画の返答は出さない（採用の後の計画の作成中で確かめる）
+  //   C-1 第 3 段: 要件の変化の会話の知らせ（「追加 R1」）は削除した（最終案のカードの「変わった点」: ai-flow-redesign R11-5）。
+  //   返答は最終案のカードの「仮案から変わった点と理由」に出るので、そこに版として出さなかった計画の返答が混ざらないことを確かめる
+  const t1 = { reply: '100万円を超えたら警告を出す計画にしました（100万円ちょうどは対象外）。', requirementOps: [OP({ condition: '金額が100万円を超える', behavior: '警告を出す', sourceQuotes: [K.REQUESTS[0]] })], utteranceCoverage: [] };
+  const t2 = { reply: '100万円ちょうども対象にしました。', requirementOps: [OP({ op: 'update', id: rid(1), condition: '金額が100万円以上', behavior: '警告を出す', sourceQuotes: ['100万円ちょうども警告の対象にして'] })], utteranceCoverage: [{ quote: '100万円ちょうども警告の対象にして', as: 'requirement', refs: [rid(1)], note: '' }] };
+  const x = makeConv([{ plan: planWith([]), turn: t1 }, { plan: planWith([]), turn: t2 }]);
+  const { c, ctl, ledger } = x;
+  await draftUntilAdopt(x);
   const open = ctl.hold();
-  const p = c.send('金額が100万円を超えたら画面に警告を出したい');
+  const p = c.send(K.REQUESTS[3]);
   await ticks();
   await c.send('100万円ちょうども警告の対象にして');
   open(); await p; await ticks();
-  const reply = byKind('turn-reply').map(m => m.text).join(' / ');
-  const changes = byKind('requirements-changes').map(m => m.text).join(' / ');
-  assert(reply === '100万円ちょうども対象にしました。' && /追加 R1/.test(changes) && !/変更 R1/.test(changes), `W5: 出さなかった計画の返答（「ちょうどは対象外」）を出さず、R1 は「追加」だけ: ${reply} ｜ ${changes}`);
+  const fin = finalText(x);
+  const added = KTAiAnswers.requirementsOf(ledger()).filter(e => e.behavior === '警告を出す');
+  assert(/100万円ちょうども対象にしました。/.test(fin) && !/100万円ちょうどは対象外/.test(fin) && added.length === 1 && added[0].id === rid(1), `W5: 出さなかった計画の返答（「ちょうどは対象外」）を最終案のカードに出さず、要件は 1 件（続けた作業で更新）: ${(fin.match(/仮案から変わった点と理由[^\n]*\n?[^\n]*/) || [''])[0]}`);
 });
 
 // =========================================================
 console.log('\n--- R. 差分レビューの指摘（失敗・前の計画・作成中の文の形・誤判定・根拠の照合・見逃し・上限） ---');
-await section(async () => {
-  // R1（H1）: 最初の計画を作れなかったら、作成中の先回りの返答だけを残さず、エラーを出して ok:false（入力欄に依頼の文を戻せる）
-  const { c, kinds } = makeConv([{ fail: { ok: false, reason: 'DEV_BASE_UNAVAILABLE', message: '動作テスト環境を取得できませんでした' } }]);
-  const r = await c.send('金額が100万円を超えたら画面に警告を出したい');
-  const err = c.messages().find(m => m.type === 'ERROR');
-  assert(r.ok === false && err && /動作テスト環境を取得できませんでした/.test(err.text) && err.data.retryText === '金額が100万円を超えたら画面に警告を出したい' && c.planHistory().length === 0, `R1: 計画を作れなかったときはエラーを出す（以前は ok:true で先回りの返答だけが残った）: ${JSON.stringify({ ok: r.ok, kinds: kinds() })}`);
-});
+//   R1（H1。最初の計画を作れなかったら、先回りの返答だけを残さずエラーを出して ok:false・［再試行］に依頼の文）: C-1 第 3 段で最初の依頼から直接に計画を作る経路と
+//   先回りの返答を削除した。採用の後の計画の失敗の回帰: ai-flow-redesign の B3-1（計画を作れなかったら仮案は open に戻り、履歴に失敗を残す）・
+//   B3-2（失敗のカードの［再試行］は「採用します」）・B3-11 / B3-12（例外のときも同じ）・F7-5（先回りの返答は使わない）
 await section(async () => {
   // R2（H2）: 反映済みの前の計画がある状態で新しい計画を作り、その作成中に受けた指示も入れる（以前は「置き換わった」として新しい計画ごと捨てた）
-  const { c, calls, ctl } = makeConv([{ plan: planWith([]) }]);
-  await c.send('金額が100万円を超えたら画面に警告を出したい');
+  //   C-1 第 3 段: 反映済みの後の新しい依頼は仮案から（afterPlan。ai-flow-redesign F6-1）。その仮案の採用の後の計画の作成中で確かめる
+  const x = makeConv([{ plan: planWith([]) }]);
+  const { c, calls, ctl } = x;
+  await adopt(x);
   const old = c.activePlan(); old.status = 'EXECUTED';
+  await draftUntilAdopt(x);
+  const d2 = c.draft();
   const open = ctl.hold();
-  const p = c.send('契約終了30日前に担当者へ通知したい');
+  const p = c.send(K.REQUESTS[3]);
   await ticks();
   const q = await c.send('土日は除いてほしい');
   open(); const r = await p; await ticks();
   const hist = c.planHistory().map(v => `${v.planId === old.planId ? 'old' : 'new'}:v${v.version}`);
-  assert(q && q.queued === true && r.ok === true && !r.superseded && hist.join() === 'old:v1,new:v1' && c.activePlan().planId !== old.planId && calls.plan.length === 3 && /土日は除いて/.test(calls.plan[2].revision.utterances[0]), `R2: 前の計画が反映済みでも、新しい計画の作成中の指示を入れた v1 を出す: ${JSON.stringify({ hist, ok: r.ok, superseded: r.superseded })}`);
+  assert(d2 && d2.afterPlan === old.planId && q && q.queued === true && r.ok === true && !r.superseded && hist.join() === 'old:v1,new:v1' && c.activePlan().planId !== old.planId && calls.plan.length === 3 && /土日は除いて/.test(calls.plan[2].revision.utterances[0]), `R2: 前の計画が反映済みでも、新しい計画の作成中の指示を入れた v1 を出す: ${JSON.stringify({ hist, ok: r.ok, superseded: r.superseded })}`);
 });
 await section(async () => {
   // R3（H3）: 作成中に受けた指示を続けて入れる作業が失敗しても、できていた最初の計画は v1 として出す（入っていないのはその指示だけ。再試行はその指示の原文で）
-  const { c, ctl, byKind } = makeConv([{ plan: planWith([]) }, { fail: { ok: false, reason: 'ERROR', message: '計画の修正に失敗しました' } }, { plan: planWith([]) }]);
+  //   C-1 第 3 段: 最初の計画は仮案の採用の後に作る。その作成中で確かめる
+  const x = makeConv([{ plan: planWith([]) }, { fail: { ok: false, reason: 'ERROR', message: '計画の修正に失敗しました' } }, { plan: planWith([]) }]);
+  const { c, ctl, byKind } = x;
+  await draftUntilAdopt(x);
   const open = ctl.hold();
-  const p = c.send('金額が100万円を超えたら画面に警告を出したい');
+  const p = c.send(K.REQUESTS[3]);
   await ticks();
   await c.send('100万円ちょうども警告の対象にして');
   open(); const r = await p; await ticks();
   const err = c.messages().find(m => m.type === 'ERROR');
   // 2026-10-06: 失敗した受領（まだ変更案に入っていない）は会話に出す
-  assert(r.ok === false && c.planHistory().length === 1 && c.activePlan().version === 1 && err && err.data.retryText === '100万円ちょうども警告の対象にして' && !err.data.intent && byKind('answers-ack').length && byKind('answers-ack').every(m => m.data.stage === 'failed' && !KTAiChatUi.isHiddenMessage(m) && /まだ変更案に入っていません/.test(KTAiChatUi.messageHtml(m))), `R3: 続けた作業の失敗でも最初の計画は v1。指示の受領は「失敗」（まだ変更案に入っていないと会話に出す）・再試行は指示の原文（振り分け直す）: ${JSON.stringify({ hist: c.planHistory().length, retry: err && err.data.retryText, intent: err && err.data.intent, ack: byKind('answers-ack').map(m => KTAiChatUi.messageHtml(m).replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim()) })}`);
-  const rr = await c.send(err.data.retryText, { intentOverride: err.data.intent });
+  assert(r.ok === false && c.planHistory().length === 1 && c.activePlan().version === 1 && c.activePlan().final && err && err.data.retryText === '100万円ちょうども警告の対象にして' && !err.data.intent && byKind('answers-ack').length && byKind('answers-ack').every(m => m.data.stage === 'failed' && !KTAiChatUi.isHiddenMessage(m) && /まだ変更案に入っていません/.test(KTAiChatUi.messageHtml(m))), `R3: 続けた作業の失敗でも最初の計画は v1（最終案も出す）。指示の受領は「失敗」（まだ変更案に入っていないと会話に出す）・再試行は指示の原文（振り分け直す）: ${JSON.stringify({ hist: c.planHistory().length, retry: err && err.data.retryText, intent: err && err.data.intent, ack: byKind('answers-ack').map(m => KTAiChatUi.messageHtml(m).replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim()) })}`);
+  const rr = await c.send(err.data.retryText, { intentOverride: err.data.intent }); await ticks();
   assert(rr.ok === true && c.activePlan().version === 2, 'R3: 再試行で、その指示を v1 に入れた v2 ができる（以前は「修正する計画がありません」）');
   // 取り消し（例外）でも同じ
   const k = makeConv([{ plan: planWith([]) }, { cancel: true }]);
+  await draftUntilAdopt(k);
   const open2 = k.ctl.hold();
-  const p2 = k.c.send('金額が100万円を超えたら画面に警告を出したい');
+  const p2 = k.c.send(K.REQUESTS[3]);
   await ticks();
   await k.c.send('100万円ちょうども警告の対象にして');
   open2(); const r2 = await p2; await ticks();
@@ -309,9 +366,12 @@ await section(async () => {
 });
 await section(async () => {
   // R4（H4）: 計画が無い最初の作成中は、文の形だけで分ける: 質問でない文（回答の形の短い指示も）はためて計画に入れる。版になる前の土台に続けて入れている間も同じ
-  const { c, calls, ctl } = makeConv([{ plan: planWith([]) }, { plan: planWith([]) }, { plan: planWith([]) }]);
+  //   C-1 第 3 段: 最初の計画は仮案の採用の後に作る。その作成中で確かめる
+  const x = makeConv([{ plan: planWith([]) }, { plan: planWith([]) }, { plan: planWith([]) }]);
+  const { c, calls, ctl } = x;
+  await draftUntilAdopt(x);
   const open = ctl.hold();
-  const p = c.send('金額が100万円を超えたら画面に警告を出したい');
+  const p = c.send(K.REQUESTS[3]);
   await ticks();
   const outs = [];
   for (const t of ['保存は止めない', 'PCだけ', '承認者は部長', '警告の文は「高額です」']) outs.push(await c.send(t));
@@ -322,16 +382,18 @@ await section(async () => {
   const more = await c.send('モバイルも対象にして');
   hold2(); await p; await ticks();
   assert(outs.every(o => o && o.queued === true) && asked && asked.asked === true && op === null && calls.plan.length === 3, `R4: 「保存は止めない」「PCだけ」などはためる（以前は質問の AI へ回り計画に入らなかった）・質問はすぐ答える・反映の命令は作業の後に: ${JSON.stringify(outs.map(o => o && o.reason))}`);
-  assert(more && more.queued === true && /保存は止めない/.test(calls.plan[1].revision.utterances.join()) && /モバイルも対象に/.test(calls.plan[2].revision.utterances.join()) && c.planHistory().length === 1, `R4: 版になる前の土台に続けて入れている間の指示もためて、次の作業で入れる: ${JSON.stringify(calls.plan.map(x => x.revision && x.revision.utterances))}`);
-  assert(calls.ask.filter(a => !a.conversation.brief).map(a => a.question).join() === '警告は一覧画面でも出ますか？', 'R4: 質問の AI に回したのは質問だけ（先回りの返答を除く）');
+  assert(more && more.queued === true && /保存は止めない/.test(calls.plan[1].revision.utterances.join()) && /モバイルも対象に/.test(calls.plan[2].revision.utterances.join()) && c.planHistory().length === 1, `R4: 版になる前の土台に続けて入れている間の指示もためて、次の作業で入れる: ${JSON.stringify(calls.plan.map(y => y.revision && y.revision.utterances))}`);
+  assert(calls.ask.map(a => a.question).join() === '警告は一覧画面でも出ますか？', 'R4: 質問の AI に回したのは質問だけ（先回りの返答は無い）');
 });
 await section(async () => {
   // R5（H5）: 文の質問の判定は文末の形で決める。文の途中の「している」「わかる」で指示を質問にしない
   const isQ = KTAiConversation.isQuestionSentence;
   assert(!isQ('完了している案件にも警告を出して') && !isQ('わかるように赤字で表示して') && !isQ('何件でも登録できるようにして') && isQ('CSVにも効きますか？') && isQ('承認者は誰がいい') && isQ('どこに表示されるの') && isQ('このフィールドは何に使ってる'), 'R5: 文末の形で質問か決める（「完了している案件にも警告を出して」は指示）');
+  //   C-1 第 3 段: 会話は最終案の後の発言で確かめる
   const t2 = { reply: 'r', requirementOps: [], utteranceCoverage: [] };
-  const { c, calls } = makeConv([{ plan: planWith(qs(QP, QS)) }, { plan: planWith(qs(QS)), turn: t2 }]);
-  await c.send('金額が100万円を超えたら画面に警告を出したい');
+  const x = makeConv([{ plan: planWith(qs(QP, QS)) }, { plan: planWith(qs(QS)), turn: t2 }]);
+  const { c, calls } = x;
+  await adopt(x);
   await c.send('PCだけ。完了している案件にも警告を出して');
   await ticks();
   assert(calls.plan.length === 2 && /完了している案件にも警告を出して/.test(calls.plan[1].revision.utterances.join()) && !calls.ask.some(a => /完了している/.test(a.question)), `R5: 回答＋指示の発言は、指示の部分も計画の AI に渡す（質問の AI に回さない）: ${JSON.stringify(calls.plan[1].revision.utterances)}`);
@@ -344,9 +406,11 @@ await section(async () => {
   const gs = ['ありがとうございました', '了解しました', 'わかりました', 'よろしくお願いします', 'うーん', 'なるほど', '承知しました。ありがとうございます'];
   assert(gs.every(t => cls(t).intent === I.GENERAL), `R6: 挨拶・相づちは計画の AI へ回さない: ${JSON.stringify(gs.map(t => cls(t).intent))}`);
   assert([I.ASK, I.EXPLAIN_PLAN].includes(cls('ありがとう。CSVにも効きますか？').intent) && [I.ASK, I.EXPLAIN_PLAN].includes(cls('なるほど。では一覧画面でも出ますか？').intent), 'R6: 挨拶＋質問は質問として答える');
-  const { c, calls } = makeConv([{ plan: planWith([]) }]);
-  await c.send('金額が100万円を超えたら画面に警告を出したい');
-  await c.send('了解しました');
+  //   C-1 第 3 段: 会話は最終案の後の発言で確かめる
+  const x = makeConv([{ plan: planWith([]) }]);
+  const { c, calls } = x;
+  await adopt(x);
+  await c.send('了解しました'); await ticks();
   assert(calls.plan.length === 1 && c.activePlan().version === 1, 'R6: 「了解しました」で計画を作り直さない（以前は v2 ができた）');
 });
 await section(async () => {
@@ -355,12 +419,19 @@ await section(async () => {
   const cls = (t) => KTAiConversation.classifyIntent(t, { activePlan: v, ledgers: new Map() });
   const a = cls('これで進めて。CSVにも効きますか？'), b = cls('コードを作って。CSVにも効きますか？');
   assert(a.intent === I.REQUEST_PREVIEW && /CSV/.test(a.askText) && b.intent === I.GENERATE_CODE && /CSV/.test(b.askText), `R7: 命令の判定は質問の文を除いた部分で行う: ${a.intent} ${b.intent}`);
-  const { c, calls } = makeConv([{ plan: planWith([]) }]);
-  await c.send('金額が100万円を超えたら画面に警告を出したい');
-  const v1 = c.activePlan(); c.confirmSpec({ planId: v1.planId, version: v1.version });
+  //   C-1 第 3 段: 仕様の確定と従来の生成は削除した。最終案の後の「コードを作って」は最終案の作り直し（ai-flow-redesign F2-1）。
+  //   最初の生成を失敗させ、作り直す JavaScript がある最終案で確かめる（検証済みだけなら作り直さない: F2-4）
+  let n = 0;
+  const base = K.makeGenerate({ sequence: ['warn'] });
+  const gen = { calls: base.calls, impl: async (args) => { n += 1; if (n === 1) return { ok: false, reason: 'UPSTREAM_ERROR', message: 'AI の応答を取得できませんでした（テスト）' }; return base.impl(args); } };
+  const x = makeConv([{ plan: planWith([]) }], { generate: gen });
+  const { c, calls } = x;
+  const v1 = await adopt(x);
+  const g0 = calls.generate;
+  assert(v1 && v1.generated.C1 && v1.generated.C1.status === 'failed', `前提: 最初の生成は失敗（作り直す JavaScript がある）: ${v1 && v1.generated.C1 && v1.generated.C1.status}`);
   await c.send('コードを作って。CSVにも効きますか？');
   await ticks();
-  assert(calls.generate === 1 && calls.plan.length === 1 && calls.ask.some(a2 => /CSV/.test(a2.question)), `R7: コードを作り（計画は作り直さない）、質問は同時に答える: ${JSON.stringify({ gen: calls.generate, plans: calls.plan.length })}`);
+  assert(calls.generate === g0 + 1 && calls.plan.length === 1 && c.activePlan().version === 2 && c.activePlan().generated.C1.status === 'verified' && calls.ask.some(a2 => /CSV/.test(a2.question)), `R7: コードを作り（計画は作り直さない）、質問は同時に答える: ${JSON.stringify({ gen: calls.generate - g0, plans: calls.plan.length })}`);
 });
 await section(async () => {
   // R8（M8）: 名詞＋「取り消して / 元に戻して」は、修正できる計画があれば計画の修正（反映の取り消しではない）。命令だけの文は従来どおり
@@ -389,12 +460,13 @@ await section(async () => {
   assert(r4.updated.length === 1 && KTAiAnswers.requirementsOf(lg)[1].decision === 'decided', 'R9: 利用者が戻すと言えば戻す');
 });
 await section(async () => {
-  // R10（M4）: AI 自身の質問文を引用しても「利用者の決定」にしない（Toolkit が組み立てた依頼文は利用者の文として数えない）
+  // R10（M4）: AI 自身の質問文を引用しても「利用者の決定」にしない（Toolkit が組み立てた依頼文は利用者の文として数えない）（最終案の後の回答で確かめる）
   const t2 = { reply: 'r', requirementOps: [OP({ behavior: '保存を止める', sourceQuotes: ['金額が大きいとき、保存を止めますか'] })], utteranceCoverage: [{ quote: 'いいえ', as: 'answer', refs: [], note: '' }] };
-  const { c, calls, ledger } = makeConv([{ plan: planWith(qs(QS)) }, { plan: planWith([]), turn: t2 }]);
-  await c.send('金額が100万円を超えたら画面に警告を出したい');
-  await c.send('いいえ');
-  const e = KTAiAnswers.requirementsOf(ledger()).find(x => x.behavior === '保存を止める');
+  const x = makeConv([{ plan: planWith(qs(QS)) }, { plan: planWith([]), turn: t2 }]);
+  const { c, calls, ledger } = x;
+  await adopt(x);
+  await c.send('いいえ'); await ticks();
+  const e = KTAiAnswers.requirementsOf(ledger()).find(y => y.behavior === '保存を止める');
   assert(/保存を止めますか/.test(calls.plan[1].revision.request) && e && e.decision === 'proposed' && !e.sourceQuotes.length, `R10: 確認事項の文の引用は根拠にならない（提案に下げる）: ${e && e.decision}`);
 });
 await section(async () => {
@@ -411,18 +483,20 @@ await section(async () => {
   assert(para.length === 0, `R11: 言い換えて構造化した節（例外）は扱った部分とみなす: ${JSON.stringify(para)}`);
 });
 await section(async () => {
-  // R12（M6）: 対応先を聞き返す回答でも、質問の部分は同時に答える
-  const { c, calls, byKind } = makeConv([{ plan: planWith(qs({ question: '金額が大きいとき、保存を止めますか？', topic: 'save_block' }, { question: '承認者にメールで通知しますか？', topic: 'notify' })) }]);
-  await c.send('金額が100万円を超えたら画面に警告を出したい');
+  // R12（M6）: 対応先の決まらない回答でも、質問の部分は同時に答える（最終案の後の回答で確かめる）
+  //   C-1 第 3 段: 対応先を聞き返すカード（answer-target）は削除した。候補の確認事項を添えて計画の AI に渡す（ai-flow-redesign F4-1・F4-2）
+  const x = makeConv([{ plan: planWith(qs({ question: '金額が大きいとき、保存を止めますか？', topic: 'save_block' }, { question: '承認者にメールで通知しますか？', topic: 'notify' })) }, { plan: planWith([]) }]);
+  const { c, calls, byKind } = x;
+  await adopt(x);
   await c.send('いいえ。CSVの読み込みにも効きますか？');
   await ticks();
-  assert(byKind('answer-target').length === 1 && calls.ask.some(a => /CSV/.test(a.question)), `R12: 対応先の聞き返しと、質問への答えの両方: ${JSON.stringify({ target: byKind('answer-target').length, asks: calls.ask.map(a => a.question.slice(0, 10)) })}`);
+  assert(byKind('answer-target').length === 0 && calls.plan.length === 2 && /候補の確認事項/.test(calls.plan[1].revision.request) && calls.ask.some(a => /CSV/.test(a.question)), `R12: 対応先は聞き返さずに計画の AI へ渡し、質問の部分は同時に答える: ${JSON.stringify({ target: byKind('answer-target').length, asks: calls.ask.map(a => a.question.slice(0, 10)) })}`);
 });
 await section(async () => {
-  // R13（M7）: 並べて走らせた質問の答えを待たずに、計画ができたら次の入力を受け付ける
-  const { c, ctl } = makeConv([{ plan: planWith(qs(QP, QS)) }, { plan: planWith(qs(QS)) }]);
-  await c.send('金額が100万円を超えたら画面に警告を出したい');
-  await ticks();
+  // R13（M7）: 並べて走らせた質問の答えを待たずに、計画ができたら次の入力を受け付ける（最終案の後の発言で確かめる）
+  const x = makeConv([{ plan: planWith(qs(QP, QS)) }, { plan: planWith(qs(QS)) }]);
+  const { c, ctl } = x;
+  await adopt(x);
   const openAsk = ctl.holdAsk();
   await c.send('PCだけ。ところでCSVの読み込みにも効きますか？');
   const busyAfter = c.isBusy();
@@ -446,48 +520,34 @@ await section(async () => {
   assert(r3.updated.length === 1 && KTAiAnswers.requirementsOf(lg2)[0].decision === 'decided' && r3.downgraded.length === 0, 'R14: 根拠の無い update でも内容が同じなら利用者の決定のまま');
   const r4 = KTAiAnswers.applyRequirementOps(lg2, [OP({ op: 'update', id: 'R1', target: '作成画面', behavior: 'PC とモバイルで動く', sourceQuotes: [] })], { version: 3, userTexts: ['PCだけ', '一覧も'], utterances: ['一覧も'] });
   assert(r4.updated.length === 1 && KTAiAnswers.requirementsOf(lg2)[0].decision === 'proposed', 'R14: 根拠の無い内容の変更は AI の提案');
-  // 会話: 上限に達したことを画面に出す
-  const t1 = { reply: 'r', requirementOps: Array.from({ length: 41 }, (_, i) => OP({ behavior: `要件 ${i + 1}`, sourceQuotes: ['金額が100万円を超えたら画面に警告を出したい'] })), utteranceCoverage: [{ quote: '金額が100万円を超えたら画面に警告を出したい', as: 'requirement', refs: [], note: '' }] };
-  const { c, byKind } = makeConv([{ plan: planWith([]), turn: t1 }]);
-  await c.send('金額が100万円を超えたら画面に警告を出したい');
-  assert(byKind('requirements-overflow').length === 1 && /上限（40 件/.test(byKind('requirements-overflow')[0].text), 'R14: 上限で記録できなかった指示があることを知らせる（黙って落とさない）');
+  // 会話: 上限に達したことを画面に出す（C-1 第 3 段: 最終案の後の発言で確かめる。台本の仮案の要件 4 件があるので、41 件の追加のうち 5 件が上限を超える）
+  const u2 = '要件をたくさん追加して';
+  const t2 = { reply: 'r', requirementOps: Array.from({ length: 41 }, (_, i) => OP({ behavior: `要件 ${i + 1}`, sourceQuotes: [u2] })), utteranceCoverage: [{ quote: u2, as: 'requirement', refs: [], note: '' }] };
+  const x = makeConv([{ plan: planWith([]) }, { plan: planWith([]), turn: t2 }]);
+  await adopt(x);
+  await x.c.send(u2); await ticks();
+  const ov = x.byKind('requirements-overflow');
+  assert(ov.length === 1 && /上限（40 件/.test(ov[0].text) && ov[0].data.count === 41 - (40 - BASE_REQS) && !KTAiChatUi.isHiddenMessage(ov[0]), `R14: 上限で記録できなかった指示があることを知らせる（黙って落とさない）: ${ov.map(m => m.data.count).join()}`);
 });
 await section(async () => {
-  // R15: 作業中の質問の対象を決められないときは、普通の質問と同じく候補を選んでもらう（エラーにしない。作業は続ける）。先回りの返答は出さないだけ
+  // R15: 作業中の質問の対象を決められないときは、普通の質問と同じく候補を選んでもらう（エラーにしない。作業は続ける）
+  //   C-1 第 3 段: 採用の後の計画の作成中で確かめる（先回りの返答は削除した）
   const amb = { ok: false, reason: 'ambiguous', candidates: [{ type: 'field', id: 'amount', label: '金額（amount）' }, { type: 'field', id: 'total', label: '合計（total）' }], message: '対象を特定できませんでした。' };
-  const { c, ctl, byKind } = makeConv([{ plan: planWith([]) }], { askResult: (a) => (a.conversation && a.conversation.brief ? null : amb) });
+  const x = makeConv([{ plan: planWith([]) }], { askResult: () => amb });
+  const { c, ctl, byKind } = x;
+  await draftUntilAdopt(x);
   const open = ctl.hold();
-  const p = c.send('金額が100万円を超えたら画面に警告を出したい');
+  const p = c.send(K.REQUESTS[3]);
   await ticks();
   await c.send('金額と合計はどう違いますか？');
   await ticks();
   open(); await p; await ticks();
-  assert(byKind('candidates').length === 1 && byKind('candidates')[0].data.candidates.length === 2 && !c.messages().some(m => m.type === 'ERROR') && c.planHistory().length === 1, 'R15: 作業中の質問の対象の候補を出す（エラーにしない）・計画はできる');
+  assert(byKind('candidates').length === 1 && byKind('candidates')[0].data.candidates.length === 2 && !c.messages().some(m => m.type === 'ERROR') && c.planHistory().length === 1 && c.activePlan().final, 'R15: 作業中の質問の対象の候補を出す（エラーにしない）・計画（最終案）はできる');
 });
-await section(async () => {
-  // R16（実機 2026-10-05）: 仕様が未確定のまま「C1 のコードを作って」→「先に確定してください」と仕様カード → 確定。同じ「確定しました」のカードを 2 枚続けて出さない
-  const { c, calls } = makeConv([{ plan: planWith([]) }]);
-  await c.send('金額が100万円を超えたら画面に警告を出したい');
-  await c.send('C1 のコードを作って');
-  const v1 = c.activePlan();
-  const lastUser = () => { const ms = c.messages(); let k = -1; ms.forEach((m, i) => { if (m.type === 'USER') k = i; }); return k; };
-  const specsAfter = () => c.messages().slice(lastUser() + 1).filter(m => m.type === 'SPEC').length;
-  assert(calls.generate === 0 && specsAfter() === 1, `R16: 前提: 未確定なので生成せず、仕様カードを 1 枚出す: ${specsAfter()}`);
-  const r = c.confirmSpec({ planId: v1.planId, version: v1.version });
-  const tail = c.messages().slice(lastUser() + 1);
-  // 2026-10-06: 会話のカードの見出しは「JavaScript の実装の内容を確定しました。」（版の番号は出さない）。お知らせはその文を繰り返さない
-  const notices = tail.filter(m => m.type === 'SYSTEM_NOTICE' && m.data?.kind === 'spec-confirmed');
-  const specCard = KTAiChatUi.specChatCardHtml(v1).replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ');
-  assert(r.ok && v1.spec.status === 'CONFIRMED' && specsAfter() === 1 && notices.length === 1 && /JavaScript を作れるようになりました/.test(notices[0].text) && !/実装の内容を確定しました/.test(notices[0].text) && !/v\d/.test(notices[0].text) && /JavaScript の実装の内容を確定しました。/.test(specCard), `R16: 確定ではカードを足さず（いまのカードが確定済みに変わる）、カードの見出しと同じ文を繰り返さないお知らせを 1 行出す: ${tail.map(m => `${m.type}:${String(m.text).slice(0, 20)}`).join(',')}`);
-  // 利用者の発言の後に仕様カードが無いとき（確定の前に別の発言をした）は、確定の後にカードを出す
-  const k = makeConv([{ plan: planWith([]) }]);
-  await k.c.send('金額が100万円を超えたら画面に警告を出したい');
-  await k.c.send('ありがとう');
-  const w1 = k.c.activePlan();
-  k.c.confirmSpec({ planId: w1.planId, version: w1.version });
-  const ms = k.c.messages(); let lu = -1; ms.forEach((m, i) => { if (m.type === 'USER') lu = i; });
-  assert(ms.slice(lu + 1).filter(m => m.type === 'SPEC').length === 1, 'R16: 利用者の最後の発言の後に仕様カードが無ければ、確定の後にカードを出す');
-});
+//   R16（実機 2026-10-05。仕様が未確定のまま「C1 のコードを作って」→ 仕様カード → 確定。確定のカードを 2 枚続けて出さない）: C-1 第 3 段で仕様の確定
+//   （confirmSpec・会話の仕様カード・spec-confirmed の知らせ）を削除した。JavaScript の仕様は最終案のパイプラインが自動で確定する。対応する回帰:
+//   ai-flow-redesign の R09-2（JS の仕様は自動で確定・［この仕様で確定］は無い）・F7-1（会話に仕様の確定は無い）・F7-3（右の仕様は閲覧だけ）・
+//   F2-7（最終案が無いときの「コードを作って」は生成しない）
 // =========================================================
 console.log('\n--- G. 「…変えて、コードも作って」の命令の節（実機 2026-10-05 と差分レビューの指摘） ---');
 await section(async () => {
@@ -518,32 +578,37 @@ await section(async () => {
   assert(cls('顧客コードを生成して').intent !== I.GENERATE_CODE, 'G2: 「顧客コードを生成して」はコードの生成の命令ではない');
 });
 await section(async () => {
-  // G3: 作り直しの途中に受け付けた「…変えて、コードも作って」: 原文のまま積み、計画の AI にはコードの生成は計画の後と伝え、作業の後に［この変更で確定してコードを作る］を出す
-  const { c, calls, ctl, byKind } = makeConv([{ plan: planWith([]) }, { plan: planWith([]) }, { plan: planWith([]) }]);
-  await c.send('金額が100万円を超えたら画面に警告を出したい');
+  // G3: 作り直しの途中に受け付けた「…変えて、コードも作って」: 原文のまま積み、計画の AI にはコードの生成は計画の後と伝える（最終案の後の差分更新で確かめる）
+  //   C-1 第 3 段: 作業の後の［この変更で確定してコードを作る］（confirm-generate）は削除した。JavaScript は最終案のパイプラインが作る（ai-flow-redesign F3-1）
+  const x = makeConv([{ plan: planWith([]) }, { plan: planWith([]) }, { plan: planWith([]) }]);
+  const { c, calls, ctl, byKind } = x;
+  await adopt(x);
   const open = ctl.hold();
   const p = c.send('100万円ちょうども警告の対象に変えて');
   await ticks();
   const q = await c.send('警告の文は「高額案件です」に変えて、コードも作って');
   open(); await p; await ticks();
-  assert(q && q.queued === true && calls.plan.length === 3 && calls.plan[2].revision.request === '修正の依頼：警告の文は「高額案件です」に変えて、コードも作って' && calls.plan[2].revision.generateAfter === true && !calls.plan[1].revision.generateAfter && calls.generate === 0, `G3: 作り直しの途中の「…コードも作って」は、その指示を入れる作業だけに generateAfter: ${JSON.stringify(calls.plan.map(x => x.revision && x.revision.generateAfter))}`);
-  const card = byKind('confirm-generate').slice(-1)[0];
-  assert(card && card.data.version === c.activePlan().version, `G3: 作業の後に［この変更で確定してコードを作る］を出す: ${byKind('confirm-generate').length}`);
+  assert(q && q.queued === true && calls.plan.length === 3 && calls.plan[2].revision.request === '修正の依頼：警告の文は「高額案件です」に変えて、コードも作って' && calls.plan[2].revision.generateAfter === true && !calls.plan[1].revision.generateAfter, `G3: 作り直しの途中の「…コードも作って」は、その指示を入れる作業だけに generateAfter: ${JSON.stringify(calls.plan.map(y => y.revision && y.revision.generateAfter))}`);
+  assert(x.finals().length === 2 && c.activePlan().final && !byKind('confirm-generate').length, `G3: 作業の後は最終案を置き換える（確定して作るカードは出さない）: ${x.finals().length}`);
 });
 await section(async () => {
-  // G4: 最初の計画の作成中に受け付けた「…変えて、コードも作って」も同じ（v1 の後に確定して作る操作）。依頼の問いの形（〜もらえる？）も指示としてためる
-  const { c, calls, ctl, byKind } = makeConv([{ plan: planWith([]) }, { plan: planWith([]) }]);
+  // G4: 最初の計画の作成中に受け付けた「…変えて、コードも作って」も同じ（v1 に入れる）。依頼の問いの形（〜もらえる？）も指示としてためる
+  //   C-1 第 3 段: 採用の後の計画の作成中で確かめる。v1 の後の［この変更で確定してコードを作る］は削除した（JavaScript は最終案のパイプラインが作る: R09-4）
+  const x = makeConv([{ plan: planWith([]) }, { plan: planWith([]) }]);
+  const { c, calls, ctl, byKind } = x;
+  await draftUntilAdopt(x);
   const open = ctl.hold();
-  const p = c.send('金額が100万円を超えたら画面に警告を出したい');
+  const p = c.send(K.REQUESTS[3]);
   await ticks();
   const q = await c.send('100万円ちょうども警告の対象に変えて、コードも作ってもらえる？');
   open(); await p; await ticks();
-  assert(q && q.queued === true && calls.plan.length === 2 && calls.plan[1].revision.request === '修正の依頼：100万円ちょうども警告の対象に変えて、コードも作ってもらえる？' && calls.plan[1].revision.generateAfter === true && c.planHistory().length === 1 && byKind('confirm-generate').length === 1 && calls.generate === 0, `G4: 作成中の「…コードも作ってもらえる？」はためて v1 に入れ、v1 の後に確定して作る操作: ${JSON.stringify(calls.plan[1] && calls.plan[1].revision)}`);
+  assert(q && q.queued === true && calls.plan.length === 2 && calls.plan[1].revision.request === '修正の依頼：100万円ちょうども警告の対象に変えて、コードも作ってもらえる？' && calls.plan[1].revision.generateAfter === true && c.planHistory().length === 1 && x.finals().length === 1 && !byKind('confirm-generate').length, `G4: 作成中の「…コードも作ってもらえる？」はためて v1 に入れる（最終案は 1 枚）: ${JSON.stringify(calls.plan[1] && calls.plan[1].revision)}`);
 });
 await section(async () => {
-  // G5: 「…変えて、コードも作って」の作り直しの途中に同じ文をもう一度送っても積まない（二重の作り直しにしない）
-  const { c, calls, ctl } = makeConv([{ plan: planWith([]) }, { plan: planWith([]) }, { plan: planWith([]) }]);
-  await c.send('金額が100万円を超えたら画面に警告を出したい');
+  // G5: 「…変えて、コードも作って」の作り直しの途中に同じ文をもう一度送っても積まない（二重の作り直しにしない）（最終案の後の差分更新で確かめる）
+  const x = makeConv([{ plan: planWith([]) }, { plan: planWith([]) }, { plan: planWith([]) }]);
+  const { c, calls, ctl } = x;
+  await adopt(x);
   const open = ctl.hold();
   const p = c.send('警告の文は「高額案件です」に変えて、コードも作って');
   await ticks();
@@ -552,40 +617,45 @@ await section(async () => {
   assert(again && again.queued === false && calls.plan.length === 2, `G5: 同じ文の二重の送信は積まない（計画の呼び出し 2 回）: ${JSON.stringify({ again: again && again.reason, plans: calls.plan.length })}`);
 });
 await section(async () => {
-  // G6: 「…変えて、コードも作って」の作り直しが失敗したら、再試行は元の発言を振り分け直す（コードの生成は計画の後と伝える・確定して作る操作を出す）
-  const { c, calls } = makeConv([{ plan: planWith([]) }, { fail: { ok: false, reason: 'ERROR', message: '計画の修正に失敗しました' } }, { plan: planWith([]) }]);
-  await c.send('金額が100万円を超えたら画面に警告を出したい');
-  await c.send('100万円ちょうども警告の対象に変えて、コードも作って');
+  // G6: 「…変えて、コードも作って」の作り直しが失敗したら、再試行は元の発言を振り分け直す（コードの生成は計画の後と伝える）（最終案の後の差分更新で確かめる）
+  //   C-1 第 3 段: 再試行の後の［この変更で確定してコードを作る］は削除した（最終案を置き換える: ai-flow-redesign F3-1）
+  const x = makeConv([{ plan: planWith([]) }, { fail: { ok: false, reason: 'ERROR', message: '計画の修正に失敗しました' } }, { plan: planWith([]) }]);
+  const { c, calls } = x;
+  await adopt(x);
+  await c.send('100万円ちょうども警告の対象に変えて、コードも作って'); await ticks();
   const err = c.messages().filter(m => m.type === 'ERROR').slice(-1)[0];
   assert(err && err.data.retryText === '100万円ちょうども警告の対象に変えて、コードも作って' && !err.data.intent, `G6: 再試行の文は元の発言（意図は振り分け直す）: ${JSON.stringify(err && { t: err.data.retryText, i: err.data.intent })}`);
-  await c.send(err.data.retryText, { intentOverride: err.data.intent || null });
-  assert(calls.plan.length === 3 && calls.plan[2].revision.generateAfter === true && c.messages().some(m => m.data?.kind === 'confirm-generate'), `G6: 再試行でも generateAfter を付け、確定して作る操作を出す: ${JSON.stringify(calls.plan[2] && calls.plan[2].revision.generateAfter)}`);
+  await c.send(err.data.retryText, { intentOverride: err.data.intent || null }); await ticks();
+  assert(calls.plan.length === 3 && calls.plan[2].revision.generateAfter === true && c.activePlan().version === 2 && x.finals().length === 2 && !c.messages().some(m => m.data?.kind === 'confirm-generate'), `G6: 再試行でも generateAfter を付け、最終案を置き換える: ${JSON.stringify(calls.plan[2] && calls.plan[2].revision.generateAfter)}`);
 });
 await section(async () => {
-  // G7: 作り直しの版のカードにも Toolkit が付けた「修正の依頼：」を出さない
-  //   2026-10-06: 会話のカードは版の番号・「修正: …」の行を出さない（指示は利用者の発言として会話に残り、版の修正の依頼の履歴にも残る）
-  const { c, ctl } = makeConv([{ plan: planWith([]) }, { plan: planWith([]) }, { plan: planWith([]) }]);
-  await c.send('金額が100万円を超えたら画面に警告を出したい');
+  // G7: 作り直しの版のカードにも Toolkit が付けた「修正の依頼：」を出さない（最終案の後の差分更新で確かめる）
+  //   C-1 第 3 段: 変更案のカード（planCardHtml）は削除した（ai-flow-redesign F7-2）。作り直しの版は最終案のカードで「最終案を直しました。」と出し、
+  //   版の番号を出さない（R09-10）。カードの「変わった点」の入れた指示に Toolkit が付けた「修正の依頼：」が出ないことを、置き換えた最終案のカードで確かめる
+  const x = makeConv([{ plan: planWith([]) }, { plan: planWith([]) }, { plan: planWith([]) }]);
+  const { c, ctl } = x;
+  await adopt(x);
   const open = ctl.hold();
   const p = c.send('警告の文は「高額案件です」に変えて');
   await ticks();
   await c.send('PC だけで動くようにして');
   open(); await p; await ticks();
   const v = c.activePlan();
-  const planMsg = c.messages().filter(m => m.type === 'PLAN' && m.data?.version === v.version).slice(-1)[0];
-  const html = KTAiChatUi.planCardHtml(v, { m: planMsg }).replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ');
-  assert(/変更案を直しました。/.test(html) && !/修正の依頼：/.test(html) && !/修正: /.test(html) && !/v\d/.test(html), `G7: 作り直しの版のカードは「変更案を直しました。」だけ（「修正の依頼：」・「修正: …」の行・版の番号を出さない）: ${html.slice(0, 200)}`);
+  const html = finalText(x);
+  assert(/最終案を直しました。/.test(html) && !/v\d/.test(html.replace(/[A-Za-z0-9_.-]*\.js/g, '')), `G7: 作り直しの版のカードは「最終案を直しました。」（版の番号を出さない）: ${html.slice(0, 120)}`);
+  assert(!/修正の依頼：/.test(html), `G7: 最終案のカードの「変わった点」に Toolkit が付けた「修正の依頼：」を出さない: ${(html.match(/入れた指示: [^\n]*(\n[^\n]*)?/) || [''])[0]}`);
   const reqs = (v.revisionRequests || []).join(' ');
   assert(/警告の文は「高額案件です」に変えて/.test(reqs) && /PC だけで動くようにして/.test(reqs), `G7: カードに出さなくても、2 つの指示は版の修正の依頼の履歴に残る: ${JSON.stringify(v.revisionRequests)}`);
 });
 await section(async () => {
-  // G8: 質問の文で決定事項を置き換えない（TURN でも、質問を除いた部分で置き換えを判断する）
-  const { c, ledger } = makeConv([{ plan: planWith(qs(QP, QS)) }, { plan: planWith(qs(QS)) }, { plan: planWith(qs(QS)) }]);
-  await c.send('金額が100万円を超えたら画面に警告を出したい');
-  await c.send('PCだけ');
+  // G8: 質問の文で決定事項を置き換えない（TURN でも、質問を除いた部分で置き換えを判断する）（最終案の後の回答で確かめる）
+  const x = makeConv([{ plan: planWith(qs(QP, QS)) }, { plan: planWith(qs(QS)) }, { plan: planWith(qs(QS)) }]);
+  const { c, ledger } = x;
+  await adopt(x);
+  await c.send('PCだけ'); await ticks();
   const dPlat = () => ledger().entries.find(e => e.topics.includes('platform') && e.answer);
   assert(dPlat() && dPlat().status === 'answered', '前提: PC / モバイルは「PCだけ」で回答済み');
-  await c.send('警告は赤字にして。モバイルでも出ますか？');
+  await c.send('警告は赤字にして。モバイルでも出ますか？'); await ticks();
   assert(dPlat().status === 'answered', `G8: 質問の文（モバイルでも出ますか？）で PC だけの決定事項を置き換えない: ${dPlat().status}`);
 });
 await section(async () => {
@@ -600,9 +670,11 @@ await section(async () => {
   assert(first.ok && first.ctx.generateAfter === true && !('generateAfter' in first0.ctx), 'G0: 最初の計画の Context にも generateAfter を載せる（印が無ければ載せない）');
 });
 await section(async () => {
-  // G9: 作業中に受け付けた「…変えて、コードも作って」を入れる作業が失敗したら、再試行はその原文を振り分け直す（コードの依頼を落とさない）
-  const { c, calls, ctl } = makeConv([{ plan: planWith([]) }, { plan: planWith([]) }, { fail: { ok: false, reason: 'ERROR', message: '計画の修正に失敗しました' } }, { plan: planWith([]) }]);
-  await c.send('金額が100万円を超えたら画面に警告を出したい');
+  // G9: 作業中に受け付けた「…変えて、コードも作って」を入れる作業が失敗したら、再試行はその原文を振り分け直す（コードの依頼を落とさない）（最終案の後の差分更新で確かめる）
+  //   C-1 第 3 段: 再試行の後の［この変更で確定してコードを作る］は削除した（最終案を置き換える）
+  const x = makeConv([{ plan: planWith([]) }, { plan: planWith([]) }, { fail: { ok: false, reason: 'ERROR', message: '計画の修正に失敗しました' } }, { plan: planWith([]) }]);
+  const { c, calls, ctl } = x;
+  await adopt(x);
   const open = ctl.hold();
   const p = c.send('100万円ちょうども警告の対象に変えて');
   await ticks();
@@ -610,30 +682,23 @@ await section(async () => {
   open(); await p; await ticks();
   const err = c.messages().filter(m => m.type === 'ERROR').slice(-1)[0];
   assert(err && err.data.retryText === '警告の文は「高額案件です」に変えて、コードも作って' && !err.data.intent && c.activePlan().version === 2, `G9: 作業中に受けた指示の作業の失敗: 再試行はその原文（振り分け直す）: ${JSON.stringify(err && { t: err.data.retryText, i: err.data.intent })}`);
-  await c.send(err.data.retryText, { intentOverride: err.data.intent || null });
-  assert(calls.plan.length === 4 && calls.plan[3].revision.generateAfter === true && c.messages().some(m => m.data?.kind === 'confirm-generate'), 'G9: 再試行で計画を更新し、確定して作る操作を出す');
+  await c.send(err.data.retryText, { intentOverride: err.data.intent || null }); await ticks();
+  assert(calls.plan.length === 4 && calls.plan[3].revision.generateAfter === true && c.activePlan().version === 3 && c.activePlan().final && !c.messages().some(m => m.data?.kind === 'confirm-generate'), 'G9: 再試行で計画を更新し、最終案を置き換える');
 });
 await section(async () => {
-  // G10: 作り直した計画に JavaScript が無ければ、コードは作らないことを知らせる（コードの依頼を黙って捨てない）
-  const { c, byKind } = makeConv([{ plan: planWith([]) }, { plan: planWith([], { customizations: [], steps: [step('P1', 'ADD_VIEW', 'VIEW', '高額案件', { name: '高額案件', fields: ['amount'] })], solution: 'STANDARD' }) }]);
-  await c.send('金額が100万円を超えたら画面に警告を出したい');
-  await c.send('警告はやめて一覧だけにして、コードも作って');
-  assert(byKind('generate-not-needed').length === 1 && byKind('confirm-generate').length === 0, `G10: JavaScript の無い計画では、コードは作らないと知らせる: ${byKind('generate-not-needed').length}`);
+  // G10: 作り直した計画に JavaScript が無ければ、コードは作らないことを知らせる（コードの依頼を黙って捨てない）（最終案の後の差分更新で確かめる）
+  //   C-1 第 3 段: 会話の知らせ（generate-not-needed）の代わりに、最終案のカードの検証の区分が「JavaScript は無く、設定の変更だけです」と出す
+  const x = makeConv([{ plan: planWith([]) }, { plan: planWith([], { customizations: [], steps: [step('P1', 'ADD_VIEW', 'VIEW', '高額案件', { name: '高額案件', fields: ['amount'] })], solution: 'STANDARD' }) }]);
+  const { c, calls, byKind } = x;
+  await adopt(x);
+  const g0 = calls.generate;
+  await c.send('警告はやめて一覧だけにして、コードも作って'); await ticks();
+  const v2 = c.activePlan();
+  assert(v2.version === 2 && v2.final && v2.final.customizations.length === 0 && /JavaScript は無く、設定の変更だけです/.test(finalText(x)) && calls.generate === g0 && byKind('confirm-generate').length === 0, `G10: JavaScript の無い計画では、コードは作らないと知らせる（最終案のカード）: ${JSON.stringify({ v: v2.version, gen: calls.generate - g0 })}`);
 });
-await section(async () => {
-  // G11: コードの生成中に受け付けた「…変えて、C2 のコードも作って」: 確定して作る操作の対象は C2
-  const two = planWith([], { customizations: [cust(), cust({ customizationId: 'C2', requirement: '明細の合計を確かめる' })], steps: [step('P1', 'ADD_VIEW', 'VIEW', '高額案件', { name: '高額案件', fields: ['amount'] }), CSTEP, step('C2', 'CUSTOMIZATION_REQUIRED', 'JS', '', { customizationId: 'C2' }, { solution: 'CUSTOMIZATION' })] });
-  const { c, ctl, byKind } = makeConv([{ plan: two }, { plan: two }]);
-  await c.send('金額が100万円を超えたら画面に警告を出したい');
-  const v1 = c.activePlan(); c.confirmSpec({ planId: v1.planId, version: v1.version });
-  const open = ctl.hold();
-  const g = c.send('C1 のコードを作って');
-  await ticks();
-  await c.send('明細の合計は税込みで比べるように変えて、C2 のコードも作って');
-  open(); await g; await ticks();
-  const card = byKind('confirm-generate').slice(-1)[0];
-  assert(card && card.data.customizationId === 'C2', `G11: 生成中に受けた「C2 のコードも作って」は、確定して作る操作の対象を C2 にする: ${card && card.data.customizationId}`);
-});
+//   G11（コードの生成中に受け付けた「…変えて、C2 のコードも作って」→［この変更で確定してコードを作る］の対象を C2 にする）: C-1 第 3 段で確定して作るカード
+//   （confirm-generate）を削除した。生成中の指示は完了後に差分更新し、変わった JavaScript だけを作り直して最終案を置き換える。対応する回帰:
+//   ai-flow-redesign の R11-2〜R11-5（生成中の指示 → 完了後に差分更新 → 実装仕様が同じものは作り直さない）・R18-1（実装仕様が変わったものだけ作り直す）・F3-1
 await section(async () => {
   // W6（実機 2026-10-05）: 作業中の入力欄の案内は作業の種類ごと。最初の計画の作成中に「作り直しています」・質問は「応答の後に」と出さない
   const h = KTAiChatUi.busyHintText;
@@ -642,9 +707,12 @@ await section(async () => {
 });
 await section(async () => {
   // W7（実機 2026-10-05）: 最初の計画の作成中の同意（「その案でお願いします。」）は修正の依頼として積まない（計画の AI を余計に呼ばない）
-  const { c, calls, ctl, byKind } = makeConv([{ plan: planWith([]) }, { plan: planWith([]) }]);
+  //   C-1 第 3 段: 最初の計画は仮案の採用の後に作る。その作成中で確かめる
+  const x = makeConv([{ plan: planWith([]) }, { plan: planWith([]) }]);
+  const { c, calls, ctl, byKind } = x;
+  await draftUntilAdopt(x);
   const open = ctl.hold();
-  const p = c.send('承認漏れを防ぐ通知を入れたい');
+  const p = c.send(K.REQUESTS[3]);
   await ticks();
   const a = await c.send('その案でお願いします。');
   const b = await c.send('その方向でいいです');
@@ -653,8 +721,9 @@ await section(async () => {
   assert(a && a.reason === 'AGREED_WHILE_PLAN' && b && b.reason === 'AGREED_WHILE_PLAN' && calls.plan.length === 1 && op === null && byKind('agree-while-plan').length === 2 && !byKind('answers-ack').length && c.planHistory().length === 1, `W7: 作成中の同意は積まない（計画の呼び出し 1 回）: ${JSON.stringify({ a: a && a.reason, plans: calls.plan.length })}`);
   // 同意に見えても指示がある文は積む
   const k = makeConv([{ plan: planWith([]) }, { plan: planWith([]) }]);
+  await draftUntilAdopt(k);
   const open2 = k.ctl.hold();
-  const p2 = k.c.send('承認漏れを防ぐ通知を入れたい');
+  const p2 = k.c.send(K.REQUESTS[3]);
   await ticks();
   const d = await k.c.send('部長宛てでお願いします');
   open2(); await p2; await ticks();
@@ -683,35 +752,27 @@ await section(async () => {
   const ex = cls('金額が大きいときに警告を出したい。コードも作って', { activePlan: { ...v, status: 'EXECUTED' }, ledgers: new Map() });
   assert(np.intent === I.PLAN && np.alsoGenerate === true && ex.intent === I.PLAN && ex.alsoGenerate === true, `G2-5: 計画が無い・反映済みのときのコードの依頼つきの依頼は新しい計画: ${np.intent}/${ex.intent}`);
 });
-await section(async () => {
-  // G2-6: 最初の依頼に「コードも作って」: 計画の AI に「コードの生成は計画の後」と伝え（generateAfter）、計画の後に確定して作る操作を出す
-  const { c, calls, byKind } = makeConv([{ plan: planWith([]) }]);
-  const seen = [];
-  const r = await c.send('金額が100万円を超えたら画面に警告を出したい。コードも作って');
-  assert(r.intent === I.PLAN && byKind('confirm-generate').length === 1 && calls.generate === 0, `G2-6: 最初の依頼のコードの依頼は、計画の後に確定して作る操作: ${JSON.stringify({ i: r.intent, card: byKind('confirm-generate').length })}`);
-  void seen;
-});
-await section(async () => {
-  // G2-7: 「…変えて、コードも作って」の作り直しが失敗したら、コードの依頼を残し、次に計画ができたときに確定して作る操作を出す
-  const { c, byKind } = makeConv([{ plan: planWith([]) }, { fail: { ok: false, reason: 'ERROR', message: '計画の修正に失敗しました' } }, { plan: planWith([]) }]);
-  await c.send('金額が100万円を超えたら画面に警告を出したい');
-  await c.send('警告の文を「高額案件です」に変えて、コードも作って');
-  assert(byKind('confirm-generate').length === 0 && c.state.pendingGenerate && c.state.pendingGenerate.planId === c.activePlan().planId, 'G2-7: 失敗したときはコードの依頼を残す');
-  await c.send('警告は赤字にして');
-  assert(byKind('confirm-generate').length === 1 && !c.state.pendingGenerate, 'G2-7: 次に計画ができたときに確定して作る操作を出す');
-});
+//   G2-6（最初の依頼に「コードも作って」→ 計画の AI に generateAfter を伝え、計画の後に［この変更で確定してコードを作る］）: C-1 第 3 段で最初の依頼は仮案へ、
+//   確定して作るカードは削除した。JavaScript は採用の後の最終案のパイプラインが作る。対応する回帰: ai-flow-redesign の R09-1（採用 → 計画 → 最終案のカード 1 枚）・
+//   R09-4（生成工程への依頼は 1 回）・F2-3（最終案を通らない生成のカードは出ない）。最終案の後の「…コードも作って」の generateAfter は上の F4・G3・G6 で守る
+//   G2-7（作り直しが失敗したらコードの依頼（pendingGenerate）を残し、次の計画の後に確定して作る操作を出す）: C-1 第 3 段で pendingGenerate と
+//   確定して作る操作を削除した。失敗の後は［再試行］が元の発言を振り分け直し（generateAfter を付ける）、計画を直した版の JavaScript は最終案のパイプラインが作る。
+//   対応する回帰: 上の G6・G9（再試行でも generateAfter）・ai-flow-redesign の F3-1（計画を直した版の JavaScript は最終案のパイプラインで作り直す）
 await section(async () => {
   // G2-8: コードの生成中に計画を変えて JavaScript が無くなったら、コードは作らないと知らせる（生成の経路も同じ処理）
+  //   C-1 第 3 段: 採用の後の最終案の生成中（working FINAL）で確かめる。会話の知らせ（generate-not-needed）の代わりに、置き換えた最終案のカードが
+  //   「JavaScript は無く、設定の変更だけです」と出す（生成中の指示の扱いは ai-flow-redesign R11-2〜R11-4）
   const std = planWith([], { customizations: [], steps: [step('P1', 'ADD_VIEW', 'VIEW', '高額案件', { name: '高額案件', fields: ['amount'] })], solution: 'STANDARD' });
-  const { c, ctl, byKind } = makeConv([{ plan: planWith([]) }, { plan: std }]);
-  await c.send('金額が100万円を超えたら画面に警告を出したい');
-  const v1 = c.activePlan(); c.confirmSpec({ planId: v1.planId, version: v1.version });
-  const open = ctl.hold();
-  const g = c.send('コードを作って');
-  await ticks();
-  await c.send('警告はやめて一覧だけにして');
-  open(); await g; await ticks();
-  assert(byKind('generate-not-needed').length === 1 && byKind('confirm-generate').length === 0, `G2-8: 生成中の変更で JavaScript が無くなったら、コードは作らないと知らせる: ${byKind('generate-not-needed').length}`);
+  const x = makeConv([{ plan: planWith([]) }, { plan: std }]);
+  const { c, calls, ctl, byKind } = x;
+  await draftUntilAdopt(x);
+  const gPlan = ctl.hold(), gGen = ctl.hold();
+  const g = c.send(K.REQUESTS[3]);
+  await ticks(); gPlan(); await ticks(10);
+  const q = await c.send('警告はやめて一覧だけにして');
+  gGen(); await g; await ticks(12);
+  const v2 = c.activePlan();
+  assert(q && q.queued === true && q.reason === 'QUEUED_DURING_FINAL' && v2.version === 2 && v2.final && v2.final.customizations.length === 0 && /JavaScript は無く、設定の変更だけです/.test(finalText(x)) && calls.generate === 1 && byKind('confirm-generate').length === 0, `G2-8: 生成中の変更で JavaScript が無くなったら、コードは作らないと知らせる（最終案のカード）: ${JSON.stringify({ v: v2.version, gen: calls.generate })}`);
 });
 
 console.log(`\n${state.failed ? 'FAILED' : 'ALL PASSED'}: ${state.passed} passed / ${state.failed} failed`);

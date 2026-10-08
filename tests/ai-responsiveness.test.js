@@ -9,12 +9,16 @@
 //      新しい会話・別の版・質問・新しい依頼・対応先の確認が要る回答は受け付けない / 上限 / 計測（指示ごとの待ち時間）/ 画面の送信
 //   S 質問の誤抑制: 回答済みの論点の別の点の質問（代理の承認者・保存を止めずに出す方法・いつチェックするか）は出す（回答済みの内容を添える）/
 //      同じ内容の聞き直しだけ出さない（出さなかった質問の文を案内に出す）/ PC / モバイルだけを聞く質問の判定は Gateway と同じ
+//   C-1 第 3 段（2026-10-08）: 古い確認の流れは削除した。最初の依頼は仮案 → 採用 → 計画（start）にし、差分更新・受付箱・台帳は仮案から作った計画の上で確かめる
 //
 // 実行方法: node tests/ai-responsiveness.test.js
 'use strict';
 process.on('unhandledRejection', (e) => { if (/kintone is not defined/.test(String(e && e.message))) return; console.error(e); process.exit(1); });
 const { loadToolkit, makeAssert } = require('./helpers/load-toolkit.js');
-const { KTDeps, KTContext, KTAiClient, KTAiConversation, KTAiAnswers, KTPlanReview, KTAiChatUi } = loadToolkit();
+const { createNewFlowKit } = require('./helpers/new-flow.js');
+const T = loadToolkit();
+const { KTDeps, KTContext, KTAiClient, KTAiConversation, KTAiAnswers, KTPlanReview, KTAiChatUi } = T;
+const K = createNewFlowKit(T);
 const { assert, state } = makeAssert();
 const FX = require('./fixtures/ai-context-app.js');
 
@@ -23,7 +27,9 @@ const DEPS = KTDeps.buildDependencyData(DATA, KTDeps.normalizeFields(DATA.fields
 const spec = (o) => ({ name: null, from: null, to: null, filterCond: null, assignees: [], targets: [], events: [], timingField: null, daysLater: null, time: null, fields: [], sort: null, sourceApp: null, keyField: null, mappings: [], fieldType: null, required: null, options: [], destApp: null, accessibility: null, entities: [], ...o });
 const step = (id, actionType, targetKind, targetRef, sp = {}, extra = {}) => ({ id, actionType, targetKind, targetRef, targetExists: null, title: `${id} ${actionType}`, proposal: { summary: '', details: [] }, spec: spec(sp), dependsOn: [], reason: '', evidenceIds: [], confidence: 'INFERRED', alternativeId: null, validation: { status: 'ok', issues: [] }, execution: { mode: 'PLAN_ONLY', supported: false, reason: 'x' }, ...extra });
 const qs = (...texts) => texts.map((t, i) => (typeof t === 'string' ? { id: `Q${i + 1}`, question: t, reason: '', relatedEvidenceIds: [] } : { id: `Q${i + 1}`, reason: '', relatedEvidenceIds: [], ...t }));
-const cust = (o = {}) => ({ customizationId: 'C1', requirement: '金額が100万円を超えたら警告を出す', whyStandardInsufficient: '入力中の警告は標準設定に無い', strategy: 'NEW_JS_FILE', implementation: 'JAVASCRIPT', platform: [], events: ['app.record.create.show'], fields: [{ code: 'amount', access: 'CONTROL' }], apis: [], existingFiles: [], risks: [], questions: [], dependsOn: [], evidenceIds: [], ...o });
+//   C-1 第 3 段（2026-10-08）: 最終案の流れでは、効果（effects）の無い JavaScript は計画の自動の差分更新を 1 回起こす（計画の呼び出しの順がずれる）ため、
+//   フィールドに効果と条件を置く（この試験の対象は差分更新の依頼と受付箱で、生成は対象外。services.generate は置かない）
+const cust = (o = {}) => ({ customizationId: 'C1', requirement: '金額が100万円を超えたら警告を出す', whyStandardInsufficient: '入力中の警告は標準設定に無い', strategy: 'NEW_JS_FILE', implementation: 'JAVASCRIPT', platform: [], events: ['app.record.create.show'], fields: [{ code: 'amount', access: 'CONTROL', condition: 'amount > 1000000', effects: ['warn'] }], apis: [], existingFiles: [], risks: [], questions: [], dependsOn: [], evidenceIds: [], ...o });
 const planWith = (questions, extra = {}) => ({ goal: '金額が大きい案件に注意を出したい', solution: 'STANDARD', assessment: { summary: 's', usableExistingFields: [], usableExistingSettings: [], missingCapabilities: [], uncertainties: [] }, relevantFields: [], proposedFields: [], steps: [step('P1', 'ADD_VIEW', 'VIEW', '高額案件', { name: '高額案件', fields: ['amount'] })], alternatives: [], impact: [], questions, unknowns: [], planConfidence: 'NEEDS_CONFIRMATION', customizations: [], ...extra });
 const QP = '対象は PC だけですか？モバイルでも使いますか？';
 const QS = '金額が大きいとき、保存を止めますか？';
@@ -35,12 +41,20 @@ const ticks = async (n = 4) => { for (let i = 0; i < n; i++) await tick(); };
 /**
  * 会話コントローラ（fake services）。plans: 呼ばれた順に返す計画（足りなければ最後）。各呼び出しは hold() で待たせられる。
  * 戻り値に Gateway の計画（gatewayPlan）と版の作り方（revisionMeta）を付ける。revisionModes は health の値
+ *   C-1 第 3 段（2026-10-08）: 古い確認の流れ（依頼から直接計画を作る）は削除したため、接続先は仮案に対応した形（conversation に proposal）にする。
+ *   最初の依頼は仮案（services.propose。決めることの無い仮案）→「これで進めて」で採用 → 計画（plans の 1 つ目）→ 最終案。以降の回答・修正の依頼と
+ *   作り直しの途中の受け付け（受付箱）は、仮案から作った計画の上で確かめる（start を使う）
  */
 function makeConv(plans, { revisionModes = ['full', 'patch'], revisionMode, failAt = null } = {}) {
   const calls = [];
   let t = 1000, gates = [];
   const ctl = { hold() { let open; const p = new Promise(r => { open = r; }); gates.push(p); return open; }, failAt };
   const services = {
+    conversationFeatures: () => ['requirements', 'stream', 'proposal'],
+    async propose(args) {
+      const raw = { reply: '金額の大きい案件に注意を出す流れにできます。', intent: 'propose', proposal: { behaviors: [K.B(args.utterance, 'user')], assumptions: [], decisions: [], approach: { standard: ['高額案件の一覧を追加する'], js: [] }, cannot: [] }, turn: { ops: [], answers: [], requirementOps: [] } };
+      return { ok: true, proposal: K.normalized(raw), ctx: { facts: [] }, perf: {} };
+    },
     async plan(args) {
       const n = calls.length + 1;
       calls.push({ n, goal: args.goal, revision: args.revision ? JSON.parse(JSON.stringify(args.revision)) : null, decisions: JSON.parse(JSON.stringify(args.decisions || null)), baseCtx: args.baseCtx || null });
@@ -57,6 +71,12 @@ function makeConv(plans, { revisionModes = ['full', 'patch'], revisionMode, fail
   };
   const c = KTAiConversation.create({ services, now: () => '2026-10-05T00:00:00.000Z', clock: () => t, ...(revisionMode ? { revisionMode } : {}) });
   return { c, calls, ctl, acks: () => c.messages().filter(m => m.data?.kind === 'answers-ack'), kinds: () => c.messages().map(m => m.data?.kind || m.type) };
+}
+/** 依頼 → 仮案 →「これで進めて」で採用 → 計画（v1）と最終案。採用の結果を返す（従来の c.send(依頼) の置き換え） */
+async function start(c, text) {
+  const r1 = await c.send(text);
+  if (!r1 || r1.intent !== 'PROPOSE') throw new Error(`仮案になりませんでした: ${JSON.stringify(r1 && { intent: r1.intent, reason: r1.reason })}`);
+  return c.send('これで進めて');
 }
 const versions = (c) => c.planHistory().map(v => v.version);
 /**
@@ -80,13 +100,15 @@ await section(async () => {
   const v1 = planWith(qs(QP, QS), { customizations: [cust({ questions: [] })] });
   const x = makeConv([v1, planWith(qs(QS))]);
   const { c, calls, acks } = x;
-  await c.send('金額が大きい案件に注意を出したい');
+  await start(c, '金額が大きい案件に注意を出したい');
   assert(c.activePlan().gatewayPlan && c.activePlan().gatewayPlan.gw === 1, 'P1: 版に Gateway の計画（次の差分の土台）を持つ');
   const { loading } = await sendHeld(x, 'PCだけ');
   const r = calls[1].revision;
   assert(r.mode === 'patch' && r.previousPlan.gw === 1 && Array.isArray(r.focus) && r.focus.includes('Q1') && calls[1].baseCtx && calls[1].baseCtx.n === 1, `P1: 回答の後の作り直しは mode patch・前の版の Gateway の計画・回答した質問（Q1）を focus・前の版の Context: ${JSON.stringify({ mode: r.mode, focus: r.focus })}`);
   // 2026-10-06: 受領の記録は会話に出さない。待ち時間は作業中の読み込み中の文で伝える（記録の文も同じ待ち時間）
-  assert(/変わる箇所だけを作り直します。十数秒ほどかかります/.test(acks()[0].text) && !/1 分前後/.test(acks()[0].text) && /十数秒ほどかかります/.test(loading) && !/1 分前後/.test(loading), `P1: 作業中の表示は差分の待ち時間（十数秒）: ${loading} ｜ ${acks()[0].text}`);
+  //   C-1 第 3 段（2026-10-08）: 最終案の流れの作業中の表示は進みの 1 枚カード（目安は実測。ai-flow-redesign の C3b-13）。
+  //   差分か全体かで変わる待ち時間の文は、受領の記録（answers-ack）に残る
+  assert(/変わる箇所だけを作り直します。十数秒ほどかかります/.test(acks()[0].text) && !/1 分前後/.test(acks()[0].text) && loading === '最終案を直しています', `P1: 受領の記録は差分の待ち時間（十数秒）・作業中の表示は進みの 1 枚カード: ${loading} ｜ ${acks()[0].text}`);
   assert(c.activePlan().revisionMeta?.mode === 'patch' && c.metrics().revisionModes.slice(-1)[0].mode === 'patch', 'P1: 版の作り方（patch）を版と計測に記録する');
   await c.send('更新状況は3段階ではなく5段階にして');
   // 2026-10-05 第 3 段で変更: 自由な修正の依頼も差分（大きな変更は Gateway が同じ依頼の中で全体の作り直しに切り替える）
@@ -95,16 +117,16 @@ await section(async () => {
 await section(async () => {
   const x = makeConv([planWith(qs(QP, QS)), planWith(qs(QS))], { revisionMode: 'full' });
   const { c, calls, acks } = x;
-  await c.send('金額が大きい案件に注意を出したい');
+  await start(c, '金額が大きい案件に注意を出したい');
   const { loading } = await sendHeld(x, 'PCだけ');
-  assert(!calls[1].revision.mode && /1 分前後/.test(acks()[0].text) && /1 分前後/.test(loading), `P3: revisionMode full（評価の対照・戻すとき）はいつも全体の作り直し（作業中の表示も 1 分前後）: ${loading}`);
+  assert(!calls[1].revision.mode && /1 分前後/.test(acks()[0].text) && loading === '最終案を直しています', `P3: revisionMode full（評価の対照・戻すとき）はいつも全体の作り直し（受領の記録は 1 分前後・作業中の表示は進みの 1 枚カード）: ${loading}`);
 });
 await section(async () => {
   const x = makeConv([planWith(qs(QP, QS)), planWith(qs(QS))], { revisionModes: ['full'] });
   const { c, calls, acks } = x;
-  await c.send('金額が大きい案件に注意を出したい');
+  await start(c, '金額が大きい案件に注意を出したい');
   const { loading } = await sendHeld(x, 'PCだけ');
-  assert(calls[1].revision.mode === 'patch' && /1 分前後/.test(acks()[0].text) && /1 分前後/.test(loading) && !/十数秒/.test(loading), `P4: health が patch を示さない古い Gateway では、差分を頼んでも全体を作り直す前提の文（古い Gateway は mode を無視する）: ${loading}`);
+  assert(calls[1].revision.mode === 'patch' && /1 分前後/.test(acks()[0].text) && !/十数秒/.test(acks()[0].text) && loading === '最終案を直しています', `P4: health が patch を示さない古い Gateway では、差分を頼んでも全体を作り直す前提の文（古い Gateway は mode を無視する。受領の記録の文）: ${loading}`);
 });
 await section(async () => {
   // 根拠ID の付け替え（Context は作り直しのたびに予算で facts を削って番号を振り直す）
@@ -133,7 +155,8 @@ console.log('\n--- Q. 作り直しの途中の追加の指示（受け付けて�
 await section(async () => {
   // 「PCだけ」の作り直しの途中に「保存は止めない」→ 受け付け、作業が終わったら続けて入れる。登録する版は 1 つ（両方入り）
   const { c, calls, ctl, acks, kinds } = makeConv([planWith(qs(QP, QS)), planWith(qs(QS)), planWith(qs())]);
-  await c.send('金額が大きい案件に注意を出したい');
+  await start(c, '金額が大きい案件に注意を出したい');
+  const aiCalls0 = c.metrics().aiCalls;   // 仮案と最初の計画（採用まで）の呼び出し
   const open1 = ctl.hold();
   const p = c.send('PCだけ');
   await ticks();
@@ -148,13 +171,14 @@ await section(async () => {
   // 2026-10-06: 会話の文に版の番号を出さない（「変更計画 v2 に入れました」→「変更案に入れました」）。入った版は記録（appliedInVersion）で確かめる
   assert(acks().every(m => m.data.stage === 'done' && (m.data.queued ? KTAiChatUi.isHiddenMessage(m) : (/変更案に入れました。/.test(KTAiChatUi.messageHtml(m)) && !/受け付けました/.test(KTAiChatUi.messageHtml(m))))) && /変更案に入れました/.test(acks()[1].text) && /kintone にはまだ何も反映していません/.test(acks()[1].text) && !/v\d/.test(acks()[1].text), `Q1: 受領の記録は両方とも完了（後の指示は「変更案に入れました」・版の番号は出さない。入れた知らせは会話に出さない）: ${acks()[1] && acks()[1].text}`);
   const mt = c.metrics();
-  assert(mt.queuedAccepted === 1 && mt.chainedJobs === 1 && mt.instructionWaits.length === 2 && mt.instructionWaits.every(w => w.waitMs > 0) && mt.aiCalls === 3, `Q1: 計測（受け付けた数・続けた作業・指示ごとの待ち時間）: ${JSON.stringify({ q: mt.queuedAccepted, ch: mt.chainedJobs, w: mt.instructionWaits })}`);
-  assert(kinds().filter(k => k === 'PLAN').length === 2, 'Q1: 計画のカードは v1 と最後の v2 だけ');
+  assert(mt.queuedAccepted === 1 && mt.chainedJobs === 1 && mt.instructionWaits.length === 2 && mt.instructionWaits.every(w => w.waitMs > 0) && mt.aiCalls - aiCalls0 === 2, `Q1: 計測（受け付けた数・続けた作業・指示ごとの待ち時間）: ${JSON.stringify({ q: mt.queuedAccepted, ch: mt.chainedJobs, w: mt.instructionWaits })}`);
+  //   C-1 第 3 段（2026-10-08）: 変更案のカード（PLAN）は削除した。版ごとのカードは最終案のカード（FINAL）1 枚
+  assert(kinds().filter(k => k === 'FINAL').length === 2 && !kinds().includes('PLAN'), 'Q1: 最終案のカードは v1 と最後の v2 だけ');
 });
 await section(async () => {
   // 古い結果で最新の指示を上書きしない: 「PCだけ」の途中に「やっぱりモバイルも必要」→ PC だけの結果は版にしない。最後の版の決定事項はモバイルも
   const { c, calls, ctl, acks } = makeConv([planWith(qs(QP, QS)), planWith(qs(QS), { customizations: [cust({ platform: ['desktop'] })] }), planWith(qs(QS), { customizations: [cust({ platform: ['desktop', 'mobile'] })] })]);
-  await c.send('金額が大きい案件に注意を出したい');
+  await start(c, '金額が大きい案件に注意を出したい');
   const open1 = ctl.hold();
   const p = c.send('PCだけ');
   await ticks();
@@ -169,7 +193,7 @@ await section(async () => {
 await section(async () => {
   // 続けて入れる作業が失敗: 先の作業の結果を版にし（先の回答は入った）、後の回答は記録したまま「入っていない」
   const { c, ctl, acks, kinds } = makeConv([planWith(qs(QP, QS)), planWith(qs(QS)), planWith(qs())], { failAt: 3 });
-  await c.send('金額が大きい案件に注意を出したい');
+  await start(c, '金額が大きい案件に注意を出したい');
   const open1 = ctl.hold();
   const p = c.send('PCだけ');
   await ticks();
@@ -185,7 +209,7 @@ await section(async () => {
 await section(async () => {
   // 続けて入れる作業の取り消し（［キャンセル］）: 先の結果を版に、後の指示は取り消し
   const { c, ctl, acks } = makeConv([planWith(qs(QP, QS)), planWith(qs(QS)), planWith(qs())]);
-  await c.send('金額が大きい案件に注意を出したい');
+  await start(c, '金額が大きい案件に注意を出したい');
   const ac = new AbortController();
   const open1 = ctl.hold(); const open2 = ctl.hold();
   const p = c.send('PCだけ', { signal: ac.signal });
@@ -199,7 +223,7 @@ await section(async () => {
 await section(async () => {
   // 新しい会話・別の版が最新になった: 途中の結果も続けた作業も入れない
   const { c, ctl, acks } = makeConv([planWith(qs(QP, QS)), planWith(qs(QS))]);
-  await c.send('金額が大きい案件に注意を出したい');
+  await start(c, '金額が大きい案件に注意を出したい');
   const open1 = ctl.hold();
   const p = c.send('PCだけ');
   await ticks();
@@ -208,7 +232,7 @@ await section(async () => {
   open1(); await p; await ticks();
   assert(c.activePlan().plan.questions[0].question === '別の質問ですか？' && acks().every(m => m.data.stage === 'superseded' && /まだ変更案に入っていません（作り直しの間に変更案が置き換わりました）/.test(KTAiChatUi.messageHtml(m))), `Q5: 別の経路で版が最新になったら、途中の結果を入れず、受領は「置き換わった」（まだ変更案に入っていないと会話に出す）: ${JSON.stringify(acks().map(m => m.data.stage))}`);
   const x = makeConv([planWith(qs(QP, QS)), planWith(qs(QS))]);
-  await x.c.send('金額が大きい案件に注意を出したい');
+  await start(x.c, '金額が大きい案件に注意を出したい');
   const o = x.ctl.hold();
   const p2 = x.c.send('PCだけ');
   await ticks();
@@ -220,7 +244,7 @@ await section(async () => {
 await section(async () => {
   // 受け付けないもの: 対応先の確認が要る回答・秘密情報（2026-10-05 第 3 段で変更: 作り直しの途中の質問は、作業と並べてすぐ答える）
   const { c, ctl } = makeConv([planWith(qs(QP, QS, '承認の設定も必要ですか？')), planWith(qs(QS))]);
-  await c.send('金額が大きい案件に注意を出したい');
+  await start(c, '金額が大きい案件に注意を出したい');
   const open1 = ctl.hold();
   const p = c.send('PCだけ');
   await ticks();
@@ -233,7 +257,7 @@ await section(async () => {
   assert(re && !re.queued && /いま直している変更案に入れています/.test(c.messages()[c.messages().length - 1].text), 'Q8: 作り直しに入っている回答の言い直しは積まない（いま入れていると伝える）');
   open1(); await p; await ticks();
   const a = makeConv([planWith(qs(QP))]);
-  await a.c.send('金額が大きい案件に注意を出したい');
+  await start(a.c, '金額が大きい案件に注意を出したい');
   const oa = a.ctl.hold();
   const pa = a.c.send('このフィールドは何に使ってる？');
   await ticks();
@@ -243,7 +267,7 @@ await section(async () => {
 await section(async () => {
   // 修正の依頼を途中に受け付けたら、続けて入れる作業に入れる（2026-10-05 第 3 段で変更: 修正の依頼を含むときも差分）
   const { c, calls, ctl, acks } = makeConv([planWith(qs(QP, QS)), planWith(qs(QS)), planWith(qs(QS))]);
-  await c.send('金額が大きい案件に注意を出したい');
+  await start(c, '金額が大きい案件に注意を出したい');
   const open1 = ctl.hold();
   const p = c.send('PCだけ');
   await ticks();
@@ -257,7 +281,7 @@ await section(async () => {
 await section(async () => {
   // 上限: 作業のたびに新しい指示が来ても、続ける作業は 4 回まで。超えた指示は記録したまま「まだ入っていない」
   const { c, ctl, acks } = makeConv([planWith(qs(QP, QS, QA, QT, '一覧は必要ですか？'))]);
-  await c.send('金額が大きい案件に注意を出したい');
+  await start(c, '金額が大きい案件に注意を出したい');
   const opens = [ctl.hold(), ctl.hold(), ctl.hold(), ctl.hold()];
   const p = c.send('PCだけ');
   const more = ['保存は止めない', '部長です', '保存時です', '一覧は不要です'];
@@ -328,14 +352,16 @@ await section(async () => {
 await section(async () => {
   // 会話: 別の点の質問が出ていれば、「課長です」はその質問への回答（以前は隠れた質問のせいで D1「部長」を置き換えた）。聞き直しは文を案内に出す
   const { c } = makeConv([planWith(qs({ question: QA, topic: 'approver' })), planWith(qs({ question: '部長が不在のときの代理の承認者は誰にしますか？', topic: 'approver' }, { question: QA, topic: 'approver' })), planWith(qs())]);
-  await c.send('金額が大きい案件に注意を出したい');
+  await start(c, '金額が大きい案件に注意を出したい');
   await c.send('部長です');
   assert(c.answerContext().open.map(q => q.text).join() === '部長が不在のときの代理の承認者は誰にしますか？', 'S7: v2 で代理の承認者の質問は出る（同じ承認者の質問は出さない）');
-  const notice = c.messages().find(m => m.data?.kind === 'reasked');
   // 2026-10-06: AI の再質問を出さなかった経緯（reasked）は記録に残し、通常の会話には出さない
-  assert(notice && /出さなかった質問: 「承認者は誰にしますか？」/.test(notice.text) && KTAiChatUi.isHiddenMessage(notice) && !/出さなかった質問/.test(KTAiChatUi.chatHtml(c.messages())), `S7: 出さなかった聞き直しの質問の文を記録に残す（会話には出さない）: ${notice && notice.text}`);
-  const card = KTAiChatUi.questionsCardHtml(c.messages().filter(m => m.data?.kind === 'questions').slice(-1)[0], { plans: new Map(c.planHistory().map(v => [`${v.planId}:${v.version}`, v])), activePlan: c.activePlan(), answerState: c.answerContext(), ledger: c.ledger() });
-  assert(/関係する回答済みの内容：承認者 → 部長です（同じ内容を聞いている質問なら、回答は不要です）/.test(card), 'S7: 確認事項のカードに、関係する回答済みの内容を添える');
+  //   C-1 第 3 段（2026-10-08）: 記録の知らせ（kind 'reasked'）は announcePlan の従来の分岐と一緒に削除した。記録は版（reaskedQuestions）と計測（reaskedLog）に残る
+  const v2s = c.activePlan();
+  assert((v2s.reaskedQuestions || []).map(q => q.text).join() === '承認者は誰にしますか？' && c.metrics().reaskedLog.some(e => e.version === v2s.version && e.text === '承認者は誰にしますか？') && !c.messages().some(m => m.data?.kind === 'reasked') && !/出さなかった質問/.test(KTAiChatUi.chatHtml(c.messages())),`S7: 出さなかった聞き直しの質問の文を記録に残す（版と計測。会話には出さない）: ${JSON.stringify(v2s.reaskedQuestions)}`);
+  //   確認事項のカード（questionsCardHtml）は削除した（ai-flow-redesign の F7-2）。関係する回答済みの内容は、未回答の確認事項の related として台帳に残る
+  const rel = (c.answerContext().open[0] || {}).related || [];
+  assert(rel.some(x => x.answer === '部長です'), `S7: 未回答の確認事項（代理の承認者）に、関係する回答済みの内容（承認者 → 部長です）を添える: ${JSON.stringify(rel)}`);
   await c.send('課長です');
   const ds = c.decisions();
   assert(ds.some(d => d.answer === '部長です') && ds.some(d => d.answer === '課長です' && /代理/.test(d.question || '')), `S7: 「課長です」は代理の質問への回答（D1「部長です」は残る）: ${JSON.stringify(ds.map(d => [d.id, d.answer, d.question]))}`);
@@ -346,7 +372,7 @@ console.log('\n--- R. 差分レビューの指摘（処理中の受け付け・�
 await section(async () => {
   // R1: 作り直しの途中の回答に含まれる依頼の部分（そのほかの記述）も、次の作業の依頼文に入れる（以前は捨てた）
   const { c, calls, ctl, acks } = makeConv([planWith(qs(QP, QS)), planWith(qs(QS)), planWith(qs())]);
-  await c.send('金額が大きい案件に注意を出したい');
+  await start(c, '金額が大きい案件に注意を出したい');
   const o = ctl.hold();
   const p = c.send('PCだけ');
   await ticks();
@@ -358,21 +384,21 @@ await section(async () => {
 await section(async () => {
   // R2: 同じ修正の依頼（［再試行］・二重クリック）は積まない / R3: 対応先の確認の選択は作り直しの後に
   const { c, calls, ctl } = makeConv([planWith(qs(QP, QS)), planWith(qs(QS))]);
-  await c.send('金額が大きい案件に注意を出したい');
+  await start(c, '金額が大きい案件に注意を出したい');
   const o = ctl.hold();
   const p = c.send('一覧「担当者別」に期日の列を追加して', { intentOverride: 'REVISE_PLAN' });
   await ticks();
   const d = await c.send('一覧「担当者別」に期日の列を追加して', { intentOverride: 'REVISE_PLAN' });
   assert(d && !d.queued && /同じ修正は、いま変更案に入れているところです/.test(c.messages()[c.messages().length - 1].text), 'R2: いまの作業と同じ修正の依頼は積まない');
-  const sel = await c.send('選択', { intentOverride: 'ANSWER', answerPayload: { source: 'chat', items: [{ key: 'Q1', answer: 'PCだけ' }], remaining: [] } });
-  assert(sel === null, 'R3: 対応先の確認の選択は、作り直しの途中は受け付けない（下書きとして残す）');
+  //   R3（対応先の確認の選択は作り直しの途中は受け付けない）は削除した: 対応先の確認（answer-target）は C-1 第 3 段で削除した
+  //   （対応先を聞き返さず、候補を添えて計画の AI に渡す。ai-flow-redesign の F4-1・F4-2）
   o(); await p; await ticks();
   assert(calls.length === 2, `R2: 計画の呼び出しは 1 回だけ（以前は同じ依頼でもう 1 回）: ${calls.length - 1}`);
 });
 await section(async () => {
   // R4: 上限に当たったら、受け付けた修正の依頼は決定事項を変えない（入れていないので）。受領は「まだ入っていません」
   const { c, ctl, acks } = makeConv([planWith(qs(QP, QS, QA, QT, '一覧は必要ですか？'))]);
-  await c.send('金額が大きい案件に注意を出したい');
+  await start(c, '金額が大きい案件に注意を出したい');
   const opens = [ctl.hold(), ctl.hold(), ctl.hold(), ctl.hold()];
   const p = c.send('PCだけ');
   const more = ['保存は止めない', '部長です', '保存時です'];
@@ -386,7 +412,7 @@ await section(async () => {
 await section(async () => {
   // R5: 依頼文の上限に収まらない修正の依頼は、次の作業に回す（黙って切り捨てて「入れました」と言わない）
   const { c, calls, ctl, acks } = makeConv([planWith(qs(QP, QS)), planWith(qs(QS)), planWith(qs(QS)), planWith(qs())]);
-  await c.send('金額が大きい案件に注意を出したい');
+  await start(c, '金額が大きい案件に注意を出したい');
   const o1 = ctl.hold(); const o2 = ctl.hold();
   const p = c.send('PCだけ');
   await ticks();
@@ -398,7 +424,7 @@ await section(async () => {
 await section(async () => {
   // R6: 続けた作業の取り消し: 先の版は登録・案内は「途中までの内容は変更案に入れました」（版の番号は出さない）・再試行の対象は入らなかった指示
   const { c, ctl } = makeConv([planWith(qs(QP, QS)), planWith(qs(QS)), planWith(qs())]);
-  await c.send('金額が大きい案件に注意を出したい');
+  await start(c, '金額が大きい案件に注意を出したい');
   const ac = new AbortController();
   const o1 = ctl.hold(); const o2 = ctl.hold();
   const p = c.send('PCだけ', { signal: ac.signal });
@@ -412,7 +438,7 @@ await section(async () => {
 await section(async () => {
   // R7: 回答に関係する箇所（focus）は最初の作業だけに付ける
   const { c, calls, ctl } = makeConv([planWith(qs(QP, QS)), planWith(qs(QS)), planWith(qs())]);
-  await c.send('金額が大きい案件に注意を出したい');
+  await start(c, '金額が大きい案件に注意を出したい');
   const o = ctl.hold();
   const p = c.send('PCだけ');
   await ticks();
@@ -468,7 +494,7 @@ await section(async () => {
   assert(!wrong.length, `T2: 内容を足す依頼・表示の仕方の依頼は回答にしない: ${JSON.stringify(wrong)}`);
   // T3: 会話: 聞き返さずに回答として受け付け、差分（patch・回答した質問を focus）で作り直す
   const { c, calls, acks, kinds } = makeConv([planWith(qs(QW, QF), { customizations: [cust()] }), planWith(qs(QW), { customizations: [cust()] })]);
-  await c.send('金額が100万円を超えたら画面に警告を出したい');
+  await start(c, '金額が100万円を超えたら画面に警告を出したい');
   const cls = KTAiConversation.classifyIntent('統合先はdealValidate.jsにまとめて', { activePlan: c.activePlan(), ledgers: new Map() });
   await c.send('統合先はdealValidate.jsにまとめて');
   assert(cls.intent === 'ANSWER' && calls.length === 2 && calls[1].revision.mode === 'patch' && (calls[1].revision.focus || []).includes('Q2') && acks().length === 1 && !kinds().includes('choices'), `T3: 聞き返さずに回答として差分で作り直す: ${JSON.stringify({ intent: cls.intent, reason: cls.reason, calls: calls.length, mode: calls[1] && calls[1].revision.mode, focus: calls[1] && calls[1].revision.focus, kinds: kinds().slice(-3) })}`);

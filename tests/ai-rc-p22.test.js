@@ -18,6 +18,8 @@ const { KTDeps, KTScan, KTCodeReview, KTAiClient, KTAiConversation, KTAiChatUi }
 const { assert, state } = makeAssert();
 const FX = require('./fixtures/ai-context-app.js');
 const R = require('./fixtures/p21-bfc-replay.js');
+// C-1 第 3 段（2026-10-08）: 新しい流れの共有の部品（会話の生成の拒否を、最終案の上で確かめる）
+const { createNewFlowKit } = require('./helpers/new-flow.js');
 
 const clean = (t) => KTScan.stripCommentsOnly(t);
 // 修正前の版（KT_SRC）には無い関数を呼んでも落ちない（失敗として数える）
@@ -299,36 +301,34 @@ const tryGenerate = async (transport) => { try { return { ok: true, r: await aiC
 }
 {
   // 会話: 生成済みのコードがある状態で作り直しが拒否されても、前のコード・計画の状態は変わらない。拒否は再試行できる
-  const custPlan = { planVersion: '1', requestId: 'tk-p22', goal: 'g', assessment: { summary: '' }, relevantFields: [], proposedFields: [], steps: [], alternatives: [], impact: [], questions: [], unknowns: [], planConfidence: 'INFERRED', solution: 'CUSTOMIZATION', customizations: [{ customizationId: 'C1', requirement: '承認済みでは明細を編集不可', strategy: 'NEW_JS_FILE', platform: ['desktop'], events: ['app.record.edit.show'], fields: [], apis: [], existingFiles: [] }] };
-  let declineNext = false;
-  const services = {
-    async plan() { return { plan: custPlan, ctx: null, review: null }; },
-    async ask() { return { ok: true, answer: { answer: 'a' } }; },
-    async generate() {
-      if (declineNext) await aiClient(gwError(422, 'GENERATION_DECLINED', DECLINE_DETAIL)).generate({ ctx: GCTX, requestId: 'gen-y' });
-      return { ok: true, generated: OK_BODY.generated, review: { status: 'OK', checks: [], registration: { verdict: 'RUNTIME_UNVERIFIED', blockers: [], confirmations: [], unverified: [] } }, ctx: null, existingSource: null };
-    },
-  };
-  const conv = KTAiConversation.create({ services });
-  await conv.send('承認済みでは明細を編集不可にしたい');
-  const v = conv.activePlan();
-  if (v && v.spec) conv.confirmSpec({ planId: v.planId, version: v.version });
-  await conv.send('C1 のコードを作って');
+  //   C-1 第 3 段（2026-10-08）: 新しい流れ（依頼 → 仮案 → 採用 → 最終案）の上で確かめる（共有の部品 tests/helpers/new-flow.js）。
+  //   JavaScript の作り直しは最終案の作り直し（同じ計画の新しい版）で、生成の失敗は最終案の「実現できない点」に出る（従来の仕様の確定と、生成のエラーのカードは無い）。
+  //   1 回目は検証を通らない候補（作り直せる）、2 回目は AI が生成を断る、3 回目は検証を通る候補
+  const K = createNewFlowKit(T2);
+  let n = 0;
+  const base = K.makeGenerate({ sequence: ['bad', 'good'] });
+  const gen = { calls: base.calls, impl: async (args) => { n += 1; if (n === 2) await aiClient(gwError(422, 'GENERATION_DECLINED', DECLINE_DETAIL)).generate({ ctx: GCTX, requestId: 'gen-y' }); return base.impl(args); } };
+  const x = K.makeConvC({ generate: gen });
+  await K.adoptC(x);
+  const v = x.c.activePlan();
   const first = v && v.generated && v.generated.C1 ? v.generated.C1 : null;
-  assert(first && first.generated && /kintone\.events\.on/.test(first.generated.code), `前提: 1 回目の生成でコードがある: ${JSON.stringify(Object.keys((v && v.generated) || {}))}`);
-  const statusBefore = v.status;
-  declineNext = true;
-  const res = await conv.send('C1 のコードを作り直して');
-  const msgs = conv.messages();
-  const last = msgs[msgs.length - 1];
-  assert(res && res.ok === false && last.type === 'ERROR' && last.data.code === 'GENERATION_DECLINED' && last.data.category === 'declined' && last.data.reason === DECLINE_DETAIL.reason, `拒否 → エラーのカードに種類（AI が生成しなかった）と AI の説明: ${JSON.stringify(last && last.data)}`);
-  assert(last.data.retryable === true && !!last.data.retryText, '拒否は再試行できる（再試行のボタン）');
-  assert(v.generated.C1 === first && v.status === statusBefore, '前に生成したコード・計画の状態は変わらない');
-  const html = KTAiChatUi.messageHtml(last, { plans: new Map() });
-  assert(/AI が生成しなかった/.test(html) && /AI の説明: items が許可されたフィールドに無いため実装できません/.test(html) && /kt-ai-declined-card/.test(html) && /再試行/.test(html) && !/ネットワークエラー/.test(html), 'カード: 種類・AI の説明・再試行。障害の色（赤）にしない（kt-ai-declined-card）');
-  declineNext = false;
-  const again = await conv.send('C1 のコードを作って');
-  assert(again && again.ok === true && v.generated.C1 && v.generated.C1 !== first, '再試行（もう一度作る）で生成できる');
+  assert(first && first.generated && /kintone\.events\.on/.test(first.generated.code) && first.status !== 'verified', `前提: 1 回目の生成でコードがある（検証を通っていないので作り直せる）: ${JSON.stringify(Object.keys((v && v.generated) || {}))} ${first && first.status}`);
+  const planBefore = JSON.stringify(v.plan);
+  const res = await x.c.send('C1 のコードを作り直して');
+  const v2 = x.c.activePlan();
+  const e2 = v2 && v2.generated ? v2.generated.C1 : null;
+  assert(res && res.intent === 'GENERATE_CODE' && v2 !== v && e2 && e2.status === 'failed' && e2.failure && e2.failure.reason === 'GENERATION_DECLINED' && v2.final && v2.final.approvable === false, `拒否 → 最終案の JavaScript は「生成できなかった」（種類は AI が生成しなかった）: ${JSON.stringify(e2 && { status: e2.status, failure: e2.failure })}`);
+  const cannot = (v2 && v2.final ? v2.final.cannot : []).filter(c => c.kind === 'failed');
+  assert(cannot.length === 1 && cannot[0].text.includes(KTAiClient.errorText('GENERATION_DECLINED').slice(0, 40)) && /通信や契約の問題ではありません/.test(cannot[0].text) && /もう一度最終案を作る/.test(cannot[0].next), `拒否は通信・契約の障害と区別して書き、作り直せることを示す: ${JSON.stringify(cannot)}`);
+  assert(v.generated.C1 === first && e2.generated === first.generated && JSON.stringify(v2.plan) === planBefore, '前に生成したコード・計画の状態は変わらない（前の版の結果は書き換えず、新しい版にも前のコードを持つ）');
+  const html = K.finalHtml(x);
+  assert(/AI はこの依頼に対するコード生成を行いませんでした/.test(html) && !/ネットワークエラー/.test(html), '最終案のカード: AI が生成しなかったことを出す（ネットワークエラーとしない）');
+  //   未解決の不足（報告済み）: 生成工程の 1 依頼（generateAndVerify）は例外を { reason, message } だけにして AI の説明（KTAiClient.declineReasonOf）を捨てるので、
+  //   最終案のカードに出ない（以前はエラーのカードに「AI の説明: …」を出した）。期待は変えずに残す
+  assert(/items が許可されたフィールドに無いため実装できません/.test(html),`最終案のカードに AI の説明（Gateway が返した理由）を出す: ${JSON.stringify(e2.failure)}`);
+  const again = await x.c.send('C1 のコードを作って');
+  const v3 = x.c.activePlan();
+  assert(again && again.ok === true && v3 !== v2 && v3.generated.C1 && v3.generated.C1.status === 'verified' && v3.final.approvable === true, '再試行（もう一度作る）で生成できる');
 }
 
 // =========================================================

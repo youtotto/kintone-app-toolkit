@@ -6,12 +6,17 @@
 //   - 失敗・キャンセルで入力欄が空なら送った文を戻す（従来どおり。直して送れる）
 //   - ［再試行］・回答欄・panel.send など入力欄以外からの送信は入力欄に触れない
 //   - 応答待ちに送ろうとしたら送らず、下書きを残したことを伝える
+//   - C-1 第 3 段（2026-10-08）: 回答欄の試験は、最終案のカードの回答欄（新しい流れ。tests/helpers/new-flow.js）の上で行う
 //
 // 実行方法: node tests/ai-chat-draft.test.js
 'use strict';
 const { loadToolkit, makeAssert } = require('./helpers/load-toolkit.js');
 const { makeFakeHost } = require('./helpers/fake-dom.js');
-const { KTDeps, KTAiClient, mountAiWorkspace } = loadToolkit();
+const T = loadToolkit();
+const { KTDeps, KTAiClient, mountAiWorkspace } = T;
+//   C-1 第 3 段（2026-10-08）: 回答欄（6 の後半・7）は新しい流れ（仮案 → 採用 → 最終案のカードの回答欄）の上で試す（共有の部品）
+const { createNewFlowKit } = require('./helpers/new-flow.js');
+const K = createNewFlowKit(T);
 const { assert, state } = makeAssert();
 const FX = require('./fixtures/ai-context-app.js');
 const { makeKintoneMock } = require('./helpers/kintone-preview-mock.js');
@@ -150,25 +155,35 @@ await section(async () => {
   await m.panel.send(Q); await ticks();
   assert(m.calls.length === 3 && m.input().value === 'panel.send の間に書いた下書き', 'panel.send（入力欄以外）: 成功しても入力欄を空にしない');
 });
+//   C-1 第 3 段（2026-10-08）: 回答欄は最終案のカードの中だけ（ai-flow-redesign R10-2）。古い確認事項のカードの代わりに、
+//   仮案 → 採用 → 最終案（先に決めたい判断つき）まで共有の部品で進め、その回答欄から送る
+/** 最終案の計画（画面の偽 client）: 最初は先に決めたい判断 Q1・Q2。keepQ2 なら作り直しの後も Q2 の質問だけ残す（番号は Q1 に振り直す） */
+const QS_FINAL = [{ id: 'Q1', question: '高額とはいくらからですか？', topic: 'threshold', priority: 'blocking' }, { id: 'Q2', question: '一覧に表示する項目は金額だけでよいですか？', topic: 'other', priority: 'blocking' }];
+const finalPlanImpl = (keepQ2) => ({ ctx, requestId }) => { const raw = K.PLAN_V1(ctx.goal); raw.plan.questions = ctx.revision ? (keepQ2 ? [{ ...QS_FINAL[1], id: 'Q1' }] : []) : QS_FINAL.map(q => ({ ...q })); const v = KTAiClient.validatePlan(raw, ctx); if (!v.ok) throw new Error(v.errors[0].message); return { ...v.normalized, requestId, clientWarnings: v.warnings }; };
+/** 共有の部品の画面に、この試験の入力欄の操作を足す */
+const mountFinal = async ({ keepQ2 = false } = {}) => {
+  const k = K.mount({ planImpl: finalPlanImpl(keepQ2) });
+  await ticks();
+  const v1 = await K.adoptOnScreen(k);
+  const m = { panel: k.panel, $: k.$, input: () => k.$('kt-ai-input'), type(t) { k.$('kt-ai-input').value = t; }, act(dataset) { return k.$('kt-ai-chat').dispatch({ type: 'click', target: { dataset } }); } };
+  return { m, k, v1 };
+};
 await section(async () => {
-  const m = mount(); await ticks();
-  await m.panel.send('高額案件の一覧を作りたい'); await ticks();
-  const v1 = m.panel.conversation().activePlan();
+  const { m, v1 } = await mountFinal();
+  assert(v1 && v1.final && v1.final.questions.length === 2 && /data-act="answer-questions"/.test(m.$('kt-ai-chat').innerHTML), `前提: 最終案のカードに先に決めたい判断 2 件の回答欄がある: ${v1 && v1.final && v1.final.questions.length}`);
   m.type('回答とは別に書いている依頼');
   await m.$('kt-ai-chat').dispatch({ type: 'input', target: { dataset: { qkey: qkeyOf(m, v1, 'Q1') }, value: '100万円以上' } });
-  await m.act({ act: 'answer-questions', plan: v1.planId, version: String(v1.version) }); await ticks();
+  await m.act({ act: 'answer-questions', plan: v1.planId, version: String(v1.version) }); await ticks(12);
   assert(m.panel.conversation().activePlan().version === 2 && m.input().value === '回答とは別に書いている依頼', `回答欄から送って計画が v2 になっても、入力欄の下書きは消さない: ${JSON.stringify(m.input().value)}`);
 });
 
 // =========================================================
 console.log('\n--- 7. 回答欄の下書き: 別の質問に答えて計画の版が進んでも、まだ送っていない回答欄の下書きは残る ---');
 await section(async () => {
-  const m = mount({ keepQ2: true }); await ticks();
-  await m.panel.send('高額案件の一覧を作りたい'); await ticks();
-  const v1 = m.panel.conversation().activePlan();
+  const { m, v1 } = await mountFinal({ keepQ2: true });
   // Q2 の回答欄に書きかけ（まだ送らない）→ チャット欄で Q1 に答える（v2 では番号が振り直され、Q2 の質問は Q1 になる）
   await m.$('kt-ai-chat').dispatch({ type: 'input', target: { dataset: { qkey: qkeyOf(m, v1, 'Q2') }, value: '金額と案件名' } });
-  await m.panel.send('100万円以上です'); await ticks();
+  await m.panel.send('100万円以上です'); await ticks(12);
   const v2 = m.panel.conversation().activePlan();
   const html = m.$('kt-ai-chat').innerHTML;
   assert(v2.version === 2 && (html.match(/class="kt-ai-qa-input"/g) || []).length === 1 && />金額と案件名<\/textarea>/.test(html), `新しい版の同じ質問（番号は Q1 に変わった）の回答欄に、書きかけの回答が残る: v=${v2.version}`);

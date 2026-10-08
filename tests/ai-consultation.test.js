@@ -2,14 +2,19 @@
 //
 // 検証内容:
 //   §44 Customize → AI: FILE / URL・desktop / mobile の seed、sourceId、会話の開始（初期メッセージ）、同じ JS の再開、別 JS の確認（戻る / 新しい会話）、Planner Context の subject
-//   §45 Spec: 初回の仕様 v1（DRAFT）、修正で v2（v1 は SUPERSEDED）、チャットの「それでいい」では確定しない、［この仕様で確定］で確定（customize revision を記録）、確定前はコードを作らない
+//   §45 Spec: 仕様 v1 は最終案の一部として自動で確定（customize revision を記録）・右は閲覧だけ・チャットの文では承認しない・修正で v2（v1 は SUPERSEDED）
 //   §46〜§53（UI 経由）: 既存 FILE の差し替え登録・新規 JS の登録・mobile・URL の fallback・stale・検証・Rollback・Rollback stale・文章だけでは登録 / 復元しない・監査
+//   C-1 第 3 段（2026-10-08）: 古い確認の流れ（DISCUSS_JS・仕様の確定・従来の生成・［確定してコードを作る］）は削除した。相談・依頼は仮案 → 採用 → 最終案（生成と検証）→
+//     最終案の承認 → 登録の順で確かめる（共有の部品 tests/helpers/new-flow.js の仮案の正規化を使う）
 //
 // 実行方法: node tests/ai-consultation.test.js
 'use strict';
 const { loadToolkit, makeAssert } = require('./helpers/load-toolkit.js');
 const { makeFakeHost } = require('./helpers/fake-dom.js');
-const { KTDeps, KTScan, KTContext, KTAiClient, KTAiConversation, KTAiChatUi, KTCodeReview, KTJsExecutor, mountAiWorkspace } = loadToolkit();
+const { createNewFlowKit } = require('./helpers/new-flow.js');
+const T0 = loadToolkit();
+const { KTDeps, KTScan, KTContext, KTAiClient, KTAiConversation, KTAiChatUi, KTCodeReview, KTJsExecutor, mountAiWorkspace } = T0;
+const KIT = createNewFlowKit(T0);
 const { assert, state } = makeAssert();
 const FX = require('./fixtures/ai-context-app.js');
 const { buildScanPayload } = require('./helpers/scan-payload.js');
@@ -78,11 +83,17 @@ const passVerification = (ctx) => { const re = (ctx && ctx.verification && ctx.v
 const genResponse = (ctx, g) => ({ ok: true, contractVersion: '2.1', meta: { requestId: 'gen-1', usage: { usedThisMonth: 3, monthlyLimit: 20 }, normalization: { warnings: [] } }, generated: g, ...(passVerification(ctx) ? { verification: passVerification(ctx) } : {}) });
 const genFor = (ctx) => {
   const c = ctx.customization;
-  if (c.strategy === 'EXTEND_EXISTING_JS') return { strategy: 'EXTEND_EXISTING_JS', targetFile: ctx.existingFile.name, summary: '承認済でも編集不可にする', code: PATCH.operations[0].content, patch: { ...PATCH, baseHash: ctx.existingFile.hash, operations: ctx.existingFile.name === 'ext.js' ? [{ type: 'INSERT_AFTER', anchor: "    event.record['owner'].disabled = true;", content: "    event.record['owner'].disabled = event.record['ステータス'].value === '承認済';" }] : PATCH.operations }, events: c.events, fields: c.fields, apis: [], assumptions: [], warnings: [] };
+  //   C-1 第 3 段（2026-10-08）: ext.js への変更の code は、patch と同じ担当者（owner）の行にする（以前は金額の行のままで、最終案の流れでは
+  //   「計画に無いフィールドを操作」で最終案が承認できず、登録の準備（EXTERNAL_JS_NOT_WRITABLE の確認）まで進めなかった）
+  const extLine = "    event.record['owner'].disabled = event.record['ステータス'].value === '承認済';";
+  if (c.strategy === 'EXTEND_EXISTING_JS') return { strategy: 'EXTEND_EXISTING_JS', targetFile: ctx.existingFile.name, summary: '承認済でも編集不可にする', code: ctx.existingFile.name === 'ext.js' ? extLine : PATCH.operations[0].content, patch: { ...PATCH, baseHash: ctx.existingFile.hash, operations: ctx.existingFile.name === 'ext.js' ? [{ type: 'INSERT_AFTER', anchor: "    event.record['owner'].disabled = true;", content: "    event.record['owner'].disabled = event.record['ステータス'].value === '承認済';" }] : PATCH.operations }, events: c.events, fields: c.fields, apis: [], assumptions: [], warnings: [] };
   if (c.platform.includes('mobile')) return { strategy: 'NEW_JS_FILE', targetFile: 'approved-lock-mobile.js', summary: 'モバイルの金額ロック', code: MOBILE_NEW, patch: null, events: ['mobile.app.record.edit.show'], fields: [{ code: 'amount', access: 'CONTROL' }], apis: [], assumptions: [], warnings: [] };
   return { strategy: 'NEW_JS_FILE', targetFile: 'amount-warning.js', summary: '金額の警告', code: NEW_JS, patch: null, events: c.events, fields: c.fields, apis: [], assumptions: [], warnings: [] };
 };
-const HEALTH = { ok: true, supportedContractVersions: ['2.0', '2.1'], entitlements: [{ product: 'toolkit', features: ['assistant-qa', 'change-planner', 'customization-generator'] }], registry: { toolkit: { 'assistant-qa': { implemented: true, promptVersions: ['1'] }, 'change-planner': { implemented: true, promptVersions: ['1'] }, 'customization-generator': { implemented: true, promptVersions: ['1'], verification: ['requirementId', 'requiredEffects', 'effectGroups', 'relatedOmitted', 'appFields', 'saveDialog', 'reasonCategory', 'caseSide', 'eventCases', 'loadFaithful', 'registrationCheck', 'emptyCase', 'hideCondition', 'registrationCounts', 'caseCoverage'] } } }, usage: { monthlyLimit: 20, usedThisMonth: 1 } };
+//   C-1 第 3 段（2026-10-08）: 接続先は仮案に対応した形（assistant-qa の conversation に proposal）。相談・依頼は仮案 → 採用 → 計画 → 最終案（生成と検証を含む）→ 承認 → 登録
+const HEALTH = { ok: true, supportedContractVersions: ['2.0', '2.1'], entitlements: [{ product: 'toolkit', features: ['assistant-qa', 'change-planner', 'customization-generator'] }], registry: { toolkit: { 'assistant-qa': { implemented: true, promptVersions: ['1'], conversation: ['requirements', 'proposal'] }, 'change-planner': { implemented: true, promptVersions: ['1'] }, 'customization-generator': { implemented: true, promptVersions: ['1'], verification: ['requirementId', 'requiredEffects', 'effectGroups', 'relatedOmitted', 'appFields', 'saveDialog', 'reasonCategory', 'caseSide', 'eventCases', 'loadFaithful', 'registrationCheck', 'emptyCase', 'hideCondition', 'registrationCounts', 'caseCoverage'] } } }, usage: { monthlyLimit: 20, usedThisMonth: 1 } };
+/** 仮案の偽の応答（決めることの無い仮案。依頼の文を実現する動作にする） */
+const proposalFor = (utterance, requestId = 'pp-1') => KIT.normalized({ reply: 'JavaScript で実現できます。', intent: 'propose', proposal: { behaviors: [KIT.B(utterance, 'user')], assumptions: [], decisions: [], approach: { standard: [], js: ['JavaScript で制御する'] }, cannot: [] }, turn: { ops: [], answers: [], requirementOps: [] } }, requestId);
 const makeStorage = () => { const m = new Map(); return { getItem: (k) => (m.has(k) ? m.get(k) : null), setItem: (k, v) => m.set(k, String(v)), removeItem: (k) => m.delete(k) }; };
 const tick = () => new Promise(r => setTimeout(r, 0));
 const ticks = async (n = 4) => { for (let i = 0; i < n; i++) await tick(); };
@@ -90,9 +101,10 @@ function mount({ inputs = INPUTS, planResponse = PLAN_REPLACE, generatedFor = ge
   const storage = makeStorage();
   const settings = KTAiClient.createSettingsStore({ storage, host: 't.cybozu.com' });
   settings.setConsent(true);
-  const calls = { ask: [], plan: [], generate: [] };
+  const calls = { ask: [], plan: [], generate: [], propose: [] };
   const client = {
     async getHealth() { return HEALTH; },
+    async propose({ ctx, requestId }) { calls.propose.push({ ctx }); return proposalFor(ctx.question, requestId || 'pp-1'); },
     async ask({ ctx, requestId }) { calls.ask.push({ ctx }); const v = KTAiClient.validateAnswer({ ok: true, contractVersion: '2.1', meta: { requestId: 'qa-1', normalization: { warnings: [] } }, answer: 'このファイルは承認待ちのとき金額を編集不可にしています。', facts: [], analysis: [], recommendations: [], unknowns: [] }, ctx); return { ...v.normalized, requestId, clientWarnings: v.warnings }; },
     async plan({ ctx, requestId }) { calls.plan.push({ ctx }); const resp = typeof planResponse === 'function' ? planResponse(ctx) : planResponse; const v = KTAiClient.validatePlan(resp, ctx); if (!v.ok) throw new Error(JSON.stringify(v.errors)); return { ...v.normalized, requestId, clientWarnings: v.warnings }; },
     async generate({ ctx, requestId }) { calls.generate.push({ ctx }); const v = KTAiClient.validateGenerated(genResponse(ctx, generatedFor(ctx)), ctx); if (!v.ok) throw new KTAiClient.AiClientError({ code: v.errors[0].code, message: v.errors[0].message, requestId }); return { ...v.normalized, requestId, clientWarnings: v.warnings }; },
@@ -115,6 +127,10 @@ const clickPane = (m, id) => m.$('kt-ai-pane-code').dispatch({ type: 'click', ta
 const ackAll = async (m) => { for (const x of (m.panel.jsExecState().prepared?.confirmations || [])) await m.$('kt-ai-pane-exec').dispatch({ type: 'change', target: { dataset: { ackKey: x.key }, checked: true } }); };
 const writes = (m) => m.mock.calls.filter(c => !c.startsWith('GET'));
 const seedFor = (name, target = 'desktop', { text, url } = {}) => KTContext.buildConsultationSeed({ data: INPUTS.data, deps: INPUTS.deps, scan: INPUTS.scan, file: url ? { name, target, type: 'URL', url } : { name, target, type: 'FILE', fileKey: name === 'fieldOnOff.js' ? 'dl:fieldOnOff' : 'dl:mlock', size: '290' }, sourceText: text ?? null, appName: '案件管理' });
+/** 依頼（相談中なら相談の要望）→ 仮案 →「これで進めて」で採用 → 計画 → 最終案（JavaScript の生成と検証を含む）。C-1 第 3 段: 仕様の確定と従来の生成の置き換え */
+async function adoptScreen(m, text) { const r = await m.panel.send(text); await ticks(6); const a = await m.panel.send('これで進めて'); await ticks(12); return { r, a, v: m.conv().activePlan() }; }
+/** 最終案のカードの［この内容で反映する］で承認する */
+async function approveScreen(m) { const v = m.conv().activePlan(); await clickChat(m, 'final-approve', { plan: v.planId, version: String(v.version) }); await ticks(4); return !!(v.approval && m.conv().approvalValid().ok); }
 const confirmSpec = async (m) => { const v = m.conv().activePlan(); await clickChat(m, 'confirm-spec', { plan: v.planId, version: String(v.version) }); };
 const jsNames = (m, t) => m.mock.st.customize[t].js.map(e => (e.type === 'URL' ? e.url : m.mock.st.files.get(e.fileKey).name));
 
@@ -158,9 +174,11 @@ console.log('\n--- §44-2. 会話の開始 / 再開 / 別 JS の確認 / Planner
   assert(/相談中: fieldOnOff\.js（PC）/.test(m.$('kt-ai-header').innerHTML), 'ヘッダーに相談対象');
   const r3 = m.panel.consult(seed);
   assert(r3.ok && r3.resumed === true && m.msgs().length === 1, '同じ JS の「AIに相談」: 再開（会話を残す・初期メッセージを重ねない）');
-  // 相談中の発話 → DISCUSS_JS（Planner に subject 付き）
-  const d = await m.panel.send('承認済みになったら金額を編集できなくしたい');
-  assert(d.ok && d.intent === KTAiConversation.INTENT.DISCUSS_JS && m.calls.plan.length === 1, '相談中の要望 → DISCUSS_JS（Planner を呼ぶ）');
+  // 相談中の発話 → 仮案（CONSULTATION。相談中の JavaScript を仮案の依頼に渡す）→ 採用 → Planner（subject 付き）
+  //   C-1 第 3 段（2026-10-08）: DISCUSS_JS（相談から直接計画を作る古い流れ）は削除した（ai-flow-redesign の F1-1〜F1-4）
+  const { r: d, a: dA } = await adoptScreen(m, '承認済みになったら金額を編集できなくしたい');
+  assert(d.ok && d.intent === KTAiConversation.INTENT.PROPOSE && d.reason === 'CONSULTATION' && m.calls.propose.length === 1 && KTAiConversation.INTENT.DISCUSS_JS === undefined && dA.intent === KTAiConversation.INTENT.ADOPT_DRAFT && m.calls.plan.length === 1, '相談中の要望 → 仮案（CONSULTATION）→ 採用 → Planner を呼ぶ（DISCUSS_JS の意図は無い）');
+  assert(m.calls.propose[0].ctx.facts.some(f => /相談中の JavaScript「fieldOnOff\.js」/.test(f.statement || '')), '仮案の Context に相談中の JavaScript の要約（本文は送らない）');
   const ctx = m.calls.plan[0].ctx;
   assert(ctx.subject && ctx.subject.type === 'javascript' && ctx.subject.sourceId === 'desktop:js:fieldOnOff.js' && ctx.subject.name === 'fieldOnOff.js' && ctx.subject.target === 'desktop' && ctx.subject.customizationType === 'FILE' && ctx.subject.sourceAvailable === true && ctx.subject.fields.some(f => f.code === 'amount' && f.access === 'CONTROL'), 'Planner Context に subject（相談中の JS。本文なし）');
   const jsFact = ctx.facts.find(f => f.kind === 'js-file' && /fieldOnOff\.js/.test(f.statement));
@@ -184,69 +202,52 @@ console.log('\n--- §44-2. 会話の開始 / 再開 / 別 JS の確認 / Planner
 }
 
 // =========================================================
-console.log('\n--- §45. 実装仕様: v1 DRAFT → チャットでは確定しない → ［この仕様で確定］→ 修正で v2（v1 は旧版）→ 確定前は生成しない ---');
+console.log('\n--- §45. 実装仕様（C-1 第 3 段で変更）: 最終案の一部として自動で確定・右は閲覧だけ・チャットの文では承認しない・修正で v2（v1 は旧版）---');
+//   C-1 第 3 段（2026-10-08）: 仕様の確定（［この仕様で確定］・「それでいい」の案内・確定前は生成しない・会話の仕様のカード）は削除した。
+//   仕様は最終案の一部として自動で確定し（ai-flow-redesign の R09-2）、右の「変更内容」で閲覧だけできる（F7-1〜F7-4）。承認は最終案の［この内容で反映する］だけ
 {
   const m = mount({ planResponse: (ctx) => (ctx.revision ? PLAN_BOTH : PLAN_REPLACE) });
   await ticks();
   m.panel.consult(seedFor('fieldOnOff.js', 'desktop', { text: FIELD_ON_OFF }));
-  await m.panel.send('承認済みになったら金額を編集できなくしたい');
-  const v1 = m.conv().activePlan();
-  assert(v1.spec && v1.spec.version === 1 && v1.spec.status === 'DRAFT' && v1.spec.specId === `${v1.planId}:spec` && v1.spec.subject?.name === 'fieldOnOff.js' && m.types().includes('SPEC'), '計画 v1 → 実装仕様 v1（DRAFT・相談対象付き）');
+  const { v: v1 } = await adoptScreen(m, '承認済みになったら金額を編集できなくしたい');
+  assert(v1.spec && v1.spec.version === 1 && v1.spec.status === 'CONFIRMED' && v1.spec.customizeRevision === '12' && v1.spec.specId === `${v1.planId}:spec` && v1.spec.subject?.name === 'fieldOnOff.js' && !m.types().includes('SPEC'), '計画 v1 → 実装仕様 v1（相談対象付き）。最終案の一部として自動で確定し customize revision 12 を記録（会話に仕様のカードは出さない）');
   const html = m.$('kt-ai-spec').innerHTML;
-  assert(/実装仕様 v1/.test(html) && /確認待ち/.test(html) && /目的/.test(html) && /承認済みになったら金額を編集できなくしたい/.test(html) && /✎ fieldOnOff\.js を変更/.test(html) && /amount（CONTROL）/.test(html) && /app\.record\.edit\.show/.test(html) && /data-act="confirm-spec"/.test(html) && /data-act="revise-spec"/.test(html) && /チャットの「それでいい」では確定になりません/.test(html), '仕様カード（右の「変更内容」）: 目的 / PC ✎ fieldOnOff.js を変更 / 対象フィールド / イベント / ［仕様を修正］［この仕様で確定］');
-  // 2026-10-06: 会話のカードは「JavaScript の実装の内容をまとめました。」と要件ごとの 1 行だけ（版の番号・C1 などの番号は出さない）。確定ボタンは右
-  const specCard1 = m.chat().split('kt-ai-msg ').find(x => /kt-ai-spec-card/.test(x)) || '';
-  assert(/JavaScript の実装の内容をまとめました。/.test(specCard1) && /・承認済では金額を編集不可（fieldOnOff\.js を変更・PC）/.test(specCard1) && /data-act="open-spec"/.test(specCard1) && !/実装仕様 v\d|\bC1\b/.test(specCard1) && !/data-act="confirm-spec"/.test(m.chat()), '会話の仕様カードは要約だけ（版の番号・要件の番号を出さない。確定ボタンは右）');
-  const c1 = await m.panel.send('それでいい');
-  assert(c1.intent === KTAiConversation.INTENT.CONFIRM_SPEC && v1.spec.status === 'DRAFT' && /この仕様で確定］ボタンで行います/.test(m.chat()) && writes(m).length === 0, '「それでいい」: 確定しない（案内だけ）');
-  const g0 = await m.panel.send('コードを作って');
-  assert(g0.ok === false && m.calls.generate.length === 0 && m.msgs().some(x => x.data?.kind === 'spec-required'), '確定前の「コードを作って」: 生成しない');
-  await confirmSpec(m);
-  assert(v1.spec.status === 'CONFIRMED' && v1.spec.confirmedAt && v1.spec.customizeRevision === '12' && /確定済み/.test(m.chat()) && /JavaScript を生成（C1）/.test(m.$('kt-ai-spec').innerHTML) && m.msgs().some(x => x.data?.kind === 'spec-confirmed'), '［この仕様で確定］→ CONFIRMED・customize revision 12 を記録・右の「変更内容」に［JavaScript を生成（C1）］');
-  assert(m.mock.calls.filter(c => c === 'GET customize').length >= 1 && writes(m).length === 0, '確定時に動作テスト環境の設定を読むだけ（書き込み 0）');
+  assert(/実装仕様 v1/.test(html) && /確定済み/.test(html) && /目的/.test(html) && /承認済みになったら金額を編集できなくしたい/.test(html) && /✎ fieldOnOff\.js を変更/.test(html) && /amount（CONTROL）/.test(html) && /app\.record\.edit\.show/.test(html) && /最終案の一部です/.test(html) && !/data-act="(confirm-spec|revise-spec|confirm-generate|generate)"/.test(html), '仕様（右の「変更内容」）: 目的 / PC ✎ fieldOnOff.js を変更 / 対象フィールド / イベント。閲覧だけ（［仕様を修正］［この仕様で確定］［確定してコードを作る］は無い）');
+  assert(!/kt-ai-spec-card/.test(m.chat()) && !/data-act="confirm-spec"/.test(m.chat()) && /最終案ができました。/.test(m.chat()), '会話は最終案のカード 1 枚（仕様のカード・確定ボタンは無い）');
+  assert(m.mock.calls.filter(c => c === 'GET customize').length >= 1 && writes(m).length === 0, '仕様の確定のときに動作テスト環境の設定を読むだけ（書き込み 0）');
+  const c1 = await m.panel.send('それでいい'); await ticks();
+  assert(!m.conv().activePlan().approval && writes(m).length === 0 && m.panel.jsExecState().stage === 'idle' && c1.intent !== KTAiConversation.INTENT.ADOPT_DRAFT, '「それでいい」: チャットの文では承認しない（承認は最終案の［この内容で反映する］だけ。書き込み 0）');
   // 修正 → v2（PC は既存へ統合・mobile は新規）
-  const rv = await m.panel.send('モバイルでも同じようにしたい');
+  const rv = await m.panel.send('モバイルでも同じようにしたい'); await ticks(12);
   assert(rv.intent === KTAiConversation.INTENT.REVISE_PLAN && m.calls.plan.length === 2 && m.calls.plan[1].ctx.revision && m.calls.plan[1].ctx.subject?.sourceId === 'desktop:js:fieldOnOff.js', '修正の依頼: REVISE_PLAN（subject 付き）');
   const v2 = m.conv().activePlan();
-  assert(v2.version === 2 && v2.spec.version === 2 && v2.spec.status === 'DRAFT' && v1.spec.status === 'SUPERSEDED' && v1.status === 'SUPERSEDED', 'v2 の仕様は DRAFT・v1 の仕様は SUPERSEDED');
-  // 2026-10-06: 会話のカードは版の番号を出さない。最新の版のカード（data-version="2"）に PC の統合と Mobile の新しい JavaScript の行。右の「変更内容」は v2 だけ
-  const specCards = m.chat().split('kt-ai-msg ').filter(x => /kt-ai-spec-card/.test(x));
-  const v2Card = specCards.filter(x => /data-version="2"/.test(x)).pop() || '';
+  assert(v2.version === 2 && v2.spec.version === 2 && v2.spec.status === 'CONFIRMED' && v1.spec.status === 'SUPERSEDED' && v1.status === 'SUPERSEDED', 'v2 の仕様（最終案の一部として確定）・v1 の仕様は SUPERSEDED');
   const rightSpec = m.$('kt-ai-spec').innerHTML;
-  assert(/・承認済では金額を編集不可（fieldOnOff\.js を変更・PC）/.test(v2Card) && /・モバイルでも承認済では金額を編集不可（新しい JavaScript・モバイル）/.test(v2Card) && !/is-old/.test(v2Card) && !/実装仕様 v\d/.test(m.chat())
-    && /Mobile/.test(rightSpec) && /＋ 新規 JS/.test(rightSpec) && /✎ fieldOnOff\.js を変更/.test(rightSpec) && /実装仕様 v2/.test(rightSpec) && !/実装仕様 v1/.test(rightSpec), '仕様 v2 のカード: PC は既存へ統合・Mobile は新しい JavaScript（§6）。右は v2 だけ');
-  const old = KTAiConversation.MSG.SPEC;
-  const v1Cards = specCards.filter(x => /data-version="1"/.test(x));
-  assert(v1Cards.length >= 1 && v1Cards.every(x => /is-old/.test(x) && /旧版/.test(x) && !/data-act="confirm-spec"/.test(x)) && !/data-act="confirm-spec"/.test(m.chat()), '旧版（v1）のカードは「旧版」で、確定ボタンは無い');
-  const g1 = await m.panel.send('コードを作って');
-  assert(g1.ok === false && m.calls.generate.length === 0, 'v2 の仕様が確定するまで生成しない（確定は最新の版だけ）');
-  const c2 = m.conv().confirmSpec({ planId: v1.planId, version: 1 });
-  assert(c2.ok === false && c2.reason === 'NOT_ACTIVE', '旧版の仕様は確定できない');
-  await confirmSpec(m);
-  assert(v2.spec.status === 'CONFIRMED', 'v2 を確定');
-  assert(old === 'SPEC', '（定数）');
+  assert(/Mobile/.test(rightSpec) && /＋ 新規 JS/.test(rightSpec) && /✎ fieldOnOff\.js を変更/.test(rightSpec) && /実装仕様 v2/.test(rightSpec) && !/実装仕様 v1/.test(rightSpec), '仕様 v2: PC は既存へ統合・Mobile は新しい JavaScript（§6）。右は v2 だけ');
+  //   旧版（v1）の仕様のカードは削除した。前の最終案は 1 行に畳む（ai-flow-redesign の R10-4・F2-2）
+  assert(/前の最終案 — このあと直した案があります/.test(m.chat()) && !/実装仕様 v\d/.test(m.chat()), '前の最終案は「このあと直した案があります」に畳む（会話に仕様の版の番号は出さない）');
+  assert(typeof m.conv().confirmSpec === 'undefined' && KTAiConversation.MSG.SPEC === undefined && typeof m.panel.confirmSpec === 'undefined', '仕様の確定の操作・仕様のカードの種類は無い（ai-flow-redesign の F7-1・F7-4）');
 }
 
 // =========================================================
 console.log('\n--- §46〜§53（UI 経由）: 既存 FILE の差し替え登録 → 検証 → Rollback、文章だけでは登録しない ---');
+//   C-1 第 3 段: 生成は最終案の中で行い、登録は最終案の承認の後だけ（ai-flow-redesign の F10-2・F11-2）。登録・検証・復元・監査はそのまま
 {
   const m = mount();
   await ticks();
   m.panel.consult(seedFor('fieldOnOff.js', 'desktop', { text: FIELD_ON_OFF }));
-  await m.panel.send('承認済みになったら金額を編集できなくしたい');
   const before = jsNames(m, 'desktop');
+  const { v } = await adoptScreen(m, '承認済みになったら金額を編集できなくしたい');
   const r0 = await m.panel.send('JS を登録して');
-  assert(r0.intent === KTAiConversation.INTENT.GENERAL && r0.reason === 'NO_GENERATED_CODE' && /登録できる JavaScript はまだありません/.test(m.chat()), '生成前の「JS を登録して」: 登録できるコードが無い');
-  await confirmSpec(m);
-  await clickChat(m, 'generate', { cid: 'C1' });
-  const v = m.conv().activePlan();
+  assert(r0.intent === KTAiConversation.INTENT.REQUEST_JS_PREVIEW && m.msgs()[m.msgs().length - 1].data?.kind === 'js-preview-needs-approval' && writes(m).length === 0 && m.panel.jsExecState().stage === 'idle', '承認前の「JS を登録して」: 最終案の承認へ案内するだけ（登録しない・書き込み 0）');
   const entry = m.panel.generated('C1');
   assert(entry && entry.review.status === 'OK' && entry.existingSource?.from === 'seed' && entry.existingSource.text === FIELD_ON_OFF && m.calls.generate[0].ctx.existingFile?.source === FIELD_ON_OFF, '生成: 統合先の本文は相談の seed から（取り直さない）・Code Review OK');
-  assert(!/data-act="open-js-register"/.test(m.chat()) && /動作テスト環境へ登録/.test(m.chat()) && m.$('kt-ai-code-register').style.display === '', '［動作テスト環境へ登録］は右の「コード」（会話は案内だけ）');
+  assert(await approveScreen(m), '最終案のカードの［この内容で反映する］で承認する');
+  await clickChat(m, 'open-code', { cid: 'C1', plan: v.planId, version: String(v.version) });
+  assert(!/data-act="open-js-register"/.test(m.chat()) && m.$('kt-ai-code-register').style.display === '', '［動作テスト環境へ登録］は右の「コード」（会話のカードに登録の操作は無い）');
   const r1 = await m.panel.send('JS を登録して');
-  assert(r1.intent === KTAiConversation.INTENT.REQUEST_JS_PREVIEW && m.msgs().some(x => x.data?.kind === 'js-preview-ready' && x.data.registrable === 1) && /登録の確認を開く/.test(m.chat()) && writes(m).length === 0 && m.panel.jsExecState().stage === 'idle', '「JS を登録して」: 案内カードだけ（登録しない・書き込み 0）');
+  assert(r1.intent === KTAiConversation.INTENT.REQUEST_JS_PREVIEW && m.msgs().some(x => x.data?.kind === 'js-preview-ready' && x.data.registrable === 1) && /登録の確認を開く/.test(m.chat()) && writes(m).length === 0 && m.panel.jsExecState().stage === 'idle', '承認後の「JS を登録して」: 案内カードだけ（登録しない・書き込み 0）');
   // 登録の確認（Human Approval）
-  const paneBeforeRegister = m.panel.drawerState().pane;
   await clickChat(m, 'open-js-register', { plan: v.planId, version: String(v.version) });
   await ticks(6);
   const jx = m.panel.jsExecState();
@@ -298,10 +299,8 @@ console.log('\n--- 新規 JS（desktop）の登録 / mobile（desktop を変え�
 {
   const m = mount({ planResponse: PLAN_NEW_DESKTOP });
   await ticks();
-  await m.panel.send('100万円以上なら警告を表示したい');
-  await confirmSpec(m);
-  await clickChat(m, 'generate', { cid: 'C1' });
-  const v = m.conv().activePlan();
+  const { v } = await adoptScreen(m, '100万円以上なら警告を表示したい');
+  assert(await approveScreen(m), '前提: 新規 JS の最終案を承認');
   await clickChat(m, 'open-js-register', { plan: v.planId, version: String(v.version) });
   await ticks(6);
   assert(m.panel.jsExecState().stage === 'confirm' && m.panel.jsExecState().prepared.changes[0].kind === 'ADD_FILE' && m.panel.jsExecState().prepared.changes[0].name === 'amount-warning.js' && /＋ <b>amount-warning\.js<\/b>（PC）　新規追加（3 番目・末尾）/.test(m.pane()) && /PC：1件追加/.test(m.pane()), '新規 JS: ADD_FILE・末尾（3 番目）・確認画面');
@@ -314,11 +313,9 @@ console.log('\n--- 新規 JS（desktop）の登録 / mobile（desktop を変え�
   const m = mount({ planResponse: PLAN_MOBILE_NEW });
   await ticks();
   m.panel.consult(seedFor('mobileLock.js', 'mobile', { text: MOBILE_LOCK }));
-  const d = await m.panel.send('承認済みでは金額を編集不可にしたい');
-  assert(d.intent === KTAiConversation.INTENT.DISCUSS_JS && m.calls.plan[0].ctx.subject.target === 'mobile', 'mobile JS の相談: subject.target mobile');
-  await confirmSpec(m);
-  await clickChat(m, 'generate', { cid: 'C1' });
-  const v = m.conv().activePlan();
+  const { r: d, v } = await adoptScreen(m, '承認済みでは金額を編集不可にしたい');
+  assert(d.intent === KTAiConversation.INTENT.PROPOSE && d.reason === 'CONSULTATION' && m.calls.plan[0].ctx.subject.target === 'mobile', 'mobile JS の相談: 仮案 → 採用 → 計画（subject.target mobile）');
+  assert(await approveScreen(m), '前提: mobile の最終案を承認');
   const before = jsNames(m, 'desktop');
   await clickChat(m, 'open-js-register', { plan: v.planId, version: String(v.version) });
   await ticks(6);
@@ -334,39 +331,36 @@ console.log('\n--- 新規 JS（desktop）の登録 / mobile（desktop を変え�
   await ticks();
   m.panel.consult(seedFor('ext.js', 'desktop', { url: 'https://cdnjs.cloudflare.com/ajax/libs/ext-lib/1.0.0/ext.js' }));
   assert(/URL 指定/.test(m.chat()) && /取得できません（外部 URL/.test(m.$('kt-ai-subject-info').innerHTML), '外部 URL の相談: 左は URL 指定の印、本文が無い旨は右の「変更内容」の相談カード');
-  await m.panel.send('承認済みでは担当者を編集不可にしたい');
-  await confirmSpec(m);
-  const g = await m.panel.send('コードを作って');
-  // 2026-10-06: 会話の文に JS_SOURCE_UNAVAILABLE の文字は出さない。選択肢は［新しい JavaScript として作る］（計画の修正の依頼）
-  const unavailable = m.msgs().find(x => x.data?.kind === 'source-unavailable');
-  assert(g.ok === false && m.calls.generate.length === 0 && unavailable && unavailable.data.customizationId === 'C1' && unavailable.data.file?.name === 'ext.js' && /統合先「ext\.js」の本文を取得できませんでした。既存のファイルへの自動生成は行いません。/.test(m.chat()) && !/JS_SOURCE_UNAVAILABLE/.test(m.chat())
-    && /data-act="choice" data-intent="REVISE_PLAN"[^>]*>新しい JavaScript として作る</.test(m.chat()), '外部 URL への統合: 本文が無いので生成せず（会話に内部のコードは出さない）、新しい JavaScript として作り直す選択肢');
+  const { v } = await adoptScreen(m, '承認済みでは担当者を編集不可にしたい');
+  //   C-1 第 3 段: 生成は最終案の中。従来の source-unavailable のカード（［新しい JavaScript として作る］の選択肢）は削除した。
+  //   守ること（本文が無い既存のファイルへは自動生成しない・反映できない・内部のコードを出さない）は最終案の「実現できない点」で確かめる
+  const gC1 = v.generated && v.generated.C1;
+  assert(m.calls.generate.length === 0 && gC1 && gC1.status === 'failed' && gC1.failure && gC1.failure.reason === 'JS_SOURCE_UNAVAILABLE' && v.final && v.final.approvable === false && /統合先の既存の JavaScript の本文を取得できませんでした/.test(m.chat()) && !/JS_SOURCE_UNAVAILABLE/.test(m.chat()) && !(await approveScreen(m)), '外部 URL への統合: 本文が無いので生成せず（会話に内部のコードは出さない）、最終案は承認できない（実現できない点に理由）');
   // URL（本文は読める想定）: 生成はできるが登録は EXTERNAL_JS_NOT_WRITABLE
   const m2 = mount({ planResponse: PLAN_EXT });
   await ticks();
   m2.panel.consult(seedFor('ext.js', 'desktop', { url: 'https://cdnjs.cloudflare.com/ajax/libs/ext-lib/1.0.0/ext.js', text: EXT_SRC }));
-  await m2.panel.send('承認済みでは担当者を編集不可にしたい');
-  await confirmSpec(m2);
-  await clickChat(m2, 'generate', { cid: 'C1' });
+  const { v: v2 } = await adoptScreen(m2, '承認済みでは担当者を編集不可にしたい');
   const e2 = m2.panel.generated('C1');
-  assert(e2 && e2.existingSource?.from === 'url' && e2.existingSource.external === true && /書き換えられません/.test(m2.chat()) && m2.$('kt-ai-code-register').style.display === 'none' && /新規 JS として設計し直す/.test(m2.chat()), 'URL の JS への patch: 生成はできるが、カードは「Toolkit からは書き換えられない」・右の登録ボタンは出ない・［新規 JS として設計し直す］');
-  const v2 = m2.conv().activePlan();
+  assert(e2 && e2.existingSource?.from === 'url' && e2.existingSource.external === true, 'URL の JS への patch: 生成はできる（統合先の本文は URL から・外部）');
+  //   守り手の無い期待（担当 R へ報告）: 以前はコードのカードで「Toolkit からは書き換えられない」と伝え、［新規 JS として設計し直す］を出し、右の登録ボタンを出さなかった。
+  //   最終案の流れでは、書き換えられない外部のファイルへの変更でも最終案が承認でき（approvable）、カードにも書き換えられないことが出ない（登録の準備で初めて止まる）。期待は弱めずに残す
+  assert(v2.final && (v2.final.approvable === false || /書き換えられません/.test(m2.chat())), 'URL の JS への変更: 最終案のカードで「Toolkit からは書き換えられない」と伝える（承認できる完成品として出さない）（本体に守り手が無い。担当 R へ報告）');
+  await approveScreen(m2);
   await m2.panel.startJsRegister(v2);
   await ticks(6);
   assert(m2.panel.jsExecState().stage === 'blocked' && m2.panel.jsExecState().prepared.blockers.some(b => b.code === 'EXTERNAL_JS_NOT_WRITABLE') && writes(m2).length === 0, '§49 直接呼んでも EXTERNAL_JS_NOT_WRITABLE で止まる（自動置換しない）');
 }
 {
-  // §50 stale: 仕様確定の後に設定が変わった
+  // §50 stale: 仕様確定（最終案の承認）の後に設定が変わった
   const m = mount();
   await ticks();
   m.panel.consult(seedFor('fieldOnOff.js', 'desktop', { text: FIELD_ON_OFF }));
-  await m.panel.send('承認済みになったら金額を編集できなくしたい');
-  await confirmSpec(m);
-  await clickChat(m, 'generate', { cid: 'C1' });
+  const { v } = await adoptScreen(m, '承認済みになったら金額を編集できなくしたい');
+  assert(await approveScreen(m), '前提: 最終案を承認');
   const cur = await m.mock.api.getPreviewCustomize('310');
   const up = await m.mock.api.uploadFile('manual.js', '// manual', 'text/javascript');
   await m.mock.api.putPreviewCustomize('310', { app: 310, scope: cur.scope, desktop: { js: [...cur.desktop.js.map(e => (e.type === 'URL' ? e : { type: 'FILE', file: { fileKey: e.file.fileKey } })), { type: 'FILE', file: { fileKey: up } }], css: cur.desktop.css.map(e => ({ type: 'FILE', file: { fileKey: e.file.fileKey } })) }, mobile: { js: cur.mobile.js.map(e => ({ type: 'FILE', file: { fileKey: e.file.fileKey } })), css: [] } }, cur.revision);
-  const v = m.conv().activePlan();
   await clickChat(m, 'open-js-register', { plan: v.planId, version: String(v.version) });
   await ticks(6);
   assert(m.panel.jsExecState().stage === 'blocked' && m.panel.jsExecState().prepared.blockers[0].code === 'STALE_CUSTOMIZATION' && /登録できません/.test(m.pane()) && /STALE_CUSTOMIZATION/.test(m.pane()), '§50 仕様確定後にカスタマイズ設定が変わった → STALE_CUSTOMIZATION で停止');
@@ -376,10 +370,8 @@ console.log('\n--- 新規 JS（desktop）の登録 / mobile（desktop を変え�
   const m = mount();
   await ticks();
   m.panel.consult(seedFor('fieldOnOff.js', 'desktop', { text: FIELD_ON_OFF }));
-  await m.panel.send('承認済みになったら金額を編集できなくしたい');
-  await confirmSpec(m);
-  await clickChat(m, 'generate', { cid: 'C1' });
-  const v = m.conv().activePlan();
+  const { v } = await adoptScreen(m, '承認済みになったら金額を編集できなくしたい');
+  assert(await approveScreen(m), '前提: 最終案を承認');
   await clickChat(m, 'open-js-register', { plan: v.planId, version: String(v.version) });
   await ticks(6);
   await ackAll(m);
@@ -399,16 +391,15 @@ console.log('\n--- §54 modern JavaScript（2026-10-05。§0d.3 で変更）: To
   // AI が var を含むコードを返した（古い Gateway・Gateway の修正の前と同じ）
   //   §0d.3（2026-10-08）の決定で期待値を変えた: 以前は Toolkit が生成の直後に const へ直して登録していたが、検証した候補と登録する候補（candidateHash）が
   //   食い違うので書き換えをやめた。検出は残す（modern-js の block。直すのは生成工程の修復か作り直し）
+  //   C-1 第 3 段: 生成は最終案の中。var の残る候補の最終案は承認できず、登録の確認を開いても登録しない
   const VAR_JS = NEW_JS.replace('    const record = event.record;', '    var record = event.record;');
   const m = mount({ planResponse: PLAN_NEW_DESKTOP, generatedFor: (ctx) => ({ ...genFor(ctx), code: VAR_JS }) });
   await ticks();
-  await m.panel.send('100万円以上なら警告を表示したい');
-  await confirmSpec(m);
-  await clickChat(m, 'generate', { cid: 'C1' });
-  const v = m.conv().activePlan();
+  const { v } = await adoptScreen(m, '100万円以上なら警告を表示したい');
   const g = v.generated.C1;
   const mj = g && g.review.registration.blockers.find(b => b.code === 'modern-js');
   assert(g && g.generated.code === VAR_JS && !g.generated.toolkitModernJs && g.review.status === 'BLOCKED' && mj && /反映直前の形式確認（記法）/.test(mj.message) && /var record/.test(mj.message) && /書き換えない/.test(mj.message), `§54 AI の var は書き換えず（生成工程が返したコードのまま）、反映直前の形式確認で検出して登録できない: ${g && g.review.status} ${mj && mj.message}`);
+  assert(v.final && v.final.approvable === false && !(await approveScreen(m)), '§54 var の残る候補の最終案は承認できない');
   await clickChat(m, 'open-js-register', { plan: v.planId, version: String(v.version) });
   await ticks(6);
   await ackAll(m);
@@ -422,10 +413,7 @@ console.log('\n--- §54 modern JavaScript（2026-10-05。§0d.3 で変更）: To
   const TOP_JS = `var LIMIT = 1000000;\n${NEW_JS}`;
   const m = mount({ planResponse: PLAN_NEW_DESKTOP, generatedFor: (ctx) => ({ ...genFor(ctx), code: TOP_JS }) });
   await ticks();
-  await m.panel.send('100万円以上なら警告を表示したい');
-  await confirmSpec(m);
-  await clickChat(m, 'generate', { cid: 'C1' });
-  const v = m.conv().activePlan();
+  const { v } = await adoptScreen(m, '100万円以上なら警告を表示したい');
   const g = v.generated.C1;
   const blocker = g && g.review.registration.blockers.find(b => b.code === 'modern-js');
   assert(g && g.review.status === 'BLOCKED' && blocker && /1 行目「var LIMIT = 1000000;」: var LIMIT — 自動で直せません（関数の外/.test(blocker.message), `§54 直せない var は登録できない（行・文・理由）: ${blocker && blocker.message}`);
@@ -433,21 +421,8 @@ console.log('\n--- §54 modern JavaScript（2026-10-05。§0d.3 で変更）: To
   assert(!r || r.ok === false, '§54 登録の準備もできない');
 }
 
-console.log('\n--- §55 確定と生成を 1 回の操作に（2026-10-05 第 3 段）: ［確定してコードを作る］・古い版のボタンでは作らない ---');
-{
-  const m = mount({ planResponse: PLAN_NEW_DESKTOP });
-  await ticks();
-  await m.panel.send('100万円以上なら警告を表示したい');
-  const v = m.conv().activePlan();
-  assert(/確定してコードを作る/.test(m.$('kt-ai-spec').innerHTML) && /data-cid="C1"/.test(m.$('kt-ai-spec').innerHTML), '§55 仕様（下書き）に［確定してコードを作る］がある（生成できるカスタマイズが 1 つなら、その id）');
-  await clickChat(m, 'confirm-generate', { plan: v.planId, version: String(v.version), cid: 'C1' });
-  await ticks(10);
-  assert(m.calls.generate.length === 1 && m.conv().activePlan().spec.status === 'CONFIRMED' && m.conv().activePlan().generated && m.conv().activePlan().generated.C1, '§55 1 回の操作で仕様を確定してコードを作る（以前は確定 → 生成の 2 回）。kintone への登録は別の確認のまま');
-  const before = m.calls.generate.length;
-  await clickChat(m, 'confirm-generate', { plan: v.planId, version: String(v.version - 1 || 99), cid: 'C1' });
-  await ticks(6);
-  assert(m.calls.generate.length === before, '§55 最新でない版のボタンでは作らない');
-}
+//   §55（［確定してコードを作る］・古い版のボタンでは作らない）は削除した: 仕様の確定と生成は最終案のパイプラインに置き換えた
+//   （ai-flow-redesign の R09-2・F2-3・F7-3）。古い版の操作で進めないことは、最終案の承認の版の照合（R16-5・画面-4・画面-5）で守る
 
 console.log(`\n${state.failed ? 'FAILED' : 'ALL PASSED'}: ${state.passed} passed / ${state.failed} failed`);
 process.exit(state.failed ? 1 : 0);

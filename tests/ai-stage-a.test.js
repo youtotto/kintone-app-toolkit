@@ -6,7 +6,8 @@
 //   T-A3（5.3）R12 / R13: error と disabled の重なり（旧 error-cancels-edit）は C-1 第 2 段で Toolkit の判定から外した（生成工程の模擬テストで守る）。siteConds の字句の形だけ確かめる
 //   T-A4（5.4）未実装を完成扱いしない: 範囲内の NOT_MET は coverage-unmet（block）・PARTIAL は review。見出しは「要件を満たしていない部分があります（登録できません）」
 //   T-A5（5.5）var: patch を入れる handler の中の既存の var を安全な判定で const / let に更新。handler の外・安全でない宣言は変えない
-//   T-A6（5.6）同じ入力・同じ指摘での再生成は AI を呼ばない。生成の回数と token / 費用の見積もり（「生成 N 回目」）
+//   T-A6（5.6）同じ入力・同じ指摘での再生成は AI を呼ばない。生成の回数と token / 費用の見積もり（「生成 N 回目」）。
+//     C-1 第 3 段（2026-10-08）: 会話の部分は新しい流れ（仮案 → 採用 → 最終案 → 「コードを作って」で最終案の作り直し）の上で試す
 //   T-A7（R14）新設の依存: dependsOn が動作テスト環境に無ければ DEPENDENCY_NOT_APPLIED で登録しない。再検査は実在するフィールドだけ。反映後は登録できる
 //   T-A8（R15）編集制限コードの検証: 両承認待ち・通常編集・一覧編集・明細・保存禁止・既存制御（行操作の制限と保存禁止を混同しない）
 //   T-A9（独立レビューの指摘）早い return の誤認（入れ子の if / for の return・callback の return）・not in の条件・緩い等号と再代入・宣言の更新は handler の中だけ・
@@ -18,13 +19,15 @@
 'use strict';
 const { loadToolkit, makeAssert } = require('./helpers/load-toolkit.js');
 const T = loadToolkit();
-const { KTDeps, KTScan, KTContext, KTCodeReview, KTModernJs, KTJsExecutor, KTAiConversation, KTAiWorkspaceViewModel, KTAiChatUi, KTPlanReview } = T;
+const { KTDeps, KTScan, KTContext, KTCodeReview, KTModernJs, KTJsExecutor, KTAiConversation, KTAiWorkspaceViewModel, KTAiChatUi } = T;
 const { assert, state } = makeAssert();
 const FX = require('./fixtures/ai-context-app.js');
 const R = require('./fixtures/p21-bfc-replay.js');
 const SA = require('./fixtures/stage-a-edit-lock.js');
-const SR = require('./fixtures/spec-retention-cases.js');
 const { makeKintoneMock } = require('./helpers/kintone-preview-mock.js');
+//   C-1 第 3 段（2026-10-08）: 会話の試験（T-A6・T-A10 の 4 / 7）は新しい流れ（仮案 → 採用 → 最終案）の上で行う（共有の部品）
+const { createNewFlowKit } = require('./helpers/new-flow.js');
+const K = createNewFlowKit(T);
 const VM = KTAiWorkspaceViewModel;
 const clone = (v) => JSON.parse(JSON.stringify(v));
 const clean = (t) => KTScan.stripCommentsOnly(t);
@@ -167,36 +170,40 @@ await section(() => {
   // 段階 C: 計画の新設の名前を requirement の文から照合する plannedHint（段階 A）は削除した（文からの推定を減らす）。新設に関わる未達も、この JavaScript の id の NOT_MET として登録不可のまま
   const rvPl = KTCodeReview.review({ generated: { ...GEN_R14, coverage: [{ requirementId: 'C1', requirement: 'ステータスが「部長承認待ち」のときは部長承認者以外は金額を編集不可にする', status: 'NOT_MET', note: '部長承認待ちというステータスは存在しないため実装できません' }] }, customization: CUST_R14, plan: PLAN_R14, data: DATA, scan: null, existingSource: null });
   assert(!('plannedHint' in rvPl.coverage) && rvPl.registration.verdict === 'BLOCKED' && rvPl.coverage.notAchieved.some(x => x.code === 'AI_NOT_MET' && x.requirementId === 'C1'), `plannedHint は無い。自分の id の NOT_MET は登録不可: ${JSON.stringify(rvPl.coverage.notAchieved)}`);
-  // 表示: VM.codeSummary（見出し・登録できるか）・コードカード・コードペイン
+  // 表示: VM.codeSummary（見出し・登録できるか）・コードペイン
+  //   C-1 第 3 段（2026-10-08）: 会話のコードのカード（MSG.CODE・codeCardHtml）は削除した（JavaScript は最終案のカードの中だけ）。カードの見出し・「生成 N 回目」・
+  //   AI の申告を 1 回だけ出す期待は、下のコードペインの同じ期待と、ai-flow-redesign の F7-2（コードのカードの描画は無い）・F2-3（最終案を通らない生成のカードは出ない）・
+  //   R19-3 / R19-5（未解決の理由と次の方針は最終案のカードに 1 回だけ）・D1-4（検証の区分に必須の動作の未達）で守る
   const entry = { generated: gen(okCode, { coverage: covNotMet }), review: rv, existingSource: null, attempts: { count: 2, measured: 2, tokens: { input: 3000, output: 400 }, costUsd: 0.01 } };
   const v = { planId: 'p', version: 1, goal: 'g', plan: mkPlan([], { customizations: [cust()] }), review: null, ctx: null, status: 'ACTIVE', generated: { C1: entry } };
   const cs = VM.codeSummary(entry, 'C1', v);
   assert(cs.unmet.length === 1 && cs.headline === 'JavaScript を作りましたが、要件を満たしていない部分があります（登録できません）。' && cs.verdictJa === '× 要件を満たしていない部分があります（登録できません）' && cs.blocked && cs.attemptCount === 2, `codeSummary: 見出しと登録の判定は「要件を満たしていない部分があります（登録できません）」・生成の回数: ${JSON.stringify({ headline: cs.headline, verdictJa: cs.verdictJa, attemptCount: cs.attemptCount })}`);
-  const card = KTAiChatUi.messageHtml({ id: 'm1', type: 'CODE', role: 'toolkit', text: 'JavaScript', at: '', data: { planId: 'p', version: 1, customizationId: 'C1' } }, { plans: new Map([['p:1', v]]) });
-  assert(/<b>JavaScript を作りましたが、要件を満たしていない部分があります（登録できません）。<\/b>/.test(card) && !/静的な検査は通過/.test(card) && /生成 2 回目/.test(card) && /kt-ai-code-not-achieved[^>]*>要件のうち満たせない部分（AI の申告）/.test(card), `コードカード: 見出しを差し替え、「✓ 静的な検査は通過」とは並べない。「生成 N 回目」を出す: ${card.replace(/<[^>]*>/g, '').slice(0, 200)}`);
-  // 独立レビュー C: AI の申告は「AI の申告」と書き、coverage-unmet の blocker と同じ項目を 2 回出さない
-  assert((card.match(/部長承認待ちでも金額を編集不可にする/g) || []).length === 1 && !/（Toolkit の確認）/.test(card), `コードカード: AI の申告の未達は 1 回だけ（blocker の行と重ねない）・Toolkit の確認の行は出ない: ${card.replace(/<[^>]*>/g, '').slice(0, 300)}`);
   const pane = KTAiChatUi.codePaneHtml(entry);
   assert(/× 要件を満たしていない部分があります（登録できません）/.test(pane.head) && !/静的な検査は通過/.test(pane.head) && /生成 2 回目（使用量: 入力 3000 \/ 出力 400 token/.test(pane.head) && !/見積もり/.test(pane.head), `コードペインの見出しも同じ（登録の判定・生成の回数と実測の使用量）: ${pane.head.replace(/<[^>]*>/g, '').slice(0, 300)}`);
   assert((pane.head.match(/部長承認待ちでも金額を編集不可にする/g) || []).length === 1 && !/（Toolkit の確認）/.test(pane.head) && /要件の達成: 要件を満たしていません（AI の申告）/.test(pane.review), 'コードペイン: AI の申告は検査の一覧（要件の達成）に 1 回だけ。Toolkit の確認の行には出さない');
-  const entryPl = { generated: GEN_R14, review: rvPl, existingSource: null };
-  const vPl = { planId: 'p', version: 1, goal: 'g', plan: PLAN_R14, review: null, ctx: null, status: 'ACTIVE', generated: { C1: entryPl } };
-  const cardPl = KTAiChatUi.messageHtml({ id: 'm2', type: 'CODE', role: 'toolkit', text: 'JavaScript', at: '', data: { planId: 'p', version: 1, customizationId: 'C1' } }, { plans: new Map([['p:1', vPl]]) });
-  assert(!/kt-ai-code-planned-hint/.test(cardPl) && /生成 1 回目/.test(cardPl), 'コードカード: 新設の項目の案内（plannedHint）は出さない。「生成 N 回目」は出す');
+  //   C-1 第 3 段: コードのカードの「新設の項目の案内（plannedHint）は出さない」は、上の rvPl（plannedHint は無い）とコードペインで守る
+  const panePl = KTAiChatUi.codePaneHtml({ generated: GEN_R14, review: rvPl, existingSource: null });
+  assert(!/kt-ai-code-planned-hint/.test(panePl.head + panePl.review) && !/前提にした作り直し/.test(panePl.head + panePl.review), 'コードペイン: 新設の項目の案内（plannedHint）は出さない');
 });
 
 // =========================================================
 // 確認 7（C-1 第 2 段で tests/ai-js-sim.test.js から移した。模擬実行を使わない KTCodeReview の回帰）:
 //   JavaScript で直せない制約（行の追加・削除）を NOT_MET と申告 → 登録不可のまま修復を頼まない（SUBTABLE_ROWS で示す）
 console.log('\n--- T-A4b 確認 7: 行の追加・削除を理由にした NOT_MET は登録不可のまま修復の対象外 ---');
+//   C-1 第 3 段（2026-10-08）: 理由（行の追加・削除）は生成工程が返す coverage の limitCode（SUBTABLE_ROWS）だけで決める。AI の申告の文（note）は読まない
+//   （ai-flow-redesign の D15-3〜D15-6・F9-1 と同じ規則）。期待（登録不可のまま・修復の対象外・達成範囲に SUBTABLE_ROWS・ほかの理由は修復の対象）はそのまま
 await section(() => {
   const GOOD_LOCK_C1F = handler(EDIT, "    if (record['ステータス'] && record['ステータス'].value === '承認待ち') record['amount'].disabled = true;");
-  const rv = (note) => KTCodeReview.review({ generated: gen(GOOD_LOCK_C1F, { coverage: [{ requirementId: 'C1', status: 'NOT_MET', note, text: '承認待ちでは明細を編集不可' }] }), customization: cust({ requirement: '承認待ちでは明細を編集不可' }), plan: { customizations: [cust()], steps: [] }, data: clone(DATA), scan: null, existingSource: null });
-  const rows = rv('テーブルの行の追加・削除は JavaScript では止められない');
+  const rv = (note, limitCode = null) => KTCodeReview.review({ generated: gen(GOOD_LOCK_C1F, { coverage: [{ requirementId: 'C1', status: 'NOT_MET', note, text: '承認待ちでは明細を編集不可', ...(limitCode ? { limitCode } : {}) }] }), customization: cust({ requirement: '承認待ちでは明細を編集不可' }), plan: { customizations: [cust()], steps: [] }, data: clone(DATA), scan: null, existingSource: null });
+  const rows = rv('テーブルの行の追加・削除は JavaScript では止められない', 'SUBTABLE_ROWS');
   const cu = rows.checks.find(x => x.name === 'coverage-unmet');
-  assert(rows.registration.verdict === 'BLOCKED' && cu && cu.severity === 'block' && cu.noRepair === true && cu.limit === 'SUBTABLE_ROWS' && rows.coverage.notAchieved.some(x => x.code === 'SUBTABLE_ROWS'), `確認 7: 行の追加・削除を理由にした NOT_MET は登録不可のまま・修復の対象外（noRepair）・達成範囲に SUBTABLE_ROWS: ${JSON.stringify(cu)}`);
+  assert(rows.registration.verdict === 'BLOCKED' && cu && cu.severity === 'block' && cu.noRepair === true && cu.limit === 'SUBTABLE_ROWS' && rows.coverage.notAchieved.some(x => x.code === 'SUBTABLE_ROWS'), `確認 7: 行の追加・削除（limitCode SUBTABLE_ROWS）を理由にした NOT_MET は登録不可のまま・修復の対象外（noRepair）・達成範囲に SUBTABLE_ROWS: ${JSON.stringify(cu)}`);
   const other = rv('一部の条件を満たせない').checks.find(x => x.name === 'coverage-unmet');
   assert(other && other.severity === 'block' && !other.noRepair, '確認 7: ほかの理由の NOT_MET は従来どおり修復の対象');
+  //   limitCode の無い申告は、文に行の追加・削除と書いてあっても登録不可のまま（文を読んで修復の対象外にはしない）
+  const noCode = rv('テーブルの行の追加・削除は JavaScript では止められない');
+  const cuN = noCode.checks.find(x => x.name === 'coverage-unmet');
+  assert(noCode.registration.verdict === 'BLOCKED' && cuN && cuN.severity === 'block' && !cuN.noRepair, `確認 7: limitCode の無い NOT_MET は文を読まずに登録不可のまま（修復の対象外にしない）: ${JSON.stringify(cuN)}`);
 });
 
 // =========================================================
@@ -259,39 +266,23 @@ await section(async () => {
   const paneNoUsage = KTAiChatUi.codePaneHtml({ generated: gen("(function () { 'use strict'; })();"), review: null, existingSource: null, attempts: nextAttempts(null, { inputHash: 'h1', blockers: [] }) });
   assert(/生成 1 回目（使用量は未取得）/.test(paneNoUsage.head) && !/見積もり/.test(paneNoUsage.head), `実測が無ければ「使用量は未取得」（数字を出さない）: ${paneNoUsage.head.replace(/<[^>]*>/g, '').slice(0, 200)}`);
   // 会話: どの入口（『作って』・generate ボタン＝同じ GENERATE_CODE）でも services.generate に前の記録を渡し、REPEAT_SAME_INPUT なら案内だけ（エラーカードの［再試行］は出さない）
-  const INPUTS = SR.inputs353(T);
-  const custC1 = { customizationId: 'C1', requirement: '承認済みでは金額を編集不可にする', whyStandardInsufficient: 'ステータスで切り替えるアクセス権は無い', strategy: 'NEW_JS_FILE', implementation: 'JAVASCRIPT', platform: ['desktop'], events: ['app.record.edit.show'], fields: [{ code: 'amount', access: 'CONTROL' }], apis: [], existingFiles: [], risks: [], questions: [], dependsOn: [], evidenceIds: [] };
-  const hybrid = mkPlan([mkStep('C1', 'CUSTOMIZATION_REQUIRED', 'JS', null, { customizationId: 'C1' }, { solution: 'CUSTOMIZATION', confidence: 'CONFIRMED' })], { goal: '承認済みでは金額を編集できなくして', solution: 'HYBRID', customizations: [custC1] });
+  //   C-1 第 3 段（2026-10-08）: 新しい流れ（仮案 → 採用 → 最終案）の上で試す。最初の生成は最終案のパイプラインが行い、最終案の後の「コードを作って」は
+  //   同じ計画の新しい版で最終案を作り直す（ai-flow-redesign F2-1）。同じ入力のときの案内は、最終案のカードの「実現できない点」に出る（会話の generate-repeat・
+  //   コードのカード・code-intro は削除した。F2-3・F7-2）
   const seen = [];
   const blockedReview = { status: 'BLOCKED', checks: [{ name: 'fields', ok: false, severity: 'block', message: '存在しないフィールドコードを参照しています: approver_mgr' }], registration: { verdict: 'BLOCKED', blockers: [{ code: 'fields', message: '存在しないフィールドコードを参照しています: approver_mgr' }], confirmations: [], unverified: [] }, coverage: { achieved: [], notAchieved: [], outOfScope: [], unowned: [] } };
-  const services = {
-    async plan() { const p = clone(hybrid); return { plan: p, ctx: { facts: [] }, review: KTPlanReview.review({ plan: p, ...INPUTS }), turn: null }; },
-    revisionModes: () => ['full', 'patch'], conversationFeatures: () => ['requirements', 'brief'],
-    async ask() { return { ok: true, answer: { answer: 'a', facts: [], analysis: [], recommendations: [], unknowns: [] }, ctx: { facts: [] } }; },
-    // 実物の services.generate と同じ順: 入力の指紋 → 前の記録と照合 → 同じなら AI を呼ばない
-    async generate({ previous }) { seen.push(previous || null); const rep2 = repeatOf(previous, 'h1'); if (rep2.repeat) return { ok: false, reason: 'REPEAT_SAME_INPUT', message: rep2.message, hints: rep2.hints, blockers: rep2.blockers, attempts: previous.attempts }; return { ok: true, generated: { code: "(function () { 'use strict'; })();", strategy: 'NEW_JS_FILE', targetFile: 'a.js', summary: 's' }, review: clone(blockedReview), ctx: { size: { approxTokens: 1200 } }, inputHash: 'h1' }; },
-    readiness(v) { return { approved: 0, executable: 0, unsupported: 0, blocked: 0, undecided: v.plan.steps.length }; },
-  };
-  const c = KTAiConversation.create({ services, now: () => '2026-10-07T00:00:00.000Z', clock: () => 1000 });
-  await c.send('承認済みでは金額を編集できなくして'); await ticks();
-  const v = c.activePlan(); c.confirmSpec({ planId: v.planId, version: v.version });
-  await c.send('コードを作って'); await ticks();
-  assert(seen.length === 1 && seen[0] === null && v.generated.C1 && v.generated.C1.inputHash === 'h1' && v.generated.C1.blockers.join() === 'fields' && v.generated.C1.attempts.count === 1 && v.generated.C1.attempts.measured === 0 && v.generated.C1.attempts.tokens.input === 0, `1 回目: 前の記録なし → 版に指紋・blocker・回数を記録（AI の記録が無いので使用量は足さない）: ${JSON.stringify(v.generated.C1 && { inputHash: v.generated.C1.inputHash, blockers: v.generated.C1.blockers, attempts: v.generated.C1.attempts })}`);
-  const before = c.messages().length;
-  const r2 = await c.send('コードを作って'); await ticks();
-  const rep2 = c.messages().find(m => m.data?.kind === 'generate-repeat');
-  assert(seen.length === 2 && seen[1] && seen[1].attempts.count === 1 && r2.ok === false && rep2 && /同じ入力・同じ指摘です/.test(rep2.text) && rep2.data.hints.length >= 2 && v.generated.C1.attempts.count === 1 && !c.messages().slice(before).some(m => m.type === KTAiConversation.MSG.ERROR), `2 回目（同じ入力・同じ指摘）: AI を呼ばず「同じ入力・同じ指摘です」と何を変えれば変わるかを会話に出す。エラーカード（再試行）は出さない・回数は増えない: ${rep2 && rep2.text.slice(0, 120)}`);
-  const cardHtml = KTAiChatUi.messageHtml(c.messages().filter(m => m.type === 'CODE').pop(), { plans: new Map([[`${v.planId}:${v.version}`, v]]) });
-  assert(/生成 1 回目/.test(cardHtml), `コードカードに「生成 N 回目」: ${cardHtml.replace(/<[^>]*>/g, '').slice(0, 120)}`);
-  // 会話の案内（code-intro）: 範囲内の NOT_MET があれば見出しは「要件を満たしていない部分があります（登録できません）」＋ 新設を前提にした作り直しが要る案内。
-  //   独立レビュー C: AI の申告と Toolkit の確認を分けて書く
-  const services2 = { ...services, async generate() { return { ok: true, generated: { code: "(function () { 'use strict'; })();", strategy: 'NEW_JS_FILE', targetFile: 'a.js', summary: 's' }, review: { status: 'BLOCKED', checks: [{ name: 'coverage-unmet', ok: false, severity: 'block', message: 'x' }], registration: { verdict: 'BLOCKED', blockers: [{ code: 'coverage-unmet', message: 'x' }], confirmations: [], unverified: [] }, coverage: { achieved: [], notAchieved: [{ code: 'AI_NOT_MET', message: '部長承認待ちでも編集不可にする（部長承認待ちは存在しない）', planned: ['部長承認待ち'] }, { code: 'SUBTABLE_ROWS', message: '明細（テーブル）の行の追加・削除は止められません' }], plannedHint: { names: ['部長承認待ち'], message: '計画で新設する項目（部長承認待ち）を前提にした作り直しが必要です。計画を直すか、最終案の作成で作り直します' }, outOfScope: [], unowned: [] } }, ctx: null, inputHash: 'h9' }; } };
-  const c2 = KTAiConversation.create({ services: services2, now: () => '2026-10-07T00:00:00.000Z', clock: () => 1000 });
-  await c2.send('承認済みでは金額を編集できなくして'); await ticks();
-  const v2 = c2.activePlan(); c2.confirmSpec({ planId: v2.planId, version: v2.version });
-  await c2.send('コードを作って'); await ticks();
-  const intro = c2.messages().find(m => m.data?.kind === 'code-intro');
-  assert(intro && /^JavaScript を生成しましたが、要件を満たしていない部分があります（登録できません）。/.test(intro.text) && /要件のうち満たせない部分があります（AI の申告）: 部長承認待ちでも編集不可にする/.test(intro.text) && /要件のうち満たせない部分があります（Toolkit の確認）: 明細（テーブル）の行の追加・削除は止められません/.test(intro.text) && !/前提にした作り直し/.test(intro.text) && !/静的な検査は通過/.test(intro.text), `code-intro: NOT_MET の見出し ＋ AI の申告と Toolkit の確認を分けて書く（段階 C: 新設を前提にした作り直しの案内（plannedHint）は出さない）: ${intro && intro.text}`);
+  // 実物の services.generate と同じ順: 入力の指紋 → 前の記録と照合 → 同じなら AI を呼ばない
+  const genRepeat = { calls: [], impl: async ({ previous }) => { seen.push(previous || null); const rep2 = repeatOf(previous, 'h1'); if (rep2.repeat) return { ok: false, reason: 'REPEAT_SAME_INPUT', message: rep2.message, hints: rep2.hints, blockers: rep2.blockers, attempts: previous.attempts, inputHash: 'h1' }; return { ok: true, generated: { code: "(function () { 'use strict'; })();", strategy: 'NEW_JS_FILE', targetFile: 'a.js', summary: 's' }, review: clone(blockedReview), ctx: { size: { approxTokens: 1200 } }, inputHash: 'h1' }; } };
+  const x = K.makeConvC({ generate: genRepeat });
+  await K.adoptC(x); await ticks();
+  const v = x.c.activePlan();
+  assert(seen.length === 1 && seen[0] === null && v.final && v.generated.C1 && v.generated.C1.inputHash === 'h1' && v.generated.C1.blockers.join() === 'fields' && v.generated.C1.attempts.count === 1 && v.generated.C1.attempts.measured === 0 && v.generated.C1.attempts.tokens.input === 0, `1 回目（最終案のパイプライン）: 前の記録なし → 版に指紋・blocker・回数を記録（AI の記録が無いので使用量は足さない）: ${JSON.stringify(v.generated.C1 && { inputHash: v.generated.C1.inputHash, blockers: v.generated.C1.blockers, attempts: v.generated.C1.attempts })}`);
+  const before = x.c.messages().length;
+  await x.c.send('コードを作って'); await ticks();
+  const v2 = x.c.activePlan(), e2 = v2.generated.C1;
+  const cannotText = (v2.final && v2.final.cannot ? v2.final.cannot : []).map(c => c.text).join('\n');
+  assert(seen.length === 2 && seen[1] && seen[1].attempts.count === 1 && e2 && e2.failure && e2.failure.reason === 'REPEAT_SAME_INPUT' && /同じ入力・同じ指摘です/.test(cannotText) && /存在しないフィールドを参照しています/.test(cannotText) && /計画に新設するフィールド・ステータスがありません/.test(cannotText) && v2.final.approvable === false && !x.c.messages().slice(before).some(m => m.type === KTAiConversation.MSG.ERROR), `2 回目（同じ入力・同じ指摘）: AI を呼ばず「同じ入力・同じ指摘です」と何を変えれば変わるか（2 つ以上）を最終案のカードに出す。エラーカード（再試行）は出さない: ${cannotText.slice(0, 160)}`);
+  assert(e2.attempts && e2.attempts.count === 1, `2 回目（同じ入力・同じ指摘）: AI を呼んでいないので生成の回数は増えない: ${JSON.stringify(e2.attempts && { count: e2.attempts.count, history: e2.attempts.history.length })}`);
 });
 
 // =========================================================
@@ -531,36 +522,29 @@ await section(async () => {
   assert(JSON.stringify(rvNoPlan.assumptions) === JSON.stringify(['計画の別の手順の反映が前提', '計画の別の手順と同じ条件']), `6: 置き換えの後ろの空白を落とす: ${JSON.stringify(rvNoPlan.assumptions)}`);
   const rvSelf = review(okCode, cust(), { assumptions: ['C1 と同じ条件'] });
   assert(rvSelf.assumptions[0] === 'この JavaScript と同じ条件', `6: 英字で終わる置き換え（この JavaScript）は空白を残す: ${rvSelf.assumptions[0]}`);
-  // ---- 7: kind 'generate-repeat' の描画: 見出し 1 行 ＋ hints の箇条書き（r.message の長文は出さない）。検査が完了しなかった回は見出しもそう言う
-  const INPUTS = SR.inputs353(T);
-  const custC1 = { customizationId: 'C1', requirement: '承認済みでは金額を編集不可にする', whyStandardInsufficient: 'ステータスで切り替えるアクセス権は無い', strategy: 'NEW_JS_FILE', implementation: 'JAVASCRIPT', platform: ['desktop'], events: ['app.record.edit.show'], fields: [{ code: 'amount', access: 'CONTROL' }], apis: [], existingFiles: [], risks: [], questions: [], dependsOn: [], evidenceIds: [] };
-  const hybrid = mkPlan([mkStep('C1', 'CUSTOMIZATION_REQUIRED', 'JS', null, { customizationId: 'C1' }, { solution: 'CUSTOMIZATION', confidence: 'CONFIRMED' })], { goal: '承認済みでは金額を編集できなくして', solution: 'HYBRID', customizations: [custC1] });
+  // ---- 7: 同じ入力での作り直しの案内。検査が完了しなかった回の後は「検査は通っています」と言わない
+  //   C-1 第 3 段（2026-10-08）: 会話の generate-repeat のカード（見出し 1 行 ＋ hints の箇条書き）は従来の生成と一緒に削除した（ai-flow-redesign F2-3）。
+  //   新しい流れ（仮案 → 採用 → 最終案 → 「コードを作って」で最終案の作り直し）の上で、同じ入力の案内が最終案のカードの「実現できない点」に出ることと、
+  //   その中身（検査が完了しなかった回の後は「検査は通っています」と言わない）を確かめる
   const convWith = async (firstReview) => {
-    const services = {
-      async plan() { const p = clone(hybrid); return { plan: p, ctx: { facts: [] }, review: KTPlanReview.review({ plan: p, ...INPUTS }), turn: null }; },
-      revisionModes: () => ['full', 'patch'], conversationFeatures: () => ['requirements', 'brief'],
-      async ask() { return { ok: true, answer: { answer: 'a', facts: [], analysis: [], recommendations: [], unknowns: [] }, ctx: { facts: [] } }; },
-      // 実物の services.generate と同じ順: 前の記録と照合 → 同じ入力なら AI を呼ばず REPEAT_SAME_INPUT（reviewFailed も返す）
-      async generate({ previous }) { const rp = repeatOf(previous, 'h1'); if (rp.repeat) return { ok: false, reason: 'REPEAT_SAME_INPUT', message: rp.message, hints: rp.hints, blockers: rp.blockers, reviewFailed: !!rp.reviewFailed, attempts: previous.attempts }; return { ok: true, generated: { code: "(function () { 'use strict'; })();", strategy: 'NEW_JS_FILE', targetFile: 'a.js', summary: 's' }, review: clone(firstReview), ctx: { size: { approxTokens: 1200 } }, inputHash: 'h1' }; },
-      readiness(v) { return { approved: 0, executable: 0, unsupported: 0, blocked: 0, undecided: v.plan.steps.length }; },
-    };
-    const c = KTAiConversation.create({ services, now: () => '2026-10-07T00:00:00.000Z', clock: () => 1000 });
-    await c.send('承認済みでは金額を編集できなくして'); await ticks();
-    const v = c.activePlan(); c.confirmSpec({ planId: v.planId, version: v.version });
-    await c.send('コードを作って'); await ticks();
-    await c.send('コードを作って'); await ticks();
-    const msg = c.messages().find(m => m.data?.kind === 'generate-repeat');
-    return { c, v, msg, html: msg ? KTAiChatUi.messageHtml(msg, { plans: new Map([[`${v.planId}:${v.version}`, v]]) }) : '' };
+    // 実物の services.generate と同じ順: 前の記録と照合 → 同じ入力なら AI を呼ばず REPEAT_SAME_INPUT（reviewFailed も返す）
+    const genR = { calls: [], impl: async ({ previous }) => { const rp = repeatOf(previous, 'h1'); if (rp.repeat) return { ok: false, reason: 'REPEAT_SAME_INPUT', message: rp.message, hints: rp.hints, blockers: rp.blockers, reviewFailed: !!rp.reviewFailed, attempts: previous.attempts, inputHash: 'h1' }; return { ok: true, generated: { code: "(function () { 'use strict'; })();", strategy: 'NEW_JS_FILE', targetFile: 'a.js', summary: 's' }, review: clone(firstReview), ctx: { size: { approxTokens: 1200 } }, inputHash: 'h1' }; } };
+    const x = K.makeConvC({ generate: genR });
+    await K.adoptC(x); await ticks();
+    const v = x.c.activePlan();
+    await x.c.send('コードを作って'); await ticks();
+    const v2 = x.c.activePlan(), e2 = v2.generated.C1;
+    const cannot = (v2.final && v2.final.cannot ? v2.final.cannot : []).map(c => c.text).join('\n');
+    return { x, v, v2, e2, cannot, card: K.stripC(K.finalHtml(x)) };
   };
   const okReview = { status: 'OK', checks: [{ name: 'syntax', ok: true, severity: 'info', message: 'ok' }], registration: { verdict: 'RUNTIME_UNVERIFIED', blockers: [], confirmations: [], unverified: [] }, coverage: { achieved: [], notAchieved: [], outOfScope: [], unowned: [] } };
   const normal = await convWith(okReview);
-  assert(normal.msg && normal.msg.data.reviewFailed === false && /<b>同じ入力・同じ指摘のため、作り直していません<\/b>/.test(normal.html) && /<ul[^>]*>(<li>[^<]+<\/li>){2,}<\/ul>/.test(normal.html) && /<li>検査は通っています。/.test(normal.html) && !/原因（入力の不足・指示・検証）を直してから/.test(normal.html), `7: 見出し 1 行 ＋ hints の箇条書き（長文は出さない）: ${normal.html.replace(/<[^>]*>/g, '｜').slice(0, 200)}`);
-  assert(normal.html.split('<li>').length - 1 === normal.msg.data.hints.length, '7: 箇条書きは hints と同じ件数');
+  assert(normal.e2 && normal.e2.failure && normal.e2.failure.reason === 'REPEAT_SAME_INPUT' && /同じ入力・同じ指摘です/.test(normal.cannot) && /検査は通っています。/.test(normal.cannot) && /実現できない点/.test(normal.card) && /同じ入力・同じ指摘です/.test(normal.card) && !normal.x.c.messages().some(m => m.type === 'ERROR' || m.data?.kind === 'generate-repeat'), `7: 同じ入力の案内は最終案のカードの「実現できない点」に出る（エラーカード・generate-repeat のカードは出さない）: ${normal.cannot.slice(0, 160)}`);
   // 検査が例外で完了しなかった回（services.generate の代替 review: reviewFailed: true・registration 無し）
   const failedReview = { status: 'REVIEW_REQUIRED', reviewFailed: true, checks: [{ name: 'code', ok: false, severity: 'review', message: 'Toolkit の検査を完了できませんでした: x' }], finalCode: '', addedCode: '', diff: null, mismatches: [], security: [] };
   const failed = await convWith(failedReview);
-  assert(failed.v.generated.C1.reviewFailed === true && failed.v.generated.C1.attempts.history[0].reviewFailed === true, '4: 会話は代替 review の reviewFailed を版の記録と履歴に残す');
-  assert(failed.msg && failed.msg.data.reviewFailed === true && /<b>同じ入力のため、作り直していません（前回は検査を完了できませんでした）<\/b>/.test(failed.html) && !/検査は通っています/.test(failed.html) && /<li>前回は Toolkit の検査を完了できなかった/.test(failed.html), `4 / 7: 検査が完了しなかった回の後は「検査は通っています」と言わない: ${failed.html.replace(/<[^>]*>/g, '｜').slice(0, 200)}`);
+  assert(failed.v.generated.C1.attempts.history[0].reviewFailed === true, '4: 会話（最終案のパイプライン）は代替 review の reviewFailed を版の生成の履歴に残す');
+  assert(/前回は Toolkit の検査を完了できなかった/.test(failed.cannot) && !/検査は通っています/.test(failed.cannot) && !/検査は通っています/.test(failed.card), `4 / 7: 検査が完了しなかった回の後は「検査は通っています」と言わない: ${failed.cannot.slice(0, 200)}`);
   // ---- 8: 括弧で囲んだ否定（not (ステータス in ("承認済み"))）を列挙で書いても形式確認は止めない（値の照合 conditional-control は C-1 第 2 段で削除）。
   //   肯定の in の値の照合（旧 notParenAnd）は生成工程の代表条件で守る: worker/test/cases/required-effects.mjs「A1 in の値ごと（本物の隔離環境）…」・「A4 F4（本物の隔離環境）: not in は…」
   const notParen = review(handler(EDIT, "    const st = record['ステータス'].value;\n    if (st === '作成中' || st === '承認待ち') {\n      record['amount'].disabled = true;\n    }"), cust({ fields: [{ code: 'ステータス', access: 'READ' }, { code: 'amount', access: 'CONTROL', condition: 'not (ステータス in ("承認済み"))' }] }));

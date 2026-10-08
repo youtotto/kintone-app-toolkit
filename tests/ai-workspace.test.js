@@ -5,12 +5,17 @@
 //   §40 Conversation: ASK / PLAN / REVISE_PLAN / EXPLAIN_PLAN / EXPLAIN_REVIEW / REQUEST_PREVIEW / REQUEST_ROLLBACK / ambiguous / errors / rate limit / retry / cancel
 //   §41 Versioning: v1 → revision → v2 / v1 inactive / Executor cannot use v1 / rollback は正しい実行に結び付く
 //   §42 Safety: チャットの文章だけでは write 0 件（「実行して」「戻して」）/ Toolkit Review は AI の説明で変わらない
+//   C-1 第 3 段（2026-10-08）: 古い確認の流れ（依頼から直接計画・変更案のカード・手順ごとの承認で反映）は削除した。依頼は仮案 → 採用 → 最終案、
+//     承認は最終案の［この内容で反映する］で、版・説明・反映・元に戻す・安全性をこの流れの上で確かめる
 //
 // 実行方法: node tests/ai-workspace.test.js
 'use strict';
 const { loadToolkit, makeAssert } = require('./helpers/load-toolkit.js');
 const { makeFakeHost, makeFakeDocument } = require('./helpers/fake-dom.js');
-const { KTDeps, KTScan, KTContext, KTAiClient, KTAiConversation, KTAiChatUi, KTPlanReview, mountAiWorkspace, renderCustomize } = loadToolkit();
+const { createNewFlowKit } = require('./helpers/new-flow.js');
+const T0 = loadToolkit();
+const { KTDeps, KTScan, KTContext, KTAiClient, KTAiConversation, KTAiChatUi, KTPlanReview, mountAiWorkspace, renderCustomize } = T0;
+const KIT = createNewFlowKit(T0);
 const { assert, state } = makeAssert();
 const FX = require('./fixtures/ai-context-app.js');
 const { buildScanPayload } = require('./helpers/scan-payload.js');
@@ -62,7 +67,13 @@ const PLAN_V2 = {
     alternatives: [], impact: [], questions: [], unknowns: [], planConfidence: 'INFERRED',
   },
 };
-const HEALTH = { ok: true, supportedContractVersions: ['2.0', '2.1'], entitlements: [{ product: 'toolkit', features: ['assistant-qa', 'change-planner'] }], registry: { toolkit: { 'assistant-qa': { implemented: true, promptVersions: ['1'] }, 'change-planner': { implemented: true, promptVersions: ['1'] } } }, usage: { monthlyLimit: 20, usedThisMonth: 1 } };
+//   C-1 第 3 段（2026-10-08）: 接続先は仮案に対応した形（assistant-qa の conversation に proposal）。無い接続先は「接続先が非対応」で計画に進まない（ai-flow-redesign の F 系）
+const HEALTH = { ok: true, supportedContractVersions: ['2.0', '2.1'], entitlements: [{ product: 'toolkit', features: ['assistant-qa', 'change-planner'] }], registry: { toolkit: { 'assistant-qa': { implemented: true, promptVersions: ['1'], conversation: ['requirements', 'proposal'] }, 'change-planner': { implemented: true, promptVersions: ['1'] } } }, usage: { monthlyLimit: 20, usedThisMonth: 1 } };
+/**
+ * 仮案の偽の応答（決めることの無い仮案。依頼の文を実現する動作にする）。
+ *   C-1 第 3 段（2026-10-08）: 古い確認の流れ（依頼から直接計画を作る）は削除した。依頼は仮案 →「これで進めて」で採用 → 計画（PLAN_V1）→ 最終案の順
+ */
+const proposalFor = (utterance, requestId = 'pp-1') => KIT.normalized({ reply: '設定の変更でできます。', intent: 'propose', proposal: { behaviors: [KIT.B(utterance, 'user')], assumptions: [], decisions: [], approach: { standard: ['フィールドと一覧の追加'], js: [] }, cannot: [] }, turn: { ops: [], answers: [], requirementOps: [] } }, requestId);
 const makeStorage = () => { const m = new Map(); return { getItem: (k) => (m.has(k) ? m.get(k) : null), setItem: (k, v) => m.set(k, String(v)), removeItem: (k) => m.delete(k) }; };
 /** 回答（facts の根拠ID は ctx から取る） */
 const answerFor = (ctx, text) => ({ ok: true, contractVersion: '2.1', meta: { requestId: 'qa-1', usage: { usedThisMonth: 2, monthlyLimit: 20 }, normalization: { warnings: [] } }, answer: text, facts: ctx.facts.length ? [{ text: 'fact', evidenceIds: [ctx.facts[0].id] }] : [], analysis: [], recommendations: [], unknowns: [] });
@@ -74,9 +85,10 @@ function mount({ paid = true, connected = true, planResponses = null, askError =
   const storage = makeStorage();
   const settings = KTAiClient.createSettingsStore({ storage, host: 't.cybozu.com' });
   if (consent) settings.setConsent(true);
-  const calls = { ask: [], plan: [], health: 0 };
+  const calls = { ask: [], plan: [], propose: [], health: 0 };
   const client = {
     async getHealth() { calls.health++; return HEALTH; },
+    async propose({ ctx, requestId }) { calls.propose.push({ ctx, requestId }); return proposalFor(ctx.question, requestId || 'pp-1'); },
     async ask({ ctx, requestId, signal }) {
       calls.ask.push({ ctx, requestId, signal });
       if (askDelay) await askDelay(signal);
@@ -111,6 +123,10 @@ const clickChat = (m, act, extra = {}) => m.$('kt-ai-chat').dispatch({ type: 'cl
 // 2026-10-06: 反映の操作（#kt-ai-exec の中のボタン）は右下の右の「反映」（#kt-ai-pane-exec）でクリックを受け付ける
 const clickExec = (m, id) => m.$('kt-ai-pane-exec').dispatch({ type: 'click', target: { id } });
 const writes = (m) => m.mock.calls.filter(c => !c.startsWith('GET'));
+/** 画面: 依頼 → 仮案 →「これで進めて」で採用 → 計画 → 最終案（C-1 第 3 段: 従来の m.panel.send(依頼) の置き換え） */
+async function adoptScreen(m, goal = GOAL) { await m.panel.send(goal); await ticks(6); await m.panel.send('これで進めて'); await ticks(10); return m.conv().activePlan(); }
+/** 画面: 最終案のカードの［この内容で反映する］で承認する（承認できない最終案は承認されない） */
+async function approveScreen(m) { const v = m.conv().activePlan(); await clickChat(m, 'final-approve', { plan: v.planId, version: String(v.version) }); await ticks(4); return !!(v.approval && m.conv().approvalValid().ok); }
 
 (async () => {
 // =========================================================
@@ -157,11 +173,15 @@ console.log('\n--- 1. KTAiConversation.classifyIntent（決定的規則） ---')
 
 // =========================================================
 console.log('\n--- 2. KTAiConversation.create（fake services。履歴は送らない）---');
+//   C-1 第 3 段（2026-10-08）: 古い確認の流れ（依頼から直接計画を作る・変更案のカード・確認のカード）は削除した。
+//   依頼は仮案（services.propose）→「これで進めて」で採用 → 計画（services.plan）→ 最終案。版・説明・反映の写し・元に戻す・エラーは、この流れの上で確かめる
 {
-  const log = [];
+  const log = [], proposeLog = [];
   const pctx = KTContext.buildPlan({ goal: GOAL, ...INPUTS, options: { now: '2026-10-02T00:00:00.000Z' } });
   const planOf = (resp, ctx) => KTAiClient.validatePlan(resp, ctx).normalized;
   const services = {
+    conversationFeatures: () => ['requirements', 'proposal'],
+    async propose(args) { proposeLog.push(args.utterance); return { ok: true, proposal: proposalFor(args.utterance), ctx: { facts: [] }, perf: {} }; },
     async ask({ question }) { log.push(['ask', question]); return { ok: true, answer: { answer: 'A', facts: [], analysis: [], recommendations: [], unknowns: [] }, ctx: { facts: [] } }; },
     async plan({ goal, revision }) { log.push(['plan', goal, revision ? revision.request : null]); const ctx = revision ? KTContext.buildPlan({ goal, ...INPUTS, options: { revision } }) : pctx; const p = planOf(revision ? PLAN_V2 : PLAN_V1, ctx); return { plan: p, ctx, review: KTPlanReview.review({ plan: p, ...INPUTS }) }; },
     async explain({ question, kind, plan, version }) { log.push(['explain', question, kind, version]); return { answer: `explain ${plan.steps.length}`, facts: [], analysis: [], recommendations: [], unknowns: [] }; },
@@ -172,29 +192,30 @@ console.log('\n--- 2. KTAiConversation.create（fake services。履歴は送ら�
   const r1 = await c.send('このフィールドは何に使ってる？');
   assert(r1.intent === 'ASK' && log[0][0] === 'ask' && c.messages().map(m => m.type).join() === 'USER,ANSWER' && c.activePlan() === null, 'ASK → services.ask → USER / ANSWER。計画は作らない');
   assert(changes > 0 && c.messages().every(m => m.id && m.at === '2026-10-02T00:00:00.000Z' && ['user', 'assistant', 'toolkit', 'system'].includes(m.role)), 'メッセージは { id, type, role, text, at, data }（文字列だけではない）');
-  const r2 = await c.send(GOAL);
+  const r2p = await c.send(GOAL);
+  const r2 = await c.send('これで進めて');
   const v1 = c.activePlan();
-  assert(r2.intent === 'PLAN' && log[1][0] === 'plan' && log[1][1] === GOAL && !log[1][2], 'PLAN → services.plan（goal。revision 無し）');
-  assert(v1 && v1.version === 1 && v1.basedOnVersion === null && v1.status === 'ACTIVE' && v1.plan.steps.length === 2 && v1.review && v1.goal === GOAL && v1.revisionRequest === null, 'v1: { planId, version 1, basedOnVersion null, goal, revisionRequest null, review }');
-  const types = c.messages().map(m => m.type);
-  assert(types.slice(2).join() === 'USER,ASSISTANT_TEXT,PLAN,ASSISTANT_TEXT,REVIEW,ASSISTANT_TEXT' && c.messages().filter(m => m.type === 'PLAN')[0].role === 'assistant' && c.messages().filter(m => m.type === 'REVIEW')[0].role === 'toolkit', 'PLAN（AI）と REVIEW（Toolkit）は別のメッセージ。質問（Q1）も案内');
-  // 2026-10-06: 確認の要約は版の番号を出さない（kind 'review-summary'。会話には出さず記録に残す）
-  { const rsum = c.messages().find(m => m.type === 'ASSISTANT_TEXT' && m.role === 'toolkit' && m.data?.kind === 'review-summary');
-    assert(rsum && /^Toolkit で変更案を確認しました。/.test(rsum.text) && !/v\d/.test(rsum.text) && rsum.data.version === 1 && KTAiChatUi.isHiddenMessage(rsum), 'Toolkit: 「Toolkit で変更案を確認しました。…」（版の番号は出さない・会話には出さず記録に残す）'); }
+  assert(r2p.intent === 'PROPOSE' && proposeLog.join() === GOAL && r2.intent === 'ADOPT_DRAFT' && log[1][0] === 'plan' && log[1][1].split('\n')[0] === GOAL && /採用した方針: /.test(log[1][1]) && !log[1][2], 'PLAN → 仮案（services.propose）→ 採用 → services.plan（goal の 1 行目は依頼。採用した方針を添える。revision 無し）');
+  assert(v1 && v1.version === 1 && v1.basedOnVersion === null && v1.status === 'ACTIVE' && v1.plan.steps.length === 2 && v1.review && v1.goal === GOAL && v1.revisionRequest === null && v1.fromDraft, 'v1: { planId, version 1, basedOnVersion null, goal, revisionRequest null, review }（仮案から作った版）');
+  //   変更案のカード（PLAN）・Toolkit の確認（REVIEW）・確認の要約（review-summary）は削除した（ai-flow-redesign の F5-1）。版ごとのカードは最終案（FINAL）1 枚
+  assert(c.messages().map(m => m.type).slice(2).join() === 'USER,DRAFT,USER,ASSISTANT_TEXT,FINAL' && !c.messages().some(m => ['PLAN', 'REVIEW'].includes(m.type) || ['plan-summary', 'review-summary'].includes(m.data?.kind)), '仮案 → 採用 → 最終案のカード 1 枚（変更案・確認のカードは出さない）');
   const r3 = await c.send('新しい承認者は作らず既存の承認者を使って');
   const v2 = c.activePlan();
   assert(r3.intent === 'REVISE_PLAN' && log[2][0] === 'plan' && log[2][1] === GOAL && log[2][2] === '新しい承認者は作らず既存の承認者を使って', 'REVISE_PLAN → services.plan（同じ goal ＋ revision.request）。旧 JSON の patch ではなく再計画');
   assert(v2.version === 2 && v2.basedOnVersion === 1 && v2.planId === v1.planId && v2.revisionRequest === '新しい承認者は作らず既存の承認者を使って' && v2.status === 'ACTIVE' && v1.status === 'SUPERSEDED' && v2.plan.steps[0].actionType === 'REUSE_FIELD', 'v2: version 2 / basedOnVersion 1 / 同じ planId / v1 は SUPERSEDED');
-  { const psum = c.messages().filter(m => m.type === 'ASSISTANT_TEXT' && m.data?.kind === 'plan-summary');
-    assert(c.planHistory().length === 2 && c.messages().find(m => m.type === 'PLAN' && m.data.version === 2) && psum.length === 2 && /^変更案を作りました。/.test(psum[0].text) && /^変更案を直しました。/.test(psum[1].text) && psum[1].data.version === 2 && psum.every(m => !/変更計画 v\d|v\d に/.test(m.text)) && c.messages().filter(m => m.type === 'PLAN').every(m => m.text === '変更案') && c.messages().filter(m => m.type === 'REVIEW').every(m => m.text === 'Toolkit の確認'), '履歴 2 版・「変更案を直しました。…」（版の番号は出さない。PLAN は「変更案」・REVIEW は「Toolkit の確認」）'); }
+  assert(c.planHistory().length === 2 && c.messages().filter(m => m.type === 'FINAL').map(m => m.data.version).join() === '1,2', '履歴 2 版・最終案のカードは版ごと（「変更案を直しました。」の要約の文は削除。版の番号は会話に出さない）');
   const r4 = await c.send('P1って何してる？');
   assert(r4.intent === 'EXPLAIN_PLAN' && log[3][0] === 'explain' && log[3][2] === 'EXPLAIN_PLAN' && log[3][3] === 2 && c.activePlan() === v2 && c.planHistory().length === 2, 'EXPLAIN_PLAN → services.explain（最新版）。計画は変わらない（版も増えない）');
   const r5 = await c.send('何でこれ危ないの？');
   assert(r5.intent === 'EXPLAIN_REVIEW' && log[4][2] === 'EXPLAIN_REVIEW' && c.messages()[c.messages().length - 1].type === 'ANSWER' && c.messages()[c.messages().length - 1].data.kind === 'EXPLAIN_REVIEW', 'EXPLAIN_REVIEW → services.explain（kind EXPLAIN_REVIEW）→ ANSWER');
   const n = log.length;
+  //   最終案の流れでは、反映は最終案の承認の後だけ（承認の前は承認へ案内する。ai-flow-redesign の F10-1）
+  const r6a = await c.send('これで進めたい');
+  assert(r6a.intent === 'REQUEST_PREVIEW' && log.length === n && c.messages()[c.messages().length - 1].data.kind === 'preview-needs-approval' && c.activePlan().status === 'ACTIVE', 'REQUEST_PREVIEW（最終案の承認の前）→ AI 呼び出し無し・承認への案内（反映の準備はしない）');
+  assert(c.approveFinal({ planId: v2.planId, version: v2.version }).ok, '最終案を承認する（承認は画面のボタンだけ。会話の文では承認しない）');
   const r6 = await c.send('これで進めたい');
   const lastM = c.messages()[c.messages().length - 1];
-  assert(r6.intent === 'REQUEST_PREVIEW' && log.length === n && lastM.role === 'toolkit' && lastM.data.kind === 'preview-ready' && lastM.data.version === 2 && lastM.data.readiness.undecided === 2, 'REQUEST_PREVIEW → AI 呼び出し無し・Toolkit の「準備」メッセージ（readiness は読み取りだけ）');
+  assert(r6.intent === 'REQUEST_PREVIEW' && log.length === n && lastM.role === 'toolkit' && lastM.data.kind === 'preview-ready' && lastM.data.version === 2 && lastM.data.readiness.undecided === 2, 'REQUEST_PREVIEW（承認の後）→ AI 呼び出し無し・Toolkit の「準備」メッセージ（readiness は読み取りだけ）');
   const r7 = await c.send('全部承認');
   assert(r7.intent === 'REQUEST_PREVIEW' && c.activePlan().status === 'ACTIVE' && log.length === n, '「全部承認」は意図の認識だけ（計画の状態も AI 呼び出しも変わらない）');
   const r8 = await c.send('元に戻して');
@@ -216,7 +237,11 @@ console.log('\n--- 2. KTAiConversation.create（fake services。履歴は送ら�
   const r11 = await c.send('やっぱり元に戻して');
   assert(r11.intent === 'REQUEST_ROLLBACK' && c.messages()[c.messages().length - 1].data.kind === 'rollback-ready' && c.messages()[c.messages().length - 1].data.executionId === 'ex_1', 'REQUEST_ROLLBACK → 「変更前の状態へ戻せます」（即 Rollback しない）');
   const r12 = await c.send('通知はいらない');
-  assert(r12.intent === 'PLAN' && r12.reason === 'NEW_PLAN_AFTER_EXECUTION' && c.messages().some(m => m.data && m.data.kind === 'new-plan-after-execution' && /反映済み/.test(m.text) && /新しい計画として作ります/.test(m.text)) && log[log.length - 1][0] === 'plan' && log[log.length - 1][1] === '通知はいらない' && !log[log.length - 1][2] && c.planHistory().length === 3 && v2.status === 'EXECUTED', '反映済みの計画は修正しない: 新しい計画として作る（旧計画は EXECUTED のまま・何を基準にするかを先に伝える）');
+  //   反映済みの計画の後の依頼は、新しい依頼として仮案から作る（C-1 第 3 段。計画の AI でその計画を直さない）
+  assert(r12.intent === 'PROPOSE' && r12.reason === 'NEW_REQUEST_NEW_PLAN_AFTER_EXECUTION' && proposeLog[proposeLog.length - 1] === '通知はいらない' && log.filter(l => l[0] === 'plan').length === 2 && c.planHistory().length === 2 && v2.status === 'EXECUTED' && c.draft() && c.draft().status === 'open', '反映済みの計画は修正しない: 新しい依頼として仮案から作る（旧計画は EXECUTED のまま・計画の AI は呼ばない）');
+  //   守り手の無い期待（担当 R へ報告）: 以前は「反映済みです。この依頼は新しい計画として作ります（基準は今の動作テスト環境…）」と何を基準にするかを先に伝えた（kind 'new-plan-after-execution'）。
+  //   C-1 第 3 段でこの知らせは削除され、仮案のカードにも基準の説明が無い。期待は弱めずに残す
+  assert(c.messages().some(m => m.data && m.data.kind === 'new-plan-after-execution' && /反映済み/.test(m.text) && /新しい計画として作ります/.test(m.text)), '反映済みの計画の後の依頼: 何を基準にするか（反映後の動作テスト環境）を先に伝える（本体に守り手が無い。担当 R へ報告）');
   c.noteExecution({ stage: 'rollback-confirm', prepared: exec.prepared, execution: exec.execution, rollback: { status: 'PREPARED', steps: [] } });
   c.noteExecution({ stage: 'rolled-back', prepared: exec.prepared, execution: exec.execution, rollback: { status: 'ROLLED_BACK_VERIFIED', steps: [{ stepId: 'R1', status: 'ROLLBACK_VERIFIED' }] } });
   assert(c.messages().filter(m => m.type === 'ROLLBACK').length === 1 && v2.status === 'ROLLED_BACK' && c.state.activeExecution.rolledBack === true && /変更前の状態に戻しました/.test(c.messages()[c.messages().length - 1].text), 'rollback → ROLLBACK メッセージ 1 件・rolled-back → 計画は ROLLED_BACK・通知');
@@ -239,13 +264,15 @@ console.log('\n--- 2. KTAiConversation.create（fake services。履歴は送ら�
   const small = KTAiConversation.create({ services, maxMessages: 6 });
   for (let i = 0; i < 5; i++) await small.send(`質問${i}？`);
   assert(small.messages().length === 6 && small.state.dropped === 4, 'メッセージ上限（古いものから外し、件数を記録）');
-  // loading 文言
+  //   loading 文言: 従来の「現在の設定を確認し、変更計画を作っています...」「変更計画を見直しています...」は、最終案の流れの進みの 1 枚カードに置き換えた
+  //   （ai-flow-redesign の C3b-1・C3b-13）
   const slow = KTAiConversation.create({ services: { ...services, plan: (p) => new Promise(r => setTimeout(() => r(services.plan(p)), 5)) } });
-  const sp = slow.send(GOAL); await tick();
-  assert(slow.messages()[slow.messages().length - 1].text === '現在の設定を確認し、変更計画を作っています...', 'loading: PLAN は「現在の設定を確認し、変更計画を作っています...」');
+  await slow.send(GOAL);
+  const sp = slow.send('これで進めて'); await tick();
+  assert(slow.messages()[slow.messages().length - 1].text === '最終案を作っています' && slow.messages()[slow.messages().length - 1].data?.kind === 'progress', 'loading: 採用の後は進みの 1 枚カード「最終案を作っています」');
   await sp;
   const sp2 = slow.send('通知はいらない'); await tick();
-  assert(slow.messages()[slow.messages().length - 1].text === '変更計画を見直しています...', 'loading: REVISE は「変更計画を見直しています...」');
+  assert(slow.messages()[slow.messages().length - 1].text === '最終案を直しています' && slow.messages()[slow.messages().length - 1].data?.kind === 'progress', 'loading: 最終案の修正は進みの 1 枚カード「最終案を直しています」');
   await sp2;
 }
 
@@ -292,7 +319,7 @@ console.log('\n--- 3. AI タブ（mountRoot / switch / minimized / 旧 Templates
   const html = m.host.innerHTML;
   const MIGRATED = { 'AI Prompt': 'kt-ai-copy-prompt', Markdown: 'kt-ai-copy-md', JSON: 'kt-ai-copy-json', Connection: 'kt-ai-connect-start', Assistant: 'kt-ai-ask', Planner: 'kt-ai-plan', Review: 'kt-ai-plan-result', Executor: 'kt-ai-pane-plan', Rollback: 'kt-ai-pane-plan', Composer: 'kt-ai-input' };
   assert(Object.values(MIGRATED).every(id => html.includes(`id="${id}"`)), `移行一覧: ${Object.keys(MIGRATED).join(' / ')} の要素が AI タブにある`);
-  await m.panel.send(GOAL); await ticks();
+  await adoptScreen(m);
   const plan = m.$('kt-ai-plan-result').innerHTML;
   assert(!plan.includes('id="kt-ai-review"') && m.$('kt-ai-review-result').innerHTML.includes('id="kt-ai-review"') && m.$('kt-ai-exec').innerHTML.includes('id="kt-ai-exec-start"') && m.$('kt-ai-exec-empty').style.display === 'none', '2026-10-06: 「変更内容」は AI の提案だけ。Toolkit で確認した結果は右の「確認結果」、動作テスト環境への反映は右のタブ「反映」');
   assert(html.includes(KTContextUi_INTRO()) , '無料の説明文（KTContextUi.INTRO_TEXT）も AI タブに移行');
@@ -393,6 +420,8 @@ console.log('\n--- 4. AI Workspace: free / connected / responsive / header ---')
 
 // =========================================================
 console.log('\n--- 5. AI Workspace: 会話（ASK / PLAN / REVISE / EXPLAIN / PREVIEW / Review 統合）---');
+//   C-1 第 3 段（2026-10-08）: 依頼は仮案 → 採用 → 計画 → 最終案のカード 1 枚（変更案のカード・確認のカード・変更前後のカードは削除）。
+//   右の「変更内容」「確認結果」「反映」と、説明・反映の依頼の扱いは、この流れの上で確かめる
 {
   const m = mount();
   await ticks();
@@ -413,44 +442,42 @@ console.log('\n--- 5. AI Workspace: 会話（ASK / PLAN / REVISE / EXPLAIN / PRE
   await m.panel.send('名前の使い方を教えて'); await ticks();
   const lastA = m.msgs()[m.msgs().length - 1];
   assert(lastA.data?.kind === 'candidates' ? (lastA.data.candidates.length >= 2 && /kt-ai-candidates-card/.test(m.chat())) : lastA.type === 'ANSWER', 'ASK: 対象が曖昧なら候補を出す（決めない）／特定できれば回答');
-  // PLAN
-  await m.panel.send(GOAL); await ticks();
-  assert(m.calls.plan.length === 1 && m.calls.plan[0].ctx.contextVersion === 'planner-1' && m.calls.plan[0].ctx.goal === GOAL && !m.calls.plan[0].ctx.revision, 'PLAN: change-planner（planner-1。goal。revision 無し）');
-  const v1 = m.conv().activePlan();
-  assert(v1.version === 1 && m.panel.lastPlan() === v1.plan && m.panel.lastReview() === v1.review && v1.review.steps.length === 2, 'PLAN → v1。lastPlan / lastReview（Review / Decision / Executor の入力）は v1 に同期');
+  // PLAN（仮案 → 採用 → 計画）
+  const v1 = await adoptScreen(m);
+  assert(m.calls.propose.length === 1 && m.calls.propose[0].ctx.question === GOAL && m.calls.plan.length === 1 && m.calls.plan[0].ctx.contextVersion === 'planner-1' && m.calls.plan[0].ctx.goal.split('\n')[0] === GOAL && !m.calls.plan[0].ctx.revision, 'PLAN: 仮案（assistant-qa の proposal）→ 採用 → change-planner（planner-1。goal の 1 行目は依頼。revision 無し）');
+  assert(v1.version === 1 && v1.fromDraft && m.panel.lastPlan() === v1.plan && m.panel.lastReview() === v1.review && v1.review.steps.length === 2, 'PLAN → v1。lastPlan / lastReview（Review / Decision / Executor の入力）は v1 に同期');
   const chat1 = m.chat();
-  // 2026-10-06: 変更案のカードは 1 枚（「変更案ができました。」・要約・変わる内容・Toolkit の確認・まだ反映していません・［変更内容を見る］）。版の番号・手順の本文は出さない
-  const planCard1 = (/<div class="kt-ai-card kt-ai-plan-card[\s\S]*?data-act="open-plan"[^>]*>[^<]*<\/button>/.exec(chat1) || [''])[0];
-  const planText1 = planCard1.replace(/<[^>]*>/g, '');
-  assert(/変更案ができました。/.test(planText1) && /更新状況を表すフィールドが無いので追加します。/.test(planText1) && /変わる内容：設定の変更 2 件・新しいフィールド 1 件/.test(planText1) && /Toolkit の確認：/.test(planText1) && /まだ反映していません。/.test(planText1) && /data-act="open-plan"[^>]*>変更内容を見る</.test(planCard1) && !/v\d|変更計画|修正: /.test(planText1) && !/＋ 更新状況フィールドを追加/.test(chat1), 'Plan Card（2026-10-06）: 「変更案ができました。」・要約・変わる内容（設定の変更 2 件・新しいフィールド 1 件）・Toolkit の確認・まだ反映していません・［変更内容を見る］。手順の本文・版の番号は出さない');
+  //   2026-10-06 の変更案のカード（「変更案ができました。」・変わる内容・Toolkit の確認・［変更内容を見る］）は削除した（ai-flow-redesign の R09-1・R09-3・F5-1）。
+  //   版ごとのカードは最終案のカード 1 枚（要約・反映先と主な影響・まだ何も反映していません・［この内容で反映する］。手順の本文・版の番号は出さない。R09-9・画面-1）
+  { const finalText = chat1.slice(chat1.indexOf('class="kt-ai-card kt-ai-final-card')).replace(/<[^>]*>/g, '');
+    assert(/最終案ができました。/.test(finalText) && /更新状況を表すフィールドが無いので追加します。/.test(finalText) && /反映先と主な影響/.test(finalText) && /まだ何も反映していません。/.test(finalText) && /data-act="final-approve"[^>]*>この内容で反映する</.test(chat1) && !/v\d|変更計画/.test(finalText) && !/＋ 更新状況フィールドを追加/.test(chat1) && !/kt-ai-plan-card/.test(chat1), '最終案のカード: 「最終案ができました。」・要約・反映先と主な影響・まだ何も反映していません・［この内容で反映する］。手順の本文・版の番号・変更案のカードは出さない'); }
   assert(!/提案の内容（/.test(chat1) && /＋ 新規フィールド<\/b>/.test(m.$('kt-ai-plan-result').innerHTML) && /更新状況/.test(m.$('kt-ai-plan-result').innerHTML) && /DROP_DOWN/.test(m.$('kt-ai-plan-result').innerHTML), '提案資産（新規フィールド / 一覧）の詳細は右の「変更内容」の計画の全文だけ（WORKSPACE_ONLY）');
   { const sum = m.$('kt-ai-change-summary').innerHTML;
     assert(/<h3>更新状況を管理したい<\/h3>/.test(sum) && /何が変わるか（Toolkit が確かめた変更前後）/.test(sum) && /新しいフィールド：更新状況（DROP_DOWN）/.test(sum) && /確認したいこと（1 件）/.test(sum) && /更新状況の選択肢は 3 段階でよいですか/.test(sum) && !/P1|P2|E\d/.test(sum.replace(/<[^>]*>/g, '')) && m.$('kt-ai-pane-plan-empty').style.display === 'none' && m.$('kt-ai-plan-detail').style.display === '', '右の「変更内容」: 変更内容の要約（見出し=goal・何が変わるか・確認したいこと。手順・根拠の番号は出さない）・計画の全文は［計画の詳細と根拠］'); }
-  // Toolkit の確認（REVIEW）は記録に残すが、会話には出さない（変更案のカードの「Toolkit の確認」と右の「確認結果」にまとめる）
-  { const revMsg = m.msgs().find(x => x.type === 'REVIEW' && x.data?.planId === v1.planId);
-    assert(revMsg && KTAiChatUi.isHiddenMessage(revMsg) && !/kt-ai-review-card/.test(chat1) && !/Toolkitで変更計画を検証しました|検証結果を見る/.test(chat1) && !/kt-ai-decision/.test(chat1), 'Toolkit の確認（REVIEW）は会話に出さず記録に残す。判断の select は会話に無い'); }
-  assert(!/<select/.test(chat1) && !/data-act="(approve|decide|exec-start|exec-go)"/.test(chat1) && !/id="kt-ai-exec-(start|go)"/.test(chat1) && /まだ反映していません。/.test(chat1), '会話のカードに承認・反映の操作は無い（承認は右の「確認結果」の判断だけ。チャットの文章では承認にならない）');
-  assert(m.$('kt-ai-review-result').innerHTML.includes('Toolkit で確認した結果') && m.$('kt-ai-review-result').innerHTML.includes('kt-ai-decision') && !m.$('kt-ai-plan-result').innerHTML.includes('kt-ai-decision') && m.panel.drawerState().open === true && m.panel.drawerState().pane === 'plan' && m.panel.activeArtifact()?.type === 'CHANGE_PLAN', 'Review 統合: 右の「確認結果」に Toolkit で確認した結果（判断 select）。計画受信で右は「変更内容」（activeArtifact CHANGE_PLAN）');
-  // Before / After
-  await clickChat(m, 'before-after', { plan: v1.planId, version: '1' }); await ticks();
-  assert(m.types()[m.types().length - 1] === 'DIFF' && /kt-ai-diff-card/.test(m.chat()) && /<b>変更前後の比較<\/b>/.test(m.chat()) && /data-act="open-diff"[^>]*>変更前後を見る</.test(m.chat()) && !/Before \/ After/.test(m.chat()) && !/P2<\/b>/.test(m.chat()), '[Before / After] → DIFF カードは案内だけ（本文は右の「確認結果」の変更前後）');
-  await clickChat(m, 'open-diff', { plan: m.conv().activePlan().planId, version: '1' });
-  assert(m.panel.drawerState().pane === 'review' && m.$('kt-ai-review-diff') && m.$('kt-ai-review-diff').style.display === '' && /P2<\/b>/.test(m.$('kt-ai-review-result').innerHTML), '［変更前後を見る］→ 右の「確認結果」の変更前後が開く');
-  // 変更内容・確認結果を開く（右は常に表示。別のペインを見ていても切り替わる）
+  //   Toolkit の確認（REVIEW）の記録のメッセージは削除した（F5-1）。確認の結果は右の「確認結果」にまとめる。判断の select は会話に無い
+  assert(!m.msgs().some(x => x.type === 'REVIEW') && !/kt-ai-review-card/.test(chat1) && !/Toolkitで変更計画を検証しました|検証結果を見る/.test(chat1) && !/kt-ai-decision/.test(chat1), 'Toolkit の確認は会話のカードにしない（REVIEW のメッセージは無い）。判断の select は会話に無い');
+  //   会話のカードの承認は最終案の［この内容で反映する］だけ（R16・画面-3）。チャットの文章・手順ごとの判断の select・反映の開始は会話に無い
+  assert(!/<select/.test(chat1) && !/data-act="(approve|decide|exec-start|exec-go)"/.test(chat1) && !/id="kt-ai-exec-(start|go)"/.test(chat1) && /まだ何も反映していません。/.test(chat1), '会話のカードに手順ごとの判断・反映の操作は無い（承認は最終案の［この内容で反映する］だけ。チャットの文章では承認にならない）');
+  assert(m.$('kt-ai-review-result').innerHTML.includes('Toolkit で確認した結果') && !m.$('kt-ai-plan-result').innerHTML.includes('kt-ai-decision') && m.panel.drawerState().open === true && m.panel.drawerState().pane === 'plan' && m.panel.activeArtifact()?.type === 'CHANGE_PLAN', 'Review 統合: 右の「確認結果」に Toolkit で確認した結果。計画受信で右は「変更内容」（activeArtifact CHANGE_PLAN）');
+  //   ［Before / After］（DIFF のカード）は変更案のカードのボタンだった。変更案のカードと一緒に入口が無くなった（R の報告の「到達しなくなった小さな残り」）。
+  //   変更前後は右の「確認結果」の中にある
+  assert(m.$('kt-ai-review-diff') && /P2<\/b>/.test(m.$('kt-ai-review-result').innerHTML) && !/data-act="before-after"/.test(chat1), '変更前後は右の「確認結果」の中（会話に［Before / After］は無い）');
+  // 右のペインを開く（右は常に表示。別のペインを見ていても切り替わる）
   m.panel.showPane('evidence');
   await clickChat(m, 'open-plan', { plan: v1.planId, version: '1' });
-  assert(m.panel.drawerState().open === true && m.panel.drawerState().pane === 'plan', '［変更内容を見る］→ 右の「変更内容」ペイン');
+  assert(m.panel.drawerState().open === true && m.panel.drawerState().pane === 'plan', '［変更内容を見る］（open-plan）→ 右の「変更内容」ペイン');
   await clickChat(m, 'open-review', { plan: v1.planId, version: '1' });
   assert(m.panel.drawerState().open === true && m.panel.drawerState().pane === 'review', '［検証と判断を開く］（open-review）→ 右の「確認結果」ペイン');
   // REVISE
-  await m.panel.send('新しい承認者は作らず既存の承認者を使って'); await ticks();
+  await m.panel.send('新しい承認者は作らず既存の承認者を使って'); await ticks(10);
   const rv = m.calls.plan[1];
-  assert(m.calls.plan.length === 2 && rv.ctx.goal === GOAL && rv.ctx.revision && rv.ctx.revision.basedOnVersion === 1 && rv.ctx.revision.request === '新しい承認者は作らず既存の承認者を使って' && rv.ctx.revision.previousPlan.steps.length === 2 && rv.ctx.revision.previousPlan.proposedFields[0].temporaryId === 'NEW_FIELD_1' && rv.ctx.revision.previousPlan.steps[0].spec.fieldType === 'DROP_DOWN', 'REVISE: 同じ goal ＋ revision（basedOnVersion 1 / request / 前回の計画の要約: steps・proposedFields・spec）を送る');
+  assert(m.calls.plan.length === 2 && rv.ctx.goal.split('\n')[0] === GOAL && rv.ctx.revision && rv.ctx.revision.basedOnVersion === 1 && rv.ctx.revision.request === '新しい承認者は作らず既存の承認者を使って' && rv.ctx.revision.previousPlan.steps.length === 2 && rv.ctx.revision.previousPlan.proposedFields[0].temporaryId === 'NEW_FIELD_1' && rv.ctx.revision.previousPlan.steps[0].spec.fieldType === 'DROP_DOWN', 'REVISE: 同じ goal ＋ revision（basedOnVersion 1 / request / 前回の計画の要約: steps・proposedFields・spec）を送る');
   assert(rv.ctx.retrieval.fields.some(f => f.code === 'approver') || rv.ctx.retrieval.matchedTerms.some(t => /承認者/.test(t.key)), 'revision の語（承認者）も辞書照合に使う');
   const v2 = m.conv().activePlan();
   assert(v2.version === 2 && v2.basedOnVersion === 1 && v1.status === 'SUPERSEDED' && m.panel.lastPlan() === v2.plan && m.panel.lastReview() === v2.review && v2.plan.steps[0].actionType === 'REUSE_FIELD', 'REVISE → v2 が最新。lastPlan / lastReview は v2（v1 は SUPERSEDED）');
+  //   v2 の最終案のカード（「最終案を直しました。」・入れた指示）と、前の最終案は 1 行に畳む（ai-flow-redesign の R10-4・F2-2）
   { const chat2 = m.chat(); const text2 = chat2.replace(/<[^>]*>/g, '');
-    assert(/変更案を直しました。/.test(text2) && /このあと直した案があります/.test(text2) && /<details class="kt-ai-card kt-ai-old-card kt-ai-plan-card is-old"><summary>前の変更案 — このあと直した案があります/.test(chat2) && (chat2.match(/class="kt-ai-card kt-ai-plan-card"/g) || []).length === 1 && !/↻ 既存「担当者」を利用/.test(chat2) && !/変更計画 v\d|v\d に更新済み|修正: 新しい承認者/.test(text2), 'v2 カード（「変更案を直しました。」）・v1 カードは「このあと直した案があります」。手順の本文・版の番号・「修正: …」の行は会話に無い'); }
+    assert(/最終案を直しました。/.test(text2) && /入れた指示: 新しい承認者は作らず既存の承認者を使って/.test(text2) && /<details class="kt-ai-card kt-ai-old-card kt-ai-final-card is-old"><summary>前の最終案 — このあと直した案があります/.test(chat2) && (chat2.match(/class="kt-ai-card kt-ai-final-card"/g) || []).length === 1 && !/↻ 既存「担当者」を利用/.test(chat2) && !/変更計画 v\d|v\d に更新済み/.test(text2), 'v2 の最終案のカード（「最終案を直しました。」）・v1 の最終案は「このあと直した案があります」に畳む。手順の本文・版の番号は会話に無い'); }
   assert(m.conv().planHistory().length === 2 && !/kt-ai-new-field/.test(m.$('kt-ai-plan-result').innerHTML) && /担当者/.test(m.$('kt-ai-plan-result').innerHTML) && m.panel.activeArtifact()?.version === 2, '右の「変更内容」は最新版 v2 だけ（v1 の新規フィールド枠は無い・activeArtifact は v2）');
   // EXPLAIN_PLAN
   await m.panel.send('P1って何してる？'); await ticks();
@@ -463,16 +490,16 @@ console.log('\n--- 5. AI Workspace: 会話（ASK / PLAN / REVISE / EXPLAIN / PRE
   await m.panel.send('何でこれ危ないの？'); await ticks();
   const ex2 = m.calls.ask[m.calls.ask.length - 1];
   assert(ex2.ctx.planContext.kind === 'EXPLAIN_REVIEW' && /実は安全です/.test(m.chat()) && JSON.stringify(m.panel.lastReview()) === before && m.panel.lastReview() === v2.review && /確認結果の説明（判定は Toolkit が確かめた結果のままです。説明で判定は変わりません）/.test(m.chat()), 'EXPLAIN_REVIEW: AI の説明で Review（判定・safety）は変わらない（Toolkit が正本。「確認結果の説明」に明記）');
-  // REQUEST_PREVIEW（承認なし）
+  // REQUEST_PREVIEW（承認なし）: 最終案の流れでは、承認の前は承認へ案内する（ai-flow-redesign の F10-1）
   const w0 = writes(m).length;
   await m.panel.send('これで進めたい'); await ticks();
   const pr = m.msgs()[m.msgs().length - 1];
-  assert(pr.data.kind === 'preview-ready' && pr.data.readiness.approved === 0 && pr.data.readiness.undecided === 2 && /承認された手順がまだありません/.test(pr.text) && /確認結果を開く/.test(m.chat()) && /右の「確認結果」で手順ごとに判断/.test(pr.text) && !/実行前レビュー/.test(m.chat()) && m.panel.executorState().stage === 'idle' && writes(m).length === w0, 'REQUEST_PREVIEW（承認前）: 「承認された手順がまだありません」＋［確認結果を開く］。Executor は動かない・書き込み 0');
-  // 承認してから「これで進めたい」
-  m.panel.decide('P1', 'approve'); m.panel.decide('P2', 'approve');
+  assert(pr.data.kind === 'preview-needs-approval' && /［この内容で反映する］/.test(pr.text) && !/実行前レビュー/.test(m.chat()) && m.panel.executorState().stage === 'idle' && writes(m).length === w0, 'REQUEST_PREVIEW（承認前）: 最終案の［この内容で反映する］へ案内。Executor は動かない・書き込み 0');
+  // 最終案を承認してから「これで進めたい」（承認の後は、却下していない手順が承認済みとして数えられる。画面-3b）
+  assert(await approveScreen(m), '最終案のカードの［この内容で反映する］で承認する');
   await m.panel.send('これで進めたい'); await ticks();
   const pr2 = m.msgs()[m.msgs().length - 1];
-  assert(pr2.data.readiness.approved === 2 && pr2.data.readiness.executable === 1 && pr2.data.readiness.unsupported === 1 && /動作テスト環境へ反映する準備ができました/.test(pr2.text) && /✓ 承認済み・実行可能<\/span><b>1 件/.test(m.chat()) && /△ 承認済みだが未対応（計画のみ）<\/span><b>1 件/.test(m.chat()), 'REQUEST_PREVIEW（承認後）: ✓ 実行可能 1 / △ 未対応 1（REUSE_FIELD は計画のみ）');
+  assert(pr2.data.kind === 'preview-ready' && pr2.data.readiness.approved === 2 && pr2.data.readiness.executable === 1 && pr2.data.readiness.unsupported === 1 && /動作テスト環境へ反映する準備ができました/.test(pr2.text) && /✓ 承認済み・実行可能<\/span><b>1 件/.test(m.chat()) && /△ 承認済みだが未対応（計画のみ）<\/span><b>1 件/.test(m.chat()), 'REQUEST_PREVIEW（承認後）: ✓ 実行可能 1 / △ 未対応 1（REUSE_FIELD は計画のみ）');
   assert(m.panel.executorState().stage === 'idle' && writes(m).length === w0 && !/id="kt-ai-exec-confirm"/.test(m.$('kt-ai-exec').innerHTML), 'チャットでは Executor を開始しない（prepare も最終確認も出ない）');
 }
 
@@ -481,15 +508,15 @@ console.log('\n--- 6. Executor / Rollback 統合と Versioning（v1 は Executor
 {
   const m = mount();
   await ticks();
-  await m.panel.send(GOAL); await ticks();
-  const v1 = m.conv().activePlan();
-  m.panel.decide('P1', 'approve'); m.panel.decide('P2', 'approve');
-  await m.panel.send('新しい承認者は作らず既存の承認者を使って'); await ticks();
+  //   C-1 第 3 段（2026-10-08）: 依頼は仮案 → 採用 → 最終案。承認は最終案のカードの［この内容で反映する］（手順ごとの判断ではない。ai-flow-redesign の 画面-3・画面-3b）
+  const v1 = await adoptScreen(m);
+  assert(await approveScreen(m) && m.panel.reviewOutput().approvedSteps.join() === 'P1,P2', '前提: v1 の最終案を承認（却下していない手順は承認済み）');
+  await m.panel.send('新しい承認者は作らず既存の承認者を使って'); await ticks(10);
   const v2 = m.conv().activePlan();
-  assert(m.panel.reviewOutput().approvedSteps.length === 0 && m.panel.reviewOutput().plan.requestId === v2.plan.requestId && m.panel.reviewOutput().plan.requestId !== v1.plan.requestId, '版が変わると判断はやり直し（v1 の承認は v2 に持ち越さない）・executorOutput は v2');
-  m.panel.decide('P2', 'approve');
+  assert(m.panel.reviewOutput().approvedSteps.length === 0 && !v2.approval && m.panel.reviewOutput().plan.requestId === v2.plan.requestId && m.panel.reviewOutput().plan.requestId !== v1.plan.requestId, '版が変わると承認はやり直し（v1 の承認は v2 に持ち越さない。R16-5・画面-4）・executorOutput は v2');
+  assert(await approveScreen(m), 'v2 の最終案を承認し直す');
   const out = m.panel.reviewOutput();
-  assert(out.plan.steps[0].actionType === 'REUSE_FIELD' && out.approvedSteps.join() === 'P2', 'Executor の入力（executorOutput）は v2 だけ（v1 の ADD_FIELD は含まれない）');
+  assert(out.plan.steps[0].actionType === 'REUSE_FIELD' && !out.plan.steps.some(s => s.actionType === 'ADD_FIELD') && out.approvedSteps.join() === 'P1,P2', 'Executor の入力（executorOutput）は v2 だけ（v1 の ADD_FIELD は含まれない）');
   assert(m.panel.applyHold() === null && m.$('kt-ai-exec-empty').style.display === 'none' && /id="kt-ai-exec-start" class="btn"[^>]*>動作テスト環境へ反映</.test(m.$('kt-ai-exec').innerHTML) && !/id="kt-ai-exec-start"[^>]*disabled/.test(m.$('kt-ai-exec').innerHTML), '承認後: 反映を止める理由は無い（applyHold null）・右の「反映」に［動作テスト環境へ反映］（押せる）');
   m.panel.showPane('review');
   await clickExec(m, 'kt-ai-exec-start'); await ticks();
@@ -529,16 +556,16 @@ console.log('\n--- 6. Executor / Rollback 統合と Versioning（v1 は Executor
   // 反映後に新しい計画を作っても、戻していない実行は失わない（別シナリオ）
   const n = mount();
   await ticks();
-  await n.panel.send(GOAL); await ticks();
-  n.panel.decide('P1', 'approve'); n.panel.decide('P2', 'approve');
-  // 未回答の確認事項（Q1。priority 無し）があっても反映は止まらない
-  assert(n.panel.applyHold() === null && n.conv().answerContext().open.length === 1 && !n.conv().answerContext().open[0].priority, '未回答の確認事項（priority 無し）があっても反映は止めない（applyHold null）');
+  await adoptScreen(n);
+  // 未回答の確認事項（Q1。priority 無し）があっても承認・反映は止まらない
+  assert(await approveScreen(n) && n.panel.applyHold() === null && n.conv().answerContext().open.length === 1 && !n.conv().answerContext().open[0].priority, '未回答の確認事項（priority 無し）があっても承認・反映は止めない（applyHold null）');
   await clickExec(n, 'kt-ai-exec-start'); await ticks(); await clickExec(n, 'kt-ai-exec-go'); await ticks(8);
   assert(n.panel.executorState().stage === 'done' && n.mock.st.fields.progress, 'v1 を反映');
-  await n.panel.send('契約終了30日前に担当者へ通知したい'); await ticks();
-  assert(n.msgs()[n.msgs().length - 1].data?.kind === 'choices' || n.conv().planHistory().length === 2, '反映済みのあとの新しい要望 → 新しい計画（または確認）');
-  await n.panel.send('契約終了30日前に担当者へ通知したい', { intent: 'PLAN' }); await ticks();
-  assert(n.conv().planHistory().length >= 2 && n.panel.executorState().stage === 'done' && n.panel.executorState().execution && /data-act="rollback"/.test(n.chat()), '新しい計画を作っても、戻していない実行結果（Rollback 可能）は残る');
+  //   C-1 第 3 段: 反映済みの計画の後の依頼は、新しい依頼として仮案から（その計画は直さない）→ 採用で新しい計画の系列
+  await n.panel.send('契約終了30日前に担当者へ通知したい'); await ticks(6);
+  assert(n.calls.propose.length === 2 && n.conv().draft() && n.conv().draft().status === 'open' && n.conv().planHistory().length === 1, '反映済みのあとの新しい要望 → 新しい仮案（反映済みの計画は直さない）');
+  await n.panel.send('これで進めて'); await ticks(10);
+  assert(n.conv().planHistory().length >= 2 && n.conv().activePlan().planId !== n.conv().planHistory()[0].planId && n.panel.executorState().stage === 'done' && n.panel.executorState().execution && /data-act="rollback"/.test(n.chat()), '新しい計画を作っても、戻していない実行結果（Rollback 可能）は残る');
 }
 
 // =========================================================
@@ -546,11 +573,12 @@ console.log('\n--- 7. Safety: 自然言語 ≠ 承認（write 0 件）/ errors /
 {
   const m = mount();
   await ticks();
-  await m.panel.send(GOAL); await ticks();
+  await adoptScreen(m);
+  //   C-1 第 3 段（2026-10-08）: 最終案の流れでは、承認の前の反映の依頼は承認（［この内容で反映する］）への案内だけ（ai-flow-redesign の F10-1）
   for (const t of ['全部承認', 'そのまま実行', 'いいから反映して', '実行して']) {
     await m.panel.send(t); await ticks();
     const last = m.msgs()[m.msgs().length - 1];
-    assert(last.data?.kind === 'preview-ready' && writes(m).length === 0 && m.panel.executorState().stage === 'idle' && [...(m.panel.reviewOutput().approvedSteps)].length === 0, `Safety: 「${t}」→ 準備メッセージだけ。承認 0・Executor idle・write 0 件`);
+    assert(last.data?.kind === 'preview-needs-approval' && !m.conv().activePlan().approval && writes(m).length === 0 && m.panel.executorState().stage === 'idle' && [...(m.panel.reviewOutput().approvedSteps)].length === 0, `Safety: 「${t}」→ 承認への案内だけ。承認 0・Executor idle・write 0 件`);
   }
   await m.panel.send('戻して'); await ticks();
   assert(writes(m).length === 0 && m.panel.executorState().stage === 'idle' && /元に戻せる反映はありません/.test(m.chat()), 'Safety: 「戻して」だけでは write 0 件（反映していない）');
@@ -560,20 +588,21 @@ console.log('\n--- 7. Safety: 自然言語 ≠ 承認（write 0 件）/ errors /
     const BLOCKING_V1 = { ...PLAN_V1, plan: { ...PLAN_V1.plan, questions: [{ id: 'Q1', question: '更新状況の選択肢は 3 段階でよいですか', reason: 'goal から決められない', relatedEvidenceIds: [], priority: 'blocking' }] } };
     const b = mount({ planResponses: (ctx) => (ctx.revision ? PLAN_V2 : BLOCKING_V1) });
     await ticks();
-    await b.panel.send(GOAL); await ticks();
-    b.panel.decide('P1', 'approve'); b.panel.decide('P2', 'approve');
+    await adoptScreen(b);
+    //   C-1 第 3 段: 先に決めたいことは最終案のカードの中（変更案のカードは削除。ai-flow-redesign の R10-1・R10-2）。最終案は承認できない
+    const approvedB = await approveScreen(b);
     const holdText = '先に確認したいことが 1 件残っています。左の会話で答えると反映できます。';
-    assert(b.panel.applyHold() === holdText && /先に確認したいことが 1 件あります。答えると変更案に入れて、反映できるようになります。/.test(b.chat()), 'blocking の確認事項が残っている: applyHold に理由・変更案のカードに「先に確認したいことが 1 件あります」');
+    assert(b.panel.applyHold() === holdText && !approvedB && b.conv().activePlan().final.approvable === false && /先に決めたいことが 1 件残っています。答えると反映できるようになります。/.test(b.chat()), 'blocking の確認事項が残っている: applyHold に理由・最終案は承認できず、カードに「先に決めたいことが 1 件残っています」');
     assert(/id="kt-ai-exec-start"[^>]*disabled/.test(b.$('kt-ai-exec').innerHTML) && b.$('kt-ai-exec').innerHTML.includes(holdText), 'blocking の確認事項が残っている: ［動作テスト環境へ反映］は押せない・理由を表示');
     const sr = await b.panel.startExecutor();
     await clickExec(b, 'kt-ai-exec-start'); await ticks();
     assert(sr === null && b.panel.executorState().stage === 'idle' && writes(b).length === 0, 'blocking の確認事項が残っている: startExecutor は null・ボタンを押しても準備しない（書き込み 0）');
-    // 回答欄に答えて［回答を送って変更案を直す］→ 直した案（確認事項なし）では反映できる
+    // 最終案のカードの回答欄に答えて［回答を送る］→ 直した最終案（確認事項なし）では承認・反映できる
     const qkey = (/data-qkey="([^"]+)"/.exec(b.chat()) || [])[1] || null;
     const v1b = b.conv().activePlan();
     await b.$('kt-ai-chat').dispatch({ type: 'input', target: { dataset: { qkey }, value: '3 段階でよい' } });
-    await clickChat(b, 'answer-questions', { plan: v1b.planId, version: String(v1b.version) }); await ticks(8);
-    b.panel.decide('P2', 'approve');   // 版が変わると判断はやり直し
+    await clickChat(b, 'answer-questions', { plan: v1b.planId, version: String(v1b.version) }); await ticks(10);
+    assert(await approveScreen(b), '直した最終案は承認できる（版が変わると承認はやり直し）');
     assert(qkey && b.conv().activePlan().version === 2 && b.conv().answerContext().open.length === 0 && b.conv().ledger().every(e => e.appliedInVersion === 2) && b.panel.applyHold() === null && !/id="kt-ai-exec-start"[^>]*disabled/.test(b.$('kt-ai-exec').innerHTML) && !b.$('kt-ai-exec').innerHTML.includes(holdText), '回答して変更案に入れると反映を止めない（applyHold null・承認すれば［動作テスト環境へ反映］を押せる）');
   }
   // errors
