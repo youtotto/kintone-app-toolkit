@@ -65,9 +65,10 @@ await section(async () => {
   const d3 = anchor(r1, 'number', 3), yen = anchor(r1, 'number', 1000000), wait = anchor(r1, 'name', '承認待ち');
   assert(d3 && d3.heldIn.includes('spec:P1.daysLater'), `R1: 3 日は spec:P1.daysLater にある: ${JSON.stringify(d3 && d3.heldIn)}`);
   assert(wait && wait.heldIn.includes('spec:P1.filterCond'), `R1: 承認待ち は spec:P1.filterCond にある: ${JSON.stringify(wait && wait.heldIn)}`);
-  assert(yen && !held(yen, 'spec:').length && !held(yen, 'js:').length && held(yen, 'unresolved:').includes('unresolved:P2.details') && held(yen, 'unresolved:').includes('unresolved:Q1') && held(yen, 'prose:').includes('prose:assessment.summary'), `R1: 100 万円は spec にも js にも無く、未解決（P2 の details・Q1）と文章（assessment.summary）だけ: ${JSON.stringify(yen && yen.heldIn)}`);
+  // 段階 C: 文章（assessment.summary など）の照合は外した（構造化データ: spec / JS / 未解決だけ）
+  assert(yen && !held(yen, 'spec:').length && !held(yen, 'js:').length && held(yen, 'unresolved:').includes('unresolved:P2.details') && held(yen, 'unresolved:').includes('unresolved:Q1') && !held(yen, 'prose:').length, `R1: 100 万円は spec にも js にも無く、未解決（P2 の details・Q1）だけ（文章は照合しない）: ${JSON.stringify(yen && yen.heldIn)}`);
   const ws = notInSpec(rv);
-  assert(ws.length === 1 && ws[0].requirementId === 'R1' && ws[0].where === 'exceptions[0]' && ws[0].severity === 'medium' && ws[0].message === '「金額が100万円以上」の条件が手順の spec にも JavaScript の条件にもありません（文章と確認事項にだけあります）', `REQUIREMENT_CONDITION_NOT_IN_SPEC が R1 の例外（金額が100万円以上）に出る: ${JSON.stringify(ws)}`);
+  assert(ws.length === 1 && ws[0].requirementId === 'R1' && ws[0].where === 'exceptions[0]' && ws[0].severity === 'medium' && ws[0].message === '「金額が100万円以上」の条件が手順の spec にも JavaScript の条件にもありません（確認事項にだけあります）', `REQUIREMENT_CONDITION_NOT_IN_SPEC が R1 の例外（金額が100万円以上）に出る: ${JSON.stringify(ws)}`);
   assert(r1.status === 'unresolved' && r2.status === 'unanchored' && !ws.some(w => w.requirementId === 'R2'), `R1 の状態は unresolved（いちばん弱い置き場所）、R2（条件なしの AI の提案）は unanchored で警告なし: ${r1.status} / ${r2.status}`);
   assert(JSON.stringify(ws[0].values) === '["100万円","金額"]', `警告に足りない値（100万円・金額）を添える: ${JSON.stringify(ws[0].values)}`);
   // 独立レビュー 2: 個数・序数（件・回目）と単位の無い裸の数は anchor にしない（警告が出ない）
@@ -313,41 +314,38 @@ await section(async () => {
   const CODE = "(function () {\n  'use strict';\n  kintone.events.on(['mobile.app.record.create.show', 'mobile.app.record.edit.show', 'mobile.app.record.create.change.items', 'mobile.app.record.edit.change.items'], function (event) {\n    var record = event.record;\n    if (record['ステータス'].value === '承認済み') {\n      record['amount'].disabled = true;\n      var rows = record['items'].value;\n      for (var i = 0; i < rows.length; i++) {\n        rows[i].value['item_name'].disabled = true;\n        rows[i].value['qty'].disabled = true;\n        rows[i].value['unit_price'].disabled = true;\n      }\n    }\n    return event;\n  });\n})();\n";
   const gen = (coverage) => ({ strategy: 'NEW_JS_FILE', targetFile: 'mobileDealLock.js', summary: 'モバイルで承認済みの金額と明細セルを編集不可にする', code: CODE, patch: null, events: C2.events, fields: C2.fields.map(f => ({ code: f.code, access: f.access })), apis: ['kintone.events.on'], assumptions: [], warnings: [], coverage });
   const rvOf = (coverage, plan = SR.CASE2_PLAN) => KTCodeReview.review({ generated: gen(coverage), customization: C2, plan, data: INPUTS.data, scan: INPUTS.scan, existingSource: null });
-  // 従来の形（AI が NOT_MET / PARTIAL で返した）: PARTIAL は notAchieved のまま。独立レビュー B-2: NOT_MET でも note が計画の手順（P1）・標準設定を担当に名指ししていて
-  //   その手順が計画にあれば担当範囲外（AI_OUT_OF_SCOPE）に読み替える（登録不可にしない）
+  // 段階 C: 担当は requirementId で引く（契約 20 §5）。文の照合（同一文・2-gram の Dice 係数）・note の文言（P1 の名指し・標準設定）からの推定は削除した。
+  //   記録した有料確認の応答（旧い形。requirementId 無し）は入口で C2（この JavaScript の id）に変換するので、NOT_MET は登録不可・PARTIAL は確認になる
   const asIs = rvOf(SR.CASE2_GENERATED_COVERAGE);
-  assert(asIs.coverage && Array.isArray(asIs.coverage.outOfScope) && asIs.coverage.outOfScope.length === 1 && asIs.coverage.outOfScope[0].code === 'AI_OUT_OF_SCOPE' && /100万円以上は部長承認/.test(asIs.coverage.outOfScope[0].requirement) && /手順「/.test(asIs.coverage.outOfScope[0].message) && !/\bP1\b/.test(asIs.coverage.outOfScope[0].message) && !asIs.coverage.notAchieved.some(x => x.code === 'AI_NOT_MET') && asIs.coverage.notAchieved.some(x => x.code === 'AI_PARTIAL' && /PCとモバイルの両方で使う/.test(x.message)) && !(asIs.checks || []).some(x => x.name === 'coverage-unmet' && x.severity === 'block'), `従来の coverage: PARTIAL は notAchieved のまま・標準設定を担当に名指しした NOT_MET は担当範囲外に読み替え: ${JSON.stringify({ na: asIs.coverage.notAchieved.map(x => x.code), oos: asIs.coverage.outOfScope.map(x => [x.code, x.message]) })}`);
-  // Gateway の新しい規則（OUT_OF_SCOPE）＋ 決定的な補助（他の customization の requirement と同じ文の NOT_MET）
-  const cov = SR.CASE2_GENERATED_COVERAGE.map(x => (x.status === 'NOT_MET' ? { ...x, status: 'OUT_OF_SCOPE', note: 'P1 で承認者を確定し、標準のプロセス管理で分岐を設定する' } : x));
-  cov.push({ requirement: C1.requirement, status: 'NOT_MET', note: 'PC は対象外' });
-  cov.push({ requirement: C2.requirement.replace(/。/g, ''), status: 'PARTIAL', note: '自分の担当（句読点だけ違う）' });
+  assert(asIs.coverage.declared.every(d => d.requirementId === 'C2' && d.legacy === true) && asIs.coverage.outOfScope.length === 0 && asIs.coverage.notAchieved.some(x => x.code === 'AI_NOT_MET' && /100万円以上は部長承認/.test(x.message) && /手順「/.test(x.message) && !/\bP1\b/.test(x.message)) && asIs.coverage.notAchieved.some(x => x.code === 'AI_PARTIAL' && /PCとモバイルの両方で使う/.test(x.message)) && (asIs.checks || []).some(x => x.name === 'coverage-unmet' && x.severity === 'block'), `旧い形の coverage: すべて自分の id に変換（NOT_MET は登録不可。note の番号は手順の名前に）: ${JSON.stringify({ na: asIs.coverage.notAchieved.map(x => [x.code, x.message]), oos: asIs.coverage.outOfScope })}`);
+  // Gateway の新しい形（requirementId つき）: P1（確認待ち）→ unowned、P3（REUSE_FIELD。設定を変える手順）→ 手順の担当、C1 → 別の JavaScript の担当、C2 → 自分
+  const cov = [
+    { requirementId: 'P1', text: '100万円以上は部長承認', status: 'OUT_OF_SCOPE', note: 'P1 で承認者を確定し、標準のプロセス管理で分岐を設定する' },
+    { requirementId: 'C1', text: C1.requirement, status: 'NOT_MET', note: 'PC は対象外' },
+    { requirementId: 'C2', text: C2.requirement.replace(/。/g, ''), status: 'PARTIAL', note: '自分の担当（句読点だけ違う）' },
+    { requirementId: 'P3', text: '承認待ちの通知', status: 'OUT_OF_SCOPE', note: '標準設定で対応' },
+  ];
   const rv = rvOf(cov);
   const oos = rv.coverage.outOfScope, na = rv.coverage.notAchieved;
-  // 再レビュー 2026-10-07: 利用者に見える message には内部の番号（P1 / C1）を出さず、手順の名前・別の JavaScript の要件で言う（判定用の note は元のまま）
-  const oosP = oos.find(x => x.code === 'AI_OUT_OF_SCOPE' && /100万円以上は部長承認/.test(x.requirement));
-  assert(oosP && /P1 で承認者を確定/.test(oosP.note) && /手順「/.test(oosP.message) && !/\bP1\b/.test(oosP.message) && !na.some(x => /100万円以上は部長承認/.test(x.message)), `OUT_OF_SCOPE は outOfScope に入り notAchieved に入れない。message の P1 は手順の名前に: ${JSON.stringify({ oos: oos.map(x => x.code), na: na.map(x => x.code), message: oosP && oosP.message })}`);
-  const oosC1 = oos.find(x => x.code === 'OTHER_CUSTOMIZATION' && x.customizationId === 'C1' && x.requirement === C1.requirement);
-  assert(oosC1 && /（別の JavaScript「.+」の担当）$/.test(oosC1.message) && !/\bC1\b/.test(oosC1.message) && !na.some(x => x.message.startsWith(C1.requirement)), `C1 の requirement と同じ文の NOT_MET は outOfScope（message は「別の JavaScript「…」の担当」）: ${JSON.stringify(oosC1 && oosC1.message)}`);
-  assert(na.some(x => x.code === 'AI_PARTIAL' && x.message.startsWith(C2.requirement.replace(/。/g, ''))) && na.some(x => x.code === 'AI_PARTIAL' && /PCとモバイルの両方で使う/.test(x.message)), '自分（C2）の requirement と同じ文・どの customization とも違う文の PARTIAL は従来どおり notAchieved');
-  assert(rvOf(cov, null).coverage.outOfScope.every(x => x.code === 'AI_OUT_OF_SCOPE') && rvOf(cov, null).coverage.unowned.length === 0, 'plan が無ければ決定的な補助は働かない（AI の OUT_OF_SCOPE だけ・unowned も無い）');
-  // 独立レビュー 3: 部分一致で付け替えない。レビューの例: C1「承認済みでは金額と明細を編集不可にする」・C2「モバイルでも承認済みの金額を編集不可にする」・
-  //   coverage「金額を編集不可にする」PARTIAL（C2 を検査中）→ 自分の requirement との類似が同等以上なので範囲内のまま（notAchieved）
+  const oosP = oos.find(x => x.requirementId === 'P1');
+  assert(oosP && oosP.code === 'AI_OUT_OF_SCOPE' && /担当が計画にありません/.test(oosP.message) && !/\bP1\b/.test(oosP.message) && rv.coverage.unowned.some(x => x.requirementId === 'P1') && !na.some(x => /100万円以上は部長承認/.test(x.message)), `P1（確認待ちの手順）の OUT_OF_SCOPE は担当が無い（unowned）。notAchieved には入れない: ${JSON.stringify({ oos: oos.map(x => [x.requirementId, x.code]), un: rv.coverage.unowned.map(x => x.requirementId) })}`);
+  const oosC1 = oos.find(x => x.requirementId === 'C1');
+  assert(oosC1 && oosC1.code === 'OTHER_OWNER' && oosC1.customizationId === 'C1' && /（別の JavaScript「.+」の担当/.test(oosC1.message) && !/\bC1\b/.test(oosC1.message) && !na.some(x => x.message.startsWith(C1.requirement)), `C1 の id の NOT_MET は別の JavaScript の担当（message は「別の JavaScript「…」の担当」）: ${JSON.stringify(oosC1 && oosC1.message)}`);
+  assert(na.some(x => x.code === 'AI_PARTIAL' && x.requirementId === 'C2') && oos.some(x => x.requirementId === 'P3' && x.code === 'OTHER_OWNER' && x.owner === 'step'), '自分（C2）の PARTIAL は notAchieved・設定を変える手順（P3）は手順の担当');
+  assert(rvOf(cov, null).coverage.outOfScope.every(x => x.code === 'AI_OUT_OF_SCOPE') && rvOf(cov, null).coverage.unowned.length === 3, 'plan が無ければ P1 / P3 / C1 の担当は引けない（unowned）');
+  // 文の類似で付け替えない（段階 C: 文の照合そのものを削除）: 別の JavaScript の要件と同じ文でも、自分の id なら自分の要件
   const revPlan = clone(SR.CASE2_PLAN);
   revPlan.customizations[0].requirement = '承認済みでは金額と明細を編集不可にする';
   revPlan.customizations[1].requirement = 'モバイルでも承認済みの金額を編集不可にする';
   const rvRev = (coverage) => KTCodeReview.review({ generated: gen(coverage), customization: revPlan.customizations[1], plan: revPlan, data: INPUTS.data, scan: INPUTS.scan, existingSource: null });
-  const partial = rvRev([{ requirement: '金額を編集不可にする', status: 'PARTIAL', note: '一覧のインライン編集では止めない' }]);
-  assert(partial.coverage.notAchieved.some(x => x.code === 'AI_PARTIAL' && /^金額を編集不可にする/.test(x.message)) && partial.coverage.outOfScope.length === 0, `部分一致（「金額を編集不可にする」）は付け替えない（範囲内のまま notAchieved）: ${JSON.stringify({ na: partial.coverage.notAchieved.map(x => x.message), oos: partial.coverage.outOfScope })}`);
-  const sameText = rvRev([{ requirement: '承認済みでは金額と明細を編集不可にする', status: 'NOT_MET', note: 'PC は対象外' }]);
-  assert(sameText.coverage.outOfScope.some(x => x.code === 'OTHER_CUSTOMIZATION' && x.customizationId === 'C1') && !sameText.coverage.notAchieved.some(x => /^AI_/.test(x.code)), `同一文（正規化後）は outOfScope（C1 の担当）: ${JSON.stringify(sameText.coverage.notAchieved.map(x => x.code))}`);
-  const nearC1 = rvRev([{ requirement: '承認済みでは金額と明細を編集不可にすること', status: 'NOT_MET', note: '' }]);
-  assert(nearC1.coverage.outOfScope.some(x => x.code === 'OTHER_CUSTOMIZATION' && x.customizationId === 'C1'), '2-gram の Dice 係数が C1 と 0.6 以上で、自分より 0.2 以上高ければ C1 の担当');
-  // 担当範囲外とされた要件の担当が計画に無ければ unowned ＋ check coverage-owner（review）。P1 / 標準設定 の担当があれば unowned にしない
-  const un = rvRev([{ requirement: '承認後に Slack へ知らせる', status: 'OUT_OF_SCOPE', note: '別の仕組みで扱う' }, { requirement: '100万円以上は部長承認', status: 'OUT_OF_SCOPE', note: 'P1 で承認者を確定し、標準のプロセス管理で分岐を設定する' }, { requirement: '承認待ちの通知', status: 'OUT_OF_SCOPE', note: '標準設定で対応' }, { requirement: '帳票の出力', status: 'OUT_OF_SCOPE', note: 'C9 の担当' }]);
+  const partial = rvRev([{ requirementId: 'C2', text: '金額を編集不可にする', status: 'PARTIAL', note: '一覧のインライン編集では止めない' }]);
+  assert(partial.coverage.notAchieved.some(x => x.code === 'AI_PARTIAL' && /^金額を編集不可にする/.test(x.message)) && partial.coverage.outOfScope.length === 0, `自分の id の PARTIAL は notAchieved: ${JSON.stringify({ na: partial.coverage.notAchieved.map(x => x.message), oos: partial.coverage.outOfScope })}`);
+  const sameText = rvRev([{ requirementId: 'C2', text: '承認済みでは金額と明細を編集不可にする', status: 'NOT_MET', note: 'PC は対象外' }]);
+  assert(sameText.coverage.outOfScope.length === 0 && sameText.coverage.notAchieved.some(x => x.code === 'AI_NOT_MET'), `C1 と同じ文でも自分の id なら自分の要件（文で付け替えない）: ${JSON.stringify(sameText.coverage.notAchieved.map(x => x.code))}`);
+  // 担当の無い OUT_OF_SCOPE は unowned ＋ check coverage-owner（review）。設定を変える手順の id なら unowned にしない
+  const un = rvRev([{ requirementId: 'R9', text: '承認後に Slack へ知らせる', status: 'OUT_OF_SCOPE', note: '別の仕組みで扱う' }, { requirementId: 'P1', text: '100万円以上は部長承認', status: 'OUT_OF_SCOPE', note: 'P1 で承認者を確定し、標準のプロセス管理で分岐を設定する' }, { requirementId: 'P3', text: '承認待ちの通知', status: 'OUT_OF_SCOPE', note: '標準設定で対応' }, { requirementId: 'C9', text: '帳票の出力', status: 'OUT_OF_SCOPE', note: 'C9 の担当' }]);
   const owner = un.checks.filter(ch => ch.name === 'coverage-owner');
-  // 再レビュー 2026-10-07: 担当は「設定を実際に変える手順」だけ。P1 は REQUIRE_CONFIRMATION（確認待ち）なので担当にならず、「標準のプロセス管理」も PROCESS 系の手順が無いので
-  //   担当にならない → 「100万円以上は部長承認」も unowned（計画全体の確認に残す。登録不可にはしない）。「標準設定で対応」は P3（REUSE_FIELD）があるので担当あり
-  assert(un.coverage.unowned.map(x => x.requirement).join('|') === '承認後に Slack へ知らせる|100万円以上は部長承認|帳票の出力' && un.coverage.outOfScope.length === 4 && !(un.checks || []).some(ch => ch.name === 'coverage-unmet'), `担当（設定を変える手順 / 標準設定）の無い OUT_OF_SCOPE は unowned（P1 は確認待ち・C9 は計画に無い）: ${JSON.stringify(un.coverage.unowned)}`);
+  assert(un.coverage.unowned.map(x => x.requirement).join('|') === '承認後に Slack へ知らせる|100万円以上は部長承認|帳票の出力' && un.coverage.outOfScope.length === 4 && !(un.checks || []).some(ch => ch.name === 'coverage-unmet'), `担当（設定を変える手順）の無い OUT_OF_SCOPE は unowned（R9 は台帳に無い・P1 は確認待ち・C9 は計画に無い）: ${JSON.stringify(un.coverage.unowned)}`);
   assert(owner.length === 3 && owner.every(ch => !ch.ok && ch.severity === 'review') && owner[0].message === '担当範囲外とされた要件「承認後に Slack へ知らせる」の担当が計画に見つかりません。計画全体の確認に残します' && un.status !== 'OK', `check coverage-owner（review）: ${JSON.stringify(owner)}`);
   const csUn = VM.codeSummary({ generated: gen([]), review: un, existingSource: null }, 'C2', { planId: 'p', version: 1, plan: revPlan });
   assert(Array.isArray(csUn.unowned) && csUn.unowned.length === 3, 'codeSummary に unowned');
@@ -367,7 +365,7 @@ await section(async () => {
   assert(Array.isArray(solo.plan.otherCustomizations) && solo.plan.otherCustomizations.length === 0 && Array.isArray(KTContext.buildGenerator({ customization: C2, plan: null, data: INPUTS.data }).plan.otherCustomizations), '他に customization が無ければ []（plan が無くても []）');
   // 表示: コードカード（VM.codeSummary）に outOfScope
   const cs = VM.codeSummary({ generated: gen(cov), review: rv, existingSource: null }, 'C2', { planId: 'p', version: 1, plan: SR.CASE2_PLAN });
-  assert(Array.isArray(cs.outOfScope) && cs.outOfScope.length === 2 && cs.notAchieved.length >= 2, `codeSummary: outOfScope と notAchieved を分けて持つ: ${JSON.stringify({ oos: cs.outOfScope.length, na: cs.notAchieved.length })}`);
+  assert(Array.isArray(cs.outOfScope) && cs.outOfScope.length === 3 && cs.notAchieved.length >= 1, `codeSummary: outOfScope と notAchieved を分けて持つ: ${JSON.stringify({ oos: cs.outOfScope.length, na: cs.notAchieved.length })}`);
   // 会話の code-intro: 満たせない部分と担当範囲外を分けて出す
   const custStep = mkStep('C1', 'CUSTOMIZATION_REQUIRED', 'JS', null, { customizationId: 'C1' }, { solution: 'CUSTOMIZATION', confidence: 'CONFIRMED' });
   const custC1 = { customizationId: 'C1', requirement: '承認済みでは金額を編集不可にする', whyStandardInsufficient: 'ステータスで切り替えるアクセス権は無い', strategy: 'NEW_JS_FILE', implementation: 'JAVASCRIPT', platform: ['desktop'], events: ['app.record.edit.show'], fields: [{ code: 'amount', access: 'CONTROL' }], apis: [], existingFiles: [], risks: [], questions: [], dependsOn: [], evidenceIds: [] };
@@ -435,7 +433,7 @@ await section(async () => {
   const ws = notInSpec(v.review);
   assert(ws.length === 1 && ws[0].requirementId === 'R1' && /「金額が100万円以上」/.test(ws[0].message), `review.warnings に REQUIREMENT_CONDITION_NOT_IN_SPEC（1 件・二重に出ない）: ${JSON.stringify(ws.map(w => w.requirementId))}`);
   const html = KTContextUi.reviewHtml(v.review, v.plan);
-  assert(/「金額が100万円以上」の条件が手順の spec にも JavaScript の条件にもありません（文章と確認事項にだけあります）/.test(html) && /\(REQUIREMENT_CONDITION_NOT_IN_SPEC\)/.test(html) && /Toolkit からの指摘/.test(html), '右の「確認結果」（reviewHtml）の「Toolkit からの指摘」に出る');
+  assert(/「金額が100万円以上」の条件が手順の spec にも JavaScript の条件にもありません（確認事項にだけあります）/.test(html) && /\(REQUIREMENT_CONDITION_NOT_IN_SPEC\)/.test(html) && /Toolkit からの指摘/.test(html), '右の「確認結果」（reviewHtml）の「Toolkit からの指摘」に出る');
   assert((html.match(/\(REQUIREMENT_CONDITION_NOT_IN_SPEC\)/g) || []).length === 1, '「Toolkit からの指摘」の一覧には 1 回だけ描く（技術情報の JSON の写しは別）');
   const rs = VM.reviewSummary(v);
   assert(rs && typeof rs.confirmations === 'number' && rs.planId === v.planId, `要約の生成は壊れない: ${JSON.stringify(rs)}`);

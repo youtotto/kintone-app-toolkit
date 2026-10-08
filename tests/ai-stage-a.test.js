@@ -17,8 +17,10 @@
 // 実行方法: node tests/ai-stage-a.test.js
 'use strict';
 const { loadToolkit, makeAssert } = require('./helpers/load-toolkit.js');
+const { makeVmBackend } = require('./helpers/js-sim-vm.js');   // 段階 C: 競合・制御の判定は模擬イベント（Node では vm の別 context）
 const T = loadToolkit();
-const { KTDeps, KTScan, KTContext, KTCodeReview, KTModernJs, KTJsExecutor, KTAiConversation, KTAiWorkspaceViewModel, KTAiChatUi, KTPlanReview } = T;
+const { KTDeps, KTScan, KTContext, KTCodeReview, KTModernJs, KTJsExecutor, KTAiConversation, KTAiWorkspaceViewModel, KTAiChatUi, KTPlanReview, KTJsSim } = T;
+const vmBackend = makeVmBackend({ timeoutMs: 2000 });
 const { assert, state } = makeAssert();
 const FX = require('./fixtures/ai-context-app.js');
 const R = require('./fixtures/p21-bfc-replay.js');
@@ -123,51 +125,54 @@ await section(() => {
   const right = review(handler(EDIT, "    if (record['ステータス'].value === '承認待ち') {\n      record['amount'].disabled = true;\n    }"));
   assert(right.registration.verdict === 'RUNTIME_UNVERIFIED' && check(right, 'conditional-control').ok, '値が同じ（承認待ち）→ 通過');
   const sw = review(handler(EDIT, "    switch (record['ステータス'].value) {\n      case '承認待ち':\n        record['amount'].disabled = true;\n        break;\n      default:\n        break;\n    }"));
-  assert(check(sw, 'conditional-control').ok, `switch の case '承認待ち' の中 → 値を見ているので通過: ${check(sw, 'conditional-control').message}`);
+  // 段階 C: switch の case のラベルの照合（段階 A）は外した。case の中の値は静的には読まず確認（review）に留め、条件どおりに動くかは模擬イベント（T-A3）で確かめる
+  assert(check(sw, 'conditional-control') && check(sw, 'conditional-control').severity === 'review' && sw.registration.verdict !== 'BLOCKED', `switch の case の中 → 静的には値を読まない（確認）: ${check(sw, 'conditional-control').message}`);
   const swWrong = review(handler(EDIT, "    switch (record['ステータス'].value) {\n      case '承認済み':\n        record['amount'].disabled = true;\n        break;\n      default:\n        break;\n    }"));
-  assert(swWrong.registration.verdict === 'BLOCKED', 'switch の別の case（承認済み）の中 → 値が違うので登録不可');
+  assert(swWrong.registration.verdict === 'NEEDS_CONFIRMATION', 'switch の別の case（承認済み）の中 → 静的には確認（値の違いは模擬イベントの不合格で分かる）');
   const viaVar = review(handler(EDIT, "    const PENDING = '承認待ち';\n    const st = record['ステータス'].value;\n    if (st === PENDING) {\n      record['amount'].disabled = true;\n    }"));
   assert(check(viaVar, 'conditional-control').ok, `値を変数に入れた書き方（st === PENDING）も定義をたどって通過: ${check(viaVar, 'conditional-control').message}`);
 });
 
 // =========================================================
-console.log('\n--- T-A3（5.3）R12: 排他的な error と disabled を誤停止しない ---');
-await section(() => {
+console.log('\n--- T-A3（5.3 → 段階 C）R12 / R13: error と disabled の競合は静的な排他判定ではなく模擬イベント（KTJsSim）で決める ---');
+//   段階 A の静的な排他判定（早い return の否定・同じ判別式と別の値・switch の別の case・if / else の別の枝）は段階 C で削除した（改訂 2: 任意の分岐の解析で採用可否を決めない）。
+//   静的な検査（error-cancels-edit）は「同じイベントに記述がある」ことを確認（review）として残し、実際の競合は代表条件を実行した結果（sim-conflict）で登録不可にする
+const simOf = (code, c = cust(), otherFiles = [], data = DATA) => KTJsSim.simulate({ customization: c, generated: gen(code), review: { finalCode: code }, existingSource: null, otherFiles, data, backend: vmBackend });
+const mergedOf = async (code, c = cust(), otherFiles = [], data = DATA) => KTCodeReview.attachSim(review(code, c), await simOf(code, c, otherFiles, data), { customization: c });
+await section(async () => {
   const ec = (rv) => check(rv, 'error-cancels-edit');
   // R12 の最小ケース: ステータス不明なら error ＋ return、承認待ちなら disabled
-  const r12 = review(handler(EDIT, "    const st = record['ステータス'] ? record['ステータス'].value : '';\n    if (!st) {\n      record['amount'].error = 'ステータスが不明です';\n      return event;\n    }\n    if (st === '承認待ち') {\n      record['amount'].disabled = true;\n    }"));
-  assert(r12.registration.verdict !== 'BLOCKED' && !codesOf(r12.registration.blockers).includes('error-cancels-edit') && ec(r12) && ec(r12).severity === 'review' && /別の条件で動くので同時には起きません/.test(ec(r12).message) && /動作テスト環境で/.test(ec(r12).message), `R12: 早い return（error）と承認待ちの disabled は排他 → 停止せず確認: ${ec(r12) && ec(r12).severity} ${ec(r12) && ec(r12).message}`);
-  assert(r12.registration.confirmations.some(x => x.code === 'error-cancels-edit' && /編集不可のまま・警告が出ない/.test(x.howToCheck)), 'R12: 確認の項目として「編集不可のまま・警告が出ない」ことを動作テスト環境で確かめる');
-  // (ii) 同じ判別式を異なるリテラルと比べている（return なし）
-  const lit = review(handler(EDIT, "    const st = record['ステータス'].value;\n    if (st === '作成中') {\n      record['amount'].error = '未申請です';\n    }\n    if (st === '承認待ち') {\n      record['amount'].disabled = true;\n    }"));
-  assert(ec(lit).severity === 'review' && !codesOf(lit.registration.blockers).includes('error-cancels-edit'), `(ii) 同じ判別式（st）を別のリテラル（作成中 / 承認待ち）と比べる → 排他: ${ec(lit).severity}`);
-  // (iii) switch の別の case
-  const sw = review(handler(EDIT, "    switch (record['ステータス'].value) {\n      case '承認待ち':\n        record['amount'].disabled = true;\n        break;\n      case '作成中':\n        record['amount'].error = '未申請です';\n        break;\n      default:\n        break;\n    }"));
-  assert(ec(sw).severity === 'review' && !codesOf(sw.registration.blockers).includes('error-cancels-edit'), `(iii) switch の別の case → 排他: ${ec(sw).severity}`);
-  // (iv) if / else の別の枝（else if の連なりも）
-  const ie = review(handler(EDIT, "    const st = record['ステータス'].value;\n    if (st === '承認待ち') {\n      record['amount'].disabled = true;\n    } else if (st === '承認済み') {\n      record['amount'].disabled = true;\n    } else {\n      record['amount'].error = '申請前です';\n    }"));
-  assert(ec(ie).severity === 'review' && !codesOf(ie.registration.blockers).includes('error-cancels-edit'), `(iv) if / else if / else の別の枝 → 排他: ${ec(ie).severity} ${ec(ie).message}`);
-  // 条件つきの経路（siteConds）: else if の連なりは手前の枝の否定も持つ・switch は case のラベルを持つ・ブロックの最後が return の if も早い return
-  const ops = KTCodeReview.fieldOperations(clean(handler(EDIT, "    const st = record['ステータス'].value;\n    if (!st) {\n      record['amount'].error = 'x';\n      return event;\n    }\n    if (st === 'A') {\n      record['amount'].disabled = true;\n    } else if (st === 'B') {\n      record['amount'].disabled = false;\n    }\n    switch (st) {\n      case 'C':\n      case 'D':\n        record['amount'].disabled = true;\n        break;\n    }")));
+  const R12 = "    const st = record['ステータス'] ? record['ステータス'].value : '';\n    if (!st) {\n      record['amount'].error = 'ステータスが不明です';\n      return event;\n    }\n    if (st === '承認待ち') {\n      record['amount'].disabled = true;\n    }";
+  const r12s = review(handler(EDIT, R12));
+  // 確認 1: 模擬の結果が無い review（従来の流れ・模擬が動かない）では従来どおり登録不可。模擬が動いたら下の R12（模擬）のとおり模擬の結果で判定する
+  assert(r12s.registration.verdict === 'BLOCKED' && ec(r12s) && ec(r12s).severity === 'block' && ec(r12s).simDecides === true && /生成工程の動作テスト（代表条件）で確かめます/.test(ec(r12s).message) && codesOf(r12s.registration.blockers).includes('error-cancels-edit'), `R12（静的）: 模擬の結果が無い間は登録不可（静的な排他の解析では下げない）: ${ec(r12s) && ec(r12s).message}`);
+  const r12 = await mergedOf(handler(EDIT, R12));
+  assert(r12.registration.verdict !== 'BLOCKED' && !r12.checks.some(x => x.name === 'sim-conflict') && r12.checks.some(x => x.name === 'sim-control' && x.ok) && r12.sim.passed === true, `R12（模擬）: 代表条件（承認待ち・作成中・空）を実行しても error と disabled は同時に起きない → 競合なし: ${JSON.stringify(r12.sim.cases.map(x => [x.verdict, x.message.slice(0, 30)]))}`);
+  assert(r12.registration.confirmations.some(x => x.code === 'error-cancels-edit' && /編集不可のまま・警告が出ない/.test(x.howToCheck)) && r12.registration.unverified.some(u => u.code === 'SIM_VERIFIED'), 'R12: 確認の項目は残し、登録の未確認は「模擬イベントで確認（実機は未確認）」');
+  // (ii)(iii)(iv) 段階 A が静的に排他と判定していた書き方も、模擬で確かめる（競合なし）
+  const bodies = [['同じ判別式と別の値', "    const st = record['ステータス'].value;\n    if (st === '作成中') {\n      record['amount'].error = '未申請です';\n    }\n    if (st === '承認待ち') {\n      record['amount'].disabled = true;\n    }"], ['switch の別の case', "    switch (record['ステータス'].value) {\n      case '承認待ち':\n        record['amount'].disabled = true;\n        break;\n      case '作成中':\n        record['amount'].error = '未申請です';\n        break;\n      default:\n        break;\n    }"], ['if / else の別の枝', "    const st = record['ステータス'].value;\n    if (st === '承認待ち') {\n      record['amount'].disabled = true;\n    } else if (st === '承認済み') {\n      record['amount'].disabled = true;\n    } else {\n      record['amount'].error = '申請前です';\n    }"]];
+  for (const [name, body] of bodies) {
+    const m = await mergedOf(handler(EDIT, body));
+    assert(!m.checks.some(x => x.name === 'sim-conflict') && m.registration.verdict !== 'BLOCKED', `R12（${name}）: 模擬で競合なし → 停止しない: ${JSON.stringify(m.checks.filter(x => !x.ok).map(x => x.name))}`);
+  }
+  // siteConds は Phase 21 の形（早い return の否定）だけ残す。else if の手前の枝の否定・switch の case のラベル（段階 A）は付けない
+  const ops = KTCodeReview.fieldOperations(clean(handler(EDIT, "    const st = record['ステータス'].value;\n    if (!st) {\n      record['amount'].error = 'x';\n      return event;\n    }\n    if (st === 'A') {\n      record['amount'].disabled = true;\n    } else if (st === 'B') {\n      record['amount'].disabled = false;\n    }\n    switch (st) {\n      case 'C':\n        record['amount'].disabled = true;\n        break;\n    }")));
   const condsOf = (op) => (op.conds || []).map(t => String(t).replace(/\s*\/\*[\s\S]*?\*\/\s*$/, ''));
-  const dB = ops.find(o => o.op === 'enabled'), dCD = ops.filter(o => o.op === 'disabled').pop(), dA = ops.find(o => o.op === 'disabled');
-  assert(dA && condsOf(dA).includes('!(!st)') && dB && condsOf(dB).includes("else of (st === 'A')") && dCD && condsOf(dCD).some(t => t === "switch (st) case 'C' / 'D'"), `siteConds: 早い return（ブロックの最後の return）の否定 !(!st)・else if の手前の枝の否定・switch の case のラベル: ${JSON.stringify([condsOf(dA), condsOf(dB), condsOf(dCD)])}`);
+  const dA = ops.find(o => o.op === 'disabled'), dB = ops.find(o => o.op === 'enabled'), dC = ops.filter(o => o.op === 'disabled').pop();
+  assert(dA && condsOf(dA).includes('!(!st)') && dB && !condsOf(dB).some(t => /else of/.test(t)) && dC && condsOf(dC).some(t => t === 'switch (st)'), `siteConds: 早い return の否定は残し、else if の手前の枝の否定・switch の case のラベル（段階 A）は外した: ${JSON.stringify([condsOf(dA), condsOf(dB), condsOf(dC)])}`);
 });
 
 // =========================================================
-console.log('\n--- T-A3（5.3）R13: 実際の競合は引き続き検出する ---');
-await section(() => {
+console.log('\n--- T-A3（5.3 → 段階 C）R13: 実際の競合は模擬イベントで検出する ---');
+await section(async () => {
   const ec = (rv) => check(rv, 'error-cancels-edit');
-  // 同じ経路で無条件に disabled と error → 従来どおり登録不可
-  const both = review(handler(EDIT, "    record['amount'].disabled = true;\n    record['amount'].error = '確認してください';"));
-  assert(both.registration.verdict === 'BLOCKED' && codesOf(both.registration.blockers).includes('error-cancels-edit') && ec(both).severity === 'block', 'R13: 同じ経路で無条件に disabled と error → block のまま');
-  // 排他でない組が 1 つでもあれば block（error は早い return の中だが、別の error が無条件）
-  const mixed = review(handler(EDIT, "    const st = record['ステータス'] ? record['ステータス'].value : '';\n    if (!st) {\n      record['amount'].error = 'ステータスが不明です';\n      return event;\n    }\n    if (st === '承認待ち') {\n      record['amount'].disabled = true;\n    }\n    record['amount'].error = '金額を確認してください';"));
-  assert(mixed.registration.verdict === 'BLOCKED' && codesOf(mixed.registration.blockers).includes('error-cancels-edit'), 'R13: 排他の組と排他でない組が混ざる → 1 組でも排他でなければ block');
-  // 同じ項目を見ていても値が重なる（承認待ちで disabled・承認待ちで error）→ 排他ではない → block
-  const same = review(handler(EDIT, "    const st = record['ステータス'].value;\n    if (st === '承認待ち') {\n      record['amount'].disabled = true;\n    }\n    if (st === '承認待ち' && Number(record['amount'].value) > 1000000) {\n      record['amount'].error = '100万円を超えています';\n    }"));
-  assert(same.registration.verdict === 'BLOCKED' && codesOf(same.registration.blockers).includes('error-cancels-edit'), 'R13: 同じ値（承認待ち）で disabled と error → 同時に起きるので block');
-  // 別ファイルの disabled と自コードの error → error-cancels-other-js（排他の判定は同じファイルの中だけ）
+  const both = await mergedOf(handler(EDIT, "    record['amount'].disabled = true;\n    record['amount'].error = '確認してください';"));
+  assert(both.registration.verdict === 'BLOCKED' && codesOf(both.registration.blockers).includes('sim-conflict') && !codesOf(both.registration.blockers).includes('error-cancels-edit') && ec(both).severity === 'review', `R13: 同じ経路で無条件に disabled と error → 模擬で競合（sim-conflict が登録不可。静的な error-cancels-edit は確認）: ${JSON.stringify(codesOf(both.registration.blockers))}`);
+  const mixed = await mergedOf(handler(EDIT, "    const st = record['ステータス'] ? record['ステータス'].value : '';\n    if (!st) {\n      record['amount'].error = 'ステータスが不明です';\n      return event;\n    }\n    if (st === '承認待ち') {\n      record['amount'].disabled = true;\n    }\n    record['amount'].error = '金額を確認してください';"));
+  assert(mixed.registration.verdict === 'BLOCKED' && codesOf(mixed.registration.blockers).includes('sim-conflict'), 'R13: 排他の組と排他でない組が混ざる → 承認待ちの代表条件で両方が立つ → 登録不可');
+  const same = await mergedOf(handler(EDIT, "    const st = record['ステータス'].value;\n    if (st === '承認待ち') {\n      record['amount'].disabled = true;\n    }\n    if (st === '承認待ち' && Number(record['amount'].value) > 0) {\n      record['amount'].error = '金額を確認してください';\n    }"));
+  assert(same.registration.verdict === 'BLOCKED' && codesOf(same.registration.blockers).includes('sim-conflict'), 'R13: 同じ値（承認待ち）で disabled と error → 代表条件で同時に起きるので登録不可');
+  // 別ファイルの disabled と自コードの error → 静的には error-cancels-other-js（確認）。模擬で同じイベントに両方が立てば sim-conflict（登録不可）
   const data = clone(DATA);
   data.customize = { scope: 'ALL', desktop: { js: [{ type: 'FILE', file: { contentType: 'text/javascript', fileKey: 'pv:other', name: 'otherLock.js', size: '200' } }], css: [] }, mobile: { js: [], css: [] }, revision: '7' };
   const OTHER = "(function () {\n  'use strict';\n  kintone.events.on(['app.record.edit.show'], function (event) {\n    const record = event.record;\n    if (record['ステータス'] && record['ステータス'].value === '承認待ち') {\n      record['amount'].disabled = true;\n    }\n    return event;\n  });\n})();\n";
@@ -176,8 +181,10 @@ await section(() => {
   const warnCust = cust({ requirement: 'ステータスが無いときは警告する', fields: [{ code: 'ステータス', access: 'READ' }, { code: 'amount', access: 'CONTROL' }] });
   const other = KTCodeReview.review({ generated: gen(handler(EDIT, "    const st = record['ステータス'] ? record['ステータス'].value : '';\n    if (!st) {\n      record['amount'].error = 'ステータスが不明です';\n      return event;\n    }"), { targetFile: 'warn.js' }), customization: warnCust, plan: null, data, scan, existingSource: null });
   const oj = check(other, 'error-cancels-other-js');
-  assert(oj && !oj.ok && oj.severity === 'review' && /otherLock\.js/.test(oj.message) && /app\.record\.edit\.show/.test(oj.message), `R13: 別ファイル（otherLock.js）の disabled と自コードの error → error-cancels-other-js（別ファイルの実行順は保証できないので排他にしない）: ${oj && oj.message}`);
+  assert(oj && !oj.ok && oj.severity === 'review' && /otherLock\.js/.test(oj.message) && /app\.record\.edit\.show/.test(oj.message), `R13: 別ファイル（otherLock.js）の disabled と自コードの error → error-cancels-other-js（確認）: ${oj && oj.message}`);
   assert(ec(other) && ec(other).ok, '自分のファイルの中には disabled が無いので error-cancels-edit 自体は重なっていない');
+  const otherSim = await simOf(handler(EDIT, "    record['amount'].error = '金額を確認してください';"), warnCust, [{ name: 'otherLock.js', target: 'desktop', text: OTHER, sourceAvailable: true, analyzed: true }], data);
+  assert(otherSim.checks.some(x => x.name === 'sim-conflict' && x.severity === 'block') && otherSim.conflicts[0].candidateInvolved === true && /既存の otherLock\.js/.test(otherSim.checks.find(x => x.name === 'sim-conflict').message), `R13: 別ファイルの disabled と候補の無条件の error → 模擬で同じイベントに両方が立つ → 競合（登録不可）: ${otherSim.checks.find(x => x.name === 'sim-conflict').message}`);
   // 編集不可（disabled）を読む条件で分けている既存の書き方は引き続き有効（確認）
   const guarded = review(handler(EDIT, "    record['amount'].disabled = record['ステータス'].value === '承認済み';\n    if (!record['amount'].disabled && Number(record['amount'].value) > 1000000) {\n      record['amount'].error = '100万円を超えています';\n    } else {\n      record['amount'].error = null;\n    }"), cust({ fields: [{ code: 'ステータス', access: 'READ' }, { code: 'amount', access: 'CONTROL' }] }));
   assert(ec(guarded).severity === 'review' && /編集不可（disabled）を見る条件で分けられています/.test(ec(guarded).message), `既存の errorGuardedByDisabled（disabled を読む if の中）はそのまま有効: ${ec(guarded).message}`);
@@ -198,11 +205,9 @@ await section(() => {
   const tableCust = cust({ requirement: '承認待ちでは明細（items）を編集不可にする', fields: [{ code: 'ステータス', access: 'READ' }, { code: 'items', access: 'CONTROL', condition: 'ステータス in ("承認待ち")' }] });
   const rvT = review(handler(EDIT, "    if (record['ステータス'].value === '承認待ち') {\n      record['items'].value.forEach(function (row) {\n        row.value['qty'].disabled = true;\n      });\n    }"), tableCust, { summary: '承認待ちでは明細のセルを編集不可にします', fields: [{ code: 'items', access: 'CONTROL' }] });
   assert(rvT.coverage.notAchieved.some(x => x.code === 'SUBTABLE_ROWS') && !(rvT.checks || []).some(x => x.name === 'coverage-unmet') && rvT.registration.verdict !== 'BLOCKED', `SUBTABLE_ROWS は coverage の確認事項のまま（coverage-unmet にしない・登録不可にしない）: ${rvT.registration.verdict} ${JSON.stringify(codesOf(rvT.registration.blockers))}`);
-  // 計画の新設ステータスに関わる NOT_MET → 同じ結果に「計画で新設する項目（…）を前提にした作り直しが必要です」の案内（planned の名前を含む）
-  //   独立レビュー B1 / B2: 照合は requirement の文だけ。ステータス名は引用符つき、ラベルは 3 文字以上
-  const rvPl = KTCodeReview.review({ generated: { ...GEN_R14, coverage: [{ requirement: 'ステータスが「部長承認待ち」のときは部長承認者以外は金額を編集不可にする', status: 'NOT_MET', note: '部長承認待ちというステータスは存在しないため実装できません' }] }, customization: CUST_R14, plan: PLAN_R14, data: DATA, scan: null, existingSource: null });
-  assert(rvPl.coverage.plannedHint && /^計画で新設する項目（[^）]+）を前提にした作り直しが必要です。計画を直すか、最終案の作成で作り直します$/.test(rvPl.coverage.plannedHint.message) && rvPl.coverage.plannedHint.names.includes('部長承認待ち') && rvPl.coverage.plannedHint.names.includes('部長承認者') && rvPl.coverage.notAchieved.some(x => x.code === 'AI_NOT_MET' && (x.planned || []).includes('部長承認待ち')), `planned の名前を含む NOT_MET → plannedHint: ${JSON.stringify(rvPl.coverage.plannedHint)}`);
-  assert(!rv.coverage.plannedHint, '計画が無ければ plannedHint は出ない');
+  // 段階 C: 計画の新設の名前を requirement の文から照合する plannedHint（段階 A）は削除した（文からの推定を減らす）。新設に関わる未達も、この JavaScript の id の NOT_MET として登録不可のまま
+  const rvPl = KTCodeReview.review({ generated: { ...GEN_R14, coverage: [{ requirementId: 'C1', requirement: 'ステータスが「部長承認待ち」のときは部長承認者以外は金額を編集不可にする', status: 'NOT_MET', note: '部長承認待ちというステータスは存在しないため実装できません' }] }, customization: CUST_R14, plan: PLAN_R14, data: DATA, scan: null, existingSource: null });
+  assert(!('plannedHint' in rvPl.coverage) && rvPl.registration.verdict === 'BLOCKED' && rvPl.coverage.notAchieved.some(x => x.code === 'AI_NOT_MET' && x.requirementId === 'C1'), `plannedHint は無い。自分の id の NOT_MET は登録不可: ${JSON.stringify(rvPl.coverage.notAchieved)}`);
   // 表示: VM.codeSummary（見出し・登録できるか）・コードカード・コードペイン
   const entry = { generated: gen(okCode, { coverage: covNotMet }), review: rv, existingSource: null, attempts: { count: 2, measured: 2, tokens: { input: 3000, output: 400 }, costUsd: 0.01 } };
   const v = { planId: 'p', version: 1, goal: 'g', plan: mkPlan([], { customizations: [cust()] }), review: null, ctx: null, status: 'ACTIVE', generated: { C1: entry } };
@@ -218,34 +223,33 @@ await section(() => {
   const entryPl = { generated: GEN_R14, review: rvPl, existingSource: null };
   const vPl = { planId: 'p', version: 1, goal: 'g', plan: PLAN_R14, review: null, ctx: null, status: 'ACTIVE', generated: { C1: entryPl } };
   const cardPl = KTAiChatUi.messageHtml({ id: 'm2', type: 'CODE', role: 'toolkit', text: 'JavaScript', at: '', data: { planId: 'p', version: 1, customizationId: 'C1' } }, { plans: new Map([['p:1', vPl]]) });
-  assert(/kt-ai-code-planned-hint[^>]*>計画で新設する項目（[^）]+）を前提にした作り直しが必要です。計画を直すか、最終案の作成で作り直します/.test(cardPl) && /生成 1 回目/.test(cardPl), 'コードカード: 新設の項目を前提にした作り直しが要る案内を同じカードに出す（同じ入力でもう一度を促さない）');
+  assert(!/kt-ai-code-planned-hint/.test(cardPl) && /生成 1 回目/.test(cardPl), 'コードカード: 新設の項目の案内（plannedHint）は出さない。「生成 N 回目」は出す');
 });
 
 // =========================================================
-console.log('\n--- T-A5（5.5）var: patch を入れる handler の中の既存の var を const / let に更新（handler の外・安全でない宣言は変えない）---');
+console.log('\n--- T-A5（5.5 → 段階 C）var: 自動修正は生成した新しいコード（patch の content）だけ。変更する handler の既存の var は自動では変えない ---');
+//   段階 A の「変更する handler の本体の既存 var の自動変換」は段階 C で外した（改訂 2: 任意の既存コードの独自変換器を広げない）。既存の記法の違反は生成側の指示と記法の検査に任せる
 await section(() => {
   const SRC = R.DEAL_LOCK;   // handler の中に var record
   const content = "      record['items'].value.forEach(function (row) {\n        row.value['qty'].disabled = true;\n      });\n";
   const g = { strategy: 'EXTEND_EXISTING_JS', targetFile: 'dealLock.js', code: content, patch: { baseHash: KTScan.hashText(SRC), operations: [{ type: 'INSERT_AFTER', anchor: "      record['amount'].disabled = true;", content }] }, events: ['app.record.edit.show'], fields: [{ code: 'qty', access: 'CONTROL' }], apis: [] };
   const src = { name: 'dealLock.js', target: 'desktop', text: SRC };
   const f = KTModernJs.fixGenerated({ generated: g, existingSource: src });
-  assert(f.status === 'fixed' && f.handlerVars === 1 && f.fixed.some(x => x.name === 'record' && x.scope === 'handler') && /const record = event\.record;/.test(f.source) && !/\bvar record\b/.test(f.source), `DEAL_LOCK（var record）の handler に挿入する patch → var record が const record になる: ${f.status} ${JSON.stringify(f.fixed.map(x => [x.name, x.scope]))}`);
-  const ops = f.generated.patch.operations;
-  assert(ops.length === 2 && ops[1].type === 'REPLACE' && ops[1].anchor === '    var record = event.record;' && ops[1].content === '    const record = event.record;' && KTCodeReview.applyPatch(SRC, f.generated.patch).text === f.source, `更新は REPLACE の操作として patch に足し、合成した全文と一致する: ${JSON.stringify(ops[1])}`);
-  // Code Review: patch の検査は「既存の宣言 1 行を const / let に更新」と数え、全文の書き換え（patch-removal）とはみなさない
+  assert(f.status === 'ok' && f.fixed.length === 0 && !('handlerVars' in f) && /var record = event\.record;/.test(f.source) && f.generated.patch.operations.length === 1, `DEAL_LOCK（var record）の handler に挿入する patch → 既存の var record は変えない（操作も増やさない）: ${f.status} ${JSON.stringify(f.fixed)}`);
   const c = { customizationId: 'C1', requirement: '承認済みでは明細の数量を編集不可', strategy: 'EXTEND_EXISTING_JS', platform: ['desktop'], events: ['app.record.create.show', 'app.record.edit.show'], fields: [{ code: 'qty', access: 'CONTROL' }], apis: [], existingFiles: [{ name: 'dealLock.js', target: 'desktop' }] };
   const rv = KTCodeReview.review({ generated: f.generated, customization: c, plan: null, data: DATA, scan: null, existingSource: src });
   const pc = check(rv, 'patch');
-  assert(pc && pc.ok && /既存の宣言 1 行を const \/ let に更新/.test(pc.message) && /元のコードは保持/.test(pc.message) && !check(rv, 'patch-removal') && check(rv, 'modern-js').ok, `patch の検査: 元のコードは保持（既存の宣言 1 行を const / let に更新）・patch-removal は出ない・modern-js は通過: ${pc && pc.message} ${JSON.stringify(check(rv, 'patch-removal'))}`);
-  // handler の外の var は変えない・安全でない宣言（ループのクロージャ）は変えない
-  const SRC2 = "(function () {\n  'use strict';\n  var EVENTS = ['app.record.edit.show'];\n  var LIMIT = 1000000;\n  kintone.events.on(EVENTS, function (event) {\n    var record = event.record;\n    var timers = [];\n    for (var i = 0; i < 3; i++) {\n      timers.push(function () { return i; });\n    }\n    if (record['ステータス'] && record['ステータス'].value === '承認済み') {\n      record['amount'].disabled = true;\n    }\n    return event;\n  });\n})();\n";
-  const g2 = { strategy: 'EXTEND_EXISTING_JS', targetFile: 'dealLock.js', code: content, patch: { baseHash: KTScan.hashText(SRC2), operations: [{ type: 'INSERT_AFTER', anchor: "      record['amount'].disabled = true;", content }] }, events: ['app.record.edit.show'], fields: [{ code: 'qty', access: 'CONTROL' }], apis: [] };
+  assert(pc && pc.ok && /元のコードは保持（全文の書き換えなし）$/.test(pc.message) && !/既存の宣言/.test(pc.message) && !check(rv, 'patch-removal') && check(rv, 'modern-js').ok, `patch の検査: 既存の var は変更していない行（記法の検査の対象外）・置き換えも無い: ${pc && pc.message}`);
+  // 追加した var は従来どおり const / let に直す（ai-modern-js M4）。handler の外・別の handler・同じ handler の既存の var は変えない
+  const SRC2 = "(function () {\n  'use strict';\n  var EVENTS = ['app.record.edit.show'];\n  var LIMIT = 1000000;\n  kintone.events.on(EVENTS, function (event) {\n    var record = event.record;\n    if (record['ステータス'] && record['ステータス'].value === '承認済み') {\n      record['amount'].disabled = true;\n    }\n    return event;\n  });\n})();\n";
+  const content2 = "      var rows = record['items'].value;\n      rows.forEach(function (row) { row.value['qty'].disabled = true; });\n";
+  const g2 = { strategy: 'EXTEND_EXISTING_JS', targetFile: 'dealLock.js', code: content2, patch: { baseHash: KTScan.hashText(SRC2), operations: [{ type: 'INSERT_AFTER', anchor: "      record['amount'].disabled = true;", content: content2 }] }, events: ['app.record.edit.show'], fields: [{ code: 'qty', access: 'CONTROL' }], apis: [] };
   const f2 = KTModernJs.fixGenerated({ generated: g2, existingSource: { name: 'dealLock.js', target: 'desktop', text: SRC2 } });
-  assert(f2.status === 'fixed' && /var EVENTS = /.test(f2.source) && /var LIMIT = /.test(f2.source) && /for \(var i = 0/.test(f2.source) && /const record = event\.record;/.test(f2.source) && /const timers = \[\];/.test(f2.source), `handler の外の var（EVENTS / LIMIT）はそのまま・ループのクロージャの var i は安全でないので変えない・安全な record / timers は const: ${JSON.stringify(f2.fixed.map(x => x.name))}\n${f2.source}`);
+  assert(f2.status === 'fixed' && f2.fixed.map(x => x.name).join() === 'rows' && /var EVENTS = /.test(f2.source) && /var LIMIT = /.test(f2.source) && /var record = event\.record;/.test(f2.source) && /const rows = record\['items'\]\.value;/.test(f2.source) && f2.generated.patch.operations.length === 1, `追加した var rows だけ const に。handler の外（EVENTS / LIMIT）も同じ handler の既存の var record も変えない: ${JSON.stringify(f2.fixed.map(x => x.name))}`);
   // patch が handler の外に入る（即時関数の直下に新しい handler を足す）→ 既存の handler の var は変えない
   const g3 = { strategy: 'EXTEND_EXISTING_JS', targetFile: 'dealLock.js', code: SA.EDIT_LOCK_CONTENT, patch: { baseHash: KTScan.hashText(SRC), operations: [{ type: 'INSERT_BEFORE', anchor: '})();', content: SA.EDIT_LOCK_CONTENT }] }, events: [], fields: [], apis: [] };
   const f3 = KTModernJs.fixGenerated({ generated: g3, existingSource: src });
-  assert(['ok', 'fixed'].includes(f3.status) && !f3.handlerVars && /var record = event\.record;/.test(f3.source || SRC), `patch が既存の handler の外（新しい handler を足す）→ 既存の handler の var record は触らない: ${f3.status} ${f3.handlerVars}`);
+  assert(f3.status === 'ok' && /var record = event\.record;/.test(f3.source), `新しい handler を足すだけ → 既存の handler の var record は触らない: ${f3.status}`);
 });
 
 // =========================================================
@@ -314,7 +318,7 @@ await section(async () => {
   const v2 = c2.activePlan(); c2.confirmSpec({ planId: v2.planId, version: v2.version });
   await c2.send('コードを作って'); await ticks();
   const intro = c2.messages().find(m => m.data?.kind === 'code-intro');
-  assert(intro && /^JavaScript を生成しましたが、要件を満たしていない部分があります（登録できません）。/.test(intro.text) && /要件のうち満たせない部分があります（AI の申告）: 部長承認待ちでも編集不可にする/.test(intro.text) && /要件のうち満たせない部分があります（Toolkit の確認）: 明細（テーブル）の行の追加・削除は止められません/.test(intro.text) && /計画で新設する項目（部長承認待ち）を前提にした作り直しが必要です。計画を直すか、最終案の作成で作り直します/.test(intro.text) && !/静的な検査は通過/.test(intro.text), `code-intro: NOT_MET の見出し ＋ AI の申告と Toolkit の確認を分けて書く ＋ 新設を前提にした作り直しの案内: ${intro && intro.text}`);
+  assert(intro && /^JavaScript を生成しましたが、要件を満たしていない部分があります（登録できません）。/.test(intro.text) && /要件のうち満たせない部分があります（AI の申告）: 部長承認待ちでも編集不可にする/.test(intro.text) && /要件のうち満たせない部分があります（Toolkit の確認）: 明細（テーブル）の行の追加・削除は止められません/.test(intro.text) && !/前提にした作り直し/.test(intro.text) && !/静的な検査は通過/.test(intro.text), `code-intro: NOT_MET の見出し ＋ AI の申告と Toolkit の確認を分けて書く（段階 C: 新設を前提にした作り直しの案内（plannedHint）は出さない）: ${intro && intro.text}`);
 });
 
 // =========================================================
@@ -408,27 +412,20 @@ console.log('\n--- T-A9（独立レビューの指摘）早い return の誤認�
 await section(async () => {
   const ec = (rv) => check(rv, 'error-cancels-edit');
   const okCode = handler(EDIT, "    if (record['ステータス'].value === '承認待ち') {\n      record['amount'].disabled = true;\n    }");
-  // ---- A-1 (a): if ブロックの最後の文が入れ子の if (…) return / for (…) if (r) return → 常に return するわけではない → 早い return ではない → 無条件の disabled と重なる（block）
-  const nested = review(handler(EDIT, "    const st = record['ステータス'].value;\n    const amt = Number(record['amount'].value);\n    if (!st) {\n      record['amount'].error = 'x';\n      if (amt > 100) return event;\n    }\n    record['amount'].disabled = true;"));
-  assert(nested.registration.verdict === 'BLOCKED' && ec(nested) && ec(nested).severity === 'block', `A-1: ブロックの最後が入れ子の if (…) return event; → 早い return ではない → block: ${ec(nested) && ec(nested).severity}`);
-  const inFor = review(handler(EDIT, "    const st = record['ステータス'].value;\n    if (!st) {\n      record['amount'].error = 'x';\n      for (const r of record['items'].value) if (r) return event;\n    }\n    record['amount'].disabled = true;"));
-  assert(inFor.registration.verdict === 'BLOCKED' && ec(inFor) && ec(inFor).severity === 'block', `A-1: ブロックの最後が for (…) if (r) return event; → 早い return ではない → block: ${ec(inFor) && ec(inFor).severity}`);
+  // ---- A-1（段階 C）: 早い return の見分け（入れ子の if / for / callback の return）で競合を断定することはやめた。静的には確認（review）に留め、競合は模擬イベントで決める
+  const nestedBody = "    const st = record['ステータス'].value;\n    const amt = Number(record['amount'].value);\n    if (!st) {\n      record['amount'].error = 'x';\n      if (amt > 100) return event;\n    }\n    record['amount'].disabled = true;";
+  const nested = review(handler(EDIT, nestedBody));
+  assert(ec(nested) && ec(nested).severity === 'block' && ec(nested).simDecides === true, `A-1（静的）: 入れ子の return の if と無条件の disabled → 模擬の結果が無い間は error-cancels-edit も登録不可（模擬が動けば模擬の結果で判定）: ${ec(nested) && ec(nested).severity}`);
+  const nestedSim = await mergedOf(handler(EDIT, nestedBody));
+  assert(!nestedSim.checks.some(x => x.name === 'sim-conflict') && nestedSim.checks.some(x => x.name === 'sim-control' && !x.ok && x.severity === 'review'), `A-1（模擬）: 代表条件（ステータスあり）では error が立たず disabled だけ → 競合なし。条件に合わないステータス（作成中）でも編集不可にする → 条件の外の制御（確認）: ${JSON.stringify(nestedSim.sim.cases.map(x => x.verdict))}`);
   const opsN = KTCodeReview.fieldOperations(clean(handler(EDIT, "    const st = record['ステータス'].value;\n    if (!st) {\n      record['amount'].error = 'x';\n      if (Number(record['amount'].value) > 100) return event;\n    }\n    record['amount'].disabled = true;")));
   const dN = opsN.find(o => o.op === 'disabled');
-  assert(dN && dN.unconditional && !(dN.conds || []).length, `siteConds: 入れ子の return の if には否定（!(…)）を付けない（disabled は無条件のまま）: ${JSON.stringify(dN && dN.conds)}`);
-  // 直接の return が最後の文（if (…) { …; } return event;）は引き続き早い return
-  const direct = review(handler(EDIT, "    const st = record['ステータス'] ? record['ステータス'].value : '';\n    if (!st) {\n      record['amount'].error = 'x';\n      if (Number(record['amount'].value) > 100) { record['amount'].error = '金額を確認してください'; }\n      return event;\n    }\n    if (st === '承認待ち') {\n      record['amount'].disabled = true;\n    }"));
-  assert(ec(direct) && ec(direct).severity === 'review' && !codesOf(direct.registration.blockers).includes('error-cancels-edit'), `A-1: 入れ子の if の後ろに直接の return がある（最後の文が return）→ 早い return → 排他（review）: ${ec(direct) && ec(direct).severity}`);
-  // ---- A-1 (b): forEach の callback の中の return は callback を抜けるだけ → 行ごとに error / disabled が別の行で同時に起きる → block
+  assert(dN && dN.unconditional && !(dN.conds || []).length, `siteConds: 入れ子の return の if には否定（!(…)）を付けない（disabled は無条件のまま。字句の判定）: ${JSON.stringify(dN && dN.conds)}`);
+  // callback の中の return と error / disabled が行ごとに同時に起きる → 模擬で競合（block）
   const tableCust = cust({ requirement: '承認待ちでは明細の数量を編集不可。数量が空なら警告', fields: [{ code: 'ステータス', access: 'READ' }, { code: 'items', access: 'CONTROL', condition: 'ステータス in ("承認待ち")' }, { code: 'qty', access: 'CONTROL' }] });
-  const tableGen = { fields: [{ code: 'items', access: 'CONTROL' }, { code: 'qty', access: 'CONTROL' }] };
-  const fe = review(handler(EDIT, "    if (record['ステータス'].value !== '承認待ち') { return event; }\n    record['items'].value.forEach(function (row) {\n      if (!row.value['qty'].value) {\n        row.value['qty'].error = '必須';\n        return;\n      }\n      row.value['qty'].disabled = true;\n    });"), tableCust, tableGen);
-  assert(fe.registration.verdict === 'BLOCKED' && ec(fe) && ec(fe).severity === 'block', `A-1: callback の中の return は handler の早い return ではない → block: ${ec(fe) && ec(fe).severity}`);
-  const feArrow = review(handler(EDIT, "    if (record['ステータス'].value !== '承認待ち') { return event; }\n    record['items'].value.forEach((row) => {\n      if (!row.value['qty'].value) { row.value['qty'].error = '必須'; return; }\n      row.value['qty'].disabled = true;\n    });"), tableCust, tableGen);
-  assert(feArrow.registration.verdict === 'BLOCKED' && ec(feArrow) && ec(feArrow).severity === 'block', `A-1: アロー関数の callback でも同じ → block: ${ec(feArrow) && ec(feArrow).severity}`);
-  // handler に直接書いた早い return の後ろの callback の中の disabled は、引き続き排他（review）
-  const feOk = review(handler(EDIT, "    const st = record['ステータス'].value;\n    if (!st) {\n      record['amount'].error = 'x';\n      return event;\n    }\n    record['items'].value.forEach(function (row) {\n      row.value['qty'].disabled = true;\n    });"), cust({ requirement: '承認待ちでは明細の数量を編集不可', fields: [{ code: 'ステータス', access: 'READ' }, { code: 'amount', access: 'CONTROL' }, { code: 'items', access: 'CONTROL' }, { code: 'qty', access: 'CONTROL' }] }), { fields: [{ code: 'amount', access: 'CONTROL' }, { code: 'items', access: 'CONTROL' }, { code: 'qty', access: 'CONTROL' }] });
-  assert(ec(feOk) && ec(feOk).severity === 'review' && !codesOf(feOk.registration.blockers).includes('error-cancels-edit'), `A-1: handler に直接書いた早い return の後ろの callback の中の disabled は排他のまま（review）: ${ec(feOk) && ec(feOk).severity} ${ec(feOk) && ec(feOk).message}`);
+  const feBody = "    if (record['ステータス'].value !== '承認待ち') { return event; }\n    record['items'].value.forEach(function (row) {\n      if (!row.value['qty'].value) {\n        row.value['qty'].error = '必須';\n        return;\n      }\n      row.value['qty'].disabled = true;\n    });";
+  const fe = await KTCodeReview.attachSim(review(handler(EDIT, feBody), tableCust, { fields: [{ code: 'items', access: 'CONTROL' }, { code: 'qty', access: 'CONTROL' }] }), await KTJsSim.simulate({ customization: tableCust, generated: gen(handler(EDIT, feBody), { fields: [{ code: 'items', access: 'CONTROL' }, { code: 'qty', access: 'CONTROL' }] }), review: null, existingSource: null, otherFiles: [], data: DATA, backend: vmBackend }), { customization: tableCust });
+  assert(fe.registration.verdict === 'BLOCKED' && codesOf(fe.registration.blockers).includes('sim-conflict'), `A-1（模擬）: 空のケース（編集画面）は明細 2 行（1 行目は空・2 行目は入力あり）→ 空の行で error・入力ありの行で disabled → 同じイベントで両方が立つ → 競合（登録不可）: ${JSON.stringify(codesOf(fe.registration.blockers))} ${JSON.stringify(fe.sim.cases.map(x => [x.kind, x.verdict]))}`);
   // ---- A-2: not in / != の条件は値を照合しない（項目を見ていれば計画の条件）。肯定の in は従来どおり値まで照合
   const notIn = review(handler(EDIT, "    const st = record['ステータス'].value;\n    if (st === '作成中' || st === '承認待ち') {\n      record['amount'].disabled = true;\n    }"), cust({ fields: [{ code: 'ステータス', access: 'READ' }, { code: 'amount', access: 'CONTROL', condition: 'ステータス not in ("承認済み")' }] }));
   assert(notIn.registration.verdict !== 'BLOCKED' && check(notIn, 'conditional-control') && check(notIn, 'conditional-control').ok, `A-2: not in ("承認済み") を列挙（作成中 / 承認待ち）で書いても BLOCKED にしない: ${notIn.registration.verdict} ${check(notIn, 'conditional-control') && check(notIn, 'conditional-control').message}`);
@@ -436,33 +433,27 @@ await section(async () => {
   assert(notEq.registration.verdict !== 'BLOCKED' && check(notEq, 'conditional-control').ok, 'A-2: != の条件も値を照合しない');
   const mixed = review(handler(EDIT, "    const st = record['ステータス'].value;\n    if (st === '承認済み') {\n      record['amount'].disabled = true;\n    }"), cust({ fields: [{ code: 'ステータス', access: 'READ' }, { code: 'amount', access: 'CONTROL', condition: 'ステータス in ("承認待ち") and 担当者 not in (LOGINUSER())' }] }));
   assert(mixed.registration.verdict === 'BLOCKED' && /計画の値「承認待ち」ではなく別の値/.test(check(mixed, 'conditional-control').message), `A-2: 肯定の in の値（承認待ち）は引き続き照合し、not in の項の値は数えない: ${check(mixed, 'conditional-control').message}`);
-  // ---- B-3: 緩い等号（== / !=）と、途中で代入し直す変数は排他にしない
+  // ---- B-3（段階 C）: 緩い等号・再代入を見る排他の判定は削除（静的には確認。模擬の結果で決める）
   const loose = review(handler(EDIT, "    const n = record['amount'].value;\n    if (n == 1) { record['amount'].error = 'x'; }\n    if (n === '1') { record['amount'].disabled = true; }"), cust({ fields: [{ code: 'amount', access: 'CONTROL' }] }));
-  assert(loose.registration.verdict === 'BLOCKED' && ec(loose) && ec(loose).severity === 'block', `B-3: n == 1 と n === '1' は同時に成り立つ → 排他にしない（block）: ${ec(loose) && ec(loose).severity}`);
-  const reassign = review(handler(EDIT, "    let st = record['ステータス'].value;\n    if (st === '作成中') { record['amount'].error = 'x'; }\n    st = '承認待ち';\n    if (st === '承認待ち') { record['amount'].disabled = true; }"));
-  assert(reassign.registration.verdict === 'BLOCKED' && ec(reassign) && ec(reassign).severity === 'block', `B-3: let st を途中で代入し直す → 同じ判別式とみなさない（block）: ${ec(reassign) && ec(reassign).severity}`);
+  assert(loose.registration.verdict === 'BLOCKED' && ec(loose) && ec(loose).severity === 'block' && ec(loose).simDecides === true, `B-3: 排他の判定はしない（模擬の結果が無い間は登録不可・模擬が動けば模擬で判定）: ${ec(loose) && ec(loose).severity}`);
+  const looseSim = await mergedOf(handler(EDIT, "    const n = record['amount'].value;\n    if (n == 1) { record['amount'].error = 'x'; }\n    if (n === '1') { record['amount'].disabled = true; }"), cust({ fields: [{ code: 'amount', access: 'CONTROL' }] }));
+  assert(ec(looseSim).severity === 'review', `B-3（模擬）: 模擬イベントが動いたら確認に下げる: ${ec(looseSim).severity}`);
+  // ---- C: 確認の文は短く、確認の仕方（HOW_TO_CHECK）に模擬イベントの位置づけを書く
   const strictBoth = review(handler(EDIT, "    const st = record['ステータス'].value;\n    if (st === '作成中') { record['amount'].error = 'x'; }\n    if (st === '承認待ち') { record['amount'].disabled = true; }"));
-  assert(ec(strictBoth) && ec(strictBoth).severity === 'review', 'B-3: const のまま・両方 === なら従来どおり排他（review）');
-  // ---- C: 排他のときの review 文は短く、詳しい種類は HOW_TO_CHECK（登録前の確認）へ
-  assert(ec(strictBoth).message === '同じイベント（app.record.edit.show: error と disabled）にエラー表示と編集可否・値の変更の両方がありますが、別の条件で動くので同時には起きません。動作テスト環境で確かめてください' && strictBoth.registration.confirmations.some(x => x.code === 'error-cancels-edit' && /編集不可のまま・警告が出ない/.test(x.howToCheck) && /早い return/.test(x.howToCheck)), `C: 排他の文は短く・確認の仕方に詳しい種類: ${ec(strictBoth).message}`);
-  // ---- B-5: 宣言の更新（var → const / let）と数えるのは handler の関数本体の中だけ。handler の外は patch-removal の確認
+  const strictBothSim = await mergedOf(handler(EDIT, "    const st = record['ステータス'].value;\n    if (st === '作成中') { record['amount'].error = 'x'; }\n    if (st === '承認待ち') { record['amount'].disabled = true; }"));
+  assert(ec(strictBoth).message === '同じイベント（app.record.edit.show: error と disabled）にエラー表示と編集可否・値の変更の記述があります。kintone はエラーを表示したイベントで編集可否（disabled）と値の変更を取り消す（別の handler で設定したものも）ため、実際に同時に起きるかを生成工程の動作テスト（代表条件）で確かめます。動作テストで確かめられない間は登録できません' && strictBothSim.registration.confirmations.some(x => x.code === 'error-cancels-edit' && /編集不可のまま・警告が出ない/.test(x.howToCheck) && /生成工程の動作テスト/.test(x.howToCheck)), `C: 確認の文と確認の仕方: ${ec(strictBoth).message}`);
+  // ---- B-5（段階 C）: 宣言の更新（var → const / let）を特別に数える処理（declUpdateCount）は削除。REPLACE で置き換えた既存の行は handler の内外を問わず patch-removal の確認
   const SRC5 = "(function () {\n  'use strict';\n  var LIMIT = 1000000;\n  kintone.events.on(['app.record.edit.show'], function (event) {\n    var record = event.record;\n    if (record['ステータス'] && record['ステータス'].value === '承認済み') {\n      record['amount'].disabled = true;\n    }\n    return event;\n  });\n})();\n";
   const c5 = { customizationId: 'C1', requirement: '承認済みでは明細の数量を編集不可', strategy: 'EXTEND_EXISTING_JS', platform: ['desktop'], events: ['app.record.edit.show'], fields: [{ code: 'qty', access: 'CONTROL' }], apis: [], existingFiles: [{ name: 'dealLock.js', target: 'desktop' }] };
   const ins = "      record['items'].value.forEach(function (row) {\n        row.value['qty'].disabled = true;\n      });\n";
   const mk5 = (ops) => ({ strategy: 'EXTEND_EXISTING_JS', targetFile: 'dealLock.js', code: ins, patch: { baseHash: KTScan.hashText(SRC5), operations: ops }, events: ['app.record.edit.show'], fields: [{ code: 'qty', access: 'CONTROL' }], apis: [] });
   const src5 = { name: 'dealLock.js', target: 'desktop', text: SRC5 };
   const outer = KTCodeReview.review({ generated: mk5([{ type: 'INSERT_AFTER', anchor: "      record['amount'].disabled = true;", content: ins }, { type: 'REPLACE', anchor: '  var LIMIT = 1000000;', content: '  const LIMIT = 1000000;' }]), customization: c5, plan: null, data: DATA, scan: null, existingSource: src5 });
-  assert(check(outer, 'patch') && !/既存の宣言/.test(check(outer, 'patch').message) && check(outer, 'patch-removal') && /既存の 1 行が置き換え/.test(check(outer, 'patch-removal').message), `B-5: handler の外の var LIMIT → const は宣言の更新と数えない（patch-removal の確認に残す）: ${check(outer, 'patch') && check(outer, 'patch').message} / ${JSON.stringify(check(outer, 'patch-removal'))}`);
+  assert(check(outer, 'patch') && !/既存の宣言/.test(check(outer, 'patch').message) && check(outer, 'patch-removal') && /既存の 1 行が置き換え/.test(check(outer, 'patch-removal').message), `B-5: handler の外の var LIMIT → const の REPLACE は patch-removal の確認: ${JSON.stringify(check(outer, 'patch-removal'))}`);
   const innerR = KTCodeReview.review({ generated: mk5([{ type: 'INSERT_AFTER', anchor: "      record['amount'].disabled = true;", content: ins }, { type: 'REPLACE', anchor: '    var record = event.record;', content: '    const record = event.record;' }]), customization: c5, plan: null, data: DATA, scan: null, existingSource: src5 });
-  assert(/既存の宣言 1 行を const \/ let に更新/.test(check(innerR, 'patch').message) && !check(innerR, 'patch-removal'), `B-5: handler の中の var record → const は宣言の更新: ${check(innerR, 'patch').message}`);
-  // ---- B8: handler の本文の範囲は acorn の AST で取る（文字列の中の } で崩れない）
-  const SRC8 = "(function () {\n  'use strict';\n  kintone.events.on(['app.record.edit.show'], function (event) {\n    var record = event.record;\n    var msg = '}';\n    if (record['ステータス'] && record['ステータス'].value === '承認済み') {\n      record['amount'].disabled = true;\n    }\n    return event;\n  });\n  kintone.events.on(['app.record.create.show'], function (event) {\n    var rec2 = event.record;\n    rec2['amount'].value = '0';\n    return event;\n  });\n})();\n";
-  const bodies = KTModernJs.handlerBodiesOf(SRC8);
-  const body0 = bodies.length ? SRC8.slice(bodies[0].start, bodies[0].end + 1) : '';
-  assert(bodies.length === 2 && body0.startsWith('{') && body0.endsWith('}') && body0.includes("var msg = '}'") && body0.includes('return event;') && !body0.includes('rec2'), `B8: 文字列の中の } があっても handler の本文の範囲が正しい（2 つ・1 つ目は return event まで）: ${JSON.stringify(bodies)} ${JSON.stringify(body0.slice(-30))}`);
-  const g8 = { strategy: 'EXTEND_EXISTING_JS', targetFile: 'a.js', code: ins, patch: { baseHash: KTScan.hashText(SRC8), operations: [{ type: 'INSERT_AFTER', anchor: "      record['amount'].disabled = true;", content: ins }] }, events: ['app.record.edit.show'], fields: [{ code: 'qty', access: 'CONTROL' }], apis: [] };
-  const f8 = KTModernJs.fixGenerated({ generated: g8, existingSource: { name: 'a.js', target: 'desktop', text: SRC8 } });
-  assert(f8.status === 'fixed' && f8.handlerVars === 2 && /const record = event\.record;/.test(f8.source) && /const msg = '\}';/.test(f8.source) && /var rec2 = event\.record;/.test(f8.source), `B8: patch を入れる handler の var（record / msg）だけ const に・別の handler の var rec2 はそのまま: ${f8.status} ${f8.handlerVars} ${JSON.stringify((f8.fixed || []).map(x => x.name))}`);
+  assert(!/既存の宣言/.test(check(innerR, 'patch').message) && check(innerR, 'patch-removal') && /既存の 1 行が置き換え/.test(check(innerR, 'patch-removal').message), `B-5: handler の中の var record → const の REPLACE も同じ扱い（特別に数えない）: ${check(innerR, 'patch').message}`);
+  // ---- B8（段階 C）: handler の本文の範囲（handlerBodiesOf）は削除した（使う処理が無くなった）
+  assert(typeof KTModernJs.handlerBodiesOf === 'undefined' && typeof KTModernJs.parseAst === 'function', 'B8: handlerBodiesOf は削除・parseAst は残す（KTJsSim が同じ構文解析器を使う）');
   // ---- B6 / B7: api に getPreviewStatus / getPreviewFields が無ければ依存の成立を確かめられない → DEPENDENCY_CHECK_FAILED（登録しない）
   const base6 = { getPreviewCustomize: async () => ({ scope: 'ALL', desktop: { js: [], css: [] }, mobile: { js: [], css: [] }, revision: '1' }), putPreviewCustomize: async () => ({}), uploadFile: async () => ({ fileKey: 'k' }) };
   const change6 = (dependsOn) => ({ changeId: 'c1', kind: 'ADD_FILE', name: 'x.js', target: 'desktop', content: 'x', contentHash: KTScan.hashText('x'), bytes: 1, dependsOn, registration: { verdict: 'RUNTIME_UNVERIFIED', blockers: [], confirmations: [], unverified: [], codeHash: KTScan.hashText('x') } });
@@ -481,11 +472,13 @@ await section(async () => {
   // ---- B-2: NOT_MET でも note が計画の手順・標準設定を名指ししていてその手順が計画にあれば担当範囲外。行の追加・削除を理由にした NOT_MET は確認（review）
   const planNotify = mkPlan([mkStep('P1', 'ADD_NOTIFICATION', 'NOTIFICATION', null, { targets: ['a'] }, { title: '承認待ちの通知を追加' }), mkStep('C1', 'CUSTOMIZATION_REQUIRED', 'JS', null, { customizationId: 'C1' })], { solution: 'HYBRID', customizations: [cust()] });
   const rvB2 = KTCodeReview.review({ generated: gen(okCode, { coverage: [{ requirement: '承認待ちになったら承認者に通知する', status: 'NOT_MET', note: 'P1 の通知設定で対応するため JavaScript では実装しない' }] }), customization: cust(), plan: planNotify, data: DATA, scan: null, existingSource: null });
-  assert(rvB2.registration.verdict !== 'BLOCKED' && !check(rvB2, 'coverage-unmet') && rvB2.coverage.outOfScope.length === 1 && rvB2.coverage.outOfScope[0].code === 'AI_OUT_OF_SCOPE' && rvB2.coverage.outOfScope[0].message === '承認待ちになったら承認者に通知する（手順「承認待ちの通知を追加」の通知設定で対応するため JavaScript では実装しない）' && !rvB2.coverage.unowned.length && !rvB2.coverage.notAchieved.length, `B-2: note に計画の手順（P1）→ 担当範囲外に読み替え（内部の番号は手順の名前に）: ${rvB2.registration.verdict} ${JSON.stringify(rvB2.coverage.outOfScope)}`);
+  // 段階 C: note の名指し（P1）では担当にしない。requirementId が無い旧い形は自分の要件（登録不可）。表示の文の番号は手順の名前に置き換える
+  assert(rvB2.registration.verdict === 'BLOCKED' && check(rvB2, 'coverage-unmet') && rvB2.coverage.outOfScope.length === 0 && rvB2.coverage.notAchieved.some(x => x.code === 'AI_NOT_MET' && x.message === '承認待ちになったら承認者に通知する（手順「承認待ちの通知を追加」の通知設定で対応するため JavaScript では実装しない）'), `B-2（段階 C）: note に計画の手順（P1）があっても担当範囲外にしない（内部の番号は手順の名前に）: ${rvB2.registration.verdict} ${JSON.stringify(rvB2.coverage.notAchieved)}`);
   const rvNoPlan = review(okCode, cust(), { coverage: [{ requirement: '承認待ちは通知する', status: 'NOT_MET', note: 'P1 の通知設定で対応' }] });
   assert(rvNoPlan.registration.verdict === 'BLOCKED' && check(rvNoPlan, 'coverage-unmet').severity === 'block', 'B-2: 計画が無ければ note の P1 は担当にならない（登録不可のまま）');
   const rvRows = review(okCode, cust(), { coverage: [{ requirement: '明細の行の追加・削除を禁止する', status: 'NOT_MET', note: 'kintone の JavaScript では行の追加・削除は止められない' }] });
-  assert(rvRows.registration.verdict === 'NEEDS_CONFIRMATION' && check(rvRows, 'coverage-unmet').severity === 'review' && rvRows.coverage.notAchieved.some(x => x.code === 'AI_PARTIAL'), `B-2: 行の追加・削除を理由にした NOT_MET は SUBTABLE_ROWS と同じ扱い（review）: ${rvRows.registration.verdict}`);
+  // 段階 C（反証 D・C3）: 文の照合（ROW_OPS_RE）で NOT_MET を PARTIAL に下げる処理は削除した（AI の申告どおり。行の追加・削除は Toolkit の SUBTABLE_ROWS で別に示す）
+  assert(rvRows.registration.verdict === 'BLOCKED' && check(rvRows, 'coverage-unmet').severity === 'block' && rvRows.coverage.notAchieved.some(x => x.code === 'AI_NOT_MET') && !rvRows.coverage.notAchieved.some(x => x.code === 'AI_PARTIAL'), `B-2（段階 C）: 行の追加・削除を理由にした NOT_MET も文では読み替えない（登録不可のまま）: ${rvRows.registration.verdict}`);
   // ---- B1 / B2: plannedHint は requirement の文だけで照合。短いラベル（2 文字）・引用符の無いステータス名は照合しない
   const planMemo = mkPlan([mkStep('P1', 'ADD_FIELD', 'PROPOSED_FIELD', 'NEW_FIELD_1', { fieldType: 'SINGLE_LINE_TEXT' }, { title: 'フィールド「備考」を追加' })], { proposedFields: [{ temporaryId: 'NEW_FIELD_1', label: '備考', suggestedCode: 'memo', type: 'SINGLE_LINE_TEXT', required: false, reason: '', evidenceIds: [] }] });
   const rvHint = KTCodeReview.review({ generated: gen(okCode, { coverage: [{ requirement: '承認済みでも警告を出す', status: 'NOT_MET', note: '備考: 実装していない' }] }), customization: cust(), plan: planMemo, data: DATA, scan: null, existingSource: null });
@@ -520,30 +513,37 @@ await section(async () => {
   const custStep = mkStep('C1', 'CUSTOMIZATION_REQUIRED', 'JS', null, { customizationId: 'C1' });
   const covReview = (plan, requirement, note, c = cust()) => KTCodeReview.review({ generated: gen(okCode, { coverage: [{ requirement, status: 'NOT_MET', note }] }), customization: c, plan, data: DATA, scan: null, existingSource: null });
   const unmetBlock = (rv) => rv.registration.verdict === 'BLOCKED' && check(rv, 'coverage-unmet') && check(rv, 'coverage-unmet').severity === 'block' && rv.coverage.outOfScope.length === 0 && rv.coverage.notAchieved.some(x => x.code === 'AI_NOT_MET');
-  // ---- 1（退行）: 自分の要件の NOT_MET は、note が手順を名指ししていても担当範囲外に読み替えない（登録不可のまま）
+  // ---- 1（段階 C）: 担当は requirementId で引く（契約 20 §5）。note の文言（P1 の名指し・「標準設定」「プロセス管理」）からの推定は削除した
   const planRC = mkPlan([mkStep('P1', 'REQUIRE_CONFIRMATION', 'PROCESS_STATUS', '承認待ち', {}, { title: '承認者を特定' }), custStep], { customizations: [cust()] });
   const planNotify = mkPlan([mkStep('P1', 'ADD_NOTIFICATION', 'NOTIFICATION', null, { targets: ['a'] }, { title: '承認待ちの通知を追加' }), custStep], { customizations: [cust()] });
   const planProcess = mkPlan([mkStep('P1', 'ADD_PROCESS_STATUS', 'PROCESS_STATUS', '部長承認待ち', { name: '部長承認待ち' }, { title: 'ステータス「部長承認待ち」を追加' }), custStep], { customizations: [cust()] });
-  const mineRC = covReview(planRC, '承認待ちでは金額を編集不可にする', 'P1 の確認を待つため実装していない');
-  assert(unmetBlock(mineRC), `1: 自分の要件（同一）の NOT_MET に「P1 の確認を待つため実装していない」→ 読み替えず登録不可のまま: ${mineRC.registration.verdict} ${JSON.stringify(mineRC.coverage.outOfScope)}`);
-  const mineNotify = covReview(planNotify, '承認待ちでは金額を編集不可', 'P1 で対応');
-  assert(unmetBlock(mineNotify), `1: 自分の要件（Dice 0.6 以上の言い換え）の NOT_MET は、設定を変える手順 P1 を名指ししても読み替えない: ${mineNotify.registration.verdict}`);
-  const mineProcess = covReview(planProcess, '承認待ちでは金額を編集不可にする', 'プロセス管理で対応');
-  assert(unmetBlock(mineProcess), `1: 自分の要件の NOT_MET に「プロセス管理で対応」（PROCESS 系の手順あり）→ 読み替えない: ${mineProcess.registration.verdict}`);
-  // 自分の要件でなければ従来どおり: 設定を実際に変える手順の名指しだけ担当。REQUIRE_CONFIRMATION の id・PROCESS 系の無い「プロセス管理」は担当にしない
+  const covId = (plan, items, extra = {}) => KTCodeReview.review({ generated: gen(okCode, { coverage: items }), customization: cust(), plan, data: DATA, scan: null, existingSource: null, ...extra });
+  // 自分の id（C1）の NOT_MET は、note に手順や標準設定が書かれていても登録不可のまま
+  const mineRC = covId(planRC, [{ requirementId: 'C1', text: '承認待ちでは金額を編集不可にする', status: 'NOT_MET', note: 'P1 の確認を待つため実装していない' }]);
+  assert(unmetBlock(mineRC) && /手順「承認者を特定」の確認を待つ/.test(mineRC.coverage.notAchieved[0].message), `1: 自分の id の NOT_MET → 登録不可（note の番号は手順の名前に置き換えて表示）: ${mineRC.registration.verdict} ${JSON.stringify(mineRC.coverage.notAchieved)}`);
+  assert(unmetBlock(covId(planProcess, [{ requirementId: 'C1', text: '承認待ちでは金額を編集不可にする', status: 'NOT_MET', note: 'プロセス管理で対応' }])), '1: 自分の id の NOT_MET に「プロセス管理で対応」→ 読み替えない（文言は見ない）');
+  // 旧い Gateway（requirementId 無し）: 入口でこの customization の id に変換 → 自分の要件として扱う（担当の推定はしない）
+  const legacy = covId(planNotify, [{ requirement: '承認待ちになったら承認者に通知する', status: 'NOT_MET', note: 'P1 で対応' }]);
+  assert(unmetBlock(legacy) && legacy.coverage.declared[0].requirementId === 'C1' && legacy.coverage.declared[0].legacy === true, `1: requirementId の無い旧い形は自分の id に変換（登録不可）: ${JSON.stringify(legacy.coverage.declared)}`);
+  // 別の担当の id: 設定を変える手順（P1 ADD_NOTIFICATION）→ 担当範囲外。確認待ちの手順（REQUIRE_CONFIRMATION）や計画に無い id（C9）→ unowned（計画全体の確認に残す。登録不可にはしない）
   const otherReq = '承認待ちになったら承認者に通知する';
-  //   （自分の要件でなければ登録不可にはせず、担当範囲外のまま coverage.unowned ＋ check coverage-owner（review）で計画全体の確認に残す）
   const unownedReview = (rv, req) => rv.registration.verdict !== 'BLOCKED' && rv.coverage.outOfScope.some(x => x.code === 'AI_OUT_OF_SCOPE' && x.requirement === req) && rv.coverage.unowned.some(x => x.requirement === req) && (rv.checks || []).some(x => x.name === 'coverage-owner' && !x.ok && x.severity === 'review' && x.message.includes(req)) && !rv.coverage.notAchieved.some(x => x.code === 'AI_NOT_MET');
-  const otherRC = covReview(planRC, otherReq, 'P1 で対応');
-  assert(unownedReview(otherRC, otherReq), `1: 別の要件で REQUIRE_CONFIRMATION の P1 を名指し → 担当にはしない（unowned・review。登録不可にはしない）: ${otherRC.registration.verdict} ${JSON.stringify(otherRC.coverage.unowned)}`);
-  const otherNotify = covReview(planNotify, otherReq, 'P1 で対応');
-  assert(otherNotify.registration.verdict !== 'BLOCKED' && otherNotify.coverage.outOfScope.some(x => x.code === 'AI_OUT_OF_SCOPE' && /手順「承認待ちの通知を追加」で対応/.test(x.message)), `1: 別の要件で ADD_NOTIFICATION の P1 を名指し → 担当範囲外（従来どおり）: ${JSON.stringify(otherNotify.coverage.outOfScope)}`);
-  const otherProcNo = covReview(planNotify, otherReq, 'プロセス管理で対応');
-  assert(unownedReview(otherProcNo, otherReq), `1: 「プロセス管理」は PROCESS 系の手順が無ければ担当にしない（unowned・review）: ${otherProcNo.registration.verdict} ${JSON.stringify(otherProcNo.coverage.unowned)}`);
-  const otherNoName = covReview(planNotify, otherReq, 'kintone の JavaScript では実装できない');
-  assert(otherNoName.registration.verdict === 'BLOCKED' && otherNoName.coverage.outOfScope.length === 0, `1: 手順も標準設定も名指ししない NOT_MET は従来どおり登録不可: ${otherNoName.registration.verdict}`);
-  const otherProcYes = covReview(planProcess, otherReq, 'プロセス管理で対応');
-  assert(otherProcYes.registration.verdict !== 'BLOCKED' && otherProcYes.coverage.outOfScope.some(x => x.code === 'AI_OUT_OF_SCOPE'), `1: 「プロセス管理」は ADD_PROCESS_STATUS があれば担当: ${otherProcYes.registration.verdict}`);
+  const byStep = covId(planNotify, [{ requirementId: 'P1', text: otherReq, status: 'NOT_MET', note: '通知の設定で対応' }]);
+  assert(byStep.registration.verdict !== 'BLOCKED' && byStep.coverage.outOfScope.some(x => x.code === 'OTHER_OWNER' && x.owner === 'step' && /手順「承認待ちの通知を追加」の担当/.test(x.message)) && !byStep.coverage.unowned.length && !byStep.coverage.notAchieved.length, `1: 設定を変える手順の id（P1 ADD_NOTIFICATION）→ 担当範囲外（手順の名前で表示）: ${JSON.stringify(byStep.coverage.outOfScope)}`);
+  const byRC = covId(planRC, [{ requirementId: 'P1', text: otherReq, status: 'OUT_OF_SCOPE', note: '確認の後に決める' }]);
+  assert(unownedReview(byRC, otherReq), `1: 確認待ちの手順の id（REQUIRE_CONFIRMATION）は担当にしない → unowned・確認: ${byRC.registration.verdict} ${JSON.stringify(byRC.coverage.unowned)}`);
+  const byUnknown = covId(planNotify, [{ requirementId: 'C9', text: otherReq, status: 'OUT_OF_SCOPE', note: '' }]);
+  assert(unownedReview(byUnknown, otherReq), `1: 計画に無い id（C9）→ unowned・確認: ${JSON.stringify(byUnknown.coverage.unowned)}`);
+  const planTwo = mkPlan([custStep, mkStep('C2', 'CUSTOMIZATION_REQUIRED', 'JS', null, { customizationId: 'C2' })], { customizations: [cust(), cust({ customizationId: 'C2', requirement: 'モバイルでも同じ制御' })] });
+  const byCust = covId(planTwo, [{ requirementId: 'C2', text: 'モバイルでも同じ制御', status: 'OUT_OF_SCOPE', note: '' }]);
+  assert(byCust.registration.verdict !== 'BLOCKED' && byCust.coverage.outOfScope.some(x => x.code === 'OTHER_OWNER' && x.customizationId === 'C2' && /別の JavaScript「モバイルでも同じ制御」の担当/.test(x.message)) && !byCust.coverage.unowned.length, `1: 別の JavaScript の id（C2）→ 担当範囲外（要件の文で表示）: ${JSON.stringify(byCust.coverage.outOfScope)}`);
+  // 要件の id（R…）は要件の台帳の planRefs で担当を引く: C1 を指す → 自分の要件（NOT_MET は登録不可）。P1 を指す → 手順の担当。無ければ unowned
+  const reqs = [{ id: 'R1', planRefs: ['C1'] }, { id: 'R2', planRefs: ['P1'] }, { id: 'R3', planRefs: [] }];
+  const r1 = covId(planNotify, [{ requirementId: 'R1', text: '承認待ちでは金額を編集不可にする', status: 'NOT_MET', note: '' }], { requirements: reqs });
+  const r2 = covId(planNotify, [{ requirementId: 'R2', text: otherReq, status: 'NOT_MET', note: '' }], { requirements: reqs });
+  const r3 = covId(planNotify, [{ requirementId: 'R3', text: otherReq, status: 'OUT_OF_SCOPE', note: '' }], { requirements: reqs });
+  assert(unmetBlock(r1) && r2.registration.verdict !== 'BLOCKED' && r2.coverage.outOfScope.some(x => x.owner === 'step') && unownedReview(r3, otherReq), `1: R… は planRefs で担当を引く（C1 → 自分・P1 → 手順・無し → unowned）: ${[r1.registration.verdict, r2.registration.verdict, r3.registration.verdict].join('/')}`);
+  assert(covId(null, [{ requirementId: 'P1', text: otherReq, status: 'OUT_OF_SCOPE', note: '' }]).coverage.unowned.length === 1 && covId(null, [{ requirement: otherReq, status: 'NOT_MET', note: 'P1 で対応' }]).registration.verdict === 'BLOCKED', '1: 計画が無ければ P1 も担当にならない（unowned）。旧い形の NOT_MET は登録不可のまま');
   // ---- 2: repeatOf の案内文（判定は inputHash だけ。新設の手順を反映すると入力が変わる）
   const repA = repeatOf({ attempts: nextAttempts(null, { inputHash: 'h', blockers: ['conditional-control'] }) }, 'h');
   assert(repA.repeat && repA.hints.includes('計画で新設するステータス・フィールドを動作テスト環境に反映すると、生成の入力が変わり作り直せます。入力が同じまま作り直しても同じ結果になります') && !repA.hints.some(h => /指摘の内容が変わったとき|設定の手順を反映しても/.test(h)), `2: 案内文の差し替え: ${JSON.stringify(repA.hints)}`);
@@ -563,15 +563,10 @@ await section(async () => {
   const repFailedLegacy = repeatOf({ inputHash: 'h', blockers: [], reviewFailed: true }, 'h');
   assert(repFailedLegacy.repeat && repFailedLegacy.reviewFailed === true && !repFailedLegacy.hints.some(h => /検査は通っています/.test(h)), '4: 履歴の無い古い記録（inputHash / blockers / reviewFailed）でも同じ');
   assert(repeatOf({ attempts: nextAttempts(null, { inputHash: 'h', blockers: [] }) }, 'h').reviewFailed === false, '4: 完了した回は reviewFailed: false');
-  // ---- 5: plannedHint の照合はコードの単語境界・表示はラベル優先
+  // ---- 5（段階 C）: plannedHint（新設の名前を requirement の文から照合する案内）は削除した
   const planTax = mkPlan([mkStep('P1', 'ADD_FIELD', 'PROPOSED_FIELD', 'NEW_FIELD_1', { fieldType: 'NUMBER' }, { title: 'フィールド「消費税額」を追加' })], { proposedFields: [{ temporaryId: 'NEW_FIELD_1', label: '消費税額', suggestedCode: 'no', type: 'NUMBER', required: false, reason: '', evidenceIds: [] }] });
-  const hintOf = (requirement, plan = planTax) => covReview(plan, requirement, '実装していない').coverage.plannedHint;
-  assert(!hintOf('notice を表示する'), `5: コード「no」は「notice」に当たらない（単語境界）: ${JSON.stringify(hintOf('notice を表示する'))}`);
-  const hintCode = hintOf('no の値を確認する');
-  assert(hintCode && hintCode.names.join() === '消費税額' && /計画で新設する項目（消費税額）/.test(hintCode.message), `5: コードが単語として入っていれば照合し、表示はラベル: ${JSON.stringify(hintCode)}`);
-  assert(hintOf('消費税額を確認する') && hintOf('消費税額を確認する').names.join() === '消費税額', '5: ラベルで照合したときもラベル 1 件（コードと二重にしない）');
-  const planNoLabel = mkPlan([], { proposedFields: [{ temporaryId: 'NEW_FIELD_1', label: '', suggestedCode: 'tax', type: 'NUMBER', required: false, reason: '', evidenceIds: [] }] });
-  assert(hintOf('tax を確認する', planNoLabel) && hintOf('tax を確認する', planNoLabel).names.join() === 'tax' && !hintOf('taxes を確認する', planNoLabel), '5: ラベルが無ければコードで表示。「taxes」には当たらない');
+  const noHint = covReview(planTax, '消費税額を確認する', '実装していない');
+  assert(!('plannedHint' in noHint.coverage) && noHint.registration.verdict === 'BLOCKED' && !(noHint.checks || []).some(x => /前提にした作り直し/.test(x.message)), '5: plannedHint は出ない（新設の名前を含む未達も自分の id の NOT_MET として登録不可）');
   // ---- 6: 計画が無いときの displayNote（「計画の別の手順 の反映が前提」の半角空白を落とす）
   const rvNoPlan = review(okCode, cust(), { assumptions: ['手順 P1 の反映が前提', 'C2 と同じ条件'] });
   assert(JSON.stringify(rvNoPlan.assumptions) === JSON.stringify(['計画の別の手順の反映が前提', '計画の別の手順と同じ条件']), `6: 置き換えの後ろの空白を落とす: ${JSON.stringify(rvNoPlan.assumptions)}`);
@@ -623,12 +618,12 @@ await section(async () => {
   const covReview = (plan, requirement, note, extra = {}) => KTCodeReview.review({ generated: gen(okCode, { coverage: [{ requirement, status: 'NOT_MET', note }], ...extra }), customization: cust(), plan, data: DATA, scan: null, existingSource: null });
   // 1: 自分の要件を言い換えた NOT_MET（Dice 係数が低い）でも、この JavaScript が制御するフィールド（amount）に触れていれば自分の要件 → 登録不可のまま
   const para = covReview(planNotify, 'amount の入力を止める', 'P1 で対応');
-  assert(para.registration.verdict === 'BLOCKED' && para.coverage.outOfScope.length === 0 && para.coverage.notAchieved.some(x => x.code === 'AI_NOT_MET'), `1: 言い換えた自分の要件（制御するフィールドに触れる）は担当範囲外に読み替えない: ${para.registration.verdict} ${JSON.stringify(para.coverage.outOfScope)}`);
-  // 2: 「標準機能では実現できない」は担当の名指しではない → 従来どおり登録不可（黙って落ちない）
+  assert(para.registration.verdict === 'BLOCKED' && para.coverage.outOfScope.length === 0 && para.coverage.notAchieved.some(x => x.code === 'AI_NOT_MET'), `1（段階 C）: requirementId の無い NOT_MET は文を見ずに自分の要件（登録不可）: ${para.registration.verdict} ${JSON.stringify(para.coverage.outOfScope)}`);
+  // 2（段階 C）: note の文言（否定・肯定の名指し）は担当の判定に使わない。requirementId が無ければどちらも自分の要件として登録不可
   const neg = covReview(planNotify, '承認待ちになったら承認者に通知する', '標準機能では実現できないため未対応');
-  assert(neg.registration.verdict === 'BLOCKED' && neg.coverage.outOfScope.length === 0 && neg.coverage.unowned.length === 0, `2: 否定の言い回しは担当にしない（登録不可のまま）: ${neg.registration.verdict} ${JSON.stringify({ oos: neg.coverage.outOfScope, un: neg.coverage.unowned })}`);
+  assert(neg.registration.verdict === 'BLOCKED' && neg.coverage.outOfScope.length === 0 && neg.coverage.unowned.length === 0, `2: 否定の言い回しでも登録不可のまま: ${neg.registration.verdict}`);
   const pos = covReview(planNotify, '承認待ちになったら承認者に通知する', '標準機能の通知で対応する');
-  assert(pos.registration.verdict !== 'BLOCKED' && pos.coverage.outOfScope.some(x => x.code === 'AI_OUT_OF_SCOPE'), `2: 肯定の名指し（標準機能の通知で対応）は従来どおり担当範囲外: ${pos.registration.verdict}`);
+  assert(pos.registration.verdict === 'BLOCKED' && pos.coverage.outOfScope.length === 0, `2: 肯定の名指しも文言では担当にしない（担当は requirementId で）: ${pos.registration.verdict}`);
   // 3: Code Review が出す検査名が対応表にある（内部名のまま画面に出さない）
   const names = ['conditional-control', 'unconditional-control', 'target-fields', 'planned-fields', 'planned-events', 'space-element', 'api-screen', 'empty-undefined', 'error-clear-compare', 'nested-registration', 'create-missing-field', 'summary-scope', 'requirement-scope', 'refetch', 'error-cancels-other-js'];
   const missing = names.filter(n => !KTAiChatUi.CHECK_JA[n] || /^[A-Za-z /()（）-]+$/.test(KTAiChatUi.CHECK_JA[n]));

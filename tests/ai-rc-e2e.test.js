@@ -108,8 +108,8 @@ console.log('\n--- N2 実機の再生（RC E2E の §2 手順 4）: 空の判定
   const v3 = KTCodeReview.review({ generated: g3.generated, customization: E2E.S2_V3.customization, plan: null, data: JSON.parse(JSON.stringify(DATA)), scan: null, existingSource: src3 });
   const raw3 = KTCodeReview.review({ generated: E2E.S2_V3.generated, customization: E2E.S2_V3.customization, plan: null, data: JSON.parse(JSON.stringify(DATA)), scan: null, existingSource: src3 });
   assert(raw3.status === 'BLOCKED' && raw3.checks.some(x => x.name === 'modern-js' && !x.ok && /const に直せます/.test(x.message)), '直していない出力（新しい var）は登録できない（以前は var のまま確認が必要で通った）');
-  // 段階 A（5.5）: patch を入れる handler（保存時の入力チェック）の中の既存の var record は const に更新する（安全な判定を通ったものだけ）。handler の外・別の handler は触らない（一括置換ではない）
-  assert(/const amount = event\.record\['amount'\]\.value;/.test(v3.finalCode || '') && !/\bvar\b/.test(KTScan.stripCommentsOnly(v3.finalCode || '')) && g3.handlerVars === 1 && v3.checks.some(x => x.name === 'patch' && /既存の宣言 1 行を const \/ let に更新/.test(x.message)), `既存の dealValidate.js の var は、patch を入れた handler の中だけ const に更新（宣言 1 行の更新として数え、置き換えとはみなさない）: ${g3.handlerVars} ${JSON.stringify(v3.checks.filter(x => /^patch/.test(x.name)).map(x => x.message))}`);
+  // 段階 C（5.5 の縮小）: 既存の handler の var は自動では変えない（直すのは追加した var だけ）。既存の var amount は変更していない行なので記法の検査の対象外
+  assert(/var amount = event\.record\['amount'\]\.value;/.test(v3.finalCode || '') && !/\bvar\b/.test(g3.generated.patch.operations.map(o => o.content).join('\n')) && !('handlerVars' in g3) && v3.checks.some(x => x.name === 'patch' && /元のコードは保持（全文の書き換えなし）$/.test(x.message)), `既存の dealValidate.js の var amount はそのまま・追加した var だけ const: ${JSON.stringify(v3.checks.filter(x => /^patch/.test(x.name)).map(x => x.message))}`);
   const x = check(v3, 'empty-undefined')[0] || {};
   assert(!check(v3, 'patch').length, '再生の前提: パッチは適用できる');
   assert(x.severity === 'review' && /referral_source/.test(x.message || '') && /undefined/.test(x.message || '') && /作成画面/.test(x.message || ''), `v3: referral_source の空の判定が undefined を扱っていない → 確認（理由つき）: ${x.message}`);
@@ -190,7 +190,9 @@ console.log('\n--- モデル更新（gpt-6.1-sol）の評価で見つけた誤�
   const ops = safe(() => KTCodeReview.kintoneFieldOps(KTScan.stripCommentsOnly("(function () {\n  kintone.events.on(['app.record.edit.show'], function (event) {\n    event.record['amount'].disabled = true;\n    event.record['amount'].error = null;\n    return event;\n  });\n})();")), []);
   assert(ops.length === 1 && ops[0].error === false && ops[0].disabled === true, `error = null だけの handler はエラーを出す handler ではない: ${JSON.stringify(ops.map(o => [o.error, o.disabled]))}`);
   const genuine = review(handler(['app.record.edit.show'], "    if (record['ステータス'].value === '承認済み') {\n      record['amount'].disabled = true;\n    }\n    if (Number(record['amount'].value) > 1000000) {\n      record['amount'].error = '金額が大きい';\n    } else {\n      record['amount'].error = null;\n    }"), cust({ fields: [{ code: 'amount', access: 'CONTROL' }] }));
-  assert(codesOf(genuine.registration.blockers).includes('error-cancels-edit'), '編集不可を見ずにエラーを出す（同じイベントで disabled）→ 従来どおり登録不可');
+  // 段階 C・確認 1: 模擬の結果が無い review では従来どおり登録不可（simDecides）。模擬が動いたら確認に下げ、実際の競合（登録不可）は模擬イベント（sim-conflict。tests/ai-js-sim.test.js §6 の p21 GENERATED の分けない版）で決める
+  const ecG = genuine.checks.find(x => x.name === 'error-cancels-edit') || {};
+  assert(codesOf(genuine.registration.blockers).includes('error-cancels-edit') && ecG.severity === 'block' && ecG.simDecides === true, '編集不可を見ずにエラーを出す（同じイベントで disabled）→ 模擬の結果が無い間は登録不可（競合の断定は模擬イベント）');
   // 2) 画面を見分ける前方一致の文字列（'app.record.index.'）を、登録しているイベント名と取り違えない
   const cx1 = run(M.SOL_CX1);
   assert(M.SOL_CX1.blockersAtRun.includes('events') && /indexOf\('app\.record\.index\.'\)/.test(M.SOL_CX1.generated.code), '前提: 実行時は「kintone に無いイベント: app.record.index.」で登録不可');

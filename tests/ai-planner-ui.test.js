@@ -230,6 +230,38 @@ console.log('\n--- 4. UI: errors / entitlement / Q&A と無料機能は不変 --
   assert(free.copies.length === 2 && free.copies[1].includes('## Context'), 'Free AI document（Q&A の Prompt）は影響なし');
 }
 
+// ---- 段階 C（C3b・契約 16 §8）: 計画の AI の説明（reply）の逐次表示。health の stream に reply があるときだけ ----
+console.log('\n--- 段階 C: 計画の reply の SSE ---');
+{
+  const sse = (events) => events.map(([ev, data]) => `event: ${ev}\ndata: ${JSON.stringify(data)}\n\n`).join('');
+  const sseResp = (text, chunks = 1) => {
+    const parts = []; const n = Math.max(1, Math.ceil(text.length / chunks)); for (let i = 0; i < text.length; i += n) parts.push(text.slice(i, i + n));
+    let k = 0; const enc = new TextEncoder();
+    return { status: 200, headers: { get: (h) => (String(h).toLowerCase() === 'content-type' ? 'text/event-stream; charset=utf-8' : null) }, body: { getReader: () => ({ read: async () => (k < parts.length ? { value: enc.encode(parts[k++]), done: false } : { value: undefined, done: true }) }) }, text: async () => text };
+  };
+  // 能力: registry.toolkit['change-planner'].stream に 'reply' を含むときだけ
+  const health = (stream) => ({ ok: true, supportedContractVersions: ['2.1'], entitlements: [{ product: 'toolkit', features: ['assistant-qa', 'change-planner'] }], registry: { toolkit: { 'assistant-qa': { implemented: true, promptVersions: ['1'] }, 'change-planner': { implemented: true, promptVersions: ['1'], ...(stream ? { stream } : {}) } } } });
+  const capNew = KTAiClient.capabilityFromHealth(health(['reply'])), capOld = KTAiClient.capabilityFromHealth(health(null));
+  assert(JSON.stringify(capNew.features['change-planner'].stream) === '["reply"]' && capOld.features['change-planner'].stream === undefined, `health の stream（reply）を能力として読む。古い Gateway は無い: ${JSON.stringify(capNew.features['change-planner'].stream)}`);
+  // SSE: delta は reply の増分 → onText にここまでの全文、done の本文は通常の計画と同じに検証
+  const text = ': start\n\n' + sse([['delta', { text: '承認待ちの間だけ' }], ['delta', { text: '金額を編集不可にします。' }]]) + sse([['done', PLAN_RESPONSE]]);
+  let sentHeaders = null, sentBody = null; const seen = [];
+  const client = KTAiClient.createAiClient({ apiBase: 'https://gw.test', customerToken: 't', hostname: 'h', transport: KTAiClient.createDefaultTransport({ kintoneApi: null, fetchFn: async (url, init) => { sentHeaders = init.headers; sentBody = init.body; return sseResp(text, 5); } }) });
+  const p = await client.plan({ ctx: PCTX, requestId: 'pl-s', onText: (t) => seen.push(t) });
+  assert(sentHeaders.Accept === 'text/event-stream' && JSON.parse(sentBody).meta.feature === 'change-planner', '計画の依頼に onText があれば Accept: text/event-stream を付けて送る');
+  assert(seen.length === 2 && seen[1] === '承認待ちの間だけ金額を編集不可にします。', `届いた reply をここまでの全文として渡す: ${JSON.stringify(seen)}`);
+  assert(p.goal === GOAL && p.steps.length === 5, 'done の本文は従来の計画と同じに検証して返す（turn.reply は done の全体で置き換わる）');
+  // error イベントは通常のエラー
+  const client2 = KTAiClient.createAiClient({ apiBase: 'https://gw.test', customerToken: 't', hostname: 'h', transport: KTAiClient.createDefaultTransport({ kintoneApi: null, fetchFn: async () => sseResp(sse([['delta', { text: '途中' }], ['error', { status: 429, body: JSON.stringify({ ok: false, contractVersion: '2.1', error: { code: 'RATE_LIMITED', message: 'm', requestId: 'e-1', retryAfterSeconds: 5 } }) }]])) }) });
+  let err = null; try { await client2.plan({ ctx: PCTX, onText: () => { } }); } catch (e) { err = e; }
+  assert(err && err.code === 'RATE_LIMITED' && err.httpStatus === 429, `計画の SSE の error イベントは通常のエラー: ${err && err.code}`);
+  // onText が無ければ従来どおり（SSE を求めない）
+  let sent3 = null;
+  const client3 = KTAiClient.createAiClient({ apiBase: 'https://gw.test', customerToken: 't', hostname: 'h', transport: async (req) => { sent3 = req; return okBody(PLAN_RESPONSE); } });
+  const p3 = await client3.plan({ ctx: PCTX });
+  assert(p3.steps.length === 5 && !(sent3.headers && sent3.headers.Accept === 'text/event-stream'), 'onText の無い計画は従来の 1 回の応答');
+}
+
 console.log(`\n${state.failed ? 'FAILED' : 'ALL PASSED'}: ${state.passed} passed / ${state.failed} failed`);
 process.exit(state.failed ? 1 : 0);
 })().catch(e => { console.error(e); process.exit(1); });

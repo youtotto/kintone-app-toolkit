@@ -339,7 +339,8 @@ console.log('\n--- G7b. 条件の外のロックの見落とし（モデル比�
   const helperRef = review("(function () {\n  'use strict';\n  function lockAll(event) {\n    event.record['amount'].disabled = true;\n    return event;\n  }\n  const guarded = function (event) { return event.record['ステータス'].value === '承認済み' ? lockAll(event) : event; };\n  kintone.events.on(['app.record.edit.show'], guarded);\n})();");
   assert(helperRef.registration.verdict !== 'BLOCKED', `呼び出し方を静的に追えない関数の中のロックは止めない（確認に回す）: ${JSON.stringify(helperRef.registration.blockers)}`);
   const sw = review(wrap(['app.record.edit.show'], "    switch (record['ステータス'].value) {\n      case '承認済み':\n        record['amount'].disabled = true;\n        break;\n      default:\n        break;\n    }"));
-  assert(sw.registration.verdict === 'RUNTIME_UNVERIFIED' && chk(sw, 'conditional-control').ok, 'switch (ステータス) の case の中は条件の中');
+  // 段階 C: switch の case のラベル（値）は静的に読まない → 条件の中かは確認（review）。条件どおりに動くかは模擬イベントで確かめる
+  assert(sw.registration.verdict === 'NEEDS_CONFIRMATION' && chk(sw, 'conditional-control').severity === 'review', 'switch (ステータス) の case の中は条件の中（値は模擬イベントで確かめる）');
   const els = review(wrap(['app.record.edit.show'], "    if (record['ステータス'].value !== '承認済み') {\n      record['amount'].disabled = false;\n    } else {\n      record['amount'].disabled = true;\n    }"));
   assert(els.registration.verdict === 'RUNTIME_UNVERIFIED' && chk(els, 'conditional-control').ok, 'ステータスの if の else の中は条件の中（else of (…)）');
   const fnCond = review("(function () {\n  'use strict';\n  function isApproved(record) {\n    return record['ステータス'].value === '承認済み';\n  }\n  kintone.events.on(['app.record.edit.show'], function (event) {\n    if (isApproved(event.record)) {\n      event.record['amount'].disabled = true;\n    }\n    return event;\n  });\n})();");
