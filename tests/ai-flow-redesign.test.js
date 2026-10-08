@@ -872,12 +872,11 @@ function makeGenerate({ sequence = ['good'], gate = null, env = null, repairs = 
     const gwFixed = generated0 ? T.KTModernJs.fixGenerated({ generated: generated0, existingSource }) : null;
     const generated = generated0 ? (gwFixed && gwFixed.fixed.length ? { ...gwFixed.generated, gatewayChecks: { ...(gwFixed.generated.gatewayChecks || {}), modernJs: { fixed: gwFixed.fixed.map(f => ({ line: f.line, rule: f.rule, name: f.name })) } } } : generated0) : { strategy: 'NEW_JS_FILE', targetFile: 'lock.js', summary: '承認待ちでは金額を編集不可にします。', code: cand.code, patch: null, events: cust.events, fields: [{ code: 'amount', access: 'CONTROL' }], apis: [], assumptions: [], warnings: [], coverage: [{ requirementId: 'C1', status: 'MET', note: '', text: cust.requirement }] };
     const review = KTCodeReview.review({ generated, customization: cust, plan: args.version.plan, data: clone(DATA_C), scan: null, existingSource });
-    const candidateHash = KTJsSim.candidateHashOf({ strategy: generated.strategy, targetFile: generated.targetFile, code: generated.code, patch: generated.patch, customizationId: 'C1' });
+    const candidateHash = KTScan.candidateHashOf({ strategy: generated.strategy, targetFile: generated.targetFile, code: generated.code, patch: generated.patch, customizationId: 'C1' });
     return { ok: true, generated, review, ctx: { size: { approxTokens: 1000 } }, existingSource, inputHash: `h${n}`, verification: fakeVerification(cand, args.requiredEffects, { env, repairs, stoppedBy, supported, candidateHash, dropCaseFor, statusOverride, extraCases, caseReason }), candidateHash, requirementIds: [{ id: 'C1', kind: 'customization', text: cust.requirement }], ...(relatedOmitted ? { relatedOmitted: clone(relatedOmitted) } : {}) };
   };
   return { impl, calls };
 }
-const { KTJsSim } = T;
 /** 段階 C の偽 services（仮案 → 採用 → 計画 → 生成と検証（生成工程）→ 最終案） */
 function makeConvC({ planImpl = (args) => planJs(args), generate = makeGenerate(), feedback = true, storage = null, planGate = null, materials = '見ている設定: ステータス 3 件・通知 0 件・既存の JavaScript 0 ファイル', supported = true } = {}) {
   const calls = { propose: [], plan: [], ask: [] };
@@ -885,7 +884,7 @@ function makeConvC({ planImpl = (args) => planJs(args), generate = makeGenerate(
   const x = { planImpl };
   const services = {
     conversationFeatures: () => ['requirements', 'brief', 'stream', 'proposal'], revisionModes: () => ['full'],
-    generatorFeatures: () => ['requirementId', 'cases', ...(feedback ? ['feedback'] : []), ...(supported ? (Array.isArray(supported) ? supported : GEN_EFFECT_FEATURES) : [])], feedbackSupported: () => feedback, plannerFeatures: () => ['reply'],
+    generatorFeatures: () => ['requirementId', 'cases', ...(feedback ? ['feedback'] : []), ...(supported ? (Array.isArray(supported) ? supported : GEN_EFFECT_FEATURES) : [])], plannerFeatures: () => ['reply'],
     materials: () => materials,
     fieldLabels: () => LABELS_C,
     async customizeRevision() { return '42'; },
@@ -1450,7 +1449,7 @@ await section(async () => {
     const generateImpl = async ({ ctx, requestId }) => {
       genCtx.push(clone(ctx));
       const req = (ctx.verification && ctx.verification.requiredEffects) || [];
-      const candidateHash = KTJsSim.candidateHashOf({ strategy: 'NEW_JS_FILE', targetFile: 'caseLock.js', code: CODE_S, customizationId: 'C1' });
+      const candidateHash = KTScan.candidateHashOf({ strategy: 'NEW_JS_FILE', targetFile: 'caseLock.js', code: CODE_S, customizationId: 'C1' });
       const resp = { ok: true, contractVersion: '2.1', meta: { requestId, gateway: { product: 'toolkit', feature: 'customization-generator', promptVersion: '1', contextVersion: 'customization-1' }, normalization: { warnings: [] }, ai: { model: 'm' } }, generated: { strategy: 'NEW_JS_FILE', targetFile: 'caseLock.js', summary: '承認待ちでは案件名を編集できないようにします。', code: CODE_S, patch: null, events: ['app.record.edit.show'], fields: [{ code: 'case_name', access: 'CONTROL' }], apis: [], assumptions: [], warnings: [], coverage: [{ requirementId: 'C1', status: 'MET', note: '' }] }, verification: fakeVerification({ code: CODE_S, has: { case_name: ['lock'] } }, req, { env, candidateHash }) };
       const v = KTAiClient.validateGenerated(resp, ctx);
       if (!v.ok) throw new Error(JSON.stringify(v.errors));
@@ -1843,7 +1842,7 @@ await section(async () => {
     const generateImpl = async ({ ctx, requestId }) => {
       genCtx.push(clone(ctx));
       const req = (ctx.verification && ctx.verification.requiredEffects) || [];
-      const candidateHash = KTJsSim.candidateHashOf({ strategy: 'NEW_JS_FILE', targetFile: 'caseLock.js', code: CODE_S, customizationId: 'C1' });
+      const candidateHash = KTScan.candidateHashOf({ strategy: 'NEW_JS_FILE', targetFile: 'caseLock.js', code: CODE_S, customizationId: 'C1' });
       const resp = { ok: true, contractVersion: '2.1', meta: { requestId, gateway: { product: 'toolkit', feature: 'customization-generator', promptVersion: '1', contextVersion: 'customization-1' }, normalization: { warnings: [] }, ai: { model: 'm' } }, generated: { strategy: 'NEW_JS_FILE', targetFile: 'caseLock.js', summary: '承認待ちでは案件名を編集できないようにします。', code: CODE_S, patch: null, events: ['app.record.edit.show'], fields: [{ code: 'case_name', access: 'CONTROL' }], apis: [], assumptions: [], warnings: [], coverage: [{ requirementId: 'C1', status: 'MET', note: '' }] }, ...(req.length ? { verification: fakeVerification({ code: CODE_S, has: { case_name: ['lock'] } }, req, { candidateHash, ...(envReason ? { env: envReason, caseReason: envReason } : {}) }) } : {}) };
       const v = KTAiClient.validateGenerated(resp, ctx);
       if (!v.ok) throw new Error(JSON.stringify(v.errors));
@@ -2591,7 +2590,7 @@ function makeGenE(code, verOf, { targetFile = 'c1.js' } = {}) {
     const c = (args.version.plan.customizations || []).find(x => x.customizationId === args.customizationId);
     const generated = { strategy: 'NEW_JS_FILE', targetFile, summary: c.requirement, code, patch: null, events: c.events, fields: c.fields.filter(f => f.access !== 'READ').map(f => ({ code: f.code, access: f.access })), apis: [], assumptions: [], warnings: [], coverage: [{ requirementId: 'C1', status: 'MET', note: '', text: c.requirement }] };
     const review = KTCodeReview.review({ generated, customization: c, plan: args.version.plan, data: clone(DATA_C), scan: null, existingSource: null });
-    const candidateHash = KTJsSim.candidateHashOf({ strategy: 'NEW_JS_FILE', targetFile, code, patch: null, customizationId: 'C1' });
+    const candidateHash = KTScan.candidateHashOf({ strategy: 'NEW_JS_FILE', targetFile, code, patch: null, customizationId: 'C1' });
     const raw = verOf(args.requiredEffects || []);
     const verification = KTAiClient.normalizeVerification({ version: '1', passed: true, machine: [{ name: 'syntax', ok: true, severity: 'info', message: '構文エラーなし' }], repairs: { count: 0, reasons: [], stoppedBy: null }, unverified: ['既存の JavaScript との実行順と相互作用は実機で確かめてください'], ...raw, candidateHash });
     return { ok: true, generated, review, ctx: { size: { approxTokens: 1000 } }, existingSource: null, inputHash: `h${calls.length}`, verification, candidateHash, requirementIds: [{ id: 'C1', kind: 'customization', text: c.requirement }] };
@@ -2663,7 +2662,7 @@ await section(async () => {
     const loadDevBase = async () => { const FXF = require('./fixtures/ai-context-app.js').files; const g = makeEnvGetter({ preview: clone(INPUTS.data), production: clone(INPUTS.data), files: { '20261001000000AAAA': FXF[0].text, '20261001000000BBBB': FXF[1].text, '20261001000000DDDD': FXF[2].text } }); return T.KTDevBase.load({ appId: '341', getImpl: g.getImpl, download: g.download, now: () => new Date('2026-10-08T00:00:00Z') }); };
     const generateImpl = async ({ ctx, requestId }) => {
       const req = (ctx.verification && ctx.verification.requiredEffects) || [];
-      const candidateHash = KTJsSim.candidateHashOf({ strategy: 'NEW_JS_FILE', targetFile: 'caseLock.js', code, customizationId: 'C1' });
+      const candidateHash = KTScan.candidateHashOf({ strategy: 'NEW_JS_FILE', targetFile: 'caseLock.js', code, customizationId: 'C1' });
       sent.push({ code, candidateHash, appFields: ctx.verification && ctx.verification.appFields });
       const resp = { ok: true, contractVersion: '2.1', meta: { requestId, gateway: { product: 'toolkit', feature: 'customization-generator', promptVersion: '1', contextVersion: 'customization-1' }, normalization: { warnings: [] }, ai: { model: 'm' } }, generated: { strategy: 'NEW_JS_FILE', targetFile: 'caseLock.js', summary: '承認待ちでは案件名を編集できないようにします。', code, patch: null, events: ['app.record.edit.show'], fields: [{ code: 'case_name', access: 'CONTROL' }], apis: [], assumptions: [], warnings: [], coverage: [{ requirementId: 'C1', status: 'MET', note: '' }] }, verification: fakeVerification({ code, has: { case_name: ['lock'] } }, req, { candidateHash }) };
       const v = KTAiClient.validateGenerated(resp, ctx);
@@ -2678,7 +2677,7 @@ await section(async () => {
   };
   const { m, sent } = await run(CODE_K);
   const v = m.conv().activePlan(), e = v && v.generated && v.generated.C1;
-  const localHash = e ? KTJsSim.candidateHashOf({ strategy: e.generated.strategy, targetFile: e.generated.targetFile, code: e.generated.code, patch: e.generated.patch, customizationId: 'C1' }) : null;
+  const localHash = e ? KTScan.candidateHashOf({ strategy: e.generated.strategy, targetFile: e.generated.targetFile, code: e.generated.code, patch: e.generated.patch, customizationId: 'C1' }) : null;
   assert(e && e.status === 'verified' && e.generated.code === CODE_K && !e.generated.toolkitModernJs && e.candidateHash === sent[0].candidateHash && e.verification.candidateHash === sent[0].candidateHash && localHash === sent[0].candidateHash && v.final.approvable === true,
     `E4-1: 生成工程が検証したコード・candidateHash のまま最終案になる（Toolkit は書き換えない）: ${JSON.stringify({ status: e && e.status, same: e && e.generated.code === CODE_K, hash: [e && e.candidateHash, sent[0] && sent[0].candidateHash, localHash] })}`);
   await clickChat(m, 'final-approve', { plan: v.planId, version: String(v.version) }); await ticks(4);
@@ -2763,6 +2762,30 @@ await section(async () => {
   const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'kintoneAppToolkit.user.js'), 'utf8').split('\n').filter(l => !/^\s*(\/\/|\*|\/\*)/.test(l)).map(l => l.replace(/\s\/\/\s.*$/, ''));
   const left = src.filter(l => /動作テスト（隔離環境|プレビュー環境/.test(l));
   assert(left.length === 0, `E8-3: 本体の文に「動作テスト（隔離環境の模擬）」「プレビュー環境」が残っていない: ${JSON.stringify(left.map(l => l.trim().slice(0, 120)))}`);
+});
+// E9（C-1 第 2 段・2026-10-08）: 本番の経路から呼ばれない処理の削除（設計 §0d.4）。
+//   候補の hash（candidateHashOf）は KTJsSim から KTScan へ移した。移す前（Toolkit d377038 の KTJsSim.candidateHashOf）と同じ入力に同じ値を返す
+await section(async () => {
+  const CR = String.fromCharCode(13), LF = String.fromCharCode(10);
+  const H = KTScan.candidateHashOf;
+  const cases = [
+    [{}, 'd371ace0bcf32633', '引数なし'],
+    [{ strategy: 'NEW_JS_FILE', targetFile: 'caseLock.js', code: "kintone.events.on('app.record.edit.show', function (e) { return e; });", customizationId: 'C1' }, 'b6757bd912f1f508', '新しいファイル'],
+    [{ strategy: 'NEW_JS_FILE', targetFile: 'caseLock.js', code: 'a' + CR + LF + 'b', customizationId: 'C1' }, '3981cdb53b56d25c', '改行が CRLF'],
+    [{ strategy: 'NEW_JS_FILE', targetFile: 'caseLock.js', code: 'a' + LF + 'b', customizationId: 'C1' }, '3981cdb53b56d25c', '改行が LF（CRLF と同じ値）'],
+    [{ strategy: 'EXTEND_EXISTING_JS', targetFile: 'old.js', code: '', patch: { baseHash: 'abcd1234', operations: [{ type: 'insertAfter', anchor: 'x' + CR + LF, content: 'y', extra: 1 }] }, existingHash: 'deadbeef', customizationId: 'C2' }, '55c12ddddb1b3154', '既存のファイルへの patch（操作の余分な項目は数えない）'],
+    [{ strategy: 'NEW_JS_FILE', targetFile: '日本語.js', code: '金額', customizationId: 'C3' }, '6e3f4cbc4aa5cd87', '日本語のファイル名と本文'],
+  ];
+  for (const [input, expected, name] of cases) assert(typeof H === 'function' && H(input) === expected, `E9-1: 候補の hash は移す前と同じ値（${name}）: ${typeof H === 'function' ? H(input) : '関数が無い'}`);
+  // 消した処理が残っていない（試作のエージェント・模擬実行の本体・模擬の取り込み・試作の接続・修復の往復の残骸）
+  assert(T.KTJsSim === undefined && T.KTAgent === undefined && T.KTAgentDomains === undefined && T.KTAgentUi === undefined, 'E9-2: KTJsSim・KTAgentDomains・KTAgent・KTAgentUi は本体に無い');
+  assert(typeof KTCodeReview.attachSim === 'undefined' && typeof KTCodeReview.simRan === 'undefined' && typeof KTCodeReview.attachBehavior === 'function', 'E9-3: KTCodeReview.attachSim・simRan は無い（生成工程の検証結果の取り込み attachBehavior は残す）');
+  assert(KTAiClient.FEATURE_AGENT_TURN === undefined && KTAiClient.AGENT_TURN_PROMPT_VERSION === undefined && typeof KTAiClient.createAiClient({ apiBase: 'https://gw.test', customerToken: 't', hostname: 't.cybozu.com', transport: async () => ({}) }).agentTurn === 'undefined', 'E9-4: 試作の会話を理解する担当（agent-turn）の接続は無い');
+  assert(!('sim' in KTAiConversation.TIMING_DEFAULTS), 'E9-5: 段階ごとの目安に模擬の段階は無い');
+  // buildGenerator は修復の依頼（feedback）と Toolkit が作る代表条件（cases）を渡されても Context に入れない
+  const c = { customizationId: 'C1', requirement: '承認待ちでは金額を編集不可にする', strategy: 'NEW_JS_FILE', platform: ['desktop'], events: ['app.record.edit.show'], fields: [{ code: 'amount', access: 'CONTROL' }], apis: [], existingFiles: [] };
+  const ctx = KTContext.buildGenerator({ customization: c, plan: { customizations: [c], steps: [] }, data: clone(DATA_C), verification: { requirementIds: [{ id: 'C1', kind: 'customization', text: 'x' }], cases: [{ id: 'K1', event: 'app.record.edit.show' }] }, feedback: { candidateHash: 'h', failures: [{ kind: 'simulation', message: 'x' }], previous: { code: 'x' } } });
+  assert(ctx && ctx.verification && !('cases' in ctx.verification) && !('feedback' in ctx), `E9-6: Generator Context に cases・feedback を入れない: ${JSON.stringify({ verification: ctx && ctx.verification && Object.keys(ctx.verification), feedback: ctx && 'feedback' in ctx })}`);
 });
 // 追加指示 §5 の表の 9 行（D1〜D9）は、§0d の修正の後も上の D1〜D9 で同じ期待のまま確かめている（期待値は弱めていない。表示の言い方だけ §0d.3 の決定で
 // 「動作テスト（隔離環境の模擬）」を「模擬テスト」に変えた。D3 の偽の生成工程は、記法の修正を検証の前に生成工程の側で行う形にした（Toolkit は書き換えない））
