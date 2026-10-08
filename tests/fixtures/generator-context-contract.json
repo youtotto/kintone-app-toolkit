@@ -1,0 +1,389 @@
+{
+  "purpose": "担当間の契約の素材（会話フローの再設計 §0c.7）。Toolkit の KTContext.buildGenerator が作る Generator Context。tests/ai-generator-context-contract.test.js が毎回作り直して一致を確かめる。AI版に写して Gateway の検証と隔離環境に通す",
+  "material": "既存 JS（tantou.js）が計画に無いフィールド（担当）を編集画面で読む／保存だけの警告（備考）と画面の編集不可（金額）を同じ customization に持つ／計画で新設するフィールド（承認メモ）の編集不可／§0c.10: 関係しない共通の関数のファイル（common.js）は送らず relatedOmitted の reason other・events []",
+  "ctx": {
+    "contextVersion": "customization-1",
+    "generatedAt": "2026-10-08T00:00:00.000Z",
+    "generator": {
+      "name": "kintone App Toolkit",
+      "version": "contract",
+      "analyzerVersion": "contract",
+      "catalogVersion": "contract"
+    },
+    "app": {
+      "id": "901",
+      "name": null
+    },
+    "plan": {
+      "planId": "plan_contract",
+      "version": 1,
+      "goal": "承認済みでは金額と承認メモを編集できないようにし、備考が空なら保存のときに確認する",
+      "standardSteps": [
+        {
+          "id": "P1",
+          "actionType": "ADD_FIELD",
+          "title": "承認メモ（文字列 1 行）を追加",
+          "summary": "フィールドを追加：「NEW_FIELD_1」",
+          "targetRef": "NEW_FIELD_1",
+          "spec": {
+            "type": "SINGLE_LINE_TEXT",
+            "label": "承認メモ"
+          }
+        }
+      ],
+      "otherCustomizations": [],
+      "userRequests": [
+        "承認済みでは金額と承認メモを編集できないようにし、備考が空なら保存のときに確認する"
+      ]
+    },
+    "customization": {
+      "customizationId": "C1",
+      "requirement": "承認済みでは金額と承認メモを編集不可にし、備考が空なら保存のときに確認する（保存は止めない）",
+      "whyStandardInsufficient": "ステータスで編集可否を切り替えるアクセス権は無い",
+      "strategy": "NEW_JS_FILE",
+      "platform": [
+        "desktop"
+      ],
+      "events": [
+        "app.record.edit.show",
+        "app.record.edit.submit"
+      ],
+      "fields": [
+        {
+          "code": "ステータス",
+          "access": "READ",
+          "effects": []
+        },
+        {
+          "code": "amount",
+          "access": "CONTROL",
+          "condition": "ステータス in (\"承認済\")",
+          "effects": [
+            {
+              "effect": "lock",
+              "condition": "",
+              "events": [
+                "app.record.edit.show"
+              ]
+            }
+          ]
+        },
+        {
+          "code": "approver_note",
+          "access": "CONTROL",
+          "condition": "ステータス in (\"承認済\")",
+          "effects": [
+            {
+              "effect": "lock",
+              "condition": "",
+              "events": [
+                "app.record.edit.show"
+              ]
+            }
+          ]
+        },
+        {
+          "code": "memo",
+          "access": "CONTROL",
+          "effects": [
+            {
+              "effect": "warn",
+              "condition": "memo = \"\"",
+              "events": [
+                "app.record.edit.submit"
+              ]
+            }
+          ]
+        }
+      ],
+      "apis": [],
+      "existingFiles": [],
+      "dependsOn": [
+        "P1"
+      ],
+      "risks": []
+    },
+    "fields": [
+      {
+        "code": "ステータス",
+        "label": "ステータス",
+        "type": "STATUS"
+      },
+      {
+        "code": "amount",
+        "label": "金額",
+        "type": "NUMBER"
+      },
+      {
+        "code": "approver_note",
+        "label": "承認メモ",
+        "type": "SINGLE_LINE_TEXT",
+        "proposed": true,
+        "temporaryId": "NEW_FIELD_1"
+      },
+      {
+        "code": "memo",
+        "label": "備考",
+        "type": "MULTI_LINE_TEXT"
+      }
+    ],
+    "dictionary": {
+      "fieldCodes": [
+        "amount",
+        "approver_note",
+        "category",
+        "customer",
+        "item_name",
+        "items",
+        "kokyaku_lookup",
+        "kokyaku_name",
+        "memo",
+        "qty",
+        "tantou",
+        "title_auto",
+        "total",
+        "ステータス",
+        "レコード番号"
+      ],
+      "statuses": [
+        "作成中",
+        "承認待ち",
+        "承認済"
+      ],
+      "fieldTypes": {
+        "ステータス": "STATUS",
+        "amount": "NUMBER",
+        "approver_note": "SINGLE_LINE_TEXT",
+        "memo": "MULTI_LINE_TEXT"
+      }
+    },
+    "existingFile": null,
+    "otherFiles": [
+      {
+        "name": "common.js",
+        "target": "desktop",
+        "events": [],
+        "fields": []
+      },
+      {
+        "name": "tantou.js",
+        "target": "desktop",
+        "events": [
+          "app.record.edit.show"
+        ],
+        "fields": [
+          {
+            "code": "tantou",
+            "access": [
+              "READ"
+            ]
+          }
+        ]
+      }
+    ],
+    "planned": {
+      "statuses": [],
+      "fields": [
+        {
+          "code": "approver_note",
+          "label": "承認メモ",
+          "type": "SINGLE_LINE_TEXT",
+          "stepId": "P1"
+        }
+      ]
+    },
+    "constraints": {
+      "style": "即時関数 (function () { 'use strict'; … })(); で包む。ハンドラは必ず return event。ライブラリは使わない。フィールドコード・ステータス名は dictionary の表記のまま。dictionary に無い名前は書けない。ただし planned にある名前（計画で新設するステータス・フィールド）は、その手順（stepId）が反映される前提で書ける",
+      "platform": [
+        "desktop"
+      ],
+      "noNetwork": true,
+      "noSecrets": true,
+      "allowedEvents": [
+        "app.record.edit.show",
+        "app.record.edit.submit"
+      ],
+      "allowedFields": [
+        "ステータス",
+        "amount",
+        "approver_note",
+        "memo"
+      ],
+      "allowedApis": [],
+      "patchOnly": false,
+      "spaces": []
+    },
+    "verification": {
+      "requirementIds": [
+        {
+          "id": "C1",
+          "kind": "customization",
+          "text": "承認済みでは金額と承認メモを編集不可にし、備考が空なら保存のときに確認する（保存は止めない）"
+        },
+        {
+          "id": "P1",
+          "kind": "step",
+          "text": "承認メモ（文字列 1 行）を追加"
+        }
+      ],
+      "requiredEffects": [
+        {
+          "requirementId": "C1",
+          "requirementIds": [
+            "C1"
+          ],
+          "field": "amount",
+          "effect": "lock",
+          "events": [
+            "app.record.edit.show"
+          ],
+          "condition": "ステータス in (\"承認済\")"
+        },
+        {
+          "requirementId": "C1",
+          "requirementIds": [
+            "C1"
+          ],
+          "field": "approver_note",
+          "effect": "lock",
+          "events": [
+            "app.record.edit.show"
+          ],
+          "condition": "ステータス in (\"承認済\")"
+        },
+        {
+          "requirementId": "C1",
+          "requirementIds": [
+            "C1"
+          ],
+          "field": "memo",
+          "effect": "warn",
+          "events": [
+            "app.record.edit.submit"
+          ],
+          "condition": "memo = \"\""
+        }
+      ],
+      "relatedFiles": [
+        {
+          "name": "tantou.js",
+          "target": "desktop",
+          "text": "(function () {\n  'use strict';\n  kintone.events.on(['app.record.edit.show'], function (event) {\n    var name = event.record['tantou'].value;\n    if (!name) console.log('担当が未入力です');\n    return event;\n  });\n})();"
+        }
+      ],
+      "relatedOmitted": [
+        {
+          "name": "luxon.min.js",
+          "target": "desktop",
+          "reason": "url",
+          "events": []
+        },
+        {
+          "name": "list.js",
+          "target": "desktop",
+          "reason": "limit",
+          "events": [
+            "app.record.index.show"
+          ]
+        },
+        {
+          "name": "common.js",
+          "target": "desktop",
+          "reason": "other",
+          "events": []
+        }
+      ],
+      "appFields": [
+        {
+          "code": "レコード番号",
+          "type": "RECORD_NUMBER",
+          "label": "レコード番号",
+          "readOnly": true
+        },
+        {
+          "code": "ステータス",
+          "type": "STATUS",
+          "label": "ステータス",
+          "readOnly": true
+        },
+        {
+          "code": "amount",
+          "type": "NUMBER",
+          "label": "金額"
+        },
+        {
+          "code": "memo",
+          "type": "MULTI_LINE_TEXT",
+          "label": "備考"
+        },
+        {
+          "code": "tantou",
+          "type": "SINGLE_LINE_TEXT",
+          "label": "担当"
+        },
+        {
+          "code": "customer",
+          "type": "SINGLE_LINE_TEXT",
+          "label": "顧客名"
+        },
+        {
+          "code": "category",
+          "type": "DROP_DOWN",
+          "label": "区分",
+          "options": [
+            "新規",
+            "更新",
+            "解約"
+          ]
+        },
+        {
+          "code": "total",
+          "type": "CALC",
+          "label": "合計",
+          "readOnly": true
+        },
+        {
+          "code": "kokyaku_lookup",
+          "type": "SINGLE_LINE_TEXT",
+          "label": "顧客コード"
+        },
+        {
+          "code": "kokyaku_name",
+          "type": "SINGLE_LINE_TEXT",
+          "label": "顧客名（ルックアップ）",
+          "readOnly": true
+        },
+        {
+          "code": "title_auto",
+          "type": "SINGLE_LINE_TEXT",
+          "label": "件名（自動計算）",
+          "readOnly": true
+        },
+        {
+          "code": "items",
+          "type": "SUBTABLE",
+          "label": "明細"
+        },
+        {
+          "code": "item_name",
+          "type": "SINGLE_LINE_TEXT",
+          "label": "品名",
+          "subtable": "items"
+        },
+        {
+          "code": "qty",
+          "type": "NUMBER",
+          "label": "数量",
+          "subtable": "items"
+        },
+        {
+          "code": "approver_note",
+          "type": "SINGLE_LINE_TEXT",
+          "label": "承認メモ",
+          "planned": true
+        }
+      ]
+    },
+    "size": null
+  }
+}

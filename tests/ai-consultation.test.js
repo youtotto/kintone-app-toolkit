@@ -43,9 +43,11 @@ const MOBILE_NEW = "(function () {\n  'use strict';\n  kintone.events.on('mobile
 const FILES = [{ name: 'fieldOnOff.js', target: 'desktop', kind: 'js', text: FIELD_ON_OFF }, { name: 'mobileLock.js', target: 'mobile', kind: 'js', text: MOBILE_LOCK }];
 function buildInputs() {
   const data = FX.makeData();
+  //   §0c.8（2026-10-08）: URL 指定の ext.js は既知のライブラリの配布元（jsDelivr の /npm/）に置く。それ以外の URL は業務の JavaScript かもしれないので
+  //   動作テストでは「イベントが分からない」（events null）になり、その platform の必須の効果を確かめられない（この試験の主題ではない）
   data.customize = {
     scope: 'ALL',
-    desktop: { js: [{ type: 'URL', url: 'https://example.com/lib/ext.js' }, { type: 'FILE', file: { contentType: 'text/javascript', fileKey: 'dl:fieldOnOff', name: 'fieldOnOff.js', size: '290' } }], css: [{ type: 'FILE', file: { contentType: 'text/css', fileKey: 'dl:style', name: 'style.css', size: '10' } }] },
+    desktop: { js: [{ type: 'URL', url: 'https://cdn.jsdelivr.net/npm/ext-lib@1.0.0/ext.js' }, { type: 'FILE', file: { contentType: 'text/javascript', fileKey: 'dl:fieldOnOff', name: 'fieldOnOff.js', size: '290' } }], css: [{ type: 'FILE', file: { contentType: 'text/css', fileKey: 'dl:style', name: 'style.css', size: '10' } }] },
     mobile: { js: [{ type: 'FILE', file: { contentType: 'text/javascript', fileKey: 'dl:mlock', name: 'mobileLock.js', size: '120' } }], css: [] },
     revision: '12',
   };
@@ -62,21 +64,25 @@ const PATCH = { baseHash: KTScan.hashText(FIELD_ON_OFF), operations: [{ type: 'I
 const spec = (o) => ({ name: null, from: null, to: null, filterCond: null, assignees: [], targets: [], events: [], timingField: null, daysLater: null, time: null, fields: [], sort: null, sourceApp: null, keyField: null, mappings: [], fieldType: null, required: null, options: [], destApp: null, accessibility: null, entities: [], customizationId: null, ...o });
 const mkStep = (id, actionType, targetKind, targetRef, sp, extra = {}) => ({ id, actionType, targetKind, targetRef, targetExists: null, title: `${id} ${actionType}`, proposal: { summary: '', details: [] }, spec: spec(sp), dependsOn: [], reason: '', evidenceIds: [], confidence: 'INFERRED', alternativeId: null, validation: { status: 'ok', issues: [] }, execution: { mode: 'PLAN_ONLY', supported: false, reason: 'x' }, ...extra });
 const META = { requestId: 'pl-1', gateway: { product: 'toolkit', feature: 'change-planner', promptVersion: '1', contextVersion: 'planner-1' }, normalization: { warnings: [] }, ai: { model: 'm' }, usage: { usedThisMonth: 1, monthlyLimit: 20 } };
-const CUST = (o = {}) => ({ customizationId: 'C1', requirement: '承認済では金額を編集不可', whyStandardInsufficient: 'フィールドのアクセス権はステータスで変えられない', strategy: 'EXTEND_EXISTING_JS', platform: ['desktop'], events: ['app.record.edit.show'], fields: [{ code: 'amount', access: 'CONTROL' }], apis: [], existingFiles: [{ name: 'fieldOnOff.js', target: 'desktop', reason: '同じフィールドを制御' }], risks: [], questions: [], dependsOn: [], evidenceIds: [], confidence: 'INFERRED', ...o });
+const CUST = (o = {}) => ({ customizationId: 'C1', requirement: '承認済では金額を編集不可', whyStandardInsufficient: 'フィールドのアクセス権はステータスで変えられない', strategy: 'EXTEND_EXISTING_JS', platform: ['desktop'], events: ['app.record.edit.show'], fields: [{ code: 'amount', access: 'CONTROL', effects: ['lock'] }], apis: [], existingFiles: [{ name: 'fieldOnOff.js', target: 'desktop', reason: '同じフィールドを制御' }], risks: [], questions: [], dependsOn: [], evidenceIds: [], confidence: 'INFERRED', ...o });
 const planOf = ({ customizations, goal, requestId = 'pl-1', steps = null }) => ({ ok: true, contractVersion: '2.1', meta: { ...META, requestId }, plan: { goal, solution: 'CUSTOMIZATION', assessment: { summary: 'このJSはすでに金額フィールドを制御しています。新規JSを追加せず、fieldOnOff.jsへ処理を統合する案が適切です。', usableExistingFields: [], usableExistingSettings: [], missingCapabilities: [], uncertainties: [] }, relevantFields: [], proposedFields: [], steps: steps || customizations.map((c, i) => mkStep(`C${i + 1}`, 'CUSTOMIZATION_REQUIRED', 'JS', (c.existingFiles || [])[0]?.name || '', { customizationId: c.customizationId }, { id: c.customizationId, title: c.requirement, solution: 'CUSTOMIZATION' })), customizations, alternatives: [], impact: [], questions: [], unknowns: [], planConfidence: 'INFERRED' } });
 const PLAN_REPLACE = planOf({ customizations: [CUST()], goal: '承認済みになったら金額を編集できなくしたい' });
 const PLAN_BOTH = planOf({ customizations: [CUST(), CUST({ customizationId: 'C2', requirement: 'モバイルでも承認済では金額を編集不可', strategy: 'NEW_JS_FILE', platform: ['mobile'], events: ['mobile.app.record.edit.show'], existingFiles: [] })], goal: '承認済みになったら金額を編集できなくしたい', requestId: 'pl-2' });
 const PLAN_MOBILE_NEW = planOf({ customizations: [CUST({ customizationId: 'C1', requirement: 'モバイルで承認済では金額を編集不可', strategy: 'NEW_JS_FILE', platform: ['mobile'], events: ['mobile.app.record.edit.show'], existingFiles: [] })], goal: 'モバイルでも承認済みでは金額を編集不可にしたい' });
-const PLAN_EXT = planOf({ customizations: [CUST({ existingFiles: [{ name: 'ext.js', target: 'desktop', reason: '' }], fields: [{ code: 'owner', access: 'CONTROL' }] })], goal: '承認済みでは担当者を編集不可にしたい' });
-const PLAN_NEW_DESKTOP = planOf({ customizations: [CUST({ requirement: '金額が100万円以上なら警告', strategy: 'NEW_JS_FILE', platform: ['desktop'], events: ['app.record.create.change.amount', 'app.record.edit.change.amount'], existingFiles: [] })], goal: '100万円以上なら警告を表示したい' });
-const genResponse = (ctx, g) => ({ ok: true, contractVersion: '2.1', meta: { requestId: 'gen-1', usage: { usedThisMonth: 3, monthlyLimit: 20 }, normalization: { warnings: [] } }, generated: g });
+const PLAN_EXT = planOf({ customizations: [CUST({ existingFiles: [{ name: 'ext.js', target: 'desktop', reason: '' }], fields: [{ code: 'owner', access: 'CONTROL', effects: ['lock'] }] })], goal: '承認済みでは担当者を編集不可にしたい' });
+const PLAN_NEW_DESKTOP = planOf({ customizations: [CUST({ requirement: '金額が100万円以上なら警告', strategy: 'NEW_JS_FILE', platform: ['desktop'], events: ['app.record.create.change.amount', 'app.record.edit.change.amount'], existingFiles: [], fields: [{ code: 'amount', access: 'CONTROL', effects: ['warn'] }] })], goal: '100万円以上なら警告を表示したい' });
+// §0c.6（2026-10-08）: 従来の流れの登録は、接続先が必須の効果の確認に対応し（health の verification に requiredEffects）、生成工程の検証が合格したものだけ。
+//   この試験は登録の経路（upload・PUT・検証・戻す）を確かめるので、偽の生成工程は Toolkit が渡した必須の効果をそのまま「処理あり・動作テストで合格」で返す
+//   （効果の区別そのものの検証は tests/ai-flow-redesign.test.js の §D）
+const passVerification = (ctx) => { const re = (ctx && ctx.verification && ctx.verification.requiredEffects) || []; return re.length ? { version: '1', passed: true, machine: [], requiredEffects: re.map(x => ({ requirementId: x.requirementId, requirementIds: x.requirementIds, field: x.field, effect: x.effect, status: 'present' })), behavior: { status: 'passed', reason: null, cases: re.flatMap((x, i) => (x.events && x.events.length ? x.events : [null]).flatMap((ev, j) => (x.condition ? ['match', 'nomatch'] : ['match']).map(side => ({ id: `K${i + 1}-${j + 1}-${side}`, requirementIds: x.requirementIds, field: x.field, effect: x.effect, expect: side === 'match' ? x.effect : ({ lock: 'not-locked', warn: 'not-warned', 'block-save': 'save-allowed', 'set-value': 'value-unchanged', 'show-hide': 'show-hide' })[x.effect], side, ...(ev ? { event: ev } : {}), verdict: 'pass', observed: {}, message: '期待どおり' })))) }, repairs: { count: 0, reasons: [], stoppedBy: null }, unverified: ['実機での動作'] } : undefined; };
+const genResponse = (ctx, g) => ({ ok: true, contractVersion: '2.1', meta: { requestId: 'gen-1', usage: { usedThisMonth: 3, monthlyLimit: 20 }, normalization: { warnings: [] } }, generated: g, ...(passVerification(ctx) ? { verification: passVerification(ctx) } : {}) });
 const genFor = (ctx) => {
   const c = ctx.customization;
   if (c.strategy === 'EXTEND_EXISTING_JS') return { strategy: 'EXTEND_EXISTING_JS', targetFile: ctx.existingFile.name, summary: '承認済でも編集不可にする', code: PATCH.operations[0].content, patch: { ...PATCH, baseHash: ctx.existingFile.hash, operations: ctx.existingFile.name === 'ext.js' ? [{ type: 'INSERT_AFTER', anchor: "    event.record['owner'].disabled = true;", content: "    event.record['owner'].disabled = event.record['ステータス'].value === '承認済';" }] : PATCH.operations }, events: c.events, fields: c.fields, apis: [], assumptions: [], warnings: [] };
   if (c.platform.includes('mobile')) return { strategy: 'NEW_JS_FILE', targetFile: 'approved-lock-mobile.js', summary: 'モバイルの金額ロック', code: MOBILE_NEW, patch: null, events: ['mobile.app.record.edit.show'], fields: [{ code: 'amount', access: 'CONTROL' }], apis: [], assumptions: [], warnings: [] };
   return { strategy: 'NEW_JS_FILE', targetFile: 'amount-warning.js', summary: '金額の警告', code: NEW_JS, patch: null, events: c.events, fields: c.fields, apis: [], assumptions: [], warnings: [] };
 };
-const HEALTH = { ok: true, supportedContractVersions: ['2.0', '2.1'], entitlements: [{ product: 'toolkit', features: ['assistant-qa', 'change-planner', 'customization-generator'] }], registry: { toolkit: { 'assistant-qa': { implemented: true, promptVersions: ['1'] }, 'change-planner': { implemented: true, promptVersions: ['1'] }, 'customization-generator': { implemented: true, promptVersions: ['1'] } } }, usage: { monthlyLimit: 20, usedThisMonth: 1 } };
+const HEALTH = { ok: true, supportedContractVersions: ['2.0', '2.1'], entitlements: [{ product: 'toolkit', features: ['assistant-qa', 'change-planner', 'customization-generator'] }], registry: { toolkit: { 'assistant-qa': { implemented: true, promptVersions: ['1'] }, 'change-planner': { implemented: true, promptVersions: ['1'] }, 'customization-generator': { implemented: true, promptVersions: ['1'], verification: ['requirementId', 'requiredEffects', 'effectGroups', 'relatedOmitted', 'appFields', 'saveDialog', 'reasonCategory', 'caseSide', 'eventCases', 'loadFaithful', 'registrationCheck', 'emptyCase', 'hideCondition', 'registrationCounts', 'caseCoverage'] } } }, usage: { monthlyLimit: 20, usedThisMonth: 1 } };
 const makeStorage = () => { const m = new Map(); return { getItem: (k) => (m.has(k) ? m.get(k) : null), setItem: (k, v) => m.set(k, String(v)), removeItem: (k) => m.delete(k) }; };
 const tick = () => new Promise(r => setTimeout(r, 0));
 const ticks = async (n = 4) => { for (let i = 0; i < n; i++) await tick(); };
@@ -123,8 +129,8 @@ console.log('\n--- §44-1. JsConsultationSeed（KTContext.buildConsultationSeed�
   assert(seed.dependencies.some(d => d.targetType === 'FIELD' && d.targetId === 'amount'), 'deps の edge（関連する依存の事実）');
   const mob = seedFor('mobileLock.js', 'mobile', { text: MOBILE_LOCK });
   assert(mob.platform === 'mobile' && mob.sourceId === 'mobile:js:mobileLock.js' && mob.analysis.fields.CONTROL.includes('owner') && mob.analysis.events.join() === 'mobile.app.record.edit.show', 'mobile の FILE');
-  const url = seedFor('ext.js', 'desktop', { url: 'https://example.com/lib/ext.js' });
-  assert(url.customizationType === 'URL' && url.url === 'https://example.com/lib/ext.js' && url.external === true && url.source.available === false && url.source.hash === null && url.analysis.analyzed === false, 'URL（外部）: 本文なし・external');
+  const url = seedFor('ext.js', 'desktop', { url: 'https://cdn.jsdelivr.net/npm/ext-lib@1.0.0/ext.js' });
+  assert(url.customizationType === 'URL' && url.url === 'https://cdn.jsdelivr.net/npm/ext-lib@1.0.0/ext.js' && url.external === true && url.source.available === false && url.source.hash === null && url.analysis.analyzed === false, 'URL（外部）: 本文なし・external');
   const noText = seedFor('fieldOnOff.js', 'desktop');
   assert(noText.source.available && noText.analysis.events.length === 2, '本文を渡さなくても Scanner の結果に本文があればそれを使う');
   const sub = KTContext.subjectFromSeed(seed);
@@ -302,7 +308,7 @@ console.log('\n--- 新規 JS（desktop）の登録 / mobile（desktop を変え�
   await ackAll(m);
   await clickPane(m, 'kt-ai-jsreg-go');
   await ticks(10);
-  assert(m.panel.jsExecState().execution.status === 'DONE' && jsNames(m, 'desktop').join() === 'https://example.com/lib/ext.js,fieldOnOff.js,amount-warning.js' && jsNames(m, 'mobile').join() === 'mobileLock.js', '§48 desktop JS 2 → 3（URL と既存を保持・mobile は不変）');
+  assert(m.panel.jsExecState().execution.status === 'DONE' && jsNames(m, 'desktop').join() === 'https://cdn.jsdelivr.net/npm/ext-lib@1.0.0/ext.js,fieldOnOff.js,amount-warning.js' && jsNames(m, 'mobile').join() === 'mobileLock.js', '§48 desktop JS 2 → 3（URL と既存を保持・mobile は不変）');
 }
 {
   const m = mount({ planResponse: PLAN_MOBILE_NEW });
@@ -326,7 +332,7 @@ console.log('\n--- 新規 JS（desktop）の登録 / mobile（desktop を変え�
   // URL（外部）: 本文なし → JS_SOURCE_UNAVAILABLE
   const m = mount({ planResponse: PLAN_EXT });
   await ticks();
-  m.panel.consult(seedFor('ext.js', 'desktop', { url: 'https://example.com/lib/ext.js' }));
+  m.panel.consult(seedFor('ext.js', 'desktop', { url: 'https://cdn.jsdelivr.net/npm/ext-lib@1.0.0/ext.js' }));
   assert(/URL 指定/.test(m.chat()) && /取得できません（外部 URL/.test(m.$('kt-ai-subject-info').innerHTML), '外部 URL の相談: 左は URL 指定の印、本文が無い旨は右の「変更内容」の相談カード');
   await m.panel.send('承認済みでは担当者を編集不可にしたい');
   await confirmSpec(m);
@@ -338,7 +344,7 @@ console.log('\n--- 新規 JS（desktop）の登録 / mobile（desktop を変え�
   // URL（本文は読める想定）: 生成はできるが登録は EXTERNAL_JS_NOT_WRITABLE
   const m2 = mount({ planResponse: PLAN_EXT });
   await ticks();
-  m2.panel.consult(seedFor('ext.js', 'desktop', { url: 'https://example.com/lib/ext.js', text: EXT_SRC }));
+  m2.panel.consult(seedFor('ext.js', 'desktop', { url: 'https://cdn.jsdelivr.net/npm/ext-lib@1.0.0/ext.js', text: EXT_SRC }));
   await m2.panel.send('承認済みでは担当者を編集不可にしたい');
   await confirmSpec(m2);
   await clickChat(m2, 'generate', { cid: 'C1' });
