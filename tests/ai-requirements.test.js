@@ -155,11 +155,12 @@ await section(async () => {
   const un = reqs.filter(e => e.disposition === 'unresolved' && e.origin === 'toolkit');
   assert(un.length === 1 && /明細の小計の合計と金額がずれていたら/.test(un[0].behavior), `F2: 計画の AI が扱いを示さなかった文は、黙って捨てずに未解決の要件として台帳に残す: ${JSON.stringify(un.map(e => e.behavior))}`);
   //   2026-10-06 の会話の知らせ（「変更案に入っていない可能性がある指示があります：「…」」・「入れる場合は、そのように伝えてください」）は、C-1 第 3 段で
-  //   要件の変化の知らせと一緒に削除された。置き換え先の最終案のカードにも、この文を「入っていない」と知らせる行が無い（「入れた指示」に発言の全文が出るだけ）。
-  //   守り手が無いので期待は消さずに残す（報告済み）。会話の知らせか、最終案のカードのどちらかに出れば合格
+  //   要件の変化の知らせと一緒に削除し、最終案のカードに「変更案に入っていない可能性がある指示」として出す（承認は止めない）。
+  //   会話の知らせか、最終案のカードのどちらかに出れば合格（「入れた指示」の行は除いて確かめる）
   const fin = finalText(x).replace(/入れた指示: [^\n]*/g, '');
   const told = c.messages().some(m => /変更案に入っていない可能性がある指示があります：「[^」]*明細の小計の合計と金額がずれていたら/.test(m.text || '') && !KTAiChatUi.isHiddenMessage(m)) || (/明細の小計の合計と金額がずれていたら/.test(fin) && /入っていない|扱いが決まっていない|未解決/.test(fin));
   assert(told, `F2: 扱いが示されなかった文を利用者に知らせる（会話の知らせ、または最終案のカード）: ${fin.slice(0, 200)}`);
+  assert(/変更案に入っていない可能性がある指示/.test(fin) && /明細の小計の合計と金額がずれていたら/.test(fin) && x.c.activePlan().final.approvable === true, `F2: 最終案のカードで「変更案に入っていない可能性がある指示」として知らせる（承認は止めない）: ${fin.slice(0, 300)}`);
   assert(c.metrics().unresolvedClauses === un0 + 1, 'F2: 計測（扱いが示されなかった文）');
 });
 await section(async () => {
@@ -229,7 +230,7 @@ await section(async () => {
   const fin = finalText(x);
   const cannotLine = (fin.match(/実現できない点・対応範囲[^\n]*/) || [''])[0];
   assert(/計画では対応できないとされた要件/.test(cannotLine) && /CSV の読み込み/.test(cannotLine) && !/R\d/.test(fin) && !x.c.activePlan().final.approvable === false, `F7: 対応できないことがある要件を知らせる（最終案のカードの「実現できない点」・要件の番号なし）: ${cannotLine}`);
-  //   理由（計画の AI の note）は、従来の会話の知らせには出ていたが、最終案のカードの「実現できない点」には出ない（文は発言の引用だけ）。守り手が無いので期待は残す（報告済み）
+  //   理由（計画の AI の note）は、最終案のカードの「実現できない点」に添える（以前は会話の知らせに出ていた）
   assert(/CSV の読み込みでは JavaScript が動かないため/.test(cannotLine), `F7: 対応できない理由を添える（理由つき）: ${cannotLine}`);
   // 対応できないことが無い要件の変化は出さない（chatHtml も数えない）
   const k = makeConv([{ plan: planWith([]) }, { plan: planWith([]), turn: { reply: 'r', requirementOps: [OP({ behavior: '画面に警告を出す', sourceQuotes: [goal] })], utteranceCoverage: [{ quote: goal, as: 'requirement', refs: [], note: '' }] } }]);

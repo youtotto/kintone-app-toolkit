@@ -91,7 +91,7 @@ const genFor = (ctx) => {
   return { strategy: 'NEW_JS_FILE', targetFile: 'amount-warning.js', summary: '金額の警告', code: NEW_JS, patch: null, events: c.events, fields: c.fields, apis: [], assumptions: [], warnings: [] };
 };
 //   C-1 第 3 段（2026-10-08）: 接続先は仮案に対応した形（assistant-qa の conversation に proposal）。相談・依頼は仮案 → 採用 → 計画 → 最終案（生成と検証を含む）→ 承認 → 登録
-const HEALTH = { ok: true, supportedContractVersions: ['2.0', '2.1'], entitlements: [{ product: 'toolkit', features: ['assistant-qa', 'change-planner', 'customization-generator'] }], registry: { toolkit: { 'assistant-qa': { implemented: true, promptVersions: ['1'], conversation: ['requirements', 'proposal'] }, 'change-planner': { implemented: true, promptVersions: ['1'] }, 'customization-generator': { implemented: true, promptVersions: ['1'], verification: ['requirementId', 'requiredEffects', 'effectGroups', 'relatedOmitted', 'appFields', 'saveDialog', 'reasonCategory', 'caseSide', 'eventCases', 'loadFaithful', 'registrationCheck', 'emptyCase', 'hideCondition', 'registrationCounts', 'caseCoverage'] } } }, usage: { monthlyLimit: 20, usedThisMonth: 1 } };
+const HEALTH = { ok: true, supportedContractVersions: ['2.0', '2.1'], entitlements: [{ product: 'toolkit', features: ['assistant-qa', 'change-planner', 'customization-generator'] }], registry: { toolkit: { 'assistant-qa': { implemented: true, promptVersions: ['1'], conversation: ['requirements', 'proposal'] }, 'change-planner': { implemented: true, promptVersions: ['1'] }, 'customization-generator': { implemented: true, promptVersions: ['1'], verification: ['requirementId', 'requiredEffects', 'effectGroups', 'relatedOmitted', 'appFields', 'saveDialog', 'reasonCategory', 'caseSide', 'eventCases', 'loadFaithful', 'registrationCheck', 'emptyCase', 'hideCondition', 'registrationCounts', 'caseCoverage', 'cancelCheck', 'limitCode', 'scopeList'] } } }, usage: { monthlyLimit: 20, usedThisMonth: 1 } };
 /** 仮案の偽の応答（決めることの無い仮案。依頼の文を実現する動作にする） */
 const proposalFor = (utterance, requestId = 'pp-1') => KIT.normalized({ reply: 'JavaScript で実現できます。', intent: 'propose', proposal: { behaviors: [KIT.B(utterance, 'user')], assumptions: [], decisions: [], approach: { standard: [], js: ['JavaScript で制御する'] }, cannot: [] }, turn: { ops: [], answers: [], requirementOps: [] } }, requestId);
 const makeStorage = () => { const m = new Map(); return { getItem: (k) => (m.has(k) ? m.get(k) : null), setItem: (k, v) => m.set(k, String(v)), removeItem: (k) => m.delete(k) }; };
@@ -343,9 +343,10 @@ console.log('\n--- 新規 JS（desktop）の登録 / mobile（desktop を変え�
   const { v: v2 } = await adoptScreen(m2, '承認済みでは担当者を編集不可にしたい');
   const e2 = m2.panel.generated('C1');
   assert(e2 && e2.existingSource?.from === 'url' && e2.existingSource.external === true, 'URL の JS への patch: 生成はできる（統合先の本文は URL から・外部）');
-  //   守り手の無い期待（担当 R へ報告）: 以前はコードのカードで「Toolkit からは書き換えられない」と伝え、［新規 JS として設計し直す］を出し、右の登録ボタンを出さなかった。
-  //   最終案の流れでは、書き換えられない外部のファイルへの変更でも最終案が承認でき（approvable）、カードにも書き換えられないことが出ない（登録の準備で初めて止まる）。期待は弱めずに残す
-  assert(v2.final && (v2.final.approvable === false || /書き換えられません/.test(m2.chat())), 'URL の JS への変更: 最終案のカードで「Toolkit からは書き換えられない」と伝える（承認できる完成品として出さない）（本体に守り手が無い。担当 R へ報告）');
+  //   以前はコードのカードで「Toolkit からは書き換えられない」と伝え、［新規 JS として設計し直す］を出し、右の登録ボタンを出さなかった。
+  //   C-1 第 3 段: 最終案の流れでは、書き換えられない外部のファイルへの変更を最終案の時点で承認できない理由にし、カードに「書き換えられません」と出す
+  //   （登録の準備で初めて止めない）
+  assert(v2.final && v2.final.approvable === false && /書き換えられません/.test(m2.chat()), 'URL の JS への変更: 最終案のカードで「Toolkit からは書き換えられない」と伝え、承認できる完成品として出さない');
   await approveScreen(m2);
   await m2.panel.startJsRegister(v2);
   await ticks(6);

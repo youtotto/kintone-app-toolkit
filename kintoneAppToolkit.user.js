@@ -19213,6 +19213,10 @@
     //   §0c.10（2026-10-08）: existing は隔離環境で既存 JS との競合が観測されたとき（既存 JS の error で編集不可が取り消された・既存 JS が値を変えた・
     //   既存 JS が保存を止めて作った JavaScript の処理が動かなかった）。次の手は［計画を直すよう依頼する］（既存の JavaScript に統合する・役割分担を見直す）
     existing: { category: 'existing', text: '既存の JavaScript との競合を、模擬テストで観測しました（既存の JavaScript が同じ画面で編集の可否・値・エラー・保存を変えました）' },
+    //   C-1 第 3 段（2026-10-08）: 既存 JS の編集不可を、作った JavaScript の警告（error）が取り消さないかを確かめられない（既存 JS の編集不可の条件が、
+    //   隔離環境の代表条件のレコードで成り立たない。例: 承認済のときだけ編集不可）。取り消しを観測できないので合格にしない。
+    //   次の手は［計画を直すよう依頼する］。依頼の文は構造化した値（代表条件の details.files・details.file のファイル名）から作る（fixRequestOf）
+    'existing-lock-unverified': { category: 'existing', fix: 'revise', text: '既存の JavaScript の編集不可を、作った JavaScript の警告が取り消さないかを、模擬テストで確かめられません（既存の JavaScript が編集不可にする条件のレコードを、隔離環境で作れません）', next: '警告を変更・保存のイベントで出す形か、作る JavaScript を既存の JavaScript に統合する形に計画を直します。最終案のカードの［計画を直すよう依頼する］で依頼できます（自動では依頼しません。修復は依頼していません）。', readiness: '既存の JavaScript の編集不可を、作った JavaScript の警告が取り消さないかを確かめられないため、まだ反映できません（計画を直します。作った JavaScript の誤りとは判定していません）。' },
     //   §0c.10: 既存 JS の handler が隔離環境で動かせない（handler の中の例外・unsupported・通信）。計画を直しても解けないので、操作を出さず「対応できない範囲」
     'existing-unrunnable': { category: 'existing', unfixable: true, text: '既存の JavaScript のこの画面の処理（handler）が、隔離環境で動かせない処理（例外・通信・隔離環境に無い機能）を含んでいます', readiness: '既存の JavaScript と一緒の動きを模擬テストで確かめられないため、まだ反映できません（対応できない範囲です。計画を直しても解けないため、依頼の操作は出していません。作った JavaScript の誤りとは判定していません）。' },
     //   旧い名前（handler の中の例外）。existing-unrunnable と同じく計画を直しても解けない
@@ -19319,7 +19323,12 @@
    *   caseCoverage（warn-unlocked を合う・合わないの両方・match-empty で数えないのは確かめられない既存 JS だけ・set-value の match-empty の廃止・空の値・複数の値・別の効果の条件）。
    *   どれかが欠ける Gateway は、Toolkit の判定（理由の分け方・表示の向き）と食い違うので新しい形として受け入れない
    */
-  const KT_EFFECT_FEATURES = Object.freeze(['requiredEffects', 'effectGroups', 'relatedOmitted', 'appFields', 'saveDialog', 'reasonCategory', 'caseSide', 'eventCases', 'loadFaithful', 'registrationCheck', 'emptyCase', 'hideCondition', 'registrationCounts', 'caseCoverage']);
+  //   C-1 第 3 段（2026-10-08）: cancelCheck（候補の error が既存 JS の編集不可を取り消したケースを候補に起因する fail にし、確かめられないときは
+  //   existing-lock-unverified を返す）と limitCode（coverage の kintone の制約の符号）も印に加える（16 個）。Toolkit は error-cancels-other-js と
+  //   AI の申告の文を読む処理を削除したので、どちらかが欠ける Gateway は守り手が無い形になる。新しい形として受け入れない
+  //   C-1 第 4 段（2026-10-09）: scopeList（模擬テストの条件 behavior.conditions と確かめていない範囲 behavior.uncheckedScope を返す）も印に加える（17 個）。
+  //   Toolkit は固定の一覧を削除したので、返さない Gateway では実施した検査の条件を正しく表示できない
+  const KT_EFFECT_FEATURES = Object.freeze(['requiredEffects', 'effectGroups', 'relatedOmitted', 'appFields', 'saveDialog', 'reasonCategory', 'caseSide', 'eventCases', 'loadFaithful', 'registrationCheck', 'emptyCase', 'hideCondition', 'registrationCounts', 'caseCoverage', 'cancelCheck', 'limitCode', 'scopeList']);
   const ktEffectsCapable = (features) => Array.isArray(features) && KT_EFFECT_FEATURES.every(f => features.includes(f));
   /**
    * §0d.1（2026-10-08）: 生成工程が効果ごとの確かめ方（requiredEffects[].check・checkReason・events）を返すか（health の印 effectCheck）。
@@ -19328,22 +19337,10 @@
    */
   const ktEffectCheckCapable = (features) => ktEffectsCapable(features) && features.includes('effectCheck');
   /**
-   * 動作テストで確かめていない範囲（会話フローの再設計 §0c.10・§0c.11。2026-10-08）。最終案の詳細表示に「動作テストの条件」と一緒に出す。
-   *   契約 20（AI版 docs/contracts/20-customization-generator.md の「確かめない範囲」）の一覧と同じ内容にする（利用者に見せる言葉に直したもの）。
-   *   契約の一覧を変えたら、ここと tests/ai-flow-redesign.test.js の D47 を合わせる。key は契約の項目との対応を取るための内部の名前（画面には出さない）
+   * C-1 第 4 段（2026-10-09）: 模擬テストの条件と確かめていない範囲は、Toolkit で一覧を持たない（前の KT_BEHAVIOR_UNVERIFIED_SCOPE と固定の文は削除した）。
+   *   生成工程（Gateway）が返す verification.behavior.conditions と uncheckedScope（契約 20 の「確かめない範囲」と同じ文）をそのまま最終案の詳細表示に出す。
+   *   health の印 'scopeList' がある接続先だけ新しい形として受け入れる（KT_EFFECT_FEATURES）。返っていなければ「接続先から返っていません」と出し、古い固定の文は出さない
    */
-  const KT_BEHAVIOR_UNVERIFIED_SCOPE = Object.freeze([
-    { key: 'handler-branch', text: '利用者・日時・画面の URL・ブラウザの保存領域・画面の要素による、処理（handler）の中の動きの違い（読み込みのときの分岐で登録が消えた既存の JavaScript は「確かめられない」として止めます。別のアプリでだけ登録する既存の JavaScript も同じで、実機で登録しないかは確かめていません）' },
-    { key: 'library-on-load', text: '読み込みのときに既知のライブラリ（luxon・dayjs・SweetAlert2・kintone UI Component など）を使う既存の JavaScript（ライブラリの本文を渡していないため、登録が消えれば「確かめられない」、処理の中のライブラリの呼び出しは「隔離環境で動かせない」になります）' },
-    { key: 'url-js', text: 'URL で読み込む業務の JavaScript（本文を取得していません）。イベントを登録しないものとして扱うのは、既知の配布元（js.cybozu.com・cdnjs.cloudflare.com・code.jquery.com・ajax.googleapis.com）のライブラリだけです。npm で配布された業務の JavaScript（cdn.jsdelivr.net・unpkg.com など）は、イベントが分からないものとして止めます' },
-    { key: 'try-catch', text: '既存の JavaScript が、隔離環境に無い機能の失敗を try / catch で握りつぶした場合（登録が消えれば止め、残れば判定します）' },
-    { key: 'kintone-rules', text: 'kintone の規則のうち実機で確かめていないもの（作成画面のシステムのフィールドと空の値・変更のイベントをまたぐ編集不可の残り方・詳細から編集への切り替えでの処理の残り方・処理（handler）の中の kintone.app.record.get / set）' },
-    { key: 'change-across', text: '既存の JavaScript が、必須の動作のイベント以外の変更のイベントで、対象のフィールドを書き換える場合（模擬テストは 1 つの代表条件で 1 つのイベントだけを動かします）' },
-    { key: 'boundary-date', text: '整数のフィールドの境界に小数を使う書き方（境界のすぐ外と内側の値では見分けられません）・UTC の日付で今日を作る誤り（固定の時計が正午のため見えません）' },
-    { key: 'create-system-fields', text: '作成画面で $id・$revision（レコード ID・リビジョン）を確かめずに読む処理（作成画面のシステムのフィールドの扱いは実機で確かめていません）' },
-    { key: 'omitted-files', text: '模擬テストに送れなかった既存の JavaScript（本文の無いもの・件数や大きさの上限を超えたもの）の中身。既存の JavaScript が 5 本以上か合計 128 KiB を超えるときに止まる範囲' },
-    { key: 'ai-error-rate', text: '生成した AI がどの誤り方をどれくらいするか' },
-  ].map(x => Object.freeze(x)));
   const KTCodeReview = (() => {
     const REVIEW_VERSION = '1';
     const STATUS = Object.freeze({ OK: 'OK', REVIEW_REQUIRED: 'REVIEW_REQUIRED', BLOCKED: 'BLOCKED' });
@@ -21485,7 +21482,12 @@
         if (fk.length) o.fileKinds = fk;
         return Object.keys(o).length ? o : null;
       };
-      const behavior = bh ? { status: ['passed', 'failed', 'not-run'].includes(bh.status) ? bh.status : 'not-run', reason: typeof bh.reason === 'string' ? str(bh.reason, 40) : null, ...(typeof bh.reasonText === 'string' ? { reasonText: str(bh.reasonText) } : {}), ...(rawCases.length > KT_BEHAVIOR_CASES_MAX ? { truncated: true, totalCases: rawCases.length } : {}), cases: rawCases.slice(0, KT_BEHAVIOR_CASES_MAX).map(x => { const det = detailsOf(x.details); return { id: str(x.id, 40), requirementId: idsOf(x)[0] || '', requirementIds: idsOf(x), field: str(x.field, 200), effect: KT_EFFECTS.includes(x.effect) ? x.effect : null, expect: str(x.expect, 40), verdict: VERDICTS.includes(x.verdict) ? x.verdict : 'not-run', observed: x.observed ?? null, message: str(x.message), ...(typeof x.note === 'string' ? { note: str(x.note, 200) } : {}), ...(typeof x.reason === 'string' && x.reason ? { reason: str(x.reason, 40) } : {}), ...(typeof x.reasonCategory === 'string' && x.reasonCategory ? { reasonCategory: str(x.reasonCategory, 40) } : {}), ...(typeof x.cause === 'string' && x.cause ? { cause: str(x.cause, 40) } : {}), ...(typeof x.event === 'string' ? { event: str(x.event, 120) } : {}), ...(typeof x.condition === 'string' ? { condition: str(x.condition) } : {}), ...(x.side === 'match' || x.side === 'nomatch' ? { side: x.side } : {}), ...(typeof x.kind === 'string' && x.kind ? { kind: str(x.kind, 40) } : {}), ...(x.platform === 'desktop' || x.platform === 'mobile' ? { platform: x.platform } : {}), ...(det ? { details: det } : {}) }; }) } : null;
+      //   C-1 第 4 段（2026-10-09）: 模擬テストの条件（conditions）と確かめていない範囲（uncheckedScope）は、生成工程が返した文をそのまま持つ（Toolkit で一覧を作らない）。
+      //   要素は文字列か { text }（key などは画面に出さない）。uncheckedScope は behavior の中を優先し、無ければ verification の直下も受ける
+      const textsOf = (a) => [...new Set((Array.isArray(a) ? a : []).map(y => (typeof y === 'string' ? y : y && typeof y === 'object' && typeof y.text === 'string' ? y.text : '')).map(y => y.trim()).filter(Boolean).map(y => str(y, 600)))].slice(0, 30);
+      //   conditions が null（生成工程が隔離環境の応答を得ていない）なら conditionsNotRun の印だけを持つ（条件を推測して出さない）
+      const scopeOf = bh ? { ...(Array.isArray(bh.conditions) ? { conditions: textsOf(bh.conditions) } : bh.conditions === null ? { conditionsNotRun: true } : {}), ...(Array.isArray(bh.uncheckedScope) ? { uncheckedScope: textsOf(bh.uncheckedScope) } : Array.isArray(v.uncheckedScope) ? { uncheckedScope: textsOf(v.uncheckedScope) } : {}) } : {};
+      const behavior = bh ? { status: ['passed', 'failed', 'not-run'].includes(bh.status) ? bh.status : 'not-run', reason: typeof bh.reason === 'string' ? str(bh.reason, 40) : null, ...(typeof bh.reasonText === 'string' ? { reasonText: str(bh.reasonText) } : {}), ...scopeOf, ...(rawCases.length > KT_BEHAVIOR_CASES_MAX ? { truncated: true, totalCases: rawCases.length } : {}), cases: rawCases.slice(0, KT_BEHAVIOR_CASES_MAX).map(x => { const det = detailsOf(x.details); return { id: str(x.id, 40), requirementId: idsOf(x)[0] || '', requirementIds: idsOf(x), field: str(x.field, 200), effect: KT_EFFECTS.includes(x.effect) ? x.effect : null, expect: str(x.expect, 40), verdict: VERDICTS.includes(x.verdict) ? x.verdict : 'not-run', observed: x.observed ?? null, message: str(x.message), ...(typeof x.note === 'string' ? { note: str(x.note, 200) } : {}), ...(typeof x.reason === 'string' && x.reason ? { reason: str(x.reason, 40) } : {}), ...(typeof x.reasonCategory === 'string' && x.reasonCategory ? { reasonCategory: str(x.reasonCategory, 40) } : {}), ...(typeof x.cause === 'string' && x.cause ? { cause: str(x.cause, 40) } : {}), ...(typeof x.event === 'string' ? { event: str(x.event, 120) } : {}), ...(typeof x.condition === 'string' ? { condition: str(x.condition) } : {}), ...(x.side === 'match' || x.side === 'nomatch' ? { side: x.side } : {}), ...(typeof x.kind === 'string' && x.kind ? { kind: str(x.kind, 40) } : {}), ...(x.platform === 'desktop' || x.platform === 'mobile' ? { platform: x.platform } : {}), ...(det ? { details: det } : {}) }; }) } : null;
       return { version: str(v.version || '1', 8), candidateHash: hash, sameAsPrevious: v.sameAsPrevious === true, passed: v.passed === true, machine, repairs: { count: Number.isFinite(Number(rp.count)) ? Number(rp.count) : 0, reasons: (Array.isArray(rp.reasons) ? rp.reasons : []).filter(x => typeof x === 'string').slice(0, 10).map(x => str(x, 120)), stoppedBy: ['limit', 'budget', 'time', 'same-failure', 'error'].includes(rp.stoppedBy) ? rp.stoppedBy : null }, unverified: (Array.isArray(v.unverified) ? v.unverified : []).filter(x => typeof x === 'string').slice(0, 10).map(x => str(x)), ...(requiredEffects ? { requiredEffects } : {}), ...(behavior ? { behavior } : {}) };
     }
 
@@ -23289,6 +23291,15 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
     const TOPIC_RES_G = TOPICS.map(t => new RegExp(t.re.source, `g${t.re.flags.includes('i') ? 'i' : ''}`));
     const coreOf = (clause) => { let s = String(clause ?? ''); for (const re of TOPIC_RES_G) s = s.replace(re, ''); return s.replace(FILLER, ''); };
     const isPure = (clause) => coreOf(clause).length <= 1;
+    //   C-1 第 4 段（2026-10-09・K-1）: 決定済みの論点の答えの変更として扱える短さ（「やっぱり100万円以上は部長承認にして」の残りは「承認」）。
+    //   名前の変更などの依頼は残りが長い（「名前「待ち」」）ので答えの変更にしない
+    const isShortCore = (clause) => coreOf(clause).length <= 3;
+    /**
+     * C-1 第 4 段（2026-10-09・K-1）: 修正の依頼の文が、決定事項（論点 decTopics）の答えの言い直しか。依頼の論点がすべて決定事項の論点に入っているか、
+     *   決定事項の論点を含む節の残り（coreOf）が短いときだけ（新しい正規表現は足さない。既存の論点の語彙と coreOf を使う）。
+     *   それ以外（「部長承認待ちの名前は「部長決裁待ち」に変えてください」など、論点の語を含むだけの依頼）は決定事項を置き換えない
+     */
+    const restatesDecision = (text, decTopics) => { const dt = Array.isArray(decTopics) ? decTopics : []; return topicsOf(text).every(x => dt.includes(x)) || splitClauses(text).some(c => topicsOf(c).some(x => dt.includes(x)) && isShortCore(c)); };
     // 言い直しの比較は語尾をそろえてから（「PCだけ」と「PCだけです」は同じ答え）
     const sameAnswer = (a, b) => { const f = (s) => normText(s).replace(/[。．！!]+$/, '').replace(/(?:です|でいい(?:です)?|でよい(?:です)?|で大丈夫(?:です)?|でお願い(?:します)?|にして(?:ください)?|でした)$/, '').trim(); return f(a) === f(b); };
     // 「〜なら」「〜のとき」で終わる部分は、次の部分の条件（分けると条件の無い決定事項になる）
@@ -23383,7 +23394,10 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
             // 再確認を求められている決定事項に同じ答えを返したら、確認の回答（記録し直して計画に入れる）
             if (same && dec.status === 'reconfirm') res.updates.push({ clause, decisionId: dec.id, topics: tc.filter(x => (dec.topics || []).includes(x)), confirm: true });
             else if (same) { restated++; res.notes.push(clause); }
-            else if (CHANGE.test(clause) || isPure(clause)) res.updates.push({ clause, decisionId: dec.id, topics: tc.filter(x => (dec.topics || []).includes(x)) });
+            //   C-1 第 4 段（2026-10-09・K-1）: 変更の言い方（CHANGE）でも、答えの変更にするのは、その節の論点がすべて決定事項の論点に入っているときか、
+            //   論点の語と語尾を除いた残り（coreOf）が短いときだけ。「部長承認待ちの名前は「部長決裁待ち」に変えてください」は承認者の語を含むだけの
+            //   名前の変更の依頼（ステータスの論点もあり、残りに「名前」が残る）なので、決定事項を書き換えず計画の修正の依頼として扱う（notes）
+            else if ((CHANGE.test(clause) || isPure(clause)) && (tc.every(x => (dec.topics || []).includes(x)) || isShortCore(clause))) res.updates.push({ clause, decisionId: dec.id, topics: tc.filter(x => (dec.topics || []).includes(x)) });
             else res.notes.push(clause);
             continue;
           }
@@ -23807,7 +23821,7 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
       }
       return out;
     }
-    return { TOPICS, AI_TOPICS: Object.freeze([...TOPICS.map(t => t.key), 'other']), labelOf, canonTopic, topicsOf, questionTopics, topicKey, splitClauses, interpret, isPure, isChange: (s) => CHANGE.test(String(s ?? '')), sameAnswer, createLedger, touch, syncQuestions, sameQuestionText, sameAsDecided, recordAnswer, settleCovered, pendingAnswers, decisionsForContext, decisionIdOf, platformValueOf, isDecided, questionList, MAX_DECISIONS, MAX_ANSWER_CHARS,
+    return { TOPICS, AI_TOPICS: Object.freeze([...TOPICS.map(t => t.key), 'other']), labelOf, canonTopic, topicsOf, questionTopics, topicKey, splitClauses, interpret, isPure, isChange: (s) => CHANGE.test(String(s ?? '')), restatesDecision, sameAnswer, createLedger, touch, syncQuestions, sameQuestionText, sameAsDecided, recordAnswer, settleCovered, pendingAnswers, decisionsForContext, decisionIdOf, platformValueOf, isDecided, questionList, MAX_DECISIONS, MAX_ANSWER_CHARS,
       // 2026-10-05 第 3 段: 要件・はい / いいえの形の答えか
       isYesNo: (s) => YESNO.test(String(s ?? '').trim()), applyRequirementOps, uncoveredClauses, addUnresolvedRequirement, requirementsForContext, requirementsOf, REQ_DECISIONS, REQ_DISPOSITIONS,
       isGreeting, MAX_REQUIREMENTS };
@@ -25119,6 +25133,8 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
           if (e.status !== 'answered' || e.kind === 'condition' || !et.length || !et.every(x => saidR.has(x))) continue;
           if (et.includes('platform') && !clearPlatform) continue;
           if (KTAiAnswers.sameAnswer(e.answer, t)) continue;
+          //   C-1 第 4 段（2026-10-09・K-1）: 論点の語を含むだけの依頼（名前の変更など）は決定事項を置き換えない（計画の修正の依頼としてだけ扱う）
+          if (!KTAiAnswers.restatesDecision(t, et)) continue;
           e.status = 'superseded'; e.supersededBy = { request: t, version: base.version }; KTAiAnswers.touch(lg, e);
         }
       }
@@ -25559,6 +25575,10 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
         /** 画面が渡すフィールドのラベル（{ code: label }。無ければ {}）。利用者に見せる文はコードではなくラベルで書く */
         const fieldLabels = () => { try { const m = typeof services.fieldLabels === 'function' ? services.fieldLabels() : null; return m && typeof m === 'object' ? m : {}; } catch (e) { return {}; } };
         const fieldName = (code) => { const l = fieldLabels()[code]; return `「${l || code}」`; };
+        /** C-1 第 4 段（2026-10-09・K-3）: イベントの platform（desktop / mobile。並びは PC → モバイル） */
+        const platformsOfEvents = (events) => { const s = new Set((Array.isArray(events) ? events : []).map(ev => KTJsCatalog.eventPlatform(ev))); return ['desktop', 'mobile'].filter(p => s.has(p)); };
+        /** customization の生成結果が動く platform（統合先のファイルの target、無ければ計画の platform。生成の relatedFiles の targets と同じ決め方） */
+        const platformsOfEntry = (e) => { const t = e && e.existingSource && e.existingSource.target; if (t === 'desktop' || t === 'mobile') return [t]; const p = e && e.customization && Array.isArray(e.customization.platform) ? e.customization.platform.filter(x => x === 'desktop' || x === 'mobile') : []; return p.length ? ['desktop', 'mobile'].filter(x => p.includes(x)) : ['desktop']; };
         /** §0c.8: 画面が渡すテーブルの列（{ 列のコード: テーブルのコード }。アプリ解析の構造。無ければ {}） */
         const tableColumns = () => { try { const m = typeof services.tableColumns === 'function' ? services.tableColumns() : null; return m && typeof m === 'object' ? m : {}; } catch (e) { return {}; } };
         /** 効果を「要件として必要な動作」の言い方で（要件未達の理由の文） */
@@ -25615,6 +25635,31 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
          */
         /** §0c.8: 次の手の文に添える操作の案内（最終案のカードのボタン。自動では送らない） */
         const FIX_HINT = Object.freeze({ revise: `最終案のカードの［${KT_FIX_LABEL.revise}］で依頼できます（自動では依頼しません）。`, regenerate: `最終案のカードの［${KT_FIX_LABEL.regenerate}］で、作り直しを依頼できます（自動では依頼しません）。` });
+        /** C-1 第 3 段: existing-lock-unverified の代表条件が示す既存 JS のファイル名（details.files・details.file。構造化した値だけを使う） */
+        const lockUnverifiedFilesOf = (er) => [...new Set((er ? er.notRun : []).flatMap(i => (i.cases || []).filter(y => y && y.verdict === 'not-run' && y.reason === 'existing-lock-unverified' && y.details).flatMap(y => [...(Array.isArray(y.details.files) ? y.details.files : []), ...(typeof y.details.file === 'string' ? [y.details.file] : [])])).map(String).filter(Boolean))];
+        /**
+         * C-1 第 4 段（2026-10-09・ledger U1）: existing-lock-unverified の既存の編集不可がある所が、候補自身の統合先（計画の EXTEND_EXISTING_JS の targetFile）だけか。
+         *   そうなら「既存の JavaScript に統合する」は解決にならない（生成工程は統合先の元の本文も既存 JS として数える）。そのときは、確かめられなかった代表条件の
+         *   フィールドとイベント（構造化した値）を返す（次の手を「警告の効果のイベントを変更・保存のイベントだけにする」と具体的に書くため）。当てはまらなければ null
+         */
+        const ownLockOnlyOf = (entry, er) => {
+          const files = lockUnverifiedFilesOf(er);
+          const strategy = (entry && entry.generated && entry.generated.strategy) || (entry && entry.customization && entry.customization.strategy) || null;
+          const own = strategy === 'EXTEND_EXISTING_JS' ? String((entry.generated && entry.generated.targetFile) || (entry.existingSource && entry.existingSource.name) || '') : '';
+          if (!files.length || !own || !files.every(n => n === own)) return null;
+          const byField = new Map();
+          for (const i of (er ? er.notRun : [])) for (const y of (i.cases || [])) {
+            if (!y || y.verdict !== 'not-run' || y.reason !== 'existing-lock-unverified') continue;
+            const f = y.field || i.field;
+            if (!byField.has(f)) byField.set(f, { field: f, effect: y.effect || i.effect || null, events: [] });
+            if (typeof y.event === 'string' && y.event && !byField.get(f).events.includes(y.event)) byField.get(f).events.push(y.event);
+          }
+          return { file: own, effects: [...byField.values()] };
+        };
+        /** ownLockOnlyOf の結果 → 「警告の効果のイベントを変更・保存のイベントだけにする」の具体的な文（フィールドのラベルと、外すイベント） */
+        //   画面の名前はイベント名の構造（mobile・index・create / edit / detail）から決める（利用者に内部のイベント名を見せない）
+        const screenJaOfEvent = (ev) => { const p = String(ev || '').split('.'); const mob = p[0] === 'mobile'; const q = mob ? p.slice(1) : p; const k = q[1] === 'record' ? (q[2] === 'index' && q[3] === 'edit' ? '一覧の編集' : q[2] === 'create' ? '作成画面' : q[2] === 'edit' ? '編集画面' : q[2] === 'detail' ? '詳細画面' : '画面') : '画面'; return (mob ? 'モバイルの' : '') + k; };
+        const ownLockFixText = (o) => `警告は画面を開いたときには出さず、値を変えたとき・保存するときだけにしてください（${o.effects.map(x => `${fieldName(x.field)}の警告${x.events.length ? `: ${[...new Set(x.events.map(screenJaOfEvent))].join('・')}を開いたときの警告をやめる` : ''}`).join('／')}）。既存の JavaScript（${o.file}）には、すでにこの JavaScript を統合しているため、統合する形にしても解決しません`;
         const verdictOf = (entry) => {
           const ver = entry.verification || null;
           const req = Array.isArray(entry.requiredEffects) ? entry.requiredEffects : [];
@@ -25683,12 +25728,16 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
               return { status: 'not-run', kind: 'environment', category: 'env', reasonKey: er.reason || null, behaviorNeeded: { labels, reasons }, reason: text, readiness: `${text}。`, next: KT_REASON_CATEGORY.env.next, details: [...details, ...reasons.map(r => `模擬テストが要る理由（生成工程の語）: ${r}`), ...[...new Set(er.notRun.flatMap(i => i.notRunReasons || []))].map(r => `模擬テストを実行できなかった理由（生成工程の語）: ${r}`)].slice(0, 10) };
             }
             const info = KT_REASON_CATEGORY[cat] || KT_REASON_CATEGORY.other;
-            const files = [...new Set((er.omittedHit || []).map(f => `「${f.url || f.name}」`))];
+            //   C-1 第 3 段: 既存 JS の編集不可の取り消しを確かめられない代表条件（existing-lock-unverified）のファイル名も出す
+            const files = [...new Set([...(er.omittedHit || []).map(f => `「${f.url || f.name}」`), ...lockUnverifiedFilesOf(er).map(n => `「${n}」`)])];
             //   §0c.7: 理由ごとの次の手があればそれを使う（other-platform は「条件の形」の区分だが、直し方は読み込まれる画面の見直し）
             const rInfo = ktBehaviorReasonOf(er.reason);
             //   §0c.8: 「計画を直す」区分（既存 JS・条件の形・件数・代表条件なし）は fix revise、候補が隔離環境で動かせない機能を使った（unsupported・unsupported-feature）は fix regenerate
             const fix = (rInfo && rInfo.fix) || info.fix || (er.notRun.some(i => (i.notRunReasons || []).some(r => (ktBehaviorReasonOf(r) || {}).fix === 'regenerate')) ? 'regenerate' : null);
-            return { status: 'not-run', kind: cat === 'env' ? 'environment' : cat, category: cat, reasonKey: er.reason || null, ...(fix ? { fix } : {}), reason: `模擬テストを実行できませんでした（${info.label}${er.reason ? `: ${envReasonJa(er.reason)}` : ''}${cat === 'existing' && files.length ? `。${files.slice(0, 3).join('・')}` : ''}）。作った JavaScript の誤りとは判定していません`, next: (rInfo && rInfo.next) || info.next, details: [...details, ...[...new Set(er.notRun.flatMap(i => i.notRunReasons || []))].map(r => `模擬テストを実行できなかった理由（生成工程の語）: ${r}`)].slice(0, 10) };
+            //   C-1 第 4 段（2026-10-09・ledger U1）: 既存の編集不可がある所が候補自身の統合先だけなら、「統合する」の案は出さない（効果のイベントで具体的に書く）
+            const ownLock = ownLockOnlyOf(entry, er);
+            const nextText = ownLock ? `${ownLockFixText(ownLock)}。${FIX_HINT.revise}` : (rInfo && rInfo.next) || info.next;
+            return { status: 'not-run', kind: cat === 'env' ? 'environment' : cat, category: cat, reasonKey: er.reason || null, ...(fix ? { fix } : {}), reason: `模擬テストを実行できませんでした（${info.label}${er.reason ? `: ${envReasonJa(er.reason)}` : ''}${cat === 'existing' && files.length ? `。${files.slice(0, 3).join('・')}` : ''}）。作った JavaScript の誤りとは判定していません`, next: nextText, details: [...details, ...[...new Set(er.notRun.flatMap(i => i.notRunReasons || []))].map(r => `模擬テストを実行できなかった理由（生成工程の語）: ${r}`)].slice(0, 10) };
           }
           //   §0c.8: 代表条件の無い効果（untested）は、確かめられるようになるのを待たずに計画を直す（fix revise）。解析できない・返らない（unknown・unchecked）・
           //   作り直しを依頼できる（fix regenerate。依頼の文が生成の入力に入る）
@@ -25716,10 +25765,11 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
           missing: '必要な動作を担当するフィールド（access・effects）・イベント・条件を見直してください',
           unresolved: 'customizations[].fields[] の effects（[{ effect, condition, events }]）を、その動作を担当するフィールド（access CONTROL か WRITE）に置き、condition は効果ごとに書いてください',
         });
-        const hintKeyOfReason = (r) => { const cat = ktBehaviorReasonCategory(r); return cat === 'existing' ? 'existing' : FIX_REASON_HINT[r] ? r : cat === 'condition' ? 'condition-unparsed' : cat === 'limit' ? 'limit' : 'scope'; };
+        //   C-1 第 3 段: existing-lock-unverified は専用の直し方（文はファイル名を入れて fixRequestOf が作る）
+        const hintKeyOfReason = (r) => { const cat = ktBehaviorReasonCategory(r); return r === 'existing-lock-unverified' ? r : cat === 'existing' ? 'existing' : FIX_REASON_HINT[r] ? r : cat === 'condition' ? 'condition-unparsed' : cat === 'limit' ? 'limit' : 'scope'; };
         const fixRequestOf = (entries) => {
           const cut = (s, n) => { const x = String(s ?? '').replace(/\s+/g, ' ').trim(); return x.length > n ? `${x.slice(0, n)}…` : x; };
-          const lines = [], hints = new Set(), regen = [], regenApis = new Set();
+          const lines = [], hints = new Set(), regen = [], regenApis = new Set(), lockFiles = new Set(), ownLocks = [];
           let revise = false;
           for (const [, e] of entries) {
             const vd = e && e.verdict;
@@ -25757,15 +25807,23 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
               const values = [...new Set(nonPass.flatMap(y => (y.details && Array.isArray(y.details.values) ? y.details.values : Array.isArray(y.values) ? y.values : Array.isArray(y.missingValues) ? y.missingValues : []).map(String)))].slice(0, 6);
               const msgs = [...new Set(nonPass.map(y => cut(y.message, 120)).filter(Boolean))].slice(0, 2);
               const cats = [...new Set(reasons.map(r => (KT_REASON_CATEGORY[ktBehaviorReasonCategory(r)] || KT_REASON_CATEGORY.other).label))];
-              lines.push(`${head}: ${fieldName(i.field)}を${KT_EFFECT_NEED_JA[i.effect] || i.effect}動作を確かめられません（${cats.join('・')}: ${reasons.join('・')}${values.length ? `・値 ${values.map(x => `「${x}」`).join('')}` : ''}）${msgs.length ? `。生成工程の記録: ${msgs.join('／')}` : ''}`);
+              lines.push(`${head}: ${fieldName(i.field)}を${KT_EFFECT_NEED_JA[i.effect] || i.effect}動作を確かめられません（${cats.join('・')}: ${[...new Set(reasons.map(envReasonJa))].join('・')}${values.length ? `・値 ${values.map(x => `「${x}」`).join('')}` : ''}）${msgs.length ? `。生成工程の記録: ${msgs.join('／')}` : ''}`);
               for (const r of reasons) hints.add(hintKeyOfReason(r));
             }
+            //   C-1 第 4 段（2026-10-09・ledger U1）: 既存の編集不可がある所が候補自身の統合先だけなら、統合の案は出さず効果のイベントで具体的に書く
+            const ownLock = ownLockOnlyOf(e, er);
+            if (ownLock) ownLocks.push(ownLock);
+            else for (const n of lockUnverifiedFilesOf(er)) lockFiles.add(n);
             const files = [...new Set((er.omittedHit || []).map(f => `「${f.url || f.name}」（${f.reason}）`))];
             if (files.length) { lines.push(`${head}: 同じ画面で動く既存の JavaScript を模擬テストに渡せませんでした: ${files.slice(0, 4).join('・')}`); hints.add('existing'); }
           }
           if (!revise && !regen.length) return null;
           const parts = [];
-          if (revise) parts.push(`最終案で、次の点を確かめられないため反映できません。計画を直してください。\n${lines.join('\n')}\n直し方: ${[...hints].map(k => FIX_REASON_HINT[k]).filter(Boolean).join('。')}。`);
+          //   C-1 第 3 段: existing-lock-unverified の直し方は、代表条件の details のファイル名（構造化した値）を入れて作る
+          //   C-1 第 4 段（2026-10-09・ledger U1）: 統合先だけに既存の編集不可がある候補（ownLocks）は「統合する」の案を出さず、効果のイベントで具体的に書く
+          const lockHint = () => [...ownLocks.map(ownLockFixText), ...(lockFiles.size || !ownLocks.length ? [`警告を変更・保存のイベントで出すか、既存の JavaScript${lockFiles.size ? `（${[...lockFiles].slice(0, 4).join('・')}）` : ''}に統合する形に計画を直してください`] : [])].join('。');
+          const hintText = (k) => (k === 'existing-lock-unverified' ? lockHint() : FIX_REASON_HINT[k]);
+          if (revise) parts.push(`最終案で、次の点を確かめられないため反映できません。計画を直してください。\n${lines.join('\n')}\n直し方: ${[...hints].map(hintText).filter(Boolean).join('。')}。`);
           if (regen.length) parts.push(`${revise ? '' : '最終案の JavaScript を作り直してください。'}作った JavaScript が、模擬テストの隔離環境で動かせない書き方・機能を使っていたため、必須の動作を確かめられませんでした。要件は変えずに、その書き方・機能（${regenApis.size ? [...regenApis].slice(0, 8).join('・') : 'BigInt・ブラウザの画面の API など'}）を使わない形で JavaScript を作り直してください。\n${regen.join('\n')}`);
           const kind = revise ? 'revise' : 'regenerate';
           return { kind, label: KT_FIX_LABEL[kind], text: parts.join('\n').slice(0, 1900), display: revise ? '最終案で確かめられなかった点を直すよう、計画の修正を依頼します' : '隔離環境で動かせない書き方を使わずに、JavaScript の作り直しを依頼します' };
@@ -25858,8 +25916,10 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
           //   同じ入力・同じ指摘で AI を呼ばなかった回（REPEAT_SAME_INPUT）は回数・履歴を進めない（履歴の指摘を空にすると、次の同じ入力で「検査は通っています」と案内してしまう）
           if (!r || !r.ok) return { ...base, generated: previous ? previous.generated : null, review: previous ? previous.review : null, existingSource: previous ? previous.existingSource : null, status: 'failed', failure: { reason: r?.reason || 'ERROR', message: r?.message || 'JavaScript を生成できませんでした。', ...(r && r.aiReason ? { aiReason: r.aiReason } : {}) }, attempts: r && r.reason === 'REPEAT_SAME_INPUT' ? ((previous && previous.attempts) || r.attempts || null) : nextAttempts(previous, { inputHash: r?.inputHash ?? null, blockers: [], at: now() }), candidateHash: null };
           const estimate = generationEstimate({ ctx: r.ctx || null, generated: r.generated || null });
+          //   C-1 第 4 段（2026-10-09・K-2 の残り）: 生成の使用量は、この送信の呼び出しの記録に付ける（attempts の累計は版をまたぐので使用量に使わない）
+          { const lastCall = timing.calls.length ? timing.calls[timing.calls.length - 1] : null; if (lastCall && lastCall.kind === 'generate' && estimate && estimate.measured !== false && (estimate.input != null || estimate.output != null)) lastCall.genEstimate = estimate; }
           const blockerCodes = (r.review?.registration?.blockers || []).map(b => String(b.code));
-          const entry = { ...base, effectsCapable: typeof services.generatorFeatures === 'function' ? ktEffectsCapable(services.generatorFeatures() || []) : null, effectCheck: typeof services.generatorFeatures === 'function' ? ktEffectCheckCapable(services.generatorFeatures() || []) : false, generated: r.generated, review: r.review, ctx: r.ctx || null, existingSource: r.existingSource || null, verification: r.verification || null, candidateHash: (r.verification && r.verification.candidateHash) || r.candidateHash || null, requirementIds: r.requirementIds || null, relatedFiles: r.relatedFiles || null, inputHash: r.inputHash ?? null, blockers: blockerCodes, attempts: nextAttempts(previous, { inputHash: r.inputHash ?? null, blockers: blockerCodes, estimate, at: now(), reviewFailed: !!(r.review && r.review.reviewFailed) }), repairs: (r.verification && r.verification.repairs && r.verification.repairs.count) || 0, status: null };
+          const entry = { ...base, effectsCapable: typeof services.generatorFeatures === 'function' ? ktEffectsCapable(services.generatorFeatures() || []) : null, effectCheck: typeof services.generatorFeatures === 'function' ? ktEffectCheckCapable(services.generatorFeatures() || []) : false, scopeList: typeof services.generatorFeatures === 'function' ? (services.generatorFeatures() || []).includes('scopeList') : false, generated: r.generated, review: r.review, ctx: r.ctx || null, existingSource: r.existingSource || null, verification: r.verification || null, candidateHash: (r.verification && r.verification.candidateHash) || r.candidateHash || null, requirementIds: r.requirementIds || null, relatedFiles: r.relatedFiles || null, inputHash: r.inputHash ?? null, blockers: blockerCodes, attempts: nextAttempts(previous, { inputHash: r.inputHash ?? null, blockers: blockerCodes, estimate, at: now(), reviewFailed: !!(r.review && r.review.reviewFailed) }), repairs: (r.verification && r.verification.repairs && r.verification.repairs.count) || 0, status: null };
           if (!entry.candidateHash) entry.candidateHash = KTScan.candidateHashOf({ strategy: entry.generated?.strategy, targetFile: entry.generated?.targetFile, code: entry.generated?.code, patch: entry.generated?.patch, existingHash: entry.existingSource && typeof entry.existingSource.text === 'string' ? KTScan.hashText(entry.existingSource.text) : null, customizationId: cid });
           //   生成工程の検証結果（必須の効果・動作テスト）を形式確認に取り込む（画面の登録前の再検査と同じ関数。動作テストの結果が無ければ既知の競合は登録不可のまま）
           //   §0c.6: 動作テストに渡せなかった既存 JS（Toolkit が外した・Gateway が落とした）が同じイベントを登録していれば、その効果は verified にしない
@@ -25887,12 +25947,16 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
           const fix = (txt) => plainJa(withLabels(noCode(txt), labelPairs));
           const cut = (s, n) => { const x = String(s ?? '').replace(/\s+/g, ' ').trim(); return x.length > n ? `${x.slice(0, n)}…` : x; };
           const sentences = (s) => String(s ?? '').split(/(?<=。)/).map(x => x.trim()).filter(Boolean);
-          const behaviors = [...sentences(chatSummary(p.assessment?.summary)), ...entries.flatMap(([, e]) => sentences(e.generated?.summary))].filter((x, i, a) => a.indexOf(x) === i).slice(0, 4);
+          //   C-1 第 4 段（2026-10-09）: 計画の AI・生成の AI の文に入ったフィールドのコードは、既存の表示用の変換（withLabels。フィールドの名前に直す）を通す。
+          //   作業者のコード（USER:… など）と通知の内部の番号（general#3 など）を名前に直す既存の変換は無いので、そのまま（新しく作らない）
+          const labeled = (s) => withLabels(s, labelPairs);
+          const behaviors = [...sentences(chatSummary(p.assessment?.summary)), ...entries.flatMap(([, e]) => sentences(e.generated?.summary))].map(labeled).filter((x, i, a) => a.indexOf(x) === i).slice(0, 4);
           const dr = draft || null;
           const lastHist = dr && Array.isArray(dr.history) && dr.history.length ? dr.history[dr.history.length - 1] : null;
-          const changed = { rejected: dr ? (dr.rejected || []).map(x => cut(x.text, 80)) : [], modified: lastHist && lastHist.applied ? (lastHist.applied.modified || []).map(x => cut(x.to || x.text || x, 80)) : [], provisionals: (Array.isArray(p.provisionals) ? p.provisionals : []).filter(x => x && String(x.choice ?? '').trim()).map(x => cut(x.choice, 80)), reply: v.turnInfo && v.turnInfo.reply ? cut(v.turnInfo.reply, 300) : '' };
+          const changed = { rejected: dr ? (dr.rejected || []).map(x => cut(x.text, 80)) : [], modified: lastHist && lastHist.applied ? (lastHist.applied.modified || []).map(x => cut(x.to || x.text || x, 80)) : [], provisionals: (Array.isArray(p.provisionals) ? p.provisionals : []).filter(x => x && String(x.choice ?? '').trim()).map(x => cut(labeled(x.choice), 80)), reply: v.turnInfo && v.turnInfo.reply ? cut(labeled(v.turnInfo.reply), 300) : '' };
           const cannot = [];
           for (const [, e] of entries) {
+            const from = cannot.length;
             for (const x of (e.review?.coverage?.notAchieved || [])) cannot.push({ kind: 'coverage', text: cut(fix(x.message), 160) });
             const file = e.generated?.targetFile ? `「${e.generated.targetFile}」` : 'JavaScript';
             if (ktUrlTarget(e)) cannot.push({ kind: 'external', text: `${file}は URL 指定（${cut(e.existingSource.url || e.existingSource.name || '', 120)}）の JavaScript です。外部サーバーのファイルは Toolkit から書き換えられません`, next: '計画で新しい JavaScript ファイルとして作るよう直してから、最終案を作り直します（URL のファイルは自動で置き換えません）。' });
@@ -25900,6 +25964,18 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
             else if (e.status !== 'verified' && e.verdict) cannot.push({ kind: e.status === 'unresolved' ? 'unresolved' : e.status, text: `${file}: ${e.verdict.reason}`, next: e.verdict.next, details: (e.verdict.details || []).map(x => cut(x, 300)) });
             //   §0c.8: kintone でできない効果（テーブルの列の表示切り替え）は必須の効果にせず、実現できない点に出す（SUBTABLE_ROWS と同じく承認は止めない）
             for (const np of (Array.isArray(e.notPossible) ? e.notPossible : [])) if (np && np.reason === 'subtable-column-show-hide') cannot.push({ kind: 'limit', text: `${fieldName(np.field)}はテーブル${np.table ? `（${fieldName(np.table)}）` : ''}の列のため、表示・非表示を切り替えられません（kintone の JavaScript で切り替えられるのはテーブル全体だけです）。この動作は作る JavaScript に含めません` });
+            //   C-1 第 4 段（2026-10-09・K-3）: JavaScript ごとの行に PC / モバイルを付ける（同じ内容の行は下でまとめる）
+            for (let i = from; i < cannot.length; i++) cannot[i].platforms = platformsOfEntry(e);
+          }
+          //   C-1 第 4 段（K-3）: PC とモバイルの JavaScript で同じ内容の行（明細の行の追加・削除など）は 1 行にまとめ、PC / モバイルを並べる
+          for (let i = cannot.length - 1; i > 0; i--) {
+            const r = cannot[i];
+            if (!r.platforms) continue;
+            const { platforms: pr, ...restR } = r;
+            const j = cannot.findIndex((y, k) => k < i && y.platforms && JSON.stringify((({ platforms, ...rest }) => (void platforms, rest))(y)) === JSON.stringify(restR));
+            if (j < 0) continue;
+            cannot[j].platforms = ['desktop', 'mobile'].filter(p => cannot[j].platforms.includes(p) || pr.includes(p));
+            cannot.splice(i, 1);
           }
           for (const u of unsupported) { const why = u.reason ? fix((typeof KTContextUi !== 'undefined' && KTContextUi.CODEGEN_REASON_JA && KTContextUi.CODEGEN_REASON_JA[u.reason]) || u.reason) : ''; cannot.push({ kind: 'unsupported', text: `Toolkit では JavaScript を作れない部分があります: ${cut(fix(u.requirement || ''), 100)}${why ? `（${cut(why, 100)}）` : ''}`, next: '計画で別の方法（標準の設定・運用など）にするか、この部分を外してから最終案を作り直します。' }); }
           // 実行できない手順（BLOCKED）: 手順の名前と理由
@@ -25924,17 +26000,24 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
           const outOfScope = [...[...scopeRows.values()].filter(x => x.decision === 'decided'), ...[...scopeRows.values()].filter(x => x.decision !== 'decided')].slice(0, 4);
           let ready = []; try { ready = v.review && typeof KTPlanExecutor !== 'undefined' && KTPlanExecutor.applyReadiness ? KTPlanExecutor.applyReadiness(p, v.review) : []; } catch (e) { ready = []; }
           const settingSteps = ready.filter(x => x.apply !== 'JS' && x.apply !== 'CONFIRM');
-          const impact = { lines: (Array.isArray(p.impact) ? p.impact : []).map(x => cut(x && (x.description || x.text) || '', 120)).filter(Boolean).slice(0, 4), settings: { total: settingSteps.length, auto: settingSteps.filter(x => x.apply === 'AUTO').length, blocked: blockedSteps.length }, js: [...entries.map(([cid, e]) => ({ customizationId: cid, file: e.generated?.targetFile || '', strategy: e.generated?.strategy || null, status: e.status })), ...unsupported.map(u => ({ customizationId: u.customizationId, file: '', strategy: u.strategy || null, status: 'unsupported', requirement: cut(u.requirement || '', 80) }))] };
+          const impact = { lines: (Array.isArray(p.impact) ? p.impact : []).map(x => cut(labeled(x && (x.description || x.text) || ''), 120)).filter(Boolean).slice(0, 4), settings: { total: settingSteps.length, auto: settingSteps.filter(x => x.apply === 'AUTO').length, blocked: blockedSteps.length }, js: [...entries.map(([cid, e]) => ({ customizationId: cid, file: e.generated?.targetFile || '', strategy: e.generated?.strategy || null, status: e.status })), ...unsupported.map(u => ({ customizationId: u.customizationId, file: '', strategy: u.strategy || null, status: 'unsupported', requirement: cut(u.requirement || '', 80) }))] };
           // 検証の区分（§0c.4）: 機械検査（生成工程の machine ＋ Toolkit の形式確認）/ 必須の動作（構造の有無）/ 動作テスト（隔離環境の模擬）/ 実機は未確認
           const EFFECT_CHECKS = /^(required-effects|behavior)(-|$)/;
           const toolkitChecks = entries.flatMap(([, e]) => (e.review?.checks || []).filter(ch => ch && !EFFECT_CHECKS.test(String(ch.name))));
           const machine = { gateway: entries.flatMap(([, e]) => e.verification?.machine || []), toolkit: toolkitChecks, blocks: [...entries.flatMap(([, e]) => (e.verification?.machine || []).filter(x => !x.ok && x.severity === 'block').map(x => x.message)), ...toolkitChecks.filter(ch => !ch.ok && ch.severity === 'block').map(ch => ch.message)].map(fix).slice(0, 6), reviews: toolkitChecks.filter(ch => !ch.ok && ch.severity === 'review').map(ch => ({ name: ch.name, message: cut(fix(ch.message), 160) })).slice(0, 6), gatewayRepairs: entries.reduce((n, [, e]) => n + ((e.verification && e.verification.repairs && e.verification.repairs.count) || 0), 0), ran: entries.some(([, e]) => !!e.review) };
-          const effectRows = entries.flatMap(([, e]) => { const er = (e.review && e.review.effects) || (Array.isArray(e.requiredEffects) && e.requiredEffects.length ? KTCodeReview.effectResults(e.verification, e.requiredEffects, { effectCheck: e.effectCheck === true }) : null); return er ? er.items.map(i => ({ field: i.field, label: fieldName(i.field), effect: i.effect, effectJa: KT_EFFECT_JA[i.effect] || i.effect, structure: i.structure, behavior: i.behavior, ...(i.checkedBy ? { checkedBy: i.checkedBy } : {}), ...(i.behavior === 'not-run' ? { notRunCategory: (KT_REASON_CATEGORY[ktBehaviorReasonCategory((i.notRunReasons || [])[0] || er.reason || 'unavailable')] || KT_REASON_CATEGORY.other).label } : {}) })) : []; });
+          //   C-1 第 4 段（2026-10-09・K-3）: 必須の動作の行に PC / モバイルを付ける（効果のイベントの platform。構造化した値）。同じ内容の行は 1 行にまとめる
+          const effectRows0 = entries.flatMap(([, e]) => { const er = (e.review && e.review.effects) || (Array.isArray(e.requiredEffects) && e.requiredEffects.length ? KTCodeReview.effectResults(e.verification, e.requiredEffects, { effectCheck: e.effectCheck === true }) : null); return er ? er.items.map(i => ({ field: i.field, label: fieldName(i.field), effect: i.effect, effectJa: KT_EFFECT_JA[i.effect] || i.effect, platforms: platformsOfEvents(i.events), structure: i.structure, behavior: i.behavior, ...(i.checkedBy ? { checkedBy: i.checkedBy } : {}), ...(i.behavior === 'not-run' ? { notRunCategory: (KT_REASON_CATEGORY[ktBehaviorReasonCategory((i.notRunReasons || [])[0] || er.reason || 'unavailable')] || KT_REASON_CATEGORY.other).label } : {}) })) : []; });
+          const effectRows = effectRows0.filter((x, i, a) => a.findIndex(y => JSON.stringify(y) === JSON.stringify(x)) === i);
           const behCases = entries.flatMap(([, e]) => ((e.verification && e.verification.behavior && Array.isArray(e.verification.behavior.cases)) ? e.verification.behavior.cases : []).filter(Boolean).map(x => ({ label: cut(caseLabelOf(x), 140), verdict: x.verdict === 'pass' ? 'pass' : x.verdict === 'fail' ? 'fail' : 'not-run', message: cut(String(x.message || ''), 200), ...(x.verdict === 'not-run' && x.reason ? { reason: reasonLineOf(x.reason), category: ktBehaviorReasonCategory(x.reason) } : {}) })));
           const behStatuses = entries.map(([, e]) => (e.verification && e.verification.behavior ? e.verification.behavior.status || null : null)).filter(Boolean);
           //   §0c.6: 実行できなかった理由は区分の見出しを付ける（環境・条件の形・件数の上限・既存の JavaScript など）。区分は必須の効果の判定（effects.reasonCategory）を優先する
           const behReasons = [...new Set(entries.map(([, e]) => { const b = e.verification && e.verification.behavior; if (!b || b.status !== 'not-run') return ''; const er = e.review && e.review.effects; return er && er.reason ? reasonLineOf(er.reason) : reasonLineOf(b.reason && b.reason !== 'partial' ? b.reason : 'unavailable'); }).filter(Boolean))];
           const behavior = { status: !behStatuses.length ? 'none' : behStatuses.includes('failed') ? 'failed' : behStatuses.includes('not-run') ? 'not-run' : behStatuses.every(s => s === 'passed') ? 'passed' : 'not-run', reasons: behReasons, cases: behCases, counts: { pass: behCases.filter(x => x.verdict === 'pass').length, fail: behCases.filter(x => x.verdict === 'fail').length, notRun: behCases.filter(x => x.verdict === 'not-run').length } };
+          //   C-1 第 4 段（2026-10-09）: 模擬テストの条件と確かめていない範囲は、生成工程が返した文（behavior.conditions・uncheckedScope）をそのまま使う（Toolkit で一覧を持たない）。
+          //   health の印 'scopeList' がある接続先の結果だけを使う。同じ文は 1 行にまとめる
+          const scopeEntries = entries.filter(([, e]) => e.scopeList === true && e.verification && e.verification.behavior);
+          const scopeTexts = (k) => [...new Set(scopeEntries.flatMap(([, e]) => (Array.isArray(e.verification.behavior[k]) ? e.verification.behavior[k] : []).filter(x => typeof x === 'string' && x.trim()).map(x => x.trim())))];
+          const scope = { conditions: scopeTexts('conditions'), unchecked: scopeTexts('uncheckedScope'), conditionsNotRun: scopeEntries.some(([, e]) => e.verification.behavior.conditionsNotRun === true) };
           // 実機で確かめること: 保存を止める・警告（保存は止めない）の必須の効果があるときだけ保存の行を出す（構造化した効果で決める。編集制限と保存の禁止を混同しない）
           const savesMatter = effectRows.some(x => x.effect === 'block-save' || x.effect === 'warn');
           const howTo = [...new Set([...entries.flatMap(([, e]) => (e.review?.registration?.confirmations || []).map(x => x.howToCheck).filter(Boolean)), ...(effectRows.length ? ['動作テスト環境で、条件に合うレコードと合わないレコードを開いて、必須の動作（' + [...new Set(effectRows.map(x => `${x.label}を${x.effectJa}`))].slice(0, 3).join('・') + '）を確かめる'] : []), ...(entries.length && savesMatter ? ['登録した後、実際に保存して、保存が止まる・止まらないことを確かめる'] : [])])].slice(0, 4);
@@ -25944,11 +26027,27 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
           const blockingReason = readiness.blockingReason;
           //   §0c.8: 承認できない最終案の次の手（計画を直す・作り直し）を、カードの操作 1 つで通常の計画の差分更新に送れる依頼の文（自動では送らない）
           const fixReq = approvable ? null : fixRequestOf(entries);
-          const usage = entries.reduce((a, [, e]) => ({ tokens: { input: a.tokens.input + ((e.attempts && e.attempts.tokens && e.attempts.tokens.input) || 0), output: a.tokens.output + ((e.attempts && e.attempts.tokens && e.attempts.tokens.output) || 0) }, costUsd: Math.round((a.costUsd + ((e.attempts && e.attempts.costUsd) || 0)) * 10000) / 10000, measured: a.measured + ((e.attempts && e.attempts.measured) || 0), repairs: a.repairs, gatewayRepairs: a.gatewayRepairs + ((e.verification && e.verification.repairs && e.verification.repairs.count) || 0) }), { tokens: { input: 0, output: 0 }, costUsd: 0, measured: 0, repairs: 0, gatewayRepairs: 0 });
+          //   C-1 第 4 段（2026-10-09・K-2）: 使用量は AI の呼び出しの回数（timing.aiCalls）と同じ範囲（この送信の呼び出し）だけで数える。
+          //   生成の分は呼び出しの記録に付けた見積もり（genEstimate）、計画の AI などは Gateway の ai の token。単価は §10 の単価（GEN_PRICE_USD_PER_M）。
+          //   attempts の累計（版をまたぐ）は使わない（作り直した最終案で前の版の生成の分を足さない）
+          const usage = { tokens: { input: 0, output: 0 }, costUsd: 0, measured: 0, repairs: 0, gatewayRepairs: entries.reduce((n, [, e]) => n + ((e.verification && e.verification.repairs && e.verification.repairs.count) || 0), 0) };
+          for (const x of timing.calls) {
+            if (!x) continue;
+            if (x.kind === 'generate') {
+              const g = x.genEstimate; if (!g) continue;
+              usage.tokens.input += g.input || 0; usage.tokens.output += g.output || 0; usage.measured += 1;
+              usage.costUsd = Math.round((usage.costUsd + (g.costUsd || 0)) * 10000) / 10000;
+              continue;
+            }
+            if (!x.ai || (x.ai.inputTokens == null && x.ai.outputTokens == null)) continue;
+            const i = x.ai.inputTokens || 0, o = x.ai.outputTokens || 0;
+            usage.tokens.input += i; usage.tokens.output += o; usage.measured += 1;
+            usage.costUsd = Math.round((usage.costUsd + (i * GEN_PRICE_USD_PER_M.input + o * GEN_PRICE_USD_PER_M.output) / 1e6) * 10000) / 10000;
+          }
           const callsNow = timing.calls.filter(x => x && typeof x.ms === 'number');
           //   追加指示 §4（f）: 測っていない段階は 0 秒と出さない（その段階の呼び出しが無ければ null。表示は測ったものだけ）
           const msOf = (kind) => { const xs = callsNow.filter(x => x.kind === kind); return xs.length ? xs.reduce((n, x) => n + x.ms, 0) : null; };
-          return { planId: v.planId, version: v.version, draftId: v.fromDraft ? v.fromDraft.id : null, behaviors, changed, cannot, outOfScope, impact, verification: { machine, effects: effectRows, behavior, unverified, howTo }, questions: questions.map(q => ({ key: q.key, text: q.text, priority: q.priority || 'later', entryId: q.entryId || null, reconfirm: !!q.reconfirm, id: q.id, ...(q.recommendation ? { recommendation: String(q.recommendation) } : {}) })), customizations: entries.map(([cid, e]) => ({ customizationId: cid, status: e.status, targetFile: e.generated?.targetFile || '', strategy: e.generated?.strategy || null, candidateHash: e.candidateHash || null, repairs: 0, gatewayRepairs: (e.verification && e.verification.repairs && e.verification.repairs.count) || 0, attempts: e.attempts || null, unresolved: e.unresolved || null, verdict: e.verdict || null, failure: e.failure || null, reused: !!e.reused })), unsupported: unsupported.map(u => ({ customizationId: u.customizationId, reason: u.reason || null })), blockedSteps, approvable, blockingReason, fix: fixReq, readiness: { ready: readiness.ready, reasons: readiness.reasons },
+          return { planId: v.planId, version: v.version, draftId: v.fromDraft ? v.fromDraft.id : null, behaviors, changed, cannot, outOfScope, impact, verification: { machine, effects: effectRows, behavior, unverified, howTo, scope }, questions: questions.map(q => ({ key: q.key, text: q.text, priority: q.priority || 'later', entryId: q.entryId || null, reconfirm: !!q.reconfirm, id: q.id, ...(q.recommendation ? { recommendation: String(q.recommendation) } : {}) })), customizations: entries.map(([cid, e]) => ({ customizationId: cid, status: e.status, targetFile: e.generated?.targetFile || '', strategy: e.generated?.strategy || null, candidateHash: e.candidateHash || null, repairs: 0, gatewayRepairs: (e.verification && e.verification.repairs && e.verification.repairs.count) || 0, attempts: e.attempts || null, unresolved: e.unresolved || null, verdict: e.verdict || null, failure: e.failure || null, reused: !!e.reused })), unsupported: unsupported.map(u => ({ customizationId: u.customizationId, reason: u.reason || null })), blockedSteps, approvable, blockingReason, fix: fixReq, readiness: { ready: readiness.ready, reasons: readiness.reasons },
             // 時間: 最終案まで（採用・指示を受け付けた時点から。timing.finalMs と同じ起点）と、測った段階だけの内訳（反証 B1・追加指示 §4（f））
             timing: { totalMs: startedMs != null ? clock() - startedMs : null, planMs: msOf('plan'), generateMs: msOf('generate'), calls: callsNow.map(x => ({ kind: x.kind, ms: x.ms })) }, usage: { aiCalls: timing.aiCalls, ...usage }, builtAt: now() };
         };
@@ -27581,7 +27680,9 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
       const cg = fin.changed || { rejected: [], modified: [], provisionals: [], reply: '' };
       const changedRows = [...cg.rejected.map(x => `外した: ${esc(x)}`), ...cg.modified.map(x => `変えた: ${esc(x)}`), ...cg.provisionals.map(x => `計画で決めた点: ${esc(x)}`)];
       const changed = changedRows.length || cg.reply ? sec('仮案から変わった点と理由', `${changedRows.length ? li(changedRows) : ''}${cg.reply ? `<div class="kt-ai-rich" style="margin-top:4px; font-size:12px;">${KTContextUi.richTextHtml(plainText(cg.reply))}</div>` : ''}`) : sec('仮案から変わった点', '<div style="font-size:12px; opacity:.8; margin-top:2px;">仮案のとおりです。</div>');
-      const cannotRows = [...fin.cannot.map(x => `${esc(x.text)}${x.next ? `<div style="font-size:11px; opacity:.85;">次の方針: ${esc(x.next)}</div>` : ''}${Array.isArray(x.details) && x.details.length ? `<details class="kt-ai-tech" style="font-size:11px;"><summary>詳細</summary>${x.details.map(esc).join('<br>')}</details>` : ''}`), ...fin.outOfScope.map(x => (typeof x === 'string' ? `対応範囲外: ${esc(x)}` : x.owned ? `この JavaScript の対応範囲外（ほかの手順・JavaScript で扱います）: ${esc(x.text)}` : `担当が計画にありません（計画全体の確認に残します）: ${esc(x.text)}`))];
+      //   C-1 第 4 段（2026-10-09・K-3）: JavaScript ごとの行と必須の動作の行に PC / モバイルを付ける（構造化した platforms。無い古い最終案は付けない）
+      const platJa = (ps) => (Array.isArray(ps) && ps.length ? ps.map(p => (p === 'mobile' ? 'モバイル' : 'PC')).join('・') : '');
+      const cannotRows = [...fin.cannot.map(x => `${platJa(x.platforms) ? `${esc(platJa(x.platforms))}: ` : ''}${esc(x.text)}${x.next ? `<div style="font-size:11px; opacity:.85;">次の方針: ${esc(x.next)}</div>` : ''}${Array.isArray(x.details) && x.details.length ? `<details class="kt-ai-tech" style="font-size:11px;"><summary>詳細</summary>${x.details.map(esc).join('<br>')}</details>` : ''}`), ...fin.outOfScope.map(x => (typeof x === 'string' ? `対応範囲外: ${esc(x)}` : x.owned ? `この JavaScript の対応範囲外（ほかの手順・JavaScript で扱います）: ${esc(x.text)}` : `担当が計画にありません（計画全体の確認に残します）: ${esc(x.text)}`))];
       const cannot = cannotRows.length ? sec('実現できない点・対応範囲', li(cannotRows), '#b26a00') : '';
       const im = fin.impact || { lines: [], settings: { total: 0, auto: 0 }, js: [] };
       const impactRows = [...(im.settings.total ? [`設定の手順 ${im.settings.total} 件（Toolkit から自動で反映できるのは ${im.settings.auto} 件${im.settings.blocked ? `・実行できない手順 ${im.settings.blocked} 件` : ''}）`] : ['設定の変更はありません']), ...im.js.map(j => (j.status === 'unsupported' ? `Toolkit では作れない JavaScript${j.requirement ? `（${esc(j.requirement)}）` : ''}（反映の対象にしません）` : !j.file ? `JavaScript（${j.status === 'failed' ? '生成できなかったため、ファイルはまだありません' : 'ファイル名は未定'}）` : `${j.strategy === 'EXTEND_EXISTING_JS' ? `既存の「${esc(j.file)}」に統合` : `新しい JavaScript「${esc(j.file)}」を登録`}${j.status === 'verified' ? '' : j.status === 'unresolved' ? '（未解決。反映の対象にしません）' : j.status === 'failed' ? '（生成できませんでした）' : j.status === 'not-run' ? '（模擬テストを実行できていません。反映の対象にしません）' : '（確かめられていません。反映の対象にしません）'}`)), ...im.lines.map(esc)];
@@ -27595,7 +27696,7 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
       const BEH_JA = { pass: '模擬テストで合格', fail: '模擬テストで不合格', 'not-run': '模擬テストを実行できません', untested: '模擬テストの結果なし' };
       const effects = Array.isArray(ver.effects) ? ver.effects : [];
       //   §0d.1（2026-10-08）: 機械検査で足りる効果（checkedBy machine）は「機械検査で確認（模擬テストは未実施）」（模擬テストの合格とは書かない）
-      const effRows = effects.map(x => `<div class="kt-ai-final-effect" style="font-size:11px;">${esc(x.structure === 'present' && x.behavior === 'pass' ? '✓' : (x.structure === 'missing' || x.behavior === 'fail') ? '×' : '未確認')} ${esc(`${x.label}: ${x.effectJa}`)} — ${esc(STRUCT_JA[x.structure] || x.structure)}・${esc(x.behavior === 'pass' && x.checkedBy === 'machine' ? '機械検査で確認（模擬テストは未実施）' : (BEH_JA[x.behavior] || x.behavior))}${x.behavior === 'not-run' ? esc(`（${x.notRunCategory || '環境'}）`) : ''}</div>`).join('');
+      const effRows = effects.map(x => `<div class="kt-ai-final-effect" style="font-size:11px;">${esc(x.structure === 'present' && x.behavior === 'pass' ? '✓' : (x.structure === 'missing' || x.behavior === 'fail') ? '×' : '未確認')} ${esc(`${x.label}${platJa(x.platforms) ? `（${platJa(x.platforms)}）` : ''}: ${x.effectJa}`)} — ${esc(STRUCT_JA[x.structure] || x.structure)}・${esc(x.behavior === 'pass' && x.checkedBy === 'machine' ? '機械検査で確認（模擬テストは未実施）' : (BEH_JA[x.behavior] || x.behavior))}${x.behavior === 'not-run' ? esc(`（${x.notRunCategory || '環境'}）`) : ''}</div>`).join('');
       const effLine = effects.length ? `<div style="font-size:12px; margin-top:4px;">必須の動作（${effects.length} 件）</div>${effRows}` : '';
       const beh = ver.behavior || { status: 'none', reasons: [], cases: [], counts: { pass: 0, fail: 0, notRun: 0 } };
       const behLine = !fin.customizations.length ? '' : beh.status === 'none' ? '模擬テスト: 結果はありません' : (beh.status === 'not-run' && !beh.cases.length) ? `模擬テスト: 実行できませんでした（${beh.reasons.length ? beh.reasons.join('／') : '環境'}）。作った JavaScript の誤りとは判定していません` : `模擬テスト（代表条件 ${beh.cases.length} 件）: 合格 ${beh.counts.pass}・不合格 ${beh.counts.fail}・実行できない ${beh.counts.notRun}${beh.status === 'not-run' && beh.reasons.length ? `（${beh.reasons.join('／')}）` : ''}`;
@@ -27607,17 +27708,15 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
       const unverRows = Array.isArray(ver.unverified) ? ver.unverified.filter(Boolean) : [];
       const unverHtml = unverRows.length ? `<div class="kt-ai-final-unverified" style="font-size:12px; margin-top:4px;"><b>まだ確かめていないこと（${unverRows.length} 件）</b>${li(unverRows.map(esc))}</div>` : '';
       //   §0c.10（2026-10-08）: 動作テストの条件（固定の利用者・日時・画面）と確かめていない範囲は詳細表示だけに出す（通常の画面には出さない）
-      //   §0c.11（2026-10-08）: 確かめていない範囲は、契約 20（AI版 docs/contracts/20-customization-generator.md の「確かめない範囲」）の一覧と同じ内容にする。
-      //   契約の一覧を変えたら、ここ（KT_BEHAVIOR_UNVERIFIED_SCOPE）と tests/ai-flow-redesign.test.js の D47 を合わせる
+      //   C-1 第 4 段（2026-10-09）: 条件と確かめていない範囲は、生成工程（Gateway）が返した文（fin.verification.scope。behavior.conditions・uncheckedScope）をそのまま出す。
+      //   Toolkit の固定の文は持たない（前の固定の日時・一覧は Gateway の定数と食い違った）。返っていなければその旨だけを出す
+      const sc0 = ver.scope || { conditions: [], unchecked: [] };
+      const scopeRows = sc0.conditions.length || sc0.unchecked.length ? [
+        ...(sc0.conditions.length ? ['<b>模擬テストの条件</b>', ...sc0.conditions.map(x => `・${esc(x)}`)] : [sc0.conditionsNotRun ? '模擬テストを隔離環境で実行していないため、模擬テストの条件はありません' : '模擬テストの条件は接続先から返っていません']),
+        ...(sc0.unchecked.length ? ['<b>確かめていない範囲</b>', ...sc0.unchecked.map(x => `・${esc(x)}`)] : ['確かめていない範囲は接続先から返っていません']),
+      ] : [sc0.conditionsNotRun ? '模擬テストを隔離環境で実行していないため、模擬テストの条件はありません' : '模擬テストの条件は接続先から返っていません'];
       const KT_BEHAVIOR_SCOPE_HTML = `<details class="kt-ai-tech kt-ai-final-scope" style="margin-top:2px;"><summary>模擬テストの条件と確かめていない範囲</summary><div style="font-size:11px;">${[
-        '<b>模擬テストの条件</b>（隔離環境で、固定の条件の 1 通りだけ動かします）',
-        '・利用者: 固定の模擬の利用者 1 人（ログインユーザーで処理を分けても 1 通りだけ）',
-        '・日時: 固定の日時（2026-10-07 の正午・日本時間・夏時間なし）',
-        '・画面: 作成・編集・詳細・一覧の編集などの各画面を 1 通り（画面の URL・ブラウザの保存領域・画面の要素は中立の値）',
-        '・既存の JavaScript: 模擬テストに渡した本文だけ（URL で読み込むファイル・ライブラリの本文は渡していません）',
-        '・1 つの代表条件では 1 つのイベントだけを、新しいレコードから動かします',
-        '<b>確かめていない範囲</b>',
-        ...KT_BEHAVIOR_UNVERIFIED_SCOPE.map(x => `・${x.text}`),
+        ...scopeRows,
         '反映は動作テスト環境から始まります。実機での確かめは、動作テスト環境で行ってください。',
       ].join('<br>')}</div></details>`;
       const verHtml = fin.customizations.length ? `<div style="font-size:12px; margin-top:2px;">${esc(machineLine)}</div>${ver.machine.blocks.length ? `<details class="kt-ai-tech" style="margin-top:2px;"><summary>登録を止める問題（詳細）</summary><div style="font-size:11px; color:#b00020;">${ver.machine.blocks.map(x => `× ${esc(x)}`).join('<br>')}</div></details>` : ''}${effLine}${behLine ? `<div style="font-size:12px; margin-top:4px;">${esc(behLine)}</div>` : ''}${machineNote ? `<div class="kt-ai-final-machine" style="font-size:11px; margin-top:2px; opacity:.85;">${esc(machineNote)}</div>` : ''}${behRows ? `<details class="kt-ai-tech" style="margin-top:2px;"${beh.counts.fail || beh.counts.notRun ? ' open' : ''}><summary>代表条件の一覧</summary>${behRows}</details>` : ''}${beh.status !== 'none' ? KT_BEHAVIOR_SCOPE_HTML : ''}${fin.approvable ? `<div style="font-size:12px; margin-top:4px;"><b>実機は未確認です。</b>反映した後、動作テスト環境で確かめること:</div>${li(realLines.length ? realLines : ['動作テスト環境で、条件に合うレコードと合わないレコードを開いて動きを確かめる'])}` : '<div class="kt-ai-final-real" style="font-size:12px; margin-top:4px;"><b>実機は未確認です。</b>反映できない点が残っているため、まだ実機で確かめる段階ではありません（上の理由と次の方針を見てください）。</div>'}${unverHtml}` : (Array.isArray(fin.unsupported) && fin.unsupported.length ? '<div style="font-size:12px; opacity:.8; margin-top:2px;">Toolkit では作れない JavaScript があるため、JavaScript は検証していません（実現できない点を見てください）。</div>' : '<div style="font-size:12px; opacity:.8; margin-top:2px;">JavaScript は無く、設定の変更だけです（Toolkit の確認結果は右の「確認結果」）。</div>');

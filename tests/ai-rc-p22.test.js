@@ -323,8 +323,8 @@ const tryGenerate = async (transport) => { try { return { ok: true, r: await aiC
   assert(v.generated.C1 === first && e2.generated === first.generated && JSON.stringify(v2.plan) === planBefore, '前に生成したコード・計画の状態は変わらない（前の版の結果は書き換えず、新しい版にも前のコードを持つ）');
   const html = K.finalHtml(x);
   assert(/AI はこの依頼に対するコード生成を行いませんでした/.test(html) && !/ネットワークエラー/.test(html), '最終案のカード: AI が生成しなかったことを出す（ネットワークエラーとしない）');
-  //   未解決の不足（報告済み）: 生成工程の 1 依頼（generateAndVerify）は例外を { reason, message } だけにして AI の説明（KTAiClient.declineReasonOf）を捨てるので、
-  //   最終案のカードに出ない（以前はエラーのカードに「AI の説明: …」を出した）。期待は変えずに残す
+  //   C-1 第 3 段: 生成工程の 1 依頼（generateAndVerify）が AI の生成の拒否を受けたときは、AI の説明（KTAiClient.declineReasonOf）を
+  //   最終案のカードの「実現できない点」に出す（以前はエラーのカードに「AI の説明: …」を出した）
   assert(/items が許可されたフィールドに無いため実装できません/.test(html),`最終案のカードに AI の説明（Gateway が返した理由）を出す: ${JSON.stringify(e2.failure)}`);
   const again = await x.c.send('C1 のコードを作って');
   const v3 = x.c.activePlan();

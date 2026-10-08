@@ -71,7 +71,7 @@ const passVerification = (ctx) => { const re = (ctx && ctx.verification && ctx.v
 const genResponse = (ctx, g) => ({ ok: true, contractVersion: '2.1', meta: { requestId: 'gen-1', usage: { usedThisMonth: 3, monthlyLimit: 20 }, normalization: { warnings: [] }, gateway: { feature: 'customization-generator' } }, generated: { strategy: ctx.customization.strategy, targetFile: ctx.existingFile?.name || 'amountWarning.js', summary: ctx.customization.requirement, events: ctx.customization.events, fields: ctx.customization.fields, apis: [], assumptions: [], warnings: [], gatewayChecks: { security: [] }, patterns: PATTERNS, ...g }, ...(passVerification(ctx) ? { verification: passVerification(ctx) } : {}) });
 const genPatch = (patch = PATCH_GOOD) => ({ strategy: 'EXTEND_EXISTING_JS', targetFile: 'fieldOnOff.js', summary: '完了でも金額を編集不可にする', code: patch.operations.map(o => o.content).join('\n'), patch, events: ['app.record.edit.show'], fields: [{ code: 'amount', access: 'CONTROL' }], apis: [], assumptions: [], warnings: [] });
 // C-1 第 3 段: 仮案の能力（assistant-qa の conversation に proposal）がある接続先。無い接続先は「接続先が非対応」で計画・生成に進まない（tests/ai-flow-redesign.test.js の §B2 の後）
-const HEALTH = { ok: true, supportedContractVersions: ['2.0', '2.1'], entitlements: [{ product: 'toolkit', features: ['assistant-qa', 'change-planner', 'customization-generator'] }], registry: { toolkit: { 'assistant-qa': { implemented: true, promptVersions: ['1'], conversation: ['requirements', 'stream', 'proposal'] }, 'change-planner': { implemented: true, promptVersions: ['1'] }, 'customization-generator': { implemented: true, promptVersions: ['1'], verification: ['requirementId', 'requiredEffects', 'effectGroups', 'relatedOmitted', 'appFields', 'saveDialog', 'reasonCategory', 'caseSide', 'eventCases', 'loadFaithful', 'registrationCheck', 'emptyCase', 'hideCondition', 'registrationCounts', 'caseCoverage'] } } }, usage: { monthlyLimit: 20, usedThisMonth: 1 } };
+const HEALTH = { ok: true, supportedContractVersions: ['2.0', '2.1'], entitlements: [{ product: 'toolkit', features: ['assistant-qa', 'change-planner', 'customization-generator'] }], registry: { toolkit: { 'assistant-qa': { implemented: true, promptVersions: ['1'], conversation: ['requirements', 'stream', 'proposal'] }, 'change-planner': { implemented: true, promptVersions: ['1'] }, 'customization-generator': { implemented: true, promptVersions: ['1'], verification: ['requirementId', 'requiredEffects', 'effectGroups', 'relatedOmitted', 'appFields', 'saveDialog', 'reasonCategory', 'caseSide', 'eventCases', 'loadFaithful', 'registrationCheck', 'emptyCase', 'hideCondition', 'registrationCounts', 'caseCoverage', 'cancelCheck', 'limitCode', 'scopeList'] } } }, usage: { monthlyLimit: 20, usedThisMonth: 1 } };
 const makeStorage = () => { const m = new Map(); return { getItem: (k) => (m.has(k) ? m.get(k) : null), setItem: (k, v) => m.set(k, String(v)), removeItem: (k) => m.delete(k) }; };
 // C-1 第 3 段: 仮案の台本（依頼の文を実現する動作にした仮案。判断・要件は無く、「これで進めて」で採用する）
 const draftRaw = (u) => ({ reply: `「${u}」を実現する変更案にできます。`, intent: 'propose', proposal: { behaviors: [{ text: u, origin: 'user' }], assumptions: [], decisions: [], approach: { standard: ['設定の変更'], js: [] }, cannot: [] }, turn: { ops: [], answers: [], requirementOps: [] } });
@@ -123,7 +123,7 @@ const approveOnScreen = async (m) => { const v = m.conv().activePlan(); if (!v) 
 const firstLine = (s) => String(s ?? '').split('\n')[0];
 /**
  * C-1 第 3 段: 右の「コード」に今の最終案の JavaScript（C1）を出す。会話のカードの［コードを見る］（open-code）と同じ操作。
- *   新しい流れの最終案のカードにはこのボタンが無い（未解決の不足。§7 / §20 で期待を残して確かめる）。ここでは、右の「コード」の振る舞い（版が変わったら消す・
+ *   最終案のカードの［コードを見る］がこの操作を送る（ボタンがあることは §7 / §20 で確かめる）。ここでは、右の「コード」の振る舞い（版が変わったら消す・
  *   登録の確認を取り消す）を確かめるために、同じ操作を直接送る
  */
 const openCodePane = async (m, cid = 'C1') => { await clickChat(m, 'open-code', { cid, view: 'code' }); await ticks(); };
@@ -287,8 +287,8 @@ console.log('\n--- §7 / §20. Customize → 開発支援（JS 相談）: 左は
   assert(/設定の手順 1 件/.test(c1) && /fieldOnOff\.js/.test(c1) && !/\bC1\b/.test(c1.replace(/<[^>]+>/g, ' ')), '最終案のカード: 設定の手順の件数と JavaScript のファイル（番号 C1 は出さない）');
   assert(!/data-act="confirm-spec"/.test(m.$('kt-ai-spec').innerHTML) && /amount（CONTROL）/.test(m.$('kt-ai-spec').innerHTML) && /最終案の一部です/.test(m.$('kt-ai-spec').innerHTML) && vH.spec.status === 'CONFIRMED' && vH.spec.autoConfirmed === true && m.panel.workspaceState().lines.join('|') === 'fieldOnOff.js|仕様 v1 確定|コード生成済み|Preview未登録' && /data-status="ready">未反映</.test(m.$('kt-ai-ws-state').innerHTML), `実装の内容（右の「変更内容」）: 詳細の閲覧だけ（確定は最終案の中で自動）。右の見出しは「未反映」（VM.workspaceState は「仕様 v1 確定 / コード生成済み / Preview未登録」）: ${m.panel.workspaceState().lines.join('|')}`);
   // 右の「コード」: 全文・検査の内訳・参考パターン・［動作テスト環境へ登録］
-  //   C-1 第 3 段（未解決の不足・報告済み）: 新しい流れでは、最終案で作った JavaScript を右の「コード」に出す入口が無い（以前はコードのカードの［コードを見る］と
-  //   従来の生成の後の自動表示）。最終案のカードにも［コードを見る］は無い。期待は変えずに残す
+  //   C-1 第 3 段: 新しい流れでは、最終案ができたら作った JavaScript を右の「コード」に描いておき（ペインは切り替えない）、最終案のカードの［コードを見る］
+  //   からも開ける（以前はコードのカードの［コードを見る］と従来の生成の後の自動表示）
   await clickTab(m, 'code');
   assert(m.panel.drawerState().pane === 'code' && m.$('kt-ai-code-view').textContent.includes("value === '完了'") && /✓ 既存ファイルへの統合/.test(m.$('kt-ai-code-review').innerHTML) && /参考パターン/.test(m.$('kt-ai-code-review').innerHTML) && m.$('kt-ai-code-register').style.display === '', 'full code only workspace（右の「コード」）: 全文・検査の内訳・参考パターン・［動作テスト環境へ登録］');
   assert(m.panel.workspaceState().lines[2] === 'コード生成済み' && /data-status="ready">未反映</.test(m.$('kt-ai-ws-state').innerHTML), '作業状態: コード生成済み（右の見出しは登録まで「未反映」）');
@@ -296,7 +296,7 @@ console.log('\n--- §7 / §20. Customize → 開発支援（JS 相談）: 左は
   await m.panel.startJsRegister(m.conv().activePlan()); await ticks();
   assert(m.panel.jsExecState().stage === 'blocked' && m.panel.jsExecState().prepared.blockers.some(b => b.code === 'APPROVAL_REQUIRED') && writes(m).filter(w => /PUT customize/.test(w)).length === 0, `承認の前は登録の最終確認に進まない: ${m.panel.jsExecState().stage}`);
   assert(await approveOnScreen(m), '前提: 最終案を承認した');
-  //   登録の確認は、会話の「JS を登録して」の案内のカード［登録の確認を開く］から開く（右の「コード」の［動作テスト環境へ登録］が出ないため。上の不足を参照）
+  //   登録の確認は、会話の「JS を登録して」の案内のカード［登録の確認を開く］からも開ける（ここではこの経路を確かめる）
   await m.panel.send('JS を登録して'); await ticks(4);
   const ready = m.msgs().find(x => x.data?.kind === 'js-preview-ready');
   await clickChat(m, 'open-js-register', ready ? { plan: ready.data.planId, version: String(ready.data.version) } : {}); await ticks();
@@ -734,7 +734,7 @@ await section(async () => {
 await section(async () => {
   // L6（medium）: 同じ会話で別の計画になっても、会話に残る前の計画のコードカードからそのコードを見られる（登録はできない）
   //   C-1 第 3 段: JavaScript は最終案のパイプラインが作る（仕様の確定・［JavaScript を生成］・コードのカードは無い）。
-  //   未解決の不足（報告済み）: 最終案のカードに［コードを見る］が無いので、会話から前の計画のコードを開く入口が無い。1 つめの期待はこの不足を示すため変えずに残す。
+  //   最終案のカードの［コードを見る］にカードの計画の版を付けるので、会話に残る前の計画の最終案のカードから、その計画のコードを開ける（1 つめの期待）。
   //   2 つめ以降は、同じ操作（open-code・copy-code）を直接送り、右の「コード」が前の計画のコードを登録ボタン無しで出すことを確かめる
   const m = mount({ plans: (ctx) => (firstLine(ctx.goal) === GOAL_HYBRID ? PLAN_HYBRID : PLAN_V1) });
   await ticks();
@@ -742,7 +742,7 @@ await section(async () => {
   const vA = m.conv().activePlan();
   await planOnScreen(m, GOAL, { intent: 'PLAN' });
   const btn = (m.chat().match(/<button[^>]*data-act="open-code"[^>]*data-view="code"[^>]*>/) || [''])[0];
-  assert(new RegExp(`data-plan="${vA.planId}" data-version="${vA.version}"`).test(btn), 'L6: コードカードのボタンに、カードの計画の版を付ける');
+  assert(new RegExp(`data-plan="${vA.planId}" data-version="${vA.version}"`).test(btn), 'L6: 最終案のカードの［コードを見る］に、カードの計画の版を付ける');
   await clickChat(m, 'open-code', { cid: 'C1', view: 'code', plan: vA.planId, version: String(vA.version) }); await ticks();
   assert(m.$('kt-ai-code-view').textContent.includes("value === '完了'") && m.$('kt-ai-code-view').style.display !== 'none' && m.$('kt-ai-code-register').style.display === 'none', 'L6: 前の計画のカードからコードを見られる（登録ボタンは出さない）');
   m.copies.length = 0;

@@ -122,8 +122,9 @@ console.log('\n--- BF-C（再 3）/ F24. エラー表示と編集不可: 条件�
   assert(rGuard.status !== 'BLOCKED', 'F24（実機 2 本目）: 編集不可を見る条件で分けたコードは形式確認で停止しない（競合の有無は生成工程の模擬テストで確かめる）');
   // 別ファイル（新規 JS が条件なしに show で error、既存の dealLock.js が同じ show で disabled）の判定は、C-1 第 3 段（2026-10-08）で
   //   Toolkit の形式確認から外した（error-cancels-other-js・errorGuarded は削除）。守り手は生成工程の模擬テスト（Gateway の cause candidate-cancels-existing-lock の fail）で、
-  //   Toolkit はその fail をほかの fail と同じく未解決（承認できない）として取り込む。新しい流れの回帰: tests/ai-flow-redesign.test.js の F8-1・F8-2
-  //   （注意: この守り手は Gateway の配備に依存する。配備前の接続先では見分けられない。担当 R の報告 §4）
+  //   Toolkit はその fail をほかの fail と同じく未解決（承認できない）として取り込む。既存 JS の編集不可の条件（承認済みなど）が代表条件で成り立たず
+  //   取り消しを観測できないときは、生成工程が existing-lock-unverified の not-run を返し、Toolkit は準備未完了（［計画を直すよう依頼する］）にする。
+  //   この守り手を持たない Gateway（health の印 cancelCheck が無い）は「接続先が非対応」として扱う。新しい流れの回帰: tests/ai-flow-redesign.test.js の F8-1〜F8-5・D49
   // BF-C 4 回目（実機の生成そのまま）: 既存の show handler の中に「編集不可でないときだけ警告」を追加。計画の change は登録していない
   const DL_SRC = "(function () {\n  'use strict';\n  // 承認済みの案件は金額を変更できないようにする（既存の運用ルール）\n  kintone.events.on(['app.record.create.show', 'app.record.edit.show'], function (event) {\n    const record = event.record;\n    if (record['ステータス'] && record['ステータス'].value === '承認済み') {\n      record['amount'].disabled = true;\n    }\n    return event;\n  });\n})();\n";
   const PATCH4 = { baseHash: KTScan.hashText(DL_SRC), operations: [{ type: 'INSERT_AFTER', anchor: "    if (record['ステータス'] && record['ステータス'].value === '承認済み') {\n      record['amount'].disabled = true;\n    }", content: "\n    // 金額が100万円を超えたら警告を表示する\n    if (record['amount'].value > 1000000 && !record['amount'].disabled) {\n      record['amount'].error = '金額が100万円を超えています。';\n    } else {\n      record['amount'].error = null;\n    }\n" }] };

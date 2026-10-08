@@ -195,13 +195,17 @@ function createNewFlowKit(T) {
   /** §0c.7: 生成工程が必須の効果の検証に対応している印（health の customization-generator.verification。すべて揃って対応） */
   //   §0c.9（2026-10-08）: caseSide（代表条件の side と、効果のイベントごとの合う / 合わない）も印に加えた
   //   §0c.10（2026-10-08）: Gateway の eventCases・loadFaithful・registrationCheck・emptyCase・hideCondition も印に加えた（12 個）
-  const GEN_EFFECT_FEATURES = ['requiredEffects', 'effectGroups', 'relatedOmitted', 'appFields', 'saveDialog', 'reasonCategory', 'caseSide', 'eventCases', 'loadFaithful', 'registrationCheck', 'emptyCase', 'hideCondition', 'registrationCounts', 'caseCoverage'];
+  //   §0c.11 の registrationCounts・caseCoverage、C-1 第 3 段（2026-10-08）の cancelCheck・limitCode、C-1 第 4 段（2026-10-09）の scopeList も加えた（17 個。どれかが欠ける接続先は「接続先が非対応」）
+  const GEN_EFFECT_FEATURES = ['requiredEffects', 'effectGroups', 'relatedOmitted', 'appFields', 'saveDialog', 'reasonCategory', 'caseSide', 'eventCases', 'loadFaithful', 'registrationCheck', 'emptyCase', 'hideCondition', 'registrationCounts', 'caseCoverage', 'cancelCheck', 'limitCode', 'scopeList'];
   const EXPECT_OF = { lock: 'lock', warn: 'warn', 'block-save': 'block-save', 'set-value': 'set-value', 'show-hide': 'show-hide' };
   /** §0c.9: 「合わない」側の期待（Gateway の behavior-cases の neg） */
   const NOMATCH_OF = { lock: 'not-locked', warn: 'not-warned', 'block-save': 'save-allowed', 'set-value': 'value-unchanged', 'show-hide': 'show-hide' };
   /** 偽の生成工程の verification（契約 20 §5・§0c.3 の 5 の形）。env = 動作テストを実行できない理由（timeout など）。supported:false は旧い接続先（requiredEffects・behavior を返さない） */
   //   §0c.6 の回帰用: statusOverride = 必須の効果の status を上書き（unchecked など）/ extraCases = 足す代表条件 / caseReason = 実行できない代表条件の理由（代表条件ごと）
-  function fakeVerification(cand, requiredEffects, { env = null, repairs = 0, stoppedBy = null, supported = true, candidateHash, dropCaseFor = null, statusOverride = null, extraCases = [], caseReason = null } = {}) {
+  /** C-1 第 4 段（2026-10-09）: 偽の生成工程が返す模擬テストの条件（behavior.conditions）と確かめていない範囲（behavior.uncheckedScope）。Toolkit はこの文をそのまま出す（テスト用の文） */
+  const GW_SCOPE = { conditions: ['利用者: テストの模擬の利用者 1 人', '日時: テストの固定の時計（2026-10-07 の日本時間の朝 8 時）'], uncheckedScope: ['テストの確かめない範囲 1（利用者による処理の中の分岐）', 'テストの確かめない範囲 2（半分の幅より細かい境界の違い）'] };
+  //   scope = 返す条件と範囲（null なら GW_SCOPE、false なら返さない）
+  function fakeVerification(cand, requiredEffects, { env = null, repairs = 0, stoppedBy = null, supported = true, candidateHash, dropCaseFor = null, statusOverride = null, extraCases = [], caseReason = null, scope = null } = {}) {
     const req = Array.isArray(requiredEffects) ? requiredEffects : [];
     const has = (x) => (cand.has[x.field] || []).includes(x.effect);
     //   §0d.1（2026-10-08）: cand.check（`フィールド|効果` → { check, checkReason }）があれば、今の契約の Gateway と同じく効果ごとの確かめ方とイベントごとの有無も返す
@@ -225,7 +229,7 @@ function createNewFlowKit(T) {
     const missing = re.filter(x => x.status === 'missing');
     const machine = [{ name: 'syntax', ok: true, severity: 'info', message: '構文エラーなし' }, { name: 'modern-js', ok: true, severity: 'info', message: '新しいコードに var はありません' }, ...(supported && req.length ? [{ name: 'required-effects', ok: !missing.length, severity: missing.length ? 'block' : 'info', message: missing.length ? `要件未達（${missing.map(x => `${x.field}: ${x.effect}`).join('、')}の処理がありません）` : '必須の効果の処理があります' }] : [])];
     return { version: '1', candidateHash, sameAsPrevious: false, passed: !machine.some(m => !m.ok && m.severity === 'block'), machine,
-      ...(supported ? { requiredEffects: re, behavior: { status: env ? 'not-run' : cases.some(c => c.verdict === 'fail') ? 'failed' : 'passed', reason: env, cases } } : {}),
+      ...(supported ? { requiredEffects: re, behavior: { status: env ? 'not-run' : cases.some(c => c.verdict === 'fail') ? 'failed' : 'passed', reason: env, cases, ...(scope === false ? {} : clone(scope || GW_SCOPE)) } } : {}),
       repairs: { count: repairs, reasons: [], stoppedBy }, unverified: ['実機での動作'] };
   }
   /** JS ありの計画（C1）。questions / cust / turn（requirementOps）/ gatewayPlan で変える */
@@ -238,7 +242,7 @@ function createNewFlowKit(T) {
    * 偽の生成（Gateway の customization-generator）。sequence = 呼び出しごとの候補（CAND のキー）。repairs / stoppedBy = 生成工程の 1 依頼の中の修復。
    * 呼び出しごとに Toolkit が渡した必須の効果（requiredEffects）・feedback の有無を記録する
    */
-  function makeGenerate({ sequence = ['good'], gate = null, env = null, repairs = 0, stoppedBy = null, supported = true, dropCaseFor = null, existingSource = null, generatedOf = null, relatedOmitted = null, statusOverride = null, extraCases = [], caseReason = null } = {}) {
+  function makeGenerate({ sequence = ['good'], gate = null, env = null, repairs = 0, stoppedBy = null, supported = true, dropCaseFor = null, existingSource = null, generatedOf = null, relatedOmitted = null, statusOverride = null, extraCases = [], caseReason = null, scope = null } = {}) {
     const calls = [];
     const impl = async (args) => {
       const n = calls.length;
@@ -254,7 +258,7 @@ function createNewFlowKit(T) {
       const generated = generated0 ? (gwFixed && gwFixed.fixed.length ? { ...gwFixed.generated, gatewayChecks: { ...(gwFixed.generated.gatewayChecks || {}), modernJs: { fixed: gwFixed.fixed.map(f => ({ line: f.line, rule: f.rule, name: f.name })) } } } : generated0) : { strategy: 'NEW_JS_FILE', targetFile: 'lock.js', summary: '承認待ちでは金額を編集不可にします。', code: cand.code, patch: null, events: cust.events, fields: [{ code: 'amount', access: 'CONTROL' }], apis: [], assumptions: [], warnings: [], coverage: [{ requirementId: 'C1', status: 'MET', note: '', text: cust.requirement }] };
       const review = KTCodeReview.review({ generated, customization: cust, plan: args.version.plan, data: clone(DATA_C), scan: null, existingSource });
       const candidateHash = KTScan.candidateHashOf({ strategy: generated.strategy, targetFile: generated.targetFile, code: generated.code, patch: generated.patch, customizationId: 'C1' });
-      return { ok: true, generated, review, ctx: { size: { approxTokens: 1000 } }, existingSource, inputHash: `h${n}`, verification: fakeVerification(cand, args.requiredEffects, { env, repairs, stoppedBy, supported, candidateHash, dropCaseFor, statusOverride, extraCases, caseReason }), candidateHash, requirementIds: [{ id: 'C1', kind: 'customization', text: cust.requirement }], ...(relatedOmitted ? { relatedOmitted: clone(relatedOmitted) } : {}) };
+      return { ok: true, generated, review, ctx: { size: { approxTokens: 1000 } }, existingSource, inputHash: `h${n}`, verification: fakeVerification(cand, args.requiredEffects, { env, repairs, stoppedBy, supported, candidateHash, dropCaseFor, statusOverride, extraCases, caseReason, scope }), candidateHash, requirementIds: [{ id: 'C1', kind: 'customization', text: cust.requirement }], ...(relatedOmitted ? { relatedOmitted: clone(relatedOmitted) } : {}) };
     };
     return { impl, calls };
   }
@@ -307,7 +311,7 @@ function createNewFlowKit(T) {
     return { v, approved, exec, js };
   };
 
-  return { tick, ticks, clone, buildInputs, INPUTS, META, B, A, Q, APPROVER, ROUTE, BASE, CSV, Q_THRESHOLD, Q_MIDDLE, Q_DAYS, Q_HOLIDAYS, Q_LOCK, Q_TIMING, B_SELECT, B_ROUTE, B_UNDER, B_OVER, B_NOTIFY_TO, B_NOTIFY_IF, B_LOCK, STD, req, idBy, reqIdBy, script, normalized, planOk, planFail, planThrow, gateMk, HEALTH, spec, mkStep, PLAN_META, PLAN_V1, answerFor, makeStorage, gate, mount, clickChat, RP, KTCodeReview, DATA_C, LABELS_C, custOf, CUST_C1, ST_C, handlerC, GOOD, BAD, WARN, VALUE, LOCKSAVE, CAND, GEN_EFFECT_FEATURES, EXPECT_OF, NOMATCH_OF, fakeVerification, planJs, makeGenerate, makeConvC, adoptC, finalHtml, stripC, REQUESTS, approveC, adoptOnScreen, prepareOnScreen };
+  return { tick, ticks, clone, buildInputs, INPUTS, META, B, A, Q, APPROVER, ROUTE, BASE, CSV, Q_THRESHOLD, Q_MIDDLE, Q_DAYS, Q_HOLIDAYS, Q_LOCK, Q_TIMING, B_SELECT, B_ROUTE, B_UNDER, B_OVER, B_NOTIFY_TO, B_NOTIFY_IF, B_LOCK, STD, req, idBy, reqIdBy, script, normalized, planOk, planFail, planThrow, gateMk, HEALTH, spec, mkStep, PLAN_META, PLAN_V1, answerFor, makeStorage, gate, mount, clickChat, RP, KTCodeReview, DATA_C, LABELS_C, custOf, CUST_C1, ST_C, handlerC, GOOD, BAD, WARN, VALUE, LOCKSAVE, CAND, GEN_EFFECT_FEATURES, GW_SCOPE, EXPECT_OF, NOMATCH_OF, fakeVerification, planJs, makeGenerate, makeConvC, adoptC, finalHtml, stripC, REQUESTS, approveC, adoptOnScreen, prepareOnScreen };
 }
 
 module.exports = { createNewFlowKit };

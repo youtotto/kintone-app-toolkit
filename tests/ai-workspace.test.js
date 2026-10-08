@@ -239,9 +239,9 @@ console.log('\n--- 2. KTAiConversation.create（fake services。履歴は送ら�
   const r12 = await c.send('通知はいらない');
   //   反映済みの計画の後の依頼は、新しい依頼として仮案から作る（C-1 第 3 段。計画の AI でその計画を直さない）
   assert(r12.intent === 'PROPOSE' && r12.reason === 'NEW_REQUEST_NEW_PLAN_AFTER_EXECUTION' && proposeLog[proposeLog.length - 1] === '通知はいらない' && log.filter(l => l[0] === 'plan').length === 2 && c.planHistory().length === 2 && v2.status === 'EXECUTED' && c.draft() && c.draft().status === 'open', '反映済みの計画は修正しない: 新しい依頼として仮案から作る（旧計画は EXECUTED のまま・計画の AI は呼ばない）');
-  //   守り手の無い期待（担当 R へ報告）: 以前は「反映済みです。この依頼は新しい計画として作ります（基準は今の動作テスト環境…）」と何を基準にするかを先に伝えた（kind 'new-plan-after-execution'）。
-  //   C-1 第 3 段でこの知らせは削除され、仮案のカードにも基準の説明が無い。期待は弱めずに残す
-  assert(c.messages().some(m => m.data && m.data.kind === 'new-plan-after-execution' && /反映済み/.test(m.text) && /新しい計画として作ります/.test(m.text)), '反映済みの計画の後の依頼: 何を基準にするか（反映後の動作テスト環境）を先に伝える（本体に守り手が無い。担当 R へ報告）');
+  //   「反映済みです。この依頼は新しい計画として作ります（基準は今の動作テスト環境…）」と何を基準にするかを先に伝える（kind 'new-plan-after-execution'）。
+  //   C-1 第 3 段: この知らせは仮案の入口で出す（新しい依頼として仮案から作るとき）
+  assert(c.messages().some(m => m.data && m.data.kind === 'new-plan-after-execution' && /反映済み/.test(m.text) && /新しい計画として作ります/.test(m.text)), '反映済みの計画の後の依頼: 何を基準にするか（反映後の動作テスト環境）を先に伝える');
   c.noteExecution({ stage: 'rollback-confirm', prepared: exec.prepared, execution: exec.execution, rollback: { status: 'PREPARED', steps: [] } });
   c.noteExecution({ stage: 'rolled-back', prepared: exec.prepared, execution: exec.execution, rollback: { status: 'ROLLED_BACK_VERIFIED', steps: [{ stepId: 'R1', status: 'ROLLBACK_VERIFIED' }] } });
   assert(c.messages().filter(m => m.type === 'ROLLBACK').length === 1 && v2.status === 'ROLLED_BACK' && c.state.activeExecution.rolledBack === true && /変更前の状態に戻しました/.test(c.messages()[c.messages().length - 1].text), 'rollback → ROLLBACK メッセージ 1 件・rolled-back → 計画は ROLLED_BACK・通知');

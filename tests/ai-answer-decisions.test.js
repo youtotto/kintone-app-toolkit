@@ -393,6 +393,29 @@ await section(async () => {
   assert(KTAiAnswers.interpret({ text: 'モバイルの通知はいらない', open: [], decided: dec, isRequest }).kind === 'none' && KTAiAnswers.interpret({ text: 'モバイルは不要', open: [], decided: [{ ...dec[0], answer: 'モバイルも必要' }], isRequest }).kind === 'answers', 'I6: 論点に触れるだけの修正の依頼は決定事項の更新にしない（「モバイルは不要」のように論点についての答えだけの文は更新）');
 });
 
+// C-1 第 4 段（2026-10-09・K-1）: 決定済みの論点の語（承認者の「部長」「決裁」）を含むだけの名前の変更の依頼は、答えの変更にしない。
+//   答えの変更にするのは、節の論点がすべて決定事項の論点に入っているときか、論点の語と語尾を除いた残りが短いときだけ。決定事項を置き換えず、計画の修正の依頼に回す
+//   （再現: scratchpad rv9a/repro-k1.mjs。最終案の後に送ると、前は承認者の答えがこの文に置き換わり「承認者を変更」と出た）
+await section(async () => {
+  const K1 = '部長承認待ちの名前は「部長決裁待ち」に変えてください';
+  const decA = [{ id: 'd1', topics: ['approver'], answer: '今の「承認待ち」と同じ作業者', status: 'answered' }];
+  const it1 = KTAiAnswers.interpret({ text: K1, open: [], decided: decA, isRequest });
+  assert(it1.kind === 'none' && !it1.updates.length && KTAiAnswers.restatesDecision(K1, ['approver']) === false, `K1-1: 名前の変更の依頼は決定事項（承認者）の答えの変更にしない: ${JSON.stringify(it1)}`);
+  //   今の答えの変更（論点についての答えだけの文・変更の言い方で論点が決定事項に収まる文）は従来どおり
+  const decP = [{ id: 'd1', topics: ['platform'], answer: 'PCだけ', status: 'answered' }];
+  assert(KTAiAnswers.interpret({ text: 'やっぱり両方', open: [], decided: decP, isRequest }).updates.length === 1 && KTAiAnswers.interpret({ text: 'やっぱりモバイルも必要', open: [], decided: decP, isRequest }).updates.length === 1 && KTAiAnswers.interpret({ text: '課長に変えて', open: [], decided: [{ id: 'd1', topics: ['approver'], answer: '部長です', status: 'answered' }], isRequest }).updates.length === 1,
+    'K1-2: 「やっぱり両方」「やっぱりモバイルも必要」「課長に変えて」は答えの変更のまま');
+  //   会話: 承認者に答えた後、名前の変更の依頼を送る → 決定事項は変わらず、計画の修正の依頼（revision.request）に原文が入る
+  const { c, calls } = makeConv([planWith(qs(QA)), planWith([]), planWith([])]);
+  await startPlan(c);
+  await c.send('部長です');
+  await c.send(K1);
+  const last = calls.plan[calls.plan.length - 1];
+  const ap = c.ledger().filter(e => (e.topics || []).includes('approver'));
+  assert(calls.plan.length === 3 && last.revision && String(last.revision.request).includes(K1) && ap.length === 1 && ap[0].status === 'answered' && ap[0].answer === '部長です' && (last.decisions || []).some(d => d.topic === 'approver' && d.answer === '部長です' && !d.previousAnswer),
+    `K1-3: 決定事項（承認者「部長です」）は変わらず、依頼は計画の修正に回る: ${JSON.stringify({ n: calls.plan.length, request: last.revision && last.revision.request, ledger: ap.map(e => [e.status, e.answer]), decisions: last.decisions })}`);
+});
+
 // =========================================================
 console.log('\n--- F. レビューで見つかった不具合の回帰（台帳・状態） ---');
 await section(async () => {
@@ -480,8 +503,8 @@ await section(async () => {
 });
 await section(async () => {
   // S7: 作り直しの間に別の経路で計画が最新になったら、待ちの表示を片づけ、受領の表示は「置き換わった」にする
-  //   C-1 第 3 段（未解決の不足・報告済み）: 最終案の差分更新（reviseWith の finalRevise）は読み込み中の表示（loading）を使わないため、置き換わりを
-  //   superseded にせず「失敗しました（［再試行］…）」にしている（kintoneAppToolkit.user.js の reviseWith の `if (!late() && loading)`）。期待は変えずに残す
+  //   C-1 第 3 段: 最終案の差分更新（reviseWith の finalRevise）は読み込み中の表示（loading）を使わず進みのカードを出す。その場合も、置き換わりは
+  //   superseded にする（「失敗しました（［再試行］…）」にしない）
   const { c, ctl } = makeConv([planWith(qs(QP, QS)), planWith(qs(QS))]);
   await startPlan(c);
   const v1 = c.activePlan();
@@ -614,8 +637,8 @@ await section(async () => {
 });
 await section(async () => {
   // R9: AI が再確認を取り下げて回答済みに戻った決定事項は、その版の生成に渡す
-  //   C-1 第 3 段（未解決の不足・報告済み）: 最終案のパイプラインは、customization が同じなら検証済みの JavaScript を流用する（canReuse）。流用の判定は
-  //   決定事項（decisionsNow）の違いを見ないため、v2（D1 は再確認中で渡さなかった）のコードが v3 に流用され、回答済みに戻った D1 が生成に渡らない。期待は変えずに残す
+  //   C-1 第 3 段: 最終案のパイプラインは、customization が同じなら検証済みの JavaScript を流用する（canReuse）。ただし前の生成に渡さなかった決定事項
+  //   （v2 で再確認中だった D1）が回答済みに戻ったとき・答えが変わったときは流用せず、v3 の生成に D1 を渡す（決定事項が増えただけなら流用する。R10・R11）
   const cust = (platform) => ({ customizationId: 'C1', requirement: 'r', whyStandardInsufficient: 'w', strategy: 'NEW_JS_FILE', implementation: 'JAVASCRIPT', platform, events: ['app.record.create.show'], fields: [], apis: [], existingFiles: [], risks: [], questions: [], dependsOn: [], evidenceIds: [], confidence: 'INFERRED' });
   const V2 = planWith(qs({ question: '外出先でも入力するとのことですが、PCだけでよいですか？', decisionRef: 'D1', reason: 'r' }), { solution: 'CUSTOMIZATION', steps: [], customizations: [cust(['desktop'])] });
   const V3 = planWith([], { solution: 'CUSTOMIZATION', steps: [], customizations: [cust(['desktop'])] });

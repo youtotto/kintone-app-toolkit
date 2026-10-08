@@ -64,7 +64,7 @@ const passVerification = (ctx) => { const re = (ctx && ctx.verification && ctx.v
 const genResponse = (ctx, g) => ({ ok: true, contractVersion: '2.1', meta: { requestId: 'gen-1', usage: { usedThisMonth: 3, monthlyLimit: 20 }, normalization: { warnings: [] }, gateway: { feature: 'customization-generator' } }, generated: { strategy: ctx.customization.strategy, targetFile: ctx.existingFile?.name || 'amountWarning.js', summary: ctx.customization.requirement, events: ctx.customization.events, fields: ctx.customization.fields, apis: [], assumptions: [], warnings: [], gatewayChecks: { security: [] }, patterns: PATTERNS, ...g }, ...(passVerification(ctx) ? { verification: passVerification(ctx) } : {}) });
 const genPatch = (patch = PATCH_GOOD) => ({ strategy: 'EXTEND_EXISTING_JS', targetFile: 'fieldOnOff.js', summary: '完了でも金額を編集不可にする', code: patch.operations.map(o => o.content).join('\n'), patch, events: ['app.record.edit.show'], fields: [{ code: 'amount', access: 'CONTROL' }], apis: [], assumptions: [], warnings: [] });
 //   C-1 第 3 段: 依頼は仮案の流れなので、会話の能力（conversation の proposal）を持つ接続先にする
-const HEALTH = { ok: true, supportedContractVersions: ['2.0', '2.1'], entitlements: [{ product: 'toolkit', features: ['assistant-qa', 'change-planner', 'customization-generator'] }], registry: { toolkit: { 'assistant-qa': { implemented: true, promptVersions: ['1'], conversation: ['requirements', 'proposal'] }, 'change-planner': { implemented: true, promptVersions: ['1'] }, 'customization-generator': { implemented: true, promptVersions: ['1'], verification: ['requirementId', 'requiredEffects', 'effectGroups', 'relatedOmitted', 'appFields', 'saveDialog', 'reasonCategory', 'caseSide', 'eventCases', 'loadFaithful', 'registrationCheck', 'emptyCase', 'hideCondition', 'registrationCounts', 'caseCoverage'] } } }, usage: { monthlyLimit: 20, usedThisMonth: 1 } };
+const HEALTH = { ok: true, supportedContractVersions: ['2.0', '2.1'], entitlements: [{ product: 'toolkit', features: ['assistant-qa', 'change-planner', 'customization-generator'] }], registry: { toolkit: { 'assistant-qa': { implemented: true, promptVersions: ['1'], conversation: ['requirements', 'proposal'] }, 'change-planner': { implemented: true, promptVersions: ['1'] }, 'customization-generator': { implemented: true, promptVersions: ['1'], verification: ['requirementId', 'requiredEffects', 'effectGroups', 'relatedOmitted', 'appFields', 'saveDialog', 'reasonCategory', 'caseSide', 'eventCases', 'loadFaithful', 'registrationCheck', 'emptyCase', 'hideCondition', 'registrationCounts', 'caseCoverage', 'cancelCheck', 'limitCode', 'scopeList'] } } }, usage: { monthlyLimit: 20, usedThisMonth: 1 } };
 const makeStorage = () => { const m = new Map(); return { getItem: (k) => (m.has(k) ? m.get(k) : null), setItem: (k, v) => m.set(k, String(v)), removeItem: (k) => m.delete(k) }; };
 const answerFor = (ctx, text) => ({ ok: true, contractVersion: '2.1', meta: { requestId: 'qa-1', usage: { usedThisMonth: 2, monthlyLimit: 20 }, normalization: { warnings: [] }, ai: { model: 'm', latencyMs: 12, streamed: true, firstTextMs: 4, usage: { input_tokens: 100, output_tokens: 20, input_tokens_details: { cached_tokens: 40 }, output_tokens_details: { reasoning_tokens: 3 } } } }, answer: text, facts: ctx.facts.length ? [{ text: 'fact', evidenceIds: [ctx.facts[0].id] }] : [], analysis: [], recommendations: [], unknowns: [] });
 const tick = () => new Promise(r => setTimeout(r, 0));
@@ -108,10 +108,6 @@ const clickPane = (m, pane, target) => m.$(`kt-ai-pane-${pane}`).dispatch({ type
 const clickTab = (m, pane) => m.$('kt-ai-drawer-tabs').dispatch({ type: 'click', target: { dataset: { pane } } });
 const writes = (m) => m.mock.calls.filter(c => !c.startsWith('GET'));
 const isHidden = (m) => KTAiChatUi.isHiddenMessage(m);
-/**
- * 守り手の無い期待（C-1 第 3 段で削除した古い確認の流れだけが満たしていたもの）。消さずに残し、結果を「保留」として出す（合否には数えない・報告済み）
- */
-const pending = (cond, msg) => console.log(`${cond ? '保留（いまは満たす）' : '保留（守り手なし・未達）'}: ${msg}`);
 // 会話（左）に出ている文だけ（右の作業内容・詳細の中は除く）
 const outsideDetails = (html) => String(html).replace(/<details[\s\S]*?<\/details>/g, '');
 const INTERNAL_IN_CHAT = /\bv[0-9]+\b|requestId|\bR[0-9]+「|\bQ[0-9]+[：:]|\[E[0-9]+\]|Toolkit Review|Code Review|VERIFIED|snapshot|受け付けました|台帳|を検証しました|kt-ai-who">(Toolkit|SYSTEM)</;
@@ -194,10 +190,10 @@ console.log('\n--- §4. 先に確認したいこと（blocking）が残ってい
   const r = await m.panel.startExecutor();
   assert(r === null && !m.conv().activePlan().approval && m.panel.executorState().stage === 'idle' && /id="kt-ai-exec-start"[^>]*disabled/.test(m.$('kt-ai-exec').innerHTML) && /先に確認したいことが 1 件残っています/.test(m.$('kt-ai-exec').innerHTML), '承認しても準備しない・ボタンは押せない・理由を出す');
   //   C-1 第 3 段: 確認したいことのカード（questions）は削除した。最終案のカードの「残る判断」と［この内容で反映する］の理由で知らせる（R10-1・R19-5）。
-  //   注意: 計画の確認事項のおすすめ（recommendation）は、最終案のカードにも右の「変更内容」にも出なくなった（以前は確認したいことのカードに出た。守り手なし・報告済み）
+  //   計画の確認事項のおすすめ（recommendation）は、最終案のカードの「残る判断」に添える（以前は確認したいことのカードに出た）
   const fin = K.stripC(m.chat());
   assert(/先に決めたいことが 1 件残っています/.test(fin) && /残る判断（1 件）\s*1．担当者別の一覧は全員に見せますか/.test(fin), `最終案のカードで知らせる: ${fin.replace(/\s+/g, ' ').slice(-400)}`);
-  pending(/おすすめ：全員に見せる/.test(fin), '計画の確認事項のおすすめ（おすすめ：全員に見せる）を知らせる（以前は確認したいことのカード）');
+  assert(/おすすめ：全員に見せる/.test(fin), '計画の確認事項のおすすめ（おすすめ：全員に見せる）を最終案のカードの「残る判断」で知らせる（以前は確認したいことのカード）');
 }
 
 // =========================================================
@@ -337,8 +333,8 @@ console.log('\n--- §12. 会話の表示の決まり（部品）: 出さない�
     const finU = K.stripC(K.finalHtml(xU));
     const cannotU = (finU.replace(/\s+/g, ' ').match(/実現できない点・対応範囲.{0,160}/) || [''])[0];
     assert(xU.c.activePlan().version === 2 && /計画では対応できないとされた要件: 承認されたら Slack に送る/.test(cannotU) && !/\bR[0-9]+\b|要件：/.test(finU), `対応できないことは番号なしで出す（最終案のカードの「実現できない点」）: ${cannotU}`);
-    //   理由（計画の AI の note「外部サービスとの連携は対象外」）は、従来の会話の知らせには出たが、最終案のカードには出ない（文は発言の引用だけ。守り手なし・報告済み）
-    pending(/外部サービスとの連携は対象外/.test(cannotU), `対応できないことの理由を添える（最終案のカードの「実現できない点」）: ${cannotU}`);
+    //   理由（計画の AI の note「外部サービスとの連携は対象外」）は、最終案のカードの「実現できない点」に添える（以前は会話の知らせに出た）
+    assert(/外部サービスとの連携は対象外/.test(cannotU), `対応できないことの理由を添える（最終案のカードの「実現できない点」）: ${cannotU}`);
     const xN = K.makeConvC({ planImpl: (args) => K.planJs(args, { requirementOps: args.revision ? [K.req('add', { target: '金額', condition: '承認待ち', behavior: '画面に警告を出す', sourceQuotes: ['警告も出して'], planRefs: ['C1'] })] : [] }) });
     await K.adoptC(xN);
     await xN.c.send('警告も出して');

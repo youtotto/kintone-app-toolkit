@@ -60,7 +60,7 @@ const PATTERNS = [{ id: 'field-disable', purpose: '条件に応じてフィー�
 const passVerification = (ctx) => { const re = (ctx && ctx.verification && ctx.verification.requiredEffects) || []; return re.length ? { version: '1', passed: true, machine: [], requiredEffects: re.map(x => ({ requirementId: x.requirementId, requirementIds: x.requirementIds, field: x.field, effect: x.effect, status: 'present' })), behavior: { status: 'passed', reason: null, cases: re.flatMap((x, i) => (x.events && x.events.length ? x.events : [null]).flatMap((ev, j) => (x.condition ? ['match', 'nomatch'] : ['match']).map(side => ({ id: `K${i + 1}-${j + 1}-${side}`, requirementIds: x.requirementIds, field: x.field, effect: x.effect, expect: side === 'match' ? x.effect : ({ lock: 'not-locked', warn: 'not-warned', 'block-save': 'save-allowed', 'set-value': 'value-unchanged', 'show-hide': 'show-hide' })[x.effect], side, ...(ev ? { event: ev } : {}), verdict: 'pass', observed: {}, message: '期待どおり' })))) }, repairs: { count: 0, reasons: [], stoppedBy: null }, unverified: ['実機での動作'] } : undefined; };
 const genResponse = (ctx, g) => ({ ok: true, contractVersion: '2.1', meta: { requestId: 'gen-1', usage: { usedThisMonth: 3, monthlyLimit: 20 }, normalization: { warnings: [] }, gateway: { feature: 'customization-generator' }, patternLibrary: { version: '1', selected: ['field-disable'] } }, generated: { strategy: ctx.customization.strategy, targetFile: ctx.existingFile?.name || 'amountWarning.js', summary: ctx.customization.requirement, events: ctx.customization.events, fields: ctx.customization.fields, apis: [], assumptions: [], warnings: [], gatewayChecks: { security: [] }, patterns: PATTERNS, ...g }, ...(passVerification(ctx) ? { verification: passVerification(ctx) } : {}) });
 const genPatch = (patch = PATCH_GOOD) => ({ strategy: 'EXTEND_EXISTING_JS', targetFile: 'fieldOnOff.js', summary: '完了でも金額を編集不可にする', code: patch.operations.map(o => o.content).join('\n'), patch, events: ['app.record.edit.show'], fields: [{ code: 'amount', access: 'CONTROL' }], apis: [], assumptions: [], warnings: [] });
-const HEALTH = { ok: true, supportedContractVersions: ['2.0', '2.1'], entitlements: [{ product: 'toolkit', features: ['assistant-qa', 'change-planner', 'customization-generator'] }], registry: { toolkit: { 'assistant-qa': { implemented: true, promptVersions: ['1'], conversation: ['requirements', 'stream', 'proposal'] }, 'change-planner': { implemented: true, promptVersions: ['1'] }, 'customization-generator': { implemented: true, promptVersions: ['1'], verification: ['requirementId', 'requiredEffects', 'effectGroups', 'relatedOmitted', 'appFields', 'saveDialog', 'reasonCategory', 'caseSide', 'eventCases', 'loadFaithful', 'registrationCheck', 'emptyCase', 'hideCondition', 'registrationCounts', 'caseCoverage'] } } }, usage: { monthlyLimit: 20, usedThisMonth: 1 } };
+const HEALTH = { ok: true, supportedContractVersions: ['2.0', '2.1'], entitlements: [{ product: 'toolkit', features: ['assistant-qa', 'change-planner', 'customization-generator'] }], registry: { toolkit: { 'assistant-qa': { implemented: true, promptVersions: ['1'], conversation: ['requirements', 'stream', 'proposal'] }, 'change-planner': { implemented: true, promptVersions: ['1'] }, 'customization-generator': { implemented: true, promptVersions: ['1'], verification: ['requirementId', 'requiredEffects', 'effectGroups', 'relatedOmitted', 'appFields', 'saveDialog', 'reasonCategory', 'caseSide', 'eventCases', 'loadFaithful', 'registrationCheck', 'emptyCase', 'hideCondition', 'registrationCounts', 'caseCoverage', 'cancelCheck', 'limitCode', 'scopeList'] } } }, usage: { monthlyLimit: 20, usedThisMonth: 1 } };
 const makeStorage = () => { const m = new Map(); return { getItem: (k) => (m.has(k) ? m.get(k) : null), setItem: (k, v) => m.set(k, String(v)), removeItem: (k) => m.delete(k) }; };
 const answerFor = (ctx, text) => ({ ok: true, contractVersion: '2.1', meta: { requestId: 'qa-1', usage: { usedThisMonth: 2, monthlyLimit: 20 }, normalization: { warnings: [] } }, answer: text, facts: [], analysis: [], recommendations: [], unknowns: [] });
 const tick = () => new Promise(r => setTimeout(r, 0));
@@ -98,10 +98,6 @@ const adoptFinal = async (m) => { const v = await K.adoptOnScreen(m); return v; 
 /** 最終案のカードの［この内容で反映する］で承認する（登録の準備は承認の後だけ） */
 const approveFinal = async (m) => { const v = m.conv().activePlan(); await clickChat(m, 'final-approve', { plan: v.planId, version: String(v.version) }); await ticks(); return v; };
 const writes = (m) => m.mock.calls.filter(c => !c.startsWith('GET'));
-/**
- * 守り手の無い期待（C-1 第 3 段で削除した古い確認の流れだけが満たしていたもの）。消さずに残し、結果を「保留」として出す（合否には数えない・報告済み）
- */
-const pending = (cond, msg) => console.log(`${cond ? '保留（いまは満たす）' : '保留（守り手なし・未達）'}: ${msg}`);
 
 /** Customize タブの mount 用: Monaco とドキュメントの最小スタブ */
 function fakeMonacoWindow(sandboxDoc) {
@@ -275,9 +271,9 @@ console.log('\n--- §38. Pattern Library（Gateway の generated.patterns）: �
   assert(vP && vP.final && m.calls.generate.length === 1, `コード生成（Gateway が patterns を返す）: ${m.calls.generate.length}`);
   const entry = m.panel.generated('C1');
   assert(entry && Array.isArray(entry.generated.patterns) && entry.generated.patterns[0].id === 'field-disable' && entry.generated.patterns[0].preferredStandardAlternatives.length === 2 && !('implementationNotes' in entry.generated.patterns[0]), 'validateGenerated: patterns（id / purpose / implementation / preferredStandardAlternatives）を通す。知識本体は無い');
-  //   右の「コード」に出す操作（act open-code）で開く。注意（C-1 第 3 段・2026-10-08 の時点）: open-code のボタンを出していたコードのカードは削除され、
-  //   最終案のカードと右の確認結果には open-code のボタンが無い（最終案の後に右の「コード」を開く入口が無い。守り手なし・報告済み）。ここでは表示の中身を確かめる
-  pending(/data-act="open-code"/.test(m.chat() + m.$('kt-ai-review-result').innerHTML), '最終案の後に、生成したコードを右の「コード」で開く入口（［コードを見る］）がある');
+  //   右の「コード」に出す操作（act open-code）で開く。C-1 第 3 段（2026-10-08）: open-code のボタンを出していたコードのカードは削除し、
+  //   最終案のカードに［コードを見る］（act open-code）を置いた。最終案の後に右の「コード」を開く入口があることを確かめてから、表示の中身を確かめる
+  assert(/data-act="open-code"/.test(m.chat() + m.$('kt-ai-review-result').innerHTML), '最終案の後に、生成したコードを右の「コード」で開く入口（［コードを見る］）がある');
   await clickChat(m, 'open-code', { cid: 'C1', view: 'code' }); await ticks();
   const codePane = m.$('kt-ai-code-review').innerHTML;
   assert(/参考パターン: <span class="kt-ai-pattern" title="条件に応じてフィールドの編集可否を制御する">field-disable<\/span>/.test(codePane) && /標準設定で代替できないか再確認: フィールドのアクセス権 \/ プロセス管理の「作業者だけ編集可」/.test(codePane) && !/参考パターン/.test(m.chat()), '右「コード」: 参考パターンと「標準設定で代替できないか再確認」（人間への standard-first の再確認）。会話には出さない（Phase 19）');
