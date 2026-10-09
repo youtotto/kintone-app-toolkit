@@ -41,7 +41,7 @@ const unescape = (s) => String(s).replace(/&quot;/g, '"').replace(/&#39;/g, "'")
 function makeFakeDocument() {
   const byId = new Map();
   function makeEl(tag) {
-    const el = { tagName: String(tag).toUpperCase(), id: '', style: {}, _cls: new Set(), children: [], attrs: {}, listeners: {}, _html: '', textContent: '', value: '', disabled: false, title: '' };
+    const el = { tagName: String(tag).toUpperCase(), id: '', style: {}, dataset: {}, _cls: new Set(), children: [], attrs: {}, listeners: {}, _html: '', textContent: '', value: '', disabled: false, title: '' };
     el.classList = {
       toggle(c, on) { if (on === undefined) on = !el._cls.has(c); if (on) el._cls.add(c); else el._cls.delete(c); return on; },
       add(c) { el._cls.add(c); }, remove(c) { el._cls.delete(c); }, contains(c) { return el._cls.has(c); },

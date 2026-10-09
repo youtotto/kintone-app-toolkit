@@ -256,6 +256,48 @@
   const opt = (p) => p.catch(() => null);
 
   // ==========================================
+  // 3.1 設定取得の関所（パネルの表示状態。KTFetchGate）
+  //  - Toolkit が設定情報を取るための自動の通信（起動・タブの表示・解析の予約・作業の基準の自動の取り直しなど）は、
+  //    パネルを展開している間だけ始める。最小化中は始めず（予約もしない）、展開の知らせ（onChange）で、そのとき表示に要るものだけを取る
+  //  - 取得の途中で最小化したら、送った通信は完了させ（結果は取得済みとして残してよい）、まだ送っていない後続（次の段・依存の取得・再試行）は始めない。
+  //    途中の確かめは手形（ticket().live()）で行う。手形は発行の後に一度でも最小化すると無効になる
+  //  - 利用者の明示の操作（［再取得］・反映・登録など）と、設定取得ではない通信（レコード・AI の Gateway・トークン）はこの関所を通さない
+  //  - 最小化の状態の保存・復元は mountRoot のまま（関所は知らせを受けるだけ）
+  // ==========================================
+  const KTFetchGate = (() => {
+    const PAUSED_CODE = 'KT_FETCH_PAUSED';
+    /** 1 つのパネルの関所。open = 展開しているか */
+    function create({ open = true } = {}) {
+      let isOpenNow = !!open;
+      let epoch = 0;   // 最小化するたびに進む（途中の取得の手形を無効にする）
+      const listeners = new Set();
+      const isOpen = () => isOpenNow;
+      /** 展開（true）／最小化（false）を知らせる。変わったときだけ購読者へ知らせる */
+      const setOpen = (on) => {
+        const v = !!on;
+        if (v === isOpenNow) return false;
+        isOpenNow = v;
+        if (!v) epoch += 1;
+        for (const fn of [...listeners]) { try { fn(v); } catch (e) { console.error('[KTFetchGate] 知らせの処理に失敗しました', e); } }
+        return true;
+      };
+      const onChange = (fn) => { listeners.add(fn); return () => listeners.delete(fn); };
+      /** 自動の取得の手形。発行した時に展開していて、その後に最小化していない間だけ live() が真 */
+      const ticket = () => { const e = epoch, ok = isOpenNow; return { live: () => ok && isOpenNow && epoch === e }; };
+      return { isOpen, setOpen, onChange, ticket, epoch: () => epoch };
+    }
+    /** パネルの無いとき（パネルを持たない呼び出し・テストの偽の root）は常に展開として扱う（今までどおり取る） */
+    const ALWAYS = Object.freeze({ isOpen: () => true, setOpen: () => false, onChange: () => () => false, ticket: () => ({ live: () => true }), epoch: () => 0 });
+    const of = (root) => (root && root.ktPanel && root.ktPanel.gate) || ALWAYS;
+    /** 後続を始めずに止めたことを表す例外（呼び出し側は失敗として扱わない） */
+    const paused = () => Object.assign(new Error('パネルを最小化したため、設定の取得の続きを止めました'), { code: PAUSED_CODE, paused: true });
+    const isPaused = (e) => !!(e && (e.paused === true || e.code === PAUSED_CODE));
+    /** shouldContinue（省略可）が偽を返したら止める */
+    const check = (shouldContinue) => { if (typeof shouldContinue === 'function' && !shouldContinue()) throw paused(); };
+    return { create, of, ALWAYS, paused, isPaused, check, PAUSED_CODE };
+  })();
+
+  // ==========================================
   // 2.2 kintone REST 共通クライアント (KTApi)
   //  - Customize / Field Scanner / Plugins に散在していた
   //    getCustomize・downloadByKey・uploadOnce・waitDeploy を一本化する
@@ -268,9 +310,10 @@
     /**
      * カスタマイズ設定を取得する
      * @param {boolean} opt.preferPreview true(既定)ならpreviewを優先し、無ければproductionを返す
+     * @param {Function} [opt.shouldContinue] 自動の取得のとき（設定取得の関所の手形）。偽なら production への切り替え（後続）を始めずに止める（KTFetchGate.paused）
      * @returns {{source:'preview'|'production', data:object}} どちらを取得したかを必ず返す
      */
-    async function getCustomize(app, { preferPreview = true } = {}) {
+    async function getCustomize(app, { preferPreview = true, shouldContinue = null } = {}) {
       if (preferPreview) {
         try {
           const prev = await kintone.api(url('/k/v1/preview/app/customize.json'), 'GET', { app });
@@ -279,6 +322,7 @@
           // preview取得不可（権限不足など）はproductionへフォールバックする
           console.warn('[KTApi] preview customize の取得に失敗しました。production を使用します', e);
         }
+        KTFetchGate.check(shouldContinue);
       }
       const prod = await kintone.api(url('/k/v1/app/customize.json'), 'GET', { app });
       return { source: 'production', data: prod };
@@ -362,9 +406,12 @@
       catch (e) { console.warn('[KTApi] アプリ名キャッシュの保存に失敗しました', e); }
     }
 
-    async function getAppNames(ids) {
+    //   shouldContinue（省略可・設定取得の関所の手形）が偽になったら、残りの 100 件ずつの問い合わせ（後続）を始めない。
+    //   問い合わせなかった ID は戻り値の pending（配列）に入れる（次に要るときに問い合わせる）
+    async function getAppNames(ids, { shouldContinue = null } = {}) {
       const list = [...new Set((ids || []).map(String).filter(v => /^\d+$/.test(v)))];
       const map = new Map();
+      map.pending = [];
       if (!list.length) return map;
 
       // 1) キャッシュから引けるものは先に埋め、APIに問い合わせるIDを減らす
@@ -381,6 +428,7 @@
       // 2) 不足分だけAPIで取得する
       const before = map.size;
       for (let i = 0; i < missing.length; i += 100) {
+        if (typeof shouldContinue === 'function' && !shouldContinue()) { map.pending = missing.slice(i); break; }
         const chunk = missing.slice(i, i + 100).map(Number);
         try {
           const res = await kintone.api(url('/k/v1/apps.json'), 'GET', { ids: chunk });
@@ -446,8 +494,24 @@
    * 指定アプリの各種定義をまとめて取得（生レスポンスのみを返す）
    * @param {number|string} appId
    * @param {(path:string, params:object)=>Promise<any>} [getImpl=kGet] 差し替え用GET関数
+   * @param {object} [opt] shouldContinue: 自動の取得のとき（設定取得の関所の手形）。偽なら段階 2（他アプリの定義）を始めずに止める（KTFetchGate.paused）
    */
-  async function prefetchAppData(appId, getImpl = kGet) {
+  async function prefetchAppData(appId, getImpl = kGet, { shouldContinue = null } = {}) {
+    const core = await prefetchAppCore(appId, getImpl);
+    KTFetchGate.check(shouldContinue);
+    // Phase 13: ルックアップの参照先アプリ（他アプリ）の名前とフィールド定義を read-only で取得する（ルックアップの Review / Executor が参照先の実設定で検証するため）。
+    //   運用環境の設定取得（レコード閲覧権限で可）。権限が無い・存在しない場合は error を残す（推測で補わない）
+    //   Phase 14: アプリアクションのコピー先アプリも同じ形で取得する（転記先フィールドの実在・型・必須を Review が確かめるため）
+    const relatedApps = await fetchRelatedApps(core.fields, getImpl, core.actions);
+    // 生データを読み取り専用で返す（派生計算は別レイヤで）
+    return Object.freeze({ ...core, relatedApps });   // relatedApps: { [appId]: { appId, name, code, revision, fields: properties, error? } }（ルックアップの参照先・アプリアクションのコピー先。Phase 13 / 14）
+  }
+
+  /**
+   * 段階 1: 運用環境の設定の一括取得（REST の GET 14 件と JS API 2 件を 1 回の Promise.all で送る）。他アプリの定義（段階 2・fetchRelatedApps）は含まない。
+   *   起動（展開したとき）はこれだけを取り、他アプリの定義は開発支援で要るときに取る（設定取得の関所。パネルの表示状態に合わせる）
+   */
+  async function prefetchAppCore(appId, getImpl = kGet) {
     // この関数内だけで使う、小さなヘルパ
     const api = (path, extra = {}) => getImpl(path, { app: appId, ...extra });
 
@@ -487,15 +551,9 @@
     const layout = Array.isArray(layoutRaw)
       ? layoutRaw
       : (Array.isArray(layoutRaw?.layout) ? layoutRaw.layout : []);
-    // Phase 13: ルックアップの参照先アプリ（他アプリ）の名前とフィールド定義を read-only で取得する（ルックアップの Review / Executor が参照先の実設定で検証するため）。
-    //   運用環境の設定取得（レコード閲覧権限で可）。権限が無い・存在しない場合は error を残す（推測で補わない）
-    //   Phase 14: アプリアクションのコピー先アプリも同じ形で取得する（転記先フィールドの実在・型・必須を Review が確かめるため）
-    const relatedApps = await fetchRelatedApps(fields, getImpl, actions);
 
-    // 生データを読み取り専用で返す（派生計算は別レイヤで）
-    return Object.freeze({
+    return {
       appId,
-      relatedApps,   // { [appId]: { appId, name, code, revision, fields: properties, error? } }（ルックアップの参照先・アプリアクションのコピー先。Phase 13 / 14）
       fields,     // kintone.app.getFormFields()（REST form/fields の properties 相当）
       layout,     // kintone.app.getFormLayout()（REST form/layout の layout 相当。グループ・要素IDを含む）
       views,      // /k/v1/app/views               （null可）
@@ -511,11 +569,14 @@
       recordAcl,    // /k/v1/record/acl
       fieldAcl,   // /k/v1/field/acl
       actions,    // /k/v1/app/actions             （null可）
-      plugins,     // /k/v1/plugins  
-    });
+      plugins,     // /k/v1/plugins
+    };
   }
 
-  /** ルックアップの参照先アプリの基本情報とフィールド定義（read-only）。失敗はアプリごとに { error: { code, message } } */
+  /**
+   * ルックアップの参照先アプリの基本情報とフィールド定義（read-only）。失敗はアプリごとに { error: { code, message } }
+   *   アプリごとの 2 件（基本情報・フィールド定義）は並べて送る（1 回のまとまり。途中で最小化しても、送った分の後に続けて送るものが無い）
+   */
   async function fetchRelatedApps(fields, getImpl = kGet, actions = null) {
     const ids = [];
     const add = (app) => { if (app != null && String(app) !== '' && !ids.includes(String(app))) ids.push(String(app)); };
@@ -526,8 +587,10 @@
     await Promise.all(ids.map(async (id) => {
       const errOf = (e) => ({ code: e?.code ?? null, message: String(e?.message ?? e ?? ''), status: e?.status ?? null });
       let info = null, infoErr = null, def = null, defErr = null;
-      try { info = await getImpl('/k/v1/app', { id }); } catch (e) { infoErr = errOf(e); }
-      try { def = await getImpl('/k/v1/app/form/fields', { app: id }); } catch (e) { defErr = errOf(e); }
+      await Promise.all([
+        (async () => { try { info = await getImpl('/k/v1/app', { id }); } catch (e) { infoErr = errOf(e); } })(),
+        (async () => { try { def = await getImpl('/k/v1/app/form/fields', { app: id }); } catch (e) { defErr = errOf(e); } })(),
+      ]);
       out[id] = { appId: id, name: info?.name ?? null, code: info?.code ?? null, revision: def?.revision ?? null, fields: def?.properties ?? null, ...(defErr ? { error: defErr } : infoErr && !def ? { error: infoErr } : {}) };
     }));
     return out;
@@ -699,6 +762,8 @@
       setState('running');
       try {
         const res = await runner(opt);
+        // 自動の解析の途中でパネルを最小化した（設定取得の関所）: 失敗にもキャッシュにもせず、解析前の状態に戻す（展開したら続きから）
+        if (res && res.paused) { setState('idle'); return { ok: false, reason: 'paused', paused: true }; }
         setState(res?.fromCache ? 'cached' : 'done', { at: res?.scannedAt || new Date().toISOString(), error: null });
         return { ok: true, ...res };
       } catch (e) {
@@ -764,16 +829,47 @@
       try { localStorage.setItem(AUTO_KEY, on ? '1' : '0'); } catch (e) { }
     };
 
-    /** ブラウザが空いたタイミングで自動実行する（初期描画をブロックしない） */
-    const scheduleAuto = (opt = {}) => {
-      if (!isAutoEnabled()) { setState('skipped'); return; }
-      const kick = () => { run({ silent: true, auto: true }); };
+    // ---- 自動の解析の予約（設定取得の関所 opt.gate を渡すと、パネルを展開している間だけ動く）----
+    //   最小化中は予約しない（展開の知らせで 1 回だけ予約し直す）。予約の時点で最小化していれば動かない。
+    //   解析の途中で最小化したら（runner が { paused } を返す）、送っていない取得は始めずに解析前の状態に戻し、展開したら続きから
+    let autoGate = null, autoWanted = false, autoQueued = false, autoUnsub = null;
+    const queueAuto = () => {
+      if (autoQueued) return;
+      autoQueued = true;
+      const kick = () => { autoQueued = false; kickAuto(); };
       if (typeof window.requestIdleCallback === 'function') {
         window.requestIdleCallback(kick, { timeout: 3000 });
       } else {
         setTimeout(kick, 500);
       }
     };
+    const kickAuto = async () => {
+      if (!autoWanted) return;
+      if (autoGate && !autoGate.isOpen()) return;   // 最小化中は動かない（展開の知らせで予約し直す）
+      autoWanted = false;
+      const t = autoGate ? autoGate.ticket() : null;
+      const r = await run({ silent: true, auto: true, ...(t ? { shouldContinue: t.live } : {}) });
+      if (r && r.paused) { autoWanted = true; if (autoGate && autoGate.isOpen()) queueAuto(); }
+    };
+    /** ブラウザが空いたタイミングで自動実行する（初期描画をブロックしない） */
+    const scheduleAuto = (opt = {}) => {
+      if (!isAutoEnabled()) { setState('skipped'); return; }
+      if (opt.gate && opt.gate !== autoGate) {
+        if (autoUnsub) { try { autoUnsub(); } catch (e) { } }
+        autoGate = opt.gate;
+        autoUnsub = typeof autoGate.onChange === 'function' ? autoGate.onChange((open) => { if (open && autoWanted) queueAuto(); }) : null;
+      }
+      autoWanted = true;
+      if (!autoGate || autoGate.isOpen()) queueAuto();
+    };
+    /** 自動の解析を待っているか（予約済み・展開待ち・途中で止めた続き） */
+    const autoPending = () => autoWanted;
+    // 自動の解析を途中で止めたときに取れていたカスタマイズ設定（続きで取り直さない）。1 分を過ぎたもの・設定の変更の知らせ（dropHeldCustomize）の後は使わない
+    const HELD_MAX_AGE_MS = 60 * 1000;
+    let heldCz = null;
+    const holdCustomize = (cz) => { heldCz = cz ? { cz, at: Date.now() } : null; };
+    const takeHeldCustomize = () => { const h = heldCz; heldCz = null; return h && (Date.now() - h.at) < HELD_MAX_AGE_MS ? h.cz : null; };
+    const dropHeldCustomize = () => { heldCz = null; };
 
     // ==========================================
     // 未知フィールドコード候補の抽出（純粋なテキスト解析）
@@ -2426,7 +2522,7 @@
     }
 
     return {
-      register, run, scheduleAuto, onChange, getStatus, setLastPayload, getLastPayload,
+      register, run, scheduleAuto, autoPending, holdCustomize, takeHeldCustomize, dropHeldCustomize, onChange, getStatus, setLastPayload, getLastPayload,
       hashText, candidateHashOf, analyzeFile, summarizeFiles, fieldList, buildPayload, isKnownLibraryUrl, KNOWN_LIBRARY_HOSTS,
       buildSignature, loadCache, saveCache, clearCache,
       isAutoEnabled, setAutoEnabled,
@@ -2860,11 +2956,18 @@
     /**
      * 作業の基準を取得する（動作テスト環境 ＋ 比較用の運用環境。並列で GET だけ）。
      * @param {object} p { appId, getImpl(path, params), download(fileKey), fetchRelated(fields, actions) → relatedApps, incoming, appNames（Map）, plugins, now }
+     *   shouldContinue（省略可・自動の取得のときの設定取得の関所の手形）: 段の間（設定の一括取得 → 他アプリの定義 → 動作テスト環境の本文 → 運用環境の本文）で確かめ、
+     *     偽なら次の段を始めずに { ok: false, paused: true, status: 'PAUSED', partial } を返す（送った通信は完了させる。基準としては使わない）。
+     *   resume（省略可）: 前に止めたときの partial。取れている段は取り直さず、足りない段だけを取る（呼び出し側が有効期限・設定の変更を確かめて渡す）
      * @returns base { baseVersion, env, ok, status, message, loadedAt, appId, revision { preview, production }, data, files, productionData, productionFiles, errors, diff, deps, scan, incoming }
      */
-    async function load({ appId, getImpl, download = null, fetchRelated = null, incoming = null, appNames = null, plugins = null, now = () => Date.now() } = {}) {
-      const started = now();
-      const [prev, prod] = await Promise.all([fetchEnv(ENV.PREVIEW, appId, getImpl), fetchEnv(ENV.PRODUCTION, appId, getImpl)]);
+    async function load({ appId, getImpl, download = null, fetchRelated = null, incoming = null, appNames = null, plugins = null, now = () => Date.now(), shouldContinue = null, resume = null } = {}) {
+      const r0 = resume && typeof resume === 'object' && Array.isArray(resume.envs) ? resume : null;
+      const started = r0 ? r0.started : now();
+      const [prev, prod] = r0 ? r0.envs : await Promise.all([fetchEnv(ENV.PREVIEW, appId, getImpl), fetchEnv(ENV.PRODUCTION, appId, getImpl)]);
+      const partial = { started, envs: [prev, prod] };
+      const live = () => typeof shouldContinue !== 'function' || !!shouldContinue();
+      const pausedBase = () => ({ ok: false, paused: true, status: 'PAUSED', message: 'パネルを最小化したため、作業の基準の取得の続きを止めました', loadedAt: new Date(started).toISOString(), errors: [], partial });
       const coreErr = prev.errors.filter(e => e.core);
       const base = {
         baseVersion: BASE_VERSION, env: ENV.PREVIEW, appId: String(appId ?? ''), loadedAt: new Date(started).toISOString(),
@@ -2878,13 +2981,28 @@
         return base;
       }
       let relatedApps = {};
-      if (typeof fetchRelated === 'function') { try { relatedApps = await fetchRelated(prev.raw.fields?.properties || {}, prev.raw.actions || null) || {}; } catch (e) { relatedApps = {}; base.errors.push({ env: ENV.PRODUCTION, what: 'relatedApps', label: '他アプリの定義', core: false, ...errOf(e) }); } }
-      base.relatedLoadedAt = new Date(now()).toISOString();
+      if (r0 && r0.related) { relatedApps = r0.related.apps || {}; base.errors.push(...(r0.related.errors || [])); base.relatedLoadedAt = r0.related.at; }
+      else {
+        if (!live()) return pausedBase();
+        const relatedErrors = [];
+        if (typeof fetchRelated === 'function') { try { relatedApps = await fetchRelated(prev.raw.fields?.properties || {}, prev.raw.actions || null) || {}; } catch (e) { relatedApps = {}; relatedErrors.push({ env: ENV.PRODUCTION, what: 'relatedApps', label: '他アプリの定義', core: false, ...errOf(e) }); } }
+        base.errors.push(...relatedErrors);
+        base.relatedLoadedAt = new Date(now()).toISOString();
+        partial.related = { apps: relatedApps, errors: relatedErrors, at: base.relatedLoadedAt };
+      }
       base.data = dataFrom(prev.raw, { appId, relatedApps, plugins });
-      base.files = await loadFiles(prev.raw.customize, download, { env: ENV.PREVIEW });
+      // 本文を取るファイル（FILE）があるときだけ、取る前に確かめる（取るものが無ければ止める理由が無い）
+      const needsDownload = (cz) => typeof download === 'function' && ['desktop', 'mobile'].some(t => (cz?.[t]?.js || []).some(e => e && e.type !== 'URL' && e.file?.fileKey));
+      if (r0 && Array.isArray(r0.files)) base.files = r0.files;
+      else {
+        if (needsDownload(prev.raw.customize) && !live()) return pausedBase();
+        base.files = await loadFiles(prev.raw.customize, download, { env: ENV.PREVIEW });
+      }
+      partial.files = base.files;
       const prodCoreErr = prod.errors.filter(e => e.core);
       if (!prodCoreErr.length) {
         base.productionData = dataFrom(prod.raw, { appId, plugins });   // 差の説明用（基準ではない）
+        if (needsDownload(prod.raw.customize) && !live()) return pausedBase();
         base.productionFiles = await loadFiles(prod.raw.customize, download, { env: ENV.PRODUCTION });
         base.diff = { available: true, reason: null, ...diffEnvs({ preview: base.data, production: base.productionData, previewFiles: base.files, productionFiles: base.productionFiles }) };
       } else base.diff = { available: false, items: [], counts: { total: 0, byKind: {} }, reason: prodCoreErr.map(e => `${e.label}: ${e.message || e.code || '不明'}`).join(' / ') };
@@ -30375,20 +30493,56 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
       if (!devBaseLoader || !devBase) return legacy;
       return KTDevBase.inputsOf(devBase, legacy) || { ...legacy, environment: KTDevBase.environmentOf(devBase) };
     };
-    /** 作業の基準を取り直す（同時に 1 回だけ）。maxAgeMs 以内に取ったものがあればそれを使う */
+    // 設定取得の関所（パネルの表示状態）: 自動の取り直し（接続・タブを開いた・承認の欄の準備・登録や戻しの後の続き）は、d.canAutoFetch() が真
+    //   （パネルを展開していて開発支援を表示している。省略時は常に真＝今までどおり）のときだけ始める。偽なら取らずに「次に見えたときに取る」印だけを付ける（devBaseWanted）。
+    //   自動の取得の途中で見えなくなったら、送っていない段（他アプリの定義・本文）は始めずに止め、取れた段は続きのために残す（devBasePartial。次は足りない段だけ）。
+    //   利用者が明示的に始めた処理（質問・計画・生成・登録・反映・［再取得］・相談）は止めない（進行中の自動の取得に合流したら、止めずに最後まで取る）。
+    //   Toolkit のほかの場所で設定を変えたら（invalidateDevBase）、今の基準を古いとし（devBaseStale）、期限の内でも再利用せずに次に要るときに取り直す
+    const DEV_BASE_AUTO_REASONS = ['connect', 'tab', 'precheck', 'after-js-register', 'after-js-rollback', 'after-rollback'];
+    const DEV_BASE_RESUME_MAX_AGE_MS = 60 * 1000;   // 止めた段の続きを使ってよい間（タブを開いたときの再利用の期限と同じ）
+    const canAutoFetch = typeof d.canAutoFetch === 'function' ? () => { try { return d.canAutoFetch() !== false; } catch (e) { return true; } } : () => true;
+    let devBaseStale = false, devBaseWanted = false, devBaseGen = 0, devBasePartial = null, devBaseWaiters = 0, devBaseOwnDeferred = false, devBasePausedP = null;
+    /** 進行中の取得に明示の処理が合流する（自動の取得でも途中で止めない。合流より先に止まっていたら、続きを明示で取る） */
+    const joinDevBase = () => {
+      const p = devBasePromise; devBaseWaiters += 1;
+      return p.finally(() => { devBaseWaiters -= 1; }).then((r) => (devBasePausedP === p ? refreshDevBase({ reason: 'resume' }) : r));
+    };
+    /** 作業の基準を取り直す（同時に 1 回だけ）。maxAgeMs 以内に取ったものがあればそれを使う（古い印があれば使わない） */
     async function refreshDevBase({ maxAgeMs = 0, reason = null } = {}) {
       if (!devBaseLoader) return null;
-      if (devBase && maxAgeMs > 0 && (nowMs() - devBaseAt) < maxAgeMs) return devBase;
-      if (devBasePromise) return devBasePromise;
+      const auto = DEV_BASE_AUTO_REASONS.includes(reason);
+      if (auto && !canAutoFetch()) {
+        devBaseWanted = true;
+        if (/^after-/.test(reason)) { devBaseStale = true; if (reason === 'after-js-register') devBaseOwnDeferred = true; }   // 自分の登録・戻しで変わった: 次に要るときに取り直す
+        return devBase;
+      }
+      if (devBase && !devBaseStale && maxAgeMs > 0 && (nowMs() - devBaseAt) < maxAgeMs) return devBase;
+      if (devBasePromise) return auto ? devBasePromise : joinDevBase();
       const seq = ++devBaseSeq;
+      const gen = devBaseGen, ownDeferred = devBaseOwnDeferred;
+      const p0 = devBasePartial; devBasePartial = null;
+      const resume = p0 && p0.gen === gen && (nowMs() - p0.at) < DEV_BASE_RESUME_MAX_AGE_MS ? p0.partial : null;
+      const startedAt = resume ? p0.at : nowMs();
+      const shouldContinue = auto ? () => devBaseWaiters > 0 || canAutoFetch() : null;
       devBasePromise = (async () => {
         let b = null;
-        try { b = await devBaseLoader({ reason }); }
+        try { b = await devBaseLoader({ reason, shouldContinue, resume }); }
         catch (e) { b = { ok: false, status: 'FETCH_FAILED', message: e?.message || String(e), loadedAt: new Date(nowMs()).toISOString(), errors: [] }; }
-        if (seq === devBaseSeq) { devBase = b || { ok: false, status: 'FETCH_FAILED', message: '作業の基準を取得できませんでした', loadedAt: new Date(nowMs()).toISOString(), errors: [] }; devBaseAt = nowMs(); }
+        if (b && b.paused) {
+          // 途中で止めた（最小化・開発支援を閉じた）: 基準は前のまま（描き直さない）。取れた段は続きのために残し、次に見えたときに足りない段だけを取る
+          if (seq === devBaseSeq) { devBasePartial = b.partial && gen === devBaseGen ? { partial: b.partial, at: startedAt, gen } : null; devBaseWanted = true; }
+          devBasePausedP = devBasePromise;
+          devBasePromise = null;
+          return devBase;
+        }
+        if (seq === devBaseSeq) {
+          devBase = b || { ok: false, status: 'FETCH_FAILED', message: '作業の基準を取得できませんでした', loadedAt: new Date(nowMs()).toISOString(), errors: [] }; devBaseAt = nowMs();
+          devBaseWanted = false;
+          if (gen === devBaseGen) { devBaseStale = false; devBaseOwnDeferred = false; }
+        }
         devBasePromise = null;
         // 段階 C（C4・R16）: 承認した最終案の基準（stamp）と今の動作テスト環境が違えば承認を外す（自分の反映の直後の取り直しは、反映の側で基準を進める）
-        try { const vA = conv ? conv.activePlan() : null; if (vA && vA.approval && devBase && devBase.ok && !['after-apply', 'after-js-register'].includes(reason)) { const stNow = KTDevBase.stamp(devBase); const ref = vA.approval.baseStamp; if (ref && stNow && ref.fingerprint && stNow.fingerprint && ref.fingerprint !== stNow.fingerprint) conv.markStale('承認の後に動作テスト環境の設定が変わりました。'); } } catch (e) { }
+        try { const vA = conv ? conv.activePlan() : null; if (vA && vA.approval && devBase && devBase.ok && !['after-apply', 'after-js-register'].includes(reason) && !ownDeferred) { const stNow = KTDevBase.stamp(devBase); const ref = vA.approval.baseStamp; if (ref && stNow && ref.fingerprint && stNow.fingerprint && ref.fingerprint !== stNow.fingerprint) conv.markStale('承認の後に動作テスト環境の設定が変わりました。'); } } catch (e) { }
         // 反映の記録の「運用環境との差」の件数も取り直した結果にする（以前はヘッダーだけが新しくなった）
         try { renderHeader(); renderBaseDiff(); renderApplyLog(); } catch (e) { }
         //   §0e.1（2026-10-09）: 作業の基準が変わったら、最終案の承認の欄の準備をやり直す（承認の前だけ。同じ基準なら何もしない）
@@ -30397,6 +30551,10 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
       })();
       return devBasePromise;
     }
+    /** Toolkit のほかの場所（Customize の反映・プラグインの追加など）で設定を変えた: 今の基準を古いとし、次に要るときに取り直す（ここでは取らない。設定取得の関所） */
+    function invalidateDevBase() { devBaseGen += 1; devBaseStale = true; devBasePartial = null; }
+    /** 動作テスト環境に書き込んだ（反映・登録・戻す）: Toolkit のほかの場所（Customize の一覧など）の取得済みの設定を古いとする（取得はしない） */
+    const notifySettingsChanged = (what) => { if (typeof d.onSettingsChanged === 'function') { try { d.onSettingsChanged({ preview: true, production: false, what }); } catch (e) { } } };
     const BASE_KIND_JA = { plan: '変更計画の作成', generate: 'コードの生成', register: 'JavaScript の登録', execute: '動作テスト環境への反映' };
     /** 計画・生成・登録の前に基準を取り直す。取れなければ理由つきで止める（運用環境の設定で代用しない） */
     async function ensureDevBase(kind) {
@@ -30484,8 +30642,9 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
         // Phase 21: 質問も最新の動作テスト環境を基準に答える（30 秒以内に取ったものは使い回す）。取れなければ運用環境の設定で答え、そのことを Context に入れる
         // 応答の速さ（2026-10-07）: 取得済みの基準があれば待たずに使い、古ければ裏で取り直す（取り直しが走っている間＝反映・登録の直後は、それを待つ）
         if (devBaseLoader) {
-          if (devBase && devBase.ok && !devBasePromise) { if (nowMs() - devBaseAt >= DEV_BASE_ASK_MAX_AGE_MS) refreshDevBase({ reason: 'ask' }); }
-          else await (devBasePromise || refreshDevBase({ maxAgeMs: DEV_BASE_ASK_MAX_AGE_MS, reason: 'ask' }));   // 取り直し中はその完了を待つ（refreshDevBase は 30 秒以内の基準を即返すので、Promise を直接待つ）
+          //   設定取得の関所: Toolkit が設定を変えて古い印がある基準は使わずに、取り直しを待つ。進行中の自動の取得には合流して最後まで取る（joinDevBase）
+          if (devBase && devBase.ok && !devBasePromise && !devBaseStale) { if (nowMs() - devBaseAt >= DEV_BASE_ASK_MAX_AGE_MS) refreshDevBase({ reason: 'ask' }); }
+          else await (devBasePromise ? joinDevBase() : refreshDevBase({ maxAgeMs: DEV_BASE_ASK_MAX_AGE_MS, reason: 'ask' }));   // 取り直し中はその完了を待つ（refreshDevBase は 30 秒以内の基準を即返すので、Promise を直接待つ）
         }
         perf.baseWaitMs = nowMs() - tb;
         const tc = nowMs();
@@ -30514,8 +30673,8 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
         const perf = { baseWaitMs: 0, contextMs: 0, requestMs: 0 };
         const tb = nowMs();
         if (devBaseLoader) {
-          if (devBase && devBase.ok && !devBasePromise) { if (nowMs() - devBaseAt >= DEV_BASE_ASK_MAX_AGE_MS) refreshDevBase({ reason: 'propose' }); }
-          else await (devBasePromise || refreshDevBase({ maxAgeMs: DEV_BASE_ASK_MAX_AGE_MS, reason: 'propose' }));
+          if (devBase && devBase.ok && !devBasePromise && !devBaseStale) { if (nowMs() - devBaseAt >= DEV_BASE_ASK_MAX_AGE_MS) refreshDevBase({ reason: 'propose' }); }
+          else await (devBasePromise ? joinDevBase() : refreshDevBase({ maxAgeMs: DEV_BASE_ASK_MAX_AGE_MS, reason: 'propose' }));
         }
         perf.baseWaitMs = nowMs() - tb;
         const inputs = subject ? withConsultedSource(inputsNow()) : inputsNow();
@@ -31543,6 +31702,7 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
       const v = planIndex().get(`${jsExec.planId}:${jsExec.version}`); if (v && jsExec.execution?.put?.ok) v.jsExecutionId = jsExec.execution.executionId;
       renderJsReg();
       if (jsExec.execution?.put?.ok && typeof d.rescanJs === 'function') { try { await d.rescanJs(); fillTargets(); renderHeader(); } catch (e) { } }
+      if (jsExec.execution?.put?.ok) notifySettingsChanged('js-register');   // 設定取得の関所: Customize の一覧など、ほかの場所の取得済みを古いとする
       if (devBaseLoader) refreshDevBase({ reason: 'after-js-register' });   // Phase 21: 登録した後の動作テスト環境を次の基準にする
       return jsExec.execution;
     }
@@ -31562,6 +31722,7 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
       catch (e) { jsExec.error = e?.message || String(e); }
       jsExec.stage = 'rolled-back'; renderJsReg();
       if (typeof d.rescanJs === 'function') { try { await d.rescanJs(); fillTargets(); renderHeader(); } catch (e) { } }
+      notifySettingsChanged('js-rollback');
       if (devBaseLoader) refreshDevBase({ reason: 'after-js-rollback' });   // Phase 21
       return jsExec.rollback;
     }
@@ -31863,6 +32024,7 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
     //   既存の startExecutor / confirmExecutor / startJsRegister / confirmJsRegister と照合（承認・計画の取り違え・依存・再検査など）はそのまま使う
     // ==================================================================
     const finalPre = { key: null, seq: 0, status: 'idle', planId: null, version: null, settings: null, js: null, parts: null, items: null, reasons: [] };
+    let finalPreDeferred = false;   // 設定取得の関所で見送った準備（開発支援が見えたときに始める）
     let finalRun = null, finalRunSeq = 0;
     const finalPreView = () => ({ planId: finalPre.planId, version: finalPre.version, status: finalPre.status, items: finalPre.items, reasons: finalPre.reasons, notice: finalPre.notice || null, settingsStatus: finalPre.settings ? finalPre.settings.status : null, jsStatus: finalPre.js ? finalPre.js.status : null });
     /** 承認済み扱い（却下した手順以外）の標準設定の入力。承認の前の準備でも、承認の後の reviewOutput と同じ手順の組になる */
@@ -31952,9 +32114,14 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
       return [...new Set(out)];
     }
     /** 準備（読み取りだけ）。refreshBase = 作業の基準を取り直す（承認の欄の準備） */
+    //   設定取得の関所: 自動で始まる準備なので、段（作業の基準 → 設定の準備 → JavaScript の準備）の前に canAutoFetch() を確かめ、
+    //   見えなくなっていたら次の段を始めずに { paused } を返す（見えたときにやり直す。runFinalPrecheck）
     async function computePrecheck(v, { onBase = null } = {}) {
+      if (!canAutoFetch()) return { paused: true };
       if (devBaseLoader) {
+        const pausedBefore = devBasePausedP;
         const b = await refreshDevBase({ maxAgeMs: DEV_BASE_ASK_MAX_AGE_MS, reason: 'precheck' });
+        if (!canAutoFetch() || devBasePausedP !== pausedBefore) return { paused: true };   // 基準の取得が途中で止まった（前の基準で準備しない）
         if (!b || !b.ok) return { settings: null, js: null, parts: null, items: null, reasons: [`動作テスト環境の今の設定を取得できませんでした（${b?.message || '不明'}）。ヘッダーの［再取得］で取り直してください。`] };
       }
       if (typeof onBase === 'function') onBase();
@@ -31962,7 +32129,9 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
       const hasSettings = !!out && KTPlanExecutor.classifySteps(out).some(s => s.status === 'PENDING');
       let settings = null;
       if (hasSettings) { try { settings = await KTPlanExecutor.prepare(out, { api: executor.api, appId: executor.appId }); } catch (e) { settings = { status: 'BLOCKED', blockers: [{ code: 'PREPARE_FAILED', message: `反映の前の準備に失敗しました: ${e?.message || String(e)}` }], steps: [], stale: null, revision: {} }; } }
-      const js = Object.keys(v.generated || {}).length ? await jsPrecheck(v) : null;
+      const hasJs = Object.keys(v.generated || {}).length > 0;
+      if (hasJs && !canAutoFetch()) return { paused: true };
+      const js = hasJs ? await jsPrecheck(v) : null;
       return { settings, js, parts: partsOf(settings, js), items: preItemsOf(settings, js, v), reasons: preReasonsOf(settings, js, v) };
     }
     function applyPrecheckResult(v, r, key = finalPreKeyOf(v)) {
@@ -31980,6 +32149,7 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
       const key = finalPreKeyOf(v);
       if (same && ['base', 'running'].includes(finalPre.status) && finalPre.runKey === key) return;   // 同じ条件の準備が進行中
       if (same && !['base', 'running'].includes(finalPre.status) && finalPre.key === key) return;    // 同じ条件の準備が済んでいる
+      if (!canAutoFetch()) { finalPreDeferred = true; return; }   // 設定取得の関所: 最小化中・開発支援を表示していない間は始めない（見えたときに始める。onVisible）
       runFinalPrecheck(v, key);   // 進行中の準備と条件が違えば、やり直す（古い結果は seq で捨てる）
     }
     async function runFinalPrecheck(v, key = finalPreKeyOf(v)) {
@@ -31991,6 +32161,8 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
       try { r = await computePrecheck(v, { onBase: () => { if (seq === finalPre.seq) { finalPre.runKey = finalPreKeyOf(v); if (finalPre.status === 'base') { finalPre.status = 'running'; renderChat(); } } } }); }
       catch (e) { r = { settings: null, js: null, parts: null, items: null, reasons: [`反映の前の準備に失敗しました: ${e?.message || String(e)}`] }; }
       if (seq !== finalPre.seq) return;
+      // 途中で見えなくなった（設定取得の関所）: 後続の取得は始めずに準備前に戻し、見えたときにやり直す
+      if (r && r.paused) { Object.assign(finalPre, { status: 'idle', key: null, runKey: null }); finalPreDeferred = true; renderChat(); return; }
       if (!conv || conv.activePlan() !== v || v.approval) { finalPre.status = 'idle'; return; }
       applyPrecheckResult(v, r, finalPre.runKey);
       renderChat(); renderExec();
@@ -32247,6 +32419,7 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
       } catch (e) { execState.error = e?.message || String(e); execState.execution = execState.execution || { status: 'FAILED', steps: execState.prepared.steps, simulation: null, reanalysis: null }; }
       execState.stage = 'done'; renderExec();
       // Phase 21: 反映した後の動作テスト環境を次の作業の基準にする（取り直す）
+      notifySettingsChanged('apply');
       if (devBaseLoader) await refreshDevBase({ reason: 'after-apply' });
       // 段階 C（C4）: 承認済みの最終案は、設定の手順が止まらずに反映できたら続けて JavaScript の登録へ（止まったら登録しない）。承認の基準は反映後の環境に進める
       //   §0e.1（2026-10-09・不具合 A）: 止まらずに反映できたかは、準備の時点で実行する手順（PENDING）だけで判定する（JavaScript の手順 CUSTOMIZATION_REQUIRED は数えない）
@@ -32291,6 +32464,7 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
         await KTPlanExecutor.executeRollback(execState.rollback, { api: executor.api, execution: execState.execution, onProgress: () => renderExec() });
       } catch (e) { execState.error = e?.message || String(e); }
       execState.stage = 'rolled-back'; renderExec();
+      notifySettingsChanged('rollback');
       if (devBaseLoader) refreshDevBase({ reason: 'after-rollback' });   // Phase 21
       return execState.rollback;
     }
@@ -32734,10 +32908,22 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
     if (typeof window !== 'undefined' && typeof window.addEventListener === 'function') {
       window.addEventListener('beforeunload', (e) => { if (!unrevertedPreviewChange()) return undefined; e.preventDefault(); e.returnValue = ''; return ''; });
     }
+    /**
+     * 開発支援が見えたとき（タブを開いた・開発支援を表示したまま展開した。設定取得の関所）: 対象一覧・見出しを最新にし、
+     *   接続済みなら 1 分より古い・古い印のある作業の基準を取り直す（有効なら取らない）。見送った承認の欄の準備を始める
+     */
+    function onVisible() {
+      try { fillTargets(); renderHeader(); } catch (e) { }
+      if (devBaseLoader && isConnected()) refreshDevBase({ maxAgeMs: 60 * 1000, reason: 'tab' });
+      if (finalPreDeferred) { finalPreDeferred = false; try { scheduleFinalPrecheck(); } catch (e) { } }
+    }
     return {
       unrevertedPreviewChange,
       // Phase 21: 開発支援の作業基準（最新の動作テスト環境）
       devBase: () => devBase, refreshDevBase, inputs: inputsNow,
+      // 設定取得の関所（パネルの表示状態）: 見えたとき・ほかの場所で設定を変えたとき・読み取り（テストと画面の確認用）
+      onVisible, invalidateDevBase,
+      devBaseFetchState: () => ({ stale: devBaseStale, wanted: devBaseWanted, partial: !!devBasePartial, loading: !!devBasePromise, precheckDeferred: finalPreDeferred, canAutoFetch: canAutoFetch() }),
       regenerate: () => (last ? generate() : null),
       refreshTargets: fillTargets,
       refreshCapability, ask, plan, showEvidence,
@@ -33070,19 +33256,23 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
 
     // === 最小化：ドメイン共通 ===
     const MINI_KEY = `kt_mini_${location.host}_global`;
+    // 設定取得の関所（KTFetchGate）: 最小化の状態（保存・復元はこれまでどおり）を知らせるだけ。展開している間だけ設定の自動の取得を始める
+    const panelGate = KTFetchGate.create({ open: true });
 
     // 状態適用＋保存
     function setMini(on) {
       wrap.classList.toggle('is-mini', !!on);
       try { localStorage.setItem(MINI_KEY, on ? '1' : '0'); } catch (e) { }
+      panelGate.setOpen(!on);
     }
 
-    // 復元（既定=非最小）
+    // 復元（既定=非最小）。設定の取得より前に同期で戻す
     (function restoreMini() {
       try {
         const v = localStorage.getItem(MINI_KEY);
         if (v === '1') wrap.classList.add('is-mini');
       } catch (e) { }
+      panelGate.setOpen(!wrap.classList.contains('is-mini'));
     })();
 
     // トグル
@@ -33143,8 +33333,10 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
     // Phase 15: 'ai' = AI 開発ワークスペース（AI 関連機能の独立タブ）。Phase 18: 'templates' は廃止（Fact = 解析タブ / Build = AI。docs/contracts/22）
     const TABS = ['health', 'fields', 'views', 'graphs', 'relations', 'deps', 'notice', 'acl', 'customize', 'field-scanner', 'plugins', 'ai'];
     const tabListeners = new Set();
+    let activeTab = 'health';   // 表示中のタブ（最初は Health。選んだタブは保存しない）
 
     const switchTab = (idShow) => {
+      if (TABS.includes(idShow)) activeTab = idShow;
       TABS.forEach(tabId => {
         // タブボタンのActive切り替え
         const btn = wrap.querySelector(`#tab-${tabId}`);
@@ -33166,6 +33358,14 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
     });
     // 他のモジュールからタブを切り替える / 切り替えを知る（AI タブの「Context」→ Field Scanner 等）
     wrap.ktTabs = { TABS, switchTab, onSwitch: (fn) => { tabListeners.add(fn); return () => tabListeners.delete(fn); } };
+    // パネルの表示状態（設定取得の関所）: isMini / visibleTab（最小化中は null）/ onChange（展開 true・最小化 false の知らせ）/ gate
+    wrap.ktPanel = {
+      gate: panelGate,
+      isMini: () => wrap.classList.contains('is-mini'),
+      activeTab: () => activeTab,
+      visibleTab: () => (panelGate.isOpen() ? activeTab : null),
+      onChange: (fn) => panelGate.onChange(fn),
+    };
     return wrap;
 
   };
@@ -37154,7 +37354,10 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
   //   Phase 18: Templates タブは廃止。Documents（仕様書 / 要件定義 / レビュー依頼の Prompt）も Context ペインの「ドキュメントを作る」へ統合。
   //   チャット（KTAiConversation）を入口に、Review / Decision / 最終確認 / Rollback 確認は既存 UI（drawer）で行う。
   // ----------------------------
-  function renderAiWorkspace(root, DATA, appId = null, { getContextInputs = null, runScan = null, openCustomize = null } = {}) {
+  //   設定取得の関所（パネルの表示状態）: 作業の基準の自動の取得（接続・タブを開いた・承認の欄の準備・登録や戻しの後の続き）は、
+  //   パネルを展開していて開発支援のタブを表示している間だけ（root.ktPanel。パネルの無い root では常に取る＝今までどおり）。
+  //   開発支援を表示したまま展開したときも、タブを開いたときと同じ扱い（onVisible）。onSettingsChanged: 動作テスト環境に書き込んだ知らせ（ほかの場所の取得済みを古いとする）
+  function renderAiWorkspace(root, DATA, appId = null, { getContextInputs = null, runScan = null, openCustomize = null, onSettingsChanged = null } = {}) {
     const view = root.querySelector('#view-ai');
     if (!view) return null;
     const C = getThemeColors();
@@ -37180,11 +37383,14 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
         // Preview Executor: このユーザーのセッション権限で動作テスト環境だけを書く（運用環境への反映関数は無い）
         executor: (() => { try { return { api: KTPlanExecutor.createKintoneApi(), appId: appId ?? (typeof kintone !== 'undefined' ? kintone.app.getId() : null) }; } catch (e) { return null; } })(),
         // Phase 21: 開発支援の作業基準（最新の動作テスト環境 ＋ 比較用の運用環境）。GET だけ（設定は変更しない）。本文は動作テスト環境の fileKey で取る
-        loadDevBase: () => {
+        //   shouldContinue / resume: 自動の取得の途中で見えなくなったら次の段を始めない・止めた段の続きから取る（設定取得の関所。KTDevBase.load）
+        loadDevBase: ({ shouldContinue = null, resume = null } = {}) => {
           const inputs = (typeof getContextInputs === 'function' ? getContextInputs() : null) || {};
           const names = inputs.deps?.meta?.appNames && typeof inputs.deps.meta.appNames === 'object' ? new Map(Object.entries(inputs.deps.meta.appNames)) : null;
-          return KTDevBase.load({ appId: appId ?? kintone.app.getId(), getImpl: kGet, download: (fk) => KTApi.downloadFile(fk), fetchRelated: (fields, actions) => fetchRelatedApps(fields, kGet, actions), incoming: inputs.incoming || null, appNames: names, plugins: DATA?.plugins ?? null });
+          return KTDevBase.load({ appId: appId ?? kintone.app.getId(), getImpl: kGet, download: (fk) => KTApi.downloadFile(fk), fetchRelated: (fields, actions) => fetchRelatedApps(fields, kGet, actions), incoming: inputs.incoming || null, appNames: names, plugins: DATA?.plugins ?? null, shouldContinue, resume });
         },
+        canAutoFetch: () => aiVisible(),
+        onSettingsChanged: typeof onSettingsChanged === 'function' ? onSettingsChanged : null,
       });
     } catch (e) {
       console.error('[Toolkit AI] AI タブの初期化に失敗しました', e);
@@ -37193,8 +37399,17 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
     }
     // タブを開いたときに対象一覧・ヘッダーを最新の解析結果へ（Scanner / 他アプリ走査は後から入る）
     // Phase 21: タブを開いたとき、1 分より古い作業基準（動作テスト環境）は取り直す（別の画面で変えた設定も拾う）
-    try { root.ktTabs?.onSwitch?.((id) => { if (id === 'ai' && panel) { panel.refreshTargets(); panel.renderHeader(); if (panel.isConnected && panel.isConnected() && panel.refreshDevBase) panel.refreshDevBase({ maxAgeMs: 60 * 1000, reason: 'tab' }); } }); } catch (e) { }
+    //   設定取得の関所: 最小化中のタブの切り替え（プログラムからの switchTab）では取らず、開発支援を表示したまま展開したときにも同じことをする
+    try { root.ktTabs?.onSwitch?.((id) => { if (id === 'ai' && panel && aiVisible()) panel.onVisible(); }); } catch (e) { }
+    try { KTFetchGate.of(root).onChange((open) => { if (open && panel && aiVisible()) panel.onVisible(); }); } catch (e) { }
     return panel;
+
+    /** 開発支援が見えているか（パネルの無い root では常に真＝今までどおり） */
+    function aiVisible() {
+      const p = root && root.ktPanel;
+      if (!p || typeof p.visibleTab !== 'function') return true;
+      return KTFetchGate.of(root).isOpen() && p.visibleTab() === 'ai';
+    }
   }
 
   // ----------------------------
@@ -37202,7 +37417,10 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
   // 現在登録されている JS / CSS を確認・解析する場所（Phase 18: Fact 側。設計・生成・修正は AI タブへ「AIに相談」で遷移）。
   // JSEdit 互換の編集・保存＋デプロイは従来どおり（利用者の明示操作だけ）。GitHub の Snippets 一覧は廃止（Pattern Library として AI 側へ）。
   // ----------------------------
-  async function renderCustomize(root, DATA, appId, { consult = null, getInputs = null } = {}) {
+  //   設定取得の関所（パネルの表示状態）: autoLoad: false なら組み立てだけ行い、一覧（カスタマイズ設定）はタブを開いたときに ensureLoaded で取る
+  //   （省略時は今までどおり、組み立ての最後に取る）。取得済みの一覧は、古い印（markStale: ほかの場所で設定を変えた）が無ければ再利用する。
+  //   onSettingsChanged: ［アプリに反映］が成功したときの知らせ（運用環境と動作テスト環境の設定が変わった。ほかの場所の取得済みを古いとする）
+  async function renderCustomize(root, DATA, appId, { consult = null, getInputs = null, autoLoad = true, onSettingsChanged = null } = {}) {
     const view = root.querySelector('#view-customize');
     if (!view) return null;
 
@@ -37433,11 +37651,12 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
       return consult(seed);
     }
     /** §32: 動作テスト環境（preview）と運用環境のカスタマイズ設定の差（名前 / URL / 順序。fileKey は環境で異なるので比べない） */
-    async function renderEnvDiff(previewData, source) {
+    //   prodP（省略可）: 一覧の取得で取った運用環境のカスタマイズ設定（同じ設定を 2 回取らない）
+    async function renderEnvDiff(previewData, source, prodP = null) {
       if (!$env) return;
       if (source !== 'preview' || typeof KTJsExecutor === 'undefined') { $env.style.display = 'none'; return; }
       try {
-        const { data: prod } = await KTApi.getCustomize(appId, { preferPreview: false });
+        const prod = prodP ? await prodP : (await KTApi.getCustomize(appId, { preferPreview: false })).data;
         const diffs = KTJsExecutor.diffSnapshots(KTJsExecutor.snapshotOf(prod), KTJsExecutor.snapshotOf(previewData), { compareFileKey: false });
         const sizeDiff = [];
         for (const t of ['desktop', 'mobile']) for (const k of ['js', 'css']) {
@@ -37453,7 +37672,20 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
     // === リスト描画（登録済みの JS / CSS） ===
     let currentFileName = null;
     const rowsByName = new Map();   // Phase 18 §30: AI タブから「Customize で確認」→ 該当ファイルの行を示す
-    async function refreshList() {
+    // 設定取得の関所: 取得済みの一覧の世代（markStale で進む）・取得中の Promise・途中で止めた取得の続き（取れた preview の設定）
+    let listGen = 0, listLoadedGen = -1, listLoading = null, heldList = null;
+    /**
+     * 一覧を取り直す（［↻ 一覧更新］・種類の選択・AI からの show・反映の後は利用者の操作として最後まで取る）。
+     *   opt.live（省略可・タブを開いたときの自動の取得の手形）が偽になったら、運用環境の設定（後続）は取らずに止め、取れた設定は続きのために残す
+     */
+    async function refreshList(opt = null) {
+      const live = opt && typeof opt.live === 'function' ? opt.live : null;
+      const run = loadList(live);
+      listLoading = run;
+      try { return await run; } finally { if (listLoading === run) listLoading = null; }
+    }
+    async function loadList(live) {
+      const gen = listGen;
       const src = $sourceSel.value;
       const conf = SRC[src] || { kind: 'js', target: 'desktop' };
       CURRENT.target = conf.target; // ← 重要：選択に合わせて更新
@@ -37464,15 +37696,31 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
       rowsByName.clear();
 
       // --- Customize (App) list: desktop/mobile × js/css 共通 ---
-      const got = await getCustomize(appId);
+      let got = null;
+      const held = heldList; heldList = null;
+      if (live && held && held.gen === gen) got = held.got;   // 止めた取得の続き（同じ世代なら取り直さない）
+      else {
+        try { got = live ? await KTApi.getCustomize(appId, { shouldContinue: live }) : await getCustomize(appId); }
+        catch (e) { if (!KTFetchGate.isPaused(e)) throw e; }
+      }
+      if (live && (!got || !live())) {
+        // 途中で最小化した: 後続（運用環境の設定）は取らない。取れた設定は残し、次にタブを開いたときに続きから
+        if (got) heldList = { got, gen };
+        $list.innerHTML = '<div style="padding:12px; opacity:.7">パネルを展開してタブを開くと、一覧の続きを読み込みます。</div>';
+        return { paused: true };
+      }
       const { data, source } = got;
       lastCustomize = got;
+      listLoadedGen = gen;
       const bucket = conf.target === 'mobile' ? (data.mobile || { js: [], css: [] })
         : (data.desktop || { js: [], css: [] });
       const arr = (conf.kind === 'js' ? bucket.js : bucket.css) || [];
       const files = arr.filter(x => x.type === 'FILE');
       const urls = arr.filter(x => x.type === 'URL');
-      renderEnvDiff(data, source);
+      // 運用環境のカスタマイズ設定は 1 回だけ取り、環境差分と「動作テスト環境のみ」の印の両方に使う（以前は同じ設定を 2 回取っていた）
+      const prodP = source === 'preview' ? KTApi.getCustomize(appId, { preferPreview: false }).then(r => r.data) : null;
+      if (prodP) prodP.catch(() => { });
+      renderEnvDiff(data, source, prodP);
 
       $list.innerHTML = '';
       if (!files.length && !urls.length) {
@@ -37486,7 +37734,7 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
         : (conf.kind === 'js' ? 'JS' : 'CSS');
       // 動作テスト環境だけにあるファイル（運用環境に無い名前）に印を付ける（§32）
       let prodNames = null;
-      if (source === 'preview') { try { const { data: prod } = await KTApi.getCustomize(appId, { preferPreview: false }); const pb = conf.target === 'mobile' ? (prod.mobile || {}) : (prod.desktop || {}); prodNames = new Set(((conf.kind === 'js' ? pb.js : pb.css) || []).map(x => (x.type === 'URL' ? x.url : x.file?.name))); } catch (e) { prodNames = null; } }
+      if (prodP) { try { const prod = await prodP; const pb = conf.target === 'mobile' ? (prod.mobile || {}) : (prod.desktop || {}); prodNames = new Set(((conf.kind === 'js' ? pb.js : pb.css) || []).map(x => (x.type === 'URL' ? x.url : x.file?.name))); } catch (e) { prodNames = null; } }
       const noteOf = (name) => (prodNames && !prodNames.has(name) ? '動作テスト環境のみ' : '');
 
       // 一覧は登録順（FILE と URL を混ぜて kintone の順序どおり）
@@ -37528,6 +37776,14 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
       $meta.textContent = name ? (row ? `AI タブから: ${name}（${target === 'mobile' ? 'モバイル' : 'PC'}）` : `${name} は現在の一覧にありません（復元済み、または別の環境）`) : '';
       return { found: !!row, src };
     }
+    /** タブを開いたとき（設定取得の関所）: 一覧をまだ取っていない・古い印があるときだけ取る。取得中ならそれを待つ（二重に送らない）。有効な一覧は再利用する */
+    function ensureLoaded({ live = null } = {}) {
+      if (listLoading) return listLoading;
+      if (listLoadedGen === listGen) return Promise.resolve({ reused: true });
+      return refreshList(typeof live === 'function' ? { live } : null);
+    }
+    /** ほかの場所で設定を変えた（開発支援の反映・登録など）: 取得済みの一覧を古いとする（取得はしない。次にタブを開いたときに取り直す） */
+    function markStale() { listGen += 1; heldList = null; }
 
     // === 保存+デプロイ（ワンボタン） ===
     // === 新規ファイルダイアログ ===
@@ -37711,8 +37967,16 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
         if (!form) return; // cancel
 
         const fileKey = await uploadOnce(currentFileName, code, getMimeByName(currentFileName));
-        await putPreviewReplace(appId, fileType, currentFileName, fileKey);
-        await deployAndWait(appId);
+        // 設定取得の関所: 書き込んだら（失敗・時間切れでも、書き込みを始めた環境は）ほかの場所の取得済みを古いとする（取り直しは次に要るとき）
+        let wrotePreview = false, deployRequested = false;
+        try {
+          await putPreviewReplace(appId, fileType, currentFileName, fileKey);
+          wrotePreview = true;
+          deployRequested = true;
+          await deployAndWait(appId);
+        } finally {
+          if (wrotePreview && typeof onSettingsChanged === 'function') { try { onSettingsChanged({ preview: true, production: deployRequested, what: 'customize' }); } catch (e) { } }
+        }
         alert(`✅ デプロイ完了：${currentFileName} `);
         await refreshList();
       } catch (e) {
@@ -37731,13 +37995,14 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
       a.click();
     };
 
-    // === イベント ===
-    $refresh.onclick = refreshList;
-    $sourceSel.onchange = refreshList;
+    // === イベント ===（利用者の操作は関所を通さずに取る）
+    $refresh.onclick = () => refreshList();
+    $sourceSel.onchange = () => refreshList();
 
-    // 初期
-    await refreshList();
-    return { show, refresh: refreshList };
+    // 初期（autoLoad: false のときは、タブを開いたときに ensureLoaded で取る）
+    if (autoLoad) await refreshList();
+    else $list.innerHTML = '<div style="padding:12px; opacity:.7">タブを開くと一覧を読み込みます。</div>';
+    return { show, refresh: refreshList, ensureLoaded, markStale };
   }
 
 
@@ -38898,10 +39163,12 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
        * JavaScript/CSSの解析を実行する
        * @param {boolean} opt.force キャッシュを無視して再取得する（手動Scanボタン）
        * @param {boolean} opt.silent 進捗表示を控えめにする（自動実行時）
+       * @param {Function} [opt.shouldContinue] 自動の解析のとき（設定取得の関所の手形）。偽になったら後続（フィールド定義の取り直し・本文の取得）を始めずに { paused } を返す
        * @returns {{fromCache:boolean, scannedAt:string}}
        */
       async function scanOnce(opt = {}) {
         const { force = false, silent = false } = opt;
+        const live = typeof opt.shouldContinue === 'function' ? opt.shouldContinue : null;
         const t0 = Date.now();
         const appId = kintone.app.getId();
         const include = resolveInclude($target.value);
@@ -38912,8 +39179,12 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
         //   動作テスト環境だけで JS を差し替えても古いキャッシュ（本文なし）が使われ続け、開発支援が運用環境の本文を基準にしていた。
         //   どちらの環境の本文かは payload.meta.source に残す
         // 解析ロジックのバージョンを含めることで、Toolkit更新時にキャッシュが自動的に無効になる
-        let cz = null;
-        try { cz = await KTApi.getCustomize(appId); } catch (e) { cz = null; }
+        //   設定取得の関所: 自動の解析を途中で止めたときに取れていた設定は、続き（展開の後）で取り直さない（KTScan.takeHeldCustomize。1 分以内・設定の変更の知らせが無い間）
+        let cz = live ? KTScan.takeHeldCustomize() : null;
+        if (!cz) {
+          try { cz = await KTApi.getCustomize(appId, { shouldContinue: live }); }
+          catch (e) { if (KTFetchGate.isPaused(e)) return { paused: true }; cz = null; }
+        }
         const signature = `v${KTScan.ANALYZER_VERSION}|${cz ? cz.source : 'production'}|`
           + KTScan.buildSignature(cz ? cz.data : DATA.customize)
           + `|${$target.value}|${$kinds.value}`;
@@ -38925,9 +39196,14 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
           }
         }
 
+        // 設定取得の関所: 後続の取得（フィールド定義の取り直し・本文）の前に確かめる。止めたら取れた設定は続きのために残す（キャッシュには保存しない）
+        const pausedHere = () => { if (live && !live()) { KTScan.holdCustomize(cz); return true; } return false; };
+        if (pausedHere()) return { paused: true };
+
         if (!silent) $meta.textContent = 'Scanning...';
 
         const fields = await fetchFieldList(DATA.fields, DATA.layout);
+        if (pausedHere()) return { paused: true };
         const files = await fetchTexts({ appId, include, kinds, customize: cz });
         // 解析（アプリID参照・イベント種別・存在しないフィールド / ステータス・外部アプリのフィールド参照）は KTScan.buildPayload（Phase 21: 開発支援の作業基準と共用）
         const scannedAt = new Date().toISOString();
@@ -39045,7 +39321,10 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
   // ----------------------------
   // [Feature] Plugins
   // ----------------------------
-  async function renderPlugins(root, DATA) {
+  //   設定取得の関所（パネルの表示状態）: 起動では呼ばず、Plugins タブを開いたときに呼ぶ。live（省略可・タブを開いたときの手形）が偽になったら、
+  //   最初の読み込みの後続（2 件目の GET）を始めずに止め、次にタブを開いたとき（ensureLoaded）に続きから取る。［↻ 再取得］・追加・deploy は利用者の操作として最後まで取る。
+  //   onSettingsChanged: 追加（動作テスト環境）・deploy（運用環境）の知らせ（ほかの場所の取得済みを古いとする）
+  async function renderPlugins(root, DATA, { live = null, onSettingsChanged = null } = {}) {
     const view = root.querySelector('#view-plugins');
     if (!view) return;
 
@@ -39066,6 +39345,7 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
     }
 
     const app = Number(DATA?.appId || (kintone.app?.getId?.() ?? 0));
+    const notifyChanged = (info) => { if (typeof onSettingsChanged === 'function') { try { onSettingsChanged({ ...info, what: 'plugins' }); } catch (e) { } } };
 
     const installedRaw = DATA?.plugins;
     const installed =
@@ -39289,13 +39569,26 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
       $catalog.appendChild(frag);
     }
 
-    async function reload() {
+    // 設定取得の関所: 最初の読み込み（タブを開いたとき）を途中で止めたら、取れた本番の一覧は続きのために残す
+    let heldProd = null, pendingResume = false;
+    const pausedLoad = () => {
+      pendingResume = true;
+      $status.textContent = 'パネルを最小化したため、読み込みの続きを止めました。';
+      setLog('展開して Plugins タブを開くと、続きを読み込みます');
+      return { paused: true };
+    };
+    async function reload(opt = null) {
+      const live = opt && typeof opt.live === 'function' ? opt.live : null;
       try {
         setLog('読み込み中...');
         $status.textContent = '読み込み中...';
 
-        prodRes = await api('/k/v1/app/plugins.json', 'GET', { app });
+        if (live && !live()) return pausedLoad();
+        const held = heldProd; heldProd = null;
+        prodRes = live && held ? held : await api('/k/v1/app/plugins.json', 'GET', { app });
+        if (live && !live()) { heldProd = prodRes; return pausedLoad(); }
         prevRes = await api('/k/v1/preview/app/plugins.json', 'GET', { app });
+        pendingResume = false;
 
         $status.innerHTML = `
         <div>本番: <b>${(prodRes?.plugins || []).length}</b> / preview: <b>${(prevRes?.plugins || []).length}</b></div>
@@ -39314,7 +39607,7 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
 
     // events
     $search.addEventListener('input', () => renderCatalog($search.value || ''), { passive: true });
-    $reload.addEventListener('click', reload);
+    $reload.addEventListener('click', () => reload());
 
     $add.addEventListener('click', async (ev) => {
       const btn = ev.currentTarget;
@@ -39330,6 +39623,7 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
 
         setLog(`previewに追加中... (${toAdd.length})`);
         await api('/k/v1/preview/app/plugins.json', 'POST', { app, ids: toAdd });
+        notifyChanged({ preview: true, production: false });
 
         // preview再取得
         prevRes = await api('/k/v1/preview/app/plugins.json', 'GET', { app });
@@ -39354,6 +39648,7 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
       try {
         setLog('deploy開始...');
         await api('/k/v1/preview/app/deploy.json', 'POST', { apps: [{ app, revision: -1 }], revert: false });
+        notifyChanged({ preview: true, production: true });   // deploy を受け付けたら運用環境は変わる（完了待ちの失敗・時間切れでも古いとする）
         await waitDeploy(app);
 
         await reload();
@@ -39368,48 +39663,69 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
       }
     });
 
-    // init
-    await reload();
+    // init（タブを開いたときの自動の読み込み。live が偽になったら後続を止める）
+    const ui = { reload: () => reload(), ensureLoaded: ({ live: l = null } = {}) => (pendingResume ? reload(typeof l === 'function' ? { live: l } : null) : Promise.resolve({ reused: true })) };
+    await reload(typeof live === 'function' ? { live } : null);
+    return ui;
   }
 
 
   // ==========================================
   // 6. メイン実行処理 (Entry Point)
   // ==========================================
-  waitReady().then(async () => {
-    const appId = kintone.app.getId();
-    if (!appId) return;
+  // 設定取得の関所（KTFetchGate。パネルの表示状態）に合わせた起動。
+  //   - 最小化で開いたときは設定を取らない（展開の知らせを待つ）。最小化中は、画面遷移（読み込み直し）・タブの切り替え・解析の予約・
+  //     作業の基準の自動の取り直しでも取らない
+  //   - 展開したら、そのとき表示に要る設定だけを取る: 運用環境の設定の一括取得（段階 1）→ 描画。Customize の一覧・Plugins・他アプリの定義・
+  //     アプリ名・作業の基準は、それを使うタブを開いたとき。JS の自動解析は、解析の結果を使うタブを表示しているとき（ブラウザが空いた時点）
+  //   - 取得済みの設定はページの中で再利用する（最小化と展開を繰り返しても取り直さない。同じ取得が進行中ならそれを待つ）
+  //   - 取得の途中で最小化したら、送った通信は完了させて結果を残し、まだ送っていない後続（描画に続く取得・次の段）は展開まで始めない
+  //   - Toolkit 自身が設定を変えたら（Customize の反映・Plugins の追加と deploy・開発支援の反映・登録・戻す）取得済みを古いとし、次に要るときに取り直す
+  //   - 利用者の明示の操作（［再取得］・［一覧更新］・反映・登録など）と、設定取得ではない通信（レコード・AI の Gateway・トークン）は止めない
+  const SNAPSHOT_TABS = new Set(['health', 'fields', 'views', 'graphs', 'relations', 'deps', 'notice', 'acl', 'field-scanner', 'ai']);   // 運用環境の設定（DATA）を表示・使うタブ（古ければ取り直す）
+  const SCAN_TABS = new Set(['health', 'fields', 'relations', 'deps', 'field-scanner', 'ai']);   // JS の自動解析の結果を表示・使うタブ
+  const NAME_TABS = new Set(['fields', 'relations', 'deps', 'field-scanner', 'ai']);              // 参照先アプリの名前を表示・使うタブ
 
-    const root = mountRoot();
+  let toolkitStart = null;
+  /** 起動（二重に起動しない。2 回目以降の呼び出しは最初の結果を返す） */
+  function startToolkit(opt = {}) {
+    if (!toolkitStart) toolkitStart = bootToolkit(opt);
+    return toolkitStart;
+  }
 
-    // 1) 起動時にスナップショット取得
-    const DATA = await prefetchAppData(appId);
-    // 2) 必要なものだけ渡す（最小限のヘルパ）
+  async function bootToolkit({ appId: appIdArg = null } = {}) {
+    const appId = appIdArg ?? kintone.app.getId();
+    if (!appId) return null;
+
+    const root = mountRoot();   // 最小化の状態は、ここで（設定の取得より前に）同期で戻す
+    const gate = KTFetchGate.of(root);
+    const panel = root.ktPanel || null;
+    const visibleTab = () => (panel ? panel.visibleTab() : 'health');
+    // 必要なものだけ渡す（最小限のヘルパ）
     const pick = (obj, keys) => Object.fromEntries(keys.map(k => [k, obj[k] ?? null]));
-    //    派生 relations を別関数で作る
-    let relations = buildRelations(DATA);
 
-    // ★追加：正規化フィールドと依存関係データを一度だけ生成（各タブで再利用する）
-    //   解析に失敗しても Toolkit 全体は停止させない
-    let FIELDS_N = [];
-    let DEPS = null;
-    try {
-      FIELDS_N = KTDeps.normalizeFields(DATA.fields);
-      DEPS = KTDeps.buildDependencyData(DATA, FIELDS_N);
-    } catch (e) {
-      console.error('[KTDeps] 依存関係解析に失敗しました（既存表示にフォールバック）', e);
-    }
+    // ---- 取得済みの設定（ページの中で再利用する）----
+    let settingsGen = 0;                                  // Toolkit 自身が運用環境の設定を変えたら進む（運用環境の写し・他アプリの定義を古いとする）
+    let core = null, coreGen = -1, coreLoading = null;    // 段階 1（運用環境の設定の一括取得）
+    let appliedCore = null;                               // 描画に使った段階 1
+    let relatedApps = {}, relatedGen = -1, relatedLoading = null;   // 他アプリ（ルックアップの参照先・アプリアクションのコピー先）の定義。開発支援を開いたときに取る
+    const appNameMap = new Map(), namesAsked = new Set(); // 参照先アプリの名前（解決済み）・このページで問い合わせた ID
+    let namesWanted = false;                              // 名前を表示するタブを開いた（それまでは問い合わせない）
+    let scanWanted = false;                               // JS の自動解析を待っている（解析の結果を使うタブが見えたら予約する）
+    let customizeReady = null, pluginsReady = null;
+    let DATA = null, relations = null, FIELDS_N = [], DEPS = null;
+    const coreValid = () => !!core && coreGen === settingsGen;
 
-    // ★他アプリからの参照（Relationsタブの走査結果。24時間キャッシュ）は、初回描画の前に依存関係データへ取り込む。
-    //   従来は Relations タブの描画時（Fields の描画後）に取り込んでいたため、Fields の変更影響は
-    //   JS自動解析による再描画が起きるまで走査結果を含まなかった。走査そのものは自動実行しない。
-    if (DEPS) {
-      try {
-        const cachedIncoming = KTIncoming.loadCache(String(appId));
-        if (cachedIncoming) KTDeps.applyIncomingRefs(DEPS, cachedIncoming);
-      } catch (e) {
-        console.error('[KTIncoming] 走査結果の取り込みに失敗しました（未走査として続行します）', e);
-      }
+    /** 段階 1 を取る。展開している間だけ始める（手形 t）。進行中ならそれを待つ（二重に送らない）。送った後は最後まで待ち、結果は取得済みとして残す */
+    function ensureCore(t) {
+      if (coreValid()) return Promise.resolve(core);
+      if (coreLoading) return coreLoading;
+      if (!t.live()) return Promise.resolve(null);
+      const gen = settingsGen;
+      const p = prefetchAppCore(appId).then((c) => { core = c; coreGen = gen; return c; });
+      coreLoading = p;
+      p.then(() => { if (coreLoading === p) coreLoading = null; }, () => { if (coreLoading === p) coreLoading = null; });
+      return p;
     }
 
     // ★依存関係データ（DEPS）は各タブで共有する単一のオブジェクト。
@@ -39428,19 +39744,25 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
     //   API呼び出しは通常1回、再訪時は0回で済む。
     //   JS解析で新しい接続先アプリが判明した場合にも、未解決のIDだけを追加で問い合わせる。
     //   取得できないアプリ（閲覧権限なし）は「名称取得不可」として表示する。
+    //   設定取得の関所: 名前を表示するタブを開くまで・最小化中は問い合わせない。このページで問い合わせた ID は問い合わせ直さない
+    //   （最小化と展開を繰り返しても重複しない）。100 件ずつの問い合わせの間で最小化したら、残りは次に要るときに
     const resolveAppNames = async ({ rerender = true } = {}) => {
-      if (!DEPS) return false;
+      if (!DEPS || !namesWanted || !gate.isOpen()) return false;
+      const t = gate.ticket();
       try {
         const known = (DEPS.meta && DEPS.meta.appNames) || {};
         const ids = [...new Set(
           DEPS.edges
             .filter(e => e.targetType === 'APP' && e.targetId !== 'UNKNOWN' && String(e.targetId) !== String(appId))
             .map(e => String(e.targetId))
-        )].filter(id => !known[id]); // 解決済みのIDは問い合わせない
+        )].filter(id => !known[id] && !namesAsked.has(id)); // 解決済み・問い合わせ済みのIDは問い合わせない
         if (!ids.length) return false;
 
-        const nameMap = await KTApi.getAppNames(ids);
+        for (const id of ids) namesAsked.add(id);   // 送る前に付ける（同時に呼ばれても同じ ID を二重に問い合わせない）
+        const nameMap = await KTApi.getAppNames(ids, { shouldContinue: t.live });
+        for (const id of (nameMap.pending || [])) namesAsked.delete(id);   // 問い合わせなかった ID（途中で最小化）は次に要るときに
         if (!nameMap.size) return false;
+        for (const [k, v] of nameMap) appNameMap.set(k, v);
         KTDeps.applyAppNames(DEPS, nameMap);
 
         if (rerender) {
@@ -39455,80 +39777,194 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
       }
     };
 
-    // 3) 各 render に “必要分だけ” 注入
-    renderHealth(root, {
-      ...pick(DATA, [
-        'appId', 'fields', 'status', 'views', 'reports', 'customize',
-        'generalNotify', 'perRecordNotify', 'reminderNotify',
-        'appAcl', 'recordAcl', 'fieldAcl',
-        'actions', 'plugins'
-      ]),
-      // 設定の整合性チェック（存在しないフィールド参照の検出）に使用する
-      deps: DEPS,
-    });
-    rerenderFields();
-    renderViews(root, pick(DATA, ['appId', 'views', 'fields']));
-    renderGraphs(root, pick(DATA, ['appId', 'reports', 'fields']));
-    rerenderRelations();
-    renderDepsGraph(root, DEPS, appId, FIELDS_N);
-    renderNotifications(root, pick(DATA, [
-      'appId',
-      'generalNotify',
-      'perRecordNotify',
-      'reminderNotify',
-    ]));
-    renderAcl(root, pick(DATA, [
-      'appId',
-      'appAcl',
-      'recordAcl',
-      'fieldAcl',
-    ]));
-    // Phase 17: Customize タブ「AIに相談」→ AI タブで、そのファイルを対象にした会話を始める（ファイルを選び直させない）
-    // Phase 18: Customize は「登録済みコードを確認・解析する場所」、AI は「次に何をするか考え、作る場所」。Templates タブは廃止
-    root.ktCustomize = null;
-    renderCustomize(root, DATA, appId, {
-      consult: (seed) => { let r = null; try { r = root.ktAi?.consult?.(seed) ?? null; } catch (e) { console.error('[Toolkit AI] 相談の開始に失敗しました', e); } try { root.ktTabs?.switchTab?.('ai'); } catch (e) { } return r; },
-      getInputs: () => ({ data: DATA, deps: DEPS, scan: KTScan.getLastPayload() }),
-    }).then((c) => { root.ktCustomize = c || null; }).catch((e) => { console.error('[Toolkit] Customize タブの初期化に失敗しました', e); });
-    // AI タブ（Phase 15: AI 開発ワークスペース。旧 Templates にあった AI 関連機能の移行先）
-    root.ktAi = renderAiWorkspace(root, DATA, appId, {
-      // Phase 18 §30: AI の結果カードから Customize タブで登録内容を確認する（登録済みの JS を一覧で選ぶ）
-      openCustomize: ({ target = 'desktop', kind = 'js', name = null } = {}) => { try { root.ktTabs?.switchTab?.('customize'); } catch (e) { } try { return root.ktCustomize?.show?.({ target, kind, name }) ?? null; } catch (e) { return null; } },
-      // 呼び出し時点の最新の解析結果を渡す（Scanner / 他アプリ走査の結果は後から入る）
-      getContextInputs: () => ({
-        data: DATA,
+    /** Toolkit 自身が設定を変えた（設定取得の関所）: 取得済みを古いとする（ここでは取らない。次に要るときに取り直す） */
+    function settingsChanged({ preview = false, production = false, source = null } = {}) {
+      if (!preview && !production) return;
+      if (production) settingsGen += 1;   // 運用環境の写し（DATA）と他アプリの定義
+      if (source !== 'ai') { try { root.ktAi?.invalidateDevBase?.(); } catch (e) { } }   // 開発支援の作業の基準（開発支援の書き込みは、開発支援が自分で取り直す）
+      if (source === 'ai') { try { root.ktCustomize?.markStale?.(); } catch (e) { } }    // Customize の一覧（Customize の反映は、その続きで取り直している）
+      try { KTScan.dropHeldCustomize(); } catch (e) { }                                   // 止めた解析の続きに残した設定
+    }
+
+    /** 段階 1 から DATA・依存関係を作り、描く。初回は全部のタブを組み立てる。2 回目以降（Toolkit 自身が運用環境を変えた後）は運用環境の設定を表示するタブだけ */
+    function applyCore(c) {
+      const first = !appliedCore;
+      appliedCore = c;
+      DATA = Object.freeze({ ...c, relatedApps: relatedGen === settingsGen ? relatedApps : {} });
+      //    派生 relations を別関数で作る
+      relations = buildRelations(DATA);
+
+      // ★追加：正規化フィールドと依存関係データを一度だけ生成（各タブで再利用する）
+      //   解析に失敗しても Toolkit 全体は停止させない
+      FIELDS_N = [];
+      DEPS = null;
+      try {
+        FIELDS_N = KTDeps.normalizeFields(DATA.fields);
+        DEPS = KTDeps.buildDependencyData(DATA, FIELDS_N);
+      } catch (e) {
+        console.error('[KTDeps] 依存関係解析に失敗しました（既存表示にフォールバック）', e);
+      }
+
+      // ★他アプリからの参照（Relationsタブの走査結果。24時間キャッシュ）は、初回描画の前に依存関係データへ取り込む。
+      //   従来は Relations タブの描画時（Fields の描画後）に取り込んでいたため、Fields の変更影響は
+      //   JS自動解析による再描画が起きるまで走査結果を含まなかった。走査そのものは自動実行しない。
+      if (DEPS) {
+        try {
+          const cachedIncoming = KTIncoming.loadCache(String(appId));
+          if (cachedIncoming) KTDeps.applyIncomingRefs(DEPS, cachedIncoming);
+        } catch (e) {
+          console.error('[KTIncoming] 走査結果の取り込みに失敗しました（未走査として続行します）', e);
+        }
+        // 解決済みの参照先アプリ名（作り直した依存関係データにも入れる。問い合わせはしない）
+        if (appNameMap.size) { try { KTDeps.applyAppNames(DEPS, appNameMap); } catch (e) { } }
+      }
+
+      // 3) 各 render に “必要分だけ” 注入
+      renderHealth(root, {
+        ...pick(DATA, [
+          'appId', 'fields', 'status', 'views', 'reports', 'customize',
+          'generalNotify', 'perRecordNotify', 'reminderNotify',
+          'appAcl', 'recordAcl', 'fieldAcl',
+          'actions', 'plugins'
+        ]),
+        // 設定の整合性チェック（存在しないフィールド参照の検出）に使用する
         deps: DEPS,
-        scan: KTScan.getLastPayload(),
-        incoming: (() => { try { return KTIncoming.loadCache(String(appId)); } catch (e) { return null; } })(),
-      }),
-      runScan: () => KTScan.run({ silent: true }),
-    });
-    renderScanner(root, {
-      ...pick(DATA, ['appId', 'fields', 'layout', 'customize']),
-      deps: DEPS,
-      // ★Scan実行後、JS由来の依存（フィールド利用・アプリID参照）を Fields / Relations に反映する
-      onDepsUpdated: () => {
-        rerenderFields();
-        rerenderRelations();
-        // ★Healthタブの整合性チェックも更新する（JS内の未知コードは解析後に判明するため）
-        //   Healthタブ全体を描き直すとステータス分布のレコード取得が再実行されるので、
-        //   該当ブロックだけを更新する
-        renderBrokenRefs(root, DEPS);
-        // JS解析で新たに判明した接続先アプリの名前を解決する（未解決のIDだけ問い合わせる）
-        resolveAppNames();
-      },
-    });
-    renderPlugins(root, pick(DATA, ['appId', 'plugins']));
+      });
+      rerenderFields();
+      renderViews(root, pick(DATA, ['appId', 'views', 'fields']));
+      renderGraphs(root, pick(DATA, ['appId', 'reports', 'fields']));
+      rerenderRelations();
+      renderDepsGraph(root, DEPS, appId, FIELDS_N);
+      renderNotifications(root, pick(DATA, [
+        'appId',
+        'generalNotify',
+        'perRecordNotify',
+        'reminderNotify',
+      ]));
+      renderAcl(root, pick(DATA, [
+        'appId',
+        'appAcl',
+        'recordAcl',
+        'fieldAcl',
+      ]));
+      if (first) {
+        // Phase 17: Customize タブ「AIに相談」→ AI タブで、そのファイルを対象にした会話を始める（ファイルを選び直させない）
+        // Phase 18: Customize は「登録済みコードを確認・解析する場所」、AI は「次に何をするか考え、作る場所」。Templates タブは廃止
+        //   設定取得の関所: 組み立てだけ行い、一覧（カスタマイズ設定）は Customize タブを開いたときに取る
+        root.ktCustomize = null;
+        customizeReady = renderCustomize(root, DATA, appId, {
+          consult: (seed) => { let r = null; try { r = root.ktAi?.consult?.(seed) ?? null; } catch (e) { console.error('[Toolkit AI] 相談の開始に失敗しました', e); } try { root.ktTabs?.switchTab?.('ai'); } catch (e) { } return r; },
+          getInputs: () => ({ data: DATA, deps: DEPS, scan: KTScan.getLastPayload() }),
+          autoLoad: false,
+          onSettingsChanged: (info) => settingsChanged({ ...info, source: 'customize' }),
+        }).then((c) => { root.ktCustomize = c || null; return root.ktCustomize; }).catch((e) => { console.error('[Toolkit] Customize タブの初期化に失敗しました', e); return null; });
+        // AI タブ（Phase 15: AI 開発ワークスペース。旧 Templates にあった AI 関連機能の移行先）
+        root.ktAi = renderAiWorkspace(root, DATA, appId, {
+          // Phase 18 §30: AI の結果カードから Customize タブで登録内容を確認する（登録済みの JS を一覧で選ぶ）
+          //   一覧の取得（show）を先に始めてからタブを切り替える（タブを開いたときの取得と二重にしない）
+          openCustomize: ({ target = 'desktop', kind = 'js', name = null } = {}) => { let r = null; try { r = root.ktCustomize?.show?.({ target, kind, name }) ?? null; } catch (e) { r = null; } try { root.ktTabs?.switchTab?.('customize'); } catch (e) { } return r; },
+          // 呼び出し時点の最新の解析結果を渡す（Scanner / 他アプリ走査の結果は後から入る）
+          getContextInputs: () => ({
+            data: DATA,
+            deps: DEPS,
+            scan: KTScan.getLastPayload(),
+            incoming: (() => { try { return KTIncoming.loadCache(String(appId)); } catch (e) { return null; } })(),
+          }),
+          runScan: () => KTScan.run({ silent: true }),
+          onSettingsChanged: (info) => settingsChanged({ ...info, source: 'ai' }),
+        });
+      }
+      renderScanner(root, {
+        ...pick(DATA, ['appId', 'fields', 'layout', 'customize']),
+        deps: DEPS,
+        // ★Scan実行後、JS由来の依存（フィールド利用・アプリID参照）を Fields / Relations に反映する
+        onDepsUpdated: () => {
+          rerenderFields();
+          rerenderRelations();
+          // ★Healthタブの整合性チェックも更新する（JS内の未知コードは解析後に判明するため）
+          //   Healthタブ全体を描き直すとステータス分布のレコード取得が再実行されるので、
+          //   該当ブロックだけを更新する
+          renderBrokenRefs(root, DEPS);
+          // JS解析で新たに判明した接続先アプリの名前を解決する（未解決のIDだけ問い合わせる。名前を表示するタブを開いた後）
+          resolveAppNames();
+        },
+      });
+      // ★JavaScriptの自動解析：初期描画の完了後、ブラウザが空いたタイミングで実行する（解析の結果を使うタブを表示しているとき。onTabVisible）
+      //   - Field Scannerタブを開かなくても、使用箇所・変更影響・アプリ間依存にJS情報が入る
+      //   - 結果は6時間キャッシュされるため、通常の再訪では追加のAPI取得は発生しない
+      //   - 失敗してもToolkit全体は停止しない（KTScan内でcatch済み）
+      scanWanted = !!DEPS;
+    }
 
-    // 参照先アプリ名の解決（定義は上部）。初期描画をブロックしないよう、描画後に実行する
-    resolveAppNames();
+    /** Plugins タブ（開いたときに組み立てる。最初の読み込みを途中で止めたら、次に開いたときに続きから） */
+    function ensurePlugins(t) {
+      if (!pluginsReady) {
+        pluginsReady = renderPlugins(root, pick(DATA, ['appId', 'plugins']), { live: t.live, onSettingsChanged: (info) => settingsChanged({ ...info, source: 'plugins' }) })
+          .catch((e) => { console.error('[Toolkit] Plugins タブの初期化に失敗しました', e); pluginsReady = null; return null; });
+        return pluginsReady;
+      }
+      return pluginsReady.then((ui) => (ui && typeof ui.ensureLoaded === 'function' && t.live() ? ui.ensureLoaded({ live: t.live }) : null));
+    }
 
-    // ★JavaScriptの自動解析：初期描画の完了後、ブラウザが空いたタイミングで実行する。
-    //   - Field Scannerタブを開かなくても、使用箇所・変更影響・アプリ間依存にJS情報が入る
-    //   - 結果は6時間キャッシュされるため、通常の再訪では追加のAPI取得は発生しない
-    //   - 失敗してもToolkit全体は停止しない（KTScan内でcatch済み）
-    if (DEPS) KTScan.scheduleAuto();
+    /** 他アプリの定義（開発支援を開いたときに取る。1 回のまとまり。運用環境の設定が変わったら取り直す） */
+    function ensureRelated(t) {
+      if (relatedGen === settingsGen) return Promise.resolve(relatedApps);
+      if (relatedLoading) return relatedLoading;
+      if (!t.live() || !DATA) return Promise.resolve(null);
+      const gen = settingsGen, src = DATA;
+      const p = fetchRelatedApps(src.fields, kGet, src.actions).then((r) => {
+        if (gen === settingsGen) {
+          relatedApps = r || {}; relatedGen = gen;
+          if (DATA) DATA = Object.freeze({ ...DATA, relatedApps });
+          try { root.ktAi?.refreshTargets?.(); } catch (e) { }
+        }
+        return r;
+      }).catch((e) => { console.error('[Toolkit] 他アプリの定義の取得に失敗しました', e); return null; });
+      relatedLoading = p;
+      p.then(() => { if (relatedLoading === p) relatedLoading = null; });
+      return p;
+    }
 
-  });
+    /** 表示中のタブに要るもの（展開している間だけ。手形 t が無効なら何もしない） */
+    function onTabVisible(tab, t) {
+      if (!tab || !appliedCore || !t.live()) return;
+      if (NAME_TABS.has(tab)) { namesWanted = true; resolveAppNames(); }
+      if (SCAN_TABS.has(tab) && scanWanted && DEPS) { scanWanted = false; KTScan.scheduleAuto({ gate }); }
+      if (tab === 'customize' && customizeReady) {
+        customizeReady.then((c) => (c && t.live() && visibleTab() === 'customize' ? c.ensureLoaded({ live: t.live }) : null))
+          .catch((e) => { console.error('[Toolkit] Customize の一覧の取得に失敗しました', e); });
+      }
+      if (tab === 'plugins') ensurePlugins(t);
+      if (tab === 'ai') ensureRelated(t);
+    }
+
+    const showNote = (text) => { const v = root.querySelector('#view-health'); if (v && !appliedCore) v.innerHTML = `<div style="padding:12px; opacity:.7;">${escapeHtml(text)}</div>`; };
+    /** 展開・タブの切り替えのたびに呼ぶ: 要る設定だけを取って描く（取得済みが有効なら取らない） */
+    async function sync() {
+      if (!gate.isOpen()) return;   // 最小化中は何もしない
+      const t = gate.ticket();
+      const tab = visibleTab();
+      if (!appliedCore || (SNAPSHOT_TABS.has(tab) && !coreValid())) {
+        if (!appliedCore) showNote('アプリの設定を読み込んでいます…');
+        let c = null;
+        try { c = await ensureCore(t); }
+        catch (e) { console.error('[Toolkit] アプリの設定の取得に失敗しました', e); showNote(`アプリの設定を取得できませんでした（${e?.message || e}）。パネルを開き直すと取り直します。`); return; }
+        // 最小化した（または始めなかった）: 取れた結果は残し、描画とそれに続く取得は展開まで始めない
+        if (!c || !t.live()) return;
+        if (appliedCore && !coreValid()) return sync();   // 取得の間に Toolkit 自身が運用環境を変えた: 古い写しで描き直さずに取り直す
+        if (appliedCore !== c) applyCore(c);
+      }
+      onTabVisible(visibleTab(), t);
+    }
+    const syncSafe = () => { sync().catch((e) => { console.error('[Toolkit] 設定の取得に失敗しました', e); }); };
+    gate.onChange((open) => { if (open) syncSafe(); });
+    try { root.ktTabs?.onSwitch?.(() => { if (gate.isOpen()) syncSafe(); }); } catch (e) { }
+
+    if (gate.isOpen()) await sync();
+    else showNote('パネルを展開すると、アプリの設定を読み込みます。');
+    return root;
+  }
+
+  waitReady().then(() => startToolkit());
 
 })();
