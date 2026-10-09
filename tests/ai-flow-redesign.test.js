@@ -2884,13 +2884,27 @@ await section(async () => {
 // =========================================================
 console.log('\n--- §G. C-1 第 4 段（2026-10-09）: 使用量の範囲・PC とモバイルの行・計画の AI の文のフィールド名 ---');
 // G1（K-2）: 最終案のカードの使用量（トークン・米ドル）は AI の呼び出しの回数と同じ範囲（計画の AI の分も足す）。単価は生成と同じ §10 の単価（入力 $2・出力 $10 / 100 万）
+//   §0f.4 の 6（2026-10-09）で強めた: 生成の使用量が未取得のときは、計画の分を「確認できた分」として出し、使用量が不明の回数と「費用は未確定」を明示する
+//   （以前は一部だけの合計を「使用量 … 約 X 米ドル」と全体のように出していた。K > 0 なら合計と言わない）
 await section(async () => {
   const x = makeConvC({ planImpl: (args) => { const r = planJs(args); r.plan.ai = { model: 'm', usage: { input_tokens: 35550, output_tokens: 3000 } }; return r; } });
   await adoptC(x);
   const u = x.c.activePlan().final.usage;
   const all = stripC(finalHtml(x));
-  assert(u && u.tokens.input === 35550 && u.tokens.output === 3000 && u.costUsd === 0.1011 && u.measured === 1 && u.aiCalls >= 2 && /使用量 入力 35550 \/ 出力 3000 トークン・約 0\.1011 米ドル/.test(all),
-    `G1（K-2）: 使用量に計画の AI の分を足す（生成の使用量が未取得でも計画の分は出す）: ${JSON.stringify(u)}`);
+  const line = (all.split('\n').find(s => /AI の呼び出し/.test(s)) || '');
+  assert(u && u.tokens.input === 35550 && u.tokens.output === 3000 && u.costUsd === 0.1011 && u.measured === 1 && u.aiCalls >= 2 && u.sentCalls === u.aiCalls && u.usageUnknown === 1
+    && /AI の呼び出し 2 回（内部を含め最大 2 回）。うち 1 回は使用量が不明のため、費用は未確定です。確認できた分 入力 35550 \/ 出力 3000 トークン・約 0\.1011 米ドル（キャッシュの割引なし）/.test(line)
+    && !/合計/.test(line) && !/使用量 入力 35550/.test(line),
+    `G1（K-2・§0f.4 の 6）: 使用量に計画の AI の分を足し、生成の使用量が未取得なら「確認できた分」と不明の回数・費用は未確定を出す（合計と言わない）: ${JSON.stringify(u)} / ${line}`);
+  //   すべての呼び出しの使用量が分かったときだけ「合計」（不明の文を出さない）
+  const base = makeGenerate({ sequence: ['good'] });
+  const gen = { calls: base.calls, impl: async (args) => { const r = await base.impl(args); return { ...r, generated: { ...r.generated, ai: { model: 'g', usage: { input_tokens: 5000, output_tokens: 800 } } } }; } };
+  const y = makeConvC({ planImpl: (args) => { const r = planJs(args); r.plan.ai = { model: 'm', usage: { input_tokens: 35550, output_tokens: 3000 } }; return r; }, generate: gen });
+  await adoptC(y);
+  const u2 = y.c.activePlan().final.usage;
+  const line2 = (stripC(finalHtml(y)).split('\n').find(s => /AI の呼び出し/.test(s)) || '');
+  assert(u2 && u2.usageUnknown === 0 && u2.measured === 2 && /合計 入力 40550 \/ 出力 3800 トークン・約 0\.1191 米ドル（キャッシュの割引なし）/.test(line2) && !/不明|未確定/.test(line2),
+    `G1-2: すべての呼び出しの使用量が分かったときだけ合計を出す: ${JSON.stringify(u2)} / ${line2}`);
 });
 // G2（K-3）: 必須の動作の行に PC / モバイルを付け、同じ内容を 2 回出さない。実現できない点の行も PC / モバイルを付け、同じ内容は 1 行にまとめる
 await section(async () => {
