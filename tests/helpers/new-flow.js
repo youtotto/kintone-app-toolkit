@@ -164,7 +164,8 @@ function createNewFlowKit(T) {
       return T.KTDevBase.load({ appId: '341', getImpl, download: async (k) => api.downloadFile(k), now: () => new Date('2026-10-09T00:00:00Z').getTime() });
     };
   }
-  function mount({ health = HEALTH, proposeGate = null, planImpl = null, generateImpl = null, extra = null, liveBase = false } = {}) {
+  //   §0f.5 の 3（2026-10-09）: scriptFn = 仮案の台本（既定は script）を差し替えられる（実機の仮案の文を画面で描く回帰用）
+  function mount({ health = HEALTH, proposeGate = null, planImpl = null, generateImpl = null, extra = null, liveBase = false, scriptFn = script } = {}) {
     const storage = makeStorage();
     const settings = KTAiClient.createSettingsStore({ storage, host: 't.cybozu.com' });
     settings.setConsent(true);
@@ -178,7 +179,7 @@ function createNewFlowKit(T) {
       async plan({ ctx, requestId, deadlineMs = null }) { calls.plan.push({ ctx, deadlineMs }); clock.t += 30000; if (mx.planImpl) return mx.planImpl({ ctx, requestId }); const v = KTAiClient.validatePlan(PLAN_V1(ctx.goal), ctx); return { ...v.normalized, requestId, clientWarnings: v.warnings }; },
       async propose({ ctx, requestId, onText = null, deadlineMs = null }) {
         calls.propose.push({ ctx, stream: typeof onText === 'function', deadlineMs });
-        const raw = script({ utterance: ctx.question, previous: ctx.conversation.proposal, requirements: ctx.conversation.requirements });
+        const raw = scriptFn({ utterance: ctx.question, previous: ctx.conversation.proposal, requirements: ctx.conversation.requirements });
         if (!raw) throw new Error(`台本がありません: ${ctx.question}`);
         // SSE を模擬: 最初の文字 → （止める）→ 全文
         clock.t += 2500; if (onText) onText(raw.reply.slice(0, 10));

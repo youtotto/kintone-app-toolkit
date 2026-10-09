@@ -113,7 +113,8 @@ const writes = (m) => m.mock.calls.filter(c => !c.startsWith('GET'));
 const isHidden = (m) => KTAiChatUi.isHiddenMessage(m);
 // 会話（左）に出ている文だけ（右の作業内容・詳細の中は除く）
 const outsideDetails = (html) => String(html).replace(/<details[\s\S]*?<\/details>/g, '');
-const INTERNAL_IN_CHAT = /\bv[0-9]+\b|requestId|\bR[0-9]+「|\bQ[0-9]+[：:]|\[E[0-9]+\]|Toolkit Review|Code Review|VERIFIED|snapshot|受け付けました|台帳|を検証しました|kt-ai-who">(Toolkit|SYSTEM)</;
+//   §0f.5 の 3（2026-10-09）: 根拠の番号は半角の [E12] だけでなく、全角の ［E12・E16］・【E3】・半角で複数の [E12・E16] も見る（実機の仮案の文）
+const INTERNAL_IN_CHAT = /\bv[0-9]+\b|requestId|\bR[0-9]+「|\bQ[0-9]+[：:]|\[E[0-9]+\]|［\s*E[0-9]+|【\s*E[0-9]+|\[\s*E[0-9]+\s*[・、,]|Toolkit Review|Code Review|VERIFIED|snapshot|受け付けました|台帳|を検証しました|kt-ai-who">(Toolkit|SYSTEM)</;
 const PLAN_VIEW = () => { const p = JSON.parse(JSON.stringify(PLAN_V1)); p.plan.proposedFields = []; p.plan.questions = []; p.plan.steps = [{ ...PLAN_V1.plan.steps[1], id: 'P1', dependsOn: [], spec: { ...PLAN_V1.plan.steps[1].spec, fields: ['owner', 'case_name'] }, title: '一覧「担当者別」を追加' }]; return p; };
 const gate = () => { let open; const p = new Promise(r => { open = r; }); return { p, open }; };
 
@@ -705,14 +706,15 @@ console.log('\n--- §21. こちらの提案で進めている点・確認した�
   const mk = (type, role, text, data = null) => ({ id: `m${Math.random()}`, type, role, text, at: '', ...(data ? { data } : {}) });
   void MSG; void mk;
   //   C-1 第 3 段: 計画の提案のカード（kind provisionals）は削除した。こちらの提案で進める点は仮案のカード（前提 assumptions）に出る（B2-3）。
-  //   同じ決まり（3 件以上は畳む・2 件以下は開く・1 件 1 行・変え方は小さく灰色・「／」で詰めない）を仮案のカードで確かめる
+  //   同じ決まり（§0f.5 の 3 で件数にかかわらず畳む・1 件 1 行・変え方は小さく灰色・「／」で詰めない）を仮案のカードで確かめる
   const xP = K.makeConvC();
   await K.adoptC(xP);
   const drafts = xP.c.messages().filter(x => x.type === 'DRAFT').map(x => KTAiChatUi.messageHtml(x, { draft: xP.c.draft() }));
   const asm = (h) => (h.match(/<details class="kt-ai-draft-assumptions"[\s\S]*?<\/details>/) || [''])[0];
   const html2 = asm(drafts[0]), html4 = asm(drafts[2]);
   assert(/<summary>こちらの提案で進める点が 4 件あります（変えたいときはそのまま伝えてください）<\/summary>/.test(html4) && !/<details[^>]*\sopen/.test(html4) && (html4.match(/<li>/g) || []).length === 4 && /<li>承認者はユーザー選択フィールド「課長承認者」「部長承認者」を新設して指定する<span[^>]*>（既存のフィールドを使うこともできます）<\/span><\/li>/.test(html4) && !/／/.test(html4) && !/仮の案/.test(html4) && !/kt-ai-who/.test(html4), `提案 4 件: details で畳まれ（見出しだけ）、開くと 1 件 1 行（変え方は小さく）: ${html4.slice(0, 400)}`);
-  assert(/ open><summary>こちらの提案で進める点が 2 件あります/.test(html2) && (html2.match(/<li>/g) || []).length === 2, `提案 2 件: 開いた状態: ${html2.slice(0, 200)}`);
+  //   §0f.5 の 3（2026-10-09）: 前提は件数にかかわらず畳む（2 件でも見出しの件数だけ見え、開くと 1 件 1 行）
+  assert(/<summary>こちらの提案で進める点が 2 件あります（変えたいときはそのまま伝えてください）<\/summary>/.test(html2) && !/<details[^>]*\sopen/.test(html2) && (html2.match(/<li>/g) || []).length === 2, `提案 2 件: 2 件でも畳む（見出しの件数は見える・開くと 2 件）: ${html2.slice(0, 200)}`);
   assert(/\.kt-ai-provisionals-card > summary\{ color:inherit; font-size:inherit; \}/.test(SRC_TEXT) && /\.kt-ai-prov-hint\{ font-size:11px; color:var\(--kt-ai-muted\);/.test(SRC_TEXT), '見出しの文字色は本文と同じ（薄くしない）・変え方は小さく灰色（CSS）');
   // 確認したいことが 2 件: 文は見出し 1 行 ＋ 「- 」の行。変更案の無い描画（記録）でも箇条書き。会話のカードは従来どおり番号付き
   const P = JSON.parse(JSON.stringify(PLAN_V2));

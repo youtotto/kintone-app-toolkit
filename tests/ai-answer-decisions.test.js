@@ -182,7 +182,7 @@ await section(async () => {
   const aiBase = c.metrics().aiCalls, rtBase = c.metrics().roundTrips;
   const r1 = await c.send('PCだけ');
   const ack = c.messages().find(m => m.data?.kind === 'answers-ack');
-  assert(r1.intent === 'ANSWER' && r1.ok && ack && ack.role === 'toolkit' && /PC \/ モバイル：PCだけ/.test(ack.text) && /計画を作り直しています/.test(ack.text) && /1 分前後/.test(ack.text) && /kintone にはまだ何も反映していません/.test(ack.text) && !/v2/.test(ack.text), `受領の表示: 理解した内容・作り直しの待ち時間が残ること・未反映（計画の完成・反映と区別できる）: ${ack && ack.text}`);
+  assert(r1.intent === 'ANSWER' && r1.ok && ack && ack.role === 'toolkit' && /PC \/ モバイル：PCだけ/.test(ack.text) && /計画を作り直しています/.test(ack.text) && /計画全体を作り直します/.test(ack.text) && !/1 分前後|十数秒|約\s*[0-9]+\s*(秒|分)/.test(ack.text) && /kintone にはまだ何も反映していません/.test(ack.text) && !/v2/.test(ack.text), `受領の表示: 理解した内容・作り直しの種類（計画全体）・未反映（計画の完成・反映と区別できる）。§0f.5 の 3: 根拠の無い待ち時間の文（1 分前後）は出さない: ${ack && ack.text}`);
   assert(calls.plan.length === 2 && calls.plan[1].ackAtCall === 1 && calls.plan[1].aiCallsAtCall === aiBase + 1, '受領の表示は AI を呼ぶ前に出る（AI の呼び出しは作り直しの 1 回だけ。受領のための呼び出しは無い）');
   const ackIdx = c.messages().indexOf(ack), planIdx = c.messages().findIndex(m => m.type === 'FINAL' && m.data.version === 2);
   assert(ackIdx >= 0 && planIdx > ackIdx && ack.data.stage === 'done', '受領の表示 → 計画 v2 の最終案の順（作り直しが終わると受領の表示は done。C-1 第 3 段: 変更案のカード PLAN は最終案のカード FINAL に置き換わった）');

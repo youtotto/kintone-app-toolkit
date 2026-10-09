@@ -820,9 +820,10 @@ await section(async () => {
   const conv = m.conv();
   assert(conv.isBusy() && conv.canQueue() && m.$('kt-ai-send').disabled === false && /^計画を作り直しています。質問にはすぐ答えます。追加の指示・回答もこのまま送れます/.test(m.$('kt-ai-composer-note').textContent), `U1: 計画の作り直しの途中は送信ボタンを止めない（回答・修正の依頼は送れる）: ${m.$('kt-ai-composer-note').textContent}`);
   const rev = m.calls.plan[1].ctx.revision;
-  //   C-1 第 3 段: 待ち時間は最終案の進みの 1 枚カード（「最終案を直しています（経過・目安）」。tests/ai-flow-redesign.test.js の C3b-2・C3b-4）。
+  //   C-1 第 3 段: 待ち時間は最終案の進みの 1 枚カード（「最終案を直しています（経過）」。tests/ai-flow-redesign.test.js の C3b-2・C3b-4）。
+  //   §0f.5 の 3（2026-10-09）: 残り時間は推定しない（「残り時間は未推定」。根拠の無い「目安 約 N 秒」は出さない）。
   //   以前の受領の表示・読み込み中の表示の「十数秒」の文は、最終案の流れでは会話に出さない（受領の表示は答えた後の 1 行だけ）
-  assert(rev.mode === 'patch' && rev.focus.includes('Q2') && rev.previousPlan.goal === GOAL && !('validation' in (rev.previousPlan.steps[0] || {})) && /最終案を直しています（経過 \d+:\d+・目安 約 \d+ 秒）/.test(m.chat()), `U2: 回答の後の作り直しは、Gateway の計画（正規化の付けた項目なし）を土台に mode patch で送る・待ち時間は進みのカードに出す: ${JSON.stringify({ mode: rev.mode, focus: rev.focus })}`);
+  assert(rev.mode === 'patch' && rev.focus.includes('Q2') && rev.previousPlan.goal === GOAL && !('validation' in (rev.previousPlan.steps[0] || {})) && /最終案を直しています（経過 \d+:\d+）/.test(m.chat()) && /残り時間は未推定/.test(m.chat()) && !/目安 約|十数秒|1 分前後/.test(m.chat()), `U2: 回答の後の作り直しは、Gateway の計画（正規化の付けた項目なし）を土台に mode patch で送る・待ち時間は進みのカードに経過と「残り時間は未推定」で出す: ${JSON.stringify({ mode: rev.mode, focus: rev.focus })}`);
   // 直している間: 右の見出しは「更新中」、右は前の内容である案内を出し、反映を止める
   assert(m.$('kt-ai-ws-state').innerHTML === '<span class="kt-ai-status" data-status="updating">更新中</span>' && m.$('kt-ai-right-banner').textContent === '変更案を直しています。できるまで、変更内容・確認結果・コードは前の内容です（反映はできません）。' && m.$('kt-ai-right-banner').style.display === '' && m.panel.applyHold() === '新しい内容の確認が終わるまで、反映はできません。', 'U1: 直している間は右の見出しが「更新中」・右は前の内容である案内・反映を止める');
   m.$('kt-ai-input').value = '3段階でよいです';

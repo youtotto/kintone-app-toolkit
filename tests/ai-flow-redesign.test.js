@@ -825,7 +825,8 @@ await section(async () => {
   const lastM = x.last();
   assert(pm && lastM.type === 'LOADING' && lastM.data.kind === 'progress' && pm.title === '最終案を作っています' && pm.stages.map(s => `${s.key}:${s.state}`).join(',') === 'plan:active,summarize:todo', `C3b-1: 進みの 1 枚カード（計画 → まとめ。生成の段階は計画ができてから足す）: ${JSON.stringify(pm && pm.stages.map(s => [s.key, s.state]))}`);
   let html = KTAiChatUi.progressInnerHtml(lastM);
-  assert(/最終案を作っています（経過 0:03・目安 約 51 秒）/.test(html) && /● 計画を作成中（経過 3 秒）/.test(html) && /○ まとめ/.test(html) && /見ている設定: ステータス 3 件・通知 0 件・既存の JavaScript 0 ファイル/.test(html) && /質問はいまでも並行して答えます。追加の指示は、できあがった最終案に入れます/.test(html), `C3b-2: 見出し（経過・目安は「約」）・段階の一覧・見ている材料・待っている間にできることの案内: ${html.replace(/<[^>]*>/g, '｜')}`);
+  //   §0f.5 の 3（2026-10-09）: 見出しは経過だけ。段階の平均から残り時間を推定しない（「残り時間は未推定」。根拠の無い「目安 約 N 秒」は出さない）
+  assert(/最終案を作っています（経過 0:03）/.test(html) && /残り時間は未推定/.test(html) && !/目安|約\s*[0-9]+\s*(秒|分)/.test(html) && /● 計画を作成中（経過 3 秒）/.test(html) && /○ まとめ/.test(html) && /見ている設定: ステータス 3 件・通知 0 件・既存の JavaScript 0 ファイル/.test(html) && /質問はいまでも並行して答えます。追加の指示は、できあがった最終案に入れます/.test(html), `C3b-2: 見出し（経過と「残り時間は未推定」。目安は出さない）・段階の一覧・見ている材料・待っている間にできることの案内:${html.replace(/<[^>]*>/g, '｜')}`);
   assert(/AI の説明/.test(html) && /kt-ai-streaming/.test(html) && /承認待ちの間だけ金額を/.test(html) && x.calls.plan[0].onText === true, 'C3b-3: 計画の AI の説明（reply）を SSE で先に流す（能力 stream: reply があるとき onText を渡す）');
   x.advance(5000); x.c.tickProgress();
   html = KTAiChatUi.progressInnerHtml(x.last());
@@ -838,7 +839,8 @@ await section(async () => {
   const y = makeConvC({ planGate: pg2, storage });
   for (const s of ['課長・部長の承認者を選ぶ運用にしたい', '100円未満は部長不要、100万円以上は必要', '7営業日で。会社独自の休業日は今回はなし']) await y.c.send(s);
   const p2 = y.c.send('おすすめで'); await ticks(6);
-  assert(/目安 約 36 秒/.test(KTAiChatUi.progressInnerHtml(y.last())), `C3b-7: 2 回目は保存した目安（計画 35 秒 ＋ まとめ）: ${KTAiChatUi.progressInnerHtml(y.last()).replace(/<[^>]*>/g, '｜').slice(0, 80)}`);
+  { const h7 = KTAiChatUi.progressInnerHtml(y.last());
+    assert(/最終案を作っています（経過 0:03）/.test(h7) && /残り時間は未推定/.test(h7) && !/目安|約\s*[0-9]+\s*(秒|分)/.test(h7), `C3b-7: 2 回目も、保存した実測（計画 35 秒）から残り時間を推定しない（「残り時間は未推定」。実測は記録に残す: C3b-8）: ${h7.replace(/<[^>]*>/g, '｜').slice(0, 80)}`); }
   pg2.open(); await p2; await ticks(8);
   const prAfter = JSON.parse(storage.getItem('ktAi.timing.v1'));
   assert(prAfter.plan.n === 2 && prAfter.plan.avg === 32500, `C3b-8: 実測が溜まるほど平均に近づく（件数 2。1 回目 35 秒・2 回目 30 秒 → 平均 32.5 秒）: ${JSON.stringify(prAfter.plan)}`);
@@ -848,7 +850,7 @@ await section(async () => {
   z.services.propose = async (args) => { const onText = args.onText; if (onText) onText('課長と部長を申請ごとに'); await gateP.p; return propose0({ ...args, onText: null }); };
   const p3 = z.c.send('課長・部長の承認者を選ぶ運用にしたい'); await ticks(4);
   const ph = KTAiChatUi.progressInnerHtml(z.last());
-  assert(z.last().type === 'LOADING' && z.last().data.kind === 'progress' && /仮案を考えています（経過 0:00・目安 約 10 秒）/.test(ph) && /● 仮案を考えています（経過/.test(ph) && !/考える中/.test(ph) && /仮案への返事や追加の指示は、仮案ができてから送ってください/.test(ph) && !/最終案に入れます/.test(ph) && /kt-ai-streaming/.test(ph) && /課長と部長を申請ごとに/.test(ph), `C3b-9: 仮案の間も同じ形（目安 約 10 秒・reply の逐次表示）: ${ph.replace(/<[^>]*>/g, '｜').slice(0, 160)}`);
+  assert(z.last().type === 'LOADING' && z.last().data.kind === 'progress' && /仮案を考えています（経過 0:00）/.test(ph) && /残り時間は未推定/.test(ph) && !/目安|約\s*[0-9]+\s*(秒|分)/.test(ph) && /● 仮案を考えています（経過/.test(ph) && !/考える中/.test(ph) && /仮案への返事や追加の指示は、仮案ができてから送ってください/.test(ph) && !/最終案に入れます/.test(ph) && /kt-ai-streaming/.test(ph) && /課長と部長を申請ごとに/.test(ph), `C3b-9: 仮案の間も同じ形（経過と「残り時間は未推定」・reply の逐次表示）:${ph.replace(/<[^>]*>/g, '｜').slice(0, 160)}`);
   gateP.open(); await p3; await ticks(4);
   assert(!z.c.messages().some(m => m.type === 'LOADING') && z.c.draft() && z.c.draft().rev === 1, 'C3b-10: 仮案ができたらカードは消える');
   // これから確かめる条件の予告: 生成工程の結果が届く前は必須の効果の一覧（○）、届いたら代表条件ごとの結果（✓ / ×）。最終案の検証の区分にそのまま使う

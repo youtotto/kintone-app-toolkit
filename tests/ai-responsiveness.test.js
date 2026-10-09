@@ -106,9 +106,9 @@ await section(async () => {
   const r = calls[1].revision;
   assert(r.mode === 'patch' && r.previousPlan.gw === 1 && Array.isArray(r.focus) && r.focus.includes('Q1') && calls[1].baseCtx && calls[1].baseCtx.n === 1, `P1: 回答の後の作り直しは mode patch・前の版の Gateway の計画・回答した質問（Q1）を focus・前の版の Context: ${JSON.stringify({ mode: r.mode, focus: r.focus })}`);
   // 2026-10-06: 受領の記録は会話に出さない。待ち時間は作業中の読み込み中の文で伝える（記録の文も同じ待ち時間）
-  //   C-1 第 3 段（2026-10-08）: 最終案の流れの作業中の表示は進みの 1 枚カード（目安は実測。ai-flow-redesign の C3b-13）。
-  //   差分か全体かで変わる待ち時間の文は、受領の記録（answers-ack）に残る
-  assert(/変わる箇所だけを作り直します。十数秒ほどかかります/.test(acks()[0].text) && !/1 分前後/.test(acks()[0].text) && loading === '最終案を直しています', `P1: 受領の記録は差分の待ち時間（十数秒）・作業中の表示は進みの 1 枚カード: ${loading} ｜ ${acks()[0].text}`);
+  //   C-1 第 3 段（2026-10-08）: 最終案の流れの作業中の表示は進みの 1 枚カード（経過と段階。§0f.5 の 3 で残り時間は推定しない。ai-flow-redesign の C3b-13）。
+  //   差分か全体かは、受領の記録（answers-ack）に作業の名前で残る。§0f.5 の 3（2026-10-09）: 根拠の無い待ち時間の文（十数秒ほど・1 分前後）は出さない
+  assert(/変わる箇所だけを作り直します/.test(acks()[0].text) && !/計画全体を作り直します/.test(acks()[0].text) && !/十数秒|1 分前後|約\s*[0-9]+\s*(秒|分)/.test(acks()[0].text) && loading === '最終案を直しています', `P1: 受領の記録は差分の作り直し（作業の名前だけ。時間の目安なし）・作業中の表示は進みの 1 枚カード: ${loading} ｜ ${acks()[0].text}`);
   assert(c.activePlan().revisionMeta?.mode === 'patch' && c.metrics().revisionModes.slice(-1)[0].mode === 'patch', 'P1: 版の作り方（patch）を版と計測に記録する');
   await c.send('更新状況は3段階ではなく5段階にして');
   // 2026-10-05 第 3 段で変更: 自由な修正の依頼も差分（大きな変更は Gateway が同じ依頼の中で全体の作り直しに切り替える）
@@ -119,14 +119,14 @@ await section(async () => {
   const { c, calls, acks } = x;
   await start(c, '金額が大きい案件に注意を出したい');
   const { loading } = await sendHeld(x, 'PCだけ');
-  assert(!calls[1].revision.mode && /1 分前後/.test(acks()[0].text) && loading === '最終案を直しています', `P3: revisionMode full（評価の対照・戻すとき）はいつも全体の作り直し（受領の記録は 1 分前後・作業中の表示は進みの 1 枚カード）: ${loading}`);
+  assert(!calls[1].revision.mode && /計画全体を作り直します/.test(acks()[0].text) && !/変わる箇所だけ/.test(acks()[0].text) && !/1 分前後|十数秒|約\s*[0-9]+\s*(秒|分)/.test(acks()[0].text) && loading === '最終案を直しています', `P3: revisionMode full（評価の対照・戻すとき）はいつも全体の作り直し（受領の記録は「計画全体を作り直します」。時間の目安なし・作業中の表示は進みの 1 枚カード）: ${loading} ｜ ${acks()[0].text}`);
 });
 await section(async () => {
   const x = makeConv([planWith(qs(QP, QS)), planWith(qs(QS))], { revisionModes: ['full'] });
   const { c, calls, acks } = x;
   await start(c, '金額が大きい案件に注意を出したい');
   const { loading } = await sendHeld(x, 'PCだけ');
-  assert(calls[1].revision.mode === 'patch' && /1 分前後/.test(acks()[0].text) && !/十数秒/.test(acks()[0].text) && loading === '最終案を直しています', `P4: health が patch を示さない古い Gateway では、差分を頼んでも全体を作り直す前提の文（古い Gateway は mode を無視する。受領の記録の文）: ${loading}`);
+  assert(calls[1].revision.mode === 'patch' && /計画全体を作り直します/.test(acks()[0].text) && !/変わる箇所だけ/.test(acks()[0].text) && !/1 分前後|十数秒|約\s*[0-9]+\s*(秒|分)/.test(acks()[0].text) && loading === '最終案を直しています', `P4: health が patch を示さない古い Gateway では、差分を頼んでも全体を作り直す前提の文（古い Gateway は mode を無視する。受領の記録の文。時間の目安なし）: ${loading} ｜ ${acks()[0].text}`);
 });
 await section(async () => {
   // 根拠ID の付け替え（Context は作り直しのたびに予算で facts を削って番号を振り直す）
