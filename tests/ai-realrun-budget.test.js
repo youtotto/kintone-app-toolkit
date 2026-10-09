@@ -53,7 +53,7 @@ function fakeClient(impl = {}) {
 const catchOf = async (p) => { try { await p; return null; } catch (e) { return e; } };
 const reasonOf = (e) => (e && e.details && e.details.budget ? e.details.budget.reason : null);
 const restButtonOf = (h) => { const m = /<button[^>]*data-act="choice"[^>]*>残りの JavaScript を作る<\/button>/.exec(h); return m ? { html: m[0], disabled: /\sdisabled/.test(m[0]) } : null; };
-const ALLOWED_ENTRY_KEYS = ['key', 'requestId', 'feature', 'kind', 'mode', 'sessionId', 'startedAt', 'endedAt', 'status', 'reservedUsd', 'reservedCalls', 'maxCallUsd', 'estimatedModel', 'maxOutputTokens', 'ctxBytes', 'model', 'calls', 'costUsd', 'costKnownUsd', 'costComplete', 'costCachedUsd', 'reason'];
+const ALLOWED_ENTRY_KEYS = ['key', 'requestId', 'feature', 'kind', 'mode', 'sessionId', 'startedAt', 'endedAt', 'status', 'reservedUsd', 'reservedCalls', 'maxCallUsd', 'estimatedModel', 'maxOutputTokens', 'ctxBytes', 'model', 'calls', 'costUsd', 'costKnownUsd', 'costComplete', 'costCachedUsd', 'reason', 'enforcement', 'allowanceUsd', 'gatewayCalls'];
 
 (async () => {
 // =========================================================
@@ -157,7 +157,7 @@ await section(async () => {
   const b = e && e.details && e.details.budget;
   const text = e ? KTAiClient.errorText(e.code, e) : '';
   assert(e && e.code === 'BUDGET_EXCEEDED' && b.reason === 'limit' && b.needUsd > b.remainingUsd && b.remainingUsd === 0.5 && b.needCalls === 3 && fc.calls.length === 0 && (ledgerOf(storage) === null || ledgerOf(storage).entries.length === 0)
-    && /検証の上限（費用・回数）を超えるため、AI に送りませんでした（次の要求は最大 約 [0-9.]+ 米ドル・AI の呼び出し 3 回、残りは 約 0\.5 米ドル・100 回です/.test(text) && KTAiConversation.stopKindOf(e) === 'budget',
+    && /検証の上限（費用・回数）を超えるため、AI に送りませんでした（次の要求は推定で最大 約 [0-9.]+ 米ドル・AI の呼び出し 3 回、残りは 約 0\.5 米ドル・100 回です（[^）]*推定による送信制限で、Gateway による上限の強制はありません）/.test(text) && KTAiConversation.stopKindOf(e) === 'budget',
     `B2-2: 残りの予算より次の要求の最大費用が大きい → 送信 0 件・記録も書かない・画面の文に必要な額と残り・会話の停止の種類は budget: ${text}`);
   const { budget: b2 } = mkBudget({ config: { limitUsd: 100, maxCalls: 2 } });
   const f2 = fakeClient();
@@ -367,7 +367,7 @@ await section(async () => {
   const head = m.$('kt-ai-header').innerHTML;
   assert(seen.length === 0 && gen.calls.length === 0 && m.calls.plan.length === 1 && fin && fin.incomplete && fin.incomplete.kind === 'budget' && fin.incomplete.budget && fin.incomplete.budget.reason === 'limit' && fin.incomplete.budget.needUsd > fin.incomplete.budget.remainingUsd && !fin.approvable,
     `B4-1: 残りより生成の最大が大きい → 生成の送信 0 件（偽の client の呼び出し 0）・最終案は予算で止まった未完成（承認できない）: ${JSON.stringify({ seen: seen.length, inc: fin && fin.incomplete, kinds })}`);
-  assert(btn && btn.disabled && /利用の上限（予算・回数）に達しました（次の要求は最大 約 [0-9.]+ 米ドル・AI の呼び出し 3 回、残りは 約 [0-9.]+ 米ドル/.test(stripC(chat)) && kinds.join() === 'propose:done,propose:done,propose:done,plan:done' && /検証の上限: 記録済み 約 [0-9.]+ 米ドル・確保中 約 0 米ドル ／ 上限 1 米ドル・AI の呼び出し 4 \/ 100 回/.test(stripC(head)),
+  assert(btn && btn.disabled && /利用の上限（予算・回数）に達しました（次の要求は推定で最大 約 [0-9.]+ 米ドル・AI の呼び出し 3 回、残りは 約 [0-9.]+ 米ドル/.test(stripC(chat)) && kinds.join() === 'propose:done,propose:done,propose:done,plan:done' && /検証の上限（推定による送信制限・上限の強制は無い）: 記録済み 約 [0-9.]+ 米ドル・確保中 約 0 米ドル ／ 上限 1 米ドル・AI の呼び出し 4 \/ 100 回/.test(stripC(head)),
     `B4-2: 最終案の理由に必要な額と残り・［残りの JavaScript を作る］は無効・記録に生成は無い・見出しに記録済み・確保中・上限: ${JSON.stringify({ btn, kinds, head: stripC(head).slice(0, 120) })}`);
   const line = stripC(chat).split('\n').find(s => /AI の呼び出し \d+ 回（内部を含め最大/.test(s)) || '';
   assert(/AI の呼び出し 1 回（内部を含め最大 1 回）。合計 入力 500 \/ 出力 200 トークン・約 0\.003 米ドル（キャッシュの割引なし）/.test(line) && /検証の上限で送らなかった要求 1 件（費用なし）/.test(stripC(chat)), `B4-3: 最終案の詳細: 送った呼び出しだけを数え、送らなかった要求は費用なしと分けて出す: ${line}`);
@@ -442,7 +442,7 @@ await section(async () => {
   const askSent = m.calls.ask.length - askBefore;
   const midBoth = budget.summary();
   g.open(); await pAdopt; await ticks(20);
-  assert(mid.inFlight === 1 && askRefused === 0 && /検証の上限（費用・回数）を超えるため、AI に送りませんでした（次の要求は最大 約/.test(refusedText) && askSent === 1 && midBoth.reservedUsd >= mid.reservedUsd,
+  assert(mid.inFlight === 1 && askRefused === 0 && /検証の上限（費用・回数）を超えるため、AI に送りませんでした（次の要求は推定で最大 約/.test(refusedText) && askSent === 1 && midBoth.reservedUsd >= mid.reservedUsd,
     `B4-10: 生成中の並行の質問は、生成の確保額を含めて判定する（収まらなければ送らず理由を出す・収まれば送る）: ${JSON.stringify({ mid, askRefused, askSent, midBoth })}`);
 });
 await section(async () => {
@@ -507,6 +507,278 @@ await section(async () => {
   const uOne = finalUsageOf({ aiCalls: 1, calls: [{ kind: 'generate', end: 'ok', repairs: 0, ...(eIn.measured !== false ? { genEstimate: eIn } : {}) }] });
   assert(eIn.measured === false && eIn.input === null && eOut.measured === false && eBoth.measured === true && eBoth.input === 5000 && eBoth.output === 800 && KTAiBudget.callsOf('generate', { ai: { usage: { input_tokens: 5000 } } })[0] === null && uOne.usageUnknown === 1 && uOne.measured === 0,
     `B5-6: 片方だけの usage は使用量が不明（最終案は「使用量が不明」に数える・記録の callsOf と同じ扱い）: ${JSON.stringify({ eIn, eOut, uOne: [uOne.usageUnknown, uOne.measured] })}`);
+});
+
+// =========================================================
+console.log('\n--- §B6. 予算を使う検証で設定を確かめられないときは送らない（再検証前の指示 §3・2026-10-10） ---');
+//   「予算を使わない通常の利用」（設定のキーが無く、読取に成功し、このページで一度も有効になっていない）は今までどおり素通し。
+//   「予算を使う検証で状態を確かめられない」（設定の読取の例外・このページで一度有効だった設定が消えた・台帳の読取の例外）は送信 0 件（BUDGET_EXCEEDED・理由「設定を確かめられない」）。
+//   一度有効だった印は、このページのメモリと sessionStorage（本文なし）。各送信の前に確かめる
+const ARMED_KEY = `ktAi.budgetArmed.v1.${HOST}`;
+await section(async () => {
+  //   通常の利用（設定のキーが無く読取に成功・印なし）は止めない
+  const storage = K.makeStorage(), session = K.makeStorage();
+  const b = KTAiBudget.create({ storage, session, host: HOST, locks: null });
+  const fc = fakeClient();
+  const r = await catchOf(b.wrap(fc.client).ask({ ctx: {}, requestId: 'n-1' }));
+  assert(r === null && fc.count('ask') === 1 && !('noProxyFallback' in fc.calls[0].p) && !b.enabled() && b.state() === 'disabled' && session.getItem(ARMED_KEY) === null && KTAiBudget.summaryText(b.summary()) === '',
+    `B6-1: 予算を設定していない通常の利用（設定のキーが無く、読取に成功）は止めない（素通し・印を書かない）: ${JSON.stringify({ state: b.state(), armed: session.getItem(ARMED_KEY) })}`);
+  //   設定の読取の例外 → 送信 0 件（今までは「無効」として上限なしで送っていた）
+  const base = K.makeStorage(); setConfig(base, { limitUsd: 10 });
+  const cfgThrows = { getItem: (k) => { if (k === CFG_KEY) throw new Error('SecurityError'); return base.getItem(k); }, setItem: (k, v) => base.setItem(k, v), removeItem: (k) => base.removeItem(k) };
+  const b2 = KTAiBudget.create({ storage: cfgThrows, session: K.makeStorage(), host: HOST, locks: null });
+  const f2 = fakeClient();
+  const e2 = await catchOf(b2.wrap(f2.client).propose({ ctx: {} }));
+  assert(e2 && e2.code === 'BUDGET_EXCEEDED' && reasonOf(e2) === 'config-unreadable' && f2.calls.length === 0 && b2.enabled() === true && /検証の上限を確かめられないため、AI に送りませんでした（検証の上限の設定を確かめられません（設定を読めません））/.test(KTAiClient.errorText(e2.code, e2)) && /設定を確かめられないため、AI に送りません/.test(KTAiBudget.summaryText(b2.summary())) && KTAiConversation.stopKindOf(e2) === 'budget',
+    `B6-2: 設定の読取が例外 → 送信 0 件（理由「設定を確かめられない」・画面は包む側（enabled）・停止の種類は budget）: ${e2 && KTAiClient.errorText(e2.code, e2)}`);
+  //   保存領域が無い（storage が取れない）: このタブで一度有効だった印があれば送らない。印が無ければ通常の利用
+  //   （localStorage の参照そのものが例外になる場合も「設定を読めない」にしているが、テストの vm では参照の例外を作れないので、ここでは印で確かめる）
+  const armedSession = K.makeStorage(); armedSession.setItem(ARMED_KEY, JSON.stringify({ id: 'v1', createdAt: CREATED }));
+  const b3 = KTAiBudget.create({ storage: null, session: armedSession, host: HOST, locks: null });
+  const f3 = fakeClient();
+  const e3 = await catchOf(b3.wrap(f3.client).ask({ ctx: {} }));
+  const b3n = KTAiBudget.create({ storage: null, session: K.makeStorage(), host: HOST, locks: null });
+  assert(e3 && reasonOf(e3) === 'config-unreadable' && f3.calls.length === 0 && b3.state() === 'broken' && b3n.state() === 'disabled', `B6-3: 保存領域が取れない: このタブで有効だった印があれば送信 0 件・印が無ければ通常の利用: ${reasonOf(e3)} / ${b3n.state()}`);
+});
+await section(async () => {
+  //   このページで一度有効だった設定が消えた（同じページ＝メモリの印）→ 送信 0 件
+  const storage = K.makeStorage(), session = K.makeStorage();
+  setConfig(storage, { limitUsd: 10 });
+  const b = KTAiBudget.create({ storage, session, host: HOST, locks: null });
+  const fc = fakeClient();
+  const w = b.wrap(fc.client);
+  await w.ask({ ctx: {} });
+  const armed = session.getItem(ARMED_KEY);
+  storage.removeItem(CFG_KEY);
+  const e = await catchOf(w.ask({ ctx: {} }));
+  assert(fc.count('ask') === 1 && !!armed && !/limitUsd|maxCalls/.test(armed) && JSON.parse(armed).id === 'v1' && e && reasonOf(e) === 'config-missing' && b.enabled() === true && /このページで有効だった設定が見つかりません/.test(KTAiClient.errorText(e.code, e)),
+    `B6-4: 一度有効だった設定が消えた（同じページ）→ 次の送信 0 件（理由「設定を確かめられない」）。印は設定の id と作った日時だけ（金額は入れない）: ${JSON.stringify({ asks: fc.count('ask'), armed, e: reasonOf(e) })}`);
+  //   読み込み直し（新しいページのインスタンス・同じタブの sessionStorage の印）でも送らない。別のタブ（印なし）は通常の利用として素通し
+  const reloaded = KTAiBudget.create({ storage, session, host: HOST, locks: null, sessionId: 'p-reload' });
+  const f2 = fakeClient();
+  const e2 = await catchOf(reloaded.wrap(f2.client).ask({ ctx: {} }));
+  const otherTab = KTAiBudget.create({ storage, session: K.makeStorage(), host: HOST, locks: null });
+  const f3 = fakeClient();
+  const e3 = await catchOf(otherTab.wrap(f3.client).ask({ ctx: {} }));
+  assert(reasonOf(e2) === 'config-missing' && f2.calls.length === 0 && e3 === null && f3.count('ask') === 1 && otherTab.state() === 'disabled',
+    `B6-5: 読み込み直しの後も sessionStorage の印で送らない。印の無い別のタブ（設定のキーが無く読めた）は通常の利用: ${JSON.stringify({ reload: reasonOf(e2), other: otherTab.state() })}`);
+  //   sessionStorage を読めない・書けない → メモリの印だけ（同じページでは止める）
+  const st2 = K.makeStorage(); setConfig(st2, { limitUsd: 10 });
+  const badSession = { getItem: () => { throw new Error('denied'); }, setItem: () => { throw new Error('denied'); }, removeItem: () => { } };
+  const b4 = KTAiBudget.create({ storage: st2, session: badSession, host: HOST, locks: null });
+  const f4 = fakeClient();
+  const w4 = b4.wrap(f4.client);
+  await w4.ask({ ctx: {} });
+  st2.removeItem(CFG_KEY);
+  const e4 = await catchOf(w4.ask({ ctx: {} }));
+  assert(f4.count('ask') === 1 && reasonOf(e4) === 'config-missing', `B6-6: sessionStorage を読めない・書けないときもメモリの印で止める: ${reasonOf(e4)}`);
+});
+await section(async () => {
+  //   台帳の読取の例外（一度送った後）→ 送信 0 件（確保・精算も記録を読めなければ送らない）。設定が壊れた・別の形になった → 送らない
+  const base = K.makeStorage(); setConfig(base, { limitUsd: 10 });
+  let ledgerThrows = false;
+  const storage = { getItem: (k) => { if (ledgerThrows && k === ledgerKey()) throw new Error('denied'); return base.getItem(k); }, setItem: (k, v) => base.setItem(k, v), removeItem: (k) => base.removeItem(k) };
+  const b = KTAiBudget.create({ storage, session: K.makeStorage(), host: HOST, locks: null });
+  const fc = fakeClient();
+  const w = b.wrap(fc.client);
+  await w.ask({ ctx: {} });
+  ledgerThrows = true;
+  const e = await catchOf(w.ask({ ctx: {} }));
+  ledgerThrows = false;
+  base.setItem(CFG_KEY, '{bad');
+  const e2 = await catchOf(w.ask({ ctx: {} }));
+  assert(fc.count('ask') === 1 && reasonOf(e) === 'ledger-unreadable' && reasonOf(e2) === 'config-invalid', `B6-7: 台帳の読取の例外・壊れた設定 → 送信 0 件: ${reasonOf(e)} / ${reasonOf(e2)}`);
+});
+await section(async () => {
+  //   画面: 各送信の前に確かめる（makeClient が送信ごとに状態を読む）。最初の仮案は送り、設定が消えた後の仮案は送らない（理由を出す・見出しにも出す）
+  const storage = K.makeStorage(), session = K.makeStorage();
+  setConfig(storage, { limitUsd: 10 });
+  const budget = KTAiBudget.create({ storage, session, host: HOST, locks: null });
+  K.META.ai.model = MODEL;
+  const { m } = mountB({ budget });
+  await ticks();
+  await m.panel.send(K.REQUESTS[0]); await ticks(10);
+  const sent1 = m.calls.propose.length;
+  storage.removeItem(CFG_KEY);
+  await m.panel.send(K.REQUESTS[1]); await ticks(10);
+  const text = stripC(m.chat());
+  const head = stripC(m.$('kt-ai-header').innerHTML);
+  assert(sent1 === 1 && m.calls.propose.length === 1 && /検証の上限を確かめられないため、AI に送りませんでした（検証の上限の設定を確かめられません（このページで有効だった設定が見つかりません/.test(text) && /設定を確かめられないため、AI に送りません/.test(head),
+    `B6-8: 画面: 一度有効だった設定が消えた後の送信は 0 件（理由を会話と見出しに出す）: ${JSON.stringify({ sent1, now: m.calls.propose.length })} / ${text.slice(-400)} / ${head.slice(0, 200)}`);
+});
+
+// =========================================================
+console.log('\n--- §B7. Gateway が要求の上界で強制する上限（health の limits.budgetAllowance・再検証前の指示 §4・2026-10-10） ---');
+//   印（limits.budgetAllowance = { version: 1, models }）があるときだけ envelope に budget: { allowanceUsd } を付ける。allowanceUsd = 上限 − 記録済みの費用（不明は確保額）− ほかの進行中・
+//   終了不明の確保額。この要求の確保額 = allowanceUsd。meta.budget で精算。Gateway の BUDGET_EXCEEDED（stage first・AI を呼んでいない）は解放して送信を止める。
+//   印の無い Gateway は今の推定による送信制限だけ（画面と記録に「推定による送信制限（上限の強制は無い）」と区別して出す）
+const BA = { version: 1, models: [MODEL] };
+const LIM_ON = { version: 1, deadlineMs: { 'assistant-qa': 120000, 'change-planner': 310000, 'customization-generator': 310000 }, features: { 'assistant-qa': { model: MODEL }, 'change-planner': { model: MODEL }, 'customization-generator': { model: MODEL } }, budgetAllowance: BA };
+const LIM_OFF = { version: 1, deadlineMs: { ...LIM_ON.deadlineMs }, features: clone(LIM_ON.features) };
+const metaOf = (allowanceUsd, calls) => ({ allowanceUsd, spentUsd: Math.round(calls.reduce((s, c) => s + (c.costUsd != null ? c.costUsd : c.boundUsd), 0) * 1e6) / 1e6, complete: calls.every(c => c.costUsd != null), calls });
+const gwBudgetErr = (detail) => Object.assign(gwErr('BUDGET_EXCEEDED', detail), { httpStatus: 402 });
+await section(async () => {
+  //   health の印の読み取りと、どの要求で強制できるか
+  const h = clone(K.HEALTH); h.limits = { version: 1, deadlineMs: { 'toolkit.assistant-qa': 120000 }, budgetAllowance: { version: 1, models: [MODEL, 7, ''] } };
+  const lim = KTAiClient.limitsFromHealth(h);
+  const cap = KTAiClient.capabilityFromHealth(h);
+  const h2 = clone(K.HEALTH); h2.limits = { version: 1, budgetAllowance: { version: 2, models: [MODEL] } };
+  const h3 = clone(K.HEALTH); h3.limits = { budgetAllowance: { version: 1, models: [MODEL] } };
+  assert(lim && JSON.stringify(lim.budgetAllowance) === JSON.stringify({ version: 1, models: [MODEL] }) && cap.limits && cap.limits.budgetAllowance && KTAiClient.limitsFromHealth(h2) === null && KTAiClient.limitsFromHealth(h3) && KTAiClient.limitsFromHealth(h3).budgetAllowance && Object.keys(KTAiClient.limitsFromHealth(h3).deadlineMs).length === 0,
+    `B7-0a: health の limits.budgetAllowance（version 1・models は文字列だけ）を読む（version の違う印は読まない・期限が無くても印は読む）: ${JSON.stringify({ lim, h2: KTAiClient.limitsFromHealth(h2), h3: KTAiClient.limitsFromHealth(h3) })}`);
+  const E = KTAiBudget.enforcementOf;
+  const other = { ...LIM_ON, features: { ...LIM_ON.features, 'customization-generator': { model: 'gpt-other' } } };
+  assert(E(LIM_ON, 'generate') === 'gateway' && E(LIM_ON, 'ask') === 'gateway' && E(LIM_OFF, 'generate') === 'estimate' && E(null, 'plan') === 'estimate' && E(other, 'generate') === 'estimate' && E(other, 'plan') === 'gateway' && E({ ...LIM_ON, features: { 'change-planner': { model: `${MODEL}-2026-08-01` } } }, 'plan') === 'gateway',
+    'B7-0b: 強制できるのは印があり、その要求のモデルが印の models にあるときだけ（日付つきの版も同じ。無ければ推定による送信制限）');
+  //   envelope の最上位の budget（印があるときだけ・有限・0 以上）
+  const env = KTAiClient.buildGenerateEnvelope({ ctx: { customization: {}, contextVersion: 'c' }, budget: { allowanceUsd: 0.1234567 } });
+  const env0 = KTAiClient.buildGenerateEnvelope({ ctx: { customization: {}, contextVersion: 'c' } });
+  const envBad = KTAiClient.buildPlanEnvelope({ ctx: { facts: [], goal: 'g', contextVersion: 'p' }, budget: { allowanceUsd: -1 } });
+  const envNaN = KTAiClient.buildAskEnvelope({ ctx: { facts: [], contextVersion: 'a' }, budget: { allowanceUsd: '1' } });
+  assert(JSON.stringify(env.budget) === '{"allowanceUsd":0.123456}' && !('budget' in env0) && !('budget' in envBad) && !('budget' in envNaN) && Object.keys(env).join() === 'contractVersion,meta,payload,budget',
+    `B7-0c: envelope の最上位に budget: { allowanceUsd }（6 桁で切り捨て＝残りを超えない）。無い・負・数でなければ付けない: ${JSON.stringify(env.budget)}`);
+  //   client の 4 つの要求が budget を envelope まで渡す
+  const bodies = [];
+  const transport = async (a) => { bodies.push(JSON.parse(a.body)); return { status: 500, body: JSON.stringify({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'x' } }) }; };
+  const client = KTAiClient.createAiClient({ apiBase: 'https://gw.test', customerToken: 't', hostname: HOST, transport });
+  await catchOf(client.ask({ ctx: { facts: [], contextVersion: 'a' }, budget: { allowanceUsd: 1 } }));
+  await catchOf(client.propose({ ctx: { facts: [], contextVersion: 'a', conversation: { mode: 'proposal' }, question: 'q' }, budget: { allowanceUsd: 2 } }));
+  await catchOf(client.plan({ ctx: { facts: [], goal: 'g', contextVersion: 'p' }, budget: { allowanceUsd: 3 } }));
+  await catchOf(client.generate({ ctx: { customization: {}, contextVersion: 'c' }, budget: { allowanceUsd: 4 } }));
+  await catchOf(client.generate({ ctx: { customization: {}, contextVersion: 'c' } }));
+  assert(bodies.map(b => (b.budget ? b.budget.allowanceUsd : null)).join() === '1,2,3,4,', `B7-0d: ask / propose / plan / generate は budget を envelope に入れる（渡さなければ入れない）: ${bodies.map(b => JSON.stringify(b.budget || null)).join(' ')}`);
+});
+await section(async () => {
+  //   印あり: allowanceUsd = 上限 − 記録済み − ほかの進行中・終了不明の確保額。この要求の確保額 = allowanceUsd。meta.budget で精算
+  const { storage, budget } = mkBudget({ config: { limitUsd: 2 } });
+  const seen = [];
+  const g = gate();
+  const fc = fakeClient({
+    ask: (p) => { seen.push(['ask', p.budget]); return { ai: { model: MODEL, usage: usage(1000, 200) }, budgetMeta: metaOf(p.budget.allowanceUsd, [{ kind: 'ask', boundUsd: 0.05, costUsd: 0.004 }]) }; },
+    plan: async (p) => { seen.push(['plan', p.budget]); await g.p; return { ai: { model: MODEL, usage: usage(30000, 2000) }, budgetMeta: metaOf(p.budget.allowanceUsd, [{ kind: 'plan-patch', boundUsd: 0.6, costUsd: null }, { kind: 'plan-full', boundUsd: 0.5, costUsd: 0.08 }]) }; },
+    generate: (p) => { seen.push(['generate', p.budget]); return { ai: { model: MODEL, usage: usage(5000, 800) } }; },
+  });
+  const w = budget.wrap(fc.client, { limits: LIM_ON });
+  await w.ask({ ctx: {}, requestId: 'a-1' });
+  const a1 = ledgerOf(storage).entries[0];
+  const pPlan = w.plan({ ctx: { goal: 'g', revision: { mode: 'patch' } }, requestId: 'p-1' });
+  await ticks();
+  const pIn = clone(ledgerOf(storage).entries[1]);
+  const sMid = budget.summary();
+  //   計画の確保（＝渡した上限 1.996）が残っている間の生成は、残り 0 なので送らない
+  const eGen = await catchOf(w.generate({ ctx: { customization: {} } }));
+  g.open(); await pPlan;
+  const p1 = ledgerOf(storage).entries[1];
+  assert(a1.enforcement === 'gateway' && a1.allowanceUsd === 2 && seen[0][1].allowanceUsd === 2 && a1.status === 'done' && a1.costUsd === 0.004 && a1.reservedUsd === 0 && JSON.stringify(a1.gatewayCalls) === JSON.stringify([{ kind: 'ask', boundUsd: 0.05, costUsd: 0.004 }]),
+    `B7-1: 印あり: 最初の要求は allowanceUsd = 上限 2 − 0（記録・確保なし）を渡し、meta.budget の complete で精算（費用 = spentUsd・確保 0）: ${JSON.stringify(a1)}`);
+  assert(pIn.status === 'in-flight' && pIn.allowanceUsd === 1.996 && pIn.reservedUsd === 1.996 && seen[1][1].allowanceUsd === 1.996 && sMid.reservedUsd === 1.996 && reasonOf(eGen) === 'limit' && eGen.details.budget.mode === 'gateway' && fc.count('generate') === 0,
+    `B7-2: 次の要求の allowanceUsd = 上限 − 記録済み 0.004 = 1.996（確保額 = allowanceUsd）。その確保が残っている間の要求は残り 0 で送らない（送信 0 件）: ${JSON.stringify({ pIn: [pIn.allowanceUsd, pIn.reservedUsd], sMid, eGen: eGen && eGen.details })}`);
+  assert(p1.status === 'partial-unknown' && p1.costUsd === null && p1.costKnownUsd === 0.08 && p1.reservedUsd === 0.6 && p1.reservedCalls === 2 && budget.summary().recordedUsd === 0.084 && budget.summary().reservedUsd === 0.6,
+    `B7-3: meta.budget が complete でない → 確認できた費用（0.08）を記録し、費用が分からない呼び出しはその上界（boundUsd 0.6）を確保に残す（呼び出しの記録どおり）: ${JSON.stringify(p1)}`);
+  const next = await catchOf(w.ask({ ctx: {} }));
+  assert(next === null && seen[2][1].allowanceUsd === 1.316, `B7-4: 次の allowanceUsd = 2 − 0.084 − 0.6 = 1.316（不明は上界で数える）: ${JSON.stringify(seen[2])}`);
+});
+await section(async () => {
+  //   Gateway の BUDGET_EXCEEDED: stage first（AI を呼んでいない）→ 解放し送信を止める理由（budget）。plan-full（差分の後）→ detail.budget で精算（解放しない・送った要求）
+  const { storage, budget } = mkBudget({ config: { limitUsd: 1 } });
+  const first = gwBudgetErr({ reason: 'over-allowance', stage: 'first', allowanceUsd: 1, boundUsd: 1.27 });
+  const fc = fakeClient({ generate: () => { throw first; } });
+  const w = budget.wrap(fc.client, { limits: LIM_ON });
+  const e = await catchOf(w.generate({ ctx: { customization: {} } }));
+  const x = ledgerOf(storage).entries[0];
+  const text = KTAiClient.errorText(e.code, e);
+  assert(e === first && x.status === 'released' && x.reservedUsd === 0 && x.costUsd === 0 && budget.summary().reservedUsd === 0 && KTAiBudget.preAiOf(e) === true && KTAiBudget.notSentOf(e) === true && KTAiConversation.stopKindOf(e) === 'budget' && /この呼び出しの上界 約 1\.27 米ドル（送る要求の大きさと出力の上限から Gateway が計算）が、渡した残り 約 1 米ドルを超えるため、AI を呼びませんでした/.test(text),
+    `B7-5: Gateway の BUDGET_EXCEEDED（stage first）→ 確保を解放・送らなかった要求（費用なし）・送信の停止の種類は budget・画面の文は上界と残り: ${JSON.stringify(x)} / ${text}`);
+  const { storage: s2, budget: b2 } = mkBudget({ config: { limitUsd: 1 } });
+  const full = gwBudgetErr({ reason: 'over-allowance', stage: 'plan-full', allowanceUsd: 1, boundUsd: 0.9, budget: metaOf(1, [{ kind: 'plan-patch', boundUsd: 0.5, costUsd: 0.2 }]) });
+  const f2 = fakeClient({ plan: () => { throw full; } });
+  const e2 = await catchOf(b2.wrap(f2.client, { limits: LIM_ON }).plan({ ctx: { goal: 'g', revision: { mode: 'patch' } } }));
+  const y = ledgerOf(s2).entries[0];
+  assert(e2 === full && y.status === 'done' && y.costUsd === 0.2 && y.reservedUsd === 0 && y.reason === 'BUDGET_EXCEEDED' && KTAiBudget.preAiOf(e2) === false && KTAiBudget.notSentOf(e2) === false && /計画の差分更新を全体の作り直しに切り替える呼び出しは/.test(KTAiClient.errorText(e2.code, e2)),
+    `B7-6: Gateway が差分の後の全体の作り直しを止めた（stage plan-full）→ 解放せず detail.budget で精算（差分の 0.2 米ドル）・送った要求として数える: ${JSON.stringify(y)}`);
+  //   AI を呼んだ後のほかのエラーも detail.budget があれば精算・無ければ終了不明（渡した allowanceUsd を確保に残す）
+  const { storage: s3, budget: b3 } = mkBudget({ config: { limitUsd: 1 } });
+  const up = gwErr('UPSTREAM_ERROR', { reason: 'timeout', budget: metaOf(1, [{ kind: 'generate', boundUsd: 0.4, costUsd: null }]) });
+  await catchOf(b3.wrap(fakeClient({ generate: () => { throw up; } }).client, { limits: LIM_ON }).generate({ ctx: { customization: {} } }));
+  const z = ledgerOf(s3).entries[0];
+  const { storage: s4, budget: b4 } = mkBudget({ config: { limitUsd: 1 } });
+  await catchOf(b4.wrap(fakeClient({ generate: () => { throw aiErr('TIMEOUT'); } }).client, { limits: LIM_ON }).generate({ ctx: { customization: {} } }));
+  const z4 = ledgerOf(s4).entries[0];
+  assert(z.status === 'unknown' && z.reservedUsd === 0.4 && z.costUsd === null && z4.status === 'unknown' && z4.reservedUsd === 1 && z4.allowanceUsd === 1,
+    `B7-7: AI を呼んだ後のエラー: detail.budget があればその上界を確保に残す（0.4）・無ければ渡した allowanceUsd を残す（1。Gateway はこれを超えて使わない）: ${JSON.stringify({ z: [z.status, z.reservedUsd], z4: [z4.status, z4.reservedUsd] })}`);
+});
+await section(async () => {
+  //   印あり なのに応答に meta.budget が無い（取り決めと合わない）→ 以後を止める。spentUsd が allowanceUsd を超える → 以後を止める
+  const { storage, budget } = mkBudget({ config: { limitUsd: 1 } });
+  const fc = fakeClient();
+  const w = budget.wrap(fc.client, { limits: LIM_ON });
+  await w.ask({ ctx: {} });
+  const e = await catchOf(w.ask({ ctx: {} }));
+  const { storage: s2, budget: b2 } = mkBudget({ config: { limitUsd: 1 } });
+  const w2 = b2.wrap(fakeClient({ ask: (p) => ({ ai: { model: MODEL, usage: usage(10, 10) }, budgetMeta: metaOf(p.budget.allowanceUsd, [{ kind: 'ask', boundUsd: 2, costUsd: 1.5 }]) }) }).client, { limits: LIM_ON });
+  await w2.ask({ ctx: {} });
+  const e2 = await catchOf(w2.ask({ ctx: {} }));
+  assert(ledgerOf(storage).stopped && ledgerOf(storage).stopped.reason === 'no-budget-meta' && reasonOf(e) === 'stopped' && fc.count('ask') === 1 && ledgerOf(s2).stopped && ledgerOf(s2).stopped.reason === 'over-allowance' && reasonOf(e2) === 'stopped',
+    `B7-8: 印ありで meta.budget の無い応答・渡した上限を超えた spentUsd → 以後の送信を止める: ${JSON.stringify({ a: ledgerOf(storage).stopped, b: ledgerOf(s2).stopped })}`);
+});
+await section(async () => {
+  //   印なし: envelope に budget を付けない・記録は推定（enforcement estimate）・画面の文は推定による送信制限（上限の強制は無い）と区別する。「超えない」「保証」と言わない
+  const { storage, budget } = mkBudget({ config: { limitUsd: 1 } });
+  const seen = [];
+  const fc = fakeClient({ ask: (p) => { seen.push(p.budget); return { ai: { model: MODEL, usage: usage(1000, 200) } }; } });
+  const w = budget.wrap(fc.client, { limits: LIM_OFF });
+  await w.ask({ ctx: {} });
+  const x = ledgerOf(storage).entries[0];
+  const head = KTAiBudget.summaryText(budget.summary());
+  const eG = await catchOf(w.generate({ ctx: { customization: {} } }));
+  const textE = KTAiClient.errorText(eG.code, eG);
+  const { budget: bOn } = mkBudget({ config: { limitUsd: 1 } });
+  bOn.wrap(fakeClient().client, { limits: LIM_ON });
+  const headOn = KTAiBudget.summaryText(bOn.summary());
+  const texts = [head, headOn, textE, ...['limit', 'calls', 'unknown-model', 'stopped', 'config-unreadable', 'config-missing', 'gateway-over-allowance'].map(r => KTAiClient.budgetDetailText({ reason: r, needUsd: 1, remainingUsd: 0.5, allowanceUsd: 0.5, boundUsd: 1 }))];
+  assert(seen.length === 1 && seen[0] === undefined && x.enforcement === 'estimate' && !('allowanceUsd' in x) && /^検証の上限（推定による送信制限・上限の強制は無い）: 記録済み/.test(head) && /^検証の上限（Gateway が要求ごとに上限を強制）: 記録済み/.test(headOn)
+    && /次の要求は推定で最大 約 [0-9.]+ 米ドル/.test(textE) && /推定による送信制限で、Gateway による上限の強制はありません/.test(textE) && texts.every(t => !/超えない|超えることはありません|保証/.test(t)),
+    `B7-9: 印なし: budget を付けない・記録は推定・見出しと拒否の文は「推定による送信制限（上限の強制は無い）」。印ありの見出しは「Gateway が要求ごとに上限を強制」。どの文も「超えない」「保証」と言わない: ${JSON.stringify({ head, headOn, textE })}`);
+});
+await section(async () => {
+  //   画面: health の印を読み、makeClient の包みが budget を付ける（仮案・計画・生成）。meta.budget で精算し、見出しは「Gateway が要求ごとに上限を強制」
+  const { storage, budget } = mkBudget({ config: { limitUsd: 3 } });
+  const health = clone(K.HEALTH_V); health.limits = clone(LIM_ON);
+  const sent = [];
+  const meta1 = (kind, p) => metaOf(p.budget ? p.budget.allowanceUsd : null, [{ kind, boundUsd: 0.2, costUsd: 0.01 }]);
+  const clientWrap = (c) => ({ ...c,
+    propose: async (p) => { sent.push(['propose', p.budget]); const r = await c.propose(p); r.ai = { model: MODEL, usage: usage(500, 100) }; r.budgetMeta = meta1('propose', p); return r; },
+    plan: async (p) => { sent.push(['plan', p.budget]); const r = await c.plan(p); r.ai = { ...(r.ai || {}), model: MODEL, usage: usage(500, 100) }; r.budgetMeta = meta1('plan-full', p); return r; },
+    generate: async (p) => { sent.push(['generate', p.budget]); const r = await c.generate(p); r.ai = { model: MODEL, usage: usage(3000, 700) }; r.budgetMeta = meta1('generate', p); return r; },
+  });
+  const gen = K.screenGenerate({ field: 'case_name', targetFile: 'caseLock.js' });
+  const m = K.mount({ health, planImpl: K.planImplOf(K.screenPlan('js')), generateImpl: gen.impl, liveBase: true, extra: { budget }, clientWrap });
+  await ticks();
+  const v = await K.adoptOnScreen(m); await ticks(20);
+  const led = ledgerOf(storage);
+  const head = stripC(m.$('kt-ai-header').innerHTML);
+  const allow = sent.map(([k, b]) => `${k}:${b ? b.allowanceUsd : 'none'}`);
+  assert(sent.length === 5 && sent.every(([, b]) => b && typeof b.allowanceUsd === 'number') && allow[0] === 'propose:3' && allow[4] === 'generate:2.96' && led.entries.every(e => e.enforcement === 'gateway' && e.status === 'done' && e.costUsd === 0.01 && e.reservedUsd === 0) && v && v.final && !v.final.incomplete && /検証の上限（Gateway が要求ごとに上限を強制）: 記録済み 約 0\.05 米ドル・確保中 約 0 米ドル/.test(head),
+    `B7-10: 画面: 印のある Gateway には仮案・計画・生成の要求ごとに残りの allowanceUsd を渡し（3 → … → 2.96）、meta.budget で精算・見出しは強制の印: ${JSON.stringify({ allow, head: head.slice(0, 120) })}`);
+});
+await section(async () => {
+  //   画面: Gateway が生成を上限で止めた（stage first）→ 確保を解放・最終案は予算で止まった未完成（［残りの JavaScript を作る］は無効・理由は上界と残り）
+  const { storage, budget } = mkBudget({ config: { limitUsd: 3 } });
+  const health = clone(K.HEALTH_V); health.limits = clone(LIM_ON);
+  const clientWrap = (c) => ({ ...c,
+    propose: async (p) => { const r = await c.propose(p); r.ai = { model: MODEL, usage: usage(500, 100) }; r.budgetMeta = metaOf(p.budget.allowanceUsd, [{ kind: 'propose', boundUsd: 0.2, costUsd: 0.01 }]); return r; },
+    plan: async (p) => { const r = await c.plan(p); r.ai = { ...(r.ai || {}), model: MODEL, usage: usage(500, 100) }; r.budgetMeta = metaOf(p.budget.allowanceUsd, [{ kind: 'plan-full', boundUsd: 0.2, costUsd: 0.01 }]); return r; },
+    generate: async (p) => { throw gwBudgetErr({ reason: 'over-allowance', stage: 'first', allowanceUsd: p.budget.allowanceUsd, boundUsd: 3.2 }); },
+  });
+  const m = K.mount({ health, planImpl: K.planImplOf(K.screenPlan('js')), generateImpl: async () => { throw new Error('not used'); }, liveBase: true, extra: { budget }, clientWrap });
+  await ticks();
+  const v = await K.adoptOnScreen(m); await ticks(20);
+  const fin = v && v.final;
+  const chat = m.chat();
+  const g = ledgerOf(storage).entries.find(e => e.kind === 'generate');
+  const btn = restButtonOf(chat);
+  assert(fin && fin.incomplete && fin.incomplete.kind === 'budget' && fin.incomplete.budget && fin.incomplete.budget.reason === 'gateway-over-allowance' && !fin.approvable && g && g.status === 'released' && g.reservedUsd === 0 && btn && btn.disabled && /呼び出しの上界 約 3\.2 米ドル（送る要求の大きさと出力の上限から Gateway が計算）が、渡した残り 約 2\.96 米ドルを超えるため、Gateway が呼び出しませんでした/.test(stripC(chat)),
+    `B7-11: 画面: Gateway が上限で生成を止めた → 確保を解放・送信を止める（予算で止まった未完成・続きのボタンは無効・理由は上界と残り）: ${JSON.stringify({ inc: fin && fin.incomplete, g: g && [g.status, g.reservedUsd] })}`);
 });
 
 console.log(`\n${state.failed ? 'NG' : 'OK'}: ${state.passed} passed, ${state.failed} failed`);

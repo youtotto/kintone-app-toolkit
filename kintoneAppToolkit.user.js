@@ -21235,25 +21235,42 @@
      * §0f.4（2026-10-09）: 検証の上限の拒否の理由（KTAiBudget の details.budget）→ 画面の文（必要な額・残り）。金額は米ドル（キャッシュの割引なし）
      */
     const usdText = (v) => { const n = Number(v); return Number.isFinite(n) ? String(Math.round(n * 10000) / 10000) : '—'; };
-    const BUDGET_STOP_JA = Object.freeze({ model: '応答のモデルが単価の表に無い・表より高い', 'output-limit': '応答の出力の上限が見積もりの表より大きい', calls: '1 回の要求の中の AI の呼び出しが見積もりの最大より多い' });
+    const BUDGET_STOP_JA = Object.freeze({ model: '応答のモデルが単価の表に無い・表より高い', 'output-limit': '応答の出力の上限が見積もりの表より大きい', calls: '1 回の要求の中の AI の呼び出しが見積もりの最大より多い', 'no-budget-meta': '上限を渡した応答に Gateway の費用の記録（meta.budget）が無い', 'over-allowance': 'Gateway の費用の記録が渡した上限を超えている' });
+    //   2026-10-10（再検証前の指示 §4）: Toolkit の見積もり（推定。provider に送る入力をこの値以下に制限してはいない）による送信制限と、Gateway が要求の上界で強制する上限を
+    //   文で分ける。推定の文に「超えない」「保証」とは書かない
     function budgetDetailText(b) {
       if (!b || typeof b !== 'object') return '';
       switch (b.reason) {
         case 'limit': case 'calls':
-          return `次の要求は最大 約 ${usdText(b.needUsd)} 米ドル・AI の呼び出し ${b.needCalls ?? '—'} 回、残りは 約 ${usdText(b.remainingUsd)} 米ドル・${b.remainingCalls ?? '—'} 回です（上限 ${usdText(b.limitUsd)} 米ドル・${b.maxCalls ?? '—'} 回。記録済みの費用と、進行中・終了不明の要求の確保額を引いた残り）`;
-        case 'unknown-model': return `単価の表に無いモデル（${String(b.model || '不明').slice(0, 60)}）のため、最大の費用を見積もれません`;
+          if (b.mode === 'gateway') return `残りは 約 ${usdText(b.remainingUsd)} 米ドル・${b.remainingCalls ?? '—'} 回です（上限 ${usdText(b.limitUsd)} 米ドル・${b.maxCalls ?? '—'} 回。記録済みの費用と、進行中・終了不明の要求の確保額を引いた残り。この要求には AI の呼び出し ${b.needCalls ?? '—'} 回分の回数が要ります）`;
+          return `次の要求は推定で最大 約 ${usdText(b.needUsd)} 米ドル・AI の呼び出し ${b.needCalls ?? '—'} 回、残りは 約 ${usdText(b.remainingUsd)} 米ドル・${b.remainingCalls ?? '—'} 回です（上限 ${usdText(b.limitUsd)} 米ドル・${b.maxCalls ?? '—'} 回。記録済みの費用と、進行中・終了不明の要求の確保額を引いた残り。推定による送信制限で、Gateway による上限の強制はありません）`;
+        case 'unknown-model': return `単価の表に無いモデル（${String(b.model || '不明').slice(0, 60)}）のため、費用を見積もれません`;
         case 'unknown-feature': return '見積もりの表に無い種類の要求です';
         case 'stopped': return `前の応答で${BUDGET_STOP_JA[b.stopReason] || '見積もりの表を超える値'}ことが分かったため、以後の送信を止めています。上限の設定を新しい id で作り直してください`;
         case 'config-invalid': return '検証の上限の設定の形が正しくありません';
+        //   再検証前の指示 §3: 予算を使う検証で設定を確かめられない（設定を読めない・このページで有効だった設定が消えた）。予算を使わない通常の利用（設定のキーが無く読めた）とは別
+        case 'config-unreadable': return '検証の上限の設定を確かめられません（設定を読めません）';
+        case 'config-missing': return '検証の上限の設定を確かめられません（このページで有効だった設定が見つかりません。検証を終えるときは、タブを開き直してください）';
         case 'ledger-unreadable': case 'ledger-broken': case 'ledger-mismatch': return '検証の上限の記録を読めません（壊れている・設定と合わない）';
         case 'ledger-write': return '検証の上限の記録を書き込めません';
+        //   再検証前の指示 §4: Gateway が要求の上界で止めた（AI を呼ぶ前。計画の差分の後の全体の作り直しは、それまでの呼び出しの後）
+        case 'gateway-over-allowance': return `${b.stage === 'plan-full' ? '計画の全体の作り直しの' : ''}呼び出しの上界 約 ${usdText(b.boundUsd)} 米ドル（送る要求の大きさと出力の上限から Gateway が計算）が、渡した残り 約 ${usdText(b.allowanceUsd)} 米ドルを超えるため、Gateway が呼び出しませんでした`;
+        case 'gateway-unknown-model': return 'Gateway の単価の表に無いモデルのため、Gateway が上限を確かめられず、呼び出しませんでした';
         default: return '';
       }
+    }
+    /** Gateway の BUDGET_EXCEEDED（402。error.detail = { reason: over-allowance / unknown-model, stage: first / plan-full, allowanceUsd, boundUsd, budget? }）の文 */
+    function gatewayBudgetText(d) {
+      if (!d || typeof d !== 'object') return '';
+      if (d.reason === 'unknown-model') return '検証の上限: Gateway の単価の表に無いモデルのため、上限を確かめられず、AI を呼びませんでした。';
+      if (d.reason !== 'over-allowance') return '';
+      const bound = `この呼び出しの上界 約 ${usdText(d.boundUsd)} 米ドル（送る要求の大きさと出力の上限から Gateway が計算）が、渡した残り 約 ${usdText(d.allowanceUsd)} 米ドルを超えるため`;
+      return d.stage === 'plan-full' ? `検証の上限: 計画の差分更新を全体の作り直しに切り替える呼び出しは、${bound}、行いませんでした（それまでの呼び出しの費用は記録しています）。` : `検証の上限: ${bound}、AI を呼びませんでした。`;
     }
     const errorText = (code, e = null) => {
       if (code === 'BUDGET_EXCEEDED') {
         const b = e && e.details && e.details.budget, t = budgetDetailText(b);
-        if (!t) return ERROR_TEXT.BUDGET_EXCEEDED;
+        if (!t) { const g = gatewayBudgetText(e && e.details && e.details.error && e.details.error.detail); return g || ERROR_TEXT.BUDGET_EXCEEDED; }
         return b.reason === 'limit' || b.reason === 'calls' ? `検証の上限（費用・回数）を超えるため、AI に送りませんでした（${t}）。` : `検証の上限を確かめられないため、AI に送りませんでした（${t}）。`;
       }
       return ERROR_TEXT[code] || 'AI への質問に失敗しました。';
@@ -21445,8 +21462,14 @@
 
     const newRequestId = () => `tk-${(typeof crypto !== 'undefined' && crypto.randomUUID) ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(16).slice(2)}`}`;
 
+    /**
+     * 2026-10-10（再検証前の指示 §4）: 要求ごとの費用の上限（envelope の最上位の任意の項目 budget: { allowanceUsd }。有限・0 以上だけ。6 桁で切り捨て＝渡す値は残りを超えない）。
+     *   health の limits.budgetAllowance がある Gateway にだけ KTAiBudget が付ける（Gateway が provider に送る要求の上界で呼び出しの前に確かめ、超える呼び出しをしない）。
+     *   無ければ今までどおり付けない
+     */
+    const budgetFieldOf = (budget) => { const a = budget && typeof budget === 'object' && typeof budget.allowanceUsd === 'number' ? budget.allowanceUsd : NaN; return Number.isFinite(a) && a >= 0 ? { budget: { allowanceUsd: Math.floor(a * 1e6) / 1e6 } } : {}; };
     /** Contract 2.1 の request envelope（payload は KTContext.build() の結果そのもの。作り直さない） */
-    function buildAskEnvelope({ ctx, requestId = newRequestId(), pluginVersion = SCRIPT_VERSION, now = new Date().toISOString() }) {
+    function buildAskEnvelope({ ctx, requestId = newRequestId(), pluginVersion = SCRIPT_VERSION, now = new Date().toISOString(), budget = null }) {
       if (!ctx || typeof ctx !== 'object' || !Array.isArray(ctx.facts)) throw new AiClientError({ code: ERROR_CODES.NO_CONTEXT, message: 'KTContext がありません' });
       return {
         contractVersion: CONTRACT_VERSION,
@@ -21456,6 +21479,7 @@
           plugin: { name: 'kintone App Toolkit', version: pluginVersion },
         },
         payload: ctx,
+        ...budgetFieldOf(budget),
       };
     }
 
@@ -21506,18 +21530,24 @@
     /**
      * §0f.3 の 3（2026-10-09）: health の limits（additive・version 1）→ { version, deadlineMs: { feature: ms }, features: { feature: {...} } }。
      *   deadlineMs のキーは Gateway の「toolkit.<feature>」と feature だけの両方を受け、feature の名前（assistant-qa など）にそろえる。数でない値は捨てる。無ければ null
+     *   2026-10-10（再検証前の指示 §4）: limits.budgetAllowance = { version: 1, models: [...] }（要求の envelope の budget: { allowanceUsd } を Gateway が強制する印。
+     *   Gateway は provider に送る要求の上界で呼び出しの前に確かめる）。version 1 で models が文字列の配列のときだけ読む（無ければ印なし＝Toolkit の推定による送信制限だけ）
      */
     function limitsFromHealth(health) {
       const l = health && health.limits && typeof health.limits === 'object' ? health.limits : null;
-      if (!l || !l.deadlineMs || typeof l.deadlineMs !== 'object') return null;
+      if (!l) return null;
+      const ba = l.budgetAllowance && typeof l.budgetAllowance === 'object' && !Array.isArray(l.budgetAllowance) ? l.budgetAllowance : null;
+      const budgetAllowance = ba && Number(ba.version) === 1 && Array.isArray(ba.models) ? { version: 1, models: ba.models.filter(m => typeof m === 'string' && m.trim()).map(m => m.trim().slice(0, 60)).slice(0, 20) } : null;
+      const dl = l.deadlineMs && typeof l.deadlineMs === 'object' ? l.deadlineMs : null;
+      if (!dl && !budgetAllowance) return null;
       const deadlineMs = {}, features = {};
       for (const f of FEATURES) {
-        const d = Number(l.deadlineMs[`${PRODUCT}.${f}`] ?? l.deadlineMs[f]);
+        const d = dl ? Number(dl[`${PRODUCT}.${f}`] ?? dl[f]) : NaN;
         if (Number.isFinite(d) && d > 0) deadlineMs[f] = d;
         const x = l.features && typeof l.features === 'object' ? (l.features[`${PRODUCT}.${f}`] || l.features[f] || null) : null;
         if (x && typeof x === 'object') { try { features[f] = JSON.parse(JSON.stringify(x)); } catch (e) { } }
       }
-      return Object.keys(deadlineMs).length ? { version: l.version ?? null, deadlineMs, features } : null;
+      return Object.keys(deadlineMs).length || budgetAllowance ? { version: l.version ?? null, deadlineMs, features, ...(budgetAllowance ? { budgetAllowance } : {}) } : null;
     }
     /**
      * §0f.3 の 3（2026-10-09）: クライアントの打ち切り（ms）。サーバーが理由を返す期限（health の deadlineMs）に受信の余裕（20 秒）を足し、上限 330 秒。
@@ -21527,7 +21557,7 @@
     const clientLimitFromDeadline = (deadlineMs) => { const d = Number(deadlineMs); return deadlineMs != null && Number.isFinite(d) && d > 0 ? Math.min(d + RECEIVE_MARGIN_MS, CLIENT_LIMIT_MAX_MS) : null; };
 
     /** Contract 2.1 の request envelope（change-planner。payload は KTContext.buildPlan() の結果そのもの） */
-    function buildPlanEnvelope({ ctx, requestId = newRequestId(), pluginVersion = SCRIPT_VERSION, now = new Date().toISOString() }) {
+    function buildPlanEnvelope({ ctx, requestId = newRequestId(), pluginVersion = SCRIPT_VERSION, now = new Date().toISOString(), budget = null }) {
       if (!ctx || typeof ctx !== 'object' || !Array.isArray(ctx.facts) || typeof ctx.goal !== 'string') throw new AiClientError({ code: ERROR_CODES.NO_CONTEXT, message: 'Planner Context がありません' });
       return {
         contractVersion: CONTRACT_VERSION,
@@ -21537,11 +21567,12 @@
           plugin: { name: 'kintone App Toolkit', version: pluginVersion },
         },
         payload: ctx,
+        ...budgetFieldOf(budget),
       };
     }
 
     /** Contract 2.1 の request envelope（customization-generator。payload は KTContext.buildGenerator() の結果そのもの） */
-    function buildGenerateEnvelope({ ctx, requestId = newRequestId(), pluginVersion = SCRIPT_VERSION, now = new Date().toISOString() }) {
+    function buildGenerateEnvelope({ ctx, requestId = newRequestId(), pluginVersion = SCRIPT_VERSION, now = new Date().toISOString(), budget = null }) {
       if (!ctx || typeof ctx !== 'object' || !ctx.customization || typeof ctx.customization !== 'object') throw new AiClientError({ code: ERROR_CODES.NO_CONTEXT, message: 'Generator Context がありません' });
       return {
         contractVersion: CONTRACT_VERSION,
@@ -21551,6 +21582,7 @@
           plugin: { name: 'kintone App Toolkit', version: pluginVersion },
         },
         payload: ctx,
+        ...budgetFieldOf(budget),
       };
     }
     /**
@@ -21582,7 +21614,7 @@
           gatewayChecks: g.gatewayChecks && typeof g.gatewayChecks === 'object' ? g.gatewayChecks : null,
           // Phase 18: Gateway が決定的に選んだ Pattern Library の pattern（表示・Audit 用。知識本体は来ない）
           patterns: Array.isArray(g.patterns) ? g.patterns.filter(p => p && typeof p.id === 'string').map(p => ({ id: p.id, purpose: String(p.purpose ?? ''), implementation: typeof p.implementation === 'string' ? p.implementation : null, preferredStandardAlternatives: Array.isArray(p.preferredStandardAlternatives) ? p.preferredStandardAlternatives.filter(x => typeof x === 'string') : [] })) : [],
-          requestId: r.meta?.requestId ?? null, usage: r.meta?.usage ?? null, ai: r.meta?.ai ?? null, gatewayWarnings: r.meta?.normalization?.warnings ?? [],
+          requestId: r.meta?.requestId ?? null, usage: r.meta?.usage ?? null, ai: r.meta?.ai ?? null, budgetMeta: r.meta?.budget && typeof r.meta.budget === 'object' ? r.meta.budget : null, gatewayWarnings: r.meta?.normalization?.warnings ?? [],
           //   §0e.4（2026-10-09）: 修復の呼び出しの観測（最後の修復の分）と生成工程の時間（契約 20 §15。数値・種類だけに整える）を落とさない（区間の記録と費用の見積もりに使う）
           aiRepair: r.meta?.aiRepair && typeof r.meta.aiRepair === 'object' ? r.meta.aiRepair : null, timing: normalizeGenTiming(r.meta?.timing),
           // 段階 C（契約 20 §12）: 生成と一体の検証結果。無い（古い Gateway）ときは null（Toolkit が入口で従来の形に合わせる）
@@ -21733,7 +21765,7 @@
         ok: true, errors, warnings,
         normalized: {
           ...p, assessment, relevantFields, proposedFields, steps, impact, questions, customizations, solution,
-          requestId: r.meta?.requestId ?? null, usage: r.meta?.usage ?? null, ai: r.meta?.ai ?? null, gatewayWarnings: r.meta?.normalization?.warnings ?? [],
+          requestId: r.meta?.requestId ?? null, usage: r.meta?.usage ?? null, ai: r.meta?.ai ?? null, budgetMeta: r.meta?.budget && typeof r.meta.budget === 'object' ? r.meta.budget : null, gatewayWarnings: r.meta?.normalization?.warnings ?? [],
           // 会話の応答性（2026-10-05）: Gateway が決定事項を受け取った証（古い Gateway は返さない＝黙って無視した）
           decisionsMeta: r.meta?.decisions ?? null,
           // 計画の修正の方式（patch = 変わる箇所だけ / full = 全体。差分から全体に切り替えた理由）。古い Gateway は返さない
@@ -21835,7 +21867,7 @@
           proposal: { behaviors, assumptions, decisions, approach, cannot },
           turn: unchanged ? { ops: [], answers: [], requirementOps: [] } : { ops, answers, requirementOps },
           proposalUnchanged: unchanged,
-          requestId: r.meta?.requestId ?? null, usage: r.meta?.usage ?? null, ai: r.meta?.ai ?? null,
+          requestId: r.meta?.requestId ?? null, usage: r.meta?.usage ?? null, ai: r.meta?.ai ?? null, budgetMeta: r.meta?.budget && typeof r.meta.budget === 'object' ? r.meta.budget : null,
           gatewayWarnings: r.meta?.normalization?.warnings ?? [],
         },
       };
@@ -21870,7 +21902,7 @@
           answerEvidenceIds: [...new Set([...answer.matchAll(/\[(E[1-9][0-9]*)\]/g)].map(m => m[1]))],
           facts, analysis: [...demoted, ...items(r.analysis, 'analysis')], recommendations: items(r.recommendations, 'recommendations'),
           unknowns: (Array.isArray(r.unknowns) ? r.unknowns : []).filter(s => typeof s === 'string' && s.trim()),
-          requestId: r.meta?.requestId ?? null, usage: r.meta?.usage ?? null, ai: r.meta?.ai ?? null,
+          requestId: r.meta?.requestId ?? null, usage: r.meta?.usage ?? null, ai: r.meta?.ai ?? null, budgetMeta: r.meta?.budget && typeof r.meta.budget === 'object' ? r.meta.budget : null,
           gatewayWarnings: r.meta?.normalization?.warnings ?? [],
         },
       };
@@ -22008,8 +22040,8 @@
         /** POST /v2/review（toolkit.assistant-qa）。生成済みの ctx をそのまま送り、応答の根拠ID を再検証して返す */
         /**   onText（任意・2026-10-07）: 返答の answer が生成された部分から順に届く（引数はここまでの全文）。Gateway の SSE を直接 fetch で受ける（待ち時間は計画と同じ長さ） */
         //   §0f.4 の 5（2026-10-09）: noProxyFallback（検証の上限が有効なとき KTAiBudget が付ける）= 直接の送信の失敗から kintone.proxy で送り直さない
-        async ask({ ctx, requestId = newRequestId(), signal = null, onText = null, deadlineMs = null, trace = null, noProxyFallback = false } = {}) {
-          const envelope = buildAskEnvelope({ ctx, requestId, pluginVersion, now: nowFn ? nowFn() : new Date().toISOString() });
+        async ask({ ctx, requestId = newRequestId(), signal = null, onText = null, deadlineMs = null, trace = null, noProxyFallback = false, budget = null } = {}) {
+          const envelope = buildAskEnvelope({ ctx, requestId, pluginVersion, now: nowFn ? nowFn() : new Date().toISOString(), budget });
           let acc = '';
           const onEvent = typeof onText === 'function' ? ({ event, data }) => { if (event === 'delta' && data && typeof data.text === 'string') { acc += data.text; try { onText(acc); } catch (e) { } } } : null;
           const response = await request({ path: '/v2/review', method: 'POST', body: JSON.stringify(envelope), signal, trace, noProxyFallback, ...(onEvent ? { limitMs: longFor(deadlineMs), long: true, onEvent } : {}) });
@@ -22022,10 +22054,10 @@
          * （conversation.mode = 'proposal'・question = 今回の発言）。transport は ask と同じ（SSE を直接 fetch で受ける。delta は reply の増分）。
          *   onText（任意）: reply の生成された部分から順に届く（引数はここまでの全文）
          */
-        async propose({ ctx, requestId = newRequestId(), signal = null, onText = null, deadlineMs = null, trace = null, noProxyFallback = false } = {}) {
+        async propose({ ctx, requestId = newRequestId(), signal = null, onText = null, deadlineMs = null, trace = null, noProxyFallback = false, budget = null } = {}) {
           if (!ctx || typeof ctx !== 'object' || !ctx.conversation || ctx.conversation.mode !== 'proposal') throw new AiClientError({ code: ERROR_CODES.NO_CONTEXT, message: '仮案の Context（conversation.mode = proposal）がありません' });
           if (typeof ctx.question !== 'string' || !ctx.question.trim()) throw new AiClientError({ code: ERROR_CODES.NO_CONTEXT, message: '仮案の経路には今回の発言（question）が要ります' });
-          const envelope = buildAskEnvelope({ ctx, requestId, pluginVersion, now: nowFn ? nowFn() : new Date().toISOString() });
+          const envelope = buildAskEnvelope({ ctx, requestId, pluginVersion, now: nowFn ? nowFn() : new Date().toISOString(), budget });
           let acc = '';
           const onEvent = typeof onText === 'function' ? ({ event, data }) => { if (event === 'delta' && data && typeof data.text === 'string') { acc += data.text; try { onText(acc); } catch (e) { } } } : null;
           const response = await request({ path: '/v2/review', method: 'POST', body: JSON.stringify(envelope), signal, limitMs: longFor(deadlineMs), long: true, trace, noProxyFallback, ...(onEvent ? { onEvent } : {}) });
@@ -22034,8 +22066,8 @@
           return { ...v.normalized, requestId: v.normalized.requestId || requestId, clientWarnings: v.warnings };
         },
         /** POST /v2/review（toolkit.change-planner）。Planner Context を送り、Change Plan を再検証して返す（計画のみ。設定変更はしない） */
-        async plan({ ctx, requestId = newRequestId(), signal = null, onText = null, deadlineMs = null, trace = null, noProxyFallback = false } = {}) {
-          const envelope = buildPlanEnvelope({ ctx, requestId, pluginVersion, now: nowFn ? nowFn() : new Date().toISOString() });
+        async plan({ ctx, requestId = newRequestId(), signal = null, onText = null, deadlineMs = null, trace = null, noProxyFallback = false, budget = null } = {}) {
+          const envelope = buildPlanEnvelope({ ctx, requestId, pluginVersion, now: nowFn ? nowFn() : new Date().toISOString(), budget });
           // 段階 C（C3b・契約 16）: onText があれば SSE（event delta は reply の増分・done に全体）で受け、説明を先に流す
           let acc = '';
           const onEvent = typeof onText === 'function' ? ({ event, data }) => { if (event === 'delta' && data && typeof data.text === 'string') { acc += data.text; try { onText(acc); } catch (e) { } } } : null;
@@ -22049,8 +22081,8 @@
           return out;
         },
         /** POST /v2/review（toolkit.customization-generator）。Generator Context を送り、生成コードを再検証して返す（登録はしない） */
-        async generate({ ctx, requestId = newRequestId(), signal = null, deadlineMs = null, trace = null, noProxyFallback = false } = {}) {
-          const envelope = buildGenerateEnvelope({ ctx, requestId, pluginVersion, now: nowFn ? nowFn() : new Date().toISOString() });
+        async generate({ ctx, requestId = newRequestId(), signal = null, deadlineMs = null, trace = null, noProxyFallback = false, budget = null } = {}) {
+          const envelope = buildGenerateEnvelope({ ctx, requestId, pluginVersion, now: nowFn ? nowFn() : new Date().toISOString(), budget });
           const response = await request({ path: '/v2/review', method: 'POST', body: JSON.stringify(envelope), signal, limitMs: longFor(deadlineMs), long: true, trace, noProxyFallback });
           const v = validateGenerated(response, ctx);
           if (!v.ok) throw new AiClientError({ code: v.errors[0].code, message: v.errors[0].message, details: { errors: v.errors }, requestId });
@@ -22375,16 +22407,49 @@
      *   Toolkit が送る前に止めたもの（検証の上限・Context が無い・接続が無い）。応答を受けた後の Toolkit の検証の失敗（details.errors）は AI を呼んだ後
      */
     const PRE_AI_CODES = new Set(['AUTH_INVALID_TOKEN', 'AUTH_TOKEN_EXPIRED', 'AUTH_DOMAIN_MISMATCH', 'PRODUCT_NOT_ENTITLED', 'FEATURE_NOT_ENTITLED', 'FEATURE_NOT_IMPLEMENTED', 'UNKNOWN_PROMPT_VERSION', 'UNSUPPORTED_CONTRACT_VERSION', 'INVALID_ENVELOPE', 'INVALID_CONTEXT', 'PAYLOAD_TOO_LARGE', 'MONTHLY_LIMIT_EXCEEDED', 'BUDGET_EXCEEDED', 'NO_CONTEXT', 'SESSION_EXPIRED', 'NOT_CONNECTED', 'NO_CONFIG']);
+    /** Gateway のエラーの本文の error.detail（無ければ null） */
+    const gatewayDetailOf = (e) => { const d = e && e.details && e.details.error && typeof e.details.error === 'object' ? e.details.error.detail : null; return d && typeof d === 'object' && !Array.isArray(d) ? d : null; };
+    /**
+     * 2026-10-10（再検証前の指示 §4）: Gateway の BUDGET_EXCEEDED が AI を呼んだ後のものか（stage が first でない＝計画の差分の後の全体の作り直しを止めたなど、
+     *   または detail.budget に呼び出しの記録がある）。AI を呼んだ後なら確保を解放しない（detail.budget で精算する）
+     */
+    const gatewayBudgetAfterAi = (e) => { const d = gatewayDetailOf(e); return !!(d && ((typeof d.stage === 'string' && d.stage !== 'first') || (d.budget && typeof d.budget === 'object' && Array.isArray(d.budget.calls) && d.budget.calls.length > 0))); };
     function preAiOf(e) {
       if (!e || typeof e !== 'object') return false;
       const code = typeof e.code === 'string' ? e.code : '';
       if (e.details && Array.isArray(e.details.errors)) return false;
+      if (code === ERROR_CODES.BUDGET_EXCEEDED && gatewayBudgetAfterAi(e)) return false;
       if (PRE_AI_CODES.has(code)) return true;
       if (code === 'RATE_LIMITED') { const d = e.details && e.details.error ? e.details.error.detail : null; return !!(d && typeof d === 'object'); }
       return false;
     }
-    /** Toolkit が送らなかった（検証の上限で止めた） */
-    const notSentOf = (e) => !!(e && typeof e === 'object' && e.code === ERROR_CODES.BUDGET_EXCEEDED);
+    /** 検証の上限で送らなかった（Toolkit が止めた・Gateway が最初の呼び出しの前に止めた）。Gateway が AI を呼んだ後に止めたものは送った要求 */
+    const notSentOf = (e) => !!(e && typeof e === 'object' && e.code === ERROR_CODES.BUDGET_EXCEEDED && !gatewayBudgetAfterAi(e));
+    /**
+     * 2026-10-10（再検証前の指示 §4）: Gateway の費用の記録 meta.budget（エラーの本文では error.detail.budget）= { allowanceUsd, spentUsd, complete, calls: [{ kind, boundUsd, costUsd|null }] }。
+     *   形が正しいときだけ返す（無ければ null）。金額は有限・0 以上
+     */
+    function budgetMetaOf(m) {
+      if (!m || typeof m !== 'object' || Array.isArray(m)) return null;
+      const fin = (x) => typeof x === 'number' && Number.isFinite(x) && x >= 0;
+      if (!fin(m.spentUsd) || !Array.isArray(m.calls) || typeof m.complete !== 'boolean') return null;
+      const calls = m.calls.filter(c => c && typeof c === 'object').slice(0, 20).map(c => ({ kind: typeof c.kind === 'string' ? c.kind.slice(0, 40) : null, boundUsd: fin(c.boundUsd) ? c.boundUsd : null, costUsd: fin(c.costUsd) ? c.costUsd : null }));
+      return { allowanceUsd: fin(m.allowanceUsd) ? m.allowanceUsd : null, spentUsd: m.spentUsd, complete: m.complete === true && calls.every(c => c.costUsd != null), calls };
+    }
+    /**
+     * 2026-10-10（再検証前の指示 §4）: この要求の費用の上限を Gateway が強制できるか。health の limits.budgetAllowance（version 1）があり、その feature のモデル（limits.features の model、
+     *   無ければ表の既定）が印の models にあるときだけ 'gateway'（envelope に budget: { allowanceUsd } を付ける）。それ以外は 'estimate'（Toolkit の推定による送信制限だけ。上限の強制は無い）
+     */
+    function enforcementOf(limits, kind) {
+      const ba = limits && limits.budgetAllowance && typeof limits.budgetAllowance === 'object' ? limits.budgetAllowance : null;
+      if (!ba || ba.version !== 1 || !Array.isArray(ba.models)) return 'estimate';
+      const feature = typeof kind === 'string' && own(FEATURE_OF, kind) ? FEATURE_OF[kind] : null;
+      if (!feature) return 'estimate';
+      const lf = limits.features && limits.features[feature] && typeof limits.features[feature] === 'object' ? limits.features[feature] : null;
+      const model = lf && typeof lf.model === 'string' && lf.model.trim() ? lf.model.trim() : DEFAULT_MODEL[feature];
+      const base = (m) => { const d = /^(.+)-\d{4}-\d{2}-\d{2}$/.exec(String(m || '')); return d ? d[1] : String(m || ''); };
+      return ba.models.some(m => m === model || base(m) === base(model)) ? 'gateway' : 'estimate';
+    }
     /** provider の usage → { input, cached, output, reasoning }（入力と出力の両方が分かるときだけ。分からなければ null = 使用量が不明） */
     function tokensOfUsage(u) {
       if (!u || typeof u !== 'object') return null;
@@ -22426,6 +22491,9 @@
     }
     const configKeyOf = (host) => `${CONFIG_PREFIX}.${host}`;
     const ledgerKeyOf = (host, id) => `${LEDGER_PREFIX}.${host}.${id}`;
+    /** 再検証前の指示 §3（2026-10-10）: このページ（タブ）で検証の上限が一度有効だった印の sessionStorage のキー（値は設定の id と作った日時だけ） */
+    const ARMED_PREFIX = 'ktAi.budgetArmed.v1';
+    const armedKeyOf = (host) => `${ARMED_PREFIX}.${host}`;
     function parseConfig(raw) {
       let j = null; try { j = JSON.parse(raw); } catch (e) { return null; }
       if (!j || typeof j !== 'object' || Array.isArray(j)) return null;
@@ -22455,7 +22523,8 @@
         if (!e || e.status === 'released') continue;
         recordedUsd += knownCostOf(e);
         reservedUsd += e.reservedUsd || 0;
-        usedCalls += e.status === 'done' || e.status === 'partial-unknown' ? e.calls.length : (e.reservedCalls || 0);
+        //   再検証前の指示 §4: Gateway の費用の記録（gatewayCalls）がある要求は、その呼び出しの数も数える（token の記録の数より多ければそちら）
+        usedCalls += e.status === 'done' || e.status === 'partial-unknown' ? Math.max(e.calls.length, Array.isArray(e.gatewayCalls) ? e.gatewayCalls.length : 0) : (e.reservedCalls || 0);
         if (e.status === 'unknown' || e.status === 'partial-unknown' || (e.status === 'in-flight' && e.sessionId !== sessionId)) unknown += 1;
         else if (e.status === 'in-flight') inFlight += 1;
         else if (e.status === 'done') done += 1;
@@ -22467,27 +22536,51 @@
     const codeOf = (e) => { const c = e && typeof e.code === 'string' ? e.code : e && e.name === 'AbortError' ? 'CANCELLED' : 'ERROR'; return /^[A-Z][A-Z0-9_]{0,39}$/.test(c) ? c : 'ERROR'; };
     /**
      * @param {object} p storage（localStorage 互換。既定は localStorage）/ host（既定 location.host）/ locks（Web Locks。既定 navigator.locks。無ければこのタブの中だけ）/
-     *   now（ms）/ sessionId（このページの印。読み込み直しで進行中のまま残った記録を見分ける）
+     *   now（ms）/ sessionId（このページの印。読み込み直しで進行中のまま残った記録を見分ける）/
+     *   session（sessionStorage 互換。既定は sessionStorage。このページ（タブ）で検証の上限が一度有効だった印を持つ。本文・金額は入れない）
      */
-    function create({ storage = undefined, host = undefined, locks = undefined, now = () => Date.now(), sessionId = null } = {}) {
-      const st0 = storage !== undefined ? storage : (() => { try { return typeof localStorage !== 'undefined' ? localStorage : null; } catch (e) { return null; } })();
+    function create({ storage = undefined, session = undefined, host = undefined, locks = undefined, now = () => Date.now(), sessionId = null } = {}) {
+      //   再検証前の指示 §3（2026-10-10）: 保存領域そのものを取れない（localStorage の参照が例外）は「設定を読めない」（予算を使わない通常の利用と見なさない）
+      let storageThrew = false;
+      const st0 = storage !== undefined ? storage : (() => { try { return typeof localStorage !== 'undefined' ? localStorage : null; } catch (e) { storageThrew = true; return null; } })();
+      const ss0 = session !== undefined ? session : (() => { try { return typeof sessionStorage !== 'undefined' ? sessionStorage : null; } catch (e) { return null; } })();
       const h = host !== undefined ? String(host || '') : (typeof location !== 'undefined' ? String(location.host || '') : '');
       const lockApi = locks !== undefined ? locks : ((typeof navigator !== 'undefined' && navigator && navigator.locks && typeof navigator.locks.request === 'function') ? navigator.locks : null);
       const sid = sessionId || newSessionId();
       const configKey = configKeyOf(h);
+      const armedKey = armedKeyOf(h);
       const LOCK_NAME = `ktAi.budget:${h}`;
       let seq = 0;
       const listeners = new Set();
       const notify = () => { for (const fn of [...listeners]) { try { fn(); } catch (e) { } } };
       const withLock = (fn) => (lockApi ? Promise.resolve(lockApi.request(LOCK_NAME, { mode: 'exclusive' }, async () => fn())) : Promise.resolve().then(fn));
-      /** 設定と記録 → { mode: disabled | broken | on }。設定が無ければ無効（今と同じ）。設定があるのに読めない・壊れているときは broken（送らない） */
+      //   再検証前の指示 §3: このページで検証の上限が一度有効だった印（このページのメモリと sessionStorage。中身は設定の id と作った日時だけ）。
+      //   sessionStorage を読めない・書けないときはメモリだけ（読み込み直しでは消える）
+      let armedMem = null;
+      const armedOf = () => {
+        if (armedMem) return armedMem;
+        try { const raw = ss0 ? ss0.getItem(armedKey) : null; const j = raw ? JSON.parse(raw) : null; if (j && typeof j === 'object' && typeof j.id === 'string') return { id: j.id, createdAt: typeof j.createdAt === 'string' ? j.createdAt : '' }; } catch (e) { }
+        return null;
+      };
+      const arm = (config) => {
+        if (armedMem && armedMem.id === config.id && armedMem.createdAt === config.createdAt) return;
+        armedMem = { id: config.id, createdAt: config.createdAt };
+        try { if (ss0) ss0.setItem(armedKey, JSON.stringify(armedMem)); } catch (e) { }
+      };
+      /**
+       * 設定と記録 → { mode: disabled | broken | on }。
+       *   disabled = 予算を使わない通常の利用（設定のキーが無く、読取に成功し、このページで一度も有効になっていない。今と同じ）。
+       *   broken = 送らない: 設定の形が正しくない・記録を読めない／壊れている・設定と合わない、と、再検証前の指示 §3（2026-10-10）の「予算を使う検証で状態を確かめられない」
+       *   （設定の読取の例外 config-unreadable・このページで一度有効だった設定が消えた config-missing）。設定の読取の例外で上限なしの送信に戻さない
+       */
       function readState() {
-        if (!st0) return { mode: 'disabled' };
+        if (!st0) return storageThrew || armedOf() ? { mode: 'broken', reason: 'config-unreadable' } : { mode: 'disabled' };
         let raw = null;
-        try { raw = st0.getItem(configKey); } catch (e) { return { mode: 'disabled' }; }
-        if (raw == null) return { mode: 'disabled' };
+        try { raw = st0.getItem(configKey); } catch (e) { return { mode: 'broken', reason: 'config-unreadable' }; }
+        if (raw == null) return armedOf() ? { mode: 'broken', reason: 'config-missing' } : { mode: 'disabled' };
         const config = parseConfig(raw);
         if (!config) return { mode: 'broken', reason: 'config-invalid' };
+        arm(config);
         let lraw = null;
         try { lraw = st0.getItem(ledgerKeyOf(h, config.id)); } catch (e) { return { mode: 'broken', reason: 'ledger-unreadable', config }; }
         if (lraw == null) return { mode: 'on', config, ledger: { version: LEDGER_VERSION, id: config.id, configCreatedAt: config.createdAt, entries: [], stopped: null } };
@@ -22497,11 +22590,17 @@
       const writeLedger = (config, ledger) => {
         try { st0.setItem(ledgerKeyOf(h, config.id), JSON.stringify(ledger)); } catch (e) { throw budgetError('ledger-write'); }
       };
-      /** 送信の直前の確保（記録に in-flight を書く）。超えるなら BUDGET_EXCEEDED を投げる。無効なら null */
-      const reserve = ({ requestId = null, kind, est }) => withLock(() => {
+      /**
+       * 送信の直前の確保（記録に in-flight を書く）。超えるなら BUDGET_EXCEEDED を投げる。無効なら null。
+       *   enforcement 'estimate'（印の無い Gateway）: 確保額 = Toolkit の推定の最大費用（推定。provider に送る入力をこの値以下に制限してはいない＝上限の強制は無い）。
+       *   enforcement 'gateway'（再検証前の指示 §4。health の limits.budgetAllowance）: allowanceUsd = 上限 − 記録済みの費用（不明は確保額で数える）− ほかの進行中・終了不明の確保額
+       *   を Gateway に渡し（Gateway が provider に送る要求の上界で呼び出しの前に確かめ、超える呼び出しをしない）、この要求の確保額 = allowanceUsd。残りが 0 なら送らない
+       */
+      const reserve = ({ requestId = null, kind, est, enforcement = 'estimate' }) => withLock(() => {
         const s = readState();
         if (s.mode === 'disabled') return null;
-        if (s.mode === 'broken') throw budgetError(s.reason);
+        //   状態を確かめられない（再検証前の指示 §3 の設定の消失・読取の例外を含む）→ 送らない。見出しの行も描き直す（設定の消失は記録を書かないので知らせる）
+        if (s.mode === 'broken') { notify(); throw budgetError(s.reason); }
         const { config, ledger } = s;
         if (ledger.stopped) throw budgetError('stopped', { stopReason: ledger.stopped.reason || null });
         //   読み込み直し（このページの外）で進行中のまま残った記録は、終了不明として数える（確保は解放しない）
@@ -22511,15 +22610,39 @@
         const t = totalsOf(ledger, { sessionId: sid });
         const remainingUsd = round6(config.limitUsd - t.recordedUsd - t.reservedUsd);
         const remainingCalls = config.maxCalls - t.usedCalls;
-        const info = { kind, needUsd: est.maxUsd, remainingUsd, needCalls: est.maxCalls, remainingCalls, limitUsd: config.limitUsd, maxCalls: config.maxCalls };
-        if (est.maxUsd > remainingUsd + 1e-9) throw budgetError('limit', info);
+        const gw = enforcement === 'gateway';
+        const info = { kind, mode: gw ? 'gateway' : 'estimate', ...(gw ? {} : { needUsd: est.maxUsd }), remainingUsd, needCalls: est.maxCalls, remainingCalls, limitUsd: config.limitUsd, maxCalls: config.maxCalls };
+        if (gw ? !(remainingUsd > 1e-6) : est.maxUsd > remainingUsd + 1e-9) throw budgetError('limit', info);
         if (est.maxCalls > remainingCalls) throw budgetError('calls', info);
+        const allowanceUsd = gw ? Math.floor(remainingUsd * 1e6) / 1e6 : null;
         const key = `${sid}:${++seq}`;
-        ledger.entries.push({ key, requestId: typeof requestId === 'string' ? requestId.slice(0, 80) : null, feature: est.feature, kind, mode: est.mode, sessionId: sid, startedAt: nowIso(now), endedAt: null, status: 'in-flight', reservedUsd: est.maxUsd, reservedCalls: est.maxCalls, maxCallUsd: est.maxCallUsd, estimatedModel: est.model, maxOutputTokens: est.maxOutputTokens, ctxBytes: est.ctxBytes, model: null, calls: [], costUsd: null, costKnownUsd: 0, costComplete: false, costCachedUsd: null, reason: null });
+        ledger.entries.push({ key, requestId: typeof requestId === 'string' ? requestId.slice(0, 80) : null, feature: est.feature, kind, mode: est.mode, enforcement: gw ? 'gateway' : 'estimate', ...(gw ? { allowanceUsd } : {}), sessionId: sid, startedAt: nowIso(now), endedAt: null, status: 'in-flight', reservedUsd: gw ? allowanceUsd : est.maxUsd, reservedCalls: est.maxCalls, maxCallUsd: est.maxCallUsd, estimatedModel: est.model, maxOutputTokens: est.maxOutputTokens, ctxBytes: est.ctxBytes, model: null, calls: [], costUsd: null, costKnownUsd: 0, costComplete: false, costCachedUsd: null, reason: null });
         writeLedger(config, ledger);
         notify();
-        return { key };
+        return { key, enforcement: gw ? 'gateway' : 'estimate', ...(gw ? { allowanceUsd } : {}) };
       });
+      /**
+       * 再検証前の指示 §4: Gateway の費用の記録（meta.budget・エラーの detail.budget）で精算する。complete なら done（費用 = spentUsd・確保 0）。
+       *   そうでなければ確認できた費用（costUsd のある呼び出し）を記録し、費用が分からない呼び出しはその呼び出しの上界（boundUsd）を確保に残す（呼び出しの記録どおり）。
+       *   spentUsd が渡した allowanceUsd を超えていたら（取り決めと合わない）以後を止める
+       */
+      const settleByMeta = (e, ledger, bm, kind) => {
+        const maxCalls0 = e.reservedCalls;
+        const known = bm.calls.filter(c => c.costUsd != null);
+        //   費用が分からない呼び出しの上界（boundUsd が無ければ渡した allowanceUsd）
+        const unknownBound = round6(bm.calls.filter(c => c.costUsd == null).reduce((s2, c) => s2 + (c.boundUsd != null ? c.boundUsd : (e.allowanceUsd || 0)), 0));
+        e.gatewayCalls = bm.calls.map(c => ({ kind: c.kind, boundUsd: c.boundUsd, costUsd: c.costUsd }));
+        e.costKnownUsd = bm.complete ? round6(bm.spentUsd) : round6(known.reduce((s2, c) => s2 + c.costUsd, 0));
+        e.status = bm.complete ? 'done' : known.length ? 'partial-unknown' : 'unknown';
+        e.costComplete = e.status === 'done'; e.costUsd = e.costComplete ? e.costKnownUsd : null;
+        if (e.status === 'done') { e.reservedUsd = 0; e.reservedCalls = bm.calls.length; }
+        else if (bm.calls.length) { e.reservedUsd = round6(e.allowanceUsd != null ? Math.min(e.allowanceUsd, unknownBound) : unknownBound); e.reservedCalls = bm.calls.length; }
+        //   呼び出しの記録が無い不完全な記録は、確保（渡した allowanceUsd）を残す（0 にしない）
+        let stop = null;
+        if (e.allowanceUsd != null && bm.spentUsd > e.allowanceUsd + 1e-6) stop = { reason: 'over-allowance' };
+        else if (bm.calls.length > maxCalls0) stop = { reason: 'calls', calls: bm.calls.length };
+        if (stop && !ledger.stopped) ledger.stopped = { ...stop, at: nowIso(now), kind };
+      };
       /** 記録の 1 件を書き換える（記録を読めなければ何もしない。確保は残ったまま = 保守的） */
       const update = (key, fn) => withLock(() => {
         const s = readState();
@@ -22535,6 +22658,8 @@
        * 応答で精算: 呼び出しごとの token がそろえば done（確保を解放）、一部が無ければ partial-unknown（無い分の確保を残す）、無ければ unknown（確保を残す）。
        *   応答のモデルが単価の表に無い・表より高い、出力の上限が見積もりより大きい、呼び出しが見積もりの最大より多いときは、以後の送信を止める（stopped）
        */
+      //   再検証前の指示 §4: 上限を Gateway に渡した要求（enforcement gateway）は Gateway の費用の記録（meta.budget）で精算する（出力の上限は Gateway の上界に含まれる）。
+      //   記録が無ければ取り決めと合わないので以後を止め、今までの token の精算をする（確保は渡した allowanceUsd のまま残りうる＝保守的）
       const settle = (key, { kind, response }) => update(key, (e, ledger) => {
         const calls = callsOf(kind, response);
         const known = calls.filter(Boolean);
@@ -22542,10 +22667,23 @@
         const model = ai && typeof ai.model === 'string' && ai.model.trim() ? ai.model.trim().slice(0, 60) : null;
         const est = priceOf(e.estimatedModel);
         const got = model ? priceOf(model) : est;
+        const gw = e.enforcement === 'gateway';
+        const bm = gw ? budgetMetaOf(response && response.budgetMeta) : null;
+        if (gw && bm) {
+          e.endedAt = nowIso(now); e.model = model;
+          e.calls = calls.map(c => (c ? { input: c.input, cached: c.cached, output: c.output, ...(c.reasoning != null ? { reasoning: c.reasoning } : {}) } : null));
+          const priced = !!got;
+          e.costCachedUsd = priced && got.cachedInput != null && known.length === calls.length ? round6(known.reduce((s2, c) => s2 + ((c.input - c.cached) * got.input + c.cached * got.cachedInput + c.output * got.output) / 1e6, 0)) : null;
+          settleByMeta(e, ledger, bm, kind);
+          e.reason = null;
+          if (model && (!got || (est && (got.input > est.input || got.output > est.output))) && !ledger.stopped) ledger.stopped = { reason: 'model', model, at: nowIso(now), kind };
+          return;
+        }
         let stop = null;
-        if (model && (!got || (est && (got.input > est.input || got.output > est.output)))) stop = { reason: 'model', model };
+        if (gw) stop = { reason: 'no-budget-meta' };
+        if (!stop && model && (!got || (est && (got.input > est.input || got.output > est.output)))) stop = { reason: 'model', model };
         const mo = ai && ai.settings ? num(ai.settings.maxOutputTokens) : null;
-        if (!stop && mo != null && mo > e.maxOutputTokens) stop = { reason: 'output-limit', maxOutputTokens: mo };
+        if (!stop && !gw && mo != null && mo > e.maxOutputTokens) stop = { reason: 'output-limit', maxOutputTokens: mo };
         if (!stop && calls.length > e.reservedCalls) stop = { reason: 'calls', calls: calls.length };
         const price = got || est;
         const priced = !!price && !(stop && stop.reason === 'model');
@@ -22563,37 +22701,50 @@
         if (stop && !ledger.stopped) ledger.stopped = { ...stop, at: nowIso(now), kind };
       });
       /** 失敗で精算: AI を呼ぶ前に止まったものだけ解放し、それ以外（中断・時間切れ・切断・AI を呼んだ後のエラー）は終了不明（確保を残す） */
-      const fail = (key, err) => update(key, (e) => {
+      //   再検証前の指示 §4: Gateway が最初の呼び出しの前に上限で止めた（BUDGET_EXCEEDED stage first）は AI を呼んでいないので解放。上限を渡した要求で、AI を呼んだ後の
+      //   エラーの本文に Gateway の費用の記録（error.detail.budget）があれば、それで精算する（無ければ今までどおり終了不明・確保を残す）
+      const fail = (key, err) => update(key, (e, ledger) => {
         e.endedAt = nowIso(now); e.reason = codeOf(err);
-        if (preAiOf(err)) { e.status = 'released'; e.reservedUsd = 0; e.reservedCalls = 0; e.costUsd = 0; e.costKnownUsd = 0; e.costComplete = true; }
-        else { e.status = 'unknown'; e.costUsd = null; e.costKnownUsd = num(e.costKnownUsd) ?? 0; e.costComplete = false; }
+        if (preAiOf(err)) { e.status = 'released'; e.reservedUsd = 0; e.reservedCalls = 0; e.costUsd = 0; e.costKnownUsd = 0; e.costComplete = true; return; }
+        const d = gatewayDetailOf(err);
+        const bm = e.enforcement === 'gateway' && d ? budgetMetaOf(d.budget) : null;
+        if (bm) { settleByMeta(e, ledger, bm, e.kind); e.reason = codeOf(err); return; }
+        e.status = 'unknown'; e.costUsd = null; e.costKnownUsd = num(e.costKnownUsd) ?? 0; e.costComplete = false;
       });
       /** 送る前に止めた（確保の直後に取り消された）: 解放 */
       const release = (key, code = 'CANCELLED') => update(key, (e) => { e.endedAt = nowIso(now); e.reason = code; e.status = 'released'; e.reservedUsd = 0; e.reservedCalls = 0; e.costUsd = 0; e.costKnownUsd = 0; e.costComplete = true; });
+      //   再検証前の指示 §4: 最後に包んだ client の health の limits（見出しの行で、Gateway が上限を強制するか・推定による送信制限だけかを分けて出す）
+      let lastLimits = null;
       function summary() {
         const s = readState();
         if (s.mode === 'disabled') return { enabled: false };
         if (s.mode === 'broken') return { enabled: true, ok: false, reason: s.reason };
         const t = totalsOf(s.ledger, { sessionId: sid });
-        return { enabled: true, ok: true, id: s.config.id, limitUsd: s.config.limitUsd, maxCalls: s.config.maxCalls, ...t, stopped: s.ledger.stopped ? { ...s.ledger.stopped } : null };
+        const L = lastLimits ? lastLimits() : null;
+        const modes = [...new Set(['ask', 'plan', 'generate'].map(k => enforcementOf(L, k)))];
+        return { enabled: true, ok: true, id: s.config.id, limitUsd: s.config.limitUsd, maxCalls: s.config.maxCalls, ...t, stopped: s.ledger.stopped ? { ...s.ledger.stopped } : null, enforcement: modes.length === 1 ? modes[0] : 'mixed' };
       }
       /**
        * session.client を包む（ask / propose / plan / generate の直前に確保、応答で精算）。設定が無ければ素通し（今と同じ）。
-       *   limits = health の limits（関数でもよい）。有効なときは直接の送信の失敗から kintone.proxy で送り直さない（noProxyFallback）
+       *   limits = health の limits（関数でもよい）。有効なときは直接の送信の失敗から kintone.proxy で送り直さない（noProxyFallback）。
+       *   再検証前の指示 §3: 各送信の前に設定を読み直す（予算を使う検証で状態を確かめられなければ送信 0 件。readState）。
+       *   再検証前の指示 §4: health に limits.budgetAllowance があり、その feature のモデルが印にあれば、envelope に budget: { allowanceUsd } を付ける（確保額 = allowanceUsd）
        */
       function wrap(client, { limits = null } = {}) {
         if (!client || typeof client !== 'object') return client;
         const lim = () => { try { return typeof limits === 'function' ? limits() : limits; } catch (e) { return null; } };
+        lastLimits = lim;
         const run = (kind) => async (p = {}) => {
           if (readState().mode === 'disabled') return client[kind](p);
           const requestId = p && p.requestId ? p.requestId : KTAiClient.newRequestId();
-          const est = estimate({ kind, ctx: p ? p.ctx : null, limits: lim() });
+          const L = lim();
+          const est = estimate({ kind, ctx: p ? p.ctx : null, limits: L });
           if (!est.ok) throw budgetError(est.reason, { kind, ...(est.model ? { model: est.model } : {}) });
-          const res = await reserve({ requestId, kind, est });
+          const res = await reserve({ requestId, kind, est, enforcement: enforcementOf(L, kind) });
           if (!res) return client[kind](p);
           if (p && p.signal && p.signal.aborted) { try { await release(res.key, 'CANCELLED'); } catch (x) { } throw new AiClientError({ code: ERROR_CODES.CANCELLED, message: '送信をキャンセルしました' }); }
           let r;
-          try { r = await client[kind]({ ...p, requestId, noProxyFallback: true }); }
+          try { r = await client[kind]({ ...p, requestId, noProxyFallback: true, ...(res.enforcement === 'gateway' ? { budget: { allowanceUsd: res.allowanceUsd } } : {}) }); }
           catch (e) { try { await fail(res.key, e); } catch (x) { } throw e; }
           try { await settle(res.key, { kind, response: r }); } catch (x) { }
           return r;
@@ -22608,15 +22759,18 @@
       };
     }
     /** 見出しの 1 行（予算が有効なときだけ。金額と回数だけ。内部の値は出さない） */
+    //   再検証前の指示 §4（2026-10-10）: Gateway が要求ごとに上限を強制するか（budgetAllowance の印）、Toolkit の推定による送信制限だけか（上限の強制は無い）を分けて書く
+    const ENFORCEMENT_JA = Object.freeze({ gateway: '（Gateway が要求ごとに上限を強制）', estimate: '（推定による送信制限・上限の強制は無い）', mixed: '（一部の要求は推定による送信制限・上限の強制は無い）' });
     function summaryText(s) {
       if (!s || !s.enabled) return '';
       const usd = KTAiClient.usdText;
-      if (!s.ok) return '検証の上限: 設定または記録を読めないため、AI に送りません';
-      if (s.stopped) return `検証の上限: 見積もりの表を超える応答があったため、以後の送信を止めています（記録済み 約 ${usd(s.recordedUsd)} 米ドル・確保中 約 ${usd(s.reservedUsd)} 米ドル）`;
-      return `検証の上限: 記録済み 約 ${usd(s.recordedUsd)} 米ドル・確保中 約 ${usd(s.reservedUsd)} 米ドル${s.unknown ? `（終了不明 ${s.unknown} 件）` : ''} ／ 上限 ${usd(s.limitUsd)} 米ドル・AI の呼び出し ${s.usedCalls} / ${s.maxCalls} 回`;
+      if (!s.ok) return s.reason === 'config-unreadable' || s.reason === 'config-missing' ? '検証の上限: 設定を確かめられないため、AI に送りません' : '検証の上限: 設定または記録を読めないため、AI に送りません';
+      const mode = ENFORCEMENT_JA[s.enforcement] || '';
+      if (s.stopped) return `検証の上限${mode}: 見積もりの表・上限の取り決めと合わない応答があったため、以後の送信を止めています（記録済み 約 ${usd(s.recordedUsd)} 米ドル・確保中 約 ${usd(s.reservedUsd)} 米ドル）`;
+      return `検証の上限${mode}: 記録済み 約 ${usd(s.recordedUsd)} 米ドル・確保中 約 ${usd(s.reservedUsd)} 米ドル${s.unknown ? `（終了不明 ${s.unknown} 件）` : ''} ／ 上限 ${usd(s.limitUsd)} 米ドル・AI の呼び出し ${s.usedCalls} / ${s.maxCalls} 回`;
     }
-    return { CONFIG_PREFIX, LEDGER_PREFIX, LEDGER_VERSION, PRICES, FEATURE_OF, DEFAULT_MODEL, OUTPUT_LIMITS, MAX_CALLS, PROMPT_BYTES, CTX_FACTOR, BYTES_PER_TOKEN, REPAIR_EXTRA_TOKENS, STATUSES,
-      priceOf, estimate, callsOf, tokensOfUsage, preAiOf, notSentOf, totalsOf, knownCostOf, parseConfig, budgetError, configKeyOf, ledgerKeyOf, summaryText, create };
+    return { CONFIG_PREFIX, LEDGER_PREFIX, ARMED_PREFIX, LEDGER_VERSION, PRICES, FEATURE_OF, DEFAULT_MODEL, OUTPUT_LIMITS, MAX_CALLS, PROMPT_BYTES, CTX_FACTOR, BYTES_PER_TOKEN, REPAIR_EXTRA_TOKENS, STATUSES,
+      priceOf, estimate, callsOf, tokensOfUsage, preAiOf, notSentOf, budgetMetaOf, enforcementOf, totalsOf, knownCostOf, parseConfig, budgetError, configKeyOf, ledgerKeyOf, armedKeyOf, summaryText, create };
   })();
 
 
@@ -24535,11 +24689,17 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
     /**
      * §0f.4（2026-10-09）: 検証の上限（KTAiBudget）の拒否の情報（数値と理由の語だけ）。BUDGET_EXCEEDED でなければ null
      */
+    //   2026-10-10（再検証前の指示 §4）: Gateway が上限で止めた（error.detail = { reason: over-allowance / unknown-model, stage, allowanceUsd, boundUsd }）も数値と理由の語だけ持つ
+    //   （reason は gateway-over-allowance / gateway-unknown-model）。mode = gateway（Gateway が強制する上限）/ estimate（Toolkit の推定による送信制限）
     function budgetInfoOf(e) {
-      const b = e && e.code === 'BUDGET_EXCEEDED' && e.details && e.details.budget && typeof e.details.budget === 'object' ? e.details.budget : null;
-      if (!b) return null;
       const n = (v) => (v != null && Number.isFinite(Number(v)) ? Number(v) : null);
-      return { reason: typeof b.reason === 'string' ? b.reason.slice(0, 40) : null, needUsd: n(b.needUsd), remainingUsd: n(b.remainingUsd), needCalls: n(b.needCalls), remainingCalls: n(b.remainingCalls), limitUsd: n(b.limitUsd), maxCalls: n(b.maxCalls), ...(typeof b.stopReason === 'string' ? { stopReason: b.stopReason.slice(0, 40) } : {}), ...(typeof b.model === 'string' ? { model: b.model.slice(0, 60) } : {}) };
+      const b = e && e.code === 'BUDGET_EXCEEDED' && e.details && e.details.budget && typeof e.details.budget === 'object' ? e.details.budget : null;
+      if (!b) {
+        const d = e && e.code === 'BUDGET_EXCEEDED' && e.details && e.details.error && e.details.error.detail && typeof e.details.error.detail === 'object' ? e.details.error.detail : null;
+        if (!d || !['over-allowance', 'unknown-model'].includes(d.reason)) return null;
+        return { reason: `gateway-${d.reason}`, mode: 'gateway', stage: typeof d.stage === 'string' ? d.stage.slice(0, 20) : null, allowanceUsd: n(d.allowanceUsd), boundUsd: n(d.boundUsd) };
+      }
+      return { reason: typeof b.reason === 'string' ? b.reason.slice(0, 40) : null, ...(b.mode === 'gateway' || b.mode === 'estimate' ? { mode: b.mode } : {}), needUsd: n(b.needUsd), remainingUsd: n(b.remainingUsd), needCalls: n(b.needCalls), remainingCalls: n(b.remainingCalls), limitUsd: n(b.limitUsd), maxCalls: n(b.maxCalls), ...(typeof b.stopReason === 'string' ? { stopReason: b.stopReason.slice(0, 40) } : {}), ...(typeof b.model === 'string' ? { model: b.model.slice(0, 60) } : {}) };
     }
     /** §0f.3 の 1: 未完成の最終案の理由の文（承認できない理由の先頭。内部の値・時間の目安は出さない） */
     function incompleteReasonText(inc) {
@@ -24695,6 +24855,41 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
       const labelOf = (code) => norm((labels && (labels[code] ?? labels[mapCode(code)])) ?? proposedLabel.get(String(code)) ?? '');
       return (r) => { const tg = norm(r && r.target); if (!tg) return null; const hit = fields.filter(f => norm(f.code) === tg || norm(mapCode(f.code)) === tg || (labelOf(f.code) && labelOf(f.code) === tg)); return hit.length === 1 ? hit[0] : null; };
     }
+    /**
+     * 再検証前の指示 §1（2026-10-10）: 要件の対象（target）→ フィールドのコード（計画のすべての customization のフィールドに reqTargetFieldOf と同じ完全一致の照合を当て、
+     *   1 つのコードに決まるときだけ。計画に無ければ画面のフィールドのコード・名前の完全一致。決まらなければ null）。決定事項の実現の照合（X(D)）に使う（自然文は読まない）
+     * @returns {(target: string) => string|null}
+     */
+    function targetFieldKeyOf(plan, labels = {}) {
+      const custs = (plan && Array.isArray(plan.customizations) ? plan.customizations : []).filter(c => c && c.customizationId);
+      const fns = custs.map(c => reqTargetFieldOf(plan, c, labels || {}));
+      const codeMap = KTContext.proposedCodeMap(plan);
+      const norm = (x) => String(x ?? '').trim();
+      return (target) => {
+        const tg = norm(target);
+        if (!tg) return null;
+        const hits = new Set();
+        for (const fn of fns) { const f = fn({ target: tg }); if (f) hits.add(String(codeMap.get(String(f.code)) ?? f.code)); }
+        if (!hits.size) for (const [code, lb] of Object.entries(labels || {})) if (norm(code) === tg || (norm(lb) && norm(lb) === tg)) hits.add(String(code));
+        return hits.size === 1 ? [...hits][0] : null;
+      };
+    }
+    /**
+     * 再検証前の指示 §1（2026-10-10）: 要件 r の (フィールド, 効果) がすべて、決定事項 D の採用の時点の組 X(D) に入るか（構造だけ。自然文は読まない）。
+     *   expected = X(D) の材料 [{ target, effects }]（採用の時点にその判断の key に結び付いた要件）。fieldOf = targetFieldKeyOf。
+     *   組の比べ方: 効果が同じで、フィールドがどちらも決まるなら同じフィールド（どちらかの対象が決まらなければ効果だけの組として効果で比べる）。
+     *   → 'match'（D の実現）/ 'mismatch'（X(D) にない効果・フィールドを持つ）/ 'unverified'（X(D) が空・r の効果が分からない＝構造で確かめられない）。
+     *   順序に依存しない（同じ D に結び付く要件はそれぞれ X(D) と比べる。PC とモバイル・複数のイベント・複数のファイルの要件がどれも D の実現になれる）
+     */
+    function decisionLinkVerdictOf(r, expected, fieldOf) {
+      const xs = (Array.isArray(expected) ? expected : []).filter(x => x && Array.isArray(x.effects));
+      const X = xs.flatMap(x => x.effects.filter(e => KT_EFFECTS.includes(e)).map(e => ({ field: fieldOf(x.target), effect: e })));
+      if (!X.length) return 'unverified';
+      const ef = r && Array.isArray(r.effects) ? [...new Set(r.effects.filter(e => KT_EFFECTS.includes(e)))] : null;
+      if (!ef) return 'unverified';
+      const fr = fieldOf(r && r.target);
+      return ef.every(e => X.some(p => p.effect === e && (p.field == null || fr == null || p.field === fr))) ? 'match' : 'mismatch';
+    }
     // ---- §0f.2（2026-10-09）: 採用範囲（利用者が採用した範囲に無い動作を、計画の返答・自動の見直し・差分更新・生成で戻さない）----
     /**
      * 要件の採用の根拠（台帳の要素 scope.basis）の語彙。
@@ -24724,19 +24919,22 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
      *   そのフィールドの E_in と比べ、対象でない（テーブルの列など。利用者の要件の target が 1 つのフィールドに付け替えられても列の効果を落とさない）なら customization の単位で比べる。
      *   対象が決まらない範囲内の要件があるときだけ今の customization 単位に倒す。範囲内でも、明示の要件と同じ効果で対象が決まらない追加の要件（item-ai・planner・unlinked）は
      *   必須の効果の材料にしない（noMaterial。target-unresolved にしない）。
-     *   レビューの指摘 row3 の 2: delegationOpen（委ねた判断のうち結び付く要件がまだ無いもの＝未実現の委任がある）のときだけ、計画の AI が足した proposed の要件で
-     *   E_in に無い効果を足すものは外さずに「判定できない（委任の実現の可能性）」として中に残す（possible。最終案の詳細に出す）。
-     *   §0f.2 の 9（2026-10-09）: 呼び出し側は、decisionRefs の印がある Gateway では delegationOpen を渡さない（委任の実現は要件の decisionRefs で結び付く）。
-     *   possibleSince（版の番号）を渡すと、その版より後に作った・直した要件だけを可能性の扱いにする（計画の段階で委ねた判断は、それより前の版の追加を実現しない）
+     *   判断の候補（再検証前の指示 §1・2026-10-10。以前の「委任の実現の可能性」possible＝外さずに必須の効果に残す扱いの置き換え）: E_in に無い効果を足す要件のうち、
+     *   (a) candidateLinks にある（計画の AI が、採用の時点に構造の無い・まだ実現していない決定事項に結び付けた＝AI の id だけでは確かめられない）もの、
+     *   (b) delegationOpen（印の無い Gateway で未実現の委任がある）のとき計画の AI が足した proposed のもの（possibleSince の版より後に作った・直したものだけ）は、
+     *   黙って入れず（範囲外・計画から外す）、黙って消さず（out の reason candidate と decisions。最終案の通常表示と承認の欄に「判断が残っている」と一度に示す）。
+     *   §0f.2 の 9（2026-10-09）: 呼び出し側は、decisionRefs の印がある Gateway では delegationOpen を渡さない（委任の実現は要件の decisionRefs と X(D) の照合で決まる）。
      * @param {Array} reqs 台帳の要件（KTAiAnswers.requirementsOf の要素。scope を持てる）
      * @param {object|null} plan 計画（customizations）
-     * @param {object} o { labels（フィールドのコード → 名前。対象のフィールドの照合に使う）, delegationOpen, possibleSince }
-     * @returns {{ inIds: Set<string>, out: Map<string, { reason: 'suggestion'|'adds-effect', customizationIds?: string[], effects?: string[] }>, eIn: Map<string, Set<string>>, undetermined: Set<string>,
-     *   eInField: Map<string, Map<string, Set<string>>>, noMaterial: Map<string, Set<string>>, possible: Map<string, { reason: 'delegation', customizationIds: string[], effects: string[] }>,
-     *   linked: Array<{ customizationId, field, effect, requirementIds: string[], decisionIds: string[] }> }}
-     *   linked = 決定事項の結び付き（scope.via decisionRefs）で範囲内に上がった要件が、それを除いた範囲内の要件の効果に無い効果を足すもの（外さない。詳細に出す）
+     * @param {object} o { labels（フィールドのコード → 名前。対象のフィールドの照合に使う）, delegationOpen, possibleSince, openDecisions（(b) の決定事項 [{ id, key, kind, label }]）,
+     *   candidateLinks（(a) 要件 id → 結び付いた決定事項 [{ id, key, kind, label }]） }
+     * @returns {{ inIds: Set<string>, out: Map<string, { reason: 'suggestion'|'adds-effect'|'candidate', customizationIds?: string[], effects?: string[], decisions?: Array }>, eIn: Map<string, Set<string>>, undetermined: Set<string>,
+     *   eInField: Map<string, Map<string, Set<string>>>, noMaterial: Map<string, Set<string>>,
+     *   linked: Array<{ customizationId, field, effect, requirementIds: string[], decisionIds: string[], links: Array<{ id, kind }> }> }}
+     *   linked = 決定事項の結び付き（scope.via decisionRefs。採用の時点の組 X(D) に入る＝D の実現）で範囲内に上がった要件が、それを除いた範囲内の要件の効果に無い効果を足すもの
+     *   （外さない。最終案の通常表示の「仮案から変わった点と理由」に出す）
      */
-    function requirementScopeOf(reqs, plan, { labels = null, delegationOpen = false, possibleSince = null } = {}) {
+    function requirementScopeOf(reqs, plan, { labels = null, delegationOpen = false, possibleSince = null, openDecisions = [], candidateLinks = null } = {}) {
       const sinceOk = (r) => possibleSince == null || (Number(r.updatedIn ?? r.createdIn) || 0) >= Number(possibleSince);
       const list = (Array.isArray(reqs) ? reqs : []).filter(r => r && r.id && r.decision !== 'revoked');
       const custs = ((plan && Array.isArray(plan.customizations)) ? plan.customizations : []).filter(c => c && c.customizationId);
@@ -24752,7 +24950,7 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
         cand.push(r);
       }
       for (const r of definite) inIds.add(r.id);
-      const eIn = new Map(), undetermined = new Set(), eInField = new Map(), noMaterial = new Map(), possible = new Map();
+      const eIn = new Map(), undetermined = new Set(), eInField = new Map(), noMaterial = new Map();
       for (const cid of custIds) {
         const set = new Set();
         let unknown = false, unresolvedTarget = false;
@@ -24791,13 +24989,10 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
         }
         if (!addsOf.size) { inIds.add(r.id); for (const c of unresolvedIn) noMaterial.get(c).add(r.id); continue; }
         const info = { customizationIds: [...addsOf.keys()], effects: [...new Set([...addsOf.values()].flat())] };
-        if (delegationOpen && scopeBasisOf(r) === 'planner' && r.decision === 'proposed' && sinceOk(r)) {
-          inIds.add(r.id);
-          possible.set(r.id, { reason: 'delegation', ...info });
-          //   対象が決まらない可能性の要件は必須の効果の材料にしない（計画のフィールドの効果は残る）
-          for (const c of cs) if (eInField.get(c) && !fieldOfIn.get(c)(r)) noMaterial.get(c).add(r.id);
-          continue;
-        }
+        //   再検証前の指示 §1: 判断の候補（黙って入れない・黙って消さない）
+        const linkedTo = candidateLinks && typeof candidateLinks.get === 'function' && candidateLinks.has(r.id) ? candidateLinks.get(r.id) : null;
+        if (linkedTo && linkedTo.length) { out.set(r.id, { reason: 'candidate', via: 'decisionRefs', ...info, decisions: linkedTo.map(d => ({ ...d })) }); continue; }
+        if (delegationOpen && scopeBasisOf(r) === 'planner' && r.decision === 'proposed' && sinceOk(r)) { out.set(r.id, { reason: 'candidate', via: 'delegation', ...info, decisions: (Array.isArray(openDecisions) ? openDecisions : []).map(d => ({ ...d })) }); continue; }
         out.set(r.id, { reason: 'adds-effect', ...info });
       }
       //   §0f.2 の 9（2026-10-09・前の確認の結び付けの誤り）: 決定事項の結び付きで範囲内に上がった要件（scope.via decisionRefs）が、それを除いた範囲内の要件の効果に
@@ -24809,7 +25004,9 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
       for (const r of definite.filter(viaLink)) {
         const ef = reqEffectsOf(r);
         if (!ef || !ef.length) continue;
-        const dIds = [...new Set((Array.isArray(r.decisionLinks) ? r.decisionLinks : []).filter(l => l && !l.realized && typeof l.id === 'string').map(l => l.id))];
+        //   再検証前の指示 §1: D の実現の結び付き（採用の時点の組 X(D) に入る verdict match）だけ（先着順の realized はやめた）
+        const mLinks = (Array.isArray(r.decisionLinks) ? r.decisionLinks : []).filter(l => l && l.verdict === 'match' && typeof l.id === 'string');
+        const dIds = [...new Set(mLinks.map(l => l.id))];
         for (const c of custs.filter(x => Array.isArray(r.planRefs) && r.planRefs.includes(x.customizationId))) {
           const cid = c.customizationId;
           const base = definite.filter(x => !viaLink(x) && Array.isArray(x.planRefs) && x.planRefs.includes(cid));
@@ -24825,15 +25022,16 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
             const fs = tf ? [String(tf.code)] : (Array.isArray(c.fields) ? c.fields : []).filter(f => f && f.code && (ktFieldEffectsOf(f.effects) || []).some(x => x.effect === e)).map(f => String(f.code));
             for (const field of (fs.length ? fs : [''])) {
               const k = `${cid}|${field}|${e}`;
-              const g = linkedBy.get(k) || { customizationId: cid, field, effect: e, requirementIds: [], decisionIds: [] };
+              const g = linkedBy.get(k) || { customizationId: cid, field, effect: e, requirementIds: [], decisionIds: [], links: [] };
               if (!g.requirementIds.includes(String(r.id))) g.requirementIds.push(String(r.id));
               for (const d of dIds) if (!g.decisionIds.includes(d)) g.decisionIds.push(d);
+              for (const l of mLinks) if (!g.links.some(x => x.id === l.id)) g.links.push({ id: l.id, kind: l.kind === 'delegated' ? 'delegated' : 'user' });
               linkedBy.set(k, g);
             }
           }
         }
       }
-      return { inIds, out, eIn, undetermined, eInField, noMaterial, possible, linked: [...linkedBy.values()] };
+      return { inIds, out, eIn, undetermined, eInField, noMaterial, linked: [...linkedBy.values()] };
     }
     /**
      * 段階 C（C4・R16）: 承認が今も有効か（1 か所で判定）。版・planHash・基準の stamp（baseStamp を渡したとき）・customizeRevision・各候補の candidateHash の一致を見る。
@@ -25483,27 +25681,36 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
       const MAX_DECISION_LINKS = 16;
       /**
        * 要件の結び付き（decisionLinks）→ 採用の根拠（値で答えた決定事項があれば item-user、委ねた判断だけなら delegated、無ければ null）。
-       *   前の確認の結び付けの誤り（2026-10-09）: 実現済みの決定事項への結び付き（realized: true）は数えない
+       *   再検証前の指示 §1（2026-10-10）: 数えるのは D の実現（verdict match＝その要件の (フィールド, 効果) がすべて採用の時点の組 X(D) に入る）の結び付きだけ。
+       *   AI が返した id だけ（X(D) が空 unverified・X(D) に無い mismatch）では上げない。先に結び付いた要件が後の要件を「実現済み」にする扱い（realized）はやめた（順序に依存しない）
        */
-      const linkBasisOf = (e) => { const ls = ((e && Array.isArray(e.decisionLinks)) ? e.decisionLinks : []).filter(l => l && !l.realized); return ls.some(l => l.kind === 'user') ? 'item-user' : ls.some(l => l.kind === 'delegated') ? 'delegated' : null; };
+      const linkBasisOf = (e) => { const ls = ((e && Array.isArray(e.decisionLinks)) ? e.decisionLinks : []).filter(l => l && l.verdict === 'match'); return ls.some(l => l.kind === 'user') ? 'item-user' : ls.some(l => l.kind === 'delegated') ? 'delegated' : null; };
       /**
-       * 決定事項（id・仮案の判断の key）が、要件 e とは別の、取り消していない要件ですでに実現されているか（構造だけで決める。自然文は読まない）。
-       *   (a) 仮案の判断の key がある決定事項: lg.itemReqs（または採用の時点の lg.adoption.itemReqs）の key:<key> に e 以外の生きた要件がある
-       *   (b) e 以外の生きた要件が、同じ決定事項の id への実現の結び付き（realized でない decisionLinks）をすでに持つ（前の版か、同じ応答の先の操作）
-       *   任意の提案の扱いの要件（suggestion。採用の既定から外した）は実現として数えない
+       * 再検証前の指示 §1: 決定事項 D（仮案の判断の key）の採用の時点の組 X(D) の材料 [{ target, effects }]。採用の時点の記録 lg.adoption.decisionPairs（freezeAdoption が
+       *   その key の key:<key> に結び付いた要件（undecided を含む・取り消し済みと任意の提案の扱いを除く）の target と effects を写したもの）。写しの無い古い台帳は今の itemReqs から。
+       *   key が無い（計画の段階の委任・相談の答え）・その判断に結び付いた要件が無ければ []（採用の時点にその判断の動作の構造が無い）
        */
-      const decisionRealizedFor = (lg, e, id, key) => {
-        const others = KTAiAnswers.requirementsOf(lg).filter(r => r && r !== e && r.id !== e.id && r.decision !== 'revoked' && scopeBasisOf(r) !== 'suggestion');
-        if (!others.length) return false;
-        const ids = new Set(others.map(r => r.id));
+      const decisionExpectedOf = (lg, key) => {
+        if (!lg || !key) return [];
+        const ad = lg.adoption || null;
+        if (ad && ad.decisionPairs && typeof ad.decisionPairs === 'object') return Array.isArray(ad.decisionPairs[key]) ? ad.decisionPairs[key] : [];
+        const ids = new Set([...((lg.itemReqs || {})[`key:${key}`] || []), ...((ad && ad.itemReqs ? ad.itemReqs : {})[`key:${key}`] || [])]);
+        return KTAiAnswers.requirementsOf(lg).filter(r => r && ids.has(r.id) && r.decision !== 'revoked' && scopeBasisOf(r) !== 'suggestion' && Array.isArray(r.effects)).map(r => ({ target: String(r.target || ''), effects: [...r.effects] }));
+      };
+      /**
+       * 再検証前の指示 §1: 決定事項がすでに範囲内の要件で実現されているか（構造だけ）。仮案の判断の key に結び付く生きた要件（lg.itemReqs・lg.adoption.itemReqs の key:<key>。
+       *   任意の提案の扱いを除く）があるか、D の実現（verdict match）の結び付きを持つ生きた要件がある。判断の候補を出すかの判定に使う（採用の根拠の判定には使わない）
+       */
+      const decisionRealizedOf = (lg, id, key) => {
+        const live = KTAiAnswers.requirementsOf(lg).filter(r => r && r.decision !== 'revoked' && scopeBasisOf(r) !== 'suggestion');
+        const ids = new Set(live.map(r => r.id));
         if (key) for (const ir of [lg.itemReqs, lg.adoption && lg.adoption.itemReqs]) if (ir && (ir[`key:${key}`] || []).some(rid => ids.has(rid))) return true;
-        return others.some(r => (Array.isArray(r.decisionLinks) ? r.decisionLinks : []).some(l => l && l.id === id && !l.realized));
+        return live.some(r => (Array.isArray(r.decisionLinks) ? r.decisionLinks : []).some(l => l && l.id === id && l.verdict === 'match'));
       };
       /**
        * この操作の decisionRefs（applyRequirementOps の decisionRefs）のうち、送った決定事項（decisionKinds）に有る id を要件の decisionLinks に積む（重複なし・16 件まで）。
-       *   decisionLinks: [{ id, kind: 'delegated'|'user', key（仮案の判断の key）, at（版）, label（決定事項の見出しか問いの短い文。最終案の詳細の行に使う）, realized? }]
-       *   操作の順（applyRequirementOps の decisionRefs の Map の順）に積み、その決定事項がすでに実現済み（decisionRealizedFor）なら realized: true で残す（採用の根拠には数えない）。
-       *   同じ応答で 2 つの要件が同じ未実現の決定事項に結び付いたら、先の 1 つだけが実現の結び付きになる
+       *   decisionLinks: [{ id, kind: 'delegated'|'user', key（仮案の判断の key）, at（版）, label（決定事項の見出しか問いの短い文。最終案の行に使う）, verdict }]
+       *   再検証前の指示 §1: 結び付きは対応付けの情報として積むだけ（操作の順で「先の 1 つだけが実現」にしない）。D の実現かは settleDecisionLinks が要件ごとに X(D) と照らして決める
        */
       const noteDecisionLinks = (lg, ch, decisionKinds, version) => {
         if (!lg || !ch || !(decisionKinds instanceof Map) || !decisionKinds.size || !(ch.decisionRefs instanceof Map)) return;
@@ -25520,17 +25727,36 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
             if (!k) continue;
             const l = { id, kind: k.kind === 'delegated' ? 'delegated' : 'user', key: k.key || null, at: version, ...(k.label ? { label: k.label } : {}) };
             if (have.has(sig(l))) continue;
-            if (decisionRealizedFor(lg, e, id, l.key)) l.realized = true;
             add.push(l); have.add(sig(l));
           }
           if (add.length) e.decisionLinks = [...cur, ...add].slice(-MAX_DECISION_LINKS);
         }
       };
+      /**
+       * 再検証前の指示 §1（2026-10-10）: 結び付きを持つ生きた要件ごとに、結び付いた決定事項 D の実現か（decisionLinkVerdictOf。採用の時点の組 X(D) と、この応答の計画の
+       *   フィールドで照らす）を決め直し、採用の根拠を決める。要件ごとに独立に決めるので、同じ応答の操作の順・前の版の結び付きで結果が変わらない（同じ D を複数の要件で実現してよい）。
+       *   上げるのは計画の AI の追加・ai の補足・根拠の無い要件（LINK_UPGRADABLE）だけ。結び付きで上げた要件が D の実現でなくなったら（計画が効果・対象を直した）元の根拠に戻す
+       */
+      const settleDecisionLinks = (lg, plan, { by = 'plan', at = null } = {}) => {
+        if (!lg) return;
+        const fieldOf = targetFieldKeyOf(plan, scopeLabels());
+        for (const r of KTAiAnswers.requirementsOf(lg)) {
+          if (!r || r.decision === 'revoked' || !Array.isArray(r.decisionLinks) || !r.decisionLinks.length) continue;
+          for (const l of r.decisionLinks) { if (!l) continue; l.verdict = decisionLinkVerdictOf(r, decisionExpectedOf(lg, l.key), fieldOf); delete l.realized; }
+          if (r.decision === 'decided' || scopeBasisOf(r) === 'explicit') continue;
+          const lb = linkBasisOf(r);
+          const viaLink = !!(r.scope && r.scope.via === 'decisionRefs');
+          if (lb && (viaLink || LINK_UPGRADABLE.includes(scopeBasisOf(r)))) { if (scopeBasisOf(r) !== lb || !viaLink) r.scope = { basis: lb, by, at, via: 'decisionRefs', from: viaLink ? (r.scope.from || 'planner') : scopeBasisOf(r) }; }
+          else if (!lb && viaLink) r.scope = { basis: LINK_UPGRADABLE.includes(r.scope.from) ? r.scope.from : 'planner', by, at };
+        }
+      };
       /** 決定事項の見出し（label。仮案の判断の key と同じ・「確認事項」だけのときは問いの文）の短い文（最終案の詳細の行に使う。構造化した値だけ） */
+      //   再検証前の指示 §2（2026-10-10）: 論点の語彙の見出し（「ステータス・条件」など。計画の段階の確認事項の決定事項に付く）は「確認事項」と同じく一般的な語として、問いの文を使う
+      const GENERIC_DECISION_LABELS = new Set(['確認事項', ...((KTAiAnswers.TOPICS || []).map(t => t && t.label).filter(Boolean))]);
       const decisionLabelOf = (d, key = null) => {
         const cut = (s, n) => { const x = String(s ?? '').replace(/\s+/g, ' ').trim(); return x.length > n ? `${x.slice(0, n)}…` : x; };
         const lb = cut(d && d.label, 40);
-        return lb && lb !== key && lb !== String((d && d.key) || '') && lb !== '確認事項' ? lb : (cut(d && d.question, 50) || lb);
+        return lb && lb !== key && lb !== String((d && d.key) || '') && !GENERIC_DECISION_LABELS.has(lb) ? lb : (cut(d && d.question, 50) || lb);
       };
       /** 送った決定事項 → decisionKinds（id → { kind, key, label }）。keyOf(d) = 仮案の判断の key（無ければ null） */
       const decisionKindsOf = (decisions, keyOf = (d) => d.key || null) => new Map((Array.isArray(decisions) ? decisions : []).filter(d => d && typeof d.id === 'string').map(d => { const key = keyOf(d); return [d.id, { kind: d.delegated === true ? 'delegated' : 'user', key, label: decisionLabelOf(d, key) }]; }));
@@ -25592,7 +25818,8 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
        */
       //   §0f.2 の 9（2026-10-09）: decisionKinds = この呼び出しで計画の AI に送った決定事項の id → { kind: 'delegated'（委ねた判断）| 'user'（値で答えた）, key（仮案の判断の key）}。
       //   decisionRefs の印がある Gateway のときだけ渡す（無ければ null。要件の decisionRefs を採用の根拠に使わない）
-      function noteTurn(lg, turn, { version, goal = '', utterances = [], extraUserTexts = [], createdBy = 'plan', decisionKinds = null } = {}) {
+      //   再検証前の指示 §1（2026-10-10）: plan = この応答の計画（決定事項の実現の照合のフィールドに使う）
+      function noteTurn(lg, turn, { version, goal = '', utterances = [], extraUserTexts = [], createdBy = 'plan', decisionKinds = null, plan = null } = {}) {
         if (!turn || typeof turn !== 'object') return null;
         // 根拠の照合は利用者の原文だけ（最初の依頼・これまでの発言・回答。ページの中だけに持つ）。Toolkit が組み立てた依頼文（確認事項の文を含む）は数えない
         //   （AI が自分の質問文を引用して「利用者の決定」にしない）
@@ -25610,18 +25837,17 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
         //   §0f.2 の 1（2026-10-09）: 採用の根拠と作った段階を要件の要素に持たせる（planRefs から計算しない。update は fields のキーだけを上書きするので、計画の付け替えで変わらない）。
         //   採用の後に計画の AI が足した要件は planner。利用者の原文の根拠つきの decided（Toolkit が照合済み）になったものは explicit に上げる。
         //   §0f.2 の 9（2026-10-09）: 計画の AI が要件の decisionRefs で決定事項に結び付けたもの（decisionKinds に有る id だけ）は、結び付きを要件の decisionLinks に積み
-        //   （update で decisionRefs が上書きされても残す）、委ねた判断なら delegated・値で答えた決定事項なら item-user（利用者の項目と同じ扱い）にする。
+        //   （update で decisionRefs が上書きされても残す）、D の実現なら委ねた判断は delegated・値で答えた決定事項は item-user（利用者の項目と同じ扱い）にする。
         //   「この作業で判断を委ねたら計画の AI の追加をすべて delegated」にする扱い（delegatedWork）はやめた（結び付きの無い追加は planner として判定する）。
-        //   前の確認の結び付けの誤り（2026-10-09）: 根拠を上げるのは、その決定事項がまだ実現されていないときだけ（ほかの生きた要件が key:<key> か実現の結び付きで
-        //   実現済みなら realized: true で残し、数えない。その要件は今までどおり planner などとして判定する）
+        //   再検証前の指示 §1（2026-10-10）: 結び付きを積み（操作の順で根拠を決めない。先に結び付いた要件が後の要件を「実現済み」にする realized はやめた）、
+        //   要件ごとに採用の時点の組 X(D) と照らして根拠を決める（settleDecisionLinks。
+        //   計画の AI の追加・ai の補足・根拠の無い要件だけを上げる。任意の提案の扱い・利用者の要件は、計画の AI の結び付けで変えない）
         noteDecisionLinks(lg, ch, decisionKinds, version);
-        for (const e of ch.added) { e.createdBy = createdBy; e.scope = { basis: e.decision === 'decided' ? 'explicit' : (linkBasisOf(e) || 'planner'), by: createdBy, at: version, ...(e.decision !== 'decided' && linkBasisOf(e) ? { via: 'decisionRefs' } : {}) }; }
+        for (const e of ch.added) { e.createdBy = createdBy; e.scope = { basis: e.decision === 'decided' ? 'explicit' : 'planner', by: createdBy, at: version }; }
         for (const e of ch.updated) {
-          if (e.decision === 'decided' && scopeBasisOf(e) !== 'explicit') { e.scope = { basis: 'explicit', by: createdBy, at: version, ...(e.scope && e.scope.basis ? { from: e.scope.basis } : {}) }; continue; }
-          //   計画の AI の追加・ai の補足・根拠の無い要件だけを上げる（任意の提案の扱い・利用者の要件は、計画の AI の結び付けで変えない）
-          const lb = linkBasisOf(e);
-          if (lb && LINK_UPGRADABLE.includes(scopeBasisOf(e)) && scopeBasisOf(e) !== lb) e.scope = { basis: lb, by: createdBy, at: version, via: 'decisionRefs', from: scopeBasisOf(e) };
+          if (e.decision === 'decided' && scopeBasisOf(e) !== 'explicit') e.scope = { basis: 'explicit', by: createdBy, at: version, ...(e.scope && e.scope.basis ? { from: e.scope.basis } : {}) };
         }
+        settleDecisionLinks(lg, plan, { by: createdBy, at: version });
         for (const e of unresolved) if (!e.createdBy) e.createdBy = 'toolkit';
         state.metrics.requirementOps += ops.length; state.metrics.unresolvedClauses += missed.length;
         // 上限（取り消し済みを除いて 40 件）で記録できなかった追加・未解決の数（黙って落とさず画面に出す）
@@ -25637,14 +25863,15 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
        *   key への結び付きは仮案の項目の id → 要件の対応（lg.itemReqs の key:<key>。同じ key の判断・前提をターンをまたいでつないだもの）
        */
       //   §0f.2 の 9（2026-10-09）: 計画の AI が decisionRefs で委ねた判断に結び付けた要件（decisionLinks。委ねた key・計画の段階の委任の id）も実現として数える。
-      //   計画の段階の委任（lg.planDelegations。「おすすめで」など）も、結び付く要件が無ければ未実現（since = その委任の版。古い版の追加を可能性の扱いにしない）
+      //   計画の段階の委任（lg.planDelegations。「おすすめで」など）も、結び付く要件が無ければ未実現（since = その委任の版。古い版の追加を判断の候補にしない）
       const delegationStateOf = (lg) => {
         const ad = lg && lg.adoption;
         const none = { open: false, since: null, keys: [], plan: [] };
         if (!ad) return none;
         const liveReqs = KTAiAnswers.requirementsOf(lg).filter(r => r && r.decision !== 'revoked');
         const live = new Set(liveReqs.map(r => r.id));
-        const links = liveReqs.flatMap(r => (Array.isArray(r.decisionLinks) ? r.decisionLinks : []).filter(l => l && l.kind === 'delegated'));
+        //   再検証前の指示 §1（2026-10-10）: 委任の実現として数える結び付きは D の実現（verdict match）だけ（AI の id だけの結び付きでは実現にしない）
+        const links = liveReqs.flatMap(r => (Array.isArray(r.decisionLinks) ? r.decisionLinks : []).filter(l => l && l.kind === 'delegated' && l.verdict === 'match'));
         const ir = ad.itemReqs || lg.itemReqs || {};
         const keys = (Array.isArray(ad.delegatedKeys) ? ad.delegatedKeys : []).filter(k => !((ir[`key:${k}`] || []).some(id => live.has(id))) && !links.some(l => l.key === k));
         const plan = livePlanDelegations(lg).filter(pd => !links.some(l => l.id === pd.id && (l.at == null || Number(l.at) >= Number(pd.at))));
@@ -25652,12 +25879,41 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
         return { open: true, since: keys.length ? null : Math.min(...plan.map(pd => Number(pd.at) || 0)), keys, plan: plan.map(pd => pd.id) };
       };
       const delegationOpenOf = (lg) => delegationStateOf(lg).open;
-      //   §0f.2 の 9: decisionRefs の印がある Gateway では、未実現の委任の可能性（possible）の扱いを使わない（委任の実現は要件の decisionRefs で結び付く。
-      //   結び付きの無い計画の AI の追加は planner として判定する）。印の無い古い Gateway（今の staging など）は今までどおり
+      /** 決定事項の見出し（仮案の判断の key → 計画の系列の台帳の決定事項・仮案の判断の見出し。計画の段階の委任は問いの文）。構造化した値だけ */
+      const keyDecisionLabelOf = (lg, key) => {
+        const e = (lg && Array.isArray(lg.entries) ? lg.entries : []).find(x => x && x.draftKey === key);
+        if (e) return decisionLabelOf({ label: e.label, question: e.question, key }, key);
+        const d = state.draftDecisions.find(x => x && x.key === key);
+        return d ? decisionLabelOf({ label: d.label, question: d.question, key }, key) : '';
+      };
+      /**
+       * 再検証前の指示 §1（2026-10-10）: 判断の候補の材料。
+       *   印のある Gateway: 計画の AI の追加・ai の補足・根拠の無い要件（LINK_UPGRADABLE）で、採用の時点に構造の無い（X(D) が空 = verdict unverified）・まだ実現していない
+       *   決定事項 D に結び付いたもの（要件 id → [{ id, key, kind, label }]）。AI の id だけでは上げない・黙って消さない（requirementScopeOf の out の reason candidate）。
+       *   印の無い Gateway: 未実現の委任（delegationStateOf）のとき、その委任（委ねた key・計画の段階の委任）の見出し（openDecisions）
+       */
+      const candidateLinksOf = (lg) => {
+        const m = new Map();
+        for (const r of KTAiAnswers.requirementsOf(lg)) {
+          if (!r || r.decision === 'revoked' || r.decision === 'decided' || !LINK_UPGRADABLE.includes(scopeBasisOf(r)) || !Array.isArray(r.decisionLinks)) continue;
+          const ds = r.decisionLinks.filter(l => l && l.verdict === 'unverified' && !decisionRealizedOf(lg, l.id, l.key));
+          const uniq = [...new Map(ds.map(l => [l.id, { id: l.id, key: l.key || null, kind: l.kind === 'delegated' ? 'delegated' : 'user', label: String(l.label || '') }])).values()];
+          if (uniq.length) m.set(r.id, uniq);
+        }
+        return m;
+      };
+      const openDecisionsOf = (lg, ds) => [
+        ...(ds.keys || []).map(k => ({ id: null, key: k, kind: 'delegated', label: keyDecisionLabelOf(lg, k) })),
+        ...livePlanDelegations(lg).filter(pd => (ds.plan || []).includes(pd.id)).map(pd => { const e = pd.source === 'answer' ? (lg.entries || []).find(x => x && x.id === pd.entryId) : null; return { id: pd.id, key: null, kind: 'delegated', label: e ? decisionLabelOf({ label: e.label, question: e.question, key: e.draftKey || '' }, e.draftKey || null) : decisionLabelOf(pd) }; }),
+      ];
+      //   §0f.2 の 9: decisionRefs の印がある Gateway では、未実現の委任の扱い（delegationOpen）を使わない（委任の実現は要件の decisionRefs と X(D) の照合で決まる。
+      //   結び付きの無い計画の AI の追加は planner として判定する）。印の無い古い Gateway（今の staging など）は、未実現の委任の間の計画の AI の追加を判断の候補にする
+      //   （再検証前の指示 §1。以前の「外さずに残す」possible の置き換え）
       const scopeOfLedger = (lg, plan = null) => {
         if (!(lg && lg.adoption)) return null;
-        const ds = decisionRefsOn() ? { open: false, since: null } : delegationStateOf(lg);
-        return requirementScopeOf(KTAiAnswers.requirementsOf(lg), plan, { labels: scopeLabels(), delegationOpen: ds.open, possibleSince: ds.since });
+        const on = decisionRefsOn();
+        const ds = on ? { open: false, since: null, keys: [], plan: [] } : delegationStateOf(lg);
+        return requirementScopeOf(KTAiAnswers.requirementsOf(lg), plan, { labels: scopeLabels(), delegationOpen: ds.open, possibleSince: ds.since, openDecisions: ds.open ? openDecisionsOf(lg, ds) : [], candidateLinks: on ? candidateLinksOf(lg) : null });
       };
       /** 範囲内の要件（KTAiAnswers.requirementsForContext の形。取り消し済みは今までどおり含める）。必須の効果・流用の指紋・生成の要件・自動の見直しの引き金に使う */
       const inScopeRequirements = (lg, plan = null, sc0 = undefined) => { if (!lg) return []; const sc = sc0 !== undefined ? sc0 : scopeOfLedger(lg, plan); return KTAiAnswers.requirementsForContext(lg).filter(r => !(sc && r && r.decision !== 'revoked' && sc.out.has(r.id))); };
@@ -25712,7 +25968,16 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
         if (!lg || !d) return;
         noteDraftScope(lg, d.items, { by: 'adopt', at: d.rev });
         lg.suggestionItems = [...draftSuggestionIds(d)];
-        lg.adoption = { draftId: d.id, rev: d.rev, at: now(), items: Object.fromEntries([...draftItemKindsOf(d.items)].filter(([k]) => !String(k).startsWith('key:'))), delegatedKeys: state.draftDecisions.filter(x => x.kind === 'delegated').map(x => x.key), suggestionItems: [...lg.suggestionItems], itemReqs: JSON.parse(JSON.stringify(lg.itemReqs || {})) };
+        //   再検証前の指示 §1（2026-10-10）: 判断の key ごとの採用の時点の組 X(D) の材料（その key:<key> に結び付いた要件の target と effects の写し。undecided を含む・
+        //   取り消し済みと任意の提案の扱いを除く。本文は要件の対象の文だけ）。計画の AI が後で要件を直しても、採用の時点の構造で D の実現かを照らす
+        const live = KTAiAnswers.requirementsOf(lg).filter(r => r && r.decision !== 'revoked' && scopeBasisOf(r) !== 'suggestion' && Array.isArray(r.effects));
+        const decisionPairs = {};
+        for (const [k, ids] of Object.entries(lg.itemReqs || {})) {
+          if (!String(k).startsWith('key:') || !Array.isArray(ids)) continue;
+          const xs = live.filter(r => ids.includes(r.id)).map(r => ({ target: String(r.target || '').slice(0, 120), effects: [...new Set(r.effects.filter(e => KT_EFFECTS.includes(e)))] }));
+          if (xs.length) decisionPairs[String(k).slice(4)] = xs;
+        }
+        lg.adoption = { draftId: d.id, rev: d.rev, at: now(), items: Object.fromEntries([...draftItemKindsOf(d.items)].filter(([k]) => !String(k).startsWith('key:'))), delegatedKeys: state.draftDecisions.filter(x => x.kind === 'delegated').map(x => x.key), suggestionItems: [...lg.suggestionItems], itemReqs: JSON.parse(JSON.stringify(lg.itemReqs || {})), decisionPairs };
       };
       /**
        * §0f.2 の 4: 計画の返答の照合（1 か所。最初の計画・自動の見直し・差分更新・全体の作り直しの registerPlan と、reviseWith で計画の AI に送る土台で共通）。
@@ -25721,22 +25986,49 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
        *   外すのは、判定できる c で範囲内の要件で説明できない効果（E_in(c) に無い。範囲内の要件の対象がフィールドに決まるときは (c, フィールド) の E_in に無い）:
        *   ・c に結び付く範囲外の要件がその効果を持つ → reason out-of-scope（requirementIds = その要件）
        *   ・範囲内・範囲外のどの要件の効果でもない（計画の fields[].effects だけで足された。レビューの指摘 row1）→ reason unattributed（requirementIds []）
-       *   未実現の委任の実現の可能性がある要件（requirementScopeOf の possible）の効果は外さずに possible に記録する（最終案の詳細に出す）。
+       *   再検証前の指示 §1（2026-10-10）: 判断の候補（requirementScopeOf の out の reason candidate。以前の「外さずに残す」possible の置き換え）の効果も外す（黙って入れない）が、
+       *   reason candidate で記録し（自動の見直しの引き金にしない・「依頼に無い」とは書かない）、candidates に決定事項ごとの計画の案（フィールド・効果）をまとめる（黙って消さない。
+       *   最終案の通常表示と承認の欄に、判断が残っていることを一度に示す）。フィールドは外す前の計画のもの（要件の対象が決まればそのフィールド、決まらなければその効果を持つフィールド）。
        *   外した customization の説明の文（requirement・手順の文・計画の要約）には範囲外の動作が残りうる（自然文は読まない）ので issues に記録し、
        *   自動の見直し（既存の上限の中）の依頼文に構造化した「外す」指示を足す。生成に渡す customization の requirement の文は、範囲内の結び付く要件の文（台帳の値）で組み立てる（reqText）
-       * @returns {{ stripped: Array, issues: Array, possible: Array, reqText: object }}
+       * @returns {{ stripped: Array, issues: Array, candidates: Array<{ decisions: Array, items: Array<{ customizationId, field, effect, requirementIds }> }>, reqText: object, linked: Array }}
        */
       function scopeStripPlans(plan, gatewayPlan, lg) {
-        const res = { stripped: [], issues: [], possible: [], reqText: {}, linked: [] };
+        const res = { stripped: [], issues: [], candidates: [], reqText: {}, linked: [] };
         const sc = scopeOfLedger(lg, plan);
         if (!sc || !plan || !Array.isArray(plan.customizations)) return res;
-        //   §0f.2 の 9（2026-10-09）: 決定事項の結び付きで範囲内に上がった要件が足した効果（外さない。最終案の詳細に出す）
-        res.linked = (Array.isArray(sc.linked) ? sc.linked : []).map(x => ({ customizationId: x.customizationId, field: x.field, effect: x.effect, requirementIds: [...x.requirementIds], decisionIds: [...x.decisionIds] }));
+        //   §0f.2 の 9（2026-10-09）: 決定事項の実現（X(D) に入る）として範囲内に上がった要件が足した効果（外さない。最終案の「仮案から変わった点と理由」に出す）
+        res.linked = (Array.isArray(sc.linked) ? sc.linked : []).map(x => ({ customizationId: x.customizationId, field: x.field, effect: x.effect, requirementIds: [...x.requirementIds], decisionIds: [...x.decisionIds], links: (x.links || []).map(l => ({ ...l })) }));
         const live = KTAiAnswers.requirementsOf(lg).filter(r => r && r.decision !== 'revoked');
         const withEff = (r) => (reqEffectsOf(r) || []).length > 0;
         const outReqs = live.filter(r => sc.out.has(r.id) && withEff(r));
-        const possReqs = live.filter(r => sc.possible && sc.possible.has(r.id) && withEff(r));
+        const isCand = (r) => { const o = sc.out.get(r.id); return !!(o && o.reason === 'candidate'); };
         const linkedTo = (cid) => (r) => Array.isArray(r.planRefs) && r.planRefs.includes(cid);
+        //   判断の候補の計画の案（外す前の計画のフィールドで組み立てる）
+        const fieldOfTarget = targetFieldKeyOf(plan, scopeLabels());
+        const candGroups = new Map();
+        for (const r of outReqs.filter(isCand)) {
+          const o = sc.out.get(r.id);
+          const ds = Array.isArray(o.decisions) ? o.decisions : [];
+          const gk = ds.map(d => d.id || `key:${d.key || ''}`).sort().join('|') || 'open';
+          const g = candGroups.get(gk) || { decisions: ds.map(d => ({ ...d })), items: [] };
+          const tf = fieldOfTarget(r.target);
+          for (const c of plan.customizations.filter(x => x && (o.customizationIds || []).includes(x.customizationId))) {
+            for (const e of (o.effects || []).filter(x => reqEffectsOf(r).includes(x))) {
+              const fs = tf ? [tf] : (Array.isArray(c.fields) ? c.fields : []).filter(f => f && f.code && (ktFieldEffectsOf(f.effects) || []).some(x => x.effect === e)).map(f => String(f.code));
+              for (const field of (fs.length ? fs : [''])) {
+                const it = g.items.find(x => x.field === field && x.effect === e);
+                if (it) { if (!it.requirementIds.includes(r.id)) it.requirementIds.push(r.id); if (!it.customizationIds.includes(c.customizationId)) it.customizationIds.push(c.customizationId); }
+                else g.items.push({ customizationIds: [c.customizationId], field, effect: e, requirementIds: [r.id] });
+              }
+            }
+          }
+          candGroups.set(gk, g);
+        }
+        //   並びは効果の語彙の順・フィールドのコードの順（要件の操作の順で表示が変わらない）
+        const effIdx = (e) => { const i = KT_EFFECTS.indexOf(e); return i < 0 ? 99 : i; };
+        res.candidates = [...candGroups.entries()].sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0)).map(([, g]) => g).filter(g => g.items.length);
+        for (const g of res.candidates) { g.items.sort((a, b) => effIdx(a.effect) - effIdx(b.effect) || (a.field < b.field ? -1 : a.field > b.field ? 1 : 0)); for (const it of g.items) { it.requirementIds.sort(); it.customizationIds.sort(); } }
         const effName = (x) => (x && typeof x === 'object' ? x.effect : x);
         const stripField = (f, drop) => {
           if (!f || !Array.isArray(f.effects)) return;
@@ -25749,7 +26041,7 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
           if (!cid || sc.undetermined.has(cid)) continue;
           const eIn = sc.eIn.get(cid) || new Set();
           const fl = sc.eInField && sc.eInField.get(cid) ? sc.eInField.get(cid) : null;
-          const mine = outReqs.filter(linkedTo(cid)), minePoss = possReqs.filter(linkedTo(cid));
+          const mine = outReqs.filter(linkedTo(cid));
           const gc = gwCusts.find(x => x && x.customizationId === cid) || null;
           for (const f of Array.isArray(c.fields) ? c.fields : []) {
             if (!f || !f.code) continue;
@@ -25759,11 +26051,10 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
               //   フィールドの単位で比べるのは、そのフィールドが範囲内の要件の対象のときだけ（requirementScopeOf と同じ。対象でないフィールドは customization の単位）
               const explained = fl && fl.has(String(f.code)) ? fl.get(String(f.code)).has(e) : eIn.has(e);
               if (explained) continue;
-              const poss = minePoss.filter(r => reqEffectsOf(r).includes(e));
-              if (poss.length) { res.possible.push({ customizationId: cid, field: String(f.code), effect: e, requirementIds: poss.map(r => r.id) }); continue; }
               const src = mine.filter(r => reqEffectsOf(r).includes(e));
               drop.add(e);
-              res.stripped.push({ customizationId: cid, field: String(f.code), effect: e, requirementIds: src.map(r => r.id), reason: src.length ? 'out-of-scope' : 'unattributed' });
+              //   出どころがすべて判断の候補なら reason candidate（「依頼に無い」とは書かない。判断の候補として通常表示に出す）
+              res.stripped.push({ customizationId: cid, field: String(f.code), effect: e, requirementIds: src.map(r => r.id), reason: !src.length ? 'unattributed' : src.every(isCand) ? 'candidate' : 'out-of-scope' });
             }
             if (!drop.size) continue;
             stripField(f, drop);
@@ -25771,7 +26062,8 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
           }
         }
         const group = (list, kind) => { const byC = new Map(); for (const x of list) { const g = byC.get(x.customizationId) || { customizationId: x.customizationId, kind, items: [] }; g.items.push({ field: x.field, effect: x.effect, requirementIds: [...x.requirementIds], ...(x.reason ? { reason: x.reason } : {}) }); byC.set(x.customizationId, g); } return [...byC.values()]; };
-        res.issues = [...group(res.stripped, 'text'), ...group(res.possible, 'delegation')];
+        //   判断の候補だけを外した customization（kind candidate）は自動の見直しの引き金にしない（計画の AI に外させず、利用者の判断を待つ）
+        res.issues = [...group(res.stripped.filter(x => x.reason !== 'candidate'), 'text'), ...group(res.stripped.filter(x => x.reason === 'candidate'), 'candidate')];
         //   レビューの指摘 row1 の 2（D）: 外した customization の requirement の文は、範囲内の結び付く要件の文（台帳の値。利用者の原文の引用か 条件・対象・動作）で組み立てる
         const inReqs = live.filter(r => !sc.out.has(r.id));
         for (const cid of new Set(res.stripped.map(x => x.customizationId))) {
@@ -25783,7 +26075,15 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
       /** registerPlan の照合: この版の計画（v.plan と v.gatewayPlan。版のもの）に scopeStripPlans を当てて、記録を版に持つ */
       function scopePlanOf(v, lg) {
         const res = scopeStripPlans(v.plan, v.gatewayPlan, lg);
-        v.scopeStripped = res.stripped; v.scopeIssues = res.issues; v.scopePossible = res.possible; v.scopeRequirementText = res.reqText; v.scopeLinked = res.linked;
+        v.scopeStripped = res.stripped; v.scopeIssues = res.issues; v.scopeCandidates = res.candidates; v.scopeRequirementText = res.reqText; v.scopeLinked = res.linked;
+        //   再検証前の指示 §1: 判断の候補のフィールドが今の計画に無い（自動の見直しで計画が外した）ときは、前の版の同じ要件の計画の案のフィールドを使う（黙って消さない）
+        const prev = state.planHistory.filter(x => x && x.planId === v.planId && x !== v && Array.isArray(x.scopeCandidates)).slice(-1)[0] || null;
+        if (prev) for (const g of v.scopeCandidates) for (const it of g.items) {
+          if (it.field) continue;
+          const old = prev.scopeCandidates.flatMap(pg => pg.items).filter(x => x.field && x.effect === it.effect && x.requirementIds.some(id => it.requirementIds.includes(id)));
+          for (const o of old) if (!g.items.some(x => x.field === o.field && x.effect === o.effect)) g.items.push({ ...o, customizationIds: [...o.customizationIds], requirementIds: [...o.requirementIds] });
+        }
+        for (const g of v.scopeCandidates) if (g.items.some(x => x.field)) g.items = g.items.filter(x => x.field || !g.items.some(y => y.field && y.effect === x.effect));
         state.metrics.scopeStripped = (state.metrics.scopeStripped || 0) + v.scopeStripped.length;
       }
       /**
@@ -27386,8 +27686,8 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
           const outOfScope = [...[...scopeRows.values()].filter(x => x.decision === 'decided'), ...[...scopeRows.values()].filter(x => x.decision !== 'decided')].slice(0, 4);
           //   §0f.2 の 4（2026-10-09）: 依頼に無い可能性がある動作（計画の返答から外した範囲外の効果）。承認は止めない（利用者に断らせない）。カードの詳細にだけ出す
           //   レビューの指摘 row1（2026-10-09・D）: 通常表示の「最終的にどう動くか」の近くに出す名前の 1 行（外した効果のフィールドの名前と効果の画面の言葉から組み立てる）。
-          //   委ねた判断を実現するために計画が足した可能性がある動作（v.scopePossible。外していない）は詳細だけに出す
-          const strippedNow = v.scopeStripped || [];
+          //   再検証前の指示 §1（2026-10-10）: 判断の候補（reason candidate）として外した効果は「依頼に無い」に入れない（下の candidates で判断が残っていると示す）
+          const strippedNow = (v.scopeStripped || []).filter(s => s && s.reason !== 'candidate');
           const effGroups = new Map();
           for (const s of strippedNow) { const names = effGroups.get(s.effect) || []; const nm = (fieldLabels()[s.field] || s.field); if (!names.includes(nm)) names.push(nm); effGroups.set(s.effect, names); }
           const notice = effGroups.size ? `依頼に無い${[...effGroups].map(([e, names]) => `「${names.join('・')}の${KT_EFFECT_NOUN_JA[e] || KT_EFFECT_NEED_JA[e] || e}」`).join('')}は入れていません（詳細）` : '';
@@ -27409,9 +27709,36 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
             for (const id of s.decisionIds || []) { const lb = dLabelOf(id); if (lb && !row.labels.includes(lb)) row.labels.push(lb); }
             linkedRows.set(k, row);
           }
-          const scopeOut = { lines: [...new Map(strippedNow.map(s => [`${s.field}|${s.effect}`, `${fieldName(s.field)}を${KT_EFFECT_NEED_JA[s.effect] || s.effect}`])).values()].slice(0, 8), remaining: (v.scopeIssues || []).filter(x => x && x.kind !== 'delegation').length, notice,
-            possible: [...new Map((v.scopePossible || []).map(s => [`${s.field}|${s.effect}`, `${fieldName(s.field)}を${KT_EFFECT_NEED_JA[s.effect] || s.effect}`])).values()].slice(0, 8),
-            linked: [...linkedRows.values()].slice(0, 8).map(x => `${x.text}（${x.labels.length ? `${x.labels.slice(0, 3).map(l => `「${labeled(l)}」`).join('・')}の` : '決めたことの'}実現として計画が足しました）`) };
+          //   再検証前の指示 §2（2026-10-10）: 計画で残した業務上の追加・変更（決定事項の実現として範囲内に上がった要件が足した効果 v.scopeLinked）は、通常表示の
+          //   「仮案から変わった点と理由」に対象・動作・理由を短く出す（planAdds。例「「備考」に警告を出します（おまかせにした「備考の警告」の実現として）」）。
+          //   判断の候補（v.scopeCandidates）は、黙って入れず・黙って消さず、同じ節と承認の欄の確認項目に判断が残っていることを一度に示す（candidates）。
+          //   文は決定事項の構造化した見出し・フィールドの名前・効果の言葉だけで組み立てる（番号は出さない）
+          const EFF_DO = { lock: ['を', '編集できないようにします', '編集できないようにする'], warn: ['に', '警告を出します', '警告を出す'], 'block-save': ['の', '保存を止めます', '保存を止める'], 'set-value': ['に', '値を設定します', '値を設定する'], 'show-hide': ['の', '表示を切り替えます', '表示を切り替える'] };
+          const effPhrase = (fields, e, polite) => { const d = EFF_DO[e] || ['の', `${KT_EFFECT_NEED_JA[e] || e}をします`, KT_EFFECT_NEED_JA[e] || e]; const f = [...new Set((fields || []).filter(Boolean))].map(fieldName).join(''); return `${f ? `${f}${d[0]}` : ''}${polite ? d[1] : d[2]}`; };
+          const quoteLabels = (ls) => [...new Set(ls.filter(Boolean))].slice(0, 3).map(l => `「${labeled(l)}」`).join('・');
+          const addGroups = new Map();
+          for (const s of (Array.isArray(v.scopeLinked) ? v.scopeLinked : [])) {
+            const links = Array.isArray(s.links) && s.links.length ? s.links : (s.decisionIds || []).map(id => ({ id, kind: 'user' }));
+            const kind = links.some(l => l.kind === 'user') ? 'user' : 'delegated';
+            const labels = [...new Set(links.map(l => dLabelOf(l.id)).filter(Boolean))];
+            const k = `${s.effect}|${kind}|${labels.join('|')}`;
+            const g = addGroups.get(k) || { effect: s.effect, kind, labels, fields: [] };
+            if (s.field && !g.fields.includes(s.field)) g.fields.push(s.field);
+            addGroups.set(k, g);
+          }
+          const effIdxF = (e) => { const i = KT_EFFECTS.indexOf(e); return i < 0 ? 99 : i; };
+          const planAdds = [...addGroups.values()].sort((a, b) => effIdxF(a.effect) - effIdxF(b.effect) || (a.kind < b.kind ? -1 : a.kind > b.kind ? 1 : 0)).map(g => ({ ...g, fields: [...g.fields].sort() })).slice(0, 6).map(g => `${effPhrase(g.fields, g.effect, true)}（${g.kind === 'delegated' ? 'おまかせにした' : '決めた'}${g.labels.length ? quoteLabels(g.labels) : g.kind === 'delegated' ? '判断' : 'こと'}の実現として）`);
+          const candidates = (Array.isArray(v.scopeCandidates) ? v.scopeCandidates : []).slice(0, 4).map(g => {
+            const ds = Array.isArray(g.decisions) ? g.decisions : [];
+            const kind = ds.some(d => d && d.kind === 'user') ? 'user' : 'delegated';
+            const lb = quoteLabels(ds.map(d => d && d.label));
+            const byEff = new Map();
+            for (const it of g.items || []) { const fs = byEff.get(it.effect) || []; if (it.field && !fs.includes(it.field)) fs.push(it.field); byEff.set(it.effect, fs); }
+            const planText = [...byEff].map(([e, fs]) => effPhrase(fs, e, false)).join('／');
+            return kind === 'delegated' ? `おまかせにした${lb || '判断'}は、計画の案と結び付けを確かめられないため、まだ入れていません。計画の案: ${planText}。入れるものを伝えてください` : `決めた${lb || 'こと'}について計画が足した動作は、結び付けを確かめられないため、まだ入れていません。計画の案: ${planText}。入れるものを伝えてください`;
+          });
+          const scopeOut = { lines: [...new Map(strippedNow.map(s => [`${s.field}|${s.effect}`, `${fieldName(s.field)}を${KT_EFFECT_NEED_JA[s.effect] || s.effect}`])).values()].slice(0, 8), remaining: (v.scopeIssues || []).filter(x => x && x.kind === 'text').length, notice,
+            linked: [...linkedRows.values()].slice(0, 8).map(x => `${x.text}（${x.labels.length ? `${x.labels.slice(0, 3).map(l => `「${labeled(l)}」`).join('・')}の` : '決めたことの'}実現として計画が足しました）`), planAdds, candidates };
           let ready = []; try { ready = v.review && typeof KTPlanExecutor !== 'undefined' && KTPlanExecutor.applyReadiness ? KTPlanExecutor.applyReadiness(p, v.review) : []; } catch (e) { ready = []; }
           const settingSteps = ready.filter(x => x.apply !== 'JS' && x.apply !== 'CONFIRM');
           const impact = { lines: (Array.isArray(p.impact) ? p.impact : []).map(x => cut(labeled(x && (x.description || x.text) || ''), 120)).filter(Boolean).slice(0, 4), settings: { total: settingSteps.length, auto: settingSteps.filter(x => x.apply === 'AUTO').length, blocked: blockedSteps.length }, js: [...entries.map(([cid, e]) => ({ customizationId: cid, file: e.generated?.targetFile || '', strategy: e.generated?.strategy || null, status: e.status, ...(e.status === 'failed' && e.failure && e.failure.stop ? { stopped: true } : {}) })), ...notStartedIds.map(cid => ({ customizationId: cid, file: '', strategy: null, status: 'not-started' })), ...unsupported.map(u => ({ customizationId: u.customizationId, file: '', strategy: u.strategy || null, status: 'unsupported', requirement: cut(u.requirement || '', 80) }))] };
@@ -27481,8 +27808,8 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
             const effFresh = (v.plan.customizations || []).filter(c => c && c.customizationId && ['NEW_JS_FILE', 'EXTEND_EXISTING_JS'].includes(c.strategy) && !effTried.has(c.customizationId)).map(c => ({ c, u: requiredOf(v, c.customizationId).unresolved })).filter(x => x.u.length);
             //   §0f.2 の 4（2026-10-09）: 範囲外の効果を外した customization（説明の文に範囲外の動作が残りうる。v.scopeIssues）も、同じ 1 回の自動の依頼で計画に外させる
             //   （回数は effectRetried の鍵（customization の id）と上限のまま。引き金と依頼文は範囲内の要件だけ。範囲外の要件は構造化した「外す」指示にだけ書く）
-            //   委任の実現の可能性として残した動作（kind delegation）は外させない（自動の見直しの引き金にしない。最終案の詳細に出すだけ）
-            const scopeFresh = (v.scopeIssues || []).filter(x => x && x.customizationId && x.kind !== 'delegation' && !effTried.has(x.customizationId) && (v.plan.customizations || []).some(c => c && c.customizationId === x.customizationId));
+            //   再検証前の指示 §1（2026-10-10）: 判断の候補だけを外した customization（kind candidate）は自動の見直しの引き金にしない（計画の AI に外させず、利用者の判断を待つ）
+            const scopeFresh = (v.scopeIssues || []).filter(x => x && x.customizationId && x.kind === 'text' && !effTried.has(x.customizationId) && (v.plan.customizations || []).some(c => c && c.customizationId === x.customizationId));
             if (fresh.length || effFresh.length || scopeFresh.length) {
               for (const r of fresh) tried.add(r.id);
               state.ownerRetried.set(v.planId, tried);
@@ -27603,8 +27930,9 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
           await finalizeVersion(v, { reuse: base && base.generated ? base.generated : null });
         };
         //   §0f.2 の 9（2026-10-09）: この作業で利用者が判断を委ねた（「おすすめで」・おまかせ）ときに計画の AI の追加をまとめて delegated にする扱い（delegatedWork）はやめた。
-        //   呼び出し側が委任を台帳（notePlanDelegations）に記録し、decisionRefs の印がある Gateway では結び付けた要件だけを delegated、印の無い古い Gateway では
-        //   未実現の委任の可能性（possible。委任の版より後の計画の AI の追加だけ）として外さずに残す
+        //   呼び出し側が委任を台帳（notePlanDelegations）に記録し、decisionRefs の印がある Gateway では結び付けた要件のうち採用の時点の組 X(D) に入るものだけを delegated
+        //   （構造の無い委任への結び付きは判断の候補。再検証前の指示 §1）、印の無い古い Gateway では
+        //   未実現の委任の間の判断の候補（委任の版より後の計画の AI の追加だけ。再検証前の指示 §1 で「外さずに残す」possible から置き換えた）
         const reviseWith = async (base, request, { afterAnswer = false, ack = null, rawTexts = [], askSeparately = false, extraAcks = [], priorTurnInfos = [], retry = null, generateAfter: genFirst = false, focusIds = [] } = {}) => {
           const lg = ledgerOf(base.planId);
           // この作業が有効な間の最新の計画（版になる前の最初の計画が土台のときは、作り始めた時点の計画のまま）
@@ -27702,7 +28030,7 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
               done = { r, decisions, snap, n: jobs, requests: [...requests] };
               // 2026-10-05 第 3 段: 要件の追加・変更・取り消しは作業ごとに台帳へ（続けた作業の途中の結果は版にしないが、利用者の発言の扱いは残す）
               //   今回の発言は利用者の原文だけ（Toolkit が組み立てた依頼文を利用者の発言として数えない）
-              turnInfos.push(noteTurn(lg, r.turn, { version: base.version + 1, goal: base.goal, utterances: utterancesNow, createdBy: state.ownerRetryActive ? 'plan-auto' : 'revise', decisionKinds: decisionRefsOn() ? ledgerDecisionKindsOf(lg, decisions) : null }));
+              turnInfos.push(noteTurn(lg, r.turn, { version: base.version + 1, goal: base.goal, utterances: utterancesNow, createdBy: state.ownerRetryActive ? 'plan-auto' : 'revise', decisionKinds: decisionRefsOn() ? ledgerDecisionKindsOf(lg, decisions) : null, plan: r.plan || null }));
               // この作業を始めた後に受け付けた指示（回答・修正の依頼）。無ければ、この結果を版にする
               const newer = KTAiAnswers.pendingAnswers(lg).filter(e => (e.rev || 0) > snap);
               const waiting = state.inbox ? state.inbox.texts.length : 0;
@@ -27799,12 +28127,12 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
                 if (dft) carryDraftDecisions(lgNew, { version: 1 });
                 //   採用した仮案から（レビューの指摘 2）: 根拠の照合は利用者の原文（仮案の依頼文・台帳の発言・判断への回答）だけ。Toolkit が組んだ依頼文は数えない・台帳に入れない
                 //   §0f.2 の 1: 計画の AI が足した要件は planner。レビューの指摘 row3 の 2（2026-10-09）: 推奨の無い判断を 1 つでも委ねたら計画の AI の追加をすべて
-                //   delegated にする扱いはやめた（混入した保存禁止まで範囲内になった）。印の無い古い Gateway では、未実現の委任があるときだけ、範囲の判定（requirementScopeOf の possible）が
-                //   E_in に無い効果を足す計画の AI の要件を外さずに残し、最終案の詳細に出す。
+                //   delegated にする扱いはやめた（混入した保存禁止まで範囲内になった）。印の無い古い Gateway では、未実現の委任があるときだけ、範囲の判定（requirementScopeOf）が
+                //   E_in に無い効果を足す計画の AI の要件を判断の候補にする（黙って入れない・黙って消さない。再検証前の指示 §1）。
                 //   §0f.2 の 9（2026-10-09）: decisionRefs の印がある Gateway では、送った決定事項（draftDecisionsForPlan の id・key・委ねた印）に結び付けた要件だけを
                 //   delegated（委ねた判断）か item-user（値で答えた判断）にする
                 const dKinds = dft && decisionRefsOn() ? decisionKindsOf(fromDraftArgs.decisions) : null;
-                const ti = dft ? noteTurn(lgNew, r.turn, { version: 1, goal: dft.request, utterances: [], extraUserTexts: state.draftDecisions.map(x => x.answer), createdBy: 'plan', decisionKinds: dKinds }) : noteTurn(lgNew, r.turn, { version: 1, goal: goalT, utterances: [goalT], createdBy: 'plan' });
+                const ti = dft ? noteTurn(lgNew, r.turn, { version: 1, goal: dft.request, utterances: [], extraUserTexts: state.draftDecisions.map(x => x.answer), createdBy: 'plan', decisionKinds: dKinds, plan: r.plan || null }) : noteTurn(lgNew, r.turn, { version: 1, goal: goalT, utterances: [goalT], createdBy: 'plan' });
                 /** 仮案を採用済みにするのは、計画が登録できた後（announcePlan の後）。失敗なら open のまま（adoptDraftNow の finally が失敗の印を付ける） */
                 const markAdopted = () => { if (!dft || late() || !state.activePlan || state.activePlan.planId !== planIdNext) return; dft.status = 'adopted'; dft.adoptedAt = now(); dft.adoptedBy = clsP.fromDraft.reason || 'ADOPT_WORDS'; dft.planId = planIdNext; delete dft.planFailed; };
                 const queuedP = wP && wP.epoch === state.epoch ? wP.texts : [];
@@ -28158,16 +28486,17 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
             adopted: !!lg.adoption, adoption: lg.adoption ? { draftId: lg.adoption.draftId, rev: lg.adoption.rev, items: { ...lg.adoption.items }, delegatedKeys: [...lg.adoption.delegatedKeys], suggestionItems: [...lg.adoption.suggestionItems] } : null,
             version: v ? v.version : null,
             //   §0f.2 の 9（2026-10-09）: 計画の AI が decisionRefs で結び付けた決定事項（id と種類だけ）・根拠を結び付きで決めたか（via）
-            requirements: KTAiAnswers.requirementsOf(lg).map(r => ({ id: r.id, decision: r.decision, basis: scopeBasisOf(r), by: (r.scope && r.scope.by) || null, via: (r.scope && r.scope.via) || null, createdBy: r.createdBy || null, planRefs: [...(r.planRefs || [])], effects: Array.isArray(r.effects) ? [...r.effects] : null, decisionLinks: (Array.isArray(r.decisionLinks) ? r.decisionLinks : []).map(l => ({ id: l.id, kind: l.kind, ...(l.realized ? { realized: true } : {}) })), inScope: r.decision !== 'revoked' && !(sc && sc.out.has(r.id)), out: sc && sc.out.has(r.id) ? sc.out.get(r.id).reason : null, possible: sc && sc.possible && sc.possible.has(r.id) ? sc.possible.get(r.id).reason : null, stripped: stripped.some(s => (s.requirementIds || []).includes(r.id)) })),
+            requirements: KTAiAnswers.requirementsOf(lg).map(r => ({ id: r.id, decision: r.decision, basis: scopeBasisOf(r), by: (r.scope && r.scope.by) || null, via: (r.scope && r.scope.via) || null, createdBy: r.createdBy || null, planRefs: [...(r.planRefs || [])], effects: Array.isArray(r.effects) ? [...r.effects] : null, decisionLinks: (Array.isArray(r.decisionLinks) ? r.decisionLinks : []).map(l => ({ id: l.id, kind: l.kind, ...(l.verdict ? { verdict: l.verdict } : {}) })), inScope: r.decision !== 'revoked' && !(sc && sc.out.has(r.id)), out: sc && sc.out.has(r.id) ? sc.out.get(r.id).reason : null, candidate: sc && sc.out.has(r.id) && sc.out.get(r.id).reason === 'candidate' ? { via: sc.out.get(r.id).via || null, decisionIds: (sc.out.get(r.id).decisions || []).map(d => d.id).filter(Boolean) } : null, stripped: stripped.some(s => (s.requirementIds || []).includes(r.id)) })),
             scopeStripped: stripped.length, scopeIssues: v && Array.isArray(v.scopeIssues) ? v.scopeIssues.length : 0,
-            //   レビューの指摘 row1・row3（2026-10-09）: 外した効果の理由（out-of-scope / unattributed）・委任の実現の可能性として残した効果・未実現の委任があるか
+            //   レビューの指摘 row1・row3（2026-10-09）: 外した効果の理由（out-of-scope / unattributed / candidate）・未実現の委任があるか
             stripped: stripped.map(s => ({ customizationId: s.customizationId, field: s.field, effect: s.effect, requirementIds: [...s.requirementIds], reason: s.reason || 'out-of-scope' })),
-            possible: (v && Array.isArray(v.scopePossible) ? v.scopePossible : []).map(s => ({ customizationId: s.customizationId, field: s.field, effect: s.effect, requirementIds: [...s.requirementIds] })),
+            //   再検証前の指示 §1（2026-10-10）: 判断の候補（決定事項ごとの計画の案。フィールドのコード・効果・要件の id だけ）。以前の possible（外さずに残す）の置き換え
+            candidates: (v && Array.isArray(v.scopeCandidates) ? v.scopeCandidates : []).map(g => ({ decisions: (g.decisions || []).map(d => ({ id: d.id || null, key: d.key || null, kind: d.kind })), items: (g.items || []).map(it => ({ customizationIds: [...(it.customizationIds || [])], field: it.field, effect: it.effect, requirementIds: [...it.requirementIds] })) })),
             //   §0f.2 の 9（2026-10-09・前の確認の結び付けの誤り）: 決定事項の結び付きで範囲内に上がった要件が足した効果の数（v.scopeLinked。外していない。最終案の詳細に出す）。
-            //   要件ごとの decisionLinks の realized = 実現済みの決定事項への結び付き（採用の根拠に数えない）
+            //   要件ごとの decisionLinks の verdict = match（採用の時点の組 X(D) に入る＝D の実現。根拠に数える）/ mismatch / unverified（数えない）
             linked: v && Array.isArray(v.scopeLinked) ? v.scopeLinked.length : 0,
             delegationOpen: delegationOpenOf(lg),
-            //   §0f.2 の 9: decisionRefs の印がある Gateway か（あれば未実現の委任でも可能性の扱いを使わない）・計画の段階の委任の数（id と版だけ）
+            //   §0f.2 の 9: decisionRefs の印がある Gateway か（あれば未実現の委任の扱い delegationOpen を使わず、要件の decisionRefs と採用の時点の組 X(D) で決める）・計画の段階の委任の数（id と版だけ）
             decisionRefs: decisionRefsOn(),
             planDelegations: livePlanDelegations(lg).map(pd => ({ id: pd.id, source: pd.source, at: pd.at })),
           };
@@ -28391,7 +28720,7 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
       // §0c.2（2026-10-08）: 効果の語彙と必須の効果
       EFFECTS: KT_EFFECTS, EFFECT_JA: KT_EFFECT_JA, requiredEffectsOf, BEHAVIOR_REASONS: KT_BEHAVIOR_REASONS, REASON_CATEGORY: KT_REASON_CATEGORY,
       // §0f.2（2026-10-09）: 採用範囲の判定（1 か所）と、仮案の動作が任意の提案の扱いか
-      requirementScopeOf, SCOPE_BASES, isSuggestionItem,
+      requirementScopeOf, decisionLinkVerdictOf, targetFieldKeyOf, SCOPE_BASES, isSuggestionItem,
       // §0f.3（2026-10-09）: 送信の後続を止める失敗の種類（1 か所）・終了不明・呼び出しの記録の end・止めた理由の文
       stopKindOf, STOP_KINDS, stopEndUnknown, callEndOf, STOP_REASON_JA };
   })();
@@ -29441,15 +29770,19 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
       const scopeNotice = fin.scopeOut && fin.scopeOut.notice ? `<div class="kt-ai-final-scope-notice" style="font-size:12px; margin-top:4px; color:#b26a00;">${esc(fin.scopeOut.notice)}</div>` : '';
       const behaviors = fin.behaviors.length ? sec('最終的にどう動くか', `${li(fin.behaviors.map(esc))}${scopeNotice}`) : (scopeNotice ? sec('最終的にどう動くか', scopeNotice) : '');
       const cg = fin.changed || { rejected: [], modified: [], provisionals: [], reply: '' };
-      const changedRows = [...cg.rejected.map(x => `外した: ${esc(x)}`), ...cg.modified.map(x => `変えた: ${esc(x)}`), ...cg.provisionals.map(x => `計画で決めた点: ${esc(x)}`)];
-      const changed0 = changedRows.length || cg.reply ? sec('仮案から変わった点と理由', `${changedRows.length ? li(changedRows) : ''}${cg.reply ? `<div class="kt-ai-rich" style="margin-top:4px; font-size:12px;">${KTContextUi.richTextHtml(plainText(cg.reply))}</div>` : ''}`) : sec('仮案から変わった点', '<div style="font-size:12px; opacity:.8; margin-top:2px;">仮案のとおりです。</div>');
+      //   再検証前の指示 §2（2026-10-10）: 計画で残した業務上の追加・変更（決定事項の実現として計画が足した動作）は通常表示のこの節に「計画で足した:」の行で出す。
+      //   判断の候補（黙って入れていない・黙って消していない計画の案）は、この節の中に 1 つの枠でまとめて出す（別のカード・質問は足さない）
+      const planAdds = fin.scopeOut && Array.isArray(fin.scopeOut.planAdds) ? fin.scopeOut.planAdds : [];
+      const candLines = fin.scopeOut && Array.isArray(fin.scopeOut.candidates) ? fin.scopeOut.candidates : [];
+      const changedRows = [...cg.rejected.map(x => `外した: ${esc(x)}`), ...cg.modified.map(x => `変えた: ${esc(x)}`), ...planAdds.map(x => `<span class="kt-ai-final-plan-add">計画で足した: ${esc(x)}</span>`), ...cg.provisionals.map(x => `計画で決めた点: ${esc(x)}`)];
+      const candHtml = candLines.length ? `<div class="kt-ai-final-candidates" style="margin-top:6px; font-size:12px; border-left:3px solid #b26a00; padding-left:8px;"><b>判断が残っています</b>${li(candLines.map(esc))}</div>` : '';
+      const changed0 = changedRows.length || cg.reply || candHtml ? sec('仮案から変わった点と理由', `${changedRows.length ? li(changedRows) : ''}${candHtml}${cg.reply ? `<div class="kt-ai-rich" style="margin-top:4px; font-size:12px;">${KTContextUi.richTextHtml(plainText(cg.reply))}</div>` : ''}`) : sec('仮案から変わった点', '<div style="font-size:12px; opacity:.8; margin-top:2px;">仮案のとおりです。</div>');
       //   §0f.2 の 4（2026-10-09）: 依頼に無い可能性がある動作（計画の返答から外した範囲外の効果）は詳細だけに出す（承認は止めない・利用者に断らせない）
       const so = fin.scopeOut && Array.isArray(fin.scopeOut.lines) && fin.scopeOut.lines.length ? fin.scopeOut : null;
-      //   レビューの指摘 row3 の 2（2026-10-09）: 委ねた判断を実現するために計画が足した可能性がある動作（外していない。判定できないため残した）
-      const sp = fin.scopeOut && Array.isArray(fin.scopeOut.possible) && fin.scopeOut.possible.length ? fin.scopeOut.possible : null;
-      //   §0f.2 の 9（2026-10-09・前の確認の結び付けの誤り）: 決定事項の実現として計画が足した動作（外していない。計画の AI が付けた結び付きは誤りうるので、詳細に名前で出す）
+      //   §0f.2 の 9（2026-10-09）: 決定事項の実現として計画が足した動作（外していない）の詳細（再検証前の指示 §2 で通常表示にも出す。詳細の折りたたみは残す）。
+      //   以前の「委ねた判断を実現するために計画が足した可能性がある動作」（possible）の折りたたみは、判断の候補（通常表示）に置き換えた
       const sl = fin.scopeOut && Array.isArray(fin.scopeOut.linked) && fin.scopeOut.linked.length ? fin.scopeOut.linked : null;
-      const changed = `${changed0}${so ? `<details class="kt-ai-tech kt-ai-final-scope-out" style="margin-top:4px; font-size:11px;"><summary>依頼に無い可能性がある動作（${so.lines.length} 件）</summary>${li(so.lines.map(x => `${esc(x)}（依頼・採用した仮案に無いため、作る JavaScript の必須の動作から外しました）`))}<div style="opacity:.85;">${so.remaining ? '計画の説明の文に残っている可能性があります。' : ''}入れる場合は、そのように伝えてください。</div></details>` : ''}${sp ? `<details class="kt-ai-tech kt-ai-final-scope-possible" style="margin-top:4px; font-size:11px;"><summary>委ねた判断を実現するために計画が足した可能性がある動作（${sp.length} 件）</summary>${li(sp.map(x => `${esc(x)}（おまかせにした判断の実現として残しています）`))}<div style="opacity:.85;">依頼・採用した仮案と照らして決められないため、外していません。入れない場合は、そのように伝えてください。</div></details>` : ''}${sl ? `<details class="kt-ai-tech kt-ai-final-scope-linked" style="margin-top:4px; font-size:11px;"><summary>決定事項の実現として計画が足した動作（${sl.length} 件）</summary>${li(sl.map(esc))}<div style="opacity:.85;">計画が決めたことに結び付けて足した動作です（依頼・採用した仮案には書かれていません）。外していません。決めたことと関係が無い・入れない場合は、そのように伝えてください。</div></details>` : ''}`;
+      const changed = `${changed0}${so ? `<details class="kt-ai-tech kt-ai-final-scope-out" style="margin-top:4px; font-size:11px;"><summary>依頼に無い可能性がある動作（${so.lines.length} 件）</summary>${li(so.lines.map(x => `${esc(x)}（依頼・採用した仮案に無いため、作る JavaScript の必須の動作から外しました）`))}<div style="opacity:.85;">${so.remaining ? '計画の説明の文に残っている可能性があります。' : ''}入れる場合は、そのように伝えてください。</div></details>` : ''}${sl ? `<details class="kt-ai-tech kt-ai-final-scope-linked" style="margin-top:4px; font-size:11px;"><summary>決定事項の実現として計画が足した動作（${sl.length} 件）</summary>${li(sl.map(esc))}<div style="opacity:.85;">計画が決めたことに結び付けて足した動作です（採用した仮案の判断の動作と同じ対象・効果のものだけを入れています）。入れない場合は、そのように伝えてください。</div></details>` : ''}`;
       //   C-1 第 4 段（2026-10-09・K-3）: JavaScript ごとの行と必須の動作の行に PC / モバイルを付ける（構造化した platforms。無い古い最終案は付けない）
       const platJa = (ps) => (Array.isArray(ps) && ps.length ? ps.map(p => (p === 'mobile' ? 'モバイル' : 'PC')).join('・') : '');
       const cannotRows = [...fin.cannot.map(x => `${platJa(x.platforms) ? `${esc(platJa(x.platforms))}: ` : ''}${esc(x.text)}${x.next ? `<div style="font-size:11px; opacity:.85;">次の方針: ${esc(x.next)}</div>` : ''}${Array.isArray(x.details) && x.details.length ? `<details class="kt-ai-tech" style="font-size:11px;"><summary>詳細</summary>${x.details.map(esc).join('<br>')}</details>` : ''}`), ...fin.outOfScope.map(x => (typeof x === 'string' ? `対応範囲外: ${esc(x)}` : x.owned ? `この JavaScript の対応範囲外（ほかの手順・JavaScript で扱います）: ${esc(x.text)}` : `担当が計画にありません（計画全体の確認に残します）: ${esc(x.text)}`))];
@@ -31439,6 +31772,9 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
       //   レビューの指摘 row4（2026-10-09）: 止めた送信で受け付けた指示がまだ計画に入っていなければ、承認の欄の確認項目にも 1 行（この最終案に入っていないことを確かめて承認する）
       const pendN = v && v.final && Array.isArray(v.final.pendingInstructions) ? v.final.pendingInstructions.length : 0;
       if (pendN) items.confirmations.push({ text: `受け付けた指示 ${pendN} 件はまだ計画に入っていません（この最終案には入っていません。入れるときは最終案のカードの［受け付けた指示を計画に入れる］）`, detail: '' });
+      //   再検証前の指示 §1・§2（2026-10-10）: 判断の候補（計画の案を黙って入れず・黙って消していない）が残っていれば、承認の欄の確認項目にも同じ文を 1 行（この最終案には入っていない）
+      const candN = v && v.final && v.final.scopeOut && Array.isArray(v.final.scopeOut.candidates) ? v.final.scopeOut.candidates : [];
+      if (candN.length) items.confirmations.push({ text: `判断が残っています（この最終案には入っていません）: ${candN.join(' ／ ')}`, detail: '' });
       const S = settingsPartsOf(sp);
       //   §0f.5 の 3（2026-10-09）: 手順の名前（計画の AI の文）は、フィールドのコードを名前に・根拠の番号を外して出す（表示だけ。指紋の材料は元の名前のまま）
       const L = labelsNow();

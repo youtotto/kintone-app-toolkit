@@ -15,14 +15,17 @@
 //   §S5 委任の粒度（レビューの指摘 row3）: 判断に結び付いた要件が委任のターンで直されない形・計画の AI が委ねた警告を足す形・推奨の無い委任＋混入した保存禁止
 //   §S6 画面: 範囲外を外した customization の生成に渡す requirement の文は、範囲内の要件の文（台帳の値）で組み立てる
 //   §S7 決定事項の結び付き decisionRefs（設計 §0f.2 の 9・契約 16 §12。前の確認の newProblems の medium）: 印（health の change-planner の requirementOps）がある
-//        Gateway では、未実現の委任があっても、計画の AI が委ねた判断の id を decisionRefs に付けた警告だけを delegated（範囲内）にし、decisionRefs [] の混入した
-//        保存禁止は外す（v.plan・v.gatewayPlan・台帳・生成の必須の効果）。印の無い古い Gateway は今の possible の扱い（外さずに詳細に出す）。
+//        Gateway では、decisionRefs [] の混入した保存禁止は外す（v.plan・v.gatewayPlan・台帳・生成の必須の効果）。再検証前の指示 §1（2026-10-10）: 採用の時点に
+//        その判断の動作の構造が無い（X(D) が空）委任に計画の AI が警告を結び付けても、AI の id だけでは上げず判断の候補（黙って入れない・黙って消さない。通常表示と
+//        承認の欄に出す）。印の無い古い Gateway の未実現の委任の間の計画の AI の追加も判断の候補（以前の possible＝外さずに残す扱いの置き換え）。
 //        計画の段階の「おすすめで」（推奨を採用・推奨の無い確認事項の委任）でも同じ（reviseWith の delegatedWork の置き換え）。画面の health の印と送る決定事項の印
-//   §S8 結び付けの誤りの影響を狭める（前の確認の probe-mislink2・2026-10-09）: 結び付けで採用の根拠を上げるのは、その決定事項がまだ実現されていないときだけ
-//        （ほかの生きた要件が仮案の判断の key:<key> か実現の結び付きですでに実現していれば realized: true で残し、根拠に数えない）。結び付きで範囲内に上がった要件が
-//        それを除いた範囲内の要件の効果に無い効果を足すときは、外さずに requirementScopeOf の linked・v.scopeLinked・最終案の詳細「決定事項の実現として計画が足した動作」に出す。
-//        (a) 仮案の段階で実現済みの値で答えた決定事項に計画の AI が保存禁止を結び付ける → planner として外れる／(b) 未実現の値で答えた決定事項 → 上がるが詳細に出る／
-//        (c) 未実現の委任に委ねた警告 → delegated で残り詳細にも出る（§S7 の期待のまま）／(d) 同じ応答で 2 つの要件が同じ未実現の決定事項に結び付く → 先の 1 つだけ上がる
+//   §S8 決定事項の採用を先着順にしない（再検証前の指示 §1・§2・2026-10-10。前の f1b01fa の「先に結び付いた要件だけが実現」をやめた）: 決定事項 D に結び付いた計画の要件は、
+//        その (フィールド, 効果) がすべて採用の時点の組 X(D)（仮案の段階で D の key に結び付いた要件の対象と効果）に入るときだけ D の実現として上げる（要件ごとに独立。順序に依存しない）。
+//        X(D) に無い効果の結び付きは上げない（planner として判定）。X(D) が空なら AI の id だけでは上げず、D が実現していなければ判断の候補（黙って入れない・黙って消さない。
+//        通常表示と承認の欄に一度に出す）。D の実現として残した追加は、通常表示の「仮案から変わった点と理由」に対象・動作・理由を出す。
+//        (a) 仮案の段階で実現済みの値で答えた決定事項に計画の AI が保存禁止を結び付ける → X(D) に無いので planner として外れる／(b) 構造の無い値で答えた決定事項 → 判断の候補／
+//        (c) 構造の無い委任に委ねた警告 → 判断の候補／(d1) 構造のある委任に警告と保存禁止を結び付ける（警告 → 保存禁止・保存禁止 → 警告）→ どちらの順でも警告は残り保存禁止は外れる／
+//        (d2) 構造の無い委任（今の S7_SF の素材）に両方を結び付ける → どちらの順でも両方を判断の候補に／(d3) 委ねた警告を PC とモバイルの 2 つの要件で実現 → 両方残る
 //
 //   修正前の版（KT_SRC）でも例外で止めずに各 assert を評価する（読み取りの関数が無い版では空の読み取りで落ちる）。§S2 は最初の計画・自動の見直し・差分更新の
 //   3 つの section に分けている（前の section が落ちても後の assert を評価する）
@@ -46,6 +49,9 @@ const inScopeIdsOf = (x, planId) => (typeof x.c.requirementsInScope === 'functio
 const strippedOf = (v) => (v && Array.isArray(v.scopeStripped) ? v.scopeStripped : []);
 const issuesOf = (v) => (v && Array.isArray(v.scopeIssues) ? v.scopeIssues : []);
 const possibleOf = (v) => (v && Array.isArray(v.scopePossible) ? v.scopePossible : []);
+//   再検証前の指示 §1・§2（2026-10-10）: 判断の候補（v.scopeCandidates）と、最終案の通常表示（折りたたみの詳細を除いた文）
+const candidatesOf = (v) => (v && Array.isArray(v.scopeCandidates) ? v.scopeCandidates : []);
+const shutOfS = (html) => stripC(String(html).replace(/<details[\s\S]*?<\/details>/g, ''));
 
 // ---- 仮案の台本（実機の 2 会話目を縮めた形）----
 const REQ = '承認済みでは金額を変更できなくして。差戻し後は再編集できるように。今ある入力チェックは残して、PCとモバイルの両方で使いたい';
@@ -137,7 +143,7 @@ console.log('\n--- §S0. 採用範囲の判定（requirementScopeOf） ---');
 await section(async () => {
   //   修正前の版（関数が無い・possible / noMaterial / eInField を返さない）でも例外で止めず、各 assert を評価する（空の結果で落ちる）
   const scopeFn = typeof KTAiConversation.requirementScopeOf === 'function' ? KTAiConversation.requirementScopeOf : null;
-  const requirementScopeOf = (...a) => { const s = scopeFn ? scopeFn(...a) || {} : {}; return { inIds: s.inIds || new Set(), out: s.out || new Map(), eIn: s.eIn || new Map(), undetermined: s.undetermined || new Set(), eInField: s.eInField || null, noMaterial: s.noMaterial || new Map(), possible: s.possible || new Map() }; };
+  const requirementScopeOf = (...a) => { const s = scopeFn ? scopeFn(...a) || {} : {}; return { inIds: s.inIds || new Set(), out: s.out || new Map(), eIn: s.eIn || new Map(), undetermined: s.undetermined || new Set(), eInField: s.eInField || null, noMaterial: s.noMaterial || new Map() }; };
   assert(!!scopeFn, 'S0-0: 採用範囲の判定の関数がある（KTAiConversation.requirementScopeOf）');
   const P = { customizations: [{ customizationId: 'C1' }, { customizationId: 'C2' }, { customizationId: 'C3' }] };
   const r = (id, basis, effects, planRefs, decision = 'proposed') => ({ id, decision, planRefs, ...(effects ? { effects } : {}), ...(basis ? { scope: { basis } } : {}) });
@@ -162,11 +168,21 @@ await section(async () => {
   const sc4 = requirementScopeOf([r('R1', 'explicit', ['lock'], ['C1'], 'decided'), r('R2', 'explicit', ['block-save'], ['C1'], 'decided'), r('R3', 'planner', ['block-save'], ['C1']), r('R4', 'planner', ['lock'], ['C1']), r('R5', 'planner', ['block-save'], ['C1'])].map((q, i) => ({ ...q, target: ['金額', '明細', '金額', '品名', '金額と明細'][i] })), PF, { labels: lab });
   assert(sc4.eInField && sc4.eInField.get('C1') && JSON.stringify([...sc4.eInField.get('C1').keys()].sort()) === JSON.stringify(['amount', 'items']) && sc4.out.get('R3') && sc4.out.get('R3').reason === 'adds-effect' && sc4.inIds.has('R4') && sc4.inIds.has('R5') && !!sc4.noMaterial.get('C1') && sc4.noMaterial.get('C1').has('R5') && !sc4.noMaterial.get('C1').has('R4'),
     `S0-7: 明細の保存禁止だけを採用した customization では、金額に保存禁止を足す計画の AI の要件（R3）は外・利用者の要件の対象でない列（品名）の編集不可（R4）は中・対象が決まらない同じ効果（R5「金額と明細」）は中で必須の効果の材料にしない: ${JSON.stringify({ out: [...sc4.out], inIds: [...sc4.inIds], noMaterial: [...(sc4.noMaterial.get('C1') || [])] })}`);
-  const sc5 = requirementScopeOf([r('R1', 'explicit', ['lock'], ['C1'], 'decided'), r('R2', 'planner', ['warn'], ['C1'])], P, { delegationOpen: true });
-  assert(sc5.inIds.has('R2') && sc5.possible.get('R2') && sc5.possible.get('R2').reason === 'delegation' && !sc5.out.has('R2') && requirementScopeOf([r('R1', 'explicit', ['lock'], ['C1'], 'decided'), r('R2', 'planner', ['warn'], ['C1'])], P).out.has('R2'), 'S0-8: 未実現の委任があるときだけ、E_in に無い効果を足す計画の AI の要件を外さずに「委任の実現の可能性」として中に残す（無ければ今までどおり外）');
-  //   §0f.2 の 9（2026-10-09）: 計画の段階の委任は、その版（possibleSince）より後に作った・直した計画の AI の追加だけを可能性の扱いにする（前の版で外した追加を戻さない）
-  const sc6 = requirementScopeOf([r('R1', 'explicit', ['lock'], ['C1'], 'decided'), { ...r('R2', 'planner', ['block-save'], ['C1']), createdIn: 1, updatedIn: 1 }, { ...r('R3', 'planner', ['warn'], ['C1']), createdIn: 3, updatedIn: 3 }, { ...r('R4', 'planner', ['block-save'], ['C1']), createdIn: 1, updatedIn: 3 }], P, { delegationOpen: true, possibleSince: 3 });
-  assert(sc6.out.has('R2') && !!sc6.possible.get('R3') && !!sc6.possible.get('R4') && !sc6.possible.has('R2'), `S0-9: 計画の段階の委任（possibleSince 3）: 前の版の追加（R2）は今までどおり外・その版より後に作った・直した追加（R3・R4）だけが可能性: ${JSON.stringify({ out: [...sc6.out.keys()], possible: [...sc6.possible.keys()] })}`);
+  //   再検証前の指示 §1（2026-10-10）: 以前の「委任の実現の可能性」（外さずに範囲内に残す possible）は、判断の候補（範囲外で外す＝黙って入れない・out の reason candidate と
+  //   決定事項の見出し＝黙って消さず通常表示に出す）に置き換えた（S0-8・S0-9 の期待を直した）
+  const OPEN = [{ id: null, key: 'lock.warn', kind: 'delegated', label: '備考の警告' }];
+  const sc5 = requirementScopeOf([r('R1', 'explicit', ['lock'], ['C1'], 'decided'), r('R2', 'planner', ['warn'], ['C1'])], P, { delegationOpen: true, openDecisions: OPEN });
+  const c5 = sc5.out.get('R2') || {};
+  assert(!sc5.inIds.has('R2') && c5.reason === 'candidate' && c5.via === 'delegation' && JSON.stringify(c5.effects) === '["warn"]' && (c5.decisions || []).length === 1 && c5.decisions[0].label === '備考の警告' && requirementScopeOf([r('R1', 'explicit', ['lock'], ['C1'], 'decided'), r('R2', 'planner', ['warn'], ['C1'])], P).out.get('R2').reason === 'adds-effect',
+    `S0-8: 未実現の委任があるとき、E_in に無い効果を足す計画の AI の要件は判断の候補（範囲外。委ねた判断の見出しつき）。無ければ今までどおり範囲外（adds-effect）: ${JSON.stringify([...sc5.out])}`);
+  //   §0f.2 の 9（2026-10-09）: 計画の段階の委任は、その版（possibleSince）より後に作った・直した計画の AI の追加だけを判断の候補にする（前の版で外した追加は今までどおり）
+  const sc6 = requirementScopeOf([r('R1', 'explicit', ['lock'], ['C1'], 'decided'), { ...r('R2', 'planner', ['block-save'], ['C1']), createdIn: 1, updatedIn: 1 }, { ...r('R3', 'planner', ['warn'], ['C1']), createdIn: 3, updatedIn: 3 }, { ...r('R4', 'planner', ['block-save'], ['C1']), createdIn: 1, updatedIn: 3 }], P, { delegationOpen: true, possibleSince: 3, openDecisions: OPEN });
+  const reasons6 = Object.fromEntries([...sc6.out].map(([k, o]) => [k, o.reason]));
+  assert(reasons6.R2 === 'adds-effect' && reasons6.R3 === 'candidate' && reasons6.R4 === 'candidate' && !['R2', 'R3', 'R4'].some(id => sc6.inIds.has(id)), `S0-9: 計画の段階の委任（possibleSince 3）: 前の版の追加（R2）は今までどおり範囲外・その版より後に作った・直した追加（R3・R4）だけが判断の候補: ${JSON.stringify(reasons6)}`);
+  //   再検証前の指示 §1: 印のある Gateway の判断の候補（candidateLinks: 構造の無い決定事項に計画の AI が結び付けた要件）。結び付いた要件でも E_in に無い効果を足さなければ範囲内のまま
+  const sc7 = requirementScopeOf([r('R1', 'explicit', ['lock'], ['C1'], 'decided'), r('R2', 'planner', ['warn'], ['C1']), r('R3', 'planner', ['lock'], ['C1'])], P, { candidateLinks: new Map([['R2', [{ id: 'D1', key: 'lock.warn', kind: 'delegated', label: '備考の警告' }]], ['R3', [{ id: 'D1', key: 'lock.warn', kind: 'delegated', label: '備考の警告' }]]]) });
+  const c7 = sc7.out.get('R2') || {};
+  assert(c7.reason === 'candidate' && c7.via === 'decisionRefs' && c7.decisions[0].id === 'D1' && sc7.inIds.has('R3') && !sc7.out.has('R3'), `S0-10: 構造の無い決定事項への結び付きだけでは上げない（効果を足すなら判断の候補・足さなければ範囲内のまま）: ${JSON.stringify([...sc7.out])}`);
 });
 
 // =========================================================
@@ -427,8 +443,9 @@ await section(async () => {
   assert(x.calls.ask.length === asks && x.calls.propose.length === 2 && sco.delegationOpen === false && !possibleOf(v).length, 'S5-2: 質問は増えない・委任は実現済み（結び付く要件がある）なので委任の実現の可能性の扱いは無い');
 });
 await section(async () => {
-  //   C2: 委任のターンで要件を作らない（既定の台本の「おすすめで」と同じ）。計画の AI が委ねられた警告を proposed（warn・C1/C2）で足す。
-  //   未実現の委任があるので、E_in に無い効果を足す計画の AI の要件は外さずに「判定できない（委任の実現の可能性）」として残し、最終案の詳細に出す
+  //   C2: 委任のターンで要件を作らない（既定の台本の「おすすめで」と同じ）。計画の AI が委ねられた警告を proposed（warn・C1/C2）で足す（印の無い Gateway）。
+  //   再検証前の指示 §1（2026-10-10）: 未実現の委任の間の計画の AI の追加は、構造では委任の実現と確かめられないので、判断の候補（黙って入れない・黙って消さない）。
+  //   以前の期待（外さずに必須の効果に残し、詳細だけに出す）を直した（S5-3〜S5-5）
   planCalls.length = 0;
   const sf = (args) => { const r = scopeScript(args); if (!r) return r; if (args.utterance === DELEGATE_U) r.turn.requirementOps = []; return r; };
   const gen = recordingGenerate(['good']);
@@ -441,11 +458,14 @@ await section(async () => {
   const sco = scopeOf(x);
   const warnReq = sco.requirements.find(q => q.createdBy === 'plan' && (q.effects || []).includes('warn')) || {};
   const g1 = gen.seen.filter(g => g.cid === 'C1' && g.version === v.version)[0];
-  assert(sco.delegationOpen === true && warnReq.basis === 'planner' && warnReq.inScope === true && warnReq.possible === 'delegation' && g1 && g1.requiredEffects.some(e => e.field === 'memo' && e.effect === 'warn' && (e.requirementIds || []).includes(warnReq.id)), `S5-3: 委ねた警告（計画の AI が proposed で足した）は外さずに必須の効果に残る（委任の実現の可能性）: ${JSON.stringify({ open: sco.delegationOpen, warn: [warnReq.id, warnReq.basis, warnReq.inScope, warnReq.possible], req: g1 && g1.requiredEffects.map(e => [e.field, e.effect, e.requirementIds]) })}`);
-  const html = finalHtml(x), shut = stripC(html.replace(/<details[\s\S]*?<\/details>/g, ''));
-  assert(/委ねた判断を実現するために計画が足した可能性がある動作（[0-9]+ 件）/.test(html) && /「備考」を警告を出す/.test(stripC(html)) && !/委ねた判断を実現するために/.test(shut) && issuesOf(v).some(i => i.kind === 'delegation') && planCalls.length === 1 && x.calls.ask.length === asks, `S5-4: 最終案の詳細（折りたたみ）に「委ねた判断を実現するために計画が足した可能性がある動作」。自動の見直しは依頼しない・質問は増えない: ${(stripC(html).match(/委ねた判断を実現するために[\s\S]{0,200}/) || [''])[0]}`);
-  //   未実現の委任の間は、計画の AI が足した保存禁止も構造だけでは委任の実現と区別できない（外さずに詳細に出す。設計 §0f.2 の 7 の既知の限界）
-  assert(possibleOf(v).some(st => st.effect === 'block-save') && /「金額」を保存を止める|「明細」を保存を止める/.test((stripC(html).match(/委ねた判断を実現するために[\s\S]{0,400}/) || [''])[0]), 'S5-5: 未実現の委任の間に計画の AI が足した保存禁止は、判定できないとして残し、詳細に出す（黙って必須にしない）');
+  assert(sco.delegationOpen === true && warnReq.basis === 'planner' && warnReq.inScope === false && warnReq.out === 'candidate' && (warnReq.candidate || {}).via === 'delegation' && g1 && !g1.requiredEffects.some(e => e.effect === 'warn') && strippedOf(v).some(st => st.field === 'memo' && st.effect === 'warn' && st.reason === 'candidate'),
+    `S5-3: 委ねた警告（計画の AI が proposed で足した・印の無い Gateway）は判断の候補（黙って必須の効果に入れない・計画から外す）: ${JSON.stringify({ open: sco.delegationOpen, warn: [warnReq.id, warnReq.basis, warnReq.inScope, warnReq.out, warnReq.candidate], req: g1 && g1.requiredEffects.map(e => [e.field, e.effect]) })}`);
+  const html = finalHtml(x), shut = shutOfS(html);
+  const cand = (shut.match(/判断が残っています[\s\S]{0,400}/) || [''])[0];
+  assert(/おまかせにした「備考の警告」は、計画の案と結び付けを確かめられないため、まだ入れていません。計画の案: [^。]*「備考」に警告を出す/.test(cand) && /入れるものを伝えてください/.test(cand) && !/委ねた判断を実現するために計画が足した可能性がある動作/.test(html) && issuesOf(v).some(i => i.kind === 'candidate') && x.calls.ask.length === asks && planCalls.length <= 2,
+    `S5-4: 最終案の通常表示（仮案から変わった点と理由）に判断が残っていることを一度に示す（委ねた判断の見出し・計画の案・入れるものを伝える）。質問は増えない・自動の見直しは既存の上限の中: ${cand.slice(0, 300)}`);
+  //   未実現の委任の間は、計画の AI が足した保存禁止も構造だけでは委任の実現と区別できない（黙って必須にせず、黙って消さずに判断の候補に出す）
+  assert(g1 && !g1.requiredEffects.some(e => e.effect === 'block-save') && /「金額」「明細」の保存を止める/.test(cand), `S5-5: 未実現の委任の間に計画の AI が足した保存禁止も判断の候補（必須の効果に入れない・通常表示に計画の案として出す）: ${cand.slice(0, 300)}`);
 });
 await section(async () => {
   //   C3: 推奨の無い判断（Q_WARN の推奨を空にした）を委ねて採用。委任のターンで警告の要件（A1 に結び付く）を足す＝委任は実現済み。
@@ -508,7 +528,8 @@ const s7Plan = ({ mark, linkWarn = true, linkSuggestion = false }) => (args) => 
   return r;
 };
 await section(async () => {
-  //   印がある Gateway: 委ねた警告（decisionRefs [委ねた判断の id]）は delegated で残り、混入した保存禁止（decisionRefs []）は外れる
+  //   印がある Gateway: 混入した保存禁止（decisionRefs []）は外れる。委ねた警告（decisionRefs [委ねた判断の id]）は、採用の時点にその判断の動作の構造が無い
+  //   （委任のターンで要件を作らない）ので AI の id だけでは上げず、判断の候補（再検証前の指示 §1。以前の期待「delegated で残る」を直した）
   planCalls.length = 0;
   const gen = recordingGenerate(['good']);
   const x = markOn(makeConvC({ scriptFn: S7_SF, labels: LABELS, generate: gen, planImpl: s7Plan({ mark: true }) }));
@@ -521,16 +542,22 @@ await section(async () => {
   const dId = delegatedIdOf(planCalls[0] && planCalls[0].decisions, 'lock.warn');
   const warnReq = reqRowOf(sco, q => q.createdBy === 'plan' && (q.effects || []).includes('warn'));
   const saveReq = reqRowOf(sco, q => q.createdBy === 'plan' && (q.effects || []).includes('block-save'));
-  assert(!!dId && sco.decisionRefs === true && warnReq.basis === 'delegated' && warnReq.via === 'decisionRefs' && warnReq.inScope === true && !warnReq.possible && (warnReq.decisionLinks || []).some(l => l.id === dId && l.kind === 'delegated'), `S7-1: 委ねた判断の id（${dId}）を decisionRefs に付けた警告の要件は delegated（範囲内・可能性の扱いではない）: ${JSON.stringify({ mode: sco.decisionRefs, warn: [warnReq.id, warnReq.basis, warnReq.via, warnReq.inScope, warnReq.possible, warnReq.decisionLinks] })}`);
-  assert(saveReq.basis === 'planner' && saveReq.inScope === false && saveReq.out === 'adds-effect' && saveReq.stripped === true && !(saveReq.decisionLinks || []).length && sco.delegationOpen === false && !(sco.possible || []).length && !possibleOf(v).length, `S7-2: decisionRefs [] の混入した保存禁止は planner として範囲外（台帳で外・計画から外した）。委任は結び付きで実現済み・可能性の扱いは無い: ${JSON.stringify({ save: [saveReq.id, saveReq.basis, saveReq.inScope, saveReq.out, saveReq.stripped], open: sco.delegationOpen, possible: sco.possible })}`);
-  assert(!!v1 && noSave(v1.plan) && noSave(v1.gatewayPlan) && noSave(v && v.plan) && noSave(v && v.gatewayPlan) && strippedOf(v1).some(s => (s.requirementIds || []).includes(saveReq.id)) && effectsOfCust(((v && v.plan.customizations) || []).find(c => c.customizationId === 'C1')).includes('memo:warn'), `S7-3: 保存禁止は v.plan と v.gatewayPlan の両方から外す（最初の計画・自動の見直しの版とも）。委ねた警告は計画に残る: ${JSON.stringify({ v1: v1 && strippedOf(v1).map(s => `${s.customizationId}:${s.field}:${s.effect}`), c1: v && effectsOfCust((v.plan.customizations || []).find(c => c.customizationId === 'C1')) })}`);
+  assert(!!dId && sco.decisionRefs === true && warnReq.basis === 'planner' && !warnReq.via && warnReq.inScope === false && warnReq.out === 'candidate' && (warnReq.candidate || {}).via === 'decisionRefs' && ((warnReq.candidate || {}).decisionIds || []).includes(dId) && (warnReq.decisionLinks || []).some(l => l.id === dId && l.kind === 'delegated' && l.verdict === 'unverified'),
+    `S7-1: 委ねた判断の id（${dId}）を付けた警告は、採用の時点にその判断の構造が無いので上げない（判断の候補・結び付きは unverified で残す）: ${JSON.stringify({ mode: sco.decisionRefs, warn: [warnReq.id, warnReq.basis, warnReq.via, warnReq.inScope, warnReq.out, warnReq.candidate, warnReq.decisionLinks] })}`);
+  assert(saveReq.basis === 'planner' && saveReq.inScope === false && saveReq.out === 'adds-effect' && saveReq.stripped === true && !(saveReq.decisionLinks || []).length && sco.delegationOpen === true && candidatesOf(v).length === 1 && candidatesOf(v)[0].items.every(it => it.effect === 'warn'),
+    `S7-2: decisionRefs [] の混入した保存禁止は planner として範囲外（台帳で外・計画から外した）。委任は実現していない（判断の候補は警告だけ）: ${JSON.stringify({ save: [saveReq.id, saveReq.basis, saveReq.inScope, saveReq.out, saveReq.stripped], open: sco.delegationOpen, cand: candidatesOf(v) })}`);
+  assert(!!v1 && noSave(v1.plan) && noSave(v1.gatewayPlan) && noSave(v && v.plan) && noSave(v && v.gatewayPlan) && strippedOf(v1).some(s => (s.requirementIds || []).includes(saveReq.id)) && !effectsOfCust(((v && v.plan.customizations) || []).find(c => c.customizationId === 'C1')).includes('memo:warn') && strippedOf(v).some(s => s.field === 'memo' && s.effect === 'warn' && s.reason === 'candidate'),
+    `S7-3: 保存禁止は v.plan と v.gatewayPlan の両方から外す（最初の計画・自動の見直しの版とも）。判断の候補の警告も計画から外す（reason candidate）: ${JSON.stringify({ v1: v1 && strippedOf(v1).map(s => `${s.customizationId}:${s.field}:${s.effect}:${s.reason}`), c1: v && effectsOfCust((v.plan.customizations || []).find(c => c.customizationId === 'C1')) })}`);
   const g1 = gen.seen.filter(g => g.cid === 'C1' && v && g.version === v.version)[0] || null;
-  assert(!!g1 && JSON.stringify(effKeys(g1.requiredEffects)) === JSON.stringify(['amount:lock', 'memo:warn']) && g1.requiredEffects.some(e => e.field === 'memo' && e.effect === 'warn' && (e.requirementIds || []).includes(warnReq.id)) && !effectsOfCust(g1.customization).some(k => /block-save/.test(k)), `S7-4: 生成の必須の効果は編集不可と委ねた警告（警告の要件の id つき）だけ。保存禁止は無い: ${JSON.stringify(g1 && g1.requiredEffects.map(e => [e.field, e.effect, e.requirementIds]))}`);
-  const html = finalHtml(x);
-  assert(x.calls.ask.length === asks && x.calls.propose.length === 2 && planCalls.length === 2 && !/委ねた判断を実現するために計画が足した可能性がある動作/.test(html) && /依頼に無い可能性がある動作/.test(html), `S7-5: 質問は増えない・自動の見直しは既存の上限の 1 回・最終案の詳細は「依頼に無い可能性がある動作」（可能性の扱いの節は出さない）: ${JSON.stringify({ plans: planCalls.length, asks: x.calls.ask.length })}`);
+  assert(!!g1 && JSON.stringify(effKeys(g1.requiredEffects)) === JSON.stringify(['amount:lock']) && !effectsOfCust(g1.customization).some(k => /block-save|warn/.test(k)), `S7-4: 生成の必須の効果は編集不可だけ（保存禁止も、確かめられない警告も黙って入れない）: ${JSON.stringify(g1 && g1.requiredEffects.map(e => [e.field, e.effect, e.requirementIds]))}`);
+  const html = finalHtml(x), shut = shutOfS(html);
+  const cand = (shut.match(/判断が残っています[\s\S]*?入れるものを伝えてください/) || [''])[0];
+  assert(x.calls.ask.length === asks && x.calls.propose.length === 2 && planCalls.length === 2 && !/委ねた判断を実現するために計画が足した可能性がある動作/.test(html) && /依頼に無い可能性がある動作/.test(html) && /おまかせにした「備考の警告」は、計画の案と結び付けを確かめられないため、まだ入れていません。計画の案: 「備考」に警告を出す。入れるものを伝えてください/.test(cand) && !/保存/.test(cand),
+    `S7-5: 質問は増えない・自動の見直しは既存の上限の 1 回・外した保存禁止は詳細の「依頼に無い可能性がある動作」・委ねた警告は通常表示に判断の候補（黙って消さない）: ${JSON.stringify({ plans: planCalls.length, asks: x.calls.ask.length, cand: cand.slice(0, 200) })}`);
 });
 await section(async () => {
-  //   印の無い古い Gateway（同じ計画の AI。decisionRefs は返らない）: 今の possible の扱い（委ねた警告も混入した保存禁止も外さずに残し、最終案の詳細に出す）
+  //   印の無い古い Gateway（同じ計画の AI。decisionRefs は返らない）: 未実現の委任の間の計画の AI の追加は判断の候補（再検証前の指示 §1。以前の「外さずに残し、
+  //   詳細に出す」possible を直した）。委ねた警告も混入した保存禁止も黙って入れず・黙って消さず、通常表示に一度に出す。自動の見直しの引き金にしない
   planCalls.length = 0;
   const gen = recordingGenerate(['good']);
   const x = makeConvC({ scriptFn: S7_SF, labels: LABELS, generate: gen, planImpl: s7Plan({ mark: false }) });
@@ -541,7 +568,11 @@ await section(async () => {
   const warnReq = reqRowOf(sco, q => q.createdBy === 'plan' && (q.effects || []).includes('warn'));
   const saveReq = reqRowOf(sco, q => q.createdBy === 'plan' && (q.effects || []).includes('block-save'));
   const html = finalHtml(x);
-  assert(sco.decisionRefs !== true && sco.delegationOpen === true && warnReq.basis === 'planner' && warnReq.possible === 'delegation' && saveReq.possible === 'delegation' && saveReq.inScope === true && !strippedOf(v).length && possibleOf(v).some(s => s.effect === 'block-save') && /委ねた判断を実現するために計画が足した可能性がある動作/.test(html) && planCalls.length === 1, `S7-6: 印の無い Gateway は今の possible の扱い（外さずに詳細に出す・自動の見直しはしない）: ${JSON.stringify({ mode: sco.decisionRefs, open: sco.delegationOpen, warn: [warnReq.basis, warnReq.possible], save: [saveReq.possible, saveReq.inScope], plans: planCalls.length })}`);
+  const cand = (shutOfS(html).match(/判断が残っています[\s\S]{0,400}/) || [''])[0];
+  const g1 = gen.seen.filter(g => g.cid === 'C1' && v && g.version === v.version)[0] || null;
+  assert(sco.decisionRefs !== true && sco.delegationOpen === true && warnReq.basis === 'planner' && warnReq.out === 'candidate' && saveReq.out === 'candidate' && saveReq.inScope === false && warnReq.inScope === false && !!g1 && JSON.stringify(effKeys(g1.requiredEffects)) === JSON.stringify(['amount:lock'])
+    && /おまかせにした「備考の警告」は、計画の案と結び付けを確かめられないため、まだ入れていません。計画の案: /.test(cand) && /「備考」に警告を出す/.test(cand) && /保存を止める/.test(cand) && !/委ねた判断を実現するために計画が足した可能性がある動作/.test(html) && planCalls.length <= 2,
+    `S7-6: 印の無い Gateway: 未実現の委任の間の計画の AI の追加は判断の候補（必須の効果に入れない・通常表示に一度に出す）: ${JSON.stringify({ mode: sco.decisionRefs, open: sco.delegationOpen, warn: [warnReq.basis, warnReq.out], save: [saveReq.out, saveReq.inScope], plans: planCalls.length, cand: cand.slice(0, 200) })}`);
 });
 await section(async () => {
   //   印がある Gateway で、計画の AI が委ねた警告に決定事項の id を付けなかった: 決定事項の id の無い計画の AI の追加は planner として今までどおり判定する（可能性の扱いにしない）
@@ -557,7 +588,7 @@ await section(async () => {
 });
 await section(async () => {
   //   印がある Gateway で、計画の AI が任意の提案の扱いの要件（R4。採用の既定から外した明細の保存禁止）の update にも委ねた判断の id を付けた:
-  //   結び付けで採用の根拠を変えない（suggestion のまま範囲外・計画から外す）。委ねた警告は delegated で残る
+  //   結び付けで採用の根拠を変えない（suggestion のまま範囲外・計画から外す。判断の候補にもしない）
   planCalls.length = 0;
   const gen = recordingGenerate(['good']);
   const x = markOn(makeConvC({ scriptFn: S7_SF, labels: LABELS, generate: gen, planImpl: s7Plan({ mark: true, linkSuggestion: true }) }));
@@ -568,7 +599,8 @@ await section(async () => {
   const r4 = reqRowOf(sco, q => q.id === 'R4');
   const warnReq = reqRowOf(sco, q => q.createdBy === 'plan' && (q.effects || []).includes('warn'));
   const g1 = gen.seen.filter(g => g.cid === 'C1' && v && g.version === v.version)[0] || null;
-  assert(r4.basis === 'suggestion' && r4.inScope === false && r4.out === 'suggestion' && warnReq.basis === 'delegated' && noSave(v && v.plan) && !!g1 && !effKeys(g1.requiredEffects).some(k => /block-save/.test(k)), `S7-7b: 任意の提案の扱いの要件は、計画の AI が委ねた判断の id を付けても範囲外のまま（保存禁止は計画と必須の効果に入らない）: ${JSON.stringify({ r4: [r4.basis, r4.inScope, r4.out, r4.decisionLinks], warn: warnReq.basis, req: g1 && effKeys(g1.requiredEffects) })}`);
+  assert(r4.basis === 'suggestion' && r4.inScope === false && r4.out === 'suggestion' && !r4.candidate && warnReq.out === 'candidate' && noSave(v && v.plan) && !!g1 && !effKeys(g1.requiredEffects).some(k => /block-save/.test(k)) && !candidatesOf(v).some(g => g.items.some(it => (it.requirementIds || []).includes('R4'))),
+    `S7-7b: 任意の提案の扱いの要件は、計画の AI が委ねた判断の id を付けても範囲外のまま（保存禁止は計画と必須の効果に入らない・判断の候補にもしない）: ${JSON.stringify({ r4: [r4.basis, r4.inScope, r4.out, r4.decisionLinks], warn: warnReq.out, req: g1 && effKeys(g1.requiredEffects) })}`);
 });
 //   計画の段階の「おすすめで」（reviseWith の delegatedWork の置き換え）: 最初の計画が確認事項（備考の警告を出すか）を返し、利用者が「おすすめで」と答える。
 //   その差分更新で計画の AI が委ねた警告と混入した保存禁止を足す（自動の見直しでは足さない）
@@ -610,10 +642,15 @@ for (const rec of [true, false]) for (const mark of [true, false]) {
     if (mark) {
       const did = (sentD[0] || {}).id;
       assert(sentD.length === 1 && (rec ? sentD[0].answer === '出す' : (sentD[0].question === Q_PLAN_TEXT && sentD[0].topic === 'other' && sentD[0].source === 'chat' && sentD[0].status === 'answered' && /^D[0-9]+$/.test(sentD[0].id))), `S7-9（${tag}）: 計画の AI に委ねた判断として送る（推奨を採用した決定事項・推奨の無い確認事項の委任は委ねた判断の決定事項）: ${JSON.stringify(sentD)}`);
-      assert(warnReq.basis === 'delegated' && warnReq.via === 'decisionRefs' && warnReq.inScope === true && (warnReq.decisionLinks || []).some(l => l.id === did) && saveReq.basis === 'planner' && saveReq.inScope === false && saveReq.stripped === true && sco.delegationOpen === false && !possibleOf(v).length, `S7-10（${tag}）: 委ねた警告（decisionRefs [${did}]）は delegated で残り、混入した保存禁止（decisionRefs []）は planner として外れる: ${JSON.stringify({ warn: [warnReq.id, warnReq.basis, warnReq.inScope], save: [saveReq.id, saveReq.basis, saveReq.inScope, saveReq.stripped], open: sco.delegationOpen })}`);
-      assert(noSave(v.plan) && noSave(v.gatewayPlan) && !!g1 && JSON.stringify(effKeys(g1.requiredEffects)) === JSON.stringify(['amount:lock', 'memo:warn']) && g1.requiredEffects.some(e => e.field === 'memo' && (e.requirementIds || []).includes(warnReq.id)) && x.calls.ask.length === 0 && planCalls.length === 3, `S7-11（${tag}）: v.plan・v.gatewayPlan・生成の必須の効果に保存禁止が無く、委ねた警告は残る（質問なし・自動の見直しは 1 回）: ${JSON.stringify({ req: g1 && effKeys(g1.requiredEffects), plans: planCalls.length })}`);
+      //   再検証前の指示 §1: 計画の段階の委任（key の無い決定事項）は採用の時点の構造が無いので、AI の id だけでは上げない（判断の候補）。以前の期待「delegated で残る」を直した
+      const cand = (shutOfS(html).match(/判断が残っています[\s\S]{0,300}/) || [''])[0];
+      assert(warnReq.basis === 'planner' && warnReq.inScope === false && warnReq.out === 'candidate' && (warnReq.decisionLinks || []).some(l => l.id === did && l.verdict === 'unverified') && saveReq.basis === 'planner' && saveReq.inScope === false && saveReq.stripped === true && sco.delegationOpen === true && /おまかせにした「[^」]+」は、計画の案と結び付けを確かめられないため、まだ入れていません。計画の案: 「備考」に警告を出す/.test(cand),
+        `S7-10（${tag}）: 委ねた警告（decisionRefs [${did}]）は判断の候補（通常表示に出す）、混入した保存禁止（decisionRefs []）は planner として外れる: ${JSON.stringify({ warn: [warnReq.id, warnReq.basis, warnReq.inScope, warnReq.out], save: [saveReq.id, saveReq.basis, saveReq.inScope, saveReq.stripped], open: sco.delegationOpen, cand: cand.slice(0, 160) })}`);
+      assert(noSave(v.plan) && noSave(v.gatewayPlan) && !!g1 && JSON.stringify(effKeys(g1.requiredEffects)) === JSON.stringify(['amount:lock']) && x.calls.ask.length === 0 && planCalls.length === 3, `S7-11（${tag}）: v.plan・v.gatewayPlan・生成の必須の効果に保存禁止も確かめられない警告も無い（質問なし・自動の見直しは 1 回）: ${JSON.stringify({ req: g1 && effKeys(g1.requiredEffects), plans: planCalls.length })}`);
     } else {
-      assert(!sentD.some(d => d.question === Q_PLAN_TEXT && !rec) && warnReq.basis === 'planner' && warnReq.possible === 'delegation' && saveReq.possible === 'delegation' && saveReq.inScope === true && sco.delegationOpen === true && possibleOf(v).some(s => s.effect === 'block-save') && /委ねた判断を実現するために計画が足した可能性がある動作/.test(html) && planCalls.length === 2 && !!g1 && effKeys(g1.requiredEffects).includes('memo:warn'), `S7-12（${tag}）: 印の無い Gateway は今の possible の扱い（計画の段階の委任の版の計画の AI の追加を外さずに残し、最終案の詳細に出す）: ${JSON.stringify({ warn: [warnReq.basis, warnReq.possible], save: [saveReq.possible, saveReq.inScope], open: sco.delegationOpen, plans: planCalls.length })}`);
+      const cand = (shutOfS(html).match(/判断が残っています[\s\S]{0,400}/) || [''])[0];
+      assert(!sentD.some(d => d.question === Q_PLAN_TEXT && !rec) && warnReq.basis === 'planner' && warnReq.out === 'candidate' && saveReq.out === 'candidate' && saveReq.inScope === false && sco.delegationOpen === true && /「備考」に警告を出す/.test(cand) && /保存を止める/.test(cand) && !/委ねた判断を実現するために計画が足した可能性がある動作/.test(html) && planCalls.length === 2 && !!g1 && JSON.stringify(effKeys(g1.requiredEffects)) === JSON.stringify(['amount:lock']),
+        `S7-12（${tag}）: 印の無い Gateway: 計画の段階の委任の版の計画の AI の追加は判断の候補（必須の効果に入れない・通常表示に一度に出す・自動の見直しの引き金にしない）: ${JSON.stringify({ warn: [warnReq.basis, warnReq.out], save: [saveReq.out, saveReq.inScope], open: sco.delegationOpen, plans: planCalls.length, cand: cand.slice(0, 200) })}`);
     }
   });
 }
@@ -667,25 +704,31 @@ const s8PlanValue = ({ refs }) => (args) => {
 };
 const S8_REFS = { R1: REFS_MAIN.R1, R3: REFS_MAIN.R3, R4: REFS_MAIN.R4, R5: REFS_MAIN.R5 };
 await section(async () => {
-  //   部品: requirementScopeOf の linked（結び付きで範囲内に上がった要件が、それを除いた範囲内の要件の効果に無い効果を足すもの。外さない）
+  //   部品: requirementScopeOf の linked（D の実現の結び付き（verdict match）で範囲内に上がった要件が、それを除いた範囲内の要件の効果に無い効果を足すもの。外さない）
   const scopeFn = typeof KTAiConversation.requirementScopeOf === 'function' ? KTAiConversation.requirementScopeOf : null;
   const plan = { customizations: [{ customizationId: 'C1', fields: [{ code: 'ステータス', access: 'READ' }, { code: 'amount', access: 'CONTROL', condition: ST_OK, effects: ['lock', 'block-save'] }, { code: 'items', access: 'CONTROL', condition: ST_OK, effects: ['block-save'] }, { code: 'memo', access: 'CONTROL', condition: 'ステータス in ("作成中")', effects: ['warn'] }] }] };
   const rq = (id, o) => ({ id, target: '', condition: '', behavior: 'x', decision: 'proposed', planRefs: ['C1'], ...o });
   const R1 = rq('R1', { target: '金額', decision: 'decided', effects: ['lock'], scope: { basis: 'explicit' } });
-  const R2 = rq('R2', { target: '備考', effects: ['warn'], scope: { basis: 'delegated', via: 'decisionRefs' }, decisionLinks: [{ id: 'D1', kind: 'delegated' }] });
-  const R3 = rq('R3', { target: '金額と明細', effects: ['block-save'], scope: { basis: 'item-user', via: 'decisionRefs' }, decisionLinks: [{ id: 'D2', kind: 'user' }, { id: 'D1', kind: 'delegated', realized: true }] });
+  const R2 = rq('R2', { target: '備考', effects: ['warn'], scope: { basis: 'delegated', via: 'decisionRefs' }, decisionLinks: [{ id: 'D1', kind: 'delegated', verdict: 'match' }] });
+  const R3 = rq('R3', { target: '金額と明細', effects: ['block-save'], scope: { basis: 'item-user', via: 'decisionRefs' }, decisionLinks: [{ id: 'D2', kind: 'user', verdict: 'match' }, { id: 'D1', kind: 'delegated', verdict: 'mismatch' }] });
   const R4 = rq('R4', { target: '備考', effects: ['warn'], scope: { basis: 'delegated' } });
   const run = (reqs) => { const s = scopeFn ? scopeFn(reqs, plan, { labels: LABELS }) || {} : {}; return { s, linked: Array.isArray(s.linked) ? s.linked.map(x => `${x.customizationId}:${x.field}:${x.effect}:${(x.requirementIds || []).join('|')}:${(x.decisionIds || []).join('|')}`).sort() : null }; };
   const a = run([R1, R2, R3]);
-  assert(JSON.stringify(a.linked) === JSON.stringify(['C1:amount:block-save:R3:D2', 'C1:items:block-save:R3:D2', 'C1:memo:warn:R2:D1']) && a.s.inIds && a.s.inIds.has('R2') && a.s.inIds.has('R3'), `S8-0a: 結び付きで上がった要件の効果のうち、それを除いた範囲内の要件の効果に無いものを linked に返す（対象が決まればそのフィールド・決まらなければ計画のその効果のフィールド。実現済みの結び付きの id は入れない。外さない）: ${JSON.stringify(a.linked)}`);
+  assert(JSON.stringify(a.linked) === JSON.stringify(['C1:amount:block-save:R3:D2', 'C1:items:block-save:R3:D2', 'C1:memo:warn:R2:D1']) && a.s.inIds && a.s.inIds.has('R2') && a.s.inIds.has('R3') && (a.s.linked.find(x => x.field === 'memo').links || []).some(l => l.id === 'D1' && l.kind === 'delegated'), `S8-0a: D の実現の結び付きで上がった要件の効果のうち、それを除いた範囲内の要件の効果に無いものを linked に返す（対象が決まればそのフィールド・決まらなければ計画のその効果のフィールド。D の実現でない結び付き（mismatch）の id は入れない。決定事項の種類も持つ。外さない）: ${JSON.stringify(a.linked)}`);
   const b = run([R1, R2, R3, R4]);
   assert(JSON.stringify(b.linked) === JSON.stringify(['C1:amount:block-save:R3:D2', 'C1:items:block-save:R3:D2']), `S8-0b: 結び付きで上がっていない範囲内の要件（仮案の委ねた判断に結び付いた警告）が持つ効果は linked にしない: ${JSON.stringify(b.linked)}`);
   const c = run([R1, rq('R5', { target: '金額', decision: 'decided', scope: { basis: 'explicit' } }), R2]);
   assert(Array.isArray(c.linked) && c.linked.length === 0, `S8-0c: effects を持たない範囲内の要件が結び付く customization は判定しない（linked なし）: ${JSON.stringify(c.linked)}`);
+  //   部品: D の実現の照合（decisionLinkVerdictOf）。X(D) の (フィールド, 効果) にすべて入るときだけ match。効果が違う・フィールドが違えば mismatch。X(D) が空なら unverified
+  const V = typeof KTAiConversation.decisionLinkVerdictOf === 'function' ? KTAiConversation.decisionLinkVerdictOf : () => null;
+  const fieldOf = (t) => ({ 備考: 'memo', 金額: 'amount', 明細: 'items' }[t] || null);
+  const X = [{ target: '備考', effects: ['warn'] }];
+  assert(V({ target: '備考', effects: ['warn'] }, X, fieldOf) === 'match' && V({ target: '金額と明細', effects: ['block-save'] }, X, fieldOf) === 'mismatch' && V({ target: '金額', effects: ['warn'] }, X, fieldOf) === 'mismatch' && V({ target: '備考', effects: ['warn', 'block-save'] }, X, fieldOf) === 'mismatch' && V({ target: '備考', effects: ['warn'] }, [], fieldOf) === 'unverified' && V({ target: '備考欄', effects: ['warn'] }, X, fieldOf) === 'match',
+    'S8-0d: D の実現の照合は採用の時点の組 X(D) の (フィールド, 効果) だけ（別の効果・別のフィールド・余分な効果は mismatch、X(D) が空は unverified、対象が決まらなければ効果だけの組として比べる）');
 });
 await section(async () => {
   //   (a) probe-mislink2 の形（値で答えた D1 は仮案の段階で警告の要件に実現済み＝判断の key:<key>）で、計画の AI が混入した保存禁止に decisionRefs [D1] を付ける
-  //   → 印がある Gateway でも保存禁止は planner として外れる（v.plan・v.gatewayPlan・台帳・生成の必須の効果）。結び付きは realized: true で残る
+  //   → 保存禁止は X(D1)（備考の警告）に無いので D1 の実現にしない（mismatch）。印がある Gateway でも planner として外れる（v.plan・v.gatewayPlan・台帳・生成の必須の効果）
   planCalls.length = 0;
   const gen = recordingGenerate(['good']);
   const x = markOn(makeConvC({ scriptFn: s8Script('key'), labels: LABELS, generate: gen, planImpl: s8PlanValue({ refs: { ...S8_REFS, R6: REFS_MAIN.R6 } }) }));
@@ -699,15 +742,15 @@ await section(async () => {
   const r6 = reqRowOf(sco, q => q.id === 'R6');
   const saves = (sco.requirements || []).filter(q => ['plan', 'plan-auto'].includes(q.createdBy) && (q.effects || []).includes('block-save'));
   assert(!!did && sco.decisionRefs === true && r6.basis === 'explicit' && r6.inScope === true && saves.length === 2, `S8-1 前提: 値で答えた決定事項（${did}）を送り、仮案の段階の警告の要件（R6）は範囲内。混入した保存禁止は最初の計画と自動の見直しで 2 件: ${JSON.stringify({ did, r6: [r6.basis, r6.inScope], saves: saves.map(q => q.id) })}`);
-  assert(saves.length === 2 && saves.every(q => q.basis === 'planner' && !q.via && q.inScope === false && q.out === 'adds-effect' && q.stripped === true && (q.decisionLinks || []).some(l => l.id === did && l.kind === 'user' && l.realized === true)), `S8-2: 実現済みの決定事項への結び付き（realized: true）は採用の根拠に数えない（保存禁止は planner として範囲外・外した）: ${JSON.stringify(saves.map(q => [q.id, q.basis, q.via, q.inScope, q.out, q.stripped, q.decisionLinks]))}`);
+  assert(saves.length === 2 && saves.every(q => q.basis === 'planner' && !q.via && q.inScope === false && q.out === 'adds-effect' && q.stripped === true && (q.decisionLinks || []).some(l => l.id === did && l.kind === 'user' && l.verdict === 'mismatch')) && !candidatesOf(v).length, `S8-2: X(D) に無い効果の結び付き（mismatch）は採用の根拠に数えない（保存禁止は planner として範囲外・外した。D は実現済みなので判断の候補にもしない）: ${JSON.stringify(saves.map(q => [q.id, q.basis, q.via, q.inScope, q.out, q.stripped, q.decisionLinks]))}`);
   const g1 = gen.seen.filter(g => g.cid === 'C1' && v && g.version === v.version)[0] || null;
   assert(!!v1 && noSave(v1.plan) && noSave(v1.gatewayPlan) && noSave(v && v.plan) && noSave(v && v.gatewayPlan) && !!g1 && JSON.stringify(effKeys(g1.requiredEffects)) === JSON.stringify(['amount:lock', 'memo:warn']) && !effectsOfCust(g1.customization).some(k => /block-save/.test(k)), `S8-3: 保存禁止は v.plan と v.gatewayPlan（最初の計画・自動の見直しの版）と生成の必須の効果に無い。値で答えた警告は残る: ${JSON.stringify({ v1: v1 && strippedOf(v1).map(s => `${s.customizationId}:${s.field}:${s.effect}`), req: g1 && effKeys(g1.requiredEffects) })}`);
   const html = finalHtml(x);
-  assert(sco.linked === 0 && !linkedOf(v).length && !LINKED_RE.test(html) && /依頼に無い可能性がある動作/.test(html) && x.calls.ask.length === asks && planCalls.length === 2, `S8-4: 結び付きで上がった要件は無い（詳細の「決定事項の実現として計画が足した動作」は出さない・外した保存禁止は「依頼に無い可能性がある動作」）。質問は増えない・自動の見直しは 1 回: ${JSON.stringify({ linked: sco.linked, plans: planCalls.length })}`);
+  assert(sco.linked === 0 && !linkedOf(v).length && !LINKED_RE.test(html) && !/計画で足した:|判断が残っています/.test(shutOf(html)) && /依頼に無い可能性がある動作/.test(html) && x.calls.ask.length === asks && planCalls.length === 2, `S8-4: 結び付きで上がった要件は無い（「計画で足した」「判断が残っています」は出さない・外した保存禁止は「依頼に無い可能性がある動作」）。質問は増えない・自動の見直しは 1 回: ${JSON.stringify({ linked: sco.linked, plans: planCalls.length })}`);
 });
 await section(async () => {
-  //   (a') probe-mislink2 のそのままの形（答えのターンの警告の要件が判断・前提の key に結び付かない）: 構造では実現済みと判定できない。
-  //   保存禁止を外せないときは、黙って必須にせず詳細の「決定事項の実現として計画が足した動作」に名前で出す
+  //   (a') probe-mislink2 のそのままの形（答えのターンの警告の要件が判断・前提の key に結び付かない）: X(D) が空で D の実現かを構造で確かめられない。
+  //   保存禁止は AI の id だけでは上げず（範囲外・計画から外す）、判断の候補として通常表示に出す（黙って入れない・黙って消さない）
   planCalls.length = 0;
   const gen = recordingGenerate(['good']);
   const x = markOn(makeConvC({ scriptFn: s8Script('loose'), labels: LABELS, generate: gen, planImpl: s8PlanValue({ refs: { ...S8_REFS, R6: REFS_MAIN.R6 } }) }));
@@ -715,12 +758,14 @@ await section(async () => {
   const v = x.c.activePlan();
   const sco = scopeOf(x);
   const save = reqRowOf(sco, q => q.createdBy === 'plan' && (q.effects || []).includes('block-save'));
-  const html = finalHtml(x), lt = linkedText(html);
-  assert(save.inScope === false || (sco.linked > 0 && linkedOf(v).some(s => s.effect === 'block-save') && /保存を止める/.test(lt) && /「備考の警告」/.test(lt)), `S8-5: 実現済みと判定できない結び付けで範囲内に上がった保存禁止は、最終案の詳細に名前と決めたことの見出しで出る: ${JSON.stringify({ save: [save.id, save.basis, save.inScope], linked: sco.linked, lt: lt.slice(0, 160) })}`);
+  const g1 = gen.seen.filter(g => g.cid === 'C1' && v && g.version === v.version)[0] || null;
+  const cand = (shutOf(finalHtml(x)).match(/判断が残っています[\s\S]*?入れるものを伝えてください/) || [''])[0];
+  assert(save.inScope === false && save.out === 'candidate' && !!g1 && !effKeys(g1.requiredEffects).some(k => /block-save/.test(k)) && /決めた「備考の警告」について計画が足した動作は、結び付けを確かめられないため、まだ入れていません。計画の案: 「金額」「明細」の保存を止める。入れるものを伝えてください/.test(cand),
+    `S8-5: 構造で確かめられない結び付けの保存禁止は上げず（必須の効果に入れない）、通常表示に判断の候補として出す（決めたことの見出し・計画の案）: ${JSON.stringify({ save: [save.id, save.basis, save.inScope, save.out], cand: cand.slice(0, 200) })}`);
 });
 await section(async () => {
-  //   (b) 未実現の値で答えた決定事項（答えのターンで要件を作らない）に、計画の AI が保存禁止を結び付ける → 範囲内に上がる（外さない）が、
-  //   最終案の詳細「決定事項の実現として計画が足した動作」に出る。自動の見直しで足し直した同じ結び付きは実現済み（先の要件が実現している）
+  //   (b) 構造の無い値で答えた決定事項（答えのターンで要件を作らない）に、計画の AI が保存禁止を結び付ける（最初の計画と自動の見直しの 2 件）→ どちらも AI の id だけでは上げず、
+  //   判断の候補（以前の期待「先の 1 件は item-user に上がり、後の 1 件は realized」を、順序に依存しない扱いに直した）
   planCalls.length = 0;
   const gen = recordingGenerate(['good']);
   const x = markOn(makeConvC({ scriptFn: s8Script('none'), labels: LABELS, generate: gen, planImpl: s8PlanValue({ refs: S8_REFS }) }));
@@ -730,14 +775,16 @@ await section(async () => {
   const did = valueIdOf(planCalls[0] && planCalls[0].decisions);
   const save1 = reqRowOf(sco, q => q.createdBy === 'plan' && (q.effects || []).includes('block-save'));
   const save2 = reqRowOf(sco, q => q.createdBy === 'plan-auto' && (q.effects || []).includes('block-save'));
-  assert(!!did && save1.basis === 'item-user' && save1.via === 'decisionRefs' && save1.inScope === true && (save1.decisionLinks || []).some(l => l.id === did && l.kind === 'user' && !l.realized), `S8-6: 未実現の値で答えた決定事項（${did}）への結び付きは今までどおり item-user に上がる（範囲内）: ${JSON.stringify({ save1: [save1.id, save1.basis, save1.via, save1.inScope, save1.decisionLinks] })}`);
-  assert(!save2.id || (save2.basis === 'planner' && (save2.decisionLinks || []).some(l => l.id === did && l.realized === true)), `S8-7: 自動の見直しで別の要件が同じ決定事項に結び付けても、先の要件が実現しているので realized（planner のまま）: ${JSON.stringify({ save2: [save2.id, save2.basis, save2.decisionLinks] })}`);
-  const html = finalHtml(x), lt = linkedText(html);
-  const m = html.match(LINKED_RE);
-  assert(sco.linked > 0 && linkedOf(v).some(s => s.effect === 'block-save' && (s.requirementIds || []).includes(save1.id) && (s.decisionIds || []).includes(did)) && !!m && /「金額」を保存を止める/.test(lt) && /「明細」を保存を止める/.test(lt) && /「備考の警告」の実現として/.test(lt) && !LINKED_RE.test(shutOf(html)) && !/\bD[0-9]+\b|\bR[0-9]+\b|\bC[0-9]+\b/.test(lt), `S8-8: v.scopeLinked と読み取りの linked の数・最終案の詳細（折りたたみ）に「決定事項の実現として計画が足した動作」（フィールドの名前を効果の言葉＋決めたことの見出し。番号は出さない）: ${JSON.stringify({ linked: sco.linked, scopeLinked: linkedOf(v).map(s => `${s.customizationId}:${s.field}:${s.effect}`), lt: lt.slice(0, 200) })}`);
+  assert(!!did && save1.basis === 'planner' && !save1.via && save1.inScope === false && save1.out === 'candidate' && (save1.decisionLinks || []).some(l => l.id === did && l.kind === 'user' && l.verdict === 'unverified'), `S8-6: 構造の無い値で答えた決定事項（${did}）への結び付きだけでは上げない（判断の候補）: ${JSON.stringify({ save1: [save1.id, save1.basis, save1.via, save1.inScope, save1.out, save1.decisionLinks] })}`);
+  assert(!!save2.id && save2.basis === 'planner' && save2.out === 'candidate' && (save2.decisionLinks || []).some(l => l.id === did && l.verdict === 'unverified'), `S8-7: 自動の見直しで別の要件が同じ決定事項に結び付けても、先の要件と同じ扱い（順序で変えない）: ${JSON.stringify({ save2: [save2.id, save2.basis, save2.out, save2.decisionLinks] })}`);
+  const html = finalHtml(x);
+  const cand = (shutOf(html).match(/判断が残っています[\s\S]*?入れるものを伝えてください/) || [''])[0];
+  const g1 = gen.seen.filter(g => g.cid === 'C1' && v && g.version === v.version)[0] || null;
+  assert(sco.linked === 0 && candidatesOf(v).length === 1 && /決めた「備考の警告」について計画が足した動作は、結び付けを確かめられないため、まだ入れていません。計画の案: 「金額」「明細」の保存を止める。入れるものを伝えてください/.test(cand) && !/\bD[0-9]+\b|\bR[0-9]+\b|\bC[0-9]+\b/.test(cand) && !!g1 && !effKeys(g1.requiredEffects).some(k => /block-save/.test(k)),
+    `S8-8: 判断の候補は通常表示に一度に出す（決めたことの見出し・フィールドの名前・効果の言葉。番号は出さない）。必須の効果には入れない: ${JSON.stringify({ linked: sco.linked, cand: cand.slice(0, 200) })}`);
 });
 await section(async () => {
-  //   (c)・(e) 未実現の委任に計画の AI が委ねた警告を結び付ける（§S7 と同じ流れ）→ 警告は delegated で残り（§S7 の期待のまま）、詳細にも出る。混入した保存禁止は外れる
+  //   (c) 構造の無い委任（S7_SF）に計画の AI が委ねた警告を結び付ける → 判断の候補（以前の期待「delegated で残り詳細に出る」を直した）。混入した保存禁止は外れる
   planCalls.length = 0;
   const gen = recordingGenerate(['good']);
   const x = markOn(makeConvC({ scriptFn: S7_SF, labels: LABELS, generate: gen, planImpl: s7Plan({ mark: true }) }));
@@ -748,40 +795,112 @@ await section(async () => {
   const warnReq = reqRowOf(sco, q => q.createdBy === 'plan' && (q.effects || []).includes('warn'));
   const saveReq = reqRowOf(sco, q => q.createdBy === 'plan' && (q.effects || []).includes('block-save'));
   const g1 = gen.seen.filter(g => g.cid === 'C1' && v && g.version === v.version)[0] || null;
-  assert(warnReq.basis === 'delegated' && warnReq.via === 'decisionRefs' && warnReq.inScope === true && (warnReq.decisionLinks || []).some(l => l.id === dId && !l.realized) && saveReq.basis === 'planner' && saveReq.stripped === true && noSave(v && v.plan) && !!g1 && JSON.stringify(effKeys(g1.requiredEffects)) === JSON.stringify(['amount:lock', 'memo:warn']), `S8-9: 委ねた警告は delegated で残り、混入した保存禁止は外れる（§S7 の期待のまま）: ${JSON.stringify({ warn: [warnReq.basis, warnReq.via, warnReq.inScope, warnReq.decisionLinks], save: [saveReq.basis, saveReq.stripped], req: g1 && effKeys(g1.requiredEffects) })}`);
-  const html = finalHtml(x), lt = linkedText(html);
-  assert(sco.linked > 0 && linkedOf(v).some(s => s.field === 'memo' && s.effect === 'warn' && (s.decisionIds || []).includes(dId)) && /「備考」を警告を出す/.test(lt) && /「備考の警告」の実現として/.test(lt) && !/保存を止める/.test(lt) && !LINKED_RE.test(shutOf(html)), `S8-10: 委ねた警告も詳細の「決定事項の実現として計画が足した動作」に出る（保存禁止は出ない・通常表示には出ない）: ${JSON.stringify({ linked: sco.linked, lt: lt.slice(0, 200) })}`);
+  assert(warnReq.basis === 'planner' && warnReq.out === 'candidate' && (warnReq.decisionLinks || []).some(l => l.id === dId && l.verdict === 'unverified') && saveReq.basis === 'planner' && saveReq.stripped === true && noSave(v && v.plan) && !!g1 && JSON.stringify(effKeys(g1.requiredEffects)) === JSON.stringify(['amount:lock']), `S8-9: 構造の無い委任に結び付けた警告は判断の候補（必須の効果に入れない）・混入した保存禁止は外れる: ${JSON.stringify({ warn: [warnReq.basis, warnReq.out, warnReq.decisionLinks], save: [saveReq.basis, saveReq.stripped], req: g1 && effKeys(g1.requiredEffects) })}`);
+  const html = finalHtml(x);
+  const cand = (shutOf(html).match(/判断が残っています[\s\S]*?入れるものを伝えてください/) || [''])[0];
+  assert(sco.linked === 0 && !LINKED_RE.test(html) && /おまかせにした「備考の警告」は、計画の案と結び付けを確かめられないため、まだ入れていません。計画の案: 「備考」に警告を出す。入れるものを伝えてください/.test(cand), `S8-10: 委ねた警告は通常表示に判断の候補として出す（黙って消さない。保存禁止は候補に入れない）: ${JSON.stringify({ linked: sco.linked, cand: cand.slice(0, 200) })}`);
 });
+/**
+ * (d1)〜(d3) の計画の偽物: 最初の計画で委ねた警告（warns の操作。既定は WARN_PLAN_OP 1 つ）と混入した保存禁止を足し、どちらにも委ねた判断の id を decisionRefs で付ける。
+ *   warnFirst = 操作の順（警告 → 保存禁止 / 保存禁止 → 警告）。自動の見直しでは警告を足さない（保存禁止は足し直す・同じく結び付ける）
+ */
+const dPlan = ({ warnFirst, warns = [WARN_PLAN_OP], refs = S8_REFS }) => (args) => {
+  const r = planImplOf({ refs })(args);
+  const dw = delegatedIdOf(args.decisions, 'lock.warn') || delegatedIdOf(args.decisions);
+  const ops = r.turn.requirementOps;
+  const warn = args.revision ? [] : warns.map(w => ({ ...w }));
+  const ordered = [...ops.filter(op => op.op === 'update'), ...(warnFirst ? [...warn, ...ops.filter(isSaveAdd)] : [...ops.filter(isSaveAdd), ...warn]), ...ops.filter(op => op.op !== 'update' && !isSaveAdd(op))];
+  r.turn.requirementOps = withRefs(ordered, (op) => (dw && (isWarnAdd(op) || isSaveAdd(op)) ? [dw] : []));
+  return r;
+};
+/** (d1)・(d3) の仮案: 1 回目の仮案で警告の要件（undecided・warn・planRefs Q1）が判断「備考の警告」に結び付き、委任のターンでは要件を作らない（採用の時点に判断の構造がある） */
+const D1_SF = (args) => { const r = scopeScript(args); if (!r) return r; if (args.utterance === REQ) r.turn.requirementOps = [...r.turn.requirementOps, req('add', { ...R_WARN, decision: 'undecided', disposition: 'unresolved', sourceQuotes: [], planRefs: ['Q1'], effects: ['warn'] })]; if (args.utterance === DELEGATE_U) r.turn.requirementOps = []; return r; };
+/** 結果の要約（順序の比較に使う。要件の id は作った順で変わるので、効果で見分ける） */
+const dSummaryOf = (x, gen) => {
+  const v = x.c.activePlan();
+  const sco = scopeOf(x);
+  const rows = (sco.requirements || []).filter(q => ['plan', 'plan-auto'].includes(q.createdBy) && (q.effects || []).length);
+  const tag = (q) => `${q.createdBy}:${(q.effects || []).join('+')}:${(q.planRefs || []).join('+')}`;
+  const g = (cid) => { const s = gen.seen.filter(z => z.cid === cid && v && z.version === v.version)[0]; return s ? effKeys(s.requiredEffects) : null; };
+  const fin = v && v.final ? v.final : null;
+  return { reqs: rows.map(q => `${tag(q)}=${q.basis}/${q.via || ''}/${q.inScope}/${q.out || ''}/${(q.decisionLinks || []).map(l => l.verdict).join(',')}`).sort(), c1: g('C1'), c2: g('C2'), plan: v ? effectsOfCust((v.plan.customizations || []).find(c => c.customizationId === 'C1')).sort() : null,
+    planAdds: fin && fin.scopeOut ? [...(fin.scopeOut.planAdds || [])] : null, candidates: fin && fin.scopeOut ? [...(fin.scopeOut.candidates || [])] : null, plans: planCalls.length };
+};
+const dOrders = {};
 for (const warnFirst of [true, false]) {
   await section(async () => {
-    //   (d) 同じ応答で 2 つの要件（委ねた警告と混入した保存禁止）が同じ未実現の委任に結び付く → 先の操作の 1 つだけが上がり、後の 1 つは realized（planner として判定）
-    const tag = warnFirst ? '警告が先' : '保存禁止が先';
+    //   (d1) 採用の時点に判断の構造がある形: 委ねた警告（X(D) に入る）は D の実現（delegated・必須の効果）、混入した保存禁止（X(D) に無い）は外れる。どちらの順でも同じ
+    const tag = warnFirst ? '警告 → 保存禁止' : '保存禁止 → 警告';
     planCalls.length = 0;
     const gen = recordingGenerate(['good']);
-    const pi = (args) => {
-      const r = planImplOf({ refs: S8_REFS })(args);
-      const dw = delegatedIdOf(args.decisions, 'lock.warn') || delegatedIdOf(args.decisions);
-      const ops = r.turn.requirementOps;
-      const warn = args.revision ? [] : [{ ...WARN_PLAN_OP }];
-      const ordered = [...ops.filter(op => op.op === 'update'), ...(warnFirst ? [...warn, ...ops.filter(isSaveAdd)] : [...ops.filter(isSaveAdd), ...warn]), ...ops.filter(op => op.op !== 'update' && !isSaveAdd(op))];
-      r.turn.requirementOps = withRefs(ordered, (op) => (dw && (isWarnAdd(op) || isSaveAdd(op)) ? [dw] : []));
-      return r;
-    };
-    const x = markOn(makeConvC({ scriptFn: S7_SF, labels: LABELS, generate: gen, planImpl: pi }));
+    const x = markOn(makeConvC({ scriptFn: D1_SF, labels: LABELS, generate: gen, planImpl: dPlan({ warnFirst }) }));
     await x.c.send(REQ); await x.c.send(DELEGATE_U); await x.c.send('採用します');
     const v = x.c.activePlan();
     const sco = scopeOf(x);
     const dId = delegatedIdOf(planCalls[0] && planCalls[0].decisions, 'lock.warn');
     const warnReq = reqRowOf(sco, q => q.createdBy === 'plan' && (q.effects || []).includes('warn'));
     const saveReq = reqRowOf(sco, q => q.createdBy === 'plan' && (q.effects || []).includes('block-save'));
-    const [first, second] = warnFirst ? [warnReq, saveReq] : [saveReq, warnReq];
-    const upFirst = (sco.requirements || []).filter(q => q.createdBy === 'plan' && q.via === 'decisionRefs');
-    assert(!!dId && first.basis === 'delegated' && first.via === 'decisionRefs' && first.inScope === true && (first.decisionLinks || []).some(l => l.id === dId && !l.realized) && upFirst.length === 1 && upFirst[0].id === first.id, `S8-11（${tag}）: 先の操作の要件だけが委ねた判断の実現として上がる（delegated・範囲内）: ${JSON.stringify({ dId, first: [first.id, first.basis, first.via, first.decisionLinks], up: upFirst.map(q => q.id) })}`);
-    assert(second.basis === 'planner' && !second.via && second.inScope === false && second.stripped === true && (second.decisionLinks || []).some(l => l.id === dId && l.realized === true), `S8-12（${tag}）: 後の操作の要件は realized で残り、planner として範囲外（外した）: ${JSON.stringify({ second: [second.id, second.basis, second.via, second.inScope, second.stripped, second.decisionLinks] })}`);
-    const lt = linkedText(finalHtml(x));
-    assert(warnFirst ? (/「備考」を警告を出す/.test(lt) && !/保存を止める/.test(lt) && noSave(v && v.plan)) : (/保存を止める/.test(lt) && !/警告を出す/.test(lt) && !effectsOfCust(((v && v.plan.customizations) || []).find(c => c.customizationId === 'C1')).includes('memo:warn')), `S8-13（${tag}）: 詳細の「決定事項の実現として計画が足した動作」は上がった要件の効果だけ: ${lt.slice(0, 200)}`);
+    const r6 = reqRowOf(sco, q => q.id === 'R6');
+    const g1 = gen.seen.filter(g => g.cid === 'C1' && v && g.version === v.version)[0] || null;
+    assert(!!dId && r6.basis === 'delegated' && warnReq.basis === 'delegated' && warnReq.via === 'decisionRefs' && warnReq.inScope === true && (warnReq.decisionLinks || []).some(l => l.id === dId && l.verdict === 'match') && !!g1 && JSON.stringify(effKeys(g1.requiredEffects)) === JSON.stringify(['amount:lock', 'memo:warn']) && g1.requiredEffects.some(e => e.field === 'memo' && e.effect === 'warn' && (e.requirementIds || []).includes(warnReq.id)),
+      `S8-11（${tag}）: 委ねた警告は D の実現（delegated・範囲内・生成の必須の効果に警告の要件の id つき）: ${JSON.stringify({ dId, warn: [warnReq.id, warnReq.basis, warnReq.via, warnReq.inScope, warnReq.decisionLinks], req: g1 && effKeys(g1.requiredEffects) })}`);
+    assert(saveReq.basis === 'planner' && !saveReq.via && saveReq.inScope === false && saveReq.out === 'adds-effect' && saveReq.stripped === true && (saveReq.decisionLinks || []).some(l => l.id === dId && l.verdict === 'mismatch') && noSave(v && v.plan) && noSave(v && v.gatewayPlan) && !candidatesOf(v).length,
+      `S8-12（${tag}）: 混入した保存禁止は X(D) に無いので D の実現にしない（planner として範囲外・計画から外す。判断の候補にもしない）: ${JSON.stringify({ save: [saveReq.id, saveReq.basis, saveReq.via, saveReq.inScope, saveReq.out, saveReq.stripped, saveReq.decisionLinks] })}`);
+    const html = finalHtml(x), shut = shutOf(html);
+    const sec = (shut.match(/仮案から変わった点と理由[\s\S]*?(?=実現できない点|反映先と主な影響|$)/) || [''])[0];
+    assert(/計画で足した: 「備考」に警告を出します（おまかせにした「備考の警告」の実現として）/.test(sec) && !/保存/.test((sec.match(/計画で足した:[^\n]*/) || [''])[0]) && !/判断が残っています/.test(shut) && /依頼に無い「[^」]*保存の停止」は入れていません/.test(shut),
+      `S8-13（${tag}）: 計画で残した業務上の追加は、通常表示の「仮案から変わった点と理由」に対象・動作・理由を短く出す（外した保存禁止は「依頼に無い」の 1 行だけ）: ${sec.slice(0, 240)}`);
+    dOrders[warnFirst ? 'wf' : 'sf'] = dSummaryOf(x, gen);
   });
 }
+await section(async () => {
+  assert(!!dOrders.wf && !!dOrders.sf && JSON.stringify(dOrders.wf) === JSON.stringify(dOrders.sf), `S8-14: (d1) 警告 → 保存禁止 と 保存禁止 → 警告 で結果が同じ（要件の根拠・範囲・生成の必須の効果・計画・通常表示の追加と候補）: ${JSON.stringify(dOrders)}`);
+});
+const dOrders2 = {};
+for (const warnFirst of [true, false]) {
+  await section(async () => {
+    //   (d2) 採用の時点に判断の構造が無い形（今の S7_SF の素材）: どちらも AI の id だけでは上げず、通常表示に判断の候補として両方を一度に出す（委ねた警告を黙って消さない・保存禁止を黙って入れない）
+    const tag = warnFirst ? '警告 → 保存禁止' : '保存禁止 → 警告';
+    planCalls.length = 0;
+    const gen = recordingGenerate(['good']);
+    const x = markOn(makeConvC({ scriptFn: S7_SF, labels: LABELS, generate: gen, planImpl: dPlan({ warnFirst }) }));
+    await x.c.send(REQ); await x.c.send(DELEGATE_U);
+    const asks = x.calls.ask.length;
+    await x.c.send('採用します');
+    const v = x.c.activePlan();
+    const sco = scopeOf(x);
+    const warnReq = reqRowOf(sco, q => q.createdBy === 'plan' && (q.effects || []).includes('warn'));
+    const saveReq = reqRowOf(sco, q => q.createdBy === 'plan' && (q.effects || []).includes('block-save'));
+    const g1 = gen.seen.filter(g => g.cid === 'C1' && v && g.version === v.version)[0] || null;
+    assert([warnReq, saveReq].every(q => q.basis === 'planner' && !q.via && q.inScope === false && q.out === 'candidate' && (q.decisionLinks || []).some(l => l.verdict === 'unverified')) && !!g1 && JSON.stringify(effKeys(g1.requiredEffects)) === JSON.stringify(['amount:lock']) && noSave(v && v.plan),
+      `S8-15（${tag}）: 構造の無い委任に結び付けた警告も保存禁止も上げない（判断の候補・必須の効果に入れない）: ${JSON.stringify({ warn: [warnReq.basis, warnReq.inScope, warnReq.out], save: [saveReq.basis, saveReq.inScope, saveReq.out], req: g1 && effKeys(g1.requiredEffects) })}`);
+    const html = finalHtml(x), shut = shutOf(html);
+    const cands = shut.match(/おまかせにした「備考の警告」は/g) || [];
+    const cand = (shut.match(/判断が残っています[\s\S]*?入れるものを伝えてください/) || [''])[0];
+    assert(cands.length === 1 && /おまかせにした「備考の警告」は、計画の案と結び付けを確かめられないため、まだ入れていません。計画の案: 「備考」に警告を出す／「金額」「明細」の保存を止める。入れるものを伝えてください/.test(cand) && x.calls.ask.length === asks && x.calls.propose.length === 2,
+      `S8-16（${tag}）: 通常表示に判断が残っていることを一度に示す（1 つの文に両方の計画の案。別のカード・質問は増やさない）: ${cand.slice(0, 260)}`);
+    dOrders2[warnFirst ? 'wf' : 'sf'] = dSummaryOf(x, gen);
+  });
+}
+await section(async () => {
+  assert(!!dOrders2.wf && !!dOrders2.sf && JSON.stringify(dOrders2.wf) === JSON.stringify(dOrders2.sf), `S8-17: (d2) 警告 → 保存禁止 と 保存禁止 → 警告 で結果が同じ: ${JSON.stringify(dOrders2)}`);
+});
+await section(async () => {
+  //   (d3) 元の動作を複数の要件で実現する形: 委ねた警告を PC（C1）とモバイル（C2）の 2 つの要件で実現する（どちらも X(D) に入る）→ 両方 D の実現として残る（先の 1 つだけにしない）
+  planCalls.length = 0;
+  const gen = recordingGenerate(['good']);
+  const warns = [{ ...WARN_PLAN_OP, behavior: '備考が空なら警告を出す（PC）', planRefs: ['C1'] }, { ...WARN_PLAN_OP, behavior: '備考が空なら警告を出す（モバイル）', planRefs: ['C2'] }];
+  const x = markOn(makeConvC({ scriptFn: D1_SF, labels: LABELS, generate: gen, planImpl: dPlan({ warnFirst: true, warns }) }));
+  await x.c.send(REQ); await x.c.send(DELEGATE_U); await x.c.send('採用します');
+  const v = x.c.activePlan();
+  const sco = scopeOf(x);
+  const ws = (sco.requirements || []).filter(q => q.createdBy === 'plan' && (q.effects || []).includes('warn'));
+  const g1 = gen.seen.filter(g => g.cid === 'C1' && v && g.version === v.version)[0] || null;
+  const g2 = gen.seen.filter(g => g.cid === 'C2' && v && g.version === v.version)[0] || null;
+  const html = finalHtml(x);
+  assert(ws.length === 2 && ws.every(q => q.basis === 'delegated' && q.via === 'decisionRefs' && q.inScope === true) && !!g1 && !!g2 && effKeys(g1.requiredEffects).includes('memo:warn') && effKeys(g2.requiredEffects).includes('memo:warn') && g1.requiredEffects.some(e => e.effect === 'warn' && (e.requirementIds || []).includes(ws.find(q => q.planRefs.includes('C1')).id)) && g2.requiredEffects.some(e => e.effect === 'warn' && (e.requirementIds || []).includes(ws.find(q => q.planRefs.includes('C2')).id)) && noSave(v && v.plan) && /計画で足した: 「備考」に警告を出します（おまかせにした「備考の警告」の実現として）/.test(shutOf(html)),
+    `S8-18: 委ねた警告を PC とモバイルの 2 つの要件で実現 → 両方 D の実現（PC とモバイルの生成の必須の効果に警告）。保存禁止は外れる: ${JSON.stringify({ ws: ws.map(q => [q.id, q.basis, q.planRefs]), c1: g1 && effKeys(g1.requiredEffects), c2: g2 && effKeys(g2.requiredEffects) })}`);
+});
 
 // =========================================================
 console.log('\n--- §S6. 画面: 範囲外を外した customization の生成に渡す requirement の文 ---');
@@ -804,6 +923,43 @@ await section(async () => {
   assert(v && strippedOf(v).some(st => st.field === 'amount' && st.effect === 'block-save' && st.reason === 'unattributed') && sg.calls.length >= 1 && ctx, `前提: 画面で範囲外の保存禁止（fields[].effects だけ）を外して生成した: ${JSON.stringify({ stripped: strippedOf(v), gen: sg.calls.length })}`);
   assert(custText.includes(REQ_S) && !custText.includes('保存') && reqRow && reqRow.text.includes(REQ_S) && !/保存/.test(reqRow.text) && v.plan.customizations[0].requirement === CUST_TEXT, `S6-1: 生成工程に送る customization の requirement と「満たすべき要件」の customization の行は、範囲内の要件の文（利用者の原文の引用）。計画の文は書き換えない: ${JSON.stringify({ custText, reqRow })}`);
   assert(ctx && (ctx.verification.requiredEffects || []).every(e => e.effect !== 'block-save'), 'S6-2: 必須の効果にも保存禁止は無い');
+});
+
+// =========================================================
+console.log('\n--- §S9. 画面: 判断の候補は最終案の通常表示と承認の欄の確認項目に一度に出す（再検証前の指示 §1・§2） ---');
+await section(async () => {
+  //   仮案の判断「案件名の警告」を「そちらで決めて」と委ね（要件は作らない）、計画の AI が警告を proposed で足す（印の無い Gateway・未実現の委任）。
+  //   警告は黙って入れず（生成の必須の効果に入らない）、黙って消さず（最終案の通常表示と承認の欄の確認項目に同じ文を一度に出す）。別のカード・質問は増えない
+  const REQ_9 = '承認待ちでは金額を変更できなくして';
+  const DEL_9 = '案件名の警告を出すかは、そちらで決めてください';
+  const Q9 = Q('lock.warn', '案件名の警告', '差戻し後に案件名が空のとき警告を出しますか', ['出す', '出さない'], '出す', '差戻し後の入力の案内が変わります', false);
+  const B9 = B('承認待ちでは金額を変更できなくする', 'user');
+  const script9 = ({ utterance: u, previous: p }) => {
+    if (u === REQ_9) return { reply: '承認待ちでは金額を編集不可にします。', intent: 'propose', proposal: { behaviors: [B9], assumptions: [], decisions: [Q9], approach: { standard: [], js: ['承認待ちの金額の編集不可'] }, cannot: [] }, turn: { ops: [], answers: [], requirementOps: [req('add', { target: '金額', condition: '承認待ち', behavior: '金額を編集不可にする', sourceQuotes: [REQ_9], planRefs: ['B1'], effects: ['lock'] })] } };
+    if (u === DEL_9) return { reply: '案件名の警告は出す形で進めます。', intent: 'update', proposal: { behaviors: [B9], assumptions: [A('lock.warn', '案件名の警告', '差戻し後に案件名が空なら警告を出す', '出さないこともできます')], decisions: [], approach: { standard: [], js: ['承認待ちの金額の編集不可'] }, cannot: [] }, turn: { ops: [], answers: [{ id: K.idBy(p && p.decisions, d => d.key === 'lock.warn'), kind: 'delegated', text: '', quote: DEL_9 }], requirementOps: [] } };
+    return null;
+  };
+  const raw9 = (goal) => { const b = K.PLAN_V1(goal); const c = K.custLock('amount', { requirement: '承認待ちでは金額を編集不可にし、差戻し後に案件名が空なら警告を出す', fields: [{ code: 'ステータス', access: 'READ' }, { code: 'amount', access: 'CONTROL', condition: 'ステータス in ("承認待ち")', effects: ['lock'] }, { code: 'case_name', access: 'CONTROL', condition: 'ステータス in ("作成中")', effects: ['warn'] }] });
+    return { ...b, plan: { ...b.plan, solution: 'CUSTOMIZATION', assessment: { ...b.plan.assessment, summary: '承認待ちでは金額を編集不可にします。' }, steps: [mkStep('C1', 'CUSTOMIZATION_REQUIRED', 'JS', null, { customizationId: 'C1' }, { title: 'JavaScript', solution: 'CUSTOMIZATION' })], customizations: [c] },
+      turn: { reply: '承認待ちでは金額を編集不可にします。', requirementOps: [{ op: 'update', id: 'R1', target: '金額', condition: '承認待ち', behavior: '金額を編集不可にする', exceptions: [], decision: 'decided', disposition: 'adopted', sourceQuotes: [REQ_9], planRefs: ['C1'], effects: ['lock'], note: '' }, { op: 'add', target: '案件名', condition: '差戻し後', behavior: '案件名が空なら警告を出す', exceptions: [], decision: 'proposed', disposition: 'adopted', sourceQuotes: [], planRefs: ['C1'], effects: ['warn'], note: '' }], utteranceCoverage: [] } }; };
+  const sg = K.screenGenerate({ field: 'amount', targetFile: 'amountLock.js' });
+  const m = K.mount({ health: K.HEALTH_V, scriptFn: script9, planImpl: K.planImplOf(raw9), generateImpl: sg.impl, liveBase: true });
+  await K.ticks();
+  await m.panel.send(REQ_9); await K.ticks(10);
+  await m.panel.send(DEL_9); await K.ticks(10);
+  const asks = m.calls.ask.length;
+  await m.panel.send('採用します'); await K.ticks(30);
+  const v = m.conv().activePlan();
+  const ctx = sg.calls.slice(-1)[0] || null;
+  await K.waitUntil(() => m.panel.finalPrecheck().status === 'ready', 60);
+  const pre = m.panel.finalPrecheck();
+  const confs = ((pre.items && pre.items.confirmations) || []).map(x => (typeof x === 'string' ? x : x.text));
+  const chat = stripC(m.chat().replace(/<details[\s\S]*?<\/details>/g, ''));
+  const SENT = 'おまかせにした「案件名の警告」は、計画の案と結び付けを確かめられないため、まだ入れていません。計画の案: 「案件名」に警告を出す。入れるものを伝えてください';
+  assert(!!v && candidatesOf(v).length === 1 && !!ctx && (ctx.verification.requiredEffects || []).every(e => e.effect !== 'warn') && v.final && v.final.approvable, `S9-1 前提: 画面で委ねた警告（計画の AI の proposed）は判断の候補（生成の必須の効果に入らない・最終案は承認できる）: ${JSON.stringify({ cand: v && candidatesOf(v), req: ctx && ctx.verification.requiredEffects })}`);
+  const changedSec = (chat.match(/仮案から変わった点と理由[\s\S]*?(?=反映先と主な影響|実現できない点|$)/) || [''])[0];
+  assert(changedSec.includes(`判断が残っています${SENT}`) && changedSec.split(SENT).length === 2 && confs.filter(t => t === `判断が残っています（この最終案には入っていません）: ${SENT}`).length === 1 && m.calls.ask.length === asks && m.msgs().filter(x => x.type === 'FINAL').length === 1,
+    `S9-2: 最終案の通常表示（仮案から変わった点と理由）と承認の欄の確認項目に、判断が残っていることを同じ文で 1 回ずつ示す（別のカード・質問は増えない）: ${JSON.stringify({ confs, sec: changedSec.slice(0, 260) })}`);
 });
 
 console.log(`\n${state.passed} passed, ${state.failed} failed`);

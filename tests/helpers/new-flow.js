@@ -165,7 +165,8 @@ function createNewFlowKit(T) {
     };
   }
   //   §0f.5 の 3（2026-10-09）: scriptFn = 仮案の台本（既定は script）を差し替えられる（実機の仮案の文を画面で描く回帰用）
-  function mount({ health = HEALTH, proposeGate = null, planImpl = null, generateImpl = null, extra = null, liveBase = false, scriptFn = script } = {}) {
+  //   2026-10-10（再検証前の指示 §4）: clientWrap = 偽の session.client を包む関数（送られた引数の budget を記録し、応答に Gateway の費用の記録 budgetMeta を足す回帰用）
+  function mount({ health = HEALTH, proposeGate = null, planImpl = null, generateImpl = null, extra = null, liveBase = false, scriptFn = script, clientWrap = null } = {}) {
     const storage = makeStorage();
     const settings = KTAiClient.createSettingsStore({ storage, host: 't.cybozu.com' });
     settings.setConsent(true);
@@ -189,7 +190,7 @@ function createNewFlowKit(T) {
       },
       async generate(a) { if (generateImpl) return generateImpl(a); throw new Error('not used'); },
     };
-    const session = { status() { return { connected: true, apiBase: 'https://gw.test', refreshExpiresAt: '2099-01-01T00:00:00Z', scope: { product: 'toolkit', feature: 'assistant-qa,change-planner,customization-generator', domain: 't.cybozu.com' } }; }, async migrateLegacy() { return false; }, async refresh() { return {}; }, async disconnect() { return { revoked: true }; }, client };
+    const session = { status() { return { connected: true, apiBase: 'https://gw.test', refreshExpiresAt: '2099-01-01T00:00:00Z', scope: { product: 'toolkit', feature: 'assistant-qa,change-planner,customization-generator', domain: 't.cybozu.com' } }; }, async migrateLegacy() { return false; }, async refresh() { return {}; }, async disconnect() { return { revoked: true }; }, client: typeof clientWrap === 'function' ? clientWrap(client) : client };
     const flow = { start: async () => ({}), cancel() { }, reopen: () => false, state: () => ({ phase: 'idle' }), isRunning: () => false };
     const host = makeFakeHost();
     const mock = makeKintoneMock(INPUTS.data, { jsSources: [] });
