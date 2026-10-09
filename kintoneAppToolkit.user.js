@@ -24732,7 +24732,9 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
      * @param {object|null} plan 計画（customizations）
      * @param {object} o { labels（フィールドのコード → 名前。対象のフィールドの照合に使う）, delegationOpen, possibleSince }
      * @returns {{ inIds: Set<string>, out: Map<string, { reason: 'suggestion'|'adds-effect', customizationIds?: string[], effects?: string[] }>, eIn: Map<string, Set<string>>, undetermined: Set<string>,
-     *   eInField: Map<string, Map<string, Set<string>>>, noMaterial: Map<string, Set<string>>, possible: Map<string, { reason: 'delegation', customizationIds: string[], effects: string[] }> }}
+     *   eInField: Map<string, Map<string, Set<string>>>, noMaterial: Map<string, Set<string>>, possible: Map<string, { reason: 'delegation', customizationIds: string[], effects: string[] }>,
+     *   linked: Array<{ customizationId, field, effect, requirementIds: string[], decisionIds: string[] }> }}
+     *   linked = 決定事項の結び付き（scope.via decisionRefs）で範囲内に上がった要件が、それを除いた範囲内の要件の効果に無い効果を足すもの（外さない。詳細に出す）
      */
     function requirementScopeOf(reqs, plan, { labels = null, delegationOpen = false, possibleSince = null } = {}) {
       const sinceOk = (r) => possibleSince == null || (Number(r.updatedIn ?? r.createdIn) || 0) >= Number(possibleSince);
@@ -24798,7 +24800,40 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
         }
         out.set(r.id, { reason: 'adds-effect', ...info });
       }
-      return { inIds, out, eIn, undetermined, eInField, noMaterial, possible };
+      //   §0f.2 の 9（2026-10-09・前の確認の結び付けの誤り）: 決定事項の結び付きで範囲内に上がった要件（scope.via decisionRefs）が、それを除いた範囲内の要件の効果に
+      //   無い効果を足すもの（linked）。外さない（承認は止めない）。最終案の詳細「決定事項の実現として計画が足した動作」に出す（計画の AI が付ける構造は誤りうる）。
+      //   比べ方は上と同じ（範囲内の要件の対象がフィールドに決まるときはフィールドの単位、そうでなければ customization の単位）。effects を持たない要件が結び付く c は判定しない。
+      //   フィールドは、要件の対象が c のフィールドに決まればそのフィールド、決まらなければ計画の c のフィールドのうちその効果を持つもの
+      const viaLink = (r) => !!(r && r.scope && r.scope.via === 'decisionRefs' && SCOPE_IN_BASES.includes(scopeBasisOf(r)));
+      const linkedBy = new Map();
+      for (const r of definite.filter(viaLink)) {
+        const ef = reqEffectsOf(r);
+        if (!ef || !ef.length) continue;
+        const dIds = [...new Set((Array.isArray(r.decisionLinks) ? r.decisionLinks : []).filter(l => l && !l.realized && typeof l.id === 'string').map(l => l.id))];
+        for (const c of custs.filter(x => Array.isArray(r.planRefs) && r.planRefs.includes(x.customizationId))) {
+          const cid = c.customizationId;
+          const base = definite.filter(x => !viaLink(x) && Array.isArray(x.planRefs) && x.planRefs.includes(cid));
+          if (base.some(x => !reqEffectsOf(x))) continue;
+          const tfOf = fieldOfIn.get(cid);
+          const setC = new Set(base.flatMap(x => reqEffectsOf(x)));
+          const withEf = base.filter(x => reqEffectsOf(x).length);
+          const byField = withEf.every(x => tfOf(x)) ? new Map() : null;
+          if (byField) for (const x of withEf) { const k = String(tfOf(x).code); const fs = byField.get(k) || new Set(); for (const e of reqEffectsOf(x)) fs.add(e); byField.set(k, fs); }
+          const tf = tfOf(r);
+          const baseOf = byField && withEf.length && tf && byField.has(String(tf.code)) ? byField.get(String(tf.code)) : setC;
+          for (const e of ef.filter(x => !baseOf.has(x))) {
+            const fs = tf ? [String(tf.code)] : (Array.isArray(c.fields) ? c.fields : []).filter(f => f && f.code && (ktFieldEffectsOf(f.effects) || []).some(x => x.effect === e)).map(f => String(f.code));
+            for (const field of (fs.length ? fs : [''])) {
+              const k = `${cid}|${field}|${e}`;
+              const g = linkedBy.get(k) || { customizationId: cid, field, effect: e, requirementIds: [], decisionIds: [] };
+              if (!g.requirementIds.includes(String(r.id))) g.requirementIds.push(String(r.id));
+              for (const d of dIds) if (!g.decisionIds.includes(d)) g.decisionIds.push(d);
+              linkedBy.set(k, g);
+            }
+          }
+        }
+      }
+      return { inIds, out, eIn, undetermined, eInField, noMaterial, possible, linked: [...linkedBy.values()] };
     }
     /**
      * 段階 C（C4・R16）: 承認が今も有効か（1 か所で判定）。版・planHash・基準の stamp（baseStamp を渡したとき）・customizeRevision・各候補の candidateHash の一致を見る。
@@ -25446,26 +25481,59 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
       /** 結び付けで採用の根拠を上げてよい要件の根拠（計画の AI の追加・ai の補足・根拠の無い要件。任意の提案の扱い・利用者の要件は変えない） */
       const LINK_UPGRADABLE = Object.freeze(['planner', 'item-ai', 'unlinked']);
       const MAX_DECISION_LINKS = 16;
-      /** 要件の結び付き（decisionLinks）→ 採用の根拠（値で答えた決定事項があれば item-user、委ねた判断だけなら delegated、無ければ null） */
-      const linkBasisOf = (e) => { const ls = (e && Array.isArray(e.decisionLinks)) ? e.decisionLinks : []; return ls.some(l => l && l.kind === 'user') ? 'item-user' : ls.some(l => l && l.kind === 'delegated') ? 'delegated' : null; };
+      /**
+       * 要件の結び付き（decisionLinks）→ 採用の根拠（値で答えた決定事項があれば item-user、委ねた判断だけなら delegated、無ければ null）。
+       *   前の確認の結び付けの誤り（2026-10-09）: 実現済みの決定事項への結び付き（realized: true）は数えない
+       */
+      const linkBasisOf = (e) => { const ls = ((e && Array.isArray(e.decisionLinks)) ? e.decisionLinks : []).filter(l => l && !l.realized); return ls.some(l => l.kind === 'user') ? 'item-user' : ls.some(l => l.kind === 'delegated') ? 'delegated' : null; };
+      /**
+       * 決定事項（id・仮案の判断の key）が、要件 e とは別の、取り消していない要件ですでに実現されているか（構造だけで決める。自然文は読まない）。
+       *   (a) 仮案の判断の key がある決定事項: lg.itemReqs（または採用の時点の lg.adoption.itemReqs）の key:<key> に e 以外の生きた要件がある
+       *   (b) e 以外の生きた要件が、同じ決定事項の id への実現の結び付き（realized でない decisionLinks）をすでに持つ（前の版か、同じ応答の先の操作）
+       *   任意の提案の扱いの要件（suggestion。採用の既定から外した）は実現として数えない
+       */
+      const decisionRealizedFor = (lg, e, id, key) => {
+        const others = KTAiAnswers.requirementsOf(lg).filter(r => r && r !== e && r.id !== e.id && r.decision !== 'revoked' && scopeBasisOf(r) !== 'suggestion');
+        if (!others.length) return false;
+        const ids = new Set(others.map(r => r.id));
+        if (key) for (const ir of [lg.itemReqs, lg.adoption && lg.adoption.itemReqs]) if (ir && (ir[`key:${key}`] || []).some(rid => ids.has(rid))) return true;
+        return others.some(r => (Array.isArray(r.decisionLinks) ? r.decisionLinks : []).some(l => l && l.id === id && !l.realized));
+      };
       /**
        * この操作の decisionRefs（applyRequirementOps の decisionRefs）のうち、送った決定事項（decisionKinds）に有る id を要件の decisionLinks に積む（重複なし・16 件まで）。
-       *   decisionLinks: [{ id, kind: 'delegated'|'user', key（仮案の判断の key）, at（版） }]
+       *   decisionLinks: [{ id, kind: 'delegated'|'user', key（仮案の判断の key）, at（版）, label（決定事項の見出しか問いの短い文。最終案の詳細の行に使う）, realized? }]
+       *   操作の順（applyRequirementOps の decisionRefs の Map の順）に積み、その決定事項がすでに実現済み（decisionRealizedFor）なら realized: true で残す（採用の根拠には数えない）。
+       *   同じ応答で 2 つの要件が同じ未実現の決定事項に結び付いたら、先の 1 つだけが実現の結び付きになる
        */
-      const noteDecisionLinks = (ch, decisionKinds, version) => {
-        if (!ch || !(decisionKinds instanceof Map) || !decisionKinds.size || !(ch.decisionRefs instanceof Map)) return;
-        for (const e of [...ch.added, ...ch.updated]) {
-          const refs = ch.decisionRefs.get(e.id) || [];
-          const add = refs.map(id => { const k = decisionKinds.get(id); return k ? { id, kind: k.kind === 'delegated' ? 'delegated' : 'user', key: k.key || null, at: version } : null; }).filter(Boolean);
-          if (!add.length) continue;
+      const noteDecisionLinks = (lg, ch, decisionKinds, version) => {
+        if (!lg || !ch || !(decisionKinds instanceof Map) || !decisionKinds.size || !(ch.decisionRefs instanceof Map)) return;
+        const byId = new Map([...ch.added, ...ch.updated].map(e => [e.id, e]));
+        const sig = (l) => `${l.id}|${l.kind}|${l.key || ''}`;
+        for (const [rid, refs] of ch.decisionRefs) {
+          const e = byId.get(rid);
+          if (!e || !Array.isArray(refs) || !refs.length) continue;
           const cur = Array.isArray(e.decisionLinks) ? e.decisionLinks : [];
-          const sig = (l) => `${l.id}|${l.kind}|${l.key || ''}`;
           const have = new Set(cur.map(sig));
-          e.decisionLinks = [...cur, ...add.filter(l => !have.has(sig(l)))].slice(-MAX_DECISION_LINKS);
+          const add = [];
+          for (const id of refs) {
+            const k = decisionKinds.get(id);
+            if (!k) continue;
+            const l = { id, kind: k.kind === 'delegated' ? 'delegated' : 'user', key: k.key || null, at: version, ...(k.label ? { label: k.label } : {}) };
+            if (have.has(sig(l))) continue;
+            if (decisionRealizedFor(lg, e, id, l.key)) l.realized = true;
+            add.push(l); have.add(sig(l));
+          }
+          if (add.length) e.decisionLinks = [...cur, ...add].slice(-MAX_DECISION_LINKS);
         }
       };
-      /** 送った決定事項 → decisionKinds（id → { kind, key }）。keyOf(d) = 仮案の判断の key（無ければ null） */
-      const decisionKindsOf = (decisions, keyOf = (d) => d.key || null) => new Map((Array.isArray(decisions) ? decisions : []).filter(d => d && typeof d.id === 'string').map(d => [d.id, { kind: d.delegated === true ? 'delegated' : 'user', key: keyOf(d) }]));
+      /** 決定事項の見出し（label。仮案の判断の key と同じ・「確認事項」だけのときは問いの文）の短い文（最終案の詳細の行に使う。構造化した値だけ） */
+      const decisionLabelOf = (d, key = null) => {
+        const cut = (s, n) => { const x = String(s ?? '').replace(/\s+/g, ' ').trim(); return x.length > n ? `${x.slice(0, n)}…` : x; };
+        const lb = cut(d && d.label, 40);
+        return lb && lb !== key && lb !== String((d && d.key) || '') && lb !== '確認事項' ? lb : (cut(d && d.question, 50) || lb);
+      };
+      /** 送った決定事項 → decisionKinds（id → { kind, key, label }）。keyOf(d) = 仮案の判断の key（無ければ null） */
+      const decisionKindsOf = (decisions, keyOf = (d) => d.key || null) => new Map((Array.isArray(decisions) ? decisions : []).filter(d => d && typeof d.id === 'string').map(d => { const key = keyOf(d); return [d.id, { kind: d.delegated === true ? 'delegated' : 'user', key, label: decisionLabelOf(d, key) }]; }));
       /**
        * 計画の段階で委ねた判断（「おすすめで」・推奨の無い確認事項の委任・相談の答えへの同意）を計画の系列の台帳 lg.planDelegations に記録する（版 at = その作業で作る版）。
        *   entryIds = 推奨を採用して記録した決定事項（台帳の項目。delegated の印つき。id は決定事項の id）。
@@ -25543,8 +25611,10 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
         //   採用の後に計画の AI が足した要件は planner。利用者の原文の根拠つきの decided（Toolkit が照合済み）になったものは explicit に上げる。
         //   §0f.2 の 9（2026-10-09）: 計画の AI が要件の decisionRefs で決定事項に結び付けたもの（decisionKinds に有る id だけ）は、結び付きを要件の decisionLinks に積み
         //   （update で decisionRefs が上書きされても残す）、委ねた判断なら delegated・値で答えた決定事項なら item-user（利用者の項目と同じ扱い）にする。
-        //   「この作業で判断を委ねたら計画の AI の追加をすべて delegated」にする扱い（delegatedWork）はやめた（結び付きの無い追加は planner として判定する）
-        noteDecisionLinks(ch, decisionKinds, version);
+        //   「この作業で判断を委ねたら計画の AI の追加をすべて delegated」にする扱い（delegatedWork）はやめた（結び付きの無い追加は planner として判定する）。
+        //   前の確認の結び付けの誤り（2026-10-09）: 根拠を上げるのは、その決定事項がまだ実現されていないときだけ（ほかの生きた要件が key:<key> か実現の結び付きで
+        //   実現済みなら realized: true で残し、数えない。その要件は今までどおり planner などとして判定する）
+        noteDecisionLinks(lg, ch, decisionKinds, version);
         for (const e of ch.added) { e.createdBy = createdBy; e.scope = { basis: e.decision === 'decided' ? 'explicit' : (linkBasisOf(e) || 'planner'), by: createdBy, at: version, ...(e.decision !== 'decided' && linkBasisOf(e) ? { via: 'decisionRefs' } : {}) }; }
         for (const e of ch.updated) {
           if (e.decision === 'decided' && scopeBasisOf(e) !== 'explicit') { e.scope = { basis: 'explicit', by: createdBy, at: version, ...(e.scope && e.scope.basis ? { from: e.scope.basis } : {}) }; continue; }
@@ -25657,9 +25727,11 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
        * @returns {{ stripped: Array, issues: Array, possible: Array, reqText: object }}
        */
       function scopeStripPlans(plan, gatewayPlan, lg) {
-        const res = { stripped: [], issues: [], possible: [], reqText: {} };
+        const res = { stripped: [], issues: [], possible: [], reqText: {}, linked: [] };
         const sc = scopeOfLedger(lg, plan);
         if (!sc || !plan || !Array.isArray(plan.customizations)) return res;
+        //   §0f.2 の 9（2026-10-09）: 決定事項の結び付きで範囲内に上がった要件が足した効果（外さない。最終案の詳細に出す）
+        res.linked = (Array.isArray(sc.linked) ? sc.linked : []).map(x => ({ customizationId: x.customizationId, field: x.field, effect: x.effect, requirementIds: [...x.requirementIds], decisionIds: [...x.decisionIds] }));
         const live = KTAiAnswers.requirementsOf(lg).filter(r => r && r.decision !== 'revoked');
         const withEff = (r) => (reqEffectsOf(r) || []).length > 0;
         const outReqs = live.filter(r => sc.out.has(r.id) && withEff(r));
@@ -25711,7 +25783,7 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
       /** registerPlan の照合: この版の計画（v.plan と v.gatewayPlan。版のもの）に scopeStripPlans を当てて、記録を版に持つ */
       function scopePlanOf(v, lg) {
         const res = scopeStripPlans(v.plan, v.gatewayPlan, lg);
-        v.scopeStripped = res.stripped; v.scopeIssues = res.issues; v.scopePossible = res.possible; v.scopeRequirementText = res.reqText;
+        v.scopeStripped = res.stripped; v.scopeIssues = res.issues; v.scopePossible = res.possible; v.scopeRequirementText = res.reqText; v.scopeLinked = res.linked;
         state.metrics.scopeStripped = (state.metrics.scopeStripped || 0) + v.scopeStripped.length;
       }
       /**
@@ -27319,8 +27391,27 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
           const effGroups = new Map();
           for (const s of strippedNow) { const names = effGroups.get(s.effect) || []; const nm = (fieldLabels()[s.field] || s.field); if (!names.includes(nm)) names.push(nm); effGroups.set(s.effect, names); }
           const notice = effGroups.size ? `依頼に無い${[...effGroups].map(([e, names]) => `「${names.join('・')}の${KT_EFFECT_NOUN_JA[e] || KT_EFFECT_NEED_JA[e] || e}」`).join('')}は入れていません（詳細）` : '';
+          //   §0f.2 の 9（2026-10-09・前の確認の結び付けの誤り）: 決定事項の実現として計画が足した動作（v.scopeLinked。外していない）。
+          //   行は「フィールドの名前を効果の言葉」と、結び付いた決定事項の見出しか問いの短い文（決定事項の構造化した値だけ。番号は出さない）
+          const lgF = state.ledgers.get(v.planId) || null;
+          const dLabelOf = (id) => {
+            if (!lgF) return '';
+            for (const r of KTAiAnswers.requirementsOf(lgF)) for (const l of (Array.isArray(r.decisionLinks) ? r.decisionLinks : [])) if (l && l.id === id && l.label) return String(l.label);
+            const e = (lgF.entries || []).find(x => KTAiAnswers.decisionIdOf(x) === id);
+            if (e) return decisionLabelOf({ label: e.label, question: e.question, key: e.draftKey || '' }, e.draftKey || null);
+            const pd = (Array.isArray(lgF.planDelegations) ? lgF.planDelegations : []).find(x => x.id === id);
+            return pd ? decisionLabelOf(pd) : '';
+          };
+          const linkedRows = new Map();
+          for (const s of (Array.isArray(v.scopeLinked) ? v.scopeLinked : [])) {
+            const k = `${s.field}|${s.effect}`;
+            const row = linkedRows.get(k) || { text: `${s.field ? `${fieldName(s.field)}を` : ''}${KT_EFFECT_NEED_JA[s.effect] || s.effect}`, labels: [] };
+            for (const id of s.decisionIds || []) { const lb = dLabelOf(id); if (lb && !row.labels.includes(lb)) row.labels.push(lb); }
+            linkedRows.set(k, row);
+          }
           const scopeOut = { lines: [...new Map(strippedNow.map(s => [`${s.field}|${s.effect}`, `${fieldName(s.field)}を${KT_EFFECT_NEED_JA[s.effect] || s.effect}`])).values()].slice(0, 8), remaining: (v.scopeIssues || []).filter(x => x && x.kind !== 'delegation').length, notice,
-            possible: [...new Map((v.scopePossible || []).map(s => [`${s.field}|${s.effect}`, `${fieldName(s.field)}を${KT_EFFECT_NEED_JA[s.effect] || s.effect}`])).values()].slice(0, 8) };
+            possible: [...new Map((v.scopePossible || []).map(s => [`${s.field}|${s.effect}`, `${fieldName(s.field)}を${KT_EFFECT_NEED_JA[s.effect] || s.effect}`])).values()].slice(0, 8),
+            linked: [...linkedRows.values()].slice(0, 8).map(x => `${x.text}（${x.labels.length ? `${x.labels.slice(0, 3).map(l => `「${labeled(l)}」`).join('・')}の` : '決めたことの'}実現として計画が足しました）`) };
           let ready = []; try { ready = v.review && typeof KTPlanExecutor !== 'undefined' && KTPlanExecutor.applyReadiness ? KTPlanExecutor.applyReadiness(p, v.review) : []; } catch (e) { ready = []; }
           const settingSteps = ready.filter(x => x.apply !== 'JS' && x.apply !== 'CONFIRM');
           const impact = { lines: (Array.isArray(p.impact) ? p.impact : []).map(x => cut(labeled(x && (x.description || x.text) || ''), 120)).filter(Boolean).slice(0, 4), settings: { total: settingSteps.length, auto: settingSteps.filter(x => x.apply === 'AUTO').length, blocked: blockedSteps.length }, js: [...entries.map(([cid, e]) => ({ customizationId: cid, file: e.generated?.targetFile || '', strategy: e.generated?.strategy || null, status: e.status, ...(e.status === 'failed' && e.failure && e.failure.stop ? { stopped: true } : {}) })), ...notStartedIds.map(cid => ({ customizationId: cid, file: '', strategy: null, status: 'not-started' })), ...unsupported.map(u => ({ customizationId: u.customizationId, file: '', strategy: u.strategy || null, status: 'unsupported', requirement: cut(u.requirement || '', 80) }))] };
@@ -28067,11 +28158,14 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
             adopted: !!lg.adoption, adoption: lg.adoption ? { draftId: lg.adoption.draftId, rev: lg.adoption.rev, items: { ...lg.adoption.items }, delegatedKeys: [...lg.adoption.delegatedKeys], suggestionItems: [...lg.adoption.suggestionItems] } : null,
             version: v ? v.version : null,
             //   §0f.2 の 9（2026-10-09）: 計画の AI が decisionRefs で結び付けた決定事項（id と種類だけ）・根拠を結び付きで決めたか（via）
-            requirements: KTAiAnswers.requirementsOf(lg).map(r => ({ id: r.id, decision: r.decision, basis: scopeBasisOf(r), by: (r.scope && r.scope.by) || null, via: (r.scope && r.scope.via) || null, createdBy: r.createdBy || null, planRefs: [...(r.planRefs || [])], effects: Array.isArray(r.effects) ? [...r.effects] : null, decisionLinks: (Array.isArray(r.decisionLinks) ? r.decisionLinks : []).map(l => ({ id: l.id, kind: l.kind })), inScope: r.decision !== 'revoked' && !(sc && sc.out.has(r.id)), out: sc && sc.out.has(r.id) ? sc.out.get(r.id).reason : null, possible: sc && sc.possible && sc.possible.has(r.id) ? sc.possible.get(r.id).reason : null, stripped: stripped.some(s => (s.requirementIds || []).includes(r.id)) })),
+            requirements: KTAiAnswers.requirementsOf(lg).map(r => ({ id: r.id, decision: r.decision, basis: scopeBasisOf(r), by: (r.scope && r.scope.by) || null, via: (r.scope && r.scope.via) || null, createdBy: r.createdBy || null, planRefs: [...(r.planRefs || [])], effects: Array.isArray(r.effects) ? [...r.effects] : null, decisionLinks: (Array.isArray(r.decisionLinks) ? r.decisionLinks : []).map(l => ({ id: l.id, kind: l.kind, ...(l.realized ? { realized: true } : {}) })), inScope: r.decision !== 'revoked' && !(sc && sc.out.has(r.id)), out: sc && sc.out.has(r.id) ? sc.out.get(r.id).reason : null, possible: sc && sc.possible && sc.possible.has(r.id) ? sc.possible.get(r.id).reason : null, stripped: stripped.some(s => (s.requirementIds || []).includes(r.id)) })),
             scopeStripped: stripped.length, scopeIssues: v && Array.isArray(v.scopeIssues) ? v.scopeIssues.length : 0,
             //   レビューの指摘 row1・row3（2026-10-09）: 外した効果の理由（out-of-scope / unattributed）・委任の実現の可能性として残した効果・未実現の委任があるか
             stripped: stripped.map(s => ({ customizationId: s.customizationId, field: s.field, effect: s.effect, requirementIds: [...s.requirementIds], reason: s.reason || 'out-of-scope' })),
             possible: (v && Array.isArray(v.scopePossible) ? v.scopePossible : []).map(s => ({ customizationId: s.customizationId, field: s.field, effect: s.effect, requirementIds: [...s.requirementIds] })),
+            //   §0f.2 の 9（2026-10-09・前の確認の結び付けの誤り）: 決定事項の結び付きで範囲内に上がった要件が足した効果の数（v.scopeLinked。外していない。最終案の詳細に出す）。
+            //   要件ごとの decisionLinks の realized = 実現済みの決定事項への結び付き（採用の根拠に数えない）
+            linked: v && Array.isArray(v.scopeLinked) ? v.scopeLinked.length : 0,
             delegationOpen: delegationOpenOf(lg),
             //   §0f.2 の 9: decisionRefs の印がある Gateway か（あれば未実現の委任でも可能性の扱いを使わない）・計画の段階の委任の数（id と版だけ）
             decisionRefs: decisionRefsOn(),
@@ -29353,7 +29447,9 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
       const so = fin.scopeOut && Array.isArray(fin.scopeOut.lines) && fin.scopeOut.lines.length ? fin.scopeOut : null;
       //   レビューの指摘 row3 の 2（2026-10-09）: 委ねた判断を実現するために計画が足した可能性がある動作（外していない。判定できないため残した）
       const sp = fin.scopeOut && Array.isArray(fin.scopeOut.possible) && fin.scopeOut.possible.length ? fin.scopeOut.possible : null;
-      const changed = `${changed0}${so ? `<details class="kt-ai-tech kt-ai-final-scope-out" style="margin-top:4px; font-size:11px;"><summary>依頼に無い可能性がある動作（${so.lines.length} 件）</summary>${li(so.lines.map(x => `${esc(x)}（依頼・採用した仮案に無いため、作る JavaScript の必須の動作から外しました）`))}<div style="opacity:.85;">${so.remaining ? '計画の説明の文に残っている可能性があります。' : ''}入れる場合は、そのように伝えてください。</div></details>` : ''}${sp ? `<details class="kt-ai-tech kt-ai-final-scope-possible" style="margin-top:4px; font-size:11px;"><summary>委ねた判断を実現するために計画が足した可能性がある動作（${sp.length} 件）</summary>${li(sp.map(x => `${esc(x)}（おまかせにした判断の実現として残しています）`))}<div style="opacity:.85;">依頼・採用した仮案と照らして決められないため、外していません。入れない場合は、そのように伝えてください。</div></details>` : ''}`;
+      //   §0f.2 の 9（2026-10-09・前の確認の結び付けの誤り）: 決定事項の実現として計画が足した動作（外していない。計画の AI が付けた結び付きは誤りうるので、詳細に名前で出す）
+      const sl = fin.scopeOut && Array.isArray(fin.scopeOut.linked) && fin.scopeOut.linked.length ? fin.scopeOut.linked : null;
+      const changed = `${changed0}${so ? `<details class="kt-ai-tech kt-ai-final-scope-out" style="margin-top:4px; font-size:11px;"><summary>依頼に無い可能性がある動作（${so.lines.length} 件）</summary>${li(so.lines.map(x => `${esc(x)}（依頼・採用した仮案に無いため、作る JavaScript の必須の動作から外しました）`))}<div style="opacity:.85;">${so.remaining ? '計画の説明の文に残っている可能性があります。' : ''}入れる場合は、そのように伝えてください。</div></details>` : ''}${sp ? `<details class="kt-ai-tech kt-ai-final-scope-possible" style="margin-top:4px; font-size:11px;"><summary>委ねた判断を実現するために計画が足した可能性がある動作（${sp.length} 件）</summary>${li(sp.map(x => `${esc(x)}（おまかせにした判断の実現として残しています）`))}<div style="opacity:.85;">依頼・採用した仮案と照らして決められないため、外していません。入れない場合は、そのように伝えてください。</div></details>` : ''}${sl ? `<details class="kt-ai-tech kt-ai-final-scope-linked" style="margin-top:4px; font-size:11px;"><summary>決定事項の実現として計画が足した動作（${sl.length} 件）</summary>${li(sl.map(esc))}<div style="opacity:.85;">計画が決めたことに結び付けて足した動作です（依頼・採用した仮案には書かれていません）。外していません。決めたことと関係が無い・入れない場合は、そのように伝えてください。</div></details>` : ''}`;
       //   C-1 第 4 段（2026-10-09・K-3）: JavaScript ごとの行と必須の動作の行に PC / モバイルを付ける（構造化した platforms。無い古い最終案は付けない）
       const platJa = (ps) => (Array.isArray(ps) && ps.length ? ps.map(p => (p === 'mobile' ? 'モバイル' : 'PC')).join('・') : '');
       const cannotRows = [...fin.cannot.map(x => `${platJa(x.platforms) ? `${esc(platJa(x.platforms))}: ` : ''}${esc(x.text)}${x.next ? `<div style="font-size:11px; opacity:.85;">次の方針: ${esc(x.next)}</div>` : ''}${Array.isArray(x.details) && x.details.length ? `<details class="kt-ai-tech" style="font-size:11px;"><summary>詳細</summary>${x.details.map(esc).join('<br>')}</details>` : ''}`), ...fin.outOfScope.map(x => (typeof x === 'string' ? `対応範囲外: ${esc(x)}` : x.owned ? `この JavaScript の対応範囲外（ほかの手順・JavaScript で扱います）: ${esc(x.text)}` : `担当が計画にありません（計画全体の確認に残します）: ${esc(x.text)}`))];

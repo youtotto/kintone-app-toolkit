@@ -18,6 +18,11 @@
 //        Gateway では、未実現の委任があっても、計画の AI が委ねた判断の id を decisionRefs に付けた警告だけを delegated（範囲内）にし、decisionRefs [] の混入した
 //        保存禁止は外す（v.plan・v.gatewayPlan・台帳・生成の必須の効果）。印の無い古い Gateway は今の possible の扱い（外さずに詳細に出す）。
 //        計画の段階の「おすすめで」（推奨を採用・推奨の無い確認事項の委任）でも同じ（reviseWith の delegatedWork の置き換え）。画面の health の印と送る決定事項の印
+//   §S8 結び付けの誤りの影響を狭める（前の確認の probe-mislink2・2026-10-09）: 結び付けで採用の根拠を上げるのは、その決定事項がまだ実現されていないときだけ
+//        （ほかの生きた要件が仮案の判断の key:<key> か実現の結び付きですでに実現していれば realized: true で残し、根拠に数えない）。結び付きで範囲内に上がった要件が
+//        それを除いた範囲内の要件の効果に無い効果を足すときは、外さずに requirementScopeOf の linked・v.scopeLinked・最終案の詳細「決定事項の実現として計画が足した動作」に出す。
+//        (a) 仮案の段階で実現済みの値で答えた決定事項に計画の AI が保存禁止を結び付ける → planner として外れる／(b) 未実現の値で答えた決定事項 → 上がるが詳細に出る／
+//        (c) 未実現の委任に委ねた警告 → delegated で残り詳細にも出る（§S7 の期待のまま）／(d) 同じ応答で 2 つの要件が同じ未実現の決定事項に結び付く → 先の 1 つだけ上がる
 //
 //   修正前の版（KT_SRC）でも例外で止めずに各 assert を評価する（読み取りの関数が無い版では空の読み取りで落ちる）。§S2 は最初の計画・自動の見直し・差分更新の
 //   3 つの section に分けている（前の section が落ちても後の assert を評価する）
@@ -625,6 +630,158 @@ await section(async () => {
     assert(!!v && sc.decisionRefs === mark && (seen[0] || []).some(d => d.delegated === true) && (seen[0] || []).every(d => !('key' in d)), `S7-13（${mark ? '印あり' : '印なし'}）: 画面は health の decisionRefs の印を読み（${mark}）、Planner Context の決定事項に委ねた判断の印を残す: ${JSON.stringify({ mode: sc.decisionRefs, decisions: (seen[0] || []).map(d => [d.id, d.delegated]) })}`);
   }
 });
+
+// =========================================================
+console.log('\n--- §S8. 結び付けの誤りの影響を狭める（実現済みの決定事項への結び付きは根拠に数えない・結び付きで上がった要件の効果は詳細に出す） ---');
+const VALUE_U = '備考の警告は出してください';
+const B_WARN_U = '差戻し後に備考が空なら警告を出す';
+const S8_REST = { approach: { standard: ['ステータス「部長承認待ち」の追加'], js: ['承認済みの金額の編集不可（PC・モバイル）'] }, cannot: ['明細の行の追加・削除ボタン自体は止められません'] };
+const S8_BEHAVIORS = () => [B(B_LOCK_U, 'user'), B(B_BACK_U, 'user'), B(B_CHECK_U, 'user'), B(B_SAVE_AI, 'ai'), B(B_STATUS_AI, 'ai'), B(B_WARN_U, 'user')];
+/** 計画の AI に送られた決定事項のうち、値で答えた「出す」の決定事項の id（最初の計画は仮案の判断の id・見直しは台帳の決定事項の id） */
+const valueIdOf = (decisions) => ((decisions || []).find(d => d && d.delegated !== true && d.answer === '出す') || {}).id || null;
+const isSaveAdd = (op) => op.op === 'add' && (op.effects || []).includes('block-save');
+const linkedOf = (v) => (v && Array.isArray(v.scopeLinked) ? v.scopeLinked : []);
+const LINKED_RE = /決定事項の実現として計画が足した動作（([0-9]+) 件）/;
+/** 最終案の詳細の「決定事項の実現として計画が足した動作」の折りたたみの中の文（無ければ ''） */
+const linkedText = (html) => stripC((String(html).match(/<details class="kt-ai-tech kt-ai-final-scope-linked"[\s\S]*?<\/details>/) || [''])[0]);
+const shutOf = (html) => stripC(html.replace(/<details[\s\S]*?<\/details>/g, ''));
+/**
+ * 仮案の台本: 判断「備考の警告」に値で答える（委任なし）。realize = 'key'（1 回目の仮案で警告の要件が判断 Q1 に結び付き、答えのターンで decided に直す＝判断の key:<key> で実現済み）/
+ *   'none'（答えのターンで要件を作らない＝未実現）/ 'loose'（probe-mislink2 の形。答えのターンで警告の要件を作るが判断・前提の key に結び付かない＝構造では判定できない）
+ */
+const s8Script = (realize) => (args) => {
+  const r = scopeScript(args);
+  if (args.utterance === REQ && realize === 'key') { r.turn.requirementOps = [...r.turn.requirementOps, req('add', { ...R_WARN, decision: 'undecided', disposition: 'unresolved', sourceQuotes: [], planRefs: ['Q1'], effects: ['warn'] })]; return r; }
+  if (args.utterance !== VALUE_U) return r;
+  const ops = realize === 'key' ? [req('update', { id: 'R6', ...R_WARN, decision: 'decided', sourceQuotes: [VALUE_U], planRefs: ['B6'], effects: ['warn'] })]
+    : realize === 'loose' ? [req('add', { ...R_WARN, decision: 'decided', sourceQuotes: [VALUE_U], planRefs: ['B1'], effects: ['warn'] })] : [];
+  return { reply: '備考の警告を出します。', intent: 'update', proposal: { behaviors: S8_BEHAVIORS(), assumptions: [], decisions: [], ...S8_REST },
+    turn: { ops: [], answers: [{ id: K.idBy(args.previous && args.previous.decisions, d => d.key === 'lock.warn'), kind: 'value', text: '出す', quote: '出してください' }], requirementOps: ops } };
+};
+/** 計画の偽物: 混入した保存禁止（最初の計画・自動の見直しのどちらでも足す）に、値で答えた決定事項の id を decisionRefs で付ける（誤った結び付け）。ほかの操作は [] */
+const s8PlanValue = ({ refs }) => (args) => {
+  const r = planImplOf({ refs })(args);
+  const did = valueIdOf(args.decisions);
+  r.turn.requirementOps = withRefs(r.turn.requirementOps, (op) => (isSaveAdd(op) && did ? [did] : []));
+  return r;
+};
+const S8_REFS = { R1: REFS_MAIN.R1, R3: REFS_MAIN.R3, R4: REFS_MAIN.R4, R5: REFS_MAIN.R5 };
+await section(async () => {
+  //   部品: requirementScopeOf の linked（結び付きで範囲内に上がった要件が、それを除いた範囲内の要件の効果に無い効果を足すもの。外さない）
+  const scopeFn = typeof KTAiConversation.requirementScopeOf === 'function' ? KTAiConversation.requirementScopeOf : null;
+  const plan = { customizations: [{ customizationId: 'C1', fields: [{ code: 'ステータス', access: 'READ' }, { code: 'amount', access: 'CONTROL', condition: ST_OK, effects: ['lock', 'block-save'] }, { code: 'items', access: 'CONTROL', condition: ST_OK, effects: ['block-save'] }, { code: 'memo', access: 'CONTROL', condition: 'ステータス in ("作成中")', effects: ['warn'] }] }] };
+  const rq = (id, o) => ({ id, target: '', condition: '', behavior: 'x', decision: 'proposed', planRefs: ['C1'], ...o });
+  const R1 = rq('R1', { target: '金額', decision: 'decided', effects: ['lock'], scope: { basis: 'explicit' } });
+  const R2 = rq('R2', { target: '備考', effects: ['warn'], scope: { basis: 'delegated', via: 'decisionRefs' }, decisionLinks: [{ id: 'D1', kind: 'delegated' }] });
+  const R3 = rq('R3', { target: '金額と明細', effects: ['block-save'], scope: { basis: 'item-user', via: 'decisionRefs' }, decisionLinks: [{ id: 'D2', kind: 'user' }, { id: 'D1', kind: 'delegated', realized: true }] });
+  const R4 = rq('R4', { target: '備考', effects: ['warn'], scope: { basis: 'delegated' } });
+  const run = (reqs) => { const s = scopeFn ? scopeFn(reqs, plan, { labels: LABELS }) || {} : {}; return { s, linked: Array.isArray(s.linked) ? s.linked.map(x => `${x.customizationId}:${x.field}:${x.effect}:${(x.requirementIds || []).join('|')}:${(x.decisionIds || []).join('|')}`).sort() : null }; };
+  const a = run([R1, R2, R3]);
+  assert(JSON.stringify(a.linked) === JSON.stringify(['C1:amount:block-save:R3:D2', 'C1:items:block-save:R3:D2', 'C1:memo:warn:R2:D1']) && a.s.inIds && a.s.inIds.has('R2') && a.s.inIds.has('R3'), `S8-0a: 結び付きで上がった要件の効果のうち、それを除いた範囲内の要件の効果に無いものを linked に返す（対象が決まればそのフィールド・決まらなければ計画のその効果のフィールド。実現済みの結び付きの id は入れない。外さない）: ${JSON.stringify(a.linked)}`);
+  const b = run([R1, R2, R3, R4]);
+  assert(JSON.stringify(b.linked) === JSON.stringify(['C1:amount:block-save:R3:D2', 'C1:items:block-save:R3:D2']), `S8-0b: 結び付きで上がっていない範囲内の要件（仮案の委ねた判断に結び付いた警告）が持つ効果は linked にしない: ${JSON.stringify(b.linked)}`);
+  const c = run([R1, rq('R5', { target: '金額', decision: 'decided', scope: { basis: 'explicit' } }), R2]);
+  assert(Array.isArray(c.linked) && c.linked.length === 0, `S8-0c: effects を持たない範囲内の要件が結び付く customization は判定しない（linked なし）: ${JSON.stringify(c.linked)}`);
+});
+await section(async () => {
+  //   (a) probe-mislink2 の形（値で答えた D1 は仮案の段階で警告の要件に実現済み＝判断の key:<key>）で、計画の AI が混入した保存禁止に decisionRefs [D1] を付ける
+  //   → 印がある Gateway でも保存禁止は planner として外れる（v.plan・v.gatewayPlan・台帳・生成の必須の効果）。結び付きは realized: true で残る
+  planCalls.length = 0;
+  const gen = recordingGenerate(['good']);
+  const x = markOn(makeConvC({ scriptFn: s8Script('key'), labels: LABELS, generate: gen, planImpl: s8PlanValue({ refs: { ...S8_REFS, R6: REFS_MAIN.R6 } }) }));
+  await x.c.send(REQ); await x.c.send(VALUE_U);
+  const asks = x.calls.ask.length;
+  await x.c.send('採用します');
+  const v = x.c.activePlan();
+  const v1 = (v && x.c.planHistory().find(z => z.planId === v.planId && z.version === 1)) || null;
+  const sco = scopeOf(x);
+  const did = valueIdOf(planCalls[0] && planCalls[0].decisions);
+  const r6 = reqRowOf(sco, q => q.id === 'R6');
+  const saves = (sco.requirements || []).filter(q => ['plan', 'plan-auto'].includes(q.createdBy) && (q.effects || []).includes('block-save'));
+  assert(!!did && sco.decisionRefs === true && r6.basis === 'explicit' && r6.inScope === true && saves.length === 2, `S8-1 前提: 値で答えた決定事項（${did}）を送り、仮案の段階の警告の要件（R6）は範囲内。混入した保存禁止は最初の計画と自動の見直しで 2 件: ${JSON.stringify({ did, r6: [r6.basis, r6.inScope], saves: saves.map(q => q.id) })}`);
+  assert(saves.length === 2 && saves.every(q => q.basis === 'planner' && !q.via && q.inScope === false && q.out === 'adds-effect' && q.stripped === true && (q.decisionLinks || []).some(l => l.id === did && l.kind === 'user' && l.realized === true)), `S8-2: 実現済みの決定事項への結び付き（realized: true）は採用の根拠に数えない（保存禁止は planner として範囲外・外した）: ${JSON.stringify(saves.map(q => [q.id, q.basis, q.via, q.inScope, q.out, q.stripped, q.decisionLinks]))}`);
+  const g1 = gen.seen.filter(g => g.cid === 'C1' && v && g.version === v.version)[0] || null;
+  assert(!!v1 && noSave(v1.plan) && noSave(v1.gatewayPlan) && noSave(v && v.plan) && noSave(v && v.gatewayPlan) && !!g1 && JSON.stringify(effKeys(g1.requiredEffects)) === JSON.stringify(['amount:lock', 'memo:warn']) && !effectsOfCust(g1.customization).some(k => /block-save/.test(k)), `S8-3: 保存禁止は v.plan と v.gatewayPlan（最初の計画・自動の見直しの版）と生成の必須の効果に無い。値で答えた警告は残る: ${JSON.stringify({ v1: v1 && strippedOf(v1).map(s => `${s.customizationId}:${s.field}:${s.effect}`), req: g1 && effKeys(g1.requiredEffects) })}`);
+  const html = finalHtml(x);
+  assert(sco.linked === 0 && !linkedOf(v).length && !LINKED_RE.test(html) && /依頼に無い可能性がある動作/.test(html) && x.calls.ask.length === asks && planCalls.length === 2, `S8-4: 結び付きで上がった要件は無い（詳細の「決定事項の実現として計画が足した動作」は出さない・外した保存禁止は「依頼に無い可能性がある動作」）。質問は増えない・自動の見直しは 1 回: ${JSON.stringify({ linked: sco.linked, plans: planCalls.length })}`);
+});
+await section(async () => {
+  //   (a') probe-mislink2 のそのままの形（答えのターンの警告の要件が判断・前提の key に結び付かない）: 構造では実現済みと判定できない。
+  //   保存禁止を外せないときは、黙って必須にせず詳細の「決定事項の実現として計画が足した動作」に名前で出す
+  planCalls.length = 0;
+  const gen = recordingGenerate(['good']);
+  const x = markOn(makeConvC({ scriptFn: s8Script('loose'), labels: LABELS, generate: gen, planImpl: s8PlanValue({ refs: { ...S8_REFS, R6: REFS_MAIN.R6 } }) }));
+  await x.c.send(REQ); await x.c.send(VALUE_U); await x.c.send('採用します');
+  const v = x.c.activePlan();
+  const sco = scopeOf(x);
+  const save = reqRowOf(sco, q => q.createdBy === 'plan' && (q.effects || []).includes('block-save'));
+  const html = finalHtml(x), lt = linkedText(html);
+  assert(save.inScope === false || (sco.linked > 0 && linkedOf(v).some(s => s.effect === 'block-save') && /保存を止める/.test(lt) && /「備考の警告」/.test(lt)), `S8-5: 実現済みと判定できない結び付けで範囲内に上がった保存禁止は、最終案の詳細に名前と決めたことの見出しで出る: ${JSON.stringify({ save: [save.id, save.basis, save.inScope], linked: sco.linked, lt: lt.slice(0, 160) })}`);
+});
+await section(async () => {
+  //   (b) 未実現の値で答えた決定事項（答えのターンで要件を作らない）に、計画の AI が保存禁止を結び付ける → 範囲内に上がる（外さない）が、
+  //   最終案の詳細「決定事項の実現として計画が足した動作」に出る。自動の見直しで足し直した同じ結び付きは実現済み（先の要件が実現している）
+  planCalls.length = 0;
+  const gen = recordingGenerate(['good']);
+  const x = markOn(makeConvC({ scriptFn: s8Script('none'), labels: LABELS, generate: gen, planImpl: s8PlanValue({ refs: S8_REFS }) }));
+  await x.c.send(REQ); await x.c.send(VALUE_U); await x.c.send('採用します');
+  const v = x.c.activePlan();
+  const sco = scopeOf(x);
+  const did = valueIdOf(planCalls[0] && planCalls[0].decisions);
+  const save1 = reqRowOf(sco, q => q.createdBy === 'plan' && (q.effects || []).includes('block-save'));
+  const save2 = reqRowOf(sco, q => q.createdBy === 'plan-auto' && (q.effects || []).includes('block-save'));
+  assert(!!did && save1.basis === 'item-user' && save1.via === 'decisionRefs' && save1.inScope === true && (save1.decisionLinks || []).some(l => l.id === did && l.kind === 'user' && !l.realized), `S8-6: 未実現の値で答えた決定事項（${did}）への結び付きは今までどおり item-user に上がる（範囲内）: ${JSON.stringify({ save1: [save1.id, save1.basis, save1.via, save1.inScope, save1.decisionLinks] })}`);
+  assert(!save2.id || (save2.basis === 'planner' && (save2.decisionLinks || []).some(l => l.id === did && l.realized === true)), `S8-7: 自動の見直しで別の要件が同じ決定事項に結び付けても、先の要件が実現しているので realized（planner のまま）: ${JSON.stringify({ save2: [save2.id, save2.basis, save2.decisionLinks] })}`);
+  const html = finalHtml(x), lt = linkedText(html);
+  const m = html.match(LINKED_RE);
+  assert(sco.linked > 0 && linkedOf(v).some(s => s.effect === 'block-save' && (s.requirementIds || []).includes(save1.id) && (s.decisionIds || []).includes(did)) && !!m && /「金額」を保存を止める/.test(lt) && /「明細」を保存を止める/.test(lt) && /「備考の警告」の実現として/.test(lt) && !LINKED_RE.test(shutOf(html)) && !/\bD[0-9]+\b|\bR[0-9]+\b|\bC[0-9]+\b/.test(lt), `S8-8: v.scopeLinked と読み取りの linked の数・最終案の詳細（折りたたみ）に「決定事項の実現として計画が足した動作」（フィールドの名前を効果の言葉＋決めたことの見出し。番号は出さない）: ${JSON.stringify({ linked: sco.linked, scopeLinked: linkedOf(v).map(s => `${s.customizationId}:${s.field}:${s.effect}`), lt: lt.slice(0, 200) })}`);
+});
+await section(async () => {
+  //   (c)・(e) 未実現の委任に計画の AI が委ねた警告を結び付ける（§S7 と同じ流れ）→ 警告は delegated で残り（§S7 の期待のまま）、詳細にも出る。混入した保存禁止は外れる
+  planCalls.length = 0;
+  const gen = recordingGenerate(['good']);
+  const x = markOn(makeConvC({ scriptFn: S7_SF, labels: LABELS, generate: gen, planImpl: s7Plan({ mark: true }) }));
+  await x.c.send(REQ); await x.c.send(DELEGATE_U); await x.c.send('採用します');
+  const v = x.c.activePlan();
+  const sco = scopeOf(x);
+  const dId = delegatedIdOf(planCalls[0] && planCalls[0].decisions, 'lock.warn');
+  const warnReq = reqRowOf(sco, q => q.createdBy === 'plan' && (q.effects || []).includes('warn'));
+  const saveReq = reqRowOf(sco, q => q.createdBy === 'plan' && (q.effects || []).includes('block-save'));
+  const g1 = gen.seen.filter(g => g.cid === 'C1' && v && g.version === v.version)[0] || null;
+  assert(warnReq.basis === 'delegated' && warnReq.via === 'decisionRefs' && warnReq.inScope === true && (warnReq.decisionLinks || []).some(l => l.id === dId && !l.realized) && saveReq.basis === 'planner' && saveReq.stripped === true && noSave(v && v.plan) && !!g1 && JSON.stringify(effKeys(g1.requiredEffects)) === JSON.stringify(['amount:lock', 'memo:warn']), `S8-9: 委ねた警告は delegated で残り、混入した保存禁止は外れる（§S7 の期待のまま）: ${JSON.stringify({ warn: [warnReq.basis, warnReq.via, warnReq.inScope, warnReq.decisionLinks], save: [saveReq.basis, saveReq.stripped], req: g1 && effKeys(g1.requiredEffects) })}`);
+  const html = finalHtml(x), lt = linkedText(html);
+  assert(sco.linked > 0 && linkedOf(v).some(s => s.field === 'memo' && s.effect === 'warn' && (s.decisionIds || []).includes(dId)) && /「備考」を警告を出す/.test(lt) && /「備考の警告」の実現として/.test(lt) && !/保存を止める/.test(lt) && !LINKED_RE.test(shutOf(html)), `S8-10: 委ねた警告も詳細の「決定事項の実現として計画が足した動作」に出る（保存禁止は出ない・通常表示には出ない）: ${JSON.stringify({ linked: sco.linked, lt: lt.slice(0, 200) })}`);
+});
+for (const warnFirst of [true, false]) {
+  await section(async () => {
+    //   (d) 同じ応答で 2 つの要件（委ねた警告と混入した保存禁止）が同じ未実現の委任に結び付く → 先の操作の 1 つだけが上がり、後の 1 つは realized（planner として判定）
+    const tag = warnFirst ? '警告が先' : '保存禁止が先';
+    planCalls.length = 0;
+    const gen = recordingGenerate(['good']);
+    const pi = (args) => {
+      const r = planImplOf({ refs: S8_REFS })(args);
+      const dw = delegatedIdOf(args.decisions, 'lock.warn') || delegatedIdOf(args.decisions);
+      const ops = r.turn.requirementOps;
+      const warn = args.revision ? [] : [{ ...WARN_PLAN_OP }];
+      const ordered = [...ops.filter(op => op.op === 'update'), ...(warnFirst ? [...warn, ...ops.filter(isSaveAdd)] : [...ops.filter(isSaveAdd), ...warn]), ...ops.filter(op => op.op !== 'update' && !isSaveAdd(op))];
+      r.turn.requirementOps = withRefs(ordered, (op) => (dw && (isWarnAdd(op) || isSaveAdd(op)) ? [dw] : []));
+      return r;
+    };
+    const x = markOn(makeConvC({ scriptFn: S7_SF, labels: LABELS, generate: gen, planImpl: pi }));
+    await x.c.send(REQ); await x.c.send(DELEGATE_U); await x.c.send('採用します');
+    const v = x.c.activePlan();
+    const sco = scopeOf(x);
+    const dId = delegatedIdOf(planCalls[0] && planCalls[0].decisions, 'lock.warn');
+    const warnReq = reqRowOf(sco, q => q.createdBy === 'plan' && (q.effects || []).includes('warn'));
+    const saveReq = reqRowOf(sco, q => q.createdBy === 'plan' && (q.effects || []).includes('block-save'));
+    const [first, second] = warnFirst ? [warnReq, saveReq] : [saveReq, warnReq];
+    const upFirst = (sco.requirements || []).filter(q => q.createdBy === 'plan' && q.via === 'decisionRefs');
+    assert(!!dId && first.basis === 'delegated' && first.via === 'decisionRefs' && first.inScope === true && (first.decisionLinks || []).some(l => l.id === dId && !l.realized) && upFirst.length === 1 && upFirst[0].id === first.id, `S8-11（${tag}）: 先の操作の要件だけが委ねた判断の実現として上がる（delegated・範囲内）: ${JSON.stringify({ dId, first: [first.id, first.basis, first.via, first.decisionLinks], up: upFirst.map(q => q.id) })}`);
+    assert(second.basis === 'planner' && !second.via && second.inScope === false && second.stripped === true && (second.decisionLinks || []).some(l => l.id === dId && l.realized === true), `S8-12（${tag}）: 後の操作の要件は realized で残り、planner として範囲外（外した）: ${JSON.stringify({ second: [second.id, second.basis, second.via, second.inScope, second.stripped, second.decisionLinks] })}`);
+    const lt = linkedText(finalHtml(x));
+    assert(warnFirst ? (/「備考」を警告を出す/.test(lt) && !/保存を止める/.test(lt) && noSave(v && v.plan)) : (/保存を止める/.test(lt) && !/警告を出す/.test(lt) && !effectsOfCust(((v && v.plan.customizations) || []).find(c => c.customizationId === 'C1')).includes('memo:warn')), `S8-13（${tag}）: 詳細の「決定事項の実現として計画が足した動作」は上がった要件の効果だけ: ${lt.slice(0, 200)}`);
+  });
+}
 
 // =========================================================
 console.log('\n--- §S6. 画面: 範囲外を外した customization の生成に渡す requirement の文 ---');
