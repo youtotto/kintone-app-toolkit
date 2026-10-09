@@ -737,6 +737,8 @@
     let state = 'idle';
     let lastError = null;
     let scannedAt = null;
+    // 書き込みの後の解析し直しを見送った古い印と、その世代（markStale で進む。下の「書き込みの後の解析し直し」）
+    let staleMark = false, staleGen = 0;
     // 状態変化の通知先（Fields/Relationsの再描画などに使う）
     const listeners = new Set();
 
@@ -767,11 +769,14 @@
     const run = async (opt = {}) => {
       if (!runner) return { ok: false, reason: 'scanner-not-ready' };
       if (state === 'running') return { ok: false, reason: 'already-running' };
+      const prev = state, gen = staleGen;   // 解析前の状態・書き込みの後の古い印の世代（始めた時点）
       setState('running');
       try {
         const res = await runner(opt);
         // 自動の解析の途中でパネルを最小化した（設定取得の関所）: 失敗にもキャッシュにもせず、解析前の状態に戻す（展開したら続きから）
-        if (res && res.paused) { setState('idle'); return { ok: false, reason: 'paused', paused: true }; }
+        if (res && res.paused) { setState(prev); return { ok: false, reason: 'paused', paused: true }; }
+        //   古い印（markStale）より後に始めて本文から解析し直した（キャッシュではない）ときだけ印を外す。印より前に始めた解析の結果は最新として扱わない
+        if (gen === staleGen && !res?.fromCache) staleMark = false;
         setState(res?.fromCache ? 'cached' : 'done', { at: res?.scannedAt || new Date().toISOString(), error: null });
         return { ok: true, ...res };
       } catch (e) {
@@ -882,6 +887,27 @@
     const holdFormDefs = (f) => { heldForm = f && (f.props || f.layout) ? { f: { ...f }, at: Date.now() } : null; };
     const takeHeldFormDefs = () => { const h = heldForm; heldForm = null; return h && (Date.now() - h.at) < HELD_MAX_AGE_MS ? h.f : null; };
     const dropHeldCustomize = () => { heldCz = null; heldForm = null; };
+
+    // ---- 書き込みの後の解析し直し（設定取得の関所 opt.gate。開発支援の JavaScript の登録・戻すの後の自動の後追い）----
+    //   パネルを展開している間は今までどおりすぐ解析し直す（キャッシュを無視して本文を取り直す）。最小化中は取らずに古い印（staleMark）を付けて保留し、
+    //   展開して解析の結果を使う表示（Field Scanner・依存・開発支援など）が見えたときに 1 回だけ解析し直す（runStale。作業の基準の after-* と同じ扱い）。
+    //   解析し直しの途中で最小化したら後続（フィールド定義の取り直し・本文）を始めず、古い印のまま次に見えたときに続きから。
+    //   利用者の明示の［Scan］・［JS解析］は止めない（印より後に始めて完了したら印を外す）。印と世代（staleMark / staleGen）は先頭の状態と並べて持つ
+    /** 書き込みで登録済みの JS が変わった: 今の解析の結果を古いとする（世代を進め、印より前に始めた解析・止めた解析の続きの設定を最新として使わない） */
+    const markStale = () => { staleGen += 1; staleMark = true; dropHeldCustomize(); };
+    const isStale = () => staleMark;
+    /** 古い印があれば、パネルを展開している間だけ 1 回解析し直す（自動の取得。手形で、途中で最小化したら後続を始めない） */
+    const runStale = async ({ gate = null } = {}) => {
+      if (!staleMark) return null;
+      if (gate && !gate.isOpen()) return { ok: false, reason: 'deferred', deferred: true };
+      const t = gate ? gate.ticket() : null, gen = staleGen;
+      const r = await run({ force: true, silent: true, ...(t ? { shouldContinue: t.live } : {}) });
+      //   失敗したら自動では繰り返さない（状態は「解析失敗」のまま。利用者の［Scan］・［JS解析］で取り直せる）
+      if (r && r.reason === 'error' && gen === staleGen) staleMark = false;
+      return r;
+    };
+    /** 書き込みの後の解析し直し（開発支援の rescanJs）: 古い印を付け、展開していればすぐ解析し直す。最小化中は取らずに保留する */
+    const rescanAfterWrite = ({ gate = null } = {}) => { markStale(); return runStale({ gate }); };
 
     // ==========================================
     // 未知フィールドコード候補の抽出（純粋なテキスト解析）
@@ -2535,6 +2561,7 @@
 
     return {
       register, run, scheduleAuto, autoPending, holdCustomize, takeHeldCustomize, holdFormDefs, takeHeldFormDefs, dropHeldCustomize, onChange, getStatus, setLastPayload, getLastPayload,
+      markStale, isStale, runStale, rescanAfterWrite,
       hashText, candidateHashOf, analyzeFile, summarizeFiles, fieldList, buildPayload, isKnownLibraryUrl, KNOWN_LIBRARY_HOSTS,
       buildSignature, loadCache, saveCache, clearCache,
       isAutoEnabled, setAutoEnabled,
@@ -30575,7 +30602,8 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
     const canAutoFetch = typeof d.canAutoFetch === 'function' ? () => { try { return d.canAutoFetch() !== false; } catch (e) { return true; } } : () => true;
     const FETCH = KTFetchGate.INTENT;   // 関所に渡す取得の種類（AUTO = 自動の取得・EXPLICIT = 利用者の明示の操作の中の取得）
     //   devBaseOwnDeferred: 見えていない間に自分の登録（after-js-register）の取り直しを見送った。次の取り直しは自分の登録の直後の取り直しと同じに扱う
-    //   （承認の基準との違いで承認を外さない。見えている間の after-js-register と同じ）
+    //   （承認の基準との違いで承認を外さない。見えている間の after-js-register と同じ）。取り直しの完了の前に別の変更（最小化中の JavaScript を戻す・設定を戻す・
+    //   ほかの場所の変更 invalidateDevBase）があったら外す（展開の取り直しで、見えているときと同じく承認の取り消しを判定する）
     let devBaseStale = false, devBaseWanted = false, devBaseGen = 0, devBasePartial = null, devBaseWaiters = 0, devBaseOwnDeferred = false, devBasePausedP = null;
     /** 進行中の取得に明示の処理が合流する（自動の取得でも途中で止めない。合流より先に止まっていたら、続きを明示で取る） */
     const joinDevBase = () => {
@@ -30588,8 +30616,9 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
       const auto = DEV_BASE_AUTO_REASONS.includes(reason);
       if (auto && !canAutoFetch()) {
         devBaseWanted = true;
-        //   自分の登録・戻しで動作テスト環境が変わった: 取らずに今の基準を古いとする（世代も進め、書き込みの前に始めた取得の結果や止めた段の続きを最新として使わない）
-        if (/^after-/.test(reason)) { invalidateDevBase(); if (reason === 'after-js-register') devBaseOwnDeferred = true; }
+        //   自分の登録・戻しで動作テスト環境が変わった: 取らずに今の基準を古いとする（世代も進め、書き込みの前に始めた取得の結果や止めた段の続きを最新として使わない）。
+        //   自分の登録の印（devBaseOwnDeferred）は登録のときだけ付け、戻す（JavaScript・設定）では外す（取り直しの前に戻したら、展開の取り直しで承認の取り消しを判定する。見えているときと同じ）
+        if (/^after-/.test(reason)) { markDevBaseStale(); devBaseOwnDeferred = reason === 'after-js-register'; }
         return devBase;
       }
       if (devBase && !devBaseStale && maxAgeMs > 0 && (nowMs() - devBaseAt) < maxAgeMs) return devBase;
@@ -30629,7 +30658,10 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
       return devBasePromise;
     }
     /** Toolkit のほかの場所（Customize の反映・プラグインの追加など）で設定を変えた: 今の基準を古いとし、次に要るときに取り直す（ここでは取らない。設定取得の関所） */
-    function invalidateDevBase() { devBaseGen += 1; devBaseStale = true; devBasePartial = null; }
+    //   ほかの場所の変更は自分の登録ではないので、見送った自分の登録の印（devBaseOwnDeferred）も外す（展開の取り直しで承認の取り消しを判定する。見えているときと同じ）
+    function invalidateDevBase() { markDevBaseStale(); devBaseOwnDeferred = false; }
+    /** 今の基準を古いとする（世代を進め、印より前に始めた取得の結果・止めた段の続きを最新として使わない） */
+    function markDevBaseStale() { devBaseGen += 1; devBaseStale = true; devBasePartial = null; }
     /** 動作テスト環境に書き込んだ（反映・登録・戻す）: Toolkit のほかの場所（Customize の一覧など）の取得済みの設定を古いとする（取得はしない） */
     const notifySettingsChanged = (what) => { if (typeof d.onSettingsChanged === 'function') { try { d.onSettingsChanged({ preview: true, production: false, what }); } catch (e) { } } };
     const BASE_KIND_JA = { plan: '変更計画の作成', generate: 'コードの生成', register: 'JavaScript の登録', execute: '動作テスト環境への反映' };
@@ -37532,7 +37564,9 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
         copyText: (t) => KTExport.copyText(t),
         downloadText: (name, text, mime) => KTExport.downloadText(name, text, mime),
         runScan,
-        rescanJs: () => KTScan.run({ force: true, silent: true }),   // Phase 16: 統合先 JS の本文を取り直す（キャッシュを無視）
+        //   Phase 16: 登録・戻すの後に統合先 JS の本文を取り直す（キャッシュを無視）。設定取得の関所: 書き込みの後の自動の後追いなので、展開している間はすぐ解析し直し、
+        //   最小化中は取らずに古い印を付けて保留する（展開して解析の結果を使う表示が見えたときに 1 回だけ。bootToolkit の onTabVisible → KTScan.runStale）
+        rescanJs: () => KTScan.rescanAfterWrite({ gate: KTFetchGate.of(root) }),
         openCustomize,                                                // Phase 18 §30: AI → Customize（登録内容の確認）
         appId,
         colors: { border: BD, bg: isDark ? '#1b1b1b' : '#fff', isDark },   // Phase 22: ダークテーマの印（data-theme）とプロセス図の背景
@@ -40115,7 +40149,14 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
     function onTabVisible(tab, t) {
       if (!tab || !appliedCore || !t.live()) return;
       if (NAME_TABS.has(tab)) { namesWanted = true; resolveAppNames(); }
-      if (SCAN_TABS.has(tab) && scanWanted && DEPS) { scanWanted = false; KTScan.scheduleAuto({ gate }); }
+      if (SCAN_TABS.has(tab) && DEPS) {
+        //   最小化中の開発支援の登録・戻すの後に見送った解析し直し（KTScan の古い印）: 解析の結果を使う表示が見えた今 1 回だけ解析し直す（自動の解析の予約も兼ねる）。
+        //   終わったら開発支援の対象一覧・見出しも新しい解析の結果にする（見えているときの登録・戻すの後と同じ）
+        if (KTScan.isStale()) {
+          scanWanted = false;
+          KTScan.runStale({ gate }).then((r) => { if (r && r.ok) { try { root.ktAi?.refreshTargets?.(); } catch (e) { } } }).catch((e) => { console.error('[Toolkit] JavaScript の解析し直しに失敗しました', e); });
+        } else if (scanWanted) { scanWanted = false; KTScan.scheduleAuto({ gate }); }
+      }
       if (tab === 'customize' && customizeReady) {
         customizeReady.then((c) => (c && t.live() && visibleTab() === 'customize' ? c.ensureLoaded({ live: t.live }) : null))
           .catch((e) => { console.error('[Toolkit] Customize の一覧の取得に失敗しました', e); });

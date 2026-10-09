@@ -16,6 +16,11 @@
 //   2026-10-10 の判断点の戻し（利用者の依頼「設定が変更された場合は古い情報を最新として扱わず、次に必要になった時点で再取得する」
 //   「取得中に最小化した場合、新たな取得処理や後続リクエストを開始しない」）:
 //     §10 登録・戻すの後の作業の基準の取り直しは、見えている間はすぐ取り、最小化中は取らずに古い印を付け、展開したら取り直す（登録・戻すの操作そのものは止めない）
+//   2026-10-10 の確認の残り 2 件:
+//     §11 登録・戻すの後の JavaScript の解析し直し（開発支援の rescanJs → 本物の KTScan）も、最小化中は取らずに古い印を付け、解析の結果を使う表示が見えたら 1 回だけ
+//         （見えている間はすぐ。利用者の［Scan］は止めない。印より前に始めた解析の完了で印を外さない。途中で最小化したら後続を始めない）
+//     §12 最小化中の自分の登録の後に別の変更（JavaScript を戻す・設定を戻す・ほかの場所の invalidateDevBase）があったら、展開の取り直しで見えているときと同じく
+//         承認の取り消しを判定する。見送るときは世代を進める（書き込みの前に始めた取得の完了で古い印を外さない）
 //
 // 実行方法: node tests/panel-minimized-fetch.test.js
 //   修正前の版で同じ確かめ方をするとき（RED の確認）: KT_SRC=<修正前の kintoneAppToolkit.user.js> node tests/panel-minimized-fetch.test.js
@@ -758,6 +763,203 @@ await safe('§10', async () => {
     `10-10 最小化中に設定を戻す: 戻すは最後まで動き、取り直しは 0 回で古い印を付ける: ${b.srb.stage}・取り直し ${b.srb.reasons.join(', ') || '0 回'}・${JSON.stringify(b.srb.state)}`);
   assert(JSON.stringify(b.srbExpand.reasons) === '["tab"]' && b.srbExpand.state.stale === false && b.srbExpand.rev === a.srb.rev,
     `10-11 展開すると 1 回取り直し、戻した後の基準になる（見えているときと同じ revision ${a.srb.rev}）: ${b.srbExpand.reasons.join(', ') || '0 回'}・revision ${b.srbExpand.rev}`);
+});
+
+// =========================================================
+console.log('\n--- §11. 登録・戻すの後の JavaScript の解析し直し（本物の KTScan）: 見えている間はすぐ、最小化中は取らずに古い印を付け、解析の結果を使う表示が見えたら 1 回だけ ---');
+//   ページ（startToolkit。Field Scanner を本物の KTScan に登録し、JS の自動解析まで終える）と同じ Toolkit の中に、開発支援の画面（偽の動作テスト環境で登録・戻す）を組み立てる。
+//   開発支援の rescanJs は renderAiWorkspace と同じつなぎ方（KTScan.rescanAfterWrite に関所を渡す）。修正前の版は、そのときのつなぎ方（KTScan.run({ force: true, silent: true })）で数える。
+//   数えるのはページの偽の kintone（解析の取得: preview の customize・本文）。開発支援の登録・戻すの書き込みと照合は偽の動作テスト環境の側（数えない）
+const RESCAN_WIRE = 'rescanJs: () => KTScan.rescanAfterWrite({ gate: KTFetchGate.of(root) })';
+const rescanOf = (T, root) => (typeof T.KTScan.rescanAfterWrite === 'function'
+  ? () => T.KTScan.rescanAfterWrite({ gate: T.KTFetchGate.of(root) })
+  : () => T.KTScan.run({ force: true, silent: true }));
+await safe('§11', async () => {
+  const { createNewFlowKit } = require('./helpers/new-flow.js');
+  const T0 = loadToolkit();
+  assert(String(T0.renderAiWorkspace).includes(RESCAN_WIRE), `11-0 開発支援の rescanJs（登録・戻すの後の解析し直し）は関所を渡した KTScan.rescanAfterWrite につなぐ（${RESCAN_WIRE}）`);
+  const out = {};
+  for (const hidden of [false, true]) {
+    const e = makeEnv({ mini: '0' });
+    const root = await e.start(); await e.settle();
+    const gate = e.T.KTFetchGate.of(root);
+    const KIT = createNewFlowKit(e.T);
+    const gen = KIT.screenGenerate({ field: 'approval_memo', targetFile: 'memoLock.js' });
+    const m = KIT.mount({ health: KIT.HEALTH_V, planImpl: KIT.planImplOf(KIT.screenPlan('mixed')), generateImpl: gen.impl, liveBase: true,
+      extra: { canAutoFetch: () => gate.isOpen(), rescanJs: rescanOf(e.T, root) } });
+    await KIT.ticks(); await KIT.adoptOnScreen(m); await KIT.ticks(20);
+    const stale = () => (typeof e.T.KTScan.isStale === 'function' ? e.T.KTScan.isStale() : null);
+    const scanState = () => e.T.KTScan.getStatus().state;
+    const toggle = async () => { await e.click('kt-mini'); await e.settle(); };
+    const o = out[hidden] = { start: scanState() };
+    // 1. ［動作テスト環境へ反映］（設定 ＋ JavaScript の登録。押す前に最小化）→ 展開（Health のタブ = 解析の結果を使う表示）
+    if (hidden) await toggle();
+    let mk = e.mark();
+    const r = await KIT.applyOnScreen(m); await e.settle();
+    o.reg = { registered: !!(r.run && r.run.js && r.run.js.registered), s: e.fk.settingsCalls(mk), stale: stale(), mini: e.isMini() };
+    mk = e.mark();
+    if (hidden) await toggle();
+    o.regExpand = { s: e.fk.settingsCalls(mk), stale: stale(), state: scanState() };
+    mk = e.mark();
+    await toggle(); await toggle();
+    o.regAgain = e.fk.settingsCalls(mk);
+    // 2. ［JavaScript を戻す］（Customize のタブ = 解析の結果を使わない表示を開いてから最小化）→ 展開（Customize のまま）→ Health を開く
+    await e.click('tab-customize'); await e.settle();
+    if (hidden) await toggle();
+    mk = e.mark();
+    const jrb = await m.panel.startJsRollback(); const jrbStatus = jrb && jrb.status;
+    await m.panel.confirmJsRollback(); await e.settle();
+    o.jsrb = { prepared: jrbStatus, stage: m.panel.jsExecState().stage, s: e.fk.settingsCalls(mk), stale: stale() };
+    mk = e.mark();
+    if (hidden) await toggle();
+    o.jsrbExpand = { s: e.fk.settingsCalls(mk), stale: stale() };
+    mk = e.mark();
+    await e.click('tab-health'); await e.settle();
+    o.jsrbHealth = { s: e.fk.settingsCalls(mk), stale: stale(), state: scanState() };
+    if (hidden) {
+      // 3. 最小化中の書き込みの後に、利用者が［Scan］を押した（明示の操作は止めない）→ 印を外す → 展開しても解析し直さない
+      await toggle();
+      mk = e.mark();
+      await rescanOf(e.T, root)(); await e.settle();
+      const deferred = e.fk.settingsCalls(mk), staleMid = stale();
+      await e.byId.get('fs-scan').onclick(); await e.settle();
+      o.explicit = { deferred, staleMid, s: e.fk.settingsCalls(mk), stale: stale() };
+      mk = e.mark();
+      await toggle();
+      o.explicitExpand = e.fk.settingsCalls(mk);
+      // 4. 書き込みの前に始めた解析（最小化中の［Scan］の途中）が書き込みの後に完了しても、古い印は外さない（最新として扱わない）→ 展開で 1 回
+      await toggle();
+      const h = e.fk.hold(/^\/k\/v1\/file$/);
+      const p = e.byId.get('fs-scan').onclick(); await ticks();
+      mk = e.mark();
+      await rescanOf(e.T, root)(); await ticks();
+      h.release(); await p; await e.settle();
+      o.genOld = { s: e.fk.settingsCalls(mk), stale: stale(), state: scanState() };
+      mk = e.mark();
+      await toggle();
+      o.genExpand = { s: e.fk.settingsCalls(mk), stale: stale() };
+    }
+    o.unexpectedAt = unexpected.length;
+  }
+  const a = out[false], b = out[true];
+  TABLE.push({ c: 'E', label: '最小化中の JavaScript の登録の後の JS の解析し直し（本物の KTScan）', s: b.reg.s, o: [], fk: E.fk });
+  TABLE.push({ c: 'E', label: '↑の後に展開（Health。解析し直しを 1 回）', s: b.regExpand.s, o: [], fk: E.fk });
+  TABLE.push({ c: 'E', label: '最小化中の JavaScript を戻すの後の JS の解析し直し（本物の KTScan）', s: b.jsrb.s, o: [], fk: E.fk });
+  TABLE.push({ c: 'E', label: '↑の後に展開（Customize のまま → Health を開く）', s: b.jsrbExpand.s.concat(b.jsrbHealth.s), o: [], fk: E.fk });
+  // 前提（見えているとき）: 今までどおり、登録・戻すの後にすぐ解析し直す（preview の customize 1・本文 3）
+  assert(a.start === 'done' && a.reg.registered && sameMap(E.fk.byPath(a.reg.s), SCAN) && a.reg.stale !== true,
+    `11-1 前提（見えているとき）: 登録の後にすぐ解析し直す（preview の customize 1・本文 3）: ${fmt(E.fk.byPath(a.reg.s))}`);
+  assert(a.jsrb.stage === 'rolled-back' && sameMap(E.fk.byPath(a.jsrb.s), SCAN) && a.jsrbHealth.s.length === 0 && a.regAgain.length === 0,
+    `11-2 前提（見えているとき）: JavaScript を戻すの後もすぐ解析し直し（Customize のタブを表示していても）、その後の表示・最小化と展開では取らない: ${fmt(E.fk.byPath(a.jsrb.s))}・Health ${a.jsrbHealth.s.length} 回`);
+  // 最小化中の登録・戻す
+  assert(b.reg.registered && b.reg.mini && b.reg.s.length === 0 && b.reg.stale === true,
+    `11-3 最小化中の登録: 登録は最後まで動き、登録の後の解析の取得（preview の customize・本文）は 0 回。解析の結果に古い印を付ける: ${b.reg.s.length} 回（${fmt(E.fk.byPath(b.reg.s))}）・印 ${b.reg.stale}`);
+  assert(sameMap(E.fk.byPath(b.regExpand.s), SCAN) && b.regExpand.stale === false && b.regExpand.state === 'done' && b.regAgain.length === 0,
+    `11-4 展開して解析の結果を使う表示（Health）が見えたら 1 回だけ解析し直す（キャッシュを使わない）。その後の最小化と展開では取らない: ${fmt(E.fk.byPath(b.regExpand.s))}・再び ${b.regAgain.length} 回`);
+  assert(b.jsrb.prepared === 'PREPARED' && b.jsrb.stage === 'rolled-back' && b.jsrb.s.length === 0 && b.jsrb.stale === true,
+    `11-5 最小化中に JavaScript を戻す: 戻すは最後まで動き、解析の取得は 0 回で古い印を付ける: ${b.jsrb.stage}・${b.jsrb.s.length} 回（${fmt(E.fk.byPath(b.jsrb.s))}）`);
+  assert(b.jsrbExpand.s.length === 0 && b.jsrbExpand.stale === true && sameMap(E.fk.byPath(b.jsrbHealth.s), SCAN) && b.jsrbHealth.stale === false,
+    `11-6 解析の結果を使わない表示（Customize）で展開しただけでは取らず、Health を開いた（必要になった）ときに 1 回だけ解析し直す: 展開 ${b.jsrbExpand.s.length} 回・Health ${fmt(E.fk.byPath(b.jsrbHealth.s))}`);
+  assert(b.explicit && b.explicit.deferred.length === 0 && b.explicit.staleMid === true && sameMap(E.fk.byPath(b.explicit.s), SCAN) && b.explicit.stale === false && b.explicitExpand.length === 0,
+    `11-7 古い印のある間に利用者が［Scan］を押したら最小化中でも取り（止めない）、印を外す。展開しても解析し直さない: ［Scan］${fmt(E.fk.byPath(b.explicit ? b.explicit.s : []))}・展開 ${b.explicitExpand ? b.explicitExpand.length : '-'} 回`);
+  assert(b.genOld && b.genOld.stale === true && b.genOld.state === 'done' && sameMap(E.fk.byPath(b.genExpand.s), SCAN) && b.genExpand.stale === false,
+    `11-8 書き込みの前に始めた解析（最小化中の［Scan］の途中）が書き込みの後に完了しても古い印は外さず、展開で 1 回だけ解析し直す: 完了の後の印 ${b.genOld && b.genOld.stale}・展開 ${b.genExpand ? fmt(E.fk.byPath(b.genExpand.s)) : '-'}`);
+  // 見えている間に始めた解析し直しの途中（preview の customize を送った後）で最小化 → 本文（後続）は取らない → 展開で続きの本文だけ
+  {
+    const e = makeEnv({ mini: '0' });
+    const root = await e.start(); await e.settle();
+    const h = e.fk.hold(/^\/k\/v1\/preview\/app\/customize$/);
+    const mk = e.mark();
+    const p = rescanOf(e.T, root)(); await ticks();
+    await e.click('kt-mini');
+    h.release(); await p; await e.settle();
+    const after = e.fk.settingsCalls(mk), staleMid = typeof e.T.KTScan.isStale === 'function' ? e.T.KTScan.isStale() : null, stMid = e.T.KTScan.getStatus().state;
+    const mk2 = e.mark();
+    await e.click('kt-mini'); await e.settle();
+    const re = e.fk.settingsCalls(mk2);
+    TABLE.push({ c: '5', label: '登録の後の JS の解析し直しの途中で最小化 → 完了の後', s: after.slice(1), o: [], fk: E.fk });
+    TABLE.push({ c: '5', label: '↑の後に再展開（続きの本文だけ）', s: re, o: [], fk: E.fk });
+    assert(sameMap(E.fk.byPath(after), { 'GET /k/v1/preview/app/customize': 1 }) && staleMid === true && stMid === 'done' && sameMap(E.fk.byPath(re), { 'fetch /k/v1/file': 3 }) && e.T.KTScan.isStale() === false,
+      `11-9 解析し直しの途中で最小化したら、送った customize の完了の後の本文（後続）は 0 回で古い印のまま（状態は解析前の「解析済み」に戻す）。展開で続きの本文だけ: 途中 ${fmt(E.fk.byPath(after))}・状態 ${stMid}・展開 ${fmt(E.fk.byPath(re))}`);
+  }
+});
+
+// =========================================================
+console.log('\n--- §12. 最小化中の自分の登録の後に別の変更（JavaScript を戻す・設定を戻す・ほかの場所の変更）: 展開の取り直しで、見えているときと同じく承認の取り消しを判定する ---');
+await safe('§12', async () => {
+  const { createNewFlowKit } = require('./helpers/new-flow.js');
+  const setup = async () => {
+    const T = loadToolkit();
+    const KIT = createNewFlowKit(T);
+    const visible = { v: true };
+    const loads = [];
+    let mref = null;
+    const loader = KIT.loadDevBaseFromMock(() => mref.mock);
+    const gen = KIT.screenGenerate({ field: 'approval_memo', targetFile: 'memoLock.js' });
+    const m = KIT.mount({ health: KIT.HEALTH_V, planImpl: KIT.planImplOf(KIT.screenPlan('mixed')), generateImpl: gen.impl, liveBase: true,
+      extra: { canAutoFetch: () => visible.v, loadDevBase: (x = {}) => { loads.push(x.reason || null); return loader(x); } } });
+    mref = m;
+    await KIT.ticks();
+    await KIT.adoptOnScreen(m); await KIT.ticks(20);
+    const info = () => ({ approval: !!(m.conv().activePlan() && m.conv().activePlan().approval), revoked: m.msgs().filter(x => x && x.data && x.data.kind === 'approval-revoked').length, reasons: loads.slice(), state: { ...m.panel.devBaseFetchState() } });
+    const register = async (hide) => { await KIT.applyOnScreen(m, { before: async () => { if (hide) visible.v = false; } }); await KIT.ticks(30); };
+    const expand = async () => { visible.v = true; m.panel.onVisible(); await KIT.ticks(30); };
+    return { T, KIT, m, visible, loads, info, register, expand };
+  };
+  const rollbackBoth = async (x) => {
+    await x.m.panel.startJsRollback(); await x.m.panel.confirmJsRollback(); await x.KIT.ticks(30);
+    await x.m.panel.startRollback(); await x.m.panel.confirmRollback(); await x.KIT.ticks(30);
+  };
+  // ほかの場所の変更（動作テスト環境へフィールドを足し、Toolkit のほかの場所の知らせ invalidateDevBase）
+  const outside = async (x) => { await x.m.mock.api.addPreviewFields('341', { ext_note: { type: 'SINGLE_LINE_TEXT', code: 'ext_note', label: 'ext' } }); x.m.panel.invalidateDevBase(); };
+  // (a) 登録 → JavaScript を戻す → 設定を戻す（見えたまま／登録の前に最小化して、展開は最後だけ）
+  const va = await setup(); await va.register(false); await rollbackBoth(va); await va.expand();
+  const A = va.info();
+  const ha = await setup(); await ha.register(true); await rollbackBoth(ha);
+  const HAmid = ha.info();
+  await ha.expand();
+  const HA = ha.info();
+  assert(A.approval === false && A.revoked === 1, `12-1 前提（見えているとき）: 登録 → JavaScript を戻す → 設定を戻すで、設定を戻した後の取り直しが承認を取り消す: 承認 ${A.approval}・取り消し ${A.revoked}`);
+  //   登録・戻すの後の続きの取り直し（after-js-register / after-js-rollback / after-rollback）。after-apply は反映の操作の中の取り直し（明示）なので数えない
+  const deferredOf = (rs) => rs.filter(r => ['after-js-register', 'after-js-rollback', 'after-rollback'].includes(r));
+  assert(HAmid.approval === true && HAmid.revoked === 0 && deferredOf(HAmid.reasons).length === 0 && HAmid.state.stale === true,
+    `12-2 最小化中は登録・戻すの後の取り直しを見送る（判定は展開の取り直しで）: 取り直し ${deferredOf(HAmid.reasons).join(', ') || '0 回'}・印 ${HAmid.state.stale}`);
+  assert(HA.approval === A.approval && HA.revoked === A.revoked && HA.reasons[HA.reasons.length - 1] === 'tab',
+    `12-3 最小化中に登録の後で戻したら、展開の取り直しで見えているときと同じく承認の取り消しを判定する（自分の登録の印を残さない）: 承認 ${HA.approval}（見えているとき ${A.approval}）・取り消し ${HA.revoked}（${A.revoked}）`);
+  // (b) 登録 → ほかの場所の変更（見えたまま／登録の前に最小化）→ 展開
+  const vb = await setup(); await vb.register(false); await outside(vb); await vb.expand();
+  const B = vb.info();
+  const hb = await setup(); await hb.register(true); await outside(hb); await hb.expand();
+  const HB = hb.info();
+  assert(B.approval === false && B.revoked === 1, `12-4 前提（見えているとき）: 登録の後のほかの場所の変更は、次の取り直しで承認を取り消す: 承認 ${B.approval}・取り消し ${B.revoked}`);
+  assert(HB.approval === B.approval && HB.revoked === B.revoked && HB.reasons[HB.reasons.length - 1] === 'tab',
+    `12-5 最小化中の登録の後にほかの場所の変更（invalidateDevBase）があったら、展開の取り直しで見えているときと同じく承認の取り消しを判定する: 承認 ${HB.approval}（見えているとき ${B.approval}）・取り消し ${HB.revoked}（${B.revoked}）`);
+  // (c) 見送るときの古い印は世代を進める: 書き込みの前に始めた取得（明示の［再取得］）が書き込みの後に完了しても、古い印のまま（最新として扱わない）。展開で 1 回取り直す
+  for (const reason of ['after-js-register', 'after-js-rollback', 'after-rollback']) {
+    const T = loadToolkit();
+    const KIT = createNewFlowKit(T);
+    const visible = { v: true };
+    const loads = [];
+    let mref = null, hold = null;
+    const loader = KIT.loadDevBaseFromMock(() => mref.mock);
+    const m = KIT.mount({ health: KIT.HEALTH_V, liveBase: true, extra: { canAutoFetch: () => visible.v, loadDevBase: async (x = {}) => { loads.push(x.reason || null); if (hold) await hold.p; return loader(x); } } });
+    mref = m;
+    await KIT.ticks(30);
+    visible.v = false;
+    let open = null;
+    hold = { p: new Promise((r) => { open = r; }) };
+    const p = m.panel.refreshDevBase({ reason: 'manual' });   // 書き込みの前に始めた取得（明示の操作なので最小化中でも最後まで取る）
+    await KIT.ticks(5);
+    await m.panel.refreshDevBase({ reason });                  // 最小化中に書き込みが終わった（取り直しは見送る）
+    const mid = { ...m.panel.devBaseFetchState() };
+    open(); hold = null; await p; await KIT.ticks(10);
+    const after = { ...m.panel.devBaseFetchState() };
+    const l = loads.length;
+    visible.v = true; m.panel.onVisible(); await KIT.ticks(30);
+    const fin = { ...m.panel.devBaseFetchState() };
+    assert(mid.stale === true && mid.wanted === true && mid.loading === true && after.stale === true && JSON.stringify(loads.slice(l)) === '["tab"]' && fin.stale === false,
+      `12-6 ${reason}: 見送るときに世代を進め、書き込みの前に始めた取得が後で完了しても古い印のまま。展開で 1 回取り直す: 見送り ${JSON.stringify({ stale: mid.stale, wanted: mid.wanted, loading: mid.loading })}・前の取得の完了の後 stale=${after.stale}・展開 ${loads.slice(l).join(', ') || '0 回'}・stale=${fin.stale}`);
+  }
 });
 
 // =========================================================
