@@ -14,6 +14,8 @@
 //   §S4 範囲外を外した最終案は承認を止めない（詳細に「依頼に無い可能性がある動作」・通常表示には名前で書いた 1 行）
 //   §S5 委任の粒度（レビューの指摘 row3）: 判断に結び付いた要件が委任のターンで直されない形・計画の AI が委ねた警告を足す形・推奨の無い委任＋混入した保存禁止
 //   §S6 画面: 範囲外を外した customization の生成に渡す requirement の文は、範囲内の要件の文（台帳の値）で組み立てる
+//   §S6b 画面: ［残りの JavaScript を作る］（GENERATE_CODE。計画の写しで版を上げる）で作り直した版も、元の版の範囲の記録と生成に渡す requirement の文を引き継ぐ
+//        （AI版 scenarios.mjs の前の K-4・2026-10-10。計画の AI は呼ばない）
 //   §S7 決定事項の結び付き decisionRefs（設計 §0f.2 の 9・契約 16 §12。前の確認の newProblems の medium）: 印（health の change-planner の requirementOps）がある
 //        Gateway では、decisionRefs [] の混入した保存禁止は外す（v.plan・v.gatewayPlan・台帳・生成の必須の効果）。再検証前の指示 §1（2026-10-10）: 採用の時点に
 //        その判断の動作の構造が無い（X(D) が空）委任に計画の AI が警告を結び付けても、AI の id だけでは上げず判断の候補（黙って入れない・黙って消さない。通常表示と
@@ -979,6 +981,52 @@ await section(async () => {
   assert(v && strippedOf(v).some(st => st.field === 'amount' && st.effect === 'block-save' && st.reason === 'unattributed') && sg.calls.length >= 1 && ctx, `前提: 画面で範囲外の保存禁止（fields[].effects だけ）を外して生成した: ${JSON.stringify({ stripped: strippedOf(v), gen: sg.calls.length })}`);
   assert(custText.includes(REQ_S) && !custText.includes('保存') && reqRow && reqRow.text.includes(REQ_S) && !/保存/.test(reqRow.text) && v.plan.customizations[0].requirement === CUST_TEXT, `S6-1: 生成工程に送る customization の requirement と「満たすべき要件」の customization の行は、範囲内の要件の文（利用者の原文の引用）。計画の文は書き換えない: ${JSON.stringify({ custText, reqRow })}`);
   assert(ctx && (ctx.verification.requiredEffects || []).every(e => e.effect !== 'block-save'), 'S6-2: 必須の効果にも保存禁止は無い');
+});
+
+// =========================================================
+console.log('\n--- §S6b. 画面: ［残りの JavaScript を作る］（GENERATE_CODE）で作り直した版も、範囲の記録と生成に渡す requirement の文を引き継ぐ（K-4・2026-10-10） ---');
+await section(async () => {
+  //   AI版 sandbox/test/scenarios.mjs §7j の前の known() の K-4: GENERATE_CODE は計画の写し（元の版の外した後の計画）で版を上げる。上げた版で照合し直すと
+  //   外す効果がもう無いので記録が空になり、生成に渡す requirement が計画の元の文（範囲外の「保存時にも止める」を含む）に戻っていた。
+  //   最初の生成が時間切れで止まった最終案から［残りの JavaScript を作る］（m.panel.generate）で作り直す（計画の AI は呼ばない）
+  const REQ_S = '承認待ちでは金額を変更できなくして';
+  const scriptS = ({ utterance: u }) => (u === REQ_S ? { reply: '承認待ちでは金額を編集不可にします。', intent: 'propose', proposal: { behaviors: [B('承認待ちでは金額を変更できなくする', 'user')], assumptions: [], decisions: [], approach: { standard: [], js: ['承認待ちの金額の編集不可'] }, cannot: [] }, turn: { ops: [], answers: [], requirementOps: [req('add', { target: '金額', condition: '承認待ち', behavior: '金額を編集不可にする', sourceQuotes: [REQ_S], planRefs: ['B1'], effects: ['lock'] })] } } : null);
+  const CUST_TEXT = '承認待ちでは金額を編集不可にし、金額の変更を保存時にも止める';
+  const rawS = (goal) => { const b = K.PLAN_V1(goal); const c = K.custLock('amount', { requirement: CUST_TEXT, fields: [{ code: 'ステータス', access: 'READ' }, { code: 'amount', access: 'CONTROL', condition: 'ステータス in ("承認待ち")', effects: ['lock', 'block-save'] }] }); return { ...b, plan: { ...b.plan, solution: 'CUSTOMIZATION', assessment: { ...b.plan.assessment, summary: '承認待ちでは金額を編集不可にし、保存時にも止める計画です。' }, steps: [mkStep('C1', 'CUSTOMIZATION_REQUIRED', 'JS', null, { customizationId: 'C1' }, { title: 'JavaScript', solution: 'CUSTOMIZATION' })], customizations: [c] }, turn: { reply: '保存時にも止める計画です。', requirementOps: [{ op: 'update', id: 'R1', target: '金額', condition: '承認待ち', behavior: '金額を編集不可にする', exceptions: [], decision: 'decided', disposition: 'adopted', sourceQuotes: [REQ_S], planRefs: ['C1'], effects: ['lock'], note: '' }], utteranceCoverage: [] } }; };
+  const sg = K.screenGenerate({ field: 'amount', targetFile: 'amountLock.js' });
+  const sent = [];   // 生成工程に送った Context（時間切れにした最初の 1 回も含む）
+  let timedOut = 0;
+  const genImpl = async (a) => {
+    sent.push(clone(a.ctx));
+    if (!timedOut) { timedOut += 1; throw new T.KTAiClient.AiClientError({ code: T.KTAiClient.ERROR_CODES.TIMEOUT, message: 'AI サービスが応答しませんでした（テストの時間切れ）' }); }
+    return sg.impl(a);
+  };
+  const m = K.mount({ health: K.HEALTH_V, scriptFn: scriptS, planImpl: K.planImplOf(rawS), generateImpl: genImpl, liveBase: true });
+  await K.ticks();
+  await m.panel.send(REQ_S); await K.ticks(10);
+  await m.panel.send('採用します'); await K.ticks(30);
+  const v0 = m.conv().activePlan();
+  const scoped = v0 && v0.scopeRequirementText ? v0.scopeRequirementText.C1 : null;
+  const recOf = (v) => (v ? JSON.stringify({ stripped: v.scopeStripped || null, issues: v.scopeIssues || null, candidates: v.scopeCandidates || null, reqText: v.scopeRequirementText || null, linked: v.scopeLinked || null }) : null);
+  const rec0 = recOf(v0);
+  const sco0 = scopeOf({ c: m.conv() }, v0 && v0.planId);
+  assert(v0 && timedOut === 1 && sent.length === 1 && !(v0.generated && v0.generated.C1 && v0.generated.C1.status === 'verified') && strippedOf(v0).some(st => st.field === 'amount' && st.effect === 'block-save' && st.reason === 'unattributed') && typeof scoped === 'string' && scoped.includes(REQ_S) && !/保存/.test(scoped) && sent[0].customization.requirement === scoped,
+    `前提: 範囲外の保存禁止を外した版で、最初の生成（範囲内の要件の文で送った）は時間切れで止まった: ${JSON.stringify({ version: v0 && v0.version, stripped: strippedOf(v0), scoped, sent: sent.map(x => x.customization.requirement) })}`);
+  const plans0 = m.calls.plan.length;
+  await m.panel.generate(); await K.ticks(30);
+  const v1 = m.conv().activePlan();
+  const ctx1 = sent.length > 1 ? sent[sent.length - 1] : null;
+  const custText = ctx1 && ctx1.customization ? String(ctx1.customization.requirement || '') : '';
+  const reqRow = ctx1 && ctx1.verification && Array.isArray(ctx1.verification.requirementIds) ? ctx1.verification.requirementIds.find(rr => rr.id === 'C1') : null;
+  assert(v1 && v0 && v1 !== v0 && v1.planId === v0.planId && v1.version === v0.version + 1 && m.calls.plan.length === plans0 && !!ctx1 && ctx1.plan && ctx1.plan.version === v1.version,
+    `S6b-1 前提: ［残りの JavaScript を作る］は計画の AI を呼ばずに版を上げ、上げた版で C1 を生成し直した: ${JSON.stringify({ versions: [v0 && v0.version, v1 && v1.version], plans: m.calls.plan.length - plans0, gen: sent.length })}`);
+  assert(custText === scoped && reqRow && reqRow.text.includes(REQ_S) && !/保存/.test(reqRow.text) && v1 && v1.plan.customizations[0].requirement === CUST_TEXT,
+    `S6b-2: 作り直した版の生成に渡す customization の requirement と「満たすべき要件」の行は、範囲内の要件の文のまま（計画の元の文「…保存時にも止める」に戻らない。計画の文は書き換えない）: ${JSON.stringify({ custText, reqRow })}`);
+  assert(v1 && recOf(v1) === rec0 && strippedOf(v1).length === strippedOf(v0).length && (ctx1.verification.requiredEffects || []).every(e => e.effect !== 'block-save'),
+    `S6b-3: 作り直した版は元の版の範囲の記録（外した効果・説明に残りうる customization・判断の候補・生成に渡す requirement の文・決定事項の実現として足した動作）を引き継ぐ。必須の効果にも保存禁止は無い: ${JSON.stringify({ v0: rec0, v1: recOf(v1) })}`);
+  const sco1 = scopeOf({ c: m.conv() }, v1 && v1.planId);
+  assert(sco0.scopeStripped > 0 && sco1.scopeStripped === sco0.scopeStripped && sco1.scopeIssues === sco0.scopeIssues,
+    `S6b-4: 読み取り（requirementScope。その系列の最新の版）の外した効果・説明に残りうる customization の数も、作り直した版で 0 に戻らない: ${JSON.stringify({ before: [sco0.scopeStripped, sco0.scopeIssues], after: [sco1.scopeStripped, sco1.scopeIssues] })}`);
 });
 
 // =========================================================

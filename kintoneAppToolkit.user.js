@@ -25821,7 +25821,8 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
       const assistant = (text, data) => push(MSG.ASSISTANT_TEXT, ROLE.ASSISTANT, text, data);
 
       // ---- 計画のバージョン ----
-      function registerPlan({ plan, ctx = null, review = null, revisionRequest = null, basedOn = null, decisionsSent = null, appliedEntryIds = [], gatewayPlan = null, revisionMeta = null, answeredAfter = null, turnInfo = null, planId: planIdIn = null, goalSent: goalSentIn = null }) {
+      function registerPlan({ plan, ctx = null, review = null, revisionRequest = null, basedOn = null, decisionsSent = null, appliedEntryIds = [], gatewayPlan = null, revisionMeta = null, answeredAfter = null, turnInfo = null, planId: planIdIn = null, goalSent: goalSentIn = null, scopeFrom = null }) {
+        //   scopeFrom（省略可）: plan がその版の外した後の計画の写しのとき、その版（範囲の記録を引き継ぐ。scopePlanOf の from）
         const parent = basedOn || null;
         const planId = parent ? parent.planId : (planIdIn || newId('plan'));
         const version = parent ? parent.version + 1 : 1;
@@ -25850,7 +25851,8 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
         const lg = ledgerOf(planId);
         //   §0f.2 の 4（2026-10-09）: 計画の返答を採用範囲と照合する（台帳はこのターンの requirementOps で更新済み）。出どころがはっきりした範囲外の効果を
         //   v.plan と v.gatewayPlan の fields[].effects から外して v.scopeStripped に記録する（実装仕様・照合の前に行う）
-        scopePlanOf(v, lg);
+        //   K-4（2026-10-10）: 外した後の計画の写しの版（scopeFrom）は、その版の範囲の記録を引き継ぐ
+        scopePlanOf(v, lg, { from: scopeFrom });
         for (const id of appliedEntryIds || []) { const e = lg.entries.find(x => x.id === id); if (e && e.appliedInVersion == null) e.appliedInVersion = version; }
         // 2026-10-07（有料確認）: 要件の台帳はこのターンの requirementOps で更新済み（noteTurn が先）。計画の検証（services.plan）は台帳の更新より前なので、
         //   ここで要件の保持（条件の値が spec / JS / 未解決 / 文章のどこにあるか）を調べ、確認結果の警告に足す（検証が済ませていれば二重に出さない）
@@ -26347,9 +26349,47 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
         }
         return res;
       }
-      /** registerPlan の照合: この版の計画（v.plan と v.gatewayPlan。版のもの）に scopeStripPlans を当てて、記録を版に持つ */
-      function scopePlanOf(v, lg) {
+      /**
+       * registerPlan の照合: この版の計画（v.plan と v.gatewayPlan。版のもの）に scopeStripPlans を当てて、記録を版に持つ。
+       *   from（省略可）: この版の計画が、その版の外した後の計画の写し（［残りの JavaScript を作る］GENERATE_CODE。計画の AI は呼ばない）。
+       *   K-4（2026-10-10）: 写しには外す効果がもう無いので、照合し直すと記録が空になり、生成に渡す requirement が計画の元の文に戻っていた。
+       *   元の版の範囲の記録（外した効果・説明に残りうる customization・判断の候補・生成に渡す requirement の文・決定事項の実現として足した動作）を写して引き継ぎ、
+       *   写しで新たに外したもの（その間に台帳が変わったとき）だけを足す。引き継いだだけの「説明に残りうる」customization（scopeIssuesCarried）は、
+       *   この版の自動の見直しの引き金にしない（計画の AI を呼ばない版。写しで新たに見つかったものだけが今までどおり引き金になる）
+       */
+      function scopePlanOf(v, lg, { from = null } = {}) {
         const res = scopeStripPlans(v.plan, v.gatewayPlan, lg);
+        let added = res.stripped.length;
+        if (from) {
+          const cj = (x) => JSON.parse(JSON.stringify(x));
+          const fxKey = (x) => `${x.customizationId}|${x.field}|${x.effect}`;
+          const st0 = Array.isArray(from.scopeStripped) ? cj(from.scopeStripped) : [];
+          const haveS = new Set(st0.map(fxKey));
+          const addS = res.stripped.filter(s => !haveS.has(fxKey(s)));
+          added = addS.length;
+          res.stripped = [...st0, ...addS];
+          const is0 = Array.isArray(from.scopeIssues) ? cj(from.scopeIssues) : [];
+          const freshText = new Set(res.issues.filter(g => g && g.kind === 'text').map(g => g.customizationId));
+          v.scopeIssuesCarried = [...new Set(is0.filter(g => g && g.kind === 'text' && !freshText.has(g.customizationId)).map(g => g.customizationId))];
+          for (const g of res.issues) {
+            const h = is0.find(x => x && x.customizationId === g.customizationId && x.kind === g.kind);
+            if (!h) { is0.push(g); continue; }
+            for (const it of g.items) if (!h.items.some(y => y.field === it.field && y.effect === it.effect)) h.items.push(it);
+          }
+          res.issues = is0;
+          res.reqText = { ...(from.scopeRequirementText && typeof from.scopeRequirementText === 'object' ? cj(from.scopeRequirementText) : {}), ...res.reqText };
+          const gKey = (g) => (Array.isArray(g.decisions) ? g.decisions : []).map(d => d.id || `key:${d.key || ''}`).sort().join('|') || 'open';
+          const cd0 = Array.isArray(from.scopeCandidates) ? cj(from.scopeCandidates) : [];
+          for (const g of res.candidates) {
+            const h = cd0.find(x => gKey(x) === gKey(g));
+            if (!h) { cd0.push(g); continue; }
+            for (const it of g.items) if (!h.items.some(y => y.field === it.field && y.effect === it.effect)) h.items.push(it);
+          }
+          res.candidates = cd0;
+          const ln0 = Array.isArray(from.scopeLinked) ? cj(from.scopeLinked) : [];
+          for (const x of res.linked) if (!ln0.some(y => fxKey(y) === fxKey(x))) ln0.push(x);
+          res.linked = ln0;
+        }
         v.scopeStripped = res.stripped; v.scopeIssues = res.issues; v.scopeCandidates = res.candidates; v.scopeRequirementText = res.reqText; v.scopeLinked = res.linked;
         //   再検証前の指示 §1: 判断の候補のフィールドが今の計画に無い（自動の見直しで計画が外した）ときは、前の版の同じ要件の計画の案のフィールドを使う（黙って消さない）
         const prev = state.planHistory.filter(x => x && x.planId === v.planId && x !== v && Array.isArray(x.scopeCandidates)).slice(-1)[0] || null;
@@ -26359,7 +26399,8 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
           for (const o of old) if (!g.items.some(x => x.field === o.field && x.effect === o.effect)) g.items.push({ ...o, customizationIds: [...o.customizationIds], requirementIds: [...o.requirementIds] });
         }
         for (const g of v.scopeCandidates) if (g.items.some(x => x.field)) g.items = g.items.filter(x => x.field || !g.items.some(y => y.field && y.effect === x.effect));
-        state.metrics.scopeStripped = (state.metrics.scopeStripped || 0) + v.scopeStripped.length;
+        //   数えるのはこの版で外した効果だけ（写しで引き継いだ記録は数え直さない）
+        state.metrics.scopeStripped = (state.metrics.scopeStripped || 0) + added;
       }
       /**
        * レビューの指摘 row2（2026-10-09）: reviseWith で計画の AI に送る土台（previousPlan）。版になっていない計画（最初の計画の作成中に受け付けた修正・作業中の指示を
@@ -28084,7 +28125,9 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
             //   §0f.2 の 4（2026-10-09）: 範囲外の効果を外した customization（説明の文に範囲外の動作が残りうる。v.scopeIssues）も、同じ 1 回の自動の依頼で計画に外させる
             //   （回数は effectRetried の鍵（customization の id）と上限のまま。引き金と依頼文は範囲内の要件だけ。範囲外の要件は構造化した「外す」指示にだけ書く）
             //   再検証前の指示 §1（2026-10-10）: 判断の候補だけを外した customization（kind candidate）は自動の見直しの引き金にしない（計画の AI に外させず、利用者の判断を待つ）
-            const scopeFresh = (v.scopeIssues || []).filter(x => x && x.customizationId && x.kind === 'text' && !effTried.has(x.customizationId) && (v.plan.customizations || []).some(c => c && c.customizationId === x.customizationId));
+            //   K-4（2026-10-10）: ［残りの JavaScript を作る］の版（計画の写し）が前の版から引き継いだだけのもの（scopeIssuesCarried）は引き金にしない（計画の AI を呼ばない版）
+            const carriedS = new Set(Array.isArray(v.scopeIssuesCarried) ? v.scopeIssuesCarried : []);
+            const scopeFresh = (v.scopeIssues || []).filter(x => x && x.customizationId && x.kind === 'text' && !effTried.has(x.customizationId) && !carriedS.has(x.customizationId) && (v.plan.customizations || []).some(c => c && c.customizationId === x.customizationId));
             if (fresh.length || effFresh.length || scopeFresh.length) {
               for (const r of fresh) tried.add(r.id);
               state.ownerRetried.set(v.planId, tried);
@@ -28626,7 +28669,8 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
               if (!redo.length) { toolkit('最終案の JavaScript は検証済みです（同じ計画のまま作り直しても同じ結果になります）。変えたい点があれば、そのまま伝えてください（最終案を直します）。', { kind: 'generate-verified', planId: v.planId, version: v.version }); break; }
               if (timing.ackMs == null) timing.ackMs = clock() - t0;
               const cloneJ = (x) => (x == null ? x : JSON.parse(JSON.stringify(x)));
-              const vNew = registerPlan({ plan: cloneJ(v.plan), ctx: v.ctx || null, review: cloneJ(v.review), basedOn: v, decisionsSent: v.decisionsSent || [], gatewayPlan: cloneJ(v.gatewayPlan), revisionMeta: null, turnInfo: null });
+              //   K-4（2026-10-10）: v.plan は範囲外を外した後の計画なので、外した記録（生成に渡す requirement の文を含む）も v から引き継ぐ（scopeFrom）
+              const vNew = registerPlan({ plan: cloneJ(v.plan), ctx: v.ctx || null, review: cloneJ(v.review), basedOn: v, decisionsSent: v.decisionsSent || [], gatewayPlan: cloneJ(v.gatewayPlan), revisionMeta: null, turnInfo: null, scopeFrom: v });
               announcePlan(vNew);
               const fin = await finalizeVersion(vNew, { reuse: v.generated || null, note: 'JavaScript の作り直し（計画は同じ）' });
               if (!fin) { if (late()) discard(); break; }
@@ -30518,17 +30562,21 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
       if (!devBaseLoader || !devBase) return legacy;
       return KTDevBase.inputsOf(devBase, legacy) || { ...legacy, environment: KTDevBase.environmentOf(devBase) };
     };
-    // 設定取得の関所（パネルの表示状態）: 自動の取り直し（接続・タブを開いた・承認の欄の準備）は、d.canAutoFetch() が真
+    // 設定取得の関所（パネルの表示状態）: 自動の取り直し（接続・タブを開いた・承認の欄の準備・登録や戻しの後の続き）は、d.canAutoFetch() が真
     //   （パネルを展開していて開発支援を表示している。省略時は常に真＝今までどおり）のときだけ始める。偽なら取らずに「次に見えたときに取る」印だけを付ける（devBaseWanted）。
     //   自動の取得の途中で見えなくなったら、送っていない段（他アプリの定義・本文）は始めずに止め、取れた段は続きのために残す（devBasePartial。次は足りない段だけ）。
-    //   利用者が明示的に始めた処理（質問・計画・生成・登録・反映・戻す・［再取得］・相談）の中の取得は止めない（登録・戻すの後の取り直しも、その操作の続きとして止めない。
-    //   進行中の自動の取得に合流したら、止めずに最後まで取る）。
+    //   登録・戻すの後の取り直し（after-js-register / after-js-rollback / after-rollback）は、見えている間は今までどおりすぐ取り、見えていない間は取らずに
+    //   今の基準を古いとする（devBaseStale。古い情報を最新として扱わず、次に見えたとき・次に要るときに取り直す。利用者の依頼 2026-10-10）。
+    //   登録・戻すの操作そのもの（書き込みと、その操作の中の照合の読み取り）は止めない。
+    //   利用者が明示的に始めた処理（質問・計画・生成・登録・反映・戻す・［再取得］・相談）の中の取得は止めない（進行中の自動の取得に合流したら、止めずに最後まで取る）。
     //   Toolkit のほかの場所で設定を変えたら（invalidateDevBase）、今の基準を古いとし（devBaseStale）、期限の内でも再利用せずに次に要るときに取り直す
-    const DEV_BASE_AUTO_REASONS = ['connect', 'tab', 'precheck'];
+    const DEV_BASE_AUTO_REASONS = ['connect', 'tab', 'precheck', 'after-js-register', 'after-js-rollback', 'after-rollback'];
     const DEV_BASE_RESUME_MAX_AGE_MS = 60 * 1000;   // 止めた段の続きを使ってよい間（タブを開いたときの再利用の期限と同じ）
     const canAutoFetch = typeof d.canAutoFetch === 'function' ? () => { try { return d.canAutoFetch() !== false; } catch (e) { return true; } } : () => true;
     const FETCH = KTFetchGate.INTENT;   // 関所に渡す取得の種類（AUTO = 自動の取得・EXPLICIT = 利用者の明示の操作の中の取得）
-    let devBaseStale = false, devBaseWanted = false, devBaseGen = 0, devBasePartial = null, devBaseWaiters = 0, devBasePausedP = null;
+    //   devBaseOwnDeferred: 見えていない間に自分の登録（after-js-register）の取り直しを見送った。次の取り直しは自分の登録の直後の取り直しと同じに扱う
+    //   （承認の基準との違いで承認を外さない。見えている間の after-js-register と同じ）
+    let devBaseStale = false, devBaseWanted = false, devBaseGen = 0, devBasePartial = null, devBaseWaiters = 0, devBaseOwnDeferred = false, devBasePausedP = null;
     /** 進行中の取得に明示の処理が合流する（自動の取得でも途中で止めない。合流より先に止まっていたら、続きを明示で取る） */
     const joinDevBase = () => {
       const p = devBasePromise; devBaseWaiters += 1;
@@ -30540,12 +30588,14 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
       const auto = DEV_BASE_AUTO_REASONS.includes(reason);
       if (auto && !canAutoFetch()) {
         devBaseWanted = true;
+        //   自分の登録・戻しで動作テスト環境が変わった: 取らずに今の基準を古いとする（世代も進め、書き込みの前に始めた取得の結果や止めた段の続きを最新として使わない）
+        if (/^after-/.test(reason)) { invalidateDevBase(); if (reason === 'after-js-register') devBaseOwnDeferred = true; }
         return devBase;
       }
       if (devBase && !devBaseStale && maxAgeMs > 0 && (nowMs() - devBaseAt) < maxAgeMs) return devBase;
       if (devBasePromise) return auto ? devBasePromise : joinDevBase();
       const seq = ++devBaseSeq;
-      const gen = devBaseGen;
+      const gen = devBaseGen, ownDeferred = devBaseOwnDeferred;
       const p0 = devBasePartial; devBasePartial = null;
       const resume = p0 && p0.gen === gen && (nowMs() - p0.at) < DEV_BASE_RESUME_MAX_AGE_MS ? p0.partial : null;
       const startedAt = resume ? p0.at : nowMs();
@@ -30564,11 +30614,12 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
         if (seq === devBaseSeq) {
           devBase = b || { ok: false, status: 'FETCH_FAILED', message: '作業の基準を取得できませんでした', loadedAt: new Date(nowMs()).toISOString(), errors: [] }; devBaseAt = nowMs();
           devBaseWanted = false;
-          if (gen === devBaseGen) devBaseStale = false;
+          if (gen === devBaseGen) { devBaseStale = false; devBaseOwnDeferred = false; }
         }
         devBasePromise = null;
         // 段階 C（C4・R16）: 承認した最終案の基準（stamp）と今の動作テスト環境が違えば承認を外す（自分の反映の直後の取り直しは、反映の側で基準を進める）
-        try { const vA = conv ? conv.activePlan() : null; if (vA && vA.approval && devBase && devBase.ok && !['after-apply', 'after-js-register'].includes(reason)) { const stNow = KTDevBase.stamp(devBase); const ref = vA.approval.baseStamp; if (ref && stNow && ref.fingerprint && stNow.fingerprint && ref.fingerprint !== stNow.fingerprint) conv.markStale('承認の後に動作テスト環境の設定が変わりました。'); } } catch (e) { }
+        //   見えていない間に見送った自分の登録の直後の取り直し（ownDeferred）も、after-js-register と同じに扱う
+        try { const vA = conv ? conv.activePlan() : null; if (vA && vA.approval && devBase && devBase.ok && !['after-apply', 'after-js-register'].includes(reason) && !ownDeferred) { const stNow = KTDevBase.stamp(devBase); const ref = vA.approval.baseStamp; if (ref && stNow && ref.fingerprint && stNow.fingerprint && ref.fingerprint !== stNow.fingerprint) conv.markStale('承認の後に動作テスト環境の設定が変わりました。'); } } catch (e) { }
         // 反映の記録の「運用環境との差」の件数も取り直した結果にする（以前はヘッダーだけが新しくなった）
         try { renderHeader(); renderBaseDiff(); renderApplyLog(); } catch (e) { }
         //   §0e.1（2026-10-09）: 作業の基準が変わったら、最終案の承認の欄の準備をやり直す（承認の前だけ。同じ基準なら何もしない）
@@ -37459,9 +37510,10 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
     return { settings, session, probe: () => result };
   }
 
-  //   設定取得の関所（パネルの表示状態）: 作業の基準の自動の取得（接続・タブを開いた・承認の欄の準備）は、
+  //   設定取得の関所（パネルの表示状態）: 作業の基準の自動の取得（接続・タブを開いた・承認の欄の準備・登録や戻しの後の続き）は、
   //   パネルを展開していて開発支援のタブを表示している間だけ（root.ktPanel。パネルの無い root では常に取る＝今までどおり）。
-  //   利用者の明示の操作（質問・計画・生成・登録・反映・戻す・［再取得］）の中の取得は止めない（登録・戻すの後の取り直しも、その操作の続きとして止めない）。
+  //   登録・戻すの後の続きは、見えていない間は取らずに今の基準を古いとし、次に見えたとき・次に要るときに取り直す（登録・戻すの操作そのものは止めない）。
+  //   利用者の明示の操作（質問・計画・生成・登録・反映・戻す・［再取得］）の中の取得は止めない。
   //   開発支援を表示したまま展開したときも、タブを開いたときと同じ扱い（onVisible）。onSettingsChanged: 動作テスト環境に書き込んだ知らせ（ほかの場所の取得済みを古いとする）
   //   aiLink（省略可・startAiLink）: 起動時に始めた AI の接続の確認（接続情報・セッション・health の結果）。あればそれを使い、トークンの交換・health を二重に送らない
   function renderAiWorkspace(root, DATA, appId = null, { getContextInputs = null, runScan = null, openCustomize = null, onSettingsChanged = null, aiLink = null } = {}) {

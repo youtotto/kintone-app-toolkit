@@ -13,6 +13,9 @@
 //     §8 ［動作テスト環境へ反映］の中の照合の取り直し（利用者の明示の操作）は、最小化中でも止めずに正しい変わった点を出す
 //     §9 最小化で開いたページでも、AI の接続の確認（トークンの交換・/v2/health）は起動時に 1 回ずつ行う（設定取得は 0 回のまま）
 //     4-13 Plugins の deploy（運用環境が変わる）の後に Customize を開くと、一覧（運用環境との差・「動作テスト環境のみ」の印）を取り直す
+//   2026-10-10 の判断点の戻し（利用者の依頼「設定が変更された場合は古い情報を最新として扱わず、次に必要になった時点で再取得する」
+//   「取得中に最小化した場合、新たな取得処理や後続リクエストを開始しない」）:
+//     §10 登録・戻すの後の作業の基準の取り直しは、見えている間はすぐ取り、最小化中は取らずに古い印を付け、展開したら取り直す（登録・戻すの操作そのものは止めない）
 //
 // 実行方法: node tests/panel-minimized-fetch.test.js
 //   修正前の版で同じ確かめ方をするとき（RED の確認）: KT_SRC=<修正前の kintoneAppToolkit.user.js> node tests/panel-minimized-fetch.test.js
@@ -668,6 +671,93 @@ await safe('§9', async () => {
   await e.click('tab-ai'); await e.settle();
   const s3 = e.fk.settingsCalls(m3);
   assert(s3.some(c => /^\/k\/v1\/preview\/app\/form\/fields$/.test(c.path)) && e.fk.otherCalls(m3).filter(c => c.kind === 'proxy').length === 0, `9-7 開発支援を開いたら（見えた）作業の基準を取る（自動の設定取得は見えたとき）: ${s3.length} 回`);
+});
+
+// =========================================================
+console.log('\n--- §10. 登録・戻すの後の作業の基準の取り直し: 見えている間はすぐ取り、最小化中は取らずに古い印を付け、展開したら取り直す ---');
+await safe('§10', async () => {
+  //   ［動作テスト環境へ反映］（設定 ＋ JavaScript の登録）→［JavaScript を戻す］→［設定を戻す］を順に行い、それぞれの操作の直前に最小化した（開発支援が見えない）場合と、
+  //   見えたままの場合を比べる。登録・戻すの操作そのもの（書き込みと、その操作の中の照合の読み取り）は止めない。作業の基準の取り直しは偽の loadDevBase で数える
+  const { createNewFlowKit } = require('./helpers/new-flow.js');
+  const out = {};
+  for (const hidden of [false, true]) {
+    const T = loadToolkit();
+    const KIT = createNewFlowKit(T);
+    const visible = { v: true };
+    const loads = [];   // 作業の基準の取り直し（reason・始めた時点の偽の動作テスト環境の呼び出しの位置）
+    let mref = null;
+    const loader = KIT.loadDevBaseFromMock(() => mref.mock);
+    const gen = KIT.screenGenerate({ field: 'approval_memo', targetFile: 'memoLock.js' });
+    const m = KIT.mount({ health: KIT.HEALTH_V, planImpl: KIT.planImplOf(KIT.screenPlan('mixed')), generateImpl: gen.impl, liveBase: true,
+      extra: { canAutoFetch: () => visible.v, loadDevBase: (a = {}) => { loads.push({ reason: a.reason || null, at: mref.mock.calls.length }); return loader(a); } } });
+    mref = m;
+    await KIT.ticks();
+    await KIT.adoptOnScreen(m); await KIT.ticks(20);
+    const o = out[hidden] = {};
+    const revOf = () => { const s = T.KTDevBase.stamp(m.panel.devBase()); return s && s.revision ? s.revision.preview : null; };
+    const hasFile = () => ((m.panel.devBase() && m.panel.devBase().files) || []).some(f => f && f.name === 'memoLock.js');
+    const revoked = () => m.msgs().filter(x => x && x.data && x.data.kind === 'approval-revoked').length;
+    const gets = (from, to = undefined) => m.mock.calls.slice(from, to).filter(c => /^GET /.test(c));
+    /** 展開（開発支援が見えた）→ その間の取り直し */
+    const expand = async () => {
+      const l = loads.length, c = m.mock.calls.length;
+      visible.v = true; m.panel.onVisible(); await KIT.ticks(30);
+      return { reasons: loads.slice(l).map(x => x.reason), gets: gets(c), state: { ...m.panel.devBaseFetchState() }, rev: revOf(), hasFile: hasFile(), approval: !!(m.conv().activePlan() && m.conv().activePlan().approval), revoked: revoked() };
+    };
+    // 1. ［動作テスト環境へ反映］（押す直前に最小化）
+    const l0 = loads.length;
+    const r = await KIT.applyOnScreen(m, { before: async () => { if (hidden) visible.v = false; } });
+    await KIT.ticks(30);
+    const putIdx = m.mock.calls.lastIndexOf('PUT customize');   // JavaScript の登録の書き込み
+    const afterPut = loads.slice(l0).filter(x => x.at > putIdx);
+    const reload = afterPut.find(x => x.reason === 'after-js-register');
+    o.reg = { stage: r.run && r.run.stage, registered: !!(r.run && r.run.js && r.run.js.registered), reasons: afterPut.map(x => x.reason),
+      verify: gets(putIdx + 1, reload ? reload.at : undefined),   // 登録の中の照合の読み取り（取り直しを始める前まで）
+      getsAfterPut: gets(putIdx + 1), state: { ...m.panel.devBaseFetchState() }, rev: revOf(), hasFile: hasFile() };
+    o.regExpand = await expand();
+    // 2. ［JavaScript を戻す］（押す直前に最小化）
+    if (hidden) visible.v = false;
+    let l = loads.length;
+    const jrb = await m.panel.startJsRollback(); const jrbStatus = jrb && jrb.status;   // 戻した後は同じ記録の状態が変わるので、準備の時点で控える
+    await m.panel.confirmJsRollback(); await KIT.ticks(30);
+    o.jsrb = { prepared: jrbStatus, stage: m.panel.jsExecState().stage, reasons: loads.slice(l).map(x => x.reason), state: { ...m.panel.devBaseFetchState() }, rev: revOf() };
+    o.jsrbExpand = await expand();
+    // 3. ［設定を戻す］（押す直前に最小化）
+    if (hidden) visible.v = false;
+    l = loads.length;
+    const srb = await m.panel.startRollback(); const srbStatus = srb && srb.status;
+    await m.panel.confirmRollback(); await KIT.ticks(30);
+    o.srb = { prepared: srbStatus, stage: m.panel.executorState().stage, reasons: loads.slice(l).map(x => x.reason), state: { ...m.panel.devBaseFetchState() }, rev: revOf() };
+    o.srbExpand = await expand();
+  }
+  const a = out[false], b = out[true];
+  TABLE.push({ c: 'E', label: '最小化中の JavaScript の登録（書き込みの後: 照合の読み取りだけ・作業の基準の取り直し 0 回）', s: b.reg.getsAfterPut, o: [], fk: KITFK });
+  TABLE.push({ c: 'E', label: '↑の後に展開（作業の基準を 1 回取り直す）', s: b.regExpand.gets, o: [], fk: KITFK });
+  // 前提（見えているとき）: 今までどおり、それぞれの操作の後にすぐ 1 回取り直す。展開（見えたまま）では取り直さない
+  assert(a.reg.stage === 'done' && a.reg.registered && JSON.stringify(a.reg.reasons) === '["after-js-register"]' && a.reg.hasFile && a.regExpand.reasons.length === 0,
+    `10-1 前提（見えているとき）: 登録の後にすぐ 1 回取り直し、登録した後の基準になる: ${a.reg.stage}・${a.reg.reasons.join(', ') || 'なし'}・ファイル ${a.reg.hasFile}`);
+  assert(a.jsrb.stage === 'rolled-back' && JSON.stringify(a.jsrb.reasons) === '["after-js-rollback"]' && a.srb.stage === 'rolled-back' && JSON.stringify(a.srb.reasons) === '["after-rollback"]' && a.jsrbExpand.reasons.length === 0 && a.srbExpand.reasons.length === 0,
+    `10-2 前提（見えているとき）: JavaScript を戻す・設定を戻すの後もすぐ 1 回ずつ取り直す: ${a.jsrb.stage}・${a.jsrb.reasons.join(', ') || 'なし'}／${a.srb.stage}・${a.srb.reasons.join(', ') || 'なし'}`);
+  // 最小化中の登録
+  assert(b.reg.stage === 'done' && b.reg.registered && b.reg.reasons.length === 0 && b.reg.state.stale === true && b.reg.state.wanted === true,
+    `10-3 最小化中の登録: 登録は最後まで動き、登録の後の作業の基準の取り直しは 0 回。今の基準に古い印と「次に見えたときに取る」印を付ける: ${b.reg.stage}・取り直し ${b.reg.reasons.join(', ') || '0 回'}・${JSON.stringify(b.reg.state)}`);
+  assert(b.reg.verify.length > 0 && JSON.stringify(b.reg.getsAfterPut) === JSON.stringify(a.reg.verify),
+    `10-4 登録の中の照合の読み取り（書き込みの後の確かめ）は止めず、見えているときと同じ。それ以外の取得は始めない: ${b.reg.getsAfterPut.join(', ') || 'なし'}（見えているとき: ${a.reg.verify.join(', ')}）`);
+  assert(!b.reg.hasFile && b.reg.rev !== a.reg.rev,
+    `10-5 取り直すまでは、古い基準を登録の後の基準として扱わない（古い印のまま。revision ${b.reg.rev}・見えているときの登録の後は ${a.reg.rev}）`);
+  assert(JSON.stringify(b.regExpand.reasons) === '["tab"]' && b.regExpand.state.stale === false && b.regExpand.state.wanted === false && b.regExpand.rev === a.reg.rev && b.regExpand.hasFile,
+    `10-6 展開する（開発支援が見える）と 1 回取り直し、登録の後の基準になる（見えているときと同じ revision・登録したファイル）: ${b.regExpand.reasons.join(', ') || '0 回'}・revision ${b.regExpand.rev}・ファイル ${b.regExpand.hasFile}`);
+  assert(b.regExpand.approval === a.regExpand.approval && b.regExpand.revoked === a.regExpand.revoked && b.regExpand.revoked === 0,
+    `10-7 見送った取り直しは自分の登録の直後の取り直しと同じに扱い、承認の基準との違いで承認を外さない（見えているときと同じ）: 承認 ${b.regExpand.approval}（見えているとき ${a.regExpand.approval}）・取り消し ${b.regExpand.revoked}`);
+  // 最小化中に戻す
+  assert(b.jsrb.prepared === 'PREPARED' && b.jsrb.stage === 'rolled-back' && b.jsrb.reasons.length === 0 && b.jsrb.state.stale === true && b.jsrb.rev === b.regExpand.rev,
+    `10-8 最小化中に JavaScript を戻す: 戻すは最後まで動き、取り直しは 0 回で古い印を付ける（基準は前のまま）: ${b.jsrb.stage}・取り直し ${b.jsrb.reasons.join(', ') || '0 回'}・${JSON.stringify(b.jsrb.state)}`);
+  assert(JSON.stringify(b.jsrbExpand.reasons) === '["tab"]' && b.jsrbExpand.state.stale === false && b.jsrbExpand.rev === a.jsrb.rev,
+    `10-9 展開すると 1 回取り直し、戻した後の基準になる（見えているときと同じ revision ${a.jsrb.rev}）: ${b.jsrbExpand.reasons.join(', ') || '0 回'}・revision ${b.jsrbExpand.rev}`);
+  assert(b.srb.prepared === 'PREPARED' && b.srb.stage === 'rolled-back' && b.srb.reasons.length === 0 && b.srb.state.stale === true && b.srb.rev === b.jsrbExpand.rev,
+    `10-10 最小化中に設定を戻す: 戻すは最後まで動き、取り直しは 0 回で古い印を付ける: ${b.srb.stage}・取り直し ${b.srb.reasons.join(', ') || '0 回'}・${JSON.stringify(b.srb.state)}`);
+  assert(JSON.stringify(b.srbExpand.reasons) === '["tab"]' && b.srbExpand.state.stale === false && b.srbExpand.rev === a.srb.rev,
+    `10-11 展開すると 1 回取り直し、戻した後の基準になる（見えているときと同じ revision ${a.srb.rev}）: ${b.srbExpand.reasons.join(', ') || '0 回'}・revision ${b.srbExpand.rev}`);
 });
 
 // =========================================================
