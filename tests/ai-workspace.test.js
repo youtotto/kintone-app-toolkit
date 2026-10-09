@@ -204,7 +204,8 @@ console.log('\n--- 2. KTAiConversation.create（fake services。履歴は送ら�
   assert(c.messages().map(m => m.type).slice(2).join() === 'USER,DRAFT,USER,ASSISTANT_TEXT,FINAL' && !c.messages().some(m => ['PLAN', 'REVIEW'].includes(m.type) || ['plan-summary', 'review-summary'].includes(m.data?.kind)), '仮案 → 採用 → 最終案のカード 1 枚（変更案・確認のカードは出さない）');
   const r3 = await c.send('新しい承認者は作らず既存の承認者を使って');
   const v2 = c.activePlan();
-  assert(r3.intent === 'REVISE_PLAN' && log[2][0] === 'plan' && log[2][1] === GOAL && log[2][2] === '新しい承認者は作らず既存の承認者を使って', 'REVISE_PLAN → services.plan（同じ goal ＋ revision.request）。旧 JSON の patch ではなく再計画');
+  //   §0f.2 の 4（2026-10-09）: 「同じ goal」は Toolkit が最初の計画に送った goal（計画の AI が返した goal で置き換えない）
+  assert(r3.intent === 'REVISE_PLAN' && log[2][0] === 'plan' && log[2][1] === log[1][1] && log[2][1].split('\n')[0] === GOAL && log[2][2] === '新しい承認者は作らず既存の承認者を使って', 'REVISE_PLAN → services.plan（同じ goal ＋ revision.request）。旧 JSON の patch ではなく再計画');
   assert(v2.version === 2 && v2.basedOnVersion === 1 && v2.planId === v1.planId && v2.revisionRequest === '新しい承認者は作らず既存の承認者を使って' && v2.status === 'ACTIVE' && v1.status === 'SUPERSEDED' && v2.plan.steps[0].actionType === 'REUSE_FIELD', 'v2: version 2 / basedOnVersion 1 / 同じ planId / v1 は SUPERSEDED');
   assert(c.planHistory().length === 2 && c.messages().filter(m => m.type === 'FINAL').map(m => m.data.version).join() === '1,2', '履歴 2 版・最終案のカードは版ごと（「変更案を直しました。」の要約の文は削除。版の番号は会話に出さない）');
   const r4 = await c.send('P1って何してる？');

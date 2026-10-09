@@ -291,8 +291,11 @@ function createNewFlowKit(T) {
     };
     return { impl, calls };
   }
-  /** 段階 C の偽 services（仮案 → 採用 → 計画 → 生成と検証（生成工程）→ 最終案） */
-  function makeConvC({ planImpl = (args) => planJs(args), generate = makeGenerate(), feedback = true, storage = null, planGate = null, materials = '見ている設定: ステータス 3 件・通知 0 件・既存の JavaScript 0 ファイル', supported = true } = {}) {
+  /**
+   * 段階 C の偽 services（仮案 → 採用 → 計画 → 生成と検証（生成工程）→ 最終案）。
+   *   §0f（2026-10-09）: scriptFn = 仮案の台本（既定は script）・labels = フィールドのラベル（既定は LABELS_C）を差し替えられる
+   */
+  function makeConvC({ planImpl = (args) => planJs(args), generate = makeGenerate(), feedback = true, storage = null, planGate = null, materials = '見ている設定: ステータス 3 件・通知 0 件・既存の JavaScript 0 ファイル', supported = true, scriptFn = script, labels = LABELS_C } = {}) {
     const calls = { propose: [], plan: [], ask: [] };
     let t = 1000;
     const x = { planImpl };
@@ -300,9 +303,9 @@ function createNewFlowKit(T) {
       conversationFeatures: () => ['requirements', 'brief', 'stream', 'proposal'], revisionModes: () => ['full'],
       generatorFeatures: () => ['requirementId', 'cases', ...(feedback ? ['feedback'] : []), ...(supported ? (Array.isArray(supported) ? supported : GEN_EFFECT_FEATURES) : [])], plannerFeatures: () => ['reply'],
       materials: () => materials,
-      fieldLabels: () => LABELS_C,
+      fieldLabels: () => labels,
       async customizeRevision() { return '42'; },
-      async propose(args) { calls.propose.push({ utterance: args.utterance }); const raw = script(args); if (!raw) return { ok: false, reason: 'NO_SCRIPT', message: `台本がありません: ${args.utterance}` }; t += 3000; if (typeof args.onText === 'function') args.onText(raw.reply.slice(0, 12)); await tick(); t += 4000; if (typeof args.onText === 'function') args.onText(raw.reply); return { ok: true, proposal: normalized(raw, `pp-${calls.propose.length}`), ctx: { facts: [] }, perf: { baseWaitMs: 0, contextMs: 5, requestMs: 7000 } }; },
+      async propose(args) { calls.propose.push({ utterance: args.utterance }); const raw = scriptFn(args); if (!raw) return { ok: false, reason: 'NO_SCRIPT', message: `台本がありません: ${args.utterance}` }; t += 3000; if (typeof args.onText === 'function') args.onText(raw.reply.slice(0, 12)); await tick(); t += 4000; if (typeof args.onText === 'function') args.onText(raw.reply); return { ok: true, proposal: normalized(raw, `pp-${calls.propose.length}`), ctx: { facts: [] }, perf: { baseWaitMs: 0, contextMs: 5, requestMs: 7000 } }; },
       async ask(args) { calls.ask.push({ question: args.question }); t += 2000; return { ok: true, answer: { answer: '答えです。', facts: [], analysis: [], recommendations: [], unknowns: [] }, ctx: { facts: [] } }; },
       async plan(args) { calls.plan.push({ goal: args.goal, revision: !!args.revision, onText: typeof args.onText === 'function', request: args.revision ? args.revision.request : null, focus: args.revision && Array.isArray(args.revision.focus) ? [...args.revision.focus] : null }); if (typeof args.onText === 'function') { t += 3000; args.onText('承認待ちの間だけ金額を'); } if (planGate) await planGate.p; t += 27000; if (typeof args.onText === 'function') args.onText('承認待ちの間だけ金額を編集不可にします。'); return x.planImpl(args); },
       async generate(args) { t += 20000; return generate.impl(args); },
