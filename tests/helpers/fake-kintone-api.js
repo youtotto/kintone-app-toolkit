@@ -3,11 +3,12 @@
 //   呼ばれた順に calls へ { kind: 'rest' | 'js' | 'fetch', method, path } で積み、fixture（tests/fixtures/ai-context-app.js の makeData と同じ形）から答える。
 //   path は URL のホスト・クエリ・.json を落とした形（/k/v1/preview/app/customize など）。
 //   hold(正規表現) は、一致した要求を受け付けたまま返さない門を作る（release() で返す）。取得の途中で最小化する場面を作るのに使う
+//   kintone.proxy（AI の Gateway への通信。設定取得ではない）は { kind: 'proxy', method, path } で積む。gateway(method, path, body) → { status, body } を渡すとその応答を返す
 'use strict';
 
 const clone = (v) => (v == null ? v : JSON.parse(JSON.stringify(v)));
 
-function makeFakeKintone(data, { admin = true, appId = 310, layout = null } = {}) {
+function makeFakeKintone(data, { admin = true, appId = 310, layout = null, gateway = null } = {}) {
   const calls = [];
   const holds = [];
   const norm = (u) => String(u).replace(/^https?:\/\/[^/]+/, '').replace(/\?.*$/, '').replace(/\.json$/, '');
@@ -66,7 +67,12 @@ function makeFakeKintone(data, { admin = true, appId = 310, layout = null } = {}
     },
     system: { getPermissions: async () => { const p = 'kintone.system.getPermissions'; calls.push({ kind: 'js', path: p }); await waitHold(p); return admin; } },
     getRequestToken: () => 'tok',
-    proxy: async (url, method) => { calls.push({ kind: 'proxy', method, path: norm(url) }); return ['{}', 200, {}]; },
+    proxy: async (url, method, headers, body) => {
+      const p = norm(url);
+      calls.push({ kind: 'proxy', method, path: p });
+      if (typeof gateway === 'function') { const r = gateway(method, p, body); return [r.body, r.status, {}]; }
+      return ['{}', 200, {}];
+    },
   };
   const fetch = async (url, opt = {}) => {
     const p = norm(url);

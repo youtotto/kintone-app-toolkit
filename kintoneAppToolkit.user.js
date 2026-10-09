@@ -261,7 +261,8 @@
   //    パネルを展開している間だけ始める。最小化中は始めず（予約もしない）、展開の知らせ（onChange）で、そのとき表示に要るものだけを取る
   //  - 取得の途中で最小化したら、送った通信は完了させ（結果は取得済みとして残してよい）、まだ送っていない後続（次の段・依存の取得・再試行）は始めない。
   //    途中の確かめは手形（ticket().live()）で行う。手形は発行の後に一度でも最小化すると無効になる
-  //  - 利用者の明示の操作（［再取得］・反映・登録など）と、設定取得ではない通信（レコード・AI の Gateway・トークン）はこの関所を通さない
+  //  - 利用者の明示の操作（［再取得］・反映・登録など）と、設定取得ではない通信（レコード・AI の Gateway・トークン）はこの関所で止めない
+  //    （同じ部品を自動と明示の両方から呼ぶときは、取得の種類 INTENT を渡す。明示の操作の中の取得は continuer が null を返す）
   //  - 最小化の状態の保存・復元は mountRoot のまま（関所は知らせを受けるだけ）
   // ==========================================
   const KTFetchGate = (() => {
@@ -294,7 +295,14 @@
     const isPaused = (e) => !!(e && (e.paused === true || e.code === PAUSED_CODE));
     /** shouldContinue（省略可）が偽を返したら止める */
     const check = (shouldContinue) => { if (typeof shouldContinue === 'function' && !shouldContinue()) throw paused(); };
-    return { create, of, ALWAYS, paused, isPaused, check, PAUSED_CODE };
+    /**
+     * 取得の種類（関所に渡す）: AUTO = 自動の取得（展開している・見えている間だけ始め、途中で最小化したら後続を始めない）／
+     *   EXPLICIT = 利用者の明示の操作の中の取得（［動作テスト環境へ反映］の照合の取り直し・［再取得］・反映・承認・登録・復元など。関所で止めない）
+     */
+    const INTENT = Object.freeze({ AUTO: 'auto', EXPLICIT: 'explicit' });
+    /** 後続を始めてよいかの確かめ（shouldContinue）を作る。明示の操作は null（止めない）、自動の取得は live（手形・見えているか） */
+    const continuer = (intent, live) => (intent === INTENT.EXPLICIT || typeof live !== 'function' ? null : live);
+    return { create, of, ALWAYS, paused, isPaused, check, PAUSED_CODE, INTENT, continuer };
   })();
 
   // ==========================================
@@ -869,7 +877,11 @@
     let heldCz = null;
     const holdCustomize = (cz) => { heldCz = cz ? { cz, at: Date.now() } : null; };
     const takeHeldCustomize = () => { const h = heldCz; heldCz = null; return h && (Date.now() - h.at) < HELD_MAX_AGE_MS ? h.cz : null; };
-    const dropHeldCustomize = () => { heldCz = null; };
+    // 同じく、フィールド定義・レイアウトの取り直し（kintone.app.getFormFields → getFormLayout の順の取得）で取れていたもの（{ props, layout }。取り直したものだけ）
+    let heldForm = null;
+    const holdFormDefs = (f) => { heldForm = f && (f.props || f.layout) ? { f: { ...f }, at: Date.now() } : null; };
+    const takeHeldFormDefs = () => { const h = heldForm; heldForm = null; return h && (Date.now() - h.at) < HELD_MAX_AGE_MS ? h.f : null; };
+    const dropHeldCustomize = () => { heldCz = null; heldForm = null; };
 
     // ==========================================
     // 未知フィールドコード候補の抽出（純粋なテキスト解析）
@@ -2522,7 +2534,7 @@
     }
 
     return {
-      register, run, scheduleAuto, autoPending, holdCustomize, takeHeldCustomize, dropHeldCustomize, onChange, getStatus, setLastPayload, getLastPayload,
+      register, run, scheduleAuto, autoPending, holdCustomize, takeHeldCustomize, holdFormDefs, takeHeldFormDefs, dropHeldCustomize, onChange, getStatus, setLastPayload, getLastPayload,
       hashText, candidateHashOf, analyzeFile, summarizeFiles, fieldList, buildPayload, isKnownLibraryUrl, KNOWN_LIBRARY_HOSTS,
       buildSignature, loadCache, saveCache, clearCache,
       isAutoEnabled, setAutoEnabled,
@@ -11643,9 +11655,11 @@
     // ================= prepare =================
     /**
      * @param {object} input executorOutput() の { plan, review, approvedSteps }（review は simulation.before / after を含んでよい）
-     * @param {object} o { api, appId, now?, data? (再解析用の運用環境 DATA), layoutPolicy? ('APPEND_ROW' | 'NONE') }
+     * @param {object} o { api, appId, now?, data? (再解析用の運用環境 DATA), layoutPolicy? ('APPEND_ROW' | 'NONE'), shouldContinue? }
+     *   shouldContinue: 自動の準備（承認の欄の準備）のとき（設定取得の関所）。偽になったら後続の取得（相手アプリの定義）を始めずに止める（KTFetchGate.paused を投げる）。
+     *   利用者の明示の操作（反映・［動作テスト環境へ反映］の照合の取り直し）では渡さない（止めない）
      */
-    async function prepare(input, { api, appId, now = Date.now, layoutPolicy = 'APPEND_ROW' } = {}) {
+    async function prepare(input, { api, appId, now = Date.now, layoutPolicy = 'APPEND_ROW', shouldContinue = null } = {}) {
       const plan = input?.plan, review = input?.review;
       const approved = Array.isArray(input?.approvedSteps) ? [...new Set(input.approvedSteps)] : [];
       const prepared = {
@@ -11683,7 +11697,8 @@
       let relatedApps = null, relatedNow = null;
       const crossSteps = pending.filter(s => ['UPDATE_LOOKUP', 'ADD_APP_ACTION', 'UPDATE_APP_ACTION'].includes(s.actionType));
       if (crossSteps.length) {
-        relatedApps = await fetchRelatedAppsForLookups(api, fields, crossSteps.map(s => rv.get(s.stepId)), actions);
+        KTFetchGate.check(shouldContinue);   // 設定取得の関所: 自動の準備の途中で見えなくなったら、相手アプリの定義（後続）は取らない
+        relatedApps = await fetchRelatedAppsForLookups(api, fields, crossSteps.map(s => rv.get(s.stepId)), actions, { shouldContinue });
         prepared.snapshot.relatedApps = clone(relatedApps);
         relatedNow = Object.fromEntries(Object.entries(relatedApps).map(([id, e]) => [id, KTPlanReview.relatedAppModel(e, id)]));
       }
@@ -11768,8 +11783,11 @@
       return prepared;
     }
 
-    /** ルックアップ / アプリアクションの step が参照する相手アプリ（Review の identity・diff・現在の設定から）を read-only で取得。prefetch（fetchRelatedApps）と同じ形で返す */
-    async function fetchRelatedAppsForLookups(api, fieldsResp, stepReviews, actionsResp = null) {
+    /**
+     * ルックアップ / アプリアクションの step が参照する相手アプリ（Review の identity・diff・現在の設定から）を read-only で取得。prefetch（fetchRelatedApps）と同じ形で返す。
+     *   shouldContinue（省略可・設定取得の関所）: アプリごとの順の取得（基本情報 → フィールド定義）の間で確かめ、偽なら後続を始めずに KTFetchGate.paused を投げる
+     */
+    async function fetchRelatedAppsForLookups(api, fieldsResp, stepReviews, actionsResp = null, { shouldContinue = null } = {}) {
       const ids = new Set();
       const addId = (v) => { if (v != null && String(v) !== '' && /^[0-9]+$/.test(String(v))) ids.add(String(v)); };
       for (const r of stepReviews || []) {
@@ -11783,6 +11801,7 @@
         if (typeof api.getAppFields !== 'function') { out[id] = { appId: id, name: null, code: null, revision: null, fields: null, error: { code: 'NOT_SUPPORTED', message: '参照元アプリの定義を取得する API がありません', status: null } }; return; }
         let info = null, infoErr = null, def = null, defErr = null;
         if (typeof api.getApp === 'function') { try { info = await api.getApp(id); } catch (e) { infoErr = errOf(e); } }
+        KTFetchGate.check(shouldContinue);
         try { def = await api.getAppFields(id); } catch (e) { defErr = errOf(e); }
         out[id] = { appId: id, name: info?.name ?? null, code: info?.code ?? null, revision: def?.revision ?? null, fields: def?.properties ?? null, ...(defErr ? { error: defErr } : infoErr && !def ? { error: infoErr } : {}) };
       }));
@@ -20879,8 +20898,12 @@
     // ---- prepare（読み取りだけ）----
     /**
      * @param {object} input { appId, changes[], expectedRevision（仕様確定 / Review 時点の customize revision。違えば STALE_CUSTOMIZATION）, spec, provenance }
+     * @param {object} o { api, now?, shouldContinue? }
+     *   shouldContinue: 自動の準備（承認の欄の準備）のとき（設定取得の関所）。順の取得（カスタマイズ設定 → ステータス → フィールド → 統合先の本文）の間で確かめ、
+     *   偽になったら後続を始めずに止める（KTFetchGate.paused を投げる。送った通信の結果は呼び出し側が続きに使える）。利用者の明示の操作（登録・反映）では渡さない（止めない）
      */
-    async function prepare(input, { api, now = Date.now } = {}) {
+    async function prepare(input, { api, now = Date.now, shouldContinue = null } = {}) {
+      const goOn = () => KTFetchGate.check(shouldContinue);
       const changes = clone(Array.isArray(input?.changes) ? input.changes : []);
       const prepared = { executorVersion: EXECUTOR_VERSION, executionId: newId('jsx'), appId: String(input?.appId ?? ''), env: ENV, preparedAt: nowIso(now), status: RUN.PREPARED, blockers: [], warnings: [], snapshot: null, changes, after: null, summary: { add: 0, replace: 0, byTarget: { desktop: { add: 0, replace: 0 }, mobile: { add: 0, replace: 0 } }, preservedJs: 0, preservedCss: 0 }, spec: input?.spec ?? null, provenance: input?.provenance ?? null, confirmations: [], unverified: [], verdict: null, deferred: [] };
       const block = (code, message, detail = null) => { prepared.blockers.push({ code, message, ...(detail ? { detail } : {}) }); prepared.status = RUN.BLOCKED; };
@@ -20923,9 +20946,9 @@
         if (depAll.fields.length && typeof api.getPreviewFields !== 'function') { block('DEPENDENCY_CHECK_FAILED', '依存の成立を確かめられませんでした（動作テスト環境のフィールドの設定を読む手段がありません）。このコードは新設のフィールドを前提にしているため登録しません'); return prepared; }
         let names = null, codes = null;
         try {
-          if (depAll.statuses.length) names = new Set(Object.values((await api.getPreviewStatus(prepared.appId))?.states || {}).map(s => s?.name).filter(Boolean));
-          if (depAll.fields.length) { codes = new Set(); const props = (await api.getPreviewFields(prepared.appId))?.properties || {}; for (const [k, p] of Object.entries(props)) { codes.add(k); for (const ck of Object.keys(p?.fields || {})) codes.add(ck); } }
-        } catch (e) { const x = strErr(e); block('DEPENDENCY_CHECK_FAILED', `依存の成立を確かめられませんでした（このコードが前提にする新設のステータス・フィールドが反映済みかを読めません）: ${x.message}`, x); return prepared; }
+          if (depAll.statuses.length) { goOn(); names = new Set(Object.values((await api.getPreviewStatus(prepared.appId))?.states || {}).map(s => s?.name).filter(Boolean)); }
+          if (depAll.fields.length) { goOn(); codes = new Set(); const props = (await api.getPreviewFields(prepared.appId))?.properties || {}; for (const [k, p] of Object.entries(props)) { codes.add(k); for (const ck of Object.keys(p?.fields || {})) codes.add(ck); } }
+        } catch (e) { if (KTFetchGate.isPaused(e)) throw e; const x = strErr(e); block('DEPENDENCY_CHECK_FAILED', `依存の成立を確かめられませんでした（このコードが前提にする新設のステータス・フィールドが反映済みかを読めません）: ${x.message}`, x); return prepared; }
         const missingOf = (d) => [
           ...d.statuses.filter(x => x.name && !names.has(x.name)).map(x => ({ ...x, kind: 'ステータス' })),
           ...d.fields.filter(x => x.code && !codes.has(x.code)).map(x => ({ ...x, kind: 'フィールド' })),
@@ -20973,11 +20996,12 @@
           ch.position = i; ch.oldFileKey = list[i].fileKey;
           // 登録直前の本文照合（§11）: baseHash が違えば止める（自動 merge しない）
           try {
+            if (typeof api.downloadFile === 'function') goOn();
             const cur = typeof api.downloadFile === 'function' ? await api.downloadFile(list[i].fileKey) : null;
             if (typeof cur !== 'string') { ch.status = ST.BLOCKED; ch.reason = 'JS_SOURCE_UNAVAILABLE'; ch.message = `統合先「${ch.name}」の現在の本文を取得できません`; block('JS_SOURCE_UNAVAILABLE', ch.message); continue; }
             ch.currentHash = hash(cur); ch.currentSource = cur;   // 復元（§28）は旧 fileKey を再指定できない（実機: 差し替え後の旧ファイルは PUT で「見つかりません」）ので、本文を保持して再アップロードする
             if (ch.baseHash && ch.currentHash !== ch.baseHash) { ch.status = ST.BLOCKED; ch.reason = 'JS_SOURCE_CHANGED'; ch.message = `統合先「${ch.name}」の本文がコード生成の時点から変わっています（指紋 ${ch.baseHash} → ${ch.currentHash}）。自動では統合しません。再スキャンして計画からやり直してください`; block('JS_SOURCE_CHANGED', ch.message, { name: ch.name, baseHash: ch.baseHash, currentHash: ch.currentHash }); continue; }
-          } catch (e) { const x = strErr(e); ch.status = ST.BLOCKED; ch.reason = 'JS_SOURCE_UNAVAILABLE'; ch.message = `統合先「${ch.name}」の現在の本文を取得できません: ${x.message}`; block('JS_SOURCE_UNAVAILABLE', ch.message, x); continue; }
+          } catch (e) { if (KTFetchGate.isPaused(e)) throw e; const x = strErr(e); ch.status = ST.BLOCKED; ch.reason = 'JS_SOURCE_UNAVAILABLE'; ch.message = `統合先「${ch.name}」の現在の本文を取得できません: ${x.message}`; block('JS_SOURCE_UNAVAILABLE', ch.message, x); continue; }
           prepared.summary.replace++; prepared.summary.byTarget[ch.target].replace++;
         } else if (ch.kind === CHANGE.ADD_FILE) {
           if (list.some(e => e.type === 'FILE' && e.name.toLowerCase() === String(ch.name).toLowerCase())) { ch.status = ST.BLOCKED; ch.reason = 'NAME_CONFLICT'; ch.message = `同じ名前のファイル「${ch.name}」が既に登録されています（既存の変更なら「既存 JS を変更」の計画にしてください）`; block('NAME_CONFLICT', ch.message); continue; }
@@ -30372,6 +30396,7 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
    *   ---- 有料（Nest Rec AI）。省略時は無料機能のみ ----
    *   settings           KTAiClient.createSettingsStore() 互換（hasConsent / setConsent を使う）
    *   session            KTAiClient.createSession() 互換（connect / migrateLegacy / disconnect / refresh / status / client）
+   *   initialHealth()    任意。起動時に済ませた接続の確認の結果（Promise<{ ok, health | error, at } | null>。startAiLink）。あれば初期判定で health を送らずにそれを使う
    *   hostname           X-Kintone-Domain（既定 location.hostname）
    *   connectFlow / devMode / openUrl（接続フロー。テストで差し替える）
    *   executor           { api, appId }（Preview Executor。省略時は反映ボタンが無効）
@@ -30493,15 +30518,17 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
       if (!devBaseLoader || !devBase) return legacy;
       return KTDevBase.inputsOf(devBase, legacy) || { ...legacy, environment: KTDevBase.environmentOf(devBase) };
     };
-    // 設定取得の関所（パネルの表示状態）: 自動の取り直し（接続・タブを開いた・承認の欄の準備・登録や戻しの後の続き）は、d.canAutoFetch() が真
+    // 設定取得の関所（パネルの表示状態）: 自動の取り直し（接続・タブを開いた・承認の欄の準備）は、d.canAutoFetch() が真
     //   （パネルを展開していて開発支援を表示している。省略時は常に真＝今までどおり）のときだけ始める。偽なら取らずに「次に見えたときに取る」印だけを付ける（devBaseWanted）。
     //   自動の取得の途中で見えなくなったら、送っていない段（他アプリの定義・本文）は始めずに止め、取れた段は続きのために残す（devBasePartial。次は足りない段だけ）。
-    //   利用者が明示的に始めた処理（質問・計画・生成・登録・反映・［再取得］・相談）は止めない（進行中の自動の取得に合流したら、止めずに最後まで取る）。
+    //   利用者が明示的に始めた処理（質問・計画・生成・登録・反映・戻す・［再取得］・相談）の中の取得は止めない（登録・戻すの後の取り直しも、その操作の続きとして止めない。
+    //   進行中の自動の取得に合流したら、止めずに最後まで取る）。
     //   Toolkit のほかの場所で設定を変えたら（invalidateDevBase）、今の基準を古いとし（devBaseStale）、期限の内でも再利用せずに次に要るときに取り直す
-    const DEV_BASE_AUTO_REASONS = ['connect', 'tab', 'precheck', 'after-js-register', 'after-js-rollback', 'after-rollback'];
+    const DEV_BASE_AUTO_REASONS = ['connect', 'tab', 'precheck'];
     const DEV_BASE_RESUME_MAX_AGE_MS = 60 * 1000;   // 止めた段の続きを使ってよい間（タブを開いたときの再利用の期限と同じ）
     const canAutoFetch = typeof d.canAutoFetch === 'function' ? () => { try { return d.canAutoFetch() !== false; } catch (e) { return true; } } : () => true;
-    let devBaseStale = false, devBaseWanted = false, devBaseGen = 0, devBasePartial = null, devBaseWaiters = 0, devBaseOwnDeferred = false, devBasePausedP = null;
+    const FETCH = KTFetchGate.INTENT;   // 関所に渡す取得の種類（AUTO = 自動の取得・EXPLICIT = 利用者の明示の操作の中の取得）
+    let devBaseStale = false, devBaseWanted = false, devBaseGen = 0, devBasePartial = null, devBaseWaiters = 0, devBasePausedP = null;
     /** 進行中の取得に明示の処理が合流する（自動の取得でも途中で止めない。合流より先に止まっていたら、続きを明示で取る） */
     const joinDevBase = () => {
       const p = devBasePromise; devBaseWaiters += 1;
@@ -30513,13 +30540,12 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
       const auto = DEV_BASE_AUTO_REASONS.includes(reason);
       if (auto && !canAutoFetch()) {
         devBaseWanted = true;
-        if (/^after-/.test(reason)) { devBaseStale = true; if (reason === 'after-js-register') devBaseOwnDeferred = true; }   // 自分の登録・戻しで変わった: 次に要るときに取り直す
         return devBase;
       }
       if (devBase && !devBaseStale && maxAgeMs > 0 && (nowMs() - devBaseAt) < maxAgeMs) return devBase;
       if (devBasePromise) return auto ? devBasePromise : joinDevBase();
       const seq = ++devBaseSeq;
-      const gen = devBaseGen, ownDeferred = devBaseOwnDeferred;
+      const gen = devBaseGen;
       const p0 = devBasePartial; devBasePartial = null;
       const resume = p0 && p0.gen === gen && (nowMs() - p0.at) < DEV_BASE_RESUME_MAX_AGE_MS ? p0.partial : null;
       const startedAt = resume ? p0.at : nowMs();
@@ -30538,11 +30564,11 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
         if (seq === devBaseSeq) {
           devBase = b || { ok: false, status: 'FETCH_FAILED', message: '作業の基準を取得できませんでした', loadedAt: new Date(nowMs()).toISOString(), errors: [] }; devBaseAt = nowMs();
           devBaseWanted = false;
-          if (gen === devBaseGen) { devBaseStale = false; devBaseOwnDeferred = false; }
+          if (gen === devBaseGen) devBaseStale = false;
         }
         devBasePromise = null;
         // 段階 C（C4・R16）: 承認した最終案の基準（stamp）と今の動作テスト環境が違えば承認を外す（自分の反映の直後の取り直しは、反映の側で基準を進める）
-        try { const vA = conv ? conv.activePlan() : null; if (vA && vA.approval && devBase && devBase.ok && !['after-apply', 'after-js-register'].includes(reason) && !ownDeferred) { const stNow = KTDevBase.stamp(devBase); const ref = vA.approval.baseStamp; if (ref && stNow && ref.fingerprint && stNow.fingerprint && ref.fingerprint !== stNow.fingerprint) conv.markStale('承認の後に動作テスト環境の設定が変わりました。'); } } catch (e) { }
+        try { const vA = conv ? conv.activePlan() : null; if (vA && vA.approval && devBase && devBase.ok && !['after-apply', 'after-js-register'].includes(reason)) { const stNow = KTDevBase.stamp(devBase); const ref = vA.approval.baseStamp; if (ref && stNow && ref.fingerprint && stNow.fingerprint && ref.fingerprint !== stNow.fingerprint) conv.markStale('承認の後に動作テスト環境の設定が変わりました。'); } } catch (e) { }
         // 反映の記録の「運用環境との差」の件数も取り直した結果にする（以前はヘッダーだけが新しくなった）
         try { renderHeader(); renderBaseDiff(); renderApplyLog(); } catch (e) { }
         //   §0e.1（2026-10-09）: 作業の基準が変わったら、最終案の承認の欄の準備をやり直す（承認の前だけ。同じ基準なら何もしない）
@@ -31605,16 +31631,19 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
     /**
      * §0e.1（2026-10-09）: 承認の欄の準備（読み取りだけ・jsExec は変えない）。この計画の手順が新設するフィールド・ステータスに依存する JavaScript は
      *   「設定の反映の後に確かめる」（deferred）にして止めない（実行のときの準備で DEPENDENCY_NOT_APPLIED を確かめる）
+     *   api / shouldContinue（省略可）: 自動の準備（承認の欄の準備）のときに computePrecheck が渡す（続きに使う読み取りの記録・設定取得の関所）。
+     *   途中で見えなくなって止めたとき（KTFetchGate.paused）は失敗にせずそのまま投げる
      */
-    async function jsPrecheck(v) {
+    async function jsPrecheck(v, { api: apiIn = null, shouldContinue = null } = {}) {
+      const api = apiIn || executor.api;
       const { changes, blocked } = jsChangesOf(v);
       const empty = (blockers) => ({ executionId: null, status: 'BLOCKED', blockers, warnings: [], changes: [], summary: JS_EMPTY_SUMMARY(), snapshot: null, confirmations: [], unverified: [], deferred: [], contentFingerprint: null });
       if (!changes.length) return empty(blocked.length ? blocked : [{ code: 'NOTHING_TO_REGISTER', message: '登録できる JavaScript がありません' }]);
       try {
-        const p = await KTJsExecutor.prepare({ appId: executor.appId, changes, recheck: jsRecheckOf(v), expectedRevision: v.spec?.customizeRevision ?? null, deferDependencies: true, spec: conv.specSummary(v), provenance: jsProvenanceOf(v) }, { api: executor.api });
+        const p = await KTJsExecutor.prepare({ appId: executor.appId, changes, recheck: jsRecheckOf(v), expectedRevision: v.spec?.customizeRevision ?? null, deferDependencies: true, spec: conv.specSummary(v), provenance: jsProvenanceOf(v) }, { api, shouldContinue });
         if (blocked.length) p.warnings.push(...blocked.map(b => ({ code: b.code, message: `登録対象外: ${b.message}` })));
         return p;
-      } catch (e) { return empty([{ code: 'PREPARE_FAILED', message: e?.message || String(e) }]); }
+      } catch (e) { if (KTFetchGate.isPaused(e)) throw e; return empty([{ code: 'PREPARE_FAILED', message: e?.message || String(e) }]); }
     }
     /**
      * 登録の準備（読み取りだけ）: 版の生成コード → 変更 → KTJsExecutor.prepare → 確認画面。
@@ -31910,8 +31939,11 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
         return { error: e };   // session の失敗も無料機能へ波及させない
       }
     }
-    /** /v2/health で利用可否を判定（TTL 内は再利用）。失敗しても無料機能には影響しない */
-    async function refreshCapability({ force = false } = {}) {
+    /**
+     * /v2/health で利用可否を判定（TTL 内は再利用）。失敗しても無料機能には影響しない。
+     *   initial（省略可）: 起動時に済ませた接続の確認の結果（d.initialHealth。{ ok, health | error, at }）。TTL 内ならそれを使い、health を二重に送らない
+     */
+    async function refreshCapability({ force = false, initial = null } = {}) {
       if (!paidEnabled) { $paid.style.display = 'none'; renderComposer(); return capability; }
       const client = makeClient();
       if (!client || client.error) {
@@ -31923,9 +31955,11 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
       capability = { ...capability, checking: true };
       setPaidStatus(KTContextUi.capabilityStatusText({ checking: true })); $ask.disabled = true; renderSession();
       try {
-        const health = await client.getHealth();
+        const pre = !force && initial && Number.isFinite(initial.at) && (Date.now() - initial.at) < KTAiClient.HEALTH_TTL_MS ? initial : null;
+        if (pre && !pre.ok) throw pre.error;
+        const health = pre ? pre.health : await client.getHealth();
         capability = KTAiClient.capabilityFromHealth(health);
-        healthAt = Date.now();
+        healthAt = pre ? pre.at : Date.now();
       } catch (e) {
         capability = { available: false, reason: KTAiClient.isAiClientError(e) ? e.code : KTAiClient.ERROR_CODES.TRANSPORT_ERROR };
       }
@@ -32025,6 +32059,7 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
     // ==================================================================
     const finalPre = { key: null, seq: 0, status: 'idle', planId: null, version: null, settings: null, js: null, parts: null, items: null, reasons: [] };
     let finalPreDeferred = false;   // 設定取得の関所で見送った準備（開発支援が見えたときに始める）
+    let precheckHeld = null;        // 設定取得の関所で止めた準備の読み取りの記録（続きに使う。{ key, entries: Map<読み取りの名前と引数, { v, at }> }。precheckReadsOf）
     let finalRun = null, finalRunSeq = 0;
     const finalPreView = () => ({ planId: finalPre.planId, version: finalPre.version, status: finalPre.status, items: finalPre.items, reasons: finalPre.reasons, notice: finalPre.notice || null, settingsStatus: finalPre.settings ? finalPre.settings.status : null, jsStatus: finalPre.js ? finalPre.js.status : null });
     /** 承認済み扱い（却下した手順以外）の標準設定の入力。承認の前の準備でも、承認の後の reviewOutput と同じ手順の組になる */
@@ -32113,26 +32148,69 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
       if (st0 && planned && st0.fingerprint && planned.fingerprint && st0.fingerprint !== planned.fingerprint) out.push('最終案を作った後に動作テスト環境の設定が変わりました。最新の設定で最終案を作り直してください（同じ依頼をもう一度送ると作り直します）。');
       return [...new Set(out)];
     }
-    /** 準備（読み取りだけ）。refreshBase = 作業の基準を取り直す（承認の欄の準備） */
-    //   設定取得の関所: 自動で始まる準備なので、段（作業の基準 → 設定の準備 → JavaScript の準備）の前に canAutoFetch() を確かめ、
-    //   見えなくなっていたら次の段を始めずに { paused } を返す（見えたときにやり直す。runFinalPrecheck）
-    async function computePrecheck(v, { onBase = null } = {}) {
-      if (!canAutoFetch()) return { paused: true };
+    /**
+     * 設定取得の関所: 自動の準備（承認の欄の準備）を途中で止めたときに取れていた読み取りの結果（動作テスト環境の設定・相手アプリの定義・統合先の本文）。
+     *   続き（見えたときのやり直し）では取り直さず、足りない分だけを取る。使うのは 1 分以内（DEV_BASE_RESUME_MAX_AGE_MS）で、作業の基準が同じ
+     *   （Toolkit のほかの場所の変更・自分の反映や登録で基準が変わったら使わない）間だけ。利用者の明示の操作の中の準備は使わない（いつも取り直し、記録も消す）。
+     *   記録（precheckHeld）は finalPre の隣で宣言している
+     */
+    const precheckHeldKey = () => { let fp = ''; try { const s = devBase && devBase.ok ? KTDevBase.stamp(devBase) : null; fp = s && s.fingerprint ? String(s.fingerprint) : ''; } catch (e) { fp = ''; } return `${devBaseGen}|${fp}`; };
+    /** 自動の準備に渡す api（読み取り get* / download* の結果を記録し、止めた続きでは記録を先に使う）。hold() で記録を続きに残す */
+    function precheckReadsOf() {
+      const api = executor.api;
+      const key = precheckHeldKey();
+      const held = precheckHeld && precheckHeld.key === key ? precheckHeld.entries : null;
+      precheckHeld = null;
+      const got = new Map();
+      const cl = (x) => (x === undefined ? x : JSON.parse(JSON.stringify(x)));
+      const wrapped = {};
+      for (const k in api) {
+        if (typeof api[k] !== 'function') { wrapped[k] = api[k]; continue; }
+        if (!/^(get|download)/.test(k)) { wrapped[k] = (...a) => api[k](...a); continue; }
+        wrapped[k] = async (...a) => {
+          const id = `${k}|${JSON.stringify(a)}`;
+          const h = held ? held.get(id) : null;
+          if (h && (nowMs() - h.at) < DEV_BASE_RESUME_MAX_AGE_MS) { got.set(id, h); return cl(h.v); }
+          const r = await api[k](...a);
+          got.set(id, { v: cl(r), at: nowMs() });
+          return r;
+        };
+      }
+      return { api: wrapped, hold: () => { if (got.size) precheckHeld = { key, entries: got }; } };
+    }
+    /**
+     * 準備（読み取りだけ）。作業の基準（30 秒以内なら再利用）→ 設定の準備 → JavaScript の準備。
+     *   intent（設定取得の関所に渡す取得の種類）:
+     *   - FETCH.AUTO（既定。承認の欄の準備）: 段の前と、段の中の順の取得（KTPlanExecutor.prepare の相手アプリ・KTJsExecutor.prepare のステータス・フィールド・本文）の間で
+     *     canAutoFetch() を確かめ、見えなくなっていたら後続を始めずに { paused } を返す（送った通信の結果は続きのために残す。見えたときにやり直す。runFinalPrecheck）
+     *   - FETCH.EXPLICIT（利用者の明示の操作。［動作テスト環境へ反映］の照合の取り直し）: 最小化中・開発支援を表示していなくても止めない
+     */
+    async function computePrecheck(v, { onBase = null, intent = FETCH.AUTO } = {}) {
+      const explicit = intent === FETCH.EXPLICIT;
+      if (!explicit && !canAutoFetch()) return { paused: true };
+      if (explicit) precheckHeld = null;
       if (devBaseLoader) {
         const pausedBefore = devBasePausedP;
-        const b = await refreshDevBase({ maxAgeMs: DEV_BASE_ASK_MAX_AGE_MS, reason: 'precheck' });
-        if (!canAutoFetch() || devBasePausedP !== pausedBefore) return { paused: true };   // 基準の取得が途中で止まった（前の基準で準備しない）
+        const b = await refreshDevBase({ maxAgeMs: DEV_BASE_ASK_MAX_AGE_MS, reason: explicit ? 'execute' : 'precheck' });
+        if (!explicit && (!canAutoFetch() || devBasePausedP !== pausedBefore)) return { paused: true };   // 基準の取得が途中で止まった（前の基準で準備しない）
         if (!b || !b.ok) return { settings: null, js: null, parts: null, items: null, reasons: [`動作テスト環境の今の設定を取得できませんでした（${b?.message || '不明'}）。ヘッダーの［再取得］で取り直してください。`] };
       }
       if (typeof onBase === 'function') onBase();
-      const out = finalOutput();
-      const hasSettings = !!out && KTPlanExecutor.classifySteps(out).some(s => s.status === 'PENDING');
-      let settings = null;
-      if (hasSettings) { try { settings = await KTPlanExecutor.prepare(out, { api: executor.api, appId: executor.appId }); } catch (e) { settings = { status: 'BLOCKED', blockers: [{ code: 'PREPARE_FAILED', message: `反映の前の準備に失敗しました: ${e?.message || String(e)}` }], steps: [], stale: null, revision: {} }; } }
-      const hasJs = Object.keys(v.generated || {}).length > 0;
-      if (hasJs && !canAutoFetch()) return { paused: true };
-      const js = hasJs ? await jsPrecheck(v) : null;
-      return { settings, js, parts: partsOf(settings, js), items: preItemsOf(settings, js, v), reasons: preReasonsOf(settings, js, v) };
+      const reads = explicit ? { api: executor.api, hold: () => { } } : precheckReadsOf();
+      const shouldContinue = KTFetchGate.continuer(intent, canAutoFetch);
+      try {
+        const out = finalOutput();
+        const hasSettings = !!out && KTPlanExecutor.classifySteps(out).some(s => s.status === 'PENDING');
+        let settings = null;
+        if (hasSettings) { try { settings = await KTPlanExecutor.prepare(out, { api: reads.api, appId: executor.appId, shouldContinue }); } catch (e) { if (KTFetchGate.isPaused(e)) throw e; settings = { status: 'BLOCKED', blockers: [{ code: 'PREPARE_FAILED', message: `反映の前の準備に失敗しました: ${e?.message || String(e)}` }], steps: [], stale: null, revision: {} }; } }
+        const hasJs = Object.keys(v.generated || {}).length > 0;
+        if (hasJs) KTFetchGate.check(shouldContinue);
+        const js = hasJs ? await jsPrecheck(v, { api: reads.api, shouldContinue }) : null;
+        return { settings, js, parts: partsOf(settings, js), items: preItemsOf(settings, js, v), reasons: preReasonsOf(settings, js, v) };
+      } catch (e) {
+        if (KTFetchGate.isPaused(e)) { reads.hold(); return { paused: true }; }
+        throw e;
+      }
     }
     function applyPrecheckResult(v, r, key = finalPreKeyOf(v)) {
       Object.assign(finalPre, { key, planId: v.planId, version: v.version, settings: r.settings, js: r.js, parts: r.parts, items: r.items, reasons: r.reasons || [], status: (r.reasons || []).length ? 'blocked' : 'ready' });
@@ -32242,7 +32320,8 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
         if (!a.ok) {
           revoke('反映の直前の確かめで、承認した時点から変わったことが分かったため、');
           let changes = [];
-          try { const r2 = await computePrecheck(v); changes = diffParts(approvedParts, r2.parts); if (finalPreEligible(v)) applyPrecheckResult(v, r2); } catch (e) { changes = []; }
+          //   照合の取り直しは利用者が押した［動作テスト環境へ反映］の中の取得なので、設定取得の関所で止めない（最小化中・開発支援を表示していなくても変わった点を出す）
+          try { const r2 = await computePrecheck(v, { intent: FETCH.EXPLICIT }); changes = diffParts(approvedParts, r2.parts); if (finalPreEligible(v)) applyPrecheckResult(v, r2); } catch (e) { changes = []; }
           const stale = v.status === KTAiConversation.PLAN_STATUS.STALE;
           return finish({ stage: 'stopped', stop: { text: stale ? '承認の欄の準備の後に、動作テスト環境の設定が変わりました。何も書き込まずに止めました。' : `${a.message}（何も書き込んでいません）`, changes, next: stale ? '同じ依頼をもう一度送ると、最新の設定で最終案を作り直します。' : NEXT_AGAIN } });
         }
@@ -32641,9 +32720,12 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
         if (id) showEvidence(id);
       });
       // 初期判定（非同期。無料機能はこの結果を待たない）。旧形式の保存があれば exchange して移行する
+      //   d.initialHealth（省略可）: 起動時に済ませた接続の確認（移行・トークンの交換・health。bootToolkit が最小化で開いたときも起動時に行う）の結果を待って使う（二重に送らない）
       (async () => {
-        try { if (typeof session.migrateLegacy === 'function') await session.migrateLegacy(); } catch (e) { }
-        await refreshCapability();
+        let initial = null;
+        if (typeof d.initialHealth === 'function') { try { initial = await d.initialHealth(); } catch (e) { initial = null; } }
+        else { try { if (typeof session.migrateLegacy === 'function') await session.migrateLegacy(); } catch (e) { } }
+        await refreshCapability({ initial });
       })();
     } else {
       $paid.style.display = 'none';
@@ -37354,10 +37436,35 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
   //   Phase 18: Templates タブは廃止。Documents（仕様書 / 要件定義 / レビュー依頼の Prompt）も Context ペインの「ドキュメントを作る」へ統合。
   //   チャット（KTAiConversation）を入口に、Review / Decision / 最終確認 / Rollback 確認は既存 UI（drawer）で行う。
   // ----------------------------
-  //   設定取得の関所（パネルの表示状態）: 作業の基準の自動の取得（接続・タブを開いた・承認の欄の準備・登録や戻しの後の続き）は、
+
+  /**
+   * AI の接続の確認を起動時に始める（設定取得ではない通信。設定取得の関所で止めない）。
+   *   最小化で開いたときは開発支援（AI の画面）の組み立てを展開まで遅らせるが、接続の確認（旧形式の移行・Gateway のトークンの交換・/v2/health）は
+   *   今までどおり起動時に行う。組み立てた画面は同じセッション（Access Token）と、この health の結果を使う（renderAiWorkspace の aiLink）。
+   *   作業の基準の取得（自動の設定取得）は、ここでは始めない（開発支援が見えたときに mountAiWorkspace が取る）
+   * @returns {{ settings, session, probe: () => Promise<{ ok, health?, error?, at } | null> } | null}（未接続なら probe は null を返す）
+   */
+  function startAiLink() {
+    let settings = null, session = null;
+    try { settings = KTAiClient.createSettingsStore(); session = KTAiClient.createSession({ store: KTAiClient.createSettingsStore() }); } catch (e) { return null; }
+    const result = (async () => {
+      try { if (typeof session.migrateLegacy === 'function') await session.migrateLegacy(); } catch (e) { }
+      let st = null;
+      try { st = session.status(); } catch (e) { st = null; }
+      if (!st || !st.connected) return null;
+      const at = Date.now();
+      try { return { ok: true, health: await session.client.getHealth(), at }; }
+      catch (e) { return { ok: false, error: e, at }; }
+    })();
+    return { settings, session, probe: () => result };
+  }
+
+  //   設定取得の関所（パネルの表示状態）: 作業の基準の自動の取得（接続・タブを開いた・承認の欄の準備）は、
   //   パネルを展開していて開発支援のタブを表示している間だけ（root.ktPanel。パネルの無い root では常に取る＝今までどおり）。
+  //   利用者の明示の操作（質問・計画・生成・登録・反映・戻す・［再取得］）の中の取得は止めない（登録・戻すの後の取り直しも、その操作の続きとして止めない）。
   //   開発支援を表示したまま展開したときも、タブを開いたときと同じ扱い（onVisible）。onSettingsChanged: 動作テスト環境に書き込んだ知らせ（ほかの場所の取得済みを古いとする）
-  function renderAiWorkspace(root, DATA, appId = null, { getContextInputs = null, runScan = null, openCustomize = null, onSettingsChanged = null } = {}) {
+  //   aiLink（省略可・startAiLink）: 起動時に始めた AI の接続の確認（接続情報・セッション・health の結果）。あればそれを使い、トークンの交換・health を二重に送らない
+  function renderAiWorkspace(root, DATA, appId = null, { getContextInputs = null, runScan = null, openCustomize = null, onSettingsChanged = null, aiLink = null } = {}) {
     const view = root.querySelector('#view-ai');
     if (!view) return null;
     const C = getThemeColors();
@@ -37378,8 +37485,9 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
         appId,
         colors: { border: BD, bg: isDark ? '#1b1b1b' : '#fff', isDark },   // Phase 22: ダークテーマの印（data-theme）とプロセス図の背景
         // 有料: Nest Rec AI（接続情報は Refresh Token のみ localStorage・Customer Token は保存しない）
-        settings: KTAiClient.createSettingsStore(),
-        session: KTAiClient.createSession({ store: KTAiClient.createSettingsStore() }),
+        settings: aiLink && aiLink.settings ? aiLink.settings : KTAiClient.createSettingsStore(),
+        session: aiLink && aiLink.session ? aiLink.session : KTAiClient.createSession({ store: KTAiClient.createSettingsStore() }),
+        ...(aiLink && typeof aiLink.probe === 'function' ? { initialHealth: aiLink.probe } : {}),
         // Preview Executor: このユーザーのセッション権限で動作テスト環境だけを書く（運用環境への反映関数は無い）
         executor: (() => { try { return { api: KTPlanExecutor.createKintoneApi(), appId: appId ?? (typeof kintone !== 'undefined' ? kintone.app.getId() : null) }; } catch (e) { return null; } })(),
         // Phase 21: 開発支援の作業基準（最新の動作テスト環境 ＋ 比較用の運用環境）。GET だけ（設定は変更しない）。本文は動作テスト環境の fileKey で取る
@@ -38812,29 +38920,42 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
         v === 'css' ? ['css'] : (v === 'both' ? ['js', 'css'] : ['js']);
 
       // ---- fields ----
-      async function fetchFieldList(resp, layout) {
+      //   live（省略可・設定取得の関所の手形）: 自動の解析のとき。フィールド定義の取り直しの後、レイアウトの取り直し（後続）の前に確かめ、
+      //   偽なら取れたフィールド定義を続きのために残して（KTScan.holdFormDefs）KTFetchGate.paused を投げる。続き（展開の後）は残したものを使い、足りない分だけを取る。
+      //   got（省略可）: 取り直したもの（{ props, layout }）を入れる（呼び出し側がこの後で止めたときに続きへ残す）
+      async function fetchFieldList(resp, layout, { live = null, got = {} } = {}) {
+        const held = (live ? KTScan.takeHeldFormDefs() : null) || {};
         // フォーム定義・レイアウトは prefetch 済みの値を使う。
         // 空のまま進むと全コードが「存在しない」と誤判定されるため、念のため取り直す。
         let props = (resp && typeof resp === 'object' && resp.properties) ? resp.properties : (resp || {});
         if (!Object.keys(props).length) {
-          try {
-            const f = await kintone.app.getFormFields();
-            props = (f && f.properties) ? f.properties : (f || {});
-            console.warn('[Field Scanner] フィールド定義が空だったため再取得しました', Object.keys(props).length);
-          } catch (e) {
-            console.error('[Field Scanner] フィールド定義の再取得に失敗しました', e);
+          if (held.props) props = held.props;
+          else {
+            try {
+              const f = await kintone.app.getFormFields();
+              props = (f && f.properties) ? f.properties : (f || {});
+              console.warn('[Field Scanner] フィールド定義が空だったため再取得しました', Object.keys(props).length);
+            } catch (e) {
+              console.error('[Field Scanner] フィールド定義の再取得に失敗しました', e);
+            }
           }
+          if (Object.keys(props).length) got.props = props;
         }
 
         let layoutNodes = Array.isArray(layout) ? layout : (layout?.layout || []);
         if (!layoutNodes.length) {
-          try {
-            const l = await kintone.app.getFormLayout();
-            layoutNodes = Array.isArray(l) ? l : (l?.layout || []);
-            console.warn('[Field Scanner] レイアウトが空だったため再取得しました', layoutNodes.length);
-          } catch (e) {
-            console.error('[Field Scanner] レイアウトの再取得に失敗しました', e);
+          if (held.layout) layoutNodes = held.layout;
+          else {
+            if (live && !live()) { KTScan.holdFormDefs(got); throw KTFetchGate.paused(); }
+            try {
+              const l = await kintone.app.getFormLayout();
+              layoutNodes = Array.isArray(l) ? l : (l?.layout || []);
+              console.warn('[Field Scanner] レイアウトが空だったため再取得しました', layoutNodes.length);
+            } catch (e) {
+              console.error('[Field Scanner] レイアウトの再取得に失敗しました', e);
+            }
           }
+          if (layoutNodes.length) got.layout = layoutNodes;
         }
 
         // ★レイアウトにしか現れない識別子（グループ・テーブル・スペースの要素 ID）も既知に入れる。実体は KTScan.fieldList（Phase 21: 開発支援の作業基準と共用）
@@ -39202,8 +39323,12 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
 
         if (!silent) $meta.textContent = 'Scanning...';
 
-        const fields = await fetchFieldList(DATA.fields, DATA.layout);
-        if (pausedHere()) return { paused: true };
+        //   フィールド定義・レイアウトの取り直し（順の取得）の間で止めたら、取れた設定とフィールド定義を続きのために残す
+        const gotForm = {};
+        let fields;
+        try { fields = await fetchFieldList(DATA.fields, DATA.layout, { live, got: gotForm }); }
+        catch (e) { if (KTFetchGate.isPaused(e)) { KTScan.holdCustomize(cz); return { paused: true }; } throw e; }
+        if (pausedHere()) { KTScan.holdFormDefs(gotForm); return { paused: true }; }
         const files = await fetchTexts({ appId, include, kinds, customize: cz });
         // 解析（アプリID参照・イベント種別・存在しないフィールド / ステータス・外部アプリのフィールド参照）は KTScan.buildPayload（Phase 21: 開発支援の作業基準と共用）
         const scannedAt = new Date().toISOString();
@@ -39681,7 +39806,9 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
   //   - 取得済みの設定はページの中で再利用する（最小化と展開を繰り返しても取り直さない。同じ取得が進行中ならそれを待つ）
   //   - 取得の途中で最小化したら、送った通信は完了させて結果を残し、まだ送っていない後続（描画に続く取得・次の段）は展開まで始めない
   //   - Toolkit 自身が設定を変えたら（Customize の反映・Plugins の追加と deploy・開発支援の反映・登録・戻す）取得済みを古いとし、次に要るときに取り直す
-  //   - 利用者の明示の操作（［再取得］・［一覧更新］・反映・登録など）と、設定取得ではない通信（レコード・AI の Gateway・トークン）は止めない
+  //   - 利用者の明示の操作（［再取得］・［一覧更新］・反映・登録など）と、設定取得ではない通信（レコード・AI の Gateway・トークン）は止めない。
+  //     AI の接続の確認（トークンの交換・/v2/health）は、最小化で開いても起動時に行う（startAiLink。開発支援の組み立ては段階 1 の後で、その結果を使う）。
+  //     レコードの取得（Health のステータスの分布）は設定（ステータス）を使うので、展開して段階 1 を取った後の描画で行う
   const SNAPSHOT_TABS = new Set(['health', 'fields', 'views', 'graphs', 'relations', 'deps', 'notice', 'acl', 'field-scanner', 'ai']);   // 運用環境の設定（DATA）を表示・使うタブ（古ければ取り直す）
   const SCAN_TABS = new Set(['health', 'fields', 'relations', 'deps', 'field-scanner', 'ai']);   // JS の自動解析の結果を表示・使うタブ
   const NAME_TABS = new Set(['fields', 'relations', 'deps', 'field-scanner', 'ai']);              // 参照先アプリの名前を表示・使うタブ
@@ -39699,6 +39826,9 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
 
     const root = mountRoot();   // 最小化の状態は、ここで（設定の取得より前に）同期で戻す
     const gate = KTFetchGate.of(root);
+    // 設定取得ではない通信（AI の接続の確認: 移行・Gateway のトークンの交換・/v2/health）は、最小化で開いても今までどおり起動時に行う。
+    //   開発支援の組み立て（段階 1 の後）はこの結果とセッションを使う（二重に送らない）。作業の基準（自動の設定取得）は開発支援が見えたときに取る
+    const aiLink = startAiLink();
     const panel = root.ktPanel || null;
     const visibleTab = () => (panel ? panel.visibleTab() : 'health');
     // 必要なものだけ渡す（最小限のヘルパ）
@@ -39782,7 +39912,10 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
       if (!preview && !production) return;
       if (production) settingsGen += 1;   // 運用環境の写し（DATA）と他アプリの定義
       if (source !== 'ai') { try { root.ktAi?.invalidateDevBase?.(); } catch (e) { } }   // 開発支援の作業の基準（開発支援の書き込みは、開発支援が自分で取り直す）
-      if (source === 'ai') { try { root.ktCustomize?.markStale?.(); } catch (e) { } }    // Customize の一覧（Customize の反映は、その続きで取り直している）
+      // Customize の一覧（動作テスト環境のカスタマイズ設定と、運用環境との差・「動作テスト環境のみ」の印）: 開発支援の書き込み（動作テスト環境）と、
+      //   ほかの場所の書き込みで運用環境が変わったとき（Plugins の deploy など。deploy は動作テスト環境の全部を運用環境へ反映する）に古いとし、次に開いたときに取り直す。
+      //   Customize 自身の反映は、その続きで取り直している
+      if (source !== 'customize' && (source === 'ai' || production)) { try { root.ktCustomize?.markStale?.(); } catch (e) { } }
       try { KTScan.dropHeldCustomize(); } catch (e) { }                                   // 止めた解析の続きに残した設定
     }
 
@@ -39872,6 +40005,7 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
           }),
           runScan: () => KTScan.run({ silent: true }),
           onSettingsChanged: (info) => settingsChanged({ ...info, source: 'ai' }),
+          aiLink,
         });
       }
       renderScanner(root, {

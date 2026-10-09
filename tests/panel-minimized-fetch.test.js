@@ -8,6 +8,11 @@
 //     5. 取得の途中で最小化 → 送った通信の完了の後に新しい後続の取得 0 回。再展開で足りない分だけ
 //   あわせて: 利用者の明示の操作（［一覧更新］・［再取得］・［Scan］・開発支援の［再取得］）は最小化の前後に関係なく動く／
 //   設定取得ではない通信（AI の Gateway の health）は止めない／最小化の保存・復元は今のまま
+//   2026-10-10 の独立の確認で見つかった漏れ・止めすぎ・古い印（追加）:
+//     §5h〜§5j 段の中の順の取得（承認の欄の準備の JavaScript の準備・相手アプリの定義・Field Scanner のフィールド定義の取り直し）も、途中で最小化したら後続 0 回。再展開で足りない分だけ
+//     §8 ［動作テスト環境へ反映］の中の照合の取り直し（利用者の明示の操作）は、最小化中でも止めずに正しい変わった点を出す
+//     §9 最小化で開いたページでも、AI の接続の確認（トークンの交換・/v2/health）は起動時に 1 回ずつ行う（設定取得は 0 回のまま）
+//     4-13 Plugins の deploy（運用環境が変わる）の後に Customize を開くと、一覧（運用環境との差・「動作テスト環境のみ」の印）を取り直す
 //
 // 実行方法: node tests/panel-minimized-fetch.test.js
 //   修正前の版で同じ確かめ方をするとき（RED の確認）: KT_SRC=<修正前の kintoneAppToolkit.user.js> node tests/panel-minimized-fetch.test.js
@@ -58,12 +63,12 @@ const fakeMonaco = (() => {
 })();
 
 /** 1 回のページ（sandbox）。storage を渡すと、同じ localStorage で読み込み直す（画面遷移） */
-function makeEnv({ mini = null, storage = null, data = null, admin = true } = {}) {
+function makeEnv({ mini = null, storage = null, data = null, admin = true, layout = null, gateway = null } = {}) {
   const { doc, byId } = makeFakeDocument();
   const store = storage || makeStorage(mini == null ? {} : { [MINI_KEY]: mini });
   const T = loadToolkit({ document: doc, localStorage: store });
   const g = T.__sandbox;
-  const fk = makeFakeKintone(data || FX.makeData(), { admin });
+  const fk = makeFakeKintone(data || FX.makeData(), { admin, layout, gateway });
   const registered = { window: [], document: [], kintone: [] };
   fk.kintone.events = { on: (type, fn) => { registered.kintone.push({ type, fn }); } };
   g.kintone = fk.kintone; g.fetch = fk.fetch;
@@ -98,6 +103,9 @@ const STAGE1 = {
 // JS の自動解析（Health の整合性チェック・Fields などが使う。ブラウザが空いた時点）。fixture の JS の FILE は 3 件（URL 1 件は外部なので取らない）
 const SCAN = { 'GET /k/v1/preview/app/customize': 1, 'fetch /k/v1/file': 3 };
 const TABLE = [];   // { c: ケース, label: 場面, s: 設定取得の呼び出し, o: 設定取得ではない通信, fk }
+// 開発支援の画面の偽の動作テスト環境（tests/helpers/kintone-preview-mock.js）の呼び出しは 'GET fields' のような文字列。表で同じ形に数える
+const KITFK = { byPath: (list) => { const m = {}; for (const c of list) m[`mock ${c}`] = (m[`mock ${c}`] || 0) + 1; return m; } };
+const sameSet = (a, b) => JSON.stringify([...a].sort()) === JSON.stringify([...b].sort());
 
 (async () => {
 console.log(`\n対象: ${SRC_PATH}${HAS_START ? '' : '（修正前の版。入口を取り出した写しで実行）'}`);
@@ -219,6 +227,15 @@ await safe('§4', async () => {
   m = E.mark();
   await E.click('kt-mini'); await E.settle(); await E.click('kt-mini'); await E.settle(); await E.click('tab-health'); await E.settle();
   assert(E.fk.settingsCalls(m).length === 0, '4-12 取り直した後は、また再利用する（0 回）');
+  // Customize の一覧（4-2 で取得済み）: deploy は動作テスト環境の全部を運用環境へ反映するので、運用環境との差・「動作テスト環境のみ」の印も古い。次に開いたときに取り直す
+  m = E.mark();
+  await E.click('tab-customize'); await E.settle();
+  const s4f = E.fk.settingsCalls(m);
+  TABLE.push({ c: '4', label: '設定の変更（Plugins の deploy）の後に Customize を開く', s: s4f, o: E.fk.otherCalls(m), fk: E.fk });
+  assert(sameMap(E.fk.byPath(s4f), { 'GET /k/v1/preview/app/customize': 1, 'GET /k/v1/app/customize': 1 }), `4-13 Plugins の deploy の後に Customize を開くと、一覧（運用環境との差・「動作テスト環境のみ」の印）を取り直す: ${fmt(E.fk.byPath(s4f))}`);
+  m = E.mark();
+  await E.click('kt-mini'); await E.settle(); await E.click('kt-mini'); await E.settle();
+  assert(E.fk.settingsCalls(m).length === 0, `4-14 取り直した一覧は再利用する（最小化 → 再展開で 0 回）: ${fmt(E.fk.byPath(E.fk.settingsCalls(m)))}`);
   void dataNow;
 });
 
@@ -425,6 +442,124 @@ await safe('§5g', async () => {
   assert(m.panel.finalPrecheck().status === 'ready', `5g-3 再び見えたら準備をやり直して終わる: ${m.panel.finalPrecheck().status}`);
 });
 
+// 承認の欄の準備の「段の中の順の取得」（2026-10-10 の独立の確認で見つかった漏れ）。
+//   開発支援の画面（偽の動作テスト環境）で最終案まで進め（依頼・計画・生成は利用者の操作）、見えた → 準備の途中の 1 件を止めて見えなくする → 完了の後の後続の GET を数える
+async function precheckEnv() {
+  const T = loadToolkit();
+  const { createNewFlowKit } = require('./helpers/new-flow.js');
+  const KIT = createNewFlowKit(T);
+  const visible = { v: false };
+  const gen = KIT.screenGenerate({});
+  const m = KIT.mount({ health: KIT.HEALTH_V, planImpl: KIT.planImplOf(KIT.screenPlan('mixed')), generateImpl: gen.impl, liveBase: true, extra: { canAutoFetch: () => visible.v } });
+  await ticks();
+  for (const s of KIT.REQUESTS) { await m.panel.send(s); await ticks(10); }
+  await ticks(30);
+  /** 準備の途中で name の読み取りを 1 回止める（止めた 1 件は見えなくなった後に返す = 送った通信の完了） */
+  const holdOnce = (name) => {
+    let open; const held = new Promise((r) => { open = r; });
+    const orig = m.mock.api[name];
+    const h = { hit: false, release: () => open(), restore: () => { m.mock.api[name] = orig; } };
+    m.mock.api[name] = async (...a) => { if (!h.hit && m.panel.finalPrecheck().status === 'running') { h.hit = true; await held; } return orig.apply(m.mock.api, a); };
+    return h;
+  };
+  const gets = (from) => m.mock.calls.slice(from).filter(c => /^GET /.test(c));
+  return { T, KIT, m, visible, holdOnce, gets };
+}
+await safe('§5h', async () => {
+  // JavaScript の準備（KTJsExecutor.prepare）: カスタマイズ設定 → フィールド（新設のフィールドに依存するコード）の順の取得
+  const { KIT, m, visible, holdOnce, gets } = await precheckEnv();
+  const h = holdOnce('getPreviewCustomize');
+  visible.v = true; m.panel.onVisible();
+  await KIT.waitUntil(() => h.hit, 80);
+  visible.v = false;                                  // 最小化（開発支援が見えなくなった）
+  const g1 = m.mock.calls.length;
+  h.release(); await ticks(40);
+  const after = gets(g1);
+  TABLE.push({ c: '5', label: '承認の欄の準備: JavaScript の準備の途中（カスタマイズ設定を送った後）で最小化 → 完了の後', s: after, o: [], fk: KITFK });
+  assert(h.hit && sameSet(after, ['GET customize']) && m.panel.finalPrecheck().status === 'idle' && m.panel.devBaseFetchState().precheckDeferred === true, `5h-1 送ったカスタマイズ設定の完了の後、後続（ステータス・フィールド・本文）の取得は 0 回で、準備前に戻す: ${after.join(', ') || 'なし'}・${m.panel.finalPrecheck().status}`);
+  h.restore();
+  const g2 = m.mock.calls.length;
+  visible.v = true; m.panel.onVisible();
+  await KIT.waitUntil(() => ['ready', 'blocked'].includes(m.panel.finalPrecheck().status), 80);
+  const re = gets(g2);
+  TABLE.push({ c: '5', label: '↑の後に再び見えた（足りない分だけ）', s: re, o: [], fk: KITFK });
+  assert(m.panel.finalPrecheck().status === 'ready' && !re.includes('GET customize') && !re.some(c => /^GET (fields|layout|views|prod views|general|perRecord|reminders|status|actions)$/.test(c)), `5h-2 再び見えたら、取れていた読み取り（設定の準備の 9 件・カスタマイズ設定。フィールドは設定の準備で取得済み）は取り直さず、足りない分だけで準備を終える: ${re.join(', ') || '（追加 0 回）'}・${m.panel.finalPrecheck().status}`);
+});
+await safe('§5i', async () => {
+  // 設定の準備（KTPlanExecutor.prepare）の相手アプリの定義（fetchRelatedAppsForLookups: アプリごとに 基本情報 → フィールド定義 の順の取得）。
+  //   画面の計画にはルックアップの手順が無いので、準備に渡す承認済みの出力だけを、ルックアップの手順のある出力（tests/ai-plan-executor-lookup.test.js の代表ユースケース）に差し替える
+  //   （準備・関所・続きの記録は本物のまま）
+  const { T, KIT, m, visible, holdOnce, gets } = await precheckEnv();
+  const R = T.KTPlanReview, E = T.KTPlanExecutor;
+  const sp = (o) => ({ name: null, from: null, to: null, filterCond: null, assignees: [], targets: [], events: [], timingField: null, daysLater: null, time: null, fields: [], sort: null, sourceApp: null, keyField: null, mappings: [], fieldType: null, required: null, options: [], destApp: null, accessibility: null, entities: [], changeKind: null, assigneeType: null, addMappings: [], addPickerFields: [], ...o });
+  const st = (id, actionType, targetKind, targetRef, s = {}, extra = {}) => ({ id, actionType, targetKind, targetRef, targetExists: null, title: `${id} ${actionType}`, proposal: { summary: '', details: [] }, spec: sp(s), dependsOn: [], reason: '', evidenceIds: [], confidence: 'INFERRED', alternativeId: null, validation: { status: 'ok', issues: [] }, execution: { mode: 'PREVIEW_SUPPORTED', supported: true, reason: 'x' }, ...extra });
+  const pf = (temporaryId, label, suggestedCode, type) => ({ temporaryId, label, suggestedCode, type, typeValid: true, required: false, options: [], reason: '', evidenceIds: [], alternativeExistingFieldCode: null, codeConflict: false, labelDuplicate: false });
+  const plan = { planVersion: '1', requestId: 'tk-p13', goal: 'g', assessment: { summary: '' }, relevantFields: [], proposedFields: [pf('NEW_FIELD_1', '顧客住所', 'customer_address', 'SINGLE_LINE_TEXT')], steps: [
+    st('P1', 'ADD_FIELD', 'PROPOSED_FIELD', 'NEW_FIELD_1', { fieldType: 'SINGLE_LINE_TEXT' }),
+    st('P3', 'UPDATE_LOOKUP', 'LOOKUP', 'customer_lookup', { addMappings: [{ relatedField: 'address', field: 'NEW_FIELD_1' }] }, { dependsOn: ['P1'] }),
+  ], alternatives: [], impact: [], questions: [], unknowns: [], planConfidence: 'INFERRED' };
+  const data = FX.makeData();
+  const rv = R.review({ plan, data, deps: T.KTDeps.buildDependencyData(data, T.KTDeps.normalizeFields(data.fields)), scan: null, incoming: null });
+  const lookupOut = R.executorOutput(plan, rv, plan.steps.map(s => s.id));
+  const origPrepare = E.prepare;
+  E.prepare = (out, o) => origPrepare(lookupOut, o);
+  try {
+    const h = holdOnce('getApp');
+    visible.v = true; m.panel.onVisible();
+    await KIT.waitUntil(() => h.hit, 80);
+    visible.v = false;
+    const g1 = m.mock.calls.length;
+    h.release(); await ticks(40);
+    const after = gets(g1);
+    TABLE.push({ c: '5', label: '承認の欄の準備: 相手アプリの定義の途中（基本情報を送った後）で最小化 → 完了の後', s: after, o: [], fk: KITFK });
+    assert(h.hit && sameSet(after, ['GET app']) && m.panel.finalPrecheck().status === 'idle', `5i-1 送った基本情報の完了の後、後続（フィールド定義・JavaScript の準備）の取得は 0 回: ${after.join(', ') || 'なし'}・${m.panel.finalPrecheck().status}`);
+    h.restore();
+    const g2 = m.mock.calls.length;
+    visible.v = true; m.panel.onVisible();
+    await KIT.waitUntil(() => ['ready', 'blocked'].includes(m.panel.finalPrecheck().status), 80);
+    const re = gets(g2);
+    TABLE.push({ c: '5', label: '↑の後に再び見えた（足りない分だけ）', s: re, o: [], fk: KITFK });
+    assert(['ready', 'blocked'].includes(m.panel.finalPrecheck().status) && sameSet(re, ['GET app fields', 'GET customize']), `5i-2 再び見えたら足りない分（相手アプリのフィールド定義・JavaScript の準備のカスタマイズ設定）だけ。設定の準備の 9 件・基本情報は取り直さない: ${re.join(', ') || 'なし'}`);
+    // 部品の単位: 明示の操作（shouldContinue なし）は止めない／自動（偽）は基本情報の後で止める
+    const mock2 = { calls: [], api: { getApp: async (id) => { mock2.calls.push(`GET app ${id}`); return { appId: String(id), name: 'x', code: '' }; }, getAppFields: async (id) => { mock2.calls.push(`GET app fields ${id}`); return { properties: {}, revision: '1' }; } } };
+    const reviews = [{ actionType: 'UPDATE_LOOKUP', diff: { target: { identity: { relatedApp: { app: '500' } } } } }, { actionType: 'UPDATE_LOOKUP', diff: { target: { identity: { relatedApp: { app: '311' } } } } }];
+    let paused = false;
+    try { await E.fetchRelatedAppsForLookups(mock2.api, { properties: {} }, reviews, null, { shouldContinue: () => false }); } catch (e) { paused = T.KTFetchGate.isPaused(e); }
+    assert(paused && mock2.calls.length === 2 && mock2.calls.every(c => /^GET app \d+$/.test(c)), `5i-3 アプリごとの順の取得: 自動の取得で見えなくなっていたら、送った基本情報の後のフィールド定義を始めない: ${mock2.calls.join(', ')}`);
+    mock2.calls.length = 0;
+    const r = await E.fetchRelatedAppsForLookups(mock2.api, { properties: {} }, reviews, null);
+    assert(mock2.calls.length === 4 && r['500'] && r['311'], `5i-4 明示の操作（shouldContinue なし）は最後まで取る: ${mock2.calls.join(', ')}`);
+  } finally { E.prepare = origPrepare; }
+});
+await safe('§5j', async () => {
+  // Field Scanner のフィールド定義の取り直し（fetchFieldList: kintone.app.getFormFields → getFormLayout の順の取得）。
+  //   段階 1 でフィールド定義・レイアウトが空だった（取り直しが要る）場面を作る
+  const data = FX.makeData();
+  const fullFields = data.fields;
+  data.fields = {};
+  const lay = [];
+  const e = makeEnv({ mini: '0', data, layout: lay });
+  await e.start(); await ticks();                    // 段階 1（空のフィールド定義・レイアウト）→ 描画。自動の解析は空いた時点に予約
+  data.fields = fullFields; lay.push({ type: 'ROW', fields: [{ type: 'SINGLE_LINE_TEXT', code: 'case_name' }] });   // 取り直したときは中身がある
+  const h = e.fk.hold(/^kintone\.app\.getFormFields$/);
+  for (const fn of e.idle.splice(0)) fn();
+  await ticks();
+  const sentFields = h.sent;
+  const m = e.mark();
+  await e.click('kt-mini');                          // フィールド定義の取り直しの途中で最小化
+  h.release(); await e.settle();
+  const after = e.fk.settingsCalls(m);
+  TABLE.push({ c: '5', label: 'Field Scanner: フィールド定義の取り直しの途中で最小化 → 完了の後', s: after, o: e.fk.otherCalls(m), fk: e.fk });
+  assert(sentFields === 1 && after.length === 0, `5j-1 送ったフィールド定義の完了の後、レイアウトの取り直し・本文の取得（後続）は 0 回: 送った ${sentFields}・後続 ${fmt(e.fk.byPath(after))}`);
+  assert(e.T.KTScan.getStatus().state === 'idle', `5j-2 解析は失敗にもキャッシュにもせず、解析前の状態に戻す: ${e.T.KTScan.getStatus().state}`);
+  const m2 = e.mark();
+  await e.click('kt-mini'); await e.settle();
+  const re = e.fk.settingsCalls(m2);
+  TABLE.push({ c: '5', label: '↑の後に再展開（足りない分だけ）', s: re, o: e.fk.otherCalls(m2), fk: e.fk });
+  assert(sameMap(e.fk.byPath(re), { 'JS API kintone.app.getFormLayout': 1, 'fetch /k/v1/file': 3 }), `5j-3 再展開ではフィールド定義・カスタマイズ設定を取り直さず、足りない分（レイアウト 1・本文 3）だけ: ${fmt(e.fk.byPath(re))}`);
+  assert(['done', 'cached'].includes(e.T.KTScan.getStatus().state), '5j-4 続きの解析が終わる');
+});
+
 // =========================================================
 console.log('\n--- §6. 利用者の明示の操作は最小化の前後に関係なく動く ---');
 await safe('§6', async () => {
@@ -465,6 +600,74 @@ await safe('§7', async () => {
     assert(t.live() === false && gate.ticket().live() === true, '7-5 関所の手形: 発行の後に一度でも最小化したら無効（展開し直しても続きは新しい手形で）');
     assert(e.T.KTFetchGate.of({}).isOpen() === true, '7-6 パネルの無い root は常に展開として扱う（今までどおり取る）');
   } else assert(false, '7-5 設定取得の関所（KTFetchGate）がある');
+});
+
+// =========================================================
+console.log('\n--- §8. 利用者の明示の操作の中の取得は止めない: ［動作テスト環境へ反映］の照合の取り直し（最小化中でも正しい変わった点） ---');
+await safe('§8', async () => {
+  // 承認の欄の準備の後に動作テスト環境へフィールドが足された状態で［動作テスト環境へ反映］を押す。押した直後に最小化（開発支援が見えない）しても、
+  //   照合の取り直し（computePrecheck）は利用者の操作の中の取得なので止めず、見えているときと同じ変わった点を出す
+  const { createNewFlowKit } = require('./helpers/new-flow.js');
+  const out = {};
+  for (const hidden of [false, true]) {
+    const T = loadToolkit();
+    const KIT = createNewFlowKit(T);
+    const visible = { v: true };
+    const gen = KIT.screenGenerate({ field: 'approval_memo', targetFile: 'memoLock.js' });
+    const m = KIT.mount({ health: KIT.HEALTH_V, planImpl: KIT.planImplOf(KIT.screenPlan('mixed')), generateImpl: gen.impl, liveBase: true, extra: { canAutoFetch: () => visible.v } });
+    await KIT.ticks();
+    await KIT.adoptOnScreen(m); await KIT.ticks(20);
+    let g0 = 0;
+    const r = await KIT.applyOnScreen(m, { before: async () => {
+      await m.mock.api.addPreviewFields('341', { other_note: { type: 'SINGLE_LINE_TEXT', code: 'other_note', label: 'x' } });
+      if (hidden) visible.v = false;   // 押す直前に最小化
+      g0 = m.mock.calls.length;
+    } });
+    out[hidden] = { stage: r.run && r.run.stage, written: r.run && r.run.written, changes: (r.run && r.run.stop && r.run.stop.changes) || [], gets: m.mock.calls.slice(g0).filter(c => /^GET /.test(c)), writes: m.mock.calls.slice(g0).filter(c => !/^GET/.test(c)) };   // 押した後の書き込み（押す前に足したフィールドは数えない）
+  }
+  const a = out[false], b = out[true];
+  TABLE.push({ c: 'E', label: '［動作テスト環境へ反映］の照合の取り直し（押した直後に最小化）', s: b.gets, o: [], fk: KITFK });
+  assert(a.stage === 'stopped' && a.written === false && a.changes.length === 4, `8-1 前提（見えているとき）: 書き込まずに止め、変わった点 4 項目: ${a.changes.join(' / ')}`);
+  assert(b.stage === 'stopped' && b.written === false && b.writes.length === 0 && JSON.stringify(b.changes) === JSON.stringify(a.changes), `8-2 最小化中でも同じ正しい変わった点（4 項目）を出す（「反映する設定の手順が無くなりました」などの誤りを出さない）: ${b.changes.join(' / ')}`);
+  assert(b.gets.filter(c => c === 'GET prod views').length === 1 && b.gets.includes('GET customize'), `8-3 照合の取り直しの取得（設定の準備・JavaScript の準備）を関所で止めない: ${b.gets.join(', ')}`);
+});
+
+// =========================================================
+console.log('\n--- §9. 最小化で開いたページでも、設定取得ではない通信（AI の接続の確認）は起動時に行う ---');
+const SESSION_KEY = 'ktAi.v2.test.cybozu.com';
+function makeGateway() {
+  let seq = 0;
+  return (method, p) => {
+    if (p === '/v2/token/exchange') {
+      seq += 1;
+      return { status: 200, body: JSON.stringify({ ok: true, contractVersion: '2.1', tokenType: 'Bearer', accessToken: `v1.AT-${seq}.sig`, expiresAt: '2099-01-01T00:00:00Z', expiresInSec: 2700, refreshToken: `v1.RT-${seq}.sig`, refreshExpiresAt: '2099-01-01T00:00:00Z', scope: { customerId: 'c', domain: 'test.cybozu.com', product: 'toolkit', feature: 'assistant-qa', tokenId: `at_${seq}`, familyId: 'f' }, customer: { plan: 'pro', monthlyLimit: 100, expiresAt: '2099-01-01T00:00:00Z' } }) };
+    }
+    if (p === '/v2/health') return { status: 200, body: JSON.stringify(HEALTH) };
+    return { status: 404, body: JSON.stringify({ ok: false, error: { code: 'NOT_FOUND', message: 'not found' } }) };
+  };
+}
+const connectedSession = () => JSON.stringify({ apiBase: 'https://gw.test', refreshToken: 'v1.RT-0.sig', refreshExpiresAt: '2099-01-01T00:00:00Z', scope: { product: 'toolkit', feature: 'assistant-qa', domain: 'test.cybozu.com' }, connectedAt: '2026-10-01T00:00:00Z' });
+await safe('§9', async () => {
+  const e = makeEnv({ storage: makeStorage({ [MINI_KEY]: '1', [SESSION_KEY]: connectedSession() }), gateway: makeGateway() });
+  const root = await e.start(); await e.settle();
+  const s = e.fk.settingsCalls(), o = e.fk.otherCalls();
+  const gw = o.filter(c => c.kind === 'proxy');
+  TABLE.push({ c: '1', label: '最小化で初期表示（AI 接続済み。接続の確認は起動時）', s, o, fk: e.fk });
+  assert(s.length === 0, `9-1 最小化で開いたら設定取得 0 回のまま（作業の基準も取らない）: ${fmt(e.fk.byPath(s))}`);
+  assert(sameMap(e.fk.byPath(gw), { 'POST /v2/token/exchange': 1, 'GET /v2/health': 1 }) && o.length === gw.length, `9-2 AI の接続の確認（トークンの交換・health）は起動時に 1 回ずつ（設定取得ではない通信は止めない）: ${fmt(e.fk.byPath(o))}`);
+  assert(e.isMini(), '9-3 最小化のまま');
+  const m = e.mark();
+  await e.click('kt-mini'); await e.settle();
+  const s2 = e.fk.settingsCalls(m), gw2 = e.fk.otherCalls(m).filter(c => c.kind === 'proxy');
+  TABLE.push({ c: '3', label: '↑の後に初回の展開（Health。AI 接続済み）', s: s2, o: e.fk.otherCalls(m), fk: e.fk });
+  assert(sameMap(e.fk.byPath(s2), { ...STAGE1, ...SCAN }), `9-4 展開したら Health に要る設定だけ（接続済みでも作業の基準は開発支援が見えるまで取らない）: ${fmt(e.fk.byPath(s2))}`);
+  assert(gw2.length === 0, `9-5 開発支援の組み立ては起動時の接続の確認（同じセッション・health の結果）を使い、トークンの交換・health を二重に送らない: ${fmt(e.fk.byPath(gw2))}`);
+  const cap = root && root.ktAi && typeof root.ktAi.capability === 'function' ? root.ktAi.capability() : null;
+  assert(!!(cap && cap.available), `9-6 起動時の接続の確認の結果で利用可（available）: ${JSON.stringify(cap && { available: cap.available, reason: cap.reason })}`);
+  const m3 = e.mark();
+  await e.click('tab-ai'); await e.settle();
+  const s3 = e.fk.settingsCalls(m3);
+  assert(s3.some(c => /^\/k\/v1\/preview\/app\/form\/fields$/.test(c.path)) && e.fk.otherCalls(m3).filter(c => c.kind === 'proxy').length === 0, `9-7 開発支援を開いたら（見えた）作業の基準を取る（自動の設定取得は見えたとき）: ${s3.length} 回`);
 });
 
 // =========================================================
