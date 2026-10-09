@@ -16,6 +16,8 @@
 //   §V7 承認の欄の確認項目（重複の handler）: 画面の言葉（イベント名・handler を出さない）。元の文は詳細に残る。承認の照合の key・code・指紋の文は元のまま
 //   §V8 作業者: ログイン中の利用者は名前・ログイン中でない利用者はログイン名を残す（承認者を確かめる情報を消さない）
 //   §V9 最終案の動作の文（計画の AI の要約）も、根拠の番号を外し、PC などの短い語を書き換えない
+//   §V10 AI の文のログイン名をフィールドの名前に書き換えない（V8-6。仮案のカード・右のペイン・進みのカード・最終案）。作業者の内部の表記（USER: など）は画面の表記・
+//        通知の内部の番号（general#N など）は Context の事実の言葉（H-1・H-2）。承認の欄の適用範囲・PC / モバイルは画面の言葉（H-3・H-4）
 //
 // 実行方法: node tests/ai-realrun-display.test.js
 'use strict';
@@ -208,7 +210,8 @@ await section(async () => {
   const saved = JSON.parse(storage.getItem('ktAi.timing.v1'));
   assert(saved.plan.n === 2 && x.c.progress() === null, `V5-5: 段階の実測は記録に残す（表示には使わない）: ${JSON.stringify(saved.plan)}`);
   //   根拠の無い時間の文（会話の受領の記録・読み込み中の文）がソースの文字列に残っていない（コメントを除く）
-  const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'kintoneAppToolkit.user.js'), 'utf8');
+  //   レビューの指摘 row8（2026-10-09）: 走らせている版（KT_SRC があればその版）のソースを読む（修正前の版で RED を確かめられるように）
+  const src = require('fs').readFileSync(process.env.KT_SRC || require('path').join(__dirname, '..', 'kintoneAppToolkit.user.js'), 'utf8');
   const lines = src.split('\n').filter(l => !/^\s*(\/\/|\*|\/\*)/.test(l)).map(l => l.replace(/\s\/\/\s.*$/, '')).filter(l => /1 分前後|十数秒|目安 \$\{|・目安/.test(l));
   assert(!lines.length, `V5-6: 「1 分前後」「十数秒ほど」「目安 約 N 秒」を画面に出す文が残っていない: ${lines.map(l => l.trim().slice(0, 120)).join(' ／ ')}`);
 });
@@ -331,6 +334,53 @@ await section(async () => {
   assert(v.final && /承認済みでは金額を編集不可にします。/.test(beh) && /PCとモバイルの両方で使います。/.test(beh) && !EVIDENCE.test(beh) && !CODES.test(beh) && !/端末区分/.test(beh), `V9-1: 最終案の「最終的にどう動くか」も根拠の番号（全角）を外し、PC をフィールドのコードと見なさない: ${beh}`);
   const out = visible(outsideDetails(finalHtml(x)));
   assert(!EVIDENCE.test(out) && !ESTIMATE.test(out), `V9-2: 最終案のカードの通常表示に根拠の番号・時間の目安を出さない: ${firstHit(out, EVIDENCE, ESTIMATE)}`);
+});
+
+// =========================================================
+console.log('\n--- §V10. AI の文のログイン名・作業者の表記・通知の番号（レビューの指摘 row8）と承認の欄の適用範囲・モバイル ---');
+//   素材: フィールドのコード approver（承認者）とログイン名 approver@example.com が同じ語を含む（実機の画面の基準と同じ）。AI の文に作業者の内部の表記
+//   USER:user.approver と、Toolkit が Context に付けた通知の番号 general#3 が入る
+const LABELS_U = { ...LABELS, approver: '承認者', manager: '部長' };
+const REQ_U = '部長承認を追加したい';
+const REPLY_U = '部長承認の作業者は manager@example.com、課長承認は今の approver@example.com のままにします。';
+const B_U = '部長承認待ちの作業者を manager@example.com にし、承認待ちは approver@example.com のままにする。';
+const SUM_U = '課長承認は approver@example.com のまま、general#3 はステータス変更時に作業者 USER:user.approver へ通知します。';
+const STREAM_U = '承認待ちの作業者 approver@example.com はそのままにし、perRecord#2 の通知先 GROUP:sales も変えない計画です。';
+const scriptU = ({ utterance: u }) => (u === REQ_U ? { reply: REPLY_U, intent: 'propose', proposal: { behaviors: [B(B_U, 'user')], assumptions: [], decisions: [], approach: { standard: [], js: [] }, cannot: [] }, turn: { ops: [], answers: [], requirementOps: [] } } : null);
+const LOGIN_BROKEN = /「承認者」@|「部長」@|USER:|GROUP:|ORGANIZATION:|general#\d|perRecord#\d|reminder#\d/;
+await section(async () => {
+  const pg = gateMk();
+  const x = makeConvC({ scriptFn: scriptU, labels: LABELS_U, planGate: pg, planImpl: (args) => planJs(args, { summary: SUM_U }) });
+  const plan0 = x.services.plan;
+  x.services.plan = async (args) => { if (typeof args.onText === 'function') args.onText(STREAM_U); return plan0({ ...args, onText: null }); };
+  await x.c.send(REQ_U);
+  const d = x.c.draft();
+  const cardU = visible(KTAiChatUi.messageHtml(x.c.messages().filter(mm => mm.type === 'DRAFT').slice(-1)[0], { draft: d, draftDecisions: x.c.draftDecisions(), draftAnswers: new Map(), labels: LABELS_U }));
+  const pane = visible(KTAiChatUi.draftSummaryHtml(d, { decisions: x.c.draftDecisions(), labels: LABELS_U }));
+  assert(cardU.includes('課長承認は今の approver@example.com のままにします') && cardU.includes('manager@example.com') && !LOGIN_BROKEN.test(cardU), `V8-6a: 仮案のカード（会話）の AI の文のログイン名は、フィールドのコード（approver＝承認者）に書き換えずに残す: ${firstHit(cardU, LOGIN_BROKEN, /[^\n]*@example\.com[^\n]*/)}`);
+  assert(pane.includes('承認待ちは approver@example.com のままにする') && !LOGIN_BROKEN.test(pane), `V8-6b: 右のペインの仮案の詳細でもログイン名を残す: ${firstHit(pane, LOGIN_BROKEN, /[^\n]*@example\.com[^\n]*/)}`);
+  const p = x.c.send('採用します'); await ticks(8);
+  const pm = x.c.messages().find(mm => mm.data && mm.data.kind === 'progress');
+  const prog = pm ? visible(KTAiChatUi.progressInnerHtml(pm, { labels: LABELS_U })) : '';
+  assert(pm && prog.includes('承認待ちの作業者 approver@example.com はそのままにし') && /レコードの条件通知（2 件目）の通知先グループ（sales）も変えない/.test(prog) && !LOGIN_BROKEN.test(prog), `V8-6c・H-1: 進みのカードの AI の説明: ログイン名を残し、通知の番号は Context の事実の言葉・作業者の表記は画面の表記: ${prog.replace(/\s+/g, ' ').slice(0, 300)}`);
+  pg.open(); await p; await ticks(8);
+  const v = x.c.activePlan();
+  const beh = (v && v.final ? v.final.behaviors : []).join(' ／ ');
+  assert(v && v.final && beh.includes('課長承認は approver@example.com のまま') && /アプリの条件通知（3 件目）はステータス変更時に作業者ユーザー（user\.approver）へ通知します/.test(beh) && !LOGIN_BROKEN.test(beh), `V8-6d・H-2: 最終案の動作の文: ログイン名を残し、general#3 は「アプリの条件通知（3 件目）」、USER:user.approver は「ユーザー（user.approver）」（ログイン名は残す）: ${beh}`);
+  const out = visible(outsideDetails(finalHtml(x)));
+  assert(!LOGIN_BROKEN.test(out) && out.includes('approver@example.com'), `V8-6e: 最終案のカードの通常表示にも壊れたログイン名・内部の表記を出さない: ${firstHit(out, LOGIN_BROKEN)}`);
+  //   描画のときだけ（計画の要約・仮案の文の元の値は変えない）
+  assert(v.plan.assessment.summary === SUM_U && d.reply === REPLY_U && d.items.behaviors[0].text === B_U, 'V8-6f: 計画と仮案の元の文は書き換えない（描画のときだけ）');
+});
+await section(async () => {
+  //   承認の欄（画面）: 適用範囲（ALL）・Mobile は画面の言葉（全員・モバイル）
+  const { m } = await K.mountFinal({ kind: 'js' });
+  await K.waitUntil(() => ['ready', 'blocked', 'unavailable'].includes(m.panel.finalPrecheck().status), 80); await ticks(2);
+  const pre = m.panel.finalPrecheck();
+  const keep = ((pre.items && pre.items.keep) || []).join(' ／ ');
+  const chatOut = visible(outsideDetails(m.chat()));
+  assert(pre.status === 'ready' && /PC：.*　モバイル：/.test(keep) && /適用範囲（全員）は変更しません/.test(keep) && !/Mobile|ALL/.test(keep) && /適用範囲（全員）/.test(chatOut) && !/適用範囲（ALL）|Mobile：/.test(chatOut), `H-3: 承認の欄の適用範囲と PC / モバイルの件数は画面の言葉: ${keep}`);
+  assert(KTAiChatUi.customizeScopeJa('ALL') === '全員' && KTAiChatUi.customizeScopeJa('ADMIN') === 'アプリの管理者だけ' && KTAiChatUi.customizeScopeJa('NONE') === '適用しない', 'H-4: 適用範囲の画面の言葉の表');
 });
 
 console.log(`\n${state.failed ? 'FAILED' : 'ALL PASSED'}: ${state.passed} passed / ${state.failed} failed`);

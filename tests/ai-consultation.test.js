@@ -253,8 +253,8 @@ console.log('\n--- §46〜§53（UI 経由）: 既存 FILE の差し替え登録
   //   §0e.1（2026-10-09）: 登録の準備（読み取りだけ）は最終案が承認できる状態になると自動で走り、以前の登録の最終確認（§21）の内容を承認の欄に出す
   await KIT.waitUntil(() => m.panel.finalPrecheck().status === 'ready', 60);
   { const pre = m.panel.finalPrecheck(); const chatPre = KIT.stripC(m.chat());
-    assert(pre.items.files.join() === '✎ fieldOnOff.js（PC）既存ファイルを更新（同じ位置）' && pre.items.keep[0] === 'PC：1件変更　Mobile：変更なし' && pre.items.keep[1] === '既存の CSS（1 件）・その他の JS（2 件）・適用範囲（ALL）は変更しません' && /運用環境には反映しません/.test(pre.items.target) && writes(m).length === 0 && m.panel.jsExecState().stage === 'idle', '承認の欄（以前の最終確認 §21）: 変更の一覧・PC / Mobile の件数・保持する設定・運用環境には反映しない（準備は読み取りだけ・書き込み 0）');
-    assert(/反映の前の確認（書き込みなし）/.test(chatPre) && /✎ fieldOnOff\.js（PC）既存ファイルを更新/.test(chatPre) && /既存の CSS（1 件）・その他の JS（2 件）・適用範囲（ALL）は変更しません/.test(chatPre) && KIT.applyButtonOf(m) && !KIT.applyButtonOf(m).disabled, '最終案のカードの承認の欄に同じ内容を出し、［動作テスト環境へ反映］を押せる'); }
+    assert(pre.items.files.join() === '✎ fieldOnOff.js（PC）既存ファイルを更新（同じ位置）' && pre.items.keep[0] === 'PC：1件変更　モバイル：変更なし' && pre.items.keep[1] === '既存の CSS（1 件）・その他の JS（2 件）・適用範囲（全員）は変更しません' && /運用環境には反映しません/.test(pre.items.target) && writes(m).length === 0 && m.panel.jsExecState().stage === 'idle', '承認の欄（以前の最終確認 §21）: 変更の一覧・PC / モバイルの件数・保持する設定（適用範囲は画面の言葉「全員」）・運用環境には反映しない（準備は読み取りだけ・書き込み 0）');
+    assert(/反映の前の確認（書き込みなし）/.test(chatPre) && /✎ fieldOnOff\.js（PC）既存ファイルを更新/.test(chatPre) && /既存の CSS（1 件）・その他の JS（2 件）・適用範囲（全員）は変更しません/.test(chatPre) && !/適用範囲（ALL）|Mobile：/.test(chatPre) && KIT.applyButtonOf(m) && !KIT.applyButtonOf(m).disabled, '最終案のカードの承認の欄に同じ内容を出し、［動作テスト環境へ反映］を押せる'); }
   const r1 = await m.panel.send('JS を登録して');
   assert(r1.intent === KTAiConversation.INTENT.REQUEST_JS_PREVIEW && m.msgs()[m.msgs().length - 1].data?.kind === 'js-preview-needs-approval' && /［動作テスト環境へ反映］/.test(m.msgs()[m.msgs().length - 1].text) && writes(m).length === 0 && m.panel.jsExecState().stage === 'idle', '「JS を登録して」: 最終案のカードの［動作テスト環境へ反映］へ案内するだけ（登録しない・書き込み 0）');
   const ar = await applyScreen(m);
@@ -299,7 +299,7 @@ console.log('\n--- 新規 JS（desktop）の登録 / mobile（desktop を変え�
   await ticks();
   const { v } = await adoptScreen(m, '100万円以上なら警告を表示したい');
   const arN = await applyScreen(m);
-  assert(arN.pre.items.files.join() === '＋ amount-warning.js（PC）新規追加（3 番目・末尾）' && arN.pre.items.keep[0] === 'PC：1件追加　Mobile：変更なし' && m.panel.jsExecState().prepared.changes[0].kind === 'ADD_FILE' && m.panel.jsExecState().prepared.changes[0].name === 'amount-warning.js' && v.approval, '新規 JS: 承認の欄に ADD_FILE・末尾（3 番目）・PC 1 件追加 →［動作テスト環境へ反映］1 回で承認と登録');
+  assert(arN.pre.items.files.join() === '＋ amount-warning.js（PC）新規追加（3 番目・末尾）' && arN.pre.items.keep[0] === 'PC：1件追加　モバイル：変更なし' && m.panel.jsExecState().prepared.changes[0].kind === 'ADD_FILE' && m.panel.jsExecState().prepared.changes[0].name === 'amount-warning.js' && v.approval, '新規 JS: 承認の欄に ADD_FILE・末尾（3 番目）・PC 1 件追加 →［動作テスト環境へ反映］1 回で承認と登録');
   assert(m.panel.jsExecState().execution.status === 'DONE' && jsNames(m, 'desktop').join() === 'https://cdnjs.cloudflare.com/ajax/libs/ext-lib/1.0.0/ext.js,fieldOnOff.js,amount-warning.js' && jsNames(m, 'mobile').join() === 'mobileLock.js', '§48 desktop JS 2 → 3（URL と既存を保持・mobile は不変）');
 }
 {
@@ -310,7 +310,7 @@ console.log('\n--- 新規 JS（desktop）の登録 / mobile（desktop を変え�
   assert(d.intent === KTAiConversation.INTENT.PROPOSE && d.reason === 'CONSULTATION' && m.calls.plan[0].ctx.subject.target === 'mobile', 'mobile JS の相談: 仮案 → 採用 → 計画（subject.target mobile）');
   const before = jsNames(m, 'desktop');
   const arM = await applyScreen(m);
-  assert(v.approval && m.panel.jsExecState().prepared.changes[0].target === 'mobile' && /（モバイル）新規追加/.test(arM.pre.items.files.join()) && arM.pre.items.keep[0] === 'PC：変更なし　Mobile：1件追加', 'mobile の新規 JS: 承認の欄に Mobile 1 件追加・PC 変更なし →［動作テスト環境へ反映］1 回で登録');
+  assert(v.approval && m.panel.jsExecState().prepared.changes[0].target === 'mobile' && /（モバイル）新規追加/.test(arM.pre.items.files.join()) && arM.pre.items.keep[0] === 'PC：変更なし　モバイル：1件追加', 'mobile の新規 JS: 承認の欄にモバイル 1 件追加・PC 変更なし →［動作テスト環境へ反映］1 回で登録');
   assert(m.panel.jsExecState().execution.status === 'DONE' && jsNames(m, 'mobile').join() === 'mobileLock.js,approved-lock-mobile.js' && jsNames(m, 'desktop').join() === before.join(), '§56 mobile に登録・desktop は変更なし');
 }
 {

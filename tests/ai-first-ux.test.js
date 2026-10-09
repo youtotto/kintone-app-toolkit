@@ -10,6 +10,10 @@
 //
 // 実行方法: node tests/ai-first-ux.test.js
 'use strict';
+//   2026-10-09: 実行が 10 秒を越えると、sandbox に読み込んだ本体の起動処理（waitReady の 10 秒の待ちの後の kintone.app.getId()）が
+//   「kintone is not defined」（テストが kintone を置いた後は kintone.app が無い TypeError）で落ちてテストが途中で止まる（テストの内容と関係ない）。
+//   ほかのテストと同じく、その起動処理の例外だけを無視する
+process.on('unhandledRejection', (e) => { if (/kintone is not defined|reading 'getId'/.test(String(e && e.message))) return; console.error(e); process.exit(1); });
 const fs = require('fs');
 const path = require('path');
 const { loadToolkit, makeAssert } = require('./helpers/load-toolkit.js');

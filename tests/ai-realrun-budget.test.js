@@ -1,8 +1,8 @@
 // 実機確認（2026-10-09）の予算管理の回帰（設計 §0f.4・利用者の指示 §5 の表の 6〜7 行目の Toolkit 側。有料の AI は使わない）
 //
 // 検証内容:
-//   §B0 見積もり（KTAiBudget.estimate）: 入力 token は送る Context のバイト数から（キャッシュ命中を前提にしない）・出力は出力の上限の表（会話 4,000・計画 48,000・生成 32,000）と
-//        health の大きい方・内部の呼び出しの最大（会話・仮案 1・計画の全体 1・差分 2・生成 1 ＋ 修復 2）・単価の表（gpt-6.1-sol 入力 2・出力 10 米ドル / 100 万 token）。
+//   §B0 見積もり（KTAiBudget.estimate）: 入力 token は送る Context のバイト数から（キャッシュ命中を前提にしない）・出力は health の limits の出力の上限（Gateway が実際に使う値）、
+//        無ければ表（会話 4,000・計画 48,000・生成 32,000）。応答の出力の上限が見積もりに使った値を超えたら以後を止める・内部の呼び出しの最大（会話・仮案 1・計画の全体 1・差分 2・生成 1 ＋ 修復 2）・単価の表（gpt-6.1-sol 入力 2・出力 10 米ドル / 100 万 token）。
 //        表に無いモデル・種類は送らない
 //   §B1 設定と記録: 設定が無ければ無効（session.client をそのまま使う・記録を書かない）。設定があるのに記録を読めない・壊れている・書けないときは送らない
 //   §B2 確保と精算: 残りより次の要求の最大が大きい → 送信 0 件／回数も同じ／終了不明（時間切れ・取り消し・usage の無い応答・AI を呼んだ後のエラー）は確保を解放しない／
@@ -13,7 +13,8 @@
 //        生成中の質問も確保額に含む／中断で usage が返らない → 費用 0 や予算内と表示せず終了不明・費用未確定／予算が無効なら今までと同じ／記録に本文が入らない／
 //        設定が壊れていれば最初の仮案も送らない／見出しに記録済み・確保中・上限（有効なときだけ）
 //   §B5 表示: 最終案の詳細の「AI の呼び出し N 回（内部を含め最大 M 回）。うち K 回は使用量が不明のため、費用は未確定です。確認できた分 …」（finalUsageOf）・
-//        JavaScript ごとの「生成 N 回目」の不明の回数・修復の token が一部だけのときの印
+//        JavaScript ごとの「生成 N 回目」の不明の回数・修復の token が一部だけのときの印・入力か出力の片方だけの usage は使用量が不明（generationEstimate）
+//   記録の費用（レビューの指摘 row7）: 費用が確定していない記録（進行中・終了不明・一部不明）は costUsd が null・costComplete false・確認できた分は costKnownUsd
 //
 // 実行方法: node tests/ai-realrun-budget.test.js
 'use strict';
@@ -52,11 +53,11 @@ function fakeClient(impl = {}) {
 const catchOf = async (p) => { try { await p; return null; } catch (e) { return e; } };
 const reasonOf = (e) => (e && e.details && e.details.budget ? e.details.budget.reason : null);
 const restButtonOf = (h) => { const m = /<button[^>]*data-act="choice"[^>]*>残りの JavaScript を作る<\/button>/.exec(h); return m ? { html: m[0], disabled: /\sdisabled/.test(m[0]) } : null; };
-const ALLOWED_ENTRY_KEYS = ['key', 'requestId', 'feature', 'kind', 'mode', 'sessionId', 'startedAt', 'endedAt', 'status', 'reservedUsd', 'reservedCalls', 'maxCallUsd', 'estimatedModel', 'maxOutputTokens', 'ctxBytes', 'model', 'calls', 'costUsd', 'costCachedUsd', 'reason'];
+const ALLOWED_ENTRY_KEYS = ['key', 'requestId', 'feature', 'kind', 'mode', 'sessionId', 'startedAt', 'endedAt', 'status', 'reservedUsd', 'reservedCalls', 'maxCallUsd', 'estimatedModel', 'maxOutputTokens', 'ctxBytes', 'model', 'calls', 'costUsd', 'costKnownUsd', 'costComplete', 'costCachedUsd', 'reason'];
 
 (async () => {
 // =========================================================
-console.log('\n--- §B0. 見積もり（入力はバイト数から・出力の上限の表と health の大きい方・内部の呼び出しの最大・単価の表） ---');
+console.log('\n--- §B0. 見積もり（入力はバイト数から・出力の上限は health の値（無ければ表）・内部の呼び出しの最大・単価の表） ---');
 await section(async () => {
   const E = KTAiBudget.estimate;
   const eAsk = E({ kind: 'ask', ctxBytes: 10000 });
@@ -75,7 +76,21 @@ await section(async () => {
   const H = (o) => ({ features: { 'customization-generator': { model: MODEL, ...o } } });
   const eBig = E({ kind: 'generate', ctxBytes: 10000, limits: H({ maxOutputTokens: 64000, maxAiCalls: 4 }) });
   const eSmall = E({ kind: 'generate', ctxBytes: 10000, limits: H({ maxOutputTokens: 1000, maxAiCalls: 1 }) });
-  assert(eBig.ok && eBig.maxOutputTokens === 64000 && eBig.maxCalls === 4 && eSmall.ok && eSmall.maxOutputTokens === 32000 && eSmall.maxCalls === 3, `B0-6: health の出力の上限・呼び出しの最大は表との大きい方（小さい値で見積もりを下げない）: ${JSON.stringify({ big: [eBig.maxOutputTokens, eBig.maxCalls], small: [eSmall.maxOutputTokens, eSmall.maxCalls] })}`);
+  //   レビューの指摘（2026-10-09・費用の見積もり）: 出力の上限は health の値（Gateway が実際に使う上限）があればその値（大きいときも小さいときも）、無ければ表の値。
+  //   呼び出しの最大は今までどおり表との大きい方（小さい値で回数を減らさない）
+  assert(eBig.ok && eBig.maxOutputTokens === 64000 && eBig.maxCalls === 4 && eSmall.ok && eSmall.maxOutputTokens === 1000 && eSmall.maxCalls === 3 && eSmall.calls.every(c => c.output === 1000) && eSmall.calls[1].input === 21500 + 1000 + 4000 && eSmall.maxUsd === 0.179 && eGen.maxOutputTokens === 32000,
+    `B0-6: health の出力の上限があればその値（大きい 64,000・小さい 1,000 のどちらも health の値。修復の入力も 1,000 で数える）・無ければ表の 32,000。呼び出しの最大は表との大きい方: ${JSON.stringify({ big: [eBig.maxOutputTokens, eBig.maxCalls], small: [eSmall.maxOutputTokens, eSmall.maxCalls, eSmall.maxUsd], table: eGen.maxOutputTokens })}`);
+  {
+    //   応答の設定の上限が、見積もりに使った値（health の 1,000）を超えたら以後を止める（表の 4,000 とは比べない）
+    const { storage, budget } = mkBudget({ config: { limitUsd: 5 } });
+    const lim = { features: { 'assistant-qa': { model: MODEL, maxOutputTokens: 1000 } } };
+    const fc = fakeClient({ ask: () => ({ ai: { model: MODEL, usage: usage(100, 10), settings: { maxOutputTokens: 2000 } } }) });
+    const w = budget.wrap(fc.client, { limits: lim });
+    await w.ask({ ctx: { q: 1 } });
+    const e = await catchOf(w.ask({ ctx: { q: 2 } }));
+    const lg = ledgerOf(storage);
+    assert(lg.entries[0].maxOutputTokens === 1000 && lg.stopped && lg.stopped.reason === 'output-limit' && lg.stopped.maxOutputTokens === 2000 && e && reasonOf(e) === 'stopped' && fc.count('ask') === 1, `B0-6b: 応答の出力の上限（2,000）が見積もりに使った health の値（1,000）を超えたら以後を止める（表の 4,000 より小さくても）: ${JSON.stringify({ est: lg.entries[0].maxOutputTokens, stopped: lg.stopped, asks: fc.count('ask') })}`);
+  }
   const ePlanH = E({ kind: 'plan', ctxBytes: 60000, limits: { features: { 'change-planner': { model: MODEL, maxOutputTokens: 48000, maxAiCalls: 2 } } } });
   assert(ePlanH.ok && ePlanH.maxCalls === 1, 'B0-7: 計画の全体の作り直しは health の maxAiCalls（差分 → 全体の 2）があっても 1 回（差分の要求だけ 2 回）');
   const eUnknownModel = E({ kind: 'plan', ctxBytes: 100, limits: { features: { 'change-planner': { model: 'gpt-9-ultra' } } } });
@@ -131,7 +146,7 @@ await section(async () => {
   const fc = fakeClient({ ask: () => ({ ai: { model: MODEL, usage: usage(1000, 200, 300) } }) });
   await budget.wrap(fc.client).ask({ ctx: { q: '質問' }, requestId: 'r-1' });
   const e0 = ledgerOf(storage).entries[0];
-  assert(e0 && e0.status === 'done' && e0.requestId === 'r-1' && e0.reservedUsd === 0 && e0.costUsd === 0.004 && e0.costCachedUsd === 0.00343 && e0.calls.length === 1 && e0.calls[0].input === 1000 && e0.calls[0].cached === 300 && e0.model === MODEL && fc.calls[0].p.noProxyFallback === true && fc.calls[0].p.requestId === 'r-1',
+  assert(e0 && e0.status === 'done' && e0.requestId === 'r-1' && e0.reservedUsd === 0 && e0.costUsd === 0.004 && e0.costKnownUsd === 0.004 && e0.costComplete === true && e0.costCachedUsd === 0.00343 && e0.calls.length === 1 && e0.calls[0].input === 1000 && e0.calls[0].cached === 300 && e0.model === MODEL && fc.calls[0].p.noProxyFallback === true && fc.calls[0].p.requestId === 'r-1',
     `B2-1: 応答の usage で精算（done・確保 0・費用はキャッシュの割引なし 0.004、割引ありは参考 0.00343）・送るときは kintone.proxy への送り直しをしない印: ${JSON.stringify(e0)}`);
 });
 await section(async () => {
@@ -176,14 +191,15 @@ await section(async () => {
     const { storage: s, budget: b } = mkBudget({ config: { limitUsd: 10 } });
     await catchOf(b.wrap(fakeClient({ ask: impl }).client).ask({ ctx: {} }));
     const x = ledgerOf(s).entries[0];
-    assert(x.status === 'unknown' && x.reservedUsd > 0 && x.reservedCalls === 1 && x.costUsd === 0, `B2-5（${label}）: AI を呼んだかもしれない失敗・usage の無い応答は終了不明（確保を解放しない。費用 0 として扱わない）: ${JSON.stringify({ status: x.status, reason: x.reason, reservedUsd: x.reservedUsd })}`);
+    //   レビューの指摘 row7: 終了不明の記録は費用が確定していない（costUsd は null・costComplete false）。確認できた費用は 0（costKnownUsd）で、確保は残す
+    assert(x.status === 'unknown' && x.reservedUsd > 0 && x.reservedCalls === 1 && x.costUsd === null && x.costKnownUsd === 0 && x.costComplete === false && b.summary().recordedUsd === 0 && b.summary().reservedUsd === x.reservedUsd, `B2-5（${label}）: AI を呼んだかもしれない失敗・usage の無い応答は終了不明（確認できた費用は 0・費用は未確定（0 と精算しない）・確保を解放しない）: ${JSON.stringify({ status: x.status, reason: x.reason, reservedUsd: x.reservedUsd, costUsd: x.costUsd, costKnownUsd: x.costKnownUsd, costComplete: x.costComplete })}`);
   }
   //   AI を呼ぶ前に止まった失敗だけ解放（認証・月次の上限・Gateway 自身のレート制限）
   for (const [label, err] of [['AUTH_INVALID_TOKEN', gwErr('AUTH_INVALID_TOKEN')], ['MONTHLY_LIMIT_EXCEEDED', gwErr('MONTHLY_LIMIT_EXCEEDED')], ['RATE_LIMITED（Gateway 自身）', gwErr('RATE_LIMITED', { limit: 10 })]]) {
     const { storage: s, budget: b } = mkBudget({ config: { limitUsd: 10 } });
     await catchOf(b.wrap(fakeClient({ ask: () => { throw err; } }).client).ask({ ctx: {} }));
     const x = ledgerOf(s).entries[0];
-    assert(x.status === 'released' && x.reservedUsd === 0 && x.reservedCalls === 0 && b.summary().usedCalls === 0, `B2-6（${label}）: AI を呼ぶ前に止まった失敗は確保を解放する: ${JSON.stringify(x)}`);
+    assert(x.status === 'released' && x.reservedUsd === 0 && x.reservedCalls === 0 && x.costUsd === 0 && x.costComplete === true && b.summary().usedCalls === 0, `B2-6（${label}）: AI を呼ぶ前に止まった失敗は確保を解放する: ${JSON.stringify(x)}`);
   }
 });
 await section(async () => {
@@ -197,7 +213,7 @@ await section(async () => {
   const p = budget.wrap(fc.client).plan({ ctx: { goal: 'g', revision: { mode: 'patch' } }, requestId: 'pl-1' });
   await ticks(); g.open(); await p;
   const x = ledgerOf(storage).entries[0];
-  assert(inFlight && inFlight.status === 'in-flight' && inFlight.reservedCalls === 2 && inFlight.mode === 'plan-patch' && x.status === 'partial-unknown' && x.calls.length === 2 && x.calls[0] === null && x.costUsd === 0.08 && x.reservedUsd === x.maxCallUsd && x.reservedUsd > 0,
+  assert(inFlight && inFlight.status === 'in-flight' && inFlight.reservedCalls === 2 && inFlight.mode === 'plan-patch' && x.status === 'partial-unknown' && x.calls.length === 2 && x.calls[0] === null && x.costUsd === null && x.costKnownUsd === 0.08 && x.costComplete === false && x.reservedUsd === x.maxCallUsd && x.reservedUsd > 0 && budget.summary().recordedUsd === 0.08,
     `B2-7: 計画の差分更新は送る前に 2 回分を確保。差分の試みの usage が無い → partial-unknown（確認できた全体の分 0.08 米ドル・無い 1 回分の確保を残す）: ${JSON.stringify({ inFlight: inFlight && [inFlight.status, inFlight.reservedCalls], x })}`);
   const { storage: s2, budget: b2 } = mkBudget({ config: { limitUsd: 10 } });
   let inFlightG = null;
@@ -206,7 +222,7 @@ await section(async () => {
   });
   await b2.wrap(fg.client).generate({ ctx: { customization: {} } });
   const y = ledgerOf(s2).entries[0];
-  assert(inFlightG && inFlightG.reservedCalls === 3 && y.status === 'partial-unknown' && y.calls.length === 3 && y.calls.filter(c => c === null).length === 1 && y.costUsd === 0.039 && y.reservedUsd === y.maxCallUsd,
+  assert(inFlightG && inFlightG.reservedCalls === 3 && y.status === 'partial-unknown' && y.calls.length === 3 && y.calls.filter(c => c === null).length === 1 && y.costUsd === null && y.costKnownUsd === 0.039 && y.costComplete === false && y.reservedUsd === y.maxCallUsd,
     `B2-8: 生成は送る前に最初の 1 回 ＋ 修復 2 回を確保。失敗した修復の token が無い → partial-unknown（確認できた分 0.039 米ドル・無い 1 回分の確保を残す）: ${JSON.stringify(y)}`);
 });
 await section(async () => {
@@ -225,10 +241,20 @@ await section(async () => {
   assert(sMid.inFlight === 1 && sMid.reservedUsd === estG.maxUsd && reasonOf(ea) === 'limit' && fc.count('ask') === 0 && ea.details.budget.remainingUsd < estA.maxUsd,
     `B2-9: 生成中（確保 ${estG.maxUsd} 米ドル・3 回）の並行の質問は、生成の確保額を含めて判定して送らない: ${JSON.stringify({ sMid, ea: ea && ea.details })}`);
   setConfig(storage, { limitUsd: 10 });
-  const pa = w.ask({ ctx: askCtx }); await ticks();
-  const sBoth = budget.summary();
-  g.open(); await pg; await pa;
-  assert(fc.count('ask') === 1 && sBoth.reservedUsd >= estG.maxUsd && sBoth.usedCalls >= 3 + 1 - 1, `B2-10: 上限に収まれば並行の質問も送り、確保額は両方の合計（生成の確保が残ったまま）: ${JSON.stringify(sBoth)}`);
+  //   レビューの指摘 row6（2026-10-09）: 質問の偽の client も止め、両方が進行中の時点で確保額と回数の合計を確かめる（すぐ応答すると質問は精算済みになり、合計を確かめられない）
+  const ga = gate();
+  const fc2 = fakeClient({ generate: async () => { await g.p; return { ai: { model: MODEL, usage: usage(5000, 800) } }; }, ask: async () => { await ga.p; return { ai: { model: MODEL, usage: usage(1000, 200) } }; } });
+  const { storage: s2, budget: b2 } = mkBudget({ config: { limitUsd: 10 }, sessionId: 'p-both' });
+  const w2 = b2.wrap(fc2.client);
+  const pg2 = w2.generate({ ctx: genCtx }); await ticks();
+  const pa = w2.ask({ ctx: askCtx }); await ticks();
+  const sBoth = b2.summary();
+  ga.open(); await pa;
+  const sAfterAsk = b2.summary();
+  g.open(); await pg; await pg2;
+  const round6 = (v) => Math.round(v * 1e6) / 1e6;
+  assert(fc2.count('ask') === 1 && fc2.count('generate') === 1 && sBoth.inFlight === 2 && sBoth.reservedUsd === round6(estG.maxUsd + estA.maxUsd) && sBoth.usedCalls === estG.maxCalls + estA.maxCalls && sAfterAsk.inFlight === 1 && sAfterAsk.reservedUsd === estG.maxUsd && ledgerOf(s2).entries.length === 2,
+    `B2-10: 上限に収まれば並行の質問も送り、両方が進行中の間の確保額は両方の合計（生成 ${estG.maxUsd} ＋ 質問 ${estA.maxUsd}・回数 ${estG.maxCalls} ＋ ${estA.maxCalls}）。質問の精算の後は生成の確保だけ残る: ${JSON.stringify({ sBoth, sAfterAsk })}`);
 });
 await section(async () => {
   //   読み込み直し: 前のページで in-flight のまま残った記録は終了不明として数え、確保を解放しない
@@ -267,7 +293,7 @@ await section(async () => {
   const { storage: s3, budget: b3 } = mkBudget({ config: { limitUsd: 10 } });
   await b3.wrap(fakeClient({ ask: () => ({ ai: { model: 'unknown-model', usage: usage(100, 10) } }) }).client).ask({ ctx: {} });
   const z = ledgerOf(s3).entries[0];
-  assert(z.status === 'unknown' && z.reservedUsd > 0 && z.costUsd === 0, 'B2-13: 単価の表に無いモデルの応答は費用を確定しない（終了不明と同じく確保を残す）');
+  assert(z.status === 'unknown' && z.reservedUsd > 0 && z.costUsd === null && z.costKnownUsd === 0 && z.costComplete === false, 'B2-13: 単価の表に無いモデルの応答は費用を確定しない（終了不明と同じく確保を残す。costUsd は null）');
 });
 await section(async () => {
   //   Web Locks: 確保と精算はタブ間で 1 つずつ（名前は ktAi.budget:<host>・exclusive）
@@ -390,8 +416,8 @@ await section(async () => {
   const s = budget.summary();
   const head = stripC(m.$('kt-ai-header').innerHTML);
   const line = stripC(m.chat()).split('\n').find(x => /AI の呼び出し \d+ 回（内部を含め最大/.test(x)) || '';
-  assert(mid.inFlight === 1 && mid.reservedUsd > 1 && v && v.final && v.final.incomplete && v.final.incomplete.kind === 'cancelled' && gEntry.status === 'unknown' && gEntry.reason === 'CANCELLED' && gEntry.costUsd === 0 && gEntry.reservedUsd > 1 && s.unknown === 1 && s.reservedUsd === gEntry.reservedUsd,
-    `B4-8: 生成中の取り消し → 記録は終了不明（費用は 0 にせず確保を残す）: ${JSON.stringify({ mid, g: gEntry && [gEntry.status, gEntry.reason, gEntry.reservedUsd], s })}`);
+  assert(mid.inFlight === 1 && mid.reservedUsd > 1 && v && v.final && v.final.incomplete && v.final.incomplete.kind === 'cancelled' && gEntry.status === 'unknown' && gEntry.reason === 'CANCELLED' && gEntry.costUsd === null && gEntry.costKnownUsd === 0 && gEntry.costComplete === false && gEntry.reservedUsd > 1 && s.unknown === 1 && s.reservedUsd === gEntry.reservedUsd,
+    `B4-8: 生成中の取り消し → 記録は終了不明（確認できた費用は 0・費用は未確定（costUsd は null）・確保を残す）: ${JSON.stringify({ mid, g: gEntry && [gEntry.status, gEntry.reason, gEntry.reservedUsd, gEntry.costUsd, gEntry.costKnownUsd], s })}`);
   assert(/確保中 約 [1-9][0-9.]* 米ドル（終了不明 1 件）/.test(head) && /うち 1 回は使用量が不明のため、費用は未確定です/.test(line) && !/合計|約 0 米ドル（/.test(line),
     `B4-9: 画面も費用 0・予算内とは出さない（見出しは確保中と終了不明、最終案の詳細は費用は未確定）: ${head} / ${line}`);
 });
@@ -474,6 +500,13 @@ await section(async () => {
   const headAll = KTAiChatUi.codePaneHtml({ generated: gen, review: null, existingSource: null, attempts: a1 }).head;
   assert(a2.unknown === 1 && /生成 2 回目（確認できた分の使用量: 入力 3000 \/ 出力 400 token・約 0\.01 米ドル。使用量が不明な回が 1 回あり、費用は未確定）/.test(stripC(head2)) && /使用量が不明な回が 1 回/.test(stripC(headOld)) && /生成 1 回目（使用量: 入力 3000 \/ 出力 400 token・約 0\.01 米ドル）/.test(stripC(headAll)),
     `B5-5: JavaScript ごとの表示も、使用量が不明な回があれば「確認できた分」と不明の回数（古い記録は回数の差から）。すべて分かれば今までどおり: ${stripC(head2).slice(0, 200)}`);
+  //   レビューの指摘 row7（2026-10-09）: 生成の応答の usage に入力か出力の片方しか無いときは使用量が不明（欠けた側を 0 として「合計」と言わない。KTAiBudget.callsOf と同じ）
+  const eIn = generationEstimate({ generated: { ai: { usage: { input_tokens: 5000 } } } });
+  const eOut = generationEstimate({ generated: { ai: { usage: { output_tokens: 800 } } } });
+  const eBoth = generationEstimate({ generated: { ai: { usage: { input_tokens: 5000, output_tokens: 800 } } } });
+  const uOne = finalUsageOf({ aiCalls: 1, calls: [{ kind: 'generate', end: 'ok', repairs: 0, ...(eIn.measured !== false ? { genEstimate: eIn } : {}) }] });
+  assert(eIn.measured === false && eIn.input === null && eOut.measured === false && eBoth.measured === true && eBoth.input === 5000 && eBoth.output === 800 && KTAiBudget.callsOf('generate', { ai: { usage: { input_tokens: 5000 } } })[0] === null && uOne.usageUnknown === 1 && uOne.measured === 0,
+    `B5-6: 片方だけの usage は使用量が不明（最終案は「使用量が不明」に数える・記録の callsOf と同じ扱い）: ${JSON.stringify({ eIn, eOut, uOne: [uOne.usageUnknown, uOne.measured] })}`);
 });
 
 console.log(`\n${state.failed ? 'NG' : 'OK'}: ${state.passed} passed, ${state.failed} failed`);

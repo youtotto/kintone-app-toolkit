@@ -3,15 +3,18 @@
 // 検証内容:
 //   §T0 停止の種類（KTAiConversation.stopKindOf。1 か所）と終了不明の印・本文が JSON でない応答の印（KTAiClient の settle）
 //   §T1 C1 と C2 の計画で C1 の生成が TIMEOUT・TRANSPORT_ERROR・UPSTREAM_ERROR detail timeout → C2 の生成・自動の見直し・受け付けた発言の計画の送信が 0 件、
-//        計画の AI は増えない・質問は増えない・最終案は未完成（承認できない）で［残りの JavaScript を作る］1 つ。押すと計画の AI 0 回で残りだけ生成する
+//        計画の AI は増えない・質問は増えない・最終案は未完成（承認できない）で［残りの JavaScript を作る］1 つ。押すと計画の AI 0 回で残りだけ生成する。
+//        止めた送信で受け付けた指示は、未完成の最終案と［残りの JavaScript を作る］で作った最終案のカード・承認の欄の確認項目に「まだ計画に入っていません」と
+//        ［受け付けた指示を計画に入れる］（レビューの指摘 row4。T1-7b・T1-10b・T1-10c・T1-11）
 //   §T2 利用者のキャンセル（生成中）: 同じく後続 0 件・未完成の最終案・知らせに「採用します」を戻さない・続きは［残りの JavaScript を作る］
 //   §T3 C1 が検証済みで C2 が時間切れ → ［残りの JavaScript を作る］は C1 を流用して C2 だけ作る
 //   §T4 遅れた結果: 中断を無視して後から返った結果は使わない（最新の案を上書きしない）。services の偽物と、実際の client（transport が中断を無視する）の両方
-//   §T5 計画の自動の見直しの時間切れ: 生成 0 件・未完成の最終案（作っていない JavaScript）。自動の見直しの失敗の［再試行］は内部の依頼文を利用者の発言として送らない
+//   §T5 計画の自動の見直しの時間切れ: 生成 0 件・未完成の最終案（作っていない JavaScript）。自動の見直しの失敗の［再試行］は内部の依頼文を利用者の発言として送らない。
+//        止まった送信の後（自動の見直し・生成の halt の後）に届いた作業中の質問は始めない（T5-7・T5-8）
 //   §T6 予算・回数の上限で止めた: ［残りの JavaScript を作る］は無効で理由を出す
 //   §T7 期限: health の deadlineMs ＋ 受信の余裕 20 秒（上限 330 秒）・無ければ 240 秒・timeoutMs だけの互換・AUTH_TOKEN_EXPIRED の再試行は残り時間だけ・
 //        逐次配信が上限を越えて届き続けても TIMEOUT（絶対時間）・transport の時刻（相対 ms。本文なし）
-//   §T8 画面: health の limits の期限を client の呼び出しに渡す・［キャンセル］は作業中の質問も止める
+//   §T8 画面: health の limits の期限を client の呼び出しに渡す（生成の要求も。打ち切り＝deadlineMs ＋ 20 秒。T8-1b）・［キャンセル］は作業中の質問も止める
 //   §T9 作業中の質問（askNow・askAside）の中断: 送信の取り消し・［キャンセル］（cancelAsides）で signal が abort される・止めた後の答えは出さない・止まった送信では新しい質問を受け付けない
 //   §T10 呼び出しの記録: end（ok / error / unknown）・requestId（取れた場合だけ）・transport の時刻
 //
@@ -128,8 +131,11 @@ for (const [label, what, kind] of [['TIMEOUT', 'throw:TIMEOUT', 'timeout'], ['TR
     assert(ap.ok === false && ap.reason === 'NOT_APPROVABLE' && x.c.finalReadiness().ready === false && x.c.finalReadiness().reasons[0].kind === 'incomplete', `T1-5（${label}）: 未完成の最終案は承認できない（理由の先頭は未完成）: ${ap.reason}`);
     const h = finalHtml(x), vis = visibleText(h);
     const b = restButtonOf(h);
-    assert(/最終案（未完成: 途中で止めました）/.test(vis) && b && !b.disabled && /data-text="コードを作って"/.test(b.html) && !/data-intent="REVISE_PLAN"/.test(h) && !/data-act="final-fix"/.test(h), `T1-6（${label}）: カードの見出しは未完成・次の手は［残りの JavaScript を作る］1 つ（計画の修正の依頼は出さない）: ${b && b.html}`);
+    assert(/最終案（未完成: 途中で止めました）/.test(vis) && b && !b.disabled && /data-text="コードを作って"/.test(b.html) && [...h.matchAll(/<button[^>]*data-intent="REVISE_PLAN"[^>]*>/g)].every(mm => /data-display="受け付けた指示を計画に入れる"/.test(mm[0])) && !/data-fix=/.test(h) && !/data-act="final-fix"/.test(h), `T1-6（${label}）: カードの見出しは未完成・JavaScript の次の手は［残りの JavaScript を作る］1 つ（計画の修正の依頼（fix）は出さない。計画の差分更新のボタンは、まだ入っていない受け付けた指示を入れる［受け付けた指示を計画に入れる］だけ）: ${b && b.html}`);
     assert(/JavaScript を作っている途中で止めました/.test(vis) && /まだ作っていない JavaScript が 1 件あります（前の JavaScript の生成を止めたため、送っていません）/.test(vis), `T1-7（${label}）: 止めた JavaScript と作っていない JavaScript を別の文で出す`);
+    //   レビューの指摘 row4（2026-10-09）: 止めた送信で受け付けていた指示は、未完成の最終案のカードにも「まだ計画に入っていません」と、計画に入れる次の手（既存の choice の導線）
+    const pendBtn = /<button[^>]*data-act="choice"[^>]*data-intent="REVISE_PLAN"[^>]*data-display="受け付けた指示を計画に入れる"[^>]*>/.exec(h);
+    assert(fin.pendingInstructions && fin.pendingInstructions.length === 1 && /受け付けた指示 1 件はまだ計画に入っていません（この最終案には入っていません）/.test(vis) && vis.includes('明細の金額も同じ条件で編集できないようにして') && pendBtn && /data-text="明細の金額も同じ条件で編集できないようにして"/.test(pendBtn[0]) && !/\sdisabled/.test(pendBtn[0]), `T1-7b（${label}）: 未完成の最終案のカードに、まだ計画に入っていない受け付けた指示（1 件・本文）と［受け付けた指示を計画に入れる］: ${(vis.match(/受け付けた指示[^\n]*/) || [''])[0]}`);
     assert(!/TIMEOUT|TRANSPORT_ERROR|UPSTREAM_ERROR|\bC[12]\b/.test(vis) && !/約\s*[0-9]+\s*(秒|分)|1 分前後|十数秒/.test(vis), `T1-8（${label}）: 通常の表示に内部の値・時間の目安を出さない: ${(vis.match(/TIMEOUT|TRANSPORT_ERROR|UPSTREAM_ERROR|\bC[12]\b|約\s*[0-9]+\s*(秒|分)|1 分前後|十数秒/) || [''])[0]}`);
     const tm = x.c.state.metrics.timings.slice(-1)[0];
     assert(tm && tm.halt && tm.halt.kind === kind && tm.calls.some(c => c.kind === 'generate' && c.end === (kind === 'timeout' || kind === 'disconnected' ? 'unknown' : 'error')) && fin.usage.unknownCalls === 1, `T1-9（${label}）: 送信の記録に止めた理由と、終了不明の生成の呼び出し（費用は確定できない）: ${JSON.stringify({ halt: tm && tm.halt, calls: tm && tm.calls.map(c => [c.kind, c.end]) })}`);
@@ -137,6 +143,15 @@ for (const [label, what, kind] of [['TIMEOUT', 'throw:TIMEOUT', 'timeout'], ['TR
     const r2 = await pressRest(x);
     const v2 = x.c.activePlan();
     assert(r2.ok && r2.intent === I.GENERATE_CODE && x.calls.plan.length === 1 && gen.seen.filter(s => s.cid === 'C1').length === 2 && gen.seen.filter(s => s.cid === 'C2').length === 1 && v2.version === v.version + 1 && v2.generated.C1.status === 'verified' && v2.generated.C2.status === 'verified' && !v2.final.incomplete && v2.final.approvable === true && x.calls.ask.length === 0, `T1-10（${label}）: ［残りの JavaScript を作る］→ 計画の AI 0 回・残りだけ生成・承認できる最終案: ${JSON.stringify({ plans: x.calls.plan.length, seen: gen.seen.map(s => s.cid), st: [v2.generated.C1 && v2.generated.C1.status, v2.generated.C2 && v2.generated.C2.status] })}`);
+    //   レビューの指摘 row4: ［残りの JavaScript を作る］で作った最終案のカードにも、まだ計画に入っていない受け付けた指示を出す（承認できる最終案でも黙って落とさない）
+    const h2 = finalHtml(x), vis2 = visibleText(h2);
+    assert(v2.final.pendingInstructions && v2.final.pendingInstructions.length === 1 && /受け付けた指示 1 件はまだ計画に入っていません（この最終案には入っていません）/.test(vis2) && /data-display="受け付けた指示を計画に入れる"/.test(h2), `T1-10b（${label}）: ［残りの JavaScript を作る］で作った最終案のカードにも「受け付けた指示 1 件はまだ計画に入っていません」と［受け付けた指示を計画に入れる］: ${(vis2.match(/受け付けた指示[^\n]*/) || [''])[0]}`);
+    //   ［受け付けた指示を計画に入れる］（choice の REVISE_PLAN）→ 計画の差分更新 1 回。その指示が入った版では「まだ入っていません」を出さない
+    const pendText = (/data-display="受け付けた指示を計画に入れる"/.test(h2) && (/<button[^>]*data-text="([^"]*)"[^>]*data-intent="REVISE_PLAN"[^>]*data-display="受け付けた指示を計画に入れる"/.exec(h2) || [])[1]) || '';
+    const plansB = x.calls.plan.length;
+    await x.c.send(pendText, { intentOverride: I.REVISE_PLAN, displayText: '受け付けた指示を計画に入れる' });
+    const v3 = x.c.activePlan();
+    assert(pendText === '明細の金額も同じ条件で編集できないようにして' && x.calls.plan.length === plansB + 1 && v3.version > v2.version && v3.final && (v3.final.pendingInstructions || []).length === 0 && !/受け付けた指示 [0-9]+ 件はまだ計画に入っていません/.test(visibleText(finalHtml(x))), `T1-10c（${label}）: 押すと計画の差分更新 1 回で指示を入れ、入った版の最終案には出さない: ${JSON.stringify({ pendText, plans: [plansB, x.calls.plan.length], v: v3.version, pend: v3.final && v3.final.pendingInstructions })}`);
   });
 }
 
@@ -280,6 +295,51 @@ await section(async () => {
   assert(waited && q === null && x.calls.ask.length === 0, `T5-7: 止まった送信の後は新しい作業中の質問を始めない（受け付けずに下書きに残す）: ${JSON.stringify({ waited, q, asks: x.calls.ask.length })}`);
 });
 
+await section(async () => {
+  //   レビューの指摘 row4（2026-10-09）: 生成の halt の後に届いた作業中の質問も始めない。C1 は 1 回目に JS ごとの失敗（INTERNAL_ERROR）・C2 は検証済み。
+  //   ［残りの JavaScript を作る］で C1 が時間切れ（halt）→ C2 の流用の判定（模擬の環境の確認）を待つ間に届いた質問は受け付けない
+  let halted = false;
+  const envGate = K.gate();
+  const gen = stagedGenerate({ C1: ['throw:INTERNAL_ERROR', 'throw:TIMEOUT'], C2: ['good'] }, { onCall: ({ what }) => { if (what === 'throw:TIMEOUT') halted = true; } });
+  const x = makeConvC({ planImpl: planJs2, generate: gen });
+  let waited = false;
+  x.services.simEnvKey = async ({ customizationId }) => { if (halted && customizationId === 'C2') { waited = true; await envGate.p; } return 'env-1'; };
+  await sendUntilAdopt(x);
+  const v1 = x.c.activePlan();
+  assert(v1.final && v1.generated.C1 && v1.generated.C1.status === 'failed' && !(v1.generated.C1.failure || {}).stop && v1.generated.C2 && v1.generated.C2.status === 'verified', `前提: C1 は JS ごとの失敗・C2 は検証済み: ${JSON.stringify({ c1: v1.generated.C1 && v1.generated.C1.status, c2: v1.generated.C2 && v1.generated.C2.status })}`);
+  const p = pressRest(x);
+  await K.waitUntil(() => waited, 200);
+  const asks0 = x.calls.ask.length;
+  const q = await x.c.send('金額の上限は何円ですか？');
+  envGate.open(); await p; await K.ticks(4);
+  const v2 = x.c.activePlan();
+  assert(waited && q === null && x.calls.ask.length === asks0 && v2.final && v2.final.incomplete && v2.final.incomplete.kind === 'timeout' && v2.final.incomplete.stoppedAt === 'C1' && v2.generated.C2 && v2.generated.C2.reused === true, `T5-8: 生成の halt の後（C2 の流用の判定を待つ間）に届いた作業中の質問は始めない（受け付けずに下書きに残す）。C2 は流用し、最終案は未完成: ${JSON.stringify({ waited, q, asks: x.calls.ask.length, inc: v2.final && v2.final.incomplete, c2: v2.generated.C2 && v2.generated.C2.reused })}`);
+});
+await section(async () => {
+  //   レビューの指摘 row4（2026-10-09）: 画面: 生成中に受け付けた指示が止めた送信で計画に入らなかったら、［残りの JavaScript を作る］で作った最終案の承認の欄の確認項目にも 1 行
+  const g = K.gate(); let n = 0;
+  const sg = K.screenGenerate({ field: 'case_name', targetFile: 'caseLock.js' });
+  const generateImpl = async (a) => { n += 1; if (n === 1) { await g.p; throw aiErr('TIMEOUT'); } return sg.impl(a); };
+  const m = K.mount({ health: K.HEALTH_V, planImpl: K.planImplOf(K.screenPlan('js')), generateImpl, liveBase: true });
+  await K.ticks();
+  for (const s0 of K.REQUESTS.slice(0, 3)) { await m.panel.send(s0); await K.ticks(10); }
+  const pAdopt = m.panel.send(K.REQUESTS[3]);
+  await K.waitUntil(() => n === 1, 400);
+  const pQ = m.panel.send('案件名の上限も同じ条件で編集できないようにして');
+  await K.ticks(8);
+  g.open(); await pAdopt; await pQ; await K.ticks(10);
+  const v1 = m.conv().activePlan();
+  assert(v1 && v1.final && v1.final.incomplete && (v1.final.pendingInstructions || []).length === 1, `前提: 画面で生成が時間切れ → 未完成の最終案・受け付けた指示 1 件が入っていない: ${JSON.stringify({ inc: v1 && v1.final && v1.final.incomplete, pend: v1 && v1.final && v1.final.pendingInstructions })}`);
+  await K.clickChat(m, 'choice', { text: 'コードを作って', intent: I.GENERATE_CODE, display: '残りの JavaScript を作る' });
+  await K.waitUntil(() => { const v = m.conv().activePlan(); return v && v !== v1 && v.final; }, 400);
+  await K.waitUntil(() => ['ready', 'blocked', 'unavailable'].includes(m.panel.finalPrecheck().status) && m.panel.finalPrecheck().planId === v1.planId && m.panel.finalPrecheck().version === m.conv().activePlan().version, 120); await K.ticks(2);
+  const pre = m.panel.finalPrecheck();
+  const conf = (pre.items && pre.items.confirmations) || [];
+  const line = conf.find(c => c && typeof c === 'object' && /受け付けた指示 1 件はまだ計画に入っていません/.test(c.text || ''));
+  const chat = stripC(m.chat().replace(/<details[\s\S]*?<\/details>/g, ''));
+  assert(m.conv().activePlan().final.approvable === true && pre.status === 'ready' && line && /受け付けた指示を計画に入れる/.test(line.text) && /確認項目（この承認で確認済みとして扱います）/.test(chat) && chat.includes('受け付けた指示 1 件はまだ計画に入っていません（この最終案には入っていません'), `T1-11: ［残りの JavaScript を作る］で作った承認できる最終案の承認の欄の確認項目に「受け付けた指示 1 件はまだ計画に入っていません」: ${JSON.stringify({ status: pre.status, conf })}`);
+});
+
 // =========================================================
 console.log('\n--- §T6. 予算・回数の上限で止めた → ボタンは無効で理由 ---');
 for (const code of ['MONTHLY_LIMIT_EXCEEDED', 'BUDGET_EXCEEDED']) {
@@ -387,6 +447,21 @@ await section(async () => {
   await m0.$('kt-ai-cancel').dispatch('click');
   conv.cancelAsides = orig;
   assert(n === 1, 'T8-3: ［キャンセル］は送信と作業中の質問の両方を止める（cancelAsides を呼ぶ）');
+});
+await section(async () => {
+  //   レビューの指摘 row5（2026-10-09）: 生成の要求にも health の customization-generator の deadlineMs を渡し、client の打ち切りは deadlineMs ＋ 20 秒
+  const H = clone(K.HEALTH_V); H.limits = { version: 1, deadlineMs: { 'toolkit.assistant-qa': 120000, 'toolkit.change-planner': 300000, 'toolkit.customization-generator': 280000 }, features: {} };
+  const genArgs = [];
+  const sg = K.screenGenerate({ field: 'case_name', targetFile: 'caseLock.js' });
+  const m = K.mount({ health: H, planImpl: K.planImplOf(K.screenPlan('js')), generateImpl: (a) => { genArgs.push({ deadlineMs: a.deadlineMs ?? null }); return sg.impl(a); }, liveBase: true });
+  await K.ticks();
+  await K.adoptOnScreen(m); await K.ticks(20);
+  //   client の打ち切り（画面のタイマーを差し替えて ms を記録。すぐ発火させる）
+  const sb = T.__sandbox; const realST = sb.setTimeout; const delays = [];
+  sb.setTimeout = (fn, ms) => { delays.push(ms); return realST(fn, 1); };
+  let e0 = null;
+  try { await KTAiClient.createAiClient({ apiBase: 'https://gw.test', customerToken: 't', hostname: 'h', transport: async ({ signal }) => new Promise((_, rej) => { if (signal) signal.addEventListener('abort', () => rej(Object.assign(new Error('aborted'), { name: 'AbortError' })), { once: true }); }) }).generate({ ctx: { facts: [], contextVersion: 'customization-1', customization: {} }, deadlineMs: genArgs.length ? genArgs[0].deadlineMs : null }); } catch (e) { e0 = e; } finally { sb.setTimeout = realST; }
+  assert(genArgs.length >= 1 && genArgs.every(g => g.deadlineMs === 280000) && delays[0] === 300000 && e0 && e0.code === 'TIMEOUT', `T8-1b: 画面は生成の要求にも health の deadlineMs（280 秒）を渡し、client の打ち切りは deadlineMs ＋ 20 秒（300 秒）: ${JSON.stringify({ gen: genArgs, delay: delays[0], code: e0 && e0.code })}`);
 });
 await section(async () => {
   //   画面: 生成中に［キャンセル］→ 入力欄に送った文（採用の発言）を戻さない・最終案のカードは未完成で［残りの JavaScript を作る］
