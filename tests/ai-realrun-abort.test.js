@@ -8,7 +8,8 @@
 //        ［受け付けた指示を計画に入れる］（レビューの指摘 row4。T1-7b・T1-10b・T1-10c・T1-11）
 //   §T2 利用者のキャンセル（生成中）: 同じく後続 0 件・未完成の最終案・知らせに「採用します」を戻さない・続きは［残りの JavaScript を作る］
 //   §T3 C1 が検証済みで C2 が時間切れ → ［残りの JavaScript を作る］は C1 を流用して C2 だけ作る
-//   §T4 遅れた結果: 中断を無視して後から返った結果は使わない（最新の案を上書きしない）。services の偽物と、実際の client（transport が中断を無視する）の両方
+//   §T4 遅れた結果: 中断を無視して後から返った結果は使わない（最新の案を上書きしない）。services の偽物と、実際の client（transport が中断を無視する）の両方。
+//        中断できない待ち（customizeRevision）の間に別の送信が始まったら、前の送信の結果で最新の案を変えない（送信ごとの印 sendSeq の分岐。T4-4）
 //   §T5 計画の自動の見直しの時間切れ: 生成 0 件・未完成の最終案（作っていない JavaScript）。自動の見直しの失敗の［再試行］は内部の依頼文を利用者の発言として送らない。
 //        止まった送信の後（自動の見直し・生成の halt の後）に届いた作業中の質問は始めない（T5-7・T5-8）
 //   §T6 予算・回数の上限で止めた: ［残りの JavaScript を作る］は無効で理由を出す
@@ -250,6 +251,28 @@ await section(async () => {
   const finals = x.finals().length;
   tg.open(); await sleep(5); await K.ticks(6);
   assert(lateDone && x.c.activePlan() === v2 && JSON.stringify({ v: v2.version, c1: v2.generated.C1.candidateHash, c2: v2.generated.C2.candidateHash, st: [v2.generated.C1.status, v2.generated.C2.status] }) === snap && x.finals().length === finals && v1.generated.C1.failure.stop === 'cancelled' && v2.final.approvable === true, `T4-3: 遅れて届いた応答は最新の版（［残りの JavaScript を作る］の版）も前の版も変えない: ${snap}`);
+});
+await section(async () => {
+  //   レビューの指摘（abort-gw の［no］・2026-10-09）: 送信ごとの印 sendSeq の分岐（late()）。中断できない待ち（services.customizeRevision。signal を受けない）の間に
+  //   新しい送信が始まったら、前の送信は待ちの後に生成・確定・最終案へ進まず、最新の案（activePlan）を変えない。
+  //   会話の send は 1 つずつしか走らない（busy の間の発言は受け付けに回る）ので、新しい送信が始まった状態は送信ごとの印を進めて作る
+  const g = K.gate();
+  const gen = stagedGenerate({ C1: ['good'], C2: ['good'] });
+  const x = makeConvC({ planImpl: planJs2, generate: gen });
+  let waiting = 0;
+  x.services.customizeRevision = async () => { waiting += 1; await g.p; return '43'; };
+  for (const s of K.REQUESTS.slice(0, 3)) await x.c.send(s);
+  const p = x.c.send(K.REQUESTS[3]);
+  await K.waitUntil(() => waiting > 0, 80);
+  const v = x.c.activePlan();
+  const finals = x.finals().length, msgs = x.c.messages().length;
+  const seq0 = x.c.state.sendSeq;
+  assert(waiting === 1 && !!v && !v.final && gen.seen.length === 0 && typeof seq0 === 'number', `T4-4 前提: 最初の計画を版にした後、JavaScript の仕様の確定の待ち（中断できない）で止まっている（送信ごとの印 ${seq0}）`);
+  x.c.state.sendSeq = (Number(seq0) || 0) + 1;   // 別の送信が始まった
+  g.open();
+  const r = await p; await K.ticks(6);
+  const v2 = x.c.activePlan();
+  assert(v2 === v && gen.seen.length === 0 && !v.final && Object.keys(v.generated || {}).length === 0 && v.spec && v.spec.status !== 'CONFIRMED' && x.finals().length === finals && !x.c.messages().slice(msgs).some(m => m.type === 'FINAL' || m.type === 'ERROR') && x.calls.plan.length === 1, `T4-4: 待ちの後の前の送信は生成 0 件・仕様の確定も最終案も作らない（最新の案を変えない）: ${JSON.stringify({ seen: gen.seen.map(s => s.cid), final: !!v.final, spec: v.spec && v.spec.status, plans: x.calls.plan.length, r: r && { ok: r.ok, discarded: r.discarded } })}`);
 });
 
 // =========================================================

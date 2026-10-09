@@ -17,7 +17,8 @@
 //   §V8 作業者: ログイン中の利用者は名前・ログイン中でない利用者はログイン名を残す（承認者を確かめる情報を消さない）
 //   §V9 最終案の動作の文（計画の AI の要約）も、根拠の番号を外し、PC などの短い語を書き換えない
 //   §V10 AI の文のログイン名をフィールドの名前に書き換えない（V8-6。仮案のカード・右のペイン・進みのカード・最終案）。作業者の内部の表記（USER: など）は画面の表記・
-//        通知の内部の番号（general#N など）は Context の事実の言葉（H-1・H-2）。承認の欄の適用範囲・PC / モバイルは画面の言葉（H-3・H-4）
+//        通知の内部の番号（general#N など）は Context の事実の言葉（H-1・H-2）。承認の欄の適用範囲・PC / モバイルは画面の言葉（H-3・H-4）。
+//        右のペインの変更内容（changeSummaryHtml）の計画の AI の文（影響範囲・JavaScript の文）も同じ変換（H-5・H-6）
 //
 // 実行方法: node tests/ai-realrun-display.test.js
 'use strict';
@@ -381,6 +382,16 @@ await section(async () => {
   const chatOut = visible(outsideDetails(m.chat()));
   assert(pre.status === 'ready' && /PC：.*　モバイル：/.test(keep) && /適用範囲（全員）は変更しません/.test(keep) && !/Mobile|ALL/.test(keep) && /適用範囲（全員）/.test(chatOut) && !/適用範囲（ALL）|Mobile：/.test(chatOut), `H-3: 承認の欄の適用範囲と PC / モバイルの件数は画面の言葉: ${keep}`);
   assert(KTAiChatUi.customizeScopeJa('ALL') === '全員' && KTAiChatUi.customizeScopeJa('ADMIN') === 'アプリの管理者だけ' && KTAiChatUi.customizeScopeJa('NONE') === '適用しない', 'H-4: 適用範囲の画面の言葉の表');
+});
+await section(async () => {
+  //   前の確認の display の［partly］の残り（2026-10-09）: 右のペインの変更内容（changeSummaryHtml）の計画の AI の文（影響範囲の impact・JavaScript の requirement）にも
+  //   displayLabels と同じ変換（通知の内部の番号は Context の事実の言葉・作業者の内部の表記は画面の表記。ログイン名は残し、フィールドの名前に書き換えない）
+  const REQ_TEXT = '承認待ちでは approver@example.com 以外は金額（amount）を編集不可にし、USER:user.approver に通知する';
+  const plan = { goal: 'g', assessment: { summary: 's' }, steps: [mkStep('C1', 'CUSTOMIZATION_REQUIRED', 'JS', null, { customizationId: 'C1' }, { title: 'JavaScript' })], customizations: [{ customizationId: 'C1', stepId: 'C1', requirement: REQ_TEXT, strategy: 'NEW_JS_FILE', platform: ['desktop'], events: ['app.record.edit.show'], fields: [] }], impact: [{ description: SUM_U }, { description: STREAM_U }], unknowns: [] };
+  const sum = stripC(KTAiChatUi.changeSummaryHtml({ goal: 'g', plan, review: null }, { labels: LABELS_U }));
+  assert(/アプリの条件通知（3 件目）はステータス変更時に作業者ユーザー（user\.approver）へ通知します/.test(sum) && /レコードの条件通知（2 件目）の通知先グループ（sales）も変えない/.test(sum) && sum.includes('課長承認は approver@example.com のまま') && sum.includes('approver@example.com 以外は') && /ユーザー（user\.approver）に通知する/.test(sum) && !LOGIN_BROKEN.test(sum), `H-5: 右のペインの変更内容の影響範囲と JavaScript の文: 通知の番号は Context の事実の言葉・作業者の表記は画面の表記・ログイン名は残す: ${firstHit(sum, LOGIN_BROKEN, /[^\n]*general#[^\n]*/, /[^\n]*条件通知[^\n]*/)}`);
+  const sumU = stripC(KTAiChatUi.changeSummaryHtml({ goal: 'g', plan, review: null }, { labels: LABELS_U, users: { 'user.approver': '承認 太郎' } }));
+  assert(/作業者ユーザー「承認 太郎」へ通知します/.test(sumU) && !LOGIN_BROKEN.test(sumU), `H-6: ログイン中の利用者なら名前（右のペインの作業者の表示と同じ）: ${firstHit(sumU, /[^\n]*承認 太郎[^\n]*/, LOGIN_BROKEN)}`);
 });
 
 console.log(`\n${state.failed ? 'FAILED' : 'ALL PASSED'}: ${state.passed} passed / ${state.failed} failed`);

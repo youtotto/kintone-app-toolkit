@@ -6802,6 +6802,9 @@
         out.push({
           id: x.id, topic, label: one(x.label, 60) || '確認事項', question: x.question ? one(x.question, 300) : null, answer, source: x.source, status: x.status, kind: x.kind === 'condition' ? 'condition' : 'question',
           ...(value.length ? { value } : {}), ...(x.previousAnswer ? { previousAnswer: one(x.previousAnswer, 300) } : {}), ...(x.reconfirmReason ? { reconfirmReason: one(x.reconfirmReason, 300) } : {}),
+          //   §0f.2 の 9（2026-10-09・契約 16 §12）: 計画の AI に送る決定事項は、委ねた判断（「おすすめで」）の印を残す（Gateway は［委ねられた判断］の行にし、
+          //   計画の AI はそれを実現する要件の decisionRefs に id を付ける）。生成（answeredOnly）には送らない（今までどおり）
+          ...(x.delegated === true && !answeredOnly ? { delegated: true } : {}),
         });
       }
       return out.slice(-30);
@@ -21465,7 +21468,8 @@
       if (!(reg.promptVersions || []).includes(promptVersion)) return { available: false, reason: ERROR_CODES.UNKNOWN_PROMPT_VERSION };
       // 会話の応答性（2026-10-05）: 計画の修正の方式（full / patch）。古い Gateway は返さない（patch を送っても全体を作り直す）
       // 段階 C（契約 20 §12・16）: 生成の検証の能力（verification: requirementId・requiredEffects などの印）と計画の AI の逐次表示（stream: reply）。古い Gateway は返さない
-      return { available: true, reason: null, ...(Array.isArray(reg.revisionModes) ? { revisionModes: reg.revisionModes.filter(x => typeof x === 'string') } : {}), ...(Array.isArray(reg.conversation) ? { conversation: reg.conversation.filter(x => typeof x === 'string') } : {}), ...(reg.requirements === true ? { requirements: true } : {}), ...(Array.isArray(reg.verification) ? { verification: reg.verification.filter(x => typeof x === 'string') } : {}), ...(Array.isArray(reg.stream) ? { stream: reg.stream.filter(x => typeof x === 'string') } : {}) };
+      // §0f.2 の 9（2026-10-09・契約 16 §12）: 計画の要件の操作の印（requirementOps: decisionRefs = 要件ごとに実現する決定事項の id を返す）。古い Gateway は返さない
+      return { available: true, reason: null, ...(Array.isArray(reg.revisionModes) ? { revisionModes: reg.revisionModes.filter(x => typeof x === 'string') } : {}), ...(Array.isArray(reg.conversation) ? { conversation: reg.conversation.filter(x => typeof x === 'string') } : {}), ...(reg.requirements === true ? { requirements: true } : {}), ...(Array.isArray(reg.requirementOps) ? { requirementOps: reg.requirementOps.filter(x => typeof x === 'string') } : {}), ...(Array.isArray(reg.verification) ? { verification: reg.verification.filter(x => typeof x === 'string') } : {}), ...(Array.isArray(reg.stream) ? { stream: reg.stream.filter(x => typeof x === 'string') } : {}) };
     }
     /**
      * 質問の誤抑制の修正（2026-10-05）: PC / モバイルだけを聞く質問か（PC / モバイルの語と、要否・対象・どちらなどの一般的な語を除くと、何も残らない）。
@@ -24194,6 +24198,8 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
           question: e.question ? normText(e.question).slice(0, MAX_ANSWER_CHARS) : null, answer: e.answer,
           source: e.source, status: e.status, kind: e.kind,
           ...(value ? { value } : {}),
+          //   §0f.2 の 9（2026-10-09・契約 16 §12）: 利用者が判断を委ねた（「おすすめで」）決定事項の印（Gateway は［委ねられた判断］の印を出す。印の無い決定事項は今までと同じ）
+          ...(e.delegated === true ? { delegated: true } : {}),
           ...(e.history.length ? { previousAnswer: normText(e.history[e.history.length - 1].answer).slice(0, MAX_ANSWER_CHARS) } : {}),
           ...(e.reconfirmReason ? { reconfirmReason: normText(e.reconfirmReason).slice(0, MAX_ANSWER_CHARS) } : {}),
         };
@@ -24218,7 +24224,10 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
     const reqNorm = (s) => String(s ?? '').replace(/[\s\u3000、。．，,.!！?？「」『』（）()・:：]/g, '');
     const reqText = (v, max = 600) => (typeof v === 'string' ? v.replace(/\s+/g, ' ').trim().slice(0, max) : '');
     const reqsOf = (lg) => { if (!Array.isArray(lg.requirements)) { lg.requirements = []; lg.reqSeq = 0; } return lg.requirements; };
-    const reqSnapshot = (e) => ({ target: e.target, condition: e.condition, behavior: e.behavior, exceptions: e.exceptions.map(x => ({ ...x })), decision: e.decision, disposition: e.disposition, sourceQuotes: [...e.sourceQuotes], planRefs: [...e.planRefs], note: e.note, ...(Array.isArray(e.effects) ? { effects: [...e.effects] } : {}) });
+    const reqSnapshot = (e) => ({ target: e.target, condition: e.condition, behavior: e.behavior, exceptions: e.exceptions.map(x => ({ ...x })), decision: e.decision, disposition: e.disposition, sourceQuotes: [...e.sourceQuotes], planRefs: [...e.planRefs], note: e.note, ...(Array.isArray(e.effects) ? { effects: [...e.effects] } : {}), ...(Array.isArray(e.decisionRefs) ? { decisionRefs: [...e.decisionRefs] } : {}) });
+    /** §0f.2 の 9（2026-10-09）: 要件の操作の decisionRefs（決定事項の id D1…。重複なし・8 件まで）。配列でなければ null（古い Gateway は返さない） */
+    const MAX_DECISION_REFS = 8;
+    const decisionRefsOf = (v) => (Array.isArray(v) ? [...new Set(v.filter(x => typeof x === 'string').map(x => x.trim()).filter(x => /^D[1-9][0-9]{0,3}$/.test(x)))].slice(0, MAX_DECISION_REFS) : null);
     /** 上限の数え方: 取り消し済みは数えない（取り消し済みが増えても、新しい要件を記録できる） */
     const activeCount = (list) => list.filter(e => e.decision !== 'revoked').length;
     /** 要件の内容（対象・条件・動作・例外）が同じか（言い換えの空白・句読点は無視） */
@@ -24227,7 +24236,9 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
     /**
      * 計画の AI の要件の操作を台帳に適用する（Gateway の正規化の後にもう一度確かめる）。
      * @param {object} o { version, userTexts（利用者の文の全部）, utterances（今回の発言。取り消しの根拠） }
-     * @returns {{ added, updated, revoked, downgraded, overflow（上限で記録できなかった追加の数） }}
+     * @returns {{ added, updated, revoked, downgraded, overflow（上限で記録できなかった追加の数）, decisionRefs: Map<要件の id, string[]|null> }}
+     *   decisionRefs（§0f.2 の 9・2026-10-09）= この操作で計画の AI が示した、要件が実現する決定事項の id（その操作に項目が無ければ null）。
+     *   要件の値の decisionRefs は操作ごとに上書きする（update は fields を上書きする）。採用の根拠に使う結び付きは、呼び出し側（noteTurn）が要件の decisionLinks に積む
      */
     function applyRequirementOps(lg, ops, { version = null, userTexts = [], utterances = [] } = {}) {
       const list = reqsOf(lg);
@@ -24237,9 +24248,10 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
       const inNow = (q) => { const n = reqNorm(q); return n.length >= 2 && now.some(u => u.includes(n)); };
       // 取り消し・取り消し済みを戻す根拠: 今回の発言にあり、4 文字以上か、発言の 1 文そのもの（「金額」のような語だけでは取り消さない。「やめて」は取り消せる）
       const strongNow = (q) => { const n = reqNorm(q); return inNow(q) && (n.length >= 4 || sentencesNow.includes(n)); };
-      const res = { added: [], updated: [], revoked: [], downgraded: [], overflow: 0 };
+      const res = { added: [], updated: [], revoked: [], downgraded: [], overflow: 0, decisionRefs: new Map() };
       for (const o of (Array.isArray(ops) ? ops : [])) {
         if (!o || typeof o !== 'object' || !['add', 'update', 'revoke'].includes(o.op)) continue;
+        const dRefs = decisionRefsOf(o.decisionRefs);
         const quotes = (Array.isArray(o.sourceQuotes) ? o.sourceQuotes : []).filter(q => typeof q === 'string' && inUser(q)).map(q => reqText(q, 300)).slice(0, 5);
         let decision = REQ_DECISIONS.includes(o.decision) && o.decision !== 'revoked' ? o.decision : 'proposed';
         if (decision === 'decided' && !quotes.length) { decision = 'proposed'; res.downgraded.push(o); }
@@ -24250,13 +24262,15 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
           planRefs: (Array.isArray(o.planRefs) ? o.planRefs : []).filter(x => typeof x === 'string' && /^[A-Z][0-9]{1,3}$/.test(x)).slice(0, 8), note: reqText(o.note, 300),
           // §0c.2（2026-10-08）: JavaScript で実現する動作の種類（語彙外は落とす。送られなければ持たない＝旧い応答。update では前の値を残す）
           ...(ktEffectsOf(o.effects) ? { effects: ktEffectsOf(o.effects) } : {}),
+          // §0f.2 の 9（2026-10-09）: 要件が実現する決定事項の id（送られなければ持たない＝古い Gateway。update では前の値を残す）
+          ...(dRefs ? { decisionRefs: dRefs } : {}),
         };
         if (o.op === 'add') {
           if (!fields.behavior) continue;
           // 上限を超えた分は黙って捨てず、数を返す（画面に出す）
           if (activeCount(list) >= MAX_REQUIREMENTS) { res.overflow += 1; continue; }
           const e = { id: `R${++lg.reqSeq}`, ...fields, origin: 'ai', createdIn: version, updatedIn: version, revokedIn: null, history: [] };
-          list.push(e); res.added.push(e); continue;
+          list.push(e); res.added.push(e); res.decisionRefs.set(e.id, dRefs); continue;
         }
         const e = list.find(x => x.id === o.id);
         if (!e) continue;
@@ -24279,7 +24293,7 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
         e.history.push({ ...reqSnapshot(e), version: e.updatedIn });
         // 根拠の発言は前の分も残す（変更の根拠を足す）
         Object.assign(e, fields, { sourceQuotes: [...new Set([...e.sourceQuotes, ...quotes])].slice(-5), updatedIn: version, revokedIn: null });
-        res.updated.push(e);
+        res.updated.push(e); res.decisionRefs.set(e.id, dRefs);
       }
       return res;
     }
@@ -24439,6 +24453,14 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
       { re: NOTIFY_ID_RE, to: (m, sp1, kind, n, sp2, off, whole) => `${keepSpace(sp1, whole.charAt(off - 1))}${NOTIFY_ID_JA[kind]}（${n} 件目）${keepSpace(sp2, whole.charAt(off + m.length))}` },
       { re: LOGIN_NAME_RE },
     ]);
+    /**
+     * 同じ守り方（作業者の内部の表記・通知の内部の番号・ログイン名）を、右のペインの変更内容（screenTextOf）でも使う組（2026-10-09・レビューの指摘 row8 の残り）。
+     *   users = { ログイン名: 表示名 }（ログイン中の利用者だけ）を渡すと、作業者の表記はその名前（KTContext.entityJaText と同じ。分からなければログイン名のまま）
+     */
+    const aiTextHolds = ({ labels = null, users = null } = {}) => [
+      { re: ENTITY_NOTATION_RE, to: (m, sp1, type, code, sp2, off, whole) => `${keepSpace(sp1, whole.charAt(off - 1))}${typeof KTContext !== 'undefined' && KTContext.entityJaText ? KTContext.entityJaText({ type, code }, labels, users) : `${type}:${code}`}${keepSpace(sp2, whole.charAt(off + m.length))}` },
+      AI_TEXT_HOLDS[1], AI_TEXT_HOLDS[2],
+    ];
     const displayLabels = (s, labels) => withHeldSpans(s, AI_TEXT_HOLDS, (text) => displayLabelsRaw(text, labels));
     const displayLabelsRaw = (s, labels) => {
       let out = String(s ?? '');
@@ -24703,14 +24725,17 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
      *   対象が決まらない範囲内の要件があるときだけ今の customization 単位に倒す。範囲内でも、明示の要件と同じ効果で対象が決まらない追加の要件（item-ai・planner・unlinked）は
      *   必須の効果の材料にしない（noMaterial。target-unresolved にしない）。
      *   レビューの指摘 row3 の 2: delegationOpen（委ねた判断のうち結び付く要件がまだ無いもの＝未実現の委任がある）のときだけ、計画の AI が足した proposed の要件で
-     *   E_in に無い効果を足すものは外さずに「判定できない（委任の実現の可能性）」として中に残す（possible。最終案の詳細に出す）
+     *   E_in に無い効果を足すものは外さずに「判定できない（委任の実現の可能性）」として中に残す（possible。最終案の詳細に出す）。
+     *   §0f.2 の 9（2026-10-09）: 呼び出し側は、decisionRefs の印がある Gateway では delegationOpen を渡さない（委任の実現は要件の decisionRefs で結び付く）。
+     *   possibleSince（版の番号）を渡すと、その版より後に作った・直した要件だけを可能性の扱いにする（計画の段階で委ねた判断は、それより前の版の追加を実現しない）
      * @param {Array} reqs 台帳の要件（KTAiAnswers.requirementsOf の要素。scope を持てる）
      * @param {object|null} plan 計画（customizations）
-     * @param {object} o { labels（フィールドのコード → 名前。対象のフィールドの照合に使う）, delegationOpen }
+     * @param {object} o { labels（フィールドのコード → 名前。対象のフィールドの照合に使う）, delegationOpen, possibleSince }
      * @returns {{ inIds: Set<string>, out: Map<string, { reason: 'suggestion'|'adds-effect', customizationIds?: string[], effects?: string[] }>, eIn: Map<string, Set<string>>, undetermined: Set<string>,
      *   eInField: Map<string, Map<string, Set<string>>>, noMaterial: Map<string, Set<string>>, possible: Map<string, { reason: 'delegation', customizationIds: string[], effects: string[] }> }}
      */
-    function requirementScopeOf(reqs, plan, { labels = null, delegationOpen = false } = {}) {
+    function requirementScopeOf(reqs, plan, { labels = null, delegationOpen = false, possibleSince = null } = {}) {
+      const sinceOk = (r) => possibleSince == null || (Number(r.updatedIn ?? r.createdIn) || 0) >= Number(possibleSince);
       const list = (Array.isArray(reqs) ? reqs : []).filter(r => r && r.id && r.decision !== 'revoked');
       const custs = ((plan && Array.isArray(plan.customizations)) ? plan.customizations : []).filter(c => c && c.customizationId);
       const custIds = new Set(custs.map(c => c.customizationId));
@@ -24764,7 +24789,7 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
         }
         if (!addsOf.size) { inIds.add(r.id); for (const c of unresolvedIn) noMaterial.get(c).add(r.id); continue; }
         const info = { customizationIds: [...addsOf.keys()], effects: [...new Set([...addsOf.values()].flat())] };
-        if (delegationOpen && scopeBasisOf(r) === 'planner' && r.decision === 'proposed') {
+        if (delegationOpen && scopeBasisOf(r) === 'planner' && r.decision === 'proposed' && sinceOk(r)) {
           inIds.add(r.id);
           possible.set(r.id, { reason: 'delegation', ...info });
           //   対象が決まらない可能性の要件は必須の効果の材料にしない（計画のフィールドの効果は残る）
@@ -25180,9 +25205,11 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
         const noRec = ac.open.filter(q => !q.recommendation).map(q => ({ question: q.text, clause: adoptT }));
         const delegateText = noRec.length ? `委ねられた確認事項（推奨が無い）：${noRec.map(x => `質問「${String(x.question).slice(0, 80)}」`).join('、')}。候補から妥当な案を選び、仮の案として計画に入れてください` : null;
         const adoptText = [goalC ? goalC.adoptText : null, delegateText].filter(Boolean).join('\n') || null;
-        if (items.length) return { intent: INTENT.ANSWER, reason: 'ADOPT_RECOMMENDATIONS', adoptItems: items, askText, ...(adoptText ? { adoptText } : {}) };
+        //   §0f.2 の 9（2026-10-09）: 委ねた判断を構造化して持つ（推奨の無い確認事項 noRec・相談の答えのおすすめ consultationText）。会話が計画の段階の委任として台帳に記録する
+        const delegatedOf = { ...(noRec.length ? { noRec } : {}), ...(goalC ? { consultationText: goalC.adoptText } : {}) };
+        if (items.length) return { intent: INTENT.ANSWER, reason: 'ADOPT_RECOMMENDATIONS', adoptItems: items, askText, ...(adoptText ? { adoptText } : {}), ...delegatedOf };
         //   質問の文が混ざっていれば、決定事項の置き換えには質問以外の部分を使う（TURN と同じ。質問で決定事項を置き換えない）
-        if (goalC || delegateText) return { intent: INTENT.REVISE_PLAN, reason: goalC ? 'ADOPT_CONSULTATION_REVISE' : 'ADOPT_DELEGATE', utterance: t, revisable: canRevise, adoptText, askText, ...(mixed ? { decisionText: restText } : {}) };
+        if (goalC || delegateText) return { intent: INTENT.REVISE_PLAN, reason: goalC ? 'ADOPT_CONSULTATION_REVISE' : 'ADOPT_DELEGATE', utterance: t, revisable: canRevise, adoptText, askText, ...(mixed ? { decisionText: restText } : {}), ...delegatedOf };
       }
       if (!(plan && canRevise) && (ADOPT.test(adoptT) || AGREEMENT.test(adoptT))) {
         const goalC = consultationGoal(state);
@@ -25412,11 +25439,92 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
       const specSummary = (v) => (v?.spec ? { specId: v.spec.specId, version: v.spec.version, status: v.spec.status, confirmedAt: v.spec.confirmedAt } : null);
       // 2026-10-06（利用者の指示）: 会話の文に版の番号を出さない（版は右の「詳細情報」・監査の記録にだけ残す）
       const planLabel = () => '変更案';
+      // ---- §0f.2 の 9（2026-10-09）: 要件と決定事項の結び付き（計画の AI の decisionRefs。契約 16 §12）----
+      //   使うのは構造化した id だけ（決定事項の id・仮案の判断の key・委ねた印）。自然文は読まない
+      /** decisionRefs の印がある Gateway か（health の change-planner の requirementOps。古い Gateway・services に無いときは false） */
+      const decisionRefsOn = () => { try { return typeof services.plannerRequirementOps === 'function' && (services.plannerRequirementOps() || []).includes('decisionRefs'); } catch (e) { return false; } };
+      /** 結び付けで採用の根拠を上げてよい要件の根拠（計画の AI の追加・ai の補足・根拠の無い要件。任意の提案の扱い・利用者の要件は変えない） */
+      const LINK_UPGRADABLE = Object.freeze(['planner', 'item-ai', 'unlinked']);
+      const MAX_DECISION_LINKS = 16;
+      /** 要件の結び付き（decisionLinks）→ 採用の根拠（値で答えた決定事項があれば item-user、委ねた判断だけなら delegated、無ければ null） */
+      const linkBasisOf = (e) => { const ls = (e && Array.isArray(e.decisionLinks)) ? e.decisionLinks : []; return ls.some(l => l && l.kind === 'user') ? 'item-user' : ls.some(l => l && l.kind === 'delegated') ? 'delegated' : null; };
+      /**
+       * この操作の decisionRefs（applyRequirementOps の decisionRefs）のうち、送った決定事項（decisionKinds）に有る id を要件の decisionLinks に積む（重複なし・16 件まで）。
+       *   decisionLinks: [{ id, kind: 'delegated'|'user', key（仮案の判断の key）, at（版） }]
+       */
+      const noteDecisionLinks = (ch, decisionKinds, version) => {
+        if (!ch || !(decisionKinds instanceof Map) || !decisionKinds.size || !(ch.decisionRefs instanceof Map)) return;
+        for (const e of [...ch.added, ...ch.updated]) {
+          const refs = ch.decisionRefs.get(e.id) || [];
+          const add = refs.map(id => { const k = decisionKinds.get(id); return k ? { id, kind: k.kind === 'delegated' ? 'delegated' : 'user', key: k.key || null, at: version } : null; }).filter(Boolean);
+          if (!add.length) continue;
+          const cur = Array.isArray(e.decisionLinks) ? e.decisionLinks : [];
+          const sig = (l) => `${l.id}|${l.kind}|${l.key || ''}`;
+          const have = new Set(cur.map(sig));
+          e.decisionLinks = [...cur, ...add.filter(l => !have.has(sig(l)))].slice(-MAX_DECISION_LINKS);
+        }
+      };
+      /** 送った決定事項 → decisionKinds（id → { kind, key }）。keyOf(d) = 仮案の判断の key（無ければ null） */
+      const decisionKindsOf = (decisions, keyOf = (d) => d.key || null) => new Map((Array.isArray(decisions) ? decisions : []).filter(d => d && typeof d.id === 'string').map(d => [d.id, { kind: d.delegated === true ? 'delegated' : 'user', key: keyOf(d) }]));
+      /**
+       * 計画の段階で委ねた判断（「おすすめで」・推奨の無い確認事項の委任・相談の答えへの同意）を計画の系列の台帳 lg.planDelegations に記録する（版 at = その作業で作る版）。
+       *   entryIds = 推奨を採用して記録した決定事項（台帳の項目。delegated の印つき。id は決定事項の id）。
+       *   noRec = 推奨の無い確認事項の委任（{ question, clause }）・consultation = 相談の答えのおすすめの文。どちらも台帳の決定事項にしない（確認事項は残す）ので、
+       *   決定事項の id（D…。台帳の項目と同じ番号の列）を振り、decisionRefs の印がある Gateway には委ねた判断として送る（plannerDecisionsOf）
+       */
+      const notePlanDelegations = (lg, version, { entryIds = [], noRec = [], consultation = null } = {}) => {
+        if (!lg) return [];
+        const list = Array.isArray(lg.planDelegations) ? lg.planDelegations : (lg.planDelegations = []);
+        const cut = (s, n) => String(s ?? '').replace(/\s+/g, ' ').trim().slice(0, n);
+        const added = [];
+        for (const id of entryIds) {
+          const e = lg.entries.find(x => x.id === id);
+          if (!e || e.delegated !== true) continue;
+          const did = KTAiAnswers.decisionIdOf(e);
+          if (list.some(pd => pd.id === did && pd.at === version)) continue;
+          const pd = { id: did, source: 'answer', entryId: e.id, at: version };
+          list.push(pd); added.push(pd);
+        }
+        for (const x of noRec || []) {
+          const q = cut(x && x.question, 300);
+          if (!q || list.some(pd => pd.source === 'no-recommendation' && pd.question === q && pd.at === version)) continue;
+          const pd = { id: `D${++lg.seq}`, source: 'no-recommendation', label: '確認事項', question: q, answer: '推奨の無い確認事項。候補から妥当な案を選ぶ（おまかせ）', kind: 'question', at: version, answerSeq: lg.answerSeq || 0 };
+          list.push(pd); added.push(pd);
+        }
+        const ct = cut(consultation, 300);
+        if (ct && !list.some(pd => pd.source === 'consultation' && pd.answer === ct && pd.at === version)) { const pd = { id: `D${++lg.seq}`, source: 'consultation', label: '相談の答え', question: null, answer: ct, kind: 'condition', at: version }; list.push(pd); added.push(pd); }
+        if (list.length > 20) list.splice(0, list.length - 20);
+        return added;
+      };
+      /**
+       * 今も有効な計画の段階の委任（推奨を採用した決定事項が値の回答に変わった・推奨の無い確認事項に後で値で答えたものは外す）
+       */
+      const livePlanDelegations = (lg) => (lg && Array.isArray(lg.planDelegations) ? lg.planDelegations : []).filter(pd => {
+        if (pd.source === 'answer') { const e = lg.entries.find(x => x.id === pd.entryId); return !!(e && e.delegated === true && KTAiAnswers.isDecided(e)); }
+        if (pd.source === 'no-recommendation') return !lg.entries.some(e => KTAiAnswers.isDecided(e) && e.question && (e.answerSeq || 0) > (pd.answerSeq || 0) && KTAiAnswers.sameQuestionText(e.question, pd.question));
+        return true;
+      });
+      /**
+       * 計画の AI に送る決定事項（計画の系列の台帳の決定事項 ＋ decisionRefs の印がある Gateway なら、台帳の決定事項にしない計画の段階の委任を委ねた判断として）。上限 30 件
+       */
+      const plannerDecisionsOf = (lg) => {
+        const syn = decisionRefsOn() ? livePlanDelegations(lg).filter(pd => pd.source !== 'answer').slice(-10).map(pd => ({ id: pd.id, topic: 'other', topics: ['other'], label: pd.label, question: pd.question || null, answer: pd.answer, source: 'chat', status: 'answered', kind: pd.kind, delegated: true })) : [];
+        return [...KTAiAnswers.decisionsForContext(lg, { max: KTAiAnswers.MAX_DECISIONS - syn.length }), ...syn];
+      };
+      /**
+       * 計画の系列の台帳から送った決定事項 → decisionKinds（台帳の項目の delegated の印と、仮案から引き継いだ判断の key。計画の段階の委任は委ねた判断）
+       */
+      const ledgerDecisionKindsOf = (lg, decisions) => {
+        const byId = new Map(lg.entries.filter(KTAiAnswers.isDecided).map(e => [KTAiAnswers.decisionIdOf(e), e]));
+        return decisionKindsOf(decisions, (d) => { const e = byId.get(d.id); return e && e.draftKey ? e.draftKey : null; });
+      };
       /**
        * 2026-10-05 第 3 段: 計画の AI の今回の発言の扱いを台帳に入れる（要件の追加・変更・取り消し。扱いが示されなかった文は未解決の要件として残す）。
        * 古い Gateway（turn が無い）は何もしない。戻り値は表示用の要約
        */
-      function noteTurn(lg, turn, { version, goal = '', utterances = [], extraUserTexts = [], createdBy = 'plan', delegatedWork = false } = {}) {
+      //   §0f.2 の 9（2026-10-09）: decisionKinds = この呼び出しで計画の AI に送った決定事項の id → { kind: 'delegated'（委ねた判断）| 'user'（値で答えた）, key（仮案の判断の key）}。
+      //   decisionRefs の印がある Gateway のときだけ渡す（無ければ null。要件の decisionRefs を採用の根拠に使わない）
+      function noteTurn(lg, turn, { version, goal = '', utterances = [], extraUserTexts = [], createdBy = 'plan', decisionKinds = null } = {}) {
         if (!turn || typeof turn !== 'object') return null;
         // 根拠の照合は利用者の原文だけ（最初の依頼・これまでの発言・回答。ページの中だけに持つ）。Toolkit が組み立てた依頼文（確認事項の文を含む）は数えない
         //   （AI が自分の質問文を引用して「利用者の決定」にしない）
@@ -25432,10 +25540,18 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
         const missed = KTAiAnswers.uncoveredClauses(said, turn.utteranceCoverage || [], ops, { isQuestion: isQuestionSentence }).filter(s => !pureGenerate(String(s).replace(/[、，,。．！!\s]+$/, '')));
         const unresolved = missed.map(s => KTAiAnswers.addUnresolvedRequirement(lg, s, { version })).filter(Boolean);
         //   §0f.2 の 1（2026-10-09）: 採用の根拠と作った段階を要件の要素に持たせる（planRefs から計算しない。update は fields のキーだけを上書きするので、計画の付け替えで変わらない）。
-        //   採用の後に計画の AI が足した要件は planner（この作業で利用者が判断を委ねた（「おすすめで」・おまかせ）なら delegated）。
-        //   利用者の原文の根拠つきの decided（Toolkit が照合済み）になったものは explicit に上げる
-        for (const e of ch.added) { e.createdBy = createdBy; e.scope = { basis: e.decision === 'decided' ? 'explicit' : (delegatedWork ? 'delegated' : 'planner'), by: createdBy, at: version }; }
-        for (const e of ch.updated) if (e.decision === 'decided' && scopeBasisOf(e) !== 'explicit') e.scope = { basis: 'explicit', by: createdBy, at: version, ...(e.scope && e.scope.basis ? { from: e.scope.basis } : {}) };
+        //   採用の後に計画の AI が足した要件は planner。利用者の原文の根拠つきの decided（Toolkit が照合済み）になったものは explicit に上げる。
+        //   §0f.2 の 9（2026-10-09）: 計画の AI が要件の decisionRefs で決定事項に結び付けたもの（decisionKinds に有る id だけ）は、結び付きを要件の decisionLinks に積み
+        //   （update で decisionRefs が上書きされても残す）、委ねた判断なら delegated・値で答えた決定事項なら item-user（利用者の項目と同じ扱い）にする。
+        //   「この作業で判断を委ねたら計画の AI の追加をすべて delegated」にする扱い（delegatedWork）はやめた（結び付きの無い追加は planner として判定する）
+        noteDecisionLinks(ch, decisionKinds, version);
+        for (const e of ch.added) { e.createdBy = createdBy; e.scope = { basis: e.decision === 'decided' ? 'explicit' : (linkBasisOf(e) || 'planner'), by: createdBy, at: version, ...(e.decision !== 'decided' && linkBasisOf(e) ? { via: 'decisionRefs' } : {}) }; }
+        for (const e of ch.updated) {
+          if (e.decision === 'decided' && scopeBasisOf(e) !== 'explicit') { e.scope = { basis: 'explicit', by: createdBy, at: version, ...(e.scope && e.scope.basis ? { from: e.scope.basis } : {}) }; continue; }
+          //   計画の AI の追加・ai の補足・根拠の無い要件だけを上げる（任意の提案の扱い・利用者の要件は、計画の AI の結び付けで変えない）
+          const lb = linkBasisOf(e);
+          if (lb && LINK_UPGRADABLE.includes(scopeBasisOf(e)) && scopeBasisOf(e) !== lb) e.scope = { basis: lb, by: createdBy, at: version, via: 'decisionRefs', from: scopeBasisOf(e) };
+        }
         for (const e of unresolved) if (!e.createdBy) e.createdBy = 'toolkit';
         state.metrics.requirementOps += ops.length; state.metrics.unresolvedClauses += missed.length;
         // 上限（取り消し済みを除いて 40 件）で記録できなかった追加・未解決の数（黙って落とさず画面に出す）
@@ -25450,14 +25566,29 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
        * レビューの指摘 row3 の 2: 未実現の委任があるか（採用の時点で委ねた判断の key のうち、その key に結び付く取り消していない要件が 1 つも無いものがある）。
        *   key への結び付きは仮案の項目の id → 要件の対応（lg.itemReqs の key:<key>。同じ key の判断・前提をターンをまたいでつないだもの）
        */
-      const delegationOpenOf = (lg) => {
+      //   §0f.2 の 9（2026-10-09）: 計画の AI が decisionRefs で委ねた判断に結び付けた要件（decisionLinks。委ねた key・計画の段階の委任の id）も実現として数える。
+      //   計画の段階の委任（lg.planDelegations。「おすすめで」など）も、結び付く要件が無ければ未実現（since = その委任の版。古い版の追加を可能性の扱いにしない）
+      const delegationStateOf = (lg) => {
         const ad = lg && lg.adoption;
-        if (!ad || !Array.isArray(ad.delegatedKeys) || !ad.delegatedKeys.length) return false;
-        const live = new Set(KTAiAnswers.requirementsOf(lg).filter(r => r && r.decision !== 'revoked').map(r => r.id));
+        const none = { open: false, since: null, keys: [], plan: [] };
+        if (!ad) return none;
+        const liveReqs = KTAiAnswers.requirementsOf(lg).filter(r => r && r.decision !== 'revoked');
+        const live = new Set(liveReqs.map(r => r.id));
+        const links = liveReqs.flatMap(r => (Array.isArray(r.decisionLinks) ? r.decisionLinks : []).filter(l => l && l.kind === 'delegated'));
         const ir = ad.itemReqs || lg.itemReqs || {};
-        return ad.delegatedKeys.some(k => !((ir[`key:${k}`] || []).some(id => live.has(id))));
+        const keys = (Array.isArray(ad.delegatedKeys) ? ad.delegatedKeys : []).filter(k => !((ir[`key:${k}`] || []).some(id => live.has(id))) && !links.some(l => l.key === k));
+        const plan = livePlanDelegations(lg).filter(pd => !links.some(l => l.id === pd.id && (l.at == null || Number(l.at) >= Number(pd.at))));
+        if (!keys.length && !plan.length) return none;
+        return { open: true, since: keys.length ? null : Math.min(...plan.map(pd => Number(pd.at) || 0)), keys, plan: plan.map(pd => pd.id) };
       };
-      const scopeOfLedger = (lg, plan = null) => (lg && lg.adoption ? requirementScopeOf(KTAiAnswers.requirementsOf(lg), plan, { labels: scopeLabels(), delegationOpen: delegationOpenOf(lg) }) : null);
+      const delegationOpenOf = (lg) => delegationStateOf(lg).open;
+      //   §0f.2 の 9: decisionRefs の印がある Gateway では、未実現の委任の可能性（possible）の扱いを使わない（委任の実現は要件の decisionRefs で結び付く。
+      //   結び付きの無い計画の AI の追加は planner として判定する）。印の無い古い Gateway（今の staging など）は今までどおり
+      const scopeOfLedger = (lg, plan = null) => {
+        if (!(lg && lg.adoption)) return null;
+        const ds = decisionRefsOn() ? { open: false, since: null } : delegationStateOf(lg);
+        return requirementScopeOf(KTAiAnswers.requirementsOf(lg), plan, { labels: scopeLabels(), delegationOpen: ds.open, possibleSince: ds.since });
+      };
       /** 範囲内の要件（KTAiAnswers.requirementsForContext の形。取り消し済みは今までどおり含める）。必須の効果・流用の指紋・生成の要件・自動の見直しの引き金に使う */
       const inScopeRequirements = (lg, plan = null, sc0 = undefined) => { if (!lg) return []; const sc = sc0 !== undefined ? sc0 : scopeOfLedger(lg, plan); return KTAiAnswers.requirementsForContext(lg).filter(r => !(sc && r && r.decision !== 'revoked' && sc.out.has(r.id))); };
       /**
@@ -26020,6 +26151,8 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
           // 「数え方はおすすめで」のように、その確認事項の推奨を選ぶ答えは、推奨の文そのものを回答にする（「おすすめで」の文字を業務の答えとして残さない）
           const adopted = adopted0 || !!(q.recommendation && isAdoptAnswer(answer0));
           const answer = adopted && q.recommendation ? String(q.recommendation).trim() : answer0;
+          //   §0f.2 の 9（2026-10-09）: 推奨を採用した回答（チャットの「おすすめで」）は委ねた判断の印（delegated）。値で答え直したら印を外す
+          const delegatedMark = { delegated: !!(adopted && q.recommendation) };
           const said = real(KTAiAnswers.topicsOf(answer));
           const entry = q.entryId ? lg.entries.find(e => e.id === q.entryId) || null : null;
           if (q.reconfirm && entry) {
@@ -26027,7 +26160,7 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
             //   論点についての答えだけの文（「やっぱりモバイルも必要」）か、はっきり変更と分かる言い方（「部長ではなく課長です」「両方です」）のときだけ変更。
             //   推奨を選んだ答え（adopted）は、回答欄から推奨を選んだのと同じく決定事項の変更（前の回答を正として残さない）
             const change = adopted || KTAiAnswers.isChange(answer) || (said.some(t => entry.topics.includes(t)) && KTAiAnswers.isPure(answer));
-            if (change) { rec({ entryId: entry.id, topics: [], answer, question: q.text, questionKey: q.key }, 'question'); return; }
+            if (change) { rec({ entryId: entry.id, topics: [], answer, question: q.text, questionKey: q.key, ...delegatedMark }, 'question'); return; }
             entry.status = 'answered'; entry.reconfirmReason = null; KTAiAnswers.touch(lg, entry);
             rec({ topics: said, answer, kind: 'condition', question: q.text, questionKey: q.key }, 'condition');
             return;
@@ -26036,7 +26169,7 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
           //   （足すと、別の論点への答えで PC / モバイルの決定事項が置き換わった）
           const decT = new Set(lg.entries.filter(KTAiAnswers.isDecided).flatMap(e => e.topics));
           const keepSaid = said.filter(t => (q.topics || []).includes(t) || KTAiAnswers.isChange(answer) || (!decT.has(t) && KTAiAnswers.isPure(answer)));
-          rec({ entryId: q.entryId, topics: [...new Set([...(q.topics || []), ...keepSaid])], answer, question: q.text, questionKey: q.key }, 'question');
+          rec({ entryId: q.entryId, topics: [...new Set([...(q.topics || []), ...keepSaid])], answer, question: q.text, questionKey: q.key, ...delegatedMark }, 'question');
         };
         if (payload && Array.isArray(payload.items)) {
           for (const it of payload.items) {
@@ -27120,9 +27253,10 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
           const fix = (txt) => plainJa(withLabels(noCode(txt), labelPairs));
           const cut = (s, n) => { const x = String(s ?? '').replace(/\s+/g, ' ').trim(); return x.length > n ? `${x.slice(0, n)}…` : x; };
           const sentences = (s) => String(s ?? '').split(/(?<=。)/).map(x => x.trim()).filter(Boolean);
-          //   C-1 第 4 段（2026-10-09）: 計画の AI・生成の AI の文に入ったフィールドのコードは、既存の表示用の変換（withLabels。フィールドの名前に直す）を通す。
-          //   作業者のコード（USER:… など）と通知の内部の番号（general#3 など）を名前に直す既存の変換は無いので、そのまま（新しく作らない）
-          //   §0f.5 の 3（2026-10-09）: AI の文は表示用の変換（displayLabels。「名前（コード）」は名前に・PC・CSV などの短い語はコードと見なさない）と根拠の番号の除去
+          //   C-1 第 4 段（2026-10-09）: 計画の AI・生成の AI の文に入ったフィールドのコードは、表示用の変換でフィールドの名前に直す。
+          //   §0f.5 の 3（2026-10-09）: AI の文は表示用の変換（displayLabels。「名前（コード）」は名前に・PC・CSV などの短い語はコードと見なさない）と根拠の番号の除去。
+          //   レビューの指摘 row8（2026-10-09）: displayLabels は作業者の内部の表記（USER:… など）を画面の表記（ユーザー（ログイン名）。ログイン名は残す）に、
+          //   通知の内部の番号（general#3 など）を Context の事実の言葉（アプリの条件通知（3 件目））にし、ログイン名・メールアドレスはフィールドの名前に書き換えない
           const labeled = (s) => displayLabels(stripEvidenceRefs(s), labelPairs);
           const behaviors = [...sentences(chatSummary(p.assessment?.summary)), ...entries.flatMap(([, e]) => sentences(e.generated?.summary))].map(labeled).filter((x, i, a) => a.indexOf(x) === i).slice(0, 4);
           const dr = draft || null;
@@ -27377,8 +27511,10 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
           if (base && base.unregistered) return;
           await finalizeVersion(v, { reuse: base && base.generated ? base.generated : null });
         };
-        //   §0f.2（2026-10-09）: delegatedWork = この作業で利用者が判断を委ねた（「おすすめで」・おまかせ）。計画の AI が足した提案の要件の根拠を delegated にする
-        const reviseWith = async (base, request, { afterAnswer = false, ack = null, rawTexts = [], askSeparately = false, extraAcks = [], priorTurnInfos = [], retry = null, generateAfter: genFirst = false, focusIds = [], delegatedWork = false } = {}) => {
+        //   §0f.2 の 9（2026-10-09）: この作業で利用者が判断を委ねた（「おすすめで」・おまかせ）ときに計画の AI の追加をまとめて delegated にする扱い（delegatedWork）はやめた。
+        //   呼び出し側が委任を台帳（notePlanDelegations）に記録し、decisionRefs の印がある Gateway では結び付けた要件だけを delegated、印の無い古い Gateway では
+        //   未実現の委任の可能性（possible。委任の版より後の計画の AI の追加だけ）として外さずに残す
+        const reviseWith = async (base, request, { afterAnswer = false, ack = null, rawTexts = [], askSeparately = false, extraAcks = [], priorTurnInfos = [], retry = null, generateAfter: genFirst = false, focusIds = [] } = {}) => {
           const lg = ledgerOf(base.planId);
           // この作業が有効な間の最新の計画（版になる前の最初の計画が土台のときは、作り始めた時点の計画のまま）
           const expectedActive = base.unregistered ? (base.activeAtStart ?? null) : base;
@@ -27435,7 +27571,8 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
                 return;
               }
               jobs += 1;
-              const decisions = KTAiAnswers.decisionsForContext(lg);
+              //   §0f.2 の 9（2026-10-09）: decisionRefs の印がある Gateway には、台帳の決定事項にしない計画の段階の委任も委ねた判断として送る（plannerDecisionsOf）
+              const decisions = plannerDecisionsOf(lg);
               const snap = lg.rev || 0;
               const usePatch = usePatchFor(prev);
               // 回答に関係する箇所の手がかりは、回答を記録した版の計画を土台にするとき（最初の作業）だけ（続けた作業の土台は途中の計画で、質問の番号が違う）
@@ -27474,7 +27611,7 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
               done = { r, decisions, snap, n: jobs, requests: [...requests] };
               // 2026-10-05 第 3 段: 要件の追加・変更・取り消しは作業ごとに台帳へ（続けた作業の途中の結果は版にしないが、利用者の発言の扱いは残す）
               //   今回の発言は利用者の原文だけ（Toolkit が組み立てた依頼文を利用者の発言として数えない）
-              turnInfos.push(noteTurn(lg, r.turn, { version: base.version + 1, goal: base.goal, utterances: utterancesNow, createdBy: state.ownerRetryActive ? 'plan-auto' : 'revise', delegatedWork }));
+              turnInfos.push(noteTurn(lg, r.turn, { version: base.version + 1, goal: base.goal, utterances: utterancesNow, createdBy: state.ownerRetryActive ? 'plan-auto' : 'revise', decisionKinds: decisionRefsOn() ? ledgerDecisionKindsOf(lg, decisions) : null }));
               // この作業を始めた後に受け付けた指示（回答・修正の依頼）。無ければ、この結果を版にする
               const newer = KTAiAnswers.pendingAnswers(lg).filter(e => (e.rev || 0) > snap);
               const waiting = state.inbox ? state.inbox.texts.length : 0;
@@ -27571,9 +27708,12 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
                 if (dft) carryDraftDecisions(lgNew, { version: 1 });
                 //   採用した仮案から（レビューの指摘 2）: 根拠の照合は利用者の原文（仮案の依頼文・台帳の発言・判断への回答）だけ。Toolkit が組んだ依頼文は数えない・台帳に入れない
                 //   §0f.2 の 1: 計画の AI が足した要件は planner。レビューの指摘 row3 の 2（2026-10-09）: 推奨の無い判断を 1 つでも委ねたら計画の AI の追加をすべて
-                //   delegated にする扱いはやめた（混入した保存禁止まで範囲内になった）。未実現の委任があるときだけ、範囲の判定（requirementScopeOf の possible）が
-                //   E_in に無い効果を足す計画の AI の要件を外さずに残し、最終案の詳細に出す
-                const ti = dft ? noteTurn(lgNew, r.turn, { version: 1, goal: dft.request, utterances: [], extraUserTexts: state.draftDecisions.map(x => x.answer), createdBy: 'plan' }) : noteTurn(lgNew, r.turn, { version: 1, goal: goalT, utterances: [goalT], createdBy: 'plan' });
+                //   delegated にする扱いはやめた（混入した保存禁止まで範囲内になった）。印の無い古い Gateway では、未実現の委任があるときだけ、範囲の判定（requirementScopeOf の possible）が
+                //   E_in に無い効果を足す計画の AI の要件を外さずに残し、最終案の詳細に出す。
+                //   §0f.2 の 9（2026-10-09）: decisionRefs の印がある Gateway では、送った決定事項（draftDecisionsForPlan の id・key・委ねた印）に結び付けた要件だけを
+                //   delegated（委ねた判断）か item-user（値で答えた判断）にする
+                const dKinds = dft && decisionRefsOn() ? decisionKindsOf(fromDraftArgs.decisions) : null;
+                const ti = dft ? noteTurn(lgNew, r.turn, { version: 1, goal: dft.request, utterances: [], extraUserTexts: state.draftDecisions.map(x => x.answer), createdBy: 'plan', decisionKinds: dKinds }) : noteTurn(lgNew, r.turn, { version: 1, goal: goalT, utterances: [goalT], createdBy: 'plan' });
                 /** 仮案を採用済みにするのは、計画が登録できた後（announcePlan の後）。失敗なら open のまま（adoptDraftNow の finally が失敗の印を付ける） */
                 const markAdopted = () => { if (!dft || late() || !state.activePlan || state.activePlan.planId !== planIdNext) return; dft.status = 'adopted'; dft.adoptedAt = now(); dft.adoptedBy = clsP.fromDraft.reason || 'ADOPT_WORDS'; dft.planId = planIdNext; delete dft.planFailed; };
                 const queuedP = wP && wP.epoch === state.epoch ? wP.texts : [];
@@ -27689,8 +27829,10 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
               timing.ackMs = clock() - t0;
               const openLeft = answerContext(state).open;
               ackMsg.data = { ...ackMsg.data, openLeft: openLeft.length };
-              //   §0f.2（2026-10-09）: 「おすすめで」・推奨の無い確認事項を委ねた作業は、計画の AI が足した提案の要件を委ねた判断（delegated）として扱う
-              await reviseWith(base, answersRequestText(records, { notes, open: openLeft }), { afterAnswer: true, ack: ackMsg, rawTexts: answerPayload ? [...records.map(x => x.answer), ...delegated.map(d => d.clause)] : [cls.restText || t], askSeparately: askedA, delegatedWork: delegated.length > 0 || cls.reason === 'ADOPT_RECOMMENDATIONS' });
+              //   §0f.2 の 9（2026-10-09）: 「おすすめで」（推奨を採用した決定事項）・推奨の無い確認事項の委任・相談の答えへの同意は、計画の段階の委任として台帳に記録する
+              //   （計画の AI の追加をまとめて delegated にしない。decisionRefs で結び付けたものだけ delegated・印の無い古い Gateway は未実現の委任の可能性）
+              notePlanDelegations(lg, base.version + 1, { entryIds: out.recorded.map(x => x.entryId), noRec: [...delegated, ...(cls.noRec || [])], consultation: cls.consultationText || null });
+              await reviseWith(base, answersRequestText(records, { notes, open: openLeft }), { afterAnswer: true, ack: ackMsg, rawTexts: answerPayload ? [...records.map(x => x.answer), ...delegated.map(d => d.clause)] : [cls.restText || t], askSeparately: askedA });
               markAck(result.ok ? 'done' : result.superseded ? 'superseded' : 'failed');
               break;
             }
@@ -27763,7 +27905,9 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
               const adoptRetry = cls.reason === 'ADOPT_CONSULTATION_REVISE' || cls.reason === 'ADOPT_DELEGATE' ? { retry: { text: t, intent: null } } : {};
               if (cls.reason === 'ADOPT_DELEGATE') toolkit(`推奨の無い確認事項は、候補からこちらの提案を選んで進めます（あとから変えられます）。kintone にはまだ何も反映していません。`, { kind: 'adopt-delegated', planId: base.planId, version: base.version });
               //   C-1 第 3 段（2026-10-08）: 計画を直した版の JavaScript は最終案のパイプライン（finalizeAfterCommit）が作り直す。［この変更で確定してコードを作る］は出さない
-              await reviseWith(base, cls.adoptText ? `${t}\n${cls.adoptText}` : t, { rawTexts: [t], askSeparately: asked, generateAfter: ttg, ...(ttg ? { retry: { text: cls.restText || t, intent: null } } : adoptRetry), delegatedWork: cls.reason === 'ADOPT_CONSULTATION_REVISE' || cls.reason === 'ADOPT_DELEGATE' });
+              //   §0f.2 の 9（2026-10-09）: 推奨の無い確認事項の委任・相談の答えへの同意は、計画の段階の委任として台帳に記録する（計画の AI の追加をまとめて delegated にしない）
+              if (cls.reason === 'ADOPT_CONSULTATION_REVISE' || cls.reason === 'ADOPT_DELEGATE') notePlanDelegations(ledgerOf(base.planId), base.version + 1, { noRec: cls.noRec || [], consultation: cls.consultationText || null });
+              await reviseWith(base, cls.adoptText ? `${t}\n${cls.adoptText}` : t, { rawTexts: [t], askSeparately: asked, generateAfter: ttg, ...(ttg ? { retry: { text: cls.restText || t, intent: null } } : adoptRetry) });
               break;
             }
             /**
@@ -27922,12 +28066,16 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
           return {
             adopted: !!lg.adoption, adoption: lg.adoption ? { draftId: lg.adoption.draftId, rev: lg.adoption.rev, items: { ...lg.adoption.items }, delegatedKeys: [...lg.adoption.delegatedKeys], suggestionItems: [...lg.adoption.suggestionItems] } : null,
             version: v ? v.version : null,
-            requirements: KTAiAnswers.requirementsOf(lg).map(r => ({ id: r.id, decision: r.decision, basis: scopeBasisOf(r), by: (r.scope && r.scope.by) || null, createdBy: r.createdBy || null, planRefs: [...(r.planRefs || [])], effects: Array.isArray(r.effects) ? [...r.effects] : null, inScope: r.decision !== 'revoked' && !(sc && sc.out.has(r.id)), out: sc && sc.out.has(r.id) ? sc.out.get(r.id).reason : null, possible: sc && sc.possible && sc.possible.has(r.id) ? sc.possible.get(r.id).reason : null, stripped: stripped.some(s => (s.requirementIds || []).includes(r.id)) })),
+            //   §0f.2 の 9（2026-10-09）: 計画の AI が decisionRefs で結び付けた決定事項（id と種類だけ）・根拠を結び付きで決めたか（via）
+            requirements: KTAiAnswers.requirementsOf(lg).map(r => ({ id: r.id, decision: r.decision, basis: scopeBasisOf(r), by: (r.scope && r.scope.by) || null, via: (r.scope && r.scope.via) || null, createdBy: r.createdBy || null, planRefs: [...(r.planRefs || [])], effects: Array.isArray(r.effects) ? [...r.effects] : null, decisionLinks: (Array.isArray(r.decisionLinks) ? r.decisionLinks : []).map(l => ({ id: l.id, kind: l.kind })), inScope: r.decision !== 'revoked' && !(sc && sc.out.has(r.id)), out: sc && sc.out.has(r.id) ? sc.out.get(r.id).reason : null, possible: sc && sc.possible && sc.possible.has(r.id) ? sc.possible.get(r.id).reason : null, stripped: stripped.some(s => (s.requirementIds || []).includes(r.id)) })),
             scopeStripped: stripped.length, scopeIssues: v && Array.isArray(v.scopeIssues) ? v.scopeIssues.length : 0,
             //   レビューの指摘 row1・row3（2026-10-09）: 外した効果の理由（out-of-scope / unattributed）・委任の実現の可能性として残した効果・未実現の委任があるか
             stripped: stripped.map(s => ({ customizationId: s.customizationId, field: s.field, effect: s.effect, requirementIds: [...s.requirementIds], reason: s.reason || 'out-of-scope' })),
             possible: (v && Array.isArray(v.scopePossible) ? v.scopePossible : []).map(s => ({ customizationId: s.customizationId, field: s.field, effect: s.effect, requirementIds: [...s.requirementIds] })),
             delegationOpen: delegationOpenOf(lg),
+            //   §0f.2 の 9: decisionRefs の印がある Gateway か（あれば未実現の委任でも可能性の扱いを使わない）・計画の段階の委任の数（id と版だけ）
+            decisionRefs: decisionRefsOn(),
+            planDelegations: livePlanDelegations(lg).map(pd => ({ id: pd.id, source: pd.source, at: pd.at })),
           };
         },
         // 会話の応答性（2026-10-05）: 計画の作り直しの作業中か（その版と何回目の作業か）・作り直しの途中に回答・修正の依頼を受け付けられるか
@@ -28139,7 +28287,7 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
       // §0f.5 の 3（2026-10-09）: 根拠の番号の除去（全角・半角の括弧）・拾い出し・AI の文のフィールドのコードの付け替え（描画のときだけ）
       stripEvidenceRefs, evidenceRefsIn, displayLabels,
       //   レビューの指摘 row8（2026-10-09）: 表示用の置き換えから守る部分（ログイン名・作業者の表記）の退避（displayLabels と screenTextOf で共通）
-      withHeldSpans, LOGIN_NAME_RE,
+      withHeldSpans, LOGIN_NAME_RE, aiTextHolds,
       // 段階 A（5.6）: 繰り返しの防止（純粋関数。services.generate と会話が使う）
       repeatOf, nextAttempts, generationEstimate, GEN_PRICE_USD_PER_M, REPEAT_HINT,
       // §0f.4（2026-10-09）: 最終案の使用量（送った要求・内部を含めた最大・使用量が不明の要求・確認できた分）と検証の上限の拒否の情報
@@ -28711,8 +28859,10 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
       //   §0f.5 の 3（2026-10-09）: 置き換えた作業者・条件の表記は、フィールドのコードの置き換え（withLabels）から守る
       //   （ログイン名「approver@example.com」の approver をフィールド「承認者」に書き換えない。ログイン名は承認者を確かめる情報なのでそのまま残す）
       //   レビューの指摘 row8（2026-10-09）: 守り方は AI の文の表示（displayLabels）と共通の関数（KTAiConversation.withHeldSpans）。作業者の表記に入っていない
-      //   ログイン名・メールアドレスも守る
-      const holds = [...keys.map(k => [k, pairs.get(k)]), { re: KTAiConversation.LOGIN_NAME_RE }];
+      //   ログイン名・メールアドレスも守る。
+      //   同じ指摘の残り（2026-10-09）: 計画の AI の文（影響範囲の impact・JavaScript の requirement・手順の題）に入った作業者の内部の表記（USER:… など）と
+      //   通知の内部の番号（general#3 など）も、displayLabels と同じ変換で画面の言葉にする（構造化した値の組を先に当て、残った表記だけ。ログイン名は残す）
+      const holds = [...keys.map(k => [k, pairs.get(k)]), ...(typeof KTAiConversation.aiTextHolds === 'function' ? KTAiConversation.aiTextHolds({ labels, users }) : [{ re: KTAiConversation.LOGIN_NAME_RE }])];
       return (s) => KTAiConversation.withHeldSpans(s, holds, (out) => KTAiConversation.withLabels(out, lp));
     }
     /** JavaScript が触るフィールドの扱い（READ / WRITE / CONTROL）の画面の言葉（KTDeps の依存の種類の名前を使う） */
@@ -29871,6 +30021,8 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
       // 段階 C: 生成の検証の能力（requirementId・requiredEffects などの印。契約 20 §12）と計画の AI の逐次表示（stream: reply。契約 16）。古い Gateway は空
       generatorFeatures() { return capability?.features?.[KTAiClient.FEATURE_GENERATOR]?.verification || []; },
       plannerFeatures() { return capability?.features?.[KTAiClient.FEATURE_PLANNER]?.stream || []; },
+      /** §0f.2 の 9（2026-10-09）: 計画の要件の操作の印（decisionRefs = 要件が実現する決定事項の id を返す Gateway）。古い Gateway は空 */
+      plannerRequirementOps() { return capability?.features?.[KTAiClient.FEATURE_PLANNER]?.requirementOps || []; },
       /** 進みのカードの「見ている材料」（手元の情報だけ。内部の番号は出さない） */
       materials() {
         try {
