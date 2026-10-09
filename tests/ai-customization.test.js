@@ -536,7 +536,8 @@ console.log('\n--- §53-3. 統合先の本文を取得できない / 契約に�
   await ticks();
   const v = await K.adoptOnScreen(m);
   const fin = finalText(m);
-  assert(m.calls2.generate.length === 1 && v.generated.C1.status === 'failed' && v.generated.C1.failure.reason === 'RATE_LIMITED' && !v.generated.C1.generated && v.final.approvable === false && /JavaScript を生成できませんでした: アクセスが集中しています/.test(fin) && /もう一度最終案を作るか/.test(fin), 'Gateway の RATE_LIMITED: 最終案のカードに失敗と次の方針（もう一度作る）。生成結果は無い・承認できない');
+  //   §0f.3 の 1（2026-10-09）: RATE_LIMITED はこの送信を止める失敗（rate）。最終案は未完成で、止めた理由と次の手（［残りの JavaScript を作る］= もう一度作る）を出す
+  assert(m.calls2.generate.length === 1 && v.generated.C1.status === 'failed' && v.generated.C1.failure.reason === 'RATE_LIMITED' && v.generated.C1.failure.stop === 'rate' && !v.generated.C1.generated && v.final.approvable === false && v.final.incomplete && v.final.incomplete.kind === 'rate' && /JavaScript を作っている途中で止めました（AI サービスへのアクセスが集中しています）/.test(fin) && /残りの JavaScript を作る/.test(fin), `Gateway の RATE_LIMITED: 最終案のカードに失敗（止めた理由）と次の方針（もう一度作る）。生成結果は無い・承認できない: ${fin.replace(/\n+/g, ' ⏎ ').slice(0, 300)}`);
   assert(!/RATE_LIMITED/.test(fin), '最終案のカード: RATE_LIMITED の番号は本文に出さない');
   assert(writes(m).length === 0, 'エラー時も書き込み 0 件');
   fail = false;

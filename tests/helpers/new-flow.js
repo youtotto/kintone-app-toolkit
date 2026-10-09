@@ -173,10 +173,11 @@ function createNewFlowKit(T) {
     const mx = { planImpl };   // 計画の client の差し替え（失敗・途中で止める。null なら PLAN_V1 を返す）
     const client = {
       async getHealth() { return health; },
-      async ask({ ctx, requestId }) { calls.ask.push({ ctx }); const v = KTAiClient.validateAnswer(answerFor(ctx, '答えです。'), ctx); return { ...v.normalized, requestId, clientWarnings: v.warnings }; },
-      async plan({ ctx, requestId }) { calls.plan.push({ ctx }); clock.t += 30000; if (mx.planImpl) return mx.planImpl({ ctx, requestId }); const v = KTAiClient.validatePlan(PLAN_V1(ctx.goal), ctx); return { ...v.normalized, requestId, clientWarnings: v.warnings }; },
-      async propose({ ctx, requestId, onText = null }) {
-        calls.propose.push({ ctx, stream: typeof onText === 'function' });
+      //   §0f.3（2026-10-09）: 画面が渡した期限（health の deadlineMs。無ければ null）も記録する
+      async ask({ ctx, requestId, deadlineMs = null }) { calls.ask.push({ ctx, deadlineMs }); const v = KTAiClient.validateAnswer(answerFor(ctx, '答えです。'), ctx); return { ...v.normalized, requestId, clientWarnings: v.warnings }; },
+      async plan({ ctx, requestId, deadlineMs = null }) { calls.plan.push({ ctx, deadlineMs }); clock.t += 30000; if (mx.planImpl) return mx.planImpl({ ctx, requestId }); const v = KTAiClient.validatePlan(PLAN_V1(ctx.goal), ctx); return { ...v.normalized, requestId, clientWarnings: v.warnings }; },
+      async propose({ ctx, requestId, onText = null, deadlineMs = null }) {
+        calls.propose.push({ ctx, stream: typeof onText === 'function', deadlineMs });
         const raw = script({ utterance: ctx.question, previous: ctx.conversation.proposal, requirements: ctx.conversation.requirements });
         if (!raw) throw new Error(`台本がありません: ${ctx.question}`);
         // SSE を模擬: 最初の文字 → （止める）→ 全文

@@ -21278,8 +21278,10 @@
      *   kintone.proxy に切り替える（Gateway に届いた後の失敗で送り直さない = 二重に使わない）
      */
     const DIRECT_FALLBACK_WITHIN_MS = 5000;
+    //   §0f.3（2026-10-09・FP9）: mark（任意）= 時刻の印（headersAt = 応答の見出しが届いた・firstByteAt = 本文の最初の断片が届いた）。呼び出しの記録に相対の ms で残す（本文は記録しない）
     function createDefaultTransport({ kintoneApi = (typeof kintone !== 'undefined' ? kintone : null), fetchFn = (typeof fetch !== 'undefined' ? fetch : null), nowFn = () => Date.now() } = {}) {
-      return async ({ url, method, headers, body, signal = null, preferDirect = false, onEvent = null }) => {
+      return async ({ url, method, headers, body, signal = null, preferDirect = false, onEvent = null, mark = null }) => {
+        const markAt = (k) => { if (typeof mark === 'function') { try { mark(k); } catch (e) { } } };
         const hasProxy = !!(kintoneApi && typeof kintoneApi.proxy === 'function');
         // 会話の返答の逐次表示（2026-10-07）: onEvent があるときは直接 fetch で SSE（Accept: text/event-stream）を受け、イベントごとに onEvent を呼ぶ。
         //   Gateway が SSE を返さない（JSON が返る）ときは通常の応答として扱う。応答が届く前の失敗だけ kintone.proxy（逐次表示なし）へ切り替える
@@ -21290,10 +21292,11 @@
           let started = false;
           try {
             const resp = await fetchFn(url, { method, headers: wantStream ? { ...headers, 'Accept': 'text/event-stream' } : headers, body: body || undefined, ...(signal ? { signal } : {}) });
+            markAt('headersAt');
             const ctype = String((resp.headers && typeof resp.headers.get === 'function' ? resp.headers.get('content-type') : '') || '');
-            if (!wantStream || !/text\/event-stream/i.test(ctype)) return { status: resp.status, body: await resp.text(), via: 'direct' };
+            if (!wantStream || !/text\/event-stream/i.test(ctype)) { const text = await resp.text(); markAt('firstByteAt'); return { status: resp.status, body: text, via: 'direct' }; }
             started = true;
-            return await readSseResponse(resp, onEvent);
+            return await readSseResponse(resp, onEvent, markAt);
           } catch (e) {
             if (started || e?.name === 'AbortError' || !hasProxy || nowFn() - t0 > DIRECT_FALLBACK_WITHIN_MS) throw e;
           }
@@ -21311,7 +21314,9 @@
         }
         if (!fetchFn) throw new AiClientError({ code: ERROR_CODES.TRANSPORT_ERROR, message: '利用可能な transport がありません' });
         const resp = await fetchFn(url, { method, headers, body: body || undefined, ...(signal ? { signal } : {}) });
-        return { status: resp.status, body: await resp.text() };
+        markAt('headersAt');
+        const text = await resp.text(); markAt('firstByteAt');
+        return { status: resp.status, body: text };
       };
     }
 
@@ -21319,8 +21324,9 @@
      * Gateway の SSE の応答を読む（event: delta → onEvent、done → 通常の 200 の本文、error → status と通常のエラー本文）。
      * done / error が無いまま終わったときは TRANSPORT_ERROR（途中で途切れた）
      */
-    async function readSseResponse(resp, onEvent) {
+    async function readSseResponse(resp, onEvent, markAt = null) {
       let final = null;
+      const firstByte = () => { if (typeof markAt === 'function') markAt('firstByteAt'); };
       const handle = (block) => {
         let event = 'message'; const data = [];
         for (const line of block.split('\n')) {
@@ -21343,9 +21349,9 @@
       };
       if (resp.body && typeof resp.body.getReader === 'function' && typeof TextDecoder !== 'undefined') {
         const reader = resp.body.getReader(); const dec = new TextDecoder();
-        for (;;) { const { value, done } = await reader.read(); if (done) break; feed(dec.decode(value, { stream: true })); }
+        for (;;) { const { value, done } = await reader.read(); if (done) break; firstByte(); feed(dec.decode(value, { stream: true })); }
         feed(dec.decode(), true);
-      } else feed(await resp.text(), true);
+      } else { const text = await resp.text(); firstByte(); feed(text, true); }
       if (!final) throw new AiClientError({ code: ERROR_CODES.TRANSPORT_ERROR, message: 'AI サービスの応答が途中で途切れました' });
       return final;
     }
@@ -21415,10 +21421,34 @@
       const planner = featureCapability(health, FEATURE_PLANNER, PLANNER_PROMPT_VERSION);
       const generator = featureCapability(health, FEATURE_GENERATOR, GENERATOR_PROMPT_VERSION);
       const features = { [FEATURE]: qa, [FEATURE_PLANNER]: planner, [FEATURE_GENERATOR]: generator };
-      if (!qa.available) return { available: false, reason: qa.reason, features, usage: health.usage ?? null };
+      //   §0f.3 の 3（2026-10-09）: 1 要求の処理全体の期限（health の limits。古い Gateway は返さない = null）
+      const limits = limitsFromHealth(health);
+      if (!qa.available) return { available: false, reason: qa.reason, features, usage: health.usage ?? null, ...(limits ? { limits } : {}) };
       // contractExpiresAt（契約の期限。W5）。tokenExpiresAt は Access Token 認証では Access の期限なので契約の表示には使わない
-      return { available: true, reason: null, features, usage: health.usage ?? null, tokenExpiresAt: health.tokenExpiresAt ?? null, contractExpiresAt: health.contractExpiresAt ?? null };
+      return { available: true, reason: null, features, usage: health.usage ?? null, tokenExpiresAt: health.tokenExpiresAt ?? null, contractExpiresAt: health.contractExpiresAt ?? null, ...(limits ? { limits } : {}) };
     }
+    /**
+     * §0f.3 の 3（2026-10-09）: health の limits（additive・version 1）→ { version, deadlineMs: { feature: ms }, features: { feature: {...} } }。
+     *   deadlineMs のキーは Gateway の「toolkit.<feature>」と feature だけの両方を受け、feature の名前（assistant-qa など）にそろえる。数でない値は捨てる。無ければ null
+     */
+    function limitsFromHealth(health) {
+      const l = health && health.limits && typeof health.limits === 'object' ? health.limits : null;
+      if (!l || !l.deadlineMs || typeof l.deadlineMs !== 'object') return null;
+      const deadlineMs = {}, features = {};
+      for (const f of FEATURES) {
+        const d = Number(l.deadlineMs[`${PRODUCT}.${f}`] ?? l.deadlineMs[f]);
+        if (Number.isFinite(d) && d > 0) deadlineMs[f] = d;
+        const x = l.features && typeof l.features === 'object' ? (l.features[`${PRODUCT}.${f}`] || l.features[f] || null) : null;
+        if (x && typeof x === 'object') { try { features[f] = JSON.parse(JSON.stringify(x)); } catch (e) { } }
+      }
+      return Object.keys(deadlineMs).length ? { version: l.version ?? null, deadlineMs, features } : null;
+    }
+    /**
+     * §0f.3 の 3（2026-10-09）: クライアントの打ち切り（ms）。サーバーが理由を返す期限（health の deadlineMs）に受信の余裕（20 秒）を足し、上限 330 秒。
+     *   期限が無い（古い Gateway）ときは null（呼び出し側が今の 240 秒を使う）。タイマーは絶対時間（逐次配信で延ばさない）
+     */
+    const RECEIVE_MARGIN_MS = 20000, CLIENT_LIMIT_MAX_MS = 330000, CLIENT_LIMIT_DEFAULT_MS = 240000;
+    const clientLimitFromDeadline = (deadlineMs) => { const d = Number(deadlineMs); return deadlineMs != null && Number.isFinite(d) && d > 0 ? Math.min(d + RECEIVE_MARGIN_MS, CLIENT_LIMIT_MAX_MS) : null; };
 
     /** Contract 2.1 の request envelope（change-planner。payload は KTContext.buildPlan() の結果そのもの） */
     function buildPlanEnvelope({ ctx, requestId = newRequestId(), pluginVersion = SCRIPT_VERSION, now = new Date().toISOString() }) {
@@ -21780,7 +21810,9 @@
     function createAiClient({ apiBase, customerToken = null, getToken = null, onAuthExpired = null, hostname = null, transport = null, timeoutMs: timeoutOpt = undefined, longTimeoutMs: longOpt = undefined, pluginVersion = SCRIPT_VERSION, nowFn = null } = {}) {
       // 既定: 質問・接続は 60 秒、計画・コード生成は 240 秒（Phase 21: 推論モデル）。timeoutMs だけを指定したときは両方その値（テスト・旧呼び出しの互換）
       const timeoutMs = timeoutOpt ?? 60000;
-      const longTimeoutMs = longOpt ?? (timeoutOpt != null ? timeoutOpt : 240000);
+      //   §0f.3 の 3（2026-10-09）: 長い要求（仮案・逐次表示の質問・計画・生成）の打ち切り。明示した longTimeoutMs・timeoutMs を優先し（テスト・旧呼び出しの互換）、
+      //   無ければ health の deadlineMs ＋ 受信の余裕 20 秒（上限 330 秒）、それも無ければ今の 240 秒
+      const longFor = (deadlineMs) => (longOpt != null ? longOpt : timeoutOpt != null ? timeoutOpt : (clientLimitFromDeadline(deadlineMs) ?? CLIENT_LIMIT_DEFAULT_MS));
       if (!apiBase || !String(apiBase).trim()) throw new AiClientError({ code: ERROR_CODES.INVALID_ENVELOPE, message: 'apiBase は必須です' });
       const base = String(apiBase).replace(/\/+$/, '');
       const send = transport || createDefaultTransport();
@@ -21818,7 +21850,8 @@
       const settle = ({ status, body }) => {
         let json = null;
         try { json = JSON.parse(body); } catch (e) {
-          throw new AiClientError({ code: ERROR_CODES.INVALID_RESPONSE, httpStatus: status, message: 'AI サービスの応答が JSON として解釈できません' });
+          //   §0f.3 の 1（2026-10-09）: 本文が JSON でない（端の 5xx の HTML など）印。会話は通信の切断として、この送信の後続を止める（stopKindOf）
+          throw new AiClientError({ code: ERROR_CODES.INVALID_RESPONSE, httpStatus: status, message: 'AI サービスの応答が JSON として解釈できません', details: { bodyNotJson: true } });
         }
         if (status >= 200 && status < 300 && json?.ok === true) return json;
         const we = json?.error;
@@ -21828,27 +21861,49 @@
         const legacy = typeof we === 'string' ? we : '';
         throw new AiClientError({ code: normalizeLegacyErrorCode(legacy) ?? ERROR_CODES.WORKER_ERROR, httpStatus: status, message: legacy || `AI API error: ${status}`, details: json, retryAfterSeconds: pickRetryAfter(null, json) });
       };
-      const rawRequest = async ({ path, method, body, token, signal: outer = null, limitMs = timeoutMs, onEvent = null }) => {
+      //   §0f.3（2026-10-09・FP9）: trace（任意）= 呼び出しの記録に残す時刻（startedAt・headersAt・firstByteAt・endAt。この要求の開始からの相対 ms）と打ち切りの ms。
+      //   本文は入れない。失敗した要求でも残す（例外の transport にも同じ値）。long = 長い要求（kintone.proxy の約 60 秒の上限を避けて直接送る）
+      const rawRequest = async ({ path, method, body, token, signal: outer = null, limitMs = timeoutMs, onEvent = null, long = false, trace = null }) => {
+        const t0 = Date.now();
+        const tm = { startedAt: 0, headersAt: null, firstByteAt: null, endAt: null };
+        const mark = (k) => { if (tm[k] == null) tm[k] = Date.now() - t0; };
+        if (trace && typeof trace === 'object') { trace.transport = tm; trace.limitMs = Number.isFinite(limitMs) ? limitMs : null; }
         let result;
         try {
           // Phase 21: 計画・コード生成（長い待ち時間の要求）は kintone.proxy の約 60 秒の上限を避けて直接送る（createDefaultTransport）
           //   逐次表示（onEvent）の要求も直接送る（kintone.proxy は応答をまとめて返すので逐次に受けられない）
-          result = await withTimeout((signal) => send({ url: `${base}${path}`, method, headers: headers(method === 'POST', token), body, signal, preferDirect: limitMs > timeoutMs, ...(onEvent ? { onEvent } : {}) }), outer, limitMs);
+          result = await withTimeout((signal) => send({ url: `${base}${path}`, method, headers: headers(method === 'POST', token), body, signal, preferDirect: !!long || limitMs > timeoutMs, ...(onEvent ? { onEvent } : {}), mark }), outer, limitMs);
         } catch (e) {
-          if (isAiClientError(e)) throw e;
-          if (e?.name === 'AbortError') throw outer?.aborted ? cancelled() : new AiClientError({ code: ERROR_CODES.TIMEOUT, message: `AI サービスが ${limitMs}ms 以内に応答しませんでした` });
-          throw new AiClientError({ code: ERROR_CODES.TRANSPORT_ERROR, message: e?.message || String(e) });
+          tm.endAt = Date.now() - t0;
+          const err = isAiClientError(e) ? e
+            : e?.name === 'AbortError' ? (outer?.aborted ? cancelled() : new AiClientError({ code: ERROR_CODES.TIMEOUT, message: `AI サービスが ${limitMs}ms 以内に応答しませんでした` }))
+            : new AiClientError({ code: ERROR_CODES.TRANSPORT_ERROR, message: e?.message || String(e) });
+          try { if (!err.transport) err.transport = tm; } catch (x) { }
+          throw err;
         }
-        return settle(result);
+        tm.endAt = Date.now() - t0;
+        try { return settle(result); }
+        catch (e) { try { if (e && !e.transport) e.transport = tm; } catch (x) { } throw e; }
       };
-      /** 認証付き request。Access Token の期限切れは onAuthExpired（Refresh）後に 1 回だけ再試行。signal（任意）でキャンセル */
-      const request = async ({ path, method, body, signal = null, limitMs = timeoutMs, onEvent = null }) => {
+      /**
+       * 認証付き request。Access Token の期限切れは onAuthExpired（Refresh）後に 1 回だけ再試行。signal（任意）でキャンセル。
+       *   §0f.3 の 3（2026-10-09）: 再試行は最初の要求の残り時間だけ（全体の待ちを最初の打ち切りの内に収める。残りが無ければ TIMEOUT）
+       */
+      const request = async ({ path, method, body, signal = null, limitMs = timeoutMs, onEvent = null, long = false, trace = null }) => {
+        let t0 = Date.now();
         try {
-          return await rawRequest({ path, method, body, token: await resolveToken(), signal, limitMs, onEvent });
+          const token0 = await resolveToken();
+          t0 = Date.now();   // 打ち切りの起点（withTimeout のタイマーと同じく token を取った後）
+          return await rawRequest({ path, method, body, token: token0, signal, limitMs, onEvent, long, trace });
         } catch (e) {
           if (isAiClientError(e) && e.code === ERROR_CODES.AUTH_TOKEN_EXPIRED && typeof onAuthExpired === 'function') {
             const refreshed = await onAuthExpired(e);
-            if (refreshed) return rawRequest({ path, method, body, token: await resolveToken(), signal, limitMs, onEvent });
+            if (refreshed) {
+              const bounded = Number.isFinite(limitMs) && limitMs > 0;
+              const left = bounded ? limitMs - (Date.now() - t0) : limitMs;
+              if (bounded && left <= 0) throw new AiClientError({ code: ERROR_CODES.TIMEOUT, message: `AI サービスが ${limitMs}ms 以内に応答しませんでした（接続の更新の後の再送の時間が残っていません）` });
+              return rawRequest({ path, method, body, token: await resolveToken(), signal, limitMs: left, onEvent, long, trace });
+            }
           }
           throw e;
         }
@@ -21876,11 +21931,11 @@
         connectDisconnect: ({ refreshToken }) => rawRequest({ path: '/v2/connect/disconnect', method: 'POST', token: null, body: JSON.stringify({ refreshToken }) }),
         /** POST /v2/review（toolkit.assistant-qa）。生成済みの ctx をそのまま送り、応答の根拠ID を再検証して返す */
         /**   onText（任意・2026-10-07）: 返答の answer が生成された部分から順に届く（引数はここまでの全文）。Gateway の SSE を直接 fetch で受ける（待ち時間は計画と同じ長さ） */
-        async ask({ ctx, requestId = newRequestId(), signal = null, onText = null } = {}) {
+        async ask({ ctx, requestId = newRequestId(), signal = null, onText = null, deadlineMs = null, trace = null } = {}) {
           const envelope = buildAskEnvelope({ ctx, requestId, pluginVersion, now: nowFn ? nowFn() : new Date().toISOString() });
           let acc = '';
           const onEvent = typeof onText === 'function' ? ({ event, data }) => { if (event === 'delta' && data && typeof data.text === 'string') { acc += data.text; try { onText(acc); } catch (e) { } } } : null;
-          const response = await request({ path: '/v2/review', method: 'POST', body: JSON.stringify(envelope), signal, ...(onEvent ? { limitMs: longTimeoutMs, onEvent } : {}) });
+          const response = await request({ path: '/v2/review', method: 'POST', body: JSON.stringify(envelope), signal, trace, ...(onEvent ? { limitMs: longFor(deadlineMs), long: true, onEvent } : {}) });
           const v = validateAnswer(response, ctx);
           if (!v.ok) throw new AiClientError({ code: v.errors[0].code, message: v.errors[0].message, details: { errors: v.errors }, requestId });
           return { ...v.normalized, requestId: v.normalized.requestId || requestId, clientWarnings: v.warnings, raw: null };
@@ -21890,24 +21945,24 @@
          * （conversation.mode = 'proposal'・question = 今回の発言）。transport は ask と同じ（SSE を直接 fetch で受ける。delta は reply の増分）。
          *   onText（任意）: reply の生成された部分から順に届く（引数はここまでの全文）
          */
-        async propose({ ctx, requestId = newRequestId(), signal = null, onText = null } = {}) {
+        async propose({ ctx, requestId = newRequestId(), signal = null, onText = null, deadlineMs = null, trace = null } = {}) {
           if (!ctx || typeof ctx !== 'object' || !ctx.conversation || ctx.conversation.mode !== 'proposal') throw new AiClientError({ code: ERROR_CODES.NO_CONTEXT, message: '仮案の Context（conversation.mode = proposal）がありません' });
           if (typeof ctx.question !== 'string' || !ctx.question.trim()) throw new AiClientError({ code: ERROR_CODES.NO_CONTEXT, message: '仮案の経路には今回の発言（question）が要ります' });
           const envelope = buildAskEnvelope({ ctx, requestId, pluginVersion, now: nowFn ? nowFn() : new Date().toISOString() });
           let acc = '';
           const onEvent = typeof onText === 'function' ? ({ event, data }) => { if (event === 'delta' && data && typeof data.text === 'string') { acc += data.text; try { onText(acc); } catch (e) { } } } : null;
-          const response = await request({ path: '/v2/review', method: 'POST', body: JSON.stringify(envelope), signal, limitMs: longTimeoutMs, ...(onEvent ? { onEvent } : {}) });
+          const response = await request({ path: '/v2/review', method: 'POST', body: JSON.stringify(envelope), signal, limitMs: longFor(deadlineMs), long: true, trace, ...(onEvent ? { onEvent } : {}) });
           const v = validateProposal(response);
           if (!v.ok) throw new AiClientError({ code: v.errors[0].code, message: v.errors[0].message, details: { errors: v.errors }, requestId });
           return { ...v.normalized, requestId: v.normalized.requestId || requestId, clientWarnings: v.warnings };
         },
         /** POST /v2/review（toolkit.change-planner）。Planner Context を送り、Change Plan を再検証して返す（計画のみ。設定変更はしない） */
-        async plan({ ctx, requestId = newRequestId(), signal = null, onText = null } = {}) {
+        async plan({ ctx, requestId = newRequestId(), signal = null, onText = null, deadlineMs = null, trace = null } = {}) {
           const envelope = buildPlanEnvelope({ ctx, requestId, pluginVersion, now: nowFn ? nowFn() : new Date().toISOString() });
           // 段階 C（C3b・契約 16）: onText があれば SSE（event delta は reply の増分・done に全体）で受け、説明を先に流す
           let acc = '';
           const onEvent = typeof onText === 'function' ? ({ event, data }) => { if (event === 'delta' && data && typeof data.text === 'string') { acc += data.text; try { onText(acc); } catch (e) { } } } : null;
-          const response = await request({ path: '/v2/review', method: 'POST', body: JSON.stringify(envelope), signal, limitMs: longTimeoutMs, ...(onEvent ? { onEvent } : {}) });
+          const response = await request({ path: '/v2/review', method: 'POST', body: JSON.stringify(envelope), signal, limitMs: longFor(deadlineMs), long: true, trace, ...(onEvent ? { onEvent } : {}) });
           const v = validatePlan(response, ctx);
           if (!v.ok) throw new AiClientError({ code: v.errors[0].code, message: v.errors[0].message, details: { errors: v.errors }, requestId });
           const out = { ...v.normalized, requestId: v.normalized.requestId || requestId, clientWarnings: v.warnings };
@@ -21917,9 +21972,9 @@
           return out;
         },
         /** POST /v2/review（toolkit.customization-generator）。Generator Context を送り、生成コードを再検証して返す（登録はしない） */
-        async generate({ ctx, requestId = newRequestId(), signal = null } = {}) {
+        async generate({ ctx, requestId = newRequestId(), signal = null, deadlineMs = null, trace = null } = {}) {
           const envelope = buildGenerateEnvelope({ ctx, requestId, pluginVersion, now: nowFn ? nowFn() : new Date().toISOString() });
-          const response = await request({ path: '/v2/review', method: 'POST', body: JSON.stringify(envelope), signal, limitMs: longTimeoutMs });
+          const response = await request({ path: '/v2/review', method: 'POST', body: JSON.stringify(envelope), signal, limitMs: longFor(deadlineMs), long: true, trace });
           const v = validateGenerated(response, ctx);
           if (!v.ok) throw new AiClientError({ code: v.errors[0].code, message: v.errors[0].message, details: { errors: v.errors }, requestId });
           return { ...v.normalized, requestId: v.normalized.requestId || requestId, clientWarnings: v.warnings };
@@ -22138,7 +22193,7 @@
       // Phase 22: エラーの種類・AI が生成しなかった理由
       ERROR_CATEGORY, CATEGORY_JA, errorCategory, declineReasonOf,
       createSettingsStore, createDefaultTransport, normalizeLegacyErrorCode,
-      buildAskEnvelope, buildPlanEnvelope, buildGenerateEnvelope, capabilityFromHealth, validateAnswer, validateProposal, PROPOSAL_INTENTS, validatePlan, validateGenerated, normalizeVerification, BEHAVIOR_CASES_MAX: KT_BEHAVIOR_CASES_MAX, createAiClient, createSession, newRequestId, isPurePlatformQuestion,
+      buildAskEnvelope, buildPlanEnvelope, buildGenerateEnvelope, capabilityFromHealth, limitsFromHealth, clientLimitFromDeadline, RECEIVE_MARGIN_MS, CLIENT_LIMIT_MAX_MS, CLIENT_LIMIT_DEFAULT_MS, validateAnswer, validateProposal, PROPOSAL_INTENTS, validatePlan, validateGenerated, normalizeVerification, BEHAVIOR_CASES_MAX: KT_BEHAVIOR_CASES_MAX, createAiClient, createSession, newRequestId, isPurePlatformQuestion,
       FEATURE_GENERATOR, GENERATOR_PROMPT_VERSION,
       createPkce, createConnectFlow, isDevMode,
     };
@@ -23937,6 +23992,42 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
     const PLAN_STATUS = { ACTIVE: 'ACTIVE', SUPERSEDED: 'SUPERSEDED', STALE: 'STALE', EXECUTED: 'EXECUTED', ROLLED_BACK: 'ROLLED_BACK' };
     const ROLE = { USER: 'user', ASSISTANT: 'assistant', TOOLKIT: 'toolkit', SYSTEM: 'system' };
     const MAX_MESSAGES = 200;
+    /**
+     * §0f.3 の 1（2026-10-09）: この送信の後続（生成・自動の見直し・受け付けた指示の取り込み・新しい作業中の質問）を止める失敗の種類。null は止めない失敗
+     *   （JS ごとの失敗のまま: GENERATION_DECLINED・MODEL_OUTPUT_INVALID・ほかの UPSTREAM_ERROR・Toolkit の内部の理由）。
+     *   cancelled = 利用者の取り消し（AbortError・CANCELLED）/ timeout = クライアントの打ち切り（TIMEOUT）・Gateway の期限（UPSTREAM_ERROR detail timeout）/
+     *   disconnected = 通信の切断（TRANSPORT_ERROR・本文が JSON でない INVALID_RESPONSE・Gateway が要求の中断で止めた UPSTREAM_ERROR detail aborted）/
+     *   budget = 予算・回数の上限（BUDGET_EXCEEDED・MONTHLY_LIMIT_EXCEEDED）/ rate = RATE_LIMITED / auth = 接続・認証（AUTH_*・SESSION_EXPIRED・NOT_CONNECTED。次の要求も失敗する）
+     */
+    const STOP_KINDS = Object.freeze(['cancelled', 'timeout', 'disconnected', 'budget', 'rate', 'auth']);
+    function stopKindOf(e) {
+      if (!e || typeof e !== 'object') return null;
+      const code = typeof e.code === 'string' ? e.code : '';
+      if (e.name === 'AbortError' || code === 'CANCELLED') return 'cancelled';
+      const detail = e.details && e.details.error ? e.details.error.detail : null;
+      if (code === 'TIMEOUT') return 'timeout';
+      if (code === 'UPSTREAM_ERROR' && detail === 'timeout') return 'timeout';
+      if (code === 'UPSTREAM_ERROR' && detail && typeof detail === 'object' && detail.reason === 'aborted') return 'disconnected';
+      if (code === 'TRANSPORT_ERROR') return 'disconnected';
+      if (code === 'INVALID_RESPONSE' && e.details && e.details.bodyNotJson === true) return 'disconnected';
+      if (code === 'BUDGET_EXCEEDED' || code === 'MONTHLY_LIMIT_EXCEEDED') return 'budget';
+      if (code === 'RATE_LIMITED') return 'rate';
+      if (/^AUTH_/.test(code) || code === 'SESSION_EXPIRED' || code === 'NOT_CONNECTED') return 'auth';
+      return null;
+    }
+    /** §0f.3 の 1: 終了不明（AI の処理が終わったかを確かめられない。費用の確保を解放しない印）= 取り消し・時間切れ・切断 */
+    const stopEndUnknown = (kind) => kind === 'cancelled' || kind === 'timeout' || kind === 'disconnected';
+    /** §0f.3（FP7）: 呼び出しの記録の end（ok / error / unknown = 中断・時間切れ・切断） */
+    const callEndOf = (e) => (stopEndUnknown(stopKindOf(e)) ? 'unknown' : 'error');
+    /** §0f.3 の 1: 止めた理由（利用者に見せる文。内部の値は出さない） */
+    const STOP_REASON_JA = Object.freeze({ cancelled: 'キャンセルしました', timeout: 'AI サービスが時間内に応答しませんでした', disconnected: 'AI サービスとの通信が途中で切れました', budget: '利用の上限（予算・回数）に達しました', rate: 'AI サービスへのアクセスが集中しています', auth: 'AI サービスとの接続の有効期限が切れています' });
+    /** §0f.3 の 1: 未完成の最終案の理由の文（承認できない理由の先頭。内部の値・時間の目安は出さない） */
+    function incompleteReasonText(inc) {
+      const why = STOP_REASON_JA[inc && inc.kind] || '処理を続けられませんでした';
+      const where = inc && inc.stage === 'plan-auto' ? '計画の自動の見直し' : 'JavaScript の生成';
+      const n = inc && Array.isArray(inc.notStarted) ? inc.notStarted.length : 0;
+      return `${why}。${where}をここで止めたため、この最終案は未完成です${n ? `（まだ作っていない JavaScript が ${n} 件あります）` : ''}。${inc && inc.kind === 'budget' ? '上限を見直すまで、続きは送りません。' : '続きは［残りの JavaScript を作る］で作ります（計画は作り直しません）。'}`;
+    }
     const LOADING_TEXT = { ASK: '確認しています...', EXPLAIN_PLAN: '確認しています...', EXPLAIN_REVIEW: '確認しています...', EXPLAIN_CUSTOMIZATION: '確認しています...', PLAN: '現在の設定を確認し、変更計画を作っています...', REVISE_PLAN: '変更計画を見直しています...', REVISE_AFTER_ANSWER: '回答を入れて計画を作り直しています（計画全体を作り直すため、1 分前後かかります）...', REVISE_AFTER_ANSWER_PATCH: '回答を入れて、変わる箇所だけを作り直しています（十数秒ほどかかります）...', REVISE_PLAN_PATCH: '変更を入れて、変わる箇所だけを作り直しています（十数秒ほどかかります）...', REVISE_CHAIN: '作り直しの間に受け付けた指示も、続けて計画に入れています...', PROPOSE: '要望を読んで、仮案を考えています...', DRAFT_REPLY: '返事を読んで、仮案を直しています...' };
     /** 会話の返答の逐次表示（2026-10-07）: 届いた部分を描き直す間隔（ms） */
     const STREAM_RENDER_MS = 150;
@@ -24640,6 +24731,9 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
         // 2026-10-05 第 3 段（作業中も会話を続ける）: 最初の計画・コードの生成の途中に受け付けた指示（{ kind: 'PLAN' | 'GENERATE', epoch, texts[{ text, kind, ack }] }）と、
         //   作業と並べて走らせている質問（答えを待つため）
         workInbox: null, sideAsks: [],
+        // §0f.3（2026-10-09）: 送信ごとの印（await の後の古い結果を捨てる）・進行中の送信の中断の signal と停止の状態（作業中の質問が使う）・
+        //   作業中の質問ごとの AbortController（［キャンセル］と新しい会話で止める）
+        sendSeq: 0, sendCtl: null, asideAborts: new Set(),
         // Phase 20（GM-6 / FR-9）: 会話の世代。新しい会話を始めると進む。送信中に会話が変わったら、遅れて返った応答・エラーをこの会話に入れない
         epoch: 0,
         // 会話の応答性（2026-10-05）: 確認事項と決定事項の台帳（planId → KTAiAnswers.createLedger。版が変わっても引き継ぐ）・計測
@@ -24923,7 +25017,14 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
       function subjectOf(seed) {
         return { type: 'javascript', sourceId: seed.sourceId, name: seed.name, platform: seed.platform, customizationType: seed.customizationType, sourceAvailable: !!seed.source?.available, sourceHash: seed.source?.hash ?? null, customizeRevision: seed.customizeRevision ?? null, counts: seed.counts || {}, events: seed.analysis?.events || [], fields: seed.analysis?.fields || { READ: [], WRITE: [], CONTROL: [] }, fieldAccess: seed.analysis?.fieldAccess || {}, appId: seed.appId ?? null, appName: seed.appName ?? null };
       }
+      /** §0f.3 の 2（2026-10-09）: 走っている作業中の質問をすべて止める（［キャンセル］・新しい会話）。止めた数 */
+      function cancelAsides() {
+        const list = [...state.asideAborts];
+        for (const ac of list) { try { ac.abort(); } catch (e) { } }
+        return list.length;
+      }
       function resetConversation() {
+        cancelAsides();
         state.epoch += 1;
         state.messages.length = 0; state.dropped = 0;
         // 反映済み（未復元）の実行は残す（「戻して」と drawer の Rollback 確認は引き続き使える）。計画・仕様・生成コードは消える
@@ -25160,15 +25261,19 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
        *   先に決めたいこと（blocking の質問）。基準（動作テスト環境）の照合は承認のとき（approveFinal・approvalValid）に行う。
        *   必須の効果に関係しない既存 JS の未確認は止めない（実機で確かめることに回す）
        */
-      const finalReadinessOf = (v, { unsupported = [] } = {}) => {
+      const finalReadinessOf = (v, { unsupported = [], incomplete = null } = {}) => {
         const entries = Object.entries(v.generated || {});
         const notReady = entries.filter(([, e]) => e && e.status !== 'verified');
-        const st = (s) => notReady.filter(([, e]) => e.status === s).length;
+        //   §0f.3 の 1（2026-10-09）: 送信を止めた JavaScript（failed ＋ failure.stop）は「未完成」の理由にまとめる（JS ごとの失敗の文と重ねない）
+        const stoppedEntry = (e) => !!(e && e.status === 'failed' && e.failure && e.failure.stop);
+        const st = (s) => notReady.filter(([, e]) => e.status === s && !(s === 'failed' && stoppedEntry(e))).length;
         const known = ['unresolved', 'failed', 'not-ready', 'unsupported', 'not-run', 'unverified'];
         const blockedIds = v.review && v.review.executionReadiness ? (v.review.executionReadiness.blockedSteps || []) : [];
         const ownerlessDecided = unownedRequirementsOf(v, entries).filter(r => r.decision === 'decided');
         const blocking = (v.openQuestions || []).filter(q => q.priority === 'blocking');
         const reasons = [];
+        //   §0f.3 の 1: 止めた送信の最終案は未完成（承認できない）。理由は最初に出す（blockingReason）
+        if (incomplete && incomplete.kind) reasons.push({ kind: 'incomplete', text: incompleteReasonText(incomplete) });
         if (st('unresolved') || st('failed') || notReady.some(([, e]) => !known.includes(e.status))) reasons.push({ kind: 'unresolved', text: '反映できる完成品になっていない JavaScript があります（未解決の理由と次の方針を見てください）。' });
         if (notReady.some(([, e]) => e.status === 'not-ready' && !(e.verdict && e.verdict.kind === 'effects-limit'))) reasons.push({ kind: 'effects-unknown', text: 'JavaScript で必要な動作（編集できない・警告・保存を止めるなど）を特定できないため、まだ反映できません。' });
         if (notReady.some(([, e]) => e.status === 'not-ready' && e.verdict && e.verdict.kind === 'effects-limit')) reasons.push({ kind: 'effects-limit', text: '必須の動作が多すぎて、生成工程で一度に確かめられないため、まだ反映できません（計画の JavaScript を分けます）。' });
@@ -25192,7 +25297,7 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
         return { ready: reasons.length === 0, reasons, blockingReason: reasons.length ? reasons[0].text : '', ownerlessDecided, blockedIds };
       };
       /** §0c.4: 承認のときの判定（最終案を作ったときの Toolkit では作れない customization の一覧を使う） */
-      const finalReadinessNow = (v) => finalReadinessOf(v, { unsupported: (v && v.finalUnsupported) || [] });
+      const finalReadinessNow = (v) => finalReadinessOf(v, { unsupported: (v && v.finalUnsupported) || [], incomplete: (v && v.finalIncomplete) || null });
       // ---- 段階 C（C4）: 最終案の承認（版・計画の hash・基準の stamp・customize の revision・候補の hash を結び付ける）----
       /**
        * baseStamp = 承認の時点の動作テスト環境の基準（画面が渡す）。計画を検証した時点の基準（v.review.base）と違えば承認せず、計画を STALE にして作り直しを案内する
@@ -25355,6 +25460,8 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
         else if (stage === 'revising' && m.data.queued) m.text = `${body}。先に受け付けた指示と合わせて、計画に入れています。kintone にはまだ何も反映していません。`;
         else if (stage === 'done' && m.data.queued) m.text = `${body}。変更案に入れました。kintone にはまだ何も反映していません。`;
         else if (stage === 'pending') m.text = `${body}。続けて入れられる作業の数を超えたため、まだ計画に入っていません（記録したままです。同じ内容をもう一度送ると計画に入れます）。kintone にはまだ何も反映していません。`;
+        //   §0f.3 の 1（2026-10-09）: この送信を途中で止めた（時間切れ・取り消し・切断・上限）ので、受け付けた指示は計画に入れていない（計画の AI を呼ばない）
+        else if (stage === 'stopped') m.text = `${body}。この送信の処理を途中で止めたため、まだ計画に入っていません（記録したままです。同じ内容をもう一度送ると計画に入れます）。kintone にはまだ何も反映していません。`;
         else if (stage === 'superseded') m.text = `${body}。作り直しの間に別の操作で計画が置き換わったため、この作り直しの結果は使いませんでした。回答は前の計画の系列に記録したままです。kintone にはまだ何も反映していません。`;
         else if (stage === 'failed' || stage === 'cancelled') m.text = `${body}。計画の作り直しは${stage === 'cancelled' ? '取り消しました' : '完了していません（失敗しました）'}。${m.data.texts ? '依頼の文はチャットに残っています（もう一度送ると計画に入れます）' : `回答は記録したままです（${stage === 'cancelled' ? '' : '［再試行］か、'}同じ回答をもう一度送ると計画に入れます）`}。kintone にはまだ何も反映していません。`;
         emit();
@@ -25372,16 +25479,28 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
        * 2026-10-05 第 3 段: 質問の AI に今すぐ聞く（作業と並べて走らせる。計画は変えない）。答えはメッセージに出す。
        *   C-1 第 3 段（2026-10-08）: 最初の計画を作り始めた直後の先回りの返答（assistant-qa の brief）は削除した（新しい依頼は仮案の AI が先に答える）
        */
+      //   §0f.3 の 2（2026-10-09）: 質問ごとの AbortController（送信の signal、無ければ進行中の送信の signal につなぐ）。［キャンセル］（cancelAsides）・新しい会話・送信の取り消しで止まる。
+      //   止めた後に届いた答え（中断を無視して返った応答）は出さない。進行中の送信が止まった（halt）後は新しい質問を始めない
       function askNow(question, { signal = null, onFirstText = null } = {}) {
         if (!question || typeof services.ask !== 'function') return null;
+        if (state.sendCtl && state.sendCtl.halt && state.sendCtl.halt.kind) return null;
         const epoch = state.epoch;
+        const parent = signal || (state.sendCtl ? state.sendCtl.signal : null);
+        const ac = typeof AbortController !== 'undefined' ? new AbortController() : null;
+        let unlink = null;
+        if (ac && parent) {
+          if (parent.aborted) ac.abort();
+          else if (typeof parent.addEventListener === 'function') { const on = () => { try { ac.abort(); } catch (e) { } }; parent.addEventListener('abort', on, { once: true }); unlink = () => { try { parent.removeEventListener('abort', on); } catch (e) { } }; }
+        }
+        if (ac) state.asideAborts.add(ac);
+        const stopped = () => !!(ac && ac.signal.aborted);
         state.metrics.asideAsks += 1; state.metrics.aiCalls += 1;
         const p = (async () => {
           // 会話の返答の逐次表示（2026-10-07）: 届いた部分を読み込み中の吹き出しに出し、そろったら答えのカードに置き換える
           let partial = null, timer = null, firstAt = null;
           const ta = clock();   // 区間の記録: この質問の開始
           const onText = (text) => {
-            if (state.epoch !== epoch || !text) return;
+            if (state.epoch !== epoch || !text || stopped()) return;
             if (!partial) { firstAt = clock(); partial = push(MSG.LOADING, ROLE.ASSISTANT, text, { kind: 'aside-answer', partial: true, question }); if (typeof onFirstText === 'function') { try { onFirstText(); } catch (e) { } } return; }
             partial.text = text;
             if (timer) return;
@@ -25389,20 +25508,25 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
           };
           const dropPartial = () => { if (partial) { const pm = partial; partial = null; remove(pm); } };
           try {
-            const r = await services.ask({ question, signal, conversation: conversationContext(), onText });
+            const r = await services.ask({ question, signal: ac ? ac.signal : signal, conversation: conversationContext(), onText });
             dropPartial();
             // 区間の記録（2026-10-07）: 作業中の質問は timings とは別に残す（送信の計測には含まれない）
-            state.metrics.asideTimings.push({ kind: 'aside', ok: !!(r && r.ok), firstTextMs: firstAt == null ? null : firstAt - ta, doneMs: clock() - ta, perf: r && r.perf || null, ai: r && r.ok ? aiOf(r.answer) : null });
+            //   §0f.3（FP7）: end（ok / error / unknown）と送った requestId（取れた場合だけ）。止めた後に届いた答えは end unknown（使わない）
+            const tr = r && r.callTrace ? r.callTrace : null;
+            state.metrics.asideTimings.push({ kind: 'aside', ok: !!(r && r.ok) && !stopped(), firstTextMs: firstAt == null ? null : firstAt - ta, doneMs: clock() - ta, perf: r && r.perf || null, ai: r && r.ok ? aiOf(r.answer) : null, end: stopped() ? 'unknown' : r && r.ok ? 'ok' : 'error', ...(tr && tr.requestId ? { requestId: tr.requestId } : {}), ...(tr && tr.transport ? { transport: tr.transport } : {}) });
             if (state.metrics.asideTimings.length > 100) state.metrics.asideTimings.shift();
-            if (state.epoch !== epoch) return;
+            if (state.epoch !== epoch || stopped()) return;
             if (r && r.ok) push(MSG.ANSWER, ROLE.ASSISTANT, r.answer?.answer || '', { answer: r.answer, ctxFacts: r.ctx?.facts || [], kind: 'aside-answer', question });
             // 対象を決められない作業中の質問は、普通の質問と同じく候補を選んでもらう（作業は続ける）
             else if (r && r.reason === 'ambiguous') assistant('対象を特定できませんでした。どちらについてですか？', { kind: 'candidates', candidates: r.candidates || [], question });
             else push(MSG.ERROR, ROLE.TOOLKIT, r?.message || '質問への回答を取得できませんでした（作業は続けています）。', { code: r?.reason || 'ERROR', retryText: question, intent: INTENT.ASK });
           } catch (e) {
             dropPartial();
-            if (state.epoch === epoch && !(e?.name === 'AbortError' || e?.code === 'CANCELLED')) push(MSG.ERROR, ROLE.TOOLKIT, '質問への回答を取得できませんでした（作業は続けています）。', { code: e?.code || 'ERROR', retryText: question, intent: INTENT.ASK });
-          } finally { emit(); }
+            const tr = e && e.callTrace ? e.callTrace : null;
+            state.metrics.asideTimings.push({ kind: 'aside', ok: false, firstTextMs: firstAt == null ? null : firstAt - ta, doneMs: clock() - ta, perf: null, ai: null, end: stopped() ? 'unknown' : callEndOf(e), code: e?.code || 'ERROR', ...(tr && tr.requestId ? { requestId: tr.requestId } : {}), ...(tr && tr.transport ? { transport: tr.transport } : {}) });
+            if (state.metrics.asideTimings.length > 100) state.metrics.asideTimings.shift();
+            if (state.epoch === epoch && !stopped() && !(e?.name === 'AbortError' || e?.code === 'CANCELLED')) push(MSG.ERROR, ROLE.TOOLKIT, '質問への回答を取得できませんでした（作業は続けています）。', { code: e?.code || 'ERROR', retryText: question, intent: INTENT.ASK });
+          } finally { if (ac) state.asideAborts.delete(ac); if (unlink) unlink(); emit(); }
         })();
         state.sideAsks.push(p);
         p.finally(() => { const i = state.sideAsks.indexOf(p); if (i >= 0) state.sideAsks.splice(i, 1); });
@@ -25433,6 +25557,8 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
       function acceptWhileBusy(t, { intentOverride = null, answerPayload = null, displayText = null } = {}) {
         const userData = displayText ? { displayText } : null;
         if (!canQueue()) return null;
+        //   §0f.3 の 1（2026-10-09）: 進行中の送信が止まった（時間切れ・取り消し・切断・上限）後は受け付けない（取り込み・質問を 0 件にする。画面は下書きとして残す）
+        if (state.sendCtl && state.sendCtl.halt && state.sendCtl.halt.kind) return null;
         const secret = secretLikeIn(t);
         if (secret) return null;   // 秘密情報らしい文は、処理中でも送らない（画面が下書きとして残す。送れる時点で同じ案内を出す）
         // 2026-10-05 第 3 段: 最初の計画・コードの生成の途中と、版になる前の最初の計画に指示を続けて入れている途中は、文の形だけで分ける。
@@ -25817,8 +25943,29 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
         state.working = adoptToPlan ? 'PLAN' : cls.intent === INTENT.REVISE_PLAN || cls.intent === INTENT.ANSWER ? 'REVISE' : cls.intent === INTENT.GENERATE_CODE ? 'FINAL' : cls.intent === INTENT.PROPOSE || cls.intent === INTENT.DRAFT_REPLY ? 'PROPOSE' : null;
         let loading = null;
         const epoch = state.epoch;
-        const late = () => state.epoch !== epoch;   // 送信中に新しい会話が始まった（この応答は前の会話のもの）
+        //   §0f.3 の 2（2026-10-09）: 送信ごとの印。await の後に印か最新の計画（activePlan）が変わっていたら、その結果を捨てる（最新の案を上書きしない）
+        const sendSeq = ++state.sendSeq;
+        const late = () => state.epoch !== epoch || state.sendSeq !== sendSeq;   // 送信中に新しい会話が始まった・別の送信が始まった（この応答は前のもの）
         const discard = () => { result.ok = false; result.discarded = true; };
+        /**
+         * §0f.3 の 1（2026-10-09）: この送信の停止の状態（halt）。stopKindOf の種類が立ったら、この送信の後続（生成・自動の見直し・受け付けた指示の取り込み・
+         *   新しい作業中の質問）を 0 件にする。完了した生成と回答は残し、最終案は未完成（承認できない）として出す。最初に止めた理由だけを残す
+         */
+        const halt = { kind: null, code: null, stage: null, customizationId: null, at: null, endUnknown: false, error: null };
+        const halted = () => !!halt.kind;
+        const haltWith = (e, { stage = null, customizationId = null } = {}) => {
+          const kind = stopKindOf(e) || (signal && signal.aborted ? 'cancelled' : null);
+          if (!kind || halt.kind) return halt.kind;
+          //   中断の後のほかの失敗（取り消しの印だけで止めた）は、取り消しの例外として送信を終える（エラーのカードにしない）
+          const asCancel = kind === 'cancelled' && stopKindOf(e) !== 'cancelled';
+          Object.assign(halt, { kind, code: asCancel ? 'CANCELLED' : ((e && e.code) || (kind === 'cancelled' ? 'CANCELLED' : null)), stage, customizationId, at: now(), endUnknown: stopEndUnknown(kind), error: asCancel ? cancelError() : (e || null) });
+          state.metrics.halts = [...(state.metrics.halts || []), { kind, code: halt.code, stage, at: halt.at }].slice(-20);
+          return kind;
+        };
+        /** 中断された後に返った結果（transport が中断を無視した）を使わない（取り消しとして扱う） */
+        const abortedNow = () => !!(signal && signal.aborted);
+        const cancelError = () => { const kc = typeof KTAiClient !== 'undefined' ? KTAiClient : null; return kc && kc.AiClientError ? new kc.AiClientError({ code: 'CANCELLED', message: '送信をキャンセルしました' }) : Object.assign(new Error('送信をキャンセルしました'), { code: 'CANCELLED' }); };
+        state.sendCtl = { seq: sendSeq, signal, halt };
         // 受領の表示（回答の経路）。作り直しが失敗・キャンセルしたら「回答は記録したまま・作り直しは未完了」に書き換える
         let ackMsg = null;
         const markAck = (stage) => {
@@ -25840,9 +25987,14 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
         const noteFirstText = () => { if (timing.firstTextMs == null) timing.firstTextMs = clock() - t0; };
         //   §0e.4（2026-10-09）: 生成の呼び出しは r.generated の ai（最初の生成の観測）と、生成工程の修復の回数・修復の分の token（repairUsageOf）・
         //   生成工程の時間（meta.timing。処理全体・AI の呼び出しごと・模擬テスト。数値と種類だけ）を残す
+        //   §0f.3（2026-10-09・FP7 / FP9）: end（ok / error / unknown = 中断・時間切れ・切断）・送った requestId（取れた場合だけ）・打ち切りの ms・transport の時刻（相対 ms）。
+        //   本文は入れない。失敗の結果（ok:false）は r.end（無ければ error）
         const noteCall = (kind, r) => {
           if (!r || typeof r !== 'object') return;
-          const e = { kind, perf: r.perf || null, ai: aiOf(r.answer || r.plan || r.proposal || r.generated || null) };
+          const tr = r.callTrace && typeof r.callTrace === 'object' ? r.callTrace : null;
+          const failed = r.ok === false || ((kind === 'plan' || kind === 'plan-auto') && !r.plan);   // 計画は plan が無ければ失敗（ok を持たない結果もある）
+          const end = failed ? (r.end || 'error') : 'ok';
+          const e = { kind, perf: r.perf || null, ai: aiOf(r.answer || r.plan || r.proposal || r.generated || null), end, ...(failed && r.reason ? { code: r.reason } : {}), ...(tr && tr.requestId ? { requestId: tr.requestId } : {}), ...(tr && tr.limitMs != null ? { limitMs: tr.limitMs } : {}), ...(tr && tr.transport ? { transport: { ...tr.transport } } : {}) };
           if (kind === 'generate' && r.generated && typeof r.generated === 'object') {
             const rp = repairUsageOf({ ...r.generated, verification: r.verification || r.generated.verification || null });
             e.repairs = rp.count || 0;
@@ -25850,6 +26002,11 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
             if (r.generated.timing) e.gatewayTiming = r.generated.timing;
           }
           timing.calls.push(e); timing.perf = e.perf; timing.ai = e.ai;
+        };
+        /** 例外で終わった呼び出しの記録（計画・仮案・質問。end は中断・時間切れ・切断なら unknown） */
+        const noteCallError = (kind, e, ms = null) => {
+          const tr = e && e.callTrace && typeof e.callTrace === 'object' ? e.callTrace : null;
+          timing.calls.push({ kind, perf: null, ai: null, end: callEndOf(e), code: (e && e.code) || 'ERROR', ...(tr && tr.requestId ? { requestId: tr.requestId } : {}), ...(tr && tr.limitMs != null ? { limitMs: tr.limitMs } : {}), ...(tr && tr.transport ? { transport: { ...tr.transport } } : {}), ...(ms != null ? { ms } : {}) });
         };
         // 会話の返答の逐次表示（2026-10-07）: 届いた部分を読み込み中の吹き出しに出す（最初はすぐ、その後は STREAM_RENDER_MS に 1 回描く）
         let streamTimer = null;
@@ -25867,7 +26024,9 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
          * 計画の AI には「質問には別に答える」と伝える（同じ質問に二重に答えない）
          */
         // 答えは待たない（計画ができたら次の入力を受け付ける。答えは届いたときに出す）
+        //   §0f.3 の 1（2026-10-09）: この送信が止まった後は、新しい作業中の質問を始めない
         const askAside = (question, o = {}) => {
+          if (halted()) return false;
           const p = askNow(question, { signal, onFirstText: noteFirstText, ...o });
           if (!p) return false;
           timing.aiCalls += 1;
@@ -26228,12 +26387,26 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
           aiCall();
           const tg = clock();
           let r;
+          //   §0f.3 の 1（2026-10-09）: 送信を止める失敗（取り消し・時間切れ・切断・上限・認証。stopKindOf）は、この JavaScript を failed（failure.stop）にして
+          //   この送信の停止（halt）を立てる。後続の JavaScript は送らない（ループが notStarted にする）。それ以外の失敗は今までどおり JS ごとの失敗
           try { r = await services.generate({ version: v, customizationId: cid, signal, decisions: decisionsNow, previous, verification: true, requiredEffects: req.effects }); }
-          catch (e) { if (e?.name === 'AbortError' || e?.code === 'CANCELLED') throw e; const er = errorOf(e); r = { ok: false, reason: er.code, message: er.message, ...(er.reason ? { aiReason: er.reason } : {}) }; }   // AI が生成を断ったときの AI の説明（declineReasonOf）は最終案のカードに出す
+          catch (e) {
+            const er = errorOf(e);
+            const kind = stopKindOf(e) || (abortedNow() ? 'cancelled' : null);
+            if (kind) haltWith(e, { stage: 'generate', customizationId: cid });
+            r = { ok: false, reason: er.code, message: er.message, ...(er.reason ? { aiReason: er.reason } : {}), ...(kind ? { stop: kind } : {}), end: kind && stopEndUnknown(kind) ? 'unknown' : 'error', callTrace: e && e.callTrace ? e.callTrace : null };   // AI が生成を断ったときの AI の説明（declineReasonOf）は最終案のカードに出す
+          }
           noteCall('generate', r); if (timing.calls.length) timing.calls[timing.calls.length - 1].ms = clock() - tg;
           if (late()) return null;
+          //   §0f.3 の 2: 中断の後に返った結果（transport が中断を無視した）は使わない（取り消しとして扱う。呼び出しの記録には使わなかった印）
+          if (r && r.ok && abortedNow()) {
+            if (timing.calls.length) timing.calls[timing.calls.length - 1].discarded = true;
+            haltWith(cancelError(), { stage: 'generate', customizationId: cid });
+            r = { ok: false, reason: 'CANCELLED', message: STOP_REASON_JA.cancelled, stop: 'cancelled', end: 'ok' };
+          }
           //   同じ入力・同じ指摘で AI を呼ばなかった回（REPEAT_SAME_INPUT）は回数・履歴を進めない（履歴の指摘を空にすると、次の同じ入力で「検査は通っています」と案内してしまう）
-          if (!r || !r.ok) return { ...base, generated: previous ? previous.generated : null, review: previous ? previous.review : null, existingSource: previous ? previous.existingSource : null, status: 'failed', failure: { reason: r?.reason || 'ERROR', message: r?.message || 'JavaScript を生成できませんでした。', ...(r && r.aiReason ? { aiReason: r.aiReason } : {}) }, attempts: r && r.reason === 'REPEAT_SAME_INPUT' ? ((previous && previous.attempts) || r.attempts || null) : nextAttempts(previous, { inputHash: r?.inputHash ?? null, blockers: [], at: now() }), candidateHash: null };
+          //   §0f.3 の 1: 止めた回も回数・履歴を進めない（同じ入力の作り直しを「繰り返し」と数えない）
+          if (!r || !r.ok) return { ...base, generated: previous ? previous.generated : null, review: previous ? previous.review : null, existingSource: previous ? previous.existingSource : null, status: 'failed', failure: { reason: r?.reason || 'ERROR', message: r?.message || 'JavaScript を生成できませんでした。', ...(r && r.aiReason ? { aiReason: r.aiReason } : {}), ...(r && r.stop ? { stop: r.stop, endUnknown: stopEndUnknown(r.stop) } : {}) }, attempts: r && (r.reason === 'REPEAT_SAME_INPUT' || r.stop) ? ((previous && previous.attempts) || r.attempts || null) : nextAttempts(previous, { inputHash: r?.inputHash ?? null, blockers: [], at: now() }), candidateHash: null };
           const estimate = generationEstimate({ ctx: r.ctx || null, generated: r.generated || null });
           //   C-1 第 4 段（2026-10-09・K-2 の残り）: 生成の使用量は、この送信の呼び出しの記録に付ける（attempts の累計は版をまたぐので使用量に使わない）
           { const lastCall = timing.calls.length ? timing.calls[timing.calls.length - 1] : null; if (lastCall && lastCall.kind === 'generate' && estimate && estimate.measured !== false && (estimate.input != null || estimate.output != null)) lastCall.genEstimate = estimate; }
@@ -26258,7 +26431,9 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
          *   実行できない手順（executionReadiness.blockedSteps）も承認できない理由にする（反証 A7）
          *   §0c.4（2026-10-08）: 承認できるかは finalReadinessOf（1 か所）。検証の区分は「機械検査」「必須の動作」「動作テスト（隔離環境の模擬）」「実機は未確認」に分ける
          */
-        const buildFinal = (v, { draft = null, startedMs = null, unsupported = [] } = {}) => {
+        //   §0f.3 の 1（2026-10-09）: incomplete = この送信を途中で止めた印（{ kind, code, stage, stoppedAt, notStarted, endUnknown }）。最終案は未完成（承認できない）。
+        //   止めた JavaScript と作っていない JavaScript は別の文で出し、次の手は［残りの JavaScript を作る］（GENERATE_CODE）1 つ
+        const buildFinal = (v, { draft = null, startedMs = null, unsupported = [], incomplete = null } = {}) => {
           const p = v.plan || {};
           const entries = Object.entries(v.generated || {});
           // 利用者に見せる検査の文: コード片を除き、フィールドコードをラベルに（反証 B7）。例外文・条件式の言い換えの規則は使わない（詳細表示に元の文を残す）
@@ -26280,7 +26455,9 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
             for (const x of (e.review?.coverage?.notAchieved || [])) cannot.push({ kind: 'coverage', text: cut(fix(x.message), 160) });
             const file = e.generated?.targetFile ? `「${e.generated.targetFile}」` : 'JavaScript';
             if (ktUrlTarget(e)) cannot.push({ kind: 'external', text: `${file}は URL 指定（${cut(e.existingSource.url || e.existingSource.name || '', 120)}）の JavaScript です。外部サーバーのファイルは Toolkit から書き換えられません`, next: '計画で新しい JavaScript ファイルとして作るよう直してから、最終案を作り直します（URL のファイルは自動で置き換えません）。' });
-            if (e.status === 'failed' && e.failure) cannot.push({ kind: 'failed', text: `JavaScript を生成できませんでした: ${cut(fix(FAILURE_JA[e.failure.reason] || e.failure.message), 160)}${e.failure.aiReason ? `（AI の説明: ${cut(e.failure.aiReason, 300)}）` : ''}`, next: 'もう一度最終案を作るか、計画を見直してください。' });
+            //   §0f.3 の 1: 送信を止めた JavaScript（作っている途中で止めた。結果は使っていない）
+            if (e.status === 'failed' && e.failure && e.failure.stop) cannot.push({ kind: 'stopped', text: `JavaScript を作っている途中で止めました（${STOP_REASON_JA[e.failure.stop] || '処理を続けられませんでした'}）。この JavaScript の結果は使っていません${e.failure.endUnknown ? '（AI サービス側の処理が終わったかは確かめられていません）' : ''}`, next: e.failure.stop === 'budget' ? '上限を見直すまで、続きは送りません。' : '［残りの JavaScript を作る］で、この JavaScript から作ります（計画は作り直しません）。' });
+            else if (e.status === 'failed' && e.failure) cannot.push({ kind: 'failed', text: `JavaScript を生成できませんでした: ${cut(fix(FAILURE_JA[e.failure.reason] || e.failure.message), 160)}${e.failure.aiReason ? `（AI の説明: ${cut(e.failure.aiReason, 300)}）` : ''}`, next: 'もう一度最終案を作るか、計画を見直してください。' });
             else if (e.status !== 'verified' && e.verdict) cannot.push({ kind: e.status === 'unresolved' ? 'unresolved' : e.status, text: `${file}: ${e.verdict.reason}`, next: e.verdict.next, details: (e.verdict.details || []).map(x => cut(x, 300)) });
             //   §0c.8: kintone でできない効果（テーブルの列の表示切り替え）は必須の効果にせず、実現できない点に出す（SUBTABLE_ROWS と同じく承認は止めない）
             for (const np of (Array.isArray(e.notPossible) ? e.notPossible : [])) if (np && np.reason === 'subtable-column-show-hide') cannot.push({ kind: 'limit', text: `${fieldName(np.field)}はテーブル${np.table ? `（${fieldName(np.table)}）` : ''}の列のため、表示・非表示を切り替えられません（kintone の JavaScript で切り替えられるのはテーブル全体だけです）。この動作は作る JavaScript に含めません` });
@@ -26297,6 +26474,9 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
             cannot[j].platforms = ['desktop', 'mobile'].filter(p => cannot[j].platforms.includes(p) || pr.includes(p));
             cannot.splice(i, 1);
           }
+          //   §0f.3 の 1: 前の JavaScript の生成を止めたため、送っていない JavaScript（止めた JavaScript とは別の文）
+          const notStartedIds = incomplete && Array.isArray(incomplete.notStarted) ? incomplete.notStarted : [];
+          if (notStartedIds.length) cannot.push({ kind: 'not-started', text: `まだ作っていない JavaScript が ${notStartedIds.length} 件あります（${incomplete.stage === 'plan-auto' ? '計画の自動の見直しを止めた' : '前の JavaScript の生成を止めた'}ため、送っていません）`, next: incomplete.kind === 'budget' ? '上限を見直すまで、続きは送りません。' : '［残りの JavaScript を作る］で作ります（計画は作り直しません。検証済みの JavaScript はそのまま使います）。' });
           for (const u of unsupported) { const why = u.reason ? fix((typeof KTContextUi !== 'undefined' && KTContextUi.CODEGEN_REASON_JA && KTContextUi.CODEGEN_REASON_JA[u.reason]) || u.reason) : ''; cannot.push({ kind: 'unsupported', text: `Toolkit では JavaScript を作れない部分があります: ${cut(fix(u.requirement || ''), 100)}${why ? `（${cut(why, 100)}）` : ''}`, next: '計画で別の方法（標準の設定・運用など）にするか、この部分を外してから最終案を作り直します。' }); }
           // 実行できない手順（BLOCKED）: 手順の名前と理由
           const blockedIds = v.review && v.review.executionReadiness ? (v.review.executionReadiness.blockedSteps || []) : [];
@@ -26314,7 +26494,7 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
             for (const x of (e.review?.coverage?.unowned || [])) { const k = x.requirementId || x.requirement; if (!scopeRows.has(k)) scopeRows.set(k, { owned: false, text: cut(fix(x.requirement || x.message), 160) }); }
           }
           // 確認 6: 要件の台帳の要件（決まった・AI の提案）のうち担当が無いものは、黙って消さずに「担当が計画にありません」として残す。decided は承認を止め、proposed は確認に残す
-          const readiness = finalReadinessOf(v, { unsupported });
+          const readiness = finalReadinessOf(v, { unsupported, incomplete });
           const ownerless = unownedRequirementsOf(v, entries);
           for (const r of ownerless) { const k = r.id; const prevRow = scopeRows.get(k); scopeRows.set(k, { owned: false, text: prevRow && !prevRow.owned ? prevRow.text : `${cut(r.text, 140)}${r.decision === 'proposed' ? '（AI の提案。扱いを確かめてください）' : ''}`, decision: r.decision }); }
           const outOfScope = [...[...scopeRows.values()].filter(x => x.decision === 'decided'), ...[...scopeRows.values()].filter(x => x.decision !== 'decided')].slice(0, 4);
@@ -26322,7 +26502,7 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
           const scopeOut = { lines: [...new Map((v.scopeStripped || []).map(s => [`${s.field}|${s.effect}`, `${fieldName(s.field)}を${KT_EFFECT_NEED_JA[s.effect] || s.effect}`])).values()].slice(0, 8), remaining: (v.scopeIssues || []).length };
           let ready = []; try { ready = v.review && typeof KTPlanExecutor !== 'undefined' && KTPlanExecutor.applyReadiness ? KTPlanExecutor.applyReadiness(p, v.review) : []; } catch (e) { ready = []; }
           const settingSteps = ready.filter(x => x.apply !== 'JS' && x.apply !== 'CONFIRM');
-          const impact = { lines: (Array.isArray(p.impact) ? p.impact : []).map(x => cut(labeled(x && (x.description || x.text) || ''), 120)).filter(Boolean).slice(0, 4), settings: { total: settingSteps.length, auto: settingSteps.filter(x => x.apply === 'AUTO').length, blocked: blockedSteps.length }, js: [...entries.map(([cid, e]) => ({ customizationId: cid, file: e.generated?.targetFile || '', strategy: e.generated?.strategy || null, status: e.status })), ...unsupported.map(u => ({ customizationId: u.customizationId, file: '', strategy: u.strategy || null, status: 'unsupported', requirement: cut(u.requirement || '', 80) }))] };
+          const impact = { lines: (Array.isArray(p.impact) ? p.impact : []).map(x => cut(labeled(x && (x.description || x.text) || ''), 120)).filter(Boolean).slice(0, 4), settings: { total: settingSteps.length, auto: settingSteps.filter(x => x.apply === 'AUTO').length, blocked: blockedSteps.length }, js: [...entries.map(([cid, e]) => ({ customizationId: cid, file: e.generated?.targetFile || '', strategy: e.generated?.strategy || null, status: e.status, ...(e.status === 'failed' && e.failure && e.failure.stop ? { stopped: true } : {}) })), ...notStartedIds.map(cid => ({ customizationId: cid, file: '', strategy: null, status: 'not-started' })), ...unsupported.map(u => ({ customizationId: u.customizationId, file: '', strategy: u.strategy || null, status: 'unsupported', requirement: cut(u.requirement || '', 80) }))] };
           // 検証の区分（§0c.4）: 機械検査（生成工程の machine ＋ Toolkit の形式確認）/ 必須の動作（構造の有無）/ 動作テスト（隔離環境の模擬）/ 実機は未確認
           const EFFECT_CHECKS = /^(required-effects|behavior)(-|$)/;
           const toolkitChecks = entries.flatMap(([, e]) => (e.review?.checks || []).filter(ch => ch && !EFFECT_CHECKS.test(String(ch.name))));
@@ -26348,11 +26528,13 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
           const approvable = readiness.ready;
           const blockingReason = readiness.blockingReason;
           //   §0c.8: 承認できない最終案の次の手（計画を直す・作り直し）を、カードの操作 1 つで通常の計画の差分更新に送れる依頼の文（自動では送らない）
-          const fixReq = approvable ? null : fixRequestOf(entries);
+          //   §0f.3 の 1: 止めた送信の最終案の次の手は［残りの JavaScript を作る］1 つ（計画の修正の依頼は出さない）
+          const fixReq = approvable || (incomplete && incomplete.kind) ? null : fixRequestOf(entries);
           //   C-1 第 4 段（2026-10-09・K-2）: 使用量は AI の呼び出しの回数（timing.aiCalls）と同じ範囲（この送信の呼び出し）だけで数える。
           //   生成の分は呼び出しの記録に付けた見積もり（genEstimate）、計画の AI などは Gateway の ai の token。単価は §10 の単価（GEN_PRICE_USD_PER_M）。
           //   attempts の累計（版をまたぐ）は使わない（作り直した最終案で前の版の生成の分を足さない）
-          const usage = { tokens: { input: 0, output: 0 }, costUsd: 0, measured: 0, repairs: 0, gatewayRepairs: entries.reduce((n, [, e]) => n + ((e.verification && e.verification.repairs && e.verification.repairs.count) || 0), 0) };
+          //   §0f.3（2026-10-09・FP7）: unknownCalls = 終了不明（中断・時間切れ・切断）の呼び出しの数（使用量が分からないので費用に足していない。表示は費用の担当が使う）
+          const usage = { tokens: { input: 0, output: 0 }, costUsd: 0, measured: 0, repairs: 0, gatewayRepairs: entries.reduce((n, [, e]) => n + ((e.verification && e.verification.repairs && e.verification.repairs.count) || 0), 0), unknownCalls: timing.calls.filter(x => x && x.end === 'unknown').length };
           for (const x of timing.calls) {
             if (!x) continue;
             if (x.kind === 'generate') {
@@ -26371,10 +26553,10 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
           const callsNow = timing.calls.filter(x => x && typeof x.ms === 'number');
           //   追加指示 §4（f）: 測っていない段階は 0 秒と出さない（その段階の呼び出しが無ければ null。表示は測ったものだけ）
           const msOf = (kind) => { const xs = callsNow.filter(x => x.kind === kind); return xs.length ? xs.reduce((n, x) => n + x.ms, 0) : null; };
-          return { planId: v.planId, version: v.version, draftId: v.fromDraft ? v.fromDraft.id : null, behaviors, changed, cannot, outOfScope, scopeOut, impact, verification: { machine, effects: effectRows, behavior, unverified, howTo, scope }, questions: questions.map(q => ({ key: q.key, text: q.text, priority: q.priority || 'later', entryId: q.entryId || null, reconfirm: !!q.reconfirm, id: q.id, ...(q.recommendation ? { recommendation: String(q.recommendation) } : {}) })), customizations: entries.map(([cid, e]) => ({ customizationId: cid, status: e.status, targetFile: e.generated?.targetFile || '', strategy: e.generated?.strategy || null, candidateHash: e.candidateHash || null, repairs: 0, gatewayRepairs: (e.verification && e.verification.repairs && e.verification.repairs.count) || 0, attempts: e.attempts || null, unresolved: e.unresolved || null, verdict: e.verdict || null, failure: e.failure || null, reused: !!e.reused })), unsupported: unsupported.map(u => ({ customizationId: u.customizationId, reason: u.reason || null })), blockedSteps, approvable, blockingReason, fix: fixReq, readiness: { ready: readiness.ready, reasons: readiness.reasons },
+          return { planId: v.planId, version: v.version, draftId: v.fromDraft ? v.fromDraft.id : null, behaviors, changed, cannot, outOfScope, scopeOut, impact, verification: { machine, effects: effectRows, behavior, unverified, howTo, scope }, questions: questions.map(q => ({ key: q.key, text: q.text, priority: q.priority || 'later', entryId: q.entryId || null, reconfirm: !!q.reconfirm, id: q.id, ...(q.recommendation ? { recommendation: String(q.recommendation) } : {}) })), customizations: entries.map(([cid, e]) => ({ customizationId: cid, status: e.status, targetFile: e.generated?.targetFile || '', strategy: e.generated?.strategy || null, candidateHash: e.candidateHash || null, repairs: 0, gatewayRepairs: (e.verification && e.verification.repairs && e.verification.repairs.count) || 0, attempts: e.attempts || null, unresolved: e.unresolved || null, verdict: e.verdict || null, failure: e.failure || null, reused: !!e.reused })), unsupported: unsupported.map(u => ({ customizationId: u.customizationId, reason: u.reason || null })), blockedSteps, approvable, blockingReason, fix: fixReq, readiness: { ready: readiness.ready, reasons: readiness.reasons }, incomplete: incomplete && incomplete.kind ? JSON.parse(JSON.stringify(incomplete)) : null,
             // 時間: 最終案まで（採用・指示を受け付けた時点から。timing.finalMs と同じ起点）と、測った段階だけの内訳（反証 B1・追加指示 §4（f））
             //   §0e.4（2026-10-09）: 計画の自動の差分更新（plan-auto）は別に数える（planMs は利用者の採用・依頼による計画だけ）
-            timing: { totalMs: startedMs != null ? clock() - startedMs : null, planMs: msOf('plan'), planAutoMs: msOf('plan-auto'), generateMs: msOf('generate'), calls: callsNow.map(x => ({ kind: x.kind, ms: x.ms, ...(x.kind === 'generate' && x.repairs != null ? { repairs: x.repairs } : {}) })) }, usage: { aiCalls: timing.aiCalls, ...usage }, builtAt: now() };
+            timing: { totalMs: startedMs != null ? clock() - startedMs : null, planMs: msOf('plan'), planAutoMs: msOf('plan-auto'), generateMs: msOf('generate'), calls: callsNow.map(x => ({ kind: x.kind, ms: x.ms, ...(x.kind === 'generate' && x.repairs != null ? { repairs: x.repairs } : {}), ...(x.end && x.end !== 'ok' ? { end: x.end } : {}) })) }, usage: { aiCalls: timing.aiCalls, ...usage }, builtAt: now() };
         };
         let finalChain = 0;
         /**
@@ -26390,7 +26572,8 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
           //   自動の依頼でできた版（依頼の途中）では、もう一度依頼しない（計画の AI が担当の無い要件を足し続けても連鎖しない）
           //   §0c.6（2026-10-08）: 必須の効果を特定できない customization（未特定の CONTROL・要件の対象を特定できない・担当するフィールドが無い・効果が 0 件）も、
           //   同じ自動の差分更新（計画の系列ごとに 1 回）で計画に効果と対象を決めさせる（利用者に再説明を求めない）。それでも残れば準備未完了
-          if (typeof services.plan === 'function' && !state.ownerRetryActive) {
+          //   §0f.3 の 1（2026-10-09）: この送信が止まった後は、自動の見直し（計画の AI）を呼ばない
+          if (typeof services.plan === 'function' && !state.ownerRetryActive && !halted()) {
             const tried = state.ownerRetried.get(v.planId) || new Set();
             const fresh = unownedRequirementsOf(v, []).filter(r => r.decision === 'decided' && !tried.has(r.id));
             const effTried = state.effectRetried.get(v.planId) || new Set();
@@ -26413,9 +26596,16 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
               const reqText = [ownerText, effText, scopeText].filter(Boolean).join('\n').slice(0, 1900);
               const focusIds = [...new Set([...fresh.map(r => r.id), ...effFresh.flatMap(x => x.u.map(u => u.requirementId).filter(Boolean)), ...effFresh.map(x => x.c.customizationId), ...scopeFresh.map(x => x.customizationId)])];
               state.ownerRetryActive = true;
-              try { await reviseWith(v, reqText, { focusIds, retry: { text: reqText, intent: INTENT.REVISE_PLAN } }); }
+              //   §0f.3 の 1: 自動の見直しの失敗の［再試行］は、内部の依頼文を利用者の発言として送らない（最終案の作り直し = GENERATE_CODE。計画の AI は呼ばない）。
+              //   送信を止める失敗（時間切れ・取り消し・切断・上限）は、この送信の停止にして、作っていない JavaScript を未完成の最終案に出す（下の生成は 0 件）
+              try { await reviseWith(v, reqText, { focusIds, retry: { text: 'コードを作って', intent: INTENT.GENERATE_CODE } }); }
+              catch (e) { if (late() || !(stopKindOf(e) || abortedNow())) throw e; haltWith(e, { stage: 'plan-auto' }); }
               finally { state.ownerRetryActive = false; }
-              if (late() || state.activePlan !== v || v.final) return null;
+              if (late()) return null;
+              //   止めたときに続けた作業の版（受け付けた指示を入れた版）が最新になっていれば、その版の最終案を未完成で出す（AI は呼ばない）
+              const vA = state.activePlan;
+              if (halted() && vA && vA !== v && vA.planId === v.planId && vA.fromDraft && !vA.final) return finalizeVersion(vA, { draft, reuse: v.generated || reuse, note });
+              if (state.activePlan !== v || v.final) { if (halt.kind === 'cancelled') throw halt.error || cancelError(); return null; }
             }
           }
           const custs = (v.plan.customizations || []).filter(c => c && c.customizationId);
@@ -26439,6 +26629,9 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
             const liveIds = new Set(lg ? lg.entries.filter(e => e.status === 'answered').map(KTAiAnswers.decisionIdOf) : []);
             const decisionsNow = (v.decisionsSent || []).filter(d => liveIds.has(d.id)).map(({ reconfirmReason, ...d }) => ({ ...d, status: 'answered' }));
             const regenerated = [], regenReasons = [];
+            //   §0f.3 の 1（2026-10-09）: notStarted = この送信が止まったため送っていない JavaScript（流用できるものは流用する。AI を呼ばない）
+            const notStarted = [];
+            let stoppedAt = null;
             for (const [i, c] of genList.entries()) {
               const cid = c.customizationId;
               const prevEntry = reuse && reuse[cid] ? reuse[cid] : null;
@@ -26447,18 +26640,27 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
               //   §0e.4: 作り直した理由（種類だけ。no-previous = 前の版にこの JavaScript が無い）
               regenReasons.push({ customizationId: cid, reason: ru.reason });
               if (late()) return null;
+              if (halted()) { notStarted.push(cid); continue; }
               progressStage('generate', { state: 'active', n: i + 1, m: genList.length });
               const entry = await generateAndVerify(v, c, { decisionsNow, index: i, total: genList.length, previous: prevEntry });
-              if (late() || !entry) return null;
-              v.generated[cid] = entry; regenerated.push(cid);
+              //   §0f.3 の 2: await の後に送信が変わった・最新の計画が別の版になったら、この結果を捨てる（最新の案を上書きしない）
+              if (late() || !entry || state.activePlan !== v) return null;
+              v.generated[cid] = entry;
+              if (entry.status === 'failed' && entry.failure && entry.failure.stop) stoppedAt = cid;
+              else regenerated.push(cid);
             }
-            if (canGenerate) progressStage('generate', { state: 'done' });
+            //   止めた送信: 生成の段階は「止めた」（完了にしない。時間の目安の実測にも入れない）
+            if (halted()) { const pr = progressOf(); const sg = pr ? pr.stages.find(x => x.key === 'generate') : null; if (sg) { sg.state = 'stopped'; sg.startedAt = null; } }
+            else if (canGenerate) progressStage('generate', { state: 'done' });
             progressStage('summarize', { state: 'active' });
             const dr = draft || (v.fromDraft && state.draft && state.draft.id === v.fromDraft.id ? state.draft : null);
-            fin = buildFinal(v, { draft: dr, startedMs: t0, unsupported });
-            fin.changedSince = reuse ? { regenerated, reasons: regenReasons.filter(x => regenerated.includes(x.customizationId)), reused: genList.map(c => c.customizationId).filter(cid => !regenerated.includes(cid)), revisionRequest: v.revisionRequest || note || null, reply: v.turnInfo && v.turnInfo.reply ? v.turnInfo.reply : '' } : null;
+            const incomplete = halted() ? { kind: halt.kind, code: halt.code, stage: halt.stage || 'generate', stoppedAt, notStarted: [...notStarted], endUnknown: !!halt.endUnknown } : null;
+            fin = buildFinal(v, { draft: dr, startedMs: t0, unsupported, incomplete });
+            fin.changedSince = reuse ? { regenerated, reasons: regenReasons.filter(x => regenerated.includes(x.customizationId)), reused: genList.map(c => c.customizationId).filter(cid => v.generated[cid] && v.generated[cid].reused), revisionRequest: v.revisionRequest || note || null, reply: v.turnInfo && v.turnInfo.reply ? v.turnInfo.reply : '' } : null;
             v.final = fin;
             v.finalUnsupported = unsupported;
+            v.finalIncomplete = incomplete;
+            if (incomplete) result.incomplete = { planId: v.planId, version: v.version, kind: incomplete.kind, stage: incomplete.stage, notStarted: [...incomplete.notStarted], stoppedAt };
             progressStage('summarize', { state: 'done' });
             finishProgress();
             if (dr) dr.finalAt = now();
@@ -26470,12 +26672,18 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
             if (!fin) finishProgress();
             emit();
           }
-          if (fin) await drainFinalInbox(v, w);
+          //   §0f.3 の 1: 止めた送信では、受け付けた指示を計画に入れない（計画の AI を呼ばない）。記録したまま「まだ入っていません」と出す
+          if (fin && halted()) { for (const x of (w && w.epoch === state.epoch ? w.texts : [])) setAckStage(x.ack, 'stopped'); }
+          else if (fin) await drainFinalInbox(v, w);
+          //   取り消しは今までどおり例外で送信を終える（最終案は未完成で出した後。知らせは send の catch）
+          if (fin && halt.kind === 'cancelled') throw halt.error || cancelError();
           return fin;
         };
         /** 最終案を作っている間に受け付けた発言 → 完了後に差分更新（変わった customization だけ作り直す） */
         const drainFinalInbox = async (v, w) => {
           const queuedF = w && w.epoch === state.epoch ? w.texts : [];
+          //   §0f.3 の 1（2026-10-09）: この送信が止まった後は取り込まない（計画の AI を呼ばない）
+          if (queuedF.length && halted()) { for (const x of queuedF) setAckStage(x.ack, 'stopped'); return; }
           if (!queuedF.length || late() || state.activePlan !== v || finalChain >= MAX_CHAIN) { if (queuedF.length) for (const x of queuedF) setAckStage(x.ack, 'failed'); return; }
           finalChain += 1;
           state.metrics.chainedJobs += 1;
@@ -26483,6 +26691,7 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
           await reviseWith(v, queuedF.map(x => `修正の依頼：${String(x.text).replace(/\s+/g, ' ').trim()}`).join('\n').slice(0, 1900), { rawTexts: queuedF.map(x => x.text), extraAcks: queuedF.map(x => x.ack), retry: { text: queuedF.map(x => x.text).join('\n'), intent: null } });
         };
         /** 版を登録した後の最終案（仮案から作った計画だけ）。前の版の生成結果を流用の候補にする */
+        //   §0f.3 の 1（2026-10-09）: この送信が止まった後は、finalizeVersion が自動の見直しも生成も呼ばずに未完成の最終案を出す（AI の呼び出しは 0 件）
         const finalizeAfterCommit = async (v, base) => {
           if (!v || !v.fromDraft || late() || state.activePlan !== v) return;
           if (base && base.unregistered) return;
@@ -26532,6 +26741,13 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
           const commitInitial = () => { if (loading) { remove(loading); loading = null; } return base.registerInitial(); };
           try {
             while (true) {
+              //   §0f.3 の 1（2026-10-09）: この送信が止まった後は、計画の AI を呼ばない（できた分は版にし、受け付けた指示は「まだ入っていません」のまま）
+              if (halted()) {
+                const vH = done ? commit(done) : null;
+                rest('stopped');
+                if (vH) await finalizeAfterCommit(vH, base);
+                return;
+              }
               jobs += 1;
               const decisions = KTAiAnswers.decisionsForContext(lg);
               const snap = lg.rev || 0;
@@ -26543,10 +26759,15 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
               aiCall();
               const utterancesNow = (jobTexts || []).filter(x => typeof x === 'string' && x.trim());
               const tRev = clock();   // 確認 5: 指示を入れて直した版の計画の時間も内訳に記録する（以前は「計画 0 秒」と出た）
-              const r = await services.plan({ goal: base.goalSent || base.goal, revision: { basedOnVersion: base.version, request: req, previousPlan: usePatch ? prev.gatewayPlan : prev.plan, previousReview: prev.review || null, previousRequests: [...(base.revisionRequests || []), ...requests], ...(usePatch ? { mode: 'patch', ...(focus.length ? { focus } : {}) } : {}), ...(utterancesNow.length ? { utterances: utterancesNow } : {}), ...(askSeparately && jobs === 1 ? { questionsAnsweredSeparately: true } : {}), ...(genNow ? { generateAfter: true } : {}) }, decisions, requirements: planRequirementsOf(lg, null, prev.plan), signal, baseCtx: prev.ctx, ...(state.subject ? { subject: state.subject } : {}), ...(progressOf() ? reviseText : {}) });
+              const callKind = state.ownerRetryActive ? 'plan-auto' : 'plan';
+              let r;
+              try { r = await services.plan({ goal: base.goalSent || base.goal, revision: { basedOnVersion: base.version, request: req, previousPlan: usePatch ? prev.gatewayPlan : prev.plan, previousReview: prev.review || null, previousRequests: [...(base.revisionRequests || []), ...requests], ...(usePatch ? { mode: 'patch', ...(focus.length ? { focus } : {}) } : {}), ...(utterancesNow.length ? { utterances: utterancesNow } : {}), ...(askSeparately && jobs === 1 ? { questionsAnsweredSeparately: true } : {}), ...(genNow ? { generateAfter: true } : {}) }, decisions, requirements: planRequirementsOf(lg, null, prev.plan), signal, baseCtx: prev.ctx, ...(state.subject ? { subject: state.subject } : {}), ...(progressOf() ? reviseText : {}) }); }
+              catch (e) { noteCallError(callKind, e, clock() - tRev); throw e; }   // §0f.3（FP7）: 例外で終わった呼び出しも記録する（end unknown / error）
               state.job = null;
               //   §0e.4（2026-10-09）: 最終案の前の計画の自動の差分更新（担当・効果の補い）は 'plan-auto' に分ける（利用者の依頼・回答による作り直しと区別する）
-              noteCall(state.ownerRetryActive ? 'plan-auto' : 'plan', r); if (r && typeof r === 'object' && timing.calls.length) timing.calls[timing.calls.length - 1].ms = clock() - tRev;
+              noteCall(callKind, r); if (r && typeof r === 'object' && timing.calls.length) timing.calls[timing.calls.length - 1].ms = clock() - tRev;
+              //   §0f.3 の 2: 中断の後に返った計画（transport が中断を無視した）は使わない（取り消しとして扱う）
+              if (abortedNow() && !late()) { if (timing.calls.length) timing.calls[timing.calls.length - 1].discarded = true; throw cancelError(); }
               // 別の経路で計画が最新になった（会話は同じ）ときは、待ちの表示を片づけてから捨てる（残ると「作り直しています」が消えなかった）
               //   最終案の流れは進みのカードを使い loading が無いので、loading の有無に関係なく受領を「置き換わった」にする（進みのカードは finally で片づける）
               if (late() || state.activePlan !== expectedActive) { if (!late()) { if (loading) { remove(loading); loading = null; } result.superseded = true; rest('superseded'); } discard(); return; }
@@ -26637,8 +26858,12 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
               const fromDraftArgs = dft ? { requirements: planRequirementsOf(lgD0, dft), decisions: draftDecisionsForPlan() } : {};
               const tPlan = clock();
               //   Customize タブの相談（subject）は、相談中の JavaScript を計画の Context にも付ける（統合先の第一候補）
-              const r = await services.plan({ goal: goalT, signal, ...(state.subject ? { subject: state.subject } : {}), ...fromDraftArgs, ...(progressOf() ? { onText: (txt) => { noteFirstText(); progressText(txt); } } : {}) });
+              let r;
+              try { r = await services.plan({ goal: goalT, signal, ...(state.subject ? { subject: state.subject } : {}), ...fromDraftArgs, ...(progressOf() ? { onText: (txt) => { noteFirstText(); progressText(txt); } } : {}) }); }
+              catch (e) { noteCallError('plan', e, clock() - tPlan); throw e; }   // §0f.3（FP7）: 例外で終わった呼び出しも記録する
               noteCall('plan', r); if (timing.calls.length) timing.calls[timing.calls.length - 1].ms = clock() - tPlan;
+              //   §0f.3 の 2: 中断の後に返った計画は使わない（仮案は採用前のまま。［再試行］は今までどおり「採用します」）
+              if (abortedNow() && !late()) { if (timing.calls.length) timing.calls[timing.calls.length - 1].discarded = true; throw cancelError(); }
               if (progressOf()) progressStage('plan', { state: 'done' });
               const wP = state.workInbox; state.workInbox = null;
               if (late()) { discard(); return; }
@@ -26700,6 +26925,8 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
             await runPlan({ intent: INTENT.PLAN, reason: 'ADOPT_DRAFT', goal: draftGoal(d), fromDraft: { id: d.id, rev: d.rev, reason, request: String(d.request || '') } });
             // 計画ができたら最終案（生成と検証）。生成中に受け付けた発言は完了後に差分更新 → 変わった customization だけ作り直す（R11）
             if (d.status === 'adopted' && state.activePlan && state.activePlan.fromDraft && state.activePlan.fromDraft.id === d.id && !late()) {
+              //   §0f.3 の 1（2026-10-09）: 計画ができた（仮案は採用済み）後の失敗の［再試行］は「採用します」ではなく最終案の作り直し（GENERATE_CODE。計画の AI は呼ばない）
+              result.retry = { text: 'コードを作って', intent: INTENT.GENERATE_CODE };
               const vA = state.activePlan;
               const hasJs = ((vA.plan && vA.plan.customizations) || []).some(c => c && c.customizationId);
               adoptMsg.text = hasJs ? 'この案で進めます。設定の手順と JavaScript を含む最終案を作っています。kintone にはまだ何も反映していません。' : 'この案で進めます。設定の手順の最終案を作っています（JavaScript は使いません）。kintone にはまだ何も反映していません。';
@@ -26720,7 +26947,9 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
             case INTENT.ASK: {
               loading = push(MSG.LOADING, ROLE.ASSISTANT, LOADING_TEXT.ASK, { intent: cls.intent });
               aiCall();
-              const r = await services.ask({ question: t, signal, conversation: conversationContext(), onText: streamInto(loading) });
+              let r;
+              try { r = await services.ask({ question: t, signal, conversation: conversationContext(), onText: streamInto(loading) }); }
+              catch (e) { noteCallError('ask', e); throw e; }   // §0f.3（FP7）: 例外で終わった呼び出しも記録する
               noteCall('ask', r);
               if (late()) { discard(); break; }
               remove(loading); loading = null;
@@ -26798,6 +27027,7 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
               const tPropose = clock();
               //   C-1 第 3 段（2026-10-08）: Customize タブの相談（subject）は、相談中の JavaScript（ファイル・イベント・フィールド）を仮案の依頼に渡す
               try { r = await services.propose({ utterance: cls.utterance || t, previous: previousForContext(), decisions: draftDecisionsForContext(), requirements: d ? KTAiAnswers.requirementsForContext(ledgerOf(d.id)) : [], working: null, ...(state.subject ? { subject: state.subject } : {}), signal, onText: (txt) => { noteFirstText(); progressText(txt); } }); }
+              catch (e) { noteCallError('propose', e, clock() - tPropose); throw e; }   // §0f.3（FP7）: 例外で終わった呼び出しも記録する
               finally { state.workInbox = null; }
               noteCall('propose', r); if (timing.calls.length) timing.calls[timing.calls.length - 1].ms = clock() - tPropose;
               if (late()) { discard(); break; }
@@ -26949,12 +27179,17 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
           result.ok = false; result.error = err;
           if (err.code === 'CANCELLED' || e?.name === 'AbortError') result.cancelled = true;
           if (late()) { discard(); }   // 前の会話の失敗・中断は新しい会話に出さない
+          //   §0f.3 の 1（2026-10-09）: 計画ができた後の取り消し（最終案を未完成で出した）は、「採用します」を戻さず、最終案のカードの続きの操作を案内する
+          else if ((err.code === 'CANCELLED' || e?.name === 'AbortError') && result.incomplete) { result.cancelled = true; markAck('cancelled'); push(MSG.SYSTEM_NOTICE, ROLE.SYSTEM, 'キャンセルしました。計画と、できた JavaScript は最終案のカードに残しています（キャンセルした JavaScript の結果は使っていません）。続きは最終案のカードの［残りの JavaScript を作る］で作れます（計画は作り直しません）。', { kind: 'cancelled', incomplete: true, planId: result.incomplete.planId, version: result.incomplete.version }); }
           else if (err.code === 'CANCELLED' || e?.name === 'AbortError') { result.cancelled = true; markAck('cancelled'); push(MSG.SYSTEM_NOTICE, ROLE.SYSTEM, result.partial ? 'キャンセルしました。途中までの内容は変更案に入れました。そのあとに送った指示は、まだ入っていません（もう一度送ると入れます）。' : 'キャンセルしました。入力は残しています。', { kind: 'cancelled', text: result.partial ? result.partial.pendingRequest : t }); }
           else { markAck('failed'); push(MSG.ERROR, ROLE.TOOLKIT, err.message, { code: err.code, category: err.category, ...(err.reason ? { reason: err.reason } : {}), retryable: TRANSIENT.includes(err.code) || err.code === 'GENERATION_DECLINED', retryAfterSeconds: err.retryAfterSeconds, requestId: err.requestId, retryText: result.partial ? result.partial.pendingRequest : result.retry ? result.retry.text : cls.reason === 'TURN_THEN_GENERATE' ? (cls.restText || t) : t, retryDisplay: !result.partial && !result.retry && cls.reason !== 'TURN_THEN_GENERATE' ? displayText || null : null, intent: result.partial ? ('pendingIntent' in result.partial ? result.partial.pendingIntent : INTENT.REVISE_PLAN) : result.retry ? result.retry.intent : cls.reason === 'TURN_THEN_GENERATE' ? null : cls.intent === INTENT.ANSWER ? INTENT.REVISE_PLAN : cls.intent }); }
         } finally {
           busy = false;
           state.working = null;
           if (state.workInbox) { for (const x of state.workInbox.texts) setAckStage(x.ack, result.cancelled ? 'cancelled' : 'failed'); state.workInbox = null; }
+          if (state.sendCtl && state.sendCtl.seq === sendSeq) state.sendCtl = null;
+          //   §0f.3 の 1: 止めた理由（種類と段階だけ）を送信の記録に残す
+          if (halt.kind) timing.halt = { kind: halt.kind, code: halt.code, stage: halt.stage, endUnknown: halt.endUnknown };
           timing.doneMs = clock() - t0; timing.ok = !!result.ok;
           if (!late()) { state.metrics.timings.push(timing); if (state.metrics.timings.length > 100) state.metrics.timings.shift(); }
           emit();
@@ -26968,6 +27203,8 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
         onChange: (fn) => { listeners.add(fn); return () => listeners.delete(fn); },
         classify: (text) => classifyAll(text),
         send, isBusy: () => busy,
+        // §0f.3 の 2（2026-10-09）: 作業中の質問を止める（［キャンセル］・新しい会話）・走っている作業中の質問の数
+        cancelAsides, asidesRunning: () => state.asideAborts.size,
         // 段階 B: 仮案（計画ができる前）・判断への回答（key 付き）・要件（計画の系列か仮案の台帳）・仮案の経路を使えるか
         draft: () => state.draft, draftDecisions: () => JSON.parse(JSON.stringify(state.draftDecisions)), proposalOn,
         requirements: (id = state.activePlan ? state.activePlan.planId : (state.draft ? state.draft.id : null)) => { const lg = id ? state.ledgers.get(id) : null; return lg ? KTAiAnswers.requirementsForContext(lg) : []; },
@@ -27144,7 +27381,9 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
       // §0c.2（2026-10-08）: 効果の語彙と必須の効果
       EFFECTS: KT_EFFECTS, EFFECT_JA: KT_EFFECT_JA, requiredEffectsOf, BEHAVIOR_REASONS: KT_BEHAVIOR_REASONS, REASON_CATEGORY: KT_REASON_CATEGORY,
       // §0f.2（2026-10-09）: 採用範囲の判定（1 か所）と、仮案の動作が任意の提案の扱いか
-      requirementScopeOf, SCOPE_BASES, isSuggestionItem };
+      requirementScopeOf, SCOPE_BASES, isSuggestionItem,
+      // §0f.3（2026-10-09）: 送信の後続を止める失敗の種類（1 か所）・終了不明・呼び出しの記録の end・止めた理由の文
+      stopKindOf, STOP_KINDS, stopEndUnknown, callEndOf, STOP_REASON_JA };
   })();
 
   // ==========================================
@@ -28086,7 +28325,7 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
      */
     const HIDDEN_KINDS = new Set(['connected', 'preview-changed', 'js-preview-changed', 'rolled-back', 'js-rolled-back']);
     // 回答・依頼の受け付けは出さない。まだ変更案に入っていない（失敗・取り消し・上限・置き換え）ときだけ、そのことを出す
-    const ACK_FAILED = { failed: '作り直しに失敗しました', cancelled: '作り直しを取り消しました', pending: '続けて入れられる数を超えました', superseded: '作り直しの間に変更案が置き換わりました' };
+    const ACK_FAILED = { failed: '作り直しに失敗しました', cancelled: '作り直しを取り消しました', pending: '続けて入れられる数を超えました', superseded: '作り直しの間に変更案が置き換わりました', stopped: '処理を途中で止めました' };
     function isHiddenMessage(m) {
       if (!m) return true;
       if (m.type === MSG.REVIEW) return true;   // Toolkit の確認の結果は変更案のカードにまとめ、詳しくは右の「確認結果」
@@ -28170,7 +28409,7 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
       const cannotRows = [...fin.cannot.map(x => `${platJa(x.platforms) ? `${esc(platJa(x.platforms))}: ` : ''}${esc(x.text)}${x.next ? `<div style="font-size:11px; opacity:.85;">次の方針: ${esc(x.next)}</div>` : ''}${Array.isArray(x.details) && x.details.length ? `<details class="kt-ai-tech" style="font-size:11px;"><summary>詳細</summary>${x.details.map(esc).join('<br>')}</details>` : ''}`), ...fin.outOfScope.map(x => (typeof x === 'string' ? `対応範囲外: ${esc(x)}` : x.owned ? `この JavaScript の対応範囲外（ほかの手順・JavaScript で扱います）: ${esc(x.text)}` : `担当が計画にありません（計画全体の確認に残します）: ${esc(x.text)}`))];
       const cannot = cannotRows.length ? sec('実現できない点・対応範囲', li(cannotRows), '#b26a00') : '';
       const im = fin.impact || { lines: [], settings: { total: 0, auto: 0 }, js: [] };
-      const impactRows = [...(im.settings.total ? [`設定の手順 ${im.settings.total} 件（Toolkit から自動で反映できるのは ${im.settings.auto} 件${im.settings.blocked ? `・実行できない手順 ${im.settings.blocked} 件` : ''}）`] : ['設定の変更はありません']), ...im.js.map(j => (j.status === 'unsupported' ? `Toolkit では作れない JavaScript${j.requirement ? `（${esc(j.requirement)}）` : ''}（反映の対象にしません）` : !j.file ? `JavaScript（${j.status === 'failed' ? '生成できなかったため、ファイルはまだありません' : 'ファイル名は未定'}）` : `${j.strategy === 'EXTEND_EXISTING_JS' ? `既存の「${esc(j.file)}」に統合` : `新しい JavaScript「${esc(j.file)}」を登録`}${j.status === 'verified' ? '' : j.status === 'unresolved' ? '（未解決。反映の対象にしません）' : j.status === 'failed' ? '（生成できませんでした）' : j.status === 'not-run' ? '（模擬テストを実行できていません。反映の対象にしません）' : '（確かめられていません。反映の対象にしません）'}`)), ...im.lines.map(esc)];
+      const impactRows = [...(im.settings.total ? [`設定の手順 ${im.settings.total} 件（Toolkit から自動で反映できるのは ${im.settings.auto} 件${im.settings.blocked ? `・実行できない手順 ${im.settings.blocked} 件` : ''}）`] : ['設定の変更はありません']), ...im.js.map(j => (j.status === 'unsupported' ? `Toolkit では作れない JavaScript${j.requirement ? `（${esc(j.requirement)}）` : ''}（反映の対象にしません）` : j.status === 'not-started' ? 'JavaScript（前の JavaScript の生成を止めたため、まだ作っていません）' : !j.file ? `JavaScript（${j.stopped ? '作っている途中で止めたため、ファイルはまだありません' : j.status === 'failed' ? '生成できなかったため、ファイルはまだありません' : 'ファイル名は未定'}）` : `${j.strategy === 'EXTEND_EXISTING_JS' ? `既存の「${esc(j.file)}」に統合` : `新しい JavaScript「${esc(j.file)}」を登録`}${j.status === 'verified' ? '' : j.status === 'unresolved' ? '（未解決。反映の対象にしません）' : j.status === 'failed' ? (j.stopped ? '（作っている途中で止めました。前の結果は反映の対象にしません）' : '（生成できませんでした）') : j.status === 'not-run' ? '（模擬テストを実行できていません。反映の対象にしません）' : '（確かめられていません。反映の対象にしません）'}`)), ...im.lines.map(esc)];
       const impact = sec('反映先と主な影響', li(impactRows));
       // §0c.4（2026-10-08）: 検証の区分は「機械検査」「必須の動作」「動作テスト（隔離環境の模擬）」「実機は未確認」に分ける。機械検査の通過を業務上の動作の確認・実機の確認とは書かない。
       //   通常画面は状態と理由。検査の文・例外文・条件式は詳細表示（details）
@@ -28258,9 +28497,16 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
       //   C-1 第 3 段（2026-10-08）: 従来のコードのカード（［コードを見る］）を削除したので、最終案で作った JavaScript を右の「コード」で開く入口をこのカードに置く
       const codeBtns = Object.entries(v.generated || {}).filter(([, e]) => e && e.generated && (typeof e.generated.code === 'string' || typeof (e.review && e.review.finalCode) === 'string')).map(([cid, e]) => btn('open-code', `コードを見る（${e.generated.targetFile || 'JavaScript'}）`, `data-cid="${esc(cid)}" data-view="code" data-plan="${esc(v.planId)}" data-version="${esc(String(v.version))}"`));
       const codeHtml = codeBtns.length ? `<div class="kt-ai-final-code" style="margin-top:6px; display:flex; gap:6px; flex-wrap:wrap;">${codeBtns.join('')}</div>` : '';
-      const body = `${changedTop}${behaviors}${changed}${cannot}${impact}${codeHtml}${verification}${questions}${fixHtml}${approveHtml}${detail}${written ? '' : `<div style="margin-top:6px; font-size:12px;"><b>まだ何も反映していません。</b>${approved ? '' : '［動作テスト環境へ反映］を押すまで、動作テスト環境にも書き込みません。'}</div>`}`;
+      //   §0f.3 の 1（2026-10-09）: 止めた送信の最終案は「未完成」（承認できない）。次の手は［残りの JavaScript を作る］1 つ（GENERATE_CODE。計画の AI は呼ばず、
+      //   検証済みは流用し、止めた JavaScript と作っていない JavaScript だけ作る）。予算・回数の上限で止めたときはボタンを無効にして理由を出す
+      const inc = fin.incomplete && fin.incomplete.kind ? fin.incomplete : null;
+      const incBtn = !inc || !active || approved ? '' : inc.kind === 'budget'
+        ? `<div style="margin-top:6px; display:flex; gap:6px; flex-wrap:wrap; align-items:center;">${btn('choice', '残りの JavaScript を作る', 'data-text="コードを作って" data-intent="' + esc(KTAiConversation.INTENT.GENERATE_CODE) + '" data-display="残りの JavaScript を作る" disabled', 'font-weight:600;')}<span class="kt-ai-final-incomplete-why" style="font-size:11px; opacity:.8;">利用の上限（予算・回数）に達したため、押せません。上限を見直してから「コードを作って」と送ると、続きを作ります。</span></div>`
+        : `<div style="margin-top:6px; display:flex; gap:6px; flex-wrap:wrap; align-items:center;">${btn('choice', '残りの JavaScript を作る', 'data-text="コードを作って" data-intent="' + esc(KTAiConversation.INTENT.GENERATE_CODE) + '" data-display="残りの JavaScript を作る"', 'font-weight:600;')}<span style="font-size:11px; opacity:.8;">${esc(`押すと、計画は作り直さずに、${[inc.stoppedAt ? '止めた JavaScript' : null, Array.isArray(inc.notStarted) && inc.notStarted.length ? 'まだ作っていない JavaScript' : null].filter(Boolean).join('と、') || '残りの JavaScript'} だけを作ります（検証済みの JavaScript はそのまま使います）。`)}</span></div>`;
+      const incHtml = inc ? `<div class="kt-ai-final-incomplete" data-kind="${esc(inc.kind)}" style="margin-top:8px; border-left:3px solid #b26a00; padding-left:8px;"><div style="font-size:12px;">${esc((fin.readiness && (fin.readiness.reasons || []).find(x => x.kind === 'incomplete') || {}).text || fin.blockingReason || '')}</div>${incBtn}</div>` : '';
+      const body = `${incHtml}${changedTop}${behaviors}${changed}${cannot}${impact}${codeHtml}${verification}${questions}${fixHtml}${approveHtml}${detail}${written ? '' : `<div style="margin-top:6px; font-size:12px;"><b>まだ何も反映していません。</b>${approved ? '' : '［動作テスト環境へ反映］を押すまで、動作テスト環境にも書き込みません。'}</div>`}`;
       if (!active) return collapsedCard('kt-ai-final-card is-old', '前の最終案 — このあと直した案があります', body);
-      return card('kt-ai-final-card', `<div><b>${esc(fin.approvable ? (d.replaced ? '最終案を直しました。' : '最終案ができました。') : (d.replaced ? '最終案を直しました（反映できない点があります）。' : '最終案（反映できない点があります）'))}</b></div>${body}`, fin.approvable ? '#2e7d32' : '#b26a00');
+      return card('kt-ai-final-card', `<div><b>${esc(fin.approvable ? (d.replaced ? '最終案を直しました。' : '最終案ができました。') : inc ? (d.replaced ? '最終案を直しました（未完成: 途中で止めました）。' : '最終案（未完成: 途中で止めました）') : (d.replaced ? '最終案を直しました（反映できない点があります）。' : '最終案（反映できない点があります）'))}</b></div>${body}`, fin.approvable ? '#2e7d32' : '#b26a00');
     }
     /**
      * 1 メッセージ → HTML。view = { plans: Map(planId:version → version), activePlan, execState, jsExecState, answerState, … }。
@@ -28683,6 +28929,11 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
       return client;
     }
     const noteAuthError = (e) => { const code = KTAiClient.isAiClientError(e) ? e.code : null; if (code && AUTH_CODES.includes(code)) { capability = { available: false, reason: code }; renderSession(); } };
+    //   §0f.3 の 3（2026-10-09）: health の limits.deadlineMs（feature ごとの処理全体の期限）。古い Gateway は無し（null → クライアントは今の 240 秒）
+    const deadlineOf = (feature) => { const d = capability && capability.limits && capability.limits.deadlineMs ? Number(capability.limits.deadlineMs[feature]) : NaN; return Number.isFinite(d) && d > 0 ? d : null; };
+    //   §0f.3（2026-10-09・FP7 / FP9）: 呼び出しの記録に残す値（送った requestId・打ち切りの ms・transport の時刻の相対 ms）。本文は入れない。失敗の例外にも同じ値を付ける
+    const callTraceOf = (requestId, trace) => ({ requestId: requestId || null, limitMs: trace && trace.limitMs != null ? trace.limitMs : null, transport: trace && trace.transport ? { ...trace.transport } : null });
+    const tagCallError = (e, requestId, trace) => { try { if (e && typeof e === 'object' && !e.callTrace) e.callTrace = callTraceOf(requestId, trace); } catch (x) { } };
     const services = {
       /** ASK: 質問 → KTContext.build（focus は質問から解決。曖昧なら候補を返す）→ assistant-qa。Planner は起動しない */
       async ask({ question, signal = null, focus = null, conversation = null, onText = null }) {
@@ -28708,8 +28959,9 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
         // 逐次表示は Gateway が対応している（health の conversation に stream）ときだけ求める（古い Gateway には従来どおり kintone.proxy で送る）
         const streamOn = typeof onText === 'function' && (services.conversationFeatures() || []).includes('stream');
         const tr = nowMs();
-        try { const a = await client.ask({ ctx: gen.ctx, requestId, signal, ...(streamOn ? { onText } : {}) }); perf.requestMs = nowMs() - tr; lastAnswer = a; return { ok: true, answer: a, ctx: gen.ctx, perf }; }
-        catch (e) { noteAuthError(e); throw e; }
+        const trace = {};
+        try { const a = await client.ask({ ctx: gen.ctx, requestId, signal, deadlineMs: deadlineOf(KTAiClient.FEATURE || 'assistant-qa'), trace, ...(streamOn ? { onText } : {}) }); perf.requestMs = nowMs() - tr; lastAnswer = a; return { ok: true, answer: a, ctx: gen.ctx, perf, callTrace: callTraceOf(requestId, trace) }; }
+        catch (e) { noteAuthError(e); tagCallError(e, requestId, trace); throw e; }
       },
       /**
        * 段階 B PROPOSE / DRAFT_REPLY: 今回の発言 ＋ 前回の仮案 ＋ 決定事項 ＋ 要件 → KTContext.buildProposal（絞った facts）→ assistant-qa（mode proposal）。
@@ -28738,8 +28990,9 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
         const feats = services.conversationFeatures() || [];
         const streamOn = typeof onText === 'function' && (feats.includes('stream') || feats.includes('proposal'));
         const tr = nowMs();
-        try { const a = await client.propose({ ctx, requestId, signal, ...(streamOn ? { onText } : {}) }); perf.requestMs = nowMs() - tr; return { ok: true, proposal: a, ctx, perf }; }
-        catch (e) { noteAuthError(e); throw e; }
+        const trace = {};
+        try { const a = await client.propose({ ctx, requestId, signal, deadlineMs: deadlineOf(KTAiClient.FEATURE || 'assistant-qa'), trace, ...(streamOn ? { onText } : {}) }); perf.requestMs = nowMs() - tr; return { ok: true, proposal: a, ctx, perf, callTrace: callTraceOf(requestId, trace) }; }
+        catch (e) { noteAuthError(e); tagCallError(e, requestId, trace); throw e; }
       },
       /** PLAN / REVISE_PLAN: goal（＋修正）→ KTContext.buildPlan → change-planner → KTPlanReview（Toolkit 検証） */
       async plan({ goal, revision = null, signal = null, subject = null, decisions = null, baseCtx = null, requirements = null, generateAfter = false, onText = null }) {
@@ -28765,8 +29018,9 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
         let p;
         const tr = nowMs();
         const streamReply = typeof onText === 'function' && (services.plannerFeatures() || []).includes('reply');   // 段階 C（C3b）: 能力があるときだけ逐次表示を求める
-        try { p = await client.plan({ ctx: gen.ctx, requestId, signal, ...(streamReply ? { onText } : {}) }); }
-        catch (e) { noteAuthError(e); throw e; }
+        const trace = {};
+        try { p = await client.plan({ ctx: gen.ctx, requestId, signal, deadlineMs: deadlineOf(KTAiClient.FEATURE_PLANNER), trace, ...(streamReply ? { onText } : {}) }); }
+        catch (e) { noteAuthError(e); tagCallError(e, requestId, trace); throw e; }
         perf.requestMs = nowMs() - tr;
         normalizePlanConditions(p, (inputs && inputs.data) || null);
         let review = null;
@@ -28778,7 +29032,7 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
         // 2026-10-05 第 3 段: 今回の発言の扱い（turn）は計画の一部ではない（版の計画に残さない。台帳と表示だけに使う）
         const turn = p?.turn ?? null, requirementsMeta = p?.requirementsMeta ?? null;
         if (p) { delete p.turn; delete p.requirementsMeta; }
-        return { plan: p, ctx: gen.ctx, review, decisionsMeta: p?.decisionsMeta ?? null, gatewayPlan: p?.gatewayPlan ?? null, revisionMeta: p?.revisionMeta ?? null, turn, requirementsMeta, perf };
+        return { plan: p, ctx: gen.ctx, review, decisionsMeta: p?.decisionsMeta ?? null, gatewayPlan: p?.gatewayPlan ?? null, revisionMeta: p?.revisionMeta ?? null, turn, requirementsMeta, perf, callTrace: callTraceOf(requestId, trace) };
       },
       /** 会話の応答性（2026-10-05）: Gateway の計画の修正の方式（health。返さない古い Gateway は全体の作り直しだけ） */
       revisionModes() { return capability?.features?.[KTAiClient.FEATURE_PLANNER || 'change-planner']?.revisionModes || ['full']; },
@@ -28833,8 +29087,9 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
         if (!ctx) throw new KTAiClient.AiClientError({ code: KTAiClient.ERROR_CODES.NO_CONTEXT, message: 'この計画の Context がありません（Context ペインから作った計画は説明の対象外です）' });
         const ectx = KTContext.buildExplain({ question, plan, review, plannerCtx: ctx, kind, version });
         const client = await ensureReady();
-        try { return await client.ask({ ctx: ectx, requestId: KTAiClient.newRequestId(), signal }); }
-        catch (e) { noteAuthError(e); throw e; }
+        const requestId = KTAiClient.newRequestId(), trace = {};
+        try { return await client.ask({ ctx: ectx, requestId, signal, trace }); }
+        catch (e) { noteAuthError(e); tagCallError(e, requestId, trace); throw e; }
       },
       /** Phase 18 DOCUMENT: Toolkit がドキュメント用の Prompt / Markdown / JSON を作る（LLM 不使用・無料）。Context ペインにも同じ結果を出す */
       async document({ kind, version = null }) {
@@ -28919,8 +29174,9 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
         const client = await ensureReady({ generator: true });
         const requestId = KTAiClient.newRequestId();
         let generated;
-        try { generated = await client.generate({ ctx, requestId, signal }); }
-        catch (e) { noteAuthError(e); throw e; }
+        const trace = {};
+        try { generated = await client.generate({ ctx, requestId, signal, deadlineMs: deadlineOf(KTAiClient.FEATURE_GENERATOR), trace }); }
+        catch (e) { noteAuthError(e); tagCallError(e, requestId, trace); throw e; }
         // §0d.3（2026-10-08）: 生成工程（Gateway）が検証したコードを Toolkit で書き換えない（KTModernJs.fixGenerated を通さない）。検証した候補と登録する候補
         //   （candidateHash）を同じにするため。記法の問題（var など）は反映直前の形式確認（KTCodeReview の modern-js）で検出して理由を出すだけにする
         //   （直すのは生成工程の修復か作り直し）
@@ -28942,7 +29198,7 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
           const f = m ? relatedFiles[Number(m[1])] : null;
           if (f && !relatedOmitted.some(x => x.name === f.name && x.target === f.target)) relatedOmitted.push({ name: f.name, target: f.target, reason: 'gateway-dropped', events: Array.isArray(f.events) ? f.events : null });
         }
-        return { ok: true, generated, review, ctx, existingSource, inputHash, verification: verificationOut, candidateHash: verificationOut.candidateHash, requirementIds, relatedFiles: relatedFiles ? relatedFiles.map(f => ({ name: f.name, target: f.target })) : null, relatedOmitted };
+        return { ok: true, generated, review, ctx, existingSource, inputHash, verification: verificationOut, candidateHash: verificationOut.candidateHash, requirementIds, relatedFiles: relatedFiles ? relatedFiles.map(f => ({ name: f.name, target: f.target })) : null, relatedOmitted, callTrace: callTraceOf(requestId, trace) };
       },
     };
     /**
@@ -29225,7 +29481,9 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
       const canChat = paidEnabled && conn.connected && (capability.available || isTransient());
       $send.disabled = !canChat || (busy && !queueable);
       $input.disabled = !paidEnabled;   // 2026-10-06: 開いた直後から書ける（接続の確認の途中・未接続でも書いておける）
-      $cancel.style.display = busy ? '' : 'none';
+      //   §0f.3 の 2（2026-10-09）: 送信が終わった後も作業中の質問が走っていれば［キャンセル］を出す（押すと質問も止める）
+      const asides = !!(conv && typeof conv.asidesRunning === 'function' && conv.asidesRunning() > 0);
+      $cancel.style.display = busy || asides ? '' : 'none';
       if ($newConv) $newConv.disabled = !(conv && conv.messages().length);
       const connecting = !!(flow && flow.isRunning());
       const showFree = !paidEnabled || !conn.connected;
@@ -29319,7 +29577,8 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
       finally {
         currentAbort = null;
         // 失敗・キャンセル・捨てた応答: 入力欄が空のときだけ送った文を戻す（その間に書いた下書きを優先。送った文はエラーの［再試行］にも残る）
-        if (fromComposer && !(r && (r.ok || r.partial)) && conv.state.epoch === epoch && !String($input.value ?? '').trim()) $input.value = rawText ?? t;
+        //   §0f.3 の 1（2026-10-09）: 計画ができた後に止めた送信（最終案を未完成で出した）は、送った文（「採用します」など）を戻さない（続きは最終案のカードの操作）
+        if (fromComposer && !(r && (r.ok || r.partial || r.incomplete)) && conv.state.epoch === epoch && !String($input.value ?? '').trim()) $input.value = rawText ?? t;
         $input.disabled = false; renderComposer();
       }
       // Phase 19 §13: 作り直した JavaScript は右の「コード」へ（読んでいる最中のペインは奪わない）。
@@ -29337,7 +29596,8 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
       return r;
     }
     $send.addEventListener('click', () => { sendChat($input.value, { source: 'composer' }); });
-    $cancel.addEventListener('click', () => { try { currentAbort?.abort(); } catch (e) { } });
+    //   §0f.3 の 2（2026-10-09）: ［キャンセル］は送信と作業中の質問（askNow・askAside）の両方を止める
+    $cancel.addEventListener('click', () => { try { currentAbort?.abort(); } catch (e) { } try { if (conv && typeof conv.cancelAsides === 'function') conv.cancelAsides(); } catch (e) { } renderComposer(); });
     /**
      * 新しい会話（2026-10-06 利用者の指示: ［新しい会話］は 1 か所。確認のカードは出さない）。送信中の要求を止め、同意待ちの文・まだ反映していない準備を
      * 取り消し、左右を新しい会話の分にする（前の処理の遅い応答は会話の世代で捨てる）。反映の記録は残す（記録から開いて元に戻せる）。
@@ -30924,7 +31184,7 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
       // Phase 19: Workspace（右）の成果物とペイン
       showPane, activeArtifact: () => activeArtifact, workspaceState: () => VM.workspaceState({ version: conv.activePlan(), execState, jsExec, subject: conv.subject() }),
       renderHeader, isConnected,
-      cancel: () => { try { currentAbort?.abort(); } catch (e) { } },
+      cancel: () => { try { currentAbort?.abort(); } catch (e) { } try { if (conv && typeof conv.cancelAsides === 'function') conv.cancelAsides(); } catch (e) { } },
     };
   }
 
