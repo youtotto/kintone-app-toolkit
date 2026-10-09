@@ -25,7 +25,10 @@
 //        通常表示と承認の欄に一度に出す）。D の実現として残した追加は、通常表示の「仮案から変わった点と理由」に対象・動作・理由を出す。
 //        (a) 仮案の段階で実現済みの値で答えた決定事項に計画の AI が保存禁止を結び付ける → X(D) に無いので planner として外れる／(b) 構造の無い値で答えた決定事項 → 判断の候補／
 //        (c) 構造の無い委任に委ねた警告 → 判断の候補／(d1) 構造のある委任に警告と保存禁止を結び付ける（警告 → 保存禁止・保存禁止 → 警告）→ どちらの順でも警告は残り保存禁止は外れる／
-//        (d2) 構造の無い委任（今の S7_SF の素材）に両方を結び付ける → どちらの順でも両方を判断の候補に／(d3) 委ねた警告を PC とモバイルの 2 つの要件で実現 → 両方残る
+//        (d2) 構造の無い委任（今の S7_SF の素材）に両方を結び付ける → どちらの順でも両方を判断の候補に／(d3) 委ねた警告を PC とモバイルの 2 つの要件で実現 → 両方残る／
+//        (d4) 前の確認の K-5（2026-10-10）: 構造のある委任がまだ範囲内の要件で実現されていないとき、計画の AI が委ねた警告と混入した保存禁止をどちらも id を付けずに
+//        （decisionRefs []）足す → 警告は X(D) に入るので構造の照合で D の実現（delegated・必須の効果・通常表示の「計画で足した」）、保存禁止は planner として外れる。
+//        どちらの順でも同じ・印の無い Gateway でも同じ。D が範囲内の要件で実現済みなら構造の照合はしない（S8-23）
 //
 //   修正前の版（KT_SRC）でも例外で止めずに各 assert を評価する（読み取りの関数が無い版では空の読み取りで落ちる）。§S2 は最初の計画・自動の見直し・差分更新の
 //   3 つの section に分けている（前の section が落ちても後の assert を評価する）
@@ -804,13 +807,14 @@ await section(async () => {
  * (d1)〜(d3) の計画の偽物: 最初の計画で委ねた警告（warns の操作。既定は WARN_PLAN_OP 1 つ）と混入した保存禁止を足し、どちらにも委ねた判断の id を decisionRefs で付ける。
  *   warnFirst = 操作の順（警告 → 保存禁止 / 保存禁止 → 警告）。自動の見直しでは警告を足さない（保存禁止は足し直す・同じく結び付ける）
  */
-const dPlan = ({ warnFirst, warns = [WARN_PLAN_OP], refs = S8_REFS }) => (args) => {
+//   link = false（(d4)・前の確認の K-5）: どちらにも決定事項の id を付けない（decisionRefs []）
+const dPlan = ({ warnFirst, warns = [WARN_PLAN_OP], refs = S8_REFS, link = true }) => (args) => {
   const r = planImplOf({ refs })(args);
   const dw = delegatedIdOf(args.decisions, 'lock.warn') || delegatedIdOf(args.decisions);
   const ops = r.turn.requirementOps;
   const warn = args.revision ? [] : warns.map(w => ({ ...w }));
   const ordered = [...ops.filter(op => op.op === 'update'), ...(warnFirst ? [...warn, ...ops.filter(isSaveAdd)] : [...ops.filter(isSaveAdd), ...warn]), ...ops.filter(op => op.op !== 'update' && !isSaveAdd(op))];
-  r.turn.requirementOps = withRefs(ordered, (op) => (dw && (isWarnAdd(op) || isSaveAdd(op)) ? [dw] : []));
+  r.turn.requirementOps = withRefs(ordered, (op) => (link && dw && (isWarnAdd(op) || isSaveAdd(op)) ? [dw] : []));
   return r;
 };
 /** (d1)・(d3) の仮案: 1 回目の仮案で警告の要件（undecided・warn・planRefs Q1）が判断「備考の警告」に結び付き、委任のターンでは要件を作らない（採用の時点に判断の構造がある） */
@@ -900,6 +904,58 @@ await section(async () => {
   const html = finalHtml(x);
   assert(ws.length === 2 && ws.every(q => q.basis === 'delegated' && q.via === 'decisionRefs' && q.inScope === true) && !!g1 && !!g2 && effKeys(g1.requiredEffects).includes('memo:warn') && effKeys(g2.requiredEffects).includes('memo:warn') && g1.requiredEffects.some(e => e.effect === 'warn' && (e.requirementIds || []).includes(ws.find(q => q.planRefs.includes('C1')).id)) && g2.requiredEffects.some(e => e.effect === 'warn' && (e.requirementIds || []).includes(ws.find(q => q.planRefs.includes('C2')).id)) && noSave(v && v.plan) && /計画で足した: 「備考」に警告を出します（おまかせにした「備考の警告」の実現として）/.test(shutOf(html)),
     `S8-18: 委ねた警告を PC とモバイルの 2 つの要件で実現 → 両方 D の実現（PC とモバイルの生成の必須の効果に警告）。保存禁止は外れる: ${JSON.stringify({ ws: ws.map(q => [q.id, q.basis, q.planRefs]), c1: g1 && effKeys(g1.requiredEffects), c2: g2 && effKeys(g2.requiredEffects) })}`);
+});
+//   (d4) 前の確認の K-5（2026-10-10）: 判断の構造がある委任（D1_SF。採用の時点の組 X(D) = 備考・警告。仮案の警告の要件は判断に結び付くだけで customization に結び付かない＝
+//   まだ範囲内の要件で実現されていない）で、計画の AI が委ねた警告と混入した保存禁止を、どちらも決定事項の id を付けずに（decisionRefs []）足す。
+//   警告の (フィールド, 効果) は X(D) にすべて入るので D の実現（委ねた判断 → delegated・構造の照合）、保存禁止は X(D) に無いので今までどおり planner として外れる。
+//   AI の id にも操作の順にも頼らない（どちらの順でも同じ）。印の無い Gateway（decisionRefs が返らない）でも同じ
+const dOrders4 = {};
+for (const [mark, warnFirst] of [[true, true], [true, false], [false, true]]) {
+  await section(async () => {
+    const tag = `${mark ? '印あり・id なし' : '印なし'}・${warnFirst ? '警告 → 保存禁止' : '保存禁止 → 警告'}`;
+    planCalls.length = 0;
+    const gen = recordingGenerate(['good']);
+    const conv = makeConvC({ scriptFn: D1_SF, labels: LABELS, generate: gen, planImpl: dPlan({ warnFirst, link: false }) });
+    const x = mark ? markOn(conv) : conv;
+    await x.c.send(REQ); await x.c.send(DELEGATE_U);
+    const asks = x.calls.ask.length;
+    await x.c.send('採用します');
+    const v = x.c.activePlan();
+    const sco = scopeOf(x);
+    const warnReq = reqRowOf(sco, q => q.createdBy === 'plan' && (q.effects || []).includes('warn'));
+    const saves = (sco.requirements || []).filter(q => ['plan', 'plan-auto'].includes(q.createdBy) && (q.effects || []).includes('block-save'));
+    const g1 = gen.seen.filter(g => g.cid === 'C1' && v && g.version === v.version)[0] || null;
+    const g2 = gen.seen.filter(g => g.cid === 'C2' && v && g.version === v.version)[0] || null;
+    assert(!!warnReq.id && warnReq.basis === 'delegated' && warnReq.via === 'structure' && warnReq.inScope === true && !warnReq.stripped && (warnReq.decisionLinks || []).length === 1 && warnReq.decisionLinks.every(l => l.kind === 'delegated' && l.verdict === 'match' && l.source === 'structure')
+      && [g1, g2].every(g => !!g && JSON.stringify(effKeys(g.requiredEffects)) === JSON.stringify(['amount:lock', 'memo:warn']) && g.requiredEffects.some(e => e.field === 'memo' && e.effect === 'warn' && (e.requirementIds || []).includes(warnReq.id))),
+      `S8-19（${tag}）: id を付けずに足した委ねた警告は、採用の時点の組 X(D)（備考・警告）にすべて入るので D の実現（delegated・構造の照合・範囲内・PC とモバイルの生成の必須の効果に警告の要件の id つき）: ${JSON.stringify({ warn: [warnReq.id, warnReq.basis, warnReq.via, warnReq.inScope, warnReq.decisionLinks], c1: g1 && effKeys(g1.requiredEffects), c2: g2 && effKeys(g2.requiredEffects) })}`);
+    assert(saves.length >= 1 && saves.every(q => q.basis === 'planner' && !q.via && q.inScope === false && q.out === 'adds-effect' && q.stripped === true && !(q.decisionLinks || []).some(l => l.verdict === 'match')) && noSave(v && v.plan) && noSave(v && v.gatewayPlan) && !candidatesOf(v).length,
+      `S8-20（${tag}）: id を付けずに足した混入した保存禁止は X(D) に無いので D の実現にしない（planner として範囲外・v.plan と v.gatewayPlan から外す・判断の候補にもしない）: ${JSON.stringify({ saves: saves.map(q => [q.id, q.createdBy, q.basis, q.via, q.inScope, q.out, q.stripped]) })}`);
+    const html = finalHtml(x), shut = shutOf(html);
+    const sec = (shut.match(/仮案から変わった点と理由[\s\S]*?(?=実現できない点|反映先と主な影響|$)/) || [''])[0];
+    assert(/計画で足した: 「備考」に警告を出します（おまかせにした「備考の警告」の実現として）/.test(sec) && !/保存/.test((sec.match(/計画で足した:[^\n]*/) || [''])[0]) && !/判断が残っています/.test(shut) && /依頼に無い「[^」]*保存の停止」は入れていません/.test(shut) && !/依頼に無い「[^」]*警告」/.test(shut) && x.calls.ask.length === asks && x.calls.propose.length === 2,
+      `S8-21（${tag}）: 通常表示の「仮案から変わった点と理由」に「計画で足した」警告を出す（外した保存禁止は「依頼に無い」の 1 行だけ。警告は「依頼に無い」に入れない）。質問・仮案の作り直しは増えない: ${sec.slice(0, 260)}`);
+    if (mark) dOrders4[warnFirst ? 'wf' : 'sf'] = dSummaryOf(x, gen);
+  });
+}
+await section(async () => {
+  assert(!!dOrders4.wf && !!dOrders4.sf && JSON.stringify(dOrders4.wf) === JSON.stringify(dOrders4.sf), `S8-22: (d4) id を付けない 警告 → 保存禁止 と 保存禁止 → 警告 で結果が同じ（要件の根拠・範囲・生成の必須の効果・計画・通常表示の追加と候補）: ${JSON.stringify(dOrders4)}`);
+});
+await section(async () => {
+  //   (d4) の部品: 構造の照合は、まだ範囲内の要件で実現されていない決定事項だけ。計画の AI が仮案の警告の要件（委任・範囲内）を customization に結び付けて実現したら
+  //   （D は実現済み）、id を付けずに別の customization に足した警告は今までどおり planner として判定する（外れる）
+  planCalls.length = 0;
+  const gen = recordingGenerate(['good']);
+  const r6Refs = { ...S8_REFS, R6: { planRefs: ['C1'], effects: ['warn'] } };
+  const x = markOn(makeConvC({ scriptFn: D1_SF, labels: LABELS, generate: gen, planImpl: dPlan({ warnFirst: true, link: false, refs: r6Refs, warns: [{ ...WARN_PLAN_OP, behavior: '備考が空なら警告を出す（モバイル）', planRefs: ['C2'] }] }) }));
+  await x.c.send(REQ); await x.c.send(DELEGATE_U); await x.c.send('採用します');
+  const v = x.c.activePlan();
+  const sco = scopeOf(x);
+  const r6 = reqRowOf(sco, q => q.id === 'R6');
+  const warnReq = reqRowOf(sco, q => q.createdBy === 'plan' && (q.effects || []).includes('warn'));
+  const g1 = gen.seen.filter(g => g.cid === 'C1' && v && g.version === v.version)[0] || null;
+  assert(r6.basis === 'delegated' && r6.inScope === true && JSON.stringify(r6.planRefs) === '["C1"]' && !!warnReq.id && warnReq.basis === 'planner' && !warnReq.via && !(warnReq.decisionLinks || []).length && warnReq.inScope === false && warnReq.out === 'adds-effect' && !!g1 && effKeys(g1.requiredEffects).includes('memo:warn'),
+    `S8-23: D が範囲内の要件（仮案の警告の要件を C1 に結び付けた）で実現済みなら、構造の照合はしない（id の無い C2 の警告は planner として判定）: ${JSON.stringify({ r6: [r6.basis, r6.planRefs], warn: [warnReq.id, warnReq.basis, warnReq.via, warnReq.inScope, warnReq.out, warnReq.decisionLinks] })}`);
 });
 
 // =========================================================
