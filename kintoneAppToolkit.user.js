@@ -25084,8 +25084,26 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
       }
       // 2) 台帳の要件の効果（その要件の id で。計画より弱めない）
       const owns = (f, e) => (e === 'set-value' ? f.access === 'WRITE' || f.access === 'CONTROL' : f.access === 'CONTROL');
+      //   2026-10-10（C1 の検証素材の整理で判明）: 対象がテーブル（明細）の「編集できない」要件は、この customization がそのテーブルの列に置いた「編集できない」で満たす
+      //   （列の組に要件の id を足す）。kintone の disabled はセル（列）に効き、テーブル自体には効かない。計画がテーブルを fields に入れず列だけを書いた形
+      //   （実 AI の CX-1 の計画）でも、テーブルのコード・名前と完全一致する対象ならテーブルとみなす。列に「編集できない」が無ければ今までどおり
+      //   （テーブルに担当が無い no-owner-field・対象を特定できない target-unresolved）。ほかの効果（表示の切り替えなど）はテーブルのまま扱う
+      const tables = new Set(Object.values(columns && typeof columns === 'object' ? columns : {}).map(String));
+      const tableOfReq = (r, tf) => {
+        if (tf) { const code = mapCode(tf.code); return tables.has(code) ? code : null; }
+        const tg = norm(r && r.target);
+        const hits = tg ? [...tables].filter(t => t === tg || (norm(labels && labels[t]) && norm(labels[t]) === tg)) : [];
+        return hits.length === 1 ? hits[0] : null;
+      };
       for (const r of linked) for (const e of effectsOfReq(r)) {
         const tf = fieldOfReq(r);
+        const table = e === 'lock' ? tableOfReq(r, tf) : null;
+        const colGroups = table ? [...groups.values()].filter(g => g.effect === 'lock' && columnOf(g.field) === table) : [];
+        if (colGroups.length) {
+          if (norm(r.condition) && colGroups.every(g => !g.condition)) { if (!unresolved.some(u => u.reason === 'condition-unknown' && u.field === table && u.effect === e && u.requirementId === String(r.id))) unresolved.push({ field: table, requirementId: String(r.id), effect: e, reason: 'condition-unknown' }); continue; }
+          for (const g of colGroups) if (!g.requirementIds.includes(String(r.id))) g.requirementIds.push(String(r.id));
+          continue;
+        }
         if (!tf) { unresolved.push({ field: '', requirementId: String(r.id), effect: e, reason: 'target-unresolved' }); continue; }
         if (!owns(tf, e)) { unresolved.push({ field: mapCode(tf.code), requirementId: String(r.id), effect: e, reason: 'no-owner-field', access: tf.access || 'READ' }); continue; }
         const code = mapCode(tf.code);
