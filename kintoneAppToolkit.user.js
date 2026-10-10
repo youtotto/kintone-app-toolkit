@@ -21538,7 +21538,8 @@
      *   kintone.proxy に切り替える（Gateway に届いた後の失敗で送り直さない = 二重に使わない）
      */
     const DIRECT_FALLBACK_WITHIN_MS = 5000;
-    //   §0f.3（2026-10-09・FP9）: mark（任意）= 時刻の印（headersAt = 応答の見出しが届いた・firstByteAt = 本文の最初の断片が届いた）。呼び出しの記録に相対の ms で残す（本文は記録しない）
+    //   §0f.3（2026-10-09・FP9）: mark（任意）= 時刻の印（headersAt = 応答の見出しが届いた・firstByteAt = 逐次表示（SSE）では本文の最初の断片が届いた時刻、
+    //   逐次表示なしの経路では resp.text() で本文を読み終えた時刻（最初の断片の到着ではない。2026-10-10 の切り分けで区別））。呼び出しの記録に相対の ms で残す（本文は記録しない）
     //   §0f.4 の 5（2026-10-09）: noProxyFallback = 直接の送信が失敗しても kintone.proxy で送り直さない（検証の上限が有効なとき。同じ要求を 2 回送らない）
     function createDefaultTransport({ kintoneApi = (typeof kintone !== 'undefined' ? kintone : null), fetchFn = (typeof fetch !== 'undefined' ? fetch : null), nowFn = () => Date.now() } = {}) {
       return async ({ url, method, headers, body, signal = null, preferDirect = false, onEvent = null, mark = null, noProxyFallback = false }) => {
@@ -21723,6 +21724,8 @@
      *   期限が無い（古い Gateway）ときは null（呼び出し側が今の 240 秒を使う）。タイマーは絶対時間（逐次配信で延ばさない）
      */
     const RECEIVE_MARGIN_MS = 20000, CLIENT_LIMIT_MAX_MS = 330000, CLIENT_LIMIT_DEFAULT_MS = 240000;
+    /** 打ち切りのタイマーがこれ以上遅れて動いたら、ページが凍結・停止から再開した直後とみなす（ms）と、その時に受信の処理を先に進める猶予（ms。1 回だけ） */
+    const LATE_TIMER_MS = 5000, RESUME_GRACE_MS = 3000;
     const clientLimitFromDeadline = (deadlineMs) => { const d = Number(deadlineMs); return deadlineMs != null && Number.isFinite(d) && d > 0 ? Math.min(d + RECEIVE_MARGIN_MS, CLIENT_LIMIT_MAX_MS) : null; };
 
     /** Contract 2.1 の request envelope（change-planner。payload は KTContext.buildPlan() の結果そのもの） */
@@ -22115,10 +22118,23 @@
         const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
         let timer = null, onAbort = null;
         const guard = new Promise((_, reject) => {
-          if (hasTimeout) timer = setTimeout(() => {
+          const expire = (lateMs) => {
+            timer = null;
             try { controller?.abort(); } catch (e) { }
-            reject(new AiClientError({ code: ERROR_CODES.TIMEOUT, message: `AI サービスが ${timeoutMs}ms 以内に応答しませんでした` }));
-          }, timeoutMs);
+            reject(new AiClientError({ code: ERROR_CODES.TIMEOUT, message: `AI サービスが ${timeoutMs}ms 以内に応答しませんでした`, ...(lateMs != null ? { details: { timerLateMs: lateMs } } : {}) }));
+          };
+          //   2026-10-10（実機・生成結果が届かない）: 見えないタブをブラウザーが凍結すると、打ち切りのタイマーは期限を過ぎても動かず、再開した時に
+          //   届いていた応答の処理より先に動くことがある（330 秒の打ち切りが送信の 627 秒後に動き、Gateway が成功で数えた生成を捨てて終了不明にした）。
+          //   予定より LATE_TIMER_MS 以上遅れて動いたら、すぐには打ち切らず、RESUME_GRACE_MS だけ受信の処理を先に進める（猶予は 1 回だけ）。
+          //   その間にそろった応答は普段どおり 1 か所で取り込み、そろわなければ打ち切る（遅れた分は details.timerLateMs）
+          if (hasTimeout) {
+            const dueAt = Date.now() + timeoutMs;
+            timer = setTimeout(() => {
+              const lateMs = Date.now() - dueAt;
+              if (lateMs >= LATE_TIMER_MS) { timer = setTimeout(() => expire(lateMs), RESUME_GRACE_MS); return; }
+              expire(null);
+            }, timeoutMs);
+          }
           if (outer && typeof outer.addEventListener === 'function') { onAbort = () => { try { controller?.abort(); } catch (e) { } reject(cancelled()); }; outer.addEventListener('abort', onAbort, { once: true }); }
         });
         return Promise.race([run(controller?.signal ?? null), guard]).finally(() => { if (timer) clearTimeout(timer); if (onAbort) { try { outer.removeEventListener('abort', onAbort); } catch (e) { } } });
@@ -22473,7 +22489,7 @@
       // Phase 22: エラーの種類・AI が生成しなかった理由
       ERROR_CATEGORY, CATEGORY_JA, errorCategory, declineReasonOf,
       createSettingsStore, createDefaultTransport, normalizeLegacyErrorCode,
-      buildAskEnvelope, buildPlanEnvelope, buildGenerateEnvelope, capabilityFromHealth, limitsFromHealth, clientLimitFromDeadline, RECEIVE_MARGIN_MS, CLIENT_LIMIT_MAX_MS, CLIENT_LIMIT_DEFAULT_MS, validateAnswer, validateProposal, PROPOSAL_INTENTS, validatePlan, validateGenerated, normalizeVerification, BEHAVIOR_CASES_MAX: KT_BEHAVIOR_CASES_MAX, createAiClient, createSession, newRequestId, isPurePlatformQuestion,
+      buildAskEnvelope, buildPlanEnvelope, buildGenerateEnvelope, capabilityFromHealth, limitsFromHealth, clientLimitFromDeadline, RECEIVE_MARGIN_MS, CLIENT_LIMIT_MAX_MS, CLIENT_LIMIT_DEFAULT_MS, LATE_TIMER_MS, RESUME_GRACE_MS, validateAnswer, validateProposal, PROPOSAL_INTENTS, validatePlan, validateGenerated, normalizeVerification, BEHAVIOR_CASES_MAX: KT_BEHAVIOR_CASES_MAX, createAiClient, createSession, newRequestId, isPurePlatformQuestion,
       FEATURE_GENERATOR, GENERATOR_PROMPT_VERSION,
       createPkce, createConnectFlow, isDevMode,
     };
