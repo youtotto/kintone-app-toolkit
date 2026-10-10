@@ -25010,7 +25010,8 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
      * @param {object} plan 計画（customizations・proposedFields）
      * @param {string} customizationId
      * @param {Array} requirements KTAiAnswers.requirementsForContext の形（effects を持てる）
-     * @param {object} o { labels: { code: label }, columns: { 列のコード: テーブルのコード }（アプリ解析のテーブルの列。§0c.8） }
+     * @param {object} o { labels: { code: label }, columns: { 列のコード: テーブルのコード }（アプリ解析のテーブルの列。§0c.8）,
+     *   readOnly: 入力できないフィールドのコード（配列か Set。KTContext.readOnlyFieldCodes。null = 根拠が無い → テーブルの要件を列に引き継がない） }
      * @returns {{ effects: [{ requirementId, requirementIds, field, effect, events, condition }], unresolved: [{ field, requirementId?, effect?, reason, platforms? }], delegated: [{ field, effect, platform, customizationId }], notPossible: [{ field, effect, table, reason, requirementIds }] }}
      *   unresolved の reason: field-unspecified（効果の無い CONTROL を補えない）/ target-unresolved（要件の対象のフィールドを特定できない）/
      *   no-owner-field（対象のフィールドに、その効果を担当する access が計画に無い）/ none（READ 以外のフィールドがあるのに必須の効果が 0 件）/
@@ -25018,7 +25019,7 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
      *   other-platform（候補が読み込まれない platform のイベントを担当する customization が無い）
      *   notPossible の reason: subtable-column-show-hide（テーブルの列の表示切り替え。kintone ではできない。必須の効果にせず実現できない点に出す）
      */
-    function requiredEffectsOf(plan, customizationId, requirements = [], { labels = {}, columns = {} } = {}) {
+    function requiredEffectsOf(plan, customizationId, requirements = [], { labels = {}, columns = {}, readOnly = null } = {}) {
       const all = (plan && Array.isArray(plan.customizations)) ? plan.customizations.filter(Boolean) : [];
       const c = all.find(x => x.customizationId === customizationId) || null;
       if (!c) return { effects: [], unresolved: [], delegated: [], notPossible: [] };
@@ -25084,26 +25085,71 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
       }
       // 2) 台帳の要件の効果（その要件の id で。計画より弱めない）
       const owns = (f, e) => (e === 'set-value' ? f.access === 'WRITE' || f.access === 'CONTROL' : f.access === 'CONTROL');
-      //   2026-10-10（C1 の検証素材の整理で判明）: 対象がテーブル（明細）の「編集できない」要件は、この customization がそのテーブルの列に置いた「編集できない」で満たす
-      //   （列の組に要件の id を足す）。kintone の disabled はセル（列）に効き、テーブル自体には効かない。計画がテーブルを fields に入れず列だけを書いた形
-      //   （実 AI の CX-1 の計画）でも、テーブルのコード・名前と完全一致する対象ならテーブルとみなす。列に「編集できない」が無ければ今までどおり
-      //   （テーブルに担当が無い no-owner-field・対象を特定できない target-unresolved）。ほかの効果（表示の切り替えなど）はテーブルのまま扱う
+      //   2026-10-10（C1 の検証素材の整理で判明・同日の確認の指摘 2 件で直した）: 対象がテーブル（明細）の「編集できない」要件は、テーブルの編集できる列のそれぞれに
+      //   「編集できない」が要る（kintone の disabled はセル（列）に効き、テーブル自体には効かない）。要る列はアプリの構造（columns の列のうちそのテーブルのもの）から、
+      //   入力できない列（readOnly。KTContext.readOnlyFieldCodes = 計算・自動計算・ルックアップのコピー先など、フィールドの定義の根拠）を除いて決める。計画に書かれた列を
+      //   要る列の一覧に使わない。列ごとに: (i) この customization に「編集できない」の組がある → 要件に条件があれば条件のある組だけに要件の id を足し、条件の無い組が
+      //   あればその列を condition-unknown に残す／(ii) 列が CONTROL で「編集できない」が無い → 直接の対象と同じく列の条件で足す（条件が無ければ condition-unknown）／
+      //   (iii) 同じ画面（platform）で、同じ要件が planRefs で指す別の customization がその列に「編集できない」を明示している → その customization が担当（列ごとの条件と
+      //   要件の id はその customization の計算で確かめる）／(iv) どれでもない → no-owner-field（table つき）に残す。テーブル全体を満たした扱いにしない。保存禁止は足さない。
+      //   入力できない列の根拠（readOnly）が無い・編集できる列が無いときは列に引き継がず今までどおり（テーブルに担当が無い no-owner-field・対象を特定できない target-unresolved。
+      //   計画がテーブル自体に「編集できない」を置いた形はテーブルのまま）。ほかの効果（表示の切り替えなど）はテーブルのまま扱う
       const tables = new Set(Object.values(columns && typeof columns === 'object' ? columns : {}).map(String));
+      const roCodes = readOnly == null ? null : new Set((readOnly instanceof Set ? [...readOnly] : Array.isArray(readOnly) ? readOnly : []).map(String));
+      //   対象がテーブルか: テーブルのコード・名前と完全一致するテーブルが 1 つ。計画のフィールドで決まった対象（tf）がそのテーブルか、テーブルと同じ名前の
+      //   そのテーブルの列ならテーブル（名前が重なるときは厳しい側。全部の編集できる列を要る列にする）。計画のフィールドで決まらず、テーブルでもその列でもない
+      //   フィールドが同じ名前（コード）なら特定できない（推測でテーブルにしない）
       const tableOfReq = (r, tf) => {
-        if (tf) { const code = mapCode(tf.code); return tables.has(code) ? code : null; }
         const tg = norm(r && r.target);
         const hits = tg ? [...tables].filter(t => t === tg || (norm(labels && labels[t]) && norm(labels[t]) === tg)) : [];
-        return hits.length === 1 ? hits[0] : null;
+        const table = hits.length === 1 ? hits[0] : null;
+        if (tf) { const code = mapCode(tf.code); if (tables.has(code)) return code; return table && columnOf(code) === table ? table : null; }
+        if (!table) return null;
+        const clash = Object.entries(labels && typeof labels === 'object' ? labels : {}).some(([code, lb]) => code !== table && columnOf(code) !== table && (code === tg || norm(lb) === tg));
+        return clash ? null : table;
+      };
+      const pushUnresolved = (u) => { if (!unresolved.some(x => x.reason === u.reason && x.field === u.field && x.effect === u.effect && x.requirementId === u.requirementId)) unresolved.push(u); };
+      /** 別の customization o がその列に置いた「編集できない」のうち、画面 p のイベントで動くもの（効果のイベント、無ければ o のイベント。条件は効果か列の condition） */
+      const lockOn = (o, col, p) => (Array.isArray(o.fields) ? o.fields : []).filter(f => f && f.code && mapCode(f.code) === col)
+        .flatMap(f => planEffectsOf(f).filter(x => x.effect === 'lock').map(x => ({ condition: norm(mapText(x.condition || f.condition || '')), events: (Array.isArray(x.events) && x.events.length ? x.events : (Array.isArray(o.events) ? o.events : [])).map(e => mapText(e)) })))
+        .filter(x => x.events.some(e => KTJsCatalog.eventPlatform(e) === p));
+      /** テーブルの要件を列ごとに確かめる。列に引き継いだら true（不足は unresolved に残す）。引き継げない（根拠が無い・編集できる列が無い）なら false */
+      const coverTableLock = (r, table) => {
+        if (!roCodes) return false;
+        const colMap = columns && typeof columns === 'object' ? columns : {};
+        const cols = Object.keys(colMap).filter(col => String(colMap[col]) === table && !roCodes.has(String(col)));
+        if (!cols.length) return false;
+        const rid = String(r.id), cond = norm(r.condition);
+        for (const col of cols) {
+          const gs = [...groups.values()].filter(g => g.field === col && g.effect === 'lock');
+          if (gs.length) {
+            const ok = cond ? gs.filter(g => g.condition) : gs;
+            for (const g of ok) if (!g.requirementIds.includes(rid)) g.requirementIds.push(rid);
+            if (ok.length < gs.length) pushUnresolved({ field: col, requirementId: rid, effect: 'lock', reason: 'condition-unknown', table });
+            continue;
+          }
+          const f = fields.find(x => mapCode(x.code) === col) || null;
+          if (f && f.access === 'CONTROL') {
+            if (!norm(f.condition) && (cond || planEffectsOf(f).some(x => x.condition))) pushUnresolved({ field: col, requirementId: rid, effect: 'lock', reason: 'condition-unknown', table });
+            else add(rid, f, 'lock', f.condition || '');
+            continue;
+          }
+          //   (iii) 同じ画面の担当: 要件の planRefs にある別の customization が、その画面のイベントで動く「編集できない」を列に明示している。条件はここでも確かめる
+          //   （その customization の計算で要件が材料から外れる（範囲の noMaterial）ときも、条件の無い編集不可で満たさない）
+          const planRefs = Array.isArray(r.planRefs) ? r.planRefs : [];
+          const owners = mine.map(p => others.filter(o => planRefs.includes(o.customizationId) && platformsOf(o).includes(p)).flatMap(o => lockOn(o, col, p)));
+          if (owners.every(list => list.length)) {
+            if (cond && owners.some(list => list.every(x => !x.condition))) pushUnresolved({ field: col, requirementId: rid, effect: 'lock', reason: 'condition-unknown', table });
+            continue;
+          }
+          pushUnresolved({ field: col, requirementId: rid, effect: 'lock', reason: 'no-owner-field', table, ...(f && f.access ? { access: f.access } : {}) });
+        }
+        return true;
       };
       for (const r of linked) for (const e of effectsOfReq(r)) {
         const tf = fieldOfReq(r);
         const table = e === 'lock' ? tableOfReq(r, tf) : null;
-        const colGroups = table ? [...groups.values()].filter(g => g.effect === 'lock' && columnOf(g.field) === table) : [];
-        if (colGroups.length) {
-          if (norm(r.condition) && colGroups.every(g => !g.condition)) { if (!unresolved.some(u => u.reason === 'condition-unknown' && u.field === table && u.effect === e && u.requirementId === String(r.id))) unresolved.push({ field: table, requirementId: String(r.id), effect: e, reason: 'condition-unknown' }); continue; }
-          for (const g of colGroups) if (!g.requirementIds.includes(String(r.id))) g.requirementIds.push(String(r.id));
-          continue;
-        }
+        if (table && coverTableLock(r, table)) continue;
         if (!tf) { unresolved.push({ field: '', requirementId: String(r.id), effect: e, reason: 'target-unresolved' }); continue; }
         if (!owns(tf, e)) { unresolved.push({ field: mapCode(tf.code), requirementId: String(r.id), effect: e, reason: 'no-owner-field', access: tf.access || 'READ' }); continue; }
         const code = mapCode(tf.code);
@@ -25210,7 +25256,8 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
      *   §0f.2 の 9（2026-10-09）: 呼び出し側は、decisionRefs の印がある Gateway では delegationOpen を渡さない（委任の実現は要件の decisionRefs と X(D) の照合で決まる）。
      * @param {Array} reqs 台帳の要件（KTAiAnswers.requirementsOf の要素。scope を持てる）
      * @param {object|null} plan 計画（customizations）
-     * @param {object} o { labels（フィールドのコード → 名前。対象のフィールドの照合に使う）, delegationOpen, possibleSince, openDecisions（(b) の決定事項 [{ id, key, kind, label }]）,
+     * @param {object} o { labels（フィールドのコード → 名前。対象のフィールドの照合に使う）, columns（列のコード → テーブルのコード。対象がテーブルの「編集できない」を
+     *   そのテーブルの列にも当てる。2026-10-10）, delegationOpen, possibleSince, openDecisions（(b) の決定事項 [{ id, key, kind, label }]）,
      *   candidateLinks（(a) 要件 id → 結び付いた決定事項 [{ id, key, kind, label }]） }
      * @returns {{ inIds: Set<string>, out: Map<string, { reason: 'suggestion'|'adds-effect'|'candidate', customizationIds?: string[], effects?: string[], decisions?: Array }>, eIn: Map<string, Set<string>>, undetermined: Set<string>,
      *   eInField: Map<string, Map<string, Set<string>>>, noMaterial: Map<string, Set<string>>,
@@ -25218,7 +25265,7 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
      *   linked = 決定事項の結び付き（scope.via decisionRefs。採用の時点の組 X(D) に入る＝D の実現）で範囲内に上がった要件が、それを除いた範囲内の要件の効果に無い効果を足すもの
      *   （外さない。最終案の通常表示の「仮案から変わった点と理由」に出す）
      */
-    function requirementScopeOf(reqs, plan, { labels = null, delegationOpen = false, possibleSince = null, openDecisions = [], candidateLinks = null } = {}) {
+    function requirementScopeOf(reqs, plan, { labels = null, columns = null, delegationOpen = false, possibleSince = null, openDecisions = [], candidateLinks = null } = {}) {
       const sinceOk = (r) => possibleSince == null || (Number(r.updatedIn ?? r.createdIn) || 0) >= Number(possibleSince);
       const list = (Array.isArray(reqs) ? reqs : []).filter(r => r && r.id && r.decision !== 'revoked');
       const custs = ((plan && Array.isArray(plan.customizations)) ? plan.customizations : []).filter(c => c && c.customizationId);
@@ -25249,6 +25296,9 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
           if (!tf) { unresolvedTarget = true; continue; }
           const k = String(tf.code);
           const fs = byField.get(k) || new Set(); for (const e of ef) fs.add(e); byField.set(k, fs);
+          //   2026-10-10: 対象がテーブル（明細）の「編集できない」は、そのテーブルの列の「編集できない」も範囲内（requiredEffectsOf がテーブルの要件を列で確かめるのと同じ。
+          //   計画がテーブルを fields に入れ、別の要件が列を対象にしても、列の編集不可を「依頼に無い」として外さない）
+          if (ef.includes('lock') && columns && typeof columns === 'object') for (const [col, t] of Object.entries(columns)) if (String(t) === k) { const cs = byField.get(String(col)) || new Set(); cs.add('lock'); byField.set(String(col), cs); }
         }
         if (unknown || !set.size) undetermined.add(cid);
         eIn.set(cid, set);
@@ -26196,6 +26246,8 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
       /** 採用した仮案の系列の台帳（採用の時点の記録 lg.adoption がある）だけ範囲を照合する。仮案を通らない計画の台帳は今までどおり（null） */
       //   レビューの指摘 row3（2026-10-09）: 対象のフィールドの照合に画面のフィールドの名前を使う（requiredEffectsOf と同じ）。未実現の委任があるか（delegationOpenOf）も渡す
       const scopeLabels = () => { try { const m = typeof services.fieldLabels === 'function' ? services.fieldLabels() : null; return m && typeof m === 'object' ? m : {}; } catch (e) { return {}; } };
+      //   2026-10-10: テーブルの列（列のコード → テーブルのコード。採用範囲の判定でテーブルの要件の効果を列にも当てる）
+      const scopeColumns = () => { try { const m = typeof services.tableColumns === 'function' ? services.tableColumns() : null; return m && typeof m === 'object' ? m : {}; } catch (e) { return {}; } };
       /**
        * レビューの指摘 row3 の 2: 未実現の委任があるか（採用の時点で委ねた判断の key のうち、その key に結び付く取り消していない要件が 1 つも無いものがある）。
        *   key への結び付きは仮案の項目の id → 要件の対応（lg.itemReqs の key:<key>。同じ key の判断・前提をターンをまたいでつないだもの）
@@ -26251,7 +26303,7 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
         if (!(lg && lg.adoption)) return null;
         const on = decisionRefsOn();
         const ds = on ? { open: false, since: null, keys: [], plan: [] } : delegationStateOf(lg);
-        return requirementScopeOf(KTAiAnswers.requirementsOf(lg), plan, { labels: scopeLabels(), delegationOpen: ds.open, possibleSince: ds.since, openDecisions: ds.open ? openDecisionsOf(lg, ds) : [], candidateLinks: on ? candidateLinksOf(lg) : null });
+        return requirementScopeOf(KTAiAnswers.requirementsOf(lg), plan, { labels: scopeLabels(), columns: scopeColumns(), delegationOpen: ds.open, possibleSince: ds.since, openDecisions: ds.open ? openDecisionsOf(lg, ds) : [], candidateLinks: on ? candidateLinksOf(lg) : null });
       };
       /** 範囲内の要件（KTAiAnswers.requirementsForContext の形。取り消し済みは今までどおり含める）。必須の効果・流用の指紋・生成の要件・自動の見直しの引き金に使う */
       const inScopeRequirements = (lg, plan = null, sc0 = undefined) => { if (!lg) return []; const sc = sc0 !== undefined ? sc0 : scopeOfLedger(lg, plan); return KTAiAnswers.requirementsForContext(lg).filter(r => !(sc && r && r.decision !== 'revoked' && sc.out.has(r.id))); };
@@ -27609,6 +27661,8 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
         const platformsOfEntry = (e) => { const t = e && e.existingSource && e.existingSource.target; if (t === 'desktop' || t === 'mobile') return [t]; const p = e && e.customization && Array.isArray(e.customization.platform) ? e.customization.platform.filter(x => x === 'desktop' || x === 'mobile') : []; return p.length ? ['desktop', 'mobile'].filter(x => p.includes(x)) : ['desktop']; };
         /** §0c.8: 画面が渡すテーブルの列（{ 列のコード: テーブルのコード }。アプリ解析の構造。無ければ {}） */
         const tableColumns = () => { try { const m = typeof services.tableColumns === 'function' ? services.tableColumns() : null; return m && typeof m === 'object' ? m : {}; } catch (e) { return {}; } };
+        //   2026-10-10: 入力できないフィールドのコード（画面が services.readOnlyFields で KTContext.readOnlyFieldCodes から作る）。取れなければ null（根拠が無い。[] = すべて入力できる、と区別する）
+        const readOnlyFields = () => { try { const m = typeof services.readOnlyFields === 'function' ? services.readOnlyFields() : null; return Array.isArray(m) || m instanceof Set ? [...m].map(String) : null; } catch (e) { return null; } };
         /** 効果を「要件として必要な動作」の言い方で（要件未達の理由の文） */
         const EFFECT_NEED_JA = KT_EFFECT_NEED_JA;
         /** 動作テストの期待（Gateway の behavior.cases[].expect）の言い方 */
@@ -27790,6 +27844,8 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
           scope: '効果の events・condition を、その効果を確かめられる画面のイベントと条件にしてください',
           missing: '必要な動作を担当するフィールド（access・effects）・イベント・条件を見直してください',
           unresolved: 'customizations[].fields[] の effects（[{ effect, condition, events }]）を、その動作を担当するフィールド（access CONTROL か WRITE）に置き、condition は効果ごとに書いてください',
+          //   2026-10-10: テーブル（明細）の要件の列の不足（自動の差分更新の依頼と同じ指示）
+          table: 'テーブル（明細など）を対象にした要件は target をテーブルのまま残し、テーブル自体には effects を置かず、そのテーブルの編集できる列をすべて fields に access CONTROL で入れて、列ごとに effects の lock を要件の条件で置いてください（保存を止める動作や行の追加・削除の制限は足さないでください）',
         });
         //   C-1 第 3 段: existing-lock-unverified は専用の直し方（文はファイル名を入れて fixRequestOf が作る）
         const hintKeyOfReason = (r) => { const cat = ktBehaviorReasonCategory(r); return r === 'existing-lock-unverified' ? r : cat === 'existing' ? 'existing' : FIX_REASON_HINT[r] ? r : cat === 'condition' ? 'condition-unparsed' : cat === 'limit' ? 'limit' : 'scope'; };
@@ -27813,8 +27869,9 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
             revise = true;
             const head = `・${file}`;
             if (vd.kind === 'effects-unknown') {
-              for (const u of (vd.unresolved || []).slice(0, 6)) lines.push(`${head}: 必須の動作を特定できません（${u.reason}${u.field ? `・フィールド ${fieldName(u.field)}` : ''}${u.effect ? `・動作 ${KT_EFFECT_NEED_JA[u.effect] || u.effect}` : ''}${u.requirementId ? `・要件 ${u.requirementId}` : ''}${Array.isArray(u.platforms) && u.platforms.length ? `・画面 ${u.platforms.map(p => (p === 'mobile' ? 'モバイル' : 'PC')).join('・')}` : ''}）`);
+              for (const u of (vd.unresolved || []).slice(0, 6)) lines.push(`${head}: 必須の動作を特定できません（${u.reason}${u.field ? `・フィールド ${fieldName(u.field)}` : ''}${u.effect ? `・動作 ${KT_EFFECT_NEED_JA[u.effect] || u.effect}` : ''}${u.requirementId ? `・要件 ${u.requirementId}` : ''}${u.table ? `・テーブル ${fieldName(u.table)}` : ''}${Array.isArray(u.platforms) && u.platforms.length ? `・画面 ${u.platforms.map(p => (p === 'mobile' ? 'モバイル' : 'PC')).join('・')}` : ''}）`);
               hints.add((vd.unresolved || []).some(u => u.reason === 'other-platform') ? 'other-platform' : 'unresolved');
+              if ((vd.unresolved || []).some(u => u.table)) hints.add('table');
               continue;
             }
             if (vd.kind === 'effects-limit') { lines.push(`${head}: ${vd.reason}`); hints.add('limit'); continue; }
@@ -27869,8 +27926,14 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
           if (typeof services.existingHash === 'function') { let h = null; try { h = await services.existingHash({ version: v, customizationId: c.customizationId }); } catch (e) { h = null; } const prevHash = prevEntry.existingSource && typeof prevEntry.existingSource.text === 'string' ? KTScan.hashText(prevEntry.existingSource.text) : null; if ((h ?? null) !== (prevHash ?? null)) return no('existing'); }
           if (typeof services.simEnvKey === 'function') { const k = await envKeyOf(v, c.customizationId); if ((k ?? null) !== (prevEntry.envKey ?? null)) return no('env'); }
           const reqIds = requirementsKeyOf(v, c.customizationId);
-          return (prevEntry.requirementsKey ?? reqIds) === reqIds ? { reuse: true, reason: null } : no('requirements');
+          if ((prevEntry.requirementsKey ?? reqIds) !== reqIds) return no('requirements');
+          //   2026-10-10: 必須の効果は、ほかの customization の担当（同じ画面の別の JavaScript が列を担当する・別の画面の担当）とアプリの構造でも変わる。
+          //   今の必須の効果に不足があるか、前の生成に渡した必須の効果と違えば流用しない（流用で不足を隠さない。理由の種類は要件が変わったときと同じ）
+          if (Array.isArray(prevEntry.requiredEffects)) { const rq = requiredOf(v, c.customizationId); if (rq.unresolved.length || effectsKeyOf(rq.effects) !== effectsKeyOf(prevEntry.requiredEffects)) return no('requirements'); }
+          return { reuse: true, reason: null };
         };
+        /** 必須の効果の指紋（フィールド・効果・イベント・条件・要件の id。順序に依らない） */
+        const effectsKeyOf = (list) => JSON.stringify((Array.isArray(list) ? list : []).filter(Boolean).map(e => [e.field, e.effect, (Array.isArray(e.events) ? e.events : []).join(','), e.condition || '', [...(Array.isArray(e.requirementIds) ? e.requirementIds : [e.requirementId])].map(String).sort().join('+')].join('|')).sort());
         /**
          * 流用の判定に使う要件の指紋: この customization を planRefs で指す要件と、担当の無い要件（planRefs が空・計画の手順 / customization に無い id だけ）（id・決定・条件・動作・効果）。
          *   担当の無い要件が増える・変わる・取り消されたら、どの JavaScript が担当するか分からないので、全部の customization を作り直す（反証 A3。仮案の流れの planRefs は仮案の項目 id）
@@ -27902,9 +27965,11 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
         const unresolvedReasonOf = (list) => {
           const names = (xs) => [...new Set(xs.map(u => (u.field ? fieldName(u.field) : '')).filter(Boolean))].join('・');
           const parts = [];
-          const fu = list.filter(u => u.reason === 'field-unspecified'), nf = list.filter(u => u.reason === 'no-owner-field'), tu = list.filter(u => u.reason === 'target-unresolved'), none = list.filter(u => u.reason === 'none');
+          const fu = list.filter(u => u.reason === 'field-unspecified'), nf = list.filter(u => u.reason === 'no-owner-field' && !u.table), nt = list.filter(u => u.reason === 'no-owner-field' && u.table), tu = list.filter(u => u.reason === 'target-unresolved'), none = list.filter(u => u.reason === 'none');
           if (fu.length) parts.push(`${names(fu)}で、編集できないようにするのか・警告を出すのか・保存を止めるのかが、計画にも要件にもありません`);
           if (nf.length) parts.push(`要件が求める動作（${[...new Set(nf.map(u => KT_EFFECT_JA[u.effect] || u.effect))].join('・')}）を担当するフィールドが計画にありません（${[...new Set(nf.map(u => `${fieldName(u.field)}は計画では${u.access === 'WRITE' ? '値の設定だけ' : '読み取りだけ'}`))].join('・')}です）`);
+          //   2026-10-10: テーブル（明細）の要件で、編集できる列に計画の担当が無い（列ごと。table つきの no-owner-field）
+          for (const t of [...new Set(nt.map(u => u.table))]) { const xs = nt.filter(u => u.table === t); parts.push(`${fieldName(t)}の列のうち${names(xs)}に、要件が求める動作（${[...new Set(xs.map(u => KT_EFFECT_JA[u.effect] || u.effect))].join('・')}）が計画にありません`); }
           if (tu.length) parts.push('要件の対象が計画のどのフィールドかを特定できません');
           if (none.length) parts.push('JavaScript が操作するフィールドはありますが、必要な動作が計画にありません');
           //   §0c.7: 要件から足す効果の条件が分からない / 候補が読み込まれない画面のイベントを担当する JavaScript が無い
@@ -27921,7 +27986,7 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
           const sc = lg ? scopeOfLedger(lg, v.plan) : null;
           const nm = sc && sc.noMaterial ? sc.noMaterial.get(cid) || null : null;
           const reqs = lg ? inScopeRequirements(lg, v.plan, sc).filter(r => !(nm && r && nm.has(r.id))) : [];
-          return requiredEffectsOf(v.plan, cid, reqs, { labels: fieldLabels(), columns: tableColumns() });
+          return requiredEffectsOf(v.plan, cid, reqs, { labels: fieldLabels(), columns: tableColumns(), readOnly: readOnlyFields() });
         };
         /** 進みのカードの「これから確かめる条件」: 動作テストの結果（Gateway の behavior.cases）が届く前は必須の効果の一覧、届いたら代表条件ごとの結果 */
         const checklistOfEffects = (effects) => [...new Map((effects || []).map(x => [`${x.field}|${x.effect}`, { label: `${fieldName(x.field)}: ${KT_EFFECT_JA[x.effect] || x.effect}`, state: 'todo' }])).values()];
@@ -28199,7 +28264,18 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
               if (effFresh.length) state.metrics.effectRevisions = (state.metrics.effectRevisions || 0) + 1;
               if (scopeFresh.length) state.metrics.scopeRevisions = (state.metrics.scopeRevisions || 0) + 1;
               const ownerText = fresh.length ? `次の決まった要件に、計画の担当（設定の手順か JavaScript）がありません。計画の手順か JavaScript に入れて、要件の planRefs で担当を示してください（入れられない理由があれば、その要件の disposition を unsupported にして note に理由を書いてください）。\n${fresh.map(r => `・${r.id}: ${r.text}`).join('\n')}` : '';
-              const effText = effFresh.length ? `次の JavaScript で必要な動作（効果）を特定できません。customizations[].fields[] の effects（[{ effect, condition, events }]。lock / warn / block-save / set-value / show-hide）を、その動作を担当するフィールド（access CONTROL か WRITE）に置いてください。要件の target は計画のフィールドのコードかラベルと同じ表記にしてください。condition-unknown は、その効果の condition（いつ行うか）を効果ごとに書いてください。other-platform は、その JavaScript が読み込まれない画面（PC / モバイル）のイベントを外すか、その画面を担当する JavaScript（platform）に同じフィールドの効果を置いてください。\n${effFresh.map(x => `・${x.c.customizationId}: ${x.u.map(u => [u.requirementId, u.field, u.effect, u.reason].filter(Boolean).join(' / ')).join('；')}`).join('\n')}` : '';
+              //   2026-10-10: テーブルの列の不足は（要件・テーブル・効果・理由）ごとに 1 行にまとめる（列が多くても依頼の文が上限で切れて、範囲の指示が落ちないように）
+              const unresolvedLinesOf = (us) => {
+                const rows = [], byTable = new Map();
+                for (const u of us) {
+                  if (!u.table) { rows.push({ u }); continue; }
+                  const k = [u.requirementId, u.table, u.effect, u.reason].join('|');
+                  if (!byTable.has(k)) { const g = { u, cols: [] }; byTable.set(k, g); rows.push(g); }
+                  byTable.get(k).cols.push(u.field);
+                }
+                return rows.map(g => (g.cols ? `${[g.u.requirementId, `table ${g.u.table}`, g.u.effect, g.u.reason].filter(Boolean).join(' / ')}: ${g.cols.join(', ')}` : [g.u.requirementId, g.u.field, g.u.effect, g.u.reason].filter(Boolean).join(' / ')));
+              };
+              const effText = effFresh.length ? `次の JavaScript で必要な動作（効果）を特定できません。customizations[].fields[] の effects（[{ effect, condition, events }]。lock / warn / block-save / set-value / show-hide）を、その動作を担当するフィールド（access CONTROL か WRITE）に置いてください。要件の target は計画のフィールドのコードかラベルと同じ表記にしてください（ただし、テーブル（明細など）を対象にした要件は target をテーブルのまま残し、テーブル自体には effects を置かず、そのテーブルの編集できる列をすべて fields に access CONTROL で入れて、列ごとに effects の lock を要件の条件で置いてください。保存を止める動作や行の追加・削除の制限は足さないでください）。condition-unknown は、その効果の condition（いつ行うか）を効果ごとに書いてください。other-platform は、その JavaScript が読み込まれない画面（PC / モバイル）のイベントを外すか、その画面を担当する JavaScript（platform）に同じフィールドの効果を置いてください。\n${effFresh.map(x => `・${x.c.customizationId}: ${unresolvedLinesOf(x.u).join('；')}`).join('\n')}` : '';
               //   レビューの指摘 row1（2026-10-09）: 根拠の要件が無い効果（計画の fields[].effects だけで足された。unattributed）も外させる。外す指示に assessment.summary と reply の書き直しも含める
               const scopeText = scopeFresh.length ? `次の動作は、利用者が採用した範囲（依頼・採用した仮案・委ねた判断）にありません。customizations[].fields[].effects・customizations[].requirement・JavaScript の手順の文・assessment.summary・reply から外し、外した後の動作に合わせて書き直してください（その要件は取り消し済みとして渡しています。足し直さないでください。「根拠の要件なし」は、採用した要件のどれにも無い効果です。根拠の要件が無い効果は外してください）。依頼を実現するための手順（ステータス・アクション・既存の JavaScript への統合）と、採用した要件の動作はそのまま残してください。\n${scopeFresh.map(x => `・${x.customizationId}: ${x.items.map(i => [i.field, i.effect, ...(i.requirementIds || []), ...(i.reason === 'unattributed' ? ['根拠の要件なし'] : [])].filter(Boolean).join(' / ')).join('；')}`).join('\n')}` : '';
               const reqText = [ownerText, effText, scopeText].filter(Boolean).join('\n').slice(0, 1900);
@@ -30928,6 +31004,8 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
       fieldLabels() { try { const inputs = inputsNow(); return Object.fromEntries(KTDeps.normalizeFields((inputs.data && inputs.data.fields) || {}).filter(f => f && f.code).map(f => [f.code, f.label || f.code])); } catch (e) { return {}; } },
       //   §0c.8（2026-10-08）: テーブルの列（{ 列のコード: テーブルのコード }。アプリ解析のフィールドの定義から。表示切り替えを必須の効果にしない判定に使う）
       tableColumns() { try { const inputs = inputsNow(); return Object.fromEntries(KTDeps.normalizeFields((inputs.data && inputs.data.fields) || {}).filter(f => f && f.code && f.parent).map(f => [f.code, f.parent])); } catch (e) { return {}; } },
+      //   2026-10-10: 入力できないフィールド（計算・自動計算・ルックアップのコピー先・システムの値。生成工程へ渡す appFields の readOnly と同じ根拠）。フィールドの定義が無ければ null
+      readOnlyFields() { try { const inputs = inputsNow(); const raw = inputs && inputs.data && inputs.data.fields; if (!raw || typeof raw !== 'object' || !Object.keys(raw).length) return null; return [...KTContext.readOnlyFieldCodes(KTDeps.normalizeFields(raw))]; } catch (e) { return null; } },
       /** EXPLAIN_PLAN / EXPLAIN_REVIEW: 計画の要約 ＋ Review の写し ＋ 計画が引用した根拠 → assistant-qa（説明だけ。計画は変えない） */
       async explain({ question, kind, plan, review, ctx, version, signal = null }) {
         if (!ctx) throw new KTAiClient.AiClientError({ code: KTAiClient.ERROR_CODES.NO_CONTEXT, message: 'この計画の Context がありません（Context ペインから作った計画は説明の対象外です）' });
