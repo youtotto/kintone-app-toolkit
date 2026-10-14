@@ -8477,40 +8477,60 @@
     }
 
     // ================= 条件式の簡易比較 =================
-    /** "amount >= \"1000000\"" のような単純な比較式を解析（field / op / value）。解析できなければ null */
+    /** 引用符の外にだけ当たる（値の中の and / or / かっこで式を切らない） */
+    const OUTSIDE_QUOTES = '(?=(?:[^"]*"[^"]*")*[^"]*$)';
+    /**
+     * "amount >= \"1000000\"" のような単純な比較式を解析し、節の配列で返す（{ field, clauses: [{ op, value, num }] }。単独の式は節 1 つ）。
+     *   2026-10-14（Q2 の局所修正）: 同じフィールドの単純比較を and で結んだ式（amount <= "1000000" and amount != "1000000"。アプリの設定の数値の条件は
+     *   > < が使えないので「未満」はこの形になる）も読む。or・括弧・別のフィールドの混在は今までどおり null
+     */
     function parseCond(cond) {
       const c = String(cond ?? '').trim();
       if (!c) return null;
-      const m = c.match(/^([^\s<>=!]+)\s*(>=|<=|!=|=|>|<)\s*"?([^"]*)"?$/);
-      if (!m) return null;
-      const num = Number(m[3].replace(/,/g, ''));
-      return { field: m[1], op: m[2], value: m[3], num: Number.isFinite(num) ? num : null };
+      if (new RegExp(`[()]${OUTSIDE_QUOTES}`).test(c) || new RegExp(`\\sor\\s${OUTSIDE_QUOTES}`, 'i').test(c)) return null;
+      const clauses = [];
+      let field = null;
+      for (const part of c.split(new RegExp(`\\s+and\\s+${OUTSIDE_QUOTES}`, 'i'))) {
+        const m = part.trim().match(/^([^\s<>=!]+)\s*(>=|<=|!=|=|>|<)\s*"?([^"]*)"?$/);
+        if (!m) return null;
+        if (field != null && m[1] !== field) return null;
+        field = m[1];
+        const num = Number(m[3].replace(/,/g, ''));
+        clauses.push({ op: m[2], value: m[3], num: Number.isFinite(num) ? num : null });
+      }
+      return { field, clauses };
     }
-    /** 2 つの単純条件が同時に成り立ち得るか（重なり）。解析できない場合は null（不明） */
+    /** 解析した条件（節の配列）の数値が全部読めたか */
+    const condNumeric = (p) => !!p && Array.isArray(p.clauses) && p.clauses.length > 0 && p.clauses.every(c => c.num != null);
+    /** 解析した条件が値 x で成り立つか（すべての節が成り立つ）。空（'' / null）は 0 にせず偽。数値に読めない値も偽 */
+    const condHolds = (p, x) => {
+      if (!condNumeric(p) || x === '' || x == null) return false;
+      const n = typeof x === 'number' ? x : Number(String(x).replace(/,/g, ''));
+      if (!Number.isFinite(n)) return false;
+      return p.clauses.every(c => (c.op === '>' ? n > c.num : c.op === '>=' ? n >= c.num : c.op === '<' ? n < c.num : c.op === '<=' ? n <= c.num : c.op === '=' ? n === c.num : n !== c.num));
+    };
+    /** 判定に使うサンプルの値（境界の値とその前後の整数・十分に小さい / 大きい値）。整数として判定する */
+    const condSamples = (ps, far = 1e12) => { const nums = [...new Set(ps.flatMap(p => p.clauses.map(c => c.num)))].filter(n => n != null).sort((a, b) => a - b); return [...nums, ...nums.map(n => n - 1), ...nums.map(n => n + 1), -far, far]; };
+    /**
+     * 2 つの単純条件が同時に成り立ち得るか（重なり）。解析できない場合は null（不明）。
+     *   2026-10-14: 節の集合をサンプルの値で評価する（整数として判定）。!= があるだけで「重なる」としない（<= 1000000 and != 1000000 と >= 1000000 は重ならない）
+     */
     function condsOverlap(a, b) {
       const pa = parseCond(a), pb = parseCond(b);
       if (!a && !b) return true;
       if (!a || !b) return true;   // 片方が無条件なら重なる
       if (!pa || !pb) return null;
       if (pa.field !== pb.field) return true;
-      if (pa.num == null || pb.num == null) return normCond(a) === normCond(b) ? true : null;
-      const range = (p) => ({ lo: p.op === '>' ? [p.num, false] : p.op === '>=' ? [p.num, true] : p.op === '=' ? [p.num, true] : [-Infinity, true], hi: p.op === '<' ? [p.num, false] : p.op === '<=' ? [p.num, true] : p.op === '=' ? [p.num, true] : [Infinity, true] });
-      if (pa.op === '!=' || pb.op === '!=') return true;
-      const ra = range(pa), rb = range(pb);
-      const lo = ra.lo[0] > rb.lo[0] ? ra.lo : rb.lo, hi = ra.hi[0] < rb.hi[0] ? ra.hi : rb.hi;
-      if (lo[0] < hi[0]) return true;
-      if (lo[0] === hi[0]) return lo[1] && hi[1];
-      return false;
+      if (!condNumeric(pa) || !condNumeric(pb)) return normCond(a) === normCond(b) ? true : null;
+      return condSamples([pa, pb]).some(x => condHolds(pa, x) && condHolds(pb, x));
     }
     /** 新条件 a にすると、旧条件 b で通っていた値が通らなくなるか（既存経路の制限）。解析できない場合は null */
     function condNarrower(a, b) {
       if (!b) return !!a;   // 無条件 → 条件あり は制限
       if (!a) return false; // 条件あり → 無条件 は緩和
       const pa = parseCond(a), pb = parseCond(b);
-      if (!pa || !pb || pa.field !== pb.field || pa.num == null || pb.num == null) return normCond(a) === normCond(b) ? false : null;
-      const ok = (p, x) => p.op === '>' ? x > p.num : p.op === '>=' ? x >= p.num : p.op === '<' ? x < p.num : p.op === '<=' ? x <= p.num : p.op === '=' ? x === p.num : x !== p.num;
-      const samples = [pa.num - 1, pa.num, pa.num + 1, pb.num - 1, pb.num, pb.num + 1, -1e12, 1e12];
-      return samples.some(x => ok(pb, x) && !ok(pa, x));
+      if (!pa || !pb || pa.field !== pb.field || !condNumeric(pa) || !condNumeric(pb)) return normCond(a) === normCond(b) ? false : null;
+      return condSamples([pa, pb]).some(x => condHolds(pb, x) && !condHolds(pa, x));
     }
     /** kintone の条件式（クエリ）で使える関数。これ以外の「名前(」は kintone では評価できない（AI が別システムの関数を書きがち） */
     const KINTONE_COND_FUNCTIONS = ['LOGINUSER', 'PRIMARY_ORGANIZATION', 'NOW', 'TODAY', 'YESTERDAY', 'TOMORROW', 'FROM_TODAY', 'THIS_WEEK', 'LAST_WEEK', 'NEXT_WEEK', 'THIS_MONTH', 'LAST_MONTH', 'NEXT_MONTH', 'THIS_YEAR', 'LAST_YEAR', 'NEXT_YEAR'];
@@ -10083,18 +10103,18 @@
         if (primary.length < 2 || !conditional.length) continue;
         const parsed = conditional.map(a => ({ name: a.name, cond: a.filterCond || '', p: parseCond(a.filterCond), origin: a.origin, stepId: a.stepId ?? null }));
         const item = { from, actions: primary.map(a => ({ name: a.name, filterCond: a.filterCond || '', origin: a.origin, stepId: a.stepId ?? null })), unconditional: unconditional.map(a => a.name), verdict: 'UNKNOWN', overlaps: [], identical: [], gap: null, message: '' };
-        const unknown = parsed.some(x => !x.p || x.p.num == null) || new Set(parsed.map(x => x.p && x.p.field)).size > 1;
+        //   2026-10-14: 条件は節の配列（parseCond）。同じフィールドの and の式（<= 1000000 and != 1000000）も節ごとに評価する（判定の意味は今までどおり整数のサンプル）
+        const unknown = parsed.some(x => !condNumeric(x.p)) || new Set(parsed.map(x => x.p && x.p.field)).size > 1;
         if (unknown) { item.message = `「${from}」からのアクションの条件が複数のフィールドにまたがる、または単純な比較式ではないため、重複・欠落を判定できません`; out.push(item); continue; }
-        const ok = (p, x) => (p.op === '>' ? x > p.num : p.op === '>=' ? x >= p.num : p.op === '<' ? x < p.num : p.op === '<=' ? x <= p.num : p.op === '=' ? x === p.num : x !== p.num);
-        const nums = [...new Set(parsed.map(x => x.p.num))].sort((a, b) => a - b);
-        const samples = [...nums, ...nums.map(n => n - 1), ...nums.map(n => n + 1), -1e15, 1e15];   // 整数として判定（小数の隙間は欠落にしない）
+        const samples = condSamples(parsed.map(x => x.p), 1e15);   // 整数として判定（小数の隙間は欠落にしない）
+        const sameCond = (a, b) => JSON.stringify(a.clauses.map(c => [c.op, c.num]).sort()) === JSON.stringify(b.clauses.map(c => [c.op, c.num]).sort());
         for (let i = 0; i < parsed.length; i++) for (let j = i + 1; j < parsed.length; j++) {
           const a = parsed[i], b = parsed[j];
-          if (a.p.op === b.p.op && a.p.num === b.p.num) { item.identical.push([a.name, b.name]); continue; }
-          if (samples.some(x => ok(a.p, x) && ok(b.p, x))) item.overlaps.push([a.name, b.name]);
+          if (sameCond(a.p, b.p)) { item.identical.push([a.name, b.name]); continue; }
+          if (samples.some(x => condHolds(a.p, x) && condHolds(b.p, x))) item.overlaps.push([a.name, b.name]);
         }
         for (const u of unconditional) for (const c of parsed) item.overlaps.push([u.name, c.name]);
-        const gaps = unconditional.length ? [] : samples.filter(x => !parsed.some(a => ok(a.p, x)));
+        const gaps = unconditional.length ? [] : samples.filter(x => !parsed.some(a => condHolds(a.p, x)));
         item.gap = gaps.length ? { example: gaps[0] } : null;
         item.verdict = item.identical.length ? 'IDENTICAL' : item.overlaps.length ? 'OVERLAP' : item.gap ? 'GAP' : 'PARTITION_OK';
         const field = parsed[0].p.field;
@@ -10141,7 +10161,7 @@
 
     return {
       REVIEW_VERSION, STATUS, SAFETY, CHANGE, ACTION_CAPABILITIES, HIGH_RISK,
-      buildBeforeModel, normalizeSpec, parseEntity, parseCond, condsOverlap, condNarrower, review, traceRequirements, processMermaid, mermaidLabel, labelsOfModel, processSummary, objDiffLines, executorOutput,
+      buildBeforeModel, normalizeSpec, parseEntity, parseCond, condHolds, condsOverlap, condNarrower, review, traceRequirements, processMermaid, mermaidLabel, labelsOfModel, processSummary, objDiffLines, executorOutput,
       remView, viewView, daysText, actionView, stateView, partitionCheck, assigneeTypeOf, ASSIGNEE_TYPES, ASSIGNEE_TYPE_JA, CHANGE_KINDS, ENTITY_FIELD_TYPES,
       lookupModel, relatedAppModel, fieldsHash, relatedFieldOf, relatedKeyCheck, lookupTypeCheck, lookupIdentity, LOOKUP_COPY_COMPAT, LOOKUP_KEY_TYPES, NOT_SORTABLE,
       appActionModel, appActionView, appActionIdentity, appActionTypeCheck, destRequiredUnmapped, parseActionEntity, APP_ACTION_COPY_COMPAT, APP_ACTION_ENTITY_TYPES, EVERYONE,

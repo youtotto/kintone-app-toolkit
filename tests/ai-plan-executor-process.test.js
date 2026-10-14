@@ -192,6 +192,16 @@ console.log('\n--- 4. §39 UPDATE action（条件）---');
   const rvB = reviewOf(broaden); const mB = makeKintoneMock(DATA);
   const rB = await flow(broaden, mB, { skipRollback: true });
   assert(rvB.steps[0].issues.some(i => i.code === 'CONDITION_CHANGE') && rB.log.status === 'DONE' && mB.st.status.actions[0].filterCond === 'amount >= "0"', 'broaden: CONDITION_CHANGE・反映');
+  // 2026-10-14（Q2 の局所修正）: 「100 万円未満」を <= と != の and で表した条件（数値の条件に < は使えない）。Review は分岐を PARTITION_OK と判定し、
+  //   UPDATE_PROCESS（ACTION_CONDITION）と ADD_PROCESS_ACTION の filterCond は文字列のまま API の payload（モックに保存される状態）に入る
+  const LOW = 'amount <= "1000000" and amount != "1000000"';
+  const comp = BRANCH(); comp.steps[1].spec.filterCond = LOW;
+  const mC = makeKintoneMock(DATA);
+  const rC = await flow(comp, mC, { skipRollback: true });
+  assert(rC.rv.steps.every(r => r.status !== 'INVALID') && !rC.rv.steps.some(r => r.issues.some(i => ['CONDITION_CHANGE_UNPARSED', 'ACTION_CONDITION_UNPARSED', 'ACTION_CONDITION_OVERLAP', 'PROCESS_CONDITION_UNKNOWN', 'PROCESS_CONDITION_OVERLAP'].includes(i.code))) && rC.rv.steps[1].issues.some(i => i.code === 'EXISTING_PATH_RESTRICTED') && rC.rv.simulation.process.partition.find(x => x.from === '承認待ち').verdict === 'PARTITION_OK', 'compound（<= 1000000 and != 1000000 / >= 1000000）: Review は EXISTING_PATH_RESTRICTED だけで、重なり・判定不能を出さず PARTITION_OK');
+  const pC = rC.prepared.steps.map(s => s.prepared);
+  assert(rC.prepared.status === 'PREPARED' && pC[1].mutation.kind === 'UPDATE_ACTION' && pC[1].mutation.set.filterCond === LOW && pC[2].mutation.kind === 'ADD_ACTION' && pC[2].mutation.action.filterCond === 'amount >= "1000000"', 'compound: prepare の変更（mutation）に式がそのまま（変換・丸めなし）');
+  assert(rC.log.status === 'DONE' && rC.log.steps.every(s => s.status === 'VERIFIED') && mC.st.status.actions.find(a => a.name === '承認する').filterCond === LOW && mC.st.status.actions.find(a => a.name === '部長へ申請').filterCond === 'amount >= "1000000"' && JSON.stringify(rC.log.steps[1].after) === JSON.stringify({ filterCond: LOW }), 'compound: PUT の payload（モックの保存）と after に式がそのまま・全 step VERIFIED');
   // invalid expression
   const bad = plan([step('P1', 'UPDATE_PROCESS', 'PROCESS_ACTION', '承認する', { filterCond: 'owner != ""' })]);
   const rvX = reviewOf(bad); const mX = makeKintoneMock(DATA);
