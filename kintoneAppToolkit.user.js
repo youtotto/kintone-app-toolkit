@@ -7192,13 +7192,8 @@
       }
       // Phase 21（G10・モデル比較の CX-1）: 要件が名前で挙げる既存ファイル（例:「PC の dealValidate.js と同等の検証をモバイルでも」）は本文を参照用に添える
       //   （要約だけでは同じ検証を書けず、制約を守るモデルは NOT_MET にした）。小さいファイルだけ（1 件 16 KB・合計 48 KB まで）。書き換え対象ではない
-      const named = new Set([c.requirement, ...(c.existingFiles || []).map(e => e.name), ...(c.risks || [])].join('\n').match(/[\w.-]+\.js\b/g) || []);
-      let refBudget = 48 * 1024;
-      const otherFiles = jsFiles.filter(f => f.analyzed && !(existingFile && f.name === existingFile.name && f.target === existingFile.target)).map(f => {
-        const row = { name: f.name, target: f.target, events: f.events, fields: Object.entries(f.fields).map(([code, acc]) => ({ code, access: Object.keys(acc) })) };
-        if (named.has(f.name) && typeof f.text === 'string' && f.text.length <= 16 * 1024 && f.text.length <= refBudget) { refBudget -= f.text.length; row.source = f.text; row.sourceUse = 'reference-only'; }
-        return row;
-      }).slice(0, 10);
+      //   2026-10-10: 規則は generatorOtherFilesOf の 1 か所（必須の効果の移植元の判定 effectJsFilesOf の source も同じ規則で決める）
+      const otherFiles = generatorOtherFilesOf(jsFiles, c, existingFile);
       const app = (() => { try { const o = buildAppOverview({ data, deps, scan, incoming: null, limits: { ...DEFAULT_LIMITS, maxFields: 0, maxViewNames: 0 }, trunc: () => { } }); return { id: o.id, name: o.name }; } catch (e) { return { id: String(data?.appId ?? ''), name: null }; } })();
       const ctx = {
         contextVersion: GENERATOR_CONTEXT_VERSION,
@@ -7217,14 +7212,17 @@
         // Phase 20（実機）: spaces = フォームに実在するスペース要素の ID（getSpaceElement に使える ID はこれだけ。無いスペースを前提にしたコードは使えない）
         //   段階 A（5.1）: allowedFields は fields[]（実装仕様のフィールド ＋ イベント由来 ＋ ステータス ＋ 新規フィールド）と親のテーブルの集合から作る
         constraints: { style: "即時関数 (function () { 'use strict'; … })(); で包む。ハンドラは必ず return event。ライブラリは使わない。フィールドコード・ステータス名は dictionary の表記のまま。dictionary に無い名前は書けない。ただし planned にある名前（計画で新設するステータス・フィールド）は、その手順（stepId）が反映される前提で書ける", platform: cust.platform, noNetwork: true, noSecrets: true, allowedEvents: cust.events, allowedFields: [...new Set([...fields.map(f => f.code), ...cust.fields.map(f => f.code), ...tables.keys()])], allowedApis: cust.apis, patchOnly: cust.strategy === 'EXTEND_EXISTING_JS', spaces: (typeof KTCodeReview !== 'undefined' && KTCodeReview.layoutSpaceIds) ? KTCodeReview.layoutSpaceIds(data?.layout) : [],
-          ...(tables.size ? { tables: [...tables].map(([code, cols]) => ({ code, columns: cols, access: 'READ', how: `行は record['${code}'].value の配列。列は row.value['<列のコード>']（例: row.value['${cols[0]}'].disabled = true）。テーブル自体の値は書き換えない。行の追加・削除は JavaScript では止められない` })) } : {}),
+          //   2026-10-10（§6）: 行の追加・削除を JavaScript 全般で不可能と言い切らない（セルの disabled では止まらない・行のボタンを隠す API は Toolkit がまだ扱っていない）
+          ...(tables.size ? { tables: [...tables].map(([code, cols]) => ({ code, columns: cols, access: 'READ', how: `行は record['${code}'].value の配列。列は row.value['<列のコード>']（例: row.value['${cols[0]}'].disabled = true）。テーブル自体の値は書き換えない。セルの disabled では行の追加・削除は止まらない（行の ＋ / − は残る。行のボタンを隠す API は Toolkit がまだ扱っていないので使わない）` })) } : {}),
           ...(otherFiles.some(f => f.source) ? { referenceFiles: 'otherFiles[].source は参照用（同じ検証・処理を別の画面に用意するときの元）。そのファイル自体は書き換えない' } : {}) },
         // 段階 C（契約 20 §12）: 要件の id（coverage の書き先）
         //   §0c.3（2026-10-08）: 必須の効果 requiredEffects（Toolkit が採用済みの計画から作り、生成の前に固定。フィールドのコードは採番後のコードに置き換える）と、
         //   動作テストに使う既存 JS の本文 relatedFiles。代表条件（cases）は Gateway が requiredEffects から作るので Toolkit は送らない（C-1 第 2 段で互換の写しも外した）
         ...(verification && typeof verification === 'object' ? { verification: { requirementIds: (Array.isArray(verification.requirementIds) ? verification.requirementIds : []).slice(0, 50).map(x => ({ id: String(x.id), kind: x.kind, text: String(x.text ?? '').slice(0, 300) })),
           //   §0c.6: 同じ field・effect・events・condition の組は 1 件にまとめ、要件の id は requirementIds（配列）に持つ（requirementId は先頭の id。旧い Gateway の互換）
-          ...(Array.isArray(verification.requiredEffects) ? { requiredEffects: verification.requiredEffects.slice(0, 20).map(x => { const ids = [...new Set([...(Array.isArray(x.requirementIds) ? x.requirementIds : []), x.requirementId].filter(Boolean).map(String))].slice(0, 10); return { requirementId: ids[0] || String(x.requirementId), requirementIds: ids, field: mapCode(String(x.field)), effect: x.effect, events: (Array.isArray(x.events) ? x.events : []).slice(0, 20).map(String), condition: typeof x.condition === 'string' && x.condition.trim() ? resolveProposedRefs(x.condition.trim(), codeMap).slice(0, 300) : '' }; }) } : {}),
+          //   2026-10-10（§5.1・契約 20 の requiredEffects[].conditionFrom）: 移植元の既存 JavaScript（file・target・events）と同じ条件の効果は conditionFrom を載せる
+          //   （condition は '' のまま。本文は otherFiles の source で送る）
+          ...(Array.isArray(verification.requiredEffects) ? { requiredEffects: verification.requiredEffects.slice(0, 20).map(x => { const ids = [...new Set([...(Array.isArray(x.requirementIds) ? x.requirementIds : []), x.requirementId].filter(Boolean).map(String))].slice(0, 10); const cf = ktConditionFromOf(x.conditionFrom); return { requirementId: ids[0] || String(x.requirementId), requirementIds: ids, field: mapCode(String(x.field)), effect: x.effect, events: (Array.isArray(x.events) ? x.events : []).slice(0, 20).map(String), condition: typeof x.condition === 'string' && x.condition.trim() ? resolveProposedRefs(x.condition.trim(), codeMap).slice(0, 300) : '', ...(cf ? { conditionFrom: cf } : {}) }; }) } : {}),
           //   §0c.7: 動作テストに使う既存 JS の上限は Gateway と同じ（4 件・合計 131,072 文字。1 ファイルの上限は無い）。送れなかったファイルは relatedOmitted で知らせる
           ...(Array.isArray(verification.relatedFiles) ? { relatedFiles: verification.relatedFiles.slice(0, KT_RELATED_FILES_MAX).map(f => ({ name: String(f.name), target: f.target === 'mobile' ? 'mobile' : 'desktop', text: String(f.text ?? '') })) } : {}),
           //   §0c.7: events は解析で分かったイベント（[] は登録しない）、null は分からない（その platform のすべて）。reason は url・no-source・limit・other だけ（gateway-dropped は送らない）
@@ -7593,9 +7591,42 @@
       for (const f of candidates) if (!related.includes(f) && hasBody(f)) relatedOmitted.push({ name: f.name, target: f.target, reason: 'other', events: eventsOf(f) || [], ...(f.url ? { url: String(f.url) } : {}) });
       return { relatedFiles, relatedOmitted };
     }
+    /**
+     * 生成の ctx の otherFiles（同じアプリのほかの JavaScript の要約。統合先は除く・10 件まで）。要件が名前で挙げる小さいファイル（1 件 16 KB・合計 48 KB まで）は
+     *   本文を参照用に添える（sourceUse reference-only）。buildGenerator と effectJsFilesOf（必須の効果の移植元の判定）で同じ規則を使う（2026-10-10 に buildGenerator から切り出した）
+     * @param {Array} jsFiles KTScan.summarizeFiles の結果
+     * @param {object} c customization（requirement・existingFiles・risks のファイル名で「名前で挙げる」を決める）
+     * @param {object|null} existingFile 統合先 { name, target }
+     */
+    function generatorOtherFilesOf(jsFiles, c, existingFile = null) {
+      //   レビュー T-4（2026-10-14）: 計画の existingFiles の名前はそのまま加える（日本語・空白などを含む名前を正規表現で落とさない）。requirement・risks の文だけ正規表現で拾う
+      const named = new Set([...([c && c.requirement, ...((c && c.risks) || [])].join('\n').match(/[\w.-]+\.js\b/g) || []), ...((c && c.existingFiles) || []).map(e => (e && e.name ? String(e.name) : '')).filter(Boolean)]);
+      let refBudget = 48 * 1024;
+      return (Array.isArray(jsFiles) ? jsFiles : []).filter(f => f && f.analyzed && !(existingFile && f.name === existingFile.name && f.target === existingFile.target)).map(f => {
+        const row = { name: f.name, target: f.target, events: f.events, fields: Object.entries(f.fields || {}).map(([code, acc]) => ({ code, access: Object.keys(acc) })) };
+        if (named.has(f.name) && typeof f.text === 'string' && f.text.length <= 16 * 1024 && f.text.length <= refBudget) { refBudget -= f.text.length; row.source = f.text; row.sourceUse = 'reference-only'; }
+        return row;
+      }).slice(0, 10);
+    }
+    /**
+     * 2026-10-10（誤った検証による修復の繰り返しを止める §5.1）: 必須の効果の移植元の判定（KTAiConversation.requiredEffectsOf の jsFiles）に使うアプリの JavaScript の一覧。
+     *   events = そのファイルが登録するイベント、fields = 参照するフィールドのコード（画面の解析 KTScan.summarizeFiles から）、
+     *   source = 本文を生成の ctx（otherFiles の source）に送れるか（generatorOtherFilesOf と同じ規則。16 KB を超える・解析していない・10 件の外なら false）
+     *   レビュー T-1（2026-10-14）: analyzed（本文の解析があるか）と eventsUnresolved（kintone.events.on の第 1 引数を本文から読めない）を KTScan.summarizeFiles の値のまま載せる
+     *   （requiredEffectsOf が「移植元を確かめられない」と「移植元ではない」を分けるため。events が [] でも、読めないだけなら「登録しない」と読まない）
+     * @returns {Array<{ name, target: 'desktop' | 'mobile', events: string[], fields: string[], source: boolean, analyzed: boolean, eventsUnresolved: boolean }>}
+     */
+    function effectJsFilesOf({ customization = null, data = null, scan = null } = {}) {
+      const c = customization || {};
+      const files = KTScan.summarizeFiles(scan, data);
+      //   統合先（EXTEND の existingFiles の先頭）は otherFiles に入らない（buildGenerator は統合先の name・target で外す）
+      const ex = c.strategy === 'EXTEND_EXISTING_JS' && Array.isArray(c.existingFiles) && c.existingFiles[0] && c.existingFiles[0].name ? { name: String(c.existingFiles[0].name), target: c.existingFiles[0].target || 'desktop' } : null;
+      const withSource = new Set(generatorOtherFilesOf(files, c, ex).filter(r => typeof r.source === 'string').map(r => `${r.target}:${r.name}`));
+      return files.filter(f => f && f.name).map(f => ({ name: String(f.name), target: f.target === 'mobile' ? 'mobile' : 'desktop', events: (Array.isArray(f.events) ? f.events : []).map(String), fields: Object.keys(f.fields || {}), source: withSource.has(`${f.target}:${f.name}`), analyzed: f.analyzed === true, eventsUnresolved: f.eventsUnresolved === true }));
+    }
 
     return {
-      CONTEXT_VERSION, LEVELS, DEFAULT_LIMITS, LEVEL_BUDGET_BYTES, relatedFilesFor, readOnlyFieldCodes,
+      CONTEXT_VERSION, LEVELS, DEFAULT_LIMITS, LEVEL_BUDGET_BYTES, relatedFilesFor, readOnlyFieldCodes, generatorOtherFilesOf, effectJsFilesOf,
       build, resolveFocus, buildDictionary, buildCoverage, buildAppOverview,
       toJSON, toMarkdown, toPrompt, measure, measureText, notifyCountText,
       redactSecretLikeText, edgeKey,
@@ -8804,8 +8835,9 @@
       const valueFields = fields.filter(f => { const m = model.fields?.[f.code]; return m && INPUT_TYPES.includes(m.baseType || m.type); });
       const reqText = `${c.requirement || ''} ${step.title || ''}`;
       if (valueFields.length && controls.length && evInfo.some(e => e.ok && /\.(create|edit)\.show$/.test(e.name)) && !events.some(ev => /\.change\./.test(ev)) && /(超え|超過|以上|以下|未満|より(大き|小さ|多|少|前|後)|を過ぎ|が空|未入力|入力され|選ばれ|選択され|に応じ)/.test(reqText)) add('JS_CHANGE_EVENT_MISSING', 'medium', `値（${valueFields.map(f => f.code).join(', ')}）に応じた表示・警告・編集可否を、画面を開いたとき（create.show / edit.show）だけで判定する計画です。入力中に値を変えても切り替わりません（app.record.*.change.<フィールド> がありません）。入力中にも切り替えるなら「入力したときにもすぐ切り替えて」と伝えて計画を修正してください`);
-      // 5c. Phase 21: kintone の JavaScript では実現できない部分（生成の前に利用者が分かるように）。明細（テーブル）の行の追加・削除は disabled では止められない
-      if (/(明細|テーブル|行)/.test(reqText) && /(行の?(追加|削除)|追加・削除|追加や削除|行(を|の)?(増や|減ら))[^。]{0,16}(禁止|できない|できなく|不可|させない|止め)/.test(reqText)) add('JS_LIMIT_SUBTABLE_ROWS', 'medium', '明細（テーブル）の行の追加・削除は、kintone の JavaScript では止められません（JavaScript で止められるのはセルの編集だけで、行の ＋ / − は残ります）。この部分は要件を満たせないので、運用（手順・権限）での扱いを決めてください。生成するコードが止められるのはセルの編集だけです');
+      // 5c. Phase 21: Toolkit が作る JavaScript では実現できない部分（生成の前に利用者が分かるように）。明細（テーブル）の行の追加・削除はセルの disabled では止まらない
+      //   2026-10-10（§6）: 行の追加・削除を kintone の JavaScript 全般で不可能と言い切らない（行のボタンを隠す API は Toolkit がまだ扱っていない、と書く）
+      if (/(明細|テーブル|行)/.test(reqText) && /(行の?(追加|削除)|追加・削除|追加や削除|行(を|の)?(増や|減ら))[^。]{0,16}(禁止|できない|できなく|不可|させない|止め)/.test(reqText)) add('JS_LIMIT_SUBTABLE_ROWS', 'medium', 'セルを編集不可にしても、明細（テーブル）の行の追加・削除は止まりません（行の ＋ / − ボタンは残ります。ボタンを隠す API は Toolkit がまだ扱っていません）。Toolkit が作る JavaScript ではこの部分の要件を満たせないので、運用（手順・権限）での扱いを決めてください。生成するコードが止められるのはセルの編集だけです');
       // 6. 既存 JS（統合先・競合）
       const files = (typeof KTScan !== 'undefined' && KTScan.summarizeFiles) ? KTScan.summarizeFiles(scan, data) : [];
       const targets = Array.isArray(c.existingFiles) ? c.existingFiles : [];
@@ -19454,6 +19486,11 @@
     //   ignored（window・document のイベントの登録を呼ばずに記録したもの）は判定に使わない記録。実行できなかった理由として届いたときは合格に数えない（環境の区分）
     'unsupported-feature': { category: 'env', text: '隔離環境で扱えない機能（BigInt など）を使っているため、模擬テストを実行していません', fix: 'regenerate', next: '作った JavaScript が隔離環境で動かせない機能（BigInt など）を使っているため、修復は依頼していません。最終案のカードの［作り直しを依頼する］で、その機能を使わない形での作り直しを依頼できます（自動では依頼しません）。', readiness: '作った JavaScript が隔離環境で動かせない機能（BigInt など）を使っていて、必須の動作を模擬テストで確かめられないため、まだ反映できません（［作り直しを依頼する］で作り直せます）。' },
     ignored: { category: 'env', text: 'ブラウザのイベントの登録（addEventListener など）は隔離環境では呼ばずに記録だけしました' },
+    //   2026-10-10（誤った検証による修復の繰り返しを止める §3.2・契約 20 §13）: 模擬テストの入力（代表条件の change の形など）が隔離環境の約束と合わない。
+    //   検証入力の誤りで、作った JavaScript の不合格ではない（区分 env。修復も［計画を直すよう依頼する］も出さない）
+    'case-invalid': { category: 'env', text: '模擬テストの入力（代表条件）の形が隔離環境の約束と合わないため、実行していません（生成したコードの誤りとは判定していません）', readiness: '模擬テストの入力（代表条件）の形が隔離環境の約束と合わず、必須の動作を確かめられないため、まだ反映できません（検証の入力の問題です。作った JavaScript の誤りとは判定していないため、修復は依頼していません）。' },
+    //   §4.2: 保存を止める条件が分からない（移植元の本文が無い・比べられない）ので代表条件を作らなかった。計画を直す対象（区分 condition。修復はしない）
+    'condition-unknown': { category: 'condition', text: '保存を止める条件が分からない（移植元の本文が無い・比べられない）ため、代表条件を作っていません', next: '保存を止める条件を推測で決めず、移植元の既存の JavaScript（本文を取得できるもの）から引き継ぐ形に計画を直します。最終案のカードの［計画を直すよう依頼する］で依頼できます（自動では依頼しません。修復は依頼していません）。', readiness: '保存を止める条件が分からず（移植元の本文が無い・比べられない）、必須の動作を確かめられないため、まだ反映できません（計画を直します。作った JavaScript の誤りとは判定していません）。' },
   });
   /** 区分ごとの見出しと次の方針（通常画面に出す。理由の名前・例外文は詳細表示） */
   const KT_REASON_CATEGORY = Object.freeze({
@@ -19472,6 +19509,8 @@
   /** §0c.8: 代表条件の「条件に合う」側の期待（Gateway の behavior-cases の pos。show-hide は条件があれば show-hide、無ければ hidden）。
    *  §0c.10（2026-10-08）: show-hide の condition は隠す条件（条件に合えば hidden・合わなければ表示）。向きは Gateway が side ごとに判定する（Toolkit は期待を作らない） */
   const KT_MATCH_EXPECTS = Object.freeze(['lock', 'warn', 'block-save', 'set-value', 'show-hide', 'hidden']);
+  /** 2026-10-10（§4.2）: 移植元と同じ動きかを比べる代表条件の期待（kind port・side match）。conditionFrom のある効果だけ「合う」側の確かめに数える */
+  const KT_PORT_EXPECT = 'same-as-source';
   /** §0c.8: 次の手の操作の名前（最終案のカードのボタン。fix revise = 計画の差分更新の依頼 / regenerate = 作り直しの依頼） */
   const KT_FIX_LABEL = Object.freeze({ revise: '計画を直すよう依頼する', regenerate: '作り直しを依頼する' });
   const ktBehaviorReasonOf = (r) => (r && KT_BEHAVIOR_REASONS[r]) || null;
@@ -19523,6 +19562,18 @@
     return out;
   };
   /**
+   * 2026-10-10（誤った検証による修復の繰り返しを止める §4.1・§5.1）: 必須の効果の conditionFrom（この効果の条件は、移植元の既存 JavaScript（file・target）が
+   *   events で行っている判定と同じ）の正規化。file が無い・events が空なら null（「いつでも」と区別する印を壊れた形で持たない）
+   * @returns {{ file: string, target: 'desktop' | 'mobile', events: string[] } | null}
+   */
+  const ktConditionFromOf = (x) => {
+    if (!x || typeof x !== 'object' || typeof x.file !== 'string' || !x.file.trim()) return null;
+    const events = [...new Set((Array.isArray(x.events) ? x.events : []).filter(e => typeof e === 'string' && e.trim()).map(e => e.trim()))].slice(0, 20);
+    return events.length ? { file: x.file.trim().slice(0, 300), target: x.target === 'mobile' ? 'mobile' : 'desktop', events } : null;
+  };
+  /** conditionFrom の指紋（流用の鍵・効果の組の鍵。無ければ ''） */
+  const ktConditionFromKey = (x) => { const cf = ktConditionFromOf(x); return cf ? `${cf.target}:${cf.file}:${[...cf.events].sort().join(',')}` : ''; };
+  /**
    * §0c.7（2026-10-08）: 生成工程が必須の効果の検証（新しい形）に対応しているか。health の customization-generator.verification に
    *   requiredEffects・effectGroups・relatedOmitted・appFields・saveDialog・reasonCategory・caseSide がすべてあるときだけ対応とみなす（欠ければ「接続先が非対応」）。
    *   §0c.9（2026-10-08）: caseSide（代表条件の side（match / nomatch）・イベントごとの合う / 合わない）も印に加える。Toolkit の二重の安全が side で判定するため、
@@ -19539,7 +19590,10 @@
   //   AI の申告の文を読む処理を削除したので、どちらかが欠ける Gateway は守り手が無い形になる。新しい形として受け入れない
   //   C-1 第 4 段（2026-10-09）: scopeList（模擬テストの条件 behavior.conditions と確かめていない範囲 behavior.uncheckedScope を返す）も印に加える（17 個）。
   //   Toolkit は固定の一覧を削除したので、返さない Gateway では実施した検査の条件を正しく表示できない
-  const KT_EFFECT_FEATURES = Object.freeze(['requiredEffects', 'effectGroups', 'relatedOmitted', 'appFields', 'saveDialog', 'reasonCategory', 'caseSide', 'eventCases', 'loadFaithful', 'registrationCheck', 'emptyCase', 'hideCondition', 'registrationCounts', 'caseCoverage', 'cancelCheck', 'limitCode', 'scopeList']);
+  //   2026-10-10（誤った検証による修復の繰り返しを止める §5.2）: tableRowChange（テーブル自体の変更のイベントを行の追加・削除として組み立て、change に value を渡さない）と
+  //   caseInvalid（壊れた模擬テストの入力を case-invalid の not-run にし、修復しない）も印に加える（19 個）。どちらかが欠ける Gateway は、壊れた入力で正しい候補を
+  //   不合格にして修復を繰り返す形のままなので、新しい形として受け入れない。conditionFrom（移植元と同じ動きかを比べる）は印に入れず、移植元の判定（requiredEffectsOf の capable）だけに使う
+  const KT_EFFECT_FEATURES = Object.freeze(['requiredEffects', 'effectGroups', 'relatedOmitted', 'appFields', 'saveDialog', 'reasonCategory', 'caseSide', 'eventCases', 'loadFaithful', 'registrationCheck', 'emptyCase', 'hideCondition', 'registrationCounts', 'caseCoverage', 'cancelCheck', 'limitCode', 'scopeList', 'tableRowChange', 'caseInvalid']);
   const ktEffectsCapable = (features) => Array.isArray(features) && KT_EFFECT_FEATURES.every(f => features.includes(f));
   /**
    * §0d.1（2026-10-08）: 生成工程が効果ごとの確かめ方（requiredEffects[].check・checkReason・events）を返すか（health の印 effectCheck）。
@@ -20409,7 +20463,8 @@
       else if (plat.length && !plat.includes('mobile') && mobileEvents) add('platform', false, 'review', '計画は PC だけですが、モバイルのイベントが含まれています', null, '計画は PC だけですが、モバイルの画面で動く処理も含まれています');
       else add('platform', true, 'info', `対象 ${plat.join(' / ') || '—'} と整合`);
       // ---- 11. 達成範囲（Phase 21）: kintone の JavaScript で実現できない部分を、要約とは別に Toolkit が示す ----
-      //   明細（テーブル）の編集を止める要件: JavaScript の disabled はセルにだけ効き、行の追加・削除（＋ / −）は止められない
+      //   明細（テーブル）の編集を止める要件: JavaScript の disabled はセルにだけ効き、行の追加・削除（＋ / −）は止まらない
+      //   （2026-10-10・§6: 行のボタンを隠す API は Toolkit がまだ扱っていない。kintone 全般で不可能と言い切らない。判定 SUBTABLE_ROWS の符号・承認を止めない扱いは変えない）
       const coverage = { achieved: [], notAchieved: [], declared: Array.isArray(g.coverage) ? g.coverage : [] };
       const subtables = fieldsN.filter(f => f.rawType === 'SUBTABLE').map(f => f.code);
       // セルのロック: テーブル内フィールドの .disabled = true と、行のループ（row.value[key]）の .disabled = true
@@ -20419,7 +20474,7 @@
       //   「明細の変更を止める要件か」「要約が言い切っているか」を推定する判定（requirement-scope・summary-scope）は削除した
       if (tableControlled.length && lockedTables.length) {
         coverage.achieved.push(`明細（テーブル ${lockedTables.join(', ')}）のセルを編集不可にする`);
-        coverage.notAchieved.push({ code: 'SUBTABLE_ROWS', message: '明細（テーブル）の行の追加・削除は止められません（kintone の JavaScript で編集できなくできるのはセルだけで、行の ＋ / − ボタンは残ります）' });
+        coverage.notAchieved.push({ code: 'SUBTABLE_ROWS', message: 'セルを編集不可にしても、明細（テーブル）の行の追加・削除は止まりません（行の ＋ / − ボタンは残ります。ボタンを隠す API は Toolkit がまだ扱っていません）' });
       }
       // 段階 C（改訂 2・5.3 / 5.4）: coverage は requirementId で判定する（契約 20 §5）。文の照合・同義語の読み替え・note のキーワードからの担当の推定・plannedHint（段階 A）は削除した。
       //   この customization の id → 範囲内（NOT_MET は登録不可・PARTIAL は確認）。要件 R… / 手順 P… / 別の C… → 範囲外（担当は計画の構造（steps / customizations）と要件の planRefs で引く。
@@ -20455,27 +20510,28 @@
         }
         if (!/NOT_MET|PARTIAL/.test(stt)) continue;
         // 段階 C（反証 D・C3）: 行の追加・削除を理由にした NOT_MET を文の照合（ROW_OPS_RE）で PARTIAL に下げる処理は削除した。AI の申告（requirementId と status）どおりに扱い、
-        //   行の追加・削除が止められないことは Toolkit の決定的な検査（SUBTABLE_ROWS・確認）で別に示す
+        //   セルの編集不可では行の追加・削除が止まらないこと（行のボタンを隠す API は Toolkit がまだ扱っていない）は Toolkit の決定的な検査（SUBTABLE_ROWS・確認）で別に示す
         coverage.notAchieved.push({ code: `AI_${stt}`, requirementId: id, requirement: text, note: d.note, ...(d.limitCode ? { limitCode: d.limitCode } : {}), message: `${text}${note ? `（${note}）` : ''}` });
       }
       // 段階 A（5.4）: 範囲内の NOT_MET は登録不可（check coverage-unmet・block）、PARTIAL は確認（review）。既存の SUBTABLE_ROWS は従来どおり確認事項のまま
-      //   確認 7: JavaScript では直せない kintone の制約（明細の行の追加・削除）を理由にした NOT_MET は、登録不可のまま修復を依頼しない（noRepair。修復の対象外）。
+      //   確認 7: セルの編集不可では直せない点（明細の行の追加・削除。行のボタンを隠す API は Toolkit がまだ扱っていない）を理由にした NOT_MET は、登録不可のまま修復を依頼しない（noRepair。修復の対象外）。
       //   C-1 第 3 段（2026-10-08）: 理由は生成工程が返す coverage の limitCode（SUBTABLE_ROWS）だけで決める。AI の申告の文（note）は読まない（ROW_LIMIT_RE は削除した）。
       //   limitCode は health の印 'limitCode' がある接続先のときだけ画面の generate が残す（印の無い接続先では落とすので、PARTIAL は要件未達のまま）
       const SUBTABLE_LIMIT = 'SUBTABLE_ROWS';
       for (const x of coverage.notAchieved.filter(y => y.code === 'AI_NOT_MET')) {
         const lim = x.limitCode === SUBTABLE_LIMIT;
-        if (lim) { x.limit = SUBTABLE_LIMIT; if (!coverage.notAchieved.some(y => y.code === SUBTABLE_LIMIT)) coverage.notAchieved.push({ code: SUBTABLE_LIMIT, fromLimitCode: true, message: '明細（テーブル）の行の追加・削除は止められません（kintone の JavaScript で編集できなくできるのはセルだけで、行の ＋ / − ボタンは残ります）' }); }
-        checks.push({ name: 'coverage-unmet', ok: false, severity: 'block', ...(lim ? { noRepair: true, limit: SUBTABLE_LIMIT } : {}), message: `要件を満たしていません（AI の申告）: ${x.message}${lim ? '。行の追加・削除は JavaScript では止められないため、作り直しでは直りません' : ''}` });
+        if (lim) { x.limit = SUBTABLE_LIMIT; if (!coverage.notAchieved.some(y => y.code === SUBTABLE_LIMIT)) coverage.notAchieved.push({ code: SUBTABLE_LIMIT, fromLimitCode: true, message: 'セルを編集不可にしても、明細（テーブル）の行の追加・削除は止まりません（行の ＋ / − ボタンは残ります。ボタンを隠す API は Toolkit がまだ扱っていません）' }); }
+        checks.push({ name: 'coverage-unmet', ok: false, severity: 'block', ...(lim ? { noRepair: true, limit: SUBTABLE_LIMIT } : {}), message: `要件を満たしていません（AI の申告）: ${x.message}${lim ? '。セルの編集不可では行の追加・削除は止まらず（行のボタンを隠す API は Toolkit がまだ扱っていません）、作り直しでは直りません' : ''}` });
       }
       //   §0c.6（2026-10-08）: PARTIAL は確認（review）のまま印（partial・requirementId）を付け、必須の効果に結び付く要件なら attachBehavior が要件未達（登録不可）にする。
-      //   ただし kintone の制約（明細のセルを編集不可にしていて行の追加・削除は止められない: SUBTABLE_ROWS）に当たるものは「実現できない点」として示し、承認を止めない
+      //   ただし明細のセルを編集不可にしていて行の追加・削除は止まらない（セルの編集不可では行の ＋ / − は残る。行のボタンを隠す API は Toolkit がまだ扱っていない: SUBTABLE_ROWS）に
+      //   当たるものは「実現できない点」として示し、承認を止めない
       //   （limit SUBTABLE_ROWS。判定は Toolkit の構造の検出（上の lockedTables）と、生成工程の coverage の limitCode が SUBTABLE_ROWS であることの両方）
       const structuralRows = coverage.notAchieved.some(y => y.code === SUBTABLE_LIMIT && !y.fromLimitCode);
       for (const x of coverage.notAchieved.filter(y => y.code === 'AI_PARTIAL')) {
         const lim = structuralRows && x.limitCode === SUBTABLE_LIMIT;
         if (lim) x.limit = 'SUBTABLE_ROWS';
-        checks.push({ name: 'coverage-unmet', ok: false, severity: 'review', partial: true, requirementId: x.requirementId || c.customizationId, ...(lim ? { limit: 'SUBTABLE_ROWS', noRepair: true } : {}), message: `要件の一部を満たしていません（AI の申告）: ${x.message}${lim ? '。行の追加・削除は JavaScript では止められません（実現できない点）' : ''}` });
+        checks.push({ name: 'coverage-unmet', ok: false, severity: 'review', partial: true, requirementId: x.requirementId || c.customizationId, ...(lim ? { limit: 'SUBTABLE_ROWS', noRepair: true } : {}), message: `要件の一部を満たしていません（AI の申告）: ${x.message}${lim ? '。セルの編集不可では行の追加・削除は止まりません（行のボタンを隠す API は Toolkit がまだ扱っていません。実現できない点）' : ''}` });
       }
       // 段階 A（R14）: コードが比べているステータス名のうち、現在のステータスにも計画の新設にも無いものは coverage.unknownStatuses に記録する（check にはしない。登録前の依存の確認は dependsOn で行う）
       {
@@ -20575,8 +20631,10 @@
         if (!x || !x.field || !KT_EFFECTS.includes(x.effect)) continue;
         const events = (Array.isArray(x.events) ? x.events : []).map(String);
         const condition = typeof x.condition === 'string' ? x.condition : '';
-        const k = `${x.field}|${x.effect}|${events.join(',')}|${condition}`;
-        const g = groups.get(k) || { field: String(x.field), effect: x.effect, events, condition, requirementIds: [] };
+        //   2026-10-10（§4.1）: 移植元と同じ条件の効果（conditionFrom）は、条件つき・いつでもの組とまとめない（Gateway の groupRequiredEffects と同じ鍵）
+        const cf = ktConditionFromOf(x.conditionFrom);
+        const k = `${x.field}|${x.effect}|${events.join(',')}|${condition}|${ktConditionFromKey(cf)}`;
+        const g = groups.get(k) || { field: String(x.field), effect: x.effect, events, condition, requirementIds: [], ...(cf ? { conditionFrom: cf } : {}) };
         for (const id of idsOf(x)) if (!g.requirementIds.includes(id)) g.requirementIds.push(id);
         groups.set(k, g);
       }
@@ -20621,7 +20679,8 @@
           for (const ev of (g.events.length ? g.events : [null])) {
             for (const side of (g.condition ? ['match', 'nomatch'] : ['match'])) {
               //   警告の効果の保存のイベントは、条件に合うレコードで「保存は止めない」（警告の保存・expect save-allowed）が合う側の確かめ（保存だけの警告は warn）
-              const okExpect = (y) => side === 'nomatch' || KT_MATCH_EXPECTS.includes(y.expect) || (g.effect === 'warn' && ev != null && /\.submit$/.test(ev) && y.expect === 'save-allowed');
+              //   2026-10-10（§4.2）: 移植元と同じ条件の効果（conditionFrom）は、移植元と同じ動きかを比べる代表条件（expect same-as-source）の合格が合う側の確かめ
+              const okExpect = (y) => side === 'nomatch' || KT_MATCH_EXPECTS.includes(y.expect) || (g.effect === 'warn' && ev != null && /\.submit$/.test(ev) && y.expect === 'save-allowed') || (!!g.conditionFrom && y.expect === KT_PORT_EXPECT);
               const ok = relevant.some(y => y.verdict === 'pass' && (ev == null || y.event === ev) && sideOf(y) === side && okExpect(y));
               if (!ok && !waived(mine, ev, side)) lacking.push({ event: ev, side });
             }
@@ -21861,8 +21920,18 @@
       const textsOf = (a) => [...new Set((Array.isArray(a) ? a : []).map(y => (typeof y === 'string' ? y : y && typeof y === 'object' && typeof y.text === 'string' ? y.text : '')).map(y => y.trim()).filter(Boolean).map(y => str(y, 600)))].slice(0, 30);
       //   conditions が null（生成工程が隔離環境の応答を得ていない）なら conditionsNotRun の印だけを持つ（条件を推測して出さない）
       const scopeOf = bh ? { ...(Array.isArray(bh.conditions) ? { conditions: textsOf(bh.conditions) } : bh.conditions === null ? { conditionsNotRun: true } : {}), ...(Array.isArray(bh.uncheckedScope) ? { uncheckedScope: textsOf(bh.uncheckedScope) } : Array.isArray(v.uncheckedScope) ? { uncheckedScope: textsOf(v.uncheckedScope) } : {}) } : {};
-      const behavior = bh ? { status: ['passed', 'failed', 'not-run'].includes(bh.status) ? bh.status : 'not-run', reason: typeof bh.reason === 'string' ? str(bh.reason, 40) : null, ...(typeof bh.reasonText === 'string' ? { reasonText: str(bh.reasonText) } : {}), ...scopeOf, ...(rawCases.length > KT_BEHAVIOR_CASES_MAX ? { truncated: true, totalCases: rawCases.length } : {}), cases: rawCases.slice(0, KT_BEHAVIOR_CASES_MAX).map(x => { const det = detailsOf(x.details); return { id: str(x.id, 40), requirementId: idsOf(x)[0] || '', requirementIds: idsOf(x), field: str(x.field, 200), effect: KT_EFFECTS.includes(x.effect) ? x.effect : null, expect: str(x.expect, 40), verdict: VERDICTS.includes(x.verdict) ? x.verdict : 'not-run', observed: x.observed ?? null, message: str(x.message), ...(typeof x.note === 'string' ? { note: str(x.note, 200) } : {}), ...(typeof x.reason === 'string' && x.reason ? { reason: str(x.reason, 40) } : {}), ...(typeof x.reasonCategory === 'string' && x.reasonCategory ? { reasonCategory: str(x.reasonCategory, 40) } : {}), ...(typeof x.cause === 'string' && x.cause ? { cause: str(x.cause, 40) } : {}), ...(typeof x.event === 'string' ? { event: str(x.event, 120) } : {}), ...(typeof x.condition === 'string' ? { condition: str(x.condition) } : {}), ...(x.side === 'match' || x.side === 'nomatch' ? { side: x.side } : {}), ...(typeof x.kind === 'string' && x.kind ? { kind: str(x.kind, 40) } : {}), ...(x.platform === 'desktop' || x.platform === 'mobile' ? { platform: x.platform } : {}), ...(det ? { details: det } : {}) }; }) } : null;
-      return { version: str(v.version || '1', 8), candidateHash: hash, sameAsPrevious: v.sameAsPrevious === true, passed: v.passed === true, machine, repairs: { count: Number.isFinite(Number(rp.count)) ? Number(rp.count) : 0, reasons: (Array.isArray(rp.reasons) ? rp.reasons : []).filter(x => typeof x === 'string').slice(0, 10).map(x => str(x, 120)), stoppedBy: ['limit', 'budget', 'time', 'same-failure', 'error'].includes(rp.stoppedBy) ? rp.stoppedBy : null }, unverified: (Array.isArray(v.unverified) ? v.unverified : []).filter(x => typeof x === 'string').slice(0, 10).map(x => str(x)), ...(requiredEffects ? { requiredEffects } : {}), ...(behavior ? { behavior } : {}) };
+      //   2026-10-10（§4.3）: 移植元と同じ動きかを比べた代表条件（expect same-as-source）の移植元（refFile・refEvent）と、比べた移植元の動き（reference: 止めたか・
+      //   その役割が設定したエラー・event.error）を落とさない（最終案の代表条件の一覧に「移植元: 止める（エラー「…」）」を出す根拠）
+      const behaviorOf = (o) => {
+        if (!o || typeof o !== 'object' || Array.isArray(o)) return null;
+        const errors = o.errors && typeof o.errors === 'object' && !Array.isArray(o.errors) ? Object.fromEntries(Object.entries(o.errors).slice(0, 20).filter(([, t]) => typeof t === 'string').map(([k, t]) => [str(k, 200), str(t, 200)])) : {};
+        return { stopped: o.stopped === true, errors, eventError: typeof o.eventError === 'string' && o.eventError ? str(o.eventError, 200) : null };
+      };
+      const portOf = (x) => ({ ...(x.refFile && typeof x.refFile === 'object' && typeof x.refFile.file === 'string' ? { refFile: { file: str(x.refFile.file, 300), target: x.refFile.target === 'mobile' ? 'mobile' : 'desktop' } } : {}), ...(typeof x.refEvent === 'string' && x.refEvent ? { refEvent: str(x.refEvent, 120) } : {}), ...(behaviorOf(x.reference) ? { reference: behaviorOf(x.reference) } : {}) });
+      const behavior = bh ? { status: ['passed', 'failed', 'not-run'].includes(bh.status) ? bh.status : 'not-run', reason: typeof bh.reason === 'string' ? str(bh.reason, 40) : null, ...(typeof bh.reasonText === 'string' ? { reasonText: str(bh.reasonText) } : {}), ...scopeOf, ...(rawCases.length > KT_BEHAVIOR_CASES_MAX ? { truncated: true, totalCases: rawCases.length } : {}), cases: rawCases.slice(0, KT_BEHAVIOR_CASES_MAX).map(x => { const det = detailsOf(x.details); return { id: str(x.id, 40), requirementId: idsOf(x)[0] || '', requirementIds: idsOf(x), field: str(x.field, 200), effect: KT_EFFECTS.includes(x.effect) ? x.effect : null, expect: str(x.expect, 40), verdict: VERDICTS.includes(x.verdict) ? x.verdict : 'not-run', observed: x.observed ?? null, message: str(x.message), ...(typeof x.note === 'string' ? { note: str(x.note, 200) } : {}), ...(typeof x.reason === 'string' && x.reason ? { reason: str(x.reason, 40) } : {}), ...(typeof x.reasonCategory === 'string' && x.reasonCategory ? { reasonCategory: str(x.reasonCategory, 40) } : {}), ...(typeof x.cause === 'string' && x.cause ? { cause: str(x.cause, 40) } : {}), ...(typeof x.event === 'string' ? { event: str(x.event, 120) } : {}), ...(typeof x.condition === 'string' ? { condition: str(x.condition) } : {}), ...(x.side === 'match' || x.side === 'nomatch' ? { side: x.side } : {}), ...(typeof x.kind === 'string' && x.kind ? { kind: str(x.kind, 40) } : {}), ...(x.platform === 'desktop' || x.platform === 'mobile' ? { platform: x.platform } : {}), ...portOf(x), ...(det ? { details: det } : {}) }; }) } : null;
+      //   2026-10-10（§3.3）: 修復しなかった理由（最後の候補の模擬テストの not-run のうち case-invalid・condition-unknown を理由ごとに数えたもの）を落とさない
+      const notRepaired = (Array.isArray(rp.notRepaired) ? rp.notRepaired : []).filter(x => x && typeof x.reason === 'string' && x.reason && Number.isFinite(Number(x.count)) && Number(x.count) > 0).slice(0, 10).map(x => ({ reason: str(x.reason, 40), category: typeof x.category === 'string' ? str(x.category, 40) : null, count: Number(x.count) }));
+      return { version: str(v.version || '1', 8), candidateHash: hash, sameAsPrevious: v.sameAsPrevious === true, passed: v.passed === true, machine, repairs: { count: Number.isFinite(Number(rp.count)) ? Number(rp.count) : 0, reasons: (Array.isArray(rp.reasons) ? rp.reasons : []).filter(x => typeof x === 'string').slice(0, 10).map(x => str(x, 120)), stoppedBy: ['limit', 'budget', 'time', 'same-failure', 'error'].includes(rp.stoppedBy) ? rp.stoppedBy : null, ...(notRepaired.length ? { notRepaired } : {}) }, unverified: (Array.isArray(v.unverified) ? v.unverified : []).filter(x => typeof x === 'string').slice(0, 10).map(x => str(x)), ...(requiredEffects ? { requiredEffects } : {}), ...(behavior ? { behavior } : {}) };
     }
 
     /**
@@ -25011,15 +25080,24 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
      * @param {string} customizationId
      * @param {Array} requirements KTAiAnswers.requirementsForContext の形（effects を持てる）
      * @param {object} o { labels: { code: label }, columns: { 列のコード: テーブルのコード }（アプリ解析のテーブルの列。§0c.8）,
-     *   readOnly: 入力できないフィールドのコード（配列か Set。KTContext.readOnlyFieldCodes。null = 根拠が無い → テーブルの要件を列に引き継がない） }
-     * @returns {{ effects: [{ requirementId, requirementIds, field, effect, events, condition }], unresolved: [{ field, requirementId?, effect?, reason, platforms? }], delegated: [{ field, effect, platform, customizationId }], notPossible: [{ field, effect, table, reason, requirementIds }] }}
+     *   readOnly: 入力できないフィールドのコード（配列か Set。KTContext.readOnlyFieldCodes。null = 根拠が無い → テーブルの要件を列に引き継がない）,
+     *   jsFiles: アプリの JavaScript の一覧 [{ name, target, events, fields, source }]（KTContext.effectJsFilesOf。会話の呼び出し側が画面の解析から作る。null = 分からない）,
+     *   capable: { conditionFrom: 接続先の health の印 conditionFrom があるか } }
+     *   2026-10-10（誤った検証による修復の繰り返しを止める §5.1）: 条件の空の保存禁止（block-save）の組は、その customization が統合（EXTEND_EXISTING_JS）でなく、
+     *   existingFiles に候補の platform に無い target のファイル F があり、jsFiles の F がその組のすべてのイベントの対のイベント（mobile. の有無だけ違う）を登録し、
+     *   その組のフィールドを参照しているとき、F を移植元とする（条件は「移植元が対のイベントで行っている判定と同じ」。空欄を「いつでも」にしない）:
+     *   接続先が conditionFrom に対応し F の本文を生成に送れる → 組に conditionFrom { file, target, events }／そうでなければ unresolved condition-unknown
+     *   （source: F の名前・why: not-capable = 接続先が非対応 / no-source = 本文を送れない）。移植元が無いときは今までどおり（'' はいつでも）。日本語の文から推定しない
+     *   レビュー T-1（2026-10-14）: 別の画面の existingFiles があるのに F を確かめられない（jsFiles が null = 画面の解析が無い・F が一覧に無い → no-source／F の本文の解析が無い・
+     *   イベントの登録を本文から読めない → events-unreadable）ときも '' にしない（unresolved condition-unknown）。解析済みで対のイベントを登録しない・フィールドを参照しない F は移植元ではない
+     * @returns {{ effects: [{ requirementId, requirementIds, field, effect, events, condition, conditionFrom? }], unresolved: [{ field, requirementId?, effect?, reason, platforms?, source?, why? }], delegated: [{ field, effect, platform, customizationId }], notPossible: [{ field, effect, table, reason, requirementIds }] }}
      *   unresolved の reason: field-unspecified（効果の無い CONTROL を補えない）/ target-unresolved（要件の対象のフィールドを特定できない）/
      *   no-owner-field（対象のフィールドに、その効果を担当する access が計画に無い）/ none（READ 以外のフィールドがあるのに必須の効果が 0 件）/
      *   condition-unknown（要件から足す効果の条件が分からない。§0c.8: 台帳の要件に条件があり、計画のフィールド・効果に構造化した条件が無いときも）/
      *   other-platform（候補が読み込まれない platform のイベントを担当する customization が無い）
      *   notPossible の reason: subtable-column-show-hide（テーブルの列の表示切り替え。kintone ではできない。必須の効果にせず実現できない点に出す）
      */
-    function requiredEffectsOf(plan, customizationId, requirements = [], { labels = {}, columns = {}, readOnly = null } = {}) {
+    function requiredEffectsOf(plan, customizationId, requirements = [], { labels = {}, columns = {}, readOnly = null, jsFiles = null, capable = {} } = {}) {
       const all = (plan && Array.isArray(plan.customizations)) ? plan.customizations.filter(Boolean) : [];
       const c = all.find(x => x.customizationId === customizationId) || null;
       if (!c) return { effects: [], unresolved: [], delegated: [], notPossible: [] };
@@ -25165,6 +25243,35 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
         //   §0c.8: 台帳の要件に条件があり、計画のフィールドに構造化した条件が無いときも同じ（f.condition || '' で「いつでも」にしない）
         if (!norm(tf.condition) && (norm(r.condition) || planEffectsOf(tf).some(x => x.condition))) { condUnknown(); continue; }
         add(r.id, tf, e, tf.condition || '');
+      }
+      // 2b) 2026-10-10（誤った検証による修復の繰り返しを止める §5.1）: 既存の入力チェックの移植。条件の空の保存禁止は、別の画面（PC / モバイル）の既存 JavaScript F が
+      //   その組のイベントの対のイベントを登録し、その組のフィールドを参照しているなら、F の判定と同じ条件（conditionFrom）にする（「いつでも」にしない）。
+      //   構造（計画の existingFiles・画面の解析の jsFiles）だけで決める。接続先が非対応・本文を送れないときは条件が分からない（condition-unknown）
+      //   レビュー T-1（2026-10-14）: 別の画面の existingFiles（portFiles）があるのに移植元 F を確かめられないときも '' にしない（空欄を「いつでも」にすると 10-10 の不具合が再発する）:
+      //   画面の解析が無い（jsFiles が null）・F が一覧に無い → no-source／F の本文の解析が無い（analyzed false）・イベントの登録を本文から読めない（eventsUnresolved）→ events-unreadable。
+      //   解析済みで対のイベントを登録しない・フィールドを参照しない F は移植元ではない（今までどおり）。複数の portFiles は、どれか 1 つが移植元になればそれを使い、
+      //   どれも確かめられないなら最初の確かめられなかった理由で unresolved
+      const pairEvent = (ev) => (String(ev).startsWith('mobile.') ? String(ev).slice('mobile.'.length) : `mobile.${ev}`);
+      const jsList = Array.isArray(jsFiles) ? jsFiles.filter(f => f && f.name) : null;
+      const portFiles = c.strategy === 'EXTEND_EXISTING_JS' ? [] : (Array.isArray(c.existingFiles) ? c.existingFiles : []).filter(e => e && e.name && !mine.includes(e.target === 'mobile' ? 'mobile' : 'desktop'));
+      if (portFiles.length) {
+        for (const g of groups.values()) {
+          if (g.effect !== 'block-save' || g.condition || !g.events.length) continue;
+          const pairs = g.events.map(pairEvent);
+          let src = null, unsure = null;
+          for (const e of portFiles) {
+            const f = jsList ? jsList.find(x => x.name === String(e.name) && x.target === (e.target === 'mobile' ? 'mobile' : 'desktop')) || null : null;
+            const why = !f ? 'no-source' : (f.analyzed === false || f.eventsUnresolved === true) ? 'events-unreadable' : null;
+            if (why) { if (!unsure) unsure = { name: String(e.name), why }; continue; }
+            if (pairs.every(p => (f.events || []).includes(p)) && (f.fields || []).includes(g.field)) { src = f; break; }
+          }
+          if (src) {
+            if (capable && capable.conditionFrom === true && src.source === true) { g.conditionFrom = { file: src.name, target: src.target, events: pairs }; continue; }
+            pushUnresolved({ field: g.field, requirementId: g.requirementId, effect: 'block-save', reason: 'condition-unknown', source: src.name, why: capable && capable.conditionFrom === true ? 'no-source' : 'not-capable' });
+            continue;
+          }
+          if (unsure) pushUnresolved({ field: g.field, requirementId: g.requirementId, effect: 'block-save', reason: 'condition-unknown', source: unsure.name, why: unsure.why });
+        }
       }
       // 3) READ 以外のフィールドがあるのに必須の効果が 0 件 → 特定できない（必須の効果が無いまま verified にしない。別の platform の担当に任せただけのときは除く）
       if (!groups.size && !unresolved.length && !delegated.length && !notPossible.length && fields.some(f => f.access && f.access !== 'READ')) unresolved.push({ field: '', reason: 'none' });
@@ -26823,7 +26930,9 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
         //   §0f.3 の 1: 止めた送信の最終案は未完成（承認できない）。理由は最初に出す（blockingReason）
         if (incomplete && incomplete.kind) reasons.push({ kind: 'incomplete', text: incompleteReasonText(incomplete) });
         if (st('unresolved') || st('failed') || notReady.some(([, e]) => !known.includes(e.status))) reasons.push({ kind: 'unresolved', text: '反映できる完成品になっていない JavaScript があります（未解決の理由と次の方針を見てください）。' });
-        if (notReady.some(([, e]) => e.status === 'not-ready' && !(e.verdict && e.verdict.kind === 'effects-limit'))) reasons.push({ kind: 'effects-unknown', text: 'JavaScript で必要な動作（編集できない・警告・保存を止めるなど）を特定できないため、まだ反映できません。' });
+        //   2026-10-10（§5.1）: 既存の入力チェックの移植で、移植元と同じ条件かを確かめる手段が無いだけ（verdict.port）のときは、その理由で書く（「特定できない」と言わない）
+        const effUnknown = notReady.filter(([, e]) => e.status === 'not-ready' && !(e.verdict && e.verdict.kind === 'effects-limit'));
+        if (effUnknown.length) reasons.push({ kind: 'effects-unknown', text: effUnknown.every(([, e]) => e.verdict && e.verdict.port) ? '既存の JavaScript から移す保存の条件が、移植元と同じかを確かめられないため、まだ反映できません（「いつでも保存を止める」にはしていません）。' : 'JavaScript で必要な動作（編集できない・警告・保存を止めるなど）を特定できないため、まだ反映できません。' });
         if (notReady.some(([, e]) => e.status === 'not-ready' && e.verdict && e.verdict.kind === 'effects-limit')) reasons.push({ kind: 'effects-limit', text: '必須の動作が多すぎて、生成工程で一度に確かめられないため、まだ反映できません（計画の JavaScript を分けます）。' });
         if (st('unsupported')) reasons.push({ kind: 'capability', text: '接続先（生成工程）が必須の動作の確認に対応していないため、まだ反映できません。' });
         //   §0c.6: 実行できなかった理由の区分ごとに文を変える（環境だけ「環境の制約」と言う）
@@ -27663,10 +27772,23 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
         const tableColumns = () => { try { const m = typeof services.tableColumns === 'function' ? services.tableColumns() : null; return m && typeof m === 'object' ? m : {}; } catch (e) { return {}; } };
         //   2026-10-10: 入力できないフィールドのコード（画面が services.readOnlyFields で KTContext.readOnlyFieldCodes から作る）。取れなければ null（根拠が無い。[] = すべて入力できる、と区別する）
         const readOnlyFields = () => { try { const m = typeof services.readOnlyFields === 'function' ? services.readOnlyFields() : null; return Array.isArray(m) || m instanceof Set ? [...m].map(String) : null; } catch (e) { return null; } };
+        //   2026-10-10（§5.1）: アプリの JavaScript の一覧（画面が services.jsFiles で KTContext.effectJsFilesOf から作る。source = 生成の ctx に本文を送れるか）。取れなければ null
+        const appJsFiles = (v, cid) => { try { const m = typeof services.jsFiles === 'function' ? services.jsFiles({ version: v, customizationId: cid }) : null; return Array.isArray(m) ? m : null; } catch (e) { return null; } };
+        /** 生成工程の検証の印（health の customization-generator.verification。取れなければ []） */
+        const generatorMarks = () => { try { const m = typeof services.generatorFeatures === 'function' ? services.generatorFeatures() : null; return Array.isArray(m) ? m : []; } catch (e) { return []; } };
         /** 効果を「要件として必要な動作」の言い方で（要件未達の理由の文） */
         const EFFECT_NEED_JA = KT_EFFECT_NEED_JA;
         /** 動作テストの期待（Gateway の behavior.cases[].expect）の言い方 */
-        const EXPECT_JA = Object.freeze({ lock: '編集できない', 'not-locked': '編集できる', warn: '警告が出る（保存は止まらない）', 'not-warned': '警告が出ない', 'block-save': '保存が止まる', 'save-allowed': '保存できる', 'set-value': '値が設定される', 'value-unchanged': '値は変わらない', hidden: '表示されない', shown: '表示される', 'show-hide': '表示が切り替わる' });
+        const EXPECT_JA = Object.freeze({ lock: '編集できない', 'not-locked': '編集できる', warn: '警告が出る（保存は止まらない）', 'not-warned': '警告が出ない', 'block-save': '保存が止まる', 'save-allowed': '保存できる', 'set-value': '値が設定される', 'value-unchanged': '値は変わらない', hidden: '表示されない', shown: '表示される', 'show-hide': '表示が切り替わる', [KT_PORT_EXPECT]: '移植元と同じ動き' });
+        /** 2026-10-10（§5.2）: 移植元と比べた動き（{ stopped, errors: { フィールドのコード: 文 }, eventError }）の文（「止める（…のエラー「…」）」／「止めない」）。
+         *  レビュー T-5（2026-10-14・Gateway の R-2 と同じ形）: error の置き場所を出す。フィールドの error は「「金額」（amount）のエラー「…」」（ラベルが無ければコードだけ）、
+         *  event.error は「画面全体のエラー「…」」。両方あれば並べる（3 件まで）。置き場所が違うだけの不合格を同じ文に見せない */
+        const saveBehaviorJa = (b) => {
+          if (!b || typeof b !== 'object') return '';
+          const fieldJa = (code) => { const l = fieldLabels()[code]; return l ? `「${l}」（${code}）` : String(code); };
+          const parts = [...Object.entries(b.errors && typeof b.errors === 'object' ? b.errors : {}).filter(([, t]) => typeof t === 'string' && t).map(([code, t]) => `${fieldJa(code)}のエラー「${String(t).slice(0, 40)}」`), ...(typeof b.eventError === 'string' && b.eventError ? [`画面全体のエラー「${String(b.eventError).slice(0, 40)}」`] : [])];
+          return b.stopped ? `止める${parts.length ? `（${parts.slice(0, 3).join('・')}）` : ''}` : '止めない';
+        };
         /**
          * 代表条件の表示の文（構造化した effect・expect・event から作る）。§0c.6: 警告の「保存は止めない」代表条件（effect warn・expect save-allowed）は
          *   「警告が出ても保存できる」と書き、生成工程の note（画面の説明）は添えない（作成画面・編集画面の取り違えを利用者に見せない）。保存だけの警告はダイアログで警告する
@@ -27677,6 +27799,13 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
           if (x.effect === 'warn' && x.expect === 'warn' && isSave) return `${fieldName(x.field)}: 保存のときに確認・警告が出る（保存は止めない）${x.note ? `（${String(x.note).slice(0, 60)}）` : ''}`;
           //   §0c.10（2026-10-08）: show-hide の condition は隠す条件。条件に合うレコード（side match）は表示されない、合わないレコード（side nomatch）は表示される
           if (x.effect === 'show-hide' && x.expect === 'show-hide' && (x.side === 'match' || x.side === 'nomatch')) return `${fieldName(x.field)}: ${x.side === 'match' ? '表示されない（隠す条件に合う）' : '表示される（隠す条件に合わない）'}${x.note ? `（${String(x.note).slice(0, 60)}）` : ''}`;
+          //   2026-10-10（§5.2）: 移植元と同じ動きかを比べた代表条件（expect same-as-source）。生成工程の note の前半（値と画面）を添え、比べた移植元の動き（reference）が
+          //   あれば「移植元: 止める（エラー「…」）／生成したコード: …」を出す（生成したコードの動きは observed が同じ形のときだけ）
+          if (x.expect === KT_PORT_EXPECT) {
+            const where = x.note ? String(x.note).split(/:\s|：/)[0].slice(0, 60) : '';
+            const mineB = x.observed && typeof x.observed === 'object' && typeof x.observed.stopped === 'boolean' ? x.observed : null;
+            return `${fieldName(x.field)}: 移植元${x.refFile && x.refFile.file ? `「${x.refFile.file}」` : ''}と同じ動き${where ? `（${where}）` : ''}${x.reference ? ` — 移植元: ${saveBehaviorJa(x.reference)}${mineB ? `／生成したコード: ${saveBehaviorJa(mineB)}` : ''}` : ''}`;
+          }
           return `${fieldName(x.field)}: ${EXPECT_JA[x.expect] || KT_EFFECT_JA[x.effect] || ''}${x.note ? `（${String(x.note).slice(0, 60)}）` : ''}`;
         };
         /** 動作テストを実行できなかった理由（区分の見出し: 理由の文） */
@@ -27800,7 +27929,8 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
             //   §0d.1（2026-10-08）: 模擬テストが要る効果（生成工程の check: behavior）を、模擬テストの環境が使えないために確かめられないときは、理由を一度にまとめて出す
             //   （「環境の制約」とだけ言わない）。理由は生成工程の checkReason（既知の競合は candidate-error-same-event）と、Toolkit が固定した必須の効果の構造
             //   （条件・効果の種類）だけから作る（文を解析しない）。修復は依頼しない。作り直しの操作がある理由（unsupported など）はこの形にしない
-            const needed = cat === 'env' && !er.notRun.some(i => (i.notRunReasons || []).some(r => (ktBehaviorReasonOf(r) || {}).fix)) ? er.notRun.filter(i => i.check === 'behavior') : [];
+            //   2026-10-10（§3.2）: 模擬テストの入力の不正（case-invalid）は「環境が使えない」とまとめず、その理由で書く
+            const needed = cat === 'env' && !er.notRun.some(i => (i.notRunReasons || []).some(r => (ktBehaviorReasonOf(r) || {}).fix || r === 'case-invalid')) ? er.notRun.filter(i => i.check === 'behavior') : [];
             if (needed.length) {
               const labels = needed.map(i => `${fieldName(i.field)}: ${KT_EFFECT_JA[i.effect] || i.effect}`);
               const reasons = [...new Set([...needed.flatMap(i => i.checkReason || []), ...(needed.some(i => i.condition) ? ['condition'] : []), ...needed.filter(i => i.effect === 'warn' || i.effect === 'block-save').map(i => i.effect)])];
@@ -27837,6 +27967,8 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
           existing: '作る JavaScript を既存の JavaScript に統合する（strategy EXTEND_EXISTING_JS・existingFiles）か、既存の処理との役割分担を見直してください',
           'condition-unparsed': '効果の condition を、フィールドと値の比較（=・!=・>・<・in など）を and でつないだ形にしてください',
           'condition-value-unknown': '条件の値（ステータス名・選択肢など）を、今の設定か計画で新設するものと同じ表記にしてください（無い値なら新設の手順を足してください）',
+          //   2026-10-10（§4.2）: 保存を止める条件が分からない（移植元の本文が無い・比べられない）。条件を推測で書かせない（空欄を「いつでも」にも、思いついた式にもしない）
+          'condition-unknown': '保存を止める条件を推測で書かないでください。既存の JavaScript の判定を別の画面へ移すときは、移植元のファイルを existingFiles に書き（本文を取得できるファイル）、効果の condition は空のままにしてください。移植元を確かめられないときは、その点を risks に書いてください',
           'other-platform': 'その画面（PC / モバイル）のイベントを外すか、その画面を担当する JavaScript（customization）を足してください',
           limit: 'JavaScript（customization）を分けるか、対象のフィールド・条件を絞ってください',
           //   §0c.9: 効果のイベントのそれぞれで「合う」「合わない」の合格が揃わない（Toolkit の二重の安全）
@@ -27878,7 +28010,8 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
             if (!er) { lines.push(`${head}: ${vd.reason}`); hints.add('missing'); continue; }
             if (vd.status === 'unresolved') {
               for (const i of er.missing.slice(0, 4)) lines.push(`${head}: ${fieldName(i.field)}を${KT_EFFECT_NEED_JA[i.effect] || i.effect}処理がありません（要件未達）`);
-              for (const i of er.failed.slice(0, 4)) lines.push(`${head}: ${fieldName(i.field)}を${KT_EFFECT_NEED_JA[i.effect] || i.effect}動きになりませんでした（模擬テスト）${i.cases.filter(y => y.verdict === 'fail' && y.message).length ? `: ${cut(i.cases.find(y => y.verdict === 'fail' && y.message).message, 120)}` : ''}`);
+              //   2026-10-10（§5.2）: 移植元と同じ条件の効果（conditionFrom）は「移植元と同じ動きにならなかった」と書く（「保存を止める動きにならなかった」と言わない）
+              for (const i of er.failed.slice(0, 4)) lines.push(`${head}: ${i.conditionFrom ? `${fieldName(i.field)}の保存を止める動きが、移植元「${i.conditionFrom.file}」と同じになりませんでした` : `${fieldName(i.field)}を${KT_EFFECT_NEED_JA[i.effect] || i.effect}動きになりませんでした`}（模擬テスト）${i.cases.filter(y => y.verdict === 'fail' && y.message).length ? `: ${cut(i.cases.find(y => y.verdict === 'fail' && y.message).message, 120)}` : ''}`);
               if (!er.missing.length && !er.failed.length) lines.push(`${head}: ${vd.reason}`);
               hints.add('missing');
               continue;
@@ -27933,7 +28066,8 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
           return { reuse: true, reason: null };
         };
         /** 必須の効果の指紋（フィールド・効果・イベント・条件・要件の id。順序に依らない） */
-        const effectsKeyOf = (list) => JSON.stringify((Array.isArray(list) ? list : []).filter(Boolean).map(e => [e.field, e.effect, (Array.isArray(e.events) ? e.events : []).join(','), e.condition || '', [...(Array.isArray(e.requirementIds) ? e.requirementIds : [e.requirementId])].map(String).sort().join('+')].join('|')).sort());
+        //   2026-10-10（§5.1）: 移植元（conditionFrom の file・target・events）も入れる（移植元の有無・移植元が変われば流用しない）
+        const effectsKeyOf = (list) => JSON.stringify((Array.isArray(list) ? list : []).filter(Boolean).map(e => [e.field, e.effect, (Array.isArray(e.events) ? e.events : []).join(','), e.condition || '', [...(Array.isArray(e.requirementIds) ? e.requirementIds : [e.requirementId])].map(String).sort().join('+'), ktConditionFromKey(e.conditionFrom)].join('|')).sort());
         /**
          * 流用の判定に使う要件の指紋: この customization を planRefs で指す要件と、担当の無い要件（planRefs が空・計画の手順 / customization に無い id だけ）（id・決定・条件・動作・効果）。
          *   担当の無い要件が増える・変わる・取り消されたら、どの JavaScript が担当するか分からないので、全部の customization を作り直す（反証 A3。仮案の流れの planRefs は仮案の項目 id）
@@ -27973,10 +28107,19 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
           if (tu.length) parts.push('要件の対象が計画のどのフィールドかを特定できません');
           if (none.length) parts.push('JavaScript が操作するフィールドはありますが、必要な動作が計画にありません');
           //   §0c.7: 要件から足す効果の条件が分からない / 候補が読み込まれない画面のイベントを担当する JavaScript が無い
-          const cu = list.filter(u => u.reason === 'condition-unknown'), op = list.filter(u => u.reason === 'other-platform');
+          //   2026-10-10（§5.1）: 既存の入力チェックの移植（source つきの condition-unknown）は「条件が計画に無い」と言わない（条件は移植元の判定と同じ。確かめる手段が無い）
+          const cu = list.filter(u => u.reason === 'condition-unknown' && !u.source), op = list.filter(u => u.reason === 'other-platform');
           if (cu.length) parts.push(`${names(cu)}で要件が求める動作（${[...new Set(cu.map(u => KT_EFFECT_JA[u.effect] || u.effect))].join('・')}）を、どの条件で行うかが計画にありません`);
+          //   レビュー T-1（2026-10-14）: why ごとの理由（not-capable = 接続先が非対応／events-unreadable = 移植元のイベントの登録を本文から読めない／no-source = 本文を渡せない）
+          const portWhyJa = (xs, src) => (xs.some(u => u.why === 'not-capable') ? '接続先（生成工程）が移植元と同じ動きかを確かめる検査に対応していない' : xs.some(u => u.why === 'events-unreadable') ? `移植元「${src}」のイベントの登録を本文から読めない` : '移植元の本文を生成に渡せない（本文を取得できない・大きすぎるなど）');
+          for (const src of [...new Set(list.filter(u => u.reason === 'condition-unknown' && u.source).map(u => u.source))]) {
+            const xs = list.filter(u => u.reason === 'condition-unknown' && u.source === src);
+            parts.push(`${names(xs)}の保存を止める条件は既存の JavaScript「${src}」の判定と同じ（移植）ですが、${portWhyJa(xs, src)}ため、同じ条件かを確かめられません（「いつでも保存を止める」にはしていません）`);
+          }
           if (op.length) parts.push(`${names(op)}の動作（${[...new Set(op.map(u => KT_EFFECT_JA[u.effect] || u.effect))].join('・')}）に、この JavaScript が読み込まれない画面（${[...new Set(op.flatMap(u => u.platforms || []).map(p => (p === 'mobile' ? 'モバイル' : 'PC')))].join('・')}）のイベントがあり、その画面を担当する JavaScript が計画にありません`);
-          return `必須の動作を特定できません（${parts.join('。') || '計画と要件から特定できません'}）`;
+          //   レビュー T-2（2026-10-14）: すべてが移植元つきの condition-unknown（動作は決まっていて、同じ条件かを確かめる手段が無いだけ）のときは「特定できません」と言わない
+          const portOnly = list.length > 0 && list.every(u => u.reason === 'condition-unknown' && u.source);
+          return `必須の動作を${portOnly ? '確かめられません' : '特定できません'}（${parts.join('。') || '計画と要件から特定できません'}）`;
         };
         /** §0c.2: この版・この customization の必須の効果（台帳の要件で未特定を補う。生成の前に固定する） */
         //   §0f.2 の 4（2026-10-09）: 台帳の要件は採用範囲の中だけ（範囲外の proposed は linked にも unresolved にも入らない。計画の効果は registerPlan が範囲外を外した後の v.plan）
@@ -27986,10 +28129,14 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
           const sc = lg ? scopeOfLedger(lg, v.plan) : null;
           const nm = sc && sc.noMaterial ? sc.noMaterial.get(cid) || null : null;
           const reqs = lg ? inScopeRequirements(lg, v.plan, sc).filter(r => !(nm && r && nm.has(r.id))) : [];
-          return requiredEffectsOf(v.plan, cid, reqs, { labels: fieldLabels(), columns: tableColumns(), readOnly: readOnlyFields() });
+          //   2026-10-10（誤った検証による修復の繰り返しを止める §5.1）: 移植元の判定に、画面の解析から作ったアプリの JavaScript の一覧（services.jsFiles）と
+          //   接続先の印（health の customization-generator.verification の conditionFrom）を渡す
+          return requiredEffectsOf(v.plan, cid, reqs, { labels: fieldLabels(), columns: tableColumns(), readOnly: readOnlyFields(), jsFiles: appJsFiles(v, cid), capable: { conditionFrom: generatorMarks().includes('conditionFrom') } });
         };
+        /** 2026-10-10（§5.2）: 効果の言い方。移植元と同じ条件の効果は、その旨を添える（条件の空を「いつでも」と読ませない） */
+        const effectJaOf = (x) => `${KT_EFFECT_JA[x.effect] || x.effect}${x && x.conditionFrom && x.conditionFrom.file ? `（移植元「${x.conditionFrom.file}」と同じ条件）` : ''}`;
         /** 進みのカードの「これから確かめる条件」: 動作テストの結果（Gateway の behavior.cases）が届く前は必須の効果の一覧、届いたら代表条件ごとの結果 */
-        const checklistOfEffects = (effects) => [...new Map((effects || []).map(x => [`${x.field}|${x.effect}`, { label: `${fieldName(x.field)}: ${KT_EFFECT_JA[x.effect] || x.effect}`, state: 'todo' }])).values()];
+        const checklistOfEffects = (effects) => [...new Map((effects || []).map(x => [`${x.field}|${x.effect}`, { label: `${fieldName(x.field)}: ${effectJaOf(x)}`, state: 'todo' }])).values()];
         const checklistOfBehavior = (behavior) => ((behavior && Array.isArray(behavior.cases)) ? behavior.cases : []).filter(Boolean).map(x => ({ label: caseLabelOf(x), state: x.verdict === 'pass' ? 'pass' : x.verdict === 'fail' ? 'fail' : 'unverified', message: String(x.message || '') }));
         /**
          * 1 件の customization の生成と検証。§0c（2026-10-08）: 生成工程（Gateway）への 1 依頼で、生成 → 機械検査（必須の効果を含む）→ 動作テスト（隔離環境の模擬）→
@@ -28003,8 +28150,13 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
           //   §0c.8: テーブルの列の表示切り替えなど kintone でできない効果（notPossible）は、必須の効果にせず「実現できない点」に出す
           const base = { customization: JSON.parse(JSON.stringify(c)), requiredEffects: req.effects, notPossible: req.notPossible || [], requirementsKey, decisionsKey: decisionsKeyOf(v.decisionsSent, decisionsNow), envKey, repairLog: [], repairs: 0, at: now() };
           if (req.unresolved.length) {
+            //   2026-10-10（§5.1）: 移植元と同じ条件かを確かめる手段が無いだけ（source つきの condition-unknown。接続先が非対応・本文を送れない）のときは、計画を直しても
+            //   解けないので［計画を直すよう依頼する］を出さない（自動の差分更新の引き金にもしない。計画の AI に条件を推測で書かせない）
+            const portOnly = req.unresolved.every(u => u.reason === 'condition-unknown' && u.source);
+            //   レビュー T-1（2026-10-14）: events-unreadable（移植元のイベントの登録を本文から読めない）も、計画を直しても解けない理由として同じ扱い
+            const portNext = req.unresolved.some(u => u.why === 'not-capable') ? '接続先（生成工程）が移植元と同じ動きかを確かめる検査に対応してから、最終案を作り直します（いまの接続先では反映できる最終案にしません。計画を直しても解けないため、依頼の操作は出していません）。' : req.unresolved.some(u => u.why === 'events-unreadable') ? '移植元の既存の JavaScript のイベントの登録を本文から読めないため、同じ条件かを確かめられません（計画を直しても解けないため、依頼の操作は出していません。移植元の本文を解析できる状態で最終案を作り直します）。' : '移植元の既存の JavaScript の本文を生成に渡せないため、同じ条件かを確かめられません（計画を直しても解けないため、依頼の操作は出していません。本文を取得できる状態で最終案を作り直します）。';
             return { ...base, generated: null, review: null, existingSource: null, status: 'not-ready', candidateHash: null, attempts: previous ? previous.attempts || null : null,
-              verdict: { status: 'not-ready', kind: 'effects-unknown', fix: 'revise', unresolved: req.unresolved.map(u => ({ ...u })), reason: unresolvedReasonOf(req.unresolved), next: `${(state.effectRetried.get(v.planId) || new Set()).has(cid) ? '計画の差分更新を 1 回自動で依頼しましたが、まだ決まっていません。' : ''}計画のフィールドと必要な動作（編集できない・警告・保存を止めるなど）を見直します（同じ要望を言い直す必要はありません）。${FIX_HINT.revise}`, details: req.unresolved.map(u => `${u.reason}${u.field ? `: ${u.field}` : ''}${u.effect ? ` / ${u.effect}` : ''}${u.requirementId ? ` / ${u.requirementId}` : ''}`) } };
+              verdict: { status: 'not-ready', kind: 'effects-unknown', ...(portOnly ? { port: true } : { fix: 'revise' }), unresolved: req.unresolved.map(u => ({ ...u })), reason: unresolvedReasonOf(req.unresolved), next: portOnly ? portNext : `${(state.effectRetried.get(v.planId) || new Set()).has(cid) ? '計画の差分更新を 1 回自動で依頼しましたが、まだ決まっていません。' : ''}計画のフィールドと必要な動作（編集できない・警告・保存を止めるなど）を見直します（同じ要望を言い直す必要はありません）。${FIX_HINT.revise}`, details: req.unresolved.map(u => `${u.reason}${u.field ? `: ${u.field}` : ''}${u.effect ? ` / ${u.effect}` : ''}${u.requirementId ? ` / ${u.requirementId}` : ''}${u.source ? ` / 移植元 ${u.source}（${u.why}）` : ''}`) } };
           }
           //   §0c.6: 必須の効果は生成工程の上限（20 件）まで。超える分を黙って落とすと確かめないまま残るので、生成を呼ばずに準備未完了（件数の上限）にする
           if (req.effects.length > 20) return { ...base, generated: null, review: null, existingSource: null, status: 'not-ready', candidateHash: null, attempts: previous ? previous.attempts || null : null,
@@ -28187,11 +28339,14 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
           // 検証の区分（§0c.4）: 機械検査（生成工程の machine ＋ Toolkit の形式確認）/ 必須の動作（構造の有無）/ 動作テスト（隔離環境の模擬）/ 実機は未確認
           const EFFECT_CHECKS = /^(required-effects|behavior)(-|$)/;
           const toolkitChecks = entries.flatMap(([, e]) => (e.review?.checks || []).filter(ch => ch && !EFFECT_CHECKS.test(String(ch.name))));
-          const machine = { gateway: entries.flatMap(([, e]) => e.verification?.machine || []), toolkit: toolkitChecks, blocks: [...entries.flatMap(([, e]) => (e.verification?.machine || []).filter(x => !x.ok && x.severity === 'block').map(x => x.message)), ...toolkitChecks.filter(ch => !ch.ok && ch.severity === 'block').map(ch => ch.message)].map(fix).slice(0, 6), reviews: toolkitChecks.filter(ch => !ch.ok && ch.severity === 'review').map(ch => ({ name: ch.name, message: cut(fix(ch.message), 160) })).slice(0, 6), gatewayRepairs: entries.reduce((n, [, e]) => n + ((e.verification && e.verification.repairs && e.verification.repairs.count) || 0), 0), ran: entries.some(([, e]) => !!e.review) };
+          const machine = { gateway: entries.flatMap(([, e]) => e.verification?.machine || []), toolkit: toolkitChecks, blocks: [...entries.flatMap(([, e]) => (e.verification?.machine || []).filter(x => !x.ok && x.severity === 'block').map(x => x.message)), ...toolkitChecks.filter(ch => !ch.ok && ch.severity === 'block').map(ch => ch.message)].map(fix).slice(0, 6), reviews: toolkitChecks.filter(ch => !ch.ok && ch.severity === 'review').map(ch => ({ name: ch.name, message: cut(fix(ch.message), 160) })).slice(0, 6), gatewayRepairs: entries.reduce((n, [, e]) => n + ((e.verification && e.verification.repairs && e.verification.repairs.count) || 0), 0), ran: entries.some(([, e]) => !!e.review),
+            //   2026-10-10（§3.3・§5.2）: 修復しなかった理由（模擬テストの入力の不正・条件が分からない必須の動作）を理由ごとに数えた写し（表示は詳細の 1 行）
+            notRepaired: [...entries.flatMap(([, e]) => (e.verification && e.verification.repairs && Array.isArray(e.verification.repairs.notRepaired) ? e.verification.repairs.notRepaired : [])).reduce((m, x) => m.set(x.reason, (m.get(x.reason) || 0) + (Number(x.count) || 0)), new Map())].map(([reason, count]) => ({ reason, count })).filter(x => x.count > 0) };
           //   C-1 第 4 段（2026-10-09・K-3）: 必須の動作の行に PC / モバイルを付ける（効果のイベントの platform。構造化した値）。同じ内容の行は 1 行にまとめる
-          const effectRows0 = entries.flatMap(([, e]) => { const er = (e.review && e.review.effects) || (Array.isArray(e.requiredEffects) && e.requiredEffects.length ? KTCodeReview.effectResults(e.verification, e.requiredEffects, { effectCheck: e.effectCheck === true }) : null); return er ? er.items.map(i => ({ field: i.field, label: fieldName(i.field), effect: i.effect, effectJa: KT_EFFECT_JA[i.effect] || i.effect, platforms: platformsOfEvents(i.events), structure: i.structure, behavior: i.behavior, ...(i.checkedBy ? { checkedBy: i.checkedBy } : {}), ...(i.behavior === 'not-run' ? { notRunCategory: (KT_REASON_CATEGORY[ktBehaviorReasonCategory((i.notRunReasons || [])[0] || er.reason || 'unavailable')] || KT_REASON_CATEGORY.other).label } : {}) })) : []; });
+          const effectRows0 = entries.flatMap(([, e]) => { const er = (e.review && e.review.effects) || (Array.isArray(e.requiredEffects) && e.requiredEffects.length ? KTCodeReview.effectResults(e.verification, e.requiredEffects, { effectCheck: e.effectCheck === true }) : null); return er ? er.items.map(i => ({ field: i.field, label: fieldName(i.field), effect: i.effect, effectJa: effectJaOf(i), platforms: platformsOfEvents(i.events), structure: i.structure, behavior: i.behavior, ...(i.checkedBy ? { checkedBy: i.checkedBy } : {}), ...(i.behavior === 'not-run' ? { notRunCategory: (KT_REASON_CATEGORY[ktBehaviorReasonCategory((i.notRunReasons || [])[0] || er.reason || 'unavailable')] || KT_REASON_CATEGORY.other).label } : {}) })) : []; });
           const effectRows = effectRows0.filter((x, i, a) => a.findIndex(y => JSON.stringify(y) === JSON.stringify(x)) === i);
-          const behCases = entries.flatMap(([, e]) => ((e.verification && e.verification.behavior && Array.isArray(e.verification.behavior.cases)) ? e.verification.behavior.cases : []).filter(Boolean).map(x => ({ label: cut(caseLabelOf(x), 140), verdict: x.verdict === 'pass' ? 'pass' : x.verdict === 'fail' ? 'fail' : 'not-run', message: cut(String(x.message || ''), 200), ...(x.verdict === 'not-run' && x.reason ? { reason: reasonLineOf(x.reason), category: ktBehaviorReasonCategory(x.reason) } : {}) })));
+          //   レビュー T-5（2026-10-14）: 移植元と比べた代表条件の文は error の置き場所（フィールド名＋コード／画面全体）を含めて 140 字を超えるので、その行だけ 240 字まで
+          const behCases = entries.flatMap(([, e]) => ((e.verification && e.verification.behavior && Array.isArray(e.verification.behavior.cases)) ? e.verification.behavior.cases : []).filter(Boolean).map(x => ({ label: cut(caseLabelOf(x), x.expect === KT_PORT_EXPECT ? 240 : 140), verdict: x.verdict === 'pass' ? 'pass' : x.verdict === 'fail' ? 'fail' : 'not-run', message: cut(String(x.message || ''), 200), ...(x.verdict === 'not-run' && x.reason ? { reason: reasonLineOf(x.reason), category: ktBehaviorReasonCategory(x.reason) } : {}) })));
           const behStatuses = entries.map(([, e]) => (e.verification && e.verification.behavior ? e.verification.behavior.status || null : null)).filter(Boolean);
           //   §0c.6: 実行できなかった理由は区分の見出しを付ける（環境・条件の形・件数の上限・既存の JavaScript など）。区分は必須の効果の判定（effects.reasonCategory）を優先する
           const behReasons = [...new Set(entries.map(([, e]) => { const b = e.verification && e.verification.behavior; if (!b || b.status !== 'not-run') return ''; const er = e.review && e.review.effects; return er && er.reason ? reasonLineOf(er.reason) : reasonLineOf(b.reason && b.reason !== 'partial' ? b.reason : 'unavailable'); }).filter(Boolean))];
@@ -28247,7 +28402,8 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
             const tried = state.ownerRetried.get(v.planId) || new Set();
             const fresh = unownedRequirementsOf(v, []).filter(r => r.decision === 'decided' && !tried.has(r.id));
             const effTried = state.effectRetried.get(v.planId) || new Set();
-            const effFresh = (v.plan.customizations || []).filter(c => c && c.customizationId && ['NEW_JS_FILE', 'EXTEND_EXISTING_JS'].includes(c.strategy) && !effTried.has(c.customizationId)).map(c => ({ c, u: requiredOf(v, c.customizationId).unresolved })).filter(x => x.u.length);
+            //   2026-10-10（§5.1）: 移植元と同じ条件かを確かめる手段が無いだけ（source つきの condition-unknown）は計画を直しても解けないので、自動の差分更新の引き金にしない
+            const effFresh = (v.plan.customizations || []).filter(c => c && c.customizationId && ['NEW_JS_FILE', 'EXTEND_EXISTING_JS'].includes(c.strategy) && !effTried.has(c.customizationId)).map(c => ({ c, u: requiredOf(v, c.customizationId).unresolved.filter(u => !(u.reason === 'condition-unknown' && u.source)) })).filter(x => x.u.length);
             //   §0f.2 の 4（2026-10-09）: 範囲外の効果を外した customization（説明の文に範囲外の動作が残りうる。v.scopeIssues）も、同じ 1 回の自動の依頼で計画に外させる
             //   （回数は effectRetried の鍵（customization の id）と上限のまま。引き金と依頼文は範囲内の要件だけ。範囲外の要件は構造化した「外す」指示にだけ書く）
             //   再検証前の指示 §1（2026-10-10）: 判断の候補だけを外した customization（kind candidate）は自動の見直しの引き金にしない（計画の AI に外させず、利用者の判断を待つ）
@@ -30259,7 +30415,11 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
       const effLine = effects.length ? `<div style="font-size:12px; margin-top:4px;">必須の動作（${effects.length} 件）</div>${effRows}` : '';
       const beh = ver.behavior || { status: 'none', reasons: [], cases: [], counts: { pass: 0, fail: 0, notRun: 0 } };
       const behLine = !fin.customizations.length ? '' : beh.status === 'none' ? '模擬テスト: 結果はありません' : (beh.status === 'not-run' && !beh.cases.length) ? `模擬テスト: 実行できませんでした（${beh.reasons.length ? beh.reasons.join('／') : '環境'}）。作った JavaScript の誤りとは判定していません` : `模擬テスト（代表条件 ${beh.cases.length} 件）: 合格 ${beh.counts.pass}・不合格 ${beh.counts.fail}・実行できない ${beh.counts.notRun}${beh.status === 'not-run' && beh.reasons.length ? `（${beh.reasons.join('／')}）` : ''}`;
-      const behRows = (beh.cases || []).slice(0, 12).map(x => `<div style="font-size:11px;">${esc(x.verdict === 'pass' ? '✓' : x.verdict === 'fail' ? '×' : '未確認')} ${esc(x.label)}${x.verdict !== 'pass' && x.message ? ` — ${esc(x.message)}` : ''}${x.verdict === 'not-run' && x.reason ? `（${esc(x.reason)}）` : ''}</div>`).join('');
+      //   2026-10-10（§3.3・§5.2）: 生成工程が修復を依頼しなかった結果（模擬テストの入力の不正・条件が分からない必須の動作）は、代表条件の一覧の詳細に 1 行で出す
+      const NOT_REPAIRED_JA = { 'case-invalid': (n) => `模擬テストの入力の不正 ${n} 件（生成したコードの不合格ではありません）`, 'condition-unknown': (n) => `条件が分からない必須の動作 ${n} 件（計画を直す対象です）` };
+      const notRep = (Array.isArray(ver.machine.notRepaired) ? ver.machine.notRepaired : []).filter(x => NOT_REPAIRED_JA[x.reason]);
+      const notRepLine = notRep.length ? `<div class="kt-ai-final-not-repaired" style="font-size:11px; opacity:.85;">修復を依頼しなかった結果: ${esc(notRep.map(x => NOT_REPAIRED_JA[x.reason](x.count)).join('・'))}</div>` : '';
+      const behRows = (beh.cases || []).slice(0, 12).map(x => `<div style="font-size:11px;">${esc(x.verdict === 'pass' ? '✓' : x.verdict === 'fail' ? '×' : '未確認')} ${esc(x.label)}${x.verdict !== 'pass' && x.message ? ` — ${esc(x.message)}` : ''}${x.verdict === 'not-run' && x.reason ? `（${esc(x.reason)}）` : ''}</div>`).join('') + notRepLine;
       const realLines = [...ver.howTo.map(esc)];
       //   §0d.1（2026-10-08）: 機械検査で足りる必須の動作があり、模擬テストが合格していないときは、その扱いを 1 行で書く（模擬テストの合格とは書かない）
       const machineNote = effects.some(x => x.checkedBy === 'machine') && beh.status !== 'passed' ? '機械検査で確認した必須の動作は、模擬テストの結果を待たずに反映できる扱いにしています（模擬テストは未実施・実機は未確認）' : '';
@@ -30996,7 +31156,10 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
         const st = inputs.data && inputs.data.status ? { enable: !!inputs.data.status.enable, states: Object.values(inputs.data.status.states || {}).filter(Boolean).map(x => [x.name, x.index]) } : null;
         const planned = KTContext.plannedOf(plan, inputs.data || null);
         const cR = KTContext.resolveCustomization ? KTContext.resolveCustomization(c, plan) : c;
-        try { return KTScan.hashText(JSON.stringify({ files, st, planned: { statuses: planned.statuses.map(x => x.name), fields: planned.fields.map(x => [x.code, x.type || null]) }, c: cR })); } catch (e) { return null; }
+        //   2026-10-10（§5.1）: 計画が挙げた別の画面の既存 JS（既存の入力チェックの移植元になりうる。本文は生成の参照に送る）の本文の指紋も入れる（移植元が変われば流用しない）。
+        //   無ければ今までの指紋のまま
+        const refs = (Array.isArray(c.existingFiles) ? c.existingFiles : []).filter(e => e && e.name && (e.target === 'mobile' ? 'mobile' : 'desktop') !== target).map(e => { const t = e.target === 'mobile' ? 'mobile' : 'desktop'; const f = KTScan.summarizeFiles(inputs.scan || null, inputs.data || null).find(x => x.name === e.name && x.target === t); return [t, String(e.name), f && typeof f.text === 'string' ? KTScan.hashText(f.text) : null]; });
+        try { return KTScan.hashText(JSON.stringify({ files, st, planned: { statuses: planned.statuses.map(x => x.name), fields: planned.fields.map(x => [x.code, x.type || null]) }, c: cR, ...(refs.length ? { refs } : {}) })); } catch (e) { return null; }
       },
       // §0c（2026-10-08）: Toolkit の模擬イベント（services.simulate）は外した。動作テストは生成工程（Gateway が隔離環境の Worker で行う）。
       //   KTJsSim は C-1 第 2 段（2026-10-08）で削除した（候補の hash は KTScan.candidateHashOf）
@@ -31006,6 +31169,17 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
       tableColumns() { try { const inputs = inputsNow(); return Object.fromEntries(KTDeps.normalizeFields((inputs.data && inputs.data.fields) || {}).filter(f => f && f.code && f.parent).map(f => [f.code, f.parent])); } catch (e) { return {}; } },
       //   2026-10-10: 入力できないフィールド（計算・自動計算・ルックアップのコピー先・システムの値。生成工程へ渡す appFields の readOnly と同じ根拠）。フィールドの定義が無ければ null
       readOnlyFields() { try { const inputs = inputsNow(); const raw = inputs && inputs.data && inputs.data.fields; if (!raw || typeof raw !== 'object' || !Object.keys(raw).length) return null; return [...KTContext.readOnlyFieldCodes(KTDeps.normalizeFields(raw))]; } catch (e) { return null; } },
+      //   2026-10-10（誤った検証による修復の繰り返しを止める §5.1）: 必須の効果の移植元の判定に使うアプリの JavaScript の一覧（KTContext.effectJsFilesOf。画面の解析から。
+      //   source は generate が buildGenerator の otherFiles に本文を入れられるか＝同じ規則。requirement は generate と同じく範囲内の要件の文に置き換えた customization で決める）
+      jsFiles({ version: v, customizationId }) {
+        try {
+          const c0 = (v?.plan?.customizations || []).find(x => x && x.customizationId === customizationId) || null;
+          if (!c0) return null;
+          const scopedReq = v && v.scopeRequirementText && typeof v.scopeRequirementText[customizationId] === 'string' && v.scopeRequirementText[customizationId].trim() ? v.scopeRequirementText[customizationId] : null;
+          const inputs = inputsNow();
+          return KTContext.effectJsFilesOf({ customization: scopedReq ? { ...c0, requirement: scopedReq } : c0, data: inputs.data || null, scan: inputs.scan || null });
+        } catch (e) { return null; }
+      },
       /** EXPLAIN_PLAN / EXPLAIN_REVIEW: 計画の要約 ＋ Review の写し ＋ 計画が引用した根拠 → assistant-qa（説明だけ。計画は変えない） */
       async explain({ question, kind, plan, review, ctx, version, signal = null }) {
         if (!ctx) throw new KTAiClient.AiClientError({ code: KTAiClient.ERROR_CODES.NO_CONTEXT, message: 'この計画の Context がありません（Context ペインから作った計画は説明の対象外です）' });

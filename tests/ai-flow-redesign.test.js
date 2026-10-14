@@ -1636,7 +1636,9 @@ await section(async () => {
 });
 // D27（B4・能力の見分け）: health の customization-generator.verification に 6 つの印がすべてあるときだけ新しい形で送る。欠ければ「接続先が非対応」
 await section(async () => {
-  assert(GEN_EFFECT_FEATURES.every(f => ['requiredEffects', 'effectGroups', 'relatedOmitted', 'appFields', 'saveDialog', 'reasonCategory', 'caseSide', 'eventCases', 'loadFaithful', 'registrationCheck', 'emptyCase', 'hideCondition', 'registrationCounts', 'caseCoverage', 'cancelCheck', 'limitCode', 'scopeList'].includes(f)) && GEN_EFFECT_FEATURES.length === 17, 'D27-0: 印は requiredEffects・effectGroups・relatedOmitted・appFields・saveDialog・reasonCategory・caseSide（§0c.9）・eventCases・loadFaithful・registrationCheck・emptyCase・hideCondition（§0c.10）・registrationCounts・caseCoverage（§0c.11）・cancelCheck・limitCode（C-1 第 3 段）・scopeList（C-1 第 4 段）');
+  assert(GEN_EFFECT_FEATURES.every(f => ['requiredEffects', 'effectGroups', 'relatedOmitted', 'appFields', 'saveDialog', 'reasonCategory', 'caseSide', 'eventCases', 'loadFaithful', 'registrationCheck', 'emptyCase', 'hideCondition', 'registrationCounts', 'caseCoverage', 'cancelCheck', 'limitCode', 'scopeList', 'tableRowChange', 'caseInvalid'].includes(f)) && GEN_EFFECT_FEATURES.length === 19, 'D27-0: 印は requiredEffects・effectGroups・relatedOmitted・appFields・saveDialog・reasonCategory・caseSide（§0c.9）・eventCases・loadFaithful・registrationCheck・emptyCase・hideCondition（§0c.10）・registrationCounts・caseCoverage（§0c.11）・cancelCheck・limitCode（C-1 第 3 段）・scopeList（C-1 第 4 段）・tableRowChange・caseInvalid（2026-10-10）');
+  //   2026-10-10（誤った検証による修復の繰り返しを止める §5.2）: 17 個 → 19 個。テーブル自体の変更の組み立て（tableRowChange）と壊れた入力の not-run（caseInvalid）が無い Gateway は、
+  //   壊れた模擬テストの入力で正しい候補を不合格にして修復を繰り返す形のままなので、新しい形として受け入れない（前の期待 17 個はこの不具合の前の契約）
   // 会話: 印が requiredEffects だけ（3d7adb6 の段階の Gateway）→ 結果が返っても「接続先が非対応」で準備未完了
   const x = makeConvC({ supported: ['requiredEffects'] });
   await adoptC(x);
