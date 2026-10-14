@@ -21620,9 +21620,11 @@
     //   §0f.3（2026-10-09・FP9）: mark（任意）= 時刻の印（headersAt = 応答の見出しが届いた・firstByteAt = 逐次表示（SSE）では本文の最初の断片が届いた時刻、
     //   逐次表示なしの経路では resp.text() で本文を読み終えた時刻（最初の断片の到着ではない。2026-10-10 の切り分けで区別））。呼び出しの記録に相対の ms で残す（本文は記録しない）
     //   §0f.4 の 5（2026-10-09）: noProxyFallback = 直接の送信が失敗しても kintone.proxy で送り直さない（検証の上限が有効なとき。同じ要求を 2 回送らない）
+    //   生成の停滞の観測のレビュー（2026-10-14・指摘 2）: mark('via', 値) = 受けた経路の印（時刻ではなく値。direct = 直接送って JSON を受けた / direct-stream = 直接送って SSE を受けた /
+    //   proxy = kintone.proxy）。送る時点で direct（または proxy）を立て、SSE と分かった時点で direct-stream に上げる（失敗した要求でも、どこまで分かったかが残る）
     function createDefaultTransport({ kintoneApi = (typeof kintone !== 'undefined' ? kintone : null), fetchFn = (typeof fetch !== 'undefined' ? fetch : null), nowFn = () => Date.now() } = {}) {
       return async ({ url, method, headers, body, signal = null, preferDirect = false, onEvent = null, mark = null, noProxyFallback = false }) => {
-        const markAt = (k) => { if (typeof mark === 'function') { try { mark(k); } catch (e) { } } };
+        const markAt = (k, v) => { if (typeof mark === 'function') { try { mark(k, v); } catch (e) { } } };
         const hasProxy = !!(kintoneApi && typeof kintoneApi.proxy === 'function');
         // 会話の返答の逐次表示（2026-10-07）: onEvent があるときは直接 fetch で SSE（Accept: text/event-stream）を受け、イベントごとに onEvent を呼ぶ。
         //   Gateway が SSE を返さない（JSON が返る）ときは通常の応答として扱う。応答が届く前の失敗だけ kintone.proxy（逐次表示なし）へ切り替える
@@ -21632,11 +21634,13 @@
           const t0 = nowFn();
           let started = false;
           try {
+            markAt('via', 'direct');
             const resp = await fetchFn(url, { method, headers: wantStream ? { ...headers, 'Accept': 'text/event-stream' } : headers, body: body || undefined, ...(signal ? { signal } : {}) });
             markAt('headersAt');
             const ctype = String((resp.headers && typeof resp.headers.get === 'function' ? resp.headers.get('content-type') : '') || '');
             if (!wantStream || !/text\/event-stream/i.test(ctype)) { const text = await resp.text(); markAt('firstByteAt'); return { status: resp.status, body: text, via: 'direct' }; }
             started = true;
+            markAt('via', 'direct-stream');
             return await readSseResponse(resp, onEvent, markAt);
           } catch (e) {
             if (started || e?.name === 'AbortError' || !hasProxy || noProxyFallback || nowFn() - t0 > DIRECT_FALLBACK_WITHIN_MS) throw e;
@@ -21644,6 +21648,7 @@
         }
         if (hasProxy) {
           let res;
+          markAt('via', 'proxy');
           try { res = await kintoneApi.proxy(url, method, headers, body ?? ''); }
           catch (e) {
             const raw = typeof e === 'string' ? e : (e?.message || (() => { try { return JSON.stringify(e); } catch (x) { return String(e); } })());
@@ -21654,10 +21659,11 @@
           return { status: Number(status), body: String(respBody ?? ''), via: 'proxy' };
         }
         if (!fetchFn) throw new AiClientError({ code: ERROR_CODES.TRANSPORT_ERROR, message: '利用可能な transport がありません' });
+        markAt('via', 'direct');
         const resp = await fetchFn(url, { method, headers, body: body || undefined, ...(signal ? { signal } : {}) });
         markAt('headersAt');
         const text = await resp.text(); markAt('firstByteAt');
-        return { status: resp.status, body: text };
+        return { status: resp.status, body: text, via: 'direct' };
       };
     }
 
@@ -21823,6 +21829,27 @@
     }
 
     /** Contract 2.1 の request envelope（customization-generator。payload は KTContext.buildGenerator() の結果そのもの） */
+    /**
+     * 生成の停滞の観測（2026-10-14・契約 20 §18）: 生成の要求の進みの通知（SSE の event: progress）の時刻の記録。この要求の開始からの相対 ms。
+     *   sentAt = Gateway が provider に送った / headersAt = 応答の見出しが届いた / startedAt = 最初のイベント（response.created など。本文ではない）/
+     *   textAt = 最初の本文断片 / lastAt = 最後に受けた AI の呼び出しの進捗（headers〜delta）/ doneAt = AI の呼び出しが終わった / verifyAt・verifyDoneAt = 候補の評価の前後。
+     *   各印は最初の 1 回だけ（修復の呼び出しでは上書きしない）。events = 受けた progress の数。本文・文は入れない
+     */
+    const emptyProgressTrace = () => ({ sentAt: null, headersAt: null, startedAt: null, textAt: null, lastAt: null, doneAt: null, verifyAt: null, verifyDoneAt: null, events: 0 });
+    function noteProgressTrace(pg, d, at) {
+      pg.events += 1;
+      const first = (k) => { if (pg[k] == null) pg[k] = at; };
+      if (d.stage === 'generate' || d.stage === 'repair') {
+        if (d.phase === 'sent') first('sentAt');
+        else if (d.phase === 'headers') { first('headersAt'); pg.lastAt = at; }
+        else if (d.phase === 'started') { first('startedAt'); pg.lastAt = at; }
+        else if (d.phase === 'text' || d.phase === 'delta') { first('textAt'); pg.lastAt = at; }
+        else if (d.phase === 'done') first('doneAt');
+      } else if (d.stage === 'verify') {
+        if (d.phase === 'start') first('verifyAt');
+        else if (d.phase === 'done') first('verifyDoneAt');
+      }
+    }
     function buildGenerateEnvelope({ ctx, requestId = newRequestId(), pluginVersion = SCRIPT_VERSION, now = new Date().toISOString(), budget = null }) {
       if (!ctx || typeof ctx !== 'object' || !ctx.customization || typeof ctx.customization !== 'object') throw new AiClientError({ code: ERROR_CODES.NO_CONTEXT, message: 'Generator Context がありません' });
       return {
@@ -22245,16 +22272,27 @@
       };
       //   §0f.3（2026-10-09・FP9）: trace（任意）= 呼び出しの記録に残す時刻（startedAt・headersAt・firstByteAt・endAt。この要求の開始からの相対 ms）と打ち切りの ms。
       //   本文は入れない。失敗した要求でも残す（例外の transport にも同じ値）。long = 長い要求（kintone.proxy の約 60 秒の上限を避けて直接送る）
+      //   生成の停滞の観測のレビュー（2026-10-14・指摘 2・3）: trace.via = transport の結果の受けた経路（direct / direct-stream / proxy。失敗した要求は transport が mark('via') で
+      //   知らせたところまで。分からなければ null）。trace.origin = 相対 ms の起点（この t0 = token を取った後の絶対時刻）。progress の相対 ms（client.generate）も同じ起点にする
+      //   （token の取得の待ちを含めない）。列挙しないプロパティ（記録・JSON には写さない）
       const rawRequest = async ({ path, method, body, token, signal: outer = null, limitMs = timeoutMs, onEvent = null, long = false, trace = null, noProxyFallback = false }) => {
         const t0 = Date.now();
         const tm = { startedAt: 0, headersAt: null, firstByteAt: null, endAt: null };
-        const mark = (k) => { if (tm[k] == null) tm[k] = Date.now() - t0; };
-        if (trace && typeof trace === 'object') { trace.transport = tm; trace.limitMs = Number.isFinite(limitMs) ? limitMs : null; }
+        const hasTrace = !!(trace && typeof trace === 'object');
+        const mark = (k, v) => {
+          if (k === 'via') { if (hasTrace) trace.via = typeof v === 'string' && v ? v : null; return; }
+          if (tm[k] == null) tm[k] = Date.now() - t0;
+        };
+        if (hasTrace) {
+          trace.transport = tm; trace.limitMs = Number.isFinite(limitMs) ? limitMs : null; trace.via = null;
+          try { Object.defineProperty(trace, 'origin', { value: t0, enumerable: false, writable: true, configurable: true }); } catch (e) { }
+        }
         let result;
         try {
           // Phase 21: 計画・コード生成（長い待ち時間の要求）は kintone.proxy の約 60 秒の上限を避けて直接送る（createDefaultTransport）
           //   逐次表示（onEvent）の要求も直接送る（kintone.proxy は応答をまとめて返すので逐次に受けられない）
           result = await withTimeout((signal) => send({ url: `${base}${path}`, method, headers: headers(method === 'POST', token), body, signal, preferDirect: !!long || limitMs > timeoutMs, ...(onEvent ? { onEvent } : {}), mark, ...(noProxyFallback ? { noProxyFallback: true } : {}) }), outer, limitMs);
+          if (hasTrace && result && typeof result.via === 'string' && result.via) trace.via = result.via;
         } catch (e) {
           tm.endAt = Date.now() - t0;
           const err = isAiClientError(e) ? e
@@ -22355,9 +22393,20 @@
           return out;
         },
         /** POST /v2/review（toolkit.customization-generator）。Generator Context を送り、生成コードを再検証して返す（登録はしない） */
-        async generate({ ctx, requestId = newRequestId(), signal = null, deadlineMs = null, trace = null, noProxyFallback = false, budget = null } = {}) {
+        //   生成の停滞の観測（2026-10-14・契約 20 §18）: onEvent（任意）があれば計画の plan と同じく SSE で受け（Accept は transport が付ける。SSE でない応答が返れば従来どおり）、
+        //   Gateway の進みの通知（event: progress = { stage, attempt, phase, t, chars?, ok?, end? }）を onEvent に渡す。done は従来の本文、error は従来のエラー（settle）。
+        //   trace.progress = progress の時刻（この要求の開始からの相対 ms。各印は最初の 1 回だけ。events = 受けた progress の数）。本文・文は入れない。
+        //   transport の firstByteAt は Gateway の `: start` のコメントで付くので、AI の進捗の時刻には使わない（keepalive のコメントも readSseResponse が捨てる = 進捗に数えない）
+        //   レビューの指摘 3（2026-10-14）: 相対 ms の起点は transport と同じ trace.origin（rawRequest の t0 = token を取った後）。token の取得の待ちを progress の時刻に含めない
+        //   （origin が無い = 従来の transport のときだけ、この関数に入った時刻）。trace.progress は作るが、実際に SSE で受けていない要求（JSON・kintone.proxy）の分は
+        //   呼び出しの記録に写さない（callTraceOf が via と events で判定）
+        async generate({ ctx, requestId = newRequestId(), signal = null, deadlineMs = null, trace = null, noProxyFallback = false, budget = null, onEvent = null } = {}) {
           const envelope = buildGenerateEnvelope({ ctx, requestId, pluginVersion, now: nowFn ? nowFn() : new Date().toISOString(), budget });
-          const response = await request({ path: '/v2/review', method: 'POST', body: JSON.stringify(envelope), signal, limitMs: longFor(deadlineMs), long: true, trace, noProxyFallback });
+          const pg = typeof onEvent === 'function' && trace && typeof trace === 'object' ? (trace.progress = emptyProgressTrace()) : null;
+          const t0 = Date.now();
+          const sinceOrigin = () => Date.now() - (trace && Number.isFinite(trace.origin) ? trace.origin : t0);
+          const onEv = typeof onEvent === 'function' ? ({ event, data, raw }) => { if (pg && event === 'progress' && data && typeof data === 'object') noteProgressTrace(pg, data, sinceOrigin()); onEvent({ event, data, raw }); } : null;
+          const response = await request({ path: '/v2/review', method: 'POST', body: JSON.stringify(envelope), signal, limitMs: longFor(deadlineMs), long: true, trace, noProxyFallback, ...(onEv ? { onEvent: onEv } : {}) });
           const v = validateGenerated(response, ctx);
           if (!v.ok) throw new AiClientError({ code: v.errors[0].code, message: v.errors[0].message, details: { errors: v.errors }, requestId });
           return { ...v.normalized, requestId: v.normalized.requestId || requestId, clientWarnings: v.warnings };
@@ -26858,8 +26907,41 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
       function progressText(text) { const pr = progressOf(); if (!pr) return; const first = !pr.aiText; pr.aiText = String(text || ''); pr.now = clock(); if (first) { emit(); return; } if (progressTimer) return; progressTimer = setTimeout(() => { progressTimer = null; if (progressOf()) emit(); }, STREAM_RENDER_MS); }
       function progressChecklist(list) { const pr = progressOf(); if (!pr) return; pr.checklist = Array.isArray(list) ? list : []; pr.now = clock(); emit(); }
       function finishProgress() { const m = state.progressMsg; state.progressMsg = null; if (m) remove(m); }
-      /** 1 秒ごとの描き直し（画面が呼ぶ）。進みのカードがあれば経過を進めて true */
-      function tickProgress() { const pr = progressOf(); if (!pr) return false; pr.now = clock(); emit(); return true; }
+      /** 1 秒ごとの描き直し（画面が呼ぶ）。進みのカードがあれば経過を進めて true（生成の AI の応答待ちが長ければ段階の文も変える。applyAiWait） */
+      function tickProgress() { const pr = progressOf(); if (!pr) return false; pr.now = clock(); applyAiWait(pr, pr.now); emit(); return true; }
+      // ---- 生成の停滞の観測（2026-10-14・契約 20 §18）: 生成工程の進みの通知（progress）→ 進みのカードの段階 generate の detail を事実に合わせる ----
+      //   打ち切り・再送はしない（期限は client の打ち切りのまま）。keepalive は届かない（transport がコメントを捨てる）。通知の無い接続先では detail は今までどおり空
+      /** 文言（§6）。部品名・英語・内部の番号は出さない。「速くなる」とは書かない */
+      const GEN_DETAIL = Object.freeze({ generate: 'コードを生成しています', repair: (n) => `コードを直しています（${n} 回目）`, verify: 'コードを確認しています', slow: '応答に時間がかかっています' });
+      /**
+       * 「応答に時間がかかっています」の閾値（1 か所）: この段階の普段の所要時間（timingStore.estimate('generate') = この端末の実測の平均。無ければ既定の 30 秒）。
+       *   根拠: 普段なら生成と検証が済む時間を過ぎても最初の本文断片（phase text）が届いていない = いつもより待っている。表示だけで、打ち切りではない。
+       *   実機の完成時間（42 秒・37 秒）から別の値は作らない。response.created（phase started）は本文の生成開始ではないので、届いても「本文が届いた」にしない
+       */
+      const aiWaitSlowAfterMs = () => timingStore.estimate('generate');
+      /** 進みのカードの aiWait（{ sentAt, textAt, slowAfterMs, detail }）から、いま時間がかかっているか（送った後、最初の本文断片が届かないまま普段の所要時間を過ぎた） */
+      const aiWaitSlow = (pr, t) => !!(pr && pr.aiWait && pr.aiWait.sentAt != null && pr.aiWait.textAt == null && t - pr.aiWait.sentAt > pr.aiWait.slowAfterMs);
+      /** 段階 generate の detail を aiWait に合わせる（1 秒ごとの描き直しと progress の受信で呼ぶ。遅ければ slow の文、本文が届けば元の文） */
+      const applyAiWait = (pr, t) => { const s = pr && Array.isArray(pr.stages) ? pr.stages.find(x => x.key === 'generate') : null; if (!s || s.state !== 'active' || !pr.aiWait) return; const want = aiWaitSlow(pr, t) ? GEN_DETAIL.slow : pr.aiWait.detail; if (want && s.detail !== want) s.detail = want; };
+      /**
+       * 生成工程の進みの通知 1 件（{ stage: generate | repair | verify, attempt, phase, ... }）を進みのカードに写す。stage / phase / attempt だけ読む（chars・文・本文は使わない）。
+       *   generate / repair の sent〜delta: 「コードを生成しています」「コードを直しています（n 回目）」（sent で aiWait を取り直す。text / delta で本文が届いた印）/
+       *   done: 呼び出しが終わった（aiWait を消す。成否は結果で分かる）/ verify の start: 「コードを確認しています」。順序の乱れ（sent の前の通知）は無視する
+       */
+      function noteGenProgress(ev, { n = null, m = null } = {}) {
+        const pr = progressOf(); if (!pr || !ev || typeof ev !== 'object') return;
+        const t = clock(); const stage = ev.stage, phase = ev.phase;
+        let detail = null;
+        if (stage === 'generate' || stage === 'repair') {
+          if (phase === 'sent') pr.aiWait = { sentAt: t, textAt: null, slowAfterMs: aiWaitSlowAfterMs(), detail: stage === 'repair' ? GEN_DETAIL.repair(Math.max(1, Number(ev.attempt) || 1)) : GEN_DETAIL.generate };
+          if (!pr.aiWait) return;
+          if ((phase === 'text' || phase === 'delta') && pr.aiWait.textAt == null) pr.aiWait.textAt = t;
+          detail = phase !== 'done' && aiWaitSlow(pr, t) ? GEN_DETAIL.slow : pr.aiWait.detail;
+          if (phase === 'done') pr.aiWait = null;
+        } else if (stage === 'verify' && phase === 'start') { pr.aiWait = null; detail = GEN_DETAIL.verify; }
+        else return;
+        progressStage('generate', { state: 'active', n, m, detail });
+      }
       /**
        * 確認 6: 最終案で「担当が計画にありません」と出す要件。台帳の要件のうち決まった（decided）か AI の提案（proposed）で、取り消し・不採用でないもので、
        *   planRefs が空、または計画の手順・customization・採用した仮案の項目のどれも指さないもの（coverage の MET は数えない。§0c.6）。
@@ -27723,7 +27805,9 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
           //   mode = 計画の修正の方式（patch なら 1 要求の中で最大 2 回）。使用量の表示（finalUsageOf）が使う
           //   notSent の値: 'budget' = 検証の上限で送らなかった / true = ほかの送る前の理由（作業の基準・同じ入力など）
           const notSent = failed && (r.notSent === 'budget' ? 'budget' : (r.notSent === true || (!tr && end !== 'unknown')) ? true : false);
-          const e = { kind, perf: r.perf || null, ai: aiOf(r.answer || r.plan || r.proposal || r.generated || null), end, ...(failed && r.reason ? { code: r.reason } : {}), ...(tr && tr.requestId ? { requestId: tr.requestId } : {}), ...(tr && tr.limitMs != null ? { limitMs: tr.limitMs } : {}), ...(tr && tr.transport ? { transport: { ...tr.transport } } : {}), ...(tr && tr.mode ? { mode: tr.mode } : {}), ...(notSent ? { notSent } : failed && r.preAi === true ? { preAi: true } : {}) };
+          //   生成の停滞の観測（2026-10-14）: progress = 生成工程の進みの通知の時刻（相対 ms・受けた数。本文なし。通知の無い接続先・要求には付かない）。
+          //   via = 受けた経路（direct / direct-stream / proxy。レビューの指摘 2。分からない要求には付かない）
+          const e = { kind, perf: r.perf || null, ai: aiOf(r.answer || r.plan || r.proposal || r.generated || null), end, ...(failed && r.reason ? { code: r.reason } : {}), ...(tr && tr.requestId ? { requestId: tr.requestId } : {}), ...(tr && tr.limitMs != null ? { limitMs: tr.limitMs } : {}), ...(tr && tr.transport ? { transport: { ...tr.transport } } : {}), ...(tr && typeof tr.via === 'string' && tr.via ? { via: tr.via } : {}), ...(tr && tr.progress ? { progress: { ...tr.progress } } : {}), ...(tr && tr.mode ? { mode: tr.mode } : {}), ...(notSent ? { notSent } : failed && r.preAi === true ? { preAi: true } : {}) };
           if (kind === 'generate' && r.generated && typeof r.generated === 'object') {
             const rp = repairUsageOf({ ...r.generated, verification: r.verification || r.generated.verification || null });
             e.repairs = rp.count || 0;
@@ -27738,7 +27822,7 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
           const end = callEndOf(e);
           //   §0f.4: 検証の上限で送らなかった・送る前に止まった（notSent）／ Gateway が AI を呼ぶ前に止めた（preAi）
           const notSent = budgetNotSent(e) ? 'budget' : (!tr && end !== 'unknown');
-          timing.calls.push({ kind, perf: null, ai: null, end, code: (e && e.code) || 'ERROR', ...(tr && tr.requestId ? { requestId: tr.requestId } : {}), ...(tr && tr.limitMs != null ? { limitMs: tr.limitMs } : {}), ...(tr && tr.transport ? { transport: { ...tr.transport } } : {}), ...(tr && tr.mode ? { mode: tr.mode } : {}), ...(ms != null ? { ms } : {}), ...(notSent ? { notSent: true } : budgetPreAi(e) ? { preAi: true } : {}) });
+          timing.calls.push({ kind, perf: null, ai: null, end, code: (e && e.code) || 'ERROR', ...(tr && tr.requestId ? { requestId: tr.requestId } : {}), ...(tr && tr.limitMs != null ? { limitMs: tr.limitMs } : {}), ...(tr && tr.transport ? { transport: { ...tr.transport } } : {}), ...(tr && typeof tr.via === 'string' && tr.via ? { via: tr.via } : {}), ...(tr && tr.progress ? { progress: { ...tr.progress } } : {}), ...(tr && tr.mode ? { mode: tr.mode } : {}), ...(ms != null ? { ms } : {}), ...(notSent ? { notSent: true } : budgetPreAi(e) ? { preAi: true } : {}) });
         };
         // 会話の返答の逐次表示（2026-10-07）: 届いた部分を読み込み中の吹き出しに出す（最初はすぐ、その後は STREAM_RENDER_MS に 1 回描く）
         let streamTimer = null;
@@ -28187,7 +28271,10 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
           let r;
           //   §0f.3 の 1（2026-10-09）: 送信を止める失敗（取り消し・時間切れ・切断・上限・認証。stopKindOf）は、この JavaScript を failed（failure.stop）にして
           //   この送信の停止（halt）を立てる。後続の JavaScript は送らない（ループが notStarted にする）。それ以外の失敗は今までどおり JS ごとの失敗
-          try { r = await services.generate({ version: v, customizationId: cid, signal, decisions: decisionsNow, previous, verification: true, requiredEffects: req.effects }); }
+          //   生成の停滞の観測（2026-10-14）: 生成工程の進みの通知（接続先に印があるときだけ届く）で進みのカードの段階 generate の文を事実に合わせる（noteGenProgress）。
+          //   表示側の失敗で生成を落とさない。この送信が終わった後の通知は進みのカードが無いので何もしない
+          const onProgress = (ev) => { try { if (!late()) noteGenProgress(ev, { n: index + 1, m: total }); } catch (x) { } };
+          try { r = await services.generate({ version: v, customizationId: cid, signal, decisions: decisionsNow, previous, verification: true, requiredEffects: req.effects, onProgress }); }
           catch (e) {
             const er = errorOf(e);
             const kind = stopKindOf(e) || (abortedNow() ? 'cancelled' : null);
@@ -28502,6 +28589,7 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
               regenReasons.push({ customizationId: cid, reason: ru.reason });
               if (late()) return null;
               if (halted()) { notStarted.push(cid); continue; }
+              { const pr = progressOf(); if (pr) pr.aiWait = null; }   // 生成の停滞の観測: 次の JavaScript では前の呼び出しの応答待ちの印を持ち越さない
               progressStage('generate', { state: 'active', n: i + 1, m: genList.length });
               const entry = await generateAndVerify(v, c, { decisionsNow, index: i, total: genList.length, previous: prevEntry });
               //   §0f.3 の 2: await の後に送信が変わった・最新の計画が別の版になったら、この結果を捨てる（最新の案を上書きしない）
@@ -30387,6 +30475,27 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
       return `<div class="kt-ai-progress-head" style="font-weight:600;">${esc(head)}</div><div class="kt-ai-progress-remaining" style="font-size:11px; opacity:.75;">${esc(PROGRESS_REMAINING)}</div><div style="margin-top:4px; display:grid; gap:2px;">${rows}</div>${ai}${list}${materials}<div class="kt-ai-progress-hint" style="margin-top:6px; font-size:11px; opacity:.7;">${esc(pr.hint || '')}</div>`;
     }
     function progressCardHtml(m, view = {}) { return `<div class="kt-ai-card kt-ai-progress-card" style="border:1px solid var(--kt-ai-border, #ccc); border-left:3px solid #1a73e8; border-radius:10px; padding:12px 16px; background:var(--kt-ai-card-bg, transparent);"><div class="kt-ai-progress">${progressInnerHtml(m, view)}</div></div>`; }
+    /**
+     * 生成の停滞の観測（2026-10-14・§5.2）: 未完成の最終案の［残りの JavaScript を作る］の説明 = 押したときに実際に作る対象の列挙と、残りの件数と、
+     *   そのまま使う検証済みの JavaScript の件数（この版で検証済みの数。押したときの流用の判定（計画・設定・依存コードが変わっていないか）は今までどおり会話の canReuse）。
+     *   レビューの指摘 1（2026-10-14）: ［残りの JavaScript を作る］（GENERATE_CODE → canReuse）は検証済み以外を全部作り直すので、残りの件数は
+     *   「生成できる customization（この版の v.generated = 流用・生成した分 ＋ まだ作っていない分）のうち検証済みでない数」。止めた 1 件＋まだ作っていない件数だけでは、
+     *   止める前に別の理由で生成できなかった JavaScript（AI が断った GENERATION_DECLINED・形式の不備など。status failed で止めた印が無い）と、
+     *   検証済みでない JavaScript（unverified・not-ready）が件数から漏れていた。対象の列挙も同じ区分（該当するものだけ。止めた 1 件だけなら「止めた JavaScript だけを作ります」のまま）。
+     *   内部の番号・ID は出さない。失敗を新しい確認（質問）に変えない
+     */
+    function incRestOf(fin, inc) {
+      const list = (fin && Array.isArray(fin.customizations) ? fin.customizations : []).filter(c => c && typeof c === 'object');
+      const stoppedId = inc && inc.stoppedAt != null ? String(inc.stoppedAt) : null;
+      const stopped = stoppedId ? 1 : 0;
+      const notStarted = inc && Array.isArray(inc.notStarted) ? inc.notStarted.length : 0;
+      const others = list.filter(c => c.status !== 'verified' && String(c.customizationId) !== stoppedId);
+      const failed = others.filter(c => c.status === 'failed').length;
+      const verified = list.filter(c => c.status === 'verified').length;
+      return { stopped, notStarted, failed, unverified: others.length - failed, rest: stopped + notStarted + others.length, verified };
+    }
+    const incRestTargets = (r) => [r.stopped ? '止めた JavaScript' : null, r.notStarted ? 'まだ作っていない JavaScript' : null, r.failed ? '生成できなかった JavaScript' : null, r.unverified ? '検証済みでない JavaScript' : null].filter(Boolean).join(' と、') || '残りの JavaScript';
+    const incRestText = (r) => `${r.rest ? `残り ${r.rest} 件。` : ''}${r.verified ? `検証済みの JavaScript ${r.verified} 件はそのまま使います` : '検証済みの JavaScript はまだありません'}`;
     // ---- 段階 C（C3 / C4）: 最終案のカード（会話に 1 枚。回答欄と［動作テスト環境へ反映］はこのカードだけ。内部の番号は出さない）----
     function finalCardHtml(m, view = {}) {
       const d = m.data || {};
@@ -30529,9 +30638,10 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
       //   §0f.3 の 1（2026-10-09）: 止めた送信の最終案は「未完成」（承認できない）。次の手は［残りの JavaScript を作る］1 つ（GENERATE_CODE。計画の AI は呼ばず、
       //   検証済みは流用し、止めた JavaScript と作っていない JavaScript だけ作る）。予算・回数の上限で止めたときはボタンを無効にして理由を出す
       const inc = fin.incomplete && fin.incomplete.kind ? fin.incomplete : null;
+      const incRest = inc ? incRestOf(fin, inc) : null;
       const incBtn = !inc || !active || approved ? '' : inc.kind === 'budget'
         ? `<div style="margin-top:6px; display:flex; gap:6px; flex-wrap:wrap; align-items:center;">${btn('choice', '残りの JavaScript を作る', 'data-text="コードを作って" data-intent="' + esc(KTAiConversation.INTENT.GENERATE_CODE) + '" data-display="残りの JavaScript を作る" disabled', 'font-weight:600;')}<span class="kt-ai-final-incomplete-why" style="font-size:11px; opacity:.8;">利用の上限（予算・回数）に達したため、押せません。上限を見直してから「コードを作って」と送ると、続きを作ります。</span></div>`
-        : `<div style="margin-top:6px; display:flex; gap:6px; flex-wrap:wrap; align-items:center;">${btn('choice', '残りの JavaScript を作る', 'data-text="コードを作って" data-intent="' + esc(KTAiConversation.INTENT.GENERATE_CODE) + '" data-display="残りの JavaScript を作る"', 'font-weight:600;')}<span style="font-size:11px; opacity:.8;">${esc(`押すと、計画は作り直さずに、${[inc.stoppedAt ? '止めた JavaScript' : null, Array.isArray(inc.notStarted) && inc.notStarted.length ? 'まだ作っていない JavaScript' : null].filter(Boolean).join('と、') || '残りの JavaScript'} だけを作ります（検証済みの JavaScript はそのまま使います）。`)}</span></div>`;
+        : `<div style="margin-top:6px; display:flex; gap:6px; flex-wrap:wrap; align-items:center;">${btn('choice', '残りの JavaScript を作る', 'data-text="コードを作って" data-intent="' + esc(KTAiConversation.INTENT.GENERATE_CODE) + '" data-display="残りの JavaScript を作る"', 'font-weight:600;')}<span style="font-size:11px; opacity:.8;">${esc(`押すと、計画は作り直さずに、${incRestTargets(incRest)} だけを作ります（${incRestText(incRest)}）。`)}</span></div>`;
       const incHtml = inc ? `<div class="kt-ai-final-incomplete" data-kind="${esc(inc.kind)}" style="margin-top:8px; border-left:3px solid #b26a00; padding-left:8px;"><div style="font-size:12px;">${esc((fin.readiness && (fin.readiness.reasons || []).find(x => x.kind === 'incomplete') || {}).text || fin.blockingReason || '')}</div>${incBtn}</div>` : '';
       //   レビューの指摘 row4（2026-10-09）: 止めた送信で受け付けた指示のうち、まだ計画に入っていないもの。次の手は計画の差分更新（既存の choice の導線で REVISE_PLAN。自動では送らない）
       const pend = Array.isArray(fin.pendingInstructions) ? fin.pendingInstructions.filter(x => x && Array.isArray(x.texts) && x.texts.length) : [];
@@ -30657,7 +30767,9 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
     }
     /** コードペイン（drawer）: Code Review の一覧 ＋ コード / Diff */
     function codePaneHtml(entry, { view = 'code' } = {}) {
-      if (!entry) return { head: esc(CODE_EMPTY_TEXT), review: '', code: '', diff: '' };
+      //   2026-10-14（統合 scenarios §7l で発見）: 生成に失敗して流用元も無い記録（status failed・generated null。止めない失敗の後の［残りの JavaScript を作る］で
+      //   作り直しの対象として開く）はコードが無いので、空の表示にする（generated.strategy を読んで例外にしない）
+      if (!entry || !entry.generated) return { head: esc(CODE_EMPTY_TEXT), review: '', code: '', diff: '' };
       const g = entry.generated, rv = entry.review;
       const mark = (ch) => (ch.ok ? '✓' : ch.severity === 'block' ? '×' : '△');
       const color = (ch) => (ch.ok ? '#2e7d32' : ch.severity === 'block' ? '#b00020' : '#b26a00');
@@ -31030,7 +31142,15 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
     const deadlineOf = (feature) => { const d = capability && capability.limits && capability.limits.deadlineMs ? Number(capability.limits.deadlineMs[feature]) : NaN; return Number.isFinite(d) && d > 0 ? d : null; };
     //   §0f.3（2026-10-09・FP7 / FP9）: 呼び出しの記録に残す値（送った requestId・打ち切りの ms・transport の時刻の相対 ms）。本文は入れない。失敗の例外にも同じ値を付ける
     //   §0f.4（2026-10-09）: extra = 計画の修正の方式（mode: patch / full。1 要求の中の AI の呼び出しの最大の表示に使う）
-    const callTraceOf = (requestId, trace, extra = null) => ({ requestId: requestId || null, limitMs: trace && trace.limitMs != null ? trace.limitMs : null, transport: trace && trace.transport ? { ...trace.transport } : null, ...(extra || {}) });
+    //   生成の停滞の観測（2026-10-14）: progress = 生成の要求の進みの通知の時刻（KTAiClient の trace.progress。相対 ms と受けた数。本文なし）。通知の無い要求は null
+    //   レビューの指摘 2（2026-10-14）: via = 受けた経路（direct / direct-stream / proxy。KTAiClient の trace.via。分からなければ null）。progress は実際に SSE で受けた要求
+    //   （via が direct-stream か、progress を 1 つでも受けた）だけ残す（JSON の 4xx・kintone.proxy で返った要求に全部 null の progress を付けない）
+    const callTraceOf = (requestId, trace, extra = null) => {
+      const via = trace && typeof trace.via === 'string' && trace.via ? trace.via : null;
+      const pg = trace && trace.progress && typeof trace.progress === 'object' ? trace.progress : null;
+      const streamed = !!pg && (via === 'direct-stream' || (Number(pg.events) || 0) > 0);
+      return { requestId: requestId || null, limitMs: trace && trace.limitMs != null ? trace.limitMs : null, transport: trace && trace.transport ? { ...trace.transport } : null, via, progress: streamed ? { ...pg } : null, ...(extra || {}) };
+    };
     const tagCallError = (e, requestId, trace, extra = null) => { try { if (e && typeof e === 'object' && !e.callTrace) e.callTrace = callTraceOf(requestId, trace, extra); } catch (x) { } };
     const services = {
       /** ASK: 質問 → KTContext.build（focus は質問から解決。曖昧なら候補を返す）→ assistant-qa。Planner は起動しない */
@@ -31140,6 +31260,8 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
       conversationFeatures() { return capability?.features?.['assistant-qa']?.conversation || []; },
       // 段階 C: 生成の検証の能力（requirementId・requiredEffects などの印。契約 20 §12）と計画の AI の逐次表示（stream: reply。契約 16）。古い Gateway は空
       generatorFeatures() { return capability?.features?.[KTAiClient.FEATURE_GENERATOR]?.verification || []; },
+      /** 生成の停滞の観測（2026-10-14）: 生成工程の逐次配信の印（health の customization-generator.stream。progress = 進みの通知。契約 20 §18）。古い Gateway は空 */
+      generatorStream() { return capability?.features?.[KTAiClient.FEATURE_GENERATOR]?.stream || []; },
       plannerFeatures() { return capability?.features?.[KTAiClient.FEATURE_PLANNER]?.stream || []; },
       /** §0f.2 の 9（2026-10-09）: 計画の要件の操作の印（decisionRefs = 要件が実現する決定事項の id を返す Gateway）。古い Gateway は空 */
       plannerRequirementOps() { return capability?.features?.[KTAiClient.FEATURE_PLANNER]?.requirementOps || []; },
@@ -31227,7 +31349,9 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
        * → KTCodeReview（Toolkit の静的検査）。kintone へは登録しない。Toolkit Review で生成不可の step は送らない。
        * @returns {{ ok:true, generated, review, ctx, existingSource } | { ok:false, reason, message?, file? }}
        */
-      async generate({ version: v, customizationId, signal = null, decisions = [], previous = null, verification = false, requiredEffects = null }) {
+      //   生成の停滞の観測（2026-10-14・契約 20 §18）: onProgress（任意）= 生成工程の進みの通知（{ stage, attempt, phase, t, ... }）の受け手。接続先に印（health の stream に progress）があるときだけ
+      //   SSE で受ける（古い Gateway には Accept を付けない = 今までどおり JSON）。通知は表示だけに使い、打ち切り・再送はしない
+      async generate({ version: v, customizationId, signal = null, decisions = [], previous = null, verification = false, requiredEffects = null, onProgress = null }) {
         const plan = v?.plan || null;
         const c0 = (plan?.customizations || []).find(x => x.customizationId === customizationId) || null;
         if (!c0) return { ok: false, reason: 'CUSTOMIZATION_NOT_FOUND', message: `カスタマイズ ${customizationId} は現在の計画にありません。` };
@@ -31297,7 +31421,9 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
         const requestId = KTAiClient.newRequestId();
         let generated;
         const trace = {};
-        try { generated = await client.generate({ ctx, requestId, signal, deadlineMs: deadlineOf(KTAiClient.FEATURE_GENERATOR), trace }); }
+        const wantProgress = typeof onProgress === 'function' && (services.generatorStream() || []).includes('progress');
+        const onEvent = wantProgress ? ({ event, data }) => { if (event === 'progress' && data && typeof data === 'object') onProgress(data); } : null;
+        try { generated = await client.generate({ ctx, requestId, signal, deadlineMs: deadlineOf(KTAiClient.FEATURE_GENERATOR), trace, ...(onEvent ? { onEvent } : {}) }); }
         catch (e) { noteAuthError(e); tagCallError(e, requestId, trace); throw e; }
         // §0d.3（2026-10-08）: 生成工程（Gateway）が検証したコードを Toolkit で書き換えない（KTModernJs.fixGenerated を通さない）。検証した候補と登録する候補
         //   （candidateHash）を同じにするため。記法の問題（var など）は反映直前の形式確認（KTCodeReview の modern-js）で検出して理由を出すだけにする
