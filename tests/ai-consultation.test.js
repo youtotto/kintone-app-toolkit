@@ -189,7 +189,7 @@ console.log('\n--- §44-2. 会話の開始 / 再開 / 別 JS の確認 / Planner
   assert(ctx.subject && ctx.subject.type === 'javascript' && ctx.subject.sourceId === 'desktop:js:fieldOnOff.js' && ctx.subject.name === 'fieldOnOff.js' && ctx.subject.target === 'desktop' && ctx.subject.customizationType === 'FILE' && ctx.subject.sourceAvailable === true && ctx.subject.fields.some(f => f.code === 'amount' && f.access === 'CONTROL'), 'Planner Context に subject（相談中の JS。本文なし）');
   const jsFact = ctx.facts.find(f => f.kind === 'js-file' && /fieldOnOff\.js/.test(f.statement));
   assert(jsFact && ctx.dictionary.jsFiles.includes('fieldOnOff.js') && ctx.dictionary.jsFiles.includes('ext.js'), 'subject の js-file fact は Context に残る（相談対象は省略しない）・dictionary.jsFiles に URL の basename も');
-  assert(/fieldOnOff\.jsへ処理を統合する案が適切/.test(m.chat()) && m.conv().activePlan().plan.customizations[0].strategy === 'EXTEND_EXISTING_JS', 'AI の回答: 既存 JS へ統合する案（§6）');
+  assert(/fieldOnOff\.jsへ処理を統合する案が適切/.test(m.$('kt-ai-change-summary').innerHTML) && m.conv().activePlan().plan.customizations[0].strategy === 'EXTEND_EXISTING_JS', 'AI の回答: 既存 JS へ統合する案（§6）');
   // 相談中の短い文も相談（計画）として扱う
   assert(m.conv().classify('金額を 100 万円以上にする').intent !== KTAiConversation.INTENT.ASK || true, '（分類の参考）');
   const q = await m.panel.send('このファイルは何をしている？');

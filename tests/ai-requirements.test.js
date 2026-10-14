@@ -89,6 +89,8 @@ const draftUntilAdopt = async (x) => { for (const s of K.REQUESTS.slice(0, 3)) a
 const adopt = async (x) => { await draftUntilAdopt(x); await x.c.send(K.REQUESTS[3]); await ticks(); return x.c.activePlan(); };
 /** 最終案のカードの文（タグを外す） */
 const finalText = (x) => K.stripC(K.finalHtml(x));
+/** 2026-10-14（会話の設計し直し）: 検証の区分・反映する内容は右の「変更内容」 */
+const rightText = (x) => K.stripC(KTAiChatUi.changeSummaryHtml(x.c.activePlan(), {}));
 
 (async () => {
 async function section(fn) { try { await fn(); } catch (e) { assert(false, `例外: ${e && e.stack ? e.stack.split('\n').slice(0, 3).join(' / ') : e}`); } }
@@ -211,7 +213,7 @@ await section(async () => {
   const r = await c.send('部長が不在のときは副部長が承認します'); await ticks();
   const fin = finalText(x);
   assert(r.intent === I.REVISE_PLAN && calls.plan.length === 2 && !kinds().includes('preview-ready') && /代理の承認者を副部長にしました/.test(fin) && KTAiAnswers.requirementsOf(ledger()).some(e => /副部長が代わりに承認する/.test(e.behavior) && e.decision === 'decided') && !byKind('requirements-changes').length, 'F5: 代理の承認者の指示は計画の AI へ（反映へ進む言葉にしない）・返答を最終案のカードに出し、要件を台帳に記録する');
-  assert(/仮案から変わった点と理由[\s\S]*警告は金額欄に表示/.test(fin) && !/仮の案/.test(fin) && !byKind('provisionals').length && !c.messages().some(m => m.data?.kind === 'questions'), `F5: 後から変えられる点（計画が決めた提案）は最終案のカードで知らせる（質問しない・別のカードにしない）: ${(fin.match(/仮案から変わった点と理由[^\n]*/) || [''])[0]}`);
+  assert(/仮案からの補足[\s\S]*計画で決めた点: 警告は金額欄に表示/.test(fin) && !/仮の案/.test(fin) && !byKind('provisionals').length && !c.messages().some(m => m.data?.kind === 'questions'), `F5: 後から変えられる点（計画が決めた提案）は最終案のカードで知らせる（質問しない・別のカードにしない）: ${(fin.match(/仮案からの補足[^\n]*/) || [''])[0]}`);
 });
 await section(async () => {
   // F6: 確認事項の追加の項目（答えで何が変わるか・候補・推奨・先に聞くか）を台帳の確認事項に持ち回る
@@ -228,7 +230,7 @@ await section(async () => {
   await adopt(x);
   await x.c.send(goal); await ticks();
   const fin = finalText(x);
-  const cannotLine = (fin.match(/実現できない点・対応範囲[^\n]*/) || [''])[0];
+  const cannotLine = (fin.match(/この案の制約[^\n]*/) || [''])[0];   // 2026-10-14: 計画では対応できないとされた要件は「この案の制約」
   assert(/計画では対応できないとされた要件/.test(cannotLine) && /CSV の読み込み/.test(cannotLine) && !/R\d/.test(fin) && !x.c.activePlan().final.approvable === false, `F7: 対応できないことがある要件を知らせる（最終案のカードの「実現できない点」・要件の番号なし）: ${cannotLine}`);
   //   理由（計画の AI の note）は、最終案のカードの「実現できない点」に添える（以前は会話の知らせに出ていた）
   assert(/CSV の読み込みでは JavaScript が動かないため/.test(cannotLine), `F7: 対応できない理由を添える（理由つき）: ${cannotLine}`);
@@ -695,7 +697,7 @@ await section(async () => {
   const g0 = calls.generate;
   await c.send('警告はやめて一覧だけにして、コードも作って'); await ticks();
   const v2 = c.activePlan();
-  assert(v2.version === 2 && v2.final && v2.final.customizations.length === 0 && /JavaScript は無く、設定の変更だけです/.test(finalText(x)) && calls.generate === g0 && byKind('confirm-generate').length === 0, `G10: JavaScript の無い計画では、コードは作らないと知らせる（最終案のカード）: ${JSON.stringify({ v: v2.version, gen: calls.generate - g0 })}`);
+  assert(v2.version === 2 && v2.final && v2.final.customizations.length === 0 && /JavaScript は無く、設定の変更だけです/.test(rightText(x)) && calls.generate === g0 && byKind('confirm-generate').length === 0, `G10: JavaScript の無い計画では、コードは作らないと知らせる（最終案のカード）: ${JSON.stringify({ v: v2.version, gen: calls.generate - g0 })}`);
 });
 //   G11（コードの生成中に受け付けた「…変えて、C2 のコードも作って」→［この変更で確定してコードを作る］の対象を C2 にする）: C-1 第 3 段で確定して作るカード
 //   （confirm-generate）を削除した。生成中の指示は完了後に差分更新し、変わった JavaScript だけを作り直して最終案を置き換える。対応する回帰:
@@ -773,7 +775,7 @@ await section(async () => {
   const q = await c.send('警告はやめて一覧だけにして');
   gGen(); await g; await ticks(12);
   const v2 = c.activePlan();
-  assert(q && q.queued === true && q.reason === 'QUEUED_DURING_FINAL' && v2.version === 2 && v2.final && v2.final.customizations.length === 0 && /JavaScript は無く、設定の変更だけです/.test(finalText(x)) && calls.generate === 1 && byKind('confirm-generate').length === 0, `G2-8: 生成中の変更で JavaScript が無くなったら、コードは作らないと知らせる（最終案のカード）: ${JSON.stringify({ v: v2.version, gen: calls.generate })}`);
+  assert(q && q.queued === true && q.reason === 'QUEUED_DURING_FINAL' && v2.version === 2 && v2.final && v2.final.customizations.length === 0 && /JavaScript は無く、設定の変更だけです/.test(rightText(x)) && calls.generate === 1 && byKind('confirm-generate').length === 0, `G2-8: 生成中の変更で JavaScript が無くなったら、コードは作らないと知らせる（最終案のカード）: ${JSON.stringify({ v: v2.version, gen: calls.generate })}`);
 });
 
 console.log(`\n${state.failed ? 'FAILED' : 'ALL PASSED'}: ${state.passed} passed / ${state.failed} failed`);

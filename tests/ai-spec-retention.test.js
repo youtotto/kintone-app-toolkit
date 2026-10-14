@@ -365,7 +365,7 @@ await section(async () => {
   //   C-1 第 3 段: 会話のコードのカード（MSG.CODE・codeCardHtml）は削除した。担当の決まっていない要件は右の「コード」の見出し（codePaneHtml）と最終案のカードに出す（最終案は §6 の下の会話の節）
   let cardUn = '';
   try { cardUn = KTAiChatUi.codePaneHtml({ generated: gen([]), review: un, existingSource: null }).head; } catch (e) { cardUn = `例外: ${e && e.stack}`; }
-  assert(/kt-ai-code-unowned[^>]*>計画で担当が決まっていない要件: 承認後に Slack へ知らせる／100万円以上は部長承認／帳票の出力</.test(cardUn), `右の「コード」の見出しに「計画で担当が決まっていない要件」を別に出す: ${cardUn.slice(0, 400)}`);
+  assert(!/kt-ai-code-unowned|kt-ai-code-out-of-scope|計画で担当が決まっていない要件|担当範囲外/.test(cardUn) && /登録：/.test(cardUn), `右の「コード」の見出しには担当範囲外・担当の無い要件を出さない（2026-10-14: 担当の無い要件は右の「変更内容」の「確認できないこと」に 1 回）: ${cardUn.slice(0, 400)}`);
   // クライアントの検証は OUT_OF_SCOPE を語彙として受け取る（語彙外は従来どおり PARTIAL）
   const gctx = KTContext.buildGenerator({ customization: C2, plan: SR.CASE2_PLAN, planId: 'p', version: 1, data: INPUTS.data, deps: INPUTS.deps, scan: INPUTS.scan });
   const RESP = { ok: true, contractVersion: '2.1', meta: { requestId: 'g1', gateway: { product: 'toolkit', feature: 'customization-generator', promptVersion: '1', contextVersion: 'customization-1' }, normalization: { warnings: [] }, ai: { model: 'm' } }, generated: { ...gen([{ requirement: '100万円以上は部長承認', status: 'OUT_OF_SCOPE', note: 'P1' }, { requirement: 'x', status: 'BOGUS', note: '' }]), gatewayChecks: { security: [] } } };
@@ -393,17 +393,17 @@ await section(async () => {
     const x = makeConvN({ planImpl: () => { const p = clone(hybrid); return { plan: p, ctx: { facts: [] }, review: R.review({ plan: p, ...INPUTS }), turn: null }; }, generate });
     await startN(x, '承認済みでは金額を編集できなくして');
     const v = x.c.activePlan();
-    return { x, v, gen: base.calls.length, text: v && v.final ? K.stripC(K.finalHtml(x)) : '' };
+    return { x, v, gen: base.calls.length, text: v && v.final ? K.stripC(K.finalHtml(x)) : '', right: v && v.final ? K.stripC(KTAiChatUi.changeSummaryHtml(v, {})) : '' };
   };
   const f1 = await runFinal({ notAchieved: [{ code: 'SUBTABLE_ROWS', message: '明細の行の追加・削除は止められません' }], outOfScope: [{ code: 'AI_OUT_OF_SCOPE', requirement: '100万円以上は部長承認', owner: 'step', message: '100万円以上は部長承認（P1 の標準設定で扱う）' }] });
   const t1 = f1.text;
-  assert(f1.gen === 1 && /実現できない点・対応範囲/.test(t1) && /明細の行の追加・削除は止められません/.test(t1) && /この JavaScript の対応範囲外（ほかの手順・JavaScript で扱います）: 100万円以上は部長承認（P1 の標準設定で扱う）/.test(t1) && t1.indexOf('明細の行の追加・削除') < t1.indexOf('対応範囲外（ほかの手順'), `最終案のカード: 満たせない部分と担当範囲外を分けて出す（満たせない部分が先）: ${t1.slice(t1.indexOf('実現できない点'), t1.indexOf('実現できない点') + 300)}`);
+  assert(f1.gen === 1 && /この案の制約/.test(t1) && /明細の行の追加・削除は止められません/.test(t1) && !/対応範囲外|担当が計画にありません|100万円以上は部長承認（P1 の標準設定で扱う）/.test(t1 + f1.right), `最終案のカード: 満たせない部分は「この案の制約」。ほかの手順が担当する要件は左右どちらにも範囲外として出さない（2026-10-14）: ${t1.slice(t1.indexOf('実現できない点'), t1.indexOf('実現できない点') + 300)}`);
   const f2 = await runFinal({ outOfScope: [{ code: 'OTHER_OWNER', requirement: 'r', owner: 'customization', customizationId: 'C2', message: 'モバイルの編集制御（C2 の担当）' }] });
-  assert(f2.gen === 1 && !/明細の行の追加・削除/.test(f2.text) && /この JavaScript の対応範囲外（ほかの手順・JavaScript で扱います）: モバイルの編集制御（C2 の担当）/.test(f2.text), `最終案のカード: 担当範囲外だけのときは満たせない部分を出さない: ${f2.text.slice(f2.text.indexOf('実現できない点'), f2.text.indexOf('実現できない点') + 200)}`);
+  assert(f2.gen === 1 && !/明細の行の追加・削除|この案の制約/.test(f2.text) && !/対応範囲外|モバイルの編集制御（C2 の担当）/.test(f2.text + f2.right), `最終案のカード: 担当範囲外だけのときは制約の節を出さず、担当のある要件は列挙しない（2026-10-14）: ${f2.text.slice(f2.text.indexOf('実現できない点'), f2.text.indexOf('実現できない点') + 200)}`);
   // 担当が計画に無い要件（unowned）は「担当が計画にありません」として、担当のある範囲外とは別の行に出す
   const f3 = await runFinal({ outOfScope: [{ code: 'OTHER_OWNER', requirement: '承認待ちの通知', owner: 'step', message: '承認待ちの通知（標準設定で対応）' }, { code: 'AI_OUT_OF_SCOPE', requirement: '承認後に Slack へ知らせる', owner: 'unowned', note: '別の仕組み', message: '承認後に Slack へ知らせる（別の仕組み）' }], unowned: [{ code: 'UNOWNED', requirement: '承認後に Slack へ知らせる', message: '承認後に Slack へ知らせる' }] });
   const t3 = f3.text;
-  assert(f3.gen === 1 && /担当が計画にありません（計画全体の確認に残します）: 承認後に Slack へ知らせる/.test(t3) && !/対応範囲外（ほかの手順・JavaScript で扱います）: 承認後に Slack/.test(t3) && t3.indexOf('対応範囲外（ほかの手順') < t3.indexOf('担当が計画にありません'), `最終案のカード: 担当の無い要件は別に出す: ${t3.slice(t3.indexOf('実現できない点'), t3.indexOf('実現できない点') + 300)}`);
+  assert(f3.gen === 1 && /確認できないこと/.test(f3.right) && /「承認後に Slack へ知らせる」は、この計画のどの手順・JavaScript が担当するか決まっていません/.test(f3.right) && !/承認待ちの通知（標準設定で対応）|対応範囲外|担当が計画にありません/.test(t3 + f3.right), `右の「変更内容」の「確認できないこと」: 担当の無い要件は 1 回・担当のある要件は出さない（2026-10-14）: ${t3.slice(t3.indexOf('実現できない点'), t3.indexOf('実現できない点') + 300)}`);
 });
 
 // =========================================================

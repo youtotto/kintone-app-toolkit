@@ -566,8 +566,11 @@ console.log('\n--- CX-2a / CX-7 / XA-5（再実行）. 通知の種類・未確�
     const p = plan([step('P1', 'UPDATE_RECORD_ACL', 'NEW_SETTING', '', { filterCond: 'ステータス in ("承認済み")', entities: ['FIELD_ENTITY:owner'] }), step('P2', 'REQUIRE_CONFIRMATION', 'NEW_SETTING', '', {})], [], { solution: 'HYBRID' });
     const xAcl = K.makeConvC({ planImpl: () => ({ plan: clone(p), ctx: null, review: reviewOf(p), turn: { reply: '計画を作りました。', requirementOps: [], utteranceCoverage: [] } }) });
     await K.adoptC(xAcl);
-    const texts = xAcl.c.messages().map(x => x.text).join('\n') + '\n' + K.stripC(K.finalHtml(xAcl));
-    assert(!/組み合わせで実現できます|実現できます。/.test(texts) && /Toolkit から自動で反映できるのは 0 件/.test(texts) && /確認が済むまで反映しない手順/.test(texts), 'CX-7: 「実現できます」と言い切らず、自動で反映できる手順が無いことを伝える（最終案のカード）');
+    const texts = xAcl.c.messages().map(x => x.text).join('\n') + '\n' + K.stripC(K.finalHtml(xAcl)) + '\n' + K.stripC(KTAiChatUi.changeSummaryHtml(xAcl.c.activePlan(), {}));   // 2026-10-14: 反映する内容（自動で反映できる件数）・反映の前に確かめることは右の「変更内容」
+    assert(!/組み合わせで実現できます|実現できます。/.test(texts) && /Toolkit から自動で反映できるのは 0 件/.test(texts) && /反映の前に確かめること/.test(texts), 'CX-7: 「実現できます」と言い切らず、自動で反映できる手順が無いことを伝える（最終案のカード）');
+    //   レビュー 10（2026-10-14・人が判断できる形）: 確認が済むまで反映しない手順（cannot の kind confirm。止めない注意）は、左の最終案の「仮案からの補足」に 1 行で残す
+    const leftAcl = K.stripC(K.finalHtml(xAcl));
+    assert(/仮案からの補足[\s\S]*確認が済むまで反映しない手順: P2 REQUIRE_CONFIRMATION/.test(leftAcl) && (leftAcl.match(/確認が済むまで反映しない手順/g) || []).length === 1, `CX-7b: 確認が済むまで反映しない手順は左の「仮案からの補足」に 1 行: ${(leftAcl.match(/仮案からの補足[\s\S]{0,160}/) || [''])[0]}`);
   }
   // 秘密情報（CX-7: AI が Webhook URL を質問した）
   {
@@ -968,7 +971,7 @@ console.log('\n--- U8（Phase 20・利用者の指摘）. 確認事項は質問�
   const html2 = $('kt-ai-chat').innerHTML;
   // 同じ Q1・Q2 を AI がもう一度質問した（respOf は毎回同じ質問を返す）→ 回答済みの Q1 は回答欄を出さない（再質問として数える）。Q2 だけ回答欄
   //   C-1 第 3 段: 回答は最終案のカードの「変わった点」に出る。古い版は 1 行に畳んだ前の最終案（読むだけ・回答欄なし）
-  assert((html2.match(/class="kt-ai-qa-input"/g) || []).length === 1 && /変わった点[\s\S]*100万円以上/.test(html2) && /前の最終案 — このあと直した案があります/.test(html2) && panel.conversation().metrics().reasked === 1, `U8: 回答欄は最新の版の未回答の確認事項だけ（回答済みの再質問は出さない・古い版は読むだけ）: reasked=${panel.conversation().metrics().reasked}`);
+  assert((html2.match(/class="kt-ai-qa-input"/g) || []).length === 1 && /前の最終案から変わった点[\s\S]*100万円以上/.test($('kt-ai-change-summary').innerHTML) && /前の最終案 — このあと直した案があります/.test(html2) && panel.conversation().metrics().reasked === 1, `U8: 回答欄は最新の版の未回答の確認事項だけ（回答済みの再質問は出さない・古い版は読むだけ）: reasked=${panel.conversation().metrics().reasked}`);
 }
 
 // =========================================================

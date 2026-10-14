@@ -169,7 +169,7 @@ await section(async () => {
   assert(JSON.stringify(versions(c)) === '[1,2]' && c.activePlan().plan.questions.length === 0, `Q1: 登録する版は最後の 1 つだけ（途中の結果は最新の計画として出さない）: ${JSON.stringify(versions(c))}`);
   assert(c.ledger().filter(e => e.status === 'answered').every(e => e.appliedInVersion === 2), 'Q1: 両方の回答が v2 に入った');
   // 2026-10-06: 会話の文に版の番号を出さない（「変更計画 v2 に入れました」→「変更案に入れました」）。入った版は記録（appliedInVersion）で確かめる
-  assert(acks().every(m => m.data.stage === 'done' && (m.data.queued ? KTAiChatUi.isHiddenMessage(m) : (/変更案に入れました。/.test(KTAiChatUi.messageHtml(m)) && !/受け付けました/.test(KTAiChatUi.messageHtml(m))))) && /変更案に入れました/.test(acks()[1].text) && /kintone にはまだ何も反映していません/.test(acks()[1].text) && !/v\d/.test(acks()[1].text), `Q1: 受領の記録は両方とも完了（後の指示は「変更案に入れました」・版の番号は出さない。入れた知らせは会話に出さない）: ${acks()[1] && acks()[1].text}`);
+  assert(acks().every(m => m.data.stage === 'done' && (m.data.queued ? KTAiChatUi.isHiddenMessage(m) : (/変更案に入れました。/.test(KTAiChatUi.messageHtml(m)) && !/受け付けました/.test(KTAiChatUi.messageHtml(m))))) && /変更案に入れました/.test(acks()[1].text) && !/kintone にはまだ何も反映していません/.test(acks()[1].text) && !/v\d/.test(acks()[1].text), `Q1: 受領の記録は両方とも完了（後の指示は「変更案に入れました」・版の番号は出さない・「まだ何も反映していません」は進みのカードだけ（レビュー 7・2026-10-14）。入れた知らせは会話に出さない）: ${acks()[1] && acks()[1].text}`);
   const mt = c.metrics();
   assert(mt.queuedAccepted === 1 && mt.chainedJobs === 1 && mt.instructionWaits.length === 2 && mt.instructionWaits.every(w => w.waitMs > 0) && mt.aiCalls - aiCalls0 === 2, `Q1: 計測（受け付けた数・続けた作業・指示ごとの待ち時間）: ${JSON.stringify({ q: mt.queuedAccepted, ch: mt.chainedJobs, w: mt.instructionWaits })}`);
   //   C-1 第 3 段（2026-10-08）: 変更案のカード（PLAN）は削除した。版ごとのカードは最終案のカード（FINAL）1 枚

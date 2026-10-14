@@ -539,7 +539,7 @@ await section(async () => {
   };
   const okReview = { status: 'OK', checks: [{ name: 'syntax', ok: true, severity: 'info', message: 'ok' }], registration: { verdict: 'RUNTIME_UNVERIFIED', blockers: [], confirmations: [], unverified: [] }, coverage: { achieved: [], notAchieved: [], outOfScope: [], unowned: [] } };
   const normal = await convWith(okReview);
-  assert(normal.e2 && normal.e2.failure && normal.e2.failure.reason === 'REPEAT_SAME_INPUT' && /同じ入力・同じ指摘です/.test(normal.cannot) && /検査は通っています。/.test(normal.cannot) && /実現できない点/.test(normal.card) && /同じ入力・同じ指摘です/.test(normal.card) && !normal.x.c.messages().some(m => m.type === 'ERROR' || m.data?.kind === 'generate-repeat'), `7: 同じ入力の案内は最終案のカードの「実現できない点」に出る（エラーカード・generate-repeat のカードは出さない）: ${normal.cannot.slice(0, 160)}`);
+  assert(normal.e2 && normal.e2.failure && normal.e2.failure.reason === 'REPEAT_SAME_INPUT' && /同じ入力・同じ指摘です/.test(normal.cannot) && /検査は通っています。/.test(normal.cannot) && /確認できないこと／反映を止めている理由/.test(normal.card) && /同じ入力・同じ指摘です/.test(normal.card) && !normal.x.c.messages().some(m => m.type === 'ERROR' || m.data?.kind === 'generate-repeat'), `7: 同じ入力の案内は最終案のカードの「実現できない点」に出る（エラーカード・generate-repeat のカードは出さない）: ${normal.cannot.slice(0, 160)}`);
   // 検査が例外で完了しなかった回（services.generate の代替 review: reviewFailed: true・registration 無し）
   const failedReview = { status: 'REVIEW_REQUIRED', reviewFailed: true, checks: [{ name: 'code', ok: false, severity: 'review', message: 'Toolkit の検査を完了できませんでした: x' }], finalCode: '', addedCode: '', diff: null, mismatches: [], security: [] };
   const failed = await convWith(failedReview);

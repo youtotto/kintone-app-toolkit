@@ -128,17 +128,16 @@ await section(async () => {
   const html = cardOf(x, m);
   const vis = visible(html), visOut = visible(outsideDetails(html));
   assert(!EVIDENCE.test(vis) && !CODES.test(vis), `V2-1: 仮案のカードは通常表示・詳細表示のどちらにも根拠の番号（［E12・E16］など）とフィールドのコード（（amount）・（items）・memo）を出さない: ${firstHit(vis, EVIDENCE, CODES)}`);
-  assert(/金額が100万円以上なら部長承認/.test(vis) && /金額と明細を編集不可にし/.test(vis) && /「備考」に理由を書けるようにし、承認済みでは「備考」を編集不可にする/.test(vis) && /PCとモバイルの両方で利用できるようにする/.test(vis) && !/端末区分/.test(vis), `V2-2: 名前に付け替えた文は残る（結論・動作・AI の補足）。「PCとモバイル」の PC はフィールドのコードと見なさない: ${vis.replace(/\s+/g, ' ').slice(0, 400)}`);
-  assert(/答えで変わること：部長承認の作業者の指定が変わります/.test(vis) && /ユーザー選択フィールドを追加（承認者）|ユーザー選択フィールドを追加（approver）/.test(vis), `V2-3: 判断の「答えで変わること」の根拠の番号も外す（候補の文はそのまま読める）: ${(vis.match(/答えで変わること[^\n]*/) || [''])[0]}`);
-  //   §0f.5 の 3（C1）: 方針 → 動作 → 判断。前提は件数（2 件）にかかわらず畳む。対応できない範囲は件数の見える見出しで畳む
-  const iPolicy = vis.indexOf('金額が100万円以上なら部長承認、100万円未満なら課長承認に分岐します'), iBeh = vis.indexOf('実現する動作'), iDec = vis.indexOf('判断が必要な点'), iAsm = vis.indexOf('こちらの提案で進める点'), iCan = vis.indexOf('対応できない範囲が 1 件あります');
-  assert(iPolicy >= 0 && iPolicy < iBeh && iBeh < iDec && iDec < iAsm && iAsm < iCan, `V2-4: 順番は 方針 → 実現する動作 → 判断が必要な点 → 前提 → 対応できない範囲: ${JSON.stringify({ iPolicy, iBeh, iDec, iAsm, iCan })}`);
-  const asm = (html.match(/<details class="kt-ai-draft-assumptions"[^>]*>[\s\S]*?<\/details>/) || [''])[0];
-  const can = (html.match(/<details class="kt-ai-draft-cannot"[^>]*>[\s\S]*?<\/details>/) || [''])[0];
-  const visShut = visible(collapsed(html));
-  assert(asm && !/<details[^>]*\sopen/.test(asm) && /こちらの提案で進める点が 2 件あります/.test(visShut) && !visShut.includes('既存の「承認待ち」を課長承認に使う') && vis.includes('既存の「承認待ち」を課長承認に使う'), `V2-5: 前提は 2 件でも畳む（見出しの件数は見える・本文は開いたときだけ）: ${asm.slice(0, 160)}`);
-  assert(can && !/<details[^>]*\sopen/.test(can) && /対応できない範囲が 1 件あります/.test(visShut) && /全文は右の「変更内容」/.test(visShut) && !visShut.includes('行の追加・削除ボタン自体は止められません') && /border-left:3px solid #b26a00/.test(can), `V2-6: 対応できない範囲は件数の見える見出しで畳む（橙の線は残す。全文は右のペイン）: ${can.slice(0, 200)}`);
-  assert(/（AI が補足・採用すると入ります）/.test(vis) && !/（提案）/.test(vis), 'V2-7: AI が補った動作の印は「（AI が補足・採用すると入ります）」（任意の提案と紛らわしい「（提案）」は出さない）');
+  //   2026-10-14 の設計し直し（指示書 §1.1・§3）: 会話の仮案のカードは AI の返答（名前に付け替えた文）と選択だけ。動作・判断・前提・対応できない範囲は右の仮案の詳細に
+  assert(/金額が100万円以上なら部長承認/.test(vis) && /金額と明細を編集不可にし/.test(vis) && !/実現する動作|判断が必要な点|こちらの提案で進める点|対応できない範囲/.test(vis) && !/端末区分/.test(vis), `V2-2: 会話のカードは名前に付け替えた返答と選択だけ（動作・判断・前提・対応できない範囲は右）: ${vis.replace(/\s+/g, ' ').slice(0, 400)}`);
+  const pane1 = KTAiChatUi.draftSummaryHtml(d, { decisions: x.c.draftDecisions(), labels: LABELS });
+  const pv = visible(pane1.replace(/<details class="kt-ai-tech kt-ai-draft-evidence"[\s\S]*?<\/details>/, ''));
+  assert(/「備考」に理由を書けるようにし、承認済みでは「備考」を編集不可にする/.test(pv) && /PCとモバイルの両方で利用できるようにする/.test(pv) && !/端末区分/.test(pv) && !EVIDENCE.test(pv) && !CODES.test(pv), `V2-3: 右の仮案の詳細の動作の文も名前に付け替える（AI の補足を含む。「PCとモバイル」の PC はフィールドのコードと見なさない）: ${firstHit(pv, EVIDENCE, CODES)}`);
+  assert(/答えで変わること：部長承認の作業者の指定が変わります/.test(pv) && /ユーザー選択フィールドを追加（承認者）|ユーザー選択フィールドを追加（approver）/.test(pv), `V2-4: 判断の「答えで変わること」の根拠の番号も外す（候補の文はそのまま読める。右の仮案の詳細）: ${(pv.match(/答えで変わること[^\n]*/) || [''])[0]}`);
+  const iDec = pv.indexOf('必要な判断'), iBeh = pv.indexOf('実現する動作'), iAsm = pv.indexOf('こちらの提案で進める点'), iCan = pv.indexOf('対応できない範囲');
+  assert(iDec >= 0 && iDec < iBeh && iBeh < iAsm && iAsm < iCan, `V2-5: 右の順番は 必要な判断 → 実現する動作 → 前提 → 対応できない範囲: ${JSON.stringify({ iDec, iBeh, iAsm, iCan })}`);
+  assert(pv.includes('既存の「承認待ち」を課長承認に使う') && /明細の行の追加・削除ボタン自体は止められません/.test(pv) && /（AI が補足・採用すると入ります）/.test(pv) && !/（提案）/.test(pv), 'V2-6: 前提・対応できない範囲の全文と、AI が補った動作の印「（AI が補足・採用すると入ります）」は右の仮案の詳細（「（提案）」は出さない）');
+  assert(!/kt-ai-draft-assumptions|kt-ai-draft-cannot|kt-ai-draft-list|kt-ai-draft-suggestions|data-dkey=|（AI が補足/.test(html), 'V2-7: 会話のカードに前提・対応できない範囲・動作の一覧・回答欄・印は無い');
   //   draft.items は書き換えない（次の仮案の AI に前回の仮案として送る。描画のときだけ変換する）
   assert(d.items.behaviors[0].text === B1 && d.items.behaviors[1].text === B2 && d.items.cannot[0] === CANNOT && d.reply === REPLY1 && m.data.items.behaviors[1].text === B2, 'V2-8: 会話の仮案（draft.items・カードの data）の文は元のまま（描画のときだけ付け替える）');
   await x.c.send(COMMENT);
@@ -167,7 +166,7 @@ await section(async () => {
   await ticks();
   await m.panel.send(REQ); await ticks(10);
   const chat = m.chat();
-  const card = (chat.match(/<div class="kt-ai-card kt-ai-draft-card[\s\S]*?まだ何も反映していません[\s\S]*?<\/div>/) || [''])[0];
+  const card = (chat.match(/<div class="kt-ai-card kt-ai-draft-card[\s\S]*?data-act="draft-adopt"[\s\S]*?<\/div>/) || [''])[0];
   const vis = visible(chat);
   //   画面のラベルは動作テスト環境の基準のフィールド（金額 = amount）。この画面の基準に無い items・memo はそのまま（コードと決められない語は推測で置き換えない）
   assert(card && !EVIDENCE.test(vis) && !/[（(]\s*amount\s*[）)]|\bamount\b/.test(vis) && /金額が100万円以上なら部長承認/.test(vis), `V4-1: 画面の会話の仮案のカードに根拠の番号と（amount）を出さない（画面が今の基準のラベルを渡す）: ${firstHit(vis, EVIDENCE, /[（(]\s*amount\s*[）)]|\bamount\b/)}`);
@@ -201,7 +200,7 @@ await section(async () => {
   const h = KTAiChatUi.progressInnerHtml(pm, { labels: LABELS });
   const vh = visible(h);
   assert(pm && /最終案を作っています（経過 2:1[0-9]）/.test(vh) && /残り時間は未推定/.test(vh) && !ESTIMATE.test(vh), `V5-1: 見出しは経過だけ・2 行目に「残り時間は未推定」（保存した実測 49.6 秒から「目安 約 50 秒」を出さない。経過が長くても隠さない）: ${vh.replace(/\s+/g, ' ').slice(0, 160)}`);
-  assert(/● 計画を作成中（経過 2 分 1[0-9] 秒）/.test(vh) && /○ まとめ/.test(vh), `V5-2: 段階の行（段階と経過）は残す: ${vh.replace(/\s+/g, ' ').slice(0, 200)}`);
+  assert(/● 計画を作っています（経過 2 分 1[0-9] 秒）/.test(vh) && /○ まとめ/.test(vh), `V5-2: 段階の行（段階と経過）は残す（2026-10-14: 段階の名前は「計画を作っています」）: ${vh.replace(/\s+/g, ' ').slice(0, 200)}`);
   assert(/明細の行追加・削除ボタン自体は止められないため、承認済みではセルを編集不可にし/.test(vh) && !EVIDENCE.test(vh) && !CODES.test(vh), `V5-3: 進みのカードの AI の説明も、フィールドのコードを名前に・根拠の番号を外す: ${firstHit(vh, EVIDENCE, CODES)}`);
   //   データに目安の値（estimateMs）が残っていても表示には使わない（実機の「約 1 分」の形）
   const fake = { type: 'LOADING', data: { kind: 'progress', progress: { title: '最終案を直しています', startedAt: 0, now: 137600, estimateMs: 87500, stages: [{ key: 'revise', label: '計画を修正', state: 'done', elapsedMs: 27000 }, { key: 'generate', label: 'JavaScript を生成・検証（生成工程）', activeLabel: 'JavaScript を生成・検証しています（生成工程）', state: 'active', startedAt: 30000, n: 1, m: 3, estimateMs: 47013 }], aiText: '', checklist: [], materials: '', hint: '' } } };
@@ -233,7 +232,7 @@ await section(async () => {
   await K.adoptC(x);
   const [s0, s1] = seen;
   assert(seen.length === 2 && s0 && !s0.revision && s1 && s1.revision, `前提: 最初の計画と、計画の自動の見直し（差分更新）の 2 回: ${JSON.stringify(seen.map(s => s.revision))}`);
-  assert(s1.title === '最終案を作っています' && s1.startedAt === s0.startedAt && s1.mid === s0.mid && s1.loadings === 1, `V6-1: 自動の見直しは同じ進みのカード（見出しは「最終案を作っています」のまま・開始の時刻も同じ・カードは 1 枚）: ${JSON.stringify({ t0: s0.title, t1: s1.title, a0: s0.startedAt, a1: s1.startedAt, loadings: s1.loadings })}`);
+  assert(s1.title === 'この案で最終案を作っています' && s1.startedAt === s0.startedAt && s1.mid === s0.mid && s1.loadings === 1, `V6-1: 自動の見直しは同じ進みのカード（見出しは「この案で最終案を作っています」のまま・開始の時刻も同じ・カードは 1 枚）: ${JSON.stringify({ t0: s0.title, t1: s1.title, a0: s0.startedAt, a1: s1.startedAt, loadings: s1.loadings })}`);
   assert(/plan-auto:active/.test(s1.stages) && /計画を自動で見直しています/.test(s1.head) && /最終案を作っています（経過 0:3[0-9]）/.test(s1.head) && !/最終案を直しています/.test(s1.head), `V6-2: 段階に「計画の自動の見直し」を足し、見出しの経過は採用からのまま（0 に戻さない）: ${s1.stages} ｜ ${s1.head.replace(/\s+/g, ' ').slice(0, 160)}`);
   const v = x.c.activePlan();
   assert(x.c.progress() === null && v && v.final && x.finals().length === 1 && v.final.timing.planAutoMs != null, 'V6-3: 最終案ができたらカードは消える（最終案は 1 枚・自動の見直しの時間は記録に残る）');
@@ -262,7 +261,7 @@ await section(async () => {
   const confText = `${dup.screenText}（${dup.howToCheck}）`;
   const htmlReady = KTAiChatUi.messageHtml(fm, { plans: new Map(x.c.planHistory().map(z => [`${z.planId}:${z.version}`, z])), activePlan: va, answerState: x.c.answerContext(), ledger: x.c.ledger(), answers: new Map(), finalPre: { planId: va.planId, version: va.version, status: 'ready', reasons: [], items: { target: '動作テスト環境（このアプリ）。運用環境には反映しません', settings: [], process: [], existing: [], duplicate: [], files: ['✎ dealLock.js（PC）既存ファイルを更新（同じ位置）'], keep: [], deferred: [], confirmations: [{ text: confText, detail: dup.message }, '文字列の確認項目'], warnings: [], manual: [] } } });
   const out = visible(outsideDetails(htmlReady)), all = visible(htmlReady);
-  assert(/確認項目（この承認で確認済みとして扱います）/.test(out) && out.includes(dup.screenText) && /文字列の確認項目/.test(out) && !EVENTS.test(out), `V7-4: 承認の欄の確認項目は画面の言葉（通常表示にイベント名・handler を出さない）: ${firstHit(out, EVENTS)}`);
+  assert(/確認項目（この承認で確認済みとして扱います）/.test(all) && all.includes(dup.screenText) && /文字列の確認項目/.test(all) && !EVENTS.test(out) && /反映の前の確認（書き込みなし）/.test(all), `V7-4: 承認の欄の確認項目は画面の言葉（通常表示にイベント名・handler を出さない）: ${firstHit(out, EVENTS)}`);
   assert(all.includes(dup.message) && /元の検査の文/.test(all), 'V7-5: 元の文（イベント名入り）は承認の欄の詳細に残る');
 });
 await section(async () => {
@@ -291,8 +290,8 @@ await section(async () => {
   const dupC = conf.find(c => c && typeof c === 'object' && /2 回登録/.test(c.text || ''));
   assert(v && v.final && calls.length === 1 && pre.status === 'ready' && dupC, `前提: 生成したコードが同じイベントを 2 回登録 → 承認の欄の準備が終わり、確認項目がある: ${JSON.stringify({ status: pre.status, conf })}`);
   assert(dupC && /同じタイミング（編集画面を開いたとき（PC））の処理を 2 回登録しています/.test(dupC.text) && /既存の処理と今回の処理の両方が動く/.test(dupC.text) && !EVENTS.test(dupC.text) && /app\.record\.edit\.show/.test(dupC.detail), `V7-6: 画面の承認の欄の確認項目は画面の言葉（元の文は detail）: ${JSON.stringify(dupC)}`);
-  const chatOut = visible(outsideDetails(m.chat()));
-  assert(chatOut.includes('同じタイミング（編集画面を開いたとき（PC））の処理を 2 回登録しています') && !EVENTS.test(chatOut), `V7-7: 会話の最終案のカード（通常表示）に app.record.edit.show・handler が出ない: ${firstHit(chatOut, EVENTS)}`);
+  const chatOut = visible(outsideDetails(m.chat())), chatAll = visible(m.chat());
+  assert(chatAll.includes('同じタイミング（編集画面を開いたとき（PC））の処理を 2 回登録しています') && !EVENTS.test(chatOut), `V7-7: 会話の最終案のカード（通常表示）に app.record.edit.show・handler が出ない: ${firstHit(chatOut, EVENTS)}`);
   const r = await K.applyOnScreen(m);
   const ap = r.v.approval;
   const fpConf = ap && ap.precheck && ap.precheck.fingerprint && ap.precheck.fingerprint.js ? ap.precheck.fingerprint.js.confirmations : [];
@@ -379,7 +378,7 @@ await section(async () => {
   await K.waitUntil(() => ['ready', 'blocked', 'unavailable'].includes(m.panel.finalPrecheck().status), 80); await ticks(2);
   const pre = m.panel.finalPrecheck();
   const keep = ((pre.items && pre.items.keep) || []).join(' ／ ');
-  const chatOut = visible(outsideDetails(m.chat()));
+  const chatOut = visible(m.chat());   // 2026-10-14: 登録先と変更しない設定は「反映の前の確認」の折りたたみの中
   assert(pre.status === 'ready' && /PC：.*　モバイル：/.test(keep) && /適用範囲（全員）は変更しません/.test(keep) && !/Mobile|ALL/.test(keep) && /適用範囲（全員）/.test(chatOut) && !/適用範囲（ALL）|Mobile：/.test(chatOut), `H-3: 承認の欄の適用範囲と PC / モバイルの件数は画面の言葉: ${keep}`);
   assert(KTAiChatUi.customizeScopeJa('ALL') === '全員' && KTAiChatUi.customizeScopeJa('ADMIN') === 'アプリの管理者だけ' && KTAiChatUi.customizeScopeJa('NONE') === '適用しない', 'H-4: 適用範囲の画面の言葉の表');
 });

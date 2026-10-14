@@ -24,7 +24,7 @@
 //   §S8 決定事項の採用を先着順にしない（再検証前の指示 §1・§2・2026-10-10。前の f1b01fa の「先に結び付いた要件だけが実現」をやめた）: 決定事項 D に結び付いた計画の要件は、
 //        その (フィールド, 効果) がすべて採用の時点の組 X(D)（仮案の段階で D の key に結び付いた要件の対象と効果）に入るときだけ D の実現として上げる（要件ごとに独立。順序に依存しない）。
 //        X(D) に無い効果の結び付きは上げない（planner として判定）。X(D) が空なら AI の id だけでは上げず、D が実現していなければ判断の候補（黙って入れない・黙って消さない。
-//        通常表示と承認の欄に一度に出す）。D の実現として残した追加は、通常表示の「仮案から変わった点と理由」に対象・動作・理由を出す。
+//        通常表示と承認の欄に一度に出す）。D の実現として残した追加は、通常表示の「仮案からの補足」に対象・動作・理由を出す。
 //        (a) 仮案の段階で実現済みの値で答えた決定事項に計画の AI が保存禁止を結び付ける → X(D) に無いので planner として外れる／(b) 構造の無い値で答えた決定事項 → 判断の候補／
 //        (c) 構造の無い委任に委ねた警告 → 判断の候補／(d1) 構造のある委任に警告と保存禁止を結び付ける（警告 → 保存禁止・保存禁止 → 警告）→ どちらの順でも警告は残り保存禁止は外れる／
 //        (d2) 構造の無い委任（今の S7_SF の素材）に両方を結び付ける → どちらの順でも両方を判断の候補に／(d3) 委ねた警告を PC とモバイルの 2 つの要件で実現 → 両方残る／
@@ -198,9 +198,9 @@ await section(async () => {
   await x.c.send(REQ);
   const d = x.c.draft();
   const card = KTAiChatUi.messageHtml(x.c.messages().filter(m => m.type === 'DRAFT').slice(-1)[0], { draft: d, draftDecisions: x.c.draftDecisions() });
-  const [mainPart, sugPart = ''] = card.split('任意の提案（入れるときは伝えてください）');
-  assert(sugPart.includes(B_SAVE_AI) && !mainPart.includes(B_SAVE_AI) && mainPart.includes(B_STATUS_AI) && mainPart.includes(B_LOCK_U), `S1-1: 利用者の要件に無い保存禁止を足す ai の項目は任意の提案の節に出す（効果を足さない ai の項目は本体）: ${stripC(card).slice(0, 500)}`);
-  assert(/（AI が補足・採用すると入ります）/.test(mainPart) && !/（提案）/.test(card) && !/（AI が補足/.test(sugPart), 'S1-2: 採用に入る ai の項目の印は「（AI が補足・採用すると入ります）」（「（提案）」は出さない）');
+  //   2026-10-14 の設計し直し: 会話の仮案のカードは AI の返答と選択だけ。動作の一覧（本体・任意の提案・印）は右の「変更内容」の仮案の詳細（S1-3）
+  assert(!card.includes(B_SAVE_AI) && !card.includes(B_STATUS_AI) && !card.includes(B_LOCK_U) && !/任意の提案（入れるときは伝えてください）/.test(card) && /承認済みでは金額を編集不可にし、差戻し後は再編集できるようにします。/.test(card) && /data-act="draft-adopt"/.test(card), `S1-1: 会話の仮案のカードは AI の返答と選択だけ（動作の一覧・任意の提案は右の「変更内容」）: ${stripC(card).slice(0, 500)}`);
+  assert(!/（AI が補足・採用すると入ります）|（提案）/.test(card), 'S1-2: 会話のカードに動作の印は出ない（印は右のペイン: S1-3）');
   const pane = KTAiChatUi.draftSummaryHtml(d, { decisions: x.c.draftDecisions() });
   const [paneMain, paneSug = ''] = pane.split('任意の提案（入れるときは伝えてください）');
   assert(paneSug.includes(B_SAVE_AI) && !paneMain.includes(B_SAVE_AI) && /（AI が補足・採用すると入ります）/.test(paneMain), 'S1-3: 右のペインの仮案の詳細も同じ分け方');
@@ -375,7 +375,9 @@ await section(async () => {
   await x.c.send(SAVE_TOO_U);
   const d = x.c.draft();
   const card = KTAiChatUi.messageHtml(x.c.messages().filter(m => m.type === 'DRAFT').slice(-1)[0], { draft: d, draftDecisions: x.c.draftDecisions() });
-  assert(!/任意の提案（入れるときは伝えてください）/.test(card) && card.includes(B_SAVE_AI) && (scopeOf(x, d.id).requirements.find(q => q.id === 'R4') || {}).basis === 'explicit', 'S3-1: 「明細の保存も止めて」で採用した保存禁止は利用者の要件（explicit）になり、本体に出る');
+  //   2026-10-14 の設計し直し: 動作の一覧は右の仮案の詳細で確かめる（会話のカードには出ない）
+  const pane3 = KTAiChatUi.draftSummaryHtml(d, { decisions: x.c.draftDecisions() });
+  assert(!/任意の提案（入れるときは伝えてください）/.test(pane3) && pane3.includes(B_SAVE_AI) && !card.includes(B_SAVE_AI) && (scopeOf(x, d.id).requirements.find(q => q.id === 'R4') || {}).basis === 'explicit', 'S3-1: 「明細の保存も止めて」で採用した保存禁止は利用者の要件（explicit）になり、右の仮案の詳細の本体に出る');
   await x.c.send('採用します');
   const v = x.c.activePlan();
   const v1 = x.c.planHistory().find(z => z.planId === v.planId && z.version === 1) || v;
@@ -422,8 +424,8 @@ await section(async () => {
   assert(/依頼に無い可能性がある動作（2 件）/.test(html) && /計画の説明の文に残っている可能性があります/.test(html) && !/依頼に無い可能性/.test(html.replace(/<details[\s\S]*?<\/details>/g, '')), 'S4-3: 「依頼に無い可能性がある動作」は詳細（折りたたみ）の中だけに出す');
   //   レビューの指摘 row1 の D: 通常表示の「最終的にどう動くか」の近くに、名前で書いた短い 1 行（計画の説明の文が外した動作を言っていても、入れていないと分かる）
   const outside = stripC(html.replace(/<details[\s\S]*?<\/details>/g, ''));
-  const iBeh = outside.indexOf('最終的にどう動くか'), iNote = outside.indexOf('依頼に無い「金額・明細の保存の停止」は入れていません（詳細）'), iChanged = outside.indexOf('仮案から変わった点');
-  assert(iBeh >= 0 && iNote > iBeh && (iChanged < 0 || iNote < iChanged) && !/block-save|\bamount\b|\bitems\b/.test(outside.slice(iNote, iNote + 60)), `S4-4: 通常表示の「最終的にどう動くか」の中に「依頼に無い「金額・明細の保存の停止」は入れていません（詳細）」（フィールドは名前・効果は画面の言葉）: ${outside.slice(Math.max(0, iBeh), iBeh + 300)}`);
+  const iBeh = outside.indexOf('仮案からの補足'), iNote = outside.indexOf('依頼に無い「金額・明細の保存の停止」は入れていません（詳細）'), iChanged = outside.indexOf('動作テスト環境へ反映');   // 2026-10-14: 範囲外の通知は「仮案からの補足」
+  assert(iBeh >= 0 && iNote > iBeh && (iChanged < 0 || iNote < iChanged) && !/block-save|\bamount\b|\bitems\b/.test(outside.slice(iNote, iNote + 60)), `S4-4（2026-10-14: 「仮案からの補足」に）: 通常表示の「仮案からの補足」の中に「依頼に無い「金額・明細の保存の停止」は入れていません（詳細）」（フィールドは名前・効果は画面の言葉）: ${outside.slice(Math.max(0, iBeh), iBeh + 300)}`);
 });
 
 // =========================================================
@@ -468,7 +470,7 @@ await section(async () => {
   const html = finalHtml(x), shut = shutOfS(html);
   const cand = (shut.match(/判断が残っています[\s\S]{0,400}/) || [''])[0];
   assert(/おまかせにした「備考の警告」は、計画の案と結び付けを確かめられないため、まだ入れていません。計画の案: [^。]*「備考」に警告を出す/.test(cand) && /入れるものを伝えてください/.test(cand) && !/委ねた判断を実現するために計画が足した可能性がある動作/.test(html) && issuesOf(v).some(i => i.kind === 'candidate') && x.calls.ask.length === asks && planCalls.length <= 2,
-    `S5-4: 最終案の通常表示（仮案から変わった点と理由）に判断が残っていることを一度に示す（委ねた判断の見出し・計画の案・入れるものを伝える）。質問は増えない・自動の見直しは既存の上限の中: ${cand.slice(0, 300)}`);
+    `S5-4: 最終案の通常表示（仮案からの補足）に判断が残っていることを一度に示す（委ねた判断の見出し・計画の案・入れるものを伝える）。質問は増えない・自動の見直しは既存の上限の中: ${cand.slice(0, 300)}`);
   //   未実現の委任の間は、計画の AI が足した保存禁止も構造だけでは委任の実現と区別できない（黙って必須にせず、黙って消さずに判断の候補に出す）
   assert(g1 && !g1.requiredEffects.some(e => e.effect === 'block-save') && /「金額」「明細」の保存を止める/.test(cand), `S5-5: 未実現の委任の間に計画の AI が足した保存禁止も判断の候補（必須の効果に入れない・通常表示に計画の案として出す）: ${cand.slice(0, 300)}`);
 });
@@ -853,9 +855,9 @@ for (const warnFirst of [true, false]) {
     assert(saveReq.basis === 'planner' && !saveReq.via && saveReq.inScope === false && saveReq.out === 'adds-effect' && saveReq.stripped === true && (saveReq.decisionLinks || []).some(l => l.id === dId && l.verdict === 'mismatch') && noSave(v && v.plan) && noSave(v && v.gatewayPlan) && !candidatesOf(v).length,
       `S8-12（${tag}）: 混入した保存禁止は X(D) に無いので D の実現にしない（planner として範囲外・計画から外す。判断の候補にもしない）: ${JSON.stringify({ save: [saveReq.id, saveReq.basis, saveReq.via, saveReq.inScope, saveReq.out, saveReq.stripped, saveReq.decisionLinks] })}`);
     const html = finalHtml(x), shut = shutOf(html);
-    const sec = (shut.match(/仮案から変わった点と理由[\s\S]*?(?=実現できない点|反映先と主な影響|$)/) || [''])[0];
+    const sec = (shut.match(/仮案からの補足[\s\S]*?(?=この案の制約|確認できないこと|残る判断|動作テスト環境へ反映|$)/) || [''])[0];
     assert(/計画で足した: 「備考」に警告を出します（おまかせにした「備考の警告」の実現として）/.test(sec) && !/保存/.test((sec.match(/計画で足した:[^\n]*/) || [''])[0]) && !/判断が残っています/.test(shut) && /依頼に無い「[^」]*保存の停止」は入れていません/.test(shut),
-      `S8-13（${tag}）: 計画で残した業務上の追加は、通常表示の「仮案から変わった点と理由」に対象・動作・理由を短く出す（外した保存禁止は「依頼に無い」の 1 行だけ）: ${sec.slice(0, 240)}`);
+      `S8-13（${tag}）: 計画で残した業務上の追加は、通常表示の「仮案からの補足」に対象・動作・理由を短く出す（外した保存禁止は「依頼に無い」の 1 行だけ）: ${sec.slice(0, 240)}`);
     dOrders[warnFirst ? 'wf' : 'sf'] = dSummaryOf(x, gen);
   });
 }
@@ -934,9 +936,9 @@ for (const [mark, warnFirst] of [[true, true], [true, false], [false, true]]) {
     assert(saves.length >= 1 && saves.every(q => q.basis === 'planner' && !q.via && q.inScope === false && q.out === 'adds-effect' && q.stripped === true && !(q.decisionLinks || []).some(l => l.verdict === 'match')) && noSave(v && v.plan) && noSave(v && v.gatewayPlan) && !candidatesOf(v).length,
       `S8-20（${tag}）: id を付けずに足した混入した保存禁止は X(D) に無いので D の実現にしない（planner として範囲外・v.plan と v.gatewayPlan から外す・判断の候補にもしない）: ${JSON.stringify({ saves: saves.map(q => [q.id, q.createdBy, q.basis, q.via, q.inScope, q.out, q.stripped]) })}`);
     const html = finalHtml(x), shut = shutOf(html);
-    const sec = (shut.match(/仮案から変わった点と理由[\s\S]*?(?=実現できない点|反映先と主な影響|$)/) || [''])[0];
+    const sec = (shut.match(/仮案からの補足[\s\S]*?(?=この案の制約|確認できないこと|残る判断|動作テスト環境へ反映|$)/) || [''])[0];
     assert(/計画で足した: 「備考」に警告を出します（おまかせにした「備考の警告」の実現として）/.test(sec) && !/保存/.test((sec.match(/計画で足した:[^\n]*/) || [''])[0]) && !/判断が残っています/.test(shut) && /依頼に無い「[^」]*保存の停止」は入れていません/.test(shut) && !/依頼に無い「[^」]*警告」/.test(shut) && x.calls.ask.length === asks && x.calls.propose.length === 2,
-      `S8-21（${tag}）: 通常表示の「仮案から変わった点と理由」に「計画で足した」警告を出す（外した保存禁止は「依頼に無い」の 1 行だけ。警告は「依頼に無い」に入れない）。質問・仮案の作り直しは増えない: ${sec.slice(0, 260)}`);
+      `S8-21（${tag}）: 通常表示の「仮案からの補足」に「計画で足した」警告を出す（外した保存禁止は「依頼に無い」の 1 行だけ。警告は「依頼に無い」に入れない）。質問・仮案の作り直しは増えない: ${sec.slice(0, 260)}`);
     if (mark) dOrders4[warnFirst ? 'wf' : 'sf'] = dSummaryOf(x, gen);
   });
 }
@@ -1061,9 +1063,9 @@ await section(async () => {
   const chat = stripC(m.chat().replace(/<details[\s\S]*?<\/details>/g, ''));
   const SENT = 'おまかせにした「案件名の警告」は、計画の案と結び付けを確かめられないため、まだ入れていません。計画の案: 「案件名」に警告を出す。入れるものを伝えてください';
   assert(!!v && candidatesOf(v).length === 1 && !!ctx && (ctx.verification.requiredEffects || []).every(e => e.effect !== 'warn') && v.final && v.final.approvable, `S9-1 前提: 画面で委ねた警告（計画の AI の proposed）は判断の候補（生成の必須の効果に入らない・最終案は承認できる）: ${JSON.stringify({ cand: v && candidatesOf(v), req: ctx && ctx.verification.requiredEffects })}`);
-  const changedSec = (chat.match(/仮案から変わった点と理由[\s\S]*?(?=反映先と主な影響|実現できない点|$)/) || [''])[0];
+  const changedSec = (chat.match(/仮案からの補足[\s\S]*?(?=この案の制約|確認できないこと|残る判断|動作テスト環境へ反映|$)/) || [''])[0];
   assert(changedSec.includes(`判断が残っています${SENT}`) && changedSec.split(SENT).length === 2 && confs.filter(t => t === `判断が残っています（この最終案には入っていません）: ${SENT}`).length === 1 && m.calls.ask.length === asks && m.msgs().filter(x => x.type === 'FINAL').length === 1,
-    `S9-2: 最終案の通常表示（仮案から変わった点と理由）と承認の欄の確認項目に、判断が残っていることを同じ文で 1 回ずつ示す（別のカード・質問は増えない）: ${JSON.stringify({ confs, sec: changedSec.slice(0, 260) })}`);
+    `S9-2: 最終案の通常表示（仮案からの補足）と承認の欄の確認項目に、判断が残っていることを同じ文で 1 回ずつ示す（別のカード・質問は増えない）: ${JSON.stringify({ confs, sec: changedSec.slice(0, 260) })}`);
 });
 
 console.log(`\n${state.passed} passed, ${state.failed} failed`);

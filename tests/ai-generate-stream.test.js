@@ -140,7 +140,8 @@ const CUST3 = K.custOf(['lock'], { customizationId: 'C3', requirement: '承認�
 const planJs3 = (args) => {
   const r = K.planJs(args, { cust: CUST1 });
   for (const c of [CUST2, CUST3]) {
-    r.plan.steps.push({ id: c.customizationId, actionType: 'CUSTOMIZATION_REQUIRED', targetKind: 'JS', targetRef: null, title: `JavaScript ${c.customizationId}`, spec: { customizationId: c.customizationId }, dependsOn: [] });
+    //   2026-10-14: 作成途中のカードは計画の手順の title で JavaScript を呼ぶので、業務の名前を付ける（内部の番号を title に入れない）
+    r.plan.steps.push({ id: c.customizationId, actionType: 'CUSTOMIZATION_REQUIRED', targetKind: 'JS', targetRef: null, title: c.customizationId === 'C2' ? 'モバイルの編集制御' : 'モバイルの入力チェック', spec: { customizationId: c.customizationId }, dependsOn: [] });
     r.plan.customizations.push(clone(c));
     r.review.steps.push({ stepId: c.customizationId, status: 'VALID', safety: 'PLAN_ONLY', customization: clone(c), codeGeneration: { supported: true, strategy: 'NEW_JS_FILE', reason: null }, issues: [] });
     r.review.executionReadiness.planOnlySteps.push(c.customizationId);
@@ -246,7 +247,7 @@ await section(async () => {
   assert(stage().detail === 'コードを生成しています', 'S2-3: 普段の所要時間（20 秒）の手前（19 秒）では「応答に時間がかかっています」にしない');
   x.advance(2000); x.c.tickProgress();
   const h = KTAiChatUi.progressInnerHtml(pm());
-  assert(stage().detail === '応答に時間がかかっています' && /応答に時間がかかっています/.test(h) && /生成・検証しています（生成工程）/.test(h) && !/Gateway|provider|SSE|timeout/i.test(stripC(h)), `S2-4: 本文が届かないまま普段の所要時間を過ぎると、1 秒ごとの描き直しで「応答に時間がかかっています」（段階の見出し・構造はそのまま。部品名・英語は出さない）: ${stripC(h).replace(/\s+/g, ' ').slice(0, 160)}`);
+  assert(stage().detail === '応答に時間がかかっています' && /応答に時間がかかっています/.test(h) && /「JavaScript」を作っています/.test(h) && !/Gateway|provider|SSE|timeout/i.test(stripC(h)), `S2-4（2026-10-14: 段階の名前は手順の title）: 本文が届かないまま普段の所要時間を過ぎると、1 秒ごとの描き直しで「応答に時間がかかっています」（段階の見出し・構造はそのまま。部品名・英語は出さない）: ${stripC(h).replace(/\s+/g, ' ').slice(0, 160)}`);
   onProgress({ stage: 'generate', attempt: 0, phase: 'text', t: 21000 });
   assert(stage().detail === 'コードを生成しています' && x.c.progress().aiWait.textAt === x.clock(), 'S2-5: 最初の本文断片が届けば「コードを生成しています」に戻る（本文の印が付く）');
   x.advance(30000); x.c.tickProgress(); onProgress({ stage: 'generate', attempt: 0, phase: 'delta', t: 51000, chars: 500 });
@@ -283,7 +284,8 @@ await section(async () => {
   assert(gw.seen.generate.length === 1 && gw.seen.generate[0].accept === 'text/event-stream' && gw.seen.generate[0].ctx.customization.customizationId === 'C1' && gw.seen.plan.length === 1 && gw.seen.ask === 0, `S3-1: 生成の要求は Accept: text/event-stream で 1 件（C1）だけ。C2 は送らない（後続 0）・計画の AI は増えない: ${JSON.stringify({ gen: gw.seen.generate.map(g => [g.ctx.customization.customizationId, g.accept]), plan: gw.seen.plan.length })}`);
   assert(fin && fin.approvable === false && fin.incomplete && fin.incomplete.kind === 'timeout' && fin.incomplete.stoppedAt === 'C1' && JSON.stringify(fin.incomplete.notStarted) === '["C2"]' && v.generated.C1.status === 'failed' && v.generated.C1.failure.stop === 'timeout' && v.generated.C1.failure.endUnknown === true && !v.generated.C2, `S3-2: SSE の error（Gateway の期限）は時間切れ（stopKindOf timeout）→ 未完成の最終案（止めた C1・作っていない C2・終了不明）: ${JSON.stringify(fin && fin.incomplete)}`);
   const b = restButtonOf(chat);
-  assert(/最終案（未完成: 途中で止めました）/.test(vis) && b && !b.disabled && /止めた JavaScript と、まだ作っていない JavaScript だけを作ります（残り 2 件。検証済みの JavaScript はまだありません）/.test(vis) && (v.openQuestions || []).length === 0, `S3-3: 次の操作は［残りの JavaScript を作る］1 つ（残り 2 件・検証済みは無し）。質問は増やさない: ${(vis.match(/押すと[^\n]*/) || [''])[0]}`);
+  //   2026-10-14 の設計し直し（指示書 §1.4）: 作成途中のカード（できたもの・止めたもの・理由・残りの件数。「未完成」の見出しと説明の文は無い）
+  assert(/作成途中/.test(vis) && !/未完成/.test(vis) && b && !b.disabled && /まだできた JavaScript はありません。JavaScriptの作成中に、AIの応答が時間切れになりました。JavaScript 2は手を付けていません。/.test(vis) && /残り 2 件から再開できます/.test(vis) && (v.openQuestions || []).length === 0, `S3-3: 次の操作は［残りの JavaScript を作る］1 つ（残り 2 件・できた JavaScript は無し）。質問は増やさない: ${vis.replace(/\s+/g, ' ').slice(0, 240)}`);
   assert(gEntry && gEntry.status === 'unknown' && gEntry.reservedUsd > 0 && gEntry.reason === 'UPSTREAM_ERROR' && /終了不明 1 件/.test(stripC(m.$('kt-ai-header').innerHTML)), `S3-4: 検証の上限の記録: 生成の確保は unknown のまま（解放しない・費用は未確定）: ${JSON.stringify(gEntry && [gEntry.status, gEntry.reservedUsd, gEntry.reason])}`);
   const call = lastCalls(m.conv()).find(c => c.kind === 'generate');
   assert(call && call.end === 'unknown' && call.code === 'UPSTREAM_ERROR' && call.progress && Number.isFinite(call.progress.sentAt) && Number.isFinite(call.progress.headersAt) && Number.isFinite(call.progress.startedAt) && call.progress.textAt === null && call.progress.doneAt === null && call.progress.events === 3 && call.transport && call.transport.firstByteAt != null, `S3-5: 呼び出しの記録: end unknown・progress は送信・見出し・最初のイベントまで（本文は届いていない = textAt null）: ${JSON.stringify({ end: call && call.end, progress: call && call.progress })}`);
@@ -299,7 +301,7 @@ await section(async () => {
   const call = lastCalls(m.conv()).find(c => c.kind === 'generate');
   assert(gw.seen.generate.length === 1 && fin && fin.approvable === false && fin.incomplete && fin.incomplete.kind === 'disconnected' && fin.incomplete.stoppedAt === 'C1' && JSON.stringify(fin.incomplete.notStarted) === '["C2"]' && v.generated.C1.failure.stop === 'disconnected' && v.generated.C1.failure.endUnknown === true && !v.generated.C1.generated, `S4-1: done が無いまま終わった SSE は TRANSPORT_ERROR → 切断として止める（後続 0・終了不明・途中の断片は候補にしない）: ${JSON.stringify(fin && fin.incomplete)}`);
   assert(call && call.end === 'unknown' && call.code === 'TRANSPORT_ERROR' && call.via === 'direct-stream' && call.progress && Number.isFinite(call.progress.textAt) && call.progress.doneAt === null && call.progress.events === 5, `S4-2: 呼び出しの記録: 本文は届き始めていた（textAt あり）が完了していない（doneAt null）。失敗した要求でも受けた経路（via direct-stream）が残る: ${JSON.stringify(call && { via: call.via, progress: call.progress })}`);
-  assert(/AI サービスとの通信が途中で切れました/.test(visibleText(m.chat())) && /残り 2 件/.test(visibleText(m.chat())), 'S4-3: 利用者には切断の理由と残りの件数（部品名は出さない）');
+  assert(/の作成中に、AIサービスとの通信が切れました。/.test(visibleText(m.chat())) && /残り 2 件から再開できます/.test(visibleText(m.chat())), 'S4-3: 利用者には切断の理由と残りの件数（部品名は出さない。2026-10-14: 作成途中のカードの文）');
 });
 await section(async () => {
   //   正常な SSE（progress → done）: C1・C2 とも検証済み → 承認できる最終案。呼び出しの記録に progress の全部の印。会話の逐次表示（仮案の delta）も実際の client で届く
@@ -323,7 +325,8 @@ await section(async () => {
   assert(v.generated.C1.status === 'verified' && v.generated.C2.status === 'verified' && v.generated.C3.status === 'failed' && v.generated.C3.failure.stop === 'timeout' && v.final.incomplete && v.final.incomplete.stoppedAt === 'C3' && v.final.incomplete.notStarted.length === 0 && v.final.approvable === false, `S5-1: 完了した C1・C2 は残し、止めた C3 で未完成: ${JSON.stringify(v.final.incomplete)}`);
   const h = finalHtml(x), vis = visibleText(h);
   const b = restButtonOf(h);
-  assert(b && !b.disabled && /止めた JavaScript だけを作ります（残り 1 件。検証済みの JavaScript 2 件はそのまま使います）/.test(vis) && !/まだ作っていない JavaScript が [0-9]+ 件/.test(vis) && !/\bC[123]\b/.test(vis), `S5-2: 未完成の最終案の説明に残りの件数と流用の件数（内部の番号は出さない）: ${(vis.match(/押すと[^\n]*/) || [''])[0]}`);
+  //   2026-10-14 の設計し直し（指示書 §1.4）: 作成途中のカードは、できたもの（手順の title）・止めたもの・理由・残り n 件（押したときに実際に作る数）の短い文
+  assert(b && !b.disabled && /JavaScript・モバイルの編集制御はできました。モバイルの入力チェックの作成中に、AIの応答が時間切れになりました。/.test(vis) && /完成した分は残っています。残り 1 件から再開できます。/.test(vis) && !/手を付けていません/.test(vis) && !/\bC[123]\b/.test(vis), `S5-2: 作成途中のカードに、できたもの・止めたもの・理由・残りの件数（内部の番号は出さない）: ${vis.replace(/\s+/g, ' ').slice(0, 240)}`);
   assert(x.calls.ask.length === 0 && (v.openQuestions || []).length === 0 && !x.c.messages().some(m => m.type === 'ERROR') && !/速くな/.test(vis), 'S5-3: 失敗を新しい確認（質問・エラーのカード）に変えない。「速くなる」とは書かない');
   const hashes = [v.generated.C1.candidateHash, v.generated.C2.candidateHash];
   const r2 = await pressRest(x);
@@ -339,7 +342,7 @@ await section(async () => {
   await sendUntilAdopt(x);
   const v = x.c.activePlan();
   const vis = visibleText(finalHtml(x));
-  assert(v.final.incomplete && v.final.incomplete.stoppedAt === 'C2' && JSON.stringify(v.final.incomplete.notStarted) === '["C3"]' && /止めた JavaScript と、まだ作っていない JavaScript だけを作ります（残り 2 件。検証済みの JavaScript 1 件はそのまま使います）/.test(vis) && /まだ作っていない JavaScript が 1 件あります/.test(vis), `S5-6: 止めた 1 件＋作っていない 1 件 = 残り 2 件・検証済み 1 件: ${(vis.match(/押すと[^\n]*/) || [''])[0]}`);
+  assert(v.final.incomplete && v.final.incomplete.stoppedAt === 'C2' && JSON.stringify(v.final.incomplete.notStarted) === '["C3"]' && /JavaScriptはできました。モバイルの編集制御の作成中に、AIの応答が時間切れになりました。モバイルの入力チェックは手を付けていません。/.test(vis) && /残り 2 件から再開できます/.test(vis), `S5-6: 止めた 1 件＋作っていない 1 件 = 残り 2 件（未着手は「手を付けていません」の 1 文）: ${vis.replace(/\s+/g, ' ').slice(0, 240)}`);
   await pressRest(x);
   const v2 = x.c.activePlan();
   assert(x.calls.plan.length === 1 && gen.count('C1') === 1 && gen.count('C2') === 2 && gen.count('C3') === 1 && v2.generated.C1.reused === true && v2.generated.C2.status === 'verified' && v2.generated.C3.status === 'verified' && v2.final.approvable === true, `S5-7: 押すと C1 は流用・C2 と C3 を生成: ${JSON.stringify({ seen: gen.seen.map(s => s.cid) })}`);
@@ -350,7 +353,7 @@ await section(async () => {
   const x = makeConvC({ planImpl: planJs3, generate: gen });
   await sendUntilAdopt(x);
   const vis = visibleText(finalHtml(x));
-  assert(/止めた JavaScript と、まだ作っていない JavaScript だけを作ります（残り 3 件。検証済みの JavaScript はまだありません）/.test(vis), `S5-8: 検証済みが無いときは「まだありません」: ${(vis.match(/押すと[^\n]*/) || [''])[0]}`);
+  assert(/まだできた JavaScript はありません。JavaScriptの作成中に、AIの応答が時間切れになりました。モバイルの編集制御・モバイルの入力チェックは手を付けていません。/.test(vis) && /残り 3 件から再開できます/.test(vis) && !/完成した分は残っています/.test(vis), `S5-8: できた JavaScript が無いときは「まだできた JavaScript はありません。」（「完成した分は残っています」とは言わない）: ${vis.replace(/\s+/g, ' ').slice(0, 240)}`);
 });
 await section(async () => {
   //   レビューの指摘 1（2026-10-14）: 止める前に別の理由で生成できなかった JavaScript（AI が断った GENERATION_DECLINED = 止めない失敗）も残りに数える。
@@ -361,7 +364,7 @@ await section(async () => {
   const v = x.c.activePlan();
   const vis = visibleText(finalHtml(x));
   assert(v.generated.C1.status === 'failed' && !v.generated.C1.failure.stop && v.generated.C1.failure.reason === 'GENERATION_DECLINED' && v.generated.C2.status === 'failed' && v.generated.C2.failure.stop === 'timeout' && v.final.incomplete && v.final.incomplete.stoppedAt === 'C2' && JSON.stringify(v.final.incomplete.notStarted) === '["C3"]' && v.final.approvable === false, `S5-9: 前提: C1 は止めない失敗（AI が断った）・C2 で止めた・C3 は作っていない: ${JSON.stringify({ c1: v.generated.C1.failure, inc: v.final.incomplete })}`);
-  assert(/止めた JavaScript と、まだ作っていない JavaScript と、生成できなかった JavaScript だけを作ります（残り 3 件。検証済みの JavaScript はまだありません）/.test(vis) && !/\bC[123]\b/.test(vis) && (v.openQuestions || []).length === 0, `S5-10: 文に実際に作る対象を列挙し、残りは検証済みでない 3 件（止めた 1 件＋未着手 1 件の 2 件にしない。内部の番号は出さない・質問は増やさない）: ${(vis.match(/押すと[^\n]*/) || [''])[0]}`);
+  assert(/まだできた JavaScript はありません。モバイルの編集制御の作成中に、AIの応答が時間切れになりました。モバイルの入力チェックは手を付けていません。JavaScriptは作れませんでした。/.test(vis) && /残り 3 件から再開できます/.test(vis) && !/\bC[123]\b/.test(vis) && (v.openQuestions || []).length === 0, `S5-10: 止めたもの・未着手・作れなかったものをそれぞれ 1 文で出し、残りは検証済みでない 3 件（止めた 1 件＋未着手 1 件の 2 件にしない。内部の番号は出さない・質問は増やさない）: ${vis.replace(/\s+/g, ' ').slice(0, 240)}`);
   const before = gen.seen.length;
   const r2 = await pressRest(x);
   const v2 = x.c.activePlan();

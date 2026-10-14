@@ -335,7 +335,7 @@ console.log('\n--- §12. 会話の表示の決まり（部品）: 出さない�
     await K.adoptC(xU);
     await xU.c.send('承認されたら Slack に送るようにして');
     const finU = K.stripC(K.finalHtml(xU));
-    const cannotU = (finU.replace(/\s+/g, ' ').match(/実現できない点・対応範囲.{0,160}/) || [''])[0];
+    const cannotU = (finU.replace(/\s+/g, ' ').match(/この案の制約.{0,160}/) || [''])[0];
     assert(xU.c.activePlan().version === 2 && /計画では対応できないとされた要件: 承認されたら Slack に送る/.test(cannotU) && !/\bR[0-9]+\b|要件：/.test(finU), `対応できないことは番号なしで出す（最終案のカードの「実現できない点」）: ${cannotU}`);
     //   理由（計画の AI の note「外部サービスとの連携は対象外」）は、最終案のカードの「実現できない点」に添える（以前は会話の知らせに出た）
     assert(/外部サービスとの連携は対象外/.test(cannotU), `対応できないことの理由を添える（最終案のカードの「実現できない点」）: ${cannotU}`);
@@ -485,7 +485,7 @@ console.log('\n--- §19. 回答欄から答える: 吹き出しは「確認事�
   const chat2 = m.chat();
   assert(m.conv().activePlan().version === 2 && /確認事項にすべて回答しました。変更案に入れました。/.test(chat2), '直し終わったら「変更案に入れました。」');
   //   C-1 第 3 段: 確認事項のカード（questions）は削除した。答えは新しい最終案のカードの「変わった点」に 1 回だけ出し、前の最終案は 1 行に畳む（R10-4）
-  assert(/前の最終案 — このあと直した案があります/.test(chat2) && (outsideDetails(chat2).match(/未着手・進行中・完了の 3 つ/g) || []).length === 1, `前の最終案は折りたたみ、何と答えたかを 1 回だけ残す: ${(outsideDetails(chat2).match(/未着手・進行中・完了の 3 つ/g) || []).length}`);
+  assert(/前の最終案 — このあと直した案があります/.test(chat2) && (outsideDetails(chat2).match(/未着手・進行中・完了の 3 つ/g) || []).length === 0 && /前の最終案から変わった点/.test(m.$('kt-ai-change-summary').innerHTML) && /未着手・進行中・完了の 3 つ/.test(m.$('kt-ai-change-summary').innerHTML), `前の最終案は折りたたみ、何と答えたかは右の「変更内容」の「前の最終案から変わった点」に 1 回（2026-10-14）: ${(outsideDetails(chat2).match(/未着手・進行中・完了の 3 つ/g) || []).length}`);
 }
 
 // =========================================================
@@ -520,7 +520,7 @@ console.log('\n--- §20. 読みやすさ: AI の文は段落と箇条書き（AI
   await adopt(m);
   const rv = m.$('kt-ai-review-result').innerHTML;
   const iDecide = rv.indexOf('必要な判断'), iSteps = rv.indexOf('手順ごとの判定と判断'), iDetail = rv.indexOf('詳しく（Toolkit で確認した結果の内訳');
-  assert(iDecide >= 0 && iDecide < iSteps && iSteps < iDetail && /設定の手順 2 件のうち、承認すると動作テスト環境へ反映できるのは 2 件です。/.test(rv) && /手順ごとに「承認」を選ぶと、承認した手順だけを右の「反映」から反映します/.test(rv), `確認結果: 必要な判断 → 手順 → 詳しく の順: ${iDecide} ${iSteps} ${iDetail}`);
+  assert(iDecide >= 0 && iDecide < iSteps && iSteps < iDetail && /設定の手順 2 件のうち、承認すると動作テスト環境へ反映できるのは 2 件です。/.test(rv) && /反映は最終案のカードの［動作テスト環境へ反映］で一度に行います/.test(rv), `確認結果: 必要な判断 → 手順 → 詳しく の順: ${iDecide} ${iSteps} ${iDetail}`);
   const step = (rv.match(/<div class="kt-ai-review-step"[\s\S]*?<\/details>\s*<\/div>/) || [''])[0];
   const visible = step.replace(/<details[\s\S]*?<\/details>/g, '');
   assert(/kt-ai-step-verdict/.test(visible) && /問題は見つかりませんでした。承認すると反映の対象になります。/.test(visible) && /class="btn kt-ai-decision"/.test(visible) && !/<span style="display:inline-block; font-size:10px; padding:0 6px; border-radius:8px; border:1px solid/.test(visible) && /＋ 新規/.test(step), '手順: 1 文の判定と判断を出す。色付きのバッジは［詳しく］の中だけ');
@@ -709,12 +709,14 @@ console.log('\n--- §21. こちらの提案で進めている点・確認した�
   //   同じ決まり（§0f.5 の 3 で件数にかかわらず畳む・1 件 1 行・変え方は小さく灰色・「／」で詰めない）を仮案のカードで確かめる
   const xP = K.makeConvC();
   await K.adoptC(xP);
-  const drafts = xP.c.messages().filter(x => x.type === 'DRAFT').map(x => KTAiChatUi.messageHtml(x, { draft: xP.c.draft() }));
-  const asm = (h) => (h.match(/<details class="kt-ai-draft-assumptions"[\s\S]*?<\/details>/) || [''])[0];
-  const html2 = asm(drafts[0]), html4 = asm(drafts[2]);
-  assert(/<summary>こちらの提案で進める点が 4 件あります（変えたいときはそのまま伝えてください）<\/summary>/.test(html4) && !/<details[^>]*\sopen/.test(html4) && (html4.match(/<li>/g) || []).length === 4 && /<li>承認者はユーザー選択フィールド「課長承認者」「部長承認者」を新設して指定する<span[^>]*>（既存のフィールドを使うこともできます）<\/span><\/li>/.test(html4) && !/／/.test(html4) && !/仮の案/.test(html4) && !/kt-ai-who/.test(html4), `提案 4 件: details で畳まれ（見出しだけ）、開くと 1 件 1 行（変え方は小さく）: ${html4.slice(0, 400)}`);
-  //   §0f.5 の 3（2026-10-09）: 前提は件数にかかわらず畳む（2 件でも見出しの件数だけ見え、開くと 1 件 1 行）
-  assert(/<summary>こちらの提案で進める点が 2 件あります（変えたいときはそのまま伝えてください）<\/summary>/.test(html2) && !/<details[^>]*\sopen/.test(html2) && (html2.match(/<li>/g) || []).length === 2, `提案 2 件: 2 件でも畳む（見出しの件数は見える・開くと 2 件）: ${html2.slice(0, 200)}`);
+  //   2026-10-14 の設計し直し（指示書 §1.1）: こちらの提案で進める点は会話のカードから外し、右の「変更内容」の仮案の詳細（draftSummaryHtml）に出す。
+  //   同じ決まり（1 件 1 行・変え方は小さく灰色・「／」で詰めない）をそこで確かめる（前の版の仮案はメッセージの items で描く）
+  const draftMsgs = xP.c.messages().filter(x => x.type === 'DRAFT');
+  const paneOf = (msg) => KTAiChatUi.draftSummaryHtml({ ...xP.c.draft(), items: msg.data.items });
+  const asm = (h) => (h.match(/<b>こちらの提案で進める点<\/b><ul[\s\S]*?<\/ul>/) || [''])[0];
+  const html2 = asm(paneOf(draftMsgs[0])), html4 = asm(paneOf(draftMsgs[2]));
+  assert(html4 && (html4.match(/<li>/g) || []).length === 4 && /<li>承認者はユーザー選択フィールド「課長承認者」「部長承認者」を新設して指定する<span[^>]*>（既存のフィールドを使うこともできます）<\/span><\/li>/.test(html4) && !/／/.test(html4) && !/仮の案/.test(html4) && !/kt-ai-who/.test(html4) && !/kt-ai-draft-assumptions|こちらの提案で進める点/.test(KTAiChatUi.messageHtml(draftMsgs[2], { draft: xP.c.draft() })), `提案 4 件: 右の仮案の詳細に 1 件 1 行（変え方は小さく）。会話のカードには出さない: ${html4.slice(0, 400)}`);
+  assert(html2 && (html2.match(/<li>/g) || []).length === 2, `提案 2 件: 右の仮案の詳細に 2 件（1 件 1 行）: ${html2.slice(0, 200)}`);
   assert(/\.kt-ai-provisionals-card > summary\{ color:inherit; font-size:inherit; \}/.test(SRC_TEXT) && /\.kt-ai-prov-hint\{ font-size:11px; color:var\(--kt-ai-muted\);/.test(SRC_TEXT), '見出しの文字色は本文と同じ（薄くしない）・変え方は小さく灰色（CSS）');
   // 確認したいことが 2 件: 文は見出し 1 行 ＋ 「- 」の行。変更案の無い描画（記録）でも箇条書き。会話のカードは従来どおり番号付き
   const P = JSON.parse(JSON.stringify(PLAN_V2));

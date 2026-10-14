@@ -496,7 +496,8 @@ await section(async () => {
   // 会話に描く文（タグ・属性を除いた本文）
   const html = card ? K.stripC(K.finalHtml(x, card)) : '';
   const summaryText = ((v && v.final && v.final.behaviors) || []).join('');
-  assert(card && !/E44|dictionary|D1|D2/.test(summaryText) && /決定事項の推奨の数え方、暦日3日を反映しました/.test(summaryText) && /決定事項の推奨の数え方、暦日3日を反映しました/.test(html) && !/E4\d|dictionary|D1|D2/.test(html)
+  const right = K.stripC(KTAiChatUi.changeSummaryHtml(v, {}));   // 2026-10-14: 計画の要約（最終的にどう動くか）は右の「変更内容」
+  assert(card && !/E44|dictionary|D1|D2/.test(summaryText) && /決定事項の推奨の数え方、暦日3日を反映しました/.test(summaryText) && /決定事項の推奨の数え方、暦日3日を反映しました/.test(right) && !/E4\d|dictionary|D1|D2/.test(html)
     && !c.messages().some(m => m.type === 'PLAN' || m.data?.kind === 'plan-summary') && /E44/.test(v.plan.assessment.summary), `E9: チャットの要約（最終案のカード）から根拠ID・内部の語を外す（計画の要約には残る）: ${summaryText}`);
 });
 
@@ -661,7 +662,7 @@ await section(async () => {
   const card = x.finals().slice(-1)[0];
   const v = c.activePlan();
   const text = ((v && v.final && v.final.behaviors) || []).join('');
-  const shown = card ? K.stripC(K.finalHtml(x, card)) : '';
+  const shown = card ? K.stripC(K.finalHtml(x, card)) + K.stripC(KTAiChatUi.changeSummaryHtml(v, {})) : '';   // 2026-10-14: 要約は右の「変更内容」
   assert(card && /日付フィールド D2 の値を初期値にします/.test(text) && /D2の値が空のときは通知しません/.test(text) && /決定事項の推奨、作業者を反映しました/.test(text) && /日付フィールド D2 の値を初期値にします/.test(shown) && /決定事項の推奨、作業者を反映しました/.test(shown), `S13: ${text}`);
 });
 

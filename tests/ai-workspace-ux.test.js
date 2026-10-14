@@ -195,7 +195,7 @@ console.log('\n--- §3〜§8. 計画 / Review / Before・After / 実行: 左は�
   // 変更案（2026-10-06: 会話は 1 枚のカード。版の番号・要件の番号は出さない）
   //   C-1 第 3 段: 変更案のカード（kt-ai-plan-card）・確認事項のカード（answer-questions）は最終案のカードに置き換えた
   //   （tests/ai-flow-redesign.test.js の R09-1・R09-3・R09-9・R09-10 と R10-1・R10-2）。ここでは最終案のカードが要約・件数・まだ反映していないことを出し、版の番号を出さないことを確かめる
-  assert(/<b>最終案ができました。<\/b>/.test(chat) && /更新状況を表すフィールドが無いので追加します。/.test(chat) && /設定の手順 2 件/.test(chat) && /まだ何も反映していません。/.test(chat) && !/変更計画 v\d|v1 を作成|修正: /.test(chat) && !/kt-ai-plan-card/.test(chat), 'chat plan summary（最終案のカード）: 最終案ができました・要約・設定の手順の件数・まだ反映していない（版の番号は出さない）');
+  assert(/<b>最終案ができました。<\/b>/.test(chat) && /更新状況を表すフィールドが無いので追加します。/.test(chat + m.$('kt-ai-change-summary').innerHTML) && /設定の手順 2 件/.test(m.$('kt-ai-change-summary').innerHTML) && !/まだ何も反映していません。/.test(chat) && !/変更計画 v\d|v1 を作成|修正: /.test(chat) && !/kt-ai-plan-card/.test(chat), 'chat plan summary（最終案のカード）: 最終案ができました・要約・設定の手順の件数・まだ反映していない（版の番号は出さない）');
   assert(/後で決めてよいことが 1 件あります/.test(chat) && !/Q1/.test(chat), '確認したいこと（後で決めてよいこと）は最終案のカードに件数だけ。番号（Q1）は出さない');
   assert(!/更新状況フィールドを追加/.test(chat) && !/kt-ai-new-field/.test(chat) && !/理由：/.test(chat) && !/提案の内容/.test(chat), 'chat には計画の本文（手順・新規フィールド・理由）が無い');
   assert(!m.msgs().some(x => x.data?.kind === 'plan-summary') && !/変更案を作りました。/.test(chat) && !/<div class="kt-ai-who">(Toolkit|SYSTEM)<\/div>/.test(chat) && /<div class="kt-ai-who">AI<\/div>/.test(chat), '計画の要約の通知（plan-summary）は作らない（最終案のカードにまとめる）。発言者は AI だけ表示（Toolkit / SYSTEM は出さない）');
@@ -213,7 +213,7 @@ console.log('\n--- §3〜§8. 計画 / Review / Before・After / 実行: 左は�
     assert(m.panel.applyHold() === null && !/kt-ai-exec-start/.test(exec0) && /最終案のカードの［動作テスト環境へ反映］/.test(exec0) && !/step がありません/.test(exec0) && m.$('kt-ai-exec-empty').style.display === 'none' && b0 && !b0.disabled && writes(m).length === 0, '右の「反映」: 最終案の流れでは準備・最終確認の段を出さず、最終案のカードの［動作テスト環境へ反映］を案内する。承認の欄の準備（書き込みなし）が終わると押せる（priority の無い確認事項では止めない）'); }
   // Toolkit の確認（REVIEW）の詳しくは右の「確認結果」
   //   C-1 第 3 段: Review の会話のカード（REVIEW）と要約の通知（review-summary）は作らない（tests/ai-flow-redesign.test.js の R09-3）。最終案のカードは確認結果の場所を示す
-  assert(!/kt-ai-review-card/.test(chat) && !/Toolkitで変更計画を検証しました/.test(chat) && !/Toolkit で変更案を確認しました。/.test(chat) && !m.msgs().some(x => x.type === MSG.REVIEW || x.data?.kind === 'review-summary') && /Toolkit の確認結果は右の「確認結果」/.test(chat) && !/kt-ai-decision/.test(chat) && !/安全に追加できる変更/.test(chat), 'review summary: Toolkit の確認は最終案のカードの 1 行だけ（詳しくは右の「確認結果」）。判断 select・内訳は会話に無い');
+  assert(!/kt-ai-review-card/.test(chat) && !/Toolkitで変更計画を検証しました/.test(chat) && !/Toolkit で変更案を確認しました。/.test(chat) && !m.msgs().some(x => x.type === MSG.REVIEW || x.data?.kind === 'review-summary') && /Toolkit の確認結果は右の「確認結果」/.test(m.$('kt-ai-change-summary').innerHTML) && !/kt-ai-decision/.test(chat) && !/安全に追加できる変更/.test(chat), 'review summary: Toolkit の確認は最終案のカードの 1 行だけ（詳しくは右の「確認結果」）。判断 select・内訳は会話に無い');
   const review = m.$('kt-ai-review-result').innerHTML;
   assert(/Toolkit で確認した結果/.test(review) && /手順ごとの判定と判断/.test(review) && (review.match(/kt-ai-decision/g) || []).length === 2 && /安全に追加できる変更/.test(review) && /kt-ai-review-diff-toggle/.test(review) && /kt-ai-tech/.test(review) && /kt-ai-review-json-copy/.test(review) && m.$('kt-ai-review-empty').style.display === 'none', 'full review only workspace（右の「確認結果」）: 手順ごとの判定 ＋ 判断 select（2 件）・集約・変更前後・技術者向け');
   await clickTab(m, 'review');
@@ -289,7 +289,7 @@ console.log('\n--- §7 / §20. Customize → 開発支援（JS 相談）: 左は
   const c1 = m.chat();
   const vH = m.conv().activePlan();
   assert(m.calls.propose.length === 1 && m.calls.propose[0].ctx.facts.some(f => /相談中の JavaScript「fieldOnOff\.js」/.test(f.statement)) && vH && vH.final && /<b>最終案ができました。<\/b>/.test(c1) && !/JavaScript の実装の内容をまとめました。/.test(c1) && !/data-act="confirm-spec"/.test(c1) && !/data-act="open-spec"/.test(c1) && !m.msgs().some(x => ['spec-intro', 'code-intro'].includes(x.data?.kind) || ['SPEC', 'CODE'].includes(x.type)), '相談の依頼 → 仮案（相談中の JavaScript を渡す）→ 採用 → 最終案のカード 1 枚（仕様・コードのカードと確定ボタンは無い）');
-  assert(/設定の手順 1 件/.test(c1) && /fieldOnOff\.js/.test(c1) && !/\bC1\b/.test(c1.replace(/<[^>]+>/g, ' ')), '最終案のカード: 設定の手順の件数と JavaScript のファイル（番号 C1 は出さない）');
+  assert(/設定の手順 1 件/.test(m.$('kt-ai-change-summary').innerHTML) && /fieldOnOff\.js/.test(c1) && !/\bC1\b/.test(c1.replace(/<[^>]+>/g, ' ')), '最終案のカード: 設定の手順の件数と JavaScript のファイル（番号 C1 は出さない）');
   assert(!/data-act="confirm-spec"/.test(m.$('kt-ai-spec').innerHTML) && /「[^」]+」（制御）/.test(m.$('kt-ai-spec').innerHTML) && !/amount（CONTROL）/.test(m.$('kt-ai-spec').innerHTML) &&/最終案の一部です/.test(m.$('kt-ai-spec').innerHTML) && vH.spec.status === 'CONFIRMED' && vH.spec.autoConfirmed === true && m.panel.workspaceState().lines.join('|') === 'fieldOnOff.js|仕様 v1 確定|コード生成済み|Preview未登録' && /data-status="ready">未反映</.test(m.$('kt-ai-ws-state').innerHTML), `実装の内容（右の「変更内容」）: 詳細の閲覧だけ（確定は最終案の中で自動）。右の見出しは「未反映」（VM.workspaceState は「仕様 v1 確定 / コード生成済み / Preview未登録」）: ${m.panel.workspaceState().lines.join('|')}`);
   // 右の「コード」: 全文・検査の内訳・参考パターン・［動作テスト環境へ登録］
   //   C-1 第 3 段: 新しい流れでは、最終案ができたら作った JavaScript を右の「コード」に描いておき（ペインは切り替えない）、最終案のカードの［コードを見る］

@@ -201,7 +201,8 @@ console.log('\n--- 2. KTAiConversation.create（fake services。履歴は送ら�
   assert(r2p.intent === 'PROPOSE' && proposeLog.join() === GOAL && r2.intent === 'ADOPT_DRAFT' && log[1][0] === 'plan' && log[1][1].split('\n')[0] === GOAL && /採用した方針: /.test(log[1][1]) && !log[1][2], 'PLAN → 仮案（services.propose）→ 採用 → services.plan（goal の 1 行目は依頼。採用した方針を添える。revision 無し）');
   assert(v1 && v1.version === 1 && v1.basedOnVersion === null && v1.status === 'ACTIVE' && v1.plan.steps.length === 2 && v1.review && v1.goal === GOAL && v1.revisionRequest === null && v1.fromDraft, 'v1: { planId, version 1, basedOnVersion null, goal, revisionRequest null, review }（仮案から作った版）');
   //   変更案のカード（PLAN）・Toolkit の確認（REVIEW）・確認の要約（review-summary）は削除した（ai-flow-redesign の F5-1）。版ごとのカードは最終案（FINAL）1 枚
-  assert(c.messages().map(m => m.type).slice(2).join() === 'USER,DRAFT,USER,ASSISTANT_TEXT,FINAL' && !c.messages().some(m => ['PLAN', 'REVIEW'].includes(m.type) || ['plan-summary', 'review-summary'].includes(m.data?.kind)), '仮案 → 採用 → 最終案のカード 1 枚（変更案・確認のカードは出さない）');
+  //   2026-10-14 の設計し直し: 採用直後の別の文（ASSISTANT_TEXT「この案で進めます…」）は出さない（見出しは進みのカードに吸収）
+  assert(c.messages().map(m => m.type).slice(2).join() === 'USER,DRAFT,USER,FINAL' && !c.messages().some(m => ['PLAN', 'REVIEW'].includes(m.type) || ['plan-summary', 'review-summary'].includes(m.data?.kind)), '仮案 → 採用 → 最終案のカード 1 枚（変更案・確認のカード・採用直後の別の文は出さない）');
   const r3 = await c.send('新しい承認者は作らず既存の承認者を使って');
   const v2 = c.activePlan();
   //   §0f.2 の 4（2026-10-09）: 「同じ goal」は Toolkit が最初の計画に送った goal（計画の AI が返した goal で置き換えない）
@@ -273,7 +274,7 @@ console.log('\n--- 2. KTAiConversation.create（fake services。履歴は送ら�
   const slow = KTAiConversation.create({ services: { ...services, plan: (p) => new Promise(r => setTimeout(() => r(services.plan(p)), 5)) } });
   await slow.send(GOAL);
   const sp = slow.send('これで進めて'); await tick();
-  assert(slow.messages()[slow.messages().length - 1].text === '最終案を作っています' && slow.messages()[slow.messages().length - 1].data?.kind === 'progress', 'loading: 採用の後は進みの 1 枚カード「最終案を作っています」');
+  assert(slow.messages()[slow.messages().length - 1].text === 'この案で最終案を作っています' && slow.messages()[slow.messages().length - 1].data?.kind === 'progress', 'loading: 採用の後は進みの 1 枚カード「この案で最終案を作っています」（2026-10-14: 採用直後の別の文を見出しに吸収）');
   await sp;
   const sp2 = slow.send('通知はいらない'); await tick();
   assert(slow.messages()[slow.messages().length - 1].text === '最終案を直しています' && slow.messages()[slow.messages().length - 1].data?.kind === 'progress', 'loading: 最終案の修正は進みの 1 枚カード「最終案を直しています」');
@@ -454,14 +455,14 @@ console.log('\n--- 5. AI Workspace: 会話（ASK / PLAN / REVISE / EXPLAIN / PRE
   //   2026-10-06 の変更案のカード（「変更案ができました。」・変わる内容・Toolkit の確認・［変更内容を見る］）は削除した（ai-flow-redesign の R09-1・R09-3・F5-1）。
   //   版ごとのカードは最終案のカード 1 枚（要約・反映先と主な影響・まだ何も反映していません・［この内容で反映する］。手順の本文・版の番号は出さない。R09-9・画面-1）
   { const finalText = chat1.slice(chat1.indexOf('class="kt-ai-card kt-ai-final-card')).replace(/<[^>]*>/g, '');
-    assert(/最終案ができました。/.test(finalText) && /更新状況を表すフィールドが無いので追加します。/.test(finalText) && /反映先と主な影響/.test(finalText) && /まだ何も反映していません。/.test(finalText) && /data-act="final-approve"[^>]*>動作テスト環境へ反映</.test(chat1) && !/v\d|変更計画/.test(finalText) && !/＋ 更新状況フィールドを追加/.test(chat1) && !/kt-ai-plan-card/.test(chat1), '最終案のカード: 「最終案ができました。」・要約・反映先と主な影響・まだ何も反映していません・［動作テスト環境へ反映］。手順の本文・版の番号・変更案のカードは出さない'); }
+    assert(/最終案ができました。/.test(finalText) && /更新状況を表すフィールドが無いので追加します。/.test(finalText + m.$('kt-ai-change-summary').innerHTML) && !/反映先と主な影響|まだ何も反映していません。/.test(finalText) && /反映する内容/.test(m.$('kt-ai-change-summary').innerHTML) && /data-act="final-approve"[^>]*>動作テスト環境へ反映</.test(chat1) && !/v\d|変更計画/.test(finalText) && !/＋ 更新状況フィールドを追加/.test(chat1) && !/kt-ai-plan-card/.test(chat1), '最終案のカード: 「最終案ができました。」・要約・反映先と主な影響・まだ何も反映していません・［動作テスト環境へ反映］。手順の本文・版の番号・変更案のカードは出さない'); }
   assert(!/提案の内容（/.test(chat1) && /＋ 新規フィールド<\/b>/.test(m.$('kt-ai-plan-result').innerHTML) && /更新状況/.test(m.$('kt-ai-plan-result').innerHTML) && /DROP_DOWN/.test(m.$('kt-ai-plan-result').innerHTML), '提案資産（新規フィールド / 一覧）の詳細は右の「変更内容」の計画の全文だけ（WORKSPACE_ONLY）');
   { const sum = m.$('kt-ai-change-summary').innerHTML;
     assert(/<h3>更新状況を管理したい<\/h3>/.test(sum) && /何が変わるか（Toolkit が確かめた変更前後）/.test(sum) && /新しいフィールド：更新状況（DROP_DOWN）/.test(sum) && /確認したいこと（1 件）/.test(sum) && /更新状況の選択肢は 3 段階でよいですか/.test(sum) && !/P1|P2|E\d/.test(sum.replace(/<[^>]*>/g, '')) && m.$('kt-ai-pane-plan-empty').style.display === 'none' && m.$('kt-ai-plan-detail').style.display === '', '右の「変更内容」: 変更内容の要約（見出し=goal・何が変わるか・確認したいこと。手順・根拠の番号は出さない）・計画の全文は［計画の詳細と根拠］'); }
   //   Toolkit の確認（REVIEW）の記録のメッセージは削除した（F5-1）。確認の結果は右の「確認結果」にまとめる。判断の select は会話に無い
   assert(!m.msgs().some(x => x.type === 'REVIEW') && !/kt-ai-review-card/.test(chat1) && !/Toolkitで変更計画を検証しました|検証結果を見る/.test(chat1) && !/kt-ai-decision/.test(chat1), 'Toolkit の確認は会話のカードにしない（REVIEW のメッセージは無い）。判断の select は会話に無い');
   //   会話のカードの承認は最終案の［この内容で反映する］だけ（R16・画面-3）。チャットの文章・手順ごとの判断の select・反映の開始は会話に無い
-  assert(!/<select/.test(chat1) && !/data-act="(approve|decide|exec-start|exec-go)"/.test(chat1) && !/id="kt-ai-exec-(start|go)"/.test(chat1) && /まだ何も反映していません。/.test(chat1), '会話のカードに手順ごとの判断・右の「反映」の操作は無い（承認と反映は最終案の［動作テスト環境へ反映］だけ。チャットの文章では承認にならない）');
+  assert(!/<select/.test(chat1) && !/data-act="(approve|decide|exec-start|exec-go)"/.test(chat1) && !/id="kt-ai-exec-(start|go)"/.test(chat1) && !/まだ何も反映していません。/.test(chat1), '会話のカードに手順ごとの判断・右の「反映」の操作は無い（承認と反映は最終案の［動作テスト環境へ反映］だけ。チャットの文章では承認にならない）');
   assert(m.$('kt-ai-review-result').innerHTML.includes('Toolkit で確認した結果') && !m.$('kt-ai-plan-result').innerHTML.includes('kt-ai-decision') && m.panel.drawerState().open === true && m.panel.drawerState().pane === 'plan' && m.panel.activeArtifact()?.type === 'CHANGE_PLAN', 'Review 統合: 右の「確認結果」に Toolkit で確認した結果。計画受信で右は「変更内容」（activeArtifact CHANGE_PLAN）');
   //   ［Before / After］（DIFF のカード）は変更案のカードのボタンだった。変更案のカードと一緒に入口が無くなった（R の報告の「到達しなくなった小さな残り」）。
   //   変更前後は右の「確認結果」の中にある
@@ -481,7 +482,7 @@ console.log('\n--- 5. AI Workspace: 会話（ASK / PLAN / REVISE / EXPLAIN / PRE
   assert(v2.version === 2 && v2.basedOnVersion === 1 && v1.status === 'SUPERSEDED' && m.panel.lastPlan() === v2.plan && m.panel.lastReview() === v2.review && v2.plan.steps[0].actionType === 'REUSE_FIELD', 'REVISE → v2 が最新。lastPlan / lastReview は v2（v1 は SUPERSEDED）');
   //   v2 の最終案のカード（「最終案を直しました。」・入れた指示）と、前の最終案は 1 行に畳む（ai-flow-redesign の R10-4・F2-2）
   { const chat2 = m.chat(); const text2 = chat2.replace(/<[^>]*>/g, '');
-    assert(/最終案を直しました。/.test(text2) && /入れた指示: 新しい承認者は作らず既存の承認者を使って/.test(text2) && /<details class="kt-ai-card kt-ai-old-card kt-ai-final-card is-old"><summary>前の最終案 — このあと直した案があります/.test(chat2) && (chat2.match(/class="kt-ai-card kt-ai-final-card"/g) || []).length === 1 && !/↻ 既存「担当者」を利用/.test(chat2) && !/変更計画 v\d|v\d に更新済み/.test(text2), 'v2 の最終案のカード（「最終案を直しました。」）・v1 の最終案は「このあと直した案があります」に畳む。手順の本文・版の番号は会話に無い'); }
+    assert(/最終案を直しました。/.test(text2) && /入れた指示: 新しい承認者は作らず既存の承認者を使って/.test(m.$('kt-ai-change-summary').innerHTML.replace(/<[^>]*>/g, '')) && /<details class="kt-ai-card kt-ai-old-card kt-ai-final-card is-old"><summary>前の最終案 — このあと直した案があります/.test(chat2) && (chat2.match(/class="kt-ai-card kt-ai-final-card"/g) || []).length === 1 && !/↻ 既存「担当者」を利用/.test(chat2) && !/変更計画 v\d|v\d に更新済み/.test(text2), 'v2 の最終案のカード（「最終案を直しました。」）・v1 の最終案は「このあと直した案があります」に畳む。手順の本文・版の番号は会話に無い'); }
   assert(m.conv().planHistory().length === 2 && !/kt-ai-new-field/.test(m.$('kt-ai-plan-result').innerHTML) && /担当者/.test(m.$('kt-ai-plan-result').innerHTML) && m.panel.activeArtifact()?.version === 2, '右の「変更内容」は最新版 v2 だけ（v1 の新規フィールド枠は無い・activeArtifact は v2）');
   // EXPLAIN_PLAN
   await m.panel.send('P1って何してる？'); await ticks();
