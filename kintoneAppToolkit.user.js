@@ -21438,6 +21438,9 @@
       TRANSPORT_ERROR: 'TRANSPORT_ERROR', TIMEOUT: 'TIMEOUT', INVALID_RESPONSE: 'INVALID_RESPONSE', WORKER_ERROR: 'WORKER_ERROR',
       NO_CONFIG: 'NO_CONFIG', NOT_ENTITLED: 'NOT_ENTITLED', CONTRACT_INCOMPATIBLE: 'CONTRACT_INCOMPATIBLE', NO_CONTEXT: 'NO_CONTEXT', PLANNER_NOT_AVAILABLE: 'PLANNER_NOT_AVAILABLE', GENERATOR_NOT_AVAILABLE: 'GENERATOR_NOT_AVAILABLE',
       NOT_CONNECTED: 'NOT_CONNECTED', SESSION_EXPIRED: 'SESSION_EXPIRED',
+      // 2026-10-15（ページ期限切れへの対応）: kintone のページの有効期限が切れ（kintone.proxy が CB_CS01）、Gateway へ直接も送れなかった。
+      //   接続や契約の失効ではない（接続情報・会話・生成済みの結果は残っている）。再読み込みすると回復するが、会話は保存しないので失われる
+      PAGE_EXPIRED: 'PAGE_EXPIRED',
       CANCELLED: 'CANCELLED',   // Phase 15: 利用者が送信を取り消した（AbortSignal）。応答は捨てる
       // §0f.4（2026-10-09）: 検証の上限（KTAiBudget。費用・回数）を超えるため送らなかった（Gateway には何も送っていない）
       BUDGET_EXCEEDED: 'BUDGET_EXCEEDED',
@@ -21449,6 +21452,7 @@
       NO_CONFIG: 'AI 機能を利用するには Nest Rec AI の契約が必要です。「Nest Rec AIに接続」から接続してください。',
       NOT_CONNECTED: 'Nest Rec AI に接続されていません。「Nest Rec AIに接続」から接続してください。',
       SESSION_EXPIRED: 'Nest Rec AI との接続の有効期限が切れました。もう一度「Nest Rec AIに接続」してください。',
+      PAGE_EXPIRED: 'このページの有効期限が切れ、AIとの接続を更新できません。作成済みの内容はこの画面に残っています。再読み込みすると、この会話は失われます。',
       NOT_ENTITLED: 'この契約では kintone App Toolkit の AI 機能を利用できません。契約内容を確認してください。',
       PRODUCT_NOT_ENTITLED: 'この契約では kintone App Toolkit の AI 機能を利用できません。契約内容を確認してください。',
       FEATURE_NOT_ENTITLED: 'この契約では「AIに質問」を利用できません。契約内容を確認してください。',
@@ -21540,8 +21544,10 @@
       MODEL_OUTPUT_INVALID: 'format', INVALID_RESPONSE: 'format',
       CONTRACT_INCOMPATIBLE: 'version', UNSUPPORTED_CONTRACT_VERSION: 'version', UNKNOWN_PROMPT_VERSION: 'version',
       INVALID_CONTEXT: 'input', INVALID_ENVELOPE: 'input', PAYLOAD_TOO_LARGE: 'input',
+      // 2026-10-15: ページの有効期限（接続・契約の問題として見せない）
+      PAGE_EXPIRED: 'page',
     });
-    const CATEGORY_JA = Object.freeze({ declined: 'AI が生成しなかった', network: '通信・AI サービスのエラー', auth: '接続・認証', license: '契約・利用範囲', timeout: '時間切れ', format: '応答形式の異常', version: 'バージョンの不一致', input: '送信データ' });
+    const CATEGORY_JA = Object.freeze({ declined: 'AI が生成しなかった', network: '通信・AI サービスのエラー', auth: '接続・認証', license: '契約・利用範囲', timeout: '時間切れ', format: '応答形式の異常', version: 'バージョンの不一致', input: '送信データ', page: 'ページの有効期限' });
     const errorCategory = (code) => ERROR_CATEGORY[code] || 'other';
     /** Phase 22: GENERATION_DECLINED の AI の説明（Gateway が長さで切った理由）。AiClientError の details は Gateway の応答そのもの */
     const declineReasonOf = (e) => { const d = e?.details?.error?.detail; return d && typeof d.reason === 'string' && d.reason.trim() ? d.reason.trim().slice(0, 600) : null; };
@@ -21621,9 +21627,17 @@
      *   kintone.proxy に切り替える（Gateway に届いた後の失敗で送り直さない = 二重に使わない）
      */
     const DIRECT_FALLBACK_WITHIN_MS = 5000;
+    /**
+     * 2026-10-15（ページ期限切れへの対応）: kintone のページの有効期限が切れると、kintone.proxy はページの要求トークンを受け付けず CB_CS01
+     *   （「ページの有効期限が切れています。ページを再読み込みしてください。」）で失敗する。この失敗は kintone が受け付けの時点で止めたもので、
+     *   要求は Gateway へ転送されていない。読み取りの kintone.api は通るので、健全なページと見分けがつかない
+     */
+    const PAGE_EXPIRED_RE = /CB_CS01/;
     //   §0f.3（2026-10-09・FP9）: mark（任意）= 時刻の印（headersAt = 応答の見出しが届いた・firstByteAt = 逐次表示（SSE）では本文の最初の断片が届いた時刻、
     //   逐次表示なしの経路では resp.text() で本文を読み終えた時刻（最初の断片の到着ではない。2026-10-10 の切り分けで区別））。呼び出しの記録に相対の ms で残す（本文は記録しない）
     //   §0f.4 の 5（2026-10-09）: noProxyFallback = 直接の送信が失敗しても kintone.proxy で送り直さない（検証の上限が有効なとき。同じ要求を 2 回送らない）
+    //     2026-10-15（レビューの指摘）: 逆向き（kintone.proxy の CB_CS01 の後に直接 1 回）は noProxyFallback でも行う。CB_CS01 はページの要求トークンの確認で
+    //     kintone が受け付けの時点で断ったもの（Gateway へ転送されていない）なので、同じ要求が 2 回 Gateway に届くことはない、という前提に立つ
     //   生成の停滞の観測のレビュー（2026-10-14・指摘 2）: mark('via', 値) = 受けた経路の印（時刻ではなく値。direct = 直接送って JSON を受けた / direct-stream = 直接送って SSE を受けた /
     //   proxy = kintone.proxy）。送る時点で direct（または proxy）を立て、SSE と分かった時点で direct-stream に上げる（失敗した要求でも、どこまで分かったかが残る）
     function createDefaultTransport({ kintoneApi = (typeof kintone !== 'undefined' ? kintone : null), fetchFn = (typeof fetch !== 'undefined' ? fetch : null), nowFn = () => Date.now() } = {}) {
@@ -21634,9 +21648,12 @@
         //   Gateway が SSE を返さない（JSON が返る）ときは通常の応答として扱う。応答が届く前の失敗だけ kintone.proxy（逐次表示なし）へ切り替える
         //   （届き始めた後の失敗は切り替えない。AI の呼び出しを二重にしない）
         const wantStream = typeof onEvent === 'function';
+        //   2026-10-15: この要求をすでに直接送ろうとしたか（kintone.proxy の CB_CS01 の後に、直接もう一度は送らない）
+        let triedDirect = false;
         if ((preferDirect || wantStream) && fetchFn) {
           const t0 = nowFn();
           let started = false;
+          triedDirect = true;
           try {
             markAt('via', 'direct');
             const resp = await fetchFn(url, { method, headers: wantStream ? { ...headers, 'Accept': 'text/event-stream' } : headers, body: body || undefined, ...(signal ? { signal } : {}) });
@@ -21657,6 +21674,25 @@
           catch (e) {
             const raw = typeof e === 'string' ? e : (e?.message || (() => { try { return JSON.stringify(e); } catch (x) { return String(e); } })());
             if (/GAIA_PR03|プロキシーAPIとの通信がタイムアウト/.test(raw)) throw new AiClientError({ code: ERROR_CODES.TIMEOUT, message: 'AI の処理が kintone の外部通信の上限（約 60 秒）を超えました。もう一度実行するか、依頼を分けてください' });
+            //   2026-10-15（ページ期限切れへの対応）: CB_CS01 は Gateway へ転送されていないので、同じ要求（同じ見出し・同じ本文。接続の更新なら同じ requestId）を
+            //   Gateway へ 1 回だけ直接送る（Gateway の CORS は kintone のドメインと X-Kintone-Domain・Authorization を許可している。認証の条件は経路で変わらない）。
+            //   直接もすでに試した・直接送れない・直接も届かない（CORS・通信の制限）ときは PAGE_EXPIRED で止める（再試行しない。理由と次の操作は画面の文で示す）
+            //   失敗の形は実機では JSON の文字列。object（{ code, message }）のときは code も見る（message に code が無い形でも見分ける）
+            if (PAGE_EXPIRED_RE.test(raw) || (e && typeof e === 'object' && e.code === 'CB_CS01')) {
+              const pageExpired = (direct) => new AiClientError({ code: ERROR_CODES.PAGE_EXPIRED, message: ERROR_TEXT.PAGE_EXPIRED, details: { pageExpired: true, direct } });
+              if (triedDirect || !fetchFn) throw pageExpired(triedDirect ? 'failed' : 'unavailable');
+              let resp;
+              try {
+                markAt('via', 'direct');
+                resp = await fetchFn(url, { method, headers, body: body || undefined, ...(signal ? { signal } : {}) });
+              } catch (e2) {
+                if (e2?.name === 'AbortError') throw e2;
+                throw pageExpired('failed');
+              }
+              markAt('headersAt');
+              const text = await resp.text(); markAt('firstByteAt');
+              return { status: resp.status, body: text, via: 'direct' };
+            }
             throw e;
           }
           const [respBody, status] = res;
@@ -22344,20 +22380,30 @@
        * 認証付き request。Access Token の期限切れは onAuthExpired（Refresh）後に 1 回だけ再試行。signal（任意）でキャンセル。
        *   §0f.3 の 3（2026-10-09）: 再試行は最初の要求の残り時間だけ（全体の待ちを最初の打ち切りの内に収める。残りが無ければ TIMEOUT）
        */
+      /**
+       * 2026-10-15（ページ期限切れへの対応）: Access Token の取得・更新（resolveToken・onAuthExpired）で止まった失敗の印 tokenStage（この要求は Gateway へ送っていない。
+       *   再送の前に止まった時間切れも同じ）。検証の上限の記録（KTAiBudget.preAiOf）はこの印で確保を解放し、会話は終了不明にしない（AI を呼んでいない）
+       */
+      const tokenStageError = (e) => {
+        const err = isAiClientError(e) ? e : new AiClientError({ code: ERROR_CODES.TRANSPORT_ERROR, message: e?.message || String(e) });
+        try { err.tokenStage = true; } catch (x) { }
+        return err;
+      };
       const request = async ({ path, method, body, signal = null, limitMs = timeoutMs, onEvent = null, long = false, trace = null, noProxyFallback = false }) => {
         let t0 = Date.now();
         try {
-          const token0 = await resolveToken();
+          const token0 = await resolveToken().catch((e) => { throw tokenStageError(e); });
           t0 = Date.now();   // 打ち切りの起点（withTimeout のタイマーと同じく token を取った後）
           return await rawRequest({ path, method, body, token: token0, signal, limitMs, onEvent, long, trace, noProxyFallback });
         } catch (e) {
           if (isAiClientError(e) && e.code === ERROR_CODES.AUTH_TOKEN_EXPIRED && typeof onAuthExpired === 'function') {
-            const refreshed = await onAuthExpired(e);
+            const refreshed = await Promise.resolve().then(() => onAuthExpired(e)).catch((x) => { throw tokenStageError(x); });
             if (refreshed) {
               const bounded = Number.isFinite(limitMs) && limitMs > 0;
               const left = bounded ? limitMs - (Date.now() - t0) : limitMs;
-              if (bounded && left <= 0) throw new AiClientError({ code: ERROR_CODES.TIMEOUT, message: `AI サービスが ${limitMs}ms 以内に応答しませんでした（接続の更新の後の再送の時間が残っていません）` });
-              return rawRequest({ path, method, body, token: await resolveToken(), signal, limitMs: left, onEvent, long, trace, noProxyFallback });
+              if (bounded && left <= 0) throw tokenStageError(new AiClientError({ code: ERROR_CODES.TIMEOUT, message: `AI サービスが ${limitMs}ms 以内に応答しませんでした（接続の更新の後の再送の時間が残っていません）` }));
+              const token1 = await resolveToken().catch((x) => { throw tokenStageError(x); });
+              return rawRequest({ path, method, body, token: token1, signal, limitMs: left, onEvent, long, trace, noProxyFallback });
             }
           }
           throw e;
@@ -22825,6 +22871,9 @@
     function preAiOf(e) {
       if (!e || typeof e !== 'object') return false;
       const code = typeof e.code === 'string' ? e.code : '';
+      //   2026-10-15（ページ期限切れへの対応）: Access Token の取得・更新で止まった（KTAiClient の request が付ける tokenStage）。要求は Gateway へ送っていないので、
+      //   有料の呼び出しを 1 回実行した扱いにしない（確保を解放する）。ページの有効期限（PAGE_EXPIRED）での接続の更新の失敗もここに入る
+      if (e.tokenStage === true) return true;
       if (e.details && Array.isArray(e.details.errors)) return false;
       if (code === ERROR_CODES.BUDGET_EXCEEDED && gatewayBudgetAfterAi(e)) return false;
       if (PRE_AI_CODES.has(code)) return true;
@@ -23697,16 +23746,21 @@
     /** 接続済みの状態表示（AI Assistant / 接続先 / 契約 / AI利用 / 接続の有効期限）。credential は表示しない */
     function sessionLinesHtml(status, cap) {
       const fmt = (iso) => { const d = iso ? new Date(iso) : null; return d && !isNaN(d) ? d.toLocaleDateString() : '—'; };
+      //   2026-10-15: ページの有効期限（PAGE_EXPIRED）は契約の状態ではない（このページからは確かめられないだけ）。契約の欄にその文を出さない
+      const pageExpired = !!(cap && !cap.available && cap.reason === KTAiClient.ERROR_CODES.PAGE_EXPIRED);
       const contract = !status?.connected ? '未接続'
         : cap?.checking ? '確認中...'
           : cap?.available ? `有効${cap.contractExpiresAt ? `（${fmt(cap.contractExpiresAt)} まで）` : ''}`
-            : (cap ? KTAiClient.errorText(cap.reason) : '確認済み');
+            : pageExpired ? '—（このページからは確かめられません）'
+              : (cap ? KTAiClient.errorText(cap.reason) : '確認済み');
       const rows = [
         ['AI Assistant', cap?.checking ? '確認中...' : cap?.available ? '利用可能' : (cap ? KTAiClient.errorText(cap.reason) : '—')],
         ['接続先', status?.scope?.domain || '—'],
         ['契約', contract],
         ...(cap?.usage ? [['AI利用', `${cap.usage.usedThisMonth} / ${cap.usage.monthlyLimit}`]] : []),
         ['接続の有効期限', fmt(status?.refreshExpiresAt)],
+        //   回復できない操作を勧めない（接続解除・再接続は、このページの有効期限では回復しない）
+        ...(pageExpired ? [['対処', '接続解除・再接続では回復しません']] : []),
       ];
       return rows.map(([k, v]) => `<div><span style="opacity:.7; display:inline-block; min-width:7em;">${esc(k)}</span>${esc(v)}</div>`).join('');
     }
@@ -25100,11 +25154,17 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
      *   disconnected = 通信の切断（TRANSPORT_ERROR・本文が JSON でない INVALID_RESPONSE・Gateway が要求の中断で止めた UPSTREAM_ERROR detail aborted）/
      *   budget = 予算・回数の上限（BUDGET_EXCEEDED・MONTHLY_LIMIT_EXCEEDED）/ rate = RATE_LIMITED / auth = 接続・認証（AUTH_*・SESSION_EXPIRED・NOT_CONNECTED。次の要求も失敗する）
      */
-    const STOP_KINDS = Object.freeze(['cancelled', 'timeout', 'disconnected', 'budget', 'rate', 'auth']);
+    //   2026-10-15（ページ期限切れへの対応）: page = ページの有効期限で AI との接続を更新できない（PAGE_EXPIRED）/ token = Access Token の更新が通信で止まった
+    //   （AI には送っていない）。どちらも終了不明ではない（Gateway へ要求を送っていない）
+    const STOP_KINDS = Object.freeze(['cancelled', 'timeout', 'disconnected', 'budget', 'rate', 'auth', 'page', 'token']);
     function stopKindOf(e) {
       if (!e || typeof e !== 'object') return null;
       const code = typeof e.code === 'string' ? e.code : '';
       if (e.name === 'AbortError' || code === 'CANCELLED') return 'cancelled';
+      //   レビューの指摘（2026-10-15）: 接続の更新の前でない PAGE_EXPIRED のうち、直接送った後に失敗したもの（details.direct failed）は、AI を呼ぶ要求が
+      //   Gateway に届いていた可能性がある → 通信の切断（終了不明）として扱う。接続の更新の前（tokenStage）・直接を送れなかった（unavailable）ものは page
+      if (code === 'PAGE_EXPIRED') return (e.tokenStage === true || !(e.details && e.details.direct === 'failed')) ? 'page' : 'disconnected';
+      if (e.tokenStage === true) return (/^AUTH_/.test(code) || code === 'SESSION_EXPIRED' || code === 'NOT_CONNECTED') ? 'auth' : 'token';
       const detail = e.details && e.details.error ? e.details.error.detail : null;
       if (code === 'TIMEOUT') return 'timeout';
       if (code === 'UPSTREAM_ERROR' && detail === 'timeout') return 'timeout';
@@ -25124,7 +25184,7 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
     /** §0f.3（FP7）: 呼び出しの記録の end（ok / error / unknown = 中断・時間切れ・切断） */
     const callEndOf = (e) => (stopEndUnknown(stopKindOf(e)) ? 'unknown' : 'error');
     /** §0f.3 の 1: 止めた理由（利用者に見せる文。内部の値は出さない） */
-    const STOP_REASON_JA = Object.freeze({ cancelled: 'キャンセルしました', timeout: 'AI サービスが時間内に応答しませんでした', disconnected: 'AI サービスとの通信が途中で切れました', budget: '利用の上限（予算・回数）に達しました', rate: 'AI サービスへのアクセスが集中しています', auth: 'AI サービスとの接続の有効期限が切れています' });
+    const STOP_REASON_JA = Object.freeze({ cancelled: 'キャンセルしました', timeout: 'AI サービスが時間内に応答しませんでした', disconnected: 'AI サービスとの通信が途中で切れました', budget: '利用の上限（予算・回数）に達しました', rate: 'AI サービスへのアクセスが集中しています', auth: 'AI サービスとの接続の有効期限が切れています', page: 'このページの有効期限が切れ、AI との接続を更新できませんでした', token: 'AI サービスとの接続の更新の途中で止まりました（AI には送っていません）' });
     /**
      * 会話の設計し直し（2026-10-14・指示書 §1.3〜§1.4・§5.1）: 作っている JavaScript を利用者に見せる名前 = 計画の手順（CUSTOMIZATION_REQUIRED）の title。
      *   進みの段階の名前（「{title}」を作っています）・作成途中のカード・右の「変更内容」の JavaScript の状態で同じ名前を使う（内部の番号・ファイル名は出さない）。
@@ -30123,7 +30183,8 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
     //   §0f.4（2026-10-09）: budget = 検証の上限の 1 行（KTAiBudget.summaryText。有効なときだけ渡される）
     function headerHtml({ app = {}, overview = null, connection = {}, jsFiles = [], subject = null, base = undefined, baseLoading = false, detailOpen = false, logCount = 0, budget = '' } = {}) {
       const o = overview || {};
-      const conn = connection.paidEnabled === false ? null : connection.checking ? '確認中' : connection.connected ? (connection.available ? '接続済み' : '利用できません') : '未接続';
+      //   2026-10-15: ページの有効期限（PAGE_EXPIRED）は「利用できません」（契約・接続の問題に読める）にまとめない
+      const conn = connection.paidEnabled === false ? null : connection.checking ? '確認中' : connection.connected ? (connection.available ? '接続済み' : connection.reason === 'PAGE_EXPIRED' ? 'ページの有効期限切れ' : '利用できません') : '未接続';
       return `${budget ? `<div id="kt-ai-budget" class="kt-ai-budget" style="flex:1 1 100%; font-size:11px; color:#b26a00;">${esc(budget)}</div>` : ''}<div class="kt-ai-ctx">
           <b style="font-size:12px;">開発支援</b><span style="opacity:.85;">${esc(app.name || '')}${app.id != null && app.id !== '' ? `（App ${esc(String(app.id))}）` : ''}</span>${subject ? `<span id="kt-ai-subject" style="font-size:11px; border:1px solid #6a1b9a; color:#6a1b9a; border-radius:8px; padding:0 6px;">相談中: ${esc(subject.name)}（${subject.platform === 'mobile' ? 'モバイル' : 'PC'}${subject.customizationType === 'URL' ? '・URL' : ''}）</span>` : ''}
           ${connection.paidEnabled === false ? '' : `<span class="kt-ai-target">反映先：<b>動作テスト環境</b>（運用環境は変更しません）${base !== undefined ? `｜${baseHtml(base, { loading: baseLoading })}` : ''}</span>`}
@@ -30809,7 +30870,7 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
       return pendHtml;
     }
     //   会話の設計し直し（2026-10-14・指示書 §1.4）: 止まった理由を人の言葉で（STOP_REASON_JA は会話の知らせ・readiness の文で使うので変えない）
-    const STOP_REASON_PLAIN = Object.freeze({ timeout: 'AIの応答が時間切れになりました', cancelled: '取り消しました', disconnected: 'AIサービスとの通信が切れました', budget: '利用の上限（予算・回数）に達しました', rate: 'AIサービスへのアクセスが集中しています', auth: 'AIサービスとの接続の有効期限が切れています' });
+    const STOP_REASON_PLAIN = Object.freeze({ timeout: 'AIの応答が時間切れになりました', cancelled: '取り消しました', disconnected: 'AIサービスとの通信が切れました', budget: '利用の上限（予算・回数）に達しました', rate: 'AIサービスへのアクセスが集中しています', auth: 'AIサービスとの接続の有効期限が切れています', page: 'このページの有効期限が切れ、AIとの接続を更新できませんでした', token: 'AIサービスとの接続の更新の途中で止まりました（AIには送っていません）' });
     /**
      * 作成途中のカード（指示書 §1.4。fin.incomplete があるとき。最終案の全文は出さない）:
      *   見出し「作成途中」／「{できた JavaScript の計画の手順の title を「・」でつなぐ}はできました。{止めた JavaScript の title}の作成中に、{止まった理由}。」
@@ -30869,7 +30930,10 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
       ];
       const rest = incRestOf(fin, inc).rest;
       const budget = inc.kind === 'budget';
-      const nextLine = budget ? '上限を見直すまで、続きは送りません。' : `${done.length ? '完成した分は残っています。' : ''}残り ${rest} 件から再開できます。`;
+      //   2026-10-15（ページ期限切れへの対応）: ページの有効期限で止めたときは、作成済みの内容が画面に残ることと、再読み込みで会話が失われることを添える
+      //   （再読み込みを勧めない。回復できない操作を案内しない）
+      const pageLine = inc.kind === 'page' ? '作成済みの内容はこの画面に残っています。再読み込みすると、この会話は失われます。' : '';
+      const nextLine = budget ? '上限を見直すまで、続きは送りません。' : `${pageLine}${done.length && !pageLine ? '完成した分は残っています。' : ''}残り ${rest} 件から再開できます。`;
       const approved = !!v.approval;
       const button = active && !approved ? `<div style="margin-top:6px; display:flex; gap:6px; flex-wrap:wrap; align-items:center;">${btn('choice', '残りの JavaScript を作る', `data-text="コードを作って" data-intent="${esc(KTAiConversation.INTENT.GENERATE_CODE)}" data-display="残りの JavaScript を作る"${budget ? ' disabled' : ''}`, 'font-weight:600;')}</div>` : '';
       //   レビュー 8（2026-10-14）: 検証済みの JavaScript の「コードを見る」と、残る判断（先に決めたい質問の回答欄。完成した最終案と同じ部品）を付ける（承認の欄は付けない。短い構成は保つ）
@@ -31412,7 +31476,9 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
     let lastAnswer = null;
     const setPaidStatus = (t) => { $paidStatus.textContent = t || ''; renderComposer(); };
     const TRANSIENT = [KTAiClient.ERROR_CODES.RATE_LIMITED, KTAiClient.ERROR_CODES.TIMEOUT, KTAiClient.ERROR_CODES.TRANSPORT_ERROR,
-      KTAiClient.ERROR_CODES.UPSTREAM_ERROR, KTAiClient.ERROR_CODES.INTERNAL_ERROR, KTAiClient.ERROR_CODES.WORKER_ERROR, KTAiClient.ERROR_CODES.INVALID_RESPONSE];
+      KTAiClient.ERROR_CODES.UPSTREAM_ERROR, KTAiClient.ERROR_CODES.INTERNAL_ERROR, KTAiClient.ERROR_CODES.WORKER_ERROR, KTAiClient.ERROR_CODES.INVALID_RESPONSE,
+      //   2026-10-15: ページの有効期限で直接も送れなかったときも、送信の操作を閉じない（利用者が押したときだけ 1 回確かめ直す。自動の再試行はしない）
+      KTAiClient.ERROR_CODES.PAGE_EXPIRED];
     const isTransient = () => !capability.available && TRANSIENT.includes(capability.reason);
     const plannerAvailable = () => !!(capability.available && capability.features?.[KTAiClient.FEATURE_PLANNER]?.available);
     const generatorAvailable = () => !!(capability.available && capability.features?.[KTAiClient.FEATURE_GENERATOR]?.available);
@@ -32185,7 +32251,7 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
     conv.onChange(() => { adoptActivePlan(); renderDraftPane(); renderSpec(); renderChat(); renderWsState(); });
     // 段階 C（C3b）: 進みのカードの経過は 1 秒ごとに描き直す（カードが無ければ何もしない。テストは conv.tickProgress() を偽の時計で呼ぶ）
     try { if (typeof setInterval === 'function') setInterval(() => { try { if (conv && typeof conv.tickProgress === 'function') conv.tickProgress(); } catch (e) { } }, 1000); } catch (e) { }
-    const connectionInfo = () => { let st = null; try { st = paidEnabled ? session.status() : null; } catch (e) { st = null; } const connected = !!st?.connected; return { paidEnabled, connected, available: !!capability.available, checking: !!capability.checking, text: !paidEnabled ? '利用できません（接続機能なし）' : connected ? KTContextUi.capabilityStatusText(capability) : flow && flow.isRunning() ? '接続中' : '未接続' }; };
+    const connectionInfo = () => { let st = null; try { st = paidEnabled ? session.status() : null; } catch (e) { st = null; } const connected = !!st?.connected; return { paidEnabled, connected, available: !!capability.available, checking: !!capability.checking, reason: capability.reason || null, text: !paidEnabled ? '利用できません（接続機能なし）' : connected ? KTContextUi.capabilityStatusText(capability) : flow && flow.isRunning() ? '接続中' : '未接続' }; };
     /** 反映の記録の件数（ヘッダーの［反映の記録］）。記録は下で作る（作る前は 0） */
     const logCount = () => { try { return applyLog.length; } catch (e) { return 0; } };
     function renderHeader() {

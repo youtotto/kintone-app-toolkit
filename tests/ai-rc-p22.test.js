@@ -297,7 +297,8 @@ const tryGenerate = async (transport) => { try { return { ok: true, r: await aiC
   const text = KTAiClient.errorText('GENERATION_DECLINED');
   assert(/AI はこの依頼に対するコード生成を行いませんでした/.test(text) && /通信や契約の問題ではありません/.test(text), `生成しなかったことが分かる文言（通信・契約の障害としない）: ${text}`);
   assert(!/契約形式/.test(KTAiClient.errorText('MODEL_OUTPUT_INVALID')) && /応答の形式/.test(KTAiClient.errorText('MODEL_OUTPUT_INVALID')), `応答形式の異常の文言に「契約」を使わない: ${KTAiClient.errorText('MODEL_OUTPUT_INVALID')}`);
-  assert(Object.values(KTAiClient.CATEGORY_JA || {}).length === 8 && KTAiClient.CATEGORY_JA.declined === 'AI が生成しなかった' && KTAiClient.CATEGORY_JA.license === '契約・利用範囲', '種類の表示名（AI が生成しなかった・契約・利用範囲 …）');
+  //   2026-10-15（ページ期限切れへの対応）: 種類「ページの有効期限」（PAGE_EXPIRED。接続・認証や契約にまとめない）を足したので 9 種類
+  assert(Object.values(KTAiClient.CATEGORY_JA || {}).length === 9 && KTAiClient.CATEGORY_JA.declined === 'AI が生成しなかった' && KTAiClient.CATEGORY_JA.license === '契約・利用範囲' && KTAiClient.CATEGORY_JA.page === 'ページの有効期限', '種類の表示名（AI が生成しなかった・契約・利用範囲・ページの有効期限 …）');
 }
 {
   // 会話: 生成済みのコードがある状態で作り直しが拒否されても、前のコード・計画の状態は変わらない。拒否は再試行できる
