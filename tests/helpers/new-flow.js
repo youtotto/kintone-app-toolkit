@@ -372,15 +372,15 @@ function createNewFlowKit(T) {
   };
   /** 画面の client.plan の偽物（契約の形を validatePlan に通す） */
   const planImplOf = (raw) => ({ ctx, requestId }) => { const vv = KTAiClient.validatePlan(raw(ctx.goal), ctx); if (!vv.ok) throw new Error(JSON.stringify(vv.errors)); return { ...vv.normalized, requestId, clientWarnings: vv.warnings }; };
-  /** 画面の client.generate の偽物（生成工程の応答の形を validateGenerated に通す）。field = 生成したコードが編集不可にするフィールドのコード */
-  const screenGenerate = ({ field = 'approval_memo', targetFile = 'memoLock.js' } = {}) => {
+  /** 画面の client.generate の偽物（生成工程の応答の形を validateGenerated に通す）。field = 生成したコードが編集不可にするフィールドのコード。coverage = 生成の AI の申告（省略すると C1 の MET だけ） */
+  const screenGenerate = ({ field = 'approval_memo', targetFile = 'memoLock.js', coverage = null } = {}) => {
     const calls = [];
     const impl = async ({ ctx, requestId }) => {
       calls.push(clone(ctx));
       const code = lockCode(field);
       const req0 = (ctx.verification && ctx.verification.requiredEffects) || [];
       const candidateHash = KTScan.candidateHashOf({ strategy: 'NEW_JS_FILE', targetFile, code, customizationId: 'C1' });
-      const resp = { ok: true, contractVersion: '2.1', meta: { requestId, gateway: { product: 'toolkit', feature: 'customization-generator', promptVersion: '1', contextVersion: 'customization-1' }, normalization: { warnings: [] }, ai: { model: 'm' } }, generated: { strategy: 'NEW_JS_FILE', targetFile, summary: '承認待ちでは編集できないようにします。', code, patch: null, events: ['app.record.edit.show'], fields: [{ code: field, access: 'CONTROL' }], apis: [], assumptions: [], warnings: [], coverage: [{ requirementId: 'C1', status: 'MET', note: '' }] }, verification: fakeVerification({ code, has: { [field]: ['lock'] } }, req0, { candidateHash }) };
+      const resp = { ok: true, contractVersion: '2.1', meta: { requestId, gateway: { product: 'toolkit', feature: 'customization-generator', promptVersion: '1', contextVersion: 'customization-1' }, normalization: { warnings: [] }, ai: { model: 'm' } }, generated: { strategy: 'NEW_JS_FILE', targetFile, summary: '承認待ちでは編集できないようにします。', code, patch: null, events: ['app.record.edit.show'], fields: [{ code: field, access: 'CONTROL' }], apis: [], assumptions: [], warnings: [], coverage: coverage ? clone(coverage) : [{ requirementId: 'C1', status: 'MET', note: '' }] }, verification: fakeVerification({ code, has: { [field]: ['lock'] } }, req0, { candidateHash }) };
       const vv = KTAiClient.validateGenerated(resp, ctx);
       if (!vv.ok) throw new Error(JSON.stringify(vv.errors));
       return { ...vv.normalized, requestId };
@@ -388,8 +388,8 @@ function createNewFlowKit(T) {
     return { impl, calls };
   };
   /** 画面: 計画の種類 kind で台本の 4 発言 → 最終案まで（作業の基準はモックの今の状態） */
-  const mountFinal = async ({ kind = 'mixed', field = null, health = HEALTH_V, liveBase = true } = {}) => {
-    const gen = screenGenerate({ field: field || (kind === 'js' ? 'case_name' : 'approval_memo'), targetFile: kind === 'js' ? 'caseLock.js' : 'memoLock.js' });
+  const mountFinal = async ({ kind = 'mixed', field = null, health = HEALTH_V, liveBase = true, coverage = null } = {}) => {
+    const gen = screenGenerate({ field: field || (kind === 'js' ? 'case_name' : 'approval_memo'), targetFile: kind === 'js' ? 'caseLock.js' : 'memoLock.js', coverage });
     const m = mount({ health, planImpl: planImplOf(screenPlan(kind)), generateImpl: gen.impl, liveBase });
     await ticks();
     const v = await adoptOnScreen(m);

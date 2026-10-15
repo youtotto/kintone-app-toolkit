@@ -224,7 +224,9 @@ const PRE_ITEMS = { target: '動作テスト環境（このアプリ）。運用
 const finalWithPre = (x, status, { reasons = [], items = PRE_ITEMS } = {}) => { const v = x.c.activePlan(), fm = x.finals().slice(-1)[0]; return KTAiChatUi.messageHtml(fm, { plans: new Map(x.c.planHistory().map(z => [`${z.planId}:${z.version}`, z])), activePlan: v, answerState: x.c.answerContext(), ledger: x.c.ledger(), answers: new Map(), finalPre: { planId: v.planId, version: v.version, status, reasons, items } }); };
 const applyBtn = (h) => { const b = /<button[^>]*data-act="final-approve"([^>]*)>([^<]*)<\/button><span[^>]*>([^<]*)<\/span>/.exec(h); return b ? { disabled: /\sdisabled/.test(b[1]), note: b[3] } : null; };
 const statusOf = (h) => { const m = /<div class="kt-ai-final-status"[^>]*>([^<]*)<\/div>/.exec(h); return m ? m[1] : null; };
-const APPLY_NOTE = '承認すると動作テスト環境へ反映します（設定の手順 → JavaScript の順。運用環境は変更しません）。反映後に、動作テスト環境の画面で動作を確認します。';
+//   2026-10-15（最終案の重複と担当未定の食い違い §1・§4）: 添え書きは反映するものに合わせる（JavaScript だけ・設定だけの最終案に「設定の手順 → JavaScript の順」と出さない）
+const APPLY_NOTE = '承認すると動作テスト環境へ JavaScript を反映します（運用環境は変更しません）。反映後に、動作テスト環境の画面で動作を確認します。';
+const APPLY_NOTE_SETTINGS = '承認すると動作テスト環境へ設定の手順を反映します（運用環境は変更しません）。反映後に、動作テスト環境の画面で動作を確認します。';
 /** 左の最終案のカードに出さない節（右の「変更内容」へ移したもの・消したもの） */
 const LEFT_MOVED = /最終的にどう動くか|反映先と主な影響|検証の区分|仮案から変わった点|変わった点|機械検査:|必須の動作（|模擬テスト（代表条件|代表条件の一覧|まだ確かめていないこと|まだ何も反映していません|token|対応範囲外|担当が計画にありません|実現できない点/;
 const Q_BLOCK = { id: 'Q1', question: '承認待ちの間、申請者本人も編集できなくしますか', topic: 'scope', priority: 'blocking', options: ['全員', '申請者以外'] };
@@ -251,7 +253,8 @@ await section(async () => {
   assert(iHead >= 0 && iHead < iStatus && iStatus < iDo && iDo < iCon && iCon < iSup && iSup < iBtn, `H4-4: 見出し → 反映できます → この案で実現すること → この案の制約 → 仮案からの補足 → ボタン の順: ${JSON.stringify([iHead, iStatus, iDo, iCon, iSup, iBtn])}`);
   assert(/申請時に課長と部長の承認者をユーザー選択で指定する/.test(vis) && /100万円以上の申請は部長承認を必要とする/.test(vis) && !/承認待ちでは金額を編集不可にします/.test(vis), 'H4-5: 「この案で実現すること」は採用した仮案の動作（計画・生成の要約の文は右）');
   assert((vis.match(/行の追加・削除は止まりません/g) || []).length === 1 && /PC: 明細（テーブル）の行の追加・削除は止まりません（セルの編集不可だけでは止められないため。行のボタンを隠す API は Toolkit がまだ扱っていません）/.test(vis) && !/入力欄だけ編集できなくなります/.test(vis), `H4-6: 「この案の制約」に行の追加・削除（PC・モバイルで同じ内容は 1 行。制約の文は残る範囲だけ。2026-10-15 §4(b)）: ${(vis.match(/この案の制約[\s\S]{0,200}/) || [''])[0]}`);
-  assert(/計画で決めた点: 編集不可の間は入力欄を灰色にする/.test(vis) && /計画を作りました。承認待ちの間だけ金額を編集不可にします。/.test(vis), 'H4-7: 「仮案からの補足」に計画の返答と計画で決めた点');
+  //   2026-10-15（最終案の重複と担当未定の食い違い §1）: 計画の返答（計画の要約）は再掲しない。採用の後に具体的になった判断（計画で決めた点）だけ
+  assert(/計画で決めた点: 編集不可の間は入力欄を灰色にする/.test(vis) && !/計画を作りました。承認待ちの間だけ金額を編集不可にします。/.test(stripC(hReady)) && !/kt-ai-final-reply/.test(hReady), 'H4-7: 「仮案からの補足」は計画で決めた点だけ（計画の返答は再掲しない）');
   assert(/<details class="kt-ai-tech kt-ai-final-pre"[^>]*><summary>反映の前の確認（書き込みなし）<\/summary>/.test(hReady) && !/プロセス管理の変更|確認項目の例/.test(vis) && /プロセス管理の変更/.test(stripC(hReady)) && /確認項目の例/.test(stripC(hReady)), 'H4-8: 「反映の前の確認（書き込みなし）」は折りたたみ（中身は開くと見える）');
   assert(!LEFT_MOVED.test(vis) && !/残る判断|確認できないこと|反映を止めている理由/.test(vis), `H4-9: 左に検証の明細・反映先と主な影響・変わった点・「まだ何も反映していません」・残る判断（無い）は出ない: ${(vis.match(LEFT_MOVED) || [''])[0]}`);
   const right = rightOf(x), rt = stripC(right);
@@ -287,7 +290,12 @@ await section(async () => {
   //   レビュー 1（2026-10-14）: fin.existingChanges は構造化した材料（kind・title・name・from・to・filterCond）。Toolkit Review の diff.human（✎・Before・After）は左に連結しない。
   //   プロセス管理以外の既存の設定の変更は「今ある設定を変えます: {手順}（変更前後は右の「変更内容」）」の 1 文
   const ex = fin.existingChanges[0];
-  assert(fin.existingChanges.length === 1 && ex && ex.kind === 'UPDATE_VIEW' && ex.title === '一覧「承認待ち一覧」の絞り込みを変更' && ex.name === '承認待ち一覧' && /今ある設定を変えます: 一覧「承認待ち一覧」の絞り込みを変更（変更前後は右の「変更内容」）/.test(vis) && !/絞り込み: なし →|✎|Before|After/.test(vis) && vis.indexOf('この案で実現すること') < vis.indexOf('今ある設定を変えます') && vis.indexOf('今ある設定を変えます') < vis.indexOf('動作テスト環境へ反映'), `H4-15: 既存の設定の変更は「この案で実現すること」に 1 文（構造化した材料から。Review の変更前後の行は連結しない）: ${JSON.stringify(fin.existingChanges)}`);
+  //   2026-10-15（最終案の重複と担当未定の食い違い §1・§2）: 採用した仮案の動作があるときは、既存の設定の変更は左に重ねない（変更前後は右の「何が変わるか」）。
+  //   採用した動作が無い最終案（古い最終案・計画だけの流れ）では今までどおり「この案で実現すること」に 1 文
+  const v0 = x.c.activePlan(), v0b = { ...v0, final: { ...fin, adoptedBehaviors: [] } };
+  const visNoAdopt = stripC(outsideDetails(KTAiChatUi.finalCardHtml({ type: 'FINAL', data: { planId: v0.planId, version: v0.version } }, { plans: new Map([[`${v0.planId}:${v0.version}`, v0b]]), activePlan: v0b, answerState: x.c.answerContext(), answers: new Map() })));
+  assert(fin.existingChanges.length === 1 && ex && ex.kind === 'UPDATE_VIEW' && ex.title === '一覧「承認待ち一覧」の絞り込みを変更' && ex.name === '承認待ち一覧' && fin.adoptedBehaviors.length > 0 && !/今ある設定を変えます/.test(vis) && /一覧「承認待ち一覧」の絞り込みを変更/.test(stripC(rightOf(x)))
+    && /今ある設定を変えます: 一覧「承認待ち一覧」の絞り込みを変更（変更前後は右の「変更内容」）/.test(visNoAdopt) && !/絞り込み: なし →|✎|Before|After/.test(visNoAdopt) && visNoAdopt.indexOf('この案で実現すること') < visNoAdopt.indexOf('今ある設定を変えます') && visNoAdopt.indexOf('今ある設定を変えます') < visNoAdopt.indexOf('動作テスト環境へ反映'), `H4-15: 既存の設定の変更は、採用した動作があれば左に重ねず右だけ。採用した動作が無ければ「この案で実現すること」に 1 文（構造化した材料から。Review の変更前後の行は連結しない）: ${JSON.stringify(fin.existingChanges)}`);
   keep('H4-upd', finalHtml(x), rightOf(x));
 });
 await section(async () => {
@@ -307,9 +315,15 @@ await section(async () => {
   const vis = stripC(outsideDetails(h));
   const ex = fin.existingChanges[0];
   assert(fin.existingChanges.length === 1 && ex && ex.kind === 'UPDATE_PROCESS' && ex.name === '申請する' && ex.from === '未処理' && ex.to === '承認待ち' && ex.filterCond === 'amount < 1000000' && ex.targetKind === 'PROCESS_ACTION', `H4-16: 既存の操作の変更は構造化した材料（name・from・to・filterCond）: ${JSON.stringify(ex)}`);
-  assert(/今ある操作「申請する」は、「金額」が1000000未満のときだけ使えるようになります/.test(vis) && !/✎|Before|After|amount|\[/.test(vis) && vis.indexOf('この案で実現すること') < vis.indexOf('今ある操作「申請する」'), `H4-16b: 左は「今ある操作「申請する」は、…のときだけ使えるようになります」（✎・Before・After・amount は出ない）: ${(vis.match(/今ある操作[^\n]{0,80}/) || [''])[0]}`);
-  //   条件を文にできない形（kintone の関数など）→ 「既存の操作「申請する」の使える条件が変わります（右の「変更内容」）」
-  const v2 = { ...v, final: { ...fin, existingChanges: [{ ...ex, filterCond: 'owner in (LOGINUSER()) and memo like "急ぎ"' }] } };
+  //   2026-10-15（最終案の重複と担当未定の食い違い §2）: 採用した仮案の動作があるので、左には「申請する」の行を重ねない（右の「何が変わるか」の変更前後に文で出す。元の式は詳細）。
+  //   採用した動作が無い最終案では左に 1 文（数値のフィールドの種類と単位があれば「100万円未満」）
+  const rt16 = KTAiChatUi.changeSummaryHtml(v, { labels: K.LABELS_C, numbers: { amount: { type: 'NUMBER', unit: '円', unitPosition: 'AFTER' } } });
+  const vNo = { ...v, final: { ...fin, adoptedBehaviors: [] } };
+  const visNo = stripC(outsideDetails(KTAiChatUi.finalCardHtml({ type: 'FINAL', data: { planId: v.planId, version: v.version } }, { plans: new Map([[`${v.planId}:${v.version}`, vNo]]), activePlan: vNo, answerState: x.c.answerContext(), answers: new Map(), labels: K.LABELS_C, numbers: { amount: { type: 'NUMBER', unit: '円', unitPosition: 'AFTER' } } })));
+  assert(!/今ある操作「申請する」/.test(vis) && !/✎|Before|After|amount|\[/.test(vis) && /After: 未処理 → 承認待ち\s*（条件: 「金額」が100万円未満）/.test(stripC(outsideDetails(rt16))) && /<details class="kt-ai-tech kt-ai-sum-cond"[^>]*><summary>条件式（実行される式）<\/summary>変更後: <code>amount &lt; 1000000<\/code><\/details>/.test(rt16)
+    && /今ある操作「申請する」は、「金額」が100万円未満のときだけ使えるようになります/.test(visNo) && !/✎|Before|After|amount|\[/.test(visNo) && visNo.indexOf('この案で実現すること') < visNo.indexOf('今ある操作「申請する」'), `H4-16b: 採用した動作があれば「申請する」は右の変更前後だけ（条件は文・元の式は詳細）。無ければ左に「今ある操作「申請する」は、…のときだけ使えるようになります」: ${(visNo.match(/今ある操作[^\n]{0,80}/) || [''])[0]}`);
+  //   条件を文にできない形（kintone の関数など）→ 「既存の操作「申請する」の使える条件が変わります（右の「変更内容」）」（採用した動作が無い最終案の左）
+  const v2 = { ...v, final: { ...fin, adoptedBehaviors: [], existingChanges: [{ ...ex, filterCond: 'owner in (LOGINUSER()) and memo like "急ぎ"' }] } };
   const text2 = KTAiChatUi.finalCardHtml({ type: 'FINAL', data: { planId: v.planId, version: v.version } }, { plans: new Map([[`${v.planId}:${v.version}`, v2]]), activePlan: v2, answerState: x.c.answerContext(), answers: new Map(), labels: K.LABELS_C });
   assert(/既存の操作「申請する」の使える条件が変わります（右の「変更内容」）/.test(stripC(text2)) && !/LOGINUSER|owner|memo/.test(stripC(outsideDetails(text2))), `H4-16c: 条件を文にできないときは「使える条件が変わります（右の「変更内容」）」: ${(stripC(text2).match(/既存の操作[^\n]{0,80}|今ある操作[^\n]{0,80}/) || [''])[0]}`);
   keep('H4-proc', h, rightOf(x));
@@ -489,7 +503,7 @@ await section(async () => {
   const fc = chat.slice(chat.indexOf('class="kt-ai-card kt-ai-final-card"')), fcText = stripC(outsideDetails(fc));
   assert(v && v.final && v.final.customizations.length === 0 && v.final.approvable === true && pre.ready === true, `前提: 設定の変更だけの計画（一覧の追加）で最終案ができ、承認の欄の準備が整った: ${JSON.stringify({ ready: pre.ready, st: pre.pre && pre.pre.status })}`);
   assert(/前の仮案 — このあと直して採用しました/.test(chat) && /仮案 — 採用済み/.test(chat) && !/最終案を作りました/.test(chat) && /課長と部長を申請ごとに選んで承認する流れにできます/.test(chat) && !/実現する動作|こちらの提案で進める点|任意の提案|対応できない範囲|data-act="draft-answer"/.test(chat), 'H7-1: 仮案のカード（採用済みは 1 行に畳む）は返答と選択だけ（同じ構成）');
-  assert(/最終案ができました。/.test(fcText) && /この内容で反映できます。/.test(fcText) && pre.button && !pre.button.disabled && pre.button.note === APPLY_NOTE && /この案で実現すること/.test(fcText), `H7-2: 最終案は「この内容で反映できます。」と反映先の文（設定の手順 → JavaScript の順・運用環境は変更しない・反映後の確認先）: ${fcText.replace(/\s+/g, ' ').slice(0, 300)}`);
+  assert(/最終案ができました。/.test(fcText) && /この内容で反映できます。/.test(fcText) && pre.button && !pre.button.disabled && pre.button.note === APPLY_NOTE_SETTINGS && /この案で実現すること/.test(fcText), `H7-2: 最終案は「この内容で反映できます。」と反映先の文（設定だけなので「設定の手順を反映」・運用環境は変更しない・反映後の確認先）: ${fcText.replace(/\s+/g, ' ').slice(0, 300)}`);
   assert(!/JavaScript の状態|この案の制約|JavaScript を作/.test(fc + sum) && !/仮案からの補足/.test(fc) && !LEFT_MOVED.test(fcText), `H7-3: JavaScript が無い計画に JavaScript の状態・制約の節は無く、補足も無ければ出さない: ${(fcText.match(LEFT_MOVED) || [''])[0]}`);
   assert(/JavaScript は無く、設定の変更だけです/.test(sum) && /反映する内容/.test(sum) && /設定の手順 1 件（Toolkit から自動で反映できるのは 1 件）/.test(stripC(sum)) && /何が変わるか（Toolkit が確かめた変更前後）/.test(sum), `H7-4: 右の「変更内容」に確かめたこと（JavaScript は無い）・反映する内容・何が変わるか: ${stripC(sum).replace(/\s+/g, ' ').slice(0, 240)}`);
   const left = stripC(outsideDetails(chat));
@@ -550,7 +564,8 @@ await section(async () => {
   assert(fin && e && e.status === 'verified' && genT.calls.length === 1 && x.calls.plan.length === 1 && na.some(r => r.code === 'SUBTABLE_ROWS' && JSON.stringify(r.tables) === '["items"]') && na.some(r => r.code === 'AI_PARTIAL' && r.requirementId === 'R1' && r.limit === 'SUBTABLE_ROWS') && reqsT.some(r => r.id === 'R1' && r.decision === 'decided' && r.disposition === 'unsupported') && reqsT.some(r => r.id === 'R2' && r.decision === 'decided' && r.disposition === 'unsupported'), `前提: セルは検証済み・構造の SUBTABLE_ROWS（テーブル items）と AI の PARTIAL（R1・limitCode）・計画は R1 / R2 を対応できないとした: ${JSON.stringify({ st: e && e.status, na: na.map(r => [r.code, r.requirementId, r.tables, r.limit]), reqs: reqsT.map(r => [r.id, r.decision, r.disposition]) })}`);
   const h = finalHtml(x), vis = stripC(outsideDetails(h)), right = rightOf(x), rt = stripC(right);
   const doSec =(vis.match(/この案で実現すること[\s\S]*?(?=この案の制約|仮案からの補足|動作テスト環境へ反映)/) || [''])[0];
-  assert(fin.adoptedBehaviors.includes(SENT) && fin.behaviors.includes(SENT) && doSec.includes(SENT) && (vis.match(/のセルを編集できなくなります/g) || []).length === 1 && /最終的にどう動くか[\s\S]*承認済みでは「明細」の品名・数量・単価のセルを編集できなくなります（PC）/.test(rt), `H9-1: 実現した部分（満たした必須の動作）は「この案で実現すること」（左）と「最終的にどう動くか」（右）に 1 文: ${doSec.replace(/\s+/g, ' ').slice(0, 240)}`);
+  //   2026-10-15（最終案の重複と担当未定の食い違い §1）: 実現した部分の 1 文（列の名前の列挙を含む）は右の「最終的にどう動くか」だけ。左は採用した仮案の動作で言う（重ねない）
+  assert(!fin.adoptedBehaviors.includes(SENT) && fin.behaviors.includes(SENT) && !doSec.includes(SENT) && /承認済みでは明細を編集できないようにする/.test(doSec) && (vis.match(/のセルを編集できなくなります/g) || []).length === 0 && /最終的にどう動くか[\s\S]*承認済みでは「明細」の品名・数量・単価のセルを編集できなくなります（PC）/.test(rt), `H9-1: 実現した部分（満たした必須の動作）は右の「最終的にどう動くか」に 1 文（左は採用した動作だけ）: ${doSec.replace(/\s+/g, ' ').slice(0, 240)}`);
   const conSec =(vis.match(/この案の制約[\s\S]*?(?=仮案からの補足|動作テスト環境へ反映)/) || [''])[0];
   assert(fin.constraints.some(c => c.kind === 'coverage' && c.text === ROWS && c.requirementId === 'R1') && fin.constraints.filter(c => c.kind === 'coverage').length === 1 && conSec.includes(ROWS) && !/PC・モバイルの両方|承認済み。/.test(vis) && !vis.includes(REQ_TEXT_FULL) && !/行の追加・削除は止められません/.test(vis), `H9-2: 制約はテーブルの名前で「残る範囲」だけ（AI の PARTIAL の行は構造の行にまとめ、要件の全文は付けない）: ${conSec.replace(/\s+/g, ' ').slice(0, 300)}`);
   assert(!fin.cannot.some(c => c.kind === 'req-unsupported' && c.requirementId === 'R1') && !vis.includes(`計画では対応できないとされた要件: ${Q_T[0]}`) && !rt.includes(`計画では対応できないとされた要件: ${Q_T[0]}`), `H9-3: 実現のある要件（R1）は「計画では対応できないとされた要件」に出さない: ${(vis.match(/計画では対応できないとされた要件[^\n]*/g) || []).join(' / ')}`);

@@ -712,10 +712,11 @@ await section(async () => {
   { const fm = x.finals().slice(-1)[0], va = x.c.activePlan();
     const htmlReady = KTAiChatUi.messageHtml(fm, { plans: new Map(x.c.planHistory().map(z => [`${z.planId}:${z.version}`, z])), activePlan: va, answerState: x.c.answerContext(), ledger: x.c.ledger(), answers: new Map(), finalPre: { planId: va.planId, version: va.version, status: 'ready', reasons: [], items: { target: '動作テスト環境（このアプリ）。運用環境には反映しません', settings: [], process: ['ステータス「部長承認待ち」を追加'], existing: [], duplicate: [], files: ['＋ lock.js（PC）新規追加（3 番目・末尾）'], keep: [], deferred: [], confirmations: ['確認項目の例'], warnings: [], manual: [] } } });
     const tReady = stripC(htmlReady);
-    assert(!/disabled>動作テスト環境へ反映/.test(htmlReady) && /反映の前の確認（書き込みなし）/.test(tReady) && /プロセス管理の変更/.test(tReady) && /追加・置き換える JavaScript/.test(tReady) && /確認項目（この承認で確認済みとして扱います）/.test(tReady) && /対象: 動作テスト環境/.test(tReady) && /設定の手順 → JavaScript の順/.test(tReady) && /この内容で反映できます。/.test(tReady), `R09-9b: 承認の欄の準備が終わると、重要事項（プロセスの変更・追加するファイル・確認項目・対象の環境）をまとめて出し、［動作テスト環境へ反映］を押せる: ${tReady.slice(-600)}`); }
-  // 反映先の JavaScript のファイル名（例「lock.js」）は利用者に見せる名前なので、内部の番号の照合から外す
-  const visibleC = outsideDetails(html).replace(/data-[a-z]+="[^"]*"/g, '').replace(/[\w.-]+\.js\b/g, '（ファイル名）');
-  assert(/lock\.js/.test(html) && !INTERNAL.test(visibleC) && !/\bC1\b|\bP1\b|candidateHash|sim-control|required-effects|block-save|\bamount\b/.test(visibleC), `R09-10: カードに内部の番号・処理名・フィールドコードを出さない（反映先のファイル名は出す）: ${(visibleC.match(INTERNAL) || visibleC.match(/\bamount\b|required-effects/) || [])[0]}`);
+    assert(!/disabled>動作テスト環境へ反映/.test(htmlReady) && /反映の前の確認（書き込みなし）/.test(tReady) && /プロセス管理の変更/.test(tReady) && /追加・置き換える JavaScript/.test(tReady) && /確認項目（この承認で確認済みとして扱います）/.test(tReady) && /対象: 動作テスト環境/.test(tReady) && /承認すると動作テスト環境へ JavaScript を反映します（運用環境は変更しません）/.test(tReady) && !/設定の手順 → JavaScript の順/.test(tReady) && /この内容で反映できます。/.test(tReady), `R09-9b（2026-10-15: JavaScript だけの最終案の添え書きは「JavaScript を反映」）: 承認の欄の準備が終わると、重要事項（プロセスの変更・追加するファイル・確認項目・対象の環境）をまとめて出し、［動作テスト環境へ反映］を押せる: ${tReady.slice(-600)}`); }
+  // 2026-10-15（最終案の重複と担当未定の食い違い §2）: ［コードを見る（…）］は JavaScript の役割の名前（計画の画面と効果から。例「PCの編集制御」）。
+  //   ファイル名は通常表示に出さない（反映の前の確認の一覧に出る）
+  const visibleC = outsideDetails(html).replace(/data-[a-z]+="[^"]*"/g, '');
+  assert(/コードを見る（PCの編集制御）/.test(html) && !/[\w.-]+\.js\b/.test(visibleC) && !INTERNAL.test(visibleC) && !/\bC1\b|\bP1\b|candidateHash|sim-control|required-effects|block-save|\bamount\b/.test(visibleC), `R09-10: カードに内部の番号・処理名・フィールドコード・ファイル名を出さない（コードのボタンは役割の名前）: ${(visibleC.match(INTERNAL) || visibleC.match(/\bamount\b|required-effects|[\w.-]+\.js\b/) || [])[0]}`);
   const draftCard = KTAiChatUi.messageHtml(x.c.messages().filter(m => m.type === 'DRAFT').slice(-1)[0], { draft: d, draftDecisions: x.c.draftDecisions() });
   assert(/仮案 — 採用済み/.test(draftCard) && /kt-ai-old-card/.test(draftCard), 'R09-11: 仮案のカードは 1 行に畳む（「仮案 — 採用済み」）');
 });
@@ -1013,11 +1014,23 @@ await section(async () => {
 await section(async () => {
   const gen = makeGenerate({ sequence: ['good'] });
   const impl0 = gen.impl;
-  gen.impl = async (args) => { const r = await impl0(args); r.generated = { ...r.generated, coverage: [{ requirementId: 'C1', status: 'MET', note: '', text: CUST_C1.requirement }, { requirementId: 'R4', status: 'OUT_OF_SCOPE', note: '期限はプロセス管理と通知の設定で扱う', text: '7 営業日以内に承認する' }] }; r.review = KTCodeReview.review({ generated: r.generated, customization: CUST_C1, plan: args.version.plan, data: clone(DATA_C), scan: null, existingSource: null, requirements: [{ id: 'R4', planRefs: ['A3'] }] }); return r; };
-  const x = makeConvC({ generate: gen });
-  await adoptC(x);
-  const h = stripC(finalHtml(x)), hr = stripC(rightOf(x));
-  assert((h.match(/7 営業日以内に承認する/g) || []).length === 0 && (hr.match(/7 営業日以内に承認する/g) || []).length === 1 && /「7 営業日以内に承認する」は、この計画のどの手順・JavaScript が担当するか決まっていません/.test(hr) && !/計画の他の手順・JavaScript で扱います|担当が計画にありません/.test(h + hr), `指示 B5（2026-10-14: 右の「変更内容」の「確認できないこと」に 1 回）: 担当の無い要件は 1 行で「担当するか決まっていません」: ${JSON.stringify(x.c.activePlan().final.outOfScope)}`);
+  //   2026-10-15（最終案の重複と担当未定の食い違い §3）: R4 の planRefs は採用した仮案の項目 A3 だけ（準備の判定では担当あり）。生成の AI が担当外と申告し、計画のどの手順で
+  //   実現するかは書かれていない → 「担当が決まっていません」とは言わず、左のカード・右の変更内容に同じ文を 1 回ずつ（反映は止めない）。
+  //   検査に担当の集まりを渡さない（この修正の前の検査の結果を流用した）ときと、渡したときで同じ表示
+  for (const withOwners of [false, true]) {
+    const gen = makeGenerate({ sequence: ['good'] });
+    const impl0 = gen.impl;
+    gen.impl = async (args) => { const r = await impl0(args); r.generated = { ...r.generated, coverage: [{ requirementId: 'C1', status: 'MET', note: '', text: CUST_C1.requirement }, { requirementId: 'R4', status: 'OUT_OF_SCOPE', note: '期限はプロセス管理と通知の設定で扱う', text: '7 営業日以内に承認する' }] }; r.review = KTCodeReview.review({ generated: r.generated, customization: CUST_C1, plan: args.version.plan, data: clone(DATA_C), scan: null, existingSource: null, requirements: [{ id: 'R4', planRefs: ['A3'] }], ...(withOwners ? { planOwners: args.planOwners } : {}) }); return r; };
+    const x = makeConvC({ generate: gen });
+    await adoptC(x);
+    const fin = x.c.activePlan().final;
+    const h = stripC(finalHtml(x)), hr = stripC(rightOf(x));
+    const line = '「7 営業日以内に承認する」は、作った JavaScript では担当外とされました。計画のどの手順で実現するかは書かれていません';
+    const rv = x.c.activePlan().generated.C1.review;
+    assert((h.match(/7 営業日以内に承認する/g) || []).length === 1 && (hr.match(/7 営業日以内に承認する/g) || []).length === 1 && h.includes(line) && hr.includes(line) && !/担当するか決まっていません|計画の他の手順・JavaScript で扱います|担当が計画にありません/.test(h + hr) && fin.approvable === true && fin.blockers.some(b => b.kind === 'plan-scope' && b.text === line)
+      && (!withOwners || (rv.coverage.unowned.length === 0 && rv.registration.confirmations.some(c => c.code === 'coverage-owner' && c.screenText === line))),
+      `指示 B5（2026-10-15: 左右と反映の前の確認で同じ 1 文。担当未定と言わない・反映は止めない）${withOwners ? '・検査に担当の集まりを渡す' : '・前の検査の結果'}: ${JSON.stringify({ blockers: fin.blockers, approvable: fin.approvable })}`);
+  }
 });
 // 正しさ C4 / C3（会話）: 計画の後に基準が変わったら承認せず STALE に（作り直しを案内）。承認の取り消し
 await section(async () => {
@@ -3220,9 +3233,13 @@ await section(async () => {
     { stepId: 'P1', diff: { before: null, after: { name: '部長承認待ち', assignees: [{ type: 'USER', code: 'user.approver' }] }, human: ['＋ ステータス「部長承認待ち」（作業者: USER:user.approver・1 人）'] } },
     { stepId: 'P2', diff: { before: null, after: { name: '部長承認へ', from: ['申請中'], to: '部長承認待ち', filterCond: 'amount >= "1000000"' }, human: ['＋ アクション「部長承認へ」: 申請中 → 部長承認待ち [amount >= "1000000"]'] } },
   ] };
-  const html = KTAiChatUi.changeSummaryHtml({ goal: 'g', plan, review }, { labels: { amount: '金額' } });
-  const txt = stripC(html).replace(/&gt;/g, '>').replace(/&lt;/g, '<');
-  assert(txt.includes('作業者: ユーザー（user.approver）') && txt.includes('（条件: 「金額」>= "1000000"）') && txt.includes('「金額」を条件に使う既存の通知') && txt.includes('金額が大きいときだけ') && !/USER:|\bamount\b/.test(txt), `I6-1: 変更内容の作業者・条件式・影響の行・要約のフィールドのコードを画面の言葉に: ${txt.replace(/\s+/g, ' ').slice(0, 500)}`);
+  //   2026-10-15（最終案の重複と担当未定の食い違い §2）: 条件式は文に（数値のフィールドの種類と単位があれば「100万円以上」）。実行される元の式は詳細（条件式（実行される式））にだけ残す
+  const html = KTAiChatUi.changeSummaryHtml({ goal: 'g', plan, review }, { labels: { amount: '金額' }, numbers: { amount: { type: 'NUMBER', unit: '円', unitPosition: 'AFTER' } } });
+  const outside = String(html).replace(/<details[\s\S]*?<\/details>/g, '');
+  const txt = stripC(outside).replace(/&gt;/g, '>').replace(/&lt;/g, '<');
+  const raw = stripC((String(html).match(/<details class="kt-ai-tech kt-ai-sum-cond"[\s\S]*?<\/details>/) || [''])[0]).replace(/&gt;/g, '>').replace(/&lt;/g, '<').replace(/&quot;/g, '"');
+  const plainHtml = KTAiChatUi.changeSummaryHtml({ goal: 'g', plan, review }, { labels: { amount: '金額' } });
+  assert(txt.includes('作業者: ユーザー（user.approver）') && txt.includes('（条件: 「金額」が100万円以上）') && txt.includes('「金額」を条件に使う既存の通知') && txt.includes('金額が大きいときだけ') && !/USER:|\bamount\b/.test(txt) && raw.includes('変更後: amount >= "1000000"') && stripC(plainHtml).includes('（条件: 「金額」が「1000000」以上）'), `I6-1: 変更内容の作業者・条件式・影響の行・要約のフィールドのコードを画面の言葉に（元の式は詳細だけ。数値の種類が分からなければ値はそのまま）: ${txt.replace(/\s+/g, ' ').slice(0, 500)} ／ ${raw}`);
   assert(KTContext.entityJaText({ type: 'GROUP', code: 'sales' }) === 'グループ（sales）' && KTContext.entityJaText({ type: 'FIELD_ENTITY', code: 'owner' }, { owner: '担当者' }) === 'フィールド「担当者」' && KTContext.entityJaText({ type: 'CREATOR' }) === '作成者', 'I6-2: 作業者・通知先の表記（KTContext.entityJaText）');
   const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'kintoneAppToolkit.user.js'), 'utf8');
   assert(!src.includes('（kintone の JavaScript の disabled はセルにだけ効き') && !src.includes('（disabled はセルの編集だけに効き') && !/処理（handler）の直下/.test(src) && !/step を 1 回の更新にまとめます/.test(src) && !/snapshot として保持します/.test(src), 'I6-3: 固定の文の英語の語（disabled・handler・step・snapshot）を言い換えた');
