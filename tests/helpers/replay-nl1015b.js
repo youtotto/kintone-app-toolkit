@@ -34,8 +34,11 @@ function createReplay(T, K) {
     if (u === F.COMMENT) { const p = F.PROPOSE[1]; return { reply: p.reply, intent: 'update', proposal: prop(p), turn: { ops: clone(p.ops).map(o => ({ ...o, quote: '' })), answers: clone(p.answers).map(a => ({ ...a, quote: '承認者は今の作業者の指定のままでよいです。' })), requirementOps: ops(p) } }; }
     return null;
   };
-  /** 計画の偽物（planMutate = 計画を変える関数。PC とモバイルで違う計画の回帰用） */
-  const planImplOf = (planMutate = null) => () => ({ plan: planMutate ? planMutate(clone(F.PLAN)) : clone(F.PLAN), ctx: clone(F.PLAN_CTX), review: clone(F.PLAN_REVIEW), gatewayPlan: F.GATEWAY_PLAN ? clone(F.GATEWAY_PLAN) : null, turn: { reply: F.PLAN_REPLY, requirementOps: [], utteranceCoverage: [] } });
+  /**
+   * 計画の偽物（planMutate = 計画を変える関数。PC とモバイルで違う計画の回帰用 / reviewMutate = 計画の確認（変更前後）を変える関数 /
+   * planOps = (n, args) => 要件の操作（n 回目の計画の呼び出し。0 = 最初・1 = 自動の見直し。実機は 0 件。計画の AI の対応づけの付け替えの回帰用）
+   */
+  const planImplOf = (planMutate = null, reviewMutate = null, planOps = null) => { let n = 0; return (args) => ({ plan: planMutate ? planMutate(clone(F.PLAN)) : clone(F.PLAN), ctx: clone(F.PLAN_CTX), review: reviewMutate ? reviewMutate(clone(F.PLAN_REVIEW)) : clone(F.PLAN_REVIEW), gatewayPlan: F.GATEWAY_PLAN ? clone(F.GATEWAY_PLAN) : null, turn: { reply: F.PLAN_REPLY, requirementOps: planOps ? planOps(n++, args) || [] : (n++, []), utteranceCoverage: [] } }); };
   const custOf = (v, cid) => (v.plan.customizations || []).find(c => c && c.customizationId === cid) || null;
   const srcOf = (s) => (s.existingSource ? { name: s.existingSource.name, target: s.existingSource.target, text: s.existingSource.text } : null);
 
@@ -43,7 +46,7 @@ function createReplay(T, K) {
    * mutate(cid, generated) = 生成の応答を変える / verificationMutate(cid, verification) = 検証の結果を変える /
    * throwFor = { cid: code }（その JavaScript の最初の生成で code の失敗を投げる。2 回目からは保存した結果）/ ownersOff = 検査に担当の集まりを渡さない（この修正の前の検査）
    */
-  async function run({ mutate = null, verificationMutate = null, planMutate = null, reqMutate = null, proposalMutate = null, throwFor = null, ownersOff = false } = {}) {
+  async function run({ mutate = null, verificationMutate = null, planMutate = null, reviewMutate = null, reqMutate = null, proposalMutate = null, throwFor = null, ownersOff = false, planOps = null } = {}) {
     const holder = {};
     const calls = [];
     const thrown = new Set();
@@ -57,7 +60,8 @@ function createReplay(T, K) {
       const verification = verificationMutate ? verificationMutate(cid, clone(s.verification)) : clone(s.verification);
       return { ok: true, generated, review, ctx: { size: { approxTokens: 1000 } }, existingSource: s.existingSource ? clone(s.existingSource) : null, inputHash: s.inputHash, verification, candidateHash: s.candidateHash, requirementIds: clone(s.requirementIds), relatedOmitted: [] };
     } };
-    const x = K.makeConvC({ planImpl: planImplOf(planMutate), generate, scriptFn: scriptOf(reqMutate, proposalMutate), labels: LABELS });
+    //   計画の AI は実機と同じく要件の対応づけを返さない（requirementOps 0 件。autoMap: false）
+    const x = K.makeConvC({ planImpl: planImplOf(planMutate, reviewMutate, planOps), generate, scriptFn: scriptOf(reqMutate, proposalMutate), labels: LABELS, autoMap: false });
     holder.x = x;
     x.services.tableColumns = () => clone(COLUMNS);
     x.services.readOnlyFields = () => [...READONLY];
@@ -76,7 +80,7 @@ function createReplay(T, K) {
   /** 反映の前の確認の JavaScript の再検査（画面の jsRecheckOf と同じ引数。ownersOff = 要件の台帳と担当の集まりを渡さない＝この修正の前） */
   const recheckOf = (x, cid, { ownersOff = false } = {}) => {
     const v = x.c.activePlan(), g = v.generated[cid];
-    let rv = KTCodeReview.review({ generated: g.generated, customization: custOf(v, cid), plan: v.plan, data: clone(DATA), scan: null, existingSource: g.existingSource ? { name: g.existingSource.name, target: g.existingSource.target, text: g.existingSource.text } : null, provenance: null, existingOnly: true, ...(ownersOff ? {} : { requirements: x.c.requirementsInScope(v.planId, v.plan || null), planOwners: x.c.planOwnerIds(v) }) });
+    let rv = KTCodeReview.review({ generated: g.generated, customization: custOf(v, cid), plan: v.plan, data: clone(DATA), scan: null, existingSource: g.existingSource ? { name: g.existingSource.name, target: g.existingSource.target, text: g.existingSource.text } : null, provenance: null, existingOnly: true, ...(ownersOff ? {} : { requirements: (() => { const gp = typeof x.c.implementationGaps === 'function' ? x.c.implementationGaps(v) : {}; return x.c.requirementsInScope(v.planId, v.plan || null).map(r => (r && gp[r.id] ? { ...r, gapScreen: gp[r.id] } : r)); })(), planOwners: x.c.planOwnerIds(v) }) });
     if (g.verification && ((Array.isArray(g.requiredEffects) && g.requiredEffects.length) || g.verification.behavior)) rv = KTCodeReview.attachBehavior(rv, g.verification, { requiredEffects: g.requiredEffects || [], customization: custOf(v, cid), omitted: g.relatedOmitted || [], effectCheck: g.effectCheck != null ? g.effectCheck === true : T.ktEffectCheckCapable ? T.ktEffectCheckCapable(x.services.generatorFeatures() || []) : true });
     return rv;
   };

@@ -112,7 +112,8 @@ function fakeGateway({ health = HEALTH_S, planRaw = planRaw2, onGenerate }) {
       seen.ask += 1;
       return jsonResponse(200, K.answerFor(ctx, '答えです。'));
     }
-    if (feature === 'change-planner') { seen.plan.push({ accept }); return jsonResponse(200, { ...planRaw(ctx.goal), meta: { ...K.PLAN_META, requestId } }); }
+    //   2026-10-15（追加の指示 1）: 偽の計画の AI は要件の対応づけ（turn.requirementOps）を返す（K.rawWithPlannerMapping）
+    if (feature === 'change-planner') { seen.plan.push({ accept }); return jsonResponse(200, K.rawWithPlannerMapping({ ...planRaw(ctx.goal), meta: { ...K.PLAN_META, requestId } }, ctx)); }
     if (feature === 'customization-generator') { const rec = { accept, ctx, requestId }; seen.generate.push(rec); return onGenerate(rec); }
     return jsonResponse(500, { ok: false, error: { code: 'INTERNAL_ERROR', message: `unknown feature ${feature}` } });
   };

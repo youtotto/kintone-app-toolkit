@@ -67,7 +67,8 @@ function makeConv(steps, { askAnswer = 'JavaScript は画面の操作だけで�
       if (s.cancel) throw Object.assign(new Error('取り消しました'), { name: 'AbortError', code: 'CANCELLED' });
       const p = JSON.parse(JSON.stringify(s.plan));
       t += 15000;
-      return { plan: p, ctx: { facts: [] }, review: KTPlanReview.review({ plan: p, data: DATA, deps: DEPS, scan: null, incoming: null }), gatewayPlan: { ...JSON.parse(JSON.stringify(p)), gw: n + 1 }, revisionMeta: args.revision ? { requested: args.revision.mode || 'full', mode: args.revision.mode || 'full', fallbackReason: null } : null, turn: s.turn || null };
+      //   2026-10-15（追加の指示 1）: 偽の計画の AI は要件の対応づけ（requirementOps）を返す（K.withPlannerMapping。turn に要件の操作があればそのまま・s.noAutoMap なら返さない）
+      return K.withPlannerMapping({ plan: p, ctx: { facts: [] }, review: KTPlanReview.review({ plan: p, data: DATA, deps: DEPS, scan: null, incoming: null }), gatewayPlan: { ...JSON.parse(JSON.stringify(p)), gw: n + 1 }, revisionMeta: args.revision ? { requested: args.revision.mode || 'full', mode: args.revision.mode || 'full', fallbackReason: null } : null, turn: s.turn || null, ...(s.noAutoMap ? { noAutoMap: true } : {}) }, args.requirements, { merge: true });
     },
     revisionModes: () => ['full', 'patch'],
     conversationFeatures: () => ['requirements', 'stream', 'proposal'],

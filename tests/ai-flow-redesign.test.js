@@ -87,7 +87,8 @@ console.log('\n--- §B1. 会話コントローラ: R01〜R08 と「ありがと�
  * 偽 services。withPlan = true で services.plan を付ける（既定は計画を作らない応答）。planImpl で差し替え（x.planImpl = … で後から変えられる）。
  * proposeGate を渡すと、仮案の AI の応答を途中で止められる（応答待ちの間の発言の検証）。台本は scriptFn（既定は script）
  */
-function makeConv({ features = ['requirements', 'brief', 'stream', 'proposal'], withPlan = false, planImpl = null, proposeGate = null, scriptFn = script } = {}) {
+//   2026-10-15（追加の指示 1）: autoMap = 偽の計画の AI が要件の対応づけ（requirementOps）を返す（K.withPlannerMapping。わざと担当を欠いた回帰は false）
+function makeConv({ features = ['requirements', 'brief', 'stream', 'proposal'], withPlan = false, planImpl = null, proposeGate = null, scriptFn = script, autoMap = true } = {}) {
   const calls = { propose: [], ask: [], plan: [] };
   let t = 1000;
   const x = { planImpl };
@@ -105,7 +106,7 @@ function makeConv({ features = ['requirements', 'brief', 'stream', 'proposal'], 
     },
     async ask(args) { calls.ask.push({ question: args.question, conversation: clone(args.conversation) }); t += 2000; return { ok: true, answer: { answer: '5 営業日にすると判定が 2 営業日早くなります。', facts: [], analysis: [], recommendations: [], unknowns: [] }, ctx: { facts: [] } }; },
     readiness() { return null; },
-    ...(withPlan || planImpl ? { async plan(args) { calls.plan.push({ goal: args.goal, decisions: clone(args.decisions ?? null), requirements: clone(args.requirements ?? null), revision: args.revision ? true : false }); t += 30000; return x.planImpl ? x.planImpl(args) : { plan: null, message: '（テスト: 計画は作らない）', reason: 'TEST' }; } } : {}),
+    ...(withPlan || planImpl ? { async plan(args) { calls.plan.push({ goal: args.goal, decisions: clone(args.decisions ?? null), requirements: clone(args.requirements ?? null), revision: args.revision ? true : false }); t += 30000; const r0 = x.planImpl ? x.planImpl(args) : { plan: null, message: '（テスト: 計画は作らない）', reason: 'TEST' }; const r = r0 && typeof r0.then === 'function' ? await r0 : r0; return autoMap ? KIT.withPlannerMapping(r, args.requirements) : r; } } : {}),
   };
   const c = KTAiConversation.create({ services, now: () => '2026-10-07T00:00:00.000Z', clock: () => t });
   Object.assign(x, { c, calls, services, kinds: () => c.messages().map(m => m.data?.kind || m.type), last: () => c.messages()[c.messages().length - 1], draft: () => c.draft(), ledger: (id) => c.state.ledgers.get(id) || null });
@@ -1012,24 +1013,25 @@ await section(async () => {
 });
 // 指示 B5: 対応範囲の重複と矛盾（担当が計画に無い要件は 1 行・「ほかの手順で扱います」と言わない）
 await section(async () => {
-  const gen = makeGenerate({ sequence: ['good'] });
-  const impl0 = gen.impl;
-  //   2026-10-15（最終案の重複と担当未定の食い違い §3）: R4 の planRefs は採用した仮案の項目 A3 だけ（準備の判定では担当あり）。生成の AI が担当外と申告し、計画のどの手順で
-  //   実現するかは書かれていない → 「担当が決まっていません」とは言わず、左のカード・右の変更内容に同じ文を 1 回ずつ（反映は止めない）。
-  //   検査に担当の集まりを渡さない（この修正の前の検査の結果を流用した）ときと、渡したときで同じ表示
+  //   2026-10-15（追加の指示 1: 仮案の採用を実装担当の代わりにしない）: R4（申請から 7 営業日以内に承認）の planRefs は採用した仮案の項目 A3 だけで、計画（承認待ちの金額の編集不可の
+  //   JavaScript C1）にこの期限を実現する手順・JavaScript は無い。計画の AI はほかの要件（R1〜R3）を C1 に対応づけ、R4 は対応づけない。生成の AI は R4 を担当外と申告する。
+  //   → 採用の記録だけでは担当にしない: 「7 営業日」を実現する手順・JavaScript が足りない決まった要件として反映を止める（警告だけで反映できるにしない）。
+  //   左の「確認できないこと／反映を止めている理由」と右の「確認できないこと」に同じ文 1 回。同じ要件の計画全体の確認（担当外の申告）は重ねない。
+  //   検査に担当の集まりを渡さない（この修正の前の検査の結果を流用した）ときと、渡したときで同じ
   for (const withOwners of [false, true]) {
     const gen = makeGenerate({ sequence: ['good'] });
     const impl0 = gen.impl;
     gen.impl = async (args) => { const r = await impl0(args); r.generated = { ...r.generated, coverage: [{ requirementId: 'C1', status: 'MET', note: '', text: CUST_C1.requirement }, { requirementId: 'R4', status: 'OUT_OF_SCOPE', note: '期限はプロセス管理と通知の設定で扱う', text: '7 営業日以内に承認する' }] }; r.review = KTCodeReview.review({ generated: r.generated, customization: CUST_C1, plan: args.version.plan, data: clone(DATA_C), scan: null, existingSource: null, requirements: [{ id: 'R4', planRefs: ['A3'] }], ...(withOwners ? { planOwners: args.planOwners } : {}) }); return r; };
-    const x = makeConvC({ generate: gen });
+    const x = makeConvC({ generate: gen, autoMap: false, planImpl: (args) => KIT.withPlannerMapping(planJs(args), (args.requirements || []).filter(q => !/営業日/.test(q.behavior || ''))) });
     await adoptC(x);
-    const fin = x.c.activePlan().final;
+    const v = x.c.activePlan(), fin = v.final;
     const h = stripC(finalHtml(x)), hr = stripC(rightOf(x));
-    const line = '「7 営業日以内に承認する」は、作った JavaScript では担当外とされました。計画のどの手順で実現するかは書かれていません';
-    const rv = x.c.activePlan().generated.C1.review;
-    assert((h.match(/7 営業日以内に承認する/g) || []).length === 1 && (hr.match(/7 営業日以内に承認する/g) || []).length === 1 && h.includes(line) && hr.includes(line) && !/担当するか決まっていません|計画の他の手順・JavaScript で扱います|担当が計画にありません/.test(h + hr) && fin.approvable === true && fin.blockers.some(b => b.kind === 'plan-scope' && b.text === line)
-      && (!withOwners || (rv.coverage.unowned.length === 0 && rv.registration.confirmations.some(c => c.code === 'coverage-owner' && c.screenText === line))),
-      `指示 B5（2026-10-15: 左右と反映の前の確認で同じ 1 文。担当未定と言わない・反映は止めない）${withOwners ? '・検査に担当の集まりを渡す' : '・前の検査の結果'}: ${JSON.stringify({ blockers: fin.blockers, approvable: fin.approvable })}`);
+    const line = '「7営業日」を実現する計画の手順・JavaScript が足りません（計画に無いもの: 7 営業日）';
+    const r4 = x.c.requirements(v.planId).find(r => /営業日/.test(r.behavior));
+    assert(r4 && JSON.stringify(r4.planRefs) === '["A3"]' && x.c.requirements(v.planId).filter(r => r.id !== r4.id && r.decision !== 'revoked').every(r => (r.planRefs || []).includes('C1')) && fin.approvable === false && x.c.approveFinal({ planId: v.planId, version: v.version }).ok === false
+      && fin.blockers.some(b => b.kind === 'ownerless' && b.text === line) && !fin.blockers.some(b => b.kind === 'plan-scope') && (h.match(new RegExp(line.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g')) || []).length === 1 && hr.includes(`${line}（決まった要件なので、反映を止めています）`)
+      && !/この内容で反映できます|担当外とされました|計画の他の手順・JavaScript で扱います/.test(h + hr) && x.calls.plan.length === 2,
+      `指示 B5（2026-10-15 追加の指示 1: 実現する手順が無い採用済みの要件は、仮案の項目に結び付いていても反映を止める。自動の見直しは 1 回）${withOwners ? '・検査に担当の集まりを渡す' : '・前の検査の結果'}: ${JSON.stringify({ blockers: fin.blockers, approvable: fin.approvable, plans: x.calls.plan.length })}`);
   }
 });
 // 正しさ C4 / C3（会話）: 計画の後に基準が変わったら承認せず STALE に（作り直しを案内）。承認の取り消し

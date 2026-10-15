@@ -290,12 +290,13 @@ await section(async () => {
   //   レビュー 1（2026-10-14）: fin.existingChanges は構造化した材料（kind・title・name・from・to・filterCond）。Toolkit Review の diff.human（✎・Before・After）は左に連結しない。
   //   プロセス管理以外の既存の設定の変更は「今ある設定を変えます: {手順}（変更前後は右の「変更内容」）」の 1 文
   const ex = fin.existingChanges[0];
-  //   2026-10-15（最終案の重複と担当未定の食い違い §1・§2）: 採用した仮案の動作があるときは、既存の設定の変更は左に重ねない（変更前後は右の「何が変わるか」）。
-  //   採用した動作が無い最終案（古い最終案・計画だけの流れ）では今までどおり「この案で実現すること」に 1 文
+  //   2026-10-15（追加の指示 2）: 採用した動作があっても一律に隠さない。この一覧の絞り込みの変更は採用した要件（承認者の選び方・部長承認の金額・期限）で説明されない
+  //   （explained false）ので、左の「この案で実現すること」に 1 文で残し、右で変更前後を確かめられる。採用した動作が無い最終案でも同じ 1 文
   const v0 = x.c.activePlan(), v0b = { ...v0, final: { ...fin, adoptedBehaviors: [] } };
   const visNoAdopt = stripC(outsideDetails(KTAiChatUi.finalCardHtml({ type: 'FINAL', data: { planId: v0.planId, version: v0.version } }, { plans: new Map([[`${v0.planId}:${v0.version}`, v0b]]), activePlan: v0b, answerState: x.c.answerContext(), answers: new Map() })));
-  assert(fin.existingChanges.length === 1 && ex && ex.kind === 'UPDATE_VIEW' && ex.title === '一覧「承認待ち一覧」の絞り込みを変更' && ex.name === '承認待ち一覧' && fin.adoptedBehaviors.length > 0 && !/今ある設定を変えます/.test(vis) && /一覧「承認待ち一覧」の絞り込みを変更/.test(stripC(rightOf(x)))
-    && /今ある設定を変えます: 一覧「承認待ち一覧」の絞り込みを変更（変更前後は右の「変更内容」）/.test(visNoAdopt) && !/絞り込み: なし →|✎|Before|After/.test(visNoAdopt) && visNoAdopt.indexOf('この案で実現すること') < visNoAdopt.indexOf('今ある設定を変えます') && visNoAdopt.indexOf('今ある設定を変えます') < visNoAdopt.indexOf('動作テスト環境へ反映'), `H4-15: 既存の設定の変更は、採用した動作があれば左に重ねず右だけ。採用した動作が無ければ「この案で実現すること」に 1 文（構造化した材料から。Review の変更前後の行は連結しない）: ${JSON.stringify(fin.existingChanges)}`);
+  const LINE15 = /今ある設定を変えます: 一覧「承認待ち一覧」の絞り込みを変更（変更前後は右の「変更内容」）/;
+  assert(fin.existingChanges.length === 1 && ex && ex.kind === 'UPDATE_VIEW' && ex.title === '一覧「承認待ち一覧」の絞り込みを変更' && ex.name === '承認待ち一覧' && ex.explained === false && fin.adoptedBehaviors.length > 0 && LINE15.test(vis) && !/絞り込み: なし →|✎|Before|After/.test(vis) && vis.indexOf('この案で実現すること') < vis.indexOf('今ある設定を変えます') && vis.indexOf('今ある設定を変えます') < vis.indexOf('動作テスト環境へ反映') && /一覧「承認待ち一覧」の絞り込みを変更/.test(stripC(rightOf(x)))
+    && LINE15.test(visNoAdopt), `H4-15: 採用した要件で説明されない既存の設定の変更は、採用した動作があっても「この案で実現すること」に 1 文（構造化した材料から。Review の変更前後の行は連結しない）: ${JSON.stringify(fin.existingChanges)}`);
   keep('H4-upd', finalHtml(x), rightOf(x));
 });
 await section(async () => {
@@ -315,13 +316,14 @@ await section(async () => {
   const vis = stripC(outsideDetails(h));
   const ex = fin.existingChanges[0];
   assert(fin.existingChanges.length === 1 && ex && ex.kind === 'UPDATE_PROCESS' && ex.name === '申請する' && ex.from === '未処理' && ex.to === '承認待ち' && ex.filterCond === 'amount < 1000000' && ex.targetKind === 'PROCESS_ACTION', `H4-16: 既存の操作の変更は構造化した材料（name・from・to・filterCond）: ${JSON.stringify(ex)}`);
-  //   2026-10-15（最終案の重複と担当未定の食い違い §2）: 採用した仮案の動作があるので、左には「申請する」の行を重ねない（右の「何が変わるか」の変更前後に文で出す。元の式は詳細）。
-  //   採用した動作が無い最終案では左に 1 文（数値のフィールドの種類と単位があれば「100万円未満」）
+  //   2026-10-15（追加の指示 2・見直しの反映）: 採用した要件は「100万円以上は部長承認を必要とする」だけで、既存の操作「申請する」を 100万円未満の側に絞る変更は
+  //   どの要件も言っていない（反対側の境界。説明済みと確かめられない）→ 採用した動作があっても左に 1 文で残す（右の「何が変わるか」にも変更前後。元の式は詳細）。
+  //   採用した動作が無い最終案でも左に 1 文（数値のフィールドの種類と単位があれば「100万円未満」）
   const rt16 = KTAiChatUi.changeSummaryHtml(v, { labels: K.LABELS_C, numbers: { amount: { type: 'NUMBER', unit: '円', unitPosition: 'AFTER' } } });
   const vNo = { ...v, final: { ...fin, adoptedBehaviors: [] } };
   const visNo = stripC(outsideDetails(KTAiChatUi.finalCardHtml({ type: 'FINAL', data: { planId: v.planId, version: v.version } }, { plans: new Map([[`${v.planId}:${v.version}`, vNo]]), activePlan: vNo, answerState: x.c.answerContext(), answers: new Map(), labels: K.LABELS_C, numbers: { amount: { type: 'NUMBER', unit: '円', unitPosition: 'AFTER' } } })));
-  assert(!/今ある操作「申請する」/.test(vis) && !/✎|Before|After|amount|\[/.test(vis) && /After: 未処理 → 承認待ち\s*（条件: 「金額」が100万円未満）/.test(stripC(outsideDetails(rt16))) && /<details class="kt-ai-tech kt-ai-sum-cond"[^>]*><summary>条件式（実行される式）<\/summary>変更後: <code>amount &lt; 1000000<\/code><\/details>/.test(rt16)
-    && /今ある操作「申請する」は、「金額」が100万円未満のときだけ使えるようになります/.test(visNo) && !/✎|Before|After|amount|\[/.test(visNo) && visNo.indexOf('この案で実現すること') < visNo.indexOf('今ある操作「申請する」'), `H4-16b: 採用した動作があれば「申請する」は右の変更前後だけ（条件は文・元の式は詳細）。無ければ左に「今ある操作「申請する」は、…のときだけ使えるようになります」: ${(visNo.match(/今ある操作[^\n]{0,80}/) || [''])[0]}`);
+  assert(ex.explained === false && (vis.match(/今ある操作「申請する」は、「金額」が1000000未満のときだけ使えるようになります/g) || []).length === 1 && !/✎|Before|After|amount|\[/.test(vis) && /After: 未処理 → 承認待ち\s*（条件: 「金額」が100万円未満）/.test(stripC(outsideDetails(rt16))) && /<details class="kt-ai-tech kt-ai-sum-cond"[^>]*><summary>条件式（実行される式）<\/summary>変更後: <code>amount &lt; 1000000<\/code><\/details>/.test(rt16)
+    && /今ある操作「申請する」は、「金額」が100万円未満のときだけ使えるようになります/.test(visNo) && !/✎|Before|After|amount|\[/.test(visNo) && visNo.indexOf('この案で実現すること') < visNo.indexOf('今ある操作「申請する」'), `H4-16b: 採用した要件が言っていない既存の操作の変更（反対側の境界）は、採用した動作があっても左に 1 文（右に変更前後・元の式は詳細）。採用した動作が無くても左に「今ある操作「申請する」は、…のときだけ使えるようになります」: ${JSON.stringify([ex.explained, (vis.match(/今ある操作[^\n]{0,80}/g) || [])])} ${(visNo.match(/今ある操作[^\n]{0,80}/) || [''])[0]}`);
   //   条件を文にできない形（kintone の関数など）→ 「既存の操作「申請する」の使える条件が変わります（右の「変更内容」）」（採用した動作が無い最終案の左）
   const v2 = { ...v, final: { ...fin, adoptedBehaviors: [], existingChanges: [{ ...ex, filterCond: 'owner in (LOGINUSER()) and memo like "急ぎ"' }] } };
   const text2 = KTAiChatUi.finalCardHtml({ type: 'FINAL', data: { planId: v.planId, version: v.version } }, { plans: new Map([[`${v.planId}:${v.version}`, v2]]), activePlan: v2, answerState: x.c.answerContext(), answers: new Map(), labels: K.LABELS_C });

@@ -44,7 +44,9 @@ const { KTAiConversation, KTAiChatUi } = T;
 const { assert, state } = makeAssert();
 const { createNewFlowKit } = require('./helpers/new-flow.js');
 const K = createNewFlowKit(T);
-const { clone, B, A, Q, req, mkStep, makeConvC, makeGenerate, stripC, finalHtml } = K;
+const { clone, B, A, Q, req, mkStep, makeGenerate, stripC, finalHtml } = K;
+//   2026-10-15（追加の指示 1）: この試験は計画の AI の要件の対応づけ（refs）を台本で決める（偽の計画の AI の自動の対応づけは使わない。実機と同じく対応づけの無い要件は計画の構造で確かめる）
+const makeConvC = (o = {}) => K.makeConvC({ autoMap: false, ...o });
 async function section(fn) { try { await fn(); } catch (e) { assert(false, `例外: ${e && e.stack ? e.stack.split('\n').slice(0, 4).join(' / ') : e}`); } }
 const LABELS = { ...K.LABELS_C, items: '明細' };
 //   レビューの指摘 row2（2026-10-09）: 修正前の版（読み取りの関数・記録が無い）でも例外で止めない読み取り
@@ -117,7 +119,7 @@ const contaminatedPlan = (args, { ids = ['C1', 'C2', 'C3'], refs = {}, label = '
   const steps = [mkStep('P1', 'ADD_PROCESS_STATUS', 'PROCESS_STATUS', '部長承認待ち', { name: '部長承認待ち' }, { title: 'ステータス「部長承認待ち」を追加' }), ...custs.map(c => ({ id: c.customizationId, actionType: 'CUSTOMIZATION_REQUIRED', targetKind: 'JS', targetRef: null, title: `JavaScript（${c.customizationId}）`, spec: { customizationId: c.customizationId }, dependsOn: [] }))];
   const plan = { goal: args.goal, assessment: { summary: '承認済みでは金額と明細を編集不可にし、行の変更を含む変更は保存時に止める計画です。' }, steps, customizations: clone(custs), provisionals: [], questions: [], unknowns: [], impact: [], solution: 'HYBRID' };
   const sent = new Map((args.requirements || []).map(r => [r.id, r]));
-  const upd = (id, base) => { const x = refs[id]; const r = sent.get(id) || { ...base, exceptions: [], decision: 'proposed' }; return { op: 'update', id, target: r.target, condition: r.condition, behavior: r.behavior, exceptions: r.exceptions || [], decision: r.decision === 'revoked' ? 'proposed' : r.decision, disposition: 'adopted', sourceQuotes: [], planRefs: x.planRefs, effects: x.effects, note: '' }; };
+  const upd = (id, base) => { const x = refs[id]; const r = sent.get(id) || { ...base, exceptions: [], decision: 'proposed' }; return { op: 'update', id, target: r.target, condition: r.condition, behavior: r.behavior, exceptions: r.exceptions || [], decision: r.decision === 'revoked' ? 'proposed' : r.decision, disposition: x.disposition || 'adopted', sourceQuotes: [], planRefs: x.planRefs, effects: x.effects, note: x.note || '' }; };
   const BASES = { R1: R_LOCK, R2: R_BACK, R3: R_CHECK, R4: R_SAVE, R5: R_STATUS, R6: R_WARN };
   const ops = [
     ...Object.keys(refs).map(id => upd(id, BASES[id])),
@@ -414,11 +416,14 @@ await section(async () => {
   planCalls.length = 0;
   const gen = recordingGenerate(['good']);
   //   C1 のイベントは表示だけ（偽の生成工程の候補は表示のイベントだけを登録する）
-  const x = makeConvC({ scriptFn: scopeScript, labels: LABELS, generate: gen, planImpl: planImplOf({ ids: ['C1'], desktopEvents: ['app.record.edit.show'], refs: { R1: { planRefs: ['C1'], effects: ['lock'] }, R4: { planRefs: ['C1'], effects: ['block-save'] }, R5: { planRefs: ['P1'], effects: [] } } }) });
+  //   2026-10-15（追加の指示 1）: この計画（PC の JavaScript だけ）は既存の入力チェックの要件（R3。PC とモバイル）を実現しないので、計画の AI はその要件を
+  //   対応できない（unsupported）と理由つきで示す（採用の記録だけで担当ありにしない・PC の JavaScript への対応づけだけではモバイルが足りず反映を止める）。
+  //   この節は範囲外を外したことで承認を止めないことを確かめる）
+  const x = makeConvC({ scriptFn: scopeScript, labels: LABELS, generate: gen, planImpl: planImplOf({ ids: ['C1'], desktopEvents: ['app.record.edit.show'], refs: { R1: { planRefs: ['C1'], effects: ['lock'] }, R3: { planRefs: [], effects: [], disposition: 'unsupported', note: 'この計画は PC の編集制御だけで、入力チェックのモバイルへの移植を含まないため' }, R4: { planRefs: ['C1'], effects: ['block-save'] }, R5: { planRefs: ['P1'], effects: [] } } }) });
   await x.c.send(REQ);
   await x.c.send('採用します');
   const v = x.c.activePlan();
-  assert(planCalls.length === 2 && strippedOf(v).length === 2 && v.generated?.C1?.status === 'verified' && v.final?.approvable === true && x.c.approveFinal({ planId: v.planId, version: v.version }).ok === true, `S4-1: 範囲外を外した最終案は、ほかに理由が無ければ承認できる（依頼に無い可能性がある動作は承認を止めない）: ${JSON.stringify({ stripped: strippedOf(v).length, status: v.generated?.C1?.status, reasons: v.final?.readiness })}`);
+  assert(planCalls.length === 2 && strippedOf(v).length === 2 && v.generated?.C1?.status === 'verified' && v.final?.approvable === true && x.c.approveFinal({ planId: v.planId, version: v.version }).ok === true, `S4-1: 範囲外を外した最終案は、ほかに理由が無ければ承認できる（依頼に無い可能性がある動作は承認を止めない）: ${JSON.stringify({ stripped: strippedOf(v).length, status: v.generated?.C1?.status, reasons: v.final?.readiness, blockers: (v.final?.blockers || []).map(b => b.text) })}`);
   assert(JSON.stringify(effKeys((gen.seen.slice(-1)[0] || {}).requiredEffects)) === JSON.stringify(['amount:lock']), 'S4-2: 必須の効果は利用者の編集不可だけ');
   const html = finalHtml(x);
   assert(/依頼に無い可能性がある動作（2 件）/.test(html) && /計画の説明の文に残っている可能性があります/.test(html) && !/依頼に無い可能性/.test(html.replace(/<details[\s\S]*?<\/details>/g, '')), 'S4-3: 「依頼に無い可能性がある動作」は詳細（折りたたみ）の中だけに出す');

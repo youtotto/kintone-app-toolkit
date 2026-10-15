@@ -20574,7 +20574,7 @@
           //     （反映は止めない。AI の申告だけで承認できるかを決めない。左のカード・右の変更内容・反映の前の確認で同じ文 planScopeText。要件の文は台帳の文とフィールドの名前）
           const rowLimit = owner === 'plan' && stt === 'PARTIAL' && d.limitCode === 'SUBTABLE_ROWS' && coverage.notAchieved.some(y => y && y.code === 'SUBTABLE_ROWS' && !y.fromLimitCode);
           const unsupportedReq = owner === 'plan' && !rowLimit && !!(reqR && reqR.disposition === 'unsupported');
-          const planMark = owner !== 'plan' ? {} : rowLimit ? { rowLimit: true } : unsupportedReq ? { unsupported: true } : { unconfirmed: true, screen: planScopeText(screenText, stt) };
+          const planMark = owner !== 'plan' ? {} : rowLimit ? { rowLimit: true } : unsupportedReq ? { unsupported: true } : { unconfirmed: true, screen: (reqR && typeof reqR.gapScreen === 'string' && reqR.gapScreen) || planScopeText(screenText, stt) };
           coverage.outOfScope.push({ code: owner === 'unowned' ? 'AI_OUT_OF_SCOPE' : owner === 'plan' ? 'PLAN_OWNER' : 'OTHER_OWNER', requirementId: id, requirement: text, owner, ...(owner === 'customization' ? { customizationId: id } : {}), status: stt, ...(d.limitCode ? { limitCode: d.limitCode } : {}), ...planMark, note: d.note, message: ownedMessage(id, owner, text, note) });
           if (owner === 'unowned') coverage.unowned.push({ code: 'UNOWNED', requirementId: id, requirement: text, message: text });
           if (planMark.unconfirmed) coverage.planUnconfirmed.push({ requirementId: id, requirement: text, status: stt, note: d.note, screen: planMark.screen, message: `${stt === 'PARTIAL' ? '一部だけ満たすとされた' : stt === 'NOT_MET' ? '満たしていないとされた' : '担当範囲外とされた'}要件「${text}」は、採用した仮案の項目として計画全体で扱う要件ですが、計画のどの手順で実現するかが書かれていません。計画全体の確認に残します${note ? `（AI の説明: ${note}）` : ''}` });
@@ -27221,12 +27221,226 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
         const owners = planOwnerIdsOf(v) || new Set();
         //   §0c.6（2026-10-08）: 担当は構造（planRefs が計画の手順か customization・採用した仮案の項目を指す）だけで決める。生成 AI の coverage の MET は担当として数えない
         //   （MET と申告しても planRefs が無ければ必須の効果に入らず、検証されないまま反映できてしまうため）
+        //   2026-10-15（追加の指示 1: 仮案の採用を実装担当の代わりにしない）: 担当（planRefs が計画の要素か採用した仮案の項目を指す）がある要件も、それを実現する
+        //   計画の手順・JavaScript を implementationOfReq で確かめる。確かめられない（unconfirmed）・足りない（missing）ものは担当が無い要件と同じく、決まった要件なら反映を止める
+        //   （警告だけにしない）。見直しの HIGH 1: planRefs が計画の要素を指す（計画の AI の対応づけ・自動の見直しで足したもの）だけでは構造の欠落を消さない
         void entries;
         return KTAiAnswers.requirementsForContext(lg)
           .filter(r => r && !sugOnly.has(r.id) && !(sc && sc.out.has(r.id)))
           .filter(r => r && (r.decision === 'decided' || r.decision === 'proposed') && r.disposition !== 'unsupported')
-          .filter(r => !(Array.isArray(r.planRefs) && r.planRefs.some(x => owners.has(x))))
-          .map(r => ({ id: r.id, decision: r.decision, text: reqTextOf(r) }));
+          .map(r => {
+            const refs = Array.isArray(r.planRefs) ? r.planRefs : [];
+            if (!refs.some(x => owners.has(x))) return { id: r.id, decision: r.decision, text: reqTextOf(r), kind: 'ownerless' };
+            const impl = implementationOfReq(v, r);
+            return impl.ok ? null : { id: r.id, decision: r.decision, text: reqTextOf(r), kind: impl.kind, missing: impl.missing || [], ...(impl.pending ? { pending: true } : {}) };
+          })
+          .filter(Boolean);
+      };
+      /**
+       * 2026-10-15（追加の指示 1: 仮案の採用を実装担当の代わりにしない。見直しの HIGH 1・2・MEDIUM 3・LOW 5 を反映）: 決まった・AI の提案の要件を実現する
+       *   計画の手順・JavaScript を計画の構造で確かめる。採用の記録（採用した仮案の項目への planRefs）は実装の担当の証拠にしない。生成の AI の達成の申告（coverage）は使わない。
+       *   計画の AI の対応づけ（planRefs が計画の手順・JavaScript を指す）があっても、下の構造の確かめは同じく行う（対応づけだけで構造の欠落を消さない）。
+       *   材料（計画の構造だけ。任意の JavaScript の意味は証明しない＝必要条件）:
+       *   - 要件の保持の判定（KTPlanReview.traceRequirements）の値を、要件の対象・条件（例外の条件を含む）・動作（例外の動作を含む）ごとに取り出す
+       *   - 実現の証拠になる値（strong）: 単位つきの数（「以上・未満・以下・超」は読める条件式なら向きも確かめる）／動作の文のフィールド（それを変える置き場所だけ:
+       *     JavaScript の対象のフィールドで効果か READ 以外の扱いがあるもの・手順の条件式・遷移元／先・名前・イベント以外の項目。対象の文のフィールドは、それを変える置き場所があるときだけ）／
+       *     対象・動作の文の「」の名前／既存の JavaScript のファイル名。
+       *     条件の文のフィールド・ステータス名・条件の文の「」の名前は文脈（計画に置き場所が無ければ足りないとするが、それだけでは実現の証拠にしない。ステータス名は見本の有無で変わるため）
+       *   - 既存の JavaScript のファイル: そのファイルを使う JavaScript（existingFiles）。アプリにある既存のファイル（計画の外）は、要件の動作が「残す・維持する」ことを言うときだけ
+       *   - 要件の効果（effects。編集不可など）: その効果を対象のフィールド（テーブルなら列）に持つ JavaScript。フィールドが分からなければその効果を持つ JavaScript
+       *     （無ければ足りない。あっても計画の AI の対応づけが無ければ、どのフィールドかを確かめられない）
+       *   - 要件の文が画面（PC / モバイル）を言うとき（「モバイルは対象外」のような否定は数えない）: 証拠を持つものにその画面のもの（画面に依らない設定の手順を含む）があるか
+       *   - 要件の対象・動作の文が通知・リマインダーを言うとき: 証拠を持つものにその種類の設定の手順があるか（承認の流れ・一覧の語は JavaScript の要件にも出るので見ない）
+       *   計画の AI の対応づけがある要件は、対応づけた要素について既存のファイル名・効果・画面・種類を構造で確かめ、数の向きの目に見える食い違いを足りないとする
+       *   （数・「」の名前・フィールドはコードの中や複数の手順で持ち得るので、対応づけを対応とする）。
+       *   証拠になる値が無い要件は、計画の AI の対応づけがあればそれを対応とし（画面・種類はその要素で確かめる）、「残す・維持する」だけの要件は既存の処理を置き換えないことと
+       *   画面で確かめ、それ以外は確かめられない（unconfirmed）
+       * @returns {{ ok: boolean, kind?: 'unconfirmed' | 'missing', missing?: string[], refs: string[] }}
+       */
+      const PLATFORM_WORDS = [['desktop', /PC|パソコン|デスクトップ/], ['mobile', /モバイル|スマホ|スマートフォン/]];
+      const PLATFORM_NEG_RE = /(PC|パソコン|デスクトップ|モバイル|スマホ|スマートフォン)(版|アプリ)?(では|には|は|を|で)?(対象外|不要|除く|除いて|除き|使わない|使用しない|対応しない|扱わない)/g;
+      const platformsOfText = (text) => { const t = String(text || '').replace(PLATFORM_NEG_RE, ''); return PLATFORM_WORDS.filter(([, re]) => re.test(t)).map(([p]) => p); };
+      /** 要件の対象・動作の文が言う設定の種類（語の無い要件は種類を限らない）。step = その種類の手順（actionType）。js = JavaScript でも実現できる種類 */
+      const REQ_KINDS = [
+        { kind: 'notification', label: '通知の設定', words: /通知/, step: /NOTIFICATION/, js: false },
+        { kind: 'reminder', label: 'リマインダーの設定', words: /リマインド|リマインダー/, step: /REMINDER/, js: false },
+        { kind: 'view', label: '一覧の設定', words: /一覧|ビュー/, step: /VIEW/, js: true },
+        { kind: 'process', label: 'プロセス管理の設定', words: /プロセス|承認|申請|差し?戻|ステータス|作業者/, step: /PROCESS/, js: true },
+      ];
+      const reqKindsOf = (text) => REQ_KINDS.filter(k => k.words.test(String(text || '')));
+      const stepKindOf = (actionType) => (REQ_KINDS.find(k => k.step.test(String(actionType || ''))) || {}).kind || null;
+      /** 動作の文が「残す・維持する」ことを言う要件（アプリにある既存のファイルを、そのまま使う実現に数える） */
+      //   「変えない・変更しない」は「編集させない」（編集不可の要件）の意味にもなるので入れない
+      const KEEP_RE = /維持|残(す|し|る|り)|のまま|引き続き|今まで(どおり|通り)/;
+      /**
+       * 要件に効果（effects）が無いときに、動作の文から読む効果（見直しの HIGH 2 の残り: 効果の申告が無い「金額を変更できないようにする」を、別の効果の JavaScript で実現にしない）。
+       *   「再編集できる」のような逆の言い方は当たらない形にする
+       */
+      const EFFECT_WORDS = [['lock', /編集(でき|させ)ない|編集不可|変更(でき|させ)ない|変更不可|書き換え(でき|させ)ない/], ['block-save', /保存(を|が)?(止め|止ま|でき(ない|なく)|させない|禁止)/], ['warn', /警告/], ['show-hide', /非表示|表示しない|隠す|見えなく/], ['set-value', /自動(で|的に)?(入力|設定|計算)/]];
+      const z2hNum = (s) => String(s ?? '').replace(/[０-９]/g, (ch) => String.fromCharCode(ch.charCodeAt(0) - 0xFEE0)).replace(/，/g, ',');
+      /** 要件の対象・条件・動作の文（例外は条件と動作に分ける） */
+      const reqPartsOf = (r) => {
+        const xs = Array.isArray(r.exceptions) ? r.exceptions : [];
+        const j = (arr) => arr.filter(x => typeof x === 'string' && x.trim()).join(' ');
+        return { tgt: j([r.target]), cond: j([r.condition, ...xs.map(x => x && x.condition)]), act: j([r.behavior, ...xs.map(x => x && x.behavior)]) };
+      };
+      /** 要件の対象・条件・動作・例外の文（実現の対応・説明済みの判定に使う） */
+      const reqWholeText = (r) => { const p = reqPartsOf(r); return [p.tgt, p.cond, p.act].filter(Boolean).join(' '); };
+      /**
+       * 要件の値と、それを持つ計画の手順・JavaScript・既存のファイル（holders）。implementationOfReq と最終案の既存の設定の変更の説明済みの判定（追加の指示 2）が使う。
+       *   { kind: 'number'|'name'|'field'|'file', part: 'tgt'|'cond'|'act', value, text（数は比較語つき）, cmp, quoted, strong, holders, places: [{ id, key }] }。
+       *   確認待ちの手順・未解決の質問は holders に入れない
+       */
+      const requirementAnchorsOf = (v, r) => {
+        const plan = (v && v.plan) || {};
+        const steps = (Array.isArray(plan.steps) ? plan.steps : []).filter(s => s && s.id && !s.alternativeId);
+        const custs = (Array.isArray(plan.customizations) ? plan.customizations : []).filter(c => c && c.customizationId);
+        const settingIds = new Set(steps.filter(s => !['CUSTOMIZATION_REQUIRED', 'REQUIRE_CONFIRMATION'].includes(s.actionType)).map(s => s.id));
+        const custIds = new Set(custs.map(c => c.customizationId));
+        const parts = reqPartsOf(r);
+        const whole = reqWholeText(r);
+        let labels = {}; try { labels = (typeof services.fieldLabels === 'function' && services.fieldLabels()) || {}; } catch (e) { labels = {}; }
+        const model = (v.review && v.review.simulation && v.review.simulation.before) || { fields: Object.fromEntries(Object.entries(labels).map(([code, label]) => [code, { code, label }])), process: { states: [] } };
+        const PARTS = ['tgt', 'cond', 'act'];
+        let trs = [];
+        try { trs = KTPlanReview.traceRequirements({ plan, requirements: PARTS.map(p => ({ id: p, decision: 'decided', disposition: 'adopted', condition: parts[p], exceptions: [] })), model }).requirements; } catch (e) { trs = []; }
+        const fieldOf = (cid, code) => { const c = custs.find(x => x.customizationId === cid); return c && Array.isArray(c.fields) ? c.fields.find(f => f && String(f.code) === String(code)) || null : null; };
+        const condOfPlace = (id, key) => { if (key === 'filterCond') { const s = steps.find(x => x.id === id); return s && s.spec ? s.spec.filterCond : null; } const m = /^(.+)\.condition$/.exec(key); if (m) { const f = fieldOf(id, m[1]); return f ? f.condition : null; } return null; };
+        const escRe = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        const condFields = new Set();
+        const anchors = [];
+        PARTS.forEach((part, i) => {
+          const tr = trs.find(x => x && x.id === part) || null;
+          for (const a of (tr && Array.isArray(tr.anchors) ? tr.anchors : [])) {
+            const places = (a.heldIn || []).filter(h => /^(spec|js):/.test(h)).map(h => { const body = String(h).split(':').slice(1).join(':'); const dot = body.indexOf('.'); return { id: dot < 0 ? body : body.slice(0, dot), key: dot < 0 ? '' : body.slice(dot + 1) }; }).filter(p => settingIds.has(p.id) || custIds.has(p.id));
+            const quoted = a.kind === 'name' && new RegExp(`[「『"]${escRe(a.value)}[」』"]`).test(parts[part]);
+            let cmp = null;
+            if (a.kind === 'number') { const s = z2hNum(parts[part]); const at = s.indexOf(a.text); const mm = at < 0 ? null : /^\s*(以上|未満|以下|を?超)/.exec(s.slice(at + a.text.length)); cmp = mm ? mm[1].replace(/^を/, '') : null; }
+            if (a.kind === 'field' && part === 'cond') condFields.add(String(a.value));
+            //   pending = 計画の確認待ちの手順（REQUIRE_CONFIRMATION）・質問・未知にだけある（実現は利用者の判断の後）
+            anchors.push({ kind: a.kind, part, value: a.value, text: cmp ? `${a.text}${cmp}` : a.text, ...(cmp ? { cmp } : {}), quoted, places, pending: (a.heldIn || []).some(h => /^unresolved:/.test(h)) });
+          }
+        });
+        //   数の向き: 条件式の置き場所（手順の filterCond・JavaScript のフィールドの条件）は、読める単純な比較なら要件と同じ側を通すものだけが持つとする
+        //   （「100万円未満」は amount <= "1000000" and amount != "1000000" が持ち、amount >= "1000000" は持たない）。読めない条件式は今までどおり持つとする
+        const dirOk = (a, p) => {
+          if (a.kind !== 'number' || !a.cmp) return true;
+          const c = condOfPlace(p.id, p.key);
+          if (c == null || c === '') return true;
+          let pc = null; try { pc = KTPlanReview.parseCond(c); } catch (e) { pc = null; }
+          if (!pc || !Array.isArray(pc.clauses) || !pc.clauses.length || !pc.clauses.every(x => x && x.num != null)) return true;
+          if (condFields.size && !condFields.has(String(pc.field))) return false;
+          const n = Number(a.value), h = (x) => KTPlanReview.condHolds(pc, x);
+          return a.cmp === '以上' ? h(n) && !h(n - 1) : a.cmp === '未満' ? h(n - 1) && !h(n) : a.cmp === '以下' ? h(n) && !h(n + 1) : h(n + 1) && !h(n);
+        };
+        //   動作の文のフィールドは、それを変える置き場所だけ（条件式・遷移元／先・名前・イベントに出てくるだけのものは実現に数えない）。
+        //   対象の文のフィールドは、それを変える置き場所があれば実現の証拠（「金額」の「再編集できるようにする」は金額の編集を制御する JavaScript）、無ければ文脈
+        const actingPlace = (a, p) => {
+          if (a.kind !== 'field' || (a.part !== 'act' && a.part !== 'tgt')) return true;
+          if (custIds.has(p.id)) { if (p.key !== String(a.value)) return false; const f = fieldOf(p.id, a.value); return !!f && (String(f.access || '') !== 'READ' || (ktFieldEffectsOf(f.effects) || []).length > 0); }
+          return !['filterCond', 'from', 'to', 'name', 'events'].includes(p.key);
+        };
+        //   テーブル（明細）は、その列（品名・数量・単価）を変える JavaScript もテーブルを変えるものに数える（JavaScript の対象のフィールドは列で書かれることが多い）
+        let colsT = {}; try { colsT = (typeof services.tableColumns === 'function' && services.tableColumns()) || {}; } catch (e) { colsT = {}; }
+        const actsOnTable = (c, code) => (Array.isArray(c.fields) ? c.fields : []).some(f => f && colsT[String(f.code)] === String(code) && (String(f.access || '') !== 'READ' || (ktFieldEffectsOf(f.effects) || []).length > 0));
+        for (const a of anchors) {
+          a.rawPlaces = a.places;
+          const ok = a.places.filter(p => dirOk(a, p));
+          const acting = ok.filter(p => actingPlace(a, p));
+          if (a.kind === 'field' && (a.part === 'act' || a.part === 'tgt')) for (const c of custs) if (!acting.some(p => p.id === c.customizationId) && actsOnTable(c, a.value)) acting.push({ id: c.customizationId, key: String(a.value) });
+          const tgtField = a.kind === 'field' && a.part === 'tgt';
+          a.places = tgtField && !acting.length ? ok : acting;
+          a.holders = [...new Set(a.places.map(p => p.id))];
+          a.strong = a.kind === 'number' || (a.kind === 'field' && (a.part === 'act' || (tgtField && acting.length > 0))) || (a.kind === 'name' && a.quoted && a.part !== 'cond');
+          if (a.kind === 'field' && a.part === 'act' && !a.holders.length) a.text = `「${a.text}」を変える手順・JavaScript`;
+        }
+        //   既存の JavaScript のファイル名（アプリの JavaScript と計画の existingFiles）
+        let appFiles = []; try { const fs0 = typeof services.jsFiles === 'function' && custs[0] ? services.jsFiles({ version: v, customizationId: custs[0].customizationId }) : null; appFiles = Array.isArray(fs0) ? fs0.filter(f => f && f.name) : []; } catch (e) { appFiles = []; }
+        const keep = KEEP_RE.test(parts.act);
+        const fileNames = [...new Set([...appFiles.map(f => f.name), ...custs.flatMap(c => (Array.isArray(c.existingFiles) ? c.existingFiles : []).map(e => e && e.name))].filter(n => typeof n === 'string' && n.trim() && whole.includes(n)))];
+        for (const n of fileNames) {
+          for (let i = anchors.length - 1; i >= 0; i--) if (anchors[i].kind === 'name' && anchors[i].value === n) anchors.splice(i, 1);
+          const holders = [...custs.filter(c => (Array.isArray(c.existingFiles) ? c.existingFiles : []).some(e => e && e.name === n)).map(c => c.customizationId), ...(keep ? appFiles.filter(f => f.name === n).map(f => `file:${f.target === 'mobile' ? 'mobile' : 'desktop'}:${n}`) : [])];
+          anchors.push({ kind: 'file', part: 'tgt', value: n, text: n, quoted: false, strong: true, holders: [...new Set(holders)], places: [] });
+        }
+        return anchors;
+      };
+      const implementationOfReq = (v, r) => {
+        const plan = (v && v.plan) || {};
+        const steps = (Array.isArray(plan.steps) ? plan.steps : []).filter(s => s && s.id && !s.alternativeId);
+        const custs = (Array.isArray(plan.customizations) ? plan.customizations : []).filter(c => c && c.customizationId);
+        const settingIds = new Set(steps.filter(s => !['CUSTOMIZATION_REQUIRED', 'REQUIRE_CONFIRMATION'].includes(s.actionType)).map(s => s.id));
+        const custIds = new Set(custs.map(c => c.customizationId));
+        const platOfCust = (c) => { const ef = c.strategy === 'EXTEND_EXISTING_JS' && Array.isArray(c.existingFiles) ? c.existingFiles.find(e => e && e.name) : null; if (ef) return [ef.target === 'mobile' ? 'mobile' : 'desktop']; const p = (Array.isArray(c.platform) ? c.platform : []).filter(x => x === 'desktop' || x === 'mobile'); return p.length ? [...new Set(p)] : ['desktop']; };
+        const parts = reqPartsOf(r);
+        const platforms = platformsOfText(reqWholeText(r));
+        //   種類の確かめは、設定の手順でしか実現できない種類（通知・リマインダー）だけ（承認・一覧の語は JavaScript の要件にも多く出るので、実現の判定には使わない）
+        const kinds = reqKindsOf(`${parts.tgt} ${parts.act}`).filter(k => !k.js);
+        const PJ = { desktop: 'PC', mobile: 'モバイル' };
+        const anchors = requirementAnchorsOf(v, r);
+        //   計画の AI の対応づけ（planRefs が計画の手順・JavaScript を指す）
+        const plannerRefs = [...new Set((Array.isArray(r.planRefs) ? r.planRefs : []).filter(x => settingIds.has(x) || custIds.has(x)))];
+        const platOf = (id) => (settingIds.has(id) ? ['desktop', 'mobile'] : custIds.has(id) ? platOfCust(custs.find(c => c.customizationId === id)) : /^file:/.test(id) ? [id.split(':')[1]] : []);
+        const kindOk = (ids) => !kinds.length || kinds.some(k => ids.some(id => (settingIds.has(id) && k.step.test(String((steps.find(s => s.id === id) || {}).actionType || ''))) || (k.js && (custIds.has(id) || /^file:/.test(id)))));
+        const check = (ids) => {
+          const lack = platforms.filter(p => !ids.some(id => platOf(id).includes(p)));
+          if (lack.length) return { ok: false, kind: 'missing', missing: lack.map(p => PJ[p]), refs: ids };
+          if (!kindOk(ids)) return { ok: false, kind: 'missing', missing: kinds.map(k => k.label), refs: ids };
+          return { ok: true, refs: ids };
+        };
+        //   効果の要件（編集不可など）: その効果を対象のフィールド（テーブルなら列）に持つ JavaScript が、要件の言う画面ごとにあるか
+        const effs0 = (Array.isArray(r.effects) ? r.effects : []).filter(e => KT_EFFECTS.includes(e));
+        const effs = effs0.length ? effs0 : EFFECT_WORDS.filter(([, re]) => re.test(parts.act)).map(([e]) => e);
+        if (effs.length) {
+          const fieldCodes = new Set(anchors.filter(a => a.kind === 'field' && a.part !== 'cond').map(a => String(a.value)));
+          if (fieldCodes.size) {
+            let cols = {}; try { cols = (typeof services.tableColumns === 'function' && services.tableColumns()) || {}; } catch (e) { cols = {}; }
+            for (const [col, table] of Object.entries(cols)) if (fieldCodes.has(String(table))) fieldCodes.add(col);
+          }
+          const pool = fieldCodes.size || !plannerRefs.length ? custs : custs.filter(c => plannerRefs.includes(c.customizationId));
+          const impl = pool.filter(c => (Array.isArray(c.fields) ? c.fields : []).some(f => f && (!fieldCodes.size || fieldCodes.has(String(f.code))) && (ktFieldEffectsOf(f.effects) || []).some(x => effs.includes(x.effect))));
+          const refs = impl.map(c => c.customizationId);
+          if (!impl.length) return { ok: false, kind: 'missing', missing: effs.map(e => KT_EFFECT_NOUN_JA[e] || e), refs };
+          //   フィールドが分からず、計画の AI の対応づけも無い: その効果を持つ JavaScript はあるが、この要件のものかを確かめられない
+          if (!fieldCodes.size && !plannerRefs.length) return { ok: false, kind: 'unconfirmed', missing: [], refs };
+          const lack = platforms.filter(p => !impl.some(c => platOfCust(c).includes(p)));
+          return lack.length ? { ok: false, kind: 'missing', missing: lack.map(p => PJ[p]), refs } : { ok: true, refs };
+        }
+        //   値の要件: 取り出した値がすべて計画にあり（文脈の値を含む）、証拠になる値を持つものが要件の言う画面と種類を満たすか。
+        //   計画の AI の対応づけがある要件（見直しの HIGH 1）: 対応づけた要素（とそのまま使う既存のファイル）について、既存の JavaScript のファイル名（existingFiles）・
+        //   効果（上）・画面と種類（下の check）を構造で確かめる（対応づけを付け替えただけで構造の欠落を消さない）。数・「」の名前・フィールドは、対応づけた要素が
+        //   コードの中や複数の手順で持ち得るので対応づけを対応とする。ただし、対応づけた設定の手順がその数を反対側の条件（「未満」の要件に「以上」の条件）で持つだけのときは、
+        //   目に見える食い違いとして足りないとする（「100万円未満」の要件を「100万円以上」の手順に付け替えても欠落は消えない）
+        const contradicted = (a) => a.kind === 'number' && !!a.cmp && (a.rawPlaces || []).some(p => plannerRefs.includes(p.id) && settingIds.has(p.id)) && !a.places.some(p => plannerRefs.includes(p.id));
+        const holdersOf = (a) => {
+          if (!plannerRefs.length) return a.holders;
+          const inRefs = a.holders.filter(id => plannerRefs.includes(id) || /^file:/.test(id));
+          if (inRefs.length) return inRefs;
+          if (a.kind === 'file' || contradicted(a)) return [];
+          return a.strong ? plannerRefs : a.holders.length ? a.holders : plannerRefs;
+        };
+        const notHeld = anchors.filter(a => !holdersOf(a).length);
+        if (notHeld.length) return { ok: false, kind: 'missing', missing: [...new Set(notHeld.map(a => a.text))], ...(notHeld.every(a => a.pending) ? { pending: true } : {}), refs: [...new Set(anchors.flatMap(a => a.holders))] };
+        const strong = anchors.filter(a => a.strong);
+        if (strong.length) return check([...new Set(strong.flatMap(holdersOf))]);
+        if (plannerRefs.length) return check(plannerRefs);
+        //   「残す・維持する」だけの要件（「今ある入力チェックを残す」。証拠になる値が無い）: 計画が何も変えないことが実現。計画に既存の処理を置き換える JavaScript
+        //   （REPLACE_EXISTING_LOGIC）が無いことを構造で確かめ、要件が画面を言うならその画面の既存の JavaScript か計画の要素があるか（モバイルにも使うなら移植が要る）
+        if (KEEP_RE.test(parts.act)) {
+          if (custs.some(c => c.strategy === 'REPLACE_EXISTING_LOGIC')) return { ok: false, kind: 'unconfirmed', missing: [], refs: [] };
+          let files = []; try { const fs0 = typeof services.jsFiles === 'function' && custs[0] ? services.jsFiles({ version: v, customizationId: custs[0].customizationId }) : null; files = Array.isArray(fs0) ? fs0.filter(f => f && f.name) : []; } catch (e) { files = []; }
+          //   既存のファイルを使う JavaScript（移植・統合。existingFiles）も、その画面で既存の処理を使い続けるものに数える
+          const keepIds = [...new Set([...files.map(f => `file:${f.target === 'mobile' ? 'mobile' : 'desktop'}:${f.name}`), ...custs.filter(c => Array.isArray(c.existingFiles) && c.existingFiles.some(e => e && e.name)).map(c => c.customizationId)])];
+          const lack = platforms.filter(p => !keepIds.some(id => platOf(id).includes(p)));
+          return lack.length ? { ok: false, kind: 'missing', missing: lack.map(p => PJ[p]), refs: keepIds } : { ok: true, refs: keepIds };
+        }
+        return { ok: false, kind: 'unconfirmed', missing: [], refs: [] };
+      };
+      /** 実現を確かめられない・足りない要件の画面の文（左の確認できないこと／反映を止めている理由・右の確認できないこと・反映の前の確認で同じ文） */
+      const implGapLineOf = (r) => {
+        const cutT = (s, n) => { const x = String(s ?? '').replace(/\s+/g, ' ').trim(); return x.length > n ? `${x.slice(0, n)}…` : x; };
+        return r.kind === 'unconfirmed' ? `「${cutT(r.text, 140)}」を実現する計画の手順・JavaScript を確かめられません（採用した仮案の項目には結び付いていますが、計画に対応する手順・JavaScript が見つかりません）`
+          : r.kind === 'missing' ? `「${cutT(r.text, 140)}」を実現する計画の手順・JavaScript が足りません（${(r.missing || []).length ? `${r.pending ? '計画の確認待ちの手順・質問にだけあるもの' : '計画に無いもの'}: ${r.missing.join('・')}` : '計画に対応する手順・JavaScript が見つかりません'}）` : '';
       };
       const reqTextOf = (r) => (Array.isArray(r.sourceQuotes) && r.sourceQuotes[0]) || [r.condition ? `${r.condition}のとき` : '', r.target, r.behavior].filter(Boolean).join(' ');
       /** 対応できない（disposition unsupported）とされた決まった要件（実現できない点に出す。黙って落とさない） */
@@ -27278,7 +27492,8 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
         //   C-1 第 3 段で従来のコードのカードの案内を削除したので、最終案の時点で承認できない理由にする（登録の準備で初めて止めない）
         if (entries.some(([, e]) => ktUrlTarget(e))) reasons.push({ kind: 'external', text: 'URL 指定の JavaScript への変更を含みます。外部サーバーのファイルは Toolkit から書き換えられないため、このままでは反映できません（実現できない点を見てください）。' });
         if (blockedIds.length) reasons.push({ kind: 'blocked', text: `実行できない設定の手順が ${blockedIds.length} 件あります（実現できない点を見てください）。` });
-        if (ownerlessDecided.length) reasons.push({ kind: 'ownerless', text: `決まった要件のうち、計画に担当が無いものが ${ownerlessDecided.length} 件あります（対応範囲を見てください）。どの手順・JavaScript で扱うかを伝えて最終案を作り直すか、その要件を取り消してから反映します。` });
+        //   2026-10-15（追加の指示 1）: 採用した仮案の項目だけに結び付き、実現する手順・JavaScript を確かめられない・足りない要件を含むときは、その言い方にする（担当が無いものと合わせて数える）
+        if (ownerlessDecided.length) reasons.push({ kind: 'ownerless', text: ownerlessDecided.every(r => !r.kind || r.kind === 'ownerless') ? `決まった要件のうち、計画に担当が無いものが ${ownerlessDecided.length} 件あります（対応範囲を見てください）。どの手順・JavaScript で扱うかを伝えて最終案を作り直すか、その要件を取り消してから反映します。` : `決まった要件のうち、計画に担当が無い、または実現する手順・JavaScript を確かめられないものが ${ownerlessDecided.length} 件あります（確認できないことを見てください）。どの手順・JavaScript で実現するかを伝えて最終案を作り直すか、その要件を取り消してから反映します。` });
         if (blocking.length) reasons.push({ kind: 'questions', text: `先に決めたいことが ${blocking.length} 件残っています。答えると反映できるようになります。` });
         return { ready: reasons.length === 0, reasons, blockingReason: reasons.length ? reasons[0].text : '', ownerlessDecided, blockedIds };
       };
@@ -28765,7 +28980,15 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
           // 確認 6: 要件の台帳の要件（決まった・AI の提案）のうち担当が無いものは、黙って消さずに「担当が計画にありません」として残す。decided は承認を止め、proposed は確認に残す
           const readiness = finalReadinessOf(v, { unsupported, incomplete });
           const ownerless = unownedRequirementsOf(v, entries);
-          for (const r of ownerless) { const k = r.id; const prevRow = scopeRows.get(k); scopeRows.set(k, { owned: false, text: prevRow && !prevRow.owned ? prevRow.text : `${cut(r.text, 140)}${r.decision === 'proposed' ? '（AI の提案。扱いを確かめてください）' : ''}`, decision: r.decision }); }
+          //   2026-10-15（追加の指示 1）: 採用した仮案の項目だけに結び付き、実現する手順・JavaScript を確かめられない（unconfirmed）・足りない（missing）要件は、その旨の文（line）で
+          //   左の「確認できないこと／反映を止めている理由」と右の「確認できないこと」に同じく出す（担当が無い要件と同じく、決まった要件なら反映を止める）。
+          //   同じ要件の計画全体の確認（生成の AI の担当外の申告。planScope）は、この強い理由と重ねない
+          const implLine = implGapLineOf;
+          for (const r of ownerless) {
+            const k = r.id; const prevRow = scopeRows.get(k); const line = implLine(r);
+            scopeRows.set(k, { owned: false, text: prevRow && !prevRow.owned && !line ? prevRow.text : `${cut(r.text, 140)}${r.decision === 'proposed' ? '（AI の提案。扱いを確かめてください）' : ''}`, decision: r.decision, ...(line ? { line, kind: r.kind } : {}) });
+            for (const key of [...planScope.keys()]) if (planScope.get(key).requirementId === String(k)) planScope.delete(key);
+          }
           //   2026-10-15（§1・§3）: 件数で切らない（担当が決まっていない決まった要件が 5 件目以降でも反映を止める理由から落とさない）。担当未定（決まった → AI の提案など）→ 担当がある行の順
           const rowsF = [...scopeRows.values()];
           const outOfScope = [...rowsF.filter(x => !x.owned && x.decision === 'decided'), ...rowsF.filter(x => !x.owned && x.decision !== 'decided'), ...rowsF.filter(x => x.owned)];
@@ -28892,8 +29115,6 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
           const toLeft = draftBehaviors.some(toLeft0) ? toLeft0 : () => true;
           const adoptedBehaviors = draftBehaviors.filter(toLeft).map(b => cut(labeled(String(b.text)), 140)).filter((x, i, a) => a.indexOf(x) === i);
           for (const b of draftBehaviors.filter(b => !toLeft(b))) { const s = cut(labeled(String(b.text)), 140); if (!behaviors.includes(s)) behaviors.push(s); }
-          //   採用した仮案が標準の設定の変更を言っていたか（approach.standard。左のカードは、言っていたときだけ既存の設定の変更を右に任せる。言っていない変更は左にも出す。独立レビュー L4）
-          const draftStandard = !!(dr && dr.items && dr.items.approach && Array.isArray(dr.items.approach.standard) && dr.items.approach.standard.some(s => String(s || '').trim()));
           //   2026-10-15（§4(b)）: 部分対応の要件のうち実現した部分の 1 文（realizedPartsOf。上で作った）は「最終的にどう動くか」（右）に足す（同じ文があれば足さない）。
           //   左（この案で実現すること）は採用した動作の文で言うので重ねない（「品名・数量・単価」の列挙は右）。PC とモバイルで本当に違う部分（diffTexts）だけ左にも出す
           for (const s of realized.texts) if (!behaviors.includes(s)) behaviors.push(s);
@@ -28901,18 +29122,56 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
           //   existingChanges = 既存の設定を変える手順（UPDATE_…）の構造化した材料（レビュー 1・2026-10-14）: { kind, title, name, from, to, filterCond, beforeFilterCond, targetKind }。
           //   Toolkit Review の変更後（diff.after。無ければ手順の spec）から取り、Review の diff.human（✎・Before・After の行）は連結しない。
           //   文は左のカード（KTAiChatUi.finalCardHtml）が右の「変更内容」と同じ変換（screenTextOf）で組み立てる（条件式を文にできなければ「使える条件が変わります」）
+          //   2026-10-15（追加の指示 2: 採用動作があることを理由に既存操作の変更を一律に隠さない。見直しの MEDIUM 6・7・LOW 8 を反映）: 変わった項目（changed）ごとに、
+          //   採用した要件（決まった・AI の提案）で説明済みかを既存の対応情報で決める。前提: 手順の種類（承認の流れ・通知・リマインダー・一覧）が要件の対象・動作の文の種類と合う
+          //   （語の無い要件・種類の違う手順は説明に使わない。例: 承認の流れの「金額が100万円以上」は、同じ値の通知の条件を説明しない）。項目ごとの証拠:
+          //   - 利用条件（filterCond）: 要件の単位つきの数（向きを含む）をすべてこの手順の条件式が持ち、条件の文のフィールドもこの手順が持つ
+          //   - 遷移先・遷移元・名前（from / to / name）: 変更後の値が要件の文にある
+          //   - 実行できる人・作業者・通知先・表示フィールドなど: 加わる・外れる要素（コード・フィールドの名前）がすべて要件の文にある
+          //   計画の AI の対応づけ（planRefs）だけでは説明済みにしない。説明できない項目が残る変更は、採用した動作があっても左に残す（文は説明できない項目だけ: unexplained）。
+          //   changed = 変更前後で変わった項目（Review の diff の before / after。無ければ分からない＝説明済みにしない）
+          const reqsForExplain = reqsF.filter(r => r && (r.decision === 'decided' || r.decision === 'proposed') && r.disposition !== 'unsupported');
+          const anchorsByReq = new Map(reqsForExplain.map(r => [r.id, requirementAnchorsOf(v, r)]));
+          let labelsEx = {}; try { labelsEx = (typeof services.fieldLabels === 'function' && services.fieldLabels()) || {}; } catch (e) { labelsEx = {}; }
+          const elemTexts = (x) => (Array.isArray(x) ? x : x == null || x === '' ? [] : [x]).map(y => (y && typeof y === 'object' ? (y.code != null ? `${y.type || ''}:${y.code}` : JSON.stringify(y)) : String(y)));
+          const keyExplained = (st, k, before, after) => {
+            const sk = stepKindOf(st.actionType);
+            if (!sk) return false;
+            return reqsForExplain.some(r => {
+              const pt = reqPartsOf(r);
+              if (!reqKindsOf(`${pt.tgt} ${pt.act}`).some(x => x.kind === sk)) return false;
+              const whole = reqWholeText(r);
+              if (k === 'filterCond') {
+                const as = anchorsByReq.get(r.id) || [];
+                const nums = as.filter(a => a.kind === 'number');
+                //   見直しの MEDIUM 7 の残り: その境界（向きを含む）を持つ設定の手順がこの手順だけのとき（同じ境界を持つ関係の無い操作「経理へ回す」の条件の変更を説明済みにしない）
+                const settingHolders = (a) => [...new Set(a.places.filter(pl => pl.key === 'filterCond').map(pl => pl.id))];
+                return nums.length > 0 && nums.every(a => { const hs = settingHolders(a); return hs.length === 1 && hs[0] === st.id; }) && as.filter(a => a.kind === 'field' && a.part === 'cond').every(a => a.holders.includes(st.id));
+              }
+              if (k === 'from' || k === 'to' || k === 'name') { const vals = elemTexts(after && after[k]).map(x => x.trim()).filter(Boolean); return vals.length > 0 && vals.every(x => whole.includes(x)); }
+              const bs = new Set(elemTexts(before && before[k])), as2 = new Set(elemTexts(after && after[k]));
+              const diff = [...[...as2].filter(x => !bs.has(x)), ...[...bs].filter(x => !as2.has(x))];
+              const said = (x) => { const code = x.includes(':') ? x.slice(x.indexOf(':') + 1) : x; return !!code && (whole.includes(code) || (labelsEx[code] && whole.includes(labelsEx[code]))); };
+              return diff.length > 0 && diff.every(said);
+            });
+          };
+          const CHANGE_KEYS = ['filterCond', 'from', 'to', 'executableUsers', 'assignees', 'assigneeType', 'name', 'fields', 'sort', 'targets'];
           const existingChanges = (Array.isArray(p.steps) ? p.steps : []).filter(st => st && !st.alternativeId && /^UPDATE_/.test(String(st.actionType))).map(st => {
             const r = (v.review && Array.isArray(v.review.steps) ? v.review.steps : []).find(x => x && x.stepId === st.id) || null;
             const sp = st.spec && typeof st.spec === 'object' ? st.spec : {};
             const after = r && r.diff && r.diff.after && typeof r.diff.after === 'object' && !Array.isArray(r.diff.after) ? r.diff.after : null;
             const before = r && r.diff && r.diff.before && typeof r.diff.before === 'object' && !Array.isArray(r.diff.before) ? r.diff.before : null;
-            const str = (x) => (x == null ? '' : String(x).replace(/\s+/g, ' ').trim());
+            const str = (x) => (x == null ? '' : Array.isArray(x) ? x.map(y => String(y ?? '').replace(/\s+/g, ' ').trim()).filter(Boolean).join('」・「') : String(x).replace(/\s+/g, ' ').trim());
             const pick = (k) => (after && after[k] != null && after[k] !== '' ? str(after[k]) : str(sp[k]));
             const title = cut(labeled(st.title || st.targetRef || ''), 80);
             const name = str((after && after.name) || sp.name || st.targetRef || '');
             if (!title && !name) return null;
-            return { kind: String(st.actionType), title, name: cut(labeled(name), 60), from: pick('from'), to: pick('to'), filterCond: pick('filterCond'), beforeFilterCond: before ? str(before.filterCond) : null, targetKind: r && r.diff && r.diff.target && r.diff.target.kind ? String(r.diff.target.kind) : null, reviewed: !!r };
-          }).filter(Boolean).slice(0, 6);
+            const changed = before && after ? CHANGE_KEYS.filter(k => JSON.stringify(before[k] ?? null) !== JSON.stringify(after[k] ?? null) && !(k === 'filterCond' && !str(before[k]) && !str(after[k]))) : null;
+            const unexplained = changed ? changed.filter(k => !keyExplained(st, k, before, after)) : null;
+            //   見直しの LOW 8 の残り: 変更前後が無い手順でも、spec が人の指定（実行できる人・作業者）を持てば左で言う（specPeople）
+            const specPeople = !changed && ((Array.isArray(sp.executableUsers) && sp.executableUsers.length) || (Array.isArray(sp.assignees) && sp.assignees.length));
+            return { kind: String(st.actionType), title, name: cut(labeled(name), 60), from: pick('from'), to: pick('to'), filterCond: pick('filterCond'), ...(specPeople ? { specPeople: true } : {}), beforeFilterCond: before ? str(before.filterCond) : null, targetKind: r && r.diff && r.diff.target && r.diff.target.kind ? String(r.diff.target.kind) : null, reviewed: !!r, explained: !!(changed && changed.length && !unexplained.length), ...(changed ? { changed, unexplained } : {}), ...(changed && changed.includes('name') && before && before.name ? { beforeName: cut(labeled(str(before.name)), 60) } : {}) };
+          }).filter(Boolean);
           //   constraints = 真にできないこと（coverage / limit / external）。計画では対応できないとされた要件（req-unsupported）は、同じ要件（requirementId）か同じ文が coverage の行に無いときだけ足す
           //   （レビュー 9・2026-10-14: 先頭 20 字の部分一致はやめ、text 全体の一致か requirementId の一致で重複を見る）
           const constraints = cannot.filter(c => ['coverage', 'limit', 'external'].includes(c.kind));
@@ -28927,7 +29186,7 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
           const hasCase = (id) => !!id && blockers.some(b => b.caseId && b.caseId === id);
           for (const b of machine.blocks) { const t = `機械検査で登録を止める問題: ${b}`; if (!hasText(t)) blockers.push({ kind: 'machine', text: t, next: '' }); }
           for (const c of behCases0.filter(x => x.row.verdict === 'fail')) { const t = `模擬テストで不合格: ${c.row.label}${c.row.message ? `（${c.row.message}）` : ''}`; if (!hasText(t) && !hasCase(c.caseId)) blockers.push({ kind: 'behavior-fail', text: t, next: '', ...(c.caseId ? { caseId: c.caseId } : {}) }); }
-          for (const r of outOfScope.filter(x => x && typeof x === 'object' && !x.owned && x.decision === 'decided')) blockers.push({ kind: 'ownerless', text: `「${r.text}」は、この計画のどの手順・JavaScript が担当するか決まっていません`, next: '計画を直すか、この要件を取り消してから反映します。' });
+          for (const r of outOfScope.filter(x => x && typeof x === 'object' && !x.owned && x.decision === 'decided')) blockers.push({ kind: 'ownerless', text: r.line || `「${r.text}」は、この計画のどの手順・JavaScript が担当するか決まっていません`, next: r.line ? '計画を直す（この要件を実現する手順か JavaScript を入れる）か、この要件を取り消してから反映します。' : '計画を直すか、この要件を取り消してから反映します。' });
           //   2026-10-15（§3）: 計画全体で扱う要件の確認（反映は止めない。右の変更内容・反映の前の確認と同じ文）
           for (const r of planScope.values()) if (!hasText(r.text)) blockers.push({ kind: 'plan-scope', text: r.text, next: '計画を直すか、反映した後に動作テスト環境で確かめてください（この点では反映を止めていません）。', ...(r.requirementId ? { requirementId: r.requirementId } : {}) });
           //   統合テストの指摘 15（2026-10-14）: 「作った JavaScript の誤りとは判定していません」が同じ行（理由の文・末尾・次の方針）に繰り返されるときは 1 回だけ残す（判定の文は変えない。表示の材料だけ）
@@ -28937,7 +29196,7 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
             const once = (s) => String(s || '').replace(/（(?:作った JavaScript |生成したコード)の誤りとは判定していません）|。(?:作った JavaScript |生成したコード)の誤りとは判定していません(?=。|$)|(?:作った JavaScript |生成したコード)の誤りとは判定していないため、|(?:作った JavaScript |生成したコード)の誤りとは判定していません。?/g, (m) => { if (seen) return ''; seen = true; return m; });
             b.text = once(b.text); b.next = once(b.next);
           }
-          return { planId: v.planId, version: v.version, draftId: v.fromDraft ? v.fromDraft.id : null, behaviors, changed, cannot, outOfScope, scopeOut, impact, pendingInstructions, adoptedBehaviors, draftStandard, existingChanges, constraints, supplements, blockers, verification: { machine, effects: effectRows, behavior, unverified, howTo, scope }, questions: questions.map(q => ({ key: q.key, text: q.text, priority: q.priority || 'later', entryId: q.entryId || null, reconfirm: !!q.reconfirm, id: q.id, ...(q.recommendation ? { recommendation: String(q.recommendation) } : {}) })), customizations: entries.map(([cid, e]) => ({ customizationId: cid, status: e.status, role: customizationRoleOf(p, cid) || '', platforms: platformsOfEntry(e), targetFile: e.generated?.targetFile || '', strategy: e.generated?.strategy || null, candidateHash: e.candidateHash || null, repairs: 0, gatewayRepairs: (e.verification && e.verification.repairs && e.verification.repairs.count) || 0, attempts: e.attempts || null, unresolved: e.unresolved || null, verdict: e.verdict || null, failure: e.failure || null, reused: !!e.reused })), unsupported: unsupported.map(u => ({ customizationId: u.customizationId, reason: u.reason || null })), blockedSteps, approvable, blockingReason, fix: fixReq, readiness: { ready: readiness.ready, reasons: readiness.reasons }, incomplete: incomplete && incomplete.kind ? JSON.parse(JSON.stringify(incomplete)) : null,
+          return { planId: v.planId, version: v.version, draftId: v.fromDraft ? v.fromDraft.id : null, behaviors, changed, cannot, outOfScope, scopeOut, impact, pendingInstructions, adoptedBehaviors, existingChanges, constraints, supplements, blockers, verification: { machine, effects: effectRows, behavior, unverified, howTo, scope }, questions: questions.map(q => ({ key: q.key, text: q.text, priority: q.priority || 'later', entryId: q.entryId || null, reconfirm: !!q.reconfirm, id: q.id, ...(q.recommendation ? { recommendation: String(q.recommendation) } : {}) })), customizations: entries.map(([cid, e]) => ({ customizationId: cid, status: e.status, role: customizationRoleOf(p, cid) || '', platforms: platformsOfEntry(e), targetFile: e.generated?.targetFile || '', strategy: e.generated?.strategy || null, candidateHash: e.candidateHash || null, repairs: 0, gatewayRepairs: (e.verification && e.verification.repairs && e.verification.repairs.count) || 0, attempts: e.attempts || null, unresolved: e.unresolved || null, verdict: e.verdict || null, failure: e.failure || null, reused: !!e.reused })), unsupported: unsupported.map(u => ({ customizationId: u.customizationId, reason: u.reason || null })), blockedSteps, approvable, blockingReason, fix: fixReq, readiness: { ready: readiness.ready, reasons: readiness.reasons }, incomplete: incomplete && incomplete.kind ? JSON.parse(JSON.stringify(incomplete)) : null,
             // 時間: 最終案まで（採用・指示を受け付けた時点から。timing.finalMs と同じ起点）と、測った段階だけの内訳（反証 B1・追加指示 §4（f））
             //   §0e.4（2026-10-09）: 計画の自動の差分更新（plan-auto）は別に数える（planMs は利用者の採用・依頼による計画だけ）
             //   2026-10-15（§4(d)）: proposeMs = 同じ送信の仮案の返答（AI の adopt で計画が始まった送信。無ければ null）・gatewayMs = 部ごとの Gateway の処理時間・calls[].gatewayMs = 呼び出しごと
@@ -28960,7 +29219,8 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
           //   §0f.3 の 1（2026-10-09）: この送信が止まった後は、自動の見直し（計画の AI）を呼ばない
           if (typeof services.plan === 'function' && !state.ownerRetryActive && !halted()) {
             const tried = state.ownerRetried.get(v.planId) || new Set();
-            const fresh = unownedRequirementsOf(v, []).filter(r => r.decision === 'decided' && !tried.has(r.id));
+            //   2026-10-15（追加の指示 1）: 値が計画の確認待ちの手順・質問にだけある要件（pending）は、利用者の回答で決まるので計画の自動の見直しの引き金にしない（反映は止めたまま）
+            const fresh = unownedRequirementsOf(v, []).filter(r => r.decision === 'decided' && !r.pending && !tried.has(r.id));
             const effTried = state.effectRetried.get(v.planId) || new Set();
             //   2026-10-10（§5.1）: 移植元と同じ条件かを確かめる手段が無いだけ（source つきの condition-unknown）は計画を直しても解けないので、自動の差分更新の引き金にしない
             const effFresh = (v.plan.customizations || []).filter(c => c && c.customizationId && ['NEW_JS_FILE', 'EXTEND_EXISTING_JS'].includes(c.strategy) && !effTried.has(c.customizationId)).map(c => ({ c, u: requiredOf(v, c.customizationId).unresolved.filter(u => !(u.reason === 'condition-unknown' && u.source)) })).filter(x => x.u.length);
@@ -29657,6 +29917,8 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
          */
         /** 2026-10-15（§3）: 要件の担当として数える id（planOwnerIdsOf。版 v の計画と採用した仮案から）。台帳が無ければ null。画面の書き込み前の確認の検査が使う */
         planOwnerIds: (v = state.activePlan) => { const o = v ? planOwnerIdsOf(v) : null; return o ? [...o] : null; },
+        //   見直しの LOW 5（2026-10-15）: 実現を確かめられない・足りない要件の画面の文（要件の id → 文）。反映の前の確認（生成の検査・登録前の再検査）が左右と同じ文を使う
+        implementationGaps: (v = state.activePlan) => { if (!v) return {}; try { return Object.fromEntries(unownedRequirementsOf(v, []).filter(r => r.kind === 'unconfirmed' || r.kind === 'missing').map(r => [r.id, implGapLineOf(r)])); } catch (e) { return {}; } },
         requirementsInScope: (id = state.activePlan ? state.activePlan.planId : null, plan = undefined) => { const lg = id ? state.ledgers.get(id) : null; if (!lg) return []; const pv = plan !== undefined ? plan : ((state.planHistory.filter(x => x.planId === id).slice(-1)[0] || {}).plan || null); return inScopeRequirements(lg, pv); },
         /**
          * §0f.2 の 5（2026-10-09）: 採用範囲の読み取り（本文なし。次の実機確認で入口を確かめるため）。要件ごとに id・decision・採用の根拠（scope.basis）・作った段階（createdBy）・
@@ -30530,7 +30792,8 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
       //   レビュー 11（2026-10-14）: 「確認できないこと」には、担当が決まっていない要件のほかに、fin.blockers のうち未解決・準備未完了・模擬テスト未実行・未確認の行（text と次の方針）を 1 行ずつ出す
       //   （作成途中のカードのときも根拠と次の方針が右で読めるように。同じ文は 1 回）
       const unownedRows = fin ? uniq([
-        ...(Array.isArray(fin.outOfScope) ? fin.outOfScope : []).filter(x => x && typeof x === 'object' && !x.owned).map(x => `「${x.text}」は、この計画のどの手順・JavaScript が担当するか決まっていません${x.decision === 'decided' ? '（決まった要件なので、反映を止めています）' : ''}`),
+        //   2026-10-15（追加の指示 1）: 実現する手順・JavaScript を確かめられない・足りない要件は、左と同じ文（line）
+        ...(Array.isArray(fin.outOfScope) ? fin.outOfScope : []).filter(x => x && typeof x === 'object' && !x.owned).map(x => `${x.line || `「${x.text}」は、この計画のどの手順・JavaScript が担当するか決まっていません`}${x.decision === 'decided' ? '（決まった要件なので、反映を止めています）' : ''}`),
         ...(Array.isArray(fin.blockers) ? fin.blockers : []).filter(b => b && ['unresolved', 'not-ready', 'not-run', 'unverified', 'plan-scope'].includes(b.kind) && b.text).map(b => `${platJaOf(b.platforms) ? `${platJaOf(b.platforms)}: ` : ''}${b.text}${b.next ? `（次の方針: ${b.next}）` : ''}`),
       ]) : [];
       const impactRows = fin ? impactRowsOf(fin) : [];
@@ -31311,9 +31574,24 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
       const title = String(x.title || '').trim();
       const generic = `今ある設定を変えます: ${title || name}（変更前後は右の「変更内容」）`;
       if (x.kind !== 'UPDATE_PROCESS' || !name || x.targetKind === 'PROCESS_STATUS') return generic;
+      //   2026-10-15（追加の指示 2）: 変更前後が分かる（x.changed）ときは、変わった項目（利用条件・遷移先・実行できる人）だけを言う（実行できる人だけの変更を「進むようになります」と言わない）
+      const ch = Array.isArray(x.changed) ? x.changed : null;
       const cond = String(x.filterCond || '').trim();
-      if (cond) { const c = condSentenceOf(cond, ui, numbers); return c ? `今ある操作「${name}」は、${c}のときだけ使えるようになります` : `既存の操作「${name}」の使える条件が変わります（右の「変更内容」）`; }
-      if (x.to && x.from) return `今ある操作「${name}」は、「${x.from}」から「${x.to}」へ進むようになります`;
+      const condText = () => { const c = condSentenceOf(cond, ui, numbers); return c ? `今ある操作「${name}」は、${c}のときだけ使えるようになります` : `既存の操作「${name}」の使える条件が変わります（右の「変更内容」）`; };
+      if (ch) {
+        const parts = [];
+        if (ch.includes('filterCond')) parts.push(cond ? condText() : `今ある操作「${name}」の使える条件が無くなります`);
+        if (ch.includes('from') || ch.includes('to')) parts.push(x.from && x.to ? `今ある操作「${name}」は、「${x.from}」から「${x.to}」へ進むようになります` : `今ある操作「${name}」の進む先が「${x.to}」になります`);
+        if (ch.includes('executableUsers')) parts.push(`今ある操作「${name}」を実行できる人が変わります（変更前後は右の「変更内容」）`);
+        //   見直しの LOW 8: 名前だけの変更も言う（汎用の文にしない）
+        if (ch.includes('name') && x.beforeName) parts.push(`今ある操作「${x.beforeName}」の名前が「${name}」に変わります`);
+        if (parts.length) return parts.join('。');
+        return generic;
+      }
+      //   見直しの LOW 8 の残り: 変更前後が分からない手順で人の指定がある（specPeople）なら、それも言う
+      const people = x.specPeople ? `。今ある操作「${name}」の実行できる人の指定も含みます（変更前後は右の「変更内容」）` : '';
+      if (cond) return condText() + people;
+      if (x.to && x.from) return `今ある操作「${name}」は、「${x.from}」から「${x.to}」へ進むようになります${people}`;
       if (x.to) return `今ある操作「${name}」の進む先が「${x.to}」になります`;
       return x.beforeFilterCond ? `既存の操作「${name}」の使える条件が変わります（右の「変更内容」）` : generic;
     }
@@ -31338,11 +31616,13 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
       const adopted = Array.isArray(fin.adoptedBehaviors) && fin.adoptedBehaviors.length ? fin.adoptedBehaviors : (Array.isArray(fin.behaviors) ? fin.behaviors : []);
       const existing = Array.isArray(fin.existingChanges) ? fin.existingChanges : [];
       //   レビュー 1（2026-10-14）: 既存の設定の変更の文は、構造化した材料から右の「変更内容」と同じ変換（screenTextOf。フィールドのコードを名前に）で組み立てる
-      //   2026-10-15（最終案の重複と担当未定の食い違い §1・§2）: 採用した仮案が動作と標準の設定の変更（approach.standard）を言っていたときは、既存の設定の変更
-      //   （「申請する」の条件など）は左に重ねない（その動作の実現の詳細。変更前後は右の「何が変わるか」と反映の前の確認の「既存の設定の変更」）。
-      //   採用した動作が無い最終案と、仮案が標準の設定の変更を言っていなかった最終案（利用者の想定と違う変更）は左に 1 文で出す（fin.draftStandard が無い古い最終案は言っていた扱い）
+      //   2026-10-15（追加の指示 2: 採用動作があることを理由に既存操作の変更を一律に隠さない）: 既存の設定の変更のうち、採用した要件で説明済み（explained。buildFinal が
+      //   計画の AI の対応づけか、要件の値をすべてその手順が持つかで決める。例「申請する」の条件は「金額が100万円未満」の要件の値を持つ）のものだけを、採用した動作があるときに
+      //   左に重ねない（変更前後は右の「何が変わるか」と反映の前の確認の「既存の設定の変更」）。説明済みと確かめられない変更（利用条件・遷移先・実行できる人など）は左にも 1 文で残す
       const uiEx = screenTextOf(existing, view.labels || {}, view.users || null, view.numbers || null);
-      const existingLeft = Array.isArray(fin.adoptedBehaviors) && fin.adoptedBehaviors.length && fin.draftStandard !== false ? [] : existing;
+      //   見直しの MEDIUM 6（2026-10-15）: 一部の項目だけ説明済みの変更は、説明できない項目（unexplained）だけを言う（実行できる人の変更を利用条件の説明で隠さない）
+      const hasAdopted = Array.isArray(fin.adoptedBehaviors) && fin.adoptedBehaviors.length > 0;
+      const existingLeft = hasAdopted ? existing.filter(x => !(x && typeof x === 'object' && x.explained === true)).map(x => (x && typeof x === 'object' && Array.isArray(x.unexplained) && x.unexplained.length ? { ...x, changed: x.unexplained } : x)) : existing;
       const realizeRows = [...adopted.map(esc), ...existingLeft.map(x => existingChangeTextOf(x, uiEx, view.numbers || null)).filter(Boolean).map(x => `<span class="kt-ai-final-existing">${esc(x)}</span>`)];
       const realize = realizeRows.length ? sec('この案で実現すること', li(realizeRows)) : '';
       // この案の制約: 真にできないこと（coverage / limit / external。同じ要件の req-unsupported は重ねない）
@@ -32178,7 +32458,8 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
         const wantVerify = !!verification;
         const files = KTScan.summarizeFiles(inputs.scan || null, inputs.data || null);
         //   §0f.2 の 4（2026-10-09）: 「満たすべき要件」と形式確認の要件は採用範囲の中だけ（この版の計画で判定する）
-        const reqLedger = conv && typeof conv.requirementsInScope === 'function' ? conv.requirementsInScope(v.planId, v.plan || null) : conv && typeof conv.requirements === 'function' ? conv.requirements(v.planId) : [];
+        const gapsG = conv && typeof conv.implementationGaps === 'function' ? conv.implementationGaps(v) : {};
+        const reqLedger = (conv && typeof conv.requirementsInScope === 'function' ? conv.requirementsInScope(v.planId, v.plan || null) : conv && typeof conv.requirements === 'function' ? conv.requirements(v.planId) : []).map(r => (r && gapsG[r.id] ? { ...r, gapScreen: gapsG[r.id] } : r));
         //   2026-10-15（§3）: 要件の担当として数える id（会話の準備の判定と同じ集まり。会話が渡したもの、無ければ会話から引く）
         const ownersOfPlan = Array.isArray(planOwners) ? planOwners : conv && typeof conv.planOwnerIds === 'function' ? conv.planOwnerIds(v) : null;
         const requirementIds = wantVerify ? [{ id: c.customizationId, kind: 'customization', text: String(c.requirement || '') }, ...reqLedger.filter(r => r && r.decision !== 'revoked').map(r => ({ id: r.id, kind: 'requirement', text: [r.condition, r.behavior].filter(Boolean).join('：') })), ...(plan?.steps || []).filter(s => s && s.id && s.actionType !== 'CUSTOMIZATION_REQUIRED').map(s => ({ id: s.id, kind: 'step', text: String(s.title || '') }))].filter(x => /^[CRP]\d+$/.test(String(x.id))).slice(0, 50) : null;
@@ -32946,7 +33227,7 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
       // 段階 A（R14）: 登録前の再検査は、計画の新規フィールドを「存在する」扱いにしない（実在するフィールドだけ。新設の依存は prepare の dependsOn で止める）
       let rv2 = KTCodeReview.review({ generated: g.generated, customization: c, plan: v.plan, data: inp.data || null, scan: inp.scan || null, existingSource: g.existingSource ? { name: g.existingSource.name, target: g.existingSource.target, text: g.existingSource.text } : null, provenance: null, existingOnly: true,
         //   2026-10-15（§3）: 生成の検査と同じ要件の台帳と担当の集まりで担当を引く（渡さないと要件 R… の担当がすべて「計画に見つかりません」になり、確認項目に検査の文のまま出ていた）
-        requirements: conv && typeof conv.requirementsInScope === 'function' ? conv.requirementsInScope(v.planId, v.plan || null) : [], planOwners: conv && typeof conv.planOwnerIds === 'function' ? conv.planOwnerIds(v) : null });
+        requirements: (() => { const gp = conv && typeof conv.implementationGaps === 'function' ? conv.implementationGaps(v) : {}; return (conv && typeof conv.requirementsInScope === 'function' ? conv.requirementsInScope(v.planId, v.plan || null) : []).map(r => (r && gp[r.id] ? { ...r, gapScreen: gp[r.id] } : r)); })(), planOwners: conv && typeof conv.planOwnerIds === 'function' ? conv.planOwnerIds(v) : null });
       // §0c（2026-10-08）: 登録前の再検査は形式確認（最新の作業基準で）＋ 生成工程の検証結果（同じ候補の必須の効果・動作テスト）の取り込み。Toolkit は模擬を実行しない。
       //   §0d.4（2026-10-08）: 既知の競合（同じイベントの error と編集不可）は生成工程の check behavior と模擬テストの結果で扱う（Toolkit の形式確認では判定しない）
       if (g.verification && ((Array.isArray(g.requiredEffects) && g.requiredEffects.length) || g.verification.behavior)) rv2 = KTCodeReview.attachBehavior(rv2, g.verification, { requiredEffects: g.requiredEffects || [], customization: c, omitted: g.relatedOmitted || [], effectCheck: g.effectCheck != null ? g.effectCheck === true : ktEffectCheckCapable(services.generatorFeatures() || []) });

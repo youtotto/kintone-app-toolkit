@@ -222,8 +222,12 @@ await section(async () => {
 console.log('\n--- §D6. 設定だけの短い変更: 決まった文の残り・空の見出しが無い ---');
 await section(async () => {
   const step = K.mkStep('P1', 'ADD_VIEW', 'VIEW', '承認待ち一覧', { name: '承認待ち一覧', fields: ['owner'], filterCond: 'ステータス in ("承認待ち")', sort: null }, { title: '一覧「承認待ち一覧」を追加' });
-  const planImpl = (args) => ({ plan: { goal: args.goal, assessment: { summary: '承認待ちの一覧を追加します。' }, steps: [step], customizations: [], provisionals: [], questions: [], unknowns: [], impact: [], solution: 'STANDARD' }, ctx: null, gatewayPlan: null, turn: { reply: '一覧を追加する計画を作りました。', requirementOps: [], utteranceCoverage: [] },
-    review: { base: { baseVersion: '1', env: 'preview', ok: true, fingerprint: 'fp-1', revision: { preview: '10' } }, steps: [{ stepId: 'P1', status: 'VALID', safety: 'SAFE', diff: { before: null, after: { name: '承認待ち一覧', filterCond: 'ステータス in ("承認待ち")' }, human: ['＋ 一覧「承認待ち一覧」（条件: ステータス in ("承認待ち")）'] }, issues: [] }], executionReadiness: { safeSteps: ['P1'], reviewSteps: [], blockedSteps: [], planOnlySteps: [] }, warnings: [] } });
+  //   2026-10-15（追加の指示 1）: 台本の要件（100万円以上は部長承認・100円未満は部長承認を省く・7 営業日の期限）を設定の手順で実現する（一覧だけの計画では要件の実現が足りないので反映を止める）
+  const routeSteps = [K.mkStep('P2', 'ADD_PROCESS_ACTION', 'PROCESS_ACTION', '部長へ申請する', { name: '部長へ申請する', from: '作成中', to: '部長承認待ち', filterCond: 'amount >= "1000000"' }, { title: '100万円以上は部長へ申請' }),
+    K.mkStep('P3', 'ADD_PROCESS_ACTION', 'PROCESS_ACTION', '部長承認を省いて承認する', { name: '部長承認を省いて承認する', from: '承認待ち', to: '承認済み', filterCond: 'amount < "100"' }, { title: '100円未満は部長承認を省く' }),
+    K.mkStep('P4', 'ADD_REMINDER', 'REMINDER', '承認の期限', { name: '承認の期限', timingField: '申請日', daysLater: 7 }, { title: '承認の期限（7 営業日）を知らせる' })];
+  const planImpl = (args) => ({ plan: { goal: args.goal, assessment: { summary: '承認待ちの一覧を追加します。' }, steps: [step, ...routeSteps], customizations: [], provisionals: [], questions: [], unknowns: [], impact: [], solution: 'STANDARD' }, ctx: null, gatewayPlan: null, turn: { reply: '一覧を追加する計画を作りました。', requirementOps: [], utteranceCoverage: [] },
+    review: { base: { baseVersion: '1', env: 'preview', ok: true, fingerprint: 'fp-1', revision: { preview: '10' } }, steps: [{ stepId: 'P1', status: 'VALID', safety: 'SAFE', diff: { before: null, after: { name: '承認待ち一覧', filterCond: 'ステータス in ("承認待ち")' }, human: ['＋ 一覧「承認待ち一覧」（条件: ステータス in ("承認待ち")）'] }, issues: [] }], executionReadiness: { safeSteps: ['P1', 'P2', 'P3', 'P4'], reviewSteps: [], blockedSteps: [], planOnlySteps: [] }, warnings: [] } });
   const x = K.makeConvC({ planImpl });
   await K.adoptC(x);
   const v = x.c.activePlan(), fin = v && v.final;
@@ -238,29 +242,157 @@ await section(async () => {
 });
 
 // =========================================================
-console.log('\n--- §D8. 既存の設定の変更: 採用した仮案が標準の設定の変更を言っていなかったときは左にも出す（利用者の想定と違う変更） ---');
+console.log('\n--- §D8. 既存の設定の変更（追加の指示 2）: 採用した動作があっても一律に隠さない。採用した要件で説明済みの変更だけ左に重ねず、説明済みと確かめられない変更は左にも短く残す ---');
 await section(async () => {
-  //   §12.31 の素材の仮案から approach.standard（プロセス管理の設定）を外す。計画は今までどおり「申請する」の条件を変える
-  const x = await R.run({ proposalMutate: (p) => ({ ...p, approach: { ...p.approach, standard: [] } }) });
-  const fin = x.c.activePlan().final, L = vis(R.leftHtml(x, { pre: READY }));
-  assert(fin && fin.draftStandard === false && fin.adoptedBehaviors.length === 4 && /今ある操作「申請する」は、「金額」が100万円未満のときだけ使えるようになります/.test(L) && !/でもない|1000000/.test(L),
-    `D8-1: 仮案が標準の設定の変更を言っていなければ、既存の操作の変更を左に 1 文（「100万円未満のときだけ」）: ${(L.match(/今ある操作[^\n]*/) || [''])[0]}`);
+  //   (1) 説明済み: §12.31 の「申請する」の条件（amount <= 1000000 and != 1000000）は「金額が100万円未満・以上」の要件（R1 / R2）の値（100万円・金額）をすべて持つ → 左に重ねない（右に変更前後）
   const y = await R.run();
-  assert(y.c.activePlan().final.draftStandard === true && !/今ある操作/.test(vis(R.leftHtml(y, { pre: READY }))), 'D8-2: 仮案が標準の設定の変更を言っていた（§12.31）ときは左に重ねない');
+  const fy = y.c.activePlan().final, Ly = vis(R.leftHtml(y, { pre: READY })), Ry = vis(R.rightHtml(y));
+  assert(fy.existingChanges.length === 1 && fy.existingChanges[0].name === '申請する' && fy.existingChanges[0].explained === true && !/今ある操作|申請する/.test(Ly) && /アクション「申請する」を変更/.test(Ry) && /After: 作成中 → 承認待ち\s*（条件: 「金額」が100万円未満）/.test(Ry),
+    `D8-1: 採用した要件で説明済みの既存の操作の変更（「申請する」の条件）は左に重ねず、右の変更前後で確かめられる: ${JSON.stringify(fy.existingChanges.map(c => [c.name, c.explained, c.changed]))}`);
+  //   (2) 説明済みでない: 計画が既存の操作「差し戻す」を実行できる人を変える（採用した仮案にも要件にも無い）→ 採用した動作があっても左に 1 文で残し、右で変更前後を確かめられる
+  const P6 = { id: 'P6', actionType: 'UPDATE_PROCESS', targetKind: 'PROCESS_ACTION', targetRef: '差し戻す', title: '差し戻すを実行できる人を変更', spec: { name: '差し戻す', from: '承認待ち', to: '作成中', executableUsers: ['USER:user.approver'] }, dependsOn: [] };
+  const before6 = { name: '差し戻す', from: '承認待ち', to: '作成中', filterCond: '', type: 'PRIMARY', executableUsers: [] }, after6 = { ...before6, executableUsers: [{ type: 'USER', code: 'user.approver' }] };
+  const x = await R.run({ planMutate: (plan) => { plan.steps.push(clone(P6)); return plan; }, reviewMutate: (rv) => { rv.steps.push({ stepId: 'P6', status: 'VALID', safety: 'REVIEW', diff: { changeType: 'UPDATE', changeKind: 'ACTION_EXECUTABLE_USERS', target: { kind: 'PROCESS_ACTION', id: '差し戻す' }, before: before6, after: after6, human: ['✎ アクション「差し戻す」を変更', 'Before: 実行できる人: （なし）', 'After: 実行できる人: USER:user.approver'] }, issues: [] }); return rv; } });
+  const fx = x.c.activePlan().final, Lx = vis(R.leftHtml(x, { pre: READY })), Rx = vis(R.rightHtml(x));
+  const ch6 = fx.existingChanges.find(c => c.name === '差し戻す'), line6 = '今ある操作「差し戻す」を実行できる人が変わります（変更前後は右の「変更内容」）';
+  assert(fx.adoptedBehaviors.length === 4 && ch6 && ch6.explained === false && JSON.stringify(ch6.changed) === '["executableUsers"]' && count(Lx, line6) === 1 && !/今ある操作「申請する」/.test(Lx) && /アクション「差し戻す」を変更/.test(Rx) && !/進むようになります/.test(Lx),
+    `D8-2: 採用した要件に無い既存の操作の変更（「差し戻す」を実行できる人）は、採用した動作があっても左に 1 文で残す（説明済みの「申請する」は重ねない）。実行できる人だけの変更を「進むようになります」と言わない: ${JSON.stringify({ changes: fx.existingChanges.map(c => [c.name, c.explained, c.changed]), left: (Lx.match(/今ある操作[^\n]*/g) || []) })}`);
+  //   (3) 見直しの MEDIUM 6: 「申請する」の条件（説明済み）と実行できる人（説明できない）を同じ手順で変える → 左は実行できる人の 1 文だけ（条件の文は重ねない）
+  const withP2 = (o) => (rv) => { const st = rv.steps.find(s => s.stepId === 'P2'); st.diff = { ...st.diff, after: { ...st.diff.after, ...(o.after || {}) }, before: { ...st.diff.before, ...(o.before || {}) } }; return rv; };
+  const z = await R.run({ reviewMutate: withP2({ after: { executableUsers: [{ type: 'USER', code: 'user.approver' }] } }) });
+  const fz = z.c.activePlan().final, Lz = vis(R.leftHtml(z, { pre: READY })), chz = fz.existingChanges.find(c => c.name === '申請する');
+  const lineU = '今ある操作「申請する」を実行できる人が変わります（変更前後は右の「変更内容」）';
+  assert(chz && chz.explained === false && JSON.stringify(chz.changed) === '["filterCond","executableUsers"]' && JSON.stringify(chz.unexplained) === '["executableUsers"]' && count(Lz, lineU) === 1 && !/今ある操作「申請する」は、/.test(Lz),
+    `D8-3: 一部の項目だけ説明済みの変更は、説明できない項目（実行できる人）だけを左に 1 文で残す: ${JSON.stringify({ ch: chz && [chz.changed, chz.unexplained], left: (Lz.match(/今ある操作[^\n]*/g) || []) })}`);
+  //   (4) 見直しの MEDIUM 7: 承認の流れの要件と同じ値（100万円以上・金額）を持つ通知の変更は、種類が違うので説明済みにしない（左に残す）
+  const P7 = { id: 'P7', actionType: 'UPDATE_NOTIFICATION', targetKind: 'NOTIFICATION', targetRef: '高額案件通知', title: '通知「高額案件通知」の通知先を変更', spec: { name: '高額案件通知', filterCond: 'amount >= "1000000"', targets: ['USER:user.director'] }, dependsOn: [] };
+  const b7 = { id: 'perRecord#1', scope: 'perRecord', title: '高額案件通知', filterCond: 'amount >= "1000000"', targets: ['USER:user.manager'] }, a7 = { ...b7, targets: ['USER:user.director'] };
+  const w = await R.run({ planMutate: (plan) => { plan.steps.push(clone(P7)); return plan; }, reviewMutate: (rv) => { rv.steps.push({ stepId: 'P7', status: 'VALID', safety: 'REVIEW', diff: { changeType: 'UPDATE', target: { kind: 'NOTIFICATION', id: 'perRecord#1' }, before: b7, after: a7, human: ['✎ 通知「高額案件通知」を変更'] }, issues: [] }); return rv; } });
+  const fw = w.c.activePlan().final, Lw = vis(R.leftHtml(w, { pre: READY })), ch7 = fw.existingChanges.find(c => c.kind === 'UPDATE_NOTIFICATION');
+  assert(ch7 && ch7.explained === false && count(Lw, '今ある設定を変えます: 通知「高額案件通知」の通知先を変更（変更前後は右の「変更内容」）') === 1 && fw.existingChanges.find(c => c.name === '申請する').explained === true,
+    `D8-4: 同じ値を持っていても種類の違う手順（通知）の変更は、承認の流れの要件で説明済みにしない: ${JSON.stringify({ ch: ch7 && [ch7.explained, ch7.changed], left: (Lw.match(/今ある設定を変えます[^\n]*/g) || []) })}`);
+  //   (5) 見直しの LOW 8: 名前だけの変更は名前の変更として言う（汎用の文にしない）
+  const nm = await R.run({ reviewMutate: withP2({ before: { filterCond: 'amount <= "1000000" and amount != "1000000"' }, after: { name: '課長へ申請する' } }) });
+  const Ln = vis(R.leftHtml(nm, { pre: READY })), chn = nm.c.activePlan().final.existingChanges.find(c => c.kind === 'UPDATE_PROCESS');
+  assert(chn && JSON.stringify(chn.changed) === '["name"]' && chn.explained === false && count(Ln, '今ある操作「申請する」の名前が「課長へ申請する」に変わります') === 1,
+    `D8-5: 名前だけの変更は「名前が変わります」と言う: ${JSON.stringify({ ch: chn && [chn.changed, chn.explained], left: (Ln.match(/今ある操作[^\n]*/g) || []) })}`);
+  //   (6) 見直しの再確認の残り（MEDIUM 7）: 同じ境界（100万円以上）を持つ関係の無い既存の操作「経理へ回す」の条件の変更は、境界を持つ設定の手順がほかにもある（部長へ申請する）ので説明済みにしない
+  const P8 = { id: 'P8', actionType: 'UPDATE_PROCESS', targetKind: 'PROCESS_ACTION', targetRef: '経理へ回す', title: 'アクション「経理へ回す」の条件を変更', spec: { name: '経理へ回す', from: '承認済み', to: '経理確認', filterCond: 'amount >= "1000000"' }, dependsOn: [] };
+  const b8 = { name: '経理へ回す', from: '承認済み', to: '経理確認', filterCond: '', type: 'PRIMARY', executableUsers: [] }, a8 = { ...b8, filterCond: 'amount >= "1000000"' };
+  const e8 = await R.run({ planMutate: (plan) => { plan.steps.push(clone(P8)); return plan; }, reviewMutate: (rv) => { rv.steps.push({ stepId: 'P8', status: 'VALID', safety: 'REVIEW', diff: { changeType: 'UPDATE', changeKind: 'ACTION_CONDITION', target: { kind: 'PROCESS_ACTION', id: '経理へ回す' }, before: b8, after: a8, human: ['✎ アクション「経理へ回す」を変更'] }, issues: [] }); return rv; } });
+  const f8 = e8.c.activePlan().final, L8 = vis(R.leftHtml(e8, { pre: READY })), ch8 = f8.existingChanges.find(c => c.name === '経理へ回す');
+  assert(ch8 && ch8.explained === false && count(L8, '今ある操作「経理へ回す」は、「金額」が100万円以上のときだけ使えるようになります') === 1 && f8.existingChanges.find(c => c.name === '申請する').explained === true,
+    `D8-6: 同じ境界を持つ関係の無い既存の操作の条件の変更は説明済みにせず左に 1 文（「申請する」は説明済みのまま）: ${JSON.stringify({ ch: ch8 && [ch8.explained, ch8.changed], left: (L8.match(/今ある操作[^\n]*/g) || []) })}`);
+  //   (7) 見直しの再確認の残り（LOW 8）: 計画の確認に変更前後が無い既存の操作でも、手順が実行できる人を指定するなら左で言う
+  const e9 = await R.run({ planMutate: (plan) => { const st = plan.steps.find(x => x.id === 'P2'); st.spec.executableUsers = ['USER:user.approver']; return plan; }, reviewMutate: (rv) => { rv.steps = rv.steps.filter(x => x.stepId !== 'P2'); return rv; } });
+  const L9 = vis(R.leftHtml(e9, { pre: READY })), ch9 = e9.c.activePlan().final.existingChanges.find(c => c.name === '申請する');
+  assert(ch9 && ch9.explained === false && /今ある操作「申請する」の実行できる人の指定も含みます（変更前後は右の「変更内容」）/.test(L9),
+    `D8-7: 変更前後の無い既存の操作でも、実行できる人の指定を左で言う: ${JSON.stringify({ ch: ch9 && [ch9.explained, ch9.specPeople], left: (L9.match(/今ある操作[^\n]*/g) || []) })}`);
+});
+
+// =========================================================
+console.log('\n--- §D9. 仮案の採用を実装担当の代わりにしない（追加の指示 1）: 実現する手順・JavaScript を外すと、仮案の項目に結び付いたままでも反映できない ---');
+await section(async () => {
+  const drop = (cid) => (plan) => { plan.customizations = plan.customizations.filter(c => c.customizationId !== cid); plan.steps = plan.steps.filter(s => s.id !== cid); return plan; };
+  //   (1) モバイルの入力チェック（C3: 既存の dealValidate.js のモバイルへの移植）を外す。R4（既存の入力チェックを PC とモバイルで使う）は仮案の項目 B3 に結び付いたまま。
+  //   ほかの JavaScript（PC の編集制御・モバイルの編集制御）は dealValidate.js を使わないので、モバイルの分を実現するものが無い（要望の実質的な欠落）
+  const x = await R.run({ planMutate: drop('C3') });
+  const v = x.c.activePlan(), fin = v.final, L = vis(R.leftHtml(x, { pre: READY })), RV = vis(R.rightHtml(x));
+  const r4 = x.c.requirements(v.planId).find(r => r.id === 'R4');
+  const line4 = '「今ある入力チェックは残して、PCとモバイルの両方で使いたい」を実現する計画の手順・JavaScript が足りません（計画に無いもの: モバイル）';
+  assert(r4 && JSON.stringify(r4.planRefs) === '["B3"]' && r4.decision === 'decided' && r4.disposition === 'adopted' && fin.approvable === false && x.c.approveFinal({ planId: v.planId, version: v.version }).ok === false
+    && fin.blockers.some(b => b.kind === 'ownerless' && b.text === line4) && count(L, line4) === 1 && RV.includes(`${line4}（決まった要件なので、反映を止めています）`) && !/この内容で反映できます/.test(L) && /disabled>動作テスト環境へ反映/.test(R.leftHtml(x, { pre: READY })) && x.calls.plan.length === 2,
+    `D9-1: 実現する JavaScript（モバイルの入力チェック）を外すと、要件が採用した仮案の項目に結び付いたままでも欠落として反映を止める（自動の見直しは今までどおり 1 回。警告だけにしない）: ${JSON.stringify({ approvable: fin.approvable, blockers: fin.blockers.map(b => b.text), planRefs: r4 && r4.planRefs })}`);
+  //   (2) モバイルの編集制御（C2）を外す。R3（PC とモバイルで金額と明細を編集不可）は PC の JavaScript（C1）だけが実現する → 一部だけ（PC）を全体の実現にしない。
+  //   C1 の生成の AI は R3 を満たしたと申告しているが、その申告では担当にしない
+  const y = await R.run({ planMutate: drop('C2') });
+  const vy = y.c.activePlan(), fy = vy.final, Ly = vis(R.leftHtml(y, { pre: READY }));
+  const line3 = '「承認済みでは金額と明細を変更できなくし、差戻し後は再編集できるようにして」を実現する計画の手順・JavaScript が足りません（計画に無いもの: モバイル）';
+  assert(fy.approvable === false && fy.blockers.some(b => b.kind === 'ownerless' && b.text === line3) && count(Ly, line3) === 1 && (vy.generated.C1.review.coverage.met || []).some(m => m.requirementId === 'R3'),
+    `D9-2: PC だけが実現しモバイルが欠けた要件は、全体を満たした扱いにしない（生成の AI の満たしたという申告では担当にしない）: ${JSON.stringify(fy.blockers.map(b => b.text))}`);
+  //   (3) 別の形で実現している: 「申請する」「部長へ申請する」の条件を別の書き方（amount < 1000000 / amount > 999999）にしても、100万円の境界は同じ手順が持つので担当不在にしない
+  const z = await R.run({ planMutate: (plan) => { for (const s of plan.steps) { if (s.id === 'P2') s.spec.filterCond = 'amount < "1000000"'; if (s.id === 'P3') s.spec.filterCond = 'amount > "999999"'; } return plan; } });
+  const fz = z.c.activePlan().final;
+  assert(fz.approvable === true && !fz.blockers.some(b => b.kind === 'ownerless') && z.calls.plan.length === 1, `D9-3: 同じ要件を別の書き方の手順で実現していれば担当不在にしない（自動の見直しもしない）: ${JSON.stringify({ approvable: fz.approvable, blockers: fz.blockers.map(b => b.kind) })}`);
+  //   (4) 別の JavaScript が実現している: モバイルの入力チェックを C3 でなく C2（モバイルの編集制御）が移植元 dealValidate.js を使って担う計画 → R4 は担当不在にしない
+  //   （C2 の保存済みのコードに入力チェックは無いので、必須の動作の検証で止まる。ここで確かめるのは担当の判定だけ）
+  const w = await R.run({ planMutate: (plan) => { const c2 = plan.customizations.find(c => c.customizationId === 'C2'); const c3 = plan.customizations.find(c => c.customizationId === 'C3'); c2.existingFiles = clone(c3.existingFiles); drop('C3')(plan); return plan; } });
+  const fw = w.c.activePlan().final;
+  assert(!fw.blockers.some(b => b.kind === 'ownerless') && !(fw.outOfScope || []).some(r => !r.owned), `D9-4: 同じ要件を別の JavaScript（移植元を使うモバイルの JavaScript）が担えば担当不在にしない: ${JSON.stringify(fw.blockers.map(b => [b.kind, b.text.slice(0, 50)]))}`);
+  //   見直しの反証（2026-10-15）。remap = 計画の AI が n 回目の呼び出し（1 = 自動の見直し）で、要件の対応づけ（planRefs）だけを付け替える（計画は変えない）
+  const remap = (id, refs, at = 1) => (n, args) => (n !== at ? [] : (args.requirements || []).filter(r => r && r.id === id).map(r => ({ op: 'update', id: r.id, target: r.target || '', condition: r.condition || '', behavior: r.behavior, exceptions: clone(r.exceptions || []), decision: r.decision, disposition: r.disposition || 'adopted', sourceQuotes: clone(r.sourceQuotes || []), planRefs: refs, note: '', ...(Array.isArray(r.effects) ? { effects: clone(r.effects) } : {}) })));
+  const blockTexts = (xx) => xx.c.activePlan().final.blockers.map(b => b.text);
+  const lineOf = (quote, what) => `「${quote}」を実現する計画の手順・JavaScript が足りません（計画に無いもの: ${what}）`;
+  const reqOf = (xx, id) => xx.c.requirements(xx.c.activePlan().planId).find(r => r.id === id);
+  //   (5) 見直しの HIGH 1: C3 を外したまま、自動の見直しで計画の AI が R4 の対応づけだけを C1（PC の編集制御）・C2（モバイルの編集制御。移植元を使わない）に付け替える
+  //   → 対応づけた要素に既存の入力チェック（dealValidate.js）のモバイルの分を持つものが無いので、反映を止めたまま（対応づけだけで構造の欠落を消さない）
+  const h1 = await R.run({ planMutate: drop('C3'), planOps: remap('R4', ['C1']) });
+  const h1b = await R.run({ planMutate: drop('C3'), planOps: remap('R4', ['C2']) });
+  assert([h1, h1b].every(xx => xx.c.activePlan().final.approvable === false && blockTexts(xx).includes(line4) && xx.calls.plan.length === 2) && JSON.stringify(reqOf(h1, 'R4').planRefs) === '["C1"]' && JSON.stringify(reqOf(h1b, 'R4').planRefs) === '["C2"]',
+    `D9-5: 自動の見直しで計画の AI が要件の対応づけだけを別の JavaScript に付け替えても、構造の欠落（モバイルの入力チェック）は消えず反映を止める: ${JSON.stringify([h1, h1b].map(xx => ({ approvable: xx.c.activePlan().final.approvable, refs: reqOf(xx, 'R4').planRefs, blockers: blockTexts(xx) })))}`);
+  //   (6) 数の境界の向き: 「申請する」の条件（100万円未満の側。P2）を外すと、100万円を持つのは「部長へ申請する」（100万円以上の側。P3）だけ → R2 は足りない。逆に P3 を外すと R1 が足りない。
+  //   P2 を外したまま計画の AI が R2 を P3 に付け替えても、P3 の条件は 100万円未満の側を通さないので足りないまま
+  const dP2 = await R.run({ planMutate: (plan) => { plan.steps = plan.steps.filter(s => s.id !== 'P2'); return plan; } });
+  const dP3 = await R.run({ planMutate: (plan) => { plan.steps = plan.steps.filter(s => s.id !== 'P3'); return plan; } });
+  const dP2r = await R.run({ planMutate: (plan) => { plan.steps = plan.steps.filter(s => s.id !== 'P2'); return plan; }, planOps: remap('R2', ['P3']) });
+  const line2 = lineOf('100万円未満は課長承認にしたい', '100万円未満'), line1 = lineOf('100万円以上は部長承認', '100万円以上');
+  assert(dP2.c.activePlan().final.approvable === false && blockTexts(dP2).includes(line2) && !blockTexts(dP2).includes(line1) && dP3.c.activePlan().final.approvable === false && blockTexts(dP3).includes(line1) && !blockTexts(dP3).includes(line2)
+    && dP2r.c.activePlan().final.approvable === false && blockTexts(dP2r).includes(line2) && JSON.stringify(reqOf(dP2r, 'R2').planRefs) === '["P3"]',
+    `D9-6: 金額の境界は条件の向きまで確かめる（100万円未満の側を外す → R2、以上の側を外す → R1 が足りない。反対側の手順への付け替えでは消えない）: ${JSON.stringify({ P2: blockTexts(dP2), P3: blockTexts(dP3), P2remap: blockTexts(dP2r) })}`);
+  //   (7) 見直しの HIGH 2: 弱い値だけでは実現にしない
+  //   a. ステータス名だけ（「承認済みになったとき申請者に通知する」。通知の手順は計画に無い）→ 確かめられない（反映を止める）
+  const setR = (id, o) => (r) => (r.id === id ? { ...r, ...o } : r);
+  const ha = await R.run({ reqMutate: setR('R5', { target: '通知', condition: '承認済みになったとき', behavior: '申請者に通知する', effects: [] }) });
+  const quote5 = reqOf(ha, 'R5').sourceQuotes[0];
+  //   b. 効果（編集不可）があるのにフィールドの語が無く、編集制御の JavaScript（C1・C2）を外した → 足りない（編集の禁止）
+  const hb = await R.run({ reqMutate: setR('R3', { target: '', behavior: '編集できないようにする', effects: ['lock'] }), planMutate: (plan) => drop('C2')(drop('C1')(plan)) });
+  //   c. 効果の申告が無く（effects 空）、「金額を編集不可」の編集不可を持つ JavaScript が無い（C1・C2 を外した。モバイルの保存の停止 C3 だけが金額を扱う）→ 動作の文から編集不可を読み、足りない（編集の禁止）
+  const hc = await R.run({ reqMutate: setR('R3', { target: '', behavior: '金額を編集不可にする', effects: [] }), planMutate: (plan) => drop('C2')(drop('C1')(plan)) });
+  //   d. 既存のファイル名を言うが「残す」ではなく新しい動作（保存を止める）で、それを使う JavaScript（C3）を外した → アプリにある既存のファイルを実現に数えない。
+  //      動作の文から保存の停止を読み、単価の保存の停止を持つ JavaScript が無いので足りない（保存の停止）
+  const hd = await R.run({ reqMutate: setR('R4', { behavior: '単価が0のときは保存を止める', effects: [] }), planMutate: drop('C3') });
+  const quote3 = '承認済みでは金額と明細を変更できなくし、差戻し後は再編集できるようにして', quote4 = '今ある入力チェックは残して、PCとモバイルの両方で使いたい';
+  assert(ha.c.activePlan().final.approvable === false && blockTexts(ha).some(t => t.startsWith(`「${quote5}」を実現する計画の手順・JavaScript を確かめられません`))
+    && hb.c.activePlan().final.approvable === false && blockTexts(hb).includes(lineOf(quote3, '編集の禁止'))
+    && hc.c.activePlan().final.approvable === false && blockTexts(hc).includes(lineOf(quote3, '編集の禁止'))
+    && hd.c.activePlan().final.approvable === false && blockTexts(hd).includes(lineOf(quote4, '保存の停止')),
+    `D9-7: ステータス名だけ・フィールドの語の無い効果・効果の申告の無い編集不可・既存のファイル名だけの新しい動作は、実現の証拠にしない（反映を止める）: ${JSON.stringify({ a: blockTexts(ha), b: blockTexts(hb), c: blockTexts(hc), d: blockTexts(hd) })}`);
+  //   (8) 見直しの LOW 5: 「モバイルは対象外」の否定はモバイルを求める語に数えない（C3 を外しても R4 は PC の既存のファイルで足りる）
+  const hn = await R.run({ reqMutate: setR('R4', { condition: 'PCの入力・保存時（モバイルは対象外）' }), planMutate: drop('C3') });
+  assert(hn.c.activePlan().final.approvable === true && !blockTexts(hn).length && hn.calls.plan.length === 1, `D9-8: 「モバイルは対象外」は画面の要求に数えない: ${JSON.stringify(blockTexts(hn))}`);
+  //   (9) 見直しの MEDIUM 3（残る緊張）: 値の無い否定の要件（「新しい入力チェックは追加しない」）は、計画の AI の対応づけが無ければ確かめられない（反映を止め、自動の見直しを 1 回）。
+  //   自動の見直しで計画の AI が対応づけを返せば、その対応で承認できる（値の無い要件は計画の AI の対応づけを対応とする）
+  const neg = { target: '', condition: '', behavior: '新しい入力チェックは追加しない', effects: [] };
+  const m3 = await R.run({ reqMutate: setR('R6', neg) });
+  const m3r = await R.run({ reqMutate: setR('R6', neg), planOps: remap('R6', ['C3']) });
+  const quote6 = reqOf(m3, 'R6').sourceQuotes[0];
+  assert(m3.c.activePlan().final.approvable === false && blockTexts(m3).some(t => t.startsWith(`「${quote6}」を実現する計画の手順・JavaScript を確かめられません`)) && m3.calls.plan.length === 2
+    && m3r.c.activePlan().final.approvable === true && !blockTexts(m3r).length && m3r.calls.plan.length === 2,
+    `D9-9: 値の無い要件は、計画の AI の対応づけが無ければ反映を止め（自動の見直し 1 回）、対応づけが返れば承認できる: ${JSON.stringify({ noMap: blockTexts(m3), mapped: { approvable: m3r.c.activePlan().final.approvable, blockers: blockTexts(m3r) } })}`);
+  //   (10) 見直しの再確認の残り（HIGH 2）: 効果の申告が無い「金額を変更できないようにする」を、別の効果（保存の停止。C3）の JavaScript で実現にしない。
+  //   「そのまま残し、…保存も止める」のように残すことと新しい動作が混じる要件は、新しい動作（保存の停止）を持つ JavaScript が要る
+  const hv1 = await R.run({ reqMutate: setR('R3', { target: '', condition: '承認済み', behavior: '金額を変更できないようにする', effects: [] }), planMutate: (plan) => drop('C2')(drop('C1')(plan)) });
+  const hv2 = await R.run({ reqMutate: setR('R4', { target: 'dealValidate.js', condition: '保存時', behavior: '今の入力チェックはそのまま残し、単価が0のときも保存を止める', effects: [] }), planMutate: drop('C3') });
+  assert(hv1.c.activePlan().final.approvable === false && blockTexts(hv1).includes(lineOf(quote3, '編集の禁止')) && hv2.c.activePlan().final.approvable === false && blockTexts(hv2).includes(lineOf(quote4, '保存の停止')),
+    `D9-10: 効果の申告が無い要件は動作の文から効果を読み、別の効果の JavaScript や「残す」の語で実現にしない: ${JSON.stringify({ v1: blockTexts(hv1), v2: blockTexts(hv2) })}`);
+  //   (11) 見直しの再確認の残り（MEDIUM 3 の一部）: 「今の作業者の指定のままにする」は残す要件（計画が既存の処理を置き換えない）として確かめる（確かめられないで止めない）
+  const keep6 = await R.run({ reqMutate: setR('R6', { target: '', condition: '', behavior: '承認者は今の作業者の指定のままにする', effects: [] }) });
+  assert(keep6.c.activePlan().final.approvable === true && !blockTexts(keep6).length && keep6.calls.plan.length === 1, `D9-11: 「…のままにする」は残す要件として確かめる: ${JSON.stringify(blockTexts(keep6))}`);
 });
 
 // =========================================================
 console.log('\n--- §D7. 画面: 反映の前の確認の再検査も、生成の検査と同じ要件の台帳と担当の集まりで担当を引く（左のカード・右の変更内容と同じ文） ---');
 await section(async () => {
-  //   台本の要件 R4（7 営業日以内に承認する）の planRefs は仮案の項目 A3。生成の AI が担当外と申告する（計画にこの期限を実現する手順は無い）
+  //   台本の要件 R4（7 営業日以内に承認する）を、計画の AI は JavaScript C1 に対応づける（画面の偽の計画の AI の要件の対応づけ）。生成の AI（C1）は R4 を担当外と申告する
+  //   → 担当の JavaScript 自身の担当外の申告（self の文）。反映の前の再検査に要件の台帳と担当の集まりが渡っていなければ「担当範囲外とされた要件…計画に見つかりません」になる
   const { m, v } = await K.mountFinal({ kind: 'js', coverage: [{ requirementId: 'C1', status: 'MET', note: '' }, { requirementId: 'R4', status: 'OUT_OF_SCOPE', note: '期限はプロセス管理の設定で扱う', text: '7 営業日以内に承認する' }] });
   const { pre } = await K.prepareOnScreen(m);
-  const line = '「7 営業日以内に承認する」は、作った JavaScript では担当外とされました。計画のどの手順で実現するかは書かれていません';
+  const line = '「7 営業日以内に承認する」は、担当の JavaScript では担当外とされました。どこで実現するかは計画に書かれていません';
   const confs = (pre && pre.items && Array.isArray(pre.items.confirmations) ? pre.items.confirmations : []).map(c => (c && typeof c === 'object' ? c.text : String(c)));
   const fin = v && v.final, chat = m.chat(), L = vis(chat), RV = vis(KTAiChatUi.changeSummaryHtml(m.conv().activePlan(), {}));
   const ledgerR4 = m.conv().requirements(v.planId).find(r => r.id === 'R4');
   //   反映の前の確認の確認項目は、同じ文の後ろに確かめ方（HOW_TO_CHECK の coverage-owner）を括弧で添える
-  assert(ledgerR4 && JSON.stringify(ledgerR4.planRefs) === '["A3"]' && fin && fin.approvable === true && pre && pre.status === 'ready' && confs.filter(t => t === `${line}（計画のどの手順で扱われているかを変更内容の「何が変わるか」で確かめ、扱われていなければ計画を直す）`).length === 1 && !confs.some(t => OWNERLESS_RE.test(t)) && count(L, line) === 1 && count(RV, line) === 1 && !OWNERLESS_RE.test(L + RV),
+  assert(ledgerR4 && JSON.stringify(ledgerR4.planRefs) === '["C1"]' && fin && fin.approvable === true && pre && pre.status === 'ready' && confs.filter(t => t === `${line}（計画のどの手順で扱われているかを変更内容の「何が変わるか」で確かめ、扱われていなければ計画を直す）`).length === 1 && !confs.some(t => OWNERLESS_RE.test(t)) && count(L, line) === 1 && count(RV, line) === 1 && !OWNERLESS_RE.test(L + RV),
     `D7-1: 画面の反映の前の確認の確認項目・左のカード・右の変更内容に同じ文 1 回ずつ（「担当範囲外とされた要件…計画に見つかりません」は出ない。反映は止めない）: ${JSON.stringify({ planRefs: ledgerR4 && ledgerR4.planRefs, approvable: fin && fin.approvable, status: pre && pre.status, confs })}`);
 });
 

@@ -126,7 +126,8 @@ function createNewFlowKit(T) {
   /** 契約の形の応答 → Toolkit の client.propose が返す形（validateProposal を通す）。utterance = 今回の発言（2026-10-15 §3.2: 進行を求める語句 adoptQuote の照合に使う） */
   const normalized = (raw, requestId = 'pp-1', utterance = null) => { const v = KTAiClient.validateProposal({ ok: true, contractVersion: '2.1', meta: META, ...raw }, { utterance }); if (!v.ok) throw new Error(`台本の形が不正: ${v.errors[0].message}`); return { ...v.normalized, requestId, clientWarnings: v.warnings }; };
   /** 計画の AI の成功の応答（最小の計画。turn に coverage 無し） */
-  const planOk = (args) => ({ plan: { goal: args.goal, assessment: { summary: '承認の流れを設定します。' }, steps: [], customizations: [], provisionals: [], questions: [] }, ctx: null, review: null, gatewayPlan: null, turn: { reply: '計画を作りました。', requirementOps: [], utteranceCoverage: [] } });
+  //   2026-10-15（追加の指示 1）: 要件の担当になる設定の手順を 1 つ持つ（手順の無い計画では、採用した仮案の要件を実現する手順が無いので反映できない＝自動の見直しが 1 回増える）
+  const planOk = (args) => ({ plan: { goal: args.goal, assessment: { summary: '承認の流れを設定します。' }, steps: [mkStep('P1', 'ADD_PROCESS_STATUS', 'PROCESS_STATUS', '部長承認待ち', { name: '部長承認待ち' }, { title: '承認の流れを設定' })], customizations: [], provisionals: [], questions: [] }, ctx: null, review: null, gatewayPlan: null, turn: { reply: '計画を作りました。', requirementOps: [], utteranceCoverage: [] } });
   const planFail = () => ({ plan: null, message: '計画を作れませんでした（テスト）', reason: 'TEST' });
   const planThrow = () => { throw Object.assign(new Error('timeout'), { code: 'TIMEOUT' }); };
   const gateMk = () => { let open; const p = new Promise(r => { open = r; }); return { p, open }; };
@@ -166,7 +167,9 @@ function createNewFlowKit(T) {
   }
   //   §0f.5 の 3（2026-10-09）: scriptFn = 仮案の台本（既定は script）を差し替えられる（実機の仮案の文を画面で描く回帰用）
   //   2026-10-10（再検証前の指示 §4）: clientWrap = 偽の session.client を包む関数（送られた引数の budget を記録し、応答に Gateway の費用の記録 budgetMeta を足す回帰用）
-  function mount({ health = HEALTH, proposeGate = null, planImpl = null, generateImpl = null, extra = null, liveBase = false, scriptFn = script, clientWrap = null } = {}) {
+  //   2026-10-15（追加の指示 1）: autoMap = 偽の計画の AI が要件の対応づけ（turn.requirementOps）を返す（withPlannerMapping。計画の Context の requirements を計画の要素に結び付ける）
+  function mount({ health = HEALTH, proposeGate = null, planImpl = null, generateImpl = null, extra = null, liveBase = false, scriptFn = script, clientWrap = null, autoMap = true } = {}) {
+    const mapFlat = (res, ctx) => (autoMap ? mapPlanResponse(res, ctx) : res);
     const storage = makeStorage();
     const settings = KTAiClient.createSettingsStore({ storage, host: 't.cybozu.com' });
     settings.setConsent(true);
@@ -177,7 +180,7 @@ function createNewFlowKit(T) {
       async getHealth() { return health; },
       //   §0f.3（2026-10-09）: 画面が渡した期限（health の deadlineMs。無ければ null）も記録する
       async ask({ ctx, requestId, deadlineMs = null }) { calls.ask.push({ ctx, deadlineMs }); const v = KTAiClient.validateAnswer(answerFor(ctx, '答えです。'), ctx); return { ...v.normalized, requestId, clientWarnings: v.warnings }; },
-      async plan({ ctx, requestId, deadlineMs = null }) { calls.plan.push({ ctx, deadlineMs }); clock.t += 30000; if (mx.planImpl) return mx.planImpl({ ctx, requestId }); const v = KTAiClient.validatePlan(PLAN_V1(ctx.goal), ctx); return { ...v.normalized, requestId, clientWarnings: v.warnings }; },
+      async plan({ ctx, requestId, deadlineMs = null }) { calls.plan.push({ ctx, deadlineMs }); clock.t += 30000; if (mx.planImpl) { const r0 = mx.planImpl({ ctx, requestId }); const r = r0 && typeof r0.then === 'function' ? await r0 : r0; return mapFlat(r, ctx); } const v = KTAiClient.validatePlan(PLAN_V1(ctx.goal), ctx); return mapFlat({ ...v.normalized, requestId, clientWarnings: v.warnings }, ctx); },
       async propose({ ctx, requestId, onText = null, deadlineMs = null }) {
         calls.propose.push({ ctx, stream: typeof onText === 'function', deadlineMs });
         const raw = scriptFn({ utterance: ctx.question, previous: ctx.conversation.proposal, requirements: ctx.conversation.requirements });
@@ -298,10 +301,46 @@ function createNewFlowKit(T) {
     return { impl, calls };
   }
   /**
+   * 2026-10-15（追加の指示 1: 仮案の採用を実装担当の代わりにしない）: 偽の計画の AI の要件の対応づけ。計画の返答に要件の操作（turn.requirementOps）が無いとき、
+   *   送られた要件（args.requirements = 計画の AI に渡す台帳の要件）を計画の要素に結び付ける update を足す
+   *   （本物の計画の AI は要件ごとに planRefs を返す契約。Toolkit は採用した仮案の項目だけでは実装の担当としないので、テストの偽の計画も対応づけを返す）。
+   *   見直しの MEDIUM 4（2026-10-15）: 結び付け先は構造で選ぶ。効果（effects）のある要件はその効果を持つ JavaScript（無ければ結び付けない＝欠落として見える）、
+   *   それ以外は計画の確認待ち以外のすべての要素（Toolkit は対応づけた要素の中で値・画面・種類・既存のファイルを確かめるので、対応づけで構造の確かめを飛ばさない。
+   *   数・「」の名前は対応づけた JavaScript がコードの中で持ち得るとする Toolkit の扱いは本物と同じ）。
+   *   わざと担当を欠いた計画の回帰は autoMap: false か、計画の返答に noAutoMap: true を付ける
+   */
+  //   台本の計画が要件の操作を返していても、操作していない要件を結び付ける（merge は互換のための引数。今は常にこの動き）
+  /** 画面の client.plan の応答（validatePlan の normalized。計画の値と turn が平らに並ぶ形）に withPlannerMapping を当てる。ctx = 計画の Context（requirements を持つ） */
+  function mapPlanResponse(res, ctx) { if (!res || res.noAutoMap || !Array.isArray(res.steps)) return res; const m = withPlannerMapping({ plan: res, turn: res.turn }, ctx && ctx.requirements); return m && m.turn && m.turn !== res.turn ? { ...res, turn: m.turn } : res; }
+  /** Gateway の計画の応答の形（{ ok, contractVersion, meta, plan, turn }）に withPlannerMapping を当てる（偽の Gateway・画面の client の偽物の計画の応答用）。ctx = 計画の Context */
+  function rawWithPlannerMapping(raw, ctx) { if (!raw || !raw.plan) return raw; const m = withPlannerMapping({ plan: raw.plan, turn: raw.turn }, ctx && ctx.requirements); return m && m.turn && m.turn !== raw.turn ? { ...raw, turn: m.turn } : raw; }
+  function withPlannerMapping(r, requirements, { merge = false } = {}) {
+    if (!r || !r.plan || r.noAutoMap) return r;
+    const turn = r.turn && typeof r.turn === 'object' ? r.turn : { reply: '', requirementOps: [], utteranceCoverage: [] };
+    const given = Array.isArray(turn.requirementOps) ? turn.requirementOps : [];
+    void merge;
+    const touched = new Set(given.filter(o => o && o.id).map(o => String(o.id)));
+    const steps = Array.isArray(r.plan.steps) ? r.plan.steps : [];
+    const custs = Array.isArray(r.plan.customizations) ? r.plan.customizations : [];
+    const allIds = [...custs.filter(c => c && c.customizationId).map(c => c.customizationId), ...steps.filter(s => s && s.id && !s.alternativeId && !['REQUIRE_CONFIRMATION', 'CUSTOMIZATION_REQUIRED'].includes(s.actionType)).map(s => s.id)];
+    const effIds = (effs) => custs.filter(c => c && c.customizationId && (Array.isArray(c.fields) ? c.fields : []).some(f => f && (Array.isArray(f.effects) ? f.effects : []).some(e => effs.includes(typeof e === 'string' ? e : e && e.effect)))).map(c => c.customizationId);
+    const refsOf = (q) => (Array.isArray(q.effects) && q.effects.length ? effIds(q.effects) : allIds);
+    //   台本の計画が操作した要件（turn.requirementOps の id）はそのまま。それ以外の送られた要件のうち、採用した仮案の項目に結び付いている（planRefs があり、
+    //   この計画の要素を指さない）ものだけを結び付ける。planRefs の無い要件（どこにも結び付いていない）・すでにこの計画の要素に結び付いている要件は操作しない
+    //   （planRefs の無い要件はこの修正の前から担当が無い要件。わざと担当を欠いた回帰がそのまま確かめられる）
+    const planIdsNow = new Set([...steps.map(s => s && s.id), ...custs.map(c => c && c.customizationId)].filter(Boolean));
+    const reqs = (Array.isArray(requirements) ? requirements : []).filter(q => q && q.id && q.decision !== 'revoked' && q.behavior && !touched.has(String(q.id)) && Array.isArray(q.planRefs) && q.planRefs.length > 0 && !q.planRefs.some(x => planIdsNow.has(x)));
+    const mapped = reqs.map(q => [q, refsOf(q)]).filter(([, refs]) => refs.length);
+    if (!mapped.length) return r;
+    const ops = mapped.map(([q, refs]) => ({ op: 'update', id: q.id, target: q.target || '', condition: q.condition || '', behavior: q.behavior, exceptions: clone(q.exceptions || []), decision: q.decision, disposition: q.disposition || 'adopted', sourceQuotes: clone(q.sourceQuotes || []), planRefs: refs.slice(0, 8), note: q.note || '', ...(Array.isArray(q.effects) ? { effects: clone(q.effects) } : {}) }));
+    return { ...r, turn: { ...turn, requirementOps: [...given, ...ops] } };
+  }
+  /**
    * 段階 C の偽 services（仮案 → 採用 → 計画 → 生成と検証（生成工程）→ 最終案）。
    *   §0f（2026-10-09）: scriptFn = 仮案の台本（既定は script）・labels = フィールドのラベル（既定は LABELS_C）を差し替えられる
+   *   2026-10-15: autoMap = 偽の計画の AI が要件の対応づけを返す（withPlannerMapping。既定は返す。わざと担当を欠いた回帰は false）
    */
-  function makeConvC({ planImpl = (args) => planJs(args), generate = makeGenerate(), feedback = true, storage = null, planGate = null, materials = '見ている設定: ステータス 3 件・通知 0 件・既存の JavaScript 0 ファイル', supported = true, scriptFn = script, labels = LABELS_C } = {}) {
+  function makeConvC({ planImpl = (args) => planJs(args), generate = makeGenerate(), feedback = true, storage = null, planGate = null, materials = '見ている設定: ステータス 3 件・通知 0 件・既存の JavaScript 0 ファイル', supported = true, scriptFn = script, labels = LABELS_C, autoMap = true } = {}) {
     const calls = { propose: [], plan: [], ask: [] };
     let t = 1000;
     const x = { planImpl };
@@ -313,7 +352,7 @@ function createNewFlowKit(T) {
       async customizeRevision() { return '42'; },
       async propose(args) { calls.propose.push({ utterance: args.utterance }); const raw = scriptFn(args); if (!raw) return { ok: false, reason: 'NO_SCRIPT', message: `台本がありません: ${args.utterance}` }; t += 3000; if (typeof args.onText === 'function') args.onText(raw.reply.slice(0, 12)); await tick(); t += 4000; if (typeof args.onText === 'function') args.onText(raw.reply); return { ok: true, proposal: normalized(raw, `pp-${calls.propose.length}`, args.utterance), ctx: { facts: [] }, perf: { baseWaitMs: 0, contextMs: 5, requestMs: 7000 } }; },
       async ask(args) { calls.ask.push({ question: args.question }); t += 2000; return { ok: true, answer: { answer: '答えです。', facts: [], analysis: [], recommendations: [], unknowns: [] }, ctx: { facts: [] } }; },
-      async plan(args) { calls.plan.push({ goal: args.goal, revision: !!args.revision, onText: typeof args.onText === 'function', request: args.revision ? args.revision.request : null, focus: args.revision && Array.isArray(args.revision.focus) ? [...args.revision.focus] : null }); if (typeof args.onText === 'function') { t += 3000; args.onText('承認待ちの間だけ金額を'); } if (planGate) await planGate.p; t += 27000; if (typeof args.onText === 'function') args.onText('承認待ちの間だけ金額を編集不可にします。'); return x.planImpl(args); },
+      async plan(args) { calls.plan.push({ goal: args.goal, revision: !!args.revision, onText: typeof args.onText === 'function', request: args.revision ? args.revision.request : null, focus: args.revision && Array.isArray(args.revision.focus) ? [...args.revision.focus] : null }); if (typeof args.onText === 'function') { t += 3000; args.onText('承認待ちの間だけ金額を'); } if (planGate) await planGate.p; t += 27000; if (typeof args.onText === 'function') args.onText('承認待ちの間だけ金額を編集不可にします。'); const r0 = x.planImpl(args); const r = r0 && typeof r0.then === 'function' ? await r0 : r0; return autoMap ? withPlannerMapping(r, args.requirements) : r; },
       async generate(args) { t += 20000; return generate.impl(args); },
       readiness() { return null; },
     };
@@ -425,7 +464,7 @@ function createNewFlowKit(T) {
     return { v, clicked: true, button, pre, run: m.panel.finalRun(), writes: writesOf(m).slice(w0), card: cards.length ? stripC(cards[cards.length - 1]) : '', cardHtml: cards.length ? cards[cards.length - 1] : '', cardCount: cards.length, exec: m.panel.executorState(), js: m.panel.jsExecState() };
   };
 
-  return { tick, ticks, clone, buildInputs, INPUTS, META, B, A, Q, APPROVER, ROUTE, BASE, CSV, Q_THRESHOLD, Q_MIDDLE, Q_DAYS, Q_HOLIDAYS, Q_LOCK, Q_TIMING, B_SELECT, B_ROUTE, B_UNDER, B_OVER, B_NOTIFY_TO, B_NOTIFY_IF, B_LOCK, STD, req, idBy, reqIdBy, script, normalized, planOk, planFail, planThrow, gateMk, HEALTH, spec, mkStep, PLAN_META, PLAN_V1, answerFor, makeStorage, gate, mount, clickChat, RP, KTCodeReview, DATA_C, LABELS_C, custOf, CUST_C1, ST_C, handlerC, GOOD, BAD, WARN, VALUE, LOCKSAVE, CAND, GEN_EFFECT_FEATURES, GW_SCOPE, EXPECT_OF, NOMATCH_OF, GEN_PORT_FEATURE, fakeVerification, planJs, makeGenerate, makeConvC, adoptC, finalHtml, stripC, REQUESTS, approveC, adoptOnScreen, prepareOnScreen, loadDevBaseFromMock, HEALTH_V, NEW_MEMO, lockCode, custLock, screenPlan, planImplOf, screenGenerate, mountFinal, applyButtonOf, writesOf, applyOnScreen, waitUntil };
+  return { withPlannerMapping, mapPlanResponse, rawWithPlannerMapping, tick, ticks, clone, buildInputs, INPUTS, META, B, A, Q, APPROVER, ROUTE, BASE, CSV, Q_THRESHOLD, Q_MIDDLE, Q_DAYS, Q_HOLIDAYS, Q_LOCK, Q_TIMING, B_SELECT, B_ROUTE, B_UNDER, B_OVER, B_NOTIFY_TO, B_NOTIFY_IF, B_LOCK, STD, req, idBy, reqIdBy, script, normalized, planOk, planFail, planThrow, gateMk, HEALTH, spec, mkStep, PLAN_META, PLAN_V1, answerFor, makeStorage, gate, mount, clickChat, RP, KTCodeReview, DATA_C, LABELS_C, custOf, CUST_C1, ST_C, handlerC, GOOD, BAD, WARN, VALUE, LOCKSAVE, CAND, GEN_EFFECT_FEATURES, GW_SCOPE, EXPECT_OF, NOMATCH_OF, GEN_PORT_FEATURE, fakeVerification, planJs, makeGenerate, makeConvC, adoptC, finalHtml, stripC, REQUESTS, approveC, adoptOnScreen, prepareOnScreen, loadDevBaseFromMock, HEALTH_V, NEW_MEMO, lockCode, custLock, screenPlan, planImplOf, screenGenerate, mountFinal, applyButtonOf, writesOf, applyOnScreen, waitUntil };
 }
 
 module.exports = { createNewFlowKit };

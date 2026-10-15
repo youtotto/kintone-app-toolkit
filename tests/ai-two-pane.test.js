@@ -79,7 +79,7 @@ function mount({ inputs = INPUTS, paid = true, plans = null, now = null, extra =
     async ask({ ctx, requestId, onText = null }) { calls.ask.push({ ctx, stream: typeof onText === 'function' }); if (askStream && typeof onText === 'function') await askStream(onText, ctx); if (askGate) await askGate(ctx); const v = KTAiClient.validateAnswer(answerFor(ctx, 'このフィールドは金額です。'), ctx); return { ...v.normalized, requestId, clientWarnings: v.warnings }; },
     //   仮案は共有の部品の台本で答える（K.REQUESTS の 4 発言で採用まで進む）
     async propose({ ctx, requestId }) { calls.propose = (calls.propose || 0) + 1; const raw = K.script({ utterance: ctx.question, previous: ctx.conversation.proposal, requirements: ctx.conversation.requirements }); if (!raw) throw new Error(`台本がありません: ${ctx.question}`); return K.normalized(raw, requestId); },
-    async plan({ ctx, requestId }) { calls.plan.push({ ctx }); if (planGate) await planGate(ctx); const resp = plans ? plans(ctx) : (ctx.revision ? PLAN_V2 : PLAN_V1); const v = KTAiClient.validatePlan(resp, ctx); const out = { ...v.normalized, requestId, clientWarnings: v.warnings }; if (gatewayPlan) Object.defineProperty(out, 'gatewayPlan', { value: JSON.parse(JSON.stringify(resp.plan)), enumerable: false }); return out; },
+    async plan({ ctx, requestId }) { calls.plan.push({ ctx }); if (planGate) await planGate(ctx); const resp = plans ? plans(ctx) : (ctx.revision ? PLAN_V2 : PLAN_V1); const v = KTAiClient.validatePlan(K.rawWithPlannerMapping(resp, ctx), ctx); /* 2026-10-15（追加の指示 1）: 偽の計画の AI は要件の対応づけを返す */ const out = { ...v.normalized, requestId, clientWarnings: v.warnings }; if (gatewayPlan) Object.defineProperty(out, 'gatewayPlan', { value: JSON.parse(JSON.stringify(resp.plan)), enumerable: false }); return out; },
     async generate({ ctx, requestId }) { calls.generate.push({ ctx }); if (genGate) await genGate(ctx); const v = KTAiClient.validateGenerated(genResponse(ctx, genPatch({ ...PATCH_GOOD, baseHash: ctx.existingFile?.hash || PATCH_GOOD.baseHash })), ctx); if (!v.ok) throw new Error(v.errors[0].message); return { ...v.normalized, requestId, clientWarnings: v.warnings }; },
   };
   const session = { status() { return { connected: true, apiBase: 'https://gw.test', refreshExpiresAt: '2099-01-01T00:00:00Z', scope: { product: 'toolkit', feature: 'assistant-qa,change-planner,customization-generator', domain: 't.cybozu.com' } }; }, async migrateLegacy() { return false; }, async refresh() { return {}; }, async disconnect() { return { revoked: true }; }, client };
@@ -339,7 +339,8 @@ console.log('\n--- §12. 会話の表示の決まり（部品）: 出さない�
     assert(xU.c.activePlan().version === 2 && /計画では対応できないとされた要件: 承認されたら Slack に送る/.test(cannotU) && !/\bR[0-9]+\b|要件：/.test(finU), `対応できないことは番号なしで出す（最終案のカードの「実現できない点」）: ${cannotU}`);
     //   理由（計画の AI の note「外部サービスとの連携は対象外」）は、最終案のカードの「実現できない点」に添える（以前は会話の知らせに出た）
     assert(/外部サービスとの連携は対象外/.test(cannotU), `対応できないことの理由を添える（最終案のカードの「実現できない点」）: ${cannotU}`);
-    const xN = K.makeConvC({ planImpl: (args) => K.planJs(args, { requirementOps: args.revision ? [K.req('add', { target: '金額', condition: '承認待ち', behavior: '画面に警告を出す', sourceQuotes: ['警告も出して'], planRefs: ['C1'] })] : [] }) });
+    //   2026-10-15（追加の指示 1）: 作り直しの計画は、対応づけた JavaScript（C1）に警告も持たせる（警告を持たない C1 への対応づけは実現が足りないとして反映を止める）
+    const xN = K.makeConvC({ planImpl: (args) => K.planJs(args, { ...(args.revision ? { cust: K.custOf(['lock', 'warn']) } : {}), requirementOps: args.revision ? [K.req('add', { target: '金額', condition: '承認待ち', behavior: '画面に警告を出す', sourceQuotes: ['警告も出して'], planRefs: ['C1'] })] : [] }) });
     await K.adoptC(xN);
     await xN.c.send('警告も出して');
     const chatN = K.stripC(KTAiChatUi.chatHtml(xN.c.messages()));
