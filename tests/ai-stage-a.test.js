@@ -494,6 +494,20 @@ await section(async () => {
   const r3 = covId(planNotify, [{ requirementId: 'R3', text: otherReq, status: 'OUT_OF_SCOPE', note: '' }], { requirements: reqs });
   assert(unmetBlock(r1) && r2.registration.verdict !== 'BLOCKED' && r2.coverage.outOfScope.some(x => x.owner === 'step') && unownedReview(r3, otherReq), `1: R… は planRefs で担当を引く（C1 → 自分・P1 → 手順・無し → unowned）: ${[r1.registration.verdict, r2.registration.verdict, r3.registration.verdict].join('/')}`);
   assert(covId(null, [{ requirementId: 'P1', text: otherReq, status: 'OUT_OF_SCOPE', note: '' }]).coverage.unowned.length === 1 && covId(null, [{ requirement: otherReq, status: 'NOT_MET', note: 'P1 で対応' }]).registration.verdict === 'BLOCKED', '1: 計画が無ければ P1 も担当にならない（unowned）。旧い形の NOT_MET は登録不可のまま');
+  // ---- 1b（2026-10-15 レビューの反映 T1 / T8）: Gateway は手順（P…）の OUT_OF_SCOPE を補わない（coverage はこの JavaScript の担当 MET / PARTIAL だけ）。
+  //   計画に確認待ちの手順（REQUIRE_CONFIRMATION）があっても、review の status・registration の verdict・確認事項（confirmations）・検査（checks）は、その手順が無い計画と同じ
+  //   （担当は計画から引くので coverage に書かれていなくてよい）。AI が自分で書いた手順の OUT_OF_SCOPE（古い形）は、設定を変える手順なら担当範囲外として通り（表示なし・判定は同じ）、
+  //   確認待ちの手順なら上の 1 のとおり unowned（確認）に残る
+  const planCustOnly = mkPlan([custStep], { customizations: [cust()] });
+  const shapeOf = (rv) => JSON.stringify({ status: rv.status, verdict: rv.registration.verdict, blockers: rv.registration.blockers, confirmations: rv.registration.confirmations.map(x => [x.code, x.message]), checks: (rv.checks || []).map(x => [x.name, x.ok, x.severity]), unowned: rv.coverage.unowned, notAchieved: rv.coverage.notAchieved.map(x => [x.code, x.requirementId || null]) });
+  const metOnly = [{ requirementId: 'C1', text: '承認待ちでは金額を編集不可にする', status: 'MET', note: '' }];
+  const partialOnly = [{ requirementId: 'C1', text: '承認待ちでは金額を編集不可にする', status: 'PARTIAL', note: '一覧の編集画面では止められません' }];
+  const rcMet = covId(planRC, metOnly), baseMet = covId(planCustOnly, metOnly);
+  assert(shapeOf(rcMet) === shapeOf(baseMet) && rcMet.registration.verdict !== 'BLOCKED' && rcMet.coverage.outOfScope.length === 0 && rcMet.coverage.unowned.length === 0 && !check(rcMet, 'coverage-owner'), `1b（T1）: 確認待ちの手順がある計画で coverage が担当の MET だけ → 手順の無い計画と同じ status / verdict / 確認事項（担当範囲外・unowned・coverage-owner は無い）: ${shapeOf(rcMet)}`);
+  const rcPartial = covId(planRC, partialOnly), basePartial = covId(planCustOnly, partialOnly);
+  assert(shapeOf(rcPartial) === shapeOf(basePartial) && rcPartial.registration.verdict === 'NEEDS_CONFIRMATION' && rcPartial.registration.confirmations.some(x => x.code === 'coverage-unmet') && !check(rcPartial, 'coverage-owner'), `1b（T1）: 担当の PARTIAL だけでも同じ（確認は PARTIAL の 1 件。手順の OUT_OF_SCOPE による確認は増えない）: ${shapeOf(rcPartial)}`);
+  const withStep = covId(planNotify, [...metOnly, { requirementId: 'P1', text: otherReq, status: 'OUT_OF_SCOPE', note: '標準設定の手順' }]), without = covId(planNotify, metOnly);
+  assert(shapeOf(withStep) === shapeOf(without) && withStep.coverage.outOfScope.length === 1 && withStep.coverage.outOfScope[0].code === 'OTHER_OWNER' && without.coverage.outOfScope.length === 0, `1b（T8）: 設定を変える手順の OUT_OF_SCOPE（AI が書いた古い形）があっても無くても、status / verdict / 確認事項は同じ（担当範囲外は表示に出さない）: ${shapeOf(withStep)}`);
   // ---- 2: repeatOf の案内文（判定は inputHash だけ。新設の手順を反映すると入力が変わる）
   const repA = repeatOf({ attempts: nextAttempts(null, { inputHash: 'h', blockers: ['conditional-control'] }) }, 'h');
   assert(repA.repeat && repA.hints.includes('計画で新設するステータス・フィールドを動作テスト環境に反映すると、生成の入力が変わり作り直せます。入力が同じまま作り直しても同じ結果になります') && !repA.hints.some(h => /指摘の内容が変わったとき|設定の手順を反映しても/.test(h)), `2: 案内文の差し替え: ${JSON.stringify(repA.hints)}`);

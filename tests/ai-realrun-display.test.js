@@ -194,7 +194,7 @@ await section(async () => {
   //   計画の AI の説明（実機の reply の逐次表示の文）
   x.services.plan = async (args) => { if (typeof args.onText === 'function') args.onText('明細（items）の行追加・削除ボタン自体は止められないため［E12・E16］、承認済みではセルを編集不可にし、行の変更を含む変更は保存時に検出して止める計画です。'); return plan0({ ...args, onText: null }); };
   for (const s of ['課長・部長の承認者を選ぶ運用にしたい', '100円未満は部長不要、100万円以上は必要', '7営業日で。会社独自の休業日は今回はなし']) await x.c.send(s);
-  const p = x.c.send('おすすめで'); await ticks(6);
+  const p = x.c.send('おすすめで。この案で進めて'); await ticks(6);
   const pm = x.c.messages().find(mm => mm.data && mm.data.kind === 'progress');
   x.advance(134000); x.c.tickProgress();
   const h = KTAiChatUi.progressInnerHtml(pm, { labels: LABELS });

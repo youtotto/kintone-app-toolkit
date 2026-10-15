@@ -240,7 +240,7 @@ await section(async () => {
   const x = makeConvC({ planImpl: planJs3, generate: gen });
   await sendUntilAdopt(x);
   const v = x.c.activePlan(), fin = v.final;
-  assert(fin && !fin.incomplete && ['C1', 'C2', 'C3'].every(c => v.generated[c].status === 'verified') && fin.approvable === true && fin.adoptedBehaviors.includes('申請時に課長と部長の承認者をユーザー選択で指定する') && fin.constraints.length === 1 && /明細の行の追加・削除は止められません/.test(fin.constraints[0].text) && JSON.stringify(fin.supplements) === JSON.stringify(['編集不可の間は入力欄を灰色にする']) && fin.blockers.length === 0, `前提: 3 本とも検証済みで承認できる。材料（採用した動作・制約 1 件・補足 1 件・止める理由なし）: ${JSON.stringify({ approvable: fin && fin.approvable, adopted: fin && fin.adoptedBehaviors, constraints: fin && fin.constraints, supplements: fin && fin.supplements, blockers: fin && fin.blockers })}`);
+  assert(fin && !fin.incomplete && ['C1', 'C2', 'C3'].every(c => v.generated[c].status === 'verified') && fin.approvable === true && fin.adoptedBehaviors.includes('申請時に課長と部長の承認者をユーザー選択で指定する') && fin.constraints.length === 1 && /明細（テーブル）の行の追加・削除は止まりません/.test(fin.constraints[0].text) && JSON.stringify(fin.supplements) === JSON.stringify(['編集不可の間は入力欄を灰色にする']) && fin.blockers.length === 0, `前提: 3 本とも検証済みで承認できる。材料（採用した動作・制約 1 件・補足 1 件・止める理由なし）: ${JSON.stringify({ approvable: fin && fin.approvable, adopted: fin && fin.adoptedBehaviors, constraints: fin && fin.constraints, supplements: fin && fin.supplements, blockers: fin && fin.blockers })}`);
   // 準備の前（finalPre が無い）・準備中・準備が整った、の 3 つの状態
   const h0 = finalHtml(x), hRun = finalWithPre(x, 'running'), hReady = finalWithPre(x, 'ready');
   assert(statusOf(h0) === '反映の前の準備を待っています…' && applyBtn(h0) && applyBtn(h0).disabled && !/この内容で反映できます/.test(h0), `H4-1: 準備の前は「反映の前の準備を待っています…」で押せない（「反映できます」は言わない）: ${statusOf(h0)}`);
@@ -250,12 +250,12 @@ await section(async () => {
   const iHead = vis.indexOf('最終案ができました。'), iStatus = vis.indexOf('この内容で反映できます。'), iDo = vis.indexOf('この案で実現すること'), iCon = vis.indexOf('この案の制約'), iSup = vis.indexOf('仮案からの補足'), iBtn = vis.indexOf('動作テスト環境へ反映');
   assert(iHead >= 0 && iHead < iStatus && iStatus < iDo && iDo < iCon && iCon < iSup && iSup < iBtn, `H4-4: 見出し → 反映できます → この案で実現すること → この案の制約 → 仮案からの補足 → ボタン の順: ${JSON.stringify([iHead, iStatus, iDo, iCon, iSup, iBtn])}`);
   assert(/申請時に課長と部長の承認者をユーザー選択で指定する/.test(vis) && /100万円以上の申請は部長承認を必要とする/.test(vis) && !/承認待ちでは金額を編集不可にします/.test(vis), 'H4-5: 「この案で実現すること」は採用した仮案の動作（計画・生成の要約の文は右）');
-  assert((vis.match(/明細の行の追加・削除は止められません/g) || []).length === 1 && /PC: 明細の行の追加・削除は止められません（入力欄だけ編集できなくなります）/.test(vis), `H4-6: 「この案の制約」に行の追加・削除（PC・モバイルで同じ内容は 1 行。できる部分と残る制約を両方書く）: ${(vis.match(/この案の制約[\s\S]{0,160}/) || [''])[0]}`);
+  assert((vis.match(/行の追加・削除は止まりません/g) || []).length === 1 && /PC: 明細（テーブル）の行の追加・削除は止まりません（セルの編集不可だけでは止められないため。行のボタンを隠す API は Toolkit がまだ扱っていません）/.test(vis) && !/入力欄だけ編集できなくなります/.test(vis), `H4-6: 「この案の制約」に行の追加・削除（PC・モバイルで同じ内容は 1 行。制約の文は残る範囲だけ。2026-10-15 §4(b)）: ${(vis.match(/この案の制約[\s\S]{0,200}/) || [''])[0]}`);
   assert(/計画で決めた点: 編集不可の間は入力欄を灰色にする/.test(vis) && /計画を作りました。承認待ちの間だけ金額を編集不可にします。/.test(vis), 'H4-7: 「仮案からの補足」に計画の返答と計画で決めた点');
   assert(/<details class="kt-ai-tech kt-ai-final-pre"[^>]*><summary>反映の前の確認（書き込みなし）<\/summary>/.test(hReady) && !/プロセス管理の変更|確認項目の例/.test(vis) && /プロセス管理の変更/.test(stripC(hReady)) && /確認項目の例/.test(stripC(hReady)), 'H4-8: 「反映の前の確認（書き込みなし）」は折りたたみ（中身は開くと見える）');
   assert(!LEFT_MOVED.test(vis) && !/残る判断|確認できないこと|反映を止めている理由/.test(vis), `H4-9: 左に検証の明細・反映先と主な影響・変わった点・「まだ何も反映していません」・残る判断（無い）は出ない: ${(vis.match(LEFT_MOVED) || [''])[0]}`);
   const right = rightOf(x), rt = stripC(right);
-  assert(/JavaScript の状態/.test(right) && (rt.match(/できた（検証済み）/g) || []).length === 3 && /承認待ちでは金額を編集不可にします/.test(rt) && /反映する内容/.test(right) && /新しい JavaScript「lock\.js」を登録/.test(rt) && /できないこと/.test(right) && /明細の行の追加・削除は止められません/.test(rt) && !/確認できないこと/.test(right), `H4-10: 右の「変更内容」に JavaScript の状態・計画の要約・反映する内容・できないこと（担当の決まっていない要件は無いので「確認できないこと」は無い）: ${rt.replace(/\s+/g, ' ').slice(0, 300)}`);
+  assert(/JavaScript の状態/.test(right) && (rt.match(/できた（検証済み）/g) || []).length === 3 && /承認待ちでは金額を編集不可にします/.test(rt) && /反映する内容/.test(right) && /新しい JavaScript「lock\.js」を登録/.test(rt) && /できないこと/.test(right) && /明細（テーブル）の行の追加・削除は止まりません/.test(rt) && !/確認できないこと/.test(right), `H4-10: 右の「変更内容」に JavaScript の状態・計画の要約・反映する内容・できないこと（担当の決まっていない要件は無いので「確認できないこと」は無い）: ${rt.replace(/\s+/g, ' ').slice(0, 300)}`);
   const line = (right.match(/<div class="kt-ai-sum-verified">([^<]*)<\/div>/) || [])[1] || '';
   assert(line === '構文と対象の照合、模擬テストで必須の動作を確認しました。実機は未確認です。' && /<details class="kt-ai-tech kt-ai-sum-verification"><summary>検証の明細<\/summary>/.test(right) && /機械検査: 生成工程の検査/.test(rt) && /必須の動作（/.test(rt) && /✓ 「金額」（PC）: 編集できない — 処理あり・模擬テストで合格/.test(rt) && /代表条件の一覧/.test(rt) && /反映した後、動作テスト環境で確かめること/.test(rt) && (rt.match(/実機は未確認です/g) || []).length === 1, `H4-11: 右の「確かめたこと」は 1 行＋明細（実機未確認は 1 回）: ${JSON.stringify({ line, n: (rt.match(/実機は未確認です/g) || []).length })}`);
   keep('H4', hReady, right);
@@ -488,13 +488,138 @@ await section(async () => {
   const chat = m.chat(), sum = m.$('kt-ai-change-summary').innerHTML;
   const fc = chat.slice(chat.indexOf('class="kt-ai-card kt-ai-final-card"')), fcText = stripC(outsideDetails(fc));
   assert(v && v.final && v.final.customizations.length === 0 && v.final.approvable === true && pre.ready === true, `前提: 設定の変更だけの計画（一覧の追加）で最終案ができ、承認の欄の準備が整った: ${JSON.stringify({ ready: pre.ready, st: pre.pre && pre.pre.status })}`);
-  assert(/前の仮案 — このあと直して採用しました/.test(chat) && /仮案 — 採用して最終案を作/.test(chat) && /課長と部長を申請ごとに選んで承認する流れにできます/.test(chat) && !/実現する動作|こちらの提案で進める点|任意の提案|対応できない範囲|data-act="draft-answer"/.test(chat), 'H7-1: 仮案のカード（採用済みは 1 行に畳む）は返答と選択だけ（同じ構成）');
+  assert(/前の仮案 — このあと直して採用しました/.test(chat) && /仮案 — 採用済み/.test(chat) && !/最終案を作りました/.test(chat) && /課長と部長を申請ごとに選んで承認する流れにできます/.test(chat) && !/実現する動作|こちらの提案で進める点|任意の提案|対応できない範囲|data-act="draft-answer"/.test(chat), 'H7-1: 仮案のカード（採用済みは 1 行に畳む）は返答と選択だけ（同じ構成）');
   assert(/最終案ができました。/.test(fcText) && /この内容で反映できます。/.test(fcText) && pre.button && !pre.button.disabled && pre.button.note === APPLY_NOTE && /この案で実現すること/.test(fcText), `H7-2: 最終案は「この内容で反映できます。」と反映先の文（設定の手順 → JavaScript の順・運用環境は変更しない・反映後の確認先）: ${fcText.replace(/\s+/g, ' ').slice(0, 300)}`);
   assert(!/JavaScript の状態|この案の制約|JavaScript を作/.test(fc + sum) && !/仮案からの補足/.test(fc) && !LEFT_MOVED.test(fcText), `H7-3: JavaScript が無い計画に JavaScript の状態・制約の節は無く、補足も無ければ出さない: ${(fcText.match(LEFT_MOVED) || [''])[0]}`);
   assert(/JavaScript は無く、設定の変更だけです/.test(sum) && /反映する内容/.test(sum) && /設定の手順 1 件（Toolkit から自動で反映できるのは 1 件）/.test(stripC(sum)) && /何が変わるか（Toolkit が確かめた変更前後）/.test(sum), `H7-4: 右の「変更内容」に確かめたこと（JavaScript は無い）・反映する内容・何が変わるか: ${stripC(sum).replace(/\s+/g, ' ').slice(0, 240)}`);
   const left = stripC(outsideDetails(chat));
   assert((left.match(/部長承認は金額に関係なく常に必要ですか/g) || []).length === 0 && (left.match(/この内容で反映できます。/g) || []).length === 1 && (left.match(/kintone にはまだ何も反映していません/g) || []).length <= 1, `H7-5: 左に重複した質問・重複した「反映できます」は無い: ${JSON.stringify({ q: (left.match(/部長承認は金額に関係なく常に必要ですか/g) || []).length })}`);
   keep('H7', chat, sum);
+});
+
+// =========================================================
+// ---- §H9 / §H9b の部品: 明細（テーブル items）の列（品名・数量・単価）を承認済みで編集不可にする JavaScript。計画の AI は明細の要件（R1）を「行の追加・削除は止められない」として
+//   対応できない（unsupported）とし、CSV の保存の要件（R2）も対応できないとした。生成の AI は R1 を PARTIAL（limitCode SUBTABLE_ROWS）と申告し、Toolkit の構造の検査（SUBTABLE_ROWS）も出る。
+//   make({ effects: false }) は生成工程の verification に必須の動作の結果（requiredEffects・behavior）を付けない（効果の結果が無い接続先。§H9b）
+const H9K = (() => {
+  const LABELS_T = { ...K.LABELS_C, items: '明細', item_name: '品名', qty: '数量', unit_price: '単価', subtotal: '小計' };
+  const Q_T = ['承認済みでは明細を編集できないようにして', 'CSV の読み込みでも保存を止めたい'];
+  const U_T = `${Q_T[0]}。${Q_T[1]}`;
+  const scriptT = ({ utterance }) => (utterance === U_T ? { reply: '承認済みのレコードでは明細のセルを編集できないようにします。CSV の読み込みの保存は計画で確かめます。', intent: 'propose',
+    proposal: { behaviors: [B('承認済みでは明細を編集できないようにする', 'user'), B('CSV の読み込みでも保存を止める', 'user')], assumptions: [], decisions: [], approach: { standard: [], js: ['承認済みでは明細のセルの編集を止める'] }, cannot: [] },
+    turn: { ops: [], answers: [], requirementOps: [K.req('add', { target: '明細', condition: '承認済み', behavior: '編集できないようにする', sourceQuotes: [Q_T[0]], planRefs: ['B1'], effects: ['lock'] }), K.req('add', { target: '保存', condition: 'CSV の読み込み', behavior: '保存を止める', sourceQuotes: [Q_T[1]], planRefs: ['B2'], effects: ['block-save'] })] } } : null);
+  const ST_DONE = "record['ステータス'] && record['ステータス'].value === '承認済み'";
+  const TABLE3 = K.handlerC(`    if (${ST_DONE}) {\n      record['items'].value.forEach(function (row) {\n        row.value['item_name'].disabled = true;\n        row.value['qty'].disabled = true;\n        row.value['unit_price'].disabled = true;\n      });\n    }`);
+  const COLS = ['item_name', 'qty', 'unit_price'];
+  const CUST_T3 = K.custOf(null, { requirement: '承認済みでは明細（items）のセルを編集できないようにする', fields: [{ code: 'ステータス', access: 'READ' }, ...COLS.map(code => ({ code, access: 'CONTROL', condition: 'ステータス in ("承認済み")', effects: ['lock'] }))] });
+  const planT = (args) => K.planJs(args, { cust: CUST_T3, summary: '承認済みでは明細のセルを編集できないようにします。', requirementOps: [
+    K.req('update', { id: 'R1', target: '明細', condition: '承認済み', behavior: '編集できないようにする', disposition: 'unsupported', note: '行の追加・削除は止められないため', sourceQuotes: [Q_T[0]], planRefs: ['C1'], effects: ['lock'] }),
+    K.req('update', { id: 'R2', target: '保存', condition: 'CSV の読み込み', behavior: '保存を止める', disposition: 'unsupported', note: 'CSV の読み込みでは JavaScript が動かないため', sourceQuotes: [Q_T[1]], planRefs: [], effects: ['block-save'] }),
+  ] });
+  const REQ_TEXT_FULL = 'PC: 承認済み。PC・モバイルの両方：明細を編集できないようにする';
+  const SENT = '承認済みでは「明細」の品名・数量・単価のセルを編集できなくなります（PC）';
+  const ROWS = '「明細」の行の追加・削除は止まりません（セルの編集不可だけでは止められないため。行のボタンを隠す API は Toolkit がまだ扱っていません）';
+  const make = ({ effects = true } = {}) => {
+    const genT = { calls: [], impl: async (args) => {
+      genT.calls.push(args.customizationId);
+      const cust = args.version.plan.customizations[0];
+      const generated = { strategy: 'NEW_JS_FILE', targetFile: 'tableLock.js', summary: '承認済みでは明細のセルを編集できないようにします。', code: TABLE3, patch: null, events: ['app.record.edit.show'], fields: COLS.map(code => ({ code, access: 'CONTROL' })), apis: [], assumptions: [], warnings: [],
+        coverage: [{ requirementId: 'C1', status: 'MET', note: '', text: cust.requirement }, { requirementId: 'R1', status: 'PARTIAL', note: '行の追加・削除は止められません', text: REQ_TEXT_FULL, limitCode: 'SUBTABLE_ROWS' }] };
+      const review = T.KTCodeReview.review({ generated, customization: cust, plan: args.version.plan, data: clone(K.DATA_C), scan: null, existingSource: null, requirements: [{ id: 'R1', planRefs: ['C1'] }, { id: 'R2', planRefs: [] }] });
+      const candidateHash = T.KTScan.candidateHashOf({ strategy: 'NEW_JS_FILE', targetFile: 'tableLock.js', code: TABLE3, patch: null, customizationId: 'C1' });
+      return { ok: true, generated, review, ctx: { size: { approxTokens: 1000 } }, existingSource: null, inputHash: 'hT', verification: K.fakeVerification({ code: TABLE3, has: { item_name: ['lock'], qty: ['lock'], unit_price: ['lock'] } }, args.requiredEffects, { candidateHash, supported: effects }), candidateHash, requirementIds: [{ id: 'C1', kind: 'customization', text: cust.requirement }] };
+    } };
+    const x = makeConvC({ scriptFn: scriptT, labels: LABELS_T, planImpl: planT, generate: genT });
+    x.services.tableColumns = () => ({ item_name: 'items', qty: 'items', unit_price: 'items', subtotal: 'items' });
+    x.services.readOnlyFields = () => ['subtotal'];
+    return { x, genT };
+  };
+  return { Q_T, U_T, REQ_TEXT_FULL, SENT, ROWS, make };
+})();
+
+// =========================================================
+console.log('\n--- §H9. 部分対応を「できないこと」に丸ごと入れない（2026-10-15 §4(b)）: 実現した部分は実現することへ・制約は残る範囲だけ・計画では対応できないとされた要件は実現のある要件では出さない ---');
+await section(async () => {
+  const { Q_T, U_T, REQ_TEXT_FULL, SENT, ROWS } = H9K;
+  const { x, genT } = H9K.make();
+  await x.c.send(U_T);
+  await x.c.send('採用します');
+  const v = x.c.activePlan(), fin = v && v.final, e = v && v.generated && v.generated.C1;
+  const na = e && e.review && e.review.coverage ? e.review.coverage.notAchieved : [];
+  const reqsT = v ? x.c.requirements(v.planId) : [];
+  assert(fin && e && e.status === 'verified' && genT.calls.length === 1 && x.calls.plan.length === 1 && na.some(r => r.code === 'SUBTABLE_ROWS' && JSON.stringify(r.tables) === '["items"]') && na.some(r => r.code === 'AI_PARTIAL' && r.requirementId === 'R1' && r.limit === 'SUBTABLE_ROWS') && reqsT.some(r => r.id === 'R1' && r.decision === 'decided' && r.disposition === 'unsupported') && reqsT.some(r => r.id === 'R2' && r.decision === 'decided' && r.disposition === 'unsupported'), `前提: セルは検証済み・構造の SUBTABLE_ROWS（テーブル items）と AI の PARTIAL（R1・limitCode）・計画は R1 / R2 を対応できないとした: ${JSON.stringify({ st: e && e.status, na: na.map(r => [r.code, r.requirementId, r.tables, r.limit]), reqs: reqsT.map(r => [r.id, r.decision, r.disposition]) })}`);
+  const h = finalHtml(x), vis = stripC(outsideDetails(h)), right = rightOf(x), rt = stripC(right);
+  const doSec =(vis.match(/この案で実現すること[\s\S]*?(?=この案の制約|仮案からの補足|動作テスト環境へ反映)/) || [''])[0];
+  assert(fin.adoptedBehaviors.includes(SENT) && fin.behaviors.includes(SENT) && doSec.includes(SENT) && (vis.match(/のセルを編集できなくなります/g) || []).length === 1 && /最終的にどう動くか[\s\S]*承認済みでは「明細」の品名・数量・単価のセルを編集できなくなります（PC）/.test(rt), `H9-1: 実現した部分（満たした必須の動作）は「この案で実現すること」（左）と「最終的にどう動くか」（右）に 1 文: ${doSec.replace(/\s+/g, ' ').slice(0, 240)}`);
+  const conSec =(vis.match(/この案の制約[\s\S]*?(?=仮案からの補足|動作テスト環境へ反映)/) || [''])[0];
+  assert(fin.constraints.some(c => c.kind === 'coverage' && c.text === ROWS && c.requirementId === 'R1') && fin.constraints.filter(c => c.kind === 'coverage').length === 1 && conSec.includes(ROWS) && !/PC・モバイルの両方|承認済み。/.test(vis) && !vis.includes(REQ_TEXT_FULL) && !/行の追加・削除は止められません/.test(vis), `H9-2: 制約はテーブルの名前で「残る範囲」だけ（AI の PARTIAL の行は構造の行にまとめ、要件の全文は付けない）: ${conSec.replace(/\s+/g, ' ').slice(0, 300)}`);
+  assert(!fin.cannot.some(c => c.kind === 'req-unsupported' && c.requirementId === 'R1') && !vis.includes(`計画では対応できないとされた要件: ${Q_T[0]}`) && !rt.includes(`計画では対応できないとされた要件: ${Q_T[0]}`), `H9-3: 実現のある要件（R1）は「計画では対応できないとされた要件」に出さない: ${(vis.match(/計画では対応できないとされた要件[^\n]*/g) || []).join(' / ')}`);
+  const unsup = fin.cannot.find(c => c.kind === 'req-unsupported' && c.requirementId === 'R2');
+  assert(unsup && unsup.text === `計画では対応できないとされた要件: ${Q_T[1]}（理由: CSV の読み込みでは JavaScript が動かないため）` && conSec.includes(unsup.text), `H9-4: 何も実現していない要件（R2）は今の文で残る: ${JSON.stringify(unsup)}`);
+  const ap = x.c.approveFinal({ planId: v.planId, version: v.version });
+  assert(fin.approvable === true && fin.blockers.length === 0 && ap.ok === true && !/確認できないこと／反映を止めている理由/.test(vis), `H9-5: 承認の可否は変わらない（判定は表示で変えない）: ${JSON.stringify({ approvable: fin.approvable, blockers: fin.blockers, ap })}`);
+  keep('H9', h, right);
+});
+
+// =========================================================
+console.log('\n--- §H9b. 実現した部分の 1 文を作れない変形（効果の結果が無い接続先 = verification に requiredEffects が無い。2026-10-15 レビューの反映 T5）: 計画では対応できないとされた要件は今の文で残す ---');
+await section(async () => {
+  //   §H9 と同じ依頼・計画・生成の AI の申告（R1 PARTIAL・limitCode SUBTABLE_ROWS・構造の SUBTABLE_ROWS）。違いは生成工程の verification に必須の動作の結果（requiredEffects・behavior）が無いこと。
+  //   満たした必須の動作が分からないので実現した部分の 1 文は作れず、R1 は「計画では対応できないとされた要件」に残る（未達を見失わない）。承認の可否は接続先の非対応で決まる（表示では変えない）
+  const { Q_T, U_T, ROWS } = H9K;
+  const { x, genT } = H9K.make({ effects: false });
+  await x.c.send(U_T);
+  await x.c.send('採用します');
+  const v = x.c.activePlan(), fin = v && v.final, e = v && v.generated && v.generated.C1;
+  const na = e && e.review && e.review.coverage ? e.review.coverage.notAchieved : [];
+  assert(fin && e && genT.calls.length === 1 && !(e.verification && e.verification.requiredEffects) && na.some(r => r.code === 'SUBTABLE_ROWS') && na.some(r => r.code === 'AI_PARTIAL' && r.requirementId === 'R1'), `前提: 生成工程の verification に必須の動作の結果が無い。構造の SUBTABLE_ROWS と AI の PARTIAL（R1）は §H9 と同じ: ${JSON.stringify({ st: e && e.status, re: !!(e && e.verification && e.verification.requiredEffects), na: na.map(r => [r.code, r.requirementId]) })}`);
+  const h = finalHtml(x), vis = stripC(h), right = rightOf(x), rt = stripC(right);
+  assert(!fin.behaviors.some(s => /のセルを編集できなくなります/.test(s)) && !fin.adoptedBehaviors.some(s => /のセルを編集できなくなります/.test(s)) && !/のセルを編集できなくなります/.test(vis + rt), `H9b-1: 満たした必須の動作が分からないので、実現した部分の 1 文は作らない: ${JSON.stringify(fin.behaviors)}`);
+  const unsupR1 = fin.cannot.find(c => c.kind === 'req-unsupported' && c.requirementId === 'R1');
+  assert(unsupR1 && unsupR1.text === `計画では対応できないとされた要件: ${Q_T[0]}（理由: 行の追加・削除は止められないため）` && fin.cannot.some(c => c.kind === 'req-unsupported' && c.requirementId === 'R2'), `H9b-2: 文を作れなかった PARTIAL の要件（R1）は「計画では対応できないとされた要件」に今の文で残る（R2 も今のまま）: ${JSON.stringify(fin.cannot.filter(c => c.kind === 'req-unsupported').map(c => [c.requirementId, c.text]))}`);
+  assert(fin.constraints.some(c => c.kind === 'coverage' && c.text === ROWS && c.requirementId === 'R1') && !vis.includes(H9K.REQ_TEXT_FULL), `H9b-3: 制約の行（テーブルの名前の「残る範囲」）は §H9 と同じ: ${JSON.stringify(fin.constraints.map(c => [c.kind, c.requirementId, c.text]))}`);
+  assert(e.status === 'unsupported' && fin.approvable === false && fin.blockers.some(b => b.kind === 'unsupported' && /接続先/.test(b.text)) && x.c.approveFinal({ planId: v.planId, version: v.version }).ok === false, `H9b-4: 承認の可否は接続先の非対応（必須の動作の結果が無い）で決まる（表示では変えない）: ${JSON.stringify({ st: e.status, approvable: fin.approvable, blockers: fin.blockers.map(b => [b.kind, b.text]) })}`);
+  keep('H9b', h, right);
+});
+
+// =========================================================
+console.log('\n--- §H10. 待ち時間の総経過は壁時計のまま（2026-10-15 §4(c)。凍結の時間を引かない） ---');
+await section(async () => {
+  const pg = gateMk();
+  const x = makeConvC({ planImpl: planJs1, generate: stagedGenerate({ C1: ['good'] }), planGate: pg });
+  for (const s of K.REQUESTS.slice(0, 3)) await x.c.send(s);
+  const p = x.c.send(K.REQUESTS[3]);
+  await ticks(6);
+  x.advance(600000);   // 計画の応答待ちの間に 10 分（隠れたタブの凍結を模す）
+  x.c.tickProgress();
+  const h0 = stripC(KTAiChatUi.progressInnerHtml(x.last()));
+  pg.open(); await p; await ticks(6);
+  const v = x.c.activePlan(), fin = v && v.final, tm = fin && fin.timing;
+  const dy = stripC(finalHtml(x));
+  assert(/経過 10 分/.test(h0) && tm && tm.totalMs === 650000 && tm.planMs === 630000 && tm.generateMs === 20000 && tm.totalMs === x.c.metrics().timings.slice(-1)[0].finalMs && /最終案まで 10 分 50 秒（計画 10 分 30 秒・生成・検証 20 秒）/.test(dy), `H10-1: 進みのカードの経過と最終案までの時間は壁時計（10 分の停止を引かない）: ${JSON.stringify({ h0: (h0.match(/経過[^）]*/) || [''])[0], tm })}`);
+});
+
+// =========================================================
+console.log('\n--- §H11. 詳細（時間と AI の利用）: 仮案の返答の時間と、Gateway の処理時間との差が 10 秒以上のときだけ分ける（2026-10-15 §4(d)） ---');
+await section(async () => {
+  const planG = (args) => { const r = planJs1(args); r.plan.ai = { model: 'm', latencyMs: 2000, usage: { input_tokens: 500, output_tokens: 200 } }; return r; };
+  const base = stagedGenerate({ C1: ['good'] });
+  const gen = { calls: base.calls, impl: async (args) => { const r = await base.impl(args); r.generated.timing = { version: '1', totalMs: 15000, ai: { count: 1, ms: 14000, repairs: 0 }, calls: [{ kind: 'generate', attempt: 0, ms: 14000, ok: true, inputTokens: 1000, outputTokens: 300 }], behavior: { ms: 500, runs: 1, calls: 2 } }; return r; } };
+  const x = makeConvC({ planImpl: planG, generate: gen });
+  //   AI の adopt で計画が始まる送信（同じ送信に仮案の返答 propose を含む）: 「おすすめで」で中間の判断を決めてから「通知は不要、期限は5営業日、ほかは採用」
+  for (const s of K.REQUESTS.slice(0, 3)) await x.c.send(s);
+  await x.c.send('おすすめで');
+  const r = await x.c.send('通知は不要、期限は5営業日、ほかは採用');
+  const v = x.c.activePlan(), fin = v && v.final, tm = fin && fin.timing;
+  const detail = stripC((finalHtml(x).match(/<details class="kt-ai-tech"[^>]*><summary>詳細（時間と AI の利用）<\/summary>[\s\S]*?<\/details>/) || [''])[0]);
+  assert(r.ok && r.draft && r.draft.intent === 'adopt' && fin && fin.approvable === true && tm.proposeMs === 7000 && tm.planMs === 30000 && tm.generateMs === 20000 && tm.gatewayMs && tm.gatewayMs.plan === 2000 && tm.gatewayMs.generate === 15000 && tm.gatewayMs.planAuto === null && tm.calls.find(c => c.kind === 'plan').gatewayMs === 2000 && tm.calls.find(c => c.kind === 'generate').gatewayMs === 15000 && tm.totalMs >= tm.proposeMs + tm.planMs + tm.generateMs, `H11-1: fin.timing に仮案の返答（proposeMs）と部ごとの Gateway の処理時間（gatewayMs）が入り、総経過は壁時計（部の和以上）: ${JSON.stringify(tm)}`);
+  assert(/最終案まで 57 秒（仮案の返答 7 秒、計画 30 秒（Gateway の処理 2 秒・画面への反映までの遅れ 28 秒）、生成・検証 20 秒）/.test(detail) && !/生成・検証 20 秒（/.test(detail) && !/秒・計画|秒）・生成/.test(detail), `H11-2: 差が 10 秒以上の計画だけ分けて書き、差が小さい生成は今のまま。仮案の返答も部に出す（総経過と部が合う）。括弧の分割がある部があれば外側の区切りは「、」（2026-10-15 T6）: ${detail.replace(/\s+/g, ' ').slice(0, 220)}`);
+  //   Gateway の処理時間が分からない（古い Gateway: ai が無い・生成工程の timing が無い）ときは今のまま（分けない）。仮案の返答の無い送信では出さない
+  const y = makeConvC({ planImpl: planJs1, generate: stagedGenerate({ C1: ['good'] }) });
+  await sendUntilAdopt(y);
+  const ty = y.c.activePlan().final.timing, dy = stripC(finalHtml(y));
+  assert(ty.gatewayMs.plan === null && ty.gatewayMs.generate === null && ty.proposeMs === null && /最終案まで 50 秒（計画 30 秒・生成・検証 20 秒）/.test(dy) && !/Gateway の処理|画面への反映までの遅れ|仮案の返答/.test(dy), `H11-3: Gateway の処理時間が分からなければ今のまま（分けない・仮案の返答の無い送信では出さない）: ${(dy.match(/最終案まで[^\n]*/) || [''])[0]}`);
+  keep('H11', finalHtml(x), rightOf(x));
 });
 
 // =========================================================

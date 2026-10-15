@@ -20494,7 +20494,8 @@
       //   「明細の変更を止める要件か」「要約が言い切っているか」を推定する判定（requirement-scope・summary-scope）は削除した
       if (tableControlled.length && lockedTables.length) {
         coverage.achieved.push(`明細（テーブル ${lockedTables.join(', ')}）のセルを編集不可にする`);
-        coverage.notAchieved.push({ code: 'SUBTABLE_ROWS', message: 'セルを編集不可にしても、明細（テーブル）の行の追加・削除は止まりません（行の ＋ / − ボタンは残ります。ボタンを隠す API は Toolkit がまだ扱っていません）' });
+        //   2026-10-15（§4(b)）: tables = セルを編集不可にしたテーブルのコード（最終案の制約の文がテーブルの名前で「残る範囲」を書くための構造。判定は変えない）
+        coverage.notAchieved.push({ code: 'SUBTABLE_ROWS', tables: [...lockedTables], message: 'セルを編集不可にしても、明細（テーブル）の行の追加・削除は止まりません（行の ＋ / − ボタンは残ります。ボタンを隠す API は Toolkit がまだ扱っていません）' });
       }
       // 段階 C（改訂 2・5.3 / 5.4）: coverage は requirementId で判定する（契約 20 §5）。文の照合・同義語の読み替え・note のキーワードからの担当の推定・plannedHint（段階 A）は削除した。
       //   この customization の id → 範囲内（NOT_MET は登録不可・PARTIAL は確認）。要件 R… / 手順 P… / 別の C… → 範囲外（担当は計画の構造（steps / customizations）と要件の planRefs で引く。
@@ -20531,7 +20532,8 @@
         if (!/NOT_MET|PARTIAL/.test(stt)) continue;
         // 段階 C（反証 D・C3）: 行の追加・削除を理由にした NOT_MET を文の照合（ROW_OPS_RE）で PARTIAL に下げる処理は削除した。AI の申告（requirementId と status）どおりに扱い、
         //   セルの編集不可では行の追加・削除が止まらないこと（行のボタンを隠す API は Toolkit がまだ扱っていない）は Toolkit の決定的な検査（SUBTABLE_ROWS・確認）で別に示す
-        coverage.notAchieved.push({ code: `AI_${stt}`, requirementId: id, requirement: text, note: d.note, ...(d.limitCode ? { limitCode: d.limitCode } : {}), message: `${text}${note ? `（${note}）` : ''}` });
+        //   2026-10-15（§4(b)）: noteText = 表示用に整えた AI の理由（内部の番号を手順の名前に）。最終案の制約の文は PARTIAL のとき理由だけを書く（判定は変えない）
+        coverage.notAchieved.push({ code: `AI_${stt}`, requirementId: id, requirement: text, note: d.note, noteText: note, ...(d.limitCode ? { limitCode: d.limitCode } : {}), message: `${text}${note ? `（${note}）` : ''}` });
       }
       // 段階 A（5.4）: 範囲内の NOT_MET は登録不可（check coverage-unmet・block）、PARTIAL は確認（review）。既存の SUBTABLE_ROWS は従来どおり確認事項のまま
       //   確認 7: セルの編集不可では直せない点（明細の行の追加・削除。行のボタンを隠す API は Toolkit がまだ扱っていない）を理由にした NOT_MET は、登録不可のまま修復を依頼しない（noRepair。修復の対象外）。
@@ -21835,9 +21837,11 @@
      * 生成の停滞の観測（2026-10-14・契約 20 §18）: 生成の要求の進みの通知（SSE の event: progress）の時刻の記録。この要求の開始からの相対 ms。
      *   sentAt = Gateway が provider に送った / headersAt = 応答の見出しが届いた / startedAt = 最初のイベント（response.created など。本文ではない）/
      *   textAt = 最初の本文断片 / lastAt = 最後に受けた AI の呼び出しの進捗（headers〜delta）/ doneAt = AI の呼び出しが終わった / verifyAt・verifyDoneAt = 候補の評価の前後。
-     *   各印は最初の 1 回だけ（修復の呼び出しでは上書きしない）。events = 受けた progress の数。本文・文は入れない
+     *   各印は最初の 1 回だけ（修復の呼び出しでは上書きしない）。events = 受けた progress の数。本文・文は入れない。
+     *   2026-10-15（§1.5）: textChars = 本文の断片の通知（text / delta）の chars（ここまでの累計。UTF-16 の長さ。token 数ではない）の最後に受けた値（無ければ null）、
+     *   deltaEvents = 本文の断片の通知の数（間引かれた分は数に入らないが、累計の文字数は落ちない）
      */
-    const emptyProgressTrace = () => ({ sentAt: null, headersAt: null, startedAt: null, textAt: null, lastAt: null, doneAt: null, verifyAt: null, verifyDoneAt: null, events: 0 });
+    const emptyProgressTrace = () => ({ sentAt: null, headersAt: null, startedAt: null, textAt: null, lastAt: null, doneAt: null, verifyAt: null, verifyDoneAt: null, events: 0, textChars: null, deltaEvents: 0 });
     function noteProgressTrace(pg, d, at) {
       pg.events += 1;
       const first = (k) => { if (pg[k] == null) pg[k] = at; };
@@ -21845,7 +21849,7 @@
         if (d.phase === 'sent') first('sentAt');
         else if (d.phase === 'headers') { first('headersAt'); pg.lastAt = at; }
         else if (d.phase === 'started') { first('startedAt'); pg.lastAt = at; }
-        else if (d.phase === 'text' || d.phase === 'delta') { first('textAt'); pg.lastAt = at; }
+        else if (d.phase === 'text' || d.phase === 'delta') { first('textAt'); pg.lastAt = at; pg.deltaEvents = (pg.deltaEvents || 0) + 1; if (d.chars != null && Number.isFinite(Number(d.chars)) && Number(d.chars) >= 0) pg.textChars = Number(d.chars); }
         else if (d.phase === 'done') first('doneAt');
       } else if (d.stage === 'verify') {
         if (d.phase === 'start') first('verifyAt');
@@ -21914,9 +21918,23 @@
       return {
         version: String(t.version ?? '').slice(0, 10), totalMs: n(t.totalMs),
         ai: { count: n(ai.count), ms: n(ai.ms), repairs: n(ai.repairs) },
-        calls: (Array.isArray(t.calls) ? t.calls : []).slice(0, 20).filter(c => c && typeof c === 'object').map(c => ({ kind: c.kind === 'repair' ? 'repair' : 'generate', attempt: n(c.attempt), ms: n(c.ms), ok: c.ok !== false, inputTokens: n(c.inputTokens), outputTokens: n(c.outputTokens) })),
+        //   2026-10-15（§1.5）: 呼び出しごとの上流（AI プロバイダ）の観測 upstream（契約 20 §15 の 8 キー）も白リストで残す（無い・ストリームでない呼び出しは null）
+        calls: (Array.isArray(t.calls) ? t.calls : []).slice(0, 20).filter(c => c && typeof c === 'object').map(c => ({ kind: c.kind === 'repair' ? 'repair' : 'generate', attempt: n(c.attempt), ms: n(c.ms), ok: c.ok !== false, inputTokens: n(c.inputTokens), outputTokens: n(c.outputTokens), upstream: normalizeUpstream(c.upstream) })),
         behavior: { ms: n(b.ms), runs: n(b.runs), calls: n(b.calls) },
       };
+    }
+    /**
+     * 2026-10-15（§1.5・契約 20 §15 / §16）: 上流（AI プロバイダ）の観測 upstream を 8 キーの白リストに整える。
+     *   headersMs / firstEventMs / firstTextMs / lastProgressMs / endMs = 送信からの相対 ms、end = 終わり方（completed / incomplete / aborted など。文字列か null）、
+     *   textChars = 受信した本文の文字数（UTF-16 の長さの累計。token 数ではない）、deltaCount = 本文の断片の数。数は数か null。形が違えば null（本文は入れない）
+     */
+    const UPSTREAM_KEYS = Object.freeze(['headersMs', 'firstEventMs', 'firstTextMs', 'lastProgressMs', 'endMs', 'end', 'textChars', 'deltaCount']);
+    function normalizeUpstream(u) {
+      if (!u || typeof u !== 'object' || Array.isArray(u)) return null;
+      const n = (v) => (v == null || v === '' || !Number.isFinite(Number(v)) || Number(v) < 0 ? null : Number(v));
+      const out = {};
+      for (const k of UPSTREAM_KEYS) out[k] = k === 'end' ? (typeof u.end === 'string' && u.end.trim() ? u.end.trim().slice(0, 40) : null) : n(u[k]);
+      return out;
     }
     /** §0c.9: 入口で受ける動作テストの代表条件の上限（Gateway の最大 PC・モバイル 192 件＋skipped より十分に大きい。超えたら truncated で合格にしない） */
     const KT_BEHAVIOR_CASES_MAX = 1000;
@@ -22084,7 +22102,13 @@
      * ok でない・契約の版が違う・reply が無いときだけ失敗にする
      * @returns {{ ok:boolean, errors:Array, warnings:Array, normalized:object|null }}
      */
-    function validateProposal(response) {
+    /** 2026-10-15（§3.2）: 進行を求める語句（adoptQuote）の照合（空白・句読点・括弧を除いた部分一致。2 文字以上） */
+    const normQuoteText = (s) => String(s ?? '').replace(/[\s　、。．，,.!！?？「」『』（）()［］\[\]・:：;；…〜~]/g, '');
+    /**
+     * @param {object} response Gateway の応答
+     * @param {{ utterance?: string|null }} o utterance = 今回の発言（adoptQuote の照合に使う。無ければ照合できないので語句があれば adopt のまま）
+     */
+    function validateProposal(response, { utterance = null } = {}) {
       const errors = [], warnings = [];
       const r = response || {};
       const warn = (code, path, message) => warnings.push({ code, path, message });
@@ -22133,6 +22157,15 @@
       if (!PROPOSAL_INTENTS.includes(intent)) { warn('PROPOSAL_INTENT_INVALID', 'intent', `語彙に無い intent（${intent || '空'}）を unclear にしました`); intent = 'unclear'; }
       if (intent === 'adopt' && decisions.some(d => d.blocking)) { warn('PROPOSAL_ADOPT_WITH_BLOCKING', 'intent', '先に必要な判断が残るため update にしました'); intent = 'update'; }
       const t = r.turn && typeof r.turn === 'object' ? r.turn : {};
+      //   2026-10-15（§3.2）: 進行を求める語句（adoptQuote）を返す Gateway では、adopt は今回の発言にその語句があるときだけ。空・見つからないときは update に下げる
+      //   （修正・回答だけの発言を採用と読まない）。キーの無い古い Gateway では今のまま。発言が渡されていない（照合できない）ときは語句があれば adopt のまま
+      const hasOwn = (o, k) => !!o && typeof o === 'object' && Object.prototype.hasOwnProperty.call(o, k);
+      const adoptQuoteRaw = hasOwn(r, 'adoptQuote') ? r.adoptQuote : hasOwn(t, 'adoptQuote') ? t.adoptQuote : undefined;
+      if (intent === 'adopt' && adoptQuoteRaw !== undefined) {
+        const q = normQuoteText(adoptQuoteRaw);
+        const found = q.length >= 2 && (typeof utterance !== 'string' || normQuoteText(utterance).includes(q));
+        if (!found) { warn('PROPOSAL_ADOPT_UNGROUNDED', 'adoptQuote', q ? '進行を求める語句が今回の発言に見つからないため update にしました' : '進行を求める語句（adoptQuote）が無いため update にしました'); intent = 'update'; }
+      }
       const OPS = ['adopt', 'reject', 'modify'];
       const ops = list(t.ops, 20, 'turn.ops')
         .map((o, i) => ({ id: o && typeof o.id === 'string' ? o.id.trim() : '', op: o && OPS.includes(o.op) ? o.op : null, text: str(o && o.text, 400, `turn.ops[${i}].text`), quote: str(o && o.quote, 400, `turn.ops[${i}].quote`) }))
@@ -22375,7 +22408,7 @@
           let acc = '';
           const onEvent = typeof onText === 'function' ? ({ event, data }) => { if (event === 'delta' && data && typeof data.text === 'string') { acc += data.text; try { onText(acc); } catch (e) { } } } : null;
           const response = await request({ path: '/v2/review', method: 'POST', body: JSON.stringify(envelope), signal, limitMs: longFor(deadlineMs), long: true, trace, noProxyFallback, ...(onEvent ? { onEvent } : {}) });
-          const v = validateProposal(response);
+          const v = validateProposal(response, { utterance: ctx.question });   // 2026-10-15（§3.2）: 進行を求める語句（adoptQuote）は今回の発言と照合する
           if (!v.ok) throw new AiClientError({ code: v.errors[0].code, message: v.errors[0].message, details: { errors: v.errors }, requestId });
           return { ...v.normalized, requestId: v.normalized.requestId || requestId, clientWarnings: v.warnings };
         },
@@ -22629,7 +22662,7 @@
       // Phase 22: エラーの種類・AI が生成しなかった理由
       ERROR_CATEGORY, CATEGORY_JA, errorCategory, declineReasonOf,
       createSettingsStore, createDefaultTransport, normalizeLegacyErrorCode,
-      buildAskEnvelope, buildPlanEnvelope, buildGenerateEnvelope, capabilityFromHealth, limitsFromHealth, clientLimitFromDeadline, RECEIVE_MARGIN_MS, CLIENT_LIMIT_MAX_MS, CLIENT_LIMIT_DEFAULT_MS, LATE_TIMER_MS, RESUME_GRACE_MS, validateAnswer, validateProposal, PROPOSAL_INTENTS, validatePlan, validateGenerated, normalizeVerification, BEHAVIOR_CASES_MAX: KT_BEHAVIOR_CASES_MAX, createAiClient, createSession, newRequestId, isPurePlatformQuestion,
+      buildAskEnvelope, buildPlanEnvelope, buildGenerateEnvelope, capabilityFromHealth, limitsFromHealth, clientLimitFromDeadline, RECEIVE_MARGIN_MS, CLIENT_LIMIT_MAX_MS, CLIENT_LIMIT_DEFAULT_MS, LATE_TIMER_MS, RESUME_GRACE_MS, validateAnswer, validateProposal, PROPOSAL_INTENTS, validatePlan, validateGenerated, normalizeVerification, normalizeUpstream, UPSTREAM_KEYS, BEHAVIOR_CASES_MAX: KT_BEHAVIOR_CASES_MAX, createAiClient, createSession, newRequestId, isPurePlatformQuestion,
       FEATURE_GENERATOR, GENERATOR_PROMPT_VERSION,
       createPkce, createConnectFlow, isDevMode,
     };
@@ -25790,8 +25823,13 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
     /** 明確な採用の言い方だけの文（「それでお願いします」「採用します」「OK です」「進めて」「この案でいいです」）。修正の語（DRAFT_REVISE）が無いときだけ採用 */
     //   レビューの指摘（2026-10-07）: 「承認します」「確定」「それで」「お願いします」「よろしくお願いします」も採用の言い方（仮案が open のとき。従来は操作の命令・相づちに流れていた）
     const DRAFT_ADOPT = /^(?:(?:はい|ok|OK|オッケー|うん|ええ|では|それでは|じゃあ)[、,。．\s]*)?(?:(?:それ|これ|この案|その案|この内容|その内容|この方向|この仮案|仮案|提案|全部|すべて|全て)(?:で|を|は|に)?[、,\s]*)?(?:採用(?:します|する|です|で|でお願いします|でいいです|して(?:ください|下さい)?)?|承認(?:します|する|です|で|でお願いします|して(?:ください|下さい)?)?|確定(?:します|する|です|で|でお願いします|して(?:ください|下さい)?)?|(?:よろしく)?お願い(?:します|いたします)?|よろしく|進めて(?:ください|下さい)?|進めましょう|進めよう|いい(?:です)?(?:よ|ね)?|よい(?:です)?|OK(?:です)?|ok(?:です)?|オッケー(?:です)?|大丈夫(?:です)?|問題ありません|異存ありません|賛成(?:です)?)[。．！!\s]*$|^それで[。．！!\s]*$/;
+    /**
+     * 2026-10-15（レビューの反映 T3）: DRAFT_ADOPT の進行の語句のうち「進めて」の語群（進めて（ください／下さい）・進めましょう・進めよう。DRAFT_ADOPT と同じ語で、新しい語は足していない）。
+     *   委ねる言い方の文（ADOPT。「おまかせで進めてください」）が同じ文にこの語群を持つときだけ、その文を進行の語句としても扱う（「おすすめでお願いします」「おまかせします」は委ねる言い方だけ）
+     */
+    const DRAFT_GO = /進め(?:て(?:ください|下さい)?|ましょう|よう)[。．！!\s]*$/;
     /** 「はい」「OK」だけの相づち（仮案が open のとき: 採用とは読まず、採用の言い方を短く案内する。AI は呼ばない） */
-    const DRAFT_ACK = /^(?:はい|ええ|うん|OK|ok|オッケー|おっけー|了解(?:です|しました)?|わかりました|分かりました)[。．！!、,\s]*$/;
+    const DRAFT_ACK =/^(?:はい|ええ|うん|OK|ok|オッケー|おっけー|了解(?:です|しました)?|わかりました|分かりました)[。．！!、,\s]*$/;
     /**
      * 仮案が無いときに新しい依頼（PROPOSE）と読まない短い文（確認 5・2026-10-07）: 相づち・制止・短い否定
      * （「問題ありません」「ちょっと待って」「やめる」「やっぱりやめる」「この案は採用しません」「結構です」）。従来の判定（質問の AI・案内）に落とす
@@ -25811,8 +25849,11 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
     /**
      * 仮案の経路の分類（能力 'proposal' があるときだけ呼ぶ）。null を返したら従来の classifyIntent へ。
      *   (a) 計画も仮案も無い新しい依頼 → PROPOSE（proposal の AI。従来の services.plan ＋ 先回りの返答は呼ばない）
-     *   (b) 仮案が open で計画が無いとき: 挨拶・相づちだけ → 何もしない（GENERAL。要件にしない）／質問文だけ → 従来の QA（null）／
-     *       明確な採用語だけで修正語が無い → ADOPT_DRAFT／「おすすめで」だけ → 推奨を採用（delegated）して、残る先に必要な判断が無ければ ADOPT_DRAFT（あれば DRAFT_REPLY）／
+     *   (b) 仮案が open で計画が無いとき（2026-10-15 §3.2・レビューの反映 T3 / T7 の規則）: 挨拶・相づちだけ → 何もしない（GENERAL。要件にしない）／質問文だけ → 従来の QA（null）／
+     *       素の「はい」「OK」→ 開いている判断があればその判断への答えとして AI へ（DRAFT_REPLY）、無ければ採用の言い方を案内（GENERAL）／
+     *       進行の語句（「採用します」「この案で進めて」）だけで修正語が無い → ADOPT_DRAFT（先に必要な判断が残れば DRAFT_REPLY）／
+     *       「おすすめで」「おまかせ」だけ → 開いている判断に推奨を記録するだけ（GENERAL。採用しない・質問しない。記録する判断が無ければ DRAFT_REPLY）／
+     *       委ねる言い方と進行の語句が同時にある（「おまかせで進めてください」「おすすめで。この案で進めて」）→ 委ねた判断を記録した上で ADOPT_DRAFT（推奨の無い先に必要な判断が残れば DRAFT_REPLY）／
      *       それ以外（修正・一部採用・混在・長文）→ DRAFT_REPLY（proposal の AI に前回の仮案と発言を渡す）
      *   (c) 計画がある（最終案の後）→ 従来どおり（null）。C-1 第 3 段（2026-10-08）: ただし、その計画の後に始めた新しい依頼の仮案（draft.afterPlan がその計画）が
      *       open なら、仮案への返事として扱う（最終案の後の新しい依頼も仮案の流れで進める）
@@ -25831,18 +25872,38 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
       // 資料の作成は従来の判定（仮案の経路では扱わない）
       if (typeof KTContextUi !== 'undefined' && KTContextUi.detectDocumentKind && KTContextUi.detectDocumentKind(t)) return null;
       const rest = restSens.join(' ');
-      // 仮案が open のとき「はい」「OK」だけは採用と読まない（採用の言い方を案内する。AI は呼ばない）
-      if (draft && DRAFT_ACK.test(t)) return { intent: INTENT.GENERAL, reason: 'DRAFT_SMALLTALK', ack: true };
+      // 仮案が open のとき「はい」「OK」だけは採用と読まない。2026-10-15（§3.2）: 開いている判断（質問）があれば、その判断への答えとして AI に読ませる（DRAFT_REPLY）。
+      //   無ければ採用の言い方を案内する（AI は呼ばない）
+      if (draft && DRAFT_ACK.test(t)) {
+        const openA = openDraftDecisions(draft, state.draftDecisions || []);
+        return openA.length ? { intent: INTENT.DRAFT_REPLY, reason: 'ACK_WITH_OPEN', utterance: t } : { intent: INTENT.GENERAL, reason: 'DRAFT_SMALLTALK', ack: true };
+      }
       // 仮案が open のときの採用の言い方（「それでお願いします」「これで進めて」「承認します」「お願いします」）は、進める命令（RE.preview）・相づち（GREETING）と重なるので、
       //   操作の命令・相づちの判定より先に見る（質問以外の文で判定する）
-      const restAll = sens.filter(s => !isQuestionSentence(s)).join(' ');
-      const adoptWords = !!draft && restAll.length > 0 && !DRAFT_REVISE.test(restAll) && (ADOPT.test(restAll) || DRAFT_ADOPT.test(restAll) || AGREEMENT.test(restAll));
-      if (adoptWords && !restSens.length) {
-        // 「お願いします」「よろしくお願いします」だけ（相づちの語と同じ文）→ 採用の言い方として扱う
-        const open0 = openDraftDecisions(draft, state.draftDecisions || []);
-        const left0 = open0.filter(d => d.blocking);
-        const ask0 = qSens.length ? { askText: qSens.join(' ') } : {};
-        return left0.length ? { intent: INTENT.DRAFT_REPLY, reason: 'ADOPT_WITH_OPEN', utterance: t, ...ask0 } : { intent: INTENT.ADOPT_DRAFT, reason: 'ADOPT_WORDS', utterance: t, ...ask0 };
+      //   2026-10-15（§3.2）: 文ごとに「委ねる言い方」（ADOPT。おすすめで・おまかせ）と「進行の語句」（DRAFT_ADOPT / AGREEMENT。採用します・この案で進めて）を見る。
+      //   質問以外の文（相づちだけの文は除く）が全部どちらかで修正の語が無ければ採用の経路: 進行の語句があれば（委ねた判断を記録した上で）採用、
+      //   委ねる言い方だけなら開いている判断に推奨を記録するだけ（採用しない・質問しない。GENERAL / DELEGATE_ONLY）。新しいキーワードは足さない
+      //   レビューの反映 T3: 委ねる言い方の文は、同じ文に「進めて」の語群（DRAFT_GO。DRAFT_ADOPT と同じ語）があるときだけ進行の語句としても扱う
+      //   （「おまかせで進めてください」→ 記録した上で採用。「おすすめでお願いします」「おまかせします」→ 記録だけ）。ADOPT に一致する文を一律に進行から除外しない
+      const nonQ = sens.filter(s => !isQuestionSentence(s));
+      const restAll = nonQ.join(' ');
+      const isDelegateSentence = (s) => ADOPT.test(s);
+      const isProgressSentence = (s) => (ADOPT.test(s) ? DRAFT_GO.test(s) : (DRAFT_ADOPT.test(s) || AGREEMENT.test(s)));
+      const core = nonQ.filter(s => isDelegateSentence(s) || isProgressSentence(s) || !isGreetingSentence(s));
+      const adoptWords = !!draft && core.length > 0 && !DRAFT_REVISE.test(restAll) && core.every(s => isDelegateSentence(s) || isProgressSentence(s));
+      if (adoptWords) {
+        const openD = openDraftDecisions(draft, state.draftDecisions || []);
+        const askD = qSens.length ? { askText: qSens.join(' ') } : {};
+        const hasDelegate = core.some(isDelegateSentence), hasProgress = core.some(isProgressSentence);
+        const delegated = hasDelegate ? openD.filter(d => d.recommendation).map(d => ({ key: d.key, label: d.label, question: d.question, answer: d.recommendation, kind: 'delegated', quote: restSens.join(' ') || restAll })) : [];
+        if (hasProgress) {
+          // 進行の語句あり: 先に必要な判断が残っていれば、採用ではなく AI にその判断を聞き直させる（黙って落とさない。委ねたときは推奨の無い先に必要な判断だけが残る）
+          const left = openD.filter(d => d.blocking && !(hasDelegate && d.recommendation));
+          const withD = delegated.length ? { delegated } : {};
+          return left.length ? { intent: INTENT.DRAFT_REPLY, reason: hasDelegate ? 'DELEGATE_WITH_OPEN' : 'ADOPT_WITH_OPEN', ...withD, utterance: t, ...askD } : { intent: INTENT.ADOPT_DRAFT, reason: hasDelegate ? 'DELEGATE' : 'ADOPT_WORDS', ...(hasDelegate ? { delegated } : {}), utterance: t, ...askD };
+        }
+        // 委ねる言い方だけ: 推奨のある開いている判断に推奨を記録するだけ（採用しない）。記録する判断が無ければ AI に読ませる（AI が update と判断する）
+        return delegated.length ? { intent: INTENT.GENERAL, reason: 'DELEGATE_ONLY', delegated, utterance: t, ...askD } : { intent: INTENT.DRAFT_REPLY, reason: openD.length ? 'DELEGATE_WITH_OPEN' : 'DELEGATE_NO_OPEN', utterance: t, ...askD };
       }
       // 操作の命令（反映・元に戻す・コードの生成・登録）は従来の判定
       if (restSens.length && !adoptWords && isOperationCommand(rest)) return null;
@@ -25861,19 +25922,7 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
       }
       if (greetingOnly) return { intent: INTENT.GENERAL, reason: 'DRAFT_SMALLTALK' };
       if (!restSens.length && qSens.length) return null;   // 質問文だけ → 従来の QA（conversationContext に仮案の要約を添える）
-      const open = openDraftDecisions(draft, state.draftDecisions || []);
-      const ask = qSens.length ? { askText: qSens.join(' ') } : {};
-      // 「おすすめで」「おまかせ」: 推奨のある判断は推奨を採用（delegated）。残る先に必要な判断が無ければ採用へ、あれば AI に残りだけ聞かせる
-      if (ADOPT.test(rest) && !DRAFT_REVISE.test(rest)) {
-        const delegated = open.filter(d => d.recommendation).map(d => ({ key: d.key, label: d.label, question: d.question, answer: d.recommendation, kind: 'delegated', quote: rest }));
-        const left = open.filter(d => !d.recommendation && d.blocking);
-        return { intent: left.length ? INTENT.DRAFT_REPLY : INTENT.ADOPT_DRAFT, reason: left.length ? 'DELEGATE_WITH_OPEN' : 'DELEGATE', delegated, utterance: t, ...ask };
-      }
-      if ((DRAFT_ADOPT.test(rest) || AGREEMENT.test(rest)) && !DRAFT_REVISE.test(rest)) {
-        // 先に必要な判断が残っていれば、採用ではなく AI にその判断を聞き直させる（黙って落とさない）
-        const left = open.filter(d => d.blocking);
-        return left.length ? { intent: INTENT.DRAFT_REPLY, reason: 'ADOPT_WITH_OPEN', utterance: t, ...ask } : { intent: INTENT.ADOPT_DRAFT, reason: 'ADOPT_WORDS', utterance: t, ...ask };
-      }
+      // 採用・委ねる言い方だけの文は上で分けた（2026-10-15 §3.2）。残り（修正・一部採用・混在・長文）は proposal の AI に前回の仮案と発言を渡す
       return { intent: INTENT.DRAFT_REPLY, reason: qSens.length ? 'DRAFT_MIXED' : 'DRAFT_TURN', utterance: t };
     }
     function classifyIntent(text, state = {}) {
@@ -27411,7 +27460,11 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
           // 最初の計画の作成中の同意（「その案でお願いします」「それで進めて」。先回りの返答への同意）: 計画はその方向で作っている。修正の依頼として積まない
           //   （実機 2026-10-05: 「修正の依頼を受け付けました：『その案でお願いします。』」となり、計画に続けて入れる作業が 1 回増えた）
           //   「おすすめで」も同じ（2026-10-05 差分レビュー: 修正の依頼として積まれ、計画の作り直しが 1 回増えた）
-          if (kind === 'PLAN' && (AGREEMENT.test(restT) || ADOPT.test(restT))) {
+          //   2026-10-15（§3.2・レビューの反映 T2）: 「おすすめで。この案で進めて」のように委ねる言い方（ADOPT）と進行の語句（DRAFT_ADOPT / AGREEMENT）が同じ発言に並ぶときも同意
+          //   （修正の依頼として積まない）。進行の語句だけの発言（「採用します」）は従来の経路のまま（同じ文なら「いま進めています」、違えば修正として積む）。
+          //   classifyDraft と同じ既存の語彙。新しいキーワードは足さない
+          const delegateAndGo = rs.some(s => ADOPT.test(s)) && rs.every(s => ADOPT.test(s) || AGREEMENT.test(s) || DRAFT_ADOPT.test(s));
+          if (kind === 'PLAN' && (AGREEMENT.test(restT) || ADOPT.test(restT) || delegateAndGo)) {
             push(MSG.USER, ROLE.USER, t, userData);
             if (qs.length) askNow(qs.join(' '));
             toolkit('いま作っている計画は、この方向で作っています。計画ができたら内容を確かめてください。', { kind: 'agree-while-plan' });
@@ -27831,7 +27884,10 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
           const notSent = failed && (r.notSent === 'budget' ? 'budget' : (r.notSent === true || (!tr && end !== 'unknown')) ? true : false);
           //   生成の停滞の観測（2026-10-14）: progress = 生成工程の進みの通知の時刻（相対 ms・受けた数。本文なし。通知の無い接続先・要求には付かない）。
           //   via = 受けた経路（direct / direct-stream / proxy。レビューの指摘 2。分からない要求には付かない）
-          const e = { kind, perf: r.perf || null, ai: aiOf(r.answer || r.plan || r.proposal || r.generated || null), end, ...(failed && r.reason ? { code: r.reason } : {}), ...(tr && tr.requestId ? { requestId: tr.requestId } : {}), ...(tr && tr.limitMs != null ? { limitMs: tr.limitMs } : {}), ...(tr && tr.transport ? { transport: { ...tr.transport } } : {}), ...(tr && typeof tr.via === 'string' && tr.via ? { via: tr.via } : {}), ...(tr && tr.progress ? { progress: { ...tr.progress } } : {}), ...(tr && tr.mode ? { mode: tr.mode } : {}), ...(notSent ? { notSent } : failed && r.preAi === true ? { preAi: true } : {}) };
+          //   2026-10-15（§1.5）: upstream = 上流（AI プロバイダ）の観測（契約 20 §15 の 8 キー。文字数は token 数ではない）。失敗は Gateway の 502 の error.upstream（r.upstream）、
+          //   成功した生成は生成工程の timing.calls の最初の呼び出しの分。表示には使わない（本文は入れない）
+          const upstream = r.upstream && typeof r.upstream === 'object' ? { ...r.upstream } : (kind === 'generate' && r.generated && r.generated.timing && Array.isArray(r.generated.timing.calls) ? ((r.generated.timing.calls.find(c => c && c.upstream) || {}).upstream || null) : null);
+          const e = { kind, perf: r.perf || null, ai: aiOf(r.answer || r.plan || r.proposal || r.generated || null), end, ...(failed && r.reason ? { code: r.reason } : {}), ...(tr && tr.requestId ? { requestId: tr.requestId } : {}), ...(tr && tr.limitMs != null ? { limitMs: tr.limitMs } : {}), ...(tr && tr.transport ? { transport: { ...tr.transport } } : {}), ...(tr && typeof tr.via === 'string' && tr.via ? { via: tr.via } : {}), ...(tr && tr.progress ? { progress: { ...tr.progress } } : {}), ...(tr && tr.mode ? { mode: tr.mode } : {}), ...(upstream ? { upstream: { ...upstream } } : {}), ...(notSent ? { notSent } : failed && r.preAi === true ? { preAi: true } : {}) };
           if (kind === 'generate' && r.generated && typeof r.generated === 'object') {
             const rp = repairUsageOf({ ...r.generated, verification: r.verification || r.generated.verification || null });
             e.repairs = rp.count || 0;
@@ -28305,7 +28361,13 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
             const er = errorOf(e);
             const kind = stopKindOf(e) || (abortedNow() ? 'cancelled' : null);
             if (kind) haltWith(e, { stage: 'generate', customizationId: cid });
-            r = { ok: false, reason: er.code, message: er.message, ...(er.reason ? { aiReason: er.reason } : {}), ...(kind ? { stop: kind } : {}), end: kind && stopEndUnknown(kind) ? 'unknown' : 'error', callTrace: e && e.callTrace ? e.callTrace : null, ...(budgetNotSent(e) ? { notSent: 'budget' } : budgetPreAi(e) ? { preAi: true } : {}) };   // AI が生成を断ったときの AI の説明（declineReasonOf）は最終案のカードに出す
+            //   2026-10-15（§1.5）: 失敗（時間切れ・中断・失敗）の記録に、Gateway の 502 の error.upstream（契約 20 §16。8 キーに整える）と、Toolkit が受けた進みの通知の
+            //   本文の文字数の累計（callTrace.progress.textChars）を残す（本文は残さない。表示は作成途中の詳細の 1 句だけ）
+            const kcU = typeof KTAiClient !== 'undefined' ? KTAiClient : null;
+            const upstream = kcU && typeof kcU.normalizeUpstream === 'function' ? kcU.normalizeUpstream(e && e.details && e.details.error && typeof e.details.error === 'object' ? e.details.error.upstream : null) : null;
+            const pgT = e && e.callTrace && e.callTrace.progress && typeof e.callTrace.progress === 'object' ? e.callTrace.progress : null;
+            const textChars = pgT && pgT.textChars != null && Number.isFinite(Number(pgT.textChars)) ? Number(pgT.textChars) : null;
+            r = { ok: false, reason: er.code, message: er.message, ...(er.reason ? { aiReason: er.reason } : {}), ...(kind ? { stop: kind } : {}), end: kind && stopEndUnknown(kind) ? 'unknown' : 'error', callTrace: e && e.callTrace ? e.callTrace : null, ...(upstream ? { upstream } : {}), ...(textChars != null ? { textChars } : {}), ...(budgetNotSent(e) ? { notSent: 'budget' } : budgetPreAi(e) ? { preAi: true } : {}) };   // AI が生成を断ったときの AI の説明（declineReasonOf）は最終案のカードに出す
           }
           noteCall('generate', r); if (timing.calls.length) timing.calls[timing.calls.length - 1].ms = clock() - tg;
           if (late()) return null;
@@ -28317,7 +28379,7 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
           }
           //   同じ入力・同じ指摘で AI を呼ばなかった回（REPEAT_SAME_INPUT）は回数・履歴を進めない（履歴の指摘を空にすると、次の同じ入力で「検査は通っています」と案内してしまう）
           //   §0f.3 の 1: 止めた回も回数・履歴を進めない（同じ入力の作り直しを「繰り返し」と数えない）
-          if (!r || !r.ok) return { ...base, generated: previous ? previous.generated : null, review: previous ? previous.review : null, existingSource: previous ? previous.existingSource : null, status: 'failed', failure: { reason: r?.reason || 'ERROR', message: r?.message || 'JavaScript を生成できませんでした。', ...(r && r.aiReason ? { aiReason: r.aiReason } : {}), ...(r && r.stop ? { stop: r.stop, endUnknown: stopEndUnknown(r.stop) } : {}) }, attempts: r && (r.reason === 'REPEAT_SAME_INPUT' || r.stop) ? ((previous && previous.attempts) || r.attempts || null) : nextAttempts(previous, { inputHash: r?.inputHash ?? null, blockers: [], at: now() }), candidateHash: null };
+          if (!r || !r.ok) return { ...base, generated: previous ? previous.generated : null, review: previous ? previous.review : null, existingSource: previous ? previous.existingSource : null, status: 'failed', failure: { reason: r?.reason || 'ERROR', message: r?.message || 'JavaScript を生成できませんでした。', ...(r && r.aiReason ? { aiReason: r.aiReason } : {}), ...(r && r.stop ? { stop: r.stop, endUnknown: stopEndUnknown(r.stop) } : {}), ...(r && r.upstream ? { upstream: { ...r.upstream } } : {}), ...(r && r.textChars != null ? { textChars: r.textChars } : {}) }, attempts: r && (r.reason === 'REPEAT_SAME_INPUT' || r.stop) ? ((previous && previous.attempts) || r.attempts || null) : nextAttempts(previous, { inputHash: r?.inputHash ?? null, blockers: [], at: now() }), candidateHash: null };
           const estimate = generationEstimate({ ctx: r.ctx || null, generated: r.generated || null });
           //   C-1 第 4 段（2026-10-09・K-2 の残り）: 生成の使用量は、この送信の呼び出しの記録に付ける（attempts の累計は版をまたぐので使用量に使わない）
           { const lastCall = timing.calls.length ? timing.calls[timing.calls.length - 1] : null; if (lastCall && lastCall.kind === 'generate' && estimate && estimate.measured !== false && (estimate.input != null || estimate.output != null)) lastCall.genEstimate = estimate; }
@@ -28363,10 +28425,78 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
           //   §0e.2（2026-10-09）: 入れなかった任意の提案（origin suggestion）は「外した」に出さない（採用の既定に入っていない）
           const changed = { rejected: dr ? (dr.rejected || []).filter(x => x && !isSuggestionItem(x)).map(x => cut(x.text, 80)) : [], modified: lastHist && lastHist.applied ? (lastHist.applied.modified || []).map(x => cut(x.to || x.text || x, 80)) : [], provisionals: (Array.isArray(p.provisionals) ? p.provisionals : []).filter(x => x && String(x.choice ?? '').trim()).map(x => cut(labeled(x.choice), 80)), reply: v.turnInfo && v.turnInfo.reply ? cut(labeled(v.turnInfo.reply), 300) : '' };
           const cannot = [];
+          //   2026-10-15（§4(b)）: 満たした必須の動作（構造あり・模擬テストで不合格でない）。部分対応の要件の「実現した部分」と、計画では対応できないとされた要件との重複の判定に使う
+          //   （止めた・作っていない JavaScript は数えない。判定は変えない）
+          const metItemsOf = (e) => {
+            if (!e || !e.generated || (e.status === 'failed' && e.failure && e.failure.stop)) return [];
+            const er = (e.review && e.review.effects) || (Array.isArray(e.requiredEffects) && e.requiredEffects.length ? KTCodeReview.effectResults(e.verification, e.requiredEffects, { effectCheck: e.effectCheck === true }) : null);
+            return er && Array.isArray(er.items) ? er.items.filter(i => i && i.structure === 'present' && i.behavior !== 'fail') : [];
+          };
+          //   2026-10-15（§4(b)）: 部分対応の制約の文は「残る範囲」だけ。構造の SUBTABLE_ROWS（セルは編集不可にできた）はテーブルの名前で、AI の PARTIAL は理由（note）だけ
+          //   （要件の全文「PC: …。PC・モバイルの両方：…」を先頭に付けない）。NOT_MET は今のまま。判定（blockers・approvable）は変えない
+          const constraintTextOf = (x) => {
+            if (x.code === 'SUBTABLE_ROWS') { const names = (Array.isArray(x.tables) ? x.tables : []).filter(Boolean).map(fieldName).join(''); return `${names || '明細（テーブル）'}の行の追加・削除は止まりません（セルの編集不可だけでは止められないため。行のボタンを隠す API は Toolkit がまだ扱っていません）`; }
+            if (x.code === 'AI_PARTIAL') { const note = String(x.noteText ?? x.note ?? '').replace(/\s+/g, ' ').trim(); return fix(note || x.message); }
+            return fix(x.message);
+          };
+          //   この版の要件の台帳（決定事項の見出し・実現した部分の文の条件に使う。2026-10-15 T5: 実現した部分の文を先に作るのでここで引く）
+          const lgF = state.ledgers.get(v.planId) || null;
+          //   2026-10-15（§4(b)）: 部分対応（AI の PARTIAL・構造の SUBTABLE_ROWS）の要件のうち実現した部分を 1 文にして「この案で実現すること」（左）と「最終的にどう動くか」（右）に足す
+          //   （同じ文があれば足さない）。材料は満たした必須の動作（metItemsOf）と、要件の台帳の条件の文・フィールドの名前・テーブルの列（構造）・画面（PC / モバイル）だけ。
+          //   例「承認済みでは「明細」の品名・数量・単価のセルを編集できなくなります（PC・モバイル）」。判定は変えない。
+          //   レビューの反映 T5: 文を実際に作れた要件の id（ids）も返す。必須の動作の項目に要件の id があればその id、テーブルの列の一致で拾った項目は limitCode SUBTABLE_ROWS の
+          //   PARTIAL の要件だけ（ほかの PARTIAL を実現したことにしない）。文を作れなかった要件は ids に入らない
+          //   効果の言葉（フィールドの名前 ＋ 助詞 ＋ 動作。実現した部分の文と、計画で足した動作（planAdds）の文で同じ言葉を使う）
+          const EFF_DO = { lock: ['を', '編集できないようにします', '編集できないようにする'], warn: ['に', '警告を出します', '警告を出す'], 'block-save': ['の', '保存を止めます', '保存を止める'], 'set-value': ['に', '値を設定します', '値を設定する'], 'show-hide': ['の', '表示を切り替えます', '表示を切り替える'] };
+          const effPhrase = (fields, e, polite) => { const d = EFF_DO[e] || ['の', `${KT_EFFECT_NEED_JA[e] || e}をします`, KT_EFFECT_NEED_JA[e] || e]; const f = [...new Set((fields || []).filter(Boolean))].map(fieldName).join(''); return `${f ? `${f}${d[0]}` : ''}${polite ? d[1] : d[2]}`; };
+          const realizedPartsOf = (ents) => {
+            const cols = tableColumns();
+            const colOf = (code) => (cols && cols[code] ? String(cols[code]) : null);
+            const labelOf = (code) => String(fieldLabels()[code] || code);
+            const condOf = (ids) => { if (!lgF) return ''; const reqsL = KTAiAnswers.requirementsOf(lgF); for (const id of ids) { const r = reqsL.find(x => x && String(x.id) === String(id)); const c = r ? String(r.condition || '').replace(/\s+/g, ' ').trim() : ''; if (c) return c; } return ''; };
+            const texts = [], ids = [];
+            for (const [, e] of ents) {
+              const na = (e.review?.coverage?.notAchieved || []).filter(Boolean);
+              const partialIds = [...new Set(na.filter(x => x.code === 'AI_PARTIAL' && x.requirementId).map(x => String(x.requirementId)))];
+              const limitedIds = partialIds.filter(id => na.some(x => x.code === 'AI_PARTIAL' && x.limit === 'SUBTABLE_ROWS' && String(x.requirementId) === id));
+              const tables = [...new Set(na.filter(x => x.code === 'SUBTABLE_ROWS' && Array.isArray(x.tables)).flatMap(x => x.tables.map(String)))];
+              if (!partialIds.length && !tables.length) continue;
+              const items = metItemsOf(e).filter(i => (Array.isArray(i.requirementIds) ? i.requirementIds : []).some(id => partialIds.includes(String(id))) || (tables.length > 0 && tables.includes(colOf(i.field))));
+              const groups = new Map();
+              for (const i of items) {
+                const table = colOf(i.field);
+                const own = (Array.isArray(i.requirementIds) ? i.requirementIds : []).map(String).filter(id => partialIds.includes(id));
+                const cond = condOf(own.length ? own : partialIds);
+                const k = `${i.effect}|${table || ''}|${cond}`;
+                const g = groups.get(k) || { effect: i.effect, table, cond, fields: [], platforms: new Set(), ids: [] };
+                if (!g.fields.includes(i.field)) g.fields.push(i.field);
+                for (const p of platformsOfEvents(i.events)) g.platforms.add(p);
+                for (const id of (own.length ? own : (table && tables.includes(table) ? limitedIds : []))) if (!g.ids.includes(id)) g.ids.push(id);
+                groups.set(k, g);
+              }
+              for (const g of groups.values()) {
+                const condJa = g.cond ? (/(?:とき|場合|際)$/.test(g.cond) ? `${g.cond}は` : `${g.cond}では`) : '';
+                const plats = ['desktop', 'mobile'].filter(p => g.platforms.has(p)).map(p => (p === 'mobile' ? 'モバイル' : 'PC'));
+                const body = g.effect === 'lock' ? (g.table ? `${fieldName(g.table)}の${g.fields.map(labelOf).join('・')}のセルを編集できなくなります` : `${g.fields.map(fieldName).join('')}を編集できなくなります`) : effPhrase(g.fields, g.effect, true);
+                texts.push(`${condJa}${body}${plats.length ? `（${plats.join('・')}）` : ''}`);
+                for (const id of g.ids) if (!ids.includes(id)) ids.push(id);
+              }
+            }
+            return { texts: [...new Set(texts)], ids };
+          };
+          const realized = realizedPartsOf(entries);
           for (const [cid, e] of entries) {
             const from = cannot.length;
             //   レビュー 9（2026-10-14）: 要件に結び付く制約（AI の申告）は requirementId を持たせる（同じ要件の req-unsupported と重ねないための照合に使う。先頭の部分一致はしない）
-            for (const x of (e.review?.coverage?.notAchieved || [])) cannot.push({ kind: 'coverage', text: cut(fix(x.message), 160), ...(x.requirementId ? { requirementId: String(x.requirementId) } : {}) });
+            //   2026-10-15（§4(b)）: limitCode SUBTABLE_ROWS の PARTIAL は、同じ JavaScript の構造の行（テーブルの名前つき）で示す（行を重ねない。要件の id はその行に引き継ぐ）
+            const naRows = (e.review?.coverage?.notAchieved || []).filter(Boolean);
+            const hasStructuralRows = naRows.some(x => x.code === 'SUBTABLE_ROWS');
+            const limitedIds = naRows.filter(x => x.code === 'AI_PARTIAL' && x.limit === 'SUBTABLE_ROWS' && x.requirementId).map(x => String(x.requirementId));
+            for (const x of naRows) {
+              if (x.code === 'AI_PARTIAL' && x.limit === 'SUBTABLE_ROWS' && hasStructuralRows) continue;
+              const rid = x.requirementId ? String(x.requirementId) : (x.code === 'SUBTABLE_ROWS' && limitedIds.length ? limitedIds[0] : null);
+              cannot.push({ kind: 'coverage', text: cut(constraintTextOf(x), 160), ...(rid ? { requirementId: rid } : {}) });
+            }
             const file = e.generated?.targetFile ? `「${e.generated.targetFile}」` : 'JavaScript';
             //   レビュー 4（2026-10-14）: 反映を止める理由の行の先頭はファイル名ではなく計画の手順の title（customizationTitleOf。無ければ「JavaScript」）
             const titleNow = customizationTitleOf(p, cid);
@@ -28402,7 +28532,10 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
           for (const st of (Array.isArray(p.steps) ? p.steps : []).filter(s => s && s.actionType === 'REQUIRE_CONFIRMATION')) cannot.push({ kind: 'confirm', text: `確認が済むまで反映しない手順: ${cut(st.title || st.targetRef || '', 80)}` });
           for (const u of (Array.isArray(p.unknowns) ? p.unknowns : []).slice(0, 3)) cannot.push({ kind: 'unknown', text: cut(fix(typeof u === 'string' ? u : (u && (u.text || u.description)) || ''), 160) });
           // 追加指示 §4: 対応できないとされた決まった要件は、黙って落とさず実現できない点に出す
-          for (const r of unsupportedRequirementsOf(v)) cannot.push({ kind: 'req-unsupported', text: `計画では対応できないとされた要件: ${cut(r.text, 140)}${r.note ? `（理由: ${cut(fix(r.note), 120)}）` : ''}`, next: '運用（手順・権限）で扱うか、要件を取り消してから反映します。', ...(r.id ? { requirementId: String(r.id) } : {}) });
+          //   2026-10-15（§4(b)・レビューの反映 T5）: coverage の MET か、実現した部分の 1 文を実際に作れた要件（realized.ids）は部分対応（実現することと制約に分けて出す）なので、ここでは出さない。
+          //   文を作れなかった PARTIAL（効果の結果が無い接続先など）と何も実現していない要件は今の文で残す（未達を見失わない）
+          const realizedIds = new Set([...entries.flatMap(([, e]) => (e.review?.coverage?.met || []).map(x => x && x.requirementId)).filter(Boolean).map(String), ...realized.ids]);
+          for (const r of unsupportedRequirementsOf(v)) { if (r.id && realizedIds.has(String(r.id))) continue; cannot.push({ kind: 'req-unsupported', text: `計画では対応できないとされた要件: ${cut(r.text, 140)}${r.note ? `（理由: ${cut(fix(r.note), 120)}）` : ''}`, next: '運用（手順・権限）で扱うか、要件を取り消してから反映します。', ...(r.id ? { requirementId: String(r.id) } : {}) }); }
           for (const r of unresolvedInstructionsOf(v)) cannot.push({ kind: 'req-unresolved', text: `変更案に入っていない可能性がある指示: 「${cut(r.text, 140)}」（計画で扱いが決まっていません）`, next: '入れる場合は、そのように伝えてください。' });
           // 対応範囲: 担当がある（ほかの手順・JavaScript）ものと、担当が計画に無いものを分ける（同じ要件を 2 行にしない。反証 B5）
           const scopeRows = new Map();
@@ -28424,7 +28557,7 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
           const notice = effGroups.size ? `依頼に無い${[...effGroups].map(([e, names]) => `「${names.join('・')}の${KT_EFFECT_NOUN_JA[e] || KT_EFFECT_NEED_JA[e] || e}」`).join('')}は入れていません（詳細）` : '';
           //   §0f.2 の 9（2026-10-09・前の確認の結び付けの誤り）: 決定事項の実現として計画が足した動作（v.scopeLinked。外していない）。
           //   行は「フィールドの名前を効果の言葉」と、結び付いた決定事項の見出しか問いの短い文（決定事項の構造化した値だけ。番号は出さない）
-          const lgF = state.ledgers.get(v.planId) || null;
+          //   （要件の台帳 lgF は上の realizedPartsOf の前で引いている）
           const dLabelOf = (id) => {
             if (!lgF) return '';
             for (const r of KTAiAnswers.requirementsOf(lgF)) for (const l of (Array.isArray(r.decisionLinks) ? r.decisionLinks : [])) if (l && l.id === id && l.label) return String(l.label);
@@ -28443,10 +28576,8 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
           //   再検証前の指示 §2（2026-10-10）: 計画で残した業務上の追加・変更（決定事項の実現として範囲内に上がった要件が足した効果 v.scopeLinked）は、通常表示の
           //   「仮案から変わった点と理由」に対象・動作・理由を短く出す（planAdds。例「「備考」に警告を出します（おまかせにした「備考の警告」の実現として）」）。
           //   判断の候補（v.scopeCandidates）は、黙って入れず・黙って消さず、同じ節と承認の欄の確認項目に判断が残っていることを一度に示す（candidates）。
-          //   文は決定事項の構造化した見出し・フィールドの名前・効果の言葉だけで組み立てる（番号は出さない）
-          const EFF_DO = { lock: ['を', '編集できないようにします', '編集できないようにする'], warn: ['に', '警告を出します', '警告を出す'], 'block-save': ['の', '保存を止めます', '保存を止める'], 'set-value': ['に', '値を設定します', '値を設定する'], 'show-hide': ['の', '表示を切り替えます', '表示を切り替える'] };
-          const effPhrase = (fields, e, polite) => { const d = EFF_DO[e] || ['の', `${KT_EFFECT_NEED_JA[e] || e}をします`, KT_EFFECT_NEED_JA[e] || e]; const f = [...new Set((fields || []).filter(Boolean))].map(fieldName).join(''); return `${f ? `${f}${d[0]}` : ''}${polite ? d[1] : d[2]}`; };
-          const quoteLabels = (ls) => [...new Set(ls.filter(Boolean))].slice(0, 3).map(l => `「${labeled(l)}」`).join('・');
+          //   文は決定事項の構造化した見出し・フィールドの名前・効果の言葉だけで組み立てる（番号は出さない）。効果の言葉（EFF_DO・effPhrase）は上の realizedPartsOf の前で定義している
+          const quoteLabels =(ls) => [...new Set(ls.filter(Boolean))].slice(0, 3).map(l => `「${labeled(l)}」`).join('・');
           const addGroups = new Map();
           for (const s of (Array.isArray(v.scopeLinked) ? v.scopeLinked : [])) {
             const links = Array.isArray(s.links) && s.links.length ? s.links : (s.decisionIds || []).map(id => ({ id, kind: 'user' }));
@@ -28518,11 +28649,22 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
           const callsNow = timing.calls.filter(x => x && typeof x.ms === 'number');
           //   追加指示 §4（f）: 測っていない段階は 0 秒と出さない（その段階の呼び出しが無ければ null。表示は測ったものだけ）
           const msOf = (kind) => { const xs = callsNow.filter(x => x.kind === kind); return xs.length ? xs.reduce((n, x) => n + x.ms, 0) : null; };
+          //   2026-10-15（§4(d)）: 部ごとの Gateway の処理時間（計画: Gateway の AI の待ち時間 meta.ai.latencyMs・生成: 生成工程の処理全体 timing.totalMs）。記録だけ（表示は finalDetailHtml が
+          //   壁時計との差が 10 秒以上のときだけ分ける）。その部の呼び出しのどれかで分からなければ null。総経過（totalMs）は壁時計のまま（凍結の時間を引かない）
+          const gwMsOf = (x) => {
+            if (!x) return null;
+            if (x.kind === 'generate') return x.gatewayTiming && x.gatewayTiming.totalMs != null && Number.isFinite(Number(x.gatewayTiming.totalMs)) ? Number(x.gatewayTiming.totalMs) : null;
+            if (x.kind === 'plan' || x.kind === 'plan-auto') return x.ai && x.ai.latencyMs != null && Number.isFinite(Number(x.ai.latencyMs)) ? Number(x.ai.latencyMs) : null;
+            return null;
+          };
+          const gwOf = (kind) => { const xs = callsNow.filter(x => x.kind === kind); if (!xs.length) return null; const ms = xs.map(gwMsOf); return ms.every(m => m != null) ? ms.reduce((n, m) => n + m, 0) : null; };
           //   レビューの指摘 row4（2026-10-09）: 止めた送信で受け付けた指示のうち、まだ計画に入っていないもの（未完成の最終案・［残りの JavaScript を作る］で作った最終案に出す）
           const pendingInstructions = stoppedInstructionsOf(v.planId);
           //   会話の設計し直し（2026-10-14・指示書 §4）: 完成した最終案のカードの材料（判定は変えない。表示だけ）。
           //   adoptedBehaviors = 採用した仮案の実現する動作（origin user / ai。任意の提案 suggestion は除く。無ければ []）
           const adoptedBehaviors = dr && dr.items && Array.isArray(dr.items.behaviors) ? dr.items.behaviors.filter(b => b && b.text && !isSuggestionItem(b)).map(b => cut(labeled(String(b.text)), 140)).filter((x, i, a) => a.indexOf(x) === i).slice(0, 8) : [];
+          //   2026-10-15（§4(b)）: 部分対応の要件のうち実現した部分の 1 文（realizedPartsOf。上で作った）を「この案で実現すること」（左）と「最終的にどう動くか」（右）に足す（同じ文があれば足さない）
+          for (const s of realized.texts) { if (!behaviors.includes(s)) behaviors.push(s); if (adoptedBehaviors.length && !adoptedBehaviors.includes(s)) adoptedBehaviors.push(s); }
           //   existingChanges = 既存の設定を変える手順（UPDATE_…）の構造化した材料（レビュー 1・2026-10-14）: { kind, title, name, from, to, filterCond, beforeFilterCond, targetKind }。
           //   Toolkit Review の変更後（diff.after。無ければ手順の spec）から取り、Review の diff.human（✎・Before・After の行）は連結しない。
           //   文は左のカード（KTAiChatUi.finalCardHtml）が右の「変更内容」と同じ変換（screenTextOf）で組み立てる（条件式を文にできなければ「使える条件が変わります」）
@@ -28563,7 +28705,8 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
           return { planId: v.planId, version: v.version, draftId: v.fromDraft ? v.fromDraft.id : null, behaviors, changed, cannot, outOfScope, scopeOut, impact, pendingInstructions, adoptedBehaviors, existingChanges, constraints, supplements, blockers, verification: { machine, effects: effectRows, behavior, unverified, howTo, scope }, questions: questions.map(q => ({ key: q.key, text: q.text, priority: q.priority || 'later', entryId: q.entryId || null, reconfirm: !!q.reconfirm, id: q.id, ...(q.recommendation ? { recommendation: String(q.recommendation) } : {}) })), customizations: entries.map(([cid, e]) => ({ customizationId: cid, status: e.status, targetFile: e.generated?.targetFile || '', strategy: e.generated?.strategy || null, candidateHash: e.candidateHash || null, repairs: 0, gatewayRepairs: (e.verification && e.verification.repairs && e.verification.repairs.count) || 0, attempts: e.attempts || null, unresolved: e.unresolved || null, verdict: e.verdict || null, failure: e.failure || null, reused: !!e.reused })), unsupported: unsupported.map(u => ({ customizationId: u.customizationId, reason: u.reason || null })), blockedSteps, approvable, blockingReason, fix: fixReq, readiness: { ready: readiness.ready, reasons: readiness.reasons }, incomplete: incomplete && incomplete.kind ? JSON.parse(JSON.stringify(incomplete)) : null,
             // 時間: 最終案まで（採用・指示を受け付けた時点から。timing.finalMs と同じ起点）と、測った段階だけの内訳（反証 B1・追加指示 §4（f））
             //   §0e.4（2026-10-09）: 計画の自動の差分更新（plan-auto）は別に数える（planMs は利用者の採用・依頼による計画だけ）
-            timing: { totalMs: startedMs != null ? clock() - startedMs : null, planMs: msOf('plan'), planAutoMs: msOf('plan-auto'), generateMs: msOf('generate'), calls: callsNow.map(x => ({ kind: x.kind, ms: x.ms, ...(x.kind === 'generate' && x.repairs != null ? { repairs: x.repairs } : {}), ...(x.end && x.end !== 'ok' ? { end: x.end } : {}) })) }, usage: { aiCalls: timing.aiCalls, ...usage }, builtAt: now() };
+            //   2026-10-15（§4(d)）: proposeMs = 同じ送信の仮案の返答（AI の adopt で計画が始まった送信。無ければ null）・gatewayMs = 部ごとの Gateway の処理時間・calls[].gatewayMs = 呼び出しごと
+            timing: { totalMs: startedMs != null ? clock() - startedMs : null, planMs: msOf('plan'), planAutoMs: msOf('plan-auto'), generateMs: msOf('generate'), proposeMs: msOf('propose'), gatewayMs: { plan: gwOf('plan'), planAuto: gwOf('plan-auto'), generate: gwOf('generate') }, calls: callsNow.map(x => ({ kind: x.kind, ms: x.ms, ...(gwMsOf(x) != null ? { gatewayMs: gwMsOf(x) } : {}), ...(x.kind === 'generate' && x.repairs != null ? { repairs: x.repairs } : {}), ...(x.end && x.end !== 'ok' ? { end: x.end } : {}) })) }, usage: { aiCalls: timing.aiCalls, ...usage }, builtAt: now() };
         };
         let finalChain = 0;
         /**
@@ -29220,6 +29363,13 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
               const v = state.activePlan, ae = state.activeExecution;
               // 質問の部分は、分類の後の共通の処理で質問の AI に送っている（ここでは送らない。二重に答えない）
               const draftOpen = !!(state.draft && state.draft.status === 'open');
+              //   2026-10-15（§3.2）: 「おすすめで」「おまかせ」だけ（進行の語句なし）は、開いている判断に推奨の回答を記録して仮案のカード（右の詳細）を描き直すだけ。
+              //   採用しない・質問しない（記録の経路は回答欄・turn.answers と同じ recordDraftDecision）。返答は 1 文
+              if (cls.reason === 'DELEGATE_ONLY' && draftOpen) {
+                const recorded = (cls.delegated || []).map(x => recordDraftDecision(x)).filter(Boolean);
+                assistant('おすすめの内容で決めました。', { kind: 'draft-delegated', draftId: state.draft.id, rev: state.draft.rev, keys: recorded.map(e => e.key) });
+                break;
+              }
               //   C-1 第 3 段（2026-10-08）: 仮案の能力が無い接続先（UNSUPPORTED_CONNECTION）と、仮案から作っていない計画への修正・回答・生成（LEGACY_PLAN）は、ここで止める
               const text2 = cls.reason === 'UNSUPPORTED_CONNECTION' ? '接続先が非対応です（仮案と最終案の流れに対応した接続先が必要です）。質問には答えますが、変更案の作成・JavaScript の生成・動作テスト環境への登録には進みません。接続先が更新されてから、実現したいことを送ってください。'
                 : cls.reason === 'LEGACY_PLAN' ? 'この変更案は仮案と最終案の流れで作ったものではないため、ここでは回答を入れたり JavaScript を作ったりしません。実現したいこと（直したい内容を含めた全体）を送ると、仮案から最終案を作ります。'
@@ -30463,9 +30613,10 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
       if (waiting) return card('kt-ai-draft-card is-waiting', `<div><b>${esc(d.rev > 1 ? '仮案を直しました。' : '仮案ができました。')}</b></div>${body}`, '#1a73e8');
       if (!active) {
         // 1 行に畳む見出し（レビューの指摘 9）: 作っている間 / 計画ができた後 / services.plan が無い採用 / 同じ仮案の前の版 / 別の依頼の前の仮案
+        //   2026-10-15（§4(a)）: 採用した仮案の見出しは「仮案 — 採用済み」（最終案ができたか・計画があるかで変えない。「最終案を作りました」は出さない）。作っている間だけ添える
         const summary = !same ? '前の仮案（別の依頼）'
-          : latest && draft.planning ? '仮案 — 採用して最終案を作っています'
-          : latest && draft.status === 'adopted' ? (draft.finalAt ? '仮案 — 採用して最終案を作りました' : draft.planId ? '仮案 — 採用して変更案を作りました' : '仮案 — 採用しました（最終案はこのあと作ります）')
+          : latest && draft.planning ? '仮案 — 採用済み（最終案を作っています）'
+          : latest && draft.status === 'adopted' ? '仮案 — 採用済み'
           : draft.status === 'adopted' ? '前の仮案 — このあと直して採用しました' : '前の仮案 — このあと直した案があります';
         return collapsedCard('kt-ai-draft-card is-old', summary, body);
       }
@@ -30491,8 +30642,9 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
       const keyOf = (q) => `${draft.id}:${q.key}`;
       const answerOf = (q) => (answers && typeof answers.get === 'function' ? answers.get(keyOf(q)) || '' : '');
       // 「最終案を作っています」は、実際に計画を作っている間（working PLAN）だけ（レビューの指摘 1・9）
+      //   2026-10-15（レビューの反映 T4）: 採用した仮案の状態の文は「採用した仮案（採用済み）。」の 1 つ（最終案ができたか・計画があるかで変えない。左の見出し §4(a) と同じ区別）
       const stateText = working === 'PLAN' && draft.planning ? '採用した仮案（最終案を作っています）。'
-        : draft.status === 'adopted' ? (draft.finalAt ? '採用した仮案（最終案を作りました）。' : draft.planId ? '採用した仮案（変更案を作りました）。' : '採用した仮案（最終案はこのあと作ります）。')
+        : draft.status === 'adopted' ? '採用した仮案（採用済み）。'
         : draft.planFailed ? '仮案 — 採用（変更案の作成に失敗。再試行できます）。もう一度採用するか、変えたい点を伝えてください。'
         : '仮案（採用前）。採用すると、設定の手順と JavaScript を含む最終案を作ります。まだ何も反映していません。';
       const head = `<h3 style="margin:0 0 4px; font-size:14px;">${esc(String(draft.request || '仮案').slice(0, 120))}</h3><div style="font-size:12px; opacity:.8;">${esc(stateText)}</div>`;
@@ -30617,7 +30769,18 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
       const usage = fin.usage || null;
       const timing = fin.timing || null;
       //   追加指示 §4（f）（2026-10-08）: 測っていない段階（null）は出さない（0 秒と表示しない）
-      const timeParts = timing ? [timing.planMs != null ? `計画 ${secText(timing.planMs)}` : null, timing.planAutoMs != null ? `計画の自動の見直し ${secText(timing.planAutoMs)}` : null, timing.generateMs != null ? `生成・検証 ${secText(timing.generateMs)}` : null].filter(Boolean) : [];
+      //   2026-10-15（§4(d)）: 同じ送信で仮案の返答（propose）を呼んだときはその時間も部に出す（総経過と部が合うように）。部ごとに Gateway の処理時間（計画: AI の待ち時間・
+      //   生成: 生成工程の処理全体）が分かり、壁時計との差が 10 秒以上なら「Gateway の処理」と「画面への反映までの遅れ」に分ける。差が小さければ今のまま。総経過は壁時計のまま
+      const gwMs = timing && timing.gatewayMs && typeof timing.gatewayMs === 'object' ? timing.gatewayMs : {};
+      const part = (label, wall, gw) => (wall == null ? null : gw != null && wall - gw >= 10000 ? `${label} ${secText(wall)}（Gateway の処理 ${secText(gw)}・画面への反映までの遅れ ${secText(wall - gw)}）` : `${label} ${secText(wall)}`);
+      const timeParts = timing ? [timing.proposeMs != null ? `仮案の返答 ${secText(timing.proposeMs)}` : null, part('計画', timing.planMs, gwMs.plan), part('計画の自動の見直し', timing.planAutoMs, gwMs.planAuto), part('生成・検証', timing.generateMs, gwMs.generate)].filter(Boolean) : [];
+      //   2026-10-15（§1.5）: 作成途中（時間切れで止めた）のとき、止めた試行までに受信した本文の文字数（Gateway の観測 upstream.textChars。無ければ Toolkit が受けた進みの通知の累計）が
+      //   あれば 1 句だけ添える（UTF-16 の長さ。token 数ではない）。無ければ何も出さない
+      const inc = fin.incomplete && fin.incomplete.kind ? fin.incomplete : null;
+      const stoppedC = inc && inc.stoppedAt != null && Array.isArray(fin.customizations) ? fin.customizations.find(c => c && String(c.customizationId) === String(inc.stoppedAt)) || null : null;
+      const fl = stoppedC && stoppedC.failure ? stoppedC.failure : null;
+      const charsN = fl ? (fl.upstream && fl.upstream.textChars != null && Number.isFinite(Number(fl.upstream.textChars)) ? Number(fl.upstream.textChars) : fl.textChars != null && Number.isFinite(Number(fl.textChars)) ? Number(fl.textChars) : null) : null;
+      const charsLine = inc && inc.kind === 'timeout' && charsN != null ? `<br><span class="kt-ai-final-chars">${esc(`時間切れまでに受信した本文 約 ${Math.round(charsN)} 文字（token 数ではありません）`)}</span>` : '';
       //   §0f.4 の 6（2026-10-09）: 「AI の呼び出し N 回（内部を含め最大 M 回）。うち K 回は使用量が不明のため、費用は未確定です。確認できた分 … 約 X 米ドル（キャッシュの割引なし）」。
       //   K > 0 のときは合計と言わない（一部だけの合計を全体のように見せない）。古い記録（sentCalls が無い）は aiCalls で数える
       const usageHtml = (() => {
@@ -30631,7 +30794,9 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
         const ns = usage.notSentBudget ? `<br>検証の上限で送らなかった要求 ${usage.notSentBudget} 件（費用なし）` : '';
         return `<br><span class="kt-ai-final-usage">${esc(head + unk + known)}</span>${ns}`;
       })();
-      const detail = `<details class="kt-ai-tech" style="margin-top:8px;"><summary>詳細（時間と AI の利用）</summary><div style="font-size:11px; opacity:.85; margin-top:4px;">${timing && timing.totalMs != null ? `最終案まで ${esc(secText(timing.totalMs))}${timeParts.length ? `（${esc(timeParts.join('・'))}）` : ''}` : ''}${usageHtml}</div></details>`;
+      //   2026-10-15（レビューの反映 T6）: どれかの部に括弧の分割（Gateway の処理・画面への反映までの遅れ）があるときは外側の区切りを「、」にする（括弧の中の「・」と見分けるため）。分割が無ければ今までどおり「・」
+      const timeSep = timeParts.some(s => s.includes('（')) ? '、' : '・';
+      const detail = `<details class="kt-ai-tech" style="margin-top:8px;"><summary>詳細（時間と AI の利用）</summary><div style="font-size:11px; opacity:.85; margin-top:4px;">${timing && timing.totalMs != null ? `最終案まで ${esc(secText(timing.totalMs))}${timeParts.length ? `（${esc(timeParts.join(timeSep))}）` : ''}` : ''}${charsLine}${usageHtml}</div></details>`;
       return detail;
     }
     /** 最終案のカードの「受け付けた指示 n 件はまだ計画に入っていません」（レビューの指摘 row4。finalCardHtml から抜き出し。完成した最終案と作成途中のカードで同じ） */

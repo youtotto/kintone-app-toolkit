@@ -76,7 +76,7 @@ await section(async () => {
   assert(c('課長・部長の承認者を選ぶ運用にしたい', noDraft)?.intent === 'PROPOSE' && c('このフィールドは何に使ってる？', noDraft) === null && c('ありがとう', noDraft) === null && c('反映して', noDraft) === null && c('承認済みでは金額を編集不可', noDraft)?.intent === 'PROPOSE', 'B0-11: 計画も仮案も無い: 依頼は PROPOSE・質問 / 相づち / 操作の命令は従来');
   assert(c('ありがとう', open)?.reason === 'DRAFT_SMALLTALK' && c('うーん', open)?.reason === 'DRAFT_SMALLTALK' && c('5営業日にすると何が変わる？', open) === null, 'B0-12: 仮案が open: 相づちは何もしない・質問文だけは従来の QA');
   assert(c('それでお願いします', open)?.intent === 'DRAFT_REPLY' && c('それでお願いします', { ...open, draftDecisions: [{ key: 'k', answer: 'x' }] })?.intent === 'ADOPT_DRAFT' && c('採用します', { ...open, draftDecisions: [{ key: 'k', answer: 'x' }] })?.reason === 'ADOPT_WORDS', 'B0-13: 明確な採用語: 先に必要な判断が残っていれば AI に聞き直させ、無ければ ADOPT_DRAFT');
-  assert(c('おすすめで', open)?.intent === 'ADOPT_DRAFT' && c('おすすめで', open)?.delegated[0].kind === 'delegated' && c('おすすめで', openNoRec)?.reason === 'DELEGATE_WITH_OPEN', 'B0-14:「おすすめで」: 推奨を採用（おまかせ）。推奨の無い先に必要な判断が残れば AI へ');
+  assert(c('おすすめで', open)?.intent === 'GENERAL' && c('おすすめで', open)?.reason === 'DELEGATE_ONLY' && c('おすすめで', open)?.delegated[0].kind === 'delegated' && c('おすすめで', openNoRec)?.reason === 'DELEGATE_WITH_OPEN' && c('おすすめで。この案で進めて', open)?.intent === 'ADOPT_DRAFT' && c('おすすめで。この案で進めて', open)?.reason === 'DELEGATE' && c('おすすめで。この案で進めて', open)?.delegated[0].kind === 'delegated', 'B0-14（2026-10-15 §3.2）:「おすすめで」だけは推奨の回答を記録するだけ（採用しない）。推奨の無い先に必要な判断だけなら AI へ。進行の語句（この案で進めて）が同時にあれば記録した上で採用');
   assert(c('通知は不要、期限は5営業日、ほかは採用', open)?.intent === 'DRAFT_REPLY' && c('この案は採用しません', open)?.intent === 'DRAFT_REPLY' && c('ほかは採用で', open)?.intent === 'DRAFT_REPLY', 'B0-15: 修正の語を含む文・不採用は DRAFT_REPLY（AI に読ませる）');
   assert(c('何か', { ...noDraft, activePlan: { status: 'ACTIVE' } }) === null && c('採用します', { ...open, activePlan: { status: 'ACTIVE' } }) === null, 'B0-16: 計画があるときは従来どおり（null）');
 });
@@ -160,8 +160,8 @@ await section(async () => {
   // R06
   const r6 = await c.send('おすすめで');
   const mid = c.draftDecisions().find(d => d.key === 'approval.threshold_middle');
-  assert(r6.ok && r6.intent === 'DRAFT_REPLY' && r6.reason === 'DELEGATE_WITH_OPEN' && mid && mid.kind === 'delegated' && mid.answer === '不要', `R06-1:「おすすめで」は推奨のある判断を採用（おまかせ）。推奨の無い先に必要な判断が残るので AI に残りだけ聞かせる: ${JSON.stringify(mid)}`);
-  assert(calls.propose[6].decisions.some(d => d.key === 'approval.threshold_middle' && d.kind === 'delegated') && openKeys().join(',') === 'notify.timing' && draft().status === 'open', 'R06-2: おまかせの決定事項を AI に渡し、再要求されない（残りは通知のタイミングだけ）');
+  assert(r6.ok && r6.intent === 'GENERAL' && r6.reason === 'DELEGATE_ONLY' && mid && mid.kind === 'delegated' && mid.answer === '不要' && x.last().data?.kind === 'draft-delegated' && x.last().text === 'おすすめの内容で決めました。', `R06-1（2026-10-15 §3.2）:「おすすめで」は推奨のある判断に推奨の回答を記録するだけ（採用しない・AI を呼ばない・返答は 1 文）: ${JSON.stringify({ intent: r6.intent, reason: r6.reason, mid, last: x.last().text })}`);
+  assert(calls.propose.length === 6 && openKeys().join(',') === 'approval.threshold_middle,notify.timing' && KTAiConversation.openDraftDecisions(draft(), c.draftDecisions()).map(d => d.key).join(',') === 'notify.timing' && draft().status === 'open' && !/[？?]/.test(x.last().text), 'R06-2: 仮案の項目は変えず（AI を呼ばない）、おまかせの判断は決定事項で閉じる（開いている判断は通知のタイミングだけ）。仮案は open のまま・質問を増やさない');
   const nPropose6 = calls.propose.length, rev6 = draft().rev, nReq6 = reqs().length;
 
   // R08（質問は従来の QA。仮案の要約を文脈に添える）
@@ -171,7 +171,7 @@ await section(async () => {
   assert(cv.plan && /採用前の仮案/.test(cv.plan.summary) && cv.plan.questions.some(q => /部長への通知/.test(q.question)) && cv.plan.provisionals.some(p => p.topic === 'deadline.days') && cv.requirements.length === nReq6, `R08-2: 質問の AI に仮案の要約（動作・前提・残る判断・要件）を添える: ${JSON.stringify(cv.plan).slice(0, 160)}`);
   // 質問の形ではないが AI が相談（question）と読んだ発言: 仮案は変えない（proposalUnchanged）
   const r8b = await c.send('5営業日と7営業日の違いが気になる');
-  assert(r8b.ok && r8b.intent === 'DRAFT_REPLY' && r8b.draft && r8b.draft.unchanged === true && draft().rev === rev6 && x.last().data?.kind === 'draft-reply' && /2 営業日早く/.test(x.last().text) && c.messages().filter(m => m.type === 'DRAFT').length === 7, 'R08-3: AI が相談と読んだときは仮案も要件も変えず、返事だけ（新しいカードは出さない）');
+  assert(r8b.ok && r8b.intent === 'DRAFT_REPLY' && r8b.draft && r8b.draft.unchanged === true && draft().rev === rev6 && x.last().data?.kind === 'draft-reply' && /2 営業日早く/.test(x.last().text) && c.messages().filter(m => m.type === 'DRAFT').length === 6, 'R08-3: AI が相談と読んだときは仮案も要件も変えず、返事だけ（新しいカードは出さない。「おすすめで」の記録だけの返事もカードを増やさない）');
 
   // 相づち
   const ra = await c.send('ありがとう');
@@ -200,7 +200,7 @@ await section(async () => {
   const view = { draft: draft(), draftDecisions: c.draftDecisions(), draftAnswers: new Map() };
   const html = c.messages().filter(m => m.type === 'DRAFT').map(m => KTAiChatUi.messageHtml(m, view)).join('');
   //   内部の番号・key の検査は details の中も含める（services.plan が無い採用は「採用しました（最終案はこのあと作ります）」）
-  assert(!INTERNAL.test(html.replace(/data-[a-z]+="[^"]*"/g, '')) && /仮案 — 採用しました（最終案はこのあと作ります）/.test(html) && !/採用して最終案を作っています/.test(html), `表示: 内部の番号・key を出さない（details の中も）・採用した仮案は 1 行に畳む: ${(html.replace(/data-[a-z]+="[^"]*"/g, '').match(INTERNAL) || [])[0]}`);
+  assert(!INTERNAL.test(html.replace(/data-[a-z]+="[^"]*"/g, '')) && /仮案 — 採用済み/.test(html) && !/採用して最終案を作っています/.test(html), `表示: 内部の番号・key を出さない（details の中も）・採用した仮案は 1 行に畳む: ${(html.replace(/data-[a-z]+="[^"]*"/g, '').match(INTERNAL) || [])[0]}`);
   // 右ペインの詳細
   const sum = KTAiChatUi.draftSummaryHtml(draft(), { decisions: c.draftDecisions() });
   assert(/必要な判断/.test(sum) && sum.indexOf('必要な判断') < sum.indexOf('実現する動作') && /不採用にした項目/.test(sum) && /進め方/.test(sum) && /判断の経緯/.test(sum) && !INTERNAL.test(sum.replace(/data-[a-z]+="[^"]*"/g, '')), '右の詳細: 必要な判断を先に・不採用・進め方・判断の経緯');
@@ -217,10 +217,10 @@ await section(async () => {
   await x2.c.send('課長・部長の承認者を選ぶ運用にしたい');
   await x2.c.send('100円未満は部長不要、100万円以上は必要');
   await x2.c.send('7営業日で。会社独自の休業日は今回はなし');
-  const r2 = await x2.c.send('おすすめで');
+  const r2 = await x2.c.send('おすすめで。この案で進めて');
   //   goal は元の依頼文 ＋ 採用した方針 1 行だけ（決定事項・前提・不採用の長文は合成しない。決定事項と要件は構造化して渡す）。計画を作れなかったので仮案は open のまま
   const p0 = x2.calls.plan[0];
-  assert(r2.intent === 'ADOPT_DRAFT' && r2.reason === 'DELEGATE' && x2.calls.plan.length === 1 && x2.c.draft().status === 'open' && x2.c.draft().planFailed && p0.goal.startsWith('課長・部長の承認者を選ぶ運用にしたい\n採用した方針:') && !/決定事項:|前提（変えてよい点）|不採用/.test(p0.goal) && p0.goal.length < 600, `採用-2:「おすすめで」で残る判断が無ければ採用 → 計画の依頼（goal は依頼文 ＋ 方針 1 行。失敗したら open のまま）: ${p0.goal.slice(0, 200)}`);
+  assert(r2.intent === 'ADOPT_DRAFT' && r2.reason === 'DELEGATE' && x2.calls.plan.length === 1 && x2.c.draft().status === 'open' && x2.c.draft().planFailed && p0.goal.startsWith('課長・部長の承認者を選ぶ運用にしたい\n採用した方針:') && !/決定事項:|前提（変えてよい点）|不採用/.test(p0.goal) && p0.goal.length < 600, `採用-2:「おすすめで。この案で進めて」（委ねる言い方 ＋ 進行の語句）で残る判断が無ければ採用 → 計画の依頼（goal は依頼文 ＋ 方針 1 行。失敗したら open のまま）: ${p0.goal.slice(0, 200)}`);
   const t = x2.c.metrics().timings.slice(-1)[0];
   assert(t.intent === 'ADOPT_DRAFT' && t.ackMs != null && t.calls.some(k => k.kind === 'plan'), `採用-3: 計測（ADOPT_DRAFT・calls に plan）: ${JSON.stringify({ intent: t.intent, calls: t.calls.map(k => k.kind) })}`);
   const dec = p0.decisions || [];
@@ -298,13 +298,13 @@ await section(async () => {
   // ［採用］: 先に必要な判断（中間の金額）が残る → AI に聞き直させる（台本が無いので失敗の表示。採用にはならない）
   // → 残りの判断に答えてから採用
   await m.panel.send('7営業日で。会社独自の休業日は今回はなし'); await ticks(8);
-  await m.panel.send('おすすめで'); await ticks(12);
+  await m.panel.send('おすすめで。この案で進めて'); await ticks(12);
   const dAfter = m.conv().draft();
   assert(dAfter.status === 'adopted' && m.calls.plan.length === 1 && m.calls.propose.length === 3 && m.conv().activePlan() && m.conv().activePlan().fromDraft && m.conv().activePlan().fromDraft.id === dAfter.id, `B2-13:「おすすめで」で残る判断が無ければ採用 → 従来の計画の作成へ（版に fromDraft）: ${dAfter.status} / plan ${m.calls.plan.length}`);
   assert(/採用した方針:/.test(m.calls.plan[0].ctx.goal) && m.conv().requirements().some(r => /課長と部長の承認者/.test(r.behavior)) && m.conv().requirements().length >= 4, 'B2-14: 要件の台帳は仮案の id から計画の planId へ引き継ぐ。goal に採用した方針');
   const chat2 = m.chat();
     // 段階 C: 採用 → 計画 → 最終案のカード（変更案のカード・確認事項・仕様の案内は出さない）
-  assert(/仮案 — 採用して最終案を作りました/.test(chat2) && !/採用して最終案を作っています/.test(chat2) && /kt-ai-final-card/.test(chat2) && !/kt-ai-plan-card/.test(chat2) && !/data-act="draft-adopt"/.test(chat2) && !/この案で進めます/.test(chat2) && dAfter.planId === m.conv().activePlan().planId, 'B2-15: 採用した仮案は 1 行に畳み（「採用して最終案を作りました」）、最終案のカードが出る（変更案のカードは出ない・仮案のボタンは消える・採用直後の別の文「この案で進めます」は出さない: 2026-10-14）');
+  assert(/仮案 — 採用済み/.test(chat2) && !/最終案を作っています|最終案を作りました/.test(chat2) && /kt-ai-final-card/.test(chat2) && !/kt-ai-plan-card/.test(chat2) && !/data-act="draft-adopt"/.test(chat2) && !/この案で進めます/.test(chat2) && dAfter.planId === m.conv().activePlan().planId, 'B2-15: 採用した仮案は 1 行に畳み（「仮案 — 採用済み」。2026-10-15 §4(a)）、最終案のカードが出る（変更案のカードは出ない・仮案のボタンは消える・採用直後の別の文「この案で進めます」は出さない: 2026-10-14）');
   //   採用した仮案からの計画の Context: 要件の台帳は渡る。合成した依頼文は台帳の利用者の原文に入らない（未解決の要件も出ない）
   const lgP = m.conv().state.ledgers.get(m.conv().activePlan().planId);
   assert(Array.isArray(m.calls.plan[0].ctx.requirements) && m.calls.plan[0].ctx.requirements.length >= 4 && !(lgP.userTexts || []).some(s => /採用した方針/.test(s)) && !m.msgs().some(x => x.data?.kind === 'requirements-unresolved'), `B2-14b: 要件は Context に渡り、合成文は台帳に入らない: ${JSON.stringify(lgP.userTexts)}`);
@@ -347,7 +347,7 @@ await section(async () => {
   await c.send('課長・部長の承認者を選ぶ運用にしたい');
   await c.send('100円未満は部長不要、100万円以上は必要');
   await c.send('7営業日で。会社独自の休業日は今回はなし');
-  const r = await c.send('おすすめで');
+  const r = await c.send('おすすめで。この案で進めて');
   const d = c.draft();
   const err = c.messages().filter(m => m.type === 'ERROR').slice(-1)[0];
   assert(r.intent === 'ADOPT_DRAFT' && r.ok === false && d.status === 'open' && d.planning === false && d.planFailed && d.planFailed.attempt === 1 && d.history.slice(-1)[0].kind === 'plan-failed' && !c.activePlan(), `B3-1: 計画を作れなかったら仮案は open に戻り、履歴に失敗を残す: ${d.status} / ${JSON.stringify(d.planFailed)}`);
@@ -371,7 +371,7 @@ await section(async () => {
   const lgP = c.state.ledgers.get(v.planId);
   assert(!(lgP.userTexts || []).some(s => /採用した方針|決定事項:/.test(s)) && !c.messages().some(m => m.data?.kind === 'requirements-unresolved') && c.requirements().every(r => r.decision !== 'undecided') && calls.plan[3].requirements.some(r => /課長と部長の承認者/.test(r.behavior)), `B3-8: 合成した依頼文は台帳の利用者の原文に入らず、未解決の要件も作らない: ${JSON.stringify(lgP.userTexts)}`);
   const cardDone = KTAiChatUi.messageHtml(c.messages().filter(m => m.type === 'DRAFT').slice(-1)[0], { draft: d2, draftDecisions: c.draftDecisions() });
-  assert(/仮案 — 採用して最終案を作りました/.test(cardDone) && /kt-ai-old-card/.test(cardDone), 'B3-9: 最終案ができた後の仮案のカードは「仮案 — 採用して最終案を作りました」に畳む');
+  assert(/仮案 — 採用済み/.test(cardDone) && !/最終案を作りました/.test(cardDone) && /kt-ai-old-card/.test(cardDone), 'B3-9: 最終案ができた後の仮案のカードは「仮案 — 採用済み」に畳む（「最終案を作りました」は出さない。2026-10-15 §4(a)）');
   const t = c.metrics().timings.slice(-1)[0];
   assert(t.intent === 'ADOPT_DRAFT' && t.calls.map(k => k.kind).join(',') === 'plan', 'B3-10: 計測は従来どおり（calls に plan）');
 });
@@ -400,9 +400,16 @@ await section(async () => {
   const ws = VM.workStatus({ version: null, working: c.state.working, draft: d });
   const cardMid = KTAiChatUi.messageHtml(c.messages().filter(m => m.type === 'DRAFT').slice(-1)[0], { draft: d, draftDecisions: c.draftDecisions() });
   assert(c.isBusy() && c.state.working === 'PLAN' && d.planning === true && d.status === 'open' && ws.key === 'finalizing' && ws.label === '最終案を作成中', `B3-14: AI の intent adopt で計画を作っている間は working PLAN・右の見出し「最終案を作成中」: ${c.state.working} / ${JSON.stringify(ws)}`);
-  assert(/仮案 — 採用して最終案を作っています/.test(cardMid) && !/data-act="draft-adopt"/.test(cardMid) && /最終案を作っています/.test(KTAiChatUi.draftSummaryHtml(d, { decisions: c.draftDecisions(), working: 'PLAN' })) && !/最終案を作っています/.test(KTAiChatUi.draftSummaryHtml(d, { decisions: c.draftDecisions(), working: null })), 'B3-15: 作っている間はカードを畳み、右の詳細の「最終案を作っています」は working PLAN のときだけ');
+  assert(/仮案 — 採用済み（最終案を作っています）/.test(cardMid) && !/data-act="draft-adopt"/.test(cardMid) && /最終案を作っています/.test(KTAiChatUi.draftSummaryHtml(d, { decisions: c.draftDecisions(), working: 'PLAN' })) && !/最終案を作っています/.test(KTAiChatUi.draftSummaryHtml(d, { decisions: c.draftDecisions(), working: null })), 'B3-15: 作っている間はカードを畳み、右の詳細の「最終案を作っています」は working PLAN のときだけ');
   const rq = await c.send('一覧の名前は承認待ちにして');
   assert(rq && rq.queued === true && rq.reason === 'QUEUED_DURING_PLAN', 'B3-16: 作っている間の指示は従来どおり積む');
+  //   2026-10-15（レビューの反映 T2）: 作っている間の進行の語句だけの発言（「採用します」）は変更前と同じ経路（いま進めている文と違うので修正として積む。同意として扱わない）。
+  //   委ねる言い方と進行の語句が同じ発言に並ぶ「おすすめで。この案で進めて」は同意（修正として積まない）
+  const nAgree = c.messages().filter(m => m.data?.kind === 'agree-while-plan').length;
+  const rq2 = await c.send('採用します');
+  assert(rq2 && rq2.queued === true && rq2.reason === 'QUEUED_DURING_PLAN' && c.messages().filter(m => m.data?.kind === 'agree-while-plan').length === nAgree, `B3-16b: 作っている間の「採用します」は変更前と同じ経路（修正として積む。同意の案内は出さない）: ${JSON.stringify({ queued: rq2 && rq2.queued, reason: rq2 && rq2.reason })}`);
+  const rq3 = await c.send('おすすめで。この案で進めて');
+  assert(rq3 && rq3.queued === false && rq3.reason === 'AGREED_WHILE_PLAN' && c.messages().filter(m => m.data?.kind === 'agree-while-plan').length === nAgree + 1, `B3-16c: 作っている間の「おすすめで。この案で進めて」（委ねる言い方 ＋ 進行の語句）は同意（修正として積まない）: ${JSON.stringify({ queued: rq3 && rq3.queued, reason: rq3 && rq3.reason })}`);
   g.open(); await p; await ticks(4);
   assert(c.state.working === null && c.draft().status === 'open' && c.draft().planFailed && VM.workStatus({ version: null, working: null, draft: c.draft() }).key === 'draft', 'B3-17: 失敗の後は working null・見出しは「仮案」に戻る');
 });
@@ -520,7 +527,11 @@ await section(async () => {
   await x.c.send('課長・部長の承認者を選ぶ運用にしたい');
   const n = x.calls.propose.length;
   const r1 = await x.c.send('はい');
-  assert(r1.reason === 'DRAFT_SMALLTALK' && x.calls.propose.length === n && x.calls.plan.length === 0 && /採用するときは「採用します」/.test(x.last().text), `B3-37:「はい」は AI を呼ばず採用の言い方を案内: ${x.last().text}`);
+  assert(r1.intent === 'DRAFT_REPLY' && r1.reason === 'ACK_WITH_OPEN' && x.calls.propose.length === n + 1 && x.calls.plan.length === 0, `B3-37（2026-10-15 §3.2）: 開いている判断があれば「はい」はその判断への答えとして AI に読ませる（台本が無いのでここでは失敗）: ${r1.intent}/${r1.reason}`);
+  await x.c.send('100円未満は部長不要、100万円以上は必要'); await x.c.send('7営業日で。会社独自の休業日は今回はなし'); await x.c.send('おすすめで');
+  const n2 = x.calls.propose.length;
+  const r1b = await x.c.send('はい');
+  assert(r1b.reason === 'DRAFT_SMALLTALK' && x.calls.propose.length === n2 && x.calls.plan.length === 0 && /採用するときは「採用します」/.test(x.last().text), `B3-37b: 開いている判断が無ければ「はい」は AI を呼ばず採用の言い方を案内: ${x.last().text}`);
   const r2 = await x.c.send('反映して');
   assert(r2.intent === 'GENERAL' && r2.reason === 'NO_PLAN' && /仮案への返事（採用・変えたい点・質問）/.test(x.last().text) && x.calls.plan.length === 0, `B3-38: 仮案 open のときの NO_PLAN の案内は仮案への返事を促す: ${x.last().text}`);
 });
@@ -552,8 +563,8 @@ await section(async () => {
   await m.panel.send('課長・部長の承認者を選ぶ運用にしたい'); await ticks(8);
   await m.panel.send('100円未満は部長不要、100万円以上は必要'); await ticks(8);
   await m.panel.send('7営業日で。会社独自の休業日は今回はなし'); await ticks(8);
-  const p = m.panel.send('おすすめで'); await ticks(10);
-  assert(/data-status="finalizing">最終案を作成中</.test(m.$('kt-ai-ws-state').innerHTML) && /最終案を作っています/.test(m.$('kt-ai-change-summary').innerHTML) && /仮案 — 採用して最終案を作っています/.test(m.chat()) && !/data-act="draft-adopt"/.test(m.chat()), `B4-1: 計画を作っている間: 右の見出し「最終案を作成中」・右の詳細「最終案を作っています」・カードは畳む: ${m.$('kt-ai-ws-state').innerHTML}`);
+  const p = m.panel.send('おすすめで。この案で進めて'); await ticks(10);
+  assert(/data-status="finalizing">最終案を作成中</.test(m.$('kt-ai-ws-state').innerHTML) && /最終案を作っています/.test(m.$('kt-ai-change-summary').innerHTML) && /仮案 — 採用済み（最終案を作っています）/.test(m.chat()) && !/data-act="draft-adopt"/.test(m.chat()), `B4-1: 計画を作っている間: 右の見出し「最終案を作成中」・右の詳細「最終案を作っています」・カードは畳む: ${m.$('kt-ai-ws-state').innerHTML}`);
   pg.open(); await p; await ticks(8);
   const err = m.msgs().filter(x => x.type === 'ERROR').slice(-1)[0];
   assert(m.conv().draft().status === 'open' && /data-status="draft">仮案</.test(m.$('kt-ai-ws-state').innerHTML) && /採用（変更案の作成に失敗。再試行できます）/.test(m.$('kt-ai-change-summary').innerHTML) && !/最終案を作っています/.test(m.$('kt-ai-change-summary').innerHTML), `B4-2: 失敗の後: 仮案は open・右の見出し「仮案」・右の詳細に失敗の文: ${m.$('kt-ai-ws-state').innerHTML}`);
@@ -564,7 +575,7 @@ await section(async () => {
   const u = m.msgs().filter(x => x.type === 'USER').length;
   await clickChat(m, 'draft-adopt', { draft: m.conv().draft().id }); await ticks(10);
   const d = m.conv().draft(), v = m.conv().activePlan();
-  assert(m.msgs().filter(x => x.type === 'USER').length === u + 1 && v && d.status === 'adopted' && d.planId === v.planId && /仮案 — 採用して最終案を作りました/.test(m.chat()) && /kt-ai-final-card/.test(m.chat()) && /data-status="ready">未反映</.test(m.$('kt-ai-ws-state').innerHTML) && /<h3>/.test(m.$('kt-ai-change-summary').innerHTML), `B4-5: ［採用］でもう一度 → 計画ができたら adopted・最終案のカード・右は変更内容に: ${d.status} / ${m.$('kt-ai-ws-state').innerHTML}`);
+  assert(m.msgs().filter(x => x.type === 'USER').length === u + 1 && v && d.status === 'adopted' && d.planId === v.planId && /仮案 — 採用済み/.test(m.chat()) && /kt-ai-final-card/.test(m.chat()) && /data-status="ready">未反映</.test(m.$('kt-ai-ws-state').innerHTML) && /<h3>/.test(m.$('kt-ai-change-summary').innerHTML), `B4-5: ［採用］でもう一度 → 計画ができたら adopted・最終案のカード・右は変更内容に: ${d.status} / ${m.$('kt-ai-ws-state').innerHTML}`);
   // 回答欄（data-dkey）のフォーカスの復元: 描き直しの前に入力中だった回答欄へ戻す（Toolkit の sandbox の document.activeElement を仮に置く）
   const el = { dataset: { dkey: 'x:k' }, selectionStart: 2, focused: false, caret: null, focus() { this.focused = true; }, setSelectionRange(a) { this.caret = a; } };
   const chatEl = m.$('kt-ai-chat');
@@ -586,7 +597,7 @@ await section(async () => {
   const x = makeConv({ planImpl: planReask });
   const { c, calls } = x;
   for (const s of ['課長・部長の承認者を選ぶ運用にしたい', '100円未満は部長不要、100万円以上は必要', '7営業日で。会社独自の休業日は今回はなし']) await c.send(s);
-  const r = await c.send('おすすめで');
+  const r = await c.send('おすすめで。この案で進めて');
   const v = c.activePlan();
   assert(r.ok && r.intent === 'ADOPT_DRAFT' && v && calls.plan.length === 1 && !calls.plan[0].revision && Array.isArray(calls.plan[0].decisions) && calls.plan[0].decisions.length === 4 && calls.plan[0].decisions.some(d => d.key === 'deadline.days' && d.answer === '7営業日'), `B6-1: 採用 → 最初の計画（revision 無し）の services.plan に仮案で答えた決定事項（4 件）を渡す: ${JSON.stringify((calls.plan[0] || {}).decisions)}`);
   const openTexts = (v.openQuestions || []).map(q => q.text), reasked = (v.reaskedQuestions || []).map(q => q.text);
@@ -610,7 +621,7 @@ await section(async () => {
   const m = mount({ planImpl: planWithQs });
   await ticks();
   for (const s of ['課長・部長の承認者を選ぶ運用にしたい', '100円未満は部長不要、100万円以上は必要', '7営業日で。会社独自の休業日は今回はなし']) { await m.panel.send(s); await ticks(8); }
-  await m.panel.send('おすすめで'); await ticks(12);
+  await m.panel.send('おすすめで。この案で進めて'); await ticks(12);
   const ctx = m.calls.plan[0] && m.calls.plan[0].ctx;
   const v = m.conv().activePlan();
   assert(v && ctx && !ctx.revision && Array.isArray(ctx.decisions) && ctx.decisions.length === 4 && ctx.decisions.every((d, i) => d.id === `D${i + 1}` && d.source === 'chat' && d.status === 'answered' && d.answer) && ctx.decisions.some(d => d.topic === 'timing' && d.answer === '7営業日') && ctx.decisions.some(d => d.topic === 'approver' && /部長承認/.test(d.question || '')), `B6-8: 採用後の最初の計画の Planner Context（Gateway に送る形）に decisions（D1…・topic・question・answer）が入る: ${JSON.stringify(ctx && ctx.decisions)}`);
@@ -648,7 +659,7 @@ await section(async () => {
   const x = makeConv({ planImpl: async () => { await g.p; return planOk({ goal: 'g' }); } });
   const { c, calls } = x;
   for (const s of ['課長・部長の承認者を選ぶ運用にしたい', '100円未満は部長不要、100万円以上は必要', '7営業日で。会社独自の休業日は今回はなし']) await c.send(s);
-  const p = c.send('おすすめで');
+  const p = c.send('おすすめで。この案で進めて');
   await ticks(6);
   const rq = await c.send('CSVにも効きますか？');
   const cv = calls.ask.slice(-1)[0].conversation;
@@ -706,7 +717,7 @@ await section(async () => {
   const visibleC = outsideDetails(html).replace(/data-[a-z]+="[^"]*"/g, '').replace(/[\w.-]+\.js\b/g, '（ファイル名）');
   assert(/lock\.js/.test(html) && !INTERNAL.test(visibleC) && !/\bC1\b|\bP1\b|candidateHash|sim-control|required-effects|block-save|\bamount\b/.test(visibleC), `R09-10: カードに内部の番号・処理名・フィールドコードを出さない（反映先のファイル名は出す）: ${(visibleC.match(INTERNAL) || visibleC.match(/\bamount\b|required-effects/) || [])[0]}`);
   const draftCard = KTAiChatUi.messageHtml(x.c.messages().filter(m => m.type === 'DRAFT').slice(-1)[0], { draft: d, draftDecisions: x.c.draftDecisions() });
-  assert(/仮案 — 採用して最終案を作りました/.test(draftCard) && /kt-ai-old-card/.test(draftCard), 'R09-11: 仮案のカードは 1 行に畳む');
+  assert(/仮案 — 採用済み/.test(draftCard) && /kt-ai-old-card/.test(draftCard), 'R09-11: 仮案のカードは 1 行に畳む（「仮案 — 採用済み」）');
 });
 // ---- R17: 最初の候補の欠陥は生成工程の 1 依頼の中で修復済み → 検証済みの最終案を 1 つ提示（Toolkit は修復を依頼しない・失敗候補への判断を求めない）----
 await section(async () => {
@@ -827,7 +838,7 @@ await section(async () => {
   const pg = gateMk();
   const x = makeConvC({ planGate: pg, storage });
   for (const s of ['課長・部長の承認者を選ぶ運用にしたい', '100円未満は部長不要、100万円以上は必要', '7営業日で。会社独自の休業日は今回はなし']) await x.c.send(s);
-  const p = x.c.send('おすすめで');
+  const p = x.c.send('おすすめで。この案で進めて');
   await ticks(6);
   const pm = x.c.progress();
   const lastM = x.last();
@@ -846,7 +857,7 @@ await section(async () => {
   const pg2 = gateMk();
   const y = makeConvC({ planGate: pg2, storage });
   for (const s of ['課長・部長の承認者を選ぶ運用にしたい', '100円未満は部長不要、100万円以上は必要', '7営業日で。会社独自の休業日は今回はなし']) await y.c.send(s);
-  const p2 = y.c.send('おすすめで'); await ticks(6);
+  const p2 = y.c.send('おすすめで。この案で進めて'); await ticks(6);
   { const h7 = KTAiChatUi.progressInnerHtml(y.last());
     assert(/最終案を作っています（経過 0:03）/.test(h7) && /残り時間は未推定/.test(h7) && !/目安|約\s*[0-9]+\s*(秒|分)/.test(h7), `C3b-7: 2 回目も、保存した実測（計画 35 秒）から残り時間を推定しない（「残り時間は未推定」。実測は記録に残す: C3b-8）: ${h7.replace(/<[^>]*>/g, '｜').slice(0, 80)}`); }
   pg2.open(); await p2; await ticks(8);
@@ -890,7 +901,7 @@ await section(async () => {
   const m = mount();
   await ticks();
   for (const s of ['課長・部長の承認者を選ぶ運用にしたい', '100円未満は部長不要、100万円以上は必要', '7営業日で。会社独自の休業日は今回はなし']) { await m.panel.send(s); await ticks(8); }
-  await m.panel.send('おすすめで'); await ticks(14);
+  await m.panel.send('おすすめで。この案で進めて'); await ticks(14);
   const v = m.conv().activePlan();
   assert(v && v.final && m.msgs().some(x => x.type === 'FINAL') && /kt-ai-final-card/.test(m.chat()) && !/kt-ai-plan-card/.test(m.chat()) && /data-act="final-approve"/.test(m.chat()), `画面-1: 採用 → 最終案のカード（設定の手順だけの計画でも 1 枚）: ${JSON.stringify(m.msgs().map(x => x.data?.kind || x.type))}`);
   assert(/data-status="ready">未反映</.test(m.$('kt-ai-ws-state').innerHTML) && !m.$('kt-ai-spec').innerHTML.includes('confirm-spec'), '画面-2: 右の見出しは「未反映」。仕様カードに［この仕様で確定］は無い');
@@ -918,7 +929,7 @@ await section(async () => {
   const pg = gateMk();
   const x = makeConvC({ planGate: pg });
   for (const s of ['課長・部長の承認者を選ぶ運用にしたい', '100円未満は部長不要、100万円以上は必要', '7営業日で。会社独自の休業日は今回はなし']) await x.c.send(s);
-  const p = x.c.send('おすすめで'); await ticks(6);
+  const p = x.c.send('おすすめで。この案で進めて'); await ticks(6);
   const rq = await x.c.send('通知は外して');
   const plan0 = x.services.plan;
   let loadingsAtRevise = null, stagesAtRevise = null;
@@ -1040,7 +1051,7 @@ await section(async () => {
   const m = mount();
   await ticks();
   for (const s of ['課長・部長の承認者を選ぶ運用にしたい', '100円未満は部長不要、100万円以上は必要', '7営業日で。会社独自の休業日は今回はなし']) { await m.panel.send(s); await ticks(8); }
-  await m.panel.send('おすすめで'); await ticks(14);
+  await m.panel.send('おすすめで。この案で進めて'); await ticks(14);
   const v = m.conv().activePlan();
   const r = await KIT.applyOnScreen(m, { before: () => { m.mock.ctl.failPut = 'views'; } });
   assert(v.approval === undefined && m.msgs().some(x => x.data?.kind === 'approval-revoked') && r.exec.prepared && r.exec.prepared.status === 'PREPARED' && r.run.stage === 'stopped' && /設定の手順が途中で止まりました/.test(r.card) && !/動作テスト環境へ反映しました/.test(r.card), `正しさ C3: 設定の手順が止まったら承認を外す（結果のカードに止まったことと次の手）: ${JSON.stringify({ approval: !!v.approval, kinds: m.msgs().slice(-4).map(x => x.data?.kind || x.type) })}`);
@@ -1274,7 +1285,7 @@ await section(async () => {
     const m = mount({ health: HEALTH_V, planImpl: ({ ctx, requestId }) => { const v = KTAiClient.validatePlan(planResp(ctx.goal), ctx); if (!v.ok) throw new Error(JSON.stringify(v.errors)); return { ...v.normalized, requestId, clientWarnings: v.warnings }; }, generateImpl, extra: { loadDevBase } });
     await ticks();
     for (const s of ['課長・部長の承認者を選ぶ運用にしたい', '100円未満は部長不要、100万円以上は必要', '7営業日で。会社独自の休業日は今回はなし']) { await m.panel.send(s); await ticks(8); }
-    await m.panel.send('おすすめで'); await ticks(20);
+    await m.panel.send('おすすめで。この案で進めて'); await ticks(20);
     return { m, genCtx, setBaseFail: (b) => { baseFail = b; } };
   };
   const { m, genCtx, setBaseFail } = await run();
@@ -1378,7 +1389,7 @@ await section(async () => {
     const m = mount({ health: h, planImpl: ({ ctx, requestId }) => { const vv = KTAiClient.validatePlan(planRespL(ctx.goal), ctx); if (!vv.ok) throw new Error(JSON.stringify(vv.errors)); return { ...vv.normalized, requestId, clientWarnings: vv.warnings }; }, generateImpl });
     await ticks();
     for (const s of ['課長・部長の承認者を選ぶ運用にしたい', '100円未満は部長不要、100万円以上は必要', '7営業日で。会社独自の休業日は今回はなし']) { await m.panel.send(s); await ticks(8); }
-    await m.panel.send('おすすめで'); await ticks(16);
+    await m.panel.send('おすすめで。この案で進めて'); await ticks(16);
     const v = m.conv().activePlan();
     //   §0e.1: 承認できる最終案は［動作テスト環境へ反映］1 回で承認と登録。承認できない最終案は登録の準備の部品を直接呼んでも止まる
     const applied = v && v.final && v.final.approvable ? await KIT.applyOnScreen(m) : null;
@@ -1697,7 +1708,7 @@ await section(async () => {
     const m = mount({ health: HEALTH_V, planImpl: ({ ctx, requestId }) => { const v = KTAiClient.validatePlan(planResp(ctx.goal), ctx); if (!v.ok) throw new Error(JSON.stringify(v.errors)); return { ...v.normalized, requestId, clientWarnings: v.warnings }; }, generateImpl, extra: { getInputs: () => inputs } });
     await ticks();
     for (const s of ['課長・部長の承認者を選ぶ運用にしたい', '100円未満は部長不要、100万円以上は必要', '7営業日で。会社独自の休業日は今回はなし']) { await m.panel.send(s); await ticks(8); }
-    await m.panel.send('おすすめで'); await ticks(20);
+    await m.panel.send('おすすめで。この案で進めて'); await ticks(20);
     return { m, genCtx, v: m.conv().activePlan() };
   };
   // 1) 96 KiB の既存 JS（以前は 1 ファイル 64 KiB の上限で外していた）→ 送る。Cybozu CDN の luxon（Field Scanner が別のホストとして本文を取らなかった）は外部のライブラリ（events []）
@@ -2536,7 +2547,7 @@ await section(async () => {
     const m = mount({ health: HEALTH_E, planImpl: ({ ctx, requestId }) => { const v = KTAiClient.validatePlan(planResp(ctx.goal), ctx); if (!v.ok) throw new Error(JSON.stringify(v.errors)); return { ...v.normalized, requestId, clientWarnings: v.warnings }; }, generateImpl, extra: { loadDevBase } });
     await ticks();
     for (const s of ['課長・部長の承認者を選ぶ運用にしたい', '100円未満は部長不要、100万円以上は必要', '7営業日で。会社独自の休業日は今回はなし']) { await m.panel.send(s); await ticks(8); }
-    await m.panel.send('おすすめで'); await ticks(20);
+    await m.panel.send('おすすめで。この案で進めて'); await ticks(20);
     return { m, sent };
   };
   const { m, sent } = await run(CODE_K);
@@ -2711,7 +2722,7 @@ await section(async () => {
   const m = mount({ generateImpl: async () => { throw new Error('生成は呼ばない'); } });
   await ticks();
   for (const s of ['課長・部長の承認者を選ぶ運用にしたい', '100円未満は部長不要、100万円以上は必要', '7営業日で。会社独自の休業日は今回はなし']) { await m.panel.send(s); await ticks(8); }
-  await m.panel.send('おすすめで'); await ticks(14);
+  await m.panel.send('おすすめで。この案で進めて'); await ticks(14);
   const vS = m.conv().activePlan();
   await clickChat(m, 'generate', { cid: 'C1' }); await ticks(6);
   assert(vS && vS.final && m.conv().activePlan() === vS && m.msgs().some(z => z.data?.kind === 'generate-not-needed') && !m.msgs().some(z => z.type === 'CODE'), 'F2-6: 右の［コードを作る］も最終案の作り直しの入口（作る JavaScript が無ければ案内だけ。版は変えない）');
@@ -2762,7 +2773,7 @@ await section(async () => {
   const c2 = x.c.classify('100円未満は部長不要、100万円以上は必要');
   assert(c2.intent === 'DRAFT_REPLY', `F6-2: その仮案への返事は前の計画の修正（REVISE_PLAN）にしない: ${c2.intent}`);
   await x.c.send('100円未満は部長不要、100万円以上は必要'); await x.c.send('7営業日で。会社独自の休業日は今回はなし');
-  const ra = await x.c.send('おすすめで');
+  const ra = await x.c.send('おすすめで。この案で進めて');
   const v2 = x.c.activePlan();
   assert(ra.intent === 'ADOPT_DRAFT' && v2 && v2.planId !== v1.planId && v2.fromDraft && v2.fromDraft.id === d2.id && v2.final && x.c.draft().status === 'adopted', `F6-3: 採用すると新しい計画の系列で最終案を作る: ${JSON.stringify({ intent: ra.intent, same: v2 && v2.planId === v1.planId })}`);
   assert(x.c.classify('一覧の名前は承認待ちにして').intent === 'REVISE_PLAN', 'F6-4: 採用の後は、その最終案の修正に戻る');
@@ -2850,7 +2861,7 @@ await section(async () => {
     const m = mount({ health: h, planImpl: ({ ctx, requestId }) => { const vv = KTAiClient.validatePlan(planRespL(ctx.goal), ctx); return { ...vv.normalized, requestId, clientWarnings: vv.warnings }; }, generateImpl });
     await ticks();
     for (const s of ['課長・部長の承認者を選ぶ運用にしたい', '100円未満は部長不要、100万円以上は必要', '7営業日で。会社独自の休業日は今回はなし']) { await m.panel.send(s); await ticks(8); }
-    await m.panel.send('おすすめで'); await ticks(16);
+    await m.panel.send('おすすめで。この案で進めて'); await ticks(16);
     return m.conv().activePlan();
   };
   const vOn = await run(GEN_EFFECT_FEATURES);

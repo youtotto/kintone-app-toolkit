@@ -123,8 +123,8 @@ function createNewFlowKit(T) {
       } };
     return null;
   }
-  /** 契約の形の応答 → Toolkit の client.propose が返す形（validateProposal を通す） */
-  const normalized = (raw, requestId = 'pp-1') => { const v = KTAiClient.validateProposal({ ok: true, contractVersion: '2.1', meta: META, ...raw }); if (!v.ok) throw new Error(`台本の形が不正: ${v.errors[0].message}`); return { ...v.normalized, requestId, clientWarnings: v.warnings }; };
+  /** 契約の形の応答 → Toolkit の client.propose が返す形（validateProposal を通す）。utterance = 今回の発言（2026-10-15 §3.2: 進行を求める語句 adoptQuote の照合に使う） */
+  const normalized = (raw, requestId = 'pp-1', utterance = null) => { const v = KTAiClient.validateProposal({ ok: true, contractVersion: '2.1', meta: META, ...raw }, { utterance }); if (!v.ok) throw new Error(`台本の形が不正: ${v.errors[0].message}`); return { ...v.normalized, requestId, clientWarnings: v.warnings }; };
   /** 計画の AI の成功の応答（最小の計画。turn に coverage 無し） */
   const planOk = (args) => ({ plan: { goal: args.goal, assessment: { summary: '承認の流れを設定します。' }, steps: [], customizations: [], provisionals: [], questions: [] }, ctx: null, review: null, gatewayPlan: null, turn: { reply: '計画を作りました。', requirementOps: [], utteranceCoverage: [] } });
   const planFail = () => ({ plan: null, message: '計画を作れませんでした（テスト）', reason: 'TEST' });
@@ -186,7 +186,7 @@ function createNewFlowKit(T) {
         clock.t += 2500; if (onText) onText(raw.reply.slice(0, 10));
         if (proposeGate) await proposeGate.p;
         clock.t += 4500; if (onText) onText(raw.reply);
-        return normalized(raw, requestId);
+        return normalized(raw, requestId, ctx.question);
       },
       async generate(a) { if (generateImpl) return generateImpl(a); throw new Error('not used'); },
     };
@@ -311,7 +311,7 @@ function createNewFlowKit(T) {
       materials: () => materials,
       fieldLabels: () => labels,
       async customizeRevision() { return '42'; },
-      async propose(args) { calls.propose.push({ utterance: args.utterance }); const raw = scriptFn(args); if (!raw) return { ok: false, reason: 'NO_SCRIPT', message: `台本がありません: ${args.utterance}` }; t += 3000; if (typeof args.onText === 'function') args.onText(raw.reply.slice(0, 12)); await tick(); t += 4000; if (typeof args.onText === 'function') args.onText(raw.reply); return { ok: true, proposal: normalized(raw, `pp-${calls.propose.length}`), ctx: { facts: [] }, perf: { baseWaitMs: 0, contextMs: 5, requestMs: 7000 } }; },
+      async propose(args) { calls.propose.push({ utterance: args.utterance }); const raw = scriptFn(args); if (!raw) return { ok: false, reason: 'NO_SCRIPT', message: `台本がありません: ${args.utterance}` }; t += 3000; if (typeof args.onText === 'function') args.onText(raw.reply.slice(0, 12)); await tick(); t += 4000; if (typeof args.onText === 'function') args.onText(raw.reply); return { ok: true, proposal: normalized(raw, `pp-${calls.propose.length}`, args.utterance), ctx: { facts: [] }, perf: { baseWaitMs: 0, contextMs: 5, requestMs: 7000 } }; },
       async ask(args) { calls.ask.push({ question: args.question }); t += 2000; return { ok: true, answer: { answer: '答えです。', facts: [], analysis: [], recommendations: [], unknowns: [] }, ctx: { facts: [] } }; },
       async plan(args) { calls.plan.push({ goal: args.goal, revision: !!args.revision, onText: typeof args.onText === 'function', request: args.revision ? args.revision.request : null, focus: args.revision && Array.isArray(args.revision.focus) ? [...args.revision.focus] : null }); if (typeof args.onText === 'function') { t += 3000; args.onText('承認待ちの間だけ金額を'); } if (planGate) await planGate.p; t += 27000; if (typeof args.onText === 'function') args.onText('承認待ちの間だけ金額を編集不可にします。'); return x.planImpl(args); },
       async generate(args) { t += 20000; return generate.impl(args); },
@@ -321,13 +321,14 @@ function createNewFlowKit(T) {
     Object.assign(x, { c, calls, services, gen: generate, clock: () => t, advance: (ms) => { t += ms; }, kinds: () => c.messages().map(m => m.data?.kind || m.type), finals: () => c.messages().filter(m => m.type === 'FINAL'), last: () => c.messages()[c.messages().length - 1] });
     return x;
   }
-  const adoptC = async (x) => { for (const s of ['課長・部長の承認者を選ぶ運用にしたい', '100円未満は部長不要、100万円以上は必要', '7営業日で。会社独自の休業日は今回はなし']) await x.c.send(s); return x.c.send('おすすめで'); };
+  //   2026-10-15（§3.2）: 「おすすめで」だけは推奨の回答を記録するだけで採用しなくなったので、採用まで進める 4 つ目の発言は委ねる言い方と進行の語句の組（「おすすめで。この案で進めて」）
+  const adoptC = async (x) => { for (const s of ['課長・部長の承認者を選ぶ運用にしたい', '100円未満は部長不要、100万円以上は必要', '7営業日で。会社独自の休業日は今回はなし']) await x.c.send(s); return x.c.send('おすすめで。この案で進めて'); };
   const finalHtml = (x, m = x.finals().slice(-1)[0]) => KTAiChatUi.messageHtml(m, { plans: new Map(x.c.planHistory().map(v => [`${v.planId}:${v.version}`, v])), activePlan: x.c.activePlan(), answerState: x.c.answerContext(), ledger: x.c.ledger(), answers: new Map() });
   const stripC = (h) => String(h).replace(/<br\s*\/?>/g, '\n').replace(/<\/(div|li)>/g, '\n').replace(/<[^>]*>/g, '').replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&amp;/g, '&');
 
   // ---- C-1 第 3 段（2026-10-08）: 新しい流れを最後（承認 → 反映の準備）まで通す部品（ほかのテストを移し替えるときに使う）----
-  /** 台本で採用まで進む 4 つの発言（adoptC・adoptOnScreen が送る） */
-  const REQUESTS = ['課長・部長の承認者を選ぶ運用にしたい', '100円未満は部長不要、100万円以上は必要', '7営業日で。会社独自の休業日は今回はなし', 'おすすめで'];
+  /** 台本で採用まで進む 4 つの発言（adoptC・adoptOnScreen が送る）。4 つ目は委ねる言い方と進行の語句の組（2026-10-15 §3.2: 「おすすめで」だけでは採用しない） */
+  const REQUESTS = ['課長・部長の承認者を選ぶ運用にしたい', '100円未満は部長不要、100万円以上は必要', '7営業日で。会社独自の休業日は今回はなし', 'おすすめで。この案で進めて'];
   /** 会話コントローラ: いまの最終案を承認する（承認できないときは理由を返す） */
   const approveC = (x, { baseStamp = undefined } = {}) => { const v = x.c.activePlan(); return v ? x.c.approveFinal({ planId: v.planId, version: v.version, baseStamp }) : { ok: false, reason: 'NO_PLAN' }; };
   /** 画面: 台本の 4 つの発言で仮案 → 採用 → 最終案まで進める（mount の結果 m） */

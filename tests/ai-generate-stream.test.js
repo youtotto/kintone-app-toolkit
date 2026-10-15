@@ -67,8 +67,8 @@ const jsonResponse = (status, obj) => ({ status, headers: { get: (k) => (/conten
 const PG = (stage, phase, extra = {}) => ({ event: 'progress', data: { stage, attempt: stage === 'repair' ? 1 : 0, phase, t: 0, ...extra } });
 /** 生成工程の正常な SSE（送信 → 見出し → 最初のイベント → keepalive → 本文 → 断片 → 完了 → 検証 → done） */
 const okBlocks = (doneBody, { beforeText = [] } = {}) => [': start', PG('generate', 'sent'), PG('generate', 'headers'), PG('generate', 'started'), ': keepalive', ...beforeText, PG('generate', 'text'), PG('generate', 'delta', { chars: 240 }), PG('generate', 'done', { ok: true, end: 'completed' }), PG('verify', 'start'), PG('verify', 'done', { passed: true, behavior: 'passed' }), { event: 'done', data: doneBody }];
-/** 生成工程の応答（契約の形。validateGenerated を通す）。field = Generator Context の CONTROL のフィールド */
-function genDone(ctx, requestId) {
+/** 生成工程の応答（契約の形。validateGenerated を通す）。field = Generator Context の CONTROL のフィールド。timing = meta.timing（契約 20 §15。2026-10-15 §1.5 の upstream の回帰で渡す） */
+function genDone(ctx, requestId, { timing = null } = {}) {
   const cust = ctx.customization || {};
   const cid = cust.customizationId || 'C1';
   const field = ((cust.fields || []).find(f => f.access === 'CONTROL') || {}).code || 'case_name';
@@ -76,7 +76,7 @@ function genDone(ctx, requestId) {
   const targetFile = `${cid.toLowerCase()}Lock.js`;
   const req0 = (ctx.verification && ctx.verification.requiredEffects) || [];
   const candidateHash = KTScan.candidateHashOf({ strategy: 'NEW_JS_FILE', targetFile, code, customizationId: cid });
-  return { ok: true, contractVersion: '2.1', meta: { requestId, gateway: { product: 'toolkit', feature: 'customization-generator', promptVersion: '1', contextVersion: 'customization-1' }, normalization: { warnings: [] }, ai: { model: MODEL, latencyMs: 40000, streamed: true, usage: usage(3000, 700) } },
+  return { ok: true, contractVersion: '2.1', meta: { requestId, gateway: { product: 'toolkit', feature: 'customization-generator', promptVersion: '1', contextVersion: 'customization-1' }, normalization: { warnings: [] }, ai: { model: MODEL, latencyMs: 40000, streamed: true, usage: usage(3000, 700) }, ...(timing ? { timing } : {}) },
     generated: { strategy: 'NEW_JS_FILE', targetFile, summary: '承認待ちでは編集できないようにします。', code, patch: null, events: ['app.record.edit.show'], fields: [{ code: field, access: 'CONTROL' }], apis: [], assumptions: [], warnings: [], coverage: [{ requirementId: cid, status: 'MET', note: '' }] },
     verification: K.fakeVerification({ code, has: { [field]: ['lock'] } }, req0, { candidateHash }) };
 }
@@ -179,7 +179,7 @@ await section(async () => {
   const order = pg ? [pg.sentAt, pg.headersAt, pg.startedAt, pg.textAt, pg.lastAt, pg.doneAt, pg.verifyAt, pg.verifyDoneAt] : [];
   const monotone = order.every((v, i) => Number.isFinite(v) && (i === 0 || v >= order[i - 1]));
   assert(headersSeen[0].Accept === 'text/event-stream' && g && typeof g.code === 'string' && events.join(',') === 'progress:generate:sent,progress:generate:headers,progress:generate:started,progress:generate:text,progress:generate:delta,progress:generate:done,progress:verify:start,progress:verify:done', `S1-1: onEvent があれば Accept: text/event-stream を付け、progress だけが onEvent に届く（done / error は従来の本文・エラーになる）: ${JSON.stringify({ accept: headersSeen[0].Accept, events })}`);
-  assert(pg && monotone && pg.events === 8 && Object.keys(pg).sort().join(',') === 'doneAt,events,headersAt,lastAt,sentAt,startedAt,textAt,verifyAt,verifyDoneAt' && pg.textAt - pg.startedAt >= 5 && !NO_BODY.test(JSON.stringify(trace)), `S1-2: trace.progress は相対 ms（送信 ≤ 見出し ≤ 最初のイベント ≤ 最初の本文 ≤ 最後の進捗 ≤ 完了 ≤ 検証の前後）と受けた数だけ。本文の遅い応答では textAt が startedAt より後。本文は入らない: ${JSON.stringify(pg)}`);
+  assert(pg && monotone && pg.events === 8 && Object.keys(pg).sort().join(',') === 'deltaEvents,doneAt,events,headersAt,lastAt,sentAt,startedAt,textAt,textChars,verifyAt,verifyDoneAt' && pg.textChars === 240 && pg.deltaEvents === 2 && pg.textAt - pg.startedAt >= 5 && !NO_BODY.test(JSON.stringify(trace)), `S1-2: trace.progress は相対 ms（送信 ≤ 見出し ≤ 最初のイベント ≤ 最初の本文 ≤ 最後の進捗 ≤ 完了 ≤ 検証の前後）と受けた数・本文の文字数の累計（textChars = 最後の delta の chars）・断片の通知の数（deltaEvents）だけ。本文の遅い応答では textAt が startedAt より後。本文は入らない: ${JSON.stringify(pg)}`);
   assert(trace.transport && trace.transport.firstByteAt != null && trace.transport.firstByteAt <= pg.sentAt, `S1-3: transport の firstByteAt は \`: start\` のコメントで付く（AI の進捗の時刻ではない。progress の sentAt より前）: ${JSON.stringify({ transport: trace.transport, sentAt: pg.sentAt })}`);
   //   onEvent なし: Accept 無し・JSON のまま（従来の経路）。trace.progress は作らない
   headersSeen.length = 0;
@@ -415,6 +415,55 @@ await section(async () => {
   let threw = null, pane = null;
   try { pane = KTAiChatUi.codePaneHtml({ status: 'failed', generated: null, review: null, existingSource: null, failure: { reason: 'GENERATION_DECLINED', message: 'テスト' } }, { view: 'code' }); } catch (e) { threw = e; }
   assert(!threw && pane && pane.head === empty.head && pane.code === '' && pane.diff === '' && pane.review === '', `S8-1: generated が無い記録の「コード」は空の表示（例外にしない）: ${threw ? String(threw && threw.message) : JSON.stringify(pane)}`);
+});
+
+// =========================================================
+console.log('\n--- §S9. 受信した本文の文字数（2026-10-15 §1.5）: trace.progress の textChars / deltaEvents・成功の timing.calls[].upstream（8 キー）・失敗の記録の upstream と textChars・詳細の 1 句 ---');
+const UPSTREAM_KEYS_JOINED = 'headersMs,firstEventMs,firstTextMs,lastProgressMs,endMs,end,textChars,deltaCount';
+/** 上流（AI プロバイダ）の観測（契約 20 §15 の 8 キー）。成功と時間切れ（期限の直前まで本文を流し続けていた形） */
+const UP_OK = { headersMs: 800, firstEventMs: 950, firstTextMs: 9000, lastProgressMs: 39000, endMs: 40000, end: 'completed', textChars: 5200, deltaCount: 61 };
+const UP_TIMEOUT = { headersMs: 700, firstEventMs: 900, firstTextMs: 8000, lastProgressMs: 239000, endMs: 240000, end: 'incomplete', textChars: 12345, deltaCount: 300 };
+const TIMING_OK = { version: '1', totalMs: 42000, ai: { count: 2, ms: 41000, repairs: 1 }, calls: [{ kind: 'generate', attempt: 0, ms: 40000, ok: true, inputTokens: 3000, outputTokens: 700, upstream: UP_OK }, { kind: 'repair', attempt: 1, ms: 1000, ok: true, inputTokens: 100, outputTokens: 50 }], behavior: { ms: 1000, runs: 1, calls: 2 } };
+/** Gateway の期限の 502 の本文に error.upstream を含める（契約 20 §16） */
+const timeoutBodyWith = (upstream, requestId) => JSON.stringify({ ...UPSTREAM_TIMEOUT_BODY, error: { ...UPSTREAM_TIMEOUT_BODY.error, ...(upstream ? { upstream } : {}) }, meta: { requestId } });
+await section(async () => {
+  //   (a) trace.progress: text / delta の chars（累計）の最後の値が textChars、本文の断片の通知の数が deltaEvents（keepalive・started は数えない）
+  const blocks = [': start', PG('generate', 'sent'), PG('generate', 'headers'), PG('generate', 'started'), ': keepalive', PG('generate', 'text', { chars: 120, deltaChars: 120 }), PG('generate', 'delta', { chars: 2400, deltaChars: 300 }), PG('generate', 'delta', { chars: 5200, deltaChars: 80 }), PG('generate', 'done', { ok: true, end: 'completed' }), PG('verify', 'start'), PG('verify', 'done', { passed: true }), null];
+  const fetchFn = async (url, init) => { const requestId = JSON.parse(init.body).meta.requestId; blocks[blocks.length - 1] = { event: 'done', data: genDone(GCTX, requestId, { timing: TIMING_OK }) }; return sseResponse(blocks, { step: () => sleep(1) }); };
+  const c = KTAiClient.createAiClient({ apiBase: 'https://gw.test', customerToken: 't', hostname: HOST, transport: KTAiClient.createDefaultTransport({ kintoneApi: null, fetchFn }) });
+  const trace = {};
+  const g = await c.generate({ ctx: GCTX, trace, onEvent: () => { } });
+  assert(trace.progress && trace.progress.textChars === 5200 && trace.progress.deltaEvents === 3 && trace.progress.events === 9 && !NO_BODY.test(JSON.stringify(trace)), `S9-1: trace.progress の textChars は最後に受けた累計（5200）・deltaEvents は本文の断片の通知の数（3。keepalive・started は数えない。events は progress の総数 9）: ${JSON.stringify(trace.progress)}`);
+  //   (c) 成功の generated.timing.calls[0].upstream は 8 キー（契約の順）。upstream の無い呼び出しは null
+  const up = g.timing && Array.isArray(g.timing.calls) ? g.timing.calls[0].upstream : null;
+  assert(up && Object.keys(up).join(',') === UPSTREAM_KEYS_JOINED && up.textChars === 5200 && up.deltaCount === 61 && up.end === 'completed' && up.headersMs === 800 && g.timing.calls[1].upstream === null && KTAiClient.UPSTREAM_KEYS.join(',') === UPSTREAM_KEYS_JOINED, `S9-2: 成功の記録 generated.timing.calls[0].upstream は 8 キー（headersMs … textChars, deltaCount）。無い呼び出しは null: ${JSON.stringify(g.timing && g.timing.calls)}`);
+  //   白リスト: 余計なキーは落ちる・文字列の数は数に・負の数と数でない end は null・形が違えば null
+  const nu = KTAiClient.normalizeUpstream({ headersMs: '12', end: 7, textChars: -1, bogus: 1 });
+  assert(nu && Object.keys(nu).join(',') === UPSTREAM_KEYS_JOINED && nu.headersMs === 12 && nu.end === null && nu.textChars === null && nu.deltaCount === null && KTAiClient.normalizeUpstream(null) === null && KTAiClient.normalizeUpstream('x') === null && KTAiClient.normalizeUpstream([1]) === null, `S9-3: upstream は 8 キーの白リスト（数か null・end は文字列か null。形が違えば null）: ${JSON.stringify(nu)}`);
+});
+await section(async () => {
+  //   (b) 画面（実際の client・偽の Gateway）: 本文が届き始めてから Gateway の期限（SSE の error 502。error.upstream つき）→ 失敗の記録に upstream（8 キー）と Toolkit が受けた累計（textChars）。本文は残さない
+  const onGenerate = ({ requestId }) => sseResponse([': start', PG('generate', 'sent'), PG('generate', 'headers'), PG('generate', 'started'), PG('generate', 'text', { chars: 100, deltaChars: 100 }), PG('generate', 'delta', { chars: 9800, deltaChars: 400 }), { event: 'error', data: { status: 502, body: timeoutBodyWith(UP_TIMEOUT, requestId) } }], { step: () => sleep(1) });
+  const { m, v } = await mountReal({ onGenerate });
+  const f = v && v.generated && v.generated.C1 ? v.generated.C1.failure : null;
+  assert(v.generated.C1.status === 'failed' && f && f.stop === 'timeout' && f.upstream && Object.keys(f.upstream).join(',') === UPSTREAM_KEYS_JOINED && f.upstream.textChars === 12345 && f.upstream.deltaCount === 300 && f.upstream.end === 'incomplete' && f.upstream.endMs === 240000 && f.textChars === 9800 && !NO_BODY.test(JSON.stringify(f)), `S9-4: 失敗の記録 failure.upstream（Gateway の 502 の error.upstream。8 キー）と failure.textChars（Toolkit が受けた進みの通知の累計 9800）。本文は無い: ${JSON.stringify(f)}`);
+  const call = lastCalls(m.conv()).find(c => c.kind === 'generate');
+  assert(call && call.end === 'unknown' && call.upstream && call.upstream.textChars === 12345 && Object.keys(call.upstream).join(',') === UPSTREAM_KEYS_JOINED && call.progress && call.progress.textChars === 9800 && call.progress.deltaEvents === 2 && !NO_BODY.test(JSON.stringify(m.conv().state.metrics.timings.slice(-1)[0])), `S9-5: 呼び出しの記録（timing.calls[]）にも upstream（8 キー）と progress の textChars / deltaEvents。本文は無い: ${JSON.stringify(call && { upstream: call.upstream, progress: call.progress })}`);
+  //   (d) 作成途中の「詳細（時間と AI の利用）」に 1 句（Gateway の観測の文字数。token 数ではないと書く）。通常表示には出さない・ほかの表示は増やさない
+  const chat = m.chat();
+  const detail = (chat.match(/<details class="kt-ai-tech"[^>]*><summary>詳細（時間と AI の利用）<\/summary>[\s\S]*?<\/details>/) || [''])[0];
+  assert(/時間切れまでに受信した本文 約 12345 文字（token 数ではありません）/.test(stripC(detail)) && (stripC(chat).match(/時間切れまでに受信した本文/g) || []).length === 1 && !/時間切れまでに受信した本文/.test(visibleText(chat)) && /作成途中/.test(visibleText(chat)), `S9-6: 作成途中の詳細に「時間切れまでに受信した本文 約 12345 文字（token 数ではありません）」の 1 句だけ（通常表示には出さない）: ${stripC(detail).replace(/\s+/g, ' ').slice(0, 200)}`);
+});
+await section(async () => {
+  //   Gateway の upstream に文字数が無い（非ストリーム = null）ときは Toolkit が受けた累計で書く。本文を受けていない・観測が無いときは何も出さない
+  const onGenerate2 = ({ requestId }) => sseResponse([': start', PG('generate', 'sent'), PG('generate', 'headers'), PG('generate', 'started'), PG('generate', 'text', { chars: 100 }), PG('generate', 'delta', { chars: 9800 }), { event: 'error', data: { status: 502, body: timeoutBodyWith({ ...UP_TIMEOUT, textChars: null, deltaCount: null }, requestId) } }], { step: () => sleep(1) });
+  const a = await mountReal({ onGenerate: onGenerate2 });
+  const fa = a.v.generated.C1.failure;
+  assert(fa.upstream && fa.upstream.textChars === null && fa.textChars === 9800 && /時間切れまでに受信した本文 約 9800 文字（token 数ではありません）/.test(stripC(a.m.chat())), `S9-7: Gateway の文字数が無ければ Toolkit が受けた累計（9800）で 1 句: ${JSON.stringify(fa)}`);
+  const onGenerate3 = ({ requestId }) => sseResponse([': start', PG('generate', 'sent'), PG('generate', 'headers'), PG('generate', 'started'), ': keepalive', { event: 'error', data: { status: 502, body: timeoutBodyWith(null, requestId) } }], { step: () => sleep(1) });
+  const b = await mountReal({ onGenerate: onGenerate3 });
+  const fb = b.v.generated.C1.failure;
+  assert(fb.stop === 'timeout' && !('upstream' in fb) && !('textChars' in fb) && !/時間切れまでに受信した本文/.test(b.m.chat()) && /作成途中/.test(visibleText(b.m.chat())), `S9-8: 観測が無く本文も受けていなければ、記録にキーを足さず 1 句も出さない（古い Gateway の 502 も同じ）: ${JSON.stringify(fb)}`);
 });
 
 console.log(`\n${state.passed} passed, ${state.failed} failed`);
