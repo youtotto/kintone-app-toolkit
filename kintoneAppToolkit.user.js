@@ -8746,7 +8746,8 @@
         // Phase 16: JavaScript カスタマイズ（標準設定の step とは別に数える）
         customizations: stepReviews.filter(r => r.solution === 'CUSTOMIZATION').length,
         generatable: stepReviews.filter(r => r.codeGeneration?.supported).length,
-        jsConflicts: stepReviews.filter(r => r.issues.some(i => i.code === 'JS_FIELD_CONFLICT' || i.code === 'JS_EXECUTION_ORDER_RISK')).length,
+        //   簡素化 §5（2026-10-16）: 同じフィールドを扱うだけ（JS_SHARED_FIELD）は競合に数えない（実行順序の懸念だけ）
+        jsConflicts: stepReviews.filter(r => r.issues.some(i => i.code === 'JS_EXECUTION_ORDER_RISK')).length,
       };
       // Phase 16: 標準設定と JavaScript を同じ Review 上で要約（§43）
       const stdReviews = stepReviews.filter(r => r.solution !== 'CUSTOMIZATION');
@@ -8754,7 +8755,7 @@
       const hybrid = {
         solution: plan?.solution || (jsReviews.length ? (stdReviews.some(r => r.actionType !== 'REQUIRE_CONFIRMATION') ? 'HYBRID' : 'CUSTOMIZATION') : 'STANDARD'),
         standard: { steps: stdReviews.map(r => r.stepId), safe: stdReviews.filter(r => r.safety === SAFETY.SAFE).length, review: stdReviews.filter(r => r.safety === SAFETY.REVIEW_REQUIRED).length, blocked: stdReviews.filter(r => r.safety === SAFETY.BLOCKED).length, planOnly: stdReviews.filter(r => r.safety === SAFETY.PLAN_ONLY).length },
-        customization: { steps: jsReviews.map(r => r.stepId), generatable: jsReviews.filter(r => r.codeGeneration?.supported).map(r => r.stepId), blocked: jsReviews.filter(r => r.status === STATUS.INVALID || r.status === STATUS.BLOCKED_BY_DEPENDENCY).map(r => r.stepId), needsConfirmation: jsReviews.filter(r => r.status === STATUS.NEEDS_CONFIRMATION).map(r => r.stepId), conflicts: jsReviews.filter(r => r.issues.some(i => i.code === 'JS_FIELD_CONFLICT')).map(r => r.stepId) },
+        customization: { steps: jsReviews.map(r => r.stepId), generatable: jsReviews.filter(r => r.codeGeneration?.supported).map(r => r.stepId), blocked: jsReviews.filter(r => r.status === STATUS.INVALID || r.status === STATUS.BLOCKED_BY_DEPENDENCY).map(r => r.stepId), needsConfirmation: jsReviews.filter(r => r.status === STATUS.NEEDS_CONFIRMATION).map(r => r.stepId), conflicts: jsReviews.filter(r => r.issues.some(i => i.code === 'JS_EXECUTION_ORDER_RISK')).map(r => r.stepId) },
       };
       const processChanged = stepReviews.some(r => ['PROCESS_STATUS', 'PROCESS_ACTION', 'PROCESS'].includes(r.diff.target.kind) && r.diff.changeType !== CHANGE.INVALID && r.diff.changeType !== CHANGE.NO_CHANGE);
       // Phase 13: 計画が触る参照元アプリ（ルックアップの step ごとの crossApp を appId で集約。Executor は実行直前に再取得して revision / fieldsHash を照合する）
@@ -8795,7 +8796,7 @@
     /**
      * CUSTOMIZATION_REQUIRED ＋ spec.customizationId の step。Executor は反映しない（PLAN_ONLY）が、
      *   - 標準設定で不足する理由 / strategy / platform / Event Catalog / フィールドの実在 / 統合先の既存 JS を検証し、
-     *   - 既存 JS との競合（同じフィールドの WRITE / CONTROL = JS_FIELD_CONFLICT、同じイベント = 候補、実行順序の懸念）を出し、
+     *   - 既存 JS と同じフィールドを扱うこと（WRITE / CONTROL = JS_SHARED_FIELD。情報。競合とは判定しない）・同じイベント（候補）・実行順序の懸念を出し、
      *   - codeGeneration { supported, strategy, existingFile, sourceAvailable } でコード生成の可否を返す
      */
     function reviewCustomization(step, r, ctx) {
@@ -8876,12 +8877,14 @@
           h(`方針: ✎ 既存 ${f.name}（${f.target === 'mobile' ? 'モバイル' : 'PC'}）へ統合`);
         }
       } else if (c.strategy === 'NEW_JS_FILE') h('方針: ＋ 新規 JS');
-      // 競合: 統合先以外の既存 JS が同じフィールドを WRITE / CONTROL している（JS_FIELD_CONFLICT → REVIEW_REQUIRED）、同じイベント（候補）、実行順序
+      // 既存 JS との関係: 統合先以外の既存 JS が同じフィールドを WRITE / CONTROL している（JS_SHARED_FIELD）、同じイベント（候補）、実行順序
+      //   簡素化 §5（2026-10-16）: 同じフィールドを扱うだけでは競合と確定せず、確認も求めない（以前は JS_FIELD_CONFLICT の medium で要確認にし、統合の手順にも
+      //   「新しいファイルを足す前に既存処理への統合を検討してください」と出していた）。一緒の動きは生成工程の動作テスト（同じ画面の既存 JS を送る）が確かめる
       for (const f of files) {
         if (!f.analyzed || isTarget(f)) continue;
         if (platform.length && !platform.includes(f.target) && events.length && !events.some(ev => KTJsCatalog.eventPlatform(ev) === f.target)) continue;   // 対象でない platform のファイル
         const fieldHits = fields.filter(x => (x.access === 'WRITE' || x.access === 'CONTROL') && f.fields[x.code] && ACCESS_WRITES(f.fields[x.code]).length);
-        if (fieldHits.length) add('JS_FIELD_CONFLICT', 'medium', `既存 JS「${f.name}」（${f.target === 'mobile' ? 'モバイル' : 'PC'}）も ${fieldHits.map(x => `${x.code}（${ACCESS_WRITES(f.fields[x.code]).join('/')}）`).join(', ')} を書き換え・制御しています。新しいファイルを足す前に既存処理への統合を検討してください`, { file: f.name, target: f.target, fields: fieldHits.map(x => x.code) });
+        if (fieldHits.length) add('JS_SHARED_FIELD', 'low', `既存 JS「${f.name}」（${f.target === 'mobile' ? 'モバイル' : 'PC'}）も ${fieldHits.map(x => `${x.code}（${ACCESS_WRITES(f.fields[x.code]).join('/')}）`).join(', ')} を書き換え・制御しています（一緒に動かしたときの動きは、生成工程の動作テストで確かめます）`, { file: f.name, target: f.target, fields: fieldHits.map(x => x.code) });
         const sameEvents = events.filter(ev => f.events.includes(ev));
         if (sameEvents.length) {
           add('JS_EVENT_CONFLICT_CANDIDATE', 'low', `既存 JS「${f.name}」も ${sameEvents.join(', ')} を使っています（同じイベントだけでは競合とは限りません）`, { file: f.name, events: sameEvents });
@@ -30396,7 +30399,7 @@
       const p = v.plan || {};
       const reviewOf = (cid) => (v.review?.steps || []).find(r => r.customization?.customizationId === cid) || null;
       const custs = sp.customizations || [];
-      const conflictFiles = [...new Set(custs.flatMap(c => (reviewOf(c.customizationId)?.issues || []).filter(i => i.code === 'JS_FIELD_CONFLICT').map(i => `${i.file}（${(i.fields || []).map(f => `「${(labels && labels[f]) || f}」`).join('、')}）`)))];   // §0e.3: フィールドは名前で
+      const sharedFiles = [...new Set(custs.flatMap(c => (reviewOf(c.customizationId)?.issues || []).filter(i => i.code === 'JS_SHARED_FIELD').map(i => `${i.file}（${(i.fields || []).map(f => `「${(labels && labels[f]) || f}」`).join('、')}）`)))];   // §0e.3: フィールドは名前で
       const questions = [...new Set([...(p.questions || []).map(q => q.question), ...custs.flatMap(c => c.questions || [])].map(q => String(q || '').trim()).filter(Boolean))];   // 計画の questions と customization の questions は同じ内容が重なりやすいので重複を除く
       const status = sp.status === 'SUPERSEDED' || !active ? 'SUPERSEDED' : sp.status;
       const badgeColor = status === 'CONFIRMED' ? '#2e7d32' : status === 'DRAFT' ? '#b26a00' : '#999';
@@ -30421,7 +30424,7 @@
         <div style="display:flex; align-items:center; justify-content:space-between; gap:6px; flex-wrap:wrap;"><b>実装仕様 v${esc(String(sp.version))}</b><span>${KTContextUi.badge(SPEC_STATUS_JA[status] || status, badgeColor)}${sp.subject ? KTContextUi.badge(`相談: ${sp.subject.name}`, '#6a1b9a') : ''}</span></div>
         <div style="margin-top:4px; display:grid; grid-template-columns:auto 1fr; gap:2px 10px; font-size:12px;"><span style="opacity:.7;">目的</span><span>${esc(v.goal || p.goal || '')}</span></div>
         ${rows}
-        ${conflictFiles.length ? `<div style="margin-top:4px; font-size:12px;"><span style="opacity:.7;">既存 JS との競合</span>　${esc(conflictFiles.join('、'))}</div>` : ''}
+        ${sharedFiles.length ? `<details class="kt-ai-tech" style="margin-top:4px; font-size:12px;"><summary>同じフィールドを扱う既存の JavaScript</summary>${esc(sharedFiles.join('、'))}（一緒に動かしたときの動きは、生成工程の動作テストで確かめます）</details>` : ''}
         ${questions.length ? `<div style="margin-top:4px; font-size:11px; color:#b26a00;">${questions.map(q => `？ ${esc(q)}`).join('<br>')}</div>` : ''}
         <div style="font-size:10px; opacity:.6; margin-top:4px;">${status === 'SUPERSEDED' ? 'この仕様は最新ではありません（修正で新しい版ができました）。' : v.fromDraft ? '最終案の一部です（内容は最終案のカードで確かめ、修正は会話で伝えます）。' : '閲覧だけです（この変更案は仮案と最終案の流れで作ったものではありません。実現したいことを送ると仮案から作ります）。'}</div>`, badgeColor);
     }
@@ -31262,6 +31265,7 @@
       const g = entry.generated, rv = entry.review;
       const mark = (ch) => (ch.ok ? '✓' : ch.severity === 'block' ? '×' : '△');
       const color = (ch) => (ch.ok ? '#2e7d32' : ch.severity === 'block' ? '#b00020' : '#b26a00');
+      const checkRow = (ch) => `<div style="color:${color(ch)};">${mark(ch)} ${esc(CHECK_JA[ch.name] || ch.name)}: ${esc(ch.message)}</div>`;
       // Phase 21: 要約・詳細・検査結果をそろえる。登録の判定と、要件のうち満たせない部分（Toolkit の確認）を AI の要約より先に出す
       const reg = rv?.registration || null;
       const VJ = { BLOCKED: '× 登録できません（要件との不一致・不整合）', NEEDS_CONFIRMATION: '△ 登録の前に確認が必要', RUNTIME_UNVERIFIED: '✓ 静的な検査は通過（動作は未確認）' };
@@ -31283,7 +31287,8 @@
       const covHtml = `${ach.length ? `<div style="margin-top:2px;">Toolkit が確かめた範囲: ${ach.map(esc).join('／')}</div>` : ''}${notAchTk.length ? `<div class="kt-ai-code-not-achieved" style="margin-top:2px; color:#b00020;">要件のうち満たせない部分（Toolkit の確認）: ${notAchTk.map(x => esc(x.message)).join('／')}</div>` : ''}${attemptsP ? `<div class="kt-ai-code-attempts" style="margin-top:2px; opacity:.75;">生成 ${esc(String(attemptsP.count || 1))} 回目${usageP}</div>` : ''}`;
       return {
         head: `<b>${esc(g.strategy === 'EXTEND_EXISTING_JS' ? '✎ 既存 JS を変更' : '＋ 新規 JS')}: ${esc(g.targetFile)}</b>　${rv?.status === 'OK' ? '✓ 検査を通過' : rv?.status === 'BLOCKED' ? '× 採用不可' : '△ 要確認'}${regHtml}${covHtml}${notAch.length ? `<details style="margin-top:2px;"><summary style="cursor:pointer; opacity:.75;">AI の要約（Toolkit の確認と食い違う部分があります。そのまま採用しないでください）</summary><span style="opacity:.85;">${esc(g.summary || '')}</span></details>` : `<div style="margin-top:2px;"><span style="opacity:.7;">AI の要約:</span> <span style="opacity:.85;">${esc(g.summary || '')}</span></div>`}`,
-        review: (rv?.checks || []).map(ch => `<div style="color:${color(ch)};">${mark(ch)} ${esc(CHECK_JA[ch.name] || ch.name)}: ${esc(ch.message)}</div>`).join('') + ((rv?.mismatches || []).length ? `<div style="margin-top:4px; opacity:.85;">計画との照合: ${rv.mismatches.map(x => esc(x.message)).join('／')}</div>` : '') + (((rv?.assumptions ?? g.assumptions) || []).length ? `<div style="margin-top:4px; opacity:.85;">前提: ${esc((rv?.assumptions ?? g.assumptions).join('／'))}</div>` : '') + ((g.warnings || []).length ? `<div style="color:#b26a00;">${g.warnings.map(w => `⚠ ${esc(w)}`).join('<br>')}</div>` : '') + patternsHtml(g),
+        //   簡素化 §5（2026-10-16）: 通常表示は止める・確かめる必要のある検査（× △）だけ。通った検査（✓ の記録）は［詳しく］の中（表示だけ。判定は変えない）
+        review: (rv?.checks || []).filter(ch => !ch.ok).map(checkRow).join('') + ((rv?.checks || []).some(ch => ch.ok) ? `<details class="kt-ai-tech kt-ai-code-passed"><summary>通った検査（${(rv.checks || []).filter(ch => ch.ok).length} 件）</summary>${(rv.checks || []).filter(ch => ch.ok).map(checkRow).join('')}</details>` : '') + ((rv?.mismatches || []).length ? `<div style="margin-top:4px; opacity:.85;">計画との照合: ${rv.mismatches.map(x => esc(x.message)).join('／')}</div>` : '') + (((rv?.assumptions ?? g.assumptions) || []).length ? `<div style="margin-top:4px; opacity:.85;">前提: ${esc((rv?.assumptions ?? g.assumptions).join('／'))}</div>` : '') + ((g.warnings || []).length ? `<div style="color:#b26a00;">${g.warnings.map(w => `⚠ ${esc(w)}`).join('<br>')}</div>` : '') + patternsHtml(g),
         code: rv?.finalCode ?? g.code ?? '',
         diff: rv?.diff ? (rv.diff.lines || []).map(l => `${l.type}${l.text}`).join('\n') : '',
       };

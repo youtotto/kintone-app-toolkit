@@ -2,7 +2,7 @@
 //
 // 検証内容:
 //   §51 Planner（Toolkit 側）: 標準のみ / カスタマイズのみ / Hybrid / 既存 JS への統合 / 新規 JS / 統合先が曖昧 / キャッシュで本文なし / PC・モバイル未定 /
-//        存在しないイベント / 既存 JS との競合（JS_FIELD_CONFLICT）/ Generator Context（アプリ全体の facts を送らない）
+//        存在しないイベント / 既存 JS と同じフィールドを扱う情報（JS_SHARED_FIELD。競合・要確認にしない）/ Generator Context（アプリ全体の facts を送らない）
 //   §52 Generator（KTCodeReview）: 新規 JS OK / patch OK / 構文エラー / 未知イベント / 未知フィールド / 計画外のフィールド書き換え / 計画外 API /
 //        計画との不一致 / 危険 API / 秘密情報 / 外部通信 / anchor 不明 / baseHash 不一致 / グローバル汚染 / return event なし
 //   §53 Chat（C-1 第 3 段・2026-10-08 から新しい流れ: 依頼 → 仮案 → 採用 → 計画 → 生成と検証 → 最終案 → 承認 → 反映）:
@@ -142,9 +142,13 @@ console.log('\n--- §51-2. Toolkit Review: 標準のみ / カスタマイズの�
   // 新規 JS
   const nw = reviewPlan(PLAN_NEW_JS);
   assert(nw.jsReview.codeGeneration.supported === true && nw.jsReview.codeGeneration.strategy === 'NEW_JS_FILE' && nw.jsReview.codeGeneration.existingFile === null, '新規 JS: NEW_JS_FILE でコード生成可');
-  assert(nw.jsReview.issues.some(i => i.code === 'JS_FIELD_CONFLICT' && i.file === 'fieldOnOff.js') && nw.jsReview.status === 'NEEDS_CONFIRMATION' && nw.review.hybrid.customization.conflicts.includes('P2'), '既存 JS（fieldOnOff.js）が同じ amount を CONTROL → JS_FIELD_CONFLICT（REVIEW_REQUIRED・統合を検討）');
+  //   簡素化 §5（2026-10-16）: 既存 JS と同じフィールドを扱うだけでは競合と確定せず、確認も求めない（以前の期待は JS_FIELD_CONFLICT の medium で NEEDS_CONFIRMATION・
+  //   「新しいファイルを足す前に既存処理への統合を検討してください」）。一緒の動きは生成工程の動作テスト（同じ画面の既存 JS を送る）が確かめる
+  const sh = nw.jsReview.issues.find(i => i.code === 'JS_SHARED_FIELD' && i.file === 'fieldOnOff.js');
+  assert(sh && sh.severity === 'low' && /amount（CONTROL）/.test(sh.message) && /生成工程の動作テストで確かめます/.test(sh.message) && !/新しいファイルを足す前に/.test(sh.message) && !nw.jsReview.issues.some(i => i.severity === 'medium' && /fieldOnOff\.js/.test(i.message)) && nw.jsReview.status !== 'NEEDS_CONFIRMATION' && !nw.review.hybrid.customization.conflicts.includes('P2') && !nw.review.hybrid.customization.needsConfirmation.includes('P2'),
+    `既存 JS（fieldOnOff.js）が同じ amount を CONTROL → 同じフィールドを扱う情報（JS_SHARED_FIELD・low）。競合・要確認にはしない: ${JSON.stringify({ status: nw.jsReview.status, issue: sh })}`);
   const nwPlain = reviewPlan(PLAN_NEW_JS, INPUTS_PLAIN);
-  assert(!nwPlain.jsReview.issues.some(i => i.code === 'JS_FIELD_CONFLICT') && nwPlain.jsReview.status === 'VALID', '同じフィールドを扱う既存 JS が無ければ競合なし（VALID）');
+  assert(!nwPlain.jsReview.issues.some(i => i.code === 'JS_SHARED_FIELD') && nwPlain.jsReview.status === 'VALID', '同じフィールドを扱う既存 JS が無ければ競合なし（VALID）');
 }
 
 // =========================================================
@@ -319,7 +323,7 @@ console.log('\n--- §52-2. KTCodeReview: 構文 / 未知イベント / 未知フ
   const otherStrategy = KTCodeReview.review({ generated: genNew(NEW_JS_GOOD, { strategy: 'PLUGIN_CANDIDATE' }), customization: hy.plan.customizations[0], plan: hy.plan, data: INPUTS.data, scan: INPUTS.scan });
   assert(otherStrategy.status === 'BLOCKED' && check(otherStrategy, 'strategy') && !check(otherStrategy, 'strategy').ok, 'PLUGIN_CANDIDATE 等はコード生成の対象外: BLOCKED');
   // C-1 第 2 段（設計 §0d.4）: 既存 JS と同じフィールドを扱うだけで確認にする判定（旧 existing-conflict）はコードの確認では行わない。
-  // 計画の段階の JS_FIELD_CONFLICT（§51 の上の期待）は残る。実際の競合は生成工程の回帰で守る:
+  // 計画の段階の同じフィールドを扱う情報（JS_SHARED_FIELD。簡素化 §5 で競合・要確認から情報に変えた。§51 の上の期待）は残る。実際の競合は生成工程の回帰で守る:
   // Gateway worker/test/cases/required-effects.mjs「§0d.1 の 2: 同じ platform の既存 JS（送ったもの）がそのイベントを登録する…→ behavior（existing-same-event）」・
   // 「レビュー S11: 既存 JS の error で候補の編集不可が取り消される → not-run（existing…）」、隔離環境 sandbox/test/run.mjs「R13 別ファイル: 既存の disabled が候補の error で取り消される」
   // 実機（Phase 17 E2E C）: モバイル JS への統合（patch。追加分に handler なし）では、PC の既存 JS は競合にならず、platform は最終ファイルのイベントで判定する
@@ -568,12 +572,25 @@ console.log('\n--- §53-4. KTAiChatUi（純関数）---');
   assert(/生成可/.test(card) && /✎ fieldOnOff\.js を変更/.test(card) && !/data-act="confirm-spec"/.test(card), 'specCardHtml（右）: 生成可バッジ・統合先（閲覧だけ）');
   const cardNew = KTAiChatUi.specCardHtml({ planId: 'p', version: 1, status: 'ACTIVE', plan: PLAN_NEW_JS.plan, review: null, spec: { specId: 'p:spec', version: 1, status: 'DRAFT', customizations: [NEW_JS_CUST()] } });
   assert(/＋ 新規 JS/.test(cardNew) && /追加画面/.test(cardNew) && !/app\.record\./.test(cardNew), 'specCardHtml（新規 JS）: イベントは画面の名前で出す（§0e.3）');
+  //   簡素化 §5（2026-10-16）: 同じフィールドを扱う既存 JS は通常表示に「既存 JS との競合」と出さない（詳しくの中に、ファイルとフィールドの名前と確かめ方だけ）
+  const nwS = reviewPlan(PLAN_NEW_JS);
+  const cardShared = KTAiChatUi.specCardHtml({ planId: 'p', version: 1, status: 'ACTIVE', plan: nwS.plan, review: nwS.review, spec: { specId: 'p:spec', version: 1, status: 'DRAFT', customizations: nwS.plan.customizations } }, { labels: { amount: '金額' } });
+  const sharedAt = cardShared.indexOf('同じフィールドを扱う既存の JavaScript');
+  assert(!/既存 JS との競合|競合/.test(cardShared) && sharedAt > 0 && cardShared.lastIndexOf('<details', sharedAt) > cardShared.lastIndexOf('</details>', sharedAt) && /fieldOnOff\.js（「金額」）/.test(cardShared),
+    `specCardHtml: 同じフィールドを扱う既存 JS は詳しくの中だけ（競合と書かない）: ${cardShared.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').slice(0, 300)}`);
   //   会話のコードのカード（MSG.CODE・codeCardHtml）は削除した（F7-1・F7-2）。検査の一覧は右の「コード」（codePaneHtml）
   const rv = KTCodeReview.review({ generated: genPatch(), customization: hy.plan.customizations[0], plan: hy.plan, data: INPUTS.data, scan: INPUTS.scan, existingSource: SRC });
   v.generated.C1 = { generated: genPatch(), review: rv, existingSource: SRC };
   assert(/✓ 検査を通過/.test(KTAiChatUi.codePaneHtml(v.generated.C1).head) && /✓ 既存ファイルへの統合/.test(KTAiChatUi.codePaneHtml(v.generated.C1).review) && /✓ 構文/.test(KTAiChatUi.codePaneHtml(v.generated.C1).review), 'codePaneHtml: 見出しは要約（✓ 検査を通過）。Toolkit Code Review の ✓ 一覧（検査名は日本語）は review');
   const pane = KTAiChatUi.codePaneHtml(v.generated.C1, { view: 'diff' });
   assert(pane.code === rv.finalCode && /^\+/m.test(pane.diff) && /fieldOnOff\.js/.test(pane.head), 'codePaneHtml: code / diff / head');
+  //   簡素化 §5（2026-10-16）: 通った検査（✓ の記録）は［詳しく］の中。止める・確かめる必要のある検査（× △）は［詳しく］の外に出す（表示だけ。判定は変えない）
+  const outsideDetails = (h) => String(h).replace(/<details[\s\S]*?<\/details>/g, '');
+  const rvMixed = { ...rv, checks: [...rv.checks, { name: 'apis', ok: false, severity: 'review', message: '確かめてください（テスト）' }] };
+  const paneMixed = KTAiChatUi.codePaneHtml({ ...v.generated.C1, review: rvMixed });
+  assert(!/✓/.test(outsideDetails(pane.review)) && /<details class="kt-ai-tech kt-ai-code-passed"><summary>通った検査（\d+ 件）<\/summary>/.test(pane.review) && /✓ 構文/.test(pane.review)
+    && /△ 使う API: 確かめてください（テスト）/.test(outsideDetails(paneMixed.review)) && !/✓/.test(outsideDetails(paneMixed.review)),
+    `codePaneHtml: 通った検査は［詳しく］の中・確かめる必要のある検査は外: ${outsideDetails(paneMixed.review).replace(/<[^>]+>/g, ' ').slice(0, 200)}`);
   assert(KTAiChatUi.STRATEGY_JA.EXTEND_EXISTING_JS === '✎ 既存 JS を変更' && KTAiChatUi.STRATEGY_JA.NEW_JS_FILE === '＋ 新規 JS', 'STRATEGY_JA');
 }
 
