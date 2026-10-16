@@ -9020,6 +9020,16 @@
       }
       r.spec = spec;
       const h = (line) => r.diff.human.push(line);
+      //   簡素化 A（2026-10-16）: 値を指定した変更の手順で、既存の比較の結果が「変わる項目なし」なら変更不要（既存のものを使う手順 REUSE と同じ扱い。
+      //   書き込まず、確認事項・反映できないこと・変更する設定に数えない）。値が無い・比べられない（medium 以上の指摘や反映しない値がある）・対象が無いものは読み替えない
+      const sameAsNow = (provided, view, target = null) => {
+        if (!provided || r.status !== STATUS.VALID || issues.some(i => i.severity !== 'low' || /_IGNORED$/.test(String(i.code)))) return false;
+        r.diff.changeType = CHANGE.REUSE; r.safety = SAFETY.SAFE; r.simulated = true;
+        if (target) r.diff.target = target;
+        r.diff.before = view; r.diff.after = view;
+        h('変更不要（今の設定と同じ値です）');
+        return true;
+      };
       const resolveField = (ref) => {
         const t = String(ref ?? '').trim();
         if (!t) return null;
@@ -9259,6 +9269,7 @@
             }
             if (r.status === STATUS.INVALID) return r;
             if (!changed) {
+              if (!planOnly.length && sameAsNow([...(spec.addMappings || []), ...(spec.mappings || []), ...(spec.addPickerFields || [])].length > 0 || !!spec.filterCond || !!spec.sort, beforeView)) break;
               r.diff.changeType = CHANGE.NO_CHANGE; r.diff.before = beforeView; r.diff.after = beforeView; r.status = STATUS.NEEDS_CONFIRMATION;
               if (planOnly.length) { r.safety = SAFETY.PLAN_ONLY; h(`ルックアップ「${f.label}」（${f.code}）: ${planOnly.join(' / ')}の変更は計画のみ（Toolkit は反映しません）`); break; }
               issue('NO_STRUCTURED_CHANGE', 'medium', '変更内容が構造化されていないため仮適用できません（addMappings / addPickerFields / filterCond / sort を確認）'); h(`ルックアップ「${f.label}」（${f.code}）: 変更内容を特定できません`); break;
@@ -9290,6 +9301,7 @@
             }
           }
           if (r.status === STATUS.INVALID) return r;
+          if (!changed && sameAsNow(!!spec.fieldType || typeof spec.required === 'boolean' || !!(spec.name || spec.label), beforeView)) break;
           if (!changed) { r.diff.changeType = CHANGE.NO_CHANGE; r.diff.before = beforeView; r.diff.after = beforeView; h(`「${f.label}」（${f.code}）: 変更内容を特定できません（proposal の details を確認）`); issue('NO_STRUCTURED_CHANGE', 'medium', '変更内容が構造化されていないため仮適用できません（要確認）'); r.status = STATUS.NEEDS_CONFIRMATION; break; }
           model.fields[f.code] = after; r.simulated = true;
           r.diff.before = beforeView; r.diff.after = fieldView(after);
@@ -9404,6 +9416,7 @@
               issue('BRANCH_ADDED', 'medium', `「${act.name}」に分岐を追加: ${add.from} → ${add.to} [${add.filterCond}]`);
             }
             if (r.status === STATUS.INVALID) return r;
+            if (!changed && sameAsNow(!!(primary && (primary.cond || primary.to)) || !!spec.to || !!spec.from || (spec.entities || []).length > 0 || branches.length > 0, actionView(beforeAct))) return r;
             if (!changed) { issue('NO_STRUCTURED_CHANGE', 'medium', '変更内容が構造化されていないため仮適用できません（要確認）'); r.status = STATUS.NEEDS_CONFIRMATION; r.diff.changeType = CHANGE.NO_CHANGE; r.diff.before = actionView(beforeAct); r.diff.after = actionView(beforeAct); return r; }
             r.simulated = true;
             const branchList = model.process.actions.filter(a => a.name === act.name && a.stepId === step.id).map(a => ({ from: a.from, to: a.to, filterCond: a.filterCond }));
@@ -9422,9 +9435,11 @@
             if (spec.assigneeTypeRaw && !spec.assigneeType) issue('ASSIGNEE_TYPE_UNKNOWN', 'medium', `作業者の指定形式「${spec.assigneeTypeRaw}」は kintone の語彙（ONE / ALL / ANY）ではありません（要確認）`);
             if (r.status === STATUS.INVALID) return r;
             const typeChange = spec.assigneeType && spec.assigneeType !== st.assigneeType;
+            if (!assignees.length && !typeChange && sameAsNow(!!spec.assigneeType, stateView(beforeSt))) return r;
             if (!assignees.length && !typeChange) { issue('NO_STRUCTURED_CHANGE', 'medium', '作業者の変更内容を特定できません（要確認）'); r.status = STATUS.NEEDS_CONFIRMATION; r.diff.changeType = CHANGE.NO_CHANGE; return r; }
             if (st.index === 0) { invalid('FIRST_STATUS_ASSIGNEE', `先頭のステータス「${st.name}」の作業者は kintone では設定できません`); return r; }
             const removed = assignees.length ? st.assignees.filter(t => !assignees.some(x => sameEntity(x, t))) : [], added = assignees.length ? assignees.filter(t => !st.assignees.some(x => sameEntity(x, t))) : [];
+            if (!typeChange && !removed.length && !added.length && sameAsNow(true, stateView(beforeSt))) return r;
             if (assignees.length) st.assignees = assignees;
             if (typeChange) { issue('ASSIGNEE_TYPE_CHANGE', 'medium', `ステータス「${st.name}」の作業者の指定形式を ${ASSIGNEE_TYPE_JA[st.assigneeType] || st.assigneeType} → ${ASSIGNEE_TYPE_JA[spec.assigneeType]} に変更します`); st.assigneeType = spec.assigneeType; }
             r.simulated = true; r.diff.changeKind = 'ASSIGNEE'; r.diff.changeKinds = ['ASSIGNEE'];
@@ -9493,6 +9508,7 @@
               else { issue('NOTIFICATION_TITLE_CHANGE', 'low', `通知の名前を「${ex.title || '（無題）'}」→「${spec.name}」に変更します`); ex.title = spec.name; changed = true; }
             }
             if (r.status === STATUS.INVALID) return r;
+            if (!changed && sameAsNow(targets.length > 0 || !!cond || events.length > 0 || !!spec.name, notifView(beforeN), { kind: 'NOTIFICATION', id: ex.id, identity })) return r;
             if (!changed) { issue('NO_STRUCTURED_CHANGE', 'medium', '変更内容を特定できません（要確認）'); r.status = STATUS.NEEDS_CONFIRMATION; r.diff.changeType = CHANGE.NO_CHANGE; r.diff.target = { kind: 'NOTIFICATION', id: ex.id, identity }; return r; }
             r.simulated = true; r.diff.target = { kind: 'NOTIFICATION', id: ex.id, identity }; r.diff.before = notifView(beforeN); r.diff.after = notifView(ex);
             h(`✎ ${ex.scope === 'general' ? 'アプリの条件通知' : 'レコードの条件通知'}「${beforeN.title || beforeN.id}」を変更`); for (const line of objDiffLines(r.diff.before, r.diff.after)) h(line);
@@ -9588,6 +9604,7 @@
           }
           if (spec.name && spec.name !== ex.title && spec.name !== ex.id && spec.name !== step.targetRef) { issue('REMINDER_TITLE_CHANGE', 'low', `リマインダーの名前を「${ex.title || '（無題）'}」→「${spec.name}」に変更します`); ex.title = spec.name; changed = true; }
           if (r.status === STATUS.INVALID) return r;
+          if (!changed && sameAsNow(!!spec.timingField || (spec.daysLater != null && String(spec.daysLater).trim() !== '') || !!spec.time || !!spec.filterCond || targets.length > 0 || !!spec.name, remView(beforeR), { kind: 'REMINDER', id: ex.id, identity })) return r;
           if (!changed) { issue('NO_STRUCTURED_CHANGE', 'medium', '変更内容を特定できません（要確認）'); r.status = STATUS.NEEDS_CONFIRMATION; r.diff.changeType = CHANGE.NO_CHANGE; r.diff.target = { kind: 'REMINDER', id: ex.id, identity }; return r; }
           r.simulated = true; r.diff.target = { kind: 'REMINDER', id: ex.id, identity }; r.diff.before = remView(beforeR); r.diff.after = remView(ex);
           h(`✎ リマインダー「${beforeR.title || beforeR.id}」を変更`); for (const line of objDiffLines(r.diff.before, r.diff.after)) h(line);
@@ -9628,6 +9645,7 @@
             }
             if (spec.filterCond && normCond(spec.filterCond) !== normCond(v.filterCond)) { issue('VIEW_FILTER_CHANGE', 'medium', `一覧「${name}」の絞り込み条件を「${v.filterCond || 'なし'}」→「${spec.filterCond}」に変更します（表示されるレコードが変わります）`); v.filterCond = spec.filterCond; changed = true; }
             if (spec.sort && normCond(spec.sort) !== normCond(v.sort)) { issue('VIEW_SORT_CHANGE', 'medium', `一覧「${name}」の並び順を「${v.sort || 'なし'}」→「${spec.sort}」に変更します`); v.sort = spec.sort; changed = true; }
+            if (!changed && sameAsNow(newFields.length > 0 || !!spec.filterCond || !!spec.sort, viewView(beforeV), { kind: 'VIEW', id: name, identity })) return r;
             if (!changed) { issue('NO_STRUCTURED_CHANGE', 'medium', '変更内容を特定できません（要確認）'); r.status = STATUS.NEEDS_CONFIRMATION; r.diff.changeType = CHANGE.NO_CHANGE; r.diff.target = { kind: 'VIEW', id: name, identity }; return r; }
             r.simulated = true; r.diff.target = { kind: 'VIEW', id: name, identity }; r.diff.before = viewView(beforeV); r.diff.after = viewView(v);
             h(`✎ 一覧「${name}」を変更`); for (const line of objDiffLines(r.diff.before, r.diff.after)) h(line);
@@ -9735,6 +9753,7 @@
           if (unmapped.length) { issue('DEST_REQUIRED_FIELD_UNMAPPED', 'medium', `コピー先 ${appLabel} の必須フィールド ${unmapped.map(f => `「${f.label}」（${f.code}）`).join(' / ')} はこのアクションでは値を設定しません。作成時に入力・自動設定（JS など）されるか確認してください`, { fields: unmapped.map(f => ({ code: f.code, label: f.label, type: f.type })) }); if (r.status === STATUS.VALID) r.status = STATUS.NEEDS_CONFIRMATION; }
           const changed = isAdd || changes.mappings.length || changes.entities || changes.filterCond;
           if (!changed) {
+            if (!planOnly.length && sameAsNow(specMaps.length > 0 || (spec.entities || []).length > 0 || !!spec.filterCond, appActionView(target), { kind: 'APP_ACTION', id: name, identity: appActionIdentity(target, destLoaded ? dest : null) })) break;
             r.diff.changeType = CHANGE.NO_CHANGE; r.diff.target = { kind: 'APP_ACTION', id: name, identity: appActionIdentity(target, destLoaded ? dest : null) }; r.diff.before = appActionView(target); r.diff.after = appActionView(target); r.status = STATUS.NEEDS_CONFIRMATION;
             if (planOnly.length) { r.safety = SAFETY.PLAN_ONLY; h(`アプリアクション「${name}」: ${planOnly.join(' / ')}の変更は計画のみ（Toolkit は反映しません）`); break; }
             issue('NO_STRUCTURED_CHANGE', 'medium', '変更内容が構造化されていないため仮適用できません（actionMappings / entities / filterCond を確認）'); h(`アプリアクション「${name}」: 変更内容を特定できません`); break;
@@ -9846,8 +9865,9 @@
       const touched = new Map();   // fieldCode → stepIds
       const reuseOnly = new Set();  // 計画が設定を変えない（REUSE だけ）のフィールド
       for (const r of results.values()) {
-        if (r.diff.target.kind === 'FIELD' && r.diff.changeType === CHANGE.UPDATE || r.diff.target.kind === 'LOOKUP') { const c = r.diff.target.id; if (before.fields[c]) { touched.set(c, [...(touched.get(c) || []), r.stepId]); reuseOnly.delete(c); } }
-        if (r.diff.changeType === CHANGE.REUSE && r.diff.target.kind === 'FIELD') { const c = r.diff.target.id; const had = touched.has(c); touched.set(c, [...(touched.get(c) || []), r.stepId]); if (!had) reuseOnly.add(c); }
+        //   簡素化 A（2026-10-16）: 今の設定と同じ変更の手順（UPDATE_FIELD・UPDATE_LOOKUP の REUSE）は変えず新しく使いもしないので、影響の確認の対象にしない（既存フィールドを使う REUSE_FIELD は従来どおり）
+        if (r.diff.target.kind === 'FIELD' && r.diff.changeType === CHANGE.UPDATE || (r.diff.target.kind === 'LOOKUP' && r.diff.changeType !== CHANGE.REUSE)) { const c = r.diff.target.id; if (before.fields[c]) { touched.set(c, [...(touched.get(c) || []), r.stepId]); reuseOnly.delete(c); } }
+        if (r.diff.changeType === CHANGE.REUSE && r.diff.target.kind === 'FIELD' && r.actionType === 'REUSE_FIELD') { const c = r.diff.target.id; const had = touched.has(c); touched.set(c, [...(touched.get(c) || []), r.stepId]); if (!had) reuseOnly.add(c); }
       }
       const plannerImpact = Array.isArray(plan?.impact) ? plan.impact : [];
       // 2026-10-07（有料確認）: 再利用（REUSE_FIELD）のフィールドは、計画がそのフィールドをどう扱うかで分ける。READ と確定したときだけ警告を出さない（独立レビュー 3）:
@@ -11616,6 +11636,13 @@
     /** 承認 / Review の判定 / allowlist（capability ＋ handler の prepare）/ 依存 の順に、各 step を PENDING / SKIPPED / UNSUPPORTED / BLOCKED に分ける */
     const LOOKUP_BLOCKING = ['RELATED_APP_SETTINGS_UNAVAILABLE', 'RELATED_FIELD_NOT_FOUND', 'RELATED_KEY_MISSING', 'PICKER_FIELD_NOT_FOUND', 'DESTINATION_MISSING', 'SORT_FIELD_UNKNOWN', 'INVALID_SORT'];
     const APP_ACTION_BLOCKING = ['DEST_APP_SETTINGS_UNAVAILABLE', 'DEST_FIELD_NOT_FOUND', 'SOURCE_FIELD_MISSING', 'TARGET_EXISTS', 'TARGET_MISSING', 'ENTITY_UNRESOLVED'];
+    /**
+     * 簡素化 A（2026-10-16）: 書き込みの要らない手順 = 計画の確認で REUSE（既存フィールドを使う手順と、値を指定して今の設定と同じ手順）かつ無効でないもの。
+     *   分類・反映の見込み・実行中の依存・計画の版の反映済みの判定（KTAiConversation）が、この 1 つを使う
+     */
+    const noWriteOf = (step, r) => !!step && !!r && r.diff?.changeType === KTPlanReview.CHANGE.REUSE && r.status !== KTPlanReview.STATUS.INVALID && r.status !== KTPlanReview.STATUS.BLOCKED_BY_DEPENDENCY && r.safety !== KTPlanReview.SAFETY.BLOCKED;
+    const noChangeDone = (s) => !!s && s.status === STEP.SKIPPED && s.reason === 'NO_CHANGE';   // 分類の結果で書き込み不要とした手順（値の無い NO_VALUES・準備で見つけた NO_CHANGE とは別）
+    const NO_CHANGE_TEXT = (step) => (step && step.actionType === 'REUSE_FIELD' ? '既存フィールドを使う手順（設定の変更はありません）' : '変更不要（今の設定と同じ値です。書き込みはしません）');
     function classifySteps({ plan, review, approvedSteps = [], fieldsNow = null, processNow = null, relatedNow = null, actionsNow = null } = {}) {
       const steps = Array.isArray(plan?.steps) ? plan.steps : [];
       const approved = [...new Set(Array.isArray(approvedSteps) ? approvedSteps : [])];
@@ -11631,11 +11658,13 @@
         const cap = ACTION_CAPABILITIES[step.actionType] || null;
         const st = { stepId: id, actionType: step.actionType, title: step.title || '', status: STEP.PENDING, reason: null, message: '', dependsOn: [...(step.dependsOn || [])], capability: cap ? { previewExecute: cap.previewExecute, verify: cap.verify, rollbackStrategy: cap.rollbackStrategy, productionDeploy: false } : null, review: r ? { status: r.status, safety: r.safety } : null, approved: approved.includes(id), prepared: null };
         const set = (status, reason, message) => { st.status = status; st.reason = reason; st.message = message; };
-        if (!st.approved) set(STEP.SKIPPED, 'NOT_APPROVED', '承認されていません');
+        // 簡素化 A（2026-10-16）: 書き込みの要らない手順は「未対応」にしない（実行しない理由は NO_CHANGE。反映できないこと・手動の一覧・反映の残りに数えない）
+        if (noWriteOf(step, r)) set(STEP.SKIPPED, 'NO_CHANGE', NO_CHANGE_TEXT(step));
+        else if (!st.approved) set(STEP.SKIPPED, 'NOT_APPROVED', '承認されていません');
         else if (!r) set(STEP.BLOCKED, 'NO_REVIEW', 'Review の結果がありません');
         else if (r.status === KTPlanReview.STATUS.INVALID || r.status === KTPlanReview.STATUS.BLOCKED_BY_DEPENDENCY || r.safety === KTPlanReview.SAFETY.BLOCKED) set(STEP.BLOCKED, 'REVIEW_BLOCKED', 'Review で実行不可と判定されています');
-        // モデル更新の評価（gpt-6.1-sol の CX-1）: 既存フィールドを使う手順（REUSE_FIELD）は設定を変えない。確認の手順と同じく、承認されれば依存を満たす（下の satisfied）
-        else if (step.actionType === 'REUSE_FIELD') set(STEP.UNSUPPORTED, 'NO_CHANGE', '既存フィールドを使う手順（設定の変更はありません。承認すると、これに依存する手順も反映できます）');
+        //   簡素化 A: 計画に変更の値が無い手順（計画の確認の NO_STRUCTURED_CHANGE）は、変更不要（NO_CHANGE）と別の理由にする（依存先として満たさない・要確認のまま）
+        else if ((r.issues || []).some(i => i.code === 'NO_STRUCTURED_CHANGE')) set(STEP.UNSUPPORTED, 'NO_VALUES', '変更の値が計画にありません（値を会話で伝えるか、kintone の画面で設定してください）');
         else if (r.safety === KTPlanReview.SAFETY.PLAN_ONLY) set(STEP.UNSUPPORTED, 'PLAN_ONLY', step.actionType === 'REQUIRE_CONFIRMATION' ? '確認の手順（承認で確認済み。設定の変更はありません）' : '計画のみ（自動反映の対象外）');
         else if ((r.issues || []).some(i => i.code === 'COND_UNKNOWN_FUNCTION' || i.code === 'COND_NOT_EXPRESSION' || i.code === 'COND_INVALID')) set(STEP.BLOCKED, 'INVALID_CONDITION', '条件式が kintone で評価できないため反映しません（計画の条件式を直してください）');
         // Phase 20（CX-1 実機）: 説明に複数の設定がある手順は 1 つ目しか検証していない（反映すると残りの設定が消えた計画になる）
@@ -11670,25 +11699,23 @@
       };
       const newStatusName = (id) => String(specOf(id).name ?? byId.get(id)?.targetRef ?? '').trim();
       const block = (st, reason, message) => { st.status = STEP.BLOCKED; st.reason = reason; st.message = message; };
-      // Phase 22（余計な確認）: 確認の手順（REQUIRE_CONFIRMATION）は設定を変えないので「実行」されない（計画のみ）。以前はこれも「依存先が実行されない」と数え、
-      //   利用者が確認の手順を承認しても依存する手順を止めていた（チャットで補足して AI に計画を作り直させるしかなく、補足が 1 回余計に要った）。
-      //   承認された確認の手順は「確認済み」として依存を満たす。依存する手順そのものの検証（必要な値が無い・条件式が無効など）は従来どおり止める
-      //   モデル更新の評価: 既存フィールドを使う手順（REUSE_FIELD・検証で無効でないもの）も同じ（設定を変えない手順）
-      const noChangeStep = (ds) => !!ds && (ds.actionType === 'REQUIRE_CONFIRMATION' || (ds.actionType === 'REUSE_FIELD' && (ds.reason === 'NO_CHANGE' || ds.reason === 'NOT_APPROVED')));
-      const satisfied = (d) => { const ds = states.get(d); return !!ds && (ds.status === STEP.PENDING || (noChangeStep(ds) && ds.approved)); };
+      // Phase 22（余計な確認）: 確認の手順（REQUIRE_CONFIRMATION）は設定を変えないので「実行」されない。承認された確認の手順は「確認済み」として依存を満たす。
+      //   簡素化 A（2026-10-16）: 書き込みの要らない手順（NO_CHANGE = 既存フィールドを使う・今の設定と同じ）は、今の設定が内容を満たすので承認に関係なく依存を満たし、
+      //   同じ遷移元の分岐の「反映されない相手」にも数えない（本当に変える隣の手順を止めない）。依存する手順そのものの検証は従来どおり止める
+      const confirmStep = (ds) => !!ds && ds.actionType === 'REQUIRE_CONFIRMATION';
+      const satisfied = (d) => { const ds = states.get(d); return !!ds && (ds.status === STEP.PENDING || noChangeDone(ds) || (confirmStep(ds) && ds.approved)); };
       for (let changed = true, guard = 0; changed && guard < 20; guard++) {
         changed = false;
         for (const st of states.values()) {
           if (st.status !== STEP.PENDING) continue;
           const bad = st.dependsOn.filter(d => !satisfied(d));
-          const conf = bad.filter(d => noChangeStep(states.get(d)));
-          const allConfirm = conf.every(d => states.get(d)?.actionType === 'REQUIRE_CONFIRMATION');
-          if (bad.length) { block(st, 'DEPENDENCY_NOT_EXECUTABLE', conf.length === bad.length ? `${allConfirm ? '確認の手順' : '設定を変えない手順'} ${conf.join(', ')} を承認すると反映できます（承認で確認済みとして扱います）` : `依存する ${bad.join(', ')} が実行されないため反映できません`); changed = true; }
+          const conf = bad.filter(d => confirmStep(states.get(d)));
+          if (bad.length) { block(st, 'DEPENDENCY_NOT_EXECUTABLE', conf.length === bad.length ? `確認の手順 ${conf.join(', ')} を承認すると反映できます（承認で確認済みとして扱います）` : `依存する ${bad.join(', ')} が実行されないため反映できません`); changed = true; }
         }
         const groups = new Map();
         for (const id of states.keys()) if (branchStep(id)) { const f = String(specOf(id).from ?? '').trim(); if (f) groups.set(f, [...(groups.get(f) || []), id]); }
         for (const [from, ids] of groups) {
-          const stuck = ids.filter(id => !pend(id));
+          const stuck = ids.filter(id => !pend(id) && !noChangeDone(states.get(id)));
           if (ids.length < 2 || !stuck.length) continue;
           for (const id of ids.filter(pend)) { block(states.get(id), 'PROCESS_BRANCH_PARTIAL', `同じ遷移元「${from}」の分岐 ${stuck.join(', ')} が反映されないため、この手順だけは反映しません（一部の条件のレコードが先へ進めなくなるのを防ぐ）。分岐の手順をそろえて承認・修正してから反映してください`); changed = true; }
         }
@@ -11724,7 +11751,7 @@
         const base = { stepId: x.stepId, actionType: st.actionType || x.actionType };
         if (st.actionType === 'CUSTOMIZATION_REQUIRED') return { ...base, apply: 'JS', reason: null, message: 'JavaScript（コードを生成して右の「コード」から登録）' };
         if (st.actionType === 'REQUIRE_CONFIRMATION') return { ...base, apply: 'CONFIRM', reason: null, message: '確認事項（設定の変更はありません。承認すると確認済みとして扱い、これに依存する手順も反映できます）' };
-        if (st.actionType === 'REUSE_FIELD' && x.reason === 'NO_CHANGE') return { ...base, apply: 'CONFIRM', reason: null, message: '既存フィールドの利用（設定の変更はありません。承認すると、これに依存する手順も反映できます）' };
+        if (noChangeDone(x)) return { ...base, apply: 'CONFIRM', reason: 'NO_CHANGE', message: x.message || NO_CHANGE_TEXT(st) };
         if (x.status === STEP.PENDING) return { ...base, apply: 'AUTO', reason: null, message: '動作テスト環境へ自動で反映できます' };
         if (x.status === STEP.UNSUPPORTED) return { ...base, apply: 'MANUAL', reason: x.reason, message: x.message || 'Toolkit からは自動で反映できません（計画のみ）' };
         return { ...base, apply: 'BLOCKED', reason: x.reason, message: x.message || '反映できません' };
@@ -11908,9 +11935,8 @@
       let actionsBaseline = undefined;   // Phase 14: 直前のアプリアクション step が検証したアクション全体（2 つ目以降の bit 比較の基準）
       const groups = Array.isArray(prepared.groups) ? prepared.groups : formProcessGroups(prepared.steps);
       const stepById = new Map(prepared.steps.map(x => [x.stepId, x]));
-      // Phase 22（余計な確認）: 承認された確認の手順（REQUIRE_CONFIRMATION。設定を変えない）は、依存を満たす「確認済み」（classifySteps と同じ）
-      //   モデル更新の評価: 既存フィールドを使う手順（REUSE_FIELD・NO_CHANGE）も同じ
-      const depMet = (d) => { const dl = stepLogs.get(d); if (!dl || dl.status === STEP.VERIFIED) return true; const ds = stepById.get(d); return !!ds && ds.approved && (ds.actionType === 'REQUIRE_CONFIRMATION' || (ds.actionType === 'REUSE_FIELD' && ds.reason === 'NO_CHANGE')); };
+      // Phase 22（余計な確認）: 承認された確認の手順（REQUIRE_CONFIRMATION。設定を変えない）は、依存を満たす「確認済み」。書き込みの要らない手順（NO_CHANGE）は承認に関係なく満たす（classifySteps と同じ）
+      const depMet = (d) => { const dl = stepLogs.get(d); if (!dl || dl.status === STEP.VERIFIED) return true; const ds = stepById.get(d); return !!ds && (noChangeDone(ds) || (ds.approved && ds.actionType === 'REQUIRE_CONFIRMATION')); };
       for (const st of prepared.steps) {
         const l = stepLogs.get(st.stepId);
         if (done.has(st.stepId)) continue;
@@ -12572,7 +12598,7 @@
 
     return {
       EXECUTOR_VERSION, ENV, STEP, RUN, RB, RB_RUN, PREVIEW_FIELD_TYPES, ACTION_CAPABILITIES, HANDLERS, ROLLBACK_STRATEGIES,
-      classifySteps, applyReadiness, prepare, executePreview, buildRollbackPlan, prepareRollback, executeRollback, rollbackSection, fieldReferences, buildAudit, compareSimulation, diffBefore, previewDataFrom, layoutHasCode, createKintoneApi,
+      classifySteps, applyReadiness, noWriteOf, prepare, executePreview, buildRollbackPlan, prepareRollback, executeRollback, rollbackSection, fieldReferences, buildAudit, compareSimulation, diffBefore, previewDataFrom, layoutHasCode, createKintoneApi,
       recipientEntity, notificationDuplicate, reminderDuplicate, preservationChecks, UPDATABLE_FIELD_KEYS,
       preservationExceptIndex, notificationIdentityMismatch, reminderIdentityMismatch, viewIdentityMismatch,
       PROCESS_GROUP, PROCESS_ACTIONS, processEntity, processIdentityMismatch, formProcessGroups,
@@ -24060,7 +24086,7 @@
     const APP_ACTION_ATTR_JA = { mappings: '転記', entities: '利用者', filterCond: '利用条件' };
     const execAttrDiff = (before, after, ja = EXEC_ATTR_JA) => Object.keys(after || {}).map(k => `${ja[k] || k}: ${execAttrVal(k, before?.[k])} → ${execAttrVal(k, after[k])}`);
     const EXEC_REASON_JA = { NOT_APPROVED: '承認されていません', REVIEW_BLOCKED: 'Review で実行不可', PLAN_ONLY: 'Toolkit からは自動で反映できません（計画のみ。kintone の設定画面で行います）', PREVIEW_NOT_SUPPORTED: 'Toolkit からは自動で反映できません（計画のみ）', FIELD_TYPE_NOT_SUPPORTED: 'このフィールド型は現在の Executor では追加できません', OPTIONS_MISSING: '選択肢が決まっていません', DEPENDENCY_NOT_EXECUTABLE: '依存する step が実行されません', INVALID_CONDITION: '条件式が kintone で評価できません（計画の条件式を直してください）', EXACT_DUPLICATE: '同じ設定が既にあります', NOTIFICATION_SCOPE_AMBIGUOUS: 'アプリの条件通知かレコードの条件通知か決められません', RECIPIENT_FIELD_INVALID: '通知先に使えないフィールドです', RECIPIENT_FIELD_MISSING: '通知先のフィールドがありません', REMINDER_TIME_MISSING: '通知時刻が決まっていません', REMINDER_FIELD_TYPE: '基準フィールドが日付型ではありません', FIELD_CHANGE_NOT_SUPPORTED: '表示名・必須以外の変更は反映しません', FIELD_CODE_CHANGE_NOT_SUPPORTED: 'フィールドコードの変更は反映しません', TARGET_CHANGED: '対象の設定が Review 後に変わっています', TARGET_MISSING: '対象が動作テスト環境にありません', REVALIDATION_FAILED: '実行前の再検証で止まりました', STOPPED_AFTER_FAILURE: '前の step の失敗で停止', DEPENDENCY_NOT_VERIFIED: '依存 step が検証済みでない', PERMISSION_DENIED: 'アプリ設定を変更する権限がありません', REVISION_MISMATCH: '他の変更が入りました（revision 不一致）', TARGET_EXISTS: '同じ名前 / コードが既にあります', API_ERROR: 'API エラー', VERIFY_FAILED: 'API は成功したが状態が一致しません',
-      NO_CHANGE: '変更内容がありません', GENERAL_NOTIFICATION_MULTI_TARGET: 'アプリの条件通知は通知先 1 件ごとの設定です', REMINDER_TIMING_MODE_CHANGE: '日付と日時の間で基準日を変える変更は反映しません', REMINDER_DAYS_INVALID: '日数が整数で決まっていません', INVALID_SORT: '並び順の指定が不正です', VIEW_TYPE_NOT_SUPPORTED: '表形式以外の一覧は変更しません', BUILTIN_VIEW_NOT_SUPPORTED: 'kintone 組み込みの一覧は変更しません', VIEW_FIELD_MISSING: '表示フィールドが動作テスト環境にありません', VIEW_FIELDS_MISSING: '表示フィールドが決まっていません', CONDITION_MISSING: '条件式が必要です', EVENTS_MISSING: 'イベントが決まっていません', TARGETS_MISSING: '通知先が決まっていません',
+      NO_CHANGE: '変更内容がありません', NO_VALUES: '変更の値が計画にありません', GENERAL_NOTIFICATION_MULTI_TARGET: 'アプリの条件通知は通知先 1 件ごとの設定です', REMINDER_TIMING_MODE_CHANGE: '日付と日時の間で基準日を変える変更は反映しません', REMINDER_DAYS_INVALID: '日数が整数で決まっていません', INVALID_SORT: '並び順の指定が不正です', VIEW_TYPE_NOT_SUPPORTED: '表形式以外の一覧は変更しません', BUILTIN_VIEW_NOT_SUPPORTED: 'kintone 組み込みの一覧は変更しません', VIEW_FIELD_MISSING: '表示フィールドが動作テスト環境にありません', VIEW_FIELDS_MISSING: '表示フィールドが決まっていません', CONDITION_MISSING: '条件式が必要です', EVENTS_MISSING: 'イベントが決まっていません', TARGETS_MISSING: '通知先が決まっていません',
       STATUS_UNREACHABLE: 'このステータスへ遷移するアクションが計画に無く孤立します', PROCESS_ENABLE_NOT_SUPPORTED: 'プロセス管理が無効なアプリです（有効化は Toolkit では行いません）', MULTI_FROM_NOT_SUPPORTED: '遷移元が複数のアクションは 1 件ずつに分けてください', BRANCH_NOT_SUPPORTED: '既存アクションへの分岐追加は反映しません（別名のアクションを追加）', NO_PROCESS_SPEC: 'プロセスの変更内容がありません', ASSIGNEE_TYPE_UNKNOWN: '作業者の指定形式が kintone の語彙（ONE / ALL / ANY）ではありません', ASSIGNEES_PENDING: '作業者が決まっていません（確認待ち。回答すると反映できます）', ASSIGNEE_FIELD_MISSING: '作業者のフィールドがありません', ASSIGNEE_FIELD_INVALID: '作業者に使えないフィールドです', EXECUTABLE_USER_INVALID: '実行可能ユーザーに指定できません', ENTITY_UNRESOLVED: '作業者 / 実行可能ユーザーを解決できません', KINTONE_SIDE_EFFECT: 'kintone 側で他の設定が自動変更されました', FIRST_STATUS_CHANGED: '先頭のステータスは変更できません',
       // Phase 14（アプリアクション）
       DEST_APP_SETTINGS_UNAVAILABLE: 'コピー先アプリのフィールド設定を確認できません（コピー先アプリへのアクセス権を確認してください）', DEST_APP_CHANGED: 'コピー先アプリのフィールド設定が Review 後に変わっています', DEST_FIELD_NOT_FOUND: '転記先のフィールドがコピー先アプリにありません', SOURCE_FIELD_MISSING: '転記元のフィールドが動作テスト環境にありません', NO_APP_ACTION_SPEC: 'アプリアクションの変更内容がありません', APP_ACTION_RENAME_NOT_SUPPORTED: 'アクション名の変更は反映しません（計画のみ）', APP_ACTION_DEST_CHANGE_NOT_SUPPORTED: 'コピー先アプリの変更は反映しません（計画のみ）', APP_ACTION_MAPPING_REMOVAL_NOT_SUPPORTED: '転記の削除は反映しません（計画のみ）',
@@ -27051,7 +27077,9 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
         //   以前は ACTIVE のままで、次の依頼がその計画の見直しになり、登録済みのカスタマイズがもう一度計画に入った（生成し直すと同じ処理が重なる）
         const jv = state.planHistory.find(x => x.planId === ae.planId && x.version === ae.version) || null;
         //   生成していないカスタマイズ（C2 など）が残っていれば、まだ反映済みにしない（登録はその時点で生成済みのものをまとめて行う）
-        const standardLeft = (pv) => ((pv?.plan?.steps || []).some(st => st.actionType !== 'CUSTOMIZATION_REQUIRED' && !st.alternativeId) && !pv.executionId)
+        //   簡素化 A（2026-10-16）: 書き込まない手順（確認の手順・既存のものを使う・今の設定と同じ = KTPlanExecutor.noWriteOf）は残りに数えない
+        const writes = (pv, st) => st.actionType !== 'REQUIRE_CONFIRMATION' && !KTPlanExecutor.noWriteOf(st, (pv?.review?.steps || []).find(x => x && x.stepId === st.id) || null);
+        const standardLeft = (pv) => ((pv?.plan?.steps || []).some(st => st.actionType !== 'CUSTOMIZATION_REQUIRED' && !st.alternativeId && writes(pv, st)) && !pv.executionId)
           || (pv?.plan?.customizations || []).some(c => ['NEW_JS_FILE', 'EXTEND_EXISTING_JS'].includes(c.strategy) && !(pv.generated && pv.generated[c.customizationId]));
         if (stage === 'done' && ae.status !== (ex?.status || 'DONE')) {
           ae.status = ex?.status || 'DONE';
@@ -29262,6 +29290,8 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
           const CHANGE_KEYS = ['filterCond', 'from', 'to', 'executableUsers', 'assignees', 'assigneeType', 'name', 'fields', 'sort', 'targets'];
           const existingChanges = (Array.isArray(p.steps) ? p.steps : []).filter(st => st && !st.alternativeId && /^UPDATE_/.test(String(st.actionType))).map(st => {
             const r = (v.review && Array.isArray(v.review.steps) ? v.review.steps : []).find(x => x && x.stepId === st.id) || null;
+            //   簡素化 A（2026-10-16）: 今の設定と同じ手順（計画の確認の REUSE）は変更ではないので「今ある設定を変えます」に出さない
+            if (typeof KTPlanExecutor !== 'undefined' && KTPlanExecutor.noWriteOf(st, r)) return null;
             const sp = st.spec && typeof st.spec === 'object' ? st.spec : {};
             const after = r && r.diff && r.diff.after && typeof r.diff.after === 'object' && !Array.isArray(r.diff.after) ? r.diff.after : null;
             const before = r && r.diff && r.diff.before && typeof r.diff.before === 'object' && !Array.isArray(r.diff.before) ? r.diff.before : null;

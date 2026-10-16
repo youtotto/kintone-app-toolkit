@@ -504,7 +504,8 @@ console.log('\n--- 5. AI Workspace: 会話（ASK / PLAN / REVISE / EXPLAIN / PRE
   //   （以前の「承認後の REQUEST_PREVIEW の件数（実行可 1・未対応 1）」は、この承認の欄の重要事項に置き換えた）
   await ticks(20);
   { const pre = m.panel.finalPrecheck();
-    assert(pre.status === 'ready' && pre.items.settings.length === 1 && pre.items.manual.length === 1 && writes(m).length === w0 && /反映の前の確認（書き込みなし）/.test(m.chat()) && !m.conv().activePlan().approval, '承認の欄: 反映する設定 1 件・自動では反映しない手順 1 件（既存フィールドの利用は計画のみ）。準備は書き込まず、まだ承認しない'); }
+    //   簡素化 A（2026-10-16）: 以前は既存フィールドの利用（書き込みなし）を「自動では反映しない手順（手動）」に 1 件数えていた。変更不要なので手動の一覧に出さない
+    assert(pre.status === 'ready' && pre.items.settings.length === 1 && pre.items.manual.length === 0 && writes(m).length === w0 && /反映の前の確認（書き込みなし）/.test(m.chat()) && !m.conv().activePlan().approval, '承認の欄: 反映する設定 1 件（既存フィールドの利用は書き込みが要らないので手動の一覧に出さない）。準備は書き込まず、まだ承認しない'); }
   const ar5 = await applyScreen(m);
   assert(ar5.button && ar5.button.label === '動作テスト環境へ反映' && !ar5.button.disabled && ar5.run && ar5.run.stage === 'done' && ar5.run.ok && JSON.stringify(ar5.writes) === '["PUT views"]', '最終案のカードの［動作テスト環境へ反映］1 回で承認と反映（実行できる 1 件だけを書き込む）');
   await m.panel.send('これで進めたい'); await ticks();
@@ -527,7 +528,7 @@ console.log('\n--- 6. Executor / Rollback 統合と Versioning（v1 は Executor
   assert(m.panel.reviewOutput().approvedSteps.length === 0 && !v2.approval && m.panel.reviewOutput().plan.requestId === v2.plan.requestId && m.panel.reviewOutput().plan.requestId !== v1.plan.requestId, '版が変わると承認はやり直し（v1 の承認は v2 に持ち越さない。R16-5・画面-4）・executorOutput は v2');
   await ticks(20);
   { const pre = m.panel.finalPrecheck();
-    assert(pre.status === 'ready' && pre.planId === v2.planId && pre.items.settings.length === 1 && pre.items.manual.length === 1 && writes(m).length === 0 && !m.msgs().some(x => x.type === 'EXECUTION') && m.panel.applyHold() === null && !v2.approval, '承認の欄: v2 の最終案ができると書き込みをしない準備を自動で走らせ、重要事項を出す（書き込み 0・まだ承認しない・反映を止める理由は無い）');
+    assert(pre.status === 'ready' && pre.planId === v2.planId && pre.items.settings.length === 1 && pre.items.manual.length === 0 && writes(m).length === 0 && !m.msgs().some(x => x.type === 'EXECUTION') && m.panel.applyHold() === null && !v2.approval, '承認の欄: v2 の最終案ができると書き込みをしない準備を自動で走らせ、重要事項を出す（書き込み 0・まだ承認しない・反映を止める理由は無い）');
     assert(/kt-ai-apply-note/.test(m.$('kt-ai-exec').innerHTML) && /最終案のカードの［動作テスト環境へ反映］/.test(m.$('kt-ai-exec').innerHTML) && !/id="kt-ai-exec-start"/.test(m.$('kt-ai-exec').innerHTML), '右の「反映」に準備・最終確認の段は出さない（最終案のカードの［動作テスト環境へ反映］1 回で反映する）'); }
   m.panel.showPane('review');
   const ar6 = await applyScreen(m);

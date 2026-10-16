@@ -321,7 +321,9 @@ console.log('\n--- 10. Phase 11: 既存設定の変更（UPDATE_NOTIFICATION / U
   const inv = review(plan([step('P1', 'UPDATE_NOTIFICATION', 'NOTIFICATION', 'perRecord#1', [], { spec: { filterCond: 'owner != ""' } })]));
   assert(codes(st(inv, 'P1')).includes('COND_INVALID'), '無効な条件式（USER_SELECT に !=）: COND_INVALID（KTQueryCheck を共通利用）');
   const noch = review(plan([step('P1', 'UPDATE_NOTIFICATION', 'NOTIFICATION', 'perRecord#1', [], { spec: { targets: ['USER:user1', 'FIELD_ENTITY:approver', 'FIELD_ENTITY:owner_org'], filterCond: 'amount >= "1000000"' } })]));
-  assert(codes(st(noch, 'P1')).includes('NO_STRUCTURED_CHANGE') && st(noch, 'P1').diff.changeType === 'NO_CHANGE' && st(noch, 'P1').diff.target.identity, '同じ値を指定: 変更なし（NO_STRUCTURED_CHANGE）');
+  //   簡素化 A（2026-10-16）: 以前は「同じ値を指定」も NO_STRUCTURED_CHANGE（要確認・「変更内容が構造化されていない」）にしていた。値は構造化されていて、
+  //   比べた結果が今と同じなので変更不要（REUSE・VALID）。書き込まず、確認事項にも反映できないことにも数えない（値が無い手順の要確認は tests/ai-no-change-steps §N2）
+  assert(!codes(st(noch, 'P1')).includes('NO_STRUCTURED_CHANGE') && st(noch, 'P1').status === 'VALID' && st(noch, 'P1').diff.changeType === 'REUSE' && st(noch, 'P1').diff.target.identity, '同じ値を指定: 変更不要（REUSE。同一性は反映の直前の照合のために残す）');
 
   // UPDATE_REMINDER: 日数 / 時刻 / 通知先 / 条件 / 基準日（高リスク）
   const rt = review(plan([step('P1', 'UPDATE_REMINDER', 'REMINDER', 'reminder#1', [], { spec: { daysLater: '-3' } })]));
@@ -463,7 +465,8 @@ console.log('\n--- 12. Lookup Preview Executor の Review（Phase 13 §43〜§45
   const mu = st(multi, 'P3');
   assert((mu.status === 'VALID' || mu.status === 'WARNING') && mu.diff.after.lookup.mappings.length === 4 && mu.diff.after.lookup.mappings.slice(0, 2).map(m => m.to).join() === 'customer_code,case_name' && mu.diff.after.lookup.pickerFields.join() === 'code,name' && multi.executionReadiness.reviewSteps.includes('P3') && multi.crossApp.length === 1 && multi.crossApp[0].appId === '500' && multi.crossApp[0].stepIds.join() === 'P3' && /^[0-9a-f]{8}$/.test(multi.crossApp[0].fieldsHash) && multi.crossApp[0].revision === '21', 'add multiple mappings: 住所 / 電話番号 を新規 2 フィールドへ（既存 2 項目と picker は保持。crossApp に 500 / revision / fieldsHash）');
   const dup = review(plan([upd({ addMappings: [{ relatedField: 'name', field: 'case_name' }] })]));
-  assert(st(dup, 'P1').status === 'NEEDS_CONFIRMATION' && codes(st(dup, 'P1')).includes('LOOKUP_MAPPING_DUPLICATE') && codes(st(dup, 'P1')).includes('NO_STRUCTURED_CHANGE') && st(dup, 'P1').diff.changeType === 'NO_CHANGE', 'duplicate mapping: 既にある取得項目と同じ → LOOKUP_MAPPING_DUPLICATE（変更なし）');
+  //   簡素化 A（2026-10-16）: 以前は NO_STRUCTURED_CHANGE（要確認）も重ねていた。既にある取得項目と同じなので変更不要（LOOKUP_MAPPING_DUPLICATE の注記は残す）
+  assert(st(dup, 'P1').status === 'VALID' && codes(st(dup, 'P1')).includes('LOOKUP_MAPPING_DUPLICATE') && !codes(st(dup, 'P1')).includes('NO_STRUCTURED_CHANGE') && st(dup, 'P1').diff.changeType === 'REUSE', 'duplicate mapping: 既にある取得項目と同じ → LOOKUP_MAPPING_DUPLICATE（変更不要）');
   const conflict = withDest({ customer_address: fld('SINGLE_LINE_TEXT', 'customer_address', '顧客住所'), other_lookup: fld('SINGLE_LINE_TEXT', 'other_lookup', '別参照', { lookup: { relatedApp: { app: '500', code: '' }, relatedKeyField: 'code', fieldMappings: [{ field: 'customer_address', relatedField: 'address' }], lookupPickerFields: [], filterCond: '', sort: '' } }) });
   const cf = review(plan([upd({ addMappings: [{ relatedField: 'address', field: 'customer_address' }] })]), conflict);
   assert(codes(st(cf, 'P1')).includes('LOOKUP_DEST_CONFLICT') && st(cf, 'P1').status === 'NEEDS_CONFIRMATION' && cf.conflicts.some(c => c.code === 'LOOKUP_DEST_CONFLICT'), 'destination conflict: 別のルックアップも書き込むコピー先 → LOOKUP_DEST_CONFLICT（高・conflicts）');

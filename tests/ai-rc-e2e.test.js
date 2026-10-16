@@ -171,7 +171,9 @@ console.log('\n--- モデル更新の評価: 既存フィールドを使う手�
   const both = safe(() => PE.classifySteps({ plan: p, review: rv, approvedSteps: ['P1', 'P2'] }), []);
   const only2 = safe(() => PE.classifySteps({ plan: p, review: rv, approvedSteps: ['P2'] }), []);
   assert(s2(both).status === 'PENDING', `既存フィールドを使う手順（P1・owner）も承認 → 依存する P2 を反映できる（以前は「依存する P1 が実行されない」で止まった）: ${s2(both).status} ${s2(both).message}`);
-  assert(s2(only2).status === 'BLOCKED' && /P1 を承認すると反映できます/.test(s2(only2).message || ''), `P1 を承認していなければ止め、承認すれば進めることを示す: ${s2(only2).status} ${s2(only2).message}`);
+  //   簡素化 A（2026-10-16）: 以前は P1（既存フィールドを使うだけ・書き込みなし）の承認が無いと P2 を止めていた。書き込みの要らない手順は今の設定が内容を満たすので、
+  //   承認の有無に関係なく依存を満たす（手順ごとの承認の名残り。値の無い手順は満たさない: tests/ai-no-change-steps §N2）
+  assert(s2(only2).status === 'PENDING', `P1 を承認していなくても、既存フィールドを使う手順は依存を満たす: ${s2(only2).status} ${s2(only2).message}`);
   const rd = safe(() => PE.applyReadiness(p, rv), []);
   const rdOf = (id) => rd.find(x => x.stepId === id) || {};
   assert(rdOf('P1').apply === 'CONFIRM' && /設定の変更はありません/.test(rdOf('P1').message || '') && rdOf('P2').apply === 'AUTO', `承認前の見込み: P1 は確認（既存フィールドの利用）・P2 は自動で反映できる: ${JSON.stringify(rd.map(x => [x.stepId, x.apply]))}`);
