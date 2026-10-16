@@ -180,6 +180,30 @@ await section(async () => {
   //   右のペインの根拠の番号のボタン（data-eid）を押すと、根拠の詳細を開く（既存の右のペインのクリックの処理）
   await m.$('kt-ai-pane-plan').dispatch({ type: 'click', target: { dataset: { eid: 'E12' } } }); await ticks(2);
   assert(m.$('kt-ai-fact-detail').innerHTML.includes(e12.statement), `V4-4: 右のペインの根拠のボタンから事実の詳細を開ける: ${m.$('kt-ai-fact-detail').innerHTML.slice(0, 120)}`);
+  //   2026-10-16（詳細情報に以前の根拠が残る不具合。利用者の報告）: (1) 開いた根拠は、会話が次の仮案に進んだら閉じる（前の案の事実を今の案の根拠のように残さない）。
+  //   (2) 根拠の番号は依頼ごとに振り直されるので、押したボタンの出どころ（この仮案の id と回数）の事実から引く。以前は会話の古いメッセージから順に探し、
+  //   直した仮案の番号で前の仮案の事実が出た
+  const detail = () => m.$('kt-ai-fact-detail');
+  const d1 = m.conv().draft();
+  assert(detail().style.display === '' && detail().innerHTML.includes(e12.statement) && /data-efrom="draft:[^"]+:1"/.test(sum) && d1.rev === 1, '前提: 1 回目の仮案の根拠（E12）を開いた。仮案の根拠のボタンは出どころ（仮案の id と回数）を持つ');
+  await m.panel.send(COMMENT); await ticks(10);
+  const drafts = m.msgs().filter(mm => mm.type === 'DRAFT');
+  assert(drafts.length === 2 && m.conv().draft().rev === 2 && detail().innerHTML === '' && detail().style.display === 'none' && m.panel.activeArtifact()?.type !== 'EVIDENCE',
+    `V4-5: 会話が次の仮案に進むと、前の仮案で開いた根拠を閉じる: ${JSON.stringify({ n: drafts.length, display: detail().style.display, html: detail().innerHTML.slice(0, 80), art: m.panel.activeArtifact() })}`);
+  //   番号の振り直しを再現: 1 回目の仮案の E12 を別の事実にしておく（2 回目の仮案も E12 を引いている）
+  const d2 = m.conv().draft(), efrom2 = `draft:${d2.id}:${d2.rev}`;
+  const fact2 = (drafts[1].data.ctxFacts || []).find(f => f.id === 'E12');
+  const old1 = (drafts[0].data.ctxFacts || []).find(f => f.id === 'E12');
+  old1.statement = '前の仮案で E12 だった別の事実（番号の振り直し）';
+  const sum2 = m.$('kt-ai-change-summary').innerHTML;
+  assert(fact2 && sum2.includes(`data-eid="E12" data-efrom="${efrom2}"`), `前提: 2 回目の仮案も E12 を引き、右の根拠のボタンは 2 回目の出どころを持つ: ${(sum2.match(/data-eid="E12"[^>]*/) || [''])[0]}`);
+  await m.$('kt-ai-pane-plan').dispatch({ type: 'click', target: { dataset: { eid: 'E12', efrom: efrom2 } } }); await ticks(2);
+  assert(detail().style.display === '' && detail().innerHTML.includes(fact2.statement) && !detail().innerHTML.includes(old1.statement),
+    `V4-6: 2 回目の仮案の根拠のボタンは、2 回目の仮案の事実を出す（前の仮案の同じ番号の事実を出さない）: ${detail().innerHTML.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').slice(0, 160)}`);
+  await m.$('kt-ai-pane-plan').dispatch({ type: 'click', target: { dataset: { eid: 'E12' } } }); await ticks(2);
+  assert(detail().innerHTML.includes(fact2.statement) && !detail().innerHTML.includes(old1.statement), 'V4-7: 出どころの無い押し方（古い描画）でも、会話の新しいメッセージから探す（古い仮案から探さない）');
+  await m.$('kt-ai-pane-plan').dispatch({ type: 'click', target: { dataset: { eid: 'E999', efrom: efrom2 } } }); await ticks(2);
+  assert(/該当する根拠が見つかりません/.test(detail().innerHTML), 'V4-8: 出どころに無い番号は「見つかりません」（別の出どころの同じ番号に置き換えない）');
 });
 
 // =========================================================

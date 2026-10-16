@@ -28874,16 +28874,19 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
           };
           //   2026-10-15（§4(b)）: 部分対応の制約の文は「残る範囲」だけ。構造の SUBTABLE_ROWS（セルは編集不可にできた）はテーブルの名前で、AI の PARTIAL は理由（note）だけ
           //   （要件の全文「PC: …。PC・モバイルの両方：…」を先頭に付けない）。NOT_MET は今のまま。判定（blockers・approvable）は変えない
+          //   2026-10-16（説明文を読みやすくする）: 構造の SUBTABLE_ROWS は「明細の行の追加・削除は防ぎません」を文の本体にし、理由（constraintReasonOf）は別の文にする
+          //   （画面の表記は本体の直後。KTAiChatUi.constraintLineOf）。入力欄の編集不可と行の操作を同じ意味にしない。AI の申告（AI_PARTIAL）の文は今のまま
           const constraintTextOf = (x) => {
-            if (x.code === 'SUBTABLE_ROWS') { const names = (Array.isArray(x.tables) ? x.tables : []).filter(Boolean).map(fieldName).join(''); return `${names || '明細（テーブル）'}の行の追加・削除は止まりません（セルの編集不可だけでは止められないため。行のボタンを隠す API は Toolkit がまだ扱っていません）`; }
+            if (x.code === 'SUBTABLE_ROWS') { const names = (Array.isArray(x.tables) ? x.tables : []).filter(Boolean).map(code => String(fieldLabels()[code] || code)).join('・'); return `${names || '明細（テーブル）'}の行の追加・削除は防ぎません`; }
             if (x.code === 'AI_PARTIAL') { const note = String(x.noteText ?? x.note ?? '').replace(/\s+/g, ' ').trim(); return fix(note || x.message); }
             return fix(x.message);
           };
+          const constraintReasonOf = (x) => (x.code === 'SUBTABLE_ROWS' ? '入力欄（セル）の編集不可だけでは止められず、行のボタンを隠す API は Toolkit がまだ扱っていません' : '');
           //   この版の要件の台帳（決定事項の見出し・実現した部分の文の条件に使う。2026-10-15 T5: 実現した部分の文を先に作るのでここで引く）
           const lgF = state.ledgers.get(v.planId) || null;
           //   2026-10-15（§4(b)）: 部分対応（AI の PARTIAL・構造の SUBTABLE_ROWS）の要件のうち実現した部分を 1 文にして「この案で実現すること」（左）と「最終的にどう動くか」（右）に足す
-          //   （同じ文があれば足さない）。材料は満たした必須の動作（metItemsOf）と、要件の台帳の条件の文・フィールドの名前・テーブルの列（構造）・画面（PC / モバイル）だけ。
-          //   例「承認済みでは「明細」の品名・数量・単価のセルを編集できなくなります（PC・モバイル）」。判定は変えない。
+          //   （同じ文があれば足さない）。材料は満たした必須の動作（metItemsOf。構造化した条件式を含む）と、要件の台帳の条件の文・フィールドの名前・テーブルの列（構造）・
+          //   画面（PC / モバイル）だけ。例「「ステータス」が「承認済み」の場合、明細の品名・数量・単価を編集できなくします（PC・モバイル）。」（2026-10-16 の文の形）。判定は変えない。
           //   レビューの反映 T5: 文を実際に作れた要件の id（ids）も返す。必須の動作の項目に要件の id があればその id、テーブルの列の一致で拾った項目は limitCode SUBTABLE_ROWS の
           //   PARTIAL の要件だけ（ほかの PARTIAL を実現したことにしない）。文を作れなかった要件は ids に入らない
           //   効果の言葉（フィールドの名前 ＋ 助詞 ＋ 動作。実現した部分の文と、計画で足した動作（planAdds）の文で同じ言葉を使う）
@@ -28894,6 +28897,10 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
             const colOf = (code) => (cols && cols[code] ? String(cols[code]) : null);
             const labelOf = (code) => String(fieldLabels()[code] || code);
             const condOf = (ids) => { if (!lgF) return ''; const reqsL = KTAiAnswers.requirementsOf(lgF); for (const id of ids) { const r = reqsL.find(x => x && String(x.id) === String(id)); const c = r ? String(r.condition || '').replace(/\s+/g, ' ').trim() : ''; if (c) return c; } return ''; };
+            //   2026-10-16（説明文を読みやすくする）: 文の条件は、満たした必須の動作の構造化した条件式（requiredEffects の condition）を、既存の条件式の文
+            //   （KTAiChatUi.condSentenceOf。右の「何が変わるか」の利用条件と同じ変換）にして使う。文にできないときは ''（呼ぶ側が要件の台帳の条件の文に戻す）
+            const numbersF = () => { try { return (typeof services.fieldNumbers === 'function' && services.fieldNumbers()) || {}; } catch (e) { return {}; } };
+            const condSentence = (expr) => { try { return expr && typeof KTAiChatUi !== 'undefined' && KTAiChatUi && typeof KTAiChatUi.condSentenceOf === 'function' ? KTAiChatUi.condSentenceOf(expr, labelOf, numbersF()) : ''; } catch (e) { return ''; } };
             const texts = [], ids = [], all = [];
             //   一部達成と申告された台帳の要件（R…）。JavaScript 自身の id（C…）の一部達成はその JavaScript の中だけで扱う
             const partialReqsAll = [...new Set(ents.flatMap(([, e]) => (e.review?.coverage?.notAchieved || []).filter(x => x && x.code === 'AI_PARTIAL' && /^R[0-9]+$/.test(String(x.requirementId || ''))).map(x => String(x.requirementId))))];
@@ -28915,8 +28922,10 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
                 const cond = condOf(own.length ? own : partialIds);
                 const k = `${i.effect}|${table || ''}|${cond}`;
                 //   verified = この JavaScript が検証済みか（下で PC・モバイルをまとめるとき、検証済みと検証済みでないものは同じ文にしない）
-                const g = groups.get(k) || { effect: i.effect, table, cond, fields: [], platforms: new Set(), ids: [], verified: e.status === 'verified' };
+                //   conds = まとまりの中の構造化した条件式（文の条件に使う。まとめ方の鍵には入れない）
+                const g = groups.get(k) || { effect: i.effect, table, cond, fields: [], platforms: new Set(), ids: [], verified: e.status === 'verified', conds: new Set() };
                 if (!g.fields.includes(i.field)) g.fields.push(i.field);
+                g.conds.add(String(i.condition || '').trim());
                 for (const p of platformsOfEvents(i.events)) g.platforms.add(p);
                 for (const id of (own.length ? own : (table && tables.includes(table) ? limitedIds : []))) if (!g.ids.includes(id)) g.ids.push(id);
                 groups.set(k, g);
@@ -28930,9 +28939,10 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
             for (const g of all) {
               const k = `${g.effect}|${g.table || ''}|${g.cond}|${[...g.fields].sort().join(',')}|${g.verified ? 'v' : 'u'}`;
               const m = merged.get(k);
-              if (!m) { merged.set(k, { ...g, fields: [...g.fields], platforms: new Set(g.platforms), ids: [...g.ids] }); continue; }
+              if (!m) { merged.set(k, { ...g, fields: [...g.fields], platforms: new Set(g.platforms), ids: [...g.ids], conds: new Set(g.conds) }); continue; }
               for (const p of g.platforms) m.platforms.add(p);
               for (const id of g.ids) if (!m.ids.includes(id)) m.ids.push(id);
+              for (const c of g.conds) m.conds.add(c);
             }
             //   本当の差: 同じ効果・テーブル・条件で、PC とモバイルの両方に文があり、画面ごとのフィールドの集まりが違う（独立レビュー L2: 同じ画面の文が 2 つあるだけでは差としない）
             const fieldsByPlat = new Map();
@@ -28941,10 +28951,21 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
             const platDiff = (k) => { const m = fieldsByPlat.get(k); return !!(m && m.desktop.size && m.mobile.size && [...m.desktop].sort().join(',') !== [...m.mobile].sort().join(',')); };
             const diffTexts = [];
             for (const g of merged.values()) {
-              const condJa = g.cond ? (/(?:とき|場合|際)$/.test(g.cond) ? `${g.cond}は` : `${g.cond}では`) : '';
+              //   2026-10-16（説明文を読みやすくする）: 条件 → 対象 → 動作 → 画面 の順の 1 文にする（「承認済み。PCとモバイルの両方では「金額」を編集できなくなります
+              //   （PC・モバイル）」を直す）。対象は表示名（テーブルは「明細の品名・数量・単価」）、画面は文末に 1 回。条件は、まとまりの構造化した条件式が 1 つに決まり
+              //   文にできればその文。そうでなければ要件の台帳の条件の文をそのまま使い、1 つの句（句点・改行を含まない）なら「…の場合、」でつなぎ、そうでなければ
+              //   条件を別の行に出す（文を解析して条件と画面に分けない・条件を落とさない）。まとめ方（鍵）・判定・要件の id は変えない
               const plats = ['desktop', 'mobile'].filter(p => g.platforms.has(p)).map(p => (p === 'mobile' ? 'モバイル' : 'PC'));
-              const body = g.effect === 'lock' ? (g.table ? `${fieldName(g.table)}の${g.fields.map(labelOf).join('・')}のセルを編集できなくなります` : `${g.fields.map(fieldName).join('')}を編集できなくなります`) : effPhrase(g.fields, g.effect, true);
-              const text = `${condJa}${body}${plats.length ? `（${plats.join('・')}）` : ''}`;
+              const body = g.effect === 'lock' ? `${g.table ? `${labelOf(g.table)}の` : ''}${g.fields.map(labelOf).join('・')}を編集できなくします` : effPhrase(g.fields, g.effect, true);
+              const sentence = `${body}${plats.length ? `（${plats.join('・')}）` : ''}。`;
+              const exprs = [...g.conds];
+              const structured = exprs.length === 1 ? condSentence(exprs[0]) : '';
+              const ledger = String(g.cond || '').trim();
+              const one = ledger.replace(/[。．]+$/, '');
+              const text = structured ? `${structured}の場合、${sentence}`
+                : !ledger ? sentence
+                : /[。．\n]/.test(one) ? `${sentence}\n条件: ${ledger}`
+                : /(?:とき|場合|際)$/.test(one) ? `${one}、${sentence}` : `${one}の場合、${sentence}`;
               texts.push(text);
               if (platDiff(`${g.effect}|${g.table || ''}|${g.cond}`)) diffTexts.push(text);
               for (const id of g.ids) if (!ids.includes(id)) ids.push(id);
@@ -28962,7 +28983,8 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
             for (const x of naRows) {
               if (x.code === 'AI_PARTIAL' && x.limit === 'SUBTABLE_ROWS' && hasStructuralRows) continue;
               const rid = x.requirementId ? String(x.requirementId) : (x.code === 'SUBTABLE_ROWS' && limitedIds.length ? limitedIds[0] : null);
-              cannot.push({ kind: 'coverage', text: cut(constraintTextOf(x), 160), ...(rid ? { requirementId: rid } : {}) });
+              const reason = constraintReasonOf(x);
+              cannot.push({ kind: 'coverage', text: cut(constraintTextOf(x), 160), ...(reason ? { reason } : {}), ...(rid ? { requirementId: rid } : {}) });
             }
             const file = e.generated?.targetFile ? `「${e.generated.targetFile}」` : 'JavaScript';
             //   レビュー 4（2026-10-14）: 反映を止める理由の行の先頭はファイル名ではなく計画の手順の title（customizationTitleOf。無ければ「JavaScript」）
@@ -30871,7 +30893,7 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
       const ch = fin && fin.changedSince ? fin.changedSince : null;
       const titleOfCid = (cid) => KTAiConversation.customizationTitleOf(p, cid) || 'JavaScript';
       const changedRows = ch ? [...(ch.revisionRequest ? [`入れた指示: ${String(ch.revisionRequest).split('\n').map(x => x.replace(/^修正の依頼：/, '').trim()).filter(Boolean).join('／')}`] : []), ...((ch.regenerated || []).length ? [`作り直した JavaScript: ${ch.regenerated.map(titleOfCid).join('・')}`] : []), ...((ch.reused || []).length ? [`そのままの JavaScript: ${ch.reused.map(titleOfCid).join('・')}（検証結果もそのまま）`] : [])] : [];
-      const constraintRows = fin ? (Array.isArray(fin.constraints) ? fin.constraints : (fin.cannot || []).filter(x => ['coverage', 'limit', 'external'].includes(x.kind))).map(x => `${platJaOf(x.platforms) ? `${platJaOf(x.platforms)}: ` : ''}${x.text}`) : [];
+      const constraintRows = fin ? (Array.isArray(fin.constraints) ? fin.constraints : (fin.cannot || []).filter(x => ['coverage', 'limit', 'external'].includes(x.kind))).map(constraintLineOf) : [];
       //   レビュー 11（2026-10-14）: 「確認できないこと」には、担当が決まっていない要件のほかに、fin.blockers のうち未解決・準備未完了・模擬テスト未実行・未確認の行（text と次の方針）を 1 行ずつ出す
       //   （作成途中のカードのときも根拠と次の方針が右で読めるように。同じ文は 1 回）
       const unownedRows = fin ? uniq([
@@ -30941,7 +30963,7 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
         <div class="kt-ai-sum-meta">${target ? `対象：${esc(target)}` : ''}</div>
         ${p.assessment?.summary ? `<div class="kt-ai-rich">${KTContextUi.richTextHtml(ui(plainText(p.assessment.summary)))}</div>` : ''}
         ${jsState.length ? `<div class="kt-ai-sum-label">JavaScript の状態</div><ul class="kt-ai-sum-js-state">${jsState.map(x => `<li>${esc(x.title)}：${esc(x.state)}</li>`).join('')}</ul>` : ''}
-        ${finBeh.length ? `<div class="kt-ai-sum-label">最終的にどう動くか</div><div class="kt-ai-sum-behaviors">${list(finBeh.map(x => ui(plainText(x))))}</div>` : ''}
+        ${finBeh.length ? `<div class="kt-ai-sum-label">最終的にどう動くか</div><div class="kt-ai-sum-behaviors"><ul>${finBeh.map(x => `<li>${esc(ui(plainText(x))).replace(/\n/g, '<br>')}</li>`).join('')}</ul></div>` : ''}
         ${changedRows.length ? `<div class="kt-ai-sum-label">前の最終案から変わった点</div><div class="kt-ai-sum-changed">${list(changedRows)}</div>` : ''}
         ${changeRows.length || newFields.length ? `<div class="kt-ai-sum-label">${review ? '何が変わるか（Toolkit が確かめた変更前後）' : '何が変わるか（AI の提案。Toolkit の確認はまだありません）'}</div><div class="kt-ai-sum-after"><ul>${changeRows.join('')}${newFields.length ? `<li>新しいフィールド：${esc(newFields.join('、'))}</li>` : ''}</ul></div>` : ''}
         ${impactRows.length ? `<div class="kt-ai-sum-label">反映する内容</div><ul class="kt-ai-sum-impact">${impactRows.map(r => `<li>${r}</li>`).join('')}</ul>` : ''}
@@ -31258,7 +31280,10 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
       const histHtml = hist.length > 1 ? `<details class="kt-ai-tech" style="margin-top:10px;"><summary>判断の経緯（${hist.length} 回のやり取り）</summary>${ul(hist.map(h => (h.kind === 'plan-failed' ? '<li>採用 → 変更案の作成に失敗（再試行できます）</li>' : `<li>${esc(tx(String(h.reply || '')).slice(0, 160))}${h.applied ? hint(`採用 ${h.applied.adopted.length}・変更 ${h.applied.modified.length}・不採用 ${h.applied.rejected.length}・回答 ${(h.answers || []).length}`) : ''}</li>`)))}</details>` : '';
       //   §0f.5 の 3: 根拠（仮案の文が引いた番号と、Toolkit が確かめた事実の文。番号のボタンで右の根拠を開く）。会話のカードには出さない
       const ev = Array.isArray(draft.evidence) ? draft.evidence.filter(x => x && x.id) : [];
-      const evidenceHtml = ev.length ? `<details class="kt-ai-tech kt-ai-draft-evidence" style="margin-top:10px;"><summary>根拠（Toolkit が確かめた設定 ${ev.length} 件）</summary>${ul(ev.map(x => `<li><button type="button" class="btn kt-ai-chip" data-eid="${esc(x.id)}" style="padding:0 6px; height:20px; font-size:11px; margin-right:4px;">${esc(x.id)}</button>${esc(x.statement || '（この仮案の Context に事実がありません）')}</li>`))}</details>` : '';
+      //   2026-10-16（詳細情報に以前の根拠が残る不具合）: 番号のボタンは出どころ（この仮案の id と回数）を持つ。番号は依頼ごとに振り直されるので、押したときは
+      //   この仮案の事実から引く（showEvidence。前の仮案・計画の同じ番号の事実を出さない）
+      const efrom = `draft:${draft.id}:${draft.rev}`;
+      const evidenceHtml = ev.length ? `<details class="kt-ai-tech kt-ai-draft-evidence" style="margin-top:10px;"><summary>根拠（Toolkit が確かめた設定 ${ev.length} 件）</summary>${ul(ev.map(x => `<li><button type="button" class="btn kt-ai-chip" data-eid="${esc(x.id)}" data-efrom="${esc(efrom)}" style="padding:0 6px; height:20px; font-size:11px; margin-right:4px;">${esc(x.id)}</button>${esc(x.statement || '（この仮案の Context に事実がありません）')}</li>`))}</details>` : '';
       return `<div class="kt-ai-sum kt-ai-draft-sum">${head}${decisionsHtml}${answeredHtml}${behaviorsHtml}${assumptionsHtml}${approachHtml}${cannotHtml}${rejectedHtml}${histHtml}${evidenceHtml}</div>`;
     }
     const WHO = { user: 'あなた', assistant: 'AI', toolkit: '', system: '' };
@@ -31478,6 +31503,17 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
     /** PC / モバイルの表記（構造化した platforms。無い古い最終案は付けない） */
     function platJaOf(ps) { return Array.isArray(ps) && ps.length ? ps.map(p => (p === 'mobile' ? 'モバイル' : 'PC')).join('・') : ''; }
     /**
+     * 2026-10-16（説明文を読みやすくする）: 「この案の制約」の 1 行（文字列。左のカードと右の「変更内容」で同じ）。
+     *   理由（reason）を別に持つ構造の行（明細の行の追加・削除）は「本体（画面）。理由。」の文にする（例「明細の行の追加・削除は防ぎません（PC・モバイル）。…」）。
+     *   それ以外（AI の申告の文など）は今までどおり「画面: 文」（文を解析して画面の表記を入れる位置を決めない）
+     */
+    function constraintLineOf(x) {
+      if (!x || typeof x !== 'object') return String(x ?? '');
+      const plat = platJaOf(x.platforms);
+      if (x.reason) return `${x.text}${plat ? `（${plat}）` : ''}。${x.reason}。`;
+      return `${plat ? `${plat}: ` : ''}${x.text}`;
+    }
+    /**
      * 会話の設計し直し（2026-10-14・指示書 §5.1）: 反映先と主な影響の行（右の「変更内容」の「反映する内容」。finalCardHtml から移した。文は変えない）。
      *   設定の手順の件数（自動で反映できる数・実行できない数）・JavaScript ごとの登録先と状態・計画の AI が書いた影響
      */
@@ -31696,7 +31732,8 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
       //   確認できないこと／反映を止めている理由 → 残る判断 → ［動作テスト環境へ反映］と反映先の文 → 反映の前の確認（折りたたみ）→ 詳細」。
       //   変わった点・最終的にどう動くか・外した／変えた・対応範囲外・反映先と主な影響・検証の区分・まだ確かめていないこと・末尾の「まだ何も反映していません」は
       //   右の「変更内容」（changeSummaryHtml・verificationDetailHtml）へ移した。判定（approvable・readiness・canApply）と反映の処理は変えない
-      const rowOf = (x) => `${platJaOf(x.platforms) ? `${esc(platJaOf(x.platforms))}: ` : ''}${esc(x.text)}${x.next ? `<div style="font-size:11px; opacity:.85;">次の方針: ${esc(x.next)}</div>` : ''}${Array.isArray(x.details) && x.details.length ? `<details class="kt-ai-tech" style="font-size:11px;"><summary>詳細</summary>${x.details.map(esc).join('<br>')}</details>` : ''}`;
+      //   2026-10-16（説明文を読みやすくする）: 行の文は constraintLineOf（理由を別に持つ構造の行は「本体（画面）。理由。」、それ以外は今までどおり「画面: 文」）
+      const rowOf = (x) => `${esc(constraintLineOf(x))}${x.next ? `<div style="font-size:11px; opacity:.85;">次の方針: ${esc(x.next)}</div>` : ''}${Array.isArray(x.details) && x.details.length ? `<details class="kt-ai-tech" style="font-size:11px;"><summary>詳細</summary>${x.details.map(esc).join('<br>')}</details>` : ''}`;
       // この案で実現すること: 採用した仮案の動作（無ければ計画・生成の要約）と、既存の設定を変える手順（Toolkit の確認の変更前後）
       const adopted = Array.isArray(fin.adoptedBehaviors) && fin.adoptedBehaviors.length ? fin.adoptedBehaviors : (Array.isArray(fin.behaviors) ? fin.behaviors : []);
       const existing = Array.isArray(fin.existingChanges) ? fin.existingChanges : [];
@@ -31708,7 +31745,8 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
       //   見直しの MEDIUM 6（2026-10-15）: 一部の項目だけ説明済みの変更は、説明できない項目（unexplained）だけを言う（実行できる人の変更を利用条件の説明で隠さない）
       const hasAdopted = Array.isArray(fin.adoptedBehaviors) && fin.adoptedBehaviors.length > 0;
       const existingLeft = hasAdopted ? existing.filter(x => !(x && typeof x === 'object' && x.explained === true)).map(x => (x && typeof x === 'object' && Array.isArray(x.unexplained) && x.unexplained.length ? { ...x, changed: x.unexplained } : x)) : existing;
-      const realizeRows = [...adopted.map(esc), ...existingLeft.map(x => existingChangeTextOf(x, uiEx, view.numbers || null)).filter(Boolean).map(x => `<span class="kt-ai-final-existing">${esc(x)}</span>`)];
+      //   2026-10-16: 実現した部分の文（右と同じ。PC とモバイルで本当に違う部分だけ左にも出る）の条件を別の行に出した改行は、行として描く
+      const realizeRows = [...adopted.map(x => esc(x).replace(/\n/g, '<br>')), ...existingLeft.map(x => existingChangeTextOf(x, uiEx, view.numbers || null)).filter(Boolean).map(x => `<span class="kt-ai-final-existing">${esc(x)}</span>`)];
       const realize = realizeRows.length ? sec('この案で実現すること', li(realizeRows)) : '';
       // この案の制約: 真にできないこと（coverage / limit / external。同じ要件の req-unsupported は重ねない）
       const constraintRows = (Array.isArray(fin.constraints) ? fin.constraints : fin.cannot.filter(x => ['coverage', 'limit', 'external'].includes(x.kind))).map(rowOf);
@@ -31995,6 +32033,7 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
     }
     return { progressInnerHtml, progressCardHtml, finalCardHtml, verificationDetailHtml, verificationLineOf, impactRowsOf,   // 段階 C（検証の明細は右の「変更内容」。2026-10-14）
       condSentenceOf, existingChangeTextOf,   // 2026-10-15（最終案の重複と担当未定の食い違い §2）: 条件式の文（テストから確かめる）
+      constraintLineOf,   // 2026-10-16（説明文を読みやすくする）: 「この案の制約」の 1 行（テストから確かめる）
       INTENT_JA, STATUS_JA, STRATEGY_JA, CHECK_JA, SPEC_STATUS_JA, busyHintText, themedMermaid, workspaceHtml, headerHtml, baseHtml, baseDiffHtml, applyLogHtml, freePanelHtml, chatHtml, messageHtml, diffCardHtml, codePaneHtml, previewReadyHtml, rollbackReadyHtml, executionCardHtml, rollbackCardHtml, answerCardHtml, errorCardHtml, readinessCounts, patternsHtml,
       // Phase 17
       consultationStartHtml, specCardHtml, jsPreviewReadyHtml, jsRollbackReadyHtml, jsExecutionCardHtml, jsRollbackCardHtml, consultChoicesHtml, jsRegisterPaneHtml, customizeScopeJa,
@@ -32876,7 +32915,17 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
       renderWsState();
       return activeArtifact;
     }
-    conv.onChange(() => { adoptActivePlan(); renderDraftPane(); renderSpec(); renderChat(); renderWsState(); });
+    //   2026-10-16（詳細情報に以前の根拠が残る不具合）: 開いた根拠（右の「詳細情報」の事実）は、開いたときの会話の段階（会話の区切り・仮案の id と回数・計画の版）を覚え、
+    //   会話が次の仮案・計画の版に進んだら閉じる（前の案の事実を今の案の根拠のように残さない）。同じ段階の間（回答の追加など）は残す
+    let factShown = null;
+    const factCtxKey = () => { const d = conv.draft(), v = conv.activePlan(); return `${conv.state.epoch}|${d ? `${d.id}:${d.rev}` : ''}|${v ? `${v.planId}:${v.version}` : ''}`; };
+    function closeStaleFact() {
+      if (!factShown || factShown.key === factCtxKey()) return;
+      factShown = null;
+      $factDetail.innerHTML = ''; $factDetail.style.display = 'none';
+      if (activeArtifact && activeArtifact.type === VM.ARTIFACT.EVIDENCE) activeArtifact = null;
+    }
+    conv.onChange(() => { adoptActivePlan(); renderDraftPane(); renderSpec(); renderChat(); closeStaleFact(); renderWsState(); });
     // 段階 C（C3b）: 進みのカードの経過は 1 秒ごとに描き直す（カードが無ければ何もしない。テストは conv.tickProgress() を偽の時計で呼ぶ）
     try { if (typeof setInterval === 'function') setInterval(() => { try { if (conv && typeof conv.tickProgress === 'function') conv.tickProgress(); } catch (e) { } }, 1000); } catch (e) { }
     const connectionInfo = () => { let st = null; try { st = paidEnabled ? session.status() : null; } catch (e) { st = null; } const connected = !!st?.connected; return { paidEnabled, connected, available: !!capability.available, checking: !!capability.checking, reason: capability.reason || null, text: !paidEnabled ? '利用できません（接続機能なし）' : connected ? KTContextUi.capabilityStatusText(capability) : flow && flow.isRunning() ? '接続中' : '未接続' }; };
@@ -33115,7 +33164,7 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
     $chat.addEventListener('click', async (ev) => {
       const t = actEl(ev?.target);
       const eid = dataOf(t, 'eid');
-      if (eid) { showEvidence(eid); return; }
+      if (eid) { showEvidence(eid, evidenceFromOf(t)); return; }
       const act = dataOf(t, 'act');
       if (act) await handleAct(act, t);
     });
@@ -34287,13 +34336,39 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
         sending = false; setAskEnabled();
       }
     }
-    /** 根拠ID → 根拠ペインに fact の詳細。会話の回答 / 計画の根拠は、その回答・計画が送った Context の facts から引く */
-    function showEvidence(id) {
-      const pools = [last?.ctx?.facts || [], conv.activePlan()?.ctx?.facts || [], ...conv.state.messages.filter(m => m.data?.ctxFacts).map(m => m.data.ctxFacts)];
+    /**
+     * 根拠ID → 根拠ペインに fact の詳細。会話の回答 / 計画の根拠は、その回答・計画が送った Context の facts から引く
+     *   2026-10-16（詳細情報に以前の根拠が残る不具合）: from = 押したボタンの出どころ（draft:仮案の id:回数 / msg:会話のカードの id / ctx: Context の回答）。
+     *   番号は依頼ごとに振り直されるので、出どころが分かればその事実だけから引く（そこに無い番号は「見つからない」と出し、別の出どころの同じ番号に置き換えない）。
+     *   分からないとき（計画の詳細・古い描画）は今の計画 → Context の回答 → 会話の新しいメッセージから順に探す（以前は古いメッセージから探し、前の仮案の事実が出た）
+     */
+    function evidencePoolsOf(from) {
+      const msgs = conv.state.messages || [];
+      const factsOf = (m) => (m && m.data && Array.isArray(m.data.ctxFacts) ? m.data.ctxFacts : []);
+      const s = from ? String(from) : '';
+      if (s.startsWith('draft:')) {
+        const [, did, rev] = s.split(':');
+        return [factsOf([...msgs].reverse().find(m => m && m.type === KTAiConversation.MSG.DRAFT && m.data && String(m.data.draftId) === did && String(m.data.rev) === rev))];
+      }
+      if (s.startsWith('msg:')) return [factsOf(msgs.find(m => m && m.id === s.slice(4)))];
+      if (s === 'ctx') return [last?.ctx?.facts || []];
+      return [conv.activePlan()?.ctx?.facts || [], last?.ctx?.facts || [], ...msgs.filter(m => m.data?.ctxFacts).map(m => m.data.ctxFacts).reverse()];
+    }
+    /** 押した要素の根拠の出どころ（ボタンの data-efrom。無ければ会話のカード（data-mid）。どちらも無ければ null） */
+    function evidenceFromOf(t) {
+      const own = dataOf(t, 'efrom');
+      if (own) return own;
+      const card = t && typeof t.closest === 'function' ? t.closest('[data-mid]') : null;
+      const mid = card ? (card.dataset?.mid ?? (typeof card.getAttribute === 'function' ? card.getAttribute('data-mid') : null)) : null;
+      return mid ? `msg:${mid}` : null;
+    }
+    function showEvidence(id, from = null) {
+      const pools = evidencePoolsOf(from);
       let fact = null;
       for (const facts of pools) { fact = (facts || []).find(f => f.id === id) || null; if (fact) break; }
       $factDetail.innerHTML = KTContextUi.evidenceDetailHtml(fact);
       $factDetail.style.display = '';
+      factShown = { key: factCtxKey(), from: from || null };
       setArtifact({ type: VM.ARTIFACT.EVIDENCE, id, version: null });
       return fact;
     }
@@ -34410,7 +34485,7 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
         const t = ev?.target;
         const el = t && typeof t.closest === 'function' ? t.closest('[data-eid]') : t;
         const id = el?.dataset?.eid ?? (typeof el?.getAttribute === 'function' ? el.getAttribute('data-eid') : null);
-        if (id) showEvidence(id);
+        if (id) showEvidence(id, 'ctx');
       });
       // 初期判定（非同期。無料機能はこの結果を待たない）。旧形式の保存があれば exchange して移行する
       //   d.initialHealth（省略可）: 起動時に済ませた接続の確認（移行・トークンの交換・health。bootToolkit が最小化で開いたときも起動時に行う）の結果を待って使う（二重に送らない）
@@ -34461,7 +34536,7 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
       if (await handleId(id, t)) return;
       const el = t && typeof t.closest === 'function' ? t.closest('[data-eid]') : t;
       const eid = el?.dataset?.eid ?? (typeof el?.getAttribute === 'function' ? el.getAttribute('data-eid') : null);
-      if (eid) showEvidence(eid);
+      if (eid) showEvidence(eid, evidenceFromOf(el));
     }
     for (const p of ['plan', 'review', 'code', 'exec', 'log']) { const el = $pane(p); if (el) el.addEventListener('click', onPaneClick); }
     // Phase 21: JS 登録の確認項目（登録の前に 1 件ずつ確認する）。チェックの状態は jsAck（Executor は acknowledged で受け、足りなければ登録しない）

@@ -397,7 +397,8 @@ await section(async () => {
   };
   const f1 = await runFinal({ notAchieved: [{ code: 'SUBTABLE_ROWS', message: '明細の行の追加・削除は止められません' }], outOfScope: [{ code: 'AI_OUT_OF_SCOPE', requirement: '100万円以上は部長承認', owner: 'step', message: '100万円以上は部長承認（P1 の標準設定で扱う）' }] });
   const t1 = f1.text;
-  assert(f1.gen === 1 && /この案の制約/.test(t1) && /明細（テーブル）の行の追加・削除は止まりません/.test(t1) && !/対応範囲外|担当が計画にありません|100万円以上は部長承認（P1 の標準設定で扱う）/.test(t1 + f1.right), `最終案のカード: 満たせない部分は「この案の制約」。ほかの手順が担当する要件は左右どちらにも範囲外として出さない（2026-10-14）: ${t1.slice(t1.indexOf('実現できない点'), t1.indexOf('実現できない点') + 300)}`);
+  //   2026-10-16（説明文を読みやすくする）: 制約の行は「明細の行の追加・削除は防ぎません（画面）。理由。」
+  assert(f1.gen === 1 && /この案の制約/.test(t1) && /明細（テーブル）の行の追加・削除は防ぎません/.test(t1) && !/対応範囲外|担当が計画にありません|100万円以上は部長承認（P1 の標準設定で扱う）/.test(t1 + f1.right), `最終案のカード: 満たせない部分は「この案の制約」。ほかの手順が担当する要件は左右どちらにも範囲外として出さない（2026-10-14）: ${t1.slice(t1.indexOf('実現できない点'), t1.indexOf('実現できない点') + 300)}`);
   const f2 = await runFinal({ outOfScope: [{ code: 'OTHER_OWNER', requirement: 'r', owner: 'customization', customizationId: 'C2', message: 'モバイルの編集制御（C2 の担当）' }] });
   assert(f2.gen === 1 && !/明細の行の追加・削除|この案の制約/.test(f2.text) && !/対応範囲外|モバイルの編集制御（C2 の担当）/.test(f2.text + f2.right), `最終案のカード: 担当範囲外だけのときは制約の節を出さず、担当のある要件は列挙しない（2026-10-14）: ${f2.text.slice(f2.text.indexOf('実現できない点'), f2.text.indexOf('実現できない点') + 200)}`);
   // 担当が計画に無い要件（unowned）は「担当が計画にありません」として、担当のある範囲外とは別の行に出す

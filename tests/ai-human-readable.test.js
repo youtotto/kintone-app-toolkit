@@ -242,7 +242,7 @@ await section(async () => {
   const x = makeConvC({ planImpl: planJs3, generate: gen });
   await sendUntilAdopt(x);
   const v = x.c.activePlan(), fin = v.final;
-  assert(fin && !fin.incomplete && ['C1', 'C2', 'C3'].every(c => v.generated[c].status === 'verified') && fin.approvable === true && fin.adoptedBehaviors.includes('申請時に課長と部長の承認者をユーザー選択で指定する') && fin.constraints.length === 1 && /明細（テーブル）の行の追加・削除は止まりません/.test(fin.constraints[0].text) && JSON.stringify(fin.supplements) === JSON.stringify(['編集不可の間は入力欄を灰色にする']) && fin.blockers.length === 0, `前提: 3 本とも検証済みで承認できる。材料（採用した動作・制約 1 件・補足 1 件・止める理由なし）: ${JSON.stringify({ approvable: fin && fin.approvable, adopted: fin && fin.adoptedBehaviors, constraints: fin && fin.constraints, supplements: fin && fin.supplements, blockers: fin && fin.blockers })}`);
+  assert(fin && !fin.incomplete && ['C1', 'C2', 'C3'].every(c => v.generated[c].status === 'verified') && fin.approvable === true && fin.adoptedBehaviors.includes('申請時に課長と部長の承認者をユーザー選択で指定する') && fin.constraints.length === 1 && /明細（テーブル）の行の追加・削除は防ぎません/.test(fin.constraints[0].text) && JSON.stringify(fin.supplements) === JSON.stringify(['編集不可の間は入力欄を灰色にする']) && fin.blockers.length === 0, `前提: 3 本とも検証済みで承認できる。材料（採用した動作・制約 1 件・補足 1 件・止める理由なし）: ${JSON.stringify({ approvable: fin && fin.approvable, adopted: fin && fin.adoptedBehaviors, constraints: fin && fin.constraints, supplements: fin && fin.supplements, blockers: fin && fin.blockers })}`);
   // 準備の前（finalPre が無い）・準備中・準備が整った、の 3 つの状態
   const h0 = finalHtml(x), hRun = finalWithPre(x, 'running'), hReady = finalWithPre(x, 'ready');
   assert(statusOf(h0) === '反映の前の準備を待っています…' && applyBtn(h0) && applyBtn(h0).disabled && !/この内容で反映できます/.test(h0), `H4-1: 準備の前は「反映の前の準備を待っています…」で押せない（「反映できます」は言わない）: ${statusOf(h0)}`);
@@ -252,13 +252,13 @@ await section(async () => {
   const iHead = vis.indexOf('最終案ができました。'), iStatus = vis.indexOf('この内容で反映できます。'), iDo = vis.indexOf('この案で実現すること'), iCon = vis.indexOf('この案の制約'), iSup = vis.indexOf('仮案からの補足'), iBtn = vis.indexOf('動作テスト環境へ反映');
   assert(iHead >= 0 && iHead < iStatus && iStatus < iDo && iDo < iCon && iCon < iSup && iSup < iBtn, `H4-4: 見出し → 反映できます → この案で実現すること → この案の制約 → 仮案からの補足 → ボタン の順: ${JSON.stringify([iHead, iStatus, iDo, iCon, iSup, iBtn])}`);
   assert(/申請時に課長と部長の承認者をユーザー選択で指定する/.test(vis) && /100万円以上の申請は部長承認を必要とする/.test(vis) && !/承認待ちでは金額を編集不可にします/.test(vis), 'H4-5: 「この案で実現すること」は採用した仮案の動作（計画・生成の要約の文は右）');
-  assert((vis.match(/行の追加・削除は止まりません/g) || []).length === 1 && /PC: 明細（テーブル）の行の追加・削除は止まりません（セルの編集不可だけでは止められないため。行のボタンを隠す API は Toolkit がまだ扱っていません）/.test(vis) && !/入力欄だけ編集できなくなります/.test(vis), `H4-6: 「この案の制約」に行の追加・削除（PC・モバイルで同じ内容は 1 行。制約の文は残る範囲だけ。2026-10-15 §4(b)）: ${(vis.match(/この案の制約[\s\S]{0,200}/) || [''])[0]}`);
+  assert((vis.match(/行の追加・削除は防ぎません/g) || []).length === 1 && vis.includes('明細（テーブル）の行の追加・削除は防ぎません（PC）。入力欄（セル）の編集不可だけでは止められず、行のボタンを隠す API は Toolkit がまだ扱っていません。') && !/入力欄だけ編集できなくなります/.test(vis), `H4-6: 「この案の制約」に行の追加・削除（PC・モバイルで同じ内容は 1 行。制約の文は残る範囲だけ。2026-10-15 §4(b)）: ${(vis.match(/この案の制約[\s\S]{0,200}/) || [''])[0]}`);
   //   2026-10-15（最終案の重複と担当未定の食い違い §1）: 計画の返答（計画の要約）は再掲しない。採用の後に具体的になった判断（計画で決めた点）だけ
   assert(/計画で決めた点: 編集不可の間は入力欄を灰色にする/.test(vis) && !/計画を作りました。承認待ちの間だけ金額を編集不可にします。/.test(stripC(hReady)) && !/kt-ai-final-reply/.test(hReady), 'H4-7: 「仮案からの補足」は計画で決めた点だけ（計画の返答は再掲しない）');
   assert(/<details class="kt-ai-tech kt-ai-final-pre"[^>]*><summary>反映の前の確認（書き込みなし）<\/summary>/.test(hReady) && !/プロセス管理の変更|確認項目の例/.test(vis) && /プロセス管理の変更/.test(stripC(hReady)) && /確認項目の例/.test(stripC(hReady)), 'H4-8: 「反映の前の確認（書き込みなし）」は折りたたみ（中身は開くと見える）');
   assert(!LEFT_MOVED.test(vis) && !/残る判断|確認できないこと|反映を止めている理由/.test(vis), `H4-9: 左に検証の明細・反映先と主な影響・変わった点・「まだ何も反映していません」・残る判断（無い）は出ない: ${(vis.match(LEFT_MOVED) || [''])[0]}`);
   const right = rightOf(x), rt = stripC(right);
-  assert(/JavaScript の状態/.test(right) && (rt.match(/できた（検証済み）/g) || []).length === 3 && /承認待ちでは金額を編集不可にします/.test(rt) && /反映する内容/.test(right) && /新しい JavaScript「lock\.js」を登録/.test(rt) && /できないこと/.test(right) && /明細（テーブル）の行の追加・削除は止まりません/.test(rt) && !/確認できないこと/.test(right), `H4-10: 右の「変更内容」に JavaScript の状態・計画の要約・反映する内容・できないこと（担当の決まっていない要件は無いので「確認できないこと」は無い）: ${rt.replace(/\s+/g, ' ').slice(0, 300)}`);
+  assert(/JavaScript の状態/.test(right) && (rt.match(/できた（検証済み）/g) || []).length === 3 && /承認待ちでは金額を編集不可にします/.test(rt) && /反映する内容/.test(right) && /新しい JavaScript「lock\.js」を登録/.test(rt) && /できないこと/.test(right) && /明細（テーブル）の行の追加・削除は防ぎません（PC）。/.test(rt) && !/確認できないこと/.test(right), `H4-10: 右の「変更内容」に JavaScript の状態・計画の要約・反映する内容・できないこと（担当の決まっていない要件は無いので「確認できないこと」は無い）: ${rt.replace(/\s+/g, ' ').slice(0, 300)}`);
   const line = (right.match(/<div class="kt-ai-sum-verified">([^<]*)<\/div>/) || [])[1] || '';
   assert(line === '構文と対象の照合、模擬テストで必須の動作を確認しました。実機は未確認です。' && /<details class="kt-ai-tech kt-ai-sum-verification"><summary>検証の明細<\/summary>/.test(right) && /機械検査: 生成工程の検査/.test(rt) && /必須の動作（/.test(rt) && /✓ 「金額」（PC）: 編集できない — 処理あり・模擬テストで合格/.test(rt) && /代表条件の一覧/.test(rt) && /反映した後、動作テスト環境で確かめること/.test(rt) && (rt.match(/実機は未確認です/g) || []).length === 1, `H4-11: 右の「確かめたこと」は 1 行＋明細（実機未確認は 1 回）: ${JSON.stringify({ line, n: (rt.match(/実機は未確認です/g) || []).length })}`);
   keep('H4', hReady, right);
@@ -533,8 +533,10 @@ const H9K = (() => {
     K.req('update', { id: 'R2', target: '保存', condition: 'CSV の読み込み', behavior: '保存を止める', disposition: 'unsupported', note: 'CSV の読み込みでは JavaScript が動かないため', sourceQuotes: [Q_T[1]], planRefs: [], effects: ['block-save'] }),
   ] });
   const REQ_TEXT_FULL = 'PC: 承認済み。PC・モバイルの両方：明細を編集できないようにする';
-  const SENT = '承認済みでは「明細」の品名・数量・単価のセルを編集できなくなります（PC）';
-  const ROWS = '「明細」の行の追加・削除は止まりません（セルの編集不可だけでは止められないため。行のボタンを隠す API は Toolkit がまだ扱っていません）';
+  //   2026-10-16（説明文を読みやすくする）: 実現した部分の条件は、満たした必須の動作の構造化した条件式（ステータス in ("承認済み")）の文。制約の行は「本体（画面）。理由。」
+  const SENT = '「ステータス」が「承認済み」の場合、明細の品名・数量・単価を編集できなくします（PC）。';
+  const ROWS = '明細の行の追加・削除は防ぎません';
+  const ROW_LINE = '明細の行の追加・削除は防ぎません（PC）。入力欄（セル）の編集不可だけでは止められず、行のボタンを隠す API は Toolkit がまだ扱っていません。';
   const make = ({ effects = true } = {}) => {
     const genT = { calls: [], impl: async (args) => {
       genT.calls.push(args.customizationId);
@@ -550,13 +552,13 @@ const H9K = (() => {
     x.services.readOnlyFields = () => ['subtotal'];
     return { x, genT };
   };
-  return { Q_T, U_T, REQ_TEXT_FULL, SENT, ROWS, make };
+  return { Q_T, U_T, REQ_TEXT_FULL, SENT, ROWS, ROW_LINE, make };
 })();
 
 // =========================================================
 console.log('\n--- §H9. 部分対応を「できないこと」に丸ごと入れない（2026-10-15 §4(b)）: 実現した部分は実現することへ・制約は残る範囲だけ・計画では対応できないとされた要件は実現のある要件では出さない ---');
 await section(async () => {
-  const { Q_T, U_T, REQ_TEXT_FULL, SENT, ROWS } = H9K;
+  const { Q_T, U_T, REQ_TEXT_FULL, SENT, ROWS, ROW_LINE } = H9K;
   const { x, genT } = H9K.make();
   await x.c.send(U_T);
   await x.c.send('採用します');
@@ -567,9 +569,9 @@ await section(async () => {
   const h = finalHtml(x), vis = stripC(outsideDetails(h)), right = rightOf(x), rt = stripC(right);
   const doSec =(vis.match(/この案で実現すること[\s\S]*?(?=この案の制約|仮案からの補足|動作テスト環境へ反映)/) || [''])[0];
   //   2026-10-15（最終案の重複と担当未定の食い違い §1）: 実現した部分の 1 文（列の名前の列挙を含む）は右の「最終的にどう動くか」だけ。左は採用した仮案の動作で言う（重ねない）
-  assert(!fin.adoptedBehaviors.includes(SENT) && fin.behaviors.includes(SENT) && !doSec.includes(SENT) && /承認済みでは明細を編集できないようにする/.test(doSec) && (vis.match(/のセルを編集できなくなります/g) || []).length === 0 && /最終的にどう動くか[\s\S]*承認済みでは「明細」の品名・数量・単価のセルを編集できなくなります（PC）/.test(rt), `H9-1: 実現した部分（満たした必須の動作）は右の「最終的にどう動くか」に 1 文（左は採用した動作だけ）: ${doSec.replace(/\s+/g, ' ').slice(0, 240)} ／ behaviors: ${JSON.stringify(fin && fin.behaviors)}`);
+  assert(!fin.adoptedBehaviors.includes(SENT) && fin.behaviors.includes(SENT) && !doSec.includes(SENT) && /承認済みでは明細を編集できないようにする/.test(doSec) && (vis.match(/を編集できなくします/g) || []).length === 0 && rt.includes('最終的にどう動くか') && rt.indexOf(SENT) > rt.indexOf('最終的にどう動くか'), `H9-1: 実現した部分（満たした必須の動作）は右の「最終的にどう動くか」に 1 文（左は採用した動作だけ）: ${doSec.replace(/\s+/g, ' ').slice(0, 240)} ／ behaviors: ${JSON.stringify(fin && fin.behaviors)}`);
   const conSec =(vis.match(/この案の制約[\s\S]*?(?=仮案からの補足|動作テスト環境へ反映)/) || [''])[0];
-  assert(fin.constraints.some(c => c.kind === 'coverage' && c.text === ROWS && c.requirementId === 'R1') && fin.constraints.filter(c => c.kind === 'coverage').length === 1 && conSec.includes(ROWS) && !/PC・モバイルの両方|承認済み。/.test(vis) && !vis.includes(REQ_TEXT_FULL) && !/行の追加・削除は止められません/.test(vis), `H9-2: 制約はテーブルの名前で「残る範囲」だけ（AI の PARTIAL の行は構造の行にまとめ、要件の全文は付けない）: ${conSec.replace(/\s+/g, ' ').slice(0, 300)}`);
+  assert(fin.constraints.some(c => c.kind === 'coverage' && c.text === ROWS && c.requirementId === 'R1') && fin.constraints.filter(c => c.kind === 'coverage').length === 1 && conSec.includes(ROW_LINE) && !/PC・モバイルの両方|承認済み。/.test(vis) && !vis.includes(REQ_TEXT_FULL) && !/行の追加・削除は止められません/.test(vis), `H9-2: 制約はテーブルの名前で「残る範囲」だけ（AI の PARTIAL の行は構造の行にまとめ、要件の全文は付けない）: ${conSec.replace(/\s+/g, ' ').slice(0, 300)}`);
   assert(!fin.cannot.some(c => c.kind === 'req-unsupported' && c.requirementId === 'R1') && !vis.includes(`計画では対応できないとされた要件: ${Q_T[0]}`) && !rt.includes(`計画では対応できないとされた要件: ${Q_T[0]}`), `H9-3: 実現のある要件（R1）は「計画では対応できないとされた要件」に出さない: ${(vis.match(/計画では対応できないとされた要件[^\n]*/g) || []).join(' / ')}`);
   const unsup = fin.cannot.find(c => c.kind === 'req-unsupported' && c.requirementId === 'R2');
   assert(unsup && unsup.text === `計画では対応できないとされた要件: ${Q_T[1]}（理由: CSV の読み込みでは JavaScript が動かないため）` && conSec.includes(unsup.text), `H9-4: 何も実現していない要件（R2）は今の文で残る: ${JSON.stringify(unsup)}`);
@@ -591,7 +593,7 @@ await section(async () => {
   const na = e && e.review && e.review.coverage ? e.review.coverage.notAchieved : [];
   assert(fin && e && genT.calls.length === 1 && !(e.verification && e.verification.requiredEffects) && na.some(r => r.code === 'SUBTABLE_ROWS') && na.some(r => r.code === 'AI_PARTIAL' && r.requirementId === 'R1'), `前提: 生成工程の verification に必須の動作の結果が無い。構造の SUBTABLE_ROWS と AI の PARTIAL（R1）は §H9 と同じ: ${JSON.stringify({ st: e && e.status, re: !!(e && e.verification && e.verification.requiredEffects), na: na.map(r => [r.code, r.requirementId]) })}`);
   const h = finalHtml(x), vis = stripC(h), right = rightOf(x), rt = stripC(right);
-  assert(!fin.behaviors.some(s => /のセルを編集できなくなります/.test(s)) && !fin.adoptedBehaviors.some(s => /のセルを編集できなくなります/.test(s)) && !/のセルを編集できなくなります/.test(vis + rt), `H9b-1: 満たした必須の動作が分からないので、実現した部分の 1 文は作らない: ${JSON.stringify(fin.behaviors)}`);
+  assert(!fin.behaviors.some(s => /を編集できなくします/.test(s)) && !fin.adoptedBehaviors.some(s => /を編集できなくします/.test(s)) && !/を編集できなくします/.test(vis + rt), `H9b-1: 満たした必須の動作が分からないので、実現した部分の 1 文は作らない: ${JSON.stringify(fin.behaviors)}`);
   const unsupR1 = fin.cannot.find(c => c.kind === 'req-unsupported' && c.requirementId === 'R1');
   assert(unsupR1 && unsupR1.text === `計画では対応できないとされた要件: ${Q_T[0]}（理由: 行の追加・削除は止められないため）` && fin.cannot.some(c => c.kind === 'req-unsupported' && c.requirementId === 'R2'), `H9b-2: 文を作れなかった PARTIAL の要件（R1）は「計画では対応できないとされた要件」に今の文で残る（R2 も今のまま）: ${JSON.stringify(fin.cannot.filter(c => c.kind === 'req-unsupported').map(c => [c.requirementId, c.text]))}`);
   assert(fin.constraints.some(c => c.kind === 'coverage' && c.text === ROWS && c.requirementId === 'R1') && !vis.includes(H9K.REQ_TEXT_FULL), `H9b-3: 制約の行（テーブルの名前の「残る範囲」）は §H9 と同じ: ${JSON.stringify(fin.constraints.map(c => [c.kind, c.requirementId, c.text]))}`);

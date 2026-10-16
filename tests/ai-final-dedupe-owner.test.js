@@ -36,8 +36,13 @@ const secOf = (text, head, nexts) => { const i = text.indexOf(head); if (i < 0) 
 const LEFT_SECTIONS = ['この案で実現すること', 'この案の制約', '仮案からの補足', '確認できないこと／反映を止めている理由', '残る判断', 'コードを見る', '動作テスト環境へ反映'];
 const ADOPTED = F.PROPOSE[1].behaviors.filter(b => b.origin === 'user').map(b => b.text);
 const AI_ITEM = F.PROPOSE[1].behaviors.find(b => b.origin === 'ai').text;
-const ROWS = '「明細」の行の追加・削除は止まりません（セルの編集不可だけでは止められないため。行のボタンを隠す API は Toolkit がまだ扱っていません）';
-const REALIZED = '「明細」の品名・数量・単価のセルを編集できなくなります';
+//   2026-10-16（説明文を読みやすくする）: 制約の行は「本体（画面）。理由。」、実現した部分は「条件の場合、対象を編集できなくします（画面）。」の文
+//   （条件は満たした必須の動作の構造化した条件式 ステータス in ("承認済み") の文）。意味（対象・条件・画面・理由）は前の文と同じ
+const ROW_TEXT = '明細の行の追加・削除は防ぎません';
+const ROW_REASON = '入力欄（セル）の編集不可だけでは止められず、行のボタンを隠す API は Toolkit がまだ扱っていません';
+const ROWS = `${ROW_TEXT}（PC・モバイル）。${ROW_REASON}。`;
+const REALIZED_COND = '「ステータス」が「承認済み」の場合、';
+const REALIZED = `${REALIZED_COND}明細の品名・数量・単価を編集できなくします`;
 const READY = { status: 'ready', items: { target: '動作テスト環境（このアプリ）。運用環境には反映しません', confirmations: [] } };
 const OWNERLESS_RE = /担当するか決まっていません|担当が計画にありません|担当が計画に見つかりません|担当範囲外とされた要件/;
 const INTERNAL = /\b[RBCP][0-9]+\b|requestId|PLAN_OWNER|AI_OUT_OF_SCOPE|coverage-owner|SUBTABLE_ROWS|requirementId|planOwners/;
@@ -63,15 +68,15 @@ await section(async () => {
     `D1-3: 「この案で実現すること」は利用者の依頼の動作 4 行（各 1 回）だけ: ${doSec.replace(/\s+/g, ' ')}`);
   assert(!L.includes(AI_ITEM) && count(RV, AI_ITEM) === 1 && /アクションを整え|既存の編集制御に統合/.test(RV) && !/アクションを整え|既存の編集制御に統合|既存ファイルに統合/.test(L),
     `D1-4: 要件に結び付かない AI の項目（実装の言い方「アクションを整え、既存の編集制御に統合する」）は左に無く、右の「最終的にどう動くか」に 1 回: ${AI_ITEM}`);
-  assert(!/品名|数量|単価|のセルを編集できなくなります/.test(L) && count(RV, `${REALIZED}（PC・モバイル）`) === 1 && !RV.includes(`${REALIZED}（PC）`) && !RV.includes(`${REALIZED}（モバイル）`) && fin.behaviors.includes(`${REALIZED}（PC・モバイル）`),
-    `D1-5: 列の列挙（品名・数量・単価）は左に無く、右に PC とモバイルをまとめた 1 文: ${(RV.match(/[^\n]*セルを編集できなくなります[^\n]*/g) || []).join(' / ')}`);
+  assert(!/品名|数量|単価|を編集できなくします/.test(L) && count(RV, `${REALIZED}（PC・モバイル）。`) === 1 && !RV.includes(`${REALIZED}（PC）`) && !RV.includes(`${REALIZED}（モバイル）`) && fin.behaviors.includes(`${REALIZED}（PC・モバイル）。`),
+    `D1-5: 列の列挙（品名・数量・単価）は左に無く、右に PC とモバイルをまとめた 1 文: ${(RV.match(/[^\n]*を編集できなくします[^\n]*/g) || []).join(' / ')}`);
   const before = F.BEFORE_LEFT, gone = before.filter(t => !ADOPTED.includes(t));
   assert(gone.length === 4 && gone.every(t => !L.includes(t)) && before.filter(t => ADOPTED.includes(t)).every(t => count(L, t) === 1),
     `D1-5b: §12.31 の実機の左にあった 4 行（AI の実装の言い方・PC とモバイルで分かれた列の列挙 2 行・崩れた条件の文）は無く、利用者の依頼の動作 4 行は 1 回ずつ: ${JSON.stringify(gone.filter(t => L.includes(t)))}`);
   assert(!/今ある操作|申請する|1000000|でもない/.test(L) && /After: 作成中 → 承認待ち\s*（条件: 「金額」が100万円未満）/.test(RV) && /アクション「部長へ申請する」: 作成中 → 部長承認待ち\s*（条件: 「金額」が100万円以上）/.test(RV) && !/amount|1000000/.test(RV) && RT.includes('変更後: amount <= "1000000" and amount != "1000000"') && RT.includes('変更後: amount >= "1000000"'),
     `D1-6: 「申請する」の変更は左に重ねず、右の変更前後に「100万円未満」。実行される元の式は右の詳細だけ（実行する条件は変えない）: ${(RV.match(/After:[^\n]*/) || [''])[0]}`);
   assert(v.plan.steps.find(s => s.id === 'P2').spec.filterCond === 'amount <= "1000000" and amount != "1000000"' && v.review.steps.find(s => s.stepId === 'P2').diff.after.filterCond === 'amount <= "1000000" and amount != "1000000"', 'D1-6b: 計画と確認の変更後の条件式（実行される式）は変えていない');
-  assert(count(L, ROWS) === 1 && /この案の制約\s*PC・モバイル: 「明細」の行の追加・削除は止まりません/.test(L) && count(RV, ROWS) === 1 && fin.constraints.length === 1,
+  assert(count(L, ROWS) === 1 && /この案の制約\s*明細の行の追加・削除は防ぎません（PC・モバイル）。/.test(L) && count(RV, ROWS) === 1 && fin.constraints.length === 1 && fin.constraints[0].text === ROW_TEXT && fin.constraints[0].reason === ROW_REASON,
     `D1-7: 行の追加・削除の制約は左の通常表示に 1 回・右の「できないこと」に 1 回（PC・モバイルで 1 行）: ${JSON.stringify(fin.constraints)}`);
   const supSec = secOf(L, '仮案からの補足', LEFT_SECTIONS.filter(s => s !== '仮案からの補足' && s !== 'この案で実現すること' && s !== 'この案の制約'));
   assert(!supSec.includes(F.PLAN_REPLY.slice(0, 20)) && !L.includes(F.PLAN_REPLY.slice(0, 20)) && !/kt-ai-final-reply/.test(hReady) && v.plan.provisionals.every(p => count(supSec, p.choice) === 1) && fin.changed.revision === false,
@@ -112,9 +117,10 @@ await section(async () => {
   const x = await R.run({ planMutate: (plan) => { const c2 = plan.customizations.find(c => c.customizationId === 'C2'); c2.fields = c2.fields.filter(f => f.code !== 'unit_price'); return plan; } });
   const v = x.c.activePlan(), fin = v.final;
   const L = vis(R.leftHtml(x, { pre: READY })), RV = vis(R.rightHtml(x));
-  assert(fin && fin.approvable === false && fin.blockers.map(b => b.text).includes('「承認済みでは金額と明細を変更できなくし、差戻し後は再編集できるようにして」を実現する計画の手順・JavaScript が足りません（計画に無いもの: 「明細」の「単価」の編集の禁止（モバイル））') && fin.behaviors.includes(`${REALIZED}（PC）`) && fin.behaviors.includes('「明細」の品名・数量のセルを編集できなくなります（モバイル）') && !fin.behaviors.some(b => /（PC・モバイル）/.test(b)),
-    `D2-1: 列が違うので PC とモバイルの文はまとめない: ${JSON.stringify(fin && fin.behaviors.filter(b => /セル/.test(b)))}`);
-  assert(L.includes(`${REALIZED}（PC）`) && L.includes('「明細」の品名・数量のセルを編集できなくなります（モバイル）') && RV.includes('「明細」の品名・数量のセルを編集できなくなります（モバイル）'),
+  const mobText = `${REALIZED_COND}明細の品名・数量を編集できなくします（モバイル）。`;
+  assert(fin && fin.approvable === false && fin.blockers.map(b => b.text).includes('「承認済みでは金額と明細を変更できなくし、差戻し後は再編集できるようにして」を実現する計画の手順・JavaScript が足りません（計画に無いもの: 「明細」の「単価」の編集の禁止（モバイル））') && fin.behaviors.includes(`${REALIZED}（PC）。`) && fin.behaviors.includes(mobText) && !fin.behaviors.some(b => /（PC・モバイル）/.test(b)),
+    `D2-1: 列が違うので PC とモバイルの文はまとめない: ${JSON.stringify(fin && fin.behaviors.filter(b => /を編集できなくします/.test(b)))}`);
+  assert(L.includes(`${REALIZED}（PC）。`) && L.includes(mobText) && RV.includes(mobText),
     'D2-2: 本当に違う部分は判断に関わるので、左の「この案で実現すること」にも画面ごとの文で出す');
 });
 
@@ -579,27 +585,28 @@ await section(async () => {
   //   PC は条件の無い文・モバイルは要件の条件つきの文と金額の文に分かれた。まとめた後も、判定（承認できる・止める理由なし）・反映の前の確認事項（C2 の一部達成の確認:
   //   要件 R3・明細の行・確認のまま／C1 の既存のファイルの行の置き換え）・AI の一部達成の申告は変えない。片方が検証済みでなければまとめない
   const itemsOnly = await R.run({ planOps: remap(['C1', 'C2'], { target: 'items' }) });
-  const ROW = '「明細」の行の追加・削除は止まりません（セルの編集不可だけでは止められないため。行のボタンを隠す API は Toolkit がまだ扱っていません）';
-  const COND3 = '承認済み。PCとモバイルの両方では';
+  //   2026-10-16（説明文を読みやすくする）: 実現した部分の条件は、要件の台帳の条件の文（「承認済み。PCとモバイルの両方」。画面が混じる）ではなく、満たした必須の動作の
+  //   構造化した条件式（ステータス in ("承認済み")）の文。画面は文末に 1 回。制約の行は「本体（画面）。理由。」
+  const ROW = ROW_TEXT;
   const confOf = (xx) => ['C1', 'C2', 'C3'].map(cid => { const rv = R.recheckOf(xx, cid); return [cid, rv.registration.verdict, (rv.checks || []).filter(c => !c.ok).map(c => [c.name, c.severity, c.requirementId || null, c.limit || null]), (rv.registration.confirmations || []).length]; });
   //   まとめる前と同じ確認事項（コミット済みの版で出した値。確認の状態・項目の種類・重さ・要件・理由・件数）
   const WANT_CONF = JSON.stringify([['C1', 'NEEDS_CONFIRMATION', [['patch-removal', 'review', null, null]], 1], ['C2', 'NEEDS_CONFIRMATION', [['coverage-unmet', 'review', 'R3', 'SUBTABLE_ROWS']], 1], ['C3', 'RUNTIME_UNVERIFIED', [], 0]]);
   const PARTIAL_PRE = '要件の一部を満たしていません（AI の申告）: 承認済み。PCとモバイルの両方：金額と明細を編集不可にする（担当するモバイルの金額と明細の入力セルは編集不可にしますが、明細の行追加・削除はセルの編集不可では止められません。）。セルの編集不可では行の追加・削除は止まりません（行のボタンを隠す API は Toolkit がまだ扱っていません。実現できない点）';
   const howOf = (xx) => (vis(R.rightHtml(xx)).match(/最終的にどう動くか[\s\S]*?(?=何が変わるか|$)/) || [''])[0];
   const conOf = (xx) => (vis(R.leftHtml(xx, { pre: READY })).match(/この案の制約[\s\S]*?(?=仮案からの補足|動作テスト環境へ反映)/) || [''])[0];
-  for (const [name, xx, want] of [['金額・明細', x, [`${COND3}「金額」を編集できなくなります（PC・モバイル）`, `${COND3}${REALIZED}（PC・モバイル）`]], ['明細だけ', itemsOnly, [`${COND3}${REALIZED}（PC・モバイル）`]]]) {
+  for (const [name, xx, want] of [['金額・明細', x, [`${REALIZED_COND}金額を編集できなくします（PC・モバイル）。`, `${REALIZED}（PC・モバイル）。`]], ['明細だけ', itemsOnly, [`${REALIZED}（PC・モバイル）。`]]]) {
     const fv = xx.c.activePlan().final, how = howOf(xx), con = conOf(xx), pre = precheckTexts(xx), na2 = xx.c.activePlan().generated.C2.review.coverage.notAchieved;
-    const realized = want.map(t => count(how, t)), realizedAll = (how.match(/編集できなくなります（[^）]*）/g) || []).length;
+    const realized = want.map(t => count(how, t)), realizedAll = (how.match(/編集できなくします（[^）]*）/g) || []).length;
     assert(fv.constraints.length === 1 && fv.constraints[0].text === ROW && JSON.stringify(fv.constraints[0].platforms) === '["desktop","mobile"]' && fv.constraints[0].requirementId === 'R3'
-      && count(con, `PC・モバイル: ${ROW}`) === 1 && !/(^|\s)(PC|モバイル): 「明細」の行/.test(con)
-      && realized.every(n => n === 1) && realizedAll === want.length && !/編集できなくなります（(PC|モバイル)）/.test(how)
+      && count(con, ROWS) === 1 && !/防ぎません（(PC|モバイル)）/.test(con) && !/(PC|モバイル): 明細の行/.test(con)
+      && realized.every(n => n === 1) && realizedAll === want.length && !/編集できなくします（(PC|モバイル)）/.test(how) && !/PCとモバイルの両方では|両方の場合/.test(how)
       && JSON.stringify(confOf(xx)) === WANT_CONF && count(pre.join('\n'), PARTIAL_PRE) === 1
       && fv.approvable === true && fv.blockers.length === 0 && ['C1', 'C2', 'C3'].every(cid => xx.c.activePlan().generated[cid].status === 'verified')
       && na2.some(y => y.code === 'AI_PARTIAL' && y.requirementId === 'R3' && y.limit === 'SUBTABLE_ROWS'),
       `D12-10: 要件を JavaScript に対応づけた版（${name}）で、同じ対象・条件・結果・制約の PC・モバイルの表示を 1 つにまとめ（制約は要件の id を残す）、確認事項・判定・AI の一部達成の申告は変えない: ${JSON.stringify({ constraints: fv.constraints.map(c => [c.platforms, c.requirementId || null]), realized, conf: confOf(xx), pre, approvable: fv.approvable })}`);
   }
   //   対応づけの無い成功素材は今までどおり（制約 1 行・要件の id 無し・実現した部分の文は条件の無い 1 文）
-  assert(base.c.activePlan().final.constraints.length === 1 && !base.c.activePlan().final.constraints[0].requirementId && count(howOf(base), `${REALIZED}（PC・モバイル）`) === 1,
+  assert(base.c.activePlan().final.constraints.length === 1 && !base.c.activePlan().final.constraints[0].requirementId && count(howOf(base), `${REALIZED}（PC・モバイル）。`) === 1,
     `D12-10b: 対応づけの無い成功素材の表示は変わらない: ${JSON.stringify(base.c.activePlan().final.constraints)}`);
   //   片方が検証済みでない（モバイルの JavaScript の数量の編集不可が生成工程の検査で「無い」）→ PC・モバイルの文をまとめず、画面ごとに残す（両方が完了したように見せない）。
   //   未完了の不足は左に計画の差として足さない（反映を止める理由で示す）
@@ -607,8 +614,8 @@ await section(async () => {
   const how2 = howOf(miss2), f2 = miss2.c.activePlan().final;
   const doSec2 = (vis(R.leftHtml(miss2)).match(/この案で実現すること[\s\S]*?(?=この案の制約|仮案からの補足|確認できないこと|動作テスト環境へ反映)/) || [''])[0];
   assert(f2.approvable === false && miss2.c.activePlan().generated.C2.status !== 'verified' && !/（PC・モバイル）/.test(how2)
-    && count(how2, `${COND3}${REALIZED}（PC）`) === 1 && count(how2, `${COND3}「明細」の品名・単価のセルを編集できなくなります（モバイル）`) === 1 && count(how2, `${COND3}「金額」を編集できなくなります（モバイル）`) === 1
-    && !/編集できなくなります/.test(doSec2),
+    && count(how2, `${REALIZED}（PC）。`) === 1 && count(how2, `${REALIZED_COND}明細の品名・単価を編集できなくします（モバイル）。`) === 1 && count(how2, `${REALIZED_COND}金額を編集できなくします（モバイル）。`) === 1
+    && count(how2, `${REALIZED_COND}金額を編集できなくします（PC）。`) === 1 && !/編集できなくします/.test(doSec2),
     `D12-10c: 片方の JavaScript が検証済みでなければ、PC・モバイルの文をまとめず画面ごとに残す（左に計画の差として足さない）: ${JSON.stringify({ approvable: f2.approvable, how: how2.replace(/\s+/g, ' ').slice(-400) })}`);
 });
 
@@ -626,6 +633,49 @@ await section(async () => {
   //   反映の前の確認の確認項目は、同じ文の後ろに確かめ方（HOW_TO_CHECK の coverage-owner）を括弧で添える
   assert(ledgerR4 && JSON.stringify(ledgerR4.planRefs) === '["C1"]' && fin && fin.approvable === true && pre && pre.status === 'ready' && confs.filter(t => t === `${line}（計画のどの手順で扱われているかを変更内容の「何が変わるか」で確かめ、扱われていなければ計画を直す）`).length === 1 && !confs.some(t => OWNERLESS_RE.test(t)) && count(L, line) === 1 && count(RV, line) === 1 && !OWNERLESS_RE.test(L + RV),
     `D7-1: 画面の反映の前の確認の確認項目・左のカード・右の変更内容に同じ文 1 回ずつ（「担当範囲外とされた要件…計画に見つかりません」は出ない。反映は止めない）: ${JSON.stringify({ planRefs: ledgerR4 && ledgerR4.planRefs, approvable: fin && fin.approvable, status: pre && pre.status, confs })}`);
+});
+
+// =========================================================
+console.log('\n--- §D13. 説明文を読みやすくする（2026-10-16 の指示）: 条件 → 対象 → 動作 → 画面の 1 文・画面は 1 回・条件を推測で分けない・判定は変えない ---');
+await section(async () => {
+  //   実現した部分の文は、満たした必須の動作の構造化した条件式（例 ステータス in ("承認済み")）を既存の条件式の文（condSentenceOf）にして「…の場合、」でつなぐ。
+  //   1 つに決まらない・文にできないときは要件の台帳の条件の文をそのまま使い、1 つの句なら「…の場合、」、2 文以上なら別の行（文を解析して条件と画面に分けない）
+  const remap = (refs, over = {}) => (n, args) => (n !== 0 ? [] : (args.requirements || []).filter(r => r && r.id === 'R3').map(r => ({ op: 'update', id: r.id, target: r.target, condition: r.condition, behavior: r.behavior, exceptions: clone(r.exceptions || []), decision: 'decided', disposition: 'adopted', sourceQuotes: clone(r.sourceQuotes || []), planRefs: refs, decisionRefs: [], effects: clone(r.effects || []), note: '', ...over })));
+  const drop = (cid) => (plan) => { plan.customizations = plan.customizations.filter(c => c.customizationId !== cid); plan.steps = plan.steps.filter(s => s.id !== cid); return plan; };
+  const setCond = (cids, cond) => (plan) => { for (const c of plan.customizations.filter(z => cids.includes(z.customizationId))) for (const f of c.fields) if (f.access === 'CONTROL') f.condition = cond; return plan; };
+  const realizedOf = (xx) => xx.c.activePlan().final.behaviors.filter(b => /を編集できなくします/.test(b));
+  const liOf = (xx) => (R.rightHtml(xx).match(/<li>[^<]*(?:<br>[^<]*)*を編集できなくします[^<]*(?:<br>[^<]*)*<\/li>/g) || []);
+  //   (1) 画面: PC だけ・モバイルだけ・両方を正確に（同じ文に画面の表記を 2 回出さない）
+  const pcOnly = await R.run({ planMutate: drop('C2') }), mobOnly = await R.run({ planMutate: drop('C1') }), both = await R.run();
+  const ALL3 = `${REALIZED_COND}明細の品名・数量・単価を編集できなくします`;
+  assert(JSON.stringify(realizedOf(pcOnly)) === JSON.stringify([`${ALL3}（PC）。`]) && JSON.stringify(realizedOf(mobOnly)) === JSON.stringify([`${ALL3}（モバイル）。`]) && JSON.stringify(realizedOf(both)) === JSON.stringify([`${ALL3}（PC・モバイル）。`])
+    && [pcOnly, mobOnly, both].every(xx => realizedOf(xx).every(t => (t.match(/PC|モバイル/g) || []).length === (t.includes('PC・モバイル') ? 2 : 1))),
+    `D13-1: 画面は PC だけ・モバイルだけ・両方を文末に 1 回（条件の中に画面の語を重ねない）: ${JSON.stringify([realizedOf(pcOnly), realizedOf(mobOnly), realizedOf(both)])}`);
+  //   (2) 条件が違う素材を同じ意味に丸めない: モバイルの条件式だけ「承認済み・部長承認待ち」にする。まとめ方（鍵）は今のままなので PC とモバイルは 1 文のまま、
+  //   条件は 1 つの条件式に決まらないので構造化した条件の文を出さない（対応づけた版は要件の台帳の条件の文を別の行に、対応づけの無い版は条件を付けない）
+  const DIFF = 'ステータス in ("承認済み", "部長承認待ち")';
+  const diffMap = await R.run({ planOps: remap(['C1', 'C2']), planMutate: setCond(['C2'], DIFF) }), diffBase = await R.run({ planMutate: setCond(['C2'], DIFF) });
+  assert(JSON.stringify(realizedOf(diffMap)) === JSON.stringify(['金額を編集できなくします（PC・モバイル）。\n条件: 承認済み。PCとモバイルの両方', '明細の品名・数量・単価を編集できなくします（PC・モバイル）。\n条件: 承認済み。PCとモバイルの両方'])
+    && JSON.stringify(realizedOf(diffBase)) === JSON.stringify(['明細の品名・数量・単価を編集できなくします（PC・モバイル）。']) && ![diffMap, diffBase].some(xx => realizedOf(xx).some(t => t.includes(REALIZED_COND) || /部長承認待ち」の場合/.test(t))),
+    `D13-2: PC とモバイルで条件式が違うときは、どちらか一方の条件の文に丸めない: ${JSON.stringify([realizedOf(diffMap), realizedOf(diffBase)])}`);
+  //   (3) 構造化した条件式を文にできない（関数の条件）: 要件の台帳の条件の文を使う。2 文以上は解析せずに別の行（右は改行で描く）、1 つの句は「…の場合、」、「とき」で終わる句は「…、」
+  const FN = 'owner in (LOGINUSER())';
+  const fn2 = await R.run({ planOps: remap(['C1', 'C2']), planMutate: setCond(['C1', 'C2'], FN) });
+  const fn1 = await R.run({ planOps: remap(['C1', 'C2'], { condition: '承認済み' }), planMutate: setCond(['C1', 'C2'], FN) });
+  const fnT = await R.run({ planOps: remap(['C1', 'C2'], { condition: '承認済みのとき' }), planMutate: setCond(['C1', 'C2'], FN) });
+  assert(liOf(fn2).includes('<li>金額を編集できなくします（PC・モバイル）。<br>条件: 承認済み。PCとモバイルの両方</li>') && !/両方の場合|両方では/.test(liOf(fn2).join(''))
+    && realizedOf(fn1).includes('承認済みの場合、金額を編集できなくします（PC・モバイル）。') && realizedOf(fnT).includes('承認済みのとき、金額を編集できなくします（PC・モバイル）。')
+    && ![fn2, fn1, fnT].some(xx => realizedOf(xx).some(t => /LOGINUSER|owner/.test(t))),
+    `D13-3: 構造が足りないときは台帳の条件の文をそのまま（2 文以上は別の行・1 つの句はつなぐ）。条件式の内部の表記は文に混ぜない: ${JSON.stringify([liOf(fn2), realizedOf(fn1), realizedOf(fnT)])}`);
+  //   (4) 判定・確認事項は文の変更で変わらない（素材ごとの承認の可否・止める理由の種類・反映の前の確認事項。§D12-10 の確認事項の値も同じ）
+  //   期待の値は、文を直す前の本体（1d21c2c）で同じ素材から出した値（KT_SRC で確かめた）
+  const judge = (xx) => { const v = xx.c.activePlan(), f = v.final; const conf = ['C1', 'C2', 'C3'].filter(cid => v.generated[cid]).flatMap(cid => (R.recheckOf(xx, cid).registration.confirmations || []).map(c => `${cid}:${c.code}`)); return [f.approvable, f.blockers.map(b => b.kind).sort(), conf]; };
+  const WANT_JUDGE = JSON.stringify([[true, [], ['C1:patch-removal']], [false, ['ownerless'], ['C1:patch-removal']], [false, ['ownerless'], []], [true, [], ['C1:patch-removal', 'C2:coverage-unmet']], [true, [], ['C1:patch-removal', 'C2:coverage-unmet']]]);
+  assert(JSON.stringify([both, pcOnly, mobOnly, diffMap, fn2].map(judge)) === WANT_JUDGE,
+    `D13-4: 承認の可否・止める理由・反映の前の確認事項の件数は文の形に関係しない: ${JSON.stringify([both, pcOnly, mobOnly, diffMap, fn2].map(judge))}`);
+  //   (5) 制約の行: 理由を別に持つ構造の行は「本体（画面）。理由。」、それ以外（AI の申告の文など）は今までどおり「画面: 文」
+  assert(KTAiChatUi.constraintLineOf({ text: ROW_TEXT, reason: ROW_REASON, platforms: ['desktop', 'mobile'] }) === ROWS && KTAiChatUi.constraintLineOf({ text: '一覧の画面のセルは対象外', platforms: ['mobile'] }) === 'モバイル: 一覧の画面のセルは対象外' && KTAiChatUi.constraintLineOf({ text: ROW_TEXT, reason: ROW_REASON }) === `${ROW_TEXT}。${ROW_REASON}。`,
+    'D13-5: 制約の行の文（構造の行は画面を本体の直後に 1 回・AI の申告の行は今までどおり）');
 });
 
 console.log(`\n${state.failed === 0 ? 'ALL PASSED' : 'FAILED'}: ${state.passed} passed / ${state.failed} failed`);
