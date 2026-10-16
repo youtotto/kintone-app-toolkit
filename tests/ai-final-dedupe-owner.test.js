@@ -413,7 +413,7 @@ await section(async () => {
   const para = await R.run({ reqMutate: (r) => (r.id === 'R2' ? { ...r, condition: '金額が1,000,000円未満', behavior: '課長の承認とする' } : r.id === 'R3' ? { ...r, behavior: '金額と明細を変更できないようにする' } : r.id === 'R4' ? { ...r, behavior: '今の入力チェックを引き続きPCとモバイルで使う' } : r) });
   assert(para.c.activePlan().final.approvable === true && !blockTexts(para).length && para.calls.plan.length === 1 && !(para.c.activePlan().final.unconfirmedReqs || []).length,
     `D10-5: 言い回しを変えても合否と自動の見直しの回数は変わらない: ${JSON.stringify({ approvable: para.c.activePlan().final.approvable, blockers: blockTexts(para), plan: para.calls.plan.length })}`);
-  //   (6) 警告の合意の有無: 利用者が「警告も出して」と言い、計画の AI がその要件を構造化した効果（warn）で記録した → 警告を持たない JavaScript では明確な欠落・生成の検証の不一致で止める。
+  //   (6) 警告の合意の有無（台本の模擬の利用者の発言。実際の会話の記録ではない）: 利用者が「警告も出して」と言い、計画の AI がその要件を構造化した効果（warn）で記録した → 警告を持たない JavaScript では明確な欠落・生成の検証の不一致で止める。
   //   計画の AI が依頼に無い警告を JavaScript に足した → 採用範囲を超えた計画として外す（対応づけがあるとき。警告に実装を合わせることを正解にしない）
   let addedU = false;
   const U = K.req('add', { target: '金額', condition: '承認待ち', behavior: '画面に警告を出す', sourceQuotes: ['警告も出して'], planRefs: ['C1'], effects: ['warn'] });
