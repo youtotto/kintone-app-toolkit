@@ -521,11 +521,12 @@ console.log('\n--- §20. 読みやすさ: AI の文は段落と箇条書き（AI
   await ticks();
   await adopt(m);
   const rv = m.$('kt-ai-review-result').innerHTML;
-  const iDecide = rv.indexOf('必要な判断'), iSteps = rv.indexOf('手順ごとの判定と判断'), iDetail = rv.indexOf('詳しく（Toolkit で確認した結果の内訳');
-  assert(iDecide >= 0 && iDecide < iSteps && iSteps < iDetail && /設定の手順 2 件のうち、承認すると動作テスト環境へ反映できるのは 2 件です。/.test(rv) && /反映は最終案のカードの［動作テスト環境へ反映］で一度に行います/.test(rv), `確認結果: 必要な判断 → 手順 → 詳しく の順: ${iDecide} ${iSteps} ${iDetail}`);
+  //   簡素化 D・E（2026-10-16）: 手順ごとの承認・保留は削除し、承認は最終案の 1 回（見出しは「手順ごとの判定」・欄は［この手順を反映しない］だけ）
+  const iDecide = rv.indexOf('必要な判断'), iSteps = rv.indexOf('手順ごとの判定'), iDetail = rv.indexOf('詳しく（Toolkit で確認した結果の内訳');
+  assert(iDecide >= 0 && iDecide < iSteps && iSteps < iDetail && /設定の手順 2 件のうち、動作テスト環境へ反映できるのは 2 件です。/.test(rv) && /反映は最終案のカードの［動作テスト環境へ反映］で一度に行います/.test(rv), `確認結果: 必要な判断 → 手順 → 詳しく の順: ${iDecide} ${iSteps} ${iDetail}`);
   const step = (rv.match(/<div class="kt-ai-review-step"[\s\S]*?<\/details>\s*<\/div>/) || [''])[0];
   const visible = step.replace(/<details[\s\S]*?<\/details>/g, '');
-  assert(/kt-ai-step-verdict/.test(visible) && /問題は見つかりませんでした。承認すると反映の対象になります。/.test(visible) && /class="btn kt-ai-decision"/.test(visible) && !/<span style="display:inline-block; font-size:10px; padding:0 6px; border-radius:8px; border:1px solid/.test(visible) && /＋ 新規/.test(step), '手順: 1 文の判定と判断を出す。色付きのバッジは［詳しく］の中だけ');
+  assert(/kt-ai-step-verdict/.test(visible) && /問題は見つかりませんでした。最終案の［動作テスト環境へ反映］で反映します。/.test(visible) && /type="checkbox" class="kt-ai-decision"/.test(visible) && /この手順を反映しない（外す）/.test(visible) && !/承認<\/option>|保留<\/option>/.test(rv) && !/<span style="display:inline-block; font-size:10px; padding:0 6px; border-radius:8px; border:1px solid/.test(visible) && /＋ 新規/.test(step), '手順: 1 文の判定と［この手順を反映しない］だけを出す（承認・保留の選択は無い）。色付きのバッジは［詳しく］の中だけ');
 }
 {
   const m = mount({ plans: (ctx) => (ctx.revision ? PLAN_V2 : PLAN_V1) });

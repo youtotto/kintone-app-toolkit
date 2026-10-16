@@ -322,8 +322,9 @@ console.log('\n--- 3. AI タブ（mountRoot / switch / minimized / 旧 Templates
   const m = mount();
   await ticks();
   const html = m.host.innerHTML;
-  const MIGRATED = { 'AI Prompt': 'kt-ai-copy-prompt', Markdown: 'kt-ai-copy-md', JSON: 'kt-ai-copy-json', Connection: 'kt-ai-connect-start', Assistant: 'kt-ai-ask', Planner: 'kt-ai-plan', Review: 'kt-ai-plan-result', Executor: 'kt-ai-pane-plan', Rollback: 'kt-ai-pane-plan', Composer: 'kt-ai-input' };
-  assert(Object.values(MIGRATED).every(id => html.includes(`id="${id}"`)), `移行一覧: ${Object.keys(MIGRATED).join(' / ')} の要素が AI タブにある`);
+  //   簡素化 E（2026-10-16）: Context ペインの［変更計画を作成］（kt-ai-plan。仮案を経ない計画 → 手順ごとの承認 → 反映の入口）は削除した。計画は会話の仮案から作る
+  const MIGRATED = { 'AI Prompt': 'kt-ai-copy-prompt', Markdown: 'kt-ai-copy-md', JSON: 'kt-ai-copy-json', Connection: 'kt-ai-connect-start', Assistant: 'kt-ai-ask', Review: 'kt-ai-plan-result', Executor: 'kt-ai-pane-plan', Rollback: 'kt-ai-pane-plan', Composer: 'kt-ai-input' };
+  assert(Object.values(MIGRATED).every(id => html.includes(`id="${id}"`)) && !html.includes('id="kt-ai-plan"'), `移行一覧: ${Object.keys(MIGRATED).join(' / ')} の要素が AI タブにある（Context ペインの［変更計画を作成］は無い）`);
   await adoptScreen(m);
   const plan = m.$('kt-ai-plan-result').innerHTML;
   assert(!plan.includes('id="kt-ai-review"') && m.$('kt-ai-review-result').innerHTML.includes('id="kt-ai-review"') && /動作テスト環境への反映/.test(m.$('kt-ai-exec').innerHTML) && m.$('kt-ai-exec').innerHTML.includes('kt-ai-apply-note') && m.$('kt-ai-exec-empty').style.display === 'none', '2026-10-06: 「変更内容」は AI の提案だけ。Toolkit で確認した結果は右の「確認結果」、動作テスト環境への反映は右のタブ「反映」（§0e.1: 最終案の流れでは、反映の操作は最終案のカードの［動作テスト環境へ反映］）');
@@ -508,10 +509,26 @@ console.log('\n--- 5. AI Workspace: 会話（ASK / PLAN / REVISE / EXPLAIN / PRE
     assert(pre.status === 'ready' && pre.items.settings.length === 1 && pre.items.manual.length === 0 && writes(m).length === w0 && /反映の前の確認（書き込みなし）/.test(m.chat()) && !m.conv().activePlan().approval, '承認の欄: 反映する設定 1 件（既存フィールドの利用は書き込みが要らないので手動の一覧に出さない）。準備は書き込まず、まだ承認しない'); }
   const ar5 = await applyScreen(m);
   assert(ar5.button && ar5.button.label === '動作テスト環境へ反映' && !ar5.button.disabled && ar5.run && ar5.run.stage === 'done' && ar5.run.ok && JSON.stringify(ar5.writes) === '["PUT views"]', '最終案のカードの［動作テスト環境へ反映］1 回で承認と反映（実行できる 1 件だけを書き込む）');
+  //   簡素化 E（2026-10-16）: 手順ごとの承認の経路のテスト（ai-plan-executor-ui）にあった、右の「反映」の監査 JSON の保存・実行前スナップショットのコピーを最終案の流れで確かめる
+  { const d0 = m.downloads.length, c0 = m.copies.length;
+    await clickExec(m, 'kt-ai-exec-audit-download'); await clickExec(m, 'kt-ai-exec-snapshot-copy');
+    const dl = m.downloads[d0], snap = m.copies.length > c0 ? JSON.parse(m.copies[m.copies.length - 1]) : null;
+    assert(dl && /^toolkit-ai-execution-ex_.*\.json$/.test(dl.name) && JSON.parse(dl.text).auditVersion === '2' && JSON.parse(dl.text).execution.status === 'DONE' && snap && snap.views && !(snap.views.views || {})['担当者別'], `右の「反映」: 監査 JSON を保存（ファイル名に executionId）・実行前スナップショットをコピー（追加前の一覧）: ${dl && dl.name}`); }
   await m.panel.send('これで進めたい'); await ticks();
   const pr2 = m.msgs()[m.msgs().length - 1];
   assert(pr2.data.kind === 'preview-approved' && /承認済みです/.test(pr2.text) && !/動作テスト環境へ反映する準備ができました/.test(m.chat()), 'REQUEST_PREVIEW（承認・反映の後）: 結果の場所を案内するだけ');
   assert(writes(m).length === w0 + 1 && !/id="kt-ai-exec-confirm"/.test(m.$('kt-ai-exec').innerHTML), 'チャットでは Executor を開始しない（新しい書き込み・最終確認は出ない）');
+}
+{
+  // 簡素化 E（2026-10-16）: 仮案から作っていない計画（以前は Context ペインの［変更計画を作成］で作れた。今は会話の登録を直接呼んだときだけ）は、
+  //   手順をすべて外さずに置いても、反映の準備も書き込みもしない（手順ごとの承認から反映へ進む経路は削除した）
+  const m = mount();
+  await ticks();
+  const v = m.conv().registerPlan({ plan: PLAN_V1.plan, ctx: null, review: KTPlanReview.review({ plan: PLAN_V1.plan, ...INPUTS }) });
+  await ticks(4);
+  const prepared = await m.panel.startExecutor();
+  const rConfirm = await m.panel.confirmExecutor();
+  assert(v && !v.fromDraft && prepared === null && rConfirm === null && writes(m).length === 0 && m.panel.executorState().stage === 'idle' && m.msgs().some(x => x.data && x.data.reason === 'NOT_FINAL'), '仮案から作っていない計画は、反映の準備も書き込みもしない（理由: 反映は仮案から作った最終案の承認のときだけ）');
 }
 
 // =========================================================

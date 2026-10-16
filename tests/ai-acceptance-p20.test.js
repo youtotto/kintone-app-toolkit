@@ -506,10 +506,11 @@ console.log('\n--- U2 / U3. 文言と最終確認の確認事項 ---');
   const rv = reviewOf(p);
   const mock = makeKintoneMock(DATA);
   const prepared = await KTPlanExecutor.prepare(KTPlanReview.executorOutput(p, rv, ['P1']), { api: mock.api, appId: '310' });
-  const confirmHtml = KTContextUi.executorHtml({ stage: 'confirm', prepared, execution: null, classified: KTPlanExecutor.classifySteps(KTPlanReview.executorOutput(p, rv, ['P1'])), available: true, review: rv, questions: ['通知の送信時間は何時が適切ですか？', '通知対象の担当者は tantou_user でよいですか？'] });
-  assert(/id="kt-ai-exec-questions"/.test(confirmHtml) && /未回答の確認事項が 2 件あります/.test(confirmHtml) && /通知の送信時間は何時が適切ですか/.test(confirmHtml), 'U3: 最終確認に未回答の確認事項（仮の値のまま反映される）');
-  const noQ = KTContextUi.executorHtml({ stage: 'confirm', prepared, execution: null, classified: [], available: true, review: rv, questions: [] });
-  assert(!/kt-ai-exec-questions/.test(noQ), '確認事項が無ければ出さない');
+  //   簡素化 E（2026-10-16）: 手順ごとの承認の後の最終確認の段（未回答の確認事項・［キャンセル］［動作テスト環境へ反映］）は削除した。
+  //   反映は最終案のカードの［動作テスト環境へ反映］1 回で、未回答の確認事項（先に決めたいこと・後で決めてよいこと）は最終案のカードが出す（ai-flow-redesign の指示 A7・B6）。
+  //   ここでは、反映の画面に最終確認の段（書き込みのボタン）が戻っていないことだけを確かめる
+  const confirmHtml = KTContextUi.executorHtml({ stage: 'confirm', prepared, execution: null, classified: KTPlanExecutor.classifySteps(KTPlanReview.executorOutput(p, rv, ['P1'])), available: true, review: rv, questions: ['通知の送信時間は何時が適切ですか？'] });
+  assert(!/id="kt-ai-exec-confirm"|id="kt-ai-exec-go"|id="kt-ai-exec-start"/.test(confirmHtml), 'U3: 反映の画面に最終確認の段と書き込みのボタンは無い（反映は最終案のカードの 1 回。未回答の確認事項は最終案のカードで出す）');
   const log = await KTPlanExecutor.executePreview(prepared, { api: mock.api, review: rv, data: DATA });
   const doneHtml = KTContextUi.executorHtml({ stage: 'done', prepared, execution: log, classified: [], available: true, review: rv });
   assert(/運用環境への反映は kintone のアプリ設定画面の［アプリを更新］で行います。Toolkit は運用環境へ反映しません/.test(doneHtml) && !/Executor/.test(doneHtml), 'U2: 結果の文言に Executor を出さない');

@@ -69,66 +69,54 @@ function mount({ planResponse = PLAN_B, inputs = INPUTS } = {}) {
   const $ = (id) => host.querySelector(`#${id}`);
   return { host, panel, $, copies };
 }
-async function runPlan(m) {
-  m.panel.setMode('plan');
-  m.$('kt-ai-goal').value = GOAL;
-  await m.$('kt-ai-generate').dispatch('click');
-  await m.$('kt-ai-plan').dispatch('click'); await tick(); await tick();
-  // Phase 19: 右 Workspace は 計画 / 検証 / 実行 のペインに分かれた。従来どおり 1 つの文字列として検証する
-  return m.$('kt-ai-plan-result').innerHTML + m.$('kt-ai-review-result').innerHTML + m.$('kt-ai-exec').innerHTML;
-}
+// 簡素化 D・E（2026-10-16）: Context ペインの［変更計画を作成］（仮案を経ない計画 → 手順ごとの承認 → 反映の入口）は削除した。
+//   右の「計画」「確認結果」は会話の計画を同じ部品（KTContextUi.planHtml・reviewHtml）で描くので、ここでは部品を同じ呼び方で使って表示を確かめる。
+//   手順ごとの承認・保留は削除し、欄は［この手順を反映しない］だけ（外した手順は最終案の承認の指紋に入る。画面での確認は tests/ai-workspace-ux.test.js）
+const planOf = (raw) => { const v = KTAiClient.validatePlan(raw, PCTX); return { ...v.normalized, clientWarnings: v.warnings }; };
+const screenHtml = (plan, review, opts = {}) => KTContextUi.planHtml(plan, null, { data: INPUTS.data, ctx: PCTX }) + KTContextUi.reviewHtml(review, plan, opts);
 
 (async () => {
-console.log('\n--- 1. 実行前レビューの表示 ---');
+console.log('\n--- 1. 確認結果の表示（右の「計画」「確認結果」と同じ部品）---');
 {
-  const m = mount();
-  await tick();
-  const h = await runPlan(m);
-  const rev = m.panel.lastReview();
-  assert(rev && rev.reviewVersion === '1' && rev.steps.length === 8, 'plan 受信後に KTPlanReview.review が実行される');
-  assert(h.includes('Toolkit で確認した結果') && h.includes('安全に追加できる変更') && h.includes('確認が必要') && h.includes('実行不可') && h.includes('計画のみ'), 'review summary: ✓ 安全 / △ 確認 / × 実行不可 / ○ 計画のみ');
-  assert(h.includes('追加：') && h.includes('既存変更：') && h.includes('高リスク変更：') && h.includes('競合候補：') && h.includes('確認事項：') && h.includes('無効：'), 'Change Risk Summary は件数で表示');
+  const plan = planOf(PLAN_B);
+  const rev = KTPlanReview.review({ plan, ...INPUTS });
+  const h = screenHtml(plan, rev);
+  assert(rev && rev.reviewVersion === '1' && rev.steps.length === 8, '計画を Toolkit が確認する（KTPlanReview.review）');
+  assert(h.includes('Toolkit で確認した結果') && h.includes('動作テスト環境への自動反映') && !h.includes('安全に追加できる変更') && !h.includes('AI の説明より優先'), 'review summary: 反映の件数は反映の分類の 1 か所（安全区分から別に数えた 4 行と「AI の説明より優先」の包括的な文は出さない）');
+  assert(h.includes('追加：') && h.includes('既存変更：') && h.includes('高リスク変更：') && h.includes('競合候補：') && h.includes('確認事項：') && h.includes('無効：'), 'Change Risk Summary は件数で表示（［詳しく］の中）');
   const er = rev.executionReadiness;
-  assert(er.safeSteps.includes('P1') && er.reviewSteps.includes('P2') && er.reviewSteps.includes('P4') && er.blockedSteps.includes('P7') && er.planOnlySteps.includes('P8'), `safe / review / blocked / plan-only の振り分け（${JSON.stringify(er)}）`);
-  assert(h.includes('以下は AI の提案です') && h.includes('Toolkit で確認した結果') && h.indexOf('kt-ai-review-step" data-step="P1"') > h.indexOf('<b>P1</b>'), 'AI 提案と Toolkit 検証を分けて表示（各 step の下に Toolkit の結果）');
-  const p4 = h.slice(h.indexOf('data-step="P4"'));
-  assert(p4.includes('確認が必要') && p4.includes('Before:') && p4.includes('After:') && p4.includes('amount &lt; &quot;1000000&quot;') && p4.includes('すべて') && p4.includes('実行できます'), 'step UI: 既存アクションの条件変更に Before / After と「現在可能な操作が制限される」注意');
+  assert(er.safeSteps.includes('P1') && er.reviewSteps.includes('P2') && er.reviewSteps.includes('P4') && er.blockedSteps.includes('P7') && er.planOnlySteps.includes('P8'), `safe / review / blocked / plan-only の振り分け（確認結果のデータ。表示はしない）（${JSON.stringify(er)}）`);
+  assert(h.includes('以下は AI の提案です') && h.includes('Toolkit で確認した結果') && h.indexOf('kt-ai-review-step" data-step="P1"') > h.indexOf('<b>P1</b>'), 'AI 提案と Toolkit 検証を分けて表示（計画の下に Toolkit の結果）');
+  const p4 = h.slice(h.indexOf('kt-ai-review-step" data-step="P4"'));
+  assert(p4.includes('内容を確かめてください') && p4.includes('Before:') && p4.includes('After:') && p4.includes('amount &lt; &quot;1000000&quot;') && p4.includes('すべて') && p4.includes('実行できます'), 'step UI: 既存アクションの条件変更に Before / After と「現在可能な操作」（承認は最終案の 1 回なので「確かめてください」）');
   assert(h.includes('競合・重複の候補') && h.includes('高額案件の登録') && h.includes('高額案件通知') && h.includes('>既存<') && h.includes('>提案<') && h.includes('通知先:'), 'conflict UI: 既存「高額案件の登録」と提案「高額案件通知」を通知先付きで並べる');
-  assert(h.includes('プロセス管理の変更前後') && h.includes('class="kt-ai-mermaid" data-side="before"') && h.includes('data-side="after"') && h.includes('部長承認待ち') && h.includes('flowchart LR'), 'Process diff: Before / After の Mermaid（コード表示。mermaid があれば描画）');
-  assert(h.includes('kt-ai-new-field') && h.includes('部長承認者') && h.includes('既存の「承認者」') , 'proposed field: 新規フィールド枠と Toolkit の再利用候補の指摘（POSSIBLE_EXISTING_REUSE）');
+  assert(h.includes('プロセス管理の変更前後') && h.includes('class="kt-ai-mermaid" data-side="before"') && h.includes('data-side="after"') && h.includes('部長承認待ち') && h.includes('flowchart LR'), 'Process diff: Before / After の Mermaid');
+  assert(h.includes('kt-ai-new-field') && h.includes('部長承認者') && h.includes('既存の「承認者」'), 'proposed field: 新規フィールド枠と Toolkit の再利用候補の指摘（POSSIBLE_EXISTING_REUSE）');
   assert(h.includes('Planner の影響範囲に JS が含まれていません') || h.includes('PLANNER_IMPACT'), 'impact mismatch: customer_code を参照する JS を Planner が挙げていない');
   const p8 = h.slice(h.indexOf('kt-ai-review-step" data-step="P8"'));
-  assert(p8.includes('計画のみ') && p8.includes('対象外'), 'unsupported action（CUSTOMIZATION_REQUIRED）は無視せず「計画のみ」と明示');
+  assert(p8.includes('反映できません') && !p8.includes('コードを作る'), `JavaScript の手順（customization の無い CUSTOMIZATION_REQUIRED）は無視せず「反映できません」と理由を出す（［コードを作る］は出さない）: ${p8.slice(0, 160)}`);
   assert(h.includes('kt-ai-review-diff-toggle') && h.includes('kt-ai-review-json-toggle') && h.includes('kt-ai-review-json-copy') && h.includes('kt-ai-review-raw-toggle') && h.includes('検証範囲:'), 'ボタン（変更前後を比較 / Review JSON / Raw Diff）と検証範囲');
-  // Before / After トグル・Review JSON
-  await m.$('kt-ai-plan-result').dispatch({ type: 'click', target: { id: 'kt-ai-review-diff-toggle' } });
-  await m.$('kt-ai-plan-result').dispatch({ type: 'click', target: { id: 'kt-ai-review-diff-toggle' } });
   const dh = h.slice(h.indexOf('id="kt-ai-review-diff"'), h.indexOf('id="kt-ai-review-json"'));
-  assert(m.$('kt-ai-review-diff').style.display === '' && dh.includes('＋ 新規フィールド「部長承認者」') && dh.includes('必須: false → true'), '変更前後を比較: 人間が読める差分（変更のある属性だけ）');
-  await m.$('kt-ai-plan-result').dispatch({ type: 'click', target: { id: 'kt-ai-review-json-copy' } });
-  const out = JSON.parse(m.copies[m.copies.length - 1]);
+  assert(dh.includes('＋ 新規フィールド「部長承認者」') && dh.includes('必須: false → true'), '変更前後を比較: 人間が読める差分（変更のある属性だけ）');
+  const out = KTPlanReview.executorOutput(plan, rev);
   assert(out.outputVersion === '1' && out.plan.planVersion === '1' && out.review.reviewVersion === '1' && out.review.steps.every(s => s.stepId) && out.approvedSteps.length === 0 && !out.review.simulation.after, 'Review JSON: { plan, review, approvedSteps: [] }（stepId は安定・After モデルは含めない）');
-  // 判断（承認 / 保留 / 却下）
-  m.panel.decide('P1', 'approve'); m.panel.decide('P2', 'hold');
-  assert(m.panel.reviewOutput().approvedSteps.join() === 'P1', '判断: 承認した step だけ approvedSteps に入る（保存はしない）');
-  await m.$('kt-ai-plan-result').dispatch({ type: 'change', target: { dataset: { step: 'P4' }, value: 'reject' } });
-  assert(!m.panel.reviewOutput().approvedSteps.includes('P4'), 'select の change で判断を記録');
-  // staging E2E で発見: 表示中の Review JSON と判断の集計は、判断を変えたら追従する（コピーだけ最新だった）
-  await m.$('kt-ai-plan-result').dispatch({ type: 'change', target: { dataset: { step: 'P2' }, value: 'approve' } });
-  const shown = JSON.parse(m.$('kt-ai-review-json').textContent);
-  assert(shown.approvedSteps.join() === 'P1,P2', 'Review JSON の表示が判断に追従する');
-  const dsum = m.$('kt-ai-review-decisions').textContent;
-  assert(/承認 2/.test(dsum) && /却下 1/.test(dsum) && /未定/.test(dsum), '判断の集計（承認 / 保留 / 却下 / 未定）を表示');
-  assert(JSON.stringify(INPUTS.data) === SNAPSHOT, 'UI 経由でも DATA は変更しない');
+  //   外す指定（簡素化 E）: 外した手順は承認した手順に入らない・確認結果に外した手順と欄の印が出る。承認・保留・未定の集計は出さない
+  const outEx = KTPlanReview.executorOutput(plan, rev, rev.steps.map(s => s.stepId).filter(id => id !== 'P4'));
+  assert(!outEx.approvedSteps.includes('P4') && outEx.approvedSteps.length === rev.steps.filter(r => r.safety !== 'BLOCKED' && r.stepId !== 'P4').length, '外した手順（P4）は承認した手順に入らない（反映できない手順は最初から入らない）');
+  const hx = KTContextUi.reviewHtml(rev, plan, { excluded: ['P4'] });
+  const p4x = hx.slice(hx.indexOf('kt-ai-review-step" data-step="P4"'));
+  assert(/外した手順: P4/.test(hx) && /type="checkbox" class="kt-ai-decision" data-step="P4" checked/.test(p4x) && !/承認 \d|保留 \d|未定 \d/.test(hx) && !/<option value="approve"/.test(hx), '外した手順を出し、その手順の［この手順を反映しない］に印を付ける（承認・保留・未定の集計と選択は無い）');
+  assert(KTContextUi.decisionSummary(rev, []) === '', '外した手順が無ければ何も出さない');
+  assert(JSON.stringify(INPUTS.data) === SNAPSHOT, '確認と表示で DATA は変更しない');
 }
 
-console.log('\n--- 2. 回帰（Planner UI / Q&A / Free）---');
+console.log('\n--- 2. 回帰（計画の表示 / Q&A / Free）---');
 {
-  const m = mount({ planResponse: { ...PLAN_B, plan: { ...PLAN_B.plan, steps: [mkStep('P1', 'ADD_FIELD', 'PROPOSED_FIELD', 'NEW_FIELD_1', { fieldType: 'USER_SELECT' })] } } });
-  await tick();
-  const h = await runPlan(m);
-  assert(h.includes('変更計画（AI の提案）') && h.includes('＋ 新規フィールド') && h.includes('kt-ai-plan-json-toggle') && h.includes('Toolkit で確認した結果'), '既存 Planner UI（AI 提案の表示・JSON）は維持されつつレビューが付く');
-  assert(m.panel.lastReview().executionReadiness.status === 'REVIEW_REQUIRED' || m.panel.lastReview().executionReadiness.status === 'SAFE', '単純な追加計画は SAFE / REVIEW_REQUIRED');
+  const plan = planOf({ ...PLAN_B, plan: { ...PLAN_B.plan, steps: [mkStep('P1', 'ADD_FIELD', 'PROPOSED_FIELD', 'NEW_FIELD_1', { fieldType: 'USER_SELECT' })] } });
+  const rev = KTPlanReview.review({ plan, ...INPUTS });
+  const h = screenHtml(plan, rev);
+  assert(h.includes('変更計画（AI の提案）') && h.includes('＋ 新規フィールド') && h.includes('kt-ai-plan-json-toggle') && h.includes('Toolkit で確認した結果'), '計画の表示（AI 提案の表示・JSON）と確認結果');
+  assert(rev.executionReadiness.status === 'REVIEW_REQUIRED' || rev.executionReadiness.status === 'SAFE', '単純な追加計画は SAFE / REVIEW_REQUIRED');
   // Q&A（質問する）は変わらない
   const qa = mount();
   await tick();
@@ -137,7 +125,7 @@ console.log('\n--- 2. 回帰（Planner UI / Q&A / Free）---');
   qa.$('kt-ai-question').value = 'このアプリの構造は？';
   await qa.$('kt-ai-generate').dispatch('click');
   await qa.$('kt-ai-copy-prompt').dispatch('click');
-  assert(qa.copies.length === 1 && qa.copies[0].includes('## Context') && qa.$('kt-ai-plan-result').style.display === 'none' && qa.panel.lastReview() === null, 'Assistant Q&A / Free AI docs は影響なし（レビューは走らない）');
+  assert(qa.copies.length === 1 && qa.copies[0].includes('## Context') && qa.$('kt-ai-plan-result').style.display === 'none' && qa.panel.lastReview() === null && !qa.host.innerHTML.includes('id="kt-ai-plan"'), 'Assistant Q&A / Free AI docs は影響なし（レビューは走らない。［変更計画を作成］は無い）');
 }
 
 console.log(`\n${state.failed ? 'FAILED' : 'ALL PASSED'}: ${state.passed} passed / ${state.failed} failed`);

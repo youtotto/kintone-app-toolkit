@@ -12,6 +12,7 @@
 const { loadToolkit, makeAssert } = require('./helpers/load-toolkit.js');
 const { makeFakeHost } = require('./helpers/fake-dom.js');
 const { KTDeps, KTScan, KTContext, KTAiClient, KTContextUi, mountAiWorkspace } = loadToolkit();
+//   簡素化 E（2026-10-16）: Context ペインの［変更計画を作成］（仮案を経ない計画 → 手順ごとの承認 → 反映の入口）は削除した。計画は会話の仮案から作る
 const { assert, state } = makeAssert();
 const FX = require('./fixtures/ai-context-app.js');
 const { buildScanPayload } = require('./helpers/scan-payload.js');
@@ -123,11 +124,10 @@ console.log('\n--- 2. UI: mode switch / goal / 無料の生成 ---');
 {
   const m = mount();
   await tick();
-  assert(m.$('kt-ai-qa-inputs').style.display === 'flex' && m.$('kt-ai-plan-inputs').style.display === 'none' && m.$('kt-ai-plan').style.display === 'none' && m.$('kt-ai-ask').style.display === '' && m.panel.mode() === 'qa', '初期はモード「質問する」（Q&A の入力・ボタンのみ）');
+  assert(m.$('kt-ai-qa-inputs').style.display === 'flex' && m.$('kt-ai-plan-inputs').style.display === 'none' && !m.host.innerHTML.includes('id="kt-ai-plan"') && m.$('kt-ai-ask').style.display === '' && m.panel.mode() === 'qa', '初期はモード「質問する」（Q&A の入力・ボタンのみ。［変更計画を作成］は無い）');
   assert(m.host.innerHTML.includes('質問する') && m.host.innerHTML.includes('変更計画を作る') && m.host.innerHTML.includes('実現したいことを入力'), 'モード切替と goal 入力欄のマークアップ');
   m.panel.setMode('plan');
-  assert(m.panel.mode() === 'plan' && m.$('kt-ai-qa-inputs').style.display === 'none' && m.$('kt-ai-plan-inputs').style.display === 'flex' && m.$('kt-ai-plan').style.display === '' && m.$('kt-ai-ask').style.display === 'none' && m.$('kt-ai-generate').textContent === '変更計画 Prompt を生成', 'mode switch: 変更計画の入力欄・「変更計画を作成」ボタン・生成ボタンの文言');
-  assert(m.$('kt-ai-plan').disabled === false, 'planner の entitlement があれば「変更計画を作成」が有効');
+  assert(m.panel.mode() === 'plan' && m.$('kt-ai-qa-inputs').style.display === 'none' && m.$('kt-ai-plan-inputs').style.display === 'flex' && !m.host.innerHTML.includes('id="kt-ai-plan"') && m.$('kt-ai-ask').style.display === 'none' && m.$('kt-ai-generate').textContent === '変更計画 Prompt を生成' && typeof m.panel.plan === 'undefined', 'mode switch: 変更計画の入力欄・無料の Prompt の生成の文言（有料の［変更計画を作成］と plan() は無い）');
   // goal 無しで生成 → 案内
   await m.$('kt-ai-generate').dispatch('click');
   assert(m.$('kt-ai-status').textContent.includes('実現したいこと'), 'goal 未入力の案内');
@@ -147,22 +147,13 @@ console.log('\n--- 2. UI: mode switch / goal / 無料の生成 ---');
   assert(m.panel.mode() === 'qa' && m.$('kt-ai-actions').style.display === 'none' && m.$('kt-ai-generate').textContent === 'AI Prompt を生成', 'Q&A へ戻す');
 }
 
-console.log('\n--- 3. UI: 変更計画の作成（loading → result）---');
+console.log('\n--- 3. 計画の表示（会話の計画の右の「計画」と同じ部品 KTContextUi.planHtml・planJson）---');
+//   送信前の確認・受信の文言・drawer の扱いは会話の流れのテスト（ai-workspace・ai-flow-redesign）が確かめる
 {
-  const m = mount({ planResponses: [PLAN_RESPONSE] });
-  await tick();
-  m.panel.setMode('plan');
-  m.$('kt-ai-goal').value = GOAL;
-  await m.$('kt-ai-generate').dispatch('click');
-  await m.$('kt-ai-plan').dispatch('click'); await tick();
-  assert(m.$('kt-ai-consent').style.display === '' && m.calls.plan.length === 0, '初回は送信前の確認（consent）');
-  const clickP = m.$('kt-ai-consent-ok').dispatch('click');
-  await tick();
-  await clickP; await tick();
-  assert(m.calls.plan.length === 1 && m.calls.plan[0].ctx.contextVersion === 'planner-1' && m.calls.plan[0].ctx.goal === GOAL, 'client.plan に Planner Context を渡す');
-  assert(m.$('kt-ai-paid-status').textContent.includes('変更計画を受信しました') && m.$('kt-ai-paid-status').textContent.includes('手順 5 件') && m.$('kt-ai-paid-status').textContent.includes('新規フィールド 1 件') && m.$('kt-ai-plan').disabled === false, '受信ステータス（手順・新規フィールド・確認事項の件数）');
-  const h = m.$('kt-ai-plan-result').innerHTML;
-  assert(m.$('kt-ai-plan-result').style.display === '' && ['実現したいこと', '現在利用できるもの', '追加が必要なもの', '変更計画', '代替案', '影響範囲', '確認したいこと', '解析できないこと'].every(t => h.includes(t)), 'result: 必要な節がすべて表示される');
+  const vp = KTAiClient.validatePlan(PLAN_RESPONSE, PCTX);
+  const planN = { ...vp.normalized, clientWarnings: vp.warnings };
+  //   右の「計画」と同じ呼び方（計画の確認の結果は渡さない。mountAiWorkspace の renderDrawer）
+  const h = KTContextUi.planHtml(planN, null, { data: INPUTS.data, ctx: PCTX });
   assert(h.includes('＋ 新規フィールド') && h.includes('部長承認者') && h.includes('USER_SELECT') && h.includes('kt-ai-new-field') && h.includes('特定する情報がありません'), '新規フィールド提案は目立つ枠（＋ 新規フィールド / 名前 / 種類 / 理由）');
   assert(h.includes('>既存<') && h.includes('>＋ 新規<') && h.includes('>△ 確認必要<') && h.includes('>× 無効<') && h.includes('>↻ 再利用<') && h.includes('>✎ 既存変更<'), '既存 / ＋ 新規 / ✎ 既存変更 / ↻ 再利用 / △ 確認必要 / × 無効 のバッジ（Phase 11 §35）');
   assert(h.includes('<b>P1</b>') && h.includes('<b>P2</b>') && h.includes('<b>P3</b>') && h.includes('依存：P1 の後') && h.includes('依存：P2 の後'), '手順 P1〜P3 と依存関係');
@@ -170,45 +161,11 @@ console.log('\n--- 3. UI: 変更計画の作成（loading → result）---');
   assert(h.includes(`data-eid="${E_AMOUNT}"`) && h.includes(`data-eid="${E_APPROVER}"`), '根拠チップ（data-eid）');
   assert(h.includes('kt-ai-plan-json-toggle') && h.includes('kt-ai-plan-json-copy') && h.includes('&quot;planVersion&quot;: &quot;1&quot;') && h.includes('検証で除去・調整した項目'), 'JSON view / copy と検証の warnings');
   assert(h.includes('存在しない一覧') && h.includes('既存として参照'), '無効な step は理由付きで表示（黙って消さない）');
-  // 根拠チップ → fact 詳細
-  const fact = m.panel.showEvidence(E_AMOUNT);
-  assert(fact && fact.field.code === 'amount' && m.$('kt-ai-fact-detail').style.display === '', '根拠チップ → Evidence 詳細');
-  // JSON copy（delegated click）
-  await m.$('kt-ai-plan-result').dispatch({ type: 'click', target: { id: 'kt-ai-plan-json-copy' } });
-  const json = JSON.parse(m.copies[m.copies.length - 1]);
-  assert(json.planVersion === '1' && json.steps.length === 5 && json.steps[0].execution.mode === 'PLAN_ONLY' && !('clientWarnings' in json) && !('usage' in json), 'Change Plan JSON のコピー（Executor へ渡す形: planVersion / steps / execution）');
-  assert(m.panel.lastPlan().goal === GOAL, 'lastPlan');
-  // Phase 15: 計画 / Review は Context ペインのモードに紐づかず、drawer の「計画 / レビュー」ペインに残る（Q&A に切り替えても消えない）
-  m.panel.setMode('qa'); assert(m.$('kt-ai-plan-result').style.display === '' && m.panel.lastPlan() && m.panel.lastReview(), 'Q&A モードに切り替えても計画 / レビューは残る（AI タブの計画ペイン）');
-  m.panel.setMode('plan'); assert(m.$('kt-ai-plan-result').style.display === '', 'plan モードでも表示されたまま');
-  assert(m.panel.drawerState().open === true && m.panel.drawerState().pane === 'evidence', 'drawer は開いたまま（直前の根拠チップで根拠ペイン）。計画の受信で drawer が開く');
-  m.panel.openDrawer('plan'); assert(m.panel.drawerState().pane === 'plan', '計画ペインへ切り替え');
+  const json = KTContextUi.planJson(planN);
+  assert(json.planVersion === '1' && json.steps.length === 5 && json.steps[0].execution.mode === 'PLAN_ONLY' && !('clientWarnings' in json) && !('usage' in json), 'Change Plan JSON（右の「計画」の［JSON をコピー］と同じ部品 planJson）: planVersion / steps / execution');
 }
 
-console.log('\n--- 4. UI: errors / entitlement / Q&A と無料機能は不変 ---');
-{
-  const m = mount({ planResponses: [new KTAiClient.AiClientError({ code: C.RATE_LIMITED, message: 'x', retryAfterSeconds: 42, requestId: 'e-9' })] });
-  await tick(); m.settings.setConsent(true);
-  m.panel.setMode('plan'); m.$('kt-ai-goal').value = GOAL; await m.$('kt-ai-generate').dispatch('click');
-  await m.$('kt-ai-plan').dispatch('click'); await tick();
-  assert(m.$('kt-ai-paid-status').textContent.includes('[RATE_LIMITED]') && m.$('kt-ai-paid-status').textContent.includes('約42秒後') && m.$('kt-ai-plan').disabled === false && m.$('kt-ai-plan-result').style.display === 'none', 'RATE_LIMITED: 文言・retryAfter・ボタンは有効のまま');
-  const q = mount({ health: HEALTH_QA_ONLY });
-  await tick(); q.settings.setConsent(true);
-  q.panel.setMode('plan'); q.$('kt-ai-goal').value = GOAL; await q.$('kt-ai-generate').dispatch('click');
-  assert(q.$('kt-ai-plan').disabled === true && q.$('kt-ai-ask').disabled === false, 'planner の entitlement が無い: 「変更計画を作成」は無効・「AIに質問」は有効');
-  const r = await q.panel.plan();
-  assert(r === null && q.$('kt-ai-paid-status').textContent.includes('「変更計画を作る」を利用できません') && q.calls.plan.length === 0, 'planner 未契約で plan() → 文言・送信しない');
-  const nc = mount({ planResponses: [PLAN_RESPONSE] });
-  await tick(); nc.settings.setConsent(true);
-  nc.panel.setMode('plan');
-  const r2 = await nc.panel.plan();
-  assert(r2 === null && nc.$('kt-ai-paid-status').textContent.includes('先に「変更計画 Prompt を生成」'), 'Context 未生成で plan() → 案内');
-  const fe = mount({ planResponses: [new KTAiClient.AiClientError({ code: C.FEATURE_NOT_ENTITLED, message: 'x', requestId: 'e-f' })] });
-  await tick(); fe.settings.setConsent(true);
-  fe.panel.setMode('plan'); fe.$('kt-ai-goal').value = GOAL; await fe.$('kt-ai-generate').dispatch('click');
-  await fe.$('kt-ai-plan').dispatch('click'); await tick();
-  assert(fe.$('kt-ai-paid-status').textContent.includes('[FEATURE_NOT_ENTITLED]') && fe.$('kt-ai-plan').disabled === true, 'Gateway が FEATURE_NOT_ENTITLED → 文言・ボタン無効');
-}
+console.log('\n--- 4. UI: Q&A と無料機能は不変（有料の［変更計画を作成］の誤りの文言は、入口ごと削除した）---');
 {
   // assistant-qa（質問する）は従来どおり
   const GOOD_QA = { ok: true, contractVersion: '2.1', meta: { requestId: 'tk-x', usage: { usedThisMonth: 4, monthlyLimit: 100 }, normalization: { warnings: [] } }, answer: '顧客コードはルックアップのコピー先です', answerEvidenceIds: [], facts: [], analysis: [], recommendations: [], unknowns: [] };
@@ -224,7 +181,7 @@ console.log('\n--- 4. UI: errors / entitlement / Q&A と無料機能は不変 --
   free.panel.setMode('plan'); free.$('kt-ai-goal').value = '担当者が設定されたら本人に通知したい';
   await free.$('kt-ai-generate').dispatch('click');
   await free.$('kt-ai-copy-md').dispatch('click');
-  assert(free.copies.length === 1 && free.copies[0].includes('Change Planner Context') && free.$('kt-ai-plan').disabled === true, '未接続でも無料の変更計画 Prompt / Markdown は使える（「変更計画を作成」は無効）');
+  assert(free.copies.length === 1 && free.copies[0].includes('Change Planner Context') && !free.host.innerHTML.includes('id="kt-ai-plan"'), '未接続でも無料の変更計画 Prompt / Markdown は使える（有料の［変更計画を作成］は無い）');
   free.panel.setMode('qa');
   await free.$('kt-ai-generate').dispatch('click'); await free.$('kt-ai-copy-prompt').dispatch('click');
   assert(free.copies.length === 2 && free.copies[1].includes('## Context'), 'Free AI document（Q&A の Prompt）は影響なし');

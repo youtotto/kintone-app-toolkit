@@ -393,10 +393,12 @@ const clickCode = (m, id) => m.$('kt-ai-pane-code').dispatch({ type: 'click', ta
   assert(!/kt-ai-customization-card/.test(html) && !/app\.record\.edit\.show/.test(html) && !/amount（CONTROL）/.test(html) && /kt-ai-spec-card/.test(specPane) && /✎ fieldOnOff\.js を変更/.test(specPane) && /標準で不足/.test(specPane) && /編集画面/.test(specPane) && /「[^」]+」（制御）/.test(specPane) && !/app\.record\.|amount（CONTROL）|<b>C1<\/b>/.test(specPane), '実装仕様カード（右の「変更内容」）: ✎ fieldOnOff.js を変更・画面・フィールド（名前と扱い）・不足する理由（§0e.3: イベント名・コード・扱いの英語・番号 C1 は出さない）。会話にはイベント・フィールドの内訳を出さない');
   assert(!/C1|v1/.test(textOf(html)), '会話（最終案のカード）に内部の番号（C1・版の v1）を出さない');
   const reviewPane = m.$('kt-ai-review-result').innerHTML;
-  assert(/data-act="generate" data-cid="C1"/.test(reviewPane) && /コードを作る/.test(reviewPane) && !/data-act="generate"/.test(html), '［コードを作る］は右の「確認結果」の JS の判定（会話には無い。押すと最終案の作り直し: ai-flow-redesign F2-6）');
-  // 2026-10-06: Toolkit の確認のカードは会話に出さない。件数は右の「確認結果」で標準設定と JavaScript を別に数える
-  assert(!/kt-ai-review-card/.test(html) && /実行可能な標準設定: 1 件　コード生成可能: 1 件/.test(reviewPane), 'Toolkit の確認: 会話にカードを出さない。標準設定 1 件・JavaScript のコード生成可能 1 件は右の「確認結果」で別に数える');
-  assert(/kt-ai-review-hybrid/.test(reviewPane) && /実装計画（標準設定 ＋ JavaScript）/.test(reviewPane) && /コード生成可能: 1 件/.test(reviewPane) && !/kt-ai-review-hybrid/.test(m.$('kt-ai-plan-result').innerHTML), 'Toolkit で確認した結果（右の「確認結果」）: Hybrid Review ブロック（標準設定 / JavaScript / 全体）。変更内容のペインには無い');
+  //   簡素化 D（2026-10-16）: 右の「確認結果」は計画の時点の確認結果なので、作成・登録の案内（［コードを作る］）と、安全区分から別に数えた「全体」の件数
+  //   （実行可能な標準設定・コード生成可能）を出さない。JavaScript の状態は「変更内容」の「JavaScript の状態」、反映の件数は反映の分類の 1 か所（下の「動作テスト環境への自動反映」）
+  assert(!/data-act="generate"/.test(reviewPane) && !/コードを作る/.test(reviewPane) && !/data-act="generate"/.test(html) && /JavaScript で実現します（作ったコードと確かめた結果は「変更内容」と「コード」に出ます）/.test(reviewPane), '右の「確認結果」に［コードを作る］は無い（計画の時点の状態から作成の案内を出さない）。JavaScript の手順は今の状態の場所を示すだけ');
+  // 2026-10-06: Toolkit の確認のカードは会話に出さない
+  assert(!/kt-ai-review-card/.test(html) && !/実行可能な標準設定/.test(reviewPane) && !/コード生成可能/.test(reviewPane) && /動作テスト環境への自動反映<\/b>　できる：1 件/.test(reviewPane), 'Toolkit の確認: 会話にカードを出さない。反映の件数は反映の分類の 1 か所だけ（安全区分から別に数えた件数は出さない）');
+  assert(/kt-ai-review-hybrid/.test(reviewPane) && /実装計画（標準設定 ＋ JavaScript）/.test(reviewPane) && !/kt-ai-review-hybrid/.test(m.$('kt-ai-plan-result').innerHTML), 'Toolkit で確認した結果（右の「確認結果」）: Hybrid Review ブロック（標準設定 / JavaScript の一覧）。変更内容のペインには無い');
   assert(/登録済み JS/.test(m.$('kt-ai-header').innerHTML) && /fieldOnOff\.js/.test(m.$('kt-ai-header').innerHTML), 'ヘッダー詳細: 登録済み JS（既存カスタマイズ設定）');
   // 「これで進めて」はコードを作らない。承認の前は最終案の承認へ案内する（C-1 第 3 段: 手順ごとの承認・仕様の確定へは案内しない）
   const pv = await m.panel.send('これで進めて');
@@ -478,7 +480,8 @@ console.log('\n--- §53-2. 複数のカスタマイズ / カスタマイズの�
   await ticks();
   const v = await K.adoptOnScreen(m);
   assert(/要確認/.test(m.$('kt-ai-spec').innerHTML) && /コード生成はまだできません/.test(m.$('kt-ai-review-result').innerHTML) && /PC \/ モバイルのどちらが対象か決まっていません/.test(m.$('kt-ai-review-result').innerHTML), 'PC / モバイル未定: 右の「変更内容」の仕様は「要確認」・右の「確認結果」に確認事項');
-  assert(/実行可能な標準設定: 1 件　コード生成可能: 0 件/.test(m.$('kt-ai-review-result').innerHTML) && !/kt-ai-review-card/.test(m.chat()), 'JS のコード生成の可否: 右の「確認結果」で標準設定 1 件とは別に「コード生成可能: 0 件」');
+  //   簡素化 D: 「全体」の件数（安全区分から別に数えた件数）は削除した。生成できないことは手順の判定（コード生成はまだできません）で出す
+  assert(/コード生成はまだできません/.test(m.$('kt-ai-review-result').innerHTML) && !/コード生成可能/.test(m.$('kt-ai-review-result').innerHTML) && !/kt-ai-review-card/.test(m.chat()), 'JS のコード生成の可否: 右の「確認結果」の手順の判定に「コード生成はまだできません」（別に数えた件数は出さない）');
   const fin = finalText(m);
   assert(v && v.final && v.final.approvable === false && m.calls2.generate.length === 0 && /Toolkit では JavaScript を作れない部分があります: 承認後（完了）は金額を編集できなくする（PC かモバイルかが未定）/.test(fin) && !/問題は見つかりませんでした/.test(fin), `最終案のカード: 作れない理由（PC かモバイルかが未定）を出し、承認できない（生成工程は呼ばない）: ${fin.slice(fin.indexOf('実現できない点'), fin.indexOf('実現できない点') + 160)}`);
   const g = await m.panel.send('コードを作って');
