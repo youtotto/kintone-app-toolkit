@@ -504,10 +504,10 @@ await section(async () => {
   const c1 = genOf(x, 'C1'), c2 = genOf(x, 'C2'), c3 = genOf(x, 'C3');
   const isR3Lock = (list, platform) => LOCKS.every(f => list.some(e => e.field === f && e.effect === 'lock' && e.condition === ST && e.requirementIds.includes('R3') && e.events.length && e.events.every(ev => T.KTJsCatalog.eventPlatform(ev) === platform)));
   assert(r3 && r3.target === 'amount, items' && JSON.stringify(r3.effects) === '["lock"]' && JSON.stringify(r3.planRefs) === '["C1","C2"]'
-    && x.calls.plan.length === 1 && c1.length === 1 && c2.length === 1 && c3.length === 1 && ['C1', 'C2', 'C3'].every(c => (v.generated[c] || {}).status === 'verified')
+    && x.calls.plan.length === 1 && x.calls.ask.length === 0 && x.calls.propose.length === 2 && c1.length === 1 && c2.length === 1 && c3.length === 1 && ['C1', 'C2', 'C3'].every(c => (v.generated[c] || {}).status === 'verified')
     && isR3Lock(effOf(x, 'C1'), 'desktop') && isR3Lock(effOf(x, 'C2'), 'mobile') && effOf(x, 'C1').length === 4 && effOf(x, 'C2').length === 4
     && v.final.approvable === true && !blockTexts(x).length,
-    `D12-1: 対象が 2 つ（金額・明細）の採用済みの要件を対応づけても止めず、生成の入力に対象ごとの編集不可が R3 に結び付いて残る（計画の呼び出し 1 回・生成は各 1 回・修復なし）: ${JSON.stringify({ target: r3 && r3.target, plan: x.calls.plan.length, gen: x.gen.calls.map(c => c.cid), C1: keysOf(effOf(x, 'C1')), C2: keysOf(effOf(x, 'C2')), st: Object.values(v.generated).map(g => g.status), blockers: blockTexts(x) })}`);
+    `D12-1: 対象が 2 つ（金額・明細）の採用済みの要件を対応づけても止めず、生成の入力に対象ごとの編集不可が R3 に結び付いて残る（計画の呼び出し 1 回・質問 0・仮案は依頼とコメントの 2 回のまま・生成は各 1 回・修復なし）: ${JSON.stringify({ target: r3 && r3.target, plan: x.calls.plan.length, ask: x.calls.ask.length, propose: x.calls.propose.length, gen: x.gen.calls.map(c => c.cid), C1: keysOf(effOf(x, 'C1')), C2: keysOf(effOf(x, 'C2')), st: Object.values(v.generated).map(g => g.status), blockers: blockTexts(x) })}`);
   //   展開は要求する動作を渡すだけ: 実装済み・検証済みは生成の検証の結果で決まる（R3 は C3 の入力チェックに入らない＝担当の JavaScript の分だけ）
   assert(!effOf(x, 'C3').some(e => (e.requirementIds || []).includes('R3')) && JSON.stringify(keysOf(effOf(x, 'C3'))) === JSON.stringify(keysOf(F.GENERATED.C3.requiredEffects)),
     `D12-1b: R3 は担当の JavaScript（C1・C2）の入力だけに入り、モバイルの入力チェック（C3）には重ねない: ${JSON.stringify(keysOf(effOf(x, 'C3')))}`);
