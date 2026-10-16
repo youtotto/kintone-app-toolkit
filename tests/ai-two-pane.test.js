@@ -339,8 +339,9 @@ console.log('\n--- §12. 会話の表示の決まり（部品）: 出さない�
     assert(xU.c.activePlan().version === 2 && /計画では対応できないとされた要件: 承認されたら Slack に送る/.test(cannotU) && !/\bR[0-9]+\b|要件：/.test(finU), `対応できないことは番号なしで出す（最終案のカードの「実現できない点」）: ${cannotU}`);
     //   理由（計画の AI の note「外部サービスとの連携は対象外」）は、最終案のカードの「実現できない点」に添える（以前は会話の知らせに出た）
     assert(/外部サービスとの連携は対象外/.test(cannotU), `対応できないことの理由を添える（最終案のカードの「実現できない点」）: ${cannotU}`);
-    //   2026-10-15（追加の指示 1）: 作り直しの計画は、対応づけた JavaScript（C1）に警告も持たせる（警告を持たない C1 への対応づけは実現が足りないとして反映を止める）
-    const xN = K.makeConvC({ planImpl: (args) => K.planJs(args, { ...(args.revision ? { cust: K.custOf(['lock', 'warn']) } : {}), requirementOps: args.revision ? [K.req('add', { target: '金額', condition: '承認待ち', behavior: '画面に警告を出す', sourceQuotes: ['警告も出して'], planRefs: ['C1'] })] : [] }) });
+    //   2026-10-16（判定の責任範囲を絞る）: 「警告も出して」は利用者の発言（合意あり）だが、この素材の要件は構造化した効果（effects）を持たないので、Toolkit は語句から
+    //   警告を推定しない（確認材料不足。反映は止めない）。合意した警告の実装漏れ・計画の AI が勝手に足した警告は tests/ai-final-dedupe-owner.test.js §D10 で分けて確かめる
+    const xN = K.makeConvC({ planImpl: (args) => K.planJs(args, { requirementOps: args.revision ? [K.req('add', { target: '金額', condition: '承認待ち', behavior: '画面に警告を出す', sourceQuotes: ['警告も出して'], planRefs: ['C1'] })] : [] }) });
     await K.adoptC(xN);
     await xN.c.send('警告も出して');
     const chatN = K.stripC(KTAiChatUi.chatHtml(xN.c.messages()));

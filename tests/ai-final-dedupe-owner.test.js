@@ -339,45 +339,100 @@ await section(async () => {
   assert(dP2.c.activePlan().final.approvable === false && blockTexts(dP2).includes(line2) && !blockTexts(dP2).includes(line1) && dP3.c.activePlan().final.approvable === false && blockTexts(dP3).includes(line1) && !blockTexts(dP3).includes(line2)
     && dP2r.c.activePlan().final.approvable === false && blockTexts(dP2r).includes(line2) && JSON.stringify(reqOf(dP2r, 'R2').planRefs) === '["P3"]',
     `D9-6: 金額の境界は条件の向きまで確かめる（100万円未満の側を外す → R2、以上の側を外す → R1 が足りない。反対側の手順への付け替えでは消えない）: ${JSON.stringify({ P2: blockTexts(dP2), P3: blockTexts(dP3), P2remap: blockTexts(dP2r) })}`);
-  //   (7) 見直しの HIGH 2: 弱い値だけでは実現にしない
-  //   a. ステータス名だけ（「承認済みになったとき申請者に通知する」。通知の手順は計画に無い）→ 確かめられない（反映を止める）
+  //   (7) 2026-10-16（判定の責任範囲を絞る）: 明確な欠落と確認材料不足を分ける。構造で確かめられる欠落だけ反映を止め、確認材料不足は止めず計画の自動の見直しもしない
+  //   a. ステータス名だけ（「承認済みになったとき申請者に通知する」）→ 確認材料不足（値が無い。通知の語から設定の種類を求めない）→ 反映は止めず、右に中立の 1 文
   const setR = (id, o) => (r) => (r.id === id ? { ...r, ...o } : r);
   const ha = await R.run({ reqMutate: setR('R5', { target: '通知', condition: '承認済みになったとき', behavior: '申請者に通知する', effects: [] }) });
   const quote5 = reqOf(ha, 'R5').sourceQuotes[0];
-  //   b. 効果（編集不可）があるのにフィールドの語が無く、編集制御の JavaScript（C1・C2）を外した → 足りない（編集の禁止）
+  //   b. 構造化した効果（編集不可）があるのにフィールドの語が無く、編集不可を持つ JavaScript が計画に無い（C1・C2 を外した）→ 明確な欠落（編集の禁止）
   const hb = await R.run({ reqMutate: setR('R3', { target: '', behavior: '編集できないようにする', effects: ['lock'] }), planMutate: (plan) => drop('C2')(drop('C1')(plan)) });
-  //   c. 効果の申告が無く（effects 空）、「金額を編集不可」の編集不可を持つ JavaScript が無い（C1・C2 を外した。モバイルの保存の停止 C3 だけが金額を扱う）→ 動作の文から編集不可を読み、足りない（編集の禁止）
+  //   c. 効果の構造が無い「金額を編集不可」（PC とモバイルの両方）で、PC に金額を扱うものが何も無い（C1・C2 を外した。モバイルの C3 だけが金額を扱う）→ 明確な欠落（PC）
   const hc = await R.run({ reqMutate: setR('R3', { target: '', behavior: '金額を編集不可にする', effects: [] }), planMutate: (plan) => drop('C2')(drop('C1')(plan)) });
-  //   d. 既存のファイル名を言うが「残す」ではなく新しい動作（保存を止める）で、それを使う JavaScript（C3）を外した → アプリにある既存のファイルを実現に数えない。
-  //      動作の文から保存の停止を読み、単価の保存の停止を持つ JavaScript が無いので足りない（保存の停止）
+  //   d. 効果の構造が無い新しい動作（「単価が0のときは保存を止める」）で、名前の挙がった既存のファイルを使う JavaScript（C3）を外した → 証拠はアプリにある既存のファイルだけ
+  //      ＝確認材料不足（文から保存の停止を補って合否を決めない）→ 反映は止めず、自動の見直しもしない
   const hd = await R.run({ reqMutate: setR('R4', { behavior: '単価が0のときは保存を止める', effects: [] }), planMutate: drop('C3') });
   const quote3 = '承認済みでは金額と明細を変更できなくし、差戻し後は再編集できるようにして', quote4 = '今ある入力チェックは残して、PCとモバイルの両方で使いたい';
-  assert(ha.c.activePlan().final.approvable === false && blockTexts(ha).some(t => t.startsWith(`「${quote5}」を実現する計画の手順・JavaScript を確かめられません`))
+  const unconfLine = (q) => `「${q}」は、計画の構造からは実現を確かめていません（反映した後に動作テスト環境で確かめてください）`;
+  const rightHas = (xx, q) => count(vis(R.rightHtml(xx)), `${unconfLine(q)}（この点では反映を止めていません）`) === 1;
+  const leftLacks = (xx, q) => !vis(R.leftHtml(xx, { pre: READY })).includes(unconfLine(q));
+  const passes = (xx) => xx.c.activePlan().final.approvable === true && !blockTexts(xx).length && xx.calls.plan.length === 1;
+  assert(passes(ha) && rightHas(ha, quote5) && leftLacks(ha, quote5)
     && hb.c.activePlan().final.approvable === false && blockTexts(hb).includes(lineOf(quote3, '編集の禁止'))
-    && hc.c.activePlan().final.approvable === false && blockTexts(hc).includes(lineOf(quote3, '編集の禁止'))
-    && hd.c.activePlan().final.approvable === false && blockTexts(hd).includes(lineOf(quote4, '保存の停止')),
-    `D9-7: ステータス名だけ・フィールドの語の無い効果・効果の申告の無い編集不可・既存のファイル名だけの新しい動作は、実現の証拠にしない（反映を止める）: ${JSON.stringify({ a: blockTexts(ha), b: blockTexts(hb), c: blockTexts(hc), d: blockTexts(hd) })}`);
+    && hc.c.activePlan().final.approvable === false && blockTexts(hc).includes(lineOf(quote3, 'PC'))
+    && passes(hd) && rightHas(hd, quote4),
+    `D9-7: 構造で確かめられる欠落（構造化した効果を持つ JavaScript が無い・要件の言う画面に何も無い）だけ反映を止め、ステータス名だけ・効果の構造の無い新しい動作は確認材料不足（止めない・自動の見直しなし・右に中立の 1 文）: ${JSON.stringify({ a: [ha.c.activePlan().final.approvable, blockTexts(ha), ha.calls.plan.length], b: blockTexts(hb), c: blockTexts(hc), d: [hd.c.activePlan().final.approvable, blockTexts(hd), hd.calls.plan.length] })}`);
   //   (8) 見直しの LOW 5: 「モバイルは対象外」の否定はモバイルを求める語に数えない（C3 を外しても R4 は PC の既存のファイルで足りる）
   const hn = await R.run({ reqMutate: setR('R4', { condition: 'PCの入力・保存時（モバイルは対象外）' }), planMutate: drop('C3') });
   assert(hn.c.activePlan().final.approvable === true && !blockTexts(hn).length && hn.calls.plan.length === 1, `D9-8: 「モバイルは対象外」は画面の要求に数えない: ${JSON.stringify(blockTexts(hn))}`);
-  //   (9) 見直しの MEDIUM 3（残る緊張）: 値の無い否定の要件（「新しい入力チェックは追加しない」）は、計画の AI の対応づけが無ければ確かめられない（反映を止め、自動の見直しを 1 回）。
-  //   自動の見直しで計画の AI が対応づけを返せば、その対応で承認できる（値の無い要件は計画の AI の対応づけを対応とする）
+  //   (9) 2026-10-16（判定の責任範囲を絞る §3）: 維持・不追加の制限（「新しい入力チェックは追加しない」）は新しい実装の担当を求めない。変更の差分に違反が無ければ
+  //   専用の手順・JavaScript が無いだけで止めず、計画の自動の見直しも呼ばない（確認材料不足として右に中立の 1 文）
   const neg = { target: '', condition: '', behavior: '新しい入力チェックは追加しない', effects: [] };
   const m3 = await R.run({ reqMutate: setR('R6', neg) });
-  const m3r = await R.run({ reqMutate: setR('R6', neg), planOps: remap('R6', ['C3']) });
   const quote6 = reqOf(m3, 'R6').sourceQuotes[0];
-  assert(m3.c.activePlan().final.approvable === false && blockTexts(m3).some(t => t.startsWith(`「${quote6}」を実現する計画の手順・JavaScript を確かめられません`)) && m3.calls.plan.length === 2
-    && m3r.c.activePlan().final.approvable === true && !blockTexts(m3r).length && m3r.calls.plan.length === 2,
-    `D9-9: 値の無い要件は、計画の AI の対応づけが無ければ反映を止め（自動の見直し 1 回）、対応づけが返れば承認できる: ${JSON.stringify({ noMap: blockTexts(m3), mapped: { approvable: m3r.c.activePlan().final.approvable, blockers: blockTexts(m3r) } })}`);
-  //   (10) 見直しの再確認の残り（HIGH 2）: 効果の申告が無い「金額を変更できないようにする」を、別の効果（保存の停止。C3）の JavaScript で実現にしない。
-  //   「そのまま残し、…保存も止める」のように残すことと新しい動作が混じる要件は、新しい動作（保存の停止）を持つ JavaScript が要る
+  assert(passes(m3) && rightHas(m3, quote6) && leftLacks(m3, quote6),
+    `D9-9: 維持・不追加の要件は、専用の手順・JavaScript が無いだけで止めず、自動の見直しも呼ばない: ${JSON.stringify({ approvable: m3.c.activePlan().final.approvable, blockers: blockTexts(m3), plan: m3.calls.plan.length })}`);
+  //   (10) 2026-10-16（判定の責任範囲を絞る §2・§6 の 3）: 効果の構造が無い要件は、文の語句（「変更できない」「保存を止める」「そのまま残し」）から効果・維持を補って合否を決めない。
+  //   別の効果の JavaScript（C3 の保存の停止）が金額を扱うだけ・名前の挙がった既存のファイルがアプリにあるだけ → 確認材料不足（止めない・自動の見直しなし）
   const hv1 = await R.run({ reqMutate: setR('R3', { target: '', condition: '承認済み', behavior: '金額を変更できないようにする', effects: [] }), planMutate: (plan) => drop('C2')(drop('C1')(plan)) });
   const hv2 = await R.run({ reqMutate: setR('R4', { target: 'dealValidate.js', condition: '保存時', behavior: '今の入力チェックはそのまま残し、単価が0のときも保存を止める', effects: [] }), planMutate: drop('C3') });
-  assert(hv1.c.activePlan().final.approvable === false && blockTexts(hv1).includes(lineOf(quote3, '編集の禁止')) && hv2.c.activePlan().final.approvable === false && blockTexts(hv2).includes(lineOf(quote4, '保存の停止')),
-    `D9-10: 効果の申告が無い要件は動作の文から効果を読み、別の効果の JavaScript や「残す」の語で実現にしない: ${JSON.stringify({ v1: blockTexts(hv1), v2: blockTexts(hv2) })}`);
-  //   (11) 見直しの再確認の残り（MEDIUM 3 の一部）: 「今の作業者の指定のままにする」は残す要件（計画が既存の処理を置き換えない）として確かめる（確かめられないで止めない）
+  assert(passes(hv1) && rightHas(hv1, quote3) && passes(hv2) && rightHas(hv2, quote4),
+    `D9-10: 効果の構造が無い要件は文から効果・維持を補わず、確認材料不足として止めない（自動の見直しなし）: ${JSON.stringify({ v1: [hv1.c.activePlan().final.approvable, blockTexts(hv1), hv1.calls.plan.length], v2: [hv2.c.activePlan().final.approvable, blockTexts(hv2), hv2.calls.plan.length] })}`);
+  //   (11) 「承認者は今の作業者の指定のままにする」（値の無い維持の要件）も止めない（確認材料不足。「のまま」の語で維持できたとも決めない）
   const keep6 = await R.run({ reqMutate: setR('R6', { target: '', condition: '', behavior: '承認者は今の作業者の指定のままにする', effects: [] }) });
-  assert(keep6.c.activePlan().final.approvable === true && !blockTexts(keep6).length && keep6.calls.plan.length === 1, `D9-11: 「…のままにする」は残す要件として確かめる: ${JSON.stringify(blockTexts(keep6))}`);
+  assert(passes(keep6) && rightHas(keep6, reqOf(keep6, 'R6').sourceQuotes[0]), `D9-11: 値の無い維持の要件は止めない（確認材料不足）: ${JSON.stringify(blockTexts(keep6))}`);
+});
+
+// =========================================================
+console.log('\n--- §D10. 判定の責任範囲（2026-10-16）: 明確な欠落・検証の不一致・確認材料不足を分け、確認材料不足だけで止めない・有料の見直しへ送らない ---');
+await section(async () => {
+  const drop = (cid) => (plan) => { plan.customizations = plan.customizations.filter(c => c.customizationId !== cid); plan.steps = plan.steps.filter(s => s.id !== cid); return plan; };
+  const blockTexts = (xx) => xx.c.activePlan().final.blockers.map(b => b.text);
+  const lineOf = (quote, what) => `「${quote}」を実現する計画の手順・JavaScript が足りません（計画に無いもの: ${what}）`;
+  const quote3 = '承認済みでは金額と明細を変更できなくし、差戻し後は再編集できるようにして';
+  //   (1) 実装を除く（§D9-1・2・6 と B5 の続き）: 計画の AI が要件を結び付けていた JavaScript が計画から外れ、ほかに証拠が無い → 明確な欠落（参照先が消えた）
+  const dang = await R.run({ planOps: (n, args) => (n !== 0 ? [] : (args.requirements || []).filter(r => r && r.id === 'R6').map(r => ({ op: 'update', id: r.id, target: r.target || '', condition: '', behavior: '承認者の指定は今のままにする', exceptions: [], decision: r.decision, disposition: 'adopted', sourceQuotes: clone(r.sourceQuotes || []), planRefs: ['B4', 'C9'], note: '', effects: [] }))) });
+  assert(dang.c.activePlan().final.approvable === false && blockTexts(dang).some(t => t.endsWith('（計画に無いもの: 対応づけられていた手順・JavaScript（計画から外れました））')) && dang.calls.plan.length === 2,
+    `D10-1: 対応づけられていた手順・JavaScript が計画から外れ、ほかに証拠が無い要件は明確な欠落として止める（自動の見直し 1 回）: ${JSON.stringify({ blockers: blockTexts(dang), plan: dang.calls.plan.length })}`);
+  //   (2) 構造化した効果が違う: 「編集不可」（R3 の effects lock）が必要なのに、計画の JavaScript は同じフィールドに「保存の停止」しか持たない → 明確な欠落（編集の禁止）
+  const eff = await R.run({ planMutate: (plan) => { for (const c of plan.customizations.filter(c => ['C1', 'C2'].includes(c.customizationId))) for (const f of c.fields) if ((f.effects || []).some(e => e.effect === 'lock')) f.effects = [{ effect: 'block-save', condition: '' }]; return plan; } });
+  assert(eff.c.activePlan().final.approvable === false && blockTexts(eff).includes(lineOf(quote3, '編集の禁止')), `D10-2: 構造化した効果が違う（編集不可が必要なのに保存の停止だけ）は通さない: ${JSON.stringify(blockTexts(eff))}`);
+  //   (3)・(4) 効果の構造が無い要件・維持・不追加の要件は §D9-7・9〜11（止めない・自動の見直しなし）。
+  //   (4) 未採用の検査の追加: 計画の AI の対応づけがあれば、採用範囲の判定（requirementScopeOf）が計画の足した「数量の保存の停止」を範囲外として外し、知らせる。
+  //   対応づけの無い計画（§12.31 の形）では範囲を判定できず外れない（既存の限界。その検査は必須の動作として生成の検証に回る）
+  const clone2 = (x) => JSON.parse(JSON.stringify(x));
+  const MAP = { R1: ['P3'], R2: ['P2'], R3: ['C1', 'C2'], R4: ['C1', 'C3'], R5: ['P1'], R6: ['P1', 'P2'] };
+  const mapOps = (n, args) => (n !== 0 ? [] : (args.requirements || []).filter(r => r && MAP[r.id]).map(r => ({ op: 'update', id: r.id, target: r.target || '', condition: r.condition || '', behavior: r.behavior, exceptions: clone2(r.exceptions || []), decision: r.decision, disposition: r.disposition || 'adopted', sourceQuotes: clone2(r.sourceQuotes || []), planRefs: MAP[r.id], note: '', ...(Array.isArray(r.effects) ? { effects: clone2(r.effects) } : {}) })));
+  const addEff = (cid, field, effect) => (plan) => { const c = plan.customizations.find(z => z.customizationId === cid); const f = c.fields.find(z => z.code === field); f.effects = [...(f.effects || []), { effect, condition: '' }]; return plan; };
+  const neg = (r) => (r.id === 'R6' ? { ...r, target: '', condition: '', behavior: '新しい入力チェックは追加しない', effects: [] } : r);
+  const add4 = await R.run({ reqMutate: neg, planOps: mapOps, planMutate: addEff('C2', 'qty', 'block-save') });
+  const add4n = await R.run({ reqMutate: neg, planMutate: addEff('C2', 'qty', 'block-save') });
+  const so4 = add4.c.activePlan().final.scopeOut || {}, so4n = add4n.c.activePlan().final.scopeOut || {};
+  assert(so4.notice === '依頼に無い「数量の保存の停止」は入れていません（詳細）' && (so4n.lines || []).length === 0,
+    `D10-4: 未採用の検査の追加は、計画の AI の対応づけがあれば採用範囲の判定で外して知らせる（対応づけが無いと判定できない＝既存の限界の記録）: ${JSON.stringify({ mapped: so4, unmapped: so4n })}`);
+  //   (5) 同じ動作・違う言い回し: 採用した構造（値・効果・対象）と成果物は同じまま要件の文を言い換えても、合否と計画の呼び出しの回数は §D1 と同じ
+  const para = await R.run({ reqMutate: (r) => (r.id === 'R2' ? { ...r, condition: '金額が1,000,000円未満', behavior: '課長の承認とする' } : r.id === 'R3' ? { ...r, behavior: '金額と明細を変更できないようにする' } : r.id === 'R4' ? { ...r, behavior: '今の入力チェックを引き続きPCとモバイルで使う' } : r) });
+  assert(para.c.activePlan().final.approvable === true && !blockTexts(para).length && para.calls.plan.length === 1 && !(para.c.activePlan().final.unconfirmedReqs || []).length,
+    `D10-5: 言い回しを変えても合否と自動の見直しの回数は変わらない: ${JSON.stringify({ approvable: para.c.activePlan().final.approvable, blockers: blockTexts(para), plan: para.calls.plan.length })}`);
+  //   (6) 警告の合意の有無: 利用者が「警告も出して」と言い、計画の AI がその要件を構造化した効果（warn）で記録した → 警告を持たない JavaScript では明確な欠落・生成の検証の不一致で止める。
+  //   計画の AI が依頼に無い警告を JavaScript に足した → 採用範囲を超えた計画として外す（対応づけがあるとき。警告に実装を合わせることを正解にしない）
+  let addedU = false;
+  const U = K.req('add', { target: '金額', condition: '承認待ち', behavior: '画面に警告を出す', sourceQuotes: ['警告も出して'], planRefs: ['C1'], effects: ['warn'] });
+  const xa = K.makeConvC({ planImpl: (args) => K.planJs(args, { requirementOps: args.revision && !addedU ? (addedU = true, [U]) : [] }) });
+  await K.adoptC(xa); await xa.c.send('警告も出して');
+  const va = xa.c.activePlan(), ra = xa.c.requirements(va.planId).find(r => r.behavior === '画面に警告を出す');
+  const warnB = va.final.blockers.map(b => b.text);
+  const w6 = await R.run({ planOps: mapOps, planMutate: addEff('C1', 'amount', 'warn') });
+  const so6 = w6.c.activePlan().final.scopeOut || {};
+  assert(ra && ra.decision === 'decided' && JSON.stringify(ra.effects) === '["warn"]' && va.final.approvable === false && warnB.includes('「警告も出して」を実現する計画の手順・JavaScript が足りません（計画に無いもの: 警告）') && warnB.filter(t => /警告も出して/.test(t)).length === 1 && warnB.some(t => /要件未達/.test(t))
+    && so6.notice === '依頼に無い「金額の警告」は入れていません（詳細）',
+    `D10-6: 合意した警告の実装漏れは止め（構造の欠落と検証の不一致）、計画の AI が勝手に足した警告は採用範囲の外として外す: ${JSON.stringify({ agreed: warnB, unagreed: so6 })}`);
+  //   (7) 表示: 確認材料不足は右の「確認できないこと」に 1 回（反映を止めていないと添える）、左の通常表示と反映を止める理由には出さない。反映の前の確認（生成の検査・登録前の再検査）の
+  //   計画全体の確認も同じ文（implementationGaps）
+  const ux = await R.run({ reqMutate: neg });
+  const vux = ux.c.activePlan(), q6 = ux.c.requirements(vux.planId).find(r => r.id === 'R6').sourceQuotes[0];
+  const lineU = `「${q6}」は、計画の構造からは実現を確かめていません（反映した後に動作テスト環境で確かめてください）`;
+  assert(ux.c.implementationGaps(vux).R6 === lineU && count(vis(R.rightHtml(ux)), `${lineU}（この点では反映を止めていません）`) === 1 && !vis(R.leftHtml(ux, { pre: READY })).includes(lineU) && /この内容で反映できます/.test(vis(R.leftHtml(ux, { pre: READY }))) && !vux.final.blockers.length,
+    `D10-7: 確認材料不足は右に 1 回・左は「反映できます」のまま・反映の前の確認と同じ文: ${JSON.stringify({ gap: ux.c.implementationGaps(vux), blockers: vux.final.blockers.map(b => b.text) })}`);
 });
 
 // =========================================================
