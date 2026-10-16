@@ -24995,6 +24995,14 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
           const k = res.downgraded.indexOf(o);
           if (k >= 0) res.downgraded.splice(k, 1);
         }
+        //   2026-10-16（依頼・採用内容から計画への引き継ぎ）: 今回の発言に根拠の無い（根拠の無い・前の根拠を写しただけの）update で内容が変わらないときは、
+        //   空の効果（effects）で前の値を消さない（計画の AI が担当の付け替えなどで内容を変えずに返した update。Gateway は省いた effects を [] にして渡すので、
+        //   採用した効果がここで消える経路があった。保存済みの実機の素材では計画の AI の update は 0 件で、起きた記録は無い）。今回の発言に根拠がある update・
+        //   内容の変わる update は今までどおり操作の値にする。
+        //   決定事項の結び付き（decisionRefs）は操作ごとの値で上書きする今までの契約のまま（採用の根拠の結び付きは decisionLinks に積む）
+        if (!quotes.some(inNow) && sameReqContent(e, fields)) {
+          if (Array.isArray(fields.effects) && !fields.effects.length && Array.isArray(e.effects) && e.effects.length) fields.effects = [...e.effects];
+        }
         e.history.push({ ...reqSnapshot(e), version: e.updatedIn });
         // 根拠の発言は前の分も残す（変更の根拠を足す）
         Object.assign(e, fields, { sourceQuotes: [...new Set([...e.sourceQuotes, ...quotes])].slice(-5), updatedIn: version, revokedIn: null });

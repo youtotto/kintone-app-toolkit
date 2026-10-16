@@ -436,6 +436,43 @@ await section(async () => {
 });
 
 // =========================================================
+console.log('\n--- §D11. 依頼・採用内容から計画への引き継ぎ（2026-10-16）: 採用した要件の構造・決めたこと・根拠の発言が計画の呼び出しへ渡り、取り込みで消えない ---');
+await section(async () => {
+  const clone3 = (x) => JSON.parse(JSON.stringify(x));
+  //   (1) 要求: §12.31 の実際の素材（仮案 rev 2・要件 R1〜R6・決めたこと 2 件）を会話に通し、計画の呼び出しに渡る引数（requirements・decisions・goal）を見る（計画の AI は呼ばない）
+  const seen = [];
+  const x = await R.run({ planOps: (n, args) => { seen.push({ n, goal: args.goal, requirements: clone3(args.requirements || []), decisions: clone3(args.decisions || []) }); return []; } });
+  const a0 = seen[0] || {};
+  const pick = (r) => JSON.stringify([r.id, r.target, r.condition, r.behavior, r.decision, r.planRefs, r.effects || [], r.sourceQuotes]);
+  const want = (F.LEDGER_REQUIREMENTS || []).map(pick), got = (a0.requirements || []).map(pick);
+  const sugText = '任意の追加案：承認済みの明細の行追加・削除を保存時に検出して保存を止める。';
+  assert(JSON.stringify(got) === JSON.stringify(want) && (a0.decisions || []).length === 2 && (a0.decisions || []).every(d => d.answer === '今の「承認待ち」の作業者指定を使用する。') && /採用した方針: /.test(a0.goal || '') && !String(a0.goal || '').includes(sugText.slice(0, 12)) && seen.length === 1,
+    `D11-1: 採用した要件（対象・条件・動作・決定の状態・仮案の項目への結び付き・構造化した効果・根拠の発言）と決めたこと 2 件が、そのまま計画の呼び出しに渡る。任意の提案（未採用）は採用した方針に入らない: ${JSON.stringify({ diff: got.filter((g, i) => g !== want[i]), decisions: (a0.decisions || []).map(d => [d.label, d.answer]), goal: String(a0.goal || '').slice(-120) })}`);
+  //   (2) 取り込み: 計画の AI が R3 の担当だけを付け替え、内容は同じ・根拠は前の発言を写しただけ・効果を省いた（Gateway は省いた effects を [] にして渡す）update を返した
+  //   → 採用した効果（編集不可）と決定の状態を消さない。承認できるかは見ない（計画の AI が R3 を JavaScript に対応づけると、対象が金額・明細の 2 つの要件から
+  //   必須の動作のフィールドを 1 つに決められない既存の別の制約で止まる。評価の記録 §12.35 の残る限界）
+  const remapR3 = (n, args) => (n !== 0 ? [] : (args.requirements || []).filter(r => r && r.id === 'R3').map(r => ({ op: 'update', id: r.id, target: r.target, condition: r.condition, behavior: r.behavior, exceptions: clone3(r.exceptions || []), decision: 'decided', disposition: 'adopted', sourceQuotes: clone3(r.sourceQuotes || []), planRefs: ['C1', 'C2'], decisionRefs: [], effects: [], note: '' })));
+  const y = await R.run({ planOps: remapR3 });
+  const r3 = y.c.requirements(y.c.activePlan().planId).find(r => r.id === 'R3');
+  assert(r3 && JSON.stringify(r3.effects) === '["lock"]' && r3.decision === 'decided' && JSON.stringify(r3.planRefs) === '["C1","C2"]',
+    `D11-2: 内容を変えない update（担当の付け替えだけ・効果を省いた）では、採用した効果と決定の状態を消さない: ${JSON.stringify({ r3: r3 && [r3.decision, r3.planRefs, r3.effects] })}`);
+  //   (3) 内容を変える update（動作の言い換え）は計画の AI の変更として操作の値にする（今回の発言に根拠が無いので AI の提案に下げる。前の内容は台帳の履歴に残る）。
+  //   取り込みで勝手に元の値を残して「採用済み」に見せない
+  const rewriteR3 = (n, args) => (n !== 0 ? [] : (args.requirements || []).filter(r => r && r.id === 'R3').map(r => ({ op: 'update', id: r.id, target: r.target, condition: r.condition, behavior: '金額と明細を変更できないようにする', exceptions: clone3(r.exceptions || []), decision: 'decided', disposition: 'adopted', sourceQuotes: [], planRefs: ['C1', 'C2'], decisionRefs: [], effects: [], note: '' })));
+  const z = await R.run({ planOps: rewriteR3 });
+  const z3 = z.c.requirements(z.c.activePlan().planId).find(r => r.id === 'R3');
+  assert(z3 && z3.decision === 'proposed' && JSON.stringify(z3.effects) === '[]' && z3.behavior === '金額と明細を変更できないようにする',
+    `D11-3: 内容を変える根拠の無い update は計画の AI の変更として記録する（AI の提案。元の値を残して採用済みに見せない）: ${JSON.stringify(z3 && [z3.decision, z3.effects, z3.behavior])}`);
+  //   (4) 構造の無い要件に効果を足さない: 台本の要件（効果を持たない）は、計画の呼び出しにも効果の無いまま渡る（推定した効果を足さない）。計画の呼び出しは 1 回
+  const w = K.makeConvC({ planImpl: (args) => K.planJs(args) });
+  let reqsSent = null;
+  const planW = w.services.plan;
+  w.services.plan = async (args) => { if (!reqsSent) reqsSent = clone3(args.requirements || []); return planW(args); };
+  await K.adoptC(w);
+  assert(Array.isArray(reqsSent) && reqsSent.length > 0 && reqsSent.every(r => !('effects' in r) || (Array.isArray(r.effects) && !r.effects.length)) && w.calls.plan.length === 1,
+    `D11-4: 構造化した効果の無い要件に、要求の組み立てで効果を足さない（計画の呼び出し 1 回）: ${JSON.stringify({ effects: (reqsSent || []).map(r => [r.id, r.effects]), plan: w.calls.plan.length })}`);
+});
+// =========================================================
 console.log('\n--- §D7. 画面: 反映の前の確認の再検査も、生成の検査と同じ要件の台帳と担当の集まりで担当を引く（左のカード・右の変更内容と同じ文） ---');
 await section(async () => {
   //   台本の要件 R4（7 営業日以内に承認する）を、計画の AI は JavaScript C1 に対応づける（画面の偽の計画の AI の要件の対応づけ）。生成の AI（C1）は R4 を担当外と申告する
