@@ -32260,10 +32260,15 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
       if (b && b.ok) return { ok: true, base: b };
       return { ok: false, base: b, message: `動作テスト環境の設定を取得できなかったため、${BASE_KIND_JA[kind] || '処理'}を止めました（${b?.message || '不明'}）。運用環境の設定で代わりに進めることはしません。上の［再取得］で取り直してください。` };
     }
-    /** 右の「詳細情報」の先頭: 運用環境との差（作業の基準の内容） */
+    /**
+     * 右の「詳細情報」の先頭: 運用環境との差（作業の基準の内容）
+     *   2026-10-16（利用者の報告: 再読み込みしても詳細情報が残る）: 一覧は、このページで［差分を見る］を押したとき（baseDiffShown）だけ出す。以前は作業の基準を
+     *   取り直すたびに描いたので、再読み込み・新しい会話の直後も前の作業の続きのように一覧が出続けた。件数（と取れなかった理由）は見出しに出る。新しい会話では閉じる
+     */
+    let baseDiffShown = false;
     function renderBaseDiff() {
       const el = host.querySelector('#kt-ai-base-diff');
-      if (el) el.innerHTML = devBaseLoader && isConnected() ? KTAiChatUi.baseDiffHtml(devBase) : '';
+      if (el) el.innerHTML = baseDiffShown && devBaseLoader && isConnected() ? KTAiChatUi.baseDiffHtml(devBase) : '';
     }
     /**
      * Phase 20（実機）: 相談中の JS は相談開始時に本文を取得済み（seed）。Field Scanner がキャッシュ復元（本文なし）だと、計画の Context（js-file facts）と
@@ -32804,6 +32809,8 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
       if ($reviewEmpty) $reviewEmpty.style.display = '';
       clearCodePane();
       $factDetail.innerHTML = ''; $factDetail.style.display = 'none';
+      //   2026-10-16: 詳細情報の運用環境との差の一覧も閉じる（新しい会話では［差分を見る］を押すまで出さない）
+      baseDiffShown = false; renderBaseDiff();
       // 戻す確認の画面のままなら、確認を取り消してから記録に写す（PREPARED のまま記録に残すと、戻せなかったように見えた）
       if (['rollback-confirm', 'rollback-blocked'].includes(execState.stage)) { execState.rollback = null; execState.error = null; execState.stage = 'done'; }
       if (['rollback-confirm', 'rollback-blocked'].includes(jsExec.stage)) { jsExec.rollback = null; jsExec.error = null; jsExec.stage = 'done'; }
@@ -33114,7 +33121,7 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
       if (act === 'log-open') { const e = logById(dataOf(t, 'log')); if (e) openApplyLogEntry(e); return; }
       if (act === 'log-close') { closeLoggedExec(); return; }
       // 記録の「運用環境との差」の［差分を見る］（ヘッダーの同じボタンと同じ）
-      if (act === 'open-base-diff') { renderBaseDiff(); showPane('evidence', { scrollTo: '#kt-ai-base-diff' }); return; }
+      if (act === 'open-base-diff') { baseDiffShown = true; renderBaseDiff(); showPane('evidence', { scrollTo: '#kt-ai-base-diff' }); return; }
       // ヘッダーの［反映の記録］（新しい会話を始めても、このページを開いている間は残る）・［AI 接続済み］
       if (act === 'open-log') { renderApplyLog(); showPane('log'); return; }
       if (act === 'open-connection') { showPane('connection'); return; }
@@ -33643,7 +33650,7 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
       const act = dataOf(actEl(t), 'act');
       if (act === 'open-log' || act === 'open-connection') { handleAct(act, actEl(t)); return; }
       if (act === 'refresh-base') { refreshDevBase({ reason: 'manual' }); renderHeader(); return; }
-      if (act === 'open-base-diff') { renderBaseDiff(); showPane('evidence', { scrollTo: '#kt-ai-base-diff' }); return; }
+      if (act === 'open-base-diff') { baseDiffShown = true; renderBaseDiff(); showPane('evidence', { scrollTo: '#kt-ai-base-diff' }); return; }
     });
     $free.addEventListener('click', async (ev) => {
       const t = ev?.target;

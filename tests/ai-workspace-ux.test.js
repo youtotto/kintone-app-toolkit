@@ -785,6 +785,34 @@ await section(async () => {
   assert(/動作テスト環境の設定を取得できませんでした（権限がありません）。変更案・コードの作成と反映は止めています（運用環境の設定では進めません）。/.test(failed) && /data-act="refresh-base"[^>]*>再取得</.test(failed), 'L7: 作業の基準を取得できないときは、変更案・コードの作成と反映を止めていることを書く（［再取得］）');
 });
 await section(async () => {
+  // L7b（2026-10-16・利用者の報告: 再読み込みしても詳細情報が残る）: 運用環境との差の一覧（右の「詳細情報」の先頭）は、このページで［差分を見る］を押したときだけ出す。
+  //   読み込んだ直後（再読み込みの後）・新しい会話の後は出さない（件数は見出しの「運用環境との差 N 件」）。押した後に取り直したら新しい内容に描き直す
+  const { makeEnvGetter } = require('./helpers/dev-base-fake.js');
+  const clone = (v) => JSON.parse(JSON.stringify(v));
+  const PROD = FX.makeData();
+  let changed = true;
+  const prevData = () => { const d = clone(PROD); if (changed) d.fields.progress = { type: 'DROP_DOWN', code: 'progress', label: '更新状況', noLabel: false, required: false, options: { '未着手': { label: '未着手', index: '0' } } }; return d; };
+  const loadDevBase = async () => { const g = makeEnvGetter({ preview: prevData(), production: PROD, files: {} }); return T.KTDevBase.load({ appId: String(FX.SELF_APP), getImpl: g.getImpl, download: g.download, now: () => new Date('2026-10-05T00:00:00Z') }); };
+  const text = (html) => html.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+  const m = mount({ extra: { loadDevBase } });
+  await ticks(12);
+  const diff = () => m.$('kt-ai-base-diff').innerHTML;
+  m.panel.openDrawer('evidence'); await ticks();
+  assert(diff() === '' && /運用環境との差 1 件/.test(text(m.$('kt-ai-header').innerHTML)) && m.panel.drawerState().pane === 'evidence', `L7b-1: 読み込んだ直後は、詳細情報のタブを開いても差の一覧を出さない（件数は見出し）: ${text(diff()).slice(0, 80)}`);
+  await clickPane(m, 'log', { dataset: { act: 'open-base-diff' } }); await ticks();
+  assert(/今回の変更の基準（動作テスト環境）/.test(diff()) && /更新状況/.test(diff()), 'L7b-2: ［差分を見る］で詳細情報に一覧を出す');
+  changed = false;
+  await m.$('kt-ai-header').dispatch({ type: 'click', target: { dataset: { act: 'refresh-base' } } }); await ticks(12);
+  assert(/今回の変更の基準（動作テスト環境）/.test(diff()) && !/更新状況/.test(diff()) && /運用環境との差なし/.test(text(m.$('kt-ai-header').innerHTML)), `L7b-3: 押した後に取り直したら、新しい内容に描き直す: ${text(diff()).slice(0, 120)}`);
+  m.panel.newConversation(); await ticks();
+  assert(diff() === '', 'L7b-4: 新しい会話の後は、差の一覧を閉じる（［差分を見る］を押すまで出さない）');
+  changed = true;
+  const m2 = mount({ extra: { loadDevBase } });
+  await ticks(12);
+  m2.panel.openDrawer('evidence'); await ticks();
+  assert(m2.$('kt-ai-base-diff').innerHTML === '' && /運用環境との差 1 件/.test(text(m2.$('kt-ai-header').innerHTML)), 'L7b-5: 読み込み直した後も、差が残っていれば見出しに件数を出し、詳細情報には［差分を見る］を押すまで出さない');
+});
+await section(async () => {
   // L8（low）・L9（low）: 同じ会話の前の計画の反映の注記・戻し済みの記録を開いただけで「戻しました」を出さない
   const m = mount();
   await ticks();
