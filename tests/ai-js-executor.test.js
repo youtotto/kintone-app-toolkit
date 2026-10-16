@@ -212,6 +212,47 @@ console.log('\n--- 4. §47 / §48 / §51 登録と検証: replace（全保持）
 }
 
 // =========================================================
+console.log('\n--- 4b. 同じ画面へ新規 2 本（＋ PC の置き換え 1 本）: 位置の確認・本当にずれたとき・復元 ---');
+{
+  //   実機（評価の記録 §12.39・2026-10-16）: モバイルへ新規 2 本を足すと、1 本目は期待の位置どおりなのに末尾でないため position が × になっていた
+  const mobAdd = (name, msg, customizationId) => {
+    const c = { ...newChange(['common.js', 'mobileLock.js']).change, customizationId, name, target: 'mobile', content: NEW_JS.replace(/app\.record\.(create|edit)\.change\.amount/g, 'mobile.app.record.$1.change.amount').replace('100万円以上は部長の承認が必要です', msg), planEvents: ['mobile.app.record.create.change.amount', 'mobile.app.record.edit.change.amount'] };
+    c.contentHash = KTScan.hashText(c.content); c.bytes = c.content.length;
+    c.registration = { ...c.registration, codeHash: c.contentHash };
+    c.codeReview = { ...c.codeReview, rescan: { events: ['mobile.app.record.create.change.amount', 'mobile.app.record.edit.change.amount'], fieldAccess: { amount: { CONTROL: 1, READ: 1 } }, apis: ['kintone.events.on'] } };
+    return c;
+  };
+  const changes3 = () => [replaceChange().change, mobAdd('mobile-lock.js', 'モバイル 1 本目', 'C2'), mobAdd('mobile-check.js', 'モバイル 2 本目', 'C3')];
+  const posOf = (st) => st.verification.checks.find(c => c.name === 'position');
+  const m = mk();
+  const before = { d: keysOf(m, 'desktop'), mob: keysOf(m, 'mobile') };
+  const prep = await X.prepare({ appId: '310', changes: changes3() }, { api: m.api });
+  assert(prep.status === 'PREPARED' && prep.changes[1].position === 2 && prep.changes[2].position === 3 && prep.summary.byTarget.mobile.add === 2, '準備: モバイルの新規 2 本は既存 2 件の後ろの位置 2・3');
+  const ex = await X.executePreview(prep, { api: m.api, fieldRows: FIELD_ROWS });
+  assert(ex.status === 'DONE' && ex.verification.ok && ex.steps.length === 3 && ex.steps.every(s => s.status === 'VERIFIED'), `PC の置き換え 1 ＋ モバイルの新規 2 → 3 本とも VERIFIED（${ex.steps.map(s => `${s.name}:${s.status}${s.message ? `(${s.message})` : ''}`).join(' / ')}）`);
+  assert(ex.steps.every(s => posOf(s).ok) && posOf(ex.steps[1]).actual === 2 && posOf(ex.steps[2]).actual === 3, '位置の確認: 新規の 1 本目（末尾でない）も期待の位置 2 で合格');
+  assert(JSON.stringify(jsNames(m, 'mobile')) === JSON.stringify(['common.js', 'mobileLock.js', 'mobile-lock.js', 'mobile-check.js']) && JSON.stringify(keysOf(m, 'mobile').slice(0, 2)) === JSON.stringify(before.mob) && jsNames(m, 'desktop').length === 4, 'モバイル: 既存 2 件の後ろに準備の順で 2 本。PC は 4 件のまま');
+  // 本当に位置がずれたとき: 新規 2 本の順が逆に登録された → 2 本とも position が × で VERIFY_FAILED（ほかの確認は通る）
+  const m2 = mk();
+  m2.ctl.mutateCustomize = (next) => { const js = next.mobile.js; const a = js.length - 2; [js[a], js[a + 1]] = [js[a + 1], js[a]]; return next; };
+  const prep2 = await X.prepare({ appId: '310', changes: changes3() }, { api: m2.api });
+  const ex2 = await X.executePreview(prep2, { api: m2.api, fieldRows: FIELD_ROWS });
+  assert(ex2.status === 'VERIFY_FAILED' && ex2.steps[0].status === 'VERIFIED' && ex2.steps.slice(1).every(s => s.status === 'VERIFY_FAILED' && !posOf(s).ok && s.verification.checks.filter(c => !c.ok).length === 1), `新規 2 本の順が逆 → 2 本とも position が ×・PC の置き換えは VERIFIED（${ex2.steps.map(s => `${s.name}:${s.status}`).join(' / ')}）`);
+  assert(posOf(ex2.steps[1]).expected === 2 && posOf(ex2.steps[1]).actual === 3 && posOf(ex2.steps[2]).expected === 3 && posOf(ex2.steps[2]).actual === 2, '順が逆のとき: 期待 2 → 実際 3、期待 3 → 実際 2');
+  // 新規の 1 本が既存の前へ入った → × （既存より後ろであること）
+  const m3 = mk();
+  m3.ctl.mutateCustomize = (next) => { const js = next.mobile.js; const added = js.splice(js.length - 2, 1)[0]; js.unshift(added); return next; };
+  const prep3 = await X.prepare({ appId: '310', changes: changes3() }, { api: m3.api });
+  const ex3 = await X.executePreview(prep3, { api: m3.api, fieldRows: FIELD_ROWS });
+  assert(ex3.status === 'VERIFY_FAILED' && !posOf(ex3.steps[1]).ok && posOf(ex3.steps[1]).actual === 0, '新規の 1 本が既存より前に入った → position が ×');
+  // 復元: 新規 2 本を外し、置き換えた PC のファイルを元の本文へ戻して、登録前の一覧と一致
+  const rb = await X.prepareRollback(ex, { api: m.api });
+  assert(rb.status === 'PREPARED' && rb.restores.length === 3 && rb.restores.filter(r => r.kind === 'ADD_FILE').map(r => r.position).join(',') === '2,3', `prepareRollback: 3 件・新規の位置 2・3（${rb.blockers.map(b => b.code).join(',')}）`);
+  const r = await X.executeRollback(rb, { api: m.api, execution: ex });
+  assert(r.status === 'ROLLED_BACK_VERIFIED' && r.verification.restoredToSnapshot && JSON.stringify(keysOf(m, 'mobile')) === JSON.stringify(before.mob) && jsNames(m, 'desktop').length === 4 && m.st.files.get(keysOf(m, 'desktop')[2]).content === FIELD_ON_OFF, 'rollback: モバイルは元の 2 件・PC の置き換えたファイルは元の本文');
+}
+
+// =========================================================
 console.log('\n--- 5. §46 失敗: upload（CSRF / 権限 / サイズ / 不正 / 一般）・upload 後の PUT 失敗（設定は不変）・execute の stale ---');
 {
   for (const [mode, code] of [['CSRF', 'UPLOAD_CSRF'], ['PERMISSION', 'PERMISSION_DENIED'], ['TOO_LARGE', 'FILE_TOO_LARGE'], ['INVALID', 'INVALID_FILE'], ['GENERIC', 'UPLOAD_FAILED']]) {

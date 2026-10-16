@@ -21230,7 +21230,8 @@
         sc('entryExists', !!e && e.type === 'FILE' && e.name === st.name, st.name, e ? entryLabel(e) : null);
         sc('platform', !!e && !after[st.target === 'desktop' ? 'mobile' : 'desktop'].js.some(x => x.type === 'FILE' && x.name === st.name && x.fileKey === e.fileKey), st.target, st.target);
         if (st.kind === CHANGE.REPLACE_FILE) { sc('position', idx === st.position, st.position, idx); sc('fileKeyUpdated', !!e && e.fileKey !== st.oldFileKey, 'old と異なる fileKey', e?.fileKey ? '更新あり' : null); }
-        else sc('position', idx === list.length - 1 && idx === st.position, st.position, idx);
+        //   新規は、準備で決めた位置（既存の後ろに準備の順で足す）にあること。同じ画面へ新規を 2 本以上足すと 1 本目は末尾でないので、末尾かどうかでは判定しない（評価の記録 §12.39）
+        else sc('position', idx === st.position && idx >= snap[st.target].js.length, st.position, idx);
         if (e && e.size != null) sc('size', String(e.size) === String(new TextEncoder().encode(st.content).length) || String(e.size) === String(st.bytes), st.bytes, e.size);
         const src = e ? downloaded[e.fileKey] : undefined;
         if (typeof src === 'string') {
