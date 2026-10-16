@@ -111,8 +111,10 @@ await section(async () => {
   const sh = [{ code: 'ステータス', access: 'READ' }, { code: 'item_name', access: 'CONTROL', condition: ST, effects: ['show-hide'] }];
   const r5 = reqOf(planOf([cust('C1', sh)]), [R('R5', '明細', ['show-hide'])]);
   assert(!r5.effects.some(e => e.requirementIds.includes('R5')) && r5.unresolved.some(u => u.requirementId === 'R5' && u.reason === 'target-unresolved'), `L1-14: 表示の切り替えはテーブルの列に結び付けない（今までどおり）: ${JSON.stringify(sum(r5))}`);
+  //   2026-10-16（評価の記録 §12.35 の残る限界の修正）: 「金額と明細」のような 1 つのフィールドの名前でない対象は、文を分けずに customization の単位で確かめる
+  //   （計画がこの JavaScript に置いた同じ効果の組に要件の id を足す。効果は足さない）。以前は特定できないまま止めていた（計画の AI に対象の付け替えを求めた）
   const s6 = sum(reqOf(planOf([cust('C1', clone(CX1_C1_FIELDS))]), [R('R3', '金額と明細', ['lock'])]));
-  assert(s6.unresolved.includes('|lock|target-unresolved|R3'), `L1-15: 「金額と明細」のような複数の対象は特定できないまま（計画の AI が対象をフィールドに付け替える）: ${JSON.stringify(s6)}`);
+  assert(JSON.stringify(s6.effects) === JSON.stringify(['amount|lock|C1+R3', 'item_name|lock|C1+R3', 'qty|lock|C1+R3', 'unit_price|lock|C1+R3']) && s6.unresolved.length === 0, `L1-15: 「金額と明細」のような複数の対象は、計画が置いた同じ効果の組に結び付け、止めない: ${JSON.stringify(s6)}`);
   const s7 = sum(reqOf(planOf([cust('C1', clone(CX1_C1_FIELDS))]), REQS, { columns: {} }));
   assert(s7.unresolved.includes('|lock|target-unresolved|R4'), `L1-16: 列の構造（tableColumns）が無ければ今までどおり（特定できない）: ${JSON.stringify(s7)}`);
 });

@@ -25346,7 +25346,9 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
      *   READ 以外のフィールドがあるのに必須の効果が 0 件なら unresolved（reason none）。
      *   計画で新設するフィールド（NEW_FIELD_n）は、ここで採番後のコードに変換する（照合も同じコードで行う）。
      *   同じ field・effect・events・condition の組は 1 件にまとめ、要件の id は requirementIds（配列）に持つ（requirementId は先頭の id）。
-     *   日本語の文から効果を推定しない（対象の照合はコード・ラベルの完全一致だけ）
+     *   日本語の文から効果を推定しない（対象の照合はコード・ラベルの完全一致だけ）。
+     *   2026-10-16: 対象が 1 つのフィールド・テーブルの名前でない要件（「金額・明細」）は、計画が置いた同じ効果の組に要件の id を足す（効果は足さない。足す組は
+     *   要件の実現の判定と同じ既存の照合 KTPlanReview.traceRequirements の対象のフィールドに絞る）
      * @param {object} plan 計画（customizations・proposedFields）
      * @param {string} customizationId
      * @param {Array} requirements KTAiAnswers.requirementsForContext の形（effects を持てる）
@@ -25495,10 +25497,45 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
         }
         return true;
       };
+      //   2026-10-16（評価の記録 §12.35 の残る限界: 対象が複数の要件で止まる）: 対象の文がアプリのどのフィールド・テーブルのコードとも名前とも完全には一致しない要件
+      //   （「金額・明細」の編集不可など。target は自然文なので分割しない）は、採用範囲の判定（requirementScopeOf の E_in）と同じく customization の単位で確かめる:
+      //   計画がこの customization のフィールドに構造で置いた同じ効果の組（1) の組）のそれぞれに要件の id を足す（対象ごとの必須の動作のまま。フィールド・条件・イベントは
+      //   組のまま）。効果は足さない・配らない（金額の編集不可を備考に広げない、警告を編集不可の組に付けない）。要件に条件があれば条件のある組だけに足し、そのような組が無ければ
+      //   condition-unknown。計画にその効果の組が無ければ今までどおり target-unresolved。1) の組だけを見る（台帳の別の要件が 2) で足した組には付けない＝要件の並び順で
+      //   結果が変わらない）。対象の文が 1 つのフィールド・テーブルの名前と一致する要件（計画に無い・列の根拠が無いテーブルなど）は今までどおり（満たした扱いにしない）。
+      //   対象のすべてがこの計画で実現されるか（金額だけで「金額・明細」を満たした扱いにしない）は、要件の実現の判定（会話の implementationOfReq）が対象ごとに確かめる
+      //   結び付ける組は、対象の文のフィールド（要件の実現の判定と同じ既存の照合 KTPlanReview.traceRequirements の field。テーブルはその列。列が別に挙がっていれば
+      //   その列だけ）の組に絞る（別のテーブルの列・別の要件のフィールドの組に要件の id を付けない）。照合でフィールドが 1 つも出なければ customization の単位のまま
+      const planGroups = [...groups.values()];
+      const targetCodesOf = (r) => {
+        let anchors = [];
+        try { anchors = (KTPlanReview.traceRequirements({ plan, requirements: [{ id: 'tgt', decision: 'decided', disposition: 'adopted', condition: String((r && r.target) || ''), exceptions: [] }], model: { fields: Object.fromEntries(Object.entries(labels && typeof labels === 'object' ? labels : {}).map(([code, label]) => [code, { code, label }])), process: { states: [] } } }).requirements[0] || {}).anchors || []; } catch (e) { anchors = []; }
+        const named = anchors.filter(a => a && a.kind === 'field').map(a => mapCode(a.value));
+        const out = new Set();
+        for (const code of named) {
+          const cols = Object.keys(columns && typeof columns === 'object' ? columns : {}).filter(col => String(columns[col]) === code);
+          const listed = cols.filter(col => named.includes(col));
+          if (!cols.length) out.add(code); else for (const col of (listed.length ? listed : cols)) out.add(col);
+        }
+        return out;
+      };
+      const proposedNames = new Set((Array.isArray(plan && plan.proposedFields) ? plan.proposedFields : []).flatMap(p => (p ? [p.temporaryId, p.suggestedCode, p.label] : [])).filter(Boolean).map(norm));
+      const namesOneField = (r) => { const tg = norm(r && r.target); return !!tg && (proposedNames.has(tg) || Object.entries(labels && typeof labels === 'object' ? labels : {}).some(([code, lb]) => norm(code) === tg || (norm(lb) && norm(lb) === tg))); };
       for (const r of linked) for (const e of effectsOfReq(r)) {
         const tf = fieldOfReq(r);
         const table = e === 'lock' ? tableOfReq(r, tf) : null;
         if (table && coverTableLock(r, table)) continue;
+        if (!tf && !table && !namesOneField(r)) {
+          const rid = String(r.id), codes = targetCodesOf(r), same = planGroups.filter(g => g.effect === e && (!codes.size || codes.has(g.field)));
+          if (!same.length) { unresolved.push({ field: '', requirementId: rid, effect: e, reason: 'target-unresolved' }); continue; }
+          //   条件はフィールドごと: 要件に条件があれば、そのフィールドの条件のある組だけに足す（組ごとの条件はそのまま。一律にしない）。条件のある組の無いフィールドは condition-unknown
+          for (const code of [...new Set(same.map(g => g.field))]) {
+            const gs = same.filter(g => g.field === code), ok = norm(r.condition) ? gs.filter(g => g.condition || g.conditionFrom) : gs;
+            if (!ok.length) { pushUnresolved({ field: code, requirementId: rid, effect: e, reason: 'condition-unknown' }); continue; }
+            for (const g of ok) if (!g.requirementIds.includes(rid)) g.requirementIds.push(rid);
+          }
+          continue;
+        }
         if (!tf) { unresolved.push({ field: '', requirementId: String(r.id), effect: e, reason: 'target-unresolved' }); continue; }
         if (!owns(tf, e)) { unresolved.push({ field: mapCode(tf.code), requirementId: String(r.id), effect: e, reason: 'no-owner-field', access: tf.access || 'READ' }); continue; }
         const code = mapCode(tf.code);
@@ -27399,7 +27436,38 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
             //   フィールドが分からず、計画の AI の対応づけも無い: その効果を持つ JavaScript はあるが、この要件のものかは確かめていない（確認材料不足）
             if (!fieldCodes.size && !plannerRefs.length) return { ...UNCONFIRMED, refs };
             const lack = platforms.filter(p => !impl.some(c => platOfCust(c).includes(p)));
-            return lack.length ? missingPlatforms(lack, refs) : { ok: true, refs };
+            if (lack.length) return missingPlatforms(lack, refs);
+            //   2026-10-16（§12.35 の残る限界: 対象が複数の要件）: 対象の文のフィールドが 2 つ以上ある要件（「金額・明細」）は、対象ごと（テーブルは下の needsOf の列）に、
+            //   要件の効果のどれかを持つ JavaScript が要件の言う画面ごとにあるかを確かめる（金額だけ・PC だけの実装で全体を満たした扱いにしない。画面の全体の欠落は上の画面の文のまま）。対象と効果の組は作らない
+            //   （「金額は編集不可・備考に警告」を全組み合わせで求めない）。対象の 1 つだけの要件は今までどおり（対象・動作の文のフィールドのどれかで足りる）
+            const tgtAnchors = anchors.filter(a => a.kind === 'field' && a.part === 'tgt');
+            if (tgtAnchors.length >= 2) {
+              //   テーブル: その列が対象の文に別に挙がっていれば、その列だけが対象（テーブルは文脈。列挙した列だけの要件をテーブル全体へ広げない）。挙がっていなければ、
+              //   入力できる列（アプリの構造の列から、入力できないフィールドの根拠 readOnlyFields を除く）のそれぞれ（単一のテーブルの要件の requiredEffectsOf と同じ）。
+              //   入力できない列の根拠が無ければ列のどれか（列を推測しない）
+              let colsA = {}; try { colsA = (typeof services.tableColumns === 'function' && services.tableColumns()) || {}; } catch (e) { colsA = {}; }
+              let roA = null; try { const ro = typeof services.readOnlyFields === 'function' ? services.readOnlyFields() : null; roA = ro == null ? null : new Set([...(ro instanceof Set ? ro : Array.isArray(ro) ? ro : [])].map(String)); } catch (e) { roA = null; }
+              let lbA = {}; try { lbA = (typeof services.fieldLabels === 'function' && services.fieldLabels()) || {}; } catch (e) { lbA = {}; }
+              const named = tgtAnchors.map(a => String(a.value));
+              /** 対象ごとに満たすべきフィールドの集まり（それぞれの集まりのどれかに効果があればよい）。null = 列が別に挙がったテーブル（文脈） */
+              const needsOf = (a) => {
+                const code = String(a.value), cols = Object.keys(colsA).filter(col => String(colsA[col]) === code);
+                if (!cols.length) return [{ codes: [code], text: `「${a.text}」` }];
+                if (cols.some(col => named.includes(col))) return null;
+                if (!roA) return [{ codes: [code, ...cols], text: `「${a.text}」` }];
+                return cols.filter(col => !roA.has(col)).map(col => ({ codes: [col], text: `「${a.text}」の「${String(lbA[col] || col)}」` }));
+              };
+              const has = (c, codes) => (Array.isArray(c.fields) ? c.fields : []).some(f => f && codes.includes(String(f.code)) && (ktFieldEffectsOf(f.effects) || []).some(x => effs.includes(x.effect)));
+              const noun = effs.map(e => KT_EFFECT_NOUN_JA[e] || e).join('・');
+              const lacks = [];
+              for (const a of tgtAnchors) for (const nd of (needsOf(a) || [])) {
+                const on = impl.filter(c => has(c, nd.codes));
+                if (!on.length) { lacks.push(`${nd.text}の${noun}`); continue; }
+                for (const p of platforms) if (!on.some(c => platOfCust(c).includes(p))) lacks.push(`${nd.text}の${noun}（${PJ[p]}）`);
+              }
+              if (lacks.length) return { ok: false, kind: 'missing', missing: [...new Set(lacks)], refs };
+            }
+            return { ok: true, refs };
           }
           //   値の要件（構造化した効果が無い）: 証拠になる値（strong）だけで決める。文脈の値（条件の文のフィールド・ステータス名・条件の「」の名前）は反映の可否に使わない。
           //   計画の AI の対応づけがある要件（見直しの HIGH 1）: 対応づけた要素（とアプリにある既存のファイル）について既存のファイル名・画面を確かめ、対応づけた設定の手順が

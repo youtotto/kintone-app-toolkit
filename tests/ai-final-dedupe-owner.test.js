@@ -107,10 +107,12 @@ await section(async () => {
 console.log('\n--- §D2. PC とモバイルで本当に違う部分は画面ごとの文のまま残す ---');
 await section(async () => {
   //   モバイルの編集制御（C2）の計画から単価を外す（PC は品名・数量・単価、モバイルは品名・数量）
+  //   2026-10-16（§12.35 の残る限界の修正）: 要件 R3 は「PC とモバイルで金額と明細を編集不可」なので、モバイルで単価を外した計画は対象ごとの確かめで明確な欠落として止める
+  //   （以前はどれかのフィールドがあれば満たした扱いで承認できた）。画面ごとの文の確かめはそのまま
   const x = await R.run({ planMutate: (plan) => { const c2 = plan.customizations.find(c => c.customizationId === 'C2'); c2.fields = c2.fields.filter(f => f.code !== 'unit_price'); return plan; } });
   const v = x.c.activePlan(), fin = v.final;
   const L = vis(R.leftHtml(x, { pre: READY })), RV = vis(R.rightHtml(x));
-  assert(fin && fin.approvable === true && fin.behaviors.includes(`${REALIZED}（PC）`) && fin.behaviors.includes('「明細」の品名・数量のセルを編集できなくなります（モバイル）') && !fin.behaviors.some(b => /（PC・モバイル）/.test(b)),
+  assert(fin && fin.approvable === false && fin.blockers.map(b => b.text).includes('「承認済みでは金額と明細を変更できなくし、差戻し後は再編集できるようにして」を実現する計画の手順・JavaScript が足りません（計画に無いもの: 「明細」の「単価」の編集の禁止（モバイル））') && fin.behaviors.includes(`${REALIZED}（PC）`) && fin.behaviors.includes('「明細」の品名・数量のセルを編集できなくなります（モバイル）') && !fin.behaviors.some(b => /（PC・モバイル）/.test(b)),
     `D2-1: 列が違うので PC とモバイルの文はまとめない: ${JSON.stringify(fin && fin.behaviors.filter(b => /セル/.test(b)))}`);
   assert(L.includes(`${REALIZED}（PC）`) && L.includes('「明細」の品名・数量のセルを編集できなくなります（モバイル）') && RV.includes('「明細」の品名・数量のセルを編集できなくなります（モバイル）'),
     'D2-2: 本当に違う部分は判断に関わるので、左の「この案で実現すること」にも画面ごとの文で出す');
@@ -472,6 +474,107 @@ await section(async () => {
   assert(Array.isArray(reqsSent) && reqsSent.length > 0 && reqsSent.every(r => !('effects' in r) || (Array.isArray(r.effects) && !r.effects.length)) && w.calls.plan.length === 1,
     `D11-4: 構造化した効果の無い要件に、要求の組み立てで効果を足さない（計画の呼び出し 1 回）: ${JSON.stringify({ effects: (reqsSent || []).map(r => [r.id, r.effects]), plan: w.calls.plan.length })}`);
 });
+// =========================================================
+console.log('\n--- §D12. 対象が複数の要件（2026-10-16・評価の記録 §12.35 の残る限界）: 「金額・明細」を JavaScript に対応づけても止めず、対象ごとの必須の動作で生成に渡す ---');
+await section(async () => {
+  const clone4 = (x) => JSON.parse(JSON.stringify(x));
+  const { KTAiConversation: CV } = T;
+  const ST = 'ステータス in ("承認済み")';
+  //   計画の AI が保存済みの要件 R3（対象 "amount, items"・効果 lock・条件「承認済み。PCとモバイルの両方」・例外「差戻し後は再編集」）を JavaScript に対応づける update。
+  //   内容（対象・条件・動作・例外・効果・根拠）は素材のまま写す（後から都合のよい対応を足さない）。over で対象・効果だけを変える
+  const remap = (refs, over = {}) => (n, args) => (n !== 0 ? [] : (args.requirements || []).filter(r => r && r.id === 'R3').map(r => ({ op: 'update', id: r.id, target: r.target, condition: r.condition, behavior: r.behavior, exceptions: clone4(r.exceptions || []), decision: 'decided', disposition: 'adopted', sourceQuotes: clone4(r.sourceQuotes || []), planRefs: refs, decisionRefs: [], effects: clone4(r.effects || []), note: '', ...over })));
+  const keysOf = (list) => (list || []).map(e => `${e.field}|${e.effect}|${e.condition}|${[...(e.requirementIds || [])].sort().join('+')}|${[...(e.events || [])].sort().join(',')}`).sort();
+  const genOf = (xx, cid) => xx.gen.calls.filter(c => c.cid === cid);
+  /** その JavaScript の最初の生成の入力の必須の動作（生成されなかった＝修正の前に止まったときは []。修正の前の版でも例外で止めず最後まで評価する） */
+  const effOf = (xx, cid) => ((genOf(xx, cid)[0] || {}).requiredEffects || []);
+  const blockTexts = (xx) => xx.c.activePlan().final.blockers.map(b => b.text);
+  const lineR3 = (what) => `「承認済みでは金額と明細を変更できなくし、差戻し後は再編集できるようにして」を実現する計画の手順・JavaScript が足りません（計画に無いもの: ${what}）`;
+  const reqOfU = (plan, reqs, cid = 'C1', o = {}) => CV.requiredEffectsOf(plan, cid, reqs, { labels: R.LABELS, columns: R.COLUMNS, readOnly: R.READONLY, ...o });
+  const lockU = (code, condition = ST, effect = 'lock') => ({ code, access: 'CONTROL', condition, effects: [{ effect, condition: '' }] });
+  const custU = (fields, o = {}) => ({ customizationId: 'C1', strategy: 'NEW_JS_FILE', platform: ['desktop'], events: ['app.record.create.show', 'app.record.edit.show'], fields, ...o });
+  const reqU = (target, effects, o = {}) => ({ id: 'R9', target, condition: '承認済み', behavior: '変更を制限する', exceptions: [], decision: 'decided', disposition: 'adopted', planRefs: ['C1'], effects, ...o });
+  const sumU = (r) => ({ effects: keysOf(r.effects).map(k => k.split('|').slice(0, 4).join('|')), unresolved: r.unresolved.map(u => `${u.field}|${u.effect || ''}|${u.reason}|${u.requirementId || ''}`).sort() });
+
+  //   (1) 金額＋明細: 保存済みの素材の R3 を PC（C1）とモバイル（C2）の JavaScript に対応づける → 対象の数を理由に止めない。生成の入力に、計画が置いた対象ごとの編集不可が
+  //   R3 に結び付いて残る（金額・品名・数量・単価。小計は入力できない列で計画にも無い）。修正の前は C1・C2 が準備未完了「要件の対象が計画のどのフィールドかを特定できません」・
+  //   計画の自動の見直し 1 回・生成 1 本（C3）だった
+  const x = await R.run({ planOps: remap(['C1', 'C2']) });
+  const v = x.c.activePlan(), r3 = x.c.requirements(v.planId).find(r => r.id === 'R3');
+  const LOCKS = ['amount', 'item_name', 'qty', 'unit_price'];
+  const c1 = genOf(x, 'C1'), c2 = genOf(x, 'C2'), c3 = genOf(x, 'C3');
+  const isR3Lock = (list, platform) => LOCKS.every(f => list.some(e => e.field === f && e.effect === 'lock' && e.condition === ST && e.requirementIds.includes('R3') && e.events.length && e.events.every(ev => T.KTJsCatalog.eventPlatform(ev) === platform)));
+  assert(r3 && r3.target === 'amount, items' && JSON.stringify(r3.effects) === '["lock"]' && JSON.stringify(r3.planRefs) === '["C1","C2"]'
+    && x.calls.plan.length === 1 && c1.length === 1 && c2.length === 1 && c3.length === 1 && ['C1', 'C2', 'C3'].every(c => (v.generated[c] || {}).status === 'verified')
+    && isR3Lock(effOf(x, 'C1'), 'desktop') && isR3Lock(effOf(x, 'C2'), 'mobile') && effOf(x, 'C1').length === 4 && effOf(x, 'C2').length === 4
+    && v.final.approvable === true && !blockTexts(x).length,
+    `D12-1: 対象が 2 つ（金額・明細）の採用済みの要件を対応づけても止めず、生成の入力に対象ごとの編集不可が R3 に結び付いて残る（計画の呼び出し 1 回・生成は各 1 回・修復なし）: ${JSON.stringify({ target: r3 && r3.target, plan: x.calls.plan.length, gen: x.gen.calls.map(c => c.cid), C1: keysOf(effOf(x, 'C1')), C2: keysOf(effOf(x, 'C2')), st: Object.values(v.generated).map(g => g.status), blockers: blockTexts(x) })}`);
+  //   展開は要求する動作を渡すだけ: 実装済み・検証済みは生成の検証の結果で決まる（R3 は C3 の入力チェックに入らない＝担当の JavaScript の分だけ）
+  assert(!effOf(x, 'C3').some(e => (e.requirementIds || []).includes('R3')) && JSON.stringify(keysOf(effOf(x, 'C3'))) === JSON.stringify(keysOf(F.GENERATED.C3.requiredEffects)),
+    `D12-1b: R3 は担当の JavaScript（C1・C2）の入力だけに入り、モバイルの入力チェック（C3）には重ねない: ${JSON.stringify(keysOf(effOf(x, 'C3')))}`);
+
+  //   (2) 並び順: 対象の文の順（"items, amount"）・対応づけの順（C2, C1）・計画のフィールドの順を逆にしても、要求する動作・判定・自動の見直しの回数は同じ
+  const y = await R.run({ planOps: remap(['C2', 'C1'], { target: 'items, amount' }), planMutate: (plan) => { for (const c of plan.customizations) c.fields = [...c.fields].reverse(); return plan; } });
+  const vy = y.c.activePlan();
+  assert(['C1', 'C2', 'C3'].every(cid => JSON.stringify(keysOf(effOf(y, cid))) === JSON.stringify(keysOf(effOf(x, cid)))) && y.calls.plan.length === x.calls.plan.length && vy.final.approvable === v.final.approvable && JSON.stringify(blockTexts(y)) === JSON.stringify(blockTexts(x)),
+    `D12-2: 対象・対応づけ・フィールドの順を入れ替えても、要求する動作・判定・計画の呼び出しの回数は変わらない: ${JSON.stringify({ C1: keysOf(effOf(y, 'C1')), plan: y.calls.plan.length, approvable: vy.final.approvable })}`);
+
+  //   (3) 異なる効果: 計画が金額に編集不可・備考に警告を置き、要件（金額と備考・編集不可と警告）がその JavaScript を指す → 金額に警告・備考に編集不可を足さない（全組み合わせにしない）。
+  //   同じ JavaScript の別のフィールド（案件名の編集不可）には要件を結び付けない
+  const mix = reqOfU({ customizations: [custU([{ code: 'ステータス', access: 'READ' }, lockU('amount'), lockU('memo', ST, 'warn'), lockU('deal_name')])] }, [reqU('金額と備考', ['lock', 'warn'])]);
+  assert(JSON.stringify(sumU(mix).effects) === JSON.stringify([`amount|lock|${ST}|C1+R9`, `deal_name|lock|${ST}|C1`, `memo|warn|${ST}|C1+R9`]) && !mix.unresolved.length,
+    `D12-3: 対応が異なる効果を混ぜない（金額は編集不可・備考は警告のまま。案件名には結び付けない）: ${JSON.stringify(sumU(mix))}`);
+
+  //   (4) 条件と例外: 素材の承認済みの条件は各対象の組の条件のまま、例外（差戻し後は再編集）は要件の台帳のまま生成の検査に渡る。対象ごとに条件が違う計画は一律にしない。
+  //   条件の無い組しか無い対象は、そのフィールドだけ condition-unknown（要件の条件を「いつでも」にしない）
+  const inScope = x.c.requirementsInScope(v.planId, v.plan).find(r => r.id === 'R3');
+  const per = reqOfU({ customizations: [custU([lockU('amount'), lockU('item_name', 'ステータス in ("承認待ち")'), lockU('qty', ''), lockU('unit_price')])] }, [reqU('金額と明細', ['lock'])]);
+  assert(inScope && JSON.stringify(inScope.exceptions) === JSON.stringify([{ condition: '差戻し後', behavior: '再編集できるようにする' }])
+    && JSON.stringify(sumU(per).effects) === JSON.stringify([`amount|lock|${ST}|C1+R9`, 'item_name|lock|ステータス in ("承認待ち")|C1+R9', 'qty|lock||C1', `unit_price|lock|${ST}|C1+R9`]) && JSON.stringify(sumU(per).unresolved) === JSON.stringify(['qty|lock|condition-unknown|R9']),
+    `D12-4: 条件は組ごとのまま（一律にしない）・例外は台帳のまま・条件の無い対象はそのフィールドだけ条件が分からない: ${JSON.stringify({ exceptions: inScope && inScope.exceptions, per: sumU(per) })}`);
+
+  //   (5) テーブルの範囲: 列を挙げた要件（金額と明細の単価）は単価だけ（テーブル全体へ広げない）。テーブルを挙げた要件の生成の入力に、計画が置いていない列の編集不可を足さない。
+  //   計画が明細の一部の列（品名）だけを編集不可にした版は、入力できる列のうち数量・単価の欠落として止める（小計は入力できない列なので求めない）
+  const listed = reqOfU({ customizations: [custU(LOCKS.map(f => lockU(f)))] }, [reqU('金額と明細の単価', ['lock'])]);
+  assert(JSON.stringify(sumU(listed).effects) === JSON.stringify([`amount|lock|${ST}|C1+R9`, `item_name|lock|${ST}|C1`, `qty|lock|${ST}|C1`, `unit_price|lock|${ST}|C1+R9`]) && !listed.unresolved.length,
+    `D12-5: 列を挙げた要件は挙げた列だけに結び付く（品名・数量へ広げない）: ${JSON.stringify(sumU(listed))}`);
+  const part = await R.run({ planOps: remap(['C1', 'C2']), planMutate: (plan) => { for (const c of plan.customizations.filter(z => ['C1', 'C2'].includes(z.customizationId))) c.fields = c.fields.filter(f => !['qty', 'unit_price'].includes(f.code)); return plan; } });
+  const pv = part.c.activePlan();
+  assert(pv.final.approvable === false && blockTexts(part).includes(lineR3('「明細」の「数量」の編集の禁止・「明細」の「単価」の編集の禁止')) && !blockTexts(part).some(t => /小計/.test(t))
+    && ['C1', 'C2'].every(cid => !keysOf(effOf(part, cid)).some(k => /^(qty|unit_price|subtotal)\|/.test(k))),
+    `D12-5b: 明細の一部の列だけの計画は、残りの入力できる列の欠落として止める（生成の入力に計画に無い列を足さない・小計は求めない）: ${JSON.stringify({ blockers: blockTexts(part), C1: keysOf(effOf(part, 'C1')) })}`);
+
+  //   (6) PC とモバイルの分担: 上の (1) で C1 は PC のイベントだけ・C2 はモバイルのイベントだけ（isR3Lock）。モバイルの JavaScript を外した計画は、PC だけの実装をモバイルの達成にしない
+  const noMob = await R.run({ planOps: remap(['C1', 'C2']), planMutate: (plan) => { plan.customizations = plan.customizations.filter(c => c.customizationId !== 'C2'); plan.steps = plan.steps.filter(s => s.id !== 'C2'); return plan; } });
+  assert(noMob.c.activePlan().final.approvable === false && blockTexts(noMob).includes(lineR3('モバイル')),
+    `D12-6: モバイルの JavaScript を外すと、明確な欠落（モバイル）で止める（既存の回帰 D9-2 と同じ文）: ${JSON.stringify(blockTexts(noMob))}`);
+  const mobPart = await R.run({ planOps: remap(['C1', 'C2']), planMutate: (plan) => { const c2 = plan.customizations.find(c => c.customizationId === 'C2'); c2.fields = c2.fields.filter(f => f.code !== 'amount'); return plan; } });
+  assert(mobPart.c.activePlan().final.approvable === false && blockTexts(mobPart).includes(lineR3('「金額」の編集の禁止（モバイル）')),
+    `D12-6b: モバイルが明細だけで金額が無い計画は、PC の金額でモバイルを満たした扱いにしない: ${JSON.stringify(blockTexts(mobPart))}`);
+
+  //   (7) 一部の実装漏れ: 生成工程の検査（固定の結果）が PC の数量の編集不可を「無い」と返した → 金額などの成功で全体を達成にしない（その JavaScript は検証済みにならず、承認できない）
+  const miss = await R.run({ planOps: remap(['C1', 'C2']), verificationMutate: (cid, ver) => (cid === 'C1' ? { ...ver, passed: false, requiredEffects: ver.requiredEffects.map(e => (e.field === 'qty' ? { ...e, status: 'missing', events: e.events.map(ev => ({ ...ev, status: 'missing' })) } : e)) } : ver) });
+  const mv = miss.c.activePlan();
+  assert((mv.generated.C1 || {}).status !== 'verified' && mv.final.approvable === false && (mv.generated.C2 || {}).status === 'verified',
+    `D12-7: 生成物の一部（PC の数量）の制御の漏れは見逃さない（金額などの成功で達成にしない）: ${JSON.stringify({ C1: (mv.generated.C1 || {}).status, approvable: mv.final.approvable, gen: miss.gen.calls.map(c => c.cid) })}`);
+
+  //   (8) 構造情報不足: 構造化した効果の無い要件（効果 []）を対応づけても、文から効果を推定して足さない・全組み合わせに展開しない・自動の見直しをしない（生成の入力は素材と同じ）
+  const noEff = await R.run({ reqMutate: (r) => (r.id === 'R3' ? { ...r, effects: [] } : r), planOps: remap(['C1', 'C2'], { effects: [] }) });
+  const ne = noEff.c.activePlan();
+  assert(JSON.stringify((noEff.c.requirements(ne.planId).find(r => r.id === 'R3') || {}).effects) === '[]' && noEff.calls.plan.length === 1 && ['C1', 'C2', 'C3'].every(cid => genOf(noEff, cid).length === 1 && JSON.stringify(keysOf(effOf(noEff, cid))) === JSON.stringify(keysOf(F.GENERATED[cid].requiredEffects))) && ne.final.approvable === true,
+    `D12-8: 構造化した効果の無い要件では、推定・全組み合わせの展開・自動の見直しをしない（生成の入力は素材のまま）: ${JSON.stringify({ plan: noEff.calls.plan.length, C1: keysOf(effOf(noEff, 'C1')), approvable: ne.final.approvable })}`);
+
+  //   (9) 単一対象と成功素材: 1 つのフィールドの名前の要件は今まで（完全一致）のまま。計画に無いフィールドの名前（案件名）は customization の単位に倒さず特定できないまま。
+  //   成功素材（§12.31。対応づけなし）の生成の入力は実機と同じ（D1-1）。対応づけた版でも左の「この案で実現すること」は利用者の依頼の 4 行のままで、列の一覧に戻らない
+  const one = reqOfU({ customizations: [custU([lockU('amount'), lockU('memo')])] }, [reqU('金額', ['lock'])]);
+  const notIn = reqOfU({ customizations: [custU([lockU('amount'), lockU('memo')])] }, [reqU('案件名', ['lock'])]);
+  const base = await R.run();
+  const L = vis(R.leftHtml(x, { pre: READY })), doSec = secOf(L, 'この案で実現すること', LEFT_SECTIONS.slice(1));
+  assert(JSON.stringify(sumU(one).effects) === JSON.stringify([`amount|lock|${ST}|C1+R9`, `memo|lock|${ST}|C1`]) && JSON.stringify(sumU(notIn).unresolved) === JSON.stringify(['|lock|target-unresolved|R9'])
+    && ['C1', 'C2', 'C3'].every(cid => JSON.stringify((base.c.activePlan().generated[cid] || {}).requiredEffects) === JSON.stringify(F.GENERATED[cid].requiredEffects))
+    && ADOPTED.every(t => count(doSec, t) === 1) && doSec.split('\n').map(s => s.trim()).filter(Boolean).length === 4 && !/品名|数量|単価/.test(doSec),
+    `D12-9: 単一対象・成功素材は今までどおり、対応づけた版の左も依頼の 4 行（列の一覧に戻さない）: ${JSON.stringify({ one: sumU(one), notIn: sumU(notIn), left: doSec.replace(/\s+/g, ' ') })}`);
+});
+
 // =========================================================
 console.log('\n--- §D7. 画面: 反映の前の確認の再検査も、生成の検査と同じ要件の台帳と担当の集まりで担当を引く（左のカード・右の変更内容と同じ文） ---');
 await section(async () => {
