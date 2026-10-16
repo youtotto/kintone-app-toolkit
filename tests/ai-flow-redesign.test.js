@@ -958,15 +958,18 @@ await section(async () => {
   const v = x.c.activePlan(), html = stripC(finalHtml(x));
   assert(x.gen.calls.length === 0 && v.final.approvable === false && v.final.cannot.some(c => c.kind === 'unsupported' && /Slack に通知する/.test(c.text) && /外部連携のコードは Toolkit では生成しません/.test(c.text)) && /Toolkit では作れない JavaScript/.test(html) && !/JavaScript は無く、設定の変更だけです/.test(html) && /最終案（反映できない点があります）/.test(html) && x.c.approveFinal({ planId: v.planId, version: v.version }).ok === false, `指示 A2: 生成できない customization を「設定の変更だけ」として承認させない: ${JSON.stringify(v.final.cannot)}`);
 });
-// 指示 A3: 担当の無い決まった要件が増えたら、JavaScript を流用せずに作り直す（計画の AI が customization を変えなくても）
+// 指示 A3: 決まった要件が増えたら、JavaScript を流用せずに作り直す（計画の AI が customization を変えなくても）
 await section(async () => {
   const x = makeConvC();
   await adoptC(x);
   x.planImpl = (args) => { const r = planJs(args); if (args.revision && /^承認済みでも/.test(args.revision.request)) r.turn = { ...r.turn, requirementOps: [{ op: 'add', target: '金額', condition: '承認済み', behavior: '編集不可にする', exceptions: [], decision: 'decided', disposition: 'adopted', sourceQuotes: ['承認済みでも金額は編集不可にして'], planRefs: [], effects: ['lock'], note: '' }] }; return r; };
   await x.c.send('承認済みでも金額は編集不可にして');
   const v2 = x.c.activePlan();
-  // 担当の無い決まった要件 → 自動で 1 回だけ計画の差分更新（担当は付かない）→ その版で作り直す（前の検証結果を流用しない）
-  assert(v2.version === 3 && x.calls.plan.length === 3 && x.gen.calls.length === 2 && v2.generated.C1.reused !== true && v2.final.approvable === false && /計画に担当が無いものが 1 件/.test(v2.final.blockingReason), `指示 A3: 担当の無い要件（planRefs が計画に無い）が増えた → 自動の差分更新 1 回の後、全部の JavaScript を作り直す（前の検証結果を流用しない）: ${JSON.stringify({ version: v2.version, plans: x.calls.plan.length, gen: x.gen.calls.length, reused: v2.generated.C1.reused })}`);
+  //   簡素化 C（2026-10-16）: 計画が手順・JavaScript に対応づけていない決まった要件（planRefs []）は「担当なし」で止めず、自動の見直しも呼ばない（確認の限界。右に件数の 1 行）。
+  //   C1 が同じ編集不可（承認待ち）を持つだけでは、この要件（承認済み）の実現にしない（対応づけが無いと、生成の検証にこの要件の効果が渡らない）。作り直しはそのまま
+  const r5 = x.c.requirements(v2.planId).find(r => r.condition === '承認済み' && r.behavior === '編集不可にする');
+  assert(!!r5 && v2.version === 2 && x.calls.plan.length === 2 && x.gen.calls.length === 2 && v2.generated.C1.reused !== true && v2.final.approvable === true && !v2.final.blockers.some(b => b.kind === 'ownerless') && (v2.final.unconfirmedReqs || []).some(u => u.requirementId === r5.id) && /計画の構造からは実現を確かめていない要件が 1 件あります/.test(stripC(rightOf(x))),
+    `指示 A3: 決まった要件（計画に対応づけていない）が増えた → 自動の見直しはせず、全部の JavaScript を作り直す（前の検証結果を流用しない）。その要件は確認の限界: ${JSON.stringify({ version: v2.version, plans: x.calls.plan.length, gen: x.gen.calls.length, reused: v2.generated.C1.reused, approvable: v2.final.approvable, unconf: (v2.final.unconfirmedReqs || []).map(u => u.requirementId) })}`);
   const y = makeConvC();
   await adoptC(y);
   await y.c.send('通知は外して');
@@ -1015,8 +1018,9 @@ await section(async () => {
 await section(async () => {
   //   2026-10-15（追加の指示 1: 仮案の採用を実装担当の代わりにしない）: R4（申請から 7 営業日以内に承認）の planRefs は採用した仮案の項目 A3 だけで、計画（承認待ちの金額の編集不可の
   //   JavaScript C1）にこの期限を実現する手順・JavaScript は無い。計画の AI はほかの要件（R1〜R3）を C1 に対応づけ、R4 は対応づけない。生成の AI は R4 を担当外と申告する。
-  //   → 採用の記録だけでは担当にしない: 「7 営業日」を実現する手順・JavaScript が足りない決まった要件として反映を止める（警告だけで反映できるにしない）。
-  //   左の「確認できないこと／反映を止めている理由」と右の「確認できないこと」に同じ文 1 回。同じ要件の計画全体の確認（担当外の申告）は重ねない。
+  //   採用の記録（A3）は実現の証拠にしない。簡素化 C（2026-10-16）: 以前は「7 営業日」を実現する手順・JavaScript が足りない決まった要件として反映を止め、自動の見直しを 1 回起こした。
+  //   期限は今のプロセス管理・通知の設定で満たしていることがあり、構造からは区別できないので止めない・自動の見直しもしない。生成の AI の担当外の申告は、計画全体で扱う要件の確認
+  //   （plan-scope。反映は止めない）として右の「確認できないこと」に 1 回出し、同じ要件を確認の限界の件数の行に重ねない。「ほかの手順で扱います」とは言わない。
   //   検査に担当の集まりを渡さない（この修正の前の検査の結果を流用した）ときと、渡したときで同じ
   for (const withOwners of [false, true]) {
     const gen = makeGenerate({ sequence: ['good'] });
@@ -1026,12 +1030,13 @@ await section(async () => {
     await adoptC(x);
     const v = x.c.activePlan(), fin = v.final;
     const h = stripC(finalHtml(x)), hr = stripC(rightOf(x));
-    const line = '「7営業日」を実現する計画の手順・JavaScript が足りません（計画に無いもの: 7 営業日）';
+    const line = '「7 営業日以内に承認する」は、作った JavaScript では担当外とされました。計画のどの手順で実現するかは書かれていません';
     const r4 = x.c.requirements(v.planId).find(r => /営業日/.test(r.behavior));
-    assert(r4 && JSON.stringify(r4.planRefs) === '["A3"]' && x.c.requirements(v.planId).filter(r => r.id !== r4.id && r.decision !== 'revoked').every(r => (r.planRefs || []).includes('C1')) && fin.approvable === false && x.c.approveFinal({ planId: v.planId, version: v.version }).ok === false
-      && fin.blockers.some(b => b.kind === 'ownerless' && b.text === line) && !fin.blockers.some(b => b.kind === 'plan-scope') && (h.match(new RegExp(line.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g')) || []).length === 1 && hr.includes(`${line}（決まった要件なので、反映を止めています）`)
-      && !/この内容で反映できます|担当外とされました|計画の他の手順・JavaScript で扱います/.test(h + hr) && x.calls.plan.length === 2,
-      `指示 B5（2026-10-15 追加の指示 1: 実現する手順が無い採用済みの要件は、仮案の項目に結び付いていても反映を止める。自動の見直しは 1 回）${withOwners ? '・検査に担当の集まりを渡す' : '・前の検査の結果'}: ${JSON.stringify({ blockers: fin.blockers, approvable: fin.approvable, plans: x.calls.plan.length })}`);
+    assert(r4 && JSON.stringify(r4.planRefs) === '["A3"]' && x.c.requirements(v.planId).filter(r => r.id !== r4.id && r.decision !== 'revoked').every(r => (r.planRefs || []).includes('C1')) && fin.approvable === true
+      && !fin.blockers.some(b => b.kind === 'ownerless') && fin.blockers.filter(b => b.kind === 'plan-scope').length === 1 && fin.blockers.some(b => b.kind === 'plan-scope' && b.text === line && b.requirementId === r4.id && /この点では反映を止めていません/.test(b.next))
+      && !(fin.unconfirmedReqs || []).some(u => u.requirementId === r4.id) && (hr.match(new RegExp(line.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g')) || []).length === 1
+      && !/計画の他の手順・JavaScript で扱います|計画の構造からは実現を確かめていない要件/.test(h + hr) && x.calls.plan.length === 1,
+      `指示 B5（簡素化 C: 実現する手順が無い採用済みの要件は止めず、生成の AI の担当外の申告を右に 1 回。自動の見直しなし）${withOwners ? '・検査に担当の集まりを渡す' : '・前の検査の結果'}: ${JSON.stringify({ blockers: fin.blockers, approvable: fin.approvable, plans: x.calls.plan.length })}`);
   }
 });
 // 正しさ C4 / C3（会話）: 計画の後に基準が変わったら承認せず STALE に（作り直しを案内）。承認の取り消し
@@ -1251,10 +1256,11 @@ await section(async () => {
   }
   assert(out.length === 40 && out.every(r => r[2] === 'BLOCKED'), `D8-7: HEAD で登録不可の 4 通りは、動作テストの結果が無い・実行できない・不合格・旧い接続先で確認に下がらない: ${JSON.stringify(out.filter(r => r[2] !== 'BLOCKED'))}`);
 });
-// D9: 採用済み要件に担当が無い → 最終案から消さず、自動で 1 回だけ計画の差分更新（その要件を focus に）に戻す
+// D9: 採用済み要件に計画の対応づけが無い → 最終案から消さず、確認の限界として右に出す（止めない・自動の見直しなし）。
+//   簡素化 C（2026-10-16）: 以前は「担当なし」で止め、自動で 1 回だけ計画の差分更新（その要件を focus に）に戻した。期限は今の設定で満たしていることがあり、構造からは区別できない
 await section(async () => {
   const OWN = { op: 'add', target: '承認', condition: '', behavior: '7 営業日以内に承認する', exceptions: [], decision: 'decided', disposition: 'unresolved', sourceQuotes: ['7営業日で'], planRefs: [], effects: [], note: '' };
-  // (a) 差分更新で担当（C1）が付く → 承認できる最終案 1 つ
+  // (a) 差分更新なら担当（C1）を付ける計画の AI でも、差分更新を依頼しない → 承認できる最終案 1 つ（その要件は確認の限界）
   let hold = null;
   const ridNow = () => { const vv = hold && hold.c.activePlan(); return vv ? (hold.c.requirements(vv.planId).find(r => r.behavior === OWN.behavior) || {}).id : null; };
   const x = makeConvC({ planImpl: (args) => planJs(args, { gatewayPlan: { plan: true }, requirementOps: args.revision ? [{ ...OWN, op: 'update', id: ridNow(), planRefs: ['C1'], disposition: 'adopted' }] : [OWN] }) });
@@ -1262,16 +1268,16 @@ await section(async () => {
   await adoptC(x);
   const v = x.c.activePlan();
   const rid = (x.c.requirements(v.planId).find(r => r.behavior === '7 営業日以内に承認する') || {}).id;
-  assert(rid && x.calls.plan.length === 2 && x.calls.plan[1].revision && x.calls.plan[1].focus && x.calls.plan[1].focus.includes(rid) && /計画の担当（設定の手順か JavaScript）がありません/.test(x.calls.plan[1].request) && /7営業日で/.test(x.calls.plan[1].request), `D9-1: 担当の無い決まった要件（扱い未定の unresolved も）→ 自動で計画の差分更新（その要件を focus に）: ${JSON.stringify(x.calls.plan.map(p => ({ rev: p.revision, focus: p.focus })))}`);
-  assert(x.finals().length === 1 && v.version === 2 && v.final.approvable === true && x.gen.calls.length === 1, `D9-2: 担当が付いた版で最終案を 1 回だけ作る（前の版の最終案は作らない）: ${JSON.stringify({ finals: x.finals().length, version: v.version, gen: x.gen.calls.length, reason: v.final.blockingReason })}`);
-  // (b) 差分更新でも担当が付かない → 最終案に「担当が計画にありません」として出し準備未完了（自動の依頼は 1 回だけ）
+  assert(rid && x.calls.plan.length === 1 && !x.calls.plan[0].revision && (v.final.unconfirmedReqs || []).some(u => u.requirementId === rid), `D9-1: 計画に対応づけていない決まった要件（扱い未定の unresolved も）→ 自動の差分更新をせず、確認の限界: ${JSON.stringify({ plans: x.calls.plan.map(p => ({ rev: p.revision, focus: p.focus })), unconf: (v.final.unconfirmedReqs || []).map(u => u.requirementId) })}`);
+  assert(x.finals().length === 1 && v.version === 1 && v.final.approvable === true && x.gen.calls.length === 1, `D9-2: 最終案を 1 回だけ作る（確認の限界では止めない）: ${JSON.stringify({ finals: x.finals().length, version: v.version, gen: x.gen.calls.length, reason: v.final.blockingReason })}`);
+  // (b) 差分更新でも担当を付けない計画の AI → 最終案に確認の限界として出す（右に件数の 1 行・要件の文は［詳しく］。左には出さない。承認できる）
   const y = makeConvC({ planImpl: (args) => planJs(args, { gatewayPlan: { plan: true }, requirementOps: args.revision ? [] : [OWN] }) });
   await adoptC(y);
   const vy = y.c.activePlan();
   const hy = stripC(finalHtml(y));
-  assert(y.calls.plan.length === 2 && y.finals().length === 1 && vy.final.approvable === false && /計画に担当が無いものが 1 件/.test(vy.final.blockingReason) && /「7営業日で」は、この計画のどの手順・JavaScript が担当するか決まっていません/.test(hy), `D9-3: それでも担当が無ければ最終案から消さずに理由を出す（自動の差分更新は 1 回だけ）: ${JSON.stringify({ plans: y.calls.plan.length, finals: y.finals().length, reason: vy.final.blockingReason })}`);
+  assert(y.calls.plan.length === 1 && y.finals().length === 1 && vy.final.approvable === true && !vy.final.blockers.some(b => b.kind === 'ownerless') && /計画の構造からは実現を確かめていない要件が 1 件あります/.test(stripC(rightOf(y))) && stripC(rightOf(y)).includes('「7営業日で」は、計画の構造からは実現を確かめていません（反映した後に動作テスト環境で確かめてください）') && !/7営業日で/.test(hy), `D9-3: 計画に対応づけていない決まった要件は最終案から消さず、右の確認の限界に出す（自動の差分更新なし）: ${JSON.stringify({ plans: y.calls.plan.length, finals: y.finals().length, reason: vy.final.blockingReason })}`);
   const ap = y.c.approveFinal({ planId: vy.planId, version: vy.version });
-  assert(ap.ok === false && ap.reason === 'NOT_APPROVABLE', 'D9-4: 担当の無い決まった要件が残る最終案は承認できない');
+  assert(ap.ok === true, `D9-4: 確認の限界の要件が残る最終案も承認できる（反映した後に動作テスト環境で確かめる）: ${JSON.stringify(ap)}`);
 });
 
 // D10（画面）: 偽 client（health の customization-generator.verification に requiredEffects）で、Generator Context に必須の効果と既存 JS の本文（伏字）を渡し、
@@ -1537,6 +1543,7 @@ await section(async () => {
   assert(e.status === 'unverified' && /解析できませんでした/.test(e.verdict.reason) && !/要件未達/.test(e.verdict.reason) && v.final.verification.effects[0].structure === 'unchecked' && /解析できません（未確認）/.test(text) && !/処理なし（要件未達）/.test(text) && v.final.approvable === false, `D19: unchecked → 未確認（要件未達と表示しない・反映はできない）: ${JSON.stringify({ status: e.status, verdict: e.verdict })}`);
 });
 // D20（レビュー 8・§0c.6 の担当）: 担当は構造（planRefs）だけで決める。生成 AI の coverage の MET は担当として数えない
+//   簡素化 C（2026-10-16）: 対応づけの無い決まった要件は止めずに確認の限界にする。MET の申告でその確認を消さない（実現した扱いにしない）
 await section(async () => {
   const OWN2 = { op: 'add', target: '承認', condition: '', behavior: '7 営業日以内に承認する', exceptions: [], decision: 'decided', disposition: 'unresolved', sourceQuotes: ['7営業日で'], planRefs: [], effects: [], note: '' };
   let hold = null;
@@ -1546,7 +1553,8 @@ await section(async () => {
   await adoptC(y);
   const vy = y.c.activePlan();
   const metIds = (vy.generated.C1.generated.coverage || []).filter(cv => cv.status === 'MET').map(cv => cv.requirementId);
-  assert(metIds.some(id => /^R\d+$/.test(id)) && vy.final.approvable === false && /計画に担当が無いものが 1 件/.test(vy.final.blockingReason), `D20: AI が MET と申告しても planRefs の無い決まった要件は担当なし（承認できない）: ${JSON.stringify({ metIds, reason: vy.final.blockingReason })}`);
+  const rid20 = (y.c.requirements(vy.planId).find(r => r.behavior === OWN2.behavior) || {}).id;
+  assert(!!rid20 && metIds.includes(rid20) && vy.final.approvable === true && (vy.final.unconfirmedReqs || []).some(u => u.requirementId === rid20) && y.calls.plan.length === 1, `D20: AI が MET と申告しても planRefs の無い決まった要件は実現した扱いにしない（確認の限界のまま。止めない）: ${JSON.stringify({ metIds, unconf: (vy.final.unconfirmedReqs || []).map(u => u.requirementId), plans: y.calls.plan.length })}`);
 });
 // D21（レビュー B6）: 警告の「保存は止めない」代表条件の説明は構造化した値から作る（作成画面・編集画面を取り違えた説明を出さない）
 await section(async () => {

@@ -47,6 +47,7 @@ const READY = { status: 'ready', items: { target: '動作テスト環境（こ�
 const OWNERLESS_RE = /担当するか決まっていません|担当が計画にありません|担当が計画に見つかりません|担当範囲外とされた要件/;
 const INTERNAL = /\b[RBCP][0-9]+\b|requestId|PLAN_OWNER|AI_OUT_OF_SCOPE|coverage-owner|SUBTABLE_ROWS|requirementId|planOwners/;
 /** 反映の前の確認の確認項目（3 本の JavaScript の再検査。画面の jsRecheckOf と同じ引数）の画面の文 */
+const UNCONF_SUM = /計画の構造からは実現を確かめていない要件が \d+ 件あります/;
 const precheckTexts = (x, o = {}) => ['C1', 'C2', 'C3'].flatMap(cid => (R.recheckOf(x, cid, o).registration.confirmations || []).map(c => c.screenText));
 /** 生成の応答の coverage を差し替える mutate（cid → coverage を返す関数） */
 const withCoverage = (map) => (cid, g) => (map[cid] ? { ...g, coverage: map[cid](clone(g.coverage)) } : g);
@@ -86,8 +87,10 @@ await section(async () => {
   assert(c2.unowned.length === 0 && c2.planUnconfirmed.length === 0 && c2.outOfScope.length === 1 && c2.outOfScope[0].code === 'PLAN_OWNER' && c2.outOfScope[0].rowLimit === true && !v.generated.C2.review.checks.some(ch => ch.name === 'coverage-owner') && !fin.blockers.length && fin.outOfScope.every(r => r.owned),
     `D1-9: R3（PC・モバイルの金額と明細を編集不可・planRefs は仮案の項目 B2）は C2 の検査で担当あり（PLAN_OWNER・rowLimit）。担当未定・確認の行は無い: ${JSON.stringify({ un: c2.unowned, oos: c2.outOfScope.map(o => [o.code, o.owner, o.rowLimit]), blockers: fin.blockers })}`);
   const pre = precheckTexts(x), preBefore = precheckTexts(x, { ownersOff: true });
-  assert(!OWNERLESS_RE.test(L) && !OWNERLESS_RE.test(RT) && !/確認できないこと/.test(L + RV) && pre.length === 1 && /既存のファイルの 2 行が置き換え・削除されます/.test(pre[0]) && !pre.some(t => OWNERLESS_RE.test(t)),
-    `D1-10: 左・右・反映の前の確認のどれにも担当未定が無い（反映の前の確認の確認項目は既存の行の置き換えの 1 件）: ${JSON.stringify(pre)}`);
+  //   簡素化 C（2026-10-16）: 要件の対応づけが仮案の項目だけ（計画の手順・JavaScript ではない）の要件は、構造からは実現を確かめられないので確認の限界。
+  //   文の値（100万円など）を計画の中で探して「実現している」とする判定は差し戻した。右の「確認できないこと」に件数の 1 行（止めない・左と反映の前の確認には出さない）
+  assert(!OWNERLESS_RE.test(L) && !OWNERLESS_RE.test(RT) && !/確認できないこと/.test(L) && UNCONF_SUM.test(RV) && pre.length === 1 && /既存のファイルの 2 行が置き換え・削除されます/.test(pre[0]) && !pre.some(t => OWNERLESS_RE.test(t) || /計画の構造からは実現を確かめていません/.test(t)),
+    `D1-10: 左・右・反映の前の確認のどれにも担当未定が無い（確認の限界は右の件数の 1 行だけ。反映の前の確認の確認項目は既存の行の置き換えの 1 件）: ${JSON.stringify(pre)}`);
   assert(preBefore.some(t => /担当範囲外とされた要件「承認済み。PCとモバイルの両方：金額と明細を編集不可にする」の担当が計画に見つかりません/.test(t)),
     `D1-11: 原因の再現: 反映の前の再検査に要件の台帳と担当の集まりを渡さない（修正の前の画面の引数）と、同じ素材で「担当範囲外とされた要件…計画に見つかりません」が出る: ${JSON.stringify(preBefore)}`);
   const btns = [...hReady.matchAll(/<button[^>]*data-act="open-code"\s+data-cid="([^"]+)"[^>]*>([^<]*)<\/button>/g)].map(m => [m[1], m[2]]);
@@ -112,14 +115,14 @@ await section(async () => {
 console.log('\n--- §D2. PC とモバイルで本当に違う部分は画面ごとの文のまま残す ---');
 await section(async () => {
   //   モバイルの編集制御（C2）の計画から単価を外す（PC は品名・数量・単価、モバイルは品名・数量）
-  //   2026-10-16（§12.35 の残る限界の修正）: 要件 R3 は「PC とモバイルで金額と明細を編集不可」なので、モバイルで単価を外した計画は対象ごとの確かめで明確な欠落として止める
-  //   （以前はどれかのフィールドがあれば満たした扱いで承認できた）。画面ごとの文の確かめはそのまま
+  //   簡素化 C（2026-10-16）: 要件の文の対象（金額・明細）ごとに列と画面を探して「欠落」とする判定（57a2161 の実現の判定の部分）は差し戻した。R3 は計画の JavaScript に
+  //   対応づけていないので確認の限界（止めない）。画面ごとに違う部分は、左の「この案で実現すること」と右の「最終的にどう動くか」に画面ごとの文で出す（人が見て判断する）
   const x = await R.run({ planMutate: (plan) => { const c2 = plan.customizations.find(c => c.customizationId === 'C2'); c2.fields = c2.fields.filter(f => f.code !== 'unit_price'); return plan; } });
   const v = x.c.activePlan(), fin = v.final;
   const L = vis(R.leftHtml(x, { pre: READY })), RV = vis(R.rightHtml(x));
   const mobText = `${REALIZED_COND}明細の品名・数量を編集できなくします（モバイル）。`;
-  assert(fin && fin.approvable === false && fin.blockers.map(b => b.text).includes('「承認済みでは金額と明細を変更できなくし、差戻し後は再編集できるようにして」を実現する計画の手順・JavaScript が足りません（計画に無いもの: 「明細」の「単価」の編集の禁止（モバイル））') && fin.behaviors.includes(`${REALIZED}（PC）。`) && fin.behaviors.includes(mobText) && !fin.behaviors.some(b => /（PC・モバイル）/.test(b)),
-    `D2-1: 列が違うので PC とモバイルの文はまとめない: ${JSON.stringify(fin && fin.behaviors.filter(b => /を編集できなくします/.test(b)))}`);
+  assert(fin && fin.approvable === true && !fin.blockers.length && fin.behaviors.includes(`${REALIZED}（PC）。`) && fin.behaviors.includes(mobText) && !fin.behaviors.some(b => /（PC・モバイル）/.test(b)),
+    `D2-1: 列が違うので PC とモバイルの文はまとめない（文の対象の列ごとの欠落では止めない）: ${JSON.stringify(fin && { approvable: fin.approvable, behaviors: fin.behaviors.filter(b => /を編集できなくします/.test(b)) })}`);
   assert(L.includes(`${REALIZED}（PC）。`) && L.includes(mobText) && RV.includes(mobText),
     'D2-2: 本当に違う部分は判断に関わるので、左の「この案で実現すること」にも画面ごとの文で出す');
 });
@@ -154,9 +157,11 @@ await section(async () => {
     const x = await R.run({ reqMutate: (r) => (r.id === 'R4' ? { ...r, planRefs: refs } : r) });
     const v = x.c.activePlan(), fin = v.final;
     const L = vis(R.leftHtml(x, { pre: READY })), RV = vis(R.rightHtml(x));
-    const line = '「今ある入力チェックは残して、PCとモバイルの両方で使いたい」は、この計画のどの手順・JavaScript が担当するか決まっていません';
-    assert(fin && fin.approvable === false && fin.blockers.some(b => b.kind === 'ownerless' && b.text === line) && L.includes(line) && RV.includes(`${line}（決まった要件なので、反映を止めています）`) && !/この内容で反映できます/.test(L) && /disabled>動作テスト環境へ反映/.test(R.leftHtml(x, { pre: READY })),
-      `D4-1（${tag}）: わざと担当を外した決まった要件は、今までどおり反映を止め、左右に同じ要件の行（担当未定）: ${JSON.stringify(fin && { approvable: fin.approvable, blockers: fin.blockers.map(b => b.kind) })}`);
+    //   簡素化 C（2026-10-16）: 計画に対応づけていない決まった要件は「担当なし」で止めない（今の設定・既存のコードで満たしていることがあり、構造からは区別できない）。
+    //   自動の見直しも呼ばない。右の「確認できないこと」の確認の限界（件数の 1 行・文は［詳しく］）
+    const line = '「今ある入力チェックは残して、PCとモバイルの両方で使いたい」は、計画の構造からは実現を確かめていません（反映した後に動作テスト環境で確かめてください）';
+    assert(fin && fin.approvable === true && !fin.blockers.some(b => b.kind === 'ownerless') && !L.includes(line) && UNCONF_SUM.test(RV) && stripC(R.rightHtml(x)).includes(line) && x.calls.plan.length === 1,
+      `D4-1（${tag}）: 計画に対応づけていない決まった要件は止めず、自動の見直しも呼ばない（右の確認の限界）: ${JSON.stringify(fin && { approvable: fin.approvable, blockers: fin.blockers.map(b => b.kind), plan: x.calls.plan.length })}`);
   }
   //   計画全体で扱う要件（R4 の planRefs は仮案の項目 B3）を、生成の AI が担当外と言い（C3）、ほかの JavaScript も満たしたと言わない（C1 の R4 MET を外す）
   const line4 = '「PCとモバイルの入力・保存時：既存の入力チェックを維持して両方で利用できるようにする」は、作った JavaScript では担当外とされました。計画のどの手順で実現するかは書かれていません';
@@ -307,18 +312,21 @@ await section(async () => {
   const x = await R.run({ planMutate: drop('C3') });
   const v = x.c.activePlan(), fin = v.final, L = vis(R.leftHtml(x, { pre: READY })), RV = vis(R.rightHtml(x));
   const r4 = x.c.requirements(v.planId).find(r => r.id === 'R4');
-  const line4 = '「今ある入力チェックは残して、PCとモバイルの両方で使いたい」を実現する計画の手順・JavaScript が足りません（計画に無いもの: モバイル）';
-  assert(r4 && JSON.stringify(r4.planRefs) === '["B3"]' && r4.decision === 'decided' && r4.disposition === 'adopted' && fin.approvable === false && x.c.approveFinal({ planId: v.planId, version: v.version }).ok === false
-    && fin.blockers.some(b => b.kind === 'ownerless' && b.text === line4) && count(L, line4) === 1 && RV.includes(`${line4}（決まった要件なので、反映を止めています）`) && !/この内容で反映できます/.test(L) && /disabled>動作テスト環境へ反映/.test(R.leftHtml(x, { pre: READY })) && x.calls.plan.length === 2,
-    `D9-1: 実現する JavaScript（モバイルの入力チェック）を外すと、要件が採用した仮案の項目に結び付いたままでも欠落として反映を止める（自動の見直しは今までどおり 1 回。警告だけにしない）: ${JSON.stringify({ approvable: fin.approvable, blockers: fin.blockers.map(b => b.text), planRefs: r4 && r4.planRefs })}`);
+  //   簡素化 C（2026-10-16）: 画面の語（モバイル）とファイル名からの欠落の判定（以前は「…が足りません（計画に無いもの: モバイル）」で止めた）は差し戻した。
+  //   R4 は計画の手順・JavaScript に対応づけていない（仮案の項目 B3）ので確認の限界。止めず、自動の見直しも呼ばない（モバイルで入力チェックが動くかは、反映した後に動作テスト環境で確かめる）
+  const line4u = '「今ある入力チェックは残して、PCとモバイルの両方で使いたい」は、計画の構造からは実現を確かめていません（反映した後に動作テスト環境で確かめてください）';
+  assert(r4 && JSON.stringify(r4.planRefs) === '["B3"]' && r4.decision === 'decided' && fin.approvable === true && !fin.blockers.some(b => b.kind === 'ownerless') && UNCONF_SUM.test(RV) && stripC(R.rightHtml(x)).includes(line4u) && !L.includes(line4u) && x.calls.plan.length === 1,
+    `D9-1: 実現する JavaScript（モバイルの入力チェック）を外しても、文の語からは欠落とせず確認の限界（止めない・自動の見直しなし）: ${JSON.stringify({ approvable: fin.approvable, blockers: fin.blockers.map(b => b.text), plan: x.calls.plan.length })}`);
   //   (2) モバイルの編集制御（C2）を外す。R3（PC とモバイルで金額と明細を編集不可）は PC の JavaScript（C1）だけが実現する → 一部だけ（PC）を全体の実現にしない。
   //   C1 の生成の AI は R3 を満たしたと申告しているが、その申告では担当にしない
   const y = await R.run({ planMutate: drop('C2') });
-  const vy = y.c.activePlan(), fy = vy.final, Ly = vis(R.leftHtml(y, { pre: READY }));
-  const line3 = '「承認済みでは金額と明細を変更できなくし、差戻し後は再編集できるようにして」を実現する計画の手順・JavaScript が足りません（計画に無いもの: モバイル）';
-  assert(fy.approvable === false && fy.blockers.some(b => b.kind === 'ownerless' && b.text === line3) && count(Ly, line3) === 1 && (vy.generated.C1.review.coverage.met || []).some(m => m.requirementId === 'R3'),
-    `D9-2: PC だけが実現しモバイルが欠けた要件は、全体を満たした扱いにしない（生成の AI の満たしたという申告では担当にしない）: ${JSON.stringify(fy.blockers.map(b => b.text))}`);
-  //   (3) 別の形で実現している: 「申請する」「部長へ申請する」の条件を別の書き方（amount < 1000000 / amount > 999999）にしても、100万円の境界は同じ手順が持つので担当不在にしない
+  const vy = y.c.activePlan(), fy = vy.final;
+  //   簡素化 C: 画面の語からの欠落の判定（以前は「…が足りません（計画に無いもの: モバイル）」で止めた）は差し戻した。R3 は計画の JavaScript に対応づけていない（仮案の項目だけ）ので
+  //   確認の限界（止めない。PC の JavaScript が同じ編集不可を持つだけでは実現にしない）。実現した画面（PC だけ）は「最終的にどう動くか」で示す
+  assert(fy.approvable === true && !fy.blockers.some(b => b.kind === 'ownerless') && (fy.unconfirmedReqs || []).some(u => u.requirementId === 'R3') && fy.behaviors.some(b => /編集できなくします（PC）。/.test(b)) && !fy.behaviors.some(b => /編集できなくします（[^）]*モバイル/.test(b)),
+    `D9-2: PC だけが実現する計画は止めず（R3 は確認の限界）、画面ごとの文で PC だけと示す: ${JSON.stringify({ approvable: fy.approvable, blockers: fy.blockers.map(b => b.text), unconf: (fy.unconfirmedReqs || []).map(u => u.requirementId), behaviors: fy.behaviors })}`);
+  //   (3) 別の形で実現している: 「申請する」「部長へ申請する」の条件を別の書き方（amount < 1000000 / amount > 999999）にしても担当不在にしない
+  //   （簡素化 C 以降は文の金額を計画の中で探さないので、対応づけの無い R1・R2 は書き方に関係なく確認の限界）
   const z = await R.run({ planMutate: (plan) => { for (const s of plan.steps) { if (s.id === 'P2') s.spec.filterCond = 'amount < "1000000"'; if (s.id === 'P3') s.spec.filterCond = 'amount > "999999"'; } return plan; } });
   const fz = z.c.activePlan().final;
   assert(fz.approvable === true && !fz.blockers.some(b => b.kind === 'ownerless') && z.calls.plan.length === 1, `D9-3: 同じ要件を別の書き方の手順で実現していれば担当不在にしない（自動の見直しもしない）: ${JSON.stringify({ approvable: fz.approvable, blockers: fz.blockers.map(b => b.kind) })}`);
@@ -332,21 +340,22 @@ await section(async () => {
   const blockTexts = (xx) => xx.c.activePlan().final.blockers.map(b => b.text);
   const lineOf = (quote, what) => `「${quote}」を実現する計画の手順・JavaScript が足りません（計画に無いもの: ${what}）`;
   const reqOf = (xx, id) => xx.c.requirements(xx.c.activePlan().planId).find(r => r.id === id);
-  //   (5) 見直しの HIGH 1: C3 を外したまま、自動の見直しで計画の AI が R4 の対応づけだけを C1（PC の編集制御）・C2（モバイルの編集制御。移植元を使わない）に付け替える
-  //   → 対応づけた要素に既存の入力チェック（dealValidate.js）のモバイルの分を持つものが無いので、反映を止めたまま（対応づけだけで構造の欠落を消さない）
+  //   (5) 見直しの HIGH 1（2026-10-15）: 以前は、C3 を外すと文の語（モバイル・dealValidate.js）からの欠落で自動の見直しが起き、計画の AI が R4 の対応づけだけを
+  //   C1（PC の編集制御）・C2（モバイルの編集制御）に付け替えても止めたままにする形を確かめた。簡素化 C 以降は、その欠落の判定と自動の見直しが無い
   const h1 = await R.run({ planMutate: drop('C3'), planOps: remap('R4', ['C1']) });
   const h1b = await R.run({ planMutate: drop('C3'), planOps: remap('R4', ['C2']) });
-  assert([h1, h1b].every(xx => xx.c.activePlan().final.approvable === false && blockTexts(xx).includes(line4) && xx.calls.plan.length === 2) && JSON.stringify(reqOf(h1, 'R4').planRefs) === '["C1"]' && JSON.stringify(reqOf(h1b, 'R4').planRefs) === '["C2"]',
-    `D9-5: 自動の見直しで計画の AI が要件の対応づけだけを別の JavaScript に付け替えても、構造の欠落（モバイルの入力チェック）は消えず反映を止める: ${JSON.stringify([h1, h1b].map(xx => ({ approvable: xx.c.activePlan().final.approvable, refs: reqOf(xx, 'R4').planRefs, blockers: blockTexts(xx) })))}`);
-  //   (6) 数の境界の向き: 「申請する」の条件（100万円未満の側。P2）を外すと、100万円を持つのは「部長へ申請する」（100万円以上の側。P3）だけ → R2 は足りない。逆に P3 を外すと R1 が足りない。
-  //   P2 を外したまま計画の AI が R2 を P3 に付け替えても、P3 の条件は 100万円未満の側を通さないので足りないまま
+  //   簡素化 C: 文の語からの欠落の判定を差し戻したので、自動の見直しは起きず（対応づけの付け替えも無い）、止めない
+  assert([h1, h1b].every(xx => xx.c.activePlan().final.approvable === true && !blockTexts(xx).length && xx.calls.plan.length === 1) && JSON.stringify(reqOf(h1, 'R4').planRefs) === '["B3"]',
+    `D9-5: 文の語からの欠落が無いので自動の見直しは起きない: ${JSON.stringify([h1, h1b].map(xx => ({ approvable: xx.c.activePlan().final.approvable, refs: reqOf(xx, 'R4').planRefs, blockers: blockTexts(xx), plan: xx.calls.plan.length })))}`);
+  //   (6) 数の境界の向き: 「申請する」の条件（100万円未満の側。P2）・「部長へ申請する」（100万円以上の側。P3）を外す。P2 を外したまま R2 を P3 に付け替える（自動の見直しの台本）
   const dP2 = await R.run({ planMutate: (plan) => { plan.steps = plan.steps.filter(s => s.id !== 'P2'); return plan; } });
   const dP3 = await R.run({ planMutate: (plan) => { plan.steps = plan.steps.filter(s => s.id !== 'P3'); return plan; } });
   const dP2r = await R.run({ planMutate: (plan) => { plan.steps = plan.steps.filter(s => s.id !== 'P2'); return plan; }, planOps: remap('R2', ['P3']) });
   const line2 = lineOf('100万円未満は課長承認にしたい', '100万円未満'), line1 = lineOf('100万円以上は部長承認', '100万円以上');
-  assert(dP2.c.activePlan().final.approvable === false && blockTexts(dP2).includes(line2) && !blockTexts(dP2).includes(line1) && dP3.c.activePlan().final.approvable === false && blockTexts(dP3).includes(line1) && !blockTexts(dP3).includes(line2)
-    && dP2r.c.activePlan().final.approvable === false && blockTexts(dP2r).includes(line2) && JSON.stringify(reqOf(dP2r, 'R2').planRefs) === '["P3"]',
-    `D9-6: 金額の境界は条件の向きまで確かめる（100万円未満の側を外す → R2、以上の側を外す → R1 が足りない。反対側の手順への付け替えでは消えない）: ${JSON.stringify({ P2: blockTexts(dP2), P3: blockTexts(dP3), P2remap: blockTexts(dP2r) })}`);
+  //   簡素化 C: 要件の文の金額と比較の向き（100万円以上・未満）を計画の条件式の中で探して欠落とする判定は差し戻した。R1・R2 は計画に対応づけていないので確認の限界（止めない）。
+  //   条件式そのもの（kintone で評価できるか・分岐の重なりと漏れ）は、計画の確認（KTPlanReview）が今までどおり確かめる
+  assert([dP2, dP3, dP2r].every(xx => xx.c.activePlan().final.approvable === true && !blockTexts(xx).some(t => t === line1 || t === line2) && UNCONF_SUM.test(vis(R.rightHtml(xx)))),
+    `D9-6: 金額の境界の文からの欠落では止めない（確認の限界）: ${JSON.stringify({ P2: blockTexts(dP2), P3: blockTexts(dP3), P2remap: blockTexts(dP2r) })}`);
   //   (7) 2026-10-16（判定の責任範囲を絞る）: 明確な欠落と確認材料不足を分ける。構造で確かめられる欠落だけ反映を止め、確認材料不足は止めず計画の自動の見直しもしない
   //   a. ステータス名だけ（「承認済みになったとき申請者に通知する」）→ 確認材料不足（値が無い。通知の語から設定の種類を求めない）→ 反映は止めず、右に中立の 1 文
   const setR = (id, o) => (r) => (r.id === id ? { ...r, ...o } : r);
@@ -361,14 +370,16 @@ await section(async () => {
   const hd = await R.run({ reqMutate: setR('R4', { behavior: '単価が0のときは保存を止める', effects: [] }), planMutate: drop('C3') });
   const quote3 = '承認済みでは金額と明細を変更できなくし、差戻し後は再編集できるようにして', quote4 = '今ある入力チェックは残して、PCとモバイルの両方で使いたい';
   const unconfLine = (q) => `「${q}」は、計画の構造からは実現を確かめていません（反映した後に動作テスト環境で確かめてください）`;
-  const rightHas = (xx, q) => count(vis(R.rightHtml(xx)), `${unconfLine(q)}（この点では反映を止めていません）`) === 1;
+  //   簡素化 C: 確認の限界は右の件数の 1 行と［詳しく］の中の文（1 件ずつ並べない）
+  const rightHas = (xx, q) => UNCONF_SUM.test(vis(R.rightHtml(xx))) && count(stripC(R.rightHtml(xx)), unconfLine(q)) === 1;
   const leftLacks = (xx, q) => !vis(R.leftHtml(xx, { pre: READY })).includes(unconfLine(q));
   const passes = (xx) => xx.c.activePlan().final.approvable === true && !blockTexts(xx).length && xx.calls.plan.length === 1;
+  //   簡素化 C: c（効果の構造が無い「金額を編集不可」）は、画面の語からの欠落の判定を差し戻したので確認の限界（止めない）。b（構造化した効果を持つ JavaScript が無い）は今までどおり止める
   assert(passes(ha) && rightHas(ha, quote5) && leftLacks(ha, quote5)
     && hb.c.activePlan().final.approvable === false && blockTexts(hb).includes(lineOf(quote3, '編集の禁止'))
-    && hc.c.activePlan().final.approvable === false && blockTexts(hc).includes(lineOf(quote3, 'PC'))
+    && passes(hc) && rightHas(hc, quote3)
     && passes(hd) && rightHas(hd, quote4),
-    `D9-7: 構造で確かめられる欠落（構造化した効果を持つ JavaScript が無い・要件の言う画面に何も無い）だけ反映を止め、ステータス名だけ・効果の構造の無い新しい動作は確認材料不足（止めない・自動の見直しなし・右に中立の 1 文）: ${JSON.stringify({ a: [ha.c.activePlan().final.approvable, blockTexts(ha), ha.calls.plan.length], b: blockTexts(hb), c: blockTexts(hc), d: [hd.c.activePlan().final.approvable, blockTexts(hd), hd.calls.plan.length] })}`);
+    `D9-7: 構造で確かめられる欠落（構造化した効果を持つ JavaScript が無い）だけ反映を止め、ステータス名だけ・効果の構造の無い要件は確認の限界（止めない・自動の見直しなし・右の件数の 1 行）: ${JSON.stringify({ a: [ha.c.activePlan().final.approvable, blockTexts(ha), ha.calls.plan.length], b: blockTexts(hb), c: [hc.c.activePlan().final.approvable, blockTexts(hc)], d: [hd.c.activePlan().final.approvable, blockTexts(hd), hd.calls.plan.length] })}`);
   //   (8) 見直しの LOW 5: 「モバイルは対象外」の否定はモバイルを求める語に数えない（C3 を外しても R4 は PC の既存のファイルで足りる）
   const hn = await R.run({ reqMutate: setR('R4', { condition: 'PCの入力・保存時（モバイルは対象外）' }), planMutate: drop('C3') });
   assert(hn.c.activePlan().final.approvable === true && !blockTexts(hn).length && hn.calls.plan.length === 1, `D9-8: 「モバイルは対象外」は画面の要求に数えない: ${JSON.stringify(blockTexts(hn))}`);
@@ -419,8 +430,11 @@ await section(async () => {
     `D10-4: 未採用の検査の追加は、計画の AI の対応づけがあれば採用範囲の判定で外して知らせる（対応づけが無いと判定できない＝既存の限界の記録）: ${JSON.stringify({ mapped: so4, unmapped: so4n })}`);
   //   (5) 同じ動作・違う言い回し: 採用した構造（値・効果・対象）と成果物は同じまま要件の文を言い換えても、合否と計画の呼び出しの回数は §D1 と同じ
   const para = await R.run({ reqMutate: (r) => (r.id === 'R2' ? { ...r, condition: '金額が1,000,000円未満', behavior: '課長の承認とする' } : r.id === 'R3' ? { ...r, behavior: '金額と明細を変更できないようにする' } : r.id === 'R4' ? { ...r, behavior: '今の入力チェックを引き続きPCとモバイルで使う' } : r) });
-  assert(para.c.activePlan().final.approvable === true && !blockTexts(para).length && para.calls.plan.length === 1 && !(para.c.activePlan().final.unconfirmedReqs || []).length,
-    `D10-5: 言い回しを変えても合否と自動の見直しの回数は変わらない: ${JSON.stringify({ approvable: para.c.activePlan().final.approvable, blockers: blockTexts(para), plan: para.calls.plan.length })}`);
+  //   簡素化 C: 確認の限界の要件（計画に対応づけていない要件）も、言い回しで増えたり減ったりしない（文から値を読まないので）
+  const base10 = await R.run();
+  const unconfIds = (xx) => JSON.stringify((xx.c.activePlan().final.unconfirmedReqs || []).map(u => u.requirementId).sort());
+  assert(para.c.activePlan().final.approvable === true && !blockTexts(para).length && para.calls.plan.length === 1 && unconfIds(para) === unconfIds(base10),
+    `D10-5: 言い回しを変えても合否・自動の見直しの回数・確認の限界の要件は変わらない: ${JSON.stringify({ approvable: para.c.activePlan().final.approvable, blockers: blockTexts(para), plan: para.calls.plan.length, unconf: unconfIds(para), base: unconfIds(base10) })}`);
   //   (6) 警告の合意の有無（台本の模擬の利用者の発言。実際の会話の記録ではない）: 利用者が「警告も出して」と言い、計画の AI がその要件を構造化した効果（warn）で記録した → 警告を持たない JavaScript では明確な欠落・生成の検証の不一致で止める。
   //   計画の AI が依頼に無い警告を JavaScript に足した → 採用範囲を超えた計画として外す（対応づけがあるとき。警告に実装を合わせることを正解にしない）
   let addedU = false;
@@ -434,13 +448,13 @@ await section(async () => {
   assert(ra && ra.decision === 'decided' && JSON.stringify(ra.effects) === '["warn"]' && va.final.approvable === false && warnB.includes('「警告も出して」を実現する計画の手順・JavaScript が足りません（計画に無いもの: 警告）') && warnB.filter(t => /警告も出して/.test(t)).length === 1 && warnB.some(t => /要件未達/.test(t))
     && so6.notice === '依頼に無い「金額の警告」は入れていません（詳細）',
     `D10-6: 合意した警告の実装漏れは止め（構造の欠落と検証の不一致）、計画の AI が勝手に足した警告は採用範囲の外として外す: ${JSON.stringify({ agreed: warnB, unagreed: so6 })}`);
-  //   (7) 表示: 確認材料不足は右の「確認できないこと」に 1 回（反映を止めていないと添える）、左の通常表示と反映を止める理由には出さない。反映の前の確認（生成の検査・登録前の再検査）の
-  //   計画全体の確認も同じ文（implementationGaps）
+  //   (7) 表示: 確認の限界は右の「確認できないこと」に件数の 1 行（文は［詳しく］）、左の通常表示と反映を止める理由には出さない。
+  //   簡素化 C（2026-10-16）: 判断ではないので、生成の検査・反映の前の確認（implementationGaps）にも渡さない（以前は反映の前の確認にも同じ文を出していた）
   const ux = await R.run({ reqMutate: neg });
   const vux = ux.c.activePlan(), q6 = ux.c.requirements(vux.planId).find(r => r.id === 'R6').sourceQuotes[0];
   const lineU = `「${q6}」は、計画の構造からは実現を確かめていません（反映した後に動作テスト環境で確かめてください）`;
-  assert(ux.c.implementationGaps(vux).R6 === lineU && count(vis(R.rightHtml(ux)), `${lineU}（この点では反映を止めていません）`) === 1 && !vis(R.leftHtml(ux, { pre: READY })).includes(lineU) && /この内容で反映できます/.test(vis(R.leftHtml(ux, { pre: READY }))) && !vux.final.blockers.length,
-    `D10-7: 確認材料不足は右に 1 回・左は「反映できます」のまま・反映の前の確認と同じ文: ${JSON.stringify({ gap: ux.c.implementationGaps(vux), blockers: vux.final.blockers.map(b => b.text) })}`);
+  assert(!ux.c.implementationGaps(vux).R6 && UNCONF_SUM.test(vis(R.rightHtml(ux))) && count(stripC(R.rightHtml(ux)), lineU) === 1 && !vis(R.leftHtml(ux, { pre: READY })).includes(lineU) && /この内容で反映できます/.test(vis(R.leftHtml(ux, { pre: READY }))) && !vux.final.blockers.length,
+    `D10-7: 確認の限界は右に件数の 1 行・左は「反映できます」のまま・反映の前の確認には渡さない: ${JSON.stringify({ gap: ux.c.implementationGaps(vux), blockers: vux.final.blockers.map(b => b.text) })}`);
 });
 
 // =========================================================
@@ -545,17 +559,20 @@ await section(async () => {
     `D12-5: 列を挙げた要件は挙げた列だけに結び付く（品名・数量へ広げない）: ${JSON.stringify(sumU(listed))}`);
   const part = await R.run({ planOps: remap(['C1', 'C2']), planMutate: (plan) => { for (const c of plan.customizations.filter(z => ['C1', 'C2'].includes(z.customizationId))) c.fields = c.fields.filter(f => !['qty', 'unit_price'].includes(f.code)); return plan; } });
   const pv = part.c.activePlan();
-  assert(pv.final.approvable === false && blockTexts(part).includes(lineR3('「明細」の「数量」の編集の禁止・「明細」の「単価」の編集の禁止')) && !blockTexts(part).some(t => /小計/.test(t))
-    && ['C1', 'C2'].every(cid => !keysOf(effOf(part, cid)).some(k => /^(qty|unit_price|subtotal)\|/.test(k))),
-    `D12-5b: 明細の一部の列だけの計画は、残りの入力できる列の欠落として止める（生成の入力に計画に無い列を足さない・小計は求めない）: ${JSON.stringify({ blockers: blockTexts(part), C1: keysOf(effOf(part, 'C1')) })}`);
+  //   簡素化 C: 要件の文の対象（明細）の列ごとの欠落の判定は差し戻した。対応づけた JavaScript（C1・C2）が構造化した効果（編集不可）を持つので止めない。生成の入力に計画に無い列を足さないことはそのまま
+  assert(pv.final.approvable === true && !blockTexts(part).length && ['C1', 'C2'].every(cid => !keysOf(effOf(part, cid)).some(k => /^(qty|unit_price|subtotal)\|/.test(k))),
+    `D12-5b: 明細の一部の列だけの計画は止めず、生成の入力に計画に無い列を足さない（小計は求めない）: ${JSON.stringify({ blockers: blockTexts(part), C1: keysOf(effOf(part, 'C1')) })}`);
 
   //   (6) PC とモバイルの分担: 上の (1) で C1 は PC のイベントだけ・C2 はモバイルのイベントだけ（isR3Lock）。モバイルの JavaScript を外した計画は、PC だけの実装をモバイルの達成にしない
   const noMob = await R.run({ planOps: remap(['C1', 'C2']), planMutate: (plan) => { plan.customizations = plan.customizations.filter(c => c.customizationId !== 'C2'); plan.steps = plan.steps.filter(s => s.id !== 'C2'); return plan; } });
-  assert(noMob.c.activePlan().final.approvable === false && blockTexts(noMob).includes(lineR3('モバイル')),
-    `D12-6: モバイルの JavaScript を外すと、明確な欠落（モバイル）で止める（既存の回帰 D9-2 と同じ文）: ${JSON.stringify(blockTexts(noMob))}`);
+  //   簡素化 C: 画面の語（モバイル）からの欠落の判定は差し戻した。対応づけた C2 は計画から外れたが、C1 への対応づけと編集不可の構造が残るので止めない
+  assert(noMob.c.activePlan().final.approvable === true && !blockTexts(noMob).length && noMob.c.activePlan().final.behaviors.some(b => /編集できなくします（PC）。/.test(b)),
+    `D12-6: モバイルの JavaScript を外しても文の語からは止めず、実現した画面（PC）を示す: ${JSON.stringify(blockTexts(noMob))}`);
   const mobPart = await R.run({ planOps: remap(['C1', 'C2']), planMutate: (plan) => { const c2 = plan.customizations.find(c => c.customizationId === 'C2'); c2.fields = c2.fields.filter(f => f.code !== 'amount'); return plan; } });
-  assert(mobPart.c.activePlan().final.approvable === false && blockTexts(mobPart).includes(lineR3('「金額」の編集の禁止（モバイル）')),
-    `D12-6b: モバイルが明細だけで金額が無い計画は、PC の金額でモバイルを満たした扱いにしない: ${JSON.stringify(blockTexts(mobPart))}`);
+  //   簡素化 C: 対象の文（金額）の画面ごとの欠落の判定（「「金額」の編集の禁止（モバイル）」が計画に無い）は差し戻した。この素材は保存済みのモバイルのコードが金額を
+  //   操作したままなので、生成したコードの検査（計画に無いフィールドの操作）で今までどおり止まる（直す前の版 7a41818 でも同じ 2 件が出ていた）
+  assert(mobPart.c.activePlan().final.approvable === false && blockTexts(mobPart).some(t => /計画に無いフィールドを操作しています（対象と異なるフィールド）: 「金額」/.test(t)) && !mobPart.c.activePlan().final.blockers.some(b => b.kind === 'ownerless'),
+    `D12-6b: モバイルが明細だけで金額が無い計画は、文の対象からは止めず、金額を操作するコードを生成の検査で止める: ${JSON.stringify(blockTexts(mobPart))}`);
 
   //   (7) 一部の実装漏れ: 生成工程の検査（固定の結果）が PC の数量の編集不可を「無い」と返した → 金額などの成功で全体を達成にしない（その JavaScript は検証済みにならず、承認できない）
   const miss = await R.run({ planOps: remap(['C1', 'C2']), verificationMutate: (cid, ver) => (cid === 'C1' ? { ...ver, passed: false, requiredEffects: ver.requiredEffects.map(e => (e.field === 'qty' ? { ...e, status: 'missing', events: e.events.map(ev => ({ ...ev, status: 'missing' })) } : e)) } : ver) });
@@ -668,9 +685,10 @@ await section(async () => {
     && ![fn2, fn1, fnT].some(xx => realizedOf(xx).some(t => /LOGINUSER|owner/.test(t))),
     `D13-3: 構造が足りないときは台帳の条件の文をそのまま（2 文以上は別の行・1 つの句はつなぐ）。条件式の内部の表記は文に混ぜない: ${JSON.stringify([liOf(fn2), realizedOf(fn1), realizedOf(fnT)])}`);
   //   (4) 判定・確認事項は文の変更で変わらない（素材ごとの承認の可否・止める理由の種類・反映の前の確認事項。§D12-10 の確認事項の値も同じ）
-  //   期待の値は、文を直す前の本体（1d21c2c）で同じ素材から出した値（KT_SRC で確かめた）
+  //   期待の値は、文を直す前の本体（1d21c2c）で同じ素材から出した値（KT_SRC で確かめた）。簡素化 C（2026-10-16）で、画面の語（PC だけ・モバイルだけ）からの欠落の判定を
+  //   差し戻したので、PC だけ・モバイルだけの素材も承認できる（止める理由なし）。確認事項（反映の前の確認）は同じ
   const judge = (xx) => { const v = xx.c.activePlan(), f = v.final; const conf = ['C1', 'C2', 'C3'].filter(cid => v.generated[cid]).flatMap(cid => (R.recheckOf(xx, cid).registration.confirmations || []).map(c => `${cid}:${c.code}`)); return [f.approvable, f.blockers.map(b => b.kind).sort(), conf]; };
-  const WANT_JUDGE = JSON.stringify([[true, [], ['C1:patch-removal']], [false, ['ownerless'], ['C1:patch-removal']], [false, ['ownerless'], []], [true, [], ['C1:patch-removal', 'C2:coverage-unmet']], [true, [], ['C1:patch-removal', 'C2:coverage-unmet']]]);
+  const WANT_JUDGE = JSON.stringify([[true, [], ['C1:patch-removal']], [true, [], ['C1:patch-removal']], [true, [], []], [true, [], ['C1:patch-removal', 'C2:coverage-unmet']], [true, [], ['C1:patch-removal', 'C2:coverage-unmet']]]);
   assert(JSON.stringify([both, pcOnly, mobOnly, diffMap, fn2].map(judge)) === WANT_JUDGE,
     `D13-4: 承認の可否・止める理由・反映の前の確認事項の件数は文の形に関係しない: ${JSON.stringify([both, pcOnly, mobOnly, diffMap, fn2].map(judge))}`);
   //   (5) 制約の行: 理由を別に持つ構造の行は「本体（画面）。理由。」、それ以外（AI の申告の文など）は今までどおり「画面: 文」
