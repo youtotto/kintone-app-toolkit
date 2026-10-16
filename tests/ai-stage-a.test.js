@@ -19,7 +19,7 @@
 'use strict';
 const { loadToolkit, makeAssert } = require('./helpers/load-toolkit.js');
 const T = loadToolkit();
-const { KTDeps, KTScan, KTContext, KTCodeReview, KTModernJs, KTJsExecutor, KTAiConversation, KTAiWorkspaceViewModel, KTAiChatUi } = T;
+const { KTDeps, KTScan, KTContext, KTCodeReview, KTJsExecutor, KTAiConversation, KTAiWorkspaceViewModel, KTAiChatUi } = T;
 const { assert, state } = makeAssert();
 const FX = require('./fixtures/ai-context-app.js');
 const R = require('./fixtures/p21-bfc-replay.js');
@@ -207,29 +207,18 @@ await section(() => {
 });
 
 // =========================================================
-console.log('\n--- T-A5（5.5 → 段階 C）var: 自動修正は生成した新しいコード（patch の content）だけ。変更する handler の既存の var は自動では変えない ---');
-//   段階 A の「変更する handler の本体の既存 var の自動変換」は段階 C で外した（改訂 2: 任意の既存コードの独自変換器を広げない）。既存の記法の違反は生成側の指示と記法の検査に任せる
+console.log('\n--- T-A5（5.5 → 段階 C → 簡素化 B）var: 記法の修正と検査は生成工程だけ。既存の var を含む統合先へ patch を当てても全文を書き換えない ---');
+//   段階 A の「変更する handler の本体の既存 var の自動変換」は段階 C で外した（改訂 2: 任意の既存コードの独自変換器を広げない）。簡素化 B（2026-10-16）で、Toolkit の記法の
+//   写し（KTModernJs）も削除した（追加した var だけを直し、handler の外・別の handler・同じ handler の既存の var を変えないことは AI版 worker/test/cases/modern-js.mjs が確かめる）
 await section(() => {
   const SRC = R.DEAL_LOCK;   // handler の中に var record
   const content = "      record['items'].value.forEach(function (row) {\n        row.value['qty'].disabled = true;\n      });\n";
   const g = { strategy: 'EXTEND_EXISTING_JS', targetFile: 'dealLock.js', code: content, patch: { baseHash: KTScan.hashText(SRC), operations: [{ type: 'INSERT_AFTER', anchor: "      record['amount'].disabled = true;", content }] }, events: ['app.record.edit.show'], fields: [{ code: 'qty', access: 'CONTROL' }], apis: [] };
   const src = { name: 'dealLock.js', target: 'desktop', text: SRC };
-  const f = KTModernJs.fixGenerated({ generated: g, existingSource: src });
-  assert(f.status === 'ok' && f.fixed.length === 0 && !('handlerVars' in f) && /var record = event\.record;/.test(f.source) && f.generated.patch.operations.length === 1, `DEAL_LOCK（var record）の handler に挿入する patch → 既存の var record は変えない（操作も増やさない）: ${f.status} ${JSON.stringify(f.fixed)}`);
   const c = { customizationId: 'C1', requirement: '承認済みでは明細の数量を編集不可', strategy: 'EXTEND_EXISTING_JS', platform: ['desktop'], events: ['app.record.create.show', 'app.record.edit.show'], fields: [{ code: 'qty', access: 'CONTROL' }], apis: [], existingFiles: [{ name: 'dealLock.js', target: 'desktop' }] };
-  const rv = KTCodeReview.review({ generated: f.generated, customization: c, plan: null, data: DATA, scan: null, existingSource: src });
+  const rv = KTCodeReview.review({ generated: g, customization: c, plan: null, data: DATA, scan: null, existingSource: src });
   const pc = check(rv, 'patch');
-  assert(pc && pc.ok && /元のコードは保持（全文の書き換えなし）$/.test(pc.message) && !/既存の宣言/.test(pc.message) && !check(rv, 'patch-removal') && check(rv, 'modern-js').ok, `patch の検査: 既存の var は変更していない行（記法の検査の対象外）・置き換えも無い: ${pc && pc.message}`);
-  // 追加した var は従来どおり const / let に直す（ai-modern-js M4）。handler の外・別の handler・同じ handler の既存の var は変えない
-  const SRC2 = "(function () {\n  'use strict';\n  var EVENTS = ['app.record.edit.show'];\n  var LIMIT = 1000000;\n  kintone.events.on(EVENTS, function (event) {\n    var record = event.record;\n    if (record['ステータス'] && record['ステータス'].value === '承認済み') {\n      record['amount'].disabled = true;\n    }\n    return event;\n  });\n})();\n";
-  const content2 = "      var rows = record['items'].value;\n      rows.forEach(function (row) { row.value['qty'].disabled = true; });\n";
-  const g2 = { strategy: 'EXTEND_EXISTING_JS', targetFile: 'dealLock.js', code: content2, patch: { baseHash: KTScan.hashText(SRC2), operations: [{ type: 'INSERT_AFTER', anchor: "      record['amount'].disabled = true;", content: content2 }] }, events: ['app.record.edit.show'], fields: [{ code: 'qty', access: 'CONTROL' }], apis: [] };
-  const f2 = KTModernJs.fixGenerated({ generated: g2, existingSource: { name: 'dealLock.js', target: 'desktop', text: SRC2 } });
-  assert(f2.status === 'fixed' && f2.fixed.map(x => x.name).join() === 'rows' && /var EVENTS = /.test(f2.source) && /var LIMIT = /.test(f2.source) && /var record = event\.record;/.test(f2.source) && /const rows = record\['items'\]\.value;/.test(f2.source) && f2.generated.patch.operations.length === 1, `追加した var rows だけ const に。handler の外（EVENTS / LIMIT）も同じ handler の既存の var record も変えない: ${JSON.stringify(f2.fixed.map(x => x.name))}`);
-  // patch が handler の外に入る（即時関数の直下に新しい handler を足す）→ 既存の handler の var は変えない
-  const g3 = { strategy: 'EXTEND_EXISTING_JS', targetFile: 'dealLock.js', code: SA.EDIT_LOCK_CONTENT, patch: { baseHash: KTScan.hashText(SRC), operations: [{ type: 'INSERT_BEFORE', anchor: '})();', content: SA.EDIT_LOCK_CONTENT }] }, events: [], fields: [], apis: [] };
-  const f3 = KTModernJs.fixGenerated({ generated: g3, existingSource: src });
-  assert(f3.status === 'ok' && /var record = event\.record;/.test(f3.source), `新しい handler を足すだけ → 既存の handler の var record は触らない: ${f3.status}`);
+  assert(pc && pc.ok && /元のコードは保持（全文の書き換えなし）$/.test(pc.message) && !/既存の宣言/.test(pc.message) && !check(rv, 'patch-removal') && !check(rv, 'modern-js') && /var record = event\.record;/.test(rv.finalCode || ''), `patch の検査: 既存の var record を含む統合先に挿入しても全文を書き換えず、置き換えも無い（記法は Toolkit では確かめない）: ${pc && pc.message}`);
 });
 
 // =========================================================
@@ -336,10 +325,9 @@ await section(() => {
   const scan = KTScan.buildPayload({ appId: 353, files, fields: fieldsN.map(f => ({ code: f.code, label: f.label, type: f.rawType })), deps: KTDeps.buildDependencyData(data, fieldsN), scannedAt: '2026-10-07T00:00:00.000Z' });
   const src = { name: 'dealLock.js', target: 'desktop', text: SA.DEAL_LOCK };
   const g0 = SA.generatedOf(KTScan.hashText(SA.DEAL_LOCK));
-  // 実機と同じ順: 生成の直後に modern JavaScript の修正 → Code Review
-  const mf = KTModernJs.fixGenerated({ generated: g0, existingSource: src });
-  assert(['ok', 'fixed'].includes(mf.status) && !mf.handlerVars, `生成コードは const で書かれている（新しい handler を足すだけなので既存の handler の var は触らない）: ${mf.status}`);
-  const rv = KTCodeReview.review({ generated: mf.generated, customization: SA.CUSTOMIZATION, plan: null, data, scan, existingSource: src });
+  //   簡素化 B（2026-10-16）: 記法の修正は生成工程だけ（Toolkit の写しは削除）。素材の生成コードは const で書かれている（新しい handler を足すだけ）
+  assert(!(g0.patch && g0.patch.operations || []).some(o => /(^|[^\w$.])var\s/m.test(String(o.content || ''))), '前提: 素材の生成コード（足す handler）に var は無い');
+  const rv = KTCodeReview.review({ generated: g0, customization: SA.CUSTOMIZATION, plan: null, data, scan, existingSource: src });
   const codes = codesOf(rv.registration.blockers);
   assert(rv.status !== 'BLOCKED' && rv.registration.verdict === 'NEEDS_CONFIRMATION' && !codes.length, `R15: 登録不可にはならない（確認が残る）: ${rv.status} ${JSON.stringify(rv.checks.filter(x => !x.ok).map(x => [x.name, x.severity, x.message.slice(0, 80)]))}`);
   const text = clean(rv.finalCode);
@@ -368,7 +356,7 @@ await section(() => {
   assert(!/\.error\s*=/.test(text) && (!ece || ece.ok) && !check(rv, 'error-cancels-other-js'), `生成コードも dealLock.js も error を設定せず、保存時のチェック（dealValidate.js の submit）とは別のイベントなので競合しない: ${ece ? ece.message : '（error の設定が無いので検査の対象外）'}`);
   assert(!rv.checks.some(x => x.name === 'summary-scope') && check(rv, 'patch').ok && !check(rv, 'patch-removal'), `AI の要約は「セル」と書いている（行の追加・削除を言い切らない）・既存の 2 ファイルは書き換えない: ${JSON.stringify(rv.checks.filter(x => /scope|patch/.test(x.name)).map(x => [x.name, x.ok]))}`);
   // 変更の組み立て: 既存の dealLock.js の差し替え（保存時のチェックの dealValidate.js は触らない）
-  const ch = KTJsExecutor.changeFromGenerated({ customization: SA.CUSTOMIZATION, generated: mf.generated, review: rv, existingSource: src });
+  const ch = KTJsExecutor.changeFromGenerated({ customization: SA.CUSTOMIZATION, generated: g0, review: rv, existingSource: src });
   assert(ch.ok && ch.change.kind === 'REPLACE_FILE' && ch.change.name === 'dealLock.js' && ch.change.content.includes("record['ステータス'].value === '承認済み'") && ch.change.content.includes("st !== '課長承認待ち' && st !== '部長承認待ち'") && ch.change.dependsOn.statuses.length === 0, '登録の単位: dealLock.js の差し替え（承認済みの既存制御 ＋ 承認待ち 2 種類の新しい制御）。新設の依存は無い');
 });
 
@@ -402,8 +390,8 @@ await section(async () => {
   assert(check(outer, 'patch') && !/既存の宣言/.test(check(outer, 'patch').message) && check(outer, 'patch-removal') && /既存の 1 行が置き換え/.test(check(outer, 'patch-removal').message), `B-5: handler の外の var LIMIT → const の REPLACE は patch-removal の確認: ${JSON.stringify(check(outer, 'patch-removal'))}`);
   const innerR = KTCodeReview.review({ generated: mk5([{ type: 'INSERT_AFTER', anchor: "      record['amount'].disabled = true;", content: ins }, { type: 'REPLACE', anchor: '    var record = event.record;', content: '    const record = event.record;' }]), customization: c5, plan: null, data: DATA, scan: null, existingSource: src5 });
   assert(!/既存の宣言/.test(check(innerR, 'patch').message) && check(innerR, 'patch-removal') && /既存の 1 行が置き換え/.test(check(innerR, 'patch-removal').message), `B-5: handler の中の var record → const の REPLACE も同じ扱い（特別に数えない）: ${check(innerR, 'patch').message}`);
-  // ---- B8（段階 C）: handler の本文の範囲（handlerBodiesOf）は削除した（使う処理が無くなった）
-  assert(typeof KTModernJs.handlerBodiesOf === 'undefined' && typeof KTModernJs.parseAst === 'undefined', 'B8: handlerBodiesOf は削除。parseAst も C-1 第 2 段で削除した（本体に呼び出し元が無い。KTJsSim も削除）');
+  // ---- B8（段階 C）: handler の本文の範囲（handlerBodiesOf）は削除した（使う処理が無くなった）。簡素化 B（2026-10-16）で記法の写し（KTModernJs）ごと削除した
+  assert(typeof T.KTModernJs === 'undefined', 'B8: handlerBodiesOf は段階 C、parseAst は C-1 第 2 段で削除し、簡素化 B で KTModernJs ごと削除した（本体に呼び出し元が無い。KTJsSim も削除）');
   // ---- B6 / B7: api に getPreviewStatus / getPreviewFields が無ければ依存の成立を確かめられない → DEPENDENCY_CHECK_FAILED（登録しない）
   const base6 = { getPreviewCustomize: async () => ({ scope: 'ALL', desktop: { js: [], css: [] }, mobile: { js: [], css: [] }, revision: '1' }), putPreviewCustomize: async () => ({}), uploadFile: async () => ({ fileKey: 'k' }) };
   const change6 = (dependsOn) => ({ changeId: 'c1', kind: 'ADD_FILE', name: 'x.js', target: 'desktop', content: 'x', contentHash: KTScan.hashText('x'), bytes: 1, dependsOn, registration: { verdict: 'RUNTIME_UNVERIFIED', blockers: [], confirmations: [], unverified: [], codeHash: KTScan.hashText('x') } });

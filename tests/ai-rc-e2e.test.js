@@ -100,19 +100,17 @@ console.log('\n--- N3 handler のイベントと使える画面の照合 ---');
 }
 
 // =========================================================
-console.log('\n--- N2 実機の再生（RC E2E の §2 手順 4）: 記録した出力は生成の直後に直り、パッチを適用できる（空の判定の undefined は生成工程の模擬テスト）---');
+console.log('\n--- N2 実機の再生（RC E2E の §2 手順 4）: 記録した出力のパッチを適用できる（記法は生成工程の機械検査・空の判定の undefined は生成工程の模擬テスト）---');
 {
   const edited = R.DEAL_VALIDATE.replace(/\s*$/, '') + '\n// 別の担当者のメモ（RC E2E: 外部からの変更の確認）\n';
   assert(KTScan.hashText(edited) === '17734541' && KTScan.hashText(R.DEAL_VALIDATE) === '6a64035a', `前提: 別の担当者の変更の後の dealValidate.js を再現（指紋 17734541）: ${KTScan.hashText(edited)}`);
-  // 実機の流れと同じく、生成の直後に modern JavaScript の安全な修正を通してから検査する（記録した AI の出力は var を含む。2026-10-05）
+  //   簡素化 B（2026-10-16）: 記法（var）の自動修正と検査は生成工程（Gateway の modern-js.mjs）だけが行う（Toolkit の写しの KTModernJs は削除。追加した var だけを直し、
+  //   既存の var を変えないことは AI版 worker/test/cases/modern-js.mjs が確かめる）。Toolkit の形式確認は記録した出力（var を含む）をそのまま検査する
   const src3 = { name: 'dealValidate.js', target: 'desktop', text: edited };
-  const g3 = T.KTModernJs.fixGenerated({ generated: E2E.S2_V3.generated, existingSource: src3 });
-  assert(g3.status === 'fixed' && g3.fixed.length > 0 && !(g3.generated.patch.operations || []).some(o => /\bvar\b/.test(o.content)), `記録した出力（var を含む）は生成の直後に直る: ${g3.status} ${JSON.stringify(g3.fixed.map(f => f.name))}`);
-  const v3 = KTCodeReview.review({ generated: g3.generated, customization: E2E.S2_V3.customization, plan: null, data: JSON.parse(JSON.stringify(DATA)), scan: null, existingSource: src3 });
-  const raw3 = KTCodeReview.review({ generated: E2E.S2_V3.generated, customization: E2E.S2_V3.customization, plan: null, data: JSON.parse(JSON.stringify(DATA)), scan: null, existingSource: src3 });
-  assert(raw3.status === 'BLOCKED' && raw3.checks.some(x => x.name === 'modern-js' && !x.ok && /const に直せます/.test(x.message)), '直していない出力（新しい var）は登録できない（以前は var のまま確認が必要で通った）');
+  const v3 = KTCodeReview.review({ generated: E2E.S2_V3.generated, customization: E2E.S2_V3.customization, plan: null, data: JSON.parse(JSON.stringify(DATA)), scan: null, existingSource: src3 });
+  assert(!v3.checks.some(x => x.name === 'modern-js'), 'Toolkit の形式確認は記法を確かめない（生成工程の機械検査の modern-js が確かめる）');
   // 段階 C（5.5 の縮小）: 既存の handler の var は自動では変えない（直すのは追加した var だけ）。既存の var amount は変更していない行なので記法の検査の対象外
-  assert(/var amount = event\.record\['amount'\]\.value;/.test(v3.finalCode || '') && !/\bvar\b/.test(g3.generated.patch.operations.map(o => o.content).join('\n')) && !('handlerVars' in g3) && v3.checks.some(x => x.name === 'patch' && /元のコードは保持（全文の書き換えなし）$/.test(x.message)), `既存の dealValidate.js の var amount はそのまま・追加した var だけ const: ${JSON.stringify(v3.checks.filter(x => /^patch/.test(x.name)).map(x => x.message))}`);
+  assert(/var amount = event\.record\['amount'\]\.value;/.test(v3.finalCode || '') && v3.checks.some(x => x.name === 'patch' && /元のコードは保持（全文の書き換えなし）$/.test(x.message)), `既存の dealValidate.js の var amount はそのまま（全文を書き換えない）: ${JSON.stringify(v3.checks.filter(x => /^patch/.test(x.name)).map(x => x.message))}`);
   assert(!check(v3, 'patch').length, '再生の前提: パッチは適用できる');
   // v3 の空の判定（undefined を扱わない）・v2（undefined も判定）の違いは、生成工程の模擬テストが確かめる（sandbox/test/run.mjs §5 の S2_V3・S2_V2）
   assert(/画面/.test((KTCodeReview.HOW_TO_CHECK || {})['api-screen'] || ''), '確かめること（api-screen）がある');

@@ -216,11 +216,9 @@ console.log('\n--- F-F2 実機の再生（Phase 21 BF-C）: 実際の生成コ�
   const files = [{ name: 'dealLock.js', target: 'desktop', kind: 'js', text: R.DEAL_LOCK }, { name: 'dealValidate.js', target: 'desktop', kind: 'js', text: R.DEAL_VALIDATE }];
   // 実機の Field Scanner と同じ解析（KTScan.buildPayload）で作る（テスト用の簡易版 buildScanPayload は .error = を CONTROL と数えない）
   const scan = KTScan.buildPayload({ appId: 353, files, fields: fieldsN.map(f => ({ code: f.code, label: f.label, type: f.rawType })), deps: KTDeps.buildDependencyData(data, fieldsN), scannedAt: '2026-10-04T00:16:00.000Z' });
-  // 実機の流れと同じく、生成の直後に modern JavaScript の安全な修正を通してから検査する（記録した AI の出力は var を含む。2026-10-05）
+  //   簡素化 B（2026-10-16）: 記法（var）は生成工程の機械検査が確かめる（Toolkit の写しの自動修正 KTModernJs は削除）。記録した AI の出力（var を含む）をそのまま検査する
   const srcL = { name: 'dealLock.js', target: 'desktop', text: R.DEAL_LOCK };
-  const gL = T2.KTModernJs.fixGenerated({ generated: R.GENERATED, existingSource: srcL });
-  assert(['fixed', 'ok'].includes(gL.status), `記録した出力は生成の直後に直る（または直すものが無い）: ${gL.status} ${JSON.stringify(gL.remaining)}`);
-  const rv = KTCodeReview.review({ generated: gL.generated, customization: R.CUSTOMIZATION, plan: null, data, scan, existingSource: srcL });
+  const rv = KTCodeReview.review({ generated: R.GENERATED, customization: R.CUSTOMIZATION, plan: null, data, scan, existingSource: srcL });
   const codes = rv.registration.confirmations.map(x => x.code);
   assert(R.P21_CONFIRMATIONS.length === 4 && R.P21_CONFIRMATIONS.includes('conditional-control'), '前提: Phase 21 の判定は確認 4 件（conditional-control を含む）');
   // §0d.4: 条件とロックの関係・同じイベントの error と編集不可・既存のファイルとの重なりの推定（conditional-control・error-cancels-edit・existing-conflict）は削除。

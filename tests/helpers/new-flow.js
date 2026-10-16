@@ -203,6 +203,11 @@ function createNewFlowKit(T) {
   }
   const clickChat = (m, act, extra = {}) => m.$('kt-ai-chat').dispatch({ type: 'click', target: { dataset: { act, ...extra } } });
   const RP = require('../fixtures/p21-bfc-replay.js');
+  /**
+   * 簡素化 B（2026-10-16）: 記録した生成結果（2026-10-04 の AI の出力。var を含む）を、本物の生成工程（Gateway の modern-js.mjs）が記法を直した後の形にする。
+   *   素材の var は再代入しないので const にする（本物の直し方の確かめは AI版 worker/test/cases/modern-js.mjs）。Toolkit は記法を直さず確かめないので、偽の生成工程に渡す素材はこの形にする
+   */
+  const gwModernized = (gen) => { const fix = (t) => String(t ?? '').replace(/(^|[^\w$.])var(\s+)/gm, '$1const$2'); const g = clone(gen); if (typeof g.code === 'string') g.code = fix(g.code); if (g.patch && Array.isArray(g.patch.operations)) g.patch.operations = g.patch.operations.map(o => ({ ...o, content: fix(o.content) })); return g; };
   const { KTCodeReview } = T;
   const DATA_C = { appId: '353', fields: clone(RP.FIELDS), status: { enable: true, states: { '作成中': { name: '作成中', index: '0', assignee: { type: 'ONE', entities: [] } }, '承認待ち': { name: '承認待ち', index: '1', assignee: { type: 'ONE', entities: [] } }, '承認済み': { name: '承認済み', index: '2', assignee: { type: 'ONE', entities: [] } } }, actions: [] }, layout: [] };
   const LABELS_C = { amount: '金額', 'ステータス': 'ステータス', memo: '備考' };
@@ -265,7 +270,11 @@ function createNewFlowKit(T) {
     });
     cases.push(...extraCases);
     const missing = re.filter(x => x.status === 'missing');
-    const machine = [{ name: 'syntax', ok: true, severity: 'info', message: '構文エラーなし' }, { name: 'modern-js', ok: true, severity: 'info', message: '新しいコードに var はありません' }, ...(supported && req.length ? [{ name: 'required-effects', ok: !missing.length, severity: missing.length ? 'block' : 'info', message: missing.length ? `要件未達（${missing.map(x => `${x.field}: ${x.effect}`).join('、')}の処理がありません）` : '必須の効果の処理があります' }] : [])];
+    //   簡素化 B（2026-10-16）: 記法は生成工程の機械検査だけが確かめる（Toolkit の写しは削除）。偽の生成工程も、新しいコードに var が残れば modern-js の block を返す
+    //   （本物は安全に直せる var を検証の前に直し、直せない var だけが残る。ここでは渡されたコードを直した後の形とみなす）
+    const newCode = cand.patch && Array.isArray(cand.patch.operations) ? cand.patch.operations.map(o => String((o && o.content) || '')).join('\n') : String(cand.code || '');
+    const varLeft = /(^|[^\w$.'"`])var\s+[A-Za-z_$]/m.test(newCode);
+    const machine = [{ name: 'syntax', ok: true, severity: 'info', message: '構文エラーなし' }, varLeft ? { name: 'modern-js', ok: false, severity: 'block', message: '記法の問題が残っています（var）' } : { name: 'modern-js', ok: true, severity: 'info', message: '新しいコードに var はありません' }, ...(supported && req.length ? [{ name: 'required-effects', ok: !missing.length, severity: missing.length ? 'block' : 'info', message: missing.length ? `要件未達（${missing.map(x => `${x.field}: ${x.effect}`).join('、')}の処理がありません）` : '必須の効果の処理があります' }] : [])];
     return { version: '1', candidateHash, sameAsPrevious: false, passed: !machine.some(m => !m.ok && m.severity === 'block'), machine,
       ...(supported ? { requiredEffects: re, behavior: { status: env ? 'not-run' : cases.some(c => c.verdict === 'fail') ? 'failed' : 'passed', reason: env, cases, ...(scope === false ? {} : clone(scope || GW_SCOPE)) } } : {}),
       repairs: { count: repairs, reasons: [], stoppedBy }, unverified: ['実機での動作'] };
@@ -290,13 +299,12 @@ function createNewFlowKit(T) {
       const cand = CAND[which];
       const cust = (args.version.plan.customizations || []).find(x => x.customizationId === args.customizationId) || CUST_C1;
       const generated0 = generatedOf ? generatedOf(cust) : null;
-      //   §0d.3（2026-10-08）: 記法の修正（var → const など）は生成工程（Gateway の modern-js.mjs。Toolkit の KTModernJs と同じ本体）が検証の前に行う。
-      //   この偽の生成工程も検証の前に直して gatewayChecks.modernJs に記録する（Toolkit の画面の generate は検証の後のコードを書き換えない）
-      const gwFixed = generated0 ? T.KTModernJs.fixGenerated({ generated: generated0, existingSource }) : null;
-      const generated = generated0 ? (gwFixed && gwFixed.fixed.length ? { ...gwFixed.generated, gatewayChecks: { ...(gwFixed.generated.gatewayChecks || {}), modernJs: { fixed: gwFixed.fixed.map(f => ({ line: f.line, rule: f.rule, name: f.name })) } } } : generated0) : { strategy: 'NEW_JS_FILE', targetFile: 'lock.js', summary: '承認待ちでは金額を編集不可にします。', code: cand.code, patch: null, events: cust.events, fields: [{ code: 'amount', access: 'CONTROL' }], apis: [], assumptions: [], warnings: [], coverage: [{ requirementId: 'C1', status: 'MET', note: '', text: cust.requirement }] };
+      //   §0d.3（2026-10-08）: 記法の修正（var → const など）は生成工程（Gateway の modern-js.mjs）が検証の前に行う。簡素化 B（2026-10-16）: Toolkit の写し（KTModernJs）は削除したので、
+      //   この偽の生成工程は直さない（渡したコードを直した後の形とみなす。var が残れば検証結果の機械検査が止める）
+      const generated = generated0 ? generated0 : { strategy: 'NEW_JS_FILE', targetFile: 'lock.js', summary: '承認待ちでは金額を編集不可にします。', code: cand.code, patch: null, events: cust.events, fields: [{ code: 'amount', access: 'CONTROL' }], apis: [], assumptions: [], warnings: [], coverage: [{ requirementId: 'C1', status: 'MET', note: '', text: cust.requirement }] };
       const review = KTCodeReview.review({ generated, customization: cust, plan: args.version.plan, data: clone(DATA_C), scan: null, existingSource });
       const candidateHash = KTScan.candidateHashOf({ strategy: generated.strategy, targetFile: generated.targetFile, code: generated.code, patch: generated.patch, customizationId: 'C1' });
-      return { ok: true, generated, review, ctx: { size: { approxTokens: 1000 } }, existingSource, inputHash: `h${n}`, verification: fakeVerification(cand, args.requiredEffects, { env, repairs, stoppedBy, supported, candidateHash, dropCaseFor, statusOverride, extraCases, caseReason, scope }), candidateHash, requirementIds: [{ id: 'C1', kind: 'customization', text: cust.requirement }], ...(relatedOmitted ? { relatedOmitted: clone(relatedOmitted) } : {}) };
+      return { ok: true, generated, review, ctx: { size: { approxTokens: 1000 } }, existingSource, inputHash: `h${n}`, verification: fakeVerification({ ...cand, code: generated.code, patch: generated.patch }, args.requiredEffects, { env, repairs, stoppedBy, supported, candidateHash, dropCaseFor, statusOverride, extraCases, caseReason, scope }), candidateHash, requirementIds: [{ id: 'C1', kind: 'customization', text: cust.requirement }], ...(relatedOmitted ? { relatedOmitted: clone(relatedOmitted) } : {}) };
     };
     return { impl, calls };
   }
@@ -464,7 +472,7 @@ function createNewFlowKit(T) {
     return { v, clicked: true, button, pre, run: m.panel.finalRun(), writes: writesOf(m).slice(w0), card: cards.length ? stripC(cards[cards.length - 1]) : '', cardHtml: cards.length ? cards[cards.length - 1] : '', cardCount: cards.length, exec: m.panel.executorState(), js: m.panel.jsExecState() };
   };
 
-  return { withPlannerMapping, mapPlanResponse, rawWithPlannerMapping, tick, ticks, clone, buildInputs, INPUTS, META, B, A, Q, APPROVER, ROUTE, BASE, CSV, Q_THRESHOLD, Q_MIDDLE, Q_DAYS, Q_HOLIDAYS, Q_LOCK, Q_TIMING, B_SELECT, B_ROUTE, B_UNDER, B_OVER, B_NOTIFY_TO, B_NOTIFY_IF, B_LOCK, STD, req, idBy, reqIdBy, script, normalized, planOk, planFail, planThrow, gateMk, HEALTH, spec, mkStep, PLAN_META, PLAN_V1, answerFor, makeStorage, gate, mount, clickChat, RP, KTCodeReview, DATA_C, LABELS_C, custOf, CUST_C1, ST_C, handlerC, GOOD, BAD, WARN, VALUE, LOCKSAVE, CAND, GEN_EFFECT_FEATURES, GW_SCOPE, EXPECT_OF, NOMATCH_OF, GEN_PORT_FEATURE, fakeVerification, planJs, makeGenerate, makeConvC, adoptC, finalHtml, stripC, REQUESTS, approveC, adoptOnScreen, prepareOnScreen, loadDevBaseFromMock, HEALTH_V, NEW_MEMO, lockCode, custLock, screenPlan, planImplOf, screenGenerate, mountFinal, applyButtonOf, writesOf, applyOnScreen, waitUntil };
+  return { gwModernized, withPlannerMapping, mapPlanResponse, rawWithPlannerMapping, tick, ticks, clone, buildInputs, INPUTS, META, B, A, Q, APPROVER, ROUTE, BASE, CSV, Q_THRESHOLD, Q_MIDDLE, Q_DAYS, Q_HOLIDAYS, Q_LOCK, Q_TIMING, B_SELECT, B_ROUTE, B_UNDER, B_OVER, B_NOTIFY_TO, B_NOTIFY_IF, B_LOCK, STD, req, idBy, reqIdBy, script, normalized, planOk, planFail, planThrow, gateMk, HEALTH, spec, mkStep, PLAN_META, PLAN_V1, answerFor, makeStorage, gate, mount, clickChat, RP, KTCodeReview, DATA_C, LABELS_C, custOf, CUST_C1, ST_C, handlerC, GOOD, BAD, WARN, VALUE, LOCKSAVE, CAND, GEN_EFFECT_FEATURES, GW_SCOPE, EXPECT_OF, NOMATCH_OF, GEN_PORT_FEATURE, fakeVerification, planJs, makeGenerate, makeConvC, adoptC, finalHtml, stripC, REQUESTS, approveC, adoptOnScreen, prepareOnScreen, loadDevBaseFromMock, HEALTH_V, NEW_MEMO, lockCode, custLock, screenPlan, planImplOf, screenGenerate, mountFinal, applyButtonOf, writesOf, applyOnScreen, waitUntil };
 }
 
 module.exports = { createNewFlowKit };

@@ -1112,7 +1112,7 @@ await section(async () => {
   const CUST_W = { ...clone(RP.CUSTOMIZATION), fields: [{ code: 'amount', access: 'CONTROL', condition: RP.CUSTOMIZATION.fields[0].condition, effects: ['warn'] }] };
   const existing = { name: 'dealLock.js', target: 'desktop', text: RP.DEAL_LOCK };
   //   §5 の 3 行目（警告を出し編集・保存を許可する候補）を確かめるため、生成した AI の申告は MET にする（記録した BFC の候補の PARTIAL の申告は D3-4 で別に確かめる）
-  const GEN_MET = () => { const g = clone(RP.GENERATED); g.coverage = g.coverage.map(cv => ({ ...cv, status: 'MET' })); return g; };
+  const GEN_MET = () => { const g = KIT.gwModernized(RP.GENERATED); g.coverage = g.coverage.map(cv => ({ ...cv, status: 'MET' })); return g; };
   const x = makeConvC({ planImpl: (args) => planJs(args, { cust: CUST_W, summary: '金額が 100 万円を超えたら警告します（保存は止めません）。' }), generate: makeGenerate({ sequence: ['warn'], existingSource: existing, generatedOf: GEN_MET }) });
   await adoptC(x);
   const v = x.c.activePlan(), e = v.generated.C1;
@@ -1121,7 +1121,7 @@ await section(async () => {
   assert(v.final.verification.howTo.some(s => /保存/.test(s)), 'D3-3: 警告の要件では「保存は止まらない」ことを実機で確かめる行を出す（構造化した効果から）');
   // D3-4（§0c.6）: 同じ候補でも、生成した AI が警告の要件を PARTIAL と申告した（既存の処理が編集不可にしている間は警告しない）→ 必須の効果に結び付く要件の PARTIAL は要件未達。
   //   Toolkit は修復を依頼しない・承認できない（「確認」を押して反映できる形にしない）
-  const y = makeConvC({ planImpl: (args) => planJs(args, { cust: CUST_W, summary: '金額が 100 万円を超えたら警告します（保存は止めません）。' }), generate: makeGenerate({ sequence: ['warn'], existingSource: existing, generatedOf: () => clone(RP.GENERATED) }) });
+  const y = makeConvC({ planImpl: (args) => planJs(args, { cust: CUST_W, summary: '金額が 100 万円を超えたら警告します（保存は止めません）。' }), generate: makeGenerate({ sequence: ['warn'], existingSource: existing, generatedOf: () => KIT.gwModernized(RP.GENERATED) }) });
   await adoptC(y);
   const vy = y.c.activePlan(), ey = vy.generated.C1;
   assert(ey.status === 'unresolved' && ey.verdict.kind === 'partial' && /要件の一部を満たしていません/.test(ey.verdict.reason) && vy.final.approvable === false && y.gen.calls.length === 1 && !y.gen.calls[0].feedback && ey.review.checks.some(ch => ch.name === 'coverage-unmet' && ch.severity === 'block' && ch.partialRequired) && y.c.approveFinal({ planId: vy.planId, version: vy.version }).ok === false, `D3-4: 必須の効果に結び付く要件の PARTIAL（AI の申告）は要件未達で承認できない: ${JSON.stringify({ status: ey.status, verdict: ey.verdict, gen: y.gen.calls.length })}`);
@@ -2143,6 +2143,10 @@ await section(async () => {
   const R = KTScan.eventRegistrationsOf;
   assert(R(X1).unresolved && R(X1).reasons.includes('dynamic-event-name') && !R(X1B).unresolved && JSON.stringify(R(X1B).events) === JSON.stringify([EV_E, EV_I]) && R(ALIAS).unresolved && R(ALIAS).reasons.includes('events-reference') && !R(LIT).unresolved && JSON.stringify(R(LIT).events) === '["app.record.detail.show"]' && !R("window.CommonUtil = {};").unresolved && R("const k = kintone; k.events.on('app.record.edit.show', function (e) { return e; });").unresolved && !R("(function (kintone) { kintone.events.on('app.record.edit.show', function (e) { return e; }); })(kintone);").unresolved && R("var evs = ['app.record.detail.show']; evs.push('app.record.edit.show'); kintone.events.on(evs, function (e) { return e; });").unresolved,
     `D43-1: 登録の第 1 引数を構文解析で読む（組み立て・別名・書き換える配列は読めない。リテラル・連結・const は読める。§0c.11 で Gateway と同じ理由の名前）: ${JSON.stringify({ X1: R(X1), X1B: R(X1B), ALIAS: R(ALIAS) })}`);
+  //   簡素化 B（2026-10-16）: 同梱の acorn の使い先はこの登録の読み取りだけになった（記法の検査 KTModernJs は削除）。kintone のページには AMD の define（define.amd）が
+  //   あるが、同梱の acorn は define に登録されず、登録を読める（以前は ai-modern-js の M6 が KTModernJs で確かめていた）
+  const regsOnPage = loadToolkit({ pageDefine: true }).KTScan.eventRegistrationsOf;
+  assert(!regsOnPage(LIT).unresolved && JSON.stringify(regsOnPage(LIT).events) === '["app.record.detail.show"]' && !regsOnPage(LIT).reasons.includes('no-parser'), `D43-0: ページに AMD の define があっても、同梱の acorn で登録を読める: ${JSON.stringify(regsOnPage(LIT))}`);
   const dataOf = (names) => ({ customize: { desktop: { js: names.map(n => ({ type: 'FILE', file: { name: n, fileKey: `k-${n}` } })) }, mobile: { js: [] } } });
   const filesOf = (list) => KTScan.summarizeFiles({ files: list.map(([name, text]) => ({ name, target: 'desktop', kind: 'js', text })) }, dataOf(list.map(([n]) => n)));
   const f1 = filesOf([['memo-check.js', X1], ['memo-check2.js', X1B], ['memo-alias.js', ALIAS]]);
@@ -2604,13 +2608,14 @@ await section(async () => {
   const chat = stripC(m.chat());
   assert(up && up.content === CODE_K && rE.run.ok && /動作テスト環境へ反映しました。/.test(rE.card) && /JavaScript: ＋ caseLock\.js（PC） を登録/.test(rE.card) && /実機（動作テスト環境）での動作はまだ確かめていません。/.test(chat) && /確かめ方:/.test(chat) && /動作テスト環境で、条件に合うレコードと合わないレコードを開いて/.test(chat),
     `E4-3（E8 の (c) を兼ねる）: 登録した本文は検証したコードそのまま・登録の結果のカードに実機（動作テスト環境）が未確認であることと確かめ方: ${JSON.stringify({ up: !!up, same: up && up.content === CODE_K, tail: chat.slice(-500) })}`);
-  // var を含むコード（記法の修正を通っていない）: 書き換えず、反映直前の形式確認で止める（候補は生成工程の候補のまま）
+  // var を含むコード（記法の修正を通っていない）: 書き換えず、生成工程の機械検査（modern-js）の block で止める（候補は生成工程の候補のまま）。
+  //   簡素化 B（2026-10-16）: Toolkit の写しの「反映直前の形式確認（記法）」は削除した（Toolkit は記法を確かめない）
   const VAR_K = CODE_K.replace('const record = event.record;', 'var record = event.record;');
   const r2 = await run(VAR_K);
   const v2 = r2.m.conv().activePlan(), e2 = v2 && v2.generated && v2.generated.C1;
-  const mj = e2 && e2.review.checks.find(ch => ch.name === 'modern-js' && !ch.ok);
-  assert(e2 && e2.generated.code === VAR_K && e2.candidateHash === r2.sent[0].candidateHash && e2.status === 'unresolved' && mj && /反映直前の形式確認（記法）/.test(mj.message) && v2.final.approvable === false,
-    `E4-4: var を含む候補は書き換えず（candidateHash も生成工程のまま）、反映直前の形式確認で理由を出して止める: ${JSON.stringify({ status: e2 && e2.status, same: e2 && e2.generated.code === VAR_K, mj: mj && mj.message })}`);
+  const mj = e2 && e2.verification && (e2.verification.machine || []).find(ch => ch.name === 'modern-js' && !ch.ok);
+  assert(e2 && e2.generated.code === VAR_K && e2.candidateHash === r2.sent[0].candidateHash && e2.status === 'unresolved' && e2.verdict.kind === 'machine' && mj && mj.severity === 'block' && !e2.review.checks.some(ch => ch.name === 'modern-js') && v2.final.approvable === false,
+    `E4-4: var を含む候補は書き換えず（candidateHash も生成工程のまま）、生成工程の機械検査の block で止める: ${JSON.stringify({ status: e2 && e2.status, same: e2 && e2.generated.code === VAR_K, mj: mj && mj.message })}`);
   // E6: appFields の required（アプリの設定で必須の項目）
   const af = sent[0].appFields || [];
   const reqCodes = Object.values(INPUTS.data.fields).filter(f => f && f.required === true).map(f => f.code);
@@ -2872,7 +2877,7 @@ await section(async () => {
   //   統合しても生成工程は統合先の元の本文を既存 JS として数えるので解決しない。「統合する」の案は出さず、警告の効果のイベントを変更・保存のイベントだけにする
   //   （確かめられなかった代表条件のフィールドとイベント）と具体的に書く
   const CUST_W = { ...clone(RP.CUSTOMIZATION), fields: [{ code: 'amount', access: 'CONTROL', condition: RP.CUSTOMIZATION.fields[0].condition, effects: ['warn'] }] };
-  const GEN_MET = () => { const g = clone(RP.GENERATED); g.coverage = g.coverage.map(cv => ({ ...cv, status: 'MET' })); return g; };
+  const GEN_MET = () => { const g = KIT.gwModernized(RP.GENERATED); g.coverage = g.coverage.map(cv => ({ ...cv, status: 'MET' })); return g; };
   const runOwn = async (extra) => { const z = makeConvC({ planImpl: (args) => planJs(args, { cust: CUST_W, summary: '金額が 100 万円を超えたら警告します（保存は止めません）。' }), generate: makeGenerate({ sequence: ['warn'], existingSource: { name: 'dealLock.js', target: 'desktop', text: RP.DEAL_LOCK }, generatedOf: GEN_MET, extraCases: extra }) }); await adoptC(z); const v = z.c.activePlan(); return { z, v, e: v.generated.C1, f: v.final.fix }; };
   const own = await runOwn([UNV]);
   assert(RP.GENERATED.strategy === 'EXTEND_EXISTING_JS' && RP.GENERATED.targetFile === 'dealLock.js' && own.e.status === 'not-run' && own.v.final.approvable === false && own.f && own.f.kind === 'revise'

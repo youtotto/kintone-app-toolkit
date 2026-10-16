@@ -270,8 +270,8 @@ await section(async () => {
   const data = require('./fixtures/ai-context-app.js').makeData();
   data.fields = clone(RP.FIELDS);
   const srcL = { name: 'dealLock.js', target: 'desktop', text: RP.DEAL_LOCK };
-  const gL = T.KTModernJs.fixGenerated({ generated: RP.GENERATED, existingSource: srcL });
-  const rv = KTCodeReview.review({ generated: gL.generated, customization: RP.CUSTOMIZATION, plan: null, data, scan: null, existingSource: srcL });
+  //   簡素化 B（2026-10-16）: 記法（var）は生成工程の機械検査が確かめる（Toolkit の写しの自動修正は削除）。記録した出力をそのまま検査する
+  const rv = KTCodeReview.review({ generated: RP.GENERATED, customization: RP.CUSTOMIZATION, plan: null, data, scan: null, existingSource: srcL });
   const dup = rv.registration.confirmations.find(x => x.code === 'duplicate-handler');
   assert(dup && /app\.record\.edit\.show/.test(dup.message) && /handler/.test(dup.message), `前提: 検査の元の文はイベント名と handler を含む（実機の承認の欄に出た文）: ${dup && dup.message}`);
   assert(dup && !EVENTS.test(dup.screenText) && /既存の「dealLock\.js」が/.test(dup.screenText) && /編集画面を開いたとき（PC）/.test(dup.screenText) && /別の処理を足します/.test(dup.screenText) && dup.howToCheck === KTCodeReview.HOW_TO_CHECK['duplicate-handler'] && /既存の処理と今回の処理の両方が動く/.test(dup.howToCheck), `V7-1: 確認項目の画面の言葉（統合先のファイル名と画面・タイミング。イベント名・handler なし）と、重複の handler の確かめ方: ${dup && dup.screenText} ｜ ${dup && dup.howToCheck}`);

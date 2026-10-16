@@ -79,8 +79,10 @@ const PLAN_NEW_DESKTOP = planOf({ customizations: [CUST({ requirement: '金額�
 // §0c.6（2026-10-08）: 従来の流れの登録は、接続先が必須の効果の確認に対応し（health の verification に requiredEffects）、生成工程の検証が合格したものだけ。
 //   この試験は登録の経路（upload・PUT・検証・戻す）を確かめるので、偽の生成工程は Toolkit が渡した必須の効果をそのまま「処理あり・動作テストで合格」で返す
 //   （効果の区別そのものの検証は tests/ai-flow-redesign.test.js の §D）
-const passVerification = (ctx) => { const re = (ctx && ctx.verification && ctx.verification.requiredEffects) || []; return re.length ? { version: '1', passed: true, machine: [], requiredEffects: re.map(x => ({ requirementId: x.requirementId, requirementIds: x.requirementIds, field: x.field, effect: x.effect, status: 'present' })), behavior: { status: 'passed', reason: null, cases: re.flatMap((x, i) => (x.events && x.events.length ? x.events : [null]).flatMap((ev, j) => (x.condition ? ['match', 'nomatch'] : ['match']).map(side => ({ id: `K${i + 1}-${j + 1}-${side}`, requirementIds: x.requirementIds, field: x.field, effect: x.effect, expect: side === 'match' ? x.effect : ({ lock: 'not-locked', warn: 'not-warned', 'block-save': 'save-allowed', 'set-value': 'value-unchanged', 'show-hide': 'show-hide' })[x.effect], side, ...(ev ? { event: ev } : {}), verdict: 'pass', observed: {}, message: '期待どおり' })))) }, repairs: { count: 0, reasons: [], stoppedBy: null }, unverified: ['実機での動作'] } : undefined; };
-const genResponse = (ctx, g) => ({ ok: true, contractVersion: '2.1', meta: { requestId: 'gen-1', usage: { usedThisMonth: 3, monthlyLimit: 20 }, normalization: { warnings: [] } }, generated: g, ...(passVerification(ctx) ? { verification: passVerification(ctx) } : {}) });
+//   簡素化 B（2026-10-16）: 記法（var）は生成工程の機械検査が止める（Toolkit の写しは削除）。偽の生成工程も、新しいコードに var が残れば modern-js の block を返す（本物の文の形）
+const varBlockOf = (g) => { const code = g && g.patch && Array.isArray(g.patch.operations) ? g.patch.operations.map(o => String((o && o.content) || '')).join('\n') : String((g && g.code) || ''); const lines = code.split('\n'); const at = lines.findIndex(l => /(^|[^\w$.'"`])var\s+[A-Za-z_$]/.test(l)); if (at < 0) return null; const name = (/var\s+([A-Za-z_$][\w$]*)/.exec(lines[at]) || [])[1]; return { name: 'modern-js', ok: false, severity: 'block', message: `記法の問題が残っています（1 件）: ${at + 1} 行目「${lines[at].trim()}」: var ${name}` }; };
+const passVerification = (ctx, g = null) => { const vb = varBlockOf(g); const re = (ctx && ctx.verification && ctx.verification.requiredEffects) || []; return re.length ? { version: '1', passed: !vb, machine: vb ? [vb] : [], requiredEffects: re.map(x => ({ requirementId: x.requirementId, requirementIds: x.requirementIds, field: x.field, effect: x.effect, status: 'present' })), behavior: { status: 'passed', reason: null, cases: re.flatMap((x, i) => (x.events && x.events.length ? x.events : [null]).flatMap((ev, j) => (x.condition ? ['match', 'nomatch'] : ['match']).map(side => ({ id: `K${i + 1}-${j + 1}-${side}`, requirementIds: x.requirementIds, field: x.field, effect: x.effect, expect: side === 'match' ? x.effect : ({ lock: 'not-locked', warn: 'not-warned', 'block-save': 'save-allowed', 'set-value': 'value-unchanged', 'show-hide': 'show-hide' })[x.effect], side, ...(ev ? { event: ev } : {}), verdict: 'pass', observed: {}, message: '期待どおり' })))) }, repairs: { count: 0, reasons: [], stoppedBy: null }, unverified: ['実機での動作'] } : undefined; };
+const genResponse = (ctx, g) => ({ ok: true, contractVersion: '2.1', meta: { requestId: 'gen-1', usage: { usedThisMonth: 3, monthlyLimit: 20 }, normalization: { warnings: [] } }, generated: g, ...(passVerification(ctx, g) ? { verification: passVerification(ctx, g) } : {}) });
 const genFor = (ctx) => {
   const c = ctx.customization;
   //   C-1 第 3 段（2026-10-08）: ext.js への変更の code は、patch と同じ担当者（owner）の行にする（以前は金額の行のままで、最終案の流れでは
@@ -374,19 +376,20 @@ console.log('\n--- 新規 JS（desktop）の登録 / mobile（desktop を変え�
   assert(/自動では元に戻せません/.test(m.chat()), '会話にも案内');
 }
 
-console.log('\n--- §54 modern JavaScript（2026-10-05。§0d.3 で変更）: Toolkit は生成工程が検証したコードを書き換えない。var は反映直前の形式確認で検出し、登録できない ---');
+console.log('\n--- §54 modern JavaScript（2026-10-05。§0d.3・簡素化 B で変更）: Toolkit は生成工程が検証したコードを書き換えない。var は生成工程の機械検査で止まり、登録できない ---');
 {
   // AI が var を含むコードを返した（古い Gateway・Gateway の修正の前と同じ）
   //   §0d.3（2026-10-08）の決定で期待値を変えた: 以前は Toolkit が生成の直後に const へ直して登録していたが、検証した候補と登録する候補（candidateHash）が
   //   食い違うので書き換えをやめた。検出は残す（modern-js の block。直すのは生成工程の修復か作り直し）
-  //   C-1 第 3 段: 生成は最終案の中。var の残る候補の最終案は承認できず、登録の確認を開いても登録しない
+  //   C-1 第 3 段: 生成は最終案の中。var の残る候補の最終案は承認できず、登録の確認を開いても登録しない。
+  //   簡素化 B（2026-10-16）: var の検出は生成工程の機械検査（modern-js）だけ（Toolkit の写しの「反映直前の形式確認（記法）」は削除）。Toolkit はその結果で止める
   const VAR_JS = NEW_JS.replace('    const record = event.record;', '    var record = event.record;');
   const m = mount({ planResponse: PLAN_NEW_DESKTOP, generatedFor: (ctx) => ({ ...genFor(ctx), code: VAR_JS }) });
   await ticks();
   const { v } = await adoptScreen(m, '100万円以上なら警告を表示したい');
   const g = v.generated.C1;
-  const mj = g && g.review.registration.blockers.find(b => b.code === 'modern-js');
-  assert(g && g.generated.code === VAR_JS && !g.generated.toolkitModernJs && g.review.status === 'BLOCKED' && mj && /反映直前の形式確認（記法）/.test(mj.message) && /var record/.test(mj.message) && /書き換えない/.test(mj.message), `§54 AI の var は書き換えず（生成工程が返したコードのまま）、反映直前の形式確認で検出して登録できない: ${g && g.review.status} ${mj && mj.message}`);
+  const mj = g && g.verification && (g.verification.machine || []).find(x => x.name === 'modern-js' && !x.ok);
+  assert(g && g.generated.code === VAR_JS && g.status === 'unresolved' && mj && mj.severity === 'block' && /var record/.test(mj.message) && !g.review.checks.some(x => x.name === 'modern-js') && (v.final.blockers || []).some(b => b.text === `機械検査で登録を止める問題: ${mj.message}`), `§54 AI の var は書き換えず（生成工程が返したコードのまま）、生成工程の機械検査の block で止まる（Toolkit は記法を確かめない）: ${g && g.status} ${mj && mj.message}`);
   assert(v.final && v.final.approvable === false && !(await approveScreen(m)), '§54 var の残る候補の最終案は承認できない');
   await clickChat(m, 'open-js-register', { plan: v.planId, version: String(v.version) });
   await ticks(6);
@@ -397,16 +400,19 @@ console.log('\n--- §54 modern JavaScript（2026-10-05。§0d.3 で変更）: To
   assert(!up && !(m.panel.jsExecState().execution && m.panel.jsExecState().execution.status === 'DONE'), '§54 var の残る候補は登録しない（アップロードも PUT もしない）');
 }
 {
-  // ファイル直下の var（グローバル）: 自動では直せない → 登録できない（具体的な理由）
+  // ファイル直下の var（グローバル）: 生成工程が自動では直せない → 機械検査の文（行・文）をそのまま最終案の止める理由に出し、承認・登録の準備をしない
+  //   簡素化 B（2026-10-16）: 直せない理由の文（関数の外など）は生成工程が作る（AI版 worker/test/cases/modern-js.mjs）。Toolkit は文を作らず、そのまま出す
   const TOP_JS = `var LIMIT = 1000000;\n${NEW_JS}`;
   const m = mount({ planResponse: PLAN_NEW_DESKTOP, generatedFor: (ctx) => ({ ...genFor(ctx), code: TOP_JS }) });
   await ticks();
   const { v } = await adoptScreen(m, '100万円以上なら警告を表示したい');
   const g = v.generated.C1;
-  const blocker = g && g.review.registration.blockers.find(b => b.code === 'modern-js');
-  assert(g && g.review.status === 'BLOCKED' && blocker && /1 行目「var LIMIT = 1000000;」: var LIMIT — 自動で直せません（関数の外/.test(blocker.message), `§54 直せない var は登録できない（行・文・理由）: ${blocker && blocker.message}`);
-  const r = KTJsExecutor.changeFromGenerated ? KTJsExecutor.changeFromGenerated({ generated: g.generated, review: g.review }) : null;
-  assert(!r || r.ok === false, '§54 登録の準備もできない');
+  const mj = g && g.verification && (g.verification.machine || []).find(x => x.name === 'modern-js' && !x.ok);
+  assert(g && g.status === 'unresolved' && mj && /1 行目「var LIMIT = 1000000;」: var LIMIT/.test(mj.message) && (v.final.blockers || []).some(b => b.text === `機械検査で登録を止める問題: ${mj.message}`) && v.final.approvable === false, `§54 直せない var は生成工程の機械検査の文（行・文）のまま止める理由に出す: ${mj && mj.message}`);
+  await clickChat(m, 'open-js-register', { plan: v.planId, version: String(v.version) });
+  await ticks(6);
+  const pr = m.panel.jsExecState().prepared;
+  assert(pr && pr.status === 'BLOCKED' && (pr.blockers || []).some(b => b.code === 'APPROVAL_REQUIRED') && !(pr.changes || []).length, `§54 登録の準備もしない（最終案の承認が無い）: ${JSON.stringify(pr && pr.blockers)}`);
 }
 
 //   §55（［確定してコードを作る］・古い版のボタンでは作らない）は削除した: 仕様の確定と生成は最終案のパイプラインに置き換えた
