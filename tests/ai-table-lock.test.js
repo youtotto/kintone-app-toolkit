@@ -25,6 +25,7 @@
 'use strict';
 process.on('unhandledRejection', (e) => { if (/kintone is not defined/.test(String(e && e.message))) return; console.error(e); process.exit(1); });
 const { loadToolkit, makeAssert } = require('./helpers/load-toolkit.js');
+const { gwCandidateHash } = require('./helpers/gw-hash.js');
 const T = loadToolkit();
 const { KTAiConversation, KTCodeReview, KTScan, KTContext, KTDeps } = T;
 const { assert, state } = makeAssert();
@@ -171,7 +172,7 @@ const tableGenerate = () => {
     const code = `(function () {\n  'use strict';\n  kintone.events.on(['app.record.create.show', 'app.record.edit.show'], function (event) {\n    const record = event.record;\n    if (record['ステータス'] && record['ステータス'].value === '承認済み') {\n${top.map(f => `      record['${f}'].disabled = true;`).join('\n')}${cols.length ? `\n      record['items'].value.forEach(function (row) {\n${cols.map(f => `        row.value['${f}'].disabled = true;`).join('\n')}\n      });` : ''}\n    }${warnPart}\n    return event;\n  });\n})();`;
     const generated = { strategy: 'NEW_JS_FILE', targetFile: `approvedLock-${c.customizationId}.js`, summary: '承認済みでは編集不可にします。', code, patch: null, events: c.events, fields: [{ code: 'ステータス', access: 'READ' }, ...(cols.length || warnCols.length ? [{ code: 'items', access: 'READ' }] : []), ...[...new Set([...locked, ...warned])].map(f => ({ code: f, access: 'CONTROL' }))], apis: [], assumptions: [], warnings: [], coverage: [{ requirementId: c.customizationId, status: 'MET', note: '', text: c.requirement }] };
     const review = KTCodeReview.review({ generated, customization: c, plan: args.version.plan, data: clone(K.DATA_C), scan: null, existingSource: null });
-    const candidateHash = KTScan.candidateHashOf({ strategy: generated.strategy, targetFile: generated.targetFile, code: generated.code, patch: null, customizationId: c.customizationId });
+    const candidateHash = gwCandidateHash({ strategy: generated.strategy, targetFile: generated.targetFile, code: generated.code, patch: null, customizationId: c.customizationId });
     const cand = { code, has: Object.fromEntries([...new Set([...locked, ...warned])].map(f => [f, [...(locked.includes(f) ? ['lock'] : []), ...(warned.includes(f) ? ['warn'] : [])]])) };
     return { ok: true, generated, review, ctx: { size: { approxTokens: 1000 } }, existingSource: null, inputHash: `h-${c.customizationId}`, verification: K.fakeVerification(cand, args.requiredEffects, { candidateHash }), candidateHash, requirementIds: [{ id: c.customizationId, kind: 'customization', text: c.requirement }] };
   };

@@ -24,6 +24,7 @@
 'use strict';
 process.on('unhandledRejection', (e) => { if (/kintone is not defined/.test(String(e && e.message))) return; console.error(e); process.exit(1); });
 const { loadToolkit, makeAssert } = require('./helpers/load-toolkit.js');
+const { gwCandidateHash } = require('./helpers/gw-hash.js');
 const T = loadToolkit();
 const { KTAiConversation, KTAiChatUi, KTJsCatalog, KTCodeReview, KTContext, KTScan, KTAiClient } = T;
 const { assert, state } = makeAssert();
@@ -298,7 +299,7 @@ await section(async () => {
     calls.push(1);
     const field = 'case_name', targetFile = 'caseLock.js', code = dupCode(field);
     const req0 = (ctx.verification && ctx.verification.requiredEffects) || [];
-    const candidateHash = KTScan.candidateHashOf({ strategy: 'NEW_JS_FILE', targetFile, code, customizationId: 'C1' });
+    const candidateHash = gwCandidateHash({ strategy: 'NEW_JS_FILE', targetFile, code, customizationId: 'C1' });
     const resp = { ok: true, contractVersion: '2.1', meta: { requestId, gateway: { product: 'toolkit', feature: 'customization-generator', promptVersion: '1', contextVersion: 'customization-1' }, normalization: { warnings: [] }, ai: { model: 'm' } }, generated: { strategy: 'NEW_JS_FILE', targetFile, summary: '承認待ちでは案件名を編集できないようにします。', code, patch: null, events: ['app.record.edit.show'], fields: [{ code: field, access: 'CONTROL' }], apis: [], assumptions: [], warnings: [], coverage: [{ requirementId: 'C1', status: 'MET', note: '' }] }, verification: K.fakeVerification({ code, has: { [field]: ['lock'] } }, req0, { candidateHash }) };
     const vv = KTAiClient.validateGenerated(resp, ctx);
     if (!vv.ok) throw new Error(JSON.stringify(vv.errors));

@@ -20,6 +20,7 @@
 'use strict';
 process.on('unhandledRejection', (e) => { if (/kintone is not defined/.test(String(e && e.message))) return; console.error(e); process.exit(1); });
 const { loadToolkit, makeAssert } = require('./helpers/load-toolkit.js');
+const { gwCandidateHash } = require('./helpers/gw-hash.js');
 const T = loadToolkit();
 const { KTAiConversation, KTAiChatUi, KTAiClient } = T;
 const { assert, state } = makeAssert();
@@ -544,7 +545,7 @@ const H9K = (() => {
       const generated = { strategy: 'NEW_JS_FILE', targetFile: 'tableLock.js', summary: '承認済みでは明細のセルを編集できないようにします。', code: TABLE3, patch: null, events: ['app.record.edit.show'], fields: COLS.map(code => ({ code, access: 'CONTROL' })), apis: [], assumptions: [], warnings: [],
         coverage: [{ requirementId: 'C1', status: 'MET', note: '', text: cust.requirement }, { requirementId: 'R1', status: 'PARTIAL', note: '行の追加・削除は止められません', text: REQ_TEXT_FULL, limitCode: 'SUBTABLE_ROWS' }] };
       const review = T.KTCodeReview.review({ generated, customization: cust, plan: args.version.plan, data: clone(K.DATA_C), scan: null, existingSource: null, requirements: [{ id: 'R1', planRefs: ['C1'] }, { id: 'R2', planRefs: [] }] });
-      const candidateHash = T.KTScan.candidateHashOf({ strategy: 'NEW_JS_FILE', targetFile: 'tableLock.js', code: TABLE3, patch: null, customizationId: 'C1' });
+      const candidateHash = gwCandidateHash({ strategy: 'NEW_JS_FILE', targetFile: 'tableLock.js', code: TABLE3, patch: null, customizationId: 'C1' });
       return { ok: true, generated, review, ctx: { size: { approxTokens: 1000 } }, existingSource: null, inputHash: 'hT', verification: K.fakeVerification({ code: TABLE3, has: { item_name: ['lock'], qty: ['lock'], unit_price: ['lock'] } }, args.requiredEffects, { candidateHash, supported: effects }), candidateHash, requirementIds: [{ id: 'C1', kind: 'customization', text: cust.requirement }] };
     } };
     const x = makeConvC({ scriptFn: scriptT, labels: LABELS_T, planImpl: planT, generate: genT });

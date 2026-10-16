@@ -24,6 +24,7 @@
 'use strict';
 process.on('unhandledRejection', (e) => { if (/kintone is not defined/.test(String(e && e.message))) return; console.error(e); process.exit(1); });
 const { loadToolkit, makeAssert } = require('./helpers/load-toolkit.js');
+const { gwCandidateHash } = require('./helpers/gw-hash.js');
 const T = loadToolkit();
 const { KTCodeReview, KTScan, KTAiClient, KTPlanReview, KTQueryCheck, KTDeps } = T;
 const { assert, state } = makeAssert();
@@ -198,7 +199,7 @@ const generate = ({ c3 = 'pass' } = {}) => {
       generated = mk({ strategy: 'NEW_JS_FILE', targetFile: 'dealValidateMobile.js', summary: 'PC と同じ保存時の入力チェックをモバイルにも用意します。', code: F.C3_CODE, events: [...M_SUBMITS], fields: [{ code: 'amount', access: 'CONTROL' }] });
     }
     const review = KTCodeReview.review({ generated, customization: c, plan: args.version.plan, data: clone(DATA), scan: null, existingSource });
-    const candidateHash = KTScan.candidateHashOf({ strategy: generated.strategy, targetFile: generated.targetFile, code: generated.code, patch: generated.patch, existingHash: existingSource ? KTScan.hashText(existingSource.text) : null, customizationId: cid });
+    const candidateHash = gwCandidateHash({ strategy: generated.strategy, targetFile: generated.targetFile, code: generated.code, patch: generated.patch, baseHash: existingSource ? KTScan.hashText(existingSource.text) : null, customizationId: cid });
     if (cid === 'C3') {
       const failing = c3 === 'fail';
       let n = 0;

@@ -33,6 +33,7 @@ process.on('unhandledRejection', (e) => { if (/kintone is not defined/.test(Stri
 const fs = require('fs');
 const path = require('path');
 const { loadToolkit, makeAssert } = require('./helpers/load-toolkit.js');
+const { gwCandidateHash } = require('./helpers/gw-hash.js');
 const T = loadToolkit();
 const { KTAiConversation, KTCodeReview, KTScan, KTContext, KTAiClient, KTPlanReview } = T;
 const { assert, state } = makeAssert();
@@ -219,7 +220,7 @@ const portGenerate = ({ mode = 'pass' } = {}) => {
     const e0 = (args.requiredEffects || [])[0] || {};
     const generated = { strategy: 'NEW_JS_FILE', targetFile: 'dealValidateMobile.js', summary: 'PC と同じ保存時の入力チェックをモバイルにも用意します。', code: F.C3_CODE, patch: null, events: [...M_SUBMITS], fields: [{ code: 'amount', access: 'CONTROL' }], apis: ['kintone.events.on'], assumptions: [], warnings: [], coverage: [{ requirementId: 'C3', status: 'MET', note: '', text: c.requirement }] };
     const review = KTCodeReview.review({ generated, customization: c, plan: args.version.plan, data: clone(K.DATA_C), scan: null, existingSource: null });
-    const candidateHash = KTScan.candidateHashOf({ strategy: generated.strategy, targetFile: generated.targetFile, code: generated.code, patch: null, customizationId: 'C3' });
+    const candidateHash = gwCandidateHash({ strategy: generated.strategy, targetFile: generated.targetFile, code: generated.code, patch: null, customizationId: 'C3' });
     let n = 0;
     const cases = (e0.events || []).flatMap(ev => VALUES.map(([val, ja, ref]) => {
       const mine = mode === 'fail' && val === '-1' ? { stopped: false, errors: {}, eventError: null }
@@ -412,7 +413,7 @@ await section(async () => {
   const genImpl = async ({ ctx, requestId }) => {
     calls.push(clone(ctx));
     const re = (ctx.verification && ctx.verification.requiredEffects) || [];
-    const candidateHash = KTScan.candidateHashOf({ strategy: 'NEW_JS_FILE', targetFile: 'dealValidateMobile.js', code: F.C3_CODE, customizationId: 'C3' });
+    const candidateHash = gwCandidateHash({ strategy: 'NEW_JS_FILE', targetFile: 'dealValidateMobile.js', code: F.C3_CODE, customizationId: 'C3' });
     const cases = re.flatMap(e => (e.events || []).flatMap((ev, i) => VALUES.map(([val, ja, ref], j) => ({ id: `K${i}-${j}`, requirementId: 'C3', requirementIds: ['C3'], field: 'amount', effect: 'block-save', expect: 'same-as-source', side: 'match', kind: 'port', event: ev, refEvent: pairOf(ev), refFile: { file: 'dealValidate.js', target: 'desktop' }, verdict: 'pass', reference: ref, observed: ref, note: `金額 が ${ja} で保存する: 移植元と同じ動き`, message: '移植元と同じ動きです' }))));
     const resp = { ok: true, contractVersion: '2.1', meta: { requestId, gateway: { product: 'toolkit', feature: 'customization-generator', promptVersion: '1', contextVersion: 'customization-1' }, normalization: { warnings: [] }, ai: { model: 'm' } },
       generated: { strategy: 'NEW_JS_FILE', targetFile: 'dealValidateMobile.js', summary: 'PC と同じ保存時の入力チェックをモバイルにも用意します。', code: F.C3_CODE, patch: null, events: [...M_SUBMITS], fields: [{ code: 'amount', access: 'CONTROL' }], apis: ['kintone.events.on'], assumptions: [], warnings: [], coverage: [{ requirementId: 'C3', status: 'MET', note: '' }] },

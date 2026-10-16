@@ -23,7 +23,8 @@ function loadToolkit({ document: docOverride = null, localStorage: lsOverride = 
   const sandbox = {
     console, setTimeout, clearTimeout,
     setInterval: () => 0, clearInterval: noop,
-    AbortController, TextEncoder, TextDecoder, URL, btoa, atob, Uint8Array,   // ブラウザにもある標準 API（timeout の中断・サイズ計測・PKCE で使う）
+    AbortController, TextEncoder, TextDecoder, URL, btoa, atob, Uint8Array, crypto: globalThis.crypto,   // 簡素化 B（2026-10-17）: 候補の指紋（SHA-256）
+      // ブラウザにもある標準 API（timeout の中断・サイズ計測・PKCE で使う）
     localStorage: lsOverride || fakeStorage, sessionStorage: fakeStorage,   // Phase 18: 移行案内（localStorage）のテストでは差し替える
     navigator: {},
     // Phase 15: mountRoot（タブ構成）のテストでは fake-dom.js の makeFakeDocument() を渡す

@@ -2368,12 +2368,22 @@
       for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 0x01000193) >>> 0; }
       return h.toString(16).padStart(8, '0');
     }
-    /** C-1 第 2 段（2026-10-08）: 模擬実行（KTJsSim）の削除に伴い、ここへ移した（同じ入力に同じ値を返す）。
-     *  候補の hash（Gateway の candidateHash が無いときの代わり。strategy・targetFile・code・patch・既存の本文の hash・customizationId から 16 桁） */
-    function candidateHashOf({ strategy = null, targetFile = null, code = '', patch = null, existingHash = null, customizationId = null } = {}) {
+    /**
+     * 簡素化 B（2026-10-17）: 候補の指紋。Gateway の candidateHashOf（worker/src/v2/toolkit/verify-generated.mjs）と同じ計算（SHA-256 の先頭 16 桁。
+     *   strategy・targetFile・code・patch（baseHash と操作の type・anchor・content）・送った既存ファイルの本文の指紋（hashText）・customizationId。改行は LF にそろえる）。
+     *   受け取った候補と生成工程の検証結果（verification.candidateHash）の結び付き、承認・登録の候補の結び付きを確かめるために使う（方式の違う指紋とは比べない）。
+     *   SHA-256 を使えない環境では null（結び付きを確かめられないので、合格にも登録にも使わない）
+     */
+    async function gatewayCandidateHashOf({ strategy = null, targetFile = null, code = '', patch = null, baseHash = null, customizationId = null } = {}) {
       const lf = (s) => String(s ?? '').replace(/\r\n/g, '\n');
-      const json = JSON.stringify({ strategy, targetFile, code: lf(code), patch: patch ? { baseHash: patch.baseHash ?? null, operations: (patch.operations || []).map(o => ({ type: o.type, anchor: lf(o.anchor), content: lf(o.content) })) } : null, existingHash, customizationId });
-      return `${hashText(json)}${hashText(`${json}\u0001`)}`;
+      const ops = patch && Array.isArray(patch.operations) ? patch.operations.map(o => [String(o?.type ?? ''), lf(o?.anchor), lf(o?.content)]) : null;
+      const payload = JSON.stringify([strategy, targetFile, lf(code), ops ? { baseHash: patch.baseHash ?? null, operations: ops } : null, baseHash, customizationId]);
+      try {
+        const subtle = typeof crypto !== 'undefined' && crypto && crypto.subtle ? crypto.subtle : null;
+        if (!subtle || typeof TextEncoder === 'undefined') return null;
+        const buf = await subtle.digest('SHA-256', new TextEncoder().encode(payload));
+        return [...new Uint8Array(buf)].map(b => b.toString(16).padStart(2, '0')).join('').slice(0, 16);
+      } catch (e) { return null; }
     }
     /**
      * Phase 16: 1 ファイル（登録済みの JS・生成コードの仮想ファイル）を Field Scanner と同じ解析に通す（純関数）。
@@ -2562,7 +2572,7 @@
     return {
       register, run, scheduleAuto, autoPending, holdCustomize, takeHeldCustomize, holdFormDefs, takeHeldFormDefs, dropHeldCustomize, onChange, getStatus, setLastPayload, getLastPayload,
       markStale, isStale, runStale, rescanAfterWrite,
-      hashText, candidateHashOf, analyzeFile, summarizeFiles, fieldList, buildPayload, isKnownLibraryUrl, KNOWN_LIBRARY_HOSTS,
+      hashText, gatewayCandidateHashOf, analyzeFile, summarizeFiles, fieldList, buildPayload, isKnownLibraryUrl, KNOWN_LIBRARY_HOSTS,
       buildSignature, loadCache, saveCache, clearCache,
       isAutoEnabled, setAutoEnabled,
       CACHE_TTL_MS, ANALYZER_VERSION,
@@ -27830,6 +27840,8 @@
           //   §0c.7: health の印（requiredEffects・effectGroups・relatedOmitted・appFields・saveDialog・reasonCategory）が欠ける接続先は、結果が返っても非対応として扱う
           //   簡素化 B（2026-10-16）: 生成工程の検証結果が無い（検証を返さない接続先。ver.legacy）は、必須の効果が無い JavaScript でも合格にしない（Toolkit の形式確認だけで検証済みにしない）
           if (!ver || ver.legacy) return { status: 'unsupported', kind: 'capability', reason: '接続先（生成工程）が生成したコードの検証結果を返さないため、反映できるかを確かめられません', next: '接続先が更新されてから最終案を作り直します（いまの接続先では反映できる最終案にしません）。', details };
+          //   簡素化 B（2026-10-17）: 検証結果の指紋が、受け取った候補の指紋と一致しない（別の候補の検証結果・指紋の無い検証結果）→ 合格にしない
+          if (ver.bound !== true) return { status: 'unresolved', kind: 'verification-mismatch', fix: 'regenerate', reason: '生成工程の検証結果が、受け取った候補と対応していません（候補の指紋が一致しません）。この検証結果では合格にしません', next: '最終案を作り直します（候補を作り直し、その候補で検証し直します）。', details };
           if (req.length && (!er.supported || entry.effectsCapable === false)) return { status: 'unsupported', kind: 'capability', reason: '接続先（生成工程）が必須の動作の確認に対応していないため、要件を満たすかを確かめられません', next: '接続先が更新されてから最終案を作り直します（いまの接続先では反映できる最終案にしません）。', details };
           const behaviorFailed = er.failed.length > 0 || er.otherFailed.length > 0;
           if (codeBlocks.length || machineBlocks.length || er.missing.length || behaviorFailed || (ver && ver.passed === false)) {
@@ -28145,8 +28157,12 @@
           //   C-1 第 4 段（2026-10-09・K-2 の残り）: 生成の使用量は、この送信の呼び出しの記録に付ける（attempts の累計は版をまたぐので使用量に使わない）
           { const lastCall = timing.calls.length ? timing.calls[timing.calls.length - 1] : null; if (lastCall && lastCall.kind === 'generate' && estimate && estimate.measured !== false && (estimate.input != null || estimate.output != null)) lastCall.genEstimate = estimate; }
           const blockerCodes = (r.review?.registration?.blockers || []).map(b => String(b.code));
-          const entry = { ...base, effectsCapable: typeof services.generatorFeatures === 'function' ? ktEffectsCapable(services.generatorFeatures() || []) : null, effectCheck: typeof services.generatorFeatures === 'function' ? ktEffectCheckCapable(services.generatorFeatures() || []) : false, scopeList: typeof services.generatorFeatures === 'function' ? (services.generatorFeatures() || []).includes('scopeList') : false, generated: r.generated, review: r.review, ctx: r.ctx || null, existingSource: r.existingSource || null, verification: r.verification || null, candidateHash: (r.verification && r.verification.candidateHash) || r.candidateHash || null, requirementIds: r.requirementIds || null, relatedFiles: r.relatedFiles || null, inputHash: r.inputHash ?? null, blockers: blockerCodes, attempts: nextAttempts(previous, { inputHash: r.inputHash ?? null, blockers: blockerCodes, estimate, at: now(), reviewFailed: !!(r.review && r.review.reviewFailed) }), repairs: (r.verification && r.verification.repairs && r.verification.repairs.count) || 0, status: null };
-          if (!entry.candidateHash) entry.candidateHash = KTScan.candidateHashOf({ strategy: entry.generated?.strategy, targetFile: entry.generated?.targetFile, code: entry.generated?.code, patch: entry.generated?.patch, existingHash: entry.existingSource && typeof entry.existingSource.text === 'string' ? KTScan.hashText(entry.existingSource.text) : null, customizationId: cid });
+          const entry = { ...base, effectsCapable: typeof services.generatorFeatures === 'function' ? ktEffectsCapable(services.generatorFeatures() || []) : null, effectCheck: typeof services.generatorFeatures === 'function' ? ktEffectCheckCapable(services.generatorFeatures() || []) : false, scopeList: typeof services.generatorFeatures === 'function' ? (services.generatorFeatures() || []).includes('scopeList') : false, generated: r.generated, review: r.review, ctx: r.ctx || null, existingSource: r.existingSource || null, verification: r.verification || null, candidateHash: null, requirementIds: r.requirementIds || null, relatedFiles: r.relatedFiles || null, inputHash: r.inputHash ?? null, blockers: blockerCodes, attempts: nextAttempts(previous, { inputHash: r.inputHash ?? null, blockers: blockerCodes, estimate, at: now(), reviewFailed: !!(r.review && r.review.reviewFailed) }), repairs: (r.verification && r.verification.repairs && r.verification.repairs.count) || 0, status: null };
+          //   簡素化 B（2026-10-17）: 生成工程の検証結果と、受け取った候補の結び付きを確かめる。候補の指紋は Gateway と同じ計算で、受け取った候補と送った既存ファイルの
+          //   本文から Toolkit が作る（承認・登録はこの指紋に結び付ける）。検証結果の指紋と一致したときだけ bound（一致しない・指紋の無い検証結果は合格にしない）
+          entry.candidateHash = await KTScan.gatewayCandidateHashOf({ strategy: entry.generated?.strategy, targetFile: entry.generated?.targetFile, code: entry.generated?.code, patch: entry.generated?.patch, baseHash: entry.existingSource && typeof entry.existingSource.text === 'string' ? KTScan.hashText(entry.existingSource.text) : null, customizationId: cid });
+          if (late()) return null;
+          if (entry.verification) entry.verification = { ...entry.verification, bound: !!entry.candidateHash && entry.verification.candidateHash === entry.candidateHash };
           //   生成工程の検証結果（必須の効果・動作テスト）を形式確認に取り込む（画面の登録前の再検査と同じ関数。動作テストの結果が無ければ既知の競合は登録不可のまま）
           //   §0c.6: 動作テストに渡せなかった既存 JS（Toolkit が外した・Gateway が落とした）が同じイベントを登録していれば、その効果は verified にしない
           entry.relatedOmitted = Array.isArray(r.relatedOmitted) ? r.relatedOmitted : [];
@@ -31808,7 +31824,7 @@
         try { return KTScan.hashText(JSON.stringify({ files, st, planned: { statuses: planned.statuses.map(x => x.name), fields: planned.fields.map(x => [x.code, x.type || null]) }, c: cR, ...(refs.length ? { refs } : {}) })); } catch (e) { return null; }
       },
       // §0c（2026-10-08）: Toolkit の模擬イベント（services.simulate）は外した。動作テストは生成工程（Gateway が隔離環境の Worker で行う）。
-      //   KTJsSim は C-1 第 2 段（2026-10-08）で削除した（候補の hash は KTScan.candidateHashOf）
+      //   KTJsSim は C-1 第 2 段（2026-10-08）で削除した（候補の hash は KTScan.gatewayCandidateHashOf。Gateway と同じ計算）
       /** §0c.2: 利用者に見せる文のフィールドのラベル（{ code: label }。今の作業の基準のフィールド） */
       fieldLabels() { try { const inputs = inputsNow(); return Object.fromEntries(KTDeps.normalizeFields((inputs.data && inputs.data.fields) || {}).filter(f => f && f.code).map(f => [f.code, f.label || f.code])); } catch (e) { return {}; } },
       //   2026-10-15（最終案の重複と担当未定の食い違い §2）: 数値・計算のフィールドの種類と単位（{ code: { type, unit, unitPosition } }。アプリ解析のフィールドの定義から）。条件式の値の表記（100万円）に使う
@@ -31940,9 +31956,8 @@
         catch (e) { review = { reviewVersion: KTCodeReview.REVIEW_VERSION, status: KTCodeReview.STATUS.REVIEW_REQUIRED, reviewFailed: true, checks: [{ name: 'code', ok: false, severity: 'review', message: `Toolkit の検査を完了できませんでした: ${e?.message || String(e)}` }], finalCode: generated.code, addedCode: generated.code, diff: null, mismatches: [], security: [], provenance }; }
         // 段階 C: 生成と一体の検証結果。能力の無い Gateway（verification を返さない）は入口で一度だけ従来の形から作る（candidateHash は Toolkit で計算。修復の依頼は無し）。
         //   簡素化 B（2026-10-16）: その形は合格にしない（passed false・会話の判定で非対応）
-        const existingHash = existingSource && typeof existingSource.text === 'string' ? KTScan.hashText(existingSource.text) : null;
-        const localHash = KTScan.candidateHashOf({ strategy: generated.strategy, targetFile: generated.targetFile, code: generated.code, patch: generated.patch, existingHash, customizationId: c.customizationId });
-        const verificationOut = generated.verification ? { ...generated.verification, candidateHash: generated.verification.candidateHash || localHash, legacy: false } : { version: '0', candidateHash: localHash, sameAsPrevious: false, passed: false, machine: [], repairs: { count: 0, reasons: [], stoppedBy: null }, unverified: ['生成側の機械検査・模擬テストには対応していない接続先です（Toolkit の形式確認だけでは合格にしません）'], legacy: true };
+        //   簡素化 B（2026-10-17）: 候補の指紋を Toolkit の別の方式で補わない（会話が Gateway と同じ計算で作り、検証結果の指紋に照らす）
+        const verificationOut = generated.verification ? { ...generated.verification, legacy: false } : { version: '0', candidateHash: null, sameAsPrevious: false, passed: false, machine: [], repairs: { count: 0, reasons: [], stoppedBy: null }, unverified: ['生成側の機械検査・模擬テストには対応していない接続先です（Toolkit の形式確認だけでは合格にしません）'], legacy: true };
         //   §0c.6: Gateway が落とした既存 JS（meta.normalization.warnings の VERIFICATION_RELATED_FILE_DROPPED。path の添え字は送った relatedFiles の順）も、送れなかったものに足す
         if (relatedFiles) for (const w of (Array.isArray(generated.gatewayWarnings) ? generated.gatewayWarnings : [])) {
           const m = w && w.code === 'VERIFICATION_RELATED_FILE_DROPPED' && typeof w.path === 'string' ? /relatedFiles\[(\d+)\]/.exec(w.path) : null;
@@ -32669,6 +32684,10 @@
     const jsRecheckOf = (v) => async (ch) => {
       const g = v.generated?.[ch.customizationId] || null;
       if (!g) return null;
+      //   簡素化 B（2026-10-17）: 登録する候補（生成の結果と、送った既存ファイルの本文）の指紋を Gateway と同じ計算で作り直し、生成工程の検証結果の指紋と
+      //   承認に使った候補の指紋に照らす（どちらかが違えば登録しない。登録する本文は同じ候補と本文から作り、下の本文の指紋で照らす）
+      const gw = await KTScan.gatewayCandidateHashOf({ strategy: g.generated?.strategy, targetFile: g.generated?.targetFile, code: g.generated?.code, patch: g.generated?.patch, baseHash: g.existingSource && typeof g.existingSource.text === 'string' ? KTScan.hashText(g.existingSource.text) : null, customizationId: ch.customizationId });
+      if (!gw || !g.verification || g.verification.candidateHash !== gw || g.candidateHash !== gw) return { version: '1', verdict: 'BLOCKED', blockers: [{ code: 'VERIFICATION_MISMATCH', message: '生成工程が検証した候補と、登録しようとしている候補が一致しません（もう一度最終案を作ってください）' }], confirmations: [], unverified: [], codeHash: null };
       const c = (v.plan?.customizations || []).find(x => x.customizationId === ch.customizationId) || null;
       const inp = inputsNow();
       // 段階 A（R14）: 登録前の再検査は、計画の新規フィールドを「存在する」扱いにしない（実在するフィールドだけ。新設の依存は prepare の dependsOn で止める）

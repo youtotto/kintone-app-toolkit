@@ -23,6 +23,7 @@
 //   // 台本（K.script）の発言: 課長・部長の承認者を選ぶ運用にしたい / 100円未満は部長不要、100万円以上は必要 / 7営業日で。会社独自の休業日は今回はなし / おすすめで
 //   //   （K.adoptC がこの 4 つを送る）。偽の生成工程の候補は K.CAND（good・bad・badChecked・warn・value・lockonly・locksave）
 'use strict';
+const { gwCandidateHash } = require('./gw-hash.js');
 const { makeFakeHost } = require('./fake-dom.js');
 const FX = require('../fixtures/ai-context-app.js');
 const { buildScanPayload } = require('./scan-payload.js');
@@ -303,7 +304,8 @@ function createNewFlowKit(T) {
       //   この偽の生成工程は直さない（渡したコードを直した後の形とみなす。var が残れば検証結果の機械検査が止める）
       const generated = generated0 ? generated0 : { strategy: 'NEW_JS_FILE', targetFile: 'lock.js', summary: '承認待ちでは金額を編集不可にします。', code: cand.code, patch: null, events: cust.events, fields: [{ code: 'amount', access: 'CONTROL' }], apis: [], assumptions: [], warnings: [], coverage: [{ requirementId: 'C1', status: 'MET', note: '', text: cust.requirement }] };
       const review = KTCodeReview.review({ generated, customization: cust, plan: args.version.plan, data: clone(DATA_C), scan: null, existingSource });
-      const candidateHash = KTScan.candidateHashOf({ strategy: generated.strategy, targetFile: generated.targetFile, code: generated.code, patch: generated.patch, customizationId: 'C1' });
+      //   簡素化 B（2026-10-17）: Gateway と同じ計算の候補の指紋（送った既存ファイルの本文の指紋と customizationId を含む）
+      const candidateHash = gwCandidateHash({ strategy: generated.strategy, targetFile: generated.targetFile, code: generated.code, patch: generated.patch, baseHash: existingSource && typeof existingSource.text === 'string' ? KTScan.hashText(existingSource.text) : null, customizationId: args.customizationId });
       return { ok: true, generated, review, ctx: { size: { approxTokens: 1000 } }, existingSource, inputHash: `h${n}`, verification: fakeVerification({ ...cand, code: generated.code, patch: generated.patch }, args.requiredEffects, { env, repairs, stoppedBy, supported, candidateHash, dropCaseFor, statusOverride, extraCases, caseReason, scope }), candidateHash, requirementIds: [{ id: 'C1', kind: 'customization', text: cust.requirement }], ...(relatedOmitted ? { relatedOmitted: clone(relatedOmitted) } : {}) };
     };
     return { impl, calls };
@@ -426,7 +428,7 @@ function createNewFlowKit(T) {
       calls.push(clone(ctx));
       const code = lockCode(field);
       const req0 = (ctx.verification && ctx.verification.requiredEffects) || [];
-      const candidateHash = KTScan.candidateHashOf({ strategy: 'NEW_JS_FILE', targetFile, code, customizationId: 'C1' });
+      const candidateHash = gwCandidateHash({ strategy: 'NEW_JS_FILE', targetFile, code, baseHash: ctx.existingFile ? ctx.existingFile.hash : null, customizationId: (ctx.customization && ctx.customization.customizationId) || 'C1' });
       const resp = { ok: true, contractVersion: '2.1', meta: { requestId, gateway: { product: 'toolkit', feature: 'customization-generator', promptVersion: '1', contextVersion: 'customization-1' }, normalization: { warnings: [] }, ai: { model: 'm' } }, generated: { strategy: 'NEW_JS_FILE', targetFile, summary: '承認待ちでは編集できないようにします。', code, patch: null, events: ['app.record.edit.show'], fields: [{ code: field, access: 'CONTROL' }], apis: [], assumptions: [], warnings: [], coverage: coverage ? clone(coverage) : [{ requirementId: 'C1', status: 'MET', note: '' }] }, verification: fakeVerification({ code, has: { [field]: ['lock'] } }, req0, { candidateHash }) };
       const vv = KTAiClient.validateGenerated(resp, ctx);
       if (!vv.ok) throw new Error(JSON.stringify(vv.errors));

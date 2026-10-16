@@ -13,6 +13,7 @@
 // 実行方法: node tests/ai-acceptance-p21.test.js（KT_SRC=<別ビルド> で修正前の版に対して走らせると RED になる）
 'use strict';
 const { loadToolkit, makeAssert } = require('./helpers/load-toolkit.js');
+const { gwCandidateHash, gwHashOfCtx, withGwHash } = require('./helpers/gw-hash.js');
 const { makeFakeHost } = require('./helpers/fake-dom.js');
 const T = loadToolkit();
 const { KTDeps, KTScan, KTDevBase, KTContext, KTAiClient, KTAiConversation, KTPlanReview, KTPlanExecutor, KTCodeReview, KTJsExecutor, mountAiWorkspace } = T;
@@ -185,10 +186,10 @@ console.log('\n--- G1 / G2 / G3（画面）. 再読み込みした後の新し�
     async generate({ ctx, requestId }) {
       genCalls.push(ctx);
       const anchor = "      event.record['discount_rate'].disabled = true;";
-      return { requestId, strategy: 'EXTEND_EXISTING_JS', targetFile: 'dealLock.js', summary: '値引率の上限チェックを追加', code: '', patch: { baseHash: ctx.existingFile.hash, operations: [{ type: 'INSERT_AFTER', anchor: "  });", content: "\n  kintone.events.on(['app.record.edit.submit'], function (event) {\n    if (Number(event.record['discount_rate'].value || 0) > 30) event.error = '値引率は 30% までです';\n    return event;\n  });" }] }, events: ['app.record.edit.submit'], fields: [{ code: 'discount_rate', access: 'READ' }], apis: [], assumptions: [], warnings: [], gatewayChecks: {} , _anchorUsed: anchor,
+      return withGwHash(ctx, { requestId, strategy: 'EXTEND_EXISTING_JS', targetFile: 'dealLock.js', summary: '値引率の上限チェックを追加', code: '', patch: { baseHash: ctx.existingFile.hash, operations: [{ type: 'INSERT_AFTER', anchor: "  });", content: "\n  kintone.events.on(['app.record.edit.submit'], function (event) {\n    if (Number(event.record['discount_rate'].value || 0) > 30) event.error = '値引率は 30% までです';\n    return event;\n  });" }] }, events: ['app.record.edit.submit'], fields: [{ code: 'discount_rate', access: 'READ' }], apis: [], assumptions: [], warnings: [], gatewayChecks: {} , _anchorUsed: anchor,
         //   C-1 第 3 段: 生成工程の機械検査で止まった候補にする（検証済みにならないので、後の「C1 のコードを作って」は作り直しの対象になる。
         //   基準が取れないときに、その作り直しで生成工程を呼ばないことを確かめるため）
-        verification: { version: '1', passed: false, machine: [{ name: 'syntax', ok: false, severity: 'block', message: '構文エラー（テスト）' }], requiredEffects: [], behavior: { status: 'not-run', reason: null, cases: [] }, repairs: { count: 0, reasons: [], stoppedBy: null }, unverified: [] } };
+        verification: { version: '1', passed: false, machine: [{ name: 'syntax', ok: false, severity: 'block', message: '構文エラー（テスト）' }], requiredEffects: [], behavior: { status: 'not-run', reason: null, cases: [] }, repairs: { count: 0, reasons: [], stoppedBy: null }, unverified: [] } });
     },
   };
   withProposal(HEALTH, client);   // C-1 第 3 段: 仮案の能力がある接続先（無い接続先は「接続先が非対応」で計画・生成に進まない）
@@ -491,11 +492,12 @@ console.log('\n--- G7（画面）. 古い版からは登録しない・確認の
   // §0c.6（2026-10-08）: 従来の流れの登録は、接続先が必須の効果の確認に対応し（health の verification に requiredEffects）、生成工程の検証が合格したものだけ。
   //   この試験は登録の経路（upload・PUT・検証・戻す）を確かめるので、偽の生成工程は Toolkit が渡した必須の効果をそのまま「処理あり・動作テストで合格」で返す
   //   （効果の区別そのものの検証は tests/ai-flow-redesign.test.js の §D）
-  const passVerification = (ctx) => { const re = (ctx && ctx.verification && ctx.verification.requiredEffects) || []; return re.length ? { version: '1', passed: true, machine: [], requiredEffects: re.map(x => ({ requirementId: x.requirementId, requirementIds: x.requirementIds, field: x.field, effect: x.effect, status: 'present' })), behavior: { status: 'passed', reason: null, cases: re.flatMap((x, i) => (x.events && x.events.length ? x.events : [null]).flatMap((ev, j) => (x.condition ? ['match', 'nomatch'] : ['match']).map(side => ({ id: `K${i + 1}-${j + 1}-${side}`, requirementIds: x.requirementIds, field: x.field, effect: x.effect, expect: side === 'match' ? x.effect : ({ lock: 'not-locked', warn: 'not-warned', 'block-save': 'save-allowed', 'set-value': 'value-unchanged', 'show-hide': 'show-hide' })[x.effect], side, ...(ev ? { event: ev } : {}), verdict: 'pass', observed: {}, message: '期待どおり' })))) }, repairs: { count: 0, reasons: [], stoppedBy: null }, unverified: ['実機での動作'] } : undefined; };
+  //   簡素化 B（2026-10-17）: 本物の Gateway と同じく、検証結果に候補の指紋（Gateway と同じ計算。tests/helpers/gw-hash.js）を入れる
+  const passVerification = (ctx, g = null) => { const re = (ctx && ctx.verification && ctx.verification.requiredEffects) || []; return re.length ? { version: '1', ...(g ? { candidateHash: gwHashOfCtx(ctx, g) } : {}), passed: true, machine: [], requiredEffects: re.map(x => ({ requirementId: x.requirementId, requirementIds: x.requirementIds, field: x.field, effect: x.effect, status: 'present' })), behavior: { status: 'passed', reason: null, cases: re.flatMap((x, i) => (x.events && x.events.length ? x.events : [null]).flatMap((ev, j) => (x.condition ? ['match', 'nomatch'] : ['match']).map(side => ({ id: `K${i + 1}-${j + 1}-${side}`, requirementIds: x.requirementIds, field: x.field, effect: x.effect, expect: side === 'match' ? x.effect : ({ lock: 'not-locked', warn: 'not-warned', 'block-save': 'save-allowed', 'set-value': 'value-unchanged', 'show-hide': 'show-hide' })[x.effect], side, ...(ev ? { event: ev } : {}), verdict: 'pass', observed: {}, message: '期待どおり' })))) }, repairs: { count: 0, reasons: [], stoppedBy: null }, unverified: ['実機での動作'] } : undefined; };
   const client = {
     async getHealth() { return HEALTH; },
     async plan({ ctx, requestId }) { const v = KTAiClient.validatePlan(planResp(ctx.goal), ctx); if (!v.ok) throw new Error(JSON.stringify(v.errors)); return { ...v.normalized, requestId, clientWarnings: v.warnings }; },
-    async generate({ ctx, requestId }) { return { requestId, strategy: 'NEW_JS_FILE', targetFile: 'lock.js', summary: '承認済みで金額を編集不可', code: CODE, patch: null, events: ['app.record.edit.show'], fields: [{ code: 'amount', access: 'CONTROL' }], apis: ['kintone.api'], assumptions: [], warnings: [], gatewayChecks: {}, ...(passVerification(ctx) ? { verification: passVerification(ctx) } : {}) }; },
+    async generate({ ctx, requestId }) { return { requestId, strategy: 'NEW_JS_FILE', targetFile: 'lock.js', summary: '承認済みで金額を編集不可', code: CODE, patch: null, events: ['app.record.edit.show'], fields: [{ code: 'amount', access: 'CONTROL' }], apis: ['kintone.api'], assumptions: [], warnings: [], gatewayChecks: {}, ...(passVerification(ctx, { strategy: 'NEW_JS_FILE', targetFile: 'lock.js', code: CODE, patch: null }) ? { verification: passVerification(ctx, { strategy: 'NEW_JS_FILE', targetFile: 'lock.js', code: CODE, patch: null }) } : {}) }; },
   };
   withProposal(HEALTH, client);   // C-1 第 3 段: 仮案の能力がある接続先
   const session = { status() { return { connected: true, apiBase: 'https://gw.test', refreshExpiresAt: '2099-01-01T00:00:00Z', scope: { product: 'toolkit', feature: 'assistant-qa,change-planner,customization-generator', domain: 't.cybozu.com' } }; }, async migrateLegacy() { return false; }, async refresh() { return {}; }, async disconnect() { return { revoked: true }; }, client };

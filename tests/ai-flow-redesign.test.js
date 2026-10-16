@@ -23,6 +23,7 @@
 'use strict';
 process.on('unhandledRejection', (e) => { if (/kintone is not defined/.test(String(e && e.message))) return; console.error(e); process.exit(1); });
 const { loadToolkit, makeAssert } = require('./helpers/load-toolkit.js');
+const { gwCandidateHash, gwHashOfCtx } = require('./helpers/gw-hash.js');
 const { makeFakeHost } = require('./helpers/fake-dom.js');
 const T = loadToolkit();
 const { KTDeps, KTScan, KTContext, KTAiClient, KTAiAnswers, KTAiConversation, KTAiChatUi, KTAiWorkspaceViewModel: VM, mountAiWorkspace } = T;
@@ -1297,7 +1298,7 @@ await section(async () => {
     const generateImpl = async ({ ctx, requestId }) => {
       genCtx.push(clone(ctx));
       const req = (ctx.verification && ctx.verification.requiredEffects) || [];
-      const candidateHash = KTScan.candidateHashOf({ strategy: 'NEW_JS_FILE', targetFile: 'caseLock.js', code: CODE_S, customizationId: 'C1' });
+      const candidateHash = gwCandidateHash({ strategy: 'NEW_JS_FILE', targetFile: 'caseLock.js', code: CODE_S, customizationId: 'C1' });
       const resp = { ok: true, contractVersion: '2.1', meta: { requestId, gateway: { product: 'toolkit', feature: 'customization-generator', promptVersion: '1', contextVersion: 'customization-1' }, normalization: { warnings: [] }, ai: { model: 'm' } }, generated: { strategy: 'NEW_JS_FILE', targetFile: 'caseLock.js', summary: '承認待ちでは案件名を編集できないようにします。', code: CODE_S, patch: null, events: ['app.record.edit.show'], fields: [{ code: 'case_name', access: 'CONTROL' }], apis: [], assumptions: [], warnings: [], coverage: [{ requirementId: 'C1', status: 'MET', note: '' }] }, verification: fakeVerification({ code: CODE_S, has: { case_name: ['lock'] } }, req, { env, candidateHash }) };
       const v = KTAiClient.validateGenerated(resp, ctx);
       if (!v.ok) throw new Error(JSON.stringify(v.errors));
@@ -1402,7 +1403,7 @@ await section(async () => {
     const generateImpl = async ({ ctx, requestId }) => {
       genCtx.push(clone(ctx));
       const req = (ctx.verification && ctx.verification.requiredEffects) || [];
-      const resp = { ok: true, contractVersion: '2.1', meta: { requestId, gateway: { product: 'toolkit', feature: 'customization-generator', promptVersion: '1', contextVersion: 'customization-1' }, normalization: { warnings: [] }, ai: { model: 'm' } }, generated: { strategy: 'NEW_JS_FILE', targetFile: 'caseLock.js', summary: '承認待ちでは案件名を編集できないようにします。', code, patch: null, events: ['app.record.edit.show'], fields: [{ code: 'case_name', access: 'CONTROL' }], apis: [], assumptions: [], warnings: [], coverage: [{ requirementId: 'C1', status: 'MET', note: '' }] }, ...(req.length ? { verification: fakeVerification({ code, has: { case_name: has }, ...cand }, req, {}) } : {}) };
+      const resp = { ok: true, contractVersion: '2.1', meta: { requestId, gateway: { product: 'toolkit', feature: 'customization-generator', promptVersion: '1', contextVersion: 'customization-1' }, normalization: { warnings: [] }, ai: { model: 'm' } }, generated: { strategy: 'NEW_JS_FILE', targetFile: 'caseLock.js', summary: '承認待ちでは案件名を編集できないようにします。', code, patch: null, events: ['app.record.edit.show'], fields: [{ code: 'case_name', access: 'CONTROL' }], apis: [], assumptions: [], warnings: [], coverage: [{ requirementId: 'C1', status: 'MET', note: '' }] }, ...(req.length ? { verification: fakeVerification({ code, has: { case_name: has }, ...cand }, req, { candidateHash: gwHashOfCtx(ctx, { strategy: 'NEW_JS_FILE', targetFile: 'caseLock.js', code, patch: null }) }) } : {}) };
       const vv = KTAiClient.validateGenerated(resp, ctx);
       if (!vv.ok) throw new Error(JSON.stringify(vv.errors));
       return { ...vv.normalized, requestId };
@@ -1709,6 +1710,27 @@ await section(async () => {
     assert(z.gen.calls.length === 1 && !(ez.requiredEffects || []).length && ez.status === 'unsupported' && ez.verdict.kind === 'capability' && /検証結果を返さない/.test(ez.verdict.reason) && vz.final.approvable === false && z.c.approveFinal({ planId: vz.planId, version: vz.version }).ok === false,
       `D27-3（${shape === 'none' ? '検証結果が無い' : '古い形の合格'}）: 必須の動作が無い JavaScript でも、生成工程の検証結果が無ければ検証済みにしない（承認できない）: ${JSON.stringify({ status: ez.status, verdict: ez.verdict, req: ez.requiredEffects })}`);
   }
+  //   簡素化 B（2026-10-17）: 検証結果と受け取った候補の結び付き。会話は受け取った候補（と送った既存ファイルの本文）から Gateway と同じ計算で指紋を作り、
+  //   検証結果の指紋と一致したときだけ合格の材料にする（承認・登録もこの指紋に結び付ける）
+  const genBind = (mutate) => { const g = makeGenerate({ sequence: ['good'] }); const impl0 = g.impl; g.impl = async (args) => mutate(await impl0(args)); return g; };
+  const bindCases = [
+    ['別の候補の検証結果（指紋が違う）', (r) => ({ ...r, verification: { ...r.verification, candidateHash: 'ffffffffffffffff' } })],
+    ['指紋の無い検証結果', (r) => { const { candidateHash, ...rest } = r.verification; void candidateHash; return { ...r, verification: rest }; }],
+    ['検証の後に候補（コード）だけが違う', (r) => ({ ...r, generated: { ...r.generated, code: `${r.generated.code}\n// 検証の後に変わった行` } })],
+  ];
+  for (const [name, mutate] of bindCases) {
+    const xb = makeConvC({ generate: genBind(mutate) });
+    await adoptC(xb);
+    const vb = xb.c.activePlan(), eb = vb.generated.C1;
+    assert(eb.status === 'unresolved' && eb.verdict.kind === 'verification-mismatch' && eb.verification.bound === false && vb.final.approvable === false && xb.c.approveFinal({ planId: vb.planId, version: vb.version }).ok === false,
+      `D27-4（${name}）: 検証結果が受け取った候補と結び付かなければ合格にしない（承認できない）: ${JSON.stringify({ status: eb.status, kind: eb.verdict.kind, bound: eb.verification.bound })}`);
+  }
+  const xok = makeConvC();
+  await adoptC(xok);
+  const eok = xok.c.activePlan().generated.C1;
+  const hok = await KTScan.gatewayCandidateHashOf({ strategy: eok.generated.strategy, targetFile: eok.generated.targetFile, code: eok.generated.code, patch: eok.generated.patch, baseHash: null, customizationId: 'C1' });
+  assert(eok.verification.bound === true && eok.candidateHash === hok && eok.verification.candidateHash === hok && eok.status === 'verified' && xok.c.activePlan().final.approvable === true,
+    `D27-5: 結び付いた検証結果（受け取った候補から作った指紋 = 検証結果の指紋）は合格の材料にし、承認の指紋もこの値: ${JSON.stringify({ bound: eok.verification.bound, hash: [eok.candidateHash, eok.verification.candidateHash, hok] })}`);
 });
 // D28（A6・B1・隔離 7・画面）: 動作テストに送る既存 JS の選び方と上限（4 件・合計 131,072 文字。1 ファイルの上限は無い）・送れなかった既存 JS の events（分からなければ null・外部のライブラリは []）
 await section(async () => {
@@ -1739,7 +1761,7 @@ await section(async () => {
     const generateImpl = async ({ ctx, requestId }) => {
       genCtx.push(clone(ctx));
       const req = (ctx.verification && ctx.verification.requiredEffects) || [];
-      const candidateHash = KTScan.candidateHashOf({ strategy: 'NEW_JS_FILE', targetFile: 'caseLock.js', code: CODE_S, customizationId: 'C1' });
+      const candidateHash = gwCandidateHash({ strategy: 'NEW_JS_FILE', targetFile: 'caseLock.js', code: CODE_S, customizationId: 'C1' });
       const resp = { ok: true, contractVersion: '2.1', meta: { requestId, gateway: { product: 'toolkit', feature: 'customization-generator', promptVersion: '1', contextVersion: 'customization-1' }, normalization: { warnings: [] }, ai: { model: 'm' } }, generated: { strategy: 'NEW_JS_FILE', targetFile: 'caseLock.js', summary: '承認待ちでは案件名を編集できないようにします。', code: CODE_S, patch: null, events: ['app.record.edit.show'], fields: [{ code: 'case_name', access: 'CONTROL' }], apis: [], assumptions: [], warnings: [], coverage: [{ requirementId: 'C1', status: 'MET', note: '' }] }, ...(req.length ? { verification: fakeVerification({ code: CODE_S, has: { case_name: ['lock'] } }, req, { candidateHash, ...(envReason ? { env: envReason, caseReason: envReason } : {}) }) } : {}) };
       const v = KTAiClient.validateGenerated(resp, ctx);
       if (!v.ok) throw new Error(JSON.stringify(v.errors));
@@ -2509,7 +2531,7 @@ function makeGenE(code, verOf, { targetFile = 'c1.js' } = {}) {
     const c = (args.version.plan.customizations || []).find(x => x.customizationId === args.customizationId);
     const generated = { strategy: 'NEW_JS_FILE', targetFile, summary: c.requirement, code, patch: null, events: c.events, fields: c.fields.filter(f => f.access !== 'READ').map(f => ({ code: f.code, access: f.access })), apis: [], assumptions: [], warnings: [], coverage: [{ requirementId: 'C1', status: 'MET', note: '', text: c.requirement }] };
     const review = KTCodeReview.review({ generated, customization: c, plan: args.version.plan, data: clone(DATA_C), scan: null, existingSource: null });
-    const candidateHash = KTScan.candidateHashOf({ strategy: 'NEW_JS_FILE', targetFile, code, patch: null, customizationId: 'C1' });
+    const candidateHash = gwCandidateHash({ strategy: 'NEW_JS_FILE', targetFile, code, patch: null, customizationId: 'C1' });
     const raw = verOf(args.requiredEffects || []);
     const verification = KTAiClient.normalizeVerification({ version: '1', passed: true, machine: [{ name: 'syntax', ok: true, severity: 'info', message: '構文エラーなし' }], repairs: { count: 0, reasons: [], stoppedBy: null }, unverified: ['既存の JavaScript との実行順と相互作用は実機で確かめてください'], ...raw, candidateHash });
     return { ok: true, generated, review, ctx: { size: { approxTokens: 1000 } }, existingSource: null, inputHash: `h${calls.length}`, verification, candidateHash, requirementIds: [{ id: 'C1', kind: 'customization', text: c.requirement }] };
@@ -2581,7 +2603,7 @@ await section(async () => {
     const loadDevBase = async () => { const FXF = require('./fixtures/ai-context-app.js').files; const g = makeEnvGetter({ preview: clone(INPUTS.data), production: clone(INPUTS.data), files: { '20261001000000AAAA': FXF[0].text, '20261001000000BBBB': FXF[1].text, '20261001000000DDDD': FXF[2].text } }); return T.KTDevBase.load({ appId: '341', getImpl: g.getImpl, download: g.download, now: () => new Date('2026-10-08T00:00:00Z') }); };
     const generateImpl = async ({ ctx, requestId }) => {
       const req = (ctx.verification && ctx.verification.requiredEffects) || [];
-      const candidateHash = KTScan.candidateHashOf({ strategy: 'NEW_JS_FILE', targetFile: 'caseLock.js', code, customizationId: 'C1' });
+      const candidateHash = gwCandidateHash({ strategy: 'NEW_JS_FILE', targetFile: 'caseLock.js', code, customizationId: 'C1' });
       sent.push({ code, candidateHash, appFields: ctx.verification && ctx.verification.appFields });
       const resp = { ok: true, contractVersion: '2.1', meta: { requestId, gateway: { product: 'toolkit', feature: 'customization-generator', promptVersion: '1', contextVersion: 'customization-1' }, normalization: { warnings: [] }, ai: { model: 'm' } }, generated: { strategy: 'NEW_JS_FILE', targetFile: 'caseLock.js', summary: '承認待ちでは案件名を編集できないようにします。', code, patch: null, events: ['app.record.edit.show'], fields: [{ code: 'case_name', access: 'CONTROL' }], apis: [], assumptions: [], warnings: [], coverage: [{ requirementId: 'C1', status: 'MET', note: '' }] }, verification: fakeVerification({ code, has: { case_name: ['lock'] } }, req, { candidateHash }) };
       const v = KTAiClient.validateGenerated(resp, ctx);
@@ -2596,7 +2618,8 @@ await section(async () => {
   };
   const { m, sent } = await run(CODE_K);
   const v = m.conv().activePlan(), e = v && v.generated && v.generated.C1;
-  const localHash = e ? KTScan.candidateHashOf({ strategy: e.generated.strategy, targetFile: e.generated.targetFile, code: e.generated.code, patch: e.generated.patch, customizationId: 'C1' }) : null;
+  //   簡素化 B（2026-10-17）: Toolkit が受け取った候補から Gateway と同じ計算で作った指紋（会話の照合と同じ関数）
+  const localHash = e ? await KTScan.gatewayCandidateHashOf({ strategy: e.generated.strategy, targetFile: e.generated.targetFile, code: e.generated.code, patch: e.generated.patch, baseHash: null, customizationId: 'C1' }) : null;
   assert(e && e.status === 'verified' && e.generated.code === CODE_K && !e.generated.toolkitModernJs && e.candidateHash === sent[0].candidateHash && e.verification.candidateHash === sent[0].candidateHash && localHash === sent[0].candidateHash && v.final.approvable === true,
     `E4-1: 生成工程が検証したコード・candidateHash のまま最終案になる（Toolkit は書き換えない）: ${JSON.stringify({ status: e && e.status, same: e && e.generated.code === CODE_K, hash: [e && e.candidateHash, sent[0] && sent[0].candidateHash, localHash] })}`);
   const rE = await KIT.applyOnScreen(m);   // §0e.1: ［動作テスト環境へ反映］1 回で承認と登録
@@ -2616,6 +2639,15 @@ await section(async () => {
   const mj = e2 && e2.verification && (e2.verification.machine || []).find(ch => ch.name === 'modern-js' && !ch.ok);
   assert(e2 && e2.generated.code === VAR_K && e2.candidateHash === r2.sent[0].candidateHash && e2.status === 'unresolved' && e2.verdict.kind === 'machine' && mj && mj.severity === 'block' && !e2.review.checks.some(ch => ch.name === 'modern-js') && v2.final.approvable === false,
     `E4-4: var を含む候補は書き換えず（candidateHash も生成工程のまま）、生成工程の機械検査の block で止める: ${JSON.stringify({ status: e2 && e2.status, same: e2 && e2.generated.code === VAR_K, mj: mj && mj.message })}`);
+  //   簡素化 B（2026-10-17）: 登録の直前にも、登録する候補の指紋を Gateway と同じ計算で作り直して、生成工程の検証結果・承認の指紋に照らす。
+  //   承認の欄の準備の前に候補だけが変わった（検証結果と承認の指紋はそのまま）→ 承認・登録の準備で止まり、動作テスト環境に書き込まない
+  const r5 = await run(CODE_K);
+  const v5 = r5.m.conv().activePlan(), e5 = v5 && v5.generated && v5.generated.C1;
+  const rE5 = await KIT.applyOnScreen(r5.m, { before: async () => { e5.generated = { ...e5.generated, code: `${CODE_K}\n// 検証の後に変わった行` }; } });
+  const pr5 = r5.m.panel.jsExecState().prepared, pre5 = r5.m.panel.finalPrecheck();
+  const mism5 = JSON.stringify([pr5 && pr5.blockers, pre5, rE5.run && rE5.run.error]).includes('VERIFICATION_MISMATCH') || JSON.stringify([pr5, pre5]).includes('生成工程が検証した候補と、登録しようとしている候補が一致しません');
+  assert(e5 && e5.verification && e5.verification.bound === true && mism5 && ![...r5.m.mock.st.files.values()].some(f => f.name === 'caseLock.js') && !rE5.writes.some(w => /putPreviewCustomize|uploadFile/.test(String(w && (w.op || w.kind || w)))),
+    `E4-5: 検証の後に候補が変わったら、登録の直前の照合（VERIFICATION_MISMATCH）で止め、書き込まない: ${JSON.stringify({ blockers: pr5 && pr5.blockers, pre: pre5 && { status: pre5.status, reasons: pre5.reasons }, writes: rE5.writes })}`);
   // E6: appFields の required（アプリの設定で必須の項目）
   const af = sent[0].appFields || [];
   const reqCodes = Object.values(INPUTS.data.fields).filter(f => f && f.required === true).map(f => f.code);
@@ -2683,19 +2715,21 @@ await section(async () => {
   assert(left.length === 0, `E8-3: 本体の文に「動作テスト（隔離環境の模擬）」「プレビュー環境」が残っていない: ${JSON.stringify(left.map(l => l.trim().slice(0, 120)))}`);
 });
 // E9（C-1 第 2 段・2026-10-08）: 本番の経路から呼ばれない処理の削除（設計 §0d.4）。
-//   候補の hash（candidateHashOf）は KTJsSim から KTScan へ移した。移す前（Toolkit d377038 の KTJsSim.candidateHashOf）と同じ入力に同じ値を返す
+//   簡素化 B（2026-10-17）: 候補の hash は Gateway の candidateHashOf と同じ計算（KTScan.gatewayCandidateHashOf。SHA-256）にした（以前の KTScan.candidateHashOf は別の方式で、
+//   Gateway の指紋と比べられなかった）。実機の記録（2026-10-15 の 1 会話の C1〜C3。統合を含む）の Gateway の指紋と一致し、改行の違いと操作の余分な項目を数えない
 await section(async () => {
   const CR = String.fromCharCode(13), LF = String.fromCharCode(10);
-  const H = KTScan.candidateHashOf;
+  const H = KTScan.gatewayCandidateHashOf;
+  const REC = require('./fixtures/nl1015b-final.js').GENERATED;
+  const recRows = [];
+  for (const [cid, e] of Object.entries(REC)) recRows.push([cid, await H({ strategy: e.generated.strategy, targetFile: e.generated.targetFile, code: e.generated.code, patch: e.generated.patch, baseHash: e.existingSource && typeof e.existingSource.text === 'string' ? KTScan.hashText(e.existingSource.text) : null, customizationId: cid }), e.verification.candidateHash]);
+  assert(recRows.length === 3 && recRows.every(([, a, b]) => a && a === b) && KTScan.candidateHashOf === undefined, `E9-1: 候補の指紋は実機の記録の Gateway の指紋と一致する（統合の C1 を含む。別の方式の指紋は削除）: ${JSON.stringify(recRows)}`);
   const cases = [
-    [{}, 'd371ace0bcf32633', '引数なし'],
-    [{ strategy: 'NEW_JS_FILE', targetFile: 'caseLock.js', code: "kintone.events.on('app.record.edit.show', function (e) { return e; });", customizationId: 'C1' }, 'b6757bd912f1f508', '新しいファイル'],
-    [{ strategy: 'NEW_JS_FILE', targetFile: 'caseLock.js', code: 'a' + CR + LF + 'b', customizationId: 'C1' }, '3981cdb53b56d25c', '改行が CRLF'],
-    [{ strategy: 'NEW_JS_FILE', targetFile: 'caseLock.js', code: 'a' + LF + 'b', customizationId: 'C1' }, '3981cdb53b56d25c', '改行が LF（CRLF と同じ値）'],
-    [{ strategy: 'EXTEND_EXISTING_JS', targetFile: 'old.js', code: '', patch: { baseHash: 'abcd1234', operations: [{ type: 'insertAfter', anchor: 'x' + CR + LF, content: 'y', extra: 1 }] }, existingHash: 'deadbeef', customizationId: 'C2' }, '55c12ddddb1b3154', '既存のファイルへの patch（操作の余分な項目は数えない）'],
-    [{ strategy: 'NEW_JS_FILE', targetFile: '日本語.js', code: '金額', customizationId: 'C3' }, '6e3f4cbc4aa5cd87', '日本語のファイル名と本文'],
+    [{ strategy: 'NEW_JS_FILE', targetFile: 'caseLock.js', code: 'a' + CR + LF + 'b', customizationId: 'C1' }, { strategy: 'NEW_JS_FILE', targetFile: 'caseLock.js', code: 'a' + LF + 'b', customizationId: 'C1' }, '改行が CRLF と LF'],
+    [{ strategy: 'EXTEND_EXISTING_JS', targetFile: 'old.js', code: '', patch: { baseHash: 'abcd1234', operations: [{ type: 'insertAfter', anchor: 'x' + CR + LF, content: 'y', extra: 1 }] }, baseHash: 'deadbeef', customizationId: 'C2' }, { strategy: 'EXTEND_EXISTING_JS', targetFile: 'old.js', code: '', patch: { baseHash: 'abcd1234', operations: [{ type: 'insertAfter', anchor: 'x' + LF, content: 'y' }] }, baseHash: 'deadbeef', customizationId: 'C2' }, '既存のファイルへの patch（操作の余分な項目は数えない）'],
   ];
-  for (const [input, expected, name] of cases) assert(typeof H === 'function' && H(input) === expected, `E9-1: 候補の hash は移す前と同じ値（${name}）: ${typeof H === 'function' ? H(input) : '関数が無い'}`);
+  for (const [a, b, name] of cases) { const ha = await H(a), hb = await H(b); assert(!!ha && ha === hb && ha === gwCandidateHash(a), `E9-1: 候補の指紋は同じ候補で同じ値（${name}）・テストの部品の計算とも同じ: ${ha} / ${hb}`); }
+  assert((await H({ strategy: 'NEW_JS_FILE', targetFile: 'a.js', code: 'x', customizationId: 'C1' })) !== (await H({ strategy: 'NEW_JS_FILE', targetFile: 'a.js', code: 'x', customizationId: 'C2' })) && (await H({ strategy: 'EXTEND_EXISTING_JS', targetFile: 'a.js', code: 'x', baseHash: '1', customizationId: 'C1' })) !== (await H({ strategy: 'EXTEND_EXISTING_JS', targetFile: 'a.js', code: 'x', baseHash: '2', customizationId: 'C1' })), 'E9-1: customizationId と送った既存ファイルの本文の指紋が違えば、違う指紋になる');
   // 消した処理が残っていない（試作のエージェント・模擬実行の本体・模擬の取り込み・試作の接続・修復の往復の残骸）
   assert(T.KTJsSim === undefined && T.KTAgent === undefined && T.KTAgentDomains === undefined && T.KTAgentUi === undefined, 'E9-2: KTJsSim・KTAgentDomains・KTAgent・KTAgentUi は本体に無い');
   assert(typeof KTCodeReview.attachSim === 'undefined' && typeof KTCodeReview.simRan === 'undefined' && typeof KTCodeReview.attachBehavior === 'function', 'E9-3: KTCodeReview.attachSim・simRan は無い（生成工程の検証結果の取り込み attachBehavior は残す）');
@@ -2899,7 +2933,7 @@ await section(async () => {
     const h = clone(HEALTH); h.registry.toolkit['customization-generator'].verification = ['requirementId', ...features];
     const generateImpl = async ({ ctx, requestId }) => {
       const req = (ctx.verification && ctx.verification.requiredEffects) || [];
-      const resp = { ok: true, contractVersion: '2.1', meta: { requestId, gateway: { product: 'toolkit', feature: 'customization-generator', promptVersion: '1', contextVersion: 'customization-1' }, normalization: { warnings: [] }, ai: { model: 'm' } }, generated: { strategy: 'NEW_JS_FILE', targetFile: 'caseLock.js', summary: 's', code: LOCK_L, patch: null, events: ['app.record.edit.show'], fields: [{ code: 'case_name', access: 'CONTROL' }], apis: [], assumptions: [], warnings: [], coverage: [{ requirementId: 'C1', status: 'PARTIAL', note: '行の追加・削除は止められません', limitCode: 'SUBTABLE_ROWS' }] }, ...(req.length ? { verification: fakeVerification({ code: LOCK_L, has: { case_name: ['lock'] } }, req, {}) } : {}) };
+      const resp = { ok: true, contractVersion: '2.1', meta: { requestId, gateway: { product: 'toolkit', feature: 'customization-generator', promptVersion: '1', contextVersion: 'customization-1' }, normalization: { warnings: [] }, ai: { model: 'm' } }, generated: { strategy: 'NEW_JS_FILE', targetFile: 'caseLock.js', summary: 's', code: LOCK_L, patch: null, events: ['app.record.edit.show'], fields: [{ code: 'case_name', access: 'CONTROL' }], apis: [], assumptions: [], warnings: [], coverage: [{ requirementId: 'C1', status: 'PARTIAL', note: '行の追加・削除は止められません', limitCode: 'SUBTABLE_ROWS' }] }, ...(req.length ? { verification: fakeVerification({ code: LOCK_L, has: { case_name: ['lock'] } }, req, { candidateHash: gwHashOfCtx(ctx, { strategy: 'NEW_JS_FILE', targetFile: 'caseLock.js', code: LOCK_L, patch: null }) }) } : {}) };
       const vv = KTAiClient.validateGenerated(resp, ctx);
       return { ...vv.normalized, requestId };
     };
@@ -2938,7 +2972,7 @@ await section(async () => {
   const planResp = (goal) => { const b = PLAN_V1(goal); return { ...b, plan: { ...b.plan, solution: 'HYBRID', steps: [...b.plan.steps, mkStep('C1', 'CUSTOMIZATION_REQUIRED', 'JS', null, { customizationId: 'C1' }, { title: 'JavaScript', solution: 'CUSTOMIZATION' })], customizations: [CUST_S] } }; };
   const generateImpl = async ({ ctx, requestId }) => {
     const req = (ctx.verification && ctx.verification.requiredEffects) || [];
-    const resp = { ok: true, contractVersion: '2.1', meta: { requestId, gateway: { product: 'toolkit', feature: 'customization-generator', promptVersion: '1', contextVersion: 'customization-1' }, normalization: { warnings: [] }, ai: { model: 'm' } }, generated: { strategy: 'NEW_JS_FILE', targetFile: 'caseLock.js', summary: '承認待ちでは案件名を編集できないようにします。', code: LOCK_S, patch: null, events: ['app.record.edit.show'], fields: [{ code: 'case_name', access: 'CONTROL' }], apis: [], assumptions: [], warnings: [], coverage: [{ requirementId: 'C1', status: 'MET', note: '' }] }, ...(req.length ? { verification: fakeVerification({ code: LOCK_S, has: { case_name: ['lock'] } }, req, {}) } : {}) };
+    const resp = { ok: true, contractVersion: '2.1', meta: { requestId, gateway: { product: 'toolkit', feature: 'customization-generator', promptVersion: '1', contextVersion: 'customization-1' }, normalization: { warnings: [] }, ai: { model: 'm' } }, generated: { strategy: 'NEW_JS_FILE', targetFile: 'caseLock.js', summary: '承認待ちでは案件名を編集できないようにします。', code: LOCK_S, patch: null, events: ['app.record.edit.show'], fields: [{ code: 'case_name', access: 'CONTROL' }], apis: [], assumptions: [], warnings: [], coverage: [{ requirementId: 'C1', status: 'MET', note: '' }] }, ...(req.length ? { verification: fakeVerification({ code: LOCK_S, has: { case_name: ['lock'] } }, req, { candidateHash: gwHashOfCtx(ctx, { strategy: 'NEW_JS_FILE', targetFile: 'caseLock.js', code: LOCK_S, patch: null }) }) } : {}) };
     const vv = KTAiClient.validateGenerated(resp, ctx);
     return { ...vv.normalized, requestId };
   };

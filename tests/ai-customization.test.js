@@ -14,6 +14,7 @@
 'use strict';
 process.on('unhandledRejection', (e) => { if (/kintone is not defined/.test(String(e && e.message))) return; console.error(e); process.exit(1); });
 const { loadToolkit, makeAssert } = require('./helpers/load-toolkit.js');
+const { gwHashOfCtx } = require('./helpers/gw-hash.js');
 const { createNewFlowKit } = require('./helpers/new-flow.js');
 const T = loadToolkit();
 const { KTDeps, KTScan, KTContext, KTAiClient, KTAiConversation, KTAiChatUi, KTContextUi, KTPlanReview, KTCodeReview, KTJsCatalog, KTPlanExecutor } = T;
@@ -368,7 +369,8 @@ function mountV({ inputs = INPUTS, planResponse = PLAN_HYBRID_V, generatedFor = 
     calls.generate.push({ ctx });
     const g = generatedFor ? generatedFor(ctx) : genPatch({ ...PATCH_GOOD, baseHash: ctx.existingFile?.hash || PATCH_GOOD.baseHash });
     const resp = genResponse(ctx, g);
-    resp.verification = K.fakeVerification({ code: g.code, has }, (ctx.verification && ctx.verification.requiredEffects) || [], {});
+    //   簡素化 B（2026-10-17）: 本物の Gateway と同じく、検証結果に候補の指紋（Gateway と同じ計算）を入れる
+    resp.verification = K.fakeVerification({ code: g.code, has }, (ctx.verification && ctx.verification.requiredEffects) || [], { candidateHash: gwHashOfCtx(ctx, resp.generated) });
     const v = KTAiClient.validateGenerated(resp, ctx);
     if (!v.ok) throw new KTAiClient.AiClientError({ code: v.errors[0].code, message: v.errors[0].message, requestId });
     return { ...v.normalized, requestId, clientWarnings: v.warnings };

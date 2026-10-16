@@ -21,6 +21,7 @@
 'use strict';
 process.on('unhandledRejection', (e) => { if (/kintone is not defined/.test(String(e && e.message))) return; console.error(e); process.exit(1); });
 const { loadToolkit, makeAssert } = require('./helpers/load-toolkit.js');
+const { gwCandidateHash } = require('./helpers/gw-hash.js');
 const T = loadToolkit();
 const { KTAiConversation, KTAiClient, KTAiBudget, KTAiChatUi, KTContext, KTScan } = T;
 const { assert, state } = makeAssert();
@@ -75,7 +76,7 @@ function genDone(ctx, requestId, { timing = null } = {}) {
   const code = K.lockCode(field);
   const targetFile = `${cid.toLowerCase()}Lock.js`;
   const req0 = (ctx.verification && ctx.verification.requiredEffects) || [];
-  const candidateHash = KTScan.candidateHashOf({ strategy: 'NEW_JS_FILE', targetFile, code, customizationId: cid });
+  const candidateHash = gwCandidateHash({ strategy: 'NEW_JS_FILE', targetFile, code, customizationId: cid });
   return { ok: true, contractVersion: '2.1', meta: { requestId, gateway: { product: 'toolkit', feature: 'customization-generator', promptVersion: '1', contextVersion: 'customization-1' }, normalization: { warnings: [] }, ai: { model: MODEL, latencyMs: 40000, streamed: true, usage: usage(3000, 700) }, ...(timing ? { timing } : {}) },
     generated: { strategy: 'NEW_JS_FILE', targetFile, summary: '承認待ちでは編集できないようにします。', code, patch: null, events: ['app.record.edit.show'], fields: [{ code: field, access: 'CONTROL' }], apis: [], assumptions: [], warnings: [], coverage: [{ requirementId: cid, status: 'MET', note: '' }] },
     verification: K.fakeVerification({ code, has: { [field]: ['lock'] } }, req0, { candidateHash }) };
