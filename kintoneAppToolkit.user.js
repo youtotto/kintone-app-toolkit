@@ -28894,10 +28894,16 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
             const labelOf = (code) => String(fieldLabels()[code] || code);
             const condOf = (ids) => { if (!lgF) return ''; const reqsL = KTAiAnswers.requirementsOf(lgF); for (const id of ids) { const r = reqsL.find(x => x && String(x.id) === String(id)); const c = r ? String(r.condition || '').replace(/\s+/g, ' ').trim() : ''; if (c) return c; } return ''; };
             const texts = [], ids = [], all = [];
+            //   一部達成と申告された台帳の要件（R…）。JavaScript 自身の id（C…）の一部達成はその JavaScript の中だけで扱う
+            const partialReqsAll = [...new Set(ents.flatMap(([, e]) => (e.review?.coverage?.notAchieved || []).filter(x => x && x.code === 'AI_PARTIAL' && /^R[0-9]+$/.test(String(x.requirementId || ''))).map(x => String(x.requirementId))))];
             for (const [, e] of ents) {
               const na = (e.review?.coverage?.notAchieved || []).filter(Boolean);
-              const partialIds = [...new Set(na.filter(x => x.code === 'AI_PARTIAL' && x.requirementId).map(x => String(x.requirementId)))];
-              const limitedIds = partialIds.filter(id => na.some(x => x.code === 'AI_PARTIAL' && x.limit === 'SUBTABLE_ROWS' && String(x.requirementId) === id));
+              //   2026-10-16（表示の重複だけをまとめる）: 一部達成の要件（台帳の要件 R…）は、申告した JavaScript だけでなく、その要件に結び付く満たした必須の動作を持つ
+              //   ほかの JavaScript の分も同じ要件の実現した部分として集める（PC が満たし・モバイルが明細の行を理由に一部と申告した要件を、PC は条件の無い文・モバイルは条件つきの文に
+              //   分けない。同じ効果・テーブル・条件・フィールドなら下で 1 文「（PC・モバイル）」にまとまる）。要件の条件の文は今までどおり付ける。判定・確認事項は変えない
+              const partialLocal = [...new Set(na.filter(x => x.code === 'AI_PARTIAL' && x.requirementId).map(x => String(x.requirementId)))];
+              const partialIds = [...new Set([...partialLocal, ...partialReqsAll])];
+              const limitedIds = partialLocal.filter(id => na.some(x => x.code === 'AI_PARTIAL' && x.limit === 'SUBTABLE_ROWS' && String(x.requirementId) === id));
               const tables = [...new Set(na.filter(x => x.code === 'SUBTABLE_ROWS' && Array.isArray(x.tables)).flatMap(x => x.tables.map(String)))];
               if (!partialIds.length && !tables.length) continue;
               const items = metItemsOf(e).filter(i => (Array.isArray(i.requirementIds) ? i.requirementIds : []).some(id => partialIds.includes(String(id))) || (tables.length > 0 && tables.includes(colOf(i.field))));
@@ -28907,7 +28913,8 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
                 const own = (Array.isArray(i.requirementIds) ? i.requirementIds : []).map(String).filter(id => partialIds.includes(id));
                 const cond = condOf(own.length ? own : partialIds);
                 const k = `${i.effect}|${table || ''}|${cond}`;
-                const g = groups.get(k) || { effect: i.effect, table, cond, fields: [], platforms: new Set(), ids: [] };
+                //   verified = この JavaScript が検証済みか（下で PC・モバイルをまとめるとき、検証済みと検証済みでないものは同じ文にしない）
+                const g = groups.get(k) || { effect: i.effect, table, cond, fields: [], platforms: new Set(), ids: [], verified: e.status === 'verified' };
                 if (!g.fields.includes(i.field)) g.fields.push(i.field);
                 for (const p of platformsOfEvents(i.events)) g.platforms.add(p);
                 for (const id of (own.length ? own : (table && tables.includes(table) ? limitedIds : []))) if (!g.ids.includes(id)) g.ids.push(id);
@@ -28917,9 +28924,10 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
             }
             //   2026-10-15（最終案の重複と担当未定の食い違い §1）: PC とモバイルの JavaScript で同じ制御（効果・テーブル・条件・フィールドがすべて同じ）は 1 文にまとめ（PC・モバイル）、
             //   フィールドが違う（本当の差がある）ものは画面ごとの文のまま残す（diffTexts。左のカードにも出す）
+            //   2026-10-16（表示の重複だけをまとめる）: 検証済みの JavaScript と検証済みでない JavaScript の文は、同じ文でもまとめない（片方が未完了なのに両方が完了したように見せない）
             const merged = new Map();
             for (const g of all) {
-              const k = `${g.effect}|${g.table || ''}|${g.cond}|${[...g.fields].sort().join(',')}`;
+              const k = `${g.effect}|${g.table || ''}|${g.cond}|${[...g.fields].sort().join(',')}|${g.verified ? 'v' : 'u'}`;
               const m = merged.get(k);
               if (!m) { merged.set(k, { ...g, fields: [...g.fields], platforms: new Set(g.platforms), ids: [...g.ids] }); continue; }
               for (const p of g.platforms) m.platforms.add(p);
@@ -28927,7 +28935,8 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
             }
             //   本当の差: 同じ効果・テーブル・条件で、PC とモバイルの両方に文があり、画面ごとのフィールドの集まりが違う（独立レビュー L2: 同じ画面の文が 2 つあるだけでは差としない）
             const fieldsByPlat = new Map();
-            for (const g of merged.values()) { const k = `${g.effect}|${g.table || ''}|${g.cond}`; const m = fieldsByPlat.get(k) || { desktop: new Set(), mobile: new Set() }; for (const p of g.platforms) if (m[p]) for (const f of g.fields) m[p].add(f); fieldsByPlat.set(k, m); }
+            //   2026-10-16: 検証済みでない JavaScript の文は本当の差に数えない（未完了の不足は反映を止める理由で示す。左のカードに計画の差として足さない）
+            for (const g of [...merged.values()].filter(x => x.verified)) { const k = `${g.effect}|${g.table || ''}|${g.cond}`; const m = fieldsByPlat.get(k) || { desktop: new Set(), mobile: new Set() }; for (const p of g.platforms) if (m[p]) for (const f of g.fields) m[p].add(f); fieldsByPlat.set(k, m); }
             const platDiff = (k) => { const m = fieldsByPlat.get(k); return !!(m && m.desktop.size && m.mobile.size && [...m.desktop].sort().join(',') !== [...m.mobile].sort().join(',')); };
             const diffTexts = [];
             for (const g of merged.values()) {
@@ -28969,13 +28978,16 @@ ${(s.questions || []).length ? `<div id="kt-ai-exec-questions" style="margin-top
             for (let i = from; i < cannot.length; i++) cannot[i].platforms = platformsOfEntry(e);
           }
           //   C-1 第 4 段（K-3）: PC とモバイルの JavaScript で同じ内容の行（明細の行の追加・削除など）は 1 行にまとめ、PC / モバイルを並べる
+          //   2026-10-16: 要件の id は片方の行にだけあっても同じ行とみなす（計画の AI が要件を PC とモバイルの JavaScript に対応づけ、片方だけが明細の行を理由に一部達成と
+          //   申告すると、構造の行の片方だけが要件の id を引き継ぐため）。まとめた行は要件の id を残す（req-unsupported との照合のため）。id が食い違う行はまとめない
+          const sameRow = (a, b) => { const strip = ({ platforms, requirementId, ...rest }) => (void platforms, void requirementId, rest); return JSON.stringify(strip(a)) === JSON.stringify(strip(b)) && (!a.requirementId || !b.requirementId || a.requirementId === b.requirementId); };
           for (let i = cannot.length - 1; i > 0; i--) {
             const r = cannot[i];
             if (!r.platforms) continue;
-            const { platforms: pr, ...restR } = r;
-            const j = cannot.findIndex((y, k) => k < i && y.platforms && JSON.stringify((({ platforms, ...rest }) => (void platforms, rest))(y)) === JSON.stringify(restR));
+            const j = cannot.findIndex((y, k) => k < i && y.platforms && sameRow(y, r));
             if (j < 0) continue;
-            cannot[j].platforms = ['desktop', 'mobile'].filter(p => cannot[j].platforms.includes(p) || pr.includes(p));
+            cannot[j].platforms = ['desktop', 'mobile'].filter(p => cannot[j].platforms.includes(p) || r.platforms.includes(p));
+            if (!cannot[j].requirementId && r.requirementId) cannot[j] = { ...cannot[j], requirementId: r.requirementId };
             cannot.splice(i, 1);
           }
           //   §0f.3 の 1: 前の JavaScript の生成を止めたため、送っていない JavaScript（止めた JavaScript とは別の文）

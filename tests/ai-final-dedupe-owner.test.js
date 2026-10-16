@@ -573,6 +573,43 @@ await section(async () => {
     && ['C1', 'C2', 'C3'].every(cid => JSON.stringify((base.c.activePlan().generated[cid] || {}).requiredEffects) === JSON.stringify(F.GENERATED[cid].requiredEffects))
     && ADOPTED.every(t => count(doSec, t) === 1) && doSec.split('\n').map(s => s.trim()).filter(Boolean).length === 4 && !/品名|数量|単価/.test(doSec),
     `D12-9: 単一対象・成功素材は今までどおり、対応づけた版の左も依頼の 4 行（列の一覧に戻さない）: ${JSON.stringify({ one: sumU(one), notIn: sumU(notIn), left: doSec.replace(/\s+/g, ' ') })}`);
+
+  //   (10) 表示の重複だけをまとめる（2026-10-16）: 要件 R3 を C1・C2 に対応づけると、C1 は R3 を MET・C2 は明細の行を理由に PARTIAL（limitCode SUBTABLE_ROWS）と申告する。
+  //   まとめる前（コミット済みの 57a2161）は、(a) 制約の行が「PC:」「モバイル:」の同じ文の 2 行に分かれ（C2 の構造の行だけが要件の id を引き継いだ）、(b) 右の実現した部分が
+  //   PC は条件の無い文・モバイルは要件の条件つきの文と金額の文に分かれた。まとめた後も、判定（承認できる・止める理由なし）・反映の前の確認事項（C2 の一部達成の確認:
+  //   要件 R3・明細の行・確認のまま／C1 の既存のファイルの行の置き換え）・AI の一部達成の申告は変えない。片方が検証済みでなければまとめない
+  const itemsOnly = await R.run({ planOps: remap(['C1', 'C2'], { target: 'items' }) });
+  const ROW = '「明細」の行の追加・削除は止まりません（セルの編集不可だけでは止められないため。行のボタンを隠す API は Toolkit がまだ扱っていません）';
+  const COND3 = '承認済み。PCとモバイルの両方では';
+  const confOf = (xx) => ['C1', 'C2', 'C3'].map(cid => { const rv = R.recheckOf(xx, cid); return [cid, rv.registration.verdict, (rv.checks || []).filter(c => !c.ok).map(c => [c.name, c.severity, c.requirementId || null, c.limit || null]), (rv.registration.confirmations || []).length]; });
+  //   まとめる前と同じ確認事項（コミット済みの版で出した値。確認の状態・項目の種類・重さ・要件・理由・件数）
+  const WANT_CONF = JSON.stringify([['C1', 'NEEDS_CONFIRMATION', [['patch-removal', 'review', null, null]], 1], ['C2', 'NEEDS_CONFIRMATION', [['coverage-unmet', 'review', 'R3', 'SUBTABLE_ROWS']], 1], ['C3', 'RUNTIME_UNVERIFIED', [], 0]]);
+  const PARTIAL_PRE = '要件の一部を満たしていません（AI の申告）: 承認済み。PCとモバイルの両方：金額と明細を編集不可にする（担当するモバイルの金額と明細の入力セルは編集不可にしますが、明細の行追加・削除はセルの編集不可では止められません。）。セルの編集不可では行の追加・削除は止まりません（行のボタンを隠す API は Toolkit がまだ扱っていません。実現できない点）';
+  const howOf = (xx) => (vis(R.rightHtml(xx)).match(/最終的にどう動くか[\s\S]*?(?=何が変わるか|$)/) || [''])[0];
+  const conOf = (xx) => (vis(R.leftHtml(xx, { pre: READY })).match(/この案の制約[\s\S]*?(?=仮案からの補足|動作テスト環境へ反映)/) || [''])[0];
+  for (const [name, xx, want] of [['金額・明細', x, [`${COND3}「金額」を編集できなくなります（PC・モバイル）`, `${COND3}${REALIZED}（PC・モバイル）`]], ['明細だけ', itemsOnly, [`${COND3}${REALIZED}（PC・モバイル）`]]]) {
+    const fv = xx.c.activePlan().final, how = howOf(xx), con = conOf(xx), pre = precheckTexts(xx), na2 = xx.c.activePlan().generated.C2.review.coverage.notAchieved;
+    const realized = want.map(t => count(how, t)), realizedAll = (how.match(/編集できなくなります（[^）]*）/g) || []).length;
+    assert(fv.constraints.length === 1 && fv.constraints[0].text === ROW && JSON.stringify(fv.constraints[0].platforms) === '["desktop","mobile"]' && fv.constraints[0].requirementId === 'R3'
+      && count(con, `PC・モバイル: ${ROW}`) === 1 && !/(^|\s)(PC|モバイル): 「明細」の行/.test(con)
+      && realized.every(n => n === 1) && realizedAll === want.length && !/編集できなくなります（(PC|モバイル)）/.test(how)
+      && JSON.stringify(confOf(xx)) === WANT_CONF && count(pre.join('\n'), PARTIAL_PRE) === 1
+      && fv.approvable === true && fv.blockers.length === 0 && ['C1', 'C2', 'C3'].every(cid => xx.c.activePlan().generated[cid].status === 'verified')
+      && na2.some(y => y.code === 'AI_PARTIAL' && y.requirementId === 'R3' && y.limit === 'SUBTABLE_ROWS'),
+      `D12-10: 要件を JavaScript に対応づけた版（${name}）で、同じ対象・条件・結果・制約の PC・モバイルの表示を 1 つにまとめ（制約は要件の id を残す）、確認事項・判定・AI の一部達成の申告は変えない: ${JSON.stringify({ constraints: fv.constraints.map(c => [c.platforms, c.requirementId || null]), realized, conf: confOf(xx), pre, approvable: fv.approvable })}`);
+  }
+  //   対応づけの無い成功素材は今までどおり（制約 1 行・要件の id 無し・実現した部分の文は条件の無い 1 文）
+  assert(base.c.activePlan().final.constraints.length === 1 && !base.c.activePlan().final.constraints[0].requirementId && count(howOf(base), `${REALIZED}（PC・モバイル）`) === 1,
+    `D12-10b: 対応づけの無い成功素材の表示は変わらない: ${JSON.stringify(base.c.activePlan().final.constraints)}`);
+  //   片方が検証済みでない（モバイルの JavaScript の数量の編集不可が生成工程の検査で「無い」）→ PC・モバイルの文をまとめず、画面ごとに残す（両方が完了したように見せない）。
+  //   未完了の不足は左に計画の差として足さない（反映を止める理由で示す）
+  const miss2 = await R.run({ planOps: remap(['C1', 'C2']), verificationMutate: (cid, ver) => (cid === 'C2' ? { ...ver, passed: false, requiredEffects: ver.requiredEffects.map(e => (e.field === 'qty' ? { ...e, status: 'missing', events: e.events.map(ev => ({ ...ev, status: 'missing' })) } : e)) } : ver) });
+  const how2 = howOf(miss2), f2 = miss2.c.activePlan().final;
+  const doSec2 = (vis(R.leftHtml(miss2)).match(/この案で実現すること[\s\S]*?(?=この案の制約|仮案からの補足|確認できないこと|動作テスト環境へ反映)/) || [''])[0];
+  assert(f2.approvable === false && miss2.c.activePlan().generated.C2.status !== 'verified' && !/（PC・モバイル）/.test(how2)
+    && count(how2, `${COND3}${REALIZED}（PC）`) === 1 && count(how2, `${COND3}「明細」の品名・単価のセルを編集できなくなります（モバイル）`) === 1 && count(how2, `${COND3}「金額」を編集できなくなります（モバイル）`) === 1
+    && !/編集できなくなります/.test(doSec2),
+    `D12-10c: 片方の JavaScript が検証済みでなければ、PC・モバイルの文をまとめず画面ごとに残す（左に計画の差として足さない）: ${JSON.stringify({ approvable: f2.approvable, how: how2.replace(/\s+/g, ' ').slice(-400) })}`);
 });
 
 // =========================================================
