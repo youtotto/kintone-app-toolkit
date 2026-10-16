@@ -1692,6 +1692,23 @@ await section(async () => {
     await adoptC(y);
     assert(y.c.activePlan().generated.C1.status === 'unsupported', `D27-2（${miss} が無い）: 1 つでも欠ければ接続先が非対応`);
   }
+  //   簡素化 B（2026-10-16）: 生成工程の検証結果が無い（検証を返さない接続先。画面の generate が作る古い形 legacy）は、必須の動作が無い JavaScript（読み取りだけ）でも
+  //   Toolkit の形式確認だけで検証済みにしない（以前は必須の効果が無いと、この判定を通り抜けて検証済みになった）
+  const CUST_READ = { ...CUST_C1, requirement: '詳細画面でステータスを読む', events: ['app.record.detail.show'], fields: [{ code: 'ステータス', access: 'READ' }] };
+  const CODE_READ = "(function () {\n  'use strict';\n  kintone.events.on(['app.record.detail.show'], function (event) {\n    const st = event.record['ステータス'].value;\n    return event;\n  });\n})();";
+  const genRead = (shape) => {
+    const g = makeGenerate({ generatedOf: (cust) => ({ strategy: 'NEW_JS_FILE', targetFile: 'read.js', summary: '詳細画面でステータスを読みます。', code: CODE_READ, patch: null, events: cust.events, fields: [{ code: 'ステータス', access: 'READ' }], apis: [], assumptions: [], warnings: [], coverage: [{ requirementId: 'C1', status: 'MET', note: '', text: cust.requirement }] }) });
+    const impl0 = g.impl;
+    g.impl = async (args) => { const r = await impl0(args); return { ...r, verification: shape === 'none' ? undefined : { version: '0', candidateHash: r.verification.candidateHash, sameAsPrevious: false, passed: true, machine: [], repairs: { count: 0, reasons: [], stoppedBy: null }, unverified: [], legacy: true } }; };
+    return g;
+  };
+  for (const shape of ['none', 'legacy']) {
+    const z = makeConvC({ generate: genRead(shape), planImpl: (args) => planJs(args, { cust: CUST_READ, summary: '詳細画面でステータスを読みます。' }) });
+    await adoptC(z);
+    const vz = z.c.activePlan(), ez = vz.generated.C1;
+    assert(z.gen.calls.length === 1 && !(ez.requiredEffects || []).length && ez.status === 'unsupported' && ez.verdict.kind === 'capability' && /検証結果を返さない/.test(ez.verdict.reason) && vz.final.approvable === false && z.c.approveFinal({ planId: vz.planId, version: vz.version }).ok === false,
+      `D27-3（${shape === 'none' ? '検証結果が無い' : '古い形の合格'}）: 必須の動作が無い JavaScript でも、生成工程の検証結果が無ければ検証済みにしない（承認できない）: ${JSON.stringify({ status: ez.status, verdict: ez.verdict, req: ez.requiredEffects })}`);
+  }
 });
 // D28（A6・B1・隔離 7・画面）: 動作テストに送る既存 JS の選び方と上限（4 件・合計 131,072 文字。1 ファイルの上限は無い）・送れなかった既存 JS の events（分からなければ null・外部のライブラリは []）
 await section(async () => {
