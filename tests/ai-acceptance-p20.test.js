@@ -49,49 +49,13 @@ const reviewOf = (p, data = DATA) => KTPlanReview.review({ plan: p, data, deps: 
 // =========================================================
 console.log('\n--- F4 / F5. KTCodeReview: kintone のエラー表示の作法（実機 BF-C の生成コードと同じ形）---');
 {
-  const DEAL_LOCK = [
-    "(function () {",
-    "  'use strict';",
-    "  kintone.events.on(['app.record.create.show', 'app.record.edit.show'], function (event) {",
-    "    const record = event.record;",
-    "    if (record['ステータス'] && record['ステータス'].value === '承認済み') {",
-    "      record['amount'].disabled = true;",
-    "    }",
-    "    return event;",
-    "  });",
-    "})();",
-  ].join('\n');
-  // 実機（P20 案件・見積管理 / BF-C v2）で生成されたパッチと同じ構造: 補助関数 checkAmountWarning を show の既存 handler から呼び、change でも使う。消すときは ''
-  const WARN_FN = [
-    "  function checkAmountWarning(event) {",
-    "    const amountField = event.record['amount'];",
-    "    if (amountField.value > 1000000) {",
-    "      amountField.error = '金額が100万円を超えています。';",
-    "    } else {",
-    "      amountField.error = '';",
-    "    }",
-    "    return event;",
-    "  }",
-  ].join('\n');
-  const BAD = DEAL_LOCK.replace("  kintone.events.on(['app.record.create.show'", WARN_FN + "\n  kintone.events.on(['app.record.create.show'").replace("    return event;\n  });\n})();", "    return checkAmountWarning(event);\n  });\n  kintone.events.on(['app.record.create.change.amount', 'app.record.edit.change.amount'], checkAmountWarning);\n})();");
-  const ops = KTCodeReview.kintoneFieldOps(KTScan.stripCommentsOnly(BAD));
-  const show = ops.find(o => o.events.includes('app.record.edit.show')), change = ops.find(o => o.events.includes('app.record.edit.change.amount'));
-  assert(show && show.error && show.emptyErrorClear && show.disabled && change && change.error && !change.disabled, 'kintoneFieldOps: handler が呼ぶ補助関数（1 段）と名前付き handler を展開して error / disabled を見る');
-  const custom = { customizationId: 'C1', requirement: '金額が100万円を超えたら警告', strategy: 'EXTEND_EXISTING_JS', platform: ['desktop'], events: ['app.record.create.show', 'app.record.edit.show', 'app.record.create.change.amount', 'app.record.edit.change.amount'], fields: [{ code: 'amount', access: 'CONTROL' }], apis: [], existingFiles: [{ name: 'dealLock.js', target: 'desktop' }] };
-  const gen = (code) => ({ strategy: 'NEW_JS_FILE', targetFile: 'warn.js', code, patch: null, events: custom.events, fields: custom.fields, apis: [] });
-  const rv = KTCodeReview.review({ generated: gen(BAD), customization: { ...custom, strategy: 'NEW_JS_FILE' }, plan: null, data: DATA, scan: null, existingSource: null });
-  const chk = (r, n) => r.checks.find(c => c.name === n) || null;
-  assert(rv.status === 'BLOCKED' && chk(rv, 'error-clear') && !chk(rv, 'error-clear').ok && /null/.test(chk(rv, 'error-clear').message), "F4: error を '' で消すコード → BLOCKED（error-clear。kintone は null を設定したときだけ消える）");
-  // F5（同じ show イベントで error と disabled → kintone が disabled を取り消す）の判定は、C-1 第 2 段（§0d.4）で Toolkit の形式確認から外した。
-  //   生成工程で守る: AI版 worker/test/cases/required-effects.mjs「§0d.1 S7（既知の競合）」（check behavior・candidate-error-same-event）・
-  //   「取り消し: 候補が同じイベントで error を表示すると…lock は fail」、sandbox/test/run.mjs「R13 同じ handler」、sandbox/test/cross-toolkit.mjs「5-3」
-  // 直したコード: 消すのは null、警告は change だけ（show の disabled と重ねない）
-  const GOOD = DEAL_LOCK.replace("})();", "  kintone.events.on(['app.record.create.change.amount', 'app.record.edit.change.amount'], function (event) {\n    const f = event.record['amount'];\n    f.error = Number(f.value || 0) > 1000000 ? '金額が100万円を超えています。' : null;\n    return event;\n  });\n})();");
-  const ok = KTCodeReview.review({ generated: gen(GOOD), customization: { ...custom, strategy: 'NEW_JS_FILE' }, plan: null, data: DATA, scan: null, existingSource: null });
-  assert(chk(ok, 'error-clear').ok, '直したコード（null で消す）は error-clear の検査を通る');
-  // 保存時（submit）の error は取り消しの規則の対象外（保存が止まるだけ）。生成工程で守る: sandbox/test/run.mjs「保存のイベント: error が残る（保存を止める）・取り消しの規則は表示 / 変更のイベントだけ」
-  const none = KTCodeReview.review({ generated: gen(DEAL_LOCK), customization: { ...custom, strategy: 'NEW_JS_FILE' }, plan: null, data: DATA, scan: null, existingSource: null });
-  assert(!chk(none, 'error-clear'), 'error を使わないコードには error-clear の検査行を出さない（ノイズにしない）');
+  //   簡素化 B（2026-10-17）: エラー表示を ''（空文字）で消す書き方（error-clear）と、その判定に使った handler の操作の解析（kintoneFieldOps）は Toolkit だけの規則で、
+  //   生成のときの候補の検査は生成工程（Gateway）の検証結果が正本になったので削除した（Gateway には移植していない。生成工程の検査に無い規則は増やさない）。
+  //   Toolkit の形式確認はこの書き方で止めない（以前の期待: BLOCKED・error-clear）。同じ show イベントの error と disabled の競合（F5）は以前から生成工程の模擬テストの範囲
+  const BAD = "(function () {\n  'use strict';\n  kintone.events.on(['app.record.edit.change.amount'], function (event) {\n    const f = event.record['amount'];\n    f.error = Number(f.value || 0) > 1000000 ? '金額が100万円を超えています。' : '';\n    return event;\n  });\n})();";
+  const custom = { customizationId: 'C1', requirement: '金額が100万円を超えたら警告', strategy: 'NEW_JS_FILE', platform: ['desktop'], events: ['app.record.edit.change.amount'], fields: [{ code: 'amount', access: 'CONTROL' }], apis: [] };
+  const rv = KTCodeReview.review({ generated: { strategy: 'NEW_JS_FILE', targetFile: 'warn.js', code: BAD, patch: null, events: custom.events, fields: custom.fields, apis: [] }, customization: custom, plan: null, data: DATA, scan: null, existingSource: null });
+  assert(typeof KTCodeReview.kintoneFieldOps === 'undefined' && !rv.checks.some(c => c.name === 'error-clear') && rv.status !== 'BLOCKED', `F4（簡素化 B）: エラー表示の解除の書き方は Toolkit の形式確認で止めない（生成工程の検査の範囲）: ${JSON.stringify(rv.checks.map(c => c.name))}`);
 }
 
 // =========================================================
@@ -130,8 +94,12 @@ console.log('\n--- BF-C（再 3）/ F24. エラー表示と編集不可: 条件�
   const PATCH4 = { baseHash: KTScan.hashText(DL_SRC), operations: [{ type: 'INSERT_AFTER', anchor: "    if (record['ステータス'] && record['ステータス'].value === '承認済み') {\n      record['amount'].disabled = true;\n    }", content: "\n    // 金額が100万円を超えたら警告を表示する\n    if (record['amount'].value > 1000000 && !record['amount'].disabled) {\n      record['amount'].error = '金額が100万円を超えています。';\n    } else {\n      record['amount'].error = null;\n    }\n" }] };
   const cust4 = { ...custom, strategy: 'EXTEND_EXISTING_JS', existingFiles: [{ name: 'dealLock.js', target: 'desktop' }] };
   const r4 = KTCodeReview.review({ generated: { strategy: 'EXTEND_EXISTING_JS', targetFile: 'dealLock.js', summary: 's', code: PATCH4.operations[0].content, patch: PATCH4, events: custom.events, fields: custom.fields, apis: ['kintone.events.on'] }, customization: cust4, plan: null, data: DATA, scan: null, existingSource: { name: 'dealLock.js', target: 'desktop', text: DL_SRC } });
-  assert(chk(r4, 'patch').ok && !chk(r4, 'planned-events').ok && chk(r4, 'planned-events').severity === 'block' && /入力中に切り替わりません/.test(chk(r4, 'planned-events').message) && r4.status === 'BLOCKED' && r4.registration.verdict === 'BLOCKED', 'F26（BF-C 4 回目）: 計画の change をコードが登録していない → 登録不可（Phase 21。Phase 20 は要確認、それ以前は「軽微な差」で合格扱い）');
-  assert(chk(r4, 'duplicate-handler').ok, '既存の handler の中に追加しただけなら「別の handler を足す」と言わない');
+  //   簡素化 B（2026-10-17）: 計画のイベント（change）をコードが登録しているかは、生成工程の必須の効果（効果のイベントごとの処理の形。AI版 worker/test/cases/required-effects.mjs）が
+  //   確かめる（Toolkit の planned-events・duplicate-handler は削除した）。Toolkit はその結果（missing）を登録不可として取り込む
+  const REQ4 = [{ requirementId: 'C1', requirementIds: ['C1'], field: 'amount', effect: 'warn', events: ['app.record.edit.change.amount'], condition: '' }];
+  const r4v = KTCodeReview.attachBehavior(r4, { version: '1', passed: false, machine: [], requiredEffects: [{ requirementId: 'C1', requirementIds: ['C1'], field: 'amount', effect: 'warn', status: 'missing', events: [{ event: 'app.record.edit.change.amount', status: 'missing' }] }], behavior: { status: 'not-run', reason: 'machine-blocked', cases: [] } }, { requiredEffects: REQ4, customization: cust4 });
+  assert(chk(r4, 'patch').ok && !chk(r4, 'planned-events') && !chk(r4, 'duplicate-handler') && r4.status !== 'BLOCKED' && r4v.status === 'BLOCKED' && r4v.registration.verdict === 'BLOCKED' && chk(r4v, 'required-effects') && !chk(r4v, 'required-effects').ok,
+    'F26（BF-C 4 回目・簡素化 B）: 計画の change をコードが登録していないことは、生成工程の必須の効果の結果（missing）で登録不可にする（Toolkit は同じ判定を作り直さない）');
   // F27（BF-C 4 回目）: 「C1 のコードを作り直して。金額を変更したときにも…」の後半を黙って捨てない。
   //   C-1 第 3 段（2026-10-08）: 古い確認の流れ（extraRequestIn・［この変更で確定してコードを作る］・仕様の確定）は削除した。
   //   要望付きの生成の指示は最終案を直す依頼（REVISE_PLAN・TURN_THEN_GENERATE）になり、JavaScript は最終案のパイプラインが作り直す。
@@ -161,10 +129,13 @@ console.log('\n--- BF-C（再）. スペース要素: 実在するスペース�
   const cust = { customizationId: 'C1', requirement: '金額が100万円を超えたら警告', strategy: 'NEW_JS_FILE', platform: ['desktop'], events: ['app.record.edit.change.amount'], fields: [{ code: 'amount', access: 'READ' }], apis: ['kintone.events.on', 'kintone.app.record.getSpaceElement'], existingFiles: [] };
   const gen = { strategy: 'NEW_JS_FILE', targetFile: 'warn.js', code: SPACE_JS, patch: null, events: cust.events, fields: cust.fields, apis: cust.apis };
   const chk = (r, n) => r.checks.find(c => c.name === n) || null;
-  const noSpace = KTCodeReview.review({ generated: gen, customization: cust, plan: null, data: DATA, scan: null, existingSource: null });
+  //   簡素化 B（2026-10-17）: スペース要素とフィールドの存在は、反映のとき（反映の前の準備・登録の直前。existingOnly）に今の設定で確かめる（生成のときは生成工程の検査）
+  const noSpace = KTCodeReview.review({ generated: gen, customization: cust, plan: null, data: DATA, scan: null, existingSource: null, existingOnly: true });
   assert(noSpace.status === 'BLOCKED' && chk(noSpace, 'space-element') && !chk(noSpace, 'space-element').ok && /amount_warning_space/.test(chk(noSpace, 'space-element').message) && chk(noSpace, 'fields').ok, 'フォームに無いスペース → space-element で止める（「存在しないフィールド」とは言わない）');
   const withLayout = clone(DATA); withLayout.layout = [{ type: 'ROW', fields: [{ type: 'NUMBER', code: 'amount' }, { type: 'SPACER', elementId: 'amount_warning_space', size: { width: '200' } }] }];
-  const ok = KTCodeReview.review({ generated: gen, customization: cust, plan: null, data: withLayout, scan: null, existingSource: null });
+  const ok = KTCodeReview.review({ generated: gen, customization: cust, plan: null, data: withLayout, scan: null, existingSource: null, existingOnly: true });
+  const atGen = KTCodeReview.review({ generated: gen, customization: cust, plan: null, data: DATA, scan: null, existingSource: null });
+  assert(!chk(atGen, 'space-element') && !chk(atGen, 'fields'), '生成のとき（existingOnly でない）は、存在の確認を Toolkit で繰り返さない（生成工程の検査）');
   assert(chk(ok, 'space-element').ok && chk(ok, 'fields').ok && ok.status !== 'BLOCKED', 'フォームに実在するスペースは通す（存在しないフィールドと数えない）');
   assert(KTCodeReview.layoutSpaceIds([{ type: 'GROUP', code: 'g', layout: [{ type: 'ROW', fields: [{ type: 'SPACER', elementId: 'inner' }] }] }, { type: 'ROW', fields: [{ type: 'SPACER', elementId: 'top' }, { type: 'LABEL', elementId: 'lbl' }] }]).sort().join() === 'inner,top', 'layoutSpaceIds: グループ内のスペースも・ラベルは含めない');
   const gctx = KTContext.buildGenerator({ customization: cust, plan: null, data: withLayout, deps: null, scan: null });
@@ -718,6 +689,9 @@ console.log('\n--- F37（CX-1 2 回目・実機）. 同じ遷移元の分岐は�
 console.log('\n--- F41（F39 の確認・実機）. PC とモバイルの計画で、制御するフィールドが片方の画面の処理にしか無い ---');
 {
   // 実機の生成そのまま: 既存の PC の handler（金額）はそのまま、担当者のロックはモバイルの handler だけ → PC では承認済みでも担当者を編集できた（Code Review は OK）
+  //   簡素化 B（2026-10-17）: 画面ごとの処理の有無（platform-fields）と、そのためのイベントの解析は Toolkit だけの規則で、削除した（生成工程には移植していない）。
+  //   同じことは生成工程の必須の効果が効果のイベントごとに確かめる（AI版 verify-generated.mjs: 候補が読み込まれる画面のイベントの handler に処理が無ければ、そのイベントは missing）。
+  //   Toolkit はその結果を登録不可として取り込む
   const DL = ["(function () {", "  'use strict';", "  kintone.events.on(['app.record.create.show', 'app.record.edit.show'], function (event) {", "    const record = event.record;", "    if (record['ステータス'] && record['ステータス'].value === '承認済み') {", "      record['amount'].disabled = true;", "    }", "    return event;", "  });", "})();", ""].join('\n');
   const ADD = "  kintone.events.on(['mobile.app.record.create.show', 'mobile.app.record.edit.show'], function (event) {\n    const record = event.record;\n    if (record['ステータス'] && record['ステータス'].value === '承認済み') {\n      record['owner'].disabled = true;\n    }\n    return event;\n  });\n";
   const SRC = { name: 'dealLock.js', target: 'desktop', text: DL };
@@ -726,15 +700,15 @@ console.log('\n--- F41（F39 の確認・実機）. PC とモバイルの計画�
   const genOf = (add) => ({ strategy: 'EXTEND_EXISTING_JS', targetFile: 'dealLock.js', code: add, patch: { baseHash, operations: [{ type: 'INSERT_BEFORE', anchor: '})();', content: add }] }, events: cust.events, fields: cust.fields, apis: ['kintone.events.on'] });
   const chk = (r, n) => r.checks.find(c => c.name === n) || null;
   const bad = KTCodeReview.review({ generated: genOf(ADD), customization: cust, plan: null, data: DATA, scan: null, existingSource: SRC });
-  assert(chk(bad, 'platform-fields') && !chk(bad, 'platform-fields').ok && chk(bad, 'platform-fields').severity === 'block' && /owner/.test(chk(bad, 'platform-fields').message) && /PC ?の画面/.test(chk(bad, 'platform-fields').message) && bad.status === 'BLOCKED' && bad.registration.verdict === 'BLOCKED', `F41: 担当者のロックがモバイルの処理だけ → 登録不可（Phase 21。PC では制御していない。Phase 20 は要確認）: ${chk(bad, 'platform-fields') && chk(bad, 'platform-fields').message}`);
-  // 両方の画面で制御するコード（PC の handler にも担当者）は従来どおり
+  assert(chk(bad, 'patch').ok && !chk(bad, 'platform-fields') && bad.status !== 'BLOCKED', `F41（簡素化 B）: Toolkit の形式確認は画面ごとの処理の有無を判定しない（生成工程の必須の効果の範囲）: ${JSON.stringify(bad.checks.map(c => c.name))}`);
+  const REQ = [{ requirementId: 'C1', requirementIds: ['C1'], field: 'owner', effect: 'lock', events: cust.events, condition: 'ステータス = "承認済み"' }];
+  const badV = KTCodeReview.attachBehavior(bad, { version: '1', passed: false, machine: [], requiredEffects: [{ requirementId: 'C1', requirementIds: ['C1'], field: 'owner', effect: 'lock', status: 'missing', events: [{ event: 'app.record.create.show', status: 'not-on-create' }, { event: 'app.record.edit.show', status: 'missing' }, { event: 'mobile.app.record.create.show', status: 'not-on-create' }, { event: 'mobile.app.record.edit.show', status: 'present' }] }], behavior: { status: 'not-run', reason: 'machine-blocked', cases: [] } }, { requiredEffects: REQ, customization: cust });
+  assert(badV.status === 'BLOCKED' && badV.registration.verdict === 'BLOCKED' && chk(badV, 'required-effects') && !chk(badV, 'required-effects').ok && /owner/.test(chk(badV, 'required-effects').message),
+    `F41（簡素化 B）: PC の画面の処理が無いことは、生成工程の必須の効果の結果（PC のイベントが missing）で登録不可にする: ${JSON.stringify(badV.checks.filter(c => !c.ok).map(c => c.name + ':' + c.message))}`);
+  // 両方の画面で制御するコード（PC の handler にも担当者）は、Toolkit の形式確認で止めない
   const BOTH = "  kintone.events.on(['app.record.create.show', 'app.record.edit.show', 'mobile.app.record.create.show', 'mobile.app.record.edit.show'], function (event) {\n    const record = event.record;\n    if (record['ステータス'] && record['ステータス'].value === '承認済み') {\n      record['owner'].disabled = true;\n    }\n    return event;\n  });\n";
   const good = KTCodeReview.review({ generated: genOf(BOTH), customization: cust, plan: null, data: DATA, scan: null, existingSource: SRC });
-  assert(!(good.mismatches || []).some(m => m.code === 'PLATFORM_FIELD_MISSING'), `F41: PC とモバイルの両方で制御するコードは指摘しない: ${JSON.stringify((good.mismatches || []).map(m => m.code))}`);
-  // イベントを変数（const EVENTS = [...]）で渡す書き方でも、配列の定義をたどって両方の画面と判定する（誤って「PC だけ」にしない）
-  const VARS = "  const EVENTS = ['app.record.create.show', 'app.record.edit.show', 'mobile.app.record.create.show', 'mobile.app.record.edit.show'];\n  kintone.events.on(EVENTS, function (event) {\n    const record = event.record;\n    if (record['ステータス'] && record['ステータス'].value === '承認済み') {\n      record['owner'].disabled = true;\n    }\n    return event;\n  });\n";
-  const viaVar = KTCodeReview.review({ generated: genOf(VARS), customization: cust, plan: null, data: DATA, scan: null, existingSource: SRC });
-  assert(!(viaVar.mismatches || []).some(m => m.code === 'PLATFORM_FIELD_MISSING'), `F41: イベントを変数で渡しても両方の画面と判定する: ${JSON.stringify((viaVar.mismatches || []).map(m => m.code + ':' + m.message))}`);
+  assert(good.status !== 'BLOCKED' && chk(good, 'patch').ok, `F41: PC とモバイルの両方で制御するコードは止めない: ${JSON.stringify(good.checks.filter(c => !c.ok).map(c => c.name))}`);
 }
 
 // F42（F41 の再生成・実機。既存の if の外に足した編集不可 → すべてのステータスで編集できなくなる）の unconditional-control は、C-1 第 2 段（§0d.4）で Toolkit の形式確認から外した。
@@ -770,8 +744,10 @@ console.log('\n--- F40（CX-3 3 回目・実機）. 同じ既存の設定を 2 �
 }
 
 // =========================================================
-console.log('\n--- F38（CX-1 2 回目・実機）. 既存ファイルの即時関数の外に足したコード（ファイル直下の宣言）を見逃さない ---');
+console.log('\n--- F38（CX-1 2 回目・実機）. 既存ファイルの即時関数の外に足したコード（ファイル直下の宣言）---');
 {
+  //   簡素化 B（2026-10-17）: 即時関数の外の宣言（globals）は Toolkit だけの規則で、削除した。生成工程（Gateway）の機械検査にも同じ規則は無く、移植していない（検査を増やさない）。
+  //   このため、即時関数の外に足した宣言は Toolkit でも生成工程でも止めない（判定しない範囲として残る）。Toolkit は統合した本文を作れるか（patch）だけを確かめる
   const DL = ["(function () {", "  'use strict';", "  kintone.events.on(['app.record.create.show', 'app.record.edit.show'], function (event) {", "    const record = event.record;", "    if (record['ステータス'] && record['ステータス'].value === '承認済み') {", "      record['amount'].disabled = true;", "    }", "    return event;", "  });", "})();", ""].join('\n');
   const baseHash = KTScan.analyzeFile({ name: 'dealLock.js', target: 'desktop', kind: 'js', text: DL }, { fields: [], selfAppId: null }).file.hash;
   const ADD = "  // 承認済みはモバイルでも金額を編集不可\n  const EVENTS = ['mobile.app.record.create.show', 'mobile.app.record.edit.show'];\n  kintone.events.on(EVENTS, function (event) {\n    if (event.record['ステータス'] && event.record['ステータス'].value === '承認済み') { event.record['amount'].disabled = true; }\n    return event;\n  });\n";
@@ -780,10 +756,10 @@ console.log('\n--- F38（CX-1 2 回目・実機）. 既存ファイルの即時�
   const chk = (r, n) => r.checks.find(c => c.name === n) || null;
   // 実機と同じ: APPEND（anchor「})();」）→ 即時関数の外（ファイル直下）に const EVENTS
   const out = KTCodeReview.review({ generated: genOf({ type: 'APPEND', anchor: '})();\n', content: ADD }), customization: cust, plan: null, data: DATA, scan: null, existingSource: { name: 'dealLock.js', target: 'desktop', text: DL } });
-  assert(chk(out, 'globals') && !chk(out, 'globals').ok && /EVENTS/.test(chk(out, 'globals').message) && /即時関数の中/.test(chk(out, 'globals').message) && out.status !== 'OK', `F38: 既存ファイルへの統合でも、即時関数の外に足した宣言はグローバル汚染として要確認（以前は「即時関数の外に宣言はありません」）: ${chk(out, 'globals') && chk(out, 'globals').message}`);
-  // 即時関数の中（閉じる行の前）に入れたコードは従来どおり
+  assert(chk(out, 'patch').ok && !chk(out, 'globals') && out.finalCode.endsWith(ADD) && out.finalCode.startsWith(DL), `F38（簡素化 B）: 即時関数の外への追加も、統合した本文は作る（globals は判定しない）: ${JSON.stringify(out.checks.map(c => c.name))}`);
+  // 即時関数の中（閉じる行の前）に入れたコード
   const inside = KTCodeReview.review({ generated: genOf({ type: 'INSERT_BEFORE', anchor: '})();', content: ADD }), customization: cust, plan: null, data: DATA, scan: null, existingSource: { name: 'dealLock.js', target: 'desktop', text: DL } });
-  assert(chk(inside, 'patch').ok && chk(inside, 'globals').ok, `F38: 即時関数の中に入れたコードは指摘しない: ${JSON.stringify(inside.checks.filter(c => !c.ok).map(c => c.name))}`);
+  assert(chk(inside, 'patch').ok && !chk(inside, 'globals') && inside.status !== 'BLOCKED', `F38: 即時関数の中に入れたコードは止めない: ${JSON.stringify(inside.checks.filter(c => !c.ok).map(c => c.name))}`);
 }
 
 // =========================================================

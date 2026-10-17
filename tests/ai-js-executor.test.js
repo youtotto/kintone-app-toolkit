@@ -81,12 +81,16 @@ console.log('\n--- 1. 変更の組み立て（changeFromGenerated / safeFileName
 {
   const r = replaceChange();
   assert(r.ok && r.change.kind === 'REPLACE_FILE' && r.change.name === 'fieldOnOff.js' && r.change.target === 'desktop' && r.change.baseHash === KTScan.hashText(FIELD_ON_OFF) && r.change.content.includes("value === '完了'") && r.change.content.startsWith('(function () {'), 'EXTEND_EXISTING_JS → REPLACE_FILE（既存名を維持・baseHash・最終コードは既存 ＋ 追加）');
-  assert(r.change.codeReview.status === 'OK' && r.change.codeReview.rescan.events.includes('app.record.edit.show') && r.change.provenance.customizationId === 'C1' && r.change.planFields[0].code === 'amount', '変更には Code Review の要約（rescan）・出所・計画のフィールド / イベントが付く');
+  //   簡素化 B（2026-10-17）: 読み戻しの判定（再解析 ＝ Code Review・計画との一致）にだけ使っていた検査の時の解析（rescan）と計画のフィールド・イベントは、変更に持たない
+  assert(r.change.codeReview.status === 'OK' && !('rescan' in r.change.codeReview) && r.change.provenance.customizationId === 'C1' && !('planFields' in r.change) && !('planEvents' in r.change), '変更には Code Review の要約（状態と検査の一覧）・出所が付く');
   const n = newChange();
   assert(n.ok && n.change.kind === 'ADD_FILE' && n.change.name === 'amount-warning-v1.js' && n.change.proposedName === 'amount warning (v1).js', 'NEW_JS_FILE → ADD_FILE。提案名を安全な名前に正規化（空白 / 括弧 → -）');
   assert(X.safeFileName('fieldOnOff', { existingNames: ['fieldOnOff.js'] }) === 'fieldOnOff-2.js' && X.safeFileName('../evil/../x.js') === 'x.js' && X.safeFileName('') === 'customization.js' && X.safeFileName('承認ロック.js') === 'customization.js'.replace('customization', '') + 'customization.js'.slice(0) ? true : true, 'safeFileName: 重複は -2・パスは落とす・空は既定名');
   assert(X.safeFileName('承認ロック.js') === 'customization.js', 'safeFileName: 英数字以外だけの名前は既定名');
-  const blocked = X.changeFromGenerated({ customization: CUST_NEW, generated: { ...GEN_NEW, code: NEW_JS.replace("record['amount'].value", "record['nope'].value") }, review: reviewOf({ ...GEN_NEW, code: NEW_JS.replace("record['amount'].value", "record['nope'].value") }, CUST_NEW) });
+  //   簡素化 B（2026-10-17）: 生成のときの未知のフィールドは生成工程の検査（Toolkit の形式確認は生成のときに作り直さない）。登録の判定が BLOCKED の例は、
+  //   反映のときの今の設定での存在の確認（existingOnly。今のアプリの設定に無いフィールド）で作る
+  const nopeGen = { ...GEN_NEW, code: NEW_JS.replace("record['amount'].value", "record['nope'].value") };
+  const blocked = X.changeFromGenerated({ customization: CUST_NEW, generated: nopeGen, review: KTCodeReview.review({ generated: nopeGen, customization: CUST_NEW, data: DATA, scan: null, existingSource: null, existingOnly: true }) });
   assert(!blocked.ok && blocked.reason === 'CODE_REVIEW_BLOCKED', 'Code Review が BLOCKED のコードは変更にできない');
   const noSrc = X.changeFromGenerated({ customization: CUST_REPLACE, generated: GEN_PATCH, review: reviewOf(GEN_PATCH, CUST_REPLACE, SRC), existingSource: null });
   assert(!noSrc.ok && noSrc.reason === 'JS_SOURCE_UNAVAILABLE', '統合先の本文が無ければ REPLACE にできない');
@@ -163,7 +167,8 @@ console.log('\n--- 4. §47 / §48 / §51 登録と検証: replace（全保持）
   assert(v.ok && v.checks.find(c => c.name === 'unrelatedPreserved').ok && v.checks.find(c => c.name === 'scopePreserved').ok && v.checks.find(c => c.name === 'revisionAdvanced').ok, '検証: 対象以外の保持・scope・revision');
   const sc = ex.steps[0].verification.checks;
   const names = (arr) => arr.map(c => c.name);
-  assert(sc.every(c => c.ok) && names(sc).includes('entryExists') && names(sc).includes('position') && names(sc).includes('fileKeyUpdated') && names(sc).includes('sourceHash') && names(sc).includes('reanalysisMatchesCodeReview') && names(sc).includes('planVsActual') && names(sc).includes('securityOnActual'), `§51 変更ごとの検証: entry / 位置 / fileKey 更新 / 本文の指紋 / 再解析 ＝ Code Review / 計画との一致 / security（${names(sc).join(',')}）`);
+  //   簡素化 B（2026-10-17）: 読み戻しは承認した本文がそのまま書き込まれたかを確かめる（entry・位置・fileKey・本文の指紋）。再解析の結果で計画との一致・安全・検査の時の解析との一致を判定する処理は削除した
+  assert(sc.every(c => c.ok) && names(sc).includes('entryExists') && names(sc).includes('position') && names(sc).includes('fileKeyUpdated') && names(sc).includes('sourceHash') && !names(sc).some(n => ['reanalysisMatchesCodeReview', 'planVsActual', 'securityOnActual'].includes(n)), `§51 変更ごとの検証: entry / 位置 / fileKey 更新 / 本文の指紋（${names(sc).join(',')}）`);
   assert(ex.steps[0].reanalysis.events.includes('app.record.edit.show') && ex.steps[0].reanalysis.fieldAccess.amount && ex.steps[0].reanalysis.fieldAccess.amount.CONTROL, '§25 登録後の本文を KTScan で再解析（イベント・amount CONTROL）');
   assert(m.calls.filter(c => c === 'GET file').length >= 2, '登録前（baseHash 照合）と登録後（指紋）に本文を取得している');
   // 新規 JS: 4 → 5
@@ -171,13 +176,12 @@ console.log('\n--- 4. §47 / §48 / §51 登録と検証: replace（全保持）
   const prep2 = await X.prepare({ appId: '310', changes: [newChange().change] }, { api: m2.api });
   const ex2 = await X.executePreview(prep2, { api: m2.api, fieldRows: FIELD_ROWS });
   assert(ex2.status === 'DONE' && ex2.steps[0].status === 'VERIFIED' && jsNames(m2, 'desktop').length === 5 && jsNames(m2, 'desktop')[4] === 'amount-warning-v1.js' && JSON.stringify(keysOf(m2, 'desktop').slice(0, 4)) === JSON.stringify(before.d) && keysOf(m2, 'mobile').length === 2, '§48 新規 JS: 4 → 5・末尾・既存 4 件と mobile は保持');
-  assert(ex2.steps[0].verification.checks.find(c => c.name === 'planVsActual').ok && ex2.steps[0].verification.checks.find(c => c.name === 'platform').ok, '新規 JS: 計画との一致（厳密）・platform');
+  assert(ex2.steps[0].verification.checks.find(c => c.name === 'sourceHash').ok && ex2.steps[0].verification.checks.find(c => c.name === 'platform').ok, '新規 JS: 本文の指紋・platform');
   // mobile に登録（desktop を変えない）
   const m3 = mk();
-  const mobCh = { ...newChange(['common.js', 'mobileLock.js']).change, target: 'mobile', content: NEW_JS.replace(/app\.record\.(create|edit)\.change\.amount/g, 'mobile.app.record.$1.change.amount'), planEvents: ['mobile.app.record.create.change.amount', 'mobile.app.record.edit.change.amount'] };
+  const mobCh = { ...newChange(['common.js', 'mobileLock.js']).change, target: 'mobile', content: NEW_JS.replace(/app\.record\.(create|edit)\.change\.amount/g, 'mobile.app.record.$1.change.amount') };
   mobCh.contentHash = KTScan.hashText(mobCh.content); mobCh.bytes = mobCh.content.length;
   mobCh.registration = { ...mobCh.registration, codeHash: mobCh.contentHash };   // Phase 21: 検査したコードの指紋（本文を差し替えた変更は、検査し直した指紋が無いと登録しない）
-  mobCh.codeReview.rescan = { events: ['mobile.app.record.create.change.amount', 'mobile.app.record.edit.change.amount'], fieldAccess: { amount: { CONTROL: 1, READ: 1 } }, apis: ['kintone.events.on'] };
   const prep3 = await X.prepare({ appId: '310', changes: [mobCh] }, { api: m3.api });
   const ex3 = await X.executePreview(prep3, { api: m3.api, fieldRows: FIELD_ROWS });
   assert(ex3.status === 'DONE' && jsNames(m3, 'mobile').length === 3 && jsNames(m3, 'mobile')[2] === 'amount-warning-v1.js' && JSON.stringify(keysOf(m3, 'desktop')) === JSON.stringify(before.d), 'mobile への新規 JS: mobile 2 → 3・desktop は変更なし');
@@ -203,12 +207,13 @@ console.log('\n--- 4. §47 / §48 / §51 登録と検証: replace（全保持）
   // Phase 21: 検査の後に本文を差し替えた変更は、登録の準備で止まる（CONTENT_CHANGED_AFTER_REVIEW）
   const prep7a = await X.prepare({ appId: '310', changes: [clone(bad)] }, { api: mk().api });
   assert(prep7a.status === 'BLOCKED' && prep7a.blockers.some(b => b.code === 'CONTENT_CHANGED_AFTER_REVIEW'), 'Phase 21: 検査の後に本文を差し替えた変更は登録の準備で止まる（CONTENT_CHANGED_AFTER_REVIEW）');
-  // 登録後の検証（多重の防御）が計画との違いを見つけることも確かめる: 検査済みの指紋を付けたことにして準備を通す
+  // 簡素化 B（2026-10-17）: 登録後の検証で計画との違い（計画に無い書き込み）を見つける判定（§26 planVsActual・JS_VERIFY_MISMATCH）は削除した。計画に無い書き込みは承認の前に
+  //   生成工程の計画との一致（確認事項）で扱い、読み戻しは承認した本文がそのまま書き込まれたか（本文の指紋）を確かめる。検査済みの指紋を付けたことにして準備を通すと、本文の指紋は一致する
   bad.registration = { ...bad.registration, codeHash: bad.contentHash };
   const prep7 = await X.prepare({ appId: '310', changes: [bad] }, { api: m7.api });
   const ex7 = await X.executePreview(prep7, { api: m7.api, fieldRows: FIELD_ROWS });
-  const pv = ex7.steps[0].verification.checks.find(c => c.name === 'planVsActual');
-  assert(ex7.status === 'VERIFY_FAILED' && ex7.steps[0].reason === 'JS_VERIFY_MISMATCH' && !pv.ok && pv.actual.extraWrites.includes('owner'), '§26 計画に無いフィールドを書く本文 → JS_VERIFY_MISMATCH');
+  const sh7 = ex7.steps[0].verification.checks.find(c => c.name === 'sourceHash');
+  assert(sh7 && sh7.ok && !ex7.steps[0].verification.checks.some(c => c.name === 'planVsActual') && ex7.steps[0].reason !== 'JS_VERIFY_MISMATCH', '§26（簡素化 B）: 読み戻しは本文の指紋で確かめ、計画との一致は判定し直さない');
 }
 
 // =========================================================
@@ -216,10 +221,9 @@ console.log('\n--- 4b. 同じ画面へ新規 2 本（＋ PC の置き換え 1 �
 {
   //   実機（評価の記録 §12.39・2026-10-16）: モバイルへ新規 2 本を足すと、1 本目は期待の位置どおりなのに末尾でないため position が × になっていた
   const mobAdd = (name, msg, customizationId) => {
-    const c = { ...newChange(['common.js', 'mobileLock.js']).change, customizationId, name, target: 'mobile', content: NEW_JS.replace(/app\.record\.(create|edit)\.change\.amount/g, 'mobile.app.record.$1.change.amount').replace('100万円以上は部長の承認が必要です', msg), planEvents: ['mobile.app.record.create.change.amount', 'mobile.app.record.edit.change.amount'] };
+    const c = { ...newChange(['common.js', 'mobileLock.js']).change, customizationId, name, target: 'mobile', content: NEW_JS.replace(/app\.record\.(create|edit)\.change\.amount/g, 'mobile.app.record.$1.change.amount').replace('100万円以上は部長の承認が必要です', msg) };
     c.contentHash = KTScan.hashText(c.content); c.bytes = c.content.length;
     c.registration = { ...c.registration, codeHash: c.contentHash };
-    c.codeReview = { ...c.codeReview, rescan: { events: ['mobile.app.record.create.change.amount', 'mobile.app.record.edit.change.amount'], fieldAccess: { amount: { CONTROL: 1, READ: 1 } }, apis: ['kintone.events.on'] } };
     return c;
   };
   const changes3 = () => [replaceChange().change, mobAdd('mobile-lock.js', 'モバイル 1 本目', 'C2'), mobAdd('mobile-check.js', 'モバイル 2 本目', 'C3')];

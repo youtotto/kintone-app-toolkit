@@ -2,15 +2,18 @@
 //
 // 検証内容:
 //   N3 使える画面の違う API: kintone.app.record.getFieldElement は PC のレコード詳細・印刷画面とモバイルのレコード詳細画面でしか使えない
-//      （公式ドキュメント。作成・編集画面では null）。BF-C の生成コードは作成・編集画面のイベントでこれを使い、警告が出なかったのに、
-//      API の検査は「目録にあります」で通した。API の目録に使える画面を持たせ、handler のイベントの画面と照合する
-//      （どのイベントでも使えない → 登録不可、一部で使えない → 確認。既存のコードに元からある呼び出しは数えない）
+//      （公式ドキュメント。作成・編集画面では null）。BF-C の生成コードは作成・編集画面のイベントでこれを使い、警告が出なかった。
+//      簡素化 B（2026-10-17）: API の目録の使える画面（screens）と、それで handler の画面と照合する Toolkit の検査（api-screen）は削除した。
+//      生成した候補の検査は生成工程（Gateway）が正本で、生成工程の検査には同じ規則が無く、移植していない（判定しない範囲として残る）。
+//      ここに残すのは、目録がモバイルの getFieldElement / getFieldElements を知っていること（目録に無い API と扱わない）と、Toolkit が判定しないこと
 //   N2 空の判定の undefined: 作成画面では空のフィールドの value が undefined になる（入力して消した後・保存時のイベントでも。実機）。
 //      §2 手順 4 の生成（v3）は `=== null` と空文字だけで判定し、保存時の必須チェックが効かなかった。
 //      C-1 第 2 段（§0d.4）で Toolkit の推定による判定（empty-undefined）は外した。生成工程で守る: AI版 sandbox/test/run.mjs §5
 //      「S2_V3（実機 N2）: 作成画面の空（undefined）を見逃し、保存は止まらない」「S2_V3: 編集画面の空（''）では止まり、入力ありでは止まらない」
 //      「S2_V2: undefined も判定して作成画面でも保存を止める」、worker/test/cases/required-effects.mjs「lock: …作成画面の空 → not-locked（…空は undefined の印）」。
 //      ここに残すのは、記録した出力が生成の直後の modern JavaScript の修正とパッチの適用を通ること
+//   表示を消す条件（実機の sol のコード。error の今の値を見て消す → 前のイベントの表示は event.record に残らないので消えない）:
+//      簡素化 B（2026-10-17）: Toolkit の検査（error-clear-compare）は削除した。生成工程の検査にも同じ規則は無く、移植していない（判定しない範囲として残る）
 //
 // 実行方法: node tests/ai-rc-e2e.test.js（KT_SRC=<別ビルド> で修正前の版に対して走らせると RED になる）
 'use strict';
@@ -41,62 +44,21 @@ const codesOf = (list) => (list || []).map(x => x.code);
 
 (async () => {
 // =========================================================
-console.log('\n--- N3 API の目録: 使える画面（公式ドキュメント）---');
+console.log('\n--- N3 API の目録（簡素化 B: 使える画面の照合は削除）---');
 {
-  const s = (n) => safe(() => KTJsCatalog.apiScreens(n), null);
-  const eq = (a, b) => JSON.stringify([...(a || [])].sort()) === JSON.stringify([...b].sort());
-  assert(eq(s('kintone.app.record.getFieldElement'), ['detail', 'print']) && eq(s('kintone.mobile.app.record.getFieldElement'), ['detail']), `getFieldElement: PC は詳細・印刷、モバイルは詳細だけ: ${JSON.stringify([s('kintone.app.record.getFieldElement'), s('kintone.mobile.app.record.getFieldElement')])}`);
-  assert(eq(s('kintone.app.record.getSpaceElement'), ['create', 'edit', 'detail', 'print']) && eq(s('kintone.mobile.app.record.getSpaceElement'), ['create', 'edit', 'detail']), 'getSpaceElement: PC は追加・編集・詳細・印刷、モバイルは追加・編集・詳細');
-  assert(eq(s('kintone.app.record.setFieldShown'), ['create', 'edit', 'detail', 'print']) && eq(s('kintone.mobile.app.record.setFieldShown'), ['create', 'edit', 'detail']) && eq(s('kintone.app.record.setGroupFieldOpen'), ['create', 'edit', 'detail', 'print']) && eq(s('kintone.mobile.app.record.setGroupFieldOpen'), ['create', 'edit', 'detail']), 'setFieldShown / setGroupFieldOpen: PC は印刷も、モバイルは追加・編集・詳細');
-  assert(eq(s('kintone.app.record.getHeaderMenuSpaceElement'), ['create', 'edit', 'detail']) && eq(s('kintone.app.getFieldElements'), ['index', 'index-edit']) && eq(s('kintone.mobile.app.getFieldElements'), ['index', 'index-edit']), 'レコードのメニューの上側は追加・編集・詳細、一覧のフィールド要素は一覧（表形式）だけ');
-  assert(s('kintone.app.record.get') === null && s('kintone.api') === null, '画面を確かめていない API は照合しない（null）');
   const apis = safe(() => KTJsCatalog.extractApis("kintone.mobile.app.record.getFieldElement('a'); kintone.mobile.app.getFieldElements('a');"), []);
   assert(apis.length === 2 && apis.every(a => a.known), `モバイルの getFieldElement / getFieldElements を目録に足す（目録に無い API と扱わない）: ${JSON.stringify(apis.map(a => [a.name, a.known]))}`);
   assert(Number(KTJsCatalog.CATALOG_VERSION) >= 2 && Number(KTScan.ANALYZER_VERSION) >= 15, `目録・解析の版を上げた（古い Field Scanner のキャッシュの API の判定を使わない）: ${KTJsCatalog.CATALOG_VERSION} / ${KTScan.ANALYZER_VERSION}`);
+  assert(typeof KTJsCatalog.apiScreens === 'undefined' && !('api-screen' in (KTCodeReview.HOW_TO_CHECK || {})), '簡素化 B: 使える画面（apiScreens）と api-screen の確かめ方は持たない');
 }
 
 // =========================================================
-console.log('\n--- N3 実機の再生（RC E2E の BF-C）: 作成・編集画面のイベントで getFieldElement → 登録不可 ---');
+console.log('\n--- N3 実機の再生（RC E2E の BF-C）: 作成・編集画面のイベントで getFieldElement（Toolkit は判定しない）---');
 {
   const data = JSON.parse(JSON.stringify(DATA));
   const rv = KTCodeReview.review({ generated: E2E.BFC.generated, customization: E2E.BFC.customization, plan: null, data, scan: null, existingSource: { name: 'dealLock.js', target: 'desktop', text: R.DEAL_LOCK } });
-  const x = check(rv, 'api-screen')[0] || {};
   assert(E2E.BFC.review.verdict === 'NEEDS_CONFIRMATION' && /getFieldElement/.test(E2E.BFC.generated.code), '前提: 実機の判定は確認が必要（getFieldElement を見逃した）');
-  assert(x.severity === 'block' && /kintone\.app\.record\.getFieldElement/.test(x.message || '') && /作成/.test(x.message || '') && /編集/.test(x.message || '') && /null/.test(x.message || ''), `getFieldElement は作成・編集画面では使えない → 登録不可（理由・使える画面つき）: ${x.message}`);
-  assert(rv.registration.verdict === 'BLOCKED' && codesOf(rv.registration.blockers).includes('api-screen'), `登録の判定は登録不可: ${rv.registration.verdict} ${JSON.stringify(codesOf(rv.registration.blockers))}`);
-}
-
-// =========================================================
-console.log('\n--- N3 handler のイベントと使える画面の照合 ---');
-{
-  const code = (events, line) => handler(events, `    ${line}`);
-  const gfe = "const el = kintone.app.record.getFieldElement('amount');\n    if (el) { el.style.color = 'red'; }";
-  const detail = review(code(['app.record.detail.show'], gfe));
-  assert(!check(detail, 'api-screen').length, '詳細画面のイベントで getFieldElement → 問題なし');
-  const mixed = review(code(['app.record.detail.show', 'app.record.edit.show'], gfe));
-  const xm = check(mixed, 'api-screen')[0] || {};
-  assert(xm.severity === 'review' && /編集/.test(xm.message || '') && !codesOf(mixed.registration.blockers).includes('api-screen') && codesOf(mixed.registration.confirmations).includes('api-screen'), `詳細と編集の両方のイベント → 編集画面では動かないので確認（登録不可にはしない）: ${xm.severity} ${xm.message}`);
-  const space = review(code(['app.record.create.show'], "const sp = kintone.app.record.getSpaceElement('warn');\n    if (sp) { sp.textContent = '注意'; }"));
-  assert(!check(space, 'api-screen').length, '作成画面のイベントで getSpaceElement → 問題なし（使える画面）');
-  const shownIndex = review(code(['app.record.index.show'], "kintone.app.record.setFieldShown('amount', false);"));
-  assert((check(shownIndex, 'api-screen')[0] || {}).severity === 'block', '一覧画面のイベントで setFieldShown → 登録不可');
-  const listOk = review(code(['app.record.index.show'], "const els = kintone.app.getFieldElements('amount');"));
-  const listNg = review(code(['app.record.edit.show'], "const els = kintone.app.getFieldElements('amount');"));
-  assert(!check(listOk, 'api-screen').length && (check(listNg, 'api-screen')[0] || {}).severity === 'block', '一覧のフィールド要素は一覧画面なら問題なし・編集画面なら登録不可');
-  const mob = (events) => review(code(events, "const el = kintone.mobile.app.record.getFieldElement('amount');"), cust({ platform: ['mobile'] }));
-  assert((check(mob(['mobile.app.record.edit.show']), 'api-screen')[0] || {}).severity === 'block' && !check(mob(['mobile.app.record.detail.show']), 'api-screen').length && !check(mob(['mobile.app.record.detail.show']), 'apis').length, 'モバイルの getFieldElement: 編集画面は登録不可・詳細画面は問題なし（目録に無い API とも言わない）');
-  // 名前で渡した handler の中も見る
-  const named = review("(function () {\n  'use strict';\n  function paint(event) {\n    const el = kintone.app.record.getFieldElement('amount');\n    if (el) { el.style.color = 'red'; }\n    return event;\n  }\n  kintone.events.on(['app.record.create.show', 'app.record.edit.show'], paint);\n})();");
-  assert((check(named, 'api-screen')[0] || {}).severity === 'block', '名前で渡した handler（function paint）の中の getFieldElement も照合する');
-  // どの handler から呼ばれるか分からない関数の中は照合しない（画面が分からない）
-  const helper = review("(function () {\n  'use strict';\n  function paint() {\n    const el = kintone.app.record.getFieldElement('amount');\n    if (el) { el.style.color = 'red'; }\n  }\n  window.ktPaint = paint;\n})();");
-  assert(!check(helper, 'api-screen').length, '呼び出し元の画面が分からない関数の中は照合しない');
-  // 既存のコードに元からある呼び出しは数えない（今回足したコードだけを照合する）
-  const base = handler(['app.record.edit.show'], "    const el = kintone.app.record.getFieldElement('amount');\n    if (el) { el.style.color = 'red'; }");
-  const added = ext(base, "  kintone.events.on(['app.record.edit.submit'], function (event) {\n    return event;\n  });\n");
-  assert(!check(added, 'api-screen').length, '既存のコードに元からある getFieldElement は数えない');
-  const added2 = ext(base, "  kintone.events.on(['app.record.create.show'], function (event) {\n    const el2 = kintone.app.record.getFieldElement('amount');\n    return event;\n  });\n");
-  assert((check(added2, 'api-screen')[0] || {}).severity === 'block', '今回足した handler の getFieldElement は照合する');
+  assert(!rv.checks.some(x => x.name === 'api-screen') && !codesOf(rv.registration.blockers).includes('api-screen'), `簡素化 B: Toolkit の形式確認は使える画面を照合しない（生成工程の検査にも同じ規則は無い）: ${JSON.stringify(codesOf(rv.registration.blockers))}`);
 }
 
 // =========================================================
@@ -113,7 +75,6 @@ console.log('\n--- N2 実機の再生（RC E2E の §2 手順 4）: 記録した
   assert(/var amount = event\.record\['amount'\]\.value;/.test(v3.finalCode || '') && v3.checks.some(x => x.name === 'patch' && /元のコードは保持（全文の書き換えなし）$/.test(x.message)), `既存の dealValidate.js の var amount はそのまま（全文を書き換えない）: ${JSON.stringify(v3.checks.filter(x => /^patch/.test(x.name)).map(x => x.message))}`);
   assert(!check(v3, 'patch').length, '再生の前提: パッチは適用できる');
   // v3 の空の判定（undefined を扱わない）・v2（undefined も判定）の違いは、生成工程の模擬テストが確かめる（sandbox/test/run.mjs §5 の S2_V3・S2_V2）
-  assert(/画面/.test((KTCodeReview.HOW_TO_CHECK || {})['api-screen'] || ''), '確かめること（api-screen）がある');
 }
 
 // N2 空の判定の書き方（empty-undefined の検出の範囲）は C-1 第 2 段（§0d.4）で判定ごと外した。生成工程で守る回帰はファイルの先頭の説明のとおり
@@ -129,8 +90,8 @@ console.log('\n--- モデル更新（gpt-6.1-sol）の評価で見つけた誤�
   assert(M.SOL_BFC.verdictAtRun === 'BLOCKED' && /field\.error = null/.test(M.SOL_BFC.generated.code), '前提: 実行時の判定は登録不可（保存時の分岐の field.error = null を数えた）');
   // 同じイベントの error と編集不可の判定（error-cancels-edit）は §0d.4 で外した。生成工程で守る: AI版 worker/test/cases/required-effects.mjs「§0d.1 S7（既知の競合）」（排他的な分岐の正しい候補を機械検査で止めない）
   assert(bfc.registration.verdict !== 'BLOCKED', `SOL_BFC: 注意は編集不可（!field.disabled）を見る条件の中だけ・保存時は null で消すだけ → 形式確認では登録不可にしない: ${bfc.registration.verdict} ${JSON.stringify(codesOf(bfc.registration.blockers))}`);
-  const ops = safe(() => KTCodeReview.kintoneFieldOps(KTScan.stripCommentsOnly("(function () {\n  kintone.events.on(['app.record.edit.show'], function (event) {\n    event.record['amount'].disabled = true;\n    event.record['amount'].error = null;\n    return event;\n  });\n})();")), []);
-  assert(ops.length === 1 && ops[0].error === false && ops[0].disabled === true, `error = null だけの handler はエラーを出す handler ではない: ${JSON.stringify(ops.map(o => [o.error, o.disabled]))}`);
+  //   簡素化 B（2026-10-17）: error = null の数え方（Toolkit の kintoneFieldOps）は、Toolkit のエラー表示の規則と一緒に削除した
+  assert(typeof KTCodeReview.kintoneFieldOps === 'undefined', 'error = null の数え方は Toolkit に無い（生成工程の検査と模擬テスト）');
   const genuine = review(handler(['app.record.edit.show'], "    if (record['ステータス'].value === '承認済み') {\n      record['amount'].disabled = true;\n    }\n    if (Number(record['amount'].value) > 1000000) {\n      record['amount'].error = '金額が大きい';\n    } else {\n      record['amount'].error = null;\n    }"), cust({ fields: [{ code: 'amount', access: 'CONTROL' }] }));
   // §0d.4: 競合の断定は生成工程（Gateway の check behavior・candidate-error-same-event と模擬テスト。AI版 required-effects.mjs「§0d.1 S7」・sandbox/test/run.mjs「R13 同じ handler」）。
   //   Toolkit は生成工程の結果を取り込み、結果が無い（返却の欠落）・模擬テストの fail（明示された失敗）なら登録不可にする（attachBehavior）
@@ -145,9 +106,11 @@ console.log('\n--- モデル更新（gpt-6.1-sol）の評価で見つけた誤�
   const cx1 = run(M.SOL_CX1);
   assert(M.SOL_CX1.blockersAtRun.includes('events') && /indexOf\('app\.record\.index\.'\)/.test(M.SOL_CX1.generated.code), '前提: 実行時は「kintone に無いイベント: app.record.index.」で登録不可');
   assert(!codesOf(cx1.registration.blockers).includes('events'), `SOL_CX1: event.type.indexOf('app.record.index.') は登録しているイベントではない → events で止めない: ${JSON.stringify(codesOf(cx1.registration.blockers))}`);
+  //   簡素化 B（2026-10-17）: 登録しているイベント名が kintone に無いことは、生成工程の機械検査（events。block）が確かめる（Toolkit の events は削除した）。
+  //   Toolkit はその結果を登録不可として取り込む
   const directBad = review("(function () {\n  kintone.events.on('app.record.update.show', function (event) {\n    return event;\n  });\n})();");
-  const prefixReg = review("(function () {\n  kintone.events.on('app.record.index.', function (event) {\n    return event;\n  });\n})();");
-  assert(codesOf(directBad.registration.blockers).includes('events') && codesOf(prefixReg.registration.blockers).includes('events'), '登録しているイベント名が kintone に無い（app.record.update.show・前方一致の文字列を直接登録）→ 従来どおり登録不可');
+  const directV = KTCodeReview.attachBehavior(directBad, { version: '1', candidateHash: '0123456789abcdef', passed: false, machine: [{ name: 'events', ok: false, severity: 'block', message: 'kintone に無いイベントをコードで使っています: 「app.record.update.show」' }], requiredEffects: [], behavior: { status: 'not-run', reason: 'machine-blocked', cases: [] } }, { requiredEffects: [], customization: cust() });
+  assert(!codesOf(directBad.registration.blockers).includes('events') && directV.registration.verdict === 'BLOCKED' && codesOf(directV.registration.blockers).includes('events'), '登録しているイベント名が kintone に無い → 生成工程の events（block）で登録不可（Toolkit は判定し直さない）');
 }
 
 // =========================================================
@@ -185,32 +148,6 @@ console.log('\n--- モデル更新の評価: 既存フィールドを使う手�
   const rvBad = PR.review({ plan: bad, data, deps, scan: null, incoming: null });
   const badCls = safe(() => PE.classifySteps({ plan: bad, review: rvBad, approvedSteps: ['P1', 'P2'] }), []);
   assert(s2(badCls).status === 'BLOCKED', `無いフィールドを使う手順（検証で無効）に依存する手順は止める: ${s2(badCls).status} ${s2(badCls).reason}`);
-}
-
-// =========================================================
-console.log('\n--- モデル更新の評価（実機）: 「error が自分の文言なら null」の条件では、前のイベントの表示は消えない（event.record に残らない）---');
-{
-  // 実機（gpt-6.1-sol / medium の BF-C）で生成されたコード。1,000,001 で警告 → 999,999 や空にしても警告が消えなかった
-  //   （表示中も kintone.app.record.get() の amount.error は undefined、次の change でも event.record.amount.error は undefined。実機で確認）
-  const SOL_DEVICE = "(function () {\n  'use strict';\n  const amountNotice = '注意：金額が100万円を超えています（この注意では保存を止めません）。';\n  kintone.events.on([\n    'app.record.create.show',\n    'app.record.edit.show',\n    'app.record.create.change.amount',\n    'app.record.edit.change.amount'\n  ], function (event) {\n    const field = event.record['amount'];\n    if (Number(field.value) > 1000000 && !field.disabled) {\n      if (!field.error || field.error === amountNotice) {\n        field.error = amountNotice;\n      }\n    } else if (field.error === amountNotice) {\n      field.error = null;\n    }\n    return event;\n  });\n  kintone.events.on(['app.record.create.submit', 'app.record.edit.submit'], function (event) {\n    const field = event.record['amount'];\n    if (field.error === amountNotice) {\n      field.error = null;\n    }\n    return event;\n  });\n})();";
-  const EV = ['app.record.create.show', 'app.record.edit.show', 'app.record.create.change.amount', 'app.record.edit.change.amount'];
-  const c = cust({ events: EV, fields: [{ code: 'amount', access: 'CONTROL', condition: 'amount > "1000000"' }] });
-  const flagged = (rv) => (rv.checks || []).filter(x => x.name === 'error-clear-compare' && !x.ok);
-  const sol = review(SOL_DEVICE, c);
-  const x = flagged(sol)[0] || {};
-  assert(x.severity === 'review' && /amount/.test(x.message || '') && /前のイベント/.test(x.message || '') && /undefined/.test(x.message || ''), `実機の sol のコード: 表示を消す条件が error の今の値を見ている → 確認（理由つき）: ${x.message}`);
-  assert(codesOf(sol.registration.confirmations).includes('error-clear-compare') && !codesOf(sol.registration.blockers).includes('error-clear-compare'), '登録の判定は確認が必要（登録不可にはしない）');
-  // 正しい書き方: 条件に当てはまらなければ比べずに null（RC 実機の terra のコード）・直接の参照でも比べていれば数える
-  const ok1 = review(handler(EV, "    if (Number(record['amount'].value) > 1000000 && !record['amount'].disabled) {\n      record['amount'].error = '金額が100万円を超えています。';\n    } else {\n      record['amount'].error = null;\n    }"), c);
-  const ng2 = review(handler(EV, "    if (Number(record['amount'].value) > 1000000) {\n      record['amount'].error = 'over';\n    } else if (record['amount'].error === 'over') {\n      record['amount'].error = null;\n    }"), c);
-  const ng3 = review(handler(EV, "    if (record.amount.error) {\n      record.amount.error = null;\n    }\n    if (Number(record.amount.value) > 1000000) {\n      record.amount.error = 'over';\n    }"), c);
-  assert(!flagged(ok1).length && flagged(ng2).length && flagged(ng3).length, `条件に当てはまらなければ null → 数えない／error を比べて消す（直接の参照・ドット記法）→ 数える: ${[ok1, ng2, ng3].map(r => flagged(r).length).join('/')}`);
-  // 保存時（submit）の比較は数えない（保存は止まらず、表示も保存の後に消える）・既存のコードに元からあるものは数えない
-  const sub = review(handler(['app.record.create.submit'], "    const f = record['amount'];\n    if (f.error === 'over') {\n      f.error = null;\n    }"), cust({ events: ['app.record.create.submit'] }));
-  const base = handler(EV, "    if (record['amount'].error === 'over') {\n      record['amount'].error = null;\n    }");
-  const existing = ext(base, "  kintone.events.on(['app.record.edit.submit'], function (event) {\n    return event;\n  });\n", cust({ strategy: 'EXTEND_EXISTING_JS', events: EV }));
-  assert(!flagged(sub).length && !flagged(existing).length, '保存時の比較・既存のコードに元からある比較は数えない');
-  assert(/警告が出る値から出ない値/.test((KTCodeReview.HOW_TO_CHECK || {})['error-clear-compare'] || ''), '確かめること: 警告が出る値から出ない値に変えて、表示が消えることを確かめる');
 }
 
 console.log(`\n${state.failed === 0 ? 'ALL PASSED' : 'FAILED'}: ${state.passed} passed / ${state.failed} failed`);

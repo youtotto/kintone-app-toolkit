@@ -310,9 +310,9 @@ console.log('\n--- §7 / §20. Customize → 開発支援（JS 相談）: 左は
   const arJ = await applyOnScreenM(m);
   assert(arJ.button && !arJ.button.disabled && arJ.pre.items.files.some(x => /✎ fieldOnOff\.js（PC）既存ファイルを更新/.test(x)) && arJ.run && arJ.run.stage === 'done' && m.panel.drawerState().pane === 'exec' && m.$('kt-ai-pane-exec').style.display === 'block' && !/id="kt-ai-jsreg-go"/.test(m.$('kt-ai-jsreg').innerHTML), '［動作テスト環境へ反映］1 回 → 承認の欄に置き換えるファイル（fieldOnOff.js）・登録まで進み、右のタブ「反映」に切り替わる（登録の最終確認の段は出さない）');
   const c4 = m.chat();
-  assert(m.panel.jsExecState().stage === 'done' && /動作テスト環境へ反映しました。/.test(arJ.card) && /JavaScript: ✎ fieldOnOff\.js（PC） を登録（反映後の確認 ✓ 1 \/ 1 件一致）/.test(arJ.card) && !/VERIFIED/.test(c4) && /data-act="open-js-result"/.test(arJ.cardHtml) && /data-act="open-customize"/.test(arJ.cardHtml) && !/planVsActual/.test(c4) && !/Audit/.test(c4) && !/kt-ai-js-execution-card/.test(c4), 'JS 登録の要約（左・結果のカード 1 枚）: ファイル・反映後の確認（✓ 1 / 1 件一致）・［登録結果を見る］［Customize で確認］。検証の内訳・監査・VERIFIED の語は無い');
+  assert(m.panel.jsExecState().stage === 'done' && /動作テスト環境へ反映しました。/.test(arJ.card) && /JavaScript: ✎ fieldOnOff\.js（PC） を登録（反映後の確認 ✓ 1 \/ 1 件一致）/.test(arJ.card) && !/VERIFIED/.test(c4) && /data-act="open-js-result"/.test(arJ.cardHtml) && /data-act="open-customize"/.test(arJ.cardHtml) && !/sourceHash/.test(c4) && !/Audit/.test(c4) && !/kt-ai-js-execution-card/.test(c4), 'JS 登録の要約（左・結果のカード 1 枚）: ファイル・反映後の確認（✓ 1 / 1 件一致）・［登録結果を見る］［Customize で確認］。検証の内訳・監査・VERIFIED の語は無い');
   assert(m.msgs().some(x => x.data?.kind === 'js-preview-changed') && !/JavaScript カスタマイズ設定が変更されました/.test(c4), '登録の処理の通知（js-preview-changed）は会話に出さない（登録のカードと同じ内容）');
-  assert(/planVsActual/.test(m.$('kt-ai-jsreg').innerHTML) && m.$('kt-ai-ws-state').innerHTML === '<span class="kt-ai-status" data-status="applied">反映済み</span>' && m.panel.workspaceState().lines[3] === 'Preview登録済み', '右下の右の「反映」に検証の内訳。右の見出しの状態は「反映済み」（VM.workspaceState は Preview登録済み）');
+  assert(/sourceHash/.test(m.$('kt-ai-jsreg').innerHTML) && m.$('kt-ai-ws-state').innerHTML === '<span class="kt-ai-status" data-status="applied">反映済み</span>' && m.panel.workspaceState().lines[3] === 'Preview登録済み', '右下の右の「反映」に検証の内訳。右の見出しの状態は「反映済み」（VM.workspaceState は Preview登録済み）');
   await clickChat(m, 'open-customize', { target: 'desktop', name: 'fieldOnOff.js' });
   assert(m.opened.length === 1 && m.opened[0].name === 'fieldOnOff.js', '［Customize で確認］→ Customize タブへ');
   assert(writes(m).filter(w => /PUT customize/.test(w)).length === 1 && JSON.stringify(arJ.writes.filter(w => !/customize|file/.test(w))) === JSON.stringify(writes(m).filter(w => !/customize|file/.test(w))), 'JavaScript の書き込みは登録の PUT 1 回だけ。書き込みはすべて［動作テスト環境へ反映］の 1 回の中（会話の文章では書かない）');
@@ -577,9 +577,9 @@ await section(async () => {
   assert(m.panel.jsExecState().stage === 'done' && /JavaScript の登録/.test(log) && /PC「fieldOnOff\.js」/.test(log) && /反映済み（未復元）/.test(log), 'N7: JavaScript の登録も記録に出る');
   const logId = (log.match(/data-log="([^"]+)"/) || [])[1];
   await clickChat(m, 'new-conv'); await ticks();
-  assert(m.msgs().length === 0 && m.panel.jsExecState().stage === 'idle' && !/planVsActual/.test(m.$('kt-ai-jsreg').innerHTML) && /前の会話/.test(m.$('kt-ai-apply-log').innerHTML) && m.panel.unrevertedPreviewChange() === true, 'N7: 新しい会話の右下の右の「反映」に前の会話の登録結果を出さず、記録に残す');
+  assert(m.msgs().length === 0 && m.panel.jsExecState().stage === 'idle' && !/sourceHash/.test(m.$('kt-ai-jsreg').innerHTML) && /前の会話/.test(m.$('kt-ai-apply-log').innerHTML) && m.panel.unrevertedPreviewChange() === true, 'N7: 新しい会話の右下の右の「反映」に前の会話の登録結果を出さず、記録に残す');
   await clickPane(m, 'log', { dataset: { act: 'log-open', log: logId } }); await ticks();
-  assert(m.panel.jsExecState().stage === 'done' && /反映の記録から開いた JavaScript の登録です（前の会話・依頼:/.test(m.$('kt-ai-jsreg').innerHTML) && /planVsActual/.test(m.$('kt-ai-jsreg').innerHTML) && m.msgs().length === 0, 'N7: 記録から開くと、登録の結果を右下の右の「反映」に出す（新しい会話に前の会話のカードは出さない）');
+  assert(m.panel.jsExecState().stage === 'done' && /反映の記録から開いた JavaScript の登録です（前の会話・依頼:/.test(m.$('kt-ai-jsreg').innerHTML) && /sourceHash/.test(m.$('kt-ai-jsreg').innerHTML) && m.msgs().length === 0, 'N7: 記録から開くと、登録の結果を右下の右の「反映」に出す（新しい会話に前の会話のカードは出さない）');
 });
 
 // =========================================================

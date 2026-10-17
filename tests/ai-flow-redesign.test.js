@@ -1120,12 +1120,14 @@ await section(async () => {
   assert(effectsSent(x) === 'amount:warn' && !x.gen.calls[0].requiredEffects.some(r => r.effect === 'lock'), `D3-1: 警告の要件は warn だけを渡す（編集不可を足さない）: ${effectsSent(x)}`);
   assert(e.status === 'verified' && v.final.approvable === true && e.review.status !== 'BLOCKED' && !e.review.checks.some(ch => /^sim-warning-only/.test(ch.name)), `D3-2: 警告を出し編集・保存を許可する候補は合格（承認できる）: ${JSON.stringify({ status: e.status, verdict: e.verdict, review: e.review.status, blocks: e.review.checks.filter(ch => !ch.ok && ch.severity === 'block').map(ch => ch.name) })}`);
   assert(v.final.verification.howTo.some(s => /保存/.test(s)), 'D3-3: 警告の要件では「保存は止まらない」ことを実機で確かめる行を出す（構造化した効果から）');
-  // D3-4（§0c.6）: 同じ候補でも、生成した AI が警告の要件を PARTIAL と申告した（既存の処理が編集不可にしている間は警告しない）→ 必須の効果に結び付く要件の PARTIAL は要件未達。
-  //   Toolkit は修復を依頼しない・承認できない（「確認」を押して反映できる形にしない）
+  // D3-4（§0c.6）: 同じ候補でも、生成した AI が警告の要件を PARTIAL と申告した（既存の処理が編集不可にしている間は警告しない）。
+  //   簡素化 B（2026-10-17）: 以前は Toolkit が「必須の効果に結び付く要件の PARTIAL」を要件未達（登録不可）に上げていた（coverage-unmet・partialRequired）。
+  //   今は生成工程の機械検査の coverage（review。自分の要件の PARTIAL）が承認の欄の確認事項にする（Toolkit は判定を作り直さない）。修復は依頼しない
   const y = makeConvC({ planImpl: (args) => planJs(args, { cust: CUST_W, summary: '金額が 100 万円を超えたら警告します（保存は止めません）。' }), generate: makeGenerate({ sequence: ['warn'], existingSource: existing, generatedOf: () => KIT.gwModernized(RP.GENERATED) }) });
   await adoptC(y);
   const vy = y.c.activePlan(), ey = vy.generated.C1;
-  assert(ey.status === 'unresolved' && ey.verdict.kind === 'partial' && /要件の一部を満たしていません/.test(ey.verdict.reason) && vy.final.approvable === false && y.gen.calls.length === 1 && !y.gen.calls[0].feedback && ey.review.checks.some(ch => ch.name === 'coverage-unmet' && ch.severity === 'block' && ch.partialRequired) && y.c.approveFinal({ planId: vy.planId, version: vy.version }).ok === false, `D3-4: 必須の効果に結び付く要件の PARTIAL（AI の申告）は要件未達で承認できない: ${JSON.stringify({ status: ey.status, verdict: ey.verdict, gen: y.gen.calls.length })}`);
+  assert(ey.status === 'verified' && ey.review.registration.verdict === 'NEEDS_CONFIRMATION' && ey.review.registration.confirmations.some(c => c.code === 'coverage' && /一部だけ/.test(c.message)) && !ey.review.checks.some(ch => ch.name === 'coverage-unmet' || ch.partialRequired) && vy.final.approvable === true && y.gen.calls.length === 1 && !y.gen.calls[0].feedback,
+    `D3-4: 自分の要件の PARTIAL（AI の申告）は、生成工程の coverage の確認事項（Toolkit は要件未達に上げない・修復を依頼しない）: ${JSON.stringify({ status: ey.status, verdict: ey.review.registration.verdict, conf: ey.review.registration.confirmations.map(c => c.code), gen: y.gen.calls.length })}`);
 });
 // D4: 保存禁止が必要、候補は画面の編集禁止だけ → 保存禁止を別に検証して要件未達（画面制御だけで代用しない）
 await section(async () => {
@@ -1438,35 +1440,39 @@ await section(async () => {
   const d = await run({ capable: true, has: ['warn'] });
   assert(d.v.final.approvable === false && /要件未達/.test(d.cannotText) && d.pr && d.pr.status === 'BLOCKED' && !d.m.mock.calls.some(c2 => c2 === 'PUT customize'), `D14-4: 生成工程が要件未達（編集不可が必要で警告だけ）を返した → 承認・登録しない: ${d.cannotText.slice(0, 300)}`);
 });
-// D15（レビュー B3・§0c.6）: 必須の効果に結び付く要件の PARTIAL（AI の申告）は要件未達（登録不可）。SUBTABLE_ROWS（Toolkit の決定的な検査で分かる制約）は実現できない点として承認を止めない
+// D15（レビュー B3・§0c.6）: 生成した AI の要件の達成の申告（PARTIAL・NOT_MET）。SUBTABLE_ROWS（計画の構造で分かる制約）は実現できない点として承認を止めない
+//   簡素化 B（2026-10-17）: 以前は Toolkit が申告を検査にしていた（coverage-unmet。NOT_MET は登録不可・必須の効果に結び付く PARTIAL は要件未達に上げる）。
+//   今は生成工程の機械検査の coverage（review。自分の要件の NOT_MET・PARTIAL）が承認の欄の確認事項にし、Toolkit は判定を作り直さない。
+//   Toolkit は申告を計画の構造に対応づけ（範囲内・範囲外・担当）、明細の行の印（limitCode SUBTABLE_ROWS）を付けるだけ（最終案の「実現できない点」の文に使う）
 await section(async () => {
   const gen = (code, coverage, fields = [{ code: 'amount', access: 'CONTROL' }]) => ({ strategy: 'NEW_JS_FILE', targetFile: 'lock.js', summary: 's', code, patch: null, events: ['app.record.edit.show'], fields, apis: [], assumptions: [], warnings: [], coverage });
+  const GW_COV = { name: 'coverage', ok: false, severity: 'review', message: 'この JavaScript の要件のうち満たせないと申告されたものがあります: 一部だけ「承認待ちでは金額を編集不可にする」（申請者本人を除く条件は入れていません）' };
   const rvP = KTCodeReview.review({ generated: gen(GOOD, [{ requirementId: 'C1', status: 'PARTIAL', note: '申請者本人を除く条件は入れていません', text: '承認待ちでは金額を編集不可にする' }]), customization: CUST_C1, plan: null, data: clone(DATA_C), scan: null, existingSource: null });
-  const m1 = KTCodeReview.attachBehavior(rvP, VER_LOCK_OK, { requiredEffects: REQ_LOCK, customization: CUST_C1 });
-  assert(m1.registration.verdict === 'BLOCKED' && m1.checks.some(ch => ch.name === 'coverage-unmet' && ch.partialRequired && ch.severity === 'block') && m1.registration.unverified.some(u => u.code === 'BEHAVIOR_NOT_VERIFIED'), `D15-1: 必須の効果（C1 の編集不可）に結び付く要件の PARTIAL → 登録不可（「確認」で通さない）: ${JSON.stringify(m1.checks.filter(ch => !ch.ok).map(ch => [ch.name, ch.severity]))}`);
+  const m1 = KTCodeReview.attachBehavior(rvP, { ...VER_LOCK_OK, machine: [GW_COV] }, { requiredEffects: REQ_LOCK, customization: CUST_C1 });
+  assert(!rvP.checks.some(ch => ch.name === 'coverage-unmet') && m1.registration.verdict === 'NEEDS_CONFIRMATION' && m1.registration.confirmations.some(x => x.code === 'coverage' && /一部だけ/.test(x.message) && x.howToCheck) && !m1.checks.some(ch => ch.partialRequired) && m1.registration.blockers.length === 0,
+    `D15-1（簡素化 B）: 自分の要件の PARTIAL は、生成工程の coverage の確認事項（Toolkit は要件未達に上げない）: ${JSON.stringify(m1.checks.filter(ch => !ch.ok).map(ch => [ch.name, ch.severity]))}`);
   const rvO = KTCodeReview.review({ generated: gen(GOOD, [{ requirementId: 'C1', status: 'MET', note: '', text: 'x' }, { requirementId: 'P1', status: 'PARTIAL', note: '一覧の並び順は別の手順', text: '一覧の並び順' }]), customization: CUST_C1, plan: { steps: [{ id: 'P1', actionType: 'ADD_VIEW', title: '一覧' }], customizations: [CUST_C1] }, data: clone(DATA_C), scan: null, existingSource: null });
   const m3 = KTCodeReview.attachBehavior(rvO, VER_LOCK_OK, { requiredEffects: REQ_LOCK, customization: CUST_C1 });
   assert(m3.registration.verdict !== 'BLOCKED' && !m3.checks.some(ch => ch.partialRequired), `D15-2: 必須の効果に結び付かない（ほかの手順の）PARTIAL は要件未達にしない: ${JSON.stringify(m3.checks.filter(ch => !ch.ok).map(ch => [ch.name, ch.severity]))}`);
-  // 明細のセルを編集不可にしていて、生成工程が kintone の制約の印（coverage の limitCode SUBTABLE_ROWS）を付けた PARTIAL → SUBTABLE_ROWS（決定的な検査）として実現できない点に出し、承認は止めない
-  //   C-1 第 3 段（2026-10-08）: AI の申告の文（note の「行の追加・削除」）は読まない（ROW_LIMIT_RE は削除した）。limitCode が無ければ要件未達（D15-4）
+  // 明細のセルを編集不可にする計画で、生成工程が kintone の制約の印（coverage の limitCode SUBTABLE_ROWS）を付けた PARTIAL → SUBTABLE_ROWS（計画の構造）として実現できない点に出し、承認は止めない
+  //   C-1 第 3 段（2026-10-08）: AI の申告の文（note の「行の追加・削除」）は読まない（ROW_LIMIT_RE は削除した）
   const CUST_T = custOf(null, { requirement: '承認待ちでは明細（items）のセルを編集不可にする', fields: [{ code: 'ステータス', access: 'READ' }, { code: 'items', access: 'CONTROL', condition: 'ステータス in ("承認待ち")', effects: ['lock'] }] });
   const TABLE = handlerC(`    if (${ST_C}) {\n      record['items'].value.forEach(function (row) {\n        row.value['qty'].disabled = true;\n      });\n    }`);
   const rvT = KTCodeReview.review({ generated: gen(TABLE, [{ requirementId: 'C1', status: 'PARTIAL', note: 'セルは編集不可にしますが、行の追加・削除は JavaScript では止められません', text: '承認待ちでは明細を編集不可', limitCode: 'SUBTABLE_ROWS' }], [{ code: 'items', access: 'CONTROL' }]), customization: CUST_T, plan: null, data: clone(DATA_C), scan: null, existingSource: null });
   const REQ_T = [{ requirementId: 'C1', requirementIds: ['C1'], field: 'items', effect: 'lock', events: ['app.record.edit.show'], condition: '' }];
   const VER_T = { requiredEffects: [{ requirementId: 'C1', field: 'items', effect: 'lock', status: 'present' }], behavior: { status: 'passed', reason: null, cases: [{ id: 'K1', requirementIds: ['C1'], field: 'items', effect: 'lock', expect: 'lock', event: 'app.record.edit.show', side: 'match', verdict: 'pass' }] } };
   const m2 = KTCodeReview.attachBehavior(rvT, VER_T, { requiredEffects: REQ_T, customization: CUST_T });
-  const cuT = m2.checks.find(ch => ch.name === 'coverage-unmet');
-  assert(rvT.coverage.notAchieved.some(x => x.code === 'SUBTABLE_ROWS') && cuT && cuT.limit === 'SUBTABLE_ROWS' && cuT.severity === 'review' && !cuT.partialRequired && m2.registration.verdict !== 'BLOCKED', `D15-3: limitCode SUBTABLE_ROWS の PARTIAL は「実現できない点」（確認のまま・登録不可にしない）: ${JSON.stringify({ cu: cuT, verdict: m2.registration.verdict })}`);
-  // D15-4: 同じ申告の文でも limitCode が無い（印の無い接続先・生成工程が制約と判定しない）PARTIAL は、文を読んで緩めずに要件未達（登録不可）
+  const apT = rvT.coverage.notAchieved.find(x => x.code === 'AI_PARTIAL');
+  assert(rvT.coverage.notAchieved.some(x => x.code === 'SUBTABLE_ROWS' && !x.fromLimitCode) && apT && apT.limit === 'SUBTABLE_ROWS' && m2.registration.verdict !== 'BLOCKED', `D15-3: limitCode SUBTABLE_ROWS の PARTIAL は「実現できない点」の印（登録不可にしない）: ${JSON.stringify({ ap: apT, verdict: m2.registration.verdict })}`);
+  // D15-4: 同じ申告の文でも limitCode が無い（印の無い接続先・生成工程が制約と判定しない）PARTIAL は、文を読んで明細の行の制約にしない（印を付けない）
   const rvN = KTCodeReview.review({ generated: gen(TABLE, [{ requirementId: 'C1', status: 'PARTIAL', note: 'セルは編集不可にしますが、行の追加・削除は JavaScript では止められません', text: '承認待ちでは明細を編集不可' }], [{ code: 'items', access: 'CONTROL' }]), customization: CUST_T, plan: null, data: clone(DATA_C), scan: null, existingSource: null });
-  const mN = KTCodeReview.attachBehavior(rvN, VER_T, { requiredEffects: REQ_T, customization: CUST_T });
-  const cuN = mN.checks.find(ch => ch.name === 'coverage-unmet');
-  assert(cuN && !cuN.limit && cuN.partialRequired && cuN.severity === 'block' && mN.registration.verdict === 'BLOCKED', `D15-4: limitCode の無い PARTIAL は申告の文（行の追加・削除）を読まずに要件未達: ${JSON.stringify(cuN)}`);
-  // D15-5: NOT_MET の修復しない印（noRepair）も limitCode だけで決める（文では決めない）
+  const apN = rvN.coverage.notAchieved.find(x => x.code === 'AI_PARTIAL');
+  assert(apN && !apN.limit && !rvN.checks.some(ch => ch.name === 'coverage-unmet'), `D15-4: limitCode の無い PARTIAL は申告の文（行の追加・削除）を読んで明細の行の制約にしない: ${JSON.stringify(apN)}`);
+  // D15-5: NOT_MET の明細の行の印も limitCode だけで決める（文では決めない）。登録の可否は生成工程の coverage（Toolkit は検査にしない）
   const rvM = KTCodeReview.review({ generated: gen(TABLE, [{ requirementId: 'C1', status: 'NOT_MET', note: '行の追加・削除は止められません', text: '明細の行を増やせないようにする', limitCode: 'SUBTABLE_ROWS' }], [{ code: 'items', access: 'CONTROL' }]), customization: CUST_T, plan: null, data: clone(DATA_C), scan: null, existingSource: null });
   const rvM0 = KTCodeReview.review({ generated: gen(TABLE, [{ requirementId: 'C1', status: 'NOT_MET', note: '行の追加・削除は止められません', text: '明細の行を増やせないようにする' }], [{ code: 'items', access: 'CONTROL' }]), customization: CUST_T, plan: null, data: clone(DATA_C), scan: null, existingSource: null });
-  const cM = rvM.checks.find(ch => ch.name === 'coverage-unmet'), cM0 = rvM0.checks.find(ch => ch.name === 'coverage-unmet');
-  assert(cM && cM.severity === 'block' && cM.noRepair && cM.limit === 'SUBTABLE_ROWS' && cM0 && cM0.severity === 'block' && !cM0.noRepair && !cM0.limit, `D15-5: NOT_MET は登録不可のまま。修復しない印は limitCode があるときだけ: ${JSON.stringify({ cM, cM0 })}`);
+  const nM = rvM.coverage.notAchieved.find(x => x.code === 'AI_NOT_MET'), nM0 = rvM0.coverage.notAchieved.find(x => x.code === 'AI_NOT_MET');
+  assert(nM && nM.limit === 'SUBTABLE_ROWS' && nM0 && !nM0.limit && ![rvM, rvM0].some(r => r.checks.some(ch => ch.name === 'coverage-unmet')), `D15-5: NOT_MET の明細の行の印は limitCode があるときだけ（Toolkit は検査にしない）: ${JSON.stringify({ nM, nM0 })}`);
   // D15-6: 入口（validateGenerated）は coverage の limitCode を落とさない（語彙は英大文字の語だけ）
   const vg = KTAiClient.validateGenerated({ ok: true, contractVersion: '2.1', generated: { strategy: 'NEW_JS_FILE', targetFile: 'a.js', code: 'x', coverage: [{ requirementId: 'C1', status: 'PARTIAL', note: 'n', limitCode: 'SUBTABLE_ROWS' }, { requirementId: 'C2', status: 'PARTIAL', note: 'n', limitCode: 'ないよう' }] } }, null);
   assert(vg.ok && vg.normalized.coverage[0].limitCode === 'SUBTABLE_ROWS' && !('limitCode' in vg.normalized.coverage[1]), `D15-6: validateGenerated は limitCode を保つ（語彙外は落とす）: ${JSON.stringify(vg.normalized && vg.normalized.coverage)}`);
@@ -2359,36 +2365,37 @@ await section(async () => {
   assert(out.every(r => r[1] === 'unsupported' && r[2] === false), `D49: §0c.9・§0c.10・§0c.11 の印が欠ける接続先は「接続先が非対応」: ${JSON.stringify(out)}`);
 });
 // D50（§0c.11・効果レビュー 6・rv7e P18）: 保存だけの警告（そのフィールドの効果がすべて保存のイベントだけの warn）は、保存の handler で確認のダイアログを出すだけで満たせる。
-//   フィールドのコードが候補に現れなくても、Gateway の必須の効果が present なら planned-fields で止めない。ほかの効果がある・Gateway が present を返さない・非対応なら止めたまま
+//   簡素化 B（2026-10-17）: 計画で制御するフィールドがコードに現れるかの判定（Toolkit の planned-fields と、保存だけの警告の例外）は削除した。処理の有無は生成工程の
+//   必須の効果（効果のイベントごとの処理の形）が決め、Toolkit はその結果（present・missing・unchecked・非対応）を取り込む
 await section(async () => {
   const EV_S = 'app.record.edit.submit';
   const CUST_SW = custOf([{ effect: 'warn', condition: '', events: [EV_S] }], { requirement: '承認待ちでは保存のときに確認する（保存は止めない）', events: [EV_S] });
   CAND.saveconfirm = { code: handlerC(`    if ((${ST_C}) && !window.confirm('承認待ちです。保存しますか？')) return false;`, [EV_S]), has: { amount: ['warn'] } };
   CAND.saveconfirmr = { code: handlerC(`    if ((${ST_C}) && !window.confirm('承認待ちです（金額: ' + record['amount'].value + '）。保存しますか？')) return false;`, [EV_S]), has: { amount: ['warn'] } };
-  const run = async (cust, o = {}) => { const x = makeConvC({ planImpl: (args) => planJs(args, { cust, summary: '承認待ちでは保存のときに確認します（保存は止めません）。' }), generate: makeGenerate({ sequence: [o.cand || 'saveconfirm'], ...(o.gen || {}) }) }); await adoptC(x); const v = x.c.activePlan(), e = v.generated.C1; return { v, e, pf: e.review.checks.find(ch => ch.name === 'planned-fields') || null }; };
+  const run = async (cust, o = {}) => { const x = makeConvC({ planImpl: (args) => planJs(args, { cust, summary: '承認待ちでは保存のときに確認します（保存は止めません）。' }), generate: makeGenerate({ sequence: [o.cand || 'saveconfirm'], ...(o.gen || {}) }) }); await adoptC(x); const v = x.c.activePlan(), e = v.generated.C1; return { v, e, pf: e.review.checks.find(ch => ch.name === 'planned-fields') || null, re: e.review.checks.find(ch => ch.name === 'required-effects') || null }; };
   const a = await run(CUST_SW);
-  assert(a.v.final.approvable === true && a.e.status === 'verified' && a.pf && a.pf.ok === true && JSON.stringify(a.pf.detail.saveOnlyWarn) === '["amount"]' && !a.e.review.checks.some(ch => !ch.ok && ch.severity === 'block'),
-    `D50-1（rv7e P18）: 保存だけの警告で確認のダイアログだけの正しい候補は承認できる（planned-fields は止めない）: ${JSON.stringify({ status: a.e.status, approvable: a.v.final.approvable, pf: a.pf, blocks: a.e.review.checks.filter(ch => !ch.ok && ch.severity === 'block').map(ch => ch.name) })}`);
-  //   対照（rv7e P18r）: フィールドを文に入れる候補は今までどおり承認できる（planned-fields は最初から無い）
+  assert(a.v.final.approvable === true && a.e.status === 'verified' && !a.pf && a.re && a.re.ok && !a.e.review.checks.some(ch => !ch.ok && ch.severity === 'block'),
+    `D50-1（rv7e P18）: 保存だけの警告で確認のダイアログだけの正しい候補は承認できる（Toolkit は planned-fields を作らない・必須の効果は生成工程の present）: ${JSON.stringify({ status: a.e.status, approvable: a.v.final.approvable, pf: a.pf, blocks: a.e.review.checks.filter(ch => !ch.ok && ch.severity === 'block').map(ch => ch.name) })}`);
+  //   対照（rv7e P18r）: フィールドを文に入れる候補も承認できる
   const r = await run(CUST_SW, { cand: 'saveconfirmr' });
-  assert(r.v.final.approvable === true && r.e.status === 'verified' && (!r.pf || r.pf.ok), `D50-2（rv7e P18r）: フィールドを文に入れる候補も承認できる: ${JSON.stringify({ status: r.e.status, pf: r.pf })}`);
-  //   同じフィールドに画面の編集不可もある（保存だけの警告ではない）→ planned-fields は止めたまま
+  assert(r.v.final.approvable === true && r.e.status === 'verified' && !r.pf, `D50-2（rv7e P18r）: フィールドを文に入れる候補も承認できる: ${JSON.stringify({ status: r.e.status, pf: r.pf })}`);
+  //   同じフィールドに画面の編集不可もある → 編集不可の処理が無いことは生成工程の必須の効果（missing）で止める
   const CUST_WL = custOf([{ effect: 'warn', condition: '', events: [EV_S] }, { effect: 'lock', condition: '', events: ['app.record.edit.show'] }], { requirement: '承認待ちでは金額を編集不可にし、保存のときに確認する', events: ['app.record.edit.show', EV_S] });
   const b = await run(CUST_WL);
-  assert(b.v.final.approvable === false && b.pf && b.pf.ok === false && b.pf.severity === 'block', `D50-3: ほかの効果（lock）があるフィールドは planned-fields で止めたまま: ${JSON.stringify({ status: b.e.status, pf: b.pf })}`);
-  //   表示のイベントの警告（保存だけではない）→ 止めたまま
+  assert(b.v.final.approvable === false && !b.pf && b.re && !b.re.ok && b.re.severity === 'block', `D50-3: ほかの効果（lock）の処理が無ければ、生成工程の必須の効果の missing で止める: ${JSON.stringify({ status: b.e.status, re: b.re })}`);
+  //   表示のイベントの警告（保存だけではない）→ 表示のイベントの処理が無いことは、生成工程の必須の効果（効果のイベントごとの処理の形）が missing で返す
   const CUST_WS = custOf([{ effect: 'warn', condition: '', events: ['app.record.edit.show', EV_S] }], { requirement: '承認待ちでは金額に警告を出す', events: ['app.record.edit.show', EV_S] });
-  const c = await run(CUST_WS);
-  assert(c.v.final.approvable === false && c.pf && c.pf.ok === false && c.pf.severity === 'block', `D50-4: 表示のイベントの警告は planned-fields で止めたまま（フィールドに error を出す処理が要る）: ${JSON.stringify({ status: c.e.status, pf: c.pf })}`);
-  //   Gateway が present を返さない（unchecked）→ 外さない（確かめられていない）
+  const c = await run(CUST_WS, { gen: { statusOverride: 'missing' } });
+  assert(c.v.final.approvable === false && !c.pf && c.re && !c.re.ok && c.re.severity === 'block', `D50-4: 表示のイベントの警告の処理が無ければ、生成工程の必須の効果の missing で止める: ${JSON.stringify({ status: c.e.status, re: c.re })}`);
+  //   Gateway が present を返さない（unchecked）→ 確かめられていないので止める
   const d = await run(CUST_SW, { gen: { statusOverride: 'unchecked' } });
-  assert(d.v.final.approvable === false && d.pf && d.pf.ok === false && d.pf.severity === 'block', `D50-5: 必須の効果が present でない（unchecked）なら planned-fields で止めたまま: ${JSON.stringify({ status: d.e.status, pf: d.pf })}`);
-  //   純関数: 生成工程が非対応（requiredEffects を返さない）なら外さない
+  assert(d.v.final.approvable === false && !d.pf && d.re && !d.re.ok && d.re.severity === 'block', `D50-5: 必須の効果が present でない（unchecked）なら止める: ${JSON.stringify({ status: d.e.status, re: d.re })}`);
+  //   純関数: 生成工程が非対応（requiredEffects を返さない）なら、必須の効果を確かめられないので止める（Toolkit の形式確認は planned-fields を作らない）
   const rv = KTCodeReview.review({ generated: { strategy: 'NEW_JS_FILE', targetFile: 'w.js', summary: 's', code: CAND.saveconfirm.code, patch: null, events: [EV_S], fields: [{ code: 'amount', access: 'CONTROL' }], apis: [], assumptions: [], warnings: [], coverage: [] }, customization: CUST_SW, plan: null, data: clone(DATA_C), scan: null, existingSource: null });
   const req = [{ requirementId: 'C1', requirementIds: ['C1'], field: 'amount', effect: 'warn', events: [EV_S], condition: 'ステータス in ("承認待ち")' }];
   const old = KTCodeReview.attachBehavior(rv, { version: '1', candidateHash: '0123456789abcdef', passed: true, machine: [] }, { requiredEffects: req, customization: CUST_SW });
-  const pf0 = rv.checks.find(ch => ch.name === 'planned-fields'), pf1 = old.checks.find(ch => ch.name === 'planned-fields');
-  assert(pf0 && pf0.severity === 'block' && JSON.stringify(pf0.detail.fields) === JSON.stringify([{ code: 'amount', access: 'CONTROL' }]) && pf1 && !pf1.ok && pf1.severity === 'block', `D50-6: 形式確認の planned-fields は対象のフィールドを detail.fields に持ち、生成工程が非対応なら止めたまま: ${JSON.stringify({ pf0, pf1 })}`);
+  const re1 = old.checks.find(ch => ch.name === 'required-effects');
+  assert(!rv.checks.some(ch => ch.name === 'planned-fields') && re1 && !re1.ok && re1.severity === 'block' && /対応していない/.test(re1.message), `D50-6: 生成工程が必須の効果の確認に非対応なら止める（Toolkit は planned-fields を作らない）: ${JSON.stringify({ re1 })}`);
   delete CAND.saveconfirm; delete CAND.saveconfirmr;
 });
 // D51（§0c.11・隔離レビュー 2）: アプリ解析の登録の印（eventsUnresolved）は、契約 20 §13 の登録の照合（Gateway の staticRegistrationsOf）と同じ言葉で決める。
@@ -2637,7 +2644,7 @@ await section(async () => {
   const r2 = await run(VAR_K);
   const v2 = r2.m.conv().activePlan(), e2 = v2 && v2.generated && v2.generated.C1;
   const mj = e2 && e2.verification && (e2.verification.machine || []).find(ch => ch.name === 'modern-js' && !ch.ok);
-  assert(e2 && e2.generated.code === VAR_K && e2.candidateHash === r2.sent[0].candidateHash && e2.status === 'unresolved' && e2.verdict.kind === 'machine' && mj && mj.severity === 'block' && !e2.review.checks.some(ch => ch.name === 'modern-js') && v2.final.approvable === false,
+  assert(e2 && e2.generated.code === VAR_K && e2.candidateHash === r2.sent[0].candidateHash && e2.status === 'unresolved' && e2.verdict.kind === 'machine' && mj && mj.severity === 'block' && !e2.review.checks.some(ch => ch.name === 'modern-js' && !ch.gateway) && e2.review.checks.some(ch => ch.name === 'modern-js' && ch.gateway && ch.severity === 'block') && v2.final.approvable === false,
     `E4-4: var を含む候補は書き換えず（candidateHash も生成工程のまま）、生成工程の機械検査の block で止める: ${JSON.stringify({ status: e2 && e2.status, same: e2 && e2.generated.code === VAR_K, mj: mj && mj.message })}`);
   //   簡素化 B（2026-10-17）: 登録の直前にも、登録する候補の指紋を Gateway と同じ計算で作り直して、生成工程の検証結果・承認の指紋に照らす。
   //   承認の欄の準備の前に候補だけが変わった（検証結果と承認の指紋はそのまま）→ 承認・登録の準備で止まり、動作テスト環境に書き込まない
@@ -2677,7 +2684,8 @@ await section(async () => {
   const memo = af.find(f => f.code === 'memo'), amount = af.find(f => f.code === 'amount'), appr = af.find(f => f.code === 'approver');
   assert(memo && memo.required === true && amount && !('required' in amount) && appr && appr.planned === true && appr.required === true, `E6-2: 必須の項目だけ required: true（必須でない項目には付けない・新設は計画の required）: ${JSON.stringify({ memo, amount, appr })}`);
 });
-// E7: 保存禁止を event.error で実装した正しい候補（sc-gate の S4）を planned-fields で止めない
+// E7: 保存禁止を event.error で実装した正しい候補（sc-gate の S4）を止めない
+//   簡素化 B（2026-10-17）: 計画で制御するフィールドがコードに現れるかの判定（Toolkit の planned-fields）は削除した。処理の有無は生成工程の必須の効果が決める
 await section(async () => {
   const CUST_S4 = custE([{ code: 'memo', access: 'CONTROL', condition: '', effects: [{ effect: 'block-save', condition: '', events: [] }] }], ['app.record.edit.submit'], '編集画面の保存を止める');
   const CODE_S4 = "(function () {\n  'use strict';\n  kintone.events.on(['app.record.edit.submit'], function (event) {\n    event.error = '保存できません';\n    return event;\n  });\n})();";
@@ -2685,19 +2693,18 @@ await section(async () => {
   const x = makeConvC({ planImpl: (args) => planJs(args, { cust: CUST_S4, summary: '編集画面の保存を止めます。' }), generate: makeGenE(CODE_S4, verS4(true)), supported: GEN_EFFECT_CHECK });
   await adoptC(x);
   const v = x.c.activePlan(), e = v.generated.C1;
-  const pf = e.review.checks.find(ch => ch.name === 'planned-fields');
   const raw = KTCodeReview.review({ generated: { strategy: 'NEW_JS_FILE', targetFile: 'c1.js', summary: '', code: CODE_S4, patch: null, events: CUST_S4.events, fields: [{ code: 'memo', access: 'CONTROL' }], apis: [], assumptions: [], warnings: [], coverage: [] }, customization: CUST_S4, plan: v.plan, data: clone(DATA_C), scan: null, existingSource: null });
-  assert(raw.checks.some(ch => ch.name === 'planned-fields' && !ch.ok && ch.severity === 'block') && pf && pf.ok === true && JSON.stringify(pf.detail.saveOnlyWarn) === '["memo"]' && /保存を止める/.test(pf.message) && e.status === 'verified' && v.final.approvable === true,
-    `E7-1（sc-gate S4）: 保存のイベントの event.error で保存を止める正しい候補は、必須の効果が present なら planned-fields で止めない（承認できる）: ${JSON.stringify({ pf: pf && [pf.ok, pf.severity, pf.message], status: e.status, reason: v.final.blockingReason })}`);
-  // 模擬テストの環境が無いとき: planned-fields ではなく「模擬テストが要る（保存を止める）」で準備未完了
+  assert(!raw.checks.some(ch => ch.name === 'planned-fields') && !e.review.checks.some(ch => ch.name === 'planned-fields') && e.status === 'verified' && v.final.approvable === true,
+    `E7-1（sc-gate S4）: 保存のイベントの event.error で保存を止める正しい候補は、必須の効果が present なら承認できる（Toolkit は planned-fields を作らない）: ${JSON.stringify({ status: e.status, reason: v.final.blockingReason })}`);
+  // 模擬テストの環境が無いとき: 「模擬テストが要る（保存を止める）」で準備未完了
   const y = makeConvC({ planImpl: (args) => planJs(args, { cust: CUST_S4, summary: '編集画面の保存を止めます。' }), generate: makeGenE(CODE_S4, verS4(false)), supported: GEN_EFFECT_CHECK });
   await adoptC(y);
   const vy = y.c.activePlan(), ey = vy.generated.C1;
   assert(vy.final.approvable === false && ey.status === 'not-run' && !ey.review.registration.blockers.some(b => b.code === 'planned-fields') && /この効果は模擬テストで確かめる必要があります（保存を止める）/.test(ey.verdict.reason),
-    `E7-2: 隔離環境が無いときは planned-fields ではなく、模擬テストが要る理由（保存を止める）で準備未完了: ${JSON.stringify({ status: ey.status, reason: ey.verdict.reason, blockers: ey.review.registration.blockers.map(b => b.code) })}`);
-  // 保存以外のイベントもある block-save・present でない場合は外さない（今のまま）
+    `E7-2: 隔離環境が無いときは、模擬テストが要る理由（保存を止める）で準備未完了: ${JSON.stringify({ status: ey.status, reason: ey.verdict.reason, blockers: ey.review.registration.blockers.map(b => b.code) })}`);
+  // 生成工程の必須の効果が present でない → 生成工程の結果（missing）で止める
   const rvX = KTCodeReview.attachBehavior(raw, verE([gwE('memo', 'block-save', 'behavior', ['app.record.edit.submit'], { status: 'missing' })], casesNR([['memo', 'block-save', ['app.record.edit.submit'], false]], null, 'pass'), 'passed', null), { requiredEffects: [reqE('memo', 'block-save', ['app.record.edit.submit'])], customization: CUST_S4, effectCheck: true });
-  assert(rvX.checks.some(ch => ch.name === 'planned-fields' && !ch.ok && ch.severity === 'block'), 'E7-3: 生成工程の必須の効果が present でなければ、planned-fields の対象から外さない');
+  assert(rvX.checks.some(ch => ch.name === 'required-effects' && !ch.ok && ch.severity === 'block') && !rvX.checks.some(ch => ch.name === 'planned-fields'), 'E7-3: 生成工程の必須の効果が present でなければ、その結果（missing）で止める');
 });
 // E8: 表示（sc-display の (a)(b)）: 最終案のカードに未確認の一覧を出す・生成工程の隔離環境は「模擬テスト」、kintone のプレビューは「動作テスト環境」
 await section(async () => {
@@ -2888,7 +2895,7 @@ await section(async () => {
   const scan2 = buildScanPayload({ KTScan, KTDeps }, { appId: FX.SELF_APP, files: [{ name: 'dealLock.js', target: 'desktop', kind: 'js', text: DEAL }], fields: fieldsN.map(f => ({ code: f.code, label: f.label, type: f.rawType })), deps: KTDeps.buildDependencyData(data2, fieldsN) });
   const custW = { customizationId: 'C1', requirement: '100万円を超えたら警告', strategy: 'NEW_JS_FILE', platform: ['desktop'], events: ['app.record.edit.show'], fields: [{ code: 'amount', access: 'CONTROL' }] };
   const rv = KTCodeReview.review({ generated: { strategy: 'NEW_JS_FILE', targetFile: 'warn.js', code: WARN_SHOW, patch: null, events: custW.events, fields: custW.fields, apis: [] }, customization: custW, plan: null, data: data2, scan: scan2, existingSource: null });
-  assert(!rv.checks.some(ch => ch.name === 'error-cancels-other-js') && !KTCodeReview.kintoneFieldOps(WARN_SHOW).some(o => 'errorGuarded' in o), `F8-2: Toolkit の形式確認に error-cancels-other-js・errorGuarded は無い（生成工程の模擬テストの fail で扱う）: ${JSON.stringify(rv.checks.filter(ch => !ch.ok).map(ch => ch.name))}`);
+  assert(!rv.checks.some(ch => ch.name === 'error-cancels-other-js') && typeof KTCodeReview.kintoneFieldOps === 'undefined', `F8-2: Toolkit の形式確認に error-cancels-other-js・errorGuarded は無い（生成工程の模擬テストの fail で扱う）: ${JSON.stringify(rv.checks.filter(ch => !ch.ok).map(ch => ch.name))}`);
   //   C-1 第 3 段（2026-10-08）: 既存 JS の編集不可の条件（承認済みなど）が隔離環境の代表条件で成り立たず、取り消しを観測できない → 生成工程は
   //   existing-lock-unverified の not-run を返す。Toolkit は既存 JS の区分で準備未完了（合格にしない・修復を依頼しない）にし、
   //   ［計画を直すよう依頼する］の文を構造化した値（details.files のファイル名）から作る

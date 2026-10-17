@@ -81,7 +81,8 @@ function createReplay(T, K) {
   const recheckOf = (x, cid, { ownersOff = false } = {}) => {
     const v = x.c.activePlan(), g = v.generated[cid];
     let rv = KTCodeReview.review({ generated: g.generated, customization: custOf(v, cid), plan: v.plan, data: clone(DATA), scan: null, existingSource: g.existingSource ? { name: g.existingSource.name, target: g.existingSource.target, text: g.existingSource.text } : null, provenance: null, existingOnly: true, ...(ownersOff ? {} : { requirements: (() => { const gp = typeof x.c.implementationGaps === 'function' ? x.c.implementationGaps(v) : {}; return x.c.requirementsInScope(v.planId, v.plan || null).map(r => (r && gp[r.id] ? { ...r, gapScreen: gp[r.id] } : r)); })(), planOwners: x.c.planOwnerIds(v) }) });
-    if (g.verification && ((Array.isArray(g.requiredEffects) && g.requiredEffects.length) || g.verification.behavior)) rv = KTCodeReview.attachBehavior(rv, g.verification, { requiredEffects: g.requiredEffects || [], customization: custOf(v, cid), omitted: g.relatedOmitted || [], effectCheck: g.effectCheck != null ? g.effectCheck === true : T.ktEffectCheckCapable ? T.ktEffectCheckCapable(x.services.generatorFeatures() || []) : true });
+    //   簡素化 B（2026-10-17）: 画面の jsRecheckOf と同じく、生成工程の検証結果があれば常に取り込む（機械検査の項目も検査の一覧に入る）
+    if (g.verification) rv = KTCodeReview.attachBehavior(rv, g.verification, { requiredEffects: g.requiredEffects || [], customization: custOf(v, cid), omitted: g.relatedOmitted || [], effectCheck: g.effectCheck != null ? g.effectCheck === true : T.ktEffectCheckCapable ? T.ktEffectCheckCapable(x.services.generatorFeatures() || []) : true });
     return rv;
   };
   return { F, LABELS, NUMBERS, COLUMNS, READONLY, DATA, run, leftHtml, rightHtml, recheckOf, viewOf };

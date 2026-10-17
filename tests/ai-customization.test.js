@@ -226,7 +226,7 @@ console.log('\n--- §52-1. KTCodeReview: 新規 JS OK / patch OK ---');
   const prov = { planId: 'plan-1', planVersion: 1, customizationId: 'C1', generatedAt: '2026-10-03T00:00:00.000Z', appId: '310', requestId: 'gen-1' };
   const rv = KTCodeReview.review({ generated: genNew(), customization: nw.plan.customizations[0], plan: nw.plan, data: INPUTS_PLAIN.data, scan: INPUTS_PLAIN.scan, existingSource: null, provenance: prov });
   assert(rv.status === 'OK', `新規 JS（妥当）: status OK（${(rv.checks || []).filter(c => !c.ok).map(c => `${c.name}: ${c.message}`).join(' / ') || 'すべて ✓'}）`);
-  assert(check(rv, 'syntax')?.ok && check(rv, 'events')?.ok && check(rv, 'fields')?.ok && check(rv, 'security')?.ok && check(rv, 'globals')?.ok && check(rv, 'return-event')?.ok && check(rv, 'plan-consistency')?.ok, 'チェック項目: 構文 / イベント / フィールド / セキュリティ / グローバル汚染 / return event / 計画との一致');
+  assert(!['syntax', 'events', 'fields', 'security', 'globals', 'return-event', 'plan-consistency'].some(n => check(rv, n)), 'チェック項目（簡素化 B）: 候補の検査（構文・イベント・フィールド・安全・return event・計画との一致）は生成工程。Toolkit の形式確認は作り直さない');
   assert(rv.finalCode === NEW_JS_GOOD && rv.diff && rv.diff.added === NEW_JS_GOOD.split('\n').length && rv.diff.removed === 0, '新規 JS: finalCode ＝ 全文・diff は全行追加');
   assert(rv.rescan && rv.rescan.events.map(e => e.name).includes('app.record.create.change.amount') && rv.rescan.fieldAccess.amount && rv.rescan.fieldAccess.amount.CONTROL, 'KTScan の再解析（仮想ファイル）: イベント・amount CONTROL');
   assert(rv.provenance && rv.provenance.planId === 'plan-1' && rv.provenance.customizationId === 'C1' && rv.provenance.codeHash === hash(NEW_JS_GOOD) && rv.provenance.reviewedAt, 'provenance（計画・版・customization・requestId・コードの指紋）');
@@ -235,7 +235,7 @@ console.log('\n--- §52-1. KTCodeReview: 新規 JS OK / patch OK ---');
   const rp = KTCodeReview.review({ generated: genPatch(), customization: hy.plan.customizations[0], plan: hy.plan, data: INPUTS.data, scan: INPUTS.scan, existingSource: SRC });
   assert(rp.status === 'OK', `既存 JS への patch（妥当）: status OK（${(rp.checks || []).filter(c => !c.ok).map(c => `${c.name}: ${c.message}`).join(' / ') || 'すべて ✓'}）`);
   assert(check(rp, 'patch')?.ok && rp.diff.added === 3 && rp.diff.removed === 0 && rp.finalCode.includes(FIELD_ON_OFF.split('\n')[2]) && rp.finalCode.includes("value === '完了'"), 'patch: 既存の行は保持（削除 0）・3 行追加・最終コードは既存 ＋ 追加');
-  assert(check(rp, 'handler')?.ok && /既存の handler/.test(check(rp, 'handler').message), '既存 handler の中へ追加（kintone.events.on を重複登録しない）');
+  assert(!check(rp, 'handler'), '既存 handler の中へ追加: 登録の形（handler）は Toolkit では判定しない（簡素化 B。生成工程の検査）');
   assert(rp.patch?.applied === 1 && rp.patch.afterHash === hash(rp.finalCode) && typeof rp.diffText === 'string' && /\+\s*if \(record\['ステータス'\] && record\['ステータス'\]\.value === '完了'\)/.test(rp.diffText), 'patch の適用結果（afterHash）と Before / After の diff テキスト');
   assert(!check(rp, 'duplicate-handler') || check(rp, 'duplicate-handler').ok, '重複 handler なし');
 }
@@ -246,62 +246,41 @@ console.log('\n--- §52-2. KTCodeReview: 構文 / 未知イベント / 未知フ
   const nw = reviewPlan(PLAN_NEW_JS, INPUTS_PLAIN);
   const c = nw.plan.customizations[0];
   const run = (code, g = {}) => KTCodeReview.review({ generated: genNew(code, g), customization: c, plan: nw.plan, data: INPUTS_PLAIN.data, scan: INPUTS_PLAIN.scan, existingSource: null });
-  const syn = run(NEW_JS_GOOD.replace('return event;', 'return event'.slice(0, 6) + ' event event;'));
-  assert(syn.status === 'BLOCKED' && check(syn, 'syntax') && !check(syn, 'syntax').ok, '構文エラー: BLOCKED（parse のみ。実行しない）');
-  const badEv = run(NEW_JS_GOOD.replace("'app.record.edit.change.amount'", "'app.record.update.show'"));
-  assert(badEv.status === 'BLOCKED' && !check(badEv, 'events').ok && /app\.record\.update\.show/.test(check(badEv, 'events').message), '存在しないイベント app.record.update.show: BLOCKED');
-  const badField = run(NEW_JS_GOOD.replace("record['amount'].value", "record['amount_total'].value"));
-  assert(badField.status === 'BLOCKED' && !check(badField, 'fields').ok && /GENERATED_JS_UNKNOWN_FIELD/.test(check(badField, 'fields').message) && /amount_total/.test(check(badField, 'fields').message), '存在しないフィールド amount_total: GENERATED_JS_UNKNOWN_FIELD（BLOCKED）');
-  // Phase 20: 計画外の書き換えは error を設定しない別の handler で確かめる（同じ change イベントで error と value を設定すると、kintone が value を取り消すので別の検査で BLOCKED になる）
-  const extraWrite = run(NEW_JS_GOOD.replace("})();", "  kintone.events.on(['app.record.create.show'], function (event) {\n    event.record['approver'].value = [];\n    return event;\n  });\n})();"));
-  assert(extraWrite.status === 'BLOCKED' && !check(extraWrite, 'target-fields').ok && check(extraWrite, 'target-fields').severity === 'block' && /approver/.test(check(extraWrite, 'target-fields').message) && extraWrite.registration.verdict === 'BLOCKED' && extraWrite.mismatches.some(m => m.code === 'EXTRA_FIELD_WRITE' && m.items.includes('approver')), '計画に無いフィールド（approver）の書き換え: 対象と異なるフィールド → 登録不可（Phase 21。以前は確認が必要の扱い）');
-  // C-1 第 2 段（設計 §0d.4）: 同じ表示・変更のイベントで error と value を設定したときの取り消し（旧 error-cancels-edit）は Toolkit の推定では判定しない。
-  // 生成工程の回帰で守る: 隔離環境 sandbox/test/run.mjs「R13 値の変更と error: 値の変更も取り消される（元の値に戻る）」、
-  // Gateway worker/test/cases/required-effects.mjs「§0d.1 S7（既知の競合）」（同じイベントの error は check behavior。判定は模擬テスト）
-  const extraApi = run(NEW_JS_GOOD.replace("    return event;", "    kintone.api(kintone.api.url('/k/v1/records.json', true), 'GET', { app: 600 });\n    return event;"));
-  assert(extraApi.status === 'REVIEW_REQUIRED' && check(extraApi, 'apis-network') && !check(extraApi, 'apis-network').ok && /kintone\.api/.test(check(extraApi, 'apis-network').message), '計画に無い REST API（kintone.api）: 確認が必要（単純な制御には不要）');
-  const missingEv = run(NEW_JS_GOOD.replace("['app.record.create.change.amount', 'app.record.edit.change.amount']", "'app.record.create.change.amount'"));
-  // Phase 20（実機 BF-C 4 回目）: 計画の change を登録しないコードは入力中に切り替わらない → 軽微な差ではなく要確認に変更
-  assert(missingEv.mismatches.some(m => m.code === 'MISSING_EVENT' && m.items.includes('app.record.edit.change.amount')) && !check(missingEv, 'planned-events').ok && check(missingEv, 'planned-events').severity === 'block' && /入力中に切り替わりません/.test(check(missingEv, 'planned-events').message) && missingEv.status === 'BLOCKED' && missingEv.registration.verdict === 'BLOCKED', '計画のイベントがコードに無い: 登録不可（Phase 21。change が無いと入力中に切り替わらない。以前は確認が必要の扱い）');
-  const extraEv = run(NEW_JS_GOOD.replace("['app.record.create.change.amount', 'app.record.edit.change.amount']", "['app.record.create.change.amount', 'app.record.edit.change.amount', 'app.record.detail.show']"));
-  assert(extraEv.status === 'REVIEW_REQUIRED' && extraEv.mismatches.some(m => m.code === 'EXTRA_EVENT'), '計画に無いイベントの登録: 計画との不一致（確認が必要）');
-  const dangerous = run(NEW_JS_GOOD.replace("    return event;", "    eval('1 + 1');\n    return event;"));
-  assert(dangerous.status === 'BLOCKED' && !check(dangerous, 'security').ok && /eval/i.test(check(dangerous, 'security').message), '危険 API（eval）: BLOCKED');
-  const secret = run(NEW_JS_GOOD.replace("    return event;", "    const h = { Authorization: 'Bearer abcdefghijklmnop1234567890' };\n    return event;"));
-  assert(secret.status === 'BLOCKED' && !check(secret, 'security').ok, 'ハードコードされた Authorization: BLOCKED');
-  const token = run(NEW_JS_GOOD.replace("    return event;", "    const API_TOKEN = 'sk_live_0123456789abcdefABCDEF';\n    return event;"));
-  assert(token.status === 'BLOCKED' && !check(token, 'security').ok, 'ハードコードされた token: BLOCKED');
-  const ext = run(NEW_JS_GOOD.replace("    return event;", "    fetch('https://api.example.com/notify', { method: 'POST', body: JSON.stringify({ amount: amount }) });\n    return event;"));
-  assert(ext.status === 'BLOCKED' && !check(ext, 'security').ok && /外部|example\.com|POST/i.test(check(ext, 'security').message), '外部への POST: BLOCKED（既定で外部通信は禁止）');
-  const cookie = run(NEW_JS_GOOD.replace("    return event;", "    const ck = document.cookie;\n    return event;"));
-  assert(cookie.status === 'BLOCKED' && !check(cookie, 'security').ok, 'document.cookie: BLOCKED');
-  const globals = run("const EVENTS = ['app.record.create.change.amount', 'app.record.edit.change.amount'];\nkintone.events.on(EVENTS, function (event) { event.record['amount'].error = null; return event; });");
-  assert(globals.status === 'REVIEW_REQUIRED' && !check(globals, 'globals').ok, '即時関数で包まない（グローバル汚染）: 確認が必要');
-  const noReturn = run(NEW_JS_GOOD.replace("    return event;\n", ""));
-  assert(noReturn.status === 'REVIEW_REQUIRED' && !check(noReturn, 'return-event').ok, 'return event が無い handler: 確認が必要');
-  // 実機（Scenario C）: 名前付き関数を handler に渡す形（kintone.events.on(EVENTS, checkAmount)）でも return event を本体から判定する
-  const NAMED = [
-    "(function () {",
-    "  'use strict';",
-    "  const EVENTS = ['app.record.create.change.amount', 'app.record.edit.change.amount'];",
-    "  function checkAmount(event) {",
-    "    const record = event.record;",
-    "    record['amount'].error = Number(record['amount'].value || 0) >= 1000000 ? '100万円以上です' : null;",
-    "    return event;",
-    "  }",
-    "  kintone.events.on(EVENTS, checkAmount);",
-    "})();",
-  ].join('\n');
-  const named = run(NAMED);
-  assert(check(named, 'return-event')?.ok && check(named, 'events')?.ok && named.status === 'OK', `名前付き関数の handler: 定義の本体で return event を判定（${check(named, 'return-event')?.message}）`);
-  const namedArrow = run(NAMED.replace("  function checkAmount(event) {", "  const checkAmount = (event) => {").replace("    return event;\n  }", "    return event;\n  };"));
-  assert(check(namedArrow, 'return-event')?.ok, 'アロー関数を const に入れた handler も同様');
-  const namedNoReturn = run(NAMED.replace("    return event;\n", ""));
-  assert(!check(namedNoReturn, 'return-event').ok, '名前付き関数に return event が無ければ指摘する');
-  const dup = run(NEW_JS_GOOD.replace("})();", "  kintone.events.on('app.record.create.change.amount', function (event) { return event; });\n})();"));
-  assert(!check(dup, 'duplicate-handler').ok, '同じイベントを 2 回登録: 確認が必要');
-  const awaitBad = run(NEW_JS_GOOD.replace("    return event;", "    await Promise.resolve();\n    return event;"));
-  assert(awaitBad.status === 'BLOCKED', 'async でない handler の await: BLOCKED（構文エラー）');
+  //   簡素化 B（2026-10-17）: 生成した候補の検査（構文・記法・イベント・フィールド・計画との一致・通信 API・秘密情報と危険な呼び出し・return event）は
+  //   生成工程（Gateway）の機械検査が正本（AI版 worker/src/v2/toolkit/verify-generated.mjs の machineChecks。本物の部品で確かめるのは AI版 worker のテスト
+  //   （customization-generator.mjs・required-effects.mjs）と sandbox/test/cross-toolkit.mjs）。Toolkit の形式確認はこれらを作り直さない
+  //   （以前の期待: Toolkit の syntax・events・fields・target-fields・apis-network・planned-events・security・globals・return-event・duplicate-handler で止める・確認にする）。
+  //   即時関数で包まない宣言（globals）と同じイベントの 2 回の登録（duplicate-handler）は生成工程にも同じ規則が無く、移植していない（判定しない範囲として残る）
+  const BAD = {
+    syntax: NEW_JS_GOOD.replace('return event;', 'return event'.slice(0, 6) + ' event event;'),
+    unknownEvent: NEW_JS_GOOD.replace("'app.record.edit.change.amount'", "'app.record.update.show'"),
+    unknownField: NEW_JS_GOOD.replace("record['amount'].value", "record['amount_total'].value"),
+    extraWrite: NEW_JS_GOOD.replace("})();", "  kintone.events.on(['app.record.create.show'], function (event) {\n    event.record['approver'].value = [];\n    return event;\n  });\n})();"),
+    extraApi: NEW_JS_GOOD.replace("    return event;", "    kintone.api(kintone.api.url('/k/v1/records.json', true), 'GET', { app: 600 });\n    return event;"),
+    missingEvent: NEW_JS_GOOD.replace("['app.record.create.change.amount', 'app.record.edit.change.amount']", "'app.record.create.change.amount'"),
+    extraEvent: NEW_JS_GOOD.replace("['app.record.create.change.amount', 'app.record.edit.change.amount']", "['app.record.create.change.amount', 'app.record.edit.change.amount', 'app.record.detail.show']"),
+    eval: NEW_JS_GOOD.replace("    return event;", "    eval('1 + 1');\n    return event;"),
+    secret: NEW_JS_GOOD.replace("    return event;", "    const h = { Authorization: 'Bearer abcdefghijklmnop1234567890' };\n    return event;"),
+    token: NEW_JS_GOOD.replace("    return event;", "    const API_TOKEN = 'sk_live_0123456789abcdefABCDEF';\n    return event;"),
+    external: NEW_JS_GOOD.replace("    return event;", "    fetch('https://api.example.com/notify', { method: 'POST', body: JSON.stringify({ amount: amount }) });\n    return event;"),
+    cookie: NEW_JS_GOOD.replace("    return event;", "    const ck = document.cookie;\n    return event;"),
+    globals: "const EVENTS = ['app.record.create.change.amount', 'app.record.edit.change.amount'];\nkintone.events.on(EVENTS, function (event) { event.record['amount'].error = null; return event; });",
+    noReturn: NEW_JS_GOOD.replace("    return event;\n", ""),
+    duplicate: NEW_JS_GOOD.replace("})();", "  kintone.events.on('app.record.create.change.amount', function (event) { return event; });\n})();"),
+    awaitBad: NEW_JS_GOOD.replace("    return event;", "    await Promise.resolve();\n    return event;"),
+  };
+  const OLD_CHECKS = ['syntax', 'events', 'fields', 'target-fields', 'apis-network', 'planned-events', 'security', 'globals', 'return-event', 'duplicate-handler', 'plan-consistency', 'handler', 'platform'];
+  for (const [name, code] of Object.entries(BAD)) {
+    const rv = run(code);
+    const old = (rv.checks || []).filter(x => OLD_CHECKS.includes(x.name)).map(x => x.name);
+    assert(!old.length && rv.status !== 'BLOCKED' && rv.finalCode === code, `簡素化 B: ${name} の候補を Toolkit の形式確認では検査し直さない（生成工程の機械検査の範囲）: ${JSON.stringify(old)} ${rv.status}`);
+  }
+  //   生成工程の結果の取り込み: block の項目は登録不可、review の項目は承認の欄の確認事項。合格の項目も生成工程の項目（gateway）として残す（Toolkit は判定を弱めない）
+  const withGw = (rv, machine) => KTCodeReview.attachBehavior(rv, { version: '1', candidateHash: '0123456789abcdef', passed: !machine.some(x => !x.ok && x.severity === 'block'), machine, requiredEffects: [], behavior: { status: 'not-run', reason: 'no-required-effects', cases: [] } }, { requiredEffects: [], customization: c });
+  const synV = withGw(run(BAD.syntax), [{ name: 'syntax', ok: false, severity: 'block', message: '構文解析に失敗しました' }]);
+  assert(synV.status === 'BLOCKED' && synV.registration.verdict === 'BLOCKED' && synV.registration.blockers.some(b => b.code === 'syntax'), '生成工程の syntax（block）→ 登録不可');
+  const apiV = withGw(run(BAD.extraApi), [{ name: 'syntax', ok: true, severity: 'info', message: '構文解析を通りました' }, { name: 'apis', ok: false, severity: 'review', message: '計画に無い通信 API を使っています: 「kintone.api」' }]);
+  assert(apiV.status === 'REVIEW_REQUIRED' && apiV.registration.verdict === 'NEEDS_CONFIRMATION' && apiV.registration.confirmations.some(x => x.code === 'apis') && apiV.checks.some(x => x.name === 'syntax' && x.ok && x.gateway), '生成工程の apis（review）→ 確認事項。合格の項目も生成工程の項目として残す');
   const empty = run('   ');
   assert(empty.status === 'BLOCKED' && check(empty, 'code') && !check(empty, 'code').ok, '空のコード: BLOCKED');
   // patch の失敗
@@ -327,15 +306,12 @@ console.log('\n--- §52-2. KTCodeReview: 構文 / 未知イベント / 未知フ
   // 計画の段階の同じフィールドを扱う情報（JS_SHARED_FIELD。簡素化 §5 で競合・要確認から情報に変えた。§51 の上の期待）は残る。実際の競合は生成工程の回帰で守る:
   // Gateway worker/test/cases/required-effects.mjs「§0d.1 の 2: 同じ platform の既存 JS（送ったもの）がそのイベントを登録する…→ behavior（existing-same-event）」・
   // 「レビュー S11: 既存 JS の error で候補の編集不可が取り消される → not-run（existing…）」、隔離環境 sandbox/test/run.mjs「R13 別ファイル: 既存の disabled が候補の error で取り消される」
-  // 実機（Phase 17 E2E C）: モバイル JS への統合（patch。追加分に handler なし）では、PC の既存 JS は競合にならず、platform は最終ファイルのイベントで判定する
+  // 実機（Phase 17 E2E C）: モバイル JS への統合（patch。追加分に handler なし）では、PC の既存 JS は競合にならない（画面ごとの判定は生成工程の必須の効果。簡素化 B で Toolkit の platform を削除した）
   const MOBILE_LOCK_SRC = ['(function () {', "  'use strict';", "  kintone.events.on('mobile.app.record.edit.show', function (event) {", "    event.record['owner'].disabled = true;", '    return event;', '  });', '})();'].join(String.fromCharCode(10));
   const mobCust = { customizationId: 'C1', requirement: '承認待ちは金額も編集不可', strategy: 'EXTEND_EXISTING_JS', platform: ['mobile'], events: ['mobile.app.record.edit.show'], fields: [{ code: 'amount', access: 'CONTROL' }], apis: [], existingFiles: [{ name: 'mobileLock.js', target: 'mobile' }] };
   const mobPatch = { baseHash: hash(MOBILE_LOCK_SRC), operations: [{ type: 'INSERT_AFTER', anchor: "    event.record['owner'].disabled = true;", content: ["    if (event.record['ステータス'].value === '承認待ち') {", "      event.record['amount'].disabled = true;", '    }'].join(String.fromCharCode(10)) }] };
   const mobRv = KTCodeReview.review({ generated: { strategy: 'EXTEND_EXISTING_JS', targetFile: 'mobileLock.js', summary: 'm', code: mobPatch.operations[0].content, patch: mobPatch, events: ['mobile.app.record.edit.show'], fields: [{ code: 'amount', access: 'CONTROL' }], apis: [] }, customization: mobCust, plan: PLAN_HYBRID.plan, data: INPUTS.data, scan: INPUTS.scan, existingSource: { name: 'mobileLock.js', target: 'mobile', text: MOBILE_LOCK_SRC } });
-  assert(mobRv.status === 'OK' && check(mobRv, 'platform').ok, `モバイル JS への統合: PC の fieldOnOff.js は競合にならず（確認に出ない）、platform は最終ファイルの mobile イベントで整合（${(mobRv.checks || []).filter(c => !c.ok).map(c => c.name).join(',') || 'すべて ✓'}）`);
-  // platform
-  const mobilePlan = KTCodeReview.review({ generated: genNew(), customization: { ...NEW_JS_CUST(), platform: ['desktop', 'mobile'] }, plan: PLAN_NEW_JS.plan, data: INPUTS_PLAIN.data, scan: INPUTS_PLAIN.scan });
-  assert(!check(mobilePlan, 'platform').ok, '計画はモバイルも対象なのに mobile.* のイベントが無い: 確認が必要');
+  assert(mobRv.status === 'OK' && !check(mobRv, 'platform'), `モバイル JS への統合: PC の fieldOnOff.js は競合にならず（確認に出ない）、統合した本文を作れる（${(mobRv.checks || []).filter(c => !c.ok).map(c => c.name).join(',') || 'すべて ✓'}）`);
 }
 
 // =========================================================
@@ -353,8 +329,9 @@ const PLAN_HYBRID_V = planOf({ steps: [STD_STEP(), JS_STEP()], customizations: [
 /**
  * 画面（K.mount）に、この節の入力（fieldOnOff.js あり）・計画・生成を差し込む。
  *   planResponse = 計画の AI の応答（関数なら ctx から）/ generatedFor = 生成のコード（例外を投げれば Gateway のエラー）/ has = 偽の検証で「処理あり」とする効果
+ *   fails = 模擬テストで不合格にする効果（`フィールド|効果`）/ verify = 偽の検証結果を本物の生成工程と同じ形に足す関数（機械検査の項目など）
  */
-function mountV({ inputs = INPUTS, planResponse = PLAN_HYBRID_V, generatedFor = null, health = HEALTH_V, has = { amount: ['lock'] }, loadJsSource = undefined } = {}) {
+function mountV({ inputs = INPUTS, planResponse = PLAN_HYBRID_V, generatedFor = null, health = HEALTH_V, has = { amount: ['lock'] }, fails = [], failMsg = undefined, verify = null, loadJsSource = undefined } = {}) {
   const calls = { plan: [], generate: [] };
   const copies = [], downloads = [];
   const mock = makeKintoneMock(inputs.data, { jsSources: [{ name: 'fieldOnOff.js', target: 'desktop', text: FIELD_ON_OFF }] });
@@ -370,7 +347,8 @@ function mountV({ inputs = INPUTS, planResponse = PLAN_HYBRID_V, generatedFor = 
     const g = generatedFor ? generatedFor(ctx) : genPatch({ ...PATCH_GOOD, baseHash: ctx.existingFile?.hash || PATCH_GOOD.baseHash });
     const resp = genResponse(ctx, g);
     //   簡素化 B（2026-10-17）: 本物の Gateway と同じく、検証結果に候補の指紋（Gateway と同じ計算）を入れる
-    resp.verification = K.fakeVerification({ code: g.code, has }, (ctx.verification && ctx.verification.requiredEffects) || [], { candidateHash: gwHashOfCtx(ctx, resp.generated) });
+    resp.verification = K.fakeVerification({ code: g.code, has, fails, ...(failMsg ? { failMsg } : {}) }, (ctx.verification && ctx.verification.requiredEffects) || [], { candidateHash: gwHashOfCtx(ctx, resp.generated) });
+    if (verify) resp.verification = verify(resp.verification);
     const v = KTAiClient.validateGenerated(resp, ctx);
     if (!v.ok) throw new KTAiClient.AiClientError({ code: v.errors[0].code, message: v.errors[0].message, requestId });
     return { ...v.normalized, requestId, clientWarnings: v.warnings };
@@ -422,7 +400,7 @@ const clickCode = (m, id) => m.$('kt-ai-pane-code').dispatch({ type: 'click', ta
   // 右の「コード」: コード / Diff / 検査の内訳 / 登録ボタン（会話のコードのカードは削除した。右の「コード」は残す）
   m.panel.showCode('C1', { view: 'code' });
   assert(m.panel.drawerState().open && m.panel.drawerState().pane === 'code' && m.$('kt-ai-code-view').textContent === entry.review.finalCode && m.$('kt-ai-code-view').style.display === '' && m.$('kt-ai-diff-view').style.display === 'none', '右の「コード」: 最終コード');
-  assert(/✎ 既存 JS を変更/.test(m.$('kt-ai-code-head').innerHTML) && /✓ 検査を通過/.test(m.$('kt-ai-code-head').innerHTML) && /既存ファイルへの統合/.test(m.$('kt-ai-code-review').innerHTML) && /元のコードは保持/.test(m.$('kt-ai-code-review').innerHTML) && /＋3 行 \/ −0 行/.test(m.$('kt-ai-code-review').innerHTML) && /安全性/.test(m.$('kt-ai-code-review').innerHTML) && !/Patch|Security/.test(m.$('kt-ai-code-review').innerHTML), '右の「コード」: 見出し（✓ 検査を通過）と Code Review の一覧（既存ファイルへの統合 ＋3 / −0 行・元のコードは保持。検査名は日本語）');
+  assert(/✎ 既存 JS を変更/.test(m.$('kt-ai-code-head').innerHTML) && /✓ 検査を通過/.test(m.$('kt-ai-code-head').innerHTML) && /既存ファイルへの統合/.test(m.$('kt-ai-code-review').innerHTML) && /元のコードは保持/.test(m.$('kt-ai-code-review').innerHTML) && /＋3 行 \/ −0 行/.test(m.$('kt-ai-code-review').innerHTML) && /構文/.test(m.$('kt-ai-code-review').innerHTML) && !/Patch|Security/.test(m.$('kt-ai-code-review').innerHTML), '右の「コード」: 見出し（✓ 検査を通過）と Code Review の一覧（既存ファイルへの統合 ＋3 / −0 行・元のコードは保持。検査名は日本語）');
   assert(m.$('kt-ai-code-register').style.display === 'none', '右の「コード」に登録ボタンは出さない（§0e.1: 仮案から作った最終案の登録は、最終案のカードの［動作テスト環境へ反映］で標準設定と続けて行う）');
   m.panel.showCode('C1', { view: 'diff' });
   assert(m.$('kt-ai-diff-view').style.display === '' && /^\+\s*if \(record\['ステータス'\] && record\['ステータス'\]\.value === '完了'\)/m.test(m.$('kt-ai-diff-view').textContent) && / {0,}kintone\.events\.on/.test(m.$('kt-ai-diff-view').textContent), '差分 → Before / After（追加行は +・既存行は保持）');
@@ -464,7 +442,9 @@ console.log('\n--- §53-2. 複数のカスタマイズ / カスタマイズの�
   const v = await K.adoptOnScreen(m);
   assert(m.calls2.generate.length === 2 && m.calls2.generate.map(g => g.ctx.customization.customizationId).join(',') === 'C1,C2' && !m.msgs().some(x => x.data?.kind === 'customization-choices'), `複数の生成可能なカスタマイズ: 最終案のパイプラインが C1・C2 を 1 回ずつ生成工程に依頼する（どれか聞くカードは無い）: ${m.calls2.generate.map(g => g.ctx.customization.customizationId).join(',')}`);
   const c2 = m.panel.generated('C2');
-  assert(c2.review.status === 'BLOCKED' && c2.review.registration.verdict === 'BLOCKED' && c2.review.checks.some(x => x.name === 'planned-fields' && !x.ok && /owner/.test(x.message)) && c2.review.checks.some(x => x.name === 'target-fields' && !x.ok && /amount/.test(x.message)) && c2.review.mismatches.some(x => x.code === 'MISSING_FIELD' && x.items.includes('owner')), 'C2 なのに amount を制御する patch: owner の処理が無い・amount は計画外 → 登録不可（Phase 21。以前は確認が必要の扱い）');
+  //   簡素化 B（2026-10-17）: 計画の処理が無いこと（Toolkit の planned-fields）・計画に無いフィールドの書き換え（target-fields）は Toolkit から削除した。
+  //   owner の処理が無いことは生成工程の必須の効果（missing）で登録不可になる（計画に無い書き換えは生成工程の plan-consistency。生成した AI の申告で見る）
+  assert(c2.review.status === 'BLOCKED' && c2.review.registration.verdict === 'BLOCKED' && c2.review.checks.some(x => x.name === 'required-effects' && !x.ok && x.severity === 'block' && /owner/.test(x.message)) && !c2.review.checks.some(x => x.name === 'planned-fields' || x.name === 'target-fields'), `C2 なのに amount を制御する patch: owner の処理が無い → 生成工程の必須の効果の missing で登録不可: ${JSON.stringify(c2.review.checks.filter(x => !x.ok).map(x => x.name))}`);
   const fin = finalText(m);
   assert(v.final.approvable === false && v.generated.C1.status === 'verified' && v.generated.C2.status !== 'verified' && /確認できないこと／反映を止めている理由/.test(fin) && /要件未達（「担当者」: 編集できないようにする）/.test(fin) && !/C1|C2/.test(textOf(m.chat())), `最終案のカード: C2 は要件未達で承認できない（C1 は検証済み。内部の番号は会話に出さない）: ${fin.slice(fin.indexOf('実現できない点'), fin.indexOf('実現できない点') + 160)}`);
   m.panel.showCode('C2', { view: 'code' });
@@ -497,14 +477,17 @@ console.log('\n--- §53-2. 複数のカスタマイズ / カスタマイズの�
   // BLOCKED なコード（未知フィールド）→ 採用不可
   const NEW_JS_CUST_V = () => cust({ ...NEW_JS_CUST(), fields: [{ code: 'amount', access: 'CONTROL', condition: 'amount >= 1000000', effects: ['warn'] }] });
   const PLAN_NEW_JS_V = planOf({ steps: [JS_STEP('C1', { title: '金額が100万円以上なら警告メッセージを表示（JavaScript）', targetRef: null })], customizations: [NEW_JS_CUST_V()], solution: 'CUSTOMIZATION', goal: '金額が100万円以上なら警告メッセージを表示したい' });
-  const m = mountV({ inputs: INPUTS_PLAIN, planResponse: PLAN_NEW_JS_V, generatedFor: () => genNew(NEW_JS_GOOD.replace("record['amount'].value", "record['amount_total'].value")), has: { amount: ['warn'] } });
+  //   簡素化 B（2026-10-17）: 生成のときの未知のフィールドは、生成工程の機械検査（fields。review）と模擬テスト（未知のフィールドの .value で例外 → 不合格）で扱う。
+  //   Toolkit の形式確認は生成のときに作り直さない（以前の期待: Toolkit の GENERATED_JS_UNKNOWN_FIELD）。偽の生成工程は本物と同じ形の結果を返す
+  const m = mountV({ inputs: INPUTS_PLAIN, planResponse: PLAN_NEW_JS_V, generatedFor: () => genNew(NEW_JS_GOOD.replace("record['amount'].value", "record['amount_total'].value")), has: { amount: ['warn'] }, fails: ['amount|warn'], failMsg: '金額が 100 万円以上なら警告するはずが、生成したコードが例外で止まりました',
+    verify: (ver) => ({ ...ver, passed: false, machine: [...ver.machine, { name: 'fields', ok: false, severity: 'review', message: 'アプリに無いフィールドコードをコードで参照しています: 「amount_total」' }] }) });
   await ticks();
   const v = await K.adoptOnScreen(m);
   const fin = finalText(m);
   assert(/設定の変更はありません/.test(m.$('kt-ai-change-summary').innerHTML) && /新しい JavaScript「amountWarning\.js」を登録/.test(m.$('kt-ai-change-summary').innerHTML) && /＋ 新規 JS/.test(m.$('kt-ai-review-result').innerHTML) && v.plan.solution === 'CUSTOMIZATION', '新規 JS の計画: 最終案のカードは「設定の変更はありません」・新しい JavaScript を登録。右の「確認結果」に ＋ 新規 JS・solution CUSTOMIZATION');
-  assert(m.calls2.generate.length === 1 && m.panel.generated('C1').review.status === 'BLOCKED', 'Generator の応答に未知フィールド → Toolkit Code Review BLOCKED');
+  assert(m.calls2.generate.length === 1 && m.panel.generated('C1').review.status === 'BLOCKED' && m.panel.generated('C1').review.checks.some(x => x.name === 'behavior-fail' && !x.ok) && m.panel.generated('C1').review.checks.some(x => x.name === 'fields' && x.gateway && !x.ok), `Generator の応答に未知フィールド → 生成工程の結果（模擬テストの不合格・fields の確認）で BLOCKED: ${JSON.stringify(m.panel.generated('C1').review.checks.filter(x => !x.ok).map(x => x.name))}`);
   m.panel.showCode('C1', { view: 'code' });
-  assert(v.final.approvable === false && /登録を止める問題が残りました/.test(fin) && /計画か実装仕様/.test(fin) && /× 採用不可/.test(m.$('kt-ai-code-head').innerHTML) && /GENERATED_JS_UNKNOWN_FIELD/.test(m.$('kt-ai-code-review').innerHTML) && m.$('kt-ai-code-register').style.display === 'none', '最終案のカード: 承認できない・次の方針（計画か実装仕様を見直す）。理由（GENERATED_JS_UNKNOWN_FIELD）は右の「コード」。登録ボタンは出ない');
+  assert(v.final.approvable === false && /模擬テストで、必須の動作のとおりに動きませんでした/.test(fin) && /計画か実装仕様/.test(fin) && /× 採用不可/.test(m.$('kt-ai-code-head').innerHTML) && /アプリに無いフィールドコード/.test(m.$('kt-ai-code-review').innerHTML) && m.$('kt-ai-code-register').style.display === 'none', `最終案のカード: 承認できない・次の方針（計画か実装仕様を見直す）。理由（生成工程の fields の確認）は右の「コード」。登録ボタンは出ない: ${v.final.approvable} ${String(fin).replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').slice(0, 400)}`);
   await clickCode(m, 'kt-ai-code-copy');
   assert(m.copies.length === 1, 'BLOCKED でもコードの確認（コピー）はできる（登録はしない）');
 }
@@ -581,9 +564,13 @@ console.log('\n--- §53-4. KTAiChatUi（純関数）---');
   assert(!/既存 JS との競合|競合/.test(cardShared) && sharedAt > 0 && cardShared.lastIndexOf('<details', sharedAt) > cardShared.lastIndexOf('</details>', sharedAt) && /fieldOnOff\.js（「金額」）/.test(cardShared),
     `specCardHtml: 同じフィールドを扱う既存 JS は詳しくの中だけ（競合と書かない）: ${cardShared.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').slice(0, 300)}`);
   //   会話のコードのカード（MSG.CODE・codeCardHtml）は削除した（F7-1・F7-2）。検査の一覧は右の「コード」（codePaneHtml）
-  const rv = KTCodeReview.review({ generated: genPatch(), customization: hy.plan.customizations[0], plan: hy.plan, data: INPUTS.data, scan: INPUTS.scan, existingSource: SRC });
+  //   簡素化 B（2026-10-17）: 検査の一覧は、Toolkit の統合の確認（patch）と、生成工程の機械検査の項目（本物と同じ名前。ここでは構文と安全）を合わせたもの
+  const rv = KTCodeReview.attachBehavior(KTCodeReview.review({ generated: genPatch(), customization: hy.plan.customizations[0], plan: hy.plan, data: INPUTS.data, scan: INPUTS.scan, existingSource: SRC }),
+    { version: '1', candidateHash: '0123456789abcdef', passed: true, machine: [{ name: 'syntax', ok: true, severity: 'info', message: '既存ファイルに patch を合成した全文が構文解析を通りました' }, { name: 'patch', ok: true, severity: 'info', message: 'patch の 1 件の操作は anchor が既存ファイルの本文に 1 回だけ現れます' }, { name: 'security', ok: true, severity: 'info', message: '秘密情報の直書き・外部への通信・eval はありません' }], requiredEffects: [], behavior: { status: 'not-run', reason: 'no-required-effects', cases: [] } },
+    { requiredEffects: [], customization: hy.plan.customizations[0] });
+  assert(rv.checks.filter(x => x.name === 'patch').length === 1 && rv.checks.some(x => x.name === 'patch' && !x.gateway && /元のコードは保持/.test(x.message)), '生成工程の patch の合格は、Toolkit の統合の行と重ねない（同じ事実）');
   v.generated.C1 = { generated: genPatch(), review: rv, existingSource: SRC };
-  assert(/✓ 検査を通過/.test(KTAiChatUi.codePaneHtml(v.generated.C1).head) && /✓ 既存ファイルへの統合/.test(KTAiChatUi.codePaneHtml(v.generated.C1).review) && /✓ 構文/.test(KTAiChatUi.codePaneHtml(v.generated.C1).review), 'codePaneHtml: 見出しは要約（✓ 検査を通過）。Toolkit Code Review の ✓ 一覧（検査名は日本語）は review');
+  assert(/✓ 検査を通過/.test(KTAiChatUi.codePaneHtml(v.generated.C1).head) && /✓ 既存ファイルへの統合/.test(KTAiChatUi.codePaneHtml(v.generated.C1).review) && /✓ 構文/.test(KTAiChatUi.codePaneHtml(v.generated.C1).review), 'codePaneHtml: 見出しは要約（✓ 検査を通過）。検査の ✓ 一覧（Toolkit の統合の確認と生成工程の項目。検査名は日本語）は review');
   const pane = KTAiChatUi.codePaneHtml(v.generated.C1, { view: 'diff' });
   assert(pane.code === rv.finalCode && /^\+/m.test(pane.diff) && /fieldOnOff\.js/.test(pane.head), 'codePaneHtml: code / diff / head');
   //   簡素化 §5（2026-10-16）: 通った検査（✓ の記録）は［詳しく］の中。止める・確かめる必要のある検査（× △）は［詳しく］の外に出す（表示だけ。判定は変えない）

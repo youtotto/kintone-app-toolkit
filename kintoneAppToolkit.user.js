@@ -7907,7 +7907,7 @@
   //   2026-10-03 確認）の語彙を正本にし、AI の自由文からイベント名・API 名を作らせない。
   // ==========================================
   const KTJsCatalog = (() => {
-    const CATALOG_VERSION = '2';   // 2: API の使える画面（screens）・モバイルの getFieldElement / getFieldElements（RC E2E）
+    const CATALOG_VERSION = '2';   // 2: モバイルの getFieldElement / getFieldElements（RC E2E）。簡素化 B（2026-10-17）で使える画面（screens）は削除した（API の名前は同じ）
     /** 固定名のイベント（desktop）。mobile は同じ名前に mobile. を付ける（一覧の編集・印刷・ポータルは mobile に無いものがある） */
     const DESKTOP_EVENTS = [
       'app.record.index.show', 'app.record.index.edit.show', 'app.record.index.edit.submit', 'app.record.index.edit.submit.success', 'app.record.index.delete.submit',
@@ -7974,31 +7974,28 @@
         : /\.submit$/.test(n) ? 'で保存するとき' : /\.change\./.test(n) ? 'で値を変えたとき' : /^app\.record\.index\.edit\.show$/.test(n) ? 'で編集を始めたとき' : /\.show$/.test(n) ? 'を開いたとき' : 'の処理';
       return `${where}${when}（${isMobileEvent(n0) ? 'モバイル' : 'PC'}）`;
     };
-    /** 複数のイベントの画面の言葉（重ならないように・で並べる） */
-    const eventsJa = (names) => [...new Set((Array.isArray(names) ? names : [names]).filter(Boolean).map(eventJa))].join('・');
 
     /**
      * JavaScript API 目録（生成コードが使ってよい kintone.* の呼び出し）。
      *   review: true = 利用は可だが人のレビューを要する（REST / proxy など通信を伴う・権限に依存する）
      *   network: true = 通信を伴う
-     *   screens = 使える画面（screenOf の画面の種類。cybozu developer network「利用できる画面」2026-10-04 確認）。書いていない API は照合しない。
-     *     RC E2E（実機）: BF-C の生成コードが作成・編集画面のイベントで getFieldElement（詳細・印刷画面だけ）を使い、null が返って警告が出なかった
+     *   簡素化 B（2026-10-17）: 使える画面（screens）と、それで handler の画面と照合する Toolkit の検査（api-screen）は削除した（生成した候補の検査は生成工程。
+     *     生成工程の検査には同じ規則が無く、移植していない）
      */
-    const REC_UI = ['create', 'edit', 'detail', 'print'], MREC_UI = ['create', 'edit', 'detail'], LIST_TABLE = ['index', 'index-edit'];
     const APIS = Object.freeze([
       { name: 'kintone.events.on', kind: 'events' }, { name: 'kintone.events.off', kind: 'events' },
       { name: 'kintone.app.getId', kind: 'app' }, { name: 'kintone.app.getQueryCondition', kind: 'app' }, { name: 'kintone.app.getQuery', kind: 'app' },
       { name: 'kintone.app.getLookupTargetAppId', kind: 'app' }, { name: 'kintone.app.getRelatedRecordsTargetAppId', kind: 'app' },
-      { name: 'kintone.app.getFieldElements', kind: 'ui', screens: LIST_TABLE }, { name: 'kintone.app.getHeaderMenuSpaceElement', kind: 'ui' }, { name: 'kintone.app.getHeaderSpaceElement', kind: 'ui' },
+      { name: 'kintone.app.getFieldElements', kind: 'ui' }, { name: 'kintone.app.getHeaderMenuSpaceElement', kind: 'ui' }, { name: 'kintone.app.getHeaderSpaceElement', kind: 'ui' },
       { name: 'kintone.app.record.get', kind: 'record' }, { name: 'kintone.app.record.set', kind: 'record' }, { name: 'kintone.app.record.getId', kind: 'record' },
-      { name: 'kintone.app.record.getFieldElement', kind: 'ui', screens: ['detail', 'print'] }, { name: 'kintone.app.record.getSpaceElement', kind: 'ui', screens: REC_UI }, { name: 'kintone.app.record.getHeaderMenuSpaceElement', kind: 'ui', screens: ['create', 'edit', 'detail'] },
-      { name: 'kintone.app.record.setFieldShown', kind: 'ui', screens: REC_UI }, { name: 'kintone.app.record.setGroupFieldOpen', kind: 'ui', screens: REC_UI },
+      { name: 'kintone.app.record.getFieldElement', kind: 'ui' }, { name: 'kintone.app.record.getSpaceElement', kind: 'ui' }, { name: 'kintone.app.record.getHeaderMenuSpaceElement', kind: 'ui' },
+      { name: 'kintone.app.record.setFieldShown', kind: 'ui' }, { name: 'kintone.app.record.setGroupFieldOpen', kind: 'ui' },
       { name: 'kintone.mobile.app.getId', kind: 'app' }, { name: 'kintone.mobile.app.getQueryCondition', kind: 'app' }, { name: 'kintone.mobile.app.getQuery', kind: 'app' },
       { name: 'kintone.mobile.app.getHeaderSpaceElement', kind: 'ui' }, { name: 'kintone.mobile.app.getLookupTargetAppId', kind: 'app' }, { name: 'kintone.mobile.app.getRelatedRecordsTargetAppId', kind: 'app' },
-      { name: 'kintone.mobile.app.getFieldElements', kind: 'ui', screens: LIST_TABLE },
+      { name: 'kintone.mobile.app.getFieldElements', kind: 'ui' },
       { name: 'kintone.mobile.app.record.get', kind: 'record' }, { name: 'kintone.mobile.app.record.set', kind: 'record' }, { name: 'kintone.mobile.app.record.getId', kind: 'record' },
-      { name: 'kintone.mobile.app.record.getFieldElement', kind: 'ui', screens: ['detail'] },
-      { name: 'kintone.mobile.app.record.getSpaceElement', kind: 'ui', screens: MREC_UI }, { name: 'kintone.mobile.app.record.setFieldShown', kind: 'ui', screens: MREC_UI }, { name: 'kintone.mobile.app.record.setGroupFieldOpen', kind: 'ui', screens: MREC_UI },
+      { name: 'kintone.mobile.app.record.getFieldElement', kind: 'ui' },
+      { name: 'kintone.mobile.app.record.getSpaceElement', kind: 'ui' }, { name: 'kintone.mobile.app.record.setFieldShown', kind: 'ui' }, { name: 'kintone.mobile.app.record.setGroupFieldOpen', kind: 'ui' },
       { name: 'kintone.api', kind: 'api', review: true, network: true }, { name: 'kintone.api.url', kind: 'api' }, { name: 'kintone.api.urlForGet', kind: 'api' },
       { name: 'kintone.proxy', kind: 'api', review: true, network: true, external: true }, { name: 'kintone.proxy.upload', kind: 'api', review: true, network: true, external: true },
       { name: 'kintone.getLoginUser', kind: 'user' }, { name: 'kintone.getUiVersion', kind: 'user' }, { name: 'kintone.getRequestToken', kind: 'api', review: true },
@@ -8007,10 +8004,6 @@
       { name: 'kintone.plugin.app.setProxyConfig', kind: 'plugin', review: true }, { name: 'kintone.plugin.app.getProxyConfig', kind: 'plugin', review: true },
     ]);
     const API_BY_NAME = new Map(APIS.map(a => [a.name, a]));
-    /** API の使える画面（screenOf の種類の配列）。目録に使える画面を書いていない API は null（照合しない） */
-    const apiScreens = (name) => { const a = API_BY_NAME.get(String(name || '')); return a && Array.isArray(a.screens) ? [...a.screens] : null; };
-    /** 画面の種類の表示名 */
-    const SCREEN_JA = Object.freeze({ create: '作成画面', edit: '編集画面', detail: 'レコード詳細画面', print: '印刷画面', index: '一覧画面', 'index-edit': '一覧のインライン編集', report: 'グラフ', portal: 'ポータル' });
     /**
      * コードから kintone.* の呼び出し（メンバー連鎖）を抽出し、目録と照合する。
      *   kintone.app.record.get() → kintone.app.record.get / kintone.api.url(...) → kintone.api.url / kintone.api(...) → kintone.api
@@ -8084,7 +8077,7 @@
     const PLATFORMS = Object.freeze(['desktop', 'mobile']);
     const ACCESS = Object.freeze(['READ', 'WRITE', 'CONTROL']);
     const SOLUTIONS = Object.freeze(['STANDARD', 'CUSTOMIZATION', 'HYBRID', 'UNKNOWN']);
-    return { CATALOG_VERSION, EVENTS, DESKTOP_EVENTS, MOBILE_EVENTS, CHANGE_PREFIXES, APIS, STRATEGIES, PLATFORMS, ACCESS, SOLUTIONS, SECURITY_RULES, checkEvent, isMobileEvent, eventPlatform, screenOf, extractApis, extractNetwork, scanSecurity, apiScreens, SCREEN_JA, eventJa, eventsJa };
+    return { CATALOG_VERSION, EVENTS, DESKTOP_EVENTS, MOBILE_EVENTS, CHANGE_PREFIXES, APIS, STRATEGIES, PLATFORMS, ACCESS, SOLUTIONS, SECURITY_RULES, checkEvent, eventPlatform, screenOf, extractApis, extractNetwork, scanSecurity, eventJa };
   })();
 
   // ==========================================
@@ -19172,7 +19165,7 @@
    *   health の印 'scopeList' がある接続先だけ新しい形として受け入れる（KT_EFFECT_FEATURES）。返っていなければ「接続先から返っていません」と出し、古い固定の文は出さない
    */
   const KTCodeReview = (() => {
-    const REVIEW_VERSION = '1';
+    const REVIEW_VERSION = '2';   // 2（簡素化 B・2026-10-17）: 生成のときの検査は生成工程の検証結果を取り込む（Toolkit では作り直さない）
     const STATUS = Object.freeze({ OK: 'OK', REVIEW_REQUIRED: 'REVIEW_REQUIRED', BLOCKED: 'BLOCKED' });
     const EOL_RE = /\r\n|\r|\n/;
     const hash = (t) => KTScan.hashText(t);
@@ -19236,513 +19229,6 @@
       lines.forEach((l, i) => { if (!keep.has(i)) return; if (i !== last + 1) out.push('@@'); out.push(`${l.type}${l.text}`); last = i; });
       return out.join('\n');
     }
-    /** 構文検査（compile のみ。実行しない） */
-    function checkSyntax(code) {
-      try { new Function(String(code ?? '')); return { ok: true, message: null }; }   // eslint-disable-line no-new-func
-      catch (e) { return { ok: false, message: e?.message || String(e) }; }
-    }
-    const stripStrings = (s) => String(s).replace(/`(?:\\[\s\S]|[^`\\])*`|'(?:\\.|[^'\\\n])*'|"(?:\\.|[^"\\\n])*"/g, (m) => '"' + ' '.repeat(Math.max(0, m.length - 2)) + '"');
-    /** ハンドラ（kintone.events.on の第 2 引数）ごとの簡易検査: return event / async */
-    function inspectHandlers(clean) {
-      const s = String(clean || '');
-      const out = [];
-      const rx = /kintone\s*\.\s*events\s*\.\s*on\s*\(/g;
-      let m;
-      while ((m = rx.exec(s)) !== null) {
-        // 第 1 引数の終わりのカンマを探し、その後の handler 本体の { … } を括弧の深さで切り出す
-        let i = m.index + m[0].length, depth = 1, comma = -1;
-        for (; i < s.length && depth > 0; i++) { const ch = s[i]; if (ch === '(' || ch === '[' || ch === '{') depth++; else if (ch === ')' || ch === ']' || ch === '}') depth--; else if (ch === ',' && depth === 1 && comma < 0) comma = i; }
-        const callEnd = i;
-        let handler = comma >= 0 ? s.slice(comma + 1, callEnd - 1) : '';
-        let named = null;
-        const idm = /^\s*([A-Za-z_$][\w$]*)\s*$/.exec(handler);
-        if (idm) {   // 名前付き関数を渡している（kintone.events.on(EVENTS, checkAmount)）→ 定義の本体を探す
-          named = idm[1];
-          const defRx = new RegExp(`(?:\\bfunction\\s+${named}\\s*\\(|\\b${named}\\s*=\\s*(?:async\\s+)?(?:function\\b[^{]*|\\([^)]*\\)\\s*=>|[A-Za-z_$][\\w$]*\\s*=>)|\\basync\\s+function\\s+${named}\\s*\\()`);
-          const dm = defRx.exec(s);
-          if (dm) {
-            const open = s.indexOf('{', dm.index + dm[0].length - (dm[0].endsWith('(') ? 1 : 0));
-            if (open >= 0) { let d = 0, k = open; for (; k < s.length; k++) { const ch = s[k]; if (ch === '{') d++; else if (ch === '}') { d--; if (d === 0) break; } } handler = (/\basync\b/.test(dm[0]) ? 'async ' : '') + 'function ' + s.slice(open, k + 1); }
-          }
-        }
-        const isAsync = /^\s*async\b/.test(handler) || /^\s*\(?\s*async\b/.test(handler);
-        const body = handler;
-        const hasReturnEvent = /\breturn\s+event\b/.test(body) || /\breturn\s+\w+\s*;\s*$/.test(body.trim()) && /\breturn\s+(event|e|ev)\b/.test(body);
-        const usesPromiseThen = /\.then\s*\(/.test(body);
-        const usesAwait = /\bawait\b/.test(body);
-        // Phase 21: complete = 呼び出しの括弧が閉じた（差分の断片が登録の行だけ = REPLACE で第 1 引数だけを書き換えたときは false）
-        out.push({ index: m.index, async: isAsync, named, complete: depth === 0, returnEvent: /\breturn\s+(event|e|ev)\b/.test(body) || hasReturnEvent, promiseThen: usesPromiseThen, awaitInNonAsync: usesAwait && !isAsync, handlerLength: body.length, firstArg: s.slice(m.index + m[0].length, comma >= 0 ? comma : m.index + m[0].length + 60).trim().slice(0, 600) });
-      }
-      return out;
-    }
-    /**
-     * Phase 20（実機で確認した kintone の制約）: handler ごとの「イベント名」と、その handler（と handler が呼ぶ同じファイル内の関数 1 段）が
-     * フィールドの error / disabled / value を設定しているか。kintone は error を表示したイベントでは disabled・value の設定を取り消し、
-     * error は null を設定したときだけ消える（'' では前の表示が残る）
-     * @returns {Array<{ events: string[], error: boolean, emptyErrorClear: boolean, disabled: boolean, value: boolean }>}
-     */
-    function kintoneFieldOps(clean) {
-      const s = String(clean || '');
-      const bodyOf = (open) => { let d = 0, k = open; for (; k < s.length; k++) { const ch = s[k]; if (ch === '{') d++; else if (ch === '}') { d--; if (d === 0) break; } } return s.slice(open, k + 1); };
-      const fnBody = (name) => {
-        const defRx = new RegExp(`(?:\\bfunction\\s+${name}\\s*\\(|\\b${name}\\s*=\\s*(?:async\\s+)?(?:function\\b[^{]*|\\([^)]*\\)\\s*=>|[A-Za-z_$][\\w$]*\\s*=>))`);
-        const dm = defRx.exec(s); if (!dm) return '';
-        const open = s.indexOf('{', dm.index + dm[0].length - (dm[0].endsWith('(') ? 1 : 0));
-        return open >= 0 ? bodyOf(open) : '';
-      };
-      const out = [];
-      const rx = /kintone\s*\.\s*events\s*\.\s*on\s*\(/g;
-      let m;
-      while ((m = rx.exec(s)) !== null) {
-        let i = m.index + m[0].length, depth = 1, comma = -1;
-        for (; i < s.length && depth > 0; i++) { const ch = s[i]; if (ch === '(' || ch === '[' || ch === '{') depth++; else if (ch === ')' || ch === ']' || ch === '}') depth--; else if (ch === ',' && depth === 1 && comma < 0) comma = i; }
-        const firstArg = s.slice(m.index + m[0].length, comma >= 0 ? comma : i);
-        let body = comma >= 0 ? s.slice(comma + 1, i - 1) : '';
-        const idm = /^\s*([A-Za-z_$][\w$]*)\s*$/.exec(body);
-        if (idm) body = fnBody(idm[1]);
-        // handler が呼ぶ同じファイル内の関数（1 段）
-        const called = [...new Set([...body.matchAll(/\b([A-Za-z_$][\w$]*)\s*\(/g)].map(x => x[1]).filter(n => !['function', 'if', 'for', 'while', 'switch', 'return', 'catch', 'Number', 'String', 'parseInt', 'parseFloat'].includes(n)))];
-        const inlined = body + called.map(n => fnBody(n)).join('\n');
-        // イベントを変数（var EVENTS = [...]）で渡す登録は、同じファイルの配列の定義をたどる（Phase 20: 画面ごとの判定で誤って「PC だけ」としないため）
-        const evVar = /^\s*([A-Za-z_$][\w$]*)\s*$/.exec(firstArg);
-        const evDef = evVar ? new RegExp(`\\b(?:var|let|const)\\s+${evVar[1]}\\s*=\\s*\\[([\\s\\S]*?)\\]`).exec(s) : null;
-        const events = [...(evDef ? evDef[1] : firstArg).matchAll(/['"`]((?:mobile\.)?app\.(?:record|report|event)\.[A-Za-z0-9_.\u00C0-\uFFFF]+)['"`]/g)].map(x => x[1]);
-        // モデル更新の評価（gpt-6.1-sol）: 空白を挟んだ x.error = null を「エラーの設定」と数えない（\s* を先読みの中に入れて、空白で null の判定を飛ばさない）
-        const error = /\.error\s*=(?!=)(?!\s*(?:null\b|undefined\b|(['"`])\1))/.test(inlined);
-        out.push({
-          events: events.length ? events : ['（イベント名を特定できない登録）'],
-          error,
-          emptyErrorClear: /\.error\s*=(?!=)\s*(['"`])\1/.test(inlined),
-          disabled: /\.disabled\s*=(?!=)/.test(inlined),
-          value: /\.value\s*=(?!=)/.test(inlined),
-          // Phase 20（F41）: この handler が参照するフィールドコード（record['code'] / record.code）。画面（PC / モバイル）ごとの制御の有無に使う
-          //   Phase 22（F-F2）: 変数に入れたフィールド・日本語のコードのドット記法（record.金額）も数える
-          refs: fieldRefsIn(inlined),
-        });
-      }
-      return out;
-    }
-    /**
-     * Phase 21: フィールド code を編集不可（.disabled = true）にしている場所と、それを囲む条件。
-     *   unconditional = handler（関数）の中で if / else / ループ / switch / 三項演算子 に囲まれていない（どのレコードでも編集不可になる）
-     *   conds = 囲んでいる if の条件式（else は 'else'、ループなどはそのキーワード）
-     */
-    function disableSites(clean, code) {
-      const s = String(clean || '');
-      // Phase 22（F-F2）: フィールドを指す式は KTScan.fieldRefAt で解決する（直接・ブラケット・変数に入れたフィールド・日本語のコードのドット記法）
-      const ctx = KTScan.fieldRefContext(s);
-      const out = [];
-      const rx = /\.\s*disabled\s*=(?!=)\s*true\b/g;
-      let m;
-      while ((m = rx.exec(ctx.m)) !== null) {
-        const ref = KTScan.fieldRefAt(s, m.index, ctx);
-        if (!ref || ref.code !== code) continue;
-        out.push({ index: m.index, via: ref.via, ...(ref.alias ? { alias: ref.alias } : {}), ...siteConds(s, m.index) });
-      }
-      return out;
-    }
-    /** Phase 22（F-F2）: 本文が参照するフィールドコード（ブラケット・record.CODE（日本語のコードも）・変数に入れたフィールド） */
-    function fieldRefsIn(text) {
-      const t = String(text || '');
-      const ctx = KTScan.fieldRefContext(t);
-      const out = new Set([...t.matchAll(/\[\s*['"`]([^'"`\]]+)['"`]\s*\]/g)].map(x => x[1]));
-      for (const x of ctx.m.matchAll(new RegExp(`\\.\\s*(${KTScan.ID_SRC})(?![$\\u200C\\u200D\\p{ID_Continue}])(?!\\s*\\()`, 'gu'))) { const r = KTScan.fieldRefAt(t, x.index + x[0].length, ctx); if (r && r.via === 'dot') out.add(r.code); }
-      for (const e of ctx.entries) if (e.code != null) out.add(e.code);
-      return [...out];
-    }
-    /** Phase 22（F-F2）: 条件の文字列（siteConds の conds・paths。変数の定義の注釈を含む）で値を読んでいるフィールドコード */
-    function condCodesOf(text, recNames) {
-      const t = String(text || '');
-      const out = new Set();
-      for (const x of t.matchAll(/\[\s*(['"`])([^'"`\]]+)\1\s*\]\s*\.\s*value\b/g)) out.add(x[2]);
-      for (const x of t.matchAll(new RegExp(`(?:^|[^$\\u200C\\u200D\\p{ID_Continue}.])(${KTScan.ID_SRC})\\s*\\.\\s*(${KTScan.ID_SRC})\\s*\\.\\s*value\\b`, 'gu'))) if (x[1] === 'record' || recNames.has(x[1])) out.add(x[2]);
-      // 注釈（decorateCond）の「変数 = フィールド」: 条件はその変数（フィールド）を読んでいる
-      for (const d of t.matchAll(/\/\*([\s\S]*?)\*\//g)) for (const part of d[1].split(';')) { const eq = part.indexOf('='); if (eq < 0) continue; const ref = KTScan.fieldRefOfExpr(part.slice(eq + 1), recNames); if (ref) out.add(ref.code); }
-      return [...out];
-    }
-    /**
-     * Phase 22（F-F2）: フィールドの操作の一覧。直接（record.CODE / record['CODE']）と変数に入れたフィールドを同じに数える。
-     *   op: read（.value を読む）/ write（.value への代入・push など）/ disabled（= true）/ enabled（= false）/ disabled-expr（= その他の式）/
-     *       error（null・''・undefined 以外のエラー）/ error-clear / shown（setFieldShown）/ event-error・event-error-clear（event.error = …。レコード全体のエラー）
-     *   各操作に、囲む条件（siteConds）・handler のイベント・条件と代入の右辺で値を読んでいるフィールド（reads）を添える
-     */
-    function fieldOperations(clean) {
-      const s = String(clean || '');
-      const ctx = KTScan.fieldRefContext(s);
-      const m = ctx.m;
-      const ranges = handlerRanges(s);
-      const eventsAt = (idx) => [...new Set(ranges.filter(r => idx > r.start && idx <= r.end).flatMap(r => r.events))];
-      const stmtEnd = (idx) => { let d = 0; for (let k = idx; k < m.length; k++) { const ch = m[k]; if ('([{'.includes(ch)) d++; else if (')]}'.includes(ch)) { if (d === 0) return k; d--; } else if (ch === ';' && d === 0) return k; } return m.length; };
-      // kintone.events.on の handler の最初の引数（event / e …）。それ以外のオブジェクトの .error（result.error など）はフィールドのエラーではない
-      const handlerOpens = new Set(ranges.map(r => m.indexOf('{', r.start)).filter(i => i >= 0));
-      const eventParamAt = (name, at) => ctx.entries.some(e => e.param && e.first && e.name === name && at >= e.scope[0] && at <= e.scope[1] && handlerOpens.has(e.index)) || (/^(?:event|e|ev|evt)$/.test(name) && ranges.some(r => at > r.start && at <= r.end));
-      const ops = [];
-      for (const x of m.matchAll(/\.\s*(value|disabled|error)\b(\s*(?:=(?![=>])|\+=|-=|\*=|\/=))?/g)) {
-        const at = x.index, prop = x[1], assign = !!x[2];
-        const rhsAt = at + x[0].length;
-        const rhs = assign ? s.slice(rhsAt, stmtEnd(rhsAt)).trim() : '';
-        const op = prop === 'value' ? (assign || /^\s*\.\s*(push|pop|shift|unshift|splice|sort|reverse|fill)\s*\(/.test(m.slice(rhsAt, rhsAt + 40)) ? 'write' : 'read')
-          : prop === 'disabled' ? (!assign ? 'disabled-read' : /^true\b/.test(rhs) ? 'disabled' : /^false\b/.test(rhs) ? 'enabled' : 'disabled-expr')
-          : (!assign ? 'error-read' : /^(?:null|undefined)\b|^(['"`])\1/.test(rhs) ? 'error-clear' : 'error');
-        const ref = KTScan.fieldRefAt(s, at, ctx);
-        if (ref) { ops.push({ code: ref.code, op, via: ref.via, ...(ref.alias ? { alias: ref.alias } : {}), index: at, rhs }); continue; }
-        if (prop === 'error' && assign) {
-          const obj = new RegExp(`(${KTScan.ID_SRC})\\s*$`, 'u').exec(s.slice(Math.max(0, at - 80), at));
-          let b = at - 1; while (b >= 0 && /\s/.test(m[b])) b--;
-          const before = obj ? b - obj[1].length : -1;
-          if (obj && !(before >= 0 && m[before] === '.') && eventParamAt(obj[1], at)) ops.push({ code: null, op: op === 'error' ? 'event-error' : 'event-error-clear', via: 'event', index: at, rhs });
-        }
-      }
-      for (const x of s.matchAll(/setFieldShown\s*\(\s*(['"`])([^'"`]+)\1\s*,\s*([^;]*?)\)\s*;?/g)) if (m.startsWith('setFieldShown', x.index)) ops.push({ code: x[2], op: 'shown', via: 'api', index: x.index, rhs: x[3] });
-      const reads = ops.filter(o => o.op === 'read');
-      return ops.sort((a, b) => a.index - b.index).map(o => {
-        const sc = siteConds(s, o.index);
-        const condText = [...(sc.conds || []), ...((sc.paths || []).flat())].map(String).join('\n');
-        const end = stmtEnd(o.index);
-        const inRhs = reads.filter(r => r.index > o.index && r.index < end).map(r => r.code);
-        return { ...o, ...sc, events: eventsAt(o.index), reads: [...new Set([...condCodesOf(condText, ctx.recNames), ...inRhs])] };
-      });
-    }
-    /**
-     * Phase 22（F-F2）: 入力チェック = 値を読む条件（または右辺）の中で、エラーを表示する場所（フィールドの error / レコード全体の event.error）。
-     *   値を読むだけ（エラーを出さない）は入力チェックではない
-     * @returns {Array<{ target: string|null, checks: string[], kind: 'field-error'|'event-error', events: string[], line: string, index: number }>}
-     */
-    function inputChecks(clean) {
-      return fieldOperations(clean).filter(o => (o.op === 'error' || o.op === 'event-error') && o.reads.length).map(o => ({ target: o.code, checks: o.reads, kind: o.op === 'error' ? 'field-error' : 'event-error', via: o.via, events: o.events, line: o.line, index: o.index }));
-    }
-    const lineOf = (s, i) => { const a = s.lastIndexOf('\n', i - 1) + 1; const b = s.indexOf('\n', i); return s.slice(a, b < 0 ? s.length : b).trim(); };
-    /** 今回足したものだけ（既存のコードに同じもの（key が同じ）が同じ数だけあれば、その分は既存として除く） */
-    const freshOnly = (cur, base, key) => {
-      const pool = new Map();
-      for (const b of base) pool.set(key(b), (pool.get(key(b)) || 0) + 1);
-      return cur.filter(x => { const n = pool.get(key(x)) || 0; if (n > 0) { pool.set(key(x), n - 1); return false; } return true; });
-    };
-    /**
-     * RC E2E（N3・2026-10-04 実機）: 使える画面が決まっている API（KTJsCatalog の screens）の呼び出しと、囲む handler のイベントの画面。
-     *   BF-C の生成コードは作成・編集画面のイベントで getFieldElement（詳細・印刷画面だけ）を使い、null が返って警告が出なかった
-     *   （API の検査は目録にあるかだけを見ていた）。どの handler から呼ばれるか分からない関数の中は画面が分からないので返さない
-     * @returns {Array<{ name: string, index: number, line: string, events: string[], screens: string[], eventScreens: string[], badScreens: string[] }>}
-     */
-    function apiScreenUses(clean) {
-      const s = String(clean || '');
-      const ranges = handlerRanges(s);
-      const out = [];
-      for (const a of KTJsCatalog.extractApis(s)) {
-        const screens = KTJsCatalog.apiScreens(a.name);
-        if (!screens) continue;
-        const events = [...new Set(ranges.filter(r => a.index > r.start && a.index <= r.end).flatMap(r => r.events))];
-        if (!events.length) continue;
-        const eventScreens = [...new Set(events.map(e => KTJsCatalog.checkEvent(e).screen))];
-        out.push({ name: a.name, index: a.index, line: lineOf(s, a.index), events, screens, eventScreens, badScreens: eventScreens.filter(x => !screens.includes(x)) });
-      }
-      return out;
-    }
-    /**
-     * RC のモデル更新の評価（gpt-6.1-sol の BF-C・2026-10-04 実機）: 表示・変更イベントの event.record の error には、前のイベントで表示したエラーは入っていない
-     *   （表示中も kintone.app.record.get() の error は undefined、次の change の event.record の error も undefined）。
-     *   「error が自分の文言なら null」の条件（else if (field.error === notice) { field.error = null; }）は成り立たず、警告が消えなかった。
-     *   表示・変更イベントで、エラーを消す（null）場所の囲む条件が、同じフィールドの .error（直接・変数に入れたフィールド）を読んでいるものを返す
-     * @returns {Array<{ code: string, cond: string, line: string, events: string[], index: number }>}
-     */
-    function errorClearByCompare(clean) {
-      const s = String(clean || '');
-      const rxEsc = (t) => String(t).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-      const out = [];
-      for (const o of fieldOperations(s)) {
-        if (o.op !== 'error-clear' || !o.code || !(o.events || []).some(e => /\.show$|\.change\./.test(e))) continue;
-        const ref = new RegExp(`(?:${o.alias ? `(?<![$\\w.])${rxEsc(o.alias)}` : '(?!)'}|\\[\\s*(['"\`])${rxEsc(o.code)}\\1\\s*\\]|\\.${rxEsc(o.code)}(?![$\\w]))\\s*\\.\\s*error\\b`, 'u');
-        const plain = (t) => String(t).replace(/\s*\/\*[\s\S]*?\*\/\s*$/, '');
-        const hit = pathsOfSite(o).flat().map(plain).find(t => ref.test(t));
-        if (hit) out.push({ code: o.code, cond: hit, line: o.line, events: o.events, index: o.index });
-      }
-      return out;
-    }
-    /**
-     * Phase 21: テーブル（tableCode）のセルを編集不可にしている場所（行のループで row.value[key] / row.value['qty'] に .disabled = true）。
-     *   直前（同じ handler の中）で tableCode の value を回しているものだけ
-     */
-    function subtableCellSites(clean, tableCode, col = null) {
-      const s = String(clean || '');
-      const out = [];
-      const rx = /\.value\s*\[\s*([^\]]+)\]\s*\.\s*disabled\s*=(?!=)\s*true\b/g;
-      const iter = new RegExp(`(?:\\[\\s*['"\`]${String(tableCode).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}['"\`]\\s*\\]|\\.\\s*${String(tableCode).replace(/[^A-Za-z0-9_$]/g, '') || '\\u0000'})\\s*\\.\\s*value\\b`);
-      let m;
-      while ((m = rx.exec(s)) !== null) {
-        const before = s.slice(Math.max(0, m.index - 1200), m.index);
-        if (!iter.test(before)) continue;
-        // Phase 21: 列を指定したときは、その列（row.value['qty']）と全列のループ（row.value[key]）だけ
-        if (col != null) { const lit = /^\s*['"`]([^'"`]+)['"`]\s*$/.exec(m[1]); if (lit && lit[1] !== col) continue; }
-        out.push({ index: m.index, allColumns: !/^\s*['"`]/.test(m[1]), ...siteConds(s, m.index) });
-      }
-      return out;
-    }
-    /**
-     * Phase 21: 位置 idx を囲む条件（handler の中だけ）。handler = kintone.events.on に渡した関数（名前付き関数なら即時関数以外の一番外の関数）。
-     *   if / else / ループ / switch のブロック、同じ行の if・三項演算子、手前の「if (条件) { return … }」（早い return で除外）を条件として集める。
-     *   条件が変数だけ（if (locked)）なら、その変数の代入式も添える（条件の項目を照合するため）
-     */
-    function siteConds(s, idx, depth = 0) {
-      const stack = [];
-      for (let k = 0; k < idx; k++) { const ch = s[k]; if (ch === '{') stack.push(k); else if (ch === '}') stack.pop(); }
-      const escRx = (x) => String(x).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-      // 名前で kintone.events.on に渡している関数（function onShow(event) {…} ＋ kintone.events.on(EV, onShow)）は handler
-      const handlerByName = (name) => !!name && new RegExp(`kintone\\s*\\.\\s*events\\s*\\.\\s*on\\s*\\([^;]*?,\\s*${escRx(name)}\\s*\\)`).test(s);
-      const blocks = stack.map(open => {
-        const before = s.slice(Math.max(0, open - 400), open).replace(/\s+$/, '');
-        // Phase 21: else は対応する if の条件を添える（else of (条件)）。条件の項目を照合するため
-        //   段階 A（5.3）: else if … の連なりは、手前の枝の条件の否定（else of (…)）も extra に添える（if / else の別の枝の排他を判定するため）
-        if (/\belse$/.test(before)) return { kind: 'cond', cond: elseCondOf(s, open) || 'else', open };
-        if (/\)$/.test(before)) {
-          const head = before.slice(0, -1);
-          let depth = 1, k = head.length - 1;
-          for (; k >= 0 && depth > 0; k--) { if (head[k] === ')') depth++; else if (head[k] === '(') depth--; }
-          const kw = head.slice(0, k + 1).replace(/\s+$/, '');
-          const kwm = /\b(if|for|while|switch|catch|with)$/.exec(kw);
-          // Phase 21: switch は判定する式を添える（switch (record['ステータス'].value) の case の中を条件つきとして照合する）
-          //   段階 A（5.3）: case のラベル（break までの連なり）も添える（switch (…) case '承認済み'）。値の照合と別の case の排他の判定に使う
-          if (kwm) {
-            if (kwm[1] === 'if') return { kind: 'cond', cond: head.slice(k + 2), open };
-            if (kwm[1] === 'switch') return { kind: 'cond', cond: `switch (${head.slice(k + 2)})`, open };
-            return { kind: 'cond', cond: kwm[1], open };
-          }
-          // 即時関数: 「(function」の「(」が呼び出しの括弧ではない（直前が識別子・)・] でない）。forEach(function … は即時関数ではない
-          const iifeM = /([\s\S]?)\s*\(\s*(?:async\s+)?function\s*$/.exec(kw);
-          const name = (/\bfunction\s+([A-Za-z_$][\w$]*)\s*$/.exec(kw) || /\b(?:var|let|const)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s+)?function\s*[\w$]*\s*$/.exec(kw) || [])[1] || null;
-          return { kind: 'func', open, name, iife: !!iifeM && !/[\w$)\]]/.test(iifeM[1] || ''), handler: /kintone\s*\.\s*events\s*\.\s*on\s*\([^;{}]*,\s*(?:async\s+)?function\s*[\w$]*\s*$/.test(kw) || handlerByName(name) };
-        }
-        if (/=>$/.test(before)) {
-          const name = (/\b(?:var|let|const)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s*)?(?:\([^()]*\)|[A-Za-z_$][\w$]*)\s*=>$/.exec(before) || [])[1] || null;
-          return { kind: 'func', open, name, iife: false, handler: /kintone\s*\.\s*events\s*\.\s*on\s*\([^;{}]*,\s*(?:async\s*)?\(?[^()]*\)?\s*=>$/.test(before) || handlerByName(name) };
-        }
-        return { kind: 'other', open };
-      });
-      let hi = blocks.map(b => b.kind === 'func' && b.handler).lastIndexOf(true);
-      if (hi < 0) hi = blocks.findIndex(b => b.kind === 'func' && !b.iife);
-      if (hi < 0) hi = blocks.map(b => b.kind).lastIndexOf('func');
-      // Phase 21: 名前付きの関数（handler でない）の中なら、その関数の呼び出し元の条件も見る（if (承認済み) lockAll(record); の書き方を「条件の外」と誤って止めない）
-      const hp = blocks.map(b => b.kind === 'func' && !!b.name && !b.handler && !b.iife).lastIndexOf(true);
-      const helper = hp >= 0 && hp >= hi ? blocks[hp] : null;
-      if (helper) hi = hp;
-      const inner = hi >= 0 ? blocks.slice(hi + 1) : blocks;
-      const lineStart = s.lastIndexOf('\n', idx) + 1;
-      const lineEnd = s.indexOf('\n', idx) < 0 ? s.length : s.indexOf('\n', idx);
-      const line = s.slice(lineStart, lineEnd);
-      // 同じ文の中だけを見る（直前の { ; } より後ろ〜次の ; まで）。1 行に書かれた外側の if を、この文の条件と取り違えない
-      let stmtStart = idx; while (stmtStart > 0 && !/[{};]/.test(s[stmtStart - 1])) stmtStart--;
-      const stmtEnd = s.indexOf(';', idx) < 0 ? lineEnd : s.indexOf(';', idx);
-      const inlineIf = /\bif\s*\(([\s\S]*)\)\s*[^)]*$/.exec(s.slice(stmtStart, idx));
-      let conds = [...inner.filter(b => b.kind === 'cond').map(b => b.cond), ...(inlineIf ? [inlineIf[1]] : []), ...(/\?/.test(s.slice(stmtStart, stmtEnd)) ? ['?'] : [])];
-      if (hi >= 0) {
-        const base = blocks[hi].open + 1;
-        const body = s.slice(base, idx);
-        // 早い return で除外する if（if (条件) return …; / if (条件) { …; return …; }）。その if を囲むブロックが idx も囲んでいるときだけ（別のブロックの中の return は効かない）
-        const openAt = (pos) => { const st = []; for (let k = 0; k < pos; k++) { if (body[k] === '{') st.push(k); else if (body[k] === '}') st.pop(); } return st; };
-        const openAtEnd = new Set(openAt(body.length));
-        // 独立レビュー A-1 (b): handler の中のさらに内側の関数（forEach / map の callback など）の中の return は、その callback を抜けるだけで handler の早い return ではない。
-        //   if が内側の関数のブロックの中にあれば数えない（if と handler の間に関数の境界が無いことを確かめる）
-        const funcOpens = new Set(inner.filter(b => b.kind === 'func').map(b => b.open - base));
-        // 「if の本文の最後の文が直接の return」だけを早い return と見る（字句: return の手前が ; { } のどれか。入れ子の文の return は除く）。
-        //   段階 C: acorn による判定（段階 A）は外した。条件の向き・排他の断定は生成工程の模擬テスト（Gateway の隔離環境）で行う
-        const endsWithReturn = (innerText) => /(^|[;{}])\s*return\b[^;{}]*;\s*$/.test(innerText);
-        for (const g of body.matchAll(/\bif\s*\(/g)) {
-          const po = g.index + g[0].length - 1, pc = closeParen(body, po);
-          if (pc < 0) continue;
-          const opens = openAt(g.index);
-          if (!opens.every(k => openAtEnd.has(k)) || opens.some(k => funcOpens.has(k))) continue;
-          const neg = `!(${body.slice(po + 1, pc)})`;
-          const rest = body.slice(pc + 1, pc + 60);
-          if (/^\s*return\b/.test(rest)) { conds.push(neg); continue; }
-          // ブロックの最後の文が return（if (!st) { record['x'].error = '…'; return event; }）も早い return
-          const bo = body.indexOf('{', pc + 1);
-          if (bo < 0 || /\S/.test(body.slice(pc + 1, bo))) continue;
-          let d = 0, be = -1; for (let k = bo; k < body.length; k++) { if (body[k] === '{') d++; else if (body[k] === '}') { d--; if (d === 0) { be = k; break; } } }
-          if (be < 0) continue;
-          if (endsWithReturn(body.slice(bo + 1, be))) conds.push(neg);
-        }
-      }
-      // 条件に出てくる変数・関数は、その定義を添える（if (locked) / if (isApproved(record)) の項目を照合するため）
-      conds = conds.map(t => decorateCond(s, t, idx));
-      const own = { unconditional: hi >= 0 && !conds.length, conds, line: line.trim().slice(0, 160) };
-      if (!helper || depth >= 2) return own;
-      // Phase 21: 名前付きの関数の中 → 呼び出し元（関数の本体の外の NAME(…)）ごとに、呼び出し元の条件 ＋ 関数の中の条件を 1 つの経路として返す
-      const bodyEnd = closeBrace(s, helper.open);
-      const callIdx = [...s.matchAll(new RegExp(`(?<![\\w$.])${escRx(helper.name)}\\s*\\(`, 'g'))].map(m => m.index).filter(i => !(i > helper.open && i < bodyEnd) && !/\bfunction\s+$/.test(s.slice(Math.max(0, i - 12), i)));
-      // 直接の呼び出しが無い（参照で渡している など）→ 呼び出し元の条件が分からない（条件の外とは言えない）
-      if (!callIdx.length) return { ...own, unconditional: false, conds: [...conds, 'unknown:caller'], via: helper.name };
-      const callers = callIdx.map(i => siteConds(s, i, depth + 1));
-      const paths = callers.flatMap(c => (c.paths && c.paths.length ? c.paths : [c.conds]).map(p => [...conds, ...p]));
-      return { unconditional: !conds.length && callers.every(c => c.unconditional), conds, paths, line: own.line, via: helper.name };
-    }
-    // ---- 囲む条件の注釈（siteConds の decorateCond）で、変数・関数の定義を添えない名前 ----
-    //   §0d.4（2026-10-08）: 囲む条件が計画の条件を見ているかの判定（条件つきの制御 conditional-control・blindCond）は削除した。
-    //   条件の向きは生成工程の模擬テスト（条件に合う・合わないレコード）で確かめる
-    const COND_NEUTRAL = new Set(['record', 'event', 'true', 'false', 'null', 'undefined', 'typeof', 'instanceof', 'in', 'of', 'new', 'this', 'void', 'function', 'return', 'var', 'let', 'const', 'if', 'else', 'for', 'while', 'switch', 'case', 'break', 'continue', 'do', 'try', 'catch', 'finally', 'throw', 'async', 'await', 'delete', 'Object', 'Array', 'Number', 'String', 'Boolean', 'Math', 'JSON', 'parseInt', 'parseFloat', 'isNaN', 'isFinite']);
-    const STRUCT_CALLS = new Set(['hasOwnProperty', 'call', 'isArray', 'keys', 'values', 'entries', 'indexOf', 'includes', 'some', 'every', 'filter', 'find', 'trim', 'toString', 'Number', 'String', 'Boolean', 'parseInt', 'parseFloat', 'isNaN', 'isFinite']);
-    const stripCondText = (t) => String(t).replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/(['"`])(?:\\.|(?!\1)[^\\])*\1/g, ' ');
-    /** else ブロック（open = '{'）に対応する if の条件を「else of (条件)」で返す（Phase 21。段階 A の else if の連なり・switch の case のラベルは段階 C で外した）。分からなければ null */
-    function elseCondOf(s, open) {
-      const skipWs = (k) => { while (k >= 0 && /\s/.test(s[k])) k--; return k; };
-      const endsWith = (k, word) => k - word.length + 1 >= 0 && s.slice(k - word.length + 1, k + 1) === word && !/[\w$]/.test(s[k - word.length] || '');
-      let p = skipWs(open - 1); if (!endsWith(p, 'else')) return null;
-      p = skipWs(p - 4); if (s[p] !== '}') return null;
-      let d = 0, j = p; for (; j >= 0; j--) { if (s[j] === '}') d++; else if (s[j] === '{') { d--; if (d === 0) break; } }
-      if (j < 0) return null;
-      p = skipWs(j - 1); if (s[p] !== ')') return null;
-      let d2 = 0, q = p; for (; q >= 0; q--) { if (s[q] === ')') d2++; else if (s[q] === '(') { d2--; if (d2 === 0) break; } }
-      if (q < 0) return null;
-      const r = skipWs(q - 1); if (!endsWith(r, 'if')) return null;
-      return `else of (${s.slice(q + 1, p)})`;
-    }
-    /**
-     * 名前の定義（var / let / const の右辺、function 宣言の本体）。無ければ null。
-     * Phase 22（F-F2）: at（使う位置）があれば、その手前で一番近い宣言（同じ名前の変数が別の handler にもあるとき、別のほうと取り違えない）
-     */
-    function defOfIdent(s, id, at = null) {
-      const e = String(id).replace(/\$/g, '\\$');
-      const all = [...s.matchAll(new RegExp(`(?<![$\\w\\u0080-\\uffff.])(?:var|let|const)\\s+${e}\\s*=\\s*([^;\\n]+)`, 'g'))];
-      const v = at == null ? all[0] : (all.filter(x => x.index < at).pop() || all[0]);
-      if (v) return v[1].trim();
-      const f = new RegExp(`\\bfunction\\s+${e}\\s*\\(`).exec(s);
-      if (f) { const o = s.indexOf('{', f.index); if (o >= 0) return s.slice(o, Math.min(closeBrace(s, o) + 1, o + 400)); }
-      return null;
-    }
-    /** 条件の中の名前（プロパティ名・文字列・注釈を除く）。Phase 22: 日本語の変数名も */
-    function condIdents(t) {
-      const out = new Set();
-      for (const m of stripCondText(t).matchAll(new RegExp(`(^|[^$\\u200C\\u200D\\p{ID_Continue}.])(${KTScan.ID_SRC})`, 'gu'))) out.add(m[2]);
-      return [...out];
-    }
-    function decorateCond(s, t, at = null) {
-      const str = String(t);
-      if (/^(for|while|catch|with|\?|else|unknown:caller)$/.test(str)) return str;
-      // Phase 22（F-F2）: 変数に入れたフィールド（const field = record['金額']; if (field.value > …)）は、その位置で有効な宣言（スコープ・影・再代入を見る）で添える
-      const ctx = at != null ? KTScan.fieldRefContext(s) : null;
-      const defs = condIdents(str).filter(id => !COND_NEUTRAL.has(id) && !STRUCT_CALLS.has(id)).map(id => {
-        const a = ctx ? KTScan.resolveAlias(ctx, id, at) : null;
-        return [id, a ? `record['${a.code}']` : defOfIdent(s, id, at)];
-      }).filter(([, d]) => d).slice(0, 4);
-      return defs.length ? `${str} /* ${defs.map(([id, d]) => `${id} = ${d.replace(/\s+/g, ' ').slice(0, 200)}`).join('; ')} */` : str;
-    }
-    const pathsOfSite = (x) => (x.paths && x.paths.length ? x.paths : [x.conds]);
-    /** Phase 21（実機）: 作成画面（create）のイベントの record に無いフィールドの型（PC・モバイルとも record.get() / event.record に無かった） */
-    const CREATE_ABSENT_TYPES = Object.freeze(['RECORD_NUMBER', 'CREATOR', 'CREATED_TIME', 'MODIFIER', 'UPDATED_TIME', 'STATUS', 'STATUS_ASSIGNEE', 'CATEGORY']);
-    /** kintone.events.on ごとのイベント名と handler の本体の範囲（その場の関数・名前で渡した関数） */
-    function handlerRanges(s) {
-      const out = [];
-      const rx = /kintone\s*\.\s*events\s*\.\s*on\s*\(/g;
-      let m;
-      while ((m = rx.exec(s)) !== null) {
-        let i = m.index + m[0].length, depth = 1, comma = -1;
-        for (; i < s.length && depth > 0; i++) { const ch = s[i]; if (ch === '(' || ch === '[' || ch === '{') depth++; else if (ch === ')' || ch === ']' || ch === '}') depth--; else if (ch === ',' && depth === 1 && comma < 0) comma = i; }
-        if (comma < 0) continue;
-        const firstArg = s.slice(m.index + m[0].length, comma);
-        const evVar = /^\s*([A-Za-z_$][\w$]*)\s*$/.exec(firstArg);
-        const evDef = evVar ? new RegExp(`\\b(?:var|let|const)\\s+${evVar[1].replace(/\$/g, '\\$')}\\s*=\\s*\\[([\\s\\S]*?)\\]`).exec(s) : null;
-        const events = [...(evDef ? evDef[1] : firstArg).matchAll(/['"`]((?:mobile\.)?app\.(?:record|report)\.[A-Za-z0-9_.\u00C0-\uFFFF]+)['"`]/g)].map(x => x[1]);
-        let start = comma + 1, end = i - 1;
-        const named = /^\s*([A-Za-z_$][\w$]*)\s*$/.exec(s.slice(comma + 1, i - 1));
-        if (named) {
-          const n = named[1].replace(/\$/g, '\\$');
-          const d = new RegExp(`(?:\\bfunction\\s+${n}\\s*\\(|\\b${n}\\s*=\\s*(?:async\\s+)?(?:function\\b[^{]*|\\([^)]*\\)\\s*=>|[A-Za-z_$][\\w$]*\\s*=>))`).exec(s);
-          if (!d) continue;
-          const open = s.indexOf('{', d.index + d[0].length - (d[0].endsWith('(') ? 1 : 0));
-          if (open < 0) continue;
-          start = open; end = closeBrace(s, open);
-        }
-        out.push({ events, start, end });
-      }
-      return out;
-    }
-    /** 作成画面のイベントの handler で、record に無いフィールド（codes）の .value を、存在を確かめずに読んでいる場所 */
-    function unguardedCreateReads(text, codes) {
-      const s = String(text || '');
-      const out = [];
-      if (!codes || !codes.length) return out;
-      const ranges = handlerRanges(s).filter(h => h.events.some(e => /^(mobile\.)?app\.record\.create\./.test(e)));
-      if (!ranges.length) return out;
-      // Phase 22（F-F2）: ブラケット（record['ステータス'].value）だけでなく、ドット記法（record.ステータス.value）・変数に入れたフィールド
-      //   （var st = record['ステータス']; st.value）も同じに見る。存在の確かめ方も、その書き方（ブラケット・ドット・変数）で照合する
-      const want = new Set(codes);
-      const ctx = KTScan.fieldRefContext(s);
-      const esc = (v) => String(v).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-      for (const x of ctx.m.matchAll(/\.\s*value\b/g)) {
-        let q = x.index - 1; while (q >= 0 && /\s/.test(ctx.m[q])) q--;
-        if (q >= 0 && ctx.m[q] === '?') continue;   // record['ステータス']?.value（無ければ undefined。止まらない）
-        const ref = KTScan.fieldRefAt(s, x.index, ctx);
-        if (!ref || !want.has(ref.code)) continue;
-        const h = ranges.find(r => x.index > r.start && x.index < r.end);
-        if (!h) continue;
-        const c = esc(ref.code);
-        const forms = [`\\[\\s*['"\`]${c}['"\`]\\s*\\]`, `\\.\\s*${c}(?![$\\u200C\\u200D\\p{ID_Continue}])`];
-        if (ref.alias) forms.push(`(?<![$\\u200C\\u200D\\p{ID_Continue}.])${esc(ref.alias)}(?![$\\u200C\\u200D\\p{ID_Continue}])`);
-        const existRef = new RegExp(`(?:${forms.join('|')})\\s*(?:&&|\\?(?!\\.)|\\|\\|)`, 'u');
-        const existCond = new RegExp(`(?:${forms.join('|')})(?!\\s*\\.\\s*value)`, 'u');
-        // 同じ式の手前で存在を確かめている（record['ステータス'] && … / ? : / || {}）
-        let st = ref.start; while (st > 0 && !/[{};]/.test(s[st - 1])) st--;
-        if (existRef.test(s.slice(st, ref.start))) continue;
-        // 囲む条件・早い return が存在を確かめている（if (record['ステータス']) { … } / if (!record['ステータス']) return event;）
-        const sc = siteConds(s, x.index);
-        if ([...sc.conds, ...((sc.paths || []).flat())].map(String).some(t => existCond.test(t))) continue;
-        const ls = s.lastIndexOf('\n', x.index) + 1, le = s.indexOf('\n', x.index);
-        out.push({ code: ref.code, index: ref.start, via: ref.via, events: h.events.filter(e => /\.create\./.test(e)), line: s.slice(ls, le < 0 ? s.length : le).trim().slice(0, 120) });
-      }
-      return out;
-    }
-    /** 位置 idx が kintone.events.on の handler（その場で渡した関数・名前で渡した関数）の中か */
-    function insideHandler(s, idx) {
-      const stack = [];
-      for (let k = 0; k < idx; k++) { const ch = s[k]; if (ch === '{') stack.push(k); else if (ch === '}') stack.pop(); }
-      return stack.some(open => {
-        const before = s.slice(Math.max(0, open - 400), open).replace(/\s+$/, '');
-        if (/=>$/.test(before)) return /kintone\s*\.\s*events\s*\.\s*on\s*\([^;{}]*,\s*(?:async\s*)?\(?[^()]*\)?\s*=>$/.test(before);
-        if (!/\)$/.test(before)) return false;
-        const head = before.slice(0, -1);
-        let depth = 1, k = head.length - 1;
-        for (; k >= 0 && depth > 0; k--) { if (head[k] === ')') depth++; else if (head[k] === '(') depth--; }
-        const kw = head.slice(0, k + 1).replace(/\s+$/, '');
-        if (/kintone\s*\.\s*events\s*\.\s*on\s*\([^;{}]*,\s*(?:async\s+)?function\s*[\w$]*\s*$/.test(kw)) return true;
-        const name = (/\bfunction\s+([A-Za-z_$][\w$]*)\s*$/.exec(kw) || /\b(?:var|let|const)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s+)?function\s*[\w$]*\s*$/.exec(kw) || [])[1];
-        return !!name && new RegExp(`kintone\\s*\\.\\s*events\\s*\\.\\s*on\\s*\\([^;]*?,\\s*${name.replace(/\$/g, '\\$')}\\s*\\)`).test(s);
-      });
-    }
-    /** Phase 21: コードがフィールドに対して行う操作（値の代入 value / 編集可否 disabled / エラー error / 表示切替 shown）。code → Set(kind) */
-    function writeTargets(clean) {
-      const s = String(clean || '');
-      const out = new Map();
-      const put = (code, kind) => { if (!code) return; if (!out.has(code)) out.set(code, new Set()); out.get(code).add(kind); };
-      // Phase 22（F-F2）: 変数に入れたフィールド（const field = record['金額']; field.disabled = true）・日本語のコードのドット記法も数える
-      const ctx = KTScan.fieldRefContext(s);
-      for (const m of ctx.m.matchAll(/\.\s*(value|disabled|error)\s*(?:=(?![=>])|\+=|-=)/g)) { const ref = KTScan.fieldRefAt(s, m.index, ctx); if (ref) put(ref.code, m[1]); }
-      let m;
-      const show = /setFieldShown\s*\(\s*['"`]([^'"`]+)['"`]/g;
-      while ((m = show.exec(s)) !== null) put(m[1], 'shown');
-      return out;
-    }
-    /** Phase 21: kintone.api の呼び出し（メソッド・対象アプリ。app が数値の文字列か、kintone.app.getId() か、変数か） */
-    function restCalls(clean) {
-      const s = String(clean || '');
-      const out = [];
-      const rx = /kintone\s*\.\s*api\s*\(/g;
-      let m;
-      while ((m = rx.exec(s)) !== null) {
-        const open = m.index + m[0].length - 1;
-        const close = closeParen(s, open);
-        const args = s.slice(open + 1, close < 0 ? Math.min(s.length, open + 600) : close);
-        const method = (/['"`](GET|POST|PUT|DELETE)['"`]/.exec(args) || [])[1] || null;
-        const lit = /\b(?:app|appId)\s*:\s*['"`]?(\d{1,7})['"`]?/.exec(args);
-        const vr = lit ? null : /\b(?:app|appId)\s*:\s*([A-Za-z_$][\w$.]*(?:\s*\(\s*\))?)/.exec(args);
-        const self = !!(vr && /kintone\s*\.\s*(?:mobile\s*\.\s*)?app\s*\.\s*getId\s*\(\s*\)/.test(vr[1]));
-        out.push({ method, app: lit ? lit[1] : null, appExpr: vr && !self ? vr[1] : null, self, path: (/['"`](\/k\/v1\/[^'"`]+)['"`]/.exec(args) || [])[1] || null });
-      }
-      return out;
-    }
-    /** Phase 21: イベント名を文字列の連結・テンプレートで組み立てている（静的にイベントを特定できない） */
-    const dynamicEventNames = (clean) => /['"`](?:mobile\.)?app\.(?:record|report)\.[A-Za-z0-9_.]*['"`]\s*\+|`(?:mobile\.)?app\.(?:record|report)\.[^`]*\$\{/.test(String(clean || ''));
-
-    /** str の open（'{' の位置）に対応する '}' の位置 / '(' に対応する ')' の位置 */
-    const closeBrace = (str, open) => { let d = 0; for (let k = open; k < str.length; k++) { const ch = str[k]; if (ch === '{') d++; else if (ch === '}') { d--; if (d === 0) return k; } } return str.length - 1; };
-    const closeParen = (str, open) => { let d = 0; for (let k = open; k < str.length; k++) { const ch = str[k]; if (ch === '(') d++; else if (ch === ')') { d--; if (d === 0) return k; } } return -1; };
     /** Phase 20: フォームのスペース要素の ID（kintone.app.getFormLayout() / REST layout の SPACER.elementId。グループ内も） */
     function layoutSpaceIds(layout) {
       const rows = Array.isArray(layout) ? layout : (Array.isArray(layout?.layout) ? layout.layout : []);
@@ -19751,33 +19237,6 @@
       walk(rows);
       return [...out];
     }
-    /** グローバル汚染: 即時関数の外（ネスト 0）に var / let / const / function / class の宣言があるか */
-    function globalDeclarations(clean) {
-      const s = stripStrings(String(clean || ''));
-      const out = [];
-      let depth = 0;
-      const lines = s.split(EOL_RE);
-      let pos = 0;
-      for (const line of lines) {
-        if (depth === 0) { const m = /^\s*(?:var|let|const|function|class)\s+([A-Za-z_$][\w$]*)/.exec(line); if (m) out.push(m[1]); }
-        for (const ch of line) { if (ch === '{' || ch === '(' || ch === '[') depth++; else if (ch === '}' || ch === ')' || ch === ']') depth = Math.max(0, depth - 1); }
-        pos += line.length + 1;
-      }
-      return out;
-    }
-    /**
-     * 生成コードの検査
-     * @param {object} p
-     *   generated     Gateway の generated（strategy / targetFile / code / patch / events / fields / apis …）
-     *   customization 承認済みの Customization Plan（events / fields / apis / platform / strategy）
-     *   plan          Change Plan（proposedFields の suggestedCode を既知コードに含める）
-     *   data / scan   アプリの定義と Field Scanner の結果（既存 JS との競合）
-     *   existingSource { name, target, text } | null（EXTEND_EXISTING_JS の統合先）
-     *   requirements  要件の台帳（{ id, planRefs }。要件 R… の担当を planRefs で引く）
-     *   planOwners    会話が担当として数える計画の項目の id（採用した仮案の項目・計画の手順など。KTAiConversation の planOwnerIds）。
-     *                 要件の planRefs がこれだけを指すときは 'plan'（計画全体で扱う要件。この JavaScript の満たせない部分にも担当未定にもしない）
-     * @returns {{ status, checks[], finalCode, addedCode, diff, rescan, mismatches[], security[], provenance }}
-     */
     /**
      * 2026-10-15（最終案の重複と担当未定の食い違い §3）: 計画全体で扱う要件（planRefs が採用した仮案の項目だけ）を、生成した JavaScript が担当外・未達・一部と申告し、
      *   計画のどの手順で実現するかが書かれていないときの画面の文。左のカード（確認できないこと）・右の変更内容・反映の前の確認の確認項目で同じ文を使う。
@@ -19801,27 +19260,37 @@
       const s = String(t || '').replace(/\s+/g, ' ').trim();
       try { return s && typeof KTAiConversation !== 'undefined' && KTAiConversation.withLabels ? KTAiConversation.withLabels(s, labels) : s; } catch (e) { return s; }
     }
+    /**
+     * 生成したコードのうち、Toolkit が受け持つ確認（純関数）。簡素化 B（2026-10-17）: 生成のときの候補と文脈の検査（構文・記法・イベント・API・計画との整合・
+     *   必須の動作と模擬テスト）は生成工程（Gateway）の検証結果が正本で、ここでは繰り返さない（結果は attachBehavior が登録の判定に取り込む）。以前はここで同じ種類の
+     *   検査と、Toolkit だけの規則（使える画面の違う API・エラー表示の解除・同じイベントの handler・グローバルの宣言・入れ子の登録・作成画面のシステムフィールドなど）を
+     *   作り直していた。ここで行うのは:
+     *   1. 登録する本文を作る（新規: 全文 / 統合: 送った既存ファイルの本文に patch を当てる。当てられなければ登録できない）と差分。既存の行の置き換え・削除は、
+     *      書き込む内容の確認（patch-removal）にする
+     *   2. existingOnly（反映の前の準備・登録の直前）: 今のアプリの設定に、コードが参照するフィールドとフォームのスペース要素があるか
+     *   3. 計画で新設するステータス・フィールドへの依存（dependsOn。反映の順を KTJsExecutor.prepare が確かめる）
+     *   4. 生成した AI の要件の達成の申告（coverage）を、計画の構造（手順・JavaScript・要件の planRefs）に対応づける（最終案の表示の材料。登録の可否はここで決めない）
+     * @param {object} p { generated, customization, plan, data, existingSource { name, target, text } | null, provenance, existingOnly, requirements（要件の台帳）, planOwners }
+     * @returns {{ status, checks[], finalCode, addedCode, diff, rescan, coverage, dependsOn, registration, provenance, assumptions }}
+     */
     function review({ generated, customization, plan = null, data = null, scan = null, existingSource = null, provenance = null, existingOnly = false, requirements = null, planOwners = null } = {}) {
+      void scan;
       const checks = [];
-      //   §0f.5 の 3（2026-10-09）: screen = 承認の欄など通常表示に出す画面の言葉の文（イベント名・フィールドのコード・handler などを出さない）。
-      //   message（元の文）は詳細と右の「確認結果」に残し、承認の照合（key・code）と指紋（message）は変えない
+      //   §0f.5 の 3（2026-10-09）: screen = 承認の欄など通常表示に出す画面の言葉の文。message（元の文）は詳細に残し、承認の照合（key・code）と指紋（message）は変えない
       const add = (name, ok, severity, message, detail = null, screen = null) => checks.push({ name, ok, severity: ok ? 'info' : severity, message, ...(detail ? { detail } : {}), ...(screen && !ok ? { screen } : {}) });
       const g = generated || {};
       const c = customization || {};
       const fieldsN = KTDeps.normalizeFields(data?.fields || {});
       const fieldJa = (code) => { const f = fieldsN.find(x => x && x.code === code); return `「${(f && f.label) || code}」`; };
-      const evJa = (list) => KTJsCatalog.eventsJa(list);
-      // 利用者に見える文に内部の番号（P2 / C2）を出さない（再レビュー 2026-10-07）: 担当は手順の名前・別の JavaScript の要件（先頭 30 字）で言い、
-      //   AI の note / assumptions に書かれた番号も表示用には名前に置き換える（担当の存在の判定には元の note を使う）。「手順 P1」の形は「手順」を重ねない
+      // 利用者に見える文に内部の番号（P2 / C2）を出さない（再レビュー 2026-10-07）: 担当は手順の名前・別の JavaScript の要件（先頭 30 字）で言う
       const planStepsAll = Array.isArray(plan?.steps) ? plan.steps : [], planCustsAll = Array.isArray(plan?.customizations) ? plan.customizations : [];
       const shortReq = (s) => { const t = String(s ?? '').trim(); return t.length > 30 ? `${t.slice(0, 30)}…` : t; };
       const idLabel = (id) => {
         if (id && id === c.customizationId) return 'この JavaScript';
-        const cu = planCustsAll.find(x => x && x.customizationId === id); if (cu) return `別の JavaScript「${shortReq(cu.requirement)}」`;   // 段階 C: JavaScript の手順（CUSTOMIZATION_REQUIRED）は customization と同じ id なので先に見る
+        const cu = planCustsAll.find(x => x && x.customizationId === id); if (cu) return `別の JavaScript「${shortReq(cu.requirement)}」`;
         const st = planStepsAll.find(s => s && s.id === id && s.actionType !== 'CUSTOMIZATION_REQUIRED'); if (st) return `手順「${String(st.title || st.targetRef || id)}」`;
         return '計画の別の手順';
       };
-      //   置き換えた語の末尾が日本語（「計画の別の手順」など）なら、番号の後ろにあった半角空白は落とす（「計画の別の手順 の反映が前提」にしない。再レビュー 2026-10-07）
       const displayNote = (note) => String(note ?? '').replace(/(?:手順\s*)?\b([PC]\d+)\b(\s*)/g, (m, id, ws, offset, whole) => { const label = idLabel(id); const next = String(whole).charAt(offset + m.length); return /[A-Za-z0-9]$/.test(label) || /^[A-Za-z0-9]/.test(next) ? label + ws : label; });
       // 段階 A（5.2）: 新規フィールドの対応表は Generator Context と同じもの（KTContext.proposedCodeMap）
       const proposedCodes = KTContext.proposedCodeMap(plan);
@@ -19830,13 +19299,13 @@
       const existingCodes = new Set(fieldsN.map(f => f.code));
       // 段階 A（R14）: existingOnly = 登録前の再検査。計画の新規フィールドを「存在する」扱いにしない（実在するフィールドだけ）
       const proposedRows = existingOnly ? [] : (plan?.proposedFields || []).filter(p => p && p.suggestedCode && !existingCodes.has(p.suggestedCode));
-      const knownCodes = new Set([...existingCodes, ...proposedRows.map(p => p.suggestedCode)]);
       // Phase 20（実機）: フォームのスペース要素（getSpaceElement の ID）はフィールドではないが実在する。存在しないフィールドと数えない
       const spaceIds = layoutSpaceIds(data?.layout);
       const fieldRows = [...fieldsN.map(f => ({ code: f.code, label: f.label, type: f.rawType })), ...proposedRows.map(p => ({ code: p.suggestedCode, label: p.label, type: p.type })), ...spaceIds.map(id => ({ code: id, label: id, type: 'SPACER' }))];
-      // ---- 1. コードの確定（新規: 全文 / 統合: patch を適用）----
+      const target = Array.isArray(c.platform) && c.platform.length === 1 && c.platform[0] === 'mobile' ? 'mobile' : (existingSource?.target || 'desktop');
+      // ---- 1. 登録する本文（新規: 全文 / 統合: 送った既存ファイルの本文に patch を当てる）----
       let finalCode = String(g.code ?? '');
-      let addedCode = finalCode;
+      const addedCode = finalCode;
       let diff = null, patchResult = null;
       if (g.strategy === 'EXTEND_EXISTING_JS') {
         if (!existingSource || typeof existingSource.text !== 'string') { add('patch', false, 'block', '統合先の既存ソースがありません（JS_SOURCE_UNAVAILABLE）。再スキャン / 新規 JS として設計 / 手動確認 のいずれかを選んでください'); return finish(); }
@@ -19845,213 +19314,33 @@
         finalCode = patchResult.text;
         diff = diffLines(existingSource.text, finalCode);
         add('patch', true, 'info', `既存「${existingSource.name}」へ ${patchResult.applied} 件の操作を適用（＋${diff.added} 行 / −${diff.removed} 行）。元のコードは保持（全文の書き換えなし）`);
+        //   書き込む内容の確認: 既存の行が置き換わる・消える（登録した後の動きではなく、書き込む本文そのものの事実）
         if (diff.removed > 0) add('patch-removal', false, 'review', `既存の ${diff.removed} 行が置き換え・削除されます（REPLACE）。既存処理が失われないか確認してください`, null, `既存のファイルの ${diff.removed} 行が置き換え・削除されます（既存の処理が失われないか確かめてください）`);
-      } else if (g.strategy !== 'NEW_JS_FILE') { add('strategy', false, 'block', `方針 ${String(g.strategy)} はコード生成の対象外です`); return finish(); }
+      } else if (g.strategy !== 'NEW_JS_FILE') { add('strategy', false, 'block', `方針 ${String(g.strategy)} は登録の対象外です`); return finish(); }
       else diff = diffLines('', finalCode);
       if (!finalCode.trim()) { add('code', false, 'block', 'コードが空です'); return finish(); }
-      // ---- 2. 構文（compile のみ）----
-      const syn = checkSyntax(finalCode);
-      add('syntax', syn.ok, 'block', syn.ok ? '構文エラーなし' : `構文エラー: ${syn.message}`);
-      if (!syn.ok) return finish();
-      //   簡素化 B（2026-10-16）: 記法（var など）は生成工程の機械検査（modern-js）で確かめる（Toolkit の写しの検査は削除した。生成工程の結果が無い候補は合格にしない）
-      // ---- 3. 再解析（KTScan の仮想ファイル）----
-      const target = Array.isArray(c.platform) && c.platform.length === 1 && c.platform[0] === 'mobile' ? 'mobile' : (existingSource?.target || 'desktop');
-      const rescan = KTScan.analyzeFile({ name: g.targetFile || existingSource?.name || 'generated.js', target, kind: 'js', text: finalCode }, { fields: fieldRows, selfAppId: data?.appId ?? null });
-      const addedScan = g.strategy === 'EXTEND_EXISTING_JS' ? KTScan.analyzeFile({ name: g.targetFile || 'added.js', target, kind: 'js', text: addedCode }, { fields: fieldRows, selfAppId: data?.appId ?? null }) : rescan;
-      const clean = KTScan.stripCommentsOnly(finalCode);
-      const cleanAdded = KTScan.stripCommentsOnly(addedCode);
-      // ---- 4. イベント（Event Catalog・計画との一致）----
-      // Phase 21: 新規フィールド（NEW_FIELD_n）の値の変更イベントは提案コードに読み替える（Generator Context と同じ）
-      const planEvents = new Set((c.events || []).map(ev => { try { const chk = KTJsCatalog.checkEvent(ev); return chk && chk.field && proposedCodes.has(chk.field) ? `${chk.base.replace('<fieldCode>', '')}${proposedCodes.get(chk.field)}` : ev; } catch (e) { return ev; } }));
-      const codeEvents = addedScan.events;            // 追加したコードが登録するイベント
-      const fileEvents = rescan.events;               // 最終的なファイル全体のイベント（統合では既存 handler のものを含む）
-      // Phase 21: イベント名を組み立てている（'app.record.edit.change.' + code）ときの前半だけの文字列は、無いイベントとは数えない（静的に特定できない → 確認）
-      // モデル更新の評価（gpt-6.1-sol）: 画面を見分ける前方一致の文字列（event.type.indexOf('app.record.index.')）は登録しているイベントではない。
-      //   「.」で終わる名前は、登録の引数に直接書いたもの（direct）だけを無いイベントとして止める
-      const badEvents = codeEvents.filter(e => e.valid === false && !(/\.$/.test(e.name) && (!e.direct || dynamicEventNames(clean))));
-      add('events', !badEvents.length, 'block', badEvents.length ? `kintone に無いイベント: ${badEvents.map(e => e.name).join(', ')}` : `イベント ${(codeEvents.length ? codeEvents : fileEvents).map(e => e.name).join(', ') || '（検出なし）'} は目録にあります`);
-      const extraEvents = codeEvents.filter(e => e.valid !== false && !planEvents.has(e.name)).map(e => e.name);
-      const missingEvents = [...planEvents].filter(ev => !fileEvents.some(e => e.name === ev));
-      const mismatches = [];
-      if (extraEvents.length) mismatches.push({ kind: 'event', code: 'EXTRA_EVENT', items: extraEvents, message: `計画に無いイベント: ${extraEvents.join(', ')}` });
-      // Phase 20（実機 BF-C 4 回目）: 計画の change イベントを生成コードが登録せず、入力中に警告が切り替わらなかった（以前は軽微な差として合格）→ 要確認
-      if (missingEvents.length) mismatches.push({ kind: 'event', code: 'MISSING_EVENT', items: missingEvents, message: `計画のイベントがコードに無い: ${missingEvents.join(', ')}（そのタイミングでは動きません${missingEvents.some(ev => /\.change\./.test(ev)) ? '。値の変更時が無いと入力中に切り替わりません' : ''}）` });
-      const addedRegisters = /kintone\s*\.\s*events\s*\.\s*on/.test(cleanAdded);
-      if (!addedRegisters) {
-        if (g.strategy === 'EXTEND_EXISTING_JS' && fileEvents.length) add('handler', true, 'info', `既存の handler（${fileEvents.map(e => e.name).join(', ')}）の中に処理を追加します`);
-        else add('handler', false, 'review', 'kintone.events.on の登録が見つかりません', null, '画面で動く処理の登録が見つかりません');
+      // ---- 2. 今の設定での存在（反映の前の準備・登録の直前。existingOnly）----
+      //   生成のときの参照の照合は生成工程の機械検査（fields）が行う。反映のときは、今のアプリの設定にコードが参照するフィールドとフォームのスペース要素があるかを確かめる
+      //   （検証の後にフィールド・スペースが消えた・コードが変わったものを書き込まない）
+      if (existingOnly) {
+        const addedScan = KTScan.analyzeFile({ name: g.targetFile || 'added.js', target, kind: 'js', text: addedCode }, { fields: fieldRows, selfAppId: data?.appId ?? null });
+        const spaceCalls = [...new Set([...String(KTScan.stripCommentsOnly(addedCode)).matchAll(/getSpaceElement\s*\(\s*['"`]([^'"`]+)['"`]/g)].map(x => x[1]))];
+        const missingSpaces = spaceCalls.filter(id => !spaceIds.includes(id));
+        const unknownRefs = [...new Set((addedScan.unknownRefs || []).map(u => u.code || u.value || u.ref).filter(Boolean).filter(code => !missingSpaces.includes(code)))];
+        add('fields', !unknownRefs.length, 'block', unknownRefs.length ? `今のアプリの設定に無いフィールドを参照しています: ${unknownRefs.map(fieldJa).join('・')}（生成の後に削除・変更されたか、計画で新設するフィールドがまだ反映されていません）` : `参照するフィールドは今のアプリの設定にあります${(addedScan.fields || []).length ? `（${[...new Set(addedScan.fields.map(x => x.code).filter(code => !spaceCalls.includes(code)))].map(fieldJa).join('・')}）` : ''}`);
+        if (spaceCalls.length) add('space-element', !missingSpaces.length, 'block', missingSpaces.length ? `スペース要素「${missingSpaces.join('」「')}」は今のフォームにありません（getSpaceElement が null を返し、警告などは表示されません）。フォームの設定でスペースを追加するか、別の表示方法にしてください` : `スペース要素 ${spaceCalls.join(', ')} は今のフォームにあります`);
       }
-      // ---- 5. フィールド（dictionary ＋ 計画の新規・計画との一致）----
-      // Phase 20（実機）: getSpaceElement の ID はフォームのスペース要素。無ければ null が返り何も表示されない → 専用の理由で止める（存在しないフィールドとは言わない）
-      const spaceCalls = [...new Set([...String(cleanAdded).matchAll(/getSpaceElement\s*\(\s*['"`]([^'"`]+)['"`]/g)].map(x => x[1]))];
-      const missingSpaces = spaceCalls.filter(id => !spaceIds.includes(id));
-      const unknownRefs = (addedScan.unknownRefs || []).map(u => u.code || u.value || u.ref).filter(Boolean).filter(code => !missingSpaces.includes(code));
-      add('fields', !unknownRefs.length, 'block', unknownRefs.length ? `存在しないフィールドコードを参照しています（GENERATED_JS_UNKNOWN_FIELD）: ${unknownRefs.join(', ')}` : `参照するフィールド ${addedScan.fields.map(f => f.code).filter(code => !spaceCalls.includes(code)).join(', ') || '（なし）'} は存在します`);
-      if (spaceCalls.length) add('space-element', !missingSpaces.length, 'block', missingSpaces.length ? `スペース要素「${missingSpaces.join('」「')}」はフォームにありません（getSpaceElement が null を返し、警告などは表示されません）。フォームの設定でスペースを追加するか、別の表示方法にしてください` : `スペース要素 ${spaceCalls.join(', ')} はフォームにあります`);
-      // Phase 21: 計画の新規フィールド（NEW_FIELD_n）は提案コードに読み替える（Generator へは提案コードで渡している）。condition = そのフィールドを制御・変更する条件（任意）
-      const planCode = (code) => proposedCodes.get(code) ?? code;
-      const planFields = new Map((c.fields || []).map(f => [planCode(f.code), f.access]));
-      // Phase 21（G9）: テーブルの中のフィールドを計画したときは、親のテーブルを読む（行を回す）のは計画の範囲。全列のループ（row.value[key].disabled = true）は各列の制御
-      const subtableOf = new Map(fieldsN.filter(f => f.parent).map(f => [f.code, f.parent]));
-      const tableOfPlanned = new Set([...planFields.keys()].filter(code => subtableOf.has(code)).map(code => subtableOf.get(code)));
-      const allCellsLocked = (text, code) => subtableOf.has(code) && subtableCellSites(text, subtableOf.get(code), code).some(x => x.allColumns);
-      //   §0c.8（2026-10-08）: テーブルの列の表示切り替えだけを計画したフィールドは、kintone ではできない（実現できない点に出す）ので、コードに現れなくても止めない
-      const columnShowHideOnly = new Set((c.fields || []).filter(f => f && subtableOf.has(planCode(f.code)) && (() => { const fe = ktFieldEffectsOf(f.effects) || []; return fe.length > 0 && fe.every(x => x.effect === 'show-hide'); })()).map(f => planCode(f.code)));
-      for (const f of addedScan.fields) {
-        const writes = ACCESS_W(f.access);
-        const planned = planFields.get(f.code) || null;
-        if (!planned && !writes.length && tableOfPlanned.has(f.code)) continue;
-        if (!planned) mismatches.push({ kind: 'field', code: writes.length ? 'EXTRA_FIELD_WRITE' : 'EXTRA_FIELD_READ', items: [f.code], message: `計画に無いフィールド ${f.code} を${writes.length ? `書き換え・制御（${writes.join('/')}）` : '参照'}しています` });
-        else if (writes.length && planned === 'READ') mismatches.push({ kind: 'field', code: 'ACCESS_ESCALATED', items: [f.code], message: `${f.code} は計画では READ ですがコードは ${writes.join('/')} しています` });
-      }
-      for (const [code, access] of planFields) if (!columnShowHideOnly.has(code) && !addedScan.fields.some(f => f.code === code) && !(access === 'CONTROL' && allCellsLocked(cleanAdded, code))) mismatches.push({ kind: 'field', code: 'MISSING_FIELD', items: [code], message: `計画のフィールド ${code}（${access}）が追加したコードに現れません${rescan.fields.some(f => f.code === code) ? '（既存のコードにはあります）' : ''}` });
-      // ---- Phase 21: 登録の可否。静的に確かめられる要件違反は block（登録不可）、静的には確かめられないことは review（登録前に確認する項目）----
-      const handlersAll = kintoneFieldOps(clean);
-      const unresolvedEvents = handlersAll.some(h => h.events.includes('（イベント名を特定できない登録）')) || dynamicEventNames(clean);
-      // (1) 計画のイベントがファイルに無い（そのタイミングでは動かない）。Phase 20 F41 / BF-C: change が無く入力中に警告が切り替わらなかった
-      if (missingEvents.length) add('planned-events', false, unresolvedEvents ? 'review' : 'block', `計画のイベントがコードにありません: ${missingEvents.join(', ')}（${missingEvents.some(ev => /\.change\./.test(ev)) ? '値の変更時に動かないため、入力中に切り替わりません' : 'そのタイミングでは動きません'}）${unresolvedEvents ? '。イベント名を組み立てている登録があり、静的には確かめられません' : ''}`, null, `計画のタイミング（${evJa(missingEvents)}）で動く処理がコードにありません${unresolvedEvents ? '（動くタイミングを組み立てている登録があり、コードからは確かめられません）' : ''}`);
-      // (2) 計画で制御・書き換えするフィールドが、ファイルのどこにも無い（要件の処理が無い）
-      const absent = [...planFields.entries()].filter(([code, access]) => (access === 'CONTROL' || access === 'WRITE') && !columnShowHideOnly.has(code) && !rescan.fields.some(f => f.code === code) && !(access === 'CONTROL' && allCellsLocked(clean, code)));
-      //   §0c.11（2026-10-08）: 対象のフィールドを detail.fields（{ code, access }）に持つ（attachBehavior が、保存だけの警告で必須の効果が present のフィールドを外す）
-      if (absent.length) add('planned-fields', false, 'block', plannedFieldsMessage(absent.map(([code, access]) => ({ code, access }))), { fields: absent.map(([code, access]) => ({ code, access })) });
-      // (3) PC とモバイルの両方が対象: 制御・書き換えするフィールドが片方の画面の処理にしか無い（Phase 20 F41: 担当者のロックがモバイルだけ）。ファイル全体（既存の handler を含む）で見る
-      if (Array.isArray(c.platform) && c.platform.includes('desktop') && c.platform.includes('mobile')) {
-        // テーブルの中のフィールドは、親のテーブルを参照して編集可否を設定する handler（全列のループ）でも扱っている
-        const covered = (code, mobile) => handlersAll.some(h => h.events.some(e => (mobile ? /^mobile\./ : /^app\./).test(e)) && ((h.refs || []).includes(code) || (subtableOf.has(code) && (h.refs || []).includes(subtableOf.get(code)) && h.disabled)));
-        const gaps = [];
-        for (const [code, access] of planFields) { if (access !== 'CONTROL' && access !== 'WRITE') continue; const pc = covered(code, false), mob = covered(code, true); if (pc !== mob) gaps.push({ code, access, pc }); }
-        for (const x of gaps) mismatches.push({ kind: 'platform', code: 'PLATFORM_FIELD_MISSING', items: [x.code], message: `${x.code} は${x.pc ? 'モバイル' : 'PC'} の画面の処理で${x.access === 'CONTROL' ? '制御' : '書き換え'}していません（${x.pc ? 'PC' : 'モバイル'} だけ）` });
-        if (gaps.length) add('platform-fields', false, unresolvedEvents ? 'review' : 'block', `PC とモバイルの両方が対象ですが、${gaps.map(x => `${x.code} は${x.pc ? 'モバイル' : 'PC'}の画面の処理で${x.access === 'CONTROL' ? '制御' : '書き換え'}していません（${x.pc ? 'PC' : 'モバイル'}だけ）`).join('、')}${unresolvedEvents ? '。イベント名を特定できない登録があり、静的には確かめられません' : ''}`, null,
-          `PC とモバイルの両方が対象ですが、${gaps.map(x => `${fieldJa(x.code)}は${x.pc ? 'モバイル' : 'PC'}の画面で${x.access === 'CONTROL' ? '制御' : '書き換え'}していません`).join('、')}${unresolvedEvents ? '（動くタイミングを特定できない登録があり、コードからは確かめられません）' : ''}`);
-      }
-      // (4) 計画に無いフィールドの操作（対象と異なるフィールド）。テーブルの中のフィールドは、テーブルが計画にあれば対象。エラー表示だけは要確認
-      const inPlan = (code) => planFields.has(code) || (subtableOf.has(code) && planFields.has(subtableOf.get(code)));
-      const OP_JA = { value: '値の書き換え', disabled: '編集可否', shown: '表示切替', error: 'エラー表示' };
-      const fieldWrites = writeTargets(cleanAdded);
-      const offTarget = [...fieldWrites.entries()].filter(([code, kinds]) => knownCodes.has(code) && !inPlan(code) && [...kinds].some(k => k !== 'error'));
-      if (offTarget.length) add('target-fields', false, 'block', `計画に無いフィールドを操作しています（対象と異なるフィールド）: ${offTarget.map(([code, kinds]) => `${code}（${[...kinds].map(k => OP_JA[k]).join('・')}）`).join('、')}。計画（実装仕様）に入れるか、コードを作り直してください`);
-      const offError = [...fieldWrites.entries()].filter(([code, kinds]) => knownCodes.has(code) && !inPlan(code) && [...kinds].every(k => k === 'error'));
-      if (offError.length) add('target-fields-error', false, 'review', `計画に無いフィールドにエラーを表示しています: ${offError.map(([code]) => code).join(', ')}（要件どおりか確認してください）`, null, `計画に無いフィールド（${offError.map(([code]) => fieldJa(code)).join('・')}）にエラーを表示しています（要件どおりか確かめてください）`);
-      // (5) 対象と異なるアプリ: このアプリ以外のレコードを書き換える REST 呼び出しは登録不可。読み取り・アプリが静的に決まらない呼び出しは要確認
-      const selfId = data?.appId != null && String(data.appId) !== '' ? String(data.appId) : null;
-      const calls = restCalls(cleanAdded);
-      const otherWrites = calls.filter(x => x.app && x.app !== selfId && ['POST', 'PUT', 'DELETE'].includes(x.method));
-      if (otherWrites.length) add('target-app', false, 'block', `このアプリ（${selfId ?? '?'}）以外のアプリ ${[...new Set(otherWrites.map(x => x.app))].join(', ')} のデータを書き換えます（${otherWrites.map(x => `${x.method} ${x.path || ''}`.trim()).join('、')}）。Toolkit が扱うのはこのアプリの変更だけです`);
-      const otherReads = calls.filter(x => !otherWrites.includes(x) && ((x.app && x.app !== selfId) || x.appExpr));
-      if (otherReads.length) add('target-app-read', false, 'review', `他のアプリ、または静的に決まらないアプリへの API 呼び出しがあります: ${otherReads.map(x => `${x.method || '?'} app ${x.app || x.appExpr}`).join('、')}（対象アプリと権限を確認してください）`, null, 'ほかのアプリ（または、コードからは決まらないアプリ）を呼び出しています（対象のアプリと権限を確かめてください）');
-      const hardMismatch = mismatches.filter(m => ['ACCESS_ESCALATED', 'EXTRA_EVENT'].includes(m.code) || (m.code === 'EXTRA_FIELD_WRITE' && !offTarget.some(([code]) => m.items.includes(code))));
-      add('plan-consistency', !hardMismatch.length, 'review', hardMismatch.length ? `計画と生成コードが一致しません（CUSTOMIZATION_PLAN_MISMATCH）: ${hardMismatch.map(m => m.message).join('／')}` : mismatches.length ? `計画との軽微な差: ${mismatches.map(m => m.message).join('／')}` : '計画（イベント・フィールド・アクセス）と一致', null, '計画（動くタイミング・フィールド・扱い）と、作ったコードが一致しない点があります（内容は右の「確認結果」）');
-      // ---- 6. API（API Catalog・通信）----
-      const apis = addedScan.apis;
-      const unknownApis = [...new Set(apis.filter(a => !a.known).map(a => a.name))];
-      add('apis', !unknownApis.length, 'review', unknownApis.length ? `目録に無い kintone API: ${unknownApis.join(', ')}` : `使用 API ${[...new Set(apis.map(a => a.name))].join(', ') || '（なし）'} は目録にあります`, null, `kintone の機能の目録に無い呼び出しがあります（${unknownApis.length} 件）`);
-      const netApis = [...new Set(apis.filter(a => a.network).map(a => a.name))];
-      const planApis = new Set(c.apis || []);
-      const unplannedNet = netApis.filter(a => !planApis.has(a));
-      if (unplannedNet.length) add('apis-network', false, 'review', `計画に無い通信 API を使っています: ${unplannedNet.join(', ')}（単純な制御なら不要）`, null, '計画に無い通信（ほかのアプリ・外部とのやり取り）を使っています（単純な制御なら不要です）');
-      // RC E2E（N3・実機）: 使える画面の違う API。handler のどのイベントの画面でも使えない → 登録不可、一部の画面で使えない → 確認。
-      //   今回足した呼び出しだけ（既存のコードに元からある呼び出しは数えない）
-      const baseClean = g.strategy === 'EXTEND_EXISTING_JS' && existingSource && typeof existingSource.text === 'string' ? KTScan.stripCommentsOnly(existingSource.text) : '';
-      const screensJa = (list) => list.map(x => KTJsCatalog.SCREEN_JA[x] || x).join('・');
-      for (const u of freshOnly(apiScreenUses(clean), baseClean ? apiScreenUses(baseClean) : [], (x) => `${x.name}|${x.line}|${x.events.join(',')}`)) {
-        if (!u.badScreens.length) continue;
-        const all = u.badScreens.length === u.eventScreens.length;
-        add('api-screen', false, all ? 'block' : 'review', `${u.name} は${screensJa(u.badScreens)}では使えません（使える画面: ${screensJa(u.screens)}。使えない画面では null を返すので、この処理は${all ? '動きません' : 'その画面では動きません'}）: ${u.line}${/getFieldElement$/.test(u.name) ? '。作成・編集画面のフィールドへの注意は event.record の error（またはスペース要素の getSpaceElement）で出します' : ''}`, null,
-          `使っている機能の一部は${screensJa(u.badScreens)}では使えないため、その画面ではこの処理が動きません（使える画面: ${screensJa(u.screens)}）`);
-      }
-      // RC のモデル更新の評価（実機）: 前のイベントで表示したエラーは event.record に残らない。error の今の値を比べて消す条件は成り立たず、表示が消えない
-      const freshClear = freshOnly(errorClearByCompare(clean), baseClean ? errorClearByCompare(baseClean) : [], (x) => `${x.code}|${x.line}`);
-      for (const code of [...new Set(freshClear.map(x => x.code))]) {
-        const x = freshClear.find(y => y.code === code);
-        add('error-clear-compare', false, 'review', `${code} の表示を消す条件が error の今の値を見ています（${x.cond}）。kintone は前のイベントで表示したエラーを event.record に残さない（undefined）ため、この条件は成り立たず、表示が消えません。条件に当てはまらないときは、error を比べずに null を設定してください`, null, `${fieldJa(code)}の警告を消す条件が正しくないため、条件に当てはまらなくなっても警告が消えません`);
-      }
-      // ---- 7. セキュリティ / 外部通信 ----
-      const security = addedScan.security;
-      const blocks = security.filter(x => x.severity === 'block'), reviews = security.filter(x => x.severity === 'review');
-      add('security', !blocks.length, 'block', blocks.length ? blocks.map(x => `${x.message} [${x.code}]`).join('／') : '秘密情報・eval・cookie・外部通信はありません');
-      if (reviews.length) add('security-review', false, 'review', reviews.map(x => `${x.message} [${x.code}]`).join('／'), null, `安全性の確認が必要な書き方があります（${reviews.length} 件。内容は右の「確認結果」）`);
-      // ---- 8. 作法: グローバル汚染 / return event / async / 重複 handler ----
-      // Phase 20（CX-1 2 回目・実機）: 既存ファイルへの統合でも見る。AI が APPEND（anchor「})();」）で既存の即時関数の外に var EVENTS を足し、
-      //   以前は新規ファイルだけを見ていたので「即時関数の外に宣言はありません」と表示した。既存ファイルに元からある宣言は除く（統合したコードの責任ではない）
-      const baseGlobals = g.strategy === 'EXTEND_EXISTING_JS' && existingSource && typeof existingSource.text === 'string' ? globalDeclarations(KTScan.stripCommentsOnly(existingSource.text)) : [];
-      const globals = g.strategy === 'NEW_JS_FILE' ? globalDeclarations(clean) : g.strategy === 'EXTEND_EXISTING_JS' ? globalDeclarations(clean).filter(n => !baseGlobals.includes(n)) : [];
-      add('globals', !globals.length, 'review', globals.length ? (g.strategy === 'EXTEND_EXISTING_JS' ? `追加したコードがファイル直下（既存の即時関数の外）に宣言を置いています（グローバル汚染）: ${globals.join(', ')}。既存の即時関数の中に入れてください（ほかの JavaScript と名前がぶつかると動作が変わります）` : `ファイル直下に宣言があります（グローバル汚染）: ${globals.join(', ')}。即時関数で包んでください`) : '即時関数の外に宣言はありません', null, `追加したコードの名前が、ほかの JavaScript の名前とぶつかる可能性があります（${globals.length} 件）`);
-      // Phase 21（モデル比較の INTEG）: 差分が登録の行だけ（REPLACE でイベントを足す）なら、handler の本体は既存のまま → 最終コードの同じ登録で見る
-      //   （断片だけを見て「return event がありません」と誤って表示した）
-      const handlersFinal = inspectHandlers(clean);
-      const handlers = inspectHandlers(cleanAdded).map(h => {
-        if (h.complete !== false) return h;
-        const full = handlersFinal.find(f => f.firstArg === h.firstArg) || null;
-        return full ? { ...full, fromFinal: true } : h;
-      });
-      const noReturn = handlers.filter(h => !h.returnEvent);
-      add('return-event', !noReturn.length, 'review', noReturn.length ? `${noReturn.length} 件の handler に return event がありません（表示イベントで無いと画面が止まります）` : handlers.length ? `${handlers.length} 件の handler は return event しています` : '追加分に新しい handler はありません（既存 handler の中に追加。既存の return event をそのまま使います）', null, `${noReturn.length} 件の処理が、処理の結果を kintone に返していません（画面を開いたときの処理では、画面が止まることがあります）`);
-      const asyncIssues = handlers.filter(h => h.awaitInNonAsync);
-      add('async', !asyncIssues.length, 'block', asyncIssues.length ? 'async でない handler の中で await を使っています（構文エラーになります）' : handlers.some(h => h.async) ? 'async handler は return event を Promise で返します' : 'async は使っていません');
-      if (handlers.some(h => h.promiseThen && !h.async)) add('async-then', false, 'review', '.then() を使う handler は Promise を return しないと kintone が結果を待ちません', null, '結果を待つ処理が、待っていることを kintone に返していないため、kintone が処理の終わりを待ちません');
-      // Phase 20（実機）: error の解除は null だけ（'' では前の表示が残る）。kintone の規則の形式確認
-      //   §0d.4（2026-10-08）: 同じイベントの error と disabled / value の重なり（error-cancels-edit）は生成工程に移した（Gateway の checkReason candidate-error-same-event → 模擬テスト）。
-      //   C-1 第 3 段（2026-10-08）: 他の JavaScript の編集不可・値の設定を候補の error が取り消すこと（error-cancels-other-js）も生成工程に移した
-      //   （Gateway の模擬テストが、候補の error による取り消しを cause candidate-cancels-existing-lock の fail にする。Toolkit はほかの fail と同じく取り込む）
-      if (handlersAll.some(o => o.error || o.emptyErrorClear)) {
-        const clears = [...new Set(handlersAll.filter(o => o.emptyErrorClear).flatMap(o => o.events))];
-        add('error-clear', !clears.length, 'block', clears.length ? `エラー表示を空文字（''）で消そうとしています（${clears.join(', ')}）。kintone は error に null を設定したときだけ表示を消します（'' では前のエラーが残り、条件を満たさなくなっても警告が消えません）` : 'エラー表示の解除は null です');
-      }
-      // 登録ごとのイベント名（第 1 引数の文字列リテラル。変数経由なら解析結果の名前で代用）
-      const literalRegs = handlers.flatMap(h => [...String(h.firstArg || '').matchAll(/['"`]((?:mobile\.)?app\.(?:record|report|event)\.[A-Za-z0-9_.\u00C0-\uFFFF]+)['"`]/g)].map(x => x[1]));
-      const regs = literalRegs.length ? literalRegs : codeEvents.map(e => e.name);
-      const dupInAdded = regs.filter((e, i) => regs.indexOf(e) !== i);
-      const existingEvents = existingSource ? KTScan.extractEventTypes(KTScan.stripCommentsOnly(existingSource.text)).map(e => e.name) : [];
-      // 既存の handler の中に追加しただけ（追加分に kintone.events.on が無い）なら「別の handler を足す」ではない（Phase 20 実機で誤表示）
-      // Phase 21（モデル比較の INTEG）: 既存の登録の行を書き換えただけ（REPLACE でイベントを足す。登録の数は変わらない）なら、別の handler を足したのではない
-      const regCount = (text) => (String(text || '').match(/kintone\s*\.\s*events\s*\.\s*on\s*\(/g) || []).length;
-      const replacedOnly = g.strategy === 'EXTEND_EXISTING_JS' && existingSource && typeof existingSource.text === 'string' && regCount(clean) === regCount(KTScan.stripCommentsOnly(existingSource.text));
-      const dupWithExisting = g.strategy === 'EXTEND_EXISTING_JS' && addedRegisters && !replacedOnly ? [...new Set(regs.filter(e => existingEvents.includes(e)))] : [];
-      //   §0f.5 の 3（2026-10-09）: 承認の欄には画面の言葉（イベント名 → 画面とタイミング・統合先のファイル名）で出す。元の文（イベント名入り）は詳細と右の「確認結果」
-      if (dupInAdded.length) add('duplicate-handler', false, 'review', `同じイベントを 2 回登録しています: ${[...new Set(dupInAdded)].join(', ')}`, { events: [...new Set(dupInAdded)] }, `同じタイミング（${evJa([...new Set(dupInAdded)])}）の処理を 2 回登録しています`);
-      else if (dupWithExisting.length) add('duplicate-handler', false, 'review', `既存ファイルが既に登録しているイベントに別の handler を足します: ${dupWithExisting.join(', ')}（同じイベントの handler は登録順に動きます）`, { events: [...dupWithExisting], file: existingSource && existingSource.name ? String(existingSource.name) : null },
-        `既存の${existingSource && existingSource.name ? `「${existingSource.name}」` : 'JavaScript'}が${evJa(dupWithExisting)}に動かしている処理に、別の処理を足します（同じタイミングの処理は登録順に動きます）`);
-      else add('duplicate-handler', true, 'info', '重複した handler はありません');
-      // Phase 21（基準モデルの CX-1 3 回目）: 既存の handler の if の後ろに、新しい kintone.events.on（PC ＋ モバイル）を丸ごと差し込んだ。
-      //   登録は外側の handler が動いたときに初めて行われ、最初の表示では動かず、表示のたびに重複して登録される。外側が PC のイベントだけなら
-      //   モバイルでは一度も登録されない。Code Review は内側の登録をモバイル対応と数えて「確認」止まりにしていた
-      const nestedRegs = (text) => [...String(text || '').matchAll(/kintone\s*\.\s*events\s*\.\s*on\s*\(/g)].map(m => m.index).filter(i => insideHandler(String(text), i));
-      const nested = nestedRegs(clean);
-      const baseNested = g.strategy === 'EXTEND_EXISTING_JS' && existingSource && typeof existingSource.text === 'string' ? nestedRegs(KTScan.stripCommentsOnly(existingSource.text)).length : 0;
-      if (nested.length > baseNested) add('nested-registration', false, 'block', `イベントの登録（kintone.events.on）が、別のイベントの handler の中にあります（${nested.length - baseNested} 件）。外側の handler が動いた後で登録されるため、最初の表示では動かず、表示のたびに重複して登録されます（外側が PC のイベントだけなら、モバイルでは一度も登録されません）。登録は即時関数の直下に置いてください`);
-      // Phase 21（モバイルの実機 §5）: 作成画面のイベントの record には、ステータス・作業者・レコード番号などのシステムフィールドが無い（実機: PC・モバイルとも）。
-      //   生成したモバイルの handler が record['ステータス'].value を確かめずに読み、作成画面を開くたびに TypeError で止まった（既存の dealLock.js は存在を確かめていた）
-      const sysCodes = fieldsN.filter(f => CREATE_ABSENT_TYPES.includes(f.rawType)).map(f => f.code);
-      const createReads = unguardedCreateReads(clean, sysCodes);
-      const baseCreateReads = g.strategy === 'EXTEND_EXISTING_JS' && existingSource && typeof existingSource.text === 'string' ? unguardedCreateReads(KTScan.stripCommentsOnly(existingSource.text), sysCodes).length : 0;
-      if (createReads.length > baseCreateReads) {
-        const x = createReads[0];
-        add('create-missing-field', false, 'block', `作成画面のイベント（${[...new Set(createReads.flatMap(r => r.events))].join(', ')}）では ${[...new Set(createReads.map(r => r.code))].join(' / ')} がレコードにありません（実機: PC・モバイルとも、新しいレコードにはステータス・作業者・レコード番号などのシステムフィールドが無い）。存在を確かめずに .value を読むと TypeError で処理が止まります（${x.line}）。record['${x.code}'] && record['${x.code}'].value のように確かめてください`);
-      }
-      // ---- 10. platform ----
-      // Phase 21: 最終的なファイルのイベントで判定する（PC とモバイルの両方が対象なら、両方のイベントが要る。片方が無ければその画面では動かない）
-      const mobileEvents = fileEvents.filter(e => KTJsCatalog.isMobileEvent(e.name)).length, pcEvents = fileEvents.length - mobileEvents;
-      const plat = Array.isArray(c.platform) ? c.platform : [];
-      const unresolvedJa = unresolvedEvents ? '（動くタイミングを特定できない登録があり、コードからは確かめられません）' : '';
-      if (plat.includes('mobile') && !mobileEvents) add('platform', false, unresolvedEvents ? 'review' : 'block', `計画はモバイルも対象ですが、モバイル（mobile.app.record.*）のイベントがありません（モバイルでは動きません）${unresolvedEvents ? '。イベント名を特定できない登録があり、静的には確かめられません' : ''}`, null, `計画はモバイルも対象ですが、モバイルの画面で動く処理がありません${unresolvedJa}`);
-      else if (plat.includes('desktop') && plat.includes('mobile') && !pcEvents) add('platform', false, unresolvedEvents ? 'review' : 'block', `計画は PC も対象ですが、PC（app.record.*）のイベントがありません（PC では動きません）`, null, `計画は PC も対象ですが、PC の画面で動く処理がありません${unresolvedJa}`);
-      else if (plat.length && !plat.includes('mobile') && mobileEvents) add('platform', false, 'review', '計画は PC だけですが、モバイルのイベントが含まれています', null, '計画は PC だけですが、モバイルの画面で動く処理も含まれています');
-      else add('platform', true, 'info', `対象 ${plat.join(' / ') || '—'} と整合`);
-      // ---- 11. 達成範囲（Phase 21）: kintone の JavaScript で実現できない部分を、要約とは別に Toolkit が示す ----
-      //   明細（テーブル）の編集を止める要件: JavaScript の disabled はセルにだけ効き、行の追加・削除（＋ / −）は止まらない
-      //   （2026-10-10・§6: 行のボタンを隠す API は Toolkit がまだ扱っていない。kintone 全般で不可能と言い切らない。判定 SUBTABLE_ROWS の符号・承認を止めない扱いは変えない）
+      // ---- 3. 生成した AI の要件の達成の申告（coverage）を、計画の構造に対応づける（最終案の表示の材料。登録の可否はここで決めない）----
+      //   明細（テーブル）の編集を止める計画: JavaScript の disabled はセルにだけ効き、行の追加・削除（＋ / −）は止まらない（行のボタンを隠す API は Toolkit がまだ扱っていない）。
+      //   簡素化 B（2026-10-17）: 当てはまるかは計画の構造（テーブル・列に編集不可の効果がある）で決める（以前はコードを解析して、セルを編集不可にしている所を探していた。
+      //   その処理が実際にあるかは、生成工程の必須の効果と模擬テストが確かめる）
       const coverage = { achieved: [], notAchieved: [], declared: Array.isArray(g.coverage) ? g.coverage : [] };
-      const subtables = fieldsN.filter(f => f.rawType === 'SUBTABLE').map(f => f.code);
-      // セルのロック: テーブル内フィールドの .disabled = true と、行のループ（row.value[key]）の .disabled = true
-      const lockedTables = subtables.filter(t => subtableCellSites(clean, t).length || [...subtableOf.entries()].some(([ch, p]) => p === t && disableSites(clean, ch).length));
-      const tableControlled = subtables.filter(t => planFields.get(t) === 'CONTROL' || [...subtableOf.entries()].some(([ch, p]) => p === t && planFields.get(ch) === 'CONTROL'));
-      //   §0d.4（2026-10-08）: 計画の構造（テーブルを制御する）とコードの構造（セルを編集不可にする）だけで決める。要件の文・AI の要約の文を読んで
-      //   「明細の変更を止める要件か」「要約が言い切っているか」を推定する判定（requirement-scope・summary-scope）は削除した
-      if (tableControlled.length && lockedTables.length) {
-        coverage.achieved.push(`明細（テーブル ${lockedTables.join(', ')}）のセルを編集不可にする`);
-        //   2026-10-15（§4(b)）: tables = セルを編集不可にしたテーブルのコード（最終案の制約の文がテーブルの名前で「残る範囲」を書くための構造。判定は変えない）
-        coverage.notAchieved.push({ code: 'SUBTABLE_ROWS', tables: [...lockedTables], message: 'セルを編集不可にしても、明細（テーブル）の行の追加・削除は止まりません（行の ＋ / − ボタンは残ります。ボタンを隠す API は Toolkit がまだ扱っていません）' });
-      }
+      const subtableOf = new Map(fieldsN.filter(f => f.parent).map(f => [f.code, f.parent]));
+      const planCode = (code) => proposedCodes.get(code) ?? code;
+      const locksField = (f) => !!f && (ktFieldEffectsOf(f.effects) || []).some(x => x.effect === 'lock');
+      const lockedTables = fieldsN.filter(f => f.rawType === 'SUBTABLE').map(f => f.code).filter(t => (c.fields || []).some(f => locksField(f) && (planCode(f.code) === t || subtableOf.get(planCode(f.code)) === t)));
+      //   2026-10-15（§4(b)）: tables = セルを編集不可にするテーブルのコード（最終案の制約の文がテーブルの名前で「残る範囲」を書くための構造。判定は変えない）
+      if (lockedTables.length) coverage.notAchieved.push({ code: 'SUBTABLE_ROWS', tables: [...lockedTables], message: 'セルを編集不可にしても、明細（テーブル）の行の追加・削除は止まりません（行の ＋ / − ボタンは残ります。ボタンを隠す API は Toolkit がまだ扱っていません）' });
       // 段階 C（改訂 2・5.3 / 5.4）: coverage は requirementId で判定する（契約 20 §5）。文の照合・同義語の読み替え・note のキーワードからの担当の推定・plannedHint（段階 A）は削除した。
       //   この customization の id → 範囲内（NOT_MET は登録不可・PARTIAL は確認）。要件 R… / 手順 P… / 別の C… → 範囲外（担当は計画の構造（steps / customizations）と要件の planRefs で引く。
       //   担当が無い・設定を変えない手順（確認待ち）だけが担当なら unowned（計画全体の確認に残す。review）。coverage の文（text / requirement）は表示だけに使う。
@@ -20115,43 +19404,28 @@
         //   2026-10-15（§4(b)）: noteText = 表示用に整えた AI の理由（内部の番号を手順の名前に）。最終案の制約の文は PARTIAL のとき理由だけを書く（判定は変えない）
         coverage.notAchieved.push({ code: `AI_${stt}`, requirementId: id, requirement: text, note: d.note, noteText: note, ...(d.limitCode ? { limitCode: d.limitCode } : {}), message: `${text}${note ? `（${note}）` : ''}` });
       }
-      // 段階 A（5.4）: 範囲内の NOT_MET は登録不可（check coverage-unmet・block）、PARTIAL は確認（review）。既存の SUBTABLE_ROWS は従来どおり確認事項のまま
-      //   確認 7: セルの編集不可では直せない点（明細の行の追加・削除。行のボタンを隠す API は Toolkit がまだ扱っていない）を理由にした NOT_MET は、登録不可のまま修復を依頼しない（noRepair。修復の対象外）。
-      //   C-1 第 3 段（2026-10-08）: 理由は生成工程が返す coverage の limitCode（SUBTABLE_ROWS）だけで決める。AI の申告の文（note）は読まない（ROW_LIMIT_RE は削除した）。
-      //   limitCode は health の印 'limitCode' がある接続先のときだけ画面の generate が残す（印の無い接続先では落とすので、PARTIAL は要件未達のまま）
+      //   簡素化 B（2026-10-17）: 範囲内の NOT_MET・PARTIAL（AI の申告）の確認は生成工程の機械検査（coverage）の結果で扱う（Toolkit の検査 coverage-unmet は削除した）。
+      //   ここでは明細の行（limitCode SUBTABLE_ROWS）の印だけを付ける（最終案の「実現できない点」の文に使う）
       const SUBTABLE_LIMIT = 'SUBTABLE_ROWS';
-      for (const x of coverage.notAchieved.filter(y => y.code === 'AI_NOT_MET')) {
-        const lim = x.limitCode === SUBTABLE_LIMIT;
-        if (lim) { x.limit = SUBTABLE_LIMIT; if (!coverage.notAchieved.some(y => y.code === SUBTABLE_LIMIT)) coverage.notAchieved.push({ code: SUBTABLE_LIMIT, fromLimitCode: true, message: 'セルを編集不可にしても、明細（テーブル）の行の追加・削除は止まりません（行の ＋ / − ボタンは残ります。ボタンを隠す API は Toolkit がまだ扱っていません）' }); }
-        checks.push({ name: 'coverage-unmet', ok: false, severity: 'block', ...(lim ? { noRepair: true, limit: SUBTABLE_LIMIT } : {}), message: `要件を満たしていません（AI の申告）: ${x.message}${lim ? '。セルの編集不可では行の追加・削除は止まらず（行のボタンを隠す API は Toolkit がまだ扱っていません）、作り直しでは直りません' : ''}` });
+      for (const x of coverage.notAchieved.filter(y => y.code === 'AI_NOT_MET' && y.limitCode === SUBTABLE_LIMIT)) {
+        x.limit = SUBTABLE_LIMIT;
+        if (!coverage.notAchieved.some(y => y.code === SUBTABLE_LIMIT)) coverage.notAchieved.push({ code: SUBTABLE_LIMIT, fromLimitCode: true, message: 'セルを編集不可にしても、明細（テーブル）の行の追加・削除は止まりません（行の ＋ / − ボタンは残ります。ボタンを隠す API は Toolkit がまだ扱っていません）' });
       }
-      //   §0c.6（2026-10-08）: PARTIAL は確認（review）のまま印（partial・requirementId）を付け、必須の効果に結び付く要件なら attachBehavior が要件未達（登録不可）にする。
-      //   ただし明細のセルを編集不可にしていて行の追加・削除は止まらない（セルの編集不可では行の ＋ / − は残る。行のボタンを隠す API は Toolkit がまだ扱っていない: SUBTABLE_ROWS）に
-      //   当たるものは「実現できない点」として示し、承認を止めない
-      //   （limit SUBTABLE_ROWS。判定は Toolkit の構造の検出（上の lockedTables）と、生成工程の coverage の limitCode が SUBTABLE_ROWS であることの両方）
       const structuralRows = coverage.notAchieved.some(y => y.code === SUBTABLE_LIMIT && !y.fromLimitCode);
-      for (const x of coverage.notAchieved.filter(y => y.code === 'AI_PARTIAL')) {
-        const lim = structuralRows && x.limitCode === SUBTABLE_LIMIT;
-        if (lim) x.limit = 'SUBTABLE_ROWS';
-        checks.push({ name: 'coverage-unmet', ok: false, severity: 'review', partial: true, requirementId: x.requirementId || c.customizationId, ...(lim ? { limit: 'SUBTABLE_ROWS', noRepair: true } : {}), message: `要件の一部を満たしていません（AI の申告）: ${x.message}${lim ? '。セルの編集不可では行の追加・削除は止まりません（行のボタンを隠す API は Toolkit がまだ扱っていません。実現できない点）' : ''}` });
-      }
-      // 段階 A（R14）: コードが比べているステータス名のうち、現在のステータスにも計画の新設にも無いものは coverage.unknownStatuses に記録する（check にはしない。登録前の依存の確認は dependsOn で行う）
-      {
-        const currentStatusNames = new Set(data?.status?.enable ? Object.values(data.status.states || {}).filter(Boolean).map(s2 => s2.name) : []);
-        const statusCodes = fieldsN.filter(f => f.rawType === 'STATUS').map(f => f.code);
-        const knownNames = new Set([...currentStatusNames, ...planned.statuses.map(x => x.name)]);
-        coverage.unknownStatuses = currentStatusNames.size ? [...new Set(KTScan.extractStatusComparisons(cleanAdded, statusCodes, null).map(x => x.value).filter(v => !knownNames.has(v)))] : [];
-      }
+      for (const x of coverage.notAchieved.filter(y => y.code === 'AI_PARTIAL')) if (structuralRows && x.limitCode === SUBTABLE_LIMIT) x.limit = SUBTABLE_LIMIT;
+      //   2026-10-15（§3）: 要件の担当（担当範囲外・一部だけ・満たしていないとされた要件のうち、計画のどこで実現するかが書かれていないもの）は確認事項に残す。
+      //   生成工程の検査には無い計画全体の確認で、反映の前の確認の文は左のカード・右の変更内容と同じ（planScopeText）。簡素化 B でも残す（候補の検査ではない）
       for (const u of coverage.unowned) {
         if (u.owner === 'self') add('coverage-owner', false, 'review', `この JavaScript が担当する要件「${u.requirement}」が担当範囲外とされました。どこで実現するかが計画に書かれていないので、計画全体の確認に残します`, null, u.screen);
         else add('coverage-owner', false, 'review', `担当範囲外とされた要件「${u.requirement}」の担当が計画に見つかりません。計画全体の確認に残します`);
       }
-      //   2026-10-15（§3）: 計画全体で扱う要件のうち、どの手順で実現するかが計画に書かれていないもの（反映の前の確認の文は左のカード・右の変更内容と同じ planScopeText）
       for (const u of coverage.planUnconfirmed) add('coverage-owner', false, 'review', u.message, null, u.screen);
-      return finish({ rescan, mismatches, security, finalCode, addedCode, diff, patchResult, coverage });
+      return finish({ finalCode, addedCode, diff, patchResult, coverage });
       function finish(extra = {}) {
         const status = checks.some(x => !x.ok && x.severity === 'block') ? STATUS.BLOCKED : checks.some(x => !x.ok) ? STATUS.REVIEW_REQUIRED : STATUS.OK;
         const finalCode2 = extra.finalCode ?? null;
+        //   登録する本文の参照（依存の確認と監査の記録に使う。検査には使わない）
+        const rescan = finalCode2 ? KTScan.analyzeFile({ name: g.targetFile || existingSource?.name || 'generated.js', target, kind: 'js', text: finalCode2 }, { fields: fieldRows, selfAppId: data?.appId ?? null }) : null;
         // 段階 A（R14）: この JavaScript が使う、計画で新設する（まだ kintone に無い）ステータス・フィールド。登録の前に、その手順が反映済みかを確かめる材料
         const dependsOn = { statuses: [], fields: [] };
         if (finalCode2) {
@@ -20159,11 +19433,11 @@
           const curNames = new Set(data?.status?.enable ? Object.values(data.status.states || {}).filter(Boolean).map(s2 => s2.name) : []);
           const escRx = (t) => String(t).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
           for (const x of planned.statuses) if (!curNames.has(x.name) && new RegExp(`['"\`]${escRx(x.name)}['"\`]`).test(text)) dependsOn.statuses.push({ name: x.name, stepId: x.stepId, title: x.title || '' });
-          const usedCodes = new Set((extra.rescan?.fields || []).map(f => f.code));
+          const usedCodes = new Set((rescan?.fields || []).map(f => f.code));
           for (const x of planned.fields) if (!existingCodes.has(x.code) && (usedCodes.has(x.code) || new RegExp(`['"\`]${escRx(x.code)}['"\`]`).test(text))) dependsOn.fields.push({ code: x.code, label: x.label, stepId: x.stepId, title: x.title || '' });
         }
-        return { reviewVersion: REVIEW_VERSION, status, checks, finalCode: finalCode2, addedCode: extra.addedCode ?? null, diff: extra.diff ?? null, diffText: extra.diff ? diffHunks(extra.diff) : null, rescan: extra.rescan ?? null, mismatches: extra.mismatches ?? [], security: extra.security ?? [], patch: extra.patchResult ? { applied: extra.patchResult.applied, afterHash: extra.patchResult.afterHash } : null, provenance: provenance ? { ...provenance, reviewedAt: new Date().toISOString(), codeHash: finalCode2 ? hash(finalCode2) : null } : null,
-          // Phase 21: 登録の判定（登録不可 / 確認が必要 / 動作は未確認）と達成範囲。KTJsExecutor は登録の直前にもこれを確かめる
+        return { reviewVersion: REVIEW_VERSION, status, checks, finalCode: finalCode2, addedCode: extra.addedCode ?? null, diff: extra.diff ?? null, diffText: extra.diff ? diffHunks(extra.diff) : null, rescan, mismatches: [], security: [], patch: extra.patchResult ? { applied: extra.patchResult.applied, afterHash: extra.patchResult.afterHash } : null, provenance: provenance ? { ...provenance, reviewedAt: new Date().toISOString(), codeHash: finalCode2 ? hash(finalCode2) : null } : null,
+          // Phase 21: 登録の判定（登録不可 / 確認が必要 / 動作は未確認）。生成工程の検証結果は attachBehavior が取り込む。KTJsExecutor は登録の直前にもこれを確かめる
           coverage: extra.coverage ?? null, dependsOn, registration: { ...registrationOf(status, checks, c, finalCode2), dependsOn },
           // 独立レビュー A3: AI の前提（assumptions）の表示用。内部の番号（手順 P1 / C2）を手順の名前・別の JavaScript の要件に置き換える
           assumptions: (Array.isArray(g.assumptions) ? g.assumptions : []).filter(x => typeof x === 'string').map(displayNote) };
@@ -20173,19 +19447,12 @@
     //   §0d.4（2026-10-08）: 業務の推定による判定（conditional-control・unconditional-control・error-cancels-edit・existing-conflict・
     //   empty-undefined・summary-scope・requirement-scope・C-1 第 3 段の error-cancels-other-js）は削除したので、その確かめ方も持たない
     const HOW_TO_CHECK = Object.freeze({
-      'coverage-unmet': '要件の一部を満たしていない部分（AI の申告）を、計画・実装仕様・運用のどれで扱うか決める',
+      //   簡素化 B（2026-10-17）: 生成工程の機械検査の確認（要件の一部を満たしていない・範囲外と申告された）
+      coverage: '要件の一部を満たしていない部分（AI の申告）を、計画・実装仕様・運用のどれで扱うか決める',
+      'plan-consistency': '計画に無いタイミング・フィールドの操作が要件どおりかを、作ったコードの差分で確かめる',
       //   2026-10-15（§3）: 担当の確認（担当が計画に無い・計画全体で扱う要件をどの手順で実現するか書かれていない）
       'coverage-owner': '計画のどの手順で扱われているかを変更内容の「何が変わるか」で確かめ、扱われていなければ計画を直す',
-      'status-names': 'コードが比べているステータス名が、プロセス管理のステータス名（新設する分を含む）と同じ表記かを確かめる',
-      'platform-fields': 'PC とモバイルの両方の画面で、同じ制御になっているかを確かめる',
-      'planned-events': '計画のタイミング（値の変更時など）で動くかを、動作テスト環境で確かめる',
-      'target-app-read': '呼び出すアプリが正しいか、利用者に読み取り権限があるかを確かめる',
       'patch-removal': '置き換え・削除される既存の行が不要かを確かめる',
-      // RC E2E（実機）
-      'api-screen': '動作テスト環境で、その API が使えない画面（作成・編集など）を開いて、処理が表示・動作するかを確かめる（使えない画面では null が返り、何も起きない）',
-      'error-clear-compare': '動作テスト環境で、警告が出る値から出ない値（空も）に変えて、表示が消えることを確かめる',
-      // §0f.5 の 3（2026-10-09）: 既存の JavaScript と同じタイミングの処理（実機の 1 会話目の承認の欄に汎用の文が出ていた）
-      'duplicate-handler': '動作テスト環境でその画面を開き、既存の処理と今回の処理の両方が動くことを確かめる',
     });
     /**
      * §0f.5 の 3（2026-10-09）: 確認項目の画面の言葉（承認の欄に出す文）。検査が組み立てた screen（イベント名・フィールドのコード・handler を出さない文）があればそれ、
@@ -20214,7 +19481,6 @@
       const verdict = verdictNow;
       return { version: '1', verdict, blockers, confirmations, unverified, codeHash: typeof finalCode === 'string' && finalCode ? hash(finalCode) : null };
     }
-    const ACCESS_W = (acc) => Object.keys(acc || {}).filter(k => k === 'WRITE' || k === 'CONTROL' || k === 'SHOW_HIDE');
     /**
      * §0c.3 / §0c.4 / §0c.6（2026-10-08）: 必須の効果（Toolkit が採用済みの計画から作って固定したもの）ごとに、生成工程（Gateway）の検証結果を突き合わせる（純関数）。
      *   照合は構造化データだけ（フィールドのコード・効果の語彙・要件の id）。Gateway の判定を Toolkit で弱めない: 返らない・missing は未達、unchecked（本文を解析できない）は未確認、
@@ -20361,30 +19627,34 @@
       out.ok = items.every(i => i.structure === 'present' && i.behavior === 'pass') && !otherFailed.length && (!items.length || statusOk || machineCovered);
       return out;
     }
-    /** planned-fields（計画で制御・書き換えするフィールドがコードに現れない）の文。fields: [{ code, access }] */
-    function plannedFieldsMessage(fields) {
-      return `計画では ${fields.map(f => `${f.code} を${f.access === 'CONTROL' ? '制御' : '書き換え'}`).join('、')}することになっていますが、コードに現れません（要件の処理がありません）`;
-    }
+    /** 必須の効果の表示（「フィールド」: 効果） */
     const effectLabel = (i) => `「${i.field}」: ${KT_EFFECT_JA[i.effect] || i.effect}`;
     /** 実行できなかった理由の文（区分の見出しと理由。例「環境: 時間内に終わりませんでした」） */
     const notRunText = (er) => { const cat = er.reasonCategory || 'env'; const head = (KT_REASON_CATEGORY[cat] || KT_REASON_CATEGORY.other).label; return `${head}${er.reason ? `: ${ktBehaviorReasonJa(er.reason)}` : ''}`; };
     /**
-     * §0c.3 / §0c.4 / §0c.6（2026-10-08）: 生成工程の検証結果（必須の効果・動作テスト）を Code Review に取り込む（純関数。元の review は変えない）。
-     *   required-effects: 必須の効果の処理が無い（missing）→ 登録不可（警告だけで編集不可の要件を満たしたことにしない）。確かめられない（返らない・unchecked・生成工程が非対応）→ 登録不可（未確認。修復しない）
-     *   behavior-fail: 動作テストの不合格（候補に起因）→ 登録不可
-     *   behavior-not-run: 必須の効果に結び付く代表条件を実行できなかった → 登録不可（理由の区分を書く。コードの誤りとは言わない・修復の対象にしない。noRepair。環境の区分だけ environment）
-     *   behavior-untested: 必須の効果に代表条件が無い・動作テストの結果が無い → 登録不可（未確認を合格に読み替えない）
-     *   coverage-unmet（PARTIAL）: 必須の効果に結び付く要件（この customization の id・要件の id）の PARTIAL は要件未達（登録不可）。SUBTABLE_ROWS の印があるものは確認のまま（実現できない点）
-     *   §0d.4（2026-10-08）: Toolkit は業務の合否を作らない（構造の照合と、返却の欠落・明示された失敗の検出だけ）。静的な block を模擬テストの結果で確認に下げる処理は無い
+     * §0c.3 / §0c.4 / §0c.6（2026-10-08）・簡素化 B（2026-10-17）: 生成工程の検証結果を形式確認に取り込む（純関数。元の review は変えない）。
+     *   Toolkit は生成のときの検査を繰り返さないので、ここで取り込む結果が登録の判定（registration）の生成のときの分になる:
+     *   - 機械検査（verification.machine）: block は登録不可、review は承認の欄の確認事項（項目の名前と文は生成工程のまま。gateway の印つき）。
+     *     必須の効果の機械検査の行は、下の必須の効果の照合で扱う
+     *   - required-effects: 必須の効果の処理が無い（missing）→ 登録不可。確かめられない（返らない・unchecked・生成工程が非対応）→ 登録不可（未確認。修復しない）
+     *   - behavior-fail / behavior-not-run / behavior-untested: 模擬テストの不合格・実行できなかった・結果が無い → 登録不可（未確認を合格に読み替えない）
+     *   Toolkit は業務の合否を作らない（構造の照合と、返却の欠落・明示された失敗の検出だけ）。検証結果と候補の結び付きは会話と登録の直前の照合が確かめる
      * @param {object} o { requiredEffects, customization, omitted: 動作テストに渡せなかった既存 JS }
      */
     function attachBehavior(review, verification, { requiredEffects = [], customization = null, omitted = [], effectCheck = false } = {}) {
       if (!review || typeof review !== 'object') return review;
+      const ver = verification && typeof verification === 'object' ? verification : null;
       const req = Array.isArray(requiredEffects) ? requiredEffects : [];
-      const er = effectResults(verification, req, { omitted, effectCheck });
-      if (!req.length && !er.behaviorRan) return review;
-      const checks = (review.checks || []).filter(x => !/^(required-effects|behavior)(-|$)/.test(String(x.name)));
+      const er = effectResults(ver, req, { omitted, effectCheck });
+      const checks = (review.checks || []).filter(x => !x.gateway && !/^(required-effects|behavior)(-|$)/.test(String(x.name)));
       const add = (name, ok, severity, message, extra = {}) => checks.push({ name, ok, severity, message, ...extra });
+      for (const m of (ver && Array.isArray(ver.machine) ? ver.machine : [])) {
+        if (!m || typeof m.name !== 'string' || m.name === 'required-effects') continue;
+        //   生成工程の patch（anchor が 1 回だけ現れる）の合格は、Toolkit が同じ候補を当てた統合の行（patch。適用した操作と行数）と同じ事実なので重ねない（不合格はそのまま入れる）
+        if (m.name === 'patch' && m.ok === true && checks.some(x => x.name === 'patch' && x.ok)) continue;
+        const ok = m.ok === true;
+        add(m.name, ok, ok ? 'info' : (m.severity === 'block' ? 'block' : 'review'), String(m.message || ''), { gateway: true });
+      }
       if (req.length) {
         if (!er.supported) add('required-effects', false, 'block', `生成工程が必須の動作の確認に対応していないため、${er.items.map(effectLabel).join('・')}の処理があるかを確かめられません（接続先の更新が必要です）`, { noRepair: true });
         else if (er.missing.length) add('required-effects', false, 'block', `要件未達（${er.missing.map(i => `「${i.field}」: ${KT_EFFECT_NEED_JA[i.effect] || i.effect}`).join('・')}）。必要な処理がありません${er.missing.some(i => i.effect === 'lock' || i.effect === 'block-save') ? '（警告だけ・値の変更だけでは、編集できない・保存を止める要件を満たしません）' : ''}`);
@@ -20407,49 +19677,13 @@
         const byMachine = er.items.filter(i => i.checkedBy === 'machine'), bySim = er.items.filter(i => i.checkedBy !== 'machine');
         add('behavior', true, 'info', [bySim.length ? `模擬テストで必須の動作を確かめました（${bySim.map(effectLabel).join('・')}。代表条件 ${bySim.reduce((n, i) => n + i.cases.length, 0)} 件）` : '', byMachine.length ? `${byMachine.map(effectLabel).join('・')}は機械検査で確認しました（模擬テストは未実施）` : ''].filter(Boolean).join('。') + '。実機は未確認です', { ...(byMachine.length ? { machineChecked: byMachine.map(i => ({ field: i.field, effect: i.effect })) } : {}) });
       }
-      //   AI の PARTIAL の申告: 必須の効果に結び付く要件なら要件未達（「確認」を押して反映できる形にしない）。SUBTABLE_ROWS（決定的な検査で分かる kintone の制約）は確認のまま
-      const linkedIds = new Set(er.items.flatMap(i => i.requirementIds));
-      const partialUp = (x) => x.name === 'coverage-unmet' && x.partial && !x.limit && !x.ok && x.severity === 'review' && linkedIds.has(String(x.requirementId || (customization && customization.customizationId) || ''));
-      const passedAll = req.length > 0 && er.ok;
-      //   §0d.4（2026-10-08）: 模擬テストの合格で静的な block（conditional-control・error-cancels-edit）を確認に下げる処理は、その判定ごと削除した。
-      //   条件の外の編集不可・同じイベントの error と編集不可は、生成工程の機械検査（check behavior）と模擬テストの結果（behavior-fail・behavior-not-run）で扱う
-      //   §0c.11（2026-10-08）: 保存だけの警告（そのフィールドの効果がすべて、保存のイベントだけの warn）は、保存の handler で確認・警告のダイアログを出すだけで満たせる（§0c.6）。
-      //   フィールドのコードが候補に現れなくてもよいので、Gateway の必須の効果がすべて present なら planned-fields の対象から外す（動作テストの判定は behavior-* のまま）。
-      //   照合は構造化データだけ（必須の効果の field・effect・events と計画の fields[].effects）。Gateway が非対応・返らない・missing のときは外さない
-      //   §0d.3（2026-10-08）: 保存禁止（block-save）も同じ扱い。保存のイベントの event.error（保存全体を止める）で正しく実装した候補は、そのフィールドのコードが
-      //   現れない。保存のイベントだけの block-save で、Gateway の必須の効果が present なら planned-fields の対象から外す（sc-gate の S4）
-      const SUBMIT_EVENT = /\.submit$/;
-      const SAVE_ONLY_EFFECTS = ['warn', 'block-save'];
-      const saveOnlyWarnPresent = (code) => {
-        const mine = er.items.filter(i => i.field === String(code));
-        if (!er.supported || !mine.length || !mine.every(i => SAVE_ONLY_EFFECTS.includes(i.effect) && i.events.length > 0 && i.events.every(ev => SUBMIT_EVENT.test(ev)) && i.structure === 'present')) return false;
-        //   計画のフィールドにほかの効果（別の platform に任せたものを含む）があれば外さない。計画のコードが採番前（NEW_FIELD_n）で見つからないときは必須の効果だけで決める
-        const cEvents = customization && Array.isArray(customization.events) ? customization.events.map(String) : [];
-        const planned = customization && Array.isArray(customization.fields) ? customization.fields.filter(f => f && String(f.code) === String(code)) : [];
-        return planned.every(f => { const fe = ktFieldEffectsOf(f.effects) || []; return fe.length > 0 && fe.every(e => { const evs = e.events && e.events.length ? e.events : cEvents; return SAVE_ONLY_EFFECTS.includes(e.effect) && evs.length > 0 && evs.every(ev => SUBMIT_EVENT.test(ev)); }); });
-      };
-      const plannedFieldsOf = (x) => {
-        if (!x || x.name !== 'planned-fields' || x.ok || x.severity !== 'block' || !x.detail || !Array.isArray(x.detail.fields)) return x;
-        const rest = x.detail.fields.filter(f => f && !saveOnlyWarnPresent(f.code));
-        if (rest.length === x.detail.fields.length) return x;
-        const excluded = x.detail.fields.filter(f => f && !rest.includes(f)).map(f => String(f.code));
-        const withBlockSave = er.items.some(i => excluded.includes(i.field) && i.effect === 'block-save');
-        const note = `${excluded.map(c => `「${c}」`).join('・')}は${withBlockSave ? '保存のときの処理（保存を止める・保存時の警告）' : '保存時の警告（確認のダイアログ）'}だけの要件で、生成工程の検査でその処理があるため、コードにフィールドが現れなくても止めません`;
-        return rest.length ? { ...x, message: `${plannedFieldsMessage(rest)}（${note}）`, detail: { ...x.detail, fields: rest, saveOnlyWarn: excluded } }
-          : { ...x, ok: true, severity: 'info', message: note, detail: { ...x.detail, fields: [], saveOnlyWarn: excluded } };
-      };
-      const merged = checks.map(plannedFieldsOf).map(x => (partialUp(x) ? { ...x, severity: 'block', noRepair: true, partialRequired: true, message: `${x.message}（必須の動作に関わる要件のため、要件未達として扱います）` } : x));
-      const status = merged.some(x => !x.ok && x.severity === 'block') ? STATUS.BLOCKED : merged.some(x => !x.ok) ? STATUS.REVIEW_REQUIRED : STATUS.OK;
+      const status = checks.some(x => !x.ok && x.severity === 'block') ? STATUS.BLOCKED : checks.some(x => !x.ok) ? STATUS.REVIEW_REQUIRED : STATUS.OK;
       const c = customization || { platform: review.registration && review.registration.platform } || {};
       const dependsOn = review.dependsOn || (review.registration && review.registration.dependsOn) || { statuses: [], fields: [] };
-      return { ...review, checks: merged, status, effects: er, registration: { ...registrationOf(status, merged, c, review.finalCode, { behavior: req.length ? { ok: passedAll && !merged.some(x => x.partialRequired), machineOnly: er.items.length > 0 && er.items.every(i => i.checkedBy === 'machine'), machineSome: er.items.some(i => i.checkedBy === 'machine') } : null }), dependsOn } };
+      const passedAll = req.length > 0 && er.ok;
+      return { ...review, checks, status, effects: er, registration: { ...registrationOf(status, checks, c, review.finalCode, { behavior: req.length ? { ok: passedAll, machineOnly: er.items.length > 0 && er.items.every(i => i.checkedBy === 'machine'), machineSome: er.items.some(i => i.checkedBy === 'machine') } : null }), dependsOn } };
     }
-
-    return { REVIEW_VERSION, STATUS, applyPatch, diffLines, diffText, diffHunks, checkSyntax, inspectHandlers, globalDeclarations, kintoneFieldOps, layoutSpaceIds, review, disableSites, subtableCellSites, siteConds, writeTargets, restCalls, HOW_TO_CHECK, confirmScreenText, planScopeText, requirementScreenText,
-      // Phase 22（F-F2）: フィールドの操作（直接・ブラケット・変数経由）と入力チェック
-      fieldOperations, inputChecks, fieldRefsIn, unguardedCreateReads,
-      // RC E2E: 使える画面の違う API・エラー表示の解除の条件（kintone の規則の形式確認）
-      apiScreenUses, errorClearByCompare,
+    return { REVIEW_VERSION, STATUS, applyPatch, diffLines, diffText, diffHunks, layoutSpaceIds, review, HOW_TO_CHECK, confirmScreenText, planScopeText, requirementScreenText,
       // §0c（2026-10-08）: 生成工程の検証結果（必須の効果・動作テスト）の取り込み
       attachBehavior, effectResults };
   })();
@@ -20557,7 +19791,7 @@
       // 段階 A（R14）: この JavaScript が使う、計画で新設する（まだ kintone に無い）ステータス・フィールド。prepare が動作テスト環境の設定と照合する
       const dep = review.dependsOn || reg?.dependsOn || null;
       const dependsOn = { statuses: [...(dep?.statuses || [])], fields: [...(dep?.fields || [])] };
-      const base = { changeId: newId('chg'), customizationId: customization?.customizationId ?? null, strategy, target: tgt === 'mobile' ? 'mobile' : 'desktop', summary: generated.summary ?? customization?.requirement ?? '', content, contentHash: hash(content), bytes: content.length, codeReview: { status: review.status, checks: (review.checks || []).map(c => ({ name: c.name, ok: c.ok, severity: c.severity })), rescan: review.rescan ? { events: (review.rescan.events || []).map(e => e.name), fieldAccess: review.rescan.fieldAccess || {}, apis: (review.rescan.apis || []).map(a => a.name) } : null }, provenance: review.provenance ?? null, planFields: (customization?.fields || []).map(f => ({ code: f.code, access: f.access })), planEvents: [...(customization?.events || [])], registration, dependsOn };
+      const base = { changeId: newId('chg'), customizationId: customization?.customizationId ?? null, strategy, target: tgt === 'mobile' ? 'mobile' : 'desktop', summary: generated.summary ?? customization?.requirement ?? '', content, contentHash: hash(content), bytes: content.length, codeReview: { status: review.status, checks: (review.checks || []).map(c => ({ name: c.name, ok: c.ok, severity: c.severity })) }, provenance: review.provenance ?? null, registration, dependsOn };
       if (strategy === 'EXTEND_EXISTING_JS') {
         if (!existingSource || typeof existingSource.text !== 'string') return { ok: false, reason: 'JS_SOURCE_UNAVAILABLE', message: '統合先の本文が無いため、既存ファイルの更新として登録できません' };
         return { ok: true, change: { ...base, kind: CHANGE.REPLACE_FILE, name: existingSource.name, baseHash: hash(existingSource.text), existingName: existingSource.name } };
@@ -20765,30 +19999,15 @@
         const src = e ? downloaded[e.fileKey] : undefined;
         if (typeof src === 'string') {
           sc('sourceHash', hash(src) === st.contentHash, st.contentHash, hash(src));
-          // KTScan の再解析（§25）と Plan との一致（§26）
+          //   登録後の本文の再解析（§25）は表示の材料だけ（イベント・フィールド・API）。簡素化 B（2026-10-17）: 再解析の結果で計画との一致（§26 planVsActual）・安全（securityOnActual）・
+          //   検査の時の解析との一致（reanalysisMatchesCodeReview）を判定する処理は削除した。候補の検査は生成工程が承認の前に行い（計画に無いイベント・書き込みは承認の欄の確認事項）、
+          //   読み戻しでは承認した本文がそのまま書き込まれたか（sourceHash・位置・画面・大きさ）を確かめる
           const an = KTScan.analyzeFile({ name: st.name, target: st.target, kind: 'js', text: src }, { fields: (execution.fieldRows || []), selfAppId: execution.appId });
-          st.reanalysis = { events: an.events.map(x => x.name), fieldAccess: an.fieldAccess, apis: [...new Set(an.apis.map(a => a.name))], security: an.security.filter(x => x.severity === 'block').map(x => x.code) };
-          const rs = st.codeReview?.rescan || null;
-          if (rs) {
-            const evOk = JSON.stringify([...new Set(st.reanalysis.events)].sort()) === JSON.stringify([...new Set(rs.events)].sort());
-            const wr = (fa) => Object.entries(fa || {}).filter(([, acc]) => acc.WRITE || acc.CONTROL || acc.SHOW_HIDE).map(([c]) => c).sort();
-            const fOk = JSON.stringify(wr(st.reanalysis.fieldAccess)) === JSON.stringify(wr(rs.fieldAccess));
-            const apiOk = JSON.stringify([...new Set(st.reanalysis.apis)].sort()) === JSON.stringify([...new Set(rs.apis)].sort());
-            sc('reanalysisMatchesCodeReview', evOk && fOk && apiOk, { events: rs.events, writes: wr(rs.fieldAccess), apis: rs.apis }, { events: st.reanalysis.events, writes: wr(st.reanalysis.fieldAccess), apis: st.reanalysis.apis });
-          }
-          const planEv = new Set(st.planEvents || []), planW = new Set((st.planFields || []).filter(f => f.access === 'WRITE' || f.access === 'CONTROL').map(f => f.code));
-          const extraEv = st.reanalysis.events.filter(x => !planEv.has(x)), extraW = Object.entries(st.reanalysis.fieldAccess).filter(([c, acc]) => (acc.WRITE || acc.CONTROL || acc.SHOW_HIDE) && !planW.has(c)).map(([c]) => c);
-          const missingEv = [...planEv].filter(x => !st.reanalysis.events.includes(x));
-          // 既存ファイルへの統合は既存の handler / フィールドが残るので、計画との一致は「計画のイベントとフィールドが含まれる」で判定。
-          // Phase 20（実機）: 既存ファイルを統合した本文をモバイルへ追加する変更（companionOfKind = REPLACE_FILE）も同じ（新規扱いで厳密に照合して VERIFY_FAILED になった）
-          const strict = st.kind === CHANGE.ADD_FILE && st.companionOfKind !== CHANGE.REPLACE_FILE;
-          const planOk = strict ? (extraEv.length === 0 && extraW.length === 0 && missingEv.length === 0) : (missingEv.length === 0 && (st.planFields || []).every(f => !!st.reanalysis.fieldAccess[f.code]));
-          sc('planVsActual', planOk, { events: [...planEv], writes: [...planW] }, { extraEvents: extraEv, extraWrites: extraW, missingEvents: missingEv }, planOk ? null : 'JS_VERIFY_MISMATCH');
-          sc('securityOnActual', st.reanalysis.security.length === 0, [], st.reanalysis.security);
+          st.reanalysis = { events: an.events.map(x => x.name), fieldAccess: an.fieldAccess, apis: [...new Set(an.apis.map(a => a.name))] };
         } else sc('sourceHash', false, st.contentHash, null, '登録後の本文をダウンロードできませんでした');
         st.verification = { ok: stChecks.every(c => c.ok), checks: stChecks };
         st.status = st.verification.ok ? ST.VERIFIED : ST.VERIFY_FAILED;
-        if (!st.verification.ok) { const bad = stChecks.filter(c => !c.ok); st.reason = bad.some(c => c.message === 'JS_VERIFY_MISMATCH') ? 'JS_VERIFY_MISMATCH' : 'VERIFY_FAILED'; st.message = `再取得した設定・本文が期待と一致しません（${bad.map(c => c.name).join(', ')}）`; }
+        if (!st.verification.ok) { const bad = stChecks.filter(c => !c.ok); st.reason = 'VERIFY_FAILED'; st.message = `再取得した設定・本文が期待と一致しません（${bad.map(c => c.name).join(', ')}）`; }
       }
       return { ok: checks.every(c => c.ok) && execution.steps.filter(st => [ST.VERIFIED, ST.VERIFY_FAILED].includes(st.status)).every(st => st.status === ST.VERIFIED), checks, unexpected };
     }
@@ -27828,12 +27047,11 @@
           const er = (entry.review && entry.review.effects) || KTCodeReview.effectResults(ver, req, { effectCheck: entry.effectCheck === true });
           const checks = (entry.review && entry.review.checks) || [];
           const blocks = checks.filter(ch => ch && !ch.ok && ch.severity === 'block');
-          const machineBlocks = ((ver && Array.isArray(ver.machine)) ? ver.machine : []).filter(m => m && !m.ok && m.severity === 'block');
           //   §0d.4（2026-10-08）: 静的には確かめられず模擬テストの結果で決める Toolkit の判定（conditional-control・error-cancels-edit。staticPending）は削除した。
           //   その分は生成工程の check behavior（checkReason）と模擬テストの結果（er.notRun・er.failed）で扱う
-          const partialBlocks = blocks.filter(ch => ch.partialRequired);
-          const codeBlocks = blocks.filter(ch => !['behavior-not-run', 'behavior-untested'].includes(ch.name) && !(ch.name === 'required-effects' && ch.noRepair) && !ch.partialRequired);
-          const details = [...new Set([...machineBlocks.map(m => String(m.message || '')), ...blocks.map(ch => String(ch.message || ''))].filter(Boolean))].slice(0, 8);
+          //   簡素化 B（2026-10-17）: 生成工程の機械検査の block は attachBehavior が取り込んだ項目（gateway）に入っている。AI の PARTIAL の申告を要件未達に引き上げる Toolkit の判定は削除した
+          const codeBlocks = blocks.filter(ch => !['behavior-not-run', 'behavior-untested'].includes(ch.name) && !(ch.name === 'required-effects' && ch.noRepair));
+          const details = [...new Set(blocks.map(ch => String(ch.message || '')).filter(Boolean))].slice(0, 8);
           const repairs = ver && ver.repairs && typeof ver.repairs === 'object' ? ver.repairs : null;
           const rc = repairs && repairs.count ? repairs.count : 0;
           if (!entry.review) return { status: 'unresolved', kind: 'no-review', reason: 'Toolkit の形式確認を完了できませんでした', next: '時間をおいて最終案を作り直します。', details };
@@ -27844,15 +27062,13 @@
           if (ver.bound !== true) return { status: 'unresolved', kind: 'verification-mismatch', fix: 'regenerate', reason: '生成工程の検証結果が、受け取った候補と対応していません（候補の指紋が一致しません）。この検証結果では合格にしません', next: '最終案を作り直します（候補を作り直し、その候補で検証し直します）。', details };
           if (req.length && (!er.supported || entry.effectsCapable === false)) return { status: 'unsupported', kind: 'capability', reason: '接続先（生成工程）が必須の動作の確認に対応していないため、要件を満たすかを確かめられません', next: '接続先が更新されてから最終案を作り直します（いまの接続先では反映できる最終案にしません）。', details };
           const behaviorFailed = er.failed.length > 0 || er.otherFailed.length > 0;
-          if (codeBlocks.length || machineBlocks.length || er.missing.length || behaviorFailed || (ver && ver.passed === false)) {
+          if (codeBlocks.length || er.missing.length || behaviorFailed || (ver && ver.passed === false)) {
             const missing = er.missing.map(i => `${fieldName(i.field)}: ${EFFECT_NEED_JA[i.effect] || i.effect}`);
             const head = rc ? `生成工程で修復を ${rc} 回行いましたが、直りませんでした。` : '';
-            const reason = missing.length ? `要件未達（${missing.join('・')}）。必要な処理がありません` : behaviorFailed ? '模擬テストで、必須の動作のとおりに動きませんでした' : '生成工程の機械検査・Toolkit の形式確認で、登録を止める問題が残りました';
+            const reason = missing.length ? `要件未達（${missing.join('・')}）。必要な処理がありません` : behaviorFailed ? '模擬テストで、必須の動作のとおりに動きませんでした' : '生成工程の機械検査、または登録する本文の確認で、登録を止める問題が残りました';
             //   §0c.8: 次の手は最終案のカードの［計画を直すよう依頼する］で実行できる（fix revise。自動では送らない）
             return { status: 'unresolved', kind: missing.length ? 'missing' : behaviorFailed ? 'behavior-fail' : 'machine', fix: 'revise', reason: `${head}${reason}`, next: `${missing.length ? '必要な動作が計画（実装仕様）のフィールド・イベントで扱えるかを見直します。' : '同じ依頼のまま作り直しても結果は変わりません。計画か実装仕様（条件・対象・イベント・既存の JavaScript との役割分担）を見直します。'}${FIX_HINT.revise}`, details, stoppedBy: repairs && repairs.stoppedBy ? repairs.stoppedBy : null, repairs: rc };
           }
-          //   §0c.6: AI が必須の効果に結び付く要件を PARTIAL と申告した → 要件未達（SUBTABLE_ROWS の制約は実現できない点に出し、ここでは止めない）
-          if (partialBlocks.length) return { status: 'unresolved', kind: 'partial', fix: 'revise', reason: `${rc ? `生成工程で修復を ${rc} 回行いましたが、直りませんでした。` : ''}要件の一部を満たしていません（生成した AI の申告。必須の動作に関わる要件です）`, next: `要件の残りの部分を計画（実装仕様の条件・対象・イベント）でどう扱うかを見直します。${FIX_HINT.revise}`, details, stoppedBy: repairs && repairs.stoppedBy ? repairs.stoppedBy : null, repairs: rc };
           //   §0c.6: 実行できなかった理由は区分ごとに理由と次の方針を変える（環境・条件の形・件数の上限・既存の JavaScript・そのほか）。どれも修復は依頼しない
           if (er.notRun.length) {
             //   §0c.9（2026-10-08）: 計画を直しても解けない理由（既存 JS の読み込みを再現できない existing-unverifiable・URL や本文の無い既存 JS・既存 JS の件数の上限などの
@@ -28166,7 +27382,8 @@
           //   生成工程の検証結果（必須の効果・動作テスト）を形式確認に取り込む（画面の登録前の再検査と同じ関数。動作テストの結果が無ければ既知の競合は登録不可のまま）
           //   §0c.6: 動作テストに渡せなかった既存 JS（Toolkit が外した・Gateway が落とした）が同じイベントを登録していれば、その効果は verified にしない
           entry.relatedOmitted = Array.isArray(r.relatedOmitted) ? r.relatedOmitted : [];
-          if (entry.review && (req.effects.length || (entry.verification && entry.verification.behavior))) entry.review = KTCodeReview.attachBehavior(entry.review, entry.verification, { requiredEffects: req.effects, customization: c, omitted: entry.relatedOmitted, effectCheck: entry.effectCheck === true });
+          //   簡素化 B（2026-10-17）: 検証結果があれば、機械検査の結果も含めて取り込む（必須の効果の無い JavaScript でも）
+          if (entry.review && entry.verification) entry.review = KTCodeReview.attachBehavior(entry.review, entry.verification, { requiredEffects: req.effects, customization: c, omitted: entry.relatedOmitted, effectCheck: entry.effectCheck === true });
           entry.verdict = verdictOf(entry);
           entry.status = entry.verdict.status;
           if (entry.verdict.status !== 'verified') entry.unresolved = { stoppedBy: entry.verdict.stoppedBy || entry.verdict.kind, rounds: entry.repairs, reason: entry.verdict.reason, left: [], next: entry.verdict.next };
@@ -28494,7 +27711,7 @@
           const impact = { lines: (Array.isArray(p.impact) ? p.impact : []).map(x => cut(labeled(x && (x.description || x.text) || ''), 120)).filter(Boolean).slice(0, 4), settings: { total: settingSteps.length, auto: settingSteps.filter(x => x.apply === 'AUTO').length, blocked: blockedSteps.length }, js: [...entries.map(([cid, e]) => ({ customizationId: cid, file: e.generated?.targetFile || '', strategy: e.generated?.strategy || null, status: e.status, ...(e.status === 'failed' && e.failure && e.failure.stop ? { stopped: true } : {}) })), ...notStartedIds.map(cid => ({ customizationId: cid, file: '', strategy: null, status: 'not-started' })), ...unsupported.map(u => ({ customizationId: u.customizationId, file: '', strategy: u.strategy || null, status: 'unsupported', requirement: cut(u.requirement || '', 80) }))] };
           // 検証の区分（§0c.4）: 機械検査（生成工程の machine ＋ Toolkit の形式確認）/ 必須の動作（構造の有無）/ 動作テスト（隔離環境の模擬）/ 実機は未確認
           const EFFECT_CHECKS = /^(required-effects|behavior)(-|$)/;
-          const toolkitChecks = entries.flatMap(([, e]) => (e.review?.checks || []).filter(ch => ch && !EFFECT_CHECKS.test(String(ch.name))));
+          const toolkitChecks = entries.flatMap(([, e]) => (e.review?.checks || []).filter(ch => ch && !ch.gateway && !EFFECT_CHECKS.test(String(ch.name))));
           const machine = { gateway: entries.flatMap(([, e]) => e.verification?.machine || []), toolkit: toolkitChecks, blocks: [...entries.flatMap(([, e]) => (e.verification?.machine || []).filter(x => !x.ok && x.severity === 'block').map(x => x.message)), ...toolkitChecks.filter(ch => !ch.ok && ch.severity === 'block').map(ch => ch.message)].map(fix).slice(0, 6), reviews: toolkitChecks.filter(ch => !ch.ok && ch.severity === 'review').map(ch => ({ name: ch.name, message: cut(fix(ch.message), 160) })).slice(0, 6), gatewayRepairs: entries.reduce((n, [, e]) => n + ((e.verification && e.verification.repairs && e.verification.repairs.count) || 0), 0), ran: entries.some(([, e]) => !!e.review),
             //   2026-10-10（§3.3・§5.2）: 修復しなかった理由（模擬テストの入力の不正・条件が分からない必須の動作）を理由ごとに数えた写し（表示は詳細の 1 行）
             notRepaired: [...entries.flatMap(([, e]) => (e.verification && e.verification.repairs && Array.isArray(e.verification.repairs.notRepaired) ? e.verification.repairs.notRepaired : [])).reduce((m, x) => m.set(x.reason, (m.get(x.reason) || 0) + (Number(x.count) || 0)), new Map())].map(([reason, count]) => ({ reason, count })).filter(x => x.count > 0) };
@@ -29544,7 +28761,9 @@
       return { count: count || 0, input: 0, output: 0, measured: 'none', unknown: count || 0 };
     }
     const sameCodes = (a, b) => JSON.stringify([...(a || [])].map(String).sort()) === JSON.stringify([...(b || [])].map(String).sort());
-    /** 指摘（blocker の code）→ 何を変えれば結果が変わるか */
+    /** 指摘（blocker の code）→ 何を変えれば結果が変わるか。
+     *   簡素化 B（2026-10-17）: coverage-unmet・planned-fields・planned-events・target-fields・platform は削除した Toolkit の検査の名前。保存済みの会話の生成の記録に
+     *   残った指摘の案内として残す（新しい生成では出ない） */
     const REPEAT_HINT = Object.freeze({
       fields: '存在しないフィールドを参照しています。計画で新設する項目に無い名前なら、計画を修正してフィールドを追加するか、実装仕様の対象を直してください',
       'coverage-unmet': '要件を満たしていない部分があります。計画で新設する項目を前提にできるものは計画と実装仕様をそろえ、それ以外は要件か実装仕様を直してください',
@@ -29706,12 +28925,13 @@
       return {
         customizationId, targetFile: g.targetFile || '', strategy: g.strategy || null, strategyJa: STRATEGY_JA[g.strategy] || g.strategy || '',
         target: entry.existingSource?.target || (Array.isArray(c?.platform) && c.platform.length === 1 ? c.platform[0] : null),
-        verdict, verdictJa: unmet.length ? '× 要件を満たしていない部分があります（登録できません）' : VERDICT_JA[verdict] || verdict, blockers: reg?.blockers || [], confirmCount: (reg?.confirmations || []).length, unverified: reg?.unverified || [],
-        unmet, headline: unmet.length ? 'JavaScript を作りましたが、要件を満たしていない部分があります（登録できません）。' : 'JavaScript を作りました。',
+        verdict, verdictJa: VERDICT_JA[verdict] || verdict, blockers: reg?.blockers || [], confirmCount: (reg?.confirmations || []).length, unverified: reg?.unverified || [],
+        unmet, headline: unmet.length ? 'JavaScript を作りましたが、要件を満たしていない部分があると生成した AI が申告しています（反映の前に確かめてください）。' : 'JavaScript を作りました。',
         // 段階 A（5.6）: 生成の回数（「生成 N 回目」）と token / 費用（独立レビュー A4: 実測が取れた回だけ「使用量」として出す）
         attempts, attemptCount: attempts?.count || 1, usageMeasured: !!attempts && ((attempts.measured ?? (((attempts.tokens?.input || 0) + (attempts.tokens?.output || 0)) > 0 ? 1 : 0)) > 0),
         achieved: rv?.coverage?.achieved || [], notAchieved: rv?.coverage?.notAchieved || [], outOfScope: rv?.coverage?.outOfScope || [], unowned: rv?.coverage?.unowned || [],
         // 独立レビュー C: AI の申告（AI_NOT_MET / AI_PARTIAL）と Toolkit の確認（SUBTABLE_ROWS など）を分け、coverage-unmet の blocker と同じ項目を 2 回出さない
+        //   （簡素化 B 以降の申告の確認は生成工程の coverage。coverage-unmet は保存済みの記録だけ）
         notAchievedAi: (rv?.coverage?.notAchieved || []).filter(x => x && /^AI_/.test(String(x.code))), notAchievedToolkit: (rv?.coverage?.notAchieved || []).filter(x => x && !/^AI_/.test(String(x.code))),
         blockersOther: (reg?.blockers || []).filter(b => b && b.code !== 'coverage-unmet'),
         status, statusJa: CODE_STATUS_JA[status] || status, ok: status === 'OK', blocked: status === 'BLOCKED' || verdict === 'BLOCKED',
@@ -30487,7 +29707,9 @@
       //   requirement-scope）の名前は、保存済みの会話に残った結果を表示するために残す（新しい検査では出さない）
       'conditional-control': '条件つきの制御', 'unconditional-control': '条件の無い制御', 'target-fields': '対象のフィールド', 'planned-fields': '計画のフィールド', 'planned-events': '計画のイベント', 'space-element': 'スペースの要素', 'api-screen': '画面の API', 'empty-undefined': '空の値の扱い', 'error-clear-compare': 'エラー表示の解除の条件', 'nested-registration': '入れ子の登録', 'create-missing-field': '作成画面に無いフィールド', 'summary-scope': '要約の範囲', 'requirement-scope': '要件の範囲', refetch: '再取得', 'error-cancels-other-js': '他の JavaScript の編集不可との競合', 'subtable-rows': '明細の行の操作', 'field-type': 'フィールドの型', 'event-field': 'イベントのフィールド', 'apis-unknown': '目録に無い API',
       // §0c（2026-10-08）: 生成工程の検証結果の取り込み（必須の効果・動作テスト）
-      'required-effects': '必須の動作', behavior: '模擬テスト', 'behavior-fail': '模擬テスト: 不合格', 'behavior-not-run': '模擬テスト: 実行できない（環境）', 'behavior-untested': '模擬テスト: 結果なし' };
+      'required-effects': '必須の動作', behavior: '模擬テスト', 'behavior-fail': '模擬テスト: 不合格', 'behavior-not-run': '模擬テスト: 実行できない（環境）', 'behavior-untested': '模擬テスト: 結果なし',
+      //   簡素化 B（2026-10-17）: 生成工程の機械検査の項目は検査の一覧にそのまま入る（Toolkit が作り直さない）。上に無い項目の名前
+      'planned-usage': '計画で新設する項目', 'unsupported-feature': '隔離環境で扱えない機能', 'lock-revert': '編集不可の戻し', 'record-api': 'レコードの API の使い方', coverage: '要件の達成（AI の申告）' };
     /** Phase 18: ドキュメントカード（Toolkit が作った Prompt / Markdown / JSON。AI へは送っていない） */
     function documentCardHtml(m) {
       const d = m.data || {};
@@ -31290,8 +30512,8 @@
       const notAch = rv?.coverage?.notAchieved || [], ach = rv?.coverage?.achieved || [];
       // 段階 A（5.4 / 5.6）: NOT_MET（AI の申告）があれば「要件を満たしていない部分があります（登録できません）」。生成の回数も見出しに
       const unmetP = notAch.filter(x => x && x.code === 'AI_NOT_MET'), attemptsP = entry.attempts || null;
-      const regHtml = reg ? `<div class="kt-ai-code-verdict" style="margin-top:2px; color:${reg.verdict === 'BLOCKED' ? '#b00020' : reg.verdict === 'NEEDS_CONFIRMATION' ? '#b26a00' : '#2e7d32'};">登録：${esc(unmetP.length ? '× 要件を満たしていない部分があります（登録できません）' : VJ[reg.verdict] || reg.verdict)}${reg.verdict === 'NEEDS_CONFIRMATION' ? `（確認 ${esc(String((reg.confirmations || []).length))} 件）` : ''}</div>${(reg.blockers || []).map(b => `<div style="color:#b00020;">× ${esc(b.message)}</div>`).join('')}${(reg.unverified || []).map(u => `<div style="opacity:.8;">・${esc(u.message)}</div>`).join('')}` : '';
-      // 独立レビュー C: AI の申告（AI_NOT_MET / AI_PARTIAL）は検査の一覧（coverage-unmet）に出るので、ここでは Toolkit の確認（SUBTABLE_ROWS など）だけ（同じ項目を 2 回出さない）
+      const regHtml = reg ? `<div class="kt-ai-code-verdict" style="margin-top:2px; color:${reg.verdict === 'BLOCKED' ? '#b00020' : reg.verdict === 'NEEDS_CONFIRMATION' ? '#b26a00' : '#2e7d32'};">登録：${esc(VJ[reg.verdict] || reg.verdict)}${unmetP.length ? esc('（要件を満たしていない部分があると申告されています）') : ''}${reg.verdict === 'NEEDS_CONFIRMATION' ? `（確認 ${esc(String((reg.confirmations || []).length))} 件）` : ''}</div>${(reg.blockers || []).map(b => `<div style="color:#b00020;">× ${esc(b.message)}</div>`).join('')}${(reg.unverified || []).map(u => `<div style="opacity:.8;">・${esc(u.message)}</div>`).join('')}` : '';
+      // 独立レビュー C: AI の申告（AI_NOT_MET / AI_PARTIAL）は検査の一覧（生成工程の coverage。保存済みの記録では coverage-unmet）に出るので、ここでは Toolkit の確認（SUBTABLE_ROWS など）だけ（同じ項目を 2 回出さない）
       const notAchTk = notAch.filter(x => x && !/^AI_/.test(String(x.code)));
       // 独立レビュー A4: token は実測が取れた回だけ「使用量」と書く。取れていなければ「使用量は未取得」
       const usageMeasured = !!attemptsP && ((attemptsP.measured ?? (((attemptsP.tokens?.input || 0) + (attemptsP.tokens?.output || 0)) > 0 ? 1 : 0)) > 0);
@@ -32696,7 +31918,7 @@
         requirements: (() => { const gp = conv && typeof conv.implementationGaps === 'function' ? conv.implementationGaps(v) : {}; return (conv && typeof conv.requirementsInScope === 'function' ? conv.requirementsInScope(v.planId, v.plan || null) : []).map(r => (r && gp[r.id] ? { ...r, gapScreen: gp[r.id] } : r)); })(), planOwners: conv && typeof conv.planOwnerIds === 'function' ? conv.planOwnerIds(v) : null });
       // §0c（2026-10-08）: 登録前の再検査は形式確認（最新の作業基準で）＋ 生成工程の検証結果（同じ候補の必須の効果・動作テスト）の取り込み。Toolkit は模擬を実行しない。
       //   §0d.4（2026-10-08）: 既知の競合（同じイベントの error と編集不可）は生成工程の check behavior と模擬テストの結果で扱う（Toolkit の形式確認では判定しない）
-      if (g.verification && ((Array.isArray(g.requiredEffects) && g.requiredEffects.length) || g.verification.behavior)) rv2 = KTCodeReview.attachBehavior(rv2, g.verification, { requiredEffects: g.requiredEffects || [], customization: c, omitted: g.relatedOmitted || [], effectCheck: g.effectCheck != null ? g.effectCheck === true : ktEffectCheckCapable(services.generatorFeatures() || []) });
+      if (g.verification) rv2 = KTCodeReview.attachBehavior(rv2, g.verification, { requiredEffects: g.requiredEffects || [], customization: c, omitted: g.relatedOmitted || [], effectCheck: g.effectCheck != null ? g.effectCheck === true : ktEffectCheckCapable(services.generatorFeatures() || []) });
       let reg = rv2.registration || null;
       if (reg && reg.codeHash && reg.codeHash !== ch.contentHash) return { ...reg, verdict: 'BLOCKED', blockers: [...(reg.blockers || []), { code: 'CONTENT_MISMATCH', message: '検査し直したコードと登録しようとしているコードが一致しません（もう一度生成してください）' }] };
       return reg;

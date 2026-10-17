@@ -13,7 +13,7 @@
 //   §V5 進みのカード: 見出しは経過だけで「残り時間は未推定」（保存した実測・既定値の目安を出さない）。AI の説明にも名前の付け替えと根拠の番号の除去。
 //        根拠の無い時間の文（「1 分前後」「十数秒ほど」）が画面に出る文に残っていない
 //   §V6 計画の自動の見直しで進みのカードを作り直さない（見出しは「最終案を作っています」のまま・経過は採用から・段階に「計画の自動の見直し」）
-//   §V7 承認の欄の確認項目（重複の handler）: 画面の言葉（イベント名・handler を出さない）。元の文は詳細に残る。承認の照合の key・code・指紋の文は元のまま
+//   §V7 承認の欄の確認項目（生成工程の確認の項目。簡素化 B で重複の handler から替えた）: 画面の言葉（イベント名・handler を出さない）。元の文は詳細に残る。承認の照合の key・code・指紋の文は元のまま
 //   §V8 作業者: ログイン中の利用者は名前・ログイン中でない利用者はログイン名を残す（承認者を確かめる情報を消さない）
 //   §V9 最終案の動作の文（計画の AI の要約）も、根拠の番号を外し、PC などの短い語を書き換えない
 //   §V10 AI の文のログイン名をフィールドの名前に書き換えない（V8-6。仮案のカード・右のペイン・進みのカード・最終案）。作業者の内部の表記（USER: など）は画面の表記・
@@ -264,21 +264,29 @@ await section(async () => {
 });
 
 // =========================================================
-console.log('\n--- §V7. 承認の欄の確認項目（重複の handler）: 画面の言葉・元の文は詳細・照合の key と指紋は元のまま ---');
+console.log('\n--- §V7. 承認の欄の確認項目（生成工程の確認の項目）: 画面の言葉・元の文は詳細・照合の key と指紋は元のまま ---');
 await section(async () => {
-  //   実機の 1 会話目と同じ形（既存の dealLock.js が app.record.edit.show を登録・統合したコードが同じイベントに別の handler を足す）: Phase 21 BF-C の記録
+  //   実機の 1 会話目と同じ形（既存の dealLock.js への統合）: Phase 21 BF-C の記録
+  //   簡素化 B（2026-10-17）: 例は、以前は Toolkit の重複の handler（duplicate-handler。Toolkit だけの規則で、削除した。生成工程には移植していない）。
+  //   今は生成工程の機械検査の review（計画との一致・return event）を取り込んだ確認項目。生成工程の項目には画面の言葉（screen）が無いので、
+  //   元の文のイベント名・handler を画面とタイミング・処理に置き換えて出す（confirmScreenText）
   const RP = K.RP;
   const data = require('./fixtures/ai-context-app.js').makeData();
   data.fields = clone(RP.FIELDS);
   const srcL = { name: 'dealLock.js', target: 'desktop', text: RP.DEAL_LOCK };
-  //   簡素化 B（2026-10-16）: 記法（var）は生成工程の機械検査が確かめる（Toolkit の写しの自動修正は削除）。記録した出力をそのまま検査する
-  const rv = KTCodeReview.review({ generated: RP.GENERATED, customization: RP.CUSTOMIZATION, plan: null, data, scan: null, existingSource: srcL });
-  const dup = rv.registration.confirmations.find(x => x.code === 'duplicate-handler');
-  assert(dup && /app\.record\.edit\.show/.test(dup.message) && /handler/.test(dup.message), `前提: 検査の元の文はイベント名と handler を含む（実機の承認の欄に出た文）: ${dup && dup.message}`);
-  assert(dup && !EVENTS.test(dup.screenText) && /既存の「dealLock\.js」が/.test(dup.screenText) && /編集画面を開いたとき（PC）/.test(dup.screenText) && /別の処理を足します/.test(dup.screenText) && dup.howToCheck === KTCodeReview.HOW_TO_CHECK['duplicate-handler'] && /既存の処理と今回の処理の両方が動く/.test(dup.howToCheck), `V7-1: 確認項目の画面の言葉（統合先のファイル名と画面・タイミング。イベント名・handler なし）と、重複の handler の確かめ方: ${dup && dup.screenText} ｜ ${dup && dup.howToCheck}`);
-  assert(dup.id === 'duplicate-handler#1' && dup.code === 'duplicate-handler', 'V7-2: 確認項目の id・code（承認の照合に使う）は元のまま');
+  const GW_ITEMS = [
+    { name: 'plan-consistency', ok: false, severity: 'review', message: '計画に無いイベントを使っています: 「app.record.detail.show」' },
+    { name: 'return-event', ok: false, severity: 'review', message: 'event を返していない handler があります（12 行目。表示・変更の結果が反映されません）' },
+  ];
+  const rv0 = KTCodeReview.review({ generated: RP.GENERATED, customization: RP.CUSTOMIZATION, plan: null, data, scan: null, existingSource: srcL });
+  const rv = KTCodeReview.attachBehavior(rv0, { version: '1', candidateHash: '0123456789abcdef', passed: true, machine: GW_ITEMS, requiredEffects: [], behavior: { status: 'not-run', reason: 'no-required-effects', cases: [] } }, { requiredEffects: [], customization: RP.CUSTOMIZATION });
+  const dup = rv.registration.confirmations.find(x => x.code === 'plan-consistency'), re = rv.registration.confirmations.find(x => x.code === 'return-event');
+  assert(dup && /app\.record\.detail\.show/.test(dup.message) && re && /handler/.test(re.message), `前提: 生成工程の確認の元の文はイベント名・handler を含む: ${dup && dup.message} ｜ ${re && re.message}`);
+  assert(dup && !EVENTS.test(dup.screenText) && /レコード詳細画面を開いたとき（PC）/.test(dup.screenText) && re && !EVENTS.test(re.screenText) && /処理/.test(re.screenText) && dup.howToCheck === KTCodeReview.HOW_TO_CHECK['plan-consistency'],
+    `V7-1: 確認項目の画面の言葉（イベント名・handler を画面とタイミング・処理に置き換える）と確かめ方: ${dup && dup.screenText} ｜ ${re && re.screenText}`);
+  assert(dup.id === `plan-consistency#${rv.registration.confirmations.indexOf(dup) + 1}` && dup.code === 'plan-consistency', 'V7-2: 確認項目の id・code（承認の照合に使う）は元のまま');
   const fallback = KTCodeReview.confirmScreenText({ message: dup.message });
-  assert(!EVENTS.test(fallback) && /編集画面を開いたとき（PC）/.test(fallback), `V7-3: 画面の言葉の無い古い記録も、元の文のイベント名・handler を置き換えて出す: ${fallback}`);
+  assert(!EVENTS.test(fallback) && /レコード詳細画面を開いたとき（PC）/.test(fallback), `V7-3: 画面の言葉の無い項目は、元の文のイベント名・handler を置き換えて出す: ${fallback}`);
   //   最終案のカードの承認の欄（確認項目は { text, detail }。文字列の項目もそのまま受ける）
   const x = makeConvC();
   await K.adoptC(x);
@@ -292,15 +300,17 @@ await section(async () => {
 await section(async () => {
   //   画面: 承認の欄の準備（書き込みなし）→ 確認項目 → ［動作テスト環境へ反映］で承認と登録（照合の key・指紋の文は元のまま。登録は動作テスト環境のモックだけ）
   const ST_S = "record['ステータス'] && record['ステータス'].value === '承認待ち'";
-  const one = (field) => `  kintone.events.on(['app.record.edit.show'], function (event) {\n    const record = event.record;\n    if (${ST_S}) record['${field}'].disabled = true;\n    return event;\n  });`;
-  const dupCode = (field) => `(function () {\n  'use strict';\n${one(field)}\n${one(field)}\n})();`;
+  const one = (field, ev = 'app.record.edit.show') => `  kintone.events.on(['${ev}'], function (event) {\n    const record = event.record;\n    if (${ST_S}) record['${field}'].disabled = true;\n    return event;\n  });`;
+  //   簡素化 B（2026-10-17）: 計画に無いイベント（詳細画面）にも処理を足した候補。生成工程の計画との一致（review）が確認項目にする（偽の生成工程も同じ項目を返す）
+  const dupCode = (field) => `(function () {\n  'use strict';\n${one(field)}\n${one(field, 'app.record.detail.show')}\n})();`;
+  const GW_PC = { name: 'plan-consistency', ok: false, severity: 'review', message: '計画に無いイベントを使っています: 「app.record.detail.show」' };
   const calls = [];
   const dupGenerate = async ({ ctx, requestId }) => {
     calls.push(1);
     const field = 'case_name', targetFile = 'caseLock.js', code = dupCode(field);
     const req0 = (ctx.verification && ctx.verification.requiredEffects) || [];
     const candidateHash = gwCandidateHash({ strategy: 'NEW_JS_FILE', targetFile, code, customizationId: 'C1' });
-    const resp = { ok: true, contractVersion: '2.1', meta: { requestId, gateway: { product: 'toolkit', feature: 'customization-generator', promptVersion: '1', contextVersion: 'customization-1' }, normalization: { warnings: [] }, ai: { model: 'm' } }, generated: { strategy: 'NEW_JS_FILE', targetFile, summary: '承認待ちでは案件名を編集できないようにします。', code, patch: null, events: ['app.record.edit.show'], fields: [{ code: field, access: 'CONTROL' }], apis: [], assumptions: [], warnings: [], coverage: [{ requirementId: 'C1', status: 'MET', note: '' }] }, verification: K.fakeVerification({ code, has: { [field]: ['lock'] } }, req0, { candidateHash }) };
+    const resp = { ok: true, contractVersion: '2.1', meta: { requestId, gateway: { product: 'toolkit', feature: 'customization-generator', promptVersion: '1', contextVersion: 'customization-1' }, normalization: { warnings: [] }, ai: { model: 'm' } }, generated: { strategy: 'NEW_JS_FILE', targetFile, summary: '承認待ちでは案件名を編集できないようにします。', code, patch: null, events: ['app.record.edit.show'], fields: [{ code: field, access: 'CONTROL' }], apis: [], assumptions: [], warnings: [], coverage: [{ requirementId: 'C1', status: 'MET', note: '' }] }, verification: (() => { const vf = K.fakeVerification({ code, has: { [field]: ['lock'] } }, req0, { candidateHash }); return { ...vf, machine: [...vf.machine, GW_PC] }; })() };
     const vv = KTAiClient.validateGenerated(resp, ctx);
     if (!vv.ok) throw new Error(JSON.stringify(vv.errors));
     return { ...vv.normalized, requestId };
@@ -312,15 +322,15 @@ await section(async () => {
   await K.waitUntil(() => ['ready', 'blocked', 'unavailable'].includes(m.panel.finalPrecheck().status), 80); await ticks(2);
   const pre = m.panel.finalPrecheck();
   const conf = (pre.items && pre.items.confirmations) || [];
-  const dupC = conf.find(c => c && typeof c === 'object' && /2 回登録/.test(c.text || ''));
-  assert(v && v.final && calls.length === 1 && pre.status === 'ready' && dupC, `前提: 生成したコードが同じイベントを 2 回登録 → 承認の欄の準備が終わり、確認項目がある: ${JSON.stringify({ status: pre.status, conf })}`);
-  assert(dupC && /同じタイミング（編集画面を開いたとき（PC））の処理を 2 回登録しています/.test(dupC.text) && /既存の処理と今回の処理の両方が動く/.test(dupC.text) && !EVENTS.test(dupC.text) && /app\.record\.edit\.show/.test(dupC.detail), `V7-6: 画面の承認の欄の確認項目は画面の言葉（元の文は detail）: ${JSON.stringify(dupC)}`);
+  const dupC = conf.find(c => c && typeof c === 'object' && /計画に無いイベント/.test(c.text || ''));
+  assert(v && v.final && calls.length === 1 && pre.status === 'ready' && dupC, `前提: 生成工程が計画に無いイベントの確認を返した → 承認の欄の準備が終わり、確認項目がある: ${JSON.stringify({ status: pre.status, conf })}`);
+  assert(dupC && /計画に無いイベントを使っています: 「レコード詳細画面を開いたとき（PC）」/.test(dupC.text) && !EVENTS.test(dupC.text) && /app\.record\.detail\.show/.test(dupC.detail), `V7-6: 画面の承認の欄の確認項目は画面の言葉（元の文は detail）: ${JSON.stringify(dupC)}`);
   const chatOut = visible(outsideDetails(m.chat())), chatAll = visible(m.chat());
-  assert(chatAll.includes('同じタイミング（編集画面を開いたとき（PC））の処理を 2 回登録しています') && !EVENTS.test(chatOut), `V7-7: 会話の最終案のカード（通常表示）に app.record.edit.show・handler が出ない: ${firstHit(chatOut, EVENTS)}`);
+  assert(chatAll.includes('計画に無いイベントを使っています: 「レコード詳細画面を開いたとき（PC）」') && !EVENTS.test(chatOut), `V7-7: 会話の最終案のカード（通常表示）に app.record.edit.show・handler が出ない: ${firstHit(chatOut, EVENTS)}`);
   const r = await K.applyOnScreen(m);
   const ap = r.v.approval;
   const fpConf = ap && ap.precheck && ap.precheck.fingerprint && ap.precheck.fingerprint.js ? ap.precheck.fingerprint.js.confirmations : [];
-  assert(r.run && r.run.ok && fpConf.length >= 1 && fpConf.some(c => c.key === 'C1:duplicate-handler#1' && /app\.record\.edit\.show/.test(c.message)) && Array.isArray(ap.confirmations.C1) && ap.confirmations.C1.includes('duplicate-handler') && r.writes.some(w => /customize/.test(w)), `V7-8: 承認の照合の key（C1:duplicate-handler#1）・code と指紋の文（元の文）は変えずに、承認と登録が通る（書き込みは動作テスト環境のモックだけ）: ${JSON.stringify({ ok: r.run && r.run.ok, fpConf, writes: r.writes })}`);
+  assert(r.run && r.run.ok && fpConf.length >= 1 && fpConf.some(c => /^C1:plan-consistency#\d+$/.test(c.key) && /app\.record\.detail\.show/.test(c.message)) && Array.isArray(ap.confirmations.C1) && ap.confirmations.C1.includes('plan-consistency') && r.writes.some(w => /customize/.test(w)), `V7-8: 承認の照合の key（C1:plan-consistency#N）・code と指紋の文（元の文）は変えずに、承認と登録が通る（書き込みは動作テスト環境のモックだけ）: ${JSON.stringify({ ok: r.run && r.run.ok, fpConf, writes: r.writes })}`);
 });
 
 // =========================================================

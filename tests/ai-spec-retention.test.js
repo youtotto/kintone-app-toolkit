@@ -328,9 +328,10 @@ await section(async () => {
   const gen = (coverage) => ({ strategy: 'NEW_JS_FILE', targetFile: 'mobileDealLock.js', summary: 'モバイルで承認済みの金額と明細セルを編集不可にする', code: CODE, patch: null, events: C2.events, fields: C2.fields.map(f => ({ code: f.code, access: f.access })), apis: ['kintone.events.on'], assumptions: [], warnings: [], coverage });
   const rvOf = (coverage, plan = SR.CASE2_PLAN) => KTCodeReview.review({ generated: gen(coverage), customization: C2, plan, data: INPUTS.data, scan: INPUTS.scan, existingSource: null });
   // 段階 C: 担当は requirementId で引く（契約 20 §5）。文の照合（同一文・2-gram の Dice 係数）・note の文言（P1 の名指し・標準設定）からの推定は削除した。
-  //   記録した有料確認の応答（旧い形。requirementId 無し）は入口で C2（この JavaScript の id）に変換するので、NOT_MET は登録不可・PARTIAL は確認になる
+  //   記録した有料確認の応答（旧い形。requirementId 無し）は入口で C2（この JavaScript の id）に変換する（自分の要件の申告として扱う）。
+  //   簡素化 B（2026-10-17）: NOT_MET・PARTIAL の確認は生成工程の機械検査の coverage（review）が行う（Toolkit の coverage-unmet は削除した。以前の期待: NOT_MET は登録不可）
   const asIs = rvOf(SR.CASE2_GENERATED_COVERAGE);
-  assert(asIs.coverage.declared.every(d => d.requirementId === 'C2' && d.legacy === true) && asIs.coverage.outOfScope.length === 0 && asIs.coverage.notAchieved.some(x => x.code === 'AI_NOT_MET' && /100万円以上は部長承認/.test(x.message) && /手順「/.test(x.message) && !/\bP1\b/.test(x.message)) && asIs.coverage.notAchieved.some(x => x.code === 'AI_PARTIAL' && /PCとモバイルの両方で使う/.test(x.message)) && (asIs.checks || []).some(x => x.name === 'coverage-unmet' && x.severity === 'block'), `旧い形の coverage: すべて自分の id に変換（NOT_MET は登録不可。note の番号は手順の名前に）: ${JSON.stringify({ na: asIs.coverage.notAchieved.map(x => [x.code, x.message]), oos: asIs.coverage.outOfScope })}`);
+  assert(asIs.coverage.declared.every(d => d.requirementId === 'C2' && d.legacy === true) && asIs.coverage.outOfScope.length === 0 && asIs.coverage.notAchieved.some(x => x.code === 'AI_NOT_MET' && /100万円以上は部長承認/.test(x.message) && /手順「/.test(x.message) && !/\bP1\b/.test(x.message)) && asIs.coverage.notAchieved.some(x => x.code === 'AI_PARTIAL' && /PCとモバイルの両方で使う/.test(x.message)) && !(asIs.checks || []).some(x => x.name === 'coverage-unmet'), `旧い形の coverage: すべて自分の id に変換（申告は計画の構造に対応づけるだけ。Toolkit は検査にしない。note の番号は手順の名前に）: ${JSON.stringify({ na: asIs.coverage.notAchieved.map(x => [x.code, x.message]), oos: asIs.coverage.outOfScope })}`);
   // Gateway の新しい形（requirementId つき）: P1（確認待ち）→ unowned、P3（REUSE_FIELD。設定を変える手順）→ 手順の担当、C1 → 別の JavaScript の担当、C2 → 自分
   const cov = [
     { requirementId: 'P1', text: '100万円以上は部長承認', status: 'OUT_OF_SCOPE', note: 'P1 で承認者を確定し、標準のプロセス管理で分岐を設定する' },

@@ -51,6 +51,17 @@ const UNCONF_SUM = /計画の構造からは実現を確かめていない要件
 const precheckTexts = (x, o = {}) => ['C1', 'C2', 'C3'].flatMap(cid => (R.recheckOf(x, cid, o).registration.confirmations || []).map(c => c.screenText));
 /** 生成の応答の coverage を差し替える mutate（cid → coverage を返す関数） */
 const withCoverage = (map) => (cid, g) => (map[cid] ? { ...g, coverage: map[cid](clone(g.coverage)) } : g);
+/**
+ * 簡素化 B（2026-10-17）: 生成の応答の coverage を変えたとき、本物の生成工程（AI版 verify-generated.mjs の coverage）と同じく、自分の要件（customizationId）の
+ *   NOT_MET・PARTIAL を機械検査の coverage（review）で返す偽の検証結果（verificationMutate）。保存した検証結果は元の coverage のときのものなので、ここで同じ規則で作り直す
+ */
+const gwCoverageMutate = (map) => (cid, ver) => {
+  if (!map[cid] || !ver || !Array.isArray(ver.machine)) return ver;
+  const cov = map[cid](clone(F.GENERATED[cid].generated.coverage || []));
+  const own = cov.filter(c => c.requirementId === cid && (c.status === 'NOT_MET' || c.status === 'PARTIAL'));
+  const item = own.length ? { name: 'coverage', ok: false, severity: 'review', message: `この JavaScript の要件のうち満たせないと申告されたものがあります: ${own.map(c => `${c.status === 'NOT_MET' ? '未実装' : '一部だけ'}「${(c.text || c.note || '').slice(0, 80)}」${c.note ? `（${c.note.slice(0, 120)}）` : ''}`).join('；')}` } : null;
+  return item ? { ...ver, machine: ver.machine.map(m => (m.name === 'coverage' ? item : m)) } : ver;
+};
 
 (async () => {
 // =========================================================
@@ -209,11 +220,15 @@ console.log('\n--- §D5. 区分を混同しない（この JavaScript の一部�
 await section(async () => {
   //   この JavaScript の一部達成（C2 自身の要件 C2 を PARTIAL・理由は一覧の画面）→ 残る範囲は「この案の制約」（モバイル）。自分の要件が必須の動作に結び付くので、
   //   今までの規則（§0c.6）どおり反映できない理由にも出る（担当未定・計画全体の確認にはしない。判定は変えていない）
-  const x = await R.run({ mutate: withCoverage({ C2: (cov) => cov.map(c => (c.requirementId === 'C2' ? { ...c, status: 'PARTIAL', note: '一覧の画面のセルは対象外' } : c)) }) });
-  const fin = x.c.activePlan().final, L = vis(R.leftHtml(x, { pre: READY }));
+  //   簡素化 B（2026-10-17）: この JavaScript の要件の一部達成（AI の申告）は、生成工程の機械検査の coverage（review）が確認事項にする（Toolkit の coverage-unmet と、
+  //   必須の動作に結び付く PARTIAL を登録不可に上げる判定は削除した。以前の期待: 反映できない理由・承認できない）。残る範囲は今までどおり「この案の制約」
+  const COV_D51 = { C2: (cov) => cov.map(c => (c.requirementId === 'C2' ? { ...c, status: 'PARTIAL', note: '一覧の画面のセルは対象外' } : c)) };
+  const x = await R.run({ mutate: withCoverage(COV_D51), verificationMutate: gwCoverageMutate(COV_D51) });
+  const fin = x.c.activePlan().final, L = vis(R.leftHtml(x, { pre: READY })), preD51 = precheckTexts(x);
   const conSec = secOf(L, 'この案の制約', LEFT_SECTIONS.slice(2));
-  assert(fin.constraints.some(c => c.kind === 'coverage' && c.text === '一覧の画面のセルは対象外' && JSON.stringify(c.platforms) === '["mobile"]') && conSec.includes('モバイル: 一覧の画面のセルは対象外') && !fin.blockers.some(b => b.kind === 'plan-scope' || b.kind === 'ownerless') && fin.blockers.some(b => b.kind === 'unresolved') && fin.approvable === false && x.c.activePlan().generated.C2.status === 'unresolved' && !OWNERLESS_RE.test(L),
-    `D5-1: この JavaScript の一部達成は残る範囲を「この案の制約」に（今までの規則どおり反映できない理由にも出る）。担当未定・計画全体の確認にしない: ${JSON.stringify({ constraints: fin.constraints, blockers: fin.blockers.map(b => b.kind) })}`);
+  assert(fin.constraints.some(c => c.kind === 'coverage' && c.text === '一覧の画面のセルは対象外' && JSON.stringify(c.platforms) === '["mobile"]') && conSec.includes('モバイル: 一覧の画面のセルは対象外') && !fin.blockers.length && fin.approvable === true && x.c.activePlan().generated.C2.status === 'verified'
+    && preD51.filter(t => /満たせないと申告されたもの/.test(t) && t.includes('一覧の画面のセルは対象外')).length === 1 && !OWNERLESS_RE.test(L),
+    `D5-1: この JavaScript の一部達成は残る範囲を「この案の制約」に、生成工程の coverage の確認を反映の前の確認に 1 回。担当未定・計画全体の確認にしない: ${JSON.stringify({ constraints: fin.constraints, blockers: fin.blockers.map(b => b.kind), pre: preD51 })}`);
   //   まだ作っていない（C3 が時間切れ）→ 作成途中のカード（反映できますと言わない）→ ［残りの JavaScript を作る］で C3 だけ作って完成
   const y = await R.run({ throwFor: { C3: 'TIMEOUT' } });
   const vy = y.c.activePlan(), fy = vy.final, hy = R.leftHtml(y, { pre: READY }), Ly = vis(hy), Ry = vis(R.rightHtml(y));
@@ -568,11 +583,17 @@ await section(async () => {
   //   簡素化 C: 画面の語（モバイル）からの欠落の判定は差し戻した。対応づけた C2 は計画から外れたが、C1 への対応づけと編集不可の構造が残るので止めない
   assert(noMob.c.activePlan().final.approvable === true && !blockTexts(noMob).length && noMob.c.activePlan().final.behaviors.some(b => /編集できなくします（PC）。/.test(b)),
     `D12-6: モバイルの JavaScript を外しても文の語からは止めず、実現した画面（PC）を示す: ${JSON.stringify(blockTexts(noMob))}`);
-  const mobPart = await R.run({ planOps: remap(['C1', 'C2']), planMutate: (plan) => { const c2 = plan.customizations.find(c => c.customizationId === 'C2'); c2.fields = c2.fields.filter(f => f.code !== 'amount'); return plan; } });
-  //   簡素化 C: 対象の文（金額）の画面ごとの欠落の判定（「「金額」の編集の禁止（モバイル）」が計画に無い）は差し戻した。この素材は保存済みのモバイルのコードが金額を
-  //   操作したままなので、生成したコードの検査（計画に無いフィールドの操作）で今までどおり止まる（直す前の版 7a41818 でも同じ 2 件が出ていた）
-  assert(mobPart.c.activePlan().final.approvable === false && blockTexts(mobPart).some(t => /計画に無いフィールドを操作しています（対象と異なるフィールド）: 「金額」/.test(t)) && !mobPart.c.activePlan().final.blockers.some(b => b.kind === 'ownerless'),
-    `D12-6b: モバイルが明細だけで金額が無い計画は、文の対象からは止めず、金額を操作するコードを生成の検査で止める: ${JSON.stringify(blockTexts(mobPart))}`);
+  //   簡素化 C: 対象の文（金額）の画面ごとの欠落の判定（「「金額」の編集の禁止（モバイル）」が計画に無い）は差し戻した。この素材は保存済みのモバイルのコードが金額を操作したまま。
+  //   簡素化 B（2026-10-17）: 計画に無いフィールドの操作（Toolkit の target-fields。登録不可）は削除した。生成工程の plan-consistency（review）が、生成した AI が申告した
+  //   フィールドの書き換え・制御のうち計画に無いもの（この素材は amount CONTROL）を確認事項にする（以前の期待: 承認できない・「計画に無いフィールドを操作しています」）。
+  //   保存した検証結果は計画を変える前のものなので、本物の生成工程が変えた計画で返す形（plan-consistency の review）にする
+  const PC_D126B = { name: 'plan-consistency', ok: false, severity: 'review', message: '計画に無いフィールドの書き換え・制御があります: 「amount CONTROL」' };
+  const mobPart = await R.run({ planOps: remap(['C1', 'C2']), planMutate: (plan) => { const c2 = plan.customizations.find(c => c.customizationId === 'C2'); c2.fields = c2.fields.filter(f => f.code !== 'amount'); return plan; },
+    verificationMutate: (cid, ver) => (cid === 'C2' ? { ...ver, machine: ver.machine.map(m => (m.name === 'plan-consistency' ? PC_D126B : m)) } : ver) });
+  const preD126b = precheckTexts(mobPart);
+  assert(mobPart.c.activePlan().final.approvable === true && !blockTexts(mobPart).length && !mobPart.c.activePlan().final.blockers.some(b => b.kind === 'ownerless') && preD126b.filter(t => t.includes('amount CONTROL')).length === 1,
+    `D12-6b: モバイルが明細だけで金額が無い計画は、文の対象からは止めず、金額の操作は生成工程の計画との一致の確認で反映の前の確認に 1 回: ${JSON.stringify({ blockers: blockTexts(mobPart), pre: preD126b })}`);
+
 
   //   (7) 一部の実装漏れ: 生成工程の検査（固定の結果）が PC の数量の編集不可を「無い」と返した → 金額などの成功で全体を達成にしない（その JavaScript は検証済みにならず、承認できない）
   const miss = await R.run({ planOps: remap(['C1', 'C2']), verificationMutate: (cid, ver) => (cid === 'C1' ? { ...ver, passed: false, requiredEffects: ver.requiredEffects.map(e => (e.field === 'qty' ? { ...e, status: 'missing', events: e.events.map(ev => ({ ...ev, status: 'missing' })) } : e)) } : ver) });
@@ -607,7 +628,9 @@ await section(async () => {
   const ROW = ROW_TEXT;
   const confOf = (xx) => ['C1', 'C2', 'C3'].map(cid => { const rv = R.recheckOf(xx, cid); return [cid, rv.registration.verdict, (rv.checks || []).filter(c => !c.ok).map(c => [c.name, c.severity, c.requirementId || null, c.limit || null]), (rv.registration.confirmations || []).length]; });
   //   まとめる前と同じ確認事項（コミット済みの版で出した値。確認の状態・項目の種類・重さ・要件・理由・件数）
-  const WANT_CONF = JSON.stringify([['C1', 'NEEDS_CONFIRMATION', [['patch-removal', 'review', null, null]], 1], ['C2', 'NEEDS_CONFIRMATION', [['coverage-unmet', 'review', 'R3', 'SUBTABLE_ROWS']], 1], ['C3', 'RUNTIME_UNVERIFIED', [], 0]]);
+  //   簡素化 B（2026-10-17）: C2 の一部達成の確認（Toolkit の coverage-unmet。要件 R3・明細の行）は削除した。生成工程の coverage は自分の要件（C2）の NOT_MET・PARTIAL だけを
+  //   確認にするので、対応づけた要件 R3 の PARTIAL は確認事項にならない。残る範囲（明細の行）は今までどおり「この案の制約」に 1 回（下の count(con, ROWS)）
+  const WANT_CONF = JSON.stringify([['C1', 'NEEDS_CONFIRMATION', [['patch-removal', 'review', null, null]], 1], ['C2', 'RUNTIME_UNVERIFIED', [], 0], ['C3', 'RUNTIME_UNVERIFIED', [], 0]]);
   const PARTIAL_PRE = '要件の一部を満たしていません（AI の申告）: 承認済み。PCとモバイルの両方：金額と明細を編集不可にする（担当するモバイルの金額と明細の入力セルは編集不可にしますが、明細の行追加・削除はセルの編集不可では止められません。）。セルの編集不可では行の追加・削除は止まりません（行のボタンを隠す API は Toolkit がまだ扱っていません。実現できない点）';
   const howOf = (xx) => (vis(R.rightHtml(xx)).match(/最終的にどう動くか[\s\S]*?(?=何が変わるか|$)/) || [''])[0];
   const conOf = (xx) => (vis(R.leftHtml(xx, { pre: READY })).match(/この案の制約[\s\S]*?(?=仮案からの補足|動作テスト環境へ反映)/) || [''])[0];
@@ -617,7 +640,7 @@ await section(async () => {
     assert(fv.constraints.length === 1 && fv.constraints[0].text === ROW && JSON.stringify(fv.constraints[0].platforms) === '["desktop","mobile"]' && fv.constraints[0].requirementId === 'R3'
       && count(con, ROWS) === 1 && !/防ぎません（(PC|モバイル)）/.test(con) && !/(PC|モバイル): 明細の行/.test(con)
       && realized.every(n => n === 1) && realizedAll === want.length && !/編集できなくします（(PC|モバイル)）/.test(how) && !/PCとモバイルの両方では|両方の場合/.test(how)
-      && JSON.stringify(confOf(xx)) === WANT_CONF && count(pre.join('\n'), PARTIAL_PRE) === 1
+      && JSON.stringify(confOf(xx)) === WANT_CONF && count(pre.join('\n'), PARTIAL_PRE) === 0
       && fv.approvable === true && fv.blockers.length === 0 && ['C1', 'C2', 'C3'].every(cid => xx.c.activePlan().generated[cid].status === 'verified')
       && na2.some(y => y.code === 'AI_PARTIAL' && y.requirementId === 'R3' && y.limit === 'SUBTABLE_ROWS'),
       `D12-10: 要件を JavaScript に対応づけた版（${name}）で、同じ対象・条件・結果・制約の PC・モバイルの表示を 1 つにまとめ（制約は要件の id を残す）、確認事項・判定・AI の一部達成の申告は変えない: ${JSON.stringify({ constraints: fv.constraints.map(c => [c.platforms, c.requirementId || null]), realized, conf: confOf(xx), pre, approvable: fv.approvable })}`);
@@ -688,7 +711,8 @@ await section(async () => {
   //   期待の値は、文を直す前の本体（1d21c2c）で同じ素材から出した値（KT_SRC で確かめた）。簡素化 C（2026-10-16）で、画面の語（PC だけ・モバイルだけ）からの欠落の判定を
   //   差し戻したので、PC だけ・モバイルだけの素材も承認できる（止める理由なし）。確認事項（反映の前の確認）は同じ
   const judge = (xx) => { const v = xx.c.activePlan(), f = v.final; const conf = ['C1', 'C2', 'C3'].filter(cid => v.generated[cid]).flatMap(cid => (R.recheckOf(xx, cid).registration.confirmations || []).map(c => `${cid}:${c.code}`)); return [f.approvable, f.blockers.map(b => b.kind).sort(), conf]; };
-  const WANT_JUDGE = JSON.stringify([[true, [], ['C1:patch-removal']], [true, [], ['C1:patch-removal']], [true, [], []], [true, [], ['C1:patch-removal', 'C2:coverage-unmet']], [true, [], ['C1:patch-removal', 'C2:coverage-unmet']]]);
+  //   簡素化 B（2026-10-17）: C2 の一部達成の確認（coverage-unmet）は削除した（上の D12-10 と同じ理由）。判定が文の形に関係しないことは変わらない
+  const WANT_JUDGE = JSON.stringify([[true, [], ['C1:patch-removal']], [true, [], ['C1:patch-removal']], [true, [], []], [true, [], ['C1:patch-removal']], [true, [], ['C1:patch-removal']]]);
   assert(JSON.stringify([both, pcOnly, mobOnly, diffMap, fn2].map(judge)) === WANT_JUDGE,
     `D13-4: 承認の可否・止める理由・反映の前の確認事項の件数は文の形に関係しない: ${JSON.stringify([both, pcOnly, mobOnly, diffMap, fn2].map(judge))}`);
   //   (5) 制約の行: 理由を別に持つ構造の行は「本体（画面）。理由。」、それ以外（AI の申告の文など）は今までどおり「画面: 文」

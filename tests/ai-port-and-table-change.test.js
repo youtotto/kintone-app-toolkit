@@ -442,8 +442,9 @@ await section(async () => {
   for (const s of ['kintone の JavaScript では止められません', '編集できなくできるのはセルだけ', '行の追加・削除は JavaScript では止められない', '行の追加・削除は JavaScript では止められません']) assert(!src.includes(s), `P7-1: 本文に言い切り「${s}」が残っていない`);
 });
 await section(async () => {
-  //   SUBTABLE_ROWS の判定（計画が明細を制御し、コードがセルを編集不可にする → 実現できない点。承認を止めない確認）は今のまま。文だけ変えた
-  const c = { customizationId: 'C1', requirement: '承認済みでは明細を編集不可にする', strategy: 'NEW_JS_FILE', platform: ['desktop'], events: ['app.record.edit.show'], fields: [{ code: 'ステータス', access: 'READ' }, { code: 'items', access: 'CONTROL', condition: 'ステータス in ("承認済み")' }], apis: [], existingFiles: [] };
+  //   SUBTABLE_ROWS の判定（実現できない点。承認を止めない）は今のまま。文だけ変えた
+  //   簡素化 B（2026-10-17）: 当てはまるかは計画の構造（明細に編集不可の効果がある）で決める（以前はコードのセルの編集不可を解析していた）
+  const c = { customizationId: 'C1', requirement: '承認済みでは明細を編集不可にする', strategy: 'NEW_JS_FILE', platform: ['desktop'], events: ['app.record.edit.show'], fields: [{ code: 'ステータス', access: 'READ' }, { code: 'items', access: 'CONTROL', condition: 'ステータス in ("承認済み")', effects: ['lock'] }], apis: [], existingFiles: [] };
   const code = "(function () {\n  'use strict';\n  kintone.events.on(['app.record.edit.show'], function (event) {\n    const record = event.record;\n    if (record['ステータス'].value === '承認済み') {\n      record['items'].value.forEach(function (row) {\n        for (const key in row.value) { row.value[key].disabled = true; }\n      });\n    }\n    return event;\n  });\n})();";
   const generated = { strategy: 'NEW_JS_FILE', targetFile: 'lock.js', summary: '承認済みでは明細を編集不可にします。', code, patch: null, events: ['app.record.edit.show'], fields: [{ code: 'items', access: 'CONTROL' }], apis: [], assumptions: [], warnings: [], coverage: [{ requirementId: 'C1', status: 'MET', note: '' }] };
   const rv = KTCodeReview.review({ generated, customization: c, plan: { customizations: [c] }, data: clone(K.DATA_C), scan: null, existingSource: null });

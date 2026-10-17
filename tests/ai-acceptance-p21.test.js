@@ -336,27 +336,39 @@ const REG = (() => {
   //   今は Toolkit が必須の効果を固定する段階で、計画のフィールドに構造化した効果・条件が無ければ未特定（field-unspecified）・台帳の要件に条件があるのに計画に無ければ
   //   condition-unknown として準備未完了にする（tests/ai-flow-redesign.test.js の D6-4・D16-1・D22-1・D34。Gateway は文から効果・条件を推定しない:
   //   required-effects.mjs「互換: 効果の無い CONTROL は [] のまま EFFECT_UNSPECIFIED（文から推定しない）」）
-  // F41: PC とモバイルの両方が対象なのに片方の画面の処理が無い → 登録不可
+  // F41・モバイルのイベント・計画の処理とイベント・対象と異なるフィールドとアプリ:
+  //   簡素化 B（2026-10-17）: 次の判定は Toolkit だけの規則で、削除した（生成工程には移植していない。検査を増やさない）。Toolkit の形式確認はこれらで止めない。
+  //     - 画面ごとの処理の有無（platform-fields・platform）・計画で制御するフィールドとイベントの処理の有無（planned-fields・planned-events）
+  //       → 生成工程の必須の効果が、効果のイベントごとに処理の形を確かめる（AI版 verify-generated.mjs。missing は Toolkit が登録不可として取り込む。p20 の F26・F41）
+  //     - 計画に無いフィールドの書き換え（target-fields・target-fields-error）→ 生成工程の plan-consistency（review）。ただし生成した AI が申告したフィールドだけを見る
+  //       （コードの解析ではない）ので、申告していない書き換えは止まらない（判定しない範囲として残る）
+  //     - 他のアプリの読み書き（target-app・target-app-read）→ 生成工程の apis（review）が「計画に無い通信 API」を見る。計画が kintone.api を含むときは止まらない（判定しない範囲として残る）
   const pcOnly = review(wrap(['app.record.edit.show', 'mobile.app.record.edit.show'], "    if (record['ステータス'].value === '承認済み') { record['amount'].disabled = true; }") + "\n" + wrap(['mobile.app.record.edit.show'], "    if (record['ステータス'].value === '承認済み') { record['owner'].disabled = true; }"), cust({ platform: ['desktop', 'mobile'], events: ['app.record.edit.show', 'mobile.app.record.edit.show'], fields: [{ code: 'amount', access: 'CONTROL' }, { code: 'owner', access: 'CONTROL' }] }));
-  assert(pcOnly.registration.verdict === 'BLOCKED' && pcOnly.registration.blockers.some(b => b.code === 'platform-fields' && /owner/.test(b.message)), 'F41: PC とモバイルの両方が対象で担当者のロックがモバイルだけ → 登録不可');
   const noMobile = review(wrap(['app.record.edit.show'], IF_LOCK), cust({ platform: ['desktop', 'mobile'] }));
-  assert(noMobile.registration.verdict === 'BLOCKED' && noMobile.registration.blockers.some(b => b.code === 'platform') && noMobile.registration.unverified.some(u => u.code === 'MOBILE_RUNTIME_NOT_VERIFIABLE'), 'モバイルも対象なのにモバイルのイベントが無い → 登録不可。モバイルは動作テスト環境で確かめられないことも示す');
-  // 対象と異なるフィールド・アプリ
   const offField = review(wrap(['app.record.edit.show'], IF_LOCK + "\n    record['approver'].value = [];"));
-  assert(offField.registration.verdict === 'BLOCKED' && offField.registration.blockers.some(b => b.code === 'target-fields' && /approver/.test(b.message)), '計画に無いフィールドの値を書き換える → 登録不可（対象と異なるフィールド）');
   const offErr = review(wrap(['app.record.edit.submit'], "    if (record['ステータス'].value === '承認済み') { record['amount'].disabled = true; }\n    if (!record['due_date'].value) record['due_date'].error = '期日を入れてください';"), cust({ events: ['app.record.edit.submit'] }));
-  assert(offErr.registration.verdict !== 'BLOCKED' && offErr.registration.confirmations.some(x => x.code === 'target-fields-error'), '計画に無いフィールドへのエラー表示だけ → 確認が必要（止めない）');
   const otherApp = review(wrap(['app.record.edit.submit.success'], IF_LOCK + "\n    return kintone.api(kintone.api.url('/k/v1/record', true), 'PUT', { app: 999, id: 1, record: {} }).then(function () { return event; });"), cust({ events: ['app.record.edit.submit.success'] }));
-  assert(otherApp.registration.verdict === 'BLOCKED' && otherApp.registration.blockers.some(b => b.code === 'target-app' && /999/.test(b.message)), '他のアプリ（999）のレコードを書き換える → 登録不可（対象と異なるアプリ）');
   const readOther = review(wrap(['app.record.edit.show'], IF_LOCK + "\n    kintone.api(kintone.api.url('/k/v1/records', true), 'GET', { app: 500, query: '' });"));
-  assert(readOther.registration.verdict === 'NEEDS_CONFIRMATION' && readOther.registration.confirmations.some(x => x.code === 'target-app-read'), '他のアプリの読み取り → 確認が必要');
-  // 計画の処理が無い / 計画のイベントが無い
   const absent = review(wrap(['app.record.edit.show'], "    // 何もしない"));
-  assert(absent.registration.verdict === 'BLOCKED' && absent.registration.blockers.some(b => b.code === 'planned-fields' && /amount/.test(b.message)), '計画で制御するフィールドがコードに無い → 登録不可（要件の処理が無い）');
   const noChange = review(wrap(['app.record.edit.show'], "    if (Number(record['amount'].value) >= 1000000) record['amount'].error = '100 万円以上です'; else record['amount'].error = null;"), cust({ requirement: '金額が 100 万円以上なら警告する', events: ['app.record.edit.show', 'app.record.edit.change.amount'], fields: [{ code: 'amount', access: 'CONTROL' }] }));
-  assert(noChange.registration.verdict === 'BLOCKED' && noChange.registration.blockers.some(b => b.code === 'planned-events' && /change\.amount/.test(b.message)), 'BF-C: 計画の change イベントが無い（入力中に切り替わらない）→ 登録不可');
+  const REMOVED = ['platform-fields', 'platform', 'target-fields', 'target-fields-error', 'target-app', 'target-app-read', 'planned-fields', 'planned-events'];
+  const usesRemoved = (rv) => [...rv.registration.blockers, ...rv.registration.confirmations].map(x => x.code).filter(cd => REMOVED.includes(cd));
+  for (const [name, rv] of Object.entries({ pcOnly, noMobile, offField, offErr, otherApp, readOther, absent, noChange })) {
+    assert(rv.registration.verdict === 'RUNTIME_UNVERIFIED' && !usesRemoved(rv).length, `簡素化 B: ${name} は Toolkit の形式確認で止めず、確認事項にもしない（生成工程の検査の範囲）: ${rv.registration.verdict} ${JSON.stringify(usesRemoved(rv))}`);
+  }
+  assert(noMobile.registration.unverified.some(u => u.code === 'MOBILE_RUNTIME_NOT_VERIFIABLE'), 'モバイルも対象 → モバイルは動作テスト環境で確かめられないことを示す（判定の項目ではなく、未確認の範囲）');
+  // 生成工程の結果の取り込み: 必須の効果の missing は登録不可・計画に無い書き換え（plan-consistency）と計画に無い通信（apis）の review は確認事項
+  const missingOf = (rv, c, field) => KTCodeReview.attachBehavior(rv, { version: '1', candidateHash: '0123456789abcdef', passed: false, machine: [], requiredEffects: [{ requirementId: 'C1', requirementIds: ['C1'], field, effect: 'lock', status: 'missing', events: [{ event: 'app.record.edit.show', status: 'missing' }] }], behavior: { status: 'not-run', reason: 'machine-blocked', cases: [] } }, { requiredEffects: [{ requirementId: 'C1', requirementIds: ['C1'], field, effect: 'lock', events: ['app.record.edit.show'], condition: 'ステータス in ("承認済み")' }], customization: c });
+  const absentV = missingOf(absent, cust(), 'amount');
+  assert(absentV.registration.verdict === 'BLOCKED' && absentV.registration.blockers.some(b => b.code === 'required-effects' && /amount/.test(b.message)), '計画で制御するフィールドの処理が無い → 生成工程の必須の効果の missing で登録不可');
+  const reviewOf = (rv, c, items) => KTCodeReview.attachBehavior(rv, { version: '1', candidateHash: '0123456789abcdef', passed: true, machine: items, requiredEffects: [], behavior: { status: 'not-run', reason: 'no-required-effects', cases: [] } }, { requiredEffects: [], customization: c });
+  const offFieldV = reviewOf(offField, cust(), [{ name: 'plan-consistency', ok: false, severity: 'review', message: '計画に無いフィールドの書き換え・制御があります: 「approver WRITE」' }]);
+  assert(offFieldV.registration.verdict === 'NEEDS_CONFIRMATION' && offFieldV.registration.confirmations.some(x => x.code === 'plan-consistency' && /approver/.test(x.message) && x.howToCheck), '生成工程の plan-consistency（review）は承認の欄の確認事項になる');
+  const otherAppV = reviewOf(otherApp, cust({ events: ['app.record.edit.submit.success'] }), [{ name: 'apis', ok: false, severity: 'review', message: '計画に無い通信 API を使っています: 「kintone.api」' }]);
+  assert(otherAppV.registration.verdict === 'NEEDS_CONFIRMATION' && otherAppV.registration.confirmations.some(x => x.code === 'apis'), '生成工程の apis（計画に無い通信。review）は承認の欄の確認事項になる');
+  // イベント名を組み立てている（静的に特定できない）: Toolkit は判定しない（生成工程はイベントを読めない handler の効果を模擬テストで確かめる。checkReason event-unreadable）
   const dyn = review("(function () {\n  'use strict';\n  const f = 'amount';\n  kintone.events.on(['app.record.edit.show', 'app.record.edit.change.' + f], function (event) {\n    if (Number(event.record['amount'].value) >= 1000000) event.record['amount'].error = 'x'; else event.record['amount'].error = null;\n    return event;\n  });\n})();", cust({ requirement: '金額が 100 万円以上なら警告する', events: ['app.record.edit.show', 'app.record.edit.change.amount'], fields: [{ code: 'amount', access: 'CONTROL' }] }));
-  assert(dyn.registration.verdict !== 'BLOCKED' && dyn.registration.confirmations.some(x => x.code === 'planned-events'), 'イベント名を組み立てている（静的に特定できない）→ 止めずに確認が必要');
+  assert(dyn.registration.verdict === 'RUNTIME_UNVERIFIED' && !usesRemoved(dyn).length, 'イベント名を組み立てていても、Toolkit の形式確認では止めない');
 }
 
 // =========================================================
@@ -401,7 +413,10 @@ console.log('\n--- G7b. 条件の外のロックの見落とし（モデル比�
   const extendBoth = cust({ strategy: 'EXTEND_EXISTING_JS', platform: ['desktop', 'mobile'], events: ['app.record.create.show', 'app.record.edit.show', 'mobile.app.record.create.show', 'mobile.app.record.edit.show'], existingFiles: [{ name: 'dealLock.js', target: 'desktop' }], requirement: '承認済みでは金額と明細を編集不可にする（PC とモバイル）', fields: [{ code: 'amount', access: 'CONTROL', condition: 'ステータス in ("承認済み")' }, { code: 'items', access: 'CONTROL', condition: 'ステータス in ("承認済み")' }] });
   nestedPatch.baseHash = KTScan.hashText(LOCK_BASE);
   const rvNested = KTCodeReview.review({ generated: REG.gen('', { strategy: 'EXTEND_EXISTING_JS', targetFile: 'dealLock.js', patch: nestedPatch, summary: '既存のdealLock.jsにモバイル対応の編集不可制御を追加' }), customization: extendBoth, plan: null, data: REG.data, scan: null, existingSource: { name: 'dealLock.js', target: 'desktop', text: LOCK_BASE } });
-  assert(rvNested.registration.verdict === 'BLOCKED' && rvNested.registration.blockers.some(b => b.code === 'nested-registration' && /handler の中/.test(b.message) && /モバイルでは一度も登録されません/.test(b.message)), `既存の handler の中に新しい kintone.events.on を差し込んだ → 登録不可（nested-registration）: ${JSON.stringify(rvNested.registration.blockers.map(b => b.code))}`);
+  //   簡素化 B（2026-10-17）: handler の中の登録（nested-registration）は Toolkit だけの規則で、削除した（生成工程には移植していない。検査を増やさない）。
+  //   生成工程の必須の効果は、即時実行でない関数の中で登録した処理を機械検査では合格にせず、確かめ方を模擬テストにする（checkReason not-top-level）。
+  //   Toolkit は統合した本文を作れるか（patch）だけを確かめる
+  assert(rvNested.registration.verdict !== 'BLOCKED' && !rvNested.registration.blockers.some(b => b.code === 'nested-registration') && rvNested.checks.some(x => x.name === 'patch' && x.ok), `既存の handler の中に新しい kintone.events.on を差し込んだ差分: Toolkit は本文を作り、登録の形は判定しない: ${JSON.stringify(rvNested.registration.blockers.map(b => b.code))}`);
   // 即時関数の直下の関数から登録する書き方は止めない
   // 候補モデル INTEG 2 回目の差分そのもの: 登録の行を REPLACE でイベントを足し、担当者の行を if の中に足した（正しいコード）
   const replacePatch = { baseHash: KTScan.hashText(LOCK_BASE), operations: [{ type: 'REPLACE', anchor: "kintone.events.on(['app.record.create.show', 'app.record.edit.show'], function (event) {", content: "kintone.events.on(['app.record.create.show', 'app.record.edit.show', 'app.record.index.edit.show'], function (event) {" }, { type: 'INSERT_AFTER', anchor: "      record['amount'].disabled = true;", content: "\n      record['owner'].disabled = true;" }] };
@@ -417,9 +432,11 @@ console.log('\n--- G8. 要約・詳細・検査結果の整合（明細の行の
 {
   const { cust, wrap, review, chk } = REG;
   const CELLS = "    const locked = record['ステータス'].value === '承認済み';\n    if (locked) {\n      record['amount'].disabled = true;\n      record['items'].value.forEach(function (row) {\n        for (const key in row.value) { row.value[key].disabled = true; }\n      });\n    }";
-  const c = cust({ requirement: '承認済みでは金額と明細を編集不可にし、明細の行の追加・削除も禁止する', fields: [{ code: 'amount', access: 'CONTROL', condition: 'ステータス in ("承認済み")' }, { code: 'items', access: 'CONTROL', condition: 'ステータス in ("承認済み")' }] });
+  const c = cust({ requirement: '承認済みでは金額と明細を編集不可にし、明細の行の追加・削除も禁止する', fields: [{ code: 'amount', access: 'CONTROL', condition: 'ステータス in ("承認済み")', effects: ['lock'] }, { code: 'items', access: 'CONTROL', condition: 'ステータス in ("承認済み")', effects: ['lock'] }] });
   const rv = review(wrap(['app.record.edit.show'], CELLS), c, { summary: '承認済みでは金額と明細を編集不可にし、明細の行追加・削除も禁止する' });
-  assert(rv.coverage && rv.coverage.notAchieved.some(x => x.code === 'SUBTABLE_ROWS' && /セルを編集不可にしても、明細（テーブル）の行の追加・削除は止まりません/.test(x.message) && /ボタンを隠す API は Toolkit がまだ扱っていません/.test(x.message) && !/kintone の JavaScript で/.test(x.message)) && rv.coverage.achieved.some(x => /セルを編集不可/.test(x)), '達成範囲: セルの編集不可は達成・行の追加・削除は未達（Toolkit が示す）');
+  //   簡素化 B（2026-10-17）: 行の追加・削除が止まらないこと（SUBTABLE_ROWS）は、計画の構造（テーブル・列に編集不可の効果）で決める（以前はコードのセルの編集不可を解析していた）。
+  //   「Toolkit が確かめた範囲」（achieved。コードの解析で作っていた）は作らない
+  assert(rv.coverage && rv.coverage.notAchieved.some(x => x.code === 'SUBTABLE_ROWS' && /セルを編集不可にしても、明細（テーブル）の行の追加・削除は止まりません/.test(x.message) && /ボタンを隠す API は Toolkit がまだ扱っていません/.test(x.message) && !/kintone の JavaScript で/.test(x.message)) && !rv.coverage.achieved.length, '達成範囲: 計画でテーブルを編集不可にする → 行の追加・削除は止まらない（Toolkit が計画の構造で示す）');
   //   §0d.4（2026-10-08）: AI の要約・要件の文を正規表現で読んで確認にする判定（summary-scope・requirement-scope）と、条件の内外の照合（conditional-control）は削除した。
   //   「行の追加・削除は止められない」ことは、構造の判定（達成範囲の SUBTABLE_ROWS・コードペインの「満たせない部分」・計画の Review の JS_LIMIT_SUBTABLE_ROWS）で示す（上の 1 件と下の 2 件）
   assert(!chk(rv, 'summary-scope') && rv.registration.verdict !== 'BLOCKED', `行のループでのセルのロック（条件の中）は止めない: ${rv.registration.verdict}`);
@@ -467,7 +484,9 @@ console.log('\n--- G7. 登録処理の側での判定（KTJsExecutor）: 古い�
   assert(p4.status === 'BLOCKED' && p4.blockers.some(b => b.code === 'REGISTRATION_UNKNOWN'), 'prepare: 検査結果の無い変更は止める');
   // 確認が必要な項目: 1 件ずつ確認したものがそろわないと登録しない（まとめての同意では通さない）
   const needCode = wrap(['app.record.edit.show'], IF_LOCK + "\n    kintone.api(kintone.api.url('/k/v1/records', true), 'GET', { app: 500, query: '' });");
-  const rvNeed = review(needCode, c);
+  //   簡素化 B（2026-10-17）: 他のアプリの読み取りの確認（target-app-read）は Toolkit から削除した。確認事項は生成工程の機械検査の review（このコードなら apis
+  //   「計画に無い通信 API」。計画の apis が空なので本物の生成工程でもこの項目になる）を取り込んだもので確かめる
+  const rvNeed = KTCodeReview.attachBehavior(review(needCode, c), { version: '1', candidateHash: '0123456789abcdef', passed: true, machine: [{ name: 'apis', ok: false, severity: 'review', message: '計画に無い通信 API を使っています: 「kintone.api」' }], requiredEffects: [], behavior: { status: 'not-run', reason: 'no-required-effects', cases: [] } }, { requiredEffects: [], customization: c });
   const need = KTJsExecutor.changeFromGenerated({ customization: c, generated: REG.gen(needCode), review: rvNeed });
   const m5 = mk();
   const p5 = await KTJsExecutor.prepare({ appId: '310', changes: [need.change] }, { api: m5.api });
@@ -488,6 +507,9 @@ console.log('\n--- G7（画面）. 古い版からは登録しない・確認の
   const HEALTH = { ok: true, supportedContractVersions: ['2.0', '2.1'], entitlements: [{ product: 'toolkit', features: ['assistant-qa', 'change-planner', 'customization-generator'] }], registry: { toolkit: { 'assistant-qa': { implemented: true, promptVersions: ['1'] }, 'change-planner': { implemented: true, promptVersions: ['1'] }, 'customization-generator': { implemented: true, promptVersions: ['1'], verification: ['requirementId', 'requiredEffects', 'effectGroups', 'relatedOmitted', 'appFields', 'saveDialog', 'reasonCategory', 'caseSide', 'eventCases', 'loadFaithful', 'registrationCheck', 'emptyCase', 'hideCondition', 'registrationCounts', 'caseCoverage', 'cancelCheck', 'limitCode', 'scopeList', 'tableRowChange', 'caseInvalid', 'conditionFrom'] } } }, contract: { usage: { usedThisMonth: 1, monthlyLimit: 200 } } };
   const CUST = { customizationId: 'C1', requirement: '承認済みでは金額を編集不可にする', whyStandardInsufficient: 'ステータスで編集可否を変えられない', strategy: 'NEW_JS_FILE', platform: ['desktop'], implementation: 'JAVASCRIPT', events: ['app.record.edit.show'], fields: [{ code: 'amount', access: 'CONTROL', condition: 'ステータス in ("承認済み")', effects: ['lock'] }], apis: [], existingFiles: [], risks: [], questions: [], dependsOn: [], evidenceIds: [], confidence: 'INFERRED' };
   const planResp = (goal) => ({ ok: true, contractVersion: '2.1', meta: { requestId: 'pl', gateway: { product: 'toolkit', feature: 'change-planner', promptVersion: '1', contextVersion: 'planner-1' }, normalization: { warnings: [] }, ai: { model: 'm' }, usage: { usedThisMonth: 1, monthlyLimit: 200 } }, plan: { goal, solution: 'CUSTOMIZATION', assessment: { summary: 's', usableExistingFields: [], usableExistingSettings: [], gaps: [], evidenceIds: [] }, relevantFields: [], proposedFields: [], steps: [step('C1', 'CUSTOMIZATION_REQUIRED', 'JS', 'lock.js', { customizationId: 'C1' }, { solution: 'CUSTOMIZATION', execution: { mode: 'PLAN_ONLY', supported: false, reason: 'x' } })], alternatives: [], impact: [], questions: [], unknowns: [], planConfidence: 'INFERRED', customizations: [CUST] } });
+  //   簡素化 B（2026-10-17）: 確認が必要な項目は、Toolkit の他のアプリの読み取りの確認（target-app-read。削除した）ではなく、生成工程の機械検査の review。
+  //   このコードと計画（apis が空）なら、本物の生成工程は apis「計画に無い通信 API」を返す（AI版 verify-generated.mjs）。偽の生成工程も同じ項目を返す
+  const G7_MACHINE = [{ name: 'apis', ok: false, severity: 'review', message: '計画に無い通信 API を使っています: 「kintone.api」' }];
   const CODE = REG.wrap(['app.record.edit.show'], "    if (record['ステータス'].value === '承認済み') {\n      record['amount'].disabled = true;\n    }\n    kintone.api(kintone.api.url('/k/v1/records', true), 'GET', { app: 500, query: '' });");
   // §0c.6（2026-10-08）: 従来の流れの登録は、接続先が必須の効果の確認に対応し（health の verification に requiredEffects）、生成工程の検証が合格したものだけ。
   //   この試験は登録の経路（upload・PUT・検証・戻す）を確かめるので、偽の生成工程は Toolkit が渡した必須の効果をそのまま「処理あり・動作テストで合格」で返す
@@ -497,7 +519,7 @@ console.log('\n--- G7（画面）. 古い版からは登録しない・確認の
   const client = {
     async getHealth() { return HEALTH; },
     async plan({ ctx, requestId }) { const v = KTAiClient.validatePlan(planResp(ctx.goal), ctx); if (!v.ok) throw new Error(JSON.stringify(v.errors)); return { ...v.normalized, requestId, clientWarnings: v.warnings }; },
-    async generate({ ctx, requestId }) { return { requestId, strategy: 'NEW_JS_FILE', targetFile: 'lock.js', summary: '承認済みで金額を編集不可', code: CODE, patch: null, events: ['app.record.edit.show'], fields: [{ code: 'amount', access: 'CONTROL' }], apis: ['kintone.api'], assumptions: [], warnings: [], gatewayChecks: {}, ...(passVerification(ctx, { strategy: 'NEW_JS_FILE', targetFile: 'lock.js', code: CODE, patch: null }) ? { verification: passVerification(ctx, { strategy: 'NEW_JS_FILE', targetFile: 'lock.js', code: CODE, patch: null }) } : {}) }; },
+    async generate({ ctx, requestId }) { return { requestId, strategy: 'NEW_JS_FILE', targetFile: 'lock.js', summary: '承認済みで金額を編集不可', code: CODE, patch: null, events: ['app.record.edit.show'], fields: [{ code: 'amount', access: 'CONTROL' }], apis: ['kintone.api'], assumptions: [], warnings: [], gatewayChecks: {}, ...(passVerification(ctx, { strategy: 'NEW_JS_FILE', targetFile: 'lock.js', code: CODE, patch: null }) ? { verification: { ...passVerification(ctx, { strategy: 'NEW_JS_FILE', targetFile: 'lock.js', code: CODE, patch: null }), machine: G7_MACHINE } } : {}) }; },
   };
   withProposal(HEALTH, client);   // C-1 第 3 段: 仮案の能力がある接続先
   const session = { status() { return { connected: true, apiBase: 'https://gw.test', refreshExpiresAt: '2099-01-01T00:00:00Z', scope: { product: 'toolkit', feature: 'assistant-qa,change-planner,customization-generator', domain: 't.cybozu.com' } }; }, async migrateLegacy() { return false; }, async refresh() { return {}; }, async disconnect() { return { revoked: true }; }, client };
@@ -513,7 +535,7 @@ console.log('\n--- G7（画面）. 古い版からは登録しない・確認の
   //   C-1 第 3 段: 依頼 → 仮案 → 採用 → 最終案（JavaScript は最終案のパイプラインが作る。仕様の確定と「C1 のコードを作って」は無い）→ 承認
   const v1 = await planOnScreen(panel, '承認済みでは金額を編集できなくしたい');
   const g1 = panel.generated('C1');
-  assert(g1 && g1.review.registration.verdict === 'NEEDS_CONFIRMATION', '前提: 生成したコードは「確認が必要」（他アプリの読み取り）');
+  assert(g1 && g1.review.registration.verdict === 'NEEDS_CONFIRMATION' && g1.review.registration.confirmations.some(x => x.code === 'apis'), '前提: 生成したコードは「確認が必要」（生成工程の機械検査の確認: 計画に無い通信 API）');
   const ok1 = await approveOnScreen(host, panel);
   assert(ok1 && v1.final && v1.final.approvable, `前提: 最終案（v1）を承認した: ${v1.final && v1.final.blockingReason}`);
   // 計画を修正して新しい版ができた後に、古い版のカードから登録しようとする
@@ -594,12 +616,13 @@ console.log('\n--- G9 / G10. Generator Context の欠落（モデル比較の候
   const both = review(wrap(['app.record.edit.show', 'mobile.app.record.edit.show'], "    if (record['ステータス'].value === '承認済み') {\n      record['items'].value.forEach(function (row) {\n        for (const key in row.value) { row.value[key].disabled = true; }\n      });\n    }"), cust({ platform: ['desktop', 'mobile'], events: ['app.record.edit.show', 'mobile.app.record.edit.show'], requirement: '承認済みでは明細を編集不可（PC とモバイル）', fields: [{ code: 'item_name', access: 'CONTROL', condition: 'ステータス in ("承認済み")' }, { code: 'qty', access: 'CONTROL', condition: 'ステータス in ("承認済み")' }] }));
   assert(!both.registration.blockers.some(b => b.code === 'platform-fields' || b.code === 'planned-fields'), `PC とモバイルの 1 つの handler で全列をロック → 両方の画面で扱っている: ${JSON.stringify(both.registration.blockers)}`);
   const oneCol = review(wrap(['app.record.edit.show'], "    if (record['ステータス'].value === '承認済み') {\n      record['items'].value.forEach(function (row) { row.value['item_name'].disabled = true; });\n    }"), c);
-  assert(oneCol.registration.verdict === 'BLOCKED' && oneCol.registration.blockers.some(b => b.code === 'planned-fields' && /qty/.test(b.message)), '計画した列の一部（qty）しかロックしていない → 要件の処理が無い（登録不可）');
+  //   簡素化 B（2026-10-17）: 計画した列の一部しか処理しないこと（planned-fields）は、生成工程の必須の効果（列ごとの効果のイベントの処理の形）の範囲。Toolkit は判定しない
+  assert(oneCol.registration.verdict !== 'BLOCKED' && !oneCol.registration.blockers.some(b => b.code === 'planned-fields'), '計画した列の一部（qty）しかロックしていない: Toolkit の形式確認は判定しない（生成工程の必須の効果の範囲）');
   // G8 の表示: 行が残ること（明細の行の追加・削除は止められない）は、構造の判定（達成範囲の SUBTABLE_ROWS）で示す
   //   §0d.4（2026-10-08）: 要件の文・AI の要約を正規表現で読んで確認にする判定（requirement-scope・summary-scope）は削除した（要件の文の読み取りは計画の Review の
   //   JS_LIMIT_SUBTABLE_ROWS と、達成範囲の SUBTABLE_ROWS が持つ。G8 の計画の Review の回帰を参照）
   const CELL_LOCK = "    if (record['ステータス'].value === '承認済み') {\n      record['items'].value.forEach(function (row) { row.value['item_name'].disabled = true; row.value['qty'].disabled = true; });\n    }";
-  const cellsOnly = review(wrap(['app.record.edit.show'], CELL_LOCK), cust({ requirement: '承認済みでは明細の品名・数量のセルを編集不可にする', fields: [{ code: 'item_name', access: 'CONTROL', condition: 'ステータス in ("承認済み")' }, { code: 'qty', access: 'CONTROL', condition: 'ステータス in ("承認済み")' }] }), { summary: '承認済みのとき明細の品名・数量のセルを編集不可にします' });
+  const cellsOnly = review(wrap(['app.record.edit.show'], CELL_LOCK), cust({ requirement: '承認済みでは明細の品名・数量のセルを編集不可にする', fields: [{ code: 'item_name', access: 'CONTROL', condition: 'ステータス in ("承認済み")', effects: ['lock'] }, { code: 'qty', access: 'CONTROL', condition: 'ステータス in ("承認済み")', effects: ['lock'] }] }), { summary: '承認済みのとき明細の品名・数量のセルを編集不可にします' });
   assert(cellsOnly.registration.verdict !== 'BLOCKED' && cellsOnly.coverage.notAchieved.some(x => x.code === 'SUBTABLE_ROWS'), `要件も要約も「セル」に限る → 止めない（行が残ることは達成範囲に出す）: ${JSON.stringify(cellsOnly.registration.confirmations.map(x => x.code))}`);
 }
 {
@@ -692,19 +715,24 @@ console.log('\n--- G9 / G10. Generator Context の欠落（モデル比較の候
   assert(seen[0] === false && seen[1] === true, `質問は短い要求（kintone.proxy）・コード生成は長い要求（直接）: ${JSON.stringify(seen)}`);
 }
 {
-  // §5 モバイルの実機: 作成画面のイベントの record にはステータス等のシステムフィールドが無い → 確かめずに .value を読むコードは登録不可
+  // §5 モバイルの実機: 作成画面のイベントの record にはステータス等のシステムフィールドが無い → 確かめずに .value を読むコードは作成画面を開くたびに TypeError
+  //   簡素化 B（2026-10-17）: その読み方の判定（create-missing-field）は Toolkit だけの規則で、削除した（生成工程には移植していない。検査を増やさない）。
+  //   生成工程の模擬テストは、作成のイベントがあれば作成画面の空のレコード（create-empty。システムフィールドが無い）の代表条件を作り、候補の例外は不合格にする
+  //   （AI版 behavior-cases.mjs・behavior-client.mjs）。Toolkit はその不合格を登録不可として取り込む
   const data = clone(REG.data);
   data.fields['ステータス'] = { type: 'STATUS', code: 'ステータス', label: 'ステータス', enabled: true };
-  const c = { customizationId: 'C2', requirement: 'モバイルで承認済みのとき金額を編集不可にする', strategy: 'NEW_JS_FILE', platform: ['mobile'], implementation: 'JAVASCRIPT', events: ['mobile.app.record.create.show', 'mobile.app.record.edit.show'], fields: [{ code: 'amount', access: 'CONTROL', condition: 'ステータス in ("承認済み")' }], apis: [], existingFiles: [] };
-  const rv = (body, events = ['mobile.app.record.create.show', 'mobile.app.record.edit.show']) => KTCodeReview.review({ generated: REG.gen(`(function () {\n  'use strict';\n  const EVENTS = ${JSON.stringify(events).replace(/"/g, "'")};\n  kintone.events.on(EVENTS, (event) => {\n    const record = event.record;\n${body}\n    return event;\n  });\n})();`, { targetFile: 'mobile-approved-lock.js', summary: 'モバイルで承認済みのとき金額を編集不可' }), customization: { ...c, events }, plan: null, data, scan: null, existingSource: null });
+  const c = { customizationId: 'C2', requirement: 'モバイルで承認済みのとき金額を編集不可にする', strategy: 'NEW_JS_FILE', platform: ['mobile'], implementation: 'JAVASCRIPT', events: ['mobile.app.record.create.show', 'mobile.app.record.edit.show'], fields: [{ code: 'amount', access: 'CONTROL', condition: 'ステータス in ("承認済み")', effects: ['lock'] }], apis: [], existingFiles: [] };
+  const code = "(function () {\n  'use strict';\n  const EVENTS = ['mobile.app.record.create.show', 'mobile.app.record.edit.show'];\n  kintone.events.on(EVENTS, (event) => {\n    const record = event.record;\n    if (record['ステータス'].value === '承認済み') {\n      record['amount'].disabled = true;\n    }\n    return event;\n  });\n})();";
   // 候補モデル CX-1 1 回目のモバイルのコードの形そのもの（実機で作成画面を開くたびに TypeError）
-  const bare = rv("    if (record['ステータス'].value === '承認済み') {\n      record['amount'].disabled = true;\n    }");
-  assert(bare.registration.verdict === 'BLOCKED' && bare.registration.blockers.some(b => b.code === 'create-missing-field' && /mobile\.app\.record\.create\.show/.test(b.message) && /TypeError/.test(b.message)), `作成画面のイベントでステータスを確かめずに読む → 登録不可（create-missing-field）: ${JSON.stringify(bare.registration.blockers.map(b => b.code))}`);
-  const guarded = rv("    if (record['ステータス'] && record['ステータス'].value === '承認済み') {\n      record['amount'].disabled = true;\n    }");
-  const optional = rv("    if (record['ステータス']?.value === '承認済み') {\n      record['amount'].disabled = true;\n    }");
-  const early = rv("    if (!record['ステータス']) {\n      return event;\n    }\n    if (record['ステータス'].value === '承認済み') {\n      record['amount'].disabled = true;\n    }");
-  const editOnly = rv("    if (record['ステータス'].value === '承認済み') {\n      record['amount'].disabled = true;\n    }", ['mobile.app.record.edit.show']);
-  assert([guarded, optional, early, editOnly].every(r => !r.registration.blockers.some(b => b.code === 'create-missing-field')), `存在を確かめる書き方（&&・?.・早い return）と、編集画面だけのイベントは止めない: ${[guarded, optional, early, editOnly].map(r => r.registration.verdict).join(',')}`);
+  const bare = KTCodeReview.review({ generated: REG.gen(code, { targetFile: 'mobile-approved-lock.js' }), customization: c, plan: null, data, scan: null, existingSource: null });
+  assert(bare.registration.verdict !== 'BLOCKED' && !bare.checks.some(x => x.name === 'create-missing-field'), `作成画面のイベントでステータスを確かめずに読むコード: Toolkit の形式確認は判定しない: ${JSON.stringify(bare.registration.blockers.map(b => b.code))}`);
+  const req = [{ requirementId: 'C2', requirementIds: ['C2'], field: 'amount', effect: 'lock', events: ['mobile.app.record.create.show', 'mobile.app.record.edit.show'], condition: 'ステータス in ("承認済み")' }];
+  const caseOf = (id, kind, event, expect, verdict, message) => ({ id, requirementIds: ['C2'], field: 'amount', effect: 'lock', expect, side: kind === 'match' ? 'match' : 'nomatch', kind, event, verdict, observed: {}, message });
+  const bareV = KTCodeReview.attachBehavior(bare, { version: '1', candidateHash: '0123456789abcdef', passed: false, machine: [],
+    requiredEffects: [{ requirementId: 'C2', requirementIds: ['C2'], field: 'amount', effect: 'lock', status: 'present', check: 'behavior', checkReason: 'conditional', events: [{ event: 'mobile.app.record.create.show', status: 'not-on-create' }, { event: 'mobile.app.record.edit.show', status: 'present' }] }],
+    behavior: { status: 'failed', reason: null, cases: [caseOf('K1', 'match', 'mobile.app.record.edit.show', 'lock', 'pass', '期待どおり'), caseOf('K2', 'nomatch', 'mobile.app.record.edit.show', 'not-locked', 'pass', '期待どおり'), caseOf('K3', 'create-empty', 'mobile.app.record.create.show', 'not-locked', 'fail', '作成画面を開くと金額を編集できるはずが、生成したコードが例外で止まりました')] } },
+    { requiredEffects: req, customization: c, effectCheck: true });
+  assert(bareV.registration.verdict === 'BLOCKED' && bareV.checks.some(x => x.name === 'behavior-fail' && !x.ok && /例外で止まりました/.test(x.message)), `作成画面の空のレコードで例外 → 生成工程の模擬テストの不合格で登録不可: ${JSON.stringify(bareV.checks.filter(x => !x.ok).map(x => x.name + ':' + x.message))}`);
 }
 {
   // 計画の Review: ステータス名の後ろの注釈（「承認待ち（課長承認として再利用）」）を名前として読まない（モデル比較の CX-1 で「遷移先が存在しません（high）」）
