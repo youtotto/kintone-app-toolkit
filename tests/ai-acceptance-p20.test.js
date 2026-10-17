@@ -781,11 +781,10 @@ console.log('\n--- F39（CX-1 2 回目・実機）. PC とモバイルの計画:
   const data = clone(DATA);
   data.customize = { scope: 'ALL', desktop: { js: [{ type: 'FILE', file: { contentType: 'text/javascript', fileKey: 'dl:lock', name: 'dealLock.js', size: '100' } }], css: [] }, mobile: { js: [], css: [] }, revision: '5' };
   const m = makeKintoneMock(data, { jsSources: [{ name: 'dealLock.js', target: 'desktop', text: DL }] });
-  const rows = KTDeps.normalizeFields(data.fields).map(f => ({ code: f.code, label: f.label, type: f.rawType }));
   if (mob.ok) {
     const prep = await KTJsExecutor.prepare({ appId: '310', changes: [r.change, mob.change] }, { api: m.api });
     assert(prep.status === 'PREPARED' && prep.summary.byTarget.desktop.replace === 1 && prep.summary.byTarget.mobile.add === 1, `F39: 確認画面の件数は PC：差し替え 1・モバイル：追加 1（${JSON.stringify(prep.summary.byTarget)}）`);
-    const ex = await KTJsExecutor.executePreview(prep, { api: m.api, fieldRows: rows });
+    const ex = await KTJsExecutor.executePreview(prep, { api: m.api });
     const mobJs = m.st.customize.mobile.js;
     assert(ex.status === 'DONE' && ex.steps.every(s => s.status === 'VERIFIED') && mobJs.length === 1 && m.st.files.get(mobJs[0].fileKey).content.includes("mobile.app.record.edit.show"), `F39: 登録で PC・モバイルとも VERIFIED、モバイルの一覧に dealLock.js（${ex.status} / ${ex.steps.map(s => s.target + ':' + s.status).join(',')}）`);
     const rb = await KTJsExecutor.prepareRollback(ex, { api: m.api });
@@ -805,7 +804,7 @@ console.log('\n--- F39（CX-1 2 回目・実機）. PC とモバイルの計画:
     const data2 = clone(data); data2.customize.mobile.js = [];
     const m2 = makeKintoneMock(data2, { jsSources: [{ name: 'dealLock.js', target: 'desktop', text: DL }] });
     const prep2 = await KTJsExecutor.prepare({ appId: '310', changes: [r2.change, mob2.change] }, { api: m2.api });
-    const ex2 = await KTJsExecutor.executePreview(prep2, { api: m2.api, fieldRows: rows, acknowledged: (prep2.confirmations || []).map(x => x.key) });   // Phase 21: 確認が必要な項目（既存のイベントに handler を足す）を確認した
+    const ex2 = await KTJsExecutor.executePreview(prep2, { api: m2.api, acknowledged: (prep2.confirmations || []).map(x => x.key) });   // Phase 21: 確認が必要な項目（既存のイベントに handler を足す）を確認した
     const ms = ex2.steps.find(s => s.target === 'mobile') || {};
     assert(ex2.status === 'DONE' && ms.status === 'VERIFIED', `F39: 既存ファイルを写したモバイル側は、既存の処理（amount）を計画外の書き込みとして扱わない: ${ex2.status} / ${ms.status} ${JSON.stringify((ms.verification?.checks || []).filter(c => !c.ok).map(c => c.name + ':' + JSON.stringify(c.actual)))}`);
   }

@@ -494,7 +494,7 @@ console.log('\n--- G7. 登録処理の側での判定（KTJsExecutor）: 古い�
   let err = null;
   try { await KTJsExecutor.executePreview(p5, { api: m5.api, acknowledged: [] }); } catch (e) { err = e; }
   assert(err && err.code === 'CONFIRMATION_REQUIRED' && !m5.calls.some(x => x === 'POST file' || x === 'PUT customize'), 'executePreview: 確認していない項目があれば登録しない（書き込みなし）');
-  const ex5 = await KTJsExecutor.executePreview(p5, { api: m5.api, fieldRows: KTDeps.normalizeFields(REG.data.fields).map(f => ({ code: f.code, label: f.label, type: f.rawType })), acknowledged: p5.confirmations.map(x => x.key) });
+  const ex5 = await KTJsExecutor.executePreview(p5, { api: m5.api, acknowledged: p5.confirmations.map(x => x.key) });
   assert(ex5.status === 'DONE' && m5.calls.includes('PUT customize'), 'すべての項目を 1 件ずつ確認したら登録できる');
 }
 

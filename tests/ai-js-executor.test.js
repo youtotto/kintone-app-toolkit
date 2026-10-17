@@ -6,7 +6,7 @@
 //   §48 New JS: JS 4 → 5。順番・platform・既存 4 件保持
 //   §49 URL: EXTEND_EXISTING_JS で URL の JS → EXTERNAL_JS_NOT_WRITABLE（自動置換しない）
 //   §50 Stale: Review 後に設定が変わる → STALE_CUSTOMIZATION（prepare / execute の両方）・JS_SOURCE_CHANGED
-//   §51 Verification: 期待する entry / 位置 / platform / CSS / scope / 再解析 / 計画との一致・本文の指紋（corrupt mutant）
+//   §51 Verification: 期待する entry / 位置 / platform / CSS / scope・本文の指紋（corrupt mutant）。再解析と計画との一致は簡素化 B で削除
 //   §52 Rollback: new JS → verify → rollback → 元の設定、replace → rollback → 旧 fileKey の本文
 //   §53 Rollback Stale: 登録後に人間が設定を変更 → ROLLBACK_STALE
 //
@@ -60,7 +60,6 @@ function makeData() {
 const SOURCES = [{ name: 'common.js', target: 'desktop', text: FX.DESKTOP_COMMON }, { name: 'fieldOnOff.js', target: 'desktop', text: FIELD_ON_OFF }, { name: 'autoLookup.js', target: 'desktop', text: FX.AUTO_LOOKUP }, { name: 'common.js', target: 'mobile', text: FX.MOBILE_COMMON }, { name: 'mobileLock.js', target: 'mobile', text: MOBILE_LOCK }];
 const mk = (opt = {}) => makeKintoneMock(makeData(), { jsSources: SOURCES, ...opt });
 const DATA = makeData();
-const FIELD_ROWS = KTDeps.normalizeFields(DATA.fields).map(f => ({ code: f.code, label: f.label, type: f.rawType }));
 const CUST_REPLACE = { customizationId: 'C1', requirement: '承認済（完了）は金額を編集不可', strategy: 'EXTEND_EXISTING_JS', platform: ['desktop'], events: ['app.record.edit.show'], fields: [{ code: 'amount', access: 'CONTROL' }], apis: [], existingFiles: [{ name: 'fieldOnOff.js', target: 'desktop' }] };
 const CUST_NEW = { customizationId: 'C1', requirement: '金額が100万円以上なら警告', strategy: 'NEW_JS_FILE', platform: ['desktop'], events: ['app.record.create.change.amount', 'app.record.edit.change.amount'], fields: [{ code: 'amount', access: 'CONTROL' }], apis: [], existingFiles: [] };
 const GEN_PATCH = { strategy: 'EXTEND_EXISTING_JS', targetFile: 'fieldOnOff.js', summary: '完了でも金額を編集不可にする', code: PATCH.operations[0].content, patch: PATCH, events: ['app.record.edit.show'], fields: [{ code: 'amount', access: 'CONTROL' }], apis: [], assumptions: [], warnings: [] };
@@ -145,7 +144,7 @@ console.log('\n--- 3. §49 URL の JS: EXTEND_EXISTING_JS は自動置換しな�
   // 新規の補助 FILE として設計し直した場合だけ登録できる
   const m2 = mk();
   const prep2 = await X.prepare({ appId: '310', changes: [newChange().change] }, { api: m2.api });
-  const ex2 = await X.executePreview(prep2, { api: m2.api, fieldRows: FIELD_ROWS });
+  const ex2 = await X.executePreview(prep2, { api: m2.api });
   assert(ex2.status === 'DONE' && m2.st.customize.desktop.js[0].type === 'URL' && m2.st.customize.desktop.js.length === 5, '新規の補助 FILE なら登録できる（URL entry は保持）');
 }
 
@@ -156,7 +155,7 @@ console.log('\n--- 4. §47 / §48 / §51 登録と検証: replace（全保持）
   const before = { d: keysOf(m, 'desktop'), dcss: keysOf(m, 'desktop', 'css'), mob: keysOf(m, 'mobile'), mcss: keysOf(m, 'mobile', 'css') };
   const prep = await X.prepare({ appId: '310', changes: [replaceChange().change] }, { api: m.api });
   const progress = [];
-  const ex = await X.executePreview(prep, { api: m.api, fieldRows: FIELD_ROWS, onProgress: (e) => progress.push(e.steps[0].status) });
+  const ex = await X.executePreview(prep, { api: m.api, onProgress: (e) => progress.push(e.steps[0].status) });
   assert(ex.status === 'DONE' && ex.lifecycle === 'DONE' && ex.steps[0].status === 'VERIFIED' && ex.put.ok === true && ex.afterRevision === '13', `replace: DONE・VERIFIED・revision 12 → 13（${ex.steps[0].message || ''}）`);
   assert(writes(m).join(',') === 'POST file,PUT customize', '書き込みは upload 1 回 ＋ PUT 1 回だけ（deploy なし）');
   assert(progress.includes('RUNNING') && progress.includes('UPLOADED') && progress.includes('APPLIED'), '進捗: RUNNING → UPLOADED → APPLIED');
@@ -169,12 +168,13 @@ console.log('\n--- 4. §47 / §48 / §51 登録と検証: replace（全保持）
   const names = (arr) => arr.map(c => c.name);
   //   簡素化 B（2026-10-17）: 読み戻しは承認した本文がそのまま書き込まれたかを確かめる（entry・位置・fileKey・本文の指紋）。再解析の結果で計画との一致・安全・検査の時の解析との一致を判定する処理は削除した
   assert(sc.every(c => c.ok) && names(sc).includes('entryExists') && names(sc).includes('position') && names(sc).includes('fileKeyUpdated') && names(sc).includes('sourceHash') && !names(sc).some(n => ['reanalysisMatchesCodeReview', 'planVsActual', 'securityOnActual'].includes(n)), `§51 変更ごとの検証: entry / 位置 / fileKey 更新 / 本文の指紋（${names(sc).join(',')}）`);
-  assert(ex.steps[0].reanalysis.events.includes('app.record.edit.show') && ex.steps[0].reanalysis.fieldAccess.amount && ex.steps[0].reanalysis.fieldAccess.amount.CONTROL, '§25 登録後の本文を KTScan で再解析（イベント・amount CONTROL）');
+  //   簡素化 B（2026-10-17）: 登録後の本文を解析し直して記録・表示する処理（§25 の再解析）は削除した。読み戻しは本文の指紋（sourceHash）で確かめる
+  assert(!('reanalysis' in ex.steps[0]) && !('fieldRows' in ex), '§25（簡素化 B）: 登録後の本文を解析し直さない（再解析を記録しない・フィールドの一覧を実行の記録に写さない）');
   assert(m.calls.filter(c => c === 'GET file').length >= 2, '登録前（baseHash 照合）と登録後（指紋）に本文を取得している');
   // 新規 JS: 4 → 5
   const m2 = mk();
   const prep2 = await X.prepare({ appId: '310', changes: [newChange().change] }, { api: m2.api });
-  const ex2 = await X.executePreview(prep2, { api: m2.api, fieldRows: FIELD_ROWS });
+  const ex2 = await X.executePreview(prep2, { api: m2.api });
   assert(ex2.status === 'DONE' && ex2.steps[0].status === 'VERIFIED' && jsNames(m2, 'desktop').length === 5 && jsNames(m2, 'desktop')[4] === 'amount-warning-v1.js' && JSON.stringify(keysOf(m2, 'desktop').slice(0, 4)) === JSON.stringify(before.d) && keysOf(m2, 'mobile').length === 2, '§48 新規 JS: 4 → 5・末尾・既存 4 件と mobile は保持');
   assert(ex2.steps[0].verification.checks.find(c => c.name === 'sourceHash').ok && ex2.steps[0].verification.checks.find(c => c.name === 'platform').ok, '新規 JS: 本文の指紋・platform');
   // mobile に登録（desktop を変えない）
@@ -183,22 +183,22 @@ console.log('\n--- 4. §47 / §48 / §51 登録と検証: replace（全保持）
   mobCh.contentHash = KTScan.hashText(mobCh.content); mobCh.bytes = mobCh.content.length;
   mobCh.registration = { ...mobCh.registration, codeHash: mobCh.contentHash };   // Phase 21: 検査したコードの指紋（本文を差し替えた変更は、検査し直した指紋が無いと登録しない）
   const prep3 = await X.prepare({ appId: '310', changes: [mobCh] }, { api: m3.api });
-  const ex3 = await X.executePreview(prep3, { api: m3.api, fieldRows: FIELD_ROWS });
+  const ex3 = await X.executePreview(prep3, { api: m3.api });
   assert(ex3.status === 'DONE' && jsNames(m3, 'mobile').length === 3 && jsNames(m3, 'mobile')[2] === 'amount-warning-v1.js' && JSON.stringify(keysOf(m3, 'desktop')) === JSON.stringify(before.d), 'mobile への新規 JS: mobile 2 → 3・desktop は変更なし');
   // PC の replace ＋ mobile の新規を 1 回で
   const m4 = mk();
   const prep4 = await X.prepare({ appId: '310', changes: [replaceChange().change, mobCh] }, { api: m4.api });
-  const ex4 = await X.executePreview(prep4, { api: m4.api, fieldRows: FIELD_ROWS });
+  const ex4 = await X.executePreview(prep4, { api: m4.api });
   assert(ex4.status === 'DONE' && ex4.steps.every(s => s.status === 'VERIFIED') && writes(m4).join(',') === 'POST file,POST file,PUT customize' && jsNames(m4, 'desktop').length === 4 && jsNames(m4, 'mobile').length === 3, 'PC 1 件変更 ＋ Mobile 1 件追加を 1 回の PUT で（upload 2・PUT 1）');
   // mutant: 既存 1 件が抜ける
   const m5 = mk(); m5.ctl.dropOneExistingOnPut = 'customize';
   const prep5 = await X.prepare({ appId: '310', changes: [replaceChange().change] }, { api: m5.api });
-  const ex5 = await X.executePreview(prep5, { api: m5.api, fieldRows: FIELD_ROWS });
+  const ex5 = await X.executePreview(prep5, { api: m5.api });
   assert(ex5.status === 'VERIFY_FAILED' && !ex5.verification.ok && ex5.verification.unexpected.length > 0 && !ex5.verification.checks.find(c => c.name === 'unrelatedPreserved').ok, '§47 mutant: 既存 1 件が抜けた → unrelatedPreserved が落ちて VERIFY_FAILED');
   // mutant: 本文が壊れる
   const m6 = mk(); m6.ctl.corruptUploaded = true;
   const prep6 = await X.prepare({ appId: '310', changes: [newChange().change] }, { api: m6.api });
-  const ex6 = await X.executePreview(prep6, { api: m6.api, fieldRows: FIELD_ROWS });
+  const ex6 = await X.executePreview(prep6, { api: m6.api });
   assert(ex6.status === 'VERIFY_FAILED' && ex6.steps[0].status === 'VERIFY_FAILED' && !ex6.steps[0].verification.checks.find(c => c.name === 'sourceHash').ok, '§24 本文の指紋が違う → VERIFY_FAILED');
   // mutant: 登録された本文が計画と違う（別のフィールドを書く）
   const m7 = mk(); m7.ctl.mutateCustomize = (next) => next;
@@ -211,7 +211,7 @@ console.log('\n--- 4. §47 / §48 / §51 登録と検証: replace（全保持）
   //   生成工程の計画との一致（確認事項）で扱い、読み戻しは承認した本文がそのまま書き込まれたか（本文の指紋）を確かめる。検査済みの指紋を付けたことにして準備を通すと、本文の指紋は一致する
   bad.registration = { ...bad.registration, codeHash: bad.contentHash };
   const prep7 = await X.prepare({ appId: '310', changes: [bad] }, { api: m7.api });
-  const ex7 = await X.executePreview(prep7, { api: m7.api, fieldRows: FIELD_ROWS });
+  const ex7 = await X.executePreview(prep7, { api: m7.api });
   const sh7 = ex7.steps[0].verification.checks.find(c => c.name === 'sourceHash');
   assert(sh7 && sh7.ok && !ex7.steps[0].verification.checks.some(c => c.name === 'planVsActual') && ex7.steps[0].reason !== 'JS_VERIFY_MISMATCH', '§26（簡素化 B）: 読み戻しは本文の指紋で確かめ、計画との一致は判定し直さない');
 }
@@ -232,7 +232,7 @@ console.log('\n--- 4b. 同じ画面へ新規 2 本（＋ PC の置き換え 1 �
   const before = { d: keysOf(m, 'desktop'), mob: keysOf(m, 'mobile') };
   const prep = await X.prepare({ appId: '310', changes: changes3() }, { api: m.api });
   assert(prep.status === 'PREPARED' && prep.changes[1].position === 2 && prep.changes[2].position === 3 && prep.summary.byTarget.mobile.add === 2, '準備: モバイルの新規 2 本は既存 2 件の後ろの位置 2・3');
-  const ex = await X.executePreview(prep, { api: m.api, fieldRows: FIELD_ROWS });
+  const ex = await X.executePreview(prep, { api: m.api });
   assert(ex.status === 'DONE' && ex.verification.ok && ex.steps.length === 3 && ex.steps.every(s => s.status === 'VERIFIED'), `PC の置き換え 1 ＋ モバイルの新規 2 → 3 本とも VERIFIED（${ex.steps.map(s => `${s.name}:${s.status}${s.message ? `(${s.message})` : ''}`).join(' / ')}）`);
   assert(ex.steps.every(s => posOf(s).ok) && posOf(ex.steps[1]).actual === 2 && posOf(ex.steps[2]).actual === 3, '位置の確認: 新規の 1 本目（末尾でない）も期待の位置 2 で合格');
   assert(JSON.stringify(jsNames(m, 'mobile')) === JSON.stringify(['common.js', 'mobileLock.js', 'mobile-lock.js', 'mobile-check.js']) && JSON.stringify(keysOf(m, 'mobile').slice(0, 2)) === JSON.stringify(before.mob) && jsNames(m, 'desktop').length === 4, 'モバイル: 既存 2 件の後ろに準備の順で 2 本。PC は 4 件のまま');
@@ -240,14 +240,14 @@ console.log('\n--- 4b. 同じ画面へ新規 2 本（＋ PC の置き換え 1 �
   const m2 = mk();
   m2.ctl.mutateCustomize = (next) => { const js = next.mobile.js; const a = js.length - 2; [js[a], js[a + 1]] = [js[a + 1], js[a]]; return next; };
   const prep2 = await X.prepare({ appId: '310', changes: changes3() }, { api: m2.api });
-  const ex2 = await X.executePreview(prep2, { api: m2.api, fieldRows: FIELD_ROWS });
+  const ex2 = await X.executePreview(prep2, { api: m2.api });
   assert(ex2.status === 'VERIFY_FAILED' && ex2.steps[0].status === 'VERIFIED' && ex2.steps.slice(1).every(s => s.status === 'VERIFY_FAILED' && !posOf(s).ok && s.verification.checks.filter(c => !c.ok).length === 1), `新規 2 本の順が逆 → 2 本とも position が ×・PC の置き換えは VERIFIED（${ex2.steps.map(s => `${s.name}:${s.status}`).join(' / ')}）`);
   assert(posOf(ex2.steps[1]).expected === 2 && posOf(ex2.steps[1]).actual === 3 && posOf(ex2.steps[2]).expected === 3 && posOf(ex2.steps[2]).actual === 2, '順が逆のとき: 期待 2 → 実際 3、期待 3 → 実際 2');
   // 新規の 1 本が既存の前へ入った → × （既存より後ろであること）
   const m3 = mk();
   m3.ctl.mutateCustomize = (next) => { const js = next.mobile.js; const added = js.splice(js.length - 2, 1)[0]; js.unshift(added); return next; };
   const prep3 = await X.prepare({ appId: '310', changes: changes3() }, { api: m3.api });
-  const ex3 = await X.executePreview(prep3, { api: m3.api, fieldRows: FIELD_ROWS });
+  const ex3 = await X.executePreview(prep3, { api: m3.api });
   assert(ex3.status === 'VERIFY_FAILED' && !posOf(ex3.steps[1]).ok && posOf(ex3.steps[1]).actual === 0, '新規の 1 本が既存より前に入った → position が ×');
   // 復元: 新規 2 本を外し、置き換えた PC のファイルを元の本文へ戻して、登録前の一覧と一致
   const rb = await X.prepareRollback(ex, { api: m.api });
@@ -262,30 +262,30 @@ console.log('\n--- 5. §46 失敗: upload（CSRF / 権限 / サイズ / 不正 /
   for (const [mode, code] of [['CSRF', 'UPLOAD_CSRF'], ['PERMISSION', 'PERMISSION_DENIED'], ['TOO_LARGE', 'FILE_TOO_LARGE'], ['INVALID', 'INVALID_FILE'], ['GENERIC', 'UPLOAD_FAILED']]) {
     const m = mk(); m.ctl.failUpload = mode;
     const prep = await X.prepare({ appId: '310', changes: [newChange().change] }, { api: m.api });
-    const ex = await X.executePreview(prep, { api: m.api, fieldRows: FIELD_ROWS });
+    const ex = await X.executePreview(prep, { api: m.api });
     assert(ex.status === 'FAILED' && ex.steps[0].status === 'FAILED' && ex.steps[0].reason === code && ex.error.code === code && ex.previewUnchanged === true && !writes(m).includes('PUT customize') && m.st.revision === 12, `upload 失敗（${mode}）→ ${code}・PUT しない・設定は不変`);
   }
   const m = mk(); m.ctl.failPut = 'customize';
   const prep = await X.prepare({ appId: '310', changes: [newChange().change] }, { api: m.api });
-  const ex = await X.executePreview(prep, { api: m.api, fieldRows: FIELD_ROWS });
+  const ex = await X.executePreview(prep, { api: m.api });
   assert(ex.status === 'FAILED' && ex.put.ok === false && ex.steps[0].status === 'FAILED' && ex.previewUnchanged === true && m.st.revision === 12 && jsNames(m, 'desktop').length === 4, 'upload 済みで PUT 失敗 → FAILED・再取得で「設定は変わっていない」を確認（previewUnchanged）');
   const m2 = mk({ permission: false });
   // prepare は権限で止まるので、prepare 後に権限を落とす
   const m3 = mk();
   const prep3 = await X.prepare({ appId: '310', changes: [newChange().change] }, { api: m3.api });
   m3.ctl.failUpload = 'PERMISSION';
-  const ex3 = await X.executePreview(prep3, { api: m3.api, fieldRows: FIELD_ROWS });
+  const ex3 = await X.executePreview(prep3, { api: m3.api });
   assert(ex3.status === 'FAILED' && ex3.error.code === 'PERMISSION_DENIED', '登録時の権限不足 → PERMISSION_DENIED');
   // execute 直前の stale（revision が進んだ）
   const m4 = mk();
   const prep4 = await X.prepare({ appId: '310', changes: [newChange().change] }, { api: m4.api });
   await bumpRevision(m4);   // 他の設定変更で revision が進む
-  const ex4 = await X.executePreview(prep4, { api: m4.api, fieldRows: FIELD_ROWS });
+  const ex4 = await X.executePreview(prep4, { api: m4.api });
   assert(ex4.status === 'FAILED' && ex4.error.code === 'STALE_CUSTOMIZATION' && ex4.steps[0].status === 'BLOCKED' && ex4.previewUnchanged === true && !writes(m4).includes('POST file'), '§50 準備後に設定が変わった → STALE_CUSTOMIZATION（upload もしない）');
   // 二重実行の防止
   const m5 = mk();
   const prep5 = await X.prepare({ appId: '310', changes: [newChange().change] }, { api: m5.api });
-  await X.executePreview(prep5, { api: m5.api, fieldRows: FIELD_ROWS });
+  await X.executePreview(prep5, { api: m5.api });
   let dup = null; try { await X.executePreview(prep5, { api: m5.api }); } catch (e) { dup = e; }
   assert(dup && dup.code === 'ALREADY_EXECUTED', '同じ準備を 2 回実行できない');
   let notPrepared = null; try { await X.executePreview({ status: 'BLOCKED' }, { api: m5.api }); } catch (e) { notPrepared = e; }
@@ -299,7 +299,7 @@ console.log('\n--- 6. §52 / §53 Rollback: new → 元の設定、replace → �
   const m = mk();
   const before = keysOf(m, 'desktop');
   const prep = await X.prepare({ appId: '310', changes: [newChange().change] }, { api: m.api });
-  const ex = await X.executePreview(prep, { api: m.api, fieldRows: FIELD_ROWS });
+  const ex = await X.executePreview(prep, { api: m.api });
   const rb = await X.prepareRollback(ex, { api: m.api });
   assert(rb.status === 'PREPARED' && rb.blockers.length === 0 && rb.restores.length === 1 && rb.restores[0].kind === 'ADD_FILE' && rb.restores[0].removeName === 'amount-warning-v1.js' && rb.stale.status === 'FRESH', 'prepareRollback（new）: PREPARED・removeName');
   const r = await X.executeRollback(rb, { api: m.api, execution: ex });
@@ -307,7 +307,7 @@ console.log('\n--- 6. §52 / §53 Rollback: new → 元の設定、replace → �
   // replace → rollback → 旧 fileKey の本文
   const m2 = mk();
   const prep2 = await X.prepare({ appId: '310', changes: [replaceChange().change] }, { api: m2.api });
-  const ex2 = await X.executePreview(prep2, { api: m2.api, fieldRows: FIELD_ROWS });
+  const ex2 = await X.executePreview(prep2, { api: m2.api });
   const rb2 = await X.prepareRollback(ex2, { api: m2.api });
   assert(rb2.status === 'PREPARED' && rb2.restores[0].kind === 'REPLACE_FILE' && rb2.restores[0].restoreFileKey === 'dl:fieldOnOff' && rb2.restores[0].restoreHash === KTScan.hashText(FIELD_ON_OFF) && rb2.restores[0].restoreSource === FIELD_ON_OFF && rb2.restores[0].position === 2, 'prepareRollback（replace）: 旧 fileKey・旧本文（保持したもの）とその指紋・位置');
   assert(!m2.st.files.has('dl:fieldOnOff'), '（kintone の実挙動）差し替えで設定から外れた旧ファイルの fileKey はもう使えない');
@@ -321,7 +321,7 @@ console.log('\n--- 6. §52 / §53 Rollback: new → 元の設定、replace → �
   // §53 stale: 登録後に人間が JS を足した
   const m3 = mk();
   const prep3 = await X.prepare({ appId: '310', changes: [newChange().change] }, { api: m3.api });
-  const ex3 = await X.executePreview(prep3, { api: m3.api, fieldRows: FIELD_ROWS });
+  const ex3 = await X.executePreview(prep3, { api: m3.api });
   const cur = await m3.api.getPreviewCustomize('310');
   const manual = await m3.api.uploadFile('manual.js', '// manual', 'text/javascript');
   await m3.api.putPreviewCustomize('310', { app: 310, scope: cur.scope, desktop: { js: [...cur.desktop.js.map(e => (e.type === 'URL' ? e : { type: 'FILE', file: { fileKey: e.file.fileKey } })), { type: 'FILE', file: { fileKey: manual } }], css: cur.desktop.css.map(e => ({ type: 'FILE', file: { fileKey: e.file.fileKey } })) }, mobile: { js: cur.mobile.js.map(e => ({ type: 'FILE', file: { fileKey: e.file.fileKey } })), css: cur.mobile.css.map(e => ({ type: 'FILE', file: { fileKey: e.file.fileKey } })) } }, cur.revision);
@@ -331,7 +331,7 @@ console.log('\n--- 6. §52 / §53 Rollback: new → 元の設定、replace → �
   // 他の設定（一覧）が変わっただけなら戻せる（警告）
   const m4 = mk();
   const prep4 = await X.prepare({ appId: '310', changes: [newChange().change] }, { api: m4.api });
-  const ex4 = await X.executePreview(prep4, { api: m4.api, fieldRows: FIELD_ROWS });
+  const ex4 = await X.executePreview(prep4, { api: m4.api });
   await bumpRevision(m4);
   const rb4 = await X.prepareRollback(ex4, { api: m4.api });
   assert(rb4.status === 'PREPARED' && rb4.warnings.some(w => w.code === 'OTHER_CHANGES_SINCE_EXECUTION'), '他の設定だけが変わった → 戻せる（警告）');
@@ -342,13 +342,13 @@ console.log('\n--- 6. §52 / §53 Rollback: new → 元の設定、replace → �
   assert(again.status === 'BLOCKED' && again.blockers[0].code === 'ALREADY_ROLLED_BACK', '同じ登録を 2 回戻せない');
   const m5 = mk(); m5.ctl.failUpload = 'GENERIC';
   const prep5 = await X.prepare({ appId: '310', changes: [newChange().change] }, { api: m5.api });
-  const ex5 = await X.executePreview(prep5, { api: m5.api, fieldRows: FIELD_ROWS });
+  const ex5 = await X.executePreview(prep5, { api: m5.api });
   const rb5 = await X.prepareRollback(ex5, { api: m5.api });
   assert(rb5.status === 'BLOCKED' && rb5.blockers[0].code === 'NOTHING_TO_ROLLBACK', '失敗して PUT していない実行は戻すものが無い');
   // rollback 中の stale（準備後に変更）
   const m6 = mk();
   const prep6 = await X.prepare({ appId: '310', changes: [newChange().change] }, { api: m6.api });
-  const ex6 = await X.executePreview(prep6, { api: m6.api, fieldRows: FIELD_ROWS });
+  const ex6 = await X.executePreview(prep6, { api: m6.api });
   const rb6 = await X.prepareRollback(ex6, { api: m6.api });
   const cur6 = await m6.api.getPreviewCustomize('310');
   await m6.api.putPreviewCustomize('310', { app: 310, scope: 'ADMIN', desktop: { js: cur6.desktop.js.map(e => (e.type === 'URL' ? e : { type: 'FILE', file: { fileKey: e.file.fileKey } })), css: cur6.desktop.css.map(e => ({ type: 'FILE', file: { fileKey: e.file.fileKey } })) }, mobile: { js: cur6.mobile.js.map(e => ({ type: 'FILE', file: { fileKey: e.file.fileKey } })), css: cur6.mobile.css.map(e => ({ type: 'FILE', file: { fileKey: e.file.fileKey } })) } }, cur6.revision);
@@ -361,7 +361,7 @@ console.log('\n--- 7. 監査（§37）・差分・payload ---');
 {
   const m = mk();
   const prep = await X.prepare({ appId: '310', changes: [replaceChange().change] }, { api: m.api, now: () => 1000 });
-  const ex = await X.executePreview(prep, { api: m.api, fieldRows: FIELD_ROWS, now: () => 2000 });
+  const ex = await X.executePreview(prep, { api: m.api, now: () => 2000 });
   const rb = await X.prepareRollback(ex, { api: m.api, now: () => 3000 });
   const r = await X.executeRollback(rb, { api: m.api, execution: ex, now: () => 4000 });
   const audit = X.buildAudit({ subject: { type: 'javascript', sourceId: 'desktop:js:fieldOnOff.js', name: 'fieldOnOff.js', target: 'desktop', customizationType: 'FILE', source: { hash: KTScan.hashText(FIELD_ON_OFF) } }, specs: [{ specId: 's1', version: 1, status: 'SUPERSEDED', customizations: [CUST_REPLACE] }, { specId: 's1', version: 2, status: 'CONFIRMED', confirmedAt: 'x', customizations: [CUST_REPLACE] }], approvedSpec: { specId: 's1', version: 2, confirmedAt: 'x' }, generated: [{ customizationId: 'C1', generated: GEN_PATCH, review: reviewOf(GEN_PATCH, CUST_REPLACE, SRC), existingSource: SRC }], prepared: prep, execution: ex, rollback: r });

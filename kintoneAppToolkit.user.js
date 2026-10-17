@@ -20002,11 +20002,8 @@
         const src = e ? downloaded[e.fileKey] : undefined;
         if (typeof src === 'string') {
           sc('sourceHash', hash(src) === st.contentHash, st.contentHash, hash(src));
-          //   登録後の本文の再解析（§25）は表示の材料だけ（イベント・フィールド・API）。簡素化 B（2026-10-17）: 再解析の結果で計画との一致（§26 planVsActual）・安全（securityOnActual）・
-          //   検査の時の解析との一致（reanalysisMatchesCodeReview）を判定する処理は削除した。候補の検査は生成工程が承認の前に行い（計画に無いイベント・書き込みは承認の欄の確認事項）、
-          //   読み戻しでは承認した本文がそのまま書き込まれたか（sourceHash・位置・画面・大きさ）を確かめる
-          const an = KTScan.analyzeFile({ name: st.name, target: st.target, kind: 'js', text: src }, { fields: (execution.fieldRows || []), selfAppId: execution.appId });
-          st.reanalysis = { events: an.events.map(x => x.name), fieldAccess: an.fieldAccess, apis: [...new Set(an.apis.map(a => a.name))] };
+          //   簡素化 B（2026-10-17）: 読み戻しは承認した本文がそのまま書き込まれたか（sourceHash・位置・画面・大きさ）を確かめる。登録した本文を解析し直す処理
+          //   （§25 の再解析と、それで判定していた §26 の計画との一致・安全・検査の時の解析との一致）は削除した。本文の中身は生成工程の検証が承認の前に扱う
         } else sc('sourceHash', false, st.contentHash, null, '登録後の本文をダウンロードできませんでした');
         st.verification = { ok: stChecks.every(c => c.ok), checks: stChecks };
         st.status = st.verification.ok ? ST.VERIFIED : ST.VERIFY_FAILED;
@@ -20016,7 +20013,7 @@
     }
 
     // ---- executePreview（書き込み: upload → PUT 1 回 → 再取得して検証）----
-    async function executePreview(prepared, { api, now = Date.now, onProgress = null, fieldRows = [], acknowledged = [] } = {}) {
+    async function executePreview(prepared, { api, now = Date.now, onProgress = null, acknowledged = [] } = {}) {
       if (!prepared || prepared.status !== RUN.PREPARED) throw Object.assign(new Error('登録の準備ができていない、または登録できない状態です'), { code: 'NOT_PREPARED' });
       if (prepared.executed) throw Object.assign(new Error('この準備は既に実行されています（やり直すには準備からやり直してください）'), { code: 'ALREADY_EXECUTED' });
       // Phase 21: 書き込みの前に、登録の判定をもう一度確かめる。要件との不一致（BLOCKED）・検査の後に変わったコードは登録しない。
@@ -20029,7 +20026,7 @@
       const missingAck = (prepared.confirmations || []).filter(x => !ack.has(x.key));
       if (missingAck.length) throw Object.assign(new Error(`確認が必要な項目（${missingAck.length} 件）を確認していないため、登録していません: ${missingAck.map(x => x.message).join('／').slice(0, 300)}`), { code: 'CONFIRMATION_REQUIRED', missing: missingAck.map(x => x.key) });
       prepared.executed = true;
-      const execution = { executorVersion: EXECUTOR_VERSION, executionId: prepared.executionId, appId: prepared.appId, env: ENV, startedAt: nowIso(now), finishedAt: null, status: RUN.RUNNING, lifecycle: RUN.RUNNING, snapshot: clone(prepared.snapshot), steps: clone(prepared.changes).filter(c => c.status === ST.PENDING), uploads: [], put: null, previewUnchanged: null, afterRevision: null, actualAfterRaw: null, verification: null, error: null, fieldRows: clone(fieldRows), spec: prepared.spec ?? null, provenance: prepared.provenance ?? null };
+      const execution = { executorVersion: EXECUTOR_VERSION, executionId: prepared.executionId, appId: prepared.appId, env: ENV, startedAt: nowIso(now), finishedAt: null, status: RUN.RUNNING, lifecycle: RUN.RUNNING, snapshot: clone(prepared.snapshot), steps: clone(prepared.changes).filter(c => c.status === ST.PENDING), uploads: [], put: null, previewUnchanged: null, afterRevision: null, actualAfterRaw: null, verification: null, error: null, spec: prepared.spec ?? null, provenance: prepared.provenance ?? null };
       const progress = () => { if (typeof onProgress === 'function') { try { onProgress(clone(execution)); } catch (e) { } } };
       const finish = (status) => { execution.status = status; execution.lifecycle = status; execution.finishedAt = nowIso(now); progress(); return execution; };
       // 1. 直前の再取得（stale）
@@ -20182,7 +20179,7 @@
 
     // ---- 監査（§37。token / cookie / 本文は含めない。本文は指紋だけ）----
     function buildAudit({ subject = null, specs = [], approvedSpec = null, generated = [], prepared = null, execution = null, rollback = null } = {}) {
-      const stepOut = (st) => ({ changeId: st.changeId, customizationId: st.customizationId ?? null, kind: st.kind, target: st.target, name: st.name, position: st.position ?? null, status: st.status, reason: st.reason ?? null, message: st.message ?? '', bytes: st.bytes, contentHash: st.contentHash, baseHash: st.baseHash ?? null, currentHash: st.currentHash ?? null, oldFileKey: st.oldFileKey ?? null, uploadKey: st.uploadKey ?? null, codeReview: st.codeReview ? { status: st.codeReview.status, checks: st.codeReview.checks } : null, provenance: st.provenance ?? null, verification: st.verification ?? null, reanalysis: st.reanalysis ?? null, error: st.error ?? null });
+      const stepOut = (st) => ({ changeId: st.changeId, customizationId: st.customizationId ?? null, kind: st.kind, target: st.target, name: st.name, position: st.position ?? null, status: st.status, reason: st.reason ?? null, message: st.message ?? '', bytes: st.bytes, contentHash: st.contentHash, baseHash: st.baseHash ?? null, currentHash: st.currentHash ?? null, oldFileKey: st.oldFileKey ?? null, uploadKey: st.uploadKey ?? null, codeReview: st.codeReview ? { status: st.codeReview.status, checks: st.codeReview.checks } : null, provenance: st.provenance ?? null, verification: st.verification ?? null, error: st.error ?? null });
       return {
         auditVersion: '1', kind: 'customization', generatedAt: new Date().toISOString(),
         consultationSubject: subject ? { type: subject.type ?? 'javascript', sourceId: subject.sourceId ?? null, name: subject.name ?? null, target: subject.target ?? subject.platform ?? null, customizationType: subject.customizationType ?? null, sourceHash: subject.source?.hash ?? subject.sourceHash ?? null } : null,
@@ -30481,7 +30478,7 @@
         if (!ex) return '';
         const v2 = ex.verification;
         const checks = (v2?.checks || []).map(c => `<div style="font-size:11px; color:${c.ok ? '#2e7d32' : '#b00020'};">${c.ok ? '✓' : '×'} ${esc(c.name)}${c.ok ? '' : `: ${esc(typeof c.actual === 'string' ? c.actual : JSON.stringify(c.actual))}`}</div>`).join('');
-        const stepsHtml = (ex.steps || []).map(c => `<div style="margin-top:4px; font-size:12px;">${esc(JS_ST_MARK[c.status] || '・')} ${name(c)} <span style="opacity:.7; font-size:11px;">${esc(c.status)}${c.message ? ` — ${esc(c.message)}` : ''}</span>${(c.verification?.checks || []).map(k => `<div style="font-size:11px; margin-left:16px; color:${k.ok ? '#2e7d32' : '#b00020'};">${k.ok ? '✓' : '×'} ${esc(k.name)}${k.ok ? '' : `: ${esc(typeof k.actual === 'string' ? k.actual : JSON.stringify(k.actual))}`}</div>`).join('')}${c.reanalysis ? `<div style="font-size:11px; margin-left:16px; opacity:.8;">再解析: イベント ${esc(c.reanalysis.events.join(', ') || '（なし）')}／フィールド ${esc(Object.entries(c.reanalysis.fieldAccess || {}).map(([k, a]) => `${k}（${Object.keys(a).join('/')}）`).join('、') || '（なし）')}</div>` : ''}</div>`).join('');
+        const stepsHtml = (ex.steps || []).map(c => `<div style="margin-top:4px; font-size:12px;">${esc(JS_ST_MARK[c.status] || '・')} ${name(c)} <span style="opacity:.7; font-size:11px;">${esc(c.status)}${c.message ? ` — ${esc(c.message)}` : ''}</span>${(c.verification?.checks || []).map(k => `<div style="font-size:11px; margin-left:16px; color:${k.ok ? '#2e7d32' : '#b00020'};">${k.ok ? '✓' : '×'} ${esc(k.name)}${k.ok ? '' : `: ${esc(typeof k.actual === 'string' ? k.actual : JSON.stringify(k.actual))}`}</div>`).join('')}</div>`).join('');
         //   §0e.3（2026-10-09）: 通常表示はファイルごとの結果を画面の言葉で 1 行ずつ。状態の名前・検証の項目名・再解析のイベント名とフィールドのコード・
         //   登録の API と revision は［詳しく］の中（詳細表示）に置く
         const plainSteps = (ex.steps || []).map(c => `<div style="margin-top:4px; font-size:12px;">${esc(JS_ST_MARK[c.status] || '・')} ${name(c)} <span style="opacity:.8; font-size:11px;">${esc(JS_STATUS_JA[c.status] || '')}${c.message ? ` — ${esc(c.message)}` : ''}</span></div>`).join('');
@@ -32021,10 +32018,8 @@
         applyLog.push(jsLogRef);
       }
       renderJsReg();
-      const inputs = inputsNow();
-      const fieldRows = KTDeps.normalizeFields(inputs.data?.fields || {}).map(f => ({ code: f.code, label: f.label, type: f.rawType }));
       try {
-        jsExec.execution = await KTJsExecutor.executePreview(jsExec.prepared, { api: executor.api, fieldRows, acknowledged: [...jsAck], onProgress: (ex) => { jsExec.execution = ex; renderJsReg(); } });
+        jsExec.execution = await KTJsExecutor.executePreview(jsExec.prepared, { api: executor.api, acknowledged: [...jsAck], onProgress: (ex) => { jsExec.execution = ex; renderJsReg(); } });
       } catch (e) {
         jsExec.error = e?.message || String(e);
         // 確認の不足・要件との不一致は、書き込む前に止まる（動作テスト環境は変わっていない）→ 確認画面に戻す
