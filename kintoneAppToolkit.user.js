@@ -9837,16 +9837,18 @@
         const byCat = {};
         for (const d of direct) byCat[d.category] = (byCat[d.category] || 0) + 1;
         const plannerSaid = plannerImpact.filter(x => x.targetRef === code);
-        // 影響範囲の検証を説明文だけに頼らない（2026-10-07）: このフィールドを参照する JS ファイル（Toolkit の依存関係の sourceName）を対象にした
-        //   targetKind JS の項目があれば「JS を挙げた」とみなす（計画のどこかの JS 項目では成立させない。差分レビューの指摘）。説明文の言及も従来どおり見る
-        const jsFilesOfField = new Set(direct.filter(d => d.sourceType === 'CUSTOMIZE').map(d => String(d.sourceName || '')).filter(Boolean));
-        const plannerMentionsJs = plannerSaid.some(x => /JavaScript|JS|スクリプト/i.test(x.description || '')) || plannerImpact.some(x => x && x.targetKind === 'JS' && jsFilesOfField.has(String(x.targetRef || '')));
+        // 影響範囲の検証を説明文だけに頼らない（2026-10-07）: このフィールドを参照する JS ファイル（Toolkit の依存関係の影響の項目の名前）を対象にした
+        //   targetKind JS の項目があれば「JS を挙げた」とみなす（計画のどこかの JS 項目では成立させない。差分レビューの指摘）。
+        //   簡素化（2026-10-17）: 説明文の言及（「JavaScript」「JS」「スクリプト」の語）で挙げたとみなす照合は削除した（構造の項目だけで決める）。
+        //   JavaScript のファイルの名前は依存関係の影響（KTDeps.impactOf）の項目の title（以前は項目に無い sourceName を読み、構造の照合が一度も成り立っていなかった）
+        const jsFilesOfField = new Set(direct.filter(d => d.sourceType === 'CUSTOMIZE').map(d => String(d.title || '')).filter(Boolean));
+        const plannerListsJs = plannerImpact.some(x => x && x.targetKind === 'JS' && jsFilesOfField.has(String(x.targetRef || '')));
         items.push({ fieldCode: code, stepIds, toolkit: { direct: direct.length, byCategory: byCat, js: jsCount, indirect: (impact.indirect || []).length, crossApp: (impact.crossApp || []).length }, planner: plannerSaid.map(x => x.description), ...(hit ? { access, accessVia: hit.via, note: readOnly ? '読むだけなので依存先は変わらない' : `${accessJa(hit)}ので、参照する設定・JS への影響を確かめる` } : reuseOnly.has(code) ? { access: null, note: '計画がこのフィールドをどう扱うか（読むだけか、値を変えるか）を判定できない' } : {}) });
         const how = hit && !readOnly ? `。${accessJa(hit)}ため、参照する設定・JS への影響を確かめてください` : '';
         if (plannerSaid.length && !direct.length) warnings.push({ code: 'PLANNER_IMPACT_OVERSTATED', severity: 'low', stepIds, message: `Planner は「${code}」への影響を挙げていますが、Toolkit の解析では参照する設定・JS はありません` });
         else if (readOnly) continue;
         else if (!plannerSaid.length && direct.length) warnings.push({ code: 'PLANNER_IMPACT_MISSING', severity: 'medium', stepIds, message: `「${code}」は ${direct.length} 件の設定・JS から参照されていますが、Planner の影響範囲に挙がっていません（${Object.entries(byCat).map(([k, v]) => `${k} ${v}`).join('・')}）${how}` });
-        else if (jsCount && !plannerMentionsJs) warnings.push({ code: 'PLANNER_IMPACT_MISMATCH', severity: 'medium', stepIds, message: `「${code}」を参照する JavaScript が ${jsCount} 件ありますが、Planner の影響範囲に JS が含まれていません${how}` });
+        else if (jsCount && !plannerListsJs) warnings.push({ code: 'PLANNER_IMPACT_MISMATCH', severity: 'medium', stepIds, message: `「${code}」を参照する JavaScript が ${jsCount} 件あります（Planner の影響範囲に、その JavaScript のファイルが挙がっていません）${how}` });
       }
       return { warnings, items };
     }

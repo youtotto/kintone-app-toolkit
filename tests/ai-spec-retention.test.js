@@ -257,8 +257,9 @@ await section(async () => {
   const wr = review(planOf('WRITE'));
   assert(wr.warnings.some(x => x.code === 'PLANNER_IMPACT_MISSING' && /JavaScript が値を変える/.test(x.message)) && (wr.impactCheck || []).find(x => x.fieldCode === 'ステータス').access === 'WRITE', 'JS が WRITE する → 警告（message に「JavaScript が値を変える」）');
   // 影響範囲を挙げていれば CONTROL でも MISSING は出ない（従来どおり）。参照の無いフィールドへの影響の主張は OVERSTATED（従来どおり）
-  const said = review({ ...planOf('CONTROL'), impact: [{ targetKind: 'FIELD', targetRef: 'ステータス', description: 'dealLock.js（JavaScript）と一覧がステータスを参照', evidenceIds: [], confidence: 'CONFIRMED' }] });
-  assert(!said.warnings.some(x => /^PLANNER_IMPACT_(MISSING|MISMATCH)$/.test(x.code)), 'Planner が JS を含む影響範囲を挙げていれば CONTROL でも警告なし');
+  //   簡素化（2026-10-17）: JavaScript の影響を挙げたかは構造（targetKind JS・targetRef = 参照する JavaScript のファイル）で決める（説明文の語では決めない。tests/ai-plan-review.test.js の §8）
+  const said = review({ ...planOf('CONTROL'), impact: [{ targetKind: 'FIELD', targetRef: 'ステータス', description: '一覧がステータスを参照', evidenceIds: [], confidence: 'CONFIRMED' }, { targetKind: 'JS', targetRef: 'dealLock.js', description: 'ステータスを参照して編集可否を変える', evidenceIds: [], confidence: 'CONFIRMED' }] });
+  assert(!said.warnings.some(x => /^PLANNER_IMPACT_(MISSING|MISMATCH)$/.test(x.code)), 'Planner が JS の影響を JavaScript のファイル（dealLock.js）で挙げていれば CONTROL でも警告なし');
   // 作成日時 は App 353 のどの設定・JS からも参照されていない（memo は一覧が参照している）
   const over = review({ ...mkPlan([mkStep('P1', 'REUSE_FIELD', 'FIELD', '作成日時', { fields: ['作成日時'] }, { confidence: 'CONFIRMED' })]), impact: [{ targetKind: 'FIELD', targetRef: '作成日時', description: '多くの設定が参照', evidenceIds: [], confidence: 'INFERRED' }] });
   const overItem = (over.impactCheck || []).find(x => x.fieldCode === '作成日時');

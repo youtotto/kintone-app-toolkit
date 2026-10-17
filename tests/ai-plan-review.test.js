@@ -198,8 +198,13 @@ console.log('\n--- 7. Dependencies / Plan 内部 / Safety ---');
 
 console.log('\n--- 8. Impact re-check / coverage / Executor 出力 ---');
 {
-  const match = review(plan([step('P1', 'UPDATE_FIELD', 'FIELD', 'customer_code', [['必須', 'true']])], [], { impact: [{ targetKind: 'FIELD', targetRef: 'customer_code', description: 'JavaScript 3 件と一覧・ルックアップが参照', evidenceIds: [], confidence: 'CONFIRMED' }] }));
-  assert(!match.warnings.some(w => w.code.startsWith('PLANNER_IMPACT')) && match.impactCheck[0].toolkit.js >= 2, 'impact 一致（Planner が JS 影響を挙げている）');
+  //   簡素化（2026-10-17）: Planner が JavaScript の影響を挙げたかは構造（targetKind JS・targetRef = そのフィールドを参照する JavaScript のファイル）だけで決める
+  //   （説明文の「JavaScript」「JS」「スクリプト」の語では決めない）
+  const jsFilesCC = [...new Set(KTDeps.impactOf(INPUTS.deps, 'customer_code').direct.filter(d => d.sourceType === 'CUSTOMIZE').map(d => String(d.title || '')).filter(Boolean))];
+  const match = review(plan([step('P1', 'UPDATE_FIELD', 'FIELD', 'customer_code', [['必須', 'true']])], [], { impact: [{ targetKind: 'FIELD', targetRef: 'customer_code', description: '一覧・ルックアップが参照', evidenceIds: [], confidence: 'CONFIRMED' }, ...jsFilesCC.map(f => ({ targetKind: 'JS', targetRef: f, description: 'customer_code を参照', evidenceIds: [], confidence: 'CONFIRMED' }))] }));
+  assert(jsFilesCC.length >= 2 && !match.warnings.some(w => w.code.startsWith('PLANNER_IMPACT')) && match.impactCheck[0].toolkit.js >= 2, `impact 一致（Planner が JS の影響を、参照する JavaScript のファイルで挙げている）: ${JSON.stringify(jsFilesCC)}`);
+  const prose = review(plan([step('P1', 'UPDATE_FIELD', 'FIELD', 'customer_code', [['必須', 'true']])], [], { impact: [{ targetKind: 'FIELD', targetRef: 'customer_code', description: 'JavaScript 3 件と一覧・ルックアップが参照', evidenceIds: [], confidence: 'CONFIRMED' }] }));
+  assert(prose.warnings.some(w => w.code === 'PLANNER_IMPACT_MISMATCH' && /参照する JavaScript が \d+ 件あります/.test(w.message)), '説明文に「JavaScript」とあるだけ（ファイルを挙げていない）なら、参照する JavaScript の件数を注意で出す（説明文の語では挙げたとみなさない）');
   const missing = review(plan([step('P1', 'UPDATE_FIELD', 'FIELD', 'customer_code', [['必須', 'true']])], [], { impact: [] }));
   assert(missing.warnings.some(w => w.code === 'PLANNER_IMPACT_MISSING' && w.stepIds.includes('P1')) && st(missing, 'P1').issues.some(i => i.code === 'PLANNER_IMPACT_MISSING'), 'Planner 不足: Toolkit の impactOf で参照があるのに Planner に無い → warning');
   const mismatch = review(plan([step('P1', 'UPDATE_FIELD', 'FIELD', 'customer_code', [['必須', 'true']])], [], { impact: [{ targetKind: 'FIELD', targetRef: 'customer_code', description: '一覧のみ', evidenceIds: [], confidence: 'INFERRED' }] }));
