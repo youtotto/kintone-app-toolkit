@@ -206,7 +206,7 @@ await section(async () => {
   const { m: m1 } = await K.mountFinal({ kind: 'js' });
   const sum1 = m1.$('kt-ai-change-summary').innerHTML;
   assert(/JavaScript の状態/.test(sum1) && /<li>JavaScript：できた（検証済み）<\/li>/.test(sum1), `H3-13: 画面の右の「変更内容」に検証済みの JavaScript の状態: ${stripC(sum1).replace(/\s+/g, ' ').slice(0, 160)}`);
-  const m2 = K.mount({ health: K.HEALTH_V, planImpl: K.planImplOf(K.screenPlan('js')), generateImpl: async () => { throw aiErr('TIMEOUT'); }, liveBase: true });
+  const m2 = K.mount({ health: K.HEALTH_V, planImpl: K.planImplOf(K.screenPlan('js')), generateImpl: async () => { throw aiErr('TIMEOUT'); } });
   await ticks();
   const v2 = await K.adoptOnScreen(m2); await ticks(20);
   const sum2 = m2.$('kt-ai-change-summary').innerHTML, chat2 = stripC(m2.chat());

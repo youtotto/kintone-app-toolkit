@@ -315,7 +315,7 @@ await section(async () => {
     if (!vv.ok) throw new Error(JSON.stringify(vv.errors));
     return { ...vv.normalized, requestId };
   };
-  const m = K.mount({ health: K.HEALTH_V, planImpl: K.planImplOf(K.screenPlan('js')), generateImpl: dupGenerate, liveBase: true });
+  const m = K.mount({ health: K.HEALTH_V, planImpl: K.planImplOf(K.screenPlan('js')), generateImpl: dupGenerate });
   await ticks();
   const v = await K.adoptOnScreen(m);
   await ticks(20);

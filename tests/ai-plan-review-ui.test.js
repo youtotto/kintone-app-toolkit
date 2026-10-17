@@ -6,8 +6,9 @@
 // 実行方法: node tests/ai-plan-review-ui.test.js
 'use strict';
 const { loadToolkit, makeAssert } = require('./helpers/load-toolkit.js');
+const { withDevBase } = require('./helpers/dev-base-fake.js');
 const { makeFakeHost } = require('./helpers/fake-dom.js');
-const { KTDeps, KTScan, KTContext, KTAiClient, KTContextUi, KTPlanReview, mountAiWorkspace } = loadToolkit();
+const { KTDevBase, KTDeps, KTScan, KTContext, KTAiClient, KTContextUi, KTPlanReview, mountAiWorkspace } = loadToolkit();
 const { assert, state } = makeAssert();
 const FX = require('./fixtures/ai-context-app.js');
 const { buildScanPayload } = require('./helpers/scan-payload.js');
@@ -65,7 +66,7 @@ function mount({ planResponse = PLAN_B, inputs = INPUTS } = {}) {
   const flow = { start: async () => { throw new Error('x'); }, cancel() { }, reopen: () => false, state: () => ({ phase: 'idle' }), isRunning: () => false };
   const host = makeFakeHost();
   const copies = [];
-  const panel = mountAiWorkspace(host, { getInputs: () => inputs, setPreview: () => { }, copyText: async (t) => { copies.push(t); return true; }, colors: { border: '#ccc', bg: '#fff' }, settings, session, hostname: 't.cybozu.com', connectFlow: flow });
+  const panel = mountAiWorkspace(host, withDevBase({ KTDevBase }, { getInputs: () => inputs, setPreview: () => { }, copyText: async (t) => { copies.push(t); return true; }, colors: { border: '#ccc', bg: '#fff' }, settings, session, hostname: 't.cybozu.com', connectFlow: flow }));
   const $ = (id) => host.querySelector(`#${id}`);
   return { host, panel, $, copies };
 }

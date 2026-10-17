@@ -15,6 +15,7 @@
 // 実行方法: node tests/ai-rc-p22.test.js（KT_SRC=<別ビルド> で修正前の版に対して走らせると RED になる）
 'use strict';
 const { loadToolkit, makeAssert } = require('./helpers/load-toolkit.js');
+const { withDevBase } = require('./helpers/dev-base-fake.js');
 const T2 = loadToolkit();
 const { KTDeps, KTScan, KTCodeReview, KTAiClient, KTAiConversation, KTAiChatUi } = T2;
 const { assert, state } = makeAssert();
@@ -315,7 +316,7 @@ console.log('\n--- ダークテーマのプロセス図: 暗い配色で描く�
     const ran = [];
     T4.__sandbox.mermaid = { run: ({ nodes }) => { ran.push(...nodes); return Promise.resolve(); } };
     const host = makeFakeHost();
-    const panel = T4.mountAiWorkspace(host, { getInputs: () => ({ data: FX.makeData() }), copyText: async () => true, downloadText: () => { }, colors: { border: '#ccc', bg: '#fff' } });
+    const panel = T4.mountAiWorkspace(host, withDevBase(T4, { getInputs: () => ({ data: FX.makeData() }), copyText: async () => true, downloadText: () => { }, colors: { border: '#ccc', bg: '#fff' } }));
     const mk = (visible) => ({ textContent: 'flowchart LR\n  S0["作成中"]\n  S1["承認待ち"]\n  S0 -->|申請する| S1', visible, getClientRects() { return this.visible ? [{ width: 100 }] : []; }, replaceWith(d) { this.replaced = d; } });
     const shownPre = mk(true), hiddenPre = mk(false);
     host.querySelector('#kt-ai-pane-review').querySelectorAll = (sel) => (sel === 'pre.kt-ai-mermaid' ? [shownPre, hiddenPre].filter(p => !p.replaced) : []);

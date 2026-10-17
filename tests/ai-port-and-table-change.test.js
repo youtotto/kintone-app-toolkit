@@ -38,6 +38,7 @@ const T = loadToolkit();
 const { KTAiConversation, KTCodeReview, KTScan, KTContext, KTAiClient, KTPlanReview } = T;
 const { assert, state } = makeAssert();
 const { createNewFlowKit } = require('./helpers/new-flow.js');
+const { makeKintoneMock } = require('./helpers/kintone-preview-mock.js');
 const K = createNewFlowKit(T);
 const { clone, B, req, makeConvC, GEN_EFFECT_FEATURES } = K;
 const F = require('./fixtures/nl1010-port.js');
@@ -401,7 +402,7 @@ await section(async () => {
 });
 
 // =========================================================
-console.log('\n--- §P6. 画面: 画面の解析から jsFiles を作り、生成の要求に conditionFrom と移植元の本文が載る ---');
+console.log('\n--- §P6. 画面: アプリの JavaScript の一覧（jsFiles）を作り、生成の要求に conditionFrom と移植元の本文が載る ---');
 await section(async () => {
   const inputs = clone(K.INPUTS);
   inputs.data.customize.desktop.js.push({ type: 'FILE', file: { contentType: 'text/javascript', fileKey: '20261010000000VVVV', name: 'dealValidate.js', size: String(F.DEAL_VALIDATE_JS.length) } });
@@ -422,7 +423,9 @@ await section(async () => {
     if (!vv.ok) throw new Error(JSON.stringify(vv.errors));
     return { ...vv.normalized, requestId };
   };
-  const m = K.mount({ health: K.HEALTH_V, planImpl: K.planImplOf(planRaw), generateImpl: genImpl, extra: { getInputs: () => inputs } });
+  //   簡素化（2026-10-17）: 作業の基準は動作テスト環境のファイルから作る（画面は基準の読み込みが必須）。移植元の本文は偽の kintone にも持たせる
+  const mockP = makeKintoneMock(inputs.data, { jsSources: [{ name: 'dealValidate.js', target: 'desktop', text: F.DEAL_VALIDATE_JS }] });
+  const m = K.mount({ health: K.HEALTH_V, planImpl: K.planImplOf(planRaw), generateImpl: genImpl, extra: { getInputs: () => inputs, executor: { api: mockP.api, appId: '341' } } });
   await K.ticks();
   const v = await K.adoptOnScreen(m);
   await K.ticks(20);
@@ -430,7 +433,7 @@ await section(async () => {
   const re = ctx && ctx.verification && ctx.verification.requiredEffects;
   const of = ctx && (ctx.otherFiles || []).find(f => f.name === 'dealValidate.js');
   assert(ctx && Array.isArray(re) && re.length === 1 && JSON.stringify(re[0].conditionFrom) === JSON.stringify(CF) && of && of.source === F.DEAL_VALIDATE_JS && of.sourceUse === 'reference-only',
-    `P6-1: 画面: 画面の解析（scan）から jsFiles を作り（services.jsFiles）、health の印 conditionFrom がある接続先で、生成の ctx の requiredEffects に conditionFrom・otherFiles に移植元の本文: ${JSON.stringify({ calls: calls.length, re, of: of && { name: of.name, src: typeof of.source } })}`);
+    `P6-1: 画面: アプリの JavaScript の一覧（services.jsFiles）を作り、health の印 conditionFrom がある接続先で、生成の ctx の requiredEffects に conditionFrom・otherFiles に移植元の本文: ${JSON.stringify({ calls: calls.length, re, of: of && { name: of.name, src: typeof of.source } })}`);
   const fv = (m.conv().activePlan() || v || {});
   assert(fv.generated && fv.generated.C3 && fv.generated.C3.status === 'verified', `P6-2: 画面でも C3 は移植元と比べる代表条件で検証済み: ${JSON.stringify(fv.generated && fv.generated.C3 && fv.generated.C3.verdict)}`);
 });

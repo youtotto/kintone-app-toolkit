@@ -23,6 +23,7 @@ process.on('unhandledRejection', (e) => { if (/kintone is not defined/.test(Stri
 const fs = require('fs');
 const path = require('path');
 const { loadToolkit, makeAssert } = require('./helpers/load-toolkit.js');
+const { withDevBase } = require('./helpers/dev-base-fake.js');
 const { gwCandidateHash, gwHashOfCtx, withGwHash } = require('./helpers/gw-hash.js');
 const { makeFakeHost, makeFakeDocument } = require('./helpers/fake-dom.js');
 const T = loadToolkit();
@@ -101,13 +102,13 @@ function mount({ inputs = INPUTS, paid = true, plans = null, now = null, extra =
   const copies = [], opened = [];
   const mock = makeKintoneMock(inputs.data, { jsSources: [{ name: 'fieldOnOff.js', target: 'desktop', text: FIELD_ON_OFF }] });
   const clock = { t: 1000000 };
-  const panel = mountAiWorkspace(host, {
+  const panel = mountAiWorkspace(host, withDevBase(T, {
     getInputs: () => inputs, copyText: async (t) => { copies.push(t); return true; }, downloadText: () => { }, colors: { border: '#ccc', bg: '#fff' },
     ...(paid ? { settings, session, hostname: 't.cybozu.com', connectFlow: flow } : {}),
-    executor: { api: mock.api, appId: '341' }, openCustomize: (x) => { opened.push(x); return { found: true }; },
+    executor: { api: mock.api, appId: String(FX.SELF_APP) }, openCustomize: (x) => { opened.push(x); return { found: true }; },
     now: now || (() => clock.t),
     ...extra,
-  });
+  }));
   const $ = (id) => host.querySelector(`#${id}`);
   const ws = () => ['kt-ai-subject-info', 'kt-ai-spec', 'kt-ai-plan-result', 'kt-ai-review-result', 'kt-ai-exec', 'kt-ai-jsreg', 'kt-ai-code-head', 'kt-ai-code-review'].map(id => $(id).innerHTML).join('\n');
   return { host, panel, $, calls, copies, opened, mock, clock, ws, conv: () => panel.conversation(), chat: () => $('kt-ai-chat').innerHTML, msgs: () => panel.conversation().state.messages, types: () => panel.conversation().state.messages.map(m => m.type) };
@@ -181,7 +182,7 @@ console.log('\n--- §2. Workspace Architecture: 左 会話 / 右 現在の作業
   await m.$('kt-ai-header').dispatch({ type: 'click', target: { id: 'kt-ai-header-toggle' } });
   assert(/aria-expanded="true"/.test(headerOpen) && /id="kt-ai-header-detail" style="flex:1 1 100%;/.test(headerOpen) && /id="kt-ai-header-detail" style="display:none;/.test(m.$('kt-ai-header').innerHTML), '［詳細］を開いた状態は描き直しても保つ（もう一度押すと閉じる）');
   await m.$('kt-ai-header').dispatch({ type: 'click', target: { id: 'kt-ai-log-open', dataset: { act: 'open-log' } } });
-  assert(m.panel.drawerState().pane === 'log' && /このページで動作テスト環境に反映した変更は、まだありません。/.test(m.$('kt-ai-apply-log').innerHTML), 'ヘッダーの［反映の記録］→ 右に反映の記録（0 件のときはまだ無いことを出す）');
+  assert(m.panel.drawerState().pane === 'log' && /このページではまだ反映していません。/.test(m.$('kt-ai-apply-log').innerHTML) && /運用環境との差/.test(m.$('kt-ai-apply-log').innerHTML), 'ヘッダーの［反映の記録］→ 右に反映の記録（0 件のときはまだ無いことを出す。作業の基準があるので運用環境との差の行も出る）');
   assert(/このアプリについて、相談したいことや変更したいことを入力してください/.test(m.chat()) && !/<button|<li>/.test(m.chat()), 'Empty State（2026-10-06）: 相談・変更したいことを入力する案内だけ（例文の一覧なし）');
 }
 
@@ -651,7 +652,7 @@ await section(async () => {
     await planOnScreen(m, GOAL, { intent: 'PLAN' });
     await m.$('kt-ai-review-result').dispatch({ type: 'change', target: { dataset: { step: 'P1' }, value: 'approve' } });
     await KF.waitUntil(() => m.panel.finalPrecheck().status === 'ready', 60);
-    assert(nowPlanReady(m) && (rolled ? !KF.applyButtonOf(m).disabled : (KF.applyButtonOf(m).disabled && m.panel.finalPrecheck().status === 'blocked' && m.panel.finalPrecheck().reasons.length > 0)), `前提（${rolled ? '戻し済み' : '未復元'}）: 新しい会話の最終案の［動作テスト環境へ反映］が出る（右の「反映」は今の計画の案内）。${rolled ? '押せる' : '前の会話の反映が残っていて同じフィールドを追加できないため、承認の欄の準備で止まり、押せない（理由を出す）'}: ${JSON.stringify(m.panel.finalPrecheck().reasons)}`);
+    assert(nowPlanReady(m) && (rolled ? !KF.applyButtonOf(m).disabled : (KF.applyButtonOf(m).disabled && m.conv().finalReadiness().ready === false && m.conv().finalReadiness().reasons.some(r => r.kind === 'blocked'))), `前提（${rolled ? '戻し済み' : '未復元'}）: 新しい会話の最終案の［動作テスト環境へ反映］が出る（右の「反映」は今の計画の案内）。${rolled ? '押せる' : '前の会話の反映が残っていて同じフィールドが動作テスト環境にあるため、計画の確認（今の動作テスト環境の設定）で反映できない手順になり、承認できず止まり、押せない（理由を出す）'}: ${JSON.stringify(m.panel.finalPrecheck().reasons)}`);
     await clickPane(m, 'log', { dataset: { act: 'log-open', log: logId } }); await ticks();
     assert(!/kt-ai-apply-note/.test(m.$('kt-ai-exec').innerHTML) && /data-act="log-close"/.test(m.$('kt-ai-exec').innerHTML) && /反映の記録から開いた反映です（前の会話・/.test(m.$('kt-ai-exec').innerHTML), `L2（${rolled ? '戻し済み' : '未復元'}）: 記録から開くと、右下の右の「反映」に［閉じる（今の計画に戻る）］が出る`);
     await clickPane(m, 'exec', { dataset: { act: 'log-close' } }); await ticks();

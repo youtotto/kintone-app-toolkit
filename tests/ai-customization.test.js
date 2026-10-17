@@ -326,10 +326,12 @@ const PLAN_HYBRID_V = planOf({ steps: [STD_STEP(), JS_STEP()], customizations: [
  *   planResponse = 計画の AI の応答（関数なら ctx から）/ generatedFor = 生成のコード（例外を投げれば Gateway のエラー）/ has = 偽の検証で「処理あり」とする効果
  *   fails = 模擬テストで不合格にする効果（`フィールド|効果`）/ verify = 偽の検証結果を本物の生成工程と同じ形に足す関数（機械検査の項目など）
  */
-function mountV({ inputs = INPUTS, planResponse = PLAN_HYBRID_V, generatedFor = null, health = HEALTH_V, has = { amount: ['lock'] }, fails = [], failMsg = undefined, verify = null, loadJsSource = undefined } = {}) {
+function mountV({ inputs = INPUTS, planResponse = PLAN_HYBRID_V, generatedFor = null, health = HEALTH_V, has = { amount: ['lock'] }, fails = [], failMsg = undefined, verify = null, downloadFails = null } = {}) {
   const calls = { plan: [], generate: [] };
   const copies = [], downloads = [];
   const mock = makeKintoneMock(inputs.data, { jsSources: [{ name: 'fieldOnOff.js', target: 'desktop', text: FIELD_ON_OFF }] });
+  //   簡素化（2026-10-17）: 統合先・同じ画面の本文を取れない素材は、動作テスト環境のファイルの取得の失敗で作る（作業の基準が本文を持たない。以前の d.loadJsSource の差し替えは削除した）
+  if (downloadFails) { const dl = mock.api.downloadFile.bind(mock.api); mock.api.downloadFile = async (k) => { const f = mock.st.files.get(k); if (f && downloadFails(f.name)) throw Object.assign(new Error('ファイルが見つかりません'), { code: 'GAIA_IL23', status: 404 }); return dl(k); }; }
   const planImpl = ({ ctx, requestId }) => {
     calls.plan.push({ ctx });
     const resp = typeof planResponse === 'function' ? planResponse(ctx) : planResponse;
@@ -348,7 +350,7 @@ function mountV({ inputs = INPUTS, planResponse = PLAN_HYBRID_V, generatedFor = 
     if (!v.ok) throw new KTAiClient.AiClientError({ code: v.errors[0].code, message: v.errors[0].message, requestId });
     return { ...v.normalized, requestId, clientWarnings: v.warnings };
   };
-  const m = K.mount({ health, planImpl, generateImpl, extra: { getInputs: () => inputs, copyText: async (t) => { copies.push(t); return true; }, downloadText: (name, text) => downloads.push({ name, text }), executor: { api: mock.api, appId: '310' }, ...(loadJsSource ? { loadJsSource } : {}) } });
+  const m = K.mount({ health, planImpl, generateImpl, extra: { getInputs: () => inputs, copyText: async (t) => { copies.push(t); return true; }, downloadText: (name, text) => downloads.push({ name, text }), executor: { api: mock.api, appId: '310' } } });
   return Object.assign(m, { calls2: calls, copies, downloads, mock, types: () => m.msgs().map(x => x.type) });
 }
 /** 2026-10-06: 会話に見える文（タグと data 属性を除く）。内部の番号（C1・v1 など）が出ていないことを確かめる */
@@ -491,7 +493,7 @@ console.log('\n--- §53-2. 複数のカスタマイズ / カスタマイズの�
 console.log('\n--- §53-3. 統合先の本文を取得できない / 契約に無い / Gateway エラー / 標準設定だけ ---');
 {
   let available = false;
-  const m = mountV({ inputs: INPUTS_CACHED, loadJsSource: async ({ name, fileKey }) => (available && name === 'fieldOnOff.js' && fileKey === '20261003000000EEEE' ? FIELD_ON_OFF : null) });
+  const m = mountV({ inputs: INPUTS_CACHED, downloadFails: (name) => name === 'common.js' || (name === 'fieldOnOff.js' && !available) });
   await ticks();
   const v = await K.adoptOnScreen(m);
   assert(v.review.steps.find(r => r.solution === 'CUSTOMIZATION').codeGeneration.sourceAvailable === false && v.review.steps.find(r => r.solution === 'CUSTOMIZATION').codeGeneration.supported === true, 'キャッシュ payload: 本文なし（生成は試みる）');

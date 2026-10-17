@@ -23,7 +23,7 @@ const K = createNewFlowKit(T);
 const { assert, state } = makeAssert();
 const FX = require('./fixtures/ai-context-app.js');
 const { makeKintoneMock } = require('./helpers/kintone-preview-mock.js');
-const { makeEnvGetter, fileEntry } = require('./helpers/dev-base-fake.js');
+const { makeEnvGetter, fileEntry, withDevBase } = require('./helpers/dev-base-fake.js');
 
 const clone = (v) => JSON.parse(JSON.stringify(v));
 const spec = (o) => ({ name: null, from: null, to: null, filterCond: null, assignees: [], targets: [], events: [], timingField: null, daysLater: null, time: null, fields: [], sort: null, sourceApp: null, keyField: null, mappings: [], addMappings: [], fieldType: null, required: null, options: [], destApp: null, accessibility: null, entities: [], ...o });
@@ -199,7 +199,7 @@ console.log('\n--- G1 / G2 / G3（画面）. 再読み込みした後の新し�
   const loadDevBase = async () => { loads++; return (loaderMode === 'ok' ? loadBase() : loadBase({ fail: { 'preview:app/form/fields': Object.assign(new Error('通信に失敗しました'), { code: null }) } })).p; };
   const host = makeFakeHost();
   // 運用環境の DATA（ページを開いた時点）だけを getInputs で渡す（Phase 20 までの入力）。基準は loadDevBase
-  const panel = mountAiWorkspace(host, { getInputs: () => ({ data: PROD, deps: KTDeps.buildDependencyData(PROD, KTDeps.normalizeFields(PROD.fields)), scan: null, incoming: null }), copyText: async () => true, downloadText: () => { }, colors: { border: '#ccc', bg: '#fff' }, settings, session, hostname: 't.cybozu.com', connectFlow: flow, executor: { api: makeKintoneMock(PREV, { jsSources: [{ name: 'dealLock.js', target: 'desktop', text: LOCK_V2 }, { name: 'discountCheck.js', target: 'desktop', text: CHECK }] }).api, appId: '310' }, loadDevBase });
+  const panel = mountAiWorkspace(host, withDevBase(T, { getInputs: () => ({ data: PROD, deps: KTDeps.buildDependencyData(PROD, KTDeps.normalizeFields(PROD.fields)), scan: null, incoming: null }), copyText: async () => true, downloadText: () => { }, colors: { border: '#ccc', bg: '#fff' }, settings, session, hostname: 't.cybozu.com', connectFlow: flow, executor: { api: makeKintoneMock(PREV, { jsSources: [{ name: 'dealLock.js', target: 'desktop', text: LOCK_V2 }, { name: 'discountCheck.js', target: 'desktop', text: CHECK }] }).api, appId: '310' }, loadDevBase }));
   await tick(10);
   assert(loads >= 1 && panel.devBase() && panel.devBase().ok, '接続を確認したら作業の基準（動作テスト環境）を取得する');
   const head = host.querySelector('#kt-ai-header').innerHTML;
@@ -243,6 +243,16 @@ console.log('\n--- G1 / G2 / G3（画面）. 再読み込みした後の新し�
   await panel.send('このアプリの通知先は誰ですか？');
   const qctx2 = askCalls[askCalls.length - 1];
   assert(qctx2 && qctx2.facts.some(f => f.key === 'ENV:base' && /運用環境の設定/.test(f.statement) && /動作テスト環境の設定を取得できませんでした/.test(f.statement)), '質問は運用環境の設定で答え、そのことを Context に入れる');
+  // 簡素化（2026-10-17）: 作業の基準の読み込み（loadDevBase）を渡さない画面は、基準を取得できなかったのと同じに扱う（以前の、基準を使わずに計画・生成・反映へ進む分岐は削除した）
+  {
+    const host2 = makeFakeHost();
+    const nPlan2 = planCalls.length;
+    const panel2 = mountAiWorkspace(host2, { getInputs: () => ({ data: PROD, deps: KTDeps.buildDependencyData(PROD, KTDeps.normalizeFields(PROD.fields)), scan: null, incoming: null }), copyText: async () => true, downloadText: () => { }, colors: { border: '#ccc', bg: '#fff' }, settings, session, hostname: 't.cybozu.com', connectFlow: flow, executor: { api: makeKintoneMock(PREV).api, appId: '310' } });
+    await tick(10);
+    await planOnScreen(panel2, '値引率を必須にしたい');
+    const err2 = [...panel2.conversation().messages()].reverse().find(m => m.type === 'ERROR');
+    assert(panel2.devBase() && panel2.devBase().ok === false && planCalls.length === nPlan2 && !panel2.conversation().activePlan() && err2 && /動作テスト環境の設定を取得できなかったため、変更計画の作成を止めました/.test(err2.text) && /作業の基準を読み込む手段がありません/.test(err2.text), `読み込みを渡さない画面: 基準を取得できなかったのと同じに扱い、計画を作らない（計画の AI を呼ばない）: ${err2 && err2.text}`);
+  }
 }
 
 // =========================================================
@@ -526,7 +536,7 @@ console.log('\n--- G7（画面）. 古い版からは登録しない・確認の
   //   §0c.7（2026-10-08）: 既存 JS の解析（scan）が無いと、本文もイベントも分からない既存 JS は events null（その platform のすべて）として送れなかった扱いになり、
   //   必須の効果を確かめられない（準備未完了）。この試験は登録の経路を確かめるので、アプリ解析の結果（既存 JS の本文）を渡す
   const scanG7 = (() => { const { buildScanPayload } = require('./helpers/scan-payload.js'); const fieldRows = KTDeps.normalizeFields(REG.data.fields).map(f => ({ code: f.code, label: f.label, type: f.rawType })); const sc = buildScanPayload({ KTScan, KTDeps }, { appId: FX.SELF_APP, files: FX.files, fields: fieldRows, deps, skippedUrlFiles: FX.skippedUrlFiles }); sc.results = KTScan.analyze({ fields: fieldRows, files: FX.files.filter(f => f.kind === 'js'), snippet: { before: 24, after: 48 } }); return sc; })();
-  const panel = mountAiWorkspace(host, { getInputs: () => ({ data: REG.data, deps, scan: scanG7, incoming: null }), copyText: async () => true, downloadText: () => { }, colors: { border: '#ccc', bg: '#fff' }, settings, session, hostname: 't.cybozu.com', connectFlow: flow, executor: { api: mock.api, appId: '310' } });
+  const panel = mountAiWorkspace(host, withDevBase(T, { getInputs: () => ({ data: REG.data, deps, scan: scanG7, incoming: null }), copyText: async () => true, downloadText: () => { }, colors: { border: '#ccc', bg: '#fff' }, settings, session, hostname: 't.cybozu.com', connectFlow: flow, executor: { api: mock.api, appId: '310' } }));
   await tick(8);
   //   C-1 第 3 段: 依頼 → 仮案 → 採用 → 最終案（JavaScript は最終案のパイプラインが作る。仕様の確定と「C1 のコードを作って」は無い）→ 承認
   const v1 = await planOnScreen(panel, '承認済みでは金額を編集できなくしたい');

@@ -124,7 +124,7 @@ function fakeGateway({ health = HEALTH_S, planRaw = planRaw2, onGenerate }) {
 async function mountReal({ health = HEALTH_S, planRaw = planRaw2, onGenerate, budget = undefined } = {}) {
   const gw = fakeGateway({ health, planRaw, onGenerate });
   const client = KTAiClient.createAiClient({ apiBase: 'https://gw.test', customerToken: 't', hostname: HOST, transport: KTAiClient.createDefaultTransport({ kintoneApi: null, fetchFn: gw.fetchFn }) });
-  const m = K.mount({ health, liveBase: true, clientWrap: () => client, ...(budget !== undefined ? { extra: { budget } } : {}) });
+  const m = K.mount({ health, clientWrap: () => client, ...(budget !== undefined ? { extra: { budget } } : {}) });
   await K.ticks();
   await K.adoptOnScreen(m);
   await K.waitUntil(() => { const v = m.conv().activePlan(); return !!(v && v.final); }, 600); await K.ticks(10);
@@ -203,7 +203,7 @@ await section(async () => {
   const run = async (health) => {
     const sg = K.screenGenerate({ field: 'case_name', targetFile: 'caseLock.js' });
     const seen = [];
-    const m = K.mount({ health, planImpl: K.planImplOf(K.screenPlan('js')), generateImpl: (a) => { seen.push({ onEvent: typeof a.onEvent, keys: Object.keys(a).sort().join(',') }); return sg.impl(a); }, liveBase: true });
+    const m = K.mount({ health, planImpl: K.planImplOf(K.screenPlan('js')), generateImpl: (a) => { seen.push({ onEvent: typeof a.onEvent, keys: Object.keys(a).sort().join(',') }); return sg.impl(a); } });
     await K.ticks();
     const v = await K.adoptOnScreen(m); await K.ticks(20);
     return { seen, v };

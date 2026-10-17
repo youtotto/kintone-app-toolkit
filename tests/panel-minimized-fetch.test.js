@@ -425,7 +425,7 @@ await safe('§5g', async () => {
   const KIT = createNewFlowKit(T);
   const visible = { v: false };
   const gen = KIT.screenGenerate({});
-  const m = KIT.mount({ health: KIT.HEALTH_V, planImpl: KIT.planImplOf(KIT.screenPlan('mixed')), generateImpl: gen.impl, liveBase: true, extra: { canAutoFetch: () => visible.v } });
+  const m = KIT.mount({ health: KIT.HEALTH_V, planImpl: KIT.planImplOf(KIT.screenPlan('mixed')), generateImpl: gen.impl, extra: { canAutoFetch: () => visible.v } });
   await ticks();
   for (const s of KIT.REQUESTS) { await m.panel.send(s); await ticks(10); }   // 依頼・計画・生成は利用者の操作（見えていなくても進む）
   await ticks(30);
@@ -458,7 +458,7 @@ async function precheckEnv() {
   const KIT = createNewFlowKit(T);
   const visible = { v: false };
   const gen = KIT.screenGenerate({});
-  const m = KIT.mount({ health: KIT.HEALTH_V, planImpl: KIT.planImplOf(KIT.screenPlan('mixed')), generateImpl: gen.impl, liveBase: true, extra: { canAutoFetch: () => visible.v } });
+  const m = KIT.mount({ health: KIT.HEALTH_V, planImpl: KIT.planImplOf(KIT.screenPlan('mixed')), generateImpl: gen.impl, extra: { canAutoFetch: () => visible.v } });
   await ticks();
   for (const s of KIT.REQUESTS) { await m.panel.send(s); await ticks(10); }
   await ticks(30);
@@ -622,7 +622,7 @@ await safe('§8', async () => {
     const KIT = createNewFlowKit(T);
     const visible = { v: true };
     const gen = KIT.screenGenerate({ field: 'approval_memo', targetFile: 'memoLock.js' });
-    const m = KIT.mount({ health: KIT.HEALTH_V, planImpl: KIT.planImplOf(KIT.screenPlan('mixed')), generateImpl: gen.impl, liveBase: true, extra: { canAutoFetch: () => visible.v } });
+    const m = KIT.mount({ health: KIT.HEALTH_V, planImpl: KIT.planImplOf(KIT.screenPlan('mixed')), generateImpl: gen.impl, extra: { canAutoFetch: () => visible.v } });
     await KIT.ticks();
     await KIT.adoptOnScreen(m); await KIT.ticks(20);
     let g0 = 0;
@@ -693,7 +693,7 @@ await safe('§10', async () => {
     let mref = null;
     const loader = KIT.loadDevBaseFromMock(() => mref.mock);
     const gen = KIT.screenGenerate({ field: 'approval_memo', targetFile: 'memoLock.js' });
-    const m = KIT.mount({ health: KIT.HEALTH_V, planImpl: KIT.planImplOf(KIT.screenPlan('mixed')), generateImpl: gen.impl, liveBase: true,
+    const m = KIT.mount({ health: KIT.HEALTH_V, planImpl: KIT.planImplOf(KIT.screenPlan('mixed')), generateImpl: gen.impl,
       extra: { canAutoFetch: () => visible.v, loadDevBase: (a = {}) => { loads.push({ reason: a.reason || null, at: mref.mock.calls.length }); return loader(a); } } });
     mref = m;
     await KIT.ticks();
@@ -785,7 +785,7 @@ await safe('§11', async () => {
     const gate = e.T.KTFetchGate.of(root);
     const KIT = createNewFlowKit(e.T);
     const gen = KIT.screenGenerate({ field: 'approval_memo', targetFile: 'memoLock.js' });
-    const m = KIT.mount({ health: KIT.HEALTH_V, planImpl: KIT.planImplOf(KIT.screenPlan('mixed')), generateImpl: gen.impl, liveBase: true,
+    const m = KIT.mount({ health: KIT.HEALTH_V, planImpl: KIT.planImplOf(KIT.screenPlan('mixed')), generateImpl: gen.impl,
       extra: { canAutoFetch: () => gate.isOpen(), rescanJs: rescanOf(e.T, root) } });
     await KIT.ticks(); await KIT.adoptOnScreen(m); await KIT.ticks(20);
     const stale = () => (typeof e.T.KTScan.isStale === 'function' ? e.T.KTScan.isStale() : null);
@@ -896,7 +896,7 @@ await safe('§12', async () => {
     let mref = null;
     const loader = KIT.loadDevBaseFromMock(() => mref.mock);
     const gen = KIT.screenGenerate({ field: 'approval_memo', targetFile: 'memoLock.js' });
-    const m = KIT.mount({ health: KIT.HEALTH_V, planImpl: KIT.planImplOf(KIT.screenPlan('mixed')), generateImpl: gen.impl, liveBase: true,
+    const m = KIT.mount({ health: KIT.HEALTH_V, planImpl: KIT.planImplOf(KIT.screenPlan('mixed')), generateImpl: gen.impl,
       extra: { canAutoFetch: () => visible.v, loadDevBase: (x = {}) => { loads.push(x.reason || null); return loader(x); } } });
     mref = m;
     await KIT.ticks();
@@ -942,7 +942,7 @@ await safe('§12', async () => {
     const loads = [];
     let mref = null, hold = null;
     const loader = KIT.loadDevBaseFromMock(() => mref.mock);
-    const m = KIT.mount({ health: KIT.HEALTH_V, liveBase: true, extra: { canAutoFetch: () => visible.v, loadDevBase: async (x = {}) => { loads.push(x.reason || null); if (hold) await hold.p; return loader(x); } } });
+    const m = KIT.mount({ health: KIT.HEALTH_V, extra: { canAutoFetch: () => visible.v, loadDevBase: async (x = {}) => { loads.push(x.reason || null); if (hold) await hold.p; return loader(x); } } });
     mref = m;
     await KIT.ticks(30);
     visible.v = false;

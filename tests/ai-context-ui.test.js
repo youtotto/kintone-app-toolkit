@@ -15,12 +15,13 @@
 // 実行方法: node tests/ai-context-ui.test.js
 'use strict';
 const { loadToolkit, makeAssert } = require('./helpers/load-toolkit.js');
+const { withDevBase } = require('./helpers/dev-base-fake.js');
 const { buildScanPayload } = require('./helpers/scan-payload.js');
 const { makeFakeHost, optionValues, unescape } = require('./helpers/fake-dom.js');
 const FX = require('./fixtures/ai-context-app.js');
 const REAL = require('./fixtures/scanner-cache-297.js');
 
-const { KTDeps, KTScan, KTContext, KTContextUi, mountAiWorkspace } = loadToolkit();
+const { KTDevBase, KTDeps, KTScan, KTContext, KTContextUi, mountAiWorkspace } = loadToolkit();
 const { assert, state } = makeAssert();
 
 function buildInputs({ withScan = true, withIncoming = true, cachedOnly = false } = {}) {
@@ -43,13 +44,13 @@ function mount(inputs, { runScan = undefined } = {}) {
   const host = makeFakeHost();
   const copies = [];
   const previews = [];
-  const panel = mountAiWorkspace(host, {
+  const panel = mountAiWorkspace(host, withDevBase({ KTDevBase }, {
     getInputs: () => inputs,
     setPreview: (text, lang) => { previews.push({ text, lang }); },
     copyText: async (t) => { copies.push(t); return true; },
     runScan,
     colors: { border: '#ccc', bg: '#fff' },
-  });
+  }));
   const $ = (id) => host.querySelector(`#${id}`);
   return { host, panel, copies, previews, $ };
 }

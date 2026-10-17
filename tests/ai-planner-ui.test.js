@@ -10,8 +10,9 @@
 // 実行方法: node tests/ai-planner-ui.test.js
 'use strict';
 const { loadToolkit, makeAssert } = require('./helpers/load-toolkit.js');
+const { withDevBase } = require('./helpers/dev-base-fake.js');
 const { makeFakeHost } = require('./helpers/fake-dom.js');
-const { KTDeps, KTScan, KTContext, KTAiClient, KTContextUi, mountAiWorkspace } = loadToolkit();
+const { KTDevBase, KTDeps, KTScan, KTContext, KTAiClient, KTContextUi, mountAiWorkspace } = loadToolkit();
 //   簡素化 E（2026-10-16）: Context ペインの［変更計画を作成］（仮案を経ない計画 → 手順ごとの承認 → 反映の入口）は削除した。計画は会話の仮案から作る
 const { assert, state } = makeAssert();
 const FX = require('./fixtures/ai-context-app.js');
@@ -92,7 +93,7 @@ function mount({ health = HEALTH_BOTH, planResponses = [], askResponses = [], co
   const flow = { start: async () => { throw new Error('x'); }, cancel() { }, reopen: () => false, state: () => ({ phase: 'idle' }), isRunning: () => false };
   const host = makeFakeHost();
   const copies = [];
-  const panel = mountAiWorkspace(host, { getInputs: () => INPUTS, setPreview: () => { }, copyText: async (t) => { copies.push(t); return true; }, colors: { border: '#ccc', bg: '#fff' }, settings, session, hostname: 't.cybozu.com', connectFlow: flow });
+  const panel = mountAiWorkspace(host, withDevBase({ KTDevBase }, { getInputs: () => INPUTS, setPreview: () => { }, copyText: async (t) => { copies.push(t); return true; }, colors: { border: '#ccc', bg: '#fff' }, settings, session, hostname: 't.cybozu.com', connectFlow: flow }));
   const $ = (id) => host.querySelector(`#${id}`);
   return { host, panel, $, calls, copies, settings };
 }

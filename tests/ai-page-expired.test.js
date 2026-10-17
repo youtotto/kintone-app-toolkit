@@ -294,7 +294,7 @@ await section(async () => {
   const flag = { page: false };
   const pageErr = () => new KTAiClient.AiClientError({ code: C.PAGE_EXPIRED, message: PAGE_TEXT, details: { pageExpired: true, direct: 'failed' } });
   const sg = K.screenGenerate({ field: 'case_name', targetFile: 'caseLock.js' });
-  const m = K.mount({ health: K.HEALTH_V, planImpl: K.planImplOf(K.screenPlan('js')), generateImpl: sg.impl, liveBase: true, clientWrap: (c) => ({ ...c, getHealth: async () => { if (flag.page) throw pageErr(); return c.getHealth(); } }) });
+  const m = K.mount({ health: K.HEALTH_V, planImpl: K.planImplOf(K.screenPlan('js')), generateImpl: sg.impl, clientWrap: (c) => ({ ...c, getHealth: async () => { if (flag.page) throw pageErr(); return c.getHealth(); } }) });
   await K.ticks();
   const v0 = await K.adoptOnScreen(m); await K.ticks(20);
   const before = v0 && v0.final ? { approvable: v0.final.approvable, gen: Object.fromEntries(Object.entries(v0.generated || {}).map(([k, r]) => [k, r && r.status])) } : null;

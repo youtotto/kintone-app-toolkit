@@ -14,6 +14,7 @@
 // 実行方法: node tests/ai-process-mermaid.test.js（KT_SRC=<別ビルド> で修正前の版に対して走らせると RED になる）
 'use strict';
 const { loadToolkit, makeAssert } = require('./helpers/load-toolkit.js');
+const { withDevBase } = require('./helpers/dev-base-fake.js');
 const { makeFakeHost } = require('./helpers/fake-dom.js');
 const FX = require('./fixtures/ai-context-app.js');
 const { assert, state } = makeAssert();
@@ -116,7 +117,7 @@ console.log('\n--- 3. 描画: mermaid.render（body で測る）で描き、描�
     run: () => { calls.run++; return Promise.resolve(); },
   };
   const host = makeFakeHost();
-  const panel = T4.mountAiWorkspace(host, { getInputs: () => ({ data: FX.makeData() }), copyText: async () => true, downloadText: () => { }, colors: { border: '#ccc', bg: '#fff' } });
+  const panel = T4.mountAiWorkspace(host, withDevBase(T4, { getInputs: () => ({ data: FX.makeData() }), copyText: async () => true, downloadText: () => { }, colors: { border: '#ccc', bg: '#fff' } }));
   // 子要素を持つ要素（理由とコードの表示を確かめる）。innerHTML に入れた SVG は querySelector('svg') で引ける（style の max-width だけを持つ）
   T4.__sandbox.document.createElement = (tag) => ({
     tagName: String(tag).toUpperCase(), style: {}, children: [], attrs: {}, className: '', textContent: '', innerHTML: '',

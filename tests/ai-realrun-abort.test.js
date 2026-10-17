@@ -347,7 +347,7 @@ await section(async () => {
   const g = K.gate(); let n = 0;
   const sg = K.screenGenerate({ field: 'case_name', targetFile: 'caseLock.js' });
   const generateImpl = async (a) => { n += 1; if (n === 1) { await g.p; throw aiErr('TIMEOUT'); } return sg.impl(a); };
-  const m = K.mount({ health: K.HEALTH_V, planImpl: K.planImplOf(K.screenPlan('js')), generateImpl, liveBase: true });
+  const m = K.mount({ health: K.HEALTH_V, planImpl: K.planImplOf(K.screenPlan('js')), generateImpl });
   await K.ticks();
   for (const s0 of K.REQUESTS.slice(0, 3)) { await m.panel.send(s0); await K.ticks(10); }
   const pAdopt = m.panel.send(K.REQUESTS[3]);
@@ -480,7 +480,7 @@ await section(async () => {
   const H = clone(K.HEALTH_V); H.limits = { version: 1, deadlineMs: { 'toolkit.assistant-qa': 120000, 'toolkit.change-planner': 300000, 'toolkit.customization-generator': 280000 }, features: {} };
   const genArgs = [];
   const sg = K.screenGenerate({ field: 'case_name', targetFile: 'caseLock.js' });
-  const m = K.mount({ health: H, planImpl: K.planImplOf(K.screenPlan('js')), generateImpl: (a) => { genArgs.push({ deadlineMs: a.deadlineMs ?? null }); return sg.impl(a); }, liveBase: true });
+  const m = K.mount({ health: H, planImpl: K.planImplOf(K.screenPlan('js')), generateImpl: (a) => { genArgs.push({ deadlineMs: a.deadlineMs ?? null }); return sg.impl(a); } });
   await K.ticks();
   await K.adoptOnScreen(m); await K.ticks(20);
   //   client の打ち切り（画面のタイマーを差し替えて ms を記録。すぐ発火させる）
@@ -494,7 +494,7 @@ await section(async () => {
   //   画面: 生成中に［キャンセル］→ 入力欄に送った文（採用の発言）を戻さない・最終案のカードは未完成で［残りの JavaScript を作る］
   let genSignal = null, genCalls = 0;
   const generateImpl = ({ signal }) => { genCalls += 1; genSignal = signal; return new Promise((_, rej) => { if (signal) signal.addEventListener('abort', () => rej(aiErr('CANCELLED')), { once: true }); }); };
-  const m = K.mount({ health: K.HEALTH_V, planImpl: K.planImplOf(K.screenPlan('js')), generateImpl, liveBase: true });
+  const m = K.mount({ health: K.HEALTH_V, planImpl: K.planImplOf(K.screenPlan('js')), generateImpl });
   await K.ticks();
   for (const s of K.REQUESTS.slice(0, 3)) { await m.panel.send(s); await K.ticks(10); }
   m.$('kt-ai-input').value = K.REQUESTS[3];

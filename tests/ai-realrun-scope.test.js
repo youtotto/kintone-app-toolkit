@@ -981,7 +981,7 @@ await section(async () => {
   const CUST_TEXT = '承認待ちでは金額を編集不可にし、金額の変更を保存時にも止める';
   const rawS = (goal) => { const b = K.PLAN_V1(goal); const c = K.custLock('amount', { requirement: CUST_TEXT, fields: [{ code: 'ステータス', access: 'READ' }, { code: 'amount', access: 'CONTROL', condition: 'ステータス in ("承認待ち")', effects: ['lock', 'block-save'] }] }); return { ...b, plan: { ...b.plan, solution: 'CUSTOMIZATION', assessment: { ...b.plan.assessment, summary: '承認待ちでは金額を編集不可にし、保存時にも止める計画です。' }, steps: [mkStep('C1', 'CUSTOMIZATION_REQUIRED', 'JS', null, { customizationId: 'C1' }, { title: 'JavaScript', solution: 'CUSTOMIZATION' })], customizations: [c] }, turn: { reply: '保存時にも止める計画です。', requirementOps: [{ op: 'update', id: 'R1', target: '金額', condition: '承認待ち', behavior: '金額を編集不可にする', exceptions: [], decision: 'decided', disposition: 'adopted', sourceQuotes: [REQ_S], planRefs: ['C1'], effects: ['lock'], note: '' }], utteranceCoverage: [] } }; };
   const sg = K.screenGenerate({ field: 'amount', targetFile: 'amountLock.js' });
-  const m = K.mount({ health: K.HEALTH_V, scriptFn: scriptS, planImpl: K.planImplOf(rawS), generateImpl: sg.impl, liveBase: true });
+  const m = K.mount({ health: K.HEALTH_V, scriptFn: scriptS, planImpl: K.planImplOf(rawS), generateImpl: sg.impl });
   await K.ticks();
   await m.panel.send(REQ_S); await K.ticks(10);
   await m.panel.send('採用します'); await K.ticks(30);
@@ -1012,7 +1012,7 @@ await section(async () => {
     if (!timedOut) { timedOut += 1; throw new T.KTAiClient.AiClientError({ code: T.KTAiClient.ERROR_CODES.TIMEOUT, message: 'AI サービスが応答しませんでした（テストの時間切れ）' }); }
     return sg.impl(a);
   };
-  const m = K.mount({ health: K.HEALTH_V, scriptFn: scriptS, planImpl: K.planImplOf(rawS), generateImpl: genImpl, liveBase: true });
+  const m = K.mount({ health: K.HEALTH_V, scriptFn: scriptS, planImpl: K.planImplOf(rawS), generateImpl: genImpl });
   await K.ticks();
   await m.panel.send(REQ_S); await K.ticks(10);
   await m.panel.send('採用します'); await K.ticks(30);
@@ -1058,7 +1058,7 @@ await section(async () => {
     return { ...b, plan: { ...b.plan, solution: 'CUSTOMIZATION', assessment: { ...b.plan.assessment, summary: '承認待ちでは金額を編集不可にします。' }, steps: [mkStep('C1', 'CUSTOMIZATION_REQUIRED', 'JS', null, { customizationId: 'C1' }, { title: 'JavaScript', solution: 'CUSTOMIZATION' })], customizations: [c] },
       turn: { reply: '承認待ちでは金額を編集不可にします。', requirementOps: [{ op: 'update', id: 'R1', target: '金額', condition: '承認待ち', behavior: '金額を編集不可にする', exceptions: [], decision: 'decided', disposition: 'adopted', sourceQuotes: [REQ_9], planRefs: ['C1'], effects: ['lock'], note: '' }, { op: 'add', target: '案件名', condition: '差戻し後', behavior: '案件名が空なら警告を出す', exceptions: [], decision: 'proposed', disposition: 'adopted', sourceQuotes: [], planRefs: ['C1'], effects: ['warn'], note: '' }], utteranceCoverage: [] } }; };
   const sg = K.screenGenerate({ field: 'amount', targetFile: 'amountLock.js' });
-  const m = K.mount({ health: K.HEALTH_V, scriptFn: script9, planImpl: K.planImplOf(raw9), generateImpl: sg.impl, liveBase: true });
+  const m = K.mount({ health: K.HEALTH_V, scriptFn: script9, planImpl: K.planImplOf(raw9), generateImpl: sg.impl });
   await K.ticks();
   await m.panel.send(REQ_9); await K.ticks(10);
   await m.panel.send(DEL_9); await K.ticks(10);

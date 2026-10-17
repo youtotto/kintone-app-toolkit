@@ -30464,13 +30464,15 @@
     // ==================================================================
     // Phase 21: 開発支援の作業基準（最新の動作テスト環境。KTDevBase）。d.loadDevBase があれば、AI の質問・計画・生成・Review・Code Review はこの基準で行う。
     //   基準を取れないときは計画・生成・登録を止める（運用環境の設定へ黙って切り替えない）。質問だけは運用環境の設定で答え、そのことを Context（environment）に入れる
-    const devBaseLoader = typeof d.loadDevBase === 'function' ? d.loadDevBase : null;
+    //   簡素化（2026-10-17）: 作業の基準の読み込み（d.loadDevBase）は必須。渡されないときは基準を取得できなかったのと同じに扱い、基準なしで計画・生成・登録・反映へ進まない
+    //   （以前は読み込みが無ければ基準を使わずに進め、承認の基準の照合も飛ばした。本体の入口は必ず渡すので、その分岐はテストのためだけだった）
+    const devBaseLoader = typeof d.loadDevBase === 'function' ? d.loadDevBase : async () => ({ ok: false, status: 'NO_LOADER', message: '作業の基準を読み込む手段がありません', loadedAt: new Date(nowMs()).toISOString(), errors: [] });
     let devBase = null, devBasePromise = null, devBaseAt = 0, devBaseSeq = 0;
     const DEV_BASE_ASK_MAX_AGE_MS = 30 * 1000;
     const legacyInputs = () => (typeof d.getInputs === 'function' ? (d.getInputs() || {}) : {});
     const inputsNow = () => {
       const legacy = legacyInputs();
-      if (!devBaseLoader || !devBase) return legacy;
+      if (!devBase) return legacy;
       return KTDevBase.inputsOf(devBase, legacy) || { ...legacy, environment: KTDevBase.environmentOf(devBase) };
     };
     // 設定取得の関所（パネルの表示状態）: 自動の取り直し（接続・タブを開いた・承認の欄の準備・登録や戻しの後の続き）は、d.canAutoFetch() が真
@@ -30496,7 +30498,6 @@
     };
     /** 作業の基準を取り直す（同時に 1 回だけ）。maxAgeMs 以内に取ったものがあればそれを使う（古い印があれば使わない） */
     async function refreshDevBase({ maxAgeMs = 0, reason = null } = {}) {
-      if (!devBaseLoader) return null;
       const auto = DEV_BASE_AUTO_REASONS.includes(reason);
       if (auto && !canAutoFetch()) {
         devBaseWanted = true;
@@ -30551,7 +30552,6 @@
     const BASE_KIND_JA = { plan: '変更計画の作成', generate: 'コードの生成', register: 'JavaScript の登録', execute: '動作テスト環境への反映' };
     /** 計画・生成・登録の前に基準を取り直す。取れなければ理由つきで止める（運用環境の設定で代用しない） */
     async function ensureDevBase(kind) {
-      if (!devBaseLoader) return { ok: true, legacy: true, base: null };
       const b = await refreshDevBase({ reason: kind });
       if (b && b.ok) return { ok: true, base: b };
       return { ok: false, base: b, message: `動作テスト環境の設定を取得できなかったため、${BASE_KIND_JA[kind] || '処理'}を止めました（${b?.message || '不明'}）。運用環境の設定で代わりに進めることはしません。上の［再取得］で取り直してください。` };
@@ -30564,7 +30564,7 @@
     let baseDiffShown = false;
     function renderBaseDiff() {
       const el = host.querySelector('#kt-ai-base-diff');
-      if (el) el.innerHTML = baseDiffShown && devBaseLoader && isConnected() ? KTAiChatUi.baseDiffHtml(devBase) : '';
+      if (el) el.innerHTML = baseDiffShown && isConnected() ? KTAiChatUi.baseDiffHtml(devBase) : '';
     }
     /**
      * Phase 20（実機）: 相談中の JS は相談開始時に本文を取得済み（seed）。Field Scanner がキャッシュ復元（本文なし）だと、計画の Context（js-file facts）と
@@ -30647,11 +30647,9 @@
         const tb = nowMs();
         // Phase 21: 質問も最新の動作テスト環境を基準に答える（30 秒以内に取ったものは使い回す）。取れなければ運用環境の設定で答え、そのことを Context に入れる
         // 応答の速さ（2026-10-07）: 取得済みの基準があれば待たずに使い、古ければ裏で取り直す（取り直しが走っている間＝反映・登録の直後は、それを待つ）
-        if (devBaseLoader) {
-          //   設定取得の関所: Toolkit が設定を変えて古い印がある基準は使わずに、取り直しを待つ。進行中の自動の取得には合流して最後まで取る（joinDevBase）
-          if (devBase && devBase.ok && !devBasePromise && !devBaseStale) { if (nowMs() - devBaseAt >= DEV_BASE_ASK_MAX_AGE_MS) refreshDevBase({ reason: 'ask' }); }
-          else await (devBasePromise ? joinDevBase() : refreshDevBase({ maxAgeMs: DEV_BASE_ASK_MAX_AGE_MS, reason: 'ask' }));   // 取り直し中はその完了を待つ（refreshDevBase は 30 秒以内の基準を即返すので、Promise を直接待つ）
-        }
+        //   設定取得の関所: Toolkit が設定を変えて古い印がある基準は使わずに、取り直しを待つ。進行中の自動の取得には合流して最後まで取る（joinDevBase）
+        if (devBase && devBase.ok && !devBasePromise && !devBaseStale) { if (nowMs() - devBaseAt >= DEV_BASE_ASK_MAX_AGE_MS) refreshDevBase({ reason: 'ask' }); }
+        else await (devBasePromise ? joinDevBase() : refreshDevBase({ maxAgeMs: DEV_BASE_ASK_MAX_AGE_MS, reason: 'ask' }));   // 取り直し中はその完了を待つ（refreshDevBase は 30 秒以内の基準を即返すので、Promise を直接待つ）
         perf.baseWaitMs = nowMs() - tb;
         const tc = nowMs();
         //   C-1 第 3 段（2026-10-08）: 先回りの返答（brief）は削除した（対象を決められない質問は候補を選んでもらう）
@@ -30678,10 +30676,8 @@
       async propose({ utterance, previous = null, decisions = [], requirements = [], working = null, subject = null, signal = null, onText = null }) {
         const perf = { baseWaitMs: 0, contextMs: 0, requestMs: 0 };
         const tb = nowMs();
-        if (devBaseLoader) {
-          if (devBase && devBase.ok && !devBasePromise && !devBaseStale) { if (nowMs() - devBaseAt >= DEV_BASE_ASK_MAX_AGE_MS) refreshDevBase({ reason: 'propose' }); }
-          else await (devBasePromise ? joinDevBase() : refreshDevBase({ maxAgeMs: DEV_BASE_ASK_MAX_AGE_MS, reason: 'propose' }));
-        }
+        if (devBase && devBase.ok && !devBasePromise && !devBaseStale) { if (nowMs() - devBaseAt >= DEV_BASE_ASK_MAX_AGE_MS) refreshDevBase({ reason: 'propose' }); }
+        else await (devBasePromise ? joinDevBase() : refreshDevBase({ maxAgeMs: DEV_BASE_ASK_MAX_AGE_MS, reason: 'propose' }));
         perf.baseWaitMs = nowMs() - tb;
         const inputs = subject ? withConsultedSource(inputsNow()) : inputsNow();
         if (!inputs || !inputs.data) return { ok: false, reason: 'no-data', message: 'アプリ設定の取得が完了していません。' };
@@ -30855,18 +30851,13 @@
           if (!t) return { ok: false, reason: 'JS_TARGET_FILE_MISSING', message: '統合先の既存 JS が指定されていません。計画を修正してください。' };
           const target = t.target || 'desktop';
           const seed = conv?.state?.consultation?.seed || null;
-          if (gate.base) {
-            // 作業の基準（動作テスト環境）の本文を使う。相談を始めた時の本文と違っていれば、その旨を残す（新しい方で作る）
-            const bf = (gate.base.files || []).find(f => f.name === t.name && f.target === target) || null;
-            // URL 指定の JS は Toolkit から書き換えない（登録は止まる）。相談時に同一ドメインから取れた本文があれば、手で反映するコード / Diff のために使う
-            if (bf && bf.type === 'URL') existingSource = { name: t.name, target, text: seed && seed.name === t.name && seed.platform === target && typeof seed.source?.text === 'string' ? seed.source.text : null, from: 'url', external: seed ? !!seed.external : true, url: bf.url };
-            else if (bf && bf.sourceAvailable) existingSource = { name: t.name, target, text: bf.text, from: 'preview-base', env: 'preview', hash: bf.hash, ...(seed && seed.name === t.name && seed.platform === target && seed.source?.hash && seed.source.hash !== bf.hash ? { changedSinceConsult: { consulted: seed.source.hash, current: bf.hash } } : {}) };
-            if (!existingSource || typeof existingSource.text !== 'string') return { ok: false, reason: 'JS_SOURCE_UNAVAILABLE', file: { name: t.name, target }, message: bf ? (bf.type === 'URL' ? `統合先「${t.name}」は URL 指定の JavaScript です（本文を取得しません）。` : `統合先「${t.name}」の動作テスト環境の本文を取得できませんでした（${bf.error?.message || '不明'}）。運用環境の本文では生成しません。`) : `統合先「${t.name}」（${target === 'mobile' ? 'モバイル' : 'PC'}）は動作テスト環境に登録されていません。` };
-          } else {
-            if (seed && seed.name === t.name && seed.platform === target && seed.source?.available && typeof seed.source.text === 'string') existingSource = { name: t.name, target, text: seed.source.text, from: seed.customizationType === 'URL' ? 'url' : 'seed', ...(seed.customizationType === 'URL' ? { external: !!seed.external, url: seed.url ?? null } : {}) };
-            else existingSource = await loadJsSource(t.name, target, inputs);
-            if (!existingSource) return { ok: false, reason: 'JS_SOURCE_UNAVAILABLE', file: { name: t.name, target } };
-          }
+          //   簡素化（2026-10-17）: gate.ok なら基準がある。基準が無いとき（読み込みが無いときだけ）に相談の元の本文や解析の本文で代える分岐は削除した
+          // 作業の基準（動作テスト環境）の本文を使う。相談を始めた時の本文と違っていれば、その旨を残す（新しい方で作る）
+          const bf = (gate.base.files || []).find(f => f.name === t.name && f.target === target) || null;
+          // URL 指定の JS は Toolkit から書き換えない（登録は止まる）。相談時に同一ドメインから取れた本文があれば、手で反映するコード / Diff のために使う
+          if (bf && bf.type === 'URL') existingSource = { name: t.name, target, text: seed && seed.name === t.name && seed.platform === target && typeof seed.source?.text === 'string' ? seed.source.text : null, from: 'url', external: seed ? !!seed.external : true, url: bf.url };
+          else if (bf && bf.sourceAvailable) existingSource = { name: t.name, target, text: bf.text, from: 'preview-base', env: 'preview', hash: bf.hash, ...(seed && seed.name === t.name && seed.platform === target && seed.source?.hash && seed.source.hash !== bf.hash ? { changedSinceConsult: { consulted: seed.source.hash, current: bf.hash } } : {}) };
+          if (!existingSource || typeof existingSource.text !== 'string') return { ok: false, reason: 'JS_SOURCE_UNAVAILABLE', file: { name: t.name, target }, message: bf ? (bf.type === 'URL' ? `統合先「${t.name}」は URL 指定の JavaScript です（本文を取得しません）。` : `統合先「${t.name}」の動作テスト環境の本文を取得できませんでした（${bf.error?.message || '不明'}）。運用環境の本文では生成しません。`) : `統合先「${t.name}」（${target === 'mobile' ? 'モバイル' : 'PC'}）は動作テスト環境に登録されていません。` };
         }
         // 段階 C（契約 20 §4 / §12）: 要件の id（この customization・要件 R…・手順 P…）。能力の無い Gateway には送らない
         //   §0c.3（2026-10-08）: 代表条件は作らない（Gateway が必須の効果から作る）。必須の効果（会話が採用済みの計画から作って固定したもの）と、
@@ -30935,17 +30926,13 @@
       },
     };
     /**
-     * 統合先の既存 JS 本文を取る（順に: 直近の解析結果の本文 → d.loadJsSource（テスト / 差し替え）→ fileKey でダウンロード → 同一オリジン URL）。
+     * 統合先の既存 JS 本文を取る（順に: 直近の解析結果の本文 → fileKey でダウンロード → 同一オリジン URL）。簡素化（2026-10-17）: テスト用の差し替え口（d.loadJsSource）は削除した。
      * 取れなければ null（JS_SOURCE_UNAVAILABLE。推測して生成はしない）
      */
     async function loadJsSource(name, target, inputs) {
       const files = KTScan.summarizeFiles(inputs.scan || null, inputs.data || null);
       const f = files.find(x => x.name === name && x.target === target) || null;
       if (f && typeof f.text === 'string' && f.text.trim()) return { name, target, text: f.text, from: 'scan' };
-      if (typeof d.loadJsSource === 'function') {
-        try { const t = await d.loadJsSource({ name, target, fileKey: f?.fileKey ?? null, url: f?.url ?? null }); if (typeof t === 'string' && t.trim()) return { name, target, text: t, from: 'loader' }; } catch (e) { }
-        return null;
-      }
       if (f?.fileKey && typeof KTApi !== 'undefined' && typeof KTApi.downloadFile === 'function') {
         try { const t = await KTApi.downloadFile(f.fileKey); if (typeof t === 'string' && t.trim()) return { name, target, text: t, from: 'download' }; } catch (e) { }
       }
@@ -31231,7 +31218,7 @@
       let jsFiles = [];
       try { const inputs = inputsNow(); jsFiles = KTScan.summarizeFiles(inputs.scan || null, inputs.data || null); } catch (e) { jsFiles = []; }
       // Phase 21: 接続して開発支援を使うときだけ「今回の変更の基準」を出す（未接続の無料機能は運用環境の設定のまま）
-      const showBase = !!devBaseLoader && isConnected();
+      const showBase = isConnected();
       let focusId = null;
       try { const ae = typeof document !== 'undefined' ? document.activeElement : null; if (ae && ae.id && typeof $header.contains === 'function' && $header.contains(ae)) focusId = ae.id; } catch (e) { }
       //   §0f.4 の 6（2026-10-09）: 検証の上限が有効なときだけ、記録済み・確保中・上限を出す
@@ -31606,7 +31593,7 @@
       }
       // Phase 21: Customize タブが動作テスト環境の設定を取れず運用環境の内容を表示していたときは、そのことを会話に出す（計画・生成の前に動作テスト環境を取り直し、取れなければ止める）
       if (r.ok && !r.resumed && seed.customizeSource && seed.customizeSource !== 'preview') conv.notice(`「${seed.name}」は運用環境の内容を表示しています（動作テスト環境のカスタマイズ設定を取得できませんでした）。計画・コード生成の前に動作テスト環境を取り直し、取れなければ止めます（運用環境の本文では生成しません）。`, { kind: 'consult-production-source' });
-      if (r.ok && !r.resumed && devBaseLoader) refreshDevBase({ maxAgeMs: DEV_BASE_ASK_MAX_AGE_MS, reason: 'consult' });
+      if (r.ok && !r.resumed) refreshDevBase({ maxAgeMs: DEV_BASE_ASK_MAX_AGE_MS, reason: 'consult' });
       renderHeader(); renderSpec(); renderChat(); renderWsState();
       // 相談を始めたら右は「計画」（相談対象の現在情報）
       if (r.ok && !r.resumed) setArtifact({ type: VM.ARTIFACT.CONSULTATION, id: seed.sourceId, version: null, name: seed.name }, { auto: true });
@@ -31715,7 +31702,7 @@
       const { changes, blocked } = jsChangesOf(v);
       if (!changes.length) { jsExec.prepared = { executionId: null, status: 'BLOCKED', blockers: blocked.length ? blocked : [{ code: 'NOTHING_TO_REGISTER', message: '登録できる JavaScript がありません（仕様を確定してコードを生成してください）' }], warnings: [], changes: [], summary: JS_EMPTY_SUMMARY(), snapshot: null }; jsExec.stage = 'blocked'; renderJsReg(); return jsExec.prepared; }
       // Phase 21: 登録の直前に、生成したコードを最新の作業基準（動作テスト環境）で検査し直す（生成の後にフィールドが消えた・変わったなども登録不可にする）
-      if (devBaseLoader) await refreshDevBase({ reason: 'register' });
+      await refreshDevBase({ reason: 'register' });
       if (stalePrep()) return null;
       { const a2 = approvalNow(); if (!a2.ok) { jsExec.prepared = { executionId: null, status: 'BLOCKED', blockers: [{ code: 'APPROVAL_REQUIRED', message: a2.message }], warnings: [], changes: [], summary: JS_EMPTY_SUMMARY(), snapshot: null, confirmations: [], unverified: [] }; jsExec.stage = 'blocked'; renderJsReg(); return jsExec.prepared; } }
       try {
@@ -31767,7 +31754,7 @@
       renderJsReg();
       if (jsExec.execution?.put?.ok && typeof d.rescanJs === 'function') { try { await d.rescanJs(); fillTargets(); renderHeader(); } catch (e) { } }
       if (jsExec.execution?.put?.ok) notifySettingsChanged('js-register');   // 設定取得の関所: Customize の一覧など、ほかの場所の取得済みを古いとする
-      if (devBaseLoader) refreshDevBase({ reason: 'after-js-register' });   // Phase 21: 登録した後の動作テスト環境を次の基準にする
+      refreshDevBase({ reason: 'after-js-register' });   // Phase 21: 登録した後の動作テスト環境を次の基準にする
       return jsExec.execution;
     }
     async function startJsRollback() {
@@ -31787,7 +31774,7 @@
       jsExec.stage = 'rolled-back'; renderJsReg();
       if (typeof d.rescanJs === 'function') { try { await d.rescanJs(); fillTargets(); renderHeader(); } catch (e) { } }
       notifySettingsChanged('js-rollback');
-      if (devBaseLoader) refreshDevBase({ reason: 'after-js-rollback' });   // Phase 21
+      refreshDevBase({ reason: 'after-js-rollback' });   // Phase 21
       return jsExec.rollback;
     }
     /** Customization Audit（§37）。相談対象・仕様の版・承認した仕様・生成の出所・Code Review・登録前後・検証・復元。token / cookie / 本文は含めない */
@@ -31997,7 +31984,7 @@
       }
       setPaidStatus(KTContextUi.capabilityStatusText(capability)); setAskEnabled(); renderSession();
       // Phase 21: 接続できたら開発支援の作業基準（最新の動作テスト環境）を取得しておく（質問・計画の前にも取り直す）
-      if (capability.available && devBaseLoader && !devBase && !devBasePromise) refreshDevBase({ reason: 'connect' });
+      if (capability.available && !devBase && !devBasePromise) refreshDevBase({ reason: 'connect' });
       return capability;
     }
     /** Context ペインの「AIに質問」の回答（明示 focus）。会話にも ANSWER として出す */
@@ -32060,7 +32047,7 @@
      *   （追加指示 §4（a）2026-10-08: null は承認・反映の照合で BASE_UNKNOWN になり、照合を飛ばして進まない）
      *   （承認に指紋があれば BASE_UNKNOWN で止める。以前は undefined を渡して照合を黙って飛ばした）
      */
-    function devBaseStampNow() { if (!devBaseLoader) return undefined; if (!devBase || !devBase.ok) return null; try { const st = KTDevBase.stamp(devBase); return st && st.fingerprint ? st : null; } catch (e) { return null; } }
+    function devBaseStampNow() { if (!devBase || !devBase.ok) return null; try { const st = KTDevBase.stamp(devBase); return st && st.fingerprint ? st : null; } catch (e) { return null; } }
     const finalFlow = () => !!(adopted && adopted.fromDraft);
     /**
      * §0e.1（2026-10-09・不具合 A）: 設定の手順が止まらずに反映できたか。準備の時点で実行する手順（PENDING）だけで判定する。
@@ -32212,12 +32199,10 @@
       const explicit = intent === FETCH.EXPLICIT;
       if (!explicit && !canAutoFetch()) return { paused: true };
       if (explicit) precheckHeld = null;
-      if (devBaseLoader) {
-        const pausedBefore = devBasePausedP;
-        const b = await refreshDevBase({ maxAgeMs: DEV_BASE_ASK_MAX_AGE_MS, reason: explicit ? 'execute' : 'precheck' });
-        if (!explicit && (!canAutoFetch() || devBasePausedP !== pausedBefore)) return { paused: true };   // 基準の取得が途中で止まった（前の基準で準備しない）
-        if (!b || !b.ok) return { settings: null, js: null, parts: null, items: null, reasons: [`動作テスト環境の今の設定を取得できませんでした（${b?.message || '不明'}）。ヘッダーの［再取得］で取り直してください。`] };
-      }
+      const pausedBefore = devBasePausedP;
+      const b = await refreshDevBase({ maxAgeMs: DEV_BASE_ASK_MAX_AGE_MS, reason: explicit ? 'execute' : 'precheck' });
+      if (!explicit && (!canAutoFetch() || devBasePausedP !== pausedBefore)) return { paused: true };   // 基準の取得が途中で止まった（前の基準で準備しない）
+      if (!b || !b.ok) return { settings: null, js: null, parts: null, items: null, reasons: [`動作テスト環境の今の設定を取得できませんでした（${b?.message || '不明'}）。ヘッダーの［再取得］で取り直してください。`] };
       if (typeof onBase === 'function') onBase();
       const reads = explicit ? { api: executor.api, hold: () => { } } : precheckReadsOf();
       const shouldContinue = KTFetchGate.continuer(intent, canAutoFetch);
@@ -32256,7 +32241,7 @@
     async function runFinalPrecheck(v, key = finalPreKeyOf(v)) {
       const seq = ++finalPre.seq;
       if (finalPre.planId !== v.planId || finalPre.version !== v.version) finalPre.notice = null;
-      Object.assign(finalPre, { key: null, runKey: key, planId: v.planId, version: v.version, status: devBaseLoader ? 'base' : 'running', settings: null, js: null, parts: null, items: null, reasons: [] });
+      Object.assign(finalPre, { key: null, runKey: key, planId: v.planId, version: v.version, status: 'base', settings: null, js: null, parts: null, items: null, reasons: [] });
       Promise.resolve().then(() => { if (seq === finalPre.seq) renderChat(); });
       let r;
       try { r = await computePrecheck(v, { onBase: () => { if (seq === finalPre.seq) { finalPre.runKey = finalPreKeyOf(v); if (finalPre.status === 'base') { finalPre.status = 'running'; renderChat(); } } } }); }
@@ -32337,7 +32322,7 @@
       const NEXT_SETTINGS_ONLY = '設定は反映済みです。JavaScript を入れないときは、［設定を変更前の状態に戻す］で戻せます。続けるときは、理由を確かめてから同じ依頼をもう一度送ると最終案を作り直します。';
       try {
         // 1. 準備のやり直しと指紋の比較（書き込みの前。違えば何も書き込まずに止め、承認を外す）
-        if (devBaseLoader) await refreshDevBase({ reason: 'execute' });
+        await refreshDevBase({ reason: 'execute' });
         if (conv.activePlan() !== v) return finish({ stage: 'stopped', stop: { text: '反映の前に最終案が新しくなりました。何も書き込んでいません。', changes: [], next: '最新の最終案のカードから反映してください。' } });
         const a = approvalNow();
         if (!a.ok) {
@@ -32514,7 +32499,7 @@
       execState.stage = 'done'; renderExec();
       // Phase 21: 反映した後の動作テスト環境を次の作業の基準にする（取り直す）
       notifySettingsChanged('apply');
-      if (devBaseLoader) await refreshDevBase({ reason: 'after-apply' });
+      await refreshDevBase({ reason: 'after-apply' });
       return execState.execution;
     }
     /** 監査 JSON。実行した計画の版（最新の版とは限らない）の plan / review を使う */
@@ -32548,7 +32533,7 @@
       } catch (e) { execState.error = e?.message || String(e); }
       execState.stage = 'rolled-back'; renderExec();
       notifySettingsChanged('rollback');
-      if (devBaseLoader) refreshDevBase({ reason: 'after-rollback' });   // Phase 21
+      refreshDevBase({ reason: 'after-rollback' });   // Phase 21
       return execState.rollback;
     }
     /** 判断を記録し、表示中の Review JSON・判断の集計・Executor の件数を追従させる */
@@ -32988,7 +32973,7 @@
      */
     function onVisible() {
       try { fillTargets(); renderHeader(); } catch (e) { }
-      if (devBaseLoader && isConnected()) refreshDevBase({ maxAgeMs: 60 * 1000, reason: 'tab' });
+      if (isConnected()) refreshDevBase({ maxAgeMs: 60 * 1000, reason: 'tab' });
       if (finalPreDeferred) { finalPreDeferred = false; try { scheduleFinalPrecheck(); } catch (e) { } }
     }
     return {

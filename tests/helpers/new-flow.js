@@ -17,7 +17,7 @@
 //   const { ready, pre, exec, js } = await K.prepareOnScreen(m);   // 承認の欄の準備（書き込みなし。設定の手順と JavaScript の登録の準備）が終わるまで待つ（押さない）
 //   // §0e.1（2026-10-09）: 承認と反映は最終案のカードの［動作テスト環境へ反映］1 回。押して結果まで進める部品:
 //   const r = await K.applyOnScreen(m, { before });          // 押す前のボタン・承認の欄、押した後の結果（finalRun）・書き込み・結果のカード
-//   //   混在（標準設定と JavaScript）の画面: const { m } = await K.mountFinal({ kind: 'mixed' | 'js' | 'settings' })（作業の基準はモックの今の状態。liveBase）
+//   //   混在（標準設定と JavaScript）の画面: const { m } = await K.mountFinal({ kind: 'mixed' | 'js' | 'settings' })（作業の基準はモックの今の状態）
 //   //   K.HEALTH の conversation から 'proposal' を外すと「接続先が非対応」の経路（計画・生成・登録に進まない）
 //   //   計画の偽物: K.planJs（JavaScript あり。cust・questions・requirementOps を変えられる）・K.PLAN_V1（画面用。設定の手順だけ）・K.planOk / planFail / planThrow
 //   // 台本（K.script）の発言: 課長・部長の承認者を選ぶ運用にしたい / 100円未満は部長不要、100万円以上は必要 / 7営業日で。会社独自の休業日は今回はなし / おすすめで
@@ -28,6 +28,7 @@ const { makeFakeHost } = require('./fake-dom.js');
 const FX = require('../fixtures/ai-context-app.js');
 const { buildScanPayload } = require('./scan-payload.js');
 const { makeKintoneMock } = require('./kintone-preview-mock.js');
+const { devBaseLoaderOf, withDevBase } = require('./dev-base-fake.js');
 
 /**
  * @param {object} T loadToolkit() の結果
@@ -144,32 +145,12 @@ function createNewFlowKit(T) {
    * §0e.1（2026-10-09）: 作業の基準（KTDevBase）をモックの今の状態から作る loadDevBase（動作テスト環境 = モックの API の GET。運用環境 = 固定の INPUTS）。
    *   設定を反映した後の基準の取り直し・登録前の再検査が、新設したフィールドを含む今の設定で行われる（実機と同じ順序を画面で確かめるため）
    */
-  function loadDevBaseFromMock(mockRef) {
-    const PROD = {
-      'app/form/fields': (d) => ({ properties: clone(d.fields || {}) }), 'app/form/layout': (d) => ({ layout: clone(d.layout || []) }), 'app/views': (d) => ({ views: clone(d.views?.views || {}) }),
-      'app/status': (d) => clone(d.status || { enable: false, states: null, actions: null }), 'app/notifications/general': (d) => clone(d.generalNotify || { notifications: [], notifyToCommenter: false }),
-      'app/notifications/perRecord': (d) => clone(d.perRecordNotify || { notifications: [] }), 'app/notifications/reminder': (d) => clone(d.reminderNotify || { notifications: [], timezone: 'Asia/Tokyo' }),
-      'app/actions': (d) => clone(d.actions || { actions: {} }), 'app/customize': (d) => clone(d.customize || { scope: 'ALL', desktop: { js: [], css: [] }, mobile: { js: [], css: [] } }),
-      'app/settings': (d) => clone(d.settings || { name: 'app' }), 'app/acl': (d) => clone(d.appAcl || { rights: [] }), 'record/acl': (d) => clone(d.recordAcl || { rights: [] }), 'field/acl': (d) => clone(d.fieldAcl || { rights: [] }),
-      'app/reports': (d) => clone(d.reports || { reports: {} }), 'app/plugins': (d) => clone(d.appPlugins || { plugins: [] }),
-    };
-    return async () => {
-      const api = mockRef().api;
-      const PREV = { 'app/form/fields': () => api.getPreviewFields('341'), 'app/form/layout': () => api.getPreviewLayout('341'), 'app/views': () => api.getPreviewViews('341'), 'app/status': () => api.getPreviewStatus('341'), 'app/notifications/general': () => api.getPreviewGeneralNotifications('341'), 'app/notifications/perRecord': () => api.getPreviewPerRecordNotifications('341'), 'app/notifications/reminder': () => api.getPreviewReminders('341'), 'app/actions': () => api.getPreviewActions('341'), 'app/customize': () => api.getPreviewCustomize('341') };
-      const getImpl = async (path) => {
-        const mm = /^\/k\/v1\/(preview\/)?(.+)$/.exec(path);
-        const key = mm[2];
-        if (mm[1] && PREV[key]) return PREV[key]();
-        const fn = PROD[key]; if (!fn) throw Object.assign(new Error(`unknown path ${path}`), { code: 'TEST' });
-        return { ...fn(INPUTS.data), revision: '1' };
-      };
-      return T.KTDevBase.load({ appId: '341', getImpl, download: async (k) => api.downloadFile(k), now: () => new Date('2026-10-09T00:00:00Z').getTime() });
-    };
-  }
+  //   簡素化（2026-10-17）: 画面は作業の基準の読み込みが必須。mount は extra まで決めた後の executor と getInputs から作る（withDevBase）。この関数は個別に渡すテスト用
+  function loadDevBaseFromMock(mockRef) { return devBaseLoaderOf(T, { appId: '341', production: INPUTS.data, mockRef }); }
   //   §0f.5 の 3（2026-10-09）: scriptFn = 仮案の台本（既定は script）を差し替えられる（実機の仮案の文を画面で描く回帰用）
   //   2026-10-10（再検証前の指示 §4）: clientWrap = 偽の session.client を包む関数（送られた引数の budget を記録し、応答に Gateway の費用の記録 budgetMeta を足す回帰用）
   //   2026-10-15（追加の指示 1）: autoMap = 偽の計画の AI が要件の対応づけ（turn.requirementOps）を返す（withPlannerMapping。計画の Context の requirements を計画の要素に結び付ける）
-  function mount({ health = HEALTH, proposeGate = null, planImpl = null, generateImpl = null, extra = null, liveBase = false, scriptFn = script, clientWrap = null, autoMap = true } = {}) {
+  function mount({ health = HEALTH, proposeGate = null, planImpl = null, generateImpl = null, extra = null, scriptFn = script, clientWrap = null, autoMap = true } = {}) {
     const mapFlat = (res, ctx) => (autoMap ? mapPlanResponse(res, ctx) : res);
     const storage = makeStorage();
     const settings = KTAiClient.createSettingsStore({ storage, host: 't.cybozu.com' });
@@ -198,7 +179,7 @@ function createNewFlowKit(T) {
     const flow = { start: async () => ({}), cancel() { }, reopen: () => false, state: () => ({ phase: 'idle' }), isRunning: () => false };
     const host = makeFakeHost();
     const mock = makeKintoneMock(INPUTS.data, { jsSources: [] });
-    const panel = mountAiWorkspace(host, { getInputs: () => INPUTS, copyText: async () => true, downloadText: () => { }, colors: { border: '#ccc', bg: '#fff' }, settings, session, hostname: 't.cybozu.com', connectFlow: flow, executor: { api: mock.api, appId: '341' }, now: () => clock.t, clock: () => clock.t, ...(liveBase ? { loadDevBase: loadDevBaseFromMock(() => mock) } : {}), ...(extra || {}) });
+    const panel = mountAiWorkspace(host, withDevBase(T, { getInputs: () => INPUTS, copyText: async () => true, downloadText: () => { }, colors: { border: '#ccc', bg: '#fff' }, settings, session, hostname: 't.cybozu.com', connectFlow: flow, executor: { api: mock.api, appId: '341' }, now: () => clock.t, clock: () => clock.t, ...(extra || {}) }));
     const $ = (id) => host.querySelector(`#${id}`);
     return Object.assign(mx, { host, panel, $, calls, clock, mock, conv: () => panel.conversation(), chat: () => $('kt-ai-chat').innerHTML, msgs: () => panel.conversation().state.messages });
   }
@@ -441,9 +422,9 @@ function createNewFlowKit(T) {
     return { impl, calls };
   };
   /** 画面: 計画の種類 kind で台本の 4 発言 → 最終案まで（作業の基準はモックの今の状態） */
-  const mountFinal = async ({ kind = 'mixed', field = null, health = HEALTH_V, liveBase = true, coverage = null } = {}) => {
+  const mountFinal = async ({ kind = 'mixed', field = null, health = HEALTH_V, coverage = null } = {}) => {
     const gen = screenGenerate({ field: field || (kind === 'js' ? 'case_name' : 'approval_memo'), targetFile: kind === 'js' ? 'caseLock.js' : 'memoLock.js', coverage });
-    const m = mount({ health, planImpl: planImplOf(screenPlan(kind)), generateImpl: gen.impl, liveBase });
+    const m = mount({ health, planImpl: planImplOf(screenPlan(kind)), generateImpl: gen.impl });
     await ticks();
     const v = await adoptOnScreen(m);
     await ticks(20);

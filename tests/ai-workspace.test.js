@@ -11,6 +11,7 @@
 // 実行方法: node tests/ai-workspace.test.js
 'use strict';
 const { loadToolkit, makeAssert } = require('./helpers/load-toolkit.js');
+const { withDevBase } = require('./helpers/dev-base-fake.js');
 const { makeFakeHost, makeFakeDocument } = require('./helpers/fake-dom.js');
 const { createNewFlowKit } = require('./helpers/new-flow.js');
 const T0 = loadToolkit();
@@ -111,11 +112,11 @@ function mount({ paid = true, connected = true, planResponses = null, askError =
   const host = makeFakeHost();
   const copies = [], downloads = [];
   const mock = makeKintoneMock(inputs.data);
-  const panel = mountAiWorkspace(host, {
+  const panel = mountAiWorkspace(host, withDevBase(T0, {
     getInputs: () => inputs, copyText: async (t) => { copies.push(t); return true; }, downloadText: (name, text) => downloads.push({ name, text }), colors: { border: '#ccc', bg: '#fff' },
     ...(paid ? { settings, session, hostname: 't.cybozu.com', connectFlow: flow } : {}),
-    executor: executor === undefined ? { api: mock.api, appId: '341' } : executor,
-  });
+    executor: executor === undefined ? { api: mock.api, appId: String(FX.SELF_APP) } : executor,   // 入力のデータ（FX）と同じアプリ（作業の基準もこの App ID で作る）
+  }));
   const $ = (id) => host.querySelector(`#${id}`);
   return { host, panel, $, calls, copies, downloads, mock, session, settings, conv: () => panel.conversation(), chat: () => $('kt-ai-chat').innerHTML, msgs: () => panel.conversation().state.messages, types: () => panel.conversation().state.messages.map(m => m.type) };
 }
@@ -382,7 +383,7 @@ console.log('\n--- 4. AI Workspace: free / connected / responsive / header ---')
   // ヘッダー（2026-10-06）: 開発支援・アプリ名（App ID）・反映先（動作テスト環境。運用環境は変えない）・AI の接続のボタン。「解析 ✓ JavaScript ✓ AI ✓」の並びは無い。件数は［詳細］に
   const header = c.$('kt-ai-header').innerHTML;
   assert(/開発支援/.test(header) && new RegExp(`案件管理（App ${FX.SELF_APP}）`).test(header) && /反映先：<b>動作テスト環境<\/b>（運用環境は変更しません）/.test(header) && /id="kt-ai-header-status"[^>]*data-act="open-connection"[^>]*>AI 接続済み</.test(header)
-    && !/解析<\/span> ✓|JavaScript<\/span> ✓|AI<\/span> ✓/.test(header) && !/今回の変更の基準|revision/.test(header) && !/Fields<\/span>/.test(header) && /フィールド 23/.test(header), 'ヘッダー（2026-10-06）: 開発支援 / 案件管理（App 341）/ 反映先：動作テスト環境（運用環境は変更しません）/ ［AI 接続済み］。件数は「詳細」に');
+    && !/解析<\/span> ✓|JavaScript<\/span> ✓|AI<\/span> ✓/.test(header) && !/今回の変更の基準|revision/.test(header) && !/Fields<\/span>/.test(header) && /フィールド 23/.test(header), `ヘッダー（2026-10-06）: 開発支援 / 案件管理（App 341）/ 反映先：動作テスト環境（運用環境は変更しません）/ ［AI 接続済み］。件数は「詳細」に: ${header.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').slice(0, 300)}`);
   // 作業の基準（baseHtml）: 「HH:MM 取得・運用環境との差 N 件」［差分を見る］［再取得］。取得できないときは止めていることを書く。「今回の変更の基準」「revision」の語は出さない
   { const conn = { paidEnabled: true, connected: true, available: true };
     const okBase = { ok: true, loadedAt: '2026-10-06T01:23:00.000Z', revision: { preview: 12, production: 11 }, diff: { available: true, items: [{ change: 'CHANGED', message: '一覧「担当者別」' }] }, errors: [], files: [] };
@@ -418,7 +419,7 @@ console.log('\n--- 4. AI Workspace: free / connected / responsive / header ---')
   assert(c.panel.drawerState().pane === 'evidence' && c.panel.drawerState().open === true && c.$('kt-ai-pane-evidence').style.display === 'block' && c.$('kt-ai-pane-plan').style.display === 'none' && /class="kt-ai-dtab active[^"]*" data-pane="evidence"/.test(c.$('kt-ai-drawer-tabs').innerHTML), 'タブの切り替え（詳細情報）。切り替えても右は閉じない');
   // ヘッダーの［反映の記録］→ 'log' ペイン（記録が 0 件の案内）・［AI 接続済み］→ 右の「接続」
   await c.$('kt-ai-header').dispatch({ type: 'click', target: { dataset: { act: 'open-log' } } });
-  assert(c.panel.drawerState().pane === 'log' && c.$('kt-ai-pane-log').style.display === 'block' && /このページで動作テスト環境に反映した変更は、まだありません。/.test(c.$('kt-ai-apply-log').innerHTML) && !/kt-ai-count/.test(c.$('kt-ai-header').innerHTML), 'ヘッダーの［反映の記録］→ 反映の記録（0 件の案内。件数の表示は無い）');
+  assert(c.panel.drawerState().pane === 'log' && c.$('kt-ai-pane-log').style.display === 'block' && /このページではまだ反映していません。/.test(c.$('kt-ai-apply-log').innerHTML) && !/kt-ai-count/.test(c.$('kt-ai-header').innerHTML), 'ヘッダーの［反映の記録］→ 反映の記録（0 件の案内。件数の表示は無い）');
   await c.$('kt-ai-header').dispatch({ type: 'click', target: { dataset: { act: 'open-connection' } } });
   assert(c.panel.drawerState().pane === 'connection' && c.$('kt-ai-pane-connection').style.display === 'block', 'ヘッダーの［AI 接続済み］→ 右の「接続」');
   assert(/このアプリについて、相談したいことや変更したいことを入力してください/.test(c.chat()), '会話が空のときの案内（2026-10-06: 相談・変更したいことを入力する）');

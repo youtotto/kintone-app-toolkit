@@ -10,6 +10,7 @@ process.on('unhandledRejection', (e) => { if (/kintone is not defined/.test(Stri
 const fs = require('fs');
 const path = require('path');
 const { loadToolkit, makeAssert } = require('./helpers/load-toolkit.js');
+const { withDevBase } = require('./helpers/dev-base-fake.js');
 const { gwCandidateHash, gwHashOfCtx, withGwHash } = require('./helpers/gw-hash.js');
 const { makeFakeHost, makeFakeDocument } = require('./helpers/fake-dom.js');
 const T = loadToolkit();
@@ -90,13 +91,13 @@ function mount({ inputs = INPUTS, paid = true, plans = null, now = null, extra =
   const copies = [], opened = [];
   const mock = makeKintoneMock(inputs.data, { jsSources: [{ name: 'fieldOnOff.js', target: 'desktop', text: FIELD_ON_OFF }] });
   const clock = { t: 1000000 };
-  const panel = mountAiWorkspace(host, {
+  const panel = mountAiWorkspace(host, withDevBase(T, {
     getInputs: () => inputs, copyText: async (t) => { copies.push(t); return true; }, downloadText: () => { }, colors: { border: '#ccc', bg: '#fff' },
     ...(paid ? { settings, session, hostname: 't.cybozu.com', connectFlow: flow } : {}),
-    executor: { api: mock.api, appId: '341' }, openCustomize: (x) => { opened.push(x); return { found: true }; },
+    executor: { api: mock.api, appId: String(FX.SELF_APP) }, openCustomize: (x) => { opened.push(x); return { found: true }; },
     now: now || (() => clock.t),
     ...extra,
-  });
+  }));
   const $ = (id) => host.querySelector(`#${id}`);
   const ws = () => ['kt-ai-subject-info', 'kt-ai-spec', 'kt-ai-plan-result', 'kt-ai-review-result', 'kt-ai-exec', 'kt-ai-jsreg', 'kt-ai-code-head', 'kt-ai-code-review'].map(id => $(id).innerHTML).join('\n');
   return { host, panel, $, calls, copies, opened, mock, clock, ws, conv: () => panel.conversation(), chat: () => $('kt-ai-chat').innerHTML, msgs: () => panel.conversation().state.messages, types: () => panel.conversation().state.messages.map(m => m.type) };

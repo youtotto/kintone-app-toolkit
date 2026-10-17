@@ -17,6 +17,7 @@ process.on('unhandledRejection', (e) => { if (/kintone is not defined|reading 'g
 const fs = require('fs');
 const path = require('path');
 const { loadToolkit, makeAssert } = require('./helpers/load-toolkit.js');
+const { withDevBase } = require('./helpers/dev-base-fake.js');
 const { gwCandidateHash, gwHashOfCtx, withGwHash } = require('./helpers/gw-hash.js');
 const { makeFakeHost, makeFakeDocument } = require('./helpers/fake-dom.js');
 const T = loadToolkit();
@@ -89,12 +90,12 @@ function mount({ inputs = INPUTS, paid = true, planResponse = PLAN_HYBRID, openC
   const host = makeFakeHost();
   const copies = [], downloads = [], opened = [];
   const mock = makeKintoneMock(inputs.data, { jsSources: [{ name: 'fieldOnOff.js', target: 'desktop', text: FIELD_ON_OFF }] });
-  const panel = mountAiWorkspace(host, {
+  const panel = mountAiWorkspace(host, withDevBase(T, {
     getInputs: () => inputs, copyText: async (t) => { copies.push(t); return true; }, downloadText: (name, text) => downloads.push({ name, text }), colors: { border: '#ccc', bg: '#fff' },
     ...(paid ? { settings, session, hostname: 't.cybozu.com', connectFlow: flow } : {}),
     executor: { api: mock.api, appId: '310' },
     openCustomize: openCustomize === undefined ? (x) => { opened.push(x); return { found: true }; } : openCustomize,
-  });
+  }));
   const $ = (id) => host.querySelector(`#${id}`);
   return { host, panel, $, calls, copies, downloads, opened, mock, conv: () => panel.conversation(), chat: () => $('kt-ai-chat').innerHTML, msgs: () => panel.conversation().state.messages, types: () => panel.conversation().state.messages.map(m => m.type) };
 }

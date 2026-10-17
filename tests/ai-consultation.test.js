@@ -10,6 +10,7 @@
 // 実行方法: node tests/ai-consultation.test.js
 'use strict';
 const { loadToolkit, makeAssert } = require('./helpers/load-toolkit.js');
+const { withDevBase } = require('./helpers/dev-base-fake.js');
 const { gwCandidateHash, gwHashOfCtx, withGwHash } = require('./helpers/gw-hash.js');
 const { makeFakeHost } = require('./helpers/fake-dom.js');
 const { createNewFlowKit } = require('./helpers/new-flow.js');
@@ -118,10 +119,10 @@ function mount({ inputs = INPUTS, planResponse = PLAN_REPLACE, generatedFor = ge
   const host = makeFakeHost();
   const copies = [], rescans = [];
   const mock = makeKintoneMock(inputs.data, { jsSources: FILES, ...mockOpt });
-  const panel = mountAiWorkspace(host, {
+  const panel = mountAiWorkspace(host, withDevBase(T0, {
     getInputs: () => inputs, copyText: async (t) => { copies.push(t); return true; }, downloadText: () => { }, colors: { border: '#ccc', bg: '#fff' },
     settings, session, hostname: 't.cybozu.com', connectFlow: flow, executor: { api: mock.api, appId: '310' }, rescanJs: async () => { rescans.push(1); return { ok: true }; },
-  });
+  }));
   const $ = (id) => host.querySelector(`#${id}`);
   return { host, panel, $, calls, copies, rescans, mock, conv: () => panel.conversation(), chat: () => $('kt-ai-chat').innerHTML, msgs: () => panel.conversation().state.messages, types: () => panel.conversation().state.messages.map(m => m.type), pane: () => $('kt-ai-jsreg').innerHTML };
 }
@@ -251,7 +252,7 @@ console.log('\n--- §46〜§53（UI 経由）: 既存 FILE の差し替え登録
   const r0 = await m.panel.send('JS を登録して');
   assert(r0.intent === KTAiConversation.INTENT.REQUEST_JS_PREVIEW && m.msgs()[m.msgs().length - 1].data?.kind === 'js-preview-needs-approval' && writes(m).length === 0 && m.panel.jsExecState().stage === 'idle', '承認前の「JS を登録して」: 最終案の承認へ案内するだけ（登録しない・書き込み 0）');
   const entry = m.panel.generated('C1');
-  assert(entry && entry.review.status === 'OK' && entry.existingSource?.from === 'seed' && entry.existingSource.text === FIELD_ON_OFF && m.calls.generate[0].ctx.existingFile?.source === FIELD_ON_OFF, '生成: 統合先の本文は相談の seed から（取り直さない）・Code Review OK');
+  assert(entry && entry.review.status === 'OK' && entry.existingSource?.from === 'preview-base' && entry.existingSource.text === FIELD_ON_OFF && m.calls.generate[0].ctx.existingFile?.source === FIELD_ON_OFF, '生成: 統合先の本文は作業の基準（動作テスト環境のファイル）から・Code Review OK（簡素化 2026-10-17: 相談の元の本文で代える分岐は削除した）');
   await clickChat(m, 'open-code', { cid: 'C1', plan: v.planId, version: String(v.version) });
   assert(!/data-act="open-js-register"/.test(m.chat()), '登録の操作は最終案のカードの［動作テスト環境へ反映］だけ（会話の登録の案内・右の「コード」の［動作テスト環境へ登録］は出さない。§0e.1）');
   //   §0e.1（2026-10-09）: 登録の準備（読み取りだけ）は最終案が承認できる状態になると自動で走り、以前の登録の最終確認（§21）の内容を承認の欄に出す
@@ -355,12 +356,13 @@ console.log('\n--- 新規 JS（desktop）の登録 / mobile（desktop を変え�
     const up = await m.mock.api.uploadFile('manual.js', '// manual', 'text/javascript');
     await m.mock.api.putPreviewCustomize('310', { app: 310, scope: cur.scope, desktop: { js: [...cur.desktop.js.map(e => (e.type === 'URL' ? e : { type: 'FILE', file: { fileKey: e.file.fileKey } })), { type: 'FILE', file: { fileKey: up } }], css: cur.desktop.css.map(e => ({ type: 'FILE', file: { fileKey: e.file.fileKey } })) }, mobile: { js: cur.mobile.js.map(e => ({ type: 'FILE', file: { fileKey: e.file.fileKey } })), css: [] } }, cur.revision);
   } });
-  assert(r50.run && r50.run.stage === 'stopped' && !r50.run.written && r50.writes.join(',') === 'POST file,PUT customize' && !v.approval && /何も書き込まずに止めました/.test(r50.card) && /JavaScript \/ CSS の一覧または適用範囲が、承認の欄の準備の後に変わりました/.test(r50.card) && /もう一度押してください/.test(r50.card), `§50 承認の欄の準備の後にカスタマイズ設定が変わった → 書き込まずに止め、変わった点と次の手を出す・承認を外す: ${r50.card.slice(0, 300)}`);
-  //   照合そのもの（STALE_CUSTOMIZATION）は消していない: 仕様確定の後に設定が変わったまま登録の準備の部品を呼ぶと止まる
+  assert(r50.run && r50.run.stage === 'stopped' && !r50.run.written && r50.writes.join(',') === 'POST file,PUT customize' && !v.approval && /何も書き込まずに止めました/.test(r50.card) && /JavaScript \/ CSS の一覧または適用範囲が、承認の欄の準備の後に変わりました/.test(r50.card) && /最新の設定で最終案を作り直します/.test(r50.card), `§50 承認の欄の準備の後にカスタマイズ設定が変わった → 書き込まずに止め、変わった点と次の手（作り直し）を出す・承認を外す: ${r50.card.slice(0, 300)}`);
+  //   簡素化（2026-10-17）: 作り直しの扱い（STALE）の最終案は、会話の承認の口（古い入口）からも承認できず、登録の部品も承認が無いので止まる。
+  //   照合 STALE_CUSTOMIZATION そのもの（内容を変えずに保存し直した revision の変化）は部品のテスト（ai-js-executor・ai-flow-redesign H6）が確かめる
   const v50 = m.conv().activePlan();
-  if (!v50.approval) m.conv().approveFinal({ planId: v50.planId, version: v50.version });
+  const ap50 = m.conv().approveFinal({ planId: v50.planId, version: v50.version });
   await m.panel.startJsRegister(v50); await ticks(6);
-  assert(m.panel.jsExecState().stage === 'blocked' && m.panel.jsExecState().prepared.blockers.some(b => b.code === 'STALE_CUSTOMIZATION') && /登録できません/.test(m.pane()) && /STALE_CUSTOMIZATION/.test(m.pane()), '§50 仕様確定後にカスタマイズ設定が変わった → 登録の準備の部品も STALE_CUSTOMIZATION で停止（照合は残す）');
+  assert(v50.status === 'STALE' && !ap50.ok && ap50.reason === 'STALE' && !v50.approval && m.panel.jsExecState().stage === 'blocked' && m.panel.jsExecState().prepared.blockers.some(b => b.code === 'APPROVAL_REQUIRED') && writes(m).join(',') === 'POST file,PUT customize', `§50 作り直しの扱いの最終案は古い入口からも承認できず、登録の部品も止まる（書き込みは別の担当者の変更だけ）: ${JSON.stringify({ ap50, status: v50.status, w: writes(m) })}`);
 }
 {
   // §53 rollback stale: 登録後に人間が JS を足した

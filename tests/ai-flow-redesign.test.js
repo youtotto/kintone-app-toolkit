@@ -1743,7 +1743,8 @@ await section(async () => {
   const CODE_S = "(function () {\n  'use strict';\n  kintone.events.on(['app.record.edit.show'], function (event) {\n    const record = event.record;\n    if (record['ステータス'] && record['ステータス'].value === '承認待ち') record['case_name'].disabled = true;\n    return event;\n  });\n})();";
   /** 既存 JS（編集画面で案件名を読む。padTo 文字まで関数の定義で伸ばす。同じ文字の長い並びは秘密情報らしい文字列として伏字になるので使わない） */
   const bigJs = (name, padTo) => { let t = `(function () {\n  kintone.events.on('app.record.edit.show', function (event) {\n    var v = event.record['case_name'].value; // ${name}\n    return event;\n  });\n})();\n`; for (let i = 0; t.length < padTo; i++) t += `function ${name.replace(/[^a-z0-9]/g, '')}_f${i}(r) { return r + ${i}; }\n`; return t; };
-  /** アプリ解析の入力（既存の fixture に既存 JS を足す。URL 指定は登録設定にだけ足す） */
+  /** アプリ解析の入力（既存の fixture に既存 JS を足す。URL 指定は登録設定にだけ足す）。足した本文は偽の kintone にも持たせる（srcOf。作業の基準は動作テスト環境のファイルから作る） */
+  const srcOf = new WeakMap();
   const inputsWith = (extraFiles, extraUrls = []) => {
     const data = clone(INPUTS.data);
     for (const f of extraFiles) data.customize.desktop.js.push({ type: 'FILE', file: { contentType: 'text/javascript', fileKey: `K-${f.name}`, name: f.name, size: String(f.text.length) } });
@@ -1755,7 +1756,9 @@ await section(async () => {
     const scan = buildScanPayload({ KTScan, KTDeps }, { appId: FX.SELF_APP, files, fields: fieldRows, deps, skippedUrlFiles: FX.skippedUrlFiles });
     scan.results = KTScan.analyze({ fields: fieldRows, files: files.filter(f => f.kind === 'js'), snippet: { before: 24, after: 48 } });
     KTDeps.mergeScannerEdges(deps, scan);
-    return { data, deps, scan, incoming: FX.incoming };
+    const out = { data, deps, scan, incoming: FX.incoming };
+    srcOf.set(out, files.filter(x => x.kind === 'js').map(x => ({ name: x.name, target: x.target || 'desktop', text: x.text })));
+    return out;
   };
   //   envReason: 偽の生成工程が返す動作テストの not-run の理由（§0c.9 の次の手の分け方の画面の回帰）
   const run = async (inputs, { health = null, envReason = null } = {}) => {
@@ -1771,7 +1774,7 @@ await section(async () => {
       if (!v.ok) throw new Error(JSON.stringify(v.errors));
       return { ...v.normalized, requestId };
     };
-    const m = mount({ health: HEALTH_V, planImpl: ({ ctx, requestId }) => { const v = KTAiClient.validatePlan(planResp(ctx.goal), ctx); if (!v.ok) throw new Error(JSON.stringify(v.errors)); return { ...v.normalized, requestId, clientWarnings: v.warnings }; }, generateImpl, extra: { getInputs: () => inputs } });
+    const m = mount({ health: HEALTH_V, planImpl: ({ ctx, requestId }) => { const v = KTAiClient.validatePlan(planResp(ctx.goal), ctx); if (!v.ok) throw new Error(JSON.stringify(v.errors)); return { ...v.normalized, requestId, clientWarnings: v.warnings }; }, generateImpl, extra: { getInputs: () => inputs, executor: { api: makeKintoneMock(inputs.data, { jsSources: srcOf.get(inputs) || [] }).api, appId: '341' } } });
     await ticks();
     for (const s of ['課長・部長の承認者を選ぶ運用にしたい', '100円未満は部長不要、100万円以上は必要', '7営業日で。会社独自の休業日は今回はなし']) { await m.panel.send(s); await ticks(8); }
     await m.panel.send('おすすめで。この案で進めて'); await ticks(20);
@@ -3118,21 +3121,20 @@ await section(async () => {
   { const { m, v } = await KIT.mountFinal({ kind: 'mixed' });
     const r = await KIT.applyOnScreen(m, { before: async () => { await m.mock.api.addPreviewFields('341', { other_note: { type: 'SINGLE_LINE_TEXT', code: 'other_note', label: '別の担当者が足したメモ' } }); } });
     assert(r.run.stage === 'stopped' && !r.run.written && JSON.stringify(r.writes) === '["POST fields"]' && !m.mock.st.fields.approval_memo && !v.approval && /何も書き込まずに止めました/.test(r.card) && /変わった点/.test(r.card) && /承認の欄の準備の後に変わりました/.test(r.card) && /同じ依頼をもう一度送ると、最新の設定で最終案を作り直します/.test(r.card), `H4-1: 承認の後（押した直後の確かめ）に動作テスト環境の設定が変わった → 書き込まずに止め、変わった点と次の手を出す（書き込みは別の担当者のフィールドだけ）: ${r.card.slice(0, 400)}`); }
-  // (b) JavaScript / CSS の設定が変わった → 設定の手順も書き込まずに止める
-  { const { m, v } = await KIT.mountFinal({ kind: 'mixed', liveBase: false });
+  // (b) JavaScript / CSS の設定が変わった → 設定の手順も書き込まずに止める。設定の内容が変わったので基準の指紋も変わり、最終案は作り直しの扱い（STALE）になる
+  { const { m, v } = await KIT.mountFinal({ kind: 'mixed' });
     const r = await KIT.applyOnScreen(m, { before: async () => {
       const cur = await m.mock.api.getPreviewCustomize('341');
       const up = await m.mock.api.uploadFile('manual.js', '// manual', 'text/javascript');
       const keep = (l) => l.map(e => (e.type === 'URL' ? { type: 'URL', url: e.url } : { type: 'FILE', file: { fileKey: e.file.fileKey } }));
       await m.mock.api.putPreviewCustomize('341', { app: 341, scope: cur.scope, desktop: { js: [...keep(cur.desktop.js), { type: 'FILE', file: { fileKey: up } }], css: keep(cur.desktop.css) }, mobile: { js: keep(cur.mobile.js), css: keep(cur.mobile.css) } }, cur.revision);
     } });
-    assert(r.run.stage === 'stopped' && !r.run.written && JSON.stringify(r.writes) === '["POST file","PUT customize"]' && !m.mock.st.fields.approval_memo && !v.approval && /JavaScript \/ CSS の一覧または適用範囲が、承認の欄の準備の後に変わりました/.test(r.card) && /もう一度押してください/.test(r.card) && m.msgs().some(x => x.data?.kind === 'approval-revoked'), `H4-2: JavaScript の設定が変わった → 標準設定も書き込まずに止め、変わった点を出し承認を外す: ${r.card.slice(0, 400)}`);
-    const pre2 = m.panel.finalPrecheck();
-    assert(pre2.status === 'blocked' && pre2.reasons.some(x => /仕様確定の後に設定が変更されています/.test(x)) && KIT.applyButtonOf(m) && KIT.applyButtonOf(m).disabled, `H4-3: 止めた後の承認の欄は、変わった後の準備の結果（JavaScript の設定が仕様の確定の後に変わったので、押せない理由を出す。照合 STALE_CUSTOMIZATION は残す）: ${JSON.stringify(pre2.reasons)}`);
+    assert(r.run.stage === 'stopped' && !r.run.written && JSON.stringify(r.writes) === '["POST file","PUT customize"]' && !m.mock.st.fields.approval_memo && !v.approval && /JavaScript \/ CSS の一覧または適用範囲が、承認の欄の準備の後に変わりました/.test(r.card) && /動作テスト環境の設定が、承認の欄の準備の後に変わりました/.test(r.card) && /最新の設定で最終案を作り直します/.test(r.card) && m.msgs().some(x => x.data?.kind === 'approval-revoked'), `H4-2: JavaScript の設定が変わった → 標準設定も書き込まずに止め、変わった点（一覧・基準）と作り直しの次の手を出し承認を外す: ${r.card.slice(0, 400)}`);
+    assert(v.status === 'STALE' && /仕様確定の後に設定が変更されています/.test(r.card) && KIT.applyButtonOf(m) && KIT.applyButtonOf(m).disabled, `H4-3: 止めた後の最終案は作り直しの扱いで押せない。変わった点に revision の変更（照合 STALE_CUSTOMIZATION の理由）も出す: ${v.status}`);
     const r2 = await KIT.applyOnScreen(m);
     assert(r2.run === r.run && r2.writes.length === 0 && !v.approval, 'H4-4: 押せない状態で押しても承認・書き込みをしない'); }
   // (c) 承認の欄の準備の後に JavaScript の候補が変わった → 承認しない（準備をやり直してから押してもらう）
-  { const { m, v } = await KIT.mountFinal({ kind: 'mixed', liveBase: false });
+  { const { m, v } = await KIT.mountFinal({ kind: 'mixed' });
     const r = await KIT.applyOnScreen(m, { before: () => { v.generated.C1 = { ...v.generated.C1, candidateHash: 'f'.repeat(16) }; } });
     assert(!v.approval && r.run === null && r.writes.length === 0 && /最終案の内容（JavaScript の候補・動作テスト環境の設定・却下した手順）が変わりました/.test(stripC(m.chat())) && m.panel.finalPrecheck().notice, `H4-5: 候補が変わった → 承認せず（書き込み 0）、承認の欄に変わったことを出して準備をやり直す: ${m.panel.finalPrecheck().notice}`); }
 });
@@ -3141,7 +3143,7 @@ await section(async () => {
   const g = gateMk();
   const { m, v } = await (async () => {
     const gen = KIT.screenGenerate({});
-    const mm = mount({ health: KIT.HEALTH_V, planImpl: KIT.planImplOf(KIT.screenPlan('mixed')), generateImpl: gen.impl, liveBase: true });
+    const mm = mount({ health: KIT.HEALTH_V, planImpl: KIT.planImplOf(KIT.screenPlan('mixed')), generateImpl: gen.impl });
     //   運用環境の一覧の取得（設定の手順の準備 KTPlanExecutor.prepare だけが使う）を止めておき、承認の欄の準備を途中で待たせる
     const o = mm.mock.api.getProductionViews; mm.mock.api.getProductionViews = async (...a) => { await g.p; return o.apply(mm.mock.api, a); };
     await ticks();

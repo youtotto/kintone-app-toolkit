@@ -353,7 +353,7 @@ function mountB({ budget, generate = null, health = K.HEALTH_V } = {}) {
   const gen = K.screenGenerate({ field: 'case_name', targetFile: 'caseLock.js' });
   const seen = [];
   const generateImpl = async (a) => { seen.push({ noProxyFallback: a.noProxyFallback, signal: a.signal || null }); if (generate) return generate(a, gen); const r = await gen.impl(a); r.ai = { model: MODEL, usage: usage(3000, 700) }; return r; };
-  const m = K.mount({ health, planImpl: K.planImplOf(K.screenPlan('js')), generateImpl, liveBase: true, extra: { budget } });
+  const m = K.mount({ health, planImpl: K.planImplOf(K.screenPlan('js')), generateImpl, extra: { budget } });
   return { m, gen, seen };
 }
 await section(async () => {
@@ -765,7 +765,7 @@ await section(async () => {
     generate: async (p) => { sent.push(['generate', p.budget, p.ctx]); const r = await c.generate(p); r.ai = { model: MODEL, usage: usage(3000, 700) }; r.budgetMeta = meta1('generate', p); return r; },
   });
   const gen = K.screenGenerate({ field: 'case_name', targetFile: 'caseLock.js' });
-  const m = K.mount({ health, planImpl: K.planImplOf(K.screenPlan('js')), generateImpl: gen.impl, liveBase: true, extra: { budget }, clientWrap });
+  const m = K.mount({ health, planImpl: K.planImplOf(K.screenPlan('js')), generateImpl: gen.impl, extra: { budget }, clientWrap });
   await ticks();
   const v = await K.adoptOnScreen(m); await ticks(20);
   const led = ledgerOf(storage);
@@ -785,7 +785,7 @@ await section(async () => {
     plan: async (p) => { const r = await c.plan(p); r.ai = { ...(r.ai || {}), model: MODEL, usage: usage(500, 100) }; r.budgetMeta = metaOf(p.budget.allowanceUsd, [{ kind: 'plan-full', boundUsd: 0.2, costUsd: 0.01 }]); return r; },
     generate: async (p) => { throw gwBudgetErr({ reason: 'over-allowance', stage: 'first', allowanceUsd: p.budget.allowanceUsd, boundUsd: 3.2 }); },
   });
-  const m = K.mount({ health, planImpl: K.planImplOf(K.screenPlan('js')), generateImpl: async () => { throw new Error('not used'); }, liveBase: true, extra: { budget }, clientWrap });
+  const m = K.mount({ health, planImpl: K.planImplOf(K.screenPlan('js')), generateImpl: async () => { throw new Error('not used'); }, extra: { budget }, clientWrap });
   await ticks();
   const v = await K.adoptOnScreen(m); await ticks(20);
   const fin = v && v.final;

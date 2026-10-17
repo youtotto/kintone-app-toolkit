@@ -20,6 +20,7 @@ const ignoreNoKintone = (e) => { if (/kintone is not defined/.test(String(e && e
 process.on('unhandledRejection', ignoreNoKintone);
 process.on('uncaughtException', ignoreNoKintone);
 const { loadToolkit, makeAssert } = require('./helpers/load-toolkit.js');
+const { withDevBase } = require('./helpers/dev-base-fake.js');
 const { makeFakeHost } = require('./helpers/fake-dom.js');
 const T = loadToolkit();
 const { KTDeps, KTScan, KTContext, KTContextUi, KTAiClient, KTAiConversation, KTAiWorkspaceViewModel: VM, KTAiChatUi, KTPlanReview, KTPlanExecutor, KTCodeReview, KTJsExecutor, mountAiWorkspace } = T;
@@ -335,7 +336,7 @@ console.log('\n--- F7 / GM-6（UI）. 相談: 取得済みの本文を Context �
   const flow = { start: async () => ({}), cancel() { }, reopen: () => false, state: () => ({ phase: 'idle' }), isRunning: () => false };
   const host = makeFakeHost();
   const mock = makeKintoneMock(data, { jsSources: FILES });
-  const panel = mountAiWorkspace(host, { getInputs: () => inputs, copyText: async () => true, downloadText: () => { }, colors: { border: '#ccc', bg: '#fff' }, settings, session, hostname: 't.cybozu.com', connectFlow: flow, executor: { api: mock.api, appId: '310' } });
+  const panel = mountAiWorkspace(host, withDevBase(T, { getInputs: () => inputs, copyText: async () => true, downloadText: () => { }, colors: { border: '#ccc', bg: '#fff' }, settings, session, hostname: 't.cybozu.com', connectFlow: flow, executor: { api: mock.api, appId: '310' } }));
   for (let i = 0; i < 4; i++) await new Promise(r => setTimeout(r, 0));
   const seed = KTContext.buildConsultationSeed({ data, deps, scan: cached, file: { name: 'fieldOnOff.js', target: 'desktop', type: 'FILE', fileKey: 'dl:fieldOnOff', size: '290' }, sourceText: FIELD_ON_OFF, appName: '案件管理' });
   panel.consult(seed);
@@ -413,7 +414,7 @@ console.log('\n--- CX-2a / CX-3 / CX-7. 条件式の in / not in への正規化
   const client = { async getHealth() { return HEALTH; }, propose: proposeByScript, async plan({ ctx, requestId }) { const v = KTAiClient.validatePlan(K.rawWithPlannerMapping(RESP, ctx), ctx); if (!v.ok) throw new Error(JSON.stringify(v.errors)); return { ...v.normalized, requestId, clientWarnings: v.warnings }; } };
   const session = { status() { return { connected: true, apiBase: 'https://gw.test', refreshExpiresAt: '2099-01-01T00:00:00Z', scope: { product: 'toolkit', feature: 'assistant-qa,change-planner,customization-generator', domain: 't.cybozu.com' } }; }, async migrateLegacy() { return false; }, async refresh() { return {}; }, async disconnect() { return { revoked: true }; }, client };
   const host = makeFakeHost();
-  const panel = mountAiWorkspace(host, { getInputs: () => ({ data: DATA, deps: DEPS, scan: null, incoming: null }), copyText: async () => true, downloadText: () => { }, colors: { border: '#ccc', bg: '#fff' }, settings, session, hostname: 't.cybozu.com', connectFlow: { start: async () => ({}), cancel() { }, reopen: () => false, state: () => ({ phase: 'idle' }), isRunning: () => false }, executor: { api: makeKintoneMock(DATA).api, appId: '310' } });
+  const panel = mountAiWorkspace(host, withDevBase(T, { getInputs: () => ({ data: DATA, deps: DEPS, scan: null, incoming: null }), copyText: async () => true, downloadText: () => { }, colors: { border: '#ccc', bg: '#fff' }, settings, session, hostname: 't.cybozu.com', connectFlow: { start: async () => ({}), cancel() { }, reopen: () => false, state: () => ({ phase: 'idle' }), isRunning: () => false }, executor: { api: makeKintoneMock(DATA).api, appId: '310' } }));
   for (let i = 0; i < 4; i++) await new Promise(r => setTimeout(r, 0));
   await adoptOnPanel(panel);
   const v = panel.conversation().activePlan();
@@ -497,7 +498,7 @@ console.log('\n--- CX-2a / CX-7 / XA-5（再実行）. 通知の種類・未確�
     const client = { async getHealth() { return withProposal(HEALTH); }, async propose(a) { calls.push(a.ctx); return proposeByScript(a); }, async plan({ ctx, requestId }) { calls.push(ctx); const v = KTAiClient.validatePlan(K.rawWithPlannerMapping(resp, ctx), ctx); if (!v.ok) throw new Error(JSON.stringify(v.errors)); return { ...v.normalized, requestId, clientWarnings: v.warnings }; } };
     const session = { status() { return { connected: true, apiBase: 'https://gw.test', refreshExpiresAt: '2099-01-01T00:00:00Z', scope: { product: 'toolkit', feature: 'assistant-qa,change-planner', domain: 't.cybozu.com' } }; }, async migrateLegacy() { return false; }, async refresh() { return {}; }, async disconnect() { return { revoked: true }; }, client };
     const host = makeFakeHost();
-    const panel = mountAiWorkspace(host, { getInputs: () => ({ data: DATA, deps: DEPS, scan: null, incoming: null }), copyText: async () => true, downloadText: () => { }, colors: { border: '#ccc', bg: '#fff' }, settings, session, hostname: 't.cybozu.com', connectFlow: { start: async () => ({}), cancel() { }, reopen: () => false, state: () => ({ phase: 'idle' }), isRunning: () => false }, executor: { api: makeKintoneMock(DATA).api, appId: '310' } });
+    const panel = mountAiWorkspace(host, withDevBase(T, { getInputs: () => ({ data: DATA, deps: DEPS, scan: null, incoming: null }), copyText: async () => true, downloadText: () => { }, colors: { border: '#ccc', bg: '#fff' }, settings, session, hostname: 't.cybozu.com', connectFlow: { start: async () => ({}), cancel() { }, reopen: () => false, state: () => ({ phase: 'idle' }), isRunning: () => false }, executor: { api: makeKintoneMock(DATA).api, appId: '310' } }));
     return { panel, host, calls, $: (id) => host.querySelector(`#${id}`) };
   };
   const ticks = async (n = 4) => { for (let i = 0; i < n; i++) await new Promise(r => setTimeout(r, 0)); };
@@ -846,7 +847,7 @@ console.log('\n--- U5. ［新しい会話］: 続けて書いた別の依頼が�
   const session = { status() { return { connected: true, apiBase: 'https://gw.test', refreshExpiresAt: '2099-01-01T00:00:00Z', scope: { product: 'toolkit', feature: 'assistant-qa,change-planner', domain: 't.cybozu.com' } }; }, async migrateLegacy() { return false; }, async refresh() { return {}; }, async disconnect() { return { revoked: true }; }, client };
   const host = makeFakeHost();
   const mock = makeKintoneMock(DATA);
-  const panel = mountAiWorkspace(host, { getInputs: () => ({ data: DATA, deps: DEPS, scan: null, incoming: null }), copyText: async () => true, downloadText: () => { }, colors: { border: '#ccc', bg: '#fff' }, settings, session, hostname: 't.cybozu.com', connectFlow: { start: async () => ({}), cancel() { }, reopen: () => false, state: () => ({ phase: 'idle' }), isRunning: () => false }, executor: { api: mock.api, appId: '310' } });
+  const panel = mountAiWorkspace(host, withDevBase(T, { getInputs: () => ({ data: DATA, deps: DEPS, scan: null, incoming: null }), copyText: async () => true, downloadText: () => { }, colors: { border: '#ccc', bg: '#fff' }, settings, session, hostname: 't.cybozu.com', connectFlow: { start: async () => ({}), cancel() { }, reopen: () => false, state: () => ({ phase: 'idle' }), isRunning: () => false }, executor: { api: mock.api, appId: '310' } }));
   const $ = (id) => host.querySelector(`#${id}`);
   const ticks = async (n = 6) => { for (let i = 0; i < n; i++) await new Promise(r => setTimeout(r, 0)); };
   const act = (a) => $('kt-ai-chat').dispatch({ type: 'click', target: { dataset: { act: a } } });
@@ -899,7 +900,7 @@ console.log('\n--- U8（Phase 20・利用者の指摘）. 確認事項は質問�
   const settings = KTAiClient.createSettingsStore({ storage, host: 't.cybozu.com' }); settings.setConsent(true);
   const session = { status() { return { connected: true, apiBase: 'https://gw.test', refreshExpiresAt: '2099-01-01T00:00:00Z', scope: { product: 'toolkit', feature: 'assistant-qa,change-planner', domain: 't.cybozu.com' } }; }, async migrateLegacy() { return false; }, async refresh() { return {}; }, async disconnect() { return { revoked: true }; }, client };
   const host = makeFakeHost();
-  const panel = mountAiWorkspace(host, { getInputs: () => ({ data: DATA, deps: DEPS, scan: null, incoming: null }), copyText: async () => true, downloadText: () => { }, colors: { border: '#ccc', bg: '#fff' }, settings, session, hostname: 't.cybozu.com', connectFlow: { start: async () => ({}), cancel() { }, reopen: () => false, state: () => ({ phase: 'idle' }), isRunning: () => false }, executor: { api: makeKintoneMock(DATA).api, appId: '310' } });
+  const panel = mountAiWorkspace(host, withDevBase(T, { getInputs: () => ({ data: DATA, deps: DEPS, scan: null, incoming: null }), copyText: async () => true, downloadText: () => { }, colors: { border: '#ccc', bg: '#fff' }, settings, session, hostname: 't.cybozu.com', connectFlow: { start: async () => ({}), cancel() { }, reopen: () => false, state: () => ({ phase: 'idle' }), isRunning: () => false }, executor: { api: makeKintoneMock(DATA).api, appId: '310' } }));
   const $ = (id) => host.querySelector(`#${id}`);
   const ticks = async (n = 6) => { for (let i = 0; i < n; i++) await new Promise(r => setTimeout(r, 0)); };
   const click = (dataset) => $('kt-ai-chat').dispatch({ type: 'click', target: { dataset } });
@@ -973,7 +974,7 @@ console.log('\n--- FR-1 / FR-2 / FR-6 / FR-7（UI・実際の AI client と tran
   const flow = { start: async () => ({}), cancel() { }, reopen: () => false, state: () => ({ phase: 'idle' }), isRunning: () => false };
   const host = makeFakeHost();
   const mock = makeKintoneMock(data);
-  const panel = mountAiWorkspace(host, { getInputs: () => inputs, copyText: async () => true, downloadText: () => { }, colors: { border: '#ccc', bg: '#fff' }, settings, session, hostname: 't.cybozu.com', connectFlow: flow, executor: { api: mock.api, appId: '310' } });
+  const panel = mountAiWorkspace(host, withDevBase(T, { getInputs: () => inputs, copyText: async () => true, downloadText: () => { }, colors: { border: '#ccc', bg: '#fff' }, settings, session, hostname: 't.cybozu.com', connectFlow: flow, executor: { api: mock.api, appId: '310' } }));
   const $ = (id) => host.querySelector(`#${id}`);
   const ticks = async (n = 6) => { for (let i = 0; i < n; i++) await new Promise(r => setTimeout(r, 0)); };
   const msgs = () => panel.conversation().messages();
