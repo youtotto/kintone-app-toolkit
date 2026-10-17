@@ -22707,8 +22707,6 @@
       // カテゴリ別（Tier 2）: ✓ 追加系 / △ 既存フィールドの変更（REVIEW_REQUIRED）
       const CATEGORY = [['ADD_FIELD', 'フィールド追加', '✓', '#2e7d32'], ['ADD_VIEW', '一覧追加', '✓', '#2e7d32'], ['ADD_NOTIFICATION', '通知追加', '✓', '#2e7d32'], ['ADD_REMINDER', 'リマインダー追加', '✓', '#2e7d32'], ['UPDATE_FIELD', 'フィールド変更', '△', '#b26a00'], ['UPDATE_NOTIFICATION', '通知変更', '✎', '#6a1b9a'], ['UPDATE_REMINDER', 'リマインダー変更', '✎', '#6a1b9a'], ['UPDATE_VIEW', '一覧変更', '✎', '#6a1b9a'], ['ADD_PROCESS_STATUS', 'ステータス追加', '＋', '#6a1b9a'], ['ADD_PROCESS_ACTION', 'アクション追加', '＋', '#6a1b9a'], ['UPDATE_PROCESS', 'プロセス管理変更', '✎', '#6a1b9a'], ['UPDATE_LOOKUP', 'ルックアップ変更', '✎', '#6a1b9a'], ['ADD_APP_ACTION', 'アプリアクション追加', '＋', '#6a1b9a'], ['UPDATE_APP_ACTION', 'アプリアクション変更', '✎', '#6a1b9a']];
       const catLines = CATEGORY.map(([a, label, mark, color]) => { const ids = executable.filter(x => x.actionType === a); return ids.length ? `<div style="display:flex; justify-content:space-between; font-size:12px;"><span style="color:${color};">${mark} ${esc(label)}</span><b>${ids.length}（${esc(ids.map(x => x.stepId).join(', '))}）</b></div>` : ''; }).join('');
-      const head = `<div style="padding-top:4px;"><b>動作テスト環境への反映</b>
-        <div style="margin-top:4px; display:grid; gap:2px;">${line(executable, '承認済み・実行可能', '#2e7d32', '✓')}${catLines ? `<div style="margin-left:12px; display:grid; gap:1px;">${catLines}</div>` : ''}${line(unsupported, '承認済みだが未対応', '#b26a00', '△')}${line(blocked, '実行不可', '#b00020', '×')}</div>${unsupportedList}`;
       const foot = '</div>';
       const note = (t, color = '#555') => `<div style="font-size:11px; color:${color}; margin-top:4px;">${esc(t)}</div>`;
       // 2026-10-06 読みやすさ: 見出しは 1 行。承認した手順・反映できない手順の件数の内訳は、どの段階でも［内訳］の中（色付きの行を並べない）
