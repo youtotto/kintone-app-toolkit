@@ -438,18 +438,14 @@ console.log('\n--- G8. 要約・詳細・検査結果の整合（明細の行の
   //   「Toolkit が確かめた範囲」（achieved。コードの解析で作っていた）は作らない
   assert(rv.coverage && rv.coverage.notAchieved.some(x => x.code === 'SUBTABLE_ROWS' && /セルを編集不可にしても、明細（テーブル）の行の追加・削除は止まりません/.test(x.message) && /ボタンを隠す API は Toolkit がまだ扱っていません/.test(x.message) && !/kintone の JavaScript で/.test(x.message)) && !rv.coverage.achieved.length, '達成範囲: 計画でテーブルを編集不可にする → 行の追加・削除は止まらない（Toolkit が計画の構造で示す）');
   //   §0d.4（2026-10-08）: AI の要約・要件の文を正規表現で読んで確認にする判定（summary-scope・requirement-scope）と、条件の内外の照合（conditional-control）は削除した。
-  //   「行の追加・削除は止められない」ことは、構造の判定（達成範囲の SUBTABLE_ROWS・コードペインの「満たせない部分」・計画の Review の JS_LIMIT_SUBTABLE_ROWS）で示す（上の 1 件と下の 2 件）
+  //   「行の追加・削除は止められない」ことは、構造の判定（達成範囲の SUBTABLE_ROWS・コードペインの「満たせない部分」）で示す（上の 1 件と下の 1 件）。
+  //   計画の Review で要件の文の語から出していた注意（JS_LIMIT_SUBTABLE_ROWS）は 2026-10-17 に削除した（要件の文を Toolkit が読み直さない）
   assert(!chk(rv, 'summary-scope') && rv.registration.verdict !== 'BLOCKED', `行のループでのセルのロック（条件の中）は止めない: ${rv.registration.verdict}`);
   const { KTAiChatUi } = loadToolkit();
   const entry = { generated: REG.gen(wrap(['app.record.edit.show'], CELLS), { summary: '承認済みでは金額と明細を編集不可にし、明細の行追加・削除も禁止する' }), review: rv, existingSource: null };
   const pane = KTAiChatUi.codePaneHtml(entry);
   //   2026-10-10（§6）: 「kintone の JavaScript では止められない」と言い切らない文に変えた（セルの編集不可では止まらない・行のボタンを隠す API は Toolkit がまだ扱っていない）
   assert(/要件のうち満たせない部分（Toolkit の確認）: セルを編集不可にしても、明細（テーブル）の行の追加・削除は止まりません/.test(pane.head) && /<details/.test(pane.head) && /そのまま採用しないでください/.test(pane.head) && pane.head.indexOf('満たせない部分') < pane.head.indexOf('AI の要約'), 'コードペイン: 満たせない部分を AI の要約より先に出し、要約は「食い違う」と畳む');
-  // 計画の段階でも分かる（Review の手順に JS_LIMIT_SUBTABLE_ROWS）
-  const data = REG.data;
-  const p = plan([step('C1', 'CUSTOMIZATION_REQUIRED', 'JS', 'lock.js', { customizationId: 'C1' }, { solution: 'CUSTOMIZATION', execution: { mode: 'PLAN_ONLY', supported: false, reason: 'x' } })], [], { solution: 'CUSTOMIZATION', customizations: [{ ...c, whyStandardInsufficient: 'ステータスで編集可否を変えられない', risks: [], questions: [], dependsOn: [], evidenceIds: [], confidence: 'INFERRED', existingFiles: [] }] });
-  const r = KTPlanReview.review({ plan: p, data, deps: null, scan: null, incoming: null });
-  assert(r.steps[0].issues.some(i => i.code === 'JS_LIMIT_SUBTABLE_ROWS' && /運用（手順・権限）/.test(i.message)), '計画の Review: 明細の行の追加・削除の禁止は JavaScript では満たせない（生成の前に分かる）');
 }
 
 // =========================================================
@@ -619,8 +615,8 @@ console.log('\n--- G9 / G10. Generator Context の欠落（モデル比較の候
   //   簡素化 B（2026-10-17）: 計画した列の一部しか処理しないこと（planned-fields）は、生成工程の必須の効果（列ごとの効果のイベントの処理の形）の範囲。Toolkit は判定しない
   assert(oneCol.registration.verdict !== 'BLOCKED' && !oneCol.registration.blockers.some(b => b.code === 'planned-fields'), '計画した列の一部（qty）しかロックしていない: Toolkit の形式確認は判定しない（生成工程の必須の効果の範囲）');
   // G8 の表示: 行が残ること（明細の行の追加・削除は止められない）は、構造の判定（達成範囲の SUBTABLE_ROWS）で示す
-  //   §0d.4（2026-10-08）: 要件の文・AI の要約を正規表現で読んで確認にする判定（requirement-scope・summary-scope）は削除した（要件の文の読み取りは計画の Review の
-  //   JS_LIMIT_SUBTABLE_ROWS と、達成範囲の SUBTABLE_ROWS が持つ。G8 の計画の Review の回帰を参照）
+  //   §0d.4（2026-10-08）: 要件の文・AI の要約を正規表現で読んで確認にする判定（requirement-scope・summary-scope）は削除した。2026-10-17 に計画の Review の
+  //   要件の文の照合（JS_LIMIT_SUBTABLE_ROWS）も削除し、行が残ることは達成範囲の SUBTABLE_ROWS（計画の構造）だけが示す
   const CELL_LOCK = "    if (record['ステータス'].value === '承認済み') {\n      record['items'].value.forEach(function (row) { row.value['item_name'].disabled = true; row.value['qty'].disabled = true; });\n    }";
   const cellsOnly = review(wrap(['app.record.edit.show'], CELL_LOCK), cust({ requirement: '承認済みでは明細の品名・数量のセルを編集不可にする', fields: [{ code: 'item_name', access: 'CONTROL', condition: 'ステータス in ("承認済み")', effects: ['lock'] }, { code: 'qty', access: 'CONTROL', condition: 'ステータス in ("承認済み")', effects: ['lock'] }] }), { summary: '承認済みのとき明細の品名・数量のセルを編集不可にします' });
   assert(cellsOnly.registration.verdict !== 'BLOCKED' && cellsOnly.coverage.notAchieved.some(x => x.code === 'SUBTABLE_ROWS'), `要件も要約も「セル」に限る → 止めない（行が残ることは達成範囲に出す）: ${JSON.stringify(cellsOnly.registration.confirmations.map(x => x.code))}`);

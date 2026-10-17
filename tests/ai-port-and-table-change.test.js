@@ -451,13 +451,7 @@ await section(async () => {
   const row = rv.coverage && rv.coverage.notAchieved.find(x => x.code === 'SUBTABLE_ROWS');
   assert(row && /セルを編集不可にしても、明細（テーブル）の行の追加・削除は止まりません/.test(row.message) && /ボタンを隠す API は Toolkit がまだ扱っていません/.test(row.message) && rv.registration.verdict !== 'BLOCKED',
     `P7-2: SUBTABLE_ROWS は今のまま出る（符号・承認を止めない）。文は「セルを編集不可にしても…止まりません（…ボタンを隠す API は Toolkit がまだ扱っていません）」: ${JSON.stringify({ row, verdict: rv.registration && rv.registration.verdict })}`);
-  //   計画の確認（JS_LIMIT_SUBTABLE_ROWS・medium）も今のまま。文は言い切らない
-  const step = K.mkStep('C1', 'CUSTOMIZATION_REQUIRED', 'JS', 'lock.js', { customizationId: 'C1' }, { solution: 'CUSTOMIZATION', execution: { mode: 'PLAN_ONLY', supported: false, reason: 'x' } });
-  const plan = { goal: 'g', assessment: { summary: '' }, relevantFields: [], proposedFields: [], steps: [step], alternatives: [], impact: [], questions: [], unknowns: [], planConfidence: 'INFERRED', solution: 'CUSTOMIZATION', customizations: [{ ...c, requirement: '承認済みでは明細を編集不可にし、明細の行の追加・削除も禁止する', whyStandardInsufficient: 'ステータスで編集可否を変えられない', risks: [], questions: [], dependsOn: [], evidenceIds: [], confidence: 'INFERRED', implementation: 'JAVASCRIPT' }] };
-  const r = KTPlanReview.review({ plan, data: clone(K.DATA_C), deps: null, scan: null, incoming: null });
-  const iss = r.steps[0].issues.find(i => i.code === 'JS_LIMIT_SUBTABLE_ROWS');
-  assert(iss && iss.severity === 'medium' && /セルを編集不可にしても、明細（テーブル）の行の追加・削除は止まりません/.test(iss.message) && /運用（手順・権限）/.test(iss.message) && !/kintone の JavaScript では/.test(iss.message),
-    `P7-3: 計画の確認 JS_LIMIT_SUBTABLE_ROWS（medium）は今のまま。文は言い切らない: ${JSON.stringify(iss)}`);
+  //   P7-3（計画の確認の JS_LIMIT_SUBTABLE_ROWS）は、要件の文の語の照合なので 2026-10-17 に削除した（行が残ることは上の P7-2 の SUBTABLE_ROWS が示す）
   //   生成の AI に渡すテーブルの扱いの文も言い切らない
   const ctx = KTContext.buildGenerator({ customization: { ...c, fields: [{ code: 'ステータス', access: 'READ' }, { code: 'qty', access: 'CONTROL', condition: 'ステータス in ("承認済み")' }] }, plan: { customizations: [c] }, data: clone(K.DATA_C), scan: null, options: { now: '2026-10-10T00:00:00.000Z' } });
   const how = (((ctx.constraints || {}).tables || [])[0] || {}).how || '';

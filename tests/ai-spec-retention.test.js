@@ -4,9 +4,10 @@
 //   再利用フィールドの警告は、読むだけと、値の書き込み・制御変更を分ける
 //
 // 検証内容（2026-10-07 独立レビューの指摘 1〜5 の修正を含む）:
-//   §1 要件の保持（KTPlanReview.traceRequirements）: 新ケース 1（3 日は spec・100 万円は未解決と文章だけ → 警告）/ 旧 §10（100 万円が spec:P2.filterCond・警告なし）。
-//      数の anchor は単位付きだけ（「1回目」「2件以上」は警告なし）・比較語の境界の同値（100万円未満 ↔ amount <= "999999"）・午前 9 時 ↔ "09:00"・planRefs の手順を heldIn の先頭に
-//   §2 要件の保持: 新ケース 2（100 万円が spec に無く警告・承認済み は js:C1 / C2 の condition）/ 旧 CX-1 初版（1000000 が spec:P5.filterCond・警告なし）
+//   §1 要件の値の取り出し（KTPlanReview.traceRequirements。2026-10-17 に要件の保持の状態と警告を削除し、説明済みの判定・必須の効果の対象が使う値だけにした）:
+//      新ケース 1（3 日は spec・100 万円は spec にも JS にも無い）/ 旧 §10（100 万円が spec:P2.filterCond）。
+//      数の anchor は単位付きだけ（「1回目」「2件以上」は値にしない）・比較語の境界の同値（100万円未満 ↔ amount <= "999999"）・午前 9 時 ↔ "09:00"
+//   §2 要件の値の取り出し: 新ケース 2（100 万円が spec に無い）/ 旧 CX-1 初版（1000000 が spec:P5.filterCond）
 //   §3 反映の制限（T1）: ADD_PROCESS_STATUS の assignees [] ＋ 確認待ち（validation.pending ACTOR、または NEEDS_CONFIRMATION ＋ 承認者 / 作業者の blocking 質問 ＋ 中間ステータス）
 //      → Review に ASSIGNEES_PENDING・Executor は Review の issue だけを見て UNSUPPORTED。終端ステータス・質問なし・回答後（assignees あり）は止めない。
 //      ADD_REMINDER / ADD_NOTIFICATION の targets [] は TARGETS_MISSING
@@ -15,7 +16,7 @@
 //      標準手順の spec が書き込む（アプリアクションの転記先・ルックアップの取得項目）は WRITE
 //   §6 担当範囲（T4）: coverage の OUT_OF_SCOPE は outOfScope・他の customization の担当は「正規化後に同一」か「2-gram の Dice 係数 0.6 以上かつ自分より 0.2 以上高い」ときだけ・
 //      担当の無い OUT_OF_SCOPE は unowned（check coverage-owner）・code-intro / コードカードで別に出す・buildGenerator の otherCustomizations
-//   §7 会話（T5）: 台帳が requirementOps で更新された後に trace が取れ、右の「確認結果」の警告一覧に出る（二重に出さない）。trace の件数が台帳と違えば作り直す
+//   （§7 の会話の要件の保持の警告は、2026-10-17 に警告と一緒に削除した）
 //
 // 実行方法: node tests/ai-spec-retention.test.js
 'use strict';
@@ -33,10 +34,9 @@ const clone = SR.clone;
 const review = (p, extra = {}) => R.review({ plan: clone(p), ...INPUTS, ...extra });
 const st = (rv, id) => rv.steps.find(s => s.stepId === id);
 const codes = (s) => (s?.issues || []).map(i => i.code);
-const traceOf = (rv, id) => (rv.requirementTrace?.requirements || []).find(r => r.id === id) || null;
+const trOf = (tr, id) => (tr?.requirements || []).find(r => r.id === id) || null;
 const anchor = (tr, kind, value) => (tr?.anchors || []).find(a => a.kind === kind && String(a.value) === String(value)) || null;
 const held = (a, prefix) => (a?.heldIn || []).filter(h => h.startsWith(prefix));
-const notInSpec = (rv) => (rv.warnings || []).filter(w => w.code === 'REQUIREMENT_CONDITION_NOT_IN_SPEC');
 const spec = (o) => ({ name: null, from: null, to: null, filterCond: null, assignees: [], targets: [], events: [], timingField: null, daysLater: null, time: null, fields: [], sort: null, sourceApp: null, keyField: null, mappings: [], fieldType: null, required: null, options: [], destApp: null, accessibility: null, entities: [], changeKind: null, assigneeType: null, customizationId: null, ...o });
 const mkStep = (id, actionType, targetKind, targetRef, sp = {}, extra = {}) => ({ id, actionType, targetKind, targetRef, targetExists: null, title: `${id} ${actionType}`, proposal: { summary: '', details: [] }, spec: spec(sp), dependsOn: [], reason: '', evidenceIds: [], confidence: 'INFERRED', alternativeId: null, validation: { status: 'ok', issues: [] }, ...extra });
 const mkPlan = (steps, extra = {}) => ({ planVersion: '1', goal: 'g', assessment: { summary: '', usableExistingFields: [], usableExistingSettings: [], missingCapabilities: [], uncertainties: [] }, relevantFields: [], proposedFields: [], steps, alternatives: [], impact: [], questions: [], provisionals: [], unknowns: [], planConfidence: 'INFERRED', solution: 'STANDARD', customizations: [], ...extra });
@@ -70,29 +70,26 @@ await section(async () => {
 });
 
 // =========================================================
-console.log('\n--- §1. 要件の保持: 新ケース 1 と旧 §10（3 日・100 万円・承認待ち がどこにあるか）---');
+console.log('\n--- §1. 要件の値の取り出し: 新ケース 1 と旧 §10（3 日・100 万円・金額 がどの置き場所にあるか）---');
 await section(async () => {
-  const rv = review(SR.CASE1_PLAN, { requirements: SR.REQUIREMENTS.case1 });
-  const r1 = traceOf(rv, 'R1'), r2 = traceOf(rv, 'R2');
-  assert(rv.requirementTrace && rv.requirementTrace.requirements.length === 2 && r1 && r2, 'review({ requirements }) → review.requirementTrace（要件ごと）');
-  const d3 = anchor(r1, 'number', 3), yen = anchor(r1, 'number', 1000000), wait = anchor(r1, 'name', '承認待ち');
+  //   簡素化（2026-10-17）: 要件の保持の確認（状態 spec / js / unresolved と REQUIREMENT_CONDITION_NOT_IN_SPEC の警告）は削除した。
+  //   残るのは、説明済みの判定と必須の効果の対象のフィールドが使う値（単位つきの数・フィールド）と、計画の構造化した置き場所（spec・JS）だけ
+  const tr = R.traceRequirements({ plan: SR.CASE1_PLAN, requirements: SR.REQUIREMENTS.case1, data: INPUTS.data });
+  const r1 = trOf(tr, 'R1'), r2 = trOf(tr, 'R2');
+  assert(r1 && r2 && JSON.stringify(Object.keys(tr)) === '["requirements"]' && JSON.stringify(Object.keys(r1)) === '["id","anchors"]', `要件ごとに id と値だけを返す（状態・警告は無い）: ${JSON.stringify(Object.keys(r1 || {}))}`);
+  const d3 = anchor(r1, 'number', 3), yen = anchor(r1, 'number', 1000000);
   assert(d3 && d3.heldIn.includes('spec:P1.daysLater'), `R1: 3 日は spec:P1.daysLater にある: ${JSON.stringify(d3 && d3.heldIn)}`);
-  assert(wait && wait.heldIn.includes('spec:P1.filterCond'), `R1: 承認待ち は spec:P1.filterCond にある: ${JSON.stringify(wait && wait.heldIn)}`);
-  // 段階 C: 文章（assessment.summary など）の照合は外した（構造化データ: spec / JS / 未解決だけ）
-  assert(yen && !held(yen, 'spec:').length && !held(yen, 'js:').length && held(yen, 'unresolved:').includes('unresolved:P2.details') && held(yen, 'unresolved:').includes('unresolved:Q1') && !held(yen, 'prose:').length, `R1: 100 万円は spec にも js にも無く、未解決（P2 の details・Q1）だけ（文章は照合しない）: ${JSON.stringify(yen && yen.heldIn)}`);
-  const ws = notInSpec(rv);
-  assert(ws.length === 1 && ws[0].requirementId === 'R1' && ws[0].where === 'exceptions[0]' && ws[0].severity === 'medium' && ws[0].message === '「金額が100万円以上」の条件が手順の spec にも JavaScript の条件にもありません（確認事項にだけあります）', `REQUIREMENT_CONDITION_NOT_IN_SPEC が R1 の例外（金額が100万円以上）に出る: ${JSON.stringify(ws)}`);
-  assert(r1.status === 'unresolved' && r2.status === 'unanchored' && !ws.some(w => w.requirementId === 'R2'), `R1 の状態は unresolved（いちばん弱い置き場所）、R2（条件なしの AI の提案）は unanchored で警告なし: ${r1.status} / ${r2.status}`);
-  assert(JSON.stringify(ws[0].values) === '["100万円","金額"]', `警告に足りない値（100万円・金額）を添える: ${JSON.stringify(ws[0].values)}`);
-  // 独立レビュー 2: 個数・序数（件・回目）と単位の無い裸の数は anchor にしない（警告が出ない）
+  assert(yen && yen.heldIn.length === 0, `R1: 100 万円は spec にも JS にも無い（確認待ちの手順の説明・質問は置き場所にしない）: ${JSON.stringify(yen && yen.heldIn)}`);
+  assert(!r1.anchors.some(a => a.kind === 'name') && !r2.anchors.length, `「」の名前・ステータス名は取り出さない。条件の無い要件（R2）は値なし: ${JSON.stringify(r1.anchors.map(a => [a.kind, a.value]))}`);
+  // 独立レビュー 2: 個数・序数（件・回目）と単位の無い裸の数は anchor にしない
   const req = (id, condition, extra = {}) => ({ id, target: '', condition, behavior: 'x', exceptions: [], decision: 'decided', disposition: 'adopted', planRefs: [], ...extra });
   const cnt = R.traceRequirements({ plan: SR.CASE1_PLAN, requirements: [req('R1', '1回目の差戻し'), req('R2', '2件以上'), req('R3', '5を超える'), req('R4', '3人以上・2つ目・10個・4行目')], data: INPUTS.data });
-  assert(cnt.warnings.length === 0 && cnt.requirements.every(r => r.status === 'unanchored' && !r.anchors.some(a => a.kind === 'number')), `「1回目の差戻し」「2件以上」「5を超える」「3人以上…」: 数は anchor にせず警告なし: ${JSON.stringify(cnt.requirements.map(r => [r.id, r.status, r.anchors.length]))}`);
-  // 比較語の境界の同値: 100万円未満 ↔ amount <= "999999"（spec 扱い）、100万円超 ↔ >= "1000001"、100万円以下 ↔ <= "1000000"
+  assert(cnt.requirements.every(r => !r.anchors.some(a => a.kind === 'number')), `「1回目の差戻し」「2件以上」「5を超える」「3人以上…」: 数は anchor にしない: ${JSON.stringify(cnt.requirements.map(r => [r.id, r.anchors.length]))}`);
+  // 比較語の境界の同値: 100万円未満 ↔ amount <= "999999"、100万円超 ↔ >= "1000001"、100万円以下 ↔ <= "1000000"
   const bplan = (cond) => mkPlan([mkStep('P1', 'ADD_PROCESS_ACTION', 'PROCESS_ACTION', '課長へ申請', { name: '課長へ申請', from: '作成中', to: '承認待ち', filterCond: cond }, { confidence: 'CONFIRMED' })]);
   const b1 = R.traceRequirements({ plan: bplan('amount <= "999999"'), requirements: [req('R1', '金額が100万円未満')], data: INPUTS.data });
   const b1a = anchor(b1.requirements[0], 'number', 1000000);
-  assert(b1.warnings.length === 0 && b1.requirements[0].status === 'spec' && b1a && JSON.stringify(b1a.values) === '[1000000,999999]' && b1a.heldIn.includes('spec:P1.filterCond'), `「100万円未満」＋ amount <= "999999" → spec 扱い（values に 999999）: ${JSON.stringify(b1a)}`);
+  assert(b1a && JSON.stringify(b1a.values) === '[1000000,999999]' && b1a.heldIn.includes('spec:P1.filterCond'), `「100万円未満」＋ amount <= "999999" → spec にある（values に 999999）: ${JSON.stringify(b1a)}`);
   const b2 = R.traceRequirements({ plan: bplan('amount >= "1000001"'), requirements: [req('R1', '金額が100万円超')], data: INPUTS.data });
   const b3 = R.traceRequirements({ plan: bplan('amount <= "1000000"'), requirements: [req('R1', '金額が100万円以下')], data: INPUTS.data });
   const b4 = R.traceRequirements({ plan: bplan('amount >= "1000001"'), requirements: [req('R1', '金額が100万円以上')], data: INPUTS.data });
@@ -100,53 +97,35 @@ await section(async () => {
   assert(anchor(b2.requirements[0], 'number', 1000000).heldIn.includes('spec:P1.filterCond') && anchor(b3.requirements[0], 'number', 1000000).heldIn.includes('spec:P1.filterCond') && b4a && JSON.stringify(b4a.values) === '[1000000,999999]' && b4a.heldIn.length === 0, `「超」は N+1、「以下」は N も一致。「以上」は N+1（1000001）を認めない: ${JSON.stringify([anchor(b2.requirements[0], 'number', 1000000).heldIn, anchor(b3.requirements[0], 'number', 1000000).heldIn, b4a])}`);
   // 時刻: 午前9時 ↔ time "09:00"（CASE1 の P1）、午後3時 ↔ "15:00"
   const t1 = R.traceRequirements({ plan: SR.CASE1_PLAN, requirements: [req('R1', '午前9時')], data: INPUTS.data });
-  assert(t1.requirements[0].status === 'spec' && anchor(t1.requirements[0], 'number', 9).heldIn.includes('spec:P1.time'), `「午前9時」は spec の time "09:00" と一致: ${JSON.stringify(anchor(t1.requirements[0], 'number', 9))}`);
+  assert(anchor(t1.requirements[0], 'number', 9).heldIn.includes('spec:P1.time'), `「午前9時」は spec の time "09:00" と一致: ${JSON.stringify(anchor(t1.requirements[0], 'number', 9))}`);
   const pm = clone(SR.CASE1_PLAN); pm.steps[0].spec.time = '15:00';
   const t2 = R.traceRequirements({ plan: pm, requirements: [req('R1', '午後3時')], data: INPUTS.data });
   // 再レビュー 2026-10-07: 「午後 3 時」の値は 15 だけ（素の 3 を残すと daysLater の 3 などと偶然一致する）
-  assert(t2.requirements[0].status === 'spec' && anchor(t2.requirements[0], 'number', 15).heldIn.includes('spec:P1.time') && !anchor(t2.requirements[0], 'number', 3), `「午後3時」は "15:00" と一致し、素の 3 は値にしない: ${JSON.stringify(t2.requirements[0].anchors)}`);
+  assert(anchor(t2.requirements[0], 'number', 15).heldIn.includes('spec:P1.time') && !anchor(t2.requirements[0], 'number', 3), `「午後3時」は "15:00" と一致し、素の 3 は値にしない: ${JSON.stringify(t2.requirements[0].anchors)}`);
   const pm3 = clone(SR.CASE1_PLAN); pm3.steps[0].spec.time = '09:00';   // daysLater 3 のまま。午後 3 時は 15 なので daysLater の 3 とは一致しない
   const t3 = R.traceRequirements({ plan: pm3, requirements: [req('R1', '午後3時')], data: INPUTS.data });
-  assert(t3.requirements[0].status !== 'spec' && !anchor(t3.requirements[0], 'number', 15).heldIn.some(h => h.startsWith('spec:')), `「午後3時」が daysLater の 3 と一致して spec 扱いにならない: ${JSON.stringify(anchor(t3.requirements[0], 'number', 15))}`);
-  // planRefs: 対応する手順の置き場所を heldIn の先頭にする（旧 CX-1: 100 万円は P4 / P5 の両方にある）
-  const pr = R.traceRequirements({ plan: SR.OLD_CX1_PLAN, requirements: [req('R1', '金額が100万円以上', { planRefs: ['P5'] }), req('R2', '金額が100万円未満', { planRefs: ['P4'] }), req('R3', '金額が100万円以上', { planRefs: ['P9'] })], data: INPUTS.data });
-  const h = (id) => anchor(pr.requirements.find(r => r.id === id), 'number', 1000000).heldIn;
-  assert(h('R1')[0] === 'spec:P5.filterCond' && h('R2')[0] === 'spec:P4.filterCond' && h('R2').includes('spec:P5.filterCond') && !h('R3')[0].startsWith('spec:P9') && h('R3').includes('spec:P5.filterCond') && pr.requirements[2].status === 'spec', `planRefs の手順を先頭に（その手順に無ければ計画全体の順のまま）: ${JSON.stringify({ R1: h('R1').slice(0, 2), R2: h('R2').slice(0, 2), R3: h('R3').slice(0, 2) })}`);
-  // 旧 §10: 同じ依頼で P2 が spec を持っていた → 100 万円は spec:P2.filterCond・警告なし
-  const old = review(SR.OLD_S10_PLAN, { requirements: SR.REQUIREMENTS.case1 });
-  const o1 = traceOf(old, 'R1'), oyen = anchor(o1, 'number', 1000000);
+  assert(!anchor(t3.requirements[0], 'number', 15).heldIn.some(h => h.startsWith('spec:')), `「午後3時」が daysLater の 3 と一致しない: ${JSON.stringify(anchor(t3.requirements[0], 'number', 15))}`);
+  // 旧 §10: 同じ依頼で P2 が spec を持っていた → 100 万円（と金額 = amount）は spec:P2.filterCond
+  const old = R.traceRequirements({ plan: SR.OLD_S10_PLAN, requirements: SR.REQUIREMENTS.case1, data: INPUTS.data });
+  const o1 = trOf(old, 'R1'), oyen = anchor(o1, 'number', 1000000);
   assert(oyen && oyen.heldIn.includes('spec:P2.filterCond') && anchor(o1, 'field', 'amount') && anchor(o1, 'field', 'amount').heldIn.includes('spec:P2.filterCond'), `旧 §10: 100 万円（と金額 = amount）は spec:P2.filterCond にある: ${JSON.stringify(oyen && oyen.heldIn)}`);
-  assert(notInSpec(old).length === 0 && o1.status === 'spec', `旧 §10: 警告なし・R1 は spec: ${o1.status}`);
-  // 新ケース 1 の v2（上長は部長グループに）: 通知先は決まったが P2 の spec はまだ {} → R3（承認待ちで金額100万円以上、3日経過）も警告
-  const v2 = review(SR.CASE1_V2_PLAN, { requirements: SR.REQUIREMENTS.case1v2 });
-  assert(notInSpec(v2).some(w => w.requirementId === 'R3' && /承認待ちで金額100万円以上、3日経過/.test(w.message)) && notInSpec(v2).some(w => w.requirementId === 'R1'), `新ケース 1 v2: R3 も R1 の例外も警告（spec はまだ {}）: ${JSON.stringify(notInSpec(v2).map(w => w.requirementId))}`);
-  // 直接呼ぶ（data から）・台帳が無い・採用されていない要件・取り消した要件
-  const direct = R.traceRequirements({ plan: SR.CASE1_PLAN, requirements: SR.REQUIREMENTS.case1, data: INPUTS.data });
-  assert(direct.warnings.length === 1 && direct.requirements[0].status === 'unresolved', 'traceRequirements は data からも同じ結果（純関数）');
-  assert(JSON.stringify(R.traceRequirements({ plan: SR.CASE1_PLAN, requirements: [], data: INPUTS.data })) === '{"requirements":[],"warnings":[]}' && JSON.stringify(R.traceRequirements({ plan: SR.CASE1_PLAN })) === '{"requirements":[],"warnings":[]}', '台帳が無ければ空（例外にしない）');
-  const unres = R.traceRequirements({ plan: SR.CASE1_PLAN, requirements: SR.REQUIREMENTS.case1.map(e => ({ ...e, disposition: 'unresolved' })), data: INPUTS.data });
-  const revoked = R.traceRequirements({ plan: SR.CASE1_PLAN, requirements: SR.REQUIREMENTS.case1.map(e => ({ ...e, decision: 'revoked' })), data: INPUTS.data });
-  assert(unres.warnings.length === 0 && unres.requirements[0].status === 'unresolved' && revoked.warnings.length === 0, '確認待ち（unresolved）・取り消し（revoked）の要件は状態だけ出し、警告は出さない');
-  const noReview = review(SR.CASE1_PLAN);
-  assert(!('requirementTrace' in noReview) && notInSpec(noReview).length === 0, 'requirements を渡さなければ従来どおり（requirementTrace は無い）');
+  // 台帳が無い・計画の確認は要件の照合の結果を持たない
+  assert(JSON.stringify(R.traceRequirements({ plan: SR.CASE1_PLAN, requirements: [], data: INPUTS.data })) === '{"requirements":[]}' && JSON.stringify(R.traceRequirements({ plan: SR.CASE1_PLAN })) === '{"requirements":[]}', '台帳が無ければ空（例外にしない）');
+  const rv = review(SR.CASE1_PLAN);
+  assert(!('requirementTrace' in rv) && !(rv.warnings || []).some(w => w.code === 'REQUIREMENT_CONDITION_NOT_IN_SPEC'), '計画の確認は要件の保持を照合しない（requirementTrace・REQUIREMENT_CONDITION_NOT_IN_SPEC は無い）');
 });
 
 // =========================================================
-console.log('\n--- §2. 要件の保持: 新ケース 2 と旧 CX-1 初版（100 万円の分岐・承認済み のロック）---');
+console.log('\n--- §2. 要件の値の取り出し: 新ケース 2 と旧 CX-1 初版（100 万円の分岐）---');
 await section(async () => {
-  const rv = review(SR.CASE2_PLAN, { requirements: SR.REQUIREMENTS.case2 });
-  const ws = notInSpec(rv);
-  assert(ws.some(w => w.requirementId === 'R1' && /「金額が100万円以上」/.test(w.message)) && ws.some(w => w.requirementId === 'R2' && /「金額が100万円未満」/.test(w.message)), `新ケース 2: 100 万円の条件（R1 / R2）が spec に無く警告: ${JSON.stringify(ws.map(w => w.requirementId))}`);
-  const r1 = traceOf(rv, 'R1'), yen = anchor(r1, 'number', 1000000);
-  assert(yen && !held(yen, 'spec:').length && !held(yen, 'js:').length && held(yen, 'unresolved:').includes('unresolved:P1.details'), `R1: 100 万円は P1（確認待ち）の details にだけある: ${JSON.stringify(yen && yen.heldIn)}`);
-  const r3 = traceOf(rv, 'R3'), ok = anchor(r3, 'name', '承認済み');
-  assert(ok && ok.heldIn.includes('js:C1.amount.condition') && ok.heldIn.includes('js:C2.amount.condition') && ok.heldIn.includes('js:C1.item_name.condition') && r3.status === 'js' && !ws.some(w => w.requirementId === 'R3'), `R3: 承認済み は js:C1 / C2 の condition にある（警告なし・状態 js）: ${JSON.stringify(ok && ok.heldIn)}`);
-  assert(['R4', 'R5', 'R6'].every(id => traceOf(rv, id).status === 'unanchored') && !ws.some(w => ['R4', 'R5', 'R6'].includes(w.requirementId)), '値を取り出せない要件（差戻し後・既存の判定を残す・PC とモバイル）は unanchored で警告なし');
+  const tr = R.traceRequirements({ plan: SR.CASE2_PLAN, requirements: SR.REQUIREMENTS.case2, data: INPUTS.data });
+  const yen = anchor(trOf(tr, 'R1'), 'number', 1000000);
+  assert(yen && !held(yen, 'spec:').length && !held(yen, 'js:').length, `R1: 100 万円は spec にも JS にも無い（P1 は確認待ちで spec が {}）: ${JSON.stringify(yen && yen.heldIn)}`);
+  assert(['R3', 'R4', 'R5', 'R6'].every(id => !trOf(tr, id).anchors.length), '数もフィールドも無い要件（承認済み・差戻し後・既存の判定を残す・PC とモバイル）は値なし');
   // 旧 CX-1 初版: 分岐が spec にある
-  const old = review(SR.OLD_CX1_PLAN, { requirements: SR.REQUIREMENTS.case2 });
-  const o1 = traceOf(old, 'R1'), oyen = anchor(o1, 'number', 1000000), o2 = traceOf(old, 'R2');
-  assert(oyen && oyen.heldIn.includes('spec:P5.filterCond') && anchor(o1, 'field', 'amount').heldIn.includes('spec:P4.filterCond') && anchor(o1, 'field', 'amount').heldIn.includes('spec:P5.filterCond'), `旧 CX-1: 1000000 が spec:P5.filterCond（金額 = amount は P4 / P5）にある: ${JSON.stringify(oyen && oyen.heldIn.filter(h => /^spec/.test(h)))}`);
-  assert(notInSpec(old).length === 0 && o1.status === 'spec' && o2.status === 'spec' && anchor(traceOf(old, 'R3'), 'name', '承認済み').heldIn.includes('spec:P6.to'), `旧 CX-1: 警告なし・R1 / R2 は spec・承認済み は P6 の遷移先: ${o1.status} / ${o2.status}`);
+  const old = R.traceRequirements({ plan: SR.OLD_CX1_PLAN, requirements: SR.REQUIREMENTS.case2, data: INPUTS.data });
+  const o1 = trOf(old, 'R1'), oyen = anchor(o1, 'number', 1000000);
+  assert(oyen && oyen.heldIn.includes('spec:P5.filterCond') && anchor(o1, 'field', 'amount').heldIn.includes('spec:P4.filterCond') && anchor(o1, 'field', 'amount').heldIn.includes('spec:P5.filterCond'), `旧 CX-1: 1000000 が spec:P5.filterCond（金額 = amount は P4 / P5）にある: ${JSON.stringify(oyen && oyen.heldIn)}`);
 });
 
 // =========================================================
@@ -406,53 +385,6 @@ await section(async () => {
   const f3 = await runFinal({ outOfScope: [{ code: 'OTHER_OWNER', requirement: '承認待ちの通知', owner: 'step', message: '承認待ちの通知（標準設定で対応）' }, { code: 'AI_OUT_OF_SCOPE', requirement: '承認後に Slack へ知らせる', owner: 'unowned', note: '別の仕組み', message: '承認後に Slack へ知らせる（別の仕組み）' }], unowned: [{ code: 'UNOWNED', requirement: '承認後に Slack へ知らせる', message: '承認後に Slack へ知らせる' }] });
   const t3 = f3.text;
   assert(f3.gen === 1 && /確認できないこと/.test(f3.right) && /「承認後に Slack へ知らせる」は、この計画のどの手順・JavaScript が担当するか決まっていません/.test(f3.right) && !/承認待ちの通知（標準設定で対応）|対応範囲外|担当が計画にありません/.test(t3 + f3.right), `右の「変更内容」の「確認できないこと」: 担当の無い要件は 1 回・担当のある要件は出さない（2026-10-14）: ${t3.slice(t3.indexOf('実現できない点'), t3.indexOf('実現できない点') + 300)}`);
-});
-
-// =========================================================
-console.log('\n--- §7. 会話（T5）: 台帳の更新の後に要件の保持を調べ、右の「確認結果」の警告一覧に出る ---');
-await section(async () => {
-  const goal = SR.CASE1_PLAN.goal;
-  const turn = { reply: '3日の数え方は更新日時から暦日で3日後の午前9時とする案にしました。', requirementOps: [
-    { op: 'add', id: '', target: '承認待ちの案件', condition: '承認待ちのまま3日経過', behavior: '作業者だけに知らせる', exceptions: [{ condition: '金額が100万円以上', behavior: '上長にも知らせる' }], decision: 'decided', disposition: 'adopted', sourceQuotes: ['3日たったら作業者だけに知らせて', '金額が100万円以上の案件は上長にも知らせて'], planRefs: ['P1', 'P2'], note: '' },
-    { op: 'add', id: '', target: '', condition: '', behavior: '更新日時から暦日で3日後の午前9時', exceptions: [], decision: 'proposed', disposition: 'adopted', sourceQuotes: [], planRefs: ['P1'], note: '' },
-  ], utteranceCoverage: [{ quote: goal, as: 'requirement', refs: ['R1'], note: '' }] };
-  //   C-1 第 3 段: 新しい流れ（依頼 → 仮案 → 採用 → 計画 → 最終案）の上で試す（共有の部品 makeConvC。仮案は要件の操作なし・計画の turn が台帳に要件を入れる）
-  const makeConv = ({ withRequirements = false, staleTrace = false } = {}) => {
-    const calls = { plan: 0 };
-    // staleTrace: 検証が台帳の更新より前に（古い台帳 = 空で）要件を照合した形（requirementTrace はあるが requirement 数が台帳と違う）
-    const x = makeConvN({ planImpl: (args) => { calls.plan += 1; const p = clone(SR.CASE1_PLAN); const review = R.review({ plan: p, ...INPUTS, ...(withRequirements ? { requirements: args.requirements || [] } : staleTrace ? { requirements: [] } : {}) }); return { plan: p, ctx: { facts: [] }, review, gatewayPlan: clone(p), turn: clone(turn) }; } });
-    return { c: x.c, x, calls };
-  };
-  const send = async (k) => { await startN(k.x, goal); return k; };
-  const { c } = await send(makeConv());
-  const v = c.activePlan();
-  assert(v && v.fromDraft && v.final, `前提: 新しい流れで最終案まで進んだ: ${JSON.stringify(v && { fromDraft: !!v.fromDraft, final: !!v.final })}`);
-  const lg = c.state.ledgers.get(v.planId);
-  assert(v && lg && Array.isArray(lg.requirements) && lg.requirements.length === 2 && lg.requirements[0].id === 'R1' && lg.requirements[0].decision === 'decided' && lg.requirements[0].exceptions[0].condition === '金額が100万円以上', `前提: 台帳に R1（決定・例外つき）と R2（AI の提案）が入った: ${JSON.stringify((lg?.requirements || []).map(e => [e.id, e.decision, e.disposition]))}`);
-  const tr = v.review && v.review.requirementTrace;
-  assert(tr && tr.requirements.length === 2 && tr.requirements[0].id === 'R1' && anchor(tr.requirements[0], 'number', 3).heldIn.includes('spec:P1.daysLater'), `計画の検証が台帳の更新より前でも、登録のときに要件の保持（review.requirementTrace）が取れる: ${JSON.stringify(tr && tr.requirements.map(r => [r.id, r.status]))}`);
-  const ws = notInSpec(v.review);
-  assert(ws.length === 1 && ws[0].requirementId === 'R1' && /「金額が100万円以上」/.test(ws[0].message), `review.warnings に REQUIREMENT_CONDITION_NOT_IN_SPEC（1 件・二重に出ない）: ${JSON.stringify(ws.map(w => w.requirementId))}`);
-  const html = KTContextUi.reviewHtml(v.review, v.plan);
-  assert(/「金額が100万円以上」の条件が手順の spec にも JavaScript の条件にもありません（確認事項にだけあります）/.test(html) && /\(REQUIREMENT_CONDITION_NOT_IN_SPEC\)/.test(html) && /Toolkit からの指摘/.test(html), '右の「確認結果」（reviewHtml）の「Toolkit からの指摘」に出る');
-  assert((html.match(/\(REQUIREMENT_CONDITION_NOT_IN_SPEC\)/g) || []).length === 1, '「Toolkit からの指摘」の一覧には 1 回だけ描く（技術情報の JSON の写しは別）');
-  const rs = VM.reviewSummary(v);
-  assert(rs && typeof rs.confirmations === 'number' && rs.planId === v.planId, `要約の生成は壊れない: ${JSON.stringify(rs)}`);
-  // services.plan が requirements つきで検証していれば（review.requirementTrace あり）、登録のときに重ねない
-  const { c: c2 } = await send(makeConv({ withRequirements: true }));
-  const v2 = c2.activePlan();
-  assert(v2.review.requirementTrace && v2.review.requirementTrace.requirements.length === 2 && notInSpec(v2.review).length === 1, `検証が先に要件を照合していれば二重に出さない（警告は 1 件・trace は台帳の 2 件）: ${notInSpec(v2.review).length} 件 / ${v2.review.requirementTrace.requirements.length}`);
-  // 検証の時点の台帳が古い（trace はあるが requirement 数が台帳と違う）→ 登録のときに作り直す（「trace が無い」だけで判定しない）
-  const { c: cS } = await send(makeConv({ staleTrace: true }));
-  const vS = cS.activePlan();
-  assert(vS.review.requirementTrace.requirements.length === 2 && notInSpec(vS.review).length === 1 && notInSpec(vS.review)[0].requirementId === 'R1', `trace の requirement 数が台帳（2 件）と違えば作り直す: ${vS.review.requirementTrace.requirements.length} / ${notInSpec(vS.review).length}`);
-  // 計画のみの版（Context ペインから登録。turn なし）は台帳が空 → 警告なし・例外にならない
-  //   C-1 第 3 段: 古い流れの「依頼 → すぐ計画」は無いので、Context ペインの「変更計画を作成」と同じ registerPlan で登録する
-  const x3 = makeConvN({ planImpl: () => { throw new Error('計画の AI は呼ばない'); } });
-  const p3 = clone(SR.OLD_S10_PLAN);
-  x3.c.registerPlan({ plan: p3, ctx: { facts: [] }, review: R.review({ plan: p3, ...INPUTS }) }); await ticks();
-  const v3 = x3.c.activePlan();
-  assert(v3 && v3.review.requirementTrace && v3.review.requirementTrace.requirements.length === 0 && notInSpec(v3.review).length === 0, '台帳が空なら警告なし（例外にしない）');
 });
 
 console.log(`\n${state.failed === 0 ? 'ALL PASS' : 'SOME FAILED'}: ${state.passed} passed, ${state.failed} failed`);

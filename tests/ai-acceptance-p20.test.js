@@ -113,13 +113,8 @@ console.log('\n--- BF-C（再 3）/ F24. エラー表示と編集不可: 条件�
     const ws = VM.workspaceState({ version: conv.activePlan(), execState: null, jsExec: { stage: 'done', execution: { status: 'VERIFY_FAILED', put: { ok: true }, steps: [{ name: 'dealLock.js', target: 'desktop', status: 'VERIFY_FAILED' }] } }, subject: null });
     assert(ws.lines.includes('Preview登録済み・検証で不一致（要確認）') && !ws.lines.includes('一部だけ反映（要確認）'), 'U6: JS 登録の検証不一致は「Preview登録済み・検証で不一致（要確認）」');
   }
-  // 計画の段階（Review）: 値に応じた警告を show だけで判定する計画は、入力中に切り替わらないと指摘する（実機 BF-C で 2 回続けて change が抜けた）
-  const custPlan = (requirement, events, fields) => plan([step('C1', 'CUSTOMIZATION_REQUIRED', 'JS', '', { customizationId: 'C1' }, { solution: 'CUSTOMIZATION', execution: { mode: 'PLAN_ONLY', supported: false, reason: 'x' } })], [], { solution: 'CUSTOMIZATION', customizations: [{ customizationId: 'C1', requirement, whyStandardInsufficient: '標準設定に無い', strategy: 'NEW_JS_FILE', platform: ['desktop'], implementation: 'JAVASCRIPT', events, fields, apis: [], existingFiles: [], risks: [], questions: [], dependsOn: [] }] });
-  const showOnly = reviewOf(custPlan('画面表示時に金額が100万円を超えた場合に金額フィールドの下に警告メッセージを表示する', ['app.record.create.show', 'app.record.edit.show'], [{ code: 'amount', access: 'CONTROL' }])).steps[0];
-  assert(showOnly.issues.some(i => i.code === 'JS_CHANGE_EVENT_MISSING' && /amount/.test(i.message)) && showOnly.status === 'NEEDS_CONFIRMATION', 'BF-C: 「100万円を超えた場合に警告」を show だけで判定 → JS_CHANGE_EVENT_MISSING（入力中に切り替わらない）');
-  const withChange = reviewOf(custPlan('金額が100万円を超えた場合に警告を表示する', ['app.record.create.show', 'app.record.edit.show', 'app.record.create.change.amount', 'app.record.edit.change.amount'], [{ code: 'amount', access: 'CONTROL' }])).steps[0];
-  const lockOnly = reviewOf(custPlan('承認済みステータスのとき、金額に加えて担当者も編集不可にする', ['app.record.create.show', 'app.record.edit.show'], [{ code: 'amount', access: 'CONTROL' }, { code: 'owner', access: 'CONTROL' }])).steps[0];
-  assert(!withChange.issues.some(i => i.code === 'JS_CHANGE_EVENT_MISSING') && !lockOnly.issues.some(i => i.code === 'JS_CHANGE_EVENT_MISSING'), 'change がある計画・ステータスで決まるロック（BF-D）は指摘しない');
+  //   簡素化（2026-10-17）: 計画の段階で要件の文の語（「超え」「以上」など）から change イベントの不足を指摘する注意（JS_CHANGE_EVENT_MISSING）は削除した。
+  //   入力中の切り替えは、必須の効果のイベント（計画の effects）と生成工程の模擬テストが扱う（F26・F27）
 }
 
 // =========================================================
@@ -565,25 +560,17 @@ console.log('\n--- CX-2a / CX-7 / XA-5（再実行）. 通知の種類・未確�
     assert(conv2.messages().some(x => x.data && x.data.kind === 'secret-question' && /チャットに書かないでください/.test(x.text)), 'CX-7: AI が秘密情報を質問したら、チャットに書かないよう Toolkit が伝える');
   }
   // 依頼のアプリ名と参照先アプリの名前（XA-5）
+  //   簡素化（2026-10-17）: 依頼の文を語の照合で読み直す計画全体の指摘（RELATED_APP_NAME_MISMATCH・CX-4 の REQUEST_EXCEPTION_UNCONFIRMED）は削除した。
+  //   どのアプリか・例外として扱うかは計画の AI と質問の AI が扱う。ここでは手順の無い計画で「問題は見つかりませんでした」と言わないことだけを確かめる
   {
-    const W = (goal, steps = []) => reviewOf(plan(steps, [], { goal })).warnings.filter(w => w.code === 'RELATED_APP_NAME_MISMATCH');
-    const w1 = W('顧客マスタ（旧）の顧客コードで会社名を取ってきたい');
-    assert(w1.length === 1 && w1[0].severity === 'medium' && /顧客マスタ\(旧\)/.test(w1[0].message) && /「顧客マスタ」（App 500）/.test(w1[0].message), 'XA-5: 「顧客マスタ（旧）」は参照先「顧客マスタ」と名前が一致しない → 計画全体の指摘（medium）');
-    assert(W('顧客マスタ2から電話番号を取得したい').length === 1 && W('顧客マスタから住所と電話番号も取得したい').length === 0 && W('見積管理にも金額を転記したい').length === 0, '番号付きの名前は指摘・同じ名前（参照先そのもの）は指摘しない');
-    assert(W('顧客マスタ（旧）の顧客コードで会社名を取ってきたい', [step('P1', 'ADD_FIELD', 'PROPOSED_FIELD', 'NEW_FIELD_1', { fieldType: 'LOOKUP', sourceApp: '357', keyField: 'cust_cd' })]).length === 0, '計画が参照先以外のアプリ（ID）を明示していれば指摘しない（利用者が ID を伝えた後）');
-    // CX-4: 全体の禁止と例外が両方ある依頼で、計画の確認事項が触れていなければ計画全体の指摘
-    const X = (goal, questions = []) => reviewOf(plan([], [], { goal, questions: questions.map((q, i) => ({ id: `Q${i + 1}`, question: q, relatedEvidenceIds: [] })) })).warnings.filter(w => w.code === 'REQUEST_EXCEPTION_UNCONFIRMED');
-    const x1 = X('承認後は誰も金額を変更できないようにして。ただし営業担当はいつでも変更できるようにして', ['営業担当フィールドは文字列です。ログインユーザーとの照合方法は？']);
-    assert(x1.length === 1 && x1[0].severity === 'medium' && /誰も/.test(x1[0].message) && /ただし/.test(x1[0].message), 'CX-4: 「誰も…できない」と「ただし…できる」が両方・確認事項が触れていない → 計画全体の指摘');
-    assert(X('承認後は誰も金額を変更できないようにして。ただし営業担当はいつでも変更できるようにして', ['営業担当を例外として扱ってよいですか？']).length === 0 && X('承認後は金額を変更できないようにして').length === 0 && X('担当者以外は見られないようにして').length === 0, '確認事項が例外に触れている・例外の無い依頼は指摘しない');
     //   C-1 第 3 段（2026-10-08）: 会話の検証の要約（review-summary の「計画全体に確認が必要な点があります」）は削除した。
     //   新しい流れでは、最終案のカードで「問題は見つかりませんでした」と言わず、計画全体の指摘は右の「確認結果」（Toolkit からの指摘）に出る
     const mX = mountWith(respOf('顧客マスタ（旧）の顧客コードで会社名を取ってきたい', []));
     await ticks();
     await adoptOnPanel(mX.panel);
     const vX = mX.panel.conversation().activePlan();
-    const chatX = mX.$('kt-ai-chat').innerHTML, rvX = mX.$('kt-ai-review-result').innerHTML;
-    assert(vX && vX.final && vX.review.warnings.some(w => w.code === 'RELATED_APP_NAME_MISMATCH') && !/問題は見つかりませんでした/.test(chatX) && /顧客マスタ\(旧\)|顧客マスタ（旧）/.test(rvX), `XA-5: 手順が無く「既存の設定で足りる」計画でも「問題は見つかりませんでした」と言わない（計画全体の指摘は右の「確認結果」）: ${(rvX.match(/顧客マスタ.{0,40}/) || [''])[0]}`);
+    const chatX = mX.$('kt-ai-chat').innerHTML;
+    assert(vX && vX.final && !/問題は見つかりませんでした/.test(chatX), 'XA-5: 手順が無く「既存の設定で足りる」計画でも「問題は見つかりませんでした」と言わない');
   }
 }
 
@@ -829,14 +816,8 @@ console.log('\n--- F35 / F36（XA-7 / XA-9 実機）. 関連レコードの設�
   const pB2 = plan([step('P1', 'UPDATE_VIEW', 'VIEW', '見積一覧', { fields: ['quote_no', 'amount'], sort: 'レコード番号 desc' })]);
   const rvB2 = reviewOf(pB2);
   assert(rvB2.steps[0].issues.some(i => i.code === 'REFERENCE_TABLE_NOT_VIEW') && KTPlanExecutor.applyReadiness(pB2, rvB2)[0].apply !== 'AUTO', 'F35: Gateway が通しても（ラベルで指定）関連レコードを一覧として反映しない');
-  // F35c: 依頼が参照元アプリの画面の関連レコード一覧を指すのに、計画はこのアプリの一覧を追加（実機 XA-7b: 対応履歴から「案件の画面に出ている対応履歴の一覧」→ 対応履歴アプリに一覧を追加・「問題は見つかりませんでした」）
-  const data2 = clone(DATA);
-  data2.relatedApps['500'].fields.deal_history = { type: 'REFERENCE_TABLE', code: 'deal_history', label: '案件履歴', referenceTable: { relatedApp: { app: String(FX.SELF_APP), code: '' }, condition: { field: 'code', relatedField: 'customer_code' }, displayFields: ['case_name'], sort: 'レコード番号 desc', filterCond: '', size: '5' } };
-  const stepsC = [step('P1', 'ADD_VIEW', 'VIEW', '案件履歴（担当表示）', { name: '案件履歴（担当表示）', fields: ['case_name', 'owner'], sort: 'レコード番号 desc' })];
-  const rvC = reviewOf(plan(stepsC, [], { goal: '顧客マスタの画面に出ている案件履歴の一覧に、担当も表示して新しい順にしたい' }), data2);
-  const wC = rvC.warnings.find(w => w.code === 'RELATED_RECORDS_IN_OTHER_APP');
-  assert(wC && /App 500/.test(wC.message) && /案件履歴/.test(wC.message) && wC.stepIds.includes('P1'), `F35: 依頼の一覧は参照元アプリの関連レコード → このアプリの一覧を変えても変わらないと指摘: ${wC && wC.message}`);
-  assert(!reviewOf(plan(stepsC, [], { goal: '案件履歴の一覧に担当も表示して新しい順にしたい' }), data2).warnings.some(w => w.code === 'RELATED_RECORDS_IN_OTHER_APP'), 'F35: 依頼に別のアプリの名前が無ければ（このアプリの一覧の話）指摘しない');
+  //   F35c（依頼の文に参照元アプリの名前と関連レコードの名前があれば指摘する RELATED_RECORDS_IN_OTHER_APP）は、依頼の文を語の照合で読み直す指摘なので 2026-10-17 に削除した。
+  //   関連レコードを一覧として反映しないこと（F35b の REFERENCE_TABLE_NOT_VIEW）は構造で決まるので残る
 
   // F36: 別のアプリへの手順（実機 XA-9: 「顧客マスタに顧客ランクを追加」を ADD_FIELD ＋ destApp 351 で書き、Toolkit は「自動で反映できる」= このアプリに追加する状態だった）
   const p36 = plan([
