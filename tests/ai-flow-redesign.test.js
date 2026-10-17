@@ -1278,7 +1278,7 @@ await section(async () => {
   await adoptC(y);
   const vy = y.c.activePlan();
   const hy = stripC(finalHtml(y));
-  assert(y.calls.plan.length === 1 && y.finals().length === 1 && vy.final.approvable === true && !vy.final.blockers.some(b => b.kind === 'ownerless') && /計画の構造からは実現を確かめていない要件が 1 件あります/.test(stripC(rightOf(y))) && stripC(rightOf(y)).includes('「7営業日で」は、計画の構造からは実現を確かめていません（反映した後に動作テスト環境で確かめてください）') && !/7営業日で/.test(hy), `D9-3: 計画に対応づけていない決まった要件は最終案から消さず、右の確認の限界に出す（自動の差分更新なし）: ${JSON.stringify({ plans: y.calls.plan.length, finals: y.finals().length, reason: vy.final.blockingReason })}`);
+  assert(y.calls.plan.length === 1 && y.finals().length === 1 && vy.final.approvable === true && !vy.final.blockers.some(b => b.kind === 'ownerless') && /計画の構造からは実現を確かめていない要件が 1 件あります/.test(stripC(rightOf(y))) && stripC(rightOf(y)).includes('「7営業日で」は、計画の構造からは実現を確かめていません') && !/7営業日で/.test(hy), `D9-3: 計画に対応づけていない決まった要件は最終案から消さず、右の確認の限界に出す（自動の差分更新なし）: ${JSON.stringify({ plans: y.calls.plan.length, finals: y.finals().length, reason: vy.final.blockingReason })}`);
   const ap = y.c.approveFinal({ planId: vy.planId, version: vy.version });
   assert(ap.ok === true, `D9-4: 確認の限界の要件が残る最終案も承認できる（反映した後に動作テスト環境で確かめる）: ${JSON.stringify(ap)}`);
 });

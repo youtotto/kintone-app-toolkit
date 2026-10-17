@@ -170,7 +170,7 @@ await section(async () => {
     const L = vis(R.leftHtml(x, { pre: READY })), RV = vis(R.rightHtml(x));
     //   簡素化 C（2026-10-16）: 計画に対応づけていない決まった要件は「担当なし」で止めない（今の設定・既存のコードで満たしていることがあり、構造からは区別できない）。
     //   自動の見直しも呼ばない。右の「確認できないこと」の確認の限界（件数の 1 行・文は［詳しく］）
-    const line = '「今ある入力チェックは残して、PCとモバイルの両方で使いたい」は、計画の構造からは実現を確かめていません（反映した後に動作テスト環境で確かめてください）';
+    const line = '「今ある入力チェックは残して、PCとモバイルの両方で使いたい」は、計画の構造からは実現を確かめていません';
     assert(fin && fin.approvable === true && !fin.blockers.some(b => b.kind === 'ownerless') && !L.includes(line) && UNCONF_SUM.test(RV) && stripC(R.rightHtml(x)).includes(line) && x.calls.plan.length === 1,
       `D4-1（${tag}）: 計画に対応づけていない決まった要件は止めず、自動の見直しも呼ばない（右の確認の限界）: ${JSON.stringify(fin && { approvable: fin.approvable, blockers: fin.blockers.map(b => b.kind), plan: x.calls.plan.length })}`);
   }
@@ -329,7 +329,7 @@ await section(async () => {
   const r4 = x.c.requirements(v.planId).find(r => r.id === 'R4');
   //   簡素化 C（2026-10-16）: 画面の語（モバイル）とファイル名からの欠落の判定（以前は「…が足りません（計画に無いもの: モバイル）」で止めた）は差し戻した。
   //   R4 は計画の手順・JavaScript に対応づけていない（仮案の項目 B3）ので確認の限界。止めず、自動の見直しも呼ばない（モバイルで入力チェックが動くかは、反映した後に動作テスト環境で確かめる）
-  const line4u = '「今ある入力チェックは残して、PCとモバイルの両方で使いたい」は、計画の構造からは実現を確かめていません（反映した後に動作テスト環境で確かめてください）';
+  const line4u = '「今ある入力チェックは残して、PCとモバイルの両方で使いたい」は、計画の構造からは実現を確かめていません';
   assert(r4 && JSON.stringify(r4.planRefs) === '["B3"]' && r4.decision === 'decided' && fin.approvable === true && !fin.blockers.some(b => b.kind === 'ownerless') && UNCONF_SUM.test(RV) && stripC(R.rightHtml(x)).includes(line4u) && !L.includes(line4u) && x.calls.plan.length === 1,
     `D9-1: 実現する JavaScript（モバイルの入力チェック）を外しても、文の語からは欠落とせず確認の限界（止めない・自動の見直しなし）: ${JSON.stringify({ approvable: fin.approvable, blockers: fin.blockers.map(b => b.text), plan: x.calls.plan.length })}`);
   //   (2) モバイルの編集制御（C2）を外す。R3（PC とモバイルで金額と明細を編集不可）は PC の JavaScript（C1）だけが実現する → 一部だけ（PC）を全体の実現にしない。
@@ -384,7 +384,7 @@ await section(async () => {
   //      ＝確認材料不足（文から保存の停止を補って合否を決めない）→ 反映は止めず、自動の見直しもしない
   const hd = await R.run({ reqMutate: setR('R4', { behavior: '単価が0のときは保存を止める', effects: [] }), planMutate: drop('C3') });
   const quote3 = '承認済みでは金額と明細を変更できなくし、差戻し後は再編集できるようにして', quote4 = '今ある入力チェックは残して、PCとモバイルの両方で使いたい';
-  const unconfLine = (q) => `「${q}」は、計画の構造からは実現を確かめていません（反映した後に動作テスト環境で確かめてください）`;
+  const unconfLine = (q) => `「${q}」は、計画の構造からは実現を確かめていません`;
   //   簡素化 C: 確認の限界は右の件数の 1 行と［詳しく］の中の文（1 件ずつ並べない）
   const rightHas = (xx, q) => UNCONF_SUM.test(vis(R.rightHtml(xx))) && count(stripC(R.rightHtml(xx)), unconfLine(q)) === 1;
   const leftLacks = (xx, q) => !vis(R.leftHtml(xx, { pre: READY })).includes(unconfLine(q));
@@ -417,6 +417,33 @@ await section(async () => {
 });
 
 // =========================================================
+// =========================================================
+console.log('\n--- §D9c. §4（2026-10-17）: C3（モバイルの入力チェックの移植）を外した素材で、検出できること・できないこと ---');
+//   (1) テストを作った側は欠落を知っている（計画から C3 を外した。モバイルの入力チェックを移植する JavaScript が無い）。
+//   (2) 製品が受け取った構造: R4（今ある入力チェックを PC とモバイルの両方で使う）の planRefs は採用した仮案の項目（B3）だけ・効果は無い。
+//       計画（v.plan と v.gatewayPlan）に R4 や B3 を指すものは無い。C3 の要件の達成の申告（R4 MET）は C3 と一緒に無くなる（申告は証拠にもしない）。
+//       Toolkit は計画の AI の planRefs をそのまま持つので、途中で失った材料は無い → 構造からは欠落を識別できない
+//   (3) 現在の製品: 検出していない（止めない・自動の見直しも呼ばない）。確認の限界（計画の構造からは実現を確かめていない要件の 1 件）として右に出す。
+//       これは未検出の限界で、有料の見直しが無くなったことを成功とは数えない。要件を確かめた・検証済みとは表示しない
+await section(async () => {
+  const drop = (cid) => (plan) => { plan.customizations = plan.customizations.filter(c => c.customizationId !== cid); plan.steps = plan.steps.filter(s => s.id !== cid); return plan; };
+  const w = await R.run({ planMutate: drop('C3') });
+  const v = w.c.activePlan(), fin = v.final;
+  const r4 = w.c.requirements(v.planId).find(r => r.id === 'R4');
+  assert(!!r4 && JSON.stringify(r4.planRefs) === '["B3"]' && !(r4.effects || []).length && !/"B3"|"R4"/.test(JSON.stringify([v.plan, v.gatewayPlan])),
+    `D9c-1: 前提: 受け取った構造に R4 の実装先を示すものは無い（planRefs は仮案の項目 B3 だけ・効果なし・計画に参照なし）: ${JSON.stringify(r4 && { planRefs: r4.planRefs, effects: r4.effects })}`);
+  const line4 = (fin.unconfirmedReqs || []).find(x => x && x.requirementId === 'R4');
+  assert(fin.approvable === true && !fin.blockers.length && w.calls.plan.length === 1 && line4 && /計画の構造からは実現を確かめていません$/.test(line4.line),
+    `D9c-2: 現在の製品は欠落を検出しない（止めない・自動の見直しなし）。R4 は確認の限界の 1 件: ${JSON.stringify({ approvable: fin.approvable, blockers: fin.blockers.map(b => b.kind), plans: w.calls.plan.length, line: line4 && line4.line })}`);
+  const L = vis(R.leftHtml(w, { pre: READY })), RV = vis(R.rightHtml(w));
+  assert(!/入力チェック[^。]*(確かめました|確認しました|検証済み)/.test(L + RV) && !/検証済み/.test(L) && (RV.match(/検証済み/g) || []).length === ((RV.match(/：できた（検証済み）/g) || []).length),
+    'D9c-3: 要件（R4）を確かめた・検証済みとは表示しない（「検証済み」は右の JavaScript の状態の行だけ。JavaScript ごとの必須の動作の検証）');
+  //   モバイルの実動作を「反映した後に動作テスト環境で確かめる」と一律に書かない（kintone の動作テスト環境には PC の画面しか無い）
+  const all = stripC(R.leftHtml(w, { pre: READY })) + stripC(R.rightHtml(w));
+  const mob = R.recheckOf(w, 'C2').registration.unverified || [];
+  assert(!/反映した後に動作テスト環境で確かめてください/.test(all) && mob.some(u => u.code === 'MOBILE_RUNTIME_NOT_VERIFIABLE') && !mob.some(u => /動作テスト環境で確かめてください/.test(String(u.message || ''))),
+    `D9c-4: 確認の限界の文とモバイルの JavaScript（C2）の未確認の文に、動作テスト環境で確かめるとは書かない: ${JSON.stringify(mob.map(u => [u.code, u.message]))}`);
+});
 console.log('\n--- §D10. 判定の責任範囲（2026-10-16）: 明確な欠落・検証の不一致・確認材料不足を分け、確認材料不足だけで止めない・有料の見直しへ送らない ---');
 await section(async () => {
   const drop = (cid) => (plan) => { plan.customizations = plan.customizations.filter(c => c.customizationId !== cid); plan.steps = plan.steps.filter(s => s.id !== cid); return plan; };
@@ -467,7 +494,7 @@ await section(async () => {
   //   簡素化 C（2026-10-16）: 判断ではないので、生成の検査・反映の前の確認（implementationGaps）にも渡さない（以前は反映の前の確認にも同じ文を出していた）
   const ux = await R.run({ reqMutate: neg });
   const vux = ux.c.activePlan(), q6 = ux.c.requirements(vux.planId).find(r => r.id === 'R6').sourceQuotes[0];
-  const lineU = `「${q6}」は、計画の構造からは実現を確かめていません（反映した後に動作テスト環境で確かめてください）`;
+  const lineU = `「${q6}」は、計画の構造からは実現を確かめていません`;
   assert(!ux.c.implementationGaps(vux).R6 && UNCONF_SUM.test(vis(R.rightHtml(ux))) && count(stripC(R.rightHtml(ux)), lineU) === 1 && !vis(R.leftHtml(ux, { pre: READY })).includes(lineU) && /この内容で反映できます/.test(vis(R.leftHtml(ux, { pre: READY }))) && !vux.final.blockers.length,
     `D10-7: 確認の限界は右に件数の 1 行・左は「反映できます」のまま・反映の前の確認には渡さない: ${JSON.stringify({ gap: ux.c.implementationGaps(vux), blockers: vux.final.blockers.map(b => b.text) })}`);
 });

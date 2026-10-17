@@ -19472,10 +19472,14 @@
       //   §0c.3（2026-10-08）: 生成工程の動作テスト（隔離環境の模擬）の結果があれば、その結果で書く（実機は未確認のまま）
       //   §0c.7（2026-10-08）: 登録できない（BLOCKED）ときは「登録した後に動作テスト環境（実機）で確かめる」という実行できない次の手を出さない（未確認であることだけ書く）
       const verdictNow = blockers.length || status === STATUS.BLOCKED ? 'BLOCKED' : confirmations.length ? 'NEEDS_CONFIRMATION' : 'RUNTIME_UNVERIFIED';
-      const after = verdictNow === 'BLOCKED' ? '' : '。登録した後、動作テスト環境で確かめてください';
+      //   §4（2026-10-17）: kintone の動作テスト環境には PC の画面しか無い。モバイルだけの JavaScript には動作テスト環境で確かめるとは書かない。PC とモバイルの両方なら PC の画面だけ
+      const pfs = Array.isArray(c?.platform) && c.platform.length ? c.platform : ['desktop'];
+      const pcIn = pfs.includes('desktop');
+      const after = verdictNow === 'BLOCKED' || !pcIn ? '' : pfs.includes('mobile') ? '。登録した後、PC の画面は動作テスト環境で確かめてください' : '。登録した後、動作テスト環境で確かめてください';
+      const realJa = pcIn ? '実機（動作テスト環境）' : '実機';
       const unverified = [];
       //   §0d.1（2026-10-08）: 機械検査で足りる効果だけで合格したときは「機械検査で確認（模擬テストは未実施）」と書く（模擬テストで確かめたとは書かない）
-      if (behavior) unverified.push(behavior.ok ? { code: 'BEHAVIOR_VERIFIED', message: behavior.machineOnly ? `必須の動作は、生成工程の機械検査で確認しました（模擬テストは未実施）。実機（動作テスト環境）では未確認です${after}` : `必須の動作は、生成工程の模擬テストで確かめました${behavior.machineSome ? '（一部は機械検査で確認し、模擬テストは未実施）' : ''}。実機（動作テスト環境）では未確認です${after}` } : { code: 'BEHAVIOR_NOT_VERIFIED', message: '必須の動作を、生成工程の模擬テストで確かめられていません。実機（動作テスト環境）でも未確認です' });
+      if (behavior) unverified.push(behavior.ok ? { code: 'BEHAVIOR_VERIFIED', message: behavior.machineOnly ? `必須の動作は、生成工程の機械検査で確認しました（模擬テストは未実施）。${realJa}では未確認です${after}` : `必須の動作は、生成工程の模擬テストで確かめました${behavior.machineSome ? '（一部は機械検査で確認し、模擬テストは未実施）' : ''}。${realJa}では未確認です${after}` } : { code: 'BEHAVIOR_NOT_VERIFIED', message: `必須の動作を、生成工程の模擬テストで確かめられていません。${realJa}でも未確認です` });
       else unverified.push({ code: 'RUNTIME_NOT_RUN', message: `動作はまだ確かめていません（Toolkit の検査はコードを実行しない静的な確認です）${after}` });
       if (Array.isArray(c?.platform) && c.platform.includes('mobile')) unverified.push({ code: 'MOBILE_RUNTIME_NOT_VERIFIABLE', message: `モバイルの画面は kintone の動作テスト環境に無いため、この流れでは動作を確かめられません${verdictNow === 'BLOCKED' ? '' : '（運用環境のモバイル画面か実機で確かめる必要があります）'}` });
       const verdict = verdictNow;
@@ -26052,7 +26056,8 @@
       const implGapLineOf = (r) => {
         const cutT = (s, n) => { const x = String(s ?? '').replace(/\s+/g, ' ').trim(); return x.length > n ? `${x.slice(0, n)}…` : x; };
         //   2026-10-16（判定の責任範囲を絞る）: 確認材料不足は「担当未定」「実現できない」と断定しない（計画の構造からは確かめていない、と言うだけ）
-        return r.kind === 'unconfirmed' ? `「${cutT(r.text, 140)}」は、計画の構造からは実現を確かめていません（反映した後に動作テスト環境で確かめてください）`
+        //   §4（2026-10-17）: 確かめ先（動作テスト環境）は一律に書かない。要件の画面（PC・モバイル）は構造に無く、モバイルの実動作は動作テスト環境では確かめられない
+        return r.kind === 'unconfirmed' ? `「${cutT(r.text, 140)}」は、計画の構造からは実現を確かめていません`
           : r.kind === 'missing' ? `「${cutT(r.text, 140)}」を実現する計画の手順・JavaScript が足りません（${(r.missing || []).length ? `計画に無いもの: ${r.missing.join('・')}` : '計画に対応する手順・JavaScript が見つかりません'}）` : '';
       };
       const reqTextOf = (r) => (Array.isArray(r.sourceQuotes) && r.sourceQuotes[0]) || [r.condition ? `${r.condition}のとき` : '', r.target, r.behavior].filter(Boolean).join(' ');
@@ -27851,7 +27856,7 @@
           for (const c of behCases0.filter(x => x.row.verdict === 'fail')) { const t = `模擬テストで不合格: ${c.row.label}${c.row.message ? `（${c.row.message}）` : ''}`; if (!hasText(t) && !hasCase(c.caseId)) blockers.push({ kind: 'behavior-fail', text: t, next: '', ...(c.caseId ? { caseId: c.caseId } : {}) }); }
           for (const r of outOfScope.filter(x => x && typeof x === 'object' && !x.owned && x.decision === 'decided')) blockers.push({ kind: 'ownerless', text: r.line || `「${r.text}」は、この計画のどの手順・JavaScript が担当するか決まっていません`, next: r.line ? '計画を直す（この要件を実現する手順か JavaScript を入れる）か、この要件を取り消してから反映します。' : '計画を直すか、この要件を取り消してから反映します。' });
           //   2026-10-15（§3）: 計画全体で扱う要件の確認（反映は止めない。右の変更内容・反映の前の確認と同じ文）
-          for (const r of planScope.values()) if (!hasText(r.text)) blockers.push({ kind: 'plan-scope', text: r.text, next: '計画を直すか、反映した後に動作テスト環境で確かめてください（この点では反映を止めていません）。', ...(r.requirementId ? { requirementId: r.requirementId } : {}) });
+          for (const r of planScope.values()) if (!hasText(r.text)) blockers.push({ kind: 'plan-scope', text: r.text, next: '計画を直すか、反映した後に確かめてください（この点では反映を止めていません）。', ...(r.requirementId ? { requirementId: r.requirementId } : {}) });
           //   統合テストの指摘 15（2026-10-14）: 「作った JavaScript の誤りとは判定していません」が同じ行（理由の文・末尾・次の方針）に繰り返されるときは 1 回だけ残す（判定の文は変えない。表示の材料だけ）
           for (const b of blockers) {
             let seen = false;
@@ -30155,7 +30160,7 @@
         ...(sc0.conditions.length ? ['<b>模擬テストの条件</b>', ...sc0.conditions.map(x => `・${esc(x)}`)] : [sc0.conditionsNotRun ? '模擬テストを隔離環境で実行していないため、模擬テストの条件はありません' : '模擬テストの条件は接続先から返っていません']),
         ...(sc0.unchecked.length ? ['<b>確かめていない範囲</b>', ...sc0.unchecked.map(x => `・${esc(x)}`)] : ['確かめていない範囲は接続先から返っていません']),
       ] : [sc0.conditionsNotRun ? '模擬テストを隔離環境で実行していないため、模擬テストの条件はありません' : '模擬テストの条件は接続先から返っていません'];
-      const scopeHtml = `<details class="kt-ai-tech kt-ai-final-scope" style="margin-top:2px;"><summary>模擬テストの条件と確かめていない範囲</summary><div style="font-size:11px;">${[...scopeRows, '反映は動作テスト環境から始まります。実機での確かめは、動作テスト環境で行ってください。'].join('<br>')}</div></details>`;
+      const scopeHtml = `<details class="kt-ai-tech kt-ai-final-scope" style="margin-top:2px;"><summary>模擬テストの条件と確かめていない範囲</summary><div style="font-size:11px;">${[...scopeRows, '反映は動作テスト環境から始まります。PC の画面の実機での確かめは、動作テスト環境で行ってください（モバイルの画面は動作テスト環境にありません）。'].join('<br>')}</div></details>`;
       //   反映した後に動作テスト環境で確かめること（実機未確認は「確かめたこと」の 1 行で言うので、ここでは繰り返さない）
       const realHtml = fin.approvable ? `<div style="font-size:12px; margin-top:4px;"><b>反映した後、動作テスト環境で確かめること:</b></div>${li(realLines.length ? realLines : ['動作テスト環境で、条件に合うレコードと合わないレコードを開いて動きを確かめる'])}` : '<div class="kt-ai-final-real" style="font-size:12px; margin-top:4px;">反映できない点が残っているため、まだ実機で確かめる段階ではありません（理由と次の方針は最終案のカード）。</div>';
       return `<div style="font-size:12px; margin-top:2px;">${esc(machineLine)}</div>${(mc.blocks || []).length ? `<details class="kt-ai-tech" style="margin-top:2px;"><summary>登録を止める問題（詳細）</summary><div style="font-size:11px; color:#b00020;">${mc.blocks.map(x => `× ${esc(x)}`).join('<br>')}</div></details>` : ''}${effLine}<div style="font-size:12px; margin-top:4px;">${esc(behLine)}</div>${machineNote ? `<div class="kt-ai-final-machine" style="font-size:11px; margin-top:2px; opacity:.85;">${esc(machineNote)}</div>` : ''}${behRows ? `<details class="kt-ai-tech" style="margin-top:2px;"${beh.counts.fail || beh.counts.notRun ? ' open' : ''}><summary>代表条件の一覧</summary>${behRows}</details>` : ''}${beh.status !== 'none' ? scopeHtml : ''}${realHtml}${unverHtml}`;
