@@ -2576,15 +2576,14 @@
       buildSignature, loadCache, saveCache, clearCache,
       isAutoEnabled, setAutoEnabled,
       CACHE_TTL_MS, ANALYZER_VERSION,
-      // Phase 16: 解析関数（UI と生成コードの再解析で共用）
-      EVENT_NAME_RE, extractEventTypes, eventRegistrationsOf, extractStatusComparisons, collectUnknownStatusRefs, buildRegexps, classifyAccess, findAllMatches, analyze,
+      // Phase 16: 解析関数（UI と登録する本文の解析で共用）。簡素化 B（2026-10-17）: 生成した候補を Toolkit が解析し直す処理を削除したので、
+      //   そのためだけに公開していた extractEventTypes・extractStatusComparisons と、フィールドを指す式の解決（Phase 22 F-F2。Code Review と共用）は公開しない
+      EVENT_NAME_RE, eventRegistrationsOf, collectUnknownStatusRefs, buildRegexps, classifyAccess, findAllMatches, analyze,
       // 純粋なテキスト解析（Field Scannerが利用。回帰テストの対象）
       isPlausibleFieldCode, extractFieldCodeCandidates, scanArrayLiteralItems,
       scanObjectProps, resolveAppExpr, collectDeclarations, isRestCallee,
       stripCommentsOnly, buildLineIndex, lineAt, normalizeCode,
       collectUnknownFieldRefs, collectExternalFieldRefs,
-      // Phase 22（F-F2）: フィールドを指す式の解決（Code Review と共用）
-      maskStrings, fieldRefContext, fieldRefAt, fieldRefOfExpr, resolveAlias, recordNames, isRecordExpr, aliasAccesses, ID_SRC,
     };
   })();
 
