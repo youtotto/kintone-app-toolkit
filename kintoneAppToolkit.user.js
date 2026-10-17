@@ -19789,7 +19789,6 @@
         const reg = ch.registration || null;
         if (!reg) { ch.status = ST.BLOCKED; ch.reason = 'REGISTRATION_UNKNOWN'; ch.message = 'Toolkit の検査結果がありません（コードを生成し直してください）'; block('REGISTRATION_UNKNOWN', `${ch.name}: ${ch.message}`); continue; }
         if (reg.verdict === 'BLOCKED') { ch.status = ST.BLOCKED; ch.reason = 'REQUIREMENT_VIOLATION'; ch.message = (reg.blockers || []).map(b => b.message).join('／') || '要件との不一致'; block('REQUIREMENT_VIOLATION', `${ch.name}: 要件との不一致・不整合が確認されています（${ch.message}）`); continue; }
-        if (typeof ch.content === 'string' && reg.codeHash && reg.codeHash !== hash(ch.content)) { ch.status = ST.BLOCKED; ch.reason = 'CONTENT_CHANGED_AFTER_REVIEW'; ch.message = '検査した後にコードが変わっています（もう一度生成・検査してください）'; block('CONTENT_CHANGED_AFTER_REVIEW', `${ch.name}: ${ch.message}`); continue; }
         //   §0e.1: 設定の反映の後に確かめる change（承認の前の準備）は、新設のフィールドを「存在しない」と言う再検査をここでは飛ばす（実行のときの準備で検査し直す）
         if (typeof input?.recheck === 'function' && !ch.deferredDependsOn) {
           let fresh = null;
@@ -19798,6 +19797,9 @@
           if (fresh.verdict === 'BLOCKED') { ch.status = ST.BLOCKED; ch.reason = 'REQUIREMENT_VIOLATION'; ch.message = (fresh.blockers || []).map(b => b.message).join('／') || '要件との不一致'; block('REQUIREMENT_VIOLATION', `${ch.name}: 最新の設定で検査し直すと、要件との不一致・不整合があります（${ch.message}）`); continue; }
           ch.registration = { ...fresh, codeHash: fresh.codeHash || reg.codeHash };
         }
+        //   書き込む本文が、検査した本文（登録の判定の codeHash。再検査があればその結果）と同じか。簡素化（2026-10-17）: この比較はここ 1 回（以前は再検査の前・
+        //   画面の再検査の中・書き込みの直前にも、同じ入力から作った本文どうしを比べていた）
+        if (typeof ch.content === 'string' && ch.registration.codeHash && ch.registration.codeHash !== hash(ch.content)) { ch.status = ST.BLOCKED; ch.reason = 'CONTENT_CHANGED_AFTER_REVIEW'; ch.message = '検査した後にコードが変わっています（もう一度生成・検査してください）'; block('CONTENT_CHANGED_AFTER_REVIEW', `${ch.name}: ${ch.message}`); continue; }
         if (!TARGETS.includes(ch.target)) { ch.status = ST.BLOCKED; ch.reason = 'INVALID_TARGET'; ch.message = 'PC / モバイルの指定が不正です'; block('INVALID_CHANGE', ch.message); continue; }
         if (typeof ch.content !== 'string' || !ch.content.trim()) { ch.status = ST.BLOCKED; ch.reason = 'NO_CODE'; ch.message = 'コードが空です'; block('INVALID_CHANGE', ch.message); continue; }
         const list = snap[ch.target].js;
@@ -19897,12 +19899,8 @@
     async function executePreview(prepared, { api, now = Date.now, onProgress = null, acknowledged = [] } = {}) {
       if (!prepared || prepared.status !== RUN.PREPARED) throw Object.assign(new Error('登録の準備ができていない、または登録できない状態です'), { code: 'NOT_PREPARED' });
       if (prepared.executed) throw Object.assign(new Error('この準備は既に実行されています（やり直すには準備からやり直してください）'), { code: 'ALREADY_EXECUTED' });
-      // Phase 21: 書き込みの前に、登録の判定をもう一度確かめる。要件との不一致（BLOCKED）・検査の後に変わったコードは登録しない。
-      //   確認が必要な項目は、利用者が 1 件ずつ確認したもの（acknowledged = 項目の key）がそろっているときだけ登録する（まとめての同意では通さない）
-      for (const ch of (prepared.changes || []).filter(c => c.status === ST.PENDING)) {
-        const reg = ch.registration || null;
-        if (!reg || reg.verdict === 'BLOCKED' || (typeof ch.content === 'string' && reg.codeHash && reg.codeHash !== hash(ch.content))) throw Object.assign(new Error(`「${ch.name}」は Toolkit の検査で登録できない状態です（${!reg ? '検査結果がありません' : reg.verdict === 'BLOCKED' ? (reg.blockers || []).map(b => b.message).join('／') : '検査の後にコードが変わっています'}）。登録していません`), { code: !reg ? 'REGISTRATION_UNKNOWN' : reg.verdict === 'BLOCKED' ? 'REQUIREMENT_VIOLATION' : 'CONTENT_CHANGED_AFTER_REVIEW' });
-      }
+      // Phase 21: 確認が必要な項目は、確認したもの（acknowledged = 項目の key）がそろっているときだけ登録する（まとめての同意では通さない）。
+      //   簡素化（2026-10-17）: 登録の判定（要件との不一致・検査の結果が無い・検査の後に変わった本文）は登録の準備（prepare）が止める（ここでは重ねない）
       const ack = new Set(Array.isArray(acknowledged) ? acknowledged : []);
       const missingAck = (prepared.confirmations || []).filter(x => !ack.has(x.key));
       if (missingAck.length) throw Object.assign(new Error(`確認が必要な項目（${missingAck.length} 件）を確認していないため、登録していません: ${missingAck.map(x => x.message).join('／').slice(0, 300)}`), { code: 'CONFIRMATION_REQUIRED', missing: missingAck.map(x => x.key) });
@@ -31616,14 +31614,16 @@
       }
       return { changes, blocked };
     }
-    /** 登録前の再検査（最新の作業基準で形式確認 ＋ 生成工程の検証結果の取り込み）。KTJsExecutor.prepare の recheck */
+    /**
+     * 登録前の再検査（KTJsExecutor.prepare の recheck）: 今の作業基準（動作テスト環境）でのフィールド・スペース要素の存在と、今の版の計画・要件の担当で検査し直し、
+     *   生成工程の検証結果（必須の効果・模擬テスト・機械検査）を取り込み直す。構文・記法・登録イベント・使う API などの生成のときの検査は生成工程が持つ（ここでは行わない）。
+     *   簡素化（2026-10-17）: 検証結果と候補の結び付きは受け取りのとき（候補の指紋が検証結果の指紋と一致したときだけ bound。一致しなければ検証済みにしない）と、
+     *   承認（候補の指紋）と反映の直前の承認の照合が持つ。ここで候補の指紋を作り直す照合と、同じ入力から作った本文どうしの比較は削除した
+     *   （書き込む本文が検査した本文と同じかは、登録の準備の再検査の後に 1 回だけ確かめる）
+     */
     const jsRecheckOf = (v) => async (ch) => {
       const g = v.generated?.[ch.customizationId] || null;
       if (!g) return null;
-      //   簡素化 B（2026-10-17）: 登録する候補（生成の結果と、送った既存ファイルの本文）の指紋を Gateway と同じ計算で作り直し、生成工程の検証結果の指紋と
-      //   承認に使った候補の指紋に照らす（どちらかが違えば登録しない。登録する本文は同じ候補と本文から作り、下の本文の指紋で照らす）
-      const gw = await KTScan.gatewayCandidateHashOf({ strategy: g.generated?.strategy, targetFile: g.generated?.targetFile, code: g.generated?.code, patch: g.generated?.patch, baseHash: g.existingSource && typeof g.existingSource.text === 'string' ? KTScan.hashText(g.existingSource.text) : null, customizationId: ch.customizationId });
-      if (!gw || !g.verification || g.verification.candidateHash !== gw || g.candidateHash !== gw) return { version: '1', verdict: 'BLOCKED', blockers: [{ code: 'VERIFICATION_MISMATCH', message: '生成工程が検証した候補と、登録しようとしている候補が一致しません（もう一度最終案を作ってください）' }], confirmations: [], unverified: [], codeHash: null };
       const c = (v.plan?.customizations || []).find(x => x.customizationId === ch.customizationId) || null;
       const inp = inputsNow();
       // 段階 A（R14）: 登録前の再検査は、計画の新規フィールドを「存在する」扱いにしない（実在するフィールドだけ。新設の依存は prepare の dependsOn で止める）
@@ -31633,9 +31633,7 @@
       // §0c（2026-10-08）: 登録前の再検査は形式確認（最新の作業基準で）＋ 生成工程の検証結果（同じ候補の必須の効果・動作テスト）の取り込み。Toolkit は模擬を実行しない。
       //   §0d.4（2026-10-08）: 既知の競合（同じイベントの error と編集不可）は生成工程の check behavior と模擬テストの結果で扱う（Toolkit の形式確認では判定しない）
       if (g.verification) rv2 = KTCodeReview.attachBehavior(rv2, g.verification, { requiredEffects: g.requiredEffects || [], customization: c, omitted: g.relatedOmitted || [], effectCheck: g.effectCheck != null ? g.effectCheck === true : ktEffectCheckCapable(services.generatorFeatures() || []) });
-      let reg = rv2.registration || null;
-      if (reg && reg.codeHash && reg.codeHash !== ch.contentHash) return { ...reg, verdict: 'BLOCKED', blockers: [...(reg.blockers || []), { code: 'CONTENT_MISMATCH', message: '検査し直したコードと登録しようとしているコードが一致しません（もう一度生成してください）' }] };
-      return reg;
+      return rv2.registration || null;
     };
     const jsProvenanceOf = (v) => ({ planId: v.planId, planVersion: v.version, specVersion: v.spec?.version ?? null, subject: conv.subject() ? { sourceId: conv.subject().sourceId, name: conv.subject().name } : null });
     /**
@@ -31724,8 +31722,8 @@
         jsExec.execution = await KTJsExecutor.executePreview(jsExec.prepared, { api: executor.api, acknowledged, onProgress: (ex) => { jsExec.execution = ex; renderJsReg(); } });
       } catch (e) {
         jsExec.error = e?.message || String(e);
-        // 確認の不足・要件との不一致は、書き込む前に止まる（動作テスト環境は変わっていない）
-        if (['CONFIRMATION_REQUIRED', 'REQUIREMENT_VIOLATION', 'CONTENT_CHANGED_AFTER_REVIEW', 'REGISTRATION_UNKNOWN'].includes(e?.code)) return stop(e.code, jsExec.error);
+        // 確認の項目の不足は、書き込む前に止まる（動作テスト環境は変わっていない。登録の判定は登録の準備が止める）
+        if (e?.code === 'CONFIRMATION_REQUIRED') return stop(e.code, jsExec.error);
         jsExec.execution = jsExec.execution || { executionId: jsExec.prepared.executionId, status: 'FAILED', steps: jsExec.prepared.changes, put: null, error: { code: e?.code || 'EXECUTE_FAILED', message: jsExec.error }, previewUnchanged: null };
       }
       jsExec.stage = 'done';

@@ -2651,15 +2651,17 @@ await section(async () => {
   const mj = e2 && e2.verification && (e2.verification.machine || []).find(ch => ch.name === 'modern-js' && !ch.ok);
   assert(e2 && e2.generated.code === VAR_K && e2.candidateHash === r2.sent[0].candidateHash && e2.status === 'unresolved' && e2.verdict.kind === 'machine' && mj && mj.severity === 'block' && !e2.review.checks.some(ch => ch.name === 'modern-js' && !ch.gateway) && e2.review.checks.some(ch => ch.name === 'modern-js' && ch.gateway && ch.severity === 'block') && FS.readyOf(v2) === false,
     `E4-4: var を含む候補は書き換えず（candidateHash も生成工程のまま）、生成工程の機械検査の block で止める: ${JSON.stringify({ status: e2 && e2.status, same: e2 && e2.generated.code === VAR_K, mj: mj && mj.message })}`);
-  //   簡素化 B（2026-10-17）: 登録の直前にも、登録する候補の指紋を Gateway と同じ計算で作り直して、生成工程の検証結果・承認の指紋に照らす。
-  //   承認の欄の準備の前に候補だけが変わった（検証結果と承認の指紋はそのまま）→ 承認・登録の準備で止まり、動作テスト環境に書き込まない
+  //   承認の欄の準備の後に、生成の記録の候補だけがその場で変わった（検証結果・承認の指紋・検査した本文はそのまま。本体にはこの書き換えは無い）→ 押した直後の準備の
+  //   やり直しで、書き込む本文と検査した本文（今の候補で検査し直した本文）が違うので止まり、動作テスト環境に書き込まない。
+  //   簡素化（2026-10-17）: 登録の直前に候補の指紋を作り直す照合（VERIFICATION_MISMATCH）は削除した（結び付きは受け取りのとき・承認・反映の直前の承認の照合が持つ）。
+  //   本文の比較は登録の準備の再検査の後の 1 回（CONTENT_CHANGED_AFTER_REVIEW）
   const r5 = await run(CODE_K);
   const v5 = r5.m.conv().activePlan(), e5 = v5 && v5.generated && v5.generated.C1;
   const rE5 = await KIT.applyOnScreen(r5.m, { before: async () => { e5.generated = { ...e5.generated, code: `${CODE_K}\n// 検証の後に変わった行` }; } });
   const pr5 = r5.m.panel.jsExecState().prepared, pre5 = r5.m.panel.finalPrecheck();
-  const mism5 = JSON.stringify([pr5 && pr5.blockers, pre5, rE5.run && rE5.run.error]).includes('VERIFICATION_MISMATCH') || JSON.stringify([pr5, pre5]).includes('生成工程が検証した候補と、登録しようとしている候補が一致しません');
-  assert(e5 && e5.verification && e5.verification.bound === true && mism5 && ![...r5.m.mock.st.files.values()].some(f => f.name === 'caseLock.js') && !rE5.writes.some(w => /putPreviewCustomize|uploadFile/.test(String(w && (w.op || w.kind || w)))),
-    `E4-5: 検証の後に候補が変わったら、登録の直前の照合（VERIFICATION_MISMATCH）で止め、書き込まない: ${JSON.stringify({ blockers: pr5 && pr5.blockers, pre: pre5 && { status: pre5.status, reasons: pre5.reasons }, writes: rE5.writes })}`);
+  const mism5 = JSON.stringify([pr5 && pr5.blockers, pre5, rE5.run && rE5.run.stop]).includes('検査した後にコードが変わっています');
+  assert(e5 && e5.verification && e5.verification.bound === true && mism5 && rE5.run && rE5.run.stage === 'stopped' && !rE5.run.written && ![...r5.m.mock.st.files.values()].some(f => f.name === 'caseLock.js') && !rE5.writes.some(w => /putPreviewCustomize|uploadFile/.test(String(w && (w.op || w.kind || w)))),
+    `E4-5: 検証の後に候補がその場で変わったら、押した直後の準備のやり直し（書き込む本文と検査した本文の比較）で止め、書き込まない: ${JSON.stringify({ blockers: pr5 && pr5.blockers, pre: pre5 && { status: pre5.status, reasons: pre5.reasons }, stop: rE5.run && rE5.run.stop, writes: rE5.writes })}`);
   // E6: appFields の required（アプリの設定で必須の項目）
   const af = sent[0].appFields || [];
   const reqCodes = Object.values(INPUTS.data.fields).filter(f => f && f.required === true).map(f => f.code);
