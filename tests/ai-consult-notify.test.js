@@ -453,6 +453,26 @@ await section(async () => {
   assert(cls.intent === I.REVISE_PLAN && cls.reason === 'ADOPT_CONSULTATION_REVISE' && rev && /相談の答えのおすすめで進めたい: 承認待ちになったら作業者（承認者）へ通知する/.test(rev.request) && JSON.stringify(rev.utterances || []) === '["おすすめで"]', `E5: 修正の依頼に相談のおすすめ・発言は原文のまま: ${cls.reason} / ${rev && rev.request}`);
 });
 await section(async () => {
+  // E5b（簡素化 2026-10-17・直前の相談の区切り）: 区切りは最終案のカード（版ができるたびに会話に積む状態の印）。以前は今は作らない変更案のカードで区切っていたので、
+  //   最終案より前（仮案の間）の相談のおすすめが、最終案の後の「おすすめで」の見直しの依頼に入っていた。古い相談のおすすめを、後の版の操作の決め手にしない
+  const { c, calls } = makeConv([planWith([]), planWith([]), planWith([])]);
+  await c.send('承認漏れを防ぎたい');                              // 仮案
+  await c.send('承認待ちの案件を見落とさないようにするには？');     // 仮案の間の相談（おすすめ付きの答え）
+  await c.send('おすすめで');                                      // 仮案の間の委ねる言い方
+  await c.send('この内容で進めて');                                // 採用 → 最終案（v1）
+  const v1 = c.activePlan();
+  const before = c.classify('おすすめで');
+  assert(v1 && v1.final && before.reason !== 'ADOPT_CONSULTATION_REVISE' && !/相談の答えのおすすめで進めたい/.test(before.adoptText || ''), `E5b-1: 最終案より前の相談のおすすめは、最終案の後の「おすすめで」に結び付けない: ${JSON.stringify({ intent: before.intent, reason: before.reason })}`);
+  //   最終案の後の相談には今までどおり結び付く（E5）。その相談のおすすめで直した次の最終案（v2）の後には、同じ相談をもう結び付けない
+  await c.send('承認待ちの案件を見落とさないようにするには？');
+  const after = c.classify('おすすめで');
+  await c.send('おすすめで');
+  const rev = calls.plan.length ? calls.plan[calls.plan.length - 1].revision : null;
+  const v2 = c.activePlan();
+  const again = c.classify('おすすめで');
+  assert(after.reason === 'ADOPT_CONSULTATION_REVISE' && rev && /相談の答えのおすすめで進めたい/.test(rev.request) && v2 && v2.version === v1.version + 1 && v2.final && again.reason !== 'ADOPT_CONSULTATION_REVISE' && !/相談の答えのおすすめで進めたい/.test(again.adoptText || ''), `E5b-2: 最終案の後の相談のおすすめで直した後、次の最終案の後の「おすすめで」には同じ相談を結び付けない: ${JSON.stringify({ after: after.reason, again: again.reason, version: v2 && v2.version })}`);
+});
+await section(async () => {
   // E6: 推奨の無い確認事項（業務の判断）だけが残っているときの「おすすめで」は、計画の AI が候補から仮の案を選ぶ（止めない。2026-10-05 実機:
   //   「回答にしていません」で止まり、任せた部分が進まなかった）。決定事項としては記録しない（仮の案は利用者の決定ではない）
   const { c, calls, ledger } = makeConv([planWith([QREC({ question: '承認されなかった案件はどうしますか？', topic: 'other', recommendation: '' })]), planWith([])]);
@@ -737,7 +757,8 @@ await section(async () => {
   const kinds = c.messages().map(m => m.type);
   const planAt = kinds.lastIndexOf('FINAL'), ansAt = kinds.lastIndexOf('ANSWER');
   const r = c.classify('おすすめで');
-  assert(planAt >= 0 && (ansAt < planAt || r.reason === 'ADOPT_RECOMMENDATIONS'), `T6: 遅れて届いた答えではなく、計画の確認事項の推奨を使う: ${r.reason} / plan ${planAt} answer ${ansAt}`);
+  //   簡素化（2026-10-17）: 遅れて届いた答えのおすすめを、確認事項の推奨と一緒に依頼の文（adoptText）に混ぜないことも確かめる（区切りは最終案のカード）
+  assert(planAt >= 0 && (ansAt < planAt || r.reason === 'ADOPT_RECOMMENDATIONS') && !/相談の答えのおすすめで進めたい/.test(r.adoptText || '') && !r.consultationText, `T6: 遅れて届いた答えではなく、計画の確認事項の推奨を使う（遅れて届いた答えのおすすめを依頼の文に混ぜない）: ${r.reason} / plan ${planAt} answer ${ansAt} / ${r.adoptText || ''}`);
 });
 
 console.log('\n--- U. 実機の確認（2026-10-05 夜）: 推奨の無い確認事項を委ねる・作業者の宛先の事実 ---');

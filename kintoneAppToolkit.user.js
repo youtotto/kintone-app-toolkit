@@ -24448,21 +24448,25 @@
       const adoptText = `相談の答えのおすすめで進めたい: ${lc.recommendations.join(' ／ ')}`;
       return { goal: `${lc.question ? `${lc.question}\n` : ''}${adoptText}`.slice(0, 1800), adoptText: adoptText.slice(0, 900) };
     }
-    /** 直前の相談の答え（利用者の前の発言への答えで、おすすめがあるもの）。無ければ null */
+    /**
+     * 直前の相談の答え（利用者の前の発言への答えで、おすすめがあるもの）。無ければ null。
+     *   簡素化（2026-10-17）: 区切りは最終案のカード（MSG.FINAL。版ができるたびに会話に積む状態の印）。以前は変更案のカード（MSG.PLAN）で区切っていたが、
+     *   そのカードは作らなくなり、最終案の後の「おすすめで」が最終案より前の相談（仮案の間の相談・その相談で直した前の版の相談）のおすすめに結び付いていた
+     */
     function lastConsultation(state) {
       const ms = Array.isArray(state.messages) ? state.messages : [];
       let i = ms.length - 1;
       if (i >= 0 && ms[i].type === MSG.USER) i -= 1;   // 送ったばかりの発言（分類の前に積まれている）
       for (; i >= 0; i--) {
         const m = ms[i];
-        // 計画ができた後は、それより前の相談の答えを「直前の相談」にしない
-        if (m.type === MSG.PLAN) return null;
+        // 最終案ができた後は、それより前の相談の答えを「直前の相談」にしない
+        if (m.type === MSG.FINAL) return null;
         // 前に送った委ねる言い方・同意・相づち（計画の作成の失敗・取り消しの後に打ち直した「おすすめで」、「ありがとう」）は飛ばして、その前の相談の答えを見る
         if (m.type === MSG.USER) { const tx = String(m.text || '').trim(); if (ADOPT.test(tx) || AGREEMENT.test(tx) || RE.greeting.test(tx)) continue; return null; }
         if (m.type === MSG.ANSWER && (m.data?.answer?.recommendations || []).length) {
-          // 答えた質問（利用者の発言）が計画より前なら「直前の相談」にしない（計画の作成中に聞いた質問の答えが、計画の後に遅れて届いた場合）
+          // 答えた質問（利用者の発言）が最終案より前なら「直前の相談」にしない（最終案の作成中に聞いた質問の答えが、最終案の後に遅れて届いた場合）
           let q = null, planBetween = false;
-          for (let k = i - 1; k >= 0; k--) { if (ms[k].type === MSG.PLAN) { planBetween = true; break; } if (ms[k].type === MSG.USER) { q = ms[k].text; break; } }
+          for (let k = i - 1; k >= 0; k--) { if (ms[k].type === MSG.FINAL) { planBetween = true; break; } if (ms[k].type === MSG.USER) { q = ms[k].text; break; } }
           if (planBetween) return null;
           q = m.data?.question || q;
           return { question: String(q || '').trim(), recommendations: m.data.answer.recommendations.map(x => String(x.text || '').trim()).filter(Boolean).slice(0, 3) };
