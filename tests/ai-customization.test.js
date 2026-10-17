@@ -419,7 +419,7 @@ const clickCode = (m, id) => m.$('kt-ai-pane-code').dispatch({ type: 'click', ta
   { const pre = m.panel.finalPrecheck();
     assert(m.panel.applyHold() === null && pre.items.settings.length === 1 && pre.items.files.join() === '✎ fieldOnOff.js（PC）既存ファイルを更新（同じ位置）' && pre.items.manual.length === 0 && !v.approval && writes(m).length === 0, '承認の欄: 標準設定 1 件（一覧）・JavaScript 1 件（既存ファイルの更新）。JS の手順は「自動では反映しない手順」に数えない・まだ承認しない・書き込み 0'); }
   const ar = await K.applyOnScreen(m);
-  assert(ar.button && !ar.button.disabled && v.approval && m.conv().approvalValid().ok, '前提: 最終案のカードの［動作テスト環境へ反映］1 回で承認した（止める理由は無い）');
+  assert(ar.button && !ar.button.disabled && v.approval && ar.run && ar.run.ok, '前提: 最終案のカードの［動作テスト環境へ反映］1 回で承認した（止める理由は無い）');
   const ex2 = m.panel.executorState().execution;
   assert(ex2 && ex2.status === 'DONE' && ex2.steps.find(s => s.stepId === 'P1')?.status === 'VERIFIED' && ex2.steps.find(s => s.stepId === 'P2')?.status === 'UNSUPPORTED', 'Preview Executor: P1（一覧）は VERIFIED・JS の P2 は UNSUPPORTED（反映しない）');
   { const w = writes(m); const k = w.indexOf('POST file');

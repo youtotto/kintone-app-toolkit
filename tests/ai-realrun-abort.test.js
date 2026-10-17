@@ -128,7 +128,7 @@ for (const [label, what, kind] of [['TIMEOUT', 'throw:TIMEOUT', 'timeout'], ['TR
     assert(x.calls.ask.length === 0 && (v.openQuestions || []).length === 0 && !x.c.messages().some(m => m.type === 'ERROR'), `T1-3（${label}）: 質問は増えない・エラーのカード（同じ依頼の［再試行］）も出さない`);
     const fin = v.final;
     assert(r.ok === true && !r.cancelled && fin && fin.approvable === false && fin.incomplete && fin.incomplete.kind === kind && fin.incomplete.stoppedAt === 'C1' && JSON.stringify(fin.incomplete.notStarted) === '["C2"]' && v.generated.C1.status === 'failed' && v.generated.C1.failure.stop === kind && !v.generated.C2 && r.incomplete && r.incomplete.kind === kind, `T1-4（${label}）: 最終案は未完成（止めた C1・作っていない C2）: ${JSON.stringify(fin && fin.incomplete)}`);
-    const ap = x.c.approveFinal({ planId: v.planId, version: v.version });
+    const ap = x.c.approveFinal(K.approveArgs(v));
     assert(ap.ok === false && ap.reason === 'NOT_APPROVABLE' && x.c.finalReadiness().ready === false && x.c.finalReadiness().reasons[0].kind === 'incomplete', `T1-5（${label}）: 未完成の最終案は承認できない（理由の先頭は未完成）: ${ap.reason}`);
     const h = finalHtml(x), vis = visibleText(h);
     const b = restButtonOf(h);

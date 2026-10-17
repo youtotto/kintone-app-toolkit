@@ -334,7 +334,7 @@ await section(async () => {
   const r2 = await pressRest(x);
   const v2 = x.c.activePlan();
   assert(r2.ok && r2.intent === I.GENERATE_CODE && x.calls.plan.length === 1 && gen.count('C1') === 1 && gen.count('C2') === 1 && gen.count('C3') === 2 && v2.generated.C1.reused === true && v2.generated.C2.reused === true && v2.generated.C1.candidateHash === hashes[0] && v2.generated.C2.candidateHash === hashes[1] && v2.generated.C3.status === 'verified' && v2.final.approvable === true && !v2.final.incomplete && JSON.stringify(v2.final.changedSince.reused) === '["C1","C2"]' && JSON.stringify(v2.final.changedSince.regenerated) === '["C3"]', `S5-4: ［残りの JavaScript を作る］→ 計画の AI 0 回・C1 / C2 は流用（検証結果もそのまま）・C3 だけ生成 → 承認できる最終案: ${JSON.stringify({ plans: x.calls.plan.length, seen: gen.seen.map(s => s.cid), changed: v2.final.changedSince })}`);
-  const ap = x.c.approveFinal({ planId: v2.planId, version: v2.version });
+  const ap = x.c.approveFinal(K.approveArgs(v2));
   assert(ap.ok === true, `S5-5: 承認できる: ${JSON.stringify(ap)}`);
 });
 await section(async () => {

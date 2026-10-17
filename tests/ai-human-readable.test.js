@@ -164,7 +164,7 @@ await section(async () => {
   const sum = KTAiChatUi.changeSummaryHtml(v, { open: [], labels: {} });
   const st = (sum.match(/<ul class="kt-ai-sum-js-state">[\s\S]*?<\/ul>/) || [''])[0];
   assert(/JavaScript の状態/.test(sum) && /<li>PCの編集制御：できた（検証済み）<\/li><li>モバイルの編集制御：できた（検証済み）<\/li><li>モバイルの入力チェック：作成中（止めた）<\/li>/.test(st), `H3-5: 右の「変更内容」の先頭に JavaScript の状態（できた・できた・作成中）: ${stripC(st).replace(/\s+/g, ' ')}`);
-  const ap = x.c.approveFinal({ planId: v.planId, version: v.version });
+  const ap = x.c.approveFinal(K.approveArgs(v));
   assert(ap.ok === false && ap.reason === 'NOT_APPROVABLE', 'H3-6: 作成途中は承認できないまま（判定は変えない）');
   const r2 = await pressRest(x);
   const v2 = x.c.activePlan();
@@ -387,7 +387,7 @@ await section(async () => {
   await sendUntilAdopt(x);
   const v = x.c.activePlan(), fin = v.final, e = v.generated.C1;
   const h = finalHtml(x), vis = stripC(outsideDetails(h));
-  const ap = x.c.approveFinal({ planId: v.planId, version: v.version });
+  const ap = x.c.approveFinal(K.approveArgs(v));
   assert(e.status === 'unresolved' && fin.approvable === false && ap.ok === false && ap.reason === 'NOT_APPROVABLE' && applyBtn(h).disabled && statusOf(h) === fin.blockingReason && !/この内容で反映できます/.test(h), `H5-1: 模擬テストで不合格の最終案は承認できないまま（判定は変えない）。1 文は止めている理由: ${JSON.stringify({ status: e.status, ok: ap.ok, line: statusOf(h) })}`);
   const sec5 = (vis.match(/確認できないこと／反映を止めている理由[\s\S]*?(?=動作テスト環境へ反映)/) || [''])[0];
   //   レビュー 4（2026-10-14）: 行の先頭はファイル名ではなく計画の手順の title（「PCの編集制御」）
@@ -480,7 +480,7 @@ await section(async () => {
   assert(fin.incomplete && eff.some(r => r.structure === 'not-generated' && r.behavior === 'untested') && !eff.some(r => r.structure === 'unsupported') && eff.some(r => r.structure === 'present' && r.behavior === 'pass'), `H6-1: 止めた JavaScript の効果の行は not-generated（接続先の非対応にしない）。できた JavaScript の行は合格のまま: ${JSON.stringify(eff.map(r => [r.structure, r.behavior]))}`);
   const rt = stripC(rightOf(x));
   assert(/－ 「金額」（PC）: 編集できない — まだ作っていません・作っていないので確かめていません/.test(rt) && /✓ 「金額」（PC）: 編集できない — 処理あり・模擬テストで合格/.test(rt) && !/接続先が確認に非対応|模擬テストの結果なし/.test(rt), `H6-2: 右の検証の明細は「まだ作っていません」「作っていないので確かめていません」: ${(rt.match(/必須の動作（[\s\S]{0,260}/) || [''])[0]}`);
-  const v2 = v; const ap = x.c.approveFinal({ planId: v2.planId, version: v2.version });
+  const v2 = v; const ap = x.c.approveFinal(K.approveArgs(v2));
   assert(ap.ok === false, 'H6-3: 分類を直しても作成途中の判定は変わらない（承認できない）');
   keep('H6-stop', finalHtml(x), rightOf(x));
 });
@@ -576,7 +576,7 @@ await section(async () => {
   assert(!fin.cannot.some(c => c.kind === 'req-unsupported' && c.requirementId === 'R1') && !vis.includes(`計画では対応できないとされた要件: ${Q_T[0]}`) && !rt.includes(`計画では対応できないとされた要件: ${Q_T[0]}`), `H9-3: 実現のある要件（R1）は「計画では対応できないとされた要件」に出さない: ${(vis.match(/計画では対応できないとされた要件[^\n]*/g) || []).join(' / ')}`);
   const unsup = fin.cannot.find(c => c.kind === 'req-unsupported' && c.requirementId === 'R2');
   assert(unsup && unsup.text === `計画では対応できないとされた要件: ${Q_T[1]}（理由: CSV の読み込みでは JavaScript が動かないため）` && conSec.includes(unsup.text), `H9-4: 何も実現していない要件（R2）は今の文で残る: ${JSON.stringify(unsup)}`);
-  const ap = x.c.approveFinal({ planId: v.planId, version: v.version });
+  const ap = x.c.approveFinal(K.approveArgs(v));
   assert(fin.approvable === true && fin.blockers.length === 0 && ap.ok === true && !/確認できないこと／反映を止めている理由/.test(vis), `H9-5: 承認の可否は変わらない（判定は表示で変えない）: ${JSON.stringify({ approvable: fin.approvable, blockers: fin.blockers, ap })}`);
   keep('H9', h, right);
 });
@@ -598,7 +598,7 @@ await section(async () => {
   const unsupR1 = fin.cannot.find(c => c.kind === 'req-unsupported' && c.requirementId === 'R1');
   assert(unsupR1 && unsupR1.text === `計画では対応できないとされた要件: ${Q_T[0]}（理由: 行の追加・削除は止められないため）` && fin.cannot.some(c => c.kind === 'req-unsupported' && c.requirementId === 'R2'), `H9b-2: 文を作れなかった PARTIAL の要件（R1）は「計画では対応できないとされた要件」に今の文で残る（R2 も今のまま）: ${JSON.stringify(fin.cannot.filter(c => c.kind === 'req-unsupported').map(c => [c.requirementId, c.text]))}`);
   assert(fin.constraints.some(c => c.kind === 'coverage' && c.text === ROWS && c.requirementId === 'R1') && !vis.includes(H9K.REQ_TEXT_FULL), `H9b-3: 制約の行（テーブルの名前の「残る範囲」）は §H9 と同じ: ${JSON.stringify(fin.constraints.map(c => [c.kind, c.requirementId, c.text]))}`);
-  assert(e.status === 'unsupported' && fin.approvable === false && fin.blockers.some(b => b.kind === 'unsupported' && /接続先/.test(b.text)) && x.c.approveFinal({ planId: v.planId, version: v.version }).ok === false, `H9b-4: 承認の可否は接続先の非対応（必須の動作の結果が無い）で決まる（表示では変えない）: ${JSON.stringify({ st: e.status, approvable: fin.approvable, blockers: fin.blockers.map(b => [b.kind, b.text]) })}`);
+  assert(e.status === 'unsupported' && fin.approvable === false && fin.blockers.some(b => b.kind === 'unsupported' && /接続先/.test(b.text)) && x.c.approveFinal(K.approveArgs(v)).ok === false, `H9b-4: 承認の可否は接続先の非対応（必須の動作の結果が無い）で決まる（表示では変えない）: ${JSON.stringify({ st: e.status, approvable: fin.approvable, blockers: fin.blockers.map(b => [b.kind, b.text]) })}`);
   keep('H9b', h, right);
 });
 

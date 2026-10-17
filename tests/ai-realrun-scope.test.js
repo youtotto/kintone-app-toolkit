@@ -425,7 +425,7 @@ await section(async () => {
   await x.c.send(REQ);
   await x.c.send('採用します');
   const v = x.c.activePlan();
-  assert(planCalls.length === 1 && strippedOf(v).length === 2 && v.generated?.C1?.status === 'verified' && v.final?.approvable === true && x.c.approveFinal({ planId: v.planId, version: v.version }).ok === true, `S4-1: 範囲外を外した最終案は、ほかに理由が無ければ承認できる（依頼に無い可能性がある動作は承認を止めない）: ${JSON.stringify({ stripped: strippedOf(v).length, status: v.generated?.C1?.status, reasons: v.final?.readiness, blockers: (v.final?.blockers || []).map(b => b.text) })}`);
+  assert(planCalls.length === 1 && strippedOf(v).length === 2 && v.generated?.C1?.status === 'verified' && v.final?.approvable === true && x.c.approveFinal(K.approveArgs(v)).ok === true, `S4-1: 範囲外を外した最終案は、ほかに理由が無ければ承認できる（依頼に無い可能性がある動作は承認を止めない）: ${JSON.stringify({ stripped: strippedOf(v).length, status: v.generated?.C1?.status, reasons: v.final?.readiness, blockers: (v.final?.blockers || []).map(b => b.text) })}`);
   assert(JSON.stringify(effKeys((gen.seen.slice(-1)[0] || {}).requiredEffects)) === JSON.stringify(['amount:lock']), 'S4-2: 必須の効果は利用者の編集不可だけ');
   const html = finalHtml(x);
   assert(/依頼に無い可能性がある動作（2 件）/.test(html) && /計画の AI の元の説明（右の「変更内容」の［詳しく］）には残っていることがあります/.test(html) && !/依頼に無い可能性/.test(html.replace(/<details[\s\S]*?<\/details>/g, '')), 'S4-3: 「依頼に無い可能性がある動作」は詳細（折りたたみ）の中だけに出す');

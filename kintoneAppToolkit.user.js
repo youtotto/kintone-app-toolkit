@@ -24278,21 +24278,21 @@
       return { inIds, out, eIn, undetermined, eInField, noMaterial, linked: [...linkedBy.values()] };
     }
     /**
-     * 段階 C（C4・R16）: 承認が今も有効か（1 か所で判定）。版・planHash・基準の stamp（baseStamp を渡したとき）・各候補の candidateHash の一致を見る。
-     *   反映の準備・最終確認・JS の登録の直前に呼ぶ。新しい版・再生成では承認を引き継がない（版の object が変わる）
+     * 段階 C（C4・R16）: 承認が今も有効か（1 か所で判定）。版・planHash・基準の stamp・各候補の candidateHash の一致を見る。
+     *   反映の準備・最終確認・JS の登録の直前に呼ぶ。新しい版・再生成では承認を引き継がない（版の object が変わる）。
+     *   簡素化（2026-10-17）: baseStamp（今の動作テスト環境の基準）は必ず要る（渡さないときに基準の照合を飛ばす分岐は、基準を使わない画面のためのもので削除した）
      */
-    function approvalValid(v, { baseStamp = undefined } = {}) {
+    function approvalValid(v, { baseStamp = null } = {}) {
       const fail = (reason, message) => ({ ok: false, reason, message });
       if (!v || !v.approval) return fail('NOT_APPROVED', '最終案が承認されていません。会話の最終案のカードで［動作テスト環境へ反映］を押してください（押すと承認して、そのまま反映します）。');
       const a = v.approval;
       if (v.status === PLAN_STATUS.SUPERSEDED) return fail('SUPERSEDED', 'この最終案は新しい版に置き換わりました。最新の最終案を承認してください。');
       if (a.planId !== v.planId || a.version !== v.version) return fail('VERSION_CHANGED', '承認した版と違います。最新の最終案を承認してください。');
       if (a.planHash !== planHashOf(v)) return fail('PLAN_CHANGED', '承認の後に計画が変わりました。内容を確かめて、もう一度承認してください。');
-      // 追加指示 §4（a）（2026-10-08）: 基準を使う画面（baseStamp を渡す）では、今の基準が取れない（null・指紋が無い）・承認に基準の指紋が無いときは照合を飛ばさずに止める
-      //   （以前は承認に指紋が無いと照合を黙って飛ばした）。baseStamp を渡さない（undefined）のは基準を使わない画面だけ
-      if (baseStamp !== undefined && !(baseStamp && baseStamp.fingerprint)) return fail('BASE_UNKNOWN', '動作テスト環境の今の設定を確かめられませんでした。設定を取り直してから、もう一度お試しください。');
-      if (baseStamp !== undefined && !(a.baseStamp && a.baseStamp.fingerprint)) return fail('BASE_UNKNOWN', '承認したときの動作テスト環境の設定を確かめられていません。内容を確かめて、もう一度承認してください。');
-      if (baseStamp !== undefined && a.baseStamp.fingerprint !== baseStamp.fingerprint) return fail('BASE_CHANGED', '承認の後に動作テスト環境の設定が変わりました。内容を確かめて、もう一度承認してください。');
+      // 追加指示 §4（a）（2026-10-08）: 今の基準が取れない（null・指紋が無い）・承認に基準の指紋が無いときは照合を飛ばさずに止める（以前は承認に指紋が無いと照合を黙って飛ばした）
+      if (!(baseStamp && baseStamp.fingerprint)) return fail('BASE_UNKNOWN', '動作テスト環境の今の設定を確かめられませんでした。設定を取り直してから、もう一度お試しください。');
+      if (!(a.baseStamp && a.baseStamp.fingerprint)) return fail('BASE_UNKNOWN', '承認したときの動作テスト環境の設定を確かめられていません。内容を確かめて、もう一度承認してください。');
+      if (a.baseStamp.fingerprint !== baseStamp.fingerprint) return fail('BASE_CHANGED', '承認の後に動作テスト環境の設定が変わりました。内容を確かめて、もう一度承認してください。');
       //   簡素化（2026-10-17）: 承認の記録の customizeRevision と仕様の revision の照合（REVISION_CHANGED）は削除した（仕様の revision を書くのは承認より前の自動の確定だけで、
       //   同じ値の写しどうしの比較だった）。承認の後のカスタマイズの変更は、基準の指紋（BASE_CHANGED）と登録の準備の revision の照合（STALE_CUSTOMIZATION）が止める
       const gen = v.generated || {};
@@ -25514,7 +25514,7 @@
         push(MSG.ASSISTANT_TEXT, ROLE.TOOLKIT, `${state.subject.name} について相談します。`, { kind: 'consultation-start', subject: state.subject, lines });
         return { ok: true, resumed: false, subject: state.subject };
       }
-      /** JS の登録（KTJsExecutor の状態）を写す。登録は UI の最終確認でだけ始まる */
+      /** JS の登録（KTJsExecutor の状態）を写す。登録は最終案のカードの［動作テスト環境へ反映］1 回の反映の中でだけ始まる */
       function noteJsExecution(jsState) {
         const ex = jsState?.execution || null;
         const executionId = ex?.executionId || jsState?.prepared?.executionId || null;
@@ -25946,8 +25946,10 @@
       /**
        * §0e.1（2026-10-09）: precheck = 最終案の承認の欄に出した書き込みをしない準備の結果（{ fingerprint, items }）。承認はこの指紋に結び付け、
        *   反映の直前の準備のやり直しで指紋が違えば止める（承認を後から増えた変更・警告への同意に流用しない）。承認と反映は 1 回の操作なので、承認の通知は出さない
+       *   簡素化（2026-10-17）: 基準と準備は必ず要る（どちらかが無い承認＝承認してから右で準備・確認する以前の 2 段の経路は記録しない）。承認したときの確認の項目の写し
+       *   （confirmations）は削除した（確認の項目は承認の欄の準備の指紋に入り、反映の直前に照らす）
        */
-      function approveFinal({ planId = null, version = null, baseStamp = undefined, precheck = null } = {}) {
+      function approveFinal({ planId = null, version = null, baseStamp = null, precheck = null } = {}) {
         const v = state.activePlan;
         if (!v || (planId && v.planId !== planId) || (version != null && String(v.version) !== String(version))) return { ok: false, reason: 'NOT_LATEST', message: '最新の最終案だけ承認できます。' };
         if (!v.final) return { ok: false, reason: 'NO_FINAL', message: 'まだ最終案ができていません。' };
@@ -25956,17 +25958,15 @@
         const rdNow = finalReadinessNow(v);
         if (rdNow && !rdNow.ready) return { ok: false, reason: 'NOT_APPROVABLE', message: rdNow.blockingReason || 'この最終案はまだ反映できません。' };
         //   追加指示 §4（a）: 基準（動作テスト環境）を取得できない（null）・指紋が無いときは照合を飛ばさずに止める（承認に基準の無い記録を残さない）
-        if (baseStamp !== undefined && !(baseStamp && baseStamp.fingerprint)) return { ok: false, reason: 'BASE_UNKNOWN', message: '動作テスト環境の今の設定を確かめられませんでした。設定を取り直してから、もう一度承認してください。' };
+        if (!(baseStamp && baseStamp.fingerprint)) return { ok: false, reason: 'BASE_UNKNOWN', message: '動作テスト環境の今の設定を確かめられませんでした。設定を取り直してから、もう一度承認してください。' };
         if (v.status === PLAN_STATUS.STALE) return { ok: false, reason: 'STALE', message: '動作テスト環境の設定が変わったため、この最終案は承認できません。最新の設定で最終案を作り直してください。' };
         const planned = v.review && v.review.base ? v.review.base : null;
-        if (baseStamp !== undefined && baseStamp && planned && baseStamp.fingerprint && planned.fingerprint && baseStamp.fingerprint !== planned.fingerprint) {
+        if (planned && planned.fingerprint && baseStamp.fingerprint !== planned.fingerprint) {
           markStale('最終案を作った後に動作テスト環境の設定が変わりました。');
           return { ok: false, reason: 'BASE_CHANGED', message: '最終案を作った後に動作テスト環境の設定が変わりました。最新の設定で最終案を作り直してください（同じ依頼をもう一度送ると作り直します）。' };
         }
-        const stampNow = baseStamp !== undefined && baseStamp ? baseStamp : planned;
-        // 承認したときの確認の項目（登録前の再検査で同じものだけを承認済みとして扱う。新しく出た確認・未確認は承認しない。反証 C2）
-        const confirmations = Object.fromEntries(Object.entries(v.generated || {}).map(([cid, e]) => [cid, [...new Set(((e && e.review && e.review.registration && e.review.registration.confirmations) || []).map(x => x.code))]]));
-        v.approval = { planId: v.planId, version: v.version, planHash: planHashOf(v), baseStamp: stampNow ? JSON.parse(JSON.stringify(stampNow)) : null, candidates: Object.fromEntries(Object.entries(v.generated || {}).map(([cid, e]) => [cid, e && e.candidateHash ? e.candidateHash : null])), confirmations, ...(precheck ? { precheck: JSON.parse(JSON.stringify(precheck)) } : {}), approvedAt: now() };
+        if (!(precheck && precheck.fingerprint)) return { ok: false, reason: 'PRECHECK_REQUIRED', message: '反映の前の準備（書き込みをしない確かめ）が終わっていないため、承認しません。準備が終わってから、最終案のカードの［動作テスト環境へ反映］を押してください。' };
+        v.approval = { planId: v.planId, version: v.version, planHash: planHashOf(v), baseStamp: JSON.parse(JSON.stringify(baseStamp)), candidates: Object.fromEntries(Object.entries(v.generated || {}).map(([cid, e]) => [cid, e && e.candidateHash ? e.candidateHash : null])), precheck: JSON.parse(JSON.stringify(precheck)), approvedAt: now() };
         emit();
         return { ok: true, approval: v.approval };
       }
@@ -28284,7 +28284,8 @@
               const v = state.activePlan;
               //   C-1 第 3 段（2026-10-08）: 最終案の流れでは、反映は最終案の承認の後だけ（承認の前は承認へ案内する。手順ごとの承認・仕様の確定へは案内しない）
               //   §0e.1（2026-10-09）: 承認と反映は最終案のカードの［動作テスト環境へ反映］1 回（標準設定と JavaScript を続けて反映する）。承認済みなら結果の場所を案内する
-              if (v && !approvalValid(v).ok) { toolkit(v.final ? '反映は、最終案のカードの［動作テスト環境へ反映］から行います。内容を確かめて押すと、標準設定と JavaScript を続けて動作テスト環境へ反映します（反映できない点があるときは押せません）。' : '最終案がまだできていません。最終案ができたら、カードの［動作テスト環境へ反映］で反映します。', { kind: 'preview-needs-approval', planId: v.planId, version: v.version }); break; }
+              //   簡素化（2026-10-17）: 案内は承認の記録（この最終案の反映を始めたか）で選ぶ。今も反映できるか（基準の照合を含む）は画面の承認の欄と反映の直前の照合が持つ
+              if (v && !v.approval) { toolkit(v.final ? '反映は、最終案のカードの［動作テスト環境へ反映］から行います。内容を確かめて押すと、標準設定と JavaScript を続けて動作テスト環境へ反映します（反映できない点があるときは押せません）。' : '最終案がまだできていません。最終案ができたら、カードの［動作テスト環境へ反映］で反映します。', { kind: 'preview-needs-approval', planId: v.planId, version: v.version }); break; }
               if (v) { toolkit('この最終案は承認済みです。反映の結果は会話の反映のカードと右の「反映」にあります。', { kind: 'preview-approved', planId: v.planId, version: v.version }); break; }
               toolkit('反映できる最終案がありません。変更したいことを送ると、仮案から最終案を作ります。', { kind: 'preview-no-final', planId: null, version: null });
               break;
@@ -28297,7 +28298,7 @@
             // Phase 17: JS の登録 / 復元は UI の操作だけ。ここでは案内する（C-1 第 3 段: 登録も最終案の承認の後だけ）
             case INTENT.REQUEST_JS_PREVIEW: {
               const v = state.activePlan;
-              if (v && !approvalValid(v).ok) { toolkit(v.final ? 'JavaScript の登録は、最終案のカードの［動作テスト環境へ反映］から行います（標準設定の反映の後に続けて登録します）。' : '登録できる最終案がまだありません。実現したいことを入力すると、仮案から最終案を作ります。', { kind: 'js-preview-needs-approval', planId: v.planId, version: v.version }); break; }
+              if (v && !v.approval) { toolkit(v.final ? 'JavaScript の登録は、最終案のカードの［動作テスト環境へ反映］から行います（標準設定の反映の後に続けて登録します）。' : '登録できる最終案がまだありません。実現したいことを入力すると、仮案から最終案を作ります。', { kind: 'js-preview-needs-approval', planId: v.planId, version: v.version }); break; }
               //   簡素化（2026-10-17）: 承認済みのときに会話のカードから JavaScript だけを登録する経路（js-preview-ready・［登録の確認を開く］）は削除した。
               //   登録は最終案のカードの［動作テスト環境へ反映］1 回の反映の中だけ（承認の後に増えた確認・注意の照合を通る）
               toolkit(v ? 'この最終案は承認済みです。JavaScript の登録の結果は、会話の反映のカードと右の「反映」にあります。' : '登録できる最終案がまだありません。実現したいことを入力すると、仮案から最終案を作ります。', { kind: v ? 'js-preview-approved' : 'js-preview-needs-approval', planId: v ? v.planId : null, version: v ? v.version : null });
@@ -30178,33 +30179,17 @@
     const customizeScopeJa = (scope) => CUSTOMIZE_SCOPE_JA[String(scope ?? '')] || String(scope ?? '');
     function jsRegisterPaneHtml(jx, v = null, opts = {}) {
       const stage = jx?.stage || 'idle';
-      //   §0e.1（2026-10-09）: ［動作テスト環境へ反映］1 回の反映の中の登録の準備は、確認の段（［動作テスト環境へ登録］）を出さず進みだけを出す（同じ内容を再承認させない）
-      if (opts.finalRunning && ['preparing', 'confirm'].includes(stage)) return '<div style="padding-top:4px;"><b>JavaScript の登録</b><div class="kt-ai-apply-note" style="font-size:12px; margin-top:4px;">最終案のカードの［動作テスト環境へ反映］の続きとして、JavaScript の登録の準備を確かめています（承認した内容と同じかを照合しています）…</div></div>';
-      const acked = opts.acknowledged || new Set();
+      //   §0e.1（2026-10-09）: ［動作テスト環境へ反映］1 回の反映の中の登録の準備は、進みだけを出す（同じ内容を再承認させない）。
+      //   簡素化（2026-10-17）: 登録の準備と書き込みはその反映の中だけ（承認してから右で確かめて登録する確認の画面（確認の項目のチェック欄・［動作テスト環境へ登録］）は
+      //   削除した。確認の項目は承認の欄で示し、［動作テスト環境へ反映］で承認を受ける）。反映が止まった後に残った準備の段は出さない
+      if (['preparing', 'confirm'].includes(stage)) return opts.finalRunning ? '<div style="padding-top:4px;"><b>JavaScript の登録</b><div class="kt-ai-apply-note" style="font-size:12px; margin-top:4px;">最終案のカードの［動作テスト環境へ反映］の続きとして、JavaScript の登録の準備を確かめています（承認した内容と同じかを照合しています）…</div></div>' : '';
       const pr = jx?.prepared || null, ex = jx?.execution || null, rb = jx?.rollback || ex?.rollback || null;
       const name = (c) => `${c.kind === 'REPLACE_FILE' ? '✎' : '＋'} <b>${esc(c.name)}</b>（${c.target === 'mobile' ? 'モバイル' : 'PC'}）${c.kind === 'REPLACE_FILE' ? '　既存ファイルを更新' : `　新規追加（${c.position != null ? `${c.position + 1} 番目・末尾` : '末尾'}）`}`;
       const blockers = (list) => (list || []).map(b => `<div style="font-size:12px; color:#b00020;" data-code="${esc(b.code)}">× ${esc(b.message)}</div>`).join('');
       const warns = (list) => (list || []).map(w => `<div style="font-size:11px; color:#b26a00;">△ ${esc(w.message)}</div>`).join('');
       const head = (title, color = '#6a1b9a') => `<div style="border:2px solid ${color}; border-radius:8px; padding:8px;"><b>${esc(title)}</b>`;
       if (stage === 'idle') return '';
-      if (stage === 'preparing') return `${head('動作テスト環境のカスタマイズ設定を確認しています...')}<div style="font-size:11px; opacity:.7; margin-top:4px;">書き込みはしません（現在の設定・統合先の本文・権限・上限を確認）</div></div>`;
       if (stage === 'blocked') return `${head('登録できません', '#b00020')}<div style="margin-top:4px;">${blockers(pr?.blockers)}${(pr?.changes || []).filter(c => c.status === 'BLOCKED').map(c => `<div style="font-size:11px; margin-left:8px;">${esc(c.name)}: ${esc(c.message)}</div>`).join('')}</div><div style="font-size:11px; opacity:.8; margin-top:4px;">動作テスト環境の設定は変更していません。</div><div style="margin-top:6px;"><button type="button" id="kt-ai-jsreg-cancel" class="btn" style="height:26px; font-size:11px;">閉じる</button></div></div>`;
-      if (stage === 'confirm') {
-        const by = pr.summary.byTarget;
-        return `${head('JavaScript を動作テスト環境へ登録します。')}
-          <div style="margin-top:6px; display:grid; gap:4px; font-size:12px;">${pr.changes.filter(c => c.status === 'PENDING').map(c => `<div>${name(c)}${c.kind === 'REPLACE_FILE' ? `<div style="font-size:11px; opacity:.75; margin-left:16px;">現在の本文の指紋 ${esc(c.currentHash || '—')} ＝ 生成時の指紋（一致を確認済み）。位置 ${c.position + 1} 番目はそのまま</div>` : ''}</div>`).join('')}</div>
-          <div style="margin-top:6px; font-size:12px;">PC：${by.desktop.replace ? `${by.desktop.replace}件変更` : ''}${by.desktop.replace && by.desktop.add ? '・' : ''}${by.desktop.add ? `${by.desktop.add}件追加` : ''}${!by.desktop.replace && !by.desktop.add ? '変更なし' : ''}　モバイル：${by.mobile.replace ? `${by.mobile.replace}件変更` : ''}${by.mobile.replace && by.mobile.add ? '・' : ''}${by.mobile.add ? `${by.mobile.add}件追加` : ''}${!by.mobile.replace && !by.mobile.add ? '変更なし' : ''}</div>
-          <div style="font-size:12px; margin-top:2px;">既存の CSS（${pr.summary.preservedCss} 件）・その他の JS（${pr.summary.preservedJs} 件）・適用範囲（${esc(customizeScopeJa(pr.snapshot.scope))}）は変更しません。</div>
-          ${warns(pr.warnings)}
-          ${(() => {
-            // Phase 21: 確認が必要な項目（静的には確かめられないこと）を 1 件ずつ確認してから登録する。要件との不一致は「登録できません」で止まりここには来ない
-            const confs = pr.confirmations || [];
-            const unv = pr.unverified || [];
-            return `${confs.length ? `<div id="kt-ai-jsreg-confirms" style="margin-top:6px; border:1px solid #b26a00; border-radius:6px; padding:6px;"><b style="font-size:12px;">登録の前に確認が必要な項目（${confs.length} 件。Toolkit の静的な検査では確かめられないこと）</b>${confs.map(x => `<label style="display:flex; gap:6px; align-items:flex-start; font-size:12px; margin-top:4px;"><input type="checkbox" class="kt-ai-jsreg-ack" data-ack-key="${esc(x.key)}"${acked.has(x.key) ? ' checked' : ''}><span>△ ${esc(x.message)}<br><span style="opacity:.8;">確かめること: ${esc(x.howToCheck || '')}</span></span></label>`).join('')}</div>` : ''}${unv.length ? `<div id="kt-ai-jsreg-unverified" style="font-size:11px; margin-top:6px;"><b>動作は未確認</b>: ${unv.map(u => esc(u.message)).join('／')}</div>` : ''}${pr.notice ? `<div style="font-size:12px; color:#b00020; margin-top:4px;">${esc(pr.notice)}</div>` : ''}`;
-          })()}
-          <div style="font-size:12px; margin-top:4px;"><b>運用環境には反映されません。</b><span style="opacity:.7;">（登録先は動作テスト環境のカスタマイズ設定だけ。登録の直前に、準備のときから設定が変わっていないかをもう一度確かめます）</span></div>
-          ${opts.hold ? `<div class="kt-ai-jsreg-hold" style="margin-top:6px; font-size:12px; color:#b26a00;"><b>${esc(opts.hold)}</b></div>` : ''}<div style="margin-top:8px; display:flex; gap:6px;"><button type="button" id="kt-ai-jsreg-cancel" class="btn" style="height:28px;">キャンセル</button><button type="button" id="kt-ai-jsreg-go" class="btn" style="height:28px; font-weight:600; border-color:#6a1b9a;"${opts.hold ? ' disabled' : (pr.confirmations || []).every(x => acked.has(x.key)) ? '' : ' disabled title="確認が必要な項目をすべて確認してください"'}>動作テスト環境へ登録</button></div></div>`;
-      }
       if (stage === 'running') return `${head('JavaScript を動作テスト環境へ登録しています...')}<div style="margin-top:4px; display:grid; gap:1px; font-size:12px;">${(ex?.steps || []).map(c => `<div>${esc(JS_ST_MARK[c.status] || '・')} ${esc(c.name)}（${c.target === 'mobile' ? 'モバイル' : 'PC'}）${esc(JS_STATUS_JA[c.status] || '')}</div>`).join('')}</div></div>`;
       const resultHtml = () => {
         if (!ex) return '';
@@ -31458,8 +31443,7 @@
     let pendingSeed = null;
     const jsExec = { stage: 'idle', prepared: null, execution: null, rollback: null, error: null, planId: null, version: null, paneClosed: false };
     // Phase 21: 登録の前に利用者が 1 件ずつ確認した項目（prepared.confirmations[].key）。準備をやり直すと空に戻る
-    const jsAck = new Set();
-    const resetJsExec = () => { jsExec.stage = 'idle'; jsExec.prepared = null; jsExec.execution = null; jsExec.rollback = null; jsExec.error = null; jsExec.planId = null; jsExec.version = null; jsExec.paneClosed = false; jsExec.genRefs = null; jsExec.finalRunId = null; jsAck.clear(); jsLogRef = null; jsOpenedFromLog = false; };
+    const resetJsExec = () => { jsExec.stage = 'idle'; jsExec.prepared = null; jsExec.execution = null; jsExec.rollback = null; jsExec.error = null; jsExec.planId = null; jsExec.version = null; jsExec.paneClosed = false; jsExec.finalRunId = null; jsLogRef = null; jsOpenedFromLog = false; };
     // ---- 動作テスト環境への反映の記録（会話をまたいで・このページを開いている間だけ。Toolkit は保存しない）----
     //   標準設定の反映（execState）と JS の登録（jsExec）は 1 件ずつしか持たず、次の反映・登録や新しい会話で上書きされていた
     //   （前の反映を戻す材料も失った）。反映・登録を始めた時点で記録を作り、戻す材料（prepared / execution / snapshot）と、その時点の
@@ -31503,7 +31487,7 @@
         // すでに戻した登録を開いただけで、「戻しました」の通知を出さない（開いた後に戻したときだけ出す）
         if (done === 'rolled-back' || VM.jsExecutionSummary(st)?.rolledBack) entry.rolledBackNoticed = true;
         jsExec.stage = done; jsExec.prepared = st.prepared; jsExec.execution = st.execution; jsExec.rollback = done === 'rolled-back' ? st.rollback : null; jsExec.error = null;
-        jsExec.planId = entry.planId; jsExec.version = entry.version; jsExec.paneClosed = false; jsAck.clear(); jsLogRef = entry; jsOpenedFromLog = true;
+        jsExec.planId = entry.planId; jsExec.version = entry.version; jsExec.paneClosed = false; jsLogRef = entry; jsOpenedFromLog = true;
         renderJsReg(); showPane('exec', { scrollTo: '#kt-ai-jsreg' });
         return true;
       }
@@ -31544,7 +31528,7 @@
       // 記録から開いた、前の会話（今の会話に無い版）の登録: どの依頼の登録かを添え、会話には前の会話のカードを出さない
       const foreign = !!(jsLogRef && conv && (jsLogRef.epoch !== conv.state.epoch || !vReg));
       const note = foreign ? `<div class="kt-ai-log-focus" style="font-size:11px; color:#6a1b9a; margin:4px 0;">${jsOpenedFromLog ? `反映の記録から開いた JavaScript の登録です（${jsLogRef.epoch !== conv.state.epoch ? '前の会話・' : ''}依頼: ${escapeHtml(jsLogRef.goal || '不明')}）。` : `${jsLogRef.epoch !== conv.state.epoch ? '前の会話' : '前の計画'}（依頼: ${escapeHtml(jsLogRef.goal || '不明')}）の JavaScript の登録です。`}</div>` : '';
-      if (el) el.innerHTML = jsExec.paneClosed ? '' : note + KTAiChatUi.jsRegisterPaneHtml(jsExec, vReg || (foreign ? jsLogRef.v || null : null), { acknowledged: jsAck, hold: foreign ? null : applyHold(), finalRunning: !foreign && !!jsExec.finalRunId && !!finalRun && finalRun.id === jsExec.finalRunId && finalRun.stage === 'running' });
+      if (el) el.innerHTML = jsExec.paneClosed ? '' : note + KTAiChatUi.jsRegisterPaneHtml(jsExec, vReg || (foreign ? jsLogRef.v || null : null), { finalRunning: !foreign && !!jsExec.finalRunId && !!finalRun && finalRun.id === jsExec.finalRunId && finalRun.stage === 'running' });
       if ($execEmpty) $execEmpty.style.display = (jsExec.stage !== 'idle' && !jsExec.paneClosed) || (execState.stage !== 'idle') || !!lastReview ? 'none' : '';
       if (conv) {
         const own = !jsLogRef || (jsLogRef.epoch === conv.state.epoch && (jsExec.stage === 'running' || conv.state.activeJsExecution?.executionId === execIdOf(jsExec)));
@@ -31649,14 +31633,15 @@
       } catch (e) { if (KTFetchGate.isPaused(e)) throw e; return empty([{ code: 'PREPARE_FAILED', message: e?.message || String(e) }]); }
     }
     /**
-     * 登録の準備（読み取りだけ）: 版の生成コード → 変更 → KTJsExecutor.prepare → 確認画面。
+     * 登録の準備（読み取りだけ）: 版の生成コード → 変更 → KTJsExecutor.prepare。［動作テスト環境へ反映］1 回の反映（applyFinal）の部品。
      *   §0e.1（2026-10-09）: expected = 承認の前の準備のカスタマイズの revision と内容の指紋（{ revision, content }）。標準設定の書き込みで進んだ revision は、
-     *   内容が同じかで比べる（不具合 B）。finalRunId = ［動作テスト環境へ反映］1 回の反映の中の登録（会話の登録のカードは結果のカードにまとめる）
+     *   内容が同じかで比べる（不具合 B）。finalRunId = その反映の印（会話の登録のカードは結果のカードにまとめる）。
+     *   簡素化（2026-10-17）: 画面の外から呼ぶ口は削除した。最新の版か・URL 指定の JS か・承認があるかは、呼ぶ直前に applyFinal と最終案の判定が確かめるので重ねない
+     *   （ここでは準備の間に変わったこと（会話・版・基準・承認）だけを確かめる）
      */
     async function startJsRegister(v, { expected = null, finalRunId = null } = {}) {
       if (!v) return null;
       if (['preparing', 'running', 'rollback-preparing', 'rolling-back'].includes(jsExec.stage)) return null;
-      if (jsExec.execution && jsExec.execution.put?.ok && !jsExec.execution.rollback && jsExec.planId === v.planId && jsExec.version === v.version) { jsExec.paneClosed = false; renderJsReg(); showPane('exec', { scrollTo: '#kt-ai-jsreg' }); return jsExec.prepared; }
       if (!executor || typeof executor.api.getPreviewCustomize !== 'function') { conv.notice('この環境では動作テスト環境への登録ができません（kintone API がありません）。', { kind: 'js-register-unavailable' }); return null; }
       // 2026-10-06: 更新中（コードを作っている・変更案を直している）・必要な確認が残っているときは、登録の準備もしない（標準設定の反映と同じ）
       { const h = applyHold(); if (h) { $note.textContent = h; renderJsReg(); return null; } }
@@ -31664,32 +31649,22 @@
       jsExec.planId = v.planId; jsExec.version = v.version; jsExec.stage = 'preparing'; jsExec.finalRunId = finalRunId; renderJsReg(); setArtifact({ type: VM.ARTIFACT.EXECUTION, id: null, version: v.version, js: true }, { scrollTo: '#kt-ai-jsreg' });
       // 準備（読み取り）の間に新しい会話・新しい版になったら、その準備の確認画面を出さない（2026-10-06: 前の処理の遅い結果を混ぜない）
       const epoch0 = conv.state.epoch;
-      jsExec.genRefs = { ...(v.generated || {}) };
       const stalePrep = () => {
         if (conv.state.epoch === epoch0 && conv.activePlan() === v && jsExec.planId === v.planId && jsExec.version === v.version) return false;
         if (jsExec.stage === 'preparing' && jsExec.planId === v.planId && jsExec.version === v.version) { resetJsExec(); renderJsReg(); }
         return true;
       };
-      // 段階 C（C4）: 有効な承認が無ければ登録の準備をしない（承認の後に計画・コード・基準が変わったものも止める）。
-      //   C-1 第 3 段（2026-10-08）: 仮案から作っていない計画（従来の流れ）も同じ（最終案の承認だけが登録の許可。従来の流れの登録の止め（REQUIRED_EFFECTS_UNVERIFIED）は、この止めに置き換えた）
-      //   URL 指定の JS は承認の有無にかかわらず書き換えない（構造上の理由を承認の理由より先に出す。最終案も承認できない理由にしている）
-      const urlBlocked = Object.entries(v.generated || {}).filter(([, g]) => g && g.generated && (g.existingSource?.from === 'url' || g.existingSource?.external)).map(([cid, g]) => ({ code: 'EXTERNAL_JS_NOT_WRITABLE', message: `${cid}: 「${g.generated.targetFile}」は URL 指定の JavaScript です。外部サーバーのファイルは Toolkit から書き換えられません（コード / Diff を手動で反映するか、新規の補助 JS として設計し直してください）` }));
-      { const a = approvalNow(); if (!a.ok) { jsExec.prepared = { executionId: null, status: 'BLOCKED', blockers: [...urlBlocked, { code: 'APPROVAL_REQUIRED', message: a.message }], warnings: [], changes: [], summary: JS_EMPTY_SUMMARY(), snapshot: null, confirmations: [], unverified: [] }; jsExec.stage = 'blocked'; renderJsReg(); return jsExec.prepared; } }
-      // Phase 21: 古い版（会話の上の方のカード・旧版のコードペイン）からは登録しない。最新の版の生成コードだけ
-      const latest = conv.activePlan();
-      if (!latest || latest !== v) { jsExec.prepared = { executionId: null, status: 'BLOCKED', blockers: [{ code: 'NOT_LATEST_VERSION', message: `この計画は最新の版ではありません（v${v.version}${latest ? `。最新は v${latest.version}` : ''}）。最新の版のコードを登録してください` }], warnings: [], changes: [], summary: JS_EMPTY_SUMMARY(), snapshot: null, confirmations: [], unverified: [] }; jsExec.stage = 'blocked'; renderJsReg(); return jsExec.prepared; }
       const { changes, blocked } = jsChangesOf(v);
       if (!changes.length) { jsExec.prepared = { executionId: null, status: 'BLOCKED', blockers: blocked.length ? blocked : [{ code: 'NOTHING_TO_REGISTER', message: '登録できる JavaScript がありません（仕様を確定してコードを生成してください）' }], warnings: [], changes: [], summary: JS_EMPTY_SUMMARY(), snapshot: null }; jsExec.stage = 'blocked'; renderJsReg(); return jsExec.prepared; }
       // Phase 21: 登録の直前に、生成したコードを最新の作業基準（動作テスト環境）で検査し直す（生成の後にフィールドが消えた・変わったなども登録不可にする）
       await refreshDevBase({ reason: 'register' });
       if (stalePrep()) return null;
+      //   段階 C（C4）: 登録の直前の基準の取り直しの後も、承認が有効か（設定の反映の後の基準・外部の変更・準備の間の変化）
       { const a2 = approvalNow(); if (!a2.ok) { jsExec.prepared = { executionId: null, status: 'BLOCKED', blockers: [{ code: 'APPROVAL_REQUIRED', message: a2.message }], warnings: [], changes: [], summary: JS_EMPTY_SUMMARY(), snapshot: null, confirmations: [], unverified: [] }; jsExec.stage = 'blocked'; renderJsReg(); return jsExec.prepared; } }
       try {
         const prepared = await KTJsExecutor.prepare({ appId: executor.appId, changes, recheck: jsRecheckOf(v), expectedRevision: expected && expected.revision != null ? expected.revision : (v.spec?.customizeRevision ?? null), ...(expected && expected.content != null ? { expectedContent: expected.content } : {}), spec: conv.specSummary(v), provenance: jsProvenanceOf(v) }, { api: executor.api });
         if (stalePrep()) return null;
         if (blocked.length) prepared.warnings.push(...blocked.map(b => ({ code: b.code, message: `登録対象外: ${b.message}` })));
-        // 段階 C（C4・R21）: 承認済みの最終案では、確認の項目（静的には確かめられないこと）は最終案のカードで示し承認を受けているので、1 件ずつ答えさせない（内容は確認画面に残す）
-        if (approvalNow().ok) { const ap = (conv.activePlan() || {}).approval || {}; const seen = ap.confirmations || {}; for (const x of (prepared.confirmations || [])) { if (!x || !x.key) continue; const cid = String(x.key).split(':')[0]; if (Array.isArray(seen[cid]) && seen[cid].includes(x.code)) jsAck.add(x.key); } }
         jsExec.prepared = prepared;
         jsExec.stage = prepared.status === 'PREPARED' ? 'confirm' : 'blocked';
       } catch (e) { if (stalePrep()) return null; jsExec.stage = 'blocked'; jsExec.error = e?.message || String(e); jsExec.prepared = { status: 'BLOCKED', blockers: [{ code: 'PREPARE_FAILED', message: jsExec.error }], warnings: [], changes, summary: JS_EMPTY_SUMMARY(), snapshot: null }; }
@@ -31697,17 +31672,19 @@
       return jsExec.prepared;
     }
     const cancelJsRegister = () => { if (jsExec.stage === 'confirm' || jsExec.stage === 'blocked') { resetJsExec(); renderJsReg(); } };
-    /** 最終確認の後: upload → 完全な payload で PUT → 再取得して検証。運用環境へは反映しない */
-    async function confirmJsRegister() {
+    /**
+     * 登録: upload → 完全な payload で PUT → 再取得して検証。運用環境へは反映しない。［動作テスト環境へ反映］1 回の反映（applyFinal）の部品。
+     *   acknowledged = 承認の欄で示して承認を受けた確認の項目の key（承認の後に増えた確認・注意は applyFinal が登録の前に止める）。
+     *   簡素化（2026-10-17）: 準備の後に版・コードが変わったかの確かめ（NOT_LATEST_VERSION・CODE_REGENERATED）は、書き込みの直前の承認の照合（版・計画・候補・基準）にまとめた。
+     *   止めたときは「登録できません」の段にする（確認の画面に戻さない）
+     */
+    async function confirmJsRegister({ acknowledged = [] } = {}) {
       if (!executor || jsExec.stage !== 'confirm' || !jsExec.prepared) return null;
-      // 2026-10-06: 更新中・必要な確認が残っているときは登録しない（ボタンも押せない）
-      if (applyHold()) { renderJsReg(); return null; }
-      { const a = approvalNow(); if (!a.ok) { jsExec.stage = 'blocked'; jsExec.prepared = { ...jsExec.prepared, status: 'BLOCKED', blockers: [{ code: 'APPROVAL_REQUIRED', message: a.message }] }; renderJsReg(); return null; } }
-      // Phase 21: 準備した版が今も最新か（準備の後に計画・コードが新しくなっていたら登録しない）。確認の未完了は Executor が止める
+      const stop = (code, message) => { jsExec.stage = 'blocked'; jsExec.prepared = { ...jsExec.prepared, status: 'BLOCKED', blockers: [{ code, message }] }; renderJsReg(); return null; };
+      // 2026-10-06: 更新中・必要な確認が残っているときは登録しない
+      { const h = applyHold(); if (h) return stop('APPLY_HOLD', h); }
+      { const a = approvalNow(); if (!a.ok) return stop('APPROVAL_REQUIRED', a.message); }
       const vNow = conv.activePlan();
-      if (!vNow || vNow.planId !== jsExec.planId || String(vNow.version) !== String(jsExec.version)) { jsExec.stage = 'blocked'; jsExec.prepared = { ...jsExec.prepared, status: 'BLOCKED', blockers: [{ code: 'NOT_LATEST_VERSION', message: '準備の後に計画が新しい版になりました。最新の版で準備からやり直してください' }] }; renderJsReg(); return null; }
-      // 準備の後に同じ版でコードを作り直していたら登録しない（確認画面の内容と登録するコードを食い違わせない）
-      if (jsExec.genRefs && Object.keys({ ...(vNow.generated || {}), ...jsExec.genRefs }).some(cid => (vNow.generated || {})[cid] !== jsExec.genRefs[cid])) { jsExec.stage = 'blocked'; jsExec.prepared = { ...jsExec.prepared, status: 'BLOCKED', blockers: [{ code: 'CODE_REGENERATED', message: '準備の後にコードが作り直されました。もう一度［動作テスト環境へ登録］から準備してください' }] }; renderJsReg(); return null; }
       jsExec.stage = 'running';
       // 反映の記録: 登録を始めた時点の版・仕様・生成の出所を持たせる（次の登録や新しい会話で jsExec が上書きされても、戻す材料と監査が残る）
       {
@@ -31721,11 +31698,11 @@
       }
       renderJsReg();
       try {
-        jsExec.execution = await KTJsExecutor.executePreview(jsExec.prepared, { api: executor.api, acknowledged: [...jsAck], onProgress: (ex) => { jsExec.execution = ex; renderJsReg(); } });
+        jsExec.execution = await KTJsExecutor.executePreview(jsExec.prepared, { api: executor.api, acknowledged, onProgress: (ex) => { jsExec.execution = ex; renderJsReg(); } });
       } catch (e) {
         jsExec.error = e?.message || String(e);
-        // 確認の不足・要件との不一致は、書き込む前に止まる（動作テスト環境は変わっていない）→ 確認画面に戻す
-        if (['CONFIRMATION_REQUIRED', 'REQUIREMENT_VIOLATION', 'CONTENT_CHANGED_AFTER_REVIEW', 'REGISTRATION_UNKNOWN'].includes(e?.code)) { jsExec.stage = e.code === 'CONFIRMATION_REQUIRED' ? 'confirm' : 'blocked'; jsExec.prepared = { ...jsExec.prepared, ...(e.code === 'CONFIRMATION_REQUIRED' ? { notice: jsExec.error } : { status: 'BLOCKED', blockers: [{ code: e.code, message: jsExec.error }] }) }; renderJsReg(); return null; }
+        // 確認の不足・要件との不一致は、書き込む前に止まる（動作テスト環境は変わっていない）
+        if (['CONFIRMATION_REQUIRED', 'REQUIREMENT_VIOLATION', 'CONTENT_CHANGED_AFTER_REVIEW', 'REGISTRATION_UNKNOWN'].includes(e?.code)) return stop(e.code, jsExec.error);
         jsExec.execution = jsExec.execution || { executionId: jsExec.prepared.executionId, status: 'FAILED', steps: jsExec.prepared.changes, put: null, error: { code: e?.code || 'EXECUTE_FAILED', message: jsExec.error }, previewUnchanged: null };
       }
       jsExec.stage = 'done';
@@ -31768,7 +31745,6 @@
     /** JS 登録 / 復元のボタン（右の「反映」）。最終確認はここだけ */
     async function handleJsRegId(id, t) {
       if (id === 'kt-ai-jsreg-cancel') { cancelJsRegister(); return true; }
-      if (id === 'kt-ai-jsreg-go') { await confirmJsRegister(); return true; }
       if (id === 'kt-ai-jsreg-close') { jsExec.paneClosed = true; renderJsReg(); return true; }
       if (id === 'kt-ai-jsreg-open-customize') { const st = (jsExec.execution?.steps || [])[0] || null; if (typeof d.openCustomize === 'function') await d.openCustomize({ target: st?.target || 'desktop', kind: 'js', name: st?.name || null }); return true; }
       if (id === 'kt-ai-jsreg-rollback-start') { setArtifact({ type: VM.ARTIFACT.ROLLBACK, id: jsExec.execution?.executionId ?? null, version: null, js: true }); await startJsRollback(); return true; }
@@ -32363,8 +32339,7 @@
             return finish({ stage: 'stopped', partial: run.written, ok: false, js: { ...run.js, reason: '承認の後に登録の内容・確認項目・注意が変わったため' }, stop: { text: '承認の後に、JavaScript の登録の内容が変わりました。登録していません。', changes: added, next: run.written ? NEXT_SETTINGS_ONLY : NEXT_AGAIN } });
           }
           //   確認項目は承認の欄で示して承認を受けたもの（新しいものは上で止めた）。同じ内容を 1 件ずつ答えさせない
-          for (const x of pj.confirmations || []) if (x && x.key) jsAck.add(x.key);
-          await confirmJsRegister();
+          await confirmJsRegister({ acknowledged: (pj.confirmations || []).filter(x => x && x.key).map(x => x.key) });
           const js = VM.jsExecutionSummary(jsExec);
           const ex = jsExec.execution || null;
           run.js = { executionId: js ? js.executionId : null, registered: !!(js && js.put), written: !!(js && js.written), ok: !!(js && js.ok), files: js ? js.steps.map(st => `${st.kind === 'REPLACE_FILE' ? '✎' : '＋'} ${st.name}（${TARGET_JA(st.target)}）`) : [], first: js && js.firstStep ? { target: js.firstStep.target, name: js.firstStep.name } : null, verified: js ? js.verified : 0, total: js ? js.steps.length : 0, reason: js && js.put ? null : ((ex && (ex.error?.message || ex.put?.error?.message)) || jsExec.error || '登録できませんでした') };
@@ -32423,13 +32398,12 @@
       renderWsState();
     }
     const resetExec = () => { execState.finalRunId = null; execState.stage = 'idle'; execState.prepared = null; execState.execution = null; execState.error = null; execState.rollbackPlan = null; execState.rollback = null; execState.planRef = null; execLogRef = null; execOpenedFromLog = false; };
-    /** 「動作テスト環境へ反映」: 現在の設定を取得して stale / 権限 / 再検証（書き込みなし）→ 最終確認へ */
+    /**
+     * 標準設定の反映の準備: 現在の設定を取得して stale / 権限 / 再検証（書き込みなし）。［動作テスト環境へ反映］1 回の反映（applyFinal）の部品。
+     *   簡素化（2026-10-17）: 画面の外から呼ぶ口は削除した。仮案の流れか・承認が有効かは、呼ぶ直前に applyFinal が確かめるので重ねない
+     */
     async function startExecutor() {
       if (!executor || ['running', 'preparing', 'rolling-back', 'rollback-preparing'].includes(execState.stage)) return null;
-      // 段階 C（C4・R16）: 有効な最終案の承認があるときだけ反映の準備をする（古い承認・変わった計画では止める）。
-      //   簡素化 E（2026-10-16）: 仮案から作っていない計画（手順ごとの承認の経路）は準備しない（その経路は削除した）
-      if (!finalFlow()) { if (conv) conv.notice('反映の準備を止めました: 反映は、仮案から作った最終案を承認したときだけ行います。', { kind: 'approval-required', reason: 'NOT_FINAL' }); renderExec(); return null; }
-      { const a = approvalNow(); if (!a.ok) { if (conv) conv.notice(`反映の準備を止めました: ${a.message}`, { kind: 'approval-required', reason: a.reason }); renderExec(); return null; } }
       // 2026-10-06: 更新中・必要な確認が残っているときは反映の準備もしない（ボタンも押せない）
       if (applyHold()) { renderExec(); return null; }
       const out = reviewOutput(); if (!out) return null;
@@ -32456,8 +32430,8 @@
      */
     async function confirmExecutor() {
       if (!executor || execState.stage !== 'confirm' || !execState.prepared) return null;
-      //   簡素化 E（2026-10-16）: 書き込みの直前にも最終案の承認を確かめる（準備の後に承認が外れた・仮案から作っていない計画では書き込まない）
-      if (!finalFlow() || !approvalNow().ok) { resetExec(); renderExec(); return null; }
+      //   簡素化 E（2026-10-16）: 書き込みの直前にも最終案の承認を確かめる（準備の後に承認が外れた・計画が変わったときは書き込まない）
+      if (!approvalNow().ok) { resetExec(); renderExec(); return null; }
       if (applyHold()) { renderExec(); return null; }
       // 準備した計画が、いまの会話の計画のままか（新しい会話・別の計画になっていたら反映しない）
       if (!lastPlan || execState.planRef !== lastPlan) { resetExec(); renderExec(); if (conv) conv.notice('準備した計画は、いまの会話の計画ではなくなりました。反映していません（動作テスト環境は変わっていません）。', { kind: 'exec-plan-changed' }); return null; }
@@ -32727,8 +32701,6 @@
       if (eid) showEvidence(eid, evidenceFromOf(el));
     }
     for (const p of ['plan', 'review', 'code', 'exec', 'log']) { const el = $pane(p); if (el) el.addEventListener('click', onPaneClick); }
-    // Phase 21: JS 登録の確認項目（登録の前に 1 件ずつ確認する）。チェックの状態は jsAck（Executor は acknowledged で受け、足りなければ登録しない）
-    { const exPane = $pane('exec'); if (exPane) exPane.addEventListener('change', (ev) => { const t = ev?.target; const key = dataOf(t, 'ackKey'); if (!key) return; if (t.checked) jsAck.add(key); else jsAck.delete(key); renderJsReg(); }); }
     if ($reviewResult) $reviewResult.addEventListener('click', onPaneClick);
     $planResult.addEventListener('click', onPaneClick);
     const onDecisionChange = (ev) => {
@@ -32969,12 +32941,11 @@
       lastPlan: () => lastPlan,
       lastReview: () => lastReview,
       reviewOutput,
-      decide,
       // Preview Executor（Phase 9）
       executorState: () => execState,
       //   §0e.1（2026-10-09）: 承認の欄の準備の状態・［動作テスト環境へ反映］1 回の反映（テストと画面の外からの確認用。通常の操作は最終案のカードのボタン）
       finalPrecheck: () => finalPreView(), finalRun: () => finalRun, applyFinal,
-      startExecutor, confirmExecutor, cancelExecutor, auditJson,
+      auditJson,
       startRollback, confirmRollback, cancelRollback,
       lastAnswer: () => lastAnswer,
       capability: () => capability,
@@ -32986,7 +32957,7 @@
       // JavaScript Generator（Phase 16）: 生成は会話の GENERATE_CODE を通る。登録はしない
       generated: (cid, v = null) => (generatedEntry(cid, v)?.entry || null), showCode, copyGenerated, codeShown: () => codeShown, loadJsSource,
       // JS 相談 / 実装仕様 / JS 登録（Phase 17）
-      consult, startJsRegister, confirmJsRegister, cancelJsRegister, startJsRollback, confirmJsRollback, cancelJsRollback, jsExecState: () => jsExec, jsAudit,
+      consult, startJsRollback, confirmJsRollback, cancelJsRollback, jsExecState: () => jsExec, jsAudit,
       openDrawer, drawerState: () => ({ open: true, pane: activePane, unread: [...unread], pinned: pin ? pin.pane : null, rightWidth: rightPct }), setSplit, applyHold, newConversation: () => startNewConversation(),
       // Phase 19: Workspace（右）の成果物とペイン
       showPane, activeArtifact: () => activeArtifact,

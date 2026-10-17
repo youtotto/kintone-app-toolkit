@@ -363,8 +363,18 @@ function createNewFlowKit(T) {
   // ---- C-1 第 3 段（2026-10-08）: 新しい流れを最後（承認 → 反映の準備）まで通す部品（ほかのテストを移し替えるときに使う）----
   /** 台本で採用まで進む 4 つの発言（adoptC・adoptOnScreen が送る）。4 つ目は委ねる言い方と進行の語句の組（2026-10-15 §3.2: 「おすすめで」だけでは採用しない） */
   const REQUESTS = ['課長・部長の承認者を選ぶ運用にしたい', '100円未満は部長不要、100万円以上は必要', '7営業日で。会社独自の休業日は今回はなし', 'おすすめで。この案で進めて'];
+  /**
+   * 会話コントローラの承認の口（approveFinal）に渡すもの。画面（applyFinal）は、承認の時点の基準と、承認の欄に出した準備（書き込みをしない確かめの指紋と項目）を
+   *   必ず渡す（簡素化 2026-10-17: どちらかが無い承認は記録しない）。会話の部品だけを確かめるときの既定は、計画を検証した基準（review.base。無ければテストの基準）と
+   *   空の準備。承認の欄の準備から押して結果まで進める確かめは applyOnScreen
+   */
+  const BASE_C = { fingerprint: 'fp-test' };
+  const baseOfC = (v) => (v && v.review && v.review.base) || BASE_C;
+  const approveArgs = (v, { baseStamp = baseOfC(v), precheck = { fingerprint: { settings: null, js: null }, items: {} } } = {}) => ({ planId: v.planId, version: v.version, baseStamp, precheck });
   /** 会話コントローラ: いまの最終案を承認する（承認できないときは理由を返す） */
-  const approveC = (x, { baseStamp = undefined } = {}) => { const v = x.c.activePlan(); return v ? x.c.approveFinal({ planId: v.planId, version: v.version, baseStamp }) : { ok: false, reason: 'NO_PLAN' }; };
+  const approveC = (x, o = {}) => { const v = x.c.activePlan(); return v ? x.c.approveFinal(approveArgs(v, o)) : { ok: false, reason: 'NO_PLAN' }; };
+  /** 会話コントローラ: 承認が、計画を検証した基準のままで今も有効か（基準を変えたときの確かめは KTAiConversation.approvalValid に baseStamp を渡す） */
+  const validC = (x, v = x.c.activePlan()) => x.c.approvalValid(v, { baseStamp: baseOfC(v) });
   /** 画面: 台本の 4 つの発言で仮案 → 採用 → 最終案まで進める（mount の結果 m） */
   const adoptOnScreen = async (m, { requests = REQUESTS } = {}) => { for (const s of requests) { await m.panel.send(s); await ticks(10); } await ticks(8); return m.conv().activePlan(); };
   /**
@@ -459,7 +469,7 @@ function createNewFlowKit(T) {
     return { v, clicked: true, button, pre, run: m.panel.finalRun(), writes: writesOf(m).slice(w0), card: cards.length ? stripC(cards[cards.length - 1]) : '', cardHtml: cards.length ? cards[cards.length - 1] : '', cardCount: cards.length, exec: m.panel.executorState(), js: m.panel.jsExecState() };
   };
 
-  return { gwModernized, withPlannerMapping, mapPlanResponse, rawWithPlannerMapping, tick, ticks, clone, buildInputs, INPUTS, META, B, A, Q, APPROVER, ROUTE, BASE, CSV, Q_THRESHOLD, Q_MIDDLE, Q_DAYS, Q_HOLIDAYS, Q_LOCK, Q_TIMING, B_SELECT, B_ROUTE, B_UNDER, B_OVER, B_NOTIFY_TO, B_NOTIFY_IF, B_LOCK, STD, req, idBy, reqIdBy, script, normalized, planOk, planFail, planThrow, gateMk, HEALTH, spec, mkStep, PLAN_META, PLAN_V1, answerFor, makeStorage, gate, mount, clickChat, RP, KTCodeReview, DATA_C, LABELS_C, custOf, CUST_C1, ST_C, handlerC, GOOD, BAD, WARN, VALUE, LOCKSAVE, CAND, GEN_EFFECT_FEATURES, GW_SCOPE, EXPECT_OF, NOMATCH_OF, GEN_PORT_FEATURE, fakeVerification, planJs, makeGenerate, makeConvC, adoptC, finalHtml, stripC, REQUESTS, approveC, adoptOnScreen, prepareOnScreen, loadDevBaseFromMock, HEALTH_V, NEW_MEMO, lockCode, custLock, screenPlan, planImplOf, screenGenerate, mountFinal, applyButtonOf, writesOf, applyOnScreen, waitUntil };
+  return { gwModernized, withPlannerMapping, mapPlanResponse, rawWithPlannerMapping, tick, ticks, clone, buildInputs, INPUTS, META, B, A, Q, APPROVER, ROUTE, BASE, CSV, Q_THRESHOLD, Q_MIDDLE, Q_DAYS, Q_HOLIDAYS, Q_LOCK, Q_TIMING, B_SELECT, B_ROUTE, B_UNDER, B_OVER, B_NOTIFY_TO, B_NOTIFY_IF, B_LOCK, STD, req, idBy, reqIdBy, script, normalized, planOk, planFail, planThrow, gateMk, HEALTH, spec, mkStep, PLAN_META, PLAN_V1, answerFor, makeStorage, gate, mount, clickChat, RP, KTCodeReview, DATA_C, LABELS_C, custOf, CUST_C1, ST_C, handlerC, GOOD, BAD, WARN, VALUE, LOCKSAVE, CAND, GEN_EFFECT_FEATURES, GW_SCOPE, EXPECT_OF, NOMATCH_OF, GEN_PORT_FEATURE, fakeVerification, planJs, makeGenerate, makeConvC, adoptC, finalHtml, stripC, REQUESTS, approveC, approveArgs, validC, adoptOnScreen, prepareOnScreen, loadDevBaseFromMock, HEALTH_V, NEW_MEMO, lockCode, custLock, screenPlan, planImplOf, screenGenerate, mountFinal, applyButtonOf, writesOf, applyOnScreen, waitUntil };
 }
 
 module.exports = { createNewFlowKit };

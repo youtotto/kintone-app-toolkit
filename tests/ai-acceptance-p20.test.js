@@ -855,12 +855,11 @@ console.log('\n--- U5. ［新しい会話］: 続けて書いた別の依頼が�
   assert($('kt-ai-new-conv') && $('kt-ai-new-conv').disabled === true, '会話が空のうちは［新しい会話］は押せない');
   await adoptOnPanel(panel); await ticks();
   assert(panel.conversation().planHistory().length === 1 && $('kt-ai-new-conv').disabled === false, '前提: 計画 v1 がある・［新しい会話］が押せる');
-  await panel.startExecutor(); await ticks();
-  // 承認してから準備（最終確認の段）まで進める。§0e.1（2026-10-09）: 画面の承認は［動作テスト環境へ反映］1 回で反映まで進むので、
-  //   ここでは承認の記録（会話コントローラ）と準備の部品（startExecutor）で「未反映の準備がある」状態を作る（新しい会話がそれを取り消すことを確かめる）
-  { const v0 = panel.conversation().activePlan(); panel.conversation().approveFinal({ planId: v0.planId, version: v0.version }); await ticks(); }
-  await panel.startExecutor(); await ticks();
-  const stageBefore = panel.executorState().stage;
+  //   まだ反映していない準備（最終案のカードの承認の欄の準備。書き込みなし）がある状態から押す（新しい会話がそれを使わないことを確かめる）。
+  //   簡素化（2026-10-17）: 承認だけを記録して右で準備する口は削除した（承認と反映は［動作テスト環境へ反映］1 回）
+  const v0 = panel.conversation().activePlan();
+  for (let i = 0; i < 60 && panel.finalPrecheck().status !== 'ready'; i++) await ticks(1);
+  const preBefore = panel.finalPrecheck();
   // 2026-10-06 利用者の指示で意図して更新: 確認のカード（new-conv-choices・［このまま続ける］）は廃止。［新しい会話］はすぐ新しい会話を始める
   //   （ここでは右の「確認結果」を開いた状態から押し、右も新しい会話の分に片づくことを確かめる）
   panel.showPane('review'); await ticks();
@@ -870,7 +869,8 @@ console.log('\n--- U5. ［新しい会話］: 続けて書いた別の依頼が�
   assert(!panel.conversation().messages().some(m => m.data && m.data.kind === 'new-conv-choices') && !/data-act="new-conv-cancel"/.test($('kt-ai-chat').innerHTML), '［新しい会話］→ 確認のカードは出さない');
   assert(panel.conversation().messages().length === 0 && panel.conversation().planHistory().length === 0 && !panel.conversation().activePlan() && $('kt-ai-new-conv').disabled === true, '［新しい会話］→ すぐ会話・計画が消え、ボタンは押せない状態に戻る');
   assert(panel.drawerState().open === true && panel.drawerState().pane === 'plan' && !panel.activeArtifact() && !/承認済みの案件/.test($('kt-ai-change-summary').innerHTML) && !/承認済みの案件/.test($('kt-ai-plan-result').innerHTML), `新しい会話では右を片づける（表示中のタブは「変更内容」に戻り、前の変更案の内容を残さない。右は常に表示）: ${panel.drawerState().pane}`);
-  assert(['confirm', 'blocked'].includes(stageBefore) ? panel.executorState().stage === 'idle' : true, `未反映の準備（最終確認）は取り消す（前の会話の計画を新しい会話から反映しない）: ${stageBefore} → ${panel.executorState().stage}`);
+  const rOld = await panel.applyFinal(v0.planId, v0.version); await ticks();
+  assert(preBefore.status === 'ready' && preBefore.planId === v0.planId && panel.finalPrecheck().planId === null && rOld === null && !v0.approval && panel.executorState().stage === 'idle', `未反映の準備（承認の欄の準備）は使わない（前の会話の計画を新しい会話から反映しない）: ${preBefore.status} → ${JSON.stringify(panel.finalPrecheck())}`);
   assert(mock.calls.every(c => c.startsWith('GET')), '新しい会話の操作で kintone の設定へ書き込まない');
   // 送信中に新しい会話 → 要求を中断し、遅れた応答を新しい会話に入れない
   for (const s0 of K.REQUESTS.slice(0, 3)) { await panel.send(s0); await ticks(); }

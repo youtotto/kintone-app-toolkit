@@ -124,8 +124,6 @@ const writes = (m) => m.mock.calls.filter(c => !c.startsWith('GET'));
 const planOnScreen = async (m, goal, opts = {}) => { await m.panel.send(goal, opts); await ticks(8); await m.panel.send('これで進めて'); await ticks(12); return m.conv().activePlan(); };
 /** §0e.1（2026-10-09）: 最終案のカードの［動作テスト環境へ反映］を 1 回押す（承認の欄の準備を待ってから。承認と反映を 1 回で行う。tests/helpers/new-flow.js の applyOnScreen） */
 const applyOnScreenM = (m, o) => KF.applyOnScreen(m, o);
-/** 承認の記録だけ（画面の外から。右の「反映」の準備・最終確認の部品の照合を確かめるとき） */
-const approveOnly = (m) => { const v = m.conv().activePlan(); return !!(v && m.conv().approveFinal({ planId: v.planId, version: v.version }).ok && m.conv().approvalValid().ok); };
 /** C-1 第 3 段: 採用した仮案から作る計画の goal は「依頼の文」＋「採用した方針: …」。依頼の文（1 行目）で計画を選ぶ */
 const firstLine = (s) => String(s ?? '').split('\n')[0];
 /**
@@ -302,14 +300,14 @@ console.log('\n--- §7 / §20. Customize → 開発支援（JS 相談）: 左は
   await clickTab(m, 'code');
   assert(m.panel.drawerState().pane === 'code' && m.$('kt-ai-code-view').textContent.includes("value === '完了'") && /✓ 既存ファイルへの統合/.test(m.$('kt-ai-code-review').innerHTML) && /参考パターン/.test(m.$('kt-ai-code-review').innerHTML), 'full code only workspace（右の「コード」）: 全文・検査の内訳・参考パターン（§0e.1: 仮案から作った最終案の登録は最終案のカードの［動作テスト環境へ反映］から。右の「コード」の［動作テスト環境へ登録］は出さない）');
   assert(/data-status="ready">未反映</.test(m.$('kt-ai-ws-state').innerHTML), 'コードを作った後も、右の見出しは登録まで「未反映」');
-  //   C-1 第 3 段: 登録の許可は最終案の承認（承認の前は登録の準備をしない。tests/ai-flow-redesign.test.js の R16・D14・F10-2）
-  await m.panel.startJsRegister(m.conv().activePlan()); await ticks();
-  assert(m.panel.jsExecState().stage === 'blocked' && m.panel.jsExecState().prepared.blockers.some(b => b.code === 'APPROVAL_REQUIRED') && writes(m).filter(w => /PUT customize/.test(w)).length === 0, `承認の前は登録の最終確認に進まない: ${m.panel.jsExecState().stage}`);
+  //   C-1 第 3 段: 登録の許可は最終案の承認（承認の前は登録の準備をしない。tests/ai-flow-redesign.test.js の R16・D14・F10-2）。
+  //   簡素化（2026-10-17）: 登録の準備と登録は、最終案のカードの［動作テスト環境へ反映］1 回の中だけ（右の「反映」から登録を始める口は無い）
+  assert(m.panel.jsExecState().stage === 'idle' && !m.conv().activePlan().approval && writes(m).filter(w => /PUT customize/.test(w)).length === 0, `承認の前は登録の準備・登録に進まない: ${m.panel.jsExecState().stage}`);
   //   §0e.1（2026-10-09）: 最終案のカードの［動作テスト環境へ反映］1 回で、設定の手順と JavaScript の登録を続けて行う（承認の欄に示した確認項目は承認で確認済み。
   //   右の「反映」の登録の最終確認は出さない）。押すと右のタブ「反映」に切り替わる
   await clickTab(m, 'code');
   const arJ = await applyOnScreenM(m);
-  assert(arJ.button && !arJ.button.disabled && arJ.pre.items.files.some(x => /✎ fieldOnOff\.js（PC）既存ファイルを更新/.test(x)) && arJ.run && arJ.run.stage === 'done' && m.panel.drawerState().pane === 'exec' && m.$('kt-ai-pane-exec').style.display === 'block' && !/id="kt-ai-jsreg-go"/.test(m.$('kt-ai-jsreg').innerHTML), '［動作テスト環境へ反映］1 回 → 承認の欄に置き換えるファイル（fieldOnOff.js）・登録まで進み、右のタブ「反映」に切り替わる（登録の最終確認の段は出さない）');
+  assert(arJ.button && !arJ.button.disabled && arJ.pre.items.files.some(x => /✎ fieldOnOff\.js（PC）既存ファイルを更新/.test(x)) && arJ.run && arJ.run.stage === 'done' && m.panel.drawerState().pane === 'exec' && m.$('kt-ai-pane-exec').style.display === 'block', '［動作テスト環境へ反映］1 回 → 承認の欄に置き換えるファイル（fieldOnOff.js）・登録まで進み、右のタブ「反映」に切り替わる');
   const c4 = m.chat();
   assert(m.panel.jsExecState().stage === 'done' && /動作テスト環境へ反映しました。/.test(arJ.card) && /JavaScript: ✎ fieldOnOff\.js（PC） を登録（反映後の確認 ✓ 1 \/ 1 件一致）/.test(arJ.card) && !/VERIFIED/.test(c4) && /data-act="open-js-result"/.test(arJ.cardHtml) && /data-act="open-customize"/.test(arJ.cardHtml) && !/sourceHash/.test(c4) && !/Audit/.test(c4) && !/kt-ai-js-execution-card/.test(c4), 'JS 登録の要約（左・結果のカード 1 枚）: ファイル・反映後の確認（✓ 1 / 1 件一致）・［登録結果を見る］［Customize で確認］。検証の内訳・監査・VERIFIED の語は無い');
   assert(m.msgs().some(x => x.data?.kind === 'js-preview-changed') && !/JavaScript カスタマイズ設定が変更されました/.test(c4), '登録の処理の通知（js-preview-changed）は会話に出さない（登録のカードと同じ内容）');
@@ -457,9 +455,8 @@ await section(async () => {
   assert(m.msgs().length === 0 && !/new-conv-choices|kt-ai-choices-card/.test(m.chat()) && m.$('kt-ai-new-conv').disabled === true, 'N1: ［新しい会話］を押すとすぐ新しい会話（確認のカードは出さない）。会話が 0 件の間は押せない');
   assert(m.$('kt-ai-plan-result').innerHTML === '' && m.$('kt-ai-plan-result').style.display === 'none' && m.$('kt-ai-plan-detail').style.display === 'none' && m.$('kt-ai-change-summary').innerHTML === '' && m.$('kt-ai-pane-plan-empty').style.display === '' && m.$('kt-ai-review-result').innerHTML === '' && m.$('kt-ai-review-empty').style.display === '', 'N1: 新しい会話では右の「変更内容」「確認結果」に前の会話の変更案を残さない');
   assert(!/kt-ai-exec-start/.test(m.$('kt-ai-exec').innerHTML) && m.$('kt-ai-pane-exec').style.display === 'none' && m.$('kt-ai-ws-state').innerHTML === '<span class="kt-ai-status" data-status="empty">未作成</span>' && m.panel.drawerState().pane === 'plan' && !m.panel.activeArtifact(), 'N1: 右下の右の「反映」に前の計画の［反映］を出さない（欄も閉じる）・右の見出しは「未作成」・表示中の成果物も無し');
-  const r = await m.panel.startExecutor();
   const ra = await m.panel.applyFinal(vN1.planId, vN1.version); await ticks(4);
-  assert(r === null && ra === null && !vN1.approval && m.panel.executorState().stage === 'idle' && writes(m).length === 0 && !/data-act="final-approve"/.test(m.chat()), 'N1: 前の会話の計画は新しい会話から反映できない（準備も、最終案のカードの反映も。以前は検証と承認が残り、そのまま反映できた）');
+  assert(ra === null && !vN1.approval && m.panel.executorState().stage === 'idle' && writes(m).length === 0 && !/data-act="final-approve"/.test(m.chat()), 'N1: 前の会話の計画は新しい会話から反映できない（準備も、最終案のカードの反映も。以前は検証と承認が残り、そのまま反映できた）');
 });
 await section(async () => {
   // N1b: 計画の無かった会話（質問だけ・根拠を開いた）でも、新しい会話では右を片づける
@@ -473,16 +470,18 @@ await section(async () => {
   assert(m.msgs().length === 0 && m.$('kt-ai-fact-detail').innerHTML === '' && m.$('kt-ai-fact-detail').style.display === 'none' && !m.panel.activeArtifact() && m.panel.drawerState().pane === 'plan' && /data-status="empty"/.test(m.$('kt-ai-ws-state').innerHTML), 'N1b: 計画の無かった会話でも、新しい会話で根拠の中身・表示中の成果物・表示中のペインを戻す');
 });
 await section(async () => {
-  // N2: 反映の準備の途中で新しい会話になったら、その準備は使わない（確認に進めない）
+  // N2: ［動作テスト環境へ反映］を押した直後（反映の前の確かめの間）に新しい会話になったら、前の計画は反映しない（何も書き込まない）
+  //   簡素化（2026-10-17）: 承認だけを記録して右で準備する口は削除した。押した反映の途中の新しい会話で確かめる
   const m = mount();
   await ticks();
   await planOnScreen(m, GOAL);
-  //   §0e.1: 右の「反映」の準備の部品（startExecutor）の照合を確かめるため、承認は記録だけ（画面の承認は反映と 1 回）
-  assert(approveOnly(m), '前提: 最終案を承認した');   // C-1 第 3 段: 承認が無いと準備そのものをしない
-  const p = m.panel.startExecutor();
+  await KF.waitUntil(() => m.panel.finalPrecheck().status === 'ready', 60);
+  const v = m.conv().activePlan();
+  const p = clickChat(m, 'final-approve', { plan: v.planId, version: String(v.version) });
   await m.$('kt-ai-new-conv').dispatch('click');
-  const r = await p; await ticks();
-  assert(r === null && m.panel.executorState().stage === 'idle' && !/kt-ai-exec-go/.test(m.$('kt-ai-exec').innerHTML) && writes(m).length === 0, `N2: 準備の途中で新しい会話 → 準備を捨て、前の計画の最終確認を出さない: ${m.panel.executorState().stage}`);
+  await p; await ticks();
+  const fr = m.panel.finalRun();
+  assert(fr && fr.stage === 'stopped' && !fr.written && m.panel.executorState().stage === 'idle' && writes(m).length === 0 && m.conv().messages().length === 0, `N2: 押した直後に新しい会話 → 前の計画は反映しない（書き込み 0。新しい会話に前の結果を出さない）: ${fr && fr.stage}`);
 });
 await section(async () => {
   // N3〜N5: 反映の記録（会話をまたぐ）・記録から戻す・監査 JSON・2 つめの会話の反映
@@ -538,20 +537,19 @@ await section(async () => {
   assert(m.conv().activePlan().plan.goal === GOAL && !/fieldOnOff\.js/.test(m.$('kt-ai-code-head').innerHTML) && m.$('kt-ai-code-view').style.display === 'none', `N6: 別の計画 B（版の番号は同じ 1）になったら、計画 A のコードと登録ボタンを残さない: ${m.$('kt-ai-code-head').innerHTML.slice(0, 80)}`);
 });
 await section(async () => {
-  // N6b: 同じ計画の新しい版になったら、前の版のコードを最新として残さず、前の版のまだ登録していない JavaScript の登録の確認を取り消す
+  // N6b: 同じ計画の新しい版になったら、前の版のコードを最新として残さず、前の版の最終案は反映しない（承認の欄の準備は新しい版でやり直す）
   const m = mount({ plans: () => PLAN_HYBRID });
   await ticks();
   await planOnScreen(m, GOAL_HYBRID);   // C-1 第 3 段: JavaScript は最終案のパイプラインが作る
   await openCodePane(m);
-  //   §0e.1: 登録の準備の部品（startJsRegister）の確認の段を作るため、承認は記録だけ（画面の承認は反映と 1 回）
-  assert(approveOnly(m), '前提: 最終案を承認した');
-  await m.panel.startJsRegister(m.conv().activePlan()); await ticks();
+  await KF.waitUntil(() => m.panel.finalPrecheck().status === 'ready', 60);
   const vA = m.conv().activePlan();
-  assert(m.panel.jsExecState().stage === 'confirm' && m.$('kt-ai-code-view').style.display === '', '前提: 変更案の版 1 のコードを表示し、登録の確認を出している');
+  assert(m.panel.finalPrecheck().version === vA.version && m.$('kt-ai-code-view').style.display === '', '前提: 変更案の版 1 のコードを表示し、承認の欄の準備が終わっている');
   await m.panel.send('モバイルでも同じようにして', { intent: 'REVISE_PLAN' }); await ticks(8);
   const vB = m.conv().activePlan();
   assert(vB.planId === vA.planId && vB.version === vA.version + 1 && m.$('kt-ai-code-head').innerHTML === '変更案が新しくなったため、前の変更案のコードは表示していません。新しい変更案でコードを作ると、ここに表示します。' && m.$('kt-ai-code-view').style.display === 'none' && m.panel.codeShown() === null, 'N6b: 同じ計画の新しい版になったら、前の版のコードは消して「変更案が新しくなったため…」と書く');
-  assert(m.panel.jsExecState().stage === 'idle' && !/kt-ai-jsreg-go/.test(m.$('kt-ai-jsreg').innerHTML) && writes(m).filter(w => /PUT customize/.test(w)).length === 0, 'N6b: 前の版のまだ登録していない JavaScript の登録の確認は取り消す（登録しない）');
+  const rA = await m.panel.applyFinal(vA.planId, vA.version); await ticks(4);
+  assert(rA === null && !vA.approval && m.panel.jsExecState().stage === 'idle' && writes(m).filter(w => /PUT customize/.test(w)).length === 0, 'N6b: 前の版の最終案は反映しない（承認も登録もしない）');
 });
 await section(async () => {
   // N7: JavaScript の登録も記録に残し、新しい会話の後に記録から開ける
@@ -605,12 +603,13 @@ await section(async () => {
   inputs.data.views.views['担当者別'] = JSON.parse(JSON.stringify(m.mock.st.views['担当者別']));
   await m.$('kt-ai-new-conv').dispatch('click'); await ticks();
   await planOnScreen(m, GOAL);
-  //   反映の途中に記録を開く操作を確かめるため、準備と実行の部品（startExecutor / confirmExecutor）を順に呼ぶ（承認は記録だけ。§0e.1 の画面の承認は反映と 1 回）
-  assert(approveOnly(m), '前提: 2 つめの最終案を承認した');
-  await m.panel.startExecutor();
+  //   反映の途中に記録を開く操作を確かめる（最終案のカードの［動作テスト環境へ反映］を押し、最初の設定の書き込みで止めておく）
   const g = gate();
   { const o = m.mock.api.addPreviewFields; let first = true; m.mock.api.addPreviewFields = async (...a) => { if (first) { first = false; await g.p; } return o.apply(m.mock.api, a); }; }
-  const run = m.panel.confirmExecutor(); await ticks(6);
+  await KF.waitUntil(() => m.panel.finalPrecheck().status === 'ready', 60);
+  const vL1 = m.conv().activePlan();
+  const run = clickChat(m, 'final-approve', { plan: vL1.planId, version: String(vL1.version) });
+  await KF.waitUntil(() => m.panel.executorState().stage === 'running', 100); await ticks(2);
   const exA = m.panel.executorState().prepared.executionId;
   const items = logItems(m.$('kt-ai-apply-log').innerHTML);
   const idA = items.find(x => /この会話/.test(x.html)).id, idB = items.find(x => /前の会話/.test(x.html)).id;
@@ -660,7 +659,8 @@ await section(async () => {
     assert(nowPlanReady(m) && m.panel.executorState().stage === 'idle' && label === (rolled ? '元に戻し済み' : '反映済み（未復元）') && m.panel.unrevertedPreviewChange() === !rolled, `L2（${rolled ? '戻し済み' : '未復元'}）: 閉じると今の計画の［動作テスト環境へ反映］に戻る（反映は記録に残る: ${label}）`);
     // 判断の変更・新しい版でも、記録から開いた反映は今の計画に戻る（簡素化 E: 判断は［この手順を反映しない］だけ。外して戻す）
     await clickPane(m, 'log', { dataset: { act: 'log-open', log: logId } }); await ticks();
-    m.panel.decide('P1', 'reject'); m.panel.decide('P1', '');
+    await m.$('kt-ai-review-result').dispatch({ type: 'change', target: { dataset: { step: 'P1' }, checked: true } });
+    await m.$('kt-ai-review-result').dispatch({ type: 'change', target: { dataset: { step: 'P1' }, checked: false } });
     await KF.waitUntil(() => m.panel.finalPrecheck().status === 'ready', 60);
     assert(nowPlanReady(m), `L2（${rolled ? '戻し済み' : '未復元'}）: 記録から開いた後に今の計画の判断を変えると、今の計画に戻る`);
     await clickPane(m, 'log', { dataset: { act: 'log-open', log: logId } }); await ticks();
@@ -874,8 +874,8 @@ await section(async () => {
   //   最終案のカードが「残る判断」と回答欄を出し、承認できない理由（先に決めたいこと）を示す
   const vB = m.conv().activePlan();
   assert(/残る判断（1 件）/.test(m.chat()) && /先に決めたいこと/.test(m.chat()) && /class="kt-ai-qa-input" data-qkey="/.test(m.chat()) && vB.final && vB.final.approvable === false && /先に決めたいことが 1 件/.test(vB.final.blockingReason) && /data-act="final-approve"[^>]*disabled/.test(m.chat()), `B1: 最終案のカードでも、先に答えることを案内する（承認のボタンは押せない）: ${vB.final && vB.final.blockingReason}`);
-  const r = await m.panel.startExecutor();
-  assert(r === null && m.panel.executorState().stage === 'idle' && writes(m).length === 0, 'B1: 止めている間は startExecutor が null（準備も書き込みもしない）');
+  const rB1 = await KF.applyOnScreen(m);
+  assert(!vB.approval && !rB1.run && m.panel.executorState().stage === 'idle' && writes(m).length === 0, 'B1: 止めている間は［動作テスト環境へ反映］を押しても、承認・反映の準備・書き込みをしない');
   for (const pr of [null, 'later']) {
     const m2 = mount({ plans: () => withQ(pr) });
     await ticks();
@@ -886,23 +886,23 @@ await section(async () => {
   }
 });
 await section(async () => {
-  // B2: 直している間（REVISE）は、最終確認の画面からも反映しない（［反映］は押せない）
+  // B2: 直している間（REVISE）は、［動作テスト環境へ反映］を押しても反映しない。直し終わったら前の版の最終案は反映しない
+  //   簡素化（2026-10-17）: 承認だけを記録して準備・書き込みの部品を呼ぶ口は削除した。押したときの止めで確かめる
   const gate = { p: null };
   const m = mount({ planGate: async (ctx) => { if (ctx.revision && gate.p) await gate.p; } });
   await ticks();
   await planOnScreen(m, GOAL);
-  //   最終確認の部品（confirmExecutor）の止めを確かめるため、承認は記録だけにして準備の部品を呼ぶ（§0e.1 の画面では最終確認の段を出さない）
-  assert(approveOnly(m), '前提: 最終案を承認した');
-  await m.panel.startExecutor(); await ticks();
-  //   簡素化 E（2026-10-16）: 最終確認の段（［反映］のボタン）は削除した。準備ができた状態（confirm）から書き込みの部品を直接呼んで止めを確かめる
-  assert(m.panel.executorState().stage === 'confirm' && !/id="kt-ai-exec-go"/.test(m.$('kt-ai-exec').innerHTML), '前提: 準備ができた（最終確認の段とボタンは出さない）');
+  await KF.waitUntil(() => m.panel.finalPrecheck().status === 'ready', 60);
+  const v1 = m.conv().activePlan();
+  assert(KF.applyButtonOf(m) && !KF.applyButtonOf(m).disabled, '前提: 承認の欄の準備が終わり、［動作テスト環境へ反映］が押せる');
   let open; gate.p = new Promise(res => { open = res; });
   const revising = m.panel.send('更新状況フィールドはいらない', { intent: 'REVISE_PLAN' }); await ticks(6);
   const hold = m.panel.applyHold();
-  const rConfirm = await m.panel.confirmExecutor();
-  assert(hold === '新しい内容の確認が終わるまで、反映はできません。' && rConfirm === null && writes(m).length === 0, `B2: 直している間は confirmExecutor が null（書き込まない）・止める理由は「新しい内容の確認が終わるまで、反映はできません。」: ${hold}`);
+  await clickChat(m, 'final-approve', { plan: v1.planId, version: String(v1.version) }); await ticks(4);
+  assert(hold === '新しい内容の確認が終わるまで、反映はできません。' && !v1.approval && !m.panel.finalRun() && m.panel.executorState().stage === 'idle' && writes(m).length === 0, `B2: 直している間は押しても承認・反映しない（書き込まない）・止める理由は「新しい内容の確認が終わるまで、反映はできません。」: ${hold}`);
   open(); await revising; await ticks(8);
-  assert(m.panel.applyHold() === null && m.conv().activePlan().version === 2 && m.panel.executorState().stage === 'idle' && writes(m).length === 0, 'B2: 直し終わったら止める理由は無くなる（前の版の最終確認は使わない）');
+  const rB = await m.panel.applyFinal(v1.planId, v1.version); await ticks(4);
+  assert(m.panel.applyHold() === null && m.conv().activePlan().version === 2 && rB === null && !v1.approval && m.panel.executorState().stage === 'idle' && writes(m).length === 0, 'B2: 直し終わったら止める理由は無くなる（前の版の最終案は反映しない）');
 });
 await section(async () => {
   // B3: 次の変更案を作っている間（反映は止めている）でも、反映した変更を元に戻す操作は止めない

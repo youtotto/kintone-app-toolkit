@@ -43,12 +43,6 @@ const withProposal = (health, client) => {
 };
 /** 画面: 依頼 → 仮案 →「これで進めて」で採用 → 最終案（最初の計画と JavaScript の生成・検証） */
 const planOnScreen = async (panel, goal) => { await panel.send(goal); await tick(10); await panel.send('これで進めて'); await tick(16); return panel.conversation().activePlan(); };
-/**
- * 最終案の承認の記録（会話コントローラの approveFinal。承認できない最終案は承認されない）。
- *   §0e.1（2026-10-09）: 画面の承認は最終案のカードの［動作テスト環境へ反映］1 回で登録まで進むので、登録の準備・確認の部品の照合（古い版・確認の項目）を
- *   確かめるこの節では、承認の記録だけを作って部品（startJsRegister / confirmJsRegister）を呼ぶ。画面のボタンで結果まで進める回帰は ai-flow-redesign の §G
- */
-const approveOnScreen = async (host, panel) => { void host; const v = panel.conversation().activePlan(); const r = panel.conversation().approveFinal({ planId: v.planId, version: v.version }); await tick(4); return !!(r.ok && v.approval && panel.conversation().approvalValid().ok); };
 /** 会話コントローラ: 依頼 → 仮案 →「これで進めて」で採用 → 最初の計画 */
 const startPlan = async (c, goal) => { await c.send(goal); return c.send('これで進めて'); };
 
@@ -505,7 +499,7 @@ console.log('\n--- G7. 登録処理の側での判定（KTJsExecutor）: 古い�
 }
 
 // =========================================================
-console.log('\n--- G7（画面）. 古い版からは登録しない・確認の項目を 1 件ずつチェックしてから登録 ---');
+console.log('\n--- G7（画面）. 古い版からは登録しない・確認の項目は承認の欄に出し、［動作テスト環境へ反映］1 回で承認を受けて登録 ---');
 {
   const storage = (() => { const m = new Map(); return { getItem: (k) => (m.has(k) ? m.get(k) : null), setItem: (k, v) => m.set(k, String(v)), removeItem: (k) => m.delete(k) }; })();
   const settings = KTAiClient.createSettingsStore({ storage, host: 't.cybozu.com' });
@@ -542,37 +536,21 @@ console.log('\n--- G7（画面）. 古い版からは登録しない・確認の
   const v1 = await planOnScreen(panel, '承認済みでは金額を編集できなくしたい');
   const g1 = panel.generated('C1');
   assert(g1 && g1.review.registration.verdict === 'NEEDS_CONFIRMATION' && g1.review.registration.confirmations.some(x => x.code === 'apis'), '前提: 生成したコードは「確認が必要」（生成工程の機械検査の確認: 計画に無い通信 API）');
-  const ok1 = await approveOnScreen(host, panel);
-  assert(ok1 && v1.final && v1.final.approvable, `前提: 最終案（v1）を承認した: ${v1.final && v1.final.blockingReason}`);
-  // 計画を修正して新しい版ができた後に、古い版のカードから登録しようとする
+  assert(v1.final && v1.final.approvable, `前提: 最終案（v1）は承認できる: ${v1.final && v1.final.blockingReason}`);
+  // 計画を修正して新しい版ができた後に、古い版のカードから反映しようとする
   await panel.send('承認待ちでも金額を編集不可にして', { intent: KTAiConversation.INTENT.REVISE_PLAN }); await tick(16);
   const v2 = panel.conversation().activePlan();
-  assert(v2 !== v1 && v2.version > v1.version && v2.final && !v2.approval, '前提: 計画が新しい版になった（前の版の承認は新しい版に引き継がない）');
-  await panel.startJsRegister(v1);
-  assert(panel.jsExecState().stage === 'blocked' && panel.jsExecState().prepared.blockers.some(b => b.code === 'APPROVAL_REQUIRED') && !mock.calls.some(x => x === 'PUT customize'), `最新の版（v2）を承認する前は、古い版（v1）の承認では登録しない（APPROVAL_REQUIRED）: ${JSON.stringify(panel.jsExecState().prepared && panel.jsExecState().prepared.blockers.map(b => b.code))}`);
-  //   最新の版（最終案のパイプラインで生成済み）を承認しても、古い版（v1）のカードからは登録しない
-  const ok2 = await approveOnScreen(host, panel);
-  assert(ok2, '前提: 最新の版（v2）の最終案を承認した');
-  await panel.startJsRegister(v1);
-  assert(panel.jsExecState().stage === 'blocked' && panel.jsExecState().prepared.blockers.some(b => b.code === 'NOT_LATEST_VERSION') && !mock.calls.some(x => x === 'PUT customize'), `古い版（v1）のカードからは登録しない（NOT_LATEST_VERSION）: ${JSON.stringify(panel.jsExecState().prepared && panel.jsExecState().prepared.blockers.map(b => b.code))}`);
-  // 最新の版で登録の確認へ: 確認の項目を 1 件ずつチェックするまで登録ボタンは押せない・押しても登録しない
-  //   C-1 第 3 段: 最終案のカードで示して承認した確認の項目（承認の confirmations に記録した code）は、承認で確認済みとしてチェック済みで出る
-  //   （段階 C の R21・正しさ C2。tests/ai-flow-redesign.test.js の「正しさ C2」）。チェックを外すと押せず、押しても登録しない（Executor が止める）ことは変わらない
-  await panel.startJsRegister(panel.conversation().activePlan());
-  await tick(4);
+  assert(v2 !== v1 && v2.version > v1.version && v2.final && !v2.approval, '前提: 計画が新しい版になった');
+  const old1 = await panel.applyFinal(v1.planId, v1.version); await tick(4);
+  assert(old1 === null && !v1.approval && !v2.approval && panel.jsExecState().stage === 'idle' && !mock.calls.some(x => x === 'PUT customize'), '古い版（v1）のカードからは承認も登録もしない（最新の最終案だけ反映できる）');
+  //   最新の版（v2）: 確認が必要な項目（静的には確かめられないこと）は承認の欄に出し、［動作テスト環境へ反映］1 回で承認を受けて登録する（1 件ずつのチェック欄は無い）。
+  //   承認を受けた確認の項目は承認の欄の準備の指紋に入り、承認の後に増えた確認は登録の前に止める（ai-flow-redesign の H4-6）。
+  //   確認していない項目があれば Executor が登録しないことは、上の部品の確かめ（executePreview の CONFIRMATION_REQUIRED）
+  const mm = { panel, mock, $: (id) => host.querySelector(`#${id}`), conv: () => panel.conversation(), chat: () => host.querySelector('#kt-ai-chat').innerHTML, msgs: () => panel.conversation().state.messages };
+  const r2 = await K.applyOnScreen(mm);
   const jx = panel.jsExecState();
-  const paneHtml = () => host.querySelector('#kt-ai-jsreg').innerHTML;
-  const vA = panel.conversation().activePlan();
-  const seenC1 = (vA.approval && vA.approval.confirmations && vA.approval.confirmations.C1) || [];
-  assert(jx.stage === 'confirm' && jx.prepared.confirmations.length >= 1 && jx.prepared.confirmations.every(x => seenC1.includes(x.code)) && /登録の前に確認が必要な項目/.test(paneHtml()) && (paneHtml().match(/class="kt-ai-jsreg-ack"[^>]*checked/g) || []).length === jx.prepared.confirmations.length && /動作は未確認/.test(paneHtml()), '確認画面: 確認が必要な項目（チェック欄）・動作は未確認。最終案で示して承認した項目は承認で確認済み（チェック済み）');
-  for (const x of jx.prepared.confirmations) await host.querySelector('#kt-ai-pane-exec').dispatch({ type: 'change', target: { dataset: { ackKey: x.key }, checked: false } });
-  assert(/id="kt-ai-jsreg-go"[^>]*disabled/.test(paneHtml()), '確認画面: チェックを外すと、すべて確認するまで登録ボタンは無効');
-  await panel.confirmJsRegister();
-  assert(panel.jsExecState().stage === 'confirm' && !mock.calls.some(x => x === 'PUT customize') && /確認していないため、登録していません/.test(paneHtml()), '確認せずに登録を押しても登録しない（Executor が止める）');
-  for (const x of panel.jsExecState().prepared.confirmations) await host.querySelector('#kt-ai-pane-exec').dispatch({ type: 'change', target: { dataset: { ackKey: x.key }, checked: true } });
-  assert(!/id="kt-ai-jsreg-go"[^>]*disabled/.test(paneHtml()), 'すべて確認すると登録ボタンが押せる');
-  await panel.confirmJsRegister();
-  assert(panel.jsExecState().execution && panel.jsExecState().execution.status === 'DONE' && mock.calls.includes('PUT customize'), '確認した後は登録できる');
+  const fpConf = (v2.approval && v2.approval.precheck && v2.approval.precheck.fingerprint && v2.approval.precheck.fingerprint.js && v2.approval.precheck.fingerprint.js.confirmations) || [];
+  assert(r2.pre.status === 'ready' && (r2.pre.items.confirmations || []).length >= 1 && r2.button && !r2.button.disabled && jx.prepared && jx.prepared.confirmations.length >= 1 && jx.prepared.confirmations.every(x => fpConf.some(c => c.key === x.key)) && jx.execution && jx.execution.status === 'DONE' && mock.calls.includes('PUT customize'), `最新の版（v2）: 確認が必要な項目を承認の欄に出し、［動作テスト環境へ反映］1 回で承認（確認の項目は準備の指紋に入る）と登録: ${JSON.stringify({ pre: r2.pre && r2.pre.status, conf: ((r2.pre && r2.pre.items && r2.pre.items.confirmations) || []).length, fp: fpConf.length })}`);
 }
 
 // =========================================================

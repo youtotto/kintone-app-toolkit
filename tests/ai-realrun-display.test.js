@@ -330,7 +330,7 @@ await section(async () => {
   const r = await K.applyOnScreen(m);
   const ap = r.v.approval;
   const fpConf = ap && ap.precheck && ap.precheck.fingerprint && ap.precheck.fingerprint.js ? ap.precheck.fingerprint.js.confirmations : [];
-  assert(r.run && r.run.ok && fpConf.length >= 1 && fpConf.some(c => /^C1:plan-consistency#\d+$/.test(c.key) && /app\.record\.detail\.show/.test(c.message)) && Array.isArray(ap.confirmations.C1) && ap.confirmations.C1.includes('plan-consistency') && r.writes.some(w => /customize/.test(w)), `V7-8: 承認の照合の key（C1:plan-consistency#N）・code と指紋の文（元の文）は変えずに、承認と登録が通る（書き込みは動作テスト環境のモックだけ）: ${JSON.stringify({ ok: r.run && r.run.ok, fpConf, writes: r.writes })}`);
+  assert(r.run && r.run.ok && fpConf.length >= 1 && fpConf.some(c => /^C1:plan-consistency#\d+$/.test(c.key) && /app\.record\.detail\.show/.test(c.message)) && r.writes.some(w => /customize/.test(w)), `V7-8: 承認の照合の key（C1:plan-consistency#N）と指紋の文（元の文）は変えずに、承認と登録が通る（書き込みは動作テスト環境のモックだけ）: ${JSON.stringify({ ok: r.run && r.run.ok, fpConf, writes: r.writes })}`);
 });
 
 // =========================================================

@@ -105,11 +105,6 @@ function mount({ inputs = INPUTS, paid = true, plans = null, now = null, extra =
 const clickChat = (m, act, extra = {}) => m.$('kt-ai-chat').dispatch({ type: 'click', target: { dataset: { act, ...extra } } });
 /** 新しい流れ: 台本の 4 発言で仮案 → 採用 → 最終案まで進める（共有の部品） */
 const adopt = (m) => K.adoptOnScreen(m);
-/**
- * §0e.1（2026-10-09）: 画面の承認は最終案のカードの［動作テスト環境へ反映］1 回（承認と反映）。準備・登録の部品の照合を確かめる節では、承認の記録だけを作る
- *   （会話コントローラの approveFinal。承認できない最終案は承認されない）。画面のボタンで結果まで進める節は K.applyOnScreen を使う
- */
-const approve = async (m) => { const v = m.conv().activePlan(); m.conv().approveFinal({ planId: v.planId, version: v.version }); await ticks(); return v; };
 const clickPane = (m, pane, target) => m.$(`kt-ai-pane-${pane}`).dispatch({ type: 'click', target });
 const clickTab = (m, pane) => m.$('kt-ai-drawer-tabs').dispatch({ type: 'click', target: { dataset: { pane } } });
 const writes = (m) => m.mock.calls.filter(c => !c.startsWith('GET'));
@@ -194,9 +189,7 @@ console.log('\n--- §4. 先に確認したいこと（blocking）が残ってい
   assert(/先に確認したいことが 1 件残っています/.test(hold || ''), `反映を止める理由: ${hold}`);
   //   C-1 第 3 段: 手順ごとの承認（decide）ではなく最終案の承認。先に決めたいことが残る最終案は承認できない
   const ar4 = await K.applyOnScreen(m);
-  await approve(m);
-  const r = await m.panel.startExecutor();
-  assert(r === null && ar4.button && ar4.button.disabled && !m.conv().activePlan().approval && m.panel.executorState().stage === 'idle' && writes(m).length === 0 && !/id="kt-ai-exec-start"/.test(m.$('kt-ai-exec').innerHTML) && /先に確認したいことが 1 件残っています/.test(m.$('kt-ai-exec').innerHTML), '［動作テスト環境へ反映］は押せず、承認も準備もしない（書き込み 0）・右の「反映」に理由を出す');
+  assert(ar4.button && ar4.button.disabled && !m.conv().activePlan().approval && m.panel.executorState().stage === 'idle' && writes(m).length === 0 && !/id="kt-ai-exec-start"/.test(m.$('kt-ai-exec').innerHTML) && /先に確認したいことが 1 件残っています/.test(m.$('kt-ai-exec').innerHTML), '［動作テスト環境へ反映］は押せず、承認も準備もしない（書き込み 0）・右の「反映」に理由を出す');
   //   C-1 第 3 段: 確認したいことのカード（questions）は削除した。最終案のカードの「残る判断」と［この内容で反映する］の理由で知らせる（R10-1・R19-5）。
   //   計画の確認事項のおすすめ（recommendation）は、最終案のカードの「残る判断」に添える（以前は確認したいことのカードに出た）
   const fin = K.stripC(m.chat());
@@ -365,32 +358,27 @@ console.log('\n--- §13. 右の見出しの状態（VM.workStatus）は実際の
 }
 
 // =========================================================
-console.log('\n--- §14. 登録の確認を出した後に同じ版でコードを作り直したら、前のコードの確認は使わない（確認した内容と違うコードを登録しない）---');
+console.log('\n--- §14. 承認の欄の準備の後に「コードを作って」: 同じ入力なら作り直さず準備はそのまま。新しい版になったら前の版は反映しない（準備の後に候補が変わったときに押しても登録しないことは ai-flow-redesign の H4-5）---');
 {
   const m = mount({ plans: () => PLAN_HYBRID });
   await ticks();
   await adopt(m);
-  //   C-1 第 3 段: 登録の準備は最終案の承認の後だけ
-  const v = await approve(m);
-  await m.panel.startJsRegister(v); await ticks(6);
-  assert(m.panel.jsExecState().stage === 'confirm', `前提: 登録の確認を出した: ${m.panel.jsExecState().stage}`);
-  // 準備の後にコードだけが入れ替わった（同じ版のまま）→ 登録しない
-  v.generated.C1 = { ...v.generated.C1 };
+  const p0 = await K.prepareOnScreen(m);
+  const v = p0.v;
+  assert(p0.ready && p0.button && !p0.button.disabled, `前提: 承認の欄の準備が終わり、［動作テスト環境へ反映］が押せる: ${p0.pre && p0.pre.status}`);
   const w0 = writes(m).length;
-  const r = await m.panel.confirmJsRegister(); await ticks();
-  assert(r === null && m.panel.jsExecState().stage === 'blocked' && /準備の後にコードが作り直されました/.test(m.$('kt-ai-jsreg').innerHTML) && writes(m).length === w0, `作り直したコードは、準備からやり直すまで登録しない: ${m.panel.jsExecState().stage}`);
-  // 同じ版・同じ入力で作り直しを頼む（会話から）→ 独立レビュー B3（5.6）: AI を呼ばず案内だけ。コードは変わらないので前のコードの確認はそのまま
-  //   C-1 第 3 段: 従来の「同じ入力・同じ指摘」の案内（generate-repeat）は削除した。最終案の後の「コードを作って」は、検証済みの JavaScript なら作り直さず案内（generate-verified）だけ（F2-4）
-  await m.panel.startJsRegister(m.conv().activePlan()); await ticks(6);
-  assert(m.panel.jsExecState().stage === 'confirm', '前提: もう一度、登録の確認を出した');
+  // 同じ版・同じ入力で作り直しを頼む（会話から）→ 独立レビュー B3（5.6）: AI を呼ばず案内だけ。コードは変わらないので承認の欄の準備はそのまま
+  //   C-1 第 3 段: 最終案の後の「コードを作って」は、検証済みの JavaScript なら作り直さず案内（generate-verified）だけ（F2-4）
   const gens0 = m.calls.generate.length;
   const verifiedBefore = m.conv().messages().filter(x => x.data?.kind === 'generate-verified').length;
   await m.panel.send('C1 のコードを作って'); await ticks(10);
-  assert(m.panel.jsExecState().stage === 'confirm' && m.calls.generate.length === gens0 && m.conv().activePlan() === v && m.conv().messages().filter(x => x.data?.kind === 'generate-verified').length === verifiedBefore + 1 && writes(m).length === w0, `同じ入力の作り直しは AI を呼ばず案内だけ（コードが変わらないので確認はそのまま）: ${m.panel.jsExecState().stage}`);
-  // 入力が変わって（追加の指示）作り直す → 前のコードで準備した確認画面を取り消す
-  //   C-1 第 3 段: 指示は最終案の修正（新しい版。承認は外れる）。前の版で準備した登録の確認は使わない
+  const p1 = await K.prepareOnScreen(m);
+  assert(m.calls.generate.length === gens0 && m.conv().activePlan() === v && m.conv().messages().filter(x => x.data?.kind === 'generate-verified').length === verifiedBefore + 1 && p1.ready && p1.button && !p1.button.disabled && writes(m).length === w0, `同じ入力の作り直しは AI を呼ばず案内だけ（コードが変わらないので承認の欄の準備はそのまま）: ${p1.pre && p1.pre.status}`);
+  // 入力が変わって（追加の指示）作り直す → 新しい版（承認は無い）。前の版の最終案は反映しない
   await m.panel.send('差戻し後は編集できるようにして'); await ticks(10);
-  assert(m.conv().activePlan().version === 2 && !m.conv().activePlan().approval && m.panel.jsExecState().stage === 'idle' && !/id="kt-ai-jsreg-go"/.test(m.$('kt-ai-jsreg').innerHTML) && writes(m).length === w0, `新しい版で作り直したら、前のコードの登録の確認を消す: ${m.panel.jsExecState().stage}`);
+  const v2 = m.conv().activePlan();
+  const r2 = await m.panel.applyFinal(v.planId, v.version); await ticks(4);
+  assert(v2.version === 2 && !v2.approval && !v.approval && r2 === null && m.panel.jsExecState().stage === 'idle' && writes(m).length === w0, `新しい版で作り直したら、前の版の最終案は反映しない（承認も登録もしない）: ${m.panel.jsExecState().stage}`);
 }
 
 // =========================================================
@@ -405,8 +393,9 @@ console.log('\n--- §15. コードを作っている間は反映・登録を止�
   for (const s0 of K.REQUESTS.slice(0, 3)) { await m.panel.send(s0); await ticks(10); }
   const generating = m.panel.send(K.REQUESTS[3]); await ticks(10);
   assert(m.calls.generate.length === 1 && m.conv().isBusy() && /新しい内容の確認が終わるまで/.test(m.panel.applyHold() || '') && m.$('kt-ai-right-banner').style.display === '', `コードを作っている間: 反映を止める・案内を出す: ${m.conv().state.working} ${m.panel.applyHold()} / ${m.$('kt-ai-right-banner').textContent}`);
-  const r0 = await m.panel.startJsRegister(m.conv().activePlan());
-  assert(r0 === null && m.panel.jsExecState().stage === 'idle', 'コードを作っている間は、登録の準備もしない');
+  const vG = m.conv().activePlan();
+  const r0 = vG ? await m.panel.applyFinal(vG.planId, vG.version) : null;
+  assert(r0 === null && m.panel.jsExecState().stage === 'idle' && m.panel.executorState().stage === 'idle' && writes(m).length === 0, 'コードを作っている間は、反映（設定の反映・JavaScript の登録）もしない');
   //   作っている間に送った修正は積んで、完了の後に 1 回の差分更新で新しい版にする（R11-2・R11-4。従来の「新しい版はコードが無い」ではない）
   await m.panel.send('一覧の条件は完了だけにして'); await ticks(4);
   g.open(); await generating; await ticks(12);

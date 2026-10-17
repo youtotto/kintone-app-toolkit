@@ -218,7 +218,7 @@ console.log('\n--- 2. KTAiConversation.create（fake services。履歴は送ら�
   //   最終案の流れでは、反映は最終案の承認の後だけ（承認の前は承認へ案内する。ai-flow-redesign の F10-1）
   const r6a = await c.send('これで進めたい');
   assert(r6a.intent === 'REQUEST_PREVIEW' && log.length === n && c.messages()[c.messages().length - 1].data.kind === 'preview-needs-approval' && c.activePlan().status === 'ACTIVE', 'REQUEST_PREVIEW（最終案の承認の前）→ AI 呼び出し無し・承認への案内（反映の準備はしない）');
-  assert(c.approveFinal({ planId: v2.planId, version: v2.version }).ok, '最終案を承認する（承認は画面のボタンだけ。会話の文では承認しない）');
+  assert(c.approveFinal(KIT.approveArgs(v2)).ok, '最終案を承認する（承認は画面のボタンだけ。会話の文では承認しない。ここでは会話コントローラに画面と同じ基準と承認の欄の準備を渡す）');
   const r6 = await c.send('これで進めたい');
   const lastM = c.messages()[c.messages().length - 1];
   assert(r6.intent === 'REQUEST_PREVIEW' && log.length === n && lastM.role === 'toolkit' && lastM.data.kind === 'preview-approved' && lastM.data.version === 2 && !c.messages().some(x => x.data && x.data.kind === 'preview-ready'), 'REQUEST_PREVIEW（承認の後）→ AI 呼び出し無し・承認済みの最終案は結果の場所を案内するだけ（§0e.1: 反映は最終案のカードの［動作テスト環境へ反映］1 回。手順ごとの準備の件数のカードは出さない）');
@@ -525,9 +525,7 @@ console.log('\n--- 5. AI Workspace: 会話（ASK / PLAN / REVISE / EXPLAIN / PRE
   await ticks();
   const v = m.conv().registerPlan({ plan: PLAN_V1.plan, ctx: null, review: KTPlanReview.review({ plan: PLAN_V1.plan, ...INPUTS }) });
   await ticks(4);
-  const prepared = await m.panel.startExecutor();
-  const rConfirm = await m.panel.confirmExecutor();
-  assert(v === null && !m.conv().activePlan() && prepared === null && rConfirm === null && writes(m).length === 0 && m.panel.executorState().stage === 'idle', '仮案を経ない計画は作れず、反映の準備も書き込みもしない');
+  assert(v === null && !m.conv().activePlan() && writes(m).length === 0 && m.panel.executorState().stage === 'idle', '仮案を経ない計画は作れず、反映するものが無い（反映の準備も書き込みもしない）');
 }
 
 // =========================================================
@@ -537,11 +535,13 @@ console.log('\n--- 6. Executor / Rollback 統合と Versioning（v1 は Executor
   await ticks();
   //   C-1 第 3 段（2026-10-08）: 依頼は仮案 → 採用 → 最終案。承認は最終案のカードの［この内容で反映する］（手順ごとの判断ではない。ai-flow-redesign の 画面-3・画面-3b）
   const v1 = await adoptScreen(m);
-  //   §0e.1: 画面の承認は反映と 1 回なので、版が変わると承認を引き継がないことは承認の記録（会話コントローラ）で確かめる
-  assert(m.conv().approveFinal({ planId: v1.planId, version: v1.version }).ok && m.panel.reviewOutput().approvedSteps.join() === 'P1,P2', '前提: v1 の最終案を承認（却下していない手順は承認済み）');
+  //   §0e.1: 画面の承認は反映と 1 回。版が変わると承認を引き継がないことは会話の部品で確かめる（ai-flow-redesign の R16-5）。画面では前の版の最終案を反映できないことを確かめる
+  await KIT.prepareOnScreen(m);
+  assert(m.panel.finalPrecheck().planId === v1.planId && m.panel.finalPrecheck().version === v1.version && m.panel.finalPrecheck().status === 'ready' && !v1.approval && m.panel.reviewOutput().approvedSteps.length === 0, '前提: v1 の最終案の承認の欄の準備が終わった（まだ押していないので、承認済みの手順は無い）');
   await m.panel.send('新しい承認者は作らず既存の承認者を使って'); await ticks(10);
   const v2 = m.conv().activePlan();
-  assert(m.panel.reviewOutput().approvedSteps.length === 0 && !v2.approval && m.panel.reviewOutput().plan.requestId === v2.plan.requestId && m.panel.reviewOutput().plan.requestId !== v1.plan.requestId, '版が変わると承認はやり直し（v1 の承認は v2 に持ち越さない。R16-5・画面-4）・executorOutput は v2');
+  const rOld = await m.panel.applyFinal(v1.planId, v1.version);
+  assert(rOld === null && !v1.approval && m.panel.reviewOutput().approvedSteps.length === 0 && !v2.approval && m.panel.reviewOutput().plan.requestId === v2.plan.requestId && m.panel.reviewOutput().plan.requestId !== v1.plan.requestId && writes(m).length === 0, '版が変わると前の版の最終案は反映できない（承認は版ごと。R16-5・画面-4）・executorOutput は v2');
   await ticks(20);
   { const pre = m.panel.finalPrecheck();
     assert(pre.status === 'ready' && pre.planId === v2.planId && pre.items.settings.length === 1 && pre.items.manual.length === 0 && writes(m).length === 0 && !m.msgs().some(x => x.type === 'EXECUTION') && m.panel.applyHold() === null && !v2.approval, '承認の欄: v2 の最終案ができると書き込みをしない準備を自動で走らせ、重要事項を出す（書き込み 0・まだ承認しない・反映を止める理由は無い）');
@@ -624,9 +624,7 @@ console.log('\n--- 7. Safety: 自然言語 ≠ 承認（write 0 件）/ errors /
     const holdText = '先に確認したいことが 1 件残っています。左の会話で答えると反映できます。';
     assert(b.panel.applyHold() === holdText && !approvedB && arB.button && arB.button.disabled && writes(b).length === 0 && b.conv().activePlan().final.approvable === false && /先に決めたいことが 1 件残っています。答えると反映できるようになります。/.test(b.chat()), 'blocking の確認事項が残っている: applyHold に理由・最終案は承認できず、カードに「先に決めたいことが 1 件残っています」');
     assert(!/id="kt-ai-exec-start"/.test(b.$('kt-ai-exec').innerHTML) && b.$('kt-ai-exec').innerHTML.includes(holdText), 'blocking の確認事項が残っている: 右の「反映」に反映の操作は無く、止めている理由を表示（最終案のカードの［動作テスト環境へ反映］も押せない）');
-    const sr = await b.panel.startExecutor();
-    await clickExec(b, 'kt-ai-exec-start'); await ticks();
-    assert(sr === null && b.panel.executorState().stage === 'idle' && writes(b).length === 0, 'blocking の確認事項が残っている: startExecutor は null・ボタンを押しても準備しない（書き込み 0）');
+    assert(b.panel.executorState().stage === 'idle' && !arB.run && writes(b).length === 0, 'blocking の確認事項が残っている: ［動作テスト環境へ反映］を押しても準備しない（書き込み 0）');
     // 最終案のカードの回答欄に答えて［回答を送る］→ 直した最終案（確認事項なし）では承認・反映できる
     const qkey = (/data-qkey="([^"]+)"/.exec(b.chat()) || [])[1] || null;
     const v1b = b.conv().activePlan();

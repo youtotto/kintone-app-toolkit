@@ -128,8 +128,6 @@ function mount({ inputs = INPUTS, planResponse = PLAN_REPLACE, generatedFor = ge
 }
 const clickChat = (m, act, extra = {}) => m.$('kt-ai-chat').dispatch({ type: 'click', target: { dataset: { act, ...extra } } });
 const clickPane = (m, id) => m.$('kt-ai-pane-code').dispatch({ type: 'click', target: { id } });
-// Phase 21: 登録の前に確認が必要な項目を 1 件ずつ確認する（確認しないと Executor が登録しない）
-const ackAll = async (m) => { for (const x of (m.panel.jsExecState().prepared?.confirmations || [])) await m.$('kt-ai-pane-exec').dispatch({ type: 'change', target: { dataset: { ackKey: x.key }, checked: true } }); };
 const writes = (m) => m.mock.calls.filter(c => !c.startsWith('GET'));
 const seedFor = (name, target = 'desktop', { text, url } = {}) => KTContext.buildConsultationSeed({ data: INPUTS.data, deps: INPUTS.deps, scan: INPUTS.scan, file: url ? { name, target, type: 'URL', url } : { name, target, type: 'FILE', fileKey: name === 'fieldOnOff.js' ? 'dl:fieldOnOff' : 'dl:mlock', size: '290' }, sourceText: text ?? null, appName: '案件管理' });
 /** 依頼（相談中なら相談の要望）→ 仮案 →「これで進めて」で採用 → 計画 → 最終案（JavaScript の生成と検証を含む）。C-1 第 3 段: 仕様の確定と従来の生成の置き換え */
@@ -139,9 +137,8 @@ async function adoptScreen(m, text) { const r = await m.panel.send(text); await 
  *   結果の詳細は applyScreen（tests/helpers/new-flow.js の applyOnScreen）
  */
 const applyScreen = (m) => KIT.applyOnScreen(m);
-async function approveScreen(m) { const r = await applyScreen(m); return !!(r.v && r.v.approval && m.conv().approvalValid().ok); }
-/** 承認の記録だけ（画面の外から。登録の準備の部品の照合を確かめるとき） */
-const approveOnly = (m) => { const v = m.conv().activePlan(); return !!(v && m.conv().approveFinal({ planId: v.planId, version: v.version }).ok); };
+/** 承認できたか（押した反映が止まらずに進み、承認の記録が残った）。止まったときは承認を外す */
+async function approveScreen(m) { const r = await applyScreen(m); return !!(r.v && r.v.approval); }
 const confirmSpec = async (m) => { const v = m.conv().activePlan(); await clickChat(m, 'confirm-spec', { plan: v.planId, version: String(v.version) }); };
 const jsNames = (m, t) => m.mock.st.customize[t].js.map(e => (e.type === 'URL' ? e.url : m.mock.st.files.get(e.fileKey).name));
 
@@ -265,7 +262,7 @@ console.log('\n--- §46〜§53（UI 経由）: 既存 FILE の差し替え登録
   const ar = await applyScreen(m);
   assert(ar.button && !ar.button.disabled && v.approval && v.approval.precheck && m.panel.drawerState().open === true && m.panel.drawerState().pane === 'exec' && m.$('kt-ai-pane-exec').style.display === 'block' && m.panel.activeArtifact()?.type === 'EXECUTION' && m.panel.activeArtifact()?.js === true, '［動作テスト環境へ反映］1 回で承認と登録。進捗と結果は右のタブ「反映」（activeArtifact EXECUTION / js。タブが切り替わる）');
   { const jx = m.panel.jsExecState();
-    assert(jx.prepared.changes[0].kind === 'REPLACE_FILE' && jx.prepared.changes[0].position === 1 && jx.prepared.changes[0].currentHash === KTScan.hashText(FIELD_ON_OFF) && !/id="kt-ai-jsreg-go"/.test(m.pane()), '登録の準備は既存ファイルの更新（同じ位置・登録直前の本文の指紋）。右の「反映」に登録の最終確認の段は出さない'); }
+    assert(jx.prepared.changes[0].kind === 'REPLACE_FILE' && jx.prepared.changes[0].position === 1 && jx.prepared.changes[0].currentHash === KTScan.hashText(FIELD_ON_OFF), '登録の準備は既存ファイルの更新（同じ位置・登録直前の本文の指紋）'); }
   const ex = m.panel.jsExecState().execution;
   assert(m.panel.jsExecState().stage === 'done' && ex && ex.status === 'DONE' && ex.steps[0].status === 'VERIFIED' && writes(m).join(',') === 'POST file,PUT customize', '［動作テスト環境へ登録］→ upload → PUT → 検証 → DONE（書き込みは upload ＋ PUT だけ）');
   const after = jsNames(m, 'desktop');
@@ -340,10 +337,8 @@ console.log('\n--- 新規 JS（desktop）の登録 / mobile（desktop を変え�
   //   C-1 第 3 段: 最終案の流れでは、書き換えられない外部のファイルへの変更を最終案の時点で承認できない理由にし、カードに「書き換えられません」と出す
   //   （登録の準備で初めて止めない）
   assert(v2.final && v2.final.approvable === false && /書き換えられません/.test(m2.chat()), 'URL の JS への変更: 最終案のカードで「Toolkit からは書き換えられない」と伝え、承認できる完成品として出さない');
-  await approveScreen(m2);
-  await m2.panel.startJsRegister(v2);
-  await ticks(6);
-  assert(m2.panel.jsExecState().stage === 'blocked' && m2.panel.jsExecState().prepared.blockers.some(b => b.code === 'EXTERNAL_JS_NOT_WRITABLE') && writes(m2).length === 0, '§49 直接呼んでも EXTERNAL_JS_NOT_WRITABLE で止まる（自動置換しない）');
+  const r49 = await applyScreen(m2);
+  assert(!v2.approval && r49.button && r49.button.disabled && m2.panel.jsExecState().stage === 'idle' && writes(m2).length === 0, '§49 ［動作テスト環境へ反映］は押せず、押しても承認・登録しない（URL 指定の JavaScript は自動で置き換えない）');
 }
 {
   // §50 stale: 承認の欄の準備（仕様確定・最終案の承認の前）の後に、カスタマイズ設定が変わった → 何も書き込まずに止め、変わった点を出す（§0e.1）
@@ -357,12 +352,11 @@ console.log('\n--- 新規 JS（desktop）の登録 / mobile（desktop を変え�
     await m.mock.api.putPreviewCustomize('310', { app: 310, scope: cur.scope, desktop: { js: [...cur.desktop.js.map(e => (e.type === 'URL' ? e : { type: 'FILE', file: { fileKey: e.file.fileKey } })), { type: 'FILE', file: { fileKey: up } }], css: cur.desktop.css.map(e => ({ type: 'FILE', file: { fileKey: e.file.fileKey } })) }, mobile: { js: cur.mobile.js.map(e => ({ type: 'FILE', file: { fileKey: e.file.fileKey } })), css: [] } }, cur.revision);
   } });
   assert(r50.run && r50.run.stage === 'stopped' && !r50.run.written && r50.writes.join(',') === 'POST file,PUT customize' && !v.approval && /何も書き込まずに止めました/.test(r50.card) && /JavaScript \/ CSS の一覧または適用範囲が、承認の欄の準備の後に変わりました/.test(r50.card) && /最新の設定で最終案を作り直します/.test(r50.card), `§50 承認の欄の準備の後にカスタマイズ設定が変わった → 書き込まずに止め、変わった点と次の手（作り直し）を出す・承認を外す: ${r50.card.slice(0, 300)}`);
-  //   簡素化（2026-10-17）: 作り直しの扱い（STALE）の最終案は、会話の承認の口（古い入口）からも承認できず、登録の部品も承認が無いので止まる。
-  //   照合 STALE_CUSTOMIZATION そのもの（内容を変えずに保存し直した revision の変化）は部品のテスト（ai-js-executor・ai-flow-redesign H6）が確かめる
+  //   簡素化（2026-10-17）: 作り直しの扱い（STALE）の最終案は［動作テスト環境へ反映］を押せず、押しても承認・登録しない（承認だけを記録する口・登録の部品を
+  //   画面の外から呼ぶ口は削除した）。照合 STALE_CUSTOMIZATION そのもの（内容を変えずに保存し直した revision の変化）は部品のテスト（ai-js-executor・ai-flow-redesign H6）が確かめる
   const v50 = m.conv().activePlan();
-  const ap50 = m.conv().approveFinal({ planId: v50.planId, version: v50.version });
-  await m.panel.startJsRegister(v50); await ticks(6);
-  assert(v50.status === 'STALE' && !ap50.ok && ap50.reason === 'STALE' && !v50.approval && m.panel.jsExecState().stage === 'blocked' && m.panel.jsExecState().prepared.blockers.some(b => b.code === 'APPROVAL_REQUIRED') && writes(m).join(',') === 'POST file,PUT customize', `§50 作り直しの扱いの最終案は古い入口からも承認できず、登録の部品も止まる（書き込みは別の担当者の変更だけ）: ${JSON.stringify({ ap50, status: v50.status, w: writes(m) })}`);
+  const r50b = await KIT.applyOnScreen(m);
+  assert(v50.status === 'STALE' && !v50.approval && r50b.button && r50b.button.disabled && r50b.writes.length === 0 && writes(m).join(',') === 'POST file,PUT customize', `§50 作り直しの扱いの最終案は押せず、押しても承認・登録しない（書き込みは別の担当者の変更だけ）: ${JSON.stringify({ status: v50.status, button: r50b.button })}`);
 }
 {
   // §53 rollback stale: 登録後に人間が JS を足した
