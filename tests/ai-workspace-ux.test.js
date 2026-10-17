@@ -299,7 +299,7 @@ console.log('\n--- §7 / §20. Customize → 開発支援（JS 相談）: 左は
   //   C-1 第 3 段: 新しい流れでは、最終案ができたら作った JavaScript を右の「コード」に描いておき（ペインは切り替えない）、最終案のカードの［コードを見る］
   //   からも開ける（以前はコードのカードの［コードを見る］と従来の生成の後の自動表示）
   await clickTab(m, 'code');
-  assert(m.panel.drawerState().pane === 'code' && m.$('kt-ai-code-view').textContent.includes("value === '完了'") && /✓ 既存ファイルへの統合/.test(m.$('kt-ai-code-review').innerHTML) && /参考パターン/.test(m.$('kt-ai-code-review').innerHTML) && m.$('kt-ai-code-register').style.display === 'none', 'full code only workspace（右の「コード」）: 全文・検査の内訳・参考パターン（§0e.1: 仮案から作った最終案の登録は最終案のカードの［動作テスト環境へ反映］から。右の「コード」の［動作テスト環境へ登録］は出さない）');
+  assert(m.panel.drawerState().pane === 'code' && m.$('kt-ai-code-view').textContent.includes("value === '完了'") && /✓ 既存ファイルへの統合/.test(m.$('kt-ai-code-review').innerHTML) && /参考パターン/.test(m.$('kt-ai-code-review').innerHTML), 'full code only workspace（右の「コード」）: 全文・検査の内訳・参考パターン（§0e.1: 仮案から作った最終案の登録は最終案のカードの［動作テスト環境へ反映］から。右の「コード」の［動作テスト環境へ登録］は出さない）');
   assert(/data-status="ready">未反映</.test(m.$('kt-ai-ws-state').innerHTML), 'コードを作った後も、右の見出しは登録まで「未反映」');
   //   C-1 第 3 段: 登録の許可は最終案の承認（承認の前は登録の準備をしない。tests/ai-flow-redesign.test.js の R16・D14・F10-2）
   await m.panel.startJsRegister(m.conv().activePlan()); await ticks();
@@ -532,9 +532,9 @@ await section(async () => {
   await ticks();
   await planOnScreen(m, GOAL_HYBRID);   // C-1 第 3 段: JavaScript は最終案のパイプラインが作る（仕様の確定・［JavaScript を生成］は無い）
   await openCodePane(m);
-  assert(m.$('kt-ai-code-view').textContent.includes("value === '完了'") && m.$('kt-ai-code-register').style.display === 'none', '前提: 計画 A（JS あり）のコードがコードペインにある（§0e.1: 登録は最終案のカードから。右の「コード」の登録ボタンは出さない）');
+  assert(m.$('kt-ai-code-view').textContent.includes("value === '完了'"), '前提: 計画 A（JS あり）のコードがコードペインにある（§0e.1: 登録は最終案のカードから。右の「コード」の登録ボタンは出さない）');
   await planOnScreen(m, GOAL, { intent: 'PLAN' });
-  assert(m.conv().activePlan().plan.goal === GOAL && !/fieldOnOff\.js/.test(m.$('kt-ai-code-head').innerHTML) && m.$('kt-ai-code-view').style.display === 'none' && m.$('kt-ai-code-register').style.display === 'none', `N6: 別の計画 B（版の番号は同じ 1）になったら、計画 A のコードと登録ボタンを残さない: ${m.$('kt-ai-code-head').innerHTML.slice(0, 80)}`);
+  assert(m.conv().activePlan().plan.goal === GOAL && !/fieldOnOff\.js/.test(m.$('kt-ai-code-head').innerHTML) && m.$('kt-ai-code-view').style.display === 'none', `N6: 別の計画 B（版の番号は同じ 1）になったら、計画 A のコードと登録ボタンを残さない: ${m.$('kt-ai-code-head').innerHTML.slice(0, 80)}`);
 });
 await section(async () => {
   // N6b: 同じ計画の新しい版になったら、前の版のコードを最新として残さず、前の版のまだ登録していない JavaScript の登録の確認を取り消す
@@ -549,7 +549,7 @@ await section(async () => {
   assert(m.panel.jsExecState().stage === 'confirm' && m.$('kt-ai-code-view').style.display === '', '前提: 変更案の版 1 のコードを表示し、登録の確認を出している');
   await m.panel.send('モバイルでも同じようにして', { intent: 'REVISE_PLAN' }); await ticks(8);
   const vB = m.conv().activePlan();
-  assert(vB.planId === vA.planId && vB.version === vA.version + 1 && m.$('kt-ai-code-head').innerHTML === '変更案が新しくなったため、前の変更案のコードは表示していません。新しい変更案でコードを作ると、ここに表示します。' && m.$('kt-ai-code-view').style.display === 'none' && m.$('kt-ai-code-register').style.display === 'none' && m.panel.codeShown() === null, 'N6b: 同じ計画の新しい版になったら、前の版のコードは消して「変更案が新しくなったため…」と書く');
+  assert(vB.planId === vA.planId && vB.version === vA.version + 1 && m.$('kt-ai-code-head').innerHTML === '変更案が新しくなったため、前の変更案のコードは表示していません。新しい変更案でコードを作ると、ここに表示します。' && m.$('kt-ai-code-view').style.display === 'none' && m.panel.codeShown() === null, 'N6b: 同じ計画の新しい版になったら、前の版のコードは消して「変更案が新しくなったため…」と書く');
   assert(m.panel.jsExecState().stage === 'idle' && !/kt-ai-jsreg-go/.test(m.$('kt-ai-jsreg').innerHTML) && writes(m).filter(w => /PUT customize/.test(w)).length === 0, 'N6b: 前の版のまだ登録していない JavaScript の登録の確認は取り消す（登録しない）');
 });
 await section(async () => {
@@ -735,12 +735,12 @@ await section(async () => {
   const btn = (m.chat().match(/<button[^>]*data-act="open-code"[^>]*data-view="code"[^>]*>/) || [''])[0];
   assert(new RegExp(`data-plan="${vA.planId}" data-version="${vA.version}"`).test(btn), 'L6: 最終案のカードの［コードを見る］に、カードの計画の版を付ける');
   await clickChat(m, 'open-code', { cid: 'C1', view: 'code', plan: vA.planId, version: String(vA.version) }); await ticks();
-  assert(m.$('kt-ai-code-view').textContent.includes("value === '完了'") && m.$('kt-ai-code-view').style.display !== 'none' && m.$('kt-ai-code-register').style.display === 'none', 'L6: 前の計画のカードからコードを見られる（登録ボタンは出さない）');
+  assert(m.$('kt-ai-code-view').textContent.includes("value === '完了'") && m.$('kt-ai-code-view').style.display !== 'none', 'L6: 前の計画のカードからコードを見られる（登録ボタンは出さない）');
   m.copies.length = 0;
   await clickChat(m, 'copy-code', { cid: 'C1', plan: vA.planId, version: String(vA.version) }); await ticks();
   assert(m.copies.length === 1 && m.copies[0].includes("value === '完了'"), 'L6: 前の計画のカードからコードをコピーできる');
   await clickChat(m, 'open-code', { cid: 'C1', view: 'code' }); await ticks();
-  assert(m.$('kt-ai-code-view').textContent.includes("value === '完了'") && m.$('kt-ai-code-register').style.display === 'none', 'L6: 版の付いていない古いカードも、会話の版から探して見られる');
+  assert(m.$('kt-ai-code-view').textContent.includes("value === '完了'"), 'L6: 版の付いていない古いカードも、会話の版から探して見られる');
 });
 await section(async () => {
   // L7（medium）: 記録の「運用環境との差」: ［差分を見る］が効く・title は属性・読み込み直した直後も出す・反映後の件数

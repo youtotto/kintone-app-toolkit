@@ -253,7 +253,7 @@ console.log('\n--- §46〜§53（UI 経由）: 既存 FILE の差し替え登録
   const entry = m.panel.generated('C1');
   assert(entry && entry.review.status === 'OK' && entry.existingSource?.from === 'seed' && entry.existingSource.text === FIELD_ON_OFF && m.calls.generate[0].ctx.existingFile?.source === FIELD_ON_OFF, '生成: 統合先の本文は相談の seed から（取り直さない）・Code Review OK');
   await clickChat(m, 'open-code', { cid: 'C1', plan: v.planId, version: String(v.version) });
-  assert(!/data-act="open-js-register"/.test(m.chat()) && m.$('kt-ai-code-register').style.display === 'none', '登録の操作は最終案のカードの［動作テスト環境へ反映］だけ（会話の登録の案内・右の「コード」の［動作テスト環境へ登録］は出さない。§0e.1）');
+  assert(!/data-act="open-js-register"/.test(m.chat()), '登録の操作は最終案のカードの［動作テスト環境へ反映］だけ（会話の登録の案内・右の「コード」の［動作テスト環境へ登録］は出さない。§0e.1）');
   //   §0e.1（2026-10-09）: 登録の準備（読み取りだけ）は最終案が承認できる状態になると自動で走り、以前の登録の最終確認（§21）の内容を承認の欄に出す
   await KIT.waitUntil(() => m.panel.finalPrecheck().status === 'ready', 60);
   { const pre = m.panel.finalPrecheck(); const chatPre = KIT.stripC(m.chat());
@@ -393,10 +393,7 @@ console.log('\n--- §54 modern JavaScript（2026-10-05。§0d.3・簡素化 B �
   const mj = g && g.verification && (g.verification.machine || []).find(x => x.name === 'modern-js' && !x.ok);
   assert(g && g.generated.code === VAR_JS && g.status === 'unresolved' && mj && mj.severity === 'block' && /var record/.test(mj.message) && !g.review.checks.some(x => x.name === 'modern-js' && !x.gateway) && (v.final.blockers || []).some(b => b.text === `機械検査で登録を止める問題: ${mj.message}`), `§54 AI の var は書き換えず（生成工程が返したコードのまま）、生成工程の機械検査の block で止まる（Toolkit は記法を確かめない）: ${g && g.status} ${mj && mj.message}`);
   assert(v.final && v.final.approvable === false && !(await approveScreen(m)), '§54 var の残る候補の最終案は承認できない');
-  await clickChat(m, 'open-js-register', { plan: v.planId, version: String(v.version) });
-  await ticks(6);
-  await ackAll(m);
-  await clickPane(m, 'kt-ai-jsreg-go');
+  //   簡素化（2026-10-17）: 会話のカードから JavaScript だけを登録する経路（open-js-register・登録の確認画面）は削除した。登録は［動作テスト環境へ反映］1 回の反映の中だけ
   await ticks(10);
   const up = [...m.mock.st.files.values()].find(f => f.name === 'amount-warning.js');
   assert(!up && !(m.panel.jsExecState().execution && m.panel.jsExecState().execution.status === 'DONE'), '§54 var の残る候補は登録しない（アップロードも PUT もしない）');
@@ -411,10 +408,8 @@ console.log('\n--- §54 modern JavaScript（2026-10-05。§0d.3・簡素化 B �
   const g = v.generated.C1;
   const mj = g && g.verification && (g.verification.machine || []).find(x => x.name === 'modern-js' && !x.ok);
   assert(g && g.status === 'unresolved' && mj && /1 行目「var LIMIT = 1000000;」: var LIMIT/.test(mj.message) && (v.final.blockers || []).some(b => b.text === `機械検査で登録を止める問題: ${mj.message}`) && v.final.approvable === false, `§54 直せない var は生成工程の機械検査の文（行・文）のまま止める理由に出す: ${mj && mj.message}`);
-  await clickChat(m, 'open-js-register', { plan: v.planId, version: String(v.version) });
-  await ticks(6);
-  const pr = m.panel.jsExecState().prepared;
-  assert(pr && pr.status === 'BLOCKED' && (pr.blockers || []).some(b => b.code === 'APPROVAL_REQUIRED') && !(pr.changes || []).length, `§54 登録の準備もしない（最終案の承認が無い）: ${JSON.stringify(pr && pr.blockers)}`);
+  //   簡素化（2026-10-17）: 会話のカードから JavaScript だけを登録する経路（open-js-register）は削除した。登録は［動作テスト環境へ反映］1 回の反映の中だけ
+  assert(!(await approveScreen(m)) && !m.panel.jsExecState().prepared, `§54 承認できず、登録の準備もしない（登録は［動作テスト環境へ反映］の中だけ）: ${JSON.stringify(m.panel.jsExecState().prepared && m.panel.jsExecState().prepared.blockers)}`);
 }
 
 //   §55（［確定してコードを作る］・古い版のボタンでは作らない）は削除した: 仕様の確定と生成は最終案のパイプラインに置き換えた

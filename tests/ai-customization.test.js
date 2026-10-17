@@ -396,7 +396,7 @@ const clickCode = (m, id) => m.$('kt-ai-pane-code').dispatch({ type: 'click', ta
   m.panel.showCode('C1', { view: 'code' });
   assert(m.panel.drawerState().open && m.panel.drawerState().pane === 'code' && m.$('kt-ai-code-view').textContent === entry.review.finalCode && m.$('kt-ai-code-view').style.display === '' && m.$('kt-ai-diff-view').style.display === 'none', '右の「コード」: 最終コード');
   assert(/✎ 既存 JS を変更/.test(m.$('kt-ai-code-head').innerHTML) && /✓ 検査を通過/.test(m.$('kt-ai-code-head').innerHTML) && /既存ファイルへの統合/.test(m.$('kt-ai-code-review').innerHTML) && /元のコードは保持/.test(m.$('kt-ai-code-review').innerHTML) && /＋3 行 \/ −0 行/.test(m.$('kt-ai-code-review').innerHTML) && /構文/.test(m.$('kt-ai-code-review').innerHTML) && !/Patch|Security/.test(m.$('kt-ai-code-review').innerHTML), '右の「コード」: 見出し（✓ 検査を通過）と Code Review の一覧（既存ファイルへの統合 ＋3 / −0 行・元のコードは保持。検査名は日本語）');
-  assert(m.$('kt-ai-code-register').style.display === 'none', '右の「コード」に登録ボタンは出さない（§0e.1: 仮案から作った最終案の登録は、最終案のカードの［動作テスト環境へ反映］で標準設定と続けて行う）');
+  //   簡素化（2026-10-17）: 右の「コード」の登録ボタン（仮案から作っていない計画のときだけ出ていた）は要素ごと削除した（出さないことの確かめは不要）
   m.panel.showCode('C1', { view: 'diff' });
   assert(m.$('kt-ai-diff-view').style.display === '' && /^\+\s*if \(record\['ステータス'\] && record\['ステータス'\]\.value === '完了'\)/m.test(m.$('kt-ai-diff-view').textContent) && / {0,}kintone\.events\.on/.test(m.$('kt-ai-diff-view').textContent), '差分 → Before / After（追加行は +・既存行は保持）');
   // コピー（右の「コード」のボタン）
@@ -443,7 +443,7 @@ console.log('\n--- §53-2. 複数のカスタマイズ / カスタマイズの�
   const fin = finalText(m);
   assert(v.final.approvable === false && v.generated.C1.status === 'verified' && v.generated.C2.status !== 'verified' && /確認できないこと／反映を止めている理由/.test(fin) && /要件未達（「担当者」: 編集できないようにする）/.test(fin) && !/C1|C2/.test(textOf(m.chat())), `最終案のカード: C2 は要件未達で承認できない（C1 は検証済み。内部の番号は会話に出さない）: ${fin.slice(fin.indexOf('実現できない点'), fin.indexOf('実現できない点') + 160)}`);
   m.panel.showCode('C2', { view: 'code' });
-  assert(/× 採用不可/.test(m.$('kt-ai-code-head').innerHTML) && m.$('kt-ai-code-register').style.display === 'none', '右の「コード」: × 採用不可。登録ボタンは出ない');
+  assert(/× 採用不可/.test(m.$('kt-ai-code-head').innerHTML), '右の「コード」: × 採用不可。登録ボタンは出ない');
   // 計画の修正（カスタマイズの対象をモバイルにも）→ 新しい版。前の版の生成結果は新しい版に引き継がない
   m.panel.showCode('C1', { view: 'code' });
   const rv = await m.panel.send('金額のロックはモバイルでも動くようにして'); await ticks(8);
@@ -452,7 +452,7 @@ console.log('\n--- §53-2. 複数のカスタマイズ / カスタマイズの�
   const g2 = m.panel.generated('C1', v2);
   assert(v2.plan.customizations[0].platform.join() === 'desktop,mobile' && v2.review.steps.find(r => r.solution === 'CUSTOMIZATION')?.codeGeneration?.supported === true && g2 !== v.generated.C1 && !(g2 && g2.generated) && !m.panel.generated('C2', v2), '新しい版: platform desktop / mobile。前の版の生成コードは新しい版に引き継がない（新しい版の最終案のパイプラインで作り直す）');
   // 2026-10-06: 同じ計画の新しい版になったら、前の版のコードは右の「コード」に残さない（古いコードを最新として見せない・登録しない）
-  assert(/変更案が新しくなったため、前の変更案のコードは表示していません。/.test(m.$('kt-ai-code-head').innerHTML) && m.$('kt-ai-code-view').style.display === 'none' && m.$('kt-ai-diff-view').style.display === 'none' && m.$('kt-ai-code-register').style.display === 'none', '新しい版: 右の「コード」から前の版のコードを消し、その旨を出す（登録ボタンも出さない）');
+  assert(/変更案が新しくなったため、前の変更案のコードは表示していません。/.test(m.$('kt-ai-code-head').innerHTML) && m.$('kt-ai-code-view').style.display === 'none' && m.$('kt-ai-diff-view').style.display === 'none', '新しい版: 右の「コード」から前の版のコードを消し、その旨を出す（登録ボタンも出さない）');
   assert(m.calls2.plan[1].ctx.revision.previousPlan && JSON.stringify(m.calls2.plan[1].ctx.revision.previousPlan).includes('C1'), 'revision の previousPlan に customization（C1）が含まれる');
 }
 {
@@ -482,7 +482,7 @@ console.log('\n--- §53-2. 複数のカスタマイズ / カスタマイズの�
   assert(/設定の変更はありません/.test(m.$('kt-ai-change-summary').innerHTML) && /新しい JavaScript「amountWarning\.js」を登録/.test(m.$('kt-ai-change-summary').innerHTML) && /＋ 新規 JS/.test(m.$('kt-ai-review-result').innerHTML) && v.plan.solution === 'CUSTOMIZATION', '新規 JS の計画: 最終案のカードは「設定の変更はありません」・新しい JavaScript を登録。右の「確認結果」に ＋ 新規 JS・solution CUSTOMIZATION');
   assert(m.calls2.generate.length === 1 && m.panel.generated('C1').review.status === 'BLOCKED' && m.panel.generated('C1').review.checks.some(x => x.name === 'behavior-fail' && !x.ok) && m.panel.generated('C1').review.checks.some(x => x.name === 'fields' && x.gateway && !x.ok), `Generator の応答に未知フィールド → 生成工程の結果（模擬テストの不合格・fields の確認）で BLOCKED: ${JSON.stringify(m.panel.generated('C1').review.checks.filter(x => !x.ok).map(x => x.name))}`);
   m.panel.showCode('C1', { view: 'code' });
-  assert(v.final.approvable === false && /模擬テストで、必須の動作のとおりに動きませんでした/.test(fin) && /計画か実装仕様/.test(fin) && /× 採用不可/.test(m.$('kt-ai-code-head').innerHTML) && /アプリに無いフィールドコード/.test(m.$('kt-ai-code-review').innerHTML) && m.$('kt-ai-code-register').style.display === 'none', `最終案のカード: 承認できない・次の方針（計画か実装仕様を見直す）。理由（生成工程の fields の確認）は右の「コード」。登録ボタンは出ない: ${v.final.approvable} ${String(fin).replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').slice(0, 400)}`);
+  assert(v.final.approvable === false && /模擬テストで、必須の動作のとおりに動きませんでした/.test(fin) && /計画か実装仕様/.test(fin) && /× 採用不可/.test(m.$('kt-ai-code-head').innerHTML) && /アプリに無いフィールドコード/.test(m.$('kt-ai-code-review').innerHTML), `最終案のカード: 承認できない・次の方針（計画か実装仕様を見直す）。理由（生成工程の fields の確認）は右の「コード」。登録ボタンは出ない: ${v.final.approvable} ${String(fin).replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').slice(0, 400)}`);
   await clickCode(m, 'kt-ai-code-copy');
   assert(m.copies.length === 1, 'BLOCKED でもコードの確認（コピー）はできる（登録はしない）');
 }

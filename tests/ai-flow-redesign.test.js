@@ -802,7 +802,7 @@ await section(async () => {
   const v = x.c.activePlan();
   const ap = x.c.approveFinal({ planId: v.planId, version: v.version });
   assert(ap.ok && v.approval && v.approval.planId === v.planId && v.approval.version === 1 && v.approval.planHash === KTAiConversation.planHashOf(v) && v.approval.baseStamp.fingerprint === 'fp-1' && v.approval.customizeRevision === '42' && v.approval.candidates.C1 === v.generated.C1.candidateHash && v.approval.approvedAt, `R16-1: 承認レコード: ${JSON.stringify(v.approval)}`);
-  assert(x.c.approvalValid().ok === true && KTAiConversation.approvalValid(v, { baseStamp: { fingerprint: 'fp-1' } }).ok && x.c.messages().some(m => m.data?.kind === 'approved'), 'R16-2: 承認は有効（同じ基準）');
+  assert(x.c.approvalValid().ok === true && KTAiConversation.approvalValid(v, { baseStamp: { fingerprint: 'fp-1' } }).ok && !x.c.messages().some(m => m.data?.kind === 'approved'), 'R16-2: 承認は有効（同じ基準）。承認だけの通知は出さない（簡素化 2026-10-17: 承認と反映は［動作テスト環境へ反映］1 回の操作）');
   assert(KTAiConversation.approvalValid(v, { baseStamp: { fingerprint: 'fp-2' } }).reason === 'BASE_CHANGED', 'R16-3: 基準の設定（stamp）が変われば無効');
   const html = finalHtml(x);
   assert(/承認済み。/.test(html) && !/data-act="final-approve"/.test(html), 'R16-4: 承認後のカードは「承認済み」（ボタンは消える）');

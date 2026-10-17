@@ -25955,7 +25955,7 @@
        */
       /**
        * §0e.1（2026-10-09）: precheck = 最終案の承認の欄に出した書き込みをしない準備の結果（{ fingerprint, items }）。承認はこの指紋に結び付け、
-       *   反映の直前の準備のやり直しで指紋が違えば止める（承認を後から増えた変更・警告への同意に流用しない）。precheck を渡したときは承認と反映が 1 回の操作なので、承認の通知は出さない
+       *   反映の直前の準備のやり直しで指紋が違えば止める（承認を後から増えた変更・警告への同意に流用しない）。承認と反映は 1 回の操作なので、承認の通知は出さない
        */
       function approveFinal({ planId = null, version = null, baseStamp = undefined, precheck = null } = {}) {
         const v = state.activePlan;
@@ -25977,7 +25977,6 @@
         // 承認したときの確認の項目（登録前の再検査で同じものだけを承認済みとして扱う。新しく出た確認・未確認は承認しない。反証 C2）
         const confirmations = Object.fromEntries(Object.entries(v.generated || {}).map(([cid, e]) => [cid, [...new Set(((e && e.review && e.review.registration && e.review.registration.confirmations) || []).map(x => x.code))]]));
         v.approval = { planId: v.planId, version: v.version, planHash: planHashOf(v), baseStamp: stampNow ? JSON.parse(JSON.stringify(stampNow)) : null, customizeRevision: v.spec?.customizeRevision ?? null, candidates: Object.fromEntries(Object.entries(v.generated || {}).map(([cid, e]) => [cid, e && e.candidateHash ? e.candidateHash : null])), confirmations, ...(precheck ? { precheck: JSON.parse(JSON.stringify(precheck)) } : {}), approvedAt: now() };
-        if (!precheck) push(MSG.SYSTEM_NOTICE, ROLE.SYSTEM, '最終案を承認しました（運用環境には反映しません）。承認の後に計画・コード・基準の設定が変わったときは、もう一度承認が要ります。', { kind: 'approved', planId: v.planId, version: v.version });
         emit();
         return { ok: true, approval: v.approval };
       }
@@ -28319,9 +28318,9 @@
             case INTENT.REQUEST_JS_PREVIEW: {
               const v = state.activePlan;
               if (v && !approvalValid(v).ok) { toolkit(v.final ? 'JavaScript の登録は、最終案のカードの［動作テスト環境へ反映］から行います（標準設定の反映の後に続けて登録します）。' : '登録できる最終案がまだありません。実現したいことを入力すると、仮案から最終案を作ります。', { kind: 'js-preview-needs-approval', planId: v.planId, version: v.version }); break; }
-              const gen = Object.values(v?.generated || {});
-              const ok = gen.filter(g => g.review && g.review.status !== 'BLOCKED').length, blocked = gen.length - ok;
-              push(MSG.ASSISTANT_TEXT, ROLE.TOOLKIT, ok ? 'JavaScript を動作テスト環境へ登録できます。登録の確認（内容・登録先・保持される設定）を開いてください。' : 'コードの確認で採用できない問題があるため登録できません。変更案を直して、もう一度作ってください。', { kind: 'js-preview-ready', planId: v.planId, version: v.version, registrable: ok, blocked });
+              //   簡素化（2026-10-17）: 承認済みのときに会話のカードから JavaScript だけを登録する経路（js-preview-ready・［登録の確認を開く］）は削除した。
+              //   登録は最終案のカードの［動作テスト環境へ反映］1 回の反映の中だけ（承認の後に増えた確認・注意の照合を通る）
+              toolkit(v ? 'この最終案は承認済みです。JavaScript の登録の結果は、会話の反映のカードと右の「反映」にあります。' : '登録できる最終案がまだありません。実現したいことを入力すると、仮案から最終案を作ります。', { kind: v ? 'js-preview-approved' : 'js-preview-needs-approval', planId: v ? v.planId : null, version: v ? v.version : null });
               break;
             }
             case INTENT.REQUEST_JS_ROLLBACK: {
@@ -29000,7 +28999,7 @@
               <div id="kt-ai-right-body" class="kt-ai-right-body">
                 <div id="kt-ai-pane-plan" class="kt-ai-pane active"><div id="kt-ai-subject-info"></div><div id="kt-ai-pane-plan-empty" class="kt-ai-empty-side">${esc(PLAN_EMPTY_TEXT)}</div><div id="kt-ai-change-summary"></div><div id="kt-ai-spec"></div><details id="kt-ai-plan-detail" class="kt-ai-detail-block" style="display:none;"><summary>計画の詳細と根拠（AI の提案の全文）</summary>${KTContextUi.planPaneHtml(c)}</details></div>
                 <div id="kt-ai-pane-review" class="kt-ai-pane"><div id="kt-ai-review-empty" class="kt-ai-empty-side">変更案ができると、Toolkit が確かめた結果（動作テスト環境へ反映できるか・競合・変更前後）と、手順ごとの判断（承認・保留・却下）をここに表示します。</div><div id="kt-ai-review-result" style="display:none; border:1px solid ${esc(c.border)}; border-radius:8px; padding:8px; background:${esc(c.bg)}; line-height:1.6;"></div></div>
-                <div id="kt-ai-pane-code" class="kt-ai-pane"><div id="kt-ai-code-head" style="font-size:11px; padding:4px;">${esc(CODE_EMPTY_TEXT)}</div><div id="kt-ai-code-actions" style="display:none; gap:6px; flex-wrap:wrap; margin:4px 0;"><button type="button" id="kt-ai-code-copy" class="btn" style="height:26px; font-size:11px;">コードをコピー</button><button type="button" id="kt-ai-diff-copy" class="btn" style="height:26px; font-size:11px;">差分をコピー</button><button type="button" id="kt-ai-cplan-copy" class="btn" style="height:26px; font-size:11px;">Customization Plan JSON をコピー</button><button type="button" id="kt-ai-code-download" class="btn" style="height:26px; font-size:11px;">ファイルとして保存</button><button type="button" id="kt-ai-code-register" class="btn" style="height:26px; font-size:11px; font-weight:600; border-color:#6a1b9a; display:none;">動作テスト環境へ登録</button></div><div id="kt-ai-code-review" style="font-size:11px;"></div><div id="kt-ai-code-tabs" style="display:none; gap:4px; margin-top:6px;"><button type="button" class="btn kt-ai-ctab active" data-code-view="code" style="height:24px; font-size:11px;">コード</button><button type="button" class="btn kt-ai-ctab" data-code-view="diff" style="height:24px; font-size:11px;">変更前後（差分）</button></div><pre id="kt-ai-code-view" style="margin-top:4px; max-height:60vh; overflow:auto; white-space:pre; font-size:11px; border:1px solid ${esc(c.border)}; border-radius:8px; padding:8px; display:none;"></pre><pre id="kt-ai-diff-view" style="margin-top:4px; max-height:60vh; overflow:auto; white-space:pre; font-size:11px; border:1px solid ${esc(c.border)}; border-radius:8px; padding:8px; display:none;"></pre></div>
+                <div id="kt-ai-pane-code" class="kt-ai-pane"><div id="kt-ai-code-head" style="font-size:11px; padding:4px;">${esc(CODE_EMPTY_TEXT)}</div><div id="kt-ai-code-actions" style="display:none; gap:6px; flex-wrap:wrap; margin:4px 0;"><button type="button" id="kt-ai-code-copy" class="btn" style="height:26px; font-size:11px;">コードをコピー</button><button type="button" id="kt-ai-diff-copy" class="btn" style="height:26px; font-size:11px;">差分をコピー</button><button type="button" id="kt-ai-cplan-copy" class="btn" style="height:26px; font-size:11px;">Customization Plan JSON をコピー</button><button type="button" id="kt-ai-code-download" class="btn" style="height:26px; font-size:11px;">ファイルとして保存</button></div><div id="kt-ai-code-review" style="font-size:11px;"></div><div id="kt-ai-code-tabs" style="display:none; gap:4px; margin-top:6px;"><button type="button" class="btn kt-ai-ctab active" data-code-view="code" style="height:24px; font-size:11px;">コード</button><button type="button" class="btn kt-ai-ctab" data-code-view="diff" style="height:24px; font-size:11px;">変更前後（差分）</button></div><pre id="kt-ai-code-view" style="margin-top:4px; max-height:60vh; overflow:auto; white-space:pre; font-size:11px; border:1px solid ${esc(c.border)}; border-radius:8px; padding:8px; display:none;"></pre><pre id="kt-ai-diff-view" style="margin-top:4px; max-height:60vh; overflow:auto; white-space:pre; font-size:11px; border:1px solid ${esc(c.border)}; border-radius:8px; padding:8px; display:none;"></pre></div>
                 <div id="kt-ai-pane-exec" class="kt-ai-pane"><div id="kt-ai-exec-empty" class="kt-ai-empty-side">${esc(EXEC_EMPTY_TEXT)}</div><div id="kt-ai-exec"></div><div id="kt-ai-jsreg"></div></div>
                 <div id="kt-ai-pane-evidence" class="kt-ai-pane"><div id="kt-ai-base-diff"></div><div class="kt-ai-empty-side" style="font-size:11px;">回答や変更案の根拠を開くと、Toolkit が kintone から確かめた事実（どこで何を使っているか・設定・ファイルと行）をここに表示します。</div>${KTContextUi.evidencePaneHtml(c)}</div>
                 <div id="kt-ai-pane-context" class="kt-ai-pane">${KTContextUi.generatorHtml(c)}<div style="margin-top:8px; display:flex; gap:6px; align-items:center;"><b style="font-size:12px;">プレビュー</b><button type="button" id="kt-ai-download" class="btn" style="height:26px; font-size:11px;" disabled>⬇ ローカルに保存</button></div><pre id="kt-ai-preview" style="margin-top:4px; max-height:320px; overflow:auto; white-space:pre-wrap; font-size:11px; border:1px solid ${esc(c.border)}; border-radius:8px; padding:8px;"></pre></div>
@@ -29441,11 +29440,6 @@
         ${sharedFiles.length ? `<details class="kt-ai-tech" style="margin-top:4px; font-size:12px;"><summary>同じフィールドを扱う既存の JavaScript</summary>${esc(sharedFiles.join('、'))}（一緒に動かしたときの動きは、生成工程の動作テストで確かめます）</details>` : ''}
         ${questions.length ? `<div style="margin-top:4px; font-size:11px; color:#b26a00;">${questions.map(q => `？ ${esc(q)}`).join('<br>')}</div>` : ''}
         <div style="font-size:10px; opacity:.6; margin-top:4px;">${status === 'SUPERSEDED' ? 'この仕様は最新ではありません（修正で新しい版ができました）。' : v.fromDraft ? '最終案の一部です（内容は最終案のカードで確かめ、修正は会話で伝えます）。' : '閲覧だけです（この変更案は仮案と最終案の流れで作ったものではありません。実現したいことを送ると仮案から作ります）。'}</div>`, badgeColor);
-    }
-    /** JS 登録の案内（REQUEST_JS_PREVIEW）: 登録の確認（Human Approval）はコードペインで */
-    function jsPreviewReadyHtml(m) {
-      const d = m.data || {};
-      return card('kt-ai-js-ready', `<div><b>${esc(m.text)}</b></div>${d.registrable != null ? `<div style="font-size:12px; margin-top:4px;">登録できるコード ${esc(String(d.registrable))} 件${d.blocked ? `　採用不可 ${esc(String(d.blocked))} 件` : ''}</div>` : ''}${d.registrable ? `<div style="margin-top:6px; display:flex; gap:6px;">${btn('open-js-register', '登録の確認を開く', `data-plan="${esc(d.planId || '')}" data-version="${esc(String(d.version ?? ''))}"`, 'font-weight:600;')}</div>` : ''}<div style="font-size:10px; opacity:.6; margin-top:4px;">登録は確認画面の［動作テスト環境へ登録］を押したときだけ行います。運用環境には反映しません。</div>`, '#6a1b9a');
     }
     function jsRollbackReadyHtml(m) {
       return card('kt-ai-js-rollback-ready', `<div><b>${esc(m.text)}</b></div><div style="font-size:11px; opacity:.8; margin-top:2px;">登録する前のカスタマイズ設定に戻します。登録の後にほかの変更があれば止まります。</div><div style="margin-top:6px; display:flex; gap:6px;">${btn('js-rollback', '変更前の状態に戻す', `data-execution="${esc(m.data?.executionId || '')}"`, 'border-color:#6a1b9a; font-weight:600;')}</div><div style="font-size:10px; opacity:.6; margin-top:4px;">押すと現在の設定を確認（書き込みなし）し、確認画面で「変更前の状態に戻す」を押したときだけ戻します。</div>`, '#6a1b9a');
@@ -30195,7 +30189,6 @@
           if (kind === 'choices') return wrap(choicesHtml(m));
           if (kind === 'consultation-start') return wrap(consultationStartHtml(m));
           if (kind === 'consult-choices') return wrap(consultChoicesHtml(m));
-          if (kind === 'js-preview-ready') return wrap(jsPreviewReadyHtml(m));
           if (kind === 'js-rollback-ready') return wrap(jsRollbackReadyHtml(m));
           if (kind === 'candidates') return wrap(candidatesHtml(m));
           if (kind === 'answers-ack') return wrap(ACK_FAILED[m.data?.stage] ? ackFailedHtml(m) : ackAnsweredHtml(m));
@@ -30366,7 +30359,7 @@
       constraintLineOf,   // 2026-10-16（説明文を読みやすくする）: 「この案の制約」の 1 行（テストから確かめる）
       INTENT_JA, STATUS_JA, STRATEGY_JA, CHECK_JA, SPEC_STATUS_JA, busyHintText, themedMermaid, workspaceHtml, headerHtml, baseHtml, baseDiffHtml, applyLogHtml, freePanelHtml, chatHtml, messageHtml, diffCardHtml, codePaneHtml, rollbackReadyHtml, executionCardHtml, rollbackCardHtml, answerCardHtml, errorCardHtml, patternsHtml,
       // Phase 17
-      consultationStartHtml, specCardHtml, jsPreviewReadyHtml, jsRollbackReadyHtml, jsExecutionCardHtml, jsRollbackCardHtml, consultChoicesHtml, jsRegisterPaneHtml, customizeScopeJa,
+      consultationStartHtml, specCardHtml, jsRollbackReadyHtml, jsExecutionCardHtml, jsRollbackCardHtml, consultChoicesHtml, jsRegisterPaneHtml, customizeScopeJa,
       // Phase 19: 会話は要約、右 Workspace が正本
       wsStateHtml, subjectInfoHtml, drawerTabsHtml, changeSummaryHtml, isHiddenMessage, finalApplyCardHtml, streamingInnerHtml, draftCardHtml, draftSummaryHtml, COMPOSER_PLACEHOLDER, PLAN_EMPTY_TEXT, PLAN_CHECKING_TEXT, CODE_EMPTY_TEXT, EXEC_EMPTY_TEXT };
   })();
@@ -31225,7 +31218,6 @@
       if ($rightBody && $rightBody.classList && typeof $rightBody.classList.toggle === 'function') $rightBody.classList.toggle('is-stale', stale);
       if ($planEmpty && !adopted) $planEmpty.textContent = working === 'PLAN' ? KTAiChatUi.PLAN_CHECKING_TEXT : KTAiChatUi.PLAN_EMPTY_TEXT;
       const hold = applyHold();
-      const $reg = $('kt-ai-code-register'); if ($reg) { $reg.disabled = !!hold; $reg.title = hold || ''; }
       if (hold !== lastHold) { lastHold = hold; renderExec(); renderJsReg(); }
     }
     /** 右の「反映」: 中身（反映・登録の操作や結果）があるときだけ出す */
@@ -31469,7 +31461,6 @@
       if (act === 'generate') { const cid = dataOf(t, 'cid'); await sendChat(cid ? `${cid} のコードを作って` : 'コードを作って', { intent: KTAiConversation.INTENT.GENERATE_CODE, displayText: generateDisplay(cid) }); return; }
       if (act === 'open-code') { const cid = dataOf(t, 'cid'); showCode(cid, { view: dataOf(t, 'view') || 'code', v: generatedForCard(cid, t) }); return; }
       if (act === 'copy-code' || act === 'copy-diff' || act === 'copy-cplan') { const cid = dataOf(t, 'cid'); const ok = await copyGenerated(cid, act === 'copy-code' ? 'code' : act === 'copy-diff' ? 'diff' : 'cplan', generatedForCard(cid, t)); if (t && t.textContent != null) flashBtnText(t, ok ? 'Copied!' : 'Failed'); return; }
-      if (act === 'open-js-register') { const v = planIndex().get(`${dataOf(t, 'plan')}:${dataOf(t, 'version')}`) || conv.activePlan(); await startJsRegister(v); return; }
       if (act === 'open-js-result') { jsExec.paneClosed = false; renderJsReg(); showPane('exec', { scrollTo: '#kt-ai-jsreg' }); return; }
       if (act === 'js-rollback') {
         const exId = dataOf(t, 'execution');
@@ -31877,7 +31868,7 @@
     /** コードペインを空に戻す（ペインは切り替えない）。新しい会話・別の計画になったとき、前の計画のコードと登録ボタンを残さない */
     function clearCodePane({ replaced = false } = {}) {
       const pane = KTAiChatUi.codePaneHtml(null);
-      const $head = $('kt-ai-code-head'), $rv = $('kt-ai-code-review'), $code = $('kt-ai-code-view'), $diff = $('kt-ai-diff-view'), $acts = $('kt-ai-code-actions'), $tabs = $('kt-ai-code-tabs'), $reg = $('kt-ai-code-register');
+      const $head = $('kt-ai-code-head'), $rv = $('kt-ai-code-review'), $code = $('kt-ai-code-view'), $diff = $('kt-ai-diff-view'), $acts = $('kt-ai-code-actions'), $tabs = $('kt-ai-code-tabs');
       // 同じ計画の新しい版になったときは、前の版のコードを出さないことを書く（古いコードを最新として残さない）
       if ($head) $head.innerHTML = replaced ? '変更案が新しくなったため、前の変更案のコードは表示していません。新しい変更案でコードを作ると、ここに表示します。' : pane.head;
       if ($rv) $rv.innerHTML = pane.review;
@@ -31885,7 +31876,6 @@
       if ($diff) { $diff.textContent = pane.diff; $diff.style.display = 'none'; }
       if ($acts) $acts.style.display = 'none';
       if ($tabs) $tabs.style.display = 'none';
-      if ($reg) $reg.style.display = 'none';
       codeShown = null;
       codeReplaced = !!replaced;
     }
@@ -31899,7 +31889,6 @@
       if ($diff) { $diff.textContent = pane.diff; $diff.style.display = hit && view === 'diff' ? '' : 'none'; }
       if ($acts) $acts.style.display = hit ? 'flex' : 'none';
       if ($tabs) $tabs.style.display = hit && hit.entry.review?.diff ? 'flex' : 'none';
-      const $reg = $('kt-ai-code-register'); if ($reg) { const cs = hit ? VM.codeSummary(hit.entry, cid, hit.v) : null; $reg.style.display = cs && !cs.blocked && !cs.external && hit.v === conv.activePlan() && !hit.v.fromDraft ? '' : 'none'; }   // §0e.1: 仮案から作った最終案の登録は、最終案のカードの［動作テスト環境へ反映］から
       codeShown = hit ? { planId: hit.v.planId, version: hit.v.version, cid, view } : null;
       if (hit) codeReplaced = false;
       if (!quiet) { if (hit) setArtifact({ type: VM.ARTIFACT.GENERATED_CODE, id: hit.v.planId, version: hit.v.version, customizationId: cid, targetFile: hit.entry.generated?.targetFile || null }, { auto }); else showPane('code', { auto }); }
@@ -31930,7 +31919,6 @@
         else if (typeof KTExport !== 'undefined' && KTExport.downloadText) KTExport.downloadText(name, text, 'text/javascript;charset=utf-8');
         return true;
       }
-      if (id === 'kt-ai-code-register') { const hit = generatedEntry(codeShown.cid, shownVersion()); if (hit && hit.v.fromDraft) { $note.textContent = '仮案から作った最終案の JavaScript は、最終案のカードの［動作テスト環境へ反映］で標準設定と続けて登録します。'; return true; } if (hit) await startJsRegister(hit.v); return true; }
       return false;
     }
     /** 候補から対象を選んだ質問（ASK。明示 focus） */
@@ -32409,7 +32397,7 @@
           step('settings');
           execState.finalRunId = run.id;
           const pendingIds = (sp.steps || []).filter(s => s.status === 'PENDING').map(s => s.stepId);
-          await confirmExecutor({ continueJs: false });
+          await confirmExecutor();
           const sum = VM.executionSummary(execState);
           const ok = settingsAllOk(execState.execution, pendingIds);
           run.settings = { started: true, executionId: sum ? sum.executionId : null, verified: sum ? sum.verified : 0, failed: sum ? sum.failed + sum.warn : 0, written: !!(sum && sum.written) };
@@ -32527,10 +32515,10 @@
     const cancelExecutor = () => { if (execState.stage === 'confirm' || execState.stage === 'blocked') { resetExec(); renderExec(); } };
     /** 最終確認の後: 動作テスト環境へ反映（dependsOn 順・Fail Stop・1 step ごとに検証）。運用環境へは反映しない */
     /**
-     * §0e.1（2026-10-09）: continueJs = 仮案の流れで、設定の手順が止まらずに反映できたら続けて JavaScript の登録の準備へ進む（従来の続き。この関数を直接呼ぶとき）。
-     *   ［動作テスト環境へ反映］1 回の反映（applyFinal）は false で呼び、続き（基準を進める・JavaScript の準備と登録）は applyFinal が行う
+     * §0e.1（2026-10-09）: ［動作テスト環境へ反映］1 回の反映（applyFinal）の部品。続き（基準を進める・JavaScript の準備と登録・止まったときの承認の取り消し）は applyFinal が行う。
+     *   簡素化（2026-10-17）: この関数から続けて JavaScript を登録する従来の続き（continueJs）は削除した
      */
-    async function confirmExecutor({ continueJs = true } = {}) {
+    async function confirmExecutor() {
       if (!executor || execState.stage !== 'confirm' || !execState.prepared) return null;
       //   簡素化 E（2026-10-16）: 書き込みの直前にも最終案の承認を確かめる（準備の後に承認が外れた・仮案から作っていない計画では書き込まない）
       if (!finalFlow() || !approvalNow().ok) { resetExec(); renderExec(); return null; }
@@ -32538,12 +32526,6 @@
       // 準備した計画が、いまの会話の計画のままか（新しい会話・別の計画になっていたら反映しない）
       if (!lastPlan || execState.planRef !== lastPlan) { resetExec(); renderExec(); if (conv) conv.notice('準備した計画は、いまの会話の計画ではなくなりました。反映していません（動作テスト環境は変わっていません）。', { kind: 'exec-plan-changed' }); return null; }
       execState.stage = 'running';
-      //   §0e.1（不具合 B）: 準備の時点で実行する手順（PENDING）。止まらずに反映できたかの判定は、この手順だけで行う
-      const preparedPending = (execState.prepared.steps || []).filter(s => s.status === 'PENDING').map(s => s.stepId);
-      //   §0e.1（2026-10-09・不具合 B）: 続けて JavaScript を登録するときは、設定を書き込む前のカスタマイズの内容を控える（仕様の確定の時点と revision が同じときだけ）。
-      //   設定の書き込みで進んだ revision は、この内容と同じかで比べる（違えば STALE_CUSTOMIZATION のまま止める）
-      let jsExpected = null;
-      { const vJ = conv ? conv.activePlan() : null; if (continueJs && finalFlow() && vJ && Object.keys(vJ.generated || {}).length && typeof executor.api.getPreviewCustomize === 'function') { try { const cz = await executor.api.getPreviewCustomize(executor.appId); if (cz && cz.revision != null && String(cz.revision) === String(vJ.spec?.customizeRevision ?? '')) jsExpected = { revision: String(cz.revision), content: KTJsExecutor.contentFingerprint(KTJsExecutor.snapshotOf(cz)) }; } catch (e) { jsExpected = null; } } }
       // 反映の記録: 反映を始めた時点の計画・検証・判断を持たせる（次の反映や新しい会話で execState が上書きされても、戻す材料と監査が残る）
       execLogRef = { id: `log_${++applyLogSeq}`, kind: 'settings', executionId: execState.prepared.executionId || null, epoch: conv ? conv.state.epoch : null, at: new Date().toISOString(), goal: lastPlan.goal || adopted?.goal || '', planId: adopted?.planId ?? null, version: adopted?.version ?? null,
         plan: lastPlan, review: lastReview, decisions: Object.fromEntries(decisions), classified: execClassified(),
@@ -32561,17 +32543,6 @@
       // Phase 21: 反映した後の動作テスト環境を次の作業の基準にする（取り直す）
       notifySettingsChanged('apply');
       if (devBaseLoader) await refreshDevBase({ reason: 'after-apply' });
-      // 段階 C（C4）: 承認済みの最終案は、設定の手順が止まらずに反映できたら続けて JavaScript の登録へ（止まったら登録しない）。承認の基準は反映後の環境に進める
-      //   §0e.1（2026-10-09・不具合 A）: 止まらずに反映できたかは、準備の時点で実行する手順（PENDING）だけで判定する（JavaScript の手順 CUSTOMIZATION_REQUIRED は数えない）
-      const vA = conv ? conv.activePlan() : null;
-      const allOk = settingsAllOk(execState.execution, preparedPending);
-      if (continueJs && vA && vA.approval && finalFlow()) {
-        if (allOk && devBase && devBase.ok) conv.advanceApprovalBase(vA, KTDevBase.stamp(devBase));
-        else if (!allOk) conv.revokeApproval(vA, '設定の手順が途中で止まったため、止まった後の環境で反映を続けないようにしました。', { next: '次の手は結果のカードにまとめています。' });
-        const hasJsNow = Object.keys(vA.generated || {}).length > 0;
-        if (allOk && hasJsNow) { try { await startJsRegister(vA, { expected: jsExpected }); } catch (e) { } }
-        else if (!allOk && hasJsNow) conv.notice('設定の手順が途中で止まったため、JavaScript の登録は始めていません。結果を確かめて、必要なら元に戻してください。', { kind: 'js-register-skipped' });
-      }
       return execState.execution;
     }
     /** 監査 JSON。実行した計画の版（最新の版とは限らない）の plan / review を使う */
