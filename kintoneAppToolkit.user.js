@@ -5520,7 +5520,6 @@
     const CONF_RANK = { CERTAIN: 0, LIKELY: 1, UNCERTAIN: 2, NOT_ANALYZED: 3 };
     /** Toolkit の confidence 語彙（KTDeps.CONF）に正規化する。未知の値は UNCERTAIN（確実扱いにしない） */
     const normConf = (c) => (c && CONF_RANK[c] != null) ? c : (c === 'HIGH' || c === 'MEDIUM' ? 'LIKELY' : c === 'LOW' ? 'UNCERTAIN' : 'UNCERTAIN');
-    const isCertain = (c) => c === 'CERTAIN';
 
     const REL_LABEL = () => KTDeps.REL_LABEL || {};
     const SRC_LABEL = () => KTDeps.IMPACT_CATEGORY || {};
@@ -8124,7 +8123,6 @@
     const HIGH_RISK = ['TYPE_CHANGE', 'OPTIONS_REMOVED', 'EXISTING_PATH_RESTRICTED', 'ACL_CHANGE', 'LOOKUP_MAPPING_OVERWRITE', 'NOTIFICATION_EVENTS_REMOVED', 'NOTIFICATION_RECIPIENTS_REMOVED', 'REMINDER_BASE_FIELD_CHANGE', 'REMINDER_RECIPIENTS_REMOVED', 'EXECUTABLE_USER_CHANGE', 'APP_ACTION_ENTITIES_REMOVED', 'STEP_MULTIPLE_SETTINGS'];
     const KINTONE_FIELD_TYPES = ['SINGLE_LINE_TEXT', 'MULTI_LINE_TEXT', 'RICH_TEXT', 'NUMBER', 'CALC', 'CHECK_BOX', 'RADIO_BUTTON', 'DROP_DOWN', 'MULTI_SELECT', 'DATE', 'TIME', 'DATETIME', 'FILE', 'LINK', 'USER_SELECT', 'ORGANIZATION_SELECT', 'GROUP_SELECT', 'LOOKUP', 'REFERENCE_TABLE', 'SUBTABLE', 'GROUP', 'SPACER', 'LABEL', 'HR'];
     const OPTION_TYPES = ['CHECK_BOX', 'RADIO_BUTTON', 'DROP_DOWN', 'MULTI_SELECT'];
-    const ENTITY_TYPES = ['USER', 'GROUP', 'ORGANIZATION', 'FIELD_ENTITY', 'CREATOR', 'CUSTOM_FIELD'];
     const NOTIFY_EVENTS = ['recordAdded', 'recordEdited', 'commentAdded', 'statusChanged', 'fileImported'];
     const EVENT_SYNONYMS = [['recordAdded', ['レコード追加', '追加', '登録']], ['recordEdited', ['レコード編集', '編集', '更新', '変更']], ['commentAdded', ['コメント']], ['statusChanged', ['ステータス変更', 'ステータス']], ['fileImported', ['ファイル', 'インポート']]];
     const RESERVED_CODES = ['レコード番号', '作成者', '作成日時', '更新者', '更新日時', 'ステータス', '作業者', 'カテゴリー'];
@@ -12096,7 +12094,6 @@
     const stripViewIds = (views) => Object.fromEntries(Object.entries(views || {}).map(([n, v]) => { const { id, ...rest } = v || {}; return [n, rest]; }));
     const listOf = (raw) => (Array.isArray(raw?.notifications) ? raw.notifications : []);
     const layoutCodes = (rows) => { const out = []; const walk = (rs) => { for (const r of rs || []) { for (const x of r?.fields || []) if (x?.code) out.push(x.code); if (Array.isArray(r?.layout)) walk(r.layout); } }; walk(rows); return out; };
-    const COLLECTION_JA = { fields: 'フィールド', layout: 'フォームのレイアウト', views: '一覧', generalNotify: 'アプリの条件通知', perRecordNotify: 'レコードの条件通知', reminderNotify: 'リマインダー', actions: 'アプリアクション' };
     async function fetchPreviewAll(api, appId) {
       const [fields, layout, views, generalNotify, perRecordNotify, reminderNotify, status, actions] = await Promise.all([api.getPreviewFields(appId), api.getPreviewLayout(appId), api.getPreviewViews(appId), api.getPreviewGeneralNotifications(appId), api.getPreviewPerRecordNotifications(appId), api.getPreviewReminders(appId), typeof api.getPreviewStatus === 'function' ? api.getPreviewStatus(appId) : Promise.resolve(null), typeof api.getPreviewActions === 'function' ? api.getPreviewActions(appId) : Promise.resolve(null)]);
       return { fields, layout, views, generalNotify, perRecordNotify, reminderNotify, ...(status ? { status } : {}), ...(actions ? { actions } : {}) };
@@ -22525,7 +22522,6 @@
     // ---- Toolkit 検証（KTPlanReview）の表示 ----
     const RSTATUS = { VALID: ['✓ 問題なし', '#2e7d32'], WARNING: ['△ 注意', '#b26a00'], NEEDS_CONFIRMATION: ['△ 確認が必要', '#b26a00'], INVALID: ['× 実行不可', '#b00020'], BLOCKED_BY_DEPENDENCY: ['× 依存先が無効', '#b00020'] };
     const RSAFETY = { SAFE: ['安全', '#2e7d32'], REVIEW_REQUIRED: ['要レビュー', '#b26a00'], BLOCKED: ['実行不可', '#b00020'], PLAN_ONLY: ['計画のみ', '#555'] };
-    const RCHANGE = { ADD: '追加', UPDATE: '既存変更', REUSE: '既存利用', REMOVE: '削除', NO_CHANGE: '変更なし', INVALID: '無効' };
     /** 変更の種類のバッジ（Phase 11 §35）: ＋ 新規 / ✎ 既存変更 / ↻ 再利用。確認が必要なら △ を重ねる */
     const CHANGE_BADGE = { ADD: ['＋ 新規', '#1a73e8'], UPDATE: ['✎ 既存変更', '#6a1b9a'], REUSE: ['↻ 再利用', '#2e7d32'], REMOVE: ['− 削除', '#b00020'], NO_CHANGE: ['変更なし', '#555'], INVALID: ['× 無効', '#b00020'] };
     const changeBadges = (r) => { const [t, c] = CHANGE_BADGE[r?.diff?.changeType] || [r?.diff?.changeType || '', '#555']; return badge(t, c) + ((r?.status === 'NEEDS_CONFIRMATION' || r?.status === 'WARNING') ? badge('△ 確認必要', '#b26a00') : ''); };
@@ -22672,10 +22668,7 @@
       RELATED_APP_SETTINGS_UNAVAILABLE: '参照元アプリのフィールド設定を確認できません（参照元アプリへのアクセス権を確認してください）', LOOKUP_RELATED_APP_CHANGED: '参照元アプリのフィールド設定が Review 後に変わっています', RELATED_FIELD_NOT_FOUND: '取得元のフィールドが参照元アプリにありません', RELATED_KEY_MISSING: '参照キーが参照元アプリにありません', PICKER_FIELD_NOT_FOUND: '選択時に表示するフィールドが参照元アプリにありません', DESTINATION_MISSING: 'コピー先のフィールドが動作テスト環境にありません', SORT_FIELD_UNKNOWN: '並び順のフィールドが参照元アプリにありません', NOT_A_LOOKUP: 'ルックアップフィールドではありません', NO_LOOKUP_SPEC: 'ルックアップの変更内容がありません', LOOKUP_SOURCE_CHANGE_NOT_SUPPORTED: '参照元アプリ / 参照キーの変更は反映しません（計画のみ）', LOOKUP_MAPPING_REMOVAL_NOT_SUPPORTED: '取得項目の削除は反映しません（計画のみ）', LOOKUP_PICKER_REMOVAL_NOT_SUPPORTED: '選択時に表示するフィールドの削除は反映しません（計画のみ）', RELATED_APP_REVISION_CHANGED: '参照元アプリの設定は変わっていますが、フィールド定義は同じです', RELATED_APP_CHANGED_SINCE_EXECUTION: '参照元アプリのフィールド定義が反映後に変わっています', RELATED_APP_UNREADABLE: '参照元アプリの定義を確認できませんでした',
       THIRD_PARTY_CHANGE: '反映後に設定が変更されています', FIELD_REFERENCED: '追加したフィールドが他の設定から参照されています', FIELD_CHANGED: '反映後にフィールドが変更されています', FIELD_MISSING: 'フィールドが見つかりません', SNAPSHOT_MISSING: '実行前の定義がありません', ALREADY_RESTORED: '既に実行前の状態です', ROLLBACK_VERIFY_FAILED: 'API は成功したが実行前の状態と一致しません', NO_ACTUAL_AFTER: '反映直後の設定を取得できていません', ALREADY_ROLLED_BACK: '既に元に戻す処理を行っています', NOTHING_TO_ROLLBACK: '元に戻す変更がありません', ROLLBACK_STALE: '反映後に動作テスト環境が変更されています', NO_STRATEGY: '元に戻す方法がありません' };
     const execActionJa = (a) => ({ ADD_FIELD: 'フィールド追加', ADD_VIEW: '一覧追加', ADD_NOTIFICATION: '通知追加', ADD_REMINDER: 'リマインダー追加', PROCESS_CHANGE: 'プロセス管理の変更', KINTONE_SIDE_EFFECT: 'kintone 側の自動変更', UPDATE_LOOKUP: 'ルックアップ変更', ADD_APP_ACTION: 'アプリアクション追加', UPDATE_APP_ACTION: 'アプリアクション変更' }[a] || ACTION_JA[a] || a);
-    const isProcessAction = (a) => ['ADD_PROCESS_STATUS', 'ADD_PROCESS_ACTION', 'UPDATE_PROCESS'].includes(String(a || ''));
     const PROCESS_KIND_JA = { ACTION_CONDITION: '条件変更', ACTION_TRANSITION: '遷移の変更', ASSIGNEE: '作業者の変更', EXECUTABLE_USER: '実行可能ユーザーの変更', ACTION_BRANCH: '分岐の追加', ADD_STATUS: 'ステータス追加', ADD_ACTION: 'アクション追加' };
-    /** プロセス管理の変更 1 件分の行（§22: ＋ ステータス「部長承認」 / ✎ 「承認する」の条件変更） */
-    const processLine = (x) => { const pp = x.prepared || {}; const label = pp.targetLabel || x.title || x.stepId; return x.actionType === 'ADD_PROCESS_STATUS' ? `＋ ステータス「${label}」` : x.actionType === 'ADD_PROCESS_ACTION' ? `＋ アクション「${label}」` : `✎ 「${label}」の${PROCESS_KIND_JA[pp.changeKind] || '変更'}`; };
     /** Mermaid（Before / Planned / Actual）の枠。描画は mountAiWorkspace の renderMermaid。
      *  枠は縦に並べる（横に並べると枠の幅が分かれて図が縮み、文字が読めなかった）。図は縮めずに枠の中で横へスクロールする */
     const mermaidBox = (title, code, color) => (code ? `<div style="border:1px solid ${color}; border-radius:6px; padding:6px; min-width:0; overflow-x:auto;"><div style="font-size:11px; opacity:.7;">${esc(title)}</div><pre class="kt-ai-mermaid" style="font-size:11px; white-space:pre-wrap; margin:0;">${esc(code)}</pre></div>` : '');
@@ -22686,7 +22679,6 @@
     const isUpdateAction = (a) => /^UPDATE_/.test(String(a || ''));
     //   §0e.3（2026-10-09）: 手順の番号（P1 など）・まとめの名前（PROCESS_CHANGE_1）は出さず、並びの番号と画面の言葉にする
     const execStepLine = (st, i) => `<div style="display:flex; gap:8px; align-items:baseline; font-size:12px;"><span style="min-width:34px; font-weight:600;">${esc(Number.isInteger(i) ? `${i + 1}.` : '・')}</span><span style="flex:1;">${esc(st.title || execActionJa(st.actionType))}${st.groupId ? ' <span style="font-size:10px; opacity:.6;">（プロセス管理の変更はまとめて 1 回で更新）</span>' : ''}</span><span style="color:${EXEC_STEP_COLOR[st.status] || '#555'}; font-weight:600;">${esc(EXEC_STEP_JA[st.status] || st.status)}</span></div>${st.status !== 'VERIFIED' && st.status !== 'RUNNING' && st.status !== 'PENDING' && (st.message || st.reason) ? `<div style="font-size:11px; opacity:.75; margin-left:42px;">${esc(st.message || EXEC_REASON_JA[st.reason] || st.reason)}</div>` : ''}${st.before || st.after ? `<div style="font-size:11px; opacity:.75; margin-left:42px;">${esc(beforeAfterText(st))}</div>` : ''}`;
-    const existingText = (ex) => ex.title ? `「${ex.title}」` : ex.entity ? KTContext.entityJaText(ex.entity) : ex.timing ? `${ex.timing.code} の ${ex.timing.daysLater} 日後` : '';
     const beforeAfterText = (st) => {
       const b = st.before || {}, a = st.after || {};
       if (st.actionType === 'ADD_NOTIFICATION') return `通知: Before 既存 ${b.count ?? '—'} 件 → After ${a.count ?? '—'} 件（＋${a.added ?? 1} 件）`;
@@ -28580,7 +28572,6 @@
       if (ar && (ri != null || ro != null)) return { count: count || 1, input: ri || 0, output: ro || 0, measured: (count || 1) > 1 ? 'last' : 'all', unknown: Math.max(0, (count || 1) - 1) };
       return { count: count || 0, input: 0, output: 0, measured: 'none', unknown: count || 0 };
     }
-    const sameCodes = (a, b) => JSON.stringify([...(a || [])].map(String).sort()) === JSON.stringify([...(b || [])].map(String).sort());
     /** 指摘（blocker の code）→ 何を変えれば結果が変わるか。
      *   簡素化 B（2026-10-17）: coverage-unmet・planned-fields・planned-events・target-fields・platform は削除した Toolkit の検査の名前。保存済みの会話の生成の記録に
      *   残った指摘の案内として残す（新しい生成では出ない） */
@@ -28822,7 +28813,6 @@
     const INTENT_JA_P17 = { REQUEST_JS_PREVIEW: 'JavaScript を動作テスト環境へ登録', REQUEST_JS_ROLLBACK: 'JavaScript の登録を元に戻す', DOCUMENT: 'ドキュメントを作る' };
     const INTENT_JA = { ...INTENT_JA_P17, ASK: '質問する', PLAN: '新しい変更案を作る', REVISE_PLAN: '今の変更案を直す', EXPLAIN_PLAN: '変更案の説明を聞く', EXPLAIN_REVIEW: '確認結果の説明を聞く', REQUEST_PREVIEW: '動作テスト環境への反映へ進む', REQUEST_ROLLBACK: '変更前の状態に戻す', GENERAL: 'その他', ANSWER: '確認事項への回答として送る' };
     const STATUS_JA = { ACTIVE: '最新', SUPERSEDED: '旧版（SUPERSEDED）', STALE: '要再作成（STALE）', EXECUTED: '動作テスト環境へ反映済み', ROLLED_BACK: '元に戻し済み' };
-    const stepMark = (st) => (/^ADD_/.test(st.actionType) ? '＋' : st.actionType === 'REUSE_FIELD' ? '↻' : /^UPDATE_/.test(st.actionType) ? '✎' : st.actionType === 'CUSTOMIZATION_REQUIRED' ? '⚙' : '？');
     const btn = (act, label, attrs = '', style = '') => `<button type="button" class="btn kt-ai-act" data-act="${esc(act)}" ${attrs} style="height:26px; font-size:11px; ${style}">${esc(label)}</button>`;
     // 2026-10-06: 開いた直後の案内（短く。何かを選ばせない）
     const COMPOSER_PLACEHOLDER = 'このアプリについて、相談したいことや変更したいことを入力してください';
@@ -29312,7 +29302,6 @@
     function rollbackReadyHtml(m) {
       return card('kt-ai-rollback-ready', `<div><b>${esc(m.text)}</b></div><div style="font-size:11px; opacity:.8; margin-top:2px;">反映する前の設定に戻します。反映の後にほかの変更があれば止まります。</div><div style="margin-top:6px; display:flex; gap:6px;">${btn('rollback', '変更前の状態に戻す', `data-execution="${esc(m.data?.executionId || '')}"`, 'border-color:#6a1b9a; font-weight:600;')}</div><div style="font-size:10px; opacity:.6; margin-top:4px;">押すと現在の動作テスト環境を確認（書き込みなし）し、確認画面で「変更前の状態に戻す」を押したときだけ戻します。</div>`, '#6a1b9a');
     }
-    const STEP_MARK = { VERIFIED: '✓', APPLIED: '…', RUNNING: '…', PENDING: '・', VERIFY_FAILED: '⚠', FAILED: '×', BLOCKED: '×', SKIPPED: '－', UNSUPPORTED: '○', ROLLBACK_VERIFIED: '✓', ROLLED_BACK: '…', ROLLING_BACK: '…', ROLLBACK_PENDING: '・', ROLLBACK_VERIFY_FAILED: '⚠', ROLLBACK_FAILED: '×', ROLLBACK_STALE: '×', ROLLBACK_SKIPPED: '－' };
     /** Phase 20（実機）: 反映・登録して戻していない間の注意（会話と「変更前の状態に戻す」はこのページの中だけ） */
     const LEAVE_NOTE = '<div style="font-size:11px; opacity:.8; margin-top:2px;">このページを離れる・再読み込みすると、この会話と「変更前の状態に戻す」は使えなくなります（動作テスト画面は別のタブで開いてください）。その後に取り消すときは、kintone のアプリの設定の［変更を中止］を使います（ほかの未反映の変更もまとめて取り消されます）。</div>';
     /**
