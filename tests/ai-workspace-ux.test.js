@@ -207,7 +207,7 @@ console.log('\n--- §3〜§8. 計画 / Review / Before・After / 実行: 左は�
   assert(/<h3>更新状況を管理したい<\/h3>/.test(sum) && /対象：フィールド・一覧/.test(sum) && /何が変わるか（Toolkit が確かめた変更前後）/.test(sum) && /更新状況フィールドを追加/.test(sum) && /＋ 新規フィールド「更新状況」/.test(sum) && /新しいフィールド：更新状況/.test(sum) && /確認したいこと（1 件）/.test(sum) && !/\b[PQEC]\d+\b/.test(sum) && m.$('kt-ai-pane-plan-empty').style.display === 'none', '右の「変更内容」の要約: 見出し（依頼）・対象・何が変わるか（Toolkit が確かめた変更前後）・確認したいこと（手順・質問・根拠の番号は出さない）');
   assert(/kt-ai-tech/.test(plan) && /requestId: tk-/.test(plan) && /kt-ai-plan-json-toggle/.test(plan), '技術者向け（requestId / JSON）は「詳細」（details）に');
   assert(m.panel.activeArtifact()?.type === 'CHANGE_PLAN' && m.panel.activeArtifact()?.version === 1 && m.panel.drawerState().pane === 'plan', 'Active Artifact: CHANGE_PLAN v1 → 右は「変更内容」（Auto Navigation）');
-  assert(m.$('kt-ai-ws-state').innerHTML === '<span class="kt-ai-status" data-status="ready">未反映</span>' && m.panel.workspaceState().lines.join('|') === '変更計画 v1|Review済み|Preview未反映', `右の見出しの状態: 変更案ができて反映前は「未反映」（旧来の「変更計画 v1 / Review済み / Preview未反映」のチップは出さない。VM.workspaceState は従来どおり）: ${m.$('kt-ai-ws-state').innerHTML}`);
+  assert(m.$('kt-ai-ws-state').innerHTML === '<span class="kt-ai-status" data-status="ready">未反映</span>', `右の見出しの状態: 変更案ができて反映前は「未反映」（旧来の「変更計画 v1 / Review済み / Preview未反映」のチップは出さない）: ${m.$('kt-ai-ws-state').innerHTML}`);
   // 確認したいこと（priority 無し）が残っていても反映は止めない（承認が 0 件の間は、承認を案内する）
   const exec0 = m.$('kt-ai-exec').innerHTML;
   await KF.waitUntil(() => m.panel.finalPrecheck().status === 'ready', 60);
@@ -253,7 +253,7 @@ console.log('\n--- §3〜§8. 計画 / Review / Before・After / 実行: 左は�
   const c2 = m.chat();
   assert(m.panel.executorState().stage === 'done' && /kt-ai-final-apply-card/.test(c2) && !/kt-ai-execution-card/.test(c2) && /動作テスト環境へ反映しました。/.test(c2) && /標準設定: ✓ \d+ 件を反映（反映後の確認で一致）/.test(c2) && !/VERIFIED/.test(c2) && /運用環境には反映されていません。/.test(c2) && /data-act="exec-details"/.test(c2) && !/Simulationとの一致/.test(c2) && !/監査 JSON/.test(c2), 'execution summary（結果のカード 1 枚）: 反映後の確認（✓ N 件。VERIFIED の語は出さない）・運用環境の注意・［実行結果を見る］。進捗 / Simulation / 監査は会話に無い');
   assert(m.msgs().some(x => x.data?.kind === 'preview-changed') && !/動作テスト環境の設定が変更されました/.test(c2), '反映の処理の通知（preview-changed）は conv.messages に残し、会話には出さない（反映のカードと同じ内容）');
-  assert(/Simulationとの一致/.test(m.$('kt-ai-exec').innerHTML) && /kt-ai-exec-audit-copy/.test(m.$('kt-ai-exec').innerHTML) && /kt-ai-exec-rollback-start/.test(m.$('kt-ai-exec').innerHTML) && m.$('kt-ai-ws-state').innerHTML === '<span class="kt-ai-status" data-status="applied">反映済み</span>' && m.panel.workspaceState().lines[2] === 'Preview反映済み', '右下の右の「反映」に詳細（Simulation / 監査 / 戻す）。右の見出しの状態は「反映済み」');
+  assert(/Simulationとの一致/.test(m.$('kt-ai-exec').innerHTML) && /kt-ai-exec-audit-copy/.test(m.$('kt-ai-exec').innerHTML) && /kt-ai-exec-rollback-start/.test(m.$('kt-ai-exec').innerHTML) && m.$('kt-ai-ws-state').innerHTML === '<span class="kt-ai-status" data-status="applied">反映済み</span>', '右下の右の「反映」に詳細（Simulation / 監査 / 戻す）。右の見出しの状態は「反映済み」');
 }
 
 // =========================================================
@@ -285,7 +285,7 @@ console.log('\n--- §7 / §20. Customize → 開発支援（JS 相談）: 左は
   assert(r.ok && /fieldOnOff\.js について相談します。/.test(m.chat()) && /何を変更したいですか？/.test(m.chat()) && !/app\.record\.create\.show/.test(m.chat()) && !/イベント：/.test(m.chat()), 'Customize → 開発支援: 左は「fieldOnOff.js について相談します。何を変更したいですか？」だけ');
   const info = m.$('kt-ai-subject-info').innerHTML;
   assert(/相談中の JavaScript/.test(info) && /fieldOnOff\.js/.test(info) && /app\.record\.create\.show/.test(info) && /制御<\/span><span>amount/.test(info) && /取得済み/.test(info) && m.panel.drawerState().pane === 'plan' && m.panel.activeArtifact()?.type === 'CONSULTATION', '右の「変更内容」に相談対象の現在情報（イベント / 制御 / 本文）。artifact CONSULTATION');
-  assert(/相談中: fieldOnOff\.js（PC）/.test(m.$('kt-ai-header').innerHTML) && m.$('kt-ai-ws-state').innerHTML === '<span class="kt-ai-status" data-status="consulting">相談中</span>' && m.panel.workspaceState().lines.join('|') === 'fieldOnOff.js|相談中', 'ヘッダーの相談中バッジ・右の見出しの状態「相談中」（VM.workspaceState は「fieldOnOff.js / 相談中」）');
+  assert(/相談中: fieldOnOff\.js（PC）/.test(m.$('kt-ai-header').innerHTML) && m.$('kt-ai-ws-state').innerHTML === '<span class="kt-ai-status" data-status="consulting">相談中</span>', 'ヘッダーの相談中バッジ・右の見出しの状態「相談中」');
   //   C-1 第 3 段: 相談の依頼も仮案から（tests/ai-flow-redesign.test.js の F1）。採用すると計画 → JavaScript の生成・検証（生成工程）→ 最終案のカード。
   //   仕様のカード（「JavaScript の実装の内容をまとめました。」・spec-intro）・［この仕様で確定］・［JavaScript を生成］・コードのカード（code-intro）は無い
   //   （tests/ai-flow-redesign.test.js の R09-2・R09-3・F7-1〜F7-3・F2-3・F11-3）
@@ -294,13 +294,13 @@ console.log('\n--- §7 / §20. Customize → 開発支援（JS 相談）: 左は
   const vH = m.conv().activePlan();
   assert(m.calls.propose.length === 1 && m.calls.propose[0].ctx.facts.some(f => /相談中の JavaScript「fieldOnOff\.js」/.test(f.statement)) && vH && vH.final && /<b>最終案ができました。<\/b>/.test(c1) && !/JavaScript の実装の内容をまとめました。/.test(c1) && !/data-act="confirm-spec"/.test(c1) && !/data-act="open-spec"/.test(c1) && !m.msgs().some(x => ['spec-intro', 'code-intro'].includes(x.data?.kind) || ['SPEC', 'CODE'].includes(x.type)), '相談の依頼 → 仮案（相談中の JavaScript を渡す）→ 採用 → 最終案のカード 1 枚（仕様・コードのカードと確定ボタンは無い）');
   assert(/設定の手順 1 件/.test(m.$('kt-ai-change-summary').innerHTML) && /fieldOnOff\.js/.test(c1) && !/\bC1\b/.test(c1.replace(/<[^>]+>/g, ' ')), '最終案のカード: 設定の手順の件数と JavaScript のファイル（番号 C1 は出さない）');
-  assert(!/data-act="confirm-spec"/.test(m.$('kt-ai-spec').innerHTML) && /「[^」]+」（制御）/.test(m.$('kt-ai-spec').innerHTML) && !/amount（CONTROL）/.test(m.$('kt-ai-spec').innerHTML) &&/最終案の一部です/.test(m.$('kt-ai-spec').innerHTML) && vH.spec.status === 'CONFIRMED' && vH.spec.autoConfirmed === true && m.panel.workspaceState().lines.join('|') === 'fieldOnOff.js|仕様 v1 確定|コード生成済み|Preview未登録' && /data-status="ready">未反映</.test(m.$('kt-ai-ws-state').innerHTML), `実装の内容（右の「変更内容」）: 詳細の閲覧だけ（確定は最終案の中で自動）。右の見出しは「未反映」（VM.workspaceState は「仕様 v1 確定 / コード生成済み / Preview未登録」）: ${m.panel.workspaceState().lines.join('|')}`);
+  assert(!/data-act="confirm-spec"/.test(m.$('kt-ai-spec').innerHTML) && /「[^」]+」（制御）/.test(m.$('kt-ai-spec').innerHTML) && !/amount（CONTROL）/.test(m.$('kt-ai-spec').innerHTML) &&/最終案の一部です/.test(m.$('kt-ai-spec').innerHTML) && vH.spec.status === 'CONFIRMED' && vH.spec.autoConfirmed === true && /data-status="ready">未反映</.test(m.$('kt-ai-ws-state').innerHTML), `実装の内容（右の「変更内容」）: 詳細の閲覧だけ（確定は最終案の中で自動）。右の見出しは「未反映」: ${m.$('kt-ai-ws-state').innerHTML}`);
   // 右の「コード」: 全文・検査の内訳・参考パターン・［動作テスト環境へ登録］
   //   C-1 第 3 段: 新しい流れでは、最終案ができたら作った JavaScript を右の「コード」に描いておき（ペインは切り替えない）、最終案のカードの［コードを見る］
   //   からも開ける（以前はコードのカードの［コードを見る］と従来の生成の後の自動表示）
   await clickTab(m, 'code');
   assert(m.panel.drawerState().pane === 'code' && m.$('kt-ai-code-view').textContent.includes("value === '完了'") && /✓ 既存ファイルへの統合/.test(m.$('kt-ai-code-review').innerHTML) && /参考パターン/.test(m.$('kt-ai-code-review').innerHTML) && m.$('kt-ai-code-register').style.display === 'none', 'full code only workspace（右の「コード」）: 全文・検査の内訳・参考パターン（§0e.1: 仮案から作った最終案の登録は最終案のカードの［動作テスト環境へ反映］から。右の「コード」の［動作テスト環境へ登録］は出さない）');
-  assert(m.panel.workspaceState().lines[2] === 'コード生成済み' && /data-status="ready">未反映</.test(m.$('kt-ai-ws-state').innerHTML), '作業状態: コード生成済み（右の見出しは登録まで「未反映」）');
+  assert(/data-status="ready">未反映</.test(m.$('kt-ai-ws-state').innerHTML), 'コードを作った後も、右の見出しは登録まで「未反映」');
   //   C-1 第 3 段: 登録の許可は最終案の承認（承認の前は登録の準備をしない。tests/ai-flow-redesign.test.js の R16・D14・F10-2）
   await m.panel.startJsRegister(m.conv().activePlan()); await ticks();
   assert(m.panel.jsExecState().stage === 'blocked' && m.panel.jsExecState().prepared.blockers.some(b => b.code === 'APPROVAL_REQUIRED') && writes(m).filter(w => /PUT customize/.test(w)).length === 0, `承認の前は登録の最終確認に進まない: ${m.panel.jsExecState().stage}`);
@@ -312,7 +312,7 @@ console.log('\n--- §7 / §20. Customize → 開発支援（JS 相談）: 左は
   const c4 = m.chat();
   assert(m.panel.jsExecState().stage === 'done' && /動作テスト環境へ反映しました。/.test(arJ.card) && /JavaScript: ✎ fieldOnOff\.js（PC） を登録（反映後の確認 ✓ 1 \/ 1 件一致）/.test(arJ.card) && !/VERIFIED/.test(c4) && /data-act="open-js-result"/.test(arJ.cardHtml) && /data-act="open-customize"/.test(arJ.cardHtml) && !/sourceHash/.test(c4) && !/Audit/.test(c4) && !/kt-ai-js-execution-card/.test(c4), 'JS 登録の要約（左・結果のカード 1 枚）: ファイル・反映後の確認（✓ 1 / 1 件一致）・［登録結果を見る］［Customize で確認］。検証の内訳・監査・VERIFIED の語は無い');
   assert(m.msgs().some(x => x.data?.kind === 'js-preview-changed') && !/JavaScript カスタマイズ設定が変更されました/.test(c4), '登録の処理の通知（js-preview-changed）は会話に出さない（登録のカードと同じ内容）');
-  assert(/sourceHash/.test(m.$('kt-ai-jsreg').innerHTML) && m.$('kt-ai-ws-state').innerHTML === '<span class="kt-ai-status" data-status="applied">反映済み</span>' && m.panel.workspaceState().lines[3] === 'Preview登録済み', '右下の右の「反映」に検証の内訳。右の見出しの状態は「反映済み」（VM.workspaceState は Preview登録済み）');
+  assert(/sourceHash/.test(m.$('kt-ai-jsreg').innerHTML) && m.$('kt-ai-ws-state').innerHTML === '<span class="kt-ai-status" data-status="applied">反映済み</span>', '右下の右の「反映」に検証の内訳。右の見出しの状態は「反映済み」');
   await clickChat(m, 'open-customize', { target: 'desktop', name: 'fieldOnOff.js' });
   assert(m.opened.length === 1 && m.opened[0].name === 'fieldOnOff.js', '［Customize で確認］→ Customize タブへ');
   assert(writes(m).filter(w => /PUT customize/.test(w)).length === 1 && JSON.stringify(arJ.writes.filter(w => !/customize|file/.test(w))) === JSON.stringify(writes(m).filter(w => !/customize|file/.test(w))), 'JavaScript の書き込みは登録の PUT 1 回だけ。書き込みはすべて［動作テスト環境へ反映］の 1 回の中（会話の文章では書かない）');
@@ -391,21 +391,9 @@ console.log('\n--- §27. ViewModel（純関数）: Chat と Workspace は同じ�
   const gen = KTContextUi.generatePlan({ goal: GOAL, inputs: INPUTS });
   const v = { planId: 'p', version: 1, status: 'ACTIVE', goal: GOAL, plan: { ...KTAiClient.validatePlan(PLAN_V1, gen.ctx).normalized, requestId: 'pl-1' } };
   v.review = KTPlanReview.review({ plan: v.plan, ...INPUTS });
-  const ps = VM.planSummary(v);
-  assert(ps.version === 1 && ps.standard === 2 && ps.javascript === 0 && ps.confirmations === 1 && ps.newFields === 1 && ps.statusJa === '最新' && ps.superseded === false, 'planSummary: 標準設定 2 / JavaScript 0 / 確認 1 / 新規フィールド 1');
-  const old = VM.planSummary({ ...v, status: 'SUPERSEDED' }, { latestVersion: 3 });
-  assert(old.superseded && old.latestVersion === 3 && old.statusJa === '旧バージョン', 'planSummary: 旧版（v3 に更新済み）');
-  const rs = VM.reviewSummary(v);
-  assert(rs && rs.safe + rs.review + rs.blocked + rs.planOnly === 2 && rs.js === null, 'reviewSummary: Toolkit の判定の件数（JS 無し）');
-  assert(VM.reviewSummary({ plan: v.plan }) === null && VM.specSummary(v) === null && VM.executionSummary({ stage: 'idle' }) === null && VM.jsExecutionSummary({ stage: 'idle' }) === null, '無いものは null');
-  const ws = VM.workspaceState({ version: v, execState: { stage: 'idle' }, jsExec: { stage: 'idle' }, subject: null });
-  assert(ws.kind === 'plan' && ws.lines.join('|') === '変更計画 v1|Review済み|Preview未反映', 'workspaceState（計画）');
+  //   簡素化（2026-10-17）: 画面に出ていなかった作業状態（workspaceState）と、それだけが使う planSummary・reviewSummary は削除した
+  assert(VM.specSummary(v) === null && VM.executionSummary({ stage: 'idle' }) === null && VM.jsExecutionSummary({ stage: 'idle' }) === null, '無いものは null');
   const vh = { planId: 'h', version: 2, status: 'ACTIVE', goal: GOAL_HYBRID, plan: PLAN_HYBRID.plan, review: null, spec: { specId: 'h:spec', version: 2, status: 'CONFIRMED', confirmedAt: 'x', customizations: PLAN_HYBRID.plan.customizations }, generated: { C1: { generated: { ...genPatch(), patterns: PATTERNS }, review: { status: 'OK', diff: { added: 3, removed: 0 } }, existingSource: { name: 'fieldOnOff.js', target: 'desktop', text: FIELD_ON_OFF } } } };
-  const subject = { name: 'fieldOnOff.js', platform: 'desktop' };
-  const wsj = VM.workspaceState({ version: vh, execState: { stage: 'idle' }, jsExec: { stage: 'idle' }, subject });
-  assert(wsj.kind === 'js' && wsj.lines.join('|') === 'fieldOnOff.js|仕様 v2 確定|コード生成済み|Preview未登録', 'workspaceState（JS 相談）: fieldOnOff.js / 仕様 v2 確定 / コード生成済み / Preview未登録');
-  const wsj2 = VM.workspaceState({ version: vh, execState: { stage: 'idle' }, jsExec: { stage: 'done', execution: { executionId: 'x', status: 'DONE', put: { ok: true }, steps: [{ name: 'fieldOnOff.js', target: 'desktop', kind: 'REPLACE_FILE', status: 'VERIFIED' }] } }, subject });
-  assert(wsj2.lines[3] === 'Preview登録済み', 'workspaceState: 登録後は Preview登録済み');
   const cs = VM.codeSummary(vh.generated.C1, 'C1', vh);
   assert(cs.targetFile === 'fieldOnOff.js' && cs.ok && cs.added === 3 && cs.removed === 0 && cs.target === 'desktop' && cs.patterns.join() === 'field-disable' && cs.external === false, 'codeSummary');
   const sp = VM.specSummary(vh);

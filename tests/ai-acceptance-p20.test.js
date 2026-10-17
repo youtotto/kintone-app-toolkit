@@ -109,9 +109,11 @@ console.log('\n--- BF-C（再 3）/ F24. エラー表示と編集不可: 条件�
     const xU6 = K.makeConvC();
     await K.adoptC(xU6);
     const conv = xU6.c;
-    // U6: JS の登録が検証で一致しない（VERIFY_FAILED。PUT は成功）→ 作業状態は「一部だけ反映」ではなく「登録済み・検証で不一致」
-    const ws = VM.workspaceState({ version: conv.activePlan(), execState: null, jsExec: { stage: 'done', execution: { status: 'VERIFY_FAILED', put: { ok: true }, steps: [{ name: 'dealLock.js', target: 'desktop', status: 'VERIFY_FAILED' }] } }, subject: null });
-    assert(ws.lines.includes('Preview登録済み・検証で不一致（要確認）') && !ws.lines.includes('一部だけ反映（要確認）'), 'U6: JS 登録の検証不一致は「Preview登録済み・検証で不一致（要確認）」');
+    // U6: JS の登録が検証で一致しない（VERIFY_FAILED。PUT は成功）→ 右上の見出し（workStatus）は「反映済み」でも「一部反映」でもなく「要確認」
+    //   簡素化（2026-10-17）: 画面に出ていなかった作業状態（workspaceState）は削除した。見出しの状態で確かめる
+    const jx = VM.jsExecutionSummary({ stage: 'done', execution: { status: 'VERIFY_FAILED', put: { ok: true }, steps: [{ name: 'dealLock.js', target: 'desktop', status: 'VERIFY_FAILED' }] } });
+    const ws = VM.workStatus({ version: conv.activePlan(), current: [jx] });
+    assert(jx.written && ws.key === 'attention' && ws.label === '要確認', `U6: JS 登録の検証不一致は「要確認」（「反映済み」「一部反映」と出さない）: ${JSON.stringify(ws)}`);
   }
   //   簡素化（2026-10-17）: 計画の段階で要件の文の語（「超え」「以上」など）から change イベントの不足を指摘する注意（JS_CHANGE_EVENT_MISSING）は削除した。
   //   入力中の切り替えは、必須の効果のイベント（計画の effects）と生成工程の模擬テストが扱う（F26・F27）
@@ -165,14 +167,15 @@ console.log('\n--- F2. 復元: リマインダー未設定（timezone null）の
   const rNoTime = reviewOf(pNoTime).steps[0];
   assert(rNoTime.status === 'NEEDS_CONFIRMATION' && rNoTime.safety === 'REVIEW_REQUIRED' && rNoTime.issues.some(i => i.code === 'REMINDER_TIME_MISSING' && /9時に通知/.test(i.message)) && rNoTime.diff.human.some(l => /時刻 未定/.test(l)), '実機 354: 時刻の無いリマインダー → 確認が必要（REMINDER_TIME_MISSING・「時刻 未定」）');
   assert(/チャットで伝えて計画を修正/.test(KTContextUi.reviewHtml(reviewOf(pNoTime), pNoTime)), '自動で反映できない理由に「チャットで伝えて計画を修正」を案内');
-  // 作業状態: 復元の失敗・検証不一致は「反映済み」と出さない
+  // 右上の見出し（workStatus）: 復元の失敗・検証不一致は「反映済み」と出さない（簡素化（2026-10-17）: 作業状態 workspaceState は削除した）
   const v = { planId: 'p', version: 1, status: 'EXECUTED', plan: p, review: rv };
   const failedRb = { stage: 'rolled-back', execution: { ...log, rollback: { status: 'ROLLBACK_VERIFY_FAILED' } }, rollback: { status: 'ROLLBACK_VERIFY_FAILED' } };
-  assert(VM.workspaceState({ version: v, execState: failedRb }).lines.includes('元に戻せず（要確認）'), '作業状態: 復元の検証不一致 → 「元に戻せず（要確認）」（Preview反映済みと出さない）');
+  const W = (execState) => VM.workStatus({ version: v, current: [VM.executionSummary(execState)] });
+  assert(W(failedRb).key === 'attention' && W(failedRb).label === '要確認', `見出し: 復元の検証不一致 → 「要確認」（反映済みと出さない）: ${JSON.stringify(W(failedRb))}`);
   const okRb = { stage: 'rolled-back', execution: { ...log, rollback: { status: 'ROLLED_BACK_VERIFIED' } }, rollback: { status: 'ROLLED_BACK_VERIFIED' } };
-  assert(VM.workspaceState({ version: v, execState: okRb }).lines.includes('元に戻し済み'), '作業状態: 復元できた → 「元に戻し済み」');
+  assert(W(okRb).key === 'rolled-back' && W(okRb).label === '元に戻し済み', `見出し: 復元できた → 「元に戻し済み」: ${JSON.stringify(W(okRb))}`);
   const partial = { stage: 'done', execution: { status: 'PARTIAL', steps: [{ stepId: 'P1', status: 'VERIFIED' }, { stepId: 'P2', status: 'FAILED' }] } };
-  assert(VM.workspaceState({ version: v, execState: partial }).lines.includes('一部だけ反映（要確認）'), '作業状態: 反映が途中で止まった → 「一部だけ反映（要確認）」');
+  assert(W(partial).key === 'attention' && W(partial).label === '要確認', `見出し: 反映が途中で止まった → 「要確認」（反映済みと出さない）: ${JSON.stringify(W(partial))}`);
 }
 
 // =========================================================
@@ -213,10 +216,9 @@ console.log('\n--- F3. 承認の前の「自動で反映できるか」と、ル
   const html = KTContextUi.reviewHtml(rv4, p4);
   assert(/id="kt-ai-review-apply"/.test(html) && /できる：1 件（P4）/.test(html) && /できない：3 件（P1, P2, P3）/.test(html), '検証ペイン: 自動反映できる / できない手順の集計（承認の前に分かる）');
   assert((html.match(/class="kt-ai-apply" data-apply="MANUAL"/g) || []).length === 2 && /data-apply="BLOCKED"/.test(html) && /承認しても反映されません/.test(html), '検証ペイン: 手順ごとに「Toolkit からは自動で反映できません — 理由（承認しても反映されません）」');
-  const v4 = { planId: 'p4', version: 1, status: 'ACTIVE', plan: p4, review: rv4 };
   //   C-1 第 3 段（2026-10-08）: 会話の検証カード（reviewCardHtml）は削除した。会話では最終案のカードの「反映先と主な影響」と、
-  //   実行できない手順があれば承認できないこと（tests/ai-flow-redesign.test.js の 指示 A7・R09-9）で示す。要約の集計（reviewSummary）は右の作業内容が使うので残す
-  assert(VM.reviewSummary(v4).notAuto.join() === 'P1,P2,P3', '検証の要約: 自動で反映できない手順を数える（✓ 実行可能 だけで安心させない）');
+  //   実行できない手順があれば承認できないこと（tests/ai-flow-redesign.test.js の 指示 A7・R09-9）で示す。
+  //   簡素化（2026-10-17）: 画面に出ていなかった要約の集計（VM.reviewSummary の notAuto）は削除した（自動で反映できない手順は上の applyReadiness と確認結果の集計）
 }
 
 {

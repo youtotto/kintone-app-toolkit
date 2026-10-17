@@ -486,7 +486,7 @@ console.log('\n--- G7. 登録処理の側での判定（KTJsExecutor）: 古い�
   const need = KTJsExecutor.changeFromGenerated({ customization: c, generated: REG.gen(needCode), review: rvNeed });
   const m5 = mk();
   const p5 = await KTJsExecutor.prepare({ appId: '310', changes: [need.change] }, { api: m5.api });
-  assert(p5.status === 'PREPARED' && p5.verdict === 'NEEDS_CONFIRMATION' && p5.confirmations.length >= 1 && p5.confirmations.every(x => x.key && x.howToCheck) && p5.unverified.some(u => u.code === 'RUNTIME_NOT_RUN'), 'prepare: 確認が必要な項目（key・確かめること）と動作が未確認であることを返す');
+  assert(p5.status === 'PREPARED' && p5.confirmations.length >= 1 && p5.confirmations.every(x => x.key && x.howToCheck) && p5.unverified.some(u => u.code === 'RUNTIME_NOT_RUN'), 'prepare: 確認が必要な項目（key・確かめること）と動作が未確認であることを返す');
   let err = null;
   try { await KTJsExecutor.executePreview(p5, { api: m5.api, acknowledged: [] }); } catch (e) { err = e; }
   assert(err && err.code === 'CONFIRMATION_REQUIRED' && !m5.calls.some(x => x === 'POST file' || x === 'PUT customize'), 'executePreview: 確認していない項目があれば登録しない（書き込みなし）');

@@ -1325,7 +1325,7 @@ await section(async () => {
   const r4 = await KIT.applyOnScreen(m);
   const pr = m.panel.jsExecState().prepared;
   assert(v.approval && v.approval.baseStamp && v.approval.baseStamp.fingerprint, `D10-3: 承認に基準の指紋を記録: ${JSON.stringify(v.approval && v.approval.baseStamp)}`);
-  assert(pr && pr.status === 'PREPARED' && pr.verdict !== 'BLOCKED' && r4.run.ok && m.panel.jsExecState().execution.status === 'DONE', `D10-4: 登録前の再検査は生成工程の結果の取り込み（模擬は実行しない）で、登録まで進む: ${JSON.stringify(pr && { status: pr.status, verdict: pr.verdict, blockers: pr.blockers })}`);
+  assert(pr && pr.status === 'PREPARED' && r4.run.ok && m.panel.jsExecState().execution.status === 'DONE', `D10-4: 登録前の再検査は生成工程の結果の取り込み（模擬は実行しない）で、登録まで進む: ${JSON.stringify(pr && { status: pr.status, blockers: pr.blockers })}`);
   // 動作テストが環境で実行できない → 承認できない（［この内容で反映する］は押せない）
   const r2 = await run({ env: 'unavailable' });
   const v2 = r2.m.conv().activePlan();

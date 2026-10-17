@@ -19836,7 +19836,6 @@
       const seenC = new Set(), seenU = new Set();
       prepared.confirmations = pend.flatMap(ch => (ch.registration?.confirmations || []).map(x => ({ ...x, key: `${ch.customizationId || ch.name}:${x.id}`, file: ch.name }))).filter(x => (seenC.has(x.key) ? false : (seenC.add(x.key), true)));
       prepared.unverified = pend.flatMap(ch => ch.registration?.unverified || []).filter(x => (seenU.has(x.code) ? false : (seenU.add(x.code), true)));
-      prepared.verdict = prepared.status === RUN.BLOCKED ? 'BLOCKED' : prepared.confirmations.length ? 'NEEDS_CONFIRMATION' : 'RUNTIME_UNVERIFIED';
       prepared.after = buildAfter(snap, changes.filter(c => c.status === ST.PENDING));
       prepared.summary.preservedJs = TARGETS.reduce((n, t) => n + snap[t].js.filter(e => !changes.some(c => c.target === t && c.kind === CHANGE.REPLACE_FILE && c.name === e.name)).length, 0);
       prepared.summary.preservedCss = TARGETS.reduce((n, t) => n + snap[t].css.length, 0);
@@ -28673,8 +28672,9 @@
 
   // ==========================================
   // 3.7b 開発支援 Workspace の ViewModel (KTAiWorkspaceViewModel) — Phase 19
-  //   会話（左）と Workspace（右）が同じ値を別々に計算しないための純関数。計画 / Review / 実装仕様 / 生成コード / 反映 / JS 登録の
-  //   要約（件数・状態）と、作業状態（Workspace State）・現在の成果物（Active Artifact）を作る。HTML は作らない（KTAiChatUi が描く）。
+  //   会話（左）と Workspace（右）が同じ値を別々に計算しないための純関数。実装仕様 / 生成コード / 反映 / JS 登録の要約（件数・状態）と、
+  //   右の見出しの状態（workStatus）・現在の成果物（Active Artifact）を作る。HTML は作らない（KTAiChatUi が描く）。
+  //   簡素化（2026-10-17）: 画面に出ていなかった作業状態（workspaceState）と、それだけが使う計画・Review の要約（planSummary・reviewSummary）は削除した
   //   思想（docs/contracts/23）: 左は「何を相談し、何が決まったか」の履歴、右は「現在の最新版」。右が表示するのは activeArtifact。
   // ==========================================
   const KTAiWorkspaceViewModel = (() => {
@@ -28694,40 +28694,7 @@
     const CODE_STATUS_JA = { OK: '✓ 検査を通過', REVIEW_REQUIRED: '△ 要確認', BLOCKED: '× 採用不可' };
     // Phase 21: JS の登録の判定（KTCodeReview の registration.verdict）
     const VERDICT_JA = { BLOCKED: '× 登録できません（要件との不一致・不整合）', NEEDS_CONFIRMATION: '△ 登録の前に確認が必要', RUNTIME_UNVERIFIED: '✓ 静的な検査は通過（動作は未確認）' };
-    const num = (v) => (Number.isFinite(Number(v)) ? Number(v) : 0);
 
-    /** 計画の版 → 要約（手順の件数は標準設定 / JavaScript に分ける。superseded は履歴表示用） */
-    function planSummary(v, { latestVersion = null } = {}) {
-      if (!v) return null;
-      const p = v.plan || {};
-      const main = (p.steps || []).filter(st => !st.alternativeId);
-      const js = main.filter(st => st.actionType === 'CUSTOMIZATION_REQUIRED');
-      const standard = main.filter(st => st.actionType !== 'CUSTOMIZATION_REQUIRED' && st.actionType !== 'REQUIRE_CONFIRMATION');
-      const confirmations = main.filter(st => st.actionType === 'REQUIRE_CONFIRMATION').length + (p.questions || []).length;
-      const superseded = v.status === 'SUPERSEDED';
-      return {
-        planId: v.planId, version: v.version, status: v.status, statusJa: STATUS_JA[v.status] || v.status, superseded,
-        latestVersion: latestVersion ?? null, goal: v.goal || p.goal || '', revisionRequest: v.revisionRequest || null, basedOnVersion: v.basedOnVersion ?? null,
-        solution: p.solution || null, solutionJa: SOLUTION_JA[p.solution] || null,
-        standard: standard.length, javascript: js.length, confirmations, newFields: (p.proposedFields || []).length, alternatives: (p.alternatives || []).length,
-        requestId: p.requestId || null, hasReview: !!v.review, hasSpec: !!v.spec,
-      };
-    }
-    /** Toolkit Review → 件数（Toolkit の判定そのまま。解釈は変えない） */
-    function reviewSummary(v) {
-      const review = v?.review; if (!review) return null;
-      const er = review.executionReadiness || {};
-      const c = review.summary?.counts || {};
-      const hc = review.hybrid?.customization || null;
-      return {
-        planId: v.planId, version: v.version,
-        safe: (er.safeSteps || []).length, review: (er.reviewSteps || []).length, blocked: (er.blockedSteps || []).length, planOnly: (er.planOnlySteps || []).length,
-        conflicts: (review.conflicts || []).length, highRisk: num(c.highRisk), confirmations: num(c.confirmations),
-        js: hc && hc.steps?.length ? { total: hc.steps.length, generatable: (hc.generatable || []).length, needsConfirmation: (hc.needsConfirmation || []).length, blocked: (hc.blocked || []).length, conflicts: (hc.conflicts || []).length } : null,
-        // Phase 20: 自動で反映できない標準設定の手順（Toolkit の対象外の種類・計画のみ・依存先）
-        notAuto: (typeof KTPlanExecutor !== 'undefined' && KTPlanExecutor.applyReadiness ? KTPlanExecutor.applyReadiness(v.plan, review) : []).filter(a => a.apply === 'MANUAL' || a.apply === 'BLOCKED').map(a => a.stepId),
-      };
-    }
     /** 実装仕様 → 要約（確定は UI だけ。ここは状態を読むだけ） */
     function specSummary(v) {
       const sp = v?.spec; if (!sp) return null;
@@ -28800,33 +28767,6 @@
         firstStep: steps[0] || null,
       };
     }
-    /**
-     * 作業状態（Workspace の上部に出す短い行）。JS の相談中はファイル名 / 仕様 / コード / Preview 登録、それ以外は計画 / Review / Preview 反映
-     * @returns {{ lines: string[], kind: 'none'|'plan'|'js' }}
-     */
-    function workspaceState({ version = null, execState = null, jsExec = null, subject = null } = {}) {
-      const v = version;
-      const ps = planSummary(v), rs = reviewSummary(v), sp = specSummary(v), ex = executionSummary(execState), jx = jsExecutionSummary(jsExec);
-      const generated = v && v.generated ? Object.keys(v.generated).length : 0;
-      // Phase 20（実機）: 元に戻す処理が失敗・検証不一致なら「反映済み」と出さない（状態は要確認）。反映が途中で止まったときも同じ
-      // JS の登録は 1 回の PUT なので「一部だけ」ではなく、登録済みで検証が一致しない（実機 BF-C 4 回目: 計画の change がコードに無く VERIFY_FAILED）
-      const previewText = (s2, { done, rolled, none, partial = '一部だけ反映（要確認）' }) => (!s2 || !s2.written ? none : s2.rolledBack ? rolled : /^ROLLBACK_(VERIFY_)?FAILED$/.test(String(s2.rollbackStatus || '')) ? '元に戻せず（要確認）' : s2.done && s2.ok === false ? partial : done);
-      if (subject && (!v || sp)) {
-        const lines = [subject.name];
-        lines.push(sp ? `仕様 v${sp.specVersion} ${sp.status === 'CONFIRMED' ? '確定' : sp.status === 'DRAFT' ? '確認待ち' : '旧版'}` : '相談中');
-        if (sp) lines.push(generated ? 'コード生成済み' : 'コード未生成');
-        if (sp) lines.push(previewText(jx, { done: 'Preview登録済み', rolled: '登録を元に戻し済み', none: 'Preview未登録', partial: 'Preview登録済み・検証で不一致（要確認）' }));
-        return { lines, kind: 'js' };
-      }
-      if (ps) {
-        const lines = [`変更計画 v${ps.version}`];
-        lines.push(rs ? 'Review済み' : 'Review未実施');
-        lines.push(previewText(ex, { done: 'Preview反映済み', rolled: '元に戻し済み', none: 'Preview未反映' }));
-        if (sp) { lines.push(`仕様 v${sp.specVersion} ${sp.status === 'CONFIRMED' ? '確定' : '確認待ち'}`); lines.push(generated ? 'コード生成済み' : 'コード未生成'); if (generated) lines.push(previewText(jx, { done: 'Preview登録済み', rolled: '登録を元に戻し済み', none: 'Preview未登録', partial: 'Preview登録済み・検証で不一致（要確認）' })); }
-        return { lines, kind: 'plan' };
-      }
-      return { lines: [], kind: 'none' };
-    }
     /** 成果物の表示名（Workspace State / タブの印用） */
     function artifactLabel(a) {
       if (!a) return '';
@@ -28875,7 +28815,7 @@
       if (subject) return { type: ARTIFACT.CONSULTATION, id: subject.sourceId ?? null, version: null, name: subject.name ?? null };
       return null;
     }
-    return { ARTIFACT, PANE_OF, PANES, PANE_JA, PRIMARY_TABS, TABS, STATUS_JA, SOLUTION_JA, STRATEGY_JA, SPEC_STATUS_JA, CODE_STATUS_JA, planSummary, reviewSummary, specSummary, codeSummary, executionSummary, jsExecutionSummary, workspaceState, workStatus, artifactLabel, paneFor, defaultArtifact };
+    return { ARTIFACT, PANE_OF, PANES, PANE_JA, PRIMARY_TABS, TABS, STATUS_JA, SOLUTION_JA, STRATEGY_JA, SPEC_STATUS_JA, CODE_STATUS_JA, specSummary, codeSummary, executionSummary, jsExecutionSummary, workStatus, artifactLabel, paneFor, defaultArtifact };
   })();
 
   // ==========================================
@@ -29192,7 +29132,6 @@
       const alts = [...new Set(ps.flatMap(p => p.preferredStandardAlternatives || []))].slice(0, 3);
       return `<div style="margin-top:4px; font-size:11px; opacity:.85;">参考パターン: ${ps.map(p => `<span class="kt-ai-pattern" title="${esc(p.purpose || '')}">${esc(p.id)}</span>`).join('、')}<span style="opacity:.7;">（Pattern Library。コードは現在のアプリに合わせて生成）</span></div>${alts.length ? `<div style="font-size:11px; color:#b26a00;">標準設定で代替できないか再確認: ${esc(alts.join(' / '))}</div>` : ''}`;
     }
-    const readinessCounts = (review) => { const er = review?.executionReadiness || {}; return { safe: (er.safeSteps || []).length, review: (er.reviewSteps || []).length, blocked: (er.blockedSteps || []).length, planOnly: (er.planOnlySteps || []).length, conflicts: (review?.conflicts || []).length }; };
     // ---- 右「変更内容」の要約（2026-10-06 利用者の指示: 変更前後・対象画面・影響範囲・確認結果を整理する）----
     /** JavaScript のイベント → 画面の名前 */
     const SCREEN_OF_EVENT = [[/app\.record\.create\./, '追加画面'], [/app\.record\.edit\./, '編集画面'], [/app\.record\.detail\./, '詳細画面'], [/app\.record\.index\./, '一覧画面'], [/app\.record\.print\./, '印刷画面'], [/app\.report\./, 'グラフ画面'], [/portal\./, 'ポータル']];
@@ -30397,7 +30336,7 @@
         const s = e.kind === 'js' ? KTAiWorkspaceViewModel.jsExecutionSummary(e.state) : KTAiWorkspaceViewModel.executionSummary(e.state);
         const written = !!(s && s.written);
         const running = !!(s && (s.running || ['preparing', 'rollback-preparing', 'rolling-back'].includes(s.stage)));
-        // 戻す確認の画面（rollback-confirm・PREPARED）・戻せなかった確認（BLOCKED）は、まだ戻していない反映として出す。失敗は右上の表示（workspaceState）と同じく ROLLBACK_FAILED / ROLLBACK_VERIFY_FAILED だけ
+        // 戻す確認の画面（rollback-confirm・PREPARED）・戻せなかった確認（BLOCKED）は、まだ戻していない反映として出す。失敗は ROLLBACK_FAILED / ROLLBACK_VERIFY_FAILED だけ
         const rollbackFailed = /^ROLLBACK_(VERIFY_)?FAILED$/.test(String((s && s.rollbackStatus) || ''));
         const state = !s ? '準備のみ' : running ? '処理中' : s.rolledBack ? '元に戻し済み' : rollbackFailed ? '元に戻せず（要確認）' : !written ? '書き込みなし（失敗・取り消し）' : (e.kind === 'settings' && s.status !== 'DONE') ? '一部だけ反映（要確認）' : '反映済み（未復元）';
         const color = state === '反映済み（未復元）' ? '#b26a00' : state === '元に戻し済み' ? '#2e7d32' : /要確認/.test(state) ? '#b00020' : '#777';
@@ -30425,7 +30364,7 @@
     return { progressInnerHtml, progressCardHtml, finalCardHtml, verificationDetailHtml, verificationLineOf, impactRowsOf,   // 段階 C（検証の明細は右の「変更内容」。2026-10-14）
       condSentenceOf, existingChangeTextOf,   // 2026-10-15（最終案の重複と担当未定の食い違い §2）: 条件式の文（テストから確かめる）
       constraintLineOf,   // 2026-10-16（説明文を読みやすくする）: 「この案の制約」の 1 行（テストから確かめる）
-      INTENT_JA, STATUS_JA, STRATEGY_JA, CHECK_JA, SPEC_STATUS_JA, busyHintText, themedMermaid, workspaceHtml, headerHtml, baseHtml, baseDiffHtml, applyLogHtml, freePanelHtml, chatHtml, messageHtml, diffCardHtml, codePaneHtml, rollbackReadyHtml, executionCardHtml, rollbackCardHtml, answerCardHtml, errorCardHtml, readinessCounts, patternsHtml,
+      INTENT_JA, STATUS_JA, STRATEGY_JA, CHECK_JA, SPEC_STATUS_JA, busyHintText, themedMermaid, workspaceHtml, headerHtml, baseHtml, baseDiffHtml, applyLogHtml, freePanelHtml, chatHtml, messageHtml, diffCardHtml, codePaneHtml, rollbackReadyHtml, executionCardHtml, rollbackCardHtml, answerCardHtml, errorCardHtml, patternsHtml,
       // Phase 17
       consultationStartHtml, specCardHtml, jsPreviewReadyHtml, jsRollbackReadyHtml, jsExecutionCardHtml, jsRollbackCardHtml, consultChoicesHtml, jsRegisterPaneHtml, customizeScopeJa,
       // Phase 19: 会話は要約、右 Workspace が正本
@@ -32528,12 +32467,6 @@
     const execClassified = () => { const out = reviewOutput(); return out ? KTPlanExecutor.classifySteps(out) : []; };
     function renderExec() {
       const el = host.querySelector('#kt-ai-exec');
-      // Phase 20（実機）: 最終確認に未回答の確認事項を出す（仮の値のまま承認・反映できてしまう）
-      // 会話の応答性（2026-10-05）: 未回答の確認事項は、決定事項で答えた論点を除く（回答済みを「未回答」と出さない）。計画の検証・反映前の確認はそのまま
-      //   記録したのにまだ計画に入っていない回答（作り直しの失敗・取り消し）の質問は、計画が回答前の仮の値のままなので「未回答」に残す
-      const unapplied = conv && adopted && conv.activePlan() === adopted ? conv.ledger().filter(e => e.status === 'answered' && e.appliedInVersion == null && e.question).map(e => `${e.question}（回答「${e.answer}」はまだ計画に入っていません）`) : [];
-      const openNow = conv && adopted && conv.activePlan() === adopted ? [...conv.answerContext().open.map(q => q.text), ...unapplied] : null;
-      const questions = [...new Set((openNow || (lastPlan?.questions || []).map(q => String(q?.question || q?.text || q || '').trim())).filter(Boolean))];
       syncApplyLog();
       // 記録から開いた、今の計画ではない反映（前の会話・別の計画）: その時点の検証で描き、どの依頼の反映かを添える。承認の件数も、その時点のもの
       const focused = execLogRef;
@@ -32544,7 +32477,7 @@
       const note = foreign && conv ? `<div class="kt-ai-log-focus" style="font-size:11px; color:#6a1b9a; margin:4px 0;">${execOpenedFromLog ? `反映の記録から開いた反映です（${focused.epoch !== conv.state.epoch ? '前の会話・' : ''}依頼: ${escapeHtml(focused.goal || '不明')}）。` : `${where}（依頼: ${escapeHtml(focused.goal || '不明')}）の反映です。`}${execClosable() && lastPlan ? ` <button type="button" class="btn kt-ai-act" data-act="log-close" style="height:22px; font-size:11px;" title="${escapeHtml('この反映は「反映の記録」に残ります。右の「反映」を今の計画に戻します')}">閉じる（今の計画に戻る）</button>` : ''}</div>` : '';
       const hasJs = !foreign && !!(lastPlan && Array.isArray(lastPlan.customizations) && lastPlan.customizations.length);
       // 右の「反映」を出してから図を描く（隠れている間に描くと、プロセス図の大きさが 0 になる）
-      if (el) { el.innerHTML = rv ? note + KTContextUi.executorHtml({ ...execState, classified: foreign ? (focused.classified || []) : execClassified(), available: !!executor, review: rv, questions: foreign ? [] : questions, hold: foreign ? null : applyHold(), hasJs, finalFlow: !foreign && finalFlow(), finalRunning: !foreign && !!execState.finalRunId && !!finalRun && finalRun.id === execState.finalRunId && finalRun.stage === 'running' }) : ''; renderApplyArea(); renderMermaid(el); }
+      if (el) { el.innerHTML = rv ? note + KTContextUi.executorHtml({ ...execState, classified: foreign ? (focused.classified || []) : execClassified(), available: !!executor, review: rv, hold: foreign ? null : applyHold(), hasJs, finalFlow: !foreign && finalFlow(), finalRunning: !foreign && !!execState.finalRunId && !!finalRun && finalRun.id === execState.finalRunId && finalRun.stage === 'running' }) : ''; renderApplyArea(); renderMermaid(el); }
       if ($execEmpty) $execEmpty.style.display = rv || execState.stage !== 'idle' || jsExec.stage !== 'idle' ? 'none' : '';
       if (conv) {
         // 会話には、この会話で始めた反映だけを写す（前の会話の反映を開いても、新しい会話に「反映しています」のカードを出さない）。
@@ -33150,7 +33083,7 @@
       consult, startJsRegister, confirmJsRegister, cancelJsRegister, startJsRollback, confirmJsRollback, cancelJsRollback, jsExecState: () => jsExec, jsAudit,
       openDrawer, drawerState: () => ({ open: true, pane: activePane, unread: [...unread], pinned: pin ? pin.pane : null, rightWidth: rightPct }), setSplit, applyHold, newConversation: () => startNewConversation(),
       // Phase 19: Workspace（右）の成果物とペイン
-      showPane, activeArtifact: () => activeArtifact, workspaceState: () => VM.workspaceState({ version: conv.activePlan(), execState, jsExec, subject: conv.subject() }),
+      showPane, activeArtifact: () => activeArtifact,
       renderHeader, isConnected,
       cancel: () => { try { currentAbort?.abort(); } catch (e) { } try { if (conv && typeof conv.cancelAsides === 'function') conv.cancelAsides(); } catch (e) { } },
     };
