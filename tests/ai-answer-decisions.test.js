@@ -349,23 +349,15 @@ await section(async () => {
   const custObj = { customizationId: 'C1', requirement: 'r', whyStandardInsufficient: 'w', strategy: 'NEW_JS_FILE', implementation: 'JAVASCRIPT', platform: ['desktop'], events: ['app.record.create.show'], fields: [], apis: [], existingFiles: [], risks: [], questions: [], dependsOn: [], evidenceIds: [], confidence: 'INFERRED' };
   const g = KTContext.buildGenerator({ customization: custObj, plan: planWith([], { customizations: [custObj] }), planId: 'p', version: 2, data: DATA, deps: DEPS, decisions });
   assert(Array.isArray(g.decisions) && g.decisions.map(d => d.id).join() === 'D1', 'Generator Context: 回答済みの決定事項だけ（再確認中は送らない）');
-  // validatePlan: 回答済みの PC / モバイルがあれば、AI が同じことを質問しても platform を空にしない
+  //   簡素化（2026-10-17）: 回答済みの PC / モバイルの再質問を外す・platform を決定事項で補う・質問しながら両方なら空にする正規化は、Gateway の validate-plan
+  //   （worker/test/cases/decisions.mjs・change-planner.mjs・plan-patch.mjs で確かめる）が必ず通すので、Toolkit の validatePlan ではやり直さない
   const resp = (platform, questions) => ({ ok: true, contractVersion: '2.1', meta: { requestId: 'r', decisions: { version: '1', received: 1 } }, plan: { goal: 'g', solution: 'CUSTOMIZATION', assessment: { summary: '' }, relevantFields: [], proposedFields: [], steps: [], alternatives: [], impact: [], questions: [], unknowns: [], planConfidence: 'INFERRED', customizations: [{ ...custObj, platform, questions }] } });
   const ctxD = { ...KTContext.buildPlan({ goal: 'g', data: DATA, deps: DEPS, scan: null, incoming: null, options: { revision: rev, decisions: [{ ...decisions[0], value: ['desktop', 'mobile'], answer: 'モバイルも必要' }] } }) };
   const a = KTAiClient.validatePlan(resp(['desktop', 'mobile'], ['PC とモバイルの両方で必要ですか？']), ctxD);
-  assert(a.normalized.customizations[0].platform.join() === 'desktop,mobile' && a.normalized.customizations[0].questions.length === 0 && a.warnings.some(w => w.code === 'ANSWERED_TOPIC_REASKED') && a.normalized.decisionsMeta.received === 1, 'validatePlan: 回答済みなら platform を空にせず、再質問を外す（Gateway の受け取りの証も読む）');
+  assert(a.normalized.customizations[0].platform.join() === 'desktop,mobile' && a.normalized.customizations[0].questions.length === 1 && !a.warnings.some(w => /^(ANSWERED_TOPIC_REASKED|CUSTOMIZATION_PLATFORM_)/.test(w.code)) && a.normalized.decisionsMeta.received === 1, 'validatePlan: Gateway の正規化をやり直さない（platform・質問は受け取ったまま。Gateway の受け取りの証は読む）');
   const b = KTAiClient.validatePlan(resp([], []), ctx);
-  assert(b.normalized.customizations[0].platform.join() === 'desktop' && b.warnings.some(w => w.code === 'CUSTOMIZATION_PLATFORM_FROM_DECISION'), 'validatePlan: platform が空なら決定事項の値で入れる');
-  const ctxN = KTContext.buildPlan({ goal: 'g', data: DATA, deps: DEPS, scan: null, incoming: null, options: { revision: rev } });
-  const n = KTAiClient.validatePlan({ ...resp(['desktop', 'mobile'], ['PC とモバイルの両方で必要ですか？']), meta: { requestId: 'r' } }, ctxN);
-  assert(n.normalized.customizations[0].platform.length === 0 && n.warnings.some(w => w.code === 'CUSTOMIZATION_PLATFORM_QUESTIONED') && n.normalized.decisionsMeta === null, 'validatePlan: 決定事項が無ければ従来どおり（質問しながら両方なら空にする）');
-  // レビュー G6: ほかの論点も聞く質問（モバイルの語が入っているだけ）は外さず、platform も空にしない
-  const keep = KTAiClient.validatePlan(resp(['desktop', 'mobile'], ['モバイルで入力している場合も、警告だけでなく保存を止めますか？', 'モバイルでは警告をどこに表示する必要がありますか？', 'PC とモバイルの両方で必要ですか？']), ctxD);
-  assert(keep.normalized.customizations[0].questions.length === 2 && keep.normalized.customizations[0].platform.join() === 'desktop,mobile', `validatePlan: 外すのは PC / モバイルだけを聞く質問（保存・表示する場所も聞く質問は残す。platform は空にしない）: ${JSON.stringify(keep.normalized.customizations[0])}`);
-  // レビュー G2: 同じ論点の決定事項が 2 件あれば、後ろ（新しい回答）を使う
-  const ctx2 = KTContext.buildPlan({ goal: 'g', data: DATA, deps: DEPS, scan: null, incoming: null, options: { revision: rev, decisions: [decisions[0], { ...decisions[0], id: 'D3', answer: 'やっぱりモバイルも必要', value: ['desktop', 'mobile'] }] } });
-  const two = KTAiClient.validatePlan(resp([], []), ctx2);
-  assert(two.normalized.customizations[0].platform.join() === 'desktop,mobile', 'validatePlan: PC / モバイルの決定事項が 2 件なら新しい方（後ろ）で補う');
+  const n = KTAiClient.validatePlan({ ...resp(['desktop', 'mobile'], ['PC とモバイルの両方で必要ですか？']), meta: { requestId: 'r' } }, KTContext.buildPlan({ goal: 'g', data: DATA, deps: DEPS, scan: null, incoming: null, options: { revision: rev } }));
+  assert(b.normalized.customizations[0].platform.length === 0 && n.normalized.customizations[0].platform.join() === 'desktop,mobile' && n.normalized.decisionsMeta === null, 'validatePlan: 決定事項で platform を補わず、質問しながら両方でも空にしない（どちらも Gateway の validate-plan が扱う）');
 });
 
 // =========================================================

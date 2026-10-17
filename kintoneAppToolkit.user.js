@@ -20778,19 +20778,9 @@
         const effEvents = c.fields.flatMap(f => (Array.isArray(f.effects) ? f.effects : []).flatMap(x => (Array.isArray(x.events) ? x.events : [])));
         const addEv = [...new Set(effEvents.filter(e => !c.events.includes(e)))];
         if (addEv.length) { c.events = [...c.events, ...addEv]; warnings.push({ code: 'CUSTOMIZATION_EFFECT_EVENTS_ADDED', path: `customizations[${i}].events`, message: `${c.customizationId}: 効果のイベント（${addEv.join(', ')}）を events に足しました` }); }
-        // 会話の応答性（2026-10-05）: PC / モバイルの決定事項（利用者の回答。送った ctx.decisions）があれば、AI が同じことを質問しても platform を空にしない
-        //   （空にすると Review が PLATFORM_UNSPECIFIED で生成を止め、同じ質問が繰り返された）。その質問は回答済みの論点の再質問として外す。
-        //   platform が空なら決定事項の値で埋める。Gateway validate-plan と同じ。決定事項が無いときは従来どおり
-        //   同じ論点の決定事項が複数あれば、後ろ（新しい回答）が正
-        const decPlatform = (Array.isArray(ctx?.decisions) ? ctx.decisions : []).filter(dd => dd && dd.topic === 'platform' && dd.status === 'answered' && Array.isArray(dd.value) && dd.value.length).pop() || null;
-        const asksPlatform = (q) => /モバイル|スマホ|スマートフォン|mobile/i.test(q) && /両方|必要|対象|どちら|いる|要る|要否|否/.test(q);
-        // 外すのは PC / モバイルだけを聞く質問（保存を止めるか・表示する場所・タイミングなど、ほかの点も聞く質問は残す）。
-        //   質問の誤抑制の修正（2026-10-05）: 以前は「必要・対象・いる・否」などの語に当たれば、ほかの論点の語の一覧に無い質問まで外した
-        if (decPlatform && c.questions.some(isPurePlatformQuestion)) { const before = c.questions.length; c.questions = c.questions.filter(q => !isPurePlatformQuestion(q)); warnings.push({ code: 'ANSWERED_TOPIC_REASKED', path: `customizations[${i}].questions`, message: `${c.customizationId} が回答済みの PC / モバイル（${decPlatform.answer}）をもう一度質問したため、その質問を外しました（${before - c.questions.length} 件）` }); }
-        if (decPlatform && !c.platform.length) { c.platform = decPlatform.value.filter(x => x === 'desktop' || x === 'mobile'); warnings.push({ code: 'CUSTOMIZATION_PLATFORM_FROM_DECISION', path: `customizations[${i}].platform`, message: `${c.customizationId} の platform を決定事項（${decPlatform.answer}）から入れました` }); }
-        // Gateway validate-plan と同じ正規化（実機 Phase 16）: PC / モバイルの要否を質問しながら両方を platform に入れたら空に、警告 / 編集不可 / 表示の要件で唯一の READ は CONTROL に
-        if (!decPlatform && c.platform.length === 2 && c.questions.some(asksPlatform)) { c.platform = []; warnings.push({ code: 'CUSTOMIZATION_PLATFORM_QUESTIONED', path: `customizations[${i}].platform`, message: `${c.customizationId}: PC / モバイルの要否を質問しているため platform を空にしました` }); }
-        if (c.fields.length === 1 && c.fields[0].access === 'READ' && /編集不可|編集でき|編集を|警告|エラー|メッセージ|非表示|表示しない|必須に|disabled|error/.test(`${c.requirement} ${c.whyStandardInsufficient}`)) { c.fields[0].access = 'CONTROL'; warnings.push({ code: 'CUSTOMIZATION_ACCESS_ADJUSTED', path: `customizations[${i}].fields`, message: `${c.customizationId}: ${c.fields[0].code} の access を READ → CONTROL にしました（要件が編集可否 / 警告 / 表示の制御）` }); }
+        //   簡素化（2026-10-17）: 回答済みの PC / モバイルの再質問を外す・platform を決定事項で補う・PC / モバイルの要否を質問しながら両方なら空にする・
+        //   要件の文の語（警告・編集不可など）で唯一の READ を CONTROL にする正規化は、Gateway の validate-plan（normalizeChangePlan）が全体の作り直しにも
+        //   差分にも同じ規則で通すので、ここではやり直さない（要件の文を Toolkit が読み直さない）
         return c;
       });
       const custSteps = steps.filter(st => st.actionType === 'CUSTOMIZATION_REQUIRED' && st.spec?.customizationId);

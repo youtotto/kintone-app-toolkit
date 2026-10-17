@@ -338,10 +338,10 @@ await section(async () => {
   const drop = ['スマートフォンからの入力も対象に含めますか？', 'PC とモバイルの両方で必要ですか？'];
   const s2 = KTAiAnswers.syncQuestions(lg, KTAiAnswers.questionList(planWith(qs(...keep.map(q => ({ question: q, topic: 'platform' })), ...drop.map(q => ({ question: q, topic: 'platform' }))))), { version: 2 });
   assert(s2.open.map(q => q.text).join('|') === keep.join('|') && s2.reasked.map(q => q.text).join('|') === drop.join('|'), `S5: PC / モバイルだけを聞く質問だけ出さない（場所・別の点は出す）: open=${JSON.stringify(s2.open.map(q => q.text))}`);
-  // validatePlan（customizations の質問）も同じ
+  // validatePlan（customizations の質問）: 簡素化（2026-10-17）: 回答済みの PC / モバイルの再質問を外す正規化は Gateway の validate-plan だけが行う（Toolkit は受け取った質問をそのまま運ぶ）
   const ctx = { facts: [], dictionary: { fieldCodes: ['amount'] }, decisions: [{ id: 'D1', topic: 'platform', status: 'answered', answer: 'PCだけ', value: ['desktop'] }] };
   const r = KTAiClient.validatePlan({ ok: true, contractVersion: KTAiClient.CONTRACT_VERSION || '2.1', meta: {}, plan: planWith([], { customizations: [cust({ questions: [...keep, ...drop] })] }) }, ctx);
-  assert(r.ok && r.normalized.customizations[0].questions.join('|') === keep.join('|'), `S5: validatePlan も別の点を聞く質問を残す（以前は「必要・対象・いる」の語で外した）: ${JSON.stringify(r.normalized && r.normalized.customizations[0].questions)}`);
+  assert(r.ok && r.normalized.customizations[0].questions.join('|') === [...keep, ...drop].join('|'), `S5: validatePlan は質問を外さない（Gateway の validate-plan が外す）: ${JSON.stringify(r.normalized && r.normalized.customizations[0].questions)}`);
 });
 await section(async () => {
   // Gateway の isPurePlatformQuestion と同じ例で同じ結果

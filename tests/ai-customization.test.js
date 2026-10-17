@@ -181,12 +181,10 @@ console.log('\n--- §51-3. Toolkit Review: 統合先が曖昧 / 本文なし / P
   // validatePlan（client）: customizations の正規化と solution の導出
   const gen = KTContextUi.generatePlan({ goal: GOAL_HYBRID, inputs: INPUTS });
   const v = KTAiClient.validatePlan(planOf({ steps: [STD_STEP(), JS_STEP()], customizations: [cust({ platform: ['desktop', 'tablet'], fields: [{ code: 'amount', access: 'ADMIN' }], evidenceIds: ['E999'] })] }), gen.ctx);
-  assert(v.ok && v.normalized.solution === 'HYBRID' && v.normalized.customizations[0].platform.join() === 'desktop' && v.normalized.customizations[0].fields[0].access === 'CONTROL' && v.normalized.customizations[0].evidenceIds.length === 0 && v.warnings.some(w => w.code === 'UNKNOWN_EVIDENCE_REMOVED') && v.warnings.some(w => w.code === 'CUSTOMIZATION_ACCESS_ADJUSTED'), 'validatePlan: platform / access の語彙外を落とし（唯一の READ は要件が編集不可なので CONTROL）、未知の根拠ID を除去、solution を導出');
-  // 実機（Scenario C）: 「PC とモバイル両方で必要か」を質問しながら両方を platform に入れる → 空に（Gateway の validate-plan と同じ正規化）
+  assert(v.ok && v.normalized.solution === 'HYBRID' && v.normalized.customizations[0].platform.join() === 'desktop' && v.normalized.customizations[0].fields[0].access === 'READ' && v.normalized.customizations[0].evidenceIds.length === 0 && v.warnings.some(w => w.code === 'UNKNOWN_EVIDENCE_REMOVED') && !v.warnings.some(w => w.code === 'CUSTOMIZATION_ACCESS_ADJUSTED'), 'validatePlan: platform / access の語彙外を落とし（語彙外の access は READ。要件の文の語で CONTROL にする正規化は Gateway の validate-plan だけ）、未知の根拠ID を除去、solution を導出');
+  //   簡素化（2026-10-17）: 「PC とモバイル両方で必要か」を質問しながら両方を platform に入れたときに空にする正規化は、Gateway の validate-plan だけが行う
   const vq = KTAiClient.validatePlan(planOf({ steps: [JS_STEP()], customizations: [{ ...NEW_JS_CUST(), platform: ['desktop', 'mobile'], questions: ['PCとモバイル両方で必要か？'] }] }), gen.ctx);
-  assert(vq.ok && vq.normalized.customizations[0].platform.length === 0 && vq.warnings.some(w => w.code === 'CUSTOMIZATION_PLATFORM_QUESTIONED'), 'validatePlan: PC / モバイルの要否を質問しながら両方 → platform []（Review が PLATFORM_UNSPECIFIED で止める）');
-  const vq2 = KTAiClient.validatePlan(planOf({ steps: [JS_STEP()], customizations: [{ ...NEW_JS_CUST(), platform: ['desktop', 'mobile'], events: ['app.record.create.change.amount', 'mobile.app.record.create.change.amount'], questions: ['警告の文言は？'] }] }), gen.ctx);
-  assert(vq2.ok && vq2.normalized.customizations[0].platform.join() === 'desktop,mobile', '質問が platform の要否でなければ両方のまま');
+  assert(vq.ok && vq.normalized.customizations[0].platform.join() === 'desktop,mobile' && !vq.warnings.some(w => w.code === 'CUSTOMIZATION_PLATFORM_QUESTIONED'), 'validatePlan: Gateway の正規化（質問しながら両方なら空にする）をやり直さない');
 }
 
 // =========================================================
