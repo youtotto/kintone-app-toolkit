@@ -13,6 +13,8 @@
 // 実行方法: node tests/ai-acceptance-p21.test.js（KT_SRC=<別ビルド> で修正前の版に対して走らせると RED になる）
 'use strict';
 const { loadToolkit, makeAssert } = require('./helpers/load-toolkit.js');
+//   簡素化（2026-10-17）: 反映できるかは、最新の版なら会話の今の判定、前の版なら最終案の記録で確かめる（tests/helpers/final-state.js）
+const FS = require('./helpers/final-state.js');
 const { gwCandidateHash, gwHashOfCtx, withGwHash } = require('./helpers/gw-hash.js');
 const { makeFakeHost } = require('./helpers/fake-dom.js');
 const T = loadToolkit();
@@ -536,7 +538,7 @@ console.log('\n--- G7（画面）. 古い版からは登録しない・確認の
   const v1 = await planOnScreen(panel, '承認済みでは金額を編集できなくしたい');
   const g1 = panel.generated('C1');
   assert(g1 && g1.review.registration.verdict === 'NEEDS_CONFIRMATION' && g1.review.registration.confirmations.some(x => x.code === 'apis'), '前提: 生成したコードは「確認が必要」（生成工程の機械検査の確認: 計画に無い通信 API）');
-  assert(v1.final && v1.final.approvable, `前提: 最終案（v1）は承認できる: ${v1.final && v1.final.blockingReason}`);
+  assert(v1.final && FS.readyOf(v1), `前提: 最終案（v1）は承認できる: ${v1.final && FS.reasonOf(v1)}`);
   // 計画を修正して新しい版ができた後に、古い版のカードから反映しようとする
   await panel.send('承認待ちでも金額を編集不可にして', { intent: KTAiConversation.INTENT.REVISE_PLAN }); await tick(16);
   const v2 = panel.conversation().activePlan();

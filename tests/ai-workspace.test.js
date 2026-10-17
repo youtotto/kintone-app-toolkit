@@ -11,6 +11,8 @@
 // 実行方法: node tests/ai-workspace.test.js
 'use strict';
 const { loadToolkit, makeAssert } = require('./helpers/load-toolkit.js');
+//   簡素化（2026-10-17）: 反映できるかは、最新の版なら会話の今の判定、前の版なら最終案の記録で確かめる（tests/helpers/final-state.js）
+const FS = require('./helpers/final-state.js');
 const { withDevBase } = require('./helpers/dev-base-fake.js');
 const { makeFakeHost, makeFakeDocument } = require('./helpers/fake-dom.js');
 const { createNewFlowKit } = require('./helpers/new-flow.js');
@@ -621,8 +623,9 @@ console.log('\n--- 7. Safety: 自然言語 ≠ 承認（write 0 件）/ errors /
     //   C-1 第 3 段: 先に決めたいことは最終案のカードの中（変更案のカードは削除。ai-flow-redesign の R10-1・R10-2）。最終案は承認できない
     const arB = await applyScreen(b);
     const approvedB = !!b.conv().activePlan().approval;
-    const holdText = '先に確認したいことが 1 件残っています。左の会話で答えると反映できます。';
-    assert(b.panel.applyHold() === holdText && !approvedB && arB.button && arB.button.disabled && writes(b).length === 0 && b.conv().activePlan().final.approvable === false && /先に決めたいことが 1 件残っています。答えると反映できるようになります。/.test(b.chat()), 'blocking の確認事項が残っている: applyHold に理由・最終案は承認できず、カードに「先に決めたいことが 1 件残っています」');
+    //   簡素化（2026-10-17）: 止める理由は今の判定の 1 か所（会話の finalReadiness の理由）。左の最終案のカードと右の「反映」で同じ文
+    const holdText = '先に決めたいことが 1 件残っています。答えると反映できるようになります。';
+    assert(b.panel.applyHold() === holdText && !approvedB && arB.button && arB.button.disabled && writes(b).length === 0 && FS.readyOf(b.conv().activePlan()) === false && /先に決めたいことが 1 件残っています。答えると反映できるようになります。/.test(b.chat()), 'blocking の確認事項が残っている: applyHold に理由・最終案は承認できず、カードに「先に決めたいことが 1 件残っています」');
     assert(!/id="kt-ai-exec-start"/.test(b.$('kt-ai-exec').innerHTML) && b.$('kt-ai-exec').innerHTML.includes(holdText), 'blocking の確認事項が残っている: 右の「反映」に反映の操作は無く、止めている理由を表示（最終案のカードの［動作テスト環境へ反映］も押せない）');
     assert(b.panel.executorState().stage === 'idle' && !arB.run && writes(b).length === 0, 'blocking の確認事項が残っている: ［動作テスト環境へ反映］を押しても準備しない（書き込み 0）');
     // 最終案のカードの回答欄に答えて［回答を送る］→ 直した最終案（確認事項なし）では承認・反映できる

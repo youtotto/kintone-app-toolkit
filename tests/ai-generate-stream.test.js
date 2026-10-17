@@ -21,6 +21,8 @@
 'use strict';
 process.on('unhandledRejection', (e) => { if (/kintone is not defined/.test(String(e && e.message))) return; console.error(e); process.exit(1); });
 const { loadToolkit, makeAssert } = require('./helpers/load-toolkit.js');
+//   簡素化（2026-10-17）: 反映できるかは、最新の版なら会話の今の判定、前の版なら最終案の記録で確かめる（tests/helpers/final-state.js）
+const FS = require('./helpers/final-state.js');
 const { gwCandidateHash } = require('./helpers/gw-hash.js');
 const T = loadToolkit();
 const { KTAiConversation, KTAiClient, KTAiBudget, KTAiChatUi, KTContext, KTScan } = T;
@@ -209,8 +211,8 @@ await section(async () => {
     return { seen, v };
   };
   const withMark = await run(HEALTH_S), without = await run(K.HEALTH_V);
-  assert(withMark.seen.length === 1 && withMark.seen[0].onEvent === 'function' && withMark.v && withMark.v.final && withMark.v.final.approvable === true, `S1-6: 印のある接続先: 画面の generate は client に onEvent を渡す（最終案は今までどおり承認できる）: ${JSON.stringify(withMark.seen)}`);
-  assert(without.seen.length === 1 && without.seen[0].onEvent === 'undefined' && !/onEvent/.test(without.seen[0].keys) && without.v && without.v.final && without.v.final.approvable === true, `S1-7: 印の無い接続先（古い Gateway）: onEvent を渡さない（Accept を付けない・JSON のまま）: ${JSON.stringify(without.seen)}`);
+  assert(withMark.seen.length === 1 && withMark.seen[0].onEvent === 'function' && withMark.v && withMark.v.final && FS.readyOf(withMark.v) === true, `S1-6: 印のある接続先: 画面の generate は client に onEvent を渡す（最終案は今までどおり承認できる）: ${JSON.stringify(withMark.seen)}`);
+  assert(without.seen.length === 1 && without.seen[0].onEvent === 'undefined' && !/onEvent/.test(without.seen[0].keys) && without.v && without.v.final && FS.readyOf(without.v) === true, `S1-7: 印の無い接続先（古い Gateway）: onEvent を渡さない（Accept を付けない・JSON のまま）: ${JSON.stringify(without.seen)}`);
 });
 await section(async () => {
   //   レビューの指摘 3（2026-10-14）: progress の相対 ms の起点は transport と同じ（rawRequest の t0 = token を取った後）。偽の getToken に待ちを入れても、
@@ -271,7 +273,7 @@ await section(async () => {
   const keys = x.c.progress().stages.map(s => `${s.key}:${s.state}`).join(',');
   g.open(); const r = await p; await K.ticks(6);
   const v = x.c.activePlan();
-  assert(r.ok && keys === 'plan:done,generate:active,summarize:todo' && x.c.progress() === null && v.final.approvable === true && x.calls.ask.length === 0 && (v.openQuestions || []).length === 0 && !x.c.messages().some(m => m.type === 'ERROR'), `S2-12: 知らない通知は無視・段階の構造は変えない（計画 → generate → summarize）・完了で進みのカードは消える・質問は増えない: ${JSON.stringify({ keys, final: v.final && v.final.approvable })}`);
+  assert(r.ok && keys === 'plan:done,generate:active,summarize:todo' && x.c.progress() === null && FS.readyOf(v) === true && x.calls.ask.length === 0 && (v.openQuestions || []).length === 0 && !x.c.messages().some(m => m.type === 'ERROR'), `S2-12: 知らない通知は無視・段階の構造は変えない（計画 → generate → summarize）・完了で進みのカードは消える・質問は増えない: ${JSON.stringify({ keys, final: v.final && FS.readyOf(v) })}`);
 });
 
 // =========================================================
@@ -284,7 +286,7 @@ await section(async () => {
   const chat = m.chat(), vis = visibleText(chat);
   const gEntry = ledgerOf(storage) ? ledgerOf(storage).entries.find(e => e.kind === 'generate') : null;
   assert(gw.seen.generate.length === 1 && gw.seen.generate[0].accept === 'text/event-stream' && gw.seen.generate[0].ctx.customization.customizationId === 'C1' && gw.seen.plan.length === 1 && gw.seen.ask === 0, `S3-1: 生成の要求は Accept: text/event-stream で 1 件（C1）だけ。C2 は送らない（後続 0）・計画の AI は増えない: ${JSON.stringify({ gen: gw.seen.generate.map(g => [g.ctx.customization.customizationId, g.accept]), plan: gw.seen.plan.length })}`);
-  assert(fin && fin.approvable === false && fin.incomplete && fin.incomplete.kind === 'timeout' && fin.incomplete.stoppedAt === 'C1' && JSON.stringify(fin.incomplete.notStarted) === '["C2"]' && v.generated.C1.status === 'failed' && v.generated.C1.failure.stop === 'timeout' && v.generated.C1.failure.endUnknown === true && !v.generated.C2, `S3-2: SSE の error（Gateway の期限）は時間切れ（stopKindOf timeout）→ 未完成の最終案（止めた C1・作っていない C2・終了不明）: ${JSON.stringify(fin && fin.incomplete)}`);
+  assert(fin && FS.readyOf(fin) === false && fin.incomplete && fin.incomplete.kind === 'timeout' && fin.incomplete.stoppedAt === 'C1' && JSON.stringify(fin.incomplete.notStarted) === '["C2"]' && v.generated.C1.status === 'failed' && v.generated.C1.failure.stop === 'timeout' && v.generated.C1.failure.endUnknown === true && !v.generated.C2, `S3-2: SSE の error（Gateway の期限）は時間切れ（stopKindOf timeout）→ 未完成の最終案（止めた C1・作っていない C2・終了不明）: ${JSON.stringify(fin && fin.incomplete)}`);
   const b = restButtonOf(chat);
   //   2026-10-14 の設計し直し（指示書 §1.4）: 作成途中のカード（できたもの・止めたもの・理由・残りの件数。「未完成」の見出しと説明の文は無い）
   assert(/作成途中/.test(vis) && !/未完成/.test(vis) && b && !b.disabled && /まだできた JavaScript はありません。JavaScriptの作成中に、AIの応答が時間切れになりました。JavaScript 2は手を付けていません。/.test(vis) && /残り 2 件から再開できます/.test(vis) && (v.openQuestions || []).length === 0, `S3-3: 次の操作は［残りの JavaScript を作る］1 つ（残り 2 件・できた JavaScript は無し）。質問は増やさない: ${vis.replace(/\s+/g, ' ').slice(0, 240)}`);
@@ -301,7 +303,7 @@ await section(async () => {
   const { m, gw, v } = await mountReal({ onGenerate });
   const fin = v && v.final;
   const call = lastCalls(m.conv()).find(c => c.kind === 'generate');
-  assert(gw.seen.generate.length === 1 && fin && fin.approvable === false && fin.incomplete && fin.incomplete.kind === 'disconnected' && fin.incomplete.stoppedAt === 'C1' && JSON.stringify(fin.incomplete.notStarted) === '["C2"]' && v.generated.C1.failure.stop === 'disconnected' && v.generated.C1.failure.endUnknown === true && !v.generated.C1.generated, `S4-1: done が無いまま終わった SSE は TRANSPORT_ERROR → 切断として止める（後続 0・終了不明・途中の断片は候補にしない）: ${JSON.stringify(fin && fin.incomplete)}`);
+  assert(gw.seen.generate.length === 1 && fin && FS.readyOf(fin) === false && fin.incomplete && fin.incomplete.kind === 'disconnected' && fin.incomplete.stoppedAt === 'C1' && JSON.stringify(fin.incomplete.notStarted) === '["C2"]' && v.generated.C1.failure.stop === 'disconnected' && v.generated.C1.failure.endUnknown === true && !v.generated.C1.generated, `S4-1: done が無いまま終わった SSE は TRANSPORT_ERROR → 切断として止める（後続 0・終了不明・途中の断片は候補にしない）: ${JSON.stringify(fin && fin.incomplete)}`);
   assert(call && call.end === 'unknown' && call.code === 'TRANSPORT_ERROR' && call.via === 'direct-stream' && call.progress && Number.isFinite(call.progress.textAt) && call.progress.doneAt === null && call.progress.events === 5, `S4-2: 呼び出しの記録: 本文は届き始めていた（textAt あり）が完了していない（doneAt null）。失敗した要求でも受けた経路（via direct-stream）が残る: ${JSON.stringify(call && { via: call.via, progress: call.progress })}`);
   assert(/の作成中に、AIサービスとの通信が切れました。/.test(visibleText(m.chat())) && /残り 2 件から再開できます/.test(visibleText(m.chat())), 'S4-3: 利用者には切断の理由と残りの件数（部品名は出さない。2026-10-14: 作成途中のカードの文）');
 });
@@ -311,7 +313,7 @@ await section(async () => {
   const { m, gw, v } = await mountReal({ onGenerate });
   const fin = v && v.final;
   const calls = lastCalls(m.conv()).filter(c => c.kind === 'generate');
-  assert(gw.seen.generate.length === 2 && gw.seen.generate.every(g => g.accept === 'text/event-stream') && fin && fin.approvable === true && !fin.incomplete && v.generated.C1.status === 'verified' && v.generated.C2.status === 'verified', `S4-4: 正常な SSE では 2 本とも検証済み・承認できる最終案（done の本文を候補にする）: ${JSON.stringify({ gen: gw.seen.generate.length, st: [v.generated.C1 && v.generated.C1.status, v.generated.C2 && v.generated.C2.status], inc: fin && fin.incomplete })}`);
+  assert(gw.seen.generate.length === 2 && gw.seen.generate.every(g => g.accept === 'text/event-stream') && fin && FS.readyOf(fin) === true && !fin.incomplete && v.generated.C1.status === 'verified' && v.generated.C2.status === 'verified', `S4-4: 正常な SSE では 2 本とも検証済み・承認できる最終案（done の本文を候補にする）: ${JSON.stringify({ gen: gw.seen.generate.length, st: [v.generated.C1 && v.generated.C1.status, v.generated.C2 && v.generated.C2.status], inc: fin && fin.incomplete })}`);
   assert(calls.length === 2 && calls.every(c => c.end === 'ok' && c.progress && c.progress.events === 8 && ['sentAt', 'headersAt', 'startedAt', 'textAt', 'lastAt', 'doneAt', 'verifyAt', 'verifyDoneAt'].every(k => Number.isFinite(c.progress[k]))), `S4-5: 呼び出しの記録に progress の全部の印（相対 ms）: ${JSON.stringify(calls.map(c => c.progress))}`);
   assert(gw.seen.propose.length >= 3 && gw.seen.propose.every(p => p.accept === 'text/event-stream') && !/undefined/.test(m.chat()), `S4-6: 会話の逐次表示（仮案の SSE: delta → done）は実際の client で今までどおり届く: ${JSON.stringify(gw.seen.propose.map(p => p.accept))}`);
   assert(!NO_BODY.test(JSON.stringify(m.conv().state.metrics.timings.slice(-1)[0])), 'S4-7: 呼び出しの記録に本文を入れない');
@@ -324,7 +326,7 @@ await section(async () => {
   const x = makeConvC({ planImpl: planJs3, generate: gen });
   await sendUntilAdopt(x);
   const v = x.c.activePlan();
-  assert(v.generated.C1.status === 'verified' && v.generated.C2.status === 'verified' && v.generated.C3.status === 'failed' && v.generated.C3.failure.stop === 'timeout' && v.final.incomplete && v.final.incomplete.stoppedAt === 'C3' && v.final.incomplete.notStarted.length === 0 && v.final.approvable === false, `S5-1: 完了した C1・C2 は残し、止めた C3 で未完成: ${JSON.stringify(v.final.incomplete)}`);
+  assert(v.generated.C1.status === 'verified' && v.generated.C2.status === 'verified' && v.generated.C3.status === 'failed' && v.generated.C3.failure.stop === 'timeout' && v.final.incomplete && v.final.incomplete.stoppedAt === 'C3' && v.final.incomplete.notStarted.length === 0 && FS.readyOf(v) === false, `S5-1: 完了した C1・C2 は残し、止めた C3 で未完成: ${JSON.stringify(v.final.incomplete)}`);
   const h = finalHtml(x), vis = visibleText(h);
   const b = restButtonOf(h);
   //   2026-10-14 の設計し直し（指示書 §1.4）: 作成途中のカードは、できたもの（手順の title）・止めたもの・理由・残り n 件（押したときに実際に作る数）の短い文
@@ -333,7 +335,7 @@ await section(async () => {
   const hashes = [v.generated.C1.candidateHash, v.generated.C2.candidateHash];
   const r2 = await pressRest(x);
   const v2 = x.c.activePlan();
-  assert(r2.ok && r2.intent === I.GENERATE_CODE && x.calls.plan.length === 1 && gen.count('C1') === 1 && gen.count('C2') === 1 && gen.count('C3') === 2 && v2.generated.C1.reused === true && v2.generated.C2.reused === true && v2.generated.C1.candidateHash === hashes[0] && v2.generated.C2.candidateHash === hashes[1] && v2.generated.C3.status === 'verified' && v2.final.approvable === true && !v2.final.incomplete && JSON.stringify(v2.final.changedSince.reused) === '["C1","C2"]' && JSON.stringify(v2.final.changedSince.regenerated) === '["C3"]', `S5-4: ［残りの JavaScript を作る］→ 計画の AI 0 回・C1 / C2 は流用（検証結果もそのまま）・C3 だけ生成 → 承認できる最終案: ${JSON.stringify({ plans: x.calls.plan.length, seen: gen.seen.map(s => s.cid), changed: v2.final.changedSince })}`);
+  assert(r2.ok && r2.intent === I.GENERATE_CODE && x.calls.plan.length === 1 && gen.count('C1') === 1 && gen.count('C2') === 1 && gen.count('C3') === 2 && v2.generated.C1.reused === true && v2.generated.C2.reused === true && v2.generated.C1.candidateHash === hashes[0] && v2.generated.C2.candidateHash === hashes[1] && v2.generated.C3.status === 'verified' && FS.readyOf(v2) === true && !v2.final.incomplete && JSON.stringify(v2.final.changedSince.reused) === '["C1","C2"]' && JSON.stringify(v2.final.changedSince.regenerated) === '["C3"]', `S5-4: ［残りの JavaScript を作る］→ 計画の AI 0 回・C1 / C2 は流用（検証結果もそのまま）・C3 だけ生成 → 承認できる最終案: ${JSON.stringify({ plans: x.calls.plan.length, seen: gen.seen.map(s => s.cid), changed: v2.final.changedSince })}`);
   const ap = x.c.approveFinal(K.approveArgs(v2));
   assert(ap.ok === true, `S5-5: 承認できる: ${JSON.stringify(ap)}`);
 });
@@ -347,7 +349,7 @@ await section(async () => {
   assert(v.final.incomplete && v.final.incomplete.stoppedAt === 'C2' && JSON.stringify(v.final.incomplete.notStarted) === '["C3"]' && /JavaScriptはできました。モバイルの編集制御の作成中に、AIの応答が時間切れになりました。モバイルの入力チェックは手を付けていません。/.test(vis) && /残り 2 件から再開できます/.test(vis), `S5-6: 止めた 1 件＋作っていない 1 件 = 残り 2 件（未着手は「手を付けていません」の 1 文）: ${vis.replace(/\s+/g, ' ').slice(0, 240)}`);
   await pressRest(x);
   const v2 = x.c.activePlan();
-  assert(x.calls.plan.length === 1 && gen.count('C1') === 1 && gen.count('C2') === 2 && gen.count('C3') === 1 && v2.generated.C1.reused === true && v2.generated.C2.status === 'verified' && v2.generated.C3.status === 'verified' && v2.final.approvable === true, `S5-7: 押すと C1 は流用・C2 と C3 を生成: ${JSON.stringify({ seen: gen.seen.map(s => s.cid) })}`);
+  assert(x.calls.plan.length === 1 && gen.count('C1') === 1 && gen.count('C2') === 2 && gen.count('C3') === 1 && v2.generated.C1.reused === true && v2.generated.C2.status === 'verified' && v2.generated.C3.status === 'verified' && FS.readyOf(v2) === true, `S5-7: 押すと C1 は流用・C2 と C3 を生成: ${JSON.stringify({ seen: gen.seen.map(s => s.cid) })}`);
 });
 await section(async () => {
   //   最初の C1 で止めた: 検証済みは無い → 「検証済みの JavaScript はまだありません」（0 件を「そのまま使います」と言わない）
@@ -365,12 +367,12 @@ await section(async () => {
   await sendUntilAdopt(x);
   const v = x.c.activePlan();
   const vis = visibleText(finalHtml(x));
-  assert(v.generated.C1.status === 'failed' && !v.generated.C1.failure.stop && v.generated.C1.failure.reason === 'GENERATION_DECLINED' && v.generated.C2.status === 'failed' && v.generated.C2.failure.stop === 'timeout' && v.final.incomplete && v.final.incomplete.stoppedAt === 'C2' && JSON.stringify(v.final.incomplete.notStarted) === '["C3"]' && v.final.approvable === false, `S5-9: 前提: C1 は止めない失敗（AI が断った）・C2 で止めた・C3 は作っていない: ${JSON.stringify({ c1: v.generated.C1.failure, inc: v.final.incomplete })}`);
+  assert(v.generated.C1.status === 'failed' && !v.generated.C1.failure.stop && v.generated.C1.failure.reason === 'GENERATION_DECLINED' && v.generated.C2.status === 'failed' && v.generated.C2.failure.stop === 'timeout' && v.final.incomplete && v.final.incomplete.stoppedAt === 'C2' && JSON.stringify(v.final.incomplete.notStarted) === '["C3"]' && FS.readyOf(v) === false, `S5-9: 前提: C1 は止めない失敗（AI が断った）・C2 で止めた・C3 は作っていない: ${JSON.stringify({ c1: v.generated.C1.failure, inc: v.final.incomplete })}`);
   assert(/まだできた JavaScript はありません。モバイルの編集制御の作成中に、AIの応答が時間切れになりました。モバイルの入力チェックは手を付けていません。JavaScriptは作れませんでした。/.test(vis) && /残り 3 件から再開できます/.test(vis) && !/\bC[123]\b/.test(vis) && (v.openQuestions || []).length === 0, `S5-10: 止めたもの・未着手・作れなかったものをそれぞれ 1 文で出し、残りは検証済みでない 3 件（止めた 1 件＋未着手 1 件の 2 件にしない。内部の番号は出さない・質問は増やさない）: ${vis.replace(/\s+/g, ' ').slice(0, 240)}`);
   const before = gen.seen.length;
   const r2 = await pressRest(x);
   const v2 = x.c.activePlan();
-  assert(r2.ok && gen.seen.length - before === 3 && gen.count('C1') === 2 && gen.count('C2') === 2 && gen.count('C3') === 1 && x.calls.plan.length === 1 && ['C1', 'C2', 'C3'].every(cid => v2.generated[cid].status === 'verified' && !v2.generated[cid].reused) && v2.final.approvable === true && !v2.final.incomplete && JSON.stringify(v2.final.changedSince.reused) === '[]' && JSON.stringify(v2.final.changedSince.regenerated) === '["C1","C2","C3"]', `S5-11: 押すと文の件数どおり生成を 3 回呼ぶ（断られた C1 も作り直す。計画の AI 0 回）→ 承認できる最終案: ${JSON.stringify({ seen: gen.seen.slice(before).map(s => s.cid), plans: x.calls.plan.length, changed: v2.final.changedSince })}`);
+  assert(r2.ok && gen.seen.length - before === 3 && gen.count('C1') === 2 && gen.count('C2') === 2 && gen.count('C3') === 1 && x.calls.plan.length === 1 && ['C1', 'C2', 'C3'].every(cid => v2.generated[cid].status === 'verified' && !v2.generated[cid].reused) && FS.readyOf(v2) === true && !v2.final.incomplete && JSON.stringify(v2.final.changedSince.reused) === '[]' && JSON.stringify(v2.final.changedSince.regenerated) === '["C1","C2","C3"]', `S5-11: 押すと文の件数どおり生成を 3 回呼ぶ（断られた C1 も作り直す。計画の AI 0 回）→ 承認できる最終案: ${JSON.stringify({ seen: gen.seen.slice(before).map(s => s.cid), plans: x.calls.plan.length, changed: v2.final.changedSince })}`);
 });
 
 // =========================================================

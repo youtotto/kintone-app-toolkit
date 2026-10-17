@@ -20,6 +20,8 @@ const ignoreNoKintone = (e) => { if (/kintone is not defined/.test(String(e && e
 process.on('unhandledRejection', ignoreNoKintone);
 process.on('uncaughtException', ignoreNoKintone);
 const { loadToolkit, makeAssert } = require('./helpers/load-toolkit.js');
+//   簡素化（2026-10-17）: 反映できるかは、最新の版なら会話の今の判定、前の版なら最終案の記録で確かめる（tests/helpers/final-state.js）
+const FS = require('./helpers/final-state.js');
 const { withDevBase } = require('./helpers/dev-base-fake.js');
 const { makeFakeHost } = require('./helpers/fake-dom.js');
 const T = loadToolkit();
@@ -465,7 +467,7 @@ console.log('\n--- CX-7. 外部サービス / 外部システムとの連携は�
   const xExt = K.makeConvC({ planImpl: () => ({ plan: clone(p), ctx: null, review: reviewOf(p), turn: { reply: '計画を作りました。', requirementOps: [], utteranceCoverage: [] } }) });
   await K.adoptC(xExt);
   const extCard = K.stripC(K.finalHtml(xExt));
-  assert(/Toolkit では JavaScript を作れない部分があります/.test(extCard) && /会計システム/.test(extCard) && !/コードを生成できます/.test(extCard) && xExt.gen.calls.length === 0 && !xExt.c.activePlan().final.approvable, `案内: 生成できない項目しか無ければ「コードを生成できます」と言わない（最終案のカード・生成は呼ばない）: ${extCard.replace(/\s+/g, ' ').slice(0, 160)}`);
+  assert(/Toolkit では JavaScript を作れない部分があります/.test(extCard) && /会計システム/.test(extCard) && !/コードを生成できます/.test(extCard) && xExt.gen.calls.length === 0 && !FS.readyOf(xExt.c.activePlan()), `案内: 生成できない項目しか無ければ「コードを生成できます」と言わない（最終案のカード・生成は呼ばない）: ${extCard.replace(/\s+/g, ' ').slice(0, 160)}`);
 }
 
 // =========================================================

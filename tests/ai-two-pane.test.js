@@ -186,10 +186,11 @@ console.log('\n--- §4. 先に確認したいこと（blocking）が残ってい
   await ticks();
   await adopt(m);
   const hold = m.panel.applyHold();
-  assert(/先に確認したいことが 1 件残っています/.test(hold || ''), `反映を止める理由: ${hold}`);
+  //   簡素化（2026-10-17）: 止める理由は今の判定の 1 か所（会話の finalReadiness の理由）。左の最終案のカードと右の「反映」で同じ文
+  assert(/先に決めたいことが 1 件残っています/.test(hold || ''), `反映を止める理由: ${hold}`);
   //   C-1 第 3 段: 手順ごとの承認（decide）ではなく最終案の承認。先に決めたいことが残る最終案は承認できない
   const ar4 = await K.applyOnScreen(m);
-  assert(ar4.button && ar4.button.disabled && !m.conv().activePlan().approval && m.panel.executorState().stage === 'idle' && writes(m).length === 0 && !/id="kt-ai-exec-start"/.test(m.$('kt-ai-exec').innerHTML) && /先に確認したいことが 1 件残っています/.test(m.$('kt-ai-exec').innerHTML), '［動作テスト環境へ反映］は押せず、承認も準備もしない（書き込み 0）・右の「反映」に理由を出す');
+  assert(ar4.button && ar4.button.disabled && !m.conv().activePlan().approval && m.panel.executorState().stage === 'idle' && writes(m).length === 0 && !/id="kt-ai-exec-start"/.test(m.$('kt-ai-exec').innerHTML) && /先に決めたいことが 1 件残っています/.test(m.$('kt-ai-exec').innerHTML) && /先に決めたいことが 1 件残っています/.test(m.chat()), '［動作テスト環境へ反映］は押せず、承認も準備もしない（書き込み 0）・右の「反映」と左の最終案のカードに同じ理由を出す');
   //   C-1 第 3 段: 確認したいことのカード（questions）は削除した。最終案のカードの「残る判断」と［この内容で反映する］の理由で知らせる（R10-1・R19-5）。
   //   計画の確認事項のおすすめ（recommendation）は、最終案のカードの「残る判断」に添える（以前は確認したいことのカードに出た）
   const fin = K.stripC(m.chat());

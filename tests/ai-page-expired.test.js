@@ -20,6 +20,8 @@
 'use strict';
 process.on('unhandledRejection', (e) => { if (/kintone is not defined/.test(String(e && e.message))) return; console.error(e); process.exit(1); });
 const { loadToolkit, makeAssert } = require('./helpers/load-toolkit.js');
+//   簡素化（2026-10-17）: 反映できるかは、最新の版なら会話の今の判定、前の版なら最終案の記録で確かめる（tests/helpers/final-state.js）
+const FS = require('./helpers/final-state.js');
 const T = loadToolkit();
 const { KTAiConversation, KTAiClient, KTAiBudget, KTAiChatUi, KTContextUi } = T;
 const { assert, state } = makeAssert();
@@ -256,7 +258,7 @@ await section(async () => {
   await sendUntilAdopt(x);
   const v = x.c.activePlan();
   const inc = v.final && v.final.incomplete;
-  assert(v.generated.C1.status === 'verified' && v.generated.C2.status === 'verified' && v.generated.C3.status === 'failed' && v.generated.C3.failure.reason === C.PAGE_EXPIRED && v.generated.C3.failure.stop === 'page' && !v.generated.C3.failure.endUnknown && inc && inc.kind === 'page' && inc.stoppedAt === 'C3' && v.final.approvable === false, `P4-1: C3 の前の接続の更新が PAGE_EXPIRED → 止める理由 page（終了不明にしない）。C1 / C2 は検証済みのまま・C3 の失敗の記録を残す: ${JSON.stringify({ C3: v.generated.C3.failure, inc })}`);
+  assert(v.generated.C1.status === 'verified' && v.generated.C2.status === 'verified' && v.generated.C3.status === 'failed' && v.generated.C3.failure.reason === C.PAGE_EXPIRED && v.generated.C3.failure.stop === 'page' && !v.generated.C3.failure.endUnknown && inc && inc.kind === 'page' && inc.stoppedAt === 'C3' && FS.readyOf(v) === false, `P4-1: C3 の前の接続の更新が PAGE_EXPIRED → 止める理由 page（終了不明にしない）。C1 / C2 は検証済みのまま・C3 の失敗の記録を残す: ${JSON.stringify({ C3: v.generated.C3.failure, inc })}`);
   const h = finalHtml(x), vis = visibleText(h);
   const b = restButtonOf(h);
   assert(/JavaScript・モバイルの編集制御はできました。モバイルの入力チェックの作成中に、このページの有効期限が切れ、AIとの接続を更新できませんでした。/.test(vis) && /作成済みの内容はこの画面に残っています。再読み込みすると、この会話は失われます。/.test(vis) && /残り 1 件から再開できます。/.test(vis) && b && !b.disabled && !/接続解除|Nest Rec AIに接続|再読み込みしてください|契約/.test(vis) && !/PAGE_EXPIRED|CB_CS01|token/i.test(vis), `P4-2: 作成途中のカード: できたもの・止めたもの・ページの有効期限の理由・作成済みの内容が残ること・再読み込みで会話が失われること（再読み込みや再接続を勧めない。内部の値・契約の語は出さない）: ${vis.replace(/\s+/g, ' ').slice(0, 300)}`);
@@ -265,7 +267,7 @@ await section(async () => {
   //   回復した後（接続の更新が通る）に［残りの JavaScript を作る］→ C3 だけ
   await x.c.send('コードを作って', { intentOverride: I.GENERATE_CODE, displayText: '残りの JavaScript を作る' });
   const v2 = x.c.activePlan();
-  assert(x.calls.plan.length === 1 && gen.count('C1') === 1 && gen.count('C2') === 1 && gen.count('C3') === 2 && v2.generated.C1.reused === true && v2.generated.C2.reused === true && v2.generated.C1.candidateHash === hashes[0] && v2.generated.C2.candidateHash === hashes[1] && v2.generated.C3.status === 'verified' && v2.final.approvable === true, `P4-4: 回復後の［残りの JavaScript を作る］→ 計画の AI 0 回・C1 / C2 は流用（検証結果もそのまま）・C3 だけ生成 → 承認できる最終案: ${JSON.stringify({ plans: x.calls.plan.length, seen: gen.seen.map(s => `${s.cid}:${s.what}`) })}`);
+  assert(x.calls.plan.length === 1 && gen.count('C1') === 1 && gen.count('C2') === 1 && gen.count('C3') === 2 && v2.generated.C1.reused === true && v2.generated.C2.reused === true && v2.generated.C1.candidateHash === hashes[0] && v2.generated.C2.candidateHash === hashes[1] && v2.generated.C3.status === 'verified' && FS.readyOf(v2) === true, `P4-4: 回復後の［残りの JavaScript を作る］→ 計画の AI 0 回・C1 / C2 は流用（検証結果もそのまま）・C3 だけ生成 → 承認できる最終案: ${JSON.stringify({ plans: x.calls.plan.length, seen: gen.seen.map(s => `${s.cid}:${s.what}`) })}`);
 });
 await section(async () => {
   const S = KTAiConversation;
@@ -297,11 +299,11 @@ await section(async () => {
   const m = K.mount({ health: K.HEALTH_V, planImpl: K.planImplOf(K.screenPlan('js')), generateImpl: sg.impl, clientWrap: (c) => ({ ...c, getHealth: async () => { if (flag.page) throw pageErr(); return c.getHealth(); } }) });
   await K.ticks();
   const v0 = await K.adoptOnScreen(m); await K.ticks(20);
-  const before = v0 && v0.final ? { approvable: v0.final.approvable, gen: Object.fromEntries(Object.entries(v0.generated || {}).map(([k, r]) => [k, r && r.status])) } : null;
+  const before = v0 && v0.final ? { approvable: FS.readyOf(v0), gen: Object.fromEntries(Object.entries(v0.generated || {}).map(([k, r]) => [k, r && r.status])) } : null;
   flag.page = true;
   const cap = await m.panel.refreshCapability({ force: true }); await K.ticks(4);
   const v1 = m.conv().activePlan();
-  const after = v1 && v1.final ? { approvable: v1.final.approvable, gen: Object.fromEntries(Object.entries(v1.generated || {}).map(([k, r]) => [k, r && r.status])) } : null;
+  const after = v1 && v1.final ? { approvable: FS.readyOf(v1), gen: Object.fromEntries(Object.entries(v1.generated || {}).map(([k, r]) => [k, r && r.status])) } : null;
   const head = stripC(m.$('kt-ai-header').innerHTML);
   assert(before && before.approvable === true && cap && cap.available === false && cap.reason === C.PAGE_EXPIRED && after && JSON.stringify(after) === JSON.stringify(before) && v1 === v0, `P5-5: health が PAGE_EXPIRED になっても、生成済みの検証結果と承認できる最終案はそのまま（会話・計画も同じもの）: ${JSON.stringify({ before, after, cap })}`);
   assert(/AI ページの有効期限切れ/.test(head) && !/AI 利用できません/.test(head), `P5-6: 画面のヘッダーは「AI ページの有効期限切れ」: ${head.replace(/\s+/g, ' ').slice(0, 120)}`);

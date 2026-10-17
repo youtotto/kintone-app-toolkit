@@ -18,6 +18,8 @@
 'use strict';
 process.on('unhandledRejection', (e) => { if (/kintone is not defined/.test(String(e && e.message))) return; console.error(e); process.exit(1); });
 const { loadToolkit, makeAssert } = require('./helpers/load-toolkit.js');
+//   簡素化（2026-10-17）: 反映できるかは、最新の版なら会話の今の判定、前の版なら最終案の記録で確かめる（tests/helpers/final-state.js）
+const FS = require('./helpers/final-state.js');
 const { createNewFlowKit } = require('./helpers/new-flow.js');
 const T = loadToolkit();
 const { KTDeps, KTAiConversation, KTAiAnswers, KTPlanReview, KTAiChatUi } = T;
@@ -163,7 +165,7 @@ await section(async () => {
   const fin = finalText(x).replace(/入れた指示: [^\n]*/g, '');
   const told = c.messages().some(m => /変更案に入っていない可能性がある指示があります：「[^」]*明細の小計の合計と金額がずれていたら/.test(m.text || '') && !KTAiChatUi.isHiddenMessage(m)) || (/明細の小計の合計と金額がずれていたら/.test(fin) && /入っていない|扱いが決まっていない|未解決/.test(fin));
   assert(told, `F2: 扱いが示されなかった文を利用者に知らせる（会話の知らせ、または最終案のカード）: ${fin.slice(0, 200)}`);
-  assert(/変更案に入っていない可能性がある指示/.test(fin) && /明細の小計の合計と金額がずれていたら/.test(fin) && x.c.activePlan().final.approvable === true, `F2: 最終案のカードで「変更案に入っていない可能性がある指示」として知らせる（承認は止めない）: ${fin.slice(0, 300)}`);
+  assert(/変更案に入っていない可能性がある指示/.test(fin) && /明細の小計の合計と金額がずれていたら/.test(fin) && FS.readyOf(x.c.activePlan()) === true, `F2: 最終案のカードで「変更案に入っていない可能性がある指示」として知らせる（承認は止めない）: ${fin.slice(0, 300)}`);
   assert(c.metrics().unresolvedClauses === un0 + 1, 'F2: 計測（扱いが示されなかった文）');
 });
 await section(async () => {
@@ -232,7 +234,7 @@ await section(async () => {
   await x.c.send(goal); await ticks();
   const fin = finalText(x);
   const cannotLine = (fin.match(/この案の制約[^\n]*/) || [''])[0];   // 2026-10-14: 計画では対応できないとされた要件は「この案の制約」
-  assert(/計画では対応できないとされた要件/.test(cannotLine) && /CSV の読み込み/.test(cannotLine) && !/R\d/.test(fin) && !x.c.activePlan().final.approvable === false, `F7: 対応できないことがある要件を知らせる（最終案のカードの「実現できない点」・要件の番号なし）: ${cannotLine}`);
+  assert(/計画では対応できないとされた要件/.test(cannotLine) && /CSV の読み込み/.test(cannotLine) && !/R\d/.test(fin) && !FS.readyOf(x.c.activePlan()) === false, `F7: 対応できないことがある要件を知らせる（最終案のカードの「実現できない点」・要件の番号なし）: ${cannotLine}`);
   //   理由（計画の AI の note）は、最終案のカードの「実現できない点」に添える（以前は会話の知らせに出ていた）
   assert(/CSV の読み込みでは JavaScript が動かないため/.test(cannotLine), `F7: 対応できない理由を添える（理由つき）: ${cannotLine}`);
   // 対応できないことが無い要件の変化は出さない（chatHtml も数えない）

@@ -23,6 +23,8 @@ process.on('unhandledRejection', (e) => { if (/kintone is not defined/.test(Stri
 const fs = require('fs');
 const path = require('path');
 const { loadToolkit, makeAssert } = require('./helpers/load-toolkit.js');
+//   簡素化（2026-10-17）: 反映できるかは、最新の版なら会話の今の判定、前の版なら最終案の記録で確かめる（tests/helpers/final-state.js）
+const FS = require('./helpers/final-state.js');
 const { withDevBase } = require('./helpers/dev-base-fake.js');
 const { gwCandidateHash, gwHashOfCtx, withGwHash } = require('./helpers/gw-hash.js');
 const { makeFakeHost, makeFakeDocument } = require('./helpers/fake-dom.js');
@@ -869,11 +871,12 @@ await section(async () => {
   await planOnScreen(m, GOAL);
   const hold = m.panel.applyHold();
   const exec = m.$('kt-ai-exec').innerHTML;
-  assert(hold === '先に確認したいことが 1 件残っています。左の会話で答えると反映できます。' && !/id="kt-ai-exec-start"/.test(exec) && /先に確認したいことが 1 件残っています。/.test(exec) && KF.applyButtonOf(m) && KF.applyButtonOf(m).disabled, `B1: 先に確認したいこと（blocking）が残っている間は［動作テスト環境へ反映］を押せず、理由を出す（右の「反映」にも理由）: ${hold}`);
+  //   簡素化（2026-10-17）: 止める理由は今の判定の 1 か所（会話の finalReadiness の理由）。左の最終案のカードと右の「反映」で同じ文
+  assert(hold === '先に決めたいことが 1 件残っています。答えると反映できるようになります。' && !/id="kt-ai-exec-start"/.test(exec) && exec.includes(hold) && m.chat().includes(hold) && KF.applyButtonOf(m) && KF.applyButtonOf(m).disabled, `B1: 先に確認したいこと（blocking）が残っている間は［動作テスト環境へ反映］を押せず、理由を出す（右の「反映」にも理由）: ${hold}`);
   //   C-1 第 3 段: 変更案のカード・確認事項のカードは最終案のカードに置き換えた（tests/ai-flow-redesign.test.js の R10-1・R10-2）。
   //   最終案のカードが「残る判断」と回答欄を出し、承認できない理由（先に決めたいこと）を示す
   const vB = m.conv().activePlan();
-  assert(/残る判断（1 件）/.test(m.chat()) && /先に決めたいこと/.test(m.chat()) && /class="kt-ai-qa-input" data-qkey="/.test(m.chat()) && vB.final && vB.final.approvable === false && /先に決めたいことが 1 件/.test(vB.final.blockingReason) && /data-act="final-approve"[^>]*disabled/.test(m.chat()), `B1: 最終案のカードでも、先に答えることを案内する（承認のボタンは押せない）: ${vB.final && vB.final.blockingReason}`);
+  assert(/残る判断（1 件）/.test(m.chat()) && /先に決めたいこと/.test(m.chat()) && /class="kt-ai-qa-input" data-qkey="/.test(m.chat()) && vB.final && FS.readyOf(vB) === false && /先に決めたいことが 1 件/.test(FS.reasonOf(vB)) && /data-act="final-approve"[^>]*disabled/.test(m.chat()), `B1: 最終案のカードでも、先に答えることを案内する（承認のボタンは押せない）: ${vB.final && FS.reasonOf(vB)}`);
   const rB1 = await KF.applyOnScreen(m);
   assert(!vB.approval && !rB1.run && m.panel.executorState().stage === 'idle' && writes(m).length === 0, 'B1: 止めている間は［動作テスト環境へ反映］を押しても、承認・反映の準備・書き込みをしない');
   for (const pr of [null, 'later']) {

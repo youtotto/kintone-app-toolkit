@@ -14,6 +14,8 @@
 'use strict';
 process.on('unhandledRejection', (e) => { if (/kintone is not defined/.test(String(e && e.message))) return; console.error(e); process.exit(1); });
 const { loadToolkit, makeAssert } = require('./helpers/load-toolkit.js');
+//   簡素化（2026-10-17）: 反映できるかは、最新の版なら会話の今の判定、前の版なら最終案の記録で確かめる（tests/helpers/final-state.js）
+const FS = require('./helpers/final-state.js');
 const { gwHashOfCtx } = require('./helpers/gw-hash.js');
 const { createNewFlowKit } = require('./helpers/new-flow.js');
 const T = loadToolkit();
@@ -363,7 +365,7 @@ const clickCode = (m, id) => m.$('kt-ai-pane-code').dispatch({ type: 'click', ta
   const m = mountV();
   await ticks();
   const v = await K.adoptOnScreen(m);
-  assert(v && v.final && v.fromDraft && m.calls2.plan.length === 1 && m.calls2.generate.length === 1 && v.generated.C1.status === 'verified' && v.final.approvable === true, `前提: 仮案を採用すると計画 1 回・生成 1 回で最終案まで進み、承認できる: ${JSON.stringify({ final: !!(v && v.final), plan: m.calls2.plan.length, gen: m.calls2.generate.length })}`);
+  assert(v && v.final && v.fromDraft && m.calls2.plan.length === 1 && m.calls2.generate.length === 1 && v.generated.C1.status === 'verified' && FS.readyOf(v) === true, `前提: 仮案を採用すると計画 1 回・生成 1 回で最終案まで進み、承認できる: ${JSON.stringify({ final: !!(v && v.final), plan: m.calls2.plan.length, gen: m.calls2.generate.length })}`);
   assert(v.plan.solution === 'HYBRID' && v.plan.customizations.length === 1 && v.review && v.review.hybrid.solution === 'HYBRID', '計画の版: solution HYBRID・customizations 1・Toolkit Review に hybrid');
   const html = m.chat();
   const fin = finalText(m);
@@ -443,7 +445,7 @@ console.log('\n--- §53-2. 複数のカスタマイズ / カスタマイズの�
   //   owner の処理が無いことは生成工程の必須の効果（missing）で登録不可になる（計画に無い書き換えは生成工程の plan-consistency。生成した AI の申告で見る）
   assert(c2.review.status === 'BLOCKED' && c2.review.registration.verdict === 'BLOCKED' && c2.review.checks.some(x => x.name === 'required-effects' && !x.ok && x.severity === 'block' && /owner/.test(x.message)) && !c2.review.checks.some(x => x.name === 'planned-fields' || x.name === 'target-fields'), `C2 なのに amount を制御する patch: owner の処理が無い → 生成工程の必須の効果の missing で登録不可: ${JSON.stringify(c2.review.checks.filter(x => !x.ok).map(x => x.name))}`);
   const fin = finalText(m);
-  assert(v.final.approvable === false && v.generated.C1.status === 'verified' && v.generated.C2.status !== 'verified' && /確認できないこと／反映を止めている理由/.test(fin) && /要件未達（「担当者」: 編集できないようにする）/.test(fin) && !/C1|C2/.test(textOf(m.chat())), `最終案のカード: C2 は要件未達で承認できない（C1 は検証済み。内部の番号は会話に出さない）: ${fin.slice(fin.indexOf('実現できない点'), fin.indexOf('実現できない点') + 160)}`);
+  assert(FS.readyOf(v) === false && v.generated.C1.status === 'verified' && v.generated.C2.status !== 'verified' && /確認できないこと／反映を止めている理由/.test(fin) && /要件未達（「担当者」: 編集できないようにする）/.test(fin) && !/C1|C2/.test(textOf(m.chat())), `最終案のカード: C2 は要件未達で承認できない（C1 は検証済み。内部の番号は会話に出さない）: ${fin.slice(fin.indexOf('実現できない点'), fin.indexOf('実現できない点') + 160)}`);
   m.panel.showCode('C2', { view: 'code' });
   assert(/× 採用不可/.test(m.$('kt-ai-code-head').innerHTML), '右の「コード」: × 採用不可。登録ボタンは出ない');
   // 計画の修正（カスタマイズの対象をモバイルにも）→ 新しい版。前の版の生成結果は新しい版に引き継がない
@@ -466,7 +468,7 @@ console.log('\n--- §53-2. 複数のカスタマイズ / カスタマイズの�
   //   簡素化 D: 「全体」の件数（安全区分から別に数えた件数）は削除した。生成できないことは手順の判定（コード生成はまだできません）で出す
   assert(/コード生成はまだできません/.test(m.$('kt-ai-review-result').innerHTML) && !/コード生成可能/.test(m.$('kt-ai-review-result').innerHTML) && !/kt-ai-review-card/.test(m.chat()), 'JS のコード生成の可否: 右の「確認結果」の手順の判定に「コード生成はまだできません」（別に数えた件数は出さない）');
   const fin = finalText(m);
-  assert(v && v.final && v.final.approvable === false && m.calls2.generate.length === 0 && /Toolkit では JavaScript を作れない部分があります: 承認後（完了）は金額を編集できなくする（PC かモバイルかが未定）/.test(fin) && !/問題は見つかりませんでした/.test(fin), `最終案のカード: 作れない理由（PC かモバイルかが未定）を出し、承認できない（生成工程は呼ばない）: ${fin.slice(fin.indexOf('実現できない点'), fin.indexOf('実現できない点') + 160)}`);
+  assert(v && v.final && FS.readyOf(v) === false && m.calls2.generate.length === 0 && /Toolkit では JavaScript を作れない部分があります: 承認後（完了）は金額を編集できなくする（PC かモバイルかが未定）/.test(fin) && !/問題は見つかりませんでした/.test(fin), `最終案のカード: 作れない理由（PC かモバイルかが未定）を出し、承認できない（生成工程は呼ばない）: ${fin.slice(fin.indexOf('実現できない点'), fin.indexOf('実現できない点') + 160)}`);
   const g = await m.panel.send('コードを作って');
   assert(g.ok === false && m.calls2.generate.length === 0 && m.msgs().some(x => x.data?.kind === 'generate-not-needed') && !/\bC1\b/.test(m.chat().replace(/<details[\s\S]*?<\/details>/g, '').replace(/data-[a-z-]+="[^"]*"/g, '')), '生成不可の JavaScript は「コードを作って」でも Generator を呼ばない（理由は最終案の「実現できない点」。カスタマイズの番号は出さない）');
 }
@@ -484,7 +486,7 @@ console.log('\n--- §53-2. 複数のカスタマイズ / カスタマイズの�
   assert(/設定の変更はありません/.test(m.$('kt-ai-change-summary').innerHTML) && /新しい JavaScript「amountWarning\.js」を登録/.test(m.$('kt-ai-change-summary').innerHTML) && /＋ 新規 JS/.test(m.$('kt-ai-review-result').innerHTML) && v.plan.solution === 'CUSTOMIZATION', '新規 JS の計画: 最終案のカードは「設定の変更はありません」・新しい JavaScript を登録。右の「確認結果」に ＋ 新規 JS・solution CUSTOMIZATION');
   assert(m.calls2.generate.length === 1 && m.panel.generated('C1').review.status === 'BLOCKED' && m.panel.generated('C1').review.checks.some(x => x.name === 'behavior-fail' && !x.ok) && m.panel.generated('C1').review.checks.some(x => x.name === 'fields' && x.gateway && !x.ok), `Generator の応答に未知フィールド → 生成工程の結果（模擬テストの不合格・fields の確認）で BLOCKED: ${JSON.stringify(m.panel.generated('C1').review.checks.filter(x => !x.ok).map(x => x.name))}`);
   m.panel.showCode('C1', { view: 'code' });
-  assert(v.final.approvable === false && /模擬テストで、必須の動作のとおりに動きませんでした/.test(fin) && /計画か実装仕様/.test(fin) && /× 採用不可/.test(m.$('kt-ai-code-head').innerHTML) && /アプリに無いフィールドコード/.test(m.$('kt-ai-code-review').innerHTML), `最終案のカード: 承認できない・次の方針（計画か実装仕様を見直す）。理由（生成工程の fields の確認）は右の「コード」。登録ボタンは出ない: ${v.final.approvable} ${String(fin).replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').slice(0, 400)}`);
+  assert(FS.readyOf(v) === false && /模擬テストで、必須の動作のとおりに動きませんでした/.test(fin) && /計画か実装仕様/.test(fin) && /× 採用不可/.test(m.$('kt-ai-code-head').innerHTML) && /アプリに無いフィールドコード/.test(m.$('kt-ai-code-review').innerHTML), `最終案のカード: 承認できない・次の方針（計画か実装仕様を見直す）。理由（生成工程の fields の確認）は右の「コード」。登録ボタンは出ない: ${FS.readyOf(v)} ${String(fin).replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').slice(0, 400)}`);
   await clickCode(m, 'kt-ai-code-copy');
   assert(m.copies.length === 1, 'BLOCKED でもコードの確認（コピー）はできる（登録はしない）');
 }
@@ -499,14 +501,14 @@ console.log('\n--- §53-3. 統合先の本文を取得できない / 契約に�
   assert(v.review.steps.find(r => r.solution === 'CUSTOMIZATION').codeGeneration.sourceAvailable === false && v.review.steps.find(r => r.solution === 'CUSTOMIZATION').codeGeneration.supported === true, 'キャッシュ payload: 本文なし（生成は試みる）');
   // 2026-10-06: 会話は利用者の言葉だけ（JS_SOURCE_UNAVAILABLE の文字は出さない。失敗の理由は生成結果に残る）
   const fin = finalText(m);
-  assert(m.calls2.generate.length === 0 && v.generated.C1.status === 'failed' && v.generated.C1.failure.reason === 'JS_SOURCE_UNAVAILABLE' && v.final.approvable === false && /JavaScript を生成できませんでした: 統合先の既存の JavaScript の本文を取得できませんでした/.test(fin) && !/JS_SOURCE_UNAVAILABLE/.test(m.chat()), '本文を取得できない: Generator を呼ばず（既存ファイルへの推測の生成はしない）、最終案のカードに取得できない旨（内部の名前 JS_SOURCE_UNAVAILABLE は会話に出さない）・承認できない');
+  assert(m.calls2.generate.length === 0 && v.generated.C1.status === 'failed' && v.generated.C1.failure.reason === 'JS_SOURCE_UNAVAILABLE' && FS.readyOf(v) === false && /JavaScript を生成できませんでした: 統合先の既存の JavaScript の本文を取得できませんでした/.test(fin) && !/JS_SOURCE_UNAVAILABLE/.test(m.chat()), '本文を取得できない: Generator を呼ばず（既存ファイルへの推測の生成はしない）、最終案のカードに取得できない旨（内部の名前 JS_SOURCE_UNAVAILABLE は会話に出さない）・承認できない');
   // 本文を取得できるようになったら、「コードを作って」（最終案の作り直し）で同じカスタマイズのコードを生成する
   available = true;
   const g = await m.panel.send('コードを作って'); await ticks(8);
   const v2 = m.conv().activePlan();
   assert(g.intent === KTAiConversation.INTENT.GENERATE_CODE && m.calls2.generate.length === 1 && m.calls2.generate[0].ctx.existingFile?.source === FIELD_ON_OFF && !!m.panel.generated('C1', v2)?.generated && !m.panel.generated('C1', v2).review.checks.some(c => !c.ok && c.name !== 'behavior-not-run'), '本文を取得できる → 「コードを作って」で同じカスタマイズのコードを生成（Toolkit の形式確認で問題なし）');
   //   キャッシュの解析（本文なし）では、同じ画面の既存 JS（common.js）の本文も模擬テストに渡せない。新しい流れでは、これをコードの誤りとせず「対応できない範囲」で準備未完了にする
-  assert(v2.generated.C1.status === 'not-run' && v2.generated.C1.verdict.reasonKey === 'related-file-omitted' && /common\.js/.test(v2.generated.C1.verdict.reason) && v2.final.approvable === false, `同じ画面の既存 JS を模擬テストに渡せない → 準備未完了（コードの誤りとはしない）: ${JSON.stringify(v2.generated.C1.verdict && { kind: v2.generated.C1.verdict.kind, key: v2.generated.C1.verdict.reasonKey })}`);
+  assert(v2.generated.C1.status === 'not-run' && v2.generated.C1.verdict.reasonKey === 'related-file-omitted' && /common\.js/.test(v2.generated.C1.verdict.reason) && FS.readyOf(v2) === false, `同じ画面の既存 JS を模擬テストに渡せない → 準備未完了（コードの誤りとはしない）: ${JSON.stringify(v2.generated.C1.verdict && { kind: v2.generated.C1.verdict.kind, key: v2.generated.C1.verdict.reasonKey })}`);
 }
 {
   const h = K.clone(HEALTH_V); h.entitlements = [{ product: 'toolkit', features: ['assistant-qa', 'change-planner'] }];
@@ -514,7 +516,7 @@ console.log('\n--- §53-3. 統合先の本文を取得できない / 契約に�
   await ticks();
   const v = await K.adoptOnScreen(m);
   const fin = finalText(m);
-  assert(m.calls2.generate.length === 0 && v.generated.C1.status === 'failed' && v.generated.C1.failure.reason === 'GENERATOR_NOT_AVAILABLE' && /JavaScript の生成」を利用できません/.test(fin) && v.final.approvable === false, '契約に customization-generator が無い: GENERATOR_NOT_AVAILABLE（Generator を呼ばない。Planner / Q&A は使える）');
+  assert(m.calls2.generate.length === 0 && v.generated.C1.status === 'failed' && v.generated.C1.failure.reason === 'GENERATOR_NOT_AVAILABLE' && /JavaScript の生成」を利用できません/.test(fin) && FS.readyOf(v) === false, '契約に customization-generator が無い: GENERATOR_NOT_AVAILABLE（Generator を呼ばない。Planner / Q&A は使える）');
   // 2026-10-06: エラーの番号は本文に出さない（[CODE] の形では出さない）
   assert(!/\[GENERATOR_NOT_AVAILABLE\]/.test(m.chat()) && !/GENERATOR_NOT_AVAILABLE/.test(fin), '最終案のカード: GENERATOR_NOT_AVAILABLE の番号は本文に出さない');
   assert(m.panel.capability().features['customization-generator']?.available === false && m.panel.capability().features['change-planner']?.available === true, 'capability: generator だけ利用不可');
@@ -526,7 +528,7 @@ console.log('\n--- §53-3. 統合先の本文を取得できない / 契約に�
   const v = await K.adoptOnScreen(m);
   const fin = finalText(m);
   //   §0f.3 の 1（2026-10-09）: RATE_LIMITED はこの送信を止める失敗（rate）。最終案は未完成で、止めた理由と次の手（［残りの JavaScript を作る］= もう一度作る）を出す
-  assert(m.calls2.generate.length === 1 && v.generated.C1.status === 'failed' && v.generated.C1.failure.reason === 'RATE_LIMITED' && v.generated.C1.failure.stop === 'rate' && !v.generated.C1.generated && v.final.approvable === false && v.final.incomplete && v.final.incomplete.kind === 'rate' && /作成途中/.test(fin) && /の作成中に、AIサービスへのアクセスが集中しています。/.test(fin) && /残りの JavaScript を作る/.test(fin), `Gateway の RATE_LIMITED: 作成途中のカードに止めた理由と次の操作（もう一度作る。2026-10-14 の設計し直しの文）。生成結果は無い・承認できない: ${fin.replace(/\n+/g, ' ⏎ ').slice(0, 300)}`);
+  assert(m.calls2.generate.length === 1 && v.generated.C1.status === 'failed' && v.generated.C1.failure.reason === 'RATE_LIMITED' && v.generated.C1.failure.stop === 'rate' && !v.generated.C1.generated && FS.readyOf(v) === false && v.final.incomplete && v.final.incomplete.kind === 'rate' && /作成途中/.test(fin) && /の作成中に、AIサービスへのアクセスが集中しています。/.test(fin) && /残りの JavaScript を作る/.test(fin), `Gateway の RATE_LIMITED: 作成途中のカードに止めた理由と次の操作（もう一度作る。2026-10-14 の設計し直しの文）。生成結果は無い・承認できない: ${fin.replace(/\n+/g, ' ⏎ ').slice(0, 300)}`);
   assert(!/RATE_LIMITED/.test(fin), '最終案のカード: RATE_LIMITED の番号は本文に出さない');
   assert(writes(m).length === 0, 'エラー時も書き込み 0 件');
   fail = false;

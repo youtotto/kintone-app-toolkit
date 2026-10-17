@@ -23,6 +23,8 @@
 'use strict';
 process.on('unhandledRejection', (e) => { if (/kintone is not defined/.test(String(e && e.message))) return; console.error(e); process.exit(1); });
 const { loadToolkit, makeAssert } = require('./helpers/load-toolkit.js');
+//   簡素化（2026-10-17）: 反映できるかは、最新の版なら会話の今の判定、前の版なら最終案の記録で確かめる（tests/helpers/final-state.js）
+const FS = require('./helpers/final-state.js');
 const T = loadToolkit();
 const { KTAiConversation, KTAiClient, KTContext } = T;
 const { assert, state } = makeAssert();
@@ -127,7 +129,7 @@ for (const [label, what, kind] of [['TIMEOUT', 'throw:TIMEOUT', 'timeout'], ['TR
     assert(ack && ack.data.stage === 'stopped' && /途中で止めたため、まだ計画に入っていません/.test(ack.text), `T1-2（${label}）: 生成中に受け付けた指示は計画に入れず「まだ入っていません」（記録したまま）: ${ack && ack.data.stage}`);
     assert(x.calls.ask.length === 0 && (v.openQuestions || []).length === 0 && !x.c.messages().some(m => m.type === 'ERROR'), `T1-3（${label}）: 質問は増えない・エラーのカード（同じ依頼の［再試行］）も出さない`);
     const fin = v.final;
-    assert(r.ok === true && !r.cancelled && fin && fin.approvable === false && fin.incomplete && fin.incomplete.kind === kind && fin.incomplete.stoppedAt === 'C1' && JSON.stringify(fin.incomplete.notStarted) === '["C2"]' && v.generated.C1.status === 'failed' && v.generated.C1.failure.stop === kind && !v.generated.C2 && r.incomplete && r.incomplete.kind === kind, `T1-4（${label}）: 最終案は未完成（止めた C1・作っていない C2）: ${JSON.stringify(fin && fin.incomplete)}`);
+    assert(r.ok === true && !r.cancelled && fin && FS.readyOf(fin) === false && fin.incomplete && fin.incomplete.kind === kind && fin.incomplete.stoppedAt === 'C1' && JSON.stringify(fin.incomplete.notStarted) === '["C2"]' && v.generated.C1.status === 'failed' && v.generated.C1.failure.stop === kind && !v.generated.C2 && r.incomplete && r.incomplete.kind === kind, `T1-4（${label}）: 最終案は未完成（止めた C1・作っていない C2）: ${JSON.stringify(fin && fin.incomplete)}`);
     const ap = x.c.approveFinal(K.approveArgs(v));
     assert(ap.ok === false && ap.reason === 'NOT_APPROVABLE' && x.c.finalReadiness().ready === false && x.c.finalReadiness().reasons[0].kind === 'incomplete', `T1-5（${label}）: 未完成の最終案は承認できない（理由の先頭は未完成）: ${ap.reason}`);
     const h = finalHtml(x), vis = visibleText(h);
@@ -145,7 +147,7 @@ for (const [label, what, kind] of [['TIMEOUT', 'throw:TIMEOUT', 'timeout'], ['TR
     // ［残りの JavaScript を作る］: 計画の AI は呼ばず、止めた C1 と作っていない C2 だけを作る
     const r2 = await pressRest(x);
     const v2 = x.c.activePlan();
-    assert(r2.ok && r2.intent === I.GENERATE_CODE && x.calls.plan.length === 1 && gen.seen.filter(s => s.cid === 'C1').length === 2 && gen.seen.filter(s => s.cid === 'C2').length === 1 && v2.version === v.version + 1 && v2.generated.C1.status === 'verified' && v2.generated.C2.status === 'verified' && !v2.final.incomplete && v2.final.approvable === true && x.calls.ask.length === 0, `T1-10（${label}）: ［残りの JavaScript を作る］→ 計画の AI 0 回・残りだけ生成・承認できる最終案: ${JSON.stringify({ plans: x.calls.plan.length, seen: gen.seen.map(s => s.cid), st: [v2.generated.C1 && v2.generated.C1.status, v2.generated.C2 && v2.generated.C2.status] })}`);
+    assert(r2.ok && r2.intent === I.GENERATE_CODE && x.calls.plan.length === 1 && gen.seen.filter(s => s.cid === 'C1').length === 2 && gen.seen.filter(s => s.cid === 'C2').length === 1 && v2.version === v.version + 1 && v2.generated.C1.status === 'verified' && v2.generated.C2.status === 'verified' && !v2.final.incomplete && FS.readyOf(v2) === true && x.calls.ask.length === 0, `T1-10（${label}）: ［残りの JavaScript を作る］→ 計画の AI 0 回・残りだけ生成・承認できる最終案: ${JSON.stringify({ plans: x.calls.plan.length, seen: gen.seen.map(s => s.cid), st: [v2.generated.C1 && v2.generated.C1.status, v2.generated.C2 && v2.generated.C2.status] })}`);
     //   レビューの指摘 row4: ［残りの JavaScript を作る］で作った最終案のカードにも、まだ計画に入っていない受け付けた指示を出す（承認できる最終案でも黙って落とさない）
     const h2 = finalHtml(x), vis2 = visibleText(h2);
     assert(v2.final.pendingInstructions && v2.final.pendingInstructions.length === 1 && /受け付けた指示 1 件はまだ計画に入っていません（この最終案には入っていません）/.test(vis2) && /data-display="受け付けた指示を計画に入れる"/.test(h2), `T1-10b（${label}）: ［残りの JavaScript を作る］で作った最終案のカードにも「受け付けた指示 1 件はまだ計画に入っていません」と［受け付けた指示を計画に入れる］: ${(vis2.match(/受け付けた指示[^\n]*/) || [''])[0]}`);
@@ -172,14 +174,14 @@ await section(async () => {
   const r = await p; await K.ticks(4);
   const v = x.c.activePlan();
   assert(r.cancelled === true && r.ok === false && gen.count('C2') === 0 && x.calls.plan.length === 1 && x.calls.ask.length === 0, `T2-1: キャンセル → C2 の生成 0 件・計画の AI は増えない・質問は増えない: ${JSON.stringify({ seen: gen.seen.map(s => s.cid), plans: x.calls.plan.length })}`);
-  assert(v.final && v.final.incomplete && v.final.incomplete.kind === 'cancelled' && v.generated.C1.status === 'failed' && v.generated.C1.failure.stop === 'cancelled' && JSON.stringify(v.final.incomplete.notStarted) === '["C2"]' && v.final.approvable === false && x.c.draft().status === 'adopted', `T2-2: 計画と途中の結果は残し、最終案は未完成（キャンセル）: ${JSON.stringify(v.final && v.final.incomplete)}`);
+  assert(v.final && v.final.incomplete && v.final.incomplete.kind === 'cancelled' && v.generated.C1.status === 'failed' && v.generated.C1.failure.stop === 'cancelled' && JSON.stringify(v.final.incomplete.notStarted) === '["C2"]' && FS.readyOf(v) === false && x.c.draft().status === 'adopted', `T2-2: 計画と途中の結果は残し、最終案は未完成（キャンセル）: ${JSON.stringify(v.final && v.final.incomplete)}`);
   const n = x.c.messages().filter(m => m.data && m.data.kind === 'cancelled').slice(-1)[0];
   assert(n && /残りの JavaScript を作る/.test(n.text) && !/採用します/.test(n.text) && n.data.text == null && r.incomplete && !/入力は残しています/.test(n.text), `T2-3: キャンセルの知らせに「採用します」を戻さず、続きの操作を案内する: ${n && n.text} / ${n && JSON.stringify(n.data)}`);
   const b = restButtonOf(finalHtml(x));
   assert(b && !b.disabled, 'T2-4: 未完成の最終案に［残りの JavaScript を作る］');
   const r2 = await pressRest(x);
   const v2 = x.c.activePlan();
-  assert(r2.ok && x.calls.plan.length === 1 && gen.count('C1') === 2 && gen.count('C2') === 1 && v2.final.approvable === true && !v2.final.incomplete, `T2-5: 押すと計画の AI 0 回で C1・C2 を作る: ${JSON.stringify({ plans: x.calls.plan.length, seen: gen.seen.map(s => s.cid) })}`);
+  assert(r2.ok && x.calls.plan.length === 1 && gen.count('C1') === 2 && gen.count('C2') === 1 && FS.readyOf(v2) === true && !v2.final.incomplete, `T2-5: 押すと計画の AI 0 回で C1・C2 を作る: ${JSON.stringify({ plans: x.calls.plan.length, seen: gen.seen.map(s => s.cid) })}`);
 });
 await section(async () => {
   //   計画の作成中の取り消し: 中断の後に返った計画は使わない（版を作らない・仮案は採用前のまま・知らせは今までどおり入力を残す）
@@ -202,14 +204,14 @@ await section(async () => {
   const x = makeConvC({ planImpl: planJs2, generate: gen });
   await sendUntilAdopt(x);
   const v = x.c.activePlan();
-  assert(v.generated.C1.status === 'verified' && v.generated.C2.status === 'failed' && v.generated.C2.failure.stop === 'timeout' && v.final.incomplete && v.final.incomplete.stoppedAt === 'C2' && v.final.incomplete.notStarted.length === 0 && v.final.approvable === false, `T3-1: 完了した C1 は残し、止めた C2 で未完成: ${JSON.stringify(v.final.incomplete)}`);
+  assert(v.generated.C1.status === 'verified' && v.generated.C2.status === 'failed' && v.generated.C2.failure.stop === 'timeout' && v.final.incomplete && v.final.incomplete.stoppedAt === 'C2' && v.final.incomplete.notStarted.length === 0 && FS.readyOf(v) === false, `T3-1: 完了した C1 は残し、止めた C2 で未完成: ${JSON.stringify(v.final.incomplete)}`);
   const vis = visibleText(finalHtml(x));
   //   2026-10-14 の設計し直し: できた C1（手順の title）・止めた C2・残り 1 件。未着手の文は出さない
   assert(/JavaScriptはできました。JavaScript 2の作成中に、AIの応答が時間切れになりました。/.test(vis) && !/手を付けていません/.test(vis) && /完成した分は残っています。残り 1 件から再開できます。/.test(vis) && !/未完成/.test(vis), `T3-2: 作っていない JavaScript が無いときは、できたものと止めたものの文だけ: ${vis.replace(/\s+/g, ' ').slice(0, 240)}`);
   const c1Hash = v.generated.C1.candidateHash;
   const r2 = await pressRest(x);
   const v2 = x.c.activePlan();
-  assert(r2.ok && x.calls.plan.length === 1 && gen.count('C1') === 1 && gen.count('C2') === 2 && v2.generated.C1.reused === true && v2.generated.C1.candidateHash === c1Hash && v2.generated.C2.status === 'verified' && v2.final.approvable === true && v2.final.changedSince.reused.includes('C1') && JSON.stringify(v2.final.changedSince.regenerated) === '["C2"]', `T3-3: 検証済みの C1 は流用し、C2 だけ生成（計画の AI 0 回）: ${JSON.stringify({ seen: gen.seen.map(s => s.cid), changed: v2.final.changedSince })}`);
+  assert(r2.ok && x.calls.plan.length === 1 && gen.count('C1') === 1 && gen.count('C2') === 2 && v2.generated.C1.reused === true && v2.generated.C1.candidateHash === c1Hash && v2.generated.C2.status === 'verified' && FS.readyOf(v2) === true && v2.final.changedSince.reused.includes('C1') && JSON.stringify(v2.final.changedSince.regenerated) === '["C2"]', `T3-3: 検証済みの C1 は流用し、C2 だけ生成（計画の AI 0 回）: ${JSON.stringify({ seen: gen.seen.map(s => s.cid), changed: v2.final.changedSince })}`);
 });
 
 // =========================================================
@@ -253,7 +255,7 @@ await section(async () => {
   const snap = JSON.stringify({ v: v2.version, c1: v2.generated.C1.candidateHash, c2: v2.generated.C2.candidateHash, st: [v2.generated.C1.status, v2.generated.C2.status] });
   const finals = x.finals().length;
   tg.open(); await sleep(5); await K.ticks(6);
-  assert(lateDone && x.c.activePlan() === v2 && JSON.stringify({ v: v2.version, c1: v2.generated.C1.candidateHash, c2: v2.generated.C2.candidateHash, st: [v2.generated.C1.status, v2.generated.C2.status] }) === snap && x.finals().length === finals && v1.generated.C1.failure.stop === 'cancelled' && v2.final.approvable === true, `T4-3: 遅れて届いた応答は最新の版（［残りの JavaScript を作る］の版）も前の版も変えない: ${snap}`);
+  assert(lateDone && x.c.activePlan() === v2 && JSON.stringify({ v: v2.version, c1: v2.generated.C1.candidateHash, c2: v2.generated.C2.candidateHash, st: [v2.generated.C1.status, v2.generated.C2.status] }) === snap && x.finals().length === finals && v1.generated.C1.failure.stop === 'cancelled' && FS.readyOf(v2) === true, `T4-3: 遅れて届いた応答は最新の版（［残りの JavaScript を作る］の版）も前の版も変えない: ${snap}`);
 });
 await section(async () => {
   //   レビューの指摘（abort-gw の［no］・2026-10-09）: 送信ごとの印 sendSeq の分岐（late()）。中断できない待ち（services.customizeRevision。signal を受けない）の間に
@@ -288,7 +290,7 @@ await section(async () => {
   const r = await sendUntilAdopt(x);
   const v = x.c.activePlan();
   const auto = x.calls.plan.filter(c => c.revision);
-  assert(x.calls.plan.length === 2 && auto.length === 1 && gen.seen.length === 0 && v.final && v.final.incomplete && v.final.incomplete.stage === 'plan-auto' && v.final.incomplete.kind === 'timeout' && JSON.stringify(v.final.incomplete.notStarted) === '["C1"]' && v.final.approvable === false && r.ok === true, `T5-1: 自動の見直しの時間切れ → 生成 0 件・未完成の最終案（作っていない JavaScript）: ${JSON.stringify({ plans: x.calls.plan.length, gen: gen.seen.length, inc: v.final && v.final.incomplete })}`);
+  assert(x.calls.plan.length === 2 && auto.length === 1 && gen.seen.length === 0 && v.final && v.final.incomplete && v.final.incomplete.stage === 'plan-auto' && v.final.incomplete.kind === 'timeout' && JSON.stringify(v.final.incomplete.notStarted) === '["C1"]' && FS.readyOf(v) === false && r.ok === true, `T5-1: 自動の見直しの時間切れ → 生成 0 件・未完成の最終案（作っていない JavaScript）: ${JSON.stringify({ plans: x.calls.plan.length, gen: gen.seen.length, inc: v.final && v.final.incomplete })}`);
   const internal = /必要な動作（効果）を特定できません|customizations\[\]/;
   assert(!x.c.messages().some(m => m.type === 'ERROR') && !x.c.messages().some(m => internal.test(String(m.text || '')) || internal.test(String((m.data && (m.data.retryText || m.data.text)) || ''))), 'T5-2: 内部の依頼文を会話・［再試行］に出さない（エラーのカードも出さない）');
   const vis = visibleText(finalHtml(x));
@@ -364,7 +366,7 @@ await section(async () => {
   const conf = (pre.items && pre.items.confirmations) || [];
   const line = conf.find(c => c && typeof c === 'object' && /受け付けた指示 1 件はまだ計画に入っていません/.test(c.text || ''));
   const chat = stripC(m.chat().replace(/<details[\s\S]*?<\/details>/g, '')), chatAll = stripC(m.chat());
-  assert(m.conv().activePlan().final.approvable === true && pre.status === 'ready' && line && /受け付けた指示を計画に入れる/.test(line.text) && /確認項目（この承認で確認済みとして扱います）/.test(chatAll) && chat.includes('受け付けた指示 1 件はまだ計画に入っていません（この最終案には入っていません'), `T1-11: ［残りの JavaScript を作る］で作った承認できる最終案の承認の欄の確認項目に「受け付けた指示 1 件はまだ計画に入っていません」: ${JSON.stringify({ status: pre.status, conf })}`);
+  assert(FS.readyOf(m.conv().activePlan()) === true && pre.status === 'ready' && line && /受け付けた指示を計画に入れる/.test(line.text) && /確認項目（この承認で確認済みとして扱います）/.test(chatAll) && chat.includes('受け付けた指示 1 件はまだ計画に入っていません（この最終案には入っていません'), `T1-11: ［残りの JavaScript を作る］で作った承認できる最終案の承認の欄の確認項目に「受け付けた指示 1 件はまだ計画に入っていません」: ${JSON.stringify({ status: pre.status, conf })}`);
 });
 
 // =========================================================
@@ -376,7 +378,7 @@ for (const code of ['MONTHLY_LIMIT_EXCEEDED', 'BUDGET_EXCEEDED']) {
     await sendUntilAdopt(x);
     const v = x.c.activePlan();
     const h = finalHtml(x), b = restButtonOf(h);
-    assert(v.final.incomplete && v.final.incomplete.kind === 'budget' && gen.count('C2') === 0 && b && b.disabled === true && /の作成中に、利用の上限（予算・回数）に達しました/.test(stripC(h)) && /上限を見直すまで、続きは送りません。/.test(stripC(h)) && !/残り [0-9]+ 件/.test(stripC(h)) && v.final.approvable === false, `T6-1（${code}）: 上限で止めた → C2 は 0 件・［残りの JavaScript を作る］は無効で理由: ${b && b.html}`);
+    assert(v.final.incomplete && v.final.incomplete.kind === 'budget' && gen.count('C2') === 0 && b && b.disabled === true && /の作成中に、利用の上限（予算・回数）に達しました/.test(stripC(h)) && /上限を見直すまで、続きは送りません。/.test(stripC(h)) && !/残り [0-9]+ 件/.test(stripC(h)) && FS.readyOf(v) === false, `T6-1（${code}）: 上限で止めた → C2 は 0 件・［残りの JavaScript を作る］は無効で理由: ${b && b.html}`);
     assert(!v.final.incomplete.endUnknown && !/終わったかは確かめられていません/.test(stripC(h)) && v.final.usage.unknownCalls === 0, `T6-2（${code}）: 上限の拒否は送る前・AI を呼ぶ前の失敗（終了不明にしない）`);
   });
 }

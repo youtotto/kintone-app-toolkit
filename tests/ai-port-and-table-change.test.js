@@ -33,6 +33,8 @@ process.on('unhandledRejection', (e) => { if (/kintone is not defined/.test(Stri
 const fs = require('fs');
 const path = require('path');
 const { loadToolkit, makeAssert } = require('./helpers/load-toolkit.js');
+//   簡素化（2026-10-17）: 反映できるかは、最新の版なら会話の今の判定、前の版なら最終案の記録で確かめる（tests/helpers/final-state.js）
+const FS = require('./helpers/final-state.js');
 const { gwCandidateHash } = require('./helpers/gw-hash.js');
 const T = loadToolkit();
 const { KTAiConversation, KTCodeReview, KTScan, KTContext, KTAiClient, KTPlanReview } = T;
@@ -254,8 +256,8 @@ await section(async () => {
   const sent = gen.seen[0] && gen.seen[0].requiredEffects;
   assert(gen.seen.length === 1 && Array.isArray(sent) && sent.length === 1 && JSON.stringify(sent[0].conditionFrom) === JSON.stringify(CF) && sent[0].condition === '',
     `P3-1: 生成に渡す必須の効果に conditionFrom（移植元 dealValidate.js の保存のイベント）が付く（会話の呼び出し側が services.jsFiles と印から作る）: ${JSON.stringify(sent)}`);
-  assert(e && e.status === 'verified' && v.final && v.final.approvable === true && x.calls.plan.length === 1,
-    `P3-2: 移植元と比べる代表条件（same-as-source）の合格で検証済み・承認できる（計画の AI 1 回・生成 1 回・修復 0）: ${JSON.stringify({ status: e && e.status, verdict: e && e.verdict && [e.verdict.kind, e.verdict.reason], approvable: v.final && v.final.approvable, plans: x.calls.plan.length })}`);
+  assert(e && e.status === 'verified' && v.final && FS.readyOf(v) === true && x.calls.plan.length === 1,
+    `P3-2: 移植元と比べる代表条件（same-as-source）の合格で検証済み・承認できる（計画の AI 1 回・生成 1 回・修復 0）: ${JSON.stringify({ status: e && e.status, verdict: e && e.verdict && [e.verdict.kind, e.verdict.reason], approvable: v.final && FS.readyOf(v), plans: x.calls.plan.length })}`);
   const html = K.stripC(T.KTAiChatUi.changeSummaryHtml(v, {}));   // 2026-10-14（設計し直し）: 代表条件の一覧と必須の動作の行は右の「変更内容」の検証の明細
   //   レビュー T-5（2026-10-14）: 期待の文を「止める（エラー「…」）」から「止める（「金額」（amount）のエラー「…」）」に変えた（error の置き場所（フィールド／画面全体）を出す。
   //   置き場所だけが違う不合格が同じ文に見えていたため）
@@ -272,28 +274,28 @@ await section(async () => {
   //   レビュー 3（2026-10-14・人が判断できる形）: 接続先が非対応のときだけ「この接続先では…検査ができません」。本文を取れない（読めない）ときは「同じ条件かは確かめていません」（不可能と読める「確かめられません」は使わない）
   assert(e && e.status === 'not-ready' && e.verdict.kind === 'effects-unknown' && e.verdict.port === true && !e.verdict.fix && /^必須の動作はまだ確かめていません（/.test(reason) && !/特定できません/.test(reason) && /「dealValidate\.js」/.test(reason) && /この接続先では同じ条件かを確かめる検査ができません/.test(reason) && /「いつでも保存を止める」にはしていません/.test(reason) && !/condition-unknown|not-capable|block-save/.test(reason),
     `P3-4: 接続先が非対応 → 準備未完了（見出しは「必須の動作はまだ確かめていません」。理由は移植元の名前と接続先の検査ができないこと。内部の語を出さない・［計画を直すよう依頼する］なし）: ${JSON.stringify(e && e.verdict)}`);
-  assert(gen.seen.length === 0 && x.calls.plan.length === 1 && v.final && v.final.approvable === false && !v.final.fix && !/kt-ai-final-fix/.test(html) && (v.final.readiness.reasons || []).some(t => /移植元と同じかを、この接続先では確かめる検査ができない/.test(t && t.text)),
-    `P3-5: 生成 0・計画の差分更新を自動で依頼しない（計画の AI 1 回）・最終案は承認できず、直す操作は出さない: ${JSON.stringify({ gens: gen.seen.length, plans: x.calls.plan.length, fix: v.final && v.final.fix, reasons: v.final && v.final.readiness && v.final.readiness.reasons })}`);
+  assert(gen.seen.length === 0 && x.calls.plan.length === 1 && v.final && FS.readyOf(v) === false && !v.final.fix && !/kt-ai-final-fix/.test(html) && (FS.readinessOf(v).reasons || []).some(t => /移植元と同じかを、この接続先では確かめる検査ができない/.test(t && t.text)),
+    `P3-5: 生成 0・計画の差分更新を自動で依頼しない（計画の AI 1 回）・最終案は承認できず、直す操作は出さない: ${JSON.stringify({ gens: gen.seen.length, plans: x.calls.plan.length, fix: v.final && v.final.fix, reasons: v.final && FS.readinessOf(v) && FS.readinessOf(v).reasons })}`);
   const ns = await runPort({ jsFiles: () => JSF({ source: false }) });
   const en = ns.v && ns.v.generated && ns.v.generated.C3;
-  assert(en && en.status === 'not-ready' && en.verdict.port === true && /^必須の動作はまだ確かめていません（/.test(en.verdict.reason) && /移植元の本文を取れない/.test(en.verdict.reason) && /同じ条件かは確かめていません/.test(en.verdict.reason) && !/確かめられません/.test(`${en.verdict.reason}${en.verdict.next}`) && /本文を取れないので、同じ条件かは確かめていません/.test(en.verdict.next) && (ns.v.final.readiness.reasons || []).some(t => /移植元の本文を取れない（読めない）ので確かめていません/.test(t && t.text)) && ns.gen.seen.length === 0 && ns.x.calls.plan.length === 1 && !ns.v.final.fix,
+  assert(en && en.status === 'not-ready' && en.verdict.port === true && /^必須の動作はまだ確かめていません（/.test(en.verdict.reason) && /移植元の本文を取れない/.test(en.verdict.reason) && /同じ条件かは確かめていません/.test(en.verdict.reason) && !/確かめられません/.test(`${en.verdict.reason}${en.verdict.next}`) && /本文を取れないので、同じ条件かは確かめていません/.test(en.verdict.next) && (FS.readinessOf(ns.v).reasons || []).some(t => /移植元の本文を取れない（読めない）ので確かめていません/.test(t && t.text)) && ns.gen.seen.length === 0 && ns.x.calls.plan.length === 1 && !ns.v.final.fix,
     `P3-6: 移植元の本文を送れない → 同じく準備未完了（見出しは「まだ確かめていません」。理由・次の方針・反映できない理由は「本文を取れないので、同じ条件かは確かめていません」）・生成 0・自動の差分更新なし: ${JSON.stringify(en && en.verdict)}`);
   //   レビュー T-1（2026-10-14）: 移植元のイベントの登録を本文から読めない（eventsUnresolved）→ 生成を呼ばず準備未完了（理由と次の方針は「読めない」。内部の語を出さない）
   const ur = await runPort({ jsFiles: () => JSF({ events: [], analyzed: true, eventsUnresolved: true }) });
   const eu = ur.v && ur.v.generated && ur.v.generated.C3;
-  assert(eu && eu.status === 'not-ready' && eu.verdict.port === true && !eu.verdict.fix && /^必須の動作はまだ確かめていません（/.test(eu.verdict.reason) && /移植元「dealValidate\.js」のイベントの登録を本文から読めないので、同じ条件かは確かめていません/.test(eu.verdict.reason) && /イベントの登録を本文から読めないので、同じ条件かは確かめていません/.test(eu.verdict.next) && !/確かめられません/.test(`${eu.verdict.reason}${eu.verdict.next}`) && !/events-unreadable/.test(`${eu.verdict.reason}${eu.verdict.next}`) && ur.gen.seen.length === 0 && ur.x.calls.plan.length === 1 && ur.v.final.approvable === false && !ur.v.final.fix,
+  assert(eu && eu.status === 'not-ready' && eu.verdict.port === true && !eu.verdict.fix && /^必須の動作はまだ確かめていません（/.test(eu.verdict.reason) && /移植元「dealValidate\.js」のイベントの登録を本文から読めないので、同じ条件かは確かめていません/.test(eu.verdict.reason) && /イベントの登録を本文から読めないので、同じ条件かは確かめていません/.test(eu.verdict.next) && !/確かめられません/.test(`${eu.verdict.reason}${eu.verdict.next}`) && !/events-unreadable/.test(`${eu.verdict.reason}${eu.verdict.next}`) && ur.gen.seen.length === 0 && ur.x.calls.plan.length === 1 && FS.readyOf(ur.v) === false && !ur.v.final.fix,
     `P3-6b: 移植元のイベントの登録を本文から読めない → 生成を呼ばず準備未完了（「いつでも」にしない・自動の差分更新なし・「確かめていません」の形）: ${JSON.stringify(eu && eu.verdict)}`);
   //   画面の解析が無い（services.jsFiles が null）→ 同じく止める（10-10 の不具合の経路: 空欄のまま生成へ渡さない）
   const nl = await runPort({ jsFiles: () => null });
   const el = nl.v && nl.v.generated && nl.v.generated.C3;
-  assert(el && el.status === 'not-ready' && el.verdict.port === true && /^必須の動作はまだ確かめていません（/.test(el.verdict.reason) && /移植元の本文を取れない/.test(el.verdict.reason) && nl.gen.seen.length === 0 && nl.x.calls.plan.length === 1 && nl.v.final.approvable === false && !nl.v.final.fix,
+  assert(el && el.status === 'not-ready' && el.verdict.port === true && /^必須の動作はまだ確かめていません（/.test(el.verdict.reason) && /移植元の本文を取れない/.test(el.verdict.reason) && nl.gen.seen.length === 0 && nl.x.calls.plan.length === 1 && FS.readyOf(nl.v) === false && !nl.v.final.fix,
     `P3-6c: 画面の解析が無い（jsFiles null）→ 生成を呼ばず準備未完了（「いつでも保存を止める」として生成へ渡さない）: ${JSON.stringify(el && el.verdict)}`);
 });
 await section(async () => {
   //   移植元と違う動き（負の数の判定を抜いた候補）→ 候補の誤り（修復の対象）。直す依頼の文は移植元の名前で書く
   const { x, gen, v } = await runPort({ mode: 'fail' });
   const e = v && v.generated && v.generated.C3;
-  assert(e && e.status === 'unresolved' && e.verdict.kind === 'behavior-fail' && e.verdict.fix === 'revise' && gen.seen.length === 1 && v.final && v.final.approvable === false,
+  assert(e && e.status === 'unresolved' && e.verdict.kind === 'behavior-fail' && e.verdict.fix === 'revise' && gen.seen.length === 1 && v.final && FS.readyOf(v) === false,
     `P3-7: 移植元と違う動き → 未解決（模擬テストの不合格。候補の誤り）: ${JSON.stringify(e && e.verdict && [e.verdict.status, e.verdict.kind, e.verdict.reason])}`);
   assert(v.final.fix && /「金額」の保存を止める動きが、移植元「dealValidate\.js」と同じになりませんでした（模擬テスト）/.test(v.final.fix.text) && /移植元は止める・エラー「金額は0円以上で入力してください」/.test(v.final.fix.text),
     `P3-8: 直す依頼の文は「移植元「dealValidate.js」と同じにならなかった」と、生成工程の記録（移植元の動き）で書く: ${v.final.fix && v.final.fix.text}`);
@@ -347,8 +349,8 @@ await section(async () => {
   const html = K.finalHtml(x);
   assert(e && e.status === 'not-run' && e.verdict.kind === 'environment' && !e.verdict.fix && /模擬テストの入力（代表条件）の形が隔離環境の約束と合わない/.test(e.verdict.reason) && !/模擬テストの環境が使えない/.test(e.verdict.reason),
     `P4-3: case-invalid の not-run → 環境の区分（直す操作なし）・理由は入力の不正（環境が使えない、とまとめない）: ${JSON.stringify(e && e.verdict && [e.verdict.kind, e.verdict.fix, e.verdict.reason])}`);
-  assert(gen.calls.length === 1 && !v.final.fix && !/kt-ai-final-fix/.test(html) && v.final.approvable === false && (v.final.readiness.reasons || []).some(t => /検証の入力の問題です/.test(t && t.text) && /修復は依頼していません/.test(t && t.text)),
-    `P4-4: 生成 1 回のまま（作り直さない）・［計画を直すよう依頼する］を出さない・承認できない理由は入力の不正: ${JSON.stringify({ gens: gen.calls.length, fix: v.final.fix, reasons: v.final.readiness.reasons })}`);
+  assert(gen.calls.length === 1 && !v.final.fix && !/kt-ai-final-fix/.test(html) && FS.readyOf(v) === false && (FS.readinessOf(v).reasons || []).some(t => /検証の入力の問題です/.test(t && t.text) && /修復は依頼していません/.test(t && t.text)),
+    `P4-4: 生成 1 回のまま（作り直さない）・［計画を直すよう依頼する］を出さない・承認できない理由は入力の不正: ${JSON.stringify({ gens: gen.calls.length, fix: v.final.fix, reasons: FS.readinessOf(v).reasons })}`);
 });
 await section(async () => {
   //   condition-unknown の not-run（Gateway が conditionFrom を受け付けなかった）→ 計画を直す。条件を推測で書かせない（「フィールドと値の比較」の指示にしない）
@@ -365,7 +367,7 @@ await section(async () => {
   for (const mark of ['tableRowChange', 'caseInvalid']) {
     const x = makeConvC({ supported: GEN_EFFECT_FEATURES.filter(f => f !== mark) });
     await K.adoptC(x);
-    out.push([mark, x.c.activePlan().generated.C1.status, x.c.activePlan().final.approvable]);
+    out.push([mark, x.c.activePlan().generated.C1.status, FS.readyOf(x.c.activePlan())]);
   }
   assert(out.every(r => r[1] === 'unsupported' && r[2] === false), `P4-6: 印 tableRowChange・caseInvalid が欠ける接続先は「接続先が非対応」: ${JSON.stringify(out)}`);
   const y = makeConvC({ supported: [...GEN_EFFECT_FEATURES] });

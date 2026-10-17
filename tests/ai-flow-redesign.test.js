@@ -23,6 +23,8 @@
 'use strict';
 process.on('unhandledRejection', (e) => { if (/kintone is not defined/.test(String(e && e.message))) return; console.error(e); process.exit(1); });
 const { loadToolkit, makeAssert } = require('./helpers/load-toolkit.js');
+//   簡素化（2026-10-17）: 反映できるかは、最新の版なら会話の今の判定、前の版なら最終案の記録で確かめる（tests/helpers/final-state.js）
+const FS = require('./helpers/final-state.js');
 const { gwCandidateHash, gwHashOfCtx } = require('./helpers/gw-hash.js');
 const { makeFakeHost } = require('./helpers/fake-dom.js');
 const T = loadToolkit();
@@ -704,7 +706,7 @@ await section(async () => {
   assert(!x.c.messages().some(m => m.type === 'PLAN' || m.type === 'CODE' || ['plan-summary', 'review-summary', 'questions', 'provisionals', 'code-intro', 'confirm-generate'].includes(m.data?.kind)), `R09-3: 変更案の要約・確認事項・提案・コードの案内は別のカードにしない（最終案に統合）: ${JSON.stringify(x.kinds())}`);
   const sent = x.gen.calls[0] && x.gen.calls[0].requiredEffects;
   assert(x.gen.calls.length === 1 && x.gen.calls[0].verification === true && !x.gen.calls[0].feedback && JSON.stringify(sent) === JSON.stringify([{ requirementId: 'C1', requirementIds: ['C1'], field: 'amount', effect: 'lock', events: ['app.record.edit.show'], condition: 'ステータス in ("承認待ち")' }]) && v.generated.C1 && v.generated.C1.status === 'verified' && v.generated.C1.verdict.status === 'verified', `R09-4: 生成工程への依頼は 1 回（必須の効果を固定して渡す・修復は依頼しない）→ 検証済み: ${JSON.stringify({ gen: x.gen.calls.length, sent, status: v.generated.C1 && v.generated.C1.status })}`);
-  assert(v.final.approvable === true && v.final.customizations[0].status === 'verified' && v.final.behaviors.length >= 1 && v.final.changed.rejected.length === 0 && v.final.verification.behavior.status === 'passed' && v.final.verification.behavior.counts.pass === v.final.verification.behavior.cases.length && v.final.verification.effects.length === 1 && v.final.verification.effects[0].structure === 'present', `R09-5: 最終案は承認できる（動作・変わった点・検証の区分）: ${JSON.stringify({ approvable: v.final.approvable, behaviors: v.final.behaviors, beh: v.final.verification.behavior })}`);
+  assert(FS.readyOf(v) === true && v.final.customizations[0].status === 'verified' && v.final.behaviors.length >= 1 && v.final.changed.rejected.length === 0 && v.final.verification.behavior.status === 'passed' && v.final.verification.behavior.counts.pass === v.final.verification.behavior.cases.length && v.final.verification.effects.length === 1 && v.final.verification.effects[0].structure === 'present', `R09-5: 最終案は承認できる（動作・変わった点・検証の区分）: ${JSON.stringify({ approvable: FS.readyOf(v), behaviors: v.final.behaviors, beh: v.final.verification.behavior })}`);
   const tm = x.c.metrics().timings.slice(-1)[0];
   assert(tm.intent === 'ADOPT_DRAFT' && tm.calls.map(k => k.kind).join(',') === 'plan,generate' && tm.calls.every(k => typeof k.ms === 'number') && tm.finalMs >= 49000 && v.final.timing.planMs === 30000 && v.final.timing.generateMs === 20000 && !('simMs' in v.final.timing), `R09-6: 計測（calls に plan / generate と区間の時間・最終案までの時間。模擬の区間は無い）: ${JSON.stringify({ calls: tm.calls.map(k => [k.kind, k.ms]), finalMs: tm.finalMs, timing: v.final.timing })}`);
   assert(v.final.usage.aiCalls === 2 && v.final.usage.repairs === 0 && x.c.metrics().aiCalls >= 2, `R09-7: AI の呼び出し回数（Toolkit からの修復の依頼は 0）: ${JSON.stringify(v.final.usage)}`);
@@ -728,7 +730,7 @@ await section(async () => {
   const x = makeConvC({ generate: makeGenerate({ sequence: ['good'], repairs: 1 }) });
   await adoptC(x);
   const v = x.c.activePlan();
-  assert(x.gen.calls.length === 1 && !x.gen.calls[0].feedback && v.generated.C1.status === 'verified' && v.final.approvable && x.finals().length === 1, `R17-1: 生成工程が中で直した候補 → Toolkit からの追加の呼び出しなしで検証済みの最終案 1 つ: ${JSON.stringify({ gen: x.gen.calls.length, status: v.generated.C1.status })}`);
+  assert(x.gen.calls.length === 1 && !x.gen.calls[0].feedback && v.generated.C1.status === 'verified' && FS.readyOf(v) && x.finals().length === 1, `R17-1: 生成工程が中で直した候補 → Toolkit からの追加の呼び出しなしで検証済みの最終案 1 つ: ${JSON.stringify({ gen: x.gen.calls.length, status: v.generated.C1.status })}`);
   assert(!x.c.messages().some(m => m.type === 'CODE' || m.type === 'ERROR' || m.data?.kind === 'generate-repeat' || m.data?.kind === 'code-intro'), `R17-3: 検査途中の候補を「完成」と出さない・採用不可のカードを出さない: ${JSON.stringify(x.kinds())}`);
   assert(v.final.usage.repairs === 0 && v.final.usage.gatewayRepairs === 1 && v.final.customizations[0].gatewayRepairs === 1 && /生成工程の修復 1 回/.test(finalHtml(x)) && /生成工程で 1 回修復/.test(rightOf(x)), `R17-4: 生成工程の修復回数を記録し、詳細に出す: ${JSON.stringify(v.final.usage)}`);
 });
@@ -738,7 +740,7 @@ await section(async () => {
   await adoptC(y);
   const vy = y.c.activePlan();
   assert(y.gen.calls.length === 1 && !y.gen.calls[0].feedback && vy.generated.C1.status === 'unresolved' && vy.generated.C1.verdict.kind === 'behavior-fail' && vy.generated.C1.verdict.stoppedBy === 'limit', `R19-1: 生成工程が上限まで修復して直らない → Toolkit は追加で呼ばない（1 回だけ）: ${JSON.stringify({ calls: y.gen.calls.length, verdict: vy.generated.C1.verdict })}`);
-  assert(vy.final && vy.final.approvable === false && /反映できる完成品になっていない/.test(vy.final.blockingReason) && vy.final.cannot.some(c => c.kind === 'unresolved' && /生成工程で修復を 2 回行いましたが/.test(c.text) && /同じ依頼のまま作り直しても結果は変わりません/.test(c.next)) && y.finals().length === 1, `R19-3: 未解決の理由と次の方針を最終案に 1 回まとめ、承認できる完成品としては出さない: ${JSON.stringify(vy.final.cannot)}`);
+  assert(vy.final && FS.readyOf(vy) === false && /反映できる完成品になっていない/.test(FS.reasonOf(vy)) && vy.final.cannot.some(c => c.kind === 'unresolved' && /生成工程で修復を 2 回行いましたが/.test(c.text) && /同じ依頼のまま作り直しても結果は変わりません/.test(c.next)) && y.finals().length === 1, `R19-3: 未解決の理由と次の方針を最終案に 1 回まとめ、承認できる完成品としては出さない: ${JSON.stringify(vy.final.cannot)}`);
   const ap = y.c.approveFinal(KIT.approveArgs(vy));
   assert(ap.ok === false && ap.reason === 'NOT_APPROVABLE' && !vy.approval, 'R19-4: 未解決の最終案は承認できない');
   const html = finalHtml(y);
@@ -753,12 +755,12 @@ await section(async () => {
   const x = makeConvC({ planImpl: (args) => planJs(args, { questions: args.revision ? [] : Q }) });
   await adoptC(x);
   const v1 = x.c.activePlan();
-  assert(v1.final && v1.final.approvable === false && /先に決めたいことが 1 件/.test(v1.final.blockingReason) && v1.final.questions.length === 1 && !x.c.messages().some(m => m.data?.kind === 'questions'), `R10-1: 先に必要な判断は最終案のカードの中（確認事項のカードは出さない）。承認はまだできない: ${JSON.stringify({ q: v1.final.questions.map(q => q.text), kinds: x.kinds() })}`);
+  assert(v1.final && FS.readyOf(v1) === false && /先に決めたいことが 1 件/.test(FS.reasonOf(v1)) && v1.final.questions.length === 1 && !x.c.messages().some(m => m.data?.kind === 'questions'), `R10-1: 先に必要な判断は最終案のカードの中（確認事項のカードは出さない）。承認はまだできない: ${JSON.stringify({ q: v1.final.questions.map(q => q.text), kinds: x.kinds() })}`);
   const html1 = finalHtml(x);
   assert(/残る判断（1 件）/.test(html1) && /申請者本人も編集できなくしますか/.test(html1) && /class="kt-ai-qa-input" data-qkey="/.test(html1) && /data-act="answer-questions"/.test(html1) && /disabled>動作テスト環境へ反映/.test(html1), `R10-2: 回答欄と［回答を送る］はこのカードだけ・反映のボタンは押せない: ${html1.replace(/<[^>]*>/g, '｜').slice(0, 300)}`);
   const r = await x.c.send('確認事項への回答です。\n・承認待ちの間、申請者本人も編集できなくしますか → 全員', { intentOverride: 'ANSWER', answerPayload: { source: 'answer-card', items: [{ key: 'Q1', answer: '全員' }] } });
   const v2 = x.c.activePlan();
-  assert(r.ok && v2.version === 2 && v2.final && v2.final.approvable === true && v2.final.questions.length === 0 && x.finals().length === 2 && x.calls.plan.length === 2 && x.calls.plan[1].revision, `R10-3: 回答 → 差分更新 → 新しい最終案（残る判断なし・承認できる）: ${JSON.stringify({ version: v2.version, q: v2.final.questions, plans: x.calls.plan.length })}`);
+  assert(r.ok && v2.version === 2 && v2.final && FS.readyOf(v2) === true && v2.final.questions.length === 0 && x.finals().length === 2 && x.calls.plan.length === 2 && x.calls.plan[1].revision, `R10-3: 回答 → 差分更新 → 新しい最終案（残る判断なし・承認できる）: ${JSON.stringify({ version: v2.version, q: v2.final.questions, plans: x.calls.plan.length })}`);
   const old = KTAiChatUi.messageHtml(x.finals()[0], { plans: new Map(x.c.planHistory().map(v => [`${v.planId}:${v.version}`, v])), activePlan: v2, answerState: x.c.answerContext(), ledger: x.c.ledger(), answers: new Map() });
   assert(/前の最終案 — このあと直した案があります/.test(old) && /kt-ai-old-card/.test(old) && !/data-qkey=/.test(old) && !/data-act="final-approve"/.test(old) && !/残る判断/.test(finalHtml(x)), 'R10-4: 前の最終案は 1 行に畳み、回答済みの質問は別のカードで残らない');
   assert(x.gen.calls.length === 1 && v2.generated.C1.reused === true, 'R10-5: 実装仕様が変わらなければ JavaScript は作り直さず、検証結果も流用する（計画の AI だけ 1 回）');
@@ -954,7 +956,7 @@ await section(async () => {
   const x = makeConvC({ planImpl: (args) => { const r = planJs(args, { cust: CUST_EXT, summary: '承認されたら Slack に通知します。' }); r.review.steps[0].codeGeneration = { supported: false, strategy: 'NEW_JS_FILE', reason: '外部連携のコードは Toolkit では生成しません' }; return r; } });
   await adoptC(x);
   const v = x.c.activePlan(), html = stripC(finalHtml(x));
-  assert(x.gen.calls.length === 0 && v.final.approvable === false && v.final.cannot.some(c => c.kind === 'unsupported' && /Slack に通知する/.test(c.text) && /外部連携のコードは Toolkit では生成しません/.test(c.text)) && /Toolkit では作れない JavaScript/.test(html) && !/JavaScript は無く、設定の変更だけです/.test(html) && /最終案（反映できない点があります）/.test(html) && x.c.approveFinal(KIT.approveArgs(v)).ok === false, `指示 A2: 生成できない customization を「設定の変更だけ」として承認させない: ${JSON.stringify(v.final.cannot)}`);
+  assert(x.gen.calls.length === 0 && FS.readyOf(v) === false && v.final.cannot.some(c => c.kind === 'unsupported' && /Slack に通知する/.test(c.text) && /外部連携のコードは Toolkit では生成しません/.test(c.text)) && /Toolkit では作れない JavaScript/.test(html) && !/JavaScript は無く、設定の変更だけです/.test(html) && /最終案（反映できない点があります）/.test(html) && x.c.approveFinal(KIT.approveArgs(v)).ok === false, `指示 A2: 生成できない customization を「設定の変更だけ」として承認させない: ${JSON.stringify(v.final.cannot)}`);
 });
 // 指示 A3: 決まった要件が増えたら、JavaScript を流用せずに作り直す（計画の AI が customization を変えなくても）
 await section(async () => {
@@ -966,8 +968,8 @@ await section(async () => {
   //   簡素化 C（2026-10-16）: 計画が手順・JavaScript に対応づけていない決まった要件（planRefs []）は「担当なし」で止めず、自動の見直しも呼ばない（確認の限界。右に件数の 1 行）。
   //   C1 が同じ編集不可（承認待ち）を持つだけでは、この要件（承認済み）の実現にしない（対応づけが無いと、生成の検証にこの要件の効果が渡らない）。作り直しはそのまま
   const r5 = x.c.requirements(v2.planId).find(r => r.condition === '承認済み' && r.behavior === '編集不可にする');
-  assert(!!r5 && v2.version === 2 && x.calls.plan.length === 2 && x.gen.calls.length === 2 && v2.generated.C1.reused !== true && v2.final.approvable === true && !v2.final.blockers.some(b => b.kind === 'ownerless') && (v2.final.unconfirmedReqs || []).some(u => u.requirementId === r5.id) && /計画の構造からは実現を確かめていない要件が 1 件あります/.test(stripC(rightOf(x))),
-    `指示 A3: 決まった要件（計画に対応づけていない）が増えた → 自動の見直しはせず、全部の JavaScript を作り直す（前の検証結果を流用しない）。その要件は確認の限界: ${JSON.stringify({ version: v2.version, plans: x.calls.plan.length, gen: x.gen.calls.length, reused: v2.generated.C1.reused, approvable: v2.final.approvable, unconf: (v2.final.unconfirmedReqs || []).map(u => u.requirementId) })}`);
+  assert(!!r5 && v2.version === 2 && x.calls.plan.length === 2 && x.gen.calls.length === 2 && v2.generated.C1.reused !== true && FS.readyOf(v2) === true && !v2.final.blockers.some(b => b.kind === 'ownerless') && (v2.final.unconfirmedReqs || []).some(u => u.requirementId === r5.id) && /計画の構造からは実現を確かめていない要件が 1 件あります/.test(stripC(rightOf(x))),
+    `指示 A3: 決まった要件（計画に対応づけていない）が増えた → 自動の見直しはせず、全部の JavaScript を作り直す（前の検証結果を流用しない）。その要件は確認の限界: ${JSON.stringify({ version: v2.version, plans: x.calls.plan.length, gen: x.gen.calls.length, reused: v2.generated.C1.reused, approvable: FS.readyOf(v2), unconf: (v2.final.unconfirmedReqs || []).map(u => u.requirementId) })}`);
   const y = makeConvC();
   await adoptC(y);
   await y.c.send('通知は外して');
@@ -978,7 +980,7 @@ await section(async () => {
   const y = makeConvC({ planImpl: (args) => { const r = planJs(args); r.plan.steps.unshift({ id: 'P1', actionType: 'ADD_FIELD', targetKind: 'FIELD', targetRef: 'x', title: 'フィールド追加', spec: {}, dependsOn: [] }); r.review.steps.unshift({ stepId: 'P1', status: 'INVALID', safety: 'BLOCKED', issues: [{ code: 'X', message: 'フィールドの型が指定されていません' }] }); r.review.executionReadiness = { safeSteps: [], reviewSteps: [], blockedSteps: ['P1'], planOnlySteps: ['C1'] }; return r; } });
   await adoptC(y);
   const vy = y.c.activePlan();
-  assert(vy.final.approvable === false && vy.final.blockedSteps.length === 1 && vy.final.cannot.some(c => c.kind === 'blocked' && /実行できない手順: フィールド追加（フィールドの型が指定されていません）/.test(c.text)) && /実行できない設定の手順が 1 件/.test(vy.final.blockingReason), `指示 A7: 実行できない手順があれば承認できない（手順の名前と理由）: ${JSON.stringify(vy.final.cannot)}`);
+  assert(FS.readyOf(vy) === false && vy.final.blockedSteps.length === 1 && vy.final.cannot.some(c => c.kind === 'blocked' && /実行できない手順: フィールド追加（フィールドの型が指定されていません）/.test(c.text)) && /実行できない設定の手順が 1 件/.test(FS.reasonOf(vy)), `指示 A7: 実行できない手順があれば承認できない（手順の名前と理由）: ${JSON.stringify(vy.final.cannot)}`);
   const Qs = [{ id: 'Q1', question: '承認待ちの間、申請者本人も編集できなくしますか', topic: 'scope', priority: 'blocking', options: ['全員', '申請者以外'] }, ...['灰色の表示色は既定のままでよいですか', 'モバイルでも同じ制御にしますか', 'CSV 読み込みでも止めますか', '一覧の編集でも止めますか'].map((q, i) => ({ id: `Q${i + 2}`, question: q, topic: `t${i}`, priority: 'later', options: [] }))];
   const x = makeConvC({ planImpl: (args) => planJs(args, { questions: Qs }) });
   await adoptC(x);
@@ -1030,11 +1032,11 @@ await section(async () => {
     const h = stripC(finalHtml(x)), hr = stripC(rightOf(x));
     const line = '「7 営業日以内に承認する」は、作った JavaScript では担当外とされました。計画のどの手順で実現するかは書かれていません';
     const r4 = x.c.requirements(v.planId).find(r => /営業日/.test(r.behavior));
-    assert(r4 && JSON.stringify(r4.planRefs) === '["A3"]' && x.c.requirements(v.planId).filter(r => r.id !== r4.id && r.decision !== 'revoked').every(r => (r.planRefs || []).includes('C1')) && fin.approvable === true
+    assert(r4 && JSON.stringify(r4.planRefs) === '["A3"]' && x.c.requirements(v.planId).filter(r => r.id !== r4.id && r.decision !== 'revoked').every(r => (r.planRefs || []).includes('C1')) && FS.readyOf(fin) === true
       && !fin.blockers.some(b => b.kind === 'ownerless') && fin.blockers.filter(b => b.kind === 'plan-scope').length === 1 && fin.blockers.some(b => b.kind === 'plan-scope' && b.text === line && b.requirementId === r4.id && /この点では反映を止めていません/.test(b.next))
       && !(fin.unconfirmedReqs || []).some(u => u.requirementId === r4.id) && (hr.match(new RegExp(line.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g')) || []).length === 1
       && !/計画の他の手順・JavaScript で扱います|計画の構造からは実現を確かめていない要件/.test(h + hr) && x.calls.plan.length === 1,
-      `指示 B5（簡素化 C: 実現する手順が無い採用済みの要件は止めず、生成の AI の担当外の申告を右に 1 回。自動の見直しなし）${withOwners ? '・検査に担当の集まりを渡す' : '・前の検査の結果'}: ${JSON.stringify({ blockers: fin.blockers, approvable: fin.approvable, plans: x.calls.plan.length })}`);
+      `指示 B5（簡素化 C: 実現する手順が無い採用済みの要件は止めず、生成の AI の担当外の申告を右に 1 回。自動の見直しなし）${withOwners ? '・検査に担当の集まりを渡す' : '・前の検査の結果'}: ${JSON.stringify({ blockers: fin.blockers, approvable: FS.readyOf(fin), plans: x.calls.plan.length })}`);
   }
 });
 // 正しさ C4 / C3（会話）: 計画の後に基準が変わったら承認せず STALE に（作り直しを案内）。承認の取り消し
@@ -1080,7 +1082,7 @@ await section(async () => {
   await adoptC(y);
   const full = finalHtml(y);
   const h = outsideDetails(full).replace(/<[^>]*>/g, '｜');
-  assert(y.c.activePlan().final.approvable === false && !/record\[|\.disabled\s*=|（（/.test(h) && !/「amount」|\bamount\b/.test(h) && !/候補/.test(h) && /取り消/.test(full), `指示 B7: 未解決の理由・機械検査の行にコード片とフィールドコードを出さない（検査の文は詳細表示）: ${(h.match(/[^｜]*(record\[|amount|候補)[^｜]*/) || [''])[0]}`);
+  assert(FS.readyOf(y.c.activePlan()) === false && !/record\[|\.disabled\s*=|（（/.test(h) && !/「amount」|\bamount\b/.test(h) && !/候補/.test(h) && /取り消/.test(full), `指示 B7: 未解決の理由・機械検査の行にコード片とフィールドコードを出さない（検査の文は詳細表示）: ${(h.match(/[^｜]*(record\[|amount|候補)[^｜]*/) || [''])[0]}`);
 });
 
 // =========================================================
@@ -1093,7 +1095,7 @@ await section(async () => {
   const v = x.c.activePlan(), e = v.generated.C1;
   assert(effectsSent(x) === 'amount:lock' && e.status === 'unresolved' && e.verdict.kind === 'missing' && /要件未達（「金額」: 編集できないようにする）/.test(e.verdict.reason), `D1-1: 編集不可が必要で候補は警告だけ → 要件未達（必須の効果は lock のまま）: ${JSON.stringify({ sent: effectsSent(x), verdict: e.verdict })}`);
   const ap = x.c.approveFinal(KIT.approveArgs(v));
-  assert(v.final.approvable === false && ap.ok === false && ap.reason === 'NOT_APPROVABLE' && !v.approval && x.gen.calls.length === 1, `D1-2: 承認できない（Toolkit から修復の再依頼もしない）: ${JSON.stringify(ap)}`);
+  assert(FS.readyOf(v) === false && ap.ok === false && ap.reason === 'NOT_APPROVABLE' && !v.approval && x.gen.calls.length === 1, `D1-2: 承認できない（Toolkit から修復の再依頼もしない）: ${JSON.stringify(ap)}`);
   assert(e.review.status === 'BLOCKED' && e.review.registration.blockers.some(b => b.code === 'required-effects') && !e.review.registration.confirmations.some(c => c.code === 'required-effects'), 'D1-3: 形式確認でも登録不可（required-effects は「確認」ではない。確認を押して通せない）');
   const text = stripC(rightOf(x));
   assert(/× 「金額」（PC）: 編集できない — 処理なし（要件未達）/.test(text) && /disabled>動作テスト環境へ反映/.test(finalHtml(x)), `D1-4: 検証の区分に必須の動作の未達を出す: ${(text.match(/必須の動作[\s\S]{0,120}/) || [''])[0]}`);
@@ -1103,7 +1105,7 @@ await section(async () => {
   const x = makeConvC({ generate: makeGenerate({ sequence: ['value'] }) });
   await adoptC(x);
   const e = x.c.activePlan().generated.C1;
-  assert(effectsSent(x) === 'amount:lock' && e.status === 'unresolved' && e.verdict.kind === 'missing' && x.c.activePlan().final.approvable === false, `D2: 編集不可が必要で候補は値の変更だけ → 要件未達: ${JSON.stringify(e.verdict)}`);
+  assert(effectsSent(x) === 'amount:lock' && e.status === 'unresolved' && e.verdict.kind === 'missing' && FS.readyOf(x.c.activePlan()) === false, `D2: 編集不可が必要で候補は値の変更だけ → 要件未達: ${JSON.stringify(e.verdict)}`);
 });
 // D3: 警告だけ必要、候補は警告を出し編集・保存を許可 → この要件について合格。編集不可を追加要求しない（BFC / p21 の警告の回帰を警告の要件として維持）
 await section(async () => {
@@ -1115,7 +1117,7 @@ await section(async () => {
   await adoptC(x);
   const v = x.c.activePlan(), e = v.generated.C1;
   assert(effectsSent(x) === 'amount:warn' && !x.gen.calls[0].requiredEffects.some(r => r.effect === 'lock'), `D3-1: 警告の要件は warn だけを渡す（編集不可を足さない）: ${effectsSent(x)}`);
-  assert(e.status === 'verified' && v.final.approvable === true && e.review.status !== 'BLOCKED' && !e.review.checks.some(ch => /^sim-warning-only/.test(ch.name)), `D3-2: 警告を出し編集・保存を許可する候補は合格（承認できる）: ${JSON.stringify({ status: e.status, verdict: e.verdict, review: e.review.status, blocks: e.review.checks.filter(ch => !ch.ok && ch.severity === 'block').map(ch => ch.name) })}`);
+  assert(e.status === 'verified' && FS.readyOf(v) === true && e.review.status !== 'BLOCKED' && !e.review.checks.some(ch => /^sim-warning-only/.test(ch.name)), `D3-2: 警告を出し編集・保存を許可する候補は合格（承認できる）: ${JSON.stringify({ status: e.status, verdict: e.verdict, review: e.review.status, blocks: e.review.checks.filter(ch => !ch.ok && ch.severity === 'block').map(ch => ch.name) })}`);
   assert(v.final.verification.howTo.some(s => /保存/.test(s)), 'D3-3: 警告の要件では「保存は止まらない」ことを実機で確かめる行を出す（構造化した効果から）');
   // D3-4（§0c.6）: 同じ候補でも、生成した AI が警告の要件を PARTIAL と申告した（既存の処理が編集不可にしている間は警告しない）。
   //   簡素化 B（2026-10-17）: 以前は Toolkit が「必須の効果に結び付く要件の PARTIAL」を要件未達（登録不可）に上げていた（coverage-unmet・partialRequired）。
@@ -1123,7 +1125,7 @@ await section(async () => {
   const y = makeConvC({ planImpl: (args) => planJs(args, { cust: CUST_W, summary: '金額が 100 万円を超えたら警告します（保存は止めません）。' }), generate: makeGenerate({ sequence: ['warn'], existingSource: existing, generatedOf: () => KIT.gwModernized(RP.GENERATED) }) });
   await adoptC(y);
   const vy = y.c.activePlan(), ey = vy.generated.C1;
-  assert(ey.status === 'verified' && ey.review.registration.verdict === 'NEEDS_CONFIRMATION' && ey.review.registration.confirmations.some(c => c.code === 'coverage' && /一部だけ/.test(c.message)) && !ey.review.checks.some(ch => ch.name === 'coverage-unmet' || ch.partialRequired) && vy.final.approvable === true && y.gen.calls.length === 1 && !y.gen.calls[0].feedback,
+  assert(ey.status === 'verified' && ey.review.registration.verdict === 'NEEDS_CONFIRMATION' && ey.review.registration.confirmations.some(c => c.code === 'coverage' && /一部だけ/.test(c.message)) && !ey.review.checks.some(ch => ch.name === 'coverage-unmet' || ch.partialRequired) && FS.readyOf(vy) === true && y.gen.calls.length === 1 && !y.gen.calls[0].feedback,
     `D3-4: 自分の要件の PARTIAL（AI の申告）は、生成工程の coverage の確認事項（Toolkit は要件未達に上げない・修復を依頼しない）: ${JSON.stringify({ status: ey.status, verdict: ey.review.registration.verdict, conf: ey.review.registration.confirmations.map(c => c.code), gen: y.gen.calls.length })}`);
 });
 // D4: 保存禁止が必要、候補は画面の編集禁止だけ → 保存禁止を別に検証して要件未達（画面制御だけで代用しない）
@@ -1132,7 +1134,7 @@ await section(async () => {
   const x = makeConvC({ planImpl: (args) => planJs(args, { cust: CUST_S }), generate: makeGenerate({ sequence: ['lockonly'] }) });
   await adoptC(x);
   const e = x.c.activePlan().generated.C1;
-  assert(effectsSent(x) === 'amount:block-save' && e.status === 'unresolved' && e.verdict.kind === 'missing' && /保存を止める/.test(e.verdict.reason) && x.c.activePlan().final.approvable === false, `D4: 保存禁止の要件は block-save として渡し、編集禁止だけの候補は要件未達: ${JSON.stringify({ sent: effectsSent(x), verdict: e.verdict })}`);
+  assert(effectsSent(x) === 'amount:block-save' && e.status === 'unresolved' && e.verdict.kind === 'missing' && /保存を止める/.test(e.verdict.reason) && FS.readyOf(x.c.activePlan()) === false, `D4: 保存禁止の要件は block-save として渡し、編集禁止だけの候補は要件未達: ${JSON.stringify({ sent: effectsSent(x), verdict: e.verdict })}`);
 });
 // D5: 編集不可と保存禁止が両方必要 → 両方の期待を保持し、それぞれ検証する
 await section(async () => {
@@ -1140,11 +1142,11 @@ await section(async () => {
   const x = makeConvC({ planImpl: (args) => planJs(args, { cust: CUST_B }), generate: makeGenerate({ sequence: ['lockonly'] }) });
   await adoptC(x);
   const v = x.c.activePlan(), e = v.generated.C1, rows = v.final.verification.effects;
-  assert(effectsSent(x) === 'amount:block-save,amount:lock' && rows.length === 2 && rows.find(r => r.effect === 'lock').structure === 'present' && rows.find(r => r.effect === 'lock').behavior === 'pass' && rows.find(r => r.effect === 'block-save').structure === 'missing' && e.status === 'unresolved' && v.final.approvable === false, `D5-1: 両方を渡し、編集不可は合格・保存禁止は未達として別々に判定: ${JSON.stringify({ sent: effectsSent(x), rows })}`);
+  assert(effectsSent(x) === 'amount:block-save,amount:lock' && rows.length === 2 && rows.find(r => r.effect === 'lock').structure === 'present' && rows.find(r => r.effect === 'lock').behavior === 'pass' && rows.find(r => r.effect === 'block-save').structure === 'missing' && e.status === 'unresolved' && FS.readyOf(v) === false, `D5-1: 両方を渡し、編集不可は合格・保存禁止は未達として別々に判定: ${JSON.stringify({ sent: effectsSent(x), rows })}`);
   const y = makeConvC({ planImpl: (args) => planJs(args, { cust: CUST_B }), generate: makeGenerate({ sequence: ['locksave'] }) });
   await adoptC(y);
   const vy = y.c.activePlan();
-  assert(vy.generated.C1.status === 'verified' && vy.final.approvable === true && vy.final.verification.behavior.cases.length >= 4 && ['lock', 'block-save'].every(ef => ['match', 'nomatch'].every(sd => vy.generated.C1.verification.behavior.cases.some(c => c.effect === ef && c.side === sd && c.verdict === 'pass'))) && vy.final.verification.behavior.cases.every(c => c.verdict === 'pass'), `D5-2: 両方の処理がある候補は、両方の代表条件で合格して承認できる: ${JSON.stringify(vy.final.verification.behavior)}`);
+  assert(vy.generated.C1.status === 'verified' && FS.readyOf(vy) === true && vy.final.verification.behavior.cases.length >= 4 && ['lock', 'block-save'].every(ef => ['match', 'nomatch'].every(sd => vy.generated.C1.verification.behavior.cases.some(c => c.effect === ef && c.side === sd && c.verdict === 'pass'))) && vy.final.verification.behavior.cases.every(c => c.verdict === 'pass'), `D5-2: 両方の処理がある候補は、両方の代表条件で合格して承認できる: ${JSON.stringify(vy.final.verification.behavior)}`);
 });
 // D6: 判定に必要な内部情報が欠けている（旧い計画: CONTROL で effects 無し）→ 台帳の要件の効果から補う。補えなければ準備未完了（利用者に聞かない）
 await section(async () => {
@@ -1153,12 +1155,12 @@ await section(async () => {
   const x = makeConvC({ planImpl: (args) => planJs(args, { cust: OLD, requirementOps: args.revision ? [] : [op] }) });
   await adoptC(x);
   const v = x.c.activePlan();
-  assert(effectsSent(x) === 'amount:lock' && x.gen.calls[0].requiredEffects.some(r => (r.requirementIds || []).some(id => /^R\d+$/.test(id))) && v.generated.C1.status === 'verified' && v.final.approvable === true, `D6-1: 計画の効果が無い（旧形式）→ 台帳の要件の効果（lock）で補って渡す: ${JSON.stringify(x.gen.calls[0] && x.gen.calls[0].requiredEffects)}`);
+  assert(effectsSent(x) === 'amount:lock' && x.gen.calls[0].requiredEffects.some(r => (r.requirementIds || []).some(id => /^R\d+$/.test(id))) && v.generated.C1.status === 'verified' && FS.readyOf(v) === true, `D6-1: 計画の効果が無い（旧形式）→ 台帳の要件の効果（lock）で補って渡す: ${JSON.stringify(x.gen.calls[0] && x.gen.calls[0].requiredEffects)}`);
   const y = makeConvC({ planImpl: (args) => planJs(args, { cust: OLD }) });
   await adoptC(y);
   const vy = y.c.activePlan();
   const asksBefore = y.calls.ask.length, proposesBefore = y.calls.propose.length;
-  assert(y.gen.calls.length === 0 && vy.generated.C1.status === 'not-ready' && /必須の動作を特定できません（「金額」で/.test(vy.generated.C1.verdict.reason) && vy.final.approvable === false && /必要な動作.*特定できない/.test(vy.final.blockingReason) && y.calls.ask.length === asksBefore && y.calls.propose.length === proposesBefore && !(vy.openQuestions || []).length, `D6-2: 補えなければ生成を呼ばずに準備未完了（同じ要望を利用者に聞き直さない）: ${JSON.stringify({ gen: y.gen.calls.length, verdict: vy.generated.C1.verdict, reason: vy.final.blockingReason })}`);
+  assert(y.gen.calls.length === 0 && vy.generated.C1.status === 'not-ready' && /必須の動作を特定できません（「金額」で/.test(vy.generated.C1.verdict.reason) && FS.readyOf(vy) === false && /必要な動作.*特定できない/.test(FS.reasonOf(vy)) && y.calls.ask.length === asksBefore && y.calls.propose.length === proposesBefore && !(vy.openQuestions || []).length, `D6-2: 補えなければ生成を呼ばずに準備未完了（同じ要望を利用者に聞き直さない）: ${JSON.stringify({ gen: y.gen.calls.length, verdict: vy.generated.C1.verdict, reason: FS.reasonOf(vy) })}`);
   // 純関数: 対象のフィールドが特定できる要件はそのフィールドだけ・計画の効果が要件より弱いときは要件の効果も必須に足す（警告で編集不可を満たしたことにしない）
   const plan2 = { customizations: [{ customizationId: 'C1', events: ['app.record.edit.show'], fields: [{ code: 'amount', access: 'CONTROL', effects: ['warn'] }, { code: 'memo', access: 'CONTROL' }] }] };
   const r2 = KTAiConversation.requiredEffectsOf(plan2, 'C1', [{ id: 'R1', target: '金額', decision: 'decided', disposition: 'adopted', planRefs: ['C1'], effects: ['lock'] }, { id: 'R2', target: '備考', decision: 'decided', disposition: 'adopted', planRefs: ['C1'], effects: ['show-hide'] }], { labels: LABELS_C });
@@ -1173,7 +1175,7 @@ await section(async () => {
   await adoptC(x);
   const v = x.c.activePlan(), e = v.generated.C1;
   assert(x.gen.calls.length === 1 && !x.gen.calls[0].feedback && e.status === 'not-run' && e.verdict.kind === 'environment' && /模擬テストを実行できませんでした（環境: 時間内に終わりませんでした）/.test(e.verdict.reason) && /誤りとは判定していません/.test(e.verdict.reason) && !/要件未達/.test(e.verdict.reason), `D7-1: not-run → 環境の理由で準備未完了（修復は呼ばない・不合格と言わない）: ${JSON.stringify({ calls: x.gen.calls.length, verdict: e.verdict })}`);
-  assert(v.final.approvable === false && /環境の制約です/.test(v.final.blockingReason) && x.c.approveFinal(KIT.approveArgs(v)).ok === false, `D7-2: 未確認を合格に読み替えない（承認できない）: ${v.final.blockingReason}`);
+  assert(FS.readyOf(v) === false && /環境の制約です/.test(FS.reasonOf(v)) && x.c.approveFinal(KIT.approveArgs(v)).ok === false, `D7-2: 未確認を合格に読み替えない（承認できない）: ${FS.reasonOf(v)}`);
   const nr = e.review.checks.find(ch => ch.name === 'behavior-not-run');
   assert(nr && nr.severity === 'block' && nr.noRepair === true && nr.environment === true && e.review.checks.find(ch => ch.name === 'required-effects').ok === true, `D7-3: 形式確認の取り込み: 必須の効果の処理はあり、動作テストは環境で未実行（修復の対象にしない印）: ${JSON.stringify(nr)}`);
   const text = stripC(rightOf(x));
@@ -1181,7 +1183,7 @@ await section(async () => {
   // 動作テストは passed だが必須の効果の代表条件が無い → 未確認（合格に読み替えない）
   const y = makeConvC({ generate: makeGenerate({ sequence: ['good'], dropCaseFor: 'amount|lock' }) });
   await adoptC(y);
-  assert(y.c.activePlan().generated.C1.status === 'unverified' && y.c.activePlan().final.approvable === false, `D7-5: 必須の効果に代表条件が無い → 未確認で準備未完了: ${JSON.stringify(y.c.activePlan().generated.C1.verdict)}`);
+  assert(y.c.activePlan().generated.C1.status === 'unverified' && FS.readyOf(y.c.activePlan()) === false, `D7-5: 必須の効果に代表条件が無い → 未確認で準備未完了: ${JSON.stringify(y.c.activePlan().generated.C1.verdict)}`);
 });
 // D8: 基準取得失敗・古い候補・機能非対応 → 照合の省略や旧承認の流用で反映できない
 await section(async () => {
@@ -1211,7 +1213,7 @@ await section(async () => {
   await adoptC(y);
   const vy = y.c.activePlan(), ey = vy.generated.C1;
   const apY = y.c.approveFinal(KIT.approveArgs(vy, { baseStamp: { fingerprint: 'fp-1' } }));
-  assert(y.gen.calls.length === 1 && ey.status === 'unsupported' && vy.final.approvable === false && /接続先（生成工程）が必須の動作の確認に対応していない/.test(vy.final.blockingReason) && ey.review.status === 'BLOCKED' && ey.review.registration.verdict === 'BLOCKED' && ey.review.checks.some(ch => ch.name === 'required-effects' && !ch.ok && ch.severity === 'block' && ch.noRepair === true) && apY.ok === false && !vy.approval, `D8-6: 機能非対応 → 準備未完了・既知の競合の候補も生成工程の結果の欠落で登録不可のまま（確認に下げない・承認できない）: ${JSON.stringify({ status: ey.status, verdict: ey.review.registration.verdict, checks: ey.review.checks.filter(ch => !ch.ok).map(ch => `${ch.name}/${ch.severity}`), ap: apY })}`);
+  assert(y.gen.calls.length === 1 && ey.status === 'unsupported' && FS.readyOf(vy) === false && /接続先（生成工程）が必須の動作の確認に対応していない/.test(FS.reasonOf(vy)) && ey.review.status === 'BLOCKED' && ey.review.registration.verdict === 'BLOCKED' && ey.review.checks.some(ch => ch.name === 'required-effects' && !ch.ok && ch.severity === 'block' && ch.noRepair === true) && apY.ok === false && !vy.approval, `D8-6: 機能非対応 → 準備未完了・既知の競合の候補も生成工程の結果の欠落で登録不可のまま（確認に下げない・承認できない）: ${JSON.stringify({ status: ey.status, verdict: ey.review.registration.verdict, checks: ey.review.checks.filter(ch => !ch.ok).map(ch => `${ch.name}/${ch.severity}`), ap: apY })}`);
   //   今の契約の接続先（health の印 effectCheck あり）: 生成工程は既知の競合を check behavior（candidate-error-same-event）にする。
   //   模擬テストの環境が使えなければ準備未完了（機械検査で足りる効果として合格に数えない）、模擬テストで不合格なら未解決（どちらも承認できない）
   const GEN_EC = [...GEN_EFFECT_FEATURES, 'effectCheck'];
@@ -1219,11 +1221,11 @@ await section(async () => {
   await adoptC(z);
   const vz = z.c.activePlan(), ez = vz.generated.C1;
   const itZ = ez.review.effects && ez.review.effects.items.find(i => i.field === 'amount' && i.effect === 'lock');
-  assert(ez.status === 'not-run' && vz.final.approvable === false && ez.review.registration.verdict === 'BLOCKED' && ez.review.checks.some(ch => ch.name === 'behavior-not-run' && ch.severity === 'block' && ch.noRepair === true) && itZ && itZ.check === 'behavior' && itZ.checkReason.includes('candidate-error-same-event') && itZ.checkedBy !== 'machine' && /error と編集不可の両方/.test(ez.verdict.reason) && z.gen.calls.length === 1 && z.c.approveFinal(KIT.approveArgs(vz, { baseStamp: { fingerprint: 'fp-1' } })).ok === false, `D8-6b: 今の契約の接続先で既知の競合（check behavior）を模擬テストで確かめられない → 準備未完了（機械検査の合格に数えない・修復しない・承認できない）: ${JSON.stringify({ status: ez.status, verdict: ez.review.registration.verdict, item: itZ && { check: itZ.check, checkReason: itZ.checkReason, checkedBy: itZ.checkedBy }, reason: ez.verdict.reason })}`);
+  assert(ez.status === 'not-run' && FS.readyOf(vz) === false && ez.review.registration.verdict === 'BLOCKED' && ez.review.checks.some(ch => ch.name === 'behavior-not-run' && ch.severity === 'block' && ch.noRepair === true) && itZ && itZ.check === 'behavior' && itZ.checkReason.includes('candidate-error-same-event') && itZ.checkedBy !== 'machine' && /error と編集不可の両方/.test(ez.verdict.reason) && z.gen.calls.length === 1 && z.c.approveFinal(KIT.approveArgs(vz, { baseStamp: { fingerprint: 'fp-1' } })).ok === false, `D8-6b: 今の契約の接続先で既知の競合（check behavior）を模擬テストで確かめられない → 準備未完了（機械検査の合格に数えない・修復しない・承認できない）: ${JSON.stringify({ status: ez.status, verdict: ez.review.registration.verdict, item: itZ && { check: itZ.check, checkReason: itZ.checkReason, checkedBy: itZ.checkedBy }, reason: ez.verdict.reason })}`);
   const w = makeConvC({ supported: GEN_EC, generate: makeGenerate({ sequence: ['badChecked'] }) });
   await adoptC(w);
   const vw = w.c.activePlan(), ew = vw.generated.C1;
-  assert(ew.status === 'unresolved' && ew.verdict.kind === 'behavior-fail' && vw.final.approvable === false && ew.review.registration.verdict === 'BLOCKED' && ew.review.checks.some(ch => ch.name === 'behavior-fail' && ch.severity === 'block' && /取り消/.test(ch.message)) && w.c.approveFinal(KIT.approveArgs(vw, { baseStamp: { fingerprint: 'fp-1' } })).ok === false, `D8-6c: 今の契約の接続先で既知の競合が模擬テストで不合格（error で編集不可が取り消される）→ 未解決・登録不可（承認できない）: ${JSON.stringify({ status: ew.status, verdict: ew.verdict && ew.verdict.kind, checks: ew.review.checks.filter(ch => !ch.ok).map(ch => `${ch.name}/${ch.severity}`) })}`);
+  assert(ew.status === 'unresolved' && ew.verdict.kind === 'behavior-fail' && FS.readyOf(vw) === false && ew.review.registration.verdict === 'BLOCKED' && ew.review.checks.some(ch => ch.name === 'behavior-fail' && ch.severity === 'block' && /取り消/.test(ch.message)) && w.c.approveFinal(KIT.approveArgs(vw, { baseStamp: { fingerprint: 'fp-1' } })).ok === false, `D8-6c: 今の契約の接続先で既知の競合が模擬テストで不合格（error で編集不可が取り消される）→ 未解決・登録不可（承認できない）: ${JSON.stringify({ status: ew.status, verdict: ew.verdict && ew.verdict.kind, checks: ew.review.checks.filter(ch => !ch.ok).map(ch => `${ch.name}/${ch.severity}`) })}`);
   // HEAD で登録不可だった 4 通りは、動作テストの結果が無い・実行できない・不合格・旧い接続先のどれでも登録不可のまま（合格のときだけ登録の準備に進める）
   //   §0d.4（2026-10-08）: 生成工程の結果を通さない静的な形式確認だけの形（旧 mode none）は、Toolkit の業務の推定による判定（error-cancels-edit）を試していたので外した。
   //   既知の競合の判定は生成工程（Gateway の required-effects.mjs §0d.1 S7 の check behavior・隔離環境の sandbox/test/run.mjs §3 R13 の cancelledByError・
@@ -1273,13 +1275,13 @@ await section(async () => {
   const v = x.c.activePlan();
   const rid = (x.c.requirements(v.planId).find(r => r.behavior === '7 営業日以内に承認する') || {}).id;
   assert(rid && x.calls.plan.length === 1 && !x.calls.plan[0].revision && (v.final.unconfirmedReqs || []).some(u => u.requirementId === rid), `D9-1: 計画に対応づけていない決まった要件（扱い未定の unresolved も）→ 自動の差分更新をせず、確認の限界: ${JSON.stringify({ plans: x.calls.plan.map(p => ({ rev: p.revision, focus: p.focus })), unconf: (v.final.unconfirmedReqs || []).map(u => u.requirementId) })}`);
-  assert(x.finals().length === 1 && v.version === 1 && v.final.approvable === true && x.gen.calls.length === 1, `D9-2: 最終案を 1 回だけ作る（確認の限界では止めない）: ${JSON.stringify({ finals: x.finals().length, version: v.version, gen: x.gen.calls.length, reason: v.final.blockingReason })}`);
+  assert(x.finals().length === 1 && v.version === 1 && FS.readyOf(v) === true && x.gen.calls.length === 1, `D9-2: 最終案を 1 回だけ作る（確認の限界では止めない）: ${JSON.stringify({ finals: x.finals().length, version: v.version, gen: x.gen.calls.length, reason: FS.reasonOf(v) })}`);
   // (b) 差分更新でも担当を付けない計画の AI → 最終案に確認の限界として出す（右に件数の 1 行・要件の文は［詳しく］。左には出さない。承認できる）
   const y = makeConvC({ planImpl: (args) => planJs(args, { gatewayPlan: { plan: true }, requirementOps: args.revision ? [] : [OWN] }) });
   await adoptC(y);
   const vy = y.c.activePlan();
   const hy = stripC(finalHtml(y));
-  assert(y.calls.plan.length === 1 && y.finals().length === 1 && vy.final.approvable === true && !vy.final.blockers.some(b => b.kind === 'ownerless') && /計画の構造からは実現を確かめていない要件が 1 件あります/.test(stripC(rightOf(y))) && stripC(rightOf(y)).includes('「7営業日で」は、計画の構造からは実現を確かめていません') && !/7営業日で/.test(hy), `D9-3: 計画に対応づけていない決まった要件は最終案から消さず、右の確認の限界に出す（自動の差分更新なし）: ${JSON.stringify({ plans: y.calls.plan.length, finals: y.finals().length, reason: vy.final.blockingReason })}`);
+  assert(y.calls.plan.length === 1 && y.finals().length === 1 && FS.readyOf(vy) === true && !vy.final.blockers.some(b => b.kind === 'ownerless') && /計画の構造からは実現を確かめていない要件が 1 件あります/.test(stripC(rightOf(y))) && stripC(rightOf(y)).includes('「7営業日で」は、計画の構造からは実現を確かめていません') && !/7営業日で/.test(hy), `D9-3: 計画に対応づけていない決まった要件は最終案から消さず、右の確認の限界に出す（自動の差分更新なし）: ${JSON.stringify({ plans: y.calls.plan.length, finals: y.finals().length, reason: FS.reasonOf(vy) })}`);
   const ap = y.c.approveFinal(KIT.approveArgs(vy));
   assert(ap.ok === true, `D9-4: 確認の限界の要件が残る最終案も承認できる（反映した後に動作テスト環境で確かめる）: ${JSON.stringify(ap)}`);
 });
@@ -1317,7 +1319,7 @@ await section(async () => {
   const v = m.conv().activePlan();
   const vf = genCtx[0] && genCtx[0].verification;
   assert(genCtx.length === 1 && vf && JSON.stringify(vf.requiredEffects) === JSON.stringify([{ requirementId: 'C1', requirementIds: ['C1'], field: 'case_name', effect: 'lock', events: ['app.record.edit.show'], condition: 'ステータス in ("承認待ち")' }]) && !('cases' in vf) && Array.isArray(vf.relatedFiles) && vf.relatedFiles.map(f => f.name).join(',') === 'common.js' && !/sk_live_0123456789abcdef0123/.test(vf.relatedFiles[0].text) && /case_name/.test(vf.relatedFiles[0].text), `D10-1: Generator Context に必須の効果と、そのフィールドを参照する既存 JS（同じ platform・秘密情報は伏字）を渡し、代表条件は送らない: ${JSON.stringify(vf && { re: vf.requiredEffects, files: (vf.relatedFiles || []).map(f => f.name), cases: 'cases' in vf })}`);
-  assert(v && v.final && v.final.approvable === true && v.generated.C1.status === 'verified' && v.generated.C1.verification.behavior.status === 'passed', `D10-2: 生成工程の結果（必須の効果・動作テスト）で最終案は承認できる: ${JSON.stringify(v && v.final && { approvable: v.final.approvable, reason: v.final.blockingReason, status: v.generated.C1 && v.generated.C1.status })}`);
+  assert(v && v.final && FS.readyOf(v) === true && v.generated.C1.status === 'verified' && v.generated.C1.verification.behavior.status === 'passed', `D10-2: 生成工程の結果（必須の効果・動作テスト）で最終案は承認できる: ${JSON.stringify(v && v.final && { approvable: FS.readyOf(v), reason: FS.reasonOf(v), status: v.generated.C1 && v.generated.C1.status })}`);
   //   §0e.1: 基準を取得できない → 照合を飛ばさない（承認の欄の準備の後、押す前に取得できなくなった場合。何も書き込まずに止め、承認を外す）
   const rF = await run();
   const vF = rF.m.conv().activePlan();
@@ -1330,7 +1332,7 @@ await section(async () => {
   // 動作テストが環境で実行できない → 承認できない（［この内容で反映する］は押せない）
   const r2 = await run({ env: 'unavailable' });
   const v2 = r2.m.conv().activePlan();
-  assert(v2 && v2.final && v2.final.approvable === false && v2.generated.C1.status === 'not-run' && r2.genCtx.length === 1 && /disabled>動作テスト環境へ反映/.test(r2.m.chat()) && /模擬テストを実行できませんでした（環境: 模擬テストの環境を使えませんでした）/.test(stripC(r2.m.chat())), `D10-6: 動作テストが環境で実行できない → 生成は 1 回のまま・承認できない・理由は環境: ${JSON.stringify(v2 && v2.final && { approvable: v2.final.approvable, reason: v2.final.blockingReason })}`);
+  assert(v2 && v2.final && FS.readyOf(v2) === false && v2.generated.C1.status === 'not-run' && r2.genCtx.length === 1 && /disabled>動作テスト環境へ反映/.test(r2.m.chat()) && /模擬テストを実行できませんでした（環境: 模擬テストの環境を使えませんでした）/.test(stripC(r2.m.chat())), `D10-6: 動作テストが環境で実行できない → 生成は 1 回のまま・承認できない・理由は環境: ${JSON.stringify(v2 && v2.final && { approvable: FS.readyOf(v2), reason: FS.reasonOf(v2) })}`);
 });
 
 // ---- §0c.6（2026-10-08）: 段階 C-1 の独立レビュー（効果の区別・隔離環境と完了条件）の再現と回帰 ----
@@ -1352,11 +1354,11 @@ await section(async () => {
   const x = makeConvC({ planImpl: (args) => planJs(args, { cust: CUST_A, gatewayPlan: { plan: true }, requirementOps: args.revision ? [] : [opA] }) });
   await adoptC(x);
   const v = x.c.activePlan(), e = v.generated.C1;
-  assert(x.calls.plan.length === 2 && x.calls.plan[1].revision && /effects/.test(x.calls.plan[1].request) && x.calls.plan[1].focus.includes('C1') && x.gen.calls.length === 0 && e.status === 'not-ready' && /担当するフィールドが計画にありません（「金額」は計画では読み取りだけです）/.test(e.verdict.reason) && /1 回自動で依頼しました/.test(e.verdict.next) && v.final.approvable === false && x.finals().length === 1, `D11-3: unresolved → 自動の差分更新は 1 回 → 準備未完了（生成しない・最終案は 1 回）: ${JSON.stringify({ plans: x.calls.plan.map(p => ({ rev: p.revision, focus: p.focus })), gen: x.gen.calls.length, verdict: e.verdict })}`);
+  assert(x.calls.plan.length === 2 && x.calls.plan[1].revision && /effects/.test(x.calls.plan[1].request) && x.calls.plan[1].focus.includes('C1') && x.gen.calls.length === 0 && e.status === 'not-ready' && /担当するフィールドが計画にありません（「金額」は計画では読み取りだけです）/.test(e.verdict.reason) && /1 回自動で依頼しました/.test(e.verdict.next) && FS.readyOf(v) === false && x.finals().length === 1, `D11-3: unresolved → 自動の差分更新は 1 回 → 準備未完了（生成しない・最終案は 1 回）: ${JSON.stringify({ plans: x.calls.plan.map(p => ({ rev: p.revision, focus: p.focus })), gen: x.gen.calls.length, verdict: e.verdict })}`);
   const y = makeConvC({ planImpl: (args) => planJs(args, { cust: args.revision ? custOf(['lock']) : CUST_A, requirementOps: args.revision ? [] : [opA] }) });
   await adoptC(y);
   const vy = y.c.activePlan();
-  assert(y.calls.plan.length === 2 && vy.version === 2 && y.gen.calls.length === 1 && effectsSent(y) === 'amount:lock' && vy.generated.C1.status === 'verified' && vy.final.approvable === true && y.finals().length === 1, `D11-4: 差分更新で計画が金額に編集不可を置けば、その版で最終案を 1 回だけ作る: ${JSON.stringify({ plans: y.calls.plan.length, gen: y.gen.calls.length, sent: effectsSent(y) })}`);
+  assert(y.calls.plan.length === 2 && vy.version === 2 && y.gen.calls.length === 1 && effectsSent(y) === 'amount:lock' && vy.generated.C1.status === 'verified' && FS.readyOf(vy) === true && y.finals().length === 1, `D11-4: 差分更新で計画が金額に編集不可を置けば、その版で最終案を 1 回だけ作る: ${JSON.stringify({ plans: y.calls.plan.length, gen: y.gen.calls.length, sent: effectsSent(y) })}`);
 });
 // D12（レビュー tk.cjs）: 計画で新設するフィールドの必須の効果は、固定する時点で採番後のコードに変換し、照合も同じコード（Gateway が全部合格なら照合も合格）
 await section(async () => {
@@ -1433,12 +1435,12 @@ await section(async () => {
   //   Toolkit はその明示された失敗を取り込んで承認・登録しない。旧い接続先（生成工程が必須の効果に非対応）では結果の欠落（接続先が非対応）で承認しない
   const b0 = await run({ code: CONFLICT_L });
   const b = await run({ capable: true, code: CONFLICT_L, has: ['lock', 'warn'], cand: { fails: ['case_name|lock'], failMsg: '承認待ちの編集画面で、エラー表示のため編集不可が取り消されました', check: { 'case_name|lock': { check: 'behavior', checkReason: ['candidate-error-same-event', 'nested'], raw: true } } } });
-  assert(b0.v && b0.v.final && b0.v.final.approvable === false && b0.v.generated.C1.status === 'unsupported' && b0.applied && b0.applied.button && b0.applied.button.disabled && !b0.v.approval && !b0.pr && !b0.m.mock.calls.some(c => c === 'PUT customize') && b.v.final.approvable === false && /取り消/.test(b.cannotText) && b.applied && b.applied.button && b.applied.button.disabled && !b.v.approval && !b.pr && !b.m.mock.calls.some(c => c === 'PUT customize'), `D14-2: 既知の競合（同じ handler の無条件の error と disabled）は承認・登録できない（今の契約の接続先では模擬テストの不合格・旧い接続先では結果の欠落）: ${b.cannotText.slice(0, 300)}`);
+  assert(b0.v && b0.v.final && FS.readyOf(b0.v) === false && b0.v.generated.C1.status === 'unsupported' && b0.applied && b0.applied.button && b0.applied.button.disabled && !b0.v.approval && !b0.pr && !b0.m.mock.calls.some(c => c === 'PUT customize') && FS.readyOf(b.v) === false && /取り消/.test(b.cannotText) && b.applied && b.applied.button && b.applied.button.disabled && !b.v.approval && !b.pr && !b.m.mock.calls.some(c => c === 'PUT customize'), `D14-2: 既知の競合（同じ handler の無条件の error と disabled）は承認・登録できない（今の契約の接続先では模擬テストの不合格・旧い接続先では結果の欠落）: ${b.cannotText.slice(0, 300)}`);
   const c = await run({ capable: true });
   const sentL = c.genCtx[0] && c.genCtx[0].verification && c.genCtx[0].verification.requiredEffects;
-  assert(c.draft && c.draft.status === 'adopted' && sentL && sentL.length === 1 && sentL[0].field === 'case_name' && sentL[0].effect === 'lock' && c.v.final.approvable === true && c.v.approval && c.pr && c.pr.status === 'PREPARED' && c.applied && c.applied.run.ok && c.m.mock.calls.includes('PUT customize'), `D14-3: 仮案の流れで接続先が対応していれば必須の効果を渡し、合格した候補は［動作テスト環境へ反映］1 回で承認と登録まで進む: ${JSON.stringify({ sent: sentL, status: c.pr && c.pr.status, blockers: c.pr && c.pr.blockers })}`);
+  assert(c.draft && c.draft.status === 'adopted' && sentL && sentL.length === 1 && sentL[0].field === 'case_name' && sentL[0].effect === 'lock' && FS.readyOf(c.v) === true && c.v.approval && c.pr && c.pr.status === 'PREPARED' && c.applied && c.applied.run.ok && c.m.mock.calls.includes('PUT customize'), `D14-3: 仮案の流れで接続先が対応していれば必須の効果を渡し、合格した候補は［動作テスト環境へ反映］1 回で承認と登録まで進む: ${JSON.stringify({ sent: sentL, status: c.pr && c.pr.status, blockers: c.pr && c.pr.blockers })}`);
   const d = await run({ capable: true, has: ['warn'] });
-  assert(d.v.final.approvable === false && /要件未達/.test(d.cannotText) && d.applied && d.applied.button && d.applied.button.disabled && !d.v.approval && !d.pr && !d.m.mock.calls.some(c2 => c2 === 'PUT customize'), `D14-4: 生成工程が要件未達（編集不可が必要で警告だけ）を返した → 承認・登録しない: ${d.cannotText.slice(0, 300)}`);
+  assert(FS.readyOf(d.v) === false && /要件未達/.test(d.cannotText) && d.applied && d.applied.button && d.applied.button.disabled && !d.v.approval && !d.pr && !d.m.mock.calls.some(c2 => c2 === 'PUT customize'), `D14-4: 生成工程が要件未達（編集不可が必要で警告だけ）を返した → 承認・登録しない: ${d.cannotText.slice(0, 300)}`);
 });
 // D15（レビュー B3・§0c.6）: 生成した AI の要件の達成の申告（PARTIAL・NOT_MET）。SUBTABLE_ROWS（計画の構造で分かる制約）は実現できない点として承認を止めない
 //   簡素化 B（2026-10-17）: 以前は Toolkit が申告を検査にしていた（coverage-unmet。NOT_MET は登録不可・必須の効果に結び付く PARTIAL は要件未達に上げる）。
@@ -1487,13 +1489,13 @@ await section(async () => {
   const y = makeConvC({ planImpl: (args) => planJs(args, { cust: custOf(null), gatewayPlan: { plan: true } }) });
   await adoptC(y);
   const vy = y.c.activePlan();
-  assert(y.calls.plan.length === 2 && y.calls.plan[1].focus.includes('C1') && y.gen.calls.length === 0 && vy.generated.C1.status === 'not-ready' && vy.final.approvable === false && vy.final.readiness.reasons.some(r => r.kind === 'effects-unknown') && y.c.metrics().effectRevisions === 1, `D16-2: 効果を特定できない → 自動の差分更新 1 回 → 準備未完了: ${JSON.stringify({ plans: y.calls.plan.length, reasons: vy.final.readiness.reasons })}`);
+  assert(y.calls.plan.length === 2 && y.calls.plan[1].focus.includes('C1') && y.gen.calls.length === 0 && vy.generated.C1.status === 'not-ready' && FS.readyOf(vy) === false && FS.readinessOf(vy).reasons.some(r => r.kind === 'effects-unknown') && y.c.metrics().effectRevisions === 1, `D16-2: 効果を特定できない → 自動の差分更新 1 回 → 準備未完了: ${JSON.stringify({ plans: y.calls.plan.length, reasons: FS.readinessOf(vy).reasons })}`);
   // 必須の効果が生成工程の上限（20 件）を超える → 黙って落とさず、生成を呼ばずに準備未完了（件数の上限）
   const many = custOf(null, { fields: [{ code: 'ステータス', access: 'READ' }, ...Array.from({ length: 21 }, (_, i) => ({ code: `f${i + 1}`, access: 'CONTROL', condition: 'ステータス in ("承認待ち")', effects: ['lock'] }))] });
   const z = makeConvC({ planImpl: (args) => planJs(args, { cust: many }) });
   await adoptC(z);
   const vz = z.c.activePlan();
-  assert(z.gen.calls.length === 0 && vz.generated.C1.status === 'not-ready' && vz.generated.C1.verdict.kind === 'effects-limit' && vz.final.readiness.reasons.some(r => r.kind === 'effects-limit') && !vz.final.readiness.reasons.some(r => r.kind === 'effects-unknown') && vz.final.approvable === false, `D16-3: 必須の効果が 21 件 → 生成を呼ばずに準備未完了（件数の上限）: ${JSON.stringify({ gen: z.gen.calls.length, verdict: vz.generated.C1.verdict, reasons: vz.final.readiness.reasons })}`);
+  assert(z.gen.calls.length === 0 && vz.generated.C1.status === 'not-ready' && vz.generated.C1.verdict.kind === 'effects-limit' && FS.readinessOf(vz).reasons.some(r => r.kind === 'effects-limit') && !FS.readinessOf(vz).reasons.some(r => r.kind === 'effects-unknown') && FS.readyOf(vz) === false, `D16-3: 必須の効果が 21 件 → 生成を呼ばずに準備未完了（件数の上限）: ${JSON.stringify({ gen: z.gen.calls.length, verdict: vz.generated.C1.verdict, reasons: FS.readinessOf(vz).reasons })}`);
 });
 // D17（レビュー A2・§3・§0c.6）: 動作テストに渡せなかった既存 JS（Toolkit が外した・Gateway が落とした）が同じイベントを登録していれば、その効果は合格でも verified にしない
 await section(async () => {
@@ -1509,7 +1511,7 @@ await section(async () => {
   await adoptC(x);
   const v = x.c.activePlan(), e = v.generated.C1;
   //   §0c.9（2026-10-08）: 送れなかった既存 JS（件数の上限）は計画を直しても解けない → 操作を出さず「対応できない範囲」（理由とファイル名。詳細は詳細表示）
-  assert(e.status === 'not-run' && e.verdict.kind === 'out-of-reach' && e.verdict.unfixable === true && !e.verdict.fix && !v.final.fix && /対応できない範囲/.test(e.verdict.reason) && /既存の JavaScript/.test(e.verdict.reason) && /「big\.js」/.test(e.verdict.reason) && /計画を直しても解けない/.test(e.verdict.next) && e.verdict.details.some(d => /「big\.js」: 模擬テストに渡せる既存の JavaScript の件数・文字数の上限/.test(d)) && !/実機/.test(e.verdict.next) && !/環境の制約/.test(v.final.blockingReason) && /既存の JavaScript と一緒の動き/.test(v.final.blockingReason) && !/実機で確かめる/.test(v.final.blockingReason) && v.final.approvable === false && x.gen.calls.length === 1 && !x.gen.calls[0].feedback, `D17-2: 送れなかった既存 JS が同じイベント → 動作テストは合格でも反映できない（理由は既存 JS・§0c.9: 対応できない範囲として出し操作は出さない（実機で確かめるとも出さない）・修復は依頼しない）: ${JSON.stringify({ status: e.status, verdict: e.verdict, reason: v.final.blockingReason })}`);
+  assert(e.status === 'not-run' && e.verdict.kind === 'out-of-reach' && e.verdict.unfixable === true && !e.verdict.fix && !v.final.fix && /対応できない範囲/.test(e.verdict.reason) && /既存の JavaScript/.test(e.verdict.reason) && /「big\.js」/.test(e.verdict.reason) && /計画を直しても解けない/.test(e.verdict.next) && e.verdict.details.some(d => /「big\.js」: 模擬テストに渡せる既存の JavaScript の件数・文字数の上限/.test(d)) && !/実機/.test(e.verdict.next) && !/環境の制約/.test(FS.reasonOf(v)) && /既存の JavaScript と一緒の動き/.test(FS.reasonOf(v)) && !/実機で確かめる/.test(FS.reasonOf(v)) && FS.readyOf(v) === false && x.gen.calls.length === 1 && !x.gen.calls[0].feedback, `D17-2: 送れなかった既存 JS が同じイベント → 動作テストは合格でも反映できない（理由は既存 JS・§0c.9: 対応できない範囲として出し操作は出さない（実機で確かめるとも出さない）・修復は依頼しない）: ${JSON.stringify({ status: e.status, verdict: e.verdict, reason: FS.reasonOf(v) })}`);
   // Generator Context: relatedFiles は 4 件まで・送れなかったものは relatedOmitted で Gateway にも知らせる
   const files = [1, 2, 3, 4, 5].map(i => ({ name: `f${i}.js`, target: 'desktop', text: `/* ${i} */` }));
   const ctx = KTContext.buildGenerator({ customization: CUST_C1, plan: { customizations: [CUST_C1] }, planId: 'p', version: 1, data: clone(DATA_C), verification: { requirementIds: [], requiredEffects: REQ_LOCK, relatedFiles: files, relatedOmitted: [{ name: 'f6.js', target: 'desktop', reason: 'limit', events: ['app.record.edit.show'] }] } });
@@ -1520,7 +1522,7 @@ await section(async () => {
   const run = async (o) => { const x = makeConvC({ generate: makeGenerate({ sequence: ['good'], ...o }) }); await adoptC(x); return x; };
   const c1 = await run({ env: 'condition-unparsed' });
   const e1 = c1.c.activePlan().generated.C1, f1 = c1.c.activePlan().final;
-  assert(e1.status === 'not-run' && e1.verdict.kind === 'condition' && /条件の形/.test(e1.verdict.reason) && /計画の条件/.test(e1.verdict.next) && !/環境/.test(e1.verdict.reason) && !/環境の制約/.test(f1.blockingReason) && /計画の条件を直します/.test(f1.blockingReason) && c1.gen.calls.length === 1, `D18-1: 条件を読めない → 「条件の形」・次の方針は計画を直す（環境とは言わない）: ${JSON.stringify({ verdict: e1.verdict, reason: f1.blockingReason })}`);
+  assert(e1.status === 'not-run' && e1.verdict.kind === 'condition' && /条件の形/.test(e1.verdict.reason) && /計画の条件/.test(e1.verdict.next) && !/環境/.test(e1.verdict.reason) && !/環境の制約/.test(FS.reasonOf(f1)) && /計画の条件を直します/.test(FS.reasonOf(f1)) && c1.gen.calls.length === 1, `D18-1: 条件を読めない → 「条件の形」・次の方針は計画を直す（環境とは言わない）: ${JSON.stringify({ verdict: e1.verdict, reason: FS.reasonOf(f1) })}`);
   const c2 = await run({ env: 'limit' });
   const e2 = c2.c.activePlan().generated.C1;
   assert(e2.verdict.kind === 'limit' && /件数の上限/.test(e2.verdict.reason) && /分けるか/.test(e2.verdict.next), `D18-2: 代表条件の上限 → 「件数の上限」・次の方針は計画を分ける・絞る: ${JSON.stringify(e2.verdict)}`);
@@ -1535,7 +1537,7 @@ await section(async () => {
   const e4 = c4.c.activePlan().generated.C1, nr4 = e4.review.checks.find(ch => ch.name === 'behavior-not-run');
   assert(e4.verdict.kind === 'missing' && nr4 && nr4.category === 'machine' && !nr4.environment && !/環境/.test(nr4.message) && /機械検査/.test(nr4.message), `D18-4: 要件未達で動作テストは機械検査で未実行 → 詳細に「環境」と並べない: ${JSON.stringify({ verdict: e4.verdict.kind, check: nr4 })}`);
   const c5 = await run({ extraCases: [{ id: 'K9', requirementIds: ['C1'], field: 'amount', effect: 'lock', expect: 'lock', verdict: 'not-run', reason: 'not-on-create', message: '' }] });
-  assert(c5.c.activePlan().generated.C1.status === 'verified' && c5.c.activePlan().final.approvable === true, `D18-5: 対象外（作成画面に当たらない）の代表条件は判定に数えない（ほかの代表条件が合格なら合格）: ${JSON.stringify(c5.c.activePlan().generated.C1.verdict)}`);
+  assert(c5.c.activePlan().generated.C1.status === 'verified' && FS.readyOf(c5.c.activePlan()) === true, `D18-5: 対象外（作成画面に当たらない）の代表条件は判定に数えない（ほかの代表条件が合格なら合格）: ${JSON.stringify(c5.c.activePlan().generated.C1.verdict)}`);
   const c6 = await run({ env: 'unknown-reason-x' });
   const h6 = outsideDetails(finalHtml(c6));
   assert(c6.c.activePlan().generated.C1.verdict.kind === 'other' && !/unknown-reason-x/.test(h6) && c6.c.activePlan().generated.C1.verdict.details.some(d => /unknown-reason-x/.test(d)), `D18-6: 語彙外の理由は「そのほか」・理由の名前は詳細表示だけ: ${JSON.stringify(c6.c.activePlan().generated.C1.verdict)}`);
@@ -1547,7 +1549,7 @@ await section(async () => {
   const x = makeConvC({ generate: makeGenerate({ sequence: ['good'], statusOverride: 'unchecked' }) });
   await adoptC(x);
   const v = x.c.activePlan(), e = v.generated.C1, text = stripC(rightOf(x));
-  assert(e.status === 'unverified' && /解析できませんでした/.test(e.verdict.reason) && !/要件未達/.test(e.verdict.reason) && v.final.verification.effects[0].structure === 'unchecked' && /解析できません（未確認）/.test(text) && !/処理なし（要件未達）/.test(text) && v.final.approvable === false, `D19: unchecked → 未確認（要件未達と表示しない・反映はできない）: ${JSON.stringify({ status: e.status, verdict: e.verdict })}`);
+  assert(e.status === 'unverified' && /解析できませんでした/.test(e.verdict.reason) && !/要件未達/.test(e.verdict.reason) && v.final.verification.effects[0].structure === 'unchecked' && /解析できません（未確認）/.test(text) && !/処理なし（要件未達）/.test(text) && FS.readyOf(v) === false, `D19: unchecked → 未確認（要件未達と表示しない・反映はできない）: ${JSON.stringify({ status: e.status, verdict: e.verdict })}`);
 });
 // D20（レビュー 8・§0c.6 の担当）: 担当は構造（planRefs）だけで決める。生成 AI の coverage の MET は担当として数えない
 //   簡素化 C（2026-10-16）: 対応づけの無い決まった要件は止めずに確認の限界にする。MET の申告でその確認を消さない（実現した扱いにしない）
@@ -1561,7 +1563,7 @@ await section(async () => {
   const vy = y.c.activePlan();
   const metIds = (vy.generated.C1.generated.coverage || []).filter(cv => cv.status === 'MET').map(cv => cv.requirementId);
   const rid20 = (y.c.requirements(vy.planId).find(r => r.behavior === OWN2.behavior) || {}).id;
-  assert(!!rid20 && metIds.includes(rid20) && vy.final.approvable === true && (vy.final.unconfirmedReqs || []).some(u => u.requirementId === rid20) && y.calls.plan.length === 1, `D20: AI が MET と申告しても planRefs の無い決まった要件は実現した扱いにしない（確認の限界のまま。止めない）: ${JSON.stringify({ metIds, unconf: (vy.final.unconfirmedReqs || []).map(u => u.requirementId), plans: y.calls.plan.length })}`);
+  assert(!!rid20 && metIds.includes(rid20) && FS.readyOf(vy) === true && (vy.final.unconfirmedReqs || []).some(u => u.requirementId === rid20) && y.calls.plan.length === 1, `D20: AI が MET と申告しても planRefs の無い決まった要件は実現した扱いにしない（確認の限界のまま。止めない）: ${JSON.stringify({ metIds, unconf: (vy.final.unconfirmedReqs || []).map(u => u.requirementId), plans: y.calls.plan.length })}`);
 });
 // D21（レビュー B6）: 警告の「保存は止めない」代表条件の説明は構造化した値から作る（作成画面・編集画面を取り違えた説明を出さない）
 await section(async () => {
@@ -1655,12 +1657,12 @@ await section(async () => {
   const x = makeConvC({ planImpl: (args) => planJs(args, { cust: CUST_P, gatewayPlan: { plan: true } }) });
   await adoptC(x);
   const v = x.c.activePlan(), e = v.generated.C1;
-  assert(x.calls.plan.length === 2 && x.calls.plan[1].revision && /other-platform/.test(x.calls.plan[1].request) && x.gen.calls.length === 0 && e.status === 'not-ready' && /読み込まれない画面（モバイル）/.test(e.verdict.reason) && /1 回自動で依頼しました/.test(e.verdict.next) && v.final.approvable === false && x.finals().length === 1, `D24-3: 担当の無い別の platform のイベント → 自動の差分更新 1 回 → 準備未完了: ${JSON.stringify({ plans: x.calls.plan.length, gen: x.gen.calls.length, verdict: e.verdict })}`);
+  assert(x.calls.plan.length === 2 && x.calls.plan[1].revision && /other-platform/.test(x.calls.plan[1].request) && x.gen.calls.length === 0 && e.status === 'not-ready' && /読み込まれない画面（モバイル）/.test(e.verdict.reason) && /1 回自動で依頼しました/.test(e.verdict.next) && FS.readyOf(v) === false && x.finals().length === 1, `D24-3: 担当の無い別の platform のイベント → 自動の差分更新 1 回 → 準備未完了: ${JSON.stringify({ plans: x.calls.plan.length, gen: x.gen.calls.length, verdict: e.verdict })}`);
   // 会話: 生成工程が other-platform を返した → 「条件の形」の区分で準備未完了。次の手は読み込まれる画面の見直し（環境・実機とは言わない）
   const y = makeConvC({ generate: makeGenerate({ sequence: ['good'], env: 'other-platform' }) });
   await adoptC(y);
   const ey = y.c.activePlan().generated.C1, fy = y.c.activePlan().final;
-  assert(ey.status === 'not-run' && ey.verdict.category === 'condition' && /その画面（PC \/ モバイル）を担当する JavaScript/.test(ey.verdict.next) && /読み込まれない画面/.test(fy.blockingReason) && !/環境の制約/.test(fy.blockingReason) && !/実機/.test(ey.verdict.next) && fy.approvable === false && y.gen.calls.length === 1, `D24-4: other-platform の not-run → 条件の形・次の手は画面の担当の見直し: ${JSON.stringify({ verdict: ey.verdict, reason: fy.blockingReason })}`);
+  assert(ey.status === 'not-run' && ey.verdict.category === 'condition' && /その画面（PC \/ モバイル）を担当する JavaScript/.test(ey.verdict.next) && /読み込まれない画面/.test(FS.reasonOf(fy)) && !/環境の制約/.test(FS.reasonOf(fy)) && !/実機/.test(ey.verdict.next) && FS.readyOf(fy) === false && y.gen.calls.length === 1, `D24-4: other-platform の not-run → 条件の形・次の手は画面の担当の見直し: ${JSON.stringify({ verdict: ey.verdict, reason: FS.reasonOf(fy) })}`);
 });
 // D25（A7・会話）: 要件から足す効果の条件が分からない → 自動の差分更新 1 回 → それでも残れば準備未完了（「いつでも」の期待で生成しない）
 await section(async () => {
@@ -1669,7 +1671,7 @@ await section(async () => {
   const x = makeConvC({ planImpl: (args) => planJs(args, { cust: CUST_K, gatewayPlan: { plan: true }, requirementOps: args.revision ? [] : [opK] }) });
   await adoptC(x);
   const v = x.c.activePlan(), e = v.generated.C1;
-  assert(x.calls.plan.length === 2 && /condition-unknown/.test(x.calls.plan[1].request) && x.gen.calls.length === 0 && e.status === 'not-ready' && /どの条件で行うかが計画にありません/.test(e.verdict.reason) && v.final.approvable === false, `D25: 条件の分からない追加の効果 → 自動の差分更新 1 回 → 準備未完了（生成しない）: ${JSON.stringify({ plans: x.calls.plan.length, gen: x.gen.calls.length, verdict: e.verdict })}`);
+  assert(x.calls.plan.length === 2 && /condition-unknown/.test(x.calls.plan[1].request) && x.gen.calls.length === 0 && e.status === 'not-ready' && /どの条件で行うかが計画にありません/.test(e.verdict.reason) && FS.readyOf(v) === false, `D25: 条件の分からない追加の効果 → 自動の差分更新 1 回 → 準備未完了（生成しない）: ${JSON.stringify({ plans: x.calls.plan.length, gen: x.gen.calls.length, verdict: e.verdict })}`);
 });
 // D26（A4・次の手）: 承認できない状態で「実機で確かめる」を次の手に出さない（区分を問わない。カード・準備未完了の理由・登録の判定の文）
 await section(async () => {
@@ -1678,11 +1680,11 @@ await section(async () => {
     await adoptC(x);
     const v = x.c.activePlan(), e = v.generated.C1, text = stripC(finalHtml(x)) + stripC(rightOf(x));
     const unv = (e.review.registration.unverified || []).map(u => u.message).join('／');
-    assert(v.final.approvable === false && !/実機で確かめ|実機（動作テスト環境）で確かめ/.test(`${e.verdict.next}${v.final.blockingReason}`) && !/反映した後、動作テスト環境で確かめること/.test(text) && /反映できない点が残っているため、まだ実機で確かめる段階ではありません/.test(text) && !/登録した後、動作テスト環境で確かめてください/.test(unv), `D26（${env}）: 承認できない最終案に「実機で確かめる」「反映した後に確かめること」「登録した後に確かめる」を出さない: ${JSON.stringify({ next: e.verdict.next, reason: v.final.blockingReason, unv })}`);
+    assert(FS.readyOf(v) === false && !/実機で確かめ|実機（動作テスト環境）で確かめ/.test(`${e.verdict.next}${FS.reasonOf(v)}`) && !/反映した後、動作テスト環境で確かめること/.test(text) && /反映できない点が残っているため、まだ実機で確かめる段階ではありません/.test(text) && !/登録した後、動作テスト環境で確かめてください/.test(unv), `D26（${env}）: 承認できない最終案に「実機で確かめる」「反映した後に確かめること」「登録した後に確かめる」を出さない: ${JSON.stringify({ next: e.verdict.next, reason: FS.reasonOf(v), unv })}`);
   }
   const ok = makeConvC();
   await adoptC(ok);
-  assert(ok.c.activePlan().final.approvable === true && /反映した後、動作テスト環境で確かめること/.test(stripC(rightOf(ok))), 'D26-ok: 承認できる最終案には、反映した後に実機で確かめることを出す（従来どおり）');
+  assert(FS.readyOf(ok.c.activePlan()) === true && /反映した後、動作テスト環境で確かめること/.test(stripC(rightOf(ok))), 'D26-ok: 承認できる最終案には、反映した後に実機で確かめることを出す（従来どおり）');
 });
 // D27（B4・能力の見分け）: health の customization-generator.verification に 6 つの印がすべてあるときだけ新しい形で送る。欠ければ「接続先が非対応」
 await section(async () => {
@@ -1693,7 +1695,7 @@ await section(async () => {
   const x = makeConvC({ supported: ['requiredEffects'] });
   await adoptC(x);
   const e = x.c.activePlan().generated.C1;
-  assert(e.status === 'unsupported' && e.verdict.kind === 'capability' && /接続先/.test(e.verdict.reason) && x.c.activePlan().final.approvable === false, `D27-1: 印が欠ける接続先 → 接続先が非対応（準備未完了）: ${JSON.stringify(e.verdict)}`);
+  assert(e.status === 'unsupported' && e.verdict.kind === 'capability' && /接続先/.test(e.verdict.reason) && FS.readyOf(x.c.activePlan()) === false, `D27-1: 印が欠ける接続先 → 接続先が非対応（準備未完了）: ${JSON.stringify(e.verdict)}`);
   for (const miss of ['effectGroups', 'relatedOmitted', 'appFields', 'saveDialog', 'reasonCategory']) {
     const y = makeConvC({ supported: GEN_EFFECT_FEATURES.filter(f => f !== miss) });
     await adoptC(y);
@@ -1713,7 +1715,7 @@ await section(async () => {
     const z = makeConvC({ generate: genRead(shape), planImpl: (args) => planJs(args, { cust: CUST_READ, summary: '詳細画面でステータスを読みます。' }) });
     await adoptC(z);
     const vz = z.c.activePlan(), ez = vz.generated.C1;
-    assert(z.gen.calls.length === 1 && !(ez.requiredEffects || []).length && ez.status === 'unsupported' && ez.verdict.kind === 'capability' && /検証結果を返さない/.test(ez.verdict.reason) && vz.final.approvable === false && z.c.approveFinal(KIT.approveArgs(vz)).ok === false,
+    assert(z.gen.calls.length === 1 && !(ez.requiredEffects || []).length && ez.status === 'unsupported' && ez.verdict.kind === 'capability' && /検証結果を返さない/.test(ez.verdict.reason) && FS.readyOf(vz) === false && z.c.approveFinal(KIT.approveArgs(vz)).ok === false,
       `D27-3（${shape === 'none' ? '検証結果が無い' : '古い形の合格'}）: 必須の動作が無い JavaScript でも、生成工程の検証結果が無ければ検証済みにしない（承認できない）: ${JSON.stringify({ status: ez.status, verdict: ez.verdict, req: ez.requiredEffects })}`);
   }
   //   簡素化 B（2026-10-17）: 検証結果と受け取った候補の結び付き。会話は受け取った候補（と送った既存ファイルの本文）から Gateway と同じ計算で指紋を作り、
@@ -1728,14 +1730,14 @@ await section(async () => {
     const xb = makeConvC({ generate: genBind(mutate) });
     await adoptC(xb);
     const vb = xb.c.activePlan(), eb = vb.generated.C1;
-    assert(eb.status === 'unresolved' && eb.verdict.kind === 'verification-mismatch' && eb.verification.bound === false && vb.final.approvable === false && xb.c.approveFinal(KIT.approveArgs(vb)).ok === false,
+    assert(eb.status === 'unresolved' && eb.verdict.kind === 'verification-mismatch' && eb.verification.bound === false && FS.readyOf(vb) === false && xb.c.approveFinal(KIT.approveArgs(vb)).ok === false,
       `D27-4（${name}）: 検証結果が受け取った候補と結び付かなければ合格にしない（承認できない）: ${JSON.stringify({ status: eb.status, kind: eb.verdict.kind, bound: eb.verification.bound })}`);
   }
   const xok = makeConvC();
   await adoptC(xok);
   const eok = xok.c.activePlan().generated.C1;
   const hok = await KTScan.gatewayCandidateHashOf({ strategy: eok.generated.strategy, targetFile: eok.generated.targetFile, code: eok.generated.code, patch: eok.generated.patch, baseHash: null, customizationId: 'C1' });
-  assert(eok.verification.bound === true && eok.candidateHash === hok && eok.verification.candidateHash === hok && eok.status === 'verified' && xok.c.activePlan().final.approvable === true,
+  assert(eok.verification.bound === true && eok.candidateHash === hok && eok.verification.candidateHash === hok && eok.status === 'verified' && FS.readyOf(xok.c.activePlan()) === true,
     `D27-5: 結び付いた検証結果（受け取った候補から作った指紋 = 検証結果の指紋）は合格の材料にし、承認の指紋もこの値: ${JSON.stringify({ bound: eok.verification.bound, hash: [eok.candidateHash, eok.verification.candidateHash, hok] })}`);
 });
 // D28（A6・B1・隔離 7・画面）: 動作テストに送る既存 JS の選び方と上限（4 件・合計 131,072 文字。1 ファイルの上限は無い）・送れなかった既存 JS の events（分からなければ null・外部のライブラリは []）
@@ -1786,7 +1788,7 @@ await section(async () => {
   const big = { name: 'big.js', text: bigJs('big', 96 * 1024) };
   const a = await run(inputsWith([big]));
   const va = a.genCtx[0] && a.genCtx[0].verification;
-  assert(va && va.relatedFiles.some(f => f.name === 'big.js' && f.text.length >= 96 * 1024) && !(va.relatedOmitted || []).some(f => f.name === 'big.js') && JSON.stringify((va.relatedOmitted || []).find(f => f.name === 'luxon.min.js')) === JSON.stringify({ name: 'luxon.min.js', target: 'desktop', reason: 'url', events: [] }) && a.v.final.approvable === true, `D28-1: 64〜128 KiB の既存 JS も送る（1 ファイルの上限なし）・外部のライブラリは events []・承認できる: ${JSON.stringify(va && { files: va.relatedFiles.map(f => [f.name, f.text.length]), omitted: va.relatedOmitted, approvable: a.v.final.approvable, reason: a.v.final.blockingReason })}`);
+  assert(va && va.relatedFiles.some(f => f.name === 'big.js' && f.text.length >= 96 * 1024) && !(va.relatedOmitted || []).some(f => f.name === 'big.js') && JSON.stringify((va.relatedOmitted || []).find(f => f.name === 'luxon.min.js')) === JSON.stringify({ name: 'luxon.min.js', target: 'desktop', reason: 'url', events: [] }) && FS.readyOf(a.v) === true, `D28-1: 64〜128 KiB の既存 JS も送る（1 ファイルの上限なし）・外部のライブラリは events []・承認できる: ${JSON.stringify(va && { files: va.relatedFiles.map(f => [f.name, f.text.length]), omitted: va.relatedOmitted, approvable: FS.readyOf(a.v), reason: FS.reasonOf(a.v) })}`);
   assert(va && Array.isArray(va.appFields) && va.appFields.length >= 20 && va.appFields.every(f => Object.keys(f).every(k => ['code', 'type', 'label', 'subtable', 'planned', 'readOnly', 'required', 'options'].includes(k))) && va.appFields.some(f => f.readOnly === true), `D28-2: appFields は code・type・label・subtable・planned・readOnly・options の形（§0c.8: readOnly を送る）: ${JSON.stringify(va && va.appFields.slice(0, 3))}`);
   // 2) 合計が 131,072 文字を超える → 超えたファイルは limit（イベントは解析で分かる edit.show）→ その効果は verified にしない
   const big2 = { name: 'big2.js', text: bigJs('big2', 40 * 1024) };
@@ -1798,16 +1800,16 @@ await section(async () => {
   const c = await run(inputsWith([], ['https://t.cybozu.com/k/api/js/biz.js']));
   const vc = c.genCtx[0] && c.genCtx[0].verification;
   const om3 = vc && (vc.relatedOmitted || []).find(f => f.name === 'biz.js');
-  assert(om3 && om3.reason === 'url' && om3.events === null && c.v.generated.C1.status === 'not-run' && c.v.generated.C1.verdict.category === 'existing' && /「https:\/\/t\.cybozu\.com\/k\/api\/js\/biz\.js」/.test(c.v.generated.C1.verdict.reason) && c.v.generated.C1.verdict.kind === 'out-of-reach' && c.v.final.approvable === false, `D28-4: 同じホストの URL 指定の既存 JS は events null → 必須の効果を verified にしない: ${JSON.stringify({ om3, verdict: c.v.generated.C1.verdict })}`);
+  assert(om3 && om3.reason === 'url' && om3.events === null && c.v.generated.C1.status === 'not-run' && c.v.generated.C1.verdict.category === 'existing' && /「https:\/\/t\.cybozu\.com\/k\/api\/js\/biz\.js」/.test(c.v.generated.C1.verdict.reason) && c.v.generated.C1.verdict.kind === 'out-of-reach' && FS.readyOf(c.v) === false, `D28-4: 同じホストの URL 指定の既存 JS は events null → 必須の効果を verified にしない: ${JSON.stringify({ om3, verdict: c.v.generated.C1.verdict })}`);
   // 4) 印が欠ける接続先（appFields が無い）→ 必須の効果も既存 JS も送らない（旧い形にも送らない）→ 接続先が非対応
   const d = await run(inputsWith([]), { health: ['requirementId', 'feedback', 'requiredEffects', 'effectGroups', 'relatedOmitted', 'saveDialog', 'reasonCategory'] });
   const vd = d.genCtx[0] && d.genCtx[0].verification;
-  assert(d.genCtx.length === 1 && vd && !vd.requiredEffects && !vd.relatedFiles && !vd.appFields && d.v.generated.C1.status === 'unsupported' && d.v.final.approvable === false, `D28-5: health に appFields の印が無い → 新しい形で送らず、接続先が非対応: ${JSON.stringify({ keys: vd && Object.keys(vd), status: d.v.generated.C1.status })}`);
+  assert(d.genCtx.length === 1 && vd && !vd.requiredEffects && !vd.relatedFiles && !vd.appFields && d.v.generated.C1.status === 'unsupported' && FS.readyOf(d.v) === false, `D28-5: health に appFields の印が無い → 新しい形で送らず、接続先が非対応: ${JSON.stringify({ keys: vd && Object.keys(vd), status: d.v.generated.C1.status })}`);
   // 5) §0c.8（A3・scen の E3a）: 画面と別のホストの URL 指定の業務 JS（自社のサーバー）も events null → verified にしない（画面とホストが違うかどうかでは決めない）
   const e6 = await run(inputsWith([], ['https://biz.example.co.jp/kintone/biz.js']));
   const ve6 = e6.genCtx[0] && e6.genCtx[0].verification;
   const om6 = ve6 && (ve6.relatedOmitted || []).find(f => f.name === 'biz.js');
-  assert(om6 && om6.reason === 'url' && om6.events === null && e6.v.generated.C1.status === 'not-run' && e6.v.generated.C1.verdict.category === 'existing' && e6.v.final.approvable === false && JSON.stringify((ve6.relatedOmitted || []).find(f => f.name === 'luxon.min.js').events) === '[]', `D28-6（E3a）: 別のホストの URL 指定の業務 JS は events null（Cybozu CDN の luxon は []）→ 承認できない: ${JSON.stringify({ om: ve6 && ve6.relatedOmitted, verdict: e6.v.generated.C1.verdict })}`);
+  assert(om6 && om6.reason === 'url' && om6.events === null && e6.v.generated.C1.status === 'not-run' && e6.v.generated.C1.verdict.category === 'existing' && FS.readyOf(e6.v) === false && JSON.stringify((ve6.relatedOmitted || []).find(f => f.name === 'luxon.min.js').events) === '[]', `D28-6（E3a）: 別のホストの URL 指定の業務 JS は events null（Cybozu CDN の luxon は []）→ 承認できない: ${JSON.stringify({ om: ve6 && ve6.relatedOmitted, verdict: e6.v.generated.C1.verdict })}`);
   // 画面（§0c.8 B1）: 最終案のカードに［計画を直すよう依頼する］（data-act choice）。押すと（画面の handleAct）利用者の修正と同じ経路で計画の差分更新 → 最終案を作り直す
   //   §0c.9（2026-10-08）: URL で読み込む業務 JS は計画を直しても解けない → カードに［計画を直すよう依頼する］を出さず、対応できない範囲（URL 全体のファイル名）を出す
   assert(!e6.v.final.fix && !/data-fix="revise"/.test(e6.m.chat()) && /対応できない範囲/.test(e6.m.chat()) && /https:\/\/biz\.example\.co\.jp\/kintone\/biz\.js/.test(e6.m.chat()) && e6.v.generated.C1.verdict.kind === 'out-of-reach', `D28-7: URL の業務 JS は操作を出さず「対応できない範囲」として理由とファイル名を出す: ${JSON.stringify(e6.v.generated.C1.verdict)}`);
@@ -1885,7 +1887,7 @@ await section(async () => {
   const x = makeConvC({ generate: makeGenerate({ sequence: ['good'], dropCaseFor: 'amount|lock', extraCases: [{ id: 'K2', requirementIds: ['C1'], field: 'amount', effect: 'lock', expect: 'not-locked', event: 'app.record.edit.show', side: 'nomatch', verdict: 'pass', message: '期待どおり' }, { id: 'K1', requirementIds: ['C1'], field: 'amount', effect: 'lock', expect: 'lock', event: 'app.record.edit.show', side: 'match', verdict: 'not-run', reason: 'no-other-value', message: '条件の値「承認待ち」の代表のレコードを作れません' }] }) });
   await adoptC(x);
   const v = x.c.activePlan(), e = v.generated.C1;
-  assert(e.status === 'not-run' && e.verdict.category === 'condition' && e.verdict.fix === 'revise' && v.final.approvable === false && v.final.fix && v.final.fix.kind === 'revise', `D31-4: 会話でも合う側の合格が無ければ準備未完了（条件の形）・次の手は計画を直す操作: ${JSON.stringify({ status: e.status, verdict: e.verdict, fix: v.final.fix && v.final.fix.kind })}`);
+  assert(e.status === 'not-run' && e.verdict.category === 'condition' && e.verdict.fix === 'revise' && FS.readyOf(v) === false && v.final.fix && v.final.fix.kind === 'revise', `D31-4: 会話でも合う側の合格が無ければ準備未完了（条件の形）・次の手は計画を直す操作: ${JSON.stringify({ status: e.status, verdict: e.verdict, fix: v.final.fix && v.final.fix.kind })}`);
 });
 // D32（A6・rv4/a7b.cjs）: 台帳の要件に条件があり、計画のフィールドに構造化した条件が無ければ condition-unknown（unresolved）。効果の無い CONTROL を補うときも同じ
 await section(async () => {
@@ -1920,13 +1922,13 @@ await section(async () => {
   //   §0c.9（2026-10-08）: 送れなかった既存 JS（件数の上限）は計画を直しても解けない → 操作を出さない（対応できない範囲）
   const x0 = makeConvC({ generate: makeGenerate({ sequence: ['good'], relatedOmitted: [{ name: 'big.js', target: 'desktop', reason: 'limit', events: ['app.record.edit.show'] }] }) });
   await adoptC(x0);
-  assert(x0.c.activePlan().final.approvable === false && !fixButtonOf(finalHtml(x0)) && !x0.c.activePlan().final.fix && /対応できない範囲/.test(stripC(finalHtml(x0))), 'D34-0: 送れなかった既存 JS（件数の上限）→ 操作を出さず「対応できない範囲」');
+  assert(FS.readyOf(x0.c.activePlan()) === false && !fixButtonOf(finalHtml(x0)) && !x0.c.activePlan().final.fix && /対応できない範囲/.test(stripC(finalHtml(x0))), 'D34-0: 送れなかった既存 JS（件数の上限）→ 操作を出さず「対応できない範囲」');
   //   既存 JS との競合が観測された（existing）は計画を直せば解ける → ［計画を直すよう依頼する］
   const x = makeConvC({ generate: makeGenerate({ sequence: ['good'], env: 'existing', caseReason: 'existing' }) });
   await adoptC(x);
   const v = x.c.activePlan(), html = finalHtml(x);
   const b = fixButtonOf(html);
-  assert(v.final.approvable === false && x.calls.plan.length === 1 && b && b.kind === 'revise' && b.label === '計画を直すよう依頼する' && b.intent === 'REVISE_PLAN' && /existing/.test(b.text) && /「金額」/.test(b.text) && /既存の JavaScript に統合する/.test(b.text) && !/実機/.test(b.text), `D34-1: 既存 JS の区分 → カードに［計画を直すよう依頼する］（ファイル名・フィールドのラベル・理由の語を添えた依頼の文）。自動では送らない: ${JSON.stringify({ plans: x.calls.plan.length, b })}`);
+  assert(FS.readyOf(v) === false && x.calls.plan.length === 1 && b && b.kind === 'revise' && b.label === '計画を直すよう依頼する' && b.intent === 'REVISE_PLAN' && /existing/.test(b.text) && /「金額」/.test(b.text) && /既存の JavaScript に統合する/.test(b.text) && !/実機/.test(b.text), `D34-1: 既存 JS の区分 → カードに［計画を直すよう依頼する］（ファイル名・フィールドのラベル・理由の語を添えた依頼の文）。自動では送らない: ${JSON.stringify({ plans: x.calls.plan.length, b })}`);
   const plansBefore = x.calls.plan.length, finalsBefore = x.finals().length;
   await x.c.send(b.text, { intentOverride: b.intent, displayText: b.display });   // 画面の handleAct('choice') と同じ（sendChat → conv.send(text, { intentOverride })）
   const last = x.calls.plan[x.calls.plan.length - 1];
@@ -1936,14 +1938,14 @@ await section(async () => {
     const y = makeConvC({ generate: makeGenerate({ sequence: ['good'], ...o }) });
     await adoptC(y);
     const vy = y.c.activePlan(), ey = vy.generated.C1, by = fixButtonOf(finalHtml(y));
-    assert(vy.final.approvable === false && by && by.kind === 'revise' && by.intent === 'REVISE_PLAN' && /計画を直してください/.test(by.text) && /［計画を直すよう依頼する］/.test(ey.verdict.next) && !/確かめられるようになってから|使えるようになってから/.test(ey.verdict.next) && y.calls.plan.length === 1, `D34-3（${JSON.stringify(o)}）: 計画を直す区分は［計画を直すよう依頼する］を出す（次の手の文もその操作を指す）: ${JSON.stringify({ verdict: ey.verdict, b: by && by.kind })}`);
+    assert(FS.readyOf(vy) === false && by && by.kind === 'revise' && by.intent === 'REVISE_PLAN' && /計画を直してください/.test(by.text) && /［計画を直すよう依頼する］/.test(ey.verdict.next) && !/確かめられるようになってから|使えるようになってから/.test(ey.verdict.next) && y.calls.plan.length === 1, `D34-3（${JSON.stringify(o)}）: 計画を直す区分は［計画を直すよう依頼する］を出す（次の手の文もその操作を指す）: ${JSON.stringify({ verdict: ey.verdict, b: by && by.kind })}`);
   }
   // 3) 候補が隔離環境で動かせない機能（unsupported・unsupported-feature）→［作り直しを依頼する］。押すと依頼の文が生成の入力に入る（同じ入力の再生成の案内とぶつからない）
   for (const env of ['unsupported', 'unsupported-feature']) {
     const z = makeConvC({ generate: makeGenerate({ sequence: ['good'], env }) });
     await adoptC(z);
     const vz = z.c.activePlan(), ez = vz.generated.C1, bz = fixButtonOf(finalHtml(z));
-    assert(vz.final.approvable === false && ez.verdict.fix === 'regenerate' && bz && bz.kind === 'regenerate' && bz.label === '作り直しを依頼する' && bz.intent === 'REVISE_PLAN' && /BigInt/.test(bz.text) && /作り直して/.test(bz.text) && /［作り直しを依頼する］/.test(ez.verdict.next) && !/使えるようになってから/.test(ez.verdict.next) && z.calls.plan.length === 1, `D34-4（${env}）: 隔離環境で動かせない機能 → ［作り直しを依頼する］（自動では送らない）: ${JSON.stringify({ verdict: ez.verdict, b: bz })}`);
+    assert(FS.readyOf(vz) === false && ez.verdict.fix === 'regenerate' && bz && bz.kind === 'regenerate' && bz.label === '作り直しを依頼する' && bz.intent === 'REVISE_PLAN' && /BigInt/.test(bz.text) && /作り直して/.test(bz.text) && /［作り直しを依頼する］/.test(ez.verdict.next) && !/使えるようになってから/.test(ez.verdict.next) && z.calls.plan.length === 1, `D34-4（${env}）: 隔離環境で動かせない機能 → ［作り直しを依頼する］（自動では送らない）: ${JSON.stringify({ verdict: ez.verdict, b: bz })}`);
     await z.c.send(bz.text, { intentOverride: bz.intent, displayText: bz.display });
     assert(z.calls.plan.length === 2 && z.calls.plan[1].revision && z.gen.calls.length === 2, `D34-5（${env}）: 作り直しの操作は計画の差分更新として送られ、JavaScript を作り直す: ${JSON.stringify({ plans: z.calls.plan.length, gen: z.gen.calls.length })}`);
   }
@@ -1956,7 +1958,7 @@ await section(async () => {
   await adoptC(ok);
   const t = makeConvC({ generate: makeGenerate({ sequence: ['good'], env: 'timeout' }) });
   await adoptC(t);
-  assert(ok.c.activePlan().final.approvable === true && !ok.c.activePlan().final.fix && !fixButtonOf(finalHtml(ok)) && !t.c.activePlan().final.fix && !fixButtonOf(finalHtml(t)), 'D34-7: 承認できる最終案・環境の制約（時間切れ）には次の手の操作を出さない');
+  assert(FS.readyOf(ok.c.activePlan()) === true && !ok.c.activePlan().final.fix && !fixButtonOf(finalHtml(ok)) && !t.c.activePlan().final.fix && !fixButtonOf(finalHtml(t)), 'D34-7: 承認できる最終案・環境の制約（時間切れ）には次の手の操作を出さない');
   // 5) 要件未達（修復の上限の後）・必須の動作を特定できない（自動の差分更新 1 回の後）も、次の手は操作で実行できる
   const u = makeConvC({ generate: makeGenerate({ sequence: ['warn'] }) });
   await adoptC(u);
@@ -1983,7 +1985,7 @@ await section(async () => {
   await adoptC(x);
   const v = x.c.activePlan(), text = stripC(finalHtml(x));
   const sent = (x.gen.calls[0] && x.gen.calls[0].requiredEffects) || [];
-  assert(!sent.some(e => e.field === 'qty') && v.final.approvable === true && v.final.cannot.some(c => c.kind === 'limit' && /テーブル/.test(c.text) && /表示・非表示を切り替えられません/.test(c.text)) && /この案の制約/.test(text) && !/確かめられるようになってから/.test(text), `D35-3: 会話では列の表示切り替えを生成工程の必須の効果に送らず、実現できない点に出す（承認は止めない）: ${JSON.stringify({ sent: sent.map(e => [e.field, e.effect]), approvable: v.final.approvable, cannot: v.final.cannot })}`);
+  assert(!sent.some(e => e.field === 'qty') && FS.readyOf(v) === true && v.final.cannot.some(c => c.kind === 'limit' && /テーブル/.test(c.text) && /表示・非表示を切り替えられません/.test(c.text)) && /この案の制約/.test(text) && !/確かめられるようになってから/.test(text), `D35-3: 会話では列の表示切り替えを生成工程の必須の効果に送らず、実現できない点に出す（承認は止めない）: ${JSON.stringify({ sent: sent.map(e => [e.field, e.effect]), approvable: FS.readyOf(v), cannot: v.final.cannot })}`);
 });
 // D36（日付の条件・語彙）: 条件の形の次の手は「単純な比較に直す」ではなく、代表条件を作れる形に直す依頼（日付の比較は Gateway が解く）。
 //   承認できない区分（環境以外）の次の手の文はどれも操作を指す
@@ -2036,7 +2038,7 @@ await section(async () => {
   const x = makeConvC({ generate: makeGenerate({ sequence: ['good'], extraCases: [...extra, { id: 'P99', requirementIds: ['C1'], field: 'amount', effect: 'lock', expect: 'lock', event: EV_E, side: 'match', kind: 'match', verdict: 'fail', message: '期待した動きになりませんでした' }] }) });
   await adoptC(x);
   const v = x.c.activePlan();
-  assert(v.generated.C1.status === 'unresolved' && v.generated.C1.verdict.kind === 'behavior-fail' && v.final.approvable === false, `D37-7: 会話でも 40 件より後ろの fail で承認できる最終案にしない: ${JSON.stringify({ status: v.generated.C1.status, verdict: v.generated.C1.verdict && v.generated.C1.verdict.kind })}`);
+  assert(v.generated.C1.status === 'unresolved' && v.generated.C1.verdict.kind === 'behavior-fail' && FS.readyOf(v) === false, `D37-7: 会話でも 40 件より後ろの fail で承認できる最終案にしない: ${JSON.stringify({ status: v.generated.C1.status, verdict: v.generated.C1.verdict && v.generated.C1.verdict.kind })}`);
 });
 
 // D38（効果レビュー A2〜A5・§0c.9 の二重の安全）: 必須の効果ごとに、効果のイベントのそれぞれで「合う」の合格、条件つきなら「合わない」の合格も 1 件以上。
@@ -2082,7 +2084,7 @@ await section(async () => {
   const y = makeConvC({ planImpl: (args) => planJs(args, { cust: CUST_I }), generate: makeGenerate({ sequence: ['good'], dropCaseFor: 'amount|lock', extraCases: all.filter(c => !(c.event === EV_I && c.side === 'nomatch')), generatedOf: (cust) => ({ strategy: 'NEW_JS_FILE', targetFile: 'lock.js', summary: '承認待ちでは金額を編集不可にします。', code: handlerC(`    if (${ST_C}) record['amount'].disabled = true;`, [EV_E, EV_I]), patch: null, events: cust.events, fields: [{ code: 'amount', access: 'CONTROL' }], apis: [], assumptions: [], warnings: [], coverage: [{ requirementId: 'C1', status: 'MET', note: '', text: cust.requirement }] }) }) });
   await adoptC(y);
   const vy = y.c.activePlan(), ey = vy.generated.C1;
-  assert(ey.status === 'not-run' && ey.verdict.category === 'condition' && ey.verdict.reasonKey === 'case-coverage' && ey.verdict.fix === 'revise' && vy.final.approvable === false && vy.final.fix && vy.final.fix.kind === 'revise' && /条件に合うレコード・合わないレコードで確かめた結果が揃わない/.test(vy.final.fix.text) && !/case-coverage/.test(vy.final.fix.text), `D38-7: 会話でもイベントごとの確かめが揃わなければ準備未完了（条件の形）・次の手は計画を直す操作: ${JSON.stringify({ status: ey.status, verdict: ey.verdict })}`);
+  assert(ey.status === 'not-run' && ey.verdict.category === 'condition' && ey.verdict.reasonKey === 'case-coverage' && ey.verdict.fix === 'revise' && FS.readyOf(vy) === false && vy.final.fix && vy.final.fix.kind === 'revise' && /条件に合うレコード・合わないレコードで確かめた結果が揃わない/.test(vy.final.fix.text) && !/case-coverage/.test(vy.final.fix.text), `D38-7: 会話でもイベントごとの確かめが揃わなければ準備未完了（条件の形）・次の手は計画を直す操作: ${JSON.stringify({ status: ey.status, verdict: ey.verdict })}`);
 });
 
 // D39（§0c.9 の次の手の分け方）: 計画を直せば解ける理由は［計画を直すよう依頼する］、計画を直しても解けない理由（existing-unverifiable・URL / 本文の無い既存 JS・件数の上限）は
@@ -2097,8 +2099,8 @@ await section(async () => {
   await adoptC(x);
   const v = x.c.activePlan(), e = v.generated.C1, html = finalHtml(x);
   const outside = stripC(outsideDetails(html));
-  assert(e.status === 'not-run' && e.verdict.kind === 'out-of-reach' && !e.verdict.fix && !v.final.fix && !fixButtonOf(html) && /対応できない範囲/.test(e.verdict.reason) && /「common\.js」/.test(e.verdict.reason) && e.verdict.details.some(d => /「common\.js」: その画面で登録する処理を確かめられません/.test(d)) && /existing-unverifiable/.test(e.verdict.details.join('\n')) && !/existing-unverifiable/.test(outside) && /対応できない範囲/.test(outside) && v.final.approvable === false && x.gen.calls.length === 1 && !x.gen.calls[0].feedback, `D39-2: existing-unverifiable → 操作を出さず「対応できない範囲」（ファイル名は通常画面・理由の語は詳細表示）・修復も依頼しない: ${JSON.stringify({ verdict: e.verdict, fix: v.final.fix })}`);
-  assert(/対応できない範囲です。計画を直しても解けない/.test(v.final.blockingReason) && !/実機で確かめ/.test(v.final.blockingReason), `D39-3: 準備未完了の理由も「対応できない範囲」（実機で確かめるとは出さない）: ${v.final.blockingReason}`);
+  assert(e.status === 'not-run' && e.verdict.kind === 'out-of-reach' && !e.verdict.fix && !v.final.fix && !fixButtonOf(html) && /対応できない範囲/.test(e.verdict.reason) && /「common\.js」/.test(e.verdict.reason) && e.verdict.details.some(d => /「common\.js」: その画面で登録する処理を確かめられません/.test(d)) && /existing-unverifiable/.test(e.verdict.details.join('\n')) && !/existing-unverifiable/.test(outside) && /対応できない範囲/.test(outside) && FS.readyOf(v) === false && x.gen.calls.length === 1 && !x.gen.calls[0].feedback, `D39-2: existing-unverifiable → 操作を出さず「対応できない範囲」（ファイル名は通常画面・理由の語は詳細表示）・修復も依頼しない: ${JSON.stringify({ verdict: e.verdict, fix: v.final.fix })}`);
+  assert(/対応できない範囲です。計画を直しても解けない/.test(FS.reasonOf(v)) && !/実機で確かめ/.test(FS.reasonOf(v)), `D39-3: 準備未完了の理由も「対応できない範囲」（実機で確かめるとは出さない）: ${FS.reasonOf(v)}`);
   //   解ける理由と解けない理由が同じ JavaScript に混ざる → 解けない理由を優先して操作を出さない（計画を直しても承認できる最終案にならない）
   const y = makeConvC({ generate: makeGenerate({ sequence: ['good'], dropCaseFor: 'amount|lock', relatedOmitted: [{ name: 'biz.js', target: 'desktop', reason: 'url', events: null, url: 'https://intra.example.co.jp/biz.js' }], extraCases: [
     { id: 'K1', requirementIds: ['C1'], field: 'amount', effect: 'lock', expect: 'lock', event: EV_E, side: 'match', verdict: 'not-run', reason: 'condition-unparsed', message: '' }] }) });
@@ -2150,7 +2152,7 @@ await section(async () => {
   const x = makeConvC({ supported: GEN_EFFECT_FEATURES.filter(f => f !== 'caseSide') });
   await adoptC(x);
   const e = x.c.activePlan().generated.C1;
-  assert(e.status === 'unsupported' && x.c.activePlan().final.approvable === false, `D41: health に caseSide が無い → 新しい形で送らず「接続先が非対応」: ${JSON.stringify({ status: e.status, sent: x.gen.calls[0] && x.gen.calls[0].requiredEffects })}`);
+  assert(e.status === 'unsupported' && FS.readyOf(x.c.activePlan()) === false, `D41: health に caseSide が無い → 新しい形で送らず「接続先が非対応」: ${JSON.stringify({ status: e.status, sent: x.gen.calls[0] && x.gen.calls[0].requiredEffects })}`);
 });
 // D42（結合の回帰で見つけた食い違い・2026-10-08）: Gateway の existing-unverifiable / unsupported（読み込み）の details.files は契約 20 §13 の [{ name, kinds[] }]。
 //   入口（normalizeVerification）でオブジェクトの要素を落とすと、「対応できない範囲」にファイル名が出ない。名前（文字列）として残す
@@ -2222,7 +2224,7 @@ await section(async () => {
   //   画面の generate と同じ経路（会話）でも、other は判定を止めない（承認できる最終案のまま）
   const x = makeConvC({ generate: makeGenerate({ sequence: ['good'], relatedOmitted: [{ name: 'common.js', target: 'desktop', reason: 'other', events: [] }] }) });
   await adoptC(x);
-  assert(x.c.activePlan().generated.C1.status === 'verified' && x.c.activePlan().final.approvable === true, `D44-4: 関係しない共通ファイル（other・events []）だけなら承認できる最終案のまま: ${JSON.stringify(x.c.activePlan().generated.C1.verdict)}`);
+  assert(x.c.activePlan().generated.C1.status === 'verified' && FS.readyOf(x.c.activePlan()) === true, `D44-4: 関係しない共通ファイル（other・events []）だけなら承認できる最終案のまま: ${JSON.stringify(x.c.activePlan().generated.C1.verdict)}`);
 });
 
 // D45（§0c.10 の理由の分け方）: existing（競合を観測した）は［計画を直すよう依頼する］、existing-unrunnable（既存 JS の handler を動かせない）と existing-unverifiable（登録が読めない・消えた）は
@@ -2243,7 +2245,7 @@ await section(async () => {
   const x = makeConvC({ generate: makeGenerate({ sequence: ['good'], dropCaseFor: 'amount|lock', extraCases: unrun('existing-unrunnable', { files: ['biz.js'], fileKinds: [{ name: 'biz.js', kinds: ['network'], apis: ['kintone.api'] }] }) }) });
   await adoptC(x);
   const v = x.c.activePlan(), e = v.generated.C1, html = finalHtml(x);
-  assert(e.verdict.kind === 'out-of-reach' && e.verdict.reasonKey === 'existing-unrunnable' && !e.verdict.fix && !v.final.fix && !fixButtonOf(html) && /「biz\.js」/.test(e.verdict.reason) && e.verdict.details.some(d => /「biz\.js」: その画面の処理（handler）を隔離環境で動かせません（種類: 通信（network）／API: kintone\.api）/.test(d)) && !/実機で確かめ/.test(v.final.blockingReason),
+  assert(e.verdict.kind === 'out-of-reach' && e.verdict.reasonKey === 'existing-unrunnable' && !e.verdict.fix && !v.final.fix && !fixButtonOf(html) && /「biz\.js」/.test(e.verdict.reason) && e.verdict.details.some(d => /「biz\.js」: その画面の処理（handler）を隔離環境で動かせません（種類: 通信（network）／API: kintone\.api）/.test(d)) && !/実機で確かめ/.test(FS.reasonOf(v)),
     `D45-3（rv6e G19）: 既存 JS の handler を動かせない → 操作なしの「対応できない範囲」・詳細にファイルの名前と種類: ${JSON.stringify(e.verdict)}`);
   //   existing-unverifiable も同じく操作なし（種類を詳細に）
   const y = makeConvC({ generate: makeGenerate({ sequence: ['good'], dropCaseFor: 'amount|lock', extraCases: unrun('existing-unverifiable', { files: ['memo-check.js'], fileKinds: [{ name: 'memo-check.js', kinds: ['first-arg'], apis: [] }] }) }) });
@@ -2303,12 +2305,12 @@ await section(async () => {
   const x = makeConvC({ planImpl: (args) => planJs(args, { cust: CUST_W, summary: '承認待ちなら備考に警告を出します。' }), generate: makeGenerate({ sequence: ['g10'], generatedOf: () => clone(gen), extraCases: WU_CASES }) });
   await adoptC(x);
   const vx = x.c.activePlan(), ex = vx.generated.C1;
-  assert(ex.status === 'unresolved' && ex.verdict.kind === 'behavior-fail' && ex.verdict.fix === 'revise' && vx.final.approvable === false && ex.review.checks.some(ch => ch.name === 'behavior-fail' && ch.severity === 'block' && /備考/.test(ch.message)) && x.c.approveFinal(KIT.approveArgs(vx, { baseStamp: { fingerprint: 'fp-1' } })).ok === false, `D46-3（rv6e G10）: 会話でも承認できない（模擬テストの不合格・次の手は計画を直す操作）: ${JSON.stringify({ status: ex.status, verdict: ex.verdict && ex.verdict.kind, approvable: vx.final.approvable })}`);
+  assert(ex.status === 'unresolved' && ex.verdict.kind === 'behavior-fail' && ex.verdict.fix === 'revise' && FS.readyOf(vx) === false && ex.review.checks.some(ch => ch.name === 'behavior-fail' && ch.severity === 'block' && /備考/.test(ch.message)) && x.c.approveFinal(KIT.approveArgs(vx, { baseStamp: { fingerprint: 'fp-1' } })).ok === false, `D46-3（rv6e G10）: 会話でも承認できない（模擬テストの不合格・次の手は計画を直す操作）: ${JSON.stringify({ status: ex.status, verdict: ex.verdict && ex.verdict.kind, approvable: FS.readyOf(vx) })}`);
   //   変更のイベントの「編集不可にしていない」を作らない旧い Gateway（health の印 eventCases が無い）は、警告がすべて合格でも新しい形として受け入れない（接続先が非対応）
   const xo = makeConvC({ supported: GEN_EFFECT_FEATURES.filter(f => f !== 'eventCases'), planImpl: (args) => planJs(args, { cust: CUST_W, summary: '承認待ちなら備考に警告を出します。' }), generate: makeGenerate({ sequence: ['g10'], generatedOf: () => clone(gen) }) });
   await adoptC(xo);
   const vxo = xo.c.activePlan(), exo = vxo.generated.C1;
-  assert(exo.status === 'unsupported' && vxo.final.approvable === false, `D46-4: 変更のイベントの代表条件を作らない旧い接続先（印 eventCases が無い）では、警告の合格だけで承認できる最終案にしない: ${JSON.stringify({ status: exo.status, approvable: vxo.final.approvable })}`);
+  assert(exo.status === 'unsupported' && FS.readyOf(vxo) === false, `D46-4: 変更のイベントの代表条件を作らない旧い接続先（印 eventCases が無い）では、警告の合格だけで承認できる最終案にしない: ${JSON.stringify({ status: exo.status, approvable: FS.readyOf(vxo) })}`);
   delete CAND.g10;
 });
 // D47（§0c.10 の確かめない範囲・C-1 第 4 段 2026-10-09）: 最終案の詳細表示に、生成工程（Gateway）が返した模擬テストの条件（behavior.conditions）と
@@ -2322,7 +2324,7 @@ await section(async () => {
   const scopeText = all.slice(all.indexOf('模擬テストの条件と確かめていない範囲'), all.indexOf('反映は動作テスト環境から始まります'));
   const lines = scopeText.split('\n').map(l => l.trim()).filter(Boolean);
   const shown = (t) => lines.includes(`・${t}`);
-  assert(x.c.activePlan().final.approvable === true && /kt-ai-final-scope/.test(html) && [...GW_SCOPE.conditions, ...GW_SCOPE.uncheckedScope].every(shown) && /実機での確かめは、動作テスト環境で行ってください/.test(all) && ![...GW_SCOPE.conditions, ...GW_SCOPE.uncheckedScope].some(t => outside.includes(t)) && !/確かめていない範囲/.test(outside),
+  assert(FS.readyOf(x.c.activePlan()) === true && /kt-ai-final-scope/.test(html) && [...GW_SCOPE.conditions, ...GW_SCOPE.uncheckedScope].every(shown) && /実機での確かめは、動作テスト環境で行ってください/.test(all) && ![...GW_SCOPE.conditions, ...GW_SCOPE.uncheckedScope].some(t => outside.includes(t)) && !/確かめていない範囲/.test(outside),
     `D47: 生成工程が返した模擬テストの条件と確かめていない範囲を、文のまま詳細表示だけに出す: ${JSON.stringify({ lines, outside: outside.slice(0, 300) })}`);
   //   Toolkit の古い固定の文（正午の時計・固定の一覧）は出さない
   assert(!/正午|固定の模擬の利用者|固定の時計が正午/.test(all) && !/URL で読み込む業務の JavaScript（本文を取得していません）/.test(all), `D47-2: Toolkit の古い固定の文は出さない: ${scopeText.slice(0, 400)}`);
@@ -2363,7 +2365,7 @@ await section(async () => {
   for (const mark of ['eventCases', 'loadFaithful', 'registrationCheck', 'emptyCase', 'hideCondition', 'registrationCounts', 'caseCoverage', 'cancelCheck', 'limitCode', 'scopeList']) {
     const x = makeConvC({ supported: GEN_EFFECT_FEATURES.filter(f => f !== mark) });
     await adoptC(x);
-    out.push([mark, x.c.activePlan().generated.C1.status, x.c.activePlan().final.approvable]);
+    out.push([mark, x.c.activePlan().generated.C1.status, FS.readyOf(x.c.activePlan())]);
   }
   assert(out.every(r => r[1] === 'unsupported' && r[2] === false), `D49: §0c.9・§0c.10・§0c.11 の印が欠ける接続先は「接続先が非対応」: ${JSON.stringify(out)}`);
 });
@@ -2377,22 +2379,22 @@ await section(async () => {
   CAND.saveconfirmr = { code: handlerC(`    if ((${ST_C}) && !window.confirm('承認待ちです（金額: ' + record['amount'].value + '）。保存しますか？')) return false;`, [EV_S]), has: { amount: ['warn'] } };
   const run = async (cust, o = {}) => { const x = makeConvC({ planImpl: (args) => planJs(args, { cust, summary: '承認待ちでは保存のときに確認します（保存は止めません）。' }), generate: makeGenerate({ sequence: [o.cand || 'saveconfirm'], ...(o.gen || {}) }) }); await adoptC(x); const v = x.c.activePlan(), e = v.generated.C1; return { v, e, pf: e.review.checks.find(ch => ch.name === 'planned-fields') || null, re: e.review.checks.find(ch => ch.name === 'required-effects') || null }; };
   const a = await run(CUST_SW);
-  assert(a.v.final.approvable === true && a.e.status === 'verified' && !a.pf && a.re && a.re.ok && !a.e.review.checks.some(ch => !ch.ok && ch.severity === 'block'),
-    `D50-1（rv7e P18）: 保存だけの警告で確認のダイアログだけの正しい候補は承認できる（Toolkit は planned-fields を作らない・必須の効果は生成工程の present）: ${JSON.stringify({ status: a.e.status, approvable: a.v.final.approvable, pf: a.pf, blocks: a.e.review.checks.filter(ch => !ch.ok && ch.severity === 'block').map(ch => ch.name) })}`);
+  assert(FS.readyOf(a.v) === true && a.e.status === 'verified' && !a.pf && a.re && a.re.ok && !a.e.review.checks.some(ch => !ch.ok && ch.severity === 'block'),
+    `D50-1（rv7e P18）: 保存だけの警告で確認のダイアログだけの正しい候補は承認できる（Toolkit は planned-fields を作らない・必須の効果は生成工程の present）: ${JSON.stringify({ status: a.e.status, approvable: FS.readyOf(a.v), pf: a.pf, blocks: a.e.review.checks.filter(ch => !ch.ok && ch.severity === 'block').map(ch => ch.name) })}`);
   //   対照（rv7e P18r）: フィールドを文に入れる候補も承認できる
   const r = await run(CUST_SW, { cand: 'saveconfirmr' });
-  assert(r.v.final.approvable === true && r.e.status === 'verified' && !r.pf, `D50-2（rv7e P18r）: フィールドを文に入れる候補も承認できる: ${JSON.stringify({ status: r.e.status, pf: r.pf })}`);
+  assert(FS.readyOf(r.v) === true && r.e.status === 'verified' && !r.pf, `D50-2（rv7e P18r）: フィールドを文に入れる候補も承認できる: ${JSON.stringify({ status: r.e.status, pf: r.pf })}`);
   //   同じフィールドに画面の編集不可もある → 編集不可の処理が無いことは生成工程の必須の効果（missing）で止める
   const CUST_WL = custOf([{ effect: 'warn', condition: '', events: [EV_S] }, { effect: 'lock', condition: '', events: ['app.record.edit.show'] }], { requirement: '承認待ちでは金額を編集不可にし、保存のときに確認する', events: ['app.record.edit.show', EV_S] });
   const b = await run(CUST_WL);
-  assert(b.v.final.approvable === false && !b.pf && b.re && !b.re.ok && b.re.severity === 'block', `D50-3: ほかの効果（lock）の処理が無ければ、生成工程の必須の効果の missing で止める: ${JSON.stringify({ status: b.e.status, re: b.re })}`);
+  assert(FS.readyOf(b.v) === false && !b.pf && b.re && !b.re.ok && b.re.severity === 'block', `D50-3: ほかの効果（lock）の処理が無ければ、生成工程の必須の効果の missing で止める: ${JSON.stringify({ status: b.e.status, re: b.re })}`);
   //   表示のイベントの警告（保存だけではない）→ 表示のイベントの処理が無いことは、生成工程の必須の効果（効果のイベントごとの処理の形）が missing で返す
   const CUST_WS = custOf([{ effect: 'warn', condition: '', events: ['app.record.edit.show', EV_S] }], { requirement: '承認待ちでは金額に警告を出す', events: ['app.record.edit.show', EV_S] });
   const c = await run(CUST_WS, { gen: { statusOverride: 'missing' } });
-  assert(c.v.final.approvable === false && !c.pf && c.re && !c.re.ok && c.re.severity === 'block', `D50-4: 表示のイベントの警告の処理が無ければ、生成工程の必須の効果の missing で止める: ${JSON.stringify({ status: c.e.status, re: c.re })}`);
+  assert(FS.readyOf(c.v) === false && !c.pf && c.re && !c.re.ok && c.re.severity === 'block', `D50-4: 表示のイベントの警告の処理が無ければ、生成工程の必須の効果の missing で止める: ${JSON.stringify({ status: c.e.status, re: c.re })}`);
   //   Gateway が present を返さない（unchecked）→ 確かめられていないので止める
   const d = await run(CUST_SW, { gen: { statusOverride: 'unchecked' } });
-  assert(d.v.final.approvable === false && !d.pf && d.re && !d.re.ok && d.re.severity === 'block', `D50-5: 必須の効果が present でない（unchecked）なら止める: ${JSON.stringify({ status: d.e.status, re: d.re })}`);
+  assert(FS.readyOf(d.v) === false && !d.pf && d.re && !d.re.ok && d.re.severity === 'block', `D50-5: 必須の効果が present でない（unchecked）なら止める: ${JSON.stringify({ status: d.e.status, re: d.re })}`);
   //   純関数: 生成工程が非対応（requiredEffects を返さない）なら、必須の効果を確かめられないので止める（Toolkit の形式確認は planned-fields を作らない）
   const rv = KTCodeReview.review({ generated: { strategy: 'NEW_JS_FILE', targetFile: 'w.js', summary: 's', code: CAND.saveconfirm.code, patch: null, events: [EV_S], fields: [{ code: 'amount', access: 'CONTROL' }], apis: [], assumptions: [], warnings: [], coverage: [] }, customization: CUST_SW, plan: null, data: clone(DATA_C), scan: null, existingSource: null });
   const req = [{ requirementId: 'C1', requirementIds: ['C1'], field: 'amount', effect: 'warn', events: [EV_S], condition: 'ステータス in ("承認待ち")' }];
@@ -2558,8 +2560,8 @@ await section(async () => {
   await adoptC(x);
   const v = x.c.activePlan(), e = v.generated.C1;
   const html = finalHtml(x), text = stripC(rightOf(x));
-  assert(e && e.status === 'verified' && v.final.approvable === true && x.gen.calls.length === 1 && e.review.effects.machineChecked.length === 1 && JSON.stringify(x.gen.calls[0].requiredEffects.map(r => [r.field, r.effect, r.events, r.condition])) === JSON.stringify([['amount', 'lock', EV_SH, '']]),
-    `E2-1（sc-gate S1）: 条件の無い lock は、隔離環境なしでも機械検査で足りる（承認できる）: ${JSON.stringify({ status: e && e.status, verdict: e && e.verdict, reason: v.final.blockingReason })}`);
+  assert(e && e.status === 'verified' && FS.readyOf(v) === true && x.gen.calls.length === 1 && e.review.effects.machineChecked.length === 1 && JSON.stringify(x.gen.calls[0].requiredEffects.map(r => [r.field, r.effect, r.events, r.condition])) === JSON.stringify([['amount', 'lock', EV_SH, '']]),
+    `E2-1（sc-gate S1）: 条件の無い lock は、隔離環境なしでも機械検査で足りる（承認できる）: ${JSON.stringify({ status: e && e.status, verdict: e && e.verdict, reason: FS.reasonOf(v) })}`);
   assert(/✓ 「金額」（PC）: 編集できない — 処理あり・機械検査で確認（模擬テストは未実施）/.test(text) && /機械検査で確認した必須の動作は、模擬テストの結果を待たずに反映できる扱いにしています/.test(text) && !/模擬テストで合格/.test(text) && !/動作確認済|実機確認済/.test(text),
     `E2-2: 最終案のカードは「機械検査で確認（模擬テストは未実施）」と出す（模擬テストの合格・動作確認済みとは書かない）: ${(text.match(/必須の動作[\s\S]{0,300}/) || [''])[0]}`);
   const ap = x.c.approveFinal(KIT.approveArgs(v));
@@ -2568,7 +2570,7 @@ await section(async () => {
   const y = makeConvC({ planImpl: (args) => planJs(args, { cust: CUST_S1, summary: '金額を編集できないようにします。' }), generate: makeGenE(lockAll(EV_SH), verS1) });
   await adoptC(y);
   const vy = y.c.activePlan(), ey = vy.generated.C1;
-  assert(ey && ey.status === 'not-run' && vy.final.approvable === false && y.gen.calls.length === 1, `E2-4: health の印に effectCheck が無い接続先では、machine の効果も模擬テストの合格が要る（今の厳しい判定）: ${JSON.stringify({ status: ey && ey.status, reason: vy.final.blockingReason })}`);
+  assert(ey && ey.status === 'not-run' && FS.readyOf(vy) === false && y.gen.calls.length === 1, `E2-4: health の印に effectCheck が無い接続先では、machine の効果も模擬テストの合格が要る（今の厳しい判定）: ${JSON.stringify({ status: ey && ey.status, reason: FS.reasonOf(vy) })}`);
   // S1b: 一覧の編集で処理が無い（生成工程のイベントごとの missing）→ 承認できない
   const verS1b = (req) => ({ requiredEffects: req.map(r => gwE(r.field, r.effect, 'machine', [r.events[0], ...r.events.slice(1).map(ev => ({ event: ev, status: 'missing' }))])), behavior: { status: 'not-run', reason: 'unavailable', cases: casesNR(req.map(r => [r.field, r.effect, r.events, false])) } });
   //   sc-gate の S1b と同じ候補（一覧の編集の handler は登録するが、編集不可にしない）。Toolkit の形式確認では止まらず、生成工程のイベントごとの missing で止まる
@@ -2576,7 +2578,7 @@ await section(async () => {
   const z = makeConvC({ planImpl: (args) => planJs(args, { cust: CUST_S1, summary: '金額を編集できないようにします。' }), generate: makeGenE(S1B_CODE, verS1b), supported: GEN_EFFECT_CHECK });
   await adoptC(z);
   const vz = z.c.activePlan();
-  assert(vz.final.approvable === false && vz.generated.C1.status === 'not-run' && !vz.generated.C1.review.effects.machineChecked.length, `E2-5（sc-gate S1b）: 効果のイベントの一部に処理が無い候補は、隔離環境なしで承認できない: ${JSON.stringify({ status: vz.generated.C1.status, reason: vz.final.blockingReason })}`);
+  assert(FS.readyOf(vz) === false && vz.generated.C1.status === 'not-run' && !vz.generated.C1.review.effects.machineChecked.length, `E2-5（sc-gate S1b）: 効果のイベントの一部に処理が無い候補は、隔離環境なしで承認できない: ${JSON.stringify({ status: vz.generated.C1.status, reason: FS.reasonOf(vz) })}`);
 });
 // E3: 準備未完了の理由（模擬テストが要る効果を、模擬テストの環境が使えないために確かめられない）
 await section(async () => {
@@ -2587,17 +2589,17 @@ await section(async () => {
   const x = makeConvC({ planImpl: (args) => planJs(args, { cust: CUST_S2 }), generate: makeGenE(CODE_S2, verB({ lock: ['conditional'] })), supported: GEN_EFFECT_CHECK });
   await adoptC(x);
   const v = x.c.activePlan(), e = v.generated.C1;
-  assert(e.status === 'not-run' && v.final.approvable === false && /この効果は模擬テストで確かめる必要があります（条件つき）/.test(e.verdict.reason) && /模擬テストの環境が使えないため、まだ反映できません/.test(e.verdict.reason) && /対象: 「金額」: 編集できない/.test(e.verdict.reason) && /この効果は模擬テストで確かめる必要があります（条件つき）/.test(v.final.blockingReason) && x.gen.calls.length === 1 && !x.gen.calls[0].feedback,
-    `E3-1（sc-gate S2）: 条件つきの効果は模擬テストが要る → 隔離環境なしでは承認できない。理由は checkReason から 1 つにまとめ、修復は依頼しない: ${JSON.stringify({ reason: e.verdict.reason, final: v.final.blockingReason })}`);
+  assert(e.status === 'not-run' && FS.readyOf(v) === false && /この効果は模擬テストで確かめる必要があります（条件つき）/.test(e.verdict.reason) && /模擬テストの環境が使えないため、まだ反映できません/.test(e.verdict.reason) && /対象: 「金額」: 編集できない/.test(e.verdict.reason) && /この効果は模擬テストで確かめる必要があります（条件つき）/.test(FS.reasonOf(v)) && x.gen.calls.length === 1 && !x.gen.calls[0].feedback,
+    `E3-1（sc-gate S2）: 条件つきの効果は模擬テストが要る → 隔離環境なしでは承認できない。理由は checkReason から 1 つにまとめ、修復は依頼しない: ${JSON.stringify({ reason: e.verdict.reason, final: FS.reasonOf(v) })}`);
   // S7: 同じ表示のイベントで lock と error（既知の競合）。生成工程の checkReason と Toolkit の形式確認の既知の競合から理由を出す（「環境の制約」とだけ言わない）
   const CUST_S7 = custE([{ code: 'amount', access: 'CONTROL', condition: '', effects: [{ effect: 'lock', condition: '', events: [] }] }, { code: 'memo', access: 'CONTROL', condition: '', effects: [{ effect: 'warn', condition: '', events: [] }] }], ['app.record.edit.show'], '金額を編集不可にし、備考に警告を出す');
   const CODE_S7 = "(function () {\n  'use strict';\n  kintone.events.on(['app.record.edit.show'], function (event) {\n    const record = event.record;\n    record['amount'].disabled = true;\n    record['memo'].error = '確認してください';\n    return event;\n  });\n})();";
   const y = makeConvC({ planImpl: (args) => planJs(args, { cust: CUST_S7, summary: '金額を編集不可にし、備考に警告を出します。' }), generate: makeGenE(CODE_S7, verB({ lock: ['candidate-error-same-event'], warn: ['effect-kind'] })), supported: GEN_EFFECT_CHECK });
   await adoptC(y);
   const vy = y.c.activePlan(), ey = vy.generated.C1;
-  const envReasons = vy.final.readiness.reasons.filter(r => r.kind === 'environment');
-  assert(ey.status === 'not-run' && vy.final.approvable === false && /同じ表示のイベントで error と編集不可の両方を設定している/.test(ey.verdict.reason) && /警告/.test(ey.verdict.reason) && /模擬テストの環境が使えないため、まだ反映できません/.test(vy.final.blockingReason) && !/環境の制約です/.test(vy.final.blockingReason) && envReasons.length === 1 && y.gen.calls.length === 1,
-    `E3-2（sc-gate S7）: 同じイベントの error と編集不可は「環境の制約」とだけ出さず、模擬テストが要る理由を一度にまとめて出す（承認できない）: ${JSON.stringify({ reason: ey.verdict.reason, final: vy.final.blockingReason, env: envReasons.length })}`);
+  const envReasons = FS.readinessOf(vy).reasons.filter(r => r.kind === 'environment');
+  assert(ey.status === 'not-run' && FS.readyOf(vy) === false && /同じ表示のイベントで error と編集不可の両方を設定している/.test(ey.verdict.reason) && /警告/.test(ey.verdict.reason) && /模擬テストの環境が使えないため、まだ反映できません/.test(FS.reasonOf(vy)) && !/環境の制約です/.test(FS.reasonOf(vy)) && envReasons.length === 1 && y.gen.calls.length === 1,
+    `E3-2（sc-gate S7）: 同じイベントの error と編集不可は「環境の制約」とだけ出さず、模擬テストが要る理由を一度にまとめて出す（承認できない）: ${JSON.stringify({ reason: ey.verdict.reason, final: FS.reasonOf(vy), env: envReasons.length })}`);
   const html = finalHtml(y);
   assert(/disabled>動作テスト環境へ反映/.test(html) && /この効果は模擬テストで確かめる必要があります/.test(stripC(html)), 'E3-3: 最終案のカードの理由にも同じ文を出し、［この内容で反映する］は押せない');
 });
@@ -2630,7 +2632,7 @@ await section(async () => {
   const v = m.conv().activePlan(), e = v && v.generated && v.generated.C1;
   //   簡素化 B（2026-10-17）: Toolkit が受け取った候補から Gateway と同じ計算で作った指紋（会話の照合と同じ関数）
   const localHash = e ? await KTScan.gatewayCandidateHashOf({ strategy: e.generated.strategy, targetFile: e.generated.targetFile, code: e.generated.code, patch: e.generated.patch, baseHash: null, customizationId: 'C1' }) : null;
-  assert(e && e.status === 'verified' && e.generated.code === CODE_K && !e.generated.toolkitModernJs && e.candidateHash === sent[0].candidateHash && e.verification.candidateHash === sent[0].candidateHash && localHash === sent[0].candidateHash && v.final.approvable === true,
+  assert(e && e.status === 'verified' && e.generated.code === CODE_K && !e.generated.toolkitModernJs && e.candidateHash === sent[0].candidateHash && e.verification.candidateHash === sent[0].candidateHash && localHash === sent[0].candidateHash && FS.readyOf(v) === true,
     `E4-1: 生成工程が検証したコード・candidateHash のまま最終案になる（Toolkit は書き換えない）: ${JSON.stringify({ status: e && e.status, same: e && e.generated.code === CODE_K, hash: [e && e.candidateHash, sent[0] && sent[0].candidateHash, localHash] })}`);
   const rE = await KIT.applyOnScreen(m);   // §0e.1: ［動作テスト環境へ反映］1 回で承認と登録
   const pr = m.panel.jsExecState().prepared;
@@ -2647,7 +2649,7 @@ await section(async () => {
   const r2 = await run(VAR_K);
   const v2 = r2.m.conv().activePlan(), e2 = v2 && v2.generated && v2.generated.C1;
   const mj = e2 && e2.verification && (e2.verification.machine || []).find(ch => ch.name === 'modern-js' && !ch.ok);
-  assert(e2 && e2.generated.code === VAR_K && e2.candidateHash === r2.sent[0].candidateHash && e2.status === 'unresolved' && e2.verdict.kind === 'machine' && mj && mj.severity === 'block' && !e2.review.checks.some(ch => ch.name === 'modern-js' && !ch.gateway) && e2.review.checks.some(ch => ch.name === 'modern-js' && ch.gateway && ch.severity === 'block') && v2.final.approvable === false,
+  assert(e2 && e2.generated.code === VAR_K && e2.candidateHash === r2.sent[0].candidateHash && e2.status === 'unresolved' && e2.verdict.kind === 'machine' && mj && mj.severity === 'block' && !e2.review.checks.some(ch => ch.name === 'modern-js' && !ch.gateway) && e2.review.checks.some(ch => ch.name === 'modern-js' && ch.gateway && ch.severity === 'block') && FS.readyOf(v2) === false,
     `E4-4: var を含む候補は書き換えず（candidateHash も生成工程のまま）、生成工程の機械検査の block で止める: ${JSON.stringify({ status: e2 && e2.status, same: e2 && e2.generated.code === VAR_K, mj: mj && mj.message })}`);
   //   簡素化 B（2026-10-17）: 登録の直前にも、登録する候補の指紋を Gateway と同じ計算で作り直して、生成工程の検証結果・承認の指紋に照らす。
   //   承認の欄の準備の前に候補だけが変わった（検証結果と承認の指紋はそのまま）→ 承認・登録の準備で止まり、動作テスト環境に書き込まない
@@ -2697,13 +2699,13 @@ await section(async () => {
   await adoptC(x);
   const v = x.c.activePlan(), e = v.generated.C1;
   const raw = KTCodeReview.review({ generated: { strategy: 'NEW_JS_FILE', targetFile: 'c1.js', summary: '', code: CODE_S4, patch: null, events: CUST_S4.events, fields: [{ code: 'memo', access: 'CONTROL' }], apis: [], assumptions: [], warnings: [], coverage: [] }, customization: CUST_S4, plan: v.plan, data: clone(DATA_C), scan: null, existingSource: null });
-  assert(!raw.checks.some(ch => ch.name === 'planned-fields') && !e.review.checks.some(ch => ch.name === 'planned-fields') && e.status === 'verified' && v.final.approvable === true,
-    `E7-1（sc-gate S4）: 保存のイベントの event.error で保存を止める正しい候補は、必須の効果が present なら承認できる（Toolkit は planned-fields を作らない）: ${JSON.stringify({ status: e.status, reason: v.final.blockingReason })}`);
+  assert(!raw.checks.some(ch => ch.name === 'planned-fields') && !e.review.checks.some(ch => ch.name === 'planned-fields') && e.status === 'verified' && FS.readyOf(v) === true,
+    `E7-1（sc-gate S4）: 保存のイベントの event.error で保存を止める正しい候補は、必須の効果が present なら承認できる（Toolkit は planned-fields を作らない）: ${JSON.stringify({ status: e.status, reason: FS.reasonOf(v) })}`);
   // 模擬テストの環境が無いとき: 「模擬テストが要る（保存を止める）」で準備未完了
   const y = makeConvC({ planImpl: (args) => planJs(args, { cust: CUST_S4, summary: '編集画面の保存を止めます。' }), generate: makeGenE(CODE_S4, verS4(false)), supported: GEN_EFFECT_CHECK });
   await adoptC(y);
   const vy = y.c.activePlan(), ey = vy.generated.C1;
-  assert(vy.final.approvable === false && ey.status === 'not-run' && !ey.review.registration.blockers.some(b => b.code === 'planned-fields') && /この効果は模擬テストで確かめる必要があります（保存を止める）/.test(ey.verdict.reason),
+  assert(FS.readyOf(vy) === false && ey.status === 'not-run' && !ey.review.registration.blockers.some(b => b.code === 'planned-fields') && /この効果は模擬テストで確かめる必要があります（保存を止める）/.test(ey.verdict.reason),
     `E7-2: 隔離環境が無いときは、模擬テストが要る理由（保存を止める）で準備未完了: ${JSON.stringify({ status: ey.status, reason: ey.verdict.reason, blockers: ey.review.registration.blockers.map(b => b.code) })}`);
   // 生成工程の必須の効果が present でない → 生成工程の結果（missing）で止める
   const rvX = KTCodeReview.attachBehavior(raw, verE([gwE('memo', 'block-save', 'behavior', ['app.record.edit.submit'], { status: 'missing' })], casesNR([['memo', 'block-save', ['app.record.edit.submit'], false]], null, 'pass'), 'passed', null), { requiredEffects: [reqE('memo', 'block-save', ['app.record.edit.submit'])], customization: CUST_S4, effectCheck: true });
@@ -2793,11 +2795,11 @@ await section(async () => {
   const x = makeConvC({ generate: gen });
   await adoptC(x);
   const v1 = x.c.activePlan();
-  assert(v1.version === 1 && v1.generated.C1.status === 'failed' && v1.final.approvable === false && x.finals().length === 1, `F2-0: 前提: 最初の生成は失敗して最終案は承認できない: ${v1.generated.C1.status}`);
+  assert(v1.version === 1 && v1.generated.C1.status === 'failed' && FS.readyOf(v1) === false && x.finals().length === 1, `F2-0: 前提: 最初の生成は失敗して最終案は承認できない: ${v1.generated.C1.status}`);
   const plans0 = x.calls.plan.length;
   const r = await x.c.send('コードを作って');
   const v2 = x.c.activePlan();
-  assert(r.ok && r.intent === 'GENERATE_CODE' && v2.version === 2 && v2.planId === v1.planId && v1.status === 'SUPERSEDED' && n === 2 && x.calls.plan.length === plans0 && v2.generated.C1.status === 'verified' && v2.final.approvable === true && x.finals().length === 2 && Array.isArray(r.regenerated) && r.regenerated.includes('C1'), `F2-1:「コードを作って」→ 同じ計画の新しい版で最終案を作り直す（計画の AI は呼ばない・失敗した JavaScript だけ作り直す）: ${JSON.stringify({ v: v2.version, n, plans: x.calls.plan.length, st: v2.generated.C1.status })}`);
+  assert(r.ok && r.intent === 'GENERATE_CODE' && v2.version === 2 && v2.planId === v1.planId && v1.status === 'SUPERSEDED' && n === 2 && x.calls.plan.length === plans0 && v2.generated.C1.status === 'verified' && FS.readyOf(v2) === true && x.finals().length === 2 && Array.isArray(r.regenerated) && r.regenerated.includes('C1'), `F2-1:「コードを作って」→ 同じ計画の新しい版で最終案を作り直す（計画の AI は呼ばない・失敗した JavaScript だけ作り直す）: ${JSON.stringify({ v: v2.version, n, plans: x.calls.plan.length, st: v2.generated.C1.status })}`);
   assert(v2.final.changedSince && v2.final.changedSince.regenerated.includes('C1') && /JavaScript の作り直し/.test(v2.final.changedSince.revisionRequest) && /最終案を直しました。/.test(finalHtml(x)) && /前の最終案 — このあと直した案があります/.test(KTAiChatUi.messageHtml(x.finals()[0], { plans: new Map(x.c.planHistory().map(v => [`${v.planId}:${v.version}`, v])), activePlan: v2 })), 'F2-2: 最終案のカードは置き換え（変わった点: JavaScript の作り直し）・前の最終案は 1 行に畳む');
   assert(!x.c.messages().some(m => ['CODE', 'SPEC'].includes(m.type) || ['code-intro', 'spec-intro', 'customization-choices', 'generate-extra-choices', 'confirm-generate', 'spec-required', 'source-unavailable', 'generate-repeat'].includes(m.data?.kind)), `F2-3: 最終案のカードを通らない生成のカード（コード・仕様・選択・確定して作る）は出ない: ${JSON.stringify(x.kinds())}`);
   // 承認の後に「コードを作って」: 検証済みだけなら作り直さない（同じ入力なら同じ結果）。承認もそのまま
@@ -2890,7 +2892,7 @@ await section(async () => {
   const x = makeConvC({ planImpl: (args) => planJs(args, { cust: custOf(['warn']) }), generate: makeGenerate({ sequence: ['warn'], extraCases: [CANCEL] }) });
   await adoptC(x);
   const v = x.c.activePlan(), e = v.generated.C1;
-  assert(e.status === 'unresolved' && e.verdict.kind === 'behavior-fail' && v.final.approvable === false && /取り消されました/.test(JSON.stringify(v.final.cannot)) && x.c.approveFinal(KIT.approveArgs(v)).ok === false && e.verification.behavior.cases.some(y => y.cause === 'candidate-cancels-existing-lock'), `F8-1: candidate-cancels-existing-lock の fail は未解決（承認できない）: ${JSON.stringify({ st: e.status, kind: e.verdict && e.verdict.kind })}`);
+  assert(e.status === 'unresolved' && e.verdict.kind === 'behavior-fail' && FS.readyOf(v) === false && /取り消されました/.test(JSON.stringify(v.final.cannot)) && x.c.approveFinal(KIT.approveArgs(v)).ok === false && e.verification.behavior.cases.some(y => y.cause === 'candidate-cancels-existing-lock'), `F8-1: candidate-cancels-existing-lock の fail は未解決（承認できない）: ${JSON.stringify({ st: e.status, kind: e.verdict && e.verdict.kind })}`);
   const WARN_SHOW = "(function () {\n  'use strict';\n  kintone.events.on(['app.record.edit.show'], function (event) {\n    const f = event.record['amount'];\n    f.error = Number(f.value || 0) > 1000000 ? '100万円を超えています' : null;\n    return event;\n  });\n})();";
   const DEAL = "(function () {\n  'use strict';\n  kintone.events.on(['app.record.edit.show'], function (event) {\n    if (event.record['ステータス'].value === '承認済み') event.record['amount'].disabled = true;\n    return event;\n  });\n})();";
   const data2 = FX.makeData();
@@ -2912,9 +2914,9 @@ await section(async () => {
   await adoptC(y);
   const vy = y.c.activePlan(), ey = vy.generated.C1, fy = vy.final.fix;
   assert(ey.status === 'not-run' && ey.verdict.category === 'existing' && ey.verdict.reasonKey === 'existing-lock-unverified' && ey.verdict.fix === 'revise' && !ey.verdict.unfixable && /「dealLock\.js」/.test(ey.verdict.reason) && /作った JavaScript の誤りとは判定していません/.test(ey.verdict.reason)
-    && vy.final.approvable === false && y.c.approveFinal(KIT.approveArgs(vy)).ok === false && y.gen.calls.length === 1 && !/実機で確かめ/.test(`${ey.verdict.next}${vy.final.blockingReason}`)
-    && vy.final.blockingReason === R.readiness,
-  `F8-4: existing-lock-unverified → 既存 JS の区分で準備未完了（承認できない・修復を呼ばない・ファイル名を出す）: ${JSON.stringify({ st: ey.status, verdict: ey.verdict, reason: vy.final.blockingReason, gen: y.gen.calls.length })}`);
+    && FS.readyOf(vy) === false && y.c.approveFinal(KIT.approveArgs(vy)).ok === false && y.gen.calls.length === 1 && !/実機で確かめ/.test(`${ey.verdict.next}${FS.reasonOf(vy)}`)
+    && FS.reasonOf(vy) === R.readiness,
+  `F8-4: existing-lock-unverified → 既存 JS の区分で準備未完了（承認できない・修復を呼ばない・ファイル名を出す）: ${JSON.stringify({ st: ey.status, verdict: ey.verdict, reason: FS.reasonOf(vy), gen: y.gen.calls.length })}`);
   assert(fy && fy.kind === 'revise' && fy.text.includes('警告を変更・保存のイベントで出すか、既存の JavaScript（dealLock.js）に統合する形に計画を直してください') && !fy.text.includes('既存の処理との役割分担を見直してください') && fixButtonOf(finalHtml(y)),
     `F8-5: ［計画を直すよう依頼する］の文は構造化した値（details.files）から「警告を変更・保存のイベントで出すか、既存の JavaScript（ファイル名）に統合する形」と作る: ${JSON.stringify(fy)}`);
   //   C-1 第 4 段（2026-10-09・ledger U1）: BF-C のように、既存の編集不可がある所（details.files）が候補自身の統合先（EXTEND_EXISTING_JS の targetFile）だけなら、
@@ -2924,7 +2926,7 @@ await section(async () => {
   const GEN_MET = () => { const g = KIT.gwModernized(RP.GENERATED); g.coverage = g.coverage.map(cv => ({ ...cv, status: 'MET' })); return g; };
   const runOwn = async (extra) => { const z = makeConvC({ planImpl: (args) => planJs(args, { cust: CUST_W, summary: '金額が 100 万円を超えたら警告します（保存は止めません）。' }), generate: makeGenerate({ sequence: ['warn'], existingSource: { name: 'dealLock.js', target: 'desktop', text: RP.DEAL_LOCK }, generatedOf: GEN_MET, extraCases: extra }) }); await adoptC(z); const v = z.c.activePlan(); return { z, v, e: v.generated.C1, f: v.final.fix }; };
   const own = await runOwn([UNV]);
-  assert(RP.GENERATED.strategy === 'EXTEND_EXISTING_JS' && RP.GENERATED.targetFile === 'dealLock.js' && own.e.status === 'not-run' && own.v.final.approvable === false && own.f && own.f.kind === 'revise'
+  assert(RP.GENERATED.strategy === 'EXTEND_EXISTING_JS' && RP.GENERATED.targetFile === 'dealLock.js' && own.e.status === 'not-run' && FS.readyOf(own.v) === false && own.f && own.f.kind === 'revise'
     && own.f.text.includes('警告は画面を開いたときには出さず、値を変えたとき・保存するときだけにしてください（「金額」の警告: 編集画面を開いたときの警告をやめる）') && !/app\.record\./.test(own.f.text) && !/existing-lock-unverified/.test(own.f.text) && !own.f.text.includes('統合する形に計画を直してください')
     && /値を変えたとき・保存するときだけ/.test(own.e.verdict.next) && !/app\.record\./.test(own.e.verdict.next) && !/統合する形に計画を直します/.test(own.e.verdict.next) && own.z.gen.calls.length === 1,
     `F8-6（ledger U1）: 既存の編集不可が候補自身の統合先だけなら、統合の案を出さず効果のイベントで具体的に書く: ${JSON.stringify({ st: own.e.status, next: own.e.verdict && own.e.verdict.next, fix: own.f })}`);
@@ -2975,7 +2977,7 @@ await section(async () => {
   const r = await adoptC(x);
   const ap = KIT.approveC(x);
   const v = x.c.activePlan();
-  assert(r.intent === 'ADOPT_DRAFT' && v.final && v.final.approvable && ap.ok && KIT.validC(x).ok && KIT.REQUESTS.length === 4, `F11-1: 会話コントローラ: 採用 → 最終案 → 承認（共有の部品）: ${JSON.stringify({ intent: r.intent, ok: ap.ok })}`);
+  assert(r.intent === 'ADOPT_DRAFT' && v.final && FS.readyOf(v) && ap.ok && KIT.validC(x).ok && KIT.REQUESTS.length === 4, `F11-1: 会話コントローラ: 採用 → 最終案 → 承認（共有の部品）: ${JSON.stringify({ intent: r.intent, ok: ap.ok })}`);
   const CUST_S = { customizationId: 'C1', requirement: '承認待ちでは案件名を編集できないようにする', whyStandardInsufficient: 'ステータスで切り替えるアクセス権は無い', strategy: 'NEW_JS_FILE', platform: ['desktop'], implementation: 'JAVASCRIPT', events: ['app.record.edit.show'], fields: [{ code: 'ステータス', access: 'READ' }, { code: 'case_name', access: 'CONTROL', condition: 'ステータス in ("承認待ち")', effects: ['lock'] }], apis: [], existingFiles: [], risks: [], questions: [], dependsOn: [], evidenceIds: [] };
   const LOCK_S = "(function () {\n  'use strict';\n  kintone.events.on(['app.record.edit.show'], function (event) {\n    const record = event.record;\n    if (record['ステータス'] && record['ステータス'].value === '承認待ち') record['case_name'].disabled = true;\n    return event;\n  });\n})();";
   const h = clone(HEALTH); h.registry.toolkit['customization-generator'].verification = ['requirementId', ...GEN_EFFECT_FEATURES];
@@ -2990,7 +2992,7 @@ await section(async () => {
   await ticks();
   const vS = await KIT.adoptOnScreen(m);
   const out = await KIT.prepareOnScreen(m);
-  assert(vS && vS.final && vS.final.approvable && out.ready && !out.approved && out.exec && out.exec.status === 'PREPARED' && out.js && out.js.status === 'PREPARED' && out.button && !out.button.disabled && KIT.writesOf(m).length === 0, `F11-2: 画面: 標準設定と JavaScript の最終案 → 承認の欄の準備（設定の手順と JavaScript の登録の準備。書き込みはしない・まだ承認しない）→［動作テスト環境へ反映］を押せる: ${JSON.stringify({ ready: out.ready, exec: out.exec && out.exec.status, js: out.js && out.js.status, reasons: out.pre && out.pre.reasons })}`);
+  assert(vS && vS.final && FS.readyOf(vS) && out.ready && !out.approved && out.exec && out.exec.status === 'PREPARED' && out.js && out.js.status === 'PREPARED' && out.button && !out.button.disabled && KIT.writesOf(m).length === 0, `F11-2: 画面: 標準設定と JavaScript の最終案 → 承認の欄の準備（設定の手順と JavaScript の登録の準備。書き込みはしない・まだ承認しない）→［動作テスト環境へ反映］を押せる: ${JSON.stringify({ ready: out.ready, exec: out.exec && out.exec.status, js: out.js && out.js.status, reasons: out.pre && out.pre.reasons })}`);
   assert(!m.msgs().some(z => ['PLAN', 'SPEC', 'CODE', 'REVIEW'].includes(z.type) || ['questions', 'provisionals', 'spec-intro', 'code-intro', 'confirm-generate', 'answer-target'].includes(z.data?.kind)), `F11-3: 標準設定と JavaScript が混在しても、確認質問・JS 仕様・コードのカードを往復しない（最終案のカード 1 枚）: ${JSON.stringify(m.msgs().map(z => z.data?.kind || z.type))}`);
 });
 
@@ -3061,7 +3063,7 @@ const wsLabel = (m) => stripC(m.$('kt-ai-ws-state').innerHTML).trim();
 // H1: 混在（標準設定と JavaScript）の成功。新設フィールドに依存する JavaScript は承認の欄で「設定の反映の後に確かめる」と出し、設定の後に登録される。利用者の確認は 1 回
 await section(async () => {
   const { m, v } = await KIT.mountFinal({ kind: 'mixed' });
-  assert(v && v.final && v.final.approvable === true && v.generated.C1.status === 'verified', `H1-0: 前提: 混在の最終案（承認メモの追加・一覧の追加・承認メモを編集不可にする JavaScript）: ${JSON.stringify(v && v.final && v.final.blockingReason)}`);
+  assert(v && v.final && FS.readyOf(v) === true && v.generated.C1.status === 'verified', `H1-0: 前提: 混在の最終案（承認メモの追加・一覧の追加・承認メモを編集不可にする JavaScript）: ${JSON.stringify(v && v.final && FS.reasonOf(v))}`);
   let preChat = '';
   const r = await KIT.applyOnScreen(m, { before: () => { preChat = stripC(m.chat()); } });
   assert(r.pre.status === 'ready' && r.pre.items.settings.length === 2 && r.pre.items.files.join() === '＋ memoLock.js（PC）新規追加（4 番目・末尾）' && r.pre.items.deferred.length === 1 && /フィールド「承認メモ」を前提にしています。設定の反映の後に、その存在を確かめてから登録します/.test(r.pre.items.deferred[0]) && r.button && !r.button.disabled && r.pre.reasons.length === 0, `H1-1: 承認の欄: 書き込みをしない準備を自動で走らせ、反映する設定 2 件・追加する JavaScript・「設定の反映の後に確かめる」依存を出す（依存では止めない）: ${JSON.stringify(r.pre)}`);
@@ -3148,7 +3150,7 @@ await section(async () => {
     return { m: mm, v: mm.conv().activePlan() };
   })();
   const b0 = KIT.applyButtonOf(m);
-  assert(v && v.final && v.final.approvable && m.panel.finalPrecheck().status === 'running' && b0 && b0.disabled && /kt-ai-final-status" data-can-apply="0"/.test(m.chat()) && /反映の前の準備をしています/.test(stripC(m.chat())), `H5-1: 準備中は［動作テスト環境へ反映］を押せず、準備中であることを出す: ${JSON.stringify({ st: m.panel.finalPrecheck().status, b0 })}`);
+  assert(v && v.final && FS.readyOf(v) && m.panel.finalPrecheck().status === 'running' && b0 && b0.disabled && /kt-ai-final-status" data-can-apply="0"/.test(m.chat()) && /反映の前の準備をしています/.test(stripC(m.chat())), `H5-1: 準備中は［動作テスト環境へ反映］を押せず、準備中であることを出す: ${JSON.stringify({ st: m.panel.finalPrecheck().status, b0 })}`);
   await clickChat(m, 'final-approve', { plan: v.planId, version: String(v.version) }); await ticks(4);
   assert(!v.approval && KIT.writesOf(m).length === 0 && /反映の前の準備がまだ終わっていません/.test(stripC(m.chat())), 'H5-2: 準備中に押しても承認・書き込みをしない（押せなかったことを承認の欄に出す）');
   g.open(); await KIT.waitUntil(() => m.panel.finalPrecheck().status === 'ready', 60);
@@ -3159,6 +3161,30 @@ await section(async () => {
   await KIT.waitUntil(() => m.panel.finalPrecheck().status === 'blocked', 80); await ticks(2);
   const b1 = KIT.applyButtonOf(m), pre = m.panel.finalPrecheck();
   assert(pre.status === 'blocked' && pre.reasons.length > 0 && b1 && b1.disabled && stripC(m.chat()).includes(pre.reasons[0]) && /反映の前の確認で止まる理由があるため/.test(stripC(m.chat())) && /kt-ai-final-pre-blocked/.test(m.chat()) && KIT.writesOf(m).length === 1, `H5-4: 準備で止まる理由があるときは押せず、理由を出す: ${JSON.stringify(pre.reasons)}`);
+});
+// H5b（簡素化 2・2026-10-17）: 反映できるかは今の判定だけ。最終案を作った時点で反映できた記録（v.final.approvable）を、今も反映できる根拠にしない。
+//   押せるか・左右の止める理由・承認の口は同じ今の判定（会話の finalReadiness と画面の applyHold）。最終案の記録は書き換えない
+await section(async () => {
+  const { m, v } = await KIT.mountFinal({ kind: 'mixed' });
+  const p0 = await KIT.prepareOnScreen(m);
+  assert(p0.ready && p0.button && !p0.button.disabled && v.final.approvable === true && FS.readyOf(v) === true, `H5b-0: 前提: 承認の欄の準備が終わり、押せる（作った時点の判定も今の判定も反映できる）: ${p0.pre && p0.pre.status}`);
+  //   最終案を作った後に、この版に先に決めたいこと（まだ答えていない）がある状態にする（今の判定だけが変わる。最終案の記録はそのまま）
+  v.openQuestions = [...(v.openQuestions || []), { key: 'Q9', id: 'Q9', text: '承認の後の通知は要りますか', reason: 'テスト', priority: 'blocking', topics: ['other:h5b'] }];
+  m.conv().notice('（テスト）描き直し', { kind: 'test-redraw' }); await ticks(4);
+  const reason = '先に決めたいことが 1 件残っています。答えると反映できるようになります。';
+  const b1 = KIT.applyButtonOf(m);
+  const r = await KIT.applyOnScreen(m);
+  assert(b1 && b1.disabled && m.panel.applyHold() === reason && stripC(m.chat()).includes(reason) && m.$('kt-ai-exec').innerHTML.includes(reason) && !v.approval && r.writes.length === 0 && FS.readyOf(v) === false, `H5b-1: 作った時点で反映できた最終案でも、今の判定で反映できなければ押せず（左のカードと右の「反映」に同じ理由）、押しても承認・書き込みをしない: ${JSON.stringify({ b1, hold: m.panel.applyHold(), writes: r.writes })}`);
+  const ap = m.conv().approveFinal(KIT.approveArgs(v));
+  assert(!ap.ok && ap.reason === 'NOT_APPROVABLE' && ap.message === reason && !v.approval && v.final.approvable === true && v.final.readiness.ready === true && !v.final.blockingReason, `H5b-2: 承認の口も今の判定で止める（記録の「反映できる」を根拠にしない）。最終案の記録は作った時点のまま: ${JSON.stringify(ap)}`);
+  //   作った後に JavaScript の検証の結果が未解決になった（候補の指紋は同じなので承認の欄の準備は「準備完了」のまま）。以前は最終案の記録でボタンを出していたので押せた
+  const { m: m2, v: w } = await KIT.mountFinal({ kind: 'mixed' });
+  const q0 = await KIT.prepareOnScreen(m2);
+  w.generated.C1.status = 'unresolved';
+  m2.conv().notice('（テスト）描き直し', { kind: 'test-redraw' }); await ticks(4);
+  const b2 = KIT.applyButtonOf(m2), hold2 = m2.panel.applyHold();
+  const r2 = await KIT.applyOnScreen(m2);
+  assert(q0.ready && m2.panel.finalPrecheck().status === 'ready' && b2 && b2.disabled && /反映できる完成品になっていない JavaScript があります/.test(hold2 || '') && stripC(m2.chat()).includes(hold2) && m2.$('kt-ai-exec').innerHTML.includes(hold2) && !w.approval && r2.writes.length === 0 && w.final.approvable === true, `H5b-3: 承認の欄の準備が終わったままでも、今の判定で反映できなければ押せず（左右に同じ理由）、押しても承認・書き込みをしない。最終案の記録は作った時点のまま: ${JSON.stringify({ b2, hold2, pre: m2.panel.finalPrecheck().status })}`);
 });
 // H6: KTJsExecutor.prepare の部品: 承認の前の準備（deferDependencies）と、内容の比較（expectedContent。不具合 B の置き換え。照合は消さない）
 await section(async () => {

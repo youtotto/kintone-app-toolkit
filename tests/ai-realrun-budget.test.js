@@ -23,6 +23,8 @@
 'use strict';
 process.on('unhandledRejection', (e) => { if (/kintone is not defined/.test(String(e && e.message))) return; console.error(e); process.exit(1); });
 const { loadToolkit, makeAssert } = require('./helpers/load-toolkit.js');
+//   簡素化（2026-10-17）: 反映できるかは、最新の版なら会話の今の判定、前の版なら最終案の記録で確かめる（tests/helpers/final-state.js）
+const FS = require('./helpers/final-state.js');
 const T = loadToolkit();
 const { KTAiClient, KTAiBudget, KTAiConversation, KTAiChatUi } = T;
 const { assert, state } = makeAssert();
@@ -368,7 +370,7 @@ await section(async () => {
   const kinds = led ? led.entries.map(e => `${e.kind}:${e.status}`) : [];
   const btn = restButtonOf(chat);
   const head = m.$('kt-ai-header').innerHTML;
-  assert(seen.length === 0 && gen.calls.length === 0 && m.calls.plan.length === 1 && fin && fin.incomplete && fin.incomplete.kind === 'budget' && fin.incomplete.budget && fin.incomplete.budget.reason === 'limit' && fin.incomplete.budget.needUsd > fin.incomplete.budget.remainingUsd && !fin.approvable,
+  assert(seen.length === 0 && gen.calls.length === 0 && m.calls.plan.length === 1 && fin && fin.incomplete && fin.incomplete.kind === 'budget' && fin.incomplete.budget && fin.incomplete.budget.reason === 'limit' && fin.incomplete.budget.needUsd > fin.incomplete.budget.remainingUsd && !FS.readyOf(fin),
     `B4-1: 残りより生成の最大が大きい → 生成の送信 0 件（偽の client の呼び出し 0）・最終案は予算で止まった未完成（承認できない）: ${JSON.stringify({ seen: seen.length, inc: fin && fin.incomplete, kinds })}`);
   assert(btn && btn.disabled && /利用の上限（予算・回数）に達しました（次の要求は推定で最大 約 [0-9.]+ 米ドル・AI の呼び出し 3 回、残りは 約 [0-9.]+ 米ドル/.test(stripC(chat)) && kinds.join() === 'propose:done,propose:done,propose:done,plan:done' && /検証の上限（推定による送信制限・上限の強制は無い）: 記録済み 約 [0-9.]+ 米ドル・確保中 約 0 米ドル ／ 上限 1 米ドル・AI の呼び出し 4 \/ 100 回/.test(stripC(head)),
     `B4-2: 最終案の理由に必要な額と残り・［残りの JavaScript を作る］は無効・記録に生成は無い・見出しに記録済み・確保中・上限: ${JSON.stringify({ btn, kinds, head: stripC(head).slice(0, 120) })}`);
@@ -792,7 +794,7 @@ await section(async () => {
   const chat = m.chat();
   const g = ledgerOf(storage).entries.find(e => e.kind === 'generate');
   const btn = restButtonOf(chat);
-  assert(fin && fin.incomplete && fin.incomplete.kind === 'budget' && fin.incomplete.budget && fin.incomplete.budget.reason === 'gateway-over-allowance' && !fin.approvable && g && g.status === 'released' && g.reservedUsd === 0 && btn && btn.disabled && /呼び出しの上界 約 3\.2 米ドル（送る要求の大きさと出力の上限から Gateway が計算）が、渡した残り 約 2\.96 米ドルを超えるため、Gateway が呼び出しませんでした/.test(stripC(chat)),
+  assert(fin && fin.incomplete && fin.incomplete.kind === 'budget' && fin.incomplete.budget && fin.incomplete.budget.reason === 'gateway-over-allowance' && !FS.readyOf(fin) && g && g.status === 'released' && g.reservedUsd === 0 && btn && btn.disabled && /呼び出しの上界 約 3\.2 米ドル（送る要求の大きさと出力の上限から Gateway が計算）が、渡した残り 約 2\.96 米ドルを超えるため、Gateway が呼び出しませんでした/.test(stripC(chat)),
     `B7-11: 画面: Gateway が上限で生成を止めた → 確保を解放・送信を止める（予算で止まった未完成・続きのボタンは無効・理由は上界と残り）: ${JSON.stringify({ inc: fin && fin.incomplete, g: g && [g.status, g.reservedUsd] })}`);
 });
 

@@ -10,6 +10,8 @@
 // 実行方法: node tests/ai-consultation.test.js
 'use strict';
 const { loadToolkit, makeAssert } = require('./helpers/load-toolkit.js');
+//   簡素化（2026-10-17）: 反映できるかは、最新の版なら会話の今の判定、前の版なら最終案の記録で確かめる（tests/helpers/final-state.js）
+const FS = require('./helpers/final-state.js');
 const { withDevBase } = require('./helpers/dev-base-fake.js');
 const { gwCandidateHash, gwHashOfCtx, withGwHash } = require('./helpers/gw-hash.js');
 const { makeFakeHost } = require('./helpers/fake-dom.js');
@@ -325,7 +327,7 @@ console.log('\n--- 新規 JS（desktop）の登録 / mobile（desktop を変え�
   //   C-1 第 3 段: 生成は最終案の中。従来の source-unavailable のカード（［新しい JavaScript として作る］の選択肢）は削除した。
   //   守ること（本文が無い既存のファイルへは自動生成しない・反映できない・内部のコードを出さない）は最終案の「実現できない点」で確かめる
   const gC1 = v.generated && v.generated.C1;
-  assert(m.calls.generate.length === 0 && gC1 && gC1.status === 'failed' && gC1.failure && gC1.failure.reason === 'JS_SOURCE_UNAVAILABLE' && v.final && v.final.approvable === false && /統合先の既存の JavaScript の本文を取得できませんでした/.test(m.chat()) && !/JS_SOURCE_UNAVAILABLE/.test(m.chat()) && !(await approveScreen(m)), '外部 URL への統合: 本文が無いので生成せず（会話に内部のコードは出さない）、最終案は承認できない（実現できない点に理由）');
+  assert(m.calls.generate.length === 0 && gC1 && gC1.status === 'failed' && gC1.failure && gC1.failure.reason === 'JS_SOURCE_UNAVAILABLE' && v.final && FS.readyOf(v) === false && /統合先の既存の JavaScript の本文を取得できませんでした/.test(m.chat()) && !/JS_SOURCE_UNAVAILABLE/.test(m.chat()) && !(await approveScreen(m)), '外部 URL への統合: 本文が無いので生成せず（会話に内部のコードは出さない）、最終案は承認できない（実現できない点に理由）');
   // URL（本文は読める想定）: 生成はできるが登録は EXTERNAL_JS_NOT_WRITABLE
   const m2 = mount({ planResponse: PLAN_EXT });
   await ticks();
@@ -336,7 +338,7 @@ console.log('\n--- 新規 JS（desktop）の登録 / mobile（desktop を変え�
   //   以前はコードのカードで「Toolkit からは書き換えられない」と伝え、［新規 JS として設計し直す］を出し、右の登録ボタンを出さなかった。
   //   C-1 第 3 段: 最終案の流れでは、書き換えられない外部のファイルへの変更を最終案の時点で承認できない理由にし、カードに「書き換えられません」と出す
   //   （登録の準備で初めて止めない）
-  assert(v2.final && v2.final.approvable === false && /書き換えられません/.test(m2.chat()), 'URL の JS への変更: 最終案のカードで「Toolkit からは書き換えられない」と伝え、承認できる完成品として出さない');
+  assert(v2.final && FS.readyOf(v2) === false && /書き換えられません/.test(m2.chat()), 'URL の JS への変更: 最終案のカードで「Toolkit からは書き換えられない」と伝え、承認できる完成品として出さない');
   const r49 = await applyScreen(m2);
   assert(!v2.approval && r49.button && r49.button.disabled && m2.panel.jsExecState().stage === 'idle' && writes(m2).length === 0, '§49 ［動作テスト環境へ反映］は押せず、押しても承認・登録しない（URL 指定の JavaScript は自動で置き換えない）');
 }
@@ -388,7 +390,7 @@ console.log('\n--- §54 modern JavaScript（2026-10-05。§0d.3・簡素化 B �
   const g = v.generated.C1;
   const mj = g && g.verification && (g.verification.machine || []).find(x => x.name === 'modern-js' && !x.ok);
   assert(g && g.generated.code === VAR_JS && g.status === 'unresolved' && mj && mj.severity === 'block' && /var record/.test(mj.message) && !g.review.checks.some(x => x.name === 'modern-js' && !x.gateway) && (v.final.blockers || []).some(b => b.text === `機械検査で登録を止める問題: ${mj.message}`), `§54 AI の var は書き換えず（生成工程が返したコードのまま）、生成工程の機械検査の block で止まる（Toolkit は記法を確かめない）: ${g && g.status} ${mj && mj.message}`);
-  assert(v.final && v.final.approvable === false && !(await approveScreen(m)), '§54 var の残る候補の最終案は承認できない');
+  assert(v.final && FS.readyOf(v) === false && !(await approveScreen(m)), '§54 var の残る候補の最終案は承認できない');
   //   簡素化（2026-10-17）: 会話のカードから JavaScript だけを登録する経路（open-js-register・登録の確認画面）は削除した。登録は［動作テスト環境へ反映］1 回の反映の中だけ
   await ticks(10);
   const up = [...m.mock.st.files.values()].find(f => f.name === 'amount-warning.js');
@@ -403,7 +405,7 @@ console.log('\n--- §54 modern JavaScript（2026-10-05。§0d.3・簡素化 B �
   const { v } = await adoptScreen(m, '100万円以上なら警告を表示したい');
   const g = v.generated.C1;
   const mj = g && g.verification && (g.verification.machine || []).find(x => x.name === 'modern-js' && !x.ok);
-  assert(g && g.status === 'unresolved' && mj && /1 行目「var LIMIT = 1000000;」: var LIMIT/.test(mj.message) && (v.final.blockers || []).some(b => b.text === `機械検査で登録を止める問題: ${mj.message}`) && v.final.approvable === false, `§54 直せない var は生成工程の機械検査の文（行・文）のまま止める理由に出す: ${mj && mj.message}`);
+  assert(g && g.status === 'unresolved' && mj && /1 行目「var LIMIT = 1000000;」: var LIMIT/.test(mj.message) && (v.final.blockers || []).some(b => b.text === `機械検査で登録を止める問題: ${mj.message}`) && FS.readyOf(v) === false, `§54 直せない var は生成工程の機械検査の文（行・文）のまま止める理由に出す: ${mj && mj.message}`);
   //   簡素化（2026-10-17）: 会話のカードから JavaScript だけを登録する経路（open-js-register）は削除した。登録は［動作テスト環境へ反映］1 回の反映の中だけ
   assert(!(await approveScreen(m)) && !m.panel.jsExecState().prepared, `§54 承認できず、登録の準備もしない（登録は［動作テスト環境へ反映］の中だけ）: ${JSON.stringify(m.panel.jsExecState().prepared && m.panel.jsExecState().prepared.blockers)}`);
 }

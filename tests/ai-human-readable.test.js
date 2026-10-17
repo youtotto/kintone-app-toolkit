@@ -20,6 +20,8 @@
 'use strict';
 process.on('unhandledRejection', (e) => { if (/kintone is not defined/.test(String(e && e.message))) return; console.error(e); process.exit(1); });
 const { loadToolkit, makeAssert } = require('./helpers/load-toolkit.js');
+//   簡素化（2026-10-17）: 反映できるかは、最新の版なら会話の今の判定、前の版なら最終案の記録で確かめる（tests/helpers/final-state.js）
+const FS = require('./helpers/final-state.js');
 const { gwCandidateHash } = require('./helpers/gw-hash.js');
 const T = loadToolkit();
 const { KTAiConversation, KTAiChatUi, KTAiClient } = T;
@@ -129,7 +131,7 @@ await section(async () => {
   assert(count(h1, /kintone にはまだ何も反映していません/g) === 1 && !INTERNAL_IN_CHAT.test(stripC(h1)), 'H2-5: 生成中も案内行は 1 回・内部の語は無い');
   gg.C1.open(); await p; await ticks(6);
   const v = x.c.activePlan();
-  assert(x.c.progress() === null && v && v.final && v.final.approvable === true && x.finals().length === 1, 'H2-6: 完了したら進みのカードは最終案のカードに置き換わる（流れは変えない）');
+  assert(x.c.progress() === null && v && v.final && FS.readyOf(v) === true && x.finals().length === 1, 'H2-6: 完了したら進みのカードは最終案のカードに置き換わる（流れは変えない）');
 });
 await section(async () => {
   // JavaScript の無い計画: 計画ができた時点で見出しを「この案で設定の最終案を作っています」に（最終案を作る間の見出し。buildFinal が services.fieldLabels を呼ぶ時点で確かめる）
@@ -153,7 +155,7 @@ await section(async () => {
   const x = makeConvC({ planImpl: planJs3, generate: gen });
   await sendUntilAdopt(x);
   const v = x.c.activePlan();
-  assert(v.generated.C1.status === 'verified' && v.generated.C2.status === 'verified' && v.generated.C3.status === 'failed' && v.generated.C3.failure.stop === 'timeout' && v.final.incomplete && v.final.incomplete.stoppedAt === 'C3' && v.final.approvable === false, `前提: C1・C2 は検証済み・C3 で止めた: ${JSON.stringify(v.final.incomplete)}`);
+  assert(v.generated.C1.status === 'verified' && v.generated.C2.status === 'verified' && v.generated.C3.status === 'failed' && v.generated.C3.failure.stop === 'timeout' && v.final.incomplete && v.final.incomplete.stoppedAt === 'C3' && FS.readyOf(v) === false, `前提: C1・C2 は検証済み・C3 で止めた: ${JSON.stringify(v.final.incomplete)}`);
   const h = finalHtml(x), vis = visible(h), all = stripC(h);
   const b = restButtonOf(h);
   assert(/^\s*AI\s*作成途中\s/.test(vis) && /PCの編集制御・モバイルの編集制御はできました。モバイルの入力チェックの作成中に、AIの応答が時間切れになりました。/.test(vis) && /完成した分は残っています。残り 1 件から再開できます。/.test(vis) && b && !b.disabled && /data-text="コードを作って"/.test(b.html), `H3-1: 見出し「作成途中」・できたもの・止めたもの・理由・残り 1 件・［残りの JavaScript を作る］: ${vis.replace(/\s+/g, ' ').slice(0, 300)}`);
@@ -169,7 +171,7 @@ await section(async () => {
   const r2 = await pressRest(x);
   const v2 = x.c.activePlan();
   const sum2 = KTAiChatUi.changeSummaryHtml(v2, {});
-  assert(r2.ok && x.calls.plan.length === 1 && gen.count('C3') === 2 && gen.count('C1') === 1 && v2.generated.C3.status === 'verified' && v2.final.approvable === true && !v2.final.incomplete && /モバイルの入力チェック：できた（検証済み）/.test(sum2), `H3-7: ［残りの JavaScript を作る］→ 計画の AI 0 回で C3 だけ作り、承認できる最終案（右の状態も「できた」に）: ${JSON.stringify({ plans: x.calls.plan.length, seen: gen.seen.map(s => s.cid) })}`);
+  assert(r2.ok && x.calls.plan.length === 1 && gen.count('C3') === 2 && gen.count('C1') === 1 && v2.generated.C3.status === 'verified' && FS.readyOf(v2) === true && !v2.final.incomplete && /モバイルの入力チェック：できた（検証済み）/.test(sum2), `H3-7: ［残りの JavaScript を作る］→ 計画の AI 0 回で C3 だけ作り、承認できる最終案（右の状態も「できた」に）: ${JSON.stringify({ plans: x.calls.plan.length, seen: gen.seen.map(s => s.cid) })}`);
   const old = KTAiChatUi.messageHtml(x.finals()[0], { plans: new Map(x.c.planHistory().map(vv => [`${vv.planId}:${vv.version}`, vv])), activePlan: x.c.activePlan(), answers: new Map() });
   assert(/kt-ai-final-card is-old/.test(old) && /前の作成途中の案 — このあと直した案があります/.test(old) && !/data-act="choice"/.test(old), 'H3-8: 前の作成途中のカードは 1 行に畳み、ボタンは出さない');
 });
@@ -243,7 +245,7 @@ await section(async () => {
   const x = makeConvC({ planImpl: planJs3, generate: gen });
   await sendUntilAdopt(x);
   const v = x.c.activePlan(), fin = v.final;
-  assert(fin && !fin.incomplete && ['C1', 'C2', 'C3'].every(c => v.generated[c].status === 'verified') && fin.approvable === true && fin.adoptedBehaviors.includes('申請時に課長と部長の承認者をユーザー選択で指定する') && fin.constraints.length === 1 && /明細（テーブル）の行の追加・削除は防ぎません/.test(fin.constraints[0].text) && JSON.stringify(fin.supplements) === JSON.stringify(['編集不可の間は入力欄を灰色にする']) && fin.blockers.length === 0, `前提: 3 本とも検証済みで承認できる。材料（採用した動作・制約 1 件・補足 1 件・止める理由なし）: ${JSON.stringify({ approvable: fin && fin.approvable, adopted: fin && fin.adoptedBehaviors, constraints: fin && fin.constraints, supplements: fin && fin.supplements, blockers: fin && fin.blockers })}`);
+  assert(fin && !fin.incomplete && ['C1', 'C2', 'C3'].every(c => v.generated[c].status === 'verified') && FS.readyOf(fin) === true && fin.adoptedBehaviors.includes('申請時に課長と部長の承認者をユーザー選択で指定する') && fin.constraints.length === 1 && /明細（テーブル）の行の追加・削除は防ぎません/.test(fin.constraints[0].text) && JSON.stringify(fin.supplements) === JSON.stringify(['編集不可の間は入力欄を灰色にする']) && fin.blockers.length === 0, `前提: 3 本とも検証済みで承認できる。材料（採用した動作・制約 1 件・補足 1 件・止める理由なし）: ${JSON.stringify({ approvable: fin && FS.readyOf(fin), adopted: fin && fin.adoptedBehaviors, constraints: fin && fin.constraints, supplements: fin && fin.supplements, blockers: fin && fin.blockers })}`);
   // 準備の前（finalPre が無い）・準備中・準備が整った、の 3 つの状態
   const h0 = finalHtml(x), hRun = finalWithPre(x, 'running'), hReady = finalWithPre(x, 'ready');
   assert(statusOf(h0) === '反映の前の準備を待っています…' && applyBtn(h0) && applyBtn(h0).disabled && !/この内容で反映できます/.test(h0), `H4-1: 準備の前は「反映の前の準備を待っています…」で押せない（「反映できます」は言わない）: ${statusOf(h0)}`);
@@ -270,7 +272,7 @@ await section(async () => {
   await sendUntilAdopt(x);
   const v = x.c.activePlan(), fin = v.final;
   const h = finalHtml(x), vis = stripC(outsideDetails(h));
-  assert(fin.approvable === false && /先に決めたいことが 1 件/.test(fin.blockingReason) && statusOf(h) === fin.blockingReason && applyBtn(h).disabled && !/この内容で反映できます/.test(h), `H4-12: 先に決めたいことが残ると、1 文は止めている理由でボタンは押せない: ${statusOf(h)}`);
+  assert(FS.readyOf(fin) === false && /先に決めたいことが 1 件/.test(FS.reasonOf(fin)) && statusOf(h) === FS.reasonOf(fin) && applyBtn(h).disabled && !/この内容で反映できます/.test(h), `H4-12: 先に決めたいことが残ると、1 文は止めている理由でボタンは押せない: ${statusOf(h)}`);
   assert(/残る判断（1 件）/.test(vis) && (vis.match(/承認待ちの間、申請者本人も編集できなくしますか/g) || []).length === 1 && /後で決めてよいことが 1 件あります/.test(vis) && !/灰色の表示色は既定のままでよいですか/.test(vis) && /<textarea class="kt-ai-qa-input"/.test(h) && /data-act="answer-questions"/.test(h), `H4-13: 残る判断は先に決めたいことだけ（1 回）。後で決めてよいことは件数だけ。回答欄は今のまま: ${(vis.match(/残る判断[\s\S]{0,200}/) || [''])[0]}`);
   keep('H4-q', h, rightOf(x));
 });
@@ -279,7 +281,7 @@ await section(async () => {
   const x = makeConvC({ planImpl: (args) => { const r = planJs1(args); r.plan.provisionals = []; r.turn.reply = ''; return r; }, generate: stagedGenerate({ C1: ['good'] }) });
   await sendUntilAdopt(x);
   const h = finalHtml(x), vis = stripC(outsideDetails(h));
-  assert(x.c.activePlan().final.approvable === true && !/仮案からの補足/.test(h) && !/この案の制約/.test(h) && /この案で実現すること/.test(vis) && /動作テスト環境へ反映/.test(vis), `H4-14: 補足・制約が無ければ見出しごと出さない: ${vis.replace(/\s+/g, ' ').slice(0, 240)}`);
+  assert(FS.readyOf(x.c.activePlan()) === true && !/仮案からの補足/.test(h) && !/この案の制約/.test(h) && /この案で実現すること/.test(vis) && /動作テスト環境へ反映/.test(vis), `H4-14: 補足・制約が無ければ見出しごと出さない: ${vis.replace(/\s+/g, ' ').slice(0, 240)}`);
   keep('H4-nosup', h, rightOf(x));
 });
 await section(async () => {
@@ -388,7 +390,7 @@ await section(async () => {
   const v = x.c.activePlan(), fin = v.final, e = v.generated.C1;
   const h = finalHtml(x), vis = stripC(outsideDetails(h));
   const ap = x.c.approveFinal(K.approveArgs(v));
-  assert(e.status === 'unresolved' && fin.approvable === false && ap.ok === false && ap.reason === 'NOT_APPROVABLE' && applyBtn(h).disabled && statusOf(h) === fin.blockingReason && !/この内容で反映できます/.test(h), `H5-1: 模擬テストで不合格の最終案は承認できないまま（判定は変えない）。1 文は止めている理由: ${JSON.stringify({ status: e.status, ok: ap.ok, line: statusOf(h) })}`);
+  assert(e.status === 'unresolved' && FS.readyOf(fin) === false && ap.ok === false && ap.reason === 'NOT_APPROVABLE' && applyBtn(h).disabled && statusOf(h) === FS.reasonOf(fin) && !/この内容で反映できます/.test(h), `H5-1: 模擬テストで不合格の最終案は承認できないまま（判定は変えない）。1 文は止めている理由: ${JSON.stringify({ status: e.status, ok: ap.ok, line: statusOf(h) })}`);
   const sec5 = (vis.match(/確認できないこと／反映を止めている理由[\s\S]*?(?=動作テスト環境へ反映)/) || [''])[0];
   //   レビュー 4（2026-10-14）: 行の先頭はファイル名ではなく計画の手順の title（「PCの編集制御」）
   assert(fin.blockers.length >= 1 && fin.blockers[0].kind === 'unresolved' && /「PCの編集制御」: /.test(sec5) && !/lock\.js」: /.test(sec5) && sec5.includes(e.verdict.reason) && /次の方針: /.test(sec5) && sec5.includes(e.verdict.next), `H5-2: 理由（verdict.reason）と次の方針（next）が「確認できないこと／反映を止めている理由」に残る（先頭は手順の名前）: ${sec5.replace(/\s+/g, ' ').slice(0, 300)}`);
@@ -416,7 +418,7 @@ await section(async () => {
   await x.c.send(U_PORT); await x.c.send('採用します');
   const v = x.c.activePlan(), e = v && v.generated && v.generated.C3, fin = v && v.final;
   const h = finalHtml(x), vis = stripC(outsideDetails(h));
-  assert(e && e.status === 'not-ready' && e.verdict.kind === 'effects-unknown' && gen.calls.length === 0 && fin.approvable === false && applyBtn(h).disabled, `前提: 移植元の本文を渡せない → 生成を呼ばず準備未完了（判定は変えない）: ${JSON.stringify(e && e.verdict && [e.status, e.verdict.kind])}`);
+  assert(e && e.status === 'not-ready' && e.verdict.kind === 'effects-unknown' && gen.calls.length === 0 && FS.readyOf(fin) === false && applyBtn(h).disabled, `前提: 移植元の本文を渡せない → 生成を呼ばず準備未完了（判定は変えない）: ${JSON.stringify(e && e.verdict && [e.status, e.verdict.kind])}`);
   const sec5 = (vis.match(/確認できないこと／反映を止めている理由[\s\S]*?(?=動作テスト環境へ反映)/) || [''])[0];
   //   レビュー 3（2026-10-14）: 「…移植元の本文を取れない（読めない）ので、同じ条件かは確かめていません」の形（不可能と読める「確かめられません」は使わない。判定 not-ready・approvable false は不変）
   assert(/移植元の本文を取れない/.test(sec5) && /同じ条件かは確かめていません/.test(sec5) && /次の方針: /.test(sec5) && !/確かめられません|不可能|できません。$/.test(sec5.replace(/\s+/g, '')) && /移植元の本文を取れない（読めない）ので確かめていません/.test(statusOf(h) || '') && !/確かめられない/.test(statusOf(h) || ''), `H5-4: 条件が分からないときは「取れないので、同じ条件かは確かめていません」と理由・次の方針（不可能と断定しない）: ${sec5.replace(/\s+/g, ' ').slice(0, 300)}`);
@@ -433,7 +435,7 @@ await section(async () => {
   const v = x.c.activePlan(), fin = v.final, e = v.generated.C1;
   const row = (fin.blockers || []).find(b => b.kind === 'not-run');
   const ONCE = /(?:作った JavaScript |生成したコード)の誤りとは判定してい/g;
-  assert(e.status === 'not-run' && fin.approvable === false && count(`${e.verdict.reason}${e.verdict.next}`, ONCE) >= 2 && row && count(`${row.text}${row.next}`, ONCE) === 1 && /模擬テストを実行できませんでした/.test(row.text) && /修復は依頼していません/.test(row.next), `H5-6: 反映を止める理由の行では「誤りとは判定していません」は 1 回（判定の文はそのまま）: ${JSON.stringify(row && [row.text, row.next])}`);
+  assert(e.status === 'not-run' && FS.readyOf(fin) === false && count(`${e.verdict.reason}${e.verdict.next}`, ONCE) >= 2 && row && count(`${row.text}${row.next}`, ONCE) === 1 && /模擬テストを実行できませんでした/.test(row.text) && /修復は依頼していません/.test(row.next), `H5-6: 反映を止める理由の行では「誤りとは判定していません」は 1 回（判定の文はそのまま）: ${JSON.stringify(row && [row.text, row.next])}`);
   const vis = stripC(outsideDetails(finalHtml(x)));
   const sec = (vis.match(/確認できないこと／反映を止めている理由[\s\S]*?(?=動作テスト環境へ反映)/) || [''])[0];
   const rightSec = (stripC(rightOf(x)).match(/確認できないこと[\s\S]*?(?=確かめたこと|$)/) || [''])[0];
@@ -457,7 +459,7 @@ await section(async () => {
   const y = makeConvC({ planImpl: planJs1, generate: makeGenerate({ sequence: ['good'], env: 'no-event', caseReason: 'no-event' }) });
   await sendUntilAdopt(y);
   const finY = y.c.activePlan().final, l3 = KTAiChatUi.verificationLineOf(finY);
-  assert(finY.approvable === false && finY.verification.behavior.cases.every(c => c.verdict === 'not-run' && c.category === 'scope') && /模擬テストで確かめた代表条件はありません（対象外の条件 2 件は除く）/.test(l3) && !/実行できていません/.test(l3), `H4-18c: 全部が対象外の not-run のとき: ${JSON.stringify({ l3, cats: finY.verification.behavior.cases.map(c => c.category) })}`);
+  assert(FS.readyOf(finY) === false && finY.verification.behavior.cases.every(c => c.verdict === 'not-run' && c.category === 'scope') && /模擬テストで確かめた代表条件はありません（対象外の条件 2 件は除く）/.test(l3) && !/実行できていません/.test(l3), `H4-18c: 全部が対象外の not-run のとき: ${JSON.stringify({ l3, cats: finY.verification.behavior.cases.map(c => c.category) })}`);
 });
 await section(async () => {
   // 統合テストの指摘 13（2026-10-14）: 計画の AI の影響の文は右の「影響範囲」に 1 回（「反映する内容」は設定の手順の件数と JavaScript の登録先の行だけ。二重に並べない）
@@ -490,7 +492,7 @@ await section(async () => {
   await sendUntilAdopt(x);
   const v = x.c.activePlan(), fin = v.final, e = v.generated.C1;
   const rt = stripC(rightOf(x)), vis = stripC(outsideDetails(finalHtml(x)));
-  assert(e.effectsCapable === false && e.status === 'unsupported' && fin.approvable === false && fin.verification.effects.every(r => r.structure === 'unsupported') && /接続先が確認に非対応/.test(rt) && !/まだ作っていません/.test(rt), `H6-4: 接続先が本当に非対応（effectsCapable false）のときだけ「接続先が確認に非対応」: ${JSON.stringify({ cap: e.effectsCapable, st: e.status, eff: fin.verification.effects.map(r => r.structure) })}`);
+  assert(e.effectsCapable === false && e.status === 'unsupported' && FS.readyOf(fin) === false && fin.verification.effects.every(r => r.structure === 'unsupported') && /接続先が確認に非対応/.test(rt) && !/まだ作っていません/.test(rt), `H6-4: 接続先が本当に非対応（effectsCapable false）のときだけ「接続先が確認に非対応」: ${JSON.stringify({ cap: e.effectsCapable, st: e.status, eff: fin.verification.effects.map(r => r.structure) })}`);
   assert(/確認できないこと／反映を止めている理由/.test(vis) && /接続先（生成工程）が必須の動作の確認に対応していない/.test(vis), 'H6-5: 左には止めている理由として接続先の非対応が出る');
   //   レビュー 2（2026-10-14）: 右の JavaScript の状態は status ごとの語（unsupported → この接続先では確かめる検査ができません）
   assert(/JavaScript：この接続先では確かめる検査ができません/.test(rt) && !/確認できないことがあります/.test(rt), `H6-6: 右の JavaScript の状態は「この接続先では確かめる検査ができません」: ${(rt.match(/JavaScript の状態[\s\S]{0,80}/) || [''])[0]}`);
@@ -504,7 +506,7 @@ await section(async () => {
   const pre = await K.prepareOnScreen(m);
   const chat = m.chat(), sum = m.$('kt-ai-change-summary').innerHTML;
   const fc = chat.slice(chat.indexOf('class="kt-ai-card kt-ai-final-card"')), fcText = stripC(outsideDetails(fc));
-  assert(v && v.final && v.final.customizations.length === 0 && v.final.approvable === true && pre.ready === true, `前提: 設定の変更だけの計画（一覧の追加）で最終案ができ、承認の欄の準備が整った: ${JSON.stringify({ ready: pre.ready, st: pre.pre && pre.pre.status })}`);
+  assert(v && v.final && v.final.customizations.length === 0 && FS.readyOf(v) === true && pre.ready === true, `前提: 設定の変更だけの計画（一覧の追加）で最終案ができ、承認の欄の準備が整った: ${JSON.stringify({ ready: pre.ready, st: pre.pre && pre.pre.status })}`);
   assert(/前の仮案 — このあと直して採用しました/.test(chat) && /仮案 — 採用済み/.test(chat) && !/最終案を作りました/.test(chat) && /課長と部長を申請ごとに選んで承認する流れにできます/.test(chat) && !/実現する動作|こちらの提案で進める点|任意の提案|対応できない範囲|data-act="draft-answer"/.test(chat), 'H7-1: 仮案のカード（採用済みは 1 行に畳む）は返答と選択だけ（同じ構成）');
   assert(/最終案ができました。/.test(fcText) && /この内容で反映できます。/.test(fcText) && pre.button && !pre.button.disabled && pre.button.note === APPLY_NOTE_SETTINGS && /この案で実現すること/.test(fcText), `H7-2: 最終案は「この内容で反映できます。」と反映先の文（設定だけなので「設定の手順を反映」・運用環境は変更しない・反映後の確認先）: ${fcText.replace(/\s+/g, ' ').slice(0, 300)}`);
   assert(!/JavaScript の状態|この案の制約|JavaScript を作/.test(fc + sum) && !/仮案からの補足/.test(fc) && !LEFT_MOVED.test(fcText), `H7-3: JavaScript が無い計画に JavaScript の状態・制約の節は無く、補足も無ければ出さない: ${(fcText.match(LEFT_MOVED) || [''])[0]}`);
@@ -577,7 +579,7 @@ await section(async () => {
   const unsup = fin.cannot.find(c => c.kind === 'req-unsupported' && c.requirementId === 'R2');
   assert(unsup && unsup.text === `計画では対応できないとされた要件: ${Q_T[1]}（理由: CSV の読み込みでは JavaScript が動かないため）` && conSec.includes(unsup.text), `H9-4: 何も実現していない要件（R2）は今の文で残る: ${JSON.stringify(unsup)}`);
   const ap = x.c.approveFinal(K.approveArgs(v));
-  assert(fin.approvable === true && fin.blockers.length === 0 && ap.ok === true && !/確認できないこと／反映を止めている理由/.test(vis), `H9-5: 承認の可否は変わらない（判定は表示で変えない）: ${JSON.stringify({ approvable: fin.approvable, blockers: fin.blockers, ap })}`);
+  assert(FS.readyOf(fin) === true && fin.blockers.length === 0 && ap.ok === true && !/確認できないこと／反映を止めている理由/.test(vis), `H9-5: 承認の可否は変わらない（判定は表示で変えない）: ${JSON.stringify({ approvable: FS.readyOf(fin), blockers: fin.blockers, ap })}`);
   keep('H9', h, right);
 });
 
@@ -598,7 +600,7 @@ await section(async () => {
   const unsupR1 = fin.cannot.find(c => c.kind === 'req-unsupported' && c.requirementId === 'R1');
   assert(unsupR1 && unsupR1.text === `計画では対応できないとされた要件: ${Q_T[0]}（理由: 行の追加・削除は止められないため）` && fin.cannot.some(c => c.kind === 'req-unsupported' && c.requirementId === 'R2'), `H9b-2: 文を作れなかった PARTIAL の要件（R1）は「計画では対応できないとされた要件」に今の文で残る（R2 も今のまま）: ${JSON.stringify(fin.cannot.filter(c => c.kind === 'req-unsupported').map(c => [c.requirementId, c.text]))}`);
   assert(fin.constraints.some(c => c.kind === 'coverage' && c.text === ROWS && c.requirementId === 'R1') && !vis.includes(H9K.REQ_TEXT_FULL), `H9b-3: 制約の行（テーブルの名前の「残る範囲」）は §H9 と同じ: ${JSON.stringify(fin.constraints.map(c => [c.kind, c.requirementId, c.text]))}`);
-  assert(e.status === 'unsupported' && fin.approvable === false && fin.blockers.some(b => b.kind === 'unsupported' && /接続先/.test(b.text)) && x.c.approveFinal(K.approveArgs(v)).ok === false, `H9b-4: 承認の可否は接続先の非対応（必須の動作の結果が無い）で決まる（表示では変えない）: ${JSON.stringify({ st: e.status, approvable: fin.approvable, blockers: fin.blockers.map(b => [b.kind, b.text]) })}`);
+  assert(e.status === 'unsupported' && FS.readyOf(fin) === false && fin.blockers.some(b => b.kind === 'unsupported' && /接続先/.test(b.text)) && x.c.approveFinal(K.approveArgs(v)).ok === false, `H9b-4: 承認の可否は接続先の非対応（必須の動作の結果が無い）で決まる（表示では変えない）: ${JSON.stringify({ st: e.status, approvable: FS.readyOf(fin), blockers: fin.blockers.map(b => [b.kind, b.text]) })}`);
   keep('H9b', h, right);
 });
 
@@ -632,7 +634,7 @@ await section(async () => {
   const r = await x.c.send('通知は不要、期限は5営業日、ほかは採用');
   const v = x.c.activePlan(), fin = v && v.final, tm = fin && fin.timing;
   const detail = stripC((finalHtml(x).match(/<details class="kt-ai-tech"[^>]*><summary>詳細（時間と AI の利用）<\/summary>[\s\S]*?<\/details>/) || [''])[0]);
-  assert(r.ok && r.draft && r.draft.intent === 'adopt' && fin && fin.approvable === true && tm.proposeMs === 7000 && tm.planMs === 30000 && tm.generateMs === 20000 && tm.gatewayMs && tm.gatewayMs.plan === 2000 && tm.gatewayMs.generate === 15000 && tm.gatewayMs.planAuto === null && tm.calls.find(c => c.kind === 'plan').gatewayMs === 2000 && tm.calls.find(c => c.kind === 'generate').gatewayMs === 15000 && tm.totalMs >= tm.proposeMs + tm.planMs + tm.generateMs, `H11-1: fin.timing に仮案の返答（proposeMs）と部ごとの Gateway の処理時間（gatewayMs）が入り、総経過は壁時計（部の和以上）: ${JSON.stringify(tm)}`);
+  assert(r.ok && r.draft && r.draft.intent === 'adopt' && fin && FS.readyOf(fin) === true && tm.proposeMs === 7000 && tm.planMs === 30000 && tm.generateMs === 20000 && tm.gatewayMs && tm.gatewayMs.plan === 2000 && tm.gatewayMs.generate === 15000 && tm.gatewayMs.planAuto === null && tm.calls.find(c => c.kind === 'plan').gatewayMs === 2000 && tm.calls.find(c => c.kind === 'generate').gatewayMs === 15000 && tm.totalMs >= tm.proposeMs + tm.planMs + tm.generateMs, `H11-1: fin.timing に仮案の返答（proposeMs）と部ごとの Gateway の処理時間（gatewayMs）が入り、総経過は壁時計（部の和以上）: ${JSON.stringify(tm)}`);
   assert(/最終案まで 57 秒（仮案の返答 7 秒、計画 30 秒（Gateway の処理 2 秒・画面への反映までの遅れ 28 秒）、生成・検証 20 秒）/.test(detail) && !/生成・検証 20 秒（/.test(detail) && !/秒・計画|秒）・生成/.test(detail), `H11-2: 差が 10 秒以上の計画だけ分けて書き、差が小さい生成は今のまま。仮案の返答も部に出す（総経過と部が合う）。括弧の分割がある部があれば外側の区切りは「、」（2026-10-15 T6）: ${detail.replace(/\s+/g, ' ').slice(0, 220)}`);
   //   Gateway の処理時間が分からない（古い Gateway: ai が無い・生成工程の timing が無い）ときは今のまま（分けない）。仮案の返答の無い送信では出さない
   const y = makeConvC({ planImpl: planJs1, generate: stagedGenerate({ C1: ['good'] }) });

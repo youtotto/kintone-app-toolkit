@@ -18,6 +18,8 @@
 // 実行方法: node tests/ai-stage-a.test.js
 'use strict';
 const { loadToolkit, makeAssert } = require('./helpers/load-toolkit.js');
+//   簡素化（2026-10-17）: 反映できるかは、最新の版なら会話の今の判定、前の版なら最終案の記録で確かめる（tests/helpers/final-state.js）
+const FS = require('./helpers/final-state.js');
 const T = loadToolkit();
 const { KTDeps, KTScan, KTContext, KTCodeReview, KTJsExecutor, KTAiConversation, KTAiWorkspaceViewModel, KTAiChatUi } = T;
 const { assert, state } = makeAssert();
@@ -269,7 +271,7 @@ await section(async () => {
   await x.c.send('コードを作って'); await ticks();
   const v2 = x.c.activePlan(), e2 = v2.generated.C1;
   const cannotText = (v2.final && v2.final.cannot ? v2.final.cannot : []).map(c => c.text).join('\n');
-  assert(seen.length === 2 && seen[1] && seen[1].attempts.count === 1 && e2 && e2.failure && e2.failure.reason === 'REPEAT_SAME_INPUT' && /同じ入力・同じ指摘です/.test(cannotText) && /存在しないフィールドを参照しています/.test(cannotText) && /計画に新設するフィールド・ステータスがありません/.test(cannotText) && v2.final.approvable === false && !x.c.messages().slice(before).some(m => m.type === KTAiConversation.MSG.ERROR), `2 回目（同じ入力・同じ指摘）: AI を呼ばず「同じ入力・同じ指摘です」と何を変えれば変わるか（2 つ以上）を最終案のカードに出す。エラーカード（再試行）は出さない: ${cannotText.slice(0, 160)}`);
+  assert(seen.length === 2 && seen[1] && seen[1].attempts.count === 1 && e2 && e2.failure && e2.failure.reason === 'REPEAT_SAME_INPUT' && /同じ入力・同じ指摘です/.test(cannotText) && /存在しないフィールドを参照しています/.test(cannotText) && /計画に新設するフィールド・ステータスがありません/.test(cannotText) && FS.readyOf(v2) === false && !x.c.messages().slice(before).some(m => m.type === KTAiConversation.MSG.ERROR), `2 回目（同じ入力・同じ指摘）: AI を呼ばず「同じ入力・同じ指摘です」と何を変えれば変わるか（2 つ以上）を最終案のカードに出す。エラーカード（再試行）は出さない: ${cannotText.slice(0, 160)}`);
   assert(e2.attempts && e2.attempts.count === 1, `2 回目（同じ入力・同じ指摘）: AI を呼んでいないので生成の回数は増えない: ${JSON.stringify(e2.attempts && { count: e2.attempts.count, history: e2.attempts.history.length })}`);
 });
 

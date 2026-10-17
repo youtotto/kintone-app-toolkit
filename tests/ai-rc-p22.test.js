@@ -15,6 +15,8 @@
 // 実行方法: node tests/ai-rc-p22.test.js（KT_SRC=<別ビルド> で修正前の版に対して走らせると RED になる）
 'use strict';
 const { loadToolkit, makeAssert } = require('./helpers/load-toolkit.js');
+//   簡素化（2026-10-17）: 反映できるかは、最新の版なら会話の今の判定、前の版なら最終案の記録で確かめる（tests/helpers/final-state.js）
+const FS = require('./helpers/final-state.js');
 const { withDevBase } = require('./helpers/dev-base-fake.js');
 const T2 = loadToolkit();
 const { KTDeps, KTScan, KTCodeReview, KTAiClient, KTAiConversation, KTAiChatUi } = T2;
@@ -230,7 +232,7 @@ const tryGenerate = async (transport) => { try { return { ok: true, r: await aiC
   const res = await x.c.send('C1 のコードを作り直して');
   const v2 = x.c.activePlan();
   const e2 = v2 && v2.generated ? v2.generated.C1 : null;
-  assert(res && res.intent === 'GENERATE_CODE' && v2 !== v && e2 && e2.status === 'failed' && e2.failure && e2.failure.reason === 'GENERATION_DECLINED' && v2.final && v2.final.approvable === false, `拒否 → 最終案の JavaScript は「生成できなかった」（種類は AI が生成しなかった）: ${JSON.stringify(e2 && { status: e2.status, failure: e2.failure })}`);
+  assert(res && res.intent === 'GENERATE_CODE' && v2 !== v && e2 && e2.status === 'failed' && e2.failure && e2.failure.reason === 'GENERATION_DECLINED' && v2.final && FS.readyOf(v2) === false, `拒否 → 最終案の JavaScript は「生成できなかった」（種類は AI が生成しなかった）: ${JSON.stringify(e2 && { status: e2.status, failure: e2.failure })}`);
   const cannot = (v2 && v2.final ? v2.final.cannot : []).filter(c => c.kind === 'failed');
   assert(cannot.length === 1 && cannot[0].text.includes(KTAiClient.errorText('GENERATION_DECLINED').slice(0, 40)) && /通信や契約の問題ではありません/.test(cannot[0].text) && /もう一度最終案を作る/.test(cannot[0].next), `拒否は通信・契約の障害と区別して書き、作り直せることを示す: ${JSON.stringify(cannot)}`);
   assert(v.generated.C1 === first && e2.generated === first.generated && JSON.stringify(v2.plan) === planBefore, '前に生成したコード・計画の状態は変わらない（前の版の結果は書き換えず、新しい版にも前のコードを持つ）');
@@ -241,7 +243,7 @@ const tryGenerate = async (transport) => { try { return { ok: true, r: await aiC
   assert(/items が許可されたフィールドに無いため実装できません/.test(html),`最終案のカードに AI の説明（Gateway が返した理由）を出す: ${JSON.stringify(e2.failure)}`);
   const again = await x.c.send('C1 のコードを作って');
   const v3 = x.c.activePlan();
-  assert(again && again.ok === true && v3 !== v2 && v3.generated.C1 && v3.generated.C1.status === 'verified' && v3.final.approvable === true, '再試行（もう一度作る）で生成できる');
+  assert(again && again.ok === true && v3 !== v2 && v3.generated.C1 && v3.generated.C1.status === 'verified' && FS.readyOf(v3) === true, '再試行（もう一度作る）で生成できる');
 }
 
 // =========================================================

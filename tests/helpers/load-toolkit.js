@@ -47,6 +47,8 @@ function loadToolkit({ document: docOverride = null, localStorage: lsOverride = 
   vm.createContext(sandbox);
   vm.runInContext(code, sandbox, { filename: 'kintoneAppToolkit.user.js' });
   sandbox.__TEST__.__sandbox = sandbox;   // Phase 18: Customize タブのテストで window.loadMonaco / kintone / fetch を差し込む
+  //   簡素化（2026-10-17）: 作った会話を覚え、テストが版から今の判定（反映できるか）を引けるようにする（tests/helpers/final-state.js）
+  require('./final-state.js').trackConversations(sandbox.__TEST__.KTAiConversation);
   return sandbox.__TEST__;
 }
 

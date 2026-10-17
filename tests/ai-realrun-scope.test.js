@@ -39,6 +39,8 @@
 'use strict';
 process.on('unhandledRejection', (e) => { if (/kintone is not defined/.test(String(e && e.message))) return; console.error(e); process.exit(1); });
 const { loadToolkit, makeAssert } = require('./helpers/load-toolkit.js');
+//   簡素化（2026-10-17）: 反映できるかは、最新の版なら会話の今の判定、前の版なら最終案の記録で確かめる（tests/helpers/final-state.js）
+const FS = require('./helpers/final-state.js');
 const T = loadToolkit();
 const { KTAiConversation, KTAiChatUi } = T;
 const { assert, state } = makeAssert();
@@ -409,7 +411,7 @@ await section(async () => {
   const g1 = gen.seen.filter(g => g.cid === 'C1').slice(-1)[0];
   const r7 = scopeOf(x).requirements.find(q => q.id === 'R7') || {};
   assert(v.generated && v.generated.C1 && v.generated.C1.status !== 'not-ready' && !(v.generated.C1.verdict && v.generated.C1.verdict.kind === 'effects-unknown') && g1 && effKeys(g1.requiredEffects).includes('items:block-save') && !effKeys(g1.requiredEffects).includes('amount:block-save') && !g1.requiredEffects.some(e => (e.requirementIds || []).includes('R7')), `S3-6: 対象が決まらない計画の AI の保存禁止（R7「金額と明細」）は、範囲内でも必須の効果の材料にしない（target-unresolved で準備未完了にしない）。明細の保存禁止（R4）は残る: ${JSON.stringify({ st: v.generated && v.generated.C1 && v.generated.C1.status, req: g1 && effKeys(g1.requiredEffects), verdict: v.generated && v.generated.C1 && v.generated.C1.verdict && v.generated.C1.verdict.reason })}`);
-  assert(r7.inScope === true && strippedOf(v).some(s => s.field === 'amount' && s.effect === 'block-save') && !strippedOf(v).some(s => s.field === 'items') && v.final && !(v.final.readiness && (v.final.readiness.reasons || []).some(x => /特定できません/.test(String(x.text || '')))) && x.calls.ask.length === 0 && planCalls.length === 1, `S3-7: 金額に広げた保存禁止は外して詳細に出す。必須の動作を特定できない理由は出ない・質問は増えない・自動の見直しは 1 回だけ: ${JSON.stringify({ stripped: strippedOf(v).map(s => `${s.customizationId}:${s.field}:${s.effect}`), reasons: v.final && v.final.readiness && v.final.readiness.reasons, plans: planCalls.length })}`);
+  assert(r7.inScope === true && strippedOf(v).some(s => s.field === 'amount' && s.effect === 'block-save') && !strippedOf(v).some(s => s.field === 'items') && v.final && !(FS.readinessOf(v) && (FS.readinessOf(v).reasons || []).some(x => /特定できません/.test(String(x.text || '')))) && x.calls.ask.length === 0 && planCalls.length === 1, `S3-7: 金額に広げた保存禁止は外して詳細に出す。必須の動作を特定できない理由は出ない・質問は増えない・自動の見直しは 1 回だけ: ${JSON.stringify({ stripped: strippedOf(v).map(s => `${s.customizationId}:${s.field}:${s.effect}`), reasons: v.final && FS.readinessOf(v) && FS.readinessOf(v).reasons, plans: planCalls.length })}`);
 });
 
 // =========================================================
@@ -1071,7 +1073,7 @@ await section(async () => {
   const confs = ((pre.items && pre.items.confirmations) || []).map(x => (typeof x === 'string' ? x : x.text));
   const chat = stripC(m.chat().replace(/<details[\s\S]*?<\/details>/g, ''));
   const SENT = 'おまかせにした「案件名の警告」は、計画の案と結び付けを確かめられないため、まだ入れていません。計画の案: 「案件名」に警告を出す。入れるものを伝えてください';
-  assert(!!v && candidatesOf(v).length === 1 && !!ctx && (ctx.verification.requiredEffects || []).every(e => e.effect !== 'warn') && v.final && v.final.approvable, `S9-1 前提: 画面で委ねた警告（計画の AI の proposed）は判断の候補（生成の必須の効果に入らない・最終案は承認できる）: ${JSON.stringify({ cand: v && candidatesOf(v), req: ctx && ctx.verification.requiredEffects })}`);
+  assert(!!v && candidatesOf(v).length === 1 && !!ctx && (ctx.verification.requiredEffects || []).every(e => e.effect !== 'warn') && v.final && FS.readyOf(v), `S9-1 前提: 画面で委ねた警告（計画の AI の proposed）は判断の候補（生成の必須の効果に入らない・最終案は承認できる）: ${JSON.stringify({ cand: v && candidatesOf(v), req: ctx && ctx.verification.requiredEffects })}`);
   const changedSec = (chat.match(/仮案からの補足[\s\S]*?(?=この案の制約|確認できないこと|残る判断|動作テスト環境へ反映|$)/) || [''])[0];
   assert(changedSec.includes(`判断が残っています${SENT}`) && changedSec.split(SENT).length === 2 && confs.filter(t => t === `判断が残っています（この最終案には入っていません）: ${SENT}`).length === 1 && m.calls.ask.length === asks && m.msgs().filter(x => x.type === 'FINAL').length === 1,
     `S9-2: 最終案の通常表示（仮案からの補足）と承認の欄の確認項目に、判断が残っていることを同じ文で 1 回ずつ示す（別のカード・質問は増えない）: ${JSON.stringify({ confs, sec: changedSec.slice(0, 260) })}`);

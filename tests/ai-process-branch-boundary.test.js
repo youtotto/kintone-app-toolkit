@@ -24,6 +24,8 @@
 'use strict';
 process.on('unhandledRejection', (e) => { if (/kintone is not defined/.test(String(e && e.message))) return; console.error(e); process.exit(1); });
 const { loadToolkit, makeAssert } = require('./helpers/load-toolkit.js');
+//   簡素化（2026-10-17）: 反映できるかは、最新の版なら会話の今の判定、前の版なら最終案の記録で確かめる（tests/helpers/final-state.js）
+const FS = require('./helpers/final-state.js');
 const { gwCandidateHash } = require('./helpers/gw-hash.js');
 const T = loadToolkit();
 const { KTCodeReview, KTScan, KTAiClient, KTPlanReview, KTQueryCheck, KTDeps } = T;
@@ -254,8 +256,8 @@ await section(async () => {
   //   移植元の本文を生成に送れない（条件が分からない）→ C3 は生成を呼ばず準備未完了 → 承認できない
   const ns = await runBranch({ jsFiles: () => JSF({ source: false }) });
   const gn = (ns.v && ns.v.generated) || {};
-  assert(ns.gen.seen.map(s => s.cid).join() === 'C1,C2' && gn.C3 && gn.C3.status === 'not-ready' && gn.C3.verdict && gn.C3.verdict.port === true && ns.v.final.approvable === false && (ns.v.final.readiness.reasons || []).some(r => r.kind === 'effects-unknown'),
-    `B4-9: 移植元の本文を送れない（条件が分からない）→ C3 の生成を呼ばず準備未完了・承認できない: ${JSON.stringify({ gens: ns.gen.seen.map(s => s.cid), c3: gn.C3 && [gn.C3.status, gn.C3.verdict && gn.C3.verdict.kind], approvable: ns.v.final.approvable })}`);
+  assert(ns.gen.seen.map(s => s.cid).join() === 'C1,C2' && gn.C3 && gn.C3.status === 'not-ready' && gn.C3.verdict && gn.C3.verdict.port === true && FS.readyOf(ns.v) === false && (FS.readinessOf(ns.v).reasons || []).some(r => r.kind === 'effects-unknown'),
+    `B4-9: 移植元の本文を送れない（条件が分からない）→ C3 の生成を呼ばず準備未完了・承認できない: ${JSON.stringify({ gens: ns.gen.seen.map(s => s.cid), c3: gn.C3 && [gn.C3.status, gn.C3.verdict && gn.C3.verdict.kind], approvable: FS.readyOf(ns.v) })}`);
 });
 
 console.log(`\n${state.failed ? 'FAILED' : 'ALL PASSED'}: ${state.passed} passed / ${state.failed} failed`);

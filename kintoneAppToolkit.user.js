@@ -24282,6 +24282,18 @@
      *   反映の準備・最終確認・JS の登録の直前に呼ぶ。新しい版・再生成では承認を引き継がない（版の object が変わる）。
      *   簡素化（2026-10-17）: baseStamp（今の動作テスト環境の基準）は必ず要る（渡さないときに基準の照合を飛ばす分岐は、基準を使わない画面のためのもので削除した）
      */
+    /**
+     * 簡素化（2026-10-17）: 今の最新の最終案を反映できない理由の 1 文（反映できるときは null）。反映できるかの規則はここ 1 か所。
+     *   hold = 画面の作業の止め（更新中・まだ変更案に入っていない回答）、readiness = 会話の今の判定（finalReadiness: 生成の結果・担当の無い要件・
+     *   先に決めたいこと・実行できない手順）、status = 版の状態（作り直しの扱い STALE）。画面の反映を止める理由（applyHold）と最終案のカードのボタンが使う。
+     *   最終案を作った時点の判定の記録（v.final.approvable）を readiness に入れるのは、今の判定を渡さない描き方（会話の部品を直接描く確かめ）だけ
+     */
+    function applyBlockText({ hold = null, readiness = null, status = null } = {}) {
+      if (hold) return String(hold);
+      if (readiness && !readiness.ready) return readiness.blockingReason || 'この最終案はまだ反映できません。';
+      if (status === PLAN_STATUS.STALE) return '動作テスト環境の設定が変わったため、この最終案は反映できません。最新の設定で最終案を作り直してください（同じ依頼をもう一度送ると作り直します）。';
+      return null;
+    }
     function approvalValid(v, { baseStamp = null } = {}) {
       const fail = (reason, message) => ({ ok: false, reason, message });
       if (!v || !v.approval) return fail('NOT_APPROVED', '最終案が承認されていません。会話の最終案のカードで［動作テスト環境へ反映］を押してください（押すと承認して、そのまま反映します）。');
@@ -25904,6 +25916,8 @@
         const blockedIds = v.review && v.review.executionReadiness ? (v.review.executionReadiness.blockedSteps || []) : [];
         //   2026-10-16（判定の責任範囲を絞る）: 反映を止めるのは、担当が無い（ownerless）・明確な実装の欠落（missing）の決まった要件だけ。確認材料不足（unconfirmed）は止めない
         const ownerlessDecided = unownedRequirementsOf(v, entries).filter(r => r.decision === 'decided' && r.kind !== 'unconfirmed');
+        //   先に決めたいことは、その版の確認事項（答えても、変更案に入れた新しい版になるまでは、この版は答えを含まないので数える）。
+        //   簡素化（2026-10-17）: 画面の反映を止める理由（applyHold）は、ここを使い、今の未回答を別に数えない
         const blocking = (v.openQuestions || []).filter(q => q.priority === 'blocking');
         const reasons = [];
         //   §0f.3 の 1: 止めた送信の最終案は未完成（承認できない）。理由は最初に出す（blockingReason）
@@ -25936,7 +25950,10 @@
         if (blocking.length) reasons.push({ kind: 'questions', text: `先に決めたいことが ${blocking.length} 件残っています。答えると反映できるようになります。` });
         return { ready: reasons.length === 0, reasons, blockingReason: reasons.length ? reasons[0].text : '', ownerlessDecided, blockedIds };
       };
-      /** §0c.4: 承認のときの判定（最終案を作ったときの Toolkit では作れない customization の一覧を使う） */
+      /**
+       * §0c.4: 今の判定（最終案を作ったときの Toolkit では作れない customization の一覧を使う）。承認の口・画面の反映を止める理由（承認の欄の準備・
+       *   最終案のカードのボタン）が使う 1 か所。最終案の記録（v.final.approvable・readiness）は作った時点の判定で、今の判定の代わりにしない（簡素化 2026-10-17）
+       */
       const finalReadinessNow = (v) => finalReadinessOf(v, { unsupported: (v && v.finalUnsupported) || [], incomplete: (v && v.finalIncomplete) || null });
       // ---- 段階 C（C4）: 最終案の承認（版・計画の hash・基準の stamp・候補の hash を結び付ける）----
       /**
@@ -25953,8 +25970,8 @@
         const v = state.activePlan;
         if (!v || (planId && v.planId !== planId) || (version != null && String(v.version) !== String(version))) return { ok: false, reason: 'NOT_LATEST', message: '最新の最終案だけ承認できます。' };
         if (!v.final) return { ok: false, reason: 'NO_FINAL', message: 'まだ最終案ができていません。' };
-        if (!v.final.approvable) return { ok: false, reason: 'NOT_APPROVABLE', message: v.final.blockingReason || 'この最終案はまだ反映できません。' };
-        //   §0c.4（2026-10-08）: 最終案を作った後に変わったもの（台帳・質問）も含めて、反映できる条件をもう一度 1 か所で判定する
+        //   §0c.4（2026-10-08）: 最終案を作った後に変わったもの（台帳・質問）も含めて、反映できる条件を今の判定で確かめる。
+        //   簡素化（2026-10-17）: 最終案を作った時点の判定の記録（v.final.approvable）は見ない（過去に反映できたことを今の根拠にしない）
         const rdNow = finalReadinessNow(v);
         if (rdNow && !rdNow.ready) return { ok: false, reason: 'NOT_APPROVABLE', message: rdNow.blockingReason || 'この最終案はまだ反映できません。' };
         //   追加指示 §4（a）: 基準（動作テスト環境）を取得できない（null）・指紋が無いときは照合を飛ばさずに止める（承認に基準の無い記録を残さない）
@@ -28636,6 +28653,8 @@
       finalUsageOf, budgetInfoOf,
       // 段階 C（C4）: 承認の有効性（1 か所）・目安の既定値
       approvalValid, planHashOf, TIMING_DEFAULTS, TIMING_KEY,
+      // 簡素化（2026-10-17）: 今の反映の判定の規則（1 か所。画面の反映を止める理由と最終案のカードのボタンが使う）
+      applyBlockText,
       // §0c.2（2026-10-08）: 効果の語彙と必須の効果
       EFFECTS: KT_EFFECTS, EFFECT_JA: KT_EFFECT_JA, requiredEffectsOf, BEHAVIOR_REASONS: KT_BEHAVIOR_REASONS, REASON_CATEGORY: KT_REASON_CATEGORY,
       // §0f.2（2026-10-09）: 採用範囲の判定（1 か所）と、仮案の動作が任意の提案の扱いか
@@ -30075,7 +30094,11 @@
       //   C-1 後の仕上げ（2026-10-09）: 一度書き込んだ最終案（一部だけ反映を含む）は、承認の欄とボタンを出さない（もう一度押しても進まない行き止まりを残さない）
       const runNow = view.finalRun && view.finalRun.planId === v.planId && String(view.finalRun.version) === String(v.version) ? view.finalRun : null;
       const writtenNow = !!(runNow && runNow.written) || v.status === 'EXECUTED';
-      const canApprove = active && fin.approvable && !approved && !writtenNow;
+      //   簡素化（2026-10-17）: 押せるか・反映できるかの 1 文は今の判定から出す（画面の applyHold が渡す view.hold。今の判定の理由・更新中・まだ変更案に入っていない回答・
+      //   作り直しの扱いを 1 つの規則 KTAiConversation.applyBlockText にしたもの）。見出し・中身・直す依頼のボタンは最終案の記録（作った時点の判定）のまま。
+      //   今の判定を渡さない描き方（会話の部品を直接描く確かめ）だけ、記録の判定で決める
+      const applyBlock = !active ? null : view.hold !== undefined ? (view.hold || null) : KTAiConversation.applyBlockText({ readiness: { ready: !!fin.approvable, blockingReason: fin.blockingReason || '' }, status: v.status });
+      const canApprove = active && !applyBlock && !approved && !writtenNow;
       //   §0c.8（2026-10-08）: 承認できない最終案の次の手（計画を直す・作り直し）は、このボタン 1 つで通常の計画の差分更新（自由入力の修正と同じ REVISE_PLAN）に送る。
       //   既存の候補の返事の仕組み（data-act choice）を使う。自動では送らない
       const fixHtml = active && !approved && !fin.approvable && fin.fix && fin.fix.text ? `<div class="kt-ai-final-fix" style="margin-top:8px; display:flex; gap:6px; flex-wrap:wrap; align-items:center;">${btn('choice', fin.fix.label, `data-text="${esc(fin.fix.text)}" data-intent="${esc(KTAiConversation.INTENT.REVISE_PLAN)}" data-display="${esc(fin.fix.display || fin.fix.label)}" data-fix="${esc(fin.fix.kind)}"`, 'font-weight:600;')}<span style="font-size:11px; opacity:.8;">${esc(fin.fix.kind === 'regenerate' ? '押すと、要件は変えずに JavaScript の作り直しを依頼します（計画の差分更新として送ります）。' : '押すと、確かめられなかった点（区分・ファイル・フィールド）を添えて計画の修正を依頼します。')}</span></div>` : '';
@@ -30085,8 +30108,7 @@
       const pre = view.finalPre && view.finalPre.planId === v.planId && String(view.finalPre.version) === String(v.version) ? view.finalPre : null;
       const run = runNow;
       const preReady = !!pre && pre.status === 'ready';
-      const stalePlan = v.status === 'STALE';   // 動作テスト環境の設定が変わった最終案（作り直すまで反映しない）
-      const canApply = canApprove && preReady && !view.hold && !stalePlan;
+      const canApply = canApprove && preReady;
       const PRE_WAIT = { base: '動作テスト環境の今の設定を取得しています（書き込みはしません）…', running: '反映の前の準備をしています（今の設定との照合だけで、書き込みはしません）…', idle: '反映の前の準備を待っています…' };
       const preItems = pre && pre.items ? pre.items : null;
       const preRows = preItems ? [
@@ -30100,7 +30122,7 @@
       const preReasons = pre && Array.isArray(pre.reasons) && pre.reasons.length ? `<div class="kt-ai-final-pre-blocked" style="font-size:12px; color:#b00020; margin-top:4px;">${pre.reasons.slice(0, 6).map(x => `× ${esc(x)}`).join('<br>')}</div>` : '';
       //   指示書 §1.5: 反映できるかは見出しの下の 1 文（準備が整ったときだけ「この内容で反映できます。」。整っていなければ準備の文か止めている理由を 1 文）。
       //   ［動作テスト環境へ反映］の文字は変えず、反映先と順序はボタンの添え書きに。「反映の前の確認（書き込みなし）」は折りたたみ（止まる理由 preReasons は畳まずに見せる）
-      const waitText = !canApprove ? (fin.blockingReason || '反映できる状態になるまで待ってください。') : stalePlan ? '動作テスト環境の設定が変わったため、この最終案は反映できません。最新の設定で最終案を作り直してください（同じ依頼をもう一度送ると作り直します）。' : view.hold ? String(view.hold) : !pre ? PRE_WAIT.idle : PRE_WAIT[pre.status] || (pre.reasons && pre.reasons.length ? '反映の前の確認で止まる理由があるため、まだ反映できません（理由は下）。' : '反映できる状態になるまで待ってください。');
+      const waitText = applyBlock || (!pre ? PRE_WAIT.idle : PRE_WAIT[pre.status] || (pre.reasons && pre.reasons.length ? '反映の前の確認で止まる理由があるため、まだ反映できません（理由は下）。' : '反映できる状態になるまで待ってください。'));
       const statusLine = active && !approved && !writtenNow ? `<div class="kt-ai-final-status" data-can-apply="${canApply ? '1' : '0'}" style="margin-top:4px; font-size:12px;${canApply ? ' color:#2e7d32; font-weight:600;' : ''}">${esc(canApply ? 'この内容で反映できます。' : waitText)}</div>` : '';
       //   2026-10-15（最終案の重複と担当未定の食い違い §1・§4）: 反映するものに合わせる（設定だけ・JavaScript だけの最終案に「設定の手順 → JavaScript の順」と出さない）
       //   数えるのは Toolkit が反映するものだけ: 自動で反映する設定の手順（settings.auto。手動・反映できない手順は数えない）と検証済みの JavaScript（独立レビュー L1）。
@@ -30109,7 +30131,7 @@
       const APPLY_NOTE = !hasJs ?'承認すると動作テスト環境へ設定の手順を反映します（運用環境は変更しません）。反映後に、動作テスト環境の画面で動作を確認します。'
         : hasJs && !hasSettings ? '承認すると動作テスト環境へ JavaScript を反映します（運用環境は変更しません）。反映後に、動作テスト環境の画面で動作を確認します。'
         : '承認すると動作テスト環境へ反映します（設定の手順 → JavaScript の順。運用環境は変更しません）。反映後に、動作テスト環境の画面で動作を確認します。';
-      const preBlock = canApprove && pre && !stalePlan ? `<div class="kt-ai-final-pre-wrap" data-status="${esc(pre.status)}" style="margin-top:8px;">${pre.notice ? `<div class="kt-ai-final-pre-notice" style="font-size:12px; color:#b26a00; margin-bottom:4px;">${esc(pre.notice)}</div>` : ''}${preReasons}<details class="kt-ai-tech kt-ai-final-pre" data-status="${esc(pre.status)}"><summary>反映の前の確認（書き込みなし）</summary><div style="margin-top:4px;">${preRows.length ? preRows.join('') : `<div style="font-size:12px; opacity:.75;">${esc(PRE_WAIT[pre.status] || '準備が終わると、反映する設定・JavaScript・確認項目をここに出します。')}</div>`}</div></details></div>` : '';
+      const preBlock = canApprove && pre ? `<div class="kt-ai-final-pre-wrap" data-status="${esc(pre.status)}" style="margin-top:8px;">${pre.notice ? `<div class="kt-ai-final-pre-notice" style="font-size:12px; color:#b26a00; margin-bottom:4px;">${esc(pre.notice)}</div>` : ''}${preReasons}<details class="kt-ai-tech kt-ai-final-pre" data-status="${esc(pre.status)}"><summary>反映の前の確認（書き込みなし）</summary><div style="margin-top:4px;">${preRows.length ? preRows.join('') : `<div style="font-size:12px; opacity:.75;">${esc(PRE_WAIT[pre.status] || '準備が終わると、反映する設定・JavaScript・確認項目をここに出します。')}</div>`}</div></details></div>` : '';
       const runText = !run ? '<b>承認済み。</b>' : run.stage === 'running' ? '<b>承認済み。</b>動作テスト環境へ反映しています（結果は下のカード）。' : '<b>承認済み。</b>反映の結果は下のカードにまとめています。';
       const writtenText = '動作テスト環境へ書き込みました（一部だけの反映を含みます）。結果と次の手は下のカードにまとめています。この最終案はもう一度反映できません。直すときは依頼を送ると、今の設定で最終案を作り直します。';
       const approveHtml = active ? `${approved || writtenNow ? '' : preBlock}<div class="kt-ai-final-apply" style="margin-top:10px; display:flex; gap:6px; flex-wrap:wrap; align-items:center;">${approved ? `<span style="font-size:12px; color:#2e7d32;">${runText}</span>` : writtenNow ? `<span class="kt-ai-final-written" style="font-size:12px; color:#b26a00;">${esc(writtenText)}</span>` : `<button type="button" class="btn kt-ai-act" data-act="final-approve" data-plan="${esc(v.planId)}" data-version="${esc(String(v.version))}" style="height:28px; font-weight:600; border-color:#2e7d32;"${canApply ? '' : ' disabled'}>動作テスト環境へ反映</button><span class="kt-ai-final-apply-note" style="font-size:11px; opacity:.8;">${esc(APPLY_NOTE)}</span>`}</div>` : '';
@@ -31119,6 +31141,8 @@
     const workingNow = () => (conv && conv.isBusy() && conv.state && conv.state.workEpoch === conv.state.epoch ? conv.state.working || null : null);
     /**
      * 反映を止める理由（2026-10-06 利用者の指示: 必要な確認が終わった内容だけを反映できるようにする）。理由が無ければ null。
+     *   簡素化（2026-10-17）: 今の反映の判定の 1 か所（KTAiConversation.applyBlockText）。最終案ができていれば会話の今の判定（finalReadiness）と作り直しの扱いも
+     *   ここで理由にする。承認の欄の準備・最終案のカードのボタンと「反映できるか」の 1 文・右の「反映」・［動作テスト環境へ反映］の受け付けがこれを使う。
      *   更新中（前の内容のまま反映しない）・回答がまだ変更案に入っていない・先に確認したいこと（priority blocking。答えで変更案の中心が変わる）が残っている。
      *   「あとで決めてもよい」確認事項（later。Gateway は指定が無ければ later）は止めない（最終確認に未回答として出す）
      */
@@ -31130,9 +31154,8 @@
       if (!v || v !== adopted) return null;
       const unapplied = conv.ledger().filter(e => e.status === 'answered' && e.appliedInVersion == null && e.question);
       if (unapplied.length) return `回答した内容（${unapplied.length} 件）が、まだ変更案に入っていません。変更案に入れてから反映できます。`;
-      const blocking = conv.answerContext().open.filter(q => q.priority === 'blocking');
-      if (blocking.length) return `先に確認したいことが ${blocking.length} 件残っています。左の会話で答えると反映できます。`;
-      return null;
+      //   先に決めたいこと（priority blocking）・生成の結果・担当の無い要件・実行できない手順は会話の今の判定、作り直しの扱いは版の状態（以前はここで今の未回答を別に数えた）
+      return v.final ? KTAiConversation.applyBlockText({ readiness: conv.finalReadiness(v), status: v.status }) : null;
     }
     let lastHold = null;
     /**
@@ -32033,12 +32056,11 @@
     const finalPreKeyOf = (v) => [conv.state.epoch, v.planId, v.version, v.status, JSON.stringify(Object.entries(v.generated || {}).map(([c, e]) => [c, e && e.candidateHash ? e.candidateHash : null])), [...decisions.entries()].filter(([, d]) => d === 'reject').map(([k]) => k).sort().join(','), (devBaseStampNow() || {}).fingerprint || '-'].join('|');
     /** 承認の欄の準備を走らせてよい最終案か（承認できる・まだ承認していない・この版の反映を始めていない・止める理由が無い） */
     function finalPreEligible(v) {
-      if (!v || !conv || !finalFlow() || v !== adopted || !v.final || !v.final.approvable || v.approval) return false;
+      if (!v || !conv || !finalFlow() || v !== adopted || !v.final || v.approval) return false;
       if (v.status !== KTAiConversation.PLAN_STATUS.ACTIVE) return false;
       if (finalRun && finalRun.planId === v.planId && finalRun.version === v.version && (finalRun.stage === 'running' || finalRun.written)) return false;
-      if (applyHold()) return false;
-      const rd = conv.finalReadiness(v);
-      return !rd || rd.ready;
+      //   簡素化（2026-10-17）: 反映できるかは今の判定だけ（applyHold。最終案を作った時点の判定の記録は見ない）
+      return !applyHold();
     }
     const stableStr = (x) => JSON.stringify(x, (k, val) => (val && typeof val === 'object' && !Array.isArray(val) ? Object.fromEntries(Object.keys(val).sort().map(kk => [kk, val[kk]])) : val));
     /** 指紋の材料（標準設定: 手順ごとの準備の内容・状態・注意と revision・古い計画の差分 / JavaScript: 変更ごとの名前・対象・種類・本文の指紋・位置、注意、確認項目、カスタマイズの内容） */

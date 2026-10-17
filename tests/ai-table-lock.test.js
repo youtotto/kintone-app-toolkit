@@ -25,6 +25,8 @@
 'use strict';
 process.on('unhandledRejection', (e) => { if (/kintone is not defined/.test(String(e && e.message))) return; console.error(e); process.exit(1); });
 const { loadToolkit, makeAssert } = require('./helpers/load-toolkit.js');
+//   簡素化（2026-10-17）: 反映できるかは、最新の版なら会話の今の判定、前の版なら最終案の記録で確かめる（tests/helpers/final-state.js）
+const FS = require('./helpers/final-state.js');
 const { gwCandidateHash } = require('./helpers/gw-hash.js');
 const T = loadToolkit();
 const { KTAiConversation, KTCodeReview, KTScan, KTContext, KTDeps } = T;
@@ -195,8 +197,8 @@ await section(async () => {
   const keys = keysOf(gen.seen.find(s => s.cid === 'C1'));
   const want = [`amount|lock|C1+${ids['金額']}`, `item_name|lock|C1+${ids['明細']}`, `qty|lock|C1+${ids['明細']}`, `unit_price|lock|C1+${ids['明細']}`].sort();
   assert(JSON.stringify(keys) === JSON.stringify(want), `L2-1: 生成に渡す必須の効果は 4 件（金額は「金額」の要件、品名・数量・単価は「明細」の要件の id つき。小計は根拠で除く）: ${JSON.stringify({ keys, want })}`);
-  assert(v.generated.C1 && v.generated.C1.status === 'verified' && v.final && v.final.approvable === true && x.calls.plan.length === 1 && gen.seen.length === 1,
-    `L2-2: 準備未完了にならず（計画の差分更新を依頼しない・計画の AI 1 回）、C1 は検証済み・承認できる: ${JSON.stringify({ status: v.generated.C1 && v.generated.C1.status, verdict: v.generated.C1 && v.generated.C1.verdict && v.generated.C1.verdict.reason, approvable: v.final && v.final.approvable, plans: x.calls.plan.length, gens: gen.seen.length })}`);
+  assert(v.generated.C1 && v.generated.C1.status === 'verified' && v.final && FS.readyOf(v) === true && x.calls.plan.length === 1 && gen.seen.length === 1,
+    `L2-2: 準備未完了にならず（計画の差分更新を依頼しない・計画の AI 1 回）、C1 は検証済み・承認できる: ${JSON.stringify({ status: v.generated.C1 && v.generated.C1.status, verdict: v.generated.C1 && v.generated.C1.verdict && v.generated.C1.verdict.reason, approvable: v.final && FS.readyOf(v), plans: x.calls.plan.length, gens: gen.seen.length })}`);
 });
 await section(async () => {
   //   不足の会話の経路: 計画が品名だけ（自動の見直しでも同じ計画）→ 要件未達を隠した最終案にしない
@@ -210,8 +212,8 @@ await section(async () => {
   const auto = x.calls.plan[1] || {};
   assert(e && e.status === 'not-ready' && e.verdict.kind === 'effects-unknown' && /「明細」の列のうち/.test(reason) && /「数量」/.test(reason) && /「単価」/.test(reason) && !/qty|unit_price|items|no-owner-field/.test(reason),
     `L2-3: 計画が品名だけ → C1 は準備未完了。理由は列の名前で（「明細」の列のうち「数量」・「単価」）、内部のコードを出さない: ${JSON.stringify({ status: e && e.status, reason })}`);
-  assert(x.calls.plan.length === 2 && auto.revision && /テーブル自体には effects を置かず/.test(auto.request || '') && /R\d+ \/ table items \/ lock \/ no-owner-field: qty, unit_price/.test(auto.request || '') && v.final && v.final.fix && /テーブル 「明細」/.test(v.final.fix.text || '') && /テーブル自体には effects を置かず/.test(v.final.fix.text || '') && gen.seen.length === 0 && v.final && v.final.approvable === false && !/仮案のとおり、承認できます/.test(html),
-    `L2-4: 計画の差分更新を 1 回だけ自動で依頼（テーブルの列の指示と、不足の列を 1 行にまとめたものつき）・［計画を直すよう依頼する］の文にもテーブルと指示・生成 0・最終案は承認できない（要件未達を隠さない）: ${JSON.stringify({ plans: x.calls.plan.length, request: (auto.request || '').slice(0, 200), gens: gen.seen.length, approvable: v.final && v.final.approvable })}`);
+  assert(x.calls.plan.length === 2 && auto.revision && /テーブル自体には effects を置かず/.test(auto.request || '') && /R\d+ \/ table items \/ lock \/ no-owner-field: qty, unit_price/.test(auto.request || '') && v.final && v.final.fix && /テーブル 「明細」/.test(v.final.fix.text || '') && /テーブル自体には effects を置かず/.test(v.final.fix.text || '') && gen.seen.length === 0 && v.final && FS.readyOf(v) === false && !/仮案のとおり、承認できます/.test(html),
+    `L2-4: 計画の差分更新を 1 回だけ自動で依頼（テーブルの列の指示と、不足の列を 1 行にまとめたものつき）・［計画を直すよう依頼する］の文にもテーブルと指示・生成 0・最終案は承認できない（要件未達を隠さない）: ${JSON.stringify({ plans: x.calls.plan.length, request: (auto.request || '').slice(0, 200), gens: gen.seen.length, approvable: v.final && FS.readyOf(v) })}`);
 });
 await section(async () => {
   //   流用で不足を隠さない: 前の版で C1（品名）と C2（数量・単価）が分担して検証済み → 修正で C2 を外し要件の planRefs を C1 だけにした版（C1 は同じ）。
@@ -226,12 +228,12 @@ await section(async () => {
   await x.c.send(U);
   await x.c.send('採用します');
   const v1 = x.c.activePlan();
-  assert(v1.generated.C1 && v1.generated.C1.status === 'verified' && v1.generated.C2 && v1.generated.C2.status === 'verified' && v1.final && v1.final.approvable === true, `L2-5: 前提: 2 つの JavaScript の分担で検証済み・承認できる: ${JSON.stringify({ c1: v1.generated.C1 && [v1.generated.C1.status, v1.generated.C1.verdict && v1.generated.C1.verdict.unresolved], c2: v1.generated.C2 && [v1.generated.C2.status, v1.generated.C2.verdict && v1.generated.C2.verdict.unresolved], plans: x.calls.plan.length, refs: x.c.requirements(v1.planId).map(r => `${r.target}:${(r.planRefs || []).join('+')}`) })}`);
+  assert(v1.generated.C1 && v1.generated.C1.status === 'verified' && v1.generated.C2 && v1.generated.C2.status === 'verified' && v1.final && FS.readyOf(v1) === true, `L2-5: 前提: 2 つの JavaScript の分担で検証済み・承認できる: ${JSON.stringify({ c1: v1.generated.C1 && [v1.generated.C1.status, v1.generated.C1.verdict && v1.generated.C1.verdict.unresolved], c2: v1.generated.C2 && [v1.generated.C2.status, v1.generated.C2.verdict && v1.generated.C2.verdict.unresolved], plans: x.calls.plan.length, refs: x.c.requirements(v1.planId).map(r => `${r.target}:${(r.planRefs || []).join('+')}`) })}`);
   await x.c.send('明細の編集不可は C1 だけで扱ってください');
   const v2 = x.c.activePlan();
   const e2 = v2.generated.C1;
-  assert(v2.version !== v1.version && e2 && !e2.reused && e2.status === 'not-ready' && v2.final && v2.final.approvable === false,
-    `L2-6: 片方を外した版では、同じ C1 でも前の検証済みの結果を流用せず、不足（数量・単価）で準備未完了・承認できない: ${JSON.stringify({ v1: v1.version, v2: v2.version, reused: e2 && e2.reused, status: e2 && e2.status, reason: e2 && e2.verdict && e2.verdict.reason, approvable: v2.final && v2.final.approvable, gens: gen.seen.map(s => `${s.cid}@${s.version}`) })}`);
+  assert(v2.version !== v1.version && e2 && !e2.reused && e2.status === 'not-ready' && v2.final && FS.readyOf(v2) === false,
+    `L2-6: 片方を外した版では、同じ C1 でも前の検証済みの結果を流用せず、不足（数量・単価）で準備未完了・承認できない: ${JSON.stringify({ v1: v1.version, v2: v2.version, reused: e2 && e2.reused, status: e2 && e2.status, reason: e2 && e2.verdict && e2.verdict.reason, approvable: v2.final && FS.readyOf(v2), gens: gen.seen.map(s => `${s.cid}@${s.version}`) })}`);
 });
 
 await section(async () => {
@@ -255,8 +257,8 @@ await section(async () => {
   const qtyEff = ((v.plan.customizations[0].fields || []).find(f => f.code === 'qty') || {}).effects || [];
   const keys = keysOf(gen.seen.find(s => s.cid === 'C1'));
   assert(!(v.scopeStripped || []).some(s => s.field === 'qty' && s.effect === 'lock') && qtyEff.some(e => (e && e.effect) === 'lock') && keys.includes(`qty|lock|C1+${ids['明細']}`) && keys.includes(`qty|warn|C1+${ids['数量']}`)
-    && x.calls.plan.length === 1 && v.generated.C1 && v.generated.C1.status === 'verified' && v.final && v.final.approvable === true,
-    `L2-7: 計画がテーブルを READ で入れ、数量に別の要件（警告）があっても、数量の編集不可は外さない（計画・必須の効果・承認が食い違わない）: ${JSON.stringify({ stripped: v.scopeStripped, qtyEff, keys, plans: x.calls.plan.length, status: v.generated.C1 && v.generated.C1.status, approvable: v.final && v.final.approvable })}`);
+    && x.calls.plan.length === 1 && v.generated.C1 && v.generated.C1.status === 'verified' && v.final && FS.readyOf(v) === true,
+    `L2-7: 計画がテーブルを READ で入れ、数量に別の要件（警告）があっても、数量の編集不可は外さない（計画・必須の効果・承認が食い違わない）: ${JSON.stringify({ stripped: v.scopeStripped, qtyEff, keys, plans: x.calls.plan.length, status: v.generated.C1 && v.generated.C1.status, approvable: v.final && FS.readyOf(v) })}`);
 });
 
 console.log(`\n${state.passed} passed, ${state.failed} failed`);

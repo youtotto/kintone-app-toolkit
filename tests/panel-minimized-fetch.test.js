@@ -53,6 +53,8 @@ if (!HAS_START) {
 }
 
 const { loadToolkit, makeAssert } = require('./helpers/load-toolkit.js');
+//   簡素化（2026-10-17）: 反映できるかは、最新の版なら会話の今の判定、前の版なら最終案の記録で確かめる（tests/helpers/final-state.js）
+const FS = require('./helpers/final-state.js');
 const { makeFakeDocument, makeFakeHost } = require('./helpers/fake-dom.js');
 const { makeFakeKintone } = require('./helpers/fake-kintone-api.js');
 const FX = require('./fixtures/ai-context-app.js');
@@ -433,7 +435,7 @@ await safe('§5g', async () => {
   const gets = () => m.mock.calls.filter(c => /^GET /.test(c)).length;
   const g0 = gets();
   await ticks(20);
-  assert(v && v.final && v.final.approvable && m.panel.finalPrecheck().status === 'idle' && m.panel.devBaseFetchState().precheckDeferred === true && gets() === g0, `5g-1 見えていない間は承認の欄の準備（自動の取得）を始めない: ${m.panel.finalPrecheck().status}・GET ${gets() - g0}`);
+  assert(v && v.final && FS.readyOf(v) && m.panel.finalPrecheck().status === 'idle' && m.panel.devBaseFetchState().precheckDeferred === true && gets() === g0, `5g-1 見えていない間は承認の欄の準備（自動の取得）を始めない: ${m.panel.finalPrecheck().status}・GET ${gets() - g0}`);
   // 見えた → 準備の途中（運用環境の一覧の取得）で見えなくなる → 完了の後は JavaScript の準備（後続）を始めない
   let open; const held = new Promise((r) => { open = r; });
   const o = m.mock.api.getProductionViews; m.mock.api.getProductionViews = async (...a) => { await held; return o.apply(m.mock.api, a); };
