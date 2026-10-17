@@ -25533,8 +25533,7 @@
        *   from（省略可）: この版の計画が、その版の外した後の計画の写し（［残りの JavaScript を作る］GENERATE_CODE。計画の AI は呼ばない）。
        *   K-4（2026-10-10）: 写しには外す効果がもう無いので、照合し直すと記録が空になり、生成に渡す requirement が計画の元の文に戻っていた。
        *   元の版の範囲の記録（外した効果・説明に残りうる customization・判断の候補・生成に渡す requirement の文・決定事項の実現として足した動作）を写して引き継ぎ、
-       *   写しで新たに外したもの（その間に台帳が変わったとき）だけを足す。引き継いだだけの「説明に残りうる」customization（scopeIssuesCarried）は、
-       *   この版の自動の見直しの引き金にしない（計画の AI を呼ばない版。写しで新たに見つかったものだけが今までどおり引き金になる）
+       *   写しで新たに外したもの（その間に台帳が変わったとき）だけを足す（§3（2026-10-17）: 外した効果は自動の見直しの引き金にしない）
        */
       function scopePlanOf(v, lg, { from = null } = {}) {
         const res = scopeStripPlans(v.plan, v.gatewayPlan, lg);
@@ -25548,8 +25547,6 @@
           added = addS.length;
           res.stripped = [...st0, ...addS];
           const is0 = Array.isArray(from.scopeIssues) ? cj(from.scopeIssues) : [];
-          const freshText = new Set(res.issues.filter(g => g && g.kind === 'text').map(g => g.customizationId));
-          v.scopeIssuesCarried = [...new Set(is0.filter(g => g && g.kind === 'text' && !freshText.has(g.customizationId)).map(g => g.customizationId))];
           for (const g of res.issues) {
             const h = is0.find(x => x && x.customizationId === g.customizationId && x.kind === g.kind);
             if (!h) { is0.push(g); continue; }
@@ -27413,7 +27410,10 @@
           //   レビューの指摘 row8（2026-10-09）: displayLabels は作業者の内部の表記（USER:… など）を画面の表記（ユーザー（ログイン名）。ログイン名は残す）に、
           //   通知の内部の番号（general#3 など）を Context の事実の言葉（アプリの条件通知（3 件目））にし、ログイン名・メールアドレスはフィールドの名前に書き換えない
           const labeled = (s) => displayLabels(stripEvidenceRefs(s), labelPairs);
-          const behaviors = [...sentences(chatSummary(p.assessment?.summary)), ...entries.flatMap(([, e]) => sentences(e.generated?.summary))].map(labeled).filter((x, i, a) => a.indexOf(x) === i).slice(0, 4);
+          //   §3（2026-10-17）: 範囲外の効果を外した版（v.scopeIssues に kind text。外した動作が計画の AI の文に残りうる）は、計画の AI の要約（assessment.summary）を
+          //   現在の確定内容に使わない（文を解析して部分修正しない。元の文は右の「変更内容」の［詳しく］）。生成の要約は外した後の計画と範囲内の要件の文から作られている
+          const scopeTextStale = (v.scopeIssues || []).some(x => x && x.kind === 'text');
+          const behaviors = [...(scopeTextStale ? [] : sentences(chatSummary(p.assessment?.summary))), ...entries.flatMap(([, e]) => sentences(e.generated?.summary))].map(labeled).filter((x, i, a) => a.indexOf(x) === i).slice(0, 4);
           const dr = draft || null;
           const lastHist = dr && Array.isArray(dr.history) && dr.history.length ? dr.history[dr.history.length - 1] : null;
           //   §0e.2（2026-10-09）: 入れなかった任意の提案（origin suggestion）は「外した」に出さない（採用の既定に入っていない）
@@ -27887,21 +27887,17 @@
             const effTried = state.effectRetried.get(v.planId) || new Set();
             //   2026-10-10（§5.1）: 移植元と同じ条件かを確かめる手段が無いだけ（source つきの condition-unknown）は計画を直しても解けないので、自動の差分更新の引き金にしない
             const effFresh = (v.plan.customizations || []).filter(c => c && c.customizationId && ['NEW_JS_FILE', 'EXTEND_EXISTING_JS'].includes(c.strategy) && !effTried.has(c.customizationId)).map(c => ({ c, u: requiredOf(v, c.customizationId).unresolved.filter(u => !(u.reason === 'condition-unknown' && u.source)) })).filter(x => x.u.length);
-            //   §0f.2 の 4（2026-10-09）: 範囲外の効果を外した customization（説明の文に範囲外の動作が残りうる。v.scopeIssues）も、同じ 1 回の自動の依頼で計画に外させる
-            //   （回数は effectRetried の鍵（customization の id）と上限のまま。引き金と依頼文は範囲内の要件だけ。範囲外の要件は構造化した「外す」指示にだけ書く）
-            //   再検証前の指示 §1（2026-10-10）: 判断の候補だけを外した customization（kind candidate）は自動の見直しの引き金にしない（計画の AI に外させず、利用者の判断を待つ）
-            //   K-4（2026-10-10）: ［残りの JavaScript を作る］の版（計画の写し）が前の版から引き継いだだけのもの（scopeIssuesCarried）は引き金にしない（計画の AI を呼ばない版）
-            const carriedS = new Set(Array.isArray(v.scopeIssuesCarried) ? v.scopeIssuesCarried : []);
-            const scopeFresh = (v.scopeIssues || []).filter(x => x && x.customizationId && x.kind === 'text' && !effTried.has(x.customizationId) && !carriedS.has(x.customizationId) && (v.plan.customizations || []).some(c => c && c.customizationId === x.customizationId));
-            if (fresh.length || effFresh.length || scopeFresh.length) {
+            //   §3（2026-10-17・説明を直すためだけの有料の見直しを減らす）: 範囲外の効果を外した customization（説明の文に範囲外の動作が残りうる。v.scopeIssues）は、
+            //   自動の見直しの引き金にしない（以前は scopeFresh で計画の AI に説明の文を書き直させていた）。外した効果は構造（計画の fields[].effects・生成に渡す要件の文）から
+            //   すでに外れているので、構造と合わなくなった AI の説明は現在の確定内容として出さない（表示の側。changeSummaryHtml・最終案の behaviors）。
+            //   実装に必要な不足（担当の無い要件・効果を特定できない customization）だけが、ここの自動の見直しの引き金
+            if (fresh.length || effFresh.length) {
               for (const r of fresh) tried.add(r.id);
               state.ownerRetried.set(v.planId, tried);
               for (const x of effFresh) effTried.add(x.c.customizationId);
-              for (const x of scopeFresh) effTried.add(x.customizationId);
               state.effectRetried.set(v.planId, effTried);
               state.metrics.ownerRevisions = (state.metrics.ownerRevisions || 0) + 1;
               if (effFresh.length) state.metrics.effectRevisions = (state.metrics.effectRevisions || 0) + 1;
-              if (scopeFresh.length) state.metrics.scopeRevisions = (state.metrics.scopeRevisions || 0) + 1;
               const ownerText = fresh.length ? `次の決まった要件に、計画の担当（設定の手順か JavaScript）がありません。計画の手順か JavaScript に入れて、要件の planRefs で担当を示してください（入れられない理由があれば、その要件の disposition を unsupported にして note に理由を書いてください）。\n${fresh.map(r => `・${r.id}: ${r.text}`).join('\n')}` : '';
               //   2026-10-10: テーブルの列の不足は（要件・テーブル・効果・理由）ごとに 1 行にまとめる（列が多くても依頼の文が上限で切れて、範囲の指示が落ちないように）
               const unresolvedLinesOf = (us) => {
@@ -27915,10 +27911,8 @@
                 return rows.map(g => (g.cols ? `${[g.u.requirementId, `table ${g.u.table}`, g.u.effect, g.u.reason].filter(Boolean).join(' / ')}: ${g.cols.join(', ')}` : [g.u.requirementId, g.u.field, g.u.effect, g.u.reason].filter(Boolean).join(' / ')));
               };
               const effText = effFresh.length ? `次の JavaScript で必要な動作（効果）を特定できません。customizations[].fields[] の effects（[{ effect, condition, events }]。lock / warn / block-save / set-value / show-hide）を、その動作を担当するフィールド（access CONTROL か WRITE）に置いてください。要件の target は計画のフィールドのコードかラベルと同じ表記にしてください（ただし、テーブル（明細など）を対象にした要件は target をテーブルのまま残し、テーブル自体には effects を置かず、そのテーブルの編集できる列をすべて fields に access CONTROL で入れて、列ごとに effects の lock を要件の条件で置いてください。保存を止める動作や行の追加・削除の制限は足さないでください）。condition-unknown は、その効果の condition（いつ行うか）を効果ごとに書いてください。other-platform は、その JavaScript が読み込まれない画面（PC / モバイル）のイベントを外すか、その画面を担当する JavaScript（platform）に同じフィールドの効果を置いてください。\n${effFresh.map(x => `・${x.c.customizationId}: ${unresolvedLinesOf(x.u).join('；')}`).join('\n')}` : '';
-              //   レビューの指摘 row1（2026-10-09）: 根拠の要件が無い効果（計画の fields[].effects だけで足された。unattributed）も外させる。外す指示に assessment.summary と reply の書き直しも含める
-              const scopeText = scopeFresh.length ? `次の動作は、利用者が採用した範囲（依頼・採用した仮案・委ねた判断）にありません。customizations[].fields[].effects・customizations[].requirement・JavaScript の手順の文・assessment.summary・reply から外し、外した後の動作に合わせて書き直してください（その要件は取り消し済みとして渡しています。足し直さないでください。「根拠の要件なし」は、採用した要件のどれにも無い効果です。根拠の要件が無い効果は外してください）。依頼を実現するための手順（ステータス・アクション・既存の JavaScript への統合）と、採用した要件の動作はそのまま残してください。\n${scopeFresh.map(x => `・${x.customizationId}: ${x.items.map(i => [i.field, i.effect, ...(i.requirementIds || []), ...(i.reason === 'unattributed' ? ['根拠の要件なし'] : [])].filter(Boolean).join(' / ')).join('；')}`).join('\n')}` : '';
-              const reqText = [ownerText, effText, scopeText].filter(Boolean).join('\n').slice(0, 1900);
-              const focusIds = [...new Set([...fresh.map(r => r.id), ...effFresh.flatMap(x => x.u.map(u => u.requirementId).filter(Boolean)), ...effFresh.map(x => x.c.customizationId), ...scopeFresh.map(x => x.customizationId)])];
+              const reqText = [ownerText, effText].filter(Boolean).join('\n').slice(0, 1900);
+              const focusIds = [...new Set([...fresh.map(r => r.id), ...effFresh.flatMap(x => x.u.map(u => u.requirementId).filter(Boolean)), ...effFresh.map(x => x.c.customizationId)])];
               state.ownerRetryActive = true;
               //   §0f.3 の 1: 自動の見直しの失敗の［再試行］は、内部の依頼文を利用者の発言として送らない（最終案の作り直し = GENERATE_CODE。計画の AI は呼ばない）。
               //   送信を止める失敗（時間切れ・取り消し・切断・上限）は、この送信の停止にして、作っていない JavaScript を未完成の最終案に出す（下の生成は 0 件）
@@ -29447,7 +29441,11 @@
       //   前の最終案から変わった点・反映する内容（反映先と主な影響）・できないこと（制約）・確認できないこと（担当が決まっていない要件はここに 1 回）・確かめたこと（1 行＋明細）。
       //   判定は変えない（表示だけ）
       const fin = v.final && typeof v.final === 'object' ? v.final : null;
-      const summaryText = p.assessment && p.assessment.summary ? String(p.assessment.summary) : '';
+      //   §3（2026-10-17）: 範囲外の効果を外した版（v.scopeIssues に kind text）では、計画の AI の要約・JavaScript の要件の文・外したフィールドの影響の文が、外した動作を
+      //   まだ書いていることがある。これらは現在の確定内容として出さず、［詳しく］の「元の説明」に残す（文は直さない）。JavaScript の行は範囲内の要件の文（生成に渡したもの）
+      const scopeTextStale = (v.scopeIssues || []).some(x => x && x.kind === 'text');
+      const strippedFields = new Set((Array.isArray(v.scopeStripped) ? v.scopeStripped : []).filter(x => x && x.reason !== 'candidate' && x.field).map(x => String(x.field)));
+      const summaryText = p.assessment && p.assessment.summary && !scopeTextStale ? String(p.assessment.summary) : '';
       //   計画の説明（assessment.summary）に同じ文があれば重ねない（画面に出す形に直してから比べる）
       const normJa = (s) => String(s ?? '').replace(/<[^>]*>/g, '').replace(/\s+/g, '').replace(/。$/, '');
       const ch = fin && fin.changedSince ? fin.changedSince : null;
@@ -29491,7 +29489,8 @@
       const changeRows = steps.map(st => {
         const r = reviewOf(st.id);
         const c = st.actionType === 'CUSTOMIZATION_REQUIRED' ? custs.find(x => x.stepId === st.id || x.customizationId === st.customizationId) || null : null;
-        const title = st.actionType === 'CUSTOMIZATION_REQUIRED' && c?.requirement ? `JavaScript：${c.requirement}` : (st.title || KTPlanText.stepSummary(st, { customizations: custs }));
+        const scopedReq = st.actionType === 'CUSTOMIZATION_REQUIRED' ? scopedReqOf(st) : '';
+        const title = scopedReq ? `JavaScript：${scopedReq}` : st.actionType === 'CUSTOMIZATION_REQUIRED' && c?.requirement ? `JavaScript：${c.requirement}` : (st.title || KTPlanText.stepSummary(st, { customizations: custs }));
         // Toolkit の確認が無いときは、spec から作った説明（AI の提案）を添える（出力削減・2026-10-07: 計画の AI は説明文を書かない）
         const spec1 = !r && st.actionType !== 'CUSTOMIZATION_REQUIRED' ? KTPlanText.stepSummary(st, { customizations: custs }) : '';
         const lines = (r?.diff?.human || []).slice(0, 3).concat(!r && spec1 && spec1 !== title ? [spec1] : []);
@@ -29503,7 +29502,12 @@
       }).filter(Boolean);
       const newFields = (p.proposedFields || []).map(f => `${f.label}${f.type ? `（${f.type}${f.required ? '・必須' : ''}）` : ''}`);
       // 影響範囲（AI の見立て。既存の設定への影響）
-      const impact = uniq((p.impact || []).map(x => ui(plainText(x.description || ''))));
+      const impactStale = (x) => scopeTextStale && x && x.targetRef != null && strippedFields.has(String(x.targetRef));
+      //   JavaScript の手順の customization（手順の id・spec の customizationId）と、範囲外の効果を外したときの範囲内の要件の文
+      function scopedReqOf(st) { const cid = String((st && st.spec && st.spec.customizationId) ?? (st && st.customizationId) ?? (st && st.id) ?? ''); const t = cid && v.scopeRequirementText && typeof v.scopeRequirementText[cid] === 'string' ? v.scopeRequirementText[cid].trim() : ''; return t; }
+      const impact = uniq((p.impact || []).filter(x => !impactStale(x)).map(x => ui(plainText(x.description || ''))));
+      //   元の説明（範囲外の効果を外す前の計画の AI の文。現在の確定内容ではない）
+      const origTexts = scopeTextStale ? uniq([...(p.assessment && p.assessment.summary ? [ui(plainText(String(p.assessment.summary)))] : []), ...steps.filter(st => st.actionType === 'CUSTOMIZATION_REQUIRED' && scopedReqOf(st)).flatMap(st => { const c = custs.find(x => x && String(x.customizationId) === String((st.spec && st.spec.customizationId) ?? st.customizationId ?? st.id)) || null; return [st.title ? `JavaScript：${ui(plainText(String(st.title)))}` : '', c && c.requirement ? `JavaScript の要件：${ui(plainText(String(c.requirement)))}` : '']; }), ...(p.impact || []).filter(impactStale).map(x => ui(plainText(x.description || '')))].filter(Boolean)) : [];
       // 反映できないこと（Toolkit の判定）・確かめられなかったこと
       let ready = [];
       try { ready = typeof KTPlanExecutor !== 'undefined' && KTPlanExecutor.applyReadiness && review ? KTPlanExecutor.applyReadiness(p, review) : []; } catch (e) { ready = []; }
@@ -29522,7 +29526,7 @@
       return `<div class="kt-ai-sum">
         <h3>${esc(v.goal || p.goal || '変更案')}</h3>
         <div class="kt-ai-sum-meta">${target ? `対象：${esc(target)}` : ''}</div>
-        ${p.assessment?.summary ? `<div class="kt-ai-rich">${KTContextUi.richTextHtml(ui(plainText(p.assessment.summary)))}</div>` : ''}
+        ${summaryText ? `<div class="kt-ai-rich">${KTContextUi.richTextHtml(ui(plainText(summaryText)))}</div>` : ''}${origTexts.length ? `<details class="kt-ai-tech kt-ai-sum-orig"><summary>元の説明（計画の AI）</summary><div style="font-size:11px; opacity:.85;">採用した範囲の外の動作を計画から外す前の文です。今の計画と合わないところがあります（今の計画は上の「何が変わるか」と左の最終案）。</div>${list(origTexts)}</details>` : ''}
         ${jsState.length ? `<div class="kt-ai-sum-label">JavaScript の状態</div><ul class="kt-ai-sum-js-state">${jsState.map(x => `<li>${esc(x.title)}：${esc(x.state)}</li>`).join('')}</ul>` : ''}
         ${finBeh.length ? `<div class="kt-ai-sum-label">最終的にどう動くか</div><div class="kt-ai-sum-behaviors"><ul>${finBeh.map(x => `<li>${esc(ui(plainText(x))).replace(/\n/g, '<br>')}</li>`).join('')}</ul></div>` : ''}
         ${changedRows.length ? `<div class="kt-ai-sum-label">前の最終案から変わった点</div><div class="kt-ai-sum-changed">${list(changedRows)}</div>` : ''}
@@ -30324,7 +30328,7 @@
       //   §0f.2 の 4・9（2026-10-09）: 依頼に無い可能性がある動作・決定事項の実現として計画が足した動作は、今までどおり折りたたみだけ（見出しは付けない）
       const so = fin.scopeOut && Array.isArray(fin.scopeOut.lines) && fin.scopeOut.lines.length ? fin.scopeOut : null;
       const sl = fin.scopeOut && Array.isArray(fin.scopeOut.linked) && fin.scopeOut.linked.length ? fin.scopeOut.linked : null;
-      const scopeDetails = `${so ? `<details class="kt-ai-tech kt-ai-final-scope-out" style="margin-top:4px; font-size:11px;"><summary>依頼に無い可能性がある動作（${so.lines.length} 件）</summary>${li(so.lines.map(x => `${esc(x)}（依頼・採用した仮案に無いため、作る JavaScript の必須の動作から外しました）`))}<div style="opacity:.85;">${so.remaining ? '計画の説明の文に残っている可能性があります。' : ''}入れる場合は、そのように伝えてください。</div></details>` : ''}${sl ? `<details class="kt-ai-tech kt-ai-final-scope-linked" style="margin-top:4px; font-size:11px;"><summary>決定事項の実現として計画が足した動作（${sl.length} 件）</summary>${li(sl.map(esc))}<div style="opacity:.85;">計画が決めたことに結び付けて足した動作です（採用した仮案の判断の動作と同じ対象・効果のものだけを入れています）。入れない場合は、そのように伝えてください。</div></details>` : ''}`;
+      const scopeDetails = `${so ? `<details class="kt-ai-tech kt-ai-final-scope-out" style="margin-top:4px; font-size:11px;"><summary>依頼に無い可能性がある動作（${so.lines.length} 件）</summary>${li(so.lines.map(x => `${esc(x)}（依頼・採用した仮案に無いため、作る JavaScript の必須の動作から外しました）`))}<div style="opacity:.85;">${so.remaining ? '計画の AI の元の説明（右の「変更内容」の［詳しく］）には残っていることがあります。' : ''}入れる場合は、そのように伝えてください。</div></details>` : ''}${sl ? `<details class="kt-ai-tech kt-ai-final-scope-linked" style="margin-top:4px; font-size:11px;"><summary>決定事項の実現として計画が足した動作（${sl.length} 件）</summary>${li(sl.map(esc))}<div style="opacity:.85;">計画が決めたことに結び付けて足した動作です（採用した仮案の判断の動作と同じ対象・効果のものだけを入れています）。入れない場合は、そのように伝えてください。</div></details>` : ''}`;
       // 確認できないこと／反映を止めている理由（根拠と次の方針を残す。無ければ出さない）
       const blockerRows = (Array.isArray(fin.blockers) ? fin.blockers : []).map(rowOf);
       const blockers = blockerRows.length ? sec('確認できないこと／反映を止めている理由', li(blockerRows), '#b00020') : '';
