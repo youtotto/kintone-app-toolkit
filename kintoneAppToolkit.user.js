@@ -24289,7 +24289,7 @@
       return { inIds, out, eIn, undetermined, eInField, noMaterial, linked: [...linkedBy.values()] };
     }
     /**
-     * 段階 C（C4・R16）: 承認が今も有効か（1 か所で判定）。版・planHash・基準の stamp（baseStamp を渡したとき）・customizeRevision・各候補の candidateHash の一致を見る。
+     * 段階 C（C4・R16）: 承認が今も有効か（1 か所で判定）。版・planHash・基準の stamp（baseStamp を渡したとき）・各候補の candidateHash の一致を見る。
      *   反映の準備・最終確認・JS の登録の直前に呼ぶ。新しい版・再生成では承認を引き継がない（版の object が変わる）
      */
     function approvalValid(v, { baseStamp = undefined } = {}) {
@@ -24304,7 +24304,8 @@
       if (baseStamp !== undefined && !(baseStamp && baseStamp.fingerprint)) return fail('BASE_UNKNOWN', '動作テスト環境の今の設定を確かめられませんでした。設定を取り直してから、もう一度お試しください。');
       if (baseStamp !== undefined && !(a.baseStamp && a.baseStamp.fingerprint)) return fail('BASE_UNKNOWN', '承認したときの動作テスト環境の設定を確かめられていません。内容を確かめて、もう一度承認してください。');
       if (baseStamp !== undefined && a.baseStamp.fingerprint !== baseStamp.fingerprint) return fail('BASE_CHANGED', '承認の後に動作テスト環境の設定が変わりました。内容を確かめて、もう一度承認してください。');
-      if ((a.customizeRevision ?? null) !== (v.spec?.customizeRevision ?? null)) return fail('REVISION_CHANGED', '承認の後に JavaScript の設定の revision が変わりました。もう一度承認してください。');
+      //   簡素化（2026-10-17）: 承認の記録の customizeRevision と仕様の revision の照合（REVISION_CHANGED）は削除した（仕様の revision を書くのは承認より前の自動の確定だけで、
+      //   同じ値の写しどうしの比較だった）。承認の後のカスタマイズの変更は、基準の指紋（BASE_CHANGED）と登録の準備の revision の照合（STALE_CUSTOMIZATION）が止める
       const gen = v.generated || {};
       for (const cid of new Set([...Object.keys(gen), ...Object.keys(a.candidates || {})])) if ((gen[cid] && gen[cid].candidateHash ? gen[cid].candidateHash : null) !== ((a.candidates || {})[cid] ?? null)) return fail('CANDIDATE_CHANGED', '承認の後に JavaScript の候補が変わりました（作り直し）。内容を確かめて、もう一度承認してください。');
       return { ok: true };
@@ -25944,7 +25945,7 @@
       };
       /** §0c.4: 承認のときの判定（最終案を作ったときの Toolkit では作れない customization の一覧を使う） */
       const finalReadinessNow = (v) => finalReadinessOf(v, { unsupported: (v && v.finalUnsupported) || [], incomplete: (v && v.finalIncomplete) || null });
-      // ---- 段階 C（C4）: 最終案の承認（版・計画の hash・基準の stamp・customize の revision・候補の hash を結び付ける）----
+      // ---- 段階 C（C4）: 最終案の承認（版・計画の hash・基準の stamp・候補の hash を結び付ける）----
       /**
        * baseStamp = 承認の時点の動作テスト環境の基準（画面が渡す）。計画を検証した時点の基準（v.review.base）と違えば承認せず、計画を STALE にして作り直しを案内する
        *   （古い基準を承認に記録すると、反映のたびに「基準が変わった」で止まり、承認し直しても抜け出せなかった。反証 C4）
@@ -25972,7 +25973,7 @@
         const stampNow = baseStamp !== undefined && baseStamp ? baseStamp : planned;
         // 承認したときの確認の項目（登録前の再検査で同じものだけを承認済みとして扱う。新しく出た確認・未確認は承認しない。反証 C2）
         const confirmations = Object.fromEntries(Object.entries(v.generated || {}).map(([cid, e]) => [cid, [...new Set(((e && e.review && e.review.registration && e.review.registration.confirmations) || []).map(x => x.code))]]));
-        v.approval = { planId: v.planId, version: v.version, planHash: planHashOf(v), baseStamp: stampNow ? JSON.parse(JSON.stringify(stampNow)) : null, customizeRevision: v.spec?.customizeRevision ?? null, candidates: Object.fromEntries(Object.entries(v.generated || {}).map(([cid, e]) => [cid, e && e.candidateHash ? e.candidateHash : null])), confirmations, ...(precheck ? { precheck: JSON.parse(JSON.stringify(precheck)) } : {}), approvedAt: now() };
+        v.approval = { planId: v.planId, version: v.version, planHash: planHashOf(v), baseStamp: stampNow ? JSON.parse(JSON.stringify(stampNow)) : null, candidates: Object.fromEntries(Object.entries(v.generated || {}).map(([cid, e]) => [cid, e && e.candidateHash ? e.candidateHash : null])), confirmations, ...(precheck ? { precheck: JSON.parse(JSON.stringify(precheck)) } : {}), approvedAt: now() };
         emit();
         return { ok: true, approval: v.approval };
       }
@@ -32065,7 +32066,7 @@
         });
       }
     }
-    /** 段階 C（C4）: 最終案の承認が今も有効か（版・planHash・基準の stamp・customizeRevision・候補の hash）。仮案から作った計画は、この承認が無いと反映の準備をしない */
+    /** 段階 C（C4）: 最終案の承認が今も有効か（版・planHash・基準の stamp・候補の hash）。仮案から作った計画は、この承認が無いと反映の準備をしない */
     const approvalNow = () => { const v = conv ? conv.activePlan() : null; if (!v || v !== adopted) return { ok: false, reason: 'NO_PLAN', message: '反映する最終案がありません。' }; return KTAiConversation.approvalValid(v, { baseStamp: devBaseStampNow() }); };
     /**
      * 確認 2: 承認の照合に使う今の基準。基準を使わない画面（基準の取得の仕組みが無い）は undefined（照合しない）、まだ取れていない・取得に失敗した（ok でない）・指紋が無いときは null

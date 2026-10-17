@@ -795,13 +795,13 @@ await section(async () => {
   await z.c.send('一覧の名前は承認待ちにして');
   assert(z.c.activePlan().version === 2 && z.gen.calls.length === 2, `R18-3: 統合先の既存コードの指紋が変わった → 流用せず作り直す: ${z.gen.calls.length}`);
 });
-// ---- R16 / C4: 承認の記録と無効化（版・planHash・基準の stamp・customizeRevision・候補の hash） ----
+// ---- R16 / C4: 承認の記録と無効化（版・planHash・基準の stamp・候補の hash） ----
 await section(async () => {
   const x = makeConvC();
   await adoptC(x);
   const v = x.c.activePlan();
   const ap = x.c.approveFinal({ planId: v.planId, version: v.version });
-  assert(ap.ok && v.approval && v.approval.planId === v.planId && v.approval.version === 1 && v.approval.planHash === KTAiConversation.planHashOf(v) && v.approval.baseStamp.fingerprint === 'fp-1' && v.approval.customizeRevision === '42' && v.approval.candidates.C1 === v.generated.C1.candidateHash && v.approval.approvedAt, `R16-1: 承認レコード: ${JSON.stringify(v.approval)}`);
+  assert(ap.ok && v.approval && v.approval.planId === v.planId && v.approval.version === 1 && v.approval.planHash === KTAiConversation.planHashOf(v) && v.approval.baseStamp.fingerprint === 'fp-1' && !('customizeRevision' in v.approval) && v.approval.candidates.C1 === v.generated.C1.candidateHash && v.approval.approvedAt, `R16-1: 承認レコード: ${JSON.stringify(v.approval)}`);
   assert(x.c.approvalValid().ok === true && KTAiConversation.approvalValid(v, { baseStamp: { fingerprint: 'fp-1' } }).ok && !x.c.messages().some(m => m.data?.kind === 'approved'), 'R16-2: 承認は有効（同じ基準）。承認だけの通知は出さない（簡素化 2026-10-17: 承認と反映は［動作テスト環境へ反映］1 回の操作）');
   assert(KTAiConversation.approvalValid(v, { baseStamp: { fingerprint: 'fp-2' } }).reason === 'BASE_CHANGED', 'R16-3: 基準の設定（stamp）が変われば無効');
   const html = finalHtml(x);
@@ -817,9 +817,7 @@ await section(async () => {
   v2.plan.assessment.summary = '変えた';
   assert(KTAiConversation.approvalValid(v2).reason === 'PLAN_CHANGED', 'R16-7: 計画の中身が変わった → 無効');
   v2.plan.assessment.summary = '承認待ちでは金額を編集不可にします。';
-  v2.spec.customizeRevision = '43';
-  assert(KTAiConversation.approvalValid(v2).reason === 'REVISION_CHANGED', 'R16-8: customize の revision が変わった → 無効');
-  v2.spec.customizeRevision = '42';
+  //   R16-8（customize の revision の照合 REVISION_CHANGED）は 2026-10-17 に削除した（承認の後のカスタマイズの変更は R16-3 の基準の指紋で止まる）
   assert(KTAiConversation.approvalValid(v2).ok, '前提: 戻せば有効');
   x.c.markStale('取り直しで設定の違いを見つけました。');
   assert(!v2.approval && x.c.messages().some(m => m.data?.kind === 'approval-revoked') && v2.status === 'STALE', 'R16-9: 動作テスト環境の基準が変わったら承認を外す（markStale）');
