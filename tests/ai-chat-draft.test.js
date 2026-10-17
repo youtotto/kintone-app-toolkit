@@ -126,7 +126,7 @@ await section(async () => {
   m.hold();
   m.type(Q); await m.send(); await ticks();
   m.type('新しい会話で聞くこと');
-  await m.act({ act: 'new-conv' }); m.release(); await ticks();
+  await m.$('kt-ai-new-conv').dispatch('click'); m.release(); await ticks();
   assert(m.msgs().length === 0 && m.input().value === '新しい会話で聞くこと', `新しい会話: 前の会話の応答を入れず、下書きは残す: msgs=${m.msgs().length} value=${JSON.stringify(m.input().value)}`);
 });
 

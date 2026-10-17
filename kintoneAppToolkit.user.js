@@ -22828,7 +22828,6 @@
       </div>`;
     }
 
-    /** 判断の集計（承認 / 保留 / 却下 / 未定）。decisions は stepId → 'approve' | 'hold' | 'reject' */
     /** 簡素化 E（2026-10-16）: 外した手順（最終案の［動作テスト環境へ反映］で反映しない手順）だけを言う。承認・保留・未定の集計は削除（承認は最終案の 1 回） */
     function decisionSummary(review, excluded) {
       const ids = new Set((review?.steps || []).map(r => r.stepId));
@@ -23811,7 +23810,7 @@
       return `${why}${bd ? `（${bd}）` : ''}。${where}をここで止めたため、この最終案は未完成です${n ? `（まだ作っていない JavaScript が ${n} 件あります）` : ''}。${inc && inc.kind === 'budget' ? '上限を見直すまで、続きは送りません。' : '続きは［残りの JavaScript を作る］で作ります（計画は作り直しません）。'}`;
     }
     //   §0f.5 の 3（2026-10-09）: 根拠の無い時間の文（「1 分前後」「十数秒ほど」）は出さない（作業の名前だけ。所要時間は出力の大きさで数倍変わる）
-    const LOADING_TEXT = { ASK: '確認しています...', EXPLAIN_PLAN: '確認しています...', EXPLAIN_REVIEW: '確認しています...', EXPLAIN_CUSTOMIZATION: '確認しています...', PLAN: '現在の設定を確認し、変更計画を作っています...', REVISE_PLAN: '変更計画を見直しています...', REVISE_AFTER_ANSWER: '回答を入れて、計画全体を作り直しています...', REVISE_AFTER_ANSWER_PATCH: '回答を入れて、変わる箇所だけを作り直しています...', REVISE_PLAN_PATCH: '変更を入れて、変わる箇所だけを作り直しています...', REVISE_CHAIN: '作り直しの間に受け付けた指示も、続けて計画に入れています...', PROPOSE: '要望を読んで、仮案を考えています...', DRAFT_REPLY: '返事を読んで、仮案を直しています...' };
+    const LOADING_TEXT = { ASK: '確認しています...' };   // 簡素化（2026-10-17）: 計画づくり・見直しの読み込み表示は進みのカードに置き換えた（仮案を経ない計画のための文は削除した）
     /** 会話の返答の逐次表示（2026-10-07）: 届いた部分を描き直す間隔（ms） */
     const STREAM_RENDER_MS = 150;
     // 段階 C（C3b）: 目安の保存先と既定値（評価の記録: 計画 約 50 秒・生成 1 件 約 30 秒・模擬 数秒・仮案 約 10 秒）
@@ -24863,6 +24862,10 @@
         //   scopeFrom（省略可）: plan がその版の外した後の計画の写しのとき、その版（範囲の記録を引き継ぐ。scopePlanOf の from）
         const parent = basedOn || null;
         const planId = parent ? parent.planId : (planIdIn || newId('plan'));
+        //   簡素化（2026-10-17）: 版は採用した仮案から作る（runPlan の draftPlanLink）か、その続き（basedOn）だけ。仮案を経ない計画（以前の Context ペインの
+        //   ［変更計画を作成］）は登録しない（その計画のための止め・案内の分岐は削除した）
+        const fromDraft = (state.draftPlanLink && state.draftPlanLink.planId === planId ? state.draftPlanLink.fromDraft : null) || (parent ? parent.fromDraft || null : null);
+        if (!fromDraft) return null;
         const version = parent ? parent.version + 1 : 1;
         for (const v of state.planHistory) if (v.planId === planId && v.status !== PLAN_STATUS.SUPERSEDED) v.status = PLAN_STATUS.SUPERSEDED;
         const v = {
@@ -24874,12 +24877,12 @@
           // 2026-10-05 第 3 段: この版を作ったときの計画の AI の返答と要件の変化（表示用）
           turnInfo: turnInfo || null,
           // 段階 B: 採用した仮案（この計画の系列の元）。版が変わっても引き継ぐ
-          fromDraft: (state.draftPlanLink && state.draftPlanLink.planId === planId ? state.draftPlanLink.fromDraft : null) || (parent ? parent.fromDraft || null : null),
+          fromDraft,
         };
         // 段階 B 修正後（2026-10-07 確認 3）: 採用した仮案からの計画は、表示用の goal を仮案の依頼文（1 行目）にする（右の見出し・目的が「依頼文 ＋ 採用した方針」の 2 行にならない）。
         //   Gateway へ送る goal（goalSent。差分更新の base にも使う）は今のまま。
         //   §0f.2 の 4（2026-10-09）: goalSent は Toolkit が送った goal を保つ（計画の AI が返した goal で置き換えない。AI が書き足した方針を以後の依頼に残さない）
-        if (v.fromDraft && v.fromDraft.request) {
+        if (v.fromDraft.request) {
           v.goalSent = goalSentIn ?? parent?.goalSent ?? parent?.goal ?? plan?.goal ?? v.goal;
           const line1 = String(v.fromDraft.request).split('\n')[0].trim().slice(0, 600);
           if (line1) v.goal = line1;
@@ -26366,11 +26369,6 @@
         const ask = cls.askText ? { askText: cls.askText } : {};
         if (!proposalOn()) return { intent: INTENT.GENERAL, reason: 'UNSUPPORTED_CONNECTION', from: cls.intent, ...ask };
         if (cls.intent === INTENT.PLAN) return { intent: INTENT.PROPOSE, reason: /^CONSULTATION/.test(String(cls.reason || '')) ? 'CONSULTATION' : `NEW_REQUEST_${cls.reason || 'PLAN'}`, utterance: cls.goal || norm(text) };
-        const v = state.activePlan && state.activePlan.status !== PLAN_STATUS.SUPERSEDED ? state.activePlan : null;
-        //   仮案から作っていない計画への修正の依頼は、その発言を新しい依頼として仮案から作る（同じ依頼を送り直しても先へ進めない行き止まりを作らない）。
-        //   回答・コードの生成は、その計画では進めずに案内だけ
-        if (v && !v.fromDraft && cls.intent === INTENT.REVISE_PLAN) return { intent: INTENT.PROPOSE, reason: 'NEW_REQUEST_LEGACY_PLAN', utterance: norm(text) };
-        if (v && !v.fromDraft && [INTENT.ANSWER, INTENT.GENERATE_CODE].includes(cls.intent)) return { intent: INTENT.GENERAL, reason: 'LEGACY_PLAN', from: cls.intent, ...ask };
         return cls;
       };
       /** 分類: 仮案の経路の前段（能力があるときだけ）→ 従来の classifyIntent → 新しい流れへの寄せ（routeFlow） */
@@ -26625,7 +26623,7 @@
           : intentOverride ? routeFlow({ intent: intentOverride, reason: 'USER_CHOICE', customizationId: (t.match(/\bC[0-9]+\b/g) || [])[0] || null }, t) : classifyAll(t);
         const result = { intent: cls.intent, reason: cls.reason, text: t, ok: true, cancelled: false, error: null };
         // 段階 B: 仮案の採用は、計画の作成から最終案のパイプラインへ（作業の種類は PLAN）
-        const adoptToPlan = cls.intent === INTENT.ADOPT_DRAFT && typeof services.plan === 'function' && state.draft && state.draft.status === 'open';
+        const adoptToPlan = cls.intent === INTENT.ADOPT_DRAFT && state.draft && state.draft.status === 'open';
         //   PROPOSE = 仮案の AI の応答待ち（画面の見出し「仮案を作成中」だけに使う。Gateway には null で送る）。GENERATE_CODE は最終案の作り直し（FINAL）
         state.working = adoptToPlan ? 'PLAN' : cls.intent === INTENT.REVISE_PLAN || cls.intent === INTENT.ANSWER ? 'REVISE' : cls.intent === INTENT.GENERATE_CODE ? 'FINAL' : cls.intent === INTENT.PROPOSE || cls.intent === INTENT.DRAFT_REPLY ? 'PROPOSE' : null;
         let loading = null;
@@ -27834,10 +27832,10 @@
           for (const x of queuedF) { x.ack.data.includedJob = 1; setAckStage(x.ack, 'revising'); }
           await reviseWith(v, queuedF.map(x => `修正の依頼：${String(x.text).replace(/\s+/g, ' ').trim()}`).join('\n').slice(0, 1900), { rawTexts: queuedF.map(x => x.text), extraAcks: queuedF.map(x => x.ack), retry: { text: queuedF.map(x => x.text).join('\n'), intent: null } });
         };
-        /** 版を登録した後の最終案（仮案から作った計画だけ）。前の版の生成結果を流用の候補にする */
+        /** 版を登録した後の最終案。前の版の生成結果を流用の候補にする */
         //   §0f.3 の 1（2026-10-09）: この送信が止まった後は、finalizeVersion が自動の見直しも生成も呼ばずに未完成の最終案を出す（AI の呼び出しは 0 件）
         const finalizeAfterCommit = async (v, base) => {
-          if (!v || !v.fromDraft || late() || state.activePlan !== v) return;
+          if (!v || late() || state.activePlan !== v) return;
           if (base && base.unregistered) return;
           await finalizeVersion(v, { reuse: base && base.generated ? base.generated : null });
         };
@@ -27859,18 +27857,16 @@
           let genNow = !!genFirst, retryNow = retry;
           const turnInfos = [...priorTurnInfos];
           const usePatchFor = (p) => patchOk && revisionMode !== 'full' && !!p.gatewayPlan;
-          // 段階 C（C3b）: 仮案から作った最終案の差分更新は、進みの 1 枚カード（計画を直す → まとめ。JS があれば生成・検証を後から足す）と AI の説明の逐次表示
-          const finalRevise = !!(base.fromDraft || (state.draftPlanLink && state.draftPlanLink.planId === base.planId));
+          // 段階 C（C3b）: 最終案の差分更新は、進みの 1 枚カード（計画を直す → まとめ。JS があれば生成・検証を後から足す）と AI の説明の逐次表示
           // 採用直後の計画作成中に受け付けた指示（版にする前の最初の計画が土台）: いまの進みのカードに「指示を計画に入れる」の段階を足す（カードを 2 つにしない）
-          const intoInitial = finalRevise && base.unregistered && !!progressOf();
+          const intoInitial = base.unregistered && !!progressOf();
           //   §0f.5 の 3（2026-10-09）: 計画の自動の見直し（finalizeVersion が担当・効果・範囲を補う）は、いまの進みのカードに段階を足す。
           //   カードを作り直さない（見出しは「最終案を作っています」のまま・経過は採用からのまま。0 に戻すと長く待っていることが隠れる）
-          const intoAuto = finalRevise && !intoInitial && state.ownerRetryActive && !!progressOf();
+          const intoAuto = !intoInitial && state.ownerRetryActive && !!progressOf();
           if (intoAuto) { const pr = progressOf(); if (!pr.stages.some(x => x.key === 'plan-auto')) { const gi = pr.stages.findIndex(x => x.key === 'generate'); const at = gi >= 0 ? gi : pr.stages.findIndex(x => x.key === 'summarize'); pr.stages.splice(at < 0 ? pr.stages.length : at, 0, { key: 'plan-auto', label: '計画の自動の見直し', activeLabel: '計画を自動で見直しています', state: 'todo', startedAt: null, doneAt: null, elapsedMs: null, detail: '', n: null, m: null, count: 1, estimateMs: 0 }); } progressStage('plan-auto', { state: 'active' }); loading = null; }
           else if (intoInitial) { const pr = progressOf(); if (!pr.stages.some(x => x.key === 'revise')) { const at = pr.stages.findIndex(x => x.key === 'summarize'); pr.stages.splice(at < 0 ? pr.stages.length : at, 0, { key: 'revise', label: '受け付けた指示を計画に入れる', activeLabel: '受け付けた指示を計画に入れています', state: 'todo', startedAt: null, doneAt: null, elapsedMs: null, detail: '', n: null, m: null, count: 1, estimateMs: timingStore.estimate('revise') }); pr.estimateMs = pr.stages.reduce((k, x) => k + (x.estimateMs || 0), 0); } progressStage('revise', { state: 'active' }); loading = null; }
-          else if (finalRevise) { finishProgress(); startProgress({ title: '最終案を直しています', stages: [{ key: 'revise', label: '計画を修正' }, { key: 'summarize', label: 'まとめ' }], materials: materialsText() }); progressStage('revise', { state: 'active' }); loading = null; }
-          else loading = push(MSG.LOADING, ROLE.ASSISTANT, usePatchFor(prev) && patchExpected() ? (afterAnswer ? LOADING_TEXT.REVISE_AFTER_ANSWER_PATCH : LOADING_TEXT.REVISE_PLAN_PATCH) : (afterAnswer ? LOADING_TEXT.REVISE_AFTER_ANSWER : LOADING_TEXT.REVISE_PLAN), { intent: cls.intent });
-          const reviseText = finalRevise ? { onText: (txt) => { noteFirstText(); progressText(txt); } } : {};
+          else { finishProgress(); startProgress({ title: '最終案を直しています', stages: [{ key: 'revise', label: '計画を修正' }, { key: 'summarize', label: 'まとめ' }], materials: materialsText() }); progressStage('revise', { state: 'active' }); loading = null; }
+          const reviseText = { onText: (txt) => { noteFirstText(); progressText(txt); } };
           /** 作業の結果を版として登録する（その作業を始めた時点までに受け付けた指示が、この版に入った） */
           const commit = (job) => {
             if (loading) { remove(loading); loading = null; }
@@ -27975,7 +27971,6 @@
               jobTexts = [...recs.map(x => x.answer), ...notesQ, ...included.map(x => x.text)];
               patchOk = true;   // 2026-10-05 第 3 段: 修正の依頼を含むときも差分（大きな変更は Gateway が全体に切り替える）
               for (const m of acks()) if (m.data?.stage === 'queued') setAckStage(m, 'revising');
-              if (loading) { loading.text = LOADING_TEXT.REVISE_CHAIN; emit(); }
             }
           } catch (e) {
             state.job = null;
@@ -27993,7 +27988,7 @@
             //   置き換わった・新しい会話になったとき（この最終案の続きを作らない）は、今までどおり片づける
             if (intoAuto && (late() || result.superseded)) finishProgress();
             else if (intoAuto) { const pr = progressOf(); const sa = pr ? pr.stages.find(x => x.key === 'plan-auto') : null; if (sa && sa.state === 'active') { if (halted() || !done) { sa.state = 'stopped'; sa.startedAt = null; emit(); } else progressStage('plan-auto', { state: 'done' }); } }
-            else if (finalRevise && !intoInitial) finishProgress();
+            else if (!intoInitial) finishProgress();
             else if (intoInitial && progressOf()) progressStage('revise', { state: 'done' });
           }
         };
@@ -28004,7 +27999,7 @@
          */
         const runPlan = async (clsP) => {
               const prev = state.activePlan;
-              if (progressOf()) progressStage('plan', { state: 'active' }); else loading = push(MSG.LOADING, ROLE.ASSISTANT, LOADING_TEXT.PLAN, { intent: clsP.intent });
+              if (progressOf()) progressStage('plan', { state: 'active' });
               aiCall();
               const goalT = clsP.goal || t;
               // 作成中の質問はすぐ答え、指示はためる（acceptWhileBusy）
@@ -28070,7 +28065,7 @@
         /**
          * 段階 B: 仮案の採用（方針の採用。設定変更の許可ではない）。仮案を adopted にし、最終案の作成へ渡す。
          * 段階 B では従来の計画の作成（runPlan = services.plan）に引き継ぐ（goal = 元の依頼 ＋ 採用した動作・前提・決定事項・不採用、要件の台帳は仮案の id から計画の planId へ）。
-         * 段階 C で最終案のパイプライン（計画 → 自動確定 → 生成 → FINAL）に置き換える。services.plan が無ければ採用の記録と案内だけ
+         * 段階 C で最終案のパイプライン（計画 → 自動確定 → 生成 → FINAL）に置き換えた
          */
         //   レビューの指摘 1・5（2026-10-07）: 仮案を adopted にするのは計画が登録できた後（runPlan の markAdopted）。作っている間は planning の印と working 'PLAN'
         //   （AI の intent adopt の経路でも）。失敗・例外では open のまま失敗の印と履歴を残し、［再試行］は「採用します」（ADOPT_DRAFT）
@@ -28078,14 +28073,13 @@
           for (const x of delegated) recordDraftDecision(x);
           state.metrics.roundTrips += 1;
           if (timing.ackMs == null) timing.ackMs = clock() - t0;
-          if (typeof services.plan !== 'function') { d.status = 'adopted'; d.adoptedAt = now(); d.adoptedBy = reason; assistant('この案で進めます。最終案（設定の手順と JavaScript）は、このあと作ります。', { kind: 'draft-adopted', draftId: d.id, rev: d.rev }); emit(); return; }
           const workingBefore = state.working;
           d.planning = true; d.adoptAttempts = (d.adoptAttempts || 0) + 1; delete d.planFailed;
           state.working = 'PLAN';
           result.retry = { text: '採用します', intent: INTENT.ADOPT_DRAFT };   // 例外で止まったときの［再試行］（利用者の発言ではなく仮案から作り直す）
           //   会話の設計し直し（2026-10-14・指示書 §1.3）: 採用直後の別の文（「この案で進めます。…kintone にはまだ何も反映していません。」）は出さない。
           //   見出しは進みのカード（「この案で最終案を作っています」。JavaScript の無い計画と分かったら「この案で設定の最終案を作っています」）に吸収し、
-          //   「まだ反映していません」は案内行（PROGRESS_HINT）に 1 回だけ。会話の流れ・［再試行］（result.retry）・services.plan が無いときの案内は変えない
+          //   「まだ反映していません」は案内行（PROGRESS_HINT）に 1 回だけ。会話の流れ・［再試行］（result.retry）は変えない
           // 段階 C（C3b）: 進みの 1 枚カード（計画 → 生成 → 検証 → まとめ。JS の件数は計画ができてから足す）
           startProgress({ title: 'この案で最終案を作っています', stages: [{ key: 'plan', label: '計画を作る', activeLabel: '計画を作っています', doneLabel: '計画を作りました' }, { key: 'summarize', label: 'まとめ' }], materials: materialsText() });
           try {
@@ -28252,7 +28246,7 @@
              */
             case INTENT.GENERATE_CODE: {
               const v = state.activePlan;
-              if (!v || !v.fromDraft) { toolkit('JavaScript を作る最終案がありません。実現したいことを入力すると、仮案から最終案を作ります（JavaScript は最終案の中で作ります）。', { kind: 'generate-no-final' }); result.ok = false; break; }
+              if (!v) { toolkit('JavaScript を作る最終案がありません。実現したいことを入力すると、仮案から最終案を作ります（JavaScript は最終案の中で作ります）。', { kind: 'generate-no-final' }); result.ok = false; break; }
               if (v.status !== PLAN_STATUS.ACTIVE && v.status !== PLAN_STATUS.STALE) { toolkit(`現在の${planLabel(v)}は${v.status === PLAN_STATUS.ROLLED_BACK ? '動作テスト環境へ反映したあと元に戻しました' : '動作テスト環境へ反映済みです'}。追加の変更は、実現したいことを入力すると新しい仮案から作ります。`, { kind: 'generate-after-execution', planId: v.planId, version: v.version }); result.ok = false; break; }
               const reviewOfG = (cid) => (v.review?.steps || []).find(r => r.customization?.customizationId === cid) || null;
               const genListG = (v.plan?.customizations || []).filter(c => c && c.customizationId).filter(c => { const rv = reviewOfG(c.customizationId); return rv ? !!(rv.codeGeneration && rv.codeGeneration.supported) : ['NEW_JS_FILE', 'EXTEND_EXISTING_JS'].includes(c.strategy); });
@@ -28290,10 +28284,9 @@
               const v = state.activePlan;
               //   C-1 第 3 段（2026-10-08）: 最終案の流れでは、反映は最終案の承認の後だけ（承認の前は承認へ案内する。手順ごとの承認・仕様の確定へは案内しない）
               //   §0e.1（2026-10-09）: 承認と反映は最終案のカードの［動作テスト環境へ反映］1 回（標準設定と JavaScript を続けて反映する）。承認済みなら結果の場所を案内する
-              if (v && v.fromDraft && !approvalValid(v).ok) { toolkit(v.final ? '反映は、最終案のカードの［動作テスト環境へ反映］から行います。内容を確かめて押すと、標準設定と JavaScript を続けて動作テスト環境へ反映します（反映できない点があるときは押せません）。' : '最終案がまだできていません。最終案ができたら、カードの［動作テスト環境へ反映］で反映します。', { kind: 'preview-needs-approval', planId: v.planId, version: v.version }); break; }
-              if (v && v.fromDraft) { toolkit('この最終案は承認済みです。反映の結果は会話の反映のカードと右の「反映」にあります。', { kind: 'preview-approved', planId: v.planId, version: v.version }); break; }
-              //   簡素化 E（2026-10-16）: 仮案から作っていない計画の手順ごとの承認の案内は削除した（反映は最終案の承認の 1 回だけ）
-              toolkit('反映できる最終案がありません。変更したいことを送ると、仮案から最終案を作ります。', { kind: 'preview-no-final', planId: v ? v.planId : null, version: v ? v.version : null });
+              if (v && !approvalValid(v).ok) { toolkit(v.final ? '反映は、最終案のカードの［動作テスト環境へ反映］から行います。内容を確かめて押すと、標準設定と JavaScript を続けて動作テスト環境へ反映します（反映できない点があるときは押せません）。' : '最終案がまだできていません。最終案ができたら、カードの［動作テスト環境へ反映］で反映します。', { kind: 'preview-needs-approval', planId: v.planId, version: v.version }); break; }
+              if (v) { toolkit('この最終案は承認済みです。反映の結果は会話の反映のカードと右の「反映」にあります。', { kind: 'preview-approved', planId: v.planId, version: v.version }); break; }
+              toolkit('反映できる最終案がありません。変更したいことを送ると、仮案から最終案を作ります。', { kind: 'preview-no-final', planId: null, version: null });
               break;
             }
             case INTENT.REQUEST_ROLLBACK: {
@@ -28342,9 +28335,8 @@
                 assistant('おすすめの内容で決めました。', { kind: 'draft-delegated', draftId: state.draft.id, rev: state.draft.rev, keys: recorded.map(e => e.key) });
                 break;
               }
-              //   C-1 第 3 段（2026-10-08）: 仮案の能力が無い接続先（UNSUPPORTED_CONNECTION）と、仮案から作っていない計画への修正・回答・生成（LEGACY_PLAN）は、ここで止める
+              //   C-1 第 3 段（2026-10-08）: 仮案の能力が無い接続先（UNSUPPORTED_CONNECTION）は、ここで止める
               const text2 = cls.reason === 'UNSUPPORTED_CONNECTION' ? '接続先が非対応です（仮案と最終案の流れに対応した接続先が必要です）。質問には答えますが、変更案の作成・JavaScript の生成・動作テスト環境への登録には進みません。接続先が更新されてから、実現したいことを送ってください。'
-                : cls.reason === 'LEGACY_PLAN' ? 'この変更案は仮案と最終案の流れで作ったものではないため、ここでは回答を入れたり JavaScript を作ったりしません。実現したいこと（直したい内容を含めた全体）を送ると、仮案から最終案を作ります。'
                 : cls.reason === 'DRAFT_SMALLTALK' ? (cls.ack ? '採用するときは「採用します」、変えたい点があればそのまま書いてください（質問もできます）。' : 'はい。仮案への返事（採用・変えたい点・質問）は、いつでもどうぞ。')
                 : cls.reason === 'NO_PLAN' && draftOpen ? '反映できる変更案はまだありません。いまは仮案への返事（採用・変えたい点・質問）を受け付けています。採用すると最終案を作ります。'
                 : cls.reason === 'ADOPT_NO_RECOMMENDATION' ? `残っている確認事項は業務の判断で、推奨がありません：「${(cls.openTexts || []).join('」「')}」。答えを書いてください（確認事項のカードの回答欄からも送れます）。kintone にはまだ何も反映していません。`
@@ -28431,7 +28423,7 @@
         // 会話の応答性（2026-10-05）: 計画の作り直しの作業中か（その版と何回目の作業か）・作り直しの途中に回答・修正の依頼を受け付けられるか
         job: () => (state.job ? { planId: state.job.planId, version: state.job.base?.version ?? null, n: state.job.n } : null),
         canQueue,
-        registerPlan: (p) => { const v = registerPlan(p); announcePlan(v); return v; },
+        registerPlan: (p) => { const v = registerPlan(p); if (v) announcePlan(v); return v; },   // 仮案から作った（受け継いだ）版でなければ登録しない（null）
         activePlan: () => state.activePlan, planHistory: () => state.planHistory,
         noteExecution, markStale,
         // 段階 C: 最終案の承認・承認の有効性・進みのカードの描き直し・反映後の基準の更新
@@ -29416,7 +29408,7 @@
         ${rows}
         ${sharedFiles.length ? `<details class="kt-ai-tech" style="margin-top:4px; font-size:12px;"><summary>同じフィールドを扱う既存の JavaScript</summary>${esc(sharedFiles.join('、'))}（一緒に動かしたときの動きは、生成工程の動作テストで確かめます）</details>` : ''}
         ${questions.length ? `<div style="margin-top:4px; font-size:11px; color:#b26a00;">${questions.map(q => `？ ${esc(q)}`).join('<br>')}</div>` : ''}
-        <div style="font-size:10px; opacity:.6; margin-top:4px;">${status === 'SUPERSEDED' ? 'この仕様は最新ではありません（修正で新しい版ができました）。' : v.fromDraft ? '最終案の一部です（内容は最終案のカードで確かめ、修正は会話で伝えます）。' : '閲覧だけです（この変更案は仮案と最終案の流れで作ったものではありません。実現したいことを送ると仮案から作ります）。'}</div>`, badgeColor);
+        <div style="font-size:10px; opacity:.6; margin-top:4px;">${status === 'SUPERSEDED' ? 'この仕様は最新ではありません（修正で新しい版ができました）。' : '最終案の一部です（内容は最終案のカードで確かめ、修正は会話で伝えます）。'}</div>`, badgeColor);
     }
     function jsRollbackReadyHtml(m) {
       return card('kt-ai-js-rollback-ready', `<div><b>${esc(m.text)}</b></div><div style="font-size:11px; opacity:.8; margin-top:2px;">登録する前のカスタマイズ設定に戻します。登録の後にほかの変更があれば止まります。</div><div style="margin-top:6px; display:flex; gap:6px;">${btn('js-rollback', '変更前の状態に戻す', `data-execution="${esc(m.data?.executionId || '')}"`, 'border-color:#6a1b9a; font-weight:600;')}</div><div style="font-size:10px; opacity:.6; margin-top:4px;">押すと現在の設定を確認（書き込みなし）し、確認画面で「変更前の状態に戻す」を押したときだけ戻します。</div>`, '#6a1b9a');
@@ -29527,7 +29519,7 @@
       const body = `${replyHtml}${buttons}${waitingHtml}`;
       if (waiting) return card('kt-ai-draft-card is-waiting', `<div><b>${esc(d.rev > 1 ? '仮案を直しました。' : '仮案ができました。')}</b></div>${body}`, '#1a73e8');
       if (!active) {
-        // 1 行に畳む見出し（レビューの指摘 9）: 作っている間 / 計画ができた後 / services.plan が無い採用 / 同じ仮案の前の版 / 別の依頼の前の仮案
+        // 1 行に畳む見出し（レビューの指摘 9）: 作っている間 / 計画ができた後 / 同じ仮案の前の版 / 別の依頼の前の仮案
         //   2026-10-15（§4(a)）: 採用した仮案の見出しは「仮案 — 採用済み」（最終案ができたか・計画があるかで変えない。「最終案を作りました」は出さない）。作っている間だけ添える
         const summary = !same ? '前の仮案（別の依頼）'
           : latest && draft.planning ? '仮案 — 採用済み（最終案を作っています）'
@@ -31375,12 +31367,11 @@
     const dataOf = (t, key) => (t?.dataset?.[key] ?? (typeof t?.getAttribute === 'function' ? t.getAttribute(`data-${key.replace(/[A-Z]/g, c => `-${c.toLowerCase()}`)}`) : null)) ?? null;
     const actEl = (t) => (t && typeof t.closest === 'function' ? (t.closest('[data-act]') || t.closest('[data-eid]') || t) : t);
     /**
-     * data-act の操作（会話のカード・右のペインのボタンで共通）。承認 / 最終確認 / 書き込みはここでは起きない（右の確認画面を経る）
+     * data-act の操作（会話のカード・右のペインのボタンで共通）。承認と反映は最終案のカードの［動作テスト環境へ反映］（final-approve → applyFinal）だけ。
+     *   簡素化（2026-10-17）: どのボタンも出していない操作（open-review・open-spec・generate・copy-code / copy-diff / copy-cplan・new-conv）は削除した
      */
     async function handleAct(act, t) {
-      if (act === 'open-review') { showPane('review', { scrollTo: '#kt-ai-review' }); return; }
       if (act === 'open-plan') { showPane('plan'); return; }
-      if (act === 'open-spec') { showPane('plan', { scrollTo: '#kt-ai-spec' }); return; }
       if (act === 'exec-details') { showPane('exec', { scrollTo: '#kt-ai-exec-result' }); return; }
       if (act === 'open-rollback') { showPane('exec', { scrollTo: '#kt-ai-rollback' }); return; }
       if (act === 'rollback') {
@@ -31416,10 +31407,7 @@
       if (act === 'copy-doc') { const m = conv.state.messages.find(x => x.id === dataOf(t, 'mid')); const text = m?.data?.outputs?.[dataOf(t, 'key') || 'prompt']; const ok = text ? await d.copyText(text) : false; if (t && t.textContent != null) flashBtnText(t, ok ? 'Copied!' : 'Failed'); return; }
       if (act === 'open-doc-context') { setMode('doc', { kind: dataOf(t, 'kind') || 'spec' }); generate(); setArtifact({ type: VM.ARTIFACT.DOCUMENT, id: dataOf(t, 'kind') || 'spec', version: null, kind: dataOf(t, 'kind') || 'spec' }); return; }
       if (act === 'open-customize') { if (typeof d.openCustomize === 'function') await d.openCustomize({ target: dataOf(t, 'target') || 'desktop', kind: 'js', name: dataOf(t, 'name') || null }); return; }
-      // Phase 16: JavaScript Generator（右の確認結果の［コードを作る］も会話の GENERATE_CODE を通る。C-1 第 3 段: 最終案の作り直し（版を上げる）だけ。登録はしない）
-      if (act === 'generate') { const cid = dataOf(t, 'cid'); await sendChat(cid ? `${cid} のコードを作って` : 'コードを作って', { intent: KTAiConversation.INTENT.GENERATE_CODE, displayText: generateDisplay(cid) }); return; }
       if (act === 'open-code') { const cid = dataOf(t, 'cid'); showCode(cid, { view: dataOf(t, 'view') || 'code', v: generatedForCard(cid, t) }); return; }
-      if (act === 'copy-code' || act === 'copy-diff' || act === 'copy-cplan') { const cid = dataOf(t, 'cid'); const ok = await copyGenerated(cid, act === 'copy-code' ? 'code' : act === 'copy-diff' ? 'diff' : 'cplan', generatedForCard(cid, t)); if (t && t.textContent != null) flashBtnText(t, ok ? 'Copied!' : 'Failed'); return; }
       if (act === 'open-js-result') { jsExec.paneClosed = false; renderJsReg(); showPane('exec', { scrollTo: '#kt-ai-jsreg' }); return; }
       if (act === 'js-rollback') {
         const exId = dataOf(t, 'execution');
@@ -31427,18 +31415,9 @@
         setArtifact({ type: VM.ARTIFACT.ROLLBACK, id: jsExec.execution?.executionId ?? null, version: null, js: true }, { scrollTo: '#kt-ai-jsreg' }); await startJsRollback(); return;
       }
       if (act === 'consult-resume') { const m = conv.state.messages.find(x => x.data?.kind === 'consult-choices'); if (m) conv.state.messages.splice(conv.state.messages.indexOf(m), 1); pendingSeed = null; renderChat(); return; }
-      // Phase 20（U5）: 新しい会話。送信中の要求は中断し、まだ反映していない準備（最終確認の画面）は取り消す（前の会話の計画を新しい会話から反映しない）。
-      // 反映済み・未復元の実行は残す（「戻して」や詳細パネルから元に戻せる）
-      if (act === 'new-conv') { startNewConversation(); return; }
       if (act === 'consult-new') { const seed = pendingSeed; if (seed) { const r = startNewConversation({ consultSeed: seed }); if (r && r.ok) setArtifact({ type: VM.ARTIFACT.CONSULTATION, id: seed.sourceId, version: null, name: seed.name }, { auto: true }); renderWsState(); } return; }
     }
     /** ボタンから送る「コードを作って」の表示（送る文はカスタマイズの番号を含む。会話には要件の文で出す） */
-    function generateDisplay(cid) {
-      const v = conv.activePlan();
-      const c = cid && v ? (v.plan?.customizations || []).find(x => x.customizationId === cid) || null : null;
-      const req = String(c?.requirement || '').replace(/\s+/g, ' ').trim();
-      return req ? `「${req.length > 40 ? `${req.slice(0, 40)}…` : req}」のコードを作って` : 'コードを作って';
-    }
     $chat.addEventListener('click', async (ev) => {
       const t = actEl(ev?.target);
       const eid = dataOf(t, 'eid');
@@ -32048,7 +32027,7 @@
      *   （承認に指紋があれば BASE_UNKNOWN で止める。以前は undefined を渡して照合を黙って飛ばした）
      */
     function devBaseStampNow() { if (!devBase || !devBase.ok) return null; try { const st = KTDevBase.stamp(devBase); return st && st.fingerprint ? st : null; } catch (e) { return null; } }
-    const finalFlow = () => !!(adopted && adopted.fromDraft);
+    const finalFlow = () => !!adopted;   // 簡素化（2026-10-17）: 版は必ず仮案から作るので、今の計画があれば最終案の流れ
     /**
      * §0e.1（2026-10-09・不具合 A）: 設定の手順が止まらずに反映できたか。準備の時点で実行する手順（PENDING）だけで判定する。
      *   以前は JavaScript の手順（CUSTOMIZATION_REQUIRED。状態は UNSUPPORTED）も数えたため、標準設定と JavaScript が混ざる計画では必ず「途中で止まった」になっていた
@@ -32755,7 +32734,7 @@
     const onDecisionChange = (ev) => {
       const t = ev?.target;
       const sid = t?.dataset?.step ?? (typeof t?.getAttribute === 'function' ? t.getAttribute('data-step') : null);
-      if (sid && t) decide(sid, 'checked' in t ? (t.checked ? 'reject' : '') : t.value);
+      if (sid && t && 'checked' in t) decide(sid, t.checked ? 'reject' : '');   // 簡素化（2026-10-17）: 以前の選択欄（承認・保留・却下）の値は読まない
     };
     if ($reviewResult) $reviewResult.addEventListener('change', onDecisionChange);
     $planResult.addEventListener('change', onDecisionChange);
@@ -33005,7 +32984,6 @@
       // AI Workspace（Phase 15）
       send: sendChat, conversation: () => conv, classify: (t) => conv.classify(t), metrics: () => conv.metrics(),
       // JavaScript Generator（Phase 16）: 生成は会話の GENERATE_CODE を通る。登録はしない
-      generate: (cid = null) => sendChat(cid ? `${cid} のコードを作って` : 'コードを作って', { intent: KTAiConversation.INTENT.GENERATE_CODE, displayText: generateDisplay(cid) }),
       generated: (cid, v = null) => (generatedEntry(cid, v)?.entry || null), showCode, copyGenerated, codeShown: () => codeShown, loadJsSource,
       // JS 相談 / 実装仕様 / JS 登録（Phase 17）
       consult, startJsRegister, confirmJsRegister, cancelJsRegister, startJsRollback, confirmJsRollback, cancelJsRollback, jsExecState: () => jsExec, jsAudit,

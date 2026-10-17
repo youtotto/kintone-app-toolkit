@@ -92,7 +92,8 @@ console.log('\n--- §B1. 会話コントローラ: R01〜R08 と「ありがと�
 function makeConv({ features = ['requirements', 'brief', 'stream', 'proposal'], withPlan = false, planImpl = null, proposeGate = null, scriptFn = script, autoMap = true } = {}) {
   const calls = { propose: [], ask: [], plan: [] };
   let t = 1000;
-  const x = { planImpl };
+  //   簡素化（2026-10-17）: 計画を作る口の無い会話（採用の記録だけ）は製品から削除したので、素材の会話もいつも計画を作る口を持つ
+  const x = { planImpl: planImpl || (withPlan ? null : planOk) };
   const services = {
     conversationFeatures: () => features,
     revisionModes: () => ['full'],
@@ -107,7 +108,7 @@ function makeConv({ features = ['requirements', 'brief', 'stream', 'proposal'], 
     },
     async ask(args) { calls.ask.push({ question: args.question, conversation: clone(args.conversation) }); t += 2000; return { ok: true, answer: { answer: '5 営業日にすると判定が 2 営業日早くなります。', facts: [], analysis: [], recommendations: [], unknowns: [] }, ctx: { facts: [] } }; },
     readiness() { return null; },
-    ...(withPlan || planImpl ? { async plan(args) { calls.plan.push({ goal: args.goal, decisions: clone(args.decisions ?? null), requirements: clone(args.requirements ?? null), revision: args.revision ? true : false }); t += 30000; const r0 = x.planImpl ? x.planImpl(args) : { plan: null, message: '（テスト: 計画は作らない）', reason: 'TEST' }; const r = r0 && typeof r0.then === 'function' ? await r0 : r0; return autoMap ? KIT.withPlannerMapping(r, args.requirements) : r; } } : {}),
+    ...({ async plan(args) { calls.plan.push({ goal: args.goal, decisions: clone(args.decisions ?? null), requirements: clone(args.requirements ?? null), revision: args.revision ? true : false }); t += 30000; const r0 = x.planImpl ? x.planImpl(args) : { plan: null, message: '（テスト: 計画は作らない）', reason: 'TEST' }; const r = r0 && typeof r0.then === 'function' ? await r0 : r0; return autoMap ? KIT.withPlannerMapping(r, args.requirements) : r; } }),
   };
   const c = KTAiConversation.create({ services, now: () => '2026-10-07T00:00:00.000Z', clock: () => t });
   Object.assign(x, { c, calls, services, kinds: () => c.messages().map(m => m.data?.kind || m.type), last: () => c.messages()[c.messages().length - 1], draft: () => c.draft(), ledger: (id) => c.state.ledgers.get(id) || null });
@@ -191,7 +192,7 @@ await section(async () => {
   assert(revoked.length === 2 && revoked.every(r => /通知/.test(`${r.condition}${r.behavior}`)) && reqs().some(r => r.decision !== 'revoked' && /5 営業日/.test(r.behavior)) && !reqs().some(r => r.decision !== 'revoked' && /7 営業日/.test(r.behavior)), `R07-4: 通知の要件は revoke・期限の要件は 5 営業日に更新: ${JSON.stringify(reqs().map(r => [r.id, r.decision, r.behavior]))}`);
   assert(c.draftDecisions().find(d => d.key === 'deadline.days')?.answer === '承認の期限は申請から 5 営業日（土日祝のみ除く）' && c.draftDecisions().find(d => d.key === 'deadline.days').history.length === 1, 'R07-5: key のある前提の変更は、同じ key の決定事項も更新（前の答えは履歴に）');
   //   レビュー 7（2026-10-14）: 「kintone にはまだ何も反映していません」は進みのカードの案内行に 1 回だけ（採用の案内では言わない）
-  assert(x.last().data?.kind === 'draft-adopted' && /この案で進めます/.test(x.last().text) && !/kintone にはまだ何も反映していません/.test(x.last().text) && calls.plan.length === 0, 'R07-6: services.plan が無いときは採用の案内だけ（最終案の作成は段階 C。「まだ何も反映していません」は繰り返さない）');
+  assert(calls.plan.length === 1 && !c.messages().some(m => m.data?.kind === 'draft-adopted') && c.activePlan() && c.activePlan().fromDraft && c.activePlan().fromDraft.id === draft().id, 'R07-6: 採用すると計画の AI を 1 回呼んで、この仮案から計画を作る（簡素化 2026-10-17: 計画を作る口の無い採用の案内は削除した）（最終案の作成は段階 C。「まだ何も反映していません」は繰り返さない）');
   const t7 = c.metrics().timings.slice(-1)[0];
   assert(t7.intent === 'DRAFT_REPLY' && t7.ackMs != null && t7.firstTextMs === 3000 && t7.doneMs >= 7000, `R07-7: 計測: ${JSON.stringify({ intent: t7.intent, ackMs: t7.ackMs, firstTextMs: t7.firstTextMs, doneMs: t7.doneMs })}`);
   // 以後の台本で再質問が無かったこと（R03 / R05 / R06 の key）
@@ -328,7 +329,7 @@ await section(async () => {
   await clickChat(m, 'draft-reject', { draft: m.conv().draft().id }); await ticks(8);
   const u2 = m.msgs().filter(x => x.type === 'USER').slice(-1)[0];
   assert(u2.text === 'この案は採用しません' && m.conv().draft().status === 'open', 'B2-20:［不採用］は「この案は採用しません」を送る（AI が別の方向を聞き返す経路）');
-  await clickChat(m, 'new-conv'); await ticks();
+  await m.$('kt-ai-new-conv').dispatch('click'); await ticks();
   assert(m.conv().draft() === null && m.conv().draftDecisions().length === 0 && m.$('kt-ai-change-summary').innerHTML === '' && /未作成/.test(m.$('kt-ai-ws-state').innerHTML), 'B2-21:［新しい会話］で仮案・決定事項・右の詳細は消える');
 });
 // C-1 第 3 段（2026-10-08）: 能力が無い health の画面も「接続先が非対応」で止める（従来の計画の流れ・変更案のカードは無い）
@@ -1421,11 +1422,9 @@ await section(async () => {
   };
   const a = await run({ proposal: false });
   assert(a.v === null && a.genCtx.length === 0 && a.m.calls.plan.length === 0 && a.pr === null && /接続先が非対応/.test(a.m.chat()) && !a.m.mock.calls.some(c => c === 'PUT customize'), `D14-1: 仮案の能力が無い接続先 →「接続先が非対応」で計画・生成・登録に進まない: ${JSON.stringify({ plan: a.m.calls.plan.length, gen: a.genCtx.length })}`);
-  //   仮案から作っていない計画（Context ペインの「変更計画を作成」など）に生成コードがあっても、最終案の承認が無いので登録の準備をしない（従来の流れの登録を残さない）
+  //   簡素化（2026-10-17）: 仮案を経ない計画（以前の Context ペインの「変更計画を作成」）は、会話の公開口からも登録できない（その計画の登録・案内の分岐は削除した）
   const legacyV = a.m.conv().registerPlan({ plan: clone(planRespL('承認待ちでは案件名を編集できないようにしたい').plan), ctx: null, review: null });
-  legacyV.generated = { C1: { generated: { strategy: 'NEW_JS_FILE', targetFile: 'caseLock.js', code: LOCK_L, patch: null, events: ['app.record.edit.show'], fields: [{ code: 'case_name', access: 'CONTROL' }], apis: [], assumptions: [], warnings: [], coverage: [] }, review: KTCodeReview.review({ generated: { strategy: 'NEW_JS_FILE', targetFile: 'caseLock.js', code: LOCK_L, patch: null, events: ['app.record.edit.show'], fields: [{ code: 'case_name', access: 'CONTROL' }], apis: [], assumptions: [], warnings: [], coverage: [] }, customization: CUST_L, plan: null, data: clone(INPUTS.data), scan: null, existingSource: null }), existingSource: null } };
-  const prL = await a.m.panel.startJsRegister(legacyV); await ticks(4);
-  assert(prL && prL.status === 'BLOCKED' && prL.blockers.some(b => b.code === 'APPROVAL_REQUIRED') && !a.m.mock.calls.some(c => c === 'PUT customize'), `D14-1b: 仮案から作っていない計画の JavaScript は、最終案の承認が無いので登録しない（APPROVAL_REQUIRED）: ${JSON.stringify(prL && prL.blockers)}`);
+  assert(legacyV === null && a.m.conv().activePlan() === null && !a.m.mock.calls.some(c => c === 'PUT customize'), `D14-1b: 仮案を経ない計画は登録しない（版を作らない・書き込みなし）: ${JSON.stringify(legacyV && legacyV.planId)}`);
   //   §0d.4（2026-10-08）: 既知の競合の判定は Toolkit の形式確認（error-cancels-edit）から生成工程へ移した。今の契約の Gateway は check behavior
   //   （checkReason candidate-error-same-event）にして模擬テストで確かめ、error で編集不可が取り消されれば不合格を返す（隔離環境の sandbox/test/run.mjs §3 R13）。
   //   Toolkit はその明示された失敗を取り込んで承認・登録しない。旧い接続先（生成工程が必須の効果に非対応）では結果の欠落（接続先が非対応）で承認しない
@@ -2805,14 +2804,14 @@ await section(async () => {
   // 「C1 のコードを作り直して。金額を変更したときにも切り替わるように」（生成の指示に要望が付いた文）は最終案を直す依頼（REVISE_PLAN）。要望を捨てない
   const cls = x.c.classify('C1 のコードを作り直して。金額を変更したときにも切り替わるように');
   assert(cls.intent === 'REVISE_PLAN' && cls.reason === 'TURN_THEN_GENERATE' && KTAiConversation.extraRequestIn === undefined, `F2-5: 生成の指示に付いた要望は最終案を直す依頼（従来の「内容を直してから作る / このまま作る」の選択は無い）: ${cls.intent}/${cls.reason}`);
-  // 画面: 右の確認結果の［コードを作る］（data-act generate）も同じ入口。設定の手順だけの最終案では作る JavaScript が無いと答える
+  // 画面: 会話の「コードを作って」も同じ入口。設定の手順だけの最終案では作る JavaScript が無いと答える（簡素化 2026-10-17: どのボタンも出していない act generate は削除した）
   const m = mount({ generateImpl: async () => { throw new Error('生成は呼ばない'); } });
   await ticks();
   for (const s of ['課長・部長の承認者を選ぶ運用にしたい', '100円未満は部長不要、100万円以上は必要', '7営業日で。会社独自の休業日は今回はなし']) { await m.panel.send(s); await ticks(8); }
   await m.panel.send('おすすめで。この案で進めて'); await ticks(14);
   const vS = m.conv().activePlan();
-  await clickChat(m, 'generate', { cid: 'C1' }); await ticks(6);
-  assert(vS && vS.final && m.conv().activePlan() === vS && m.msgs().some(z => z.data?.kind === 'generate-not-needed') && !m.msgs().some(z => z.type === 'CODE'), 'F2-6: 右の［コードを作る］も最終案の作り直しの入口（作る JavaScript が無ければ案内だけ。版は変えない）');
+  await m.panel.send('コードを作って'); await ticks(6);
+  assert(vS && vS.final && m.conv().activePlan() === vS && m.msgs().some(z => z.data?.reason === 'NO_CUSTOMIZATION') && !m.msgs().some(z => z.type === 'CODE'), 'F2-6: 会話の「コードを作って」は、作る JavaScript が無い最終案では案内だけ（版は変えない）');
   const noFinal = makeConvC();
   const rn = await noFinal.c.send('コードを作って');
   assert(rn.intent === 'GENERAL' && rn.reason === 'NO_PLAN', `F2-7: 最終案が無いときの「コードを作って」は生成しない: ${rn.reason}`);
@@ -2838,16 +2837,16 @@ await section(async () => {
   assert(r.ok && r.intent === 'ANSWER' && x.c.activePlan().version === 2 && req.revision && /いいえ（どの確認事項への回答か決められなかった答え。候補の確認事項: 「承認待ちの間、申請者本人も編集できなくしますか」、「モバイルでも同じ制御にしますか」）/.test(req.request) && !x.c.messages().some(m => m.data?.kind === 'answer-target') && x.c.pendingClarification === undefined && !x.c.ledger().some(e => e.answer === 'いいえ'), `F4-1: 対応先を聞き返さず、候補を添えて計画の AI に渡す（決定事項に記録しない）: ${req.request}`);
   assert(x.c.metrics().unresolvedAnswers === 1 && x.c.metrics().clarifications === 0, 'F4-2: 計測は「対応先を決められず計画の AI に渡した答え」（unresolvedAnswers）。聞き返しの回数（clarifications）は増えない');
 });
-// F5: 仮案から作っていない計画（Context ペインの「変更計画を作成」・registerPlan）は、会話で回答を入れない・JavaScript を作らない。
-//   修正の依頼はその発言を新しい依頼として仮案から作る（同じ依頼を送り直しても進めない行き止まりを作らない）
+// F5: 仮案を経ない計画（以前の Context ペインの「変更計画を作成」）は、会話の公開口 registerPlan からも登録できない（簡素化 2026-10-17: その計画への回答・生成・
+//   修正を止める振り分け LEGACY_PLAN は削除した）。前の版から受け継ぐ版（basedOn）は今までどおり登録できる
 await section(async () => {
   const x = makeConvC();
   const vL = x.c.registerPlan({ plan: planJs({ goal: '承認待ちでは金額を編集不可' }).plan, ctx: null, review: null });
-  assert(!x.c.messages().some(m => ['PLAN', 'REVIEW', 'SPEC'].includes(m.type) || ['plan-summary', 'review-summary', 'questions', 'provisionals', 'spec-intro'].includes(m.data?.kind)), `F5-1: 計画を登録しても、変更案のカード・確認事項・提案・仕様の案内は出ない（announcePlan の従来の分岐は削除）: ${JSON.stringify(x.kinds())}`);
-  const rs = [await x.c.send('コードを作って'), await x.c.send('全員', { intentOverride: 'ANSWER' })];
-  assert(rs.every(r => r.intent === 'GENERAL' && r.reason === 'LEGACY_PLAN') && x.calls.plan.length === 0 && x.gen.calls.length === 0 && x.c.activePlan() === vL && /仮案と最終案の流れで作ったものではない/.test(x.last().text), `F5-2: 仮案から作っていない計画には回答を入れない・JavaScript を作らない: ${JSON.stringify(rs.map(r => r.reason))}`);
-  const rv = await x.c.send('一覧の名前は承認待ちにして');
-  assert(rv.intent === 'PROPOSE' && rv.reason === 'NEW_REQUEST_LEGACY_PLAN' && x.calls.propose.length === 1 && x.calls.propose[0].utterance === '一覧の名前は承認待ちにして' && x.calls.plan.length === 0, `F5-3: 修正の依頼は新しい依頼として仮案の AI へ（計画の AI でその計画を直さない）: ${JSON.stringify({ intent: rv.intent, reason: rv.reason })}`);
+  assert(vL === null && x.c.activePlan() === null && x.c.planHistory().length === 0, 'F5-1: 仮案を経ない計画は登録しない（版を作らない）');
+  await adoptC(x);
+  const v1 = x.c.activePlan();
+  const v2 = x.c.registerPlan({ plan: clone(v1.plan), ctx: null, review: null, basedOn: v1 });
+  assert(v1 && v1.fromDraft && v2 && v2.version === v1.version + 1 && v2.fromDraft && v2.fromDraft.id === v1.fromDraft.id, 'F5-2: 仮案から作った版の続き（basedOn）は登録でき、採用した仮案を受け継ぐ');
 });
 // F6: 最終案の後の新しい依頼（「新しい変更案にする」の選択・反映済みの後の依頼）も仮案から（afterPlan。仮案への返事を前の計画の修正と取り違えない）
 await section(async () => {

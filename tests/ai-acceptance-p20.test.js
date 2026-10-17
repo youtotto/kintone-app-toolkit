@@ -557,10 +557,10 @@ console.log('\n--- CX-2a / CX-7 / XA-5（再実行）. 通知の種類・未確�
     m.$('kt-ai-input').value = 'APIキー: a1B2c3D4e5f6 を使って会計システムに送って';
     await m.$('kt-ai-send').dispatch('click'); await ticks();
     assert(m.calls.length === 0 && m.$('kt-ai-input').value === 'APIキー: a1B2c3D4e5f6 を使って会計システムに送って' && /送信しませんでした/.test(m.$('kt-ai-chat').innerHTML) && !/a1B2c3D4e5f6/.test(m.$('kt-ai-chat').innerHTML), '画面: 送信しない・入力欄の文は残る（直して送れる）・会話には秘密情報を出さない');
-    const conv2 = KTAiConversation.create({ services: {} });
-    const pq = plan([step('P1', 'REQUIRE_CONFIRMATION', 'NEW_SETTING', '', {})], [], { questions: [{ id: 'Q1', question: 'Slack通知の送信先Webhook URLや通知内容の詳細は？', relatedEvidenceIds: [] }] });
-    conv2.registerPlan({ plan: pq, ctx: null, review: reviewOf(pq) });
-    assert(conv2.messages().some(x => x.data && x.data.kind === 'secret-question' && /チャットに書かないでください/.test(x.text)), 'CX-7: AI が秘密情報を質問したら、チャットに書かないよう Toolkit が伝える');
+    //   簡素化（2026-10-17）: 計画は採用した仮案から作る（仮案を経ない計画は登録できない）。計画の AI が秘密情報を質問した計画を、本来の流れで登録する
+    const x7 = K.makeConvC({ planImpl: (args) => { const r = K.planJs(args); r.plan.questions = [...(r.plan.questions || []), { id: 'Q9', question: 'Slack通知の送信先Webhook URLや通知内容の詳細は？', relatedEvidenceIds: [] }]; return r; } });
+    await K.adoptC(x7);
+    assert(x7.c.activePlan() && x7.c.messages().some(x => x.data && x.data.kind === 'secret-question' && /チャットに書かないでください/.test(x.text)), 'CX-7: AI が秘密情報を質問したら、チャットに書かないよう Toolkit が伝える');
   }
   // 依頼のアプリ名と参照先アプリの名前（XA-5）
   //   簡素化（2026-10-17）: 依頼の文を語の照合で読み直す計画全体の指摘（RELATED_APP_NAME_MISMATCH・CX-4 の REQUEST_EXCEPTION_UNCONFIRMED）は削除した。
@@ -872,11 +872,6 @@ console.log('\n--- U5. ［新しい会話］: 続けて書いた別の依頼が�
   assert(panel.drawerState().open === true && panel.drawerState().pane === 'plan' && !panel.activeArtifact() && !/承認済みの案件/.test($('kt-ai-change-summary').innerHTML) && !/承認済みの案件/.test($('kt-ai-plan-result').innerHTML), `新しい会話では右を片づける（表示中のタブは「変更内容」に戻り、前の変更案の内容を残さない。右は常に表示）: ${panel.drawerState().pane}`);
   assert(['confirm', 'blocked'].includes(stageBefore) ? panel.executorState().stage === 'idle' : true, `未反映の準備（最終確認）は取り消す（前の会話の計画を新しい会話から反映しない）: ${stageBefore} → ${panel.executorState().stage}`);
   assert(mock.calls.every(c => c.startsWith('GET')), '新しい会話の操作で kintone の設定へ書き込まない');
-  // 会話のカードなどからの act 'new-conv' も今までどおり使える（ボタンと同じく、すぐ新しい会話）
-  await adoptOnPanel(panel); await ticks();
-  assert(panel.conversation().planHistory().length === 1, '前提: 新しい会話で計画 v1 ができた');
-  await act('new-conv'); await ticks();
-  assert(panel.conversation().messages().length === 0 && panel.conversation().planHistory().length === 0 && !panel.conversation().activePlan() && $('kt-ai-new-conv').disabled === true, 'act「new-conv」でも、すぐ会話・計画が消える');
   // 送信中に新しい会話 → 要求を中断し、遅れた応答を新しい会話に入れない
   for (const s0 of K.REQUESTS.slice(0, 3)) { await panel.send(s0); await ticks(); }
   gate = {};

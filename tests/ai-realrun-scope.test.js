@@ -1024,7 +1024,7 @@ await section(async () => {
   assert(v0 && timedOut === 1 && sent.length === 1 && !(v0.generated && v0.generated.C1 && v0.generated.C1.status === 'verified') && strippedOf(v0).some(st => st.field === 'amount' && st.effect === 'block-save' && st.reason === 'unattributed') && typeof scoped === 'string' && scoped.includes(REQ_S) && !/保存/.test(scoped) && sent[0].customization.requirement === scoped,
     `前提: 範囲外の保存禁止を外した版で、最初の生成（範囲内の要件の文で送った）は時間切れで止まった: ${JSON.stringify({ version: v0 && v0.version, stripped: strippedOf(v0), scoped, sent: sent.map(x => x.customization.requirement) })}`);
   const plans0 = m.calls.plan.length;
-  await m.panel.generate(); await K.ticks(30);
+  await m.panel.send('コードを作って'); await K.ticks(30);
   const v1 = m.conv().activePlan();
   const ctx1 = sent.length > 1 ? sent[sent.length - 1] : null;
   const custText = ctx1 && ctx1.customization ? String(ctx1.customization.requirement || '') : '';

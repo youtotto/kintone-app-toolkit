@@ -279,13 +279,9 @@ console.log('\n--- §9. ボタンから送る文は、会話には利用者の�
   await ticks();
   await adopt(m);
   //   C-1 第 3 段: 実装の内容のカード（spec-intro）とコードのカード（CODE）は削除した。最終案のカードに内部の番号を出さないことは R09-10、
-  //   最終案のカードを通らない生成のカードが出ないことは F2-3・F11-3 で守る。ここでは右の確認結果の［コードを作る］（act generate）の送る文と表示を確かめる
+  //   最終案のカードを通らない生成のカードが出ないことは F2-3・F11-3 で守る（簡素化 2026-10-17: どのボタンも出していない act generate は削除した）
   const chat0 = m.chat();
   assert(!/\bC1\b/.test(outsideDetails(chat0).replace(/data-[a-z-]+="[^"]*"/g, '')), `最終案のカード: 番号を出さない: ${(outsideDetails(chat0).match(/.{20}\bC1\b.{20}/) || [])[0]}`);
-  await m.$('kt-ai-chat').dispatch({ type: 'click', target: { dataset: { act: 'generate', cid: 'C1' } } }); await ticks(10);
-  const users = m.msgs().filter(x => x.type === 'USER');
-  const last = users[users.length - 1];
-  assert(last && last.text === 'C1 のコードを作って' && last.data?.displayText === '「承認後（完了）は金額を編集できなくする」のコードを作って' && /「承認後（完了）は金額を編集できなくする」のコードを作って/.test(m.chat()) && !/C1 のコードを作って/.test(m.chat()), `生成のボタン: 送る文は従来どおり・会話は要件の文: ${last && last.data?.displayText}`);
 }
 
 // =========================================================
@@ -389,7 +385,7 @@ console.log('\n--- §14. 登録の確認を出した後に同じ版でコード�
   assert(m.panel.jsExecState().stage === 'confirm', '前提: もう一度、登録の確認を出した');
   const gens0 = m.calls.generate.length;
   const verifiedBefore = m.conv().messages().filter(x => x.data?.kind === 'generate-verified').length;
-  await m.panel.generate('C1'); await ticks(10);
+  await m.panel.send('C1 のコードを作って'); await ticks(10);
   assert(m.panel.jsExecState().stage === 'confirm' && m.calls.generate.length === gens0 && m.conv().activePlan() === v && m.conv().messages().filter(x => x.data?.kind === 'generate-verified').length === verifiedBefore + 1 && writes(m).length === w0, `同じ入力の作り直しは AI を呼ばず案内だけ（コードが変わらないので確認はそのまま）: ${m.panel.jsExecState().stage}`);
   // 入力が変わって（追加の指示）作り直す → 前のコードで準備した確認画面を取り消す
   //   C-1 第 3 段: 指示は最終案の修正（新しい版。承認は外れる）。前の版で準備した登録の確認は使わない

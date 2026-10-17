@@ -473,8 +473,6 @@ console.log('\n--- 5. AI Workspace: 会話（ASK / PLAN / REVISE / EXPLAIN / PRE
   m.panel.showPane('evidence');
   await clickChat(m, 'open-plan', { plan: v1.planId, version: '1' });
   assert(m.panel.drawerState().open === true && m.panel.drawerState().pane === 'plan', '［変更内容を見る］（open-plan）→ 右の「変更内容」ペイン');
-  await clickChat(m, 'open-review', { plan: v1.planId, version: '1' });
-  assert(m.panel.drawerState().open === true && m.panel.drawerState().pane === 'review', '［検証と判断を開く］（open-review）→ 右の「確認結果」ペイン');
   // REVISE
   await m.panel.send('新しい承認者は作らず既存の承認者を使って'); await ticks(10);
   const rv = m.calls.plan[1];
@@ -521,15 +519,15 @@ console.log('\n--- 5. AI Workspace: 会話（ASK / PLAN / REVISE / EXPLAIN / PRE
   assert(writes(m).length === w0 + 1 && !/id="kt-ai-exec-confirm"/.test(m.$('kt-ai-exec').innerHTML), 'チャットでは Executor を開始しない（新しい書き込み・最終確認は出ない）');
 }
 {
-  // 簡素化 E（2026-10-16）: 仮案から作っていない計画（以前は Context ペインの［変更計画を作成］で作れた。今は会話の登録を直接呼んだときだけ）は、
-  //   手順をすべて外さずに置いても、反映の準備も書き込みもしない（手順ごとの承認から反映へ進む経路は削除した）
+  // 簡素化 E（2026-10-16）・簡素化（2026-10-17）: 仮案を経ない計画（以前は Context ペインの［変更計画を作成］で作れた）は、会話の登録の口を直接呼んでも作れない。
+  //   反映の準備も書き込みもしない
   const m = mount();
   await ticks();
   const v = m.conv().registerPlan({ plan: PLAN_V1.plan, ctx: null, review: KTPlanReview.review({ plan: PLAN_V1.plan, ...INPUTS }) });
   await ticks(4);
   const prepared = await m.panel.startExecutor();
   const rConfirm = await m.panel.confirmExecutor();
-  assert(v && !v.fromDraft && prepared === null && rConfirm === null && writes(m).length === 0 && m.panel.executorState().stage === 'idle' && m.msgs().some(x => x.data && x.data.reason === 'NOT_FINAL'), '仮案から作っていない計画は、反映の準備も書き込みもしない（理由: 反映は仮案から作った最終案の承認のときだけ）');
+  assert(v === null && !m.conv().activePlan() && prepared === null && rConfirm === null && writes(m).length === 0 && m.panel.executorState().stage === 'idle', '仮案を経ない計画は作れず、反映の準備も書き込みもしない');
 }
 
 // =========================================================
