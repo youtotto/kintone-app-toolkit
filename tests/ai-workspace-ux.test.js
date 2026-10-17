@@ -423,7 +423,7 @@ console.log('\n--- §27. ViewModel（純関数）: Chat と Workspace は同じ�
   //   C-1 第 3 段: 変更案の要約・確認・仕様・コードの案内（reasked・plan-summary・review-summary・spec-intro・code-intro）は作らなくなった
   //   （tests/ai-flow-redesign.test.js の R09-3・F5-1・F7）。残る内部処理の通知だけを出さない
   const hiddenKinds = ['connected', 'preview-changed', 'js-preview-changed', 'rolled-back', 'js-rolled-back'];
-  assert(hiddenKinds.every(k => KTAiChatUi.isHiddenMessage(msg(k))) && KTAiChatUi.isHiddenMessage({ id: 'r', type: MSG.REVIEW, role: 'toolkit', text: 'Toolkit の確認', data: {} }) && !KTAiChatUi.isHiddenMessage(msg('rollback-ready')), 'isHiddenMessage: REVIEW と内部処理の通知（connected / preview-changed / js-preview-changed / rolled-back / js-rolled-back）は会話に出さない');
+  assert(hiddenKinds.every(k => KTAiChatUi.isHiddenMessage(msg(k))) && !KTAiChatUi.isHiddenMessage(msg('rollback-ready')), 'isHiddenMessage: 内部処理の通知（connected / preview-changed / js-preview-changed / rolled-back / js-rolled-back）は会話に出さない');
   const ackShown = ['queued', 'revising', 'done', 'failed', 'cancelled', 'pending', 'superseded'].filter(st => !KTAiChatUi.isHiddenMessage(msg('answers-ack', { stage: st, texts: ['保存時です'] })));
   const ackHtml = KTAiChatUi.chatHtml([msg('answers-ack', { stage: 'failed', texts: ['保存時です'] })]);
   assert(ackShown.join() === 'failed,cancelled,pending,superseded' && /「保存時です」は、まだ変更案に入っていません（作り直しに失敗しました）。/.test(ackHtml) && /kintone には何も反映していません。/.test(ackHtml), `answers-ack: 受け付けた・入れた の知らせは出さず、まだ変更案に入っていない（失敗・取り消し・上限・置き換え）ときだけ出す: ${ackShown.join()}`);

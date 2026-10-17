@@ -22407,10 +22407,6 @@
               </div>
             </div>`;
     }
-    /** 旧レイアウト（Phase 15 以前の 1 枚パネル）。AI Workspace（KTAiChatUi.workspaceHtml）が部品を配置する */
-    function panelHtml(colors) {
-      return `<div id="kt-ai-panel" style="display:flex; flex-direction:column; gap:8px; font-size:12px;">${generatorHtml(colors)}${planPaneHtml(colors)}${evidencePaneHtml(colors)}${connectionHtml(colors)}${consentHtml(colors)}</div>`;
-    }
 
     /** 利用可否 → 表示文（AI 未契約でも無料機能はそのまま使える） */
     function capabilityStatusText(cap) {
@@ -22955,7 +22951,7 @@
     return {
       TARGET_TYPES, PRESETS, CONFIDENCE_HELP, INTRO_TEXT, INTRO_NOTE,
       listTargets, fileLabel, toBuildRequest, generate, coverageRows, truncationSummary, sizeSummary, outputFilename,
-      panelHtml, generatorHtml, planPaneHtml, evidencePaneHtml, connectionHtml, consentHtml, resultHtml, capabilityStatusText, sessionLinesHtml, answerHtml, evidenceDetailHtml, richTextHtml,
+      generatorHtml, planPaneHtml, evidencePaneHtml, connectionHtml, consentHtml, resultHtml, capabilityStatusText, sessionLinesHtml, answerHtml, evidenceDetailHtml, richTextHtml,
       ACTION_JA, RSTATUS, RSAFETY, EXEC_STEP_JA, EXEC_STEP_COLOR, EXEC_REASON_JA, badge, chips,
       // AI Change Planner（Phase 7）/ Review（Phase 8）
       PLANNER_PRESETS, generatePlan, planHtml, planJson, reviewHtml, reviewStepHtml, decisionSummary, executorHtml, CODEGEN_REASON_JA,
@@ -23711,7 +23707,7 @@
       ANSWER: 'ANSWER',
       // 会話フローの再設計 段階 B（2026-10-07）: 仮案の経路（新しい依頼 → 仮案 / 仮案への返事 / 仮案の採用）。能力 'proposal' があるときだけ
       PROPOSE: 'PROPOSE', DRAFT_REPLY: 'DRAFT_REPLY', ADOPT_DRAFT: 'ADOPT_DRAFT' };
-    const MSG = { USER: 'USER', ASSISTANT_TEXT: 'ASSISTANT_TEXT', ANSWER: 'ANSWER', PLAN: 'PLAN', REVIEW: 'REVIEW', DIFF: 'DIFF', EXECUTION: 'EXECUTION', ROLLBACK: 'ROLLBACK', SYSTEM_NOTICE: 'SYSTEM_NOTICE', ERROR: 'ERROR', LOADING: 'LOADING',
+    const MSG = { USER: 'USER', ASSISTANT_TEXT: 'ASSISTANT_TEXT', ANSWER: 'ANSWER', PLAN: 'PLAN', REVIEW: 'REVIEW', EXECUTION: 'EXECUTION', ROLLBACK: 'ROLLBACK', SYSTEM_NOTICE: 'SYSTEM_NOTICE', ERROR: 'ERROR', LOADING: 'LOADING',
       // Phase 17: JS 登録 / 復元の写し。Phase 18: ドキュメントの出力カード。C-1 第 3 段（2026-10-08）: 実装仕様のカード（SPEC）・コードのカード（CODE）は削除した（最終案のカードに統合）
       JS_EXECUTION: 'JS_EXECUTION', JS_ROLLBACK: 'JS_ROLLBACK', DOCUMENT: 'DOCUMENT',
       // 段階 B: 仮案のカード（会話に 1 枚。更新で置き換え、前の仮案は 1 行に畳む）
@@ -28445,7 +28441,6 @@
         job: () => (state.job ? { planId: state.job.planId, version: state.job.base?.version ?? null, n: state.job.n } : null),
         canQueue,
         registerPlan: (p) => { const v = registerPlan(p); announcePlan(v); return v; },
-        setReview: (review) => { if (state.activePlan) { state.activePlan.review = review; state.activeReview = review ? { planId: state.activePlan.planId, version: state.activePlan.version, review } : null; emit(); } },
         activePlan: () => state.activePlan, planHistory: () => state.planHistory,
         noteExecution, markStale,
         // 段階 C: 最終案の承認・承認の有効性・進みのカードの描き直し・反映後の基準の更新
@@ -28485,7 +28480,6 @@
          */
         startNew: () => { resetConversation(); state.subject = null; state.consultation = null; emit(); return { ok: true, epoch: state.epoch }; },
         /** Before / After を会話に出す（計画カードの操作。Review の diff を写す） */
-        showDiff: (v = state.activePlan) => (v ? push(MSG.DIFF, ROLE.TOOLKIT, `${planLabel(v)} の Before / After`, { planId: v.planId, version: v.version }) : null),
       };
     }
 
@@ -29315,11 +29309,6 @@
         ${openQs.length ? `<div class="kt-ai-sum-label kt-ai-sum-warn">確認したいこと（${openQs.length} 件）</div><div class="kt-ai-sum-warn">${list(openQs.slice(0, 5).map(q => q.text))}${openQs.length > 5 ? `<div>ほか ${openQs.length - 5} 件</div>` : ''}<div style="font-size:11px;">左の会話で答えると、変更案に入れます。</div></div>` : ''}
       </div>`;
     }
-    /** Before / After（§14 → Phase 19 は案内だけ。本文は右の「確認結果」の「変更前後を比較」） */
-    function diffCardHtml(v) {
-      if (!v?.review) return card('kt-ai-diff-card', '<div style="opacity:.7;">Toolkit の確認が無いため、変更前後を出せません</div>');
-      return card('kt-ai-diff-card', `<div><b>変更前後の比較</b></div><div style="margin-top:6px; display:flex; gap:6px;">${btn('open-diff', '変更前後を見る', `data-plan="${esc(v.planId)}" data-version="${esc(String(v.version))}"`, 'font-weight:600;')}</div>`, '#555');
-    }
     /** 元に戻す準備（§16）: 既存の Rollback 確認へ。即 Rollback はしない */
     function rollbackReadyHtml(m) {
       return card('kt-ai-rollback-ready', `<div><b>${esc(m.text)}</b></div><div style="font-size:11px; opacity:.8; margin-top:2px;">反映する前の設定に戻します。反映の後にほかの変更があれば止まります。</div><div style="margin-top:6px; display:flex; gap:6px;">${btn('rollback', '変更前の状態に戻す', `data-execution="${esc(m.data?.executionId || '')}"`, 'border-color:#6a1b9a; font-weight:600;')}</div><div style="font-size:10px; opacity:.6; margin-top:4px;">押すと現在の動作テスト環境を確認（書き込みなし）し、確認画面で「変更前の状態に戻す」を押したときだけ戻します。</div>`, '#6a1b9a');
@@ -29620,7 +29609,6 @@
     const ACK_FAILED = { failed: '作り直しに失敗しました', cancelled: '作り直しを取り消しました', pending: '続けて入れられる数を超えました', superseded: '作り直しの間に変更案が置き換わりました', stopped: '処理を途中で止めました' };
     function isHiddenMessage(m) {
       if (!m) return true;
-      if (m.type === MSG.REVIEW) return true;   // Toolkit の確認の結果は変更案のカードにまとめ、詳しくは右の「確認結果」
       const kind = m.data?.kind;
       if (HIDDEN_KINDS.has(kind)) return true;
       //   §0e.1（2026-10-09）: ［動作テスト環境へ反映］1 回の反映の中の標準設定・JavaScript の実行のカードは、結果のカード（final-apply）に 1 枚にまとめる
@@ -30170,9 +30158,7 @@
         // 会話の返答の逐次表示（2026-10-07）: 届いた部分（partial）は答えと同じ段落の整形で出し、末尾に生成中の印
         case MSG.LOADING: return wrap(m.data?.kind === 'progress' ? progressCardHtml(m, view) : m.data?.partial ? `<div class="kt-ai-bubble kt-ai-rich kt-ai-streaming">${streamingInnerHtml(m)}</div>` : `<div class="kt-ai-bubble kt-ai-loading" style="opacity:.75;">${esc(m.text)}</div>`);
         case MSG.FINAL: return wrap(finalCardHtml(m, view));   // 段階 C: 最終案のカード
-        // C-1 第 3 段（2026-10-08）: 変更案のカード（MSG.PLAN）は削除した（最終案のカードに統合）。記録の表示だけ短い文にする
-        case MSG.PLAN: return wrap(bubble('変更案（最終案のカードにまとめています）'));
-        case MSG.DIFF: { const v = planOf(); return wrap(v ? diffCardHtml(v) : bubble(m.text)); }
+        // C-1 第 3 段（2026-10-08）: 変更案のカード（MSG.PLAN）は削除した（最終案のカードに統合）。簡素化（2026-10-17）: 本体は MSG.PLAN・MSG.REVIEW を作らないので、描画・隠す判定も削除した
         case MSG.DRAFT: return wrap(draftCardHtml(m, view));   // 段階 B: 仮案のカード
         case MSG.ANSWER: return wrap(answerCardHtml(m));
         case MSG.JS_EXECUTION: return wrap(jsExecutionCardHtml(m, view.jsExecState, view));
@@ -30357,7 +30343,7 @@
     return { progressInnerHtml, progressCardHtml, finalCardHtml, verificationDetailHtml, verificationLineOf, impactRowsOf,   // 段階 C（検証の明細は右の「変更内容」。2026-10-14）
       condSentenceOf, existingChangeTextOf,   // 2026-10-15（最終案の重複と担当未定の食い違い §2）: 条件式の文（テストから確かめる）
       constraintLineOf,   // 2026-10-16（説明文を読みやすくする）: 「この案の制約」の 1 行（テストから確かめる）
-      INTENT_JA, STATUS_JA, STRATEGY_JA, CHECK_JA, SPEC_STATUS_JA, busyHintText, themedMermaid, workspaceHtml, headerHtml, baseHtml, baseDiffHtml, applyLogHtml, freePanelHtml, chatHtml, messageHtml, diffCardHtml, codePaneHtml, rollbackReadyHtml, executionCardHtml, rollbackCardHtml, answerCardHtml, errorCardHtml, patternsHtml,
+      INTENT_JA, STATUS_JA, STRATEGY_JA, CHECK_JA, SPEC_STATUS_JA, busyHintText, themedMermaid, workspaceHtml, headerHtml, baseHtml, baseDiffHtml, applyLogHtml, freePanelHtml, chatHtml, messageHtml, codePaneHtml, rollbackReadyHtml, executionCardHtml, rollbackCardHtml, answerCardHtml, errorCardHtml, patternsHtml,
       // Phase 17
       consultationStartHtml, specCardHtml, jsRollbackReadyHtml, jsExecutionCardHtml, jsRollbackCardHtml, consultChoicesHtml, jsRegisterPaneHtml, customizeScopeJa,
       // Phase 19: 会話は要約、右 Workspace が正本
@@ -31420,8 +31406,6 @@
       if (act === 'open-review') { showPane('review', { scrollTo: '#kt-ai-review' }); return; }
       if (act === 'open-plan') { showPane('plan'); return; }
       if (act === 'open-spec') { showPane('plan', { scrollTo: '#kt-ai-spec' }); return; }
-      if (act === 'open-diff') { showPane('review', { scrollTo: '#kt-ai-review-diff' }); const el = host.querySelector('#kt-ai-review-diff'); if (el) el.style.display = ''; return; }
-      if (act === 'before-after') { const v = planIndex().get(`${dataOf(t, 'plan')}:${dataOf(t, 'version')}`) || conv.activePlan(); conv.showDiff(v); return; }
       if (act === 'exec-details') { showPane('exec', { scrollTo: '#kt-ai-exec-result' }); return; }
       if (act === 'open-rollback') { showPane('exec', { scrollTo: '#kt-ai-rollback' }); return; }
       if (act === 'rollback') {
