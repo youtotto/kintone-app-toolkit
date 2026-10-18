@@ -457,7 +457,7 @@ await section(async () => {
   assert(unmetBlock(covId(planProcess, [{ requirementId: 'C1', text: '承認待ちでは金額を編集不可にする', status: 'NOT_MET', note: 'プロセス管理で対応' }])), '1: 自分の id の NOT_MET に「プロセス管理で対応」→ 読み替えない（文言は見ない）');
   // 旧い Gateway（requirementId 無し）: 入口でこの customization の id に変換 → 自分の要件として扱う（担当の推定はしない）
   const legacy = covId(planNotify, [{ requirement: '承認待ちになったら承認者に通知する', status: 'NOT_MET', note: 'P1 で対応' }]);
-  assert(unmetBlock(legacy) && legacy.coverage.declared[0].requirementId === 'C1' && legacy.coverage.declared[0].legacy === true, `1: requirementId の無い旧い形は自分の id に変換（登録不可）: ${JSON.stringify(legacy.coverage.declared)}`);
+  assert(unmetBlock(legacy) && legacy.coverage.declared[0].requirementId === 'C1', `1: requirementId の無い旧い形は自分の id に変換（登録不可）: ${JSON.stringify(legacy.coverage.declared)}`);
   // 別の担当の id: 設定を変える手順（P1 ADD_NOTIFICATION）→ 担当範囲外。確認待ちの手順（REQUIRE_CONFIRMATION）や計画に無い id（C9）→ unowned（計画全体の確認に残す。登録不可にはしない）
   const otherReq = '承認待ちになったら承認者に通知する';
   const unownedReview = (rv, req) => rv.registration.verdict !== 'BLOCKED' && rv.coverage.outOfScope.some(x => x.code === 'AI_OUT_OF_SCOPE' && x.requirement === req) && rv.coverage.unowned.some(x => x.requirement === req) && (rv.checks || []).some(x => x.name === 'coverage-owner' && !x.ok && x.severity === 'review' && x.message.includes(req)) && !rv.coverage.notAchieved.some(x => x.code === 'AI_NOT_MET');
