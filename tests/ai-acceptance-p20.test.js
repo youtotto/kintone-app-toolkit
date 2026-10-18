@@ -426,43 +426,35 @@ console.log('\n--- CX-2a / CX-3 / CX-7. 条件式の in / not in への正規化
 }
 
 // =========================================================
-console.log('\n--- CX-7. 外部サービス / 外部システムとの連携はコード生成の対象外・案内文 ---');
+console.log('\n--- CX-7. 外部連携・通知の語で生成の可否を変えない（簡素化 2026-10-18: 制限は生成工程の機械検査）・生成できない項目の案内 ---');
 {
-  const cust = { customizationId: 'C1', requirement: '承認済みになったら会計システムに請求データを自動送信する', whyStandardInsufficient: 'kintone標準機能に会計システムへの自動送信機能がないため', strategy: 'NEW_JS_FILE', platform: ['desktop'], implementation: 'JAVASCRIPT', events: ['app.record.detail.process.proceed'], fields: [{ code: 'amount', access: 'READ' }], apis: [], existingFiles: [], risks: [], questions: [], dependsOn: [] };
-  const p = plan([step('C1', 'CUSTOMIZATION_REQUIRED', 'JS', '', { customizationId: 'C1' }, { solution: 'CUSTOMIZATION', execution: { mode: 'PLAN_ONLY', supported: false, reason: 'x' } })], [], { solution: 'CUSTOMIZATION', customizations: [cust] });
-  const rv = reviewOf(p);
-  const r = rv.steps.find(x => x.stepId === 'C1');
-  assert(r.codeGeneration.supported === false && r.codeGeneration.reason === 'EXTERNAL_INTEGRATION' && r.issues.some(i => i.code === 'JS_EXTERNAL_INTEGRATION' && /会計システム/.test(i.message)), 'CX-7: 会計システムへの送信はコード生成の対象外（EXTERNAL_INTEGRATION）');
-  const slack = reviewOf(plan([step('C1', 'CUSTOMIZATION_REQUIRED', 'JS', '', { customizationId: 'C1' }, { solution: 'CUSTOMIZATION' })], [], { solution: 'CUSTOMIZATION', customizations: [{ ...cust, requirement: '承認されたらSlackに通知する', whyStandardInsufficient: '標準の通知はSlackに送れない' }] })).steps[0];
-  assert(slack.codeGeneration.supported === false && slack.codeGeneration.reason === 'EXTERNAL_INTEGRATION', 'Slack への通知も対象外');
-  const local = reviewOf(plan([step('C1', 'CUSTOMIZATION_REQUIRED', 'JS', '', { customizationId: 'C1' }, { solution: 'CUSTOMIZATION' })], [], { solution: 'CUSTOMIZATION', customizations: [{ ...cust, requirement: '金額が100万円を超えたら警告を表示する', whyStandardInsufficient: '条件付きの画面警告は標準にない', events: ['app.record.edit.show'], fields: [{ code: 'amount', access: 'CONTROL' }] }] })).steps[0];
-  assert(local.codeGeneration.supported === true, '画面内の処理（外部連携の語なし）は従来どおり生成できる');
-  // F28（CX-2a 4 回目）: 「営業担当がいれば営業担当に通知、いなければ担当者に通知」の JS は生成の対象外（JavaScript では kintone の通知を送れない）
-  const byJs = reviewOf(plan([step('C1', 'CUSTOMIZATION_REQUIRED', 'JS', '', { customizationId: 'C1' }, { solution: 'CUSTOMIZATION' })], [], { solution: 'CUSTOMIZATION', customizations: [{ ...cust, requirement: '営業担当が空でない場合は営業担当に通知し、空の場合は担当者に通知する条件分岐を実装する', whyStandardInsufficient: '通知先を条件で切り替える標準機能がない', events: ['app.record.detail.process.proceed'], fields: [{ code: 'owner', access: 'READ' }] }] })).steps[0];
-  assert(byJs.codeGeneration.supported === false && byJs.codeGeneration.reason === 'NOTIFICATION_BY_JS' && byJs.issues.some(i => i.code === 'JS_NOTIFICATION_NOT_POSSIBLE' && /標準の通知設定/.test(i.message)), 'F28: JavaScript で通知を送る / 通知先を切り替える要件は生成の対象外（NOTIFICATION_BY_JS）');
-  const uiMsg = reviewOf(plan([step('C1', 'CUSTOMIZATION_REQUIRED', 'JS', '', { customizationId: 'C1' }, { solution: 'CUSTOMIZATION' })], [], { solution: 'CUSTOMIZATION', customizations: [{ ...cust, requirement: '承認済みのレコードを開いたら画面の上部に注意メッセージを表示する', whyStandardInsufficient: '標準にない', events: ['app.record.detail.show'], fields: [{ code: 'amount', access: 'READ' }] }] })).steps[0];
-  assert(!uiMsg.issues.some(i => i.code === 'JS_NOTIFICATION_NOT_POSSIBLE'), '画面のメッセージ表示は対象外にしない');
-  // F28b（2026-10-05）: メンション付きのコメントの登録による通知も Toolkit の JavaScript の対象外（計画の AI・質問の AI と同じ方針）。メンションでは通知が届くので「送れない」とは書かない
-  const mention = reviewOf(plan([step('C1', 'CUSTOMIZATION_REQUIRED', 'JS', '', { customizationId: 'C1' }, { solution: 'CUSTOMIZATION' })], [], { solution: 'CUSTOMIZATION', customizations: [{ ...cust, requirement: '承認待ちになったら承認者をメンションしてコメントを書き込む', whyStandardInsufficient: '標準にない', events: ['app.record.detail.show'], fields: [{ code: 'amount', access: 'READ' }] }] })).steps[0];
-  const mention2 = reviewOf(plan([step('C1', 'CUSTOMIZATION_REQUIRED', 'JS', '', { customizationId: 'C1' }, { solution: 'CUSTOMIZATION' })], [], { solution: 'CUSTOMIZATION', customizations: [{ ...cust, requirement: '承認待ちになったら承認者にメンション付きのコメントを登録して知らせる', whyStandardInsufficient: '標準にない', events: ['app.record.detail.show'], fields: [{ code: 'amount', access: 'READ' }] }] })).steps[0];
-  assert([mention, mention2].every(r => r.codeGeneration.supported === false && r.codeGeneration.reason === 'NOTIFICATION_BY_JS' && r.issues.some(i => i.code === 'JS_NOTIFICATION_NOT_POSSIBLE' && /Toolkit が作る JavaScript では通知を扱いません/.test(i.message) && !/送れず/.test(i.message))), 'F28b: メンション付きのコメントによる通知も生成の対象外・「送れない」と書かない');
-  assert(byJs.issues.some(i => i.code === 'JS_NOTIFICATION_NOT_POSSIBLE' && !/送れず/.test(i.message)), 'F28b: 通知の検査の文に「送れず」を書かない');
-  const byComment = reviewOf(plan([step('C1', 'CUSTOMIZATION_REQUIRED', 'JS', '', { customizationId: 'C1' }, { solution: 'CUSTOMIZATION' })], [], { solution: 'CUSTOMIZATION', customizations: [{ ...cust, requirement: '承認待ちになったら承認者にコメントで知らせる', whyStandardInsufficient: '標準にない', events: ['app.record.detail.show'], fields: [{ code: 'amount', access: 'READ' }] }] })).steps[0];
-  const commentCount = reviewOf(plan([step('C1', 'CUSTOMIZATION_REQUIRED', 'JS', '', { customizationId: 'C1' }, { solution: 'CUSTOMIZATION' })], [], { solution: 'CUSTOMIZATION', customizations: [{ ...cust, requirement: 'コメント欄の文字数を数えて画面に表示する', whyStandardInsufficient: '標準にない', events: ['app.record.detail.show'], fields: [{ code: 'amount', access: 'READ' }] }] })).steps[0];
-  const mentionList = reviewOf(plan([step('C1', 'CUSTOMIZATION_REQUIRED', 'JS', '', { customizationId: 'C1' }, { solution: 'CUSTOMIZATION' })], [], { solution: 'CUSTOMIZATION', customizations: [{ ...cust, requirement: 'メンションされた人の一覧を画面に表示する', whyStandardInsufficient: '標準にない', events: ['app.record.detail.show'], fields: [{ code: 'amount', access: 'READ' }] }] })).steps[0];
-  const commentLog = reviewOf(plan([step('C1', 'CUSTOMIZATION_REQUIRED', 'JS', '', { customizationId: 'C1' }, { solution: 'CUSTOMIZATION' })], [], { solution: 'CUSTOMIZATION', customizations: [{ ...cust, requirement: '保存したらコメントを登録して変更の履歴を残す', whyStandardInsufficient: '標準にない', events: ['app.record.detail.show'], fields: [{ code: 'amount', access: 'READ' }] }] })).steps[0];
-  assert(byComment.issues.some(i => i.code === 'JS_NOTIFICATION_NOT_POSSIBLE'), 'F28c: 「コメントで知らせる」も通知の検査に当たる');
-  assert([commentCount, mentionList, commentLog].every(r => !r.issues.some(i => i.code === 'JS_NOTIFICATION_NOT_POSSIBLE')), 'F28c: 通知と関係ないコメントの JS（文字数・メンションされた人の一覧・履歴の登録）は止めない');
-  // F28d（2026-10-05 差分レビュー）: 「で」の広すぎる当たり・メンションの名詞だけの当たりを外す（画面の表示・集計は止めない。人の宛先に知らせる・投稿する動作の形は止める）
-  const neg0 = reviewOf(plan([step('C1', 'CUSTOMIZATION_REQUIRED', 'JS', '', { customizationId: 'C1' }, { solution: 'CUSTOMIZATION' })], [], { solution: 'CUSTOMIZATION', customizations: [{ ...cust, requirement: 'コメントで多い単語を集計して画面に表示する', whyStandardInsufficient: '標準にない', events: ['app.record.detail.show'], fields: [{ code: 'amount', access: 'READ' }] }] })).steps[0];
-  const neg1 = reviewOf(plan([step('C1', 'CUSTOMIZATION_REQUIRED', 'JS', '', { customizationId: 'C1' }, { solution: 'CUSTOMIZATION' })], [], { solution: 'CUSTOMIZATION', customizations: [{ ...cust, requirement: 'コメントの件数を一覧で表示する', whyStandardInsufficient: '標準にない', events: ['app.record.detail.show'], fields: [{ code: 'amount', access: 'READ' }] }] })).steps[0];
-  const neg2 = reviewOf(plan([step('C1', 'CUSTOMIZATION_REQUIRED', 'JS', '', { customizationId: 'C1' }, { solution: 'CUSTOMIZATION' })], [], { solution: 'CUSTOMIZATION', customizations: [{ ...cust, requirement: 'メンション付きのコメントの件数を数える', whyStandardInsufficient: '標準にない', events: ['app.record.detail.show'], fields: [{ code: 'amount', access: 'READ' }] }] })).steps[0];
-  const neg3 = reviewOf(plan([step('C1', 'CUSTOMIZATION_REQUIRED', 'JS', '', { customizationId: 'C1' }, { solution: 'CUSTOMIZATION' })], [], { solution: 'CUSTOMIZATION', customizations: [{ ...cust, requirement: 'メンションされたら画面にアイコンを出す', whyStandardInsufficient: '標準にない', events: ['app.record.detail.show'], fields: [{ code: 'amount', access: 'READ' }] }] })).steps[0];
-  const neg4 = reviewOf(plan([step('C1', 'CUSTOMIZATION_REQUIRED', 'JS', '', { customizationId: 'C1' }, { solution: 'CUSTOMIZATION' })], [], { solution: 'CUSTOMIZATION', customizations: [{ ...cust, requirement: 'コメントでよく使う語をダイアログで表示する', whyStandardInsufficient: '標準にない', events: ['app.record.detail.show'], fields: [{ code: 'amount', access: 'READ' }] }] })).steps[0];
-  const pos0 = reviewOf(plan([step('C1', 'CUSTOMIZATION_REQUIRED', 'JS', '', { customizationId: 'C1' }, { solution: 'CUSTOMIZATION' })], [], { solution: 'CUSTOMIZATION', customizations: [{ ...cust, requirement: '承認待ちになったらメンション付きのコメントを投稿して承認を促す', whyStandardInsufficient: '標準にない', events: ['app.record.detail.show'], fields: [{ code: 'amount', access: 'READ' }] }] })).steps[0];
-  const pos1 = reviewOf(plan([step('C1', 'CUSTOMIZATION_REQUIRED', 'JS', '', { customizationId: 'C1' }, { solution: 'CUSTOMIZATION' })], [], { solution: 'CUSTOMIZATION', customizations: [{ ...cust, requirement: 'コメントで担当者に知らせる', whyStandardInsufficient: '標準にない', events: ['app.record.detail.show'], fields: [{ code: 'amount', access: 'READ' }] }] })).steps[0];
-  assert([neg0, neg1, neg2, neg3, neg4].every(r => !r.issues.some(i => i.code === 'JS_NOTIFICATION_NOT_POSSIBLE')), 'F28d: 画面の表示・コメントの集計・メンションされた人の表示は止めない');
-  assert([pos0, pos1].every(r => r.issues.some(i => i.code === 'JS_NOTIFICATION_NOT_POSSIBLE')), 'F28d: メンション付きのコメントの投稿・コメントで人に知らせる要件は止める');
+  //   簡素化（2026-10-18）: 要件の文を語の照合で読み、外部サービスとの連携（EXTERNAL_INTEGRATION）と JavaScript による通知（NOTIFICATION_BY_JS）を生成の対象外にする
+  //   処理（7b・7c）は削除した。外部への通信と通知の制限は生成工程の責任（生成の指示と機械検査の security・security-review・notification が生成したコードの形で止める。
+  //   AI版 worker の customization-generator §11・cross-toolkit §15）。ここでは、言い回しが違っても生成の可否・理由・判定・確認の項目が変わらないことを確かめる
+  const cust = { customizationId: 'C1', requirement: '金額が100万円を超えたら画面に警告を表示する', whyStandardInsufficient: '条件付きの画面の警告は標準にない', strategy: 'NEW_JS_FILE', platform: ['desktop'], implementation: 'JAVASCRIPT', events: ['app.record.detail.process.proceed'], fields: [{ code: 'amount', access: 'READ' }], apis: [], existingFiles: [], risks: [], questions: [], dependsOn: [] };
+  const planC = (o) => plan([step('C1', 'CUSTOMIZATION_REQUIRED', 'JS', '', { customizationId: 'C1' }, { solution: 'CUSTOMIZATION', execution: { mode: 'PLAN_ONLY', supported: false, reason: 'x' } })], [], { solution: 'CUSTOMIZATION', customizations: [{ ...cust, ...o }] });
+  const shape = (r) => JSON.stringify({ supported: r.codeGeneration.supported, reason: r.codeGeneration.reason, status: r.status, safety: r.safety, codes: (r.issues || []).map(i => `${i.code}:${i.severity}`).sort() });
+  const base = reviewOf(planC({})).steps.find(x => x.stepId === 'C1');
+  const variants = [
+    { requirement: '承認済みになったら会計システムに請求データを自動送信する', whyStandardInsufficient: 'kintone標準機能に会計システムへの自動送信機能がないため' },
+    { requirement: '承認されたらSlackに通知する', whyStandardInsufficient: '標準の通知はSlackに送れない' },
+    { requirement: '営業担当が空でない場合は営業担当に通知し、空の場合は担当者に通知する条件分岐を実装する', whyStandardInsufficient: '通知先を条件で切り替える標準機能がない' },
+    { requirement: '承認待ちになったら承認者をメンションしてコメントを書き込む', whyStandardInsufficient: '標準にない' },
+    { requirement: '承認待ちになったら承認者にコメントで知らせる', whyStandardInsufficient: '標準にない' },
+    { requirement: 'メンションされた人の一覧を画面に表示する', whyStandardInsufficient: '標準にない' },
+    //   関係の無い説明の文（リスクの注意）に外部連携の語がある
+    { risks: ['他のシステムとの連携は今回は扱わない', 'Webhook の設定は変えない'] },
+  ];
+  assert(base.codeGeneration.supported === true && base.codeGeneration.reason === null, `CX-7: 画面の処理は生成できる: ${shape(base)}`);
+  for (const v of variants) {
+    const r = reviewOf(planC(v)).steps.find(x => x.stepId === 'C1');
+    assert(shape(r) === shape(base), `CX-7: 要件・理由・リスクの文の語（外部連携・通知・メンション）で、生成の可否・理由・判定・確認の項目を変えない（${v.requirement || v.risks.join('・')}）: ${shape(r)} / ${shape(base)}`);
+    assert(!(r.issues || []).some(i => i.code === 'JS_EXTERNAL_INTEGRATION' || i.code === 'JS_NOTIFICATION_NOT_POSSIBLE'), 'CX-7: 文から外部連携・通知の確認を作らない');
+  }
+  //   生成できない理由は構造で決まるもの（方針が生成の対象外など）だけ。生成できない項目しか無ければ、最終案のカードで「コードを生成できます」と言わない（生成は呼ばない）
+  const p = planC({ requirement: '承認済みになったら会計システムに請求データを自動送信する', whyStandardInsufficient: 'kintone標準機能に会計システムへの自動送信機能がないため', strategy: 'PLUGIN_CANDIDATE' });
+  const rP = reviewOf(p).steps.find(x => x.stepId === 'C1');
+  assert(rP.codeGeneration.supported === false && rP.codeGeneration.reason === 'STRATEGY_NOT_GENERATED', `CX-7: 方針が生成の対象外（構造）なら生成しない: ${shape(rP)}`);
   //   C-1 第 3 段（2026-10-08）: 仕様の案内（spec-intro）は削除した。同じ約束を新しい流れの最終案のカードで確かめる（生成できない部分を示し、「コードを生成できます」と言わない）
   const xExt = K.makeConvC({ planImpl: () => ({ plan: clone(p), ctx: null, review: reviewOf(p), turn: { reply: '計画を作りました。', requirementOps: [], utteranceCoverage: [] } }) });
   await K.adoptC(xExt);

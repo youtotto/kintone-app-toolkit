@@ -8753,22 +8753,11 @@
       if ((c.dependsOn || []).length) h(`依存: ${c.dependsOn.join(', ')} の後`);
       for (const q of (c.questions || [])) add('JS_QUESTION', 'medium', `確認: ${q}`);
       for (const rk of (c.risks || [])) h(`リスク: ${rk}`);
-      // 7b. Phase 20（実機）: 外部サービス・外部システムとの連携（Slack / 会計システム / Webhook / メール送信 など）は、認証情報と外部への通信が要るため
-      //     Toolkit のコード生成の対象外（JavaScript に書かない）。kintone の Webhook・プラグイン・連携サービスなど別の手段で行う
-      const extText = [c.requirement, c.whyStandardInsufficient, ...(c.risks || []), ...(c.questions || []), step.title].filter(Boolean).join(' ');
-      const externalHit = /Slack|Teams|Chatwork|LINE ?WORKS|[Ww]ebhook|外部の?(システム|サービス|サーバー|API)|会計(システム|ソフト)|基幹システム|他の?システム|SaaS|メールを?(送信|配信)|外部へ(送|連携)/.exec(extText);
-      if (externalHit) add('JS_EXTERNAL_INTEGRATION', 'medium', `外部サービス / 外部システムとの連携（「${externalHit[0]}」）は Toolkit のコード生成の対象外です（認証情報と外部への通信が必要なため JavaScript には書きません）。kintone の Webhook・プラグイン・連携サービスなど別の手段で行ってください`);
-      // 7c. Phase 20（実機 CX-2a 4 回目）: 「営業担当がいれば営業担当に通知、いなければ担当者に通知」を JavaScript の分岐にした。kintone の JavaScript では
-      //     kintone の通知（宛先を決めて送る）を出せない（Planner の規則があっても出た）→ 生成の対象外にし、標準の通知設定で表すよう案内する
-      //     2026-10-05: メンション付きのコメントの登録による通知も対象外（Gateway の計画の AI・質問の AI と同じ方針）。メンションでは通知が届くので「送れない」とは書かない
-      //     コメントの読み取り・メンション無しの履歴の登録・メンションされた人の一覧は対象外にしない（通知を目的にした言い方だけ）
-      //     メンション・コメントは、人の宛先に知らせる・投稿する動作の形だけ（画面の表示・コメントの集計・メンションされた人の一覧は止めない）
-      const PEOPLE = '(?:担当者|営業担当|作業者|承認者|上長|ユーザー|メンバー|宛先|関係者|申請者|作成者)';
-      const notifyHit = new RegExp(`${PEOPLE}(に|へ)(通知|メール|知らせ|連絡(?!先))|通知先を(切り替|変え|決め|分け)|通知を(送信|送る|送っ|飛ば)|`
-        + `メンション(?:して|した|する|で|付きで|を付けて)[^。]{0,20}(?:コメント|知らせ|通知|伝え|連絡)|メンション付きの?コメントを(?:登録|投稿|書き込|書く|書い|残|送|追加)|`
-        + `${PEOPLE}(?:に|へ)(?:メンション付きの)?コメントで(?:知らせ|通知|伝え|連絡)|コメント(?:で|を(?:登録|投稿|書き込ん|書き込み|書込ん)(?:で|して)?)[^。]{0,4}${PEOPLE}(?:に|へ)(?:知らせ|通知|伝え|連絡)`)
-        .exec([c.requirement, step.title].filter(Boolean).join(' '));
-      if (notifyHit && !externalHit) add('JS_NOTIFICATION_NOT_POSSIBLE', 'medium', `Toolkit が作る JavaScript では通知を扱いません（メンション付きのコメントの登録による通知も対象外。「${notifyHit[0]}」）。通知は標準の通知設定（レコードの条件通知・アプリの条件通知・リマインダー）で、宛先のフィールドと条件として表してください`);
+      // 7b / 7c（簡素化・2026-10-18）: 要件の文（requirement・whyStandardInsufficient・risks・questions・手順の名前）を語の照合で読み、外部サービスとの連携
+      //   （Slack・Webhook・会計システム など）と JavaScript による通知（担当者に通知・メンション付きのコメントで知らせる など）を生成の対象外にする処理は削除した
+      //   （関係の無い説明の文で生成を止め、言い回しが違えば通していた）。外部への通信と通知の制限は生成工程の責任: 生成の指示（proxy の API は使わない・
+      //   メンション付きのコメントを登録しない）と機械検査（proxy の API・kintone の外の宛先・メンション付きのコメントの登録は block、宛先を読めない通信は確認）。
+      //   計画の AI の指示（外部システムとの連携・JavaScript での通知を計画しない）も今までどおり。理由 EXTERNAL_INTEGRATION・NOTIFICATION_BY_JS はもう出さない
       // 8. 判定
       if (worst === 'high') { r.status = STATUS.INVALID; r.safety = SAFETY.BLOCKED; r.diff.changeType = CHANGE.INVALID; }
       else if (worst === 'medium') r.status = STATUS.NEEDS_CONFIRMATION;
@@ -8776,8 +8765,8 @@
       r.codeGeneration.strategy = c.strategy || null;
       const targetOk = c.strategy !== 'EXTEND_EXISTING_JS' || !!r.codeGeneration.existingFile;
       r.codeGeneration.implementation = impl;
-      r.codeGeneration.supported = r.status !== STATUS.INVALID && impl !== 'CSS' && !externalHit && !notifyHit && GENERATABLE_STRATEGIES.includes(c.strategy) && platform.length > 0 && events.length > 0 && targetOk;
-      r.codeGeneration.reason = r.codeGeneration.supported ? null : (r.status === STATUS.INVALID ? 'INVALID' : impl === 'CSS' ? 'CSS_NOT_GENERATED' : externalHit ? 'EXTERNAL_INTEGRATION' : notifyHit ? 'NOTIFICATION_BY_JS' : !GENERATABLE_STRATEGIES.includes(c.strategy) ? 'STRATEGY_NOT_GENERATED' : !platform.length ? 'PLATFORM_UNSPECIFIED' : !events.length ? 'EVENT_MISSING' : 'TARGET_FILE_MISSING');
+      r.codeGeneration.supported = r.status !== STATUS.INVALID && impl !== 'CSS' && GENERATABLE_STRATEGIES.includes(c.strategy) && platform.length > 0 && events.length > 0 && targetOk;
+      r.codeGeneration.reason = r.codeGeneration.supported ? null : (r.status === STATUS.INVALID ? 'INVALID' : impl === 'CSS' ? 'CSS_NOT_GENERATED' : !GENERATABLE_STRATEGIES.includes(c.strategy) ? 'STRATEGY_NOT_GENERATED' : !platform.length ? 'PLATFORM_UNSPECIFIED' : !events.length ? 'EVENT_MISSING' : 'TARGET_FILE_MISSING');
       return r;
     }
 
@@ -19268,6 +19257,8 @@
       //   2026-10-15（§3）: 担当の確認（担当が計画に無い・計画全体で扱う要件をどの手順で実現するか書かれていない）
       'coverage-owner': '計画のどの手順で扱われているかを変更内容の「何が変わるか」で確かめ、扱われていなければ計画を直す',
       'patch-removal': '置き換え・削除される既存の行が不要かを確かめる',
+      //   2026-10-18: 生成工程の機械検査の確認（宛先をコードから読めない通信）
+      'security-review': '作ったコードの通信の宛先が kintone の中か（kintone の外のサーバーへ送っていないか）を、コードの差分で確かめる',
     });
     /**
      * §0f.5 の 3（2026-10-09）: 確認項目の画面の言葉（承認の欄に出す文）。検査が組み立てた screen（イベント名・フィールドのコード・handler を出さない文）があればそれ、
@@ -22461,7 +22452,8 @@
     const APPLY_LINE = { AUTO: ['✓', '#2e7d32'], MANUAL: ['△', '#b26a00'], BLOCKED: ['×', '#b00020'] };
     /** Phase 20: 手順が動作テスト環境へ自動で反映できるか（KTPlanExecutor.applyReadiness の 1 件） */
     const applyLineHtml = (a) => { if (!a || !APPLY_LINE[a.apply]) return ''; const [mark, color] = APPLY_LINE[a.apply]; return `<div class="kt-ai-apply" data-apply="${esc(a.apply)}" style="font-size:11px; margin-top:2px; color:${color};">${mark} ${a.apply === 'AUTO' ? '動作テスト環境へ自動で反映できます（承認すると反映の対象）' : a.apply === 'MANUAL' ? `Toolkit からは自動で反映できません — ${esc(a.message)}（承認しても反映されません。足りない値はチャットで伝えて計画を修正するか、kintone の画面で設定してください）` : `反映できません — ${esc(a.message)}`}</div>`; };
-    /** コードを作れない理由（Toolkit の Review の codeGeneration.reason → 利用者の言葉）。会話の文でも使う */
+    /** コードを作れない理由（Toolkit の Review の codeGeneration.reason → 利用者の言葉）。会話の文でも使う。
+     *   簡素化（2026-10-18）: EXTERNAL_INTEGRATION・NOTIFICATION_BY_JS は削除した要件の文の語句判定（7b・7c）の理由。保存済みの会話の記録を表示するために残す（新しい Review では出ない） */
     const CODEGEN_REASON_JA = Object.freeze({ INVALID: '変更案が無効', EXTERNAL_INTEGRATION: '外部サービス / 外部システムとの連携は対象外', NOTIFICATION_BY_JS: '通知は Toolkit の JavaScript の対象外（標準の通知設定で）', CSS_NOT_GENERATED: 'CSS は生成の対象外', STRATEGY_NOT_GENERATED: '方針が生成の対象外', PLATFORM_UNSPECIFIED: 'PC かモバイルかが未定', EVENT_MISSING: '動かす画面（イベント）が未定', TARGET_FILE_MISSING: '組み込む先の JavaScript が未定', BLOCKED_BY_DEPENDENCY: '前提の標準設定が無効', CUSTOMIZATION_NOT_FOUND: 'JavaScript の内容が見つからない' });
     /** 手順の判定を 1 文で（2026-10-06: 色付きのバッジを並べず、何を確かめるかを短い文で） */
     function stepVerdict(r, apply = null) {
@@ -29442,7 +29434,9 @@
       // §0c（2026-10-08）: 生成工程の検証結果の取り込み（必須の効果・動作テスト）
       'required-effects': '必須の動作', behavior: '模擬テスト', 'behavior-fail': '模擬テスト: 不合格', 'behavior-not-run': '模擬テスト: 実行できない（環境）', 'behavior-untested': '模擬テスト: 結果なし',
       //   簡素化 B（2026-10-17）: 生成工程の機械検査の項目は検査の一覧にそのまま入る（Toolkit が作り直さない）。上に無い項目の名前
-      'planned-usage': '計画で新設する項目', 'unsupported-feature': '隔離環境で扱えない機能', 'lock-revert': '編集不可の戻し', 'record-api': 'レコードの API の使い方', coverage: '要件の達成（AI の申告）' };
+      'planned-usage': '計画で新設する項目', 'unsupported-feature': '隔離環境で扱えない機能', 'lock-revert': '編集不可の戻し', 'record-api': 'レコードの API の使い方', coverage: '要件の達成（AI の申告）',
+      //   2026-10-18: 生成工程の機械検査の通知の項目（メンション付きのコメントの登録。外部への通信は今までの security・宛先を読めない通信は security-review）
+      notification: '通知（メンション付きのコメント）' };
     /** Phase 18: ドキュメントカード（Toolkit が作った Prompt / Markdown / JSON。AI へは送っていない） */
     function documentCardHtml(m) {
       const d = m.data || {};

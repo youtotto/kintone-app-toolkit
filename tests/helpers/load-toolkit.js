@@ -44,8 +44,15 @@ function loadToolkit({ document: docOverride = null, localStorage: lsOverride = 
   };
   sandbox.window = sandbox;
   sandbox.globalThis = sandbox;
+  //   2026-10-18: 読み込みの間に本体が作るタイマー（起動の待ち waitReady: kintone が無ければ 10 秒で打ち切って画面を起動する）は、読み込みの後に止める。
+  //   テストは kintone を与えないので、実行が 10 秒を超えたファイルの途中で画面の起動が始まり、kintone が無い例外でテストが止まっていた
+  //   （ai-consultation が 10.3 秒かかり §54 の後で止まった。setInterval は前から何もしない関数）。読み込みの後に作るタイマー（テストの待ち）は今までどおり
+  const loadTimers = [];
+  sandbox.setTimeout = (fn, ms, ...args) => { const t = setTimeout(fn, ms, ...args); loadTimers.push(t); return t; };
   vm.createContext(sandbox);
   vm.runInContext(code, sandbox, { filename: 'kintoneAppToolkit.user.js' });
+  sandbox.setTimeout = setTimeout;
+  for (const t of loadTimers) clearTimeout(t);
   sandbox.__TEST__.__sandbox = sandbox;   // Phase 18: Customize タブのテストで window.loadMonaco / kintone / fetch を差し込む
   //   簡素化（2026-10-17）: 作った会話を覚え、テストが版から今の判定（反映できるか）を引けるようにする（tests/helpers/final-state.js）
   require('./final-state.js').trackConversations(sandbox.__TEST__.KTAiConversation);
