@@ -32,6 +32,9 @@
 //        （decisionRefs []）足す → 警告は X(D) に入るので構造の照合で D の実現（delegated・必須の効果・通常表示の「計画で足した」）、保存禁止は planner として外れる。
 //        どちらの順でも同じ・印の無い Gateway でも同じ。D が範囲内の要件で実現済みなら構造の照合はしない（S8-23）
 //
+//   §S10（2026-10-18）採用内容の欠落の区別: 仮案の id の振り直しで、要件が記録した planRefs（前のターンの id）が別の項目を指しても、台帳の対応だけで採用の範囲を決める。
+//        採用した AI の項目の要件を任意の提案と取り違えない・対応の切れた要件は計画に入れず取り消さず「結び付かない提案」として出す・未採用の任意の提案は入れない
+//
 //   修正前の版（KT_SRC）でも例外で止めずに各 assert を評価する（読み取りの関数が無い版では空の読み取りで落ちる）。§S2 は最初の計画・自動の見直し・差分更新の
 //   3 つの section に分けている（前の section が落ちても後の assert を評価する）
 //
@@ -1079,6 +1082,51 @@ await section(async () => {
   const changedSec = (chat.match(/仮案からの補足[\s\S]*?(?=この案の制約|確認できないこと|残る判断|動作テスト環境へ反映|$)/) || [''])[0];
   assert(changedSec.includes(`判断が残っています${SENT}`) && changedSec.split(SENT).length === 2 && confs.filter(t => t === `判断が残っています（この最終案には入っていません）: ${SENT}`).length === 1 && m.calls.ask.length === asks && m.msgs().filter(x => x.type === 'FINAL').length === 1,
     `S9-2: 最終案の通常表示（仮案からの補足）と承認の欄の確認項目に、判断が残っていることを同じ文で 1 回ずつ示す（別のカード・質問は増えない）: ${JSON.stringify({ confs, sec: changedSec.slice(0, 260) })}`);
+});
+
+// =========================================================
+console.log('\n--- §S10（2026-10-18）採用内容の欠落の区別: 仮案の id の振り直しで、結び付きの欠落だけを理由に黙って入れない・黙って消さない ---');
+//   仮案の AI は項目の id を毎回 B1… と振り直す。要件が記録した planRefs は、その要件を操作したターンの id のまま（別の項目の id と同じ文字になることもある）。
+//   結び付きは台帳の「仮案の項目 id → 要件 id」の対応（同じ文の項目・利用者の言い換え・判断の key・そのターンの要件の操作で引き継ぐ）だけで決める（文の似ているかは見ない・AI を呼ばない）。
+//   区別: (a) 未採用の任意の提案は計画に入れない（理由を出さない。設計どおり）／(b) 採用した内容を引き継げない（結び付きが切れた）ときは、計画に入れず・取り消さず、
+//   最終案に「結び付かない提案」として件数を出す／(c) 書き込み手順に必要な値が無い手順は、反映の分類 NO_VALUES で止める（ai-flow-redesign の §7p・0b8e38e）
+await section(async () => {
+  const U1 = '承認待ちでは金額を編集できないようにしたい';
+  const LOCK = B('承認待ちでは金額を編集できないようにする', 'user');
+  const ITEMS = B('明細の金額も承認待ちでは編集できないようにする', 'ai');
+  const SUG = B('保存するときに確認のメッセージを出す', 'suggestion');
+  const R_LOCK = req('add', { target: '金額', condition: '承認待ち', behavior: '編集できないようにする', sourceQuotes: [U1], planRefs: ['B1'], effects: ['lock'] });
+  const R_ITEMS = (ref) => req('add', { target: '明細', condition: '承認待ち', behavior: '明細の金額も編集できないようにする', decision: 'proposed', sourceQuotes: [], planRefs: [ref], effects: ['lock'] });
+  const R_SUG = (ref) => req('add', { target: '保存', condition: '', behavior: '確認のメッセージを出す', decision: 'proposed', sourceQuotes: [], planRefs: [ref] });
+  const turn1 = (behaviors, ops) => ({ reply: '仮案です。', intent: 'propose', proposal: { behaviors, assumptions: [], decisions: [], approach: { standard: [], js: ['JavaScript で制御する'] }, cannot: [] }, turn: { ops: [], answers: [], requirementOps: ops } });
+  const turn2 = (behaviors, ops = []) => ({ reply: '仮案を直しました。', intent: 'update', proposal: { behaviors, assumptions: [], decisions: [], approach: { standard: [], js: ['JavaScript で制御する'] }, cannot: [] }, turn: { ops, answers: [], requirementOps: [] } });
+  const run = async (t1, t2) => {
+    const sent = [];
+    const scriptFn = ({ utterance: u }) => (u === U1 ? t1 : /保存/.test(u) ? t2 : null);
+    const x = makeConvC({ scriptFn, planImpl: (args) => { sent.push((args.requirements || []).map(r => r.id)); return K.planJs(args); } });
+    await x.c.send(U1);
+    await x.c.send('保存の確認も入れて');
+    const r = await x.c.send('この案で進めて');
+    const v = x.c.activePlan();
+    const decisionOf = (id) => (x.c.requirements(v.planId).find(q => q.id === id) || {}).decision || null;
+    return { r, v, sent: sent[0] || [], unlinked: ((v && v.final && v.final.unlinkedReqs) || []).map(u => u.requirementId), unconfirmed: ((v && v.final && v.final.unconfirmedReqs) || []).map(u => u.requirementId), decisionOf };
+  };
+  //   (1) 2 回目の仮案で任意の提案が間に入り、AI の項目（明細の編集不可）が B2 → B3 にずれた。R2 の planRefs は B2 のまま（今は任意の提案の id）
+  const a = await run(turn1([LOCK, ITEMS], [R_LOCK, R_ITEMS('B2')]), turn2([LOCK, SUG, ITEMS]));
+  assert(a.r.intent === 'ADOPT_DRAFT' && a.sent.includes('R2') && a.unconfirmed.includes('R2') && !a.unlinked.includes('R2'),
+    `S10-1: 採用した AI の項目の要件は、記録した planRefs が今は任意の提案の id でも、台帳の対応で採用の範囲に入り、計画の AI に渡す（担当の確認の対象。黙って消さない）: ${JSON.stringify({ sent: a.sent, unconfirmed: a.unconfirmed, unlinked: a.unlinked })}`);
+  //   (2) 逆: 記録した planRefs は今は利用者の項目の id だが、台帳の対応では任意の提案だけに結び付く → 未採用の任意の提案（計画に入れない・理由は出さない）
+  const b = await run(turn1([SUG, LOCK], [{ ...R_LOCK, planRefs: ['B2'] }, R_SUG('B1')]), turn2([LOCK, SUG]));
+  assert(b.r.intent === 'ADOPT_DRAFT' && !b.sent.includes('R2') && !b.unlinked.includes('R2') && !b.unconfirmed.includes('R2') && b.decisionOf('R2') === 'proposed',
+    `S10-2: 台帳の対応で任意の提案だけに結び付く要件は、記録した planRefs が利用者の項目の id を指しても計画に入れない（未採用の任意の提案。取り消しもしない）: ${JSON.stringify({ sent: b.sent, unlinked: b.unlinked, unconfirmed: b.unconfirmed })}`);
+  //   (3) 利用者が任意の提案を入れると伝え（adopt）、AI が項目の文を言い換えた。要件の操作は無い（対応が切れる）→ 前の「任意の提案」の根拠のまま黙って外さない
+  const c = await run(turn1([LOCK, SUG], [R_LOCK, R_SUG('B2')]), turn2([LOCK, B('保存時に確認メッセージを表示する', 'user')], [{ id: 'B2', op: 'adopt', text: '', quote: '保存の確認も入れて' }]));
+  assert(c.r.intent === 'ADOPT_DRAFT' && !c.sent.includes('R2') && c.unlinked.includes('R2') && c.decisionOf('R2') === 'proposed',
+    `S10-3: 採用した内容を引き継げない（項目の文が変わり対応が切れた）要件は、計画に入れず・取り消さず、最終案に「結び付かない提案」として出す（入れるかは利用者が伝える）: ${JSON.stringify({ sent: c.sent, unlinked: c.unlinked, decision: c.decisionOf('R2') })}`);
+  //   (4) AI が 2 回目の仮案から項目を黙って落とした（利用者は断っていない）→ 前の採用の根拠のまま、もう見えない項目の要件を計画に入れない
+  const d = await run(turn1([LOCK, ITEMS], [R_LOCK, R_ITEMS('B2')]), turn2([LOCK]));
+  assert(d.r.intent === 'ADOPT_DRAFT' && !d.sent.includes('R2') && d.unlinked.includes('R2') && d.decisionOf('R2') === 'proposed',
+    `S10-4: 仮案から消えた項目の要件は、採用の時点に結び付く項目が無いので計画に入れず・取り消さず、最終案に「結び付かない提案」として出す: ${JSON.stringify({ sent: d.sent, unlinked: d.unlinked, decision: d.decisionOf('R2') })}`);
 });
 
 console.log(`\n${state.passed} passed, ${state.failed} failed`);

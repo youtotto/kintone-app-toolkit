@@ -25184,7 +25184,9 @@
        */
       const noteDraftScope = (lg, items, { decisionsAll = [], by = 'proposal', at = null } = {}) => {
         const reqs = KTAiAnswers.requirementsOf(lg).filter(r => r && r.decision !== 'revoked');
-        const assign = (useFlags) => { const kinds = draftItemKindsOf(items, decisionsAll, { useFlags }); for (const r of reqs) { const b = basisFromItems(r, kinds, lg.itemReqs); if (b) r.scope = { basis: b, by, at }; else if (!r.scope) r.scope = { basis: 'unlinked', by, at }; } };
+        //   2026-10-18: 今の対応（lg.itemReqs）で結び付く項目が無い要件は unlinked にする（前のターンの根拠を持ち続けない）。仮案の AI が項目の文を言い換えて対応が切れたとき、
+        //   前の「任意の提案」の根拠のまま計画から黙って外したり、前の採用の根拠のまま、もう見えない項目の要件を計画に入れたりしない（最終案に「結び付かない提案」として件数を出す）
+        const assign = (useFlags) => { const kinds = draftItemKindsOf(items, decisionsAll, { useFlags }); for (const r of reqs) r.scope = { basis: basisFromItems(r, kinds, lg.itemReqs) || 'unlinked', by, at }; };
         //   1 回目は ai の項目をすべて ai として根拠を決め（前のターン・採用の時点の判定に左右されない）、効果を足す項目を決めてから印を付けて決め直す
         assign(false);
         const userReqs = reqs.filter(r => ['explicit', 'item-user'].includes(scopeBasisOf(r)));
@@ -25625,33 +25627,19 @@
       //   §0f.2 の 3（2026-10-09）: 利用者の要件に無い効果を足すため任意の提案の扱いにした ai の項目（asSuggestion）も含める
       const draftSuggestionIds = (d) => new Set(((d && d.items && d.items.behaviors) || []).filter(b => isSuggestionItem(b) && b.id).map(b => b.id));
       /**
-       * §0e.2: 採用していない任意の提案だけに結び付く AI の提案の要件（decision proposed で、planRefs が任意の提案の項目だけを指す）の id。
-       *   計画の AI に渡さず、最終案の「担当が計画にありません」にも出さない。決まった要件（decided）は利用者の発言に根拠があるので外さない
-       */
-      const suggestionOnlyReqIds = (d, lg) => {
-        //   採用の時点の任意の提案の項目 id は台帳にも残す（runPlan の lg.suggestionItems。次の仮案が始まった後の計画の差分更新でも同じに扱う）
-        const ids = new Set([...draftSuggestionIds(d), ...((lg && Array.isArray(lg.suggestionItems)) ? lg.suggestionItems : [])]);
-        const out = new Set();
-        if (!ids.size || !lg) return out;
-        for (const r of KTAiAnswers.requirementsForContext(lg)) {
-          const refs = Array.isArray(r && r.planRefs) ? r.planRefs : [];
-          if (r && r.decision === 'proposed' && refs.length && refs.every(x => ids.has(x))) out.add(r.id);
-        }
-        return out;
-      };
-      /**
        * 計画の AI に渡す要件（§0e.2: 採用していない任意の提案だけに結び付く AI の提案の要件を除く）。
        *   §0f.2 の 4（2026-10-09）: 採用範囲の外の要件（requirementScopeOf）は、任意の提案だけのものは今までどおり渡さず、ほか（効果を足す ai の項目・計画の AI の追加）は
        *   decision revoked として渡す（Gateway は「取り消し済み。計画に入れない・戻さない」として出す）。台帳の decision は変えない（送る形だけ）。
-       *   plan = その版の計画（customization ごとの判定に使う。最初の計画の前は null）
+       *   plan = その版の計画（customization ごとの判定に使う。最初の計画の前は null）。
+       *   2026-10-18: 任意の提案だけに結び付くかは採用の範囲の判定（reason suggestion。根拠は台帳の「仮案の項目 id → 要件 id」の対応から決める）だけで決める。
+       *   要件が記録した planRefs（前のターンの項目 id のまま）で決め直していた処理は削除した（id の振り直しで、採用した AI の項目の要件を任意の提案と取り違え、計画の AI に渡していなかった）
        */
-      const planRequirementsOf = (lg, d = null, plan = null) => {
+      const planRequirementsOf = (lg, plan = null) => {
         if (!lg) return [];
-        const so = suggestionOnlyReqIds(d, lg);
         const sc = scopeOfLedger(lg, plan);
         const outOf = (r) => (sc && r && r.decision !== 'revoked' ? sc.out.get(r.id) || null : null);
         //   2026-10-18: 結び付きの分からない AI の提案（reason unlinked）も任意の提案と同じく渡さない（採用済みとして渡さず、取り消し済み（revoked）とも決めない）
-        return KTAiAnswers.requirementsForContext(lg).filter(r => !(r && so.has(r.id))).filter(r => !(outOf(r) && ['suggestion', 'unlinked'].includes(outOf(r).reason))).map(r => (outOf(r) ? { ...r, decision: 'revoked' } : r));
+        return KTAiAnswers.requirementsForContext(lg).filter(r => !(outOf(r) && ['suggestion', 'unlinked'].includes(outOf(r).reason))).map(r => (outOf(r) ? { ...r, decision: 'revoked' } : r));
       };
       /**
        * 要件の担当として数える id（計画の手順・customization・採用した仮案の項目。任意の提案の項目は数えない）。
@@ -25673,9 +25661,7 @@
       const unownedRequirementsOf = (v, entries) => {
         const lg = state.ledgers.get(v.planId) || null;
         if (!lg) return [];
-        const dft = state.draft && v.fromDraft && state.draft.id === v.fromDraft.id ? state.draft : null;
-        //   範囲外の要件・任意の提案だけの要件は数えない
-        const sugOnly = suggestionOnlyReqIds(dft, lg);
+        //   範囲外の要件（任意の提案だけの要件・結び付きの分からない AI の提案を含む。採用の範囲の判定）は数えない
         const sc = scopeOfLedger(lg, v.plan);
         //   §0c.6（2026-10-08）: 担当は構造（planRefs が計画の手順か customization・採用した仮案の項目を指す）だけで決める。生成 AI の coverage の MET は担当として数えない
         //   （MET と申告しても planRefs が無ければ必須の効果に入らず、検証されないまま反映できてしまうため）
@@ -25683,7 +25669,7 @@
         //   足りない（missing）決まった要件は反映を止める。確かめられない（unconfirmed）要件は確認の限界（簡素化 C で止めない・自動の見直しもしない）
         void entries;
         return KTAiAnswers.requirementsForContext(lg)
-          .filter(r => r && !sugOnly.has(r.id) && !(sc && sc.out.has(r.id)))
+          .filter(r => r && !(sc && sc.out.has(r.id)))
           .filter(r => r && (r.decision === 'decided' || r.decision === 'proposed') && r.disposition !== 'unsupported')
           //   簡素化 C（2026-10-16）: 計画が手順・JavaScript に対応づけていない要件を「担当が無い」（反映を止め、有料の自動の見直しを起こす）にしない。
           //   要件は今の設定・既存のコードで満たされていることがあり（今回の変更だけが実現先とは限らない）、構造からは区別できないので確認の限界（unconfirmed）
@@ -27563,7 +27549,8 @@
           //   adoptedBehaviors = 採用した仮案の実現する動作（origin user / ai。任意の提案 suggestion は除く。無ければ []）
           //   2026-10-15（最終案の重複と担当未定の食い違い §1）: 左に出すのは利用者の依頼の動作（origin user）と、要件の台帳の要件に結び付く AI の項目だけ。
           //   要件に結び付かない AI の項目（「アクションを整え、既存の編集制御に統合する」など実装の言い方）は右の「最終的にどう動くか」へ。件数では切らない
-          const linkedItemIds = new Set([...reqsF.flatMap(r => (Array.isArray(r && r.planRefs) ? r.planRefs : []).map(String)), ...Object.entries((lgF && lgF.itemReqs) || {}).filter(([, rs]) => Array.isArray(rs) ? rs.length : !!rs).map(([k]) => String(k))]);
+          //   2026-10-18: 結び付きは台帳の「仮案の項目 id → 要件 id」の対応だけで見る（要件が記録した planRefs は前のターンの項目 id のまま。別の項目の id と同じ文字になることもある）
+          const linkedItemIds = new Set(Object.entries((lgF && lgF.itemReqs) || {}).filter(([, rs]) => Array.isArray(rs) ? rs.length : !!rs).map(([k]) => String(k)));
           const draftBehaviors = dr && dr.items && Array.isArray(dr.items.behaviors) ? dr.items.behaviors.filter(b => b && b.text && !isSuggestionItem(b)) : [];
           //   採用した仮案の動作がすべて要件に結び付かない AI の項目のときは、それを左に出す（採用した内容を左から消さない。計画・生成の要約と列の列挙の fin.behaviors に戻さない。独立レビュー L3）
           const toLeft0 = (b) => b.origin !== 'ai' || (b.id != null && linkedItemIds.has(String(b.id)));
@@ -27889,7 +27876,7 @@
               let r;
               //   レビューの指摘 row2（2026-10-09）: 土台の計画（版になっていない最初の計画・続けた作業の途中の結果を含む）にも採用範囲の外し方を当てた写しを送る
               const prevScoped = scopedBaseOf(prev, lg);
-              try { r = await services.plan({ goal: base.goalSent || base.goal, revision: { basedOnVersion: base.version, request: req, previousPlan: usePatch ? prevScoped.gatewayPlan : prevScoped.plan, previousReview: prev.review || null, previousRequests: [...(base.revisionRequests || []), ...requests], ...(usePatch ? { mode: 'patch', ...(focus.length ? { focus } : {}) } : {}), ...(utterancesNow.length ? { utterances: utterancesNow } : {}), ...(askSeparately && jobs === 1 ? { questionsAnsweredSeparately: true } : {}), ...(genNow ? { generateAfter: true } : {}) }, decisions, requirements: planRequirementsOf(lg, null, prev.plan), signal, baseCtx: prev.ctx, ...(state.subject ? { subject: state.subject } : {}), ...(progressOf() ? reviseText : {}) }); }
+              try { r = await services.plan({ goal: base.goalSent || base.goal, revision: { basedOnVersion: base.version, request: req, previousPlan: usePatch ? prevScoped.gatewayPlan : prevScoped.plan, previousReview: prev.review || null, previousRequests: [...(base.revisionRequests || []), ...requests], ...(usePatch ? { mode: 'patch', ...(focus.length ? { focus } : {}) } : {}), ...(utterancesNow.length ? { utterances: utterancesNow } : {}), ...(askSeparately && jobs === 1 ? { questionsAnsweredSeparately: true } : {}), ...(genNow ? { generateAfter: true } : {}) }, decisions, requirements: planRequirementsOf(lg, prev.plan), signal, baseCtx: prev.ctx, ...(state.subject ? { subject: state.subject } : {}), ...(progressOf() ? reviseText : {}) }); }
               catch (e) { noteCallError(callKind, e, clock() - tRev); throw e; }   // §0f.3（FP7）: 例外で終わった呼び出しも記録する（end unknown / error）
               state.job = null;
               //   §0e.4（2026-10-09）: 最終案の前の計画の自動の差分更新（担当・効果の補い）は 'plan-auto' に分ける（利用者の依頼・回答による作り直しと区別する）
@@ -27986,7 +27973,7 @@
               //   §0f.2 の 1（2026-10-09）: 採用の時点の記録（lg.adoption）を固定し、要件ごとの採用の根拠を決め直す（計画の AI に送る前）
               if (dft && lgD0) freezeAdoption(lgD0, dft);
               //   §0e.2（2026-10-09）: 採用していない任意の提案だけに結び付く AI の提案の要件は計画の AI に渡さない（計画に入れない）
-              const fromDraftArgs = dft ? { requirements: planRequirementsOf(lgD0, dft), decisions: draftDecisionsForPlan() } : {};
+              const fromDraftArgs = dft ? { requirements: planRequirementsOf(lgD0), decisions: draftDecisionsForPlan() } : {};
               const tPlan = clock();
               //   Customize タブの相談（subject）は、相談中の JavaScript を計画の Context にも付ける（統合先の第一候補）
               let r;
