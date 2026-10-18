@@ -319,7 +319,7 @@ console.log('\n--- §53. AI Workspace: Hybrid の計画 → 最終案（生成�
 //   共有の部品（tests/helpers/new-flow.js）: K.mount（画面と偽 client。health に proposal）・K.adoptOnScreen（台本の 4 発言で最終案まで）・K.fakeVerification（生成工程の検証結果）
 const K = createNewFlowKit(T);
 /** 生成工程が必須の効果の検証に対応している接続先（health の customization-generator.verification に印） */
-const HEALTH_V = (() => { const h = K.clone(K.HEALTH); h.registry.toolkit['customization-generator'].verification = ['requirementId', ...K.GEN_EFFECT_FEATURES]; return h; })();
+const HEALTH_V = (() => { const h = K.clone(K.HEALTH); h.registry.toolkit['customization-generator'].verification = ['requirementId', ...K.GEN_EFFECT_FEATURES, K.GEN_NETWORK_FEATURE]; return h; })();
 /** 新しい流れの生成工程は必須の効果（effects・condition）を固定して依頼する。§51・§52 の cust() に、完了で金額を編集不可にする効果を足したもの */
 const CUST_LOCK = (o = {}) => cust({ fields: [{ code: 'ステータス', access: 'READ' }, { code: 'amount', access: 'CONTROL', condition: 'ステータス in ("完了")', effects: ['lock'] }], ...o });
 const PLAN_HYBRID_V = planOf({ steps: [STD_STEP(), JS_STEP()], customizations: [CUST_LOCK()], solution: 'HYBRID' });

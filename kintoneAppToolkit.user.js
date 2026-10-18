@@ -18964,6 +18964,12 @@
    */
   const ktEffectCheckCapable = (features) => ktEffectsCapable(features) && features.includes('effectCheck');
   /**
+   * 2026-10-18（外部への通信と通知の制限は生成工程の責任）: 生成工程の機械検査に、proxy の API・kintone の外の宛先・宛先を読めない通信・メンション付きのコメントの登録の
+   *   検査があるか（health の印 networkCheck。AI版 契約 20 §19）。Toolkit は要件の文の語で生成を止める判定（7b・7c）を削除したので、印の無い接続先の生成結果は
+   *   検証済みにしない（守り手の無い形を受け入れない。cancelCheck・limitCode と同じ扱い。文の語の判定は戻さない）
+   */
+  const KT_NETWORK_CHECK_FEATURE = 'networkCheck';
+  /**
    * C-1 第 4 段（2026-10-09）: 模擬テストの条件と確かめていない範囲は、Toolkit で一覧を持たない（前の KT_BEHAVIOR_UNVERIFIED_SCOPE と固定の文は削除した）。
    *   生成工程（Gateway）が返す verification.behavior.conditions と uncheckedScope（契約 20 の「確かめない範囲」と同じ文）をそのまま最終案の詳細表示に出す。
    *   health の印 'scopeList' がある接続先だけ新しい形として受け入れる（KT_EFFECT_FEATURES）。返っていなければ「接続先から返っていません」と出し、古い固定の文は出さない
@@ -25861,7 +25867,12 @@
         const portNotCapable = effUnknown.some(([, e]) => e.verdict && Array.isArray(e.verdict.unresolved) && e.verdict.unresolved.some(u => u && u.why === 'not-capable'));
         if (effUnknown.length) reasons.push({ kind: 'effects-unknown', text: effUnknown.every(([, e]) => e.verdict && e.verdict.port) ? (portNotCapable ? '既存の JavaScript から移す保存の条件が移植元と同じかを、この接続先では確かめる検査ができないため、まだ反映できません（「いつでも保存を止める」にはしていません）。' : '既存の JavaScript から移す保存の条件が移植元と同じかは、移植元の本文を取れない（読めない）ので確かめていません。そのため、まだ反映できません（「いつでも保存を止める」にはしていません）。') : 'JavaScript で必要な動作（編集できない・警告・保存を止めるなど）を特定できないため、まだ反映できません。' });
         if (notReady.some(([, e]) => e.status === 'not-ready' && e.verdict && e.verdict.kind === 'effects-limit')) reasons.push({ kind: 'effects-limit', text: '必須の動作が多すぎて、生成工程で一度に確かめられないため、まだ反映できません（計画の JavaScript を分けます）。' });
-        if (st('unsupported')) reasons.push({ kind: 'capability', text: '接続先（生成工程）が必須の動作の確認に対応していないため、まだ反映できません。' });
+        //   2026-10-18: 外部への通信と通知の検査に対応していない接続先（verdict.capability network）は、その理由で書く（必須の動作の確認の文と分ける）
+        if (st('unsupported')) {
+          const capNet = notReady.some(([, e]) => e.status === 'unsupported' && e.verdict && e.verdict.capability === 'network');
+          const capOther = notReady.some(([, e]) => e.status === 'unsupported' && !(e.verdict && e.verdict.capability === 'network'));
+          reasons.push({ kind: 'capability', text: [capOther ? '接続先（生成工程）が必須の動作の確認に対応していないため、まだ反映できません。' : '', capNet ? '接続先（生成工程）が外部への通信と通知の検査に対応していないため、まだ反映できません。' : ''].filter(Boolean).join('') });
+        }
         //   §0c.6: 実行できなかった理由の区分ごとに文を変える（環境だけ「環境の制約」と言う）
         const NOT_RUN_TEXT = { env: '必須の動作を模擬テストで確かめられていないため、まだ反映できません（環境の制約です。作った JavaScript の誤りとは判定していません）。', condition: '計画の条件を模擬テストの代表条件にできる形で読めないため、まだ反映できません（計画の条件を直します。作った JavaScript の誤りとは判定していません）。', limit: '確かめる条件が模擬テストの上限を超えたため、まだ反映できません（計画を分けるか絞ります。作った JavaScript の誤りとは判定していません）。', existing: '既存の JavaScript と一緒の動きを模擬テストで確かめられないため、まだ反映できません（計画を直します: 作る JavaScript を既存の JavaScript に統合する・既存の処理を見直す。作った JavaScript の誤りとは判定していません）。' };
         //   §0c.7: 理由ごとの文があればそれを使う（other-platform）
@@ -26841,6 +26852,8 @@
           //   簡素化 B（2026-10-17）: 検証結果の指紋が、受け取った候補の指紋と一致しない（別の候補の検証結果・指紋の無い検証結果）→ 合格にしない
           if (ver.bound !== true) return { status: 'unresolved', kind: 'verification-mismatch', fix: 'regenerate', reason: '生成工程の検証結果が、受け取った候補と対応していません（候補の指紋が一致しません）。この検証結果では合格にしません', next: '最終案を作り直します（候補を作り直し、その候補で検証し直します）。', details };
           if (req.length && (!er.supported || entry.effectsCapable === false)) return { status: 'unsupported', kind: 'capability', reason: '接続先（生成工程）が必須の動作の確認に対応していないため、要件を満たすかを確かめられません', next: '接続先が更新されてから最終案を作り直します（いまの接続先では反映できる最終案にしません）。', details };
+          //   2026-10-18: 外部への通信と通知の検査（health の印 networkCheck）の無い接続先の結果は検証済みにしない（KT_NETWORK_CHECK_FEATURE。印を記録していない前の結果は変えない）
+          if (entry.networkCheck === false) return { status: 'unsupported', kind: 'capability', capability: 'network', reason: '接続先（生成工程）が外部への通信と通知の検査に対応していないため、作った JavaScript が kintone の外と通信しないか・メンション付きのコメントで通知しないかを確かめられません', next: '接続先が更新されてから最終案を作り直します（いまの接続先では反映できる最終案にしません）。', details };
           const behaviorFailed = er.failed.length > 0 || er.otherFailed.length > 0;
           if (codeBlocks.length || er.missing.length || behaviorFailed || (ver && ver.passed === false)) {
             const missing = er.missing.map(i => `${fieldName(i.field)}: ${EFFECT_NEED_JA[i.effect] || i.effect}`);
@@ -27153,7 +27166,7 @@
           //   C-1 第 4 段（2026-10-09・K-2 の残り）: 生成の使用量は、この送信の呼び出しの記録に付ける（attempts の累計は版をまたぐので使用量に使わない）
           { const lastCall = timing.calls.length ? timing.calls[timing.calls.length - 1] : null; if (lastCall && lastCall.kind === 'generate' && estimate && estimate.measured !== false && (estimate.input != null || estimate.output != null)) lastCall.genEstimate = estimate; }
           const blockerCodes = (r.review?.registration?.blockers || []).map(b => String(b.code));
-          const entry = { ...base, effectsCapable: typeof services.generatorFeatures === 'function' ? ktEffectsCapable(services.generatorFeatures() || []) : null, effectCheck: typeof services.generatorFeatures === 'function' ? ktEffectCheckCapable(services.generatorFeatures() || []) : false, scopeList: typeof services.generatorFeatures === 'function' ? (services.generatorFeatures() || []).includes('scopeList') : false, generated: r.generated, review: r.review, ctx: r.ctx || null, existingSource: r.existingSource || null, verification: r.verification || null, candidateHash: null, requirementIds: r.requirementIds || null, relatedFiles: r.relatedFiles || null, inputHash: r.inputHash ?? null, blockers: blockerCodes, attempts: nextAttempts(previous, { inputHash: r.inputHash ?? null, blockers: blockerCodes, estimate, at: now(), reviewFailed: !!(r.review && r.review.reviewFailed) }), repairs: (r.verification && r.verification.repairs && r.verification.repairs.count) || 0, status: null };
+          const entry = { ...base, effectsCapable: typeof services.generatorFeatures === 'function' ? ktEffectsCapable(services.generatorFeatures() || []) : null, effectCheck: typeof services.generatorFeatures === 'function' ? ktEffectCheckCapable(services.generatorFeatures() || []) : false, scopeList: typeof services.generatorFeatures === 'function' ? (services.generatorFeatures() || []).includes('scopeList') : false, networkCheck: typeof services.generatorFeatures === 'function' ? (services.generatorFeatures() || []).includes(KT_NETWORK_CHECK_FEATURE) : null, generated: r.generated, review: r.review, ctx: r.ctx || null, existingSource: r.existingSource || null, verification: r.verification || null, candidateHash: null, requirementIds: r.requirementIds || null, relatedFiles: r.relatedFiles || null, inputHash: r.inputHash ?? null, blockers: blockerCodes, attempts: nextAttempts(previous, { inputHash: r.inputHash ?? null, blockers: blockerCodes, estimate, at: now(), reviewFailed: !!(r.review && r.review.reviewFailed) }), repairs: (r.verification && r.verification.repairs && r.verification.repairs.count) || 0, status: null };
           //   簡素化 B（2026-10-17）: 生成工程の検証結果と、受け取った候補の結び付きを確かめる。候補の指紋は Gateway と同じ計算で、受け取った候補と送った既存ファイルの
           //   本文から Toolkit が作る（承認・登録はこの指紋に結び付ける）。検証結果の指紋と一致したときだけ bound（一致しない・指紋の無い検証結果は合格にしない）
           entry.candidateHash = await KTScan.gatewayCandidateHashOf({ strategy: entry.generated?.strategy, targetFile: entry.generated?.targetFile, code: entry.generated?.code, patch: entry.generated?.patch, baseHash: entry.existingSource && typeof entry.existingSource.text === 'string' ? KTScan.hashText(entry.existingSource.text) : null, customizationId: cid });

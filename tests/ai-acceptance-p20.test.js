@@ -460,6 +460,18 @@ console.log('\n--- CX-7. 外部連携・通知の語で生成の可否を変え�
   await K.adoptC(xExt);
   const extCard = K.stripC(K.finalHtml(xExt));
   assert(/Toolkit では JavaScript を作れない部分があります/.test(extCard) && /会計システム/.test(extCard) && !/コードを生成できます/.test(extCard) && xExt.gen.calls.length === 0 && !FS.readyOf(xExt.c.activePlan()), `案内: 生成できない項目しか無ければ「コードを生成できます」と言わない（最終案のカード・生成は呼ばない）: ${extCard.replace(/\s+/g, ' ').slice(0, 160)}`);
+  //   接続先の能力（AI版 契約 20 §19）: 外部への通信と通知の検査の印（health の networkCheck）の無い接続先の生成結果は、合格の検証結果が返っても検証済みにしない
+  //   （守り手の無い形を受け入れない。文の語の判定には戻さない）。理由は必須の動作の確認の文と分ける。印のある接続先は今までどおり確認済み
+  const xNoNet = K.makeConvC({ networkCheck: false });
+  await K.adoptC(xNoNet);
+  const vNoNet = xNoNet.c.activePlan(), eNoNet = vNoNet && vNoNet.generated ? vNoNet.generated.C1 : null;
+  assert(eNoNet && eNoNet.status === 'unsupported' && eNoNet.verdict.kind === 'capability' && eNoNet.verdict.capability === 'network' && /外部への通信と通知の検査に対応していない/.test(eNoNet.verdict.reason) && xNoNet.gen.calls.length === 1 && !FS.readyOf(vNoNet)
+    && /接続先（生成工程）が外部への通信と通知の検査に対応していないため、まだ反映できません。/.test(FS.reasonOf(vNoNet)) && !/必須の動作の確認に対応していない/.test(FS.reasonOf(vNoNet)),
+    `CX-7: 外部への通信と通知の検査の印の無い接続先の生成結果は検証済みにしない（理由は通信と通知の検査の文）: ${JSON.stringify({ status: eNoNet && eNoNet.status, verdict: eNoNet && eNoNet.verdict && eNoNet.verdict.reason, reason: FS.reasonOf(vNoNet) })}`);
+  const xNet = K.makeConvC();
+  await K.adoptC(xNet);
+  const vNet = xNet.c.activePlan();
+  assert(vNet.generated.C1.status === 'verified' && vNet.generated.C1.networkCheck === true && FS.readyOf(vNet), `CX-7: 印のある接続先の生成結果は今までどおり確認済み: ${JSON.stringify({ status: vNet.generated.C1.status, reason: FS.reasonOf(vNet) })}`);
 }
 
 // =========================================================

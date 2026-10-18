@@ -37,7 +37,7 @@ const { makeKintoneMock } = require('./helpers/kintone-preview-mock.js');
 // 新しい流れの共有の部品（tests/helpers/new-flow.js。台本・偽の計画と生成工程・会話の偽 services・画面の偽 client）
 const { createNewFlowKit } = require('./helpers/new-flow.js');
 const KIT = createNewFlowKit(T);
-const { tick, ticks, clone, buildInputs, INPUTS, META, B, A, Q, APPROVER, ROUTE, BASE, CSV, Q_THRESHOLD, Q_MIDDLE, Q_DAYS, Q_HOLIDAYS, Q_LOCK, Q_TIMING, B_SELECT, B_ROUTE, B_UNDER, B_OVER, B_NOTIFY_TO, B_NOTIFY_IF, B_LOCK, STD, req, idBy, reqIdBy, script, normalized, planOk, planFail, planThrow, gateMk, HEALTH, spec, mkStep, PLAN_META, PLAN_V1, answerFor, makeStorage, gate, mount, clickChat, RP, KTCodeReview, DATA_C, LABELS_C, custOf, CUST_C1, ST_C, handlerC, GOOD, BAD, WARN, VALUE, LOCKSAVE, CAND, GEN_EFFECT_FEATURES, GW_SCOPE, EXPECT_OF, NOMATCH_OF, fakeVerification, planJs, makeGenerate, makeConvC, adoptC, finalHtml, stripC } = KIT;
+const { tick, ticks, clone, buildInputs, INPUTS, META, B, A, Q, APPROVER, ROUTE, BASE, CSV, Q_THRESHOLD, Q_MIDDLE, Q_DAYS, Q_HOLIDAYS, Q_LOCK, Q_TIMING, B_SELECT, B_ROUTE, B_UNDER, B_OVER, B_NOTIFY_TO, B_NOTIFY_IF, B_LOCK, STD, req, idBy, reqIdBy, script, normalized, planOk, planFail, planThrow, gateMk, HEALTH, spec, mkStep, PLAN_META, PLAN_V1, answerFor, makeStorage, gate, mount, clickChat, RP, KTCodeReview, DATA_C, LABELS_C, custOf, CUST_C1, ST_C, handlerC, GOOD, BAD, WARN, VALUE, LOCKSAVE, CAND, GEN_EFFECT_FEATURES, GEN_NETWORK_FEATURE, GW_SCOPE, EXPECT_OF, NOMATCH_OF, fakeVerification, planJs, makeGenerate, makeConvC, adoptC, finalHtml, stripC } = KIT;
 /** 2026-10-14（会話の設計し直し）: 最終的にどう動くか・反映先と主な影響・検証の区分・変わった点は右の「変更内容」（changeSummaryHtml）に移した */
 const rightOf = (x, v = x.c.activePlan()) => KTAiChatUi.changeSummaryHtml(v, {});
 async function section(fn) { try { await fn(); } catch (e) { assert(false, `例外: ${e && e.stack ? e.stack.split('\n').slice(0, 4).join(' / ') : e}`); } }
@@ -1348,7 +1348,7 @@ await section(async () => {
 const { makeEnvGetter } = require('./helpers/dev-base-fake.js');
 await section(async () => {
   const HEALTH_V = clone(HEALTH);
-  HEALTH_V.registry.toolkit['customization-generator'].verification = ['requirementId', 'feedback', ...GEN_EFFECT_FEATURES];
+  HEALTH_V.registry.toolkit['customization-generator'].verification = ['requirementId', 'feedback', ...GEN_EFFECT_FEATURES, GEN_NETWORK_FEATURE];
   const CUST_S = { customizationId: 'C1', requirement: '承認待ちでは案件名を編集できないようにする', whyStandardInsufficient: 'ステータスで切り替えるアクセス権は無い', strategy: 'NEW_JS_FILE', platform: ['desktop'], implementation: 'JAVASCRIPT', events: ['app.record.edit.show'], fields: [{ code: 'ステータス', access: 'READ' }, { code: 'case_name', access: 'CONTROL', condition: 'ステータス in ("承認待ち")', effects: ['lock'] }], apis: [], existingFiles: [], risks: [], questions: [], dependsOn: [], evidenceIds: [] };
   const planResp = (goal) => { const b = PLAN_V1(goal); return { ...b, plan: { ...b.plan, solution: 'CUSTOMIZATION', assessment: { ...b.plan.assessment, summary: '承認待ちでは案件名を編集できないようにします。' }, steps: [mkStep('C1', 'CUSTOMIZATION_REQUIRED', 'JS', null, { customizationId: 'C1' }, { title: 'JavaScript', solution: 'CUSTOMIZATION' })], customizations: [CUST_S] } }; };
   const CODE_S = "(function () {\n  'use strict';\n  kintone.events.on(['app.record.edit.show'], function (event) {\n    const record = event.record;\n    if (record['ステータス'] && record['ステータス'].value === '承認待ち') record['case_name'].disabled = true;\n    return event;\n  });\n})();";
@@ -1459,7 +1459,7 @@ await section(async () => {
   //   cand = 偽の生成工程の候補の性質に足すもの（fails・failMsg・check。今の契約の Gateway の結果を返すときに使う）
   const run = async ({ proposal = true, capable = false, code = LOCK_L, has = ['lock'], cand = {} } = {}) => {
     const h = clone(proposal ? HEALTH : hLegacy);
-    if (capable) h.registry.toolkit['customization-generator'].verification = ['requirementId', ...(Array.isArray(capable) ? capable : GEN_EFFECT_FEATURES)];
+    if (capable) h.registry.toolkit['customization-generator'].verification = ['requirementId', ...(Array.isArray(capable) ? capable : GEN_EFFECT_FEATURES), GEN_NETWORK_FEATURE];
     const genCtx = [];
     const generateImpl = async ({ ctx, requestId }) => {
       genCtx.push(clone(ctx));
@@ -1823,7 +1823,7 @@ await section(async () => {
   //   envReason: 偽の生成工程が返す動作テストの not-run の理由（§0c.9 の次の手の分け方の画面の回帰）
   const run = async (inputs, { health = null, envReason = null } = {}) => {
     const HEALTH_V = clone(HEALTH);
-    HEALTH_V.registry.toolkit['customization-generator'].verification = health || ['requirementId', 'feedback', ...GEN_EFFECT_FEATURES];
+    HEALTH_V.registry.toolkit['customization-generator'].verification = health || ['requirementId', 'feedback', ...GEN_EFFECT_FEATURES, GEN_NETWORK_FEATURE];
     const genCtx = [];
     const generateImpl = async ({ ctx, requestId }) => {
       genCtx.push(clone(ctx));
@@ -2662,7 +2662,7 @@ await section(async () => {
 // E4: 検証の後の書き換えをやめる（§0d.3）。画面の generate（偽 client）で、生成工程が返したコードと candidateHash のまま最終案・承認・登録の準備まで進む
 await section(async () => {
   const HEALTH_E = clone(HEALTH);
-  HEALTH_E.registry.toolkit['customization-generator'].verification = ['requirementId', 'feedback', ...GEN_EFFECT_CHECK];
+  HEALTH_E.registry.toolkit['customization-generator'].verification = ['requirementId', 'feedback', ...GEN_EFFECT_CHECK, GEN_NETWORK_FEATURE];
   const CUST_K = { customizationId: 'C1', requirement: '承認待ちでは案件名を編集できないようにする', whyStandardInsufficient: 'ステータスで切り替えるアクセス権は無い', strategy: 'NEW_JS_FILE', platform: ['desktop'], implementation: 'JAVASCRIPT', events: ['app.record.edit.show'], fields: [{ code: 'ステータス', access: 'READ' }, { code: 'case_name', access: 'CONTROL', condition: 'ステータス in ("承認待ち")', effects: ['lock'] }], apis: [], existingFiles: [], risks: [], questions: [], dependsOn: [], evidenceIds: [] };
   const planResp = (goal) => { const b = PLAN_V1(goal); return { ...b, plan: { ...b.plan, solution: 'CUSTOMIZATION', assessment: { ...b.plan.assessment, summary: '承認待ちでは案件名を編集できないようにします。' }, steps: [mkStep('C1', 'CUSTOMIZATION_REQUIRED', 'JS', null, { customizationId: 'C1' }, { title: 'JavaScript', solution: 'CUSTOMIZATION' })], customizations: [CUST_K] } }; };
   const CODE_K = "(function () {\n  'use strict';\n  kintone.events.on(['app.record.edit.show'], function (event) {\n    const record = event.record;\n    if (record['ステータス'] && record['ステータス'].value === '承認待ち') record['case_name'].disabled = true;\n    return event;\n  });\n})();";
@@ -3000,7 +3000,7 @@ await section(async () => {
   const planRespL = (goal) => { const b = PLAN_V1(goal); return { ...b, plan: { ...b.plan, solution: 'CUSTOMIZATION', steps: [mkStep('C1', 'CUSTOMIZATION_REQUIRED', 'JS', null, { customizationId: 'C1' }, { title: 'JavaScript', solution: 'CUSTOMIZATION' })], customizations: [CUST_L] } }; };
   const LOCK_L = "(function () {\n  'use strict';\n  kintone.events.on(['app.record.edit.show'], function (event) {\n    const record = event.record;\n    if (record['ステータス'] && record['ステータス'].value === '承認待ち') record['case_name'].disabled = true;\n    return event;\n  });\n})();";
   const run = async (features) => {
-    const h = clone(HEALTH); h.registry.toolkit['customization-generator'].verification = ['requirementId', ...features];
+    const h = clone(HEALTH); h.registry.toolkit['customization-generator'].verification = ['requirementId', ...features, GEN_NETWORK_FEATURE];
     const generateImpl = async ({ ctx, requestId }) => {
       const req = (ctx.verification && ctx.verification.requiredEffects) || [];
       const resp = { ok: true, contractVersion: '2.1', meta: { requestId, gateway: { product: 'toolkit', feature: 'customization-generator', promptVersion: '1', contextVersion: 'customization-1' }, normalization: { warnings: [] }, ai: { model: 'm' } }, generated: { strategy: 'NEW_JS_FILE', targetFile: 'caseLock.js', summary: 's', code: LOCK_L, patch: null, events: ['app.record.edit.show'], fields: [{ code: 'case_name', access: 'CONTROL' }], apis: [], assumptions: [], warnings: [], coverage: [{ requirementId: 'C1', status: 'PARTIAL', note: '行の追加・削除は止められません', limitCode: 'SUBTABLE_ROWS' }] }, ...(req.length ? { verification: fakeVerification({ code: LOCK_L, has: { case_name: ['lock'] } }, req, { candidateHash: gwHashOfCtx(ctx, { strategy: 'NEW_JS_FILE', targetFile: 'caseLock.js', code: LOCK_L, patch: null }) }) } : {}) };
@@ -3038,7 +3038,7 @@ await section(async () => {
   assert(r.intent === 'ADOPT_DRAFT' && v.final && FS.readyOf(v) && ap.ok && KIT.validC(x).ok && KIT.REQUESTS.length === 4, `F11-1: 会話コントローラ: 採用 → 最終案 → 承認（共有の部品）: ${JSON.stringify({ intent: r.intent, ok: ap.ok })}`);
   const CUST_S = { customizationId: 'C1', requirement: '承認待ちでは案件名を編集できないようにする', whyStandardInsufficient: 'ステータスで切り替えるアクセス権は無い', strategy: 'NEW_JS_FILE', platform: ['desktop'], implementation: 'JAVASCRIPT', events: ['app.record.edit.show'], fields: [{ code: 'ステータス', access: 'READ' }, { code: 'case_name', access: 'CONTROL', condition: 'ステータス in ("承認待ち")', effects: ['lock'] }], apis: [], existingFiles: [], risks: [], questions: [], dependsOn: [], evidenceIds: [] };
   const LOCK_S = "(function () {\n  'use strict';\n  kintone.events.on(['app.record.edit.show'], function (event) {\n    const record = event.record;\n    if (record['ステータス'] && record['ステータス'].value === '承認待ち') record['case_name'].disabled = true;\n    return event;\n  });\n})();";
-  const h = clone(HEALTH); h.registry.toolkit['customization-generator'].verification = ['requirementId', ...GEN_EFFECT_FEATURES];
+  const h = clone(HEALTH); h.registry.toolkit['customization-generator'].verification = ['requirementId', ...GEN_EFFECT_FEATURES, GEN_NETWORK_FEATURE];
   const planResp = (goal) => { const b = PLAN_V1(goal); return { ...b, plan: { ...b.plan, solution: 'HYBRID', steps: [...b.plan.steps, mkStep('C1', 'CUSTOMIZATION_REQUIRED', 'JS', null, { customizationId: 'C1' }, { title: 'JavaScript', solution: 'CUSTOMIZATION' })], customizations: [CUST_S] } }; };
   const generateImpl = async ({ ctx, requestId }) => {
     const req = (ctx.verification && ctx.verification.requiredEffects) || [];

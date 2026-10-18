@@ -58,7 +58,7 @@ function makeConv(plans, { fail = null, review = true } = {}) {
   };
   const services = {
     conversationFeatures: () => ['requirements', 'stream', 'proposal'],
-    generatorFeatures: () => ['requirementId', ...K.GEN_EFFECT_FEATURES],
+    generatorFeatures: () => ['requirementId', ...K.GEN_EFFECT_FEATURES, K.GEN_NETWORK_FEATURE],
     async propose(args) { calls.propose.push({ utterance: args.utterance }); return { ok: true, proposal: K.normalized(draftRaw(args.utterance), `pp-${calls.propose.length}`), ctx: { facts: [] } }; },
     async plan(args) {
       calls.plan.push({ goal: args.goal, revision: args.revision ? JSON.parse(JSON.stringify({ ...args.revision, previousPlan: null })) : null, decisions: JSON.parse(JSON.stringify(args.decisions || null)), ackAtCall: c ? c.messages().filter(m => m.data?.kind === 'answers-ack').length : 0, aiCallsAtCall: c && typeof c.metrics === "function" ? c.metrics().aiCalls : null });
