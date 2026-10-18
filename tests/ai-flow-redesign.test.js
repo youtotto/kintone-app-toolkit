@@ -459,9 +459,65 @@ await section(async () => {
   const r = await c.send('通知も催促も不要、ほかは採用');
   const reqs = c.requirements();
   const byId = (id) => reqs.find(e => e.id === id);
-  assert(r.ok && byId('R1').decision === 'decided' && byId('R2').decision === 'revoked' && byId('R3').decision === 'revoked' && byId('R4').decision !== 'revoked', `B3-24: 不採用 → id の対応で R2 を取り消し、対応の無い R3 は内容の文字の重なり（7 割）で取り消し、短い動作だけの R4（「催促する」）は取り消さない: ${JSON.stringify(reqs.map(e => [e.id, e.decision]))}`);
+  //   2026-10-18: 不採用の取り消しは仮案の項目 id → 要件 id の対応だけで決める（前は対応の無い R3 を内容の文字の重なり（7 割）で取り消していた）。
+  //   対応の無い R3・R4（AI の提案・planRefs なし）は取り消しも採用もしない: 台帳の decision は proposed のまま、採用の範囲には入れず（reason unlinked）、計画の AI にも送らない
+  assert(r.ok && byId('R1').decision === 'decided' && byId('R2').decision === 'revoked' && byId('R3').decision === 'proposed' && byId('R4').decision === 'proposed', `B3-24: 不採用 → id の対応で R2 を取り消す。対応の無い R3・R4 は文字の重なりでは取り消さない: ${JSON.stringify(reqs.map(e => [e.id, e.decision]))}`);
   const raw = KTAiAnswers.requirementsOf(lg);
-  assert(raw.find(e => e.id === 'R2').revokedBy.by === 'id' && raw.find(e => e.id === 'R3').revokedBy.by === 'overlap', `B3-25: 取り消しの根拠（id / overlap）を要件に残す: ${JSON.stringify(raw.map(e => [e.id, e.revokedBy && e.revokedBy.by]))}`);
+  const sco = c.requirementScope(c.activePlan() ? c.activePlan().planId : undefined);
+  const row = (id) => (sco.requirements || []).find(q => q.id === id) || {};
+  const sent = (x.calls.plan[0] && x.calls.plan[0].requirements) || [];
+  assert(raw.find(e => e.id === 'R2').revokedBy.by === 'id' && !raw.find(e => e.id === 'R3').revokedBy && ['R3', 'R4'].every(id => row(id).inScope === false && row(id).out === 'unlinked') && ['R3', 'R4'].every(id => !sent.some(q => q.id === id)) && sent.some(q => q.id === 'R2' && q.decision === 'revoked'),
+    `B3-25: 取り消しの根拠（id）を要件に残す。結び付きの分からない R3・R4 は採用の範囲の外（unlinked）で、計画の AI に送らない（取り消し済みとしても送らない）: ${JSON.stringify({ revokedBy: raw.map(e => [e.id, e.revokedBy && e.revokedBy.by]), scope: ['R3', 'R4'].map(id => [id, row(id).inScope, row(id).out]), sent: sent.map(q => `${q.id}:${q.decision}`) })}`);
+  const fin = c.activePlan() && c.activePlan().final;
+  const rightT = stripC(rightOf(x));
+  assert(fin && (fin.unlinkedReqs || []).map(u => u.requirementId).sort().join() === 'R3,R4' && /仮案のどの項目とも結び付かない AI の提案が 2 件あり、計画に入れていません（取り消してもいません。入れるときは伝えてください）/.test(rightT),
+    `B3-25b: 結び付きの分からない提案は黙って消さず、右の「確認できないこと」に件数の 1 行（中立の文）で出す: ${JSON.stringify({ unlinked: fin && fin.unlinkedReqs, right: rightT.slice(Math.max(0, rightT.indexOf('確認できないこと')), Math.max(0, rightT.indexOf('確認できないこと')) + 200) })}`);
+});
+// 4b. 2026-10-18: 不採用の取り消しで、ほかの根拠を持つ要件と利用者の決めた要件を守る（id の対応だけ・文字の重なりは使わない）
+await section(async () => {
+  const scriptKeep = ({ utterance: u, previous: p }) => {
+    const prevB = (p && p.behaviors) || [];
+    //   R1: 利用者の決めた要件（承認済みの保存を止める）を、AI が利用者の項目 B1 と AI の提案 B3 の両方に結び付けた。R2: AI の提案 B2（警告）と B3 の両方に結び付く。
+    //   R3: 利用者の決めた要件を AI の提案 B3 だけに結び付けた（AI の結び付けの誤り）。R4: B3 だけに結び付く AI の提案
+    if (/保存を止めたい/.test(u)) return { reply: '仮案です。', intent: 'propose', proposal: { behaviors: [B('承認済みでは金額の保存を止める', 'user'), B('差戻し後に備考が空なら警告する'), B('承認済みでは明細の保存も止める', 'suggestion')], assumptions: [], decisions: [], approach: { standard: [], js: ['保存の検査'] }, cannot: [] },
+      turn: { ops: [], answers: [], requirementOps: [
+        req('add', { target: '金額', condition: '承認済み', behavior: '保存を止める', sourceQuotes: ['保存を止めたい'], planRefs: ['B1', 'B3'], effects: ['block-save'] }),
+        req('add', { target: '備考', condition: '差戻し後', behavior: '空なら警告する', decision: 'proposed', planRefs: ['B2', 'B3'], effects: ['warn'] }),
+        req('add', { target: '金額', condition: '承認済み', behavior: '保存時に確かめる', sourceQuotes: ['保存を止めたい'], planRefs: ['B3'], effects: ['block-save'] }),
+        req('add', { target: '明細', condition: '承認済み', behavior: '保存を止める', decision: 'proposed', planRefs: ['B3'], effects: ['block-save'] }),
+      ] } };
+    if (/明細はいらない/.test(u)) return { reply: '明細の提案を外しました。', intent: 'update', proposal: { behaviors: [B('承認済みでは金額の保存を止める', 'user'), B('差戻し後に備考が空なら警告する')], assumptions: [], decisions: [], approach: { standard: [], js: ['保存の検査'] }, cannot: [] },
+      turn: { ops: prevB.filter(b => /明細/.test(b.text)).map(b => ({ id: b.id, op: 'reject', text: '', quote: '明細はいらない' })), answers: [], requirementOps: [] } };
+    return null;
+  };
+  const x = makeConv({ scriptFn: scriptKeep });
+  const { c } = x;
+  await c.send('承認済みでは金額の保存を止めたい');
+  await c.send('明細はいらない');
+  const reqs = c.requirements();
+  const byId = (id) => reqs.find(e => e.id === id) || {};
+  assert(byId('R1').decision === 'decided' && byId('R2').decision === 'proposed' && byId('R3').decision === 'decided' && byId('R4').decision === 'revoked',
+    `B3-24b: 断った提案（B3）にだけ結び付く AI の提案 R4 は取り消す。ほかの残る項目（B1・B2）にも結び付く R1・R2 は取り消さない（採用された根拠まで消さない）。利用者の決めた R3 は、AI の提案を断っただけでは取り消さない: ${JSON.stringify(reqs.map(e => [e.id, e.decision]))}`);
+});
+// 4c. 2026-10-18: 仮案の AI に送る要件の planRefs は、今の仮案（AI から見た前回の仮案）の項目 id（Gateway は毎回 id を振り直す。要件が記録した planRefs は前のターンの id）
+await section(async () => {
+  const scriptOrder = ({ utterance: u }) => {
+    if (/一覧と通知/.test(u)) return { reply: '仮案です。', intent: 'propose', proposal: { behaviors: [B('承認待ちの一覧を足す', 'user'), B('承認されたら申請者に通知する', 'user')], assumptions: [], decisions: [], approach: { standard: ['一覧と通知'], js: [] }, cannot: [] },
+      turn: { ops: [], answers: [], requirementOps: [req('add', { target: '通知', condition: '承認されたら', behavior: '申請者に通知する', sourceQuotes: ['一覧と通知'], planRefs: ['B2'] })] } };
+    //   2 回目の仮案は項目の順が逆（振り直しで「通知」の項目は B1 になる。R1 の記録の planRefs は前の B2 のまま）
+    if (/順番/.test(u)) return { reply: '順番を入れ替えました。', intent: 'update', proposal: { behaviors: [B('承認されたら申請者に通知する', 'user'), B('承認待ちの一覧を足す', 'user')], assumptions: [], decisions: [], approach: { standard: ['一覧と通知'], js: [] }, cannot: [] }, turn: { ops: [], answers: [], requirementOps: [] } };
+    if (/確認/.test(u)) return { reply: '確認しました。', intent: 'update', proposal: { behaviors: [B('承認されたら申請者に通知する', 'user'), B('承認待ちの一覧を足す', 'user')], assumptions: [], decisions: [], approach: { standard: ['一覧と通知'], js: [] }, cannot: [] }, turn: { ops: [], answers: [], requirementOps: [] } };
+    return null;
+  };
+  const x = makeConv({ scriptFn: scriptOrder });
+  await x.c.send('承認待ちの一覧と通知を足したい');
+  await x.c.send('順番を入れ替えて');
+  await x.c.send('確認だけです');
+  const sentR1 = ((x.calls.propose[2] && x.calls.propose[2].requirements) || []).find(r => r.id === 'R1') || {};
+  const stored = (KTAiAnswers.requirementsOf(x.ledger(x.c.draft().id)).find(r => r.id === 'R1') || {}).planRefs;
+  const notifyId = (x.c.draft().items.behaviors.find(b => /通知/.test(b.text)) || {}).id;
+  assert(notifyId === 'B1' && JSON.stringify(sentR1.planRefs) === '["B1"]' && JSON.stringify(stored) === '["B2"]',
+    `B3-24c: 仮案の AI に送る要件の planRefs は今の仮案の項目 id（「通知」は B1）にそろえる（台帳の項目 id → 要件 id の対応で引く。記録の planRefs は前のターンの B2 のまま）: ${JSON.stringify({ sent: sentR1.planRefs, stored, notifyId })}`);
 });
 // 6. 回答済みの key の判断を AI がもう一度出したら「再確認」（前の答えを添える。答えると同じ key を置き換える）。同じターンで答えたばかりの key は出さない
 await section(async () => {

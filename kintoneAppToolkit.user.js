@@ -24117,6 +24117,9 @@
         const b = scopeBasisOf(r);
         if (SCOPE_IN_BASES.includes(b)) { definite.push(r); continue; }
         if (b === 'suggestion') { out.set(r.id, { reason: 'suggestion' }); continue; }
+        //   2026-10-18: 仮案の段階で AI が足した要件（createdBy proposal）で、仮案のどの項目にも結び付かない（unlinked）・決まっていない（proposed / undecided）ものは、
+        //   採用の範囲に入れない（採用した項目に結び付く根拠が無いので、結び付きが無いことを理由に採用済みにしない）。取り消しもしない（reason unlinked。台帳の decision は変えない）
+        if (b === 'unlinked' && r.decision !== 'decided' && r.createdBy === 'proposal') { out.set(r.id, { reason: 'unlinked' }); continue; }
         const ef = reqEffectsOf(r);
         if (r.decision === 'decided' || !ef || !ef.length) { definite.push(r); continue; }
         cand.push(r);
@@ -25669,7 +25672,8 @@
         const so = suggestionOnlyReqIds(d, lg);
         const sc = scopeOfLedger(lg, plan);
         const outOf = (r) => (sc && r && r.decision !== 'revoked' ? sc.out.get(r.id) || null : null);
-        return KTAiAnswers.requirementsForContext(lg).filter(r => !(r && so.has(r.id))).filter(r => !(outOf(r) && outOf(r).reason === 'suggestion')).map(r => (outOf(r) ? { ...r, decision: 'revoked' } : r));
+        //   2026-10-18: 結び付きの分からない AI の提案（reason unlinked）も任意の提案と同じく渡さない（採用済みとして渡さず、取り消し済み（revoked）とも決めない）
+        return KTAiAnswers.requirementsForContext(lg).filter(r => !(r && so.has(r.id))).filter(r => !(outOf(r) && ['suggestion', 'unlinked'].includes(outOf(r).reason))).map(r => (outOf(r) ? { ...r, decision: 'revoked' } : r));
       };
       /**
        * 要件の担当として数える id（計画の手順・customization・採用した仮案の項目。任意の提案の項目は数えない）。
@@ -26373,19 +26377,19 @@
         return entry;
       }
       const openDecisionsNow = () => openDraftDecisions(state.draft, state.draftDecisions);
-      /** 要件の文と仮案の項目の文の照合（記号を除いた文。項目の文と仮案の項目の対応を引き継ぐときに使う） */
+      /** 仮案の項目の文の照合（記号を除いた文。同じ文の項目に、前のターンの項目 id → 要件 id の対応を引き継ぐときに使う） */
       const reqNormB = (s) => String(s ?? '').replace(/[\s　、。．，,.!！?？「」『』（）()・:：]/g, '');
-      /** 内容の文字（漢字・カタカナ・英数字。ひらがなは助詞・語尾が多いので使わない） */
-      const CONTENT_CHAR_B = /[㐀-䶿一-鿿々ァ-ヶーA-Za-z0-9０-９Ａ-Ｚａ-ｚ]/;
       /**
-       * 要件（条件 ＋ 動作）の内容の文字の 7 割以上が、不採用にした項目の文にあるか（KTAiAnswers.uncoveredClauses と同じ方式）。
-       * id の対応で引けないときの補助。内容の文字が 4 文字に満たない短い動作（「通知する」）だけでは取り消さない（レビューの指摘 2026-10-07: 文の包含だけでは過剰に一致した）
+       * 2026-10-18: 仮案の AI に送る要件の planRefs を、今の仮案（AI から見た「前回の仮案」）の項目 id にそろえる。Gateway は仮案の id を毎回振り直すので、
+       *   要件が記録した planRefs は前のターンの id のまま（別の項目の id と同じ文字になることもある）。対応は台帳の「仮案の項目 id → 要件 id」（lg.itemReqs）だけで引き、
+       *   今の仮案の項目に結び付かない要件は []（結び付きを推定しない）
        */
-      const reqOverlapsItem = (e, itemText) => {
-        const chars = [...reqNormB(`${e.condition}${e.behavior}`)].filter(ch => CONTENT_CHAR_B.test(ch));
-        if (chars.length < 4) return false;
-        const have = new Set([...reqNormB(itemText)].filter(ch => CONTENT_CHAR_B.test(ch)));
-        return chars.filter(ch => have.has(ch)).length / chars.length >= 0.7;
+      const draftRequirementsForContext = (d) => {
+        const lg = ledgerOf(d.id);
+        const ir = lg.itemReqs || {};
+        const it = d.items || {};
+        const itemIds = new Set([...(it.behaviors || []), ...(it.assumptions || []), ...(it.decisions || [])].map(x => x && x.id).filter(Boolean));
+        return KTAiAnswers.requirementsForContext(lg).map(r => ({ ...r, planRefs: Object.keys(ir).filter(k => itemIds.has(k) && Array.isArray(ir[k]) && ir[k].includes(r.id)).slice(0, 8) }));
       };
       /** 質問の AI に渡す仮案の要約（計画の形に合わせる。採用前の仮案だと分かる文にする）。open の仮案が無ければ null */
       const draftAsPlanContext = () => {
@@ -26451,15 +26455,23 @@
         state.metrics.requirementOps += (resp.turn.requirementOps || []).length;
         // 不採用にした項目に対応する要件は取り消す（AI が requirementOps で取り消していなくても復活させない）。
         //   レビューの指摘 4（2026-10-07）: 台帳に持つ「仮案の項目 id → 要件 id」の対応（lg.itemReqs。要件の add / update の planRefs から）で引く。
-        //   id で引けないときだけ、内容の文字の重なり率（7 割）で補う（短い動作の包含では取り消さない）
+        //   2026-10-18: id で引ける要件だけを取り消す（前は id で引けないとき、要件と項目の文の内容の文字の重なり率（7 割）で取り消していた。利用者の要件を、
+        //   似た文の提案を断っただけで取り消すおそれがあった）。id で結び付かない要件は、取り消しも採用もしない（requirementScopeOf の unlinked）。
+        //   次の要件は、id で結び付いていても取り消さない:
+        //   - 今回も断っていない前回の仮案の項目・判断の key（key:<key>）にも結び付く（同じ内容の採用された根拠まで消さない）
+        //   - 利用者が決めた要件（decided）で、断った項目が AI の項目（origin user でない動作・前提）（利用者の依頼を、提案を断っただけで取り消さない）
         const itemReqsPrev = lg.itemReqs || {};
+        //   （判断を「不要（推奨で進める）」にした dismissed は推奨で決まるので、その判断の結び付きは根拠に数える）
+        const rejectedNow = new Set(applied.rejected.map(x => x.id));
+        const supportedElsewhere = (rid, itemId) => Object.entries(itemReqsPrev).some(([k, ids]) => k !== itemId && !rejectedNow.has(k) && Array.isArray(ids) && ids.includes(rid));
         for (const rj of applied.rejected) {
           const byId = new Set(itemReqsPrev[rj.id] || []);
           for (const e of KTAiAnswers.requirementsOf(lg)) {
-            if (e.decision === 'revoked') continue;
-            if (!(byId.has(e.id) || (!byId.size && reqOverlapsItem(e, rj.text)))) continue;
+            if (e.decision === 'revoked' || !byId.has(e.id)) continue;
+            if (supportedElsewhere(e.id, rj.id)) continue;
+            if (e.decision === 'decided' && rj.origin !== 'user') continue;
             e.history.push({ target: e.target, condition: e.condition, behavior: e.behavior, decision: e.decision, version: e.updatedIn });
-            e.decision = 'revoked'; e.revokedIn = rev; e.updatedIn = rev; e.revokedBy = { itemId: rj.id, by: byId.has(e.id) ? 'id' : 'overlap' };
+            e.decision = 'revoked'; e.revokedIn = rev; e.updatedIn = rev; e.revokedBy = { itemId: rj.id, by: 'id' };
             if (!ch.revoked.includes(e)) ch.revoked.push(e);
           }
         }
@@ -27431,6 +27443,11 @@
           const implLine = implGapLineOf;
           //   2026-10-16（判定の責任範囲を絞る）: 確認材料不足（unconfirmed）は欠落・担当未定にしない。反映を止めず、右の「確認できないこと」に中立の 1 文（unconfirmedReqs）
           const unconfirmedReqs = [];
+          //   2026-10-18: 仮案の項目に結び付かない AI の提案（requirementScopeOf の reason unlinked。採用の範囲に入れず、取り消してもいない）は、右の「確認できないこと」に
+          //   中立の 1 文で出す（黙って消さない。入れるかは利用者が伝える）
+          const lgU = state.ledgers.get(v.planId) || null;
+          const scU = lgU ? scopeOfLedger(lgU, v.plan) : null;
+          const unlinkedReqs = scU ? [...scU.out].filter(([, o]) => o && o.reason === 'unlinked').map(([id]) => { const r = KTAiAnswers.requirementsOf(lgU).find(x => x && x.id === id); return r ? { requirementId: String(id), line: cut(reqTextOf(r), 140) } : null; }).filter(Boolean) : [];
           for (const r of ownerless) {
             if (r.kind === 'unconfirmed') { if (![...planScope.values()].some(x => x && x.requirementId === String(r.id))) unconfirmedReqs.push({ requirementId: String(r.id), decision: r.decision, line: implLine(r) }); continue; }
             const k = r.id; const prevRow = scopeRows.get(k); const line = implLine(r);
@@ -27646,7 +27663,7 @@
             const once = (s) => String(s || '').replace(/（(?:作った JavaScript |生成したコード)の誤りとは判定していません）|。(?:作った JavaScript |生成したコード)の誤りとは判定していません(?=。|$)|(?:作った JavaScript |生成したコード)の誤りとは判定していないため、|(?:作った JavaScript |生成したコード)の誤りとは判定していません。?/g, (m) => { if (seen) return ''; seen = true; return m; });
             b.text = once(b.text); b.next = once(b.next);
           }
-          return { planId: v.planId, version: v.version, draftId: v.fromDraft ? v.fromDraft.id : null, behaviors, changed, cannot, outOfScope, ...(unconfirmedReqs.length ? { unconfirmedReqs } : {}), scopeOut, impact, pendingInstructions, adoptedBehaviors, existingChanges, constraints, supplements, blockers, verification: { machine, effects: effectRows, behavior, unverified, howTo, scope }, questions: questions.map(q => ({ key: q.key, text: q.text, priority: q.priority || 'later', entryId: q.entryId || null, reconfirm: !!q.reconfirm, id: q.id, ...(q.recommendation ? { recommendation: String(q.recommendation) } : {}) })), customizations: entries.map(([cid, e]) => ({ customizationId: cid, status: e.status, role: customizationRoleOf(p, cid) || '', platforms: platformsOfEntry(e), targetFile: e.generated?.targetFile || '', strategy: e.generated?.strategy || null, candidateHash: e.candidateHash || null, repairs: 0, gatewayRepairs: (e.verification && e.verification.repairs && e.verification.repairs.count) || 0, attempts: e.attempts || null, unresolved: e.unresolved || null, verdict: e.verdict || null, failure: e.failure || null, reused: !!e.reused })), unsupported: unsupported.map(u => ({ customizationId: u.customizationId, reason: u.reason || null })), blockedSteps, approvable, blockingReason, fix: fixReq, readiness: { ready: readiness.ready, reasons: readiness.reasons }, incomplete: incomplete && incomplete.kind ? JSON.parse(JSON.stringify(incomplete)) : null,
+          return { planId: v.planId, version: v.version, draftId: v.fromDraft ? v.fromDraft.id : null, behaviors, changed, cannot, outOfScope, ...(unconfirmedReqs.length ? { unconfirmedReqs } : {}), ...(unlinkedReqs.length ? { unlinkedReqs } : {}), scopeOut, impact, pendingInstructions, adoptedBehaviors, existingChanges, constraints, supplements, blockers, verification: { machine, effects: effectRows, behavior, unverified, howTo, scope }, questions: questions.map(q => ({ key: q.key, text: q.text, priority: q.priority || 'later', entryId: q.entryId || null, reconfirm: !!q.reconfirm, id: q.id, ...(q.recommendation ? { recommendation: String(q.recommendation) } : {}) })), customizations: entries.map(([cid, e]) => ({ customizationId: cid, status: e.status, role: customizationRoleOf(p, cid) || '', platforms: platformsOfEntry(e), targetFile: e.generated?.targetFile || '', strategy: e.generated?.strategy || null, candidateHash: e.candidateHash || null, repairs: 0, gatewayRepairs: (e.verification && e.verification.repairs && e.verification.repairs.count) || 0, attempts: e.attempts || null, unresolved: e.unresolved || null, verdict: e.verdict || null, failure: e.failure || null, reused: !!e.reused })), unsupported: unsupported.map(u => ({ customizationId: u.customizationId, reason: u.reason || null })), blockedSteps, approvable, blockingReason, fix: fixReq, readiness: { ready: readiness.ready, reasons: readiness.reasons }, incomplete: incomplete && incomplete.kind ? JSON.parse(JSON.stringify(incomplete)) : null,
             // 時間: 最終案まで（採用・指示を受け付けた時点から。timing.finalMs と同じ起点）と、測った段階だけの内訳（反証 B1・追加指示 §4（f））
             //   §0e.4（2026-10-09）: 計画の自動の差分更新（plan-auto）は別に数える（planMs は利用者の採用・依頼による計画だけ）
             //   2026-10-15（§4(d)）: proposeMs = 同じ送信の仮案の返答（AI の adopt で計画が始まった送信。無ければ null）・gatewayMs = 部ごとの Gateway の処理時間・calls[].gatewayMs = 呼び出しごと
@@ -28159,7 +28176,7 @@
               let r;
               const tPropose = clock();
               //   C-1 第 3 段（2026-10-08）: Customize タブの相談（subject）は、相談中の JavaScript（ファイル・イベント・フィールド）を仮案の依頼に渡す
-              try { r = await services.propose({ utterance: cls.utterance || t, previous: previousForContext(), decisions: draftDecisionsForContext(), requirements: d ? KTAiAnswers.requirementsForContext(ledgerOf(d.id)) : [], working: null, ...(state.subject ? { subject: state.subject } : {}), signal, onText: (txt) => { noteFirstText(); progressText(txt); } }); }
+              try { r = await services.propose({ utterance: cls.utterance || t, previous: previousForContext(), decisions: draftDecisionsForContext(), requirements: d ? draftRequirementsForContext(d) : [], working: null, ...(state.subject ? { subject: state.subject } : {}), signal, onText: (txt) => { noteFirstText(); progressText(txt); } }); }
               catch (e) { noteCallError('propose', e, clock() - tPropose); throw e; }   // §0f.3（FP7）: 例外で終わった呼び出しも記録する
               finally { state.workInbox = null; }
               noteCall('propose', r); if (timing.calls.length) timing.calls[timing.calls.length - 1].ms = clock() - tPropose;
@@ -29242,7 +29259,10 @@
       const list = (xs) => `<ul>${xs.map(x => `<li>${typeof x === 'string' ? esc(x) : x}</li>`).join('')}</ul>`;
       //   簡素化 C（2026-10-16）: 計画の構造からは実現を確かめていない要件（確認の限界。反映は止めない）は、件数の 1 行と［詳しく］の中の文にまとめる（1 件ずつ並べない）
       const unconfirmedLines = fin && Array.isArray(fin.unconfirmedReqs) ? uniq(fin.unconfirmedReqs.filter(x => x && x.line).map(x => x.line)) : [];
-      const unconfirmedHtml = unconfirmedLines.length ? `<div class="kt-ai-sum-unconfirmed">${esc(`計画の構造からは実現を確かめていない要件が ${unconfirmedLines.length} 件あります（今の設定や既存のコードで満たしていることがあります。この点では反映を止めていません）`)}<details class="kt-ai-tech"><summary>要件</summary>${list(unconfirmedLines)}</details></div>` : '';
+      const unconfirmedHtml0 = unconfirmedLines.length ? `<div class="kt-ai-sum-unconfirmed">${esc(`計画の構造からは実現を確かめていない要件が ${unconfirmedLines.length} 件あります（今の設定や既存のコードで満たしていることがあります。この点では反映を止めていません）`)}<details class="kt-ai-tech"><summary>要件</summary>${list(unconfirmedLines)}</details></div>` : '';
+      //   2026-10-18: 仮案の項目に結び付かない AI の提案（採用の範囲に入れず、取り消してもいない）の件数の 1 行（中立の文。1 件ずつは［詳しく］の中）
+      const unlinkedLines = fin && Array.isArray(fin.unlinkedReqs) ? uniq(fin.unlinkedReqs.filter(x => x && x.line).map(x => x.line)) : [];
+      const unconfirmedHtml = unconfirmedHtml0 + (unlinkedLines.length ? `<div class="kt-ai-sum-unlinked">${esc(`仮案のどの項目とも結び付かない AI の提案が ${unlinkedLines.length} 件あり、計画に入れていません（取り消してもいません。入れるときは伝えてください）`)}<details class="kt-ai-tech"><summary>提案</summary>${list(unlinkedLines)}</details></div>` : '');
       return `<div class="kt-ai-sum">
         <h3>${esc(v.goal || p.goal || '変更案')}</h3>
         <div class="kt-ai-sum-meta">${target ? `対象：${esc(target)}` : ''}</div>
