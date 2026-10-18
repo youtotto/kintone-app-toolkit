@@ -50,10 +50,10 @@ function makeConv(plans, { revisionModes = ['full', 'patch'], revisionMode, fail
   let t = 1000, gates = [];
   const ctl = { hold() { let open; const p = new Promise(r => { open = r; }); gates.push(p); return open; }, failAt };
   const services = {
-    conversationFeatures: () => ['requirements', 'stream', 'proposal'],
+    conversationFeatures: () => ['requirements', 'stream', 'proposal', 'itemIds'],
     async propose(args) {
       const raw = { reply: '金額の大きい案件に注意を出す流れにできます。', intent: 'propose', proposal: { behaviors: [K.B(args.utterance, 'user')], assumptions: [], decisions: [], approach: { standard: ['高額案件の一覧を追加する'], js: [] }, cannot: [] }, turn: { ops: [], answers: [], requirementOps: [] } };
-      return { ok: true, proposal: K.normalized(raw), ctx: { facts: [] }, perf: {} };
+      return { ok: true, proposal: K.normalized(raw, 'pp-1', null, args), ctx: { facts: [] }, perf: {} };
     },
     async plan(args) {
       const n = calls.length + 1;

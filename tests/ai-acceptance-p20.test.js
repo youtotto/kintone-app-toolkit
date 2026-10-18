@@ -31,8 +31,8 @@ const { createNewFlowKit } = require('./helpers/new-flow.js');
 const K = createNewFlowKit(T);
 //   画面の試験の共通: health の assistant-qa に会話の能力（proposal）を足し、client.propose は共有の部品の台本で答える。
 //   依頼は台本の 4 発言（K.REQUESTS）で仮案 → 採用 → 計画（試験ごとの client.plan）→ 最終案まで進める
-const withProposal = (h) => { const x = JSON.parse(JSON.stringify(h)); x.registry.toolkit['assistant-qa'].conversation = ['requirements', 'stream', 'proposal']; return x; };
-const proposeByScript = async ({ ctx, requestId }) => { const raw = K.script({ utterance: ctx.question, previous: ctx.conversation.proposal, requirements: ctx.conversation.requirements }); if (!raw) throw new Error(`台本がありません: ${ctx.question}`); return K.normalized(raw, requestId); };
+const withProposal = (h) => { const x = JSON.parse(JSON.stringify(h)); x.registry.toolkit['assistant-qa'].conversation = ['requirements', 'stream', 'proposal', 'itemIds']; return x; };
+const proposeByScript = async ({ ctx, requestId }) => { const raw = K.script({ utterance: ctx.question, previous: ctx.conversation.proposal, requirements: ctx.conversation.requirements }); if (!raw) throw new Error(`台本がありません: ${ctx.question}`); return K.normalized(raw, requestId, null, ctx.conversation); };
 const adoptOnPanel = (panel) => K.adoptOnScreen({ panel, conv: () => panel.conversation() });
 const { assert, state } = makeAssert();
 const FX = require('./fixtures/ai-context-app.js');
@@ -322,13 +322,13 @@ console.log('\n--- F7 / GM-6（UI）. 相談: 取得済みの本文を Context �
   settings.setConsent(true);
   const calls = [];
   //   C-1 第 3 段（2026-10-08）: 依頼は仮案の流れ（health の conversation に proposal・client.propose は共有の部品の台本）。計画の AI は採用で 1 回呼ぶ
-  const HEALTH = { ok: true, supportedContractVersions: ['2.0', '2.1'], entitlements: [{ product: 'toolkit', features: ['assistant-qa', 'change-planner', 'customization-generator'] }], registry: { toolkit: { 'assistant-qa': { implemented: true, promptVersions: ['1'], conversation: ['requirements', 'stream', 'proposal'] }, 'change-planner': { implemented: true, promptVersions: ['1'] }, 'customization-generator': { implemented: true, promptVersions: ['1'] } } }, contract: { usage: { usedThisMonth: 1, monthlyLimit: 200 } } };
+  const HEALTH = { ok: true, supportedContractVersions: ['2.0', '2.1'], entitlements: [{ product: 'toolkit', features: ['assistant-qa', 'change-planner', 'customization-generator'] }], registry: { toolkit: { 'assistant-qa': { implemented: true, promptVersions: ['1'], conversation: ['requirements', 'stream', 'proposal', 'itemIds'] }, 'change-planner': { implemented: true, promptVersions: ['1'] }, 'customization-generator': { implemented: true, promptVersions: ['1'] } } }, contract: { usage: { usedThisMonth: 1, monthlyLimit: 200 } } };
   const CUST = { customizationId: 'C1', requirement: '承認済では担当者も編集不可', whyStandardInsufficient: 'フィールドのアクセス権はステータスで変えられない', strategy: 'EXTEND_EXISTING_JS', platform: ['desktop'], implementation: 'JAVASCRIPT', events: ['app.record.edit.show'], fields: [{ code: 'amount', access: 'CONTROL' }], apis: [], existingFiles: [{ name: 'fieldOnOff.js', target: 'desktop', reason: '' }], risks: [], questions: [], dependsOn: [], evidenceIds: [] };
   const PLAN_RESP = { ok: true, contractVersion: '2.1', meta: { requestId: 'pl-1', gateway: { product: 'toolkit', feature: 'change-planner', promptVersion: '1', contextVersion: 'planner-1' }, normalization: { warnings: [] }, ai: { model: 'm' }, usage: { usedThisMonth: 1, monthlyLimit: 200 } }, plan: { goal: '承認済みでは担当者も編集不可', solution: 'CUSTOMIZATION', assessment: { summary: 's', usableExistingFields: [], usableExistingSettings: [], gaps: [], evidenceIds: [] }, relevantFields: [], proposedFields: [], steps: [step('C1', 'CUSTOMIZATION_REQUIRED', 'JS', 'fieldOnOff.js', { customizationId: 'C1' }, { solution: 'CUSTOMIZATION', execution: { mode: 'PLAN_ONLY', supported: false, reason: 'x' } })], alternatives: [], impact: [], questions: [], unknowns: [], planConfidence: 'INFERRED', customizations: [CUST] } };
   let gate = null;
   const client = {
     async getHealth() { return HEALTH; },
-    async propose({ ctx, requestId }) { const raw = K.script({ utterance: ctx.question, previous: ctx.conversation.proposal, requirements: ctx.conversation.requirements }); if (!raw) throw new Error(`台本がありません: ${ctx.question}`); return K.normalized(raw, requestId); },
+    async propose({ ctx, requestId }) { const raw = K.script({ utterance: ctx.question, previous: ctx.conversation.proposal, requirements: ctx.conversation.requirements }); if (!raw) throw new Error(`台本がありません: ${ctx.question}`); return K.normalized(raw, requestId, null, ctx.conversation); },
     async plan({ ctx, requestId, signal }) {
       calls.push({ ctx, signal });
       if (gate) await new Promise((res, rej) => { gate.res = res; if (signal) signal.addEventListener?.('abort', () => rej(Object.assign(new Error('aborted'), { name: 'AbortError', code: 'CANCELLED' }))); });
@@ -962,7 +962,7 @@ console.log('\n--- FR-1 / FR-2 / FR-6 / FR-7（UI・実際の AI client と tran
     const env = JSON.parse(req.body || '{}');
     if (env.meta && env.meta.feature === 'assistant-qa' && env.payload && env.payload.conversation && env.payload.conversation.mode === 'proposal') {
       const raw = K.script({ utterance: env.payload.question, previous: env.payload.conversation.proposal, requirements: env.payload.conversation.requirements });
-      return { status: 200, body: JSON.stringify({ ok: true, contractVersion: '2.1', meta: K.META, ...raw }) };
+      return { status: 200, body: JSON.stringify({ ok: true, contractVersion: '2.1', meta: K.META, ...K.gatewayIds(raw, env.payload.conversation) }) };
     }
     posts.push(req.url);
     const next = queue.shift() || 'ok';

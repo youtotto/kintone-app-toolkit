@@ -138,7 +138,7 @@ function makeConv(steps, { askResult = null } = {}) {
   x.services.propose = async (args) => {
     calls.propose.push({ utterance: args.utterance });
     if (ctl.proposeFail) { ctl.proposeFail = false; return { ok: false, reason: 'TIMEOUT', message: '仮案を作れませんでした（テスト）' }; }
-    return { ok: true, proposal: K.normalized(DRAFT_C, `pp-${calls.propose.length}`), ctx: { facts: [] }, perf: { baseWaitMs: 0, contextMs: 1, requestMs: 1 } };
+    return { ok: true, proposal: K.normalized(DRAFT_C, `pp-${calls.propose.length}`, null, args), ctx: { facts: [] }, perf: { baseWaitMs: 0, contextMs: 1, requestMs: 1 } };
   };
   x.services.ask = async (args) => { calls.ask.push({ question: args.question }); if (ctl.askGate) await ctl.askGate; return askResult || { ok: true, answer: { answer: '承認待ちのときの通知はありません。承認者へ通知するのがおすすめです。', facts: [], analysis: [], recommendations: [{ text: '承認待ちになったら作業者（承認者）へ通知する', evidenceIds: [] }], unknowns: [] }, ctx: { facts: [] } }; };
   const c = x.c;

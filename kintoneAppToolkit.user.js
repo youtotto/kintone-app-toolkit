@@ -7455,11 +7455,11 @@
      * （アプリ概要と作業の基準・関連候補（決定的な辞書照合と部分一致）のフィールドとその依存・ステータス・既存 JS の要約（イベントと制御しているフィールド）・
      * 通知とリマインダーの要約）。AI は呼ばない（決定的）。facts の根拠ID は E1… で振り直す
      * @param {object} p utterance（今回の発言）/ previous（前回の仮案。契約の形）/ requirements（KTAiAnswers.requirementsForContext の形）/
-     *   decisions（[{ id, key, label?, answer, kind }]）/ data / deps / scan / incoming / working / options（environment / now / limits / subject）
+     *   decisions（[{ id, key, label?, answer, kind }]）/ itemIdFloor（この仮案で使った番号の上限 { B, A, Q }。2026-10-19・契約 13 §11.11）/ data / deps / scan / incoming / working / options（environment / now / limits / subject）
      *   C-1 第 3 段（2026-10-08）: options.subject（compactSubject の形。Customize タブで相談中の JavaScript）があれば、そのファイルの要約を先頭の事実（js-file・
      *   statement に「相談中の JavaScript」）にし、そのファイルが操作するフィールドを関連候補に入れる（Customize タブの相談も仮案の流れで進めるため。本文は送らない）
      */
-    function buildProposal({ utterance = '', previous = null, requirements = [], decisions = [], data = null, deps = null, scan = null, incoming = null, working = null, options = {} } = {}) {
+    function buildProposal({ utterance = '', previous = null, requirements = [], decisions = [], itemIdFloor = null, data = null, deps = null, scan = null, incoming = null, working = null, options = {} } = {}) {
       const limits = { ...PROPOSAL_LIMITS, ...(options.limits || {}) };
       const q = String(utterance ?? '').replace(/\s+/g, ' ').trim().slice(0, limits.maxUtteranceChars);
       const prev = previous && typeof previous === 'object' ? previous : null;
@@ -7542,7 +7542,8 @@
       facts.sort((a, b) => (b._p - a._p) || (kindRank(a.kind) - kindRank(b.kind)) || cmp(a.key, b.key));
       const strip = (f) => { const { _p, _t, ...rest } = f; return rest; };
       const withIds = (fs) => fs.map((f, i) => ({ id: `E${i + 1}`, ...strip(f) }));
-      const conversation = { mode: 'proposal', proposal: prev, decisions: decs.slice(-40), requirements: reqs.slice(-40), working: working || null };
+      //   2026-10-19（契約 13 §11.11）: この仮案で使った番号の上限（Gateway は新しい項目にこの続きの番号を付ける）
+      const conversation = { mode: 'proposal', proposal: prev, decisions: decs.slice(-40), requirements: reqs.slice(-40), working: working || null, ...(itemIdFloor ? { itemIdFloor: { ...itemIdFloor } } : {}) };
       const make = (fs) => ({ ...base, question: q, facts: withIds(fs), conversation, truncation: { applied: false, sections: [] }, size: null });
       const total = facts.length;
       let n = total, ctx = make(facts);
@@ -20716,8 +20717,8 @@
     const PROPOSAL_ORIGINS = Object.freeze(['user', 'ai', 'suggestion']);
     /**
      * 仮案の応答（mode proposal）の検証と正規化。Gateway の正規化（§11.3）を信頼しつつ、形が崩れていれば直して clientWarnings に残す
-     * （件数 8 / 8 / 4・options 5・approach と cannot 各 6・文字数・id の振り直し B1… / A1… / Q1…・key の正規化と重複・blocking 2 件まで・turn の形）。
-     * ok でない・契約の版が違う・reply が無いときだけ失敗にする
+     * （件数 8 / 8 / 4・options 5・approach と cannot 各 6・文字数・key の正規化と重複・blocking 2 件まで・turn の形）。項目の id は Gateway のまま使う（2026-10-19）。
+     * ok でない・契約の版が違う・reply が無い・項目の id の形が崩れている（重複を含む）ときだけ失敗にする
      * @returns {{ ok:boolean, errors:Array, warnings:Array, normalized:object|null }}
      */
     /** 2026-10-15（§3.2）: 進行を求める語句（adoptQuote）の照合（空白・句読点・括弧を除いた部分一致。2 文字以上） */
@@ -20745,17 +20746,21 @@
       };
       const seenKeys = new Set();
       const uniqKey = (k, path) => { let out = k, n = 2; while (seenKeys.has(out)) out = `${k}_${n++}`; if (out !== k) warn('PROPOSAL_KEY_DUPLICATE', path, `key が重複したため ${out} にしました`); seenKeys.add(out); return out; };
+      //   2026-10-19（契約 13 §11.11）: 項目の id は Gateway がターンをまたいで保ったもの（前回からの項目はその id・新しい項目は使った番号の続き）。そのまま使い、
+      //   形（B… / A… / Q…）と重複だけを確かめる（崩れていれば結び付きが壊れた応答として失敗にする。前は出力の順で B1… / A1… / Q1… に振り直していた）
+      const seenIds = new Set();
+      const idOf = (x, prefix, path) => { const id = x && typeof x.id === 'string' ? x.id.trim() : ''; if (!new RegExp(`^${prefix}[1-9][0-9]{0,2}$`).test(id) || seenIds.has(id)) errors.push({ code: ERROR_CODES.INVALID_RESPONSE, path, message: `仮案の項目の id が不正か重複しています（${id || '空'}）` }); seenIds.add(id); return id; };
       const p = r.proposal && typeof r.proposal === 'object' ? r.proposal : {};
       const behaviors = list(p.behaviors, 8, 'proposal.behaviors')
-        .map((x, i) => ({ text: str(x && x.text, 400, `proposal.behaviors[${i}].text`), origin: x && PROPOSAL_ORIGINS.includes(x.origin) ? x.origin : 'ai' }))
-        .filter(x => x.text).map((x, i) => ({ id: `B${i + 1}`, ...x }));
+        .map((x, i) => ({ id: idOf(x, 'B', `proposal.behaviors[${i}].id`), text: str(x && x.text, 400, `proposal.behaviors[${i}].text`), origin: x && PROPOSAL_ORIGINS.includes(x.origin) ? x.origin : 'ai' }))
+        .filter(x => x.text);
       const assumptions = list(p.assumptions, 8, 'proposal.assumptions')
-        .map((x, i) => ({ key: keyOf(x && x.key, `proposal.assumptions[${i}].key`), label: str(x && x.label, 60, `proposal.assumptions[${i}].label`), text: str(x && x.text, 400, `proposal.assumptions[${i}].text`), changeHint: str(x && x.changeHint, 400, `proposal.assumptions[${i}].changeHint`) }))
-        .filter(x => x.text).map((x, i) => ({ id: `A${i + 1}`, ...x, key: uniqKey(x.key, `proposal.assumptions[${i}].key`) }));
+        .map((x, i) => ({ id: idOf(x, 'A', `proposal.assumptions[${i}].id`), key: keyOf(x && x.key, `proposal.assumptions[${i}].key`), label: str(x && x.label, 60, `proposal.assumptions[${i}].label`), text: str(x && x.text, 400, `proposal.assumptions[${i}].text`), changeHint: str(x && x.changeHint, 400, `proposal.assumptions[${i}].changeHint`) }))
+        .filter(x => x.text).map((x, i) => ({ ...x, key: uniqKey(x.key, `proposal.assumptions[${i}].key`) }));
       let blockingN = 0;
       const decisions = list(p.decisions, 4, 'proposal.decisions')
         .map((x, i) => ({
-          key: keyOf(x && x.key, `proposal.decisions[${i}].key`), label: str(x && x.label, 60, `proposal.decisions[${i}].label`), question: str(x && x.question, 400, `proposal.decisions[${i}].question`),
+          id: idOf(x, 'Q', `proposal.decisions[${i}].id`), key: keyOf(x && x.key, `proposal.decisions[${i}].key`), label: str(x && x.label, 60, `proposal.decisions[${i}].label`), question: str(x && x.question, 400, `proposal.decisions[${i}].question`),
           options: list(x && x.options, 5, `proposal.decisions[${i}].options`).map((o, j) => str(o, 120, `proposal.decisions[${i}].options[${j}]`)).filter(Boolean),
           recommendation: str(x && x.recommendation, 400, `proposal.decisions[${i}].recommendation`), impact: str(x && x.impact, 400, `proposal.decisions[${i}].impact`), blocking: !!(x && x.blocking === true),
         }))
@@ -20763,8 +20768,9 @@
         .map((x, i) => {
           let blocking = x.blocking;
           if (blocking) { blockingN += 1; if (blockingN > 2) { blocking = false; warn('PROPOSAL_BLOCKING_LIMIT', `proposal.decisions[${i}].blocking`, '先に必要な判断は 2 件まで（3 件目からは後で決めてよい扱い）'); } }
-          return { id: `Q${i + 1}`, ...x, key: uniqKey(x.key, `proposal.decisions[${i}].key`), blocking };
+          return { ...x, key: uniqKey(x.key, `proposal.decisions[${i}].key`), blocking };
         });
+      if (errors.length) return { ok: false, errors, warnings, normalized: null };
       const ap = p.approach && typeof p.approach === 'object' ? p.approach : {};
       const approach = {
         standard: list(ap.standard, 6, 'proposal.approach.standard').map((s, i) => str(s, 400, `proposal.approach.standard[${i}]`)).filter(Boolean),
@@ -25179,8 +25185,8 @@
        */
       const noteDraftScope = (lg, items, { decisionsAll = [], by = 'proposal', at = null } = {}) => {
         const reqs = KTAiAnswers.requirementsOf(lg).filter(r => r && r.decision !== 'revoked');
-        //   2026-10-18: 今の対応（lg.itemReqs）で結び付く項目が無い要件は unlinked にする（前のターンの根拠を持ち続けない）。仮案の AI が項目の文を言い換えて対応が切れたとき、
-        //   前の「任意の提案」の根拠のまま計画から黙って外したり、前の採用の根拠のまま、もう見えない項目の要件を計画に入れたりしない（最終案に「結び付かない提案」として件数を出す）
+        //   2026-10-18: 今の対応（lg.itemReqs）で結び付く項目が無い要件は unlinked にする（前のターンの根拠を持ち続けない）。仮案に残らない項目（AI が取り下げた提案）だけに
+        //   結び付く要件を、前の「任意の提案」の根拠のまま計画から黙って外したり、前の採用の根拠のまま計画に入れたりしない（最終案に「結び付かない提案」として件数を出す）
         const assign = (useFlags) => { const kinds = draftItemKindsOf(items, decisionsAll, { useFlags }); for (const r of reqs) r.scope = { basis: basisFromItems(r, kinds, lg.itemReqs) || 'unlinked', by, at }; };
         //   1 回目は ai の項目をすべて ai として根拠を決め（前のターン・採用の時点の判定に左右されない）、効果を足す項目を決めてから印を付けて決め直す
         assign(false);
@@ -25195,11 +25201,13 @@
         }
         assign(true);
       };
-      /** §0f.2 の 1: 採用の時点の固定の記録（仮案の id・版・項目の種類・委ねた key・任意の提案の項目・itemReqs の写し）。根拠をもう一度決めて固定する */
+      /**
+       * §0f.2 の 1: 採用の時点の固定の記録（仮案の id・版・項目の種類・委ねた key・任意の提案の項目・itemReqs の写し）。根拠をもう一度決めて固定する。
+       *   2026-10-19: 採用した動作（任意の提案の扱いを除く）も記録する（計画の依頼文の「採用した方針」と計画の AI に渡す要件を、この 1 つの記録から取り出す）
+       */
       const freezeAdoption = (lg, d) => {
         if (!lg || !d) return;
         noteDraftScope(lg, d.items, { by: 'adopt', at: d.rev });
-        lg.suggestionItems = [...draftSuggestionIds(d)];
         //   再検証前の指示 §1（2026-10-10）: 判断の key ごとの採用の時点の組 X(D) の材料（その key:<key> に結び付いた要件の target と effects の写し。undecided を含む・
         //   取り消し済みと任意の提案の扱いを除く。本文は要件の対象の文だけ）。計画の AI が後で要件を直しても、採用の時点の構造で D の実現かを照らす
         const live = KTAiAnswers.requirementsOf(lg).filter(r => r && r.decision !== 'revoked' && scopeBasisOf(r) !== 'suggestion' && Array.isArray(r.effects));
@@ -25209,7 +25217,8 @@
           const xs = live.filter(r => ids.includes(r.id)).map(r => ({ target: String(r.target || '').slice(0, 120), effects: [...new Set(r.effects.filter(e => KT_EFFECTS.includes(e)))] }));
           if (xs.length) decisionPairs[String(k).slice(4)] = xs;
         }
-        lg.adoption = { draftId: d.id, rev: d.rev, at: now(), items: Object.fromEntries([...draftItemKindsOf(d.items)].filter(([k]) => !String(k).startsWith('key:'))), delegatedKeys: state.draftDecisions.filter(x => x.kind === 'delegated').map(x => x.key), suggestionItems: [...lg.suggestionItems], itemReqs: JSON.parse(JSON.stringify(lg.itemReqs || {})), decisionPairs };
+        lg.adoption = { draftId: d.id, rev: d.rev, at: now(), items: Object.fromEntries([...draftItemKindsOf(d.items)].filter(([k]) => !String(k).startsWith('key:'))), delegatedKeys: state.draftDecisions.filter(x => x.kind === 'delegated').map(x => x.key), suggestionItems: [...draftSuggestionIds(d)], itemReqs: JSON.parse(JSON.stringify(lg.itemReqs || {})), decisionPairs,
+          behaviors: ((d.items && d.items.behaviors) || []).filter(b => b && b.id && !isSuggestionItem(b)).map(b => ({ id: b.id, text: String(b.text || '') })) };
       };
       /**
        * §0f.2 の 4: 計画の返答の照合（1 か所。最初の計画・自動の見直し・差分更新・全体の作り直しの registerPlan と、reviseWith で計画の AI に送る土台で共通）。
@@ -25644,14 +25653,11 @@
       const planOwnerIdsOf = (v) => {
         const lg = v && v.planId ? state.ledgers.get(v.planId) || null : null;
         if (!lg) return null;
-        const dft = state.draft && v.fromDraft && state.draft.id === v.fromDraft.id ? state.draft : null;
         //   §0e.2: 採用していない任意の提案の項目は担当に数えない（その項目だけを指す決まった要件は「担当が計画にありません」に出す）。
-        //   §0f.2 の 4（2026-10-09）: 採用の時点の任意の提案の項目（lg.suggestionItems）も使う（次の仮案が始まって dft が無くなった後も同じに扱う）
-        const sugIds = new Set([...draftSuggestionIds(dft), ...(Array.isArray(lg.suggestionItems) ? lg.suggestionItems : [])]);
-        const owners = new Set([...((v.plan && v.plan.steps) || []).map(s => s && s.id), ...((v.plan && v.plan.customizations) || []).map(x => x && x.customizationId), ...Object.keys(lg.itemReqs || {}).filter(k => !sugIds.has(k))].filter(Boolean));
-        const walkIds = (o) => { if (Array.isArray(o)) o.forEach(walkIds); else if (o && typeof o === 'object') { if (typeof o.id === 'string' && !sugIds.has(o.id)) owners.add(o.id); for (const k of Object.keys(o)) if (k !== 'id' && o[k] && typeof o[k] === 'object') walkIds(o[k]); } };
-        if (dft && dft.items) walkIds(dft.items);
-        return owners;
+        //   2026-10-19: 採用した仮案の項目は採用の時点の記録（lg.adoption.items。任意の提案の扱いを除く）だけから取り出す（次の仮案が始まった後も同じ。前は今の仮案の項目・
+        //   台帳の対応・任意の提案の写しを合わせて作り直していた）
+        const adopted = Object.entries((lg.adoption && lg.adoption.items) || {}).filter(([, kind]) => kind !== 'suggestion').map(([id]) => id);
+        return new Set([...((v.plan && v.plan.steps) || []).map(s => s && s.id), ...((v.plan && v.plan.customizations) || []).map(x => x && x.customizationId), ...adopted].filter(Boolean));
       };
       const unownedRequirementsOf = (v, entries) => {
         const lg = state.ledgers.get(v.planId) || null;
@@ -26283,7 +26289,9 @@
        * 仮案の経路を使えるか（Gateway の health の conversation に 'proposal' を含み、services.propose がある）。
        *   C-1 第 3 段（2026-10-08）: 無い接続先では古い流れに入らない（routeFlow が「接続先が非対応」で止める）
        */
-      const proposalOn = () => { try { return typeof services.propose === 'function' && typeof services.conversationFeatures === 'function' && (services.conversationFeatures() || []).includes('proposal'); } catch (e) { return false; } };
+      //   2026-10-19（契約 13 §11.11）: 仮案の項目の id をターンをまたいで保つ Gateway（conversation に itemIds）だけ。印の無い Gateway は id を出力の順で振り直すので、
+      //   採用の記録を id で持てない（「接続先が非対応」で止める。文の照合で前の項目との対応を戻す処理は削除した）
+      const proposalOn = () => { try { const f = typeof services.conversationFeatures === 'function' ? (services.conversationFeatures() || []) : []; return typeof services.propose === 'function' && f.includes('proposal') && f.includes('itemIds'); } catch (e) { return false; } };
       /**
        * C-1 第 3 段（2026-10-08）: 入口を新しい流れ（依頼 → 仮案 → 採用 → 最終案 → 承認 → 反映）に寄せる。置き換えた古い確認の流れには入らない。
        *   - 仮案の能力が無い接続先: 変更案を作る・直す・JavaScript を作る意図（PLAN・REVISE_PLAN・ANSWER・GENERATE_CODE・仮案の意図）は「接続先が非対応」で止める
@@ -26340,12 +26348,10 @@
         return entry;
       }
       const openDecisionsNow = () => openDraftDecisions(state.draft, state.draftDecisions);
-      /** 仮案の項目の文の照合（記号を除いた文。同じ文の項目に、前のターンの項目 id → 要件 id の対応を引き継ぐときに使う） */
-      const reqNormB = (s) => String(s ?? '').replace(/[\s　、。．，,.!！?？「」『』（）()・:：]/g, '');
       /**
-       * 2026-10-18: 仮案の AI に送る要件の planRefs を、今の仮案（AI から見た「前回の仮案」）の項目 id にそろえる。Gateway は仮案の id を毎回振り直すので、
-       *   要件が記録した planRefs は前のターンの id のまま（別の項目の id と同じ文字になることもある）。対応は台帳の「仮案の項目 id → 要件 id」（lg.itemReqs）だけで引き、
-       *   今の仮案の項目に結び付かない要件は []（結び付きを推定しない）
+       * 2026-10-18: 仮案の AI に送る要件の planRefs を、今の仮案（AI から見た「前回の仮案」）の項目 id にそろえる。対応は台帳の「仮案の項目 id → 要件 id」（lg.itemReqs）だけで引き、
+       *   今の仮案の項目に結び付かない要件は []（結び付きを推定しない）。2026-10-19（契約 13 §11.11）: 項目の id はターンをまたいで同じになったが、
+       *   要件が記録した planRefs（そのターンに AI が書いた参照）では引かない（対応の出どころを台帳の 1 つにする）
        */
       const draftRequirementsForContext = (d) => {
         const lg = ledgerOf(d.id);
@@ -26363,7 +26369,7 @@
         return { goal: String(d.request || '').slice(0, 600), version: 0, summary: `${d.planning ? '採用した仮案（最終案を作成中）' : '採用前の仮案（まだ計画ではありません）'}: ${String(d.reply || '').slice(0, 400)}`, steps: it.behaviors.slice(0, 24).map(b => ({ id: b.id, title: isSuggestionItem(b) ? `任意の提案（入れると言われるまで入れない）: ${b.text}` : b.text })), customizations: [], provisionals: it.assumptions.map(a => ({ topic: a.key, choice: a.text, changeHint: a.changeHint || '' })), questions: openDecisionsNow().map(q => ({ id: q.id, question: q.question })) };
       };
       /**
-       * 仮案の AI の応答を会話に入れる。turn.ops を前回の仮案に適用（adopt → origin user・reject → 不採用として残し要件を revoke・modify → 文を置き換え origin user。
+       * 仮案の AI の応答を会話に入れる。turn.ops を前回の仮案に適用（adopt → 利用者が採用した項目・reject → 不採用として残し要件を revoke・modify → 文を置き換え利用者の項目。
        * key のある前提の modify は同じ key の決定事項も更新）、turn.answers を決定事項に key 付きで記録、turn.requirementOps を台帳へ（鍵は仮案の id。採用で計画の planId に引き継ぐ）。
        * proposalUnchanged（相談・相づち・不明）のときは仮案を変えない（返事だけ）。回答済みの key の判断は仮案から外す（同じ点を再確認しない）
        * @returns {{ card: object|null, adopt: boolean }} adopt = AI の intent が adopt で、先に必要な判断が残っていない
@@ -26438,39 +26444,74 @@
             if (!ch.revoked.includes(e)) ch.revoked.push(e);
           }
         }
-        // 新しい仮案（id は Gateway が振り直したもの）。
+        // 新しい仮案。2026-10-19（契約 13 §11.11）: 項目の id は Gateway がターンをまたいで保つ（同じ項目は同じ id・新しい項目は使った番号の続き）。
+        //   採用の記録は id で持ち、AI の書き直しで変えない: 利用者が採用・修正した動作（turn.ops の adopt / modify。userItemIds に持つ）は利用者の項目（origin user）にする。
+        //   それと利用者の依頼として示した動作（origin user）は、修正（modify）が無ければ前の文と扱いのまま・応答から省いても残す（取り消しは reject だけ。AI が user から下げた扱いも戻さない）。
+        //   採用の発言のターン（intent adopt）は、利用者が見ていた仮案の項目すべてを同じに扱い、新しい項目は利用者の依頼として示した動作だけを入れる
+        //   （利用者がまだ見ていない AI の言い換え・追加・省略を採用にしない）。不採用にした項目の id は戻さない。件数の上限（8）を超えたら、利用者の項目でない後ろの項目から外す。
         //   回答済みの key の判断（このターンより前に答えたもの）を AI がもう一度出したら「再確認」として残す（前の答えを添える。答えると同じ key を置き換える）。
         //   このターンで答えたばかりの key（回答欄・「おすすめで」・turn.answers）を AI がまだ出していたら、それは読み落としなので出さない（hidden）
         const p = resp.proposal || EMPTY_ITEMS();
+        const adoptTurn = resp.intent === 'adopt';
+        const rejectedAll = new Set(rejected.map(x => x.id));
+        const owned = new Set([...((prevDraft && prevDraft.userItemIds) || []), ...prevItems.behaviors.filter(b => b.origin === 'user').map(b => b.id)]);
+        const explicit = new Set([...applied.adopted, ...applied.modified].map(x => x.id));
+        const modifiedText = new Map(applied.modified.map(x => [x.id, x.text]));
+        const kept = (id) => adoptTurn || owned.has(id) || explicit.has(id);
+        const toUser = (x) => { const y = { ...x, origin: 'user' }; delete y.asSuggestion; return y; };
+        const mergeItems = (prevList, nowList, max) => {
+          const prevById = new Map(prevList.map(x => [x.id, x]));
+          const mine = (y) => (explicit.has(y.id) && 'origin' in y ? toUser(y) : y);
+          const out = [], seen = new Set();
+          for (const x of nowList) {
+            if (!x || !x.id || seen.has(x.id) || rejectedAll.has(x.id)) continue;
+            seen.add(x.id);
+            const pv = prevById.get(x.id);
+            if (!pv) { if (!adoptTurn || x.origin === 'user') out.push({ ...x }); continue; }
+            if (modifiedText.has(x.id) || !kept(x.id)) out.push(mine({ ...x }));
+            else out.push(mine(x.origin === 'user' ? toUser(pv) : { ...pv }));
+          }
+          for (const pv of prevList) if (!seen.has(pv.id) && !rejectedAll.has(pv.id) && kept(pv.id)) out.push(mine(modifiedText.has(pv.id) ? { ...pv, text: modifiedText.get(pv.id) } : { ...pv }));
+          for (let i = out.length - 1; out.length > max && i >= 0; i--) if (!owned.has(out[i].id) && !explicit.has(out[i].id)) out.splice(i, 1);
+          return out;
+        };
         const decidedBefore = new Map(state.draftDecisions.filter(d => (d.seq || 0) <= sinceSeq).map(d => [d.key, d]));
         const decidedNow = new Set(state.draftDecisions.filter(d => (d.seq || 0) > sinceSeq).map(d => d.key));
         const hidden = (p.decisions || []).filter(d => decidedNow.has(d.key));
         const items = {
-          behaviors: (p.behaviors || []).map(b => ({ ...b })), assumptions: (p.assumptions || []).map(a => ({ ...a })),
+          behaviors: mergeItems(prevItems.behaviors, p.behaviors || [], 8), assumptions: mergeItems(prevItems.assumptions, p.assumptions || [], 8),
           decisions: (p.decisions || []).filter(d => !decidedNow.has(d.key)).map(d => {
             const prevE = decidedBefore.get(d.key) || null;
             return { ...d, options: [...(d.options || [])], ...(prevE ? { reconfirm: true, previousAnswer: prevE.answer, prevSeq: prevE.seq ?? null } : {}) };
           }),
           approach: { standard: [...((p.approach && p.approach.standard) || [])], js: [...((p.approach && p.approach.js) || [])] }, cannot: [...(p.cannot || [])],
         };
-        // 仮案の項目 id → 要件 id の対応を次のターンへ（Gateway が項目の id を振り直すので、同じ文の項目・modify で置き換えた文の項目に引き継ぎ、
-        //   このターンの要件の add / update の planRefs（新しい仮案の項目 id）を重ねる）
-        const itemReqs = {};
-        const prevTextOf = new Map([...prevItems.behaviors, ...prevItems.assumptions].map(x => [reqNormB(x.text), x.id]));
-        for (const m of applied.modified) prevTextOf.set(reqNormB(m.text), m.id);
-        for (const x of [...items.behaviors, ...items.assumptions]) { const pid = prevTextOf.get(reqNormB(x.text)); if (pid && itemReqsPrev[pid]) itemReqs[x.id] = [...itemReqsPrev[pid]]; }
-        //   レビューの指摘 row3 の 1（2026-10-09）: 前の判断 Q・前提 A と今の前提 A・判断 Q を同じ key でつなぐ（Gateway が委ねた判断を前提に置き換えても、
+        //   利用者が採用・修正した項目の id（取り消すまで持つ）と、この仮案で使った番号の上限（次の依頼の itemIdFloor。Gateway は新しい項目にこの続きの番号を付ける）
+        const userItemIds = [...new Set([...((prevDraft && prevDraft.userItemIds) || []), ...explicit])].filter(id => !rejectedAll.has(id));
+        const idFloor = { B: 0, A: 0, Q: 0, ...((prevDraft && prevDraft.idFloor) || {}) };
+        for (const x of [...(p.behaviors || []), ...(p.assumptions || []), ...(p.decisions || []), ...items.behaviors, ...items.assumptions, ...items.decisions]) { const m = /^([BAQ])([1-9][0-9]{0,2})$/.exec(String((x && x.id) || '')); if (m && Number(m[2]) > idFloor[m[1]]) idFloor[m[1]] = Number(m[2]); }
+        // 仮案の項目 id → 要件 id の対応（lg.itemReqs）を次のターンへ。2026-10-19（契約 13 §11.11）: id はターンをまたいで同じなので、今の仮案に残る項目の対応は
+        //   その id のまま持ち、このターンの要件の add / update の planRefs（項目の id）を重ねる（前は Gateway が id を振り直すので、同じ文の項目・modify で置き換えた文の項目に
+        //   前の対応を引き継いでいた。文の照合は削除した）。
+        //   レビューの指摘 row3 の 1（2026-10-09）: 前の判断 Q・前提 A と今の前提 A・判断 Q を同じ key でつなぐ（委ねた判断を前提に置き換えると新しい項目になるので、
         //   判断に結び付いた要件を引き継ぐ）。key への結び付きは key:<key> にも持つ（判断が次の仮案から消えても、委ねた key の要件の根拠を delegated にできる）
-        const keyedPrev = [...prevItems.assumptions, ...prevItems.decisions].filter(x => x && x.id && x.key);
-        const byKey = new Map();
-        const addKey = (k, ids) => { if (!k) return; const set = byKey.get(k) || new Set(); for (const id of ids || []) set.add(id); byKey.set(k, set); };
-        for (const x of keyedPrev) addKey(String(x.key), itemReqsPrev[x.id]);
-        for (const k of Object.keys(itemReqsPrev)) if (k.startsWith('key:')) addKey(k.slice(4), itemReqsPrev[k]);
+        const live = new Set([...items.behaviors, ...items.assumptions, ...items.decisions].map(x => x.id));
+        const keyOfPrev = new Map([...prevItems.assumptions, ...prevItems.decisions].filter(x => x && x.id && x.key).map(x => [x.id, String(x.key)]));
         const keyedNow = [...items.assumptions, ...items.decisions].filter(x => x && x.id && x.key);
-        for (const x of keyedNow) { const prevIds = byKey.get(String(x.key)); if (!prevIds || !prevIds.size) continue; const cur = itemReqs[x.id] || []; for (const id of prevIds) if (!cur.includes(id)) cur.push(id); itemReqs[x.id] = cur; }
-        for (const e of [...ch.added, ...ch.updated]) for (const ref of e.planRefs || []) { const cur = itemReqs[ref] || []; if (!cur.includes(e.id)) cur.push(e.id); itemReqs[ref] = cur; }
-        for (const x of keyedNow) addKey(String(x.key), itemReqs[x.id]);
-        for (const [k, set] of byKey) if (set.size) itemReqs[`key:${k}`] = [...set];
+        const keyOfNow = new Map(keyedNow.map(x => [x.id, String(x.key)]));
+        const itemReqs = {};
+        const link = (k, rid) => { const cur = itemReqs[k] || (itemReqs[k] = []); if (!cur.includes(rid)) cur.push(rid); };
+        for (const [k, rids] of Object.entries(itemReqsPrev)) for (const rid of Array.isArray(rids) ? rids : []) {
+          if (String(k).startsWith('key:')) { link(k, rid); continue; }
+          if (live.has(k)) link(k, rid);
+          if (keyOfPrev.has(k)) link(`key:${keyOfPrev.get(k)}`, rid);
+        }
+        for (const e of [...ch.added, ...ch.updated]) for (const ref of e.planRefs || []) {
+          if (live.has(ref)) link(ref, e.id);
+          const k = keyOfNow.get(ref) || keyOfPrev.get(ref);
+          if (k) link(`key:${k}`, e.id);
+        }
+        for (const x of keyedNow) { const kk = `key:${x.key}`; for (const rid of [...(itemReqs[kk] || [])]) link(x.id, rid); for (const rid of [...(itemReqs[x.id] || [])]) link(kk, rid); }
         lg.itemReqs = itemReqs;
         //   §0f.2 の 1・3（2026-10-09）: 要件ごとの採用の根拠（項目の origin と lg.itemReqs から）と作った段階。利用者の要件に無い効果を足す ai の項目は任意の提案の扱いにする。
         //   採用の失敗の後に直した仮案は、もう一度採用するまで採用の記録を持たない
@@ -26489,7 +26530,7 @@
         const factById = new Map((Array.isArray(ctxFacts) ? ctxFacts : []).filter(f => f && f.id).map(f => [String(f.id), f]));
         const citedFacts = citedIds.map(id => factById.get(id)).filter(Boolean).map(f => JSON.parse(JSON.stringify(f)));
         const evidence = citedIds.map(id => { const f = factById.get(id); return { id, statement: f ? String(f.statement ?? '') : '', ...(f && f.kind ? { kind: String(f.kind) } : {}) }; });
-        Object.assign(draft, { rev, reply, intent: resp.intent, items, rejected, updatedAt: now(), utterance, evidence });
+        Object.assign(draft, { rev, reply, intent: resp.intent, items, rejected, userItemIds, idFloor, updatedAt: now(), utterance, evidence });
         delete draft.planFailed;   // 直した仮案は、前の採用の失敗の印を持たない
         state.draft = draft;
         // 会話のカード: 同じ仮案の新しいカードを出す（前のカードは rev が古くなるので 1 行に畳んで描かれる）
@@ -26500,13 +26541,12 @@
        * 採用した仮案 → 計画の依頼文。元の依頼文 ＋ 採用した方針の短い要約 1 行だけ（レビューの指摘 2・3（2026-10-07）: 前提・決定事項・不採用を長文で合成しない。
        * 要件の台帳と決定事項は構造化して services.plan に渡す）。Gateway の goal の上限に収める
        */
-      const draftGoal = (d) => {
+      const draftGoal = (d, ad) => {
         const cut = (s, n) => { const x = String(s ?? '').replace(/\s+/g, ' ').trim(); return x.length > n ? x.slice(0, n) : x; };
-        const it = d.items || EMPTY_ITEMS();
         const lines = [cut(d.request, 600)];
-        //   §0e.2（2026-10-09）: 任意の提案（origin suggestion）は採用の既定に含めない（利用者が入れると言えば仮案の AI が user にする）。
-        //   §0f.2 の 3: 利用者の要件に無い効果を足すため任意の提案の扱いにした ai の項目も入れない
-        const adopted = it.behaviors.filter(b => !isSuggestionItem(b));
+        //   2026-10-19: 採用した方針は採用の時点の記録（lg.adoption.behaviors。freezeAdoption）から取り出す（計画の AI に渡す要件の採用範囲と同じ記録）。
+        //   §0e.2（2026-10-09）: 任意の提案（origin suggestion）と、§0f.2 の 3: 利用者の要件に無い効果を足すため任意の提案の扱いにした ai の項目は、その記録に入っていない
+        const adopted = ad && Array.isArray(ad.behaviors) ? ad.behaviors : [];
         if (adopted.length) lines.push(cut(`採用した方針: ${adopted.map(b => cut(b.text, 80)).join('／')}`, 400));
         return lines.join('\n').slice(0, 1200);
       };
@@ -27962,8 +28002,6 @@
               // 段階 B（レビューの指摘 3・2026-10-07）: 採用した仮案からの計画は、要件の台帳（取り消し済みを含む）と仮案の判断への回答（決定事項）を構造化して渡す
               const dft = clsP.fromDraft && state.draft && state.draft.id === clsP.fromDraft.id ? state.draft : null;
               const lgD0 = dft ? state.ledgers.get(dft.id) || null : null;
-              //   §0f.2 の 1（2026-10-09）: 採用の時点の記録（lg.adoption）を固定し、要件ごとの採用の根拠を決め直す（計画の AI に送る前）
-              if (dft && lgD0) freezeAdoption(lgD0, dft);
               //   §0e.2（2026-10-09）: 採用していない任意の提案だけに結び付く AI の提案の要件は計画の AI に渡さない（計画に入れない）
               const fromDraftArgs = dft ? { requirements: planRequirementsOf(lgD0), decisions: draftDecisionsForPlan() } : {};
               const tPlan = clock();
@@ -27982,8 +28020,8 @@
                 // 2026-10-05 第 3 段: 最初の依頼の要件（計画の AI が分けたもの）を新しい計画の系列の台帳へ
                 const planIdNext = newId('plan');
                 // 段階 B: 採用した仮案の要件の台帳（鍵は仮案の id）を、この計画の系列（planId）に引き継ぐ。版の fromDraft は registerPlan が付ける
-                //   §0e.2（2026-10-09）: 採用の時点の任意の提案の項目 id を台帳に残す（以後の差分更新でも、その提案だけの要件を計画の AI に渡さない）
-                if (clsP.fromDraft) { const lgD = state.ledgers.get(clsP.fromDraft.id); if (lgD) { lgD.planId = planIdNext; if (dft) lgD.suggestionItems = [...draftSuggestionIds(dft)]; state.ledgers.set(planIdNext, lgD); } state.draftPlanLink = { planId: planIdNext, fromDraft: clsP.fromDraft }; }
+                //   §0e.2（2026-10-09）: 採用の時点の任意の提案の項目 id は、採用の記録（lg.adoption）が台帳に持っている（以後の差分更新でも、その提案だけの要件を計画の AI に渡さない）
+                if (clsP.fromDraft) { const lgD = state.ledgers.get(clsP.fromDraft.id); if (lgD) { lgD.planId = planIdNext; state.ledgers.set(planIdNext, lgD); } state.draftPlanLink = { planId: planIdNext, fromDraft: clsP.fromDraft }; }
                 const lgNew = ledgerOf(planIdNext);
                 // 段階 B 修正後（確認 1b）: 仮案で答えた決定事項を計画の系列の台帳へ（registerPlan の syncQuestions が「回答済みの論点」として扱う。以後の差分更新の decisionsForContext にも入る）
                 if (dft) carryDraftDecisions(lgNew, { version: 1 });
@@ -28038,7 +28076,11 @@
           // 段階 C（C3b）: 進みの 1 枚カード（計画 → 生成 → 検証 → まとめ。JS の件数は計画ができてから足す）
           startProgress({ title: 'この案で最終案を作っています', stages: [{ key: 'plan', label: '計画を作る', activeLabel: '計画を作っています', doneLabel: '計画を作りました' }, { key: 'summarize', label: 'まとめ' }], materials: materialsText() });
           try {
-            await runPlan({ intent: INTENT.PLAN, reason: 'ADOPT_DRAFT', goal: draftGoal(d), fromDraft: { id: d.id, rev: d.rev, reason, request: String(d.request || '') } });
+            //   §0f.2 の 1（2026-10-09）: 採用の時点の記録（lg.adoption）を固定し、要件ごとの採用の根拠を決め直す（計画の AI に送る前）。
+            //   2026-10-19: 計画の依頼文の「採用した方針」と計画の AI に渡す要件は、どちらもこの記録から取り出す（runPlan では固定し直さない）
+            const lgA = ledgerOf(d.id);
+            freezeAdoption(lgA, d);
+            await runPlan({ intent: INTENT.PLAN, reason: 'ADOPT_DRAFT', goal: draftGoal(d, lgA.adoption), fromDraft: { id: d.id, rev: d.rev, reason, request: String(d.request || '') } });
             // 計画ができたら最終案（生成と検証）。生成中に受け付けた発言は完了後に差分更新 → 変わった customization だけ作り直す（R11）
             if (d.status === 'adopted' && state.activePlan && state.activePlan.fromDraft && state.activePlan.fromDraft.id === d.id && !late()) {
               //   §0f.3 の 1（2026-10-09）: 計画ができた（仮案は採用済み）後の失敗の［再試行］は「採用します」ではなく最終案の作り直し（GENERATE_CODE。計画の AI は呼ばない）
@@ -28145,7 +28187,7 @@
               let r;
               const tPropose = clock();
               //   C-1 第 3 段（2026-10-08）: Customize タブの相談（subject）は、相談中の JavaScript（ファイル・イベント・フィールド）を仮案の依頼に渡す
-              try { r = await services.propose({ utterance: cls.utterance || t, previous: previousForContext(), decisions: draftDecisionsForContext(), requirements: d ? draftRequirementsForContext(d) : [], working: null, ...(state.subject ? { subject: state.subject } : {}), signal, onText: (txt) => { noteFirstText(); progressText(txt); } }); }
+              try { r = await services.propose({ utterance: cls.utterance || t, previous: previousForContext(), decisions: draftDecisionsForContext(), requirements: d ? draftRequirementsForContext(d) : [], itemIdFloor: d && d.idFloor ? { ...d.idFloor } : null, working: null, ...(state.subject ? { subject: state.subject } : {}), signal, onText: (txt) => { noteFirstText(); progressText(txt); } }); }
               catch (e) { noteCallError('propose', e, clock() - tPropose); throw e; }   // §0f.3（FP7）: 例外で終わった呼び出しも記録する
               finally { state.workInbox = null; }
               noteCall('propose', r); if (timing.calls.length) timing.calls[timing.calls.length - 1].ms = clock() - tPropose;
@@ -30614,7 +30656,7 @@
        * C-1 第 3 段（2026-10-08）: Customize タブの相談（subject）は、相談中の JavaScript（ファイル・イベント・操作するフィールド）を仮案の Context に入れる
        *   （本文は Field Scanner に無ければ相談を始めたときの本文で補い、facts の要約にだけ使う。本文そのものは送らない）
        */
-      async propose({ utterance, previous = null, decisions = [], requirements = [], working = null, subject = null, signal = null, onText = null }) {
+      async propose({ utterance, previous = null, decisions = [], requirements = [], itemIdFloor = null, working = null, subject = null, signal = null, onText = null }) {
         const perf = { baseWaitMs: 0, contextMs: 0, requestMs: 0 };
         const tb = nowMs();
         if (devBase && devBase.ok && !devBasePromise && !devBaseStale) { if (nowMs() - devBaseAt >= DEV_BASE_ASK_MAX_AGE_MS) refreshDevBase({ reason: 'propose' }); }
@@ -30625,7 +30667,7 @@
         const tc = nowMs();
         const sub = subject ? KTContext.compactSubject({ sourceId: subject.sourceId, name: subject.name, target: subject.platform, customizationType: subject.customizationType, sourceAvailable: !!subject.sourceAvailable, events: subject.events || [], fields: Object.entries(subject.fieldAccess || {}).map(([code, acc]) => ({ code, access: acc.CONTROL || acc.SHOW_HIDE ? 'CONTROL' : acc.WRITE ? 'WRITE' : 'READ' })) }) : null;
         let ctx;
-        try { ctx = KTContext.buildProposal({ utterance, previous, decisions, requirements, working, data: inputs.data, deps: inputs.deps || null, scan: inputs.scan || null, incoming: inputs.incoming || null, options: { ...(inputs.environment ? { environment: inputs.environment } : {}), ...(sub ? { subject: sub } : {}) } }); }
+        try { ctx = KTContext.buildProposal({ utterance, previous, decisions, requirements, itemIdFloor, working, data: inputs.data, deps: inputs.deps || null, scan: inputs.scan || null, incoming: inputs.incoming || null, options: { ...(inputs.environment ? { environment: inputs.environment } : {}), ...(sub ? { subject: sub } : {}) } }); }
         catch (e) { return { ok: false, reason: 'error', message: `Context の生成に失敗しました: ${e?.message || e}` }; }
         perf.contextMs = nowMs() - tc;
         const client = await ensureReady();

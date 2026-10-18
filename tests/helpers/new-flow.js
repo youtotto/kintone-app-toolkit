@@ -125,15 +125,63 @@ function createNewFlowKit(T) {
       } };
     return null;
   }
-  /** 契約の形の応答 → Toolkit の client.propose が返す形（validateProposal を通す）。utterance = 今回の発言（2026-10-15 §3.2: 進行を求める語句 adoptQuote の照合に使う） */
-  const normalized = (raw, requestId = 'pp-1', utterance = null) => { const v = KTAiClient.validateProposal({ ok: true, contractVersion: '2.1', meta: META, ...raw }, { utterance }); if (!v.ok) throw new Error(`台本の形が不正: ${v.errors[0].message}`); return { ...v.normalized, requestId, clientWarnings: v.warnings }; };
+  /**
+   * 2026-10-19（契約 13 §11.11）: 偽の Gateway の項目の id（本物の Gateway と同じ規則: 前回の仮案の id はそのまま、新しい項目は使った番号の続き）。
+   *   台本の AI は、前回の項目の id（台本に書いた前回の id）か、前回の同じ項目（動作は同じ文・前提と判断は同じ key・modify の文と同じ文）の id を書き、
+   *   ほかを新しい項目にする（台本の N… も新しい項目）。台本の planRefs は今回の出力の順の id（B1 = 1 つ目の動作）か N… なので、付けた id に読み替える。
+   *   conv = 今回の依頼の会話（previous / proposal = 前回の仮案・itemIdFloor = 使った番号の上限）。無ければ最初の仮案
+   */
+  const gatewayIds = (raw, conv = null) => {
+    const pr = raw && raw.proposal;
+    if (!pr) return raw;
+    const prev = (conv && (conv.proposal !== undefined ? conv.proposal : conv.previous)) || null;
+    //   相談・相づち・不明は、本物の Gateway と同じく前回の仮案をそのまま返す（無ければ空の仮案）
+    if (['question', 'smalltalk', 'unclear'].includes(raw.intent)) return { ...raw, proposal: prev ? clone(prev) : { behaviors: [], assumptions: [], decisions: [], approach: { standard: [], js: [] }, cannot: [] } };
+    const floor = { B: 0, A: 0, Q: 0, ...((conv && conv.itemIdFloor) || {}) };
+    const modText = new Map(((raw.turn && raw.turn.ops) || []).filter(o => o && o.op === 'modify' && o.text).map(o => [o.text, o.id]));
+    const pos = new Map(), raws = new Map();
+    const assign = (list, k, prefix, same) => {
+      const prevList = ((prev && prev[k]) || []).filter(y => y && y.id);
+      const prevIds = new Set(prevList.map(y => y.id));
+      let next = Math.max(floor[prefix] || 0, ...prevList.map(y => Number(String(y.id).slice(1)) || 0));
+      const used = new Set();
+      return (list || []).map((x, i) => {
+        const rid = x && typeof x.id === 'string' ? x.id : '';
+        let id = prevIds.has(rid) && !used.has(rid) ? rid : null;
+        if (!id && !/^N\d+$/.test(rid)) {
+          const pv = prevList.find(y => !used.has(y.id) && same(x, y)) || null;
+          const mt = x && modText.get(x.text);
+          id = pv ? pv.id : (mt && prevIds.has(mt) && !used.has(mt) ? mt : null);
+        }
+        if (!id) { next += 1; id = `${prefix}${next}`; }
+        used.add(id);
+        pos.set(`${prefix}${i + 1}`, id);
+        if (rid) raws.set(rid, id);
+        return { ...x, id };
+      });
+    };
+    const proposal = {
+      ...pr,
+      behaviors: assign(pr.behaviors, 'behaviors', 'B', (x, y) => x.text === y.text),
+      assumptions: assign(pr.assumptions, 'assumptions', 'A', (x, y) => x.key === y.key),
+      decisions: assign(pr.decisions, 'decisions', 'Q', (x, y) => x.key === y.key),
+    };
+    const refOf = (r) => (/^N\d+$/.test(r) ? raws.get(r) || r : pos.get(r) || r);
+    const turn = raw.turn ? { ...raw.turn, requirementOps: (raw.turn.requirementOps || []).map(o => (o && Array.isArray(o.planRefs) ? { ...o, planRefs: o.planRefs.map(refOf) } : o)) } : raw.turn;
+    return { ...raw, proposal, turn };
+  };
+  /**
+   * 契約の形の応答 → Toolkit の client.propose が返す形（偽の Gateway の id を付けて validateProposal を通す）。utterance = 今回の発言（2026-10-15 §3.2: 進行を求める語句 adoptQuote の照合に使う）。
+   *   conv = 今回の依頼の会話（services.propose の args か ctx.conversation。2026-10-19: 前回の仮案と使った番号の上限から id を付ける。無ければ最初の仮案）
+   */
+  const normalized = (raw, requestId = 'pp-1', utterance = null, conv = null) => { const v = KTAiClient.validateProposal({ ok: true, contractVersion: '2.1', meta: META, ...gatewayIds(raw, conv) }, { utterance }); if (!v.ok) throw new Error(`台本の形が不正: ${v.errors[0].message}`); return { ...v.normalized, requestId, clientWarnings: v.warnings }; };
   /** 計画の AI の成功の応答（最小の計画。turn に coverage 無し） */
   //   2026-10-15（追加の指示 1）: 要件の担当になる設定の手順を 1 つ持つ（手順の無い計画では、採用した仮案の要件を実現する手順が無いので反映できない＝自動の見直しが 1 回増える）
   const planOk = (args) => ({ plan: { goal: args.goal, assessment: { summary: '承認の流れを設定します。' }, steps: [mkStep('P1', 'ADD_PROCESS_STATUS', 'PROCESS_STATUS', '部長承認待ち', { name: '部長承認待ち' }, { title: '承認の流れを設定' })], customizations: [], provisionals: [], questions: [] }, ctx: null, review: null, gatewayPlan: null, turn: { reply: '計画を作りました。', requirementOps: [], utteranceCoverage: [] } });
   const planFail = () => ({ plan: null, message: '計画を作れませんでした（テスト）', reason: 'TEST' });
   const planThrow = () => { throw Object.assign(new Error('timeout'), { code: 'TIMEOUT' }); };
   const gateMk = () => { let open; const p = new Promise(r => { open = r; }); return { p, open }; };
-  const HEALTH = { ok: true, supportedContractVersions: ['2.0', '2.1'], entitlements: [{ product: 'toolkit', features: ['assistant-qa', 'change-planner', 'customization-generator'] }], registry: { toolkit: { 'assistant-qa': { implemented: true, promptVersions: ['1'], conversation: ['requirements', 'brief', 'stream', 'proposal'] }, 'change-planner': { implemented: true, promptVersions: ['1'] }, 'customization-generator': { implemented: true, promptVersions: ['1'] } } }, usage: { monthlyLimit: 20, usedThisMonth: 1 } };
+  const HEALTH = { ok: true, supportedContractVersions: ['2.0', '2.1'], entitlements: [{ product: 'toolkit', features: ['assistant-qa', 'change-planner', 'customization-generator'] }], registry: { toolkit: { 'assistant-qa': { implemented: true, promptVersions: ['1'], conversation: ['requirements', 'brief', 'stream', 'proposal', 'itemIds'] }, 'change-planner': { implemented: true, promptVersions: ['1'] }, 'customization-generator': { implemented: true, promptVersions: ['1'] } } }, usage: { monthlyLimit: 20, usedThisMonth: 1 } };
   const spec = (o) => ({ name: null, from: null, to: null, filterCond: null, assignees: [], targets: [], events: [], timingField: null, daysLater: null, time: null, fields: [], sort: null, sourceApp: null, keyField: null, mappings: [], fieldType: null, required: null, options: [], destApp: null, accessibility: null, entities: [], customizationId: null, ...o });
   const mkStep = (id, actionType, targetKind, targetRef, sp, extra = {}) => ({ id, actionType, targetKind, targetRef, targetExists: null, title: `${id} ${actionType}`, proposal: { summary: '', details: [] }, spec: spec(sp), dependsOn: [], reason: '', evidenceIds: [], confidence: 'INFERRED', alternativeId: null, validation: { status: 'ok', issues: [] }, execution: { mode: 'PLAN_ONLY', supported: false, reason: 'x' }, ...extra });
   const PLAN_META = { requestId: 'pl-1', gateway: { product: 'toolkit', feature: 'change-planner', promptVersion: '1', contextVersion: 'planner-1' }, normalization: { warnings: [] }, ai: { model: 'm', latencyMs: 30, usage: { input_tokens: 500, output_tokens: 200 } }, usage: { usedThisMonth: 1, monthlyLimit: 20 } };
@@ -349,12 +397,12 @@ function createNewFlowKit(T) {
     let t = 1000;
     const x = { planImpl };
     const services = {
-      conversationFeatures: () => ['requirements', 'brief', 'stream', 'proposal'], revisionModes: () => ['full'],
+      conversationFeatures: () => ['requirements', 'brief', 'stream', 'proposal', 'itemIds'], revisionModes: () => ['full'],
       generatorFeatures: () => ['requirementId', 'cases', ...(feedback ? ['feedback'] : []), ...(supported ? (Array.isArray(supported) ? supported : [...GEN_EFFECT_FEATURES, GEN_PORT_FEATURE]) : []), ...(current ? GEN_CURRENT_FEATURES : [])], plannerFeatures: () => ['reply'],
       materials: () => materials,
       fieldLabels: () => labels,
       async customizeRevision() { return '42'; },
-      async propose(args) { calls.propose.push({ utterance: args.utterance }); const raw = scriptFn(args); if (!raw) return { ok: false, reason: 'NO_SCRIPT', message: `台本がありません: ${args.utterance}` }; t += 3000; if (typeof args.onText === 'function') args.onText(raw.reply.slice(0, 12)); await tick(); t += 4000; if (typeof args.onText === 'function') args.onText(raw.reply); return { ok: true, proposal: normalized(raw, `pp-${calls.propose.length}`, args.utterance), ctx: { facts: [] }, perf: { baseWaitMs: 0, contextMs: 5, requestMs: 7000 } }; },
+      async propose(args) { calls.propose.push({ utterance: args.utterance }); const raw = scriptFn(args); if (!raw) return { ok: false, reason: 'NO_SCRIPT', message: `台本がありません: ${args.utterance}` }; t += 3000; if (typeof args.onText === 'function') args.onText(raw.reply.slice(0, 12)); await tick(); t += 4000; if (typeof args.onText === 'function') args.onText(raw.reply); return { ok: true, proposal: normalized(raw, `pp-${calls.propose.length}`, args.utterance, args), ctx: { facts: [] }, perf: { baseWaitMs: 0, contextMs: 5, requestMs: 7000 } }; },
       async ask(args) { calls.ask.push({ question: args.question }); t += 2000; return { ok: true, answer: { answer: '答えです。', facts: [], analysis: [], recommendations: [], unknowns: [] }, ctx: { facts: [] } }; },
       async plan(args) { calls.plan.push({ goal: args.goal, revision: !!args.revision, onText: typeof args.onText === 'function', request: args.revision ? args.revision.request : null, focus: args.revision && Array.isArray(args.revision.focus) ? [...args.revision.focus] : null }); if (typeof args.onText === 'function') { t += 3000; args.onText('承認待ちの間だけ金額を'); } if (planGate) await planGate.p; t += 27000; if (typeof args.onText === 'function') args.onText('承認待ちの間だけ金額を編集不可にします。'); const r0 = x.planImpl(args); const r = r0 && typeof r0.then === 'function' ? await r0 : r0; return autoMap ? withPlannerMapping(r, args.requirements) : r; },
       async generate(args) { t += 20000; return generate.impl(args); },
@@ -478,7 +526,7 @@ function createNewFlowKit(T) {
     return { v, clicked: true, button, pre, run: m.panel.finalRun(), writes: writesOf(m).slice(w0), card: cards.length ? stripC(cards[cards.length - 1]) : '', cardHtml: cards.length ? cards[cards.length - 1] : '', cardCount: cards.length, exec: m.panel.executorState(), js: m.panel.jsExecState() };
   };
 
-  return { gwModernized, withPlannerMapping, mapPlanResponse, rawWithPlannerMapping, tick, ticks, clone, buildInputs, INPUTS, META, B, A, Q, APPROVER, ROUTE, BASE, CSV, Q_THRESHOLD, Q_MIDDLE, Q_DAYS, Q_HOLIDAYS, Q_LOCK, Q_TIMING, B_SELECT, B_ROUTE, B_UNDER, B_OVER, B_NOTIFY_TO, B_NOTIFY_IF, B_LOCK, STD, req, idBy, reqIdBy, script, normalized, planOk, planFail, planThrow, gateMk, HEALTH, spec, mkStep, PLAN_META, PLAN_V1, answerFor, makeStorage, gate, mount, clickChat, RP, KTCodeReview, DATA_C, LABELS_C, custOf, CUST_C1, ST_C, handlerC, GOOD, BAD, WARN, VALUE, LOCKSAVE, CAND, GEN_EFFECT_FEATURES, GW_SCOPE, EXPECT_OF, NOMATCH_OF, GEN_PORT_FEATURE, GEN_NETWORK_FEATURE, GEN_CURRENT_FEATURES, fakeVerification, planJs, makeGenerate, makeConvC, adoptC, finalHtml, stripC, REQUESTS, approveC, approveArgs, validC, adoptOnScreen, prepareOnScreen, loadDevBaseFromMock, HEALTH_V, NEW_MEMO, lockCode, custLock, screenPlan, planImplOf, screenGenerate, mountFinal, applyButtonOf, writesOf, applyOnScreen, waitUntil };
+  return { gwModernized, withPlannerMapping, mapPlanResponse, rawWithPlannerMapping, tick, ticks, clone, buildInputs, INPUTS, META, B, A, Q, APPROVER, ROUTE, BASE, CSV, Q_THRESHOLD, Q_MIDDLE, Q_DAYS, Q_HOLIDAYS, Q_LOCK, Q_TIMING, B_SELECT, B_ROUTE, B_UNDER, B_OVER, B_NOTIFY_TO, B_NOTIFY_IF, B_LOCK, STD, req, idBy, reqIdBy, script, gatewayIds, normalized, planOk, planFail, planThrow, gateMk, HEALTH, spec, mkStep, PLAN_META, PLAN_V1, answerFor, makeStorage, gate, mount, clickChat, RP, KTCodeReview, DATA_C, LABELS_C, custOf, CUST_C1, ST_C, handlerC, GOOD, BAD, WARN, VALUE, LOCKSAVE, CAND, GEN_EFFECT_FEATURES, GW_SCOPE, EXPECT_OF, NOMATCH_OF, GEN_PORT_FEATURE, GEN_NETWORK_FEATURE, GEN_CURRENT_FEATURES, fakeVerification, planJs, makeGenerate, makeConvC, adoptC, finalHtml, stripC, REQUESTS, approveC, approveArgs, validC, adoptOnScreen, prepareOnScreen, loadDevBaseFromMock, HEALTH_V, NEW_MEMO, lockCode, custLock, screenPlan, planImplOf, screenGenerate, mountFinal, applyButtonOf, writesOf, applyOnScreen, waitUntil };
 }
 
 module.exports = { createNewFlowKit };

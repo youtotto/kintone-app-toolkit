@@ -52,12 +52,16 @@ const outsideDetails = (html) => String(html).replace(/<details[\s\S]*?<\/detail
 console.log('\n--- §B0. 仮案の応答の検証と正規化・仮案の Context・決定的な前段 ---');
 await section(async () => {
   const raw = { ok: true, contractVersion: '2.1', meta: META, reply: ' 結論です。 ', intent: 'adopt',
-    proposal: { behaviors: [{ id: 'x9', text: '動作 1', origin: 'user' }, { id: 'x8', text: '', origin: 'ai' }, { text: '動作 2', origin: 'bogus' }], assumptions: [{ key: 'Deadline Days', label: 'l', text: '前提', changeHint: '' }, { key: 'deadline_days', text: '前提 2' }],
-      decisions: [{ key: '期限', question: 'Q1?', blocking: true, options: ['a', 'b', 'c', 'd', 'e', 'f'] }, { key: 'k2', question: 'Q2?', blocking: true }, { key: 'k3', question: 'Q3?', blocking: true }, { key: 'k4', question: '' }], approach: { standard: ['s'], js: ['j'] }, cannot: ['c'] },
+    proposal: { behaviors: [{ id: 'B3', text: '動作 1', origin: 'user' }, { id: 'B4', text: '', origin: 'ai' }, { id: 'B1', text: '動作 2', origin: 'bogus' }], assumptions: [{ id: 'A2', key: 'Deadline Days', label: 'l', text: '前提', changeHint: '' }, { id: 'A1', key: 'deadline_days', text: '前提 2' }],
+      decisions: [{ id: 'Q1', key: '期限', question: 'Q1?', blocking: true, options: ['a', 'b', 'c', 'd', 'e', 'f'] }, { id: 'Q2', key: 'k2', question: 'Q2?', blocking: true }, { id: 'Q3', key: 'k3', question: 'Q3?', blocking: true }, { id: 'Q4', key: 'k4', question: '' }], approach: { standard: ['s'], js: ['j'] }, cannot: ['c'] },
     turn: { ops: [{ id: 'B1', op: 'adopt' }, { id: 'Q1', op: 'modify', text: 'x' }, { id: 'Q2', op: 'reject' }, { id: 'B2', op: 'modify', text: '' }, { id: 'A1', op: 'nope' }], answers: [{ id: 'Q1', kind: 'value', text: '' }, { id: 'Q2', kind: 'delegated', text: '' }, { id: 'B1', kind: 'value', text: 'x' }], requirementOps: [{ op: 'add', behavior: 'b' }] } };
   const v = KTAiClient.validateProposal(raw);
   const n = v.normalized;
-  assert(v.ok && n.reply === '結論です。' && n.proposal.behaviors.map(b => b.id).join(',') === 'B1,B2' && n.proposal.behaviors[1].origin === 'ai', `B0-1: id は B1… に振り直し・空の項目は外す・origin は user / ai: ${JSON.stringify(n.proposal.behaviors)}`);
+  assert(v.ok && n.reply === '結論です。' && n.proposal.behaviors.map(b => b.id).join(',') === 'B3,B1' && n.proposal.behaviors[1].origin === 'ai', `B0-1: id は Gateway のまま（出力の順で振り直さない。2026-10-19）・空の項目は外す・origin は user / ai: ${JSON.stringify(n.proposal.behaviors)}`);
+  //   2026-10-19（契約 13 §11.11）: 項目の id の形が違う・無い・重複・別の種類・N…（Gateway が付け替えていない）応答は失敗（結び付きが壊れた応答として取り込まない）
+  const badId = (mut) => { const r2 = clone(raw); mut(r2.proposal); return KTAiClient.validateProposal(r2); };
+  const badIds = [badId(p => { p.behaviors[0].id = 'x9'; }), badId(p => { delete p.behaviors[2].id; }), badId(p => { p.behaviors[2].id = 'B3'; }), badId(p => { p.assumptions[0].id = 'B2'; }), badId(p => { p.decisions[1].id = 'N1'; })];
+  assert(badIds.every(r => !r.ok && !r.normalized && r.errors.some(e => e.code === 'INVALID_RESPONSE' && /\.id$/.test(e.path))), `B0-1b: 項目の id の形が違う・無い・重複・別の種類・N… の応答は失敗にする: ${JSON.stringify(badIds.map(r => [r.ok, (r.errors[0] || {}).path]))}`);
   assert(n.proposal.assumptions.map(a => a.key).join(',') === 'deadline_days,deadline_days_2' && n.proposal.decisions.map(d => d.key).join(',') === 'other,k2,k3', `B0-2: key の正規化（小文字・空白は _）と重複（_2）・空は other: ${n.proposal.assumptions.map(a => a.key)} / ${n.proposal.decisions.map(d => d.key)}`);
   assert(n.proposal.decisions.filter(d => d.blocking).length === 2 && n.proposal.decisions[0].options.length === 5 && n.intent === 'update', `B0-3: blocking は 2 件まで・options は 5 件・blocking が残る adopt は update に: ${n.intent}`);
   assert(n.turn.ops.map(o => `${o.id}:${o.op}`).join(',') === 'B1:adopt,Q2:reject' && n.turn.answers.map(a => `${a.id}:${a.kind}`).join(',') === 'Q2:delegated' && n.turn.requirementOps.length === 1, `B0-4: 判断への ops は reject だけ・空の modify と語彙外の op は外す・空の value の answer は外す: ${JSON.stringify(n.turn)}`);
@@ -91,7 +95,7 @@ console.log('\n--- §B1. 会話コントローラ: R01〜R08 と「ありがと�
  * proposeGate を渡すと、仮案の AI の応答を途中で止められる（応答待ちの間の発言の検証）。台本は scriptFn（既定は script）
  */
 //   2026-10-15（追加の指示 1）: autoMap = 偽の計画の AI が要件の対応づけ（requirementOps）を返す（K.withPlannerMapping。わざと担当を欠いた回帰は false）
-function makeConv({ features = ['requirements', 'brief', 'stream', 'proposal'], withPlan = false, planImpl = null, proposeGate = null, scriptFn = script, autoMap = true } = {}) {
+function makeConv({ features = ['requirements', 'brief', 'stream', 'proposal', 'itemIds'], withPlan = false, planImpl = null, proposeGate = null, scriptFn = script, autoMap = true } = {}) {
   const calls = { propose: [], ask: [], plan: [] };
   let t = 1000;
   //   簡素化（2026-10-17）: 計画を作る口の無い会話（採用の記録だけ）は製品から削除したので、素材の会話もいつも計画を作る口を持つ
@@ -106,7 +110,7 @@ function makeConv({ features = ['requirements', 'brief', 'stream', 'proposal'], 
       t += 3000; if (typeof args.onText === 'function') args.onText(raw.reply.slice(0, 12)); await tick();
       if (proposeGate) await proposeGate.p;
       t += 4000; if (typeof args.onText === 'function') args.onText(raw.reply);
-      return { ok: true, proposal: normalized(raw, `pp-${calls.propose.length}`), ctx: { facts: [] }, perf: { baseWaitMs: 0, contextMs: 5, requestMs: 7000 } };
+      return { ok: true, proposal: normalized(raw, `pp-${calls.propose.length}`, null, args), ctx: { facts: [] }, perf: { baseWaitMs: 0, contextMs: 5, requestMs: 7000 } };
     },
     async ask(args) { calls.ask.push({ question: args.question, conversation: clone(args.conversation) }); t += 2000; return { ok: true, answer: { answer: '5 営業日にすると判定が 2 営業日早くなります。', facts: [], analysis: [], recommendations: [], unknowns: [] }, ctx: { facts: [] } }; },
     readiness() { return null; },
@@ -237,7 +241,7 @@ await section(async () => {
   const x = makeConv({ features: ['requirements', 'brief'], withPlan: true });
   const r = await x.c.send('課長・部長の承認者を選ぶ運用にしたい');
   assert(x.c.proposalOn() === false && r.intent === 'GENERAL' && r.reason === 'UNSUPPORTED_CONNECTION' && x.calls.propose.length === 0 && x.calls.plan.length === 0 && x.c.draft() === null && x.c.activePlan() === null && /接続先が非対応です（仮案と最終案の流れに対応した接続先が必要です）/.test(x.last().text), `B5-1: health に proposal が無ければ「接続先が非対応」で止める（仮案の AI も計画の AI も呼ばない）: ${JSON.stringify({ intent: r.intent, reason: r.reason, plan: x.calls.plan.length })}`);
-  const y = makeConv({ features: ['requirements', 'brief', 'proposal'], withPlan: true });
+  const y = makeConv({ features: ['requirements', 'brief', 'proposal', 'itemIds'], withPlan: true });
   y.services.propose = undefined;
   const ry = await y.c.send('課長・部長の承認者を選ぶ運用にしたい');
   assert(y.c.proposalOn() === false && ry.reason === 'UNSUPPORTED_CONNECTION' && y.calls.plan.length === 0, 'B5-2: services.propose が無くても「接続先が非対応」（従来の計画の経路に入らない）');
@@ -499,12 +503,13 @@ await section(async () => {
   assert(byId('R1').decision === 'decided' && byId('R2').decision === 'proposed' && byId('R3').decision === 'decided' && byId('R4').decision === 'revoked',
     `B3-24b: 断った提案（B3）にだけ結び付く AI の提案 R4 は取り消す。ほかの残る項目（B1・B2）にも結び付く R1・R2 は取り消さない（採用された根拠まで消さない）。利用者の決めた R3 は、AI の提案を断っただけでは取り消さない: ${JSON.stringify(reqs.map(e => [e.id, e.decision]))}`);
 });
-// 4c. 2026-10-18: 仮案の AI に送る要件の planRefs は、今の仮案（AI から見た前回の仮案）の項目 id（Gateway は毎回 id を振り直す。要件が記録した planRefs は前のターンの id）
+// 4c. 2026-10-18: 仮案の AI に送る要件の planRefs は、今の仮案（AI から見た前回の仮案）の項目 id（台帳の対応から引く）。
+//   2026-10-19（契約 13 §11.11）: 項目の id はターンをまたいで同じなので、順を入れ替えても「通知」は同じ id（B2）のまま・送る planRefs も B2
 await section(async () => {
   const scriptOrder = ({ utterance: u }) => {
     if (/一覧と通知/.test(u)) return { reply: '仮案です。', intent: 'propose', proposal: { behaviors: [B('承認待ちの一覧を足す', 'user'), B('承認されたら申請者に通知する', 'user')], assumptions: [], decisions: [], approach: { standard: ['一覧と通知'], js: [] }, cannot: [] },
       turn: { ops: [], answers: [], requirementOps: [req('add', { target: '通知', condition: '承認されたら', behavior: '申請者に通知する', sourceQuotes: ['一覧と通知'], planRefs: ['B2'] })] } };
-    //   2 回目の仮案は項目の順が逆（振り直しで「通知」の項目は B1 になる。R1 の記録の planRefs は前の B2 のまま）
+    //   2 回目の仮案は項目の順が逆（前は振り直しで「通知」の項目が B1 になっていた。今は前の項目の id のまま）
     if (/順番/.test(u)) return { reply: '順番を入れ替えました。', intent: 'update', proposal: { behaviors: [B('承認されたら申請者に通知する', 'user'), B('承認待ちの一覧を足す', 'user')], assumptions: [], decisions: [], approach: { standard: ['一覧と通知'], js: [] }, cannot: [] }, turn: { ops: [], answers: [], requirementOps: [] } };
     if (/確認/.test(u)) return { reply: '確認しました。', intent: 'update', proposal: { behaviors: [B('承認されたら申請者に通知する', 'user'), B('承認待ちの一覧を足す', 'user')], assumptions: [], decisions: [], approach: { standard: ['一覧と通知'], js: [] }, cannot: [] }, turn: { ops: [], answers: [], requirementOps: [] } };
     return null;
@@ -516,8 +521,9 @@ await section(async () => {
   const sentR1 = ((x.calls.propose[2] && x.calls.propose[2].requirements) || []).find(r => r.id === 'R1') || {};
   const stored = (KTAiAnswers.requirementsOf(x.ledger(x.c.draft().id)).find(r => r.id === 'R1') || {}).planRefs;
   const notifyId = (x.c.draft().items.behaviors.find(b => /通知/.test(b.text)) || {}).id;
-  assert(notifyId === 'B1' && JSON.stringify(sentR1.planRefs) === '["B1"]' && JSON.stringify(stored) === '["B2"]',
-    `B3-24c: 仮案の AI に送る要件の planRefs は今の仮案の項目 id（「通知」は B1）にそろえる（台帳の項目 id → 要件 id の対応で引く。記録の planRefs は前のターンの B2 のまま）: ${JSON.stringify({ sent: sentR1.planRefs, stored, notifyId })}`);
+  const order = x.c.draft().items.behaviors.map(b => b.id);
+  assert(notifyId === 'B2' && JSON.stringify(order) === '["B2","B1"]' && JSON.stringify(sentR1.planRefs) === '["B2"]' && JSON.stringify(stored) === '["B2"]',
+    `B3-24c: 項目の順を入れ替えても「通知」は同じ id（B2）・仮案の AI に送る要件の planRefs も台帳の対応から B2（2026-10-19: id はターンをまたいで同じ）: ${JSON.stringify({ sent: sentR1.planRefs, stored, notifyId, order })}`);
 });
 // 6. 回答済みの key の判断を AI がもう一度出したら「再確認」（前の答えを添える。答えると同じ key を置き換える）。同じターンで答えたばかりの key は出さない
 await section(async () => {
@@ -2827,7 +2833,7 @@ console.log('\n--- §F. C-1 第 3 段: 入口を新しい流れに寄せ、古�
 // F1: Customize タブの相談（subject）→ 仮案（PROPOSE）。相談中の JavaScript を仮案の依頼に渡す（従来の DISCUSS_JS の計画には入らない）
 await section(async () => {
   const calls = { propose: [], plan: 0 };
-  const services = { conversationFeatures: () => ['requirements', 'stream', 'proposal'], async propose(args) { calls.propose.push(args); return { ok: false, reason: 'TEST', message: '（テスト: 仮案は作らない）' }; }, async plan() { calls.plan += 1; return { plan: null }; }, async ask() { return { ok: true, answer: { answer: '答えです。', facts: [], analysis: [], recommendations: [], unknowns: [] }, ctx: { facts: [] } }; }, readiness() { return null; } };
+  const services = { conversationFeatures: () => ['requirements', 'stream', 'proposal', 'itemIds'], async propose(args) { calls.propose.push(args); return { ok: false, reason: 'TEST', message: '（テスト: 仮案は作らない）' }; }, async plan() { calls.plan += 1; return { plan: null }; }, async ask() { return { ok: true, answer: { answer: '答えです。', facts: [], analysis: [], recommendations: [], unknowns: [] }, ctx: { facts: [] } }; }, readiness() { return null; } };
   const c = KTAiConversation.create({ services, now: () => '2026-10-08T00:00:00.000Z', clock: () => 0 });
   const seed = KTContext.buildConsultationSeed({ data: INPUTS.data, deps: INPUTS.deps, scan: INPUTS.scan, file: { name: 'common.js', target: 'desktop', type: 'FILE', fileKey: 'dl:common', size: '100' }, sourceText: null, appName: '案件管理' });
   const st = c.startConsultation(seed);
@@ -3290,8 +3296,8 @@ const sugScript = ({ utterance: u }) => {
 await section(async () => {
   const x = makeConv({ planImpl: planOk, scriptFn: sugScript });
   const { c, calls } = x;
-  const v0 = KTAiClient.validateProposal({ ok: true, contractVersion: '2.1', meta: META, ...sugScript({ utterance: SUG_REQ }) });
-  assert(v0.ok && v0.normalized.proposal.behaviors.map(b => b.origin).join(',') === 'user,suggestion' && KTAiClient.validateProposal({ ok: true, contractVersion: '2.1', meta: META, reply: 'r', intent: 'propose', proposal: { behaviors: [{ text: 'x', origin: 'other' }] }, turn: {} }).normalized.proposal.behaviors[0].origin === 'ai', 'I1-1: validateProposal は origin suggestion を残す（語彙外は ai）');
+  const v0 = KTAiClient.validateProposal({ ok: true, contractVersion: '2.1', meta: META, ...KIT.gatewayIds(sugScript({ utterance: SUG_REQ })) });
+  assert(v0.ok && v0.normalized.proposal.behaviors.map(b => b.origin).join(',') === 'user,suggestion' && KTAiClient.validateProposal({ ok: true, contractVersion: '2.1', meta: META, reply: 'r', intent: 'propose', proposal: { behaviors: [{ id: 'B1', text: 'x', origin: 'other' }] }, turn: {} }).normalized.proposal.behaviors[0].origin === 'ai', 'I1-1: validateProposal は origin suggestion を残す（語彙外は ai）');
   await c.send(SUG_REQ);
   const d = c.draft();
   const card = KTAiChatUi.messageHtml(c.messages().filter(m => m.type === 'DRAFT').slice(-1)[0], { draft: d, draftDecisions: c.draftDecisions() });
@@ -3313,7 +3319,7 @@ await section(async () => {
 });
 // I2: 入れると言った提案は入る（仮案の AI が user にする。既存の自然文の返事の処理）。Gateway が suggestion を出さない接続先には ai として送る
 await section(async () => {
-  const x = makeConv({ planImpl: planOk, scriptFn: sugScript, features: ['requirements', 'brief', 'stream', 'proposal', 'suggestion'] });
+  const x = makeConv({ planImpl: planOk, scriptFn: sugScript, features: ['requirements', 'brief', 'stream', 'proposal', 'suggestion', 'itemIds'] });
   const { c, calls } = x;
   await c.send(SUG_REQ);
   await c.send('通知も入れて');

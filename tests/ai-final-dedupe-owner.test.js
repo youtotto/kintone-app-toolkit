@@ -74,8 +74,9 @@ await section(async () => {
   assert(x.sends.map(r => r && r.intent).join(',') === `${I.PROPOSE},${I.DRAFT_REPLY},${I.ADOPT_DRAFT}` && x.calls.plan.length === 1 && x.gen.calls.length === 3 && fin && !fin.incomplete && ['C1', 'C2', 'C3'].every(c => v.generated[c].status === 'verified') && FS.readyOf(fin) === true && ['C1', 'C2', 'C3'].every(c => JSON.stringify(v.generated[c].requiredEffects) === JSON.stringify(F.GENERATED[c].requiredEffects)),
     `D1-1: 前提（再生）: 仮案 2 回 → 採用 → 計画 1 回 → 生成 3 本（必須の動作は実機と同じ）→ 承認できる最終案: ${JSON.stringify({ sends: x.sends.map(r => r && r.intent), plan: x.calls.plan.length, gen: x.gen.calls.length, st: v && Object.values(v.generated || {}).map(e => e.status), approvable: fin && FS.readyOf(fin) })}`);
   const owners = x.gen.calls[0].planOwners || [];
-  assert(x.gen.calls.every(c => Array.isArray(c.planOwners)) && ['B1', 'B2', 'B3', 'B4', 'C1', 'C2', 'C3', 'P1'].every(id => owners.includes(id)) && !owners.includes('B6') && JSON.stringify(x.c.planOwnerIds(v)) === JSON.stringify(owners),
-    `D1-2: 生成の検査に、準備の判定と同じ担当の集まりを渡す（採用した仮案の項目・計画の手順・JavaScript。任意の提案 B6 は含めない）: ${JSON.stringify(owners)}`);
+  //   2026-10-19（契約 13 §11.11）: 項目の id はターンをまたいで同じ（記録の当時は出力の順で振り直していた）。任意の提案は 1 回目の B5 のまま、2 回目に足した利用者の項目が B6
+  assert(x.gen.calls.every(c => Array.isArray(c.planOwners)) && ['B1', 'B2', 'B3', 'B4', 'B6', 'C1', 'C2', 'C3', 'P1'].every(id => owners.includes(id)) && !owners.includes('B5') && JSON.stringify(x.c.planOwnerIds(v)) === JSON.stringify(owners),
+    `D1-2: 生成の検査に、準備の判定と同じ担当の集まりを渡す（採用した仮案の項目・計画の手順・JavaScript。任意の提案 B5 は含めない）: ${JSON.stringify(owners)}`);
   const h0 = R.leftHtml(x), hReady = R.leftHtml(x, { pre: READY }), L = vis(hReady), right = R.rightHtml(x), RT = stripC(right).replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"'), RV = vis(right);
   const doSec = secOf(L, 'この案で実現すること', LEFT_SECTIONS.slice(1));
   assert(ADOPTED.length === 4 && ADOPTED.every(t => count(doSec, t) === 1 && count(L, t) === 1) && doSec.split('\n').map(s => s.trim()).filter(Boolean).length === 4,
@@ -515,7 +516,8 @@ await section(async () => {
   const x = await R.run({ planOps: (n, args) => { seen.push({ n, goal: args.goal, requirements: clone3(args.requirements || []), decisions: clone3(args.decisions || []) }); return []; } });
   const a0 = seen[0] || {};
   const pick = (r) => JSON.stringify([r.id, r.target, r.condition, r.behavior, r.decision, r.planRefs, r.effects || [], r.sourceQuotes]);
-  const want = (F.LEDGER_REQUIREMENTS || []).map(pick), got = (a0.requirements || []).map(pick);
+  //   2026-10-19（契約 13 §11.11）: 記録の R5・R6 の planRefs（B4）は当時の Gateway が 2 回目の仮案の出力の順で振った id。今は同じ項目（2 回目に足した利用者の項目）の id B6 で台帳に入る
+  const want = (F.LEDGER_REQUIREMENTS || []).map(r => (['R5', 'R6'].includes(r.id) ? { ...r, planRefs: ['B6'] } : r)).map(pick), got = (a0.requirements || []).map(pick);
   const sugText = '任意の追加案：承認済みの明細の行追加・削除を保存時に検出して保存を止める。';
   assert(JSON.stringify(got) === JSON.stringify(want) && (a0.decisions || []).length === 2 && (a0.decisions || []).every(d => d.answer === '今の「承認待ち」の作業者指定を使用する。') && /採用した方針: /.test(a0.goal || '') && !String(a0.goal || '').includes(sugText.slice(0, 12)) && seen.length === 1,
     `D11-1: 採用した要件（対象・条件・動作・決定の状態・仮案の項目への結び付き・構造化した効果・根拠の発言）と決めたこと 2 件が、そのまま計画の呼び出しに渡る。任意の提案（未採用）は採用した方針に入らない: ${JSON.stringify({ diff: got.filter((g, i) => g !== want[i]), decisions: (a0.decisions || []).map(d => [d.label, d.answer]), goal: String(a0.goal || '').slice(-120) })}`);

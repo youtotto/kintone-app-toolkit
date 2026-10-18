@@ -58,7 +58,7 @@ function makeConv(steps, { askAnswer = 'JavaScript は画面の操作だけで�
   const ctl = { hold() { let o; gates.push(new Promise(r => { o = r; })); return o; }, holdAsk() { let o; askGates.push(new Promise(r => { o = r; })); return o; } };
   const gen = generate || K.makeGenerate({ sequence: ['warn'] });
   const services = {
-    async propose(args) { calls.propose.push({ utterance: args.utterance }); const raw = K.script(args); if (!raw) return { ok: false, reason: 'NO_SCRIPT', message: `台本がありません: ${args.utterance}` }; t += 3000; return { ok: true, proposal: K.normalized(raw, `pp-${calls.propose.length}`), ctx: { facts: [] } }; },
+    async propose(args) { calls.propose.push({ utterance: args.utterance }); const raw = K.script(args); if (!raw) return { ok: false, reason: 'NO_SCRIPT', message: `台本がありません: ${args.utterance}` }; t += 3000; return { ok: true, proposal: K.normalized(raw, `pp-${calls.propose.length}`, null, args), ctx: { facts: [] } }; },
     async plan(args) {
       const n = calls.plan.length;
       calls.plan.push(JSON.parse(JSON.stringify({ goal: args.goal, revision: args.revision || null, requirements: args.requirements || null, decisions: args.decisions || null })));
@@ -73,7 +73,7 @@ function makeConv(steps, { askAnswer = 'JavaScript は画面の操作だけで�
       return K.withPlannerMapping({ plan: p, ctx: { facts: [] }, review: KTPlanReview.review({ plan: p, data: DATA, deps: DEPS, scan: null, incoming: null }), gatewayPlan: { ...JSON.parse(JSON.stringify(p)), gw: n + 1 }, revisionMeta: args.revision ? { requested: args.revision.mode || 'full', mode: args.revision.mode || 'full', fallbackReason: null } : null, turn: s.turn || null, ...(s.noAutoMap ? { noAutoMap: true } : {}) }, args.requirements, { merge: true });
     },
     revisionModes: () => ['full', 'patch'],
-    conversationFeatures: () => ['requirements', 'stream', 'proposal'],
+    conversationFeatures: () => ['requirements', 'stream', 'proposal', 'itemIds'],
     generatorFeatures: () => ['requirementId', 'cases', 'feedback', ...K.GEN_EFFECT_FEATURES, ...K.GEN_CURRENT_FEATURES], plannerFeatures: () => ['reply'],
     materials: () => '見ている設定: 一覧 1 件・既存の JavaScript 0 ファイル', fieldLabels: () => K.LABELS_C, async customizeRevision() { return '42'; },
     async ask(args) { const ga = askGates.shift(); if (ga) await ga; calls.ask.push(JSON.parse(JSON.stringify({ question: args.question, conversation: args.conversation || null }))); if (askResult) { const x = askResult(args); if (x) return x; } return { ok: true, answer: { answer: askAnswer, facts: [], analysis: [], recommendations: [], unknowns: [] }, ctx: { facts: [] } }; },

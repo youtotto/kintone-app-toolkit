@@ -38,9 +38,9 @@ const tick = async (n = 6) => { for (let i = 0; i < n; i++) await new Promise(r 
 const draftRaw = (u) => ({ reply: `「${u}」を実現する変更案にできます。`, intent: 'propose', proposal: { behaviors: [{ text: u, origin: 'user' }], assumptions: [], decisions: [], approach: { standard: [], js: ['JavaScript で実現する'] }, cannot: [] }, turn: { ops: [], answers: [], requirementOps: [] } });
 /** 画面の接続先に仮案の能力（health の conversation の proposal と client.propose）と、生成工程の能力の印を足す */
 const withProposal = (health, client) => {
-  health.registry.toolkit['assistant-qa'].conversation = ['requirements', 'stream', 'proposal'];
+  health.registry.toolkit['assistant-qa'].conversation = ['requirements', 'stream', 'proposal', 'itemIds'];
   if (!health.registry.toolkit['customization-generator'].verification) health.registry.toolkit['customization-generator'].verification = ['requirementId', ...K.GEN_EFFECT_FEATURES, ...K.GEN_CURRENT_FEATURES];
-  client.propose = async ({ ctx, requestId, onText }) => { const raw = draftRaw(ctx.question); if (typeof onText === 'function') onText(raw.reply); return K.normalized(raw, requestId); };
+  client.propose = async ({ ctx, requestId, onText }) => { const raw = draftRaw(ctx.question); if (typeof onText === 'function') onText(raw.reply); return K.normalized(raw, requestId, null, ctx.conversation); };
   return client;
 };
 /** 画面: 依頼 → 仮案 →「これで進めて」で採用 → 最終案（最初の計画と JavaScript の生成・検証） */
@@ -634,7 +634,7 @@ console.log('\n--- G9 / G10. Generator Context の欠落（モデル比較の候
   // §2 の実機（続き）: JS を登録したら計画は「反映済み」（標準設定の手順が無く、カスタマイズをすべて生成して登録したとき）。次の依頼は新しい計画
   const mkPlan = (custs) => plan([], [], { solution: 'CUSTOMIZATION', customizations: custs.map(id => ({ customizationId: id, requirement: 'r', strategy: 'NEW_JS_FILE', platform: ['desktop'], events: [], fields: [], apis: [], existingFiles: [] })) });
   //   C-1 第 3 段: 仮案の能力がある接続先で、依頼 → 仮案 → 採用で計画を作る（生成の services は無いので、生成の結果は手で置く）
-  const svc = (p) => ({ conversationFeatures: () => ['requirements', 'stream', 'proposal'], async propose(args) { return { ok: true, proposal: K.normalized(draftRaw(args.utterance)), ctx: { facts: [] } }; }, async plan() { return { plan: clone(p), ctx: null, review: null }; }, async ask() { return { ok: true, answer: { answer: 'a' } }; } });
+  const svc = (p) => ({ conversationFeatures: () => ['requirements', 'stream', 'proposal', 'itemIds'], async propose(args) { return { ok: true, proposal: K.normalized(draftRaw(args.utterance), 'pp-1', null, args), ctx: { facts: [] } }; }, async plan() { return { plan: clone(p), ctx: null, review: null }; }, async ask() { return { ok: true, answer: { answer: 'a' } }; } });
   const one = KTAiConversation.create({ services: svc(mkPlan(['C1'])) });
   await startPlan(one, '紹介元を顧客区分で切り替えて表示したい');
   const v1 = one.activePlan(); v1.generated = { C1: { generated: { strategy: 'NEW_JS_FILE' } } };

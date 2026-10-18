@@ -108,7 +108,7 @@ function fakeGateway({ health = HEALTH_S, planRaw = planRaw2, onGenerate }) {
         seen.propose.push({ accept });
         const raw = K.script({ utterance: ctx.question, previous: ctx.conversation.proposal, requirements: ctx.conversation.requirements });
         if (!raw) return jsonResponse(500, { ok: false, error: { code: 'INTERNAL_ERROR', message: `台本がありません: ${ctx.question}` } });
-        const body = { ok: true, contractVersion: '2.1', meta: { ...K.META, requestId }, ...raw };
+        const body = { ok: true, contractVersion: '2.1', meta: { ...K.META, requestId }, ...K.gatewayIds(raw, ctx.conversation) };
         if (/text\/event-stream/.test(accept || '')) return sseResponse([': start', { event: 'delta', data: { text: raw.reply.slice(0, 8) } }, { event: 'delta', data: { text: raw.reply.slice(8) } }, { event: 'done', data: body }]);
         return jsonResponse(200, body);
       }

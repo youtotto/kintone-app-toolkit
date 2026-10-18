@@ -78,7 +78,7 @@ const outsideDetails = (html) => String(html).replace(/<details[\s\S]*?<\/detail
 // =========================================================
 console.log('\n--- §A1. validateProposal: adoptQuote の照合（空・発言に無い → update。古い Gateway はそのまま） ---');
 await section(async () => {
-  const base = { ok: true, contractVersion: '2.1', meta: META, reply: '進めます。', intent: 'adopt', proposal: { behaviors: [{ text: '動作', origin: 'user' }], assumptions: [], decisions: [], approach: { standard: [], js: [] }, cannot: [] }, turn: { ops: [], answers: [], requirementOps: [] } };
+  const base = { ok: true, contractVersion: '2.1', meta: META, reply: '進めます。', intent: 'adopt', proposal: { behaviors: [{ id: 'B1', text: '動作', origin: 'user' }], assumptions: [], decisions: [], approach: { standard: [], js: [] }, cannot: [] }, turn: { ops: [], answers: [], requirementOps: [] } };
   const v1 = KTAiClient.validateProposal({ ...base, adoptQuote: 'この案で進めて' }, { utterance: '承認者は今のままで。この案で進めて' });
   assert(v1.ok && v1.normalized.intent === 'adopt' && !v1.warnings.some(w => w.code === 'PROPOSAL_ADOPT_UNGROUNDED'), `A1-1: adoptQuote が今回の発言にあれば adopt のまま: ${JSON.stringify({ intent: v1.normalized.intent, warnings: v1.warnings.map(w => w.code) })}`);
   const v2 = KTAiClient.validateProposal({ ...base, adoptQuote: '' }, { utterance: '承認者は今のまま、ステータスを一つ追加してください' });

@@ -33,7 +33,11 @@
 //        どちらの順でも同じ・印の無い Gateway でも同じ。D が範囲内の要件で実現済みなら構造の照合はしない（S8-23）
 //
 //   §S10（2026-10-18）採用内容の欠落の区別: 仮案の id の振り直しで、要件が記録した planRefs（前のターンの id）が別の項目を指しても、台帳の対応だけで採用の範囲を決める。
-//        採用した AI の項目の要件を任意の提案と取り違えない・対応の切れた要件は計画に入れず取り消さず「結び付かない提案」として出す・未採用の任意の提案は入れない
+//        採用した AI の項目の要件を任意の提案と取り違えない・対応の切れた要件は計画に入れず取り消さず「結び付かない提案」として出す・未採用の任意の提案は入れない。
+//        2026-10-19（契約 13 §11.11）: 項目の id はターンをまたいで同じ。利用者が採用した項目を AI が言い換えて別の項目にした（更新先を示さない置き換え）ときは、
+//        採用した項目を前の文のまま残し、その要件を計画に入れる（採用した内容を黙って落とさない。言い換えの新しい項目は別の項目として見える）
+//   §S11（2026-10-19・契約 13 §11.11）仮案の項目の識別と採用の記録: 利用者が採用した項目は利用者の項目になり、AI の言い換え・省略で変えない。採用の発言のターンは
+//        利用者が見ていた内容だけを採用にし、計画の依頼の「採用した方針」は採用の記録から取り出す。使った番号の上限を次の依頼に渡す。itemIds の印の無い接続先では仮案を使わない
 //
 //   修正前の版（KT_SRC）でも例外で止めずに各 assert を評価する（読み取りの関数が無い版では空の読み取りで落ちる）。§S2 は最初の計画・自動の見直し・差分更新の
 //   3 つの section に分けている（前の section が落ちても後の assert を評価する）
@@ -1119,14 +1123,55 @@ await section(async () => {
   const b = await run(turn1([SUG, LOCK], [{ ...R_LOCK, planRefs: ['B2'] }, R_SUG('B1')]), turn2([LOCK, SUG]));
   assert(b.r.intent === 'ADOPT_DRAFT' && !b.sent.includes('R2') && !b.unlinked.includes('R2') && !b.unconfirmed.includes('R2') && b.decisionOf('R2') === 'proposed',
     `S10-2: 台帳の対応で任意の提案だけに結び付く要件は、記録した planRefs が利用者の項目の id を指しても計画に入れない（未採用の任意の提案。取り消しもしない）: ${JSON.stringify({ sent: b.sent, unlinked: b.unlinked, unconfirmed: b.unconfirmed })}`);
-  //   (3) 利用者が任意の提案を入れると伝え（adopt）、AI が項目の文を言い換えた。要件の操作は無い（対応が切れる）→ 前の「任意の提案」の根拠のまま黙って外さない
+  //   (3) 利用者が任意の提案を入れると伝え（adopt）、AI が項目の文を言い換えて新しい項目にした（前の項目は省いた・要件の操作は無い）。
+  //   2026-10-19: 採用した項目（B2）は利用者の項目として前の文のまま残り、その要件 R2 は計画に入る（前は対応が切れて「結び付かない提案」になっていた）
   const c = await run(turn1([LOCK, SUG], [R_LOCK, R_SUG('B2')]), turn2([LOCK, B('保存時に確認メッセージを表示する', 'user')], [{ id: 'B2', op: 'adopt', text: '', quote: '保存の確認も入れて' }]));
-  assert(c.r.intent === 'ADOPT_DRAFT' && !c.sent.includes('R2') && c.unlinked.includes('R2') && c.decisionOf('R2') === 'proposed',
-    `S10-3: 採用した内容を引き継げない（項目の文が変わり対応が切れた）要件は、計画に入れず・取り消さず、最終案に「結び付かない提案」として出す（入れるかは利用者が伝える）: ${JSON.stringify({ sent: c.sent, unlinked: c.unlinked, decision: c.decisionOf('R2') })}`);
+  assert(c.r.intent === 'ADOPT_DRAFT' && c.sent.includes('R2') && !c.unlinked.includes('R2') && c.decisionOf('R2') === 'proposed',
+    `S10-3: 利用者が採用した項目を AI が言い換えて別の項目にしても、採用した項目は残り、その要件は計画に入る（黙って落とさない・結び付かない提案にしない）: ${JSON.stringify({ sent: c.sent, unlinked: c.unlinked, decision: c.decisionOf('R2') })}`);
   //   (4) AI が 2 回目の仮案から項目を黙って落とした（利用者は断っていない）→ 前の採用の根拠のまま、もう見えない項目の要件を計画に入れない
   const d = await run(turn1([LOCK, ITEMS], [R_LOCK, R_ITEMS('B2')]), turn2([LOCK]));
   assert(d.r.intent === 'ADOPT_DRAFT' && !d.sent.includes('R2') && d.unlinked.includes('R2') && d.decisionOf('R2') === 'proposed',
     `S10-4: 仮案から消えた項目の要件は、採用の時点に結び付く項目が無いので計画に入れず・取り消さず、最終案に「結び付かない提案」として出す: ${JSON.stringify({ sent: d.sent, unlinked: d.unlinked, decision: d.decisionOf('R2') })}`);
+});
+
+// =========================================================
+console.log('\n--- §S11（2026-10-19・契約 13 §11.11）仮案の項目の識別と採用の記録: 利用者の項目は AI の書き直し・省略で変えない・採用の発言のターンは見ていた内容だけ・番号の上限・itemIds の印 ---');
+//   偽の Gateway（K.gatewayIds）は、台本の前回の id をそのまま・N… を使った番号の続きにする（本物の Gateway と同じ規則。本物は AI版 の cross-toolkit §16 で通す）
+await section(async () => {
+  const V1 = '承認待ちでは金額を編集できないようにして、承認されたら通知したい';
+  const V2 = '通知は採用です';
+  const V3 = 'よさそうなので、この案で進めて';
+  const L = '承認待ちでは金額を編集できないようにする', N = '承認されたら申請者に通知する', AI = '承認待ちのステータスで金額の欄を止める';
+  const pr = (behaviors) => ({ behaviors, assumptions: [], decisions: [], approach: { standard: ['通知'], js: ['金額'] }, cannot: [] });
+  const t1 = { reply: '仮案です。', intent: 'propose', proposal: pr([{ id: 'N1', text: L, origin: 'user' }, { id: 'N2', text: N, origin: 'ai' }, { id: 'N3', text: AI, origin: 'ai' }]),
+    turn: { ops: [], answers: [], requirementOps: [req('add', { target: '金額', condition: '承認待ち', behavior: '編集できないようにする', sourceQuotes: [V1], planRefs: ['N1', 'N3'], effects: ['lock'] }), req('add', { target: '通知', condition: '承認されたら', behavior: '申請者に通知する', decision: 'proposed', planRefs: ['N2'] })] } };
+  //   2 回目: 利用者が通知（B2・AI の案）を採用。AI は B2 を言い換えて ai のまま返し、利用者の依頼 B1 を省く
+  const t2 = { reply: '通知を入れました。', intent: 'update', proposal: pr([{ id: 'B2', text: '承認後に申請者へ知らせる', origin: 'ai' }, { id: 'B3', text: AI, origin: 'ai' }]), turn: { ops: [{ id: 'B2', op: 'adopt', text: '', quote: V2 }], answers: [], requirementOps: [] } };
+  //   3 回目（採用の発言）: AI は B3 を言い換え、新しい AI の項目を足し、B2 を省く（どれも利用者はまだ見ていない）
+  const t3 = { reply: 'この案で進めます。', intent: 'adopt', adoptQuote: 'この案で進めて', proposal: pr([{ id: 'B1', text: L, origin: 'user' }, { id: 'B3', text: '承認待ちでは金額の入力欄を無効にする', origin: 'ai' }, { id: 'N1', text: '保存時に確認を出す', origin: 'ai' }]), turn: { ops: [], answers: [], requirementOps: [] } };
+  const floors = [], plans = [];
+  const scriptFn = (args) => { floors.push(args.itemIdFloor || null); const u = args.utterance; return u === V1 ? t1 : u === V2 ? t2 : u === V3 ? t3 : null; };
+  const x = makeConvC({ scriptFn, planImpl: (args) => { plans.push({ goal: String(args.goal || ''), requirements: (args.requirements || []).map(r => `${r.id}:${r.decision}`) }); return K.planJs(args); } });
+  await x.c.send(V1);
+  await x.c.send(V2);
+  const d2 = clone(x.c.draft());
+  const of2 = (id) => d2.items.behaviors.find(b => b.id === id) || {};
+  assert(JSON.stringify(d2.items.behaviors.map(b => b.id)) === '["B2","B3","B1"]' && of2('B2').text === N && of2('B2').origin === 'user' && of2('B1').text === L && of2('B1').origin === 'user' && JSON.stringify(d2.userItemIds) === '["B2"]',
+    `S11-1: 利用者が採用した B2 は利用者の項目になり、採用した時点の文のまま（AI の言い換え・ai のままの扱いにしない）。AI が省いた利用者の依頼 B1 は残る: ${JSON.stringify({ items: d2.items.behaviors.map(b => [b.id, b.origin, b.text]), userItemIds: d2.userItemIds })}`);
+  assert(floors[0] === null && JSON.stringify(floors[1]) === '{"B":3,"A":0,"Q":0}',
+    `S11-2: 次の依頼に、この仮案で使った番号の上限（itemIdFloor）を渡す（最初の仮案は無し）: ${JSON.stringify(floors)}`);
+  const r3 = await x.c.send(V3);
+  const ad = (x.c.state.ledgers.get(x.c.draft().id) || {}).adoption || null;
+  const goal = plans[0] ? plans[0].goal : '';
+  const lines = goal.split('\n').slice(1).join('\n').replace(/^採用した方針: /, '').split('／');
+  assert(r3.intent === 'DRAFT_REPLY' && ad && JSON.stringify((ad.behaviors || []).map(b => b.id).sort()) === '["B1","B2","B3"]' && JSON.stringify(lines) === JSON.stringify((ad.behaviors || []).map(b => b.text)) && lines.includes(AI) && !goal.includes('入力欄を無効にする') && !goal.includes('保存時に確認を出す'),
+    `S11-3: 採用の発言と同じターンの AI の言い換え（B3）・新しい AI の項目は採用にせず、省いた B2 も残す。計画の依頼の「採用した方針」は採用の記録（lg.adoption.behaviors）と同じ: ${JSON.stringify({ intent: r3.intent, adopted: ad && ad.behaviors, goal: goal.slice(-160) })}`);
+  //   印の無い接続先（項目の id を出力の順で振り直す古い Gateway）では仮案の経路を使わない
+  const y = makeConvC({ scriptFn });
+  y.services.conversationFeatures = () => ['requirements', 'brief', 'stream', 'proposal', 'suggestion', 'adoptQuote'];
+  const ry = await y.c.send(V1);
+  assert(ry.intent === 'GENERAL' && y.calls.propose.length === 0 && !y.c.draft(),
+    `S11-4: health の conversation に itemIds の無い接続先では仮案の AI を呼ばない（接続先が非対応）: ${JSON.stringify({ intent: ry.intent, propose: y.calls.propose.length })}`);
 });
 
 console.log(`\n${state.passed} passed, ${state.failed} failed`);
