@@ -724,11 +724,12 @@ console.log('\n--- G9 / G10. Generator Context の欠落（モデル比較の候
   // 計画の Review: ステータス名の後ろの注釈（「承認待ち（課長承認として再利用）」）を名前として読まない（モデル比較の CX-1 で「遷移先が存在しません（high）」）
   const data = clone(REG.data);
   data.status = { enable: true, revision: '5', states: { '作成中': { name: '作成中', index: '0', assignee: { type: 'ONE', entities: [] } }, '承認待ち': { name: '承認待ち', index: '1', assignee: { type: 'ONE', entities: [{ entity: { type: 'USER', code: 'u1' }, includeSubs: false }] } }, '承認済み': { name: '承認済み', index: '2', assignee: { type: 'ONE', entities: [] } } }, actions: [{ name: '申請する', from: '作成中', to: '承認待ち', filterCond: '', type: 'PRIMARY' }, { name: '承認する', from: '承認待ち', to: '承認済み', filterCond: '', type: 'PRIMARY' }, { name: '差し戻す', from: '承認待ち', to: '作成中', filterCond: '', type: 'PRIMARY' }] };
-  const st = step('P1', 'UPDATE_PROCESS', 'PROCESS_ACTION', '申請する', { filterCond: 'amount <= "999999"', changeKind: 'ACTION_CONDITION' }, { proposal: { summary: '「申請する」を 999,999 円以下だけにする', details: [{ key: '遷移元', value: '作成中' }, { key: '遷移先', value: '承認待ち（課長承認として再利用）' }, { key: '条件', value: 'amount <= "999999"' }] } });
+  //   2026-10-18: 遷移元・遷移先は spec の値だけを読む（説明文の details は読まない）ので、注釈つきの名前は spec に入れて確かめる（前の固定データは details に書いていた）
+  const st = step('P1', 'UPDATE_PROCESS', 'PROCESS_ACTION', '申請する', { from: '作成中', to: '承認待ち（課長承認として再利用）', filterCond: 'amount <= "999999"', changeKind: 'ACTION_CONDITION' }, { proposal: { summary: '「申請する」を 999,999 円以下だけにする', details: [] } });
   const r = KTPlanReview.review({ plan: plan([st]), data, deps: null, scan: null, incoming: null });
   const iss = r.steps[0].issues.map(i => i.code);
-  assert(!iss.includes('UNKNOWN_STATUS') && iss.includes('EXISTING_PATH_RESTRICTED'), `説明文の注釈つきの遷移先を実在のステータス（承認待ち）として読む（既存の経路を狭める注意は残す）: ${iss.join(',')}`);
-  const st2 = step('P1', 'UPDATE_PROCESS', 'PROCESS_ACTION', '申請する', { filterCond: 'amount <= "999999"', changeKind: 'ACTION_CONDITION' }, { proposal: { summary: 's', details: [{ key: '遷移先', value: '課長承認待ち（新設）' }] } });
+  assert(!iss.includes('UNKNOWN_STATUS') && iss.includes('EXISTING_PATH_RESTRICTED'), `spec の注釈つきの遷移先を実在のステータス（承認待ち）として読む（既存の経路を狭める注意は残す）: ${iss.join(',')}`);
+  const st2 = step('P1', 'UPDATE_PROCESS', 'PROCESS_ACTION', '申請する', { to: '課長承認待ち（新設）', filterCond: 'amount <= "999999"', changeKind: 'ACTION_CONDITION' }, { proposal: { summary: 's', details: [] } });
   const r2 = KTPlanReview.review({ plan: plan([st2]), data, deps: null, scan: null, incoming: null });
   assert(r2.steps[0].issues.some(i => i.code === 'UNKNOWN_STATUS' && /課長承認待ち/.test(i.message)), '注釈を除いても実在しないステータスは従来どおり「存在しません」');
 }

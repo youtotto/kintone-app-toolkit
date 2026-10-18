@@ -616,21 +616,25 @@ console.log('\n--- F32 / F33（CX-1 実機）. 1 つの手順の説明に書か�
   ]);
   const rv = reviewOf(p);
   const s3 = rv.steps.find(x => x.stepId === 'P3');
-  const multi = s3.issues.find(i => i.code === 'STEP_MULTIPLE_SETTINGS');
-  assert(multi && multi.severity === 'high' && /課長承認待ち/.test(multi.message) && /amount < "1000000"/.test(multi.message) && /部長承認待ち/.test(multi.message), 'F32: 説明に遷移先・条件が 2 組 → STEP_MULTIPLE_SETTINGS（以前は 1 組目だけを黙って使い、2 組目は検証も表示もされなかった）');
+  //   2026-10-18（説明文から設定値を補わない）: 前は説明文の 2 組を読んで STEP_MULTIPLE_SETTINGS で止めていた（その検出と、同じ値の繰り返し・一覧の行を合わせる確かめは消した）。
+  //   今は説明文を読まない。spec は changeKind ACTION_CONDITION なのに条件式が無いので、遷移元が今と同じでも変更不要にせず値の欠落（NO_STRUCTURED_CHANGE → NO_VALUES）。
+  //   1 組目だけ・説明文から推測した値で反映することも、黙って「変更不要」で外すことも無い
   const ar = KTPlanExecutor.applyReadiness(p, rv).find(a => a.stepId === 'P3');
-  assert(ar.apply === 'BLOCKED' && ar.reason === 'MULTIPLE_SETTINGS_IN_STEP', `F32: その手順は自動で反映しない（1 組目だけを反映すると 100 万円未満を申請できなくなる。依存の書き方に頼らない）: ${ar.apply} ${ar.reason}`);
-  // 同じ値の繰り返し（name / from）だけなら指摘しない
-  const same = plan([statusStep('P1', '部長承認待ち'), step('P2', 'UPDATE_PROCESS', 'PROCESS_ACTION', '申請する', { name: '申請する', from: '未処理', changeKind: 'ACTION_CONDITION' }, { dependsOn: ['P1'], proposal: { summary: '', details: [['to', '部長承認待ち'], ['filterCond', 'amount >= "1000000"'], ['遷移先', '部長承認待ち'], ['条件', 'amount >= "1000000"']].map(([key, value]) => ({ key, value })) } })]);
-  assert(!reviewOf(same).steps.find(x => x.stepId === 'P2').issues.some(i => i.code === 'STEP_MULTIPLE_SETTINGS'), 'F32: 同じ値の繰り返し（表記違いの同じ条件を含む）は指摘しない');
-  // 一覧の項目（通知先など）は行が分かれていても全部使う（2 行目を黙って捨てない）
-  const n = reviewOf(plan([step('P1', 'ADD_NOTIFICATION', 'NEW_SETTING', '高額案件', { name: '高額案件' }, { proposal: { summary: '', details: [['通知先', 'FIELD_ENTITY:owner'], ['通知先', 'CREATOR'], ['条件', 'amount >= "1000000"']].map(([key, value]) => ({ key, value })) } })])).steps.find(x => x.stepId === 'P1');
-  assert(n.spec.targets.length === 2 && !n.issues.some(i => i.code === 'STEP_MULTIPLE_SETTINGS'), `F32: 通知先の行が 2 つ → 2 人とも通知先（以前は 1 行目だけ）: ${JSON.stringify(n.spec.targets)}`);
+  const p3Actions = rv.simulation.after.process.actions.filter(a => a.name === '申請する');
+  assert(s3.status === 'NEEDS_CONFIRMATION' && s3.issues.some(i => i.code === 'NO_STRUCTURED_CHANGE' && /条件の変更の値（条件式）が計画にありません/.test(i.message)) && s3.diff.changeType === 'NO_CHANGE' && !s3.issues.some(i => i.code === 'BRANCH_ADDED') && !s3.diff.human.some(h => /変更不要/.test(h))
+    && ar.apply !== 'APPLY' && ar.reason === 'NO_VALUES' && p3Actions.length === 1 && p3Actions[0].to === '承認待ち' && p3Actions[0].filterCond === 'amount > "0"' && p3Actions[0].origin === 'existing',
+    `F32: 説明に遷移先・条件が 2 組あっても読まない。spec に条件式が無いので値の欠落で反映しない（変更不要にもしない・分岐も作らない）: ${JSON.stringify({ status: s3.status, codes: s3.issues.map(i => i.code), apply: ar.apply, reason: ar.reason, actions: p3Actions })}`);
+  // 同じ手順で spec の条件式が今の条件（amount > "0"）と同じなら、値はあるので変更不要。空の条件式は値の欠落（区別する。どちらも説明文の 2 組は読まない）
+  const empty = reviewOf(plan([step('P1', 'UPDATE_PROCESS', 'PROCESS_ACTION', '申請する', { name: '申請する', from: '未処理', filterCond: '', changeKind: 'ACTION_CONDITION' }, { proposal: { summary: '', details: det } })])).steps[0];
+  const sameNow = reviewOf(plan([step('P1', 'UPDATE_PROCESS', 'PROCESS_ACTION', '申請する', { name: '申請する', from: '未処理', filterCond: 'amount > "0"', changeKind: 'ACTION_CONDITION' }, { proposal: { summary: '', details: det } })])).steps[0];
+  assert(empty.issues.some(i => i.code === 'NO_STRUCTURED_CHANGE') && empty.diff.changeType === 'NO_CHANGE' && sameNow.diff.changeType === 'REUSE' && sameNow.diff.human.some(h => /変更不要/.test(h)) && !sameNow.issues.some(i => i.code === 'NO_STRUCTURED_CHANGE'),
+    `F32: 値の欠落（条件式が空）と変更不要（条件式が今と同じ）を分ける: ${JSON.stringify({ empty: [empty.diff.changeType, empty.issues.map(i => i.code)], same: [sameNow.diff.changeType, sameNow.issues.map(i => i.code)] })}`);
 
   // F33: 「申請する」の遷移先を新しいステータスへ変えると、既存の「承認待ち」へ進むアクションが無くなる（実機では指摘が無かった）
   const orphan = plan([
     statusStep('P1', '部長承認待ち'),
-    step('P2', 'UPDATE_PROCESS', 'PROCESS_ACTION', '申請する', { name: '申請する', from: '未処理', to: '部長承認待ち', changeKind: 'ACTION_CONDITION' }, { dependsOn: ['P1'] }),
+    //   2026-10-18: 遷移先だけを変える手順なので changeKind は ACTION_TRANSITION（前の固定データは ACTION_CONDITION で条件式が無く、変更の種類の値の欠落になる）
+    step('P2', 'UPDATE_PROCESS', 'PROCESS_ACTION', '申請する', { name: '申請する', from: '未処理', to: '部長承認待ち', changeKind: 'ACTION_TRANSITION' }, { dependsOn: ['P1'] }),
     step('P3', 'ADD_PROCESS_ACTION', 'PROCESS_ACTION', '承認する（部長）', { name: '承認する（部長）', from: '部長承認待ち', to: '完了' }, { dependsOn: ['P1'] }),
   ]);
   const w = reviewOf(orphan).warnings.find(x => x.code === 'STATUS_ORPHANED');

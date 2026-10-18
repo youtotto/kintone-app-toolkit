@@ -257,7 +257,9 @@ await section(async () => {
     K.mkStep('P3', 'ADD_PROCESS_ACTION', 'PROCESS_ACTION', '部長承認を省いて承認する', { name: '部長承認を省いて承認する', from: '承認待ち', to: '承認済み', filterCond: 'amount < "100"' }, { title: '100円未満は部長承認を省く' }),
     K.mkStep('P4', 'ADD_REMINDER', 'REMINDER', '承認の期限', { name: '承認の期限', timingField: '申請日', daysLater: 7 }, { title: '承認の期限（7 営業日）を知らせる' })];
   const planImpl = (args) => ({ plan: { goal: args.goal, assessment: { summary: '承認待ちの一覧を追加します。' }, steps: [step, ...routeSteps], customizations: [], provisionals: [], questions: [], unknowns: [], impact: [], solution: 'STANDARD' }, ctx: null, gatewayPlan: null, turn: { reply: '一覧を追加する計画を作りました。', requirementOps: [], utteranceCoverage: [] },
-    review: { base: { baseVersion: '1', env: 'preview', ok: true, fingerprint: 'fp-1', revision: { preview: '10' } }, steps: [{ stepId: 'P1', status: 'VALID', safety: 'SAFE', diff: { before: null, after: { name: '承認待ち一覧', filterCond: 'ステータス in ("承認待ち")' }, human: ['＋ 一覧「承認待ち一覧」（条件: ステータス in ("承認待ち")）'] }, issues: [] }], executionReadiness: { safeSteps: ['P1', 'P2', 'P3', 'P4'], reviewSteps: [], blockedSteps: [], planOnlySteps: [] }, warnings: [] } });
+    //   2026-10-18: 最終案の判定は設定の手順の反映の分類（手順ごとの確認の結果が要る）も見るので、偽の確認の結果も計画のすべての手順を持つ（製品の確認はすべての手順を確かめる。
+    //   前の素材は P1 だけで、P2〜P4 は「確認の結果が無い」で反映できない手順になる）
+    review: { base: { baseVersion: '1', env: 'preview', ok: true, fingerprint: 'fp-1', revision: { preview: '10' } }, steps: [{ stepId: 'P1', status: 'VALID', safety: 'SAFE', diff: { before: null, after: { name: '承認待ち一覧', filterCond: 'ステータス in ("承認待ち")' }, human: ['＋ 一覧「承認待ち一覧」（条件: ステータス in ("承認待ち")）'] }, issues: [] }, ...routeSteps.map(s => ({ stepId: s.id, status: 'VALID', safety: 'SAFE', spec: JSON.parse(JSON.stringify(s.spec)), diff: { before: null, after: JSON.parse(JSON.stringify(s.spec)), human: [`＋ ${s.title}`] }, issues: [] }))], executionReadiness: { safeSteps: ['P1', 'P2', 'P3', 'P4'], reviewSteps: [], blockedSteps: [], planOnlySteps: [] }, warnings: [] } });
   const x = K.makeConvC({ planImpl });
   await K.adoptC(x);
   const v = x.c.activePlan(), fin = v && v.final;
@@ -371,8 +373,11 @@ await section(async () => {
   const line2 = lineOf('100万円未満は課長承認にしたい', '100万円未満'), line1 = lineOf('100万円以上は部長承認', '100万円以上');
   //   簡素化 C: 要件の文の金額と比較の向き（100万円以上・未満）を計画の条件式の中で探して欠落とする判定は差し戻した。R1・R2 は計画に対応づけていないので確認の限界（止めない）。
   //   条件式そのもの（kintone で評価できるか・分岐の重なりと漏れ）は、計画の確認（KTPlanReview）が今までどおり確かめる
-  assert([dP2, dP3, dP2r].every(xx => FS.readyOf(xx.c.activePlan()) === true && !blockTexts(xx).some(t => t === line1 || t === line2) && UNCONF_SUM.test(vis(R.rightHtml(xx)))),
-    `D9-6: 金額の境界の文からの欠落では止めない（確認の限界）: ${JSON.stringify({ P2: blockTexts(dP2), P3: blockTexts(dP3), P2remap: blockTexts(dP2r) })}`);
+  //   2026-10-18: 最終案の判定が設定の手順の反映の分類も見るようになったので、P2 を外した変形は、P2 に依存する手順（部長向けの申請アクション）と孤立するステータス・
+  //   そこから出るアクションが構造で止まる（計画の確認の依存と分岐。文からの判定ではない）。文の金額の境界からの欠落の文で止めないことは同じ
+  const structuralOnly = (xx) => (FS.readinessOf(xx.c.activePlan()).reasons || []).every(r => r.kind === 'blocked');
+  assert([dP2, dP3, dP2r].every(xx => !blockTexts(xx).some(t => t === line1 || t === line2) && UNCONF_SUM.test(vis(R.rightHtml(xx))) && structuralOnly(xx)) && FS.readyOf(dP3.c.activePlan()) === true && [dP2, dP2r].every(xx => FS.readyOf(xx.c.activePlan()) === false && blockTexts(xx).some(t => /依存する P2 が実行されない/.test(t))),
+    `D9-6: 金額の境界の文からの欠落では止めない（確認の限界）。P2 を外した変形を止めるのは計画の構造（依存する手順が無い）だけ: ${JSON.stringify({ P2: blockTexts(dP2), P3: blockTexts(dP3), P2remap: blockTexts(dP2r) })}`);
   //   (7) 2026-10-16（判定の責任範囲を絞る）: 明確な欠落と確認材料不足を分ける。構造で確かめられる欠落だけ反映を止め、確認材料不足は止めず計画の自動の見直しもしない
   //   a. ステータス名だけ（「承認済みになったとき申請者に通知する」）→ 確認材料不足（値が無い。通知の語から設定の種類を求めない）→ 反映は止めず、右に中立の 1 文
   const setR = (id, o) => (r) => (r.id === id ? { ...r, ...o } : r);

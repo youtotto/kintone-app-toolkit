@@ -179,6 +179,32 @@ console.log('\n--- §N9 計画の版の反映済み（JavaScript の登録の後
   assert(vReal.status === 'ACTIVE', `本当に変える設定の手順がまだ反映されていなければ反映済みにしない: ${vReal.status}`);
 }
 
+console.log('\n--- §N10 最終案の判定: 値の無い手順と、それで止まる手順があれば反映できない（2026-10-18）---');
+{
+  //   2026-10-18（説明文から設定値を補わない）: 最終案の判定は、確認の結果の BLOCKED だけでなく設定の手順の反映の分類（値の無い NO_VALUES・依存や分岐で止まる手順）も見る。
+  //   前は、値の無い手順と、それに依存して止まる手順があっても「この内容で反映できます」としていた（ほかの手順だけを反映する）
+  const FS = require('./helpers/final-state.js');
+  const draftRaw = (u) => ({ reply: `「${u}」を実現する変更案にできます。`, intent: 'propose', proposal: { behaviors: [{ text: u, origin: 'user' }], assumptions: [], decisions: [], approach: { standard: ['プロセス管理と一覧'], js: [] }, cannot: [] }, turn: { ops: [], answers: [], requirementOps: [] } });
+  const finalOf = async (p) => {
+    const rv = reviewOf(p);
+    const svc = { conversationFeatures: () => ['requirements', 'stream', 'proposal'], async propose(args) { return { ok: true, proposal: K.normalized(draftRaw(args.utterance)), ctx: { facts: [] } }; }, async plan() { return { plan: clone(p), ctx: null, review: clone(rv) }; }, async ask() { return { ok: true, answer: { answer: 'a' } }; } };
+    const c = KTAiConversation.create({ services: svc });
+    await c.send('100万円未満の申請の条件を変えて、一覧も足したい'); await c.send('これで進めて');
+    return c.activePlan();
+  };
+  const view = () => step('V1', 'ADD_VIEW', 'VIEW', '新しい一覧', { name: '新しい一覧', fields: ['amount'] }, { dependsOn: ['P1'] });
+  //   条件の変更（changeKind ACTION_CONDITION）なのに条件式が spec に無い（説明文にだけ書いた）P1 と、P1 に依存する一覧
+  const noVal = step('P1', 'UPDATE_PROCESS', 'PROCESS_ACTION', '申請する', { name: '申請する', from: '未処理', changeKind: 'ACTION_CONDITION' }, { proposal: { summary: '申請するを 100 万円未満だけにする', details: [{ key: '条件', value: 'amount < "1000000"' }] } });
+  const a = await finalOf(plan([noVal, view()]));
+  const rdA = FS.readinessOf(a);
+  assert(a.final && rdA.ready === false && rdA.reasons.some(r => r.kind === 'no-values') && rdA.reasons.some(r => r.kind === 'blocked') && (a.final.cannot || []).some(x => x.kind === 'no-values' && /変更の値が計画に無い手順/.test(x.text)) && (a.final.cannot || []).some(x => x.kind === 'blocked' && /依存する P1/.test(x.text)),
+    `値の無い手順（説明文にだけ条件を書いた）と、それに依存して止まる手順があれば、最終案は反映できない（理由と「実現できない点」に出す）: ${JSON.stringify({ reasons: rdA.reasons.map(r => r.kind), cannot: (a.final.cannot || []).map(x => x.kind) })}`);
+  //   同じ形で、spec の条件式が今の条件と同じなら変更不要（値の欠落ではない）→ 依存する一覧も反映でき、最終案は反映できる
+  const same = step('P1', 'UPDATE_PROCESS', 'PROCESS_ACTION', '申請する', { name: '申請する', from: '未処理', filterCond: 'amount < "1000000"', changeKind: 'ACTION_CONDITION' }, { proposal: { summary: '申請するを 100 万円未満だけにする', details: [{ key: '条件', value: 'amount < "1000000"' }] } });
+  const b = await finalOf(plan([same, view()]));
+  assert(b.final && FS.readyOf(b) === true && !(b.final.cannot || []).some(x => ['no-values', 'blocked'].includes(x.kind)), `spec の値が今と同じ手順（変更不要）なら、依存する手順も反映でき最終案は反映できる: ${JSON.stringify(FS.readinessOf(b).reasons)}`);
+}
+
 console.log(`\n${state.failed ? 'FAILED' : 'ALL PASSED'}: ${state.passed} passed / ${state.failed} failed`);
 process.exit(state.failed ? 1 : 0);
 })().catch(e => { console.error(e); process.exit(1); });

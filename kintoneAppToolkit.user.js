@@ -8120,11 +8120,10 @@
       CUSTOMIZATION_REQUIRED: { simulate: false, validate: false, defaultSafety: 'PLAN_ONLY', execution: 'NONE', changeType: 'NO_CHANGE', kind: 'JS' },
     });
     /** 高リスクの変更（安全分類を REVIEW_REQUIRED に上げ、status は NEEDS_CONFIRMATION） */
-    const HIGH_RISK = ['TYPE_CHANGE', 'OPTIONS_REMOVED', 'EXISTING_PATH_RESTRICTED', 'ACL_CHANGE', 'LOOKUP_MAPPING_OVERWRITE', 'NOTIFICATION_EVENTS_REMOVED', 'NOTIFICATION_RECIPIENTS_REMOVED', 'REMINDER_BASE_FIELD_CHANGE', 'REMINDER_RECIPIENTS_REMOVED', 'EXECUTABLE_USER_CHANGE', 'APP_ACTION_ENTITIES_REMOVED', 'STEP_MULTIPLE_SETTINGS'];
+    const HIGH_RISK = ['TYPE_CHANGE', 'OPTIONS_REMOVED', 'EXISTING_PATH_RESTRICTED', 'ACL_CHANGE', 'LOOKUP_MAPPING_OVERWRITE', 'NOTIFICATION_EVENTS_REMOVED', 'NOTIFICATION_RECIPIENTS_REMOVED', 'REMINDER_BASE_FIELD_CHANGE', 'REMINDER_RECIPIENTS_REMOVED', 'EXECUTABLE_USER_CHANGE', 'APP_ACTION_ENTITIES_REMOVED'];
     const KINTONE_FIELD_TYPES = ['SINGLE_LINE_TEXT', 'MULTI_LINE_TEXT', 'RICH_TEXT', 'NUMBER', 'CALC', 'CHECK_BOX', 'RADIO_BUTTON', 'DROP_DOWN', 'MULTI_SELECT', 'DATE', 'TIME', 'DATETIME', 'FILE', 'LINK', 'USER_SELECT', 'ORGANIZATION_SELECT', 'GROUP_SELECT', 'LOOKUP', 'REFERENCE_TABLE', 'SUBTABLE', 'GROUP', 'SPACER', 'LABEL', 'HR'];
     const OPTION_TYPES = ['CHECK_BOX', 'RADIO_BUTTON', 'DROP_DOWN', 'MULTI_SELECT'];
     const NOTIFY_EVENTS = ['recordAdded', 'recordEdited', 'commentAdded', 'statusChanged', 'fileImported'];
-    const EVENT_SYNONYMS = [['recordAdded', ['レコード追加', '追加', '登録']], ['recordEdited', ['レコード編集', '編集', '更新', '変更']], ['commentAdded', ['コメント']], ['statusChanged', ['ステータス変更', 'ステータス']], ['fileImported', ['ファイル', 'インポート']]];
     const RESERVED_CODES = ['レコード番号', '作成者', '作成日時', '更新者', '更新日時', 'ステータス', '作業者', 'カテゴリー'];
     /** プロセス管理（Phase 12）: 作業者の指定形式の語彙（kintone API: ONE = 次のユーザーから作業者を選択 / ALL = 全員 / ANY = 一人）と同義語 */
     const ASSIGNEE_TYPES = ['ONE', 'ALL', 'ANY'];
@@ -8340,38 +8339,11 @@
     const sameEntity = (a, b) => a && b && a.type === b.type && String(a.code ?? '') === String(b.code ?? '');
 
     // ================= step の仕様（spec）の正規化 =================
-    //   Gateway の step.spec（構造化）を優先し、無ければ proposal.details（key / value）を同義語で読む
-    const DETAIL_KEYS = {
-      name: ['name', 'title', 'ステータス名', 'アクション名', '名前', '名称', '通知名', '一覧名', 'タイトル', 'label', 'ラベル', 'フィールド名'],
-      from: ['from', '遷移元'], to: ['to', '遷移先'],
-      filterCond: ['filtercond', 'condition', '条件', '条件式', '絞り込み', '通知条件', 'filter', 'フィルター'],
-      assignees: ['assignee', 'assignees', '作業者'],
-      targets: ['target', 'targets', '通知先', '通知対象', '対象者', 'recipients', '通知対象者'],
-      events: ['events', 'event', 'イベント', '通知イベント', 'trigger', 'タイミング', '通知タイミング'],
-      timingField: ['timingfield', '基準日', '基準フィールド', '基準日フィールド', '日付フィールド', 'basedate', 'basefield'],
-      daysLater: ['dayslater', '日数', 'days', 'offset', '何日前', '日前'],
-      time: ['time', '時刻', '通知時刻'],
-      fields: ['fields', 'フィールド', '表示フィールド', '表示項目', '取得先', 'copyto', 'destination', 'columns'],
-      sort: ['sort', 'ソート', '並び順'],
-      sourceApp: ['sourceapp', '参照元アプリ', '参照元アプリid', 'app', 'relatedapp', '参照アプリ', 'コピー元アプリ', 'マスタ'],
-      keyField: ['keyfield', '参照元フィールド', 'relatedkeyfield', 'key', 'キー', '参照キー'],
-      mappings: ['mappings', 'mapping', '取得項目', 'lookupfields', 'fieldmappings', 'コピー', 'コピー項目'],
-      fieldType: ['type', 'fieldtype', 'フィールドタイプ', '種類', '型'],
-      required: ['required', '必須'],
-      options: ['options', '選択肢', 'choices'],
-      destApp: ['destapp', '作成先アプリ', '作成先', '遷移先アプリ'],
-      accessibility: ['accessibility', '権限', 'アクセス権'],
-      entities: ['entities', '対象', 'ユーザー', 'グループ', '組織', '実行可能ユーザー', 'executableuser'],
-      changeKind: ['changekind', '変更種別'],
-      assigneeType: ['assigneetype', '作業者の指定形式', '指定形式'],
-      // Phase 13: 既存ルックアップへの追加（取得項目 / 選択時に表示するフィールド）。既存の取得項目は消さない語彙
-      addMappings: ['addmappings', '追加する取得項目', '追加取得項目', '取得項目の追加'],
-      addPickerFields: ['addpickerfields', 'pickerfields', 'lookuppickerfields', '選択時に表示するフィールド', '選択時表示フィールド', '選択時に表示'],
-      // Phase 14: アプリアクションの転記（{ srcType: FIELD | RECORD_URL, srcField, destField }）。既存の転記は消さない語彙
-      actionMappings: ['actionmappings', '転記', '転記項目', 'フィールドの関連付け', '関連付け', '追加する転記'],
-    };
+    //   書き込む値は Gateway の step.spec（構造化した値。計画の出力の schema と validate-plan の正規化を通ったもの）だけから作る。
+    //   2026-10-18: proposal.summary / details（説明文）は人が読む説明として扱い、設定の値を読み取らない（以前は spec に無い項目を details の「キー: 値」を
+    //   同義語で読んで補い、「A → B」を取得項目・転記・分岐に分けていた）。spec に値の無い手順は、説明文があっても値の欠落（NO_STRUCTURED_CHANGE → NO_VALUES）
+    const SPEC_KEYS = ['name', 'from', 'to', 'filterCond', 'assignees', 'targets', 'events', 'timingField', 'daysLater', 'time', 'fields', 'sort', 'sourceApp', 'keyField', 'mappings', 'fieldType', 'required', 'options', 'destApp', 'accessibility', 'entities', 'changeKind', 'assigneeType', 'addMappings', 'addPickerFields', 'actionMappings'];
     const actionMappingOf = (m) => { if (!m || typeof m !== 'object') return null; const st = String(m.srcType ?? '').trim().toUpperCase(); const sf = String(m.srcField ?? '').trim(); const df = String(m.destField ?? '').trim(); const isUrl = st === 'RECORD_URL' || (!st && /^(レコード\s*(の)?\s*URL|RECORD_URL)$/i.test(sf)); if (!df && !sf && !isUrl) return null; return { srcType: isUrl ? 'RECORD_URL' : 'FIELD', srcField: isUrl ? null : sf, destField: df }; };
-    const keyOf = (k) => { const n = norm(k); for (const [canon, syn] of Object.entries(DETAIL_KEYS)) if (syn.some(s => n === norm(s) || n.startsWith(norm(s)))) return canon; return null; };
     const splitList = (v) => String(v ?? '').split(/[、,，\/／;；\n]+/).map(s => s.trim()).filter(Boolean);
     /** "担当者(owner)" / "FIELD_ENTITY:owner" / "NEW_FIELD_1（部長承認者）" / "USER:user1" → entity 候補 */
     function parseEntity(text, model, proposedMap) {
@@ -8406,12 +8378,8 @@
       for (const r of model.acl.field) push(r.entities);
       return out;
     }
-    // Phase 20（CX-1 実機）: 説明（details）で同じ項目が違う値で繰り返す = 1 つの手順に複数の設定（「申請する」の分岐 2 組を 1 手順に書いた）
-    const DETAIL_SCALAR_KEYS = ['name', 'from', 'to', 'filterCond', 'timingField', 'daysLater', 'time', 'sort', 'sourceApp', 'keyField', 'fieldType', 'destApp'];
-    const DETAIL_LIST_KEYS = ['assignees', 'targets', 'events', 'fields', 'options', 'entities', 'addPickerFields', 'mappings', 'addMappings', 'actionMappings'];
-    const sameDetailValue = (k, a, b) => (k === 'filterCond' ? normCond(String(a).replace(/^(条件|condition)[:：]\s*/i, '')) === normCond(String(b).replace(/^(条件|condition)[:：]\s*/i, '')) : norm(a) === norm(b));
-    /** @param {object} [notes] 出力: notes.multiple = [{ key, values[] }]（説明に同じ項目が違う値で複数ある。1 つ目だけを spec に使う） */
-    function normalizeSpec(step, model, proposedMap, notes = null) {
+    /** step.spec（構造化した値）だけを正規化する。説明文（proposal）は読まない */
+    function normalizeSpec(step, model, proposedMap) {
       const spec = {};
       const s = step.spec && typeof step.spec === 'object' ? step.spec : null;
       // AI が「なし」「none」「—」などを値として書くことがある（staging E2E で filterCond: "なし"）。空と同じ意味なので捨てる
@@ -8420,7 +8388,7 @@
       const dropPh = (arr) => arr.filter(x => !isPlaceholder(x));
       const put = (k, v) => { if (v == null) return; if (typeof v === 'string' && isPlaceholder(v)) return; if (Array.isArray(v) ? v.length : String(v).trim() !== '') spec[k] = v; };
       if (s) {
-        for (const k of Object.keys(DETAIL_KEYS)) {
+        for (const k of SPEC_KEYS) {
           const v = s[k];
           if (v == null) continue;
           if (k === 'mappings' && Array.isArray(v)) put(k, v.filter(m => m && (m.from || m.to)).map(m => ({ from: String(m.from ?? '').trim(), to: String(m.to ?? '').trim() })));
@@ -8431,32 +8399,6 @@
           else put(k, String(v).trim());
         }
       }
-      // 説明文から読んだ項目（構造化した値が無いもの）。同じ項目の 2 行目以降: 一覧の項目は合わせて使い、1 つの値の項目は違う値なら notes.multiple に返す
-      //   （以前は 2 行目以降を黙って捨て、2 つ目の分岐は検証も表示もされなかった）
-      const fromDetails = new Map();   // canon → 1 つ目の値（説明文の文字列）
-      const multiple = new Map();
-      for (const d of (step.proposal?.details || [])) {
-        const k = keyOf(d.key);
-        if (!k) continue;
-        const again = fromDetails.has(k);
-        if (spec[k] != null && !again) continue;   // 構造化した値を優先
-        // Phase 20（実機）: 構造化した取得項目（mappings / addMappings のどちらか）があれば、説明文から取得項目を作らない
-        //   （説明文の「address → 新規フィールド customer_address」を addMappings として二重に取り込み、コピー先が無いと誤判定した）
-        if (!again && (k === 'mappings' || k === 'addMappings') && (spec.mappings != null || spec.addMappings != null)) continue;
-        const v = String(d.value ?? '').trim();
-        if (!v || isPlaceholder(v)) continue;   // details の「なし」も捨てる（spec で捨てた項目を details から拾い直さない）
-        const cleanRef = (x) => String(x).replace(/^新規(フィールド|項目)\s*/, '').replace(/[（(][^）)]*[）)]\s*$/, '').trim();   // 説明文の飾り（新規フィールド X・X（新規追加））を除く
-        let val;
-        if (k === 'mappings' || k === 'addMappings') val = splitList(v).map(x => { const m = x.match(/^(.+?)\s*(?:→|->|=>|:|：)\s*(.+)$/); return m ? { from: cleanRef(m[1]), to: cleanRef(m[2]) } : { from: cleanRef(x), to: '' }; });
-        else if (k === 'actionMappings') val = splitList(v).map(x => { const m = x.match(/^(.+?)\s*(?:→|->|=>|:|：)\s*(.+)$/); return actionMappingOf(m ? { srcField: m[1].trim(), destField: m[2].trim() } : { srcField: x, destField: '' }); }).filter(Boolean);
-        else if (DETAIL_LIST_KEYS.includes(k)) { val = dropPh(splitList(v)); if (!val.length) continue; }
-        else if (k === 'required') val = /^(true|yes|必須|はい)$/i.test(v) ? true : /^(false|no|任意|いいえ)$/i.test(v) ? false : undefined;
-        else val = v;
-        if (!again) { spec[k] = val; if (spec[k] != null) fromDetails.set(k, v); continue; }
-        if (DETAIL_LIST_KEYS.includes(k)) { const have = new Set(spec[k].map(x => JSON.stringify(x))); spec[k] = [...spec[k], ...val.filter(x => !have.has(JSON.stringify(x)))]; }
-        else if (DETAIL_SCALAR_KEYS.includes(k)) { const vals = multiple.get(k) || [fromDetails.get(k)]; if (!vals.some(x => sameDetailValue(k, x, v))) multiple.set(k, [...vals, v]); }
-      }
-      if (notes && multiple.size) notes.multiple = [...multiple].map(([key, values]) => ({ key, values }));
       // Phase 21（モデル比較の CX-1）: ステータス名の後ろの注釈（「承認待ち（課長承認として再利用）」）を名前として読まない。
       //   注釈つきの名前が実在しなければ、注釈を除いた名前を使う（説明文の飾りで「遷移先ステータスが存在しません（high）」になり、正しい手順が反映できなかった）
       for (const k of ['from', 'to']) {
@@ -8466,7 +8408,9 @@
         const bare = spec[k].replace(/\s*[（(][^（）()]*[）)]\s*$/, '').trim();
         if (bare && bare !== spec[k]) spec[k] = bare;
       }
-      if (spec.events) spec.events = spec.events.map(e => { const n = norm(e); const exact = NOTIFY_EVENTS.find(x => norm(x) === n); if (exact) return exact; const hit = EVENT_SYNONYMS.find(([, syn]) => syn.some(s => n.includes(norm(s)))); return hit ? hit[0] : e; });
+      //   2026-10-18: イベントは語彙（NOTIFY_EVENTS）の表記だけを読む（大文字・空白の違いだけ揃える）。言い換え（「レコード追加」「更新」など）を語の部分一致で
+      //   イベントに読み替えない（語彙外は NOTIFICATION_EVENT_UNKNOWN で要確認・書き込みに使わない）
+      if (spec.events) spec.events = spec.events.map(e => { const n = norm(e); return NOTIFY_EVENTS.find(x => norm(x) === n) || e; });
       if (spec.filterCond) spec.filterCond = String(spec.filterCond).replace(/^(条件|condition)[:：]\s*/i, '');
       // Phase 12: 作業者の指定形式と変更種別は語彙に揃える（AI の自由文を API 値に使わない。語彙外は Review が指摘する）
       if (spec.assigneeType != null) { const t = assigneeTypeOf(spec.assigneeType); spec.assigneeTypeRaw = String(spec.assigneeType); if (t) spec.assigneeType = t; else delete spec.assigneeType; }
@@ -8894,7 +8838,7 @@
           //   正規化して r.spec に入れる（未確定の承認者だけが保留。構造化した spec だけを読み、説明文の details からは作らない）。
           //   1 行「確認してから決める：…」は proposal.summary があるときだけ足す（summary が空なら手順カードの要約が spec から作られるので二重になる。独立レビュー 5）
           if (step.actionType === 'REQUIRE_CONFIRMATION' && step.spec && typeof step.spec === 'object') {
-            const sp = normalizeSpec({ ...step, proposal: { summary: '', details: [] } }, model, proposedMap);
+            const sp = normalizeSpec(step, model, proposedMap);
             if (Object.keys(sp).length) {
               r.spec = sp;
               const det = KTPlanText.specDetails({ ...step, spec: sp }, { data: ctx.data || null });
@@ -8905,15 +8849,9 @@
         }
       }
       if (r.status === STATUS.INVALID) return r;
-      const specNotes = {};
-      const spec = normalizeSpec(step, model, proposedMap, specNotes);
-      // Phase 20（CX-1 実機）: 説明に複数の設定（遷移先・条件の 2 組など）→ 1 組目だけを検証・反映すると残りが黙って消える。手順ごとに分けてもらう
-      if (specNotes.multiple) {
-        const LABEL = { name: '名前', from: '遷移元', to: '遷移先', filterCond: '条件', timingField: '基準日', daysLater: '日数', time: '時刻', sort: '並び順', sourceApp: '参照元アプリ', keyField: 'キー', fieldType: '種類', destApp: 'コピー先アプリ' };
-        const list = specNotes.multiple.map(m => `${LABEL[m.key] || m.key} ${m.values.map(x => `「${x}」`).join(' / ')}`).join('、');
-        issue('STEP_MULTIPLE_SETTINGS', 'high', `この手順の説明に、1 つの手順では表せない複数の設定が書かれています（${list}）。Toolkit は 1 つ目の値だけを検証し、2 つ目以降は検証も反映もしません。設定ごとに手順を分けるよう計画の修正を依頼してください`, { values: specNotes.multiple });
-        if (STATUS_RANK[r.status] < STATUS_RANK[STATUS.NEEDS_CONFIRMATION]) r.status = STATUS.NEEDS_CONFIRMATION;
-      }
+      //   2026-10-18: 書き込む値は構造化した spec だけ（説明文の details は読まない）。以前の「説明に同じ項目が違う値で複数ある」の検出（STEP_MULTIPLE_SETTINGS）は
+      //   説明文の読み取りだったので消した。1 つの手順は 1 つの設定（計画の指示）で、分岐の漏れ・重なりは計画の構造（同じ遷移元のアクションの条件）で確かめる
+      const spec = normalizeSpec(step, model, proposedMap);
       // Phase 20（XA-9 実機）: 別のアプリ（参照元のマスタ等）への変更を、AI が ADD_FIELD 等に destApp を付けて書いた。Toolkit が反映できるのはこのアプリだけで、
       //   そのまま仮適用・反映すると「顧客マスタに追加」の手順がこのアプリに追加される（「自動で反映できる」と表示された）→ 計画のみ（そのアプリで手作業）
       const otherApp = (() => {
@@ -9218,7 +9156,7 @@
           }
           if (r.status === STATUS.INVALID) return r;
           if (!changed && sameAsNow(!!spec.fieldType || typeof spec.required === 'boolean' || !!(spec.name || spec.label), beforeView)) break;
-          if (!changed) { r.diff.changeType = CHANGE.NO_CHANGE; r.diff.before = beforeView; r.diff.after = beforeView; h(`「${f.label}」（${f.code}）: 変更内容を特定できません（proposal の details を確認）`); issue('NO_STRUCTURED_CHANGE', 'medium', '変更内容が構造化されていないため仮適用できません（要確認）'); r.status = STATUS.NEEDS_CONFIRMATION; break; }
+          if (!changed) { r.diff.changeType = CHANGE.NO_CHANGE; r.diff.before = beforeView; r.diff.after = beforeView; h(`「${f.label}」（${f.code}）: 変更内容を特定できません（計画に変更の値がありません）`); issue('NO_STRUCTURED_CHANGE', 'medium', '変更内容が構造化されていないため仮適用できません（要確認）'); r.status = STATUS.NEEDS_CONFIRMATION; break; }
           model.fields[f.code] = after; r.simulated = true;
           r.diff.before = beforeView; r.diff.after = fieldView(after);
           h(`「${f.label}」（${f.code}）`); for (const line of fieldDiffLines(beforeView, r.diff.after)) h(line);
@@ -9296,10 +9234,14 @@
             const beforeAct = clone(act);
             let changed = false;
             const kinds = [];
-            // 複数条件（分岐）が details に並ぶ場合: 最初の条件を既存に適用し、他は新しい遷移として扱う
-            const condDetails = (step.proposal?.details || []).filter(d => keyOf(d.key) === 'filterCond').map(d => String(d.value));
-            const branches = condDetails.map(v => { const m = v.match(/^(.*?)\s*(?:→|->|=>)\s*(.+?)(?:へ遷移|に遷移)?$/); return m ? { cond: m[1].trim(), to: m[2].trim() } : { cond: v.replace(/^(条件|condition)[:：]\s*/i, '').trim(), to: null }; });
-            const primary = branches[0] || (spec.filterCond ? { cond: spec.filterCond, to: spec.to || null } : null);
+            //   2026-10-18: 変更の種類（spec.changeKind）が言う変更の値が spec に無いときは、ほかの項目が今と同じでも変更不要にせず値の欠落にする
+            //   （説明文から補わない。CX-1 の実機の計画は changeKind ACTION_CONDITION で、条件と遷移先を説明文にだけ書いていた）。モデルを変える前に判定する
+            const KIND_VALUE = { ACTION_CONDITION: ['条件の変更', '条件式', !!spec.filterCond], ACTION_TRANSITION: ['遷移の変更', '遷移元・遷移先', !!(spec.to || spec.from)], EXECUTABLE_USER: ['実行可能ユーザーの変更', '実行可能ユーザー', (spec.entities || []).length > 0] };
+            const kv = spec.changeKind ? KIND_VALUE[spec.changeKind] : null;
+            if (kv && !kv[2]) { issue('NO_STRUCTURED_CHANGE', 'medium', `「${act.name}」の${kv[0]}の値（${kv[1]}）が計画にありません（要確認）`); r.status = STATUS.NEEDS_CONFIRMATION; r.diff.changeType = CHANGE.NO_CHANGE; r.diff.before = actionView(beforeAct); r.diff.after = actionView(beforeAct); return r; }
+            //   2026-10-18: 条件と遷移先は spec の filterCond / to だけから作る。以前は説明文（details）の条件の行を「条件 → 遷移先」に分け、1 行目で spec を上書きし、
+            //   2 行目以降を同じアクション名の分岐（BRANCH_ADDED・反映は BRANCH_NOT_SUPPORTED で止める）にしていた。分岐は別の手順（ADD_PROCESS_ACTION）で表す（計画の指示）
+            const primary = spec.filterCond ? { cond: spec.filterCond, to: spec.to || null } : null;
             if (primary && primary.cond && normCond(primary.cond) !== normCond(act.filterCond)) {
               for (const c of condFields(primary.cond, model)) requireField(c, '条件式');
               checkCond(primary.cond, '条件式', 'process');
@@ -9311,7 +9253,7 @@
             }
             const newTo = (primary && primary.to && primary.to !== act.to) ? primary.to : (spec.to && spec.to !== act.to ? spec.to : null);
             if (newTo) { if (!model.process.states.some(s => s.name === newTo)) invalid('UNKNOWN_STATUS', `遷移先ステータス「${newTo}」が存在しません`); else { issue('TRANSITION_CHANGE', 'high', `「${act.name}」の遷移先を「${act.to}」→「${newTo}」に変更します`); act.to = newTo; changed = true; kinds.push('ACTION_TRANSITION'); } }
-            if (spec.from && spec.from !== act.from && !branches.length) { const nf = splitList(spec.from); for (const x of nf) if (!model.process.states.some(s => s.name === x)) invalid('UNKNOWN_STATUS', `遷移元ステータス「${x}」が存在しません`); if (r.status !== STATUS.INVALID) { issue('TRANSITION_CHANGE', 'high', `「${act.name}」の遷移元を「${act.from}」→「${nf.join('/')}」に変更します`); act.from = nf[0]; changed = true; kinds.push('ACTION_TRANSITION'); for (const x of nf.slice(1)) model.process.actions.push({ ...clone(act), from: x, origin: 'proposed', stepId: step.id }); } }
+            if (spec.from && spec.from !== act.from) { const nf = splitList(spec.from); for (const x of nf) if (!model.process.states.some(s => s.name === x)) invalid('UNKNOWN_STATUS', `遷移元ステータス「${x}」が存在しません`); if (r.status !== STATUS.INVALID) { issue('TRANSITION_CHANGE', 'high', `「${act.name}」の遷移元を「${act.from}」→「${nf.join('/')}」に変更します`); act.from = nf[0]; changed = true; kinds.push('ACTION_TRANSITION'); for (const x of nf.slice(1)) model.process.actions.push({ ...clone(act), from: x, origin: 'proposed', stepId: step.id }); } }
             // 実行可能ユーザー（作業者以外でも実行できるアクション）の変更: 変更後の全件で指定。変更は高リスク
             if ((spec.entities || []).length) {
               const execUsers = spec.entities.map(e => parseEntity(e, model, proposedMap)).filter(Boolean);
@@ -9323,16 +9265,8 @@
                 act.executableUsers = execUsers; act.type = 'SECONDARY'; changed = true; kinds.push('EXECUTABLE_USER');
               }
             }
-            for (const b of branches.slice(1)) {
-              if (!b.to) continue;
-              if (!model.process.states.some(s => s.name === b.to)) { invalid('UNKNOWN_STATUS', `遷移先ステータス「${b.to}」が存在しません`); continue; }
-              const add = { name: act.name, from: act.from, to: b.to, filterCond: b.cond, type: 'PRIMARY', executableUsers: [], origin: 'proposed', stepId: step.id };
-              if (model.process.actions.some(a => a.from === add.from && a.to === add.to && normCond(a.filterCond) === normCond(add.filterCond))) { issue('ACTION_DUPLICATE', 'medium', `同じ遷移「${add.from} → ${add.to}」（${add.filterCond}）が既にあります`); continue; }
-              model.process.actions.push(add); changed = true;
-              issue('BRANCH_ADDED', 'medium', `「${act.name}」に分岐を追加: ${add.from} → ${add.to} [${add.filterCond}]`);
-            }
             if (r.status === STATUS.INVALID) return r;
-            if (!changed && sameAsNow(!!(primary && (primary.cond || primary.to)) || !!spec.to || !!spec.from || (spec.entities || []).length > 0 || branches.length > 0, actionView(beforeAct))) return r;
+            if (!changed && sameAsNow(!!(primary && (primary.cond || primary.to)) || !!spec.to || !!spec.from || (spec.entities || []).length > 0, actionView(beforeAct))) return r;
             if (!changed) { issue('NO_STRUCTURED_CHANGE', 'medium', '変更内容が構造化されていないため仮適用できません（要確認）'); r.status = STATUS.NEEDS_CONFIRMATION; r.diff.changeType = CHANGE.NO_CHANGE; r.diff.before = actionView(beforeAct); r.diff.after = actionView(beforeAct); return r; }
             r.simulated = true;
             const branchList = model.process.actions.filter(a => a.name === act.name && a.stepId === step.id).map(a => ({ from: a.from, to: a.to, filterCond: a.filterCond }));
@@ -11557,8 +11491,6 @@
         else if ((r.issues || []).some(i => i.code === 'NO_STRUCTURED_CHANGE')) set(STEP.UNSUPPORTED, 'NO_VALUES', '変更の値が計画にありません（値を会話で伝えるか、kintone の画面で設定してください）');
         else if (r.safety === KTPlanReview.SAFETY.PLAN_ONLY) set(STEP.UNSUPPORTED, 'PLAN_ONLY', step.actionType === 'REQUIRE_CONFIRMATION' ? '確認の手順（承認で確認済み。設定の変更はありません）' : '計画のみ（自動反映の対象外）');
         else if ((r.issues || []).some(i => i.code === 'COND_UNKNOWN_FUNCTION' || i.code === 'COND_NOT_EXPRESSION' || i.code === 'COND_INVALID')) set(STEP.BLOCKED, 'INVALID_CONDITION', '条件式が kintone で評価できないため反映しません（計画の条件式を直してください）');
-        // Phase 20（CX-1 実機）: 説明に複数の設定がある手順は 1 つ目しか検証していない（反映すると残りの設定が消えた計画になる）
-        else if ((r.issues || []).some(i => i.code === 'STEP_MULTIPLE_SETTINGS')) set(STEP.BLOCKED, 'MULTIPLE_SETTINGS_IN_STEP', '1 つの手順に複数の設定が書かれているため反映しません（設定ごとに手順を分けるよう計画を直してください）');
         else if (!cap || !cap.previewExecute || !HANDLERS[step.actionType]) set(STEP.UNSUPPORTED, 'PREVIEW_NOT_SUPPORTED', 'Toolkit からは自動で反映できません（計画のみ）');
         else if (step.actionType === 'ADD_PROCESS_STATUS' && (review?.conflicts || []).some(c => c.code === 'STATUS_UNREACHABLE' && (c.stepIds || []).includes(id))) set(STEP.BLOCKED, 'STATUS_UNREACHABLE', 'このステータスへ遷移するアクションが計画に無く孤立するため反映しません（遷移するアクションの step を足してください）');
         // Phase 20（CX-3 3 回目・実機）: 同じアクションを別の手順も変更する（後の手順が前を上書きする）計画は反映しない
@@ -25947,12 +25879,20 @@
         //   URL 指定の JavaScript（外部サーバー・同一ドメインの URL）への統合は、Toolkit から書き換えられない（登録の準備が EXTERNAL_JS_NOT_WRITABLE で止める）。
         //   C-1 第 3 段で従来のコードのカードの案内を削除したので、最終案の時点で承認できない理由にする（登録の準備で初めて止めない）
         if (entries.some(([, e]) => ktUrlTarget(e))) reasons.push({ kind: 'external', text: 'URL 指定の JavaScript への変更を含みます。外部サーバーのファイルは Toolkit から書き換えられないため、このままでは反映できません（実現できない点を見てください）。' });
-        if (blockedIds.length) reasons.push({ kind: 'blocked', text: `実行できない設定の手順が ${blockedIds.length} 件あります（実現できない点を見てください）。` });
+        //   2026-10-18: 設定の手順の反映の分類（KTPlanExecutor.applyReadiness。承認の欄・右の「反映する内容」と同じ分類）も見る。確認の結果の BLOCKED だけでなく、
+        //   計画の構造で止まる手順（分岐の片方だけ・反映されない手順への依存・孤立するステータス）と、変更の値が計画に無い手順（NO_VALUES。説明文からは補わない）が
+        //   あるときは反映できない（ほかの手順だけを反映して「この内容で反映できます」としない）。手作業の手順（計画のみ・Toolkit が扱わない種類）は今までどおり止めない
+        let cls = [];
+        try { cls = v.review && v.plan && typeof KTPlanExecutor !== 'undefined' && KTPlanExecutor.applyReadiness ? KTPlanExecutor.applyReadiness(v.plan, v.review) : []; } catch (e) { cls = []; }
+        const blockedAll = [...new Set([...blockedIds, ...cls.filter(a => a && a.apply === 'BLOCKED').map(a => a.stepId)])];
+        const noValues = cls.filter(a => a && a.apply === 'MANUAL' && a.reason === 'NO_VALUES').map(a => a.stepId);
+        if (blockedAll.length) reasons.push({ kind: 'blocked', text: `実行できない設定の手順が ${blockedAll.length} 件あります（実現できない点を見てください）。` });
+        if (noValues.length) reasons.push({ kind: 'no-values', text: `変更の値が計画に無い設定の手順が ${noValues.length} 件あります（説明文からは値を補いません）。値を会話で伝えて最終案を作り直してください。` });
         //   2026-10-15（追加の指示 1）: 採用した仮案の項目だけに結び付き、実現する手順・JavaScript を確かめられない・足りない要件を含むときは、その言い方にする（担当が無いものと合わせて数える）
         //   簡素化 C（2026-10-16）: 止めるのは明確な欠落（対応づけた手順・JavaScript が計画から外れた・構造化した効果を持つ JavaScript が無い）だけ
         if (ownerlessDecided.length) reasons.push({ kind: 'ownerless', text: `決まった要件のうち、実現する手順・JavaScript が足りないものが ${ownerlessDecided.length} 件あります（反映を止めている理由を見てください）。足りないものを計画に入れて最終案を作り直すか、その要件を取り消してから反映します。` });
         if (blocking.length) reasons.push({ kind: 'questions', text: `先に決めたいことが ${blocking.length} 件残っています。答えると反映できるようになります。` });
-        return { ready: reasons.length === 0, reasons, blockingReason: reasons.length ? reasons[0].text : '', ownerlessDecided, blockedIds };
+        return { ready: reasons.length === 0, reasons, blockingReason: reasons.length ? reasons[0].text : '', ownerlessDecided, blockedIds: blockedAll, noValueIds: noValues };
       };
       /**
        * §0c.4: 今の判定（最終案を作ったときの Toolkit では作れない customization の一覧を使う）。承認の口・画面の反映を止める理由（承認の欄の準備・
@@ -27414,9 +27354,17 @@
           if (notStartedIds.length) cannot.push({ kind: 'not-started', text: `まだ作っていない JavaScript が ${notStartedIds.length} 件あります（${incomplete.stage === 'plan-auto' ? '計画の自動の見直しを止めた' : '前の JavaScript の生成を止めた'}ため、送っていません）`, next: incomplete.kind === 'budget' ? '上限を見直すまで、続きは送りません。' : '［残りの JavaScript を作る］で作ります（計画は作り直しません。検証済みの JavaScript はそのまま使います）。' });
           for (const u of unsupported) { const why = u.reason ? fix((typeof KTContextUi !== 'undefined' && KTContextUi.CODEGEN_REASON_JA && KTContextUi.CODEGEN_REASON_JA[u.reason]) || u.reason) : ''; cannot.push({ kind: 'unsupported', text: `Toolkit では JavaScript を作れない部分があります: ${cut(fix(u.requirement || ''), 100)}${why ? `（${cut(why, 100)}）` : ''}`, next: '計画で別の方法（標準の設定・運用など）にするか、この部分を外してから最終案を作り直します。' }); }
           // 実行できない手順（BLOCKED）: 手順の名前と理由
+          //   2026-10-18: 設定の手順の反映の分類（承認の欄・右の「反映する内容」と同じ）で止まる手順（分岐の片方だけ・依存・孤立）と、変更の値が計画に無い手順
+          //   （NO_VALUES。説明文からは補わない）も出す（finalReadinessOf が反映できない理由にするものと同じ集まり。理由は分類の文）
+          let ready = []; try { ready = v.review && typeof KTPlanExecutor !== 'undefined' && KTPlanExecutor.applyReadiness ? KTPlanExecutor.applyReadiness(p, v.review) : []; } catch (e) { ready = []; }
+          const stepTitleOf = (id) => { const st = (Array.isArray(p.steps) ? p.steps : []).find(s => s && s.id === id) || {}; return cut(st.title || st.targetRef || '設定の手順', 80); };
           const blockedIds = v.review && v.review.executionReadiness ? (v.review.executionReadiness.blockedSteps || []) : [];
-          const blockedSteps = blockedIds.map(id => { const st = (Array.isArray(p.steps) ? p.steps : []).find(s => s && s.id === id) || {}; const rv = (v.review?.steps || []).find(r => r && r.stepId === id) || {}; const why = (rv.issues || []).map(i => i && i.message).filter(Boolean)[0] || ''; return { id, title: cut(st.title || st.targetRef || '設定の手順', 80), reason: cut(fix(why), 120) }; });
+          const blockedSteps = [
+            ...blockedIds.map(id => { const rv = (v.review?.steps || []).find(r => r && r.stepId === id) || {}; const why = (rv.issues || []).map(i => i && i.message).filter(Boolean)[0] || ''; return { id, title: stepTitleOf(id), reason: cut(fix(why), 120) }; }),
+            ...ready.filter(a => a && a.apply === 'BLOCKED' && !blockedIds.includes(a.stepId)).map(a => ({ id: a.stepId, title: stepTitleOf(a.stepId), reason: cut(fix(a.message || ''), 120) })),
+          ];
           for (const b of blockedSteps) cannot.push({ kind: 'blocked', text: `実行できない手順: ${b.title}${b.reason ? `（${b.reason}）` : ''}`, next: '計画を見直して、この手順を直すか外してから最終案を作り直します。' });
+          for (const a of ready.filter(x => x && x.apply === 'MANUAL' && x.reason === 'NO_VALUES')) cannot.push({ kind: 'no-values', text: `変更の値が計画に無い手順: ${stepTitleOf(a.stepId)}（説明文からは値を補いません）`, next: '値を会話で伝えて、最終案を作り直します。' });
           for (const st of (Array.isArray(p.steps) ? p.steps : []).filter(s => s && s.actionType === 'REQUIRE_CONFIRMATION')) cannot.push({ kind: 'confirm', text: `確認が済むまで反映しない手順: ${cut(st.title || st.targetRef || '', 80)}` });
           for (const u of (Array.isArray(p.unknowns) ? p.unknowns : []).slice(0, 3)) cannot.push({ kind: 'unknown', text: cut(fix(typeof u === 'string' ? u : (u && (u.text || u.description)) || ''), 160) });
           // 追加指示 §4: 対応できないとされた決まった要件は、黙って落とさず実現できない点に出す
@@ -27545,7 +27493,7 @@
           });
           const scopeOut = { lines: [...new Map(strippedNow.map(s => [`${s.field}|${s.effect}`, `${fieldName(s.field)}を${KT_EFFECT_NEED_JA[s.effect] || s.effect}`])).values()].slice(0, 8), remaining: (v.scopeIssues || []).filter(x => x && x.kind === 'text').length, notice,
             linked: [...linkedRows.values()].slice(0, 8).map(x => `${x.text}（${x.labels.length ? `${x.labels.slice(0, 3).map(l => `「${labeled(l)}」`).join('・')}の` : '決めたことの'}実現として計画が足しました）`), planAdds, candidates };
-          let ready = []; try { ready = v.review && typeof KTPlanExecutor !== 'undefined' && KTPlanExecutor.applyReadiness ? KTPlanExecutor.applyReadiness(p, v.review) : []; } catch (e) { ready = []; }
+          //   設定の手順の反映の分類（ready）は上の「実行できない手順」で作ったものを使う
           const settingSteps = ready.filter(x => x.apply !== 'JS' && x.apply !== 'CONFIRM');
           const impact = { lines: (Array.isArray(p.impact) ? p.impact : []).map(x => cut(labeled(x && (x.description || x.text) || ''), 120)).filter(Boolean).slice(0, 4), settings: { total: settingSteps.length, auto: settingSteps.filter(x => x.apply === 'AUTO').length, blocked: blockedSteps.length }, js: [...entries.map(([cid, e]) => ({ customizationId: cid, file: e.generated?.targetFile || '', strategy: e.generated?.strategy || null, status: e.status, ...(e.status === 'failed' && e.failure && e.failure.stop ? { stopped: true } : {}) })), ...notStartedIds.map(cid => ({ customizationId: cid, file: '', strategy: null, status: 'not-started' })), ...unsupported.map(u => ({ customizationId: u.customizationId, file: '', strategy: u.strategy || null, status: 'unsupported', requirement: cut(u.requirement || '', 80) }))] };
           // 検証の区分（§0c.4）: 機械検査（生成工程の machine ＋ Toolkit の形式確認）/ 必須の動作（構造の有無）/ 動作テスト（隔離環境の模擬）/ 実機は未確認
@@ -27682,7 +27630,7 @@
           const supplements = [...changed.provisionals, ...planAdds, ...candidates, ...(notice ? [notice] : [])].filter((x, i, a) => x && a.indexOf(x) === i);
           //   blockers = 確認できないこと／反映を止めている理由（未解決・未確認・非対応・生成の失敗・実行できない手順・扱いが決まっていない指示・機械検査の block・模擬テストの不合格・
           //   担当が決まっていない決まった要件）。reason と next を保つ。同じ文は重ねない
-          const blockers = cannot.filter(c => ['unresolved', 'not-ready', 'not-run', 'unverified', 'unsupported', 'failed', 'blocked', 'req-unresolved'].includes(c.kind)).map(c => ({ kind: c.kind, text: c.text, next: c.next || '', details: Array.isArray(c.details) ? c.details : [], ...(c.platforms ? { platforms: c.platforms } : {}), ...(c.requirementId ? { requirementId: c.requirementId } : {}) }));
+          const blockers = cannot.filter(c => ['unresolved', 'not-ready', 'not-run', 'unverified', 'unsupported', 'failed', 'blocked', 'no-values', 'req-unresolved'].includes(c.kind)).map(c => ({ kind: c.kind, text: c.text, next: c.next || '', details: Array.isArray(c.details) ? c.details : [], ...(c.platforms ? { platforms: c.platforms } : {}), ...(c.requirementId ? { requirementId: c.requirementId } : {}) }));
           //   レビュー 9（2026-10-14）: 重複は text 全体の一致か代表条件の id（caseId）の一致で見る（先頭 30 字の部分一致はしない）
           const hasText = (t) => blockers.some(b => b.text === t);
           const hasCase = (id) => !!id && blockers.some(b => b.caseId && b.caseId === id);
@@ -29243,8 +29191,8 @@
       //   2026-10-07（有料確認）: 確認待ちの手順でも決まっている条件・日数・遷移（spec）があれば「（条件 …・タイミング …）」で添える（未確定の承認者だけが保留）
       const confirmSteps = uniq((p.steps || []).filter(st => !st.alternativeId && st.actionType === 'REQUIRE_CONFIRMATION').map(st => {
         const title = plainText(st.title || KTPlanText.stepSummary(st, { customizations: p.customizations || [] }));
-        // normalizeSpec（プレースホルダ「なし」を落とす。説明文の details からは作らない）を通した spec から（Review が正規化済みならそれ）
-        const sp = reviewOf(st.id)?.spec || KTPlanReview.normalizeSpec({ ...st, proposal: { summary: '', details: [] } }, null, new Map());
+        // normalizeSpec（プレースホルダ「なし」を落とす。説明文の details は読まない）を通した spec から（Review が正規化済みならそれ）
+        const sp = reviewOf(st.id)?.spec || KTPlanReview.normalizeSpec(st, null, new Map());
         const det = KTPlanText.specDetails({ ...st, spec: sp });
         return ui(det.length ? `${title}（${det.map(d => `${d.key} ${d.value}`).join('・')}）` : title);
       }));
@@ -30597,8 +30545,7 @@
           const isStatus = (code) => (fields[code] ? fields[code].type === 'STATUS' : KTQueryCheck.SYSTEM_CODES[code] === 'STATUS');
           if (qc.ok && qc.conds.length && qc.conds.every(c => c.op === 'in' && isStatus(c.field)) && qc.logical !== 'or') {
             st.spec.events = [];
-            // 説明文（details）の「イベント: statusChanged」も外す（Review は構造化した値が空だと説明文から取り込むため。実機で正規化が戻された）
-            if (st.proposal && Array.isArray(st.proposal.details)) st.proposal.details = st.proposal.details.filter(d => !(d && /^(events?|イベント|通知イベント|trigger|タイミング|通知タイミング)$/i.test(String(d.key ?? '').trim())));
+            //   2026-10-18: 確認（Review）は説明文（details）から値を取り込まなくなったので、説明文の「イベント: statusChanged」の行は書き換えない（人が読む説明のまま）
             st.toolkitNotes = [...(Array.isArray(st.toolkitNotes) ? st.toolkitNotes : []), { code: 'NOTIFICATION_EVENTS_DROPPED', message: `イベント（statusChanged: ステータスの更新）と条件式「${st.spec.filterCond}」の両方が書かれていました。そのステータスになったときに届く「レコードの条件通知」として扱います（イベントは外しました）` }];
           }
         }

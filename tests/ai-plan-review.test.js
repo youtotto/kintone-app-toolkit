@@ -53,7 +53,7 @@ console.log('\n--- 1. Before model / Action Catalog ---');
 
 console.log('\n--- 2. Field ---');
 {
-  const r = review(plan([step('P1', 'ADD_FIELD', 'PROPOSED_FIELD', 'NEW_FIELD_1', [['フィールドタイプ', 'DATE']])], [pf('NEW_FIELD_1', '契約終了日', 'contract_end', 'DATE')]));
+  const r = review(plan([step('P1', 'ADD_FIELD', 'PROPOSED_FIELD', 'NEW_FIELD_1', [], { spec: { fieldType: 'DATE' } })], [pf('NEW_FIELD_1', '契約終了日', 'contract_end', 'DATE')]));
   const s = st(r, 'P1');
   assert(s.status === 'VALID' && s.safety === 'SAFE' && s.diff.changeType === 'ADD' && s.diff.target.id === 'contract_end' && s.diff.before === null && s.diff.after.type === 'DATE' && s.diff.human[0].includes('＋ 新規フィールド') && s.diff.human.includes('衝突なし'), 'ADD_FIELD normal: VALID / SAFE / ADD / human diff');
   assert(r.simulation.after.fields.contract_end && !INPUTS.data.fields.contract_end && JSON.stringify(INPUTS.data) === SNAPSHOT, 'After モデルに追加され、DATA は不変');
@@ -64,12 +64,12 @@ console.log('\n--- 2. Field ---');
   assert(st(l, 'P1').status !== 'INVALID' && codes(st(l, 'P1')).includes('LABEL_DUPLICATE'), 'label duplicate → 警告（追加は可能）');
   const reuse = review(plan([step('P1', 'ADD_FIELD', 'PROPOSED_FIELD', 'NEW_FIELD_1')], [pf('NEW_FIELD_1', '部長承認者', 'manager_approver', 'USER_SELECT')]));
   assert(st(reuse, 'P1').status === 'WARNING' && codes(st(reuse, 'P1')).includes('POSSIBLE_EXISTING_REUSE') && reuse.warnings.some(w => w.code === 'POSSIBLE_EXISTING_REUSE' && w.message.includes('承認者') && w.detail.existing === 'approver'), 'Proposal necessity: 既存「承認者」の再利用候補を Toolkit 側から指摘');
-  const u = review(plan([step('P1', 'UPDATE_FIELD', 'FIELD', 'ghost', [['必須', 'true']])]));
+  const u = review(plan([step('P1', 'UPDATE_FIELD', 'FIELD', 'ghost', [], { spec: { required: true } })]));
   assert(st(u, 'P1').status === 'INVALID' && codes(st(u, 'P1')).includes('UNKNOWN_FIELD'), 'UPDATE_FIELD nonexistent → INVALID');
-  const t = review(plan([step('P1', 'UPDATE_FIELD', 'FIELD', 'amount', [['型', 'SINGLE_LINE_TEXT'], ['必須', 'true']])]));
+  const t = review(plan([step('P1', 'UPDATE_FIELD', 'FIELD', 'amount', [], { spec: { fieldType: 'SINGLE_LINE_TEXT', required: true } })]));
   const ts = st(t, 'P1');
   assert(ts.status === 'NEEDS_CONFIRMATION' && ts.safety === 'REVIEW_REQUIRED' && codes(ts).includes('TYPE_CHANGE') && codes(ts).includes('REQUIRED_CHANGE') && ts.diff.before.type === 'NUMBER' && ts.diff.after.type === 'SINGLE_LINE_TEXT' && ts.diff.human.some(h => h.includes('種類: NUMBER → SINGLE_LINE_TEXT')) && ts.diff.human.some(h => h.includes('必須: false → true')) && t.summary.counts.highRisk === 1, 'type change: 高リスク・Before/After は変更属性だけ');
-  const o = review(plan([step('P1', 'UPDATE_FIELD', 'FIELD', 'status_select', [['選択肢', 'A, B']])]), (() => { const i = buildInputs(); i.data.fields.status_select = { type: 'DROP_DOWN', code: 'status_select', label: '区分', options: { A: { label: 'A', index: '0' }, B: { label: 'B', index: '1' }, C: { label: 'C', index: '2' } } }; const fieldsN = KTDeps.normalizeFields(i.data.fields); i.deps = KTDeps.buildDependencyData(i.data, fieldsN); return i; })());
+  const o = review(plan([step('P1', 'UPDATE_FIELD', 'FIELD', 'status_select', [], { spec: { options: ['A', 'B'] } })]), (() => { const i = buildInputs(); i.data.fields.status_select = { type: 'DROP_DOWN', code: 'status_select', label: '区分', options: { A: { label: 'A', index: '0' }, B: { label: 'B', index: '1' }, C: { label: 'C', index: '2' } } }; const fieldsN = KTDeps.normalizeFields(i.data.fields); i.deps = KTDeps.buildDependencyData(i.data, fieldsN); return i; })());
   assert(codes(st(o, 'P1')).includes('OPTIONS_REMOVED') && st(o, 'P1').issues.find(i => i.code === 'OPTIONS_REMOVED').message.includes('C'), '選択肢削除 → OPTIONS_REMOVED（高リスク）');
   const reuseStep = review(plan([step('P1', 'REUSE_FIELD', 'FIELD', 'approver', [], { confidence: 'NEEDS_CONFIRMATION' })]));
   assert(st(reuseStep, 'P1').diff.changeType === 'REUSE' && st(reuseStep, 'P1').status === 'NEEDS_CONFIRMATION' && codes(st(reuseStep, 'P1')).includes('MEANING_UNCONFIRMED'), 'REUSE_FIELD: 変更なし・意味は未確認');
@@ -77,29 +77,29 @@ console.log('\n--- 2. Field ---');
 
 console.log('\n--- 3. Notification / Reminder ---');
 {
-  const uniq = review(plan([step('P1', 'ADD_NOTIFICATION', 'NOTIFICATION', '担当者設定通知', [['通知先', 'owner'], ['条件', 'owner not in ("")']])]));
+  const uniq = review(plan([step('P1', 'ADD_NOTIFICATION', 'NOTIFICATION', '担当者設定通知', [], { spec: { targets: ['owner'], filterCond: 'owner not in ("")' } })]));
   const us = st(uniq, 'P1');
   assert(us.status === 'VALID' || us.status === 'WARNING', 'unique notification: 追加できる');
-  const exact = review(plan([step('P1', 'ADD_NOTIFICATION', 'NOTIFICATION', '高額案件', [['通知先', 'user1, approver, owner_org'], ['条件', 'amount >= "1000000"']])]));
+  const exact = review(plan([step('P1', 'ADD_NOTIFICATION', 'NOTIFICATION', '高額案件', [], { spec: { targets: ['user1', 'approver', 'owner_org'], filterCond: 'amount >= "1000000"' } })]));
   const es = st(exact, 'P1');
   assert(es.status === 'NEEDS_CONFIRMATION' && codes(es).includes('DUPLICATE') && es.issues.find(i => i.code === 'DUPLICATE').existing.title === '高額案件の登録' && exact.conflicts.some(c => c.code === 'DUPLICATE' && c.stepIds.includes('P1')), 'exact duplicate: 既存「高額案件の登録」と同一（USER:user1 は既存設定から種別を補完）→ DUPLICATE / 競合');
-  const sim = review(plan([step('P1', 'ADD_NOTIFICATION', 'NOTIFICATION', '承認者通知', [['通知先', 'approver'], ['条件', 'amount >= "1000000"']])]));
+  const sim = review(plan([step('P1', 'ADD_NOTIFICATION', 'NOTIFICATION', '承認者通知', [], { spec: { targets: ['approver'], filterCond: 'amount >= "1000000"' } })]));
   const ss = st(sim, 'P1');
   assert(ss.status === 'WARNING' && codes(ss).includes('POSSIBLE_DUPLICATE') && ss.safety === 'REVIEW_REQUIRED', 'possible duplicate: 通知先が重なり条件が同じ → POSSIBLE_DUPLICATE');
-  const unk = review(plan([step('P1', 'ADD_NOTIFICATION', 'NOTIFICATION', 'x', [['通知先', 'NEW_FIELD_9']])]));
+  const unk = review(plan([step('P1', 'ADD_NOTIFICATION', 'NOTIFICATION', 'x', [], { spec: { targets: ['NEW_FIELD_9'] } })]));
   assert(st(unk, 'P1').status === 'INVALID' && codes(st(unk, 'P1')).includes('PROPOSED_FIELD_NOT_APPLIED'), '通知先の新規フィールドが未追加 → INVALID');
-  const rem = review(plan([step('P1', 'ADD_REMINDER', 'REMINDER', '期限前日', [['基準日', 'due_date'], ['日数', '-1'], ['通知先', 'owner, owner_group, user1'], ['条件', 'amount > "0"']])]));
+  const rem = review(plan([step('P1', 'ADD_REMINDER', 'REMINDER', '期限前日', [], { spec: { timingField: 'due_date', daysLater: '-1', targets: ['owner', 'owner_group', 'user1'], filterCond: 'amount > "0"' } })]));
   assert(st(rem, 'P1').status === 'NEEDS_CONFIRMATION' && codes(st(rem, 'P1')).includes('DUPLICATE'), 'reminder duplicate（基準日・日数・通知先・条件が一致）');
-  const rem2 = review(plan([step('P1', 'ADD_REMINDER', 'REMINDER', '期限30日前', [['基準日', '期限'], ['日数', '-30'], ['時刻', '09:00'], ['通知先', '担当者']])]));
+  const rem2 = review(plan([step('P1', 'ADD_REMINDER', 'REMINDER', '期限30日前', [], { spec: { timingField: '期限', daysLater: '-30', time: '09:00', targets: ['担当者'] } })]));
   const r2 = st(rem2, 'P1');
   assert(r2.status === 'WARNING' && codes(r2).includes('POSSIBLE_DUPLICATE') && r2.diff.after.timing.code === 'due_date' && r2.diff.after.timing.daysLater === '-30' && r2.diff.after.targets[0].code === 'owner', 'reminder: ラベル（期限・担当者）で解決・既存と類似');
-  const remBad = review(plan([step('P1', 'ADD_REMINDER', 'REMINDER', 'x', [['基準日', 'amount'], ['日数', '-1'], ['通知先', 'owner']])]));
+  const remBad = review(plan([step('P1', 'ADD_REMINDER', 'REMINDER', 'x', [], { spec: { timingField: 'amount', daysLater: '-1', targets: ['owner'] } })]));
   assert(st(remBad, 'P1').status === 'INVALID' && codes(st(remBad, 'P1')).includes('REMINDER_FIELD_TYPE'), 'reminder: 基準が日付型でない → INVALID');
 }
 
 console.log('\n--- 4. Process ---');
 {
-  const add = review(plan([step('P1', 'ADD_PROCESS_STATUS', 'PROCESS_STATUS', '部長承認待ち', [['作業者', 'approver']]), step('P2', 'ADD_PROCESS_ACTION', 'PROCESS_ACTION', '部長へ', [['遷移元', '承認待ち'], ['遷移先', '部長承認待ち'], ['条件', 'amount >= "1000000"']], { dependsOn: ['P1'] }), step('P3', 'ADD_PROCESS_ACTION', 'PROCESS_ACTION', '部長承認', [['遷移元', '部長承認待ち'], ['遷移先', '完了']], { dependsOn: ['P1'] })]));
+  const add = review(plan([step('P1', 'ADD_PROCESS_STATUS', 'PROCESS_STATUS', '部長承認待ち', [], { spec: { assignees: ['approver'] } }), step('P2', 'ADD_PROCESS_ACTION', 'PROCESS_ACTION', '部長へ', [], { spec: { from: '承認待ち', to: '部長承認待ち', filterCond: 'amount >= "1000000"' }, dependsOn: ['P1'] }), step('P3', 'ADD_PROCESS_ACTION', 'PROCESS_ACTION', '部長承認', [], { spec: { from: '部長承認待ち', to: '完了' }, dependsOn: ['P1'] })]));
   assert(st(add, 'P1').status === 'NEEDS_CONFIRMATION' && st(add, 'P1').diff.changeType === 'ADD' && add.simulation.after.process.states.length === 4 && add.simulation.after.process.actions.length === 5, 'add status / add action: After に反映・プロセス変更は確認');
   assert(add.simulation.process.changed && add.simulation.process.mermaid.after.includes('部長承認待ち') && add.simulation.process.mermaid.after.includes('==>') && add.simulation.process.mermaid.before.split('\n').length < add.simulation.process.mermaid.after.split('\n').length && /」 ≧/.test(add.simulation.process.mermaid.after) && !add.simulation.process.mermaid.after.includes('amount ≧'), 'Process Mermaid: Before / After・新規遷移を強調・比較演算子を全角に・条件のフィールドは名前で出す（C-1 後の仕上げ: フィールドのコードを通常表示に出さない）', add.simulation.process.mermaid.after);
   assert(!add.conflicts.some(c => c.code === 'STATUS_UNREACHABLE'), '遷移で繋がったステータスは到達可能');
@@ -107,86 +107,84 @@ console.log('\n--- 4. Process ---');
   assert(codes(ov).includes('ACTION_CONDITION_OVERLAP') && ov.issues.find(i => i.code === 'ACTION_CONDITION_OVERLAP').message.includes('承認する'), 'overlapping condition candidate: 同じ遷移元「承認待ち」の既存「承認する」（条件なし）と重なる');
   const dup = review(plan([step('P1', 'ADD_PROCESS_STATUS', 'PROCESS_STATUS', '承認待ち')]));
   assert(st(dup, 'P1').status === 'INVALID' && codes(st(dup, 'P1')).includes('STATUS_DUPLICATE'), 'duplicate status → INVALID');
-  const dupA = review(plan([step('P1', 'ADD_PROCESS_ACTION', 'PROCESS_ACTION', '申請する', [['遷移元', '未処理'], ['遷移先', '承認待ち']])]));
+  const dupA = review(plan([step('P1', 'ADD_PROCESS_ACTION', 'PROCESS_ACTION', '申請する', [], { spec: { from: '未処理', to: '承認待ち' } })]));
   assert(st(dupA, 'P1').status === 'INVALID' && codes(st(dupA, 'P1')).includes('ACTION_DUPLICATE'), 'duplicate action → INVALID');
-  const unk = review(plan([step('P1', 'ADD_PROCESS_ACTION', 'PROCESS_ACTION', 'x', [['遷移元', '存在しない'], ['遷移先', '完了']])]));
+  const unk = review(plan([step('P1', 'ADD_PROCESS_ACTION', 'PROCESS_ACTION', 'x', [], { spec: { from: '存在しない', to: '完了' } })]));
   assert(st(unk, 'P1').status === 'INVALID' && codes(st(unk, 'P1')).includes('UNKNOWN_STATUS'), 'unknown from → INVALID');
   const unreach = review(plan([step('P1', 'ADD_PROCESS_STATUS', 'PROCESS_STATUS', '差戻し')]));
   assert(unreach.conflicts.some(c => c.code === 'STATUS_UNREACHABLE' && c.stepIds.includes('P1')), '到達不能ステータス（遷移するアクションが無い）');
-  const same = review(plan([step('P1', 'ADD_PROCESS_ACTION', 'PROCESS_ACTION', '別名申請', [['遷移元', '未処理'], ['遷移先', '承認待ち'], ['条件', 'amount > "0"']])]));
+  const same = review(plan([step('P1', 'ADD_PROCESS_ACTION', 'PROCESS_ACTION', '別名申請', [], { spec: { from: '未処理', to: '承認待ち', filterCond: 'amount > "0"' } })]));
   assert(codes(st(same, 'P1')).includes('ACTION_SAME_CONDITION') && same.conflicts.some(c => c.code === 'ACTION_SAME_CONDITION'), '同じ遷移元・同じ条件のアクション → ACTION_SAME_CONDITION');
-  const restrict = review(plan([step('P1', 'UPDATE_PROCESS', 'PROCESS_ACTION', '承認する', [['条件', 'amount < "1000000"']])]));
+  const restrict = review(plan([step('P1', 'UPDATE_PROCESS', 'PROCESS_ACTION', '承認する', [], { spec: { filterCond: 'amount < "1000000"' } })]));
   const rs = st(restrict, 'P1');
   assert(rs.status === 'NEEDS_CONFIRMATION' && codes(rs).includes('EXISTING_PATH_RESTRICTED') && rs.issues.find(i => i.code === 'EXISTING_PATH_RESTRICTED').message.includes('すべて') && rs.diff.before.filterCond === '' && rs.diff.after.filterCond === 'amount < "1000000"' && rs.diff.human.some(h => h.startsWith('Before:')) && rs.diff.human.some(h => h.startsWith('After:')) && restrict.summary.counts.highRisk === 1, 'existing action condition restriction: 条件なし → 条件あり は EXISTING_PATH_RESTRICTED（高リスク・Before/After）');
-  const branch = review(plan([step('P1', 'UPDATE_PROCESS', 'PROCESS_ACTION', '申請する', [['条件', 'amount < 1000000 → 承認待ちへ遷移'], ['条件', 'amount >= 1000000 → 部長承認待ちへ遷移']])]));
-  assert(st(branch, 'P1').status === 'INVALID' && codes(st(branch, 'P1')).includes('UNKNOWN_STATUS'), '分岐先のステータスが無い → INVALID（dependsOn 不足の検出）');
-  const branch2 = review(plan([step('P0', 'ADD_PROCESS_STATUS', 'PROCESS_STATUS', '部長承認待ち'), step('P1', 'UPDATE_PROCESS', 'PROCESS_ACTION', '申請する', [['条件', 'amount < 1000000 → 承認待ちへ遷移'], ['条件', 'amount >= 1000000 → 部長承認待ちへ遷移']], { dependsOn: ['P0'] })]));
-  const b1 = st(branch2, 'P1');
-  assert(b1.status === 'NEEDS_CONFIRMATION' && codes(b1).includes('EXISTING_PATH_RESTRICTED') && codes(b1).includes('BRANCH_ADDED') && branch2.simulation.after.process.actions.filter(a => a.name === '申請する').length === 2, '既存アクションの分岐（amount > "0" → <1,000,000 / >=1,000,000）: 制限＋分岐追加');
-  const unkT = review(plan([step('P1', 'UPDATE_PROCESS', 'PROCESS_ACTION', '存在しないアクション', [['条件', 'x']])]));
+  //   2026-10-18: 遷移先は spec の to だけから読む（前は説明文の「条件 → 遷移先」の行から読み、2 行目以降を同じアクションの分岐にしていた。その確かめ（分岐の追加）は消した）
+  const branch = review(plan([step('P1', 'UPDATE_PROCESS', 'PROCESS_ACTION', '申請する', [], { spec: { filterCond: 'amount >= "1000000"', to: '部長承認待ち', changeKind: 'ACTION_CONDITION' } })]));
+  assert(st(branch, 'P1').status === 'INVALID' && codes(st(branch, 'P1')).includes('UNKNOWN_STATUS'), '遷移先のステータスが無い → INVALID（dependsOn 不足の検出）');
+  const unkT = review(plan([step('P1', 'UPDATE_PROCESS', 'PROCESS_ACTION', '存在しないアクション', [], { spec: { filterCond: 'x' } })]));
   assert(st(unkT, 'P1').status === 'INVALID' && codes(st(unkT, 'P1')).includes('UNKNOWN_PROCESS_TARGET'), 'UPDATE_PROCESS unknown target → INVALID');
 }
 
 console.log('\n--- 5. Lookup ---');
 {
-  const add = review(plan([step('P1', 'UPDATE_LOOKUP', 'LOOKUP', 'customer_lookup', [['取得項目', 'address → customer_address']])]), (() => { const i = buildInputs(); i.data.fields.customer_address = { type: 'SINGLE_LINE_TEXT', code: 'customer_address', label: '顧客住所' }; i.deps = KTDeps.buildDependencyData(i.data, KTDeps.normalizeFields(i.data.fields)); return i; })());
+  const add = review(plan([step('P1', 'UPDATE_LOOKUP', 'LOOKUP', 'customer_lookup', [], { spec: { mappings: [{ from: 'address', to: 'customer_address' }] } })]), (() => { const i = buildInputs(); i.data.fields.customer_address = { type: 'SINGLE_LINE_TEXT', code: 'customer_address', label: '顧客住所' }; i.deps = KTDeps.buildDependencyData(i.data, KTDeps.normalizeFields(i.data.fields)); return i; })());
   const a = st(add, 'P1');
   assert((a.status === 'VALID' || a.status === 'WARNING') && a.safety === 'REVIEW_REQUIRED' && a.diff.changeType === 'UPDATE' && a.diff.after.lookup.mappings.length === 3 && a.diff.after.lookup.mappings.some(m => m.to === 'customer_address') && a.diff.before.lookup.mappings.length === 2, 'add mapping: 既存ルックアップに取得項目を追加（Before 2 → After 3）');
-  const dupDest = review(plan([step('P1', 'UPDATE_LOOKUP', 'LOOKUP', 'customer_lookup', [['取得項目', 'addr → amount, tel → amount']])]));
+  const dupDest = review(plan([step('P1', 'UPDATE_LOOKUP', 'LOOKUP', 'customer_lookup', [], { spec: { mappings: [{ from: 'addr', to: 'amount' }, { from: 'tel', to: 'amount' }] } })]));
   assert(st(dupDest, 'P1').status === 'INVALID' && codes(st(dupDest, 'P1')).includes('LOOKUP_DEST_DUPLICATE'), 'duplicate destination → INVALID');
-  const over = review(plan([step('P1', 'UPDATE_LOOKUP', 'LOOKUP', 'customer_lookup', [['取得項目', 'address → case_name']])]));   // Phase 13: 取得元は参照元アプリに実在するフィールド（address）
+  const over = review(plan([step('P1', 'UPDATE_LOOKUP', 'LOOKUP', 'customer_lookup', [], { spec: { mappings: [{ from: 'address', to: 'case_name' }] } })]));   // Phase 13: 取得元は参照元アプリに実在するフィールド（address）
   assert(codes(st(over, 'P1')).includes('LOOKUP_MAPPING_OVERWRITE') && st(over, 'P1').status === 'NEEDS_CONFIRMATION', '既存マッピングの上書き → 高リスク');
-  const missing = review(plan([step('P1', 'UPDATE_LOOKUP', 'LOOKUP', 'customer_lookup', [['取得項目', 'address → NEW_FIELD_1']])]));
+  const missing = review(plan([step('P1', 'UPDATE_LOOKUP', 'LOOKUP', 'customer_lookup', [], { spec: { mappings: [{ from: 'address', to: 'NEW_FIELD_1' }] } })]));
   assert(st(missing, 'P1').status === 'INVALID' && codes(st(missing, 'P1')).includes('PROPOSED_FIELD_NOT_APPLIED'), 'proposed field 未追加のコピー先 → INVALID');
-  const resolved = review(plan([step('P1', 'ADD_FIELD', 'PROPOSED_FIELD', 'NEW_FIELD_1'), step('P2', 'UPDATE_LOOKUP', 'LOOKUP', 'customer_lookup', [['取得項目', 'address → NEW_FIELD_1']], { dependsOn: ['P1'] })], [pf('NEW_FIELD_1', '顧客住所', 'customer_address', 'SINGLE_LINE_TEXT')]));
+  const resolved = review(plan([step('P1', 'ADD_FIELD', 'PROPOSED_FIELD', 'NEW_FIELD_1'), step('P2', 'UPDATE_LOOKUP', 'LOOKUP', 'customer_lookup', [], { spec: { mappings: [{ from: 'address', to: 'NEW_FIELD_1' }] }, dependsOn: ['P1'] })], [pf('NEW_FIELD_1', '顧客住所', 'customer_address', 'SINGLE_LINE_TEXT')]));
   assert(st(resolved, 'P2').status !== 'INVALID' && st(resolved, 'P2').diff.after.lookup.mappings.some(m => m.to === 'customer_address'), 'proposed field resolution: P1 で追加した NEW_FIELD_1 を P2 のコピー先に解決');
-  const notLookup = review(plan([step('P1', 'UPDATE_LOOKUP', 'LOOKUP', 'amount', [['取得項目', 'a → b']])]));
+  const notLookup = review(plan([step('P1', 'UPDATE_LOOKUP', 'LOOKUP', 'amount', [], { spec: { mappings: [{ from: 'a', to: 'b' }] } })]));
   assert(st(notLookup, 'P1').status === 'INVALID' && codes(st(notLookup, 'P1')).includes('NOT_A_LOOKUP'), 'ルックアップでないフィールド → INVALID');
-  const addLk = review(plan([step('P1', 'ADD_FIELD', 'PROPOSED_FIELD', 'NEW_FIELD_1'), step('P2', 'ADD_LOOKUP', 'PROPOSED_FIELD', 'NEW_FIELD_2', [['参照元アプリ', '500'], ['参照元フィールド', 'code'], ['取得項目', 'address → NEW_FIELD_1']], { dependsOn: ['P1'] })], [pf('NEW_FIELD_1', '顧客住所', 'customer_address', 'SINGLE_LINE_TEXT'), pf('NEW_FIELD_2', '顧客参照2', 'customer_ref2', 'LOOKUP')]));
+  const addLk = review(plan([step('P1', 'ADD_FIELD', 'PROPOSED_FIELD', 'NEW_FIELD_1'), step('P2', 'ADD_LOOKUP', 'PROPOSED_FIELD', 'NEW_FIELD_2', [], { spec: { sourceApp: '500', keyField: 'code', mappings: [{ from: 'address', to: 'NEW_FIELD_1' }] }, dependsOn: ['P1'] })], [pf('NEW_FIELD_1', '顧客住所', 'customer_address', 'SINGLE_LINE_TEXT'), pf('NEW_FIELD_2', '顧客参照2', 'customer_ref2', 'LOOKUP')]));
   const lk = st(addLk, 'P2');
   assert(lk.status !== 'INVALID' && lk.diff.after.lookup.app === '500' && lk.diff.after.lookup.mappings[0].to === 'customer_address' && addLk.simulation.after.fields.customer_ref2.type === 'LOOKUP', 'ADD_LOOKUP: 新規ルックアップ（参照元・キー・取得項目）を仮適用');
 }
 
 console.log('\n--- 6. View / ACL / App Action ---');
 {
-  const v = review(plan([step('P1', 'ADD_VIEW', 'VIEW', '顧客情報', [['表示フィールド', 'case_name, amount, ghost']])]));
+  const v = review(plan([step('P1', 'ADD_VIEW', 'VIEW', '顧客情報', [], { spec: { fields: ['case_name', 'amount', 'ghost'] } })]));
   assert(st(v, 'P1').status === 'INVALID' && codes(st(v, 'P1')).includes('UNKNOWN_FIELD'), 'ADD_VIEW unknown field → INVALID');
-  const v2 = review(plan([step('P1', 'ADD_VIEW', 'VIEW', '顧客別一覧', [['表示フィールド', 'case_name']])]));
+  const v2 = review(plan([step('P1', 'ADD_VIEW', 'VIEW', '顧客別一覧', [], { spec: { fields: ['case_name'] } })]));
   assert(codes(st(v2, 'P1')).includes('VIEW_NAME_DUPLICATE'), 'ADD_VIEW name duplicate');
-  const v3 = review(plan([step('P1', 'ADD_VIEW', 'VIEW', '期限順', [['表示フィールド', 'case_name, due_date'], ['並び順', 'due_date asc']])]));
+  const v3 = review(plan([step('P1', 'ADD_VIEW', 'VIEW', '期限順', [], { spec: { fields: ['case_name', 'due_date'], sort: 'due_date asc' } })]));
   assert(st(v3, 'P1').status === 'VALID' && st(v3, 'P1').safety === 'SAFE' && v3.simulation.after.views.length === 3, 'ADD_VIEW normal → SAFE');
-  const acl = review(plan([step('P1', 'UPDATE_FIELD_ACL', 'FIELD_ACL', 'amount', [['対象', 'owner']])]));
+  const acl = review(plan([step('P1', 'UPDATE_FIELD_ACL', 'FIELD_ACL', 'amount', [], { spec: { entities: ['owner'] } })]));
   const as = st(acl, 'P1');
   assert(as.status === 'NEEDS_CONFIRMATION' && as.safety === 'REVIEW_REQUIRED' && codes(as).includes('ACL_CHANGE') && codes(as).includes('ACL_EXISTING_RULE') && as.simulated === false && as.diff.before && as.diff.human[0].includes('仮適用なし'), 'ACL: 高リスク・既存ルールあり・仮適用なし（validate only）');
   const aclBad = review(plan([step('P1', 'UPDATE_FIELD_ACL', 'FIELD_ACL', 'ghost', [])]));
   assert(st(aclBad, 'P1').status === 'INVALID' && codes(st(aclBad, 'P1')).includes('UNKNOWN_FIELD'), 'ACL unknown target → INVALID');
-  const racl = review(plan([step('P1', 'UPDATE_RECORD_ACL', 'RECORD_ACL', '', [['条件', 'amount >= "1000000"']])]));
+  const racl = review(plan([step('P1', 'UPDATE_RECORD_ACL', 'RECORD_ACL', '', [], { spec: { filterCond: 'amount >= "1000000"' } })]));
   assert(codes(st(racl, 'P1')).includes('ACL_EXISTING_RULE') && st(racl, 'P1').status === 'NEEDS_CONFIRMATION', 'RECORD_ACL: 同じ条件の既存ルール');
-  const app = review(plan([step('P1', 'ADD_APP_ACTION', 'APP_ACTION', '見積を作成', [['作成先', '311']])]));
+  const app = review(plan([step('P1', 'ADD_APP_ACTION', 'APP_ACTION', '見積を作成', [], { spec: { destApp: '311' } })]));
   assert(st(app, 'P1').status === 'INVALID' && codes(st(app, 'P1')).includes('APP_ACTION_NAME_DUPLICATE'), 'APP_ACTION name duplicate');
-  const app2 = review(plan([step('P1', 'ADD_APP_ACTION', 'APP_ACTION', '請求を作成', [['作成先', '312'], ['コピー', 'case_name → title, ghost → x']])]));
+  const app2 = review(plan([step('P1', 'ADD_APP_ACTION', 'APP_ACTION', '請求を作成', [], { spec: { destApp: '312', mappings: [{ from: 'case_name', to: 'title' }, { from: 'ghost', to: 'x' }] } })]));
   assert(st(app2, 'P1').status === 'INVALID' && codes(st(app2, 'P1')).includes('UNKNOWN_FIELD'), 'APP_ACTION source field 不存在');
 }
 
 console.log('\n--- 7. Dependencies / Plan 内部 / Safety ---');
 {
-  const ok = review(plan([step('P1', 'ADD_FIELD', 'PROPOSED_FIELD', 'NEW_FIELD_1'), step('P2', 'ADD_PROCESS_STATUS', 'PROCESS_STATUS', '部長承認待ち', [['作業者', 'NEW_FIELD_1']], { dependsOn: ['P1'] }), step('P3', 'ADD_PROCESS_ACTION', 'PROCESS_ACTION', '部長へ', [['遷移元', '承認待ち'], ['遷移先', '部長承認待ち'], ['条件', 'amount >= "1000000"']], { dependsOn: ['P2'] })], [pf('NEW_FIELD_1', '部長承認者', 'manager_approver', 'USER_SELECT')]));
+  const ok = review(plan([step('P1', 'ADD_FIELD', 'PROPOSED_FIELD', 'NEW_FIELD_1'), step('P2', 'ADD_PROCESS_STATUS', 'PROCESS_STATUS', '部長承認待ち', [], { spec: { assignees: ['NEW_FIELD_1'] }, dependsOn: ['P1'] }), step('P3', 'ADD_PROCESS_ACTION', 'PROCESS_ACTION', '部長へ', [], { spec: { from: '承認待ち', to: '部長承認待ち', filterCond: 'amount >= "1000000"' }, dependsOn: ['P2'] })], [pf('NEW_FIELD_1', '部長承認者', 'manager_approver', 'USER_SELECT')]));
   assert(st(ok, 'P2').status !== 'INVALID' && st(ok, 'P2').diff.after.assignees[0].code === 'manager_approver', 'valid dependsOn: P1 仮適用後の After で P2 が NEW_FIELD_1 を解決（temporaryId → suggestedCode）');
-  const bad = review(plan([step('P2', 'ADD_PROCESS_STATUS', 'PROCESS_STATUS', '部長承認待ち', [['作業者', 'NEW_FIELD_1']], { dependsOn: ['P9'] })]));
+  const bad = review(plan([step('P2', 'ADD_PROCESS_STATUS', 'PROCESS_STATUS', '部長承認待ち', [], { spec: { assignees: ['NEW_FIELD_1'] }, dependsOn: ['P9'] })]));
   assert(st(bad, 'P2').status === 'INVALID' && codes(st(bad, 'P2')).includes('PROPOSED_FIELD_NOT_APPLIED'), 'invalid dependsOn（未追加の NEW_FIELD を参照）→ INVALID');
-  const blocked = review(plan([step('P1', 'ADD_FIELD', 'PROPOSED_FIELD', 'NEW_FIELD_1'), step('P2', 'ADD_VIEW', 'VIEW', '新一覧', [['表示フィールド', 'case_name']], { dependsOn: ['P1'] })], [pf('NEW_FIELD_1', '金額2', 'amount', 'NUMBER')]));
+  const blocked = review(plan([step('P1', 'ADD_FIELD', 'PROPOSED_FIELD', 'NEW_FIELD_1'), step('P2', 'ADD_VIEW', 'VIEW', '新一覧', [], { spec: { fields: ['case_name'] }, dependsOn: ['P1'] })], [pf('NEW_FIELD_1', '金額2', 'amount', 'NUMBER')]));
   assert(st(blocked, 'P1').status === 'INVALID' && st(blocked, 'P2').status === 'BLOCKED_BY_DEPENDENCY' && st(blocked, 'P2').safety === 'BLOCKED' && st(blocked, 'P2').blockedBy.join() === 'P1' && blocked.executionReadiness.blockedSteps.join() === 'P1,P2', 'blocked dependency: 単独では VALID な P2 も BLOCKED_BY_DEPENDENCY');
-  const cycle = review(plan([step('P1', 'ADD_VIEW', 'VIEW', 'v1', [['表示フィールド', 'case_name']], { dependsOn: ['P2'] }), step('P2', 'ADD_VIEW', 'VIEW', 'v2', [['表示フィールド', 'case_name']], { dependsOn: ['P1'] })]));
+  const cycle = review(plan([step('P1', 'ADD_VIEW', 'VIEW', 'v1', [], { spec: { fields: ['case_name'] }, dependsOn: ['P2'] }), step('P2', 'ADD_VIEW', 'VIEW', 'v2', [], { spec: { fields: ['case_name'] }, dependsOn: ['P1'] })]));
   assert(cycle.warnings.some(w => w.code === 'CIRCULAR_DEPENDENCY') && st(cycle, 'P1').status === 'INVALID' && st(cycle, 'P2').status === 'INVALID', 'plan cycle → INVALID＋warning');
   const twoFields = review(plan([step('P1', 'ADD_FIELD', 'PROPOSED_FIELD', 'NEW_FIELD_1'), step('P2', 'ADD_FIELD', 'PROPOSED_FIELD', 'NEW_FIELD_2')], [pf('NEW_FIELD_1', '部長承認者', 'mgr', 'USER_SELECT'), pf('NEW_FIELD_2', '部長', 'mgr', 'USER_SELECT')]));
   assert(st(twoFields, 'P2').status === 'INVALID' && codes(st(twoFields, 'P2')).includes('PLAN_INTERNAL_DUPLICATE'), 'two steps create same field → PLAN_INTERNAL_DUPLICATE');
-  const twoNotif = review(plan([step('P1', 'ADD_NOTIFICATION', 'NOTIFICATION', '担当者通知', [['通知先', 'owner'], ['条件', 'owner not in ("")']]), step('P4', 'ADD_NOTIFICATION', 'NOTIFICATION', '担当者設定通知', [['通知先', 'owner'], ['条件', 'owner not in ("")']])]));
+  const twoNotif = review(plan([step('P1', 'ADD_NOTIFICATION', 'NOTIFICATION', '担当者通知', [], { spec: { targets: ['owner'], filterCond: 'owner not in ("")' } }), step('P4', 'ADD_NOTIFICATION', 'NOTIFICATION', '担当者設定通知', [], { spec: { targets: ['owner'], filterCond: 'owner not in ("")' } })]));
   assert(codes(st(twoNotif, 'P4')).includes('PLAN_INTERNAL_DUPLICATE') && twoNotif.conflicts.some(c => c.code === 'PLAN_INTERNAL_DUPLICATE' && c.stepIds.includes('P4') && c.stepIds.includes('P1')), 'two notifications duplicate（別名・同条件・同通知先）→ Plan 内部重複');
   // Safety の 4 種
   const safety = review(plan([
-    step('P1', 'ADD_VIEW', 'VIEW', '期限順2', [['表示フィールド', 'case_name']]),
-    step('P2', 'UPDATE_PROCESS', 'PROCESS_ACTION', '承認する', [['条件', 'amount < "1000000"']]),
-    step('P3', 'UPDATE_FIELD', 'FIELD', 'ghost', [['必須', 'true']]),
+    step('P1', 'ADD_VIEW', 'VIEW', '期限順2', [], { spec: { fields: ['case_name'] } }),
+    step('P2', 'UPDATE_PROCESS', 'PROCESS_ACTION', '承認する', [], { spec: { filterCond: 'amount < "1000000"' } }),
+    step('P3', 'UPDATE_FIELD', 'FIELD', 'ghost', [], { spec: { required: true } }),
     step('P4', 'CUSTOMIZATION_REQUIRED', 'JS', '', []),
   ]));
   assert(st(safety, 'P1').safety === 'SAFE' && st(safety, 'P2').safety === 'REVIEW_REQUIRED' && st(safety, 'P3').safety === 'BLOCKED' && st(safety, 'P4').safety === 'PLAN_ONLY' && st(safety, 'P4').diff.changeType === 'NO_CHANGE' && st(safety, 'P4').diff.human.some(h => h.includes('計画のみ')), 'Safety: SAFE / REVIEW_REQUIRED / BLOCKED / PLAN_ONLY（Action Catalog どおり。未対応は PLAN_ONLY で明示）');
@@ -201,21 +199,21 @@ console.log('\n--- 8. Impact re-check / coverage / Executor 出力 ---');
   //   簡素化（2026-10-17）: Planner が JavaScript の影響を挙げたかは構造（targetKind JS・targetRef = そのフィールドを参照する JavaScript のファイル）だけで決める
   //   （説明文の「JavaScript」「JS」「スクリプト」の語では決めない）
   const jsFilesCC = [...new Set(KTDeps.impactOf(INPUTS.deps, 'customer_code').direct.filter(d => d.sourceType === 'CUSTOMIZE').map(d => String(d.title || '')).filter(Boolean))];
-  const match = review(plan([step('P1', 'UPDATE_FIELD', 'FIELD', 'customer_code', [['必須', 'true']])], [], { impact: [{ targetKind: 'FIELD', targetRef: 'customer_code', description: '一覧・ルックアップが参照', evidenceIds: [], confidence: 'CONFIRMED' }, ...jsFilesCC.map(f => ({ targetKind: 'JS', targetRef: f, description: 'customer_code を参照', evidenceIds: [], confidence: 'CONFIRMED' }))] }));
+  const match = review(plan([step('P1', 'UPDATE_FIELD', 'FIELD', 'customer_code', [], { spec: { required: true } })], [], { impact: [{ targetKind: 'FIELD', targetRef: 'customer_code', description: '一覧・ルックアップが参照', evidenceIds: [], confidence: 'CONFIRMED' }, ...jsFilesCC.map(f => ({ targetKind: 'JS', targetRef: f, description: 'customer_code を参照', evidenceIds: [], confidence: 'CONFIRMED' }))] }));
   assert(jsFilesCC.length >= 2 && !match.warnings.some(w => w.code.startsWith('PLANNER_IMPACT')) && match.impactCheck[0].toolkit.js >= 2, `impact 一致（Planner が JS の影響を、参照する JavaScript のファイルで挙げている）: ${JSON.stringify(jsFilesCC)}`);
-  const prose = review(plan([step('P1', 'UPDATE_FIELD', 'FIELD', 'customer_code', [['必須', 'true']])], [], { impact: [{ targetKind: 'FIELD', targetRef: 'customer_code', description: 'JavaScript 3 件と一覧・ルックアップが参照', evidenceIds: [], confidence: 'CONFIRMED' }] }));
+  const prose = review(plan([step('P1', 'UPDATE_FIELD', 'FIELD', 'customer_code', [], { spec: { required: true } })], [], { impact: [{ targetKind: 'FIELD', targetRef: 'customer_code', description: 'JavaScript 3 件と一覧・ルックアップが参照', evidenceIds: [], confidence: 'CONFIRMED' }] }));
   assert(prose.warnings.some(w => w.code === 'PLANNER_IMPACT_MISMATCH' && /参照する JavaScript が \d+ 件あります/.test(w.message)), '説明文に「JavaScript」とあるだけ（ファイルを挙げていない）なら、参照する JavaScript の件数を注意で出す（説明文の語では挙げたとみなさない）');
-  const missing = review(plan([step('P1', 'UPDATE_FIELD', 'FIELD', 'customer_code', [['必須', 'true']])], [], { impact: [] }));
+  const missing = review(plan([step('P1', 'UPDATE_FIELD', 'FIELD', 'customer_code', [], { spec: { required: true } })], [], { impact: [] }));
   assert(missing.warnings.some(w => w.code === 'PLANNER_IMPACT_MISSING' && w.stepIds.includes('P1')) && st(missing, 'P1').issues.some(i => i.code === 'PLANNER_IMPACT_MISSING'), 'Planner 不足: Toolkit の impactOf で参照があるのに Planner に無い → warning');
-  const mismatch = review(plan([step('P1', 'UPDATE_FIELD', 'FIELD', 'customer_code', [['必須', 'true']])], [], { impact: [{ targetKind: 'FIELD', targetRef: 'customer_code', description: '一覧のみ', evidenceIds: [], confidence: 'INFERRED' }] }));
+  const mismatch = review(plan([step('P1', 'UPDATE_FIELD', 'FIELD', 'customer_code', [], { spec: { required: true } })], [], { impact: [{ targetKind: 'FIELD', targetRef: 'customer_code', description: '一覧のみ', evidenceIds: [], confidence: 'INFERRED' }] }));
   assert(mismatch.warnings.some(w => w.code === 'PLANNER_IMPACT_MISMATCH' && w.message.includes('JavaScript')), 'Planner 過少: JS 参照があるのに Planner が JS を挙げていない → mismatch');
-  const over = review(plan([step('P1', 'UPDATE_FIELD', 'FIELD', 'secret_memo', [['必須', 'true']])], [], { impact: [{ targetKind: 'FIELD', targetRef: 'secret_memo', description: '多くの設定が参照', evidenceIds: [], confidence: 'INFERRED' }] }));
+  const over = review(plan([step('P1', 'UPDATE_FIELD', 'FIELD', 'secret_memo', [], { spec: { required: true } })], [], { impact: [{ targetKind: 'FIELD', targetRef: 'secret_memo', description: '多くの設定が参照', evidenceIds: [], confidence: 'INFERRED' }] }));
   assert(over.warnings.some(w => w.code === 'PLANNER_IMPACT_OVERSTATED') || over.impactCheck[0].toolkit.direct > 0, 'Planner 過剰（参照が無いのに影響を主張）→ OVERSTATED（参照があればそのまま）');
   const cov = match.reviewCoverage;
   assert(cov.fields === true && cov.process === true && cov.notifications === true && cov.lookup === true && cov.acl === 'partial' && cov.javascript === true && Array.isArray(cov.notes) && cov.notes.length >= 3, 'reviewCoverage（未対応は partial / false として明示）');
-  const noJs = review(plan([step('P1', 'ADD_VIEW', 'VIEW', 'v', [['表示フィールド', 'case_name']])]), (() => { const d = FX.makeData(); const deps = KTDeps.buildDependencyData(d, KTDeps.normalizeFields(d.fields)); return { data: d, deps, scan: null, incoming: null }; })());
+  const noJs = review(plan([step('P1', 'ADD_VIEW', 'VIEW', 'v', [], { spec: { fields: ['case_name'] } })]), (() => { const d = FX.makeData(); const deps = KTDeps.buildDependencyData(d, KTDeps.normalizeFields(d.fields)); return { data: d, deps, scan: null, incoming: null }; })());
   assert(noJs.reviewCoverage.javascript === false && noJs.reviewCoverage.incoming === false, 'JS 未解析なら coverage.javascript false');
-  const out = R.executorOutput(plan([step('P1', 'ADD_VIEW', 'VIEW', 'v', [['表示フィールド', 'case_name']])]), noJs);
+  const out = R.executorOutput(plan([step('P1', 'ADD_VIEW', 'VIEW', 'v', [], { spec: { fields: ['case_name'] } })]), noJs);
   assert(out.outputVersion === '1' && out.plan && out.review.reviewVersion === '1' && Array.isArray(out.approvedSteps) && out.approvedSteps.length === 0 && out.review.steps[0].stepId === 'P1' && !out.review.simulation.after, 'Executor-ready output: { plan, review, approvedSteps: [] }（巨大な After モデルは除く）');
   assert(JSON.stringify(INPUTS.data) === SNAPSHOT, 'すべての review の後も DATA は不変');
 }
@@ -223,7 +221,7 @@ console.log('\n--- 8. Impact re-check / coverage / Executor 出力 ---');
 console.log('\n--- 9. staging E2E（2026-10-02）で見つかった実データの癖 ---');
 {
   // A: 既存通知と類似 → step.issues に同じ指摘が 2 回並ばない（plan-level conflict の step への反映は重複を除く）
-  const dupA = review(plan([step('P1', 'ADD_NOTIFICATION', 'NOTIFICATION', '担当者設定通知', [['通知先', 'owner'], ['条件', 'owner not in ("")']])]));
+  const dupA = review(plan([step('P1', 'ADD_NOTIFICATION', 'NOTIFICATION', '担当者設定通知', [], { spec: { targets: ['owner'], filterCond: 'owner not in ("")' } })]));
   const dupCodes = codes(st(dupA, 'P1')).filter(c => c === 'POSSIBLE_DUPLICATE');
   assert(dupCodes.length === 1 && dupA.conflicts.filter(c => c.code === 'POSSIBLE_DUPLICATE').length === 1, 'POSSIBLE_DUPLICATE は step.issues にも conflicts にも 1 回だけ');
   // A: kintone の条件式に無い関数（IS_NULL / PREVIOUS_VALUE）→ COND_UNKNOWN_FUNCTION（要確認。VALID のままにしない）
@@ -273,8 +271,8 @@ console.log('\n--- 9. staging E2E（2026-10-02）で見つかった実データ�
   assert(!codes(st(idOk, 'P1')).includes('LOOKUP_SOURCE_NOT_ID') && !idOk.conflicts.some(c => c.code === 'LOOKUP_SPLIT'), '数値の参照元・1 本のルックアップは指摘しない');
   // 実機: 承認しても review.executionReadiness.approvedSteps が [] のままだった → 一致させる。BLOCKED / PLAN_ONLY の承認は採らない
   const mix = review(plan([
-    step('P1', 'ADD_VIEW', 'VIEW', '期限順3', [['表示フィールド', 'case_name']]),
-    step('P2', 'UPDATE_FIELD', 'FIELD', 'ghost', [['必須', 'true']]),
+    step('P1', 'ADD_VIEW', 'VIEW', '期限順3', [], { spec: { fields: ['case_name'] } }),
+    step('P2', 'UPDATE_FIELD', 'FIELD', 'ghost', [], { spec: { required: true } }),
     step('P3', 'CUSTOMIZATION_REQUIRED', 'JS', '', []),
   ]));
   const eo = R.executorOutput(plan([]), mix, ['P1', 'P2', 'P3', 'P1']);
@@ -295,8 +293,13 @@ console.log('\n--- 9. staging E2E（2026-10-02）で見つかった実データ�
   // Phase 10 staging E2E（app 343）: AI が events: ["なし（レコードの条件通知）"] と書いた → 配列の placeholder も空扱い（イベント不明の指摘にしない）
   const noneEv = review(plan([step('P1', 'ADD_NOTIFICATION', 'NOTIFICATION', 'n', [], { spec: { name: 'n', targets: ['FIELD_ENTITY:owner_group'], filterCond: 'amount >= "1"', events: ['なし（レコードの条件通知）'] } })]));
   assert(!codes(st(noneEv, 'P1')).includes('NOTIFICATION_EVENT_UNKNOWN') && st(noneEv, 'P1').diff.after.scope === 'perRecord' && !st(noneEv, 'P1').spec.events, '配列の placeholder（なし）は捨てる');
-  const noneEv2 = review(plan([step('P1', 'ADD_NOTIFICATION', 'NOTIFICATION', 'n2', [['通知先', 'owner_group'], ['条件', 'amount >= "1"'], ['イベント', 'なし（レコードの条件通知）']], { spec: { name: 'n2', targets: ['FIELD_ENTITY:owner_group'], filterCond: 'amount >= "1"', events: ['なし（レコードの条件通知）'] } })]));
-  assert(!codes(st(noneEv2, 'P1')).includes('NOTIFICATION_EVENT_UNKNOWN') && !st(noneEv2, 'P1').spec.events, 'details の「イベント: なし」も拾い直さない（実機で spec と details の両方に出た）');
+  //   2026-10-18: イベントは語彙の表記だけを読む（言い換えの「レコード追加」「ステータス変更」を語の部分一致で recordAdded などに読み替えない。前の読み替えは
+  //   「ステータス変更」を「変更」の語で recordEdited にしていた）。表記の大文字・空白の違いだけは揃える
+  const synEv = review(plan([step('P1', 'ADD_NOTIFICATION', 'NOTIFICATION', '言い換え', [], { spec: { name: '言い換え', targets: ['FIELD_ENTITY:owner_group'], events: ['レコード追加', 'ステータス変更'] } })]));
+  const caseEv = review(plan([step('P1', 'ADD_NOTIFICATION', 'NOTIFICATION', '表記', [], { spec: { name: '表記', targets: ['FIELD_ENTITY:owner_group'], events: ['RecordAdded'] } })]));
+  assert(codes(st(synEv, 'P1')).includes('NOTIFICATION_EVENT_UNKNOWN') && st(synEv, 'P1').status === 'NEEDS_CONFIRMATION' && st(synEv, 'P1').diff.after.events.length === 0 && JSON.stringify(st(synEv, 'P1').spec.events) === JSON.stringify(['レコード追加', 'ステータス変更'])
+    && !codes(st(caseEv, 'P1')).includes('NOTIFICATION_EVENT_UNKNOWN') && JSON.stringify(st(caseEv, 'P1').spec.events) === JSON.stringify(['recordAdded']),
+    '通知のイベントの言い換え（レコード追加・ステータス変更）は語彙に読み替えず NOTIFICATION_EVENT_UNKNOWN（要確認・After に載せない）。大文字の違い（RecordAdded）だけは recordAdded に揃える', { syn: st(synEv, 'P1').spec.events, cs: st(caseEv, 'P1').spec.events });
   assert(JSON.stringify(INPUTS.data) === SNAPSHOT, '§9 の後も DATA は不変');
 }
 
@@ -525,9 +528,11 @@ console.log('\n--- 12. Lookup Preview Executor の Review（Phase 13 §43〜§45
   assert(st(addLkNum, 'P1').status !== 'INVALID' && addLkNum.simulation.after.fields.credit_ref.baseType === 'NUMBER' && codes(st(addLkNum, 'P1')).includes('LOOKUP_KEY_NOT_UNIQUE'), 'ADD_LOOKUP: キーの型をルックアップの型にする（NUMBER）・キーの重複禁止なしは注意');
   const addLkOther = review(plan([step('P1', 'ADD_LOOKUP', 'PROPOSED_FIELD', 'NEW_FIELD_1', [], { spec: { sourceApp: '999999', keyField: 'code', mappings: [{ from: 'name', to: 'case_name' }] } })], [pf('NEW_FIELD_1', '別参照', 'other_ref', 'LOOKUP')]));
   assert(codes(st(addLkOther, 'P1')).includes('LOOKUP_SOURCE_NOT_LOADED') && st(addLkOther, 'P1').status === 'NEEDS_CONFIRMATION', 'ADD_LOOKUP（未取得の参照元）: 推測せず要確認（LOOKUP_SOURCE_NOT_LOADED）');
-  // normalizeSpec: details の文章形も addMappings に読む
+  //   2026-10-18: 取得項目は spec の addMappings / mappings / addPickerFields だけから作る。説明文（details）の「追加する取得項目: address → customer_address」は読まない
+  //   （前は説明文の「A → B」を取得項目に分けていた）。spec に値が無ければ、説明文があっても値の欠落（NO_STRUCTURED_CHANGE・書き込まない）
   const det = review(plan([step('P1', 'UPDATE_LOOKUP', 'LOOKUP', 'customer_lookup', [['追加する取得項目', 'address → customer_address, phone → customer_phone'], ['選択時に表示するフィールド', 'address']])]), withDest({ customer_address: fld('SINGLE_LINE_TEXT', 'customer_address', '顧客住所'), customer_phone: fld('LINK', 'customer_phone', '顧客電話', { protocol: 'CALL' }) }));
-  assert(st(det, 'P1').status === 'VALID' && st(det, 'P1').diff.after.lookup.mappings.length === 4 && st(det, 'P1').diff.after.lookup.pickerFields.includes('address'), 'details（追加する取得項目 / 選択時に表示するフィールド）も addMappings / addPickerFields に正規化');
+  assert(st(det, 'P1').status === 'NEEDS_CONFIRMATION' && codes(st(det, 'P1')).includes('NO_STRUCTURED_CHANGE') && st(det, 'P1').diff.changeType === 'NO_CHANGE' && !(st(det, 'P1').spec.addMappings || st(det, 'P1').spec.mappings || st(det, 'P1').spec.addPickerFields) && det.simulation.after.fields.customer_lookup.lookup.mappings.length === 2,
+    '説明文（追加する取得項目 / 選択時に表示するフィールド）だけの取得項目は読まない: spec に値が無いので値の欠落（NO_STRUCTURED_CHANGE・取得項目は今の 2 件のまま）', { status: st(det, 'P1').status, codes: codes(st(det, 'P1')), spec: st(det, 'P1').spec });
   const linkMismatch = review(plan([upd({ addMappings: [{ relatedField: 'phone', field: 'customer_url' }] })]), withDest({ customer_url: fld('LINK', 'customer_url', 'URL', { protocol: 'WEB' }) }));
   assert(st(linkMismatch, 'P1').status === 'INVALID' && /リンクの種類/.test(st(linkMismatch, 'P1').issues.find(i => i.code === 'LOOKUP_TYPE_MISMATCH').message), 'LINK: プロトコル（CALL / WEB）が違えば取得できない');
   // KTQueryCheck lookup usage
@@ -585,8 +590,12 @@ console.log('\n--- 13. App Action Preview Executor の Review（Phase 14 §41〜
   const urlBad = review(plan([add({ name: '請求書作成', destApp: '311', actionMappings: [{ srcType: 'RECORD_URL', srcField: null, destField: 'phone_q' }] })]));
   const urlBad2 = review(plan([add({ name: '請求書作成', destApp: '311', actionMappings: [{ srcType: 'RECORD_URL', srcField: null, destField: 'customer' }] })]));
   assert(st(urlBad, 'P1').status === 'INVALID' && st(urlBad2, 'P1').status === 'INVALID' && codes(st(urlBad2, 'P1')).includes('APP_ACTION_MAPPING_TYPE_MISMATCH'), 'RECORD_URL: 電話リンク・文字列へは転記できない');
-  const urlText = review(plan([step('P1', 'UPDATE_APP_ACTION', 'APP_ACTION', '見積を作成', [['転記', 'レコードURL → source_url, secret_memo → note']])]));
-  assert(st(urlText, 'P1').status !== 'INVALID' && codes(st(urlText, 'P1')).includes('APP_ACTION_MAPPING_DUPLICATE') && st(urlText, 'P1').diff.after.mappings.length === 3, 'details の文章形（レコードURL → …）も actionMappings に正規化（既存の URL 転記は重複として変更なし）');
+  const urlText = review(plan([step('P1', 'UPDATE_APP_ACTION', 'APP_ACTION', '見積を作成', [], { spec: { actionMappings: [{ srcType: 'RECORD_URL', srcField: null, destField: 'source_url' }, { srcType: 'FIELD', srcField: 'secret_memo', destField: 'note' }] } })]));
+  assert(st(urlText, 'P1').status !== 'INVALID' && codes(st(urlText, 'P1')).includes('APP_ACTION_MAPPING_DUPLICATE') && st(urlText, 'P1').diff.after.mappings.length === 3, '既存の URL 転記と同じ転記（RECORD_URL → source_url）は重複として変更なし、新しい転記だけ足す');
+  //   2026-10-18: 転記は spec の actionMappings だけから作る。説明文（details）の「転記: レコードURL → source_url, …」は読まない（前は説明文の「A → B」を転記に分けていた）
+  const urlDet = review(plan([step('P1', 'UPDATE_APP_ACTION', 'APP_ACTION', '見積を作成', [['転記', 'レコードURL → source_url, secret_memo → note']])]));
+  assert(codes(st(urlDet, 'P1')).includes('NO_STRUCTURED_CHANGE') && st(urlDet, 'P1').diff.changeType === 'NO_CHANGE' && !st(urlDet, 'P1').spec.actionMappings && st(urlDet, 'P1').status === 'NEEDS_CONFIRMATION',
+    '説明文だけの転記は読まない: spec に値が無いので値の欠落（NO_STRUCTURED_CHANGE・書き込まない）', { codes: codes(st(urlDet, 'P1')), spec: st(urlDet, 'P1').spec });
   const preserved = review(plan([upd({ actionMappings: [{ srcType: 'FIELD', srcField: 'secret_memo', destField: 'note' }] })]));
   const pv = st(preserved, 'P1');
   assert(pv.diff.after.mappings.slice(0, 2).map(m => `${m.srcType}:${m.srcField}:${m.destField}`).join() === 'FIELD:case_name:quote_title,RECORD_URL:null:source_url' && pv.diff.after.entities.map(e => `${e.type}:${e.code}`).join() === 'USER:user1,GROUP:sales_group' && pv.diff.after.destApp.app === '311' && pv.diff.after.name === '見積を作成' && pv.diff.after.index === '0', 'existing preserved: 既存の転記・利用者・コピー先・名前・並び順はそのまま');
