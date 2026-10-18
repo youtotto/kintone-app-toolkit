@@ -2369,15 +2369,14 @@
       return h.toString(16).padStart(8, '0');
     }
     /**
-     * 簡素化 B（2026-10-17）: 候補の指紋。Gateway の candidateHashOf（worker/src/v2/toolkit/verify-generated.mjs）と同じ計算（SHA-256 の先頭 16 桁。
-     *   strategy・targetFile・code・patch（baseHash と操作の type・anchor・content）・送った既存ファイルの本文の指紋（hashText）・customizationId。改行は LF にそろえる）。
-     *   受け取った候補と生成工程の検証結果（verification.candidateHash）の結び付き、承認・登録の候補の結び付きを確かめるために使う（方式の違う指紋とは比べない）。
-     *   SHA-256 を使えない環境では null（結び付きを確かめられないので、合格にも登録にも使わない）
+     * 書き込む本文の指紋（2026-10-18。契約 20 §20）。Gateway の bodyHashOf（worker/src/v2/toolkit/verify-generated.mjs）と同じ計算（SHA-256 の先頭 16 桁。
+     *   strategy・targetFile・書き込む本文（新規はコード、統合は生成工程が合成した generated.body）・送った既存ファイルの本文の指紋（hashText）・customizationId。
+     *   改行はそろえない）。受け取った本文と生成工程の検証結果（verification.bodyHash）の結び付き、承認・登録の候補の結び付きを確かめるために使う。
+     *   本文が無い・SHA-256 を使えない環境では null（結び付きを確かめられないので、合格にも登録にも使わない）
      */
-    async function gatewayCandidateHashOf({ strategy = null, targetFile = null, code = '', patch = null, baseHash = null, customizationId = null } = {}) {
-      const lf = (s) => String(s ?? '').replace(/\r\n/g, '\n');
-      const ops = patch && Array.isArray(patch.operations) ? patch.operations.map(o => [String(o?.type ?? ''), lf(o?.anchor), lf(o?.content)]) : null;
-      const payload = JSON.stringify([strategy, targetFile, lf(code), ops ? { baseHash: patch.baseHash ?? null, operations: ops } : null, baseHash, customizationId]);
+    async function gatewayBodyHashOf({ strategy = null, targetFile = null, body = null, baseHash = null, customizationId = null } = {}) {
+      if (typeof body !== 'string') return null;
+      const payload = JSON.stringify([strategy, targetFile, body, baseHash, customizationId]);
       try {
         const subtle = typeof crypto !== 'undefined' && crypto && crypto.subtle ? crypto.subtle : null;
         if (!subtle || typeof TextEncoder === 'undefined') return null;
@@ -2572,7 +2571,7 @@
     return {
       register, run, scheduleAuto, autoPending, holdCustomize, takeHeldCustomize, holdFormDefs, takeHeldFormDefs, dropHeldCustomize, onChange, getStatus, setLastPayload, getLastPayload,
       markStale, isStale, runStale, rescanAfterWrite,
-      hashText, gatewayCandidateHashOf, analyzeFile, summarizeFiles, fieldList, buildPayload, isKnownLibraryUrl, KNOWN_LIBRARY_HOSTS,
+      hashText, gatewayBodyHashOf, analyzeFile, summarizeFiles, fieldList, buildPayload, isKnownLibraryUrl, KNOWN_LIBRARY_HOSTS,
       buildSignature, loadCache, saveCache, clearCache,
       isAutoEnabled, setAutoEnabled,
       CACHE_TTL_MS, ANALYZER_VERSION,
@@ -18964,11 +18963,16 @@
    */
   const ktEffectCheckCapable = (features) => ktEffectsCapable(features) && features.includes('effectCheck');
   /**
-   * 2026-10-18（外部への通信と通知の制限は生成工程の責任）: 生成工程の機械検査に、proxy の API・kintone の外の宛先・宛先を読めない通信・メンション付きのコメントの登録の
-   *   検査があるか（health の印 networkCheck。AI版 契約 20 §19）。Toolkit は要件の文の語で生成を止める判定（7b・7c）を削除したので、印の無い接続先の生成結果は
-   *   検証済みにしない（守り手の無い形を受け入れない。cancelCheck・limitCode と同じ扱い。文の語の判定は戻さない）
+   * 2026-10-18: 生成を依頼してよい接続先か（health の customization-generator.verification の印。既存の能力の確認の仕組み）。足りなければ生成を呼ばない
+   *   （使えないと分かっている結果のために有料の生成をしてから止めない）。要る印は今の受け渡しのすべて: requirementId（要件の id で達成を返す）・
+   *   KT_EFFECT_FEATURES（必須の効果と模擬テスト）・networkCheck（外部への通信と通知の機械検査。Toolkit は要件の文の語の判定 7b・7c を消した。AI版 契約 20 §19）・
+   *   verifiedBody（検査と模擬テストに使った本文を返す。Toolkit は合成しない。§20）。古い接続先のための形（印ごとに送る物や読み方を変える分岐）は持たない
    */
-  const KT_NETWORK_CHECK_FEATURE = 'networkCheck';
+  const KT_GENERATOR_REQUIRED = Object.freeze(['requirementId', ...KT_EFFECT_FEATURES, 'networkCheck', 'verifiedBody']);
+  const generatorLackOf = (marks) => {
+    const m = Array.isArray(marks) ? marks : [];
+    return KT_GENERATOR_REQUIRED.every(f => m.includes(f)) ? null : { capability: 'generator', reason: '接続先（生成工程）が、今の Toolkit が使う受け渡し（必須の動作の確認・検査と模擬テストに使った本文・外部への通信と通知の検査）に対応していないため、JavaScript の生成を依頼していません' };
+  };
   /**
    * C-1 第 4 段（2026-10-09）: 模擬テストの条件と確かめていない範囲は、Toolkit で一覧を持たない（前の KT_BEHAVIOR_UNVERIFIED_SCOPE と固定の文は削除した）。
    *   生成工程（Gateway）が返す verification.behavior.conditions と uncheckedScope（契約 20 の「確かめない範囲」と同じ文）をそのまま最終案の詳細表示に出す。
@@ -18979,37 +18983,8 @@
     const STATUS = Object.freeze({ OK: 'OK', REVIEW_REQUIRED: 'REVIEW_REQUIRED', BLOCKED: 'BLOCKED' });
     const EOL_RE = /\r\n|\r|\n/;
     const hash = (t) => KTScan.hashText(t);
-    /** 既存ソースへ patch を適用する（純関数）。anchor は 1 回だけ一致しなければ止める。baseHash が違えば止める */
-    function applyPatch(source, patch) {
-      const errors = [];
-      const src = String(source ?? '');
-      if (!patch || !Array.isArray(patch.operations) || !patch.operations.length) { errors.push({ code: 'PATCH_EMPTY', message: 'patch の操作がありません' }); return { ok: false, text: src, errors, applied: 0 }; }
-      const cur = hash(src);
-      if (patch.baseHash && patch.baseHash !== cur) errors.push({ code: 'PATCH_BASE_MISMATCH', message: `既存ソースの指紋が違います（patch ${patch.baseHash} / 現在 ${cur}）。既存ファイルが変わっています` });
-      let text = src;
-      let applied = 0;
-      const nl = /\r\n/.test(src) ? '\r\n' : '\n';
-      for (const [i, op] of patch.operations.entries()) {
-        const type = op?.type;
-        const anchor = String(op?.anchor ?? '').replace(/\r\n/g, '\n');
-        const content = String(op?.content ?? '').replace(/\r\n/g, '\n');
-        const norm = text.replace(/\r\n/g, '\n');
-        if (type === 'APPEND') { text = norm + (norm.endsWith('\n') || !norm ? '' : '\n') + content + (content.endsWith('\n') ? '' : '\n'); applied++; continue; }
-        if (!['INSERT_AFTER', 'INSERT_BEFORE', 'REPLACE'].includes(type)) { errors.push({ code: 'PATCH_OP_INVALID', message: `操作 ${i + 1}: 語彙外の type「${String(type)}」` }); continue; }
-        if (!anchor.trim()) { errors.push({ code: 'PATCH_ANCHOR_EMPTY', message: `操作 ${i + 1}: anchor がありません` }); continue; }
-        let count = 0, idx = -1, from = 0;
-        while ((from = norm.indexOf(anchor, from)) >= 0) { count++; if (idx < 0) idx = from; from += anchor.length; }
-        if (count !== 1) { errors.push({ code: count === 0 ? 'PATCH_ANCHOR_NOT_FOUND' : 'PATCH_ANCHOR_AMBIGUOUS', message: `操作 ${i + 1}: anchor が既存ソースに ${count} 回現れます（1 回だけ必要）` }); continue; }
-        const end = idx + anchor.length;
-        const withNl = (t) => (t.endsWith('\n') ? t : `${t}\n`);
-        if (type === 'INSERT_AFTER') { const rest = norm.slice(end); text = norm.slice(0, end) + (norm[end - 1] === '\n' ? '' : '\n') + content.replace(/\n$/, '') + (rest.startsWith('\n') || !rest ? '' : '\n') + rest; }   // anchor の行の直後に content（空行を挟まない）
-        else if (type === 'INSERT_BEFORE') text = norm.slice(0, idx) + withNl(content) + norm.slice(idx);
-        else text = norm.slice(0, idx) + content + norm.slice(end);
-        applied++;
-      }
-      if (nl === '\r\n') text = text.replace(/\n/g, '\r\n');
-      return { ok: errors.length === 0 && applied > 0, text, errors, applied, afterHash: hash(text) };
-    }
+    //   2026-10-18（契約 20 §20）: 既存ソースへ patch を適用する Toolkit の合成（applyPatch）は削除した。統合の書き込む本文は、生成工程が合成して検査と模擬テストに使った
+    //   generated.body をそのまま使う（同じ合成を二か所で持たない。改行は生成工程が LF にそろえる）。元の本文が変わったかは書き込みの直前の照合（JS_SOURCE_CHANGED）が見る
     /** 行単位の差分（LCS）。[{ type: ' ' | '+' | '-', text }]。大きいファイルは上限で打ち切る */
     function diffLines(before, after, { max = 4000 } = {}) {
       const a = String(before ?? '') === '' ? [] : String(before ?? '').split(EOL_RE), b = String(after ?? '') === '' ? [] : String(after ?? '').split(EOL_RE);   // 空は 0 行（新規ファイルは全行追加）
@@ -19113,17 +19088,17 @@
       const spaceIds = layoutSpaceIds(data?.layout);
       const fieldRows = [...fieldsN.map(f => ({ code: f.code, label: f.label, type: f.rawType })), ...proposedRows.map(p => ({ code: p.suggestedCode, label: p.label, type: p.type })), ...spaceIds.map(id => ({ code: id, label: id, type: 'SPACER' }))];
       const target = Array.isArray(c.platform) && c.platform.length === 1 && c.platform[0] === 'mobile' ? 'mobile' : (existingSource?.target || 'desktop');
-      // ---- 1. 登録する本文（新規: 全文 / 統合: 送った既存ファイルの本文に patch を当てる）----
+      // ---- 1. 登録する本文（新規: コード / 統合: 生成工程が既存ファイルの本文に patch を合成して検査と模擬テストに使った全文 g.body。Toolkit は合成しない）----
       let finalCode = String(g.code ?? '');
       const addedCode = finalCode;
-      let diff = null, patchResult = null;
+      let diff = null;
       if (g.strategy === 'EXTEND_EXISTING_JS') {
         if (!existingSource || typeof existingSource.text !== 'string') { add('patch', false, 'block', '統合先の既存ソースがありません（JS_SOURCE_UNAVAILABLE）。再スキャン / 新規 JS として設計 / 手動確認 のいずれかを選んでください'); return finish(); }
-        patchResult = applyPatch(existingSource.text, g.patch);
-        if (!patchResult.ok) { for (const e of patchResult.errors) add('patch', false, 'block', e.message, { code: e.code }); return finish(); }
-        finalCode = patchResult.text;
+        if (typeof g.body !== 'string' || !g.body.trim()) { add('patch', false, 'block', '生成工程が既存ファイルに統合した本文を返していません（統合の本文を作れなかった・接続先が古い）。この候補は登録しません'); return finish(); }
+        finalCode = g.body;
         diff = diffLines(existingSource.text, finalCode);
-        add('patch', true, 'info', `既存「${existingSource.name}」へ ${patchResult.applied} 件の操作を適用（＋${diff.added} 行 / −${diff.removed} 行）。元のコードは保持（全文の書き換えなし）`);
+        //   改行: 生成工程は LF で合成する（契約 20 §20）。元のファイルに CR があれば、改行の文字が LF に変わることを書く（行の差分には出ない）
+        add('patch', true, 'info', `既存「${existingSource.name}」に ${(g.patch?.operations || []).length} 件の操作を合成した本文（生成工程が検査と模擬テストに使った本文）を書き込みます（＋${diff.added} 行 / −${diff.removed} 行）${diff.removed === 0 ? '。元のコードは保持（既存の行の削除なし）' : ''}${existingSource.text.includes('\r') && !finalCode.includes('\r') ? '。元のファイルの改行（CRLF）は LF になります' : ''}`);
         //   書き込む内容の確認: 既存の行が置き換わる・消える（登録した後の動きではなく、書き込む本文そのものの事実）
         if (diff.removed > 0) add('patch-removal', false, 'review', `既存の ${diff.removed} 行が置き換え・削除されます（REPLACE）。既存処理が失われないか確認してください`, null, `既存のファイルの ${diff.removed} 行が置き換え・削除されます（既存の処理が失われないか確かめてください）`);
       } else if (g.strategy !== 'NEW_JS_FILE') { add('strategy', false, 'block', `方針 ${String(g.strategy)} は登録の対象外です`); return finish(); }
@@ -19230,7 +19205,7 @@
         else add('coverage-owner', false, 'review', `担当範囲外とされた要件「${u.requirement}」の担当が計画に見つかりません。計画全体の確認に残します`);
       }
       for (const u of coverage.planUnconfirmed) add('coverage-owner', false, 'review', u.message, null, u.screen);
-      return finish({ finalCode, addedCode, diff, patchResult, coverage });
+      return finish({ finalCode, addedCode, diff, coverage });
       function finish(extra = {}) {
         const status = checks.some(x => !x.ok && x.severity === 'block') ? STATUS.BLOCKED : checks.some(x => !x.ok) ? STATUS.REVIEW_REQUIRED : STATUS.OK;
         const finalCode2 = extra.finalCode ?? null;
@@ -19246,7 +19221,7 @@
           const usedCodes = new Set((rescan?.fields || []).map(f => f.code));
           for (const x of planned.fields) if (!existingCodes.has(x.code) && (usedCodes.has(x.code) || new RegExp(`['"\`]${escRx(x.code)}['"\`]`).test(text))) dependsOn.fields.push({ code: x.code, label: x.label, stepId: x.stepId, title: x.title || '' });
         }
-        return { reviewVersion: REVIEW_VERSION, status, checks, finalCode: finalCode2, addedCode: extra.addedCode ?? null, diff: extra.diff ?? null, diffText: extra.diff ? diffHunks(extra.diff) : null, rescan, mismatches: [], security: [], patch: extra.patchResult ? { applied: extra.patchResult.applied, afterHash: extra.patchResult.afterHash } : null, provenance: provenance ? { ...provenance, reviewedAt: new Date().toISOString(), codeHash: finalCode2 ? hash(finalCode2) : null } : null,
+        return { reviewVersion: REVIEW_VERSION, status, checks, finalCode: finalCode2, addedCode: extra.addedCode ?? null, diff: extra.diff ?? null, diffText: extra.diff ? diffHunks(extra.diff) : null, rescan, mismatches: [], security: [], provenance: provenance ? { ...provenance, reviewedAt: new Date().toISOString(), codeHash: finalCode2 ? hash(finalCode2) : null } : null,
           // Phase 21: 登録の判定（登録不可 / 確認が必要 / 動作は未確認）。生成工程の検証結果は attachBehavior が取り込む。KTJsExecutor は登録の直前にもこれを確かめる
           coverage: extra.coverage ?? null, dependsOn, registration: { ...registrationOf(status, checks, c, finalCode2), dependsOn },
           // 独立レビュー A3: AI の前提（assumptions）の表示用。内部の番号（手順 P1 / C2）を手順の名前・別の JavaScript の要件に置き換える
@@ -19499,7 +19474,7 @@
       const passedAll = req.length > 0 && er.ok;
       return { ...review, checks, status, effects: er, registration: { ...registrationOf(status, checks, c, review.finalCode, { behavior: req.length ? { ok: passedAll, machineOnly: er.items.length > 0 && er.items.every(i => i.checkedBy === 'machine'), machineSome: er.items.some(i => i.checkedBy === 'machine') } : null }), dependsOn } };
     }
-    return { REVIEW_VERSION, STATUS, applyPatch, diffLines, diffText, diffHunks, layoutSpaceIds, review, HOW_TO_CHECK, confirmScreenText, planScopeText, requirementScreenText,
+    return { REVIEW_VERSION, STATUS, diffLines, diffText, diffHunks, layoutSpaceIds, review, HOW_TO_CHECK, confirmScreenText, planScopeText, requirementScreenText,
       // §0c（2026-10-08）: 生成工程の検証結果（必須の効果・動作テスト）の取り込み
       attachBehavior, effectResults };
   })();
@@ -20542,6 +20517,8 @@
         ok: true, errors, warnings,
         normalized: {
           strategy: g.strategy, targetFile: String(g.targetFile || ''), summary: String(g.summary || ''), code: g.code, patch: g.patch && typeof g.patch === 'object' ? g.patch : null,
+          //   2026-10-18（契約 20 §20）: 統合の本文（生成工程が既存の本文に差分を合成して検査・模擬テストに使った全文）。Toolkit は合成せず、この本文をそのまま書き込む
+          body: g.strategy === 'EXTEND_EXISTING_JS' && typeof g.body === 'string' ? g.body : null,
           events: Array.isArray(g.events) ? g.events.filter(x => typeof x === 'string') : [], fields: Array.isArray(g.fields) ? g.fields.filter(f => f && typeof f.code === 'string') : [], apis: Array.isArray(g.apis) ? g.apis.filter(x => typeof x === 'string') : [],
           assumptions: Array.isArray(g.assumptions) ? g.assumptions.filter(x => typeof x === 'string') : [], warnings: Array.isArray(g.warnings) ? g.warnings.filter(x => typeof x === 'string') : [],
           // Phase 21: 要件ごとの達成（AI の自己申告。KTCodeReview が検査結果と照合して、満たせない部分を要約より先に出す）
@@ -20591,11 +20568,14 @@
     }
     /** §0c.9: 入口で受ける動作テストの代表条件の上限（Gateway の最大 PC・モバイル 192 件＋skipped より十分に大きい。超えたら truncated で合格にしない） */
     const KT_BEHAVIOR_CASES_MAX = 1000;
-    /** 契約 20 §12 の verification を Toolkit の形に（語彙外は落とす。candidateHash は 16 桁の 16 進だけ） */
+    /**
+     * 契約 20 §12 の verification を Toolkit の形に（語彙外は落とす。指紋は 16 桁の 16 進だけ）。
+     *   2026-10-18: Toolkit が結び付けに使うのは書き込む本文の指紋 bodyHash（候補の指紋 candidateHash は生成工程の中の判定のもので、Toolkit は見ない）
+     */
     function normalizeVerification(v) {
       if (!v || typeof v !== 'object') return null;
       const str = (x, n = 300) => String(x ?? '').slice(0, n);
-      const hash = typeof v.candidateHash === 'string' && /^[0-9a-f]{16}$/i.test(v.candidateHash) ? v.candidateHash.toLowerCase() : null;
+      const hash = typeof v.bodyHash === 'string' && /^[0-9a-f]{16}$/i.test(v.bodyHash) ? v.bodyHash.toLowerCase() : null;
       const machine = (Array.isArray(v.machine) ? v.machine : []).filter(x => x && typeof x.name === 'string').slice(0, 40).map(x => ({ name: str(x.name, 40), ok: x.ok === true, severity: ['block', 'review', 'info'].includes(x.severity) ? x.severity : (x.ok === true ? 'info' : 'review'), message: str(x.message), ...(Number.isFinite(Number(x.count)) ? { count: Number(x.count) } : {}) }));
       const rp = v.repairs && typeof v.repairs === 'object' ? v.repairs : {};
       // §0c.3 の 5（2026-10-08）: 必須の効果の構造の有無と動作テスト（隔離環境の模擬）の結果。返さない旧い Gateway では持たない（「非対応」として扱う。合格に読み替えない）
@@ -20651,7 +20631,7 @@
       const behavior = bh ? { status: ['passed', 'failed', 'not-run'].includes(bh.status) ? bh.status : 'not-run', reason: typeof bh.reason === 'string' ? str(bh.reason, 40) : null, ...(typeof bh.reasonText === 'string' ? { reasonText: str(bh.reasonText) } : {}), ...scopeOf, ...(rawCases.length > KT_BEHAVIOR_CASES_MAX ? { truncated: true, totalCases: rawCases.length } : {}), cases: rawCases.slice(0, KT_BEHAVIOR_CASES_MAX).map(x => { const det = detailsOf(x.details); return { id: str(x.id, 40), requirementId: idsOf(x)[0] || '', requirementIds: idsOf(x), field: str(x.field, 200), effect: KT_EFFECTS.includes(x.effect) ? x.effect : null, expect: str(x.expect, 40), verdict: VERDICTS.includes(x.verdict) ? x.verdict : 'not-run', observed: x.observed ?? null, message: str(x.message), ...(typeof x.note === 'string' ? { note: str(x.note, 200) } : {}), ...(typeof x.reason === 'string' && x.reason ? { reason: str(x.reason, 40) } : {}), ...(typeof x.reasonCategory === 'string' && x.reasonCategory ? { reasonCategory: str(x.reasonCategory, 40) } : {}), ...(typeof x.cause === 'string' && x.cause ? { cause: str(x.cause, 40) } : {}), ...(typeof x.event === 'string' ? { event: str(x.event, 120) } : {}), ...(typeof x.condition === 'string' ? { condition: str(x.condition) } : {}), ...(x.side === 'match' || x.side === 'nomatch' ? { side: x.side } : {}), ...(typeof x.kind === 'string' && x.kind ? { kind: str(x.kind, 40) } : {}), ...(x.platform === 'desktop' || x.platform === 'mobile' ? { platform: x.platform } : {}), ...portOf(x), ...(det ? { details: det } : {}) }; }) } : null;
       //   2026-10-10（§3.3）: 修復しなかった理由（最後の候補の模擬テストの not-run のうち case-invalid・condition-unknown を理由ごとに数えたもの）を落とさない
       const notRepaired = (Array.isArray(rp.notRepaired) ? rp.notRepaired : []).filter(x => x && typeof x.reason === 'string' && x.reason && Number.isFinite(Number(x.count)) && Number(x.count) > 0).slice(0, 10).map(x => ({ reason: str(x.reason, 40), category: typeof x.category === 'string' ? str(x.category, 40) : null, count: Number(x.count) }));
-      return { version: str(v.version || '1', 8), candidateHash: hash, sameAsPrevious: v.sameAsPrevious === true, passed: v.passed === true, machine, repairs: { count: Number.isFinite(Number(rp.count)) ? Number(rp.count) : 0, reasons: (Array.isArray(rp.reasons) ? rp.reasons : []).filter(x => typeof x === 'string').slice(0, 10).map(x => str(x, 120)), stoppedBy: ['limit', 'budget', 'time', 'same-failure', 'error'].includes(rp.stoppedBy) ? rp.stoppedBy : null, ...(notRepaired.length ? { notRepaired } : {}) }, unverified: (Array.isArray(v.unverified) ? v.unverified : []).filter(x => typeof x === 'string').slice(0, 10).map(x => str(x)), ...(requiredEffects ? { requiredEffects } : {}), ...(behavior ? { behavior } : {}) };
+      return { version: str(v.version || '1', 8), bodyHash: hash, sameAsPrevious: v.sameAsPrevious === true, passed: v.passed === true, machine, repairs: { count: Number.isFinite(Number(rp.count)) ? Number(rp.count) : 0, reasons: (Array.isArray(rp.reasons) ? rp.reasons : []).filter(x => typeof x === 'string').slice(0, 10).map(x => str(x, 120)), stoppedBy: ['limit', 'budget', 'time', 'same-failure', 'error'].includes(rp.stoppedBy) ? rp.stoppedBy : null, ...(notRepaired.length ? { notRepaired } : {}) }, unverified: (Array.isArray(v.unverified) ? v.unverified : []).filter(x => typeof x === 'string').slice(0, 10).map(x => str(x)), ...(requiredEffects ? { requiredEffects } : {}), ...(behavior ? { behavior } : {}) };
     }
 
     /**
@@ -25867,11 +25847,11 @@
         const portNotCapable = effUnknown.some(([, e]) => e.verdict && Array.isArray(e.verdict.unresolved) && e.verdict.unresolved.some(u => u && u.why === 'not-capable'));
         if (effUnknown.length) reasons.push({ kind: 'effects-unknown', text: effUnknown.every(([, e]) => e.verdict && e.verdict.port) ? (portNotCapable ? '既存の JavaScript から移す保存の条件が移植元と同じかを、この接続先では確かめる検査ができないため、まだ反映できません（「いつでも保存を止める」にはしていません）。' : '既存の JavaScript から移す保存の条件が移植元と同じかは、移植元の本文を取れない（読めない）ので確かめていません。そのため、まだ反映できません（「いつでも保存を止める」にはしていません）。') : 'JavaScript で必要な動作（編集できない・警告・保存を止めるなど）を特定できないため、まだ反映できません。' });
         if (notReady.some(([, e]) => e.status === 'not-ready' && e.verdict && e.verdict.kind === 'effects-limit')) reasons.push({ kind: 'effects-limit', text: '必須の動作が多すぎて、生成工程で一度に確かめられないため、まだ反映できません（計画の JavaScript を分けます）。' });
-        //   2026-10-18: 外部への通信と通知の検査に対応していない接続先（verdict.capability network）は、その理由で書く（必須の動作の確認の文と分ける）
+        //   2026-10-18: 今の Toolkit が使う受け渡しに対応していない接続先（生成の前の確認。verdict.capability generator）は、その理由で書く（必須の動作の確認の文と分ける）
         if (st('unsupported')) {
-          const capNet = notReady.some(([, e]) => e.status === 'unsupported' && e.verdict && e.verdict.capability === 'network');
-          const capOther = notReady.some(([, e]) => e.status === 'unsupported' && !(e.verdict && e.verdict.capability === 'network'));
-          reasons.push({ kind: 'capability', text: [capOther ? '接続先（生成工程）が必須の動作の確認に対応していないため、まだ反映できません。' : '', capNet ? '接続先（生成工程）が外部への通信と通知の検査に対応していないため、まだ反映できません。' : ''].filter(Boolean).join('') });
+          const capGen = notReady.some(([, e]) => e.status === 'unsupported' && e.verdict && e.verdict.capability === 'generator');
+          const capOther = notReady.some(([, e]) => e.status === 'unsupported' && !(e.verdict && e.verdict.capability === 'generator'));
+          reasons.push({ kind: 'capability', text: [capOther ? '接続先（生成工程）が必須の動作の確認に対応していないため、まだ反映できません。' : '', capGen ? '接続先（生成工程）が今の Toolkit の生成の受け渡し（必須の動作の確認・検査と模擬テストに使った本文・外部への通信と通知の検査）に対応していないため、まだ反映できません。' : ''].filter(Boolean).join('') });
         }
         //   §0c.6: 実行できなかった理由の区分ごとに文を変える（環境だけ「環境の制約」と言う）
         const NOT_RUN_TEXT = { env: '必須の動作を模擬テストで確かめられていないため、まだ反映できません（環境の制約です。作った JavaScript の誤りとは判定していません）。', condition: '計画の条件を模擬テストの代表条件にできる形で読めないため、まだ反映できません（計画の条件を直します。作った JavaScript の誤りとは判定していません）。', limit: '確かめる条件が模擬テストの上限を超えたため、まだ反映できません（計画を分けるか絞ります。作った JavaScript の誤りとは判定していません）。', existing: '既存の JavaScript と一緒の動きを模擬テストで確かめられないため、まだ反映できません（計画を直します: 作る JavaScript を既存の JavaScript に統合する・既存の処理を見直す。作った JavaScript の誤りとは判定していません）。' };
@@ -26846,14 +26826,12 @@
           const repairs = ver && ver.repairs && typeof ver.repairs === 'object' ? ver.repairs : null;
           const rc = repairs && repairs.count ? repairs.count : 0;
           if (!entry.review) return { status: 'unresolved', kind: 'no-review', reason: 'Toolkit の形式確認を完了できませんでした', next: '時間をおいて最終案を作り直します。', details };
-          //   §0c.7: health の印（requiredEffects・effectGroups・relatedOmitted・appFields・saveDialog・reasonCategory）が欠ける接続先は、結果が返っても非対応として扱う
-          //   簡素化 B（2026-10-16）: 生成工程の検証結果が無い（検証を返さない接続先。ver.legacy）は、必須の効果が無い JavaScript でも合格にしない（Toolkit の形式確認だけで検証済みにしない）
-          if (!ver || ver.legacy) return { status: 'unsupported', kind: 'capability', reason: '接続先（生成工程）が生成したコードの検証結果を返さないため、反映できるかを確かめられません', next: '接続先が更新されてから最終案を作り直します（いまの接続先では反映できる最終案にしません）。', details };
-          //   簡素化 B（2026-10-17）: 検証結果の指紋が、受け取った候補の指紋と一致しない（別の候補の検証結果・指紋の無い検証結果）→ 合格にしない
-          if (ver.bound !== true) return { status: 'unresolved', kind: 'verification-mismatch', fix: 'regenerate', reason: '生成工程の検証結果が、受け取った候補と対応していません（候補の指紋が一致しません）。この検証結果では合格にしません', next: '最終案を作り直します（候補を作り直し、その候補で検証し直します）。', details };
-          if (req.length && (!er.supported || entry.effectsCapable === false)) return { status: 'unsupported', kind: 'capability', reason: '接続先（生成工程）が必須の動作の確認に対応していないため、要件を満たすかを確かめられません', next: '接続先が更新されてから最終案を作り直します（いまの接続先では反映できる最終案にしません）。', details };
-          //   2026-10-18: 外部への通信と通知の検査（health の印 networkCheck）の無い接続先の結果は検証済みにしない（KT_NETWORK_CHECK_FEATURE。印を記録していない前の結果は変えない）
-          if (entry.networkCheck === false) return { status: 'unsupported', kind: 'capability', capability: 'network', reason: '接続先（生成工程）が外部への通信と通知の検査に対応していないため、作った JavaScript が kintone の外と通信しないか・メンション付きのコメントで通知しないかを確かめられません', next: '接続先が更新されてから最終案を作り直します（いまの接続先では反映できる最終案にしません）。', details };
+          //   簡素化 B（2026-10-16）: 生成工程の検証結果が無い応答は、必須の効果が無い JavaScript でも合格にしない（Toolkit の形式確認だけで検証済みにしない）。
+          //   2026-10-18: 能力の印の足りない接続先には生成を依頼しない（generateAndVerify の生成の前の確認 generatorLackOf）。ここは返った応答の形だけを見る
+          if (!ver) return { status: 'unsupported', kind: 'capability', reason: '接続先（生成工程）が生成したコードの検証結果を返さないため、反映できるかを確かめられません', next: '接続先が更新されてから最終案を作り直します（いまの接続先では反映できる最終案にしません）。', details };
+          //   簡素化 B（2026-10-17）: 検証結果の指紋が、受け取った本文の指紋と一致しない（別の候補の検証結果・指紋の無い検証結果）→ 合格にしない
+          if (ver.bound !== true) return { status: 'unresolved', kind: 'verification-mismatch', fix: 'regenerate', reason: '生成工程の検証結果が、受け取った本文と対応していません（本文の指紋が一致しません）。この検証結果では合格にしません', next: '最終案を作り直します（候補を作り直し、その候補で検証し直します）。', details };
+          if (req.length && !er.supported) return { status: 'unsupported', kind: 'capability', reason: '接続先（生成工程）が必須の動作の確認に対応していないため、要件を満たすかを確かめられません', next: '接続先が更新されてから最終案を作り直します（いまの接続先では反映できる最終案にしません）。', details };
           const behaviorFailed = er.failed.length > 0 || er.otherFailed.length > 0;
           if (codeBlocks.length || er.missing.length || behaviorFailed || (ver && ver.passed === false)) {
             const missing = er.missing.map(i => `${fieldName(i.field)}: ${EFFECT_NEED_JA[i.effect] || i.effect}`);
@@ -27129,6 +27107,11 @@
           //   §0c.6: 必須の効果は生成工程の上限（20 件）まで。超える分を黙って落とすと確かめないまま残るので、生成を呼ばずに準備未完了（件数の上限）にする
           if (req.effects.length > 20) return { ...base, generated: null, review: null, existingSource: null, status: 'not-ready', candidateHash: null, attempts: previous ? previous.attempts || null : null,
             verdict: { status: 'not-ready', kind: 'effects-limit', fix: 'revise', reasonKey: 'limit', reason: `必須の動作が ${req.effects.length} 件あり、生成工程で一度に確かめられる 20 件を超えています`, next: KT_REASON_CATEGORY.limit.next, details: [] } };
+          //   2026-10-18: 接続先（生成工程）の能力の印で、生成の結果を使えないと分かっているときは、生成を呼ばずに止める（有料の生成をしてから止めない。古い形の応答の読み替えはしない）
+          const marksNow = typeof services.generatorFeatures === 'function' ? services.generatorFeatures() : null;
+          const lack = Array.isArray(marksNow) ? generatorLackOf(marksNow) : null;
+          if (lack) return { ...base, generated: null, review: null, existingSource: null, status: 'unsupported', candidateHash: null, attempts: previous ? previous.attempts || null : null,
+            verdict: { status: 'unsupported', kind: 'capability', capability: lack.capability, reason: lack.reason, next: '接続先が更新されてから最終案を作り直します（いまの接続先では反映できる最終案にしません）。', details: [] } };
           progressChecklist(checklistOfEffects(req.effects));
           aiCall();
           const tg = clock();
@@ -27138,7 +27121,7 @@
           //   生成の停滞の観測（2026-10-14）: 生成工程の進みの通知（接続先に印があるときだけ届く）で進みのカードの段階 generate の文を事実に合わせる（noteGenProgress）。
           //   表示側の失敗で生成を落とさない。この送信が終わった後の通知は進みのカードが無いので何もしない
           const onProgress = (ev) => { try { if (!late()) noteGenProgress(ev, { n: index + 1, m: total }); } catch (x) { } };
-          try { const ownersNow = planOwnerIdsOf(v); r = await services.generate({ version: v, customizationId: cid, signal, decisions: decisionsNow, previous, verification: true, requiredEffects: req.effects, onProgress, ...(ownersNow ? { planOwners: [...ownersNow] } : {}) }); }
+          try { const ownersNow = planOwnerIdsOf(v); r = await services.generate({ version: v, customizationId: cid, signal, decisions: decisionsNow, previous, requiredEffects: req.effects, onProgress, ...(ownersNow ? { planOwners: [...ownersNow] } : {}) }); }
           catch (e) {
             const er = errorOf(e);
             const kind = stopKindOf(e) || (abortedNow() ? 'cancelled' : null);
@@ -27166,12 +27149,14 @@
           //   C-1 第 4 段（2026-10-09・K-2 の残り）: 生成の使用量は、この送信の呼び出しの記録に付ける（attempts の累計は版をまたぐので使用量に使わない）
           { const lastCall = timing.calls.length ? timing.calls[timing.calls.length - 1] : null; if (lastCall && lastCall.kind === 'generate' && estimate && estimate.measured !== false && (estimate.input != null || estimate.output != null)) lastCall.genEstimate = estimate; }
           const blockerCodes = (r.review?.registration?.blockers || []).map(b => String(b.code));
-          const entry = { ...base, effectsCapable: typeof services.generatorFeatures === 'function' ? ktEffectsCapable(services.generatorFeatures() || []) : null, effectCheck: typeof services.generatorFeatures === 'function' ? ktEffectCheckCapable(services.generatorFeatures() || []) : false, scopeList: typeof services.generatorFeatures === 'function' ? (services.generatorFeatures() || []).includes('scopeList') : false, networkCheck: typeof services.generatorFeatures === 'function' ? (services.generatorFeatures() || []).includes(KT_NETWORK_CHECK_FEATURE) : null, generated: r.generated, review: r.review, ctx: r.ctx || null, existingSource: r.existingSource || null, verification: r.verification || null, candidateHash: null, requirementIds: r.requirementIds || null, relatedFiles: r.relatedFiles || null, inputHash: r.inputHash ?? null, blockers: blockerCodes, attempts: nextAttempts(previous, { inputHash: r.inputHash ?? null, blockers: blockerCodes, estimate, at: now(), reviewFailed: !!(r.review && r.review.reviewFailed) }), repairs: (r.verification && r.verification.repairs && r.verification.repairs.count) || 0, status: null };
-          //   簡素化 B（2026-10-17）: 生成工程の検証結果と、受け取った候補の結び付きを確かめる。候補の指紋は Gateway と同じ計算で、受け取った候補と送った既存ファイルの
-          //   本文から Toolkit が作る（承認・登録はこの指紋に結び付ける）。検証結果の指紋と一致したときだけ bound（一致しない・指紋の無い検証結果は合格にしない）
-          entry.candidateHash = await KTScan.gatewayCandidateHashOf({ strategy: entry.generated?.strategy, targetFile: entry.generated?.targetFile, code: entry.generated?.code, patch: entry.generated?.patch, baseHash: entry.existingSource && typeof entry.existingSource.text === 'string' ? KTScan.hashText(entry.existingSource.text) : null, customizationId: cid });
+          const entry = { ...base, effectCheck: typeof services.generatorFeatures === 'function' ? ktEffectCheckCapable(services.generatorFeatures() || []) : false, generated: r.generated, review: r.review, ctx: r.ctx || null, existingSource: r.existingSource || null, verification: r.verification || null, candidateHash: null, requirementIds: r.requirementIds || null, relatedFiles: r.relatedFiles || null, inputHash: r.inputHash ?? null, blockers: blockerCodes, attempts: nextAttempts(previous, { inputHash: r.inputHash ?? null, blockers: blockerCodes, estimate, at: now(), reviewFailed: !!(r.review && r.review.reviewFailed) }), repairs: (r.verification && r.verification.repairs && r.verification.repairs.count) || 0, status: null };
+          //   簡素化 B（2026-10-17）・2026-10-18（契約 20 §20）: 生成工程の検証結果と、受け取った本文の結び付きを確かめる。書き込む本文（新規はコード、統合は生成工程が
+          //   合成した generated.body）の指紋を Gateway と同じ計算で作り（承認・登録はこの指紋に結び付ける）、検証結果の指紋 bodyHash と一致したときだけ bound
+          //   （一致しない・指紋の無い検証結果は合格にしない。Toolkit は本文を合成しないので、検証した本文と書き込む本文は同じ文字列）
+          const writeBody = entry.generated && entry.generated.strategy === 'EXTEND_EXISTING_JS' ? entry.generated.body : entry.generated?.code;
+          entry.candidateHash = await KTScan.gatewayBodyHashOf({ strategy: entry.generated?.strategy, targetFile: entry.generated?.targetFile, body: writeBody, baseHash: entry.existingSource && typeof entry.existingSource.text === 'string' ? KTScan.hashText(entry.existingSource.text) : null, customizationId: cid });
           if (late()) return null;
-          if (entry.verification) entry.verification = { ...entry.verification, bound: !!entry.candidateHash && entry.verification.candidateHash === entry.candidateHash };
+          if (entry.verification) entry.verification = { ...entry.verification, bound: !!entry.candidateHash && entry.verification.bodyHash === entry.candidateHash };
           //   生成工程の検証結果（必須の効果・動作テスト）を形式確認に取り込む（画面の登録前の再検査と同じ関数。動作テストの結果が無ければ既知の競合は登録不可のまま）
           //   §0c.6: 動作テストに渡せなかった既存 JS（Toolkit が外した・Gateway が落とした）が同じイベントを登録していれば、その効果は verified にしない
           entry.relatedOmitted = Array.isArray(r.relatedOmitted) ? r.relatedOmitted : [];
@@ -27539,8 +27524,8 @@
           const behReasons = [...new Set(entries.map(([, e]) => { const b = e.verification && e.verification.behavior; if (!b || b.status !== 'not-run') return ''; const er = e.review && e.review.effects; return er && er.reason ? reasonLineOf(er.reason) : reasonLineOf(b.reason && b.reason !== 'partial' ? b.reason : 'unavailable'); }).filter(Boolean))];
           const behavior = { status: !behStatuses.length ? 'none' : behStatuses.includes('failed') ? 'failed' : behStatuses.includes('not-run') ? 'not-run' : behStatuses.every(s => s === 'passed') ? 'passed' : 'not-run', reasons: behReasons, cases: behCases, counts: { pass: behCases.filter(x => x.verdict === 'pass').length, fail: behCases.filter(x => x.verdict === 'fail').length, notRun: behCases.filter(x => x.verdict === 'not-run').length } };
           //   C-1 第 4 段（2026-10-09）: 模擬テストの条件と確かめていない範囲は、生成工程が返した文（behavior.conditions・uncheckedScope）をそのまま使う（Toolkit で一覧を持たない）。
-          //   health の印 'scopeList' がある接続先の結果だけを使う。同じ文は 1 行にまとめる
-          const scopeEntries = entries.filter(([, e]) => e.scopeList === true && e.verification && e.verification.behavior);
+          //   同じ文は 1 行にまとめる（2026-10-18: 生成を依頼するのは印 scopeList を持つ今の接続先だけなので、結果ごとの印の写しは持たない）
+          const scopeEntries = entries.filter(([, e]) => e.verification && e.verification.behavior);
           const scopeTexts = (k) => [...new Set(scopeEntries.flatMap(([, e]) => (Array.isArray(e.verification.behavior[k]) ? e.verification.behavior[k] : []).filter(x => typeof x === 'string' && x.trim()).map(x => x.trim())))];
           const scope = { conditions: scopeTexts('conditions'), unchecked: scopeTexts('uncheckedScope'), conditionsNotRun: scopeEntries.some(([, e]) => e.verification.behavior.conditionsNotRun === true) };
           // 実機で確かめること: 保存を止める・警告（保存は止めない）の必須の効果があるときだけ保存の行を出す（構造化した効果で決める。編集制限と保存の禁止を混同しない）
@@ -30719,7 +30704,8 @@
       /** 2026-10-05 第 3 段: 質問の AI が受け取れる会話の文脈（requirements / brief。返さない古い Gateway は無し = 先回りの返答を使わない） */
       conversationFeatures() { return capability?.features?.['assistant-qa']?.conversation || []; },
       // 段階 C: 生成の検証の能力（requirementId・requiredEffects などの印。契約 20 §12）と計画の AI の逐次表示（stream: reply。契約 16）。古い Gateway は空
-      generatorFeatures() { return capability?.features?.[KTAiClient.FEATURE_GENERATOR]?.verification || []; },
+      //   2026-10-18: 生成を使えない（契約に無い・Gateway に無いなど。features の customization-generator が available でない）ときは null（会話の生成の前の確認は印の不足と言わず、生成の呼び出しの GENERATOR_NOT_AVAILABLE に任せる）
+      generatorFeatures() { const g = capability?.features?.[KTAiClient.FEATURE_GENERATOR]; return g && g.available === true ? (g.verification || []) : null; },
       /** 生成の停滞の観測（2026-10-14）: 生成工程の逐次配信の印（health の customization-generator.stream。progress = 進みの通知。契約 20 §18）。古い Gateway は空 */
       generatorStream() { return capability?.features?.[KTAiClient.FEATURE_GENERATOR]?.stream || []; },
       plannerFeatures() { return capability?.features?.[KTAiClient.FEATURE_PLANNER]?.stream || []; },
@@ -30807,7 +30793,7 @@
        */
       //   生成の停滞の観測（2026-10-14・契約 20 §18）: onProgress（任意）= 生成工程の進みの通知（{ stage, attempt, phase, t, ... }）の受け手。接続先に印（health の stream に progress）があるときだけ
       //   SSE で受ける（古い Gateway には Accept を付けない = 今までどおり JSON）。通知は表示だけに使い、打ち切り・再送はしない
-      async generate({ version: v, customizationId, signal = null, decisions = [], previous = null, verification = false, requiredEffects = null, onProgress = null, planOwners = null }) {
+      async generate({ version: v, customizationId, signal = null, decisions = [], previous = null, requiredEffects = null, onProgress = null, planOwners = null }) {
         const plan = v?.plan || null;
         const c0 = (plan?.customizations || []).find(x => x.customizationId === customizationId) || null;
         if (!c0) return { ok: false, reason: 'CUSTOMIZATION_NOT_FOUND', message: `カスタマイズ ${customizationId} は現在の計画にありません。` };
@@ -30839,32 +30825,25 @@
         // 段階 C（契約 20 §4 / §12）: 要件の id（この customization・要件 R…・手順 P…）。能力の無い Gateway には送らない
         //   §0c.3（2026-10-08）: 代表条件は作らない（Gateway が必須の効果から作る）。必須の効果（会話が採用済みの計画から作って固定したもの）と、
         //   動作テストに使う既存 JS の本文（同じ platform の既存 JS のうち、必須の効果のフィールドを参照するものだけ。アプリ解析で選ぶ）を渡す。
-        //   能力（health の customization-generator.verification に requiredEffects）が無い接続先には送らない（最終案は「接続先が非対応」で準備未完了になる）
-        const feats = services.generatorFeatures() || [];
-        const wantVerify = !!verification;
+        //   2026-10-18: 能力の印の足りない接続先には、会話の生成の前の確認（generatorLackOf）で依頼しない。ここでは今の受け渡しの形だけで送る（古い形の分岐は持たない）
         const files = KTScan.summarizeFiles(inputs.scan || null, inputs.data || null);
         //   §0f.2 の 4（2026-10-09）: 「満たすべき要件」と形式確認の要件は採用範囲の中だけ（この版の計画で判定する）
         const gapsG = conv && typeof conv.implementationGaps === 'function' ? conv.implementationGaps(v) : {};
         const reqLedger = (conv && typeof conv.requirementsInScope === 'function' ? conv.requirementsInScope(v.planId, v.plan || null) : conv && typeof conv.requirements === 'function' ? conv.requirements(v.planId) : []).map(r => (r && gapsG[r.id] ? { ...r, gapScreen: gapsG[r.id] } : r));
         //   2026-10-15（§3）: 要件の担当として数える id（会話の準備の判定と同じ集まり。会話が渡したもの、無ければ会話から引く）
         const ownersOfPlan = Array.isArray(planOwners) ? planOwners : conv && typeof conv.planOwnerIds === 'function' ? conv.planOwnerIds(v) : null;
-        const requirementIds = wantVerify ? [{ id: c.customizationId, kind: 'customization', text: String(c.requirement || '') }, ...reqLedger.filter(r => r && r.decision !== 'revoked').map(r => ({ id: r.id, kind: 'requirement', text: [r.condition, r.behavior].filter(Boolean).join('：') })), ...(plan?.steps || []).filter(s => s && s.id && s.actionType !== 'CUSTOMIZATION_REQUIRED').map(s => ({ id: s.id, kind: 'step', text: String(s.title || '') }))].filter(x => /^[CRP]\d+$/.test(String(x.id))).slice(0, 50) : null;
-        const reqEffects = wantVerify && Array.isArray(requiredEffects) ? requiredEffects : [];
-        //   §0c.7（2026-10-08）: health の印（requiredEffects・effectGroups・relatedOmitted・appFields・saveDialog・reasonCategory）がすべてあるときだけ新しい形で送る
-        const sendEffects = wantVerify && ktEffectsCapable(feats);
+        const requirementIds = [{ id: c.customizationId, kind: 'customization', text: String(c.requirement || '') }, ...reqLedger.filter(r => r && r.decision !== 'revoked').map(r => ({ id: r.id, kind: 'requirement', text: [r.condition, r.behavior].filter(Boolean).join('：') })), ...(plan?.steps || []).filter(s => s && s.id && s.actionType !== 'CUSTOMIZATION_REQUIRED').map(s => ({ id: s.id, kind: 'step', text: String(s.title || '') }))].filter(x => /^[CRP]\d+$/.test(String(x.id))).slice(0, 50);
+        const reqEffects = Array.isArray(requiredEffects) ? requiredEffects : [];
         //   §0c.6（2026-10-08）: 動作テストに送る既存 JS は、計画の platform（PC / モバイル）ごとに、必須の効果のフィールドを参照するか必須の効果のイベントを登録するファイル
         //   （アプリ解析の結果で選ぶ）。上限は Gateway と同じ（§0c.7: 4 件・合計 131,072 文字。1 ファイルの上限は無い）。送れなかったファイル（本文が無い・URL 指定・上限超え）は
         //   relatedOmitted として Gateway にも知らせ、Toolkit の判定でも verified にしない。events は、解析で分かったイベント（登録が 1 つ以上）か、
         //   分からなければ null（その platform のすべて）。
         //   §0c.8（2026-10-08）: URL 指定のファイルは既定で null。[] にするのは既知のライブラリの配布元（KTScan.isKnownLibraryUrl）だけ。
         //   画面とホストが違うかどうか（Field Scanner の本文を取らない判定）では決めない（自社のサーバーの業務 JS を素通りさせない）
-        let relatedFiles = null, relatedOmitted = [];
-        if (sendEffects) {
-          const targets = existingSource?.target ? [existingSource.target] : (Array.isArray(c.platform) && c.platform.length ? c.platform.filter(x => x === 'desktop' || x === 'mobile') : ['desktop']);
-          ({ relatedFiles, relatedOmitted } = KTContext.relatedFilesFor(files, { targets, requiredEffects: reqEffects, existing: existingSource }));
-        }
-        const sendVerify = wantVerify && feats.includes('requirementId') ? { requirementIds, ...(sendEffects ? { requiredEffects: reqEffects, relatedFiles: relatedFiles.map(f => ({ name: f.name, target: f.target, text: f.text })), relatedOmitted } : {}) } : null;
-        const ctx = KTContext.buildGenerator({ customization: c, plan, review: v.review || null, planId: v.planId, version: v.version, data: inputs.data || null, deps: inputs.deps || null, scan: inputs.scan || null, existingSource, userRequests: [v.goal, ...(v.revisionRequests || [])], decisions: Array.isArray(decisions) ? decisions : [], ...(sendVerify ? { verification: sendVerify } : {}) });
+        const targets = existingSource?.target ? [existingSource.target] : (Array.isArray(c.platform) && c.platform.length ? c.platform.filter(x => x === 'desktop' || x === 'mobile') : ['desktop']);
+        const { relatedFiles, relatedOmitted } = KTContext.relatedFilesFor(files, { targets, requiredEffects: reqEffects, existing: existingSource });
+        const sendVerify = { requirementIds, requiredEffects: reqEffects, relatedFiles: relatedFiles.map(f => ({ name: f.name, target: f.target, text: f.text })), relatedOmitted };
+        const ctx = KTContext.buildGenerator({ customization: c, plan, review: v.review || null, planId: v.planId, version: v.version, data: inputs.data || null, deps: inputs.deps || null, scan: inputs.scan || null, existingSource, userRequests: [v.goal, ...(v.revisionRequests || [])], decisions: Array.isArray(decisions) ? decisions : [], verification: sendVerify });
         // 段階 A（5.6）: 同じ入力（Context の指紋）・同じ指摘（直前の Review の blocker）での再生成は AI を呼ばない（『作って』・generate・再試行のどの入口も）
         const inputHash = KTContext.generatorInputHash(ctx);
         const prevGen = previous || (v.generated && v.generated[customizationId]) || null;
@@ -30882,24 +30861,19 @@
         // §0d.3（2026-10-08）: 生成工程（Gateway）が検証したコードを Toolkit で書き換えない（検証した候補と登録する候補（candidateHash）を同じにするため）。
         //   記法の問題（var など）は生成工程の機械検査（modern-js）が止める（直すのは生成工程の修復か作り直し）
         const provenance = { planId: v.planId, planVersion: v.version, customizationId, generatedAt: new Date().toISOString(), appId: String(inputs.data?.appId ?? d.appId ?? executor?.appId ?? ''), requestId: generated.requestId || requestId, generator: 'nest-rec-ai/customization-generator', toolkitVersion: SCRIPT_VERSION };
-        //   C-1 第 3 段（2026-10-08）: coverage の limitCode（kintone の制約の印）は、health の customization-generator.verification に 'limitCode' の印がある
-        //   接続先のときだけ使う。印の無い接続先では落とす（その PARTIAL は「実現できない点」にせず要件未達のまま。AI の申告の文は読まない）
-        if (!feats.includes('limitCode') && Array.isArray(generated.coverage) && generated.coverage.some(x => x && x.limitCode)) generated.coverage = generated.coverage.map(x => { if (!x || !x.limitCode) return x; const { limitCode, ...rest } = x; void limitCode; return rest; });
         let review;
         try { review = KTCodeReview.review({ generated, customization: c, plan, data: inputs.data || null, scan: inputs.scan || null, existingSource, provenance, requirements: reqLedger, planOwners: ownersOfPlan }); }
         // 再レビュー 2026-10-07: 検査が例外で完了しなかった回は reviewFailed: true（同じ入力の案内で「検査は通っています」と言わない）
         catch (e) { review = { reviewVersion: KTCodeReview.REVIEW_VERSION, status: KTCodeReview.STATUS.REVIEW_REQUIRED, reviewFailed: true, checks: [{ name: 'code', ok: false, severity: 'review', message: `Toolkit の検査を完了できませんでした: ${e?.message || String(e)}` }], finalCode: generated.code, addedCode: generated.code, diff: null, mismatches: [], security: [], provenance }; }
-        // 段階 C: 生成と一体の検証結果。能力の無い Gateway（verification を返さない）は入口で一度だけ従来の形から作る（candidateHash は Toolkit で計算。修復の依頼は無し）。
-        //   簡素化 B（2026-10-16）: その形は合格にしない（passed false・会話の判定で非対応）
-        //   簡素化 B（2026-10-17）: 候補の指紋を Toolkit の別の方式で補わない（会話が Gateway と同じ計算で作り、検証結果の指紋に照らす）
-        const verificationOut = generated.verification ? { ...generated.verification, legacy: false } : { version: '0', candidateHash: null, sameAsPrevious: false, passed: false, machine: [], repairs: { count: 0, reasons: [], stoppedBy: null }, unverified: ['生成側の機械検査・模擬テストには対応していない接続先です（Toolkit の形式確認だけでは合格にしません）'], legacy: true };
+        //   生成と一体の検証結果（無い応答は会話の判定で検証済みにしない。古い形を作って補わない）
+        const verificationOut = generated.verification || null;
         //   §0c.6: Gateway が落とした既存 JS（meta.normalization.warnings の VERIFICATION_RELATED_FILE_DROPPED。path の添え字は送った relatedFiles の順）も、送れなかったものに足す
-        if (relatedFiles) for (const w of (Array.isArray(generated.gatewayWarnings) ? generated.gatewayWarnings : [])) {
+        for (const w of (Array.isArray(generated.gatewayWarnings) ? generated.gatewayWarnings : [])) {
           const m = w && w.code === 'VERIFICATION_RELATED_FILE_DROPPED' && typeof w.path === 'string' ? /relatedFiles\[(\d+)\]/.exec(w.path) : null;
           const f = m ? relatedFiles[Number(m[1])] : null;
           if (f && !relatedOmitted.some(x => x.name === f.name && x.target === f.target)) relatedOmitted.push({ name: f.name, target: f.target, reason: 'gateway-dropped', events: Array.isArray(f.events) ? f.events : null });
         }
-        return { ok: true, generated, review, ctx, existingSource, inputHash, verification: verificationOut, candidateHash: verificationOut.candidateHash, requirementIds, relatedFiles: relatedFiles ? relatedFiles.map(f => ({ name: f.name, target: f.target })) : null, relatedOmitted, callTrace: callTraceOf(requestId, trace) };
+        return { ok: true, generated, review, ctx, existingSource, inputHash, verification: verificationOut, requirementIds, relatedFiles: relatedFiles ? relatedFiles.map(f => ({ name: f.name, target: f.target })) : null, relatedOmitted, callTrace: callTraceOf(requestId, trace) };
       },
     };
     /**

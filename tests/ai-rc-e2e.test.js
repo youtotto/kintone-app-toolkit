@@ -24,6 +24,9 @@ const { assert, state } = makeAssert();
 const FX = require('./fixtures/ai-context-app.js');
 const R = require('./fixtures/p21-bfc-replay.js');
 const E2E = require('./fixtures/rc-e2e-replay.js');
+//   2026-10-18（AI版 契約 20 §20）: 統合の書き込む本文は生成工程が合成して返す（generated.body）。記録した出力（記録の時点の受け渡し）には本文が無いので、
+//   形式確認に渡すときはテストの偽の生成工程の本文（gwWithBody。既存の本文と patch から作る）を持たせる（記録の値は変えない）
+const { gwWithBody } = require('./helpers/gw-hash.js');
 
 // 修正前の版（KT_SRC）には無い関数を呼んでも落ちない（失敗として数える）
 const safe = (fn, fallback = null) => { try { return fn(); } catch (e) { return fallback; } };
@@ -69,11 +72,11 @@ console.log('\n--- N2 実機の再生（RC E2E の §2 手順 4）: 記録した
   //   簡素化 B（2026-10-16）: 記法（var）の自動修正と検査は生成工程（Gateway の modern-js.mjs）だけが行う（Toolkit の写しの KTModernJs は削除。追加した var だけを直し、
   //   既存の var を変えないことは AI版 worker/test/cases/modern-js.mjs が確かめる）。Toolkit の形式確認は記録した出力（var を含む）をそのまま検査する
   const src3 = { name: 'dealValidate.js', target: 'desktop', text: edited };
-  const v3 = KTCodeReview.review({ generated: E2E.S2_V3.generated, customization: E2E.S2_V3.customization, plan: null, data: JSON.parse(JSON.stringify(DATA)), scan: null, existingSource: src3 });
+  const v3 = KTCodeReview.review({ generated: gwWithBody(E2E.S2_V3.generated, edited), customization: E2E.S2_V3.customization, plan: null, data: JSON.parse(JSON.stringify(DATA)), scan: null, existingSource: src3 });
   assert(!v3.checks.some(x => x.name === 'modern-js'), 'Toolkit の形式確認は記法を確かめない（生成工程の機械検査の modern-js が確かめる）');
   // 段階 C（5.5 の縮小）: 既存の handler の var は自動では変えない（直すのは追加した var だけ）。既存の var amount は変更していない行なので記法の検査の対象外
-  assert(/var amount = event\.record\['amount'\]\.value;/.test(v3.finalCode || '') && v3.checks.some(x => x.name === 'patch' && /元のコードは保持（全文の書き換えなし）$/.test(x.message)), `既存の dealValidate.js の var amount はそのまま（全文を書き換えない）: ${JSON.stringify(v3.checks.filter(x => /^patch/.test(x.name)).map(x => x.message))}`);
-  assert(!check(v3, 'patch').length, '再生の前提: パッチは適用できる');
+  assert(/var amount = event\.record\['amount'\]\.value;/.test(v3.finalCode || '') && v3.checks.some(x => x.name === 'patch' && /元のコードは保持（既存の行の削除なし）$/.test(x.message)) && v3.finalCode === gwWithBody(E2E.S2_V3.generated, edited).body, `既存の dealValidate.js の var amount はそのまま（受け取った統合の本文のまま書き込む。既存の var を変えないのは生成工程の合成）: ${JSON.stringify(v3.checks.filter(x => /^patch/.test(x.name)).map(x => x.message))}`);
+  assert(!check(v3, 'patch').length, '再生の前提: 統合の本文を受け取れる（patch の確認に止める項目が無い）');
   // v3 の空の判定（undefined を扱わない）・v2（undefined も判定）の違いは、生成工程の模擬テストが確かめる（sandbox/test/run.mjs §5 の S2_V3・S2_V2）
 }
 
@@ -84,7 +87,7 @@ console.log('\n--- モデル更新（gpt-6.1-sol）の評価で見つけた誤�
 {
   const M = require('./fixtures/rc-model-replay.js');
   const data = JSON.parse(JSON.stringify(DATA));
-  const run = (x) => KTCodeReview.review({ generated: x.generated, customization: x.customization, plan: null, data, scan: null, existingSource: { name: 'dealLock.js', target: 'desktop', text: R.DEAL_LOCK } });
+  const run = (x) => KTCodeReview.review({ generated: gwWithBody(x.generated, R.DEAL_LOCK), customization: x.customization, plan: null, data, scan: null, existingSource: { name: 'dealLock.js', target: 'desktop', text: R.DEAL_LOCK } });
   // 1) error = null（空白を挟む普通の書き方）をエラーの設定と数えない
   const bfc = run(M.SOL_BFC);
   assert(M.SOL_BFC.verdictAtRun === 'BLOCKED' && /field\.error = null/.test(M.SOL_BFC.generated.code), '前提: 実行時の判定は登録不可（保存時の分岐の field.error = null を数えた）');

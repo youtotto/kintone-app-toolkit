@@ -26,6 +26,9 @@ const { assert, state } = makeAssert();
 const FX = require('./fixtures/ai-context-app.js');
 const R = require('./fixtures/p21-bfc-replay.js');
 const SA = require('./fixtures/stage-a-edit-lock.js');
+//   2026-10-18（AI版 契約 20 §20）: 統合の書き込む本文は生成工程が合成して返す（generated.body）。素材の統合の候補には本文が無いので、
+//   形式確認に渡すときはテストの偽の生成工程の本文（gwWithBody。既存の本文と patch から作る）を持たせる
+const { gwWithBody } = require('./helpers/gw-hash.js');
 const { makeKintoneMock } = require('./helpers/kintone-preview-mock.js');
 //   C-1 第 3 段（2026-10-08）: 会話の試験（T-A6・T-A10 の 4 / 7）は新しい流れ（仮案 → 採用 → 最終案）の上で行う（共有の部品）
 const { createNewFlowKit } = require('./helpers/new-flow.js');
@@ -208,18 +211,18 @@ await section(() => {
   assert(nmOf(noCode) && !nmOf(noCode).limit && !noCode.coverage.notAchieved.some(x => x.code === 'SUBTABLE_ROWS'), `確認 7: limitCode の無い NOT_MET は文を読まずに印を付けない: ${JSON.stringify(nmOf(noCode))}`);
 });
 // =========================================================
-console.log('\n--- T-A5（5.5 → 段階 C → 簡素化 B）var: 記法の修正と検査は生成工程だけ。既存の var を含む統合先へ patch を当てても全文を書き換えない ---');
+console.log('\n--- T-A5（5.5 → 段階 C → 簡素化 B）var: 記法の修正と検査は生成工程だけ。既存の var を含む統合先に足した本文でも、既存の行を消さない ---');
 //   段階 A の「変更する handler の本体の既存 var の自動変換」は段階 C で外した（改訂 2: 任意の既存コードの独自変換器を広げない）。簡素化 B（2026-10-16）で、Toolkit の記法の
 //   写し（KTModernJs）も削除した（追加した var だけを直し、handler の外・別の handler・同じ handler の既存の var を変えないことは AI版 worker/test/cases/modern-js.mjs が確かめる）
 await section(() => {
   const SRC = R.DEAL_LOCK;   // handler の中に var record
   const content = "      record['items'].value.forEach(function (row) {\n        row.value['qty'].disabled = true;\n      });\n";
-  const g = { strategy: 'EXTEND_EXISTING_JS', targetFile: 'dealLock.js', code: content, patch: { baseHash: KTScan.hashText(SRC), operations: [{ type: 'INSERT_AFTER', anchor: "      record['amount'].disabled = true;", content }] }, events: ['app.record.edit.show'], fields: [{ code: 'qty', access: 'CONTROL' }], apis: [] };
+  const g = gwWithBody({ strategy: 'EXTEND_EXISTING_JS', targetFile: 'dealLock.js', code: content, patch: { baseHash: KTScan.hashText(SRC), operations: [{ type: 'INSERT_AFTER', anchor: "      record['amount'].disabled = true;", content }] }, events: ['app.record.edit.show'], fields: [{ code: 'qty', access: 'CONTROL' }], apis: [] }, SRC);
   const src = { name: 'dealLock.js', target: 'desktop', text: SRC };
   const c = { customizationId: 'C1', requirement: '承認済みでは明細の数量を編集不可', strategy: 'EXTEND_EXISTING_JS', platform: ['desktop'], events: ['app.record.create.show', 'app.record.edit.show'], fields: [{ code: 'qty', access: 'CONTROL' }], apis: [], existingFiles: [{ name: 'dealLock.js', target: 'desktop' }] };
   const rv = KTCodeReview.review({ generated: g, customization: c, plan: null, data: DATA, scan: null, existingSource: src });
   const pc = check(rv, 'patch');
-  assert(pc && pc.ok && /元のコードは保持（全文の書き換えなし）$/.test(pc.message) && !/既存の宣言/.test(pc.message) && !check(rv, 'patch-removal') && !check(rv, 'modern-js') && /var record = event\.record;/.test(rv.finalCode || ''), `patch の検査: 既存の var record を含む統合先に挿入しても全文を書き換えず、置き換えも無い（記法は Toolkit では確かめない）: ${pc && pc.message}`);
+  assert(pc && pc.ok && /元のコードは保持（既存の行の削除なし）$/.test(pc.message) && rv.finalCode === g.body && !/既存の宣言/.test(pc.message) && !check(rv, 'patch-removal') && !check(rv, 'modern-js') && /var record = event\.record;/.test(rv.finalCode || ''), `patch の検査: 既存の var record を含む統合先に足した本文（生成工程の本文のまま書き込む）は既存の行を消さず、置き換えも無い（記法は Toolkit では確かめない）: ${pc && pc.message}`);
 });
 
 // =========================================================
@@ -330,15 +333,15 @@ await section(() => {
   assert(!(g0.patch && g0.patch.operations || []).some(o => /(^|[^\w$.])var\s/m.test(String(o.content || ''))), '前提: 素材の生成コード（足す handler）に var は無い');
   //   簡素化 B（2026-10-17）: 明細の行の制約（SUBTABLE_ROWS）は計画の構造（編集不可の効果）で決めるので、素材の計画のフィールドに今の計画の形の効果（lock）を付けて確かめる
   const CUST15 = { ...SA.CUSTOMIZATION, fields: SA.CUSTOMIZATION.fields.map(f => (f.access === 'CONTROL' ? { ...f, effects: ['lock'] } : f)) };
-  const rv = KTCodeReview.review({ generated: g0, customization: CUST15, plan: null, data, scan, existingSource: src });
+  const rv = KTCodeReview.review({ generated: gwWithBody(g0, SA.DEAL_LOCK), customization: CUST15, plan: null, data, scan, existingSource: src });
   const codes = codesOf(rv.registration.blockers);
   assert(rv.status !== 'BLOCKED' && !codes.length, `R15: 登録不可にはならない: ${rv.status} ${JSON.stringify(rv.checks.filter(x => !x.ok).map(x => [x.name, x.severity, x.message.slice(0, 80)]))}`);
   const text = clean(rv.finalCode);
   // 簡素化 B（2026-10-17）: ロックの場所（disableSites）・handler の操作（kintoneFieldOps）・明細のセルの場所（subtableCellSites）・入力チェック（inputChecks）の解析は、
   //   生成した候補を Toolkit が解析し直す関数として削除した。両承認待ち・通常編集と一覧編集・明細の列・保存禁止の動きは、上の注の生成工程の回帰（AI版 sandbox/test/run.mjs §2 の R15・
-  //   worker/test/cases/required-effects.mjs）で守る。Toolkit は統合した本文を作る
+  //   worker/test/cases/required-effects.mjs）で守る。統合した本文は生成工程が作り、Toolkit は受け取った本文を書き込む（2026-10-18）
   assert(['disableSites', 'kintoneFieldOps', 'subtableCellSites', 'inputChecks'].every(n => typeof KTCodeReview[n] === 'undefined') && /課長承認待ち/.test(text) && /部長承認待ち/.test(text) && /app\.record\.index\.edit\.show/.test(text) && /app\.record\.edit\.show/.test(text),
-    'R15: Toolkit は統合した本文（両承認待ち・通常編集と一覧編集）を作り、解析し直す関数は持たない');
+    'R15: Toolkit は受け取った統合の本文（両承認待ち・通常編集と一覧編集）を書き込む本文にし、解析し直す関数は持たない');
   // 明細: 行の追加・削除（SUBTABLE_ROWS）は確認事項（登録不可にしない）
   const rows = rv.coverage.notAchieved.find(x => x.code === 'SUBTABLE_ROWS');
   assert(rows && /行の追加・削除/.test(rows.message) && !/保存/.test(rows.message) && !codes.includes('coverage-unmet'), `行操作の制限: SUBTABLE_ROWS は「行の追加・削除は止められない」の確認（保存の話ではない・登録不可にしない）: ${rows && rows.message}`);
@@ -374,7 +377,7 @@ await section(async () => {
   const SRC5 = "(function () {\n  'use strict';\n  var LIMIT = 1000000;\n  kintone.events.on(['app.record.edit.show'], function (event) {\n    var record = event.record;\n    if (record['ステータス'] && record['ステータス'].value === '承認済み') {\n      record['amount'].disabled = true;\n    }\n    return event;\n  });\n})();\n";
   const c5 = { customizationId: 'C1', requirement: '承認済みでは明細の数量を編集不可', strategy: 'EXTEND_EXISTING_JS', platform: ['desktop'], events: ['app.record.edit.show'], fields: [{ code: 'qty', access: 'CONTROL' }], apis: [], existingFiles: [{ name: 'dealLock.js', target: 'desktop' }] };
   const ins = "      record['items'].value.forEach(function (row) {\n        row.value['qty'].disabled = true;\n      });\n";
-  const mk5 = (ops) => ({ strategy: 'EXTEND_EXISTING_JS', targetFile: 'dealLock.js', code: ins, patch: { baseHash: KTScan.hashText(SRC5), operations: ops }, events: ['app.record.edit.show'], fields: [{ code: 'qty', access: 'CONTROL' }], apis: [] });
+  const mk5 = (ops) => gwWithBody({ strategy: 'EXTEND_EXISTING_JS', targetFile: 'dealLock.js', code: ins, patch: { baseHash: KTScan.hashText(SRC5), operations: ops }, events: ['app.record.edit.show'], fields: [{ code: 'qty', access: 'CONTROL' }], apis: [] }, SRC5);
   const src5 = { name: 'dealLock.js', target: 'desktop', text: SRC5 };
   const outer = KTCodeReview.review({ generated: mk5([{ type: 'INSERT_AFTER', anchor: "      record['amount'].disabled = true;", content: ins }, { type: 'REPLACE', anchor: '  var LIMIT = 1000000;', content: '  const LIMIT = 1000000;' }]), customization: c5, plan: null, data: DATA, scan: null, existingSource: src5 });
   assert(check(outer, 'patch') && !/既存の宣言/.test(check(outer, 'patch').message) && check(outer, 'patch-removal') && /既存の 1 行が置き換え/.test(check(outer, 'patch-removal').message), `B-5: handler の外の var LIMIT → const の REPLACE は patch-removal の確認: ${JSON.stringify(check(outer, 'patch-removal'))}`);

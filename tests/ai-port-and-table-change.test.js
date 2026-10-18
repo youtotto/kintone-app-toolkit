@@ -235,7 +235,7 @@ const portGenerate = ({ mode = 'pass' } = {}) => {
         note: `金額 が ${ja} で${/create/.test(ev) ? 'モバイルの作成画面' : 'モバイルの編集画面'}で保存する: 移植元「dealValidate.js」と同じ動き（保存を止めるか・エラーの文）`,
         message: fail ? (mode === 'fail' ? `金額 が ${ja} で保存する: 移植元は止める・エラー「金額は0円以上で入力してください」のに、生成したコードは止めない` : `金額 が ${ja} で保存する: 移植元と違う動きです`) : '移植元と同じ動きです' };
     }));
-    const raw = { version: '1', candidateHash, sameAsPrevious: false, passed: !failing, machine: [{ name: 'syntax', ok: true, severity: 'info', message: '構文エラーなし' }, { name: 'required-effects', ok: true, severity: 'info', message: '必須の効果の処理があります' }],
+    const raw = { version: '1', bodyHash: candidateHash, sameAsPrevious: false, passed: !failing, machine: [{ name: 'syntax', ok: true, severity: 'info', message: '構文エラーなし' }, { name: 'required-effects', ok: true, severity: 'info', message: '必須の効果の処理があります' }],
       requiredEffects: [{ requirementId: 'C3', requirementIds: ['C3'], field: 'amount', effect: 'block-save', status: 'present' }],
       behavior: { status: failing ? 'failed' : 'passed', reason: null, cases, ...clone(K.GW_SCOPE) }, repairs: { count: failing ? 1 : 0, reasons: [], stoppedBy: failing ? 'same-failure' : null }, unverified: ['実機での動作'] };
     const verification = KTAiClient.normalizeVerification(raw);
@@ -420,7 +420,7 @@ await section(async () => {
     const cases = re.flatMap(e => (e.events || []).flatMap((ev, i) => VALUES.map(([val, ja, ref], j) => ({ id: `K${i}-${j}`, requirementId: 'C3', requirementIds: ['C3'], field: 'amount', effect: 'block-save', expect: 'same-as-source', side: 'match', kind: 'port', event: ev, refEvent: pairOf(ev), refFile: { file: 'dealValidate.js', target: 'desktop' }, verdict: 'pass', reference: ref, observed: ref, note: `金額 が ${ja} で保存する: 移植元と同じ動き`, message: '移植元と同じ動きです' }))));
     const resp = { ok: true, contractVersion: '2.1', meta: { requestId, gateway: { product: 'toolkit', feature: 'customization-generator', promptVersion: '1', contextVersion: 'customization-1' }, normalization: { warnings: [] }, ai: { model: 'm' } },
       generated: { strategy: 'NEW_JS_FILE', targetFile: 'dealValidateMobile.js', summary: 'PC と同じ保存時の入力チェックをモバイルにも用意します。', code: F.C3_CODE, patch: null, events: [...M_SUBMITS], fields: [{ code: 'amount', access: 'CONTROL' }], apis: ['kintone.events.on'], assumptions: [], warnings: [], coverage: [{ requirementId: 'C3', status: 'MET', note: '' }] },
-      verification: { version: '1', candidateHash, sameAsPrevious: false, passed: true, machine: [{ name: 'syntax', ok: true, severity: 'info', message: '構文エラーなし' }], requiredEffects: re.map(e => ({ requirementId: e.requirementId, requirementIds: e.requirementIds, field: e.field, effect: e.effect, status: 'present' })), behavior: { status: 'passed', reason: null, cases, ...clone(K.GW_SCOPE) }, repairs: { count: 0, reasons: [], stoppedBy: null }, unverified: [] } };
+      verification: { version: '1', bodyHash: candidateHash, sameAsPrevious: false, passed: true, machine: [{ name: 'syntax', ok: true, severity: 'info', message: '構文エラーなし' }], requiredEffects: re.map(e => ({ requirementId: e.requirementId, requirementIds: e.requirementIds, field: e.field, effect: e.effect, status: 'present' })), behavior: { status: 'passed', reason: null, cases, ...clone(K.GW_SCOPE) }, repairs: { count: 0, reasons: [], stoppedBy: null }, unverified: [] } };
     const vv = KTAiClient.validateGenerated(resp, ctx);
     if (!vv.ok) throw new Error(JSON.stringify(vv.errors));
     return { ...vv.normalized, requestId };

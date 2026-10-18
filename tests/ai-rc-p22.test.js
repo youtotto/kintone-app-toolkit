@@ -23,6 +23,9 @@ const { KTDeps, KTScan, KTCodeReview, KTAiClient, KTAiConversation, KTAiChatUi }
 const { assert, state } = makeAssert();
 const FX = require('./fixtures/ai-context-app.js');
 const R = require('./fixtures/p21-bfc-replay.js');
+//   2026-10-18（AI版 契約 20 §20）: 統合の書き込む本文は生成工程が合成して返す（generated.body）。記録した出力（記録の時点の受け渡し）と手作りの統合の候補には本文が無いので、
+//   形式確認に渡すときはテストの偽の生成工程の本文（gwWithBody。既存の本文と patch から作る）を持たせる（記録の値は変えない）
+const { gwWithBody } = require('./helpers/gw-hash.js');
 // C-1 第 3 段（2026-10-08）: 新しい流れの共有の部品（会話の生成の拒否を、最終案の上で確かめる）
 const { createNewFlowKit } = require('./helpers/new-flow.js');
 
@@ -104,7 +107,7 @@ const blockNames = (rv) => (rv.checks || []).filter(x => !x.ok && x.severity ===
   const BASE_D = "(function () {\n  'use strict';\n  kintone.events.on(['app.record.edit.show'], function (event) {\n    const record = event.record;\n    if (record['ステータス'] && record['ステータス'].value === '承認済み') {\n      record['金額'].disabled = true;\n    }\n    return event;\n  });\n})();\n";
   const warn = "  kintone.events.on(['app.record.edit.show', 'app.record.edit.change.金額'], function (event) {\n    const amount = event.record['金額'];\n    if (Number(amount.value) > 1000000 && !amount.disabled) {\n      amount.error = '金額が1,000,000円を超えています。';\n    } else {\n      amount.error = null;\n    }\n    return event;\n  });\n";
   const warnCust = cust({ requirement: '金額が100万円を超えたら警告する', strategy: 'EXTEND_EXISTING_JS', events: ['app.record.edit.show', 'app.record.edit.change.金額'], fields: [{ code: '金額', access: 'CONTROL', condition: '金額 >= "1000000" and 金額 != "1000000"' }], existingFiles: [{ name: 'lock.js', target: 'desktop' }] });
-  const ext = (base, content, c) => KTCodeReview.review({ generated: gen(content, { strategy: 'EXTEND_EXISTING_JS', targetFile: 'lock.js', patch: { baseHash: KTScan.hashText(base), operations: [{ type: 'INSERT_BEFORE', anchor: '})();', content }] } }), customization: c, plan: null, data: DATA, scan: null, existingSource: { name: 'lock.js', target: 'desktop', text: base } });
+  const ext = (base, content, c) => KTCodeReview.review({ generated: gwWithBody(gen(content, { strategy: 'EXTEND_EXISTING_JS', targetFile: 'lock.js', patch: { baseHash: KTScan.hashText(base), operations: [{ type: 'INSERT_BEFORE', anchor: '})();', content }] } }), base), customization: c, plan: null, data: DATA, scan: null, existingSource: { name: 'lock.js', target: 'desktop', text: base } });
   // 警告の必須の効果（Gateway の代表条件: 合う → warn・合わない → not-warned・編集不可にしていない → not-locked。表示と金額の変更の両方のイベント）
   const W = [effOf({ effect: 'warn', events: ['app.record.edit.show', 'app.record.edit.change.金額'], condition: '金額 > 1000000' })];
   // 既存の条件つきロック（承認済みのとき）＋ 新しい入力チェック: Gateway の代表条件（作成中・100 万円超）では既存のロックは効かず、警告が出て編集もできる → 合格のまま
@@ -138,7 +141,7 @@ console.log('\n--- F-F2 実機の再生（Phase 21 BF-C）: 実際の生成コ�
   const scan = KTScan.buildPayload({ appId: 353, files, fields: fieldsN.map(f => ({ code: f.code, label: f.label, type: f.rawType })), deps: KTDeps.buildDependencyData(data, fieldsN), scannedAt: '2026-10-04T00:16:00.000Z' });
   //   簡素化 B（2026-10-16）: 記法（var）は生成工程の機械検査が確かめる（Toolkit の写しの自動修正 KTModernJs は削除）。記録した AI の出力（var を含む）をそのまま検査する
   const srcL = { name: 'dealLock.js', target: 'desktop', text: R.DEAL_LOCK };
-  const rv = KTCodeReview.review({ generated: R.GENERATED, customization: R.CUSTOMIZATION, plan: null, data, scan, existingSource: srcL });
+  const rv = KTCodeReview.review({ generated: gwWithBody(R.GENERATED, R.DEAL_LOCK), customization: R.CUSTOMIZATION, plan: null, data, scan, existingSource: srcL });
   const codes = rv.registration.confirmations.map(x => x.code);
   assert(R.P21_CONFIRMATIONS.length === 4 && R.P21_CONFIRMATIONS.includes('conditional-control'), '前提: Phase 21 の判定は確認 4 件（conditional-control を含む）');
   // §0d.4: 条件とロックの関係・同じイベントの error と編集不可・既存のファイルとの重なりの推定（conditional-control・error-cancels-edit・existing-conflict）は削除。

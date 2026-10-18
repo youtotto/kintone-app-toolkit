@@ -62,7 +62,9 @@ const mk = (opt = {}) => makeKintoneMock(makeData(), { jsSources: SOURCES, ...op
 const DATA = makeData();
 const CUST_REPLACE = { customizationId: 'C1', requirement: '承認済（完了）は金額を編集不可', strategy: 'EXTEND_EXISTING_JS', platform: ['desktop'], events: ['app.record.edit.show'], fields: [{ code: 'amount', access: 'CONTROL' }], apis: [], existingFiles: [{ name: 'fieldOnOff.js', target: 'desktop' }] };
 const CUST_NEW = { customizationId: 'C1', requirement: '金額が100万円以上なら警告', strategy: 'NEW_JS_FILE', platform: ['desktop'], events: ['app.record.create.change.amount', 'app.record.edit.change.amount'], fields: [{ code: 'amount', access: 'CONTROL' }], apis: [], existingFiles: [] };
-const GEN_PATCH = { strategy: 'EXTEND_EXISTING_JS', targetFile: 'fieldOnOff.js', summary: '完了でも金額を編集不可にする', code: PATCH.operations[0].content, patch: PATCH, events: ['app.record.edit.show'], fields: [{ code: 'amount', access: 'CONTROL' }], apis: [], assumptions: [], warnings: [] };
+//   2026-10-18（AI版 契約 20 §20）: 統合の書き込む本文は生成工程が合成して返す generated.body（Toolkit は合成しない）。偽の生成工程の本文（INSERT_AFTER を当てた全文）
+const PATCH_BODY = FIELD_ON_OFF.replace(PATCH.operations[0].anchor, PATCH.operations[0].anchor + '\n' + PATCH.operations[0].content.replace(/\n$/, ''));
+const GEN_PATCH = { strategy: 'EXTEND_EXISTING_JS', targetFile: 'fieldOnOff.js', summary: '完了でも金額を編集不可にする', code: PATCH.operations[0].content, patch: PATCH, body: PATCH_BODY, events: ['app.record.edit.show'], fields: [{ code: 'amount', access: 'CONTROL' }], apis: [], assumptions: [], warnings: [] };
 const GEN_NEW = { strategy: 'NEW_JS_FILE', targetFile: 'amount warning (v1).js', summary: '金額の警告', code: NEW_JS, patch: null, events: CUST_NEW.events, fields: CUST_NEW.fields, apis: [], assumptions: [], warnings: [] };
 const SRC = { name: 'fieldOnOff.js', target: 'desktop', text: FIELD_ON_OFF };
 const reviewOf = (generated, customization, existingSource = null) => KTCodeReview.review({ generated, customization, data: DATA, scan: null, existingSource, provenance: { planId: 'p1', planVersion: 1, customizationId: customization.customizationId, generatedAt: '2026-10-03T00:00:00.000Z', appId: '310', requestId: 'gen-1' } });

@@ -37,7 +37,7 @@ const { makeKintoneMock } = require('./helpers/kintone-preview-mock.js');
 // 新しい流れの共有の部品（tests/helpers/new-flow.js。台本・偽の計画と生成工程・会話の偽 services・画面の偽 client）
 const { createNewFlowKit } = require('./helpers/new-flow.js');
 const KIT = createNewFlowKit(T);
-const { tick, ticks, clone, buildInputs, INPUTS, META, B, A, Q, APPROVER, ROUTE, BASE, CSV, Q_THRESHOLD, Q_MIDDLE, Q_DAYS, Q_HOLIDAYS, Q_LOCK, Q_TIMING, B_SELECT, B_ROUTE, B_UNDER, B_OVER, B_NOTIFY_TO, B_NOTIFY_IF, B_LOCK, STD, req, idBy, reqIdBy, script, normalized, planOk, planFail, planThrow, gateMk, HEALTH, spec, mkStep, PLAN_META, PLAN_V1, answerFor, makeStorage, gate, mount, clickChat, RP, KTCodeReview, DATA_C, LABELS_C, custOf, CUST_C1, ST_C, handlerC, GOOD, BAD, WARN, VALUE, LOCKSAVE, CAND, GEN_EFFECT_FEATURES, GEN_NETWORK_FEATURE, GW_SCOPE, EXPECT_OF, NOMATCH_OF, fakeVerification, planJs, makeGenerate, makeConvC, adoptC, finalHtml, stripC } = KIT;
+const { tick, ticks, clone, buildInputs, INPUTS, META, B, A, Q, APPROVER, ROUTE, BASE, CSV, Q_THRESHOLD, Q_MIDDLE, Q_DAYS, Q_HOLIDAYS, Q_LOCK, Q_TIMING, B_SELECT, B_ROUTE, B_UNDER, B_OVER, B_NOTIFY_TO, B_NOTIFY_IF, B_LOCK, STD, req, idBy, reqIdBy, script, normalized, planOk, planFail, planThrow, gateMk, HEALTH, spec, mkStep, PLAN_META, PLAN_V1, answerFor, makeStorage, gate, mount, clickChat, RP, KTCodeReview, DATA_C, LABELS_C, custOf, CUST_C1, ST_C, handlerC, GOOD, BAD, WARN, VALUE, LOCKSAVE, CAND, GEN_EFFECT_FEATURES, GEN_CURRENT_FEATURES, GW_SCOPE, EXPECT_OF, NOMATCH_OF, fakeVerification, planJs, makeGenerate, makeConvC, adoptC, finalHtml, stripC } = KIT;
 /** 2026-10-14（会話の設計し直し）: 最終的にどう動くか・反映先と主な影響・検証の区分・変わった点は右の「変更内容」（changeSummaryHtml）に移した */
 const rightOf = (x, v = x.c.activePlan()) => KTAiChatUi.changeSummaryHtml(v, {});
 async function section(fn) { try { await fn(); } catch (e) { assert(false, `例外: ${e && e.stack ? e.stack.split('\n').slice(0, 4).join(' / ') : e}`); } }
@@ -761,7 +761,7 @@ await section(async () => {
   assert(v.spec && v.spec.status === 'CONFIRMED' && v.spec.autoConfirmed === true && v.spec.customizeRevision === '42' && !x.c.messages().some(m => m.type === 'SPEC' || m.data?.kind === 'spec-intro' || m.data?.kind === 'spec-confirm-hint'), `R09-2: JS の仕様は自動で確定（customizeRevision を記録）。［この仕様で確定］の案内・仕様カードは出さない: ${JSON.stringify(v.spec && { status: v.spec.status, rev: v.spec.customizeRevision })}`);
   assert(!x.c.messages().some(m => m.type === 'PLAN' || m.type === 'CODE' || ['plan-summary', 'review-summary', 'questions', 'provisionals', 'code-intro', 'confirm-generate'].includes(m.data?.kind)), `R09-3: 変更案の要約・確認事項・提案・コードの案内は別のカードにしない（最終案に統合）: ${JSON.stringify(x.kinds())}`);
   const sent = x.gen.calls[0] && x.gen.calls[0].requiredEffects;
-  assert(x.gen.calls.length === 1 && x.gen.calls[0].verification === true && !x.gen.calls[0].feedback && JSON.stringify(sent) === JSON.stringify([{ requirementId: 'C1', requirementIds: ['C1'], field: 'amount', effect: 'lock', events: ['app.record.edit.show'], condition: 'ステータス in ("承認待ち")' }]) && v.generated.C1 && v.generated.C1.status === 'verified' && v.generated.C1.verdict.status === 'verified', `R09-4: 生成工程への依頼は 1 回（必須の効果を固定して渡す・修復は依頼しない）→ 検証済み: ${JSON.stringify({ gen: x.gen.calls.length, sent, status: v.generated.C1 && v.generated.C1.status })}`);
+  assert(x.gen.calls.length === 1 && !x.gen.calls[0].feedback && JSON.stringify(sent) === JSON.stringify([{ requirementId: 'C1', requirementIds: ['C1'], field: 'amount', effect: 'lock', events: ['app.record.edit.show'], condition: 'ステータス in ("承認待ち")' }]) && v.generated.C1 && v.generated.C1.status === 'verified' && v.generated.C1.verdict.status === 'verified', `R09-4: 生成工程への依頼は 1 回（必須の効果を固定して渡す・修復は依頼しない）→ 検証済み: ${JSON.stringify({ gen: x.gen.calls.length, sent, status: v.generated.C1 && v.generated.C1.status })}`);
   assert(FS.readyOf(v) === true && v.final.customizations[0].status === 'verified' && v.final.behaviors.length >= 1 && v.final.changed.rejected.length === 0 && v.final.verification.behavior.status === 'passed' && v.final.verification.behavior.counts.pass === v.final.verification.behavior.cases.length && v.final.verification.effects.length === 1 && v.final.verification.effects[0].structure === 'present', `R09-5: 最終案は承認できる（動作・変わった点・検証の区分）: ${JSON.stringify({ approvable: FS.readyOf(v), behaviors: v.final.behaviors, beh: v.final.verification.behavior })}`);
   const tm = x.c.metrics().timings.slice(-1)[0];
   assert(tm.intent === 'ADOPT_DRAFT' && tm.calls.map(k => k.kind).join(',') === 'plan,generate' && tm.calls.every(k => typeof k.ms === 'number') && tm.finalMs >= 49000 && v.final.timing.planMs === 30000 && v.final.timing.generateMs === 20000 && !('simMs' in v.final.timing), `R09-6: 計測（calls に plan / generate と区間の時間・最終案までの時間。模擬の区間は無い）: ${JSON.stringify({ calls: tm.calls.map(k => [k.kind, k.ms]), finalMs: tm.finalMs, timing: v.final.timing })}`);
@@ -1262,14 +1262,13 @@ await section(async () => {
   v.generated.C1 = { ...v.generated.C1, candidateHash: 'eeeeeeeeeeeeeeee' };
   assert(KTAiConversation.approvalValid(v, { baseStamp: { fingerprint: 'fp-1' } }).reason === 'CANDIDATE_CHANGED', 'D8-5: 古い候補（承認の後に候補が変わった）→ 旧承認を流用しない');
   v.generated.C1 = { ...v.generated.C1, candidateHash: oldHash };
-  // 機能非対応（requiredEffects・behavior を返さない旧い接続先）: 既知の競合を「確認」に下げず、反映できる最終案にしない
-  //   §0d.4（2026-10-08）: Toolkit の業務の推定による判定（error-cancels-edit）は削除した。旧い接続先では、生成工程の結果（必須の効果・模擬テスト）が返らないこと
-  //   （返却の欠落）を Toolkit が検出して登録不可にする（required-effects の block・修復しない印 noRepair）。既知の競合の候補も「確認」に下がらない
+  // 機能非対応（必須の効果・模擬テスト・検査と模擬テストに使った本文を返さない旧い接続先）。2026-10-18: 生成の前の確認（health の印）で生成を依頼しない
+  //   （使えないと分かっている結果のために有料の生成をしない。以前は生成してから、返却の欠落で登録不可にしていた）。反映できる最終案にしない
   const y = makeConvC({ supported: false, generate: makeGenerate({ sequence: ['bad'], supported: false }) });
   await adoptC(y);
   const vy = y.c.activePlan(), ey = vy.generated.C1;
   const apY = y.c.approveFinal(KIT.approveArgs(vy, { baseStamp: { fingerprint: 'fp-1' } }));
-  assert(y.gen.calls.length === 1 && ey.status === 'unsupported' && FS.readyOf(vy) === false && /接続先（生成工程）が必須の動作の確認に対応していない/.test(FS.reasonOf(vy)) && ey.review.status === 'BLOCKED' && ey.review.registration.verdict === 'BLOCKED' && ey.review.checks.some(ch => ch.name === 'required-effects' && !ch.ok && ch.severity === 'block' && ch.noRepair === true) && apY.ok === false && !vy.approval, `D8-6: 機能非対応 → 準備未完了・既知の競合の候補も生成工程の結果の欠落で登録不可のまま（確認に下げない・承認できない）: ${JSON.stringify({ status: ey.status, verdict: ey.review.registration.verdict, checks: ey.review.checks.filter(ch => !ch.ok).map(ch => `${ch.name}/${ch.severity}`), ap: apY })}`);
+  assert(y.gen.calls.length === 0 && ey.status === 'unsupported' && ey.verdict.capability === 'generator' && /生成を依頼していません/.test(ey.verdict.reason) && FS.readyOf(vy) === false && /接続先（生成工程）が今の Toolkit の生成の受け渡し/.test(FS.reasonOf(vy)) && apY.ok === false && !vy.approval, `D8-6: 機能非対応 → 生成を依頼せず準備未完了（承認できない）: ${JSON.stringify({ gen: y.gen.calls.length, status: ey.status, verdict: ey.verdict, reason: FS.reasonOf(vy), ap: apY })}`);
   //   今の契約の接続先（health の印 effectCheck あり）: 生成工程は既知の競合を check behavior（candidate-error-same-event）にする。
   //   模擬テストの環境が使えなければ準備未完了（機械検査で足りる効果として合格に数えない）、模擬テストで不合格なら未解決（どちらも承認できない）
   const GEN_EC = [...GEN_EFFECT_FEATURES, 'effectCheck'];
@@ -1348,7 +1347,7 @@ await section(async () => {
 const { makeEnvGetter } = require('./helpers/dev-base-fake.js');
 await section(async () => {
   const HEALTH_V = clone(HEALTH);
-  HEALTH_V.registry.toolkit['customization-generator'].verification = ['requirementId', 'feedback', ...GEN_EFFECT_FEATURES, GEN_NETWORK_FEATURE];
+  HEALTH_V.registry.toolkit['customization-generator'].verification = ['requirementId', 'feedback', ...GEN_EFFECT_FEATURES, ...GEN_CURRENT_FEATURES];
   const CUST_S = { customizationId: 'C1', requirement: '承認待ちでは案件名を編集できないようにする', whyStandardInsufficient: 'ステータスで切り替えるアクセス権は無い', strategy: 'NEW_JS_FILE', platform: ['desktop'], implementation: 'JAVASCRIPT', events: ['app.record.edit.show'], fields: [{ code: 'ステータス', access: 'READ' }, { code: 'case_name', access: 'CONTROL', condition: 'ステータス in ("承認待ち")', effects: ['lock'] }], apis: [], existingFiles: [], risks: [], questions: [], dependsOn: [], evidenceIds: [] };
   const planResp = (goal) => { const b = PLAN_V1(goal); return { ...b, plan: { ...b.plan, solution: 'CUSTOMIZATION', assessment: { ...b.plan.assessment, summary: '承認待ちでは案件名を編集できないようにします。' }, steps: [mkStep('C1', 'CUSTOMIZATION_REQUIRED', 'JS', null, { customizationId: 'C1' }, { title: 'JavaScript', solution: 'CUSTOMIZATION' })], customizations: [CUST_S] } }; };
   const CODE_S = "(function () {\n  'use strict';\n  kintone.events.on(['app.record.edit.show'], function (event) {\n    const record = event.record;\n    if (record['ステータス'] && record['ステータス'].value === '承認待ち') record['case_name'].disabled = true;\n    return event;\n  });\n})();";
@@ -1459,7 +1458,7 @@ await section(async () => {
   //   cand = 偽の生成工程の候補の性質に足すもの（fails・failMsg・check。今の契約の Gateway の結果を返すときに使う）
   const run = async ({ proposal = true, capable = false, code = LOCK_L, has = ['lock'], cand = {} } = {}) => {
     const h = clone(proposal ? HEALTH : hLegacy);
-    if (capable) h.registry.toolkit['customization-generator'].verification = ['requirementId', ...(Array.isArray(capable) ? capable : GEN_EFFECT_FEATURES), GEN_NETWORK_FEATURE];
+    if (capable) h.registry.toolkit['customization-generator'].verification = ['requirementId', ...(Array.isArray(capable) ? capable : GEN_EFFECT_FEATURES), ...GEN_CURRENT_FEATURES];
     const genCtx = [];
     const generateImpl = async ({ ctx, requestId }) => {
       genCtx.push(clone(ctx));
@@ -1751,35 +1750,34 @@ await section(async () => {
   const x = makeConvC({ supported: ['requiredEffects'] });
   await adoptC(x);
   const e = x.c.activePlan().generated.C1;
-  assert(e.status === 'unsupported' && e.verdict.kind === 'capability' && /接続先/.test(e.verdict.reason) && FS.readyOf(x.c.activePlan()) === false, `D27-1: 印が欠ける接続先 → 接続先が非対応（準備未完了）: ${JSON.stringify(e.verdict)}`);
+  assert(x.gen.calls.length === 0 && e.status === 'unsupported' && e.verdict.kind === 'capability' && /接続先/.test(e.verdict.reason) && FS.readyOf(x.c.activePlan()) === false, `D27-1: 印が欠ける接続先 → 生成を依頼せず、接続先が非対応（準備未完了）: ${JSON.stringify({ gen: x.gen.calls.length, verdict: e.verdict })}`);
   for (const miss of ['effectGroups', 'relatedOmitted', 'appFields', 'saveDialog', 'reasonCategory']) {
     const y = makeConvC({ supported: GEN_EFFECT_FEATURES.filter(f => f !== miss) });
     await adoptC(y);
-    assert(y.c.activePlan().generated.C1.status === 'unsupported', `D27-2（${miss} が無い）: 1 つでも欠ければ接続先が非対応`);
+    assert(y.gen.calls.length === 0 && y.c.activePlan().generated.C1.status === 'unsupported', `D27-2（${miss} が無い）: 1 つでも欠ければ生成を依頼せず、接続先が非対応`);
   }
-  //   簡素化 B（2026-10-16）: 生成工程の検証結果が無い（検証を返さない接続先。画面の generate が作る古い形 legacy）は、必須の動作が無い JavaScript（読み取りだけ）でも
-  //   Toolkit の形式確認だけで検証済みにしない（以前は必須の効果が無いと、この判定を通り抜けて検証済みになった）
+  //   簡素化 B（2026-10-16）: 生成工程の検証結果が無い応答は、必須の動作が無い JavaScript（読み取りだけ）でも、Toolkit の形式確認だけで検証済みにしない
+  //   （以前は必須の効果が無いと、この判定を通り抜けて検証済みになった）。2026-10-18: 画面の generate が旧い接続先の応答から作っていた古い形（legacy）は、
+  //   旧い経路と一緒に消した（旧い接続先には生成の前の確認で依頼しない。D27-1・D27-2）
   const CUST_READ = { ...CUST_C1, requirement: '詳細画面でステータスを読む', events: ['app.record.detail.show'], fields: [{ code: 'ステータス', access: 'READ' }] };
   const CODE_READ = "(function () {\n  'use strict';\n  kintone.events.on(['app.record.detail.show'], function (event) {\n    const st = event.record['ステータス'].value;\n    return event;\n  });\n})();";
-  const genRead = (shape) => {
-    const g = makeGenerate({ generatedOf: (cust) => ({ strategy: 'NEW_JS_FILE', targetFile: 'read.js', summary: '詳細画面でステータスを読みます。', code: CODE_READ, patch: null, events: cust.events, fields: [{ code: 'ステータス', access: 'READ' }], apis: [], assumptions: [], warnings: [], coverage: [{ requirementId: 'C1', status: 'MET', note: '', text: cust.requirement }] }) });
-    const impl0 = g.impl;
-    g.impl = async (args) => { const r = await impl0(args); return { ...r, verification: shape === 'none' ? undefined : { version: '0', candidateHash: r.verification.candidateHash, sameAsPrevious: false, passed: true, machine: [], repairs: { count: 0, reasons: [], stoppedBy: null }, unverified: [], legacy: true } }; };
-    return g;
-  };
-  for (const shape of ['none', 'legacy']) {
-    const z = makeConvC({ generate: genRead(shape), planImpl: (args) => planJs(args, { cust: CUST_READ, summary: '詳細画面でステータスを読みます。' }) });
+  const genRead = makeGenerate({ generatedOf: (cust) => ({ strategy: 'NEW_JS_FILE', targetFile: 'read.js', summary: '詳細画面でステータスを読みます。', code: CODE_READ, patch: null, events: cust.events, fields: [{ code: 'ステータス', access: 'READ' }], apis: [], assumptions: [], warnings: [], coverage: [{ requirementId: 'C1', status: 'MET', note: '', text: cust.requirement }] }) });
+  const genReadImpl = genRead.impl;
+  genRead.impl = async (args) => ({ ...(await genReadImpl(args)), verification: undefined });
+  {
+    const z = makeConvC({ generate: genRead, planImpl: (args) => planJs(args, { cust: CUST_READ, summary: '詳細画面でステータスを読みます。' }) });
     await adoptC(z);
     const vz = z.c.activePlan(), ez = vz.generated.C1;
     assert(z.gen.calls.length === 1 && !(ez.requiredEffects || []).length && ez.status === 'unsupported' && ez.verdict.kind === 'capability' && /検証結果を返さない/.test(ez.verdict.reason) && FS.readyOf(vz) === false && z.c.approveFinal(KIT.approveArgs(vz)).ok === false,
-      `D27-3（${shape === 'none' ? '検証結果が無い' : '古い形の合格'}）: 必須の動作が無い JavaScript でも、生成工程の検証結果が無ければ検証済みにしない（承認できない）: ${JSON.stringify({ status: ez.status, verdict: ez.verdict, req: ez.requiredEffects })}`);
+      `D27-3（検証結果が無い）: 必須の動作が無い JavaScript でも、生成工程の検証結果が無ければ検証済みにしない（承認できない）: ${JSON.stringify({ status: ez.status, verdict: ez.verdict, req: ez.requiredEffects })}`);
   }
   //   簡素化 B（2026-10-17）: 検証結果と受け取った候補の結び付き。会話は受け取った候補（と送った既存ファイルの本文）から Gateway と同じ計算で指紋を作り、
-  //   検証結果の指紋と一致したときだけ合格の材料にする（承認・登録もこの指紋に結び付ける）
+  //   検証結果の指紋と一致したときだけ合格の材料にする（承認・登録もこの指紋に結び付ける）。2026-10-18（AI版 契約 20 §20）: 指紋は書き込む本文の指紋 bodyHash
+  //   （新規はコード、統合は生成工程が合成して検査と模擬テストに使った本文 generated.body。改行はそろえない）
   const genBind = (mutate) => { const g = makeGenerate({ sequence: ['good'] }); const impl0 = g.impl; g.impl = async (args) => mutate(await impl0(args)); return g; };
   const bindCases = [
-    ['別の候補の検証結果（指紋が違う）', (r) => ({ ...r, verification: { ...r.verification, candidateHash: 'ffffffffffffffff' } })],
-    ['指紋の無い検証結果', (r) => { const { candidateHash, ...rest } = r.verification; void candidateHash; return { ...r, verification: rest }; }],
+    ['別の候補の検証結果（指紋が違う）', (r) => ({ ...r, verification: { ...r.verification, bodyHash: 'ffffffffffffffff' } })],
+    ['指紋の無い検証結果', (r) => { const { bodyHash, ...rest } = r.verification; void bodyHash; return { ...r, verification: rest }; }],
     ['検証の後に候補（コード）だけが違う', (r) => ({ ...r, generated: { ...r.generated, code: `${r.generated.code}\n// 検証の後に変わった行` } })],
   ];
   for (const [name, mutate] of bindCases) {
@@ -1789,12 +1787,29 @@ await section(async () => {
     assert(eb.status === 'unresolved' && eb.verdict.kind === 'verification-mismatch' && eb.verification.bound === false && FS.readyOf(vb) === false && xb.c.approveFinal(KIT.approveArgs(vb)).ok === false,
       `D27-4（${name}）: 検証結果が受け取った候補と結び付かなければ合格にしない（承認できない）: ${JSON.stringify({ status: eb.status, kind: eb.verdict.kind, bound: eb.verification.bound })}`);
   }
+  //   統合（既存の dealLock.js に足す）: 生成工程の本文（generated.body）が検証の後に変わった・改行だけが変わった → 合格にしない
+  const CUST_WB = { ...clone(RP.CUSTOMIZATION), fields: [{ code: 'amount', access: 'CONTROL', condition: RP.CUSTOMIZATION.fields[0].condition, effects: ['warn'] }] };
+  const GEN_WB = () => { const g = KIT.gwModernized(RP.GENERATED); g.coverage = g.coverage.map(cv => ({ ...cv, status: 'MET' })); return g; };
+  const genBindX = (mutate) => { const g = makeGenerate({ sequence: ['warn'], existingSource: { name: 'dealLock.js', target: 'desktop', text: RP.DEAL_LOCK }, generatedOf: GEN_WB }); const impl0 = g.impl; g.impl = async (args) => mutate(await impl0(args)); return g; };
+  const CRLF = String.fromCharCode(13, 10), LF1 = String.fromCharCode(10);
+  const extendCases = [
+    ['そのまま', (r) => r, true],
+    ['検証の後に統合の本文だけが違う', (r) => ({ ...r, generated: { ...r.generated, body: `${r.generated.body}${LF1}// 検証の後に変わった行` } }), false],
+    ['統合の本文の改行だけが CRLF に変わった', (r) => ({ ...r, generated: { ...r.generated, body: r.generated.body.split(LF1).join(CRLF) } }), false],
+  ];
+  for (const [name, mutate, ok] of extendCases) {
+    const xe = makeConvC({ planImpl: (args) => planJs(args, { cust: CUST_WB, summary: '金額が 100 万円を超えたら警告します（保存は止めません）。' }), generate: genBindX(mutate) });
+    await adoptC(xe);
+    const ve = xe.c.activePlan(), ee = ve.generated.C1;
+    assert(RP.GENERATED.strategy === 'EXTEND_EXISTING_JS' && typeof ee.generated.body === 'string' && (ok ? ee.verification.bound === true && ee.status === 'verified' && ee.review.finalCode === ee.generated.body : ee.status === 'unresolved' && ee.verdict.kind === 'verification-mismatch' && ee.verification.bound === false && FS.readyOf(ve) === false && xe.c.approveFinal(KIT.approveArgs(ve)).ok === false),
+      `D27-4（統合・${name}）: ${ok ? '書き込む本文は生成工程の本文のまま・検証結果と結び付く' : '検証した本文と受け取った本文が違えば合格にしない（承認できない）'}: ${JSON.stringify({ status: ee.status, kind: ee.verdict && ee.verdict.kind, bound: ee.verification && ee.verification.bound })}`);
+  }
   const xok = makeConvC();
   await adoptC(xok);
   const eok = xok.c.activePlan().generated.C1;
-  const hok = await KTScan.gatewayCandidateHashOf({ strategy: eok.generated.strategy, targetFile: eok.generated.targetFile, code: eok.generated.code, patch: eok.generated.patch, baseHash: null, customizationId: 'C1' });
-  assert(eok.verification.bound === true && eok.candidateHash === hok && eok.verification.candidateHash === hok && eok.status === 'verified' && FS.readyOf(xok.c.activePlan()) === true,
-    `D27-5: 結び付いた検証結果（受け取った候補から作った指紋 = 検証結果の指紋）は合格の材料にし、承認の指紋もこの値: ${JSON.stringify({ bound: eok.verification.bound, hash: [eok.candidateHash, eok.verification.candidateHash, hok] })}`);
+  const hok = await KTScan.gatewayBodyHashOf({ strategy: eok.generated.strategy, targetFile: eok.generated.targetFile, body: eok.generated.code, baseHash: null, customizationId: 'C1' });
+  assert(eok.verification.bound === true && eok.candidateHash === hok && eok.verification.bodyHash === hok && eok.status === 'verified' && FS.readyOf(xok.c.activePlan()) === true,
+    `D27-5: 結び付いた検証結果（受け取った候補から作った指紋 = 検証結果の指紋）は合格の材料にし、承認の指紋もこの値: ${JSON.stringify({ bound: eok.verification.bound, hash: [eok.candidateHash, eok.verification.bodyHash, hok] })}`);
 });
 // D28（A6・B1・隔離 7・画面）: 動作テストに送る既存 JS の選び方と上限（4 件・合計 131,072 文字。1 ファイルの上限は無い）・送れなかった既存 JS の events（分からなければ null・外部のライブラリは []）
 await section(async () => {
@@ -1823,7 +1838,7 @@ await section(async () => {
   //   envReason: 偽の生成工程が返す動作テストの not-run の理由（§0c.9 の次の手の分け方の画面の回帰）
   const run = async (inputs, { health = null, envReason = null } = {}) => {
     const HEALTH_V = clone(HEALTH);
-    HEALTH_V.registry.toolkit['customization-generator'].verification = health || ['requirementId', 'feedback', ...GEN_EFFECT_FEATURES, GEN_NETWORK_FEATURE];
+    HEALTH_V.registry.toolkit['customization-generator'].verification = health || ['requirementId', 'feedback', ...GEN_EFFECT_FEATURES, ...GEN_CURRENT_FEATURES];
     const genCtx = [];
     const generateImpl = async ({ ctx, requestId }) => {
       genCtx.push(clone(ctx));
@@ -1857,10 +1872,9 @@ await section(async () => {
   const vc = c.genCtx[0] && c.genCtx[0].verification;
   const om3 = vc && (vc.relatedOmitted || []).find(f => f.name === 'biz.js');
   assert(om3 && om3.reason === 'url' && om3.events === null && c.v.generated.C1.status === 'not-run' && c.v.generated.C1.verdict.category === 'existing' && /「https:\/\/t\.cybozu\.com\/k\/api\/js\/biz\.js」/.test(c.v.generated.C1.verdict.reason) && c.v.generated.C1.verdict.kind === 'out-of-reach' && FS.readyOf(c.v) === false, `D28-4: 同じホストの URL 指定の既存 JS は events null → 必須の効果を verified にしない: ${JSON.stringify({ om3, verdict: c.v.generated.C1.verdict })}`);
-  // 4) 印が欠ける接続先（appFields が無い）→ 必須の効果も既存 JS も送らない（旧い形にも送らない）→ 接続先が非対応
+  // 4) 印が欠ける接続先（appFields などが無い）→ 2026-10-18: 生成の前の確認で生成を依頼しない（有料の生成をしない）→ 接続先が非対応
   const d = await run(inputsWith([]), { health: ['requirementId', 'feedback', 'requiredEffects', 'effectGroups', 'relatedOmitted', 'saveDialog', 'reasonCategory'] });
-  const vd = d.genCtx[0] && d.genCtx[0].verification;
-  assert(d.genCtx.length === 1 && vd && !vd.requiredEffects && !vd.relatedFiles && !vd.appFields && d.v.generated.C1.status === 'unsupported' && FS.readyOf(d.v) === false, `D28-5: health に appFields の印が無い → 新しい形で送らず、接続先が非対応: ${JSON.stringify({ keys: vd && Object.keys(vd), status: d.v.generated.C1.status })}`);
+  assert(d.genCtx.length === 0 && d.v.generated.C1.status === 'unsupported' && d.v.generated.C1.verdict.capability === 'generator' && FS.readyOf(d.v) === false, `D28-5: health に appFields などの印が無い → 生成を依頼せず、接続先が非対応: ${JSON.stringify({ sent: d.genCtx.length, status: d.v.generated.C1.status })}`);
   // 5) §0c.8（A3・scen の E3a）: 画面と別のホストの URL 指定の業務 JS（自社のサーバー）も events null → verified にしない（画面とホストが違うかどうかでは決めない）
   const e6 = await run(inputsWith([], ['https://biz.example.co.jp/kintone/biz.js']));
   const ve6 = e6.genCtx[0] && e6.genCtx[0].verification;
@@ -2601,7 +2615,7 @@ function makeGenE(code, verOf, { targetFile = 'c1.js' } = {}) {
     const review = KTCodeReview.review({ generated, customization: c, plan: args.version.plan, data: clone(DATA_C), scan: null, existingSource: null });
     const candidateHash = gwCandidateHash({ strategy: 'NEW_JS_FILE', targetFile, code, patch: null, customizationId: 'C1' });
     const raw = verOf(args.requiredEffects || []);
-    const verification = KTAiClient.normalizeVerification({ version: '1', passed: true, machine: [{ name: 'syntax', ok: true, severity: 'info', message: '構文エラーなし' }], repairs: { count: 0, reasons: [], stoppedBy: null }, unverified: ['既存の JavaScript との実行順と相互作用は実機で確かめてください'], ...raw, candidateHash });
+    const verification = KTAiClient.normalizeVerification({ version: '1', passed: true, machine: [{ name: 'syntax', ok: true, severity: 'info', message: '構文エラーなし' }], repairs: { count: 0, reasons: [], stoppedBy: null }, unverified: ['既存の JavaScript との実行順と相互作用は実機で確かめてください'], ...raw, bodyHash: candidateHash });
     return { ok: true, generated, review, ctx: { size: { approxTokens: 1000 } }, existingSource: null, inputHash: `h${calls.length}`, verification, candidateHash, requirementIds: [{ id: 'C1', kind: 'customization', text: c.requirement }] };
   };
   return { impl, calls };
@@ -2662,7 +2676,7 @@ await section(async () => {
 // E4: 検証の後の書き換えをやめる（§0d.3）。画面の generate（偽 client）で、生成工程が返したコードと candidateHash のまま最終案・承認・登録の準備まで進む
 await section(async () => {
   const HEALTH_E = clone(HEALTH);
-  HEALTH_E.registry.toolkit['customization-generator'].verification = ['requirementId', 'feedback', ...GEN_EFFECT_CHECK, GEN_NETWORK_FEATURE];
+  HEALTH_E.registry.toolkit['customization-generator'].verification = ['requirementId', 'feedback', ...GEN_EFFECT_CHECK, ...GEN_CURRENT_FEATURES];
   const CUST_K = { customizationId: 'C1', requirement: '承認待ちでは案件名を編集できないようにする', whyStandardInsufficient: 'ステータスで切り替えるアクセス権は無い', strategy: 'NEW_JS_FILE', platform: ['desktop'], implementation: 'JAVASCRIPT', events: ['app.record.edit.show'], fields: [{ code: 'ステータス', access: 'READ' }, { code: 'case_name', access: 'CONTROL', condition: 'ステータス in ("承認待ち")', effects: ['lock'] }], apis: [], existingFiles: [], risks: [], questions: [], dependsOn: [], evidenceIds: [] };
   const planResp = (goal) => { const b = PLAN_V1(goal); return { ...b, plan: { ...b.plan, solution: 'CUSTOMIZATION', assessment: { ...b.plan.assessment, summary: '承認待ちでは案件名を編集できないようにします。' }, steps: [mkStep('C1', 'CUSTOMIZATION_REQUIRED', 'JS', null, { customizationId: 'C1' }, { title: 'JavaScript', solution: 'CUSTOMIZATION' })], customizations: [CUST_K] } }; };
   const CODE_K = "(function () {\n  'use strict';\n  kintone.events.on(['app.record.edit.show'], function (event) {\n    const record = event.record;\n    if (record['ステータス'] && record['ステータス'].value === '承認待ち') record['case_name'].disabled = true;\n    return event;\n  });\n})();";
@@ -2686,9 +2700,9 @@ await section(async () => {
   };
   const { m, sent } = await run(CODE_K);
   const v = m.conv().activePlan(), e = v && v.generated && v.generated.C1;
-  //   簡素化 B（2026-10-17）: Toolkit が受け取った候補から Gateway と同じ計算で作った指紋（会話の照合と同じ関数）
-  const localHash = e ? await KTScan.gatewayCandidateHashOf({ strategy: e.generated.strategy, targetFile: e.generated.targetFile, code: e.generated.code, patch: e.generated.patch, baseHash: null, customizationId: 'C1' }) : null;
-  assert(e && e.status === 'verified' && e.generated.code === CODE_K && !e.generated.toolkitModernJs && e.candidateHash === sent[0].candidateHash && e.verification.candidateHash === sent[0].candidateHash && localHash === sent[0].candidateHash && FS.readyOf(v) === true,
+  //   簡素化 B（2026-10-17）・2026-10-18: Toolkit が受け取った本文から Gateway と同じ計算で作った書き込む本文の指紋（会話の照合と同じ関数）
+  const localHash = e ? await KTScan.gatewayBodyHashOf({ strategy: e.generated.strategy, targetFile: e.generated.targetFile, body: e.generated.code, baseHash: null, customizationId: 'C1' }) : null;
+  assert(e && e.status === 'verified' && e.generated.code === CODE_K && !e.generated.toolkitModernJs && e.candidateHash === sent[0].candidateHash && e.verification.bodyHash === sent[0].candidateHash && localHash === sent[0].candidateHash && FS.readyOf(v) === true,
     `E4-1: 生成工程が検証したコード・candidateHash のまま最終案になる（Toolkit は書き換えない）: ${JSON.stringify({ status: e && e.status, same: e && e.generated.code === CODE_K, hash: [e && e.candidateHash, sent[0] && sent[0].candidateHash, localHash] })}`);
   const rE = await KIT.applyOnScreen(m);   // §0e.1: ［動作テスト環境へ反映］1 回で承認と登録
   const pr = m.panel.jsExecState().prepared;
@@ -2785,21 +2799,19 @@ await section(async () => {
   assert(left.length === 0, `E8-3: 本体の文に「動作テスト（隔離環境の模擬）」「プレビュー環境」が残っていない: ${JSON.stringify(left.map(l => l.trim().slice(0, 120)))}`);
 });
 // E9（C-1 第 2 段・2026-10-08）: 本番の経路から呼ばれない処理の削除（設計 §0d.4）。
-//   簡素化 B（2026-10-17）: 候補の hash は Gateway の candidateHashOf と同じ計算（KTScan.gatewayCandidateHashOf。SHA-256）にした（以前の KTScan.candidateHashOf は別の方式で、
-//   Gateway の指紋と比べられなかった）。実機の記録（2026-10-15 の 1 会話の C1〜C3。統合を含む）の Gateway の指紋と一致し、改行の違いと操作の余分な項目を数えない
+//   簡素化 B（2026-10-17）・2026-10-18（AI版 契約 20 §20）: 結び付けの指紋は書き込む本文の指紋（KTScan.gatewayBodyHashOf。Gateway の bodyHashOf と同じ SHA-256）。
+//   記録（2026-10-15 の 1 会話の C1〜C3。統合を含む）に、今の生成工程の部品（AI版 bodyHashOf）で足した指紋と一致する。改行はそろえない（CRLF と LF は違う本文）
 await section(async () => {
   const CR = String.fromCharCode(13), LF = String.fromCharCode(10);
-  const H = KTScan.gatewayCandidateHashOf;
+  const H = KTScan.gatewayBodyHashOf;
   const REC = require('./fixtures/nl1015b-final.js').GENERATED;
   const recRows = [];
-  for (const [cid, e] of Object.entries(REC)) recRows.push([cid, await H({ strategy: e.generated.strategy, targetFile: e.generated.targetFile, code: e.generated.code, patch: e.generated.patch, baseHash: e.existingSource && typeof e.existingSource.text === 'string' ? KTScan.hashText(e.existingSource.text) : null, customizationId: cid }), e.verification.candidateHash]);
-  assert(recRows.length === 3 && recRows.every(([, a, b]) => a && a === b) && KTScan.candidateHashOf === undefined, `E9-1: 候補の指紋は実機の記録の Gateway の指紋と一致する（統合の C1 を含む。別の方式の指紋は削除）: ${JSON.stringify(recRows)}`);
-  const cases = [
-    [{ strategy: 'NEW_JS_FILE', targetFile: 'caseLock.js', code: 'a' + CR + LF + 'b', customizationId: 'C1' }, { strategy: 'NEW_JS_FILE', targetFile: 'caseLock.js', code: 'a' + LF + 'b', customizationId: 'C1' }, '改行が CRLF と LF'],
-    [{ strategy: 'EXTEND_EXISTING_JS', targetFile: 'old.js', code: '', patch: { baseHash: 'abcd1234', operations: [{ type: 'insertAfter', anchor: 'x' + CR + LF, content: 'y', extra: 1 }] }, baseHash: 'deadbeef', customizationId: 'C2' }, { strategy: 'EXTEND_EXISTING_JS', targetFile: 'old.js', code: '', patch: { baseHash: 'abcd1234', operations: [{ type: 'insertAfter', anchor: 'x' + LF, content: 'y' }] }, baseHash: 'deadbeef', customizationId: 'C2' }, '既存のファイルへの patch（操作の余分な項目は数えない）'],
-  ];
-  for (const [a, b, name] of cases) { const ha = await H(a), hb = await H(b); assert(!!ha && ha === hb && ha === gwCandidateHash(a), `E9-1: 候補の指紋は同じ候補で同じ値（${name}）・テストの部品の計算とも同じ: ${ha} / ${hb}`); }
-  assert((await H({ strategy: 'NEW_JS_FILE', targetFile: 'a.js', code: 'x', customizationId: 'C1' })) !== (await H({ strategy: 'NEW_JS_FILE', targetFile: 'a.js', code: 'x', customizationId: 'C2' })) && (await H({ strategy: 'EXTEND_EXISTING_JS', targetFile: 'a.js', code: 'x', baseHash: '1', customizationId: 'C1' })) !== (await H({ strategy: 'EXTEND_EXISTING_JS', targetFile: 'a.js', code: 'x', baseHash: '2', customizationId: 'C1' })), 'E9-1: customizationId と送った既存ファイルの本文の指紋が違えば、違う指紋になる');
+  for (const [cid, e] of Object.entries(REC)) recRows.push([cid, await H({ strategy: e.generated.strategy, targetFile: e.generated.targetFile, body: e.generated.strategy === 'EXTEND_EXISTING_JS' ? e.generated.body : e.generated.code, baseHash: e.existingSource && typeof e.existingSource.text === 'string' ? KTScan.hashText(e.existingSource.text) : null, customizationId: cid }), e.verification.bodyHash]);
+  assert(recRows.length === 3 && recRows.every(([, a, b]) => a && a === b) && KTScan.candidateHashOf === undefined, `E9-1: 書き込む本文の指紋は、記録に今の生成工程の計算で足した指紋と一致する（統合の C1 を含む。別の方式の指紋は削除）: ${JSON.stringify(recRows)}`);
+  const lfBody = { strategy: 'NEW_JS_FILE', targetFile: 'caseLock.js', body: 'a' + LF + 'b', customizationId: 'C1' }, crlfBody = { ...lfBody, body: 'a' + CR + LF + 'b' };
+  const hl = await H(lfBody), hc = await H(crlfBody);
+  assert(!!hl && !!hc && hl !== hc && hl === gwCandidateHash({ ...lfBody, code: lfBody.body }) && hc === gwCandidateHash({ ...crlfBody, code: crlfBody.body }), `E9-1: 改行だけが違う本文は違う指紋（改行をそろえない）・テストの部品の計算とも同じ: ${hl} / ${hc}`);
+  assert((await H({ strategy: 'NEW_JS_FILE', targetFile: 'a.js', body: 'x', customizationId: 'C1' })) !== (await H({ strategy: 'NEW_JS_FILE', targetFile: 'a.js', body: 'x', customizationId: 'C2' })) && (await H({ strategy: 'EXTEND_EXISTING_JS', targetFile: 'a.js', body: 'x', baseHash: '1', customizationId: 'C1' })) !== (await H({ strategy: 'EXTEND_EXISTING_JS', targetFile: 'a.js', body: 'x', baseHash: '2', customizationId: 'C1' })) && (await H({ strategy: 'EXTEND_EXISTING_JS', targetFile: 'a.js', body: null, baseHash: '1', customizationId: 'C1' })) === null, 'E9-1: customizationId と送った既存ファイルの本文の指紋が違えば違う指紋・本文が無ければ指紋を作らない');
   // 消した処理が残っていない（試作のエージェント・模擬実行の本体・模擬の取り込み・試作の接続・修復の往復の残骸）
   assert(T.KTJsSim === undefined && T.KTAgent === undefined && T.KTAgentDomains === undefined && T.KTAgentUi === undefined, 'E9-2: KTJsSim・KTAgentDomains・KTAgent・KTAgentUi は本体に無い');
   assert(typeof KTCodeReview.attachSim === 'undefined' && typeof KTCodeReview.simRan === 'undefined' && typeof KTCodeReview.attachBehavior === 'function', 'E9-3: KTCodeReview.attachSim・simRan は無い（生成工程の検証結果の取り込み attachBehavior は残す）');
@@ -3000,7 +3012,7 @@ await section(async () => {
   const planRespL = (goal) => { const b = PLAN_V1(goal); return { ...b, plan: { ...b.plan, solution: 'CUSTOMIZATION', steps: [mkStep('C1', 'CUSTOMIZATION_REQUIRED', 'JS', null, { customizationId: 'C1' }, { title: 'JavaScript', solution: 'CUSTOMIZATION' })], customizations: [CUST_L] } }; };
   const LOCK_L = "(function () {\n  'use strict';\n  kintone.events.on(['app.record.edit.show'], function (event) {\n    const record = event.record;\n    if (record['ステータス'] && record['ステータス'].value === '承認待ち') record['case_name'].disabled = true;\n    return event;\n  });\n})();";
   const run = async (features) => {
-    const h = clone(HEALTH); h.registry.toolkit['customization-generator'].verification = ['requirementId', ...features, GEN_NETWORK_FEATURE];
+    const h = clone(HEALTH); h.registry.toolkit['customization-generator'].verification = ['requirementId', ...features, ...GEN_CURRENT_FEATURES];
     const generateImpl = async ({ ctx, requestId }) => {
       const req = (ctx.verification && ctx.verification.requiredEffects) || [];
       const resp = { ok: true, contractVersion: '2.1', meta: { requestId, gateway: { product: 'toolkit', feature: 'customization-generator', promptVersion: '1', contextVersion: 'customization-1' }, normalization: { warnings: [] }, ai: { model: 'm' } }, generated: { strategy: 'NEW_JS_FILE', targetFile: 'caseLock.js', summary: 's', code: LOCK_L, patch: null, events: ['app.record.edit.show'], fields: [{ code: 'case_name', access: 'CONTROL' }], apis: [], assumptions: [], warnings: [], coverage: [{ requirementId: 'C1', status: 'PARTIAL', note: '行の追加・削除は止められません', limitCode: 'SUBTABLE_ROWS' }] }, ...(req.length ? { verification: fakeVerification({ code: LOCK_L, has: { case_name: ['lock'] } }, req, { candidateHash: gwHashOfCtx(ctx, { strategy: 'NEW_JS_FILE', targetFile: 'caseLock.js', code: LOCK_L, patch: null }) }) } : {}) };
@@ -3038,7 +3050,7 @@ await section(async () => {
   assert(r.intent === 'ADOPT_DRAFT' && v.final && FS.readyOf(v) && ap.ok && KIT.validC(x).ok && KIT.REQUESTS.length === 4, `F11-1: 会話コントローラ: 採用 → 最終案 → 承認（共有の部品）: ${JSON.stringify({ intent: r.intent, ok: ap.ok })}`);
   const CUST_S = { customizationId: 'C1', requirement: '承認待ちでは案件名を編集できないようにする', whyStandardInsufficient: 'ステータスで切り替えるアクセス権は無い', strategy: 'NEW_JS_FILE', platform: ['desktop'], implementation: 'JAVASCRIPT', events: ['app.record.edit.show'], fields: [{ code: 'ステータス', access: 'READ' }, { code: 'case_name', access: 'CONTROL', condition: 'ステータス in ("承認待ち")', effects: ['lock'] }], apis: [], existingFiles: [], risks: [], questions: [], dependsOn: [], evidenceIds: [] };
   const LOCK_S = "(function () {\n  'use strict';\n  kintone.events.on(['app.record.edit.show'], function (event) {\n    const record = event.record;\n    if (record['ステータス'] && record['ステータス'].value === '承認待ち') record['case_name'].disabled = true;\n    return event;\n  });\n})();";
-  const h = clone(HEALTH); h.registry.toolkit['customization-generator'].verification = ['requirementId', ...GEN_EFFECT_FEATURES, GEN_NETWORK_FEATURE];
+  const h = clone(HEALTH); h.registry.toolkit['customization-generator'].verification = ['requirementId', ...GEN_EFFECT_FEATURES, ...GEN_CURRENT_FEATURES];
   const planResp = (goal) => { const b = PLAN_V1(goal); return { ...b, plan: { ...b.plan, solution: 'HYBRID', steps: [...b.plan.steps, mkStep('C1', 'CUSTOMIZATION_REQUIRED', 'JS', null, { customizationId: 'C1' }, { title: 'JavaScript', solution: 'CUSTOMIZATION' })], customizations: [CUST_S] } }; };
   const generateImpl = async ({ ctx, requestId }) => {
     const req = (ctx.verification && ctx.verification.requiredEffects) || [];

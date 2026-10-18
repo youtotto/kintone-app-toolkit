@@ -23,7 +23,7 @@
 //   // 台本（K.script）の発言: 課長・部長の承認者を選ぶ運用にしたい / 100円未満は部長不要、100万円以上は必要 / 7営業日で。会社独自の休業日は今回はなし / おすすめで
 //   //   （K.adoptC がこの 4 つを送る）。偽の生成工程の候補は K.CAND（good・bad・badChecked・warn・value・lockonly・locksave）
 'use strict';
-const { gwCandidateHash } = require('./gw-hash.js');
+const { gwCandidateHash, gwFakeBody } = require('./gw-hash.js');
 const { makeFakeHost } = require('./fake-dom.js');
 const FX = require('../fixtures/ai-context-app.js');
 const { buildScanPayload } = require('./scan-payload.js');
@@ -222,8 +222,10 @@ function createNewFlowKit(T) {
   const GEN_EFFECT_FEATURES = ['requiredEffects', 'effectGroups', 'relatedOmitted', 'appFields', 'saveDialog', 'reasonCategory', 'caseSide', 'eventCases', 'loadFaithful', 'registrationCheck', 'emptyCase', 'hideCondition', 'registrationCounts', 'caseCoverage', 'cancelCheck', 'limitCode', 'scopeList', 'tableRowChange', 'caseInvalid'];
   /** §5.1: 移植元と同じ動きかを比べる検査の印（health の customization-generator.verification の conditionFrom。今の Gateway の偽物には付ける） */
   const GEN_PORT_FEATURE = 'conditionFrom';
-  /** 2026-10-18: 外部への通信と通知の検査の印（health の networkCheck。今の Gateway の偽物には付ける。無い接続先の生成結果は検証済みにしない） */
+  /** 2026-10-18: 外部への通信と通知の検査の印（health の networkCheck）と、検査と模擬テストに使った本文を返す印（verifiedBody）。今の Gateway の偽物には付ける
+   *   （どちらかが無い接続先には、会話が生成を依頼しない） */
   const GEN_NETWORK_FEATURE = 'networkCheck';
+  const GEN_CURRENT_FEATURES = Object.freeze([GEN_NETWORK_FEATURE, 'verifiedBody']);
   const EXPECT_OF = { lock: 'lock', warn: 'warn', 'block-save': 'block-save', 'set-value': 'set-value', 'show-hide': 'show-hide' };
   /** §0c.9: 「合わない」側の期待（Gateway の behavior-cases の neg） */
   const NOMATCH_OF = { lock: 'not-locked', warn: 'not-warned', 'block-save': 'save-allowed', 'set-value': 'value-unchanged', 'show-hide': 'show-hide' };
@@ -263,7 +265,7 @@ function createNewFlowKit(T) {
     //   要件の id の無い旧い形（{ requirement }）は、本物の入口（normalizeCoverage）と同じくこの customization の要件として扱う
     const coverageItem = (c) => { const own = (Array.isArray(c.coverage) ? c.coverage : []).filter(x => x && (x.requirementId == null ? c.ownId : x.requirementId) === c.ownId && (x.status === 'NOT_MET' || x.status === 'PARTIAL')); return own.length ? [{ name: 'coverage', ok: false, severity: 'review', message: `この JavaScript の要件のうち満たせないと申告されたものがあります: ${own.map(x => `${x.status === 'NOT_MET' ? '未実装' : '一部だけ'}「${String(x.text || x.requirement || x.note || '').slice(0, 80)}」${x.note ? `（${String(x.note).slice(0, 120)}）` : ''}`).join('；')}` }] : []; };
     const machine = [{ name: 'syntax', ok: true, severity: 'info', message: '構文エラーなし' }, varLeft ? { name: 'modern-js', ok: false, severity: 'block', message: '記法の問題が残っています（var）' } : { name: 'modern-js', ok: true, severity: 'info', message: '新しいコードに var はありません' }, ...(supported && req.length ? [{ name: 'required-effects', ok: !missing.length, severity: missing.length ? 'block' : 'info', message: missing.length ? `要件未達（${missing.map(x => `${x.field}: ${x.effect}`).join('、')}の処理がありません）` : '必須の効果の処理があります' }] : []), ...coverageItem(cand)];
-    return { version: '1', candidateHash, sameAsPrevious: false, passed: !machine.some(m => !m.ok && m.severity === 'block'), machine,
+    return { version: '1', bodyHash: candidateHash, sameAsPrevious: false, passed: !machine.some(m => !m.ok && m.severity === 'block'), machine,
       ...(supported ? { requiredEffects: re, behavior: { status: env ? 'not-run' : cases.some(c => c.verdict === 'fail') ? 'failed' : 'passed', reason: env, cases, ...(scope === false ? {} : clone(scope || GW_SCOPE)) } } : {}),
       repairs: { count: repairs, reasons: [], stoppedBy }, unverified: ['実機での動作'] };
   }
@@ -289,10 +291,13 @@ function createNewFlowKit(T) {
       const generated0 = generatedOf ? generatedOf(cust) : null;
       //   §0d.3（2026-10-08）: 記法の修正（var → const など）は生成工程（Gateway の modern-js.mjs）が検証の前に行う。簡素化 B（2026-10-16）: Toolkit の写し（KTModernJs）は削除したので、
       //   この偽の生成工程は直さない（渡したコードを直した後の形とみなす。var が残れば検証結果の機械検査が止める）
-      const generated = generated0 ? generated0 : { strategy: 'NEW_JS_FILE', targetFile: 'lock.js', summary: '承認待ちでは金額を編集不可にします。', code: cand.code, patch: null, events: cust.events, fields: [{ code: 'amount', access: 'CONTROL' }], apis: [], assumptions: [], warnings: [], coverage: [{ requirementId: 'C1', status: 'MET', note: '', text: cust.requirement }] };
+      const generated1 = generated0 ? generated0 : { strategy: 'NEW_JS_FILE', targetFile: 'lock.js', summary: '承認待ちでは金額を編集不可にします。', code: cand.code, patch: null, events: cust.events, fields: [{ code: 'amount', access: 'CONTROL' }], apis: [], assumptions: [], warnings: [], coverage: [{ requirementId: 'C1', status: 'MET', note: '', text: cust.requirement }] };
+      //   2026-10-18（AI版 契約 20 §20）: 統合の書き込む本文は生成工程が合成して返す（generated.body）。この偽の生成工程は、本文を持たない統合の候補に、
+      //   既存の本文と patch から本文を作る（gwFakeBody。本物の合成は AI版 modern-js.mjs の modernizeGenerated）
+      const generated = generated1.strategy === 'EXTEND_EXISTING_JS' && typeof generated1.body !== 'string' && existingSource && typeof existingSource.text === 'string' ? { ...generated1, body: gwFakeBody(existingSource.text, generated1.patch) } : generated1;
       const review = KTCodeReview.review({ generated, customization: cust, plan: args.version.plan, data: clone(DATA_C), scan: null, existingSource });
-      //   簡素化 B（2026-10-17）: Gateway と同じ計算の候補の指紋（送った既存ファイルの本文の指紋と customizationId を含む）
-      const candidateHash = gwCandidateHash({ strategy: generated.strategy, targetFile: generated.targetFile, code: generated.code, patch: generated.patch, baseHash: existingSource && typeof existingSource.text === 'string' ? KTScan.hashText(existingSource.text) : null, customizationId: args.customizationId });
+      //   簡素化 B（2026-10-17）・2026-10-18: Gateway と同じ計算の書き込む本文の指紋（統合は generated.body。送った既存ファイルの本文の指紋と customizationId を含む）
+      const candidateHash = gwCandidateHash({ strategy: generated.strategy, targetFile: generated.targetFile, code: generated.code, body: generated.body, baseHash: existingSource && typeof existingSource.text === 'string' ? KTScan.hashText(existingSource.text) : null, customizationId: args.customizationId });
       return { ok: true, generated, review, ctx: { size: { approxTokens: 1000 } }, existingSource, inputHash: `h${n}`, verification: fakeVerification({ ...cand, code: generated.code, patch: generated.patch, coverage: generated.coverage, ownId: args.customizationId }, args.requiredEffects, { env, repairs, stoppedBy, supported, candidateHash, dropCaseFor, statusOverride, extraCases, caseReason, scope }), candidateHash, requirementIds: [{ id: 'C1', kind: 'customization', text: cust.requirement }], ...(relatedOmitted ? { relatedOmitted: clone(relatedOmitted) } : {}) };
     };
     return { impl, calls };
@@ -336,15 +341,16 @@ function createNewFlowKit(T) {
    * 段階 C の偽 services（仮案 → 採用 → 計画 → 生成と検証（生成工程）→ 最終案）。
    *   §0f（2026-10-09）: scriptFn = 仮案の台本（既定は script）・labels = フィールドのラベル（既定は LABELS_C）を差し替えられる
    *   2026-10-15: autoMap = 偽の計画の AI が要件の対応づけを返す（withPlannerMapping。既定は返す。わざと担当を欠いた回帰は false）
-   *   2026-10-18: networkCheck = 生成工程の印に外部への通信と通知の検査（GEN_NETWORK_FEATURE）を付ける（既定は付ける。印の無い接続先の回帰は false。supported とは別に決める）
+   *   2026-10-18: current = 生成工程の印に今の受け渡しの印（GEN_CURRENT_FEATURES: 外部への通信と通知の検査・検査した本文の受け渡し）を付ける（既定は付ける。
+   *   印の無い接続先の回帰は false。supported とは別に決める）
    */
-  function makeConvC({ planImpl = (args) => planJs(args), generate = makeGenerate(), feedback = true, storage = null, planGate = null, materials = '見ている設定: ステータス 3 件・通知 0 件・既存の JavaScript 0 ファイル', supported = true, scriptFn = script, labels = LABELS_C, autoMap = true, networkCheck = true } = {}) {
+  function makeConvC({ planImpl = (args) => planJs(args), generate = makeGenerate(), feedback = true, storage = null, planGate = null, materials = '見ている設定: ステータス 3 件・通知 0 件・既存の JavaScript 0 ファイル', supported = true, scriptFn = script, labels = LABELS_C, autoMap = true, current = true } = {}) {
     const calls = { propose: [], plan: [], ask: [] };
     let t = 1000;
     const x = { planImpl };
     const services = {
       conversationFeatures: () => ['requirements', 'brief', 'stream', 'proposal'], revisionModes: () => ['full'],
-      generatorFeatures: () => ['requirementId', 'cases', ...(feedback ? ['feedback'] : []), ...(supported ? (Array.isArray(supported) ? supported : [...GEN_EFFECT_FEATURES, GEN_PORT_FEATURE]) : []), ...(networkCheck ? [GEN_NETWORK_FEATURE] : [])], plannerFeatures: () => ['reply'],
+      generatorFeatures: () => ['requirementId', 'cases', ...(feedback ? ['feedback'] : []), ...(supported ? (Array.isArray(supported) ? supported : [...GEN_EFFECT_FEATURES, GEN_PORT_FEATURE]) : []), ...(current ? GEN_CURRENT_FEATURES : [])], plannerFeatures: () => ['reply'],
       materials: () => materials,
       fieldLabels: () => labels,
       async customizeRevision() { return '42'; },
@@ -397,7 +403,7 @@ function createNewFlowKit(T) {
 
   // ---- §0e.1（2026-10-09）: 承認から結果まで画面のボタンで進める部品 ----
   /** 生成工程が必須の効果の検証に対応している接続先（health の customization-generator.verification） */
-  const HEALTH_V = (() => { const h = clone(HEALTH); h.registry.toolkit['customization-generator'].verification = ['requirementId', 'feedback', ...GEN_EFFECT_FEATURES, GEN_PORT_FEATURE, GEN_NETWORK_FEATURE]; return h; })();
+  const HEALTH_V = (() => { const h = clone(HEALTH); h.registry.toolkit['customization-generator'].verification = ['requirementId', 'feedback', ...GEN_EFFECT_FEATURES, GEN_PORT_FEATURE, ...GEN_CURRENT_FEATURES]; return h; })();
   /** 新設するフィールド（承認メモ。コードは approval_memo） */
   const NEW_MEMO = { temporaryId: 'NEW_FIELD_1', label: '承認メモ', suggestedCode: 'approval_memo', type: 'SINGLE_LINE_TEXT', typeValid: true, required: false, options: [], reason: '承認の記録を残すフィールドが無いため', evidenceIds: [], alternativeExistingFieldCode: null, codeConflict: false, labelDuplicate: false };
   const ST_S = "record['ステータス'] && record['ステータス'].value === '承認待ち'";
@@ -472,7 +478,7 @@ function createNewFlowKit(T) {
     return { v, clicked: true, button, pre, run: m.panel.finalRun(), writes: writesOf(m).slice(w0), card: cards.length ? stripC(cards[cards.length - 1]) : '', cardHtml: cards.length ? cards[cards.length - 1] : '', cardCount: cards.length, exec: m.panel.executorState(), js: m.panel.jsExecState() };
   };
 
-  return { gwModernized, withPlannerMapping, mapPlanResponse, rawWithPlannerMapping, tick, ticks, clone, buildInputs, INPUTS, META, B, A, Q, APPROVER, ROUTE, BASE, CSV, Q_THRESHOLD, Q_MIDDLE, Q_DAYS, Q_HOLIDAYS, Q_LOCK, Q_TIMING, B_SELECT, B_ROUTE, B_UNDER, B_OVER, B_NOTIFY_TO, B_NOTIFY_IF, B_LOCK, STD, req, idBy, reqIdBy, script, normalized, planOk, planFail, planThrow, gateMk, HEALTH, spec, mkStep, PLAN_META, PLAN_V1, answerFor, makeStorage, gate, mount, clickChat, RP, KTCodeReview, DATA_C, LABELS_C, custOf, CUST_C1, ST_C, handlerC, GOOD, BAD, WARN, VALUE, LOCKSAVE, CAND, GEN_EFFECT_FEATURES, GW_SCOPE, EXPECT_OF, NOMATCH_OF, GEN_PORT_FEATURE, GEN_NETWORK_FEATURE, fakeVerification, planJs, makeGenerate, makeConvC, adoptC, finalHtml, stripC, REQUESTS, approveC, approveArgs, validC, adoptOnScreen, prepareOnScreen, loadDevBaseFromMock, HEALTH_V, NEW_MEMO, lockCode, custLock, screenPlan, planImplOf, screenGenerate, mountFinal, applyButtonOf, writesOf, applyOnScreen, waitUntil };
+  return { gwModernized, withPlannerMapping, mapPlanResponse, rawWithPlannerMapping, tick, ticks, clone, buildInputs, INPUTS, META, B, A, Q, APPROVER, ROUTE, BASE, CSV, Q_THRESHOLD, Q_MIDDLE, Q_DAYS, Q_HOLIDAYS, Q_LOCK, Q_TIMING, B_SELECT, B_ROUTE, B_UNDER, B_OVER, B_NOTIFY_TO, B_NOTIFY_IF, B_LOCK, STD, req, idBy, reqIdBy, script, normalized, planOk, planFail, planThrow, gateMk, HEALTH, spec, mkStep, PLAN_META, PLAN_V1, answerFor, makeStorage, gate, mount, clickChat, RP, KTCodeReview, DATA_C, LABELS_C, custOf, CUST_C1, ST_C, handlerC, GOOD, BAD, WARN, VALUE, LOCKSAVE, CAND, GEN_EFFECT_FEATURES, GW_SCOPE, EXPECT_OF, NOMATCH_OF, GEN_PORT_FEATURE, GEN_NETWORK_FEATURE, GEN_CURRENT_FEATURES, fakeVerification, planJs, makeGenerate, makeConvC, adoptC, finalHtml, stripC, REQUESTS, approveC, approveArgs, validC, adoptOnScreen, prepareOnScreen, loadDevBaseFromMock, HEALTH_V, NEW_MEMO, lockCode, custLock, screenPlan, planImplOf, screenGenerate, mountFinal, applyButtonOf, writesOf, applyOnScreen, waitUntil };
 }
 
 module.exports = { createNewFlowKit };

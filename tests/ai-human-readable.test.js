@@ -487,13 +487,14 @@ await section(async () => {
   keep('H6-stop', finalHtml(x), rightOf(x));
 });
 await section(async () => {
-  // 接続先（生成工程）が必須の動作の確認に対応していない（health の印が無い・requiredEffects を返さない）: 行は「接続先が確認に非対応」のまま。承認できない
+  // 接続先（生成工程）が今の生成の受け渡しに対応していない（health の印が足りない）。2026-10-18: 生成の前の確認で生成を依頼しない（有料の生成をしない）。
+  //   作っていないので効果の行は「まだ作っていません」。止めている理由（接続先が非対応）は左の理由と右の JavaScript の状態に出す。承認できない
   const x = makeConvC({ supported: false, generate: makeGenerate({ sequence: ['good'], supported: false }) });
   await sendUntilAdopt(x);
   const v = x.c.activePlan(), fin = v.final, e = v.generated.C1;
   const rt = stripC(rightOf(x)), vis = stripC(outsideDetails(finalHtml(x)));
-  assert(e.effectsCapable === false && e.status === 'unsupported' && FS.readyOf(fin) === false && fin.verification.effects.every(r => r.structure === 'unsupported') && /接続先が確認に非対応/.test(rt) && !/まだ作っていません/.test(rt), `H6-4: 接続先が本当に非対応（effectsCapable false）のときだけ「接続先が確認に非対応」: ${JSON.stringify({ cap: e.effectsCapable, st: e.status, eff: fin.verification.effects.map(r => r.structure) })}`);
-  assert(/確認できないこと／反映を止めている理由/.test(vis) && /接続先（生成工程）が必須の動作の確認に対応していない/.test(vis), 'H6-5: 左には止めている理由として接続先の非対応が出る');
+  assert(x.gen.calls.length === 0 && e.status === 'unsupported' && e.verdict.capability === 'generator' && FS.readyOf(fin) === false && fin.verification.effects.length > 0 && fin.verification.effects.every(r => r.structure === 'not-generated') && /まだ作っていません/.test(rt), `H6-4: 接続先が今の受け渡しに非対応 → 生成を依頼しない（効果の行は「まだ作っていません」）: ${JSON.stringify({ gen: x.gen.calls.length, st: e.status, eff: fin.verification.effects.map(r => r.structure) })}`);
+  assert(/確認できないこと／反映を止めている理由/.test(vis) && /接続先（生成工程）が今の Toolkit の生成の受け渡し/.test(vis), `H6-5: 左には止めている理由として接続先の非対応が出る: ${(vis.match(/確認できないこと[\s\S]{0,200}/) || [''])[0]}`);
   //   レビュー 2（2026-10-14）: 右の JavaScript の状態は status ごとの語（unsupported → この接続先では確かめる検査ができません）
   assert(/JavaScript：この接続先では確かめる検査ができません/.test(rt) && !/確認できないことがあります/.test(rt), `H6-6: 右の JavaScript の状態は「この接続先では確かめる検査ができません」: ${(rt.match(/JavaScript の状態[\s\S]{0,80}/) || [''])[0]}`);
   keep('H6-cap', finalHtml(x), rightOf(x));

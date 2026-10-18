@@ -26,7 +26,7 @@ process.on('unhandledRejection', (e) => { if (/kintone is not defined/.test(Stri
 const { loadToolkit, makeAssert } = require('./helpers/load-toolkit.js');
 //   簡素化（2026-10-17）: 反映できるかは、最新の版なら会話の今の判定、前の版なら最終案の記録で確かめる（tests/helpers/final-state.js）
 const FS = require('./helpers/final-state.js');
-const { gwCandidateHash } = require('./helpers/gw-hash.js');
+const { gwCandidateHash, gwWithBody } = require('./helpers/gw-hash.js');
 const T = loadToolkit();
 const { KTCodeReview, KTScan, KTAiClient, KTPlanReview, KTQueryCheck, KTDeps } = T;
 const { assert, state } = makeAssert();
@@ -194,19 +194,20 @@ const generate = ({ c3 = 'pass' } = {}) => {
     if (cid === 'C1') {
       existingSource = { name: 'dealLock.js', target: 'desktop', text: F.DEAL_LOCK_JS };
       const content = LOCK_HANDLER(c.events);
-      generated = mk({ strategy: 'EXTEND_EXISTING_JS', targetFile: 'dealLock.js', summary: '承認済みでは金額と明細のセルを編集できないようにし、それ以外では解除します。', code: content, patch: { baseHash: KTScan.hashText(F.DEAL_LOCK_JS), operations: [{ type: 'REPLACE', anchor: OLD_HANDLER, content }] }, events: [...c.events], fields: c.fields.map(f => ({ code: f.code, access: f.access })) });
+      //   2026-10-18（AI版 契約 20 §20）: 統合の書き込む本文は生成工程が合成して返す（偽の生成工程は既存の本文と patch から作る）
+      generated = gwWithBody(mk({ strategy: 'EXTEND_EXISTING_JS', targetFile: 'dealLock.js', summary: '承認済みでは金額と明細のセルを編集できないようにし、それ以外では解除します。', code: content, patch: { baseHash: KTScan.hashText(F.DEAL_LOCK_JS), operations: [{ type: 'REPLACE', anchor: OLD_HANDLER, content }] }, events: [...c.events], fields: c.fields.map(f => ({ code: f.code, access: f.access })) }), F.DEAL_LOCK_JS);
     } else if (cid === 'C2') {
       generated = mk({ strategy: 'NEW_JS_FILE', targetFile: 'dealLockMobile.js', summary: 'モバイルでも承認済みでは金額と明細のセルを編集できないようにします。', code: `(function () {\n  'use strict';\n  ${LOCK_HANDLER(c.events)}\n})();\n`, events: [...c.events], fields: c.fields.map(f => ({ code: f.code, access: f.access })) });
     } else {
       generated = mk({ strategy: 'NEW_JS_FILE', targetFile: 'dealValidateMobile.js', summary: 'PC と同じ保存時の入力チェックをモバイルにも用意します。', code: F.C3_CODE, events: [...M_SUBMITS], fields: [{ code: 'amount', access: 'CONTROL' }] });
     }
     const review = KTCodeReview.review({ generated, customization: c, plan: args.version.plan, data: clone(DATA), scan: null, existingSource });
-    const candidateHash = gwCandidateHash({ strategy: generated.strategy, targetFile: generated.targetFile, code: generated.code, patch: generated.patch, baseHash: existingSource ? KTScan.hashText(existingSource.text) : null, customizationId: cid });
+    const candidateHash = gwCandidateHash({ strategy: generated.strategy, targetFile: generated.targetFile, code: generated.code, body: generated.body, baseHash: existingSource ? KTScan.hashText(existingSource.text) : null, customizationId: cid });
     if (cid === 'C3') {
       const failing = c3 === 'fail';
       let n = 0;
       const cases = (e0.events || []).flatMap(ev => VALUES.map(([val, ja, ref]) => { const mine = failing && val === '-1' ? { stopped: false, errors: {}, eventError: null } : clone(ref); const fail = JSON.stringify(mine) !== JSON.stringify(ref); return { id: `K${++n}`, requirementId: 'C3', requirementIds: ['C3'], field: 'amount', effect: 'block-save', expect: 'same-as-source', side: 'match', kind: 'port', event: ev, refEvent: ev.replace(/^mobile\./, ''), refFile: { file: 'dealValidate.js', target: 'desktop' }, verdict: fail ? 'fail' : 'pass', reference: ref, observed: mine, ...(fail ? { cause: 'expectation' } : {}), note: `金額 が ${ja} で保存する`, message: fail ? '移植元と違う動きです' : '移植元と同じ動きです' }; }));
-      const raw = { version: '1', candidateHash, sameAsPrevious: false, passed: !failing, machine: [{ name: 'syntax', ok: true, severity: 'info', message: '構文エラーなし' }, { name: 'required-effects', ok: true, severity: 'info', message: '必須の効果の処理があります' }], requiredEffects: [{ requirementId: 'C3', requirementIds: ['C3'], field: 'amount', effect: 'block-save', status: 'present' }], behavior: { status: failing ? 'failed' : 'passed', reason: null, cases, ...clone(K.GW_SCOPE) }, repairs: { count: failing ? 1 : 0, reasons: [], stoppedBy: failing ? 'same-failure' : null }, unverified: ['実機での動作'] };
+      const raw = { version: '1', bodyHash: candidateHash, sameAsPrevious: false, passed: !failing, machine: [{ name: 'syntax', ok: true, severity: 'info', message: '構文エラーなし' }, { name: 'required-effects', ok: true, severity: 'info', message: '必須の効果の処理があります' }], requiredEffects: [{ requirementId: 'C3', requirementIds: ['C3'], field: 'amount', effect: 'block-save', status: 'present' }], behavior: { status: failing ? 'failed' : 'passed', reason: null, cases, ...clone(K.GW_SCOPE) }, repairs: { count: failing ? 1 : 0, reasons: [], stoppedBy: failing ? 'same-failure' : null }, unverified: ['実機での動作'] };
       verification = KTAiClient.normalizeVerification(raw);
     } else {
       verification = K.fakeVerification({ code: generated.code, has: { amount: ['lock'], item_name: ['lock'], qty: ['lock'], unit_price: ['lock'] } }, args.requiredEffects, { candidateHash });

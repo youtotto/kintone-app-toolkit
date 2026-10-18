@@ -38,6 +38,7 @@ const { assert, state } = makeAssert();
 const FX = require('./fixtures/ai-context-app.js');
 const { makeKintoneMock } = require('./helpers/kintone-preview-mock.js');
 const { buildScanPayload } = require('./helpers/scan-payload.js');
+const { gwWithBody } = require('./helpers/gw-hash.js');
 
 const clone = (v) => JSON.parse(JSON.stringify(v));
 const spec = (o) => ({ name: null, from: null, to: null, filterCond: null, assignees: [], targets: [], events: [], timingField: null, daysLater: null, time: null, fields: [], sort: null, sourceApp: null, keyField: null, mappings: [], addMappings: [], fieldType: null, required: null, options: [], destApp: null, accessibility: null, entities: [], ...o });
@@ -96,7 +97,7 @@ console.log('\n--- BF-C（再 3）/ F24. エラー表示と編集不可: 条件�
   const DL_SRC = "(function () {\n  'use strict';\n  // 承認済みの案件は金額を変更できないようにする（既存の運用ルール）\n  kintone.events.on(['app.record.create.show', 'app.record.edit.show'], function (event) {\n    const record = event.record;\n    if (record['ステータス'] && record['ステータス'].value === '承認済み') {\n      record['amount'].disabled = true;\n    }\n    return event;\n  });\n})();\n";
   const PATCH4 = { baseHash: KTScan.hashText(DL_SRC), operations: [{ type: 'INSERT_AFTER', anchor: "    if (record['ステータス'] && record['ステータス'].value === '承認済み') {\n      record['amount'].disabled = true;\n    }", content: "\n    // 金額が100万円を超えたら警告を表示する\n    if (record['amount'].value > 1000000 && !record['amount'].disabled) {\n      record['amount'].error = '金額が100万円を超えています。';\n    } else {\n      record['amount'].error = null;\n    }\n" }] };
   const cust4 = { ...custom, strategy: 'EXTEND_EXISTING_JS', existingFiles: [{ name: 'dealLock.js', target: 'desktop' }] };
-  const r4 = KTCodeReview.review({ generated: { strategy: 'EXTEND_EXISTING_JS', targetFile: 'dealLock.js', summary: 's', code: PATCH4.operations[0].content, patch: PATCH4, events: custom.events, fields: custom.fields, apis: ['kintone.events.on'] }, customization: cust4, plan: null, data: DATA, scan: null, existingSource: { name: 'dealLock.js', target: 'desktop', text: DL_SRC } });
+  const r4 = KTCodeReview.review({ generated: gwWithBody({ strategy: 'EXTEND_EXISTING_JS', targetFile: 'dealLock.js', summary: 's', code: PATCH4.operations[0].content, patch: PATCH4, events: custom.events, fields: custom.fields, apis: ['kintone.events.on'] }, DL_SRC), customization: cust4, plan: null, data: DATA, scan: null, existingSource: { name: 'dealLock.js', target: 'desktop', text: DL_SRC } });
   //   簡素化 B（2026-10-17）: 計画のイベント（change）をコードが登録しているかは、生成工程の必須の効果（効果のイベントごとの処理の形。AI版 worker/test/cases/required-effects.mjs）が
   //   確かめる（Toolkit の planned-events・duplicate-handler は削除した）。Toolkit はその結果（missing）を登録不可として取り込む
   const REQ4 = [{ requirementId: 'C1', requirementIds: ['C1'], field: 'amount', effect: 'warn', events: ['app.record.edit.change.amount'], condition: '' }];
@@ -460,18 +461,18 @@ console.log('\n--- CX-7. 外部連携・通知の語で生成の可否を変え�
   await K.adoptC(xExt);
   const extCard = K.stripC(K.finalHtml(xExt));
   assert(/Toolkit では JavaScript を作れない部分があります/.test(extCard) && /会計システム/.test(extCard) && !/コードを生成できます/.test(extCard) && xExt.gen.calls.length === 0 && !FS.readyOf(xExt.c.activePlan()), `案内: 生成できない項目しか無ければ「コードを生成できます」と言わない（最終案のカード・生成は呼ばない）: ${extCard.replace(/\s+/g, ' ').slice(0, 160)}`);
-  //   接続先の能力（AI版 契約 20 §19）: 外部への通信と通知の検査の印（health の networkCheck）の無い接続先の生成結果は、合格の検証結果が返っても検証済みにしない
-  //   （守り手の無い形を受け入れない。文の語の判定には戻さない）。理由は必須の動作の確認の文と分ける。印のある接続先は今までどおり確認済み
-  const xNoNet = K.makeConvC({ networkCheck: false });
-  await K.adoptC(xNoNet);
-  const vNoNet = xNoNet.c.activePlan(), eNoNet = vNoNet && vNoNet.generated ? vNoNet.generated.C1 : null;
-  assert(eNoNet && eNoNet.status === 'unsupported' && eNoNet.verdict.kind === 'capability' && eNoNet.verdict.capability === 'network' && /外部への通信と通知の検査に対応していない/.test(eNoNet.verdict.reason) && xNoNet.gen.calls.length === 1 && !FS.readyOf(vNoNet)
-    && /接続先（生成工程）が外部への通信と通知の検査に対応していないため、まだ反映できません。/.test(FS.reasonOf(vNoNet)) && !/必須の動作の確認に対応していない/.test(FS.reasonOf(vNoNet)),
-    `CX-7: 外部への通信と通知の検査の印の無い接続先の生成結果は検証済みにしない（理由は通信と通知の検査の文）: ${JSON.stringify({ status: eNoNet && eNoNet.status, verdict: eNoNet && eNoNet.verdict && eNoNet.verdict.reason, reason: FS.reasonOf(vNoNet) })}`);
-  const xNet = K.makeConvC();
-  await K.adoptC(xNet);
-  const vNet = xNet.c.activePlan();
-  assert(vNet.generated.C1.status === 'verified' && vNet.generated.C1.networkCheck === true && FS.readyOf(vNet), `CX-7: 印のある接続先の生成結果は今までどおり確認済み: ${JSON.stringify({ status: vNet.generated.C1.status, reason: FS.reasonOf(vNet) })}`);
+  //   接続先の能力（AI版 契約 20 §19・§20）: 今の受け渡しの印（外部への通信と通知の検査 networkCheck・検査した本文の受け渡し verifiedBody）の無い接続先には、
+  //   生成を依頼しない（使えないと分かっている結果のために有料の生成をしない。文の語の判定には戻さない）。理由は必須の動作の確認の文と分ける。印のある接続先は今までどおり確認済み
+  const xOld = K.makeConvC({ current: false });
+  await K.adoptC(xOld);
+  const vOld = xOld.c.activePlan(), eOld = vOld && vOld.generated ? vOld.generated.C1 : null;
+  assert(eOld && eOld.status === 'unsupported' && eOld.verdict.kind === 'capability' && eOld.verdict.capability === 'generator' && /生成を依頼していません/.test(eOld.verdict.reason) && xOld.gen.calls.length === 0 && !FS.readyOf(vOld)
+    && /接続先（生成工程）が今の Toolkit の生成の受け渡し（必須の動作の確認・検査と模擬テストに使った本文・外部への通信と通知の検査）に対応していないため、まだ反映できません。/.test(FS.reasonOf(vOld)) && !/必須の動作の確認に対応していない/.test(FS.reasonOf(vOld)),
+    `CX-7: 今の受け渡しの印の無い接続先には生成を依頼しない（生成 0 回・理由は受け渡しの文）: ${JSON.stringify({ status: eOld && eOld.status, calls: xOld.gen.calls.length, verdict: eOld && eOld.verdict && eOld.verdict.reason, reason: FS.reasonOf(vOld) })}`);
+  const xNow = K.makeConvC();
+  await K.adoptC(xNow);
+  const vNow = xNow.c.activePlan();
+  assert(vNow.generated.C1.status === 'verified' && xNow.gen.calls.length === 1 && FS.readyOf(vNow), `CX-7: 印のある接続先の生成結果は今までどおり確認済み: ${JSON.stringify({ status: vNow.generated.C1.status, reason: FS.reasonOf(vNow) })}`);
 }
 
 // =========================================================
@@ -697,7 +698,7 @@ console.log('\n--- F41（F39 の確認・実機）. PC とモバイルの計画�
   const SRC = { name: 'dealLock.js', target: 'desktop', text: DL };
   const baseHash = KTScan.analyzeFile({ name: 'dealLock.js', target: 'desktop', kind: 'js', text: DL }, { fields: [], selfAppId: null }).file.hash;
   const cust = { customizationId: 'C1', requirement: '承認済みでは担当者も編集不可（PC・スマホ）', strategy: 'EXTEND_EXISTING_JS', platform: ['desktop', 'mobile'], events: ['app.record.create.show', 'app.record.edit.show', 'mobile.app.record.create.show', 'mobile.app.record.edit.show'], fields: [{ code: 'owner', access: 'CONTROL' }, { code: 'ステータス', access: 'READ' }], apis: [], existingFiles: [{ name: 'dealLock.js', target: 'desktop' }] };
-  const genOf = (add) => ({ strategy: 'EXTEND_EXISTING_JS', targetFile: 'dealLock.js', code: add, patch: { baseHash, operations: [{ type: 'INSERT_BEFORE', anchor: '})();', content: add }] }, events: cust.events, fields: cust.fields, apis: ['kintone.events.on'] });
+  const genOf = (add) => gwWithBody({ strategy: 'EXTEND_EXISTING_JS', targetFile: 'dealLock.js', code: add, patch: { baseHash, operations: [{ type: 'INSERT_BEFORE', anchor: '})();', content: add }] }, events: cust.events, fields: cust.fields, apis: ['kintone.events.on'] }, DL);
   const chk = (r, n) => r.checks.find(c => c.name === n) || null;
   const bad = KTCodeReview.review({ generated: genOf(ADD), customization: cust, plan: null, data: DATA, scan: null, existingSource: SRC });
   assert(chk(bad, 'patch').ok && !chk(bad, 'platform-fields') && bad.status !== 'BLOCKED', `F41（簡素化 B）: Toolkit の形式確認は画面ごとの処理の有無を判定しない（生成工程の必須の効果の範囲）: ${JSON.stringify(bad.checks.map(c => c.name))}`);
@@ -747,16 +748,17 @@ console.log('\n--- F40（CX-3 3 回目・実機）. 同じ既存の設定を 2 �
 console.log('\n--- F38（CX-1 2 回目・実機）. 既存ファイルの即時関数の外に足したコード（ファイル直下の宣言）---');
 {
   //   簡素化 B（2026-10-17）: 即時関数の外の宣言（globals）は Toolkit だけの規則で、削除した。生成工程（Gateway）の機械検査にも同じ規則は無く、移植していない（検査を増やさない）。
-  //   このため、即時関数の外に足した宣言は Toolkit でも生成工程でも止めない（判定しない範囲として残る）。Toolkit は統合した本文を作れるか（patch）だけを確かめる
+  //   このため、即時関数の外に足した宣言は Toolkit でも生成工程でも止めない（判定しない範囲として残る）。2026-10-18: 統合した本文は生成工程が作り（generated.body）、
+  //   Toolkit はその本文をそのまま書き込む本文にする（合成し直さない）
   const DL = ["(function () {", "  'use strict';", "  kintone.events.on(['app.record.create.show', 'app.record.edit.show'], function (event) {", "    const record = event.record;", "    if (record['ステータス'] && record['ステータス'].value === '承認済み') {", "      record['amount'].disabled = true;", "    }", "    return event;", "  });", "})();", ""].join('\n');
   const baseHash = KTScan.analyzeFile({ name: 'dealLock.js', target: 'desktop', kind: 'js', text: DL }, { fields: [], selfAppId: null }).file.hash;
   const ADD = "  // 承認済みはモバイルでも金額を編集不可\n  const EVENTS = ['mobile.app.record.create.show', 'mobile.app.record.edit.show'];\n  kintone.events.on(EVENTS, function (event) {\n    if (event.record['ステータス'] && event.record['ステータス'].value === '承認済み') { event.record['amount'].disabled = true; }\n    return event;\n  });\n";
   const cust = { customizationId: 'C1', requirement: '承認済みは金額を編集不可（PC・モバイル）', strategy: 'EXTEND_EXISTING_JS', platform: ['desktop', 'mobile'], events: ['app.record.create.show', 'app.record.edit.show', 'mobile.app.record.create.show', 'mobile.app.record.edit.show'], fields: [{ code: 'amount', access: 'CONTROL' }], apis: [], existingFiles: [{ name: 'dealLock.js', target: 'desktop' }] };
-  const genOf = (op) => ({ strategy: 'EXTEND_EXISTING_JS', targetFile: 'dealLock.js', code: ADD, patch: { baseHash, operations: [op] }, events: cust.events, fields: cust.fields, apis: ['kintone.events.on'] });
+  const genOf = (op) => gwWithBody({ strategy: 'EXTEND_EXISTING_JS', targetFile: 'dealLock.js', code: ADD, patch: { baseHash, operations: [op] }, events: cust.events, fields: cust.fields, apis: ['kintone.events.on'] }, DL);
   const chk = (r, n) => r.checks.find(c => c.name === n) || null;
   // 実機と同じ: APPEND（anchor「})();」）→ 即時関数の外（ファイル直下）に const EVENTS
   const out = KTCodeReview.review({ generated: genOf({ type: 'APPEND', anchor: '})();\n', content: ADD }), customization: cust, plan: null, data: DATA, scan: null, existingSource: { name: 'dealLock.js', target: 'desktop', text: DL } });
-  assert(chk(out, 'patch').ok && !chk(out, 'globals') && out.finalCode.endsWith(ADD) && out.finalCode.startsWith(DL), `F38（簡素化 B）: 即時関数の外への追加も、統合した本文は作る（globals は判定しない）: ${JSON.stringify(out.checks.map(c => c.name))}`);
+  assert(chk(out, 'patch').ok && !chk(out, 'globals') && out.finalCode === genOf({ type: 'APPEND', anchor: '})();\n', content: ADD }).body && out.finalCode.startsWith(DL), `F38（簡素化 B）: 即時関数の外への追加も、受け取った統合の本文のまま書き込む（globals は判定しない）: ${JSON.stringify(out.checks.map(c => c.name))}`);
   // 即時関数の中（閉じる行の前）に入れたコード
   const inside = KTCodeReview.review({ generated: genOf({ type: 'INSERT_BEFORE', anchor: '})();', content: ADD }), customization: cust, plan: null, data: DATA, scan: null, existingSource: { name: 'dealLock.js', target: 'desktop', text: DL } });
   assert(chk(inside, 'patch').ok && !chk(inside, 'globals') && inside.status !== 'BLOCKED', `F38: 即時関数の中に入れたコードは止めない: ${JSON.stringify(inside.checks.filter(c => !c.ok).map(c => c.name))}`);
@@ -771,10 +773,10 @@ console.log('\n--- F39（CX-1 2 回目・実機）. PC とモバイルの計画:
   const SRC = { name: 'dealLock.js', target: 'desktop', text: DL };
   const baseHash = KTScan.analyzeFile({ name: 'dealLock.js', target: 'desktop', kind: 'js', text: DL }, { fields: [], selfAppId: null }).file.hash;
   const cust = { customizationId: 'C1', requirement: '承認済みは金額を編集不可（PC・モバイル）', strategy: 'EXTEND_EXISTING_JS', platform: ['desktop', 'mobile'], events: ['app.record.create.show', 'app.record.edit.show', 'mobile.app.record.create.show', 'mobile.app.record.edit.show'], fields: [{ code: 'amount', access: 'CONTROL' }], apis: [], existingFiles: [{ name: 'dealLock.js', target: 'desktop' }] };
-  const gen = { strategy: 'EXTEND_EXISTING_JS', targetFile: 'dealLock.js', summary: 'モバイルでも金額を編集不可', code: ADD, patch: { baseHash, operations: [{ type: 'INSERT_BEFORE', anchor: '})();', content: ADD }] }, events: cust.events, fields: cust.fields, apis: ['kintone.events.on'], assumptions: [], warnings: [] };
+  const gen = gwWithBody({ strategy: 'EXTEND_EXISTING_JS', targetFile: 'dealLock.js', summary: 'モバイルでも金額を編集不可', code: ADD, patch: { baseHash, operations: [{ type: 'INSERT_BEFORE', anchor: '})();', content: ADD }] }, events: cust.events, fields: cust.fields, apis: ['kintone.events.on'], assumptions: [], warnings: [] }, DL);
   const rv = KTCodeReview.review({ generated: gen, customization: cust, plan: null, data: DATA, scan: null, existingSource: SRC });
   const r = KTJsExecutor.changeFromGenerated({ customization: cust, generated: gen, review: rv, existingSource: SRC });
-  assert(r.ok && r.change.target === 'desktop' && r.change.kind === 'REPLACE_FILE', '前提: PC の dealLock.js を差し替える変更');
+  assert(r.ok && r.change.target === 'desktop' && r.change.kind === 'REPLACE_FILE' && r.change.content === gen.body, '前提: PC の dealLock.js を、受け取った統合の本文で差し替える変更');
   const mob = typeof KTJsExecutor.mobileCompanionOf === 'function' ? KTJsExecutor.mobileCompanionOf(r.change, { customization: cust, mobileNames: [] }) : { ok: false };
   assert(mob.ok && mob.change.target === 'mobile' && mob.change.kind === 'ADD_FILE' && mob.change.name === 'dealLock.js' && mob.change.content === r.change.content && mob.change.changeId !== r.change.changeId, 'F39: PC とモバイルの計画でモバイルのイベントを含むコード → モバイルにも同じ本文を追加する変更');
   // 登録（mock）: PC は差し替え・モバイルは追加 → 復元で両方とも元に戻る
@@ -797,7 +799,7 @@ console.log('\n--- F39（CX-1 2 回目・実機）. PC とモバイルの計画:
     // Phase 21: PC とモバイルの両方が対象なら、担当者のロックは両方の画面の処理に入れる（モバイルだけだと F41 の不具合として登録不可）
     const ADD2 = "  kintone.events.on(['app.record.create.show', 'app.record.edit.show', 'mobile.app.record.create.show', 'mobile.app.record.edit.show'], function (event) {\n    if (event.record['ステータス'] && event.record['ステータス'].value === '承認済み') { event.record['owner'].disabled = true; }\n    return event;\n  });\n";
     const cust2 = { ...cust, fields: [{ code: 'owner', access: 'CONTROL' }], events: ['app.record.create.show', 'app.record.edit.show', 'mobile.app.record.create.show', 'mobile.app.record.edit.show'] };
-    const gen2 = { ...gen, code: ADD2, patch: { baseHash, operations: [{ type: 'INSERT_BEFORE', anchor: '})();', content: ADD2 }] }, events: cust2.events, fields: cust2.fields };
+    const gen2 = gwWithBody({ ...gen, code: ADD2, patch: { baseHash, operations: [{ type: 'INSERT_BEFORE', anchor: '})();', content: ADD2 }] }, events: cust2.events, fields: cust2.fields }, DL);
     const rv2 = KTCodeReview.review({ generated: gen2, customization: cust2, plan: null, data: DATA, scan: null, existingSource: SRC });
     const r2 = KTJsExecutor.changeFromGenerated({ customization: cust2, generated: gen2, review: rv2, existingSource: SRC });
     const mob2 = KTJsExecutor.mobileCompanionOf(r2.change, { customization: cust2, mobileNames: [] });

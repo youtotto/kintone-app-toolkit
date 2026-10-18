@@ -16,7 +16,7 @@ process.on('unhandledRejection', (e) => { if (/kintone is not defined/.test(Stri
 const { loadToolkit, makeAssert } = require('./helpers/load-toolkit.js');
 //   簡素化（2026-10-17）: 反映できるかは、最新の版なら会話の今の判定、前の版なら最終案の記録で確かめる（tests/helpers/final-state.js）
 const FS = require('./helpers/final-state.js');
-const { gwHashOfCtx } = require('./helpers/gw-hash.js');
+const { gwHashOfCtx, gwFakeBody } = require('./helpers/gw-hash.js');
 const { createNewFlowKit } = require('./helpers/new-flow.js');
 const T = loadToolkit();
 const { KTDeps, KTScan, KTContext, KTAiClient, KTAiConversation, KTAiChatUi, KTContextUi, KTPlanReview, KTCodeReview, KTJsCatalog, KTPlanExecutor } = T;
@@ -105,7 +105,8 @@ const PATCH_ADDED = PATCH_GOOD.operations[0].content;
 /** Gateway の応答（generated）。validateGenerated を通して会話経路と同じ形にする */
 const genResponse = (ctx, g) => ({ ok: true, contractVersion: '2.1', meta: { requestId: 'gen-1', usage: { usedThisMonth: 3, monthlyLimit: 20 }, normalization: { warnings: [] }, gateway: { feature: 'customization-generator' } }, generated: { strategy: ctx.customization.strategy, targetFile: ctx.existingFile?.name || 'amountWarning.js', summary: ctx.customization.requirement, events: ctx.customization.events, fields: ctx.customization.fields, apis: [], assumptions: [], warnings: [], gatewayChecks: { security: [] }, ...g } });
 const genNew = (code = NEW_JS_GOOD, g = {}) => ({ strategy: 'NEW_JS_FILE', targetFile: 'amountWarning.js', summary: '金額の警告', code, patch: null, events: ['app.record.create.change.amount', 'app.record.edit.change.amount'], fields: [{ code: 'amount', access: 'CONTROL' }], apis: [], assumptions: [], warnings: [], ...g });
-const genPatch = (patch = PATCH_GOOD, g = {}) => ({ strategy: 'EXTEND_EXISTING_JS', targetFile: 'fieldOnOff.js', summary: '完了でも金額を編集不可にする', code: patch.operations.map(o => o.content).join('\n'), patch, events: ['app.record.edit.show'], fields: [{ code: 'amount', access: 'CONTROL' }], apis: [], assumptions: [], warnings: [], ...g });
+//   2026-10-18（AI版 契約 20 §20）: 統合の書き込む本文は生成工程が合成して返す generated.body（Toolkit は合成しない）。偽の生成工程の本文は gwFakeBody（テストの部品）
+const genPatch = (patch = PATCH_GOOD, g = {}, src = FIELD_ON_OFF) => ({ strategy: 'EXTEND_EXISTING_JS', targetFile: 'fieldOnOff.js', summary: '完了でも金額を編集不可にする', code: patch.operations.map(o => o.content).join('\n'), patch, body: gwFakeBody(src, patch), events: ['app.record.edit.show'], fields: [{ code: 'amount', access: 'CONTROL' }], apis: [], assumptions: [], warnings: [], ...g });
 const check = (rv, name) => (rv.checks || []).find(c => c.name === name) || null;
 const SRC = { name: 'fieldOnOff.js', target: 'desktop', text: FIELD_ON_OFF };
 const tick = () => new Promise(r => setTimeout(r, 0));
@@ -233,7 +234,7 @@ console.log('\n--- §52-1. KTCodeReview: 新規 JS OK / patch OK ---');
   assert(rp.status === 'OK', `既存 JS への patch（妥当）: status OK（${(rp.checks || []).filter(c => !c.ok).map(c => `${c.name}: ${c.message}`).join(' / ') || 'すべて ✓'}）`);
   assert(check(rp, 'patch')?.ok && rp.diff.added === 3 && rp.diff.removed === 0 && rp.finalCode.includes(FIELD_ON_OFF.split('\n')[2]) && rp.finalCode.includes("value === '完了'"), 'patch: 既存の行は保持（削除 0）・3 行追加・最終コードは既存 ＋ 追加');
   assert(!check(rp, 'handler'), '既存 handler の中へ追加: 登録の形（handler）は Toolkit では判定しない（簡素化 B。生成工程の検査）');
-  assert(rp.patch?.applied === 1 && rp.patch.afterHash === hash(rp.finalCode) && typeof rp.diffText === 'string' && /\+\s*if \(record\['ステータス'\] && record\['ステータス'\]\.value === '完了'\)/.test(rp.diffText), 'patch の適用結果（afterHash）と Before / After の diff テキスト');
+  assert(rp.finalCode === genPatch().body && typeof rp.diffText === 'string' && /\+\s*if \(record\['ステータス'\] && record\['ステータス'\]\.value === '完了'\)/.test(rp.diffText), '書き込む本文は生成工程の本文そのもの（Toolkit は合成し直さない）と Before / After の diff テキスト');
   assert(!check(rp, 'duplicate-handler') || check(rp, 'duplicate-handler').ok, '重複 handler なし');
 }
 
@@ -280,23 +281,20 @@ console.log('\n--- §52-2. KTCodeReview: 構文 / 未知イベント / 未知フ
   assert(apiV.status === 'REVIEW_REQUIRED' && apiV.registration.verdict === 'NEEDS_CONFIRMATION' && apiV.registration.confirmations.some(x => x.code === 'apis') && apiV.checks.some(x => x.name === 'syntax' && x.ok && x.gateway), '生成工程の apis（review）→ 確認事項。合格の項目も生成工程の項目として残す');
   const empty = run('   ');
   assert(empty.status === 'BLOCKED' && check(empty, 'code') && !check(empty, 'code').ok, '空のコード: BLOCKED');
-  // patch の失敗
+  // 統合の本文（2026-10-18・AI版 契約 20 §20）: Toolkit は合成しない。生成工程の本文が無ければ登録しない（anchor が無い・複数ある・元の本文が変わったなどで合成できない候補は、
+  //   生成工程の機械検査の patch が止める。書き込む前に元のファイルが変わったときは、反映の直前の照合 JS_SOURCE_CHANGED が止める。ai-js-executor §50）
   const hy = reviewPlan(PLAN_HYBRID);
-  const runP = (patch, src = SRC) => KTCodeReview.review({ generated: genPatch(patch), customization: hy.plan.customizations[0], plan: hy.plan, data: INPUTS.data, scan: INPUTS.scan, existingSource: src });
-  const anchorBad = runP({ baseHash: hash(FIELD_ON_OFF), operations: [{ type: 'INSERT_AFTER', anchor: '    // not in source', content: PATCH_ADDED }] });
-  assert(anchorBad.status === 'BLOCKED' && !check(anchorBad, 'patch').ok && check(anchorBad, 'patch').detail?.code === 'PATCH_ANCHOR_NOT_FOUND', 'anchor が既存ソースに無い: BLOCKED（全文の書き換えに逃げない）');
-  const anchorAmb = runP({ baseHash: hash(FIELD_ON_OFF), operations: [{ type: 'INSERT_AFTER', anchor: "record[", content: PATCH_ADDED }] });
-  assert(anchorAmb.status === 'BLOCKED' && check(anchorAmb, 'patch').detail?.code === 'PATCH_ANCHOR_AMBIGUOUS', 'anchor が複数回現れる（"record["）: BLOCKED（一意な anchor が必要）');
+  const runP = (patch, src = SRC, g = {}) => KTCodeReview.review({ generated: genPatch(patch, g), customization: hy.plan.customizations[0], plan: hy.plan, data: INPUTS.data, scan: INPUTS.scan, existingSource: src });
+  const noBody = runP(PATCH_GOOD, SRC, { body: null });
+  assert(noBody.status === 'BLOCKED' && !check(noBody, 'patch').ok && /生成工程が既存ファイルに統合した本文を返していません/.test(check(noBody, 'patch').message) && !noBody.finalCode, '生成工程の本文が無い統合: BLOCKED（Toolkit が合成して補わない）');
   const anchorLine = runP({ baseHash: hash(FIELD_ON_OFF), operations: [{ type: 'INSERT_AFTER', anchor: "    const record = event.record;", content: PATCH_ADDED }] });
-  assert(anchorLine.status === 'OK' && anchorLine.diff.added === 3 && anchorLine.diff.removed === 0, '一意な行を anchor にした INSERT_AFTER: 適用できる（OK）');
-  const hashBad = runP({ baseHash: 'deadbeef', operations: PATCH_GOOD.operations });
-  assert(hashBad.status === 'BLOCKED' && check(hashBad, 'patch').detail?.code === 'PATCH_BASE_MISMATCH', 'baseHash が現在の本文と違う（既存ファイルが変わった）: BLOCKED');
+  assert(anchorLine.status === 'OK' && anchorLine.diff.added === 3 && anchorLine.diff.removed === 0 && anchorLine.finalCode === gwFakeBody(FIELD_ON_OFF, { operations: [{ type: 'INSERT_AFTER', anchor: "    const record = event.record;", content: PATCH_ADDED }] }), '別の位置への統合: 書き込む本文は生成工程の本文のまま・差分は本文から数える');
   const noSrc = runP(PATCH_GOOD, null);
   assert(noSrc.status === 'BLOCKED' && /JS_SOURCE_UNAVAILABLE/.test(check(noSrc, 'patch').message), '統合先の本文が無い: BLOCKED（JS_SOURCE_UNAVAILABLE）');
   const replace = runP({ baseHash: hash(FIELD_ON_OFF), operations: [{ type: 'REPLACE', anchor: "    if (record['ステータス'].value === '承認待ち') {", content: "    if (record['ステータス'] && (record['ステータス'].value === '承認待ち' || record['ステータス'].value === '完了')) {" }] });
-  assert(replace.status === 'REVIEW_REQUIRED' && check(replace, 'patch-removal') && !check(replace, 'patch-removal').ok && replace.diff.removed === 1 && replace.diff.added === 1, 'REPLACE で既存行を置き換える: 既存処理が失われないか確認（確認が必要）');
-  const emptyPatch = runP({ baseHash: hash(FIELD_ON_OFF), operations: [] });
-  assert(emptyPatch.status === 'BLOCKED', '操作の無い patch: BLOCKED');
+  assert(replace.status === 'REVIEW_REQUIRED' && check(replace, 'patch-removal') && !check(replace, 'patch-removal').ok && replace.diff.removed === 1 && replace.diff.added === 1, 'REPLACE で既存行を置き換える: 既存処理が失われないか確認（確認が必要。書き込む本文と元の本文の差分から決める）');
+  const crlf = runP(PATCH_GOOD, { ...SRC, text: FIELD_ON_OFF.replace(/\n/g, '\r\n') });
+  assert(crlf.finalCode === genPatch().body && !crlf.finalCode.includes('\r') && /元のファイルの改行（CRLF）は LF になります/.test(check(crlf, 'patch').message) && crlf.diff.removed === 0, '元が CRLF でも書き込む本文は生成工程の LF の本文のまま。改行が LF になることを書く（差分の行には出ない）');
   const otherStrategy = KTCodeReview.review({ generated: genNew(NEW_JS_GOOD, { strategy: 'PLUGIN_CANDIDATE' }), customization: hy.plan.customizations[0], plan: hy.plan, data: INPUTS.data, scan: INPUTS.scan });
   assert(otherStrategy.status === 'BLOCKED' && check(otherStrategy, 'strategy') && !check(otherStrategy, 'strategy').ok, 'PLUGIN_CANDIDATE 等はコード生成の対象外: BLOCKED');
   // C-1 第 2 段（設計 §0d.4）: 既存 JS と同じフィールドを扱うだけで確認にする判定（旧 existing-conflict）はコードの確認では行わない。
@@ -307,7 +305,7 @@ console.log('\n--- §52-2. KTCodeReview: 構文 / 未知イベント / 未知フ
   const MOBILE_LOCK_SRC = ['(function () {', "  'use strict';", "  kintone.events.on('mobile.app.record.edit.show', function (event) {", "    event.record['owner'].disabled = true;", '    return event;', '  });', '})();'].join(String.fromCharCode(10));
   const mobCust = { customizationId: 'C1', requirement: '承認待ちは金額も編集不可', strategy: 'EXTEND_EXISTING_JS', platform: ['mobile'], events: ['mobile.app.record.edit.show'], fields: [{ code: 'amount', access: 'CONTROL' }], apis: [], existingFiles: [{ name: 'mobileLock.js', target: 'mobile' }] };
   const mobPatch = { baseHash: hash(MOBILE_LOCK_SRC), operations: [{ type: 'INSERT_AFTER', anchor: "    event.record['owner'].disabled = true;", content: ["    if (event.record['ステータス'].value === '承認待ち') {", "      event.record['amount'].disabled = true;", '    }'].join(String.fromCharCode(10)) }] };
-  const mobRv = KTCodeReview.review({ generated: { strategy: 'EXTEND_EXISTING_JS', targetFile: 'mobileLock.js', summary: 'm', code: mobPatch.operations[0].content, patch: mobPatch, events: ['mobile.app.record.edit.show'], fields: [{ code: 'amount', access: 'CONTROL' }], apis: [] }, customization: mobCust, plan: PLAN_HYBRID.plan, data: INPUTS.data, scan: INPUTS.scan, existingSource: { name: 'mobileLock.js', target: 'mobile', text: MOBILE_LOCK_SRC } });
+  const mobRv = KTCodeReview.review({ generated: { strategy: 'EXTEND_EXISTING_JS', targetFile: 'mobileLock.js', summary: 'm', code: mobPatch.operations[0].content, patch: mobPatch, body: gwFakeBody(MOBILE_LOCK_SRC, mobPatch), events: ['mobile.app.record.edit.show'], fields: [{ code: 'amount', access: 'CONTROL' }], apis: [] }, customization: mobCust, plan: PLAN_HYBRID.plan, data: INPUTS.data, scan: INPUTS.scan, existingSource: { name: 'mobileLock.js', target: 'mobile', text: MOBILE_LOCK_SRC } });
   assert(mobRv.status === 'OK' && !check(mobRv, 'platform'), `モバイル JS への統合: PC の fieldOnOff.js は競合にならず（確認に出ない）、統合した本文を作れる（${(mobRv.checks || []).filter(c => !c.ok).map(c => c.name).join(',') || 'すべて ✓'}）`);
 }
 
@@ -319,7 +317,7 @@ console.log('\n--- §53. AI Workspace: Hybrid の計画 → 最終案（生成�
 //   共有の部品（tests/helpers/new-flow.js）: K.mount（画面と偽 client。health に proposal）・K.adoptOnScreen（台本の 4 発言で最終案まで）・K.fakeVerification（生成工程の検証結果）
 const K = createNewFlowKit(T);
 /** 生成工程が必須の効果の検証に対応している接続先（health の customization-generator.verification に印） */
-const HEALTH_V = (() => { const h = K.clone(K.HEALTH); h.registry.toolkit['customization-generator'].verification = ['requirementId', ...K.GEN_EFFECT_FEATURES, K.GEN_NETWORK_FEATURE]; return h; })();
+const HEALTH_V = (() => { const h = K.clone(K.HEALTH); h.registry.toolkit['customization-generator'].verification = ['requirementId', ...K.GEN_EFFECT_FEATURES, ...K.GEN_CURRENT_FEATURES]; return h; })();
 /** 新しい流れの生成工程は必須の効果（effects・condition）を固定して依頼する。§51・§52 の cust() に、完了で金額を編集不可にする効果を足したもの */
 const CUST_LOCK = (o = {}) => cust({ fields: [{ code: 'ステータス', access: 'READ' }, { code: 'amount', access: 'CONTROL', condition: 'ステータス in ("完了")', effects: ['lock'] }], ...o });
 const PLAN_HYBRID_V = planOf({ steps: [STD_STEP(), JS_STEP()], customizations: [CUST_LOCK()], solution: 'HYBRID' });
@@ -343,7 +341,7 @@ function mountV({ inputs = INPUTS, planResponse = PLAN_HYBRID_V, generatedFor = 
   };
   const generateImpl = async ({ ctx, requestId }) => {
     calls.generate.push({ ctx });
-    const g = generatedFor ? generatedFor(ctx) : genPatch({ ...PATCH_GOOD, baseHash: ctx.existingFile?.hash || PATCH_GOOD.baseHash });
+    const g = generatedFor ? generatedFor(ctx) : genPatch({ ...PATCH_GOOD, baseHash: ctx.existingFile?.hash || PATCH_GOOD.baseHash }, {}, ctx.existingFile ? ctx.existingFile.source : FIELD_ON_OFF);
     const resp = genResponse(ctx, g);
     //   簡素化 B（2026-10-17）: 本物の Gateway と同じく、検証結果に候補の指紋（Gateway と同じ計算）を入れる
     resp.verification = K.fakeVerification({ code: g.code, has, fails, ...(failMsg ? { failMsg } : {}) }, (ctx.verification && ctx.verification.requiredEffects) || [], { candidateHash: gwHashOfCtx(ctx, resp.generated) });
