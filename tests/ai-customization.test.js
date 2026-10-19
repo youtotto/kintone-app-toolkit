@@ -369,9 +369,10 @@ const clickCode = (m, id) => m.$('kt-ai-pane-code').dispatch({ type: 'click', ta
   const fin = finalText(m);
   // 会話の要約は最終案のカード 1 枚（設定の手順と JavaScript の反映先）。内訳は右の「変更内容」の要約（対象・何が変わるか・JavaScript の状態）
   assert(/設定の手順 1 件（Toolkit から自動で反映できるのは 1 件）/.test(m.$('kt-ai-change-summary').innerHTML) && /既存の「fieldOnOff\.js」に統合/.test(m.$('kt-ai-change-summary').innerHTML) && /対象：一覧／JavaScript（PC：編集画面）/.test(m.$('kt-ai-change-summary').innerHTML), '最終案のカード: 設定の手順 1 件と JavaScript（fieldOnOff.js に統合）。右の「変更内容」の要約に対象（一覧／JavaScript の画面）');
-  // Phase 19: カスタマイズの詳細（統合先・イベント・フィールド・不足する理由）は右の「変更内容」の実装仕様カードだけ。会話にはイベント・フィールドの内訳を出さない
-  const specPane = m.$('kt-ai-spec').innerHTML;
-  assert(!/kt-ai-customization-card/.test(html) && !/app\.record\.edit\.show/.test(html) && !/amount（CONTROL）/.test(html) && /kt-ai-spec-card/.test(specPane) && /✎ fieldOnOff\.js を変更/.test(specPane) && /標準で不足/.test(specPane) && /編集画面/.test(specPane) && /「[^」]+」（制御）/.test(specPane) && !/app\.record\.|amount（CONTROL）|<b>C1<\/b>/.test(specPane), '実装仕様カード（右の「変更内容」）: ✎ fieldOnOff.js を変更・画面・フィールド（名前と扱い）・不足する理由（§0e.3: イベント名・コード・扱いの英語・番号 C1 は出さない）。会話にはイベント・フィールドの内訳を出さない');
+  // Phase 19: カスタマイズの詳細（統合先・画面・フィールド・不足する理由）は右の「変更内容」だけ。会話にはイベント・フィールドの内訳を出さない
+  //   2026-10-19: 実装仕様のカードは廃止し、変更内容の要約（反映する内容・対象・JavaScript の行）で出す
+  const specPane = m.$('kt-ai-change-summary').innerHTML;
+  assert(!/kt-ai-customization-card/.test(html) && !/app\.record\.edit\.show/.test(html) && !/amount（CONTROL）/.test(html) && /既存の「fieldOnOff\.js」に統合/.test(specPane) && /標準設定で不足する理由/.test(specPane) && /編集画面/.test(specPane) && /対象のフィールド: [^<]*「[^」]+」（制御）/.test(specPane) && !/app\.record\.|amount（CONTROL）|<b>C1<\/b>/.test(specPane), '右の「変更内容」: 既存の fieldOnOff.js に統合・画面・対象のフィールド（名前と扱い）・不足する理由（§0e.3: イベント名・コード・扱いの英語・番号 C1 は出さない）。会話にはイベント・フィールドの内訳を出さない');
   assert(!/C1|v1/.test(textOf(html)), '会話（最終案のカード）に内部の番号（C1・版の v1）を出さない');
   //   2026-10-19: 右の「確認結果」のタブ（計画の時点の確認結果の描き直し・Hybrid の一覧）は廃止した。標準設定と JavaScript は右の「変更内容」の「何が変わるか」の行、
   //   JavaScript の今の状態は「JavaScript の状態」、反映の件数は反映の分類の 1 か所（「反映する内容」の「設定の手順 N 件（…自動で反映できるのは N 件）」）
@@ -463,7 +464,7 @@ console.log('\n--- §53-2. 複数のカスタマイズ / カスタマイズの�
   await ticks();
   const v = await K.adoptOnScreen(m);
   const sumU = m.$('kt-ai-change-summary').innerHTML;
-  assert(/要確認/.test(m.$('kt-ai-spec').innerHTML) && /Toolkit ではコードを作れません（PC かモバイルかが未定）/.test(sumU) && /PC かモバイルかは未定/.test(sumU), `PC / モバイル未定: 右の「変更内容」の仕様は「要確認」・「反映できないこと」に作れない理由・対象に「PC かモバイルかは未定」: ${K.stripC(sumU).slice(0, 400)}`);
+  assert(/Toolkit ではコードを作れません（PC かモバイルかが未定）/.test(sumU) && /PC かモバイルかは未定/.test(sumU), `PC / モバイル未定: 右の「変更内容」の「反映できないこと」に作れない理由・対象に「PC かモバイルかは未定」: ${K.stripC(sumU).slice(0, 400)}`);
   //   簡素化 D: 「全体」の件数（安全区分から別に数えた件数）は削除した。生成できないことは「反映できないこと」の理由で出す
   assert(!/コード生成可能/.test(sumU) && !/kt-ai-review-card/.test(m.chat()), 'JS のコード生成の可否: 別に数えた件数は出さない・会話に確認のカードを出さない');
   const fin = finalText(m);
@@ -548,19 +549,15 @@ console.log('\n--- §53-4. KTAiChatUi（純関数）---');
 {
   const hy = reviewPlan(PLAN_HYBRID);
   const v = { planId: 'p', version: 1, status: 'ACTIVE', goal: GOAL_HYBRID, plan: hy.plan, review: hy.review, generated: {} };
-  // Phase 19: カスタマイズの詳細は実装仕様カード（右の「変更内容」）に一本化。
-  //   C-1 第 3 段: 右の仕様は閲覧だけ（［この仕様で確定］は削除: ai-flow-redesign F7-3）。会話の仕様のカード（specChatCardHtml）は削除（F7-2）
-  const vSpec = { ...v, spec: { specId: 'p:spec', version: 1, status: 'DRAFT', customizations: hy.plan.customizations } };
-  const card = KTAiChatUi.specCardHtml(vSpec);
-  assert(/生成可/.test(card) && /✎ fieldOnOff\.js を変更/.test(card) && !/data-act="confirm-spec"/.test(card), 'specCardHtml（右）: 生成可バッジ・統合先（閲覧だけ）');
-  const cardNew = KTAiChatUi.specCardHtml({ planId: 'p', version: 1, status: 'ACTIVE', plan: PLAN_NEW_JS.plan, review: null, spec: { specId: 'p:spec', version: 1, status: 'DRAFT', customizations: [NEW_JS_CUST()] } });
-  assert(/＋ 新規 JS/.test(cardNew) && /追加画面/.test(cardNew) && !/app\.record\./.test(cardNew), 'specCardHtml（新規 JS）: イベントは画面の名前で出す（§0e.3）');
-  //   簡素化 §5（2026-10-16）: 同じフィールドを扱う既存 JS は通常表示に「既存 JS との競合」と出さない（詳しくの中に、ファイルとフィールドの名前と確かめ方だけ）
+  // 2026-10-19: 実装仕様のカード（specCardHtml）は廃止した。JavaScript の対象（PC / モバイルと画面）・方針・対象のフィールドは右の「変更内容」の要約
+  const sumHy = KTAiChatUi.changeSummaryHtml(v, { labels: { amount: '金額', status: 'ステータス' } });
+  assert(/JavaScript（PC：編集画面）/.test(sumHy) && /対象のフィールド: [^<]*（制御）/.test(sumHy) && !/data-act="confirm-spec"|app\.record\.|CONTROL/.test(sumHy), `変更内容（Hybrid）: 画面の名前・対象のフィールド（名前と扱い）。仕様の確定の操作・イベント名・扱いの英語は出さない: ${K.stripC(sumHy).replace(/\s+/g, ' ').slice(0, 300)}`);
+  const sumNew = KTAiChatUi.changeSummaryHtml({ planId: 'p', version: 1, status: 'ACTIVE', plan: PLAN_NEW_JS.plan, review: null }, { labels: { amount: '金額' } });
+  assert(/追加画面/.test(sumNew) && !/app\.record\./.test(sumNew), `変更内容（新規 JS）: イベントは画面の名前で出す（§0e.3）: ${K.stripC(sumNew).replace(/\s+/g, ' ').slice(0, 300)}`);
+  //   簡素化 §5（2026-10-16）: 同じフィールドを扱う既存 JS は通常表示に「既存 JS との競合」と出さない
   const nwS = reviewPlan(PLAN_NEW_JS);
-  const cardShared = KTAiChatUi.specCardHtml({ planId: 'p', version: 1, status: 'ACTIVE', plan: nwS.plan, review: nwS.review, spec: { specId: 'p:spec', version: 1, status: 'DRAFT', customizations: nwS.plan.customizations } }, { labels: { amount: '金額' } });
-  const sharedAt = cardShared.indexOf('同じフィールドを扱う既存の JavaScript');
-  assert(!/既存 JS との競合|競合/.test(cardShared) && sharedAt > 0 && cardShared.lastIndexOf('<details', sharedAt) > cardShared.lastIndexOf('</details>', sharedAt) && /fieldOnOff\.js（「金額」）/.test(cardShared),
-    `specCardHtml: 同じフィールドを扱う既存 JS は詳しくの中だけ（競合と書かない）: ${cardShared.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').slice(0, 300)}`);
+  const sumShared = KTAiChatUi.changeSummaryHtml({ planId: 'p', version: 1, status: 'ACTIVE', plan: nwS.plan, review: nwS.review }, { labels: { amount: '金額' } });
+  assert(!/既存 JS との競合|競合/.test(sumShared), `変更内容: 同じフィールドを扱う既存 JS を「競合」と書かない: ${K.stripC(sumShared).replace(/\s+/g, ' ').slice(0, 300)}`);
   //   会話のコードのカード（MSG.CODE・codeCardHtml）は削除した（F7-1・F7-2）。検査の一覧は右の「コード」（codePaneHtml）
   //   簡素化 B（2026-10-17）: 検査の一覧は、Toolkit の統合の確認（patch）と、生成工程の機械検査の項目（本物と同じ名前。ここでは構文と安全）を合わせたもの
   const rv = KTCodeReview.attachBehavior(KTCodeReview.review({ generated: genPatch(), customization: hy.plan.customizations[0], plan: hy.plan, data: INPUTS.data, scan: INPUTS.scan, existingSource: SRC }),

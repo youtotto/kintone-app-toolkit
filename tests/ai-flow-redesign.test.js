@@ -970,7 +970,7 @@ await section(async () => {
   await m.panel.send('おすすめで。この案で進めて'); await ticks(14);
   const v = m.conv().activePlan();
   assert(v && v.final && m.msgs().some(x => x.type === 'FINAL') && /kt-ai-final-card/.test(m.chat()) && !/kt-ai-plan-card/.test(m.chat()) && /data-act="final-approve"/.test(m.chat()), `画面-1: 採用 → 最終案のカード（設定の手順だけの計画でも 1 枚）: ${JSON.stringify(m.msgs().map(x => x.data?.kind || x.type))}`);
-  assert(/data-status="ready">未反映</.test(m.$('kt-ai-ws-state').innerHTML) && !m.$('kt-ai-spec').innerHTML.includes('confirm-spec'), '画面-2: 右の見出しは「未反映」。仕様カードに［この仕様で確定］は無い');
+  assert(/data-status="ready">未反映</.test(m.$('kt-ai-ws-state').innerHTML) && !/confirm-spec/.test(m.$('kt-ai-change-summary').innerHTML + m.chat()), '画面-2: 右の見出しは「未反映」。［この仕様で確定］は無い（実装仕様のカードは 2026-10-19 に廃止）');
   assert(m.panel.executorState().stage === 'idle' && !v.approval && KIT.writesOf(m).length === 0, '画面-2b: 押す前は承認も反映の準備（右の「反映」の準備の段）もしない（承認の欄の準備は読み取りだけ・書き込み 0）');
   //   §0e.1（2026-10-09）: 承認の欄の準備（書き込みなし）が終わると押せる。［動作テスト環境へ反映］1 回で承認（準備の結果の指紋つき）と反映
   const r3 = await KIT.applyOnScreen(m);
@@ -2939,10 +2939,10 @@ await section(async () => {
 await section(async () => {
   const x = makeConvC();
   assert(typeof x.c.confirmSpec === 'undefined' && typeof x.c.pendingClarification === 'undefined' && KTAiConversation.INTENT.CONFIRM_SPEC === undefined && KTAiConversation.MSG.SPEC === undefined && KTAiConversation.MSG.CODE === undefined, 'F7-1: 会話に仕様の確定・対応先の確認・仕様とコードのカードの種類は無い');
-  assert(['specChatCardHtml', 'codeCardHtml', 'questionsCardHtml', 'planCardHtml', 'reviewCardHtml', 'questionList'].every(k => KTAiChatUi[k] === undefined) && typeof KTAiChatUi.specCardHtml === 'function', 'F7-2: 仕様のカード・コードのカード・確認事項のカード・変更案のカードの描画は無い（右の仕様の閲覧 specCardHtml は残す）');
+  assert(['specChatCardHtml', 'codeCardHtml', 'questionsCardHtml', 'planCardHtml', 'reviewCardHtml', 'questionList'].every(k => KTAiChatUi[k] === undefined) && KTAiChatUi.specCardHtml === undefined, 'F7-2: 仕様のカード・コードのカード・確認事項のカード・変更案のカードの描画は無い（右の実装仕様のカード specCardHtml も 2026-10-19 に廃止）');
   await adoptC(x);
-  const sp = KTAiChatUi.specCardHtml(x.c.activePlan());
-  assert(!/data-act="(confirm-spec|confirm-generate|generate|revise-spec)"/.test(sp) && /最終案の一部です/.test(sp), 'F7-3: 右の仕様は閲覧だけ（［この仕様で確定］［確定してコードを作る］［JavaScript を生成］［仕様を修正］は無い）');
+  const sp = KTAiChatUi.changeSummaryHtml(x.c.activePlan(), {});
+  assert(!/data-act="(confirm-spec|confirm-generate|generate|revise-spec)"/.test(sp), 'F7-3: 右の「変更内容」は閲覧だけ（［この仕様で確定］［確定してコードを作る］［JavaScript を生成］［仕様を修正］は無い）');
   const m = mount();
   assert(typeof m.panel.confirmSpec === 'undefined', 'F7-4: 画面に仕様の確定（confirmSpec）は無い');
   const askCalls = [];

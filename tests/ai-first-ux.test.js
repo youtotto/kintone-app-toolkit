@@ -310,10 +310,11 @@ console.log('\n--- §38b. implementation（JAVASCRIPT / CSS / JS_CSS）: validat
   assert(jscss.js.codeGeneration.supported === true && jscss.js.codeGeneration.implementation === 'JS_CSS' && jscss.js.issues.some(i => i.code === 'JS_CSS_PART_MANUAL' && i.severity === 'low'), 'implementation JS_CSS: JavaScript 部分は生成可（CSS は手動の注記）');
   const plain = reviewOf(cust());
   assert(plain.js.codeGeneration.supported === true && plain.js.codeGeneration.implementation === 'JAVASCRIPT' && !plain.js.issues.some(i => /^JS_CSS/.test(i.code)), 'implementation JAVASCRIPT: 従来どおり');
-  const cardCss = KTAiChatUi.specCardHtml({ planId: 'p', version: 1, status: 'ACTIVE', goal: GOAL_HYBRID, plan: css.plan, review: css.review, spec: { specId: 'p:spec', version: 1, status: 'DRAFT', customizations: css.plan.customizations } });
-  assert(/実装<\/span><span>CSS（見た目だけ・生成対象外）/.test(cardCss) && /要確認/.test(cardCss), '実装仕様カード（右「計画」）: 実装 CSS（見た目だけ・生成対象外）・要確認（生成不可）');
-  const cardJs = KTAiChatUi.specCardHtml({ planId: 'p', version: 1, status: 'ACTIVE', goal: GOAL_HYBRID, plan: plain.plan, review: plain.review, spec: { specId: 'p:spec', version: 1, status: 'DRAFT', customizations: plain.plan.customizations } });
-  assert(!/実装<\/span>/.test(cardJs), 'JAVASCRIPT のときは実装の行を出さない（既定）');
+  //   2026-10-19: 実装仕様のカード（実装の行）は廃止した。CSS で生成しないことは右の「変更内容」の「反映できないこと」に理由と一緒に出す
+  const sumCss = KTAiChatUi.changeSummaryHtml({ planId: 'p', version: 1, status: 'ACTIVE', goal: GOAL_HYBRID, plan: css.plan, review: css.review });
+  assert(/Toolkit ではコードを作れません（CSS は生成の対象外）/.test(sumCss), `変更内容: 実装 CSS は「反映できないこと」に作れない理由（CSS は生成の対象外）: ${sumCss.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').slice(0, 300)}`);
+  const sumJs = KTAiChatUi.changeSummaryHtml({ planId: 'p', version: 1, status: 'ACTIVE', goal: GOAL_HYBRID, plan: plain.plan, review: plain.review });
+  assert(!/CSS は生成の対象外/.test(sumJs), 'JAVASCRIPT のときは CSS の理由を出さない（既定）');
 }
 
 // =========================================================

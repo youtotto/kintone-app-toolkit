@@ -113,7 +113,7 @@ function mount({ inputs = INPUTS, paid = true, plans = null, now = null, extra =
     ...extra,
   }));
   const $ = (id) => host.querySelector(`#${id}`);
-  const ws = () => ['kt-ai-subject-info', 'kt-ai-spec', 'kt-ai-plan-result', 'kt-ai-exec', 'kt-ai-jsreg', 'kt-ai-code-head', 'kt-ai-code-review'].map(id => $(id).innerHTML).join('\n');
+  const ws = () => ['kt-ai-subject-info', 'kt-ai-plan-result', 'kt-ai-exec', 'kt-ai-jsreg', 'kt-ai-code-head', 'kt-ai-code-review'].map(id => $(id).innerHTML).join('\n');
   return { host, panel, $, calls, copies, opened, mock, clock, ws, conv: () => panel.conversation(), chat: () => $('kt-ai-chat').innerHTML, msgs: () => panel.conversation().state.messages, types: () => panel.conversation().state.messages.map(m => m.type) };
 }
 const clickChat = (m, act, extra = {}) => m.$('kt-ai-chat').dispatch({ type: 'click', target: { dataset: { act, ...extra } } });
@@ -163,7 +163,7 @@ console.log('\n--- §2. Workspace Architecture: 左 会話 / 右 現在の作業
   // 2026-10-07: 反映（exec）も右のタブ。反映の記録（log）はヘッダーの［反映の記録］から開くペイン（タブにしない）
   assert(/<div id="kt-ai-pane-exec" class="kt-ai-pane">[\s\S]*?id="kt-ai-exec-empty"[\s\S]*?id="kt-ai-exec"[\s\S]*?id="kt-ai-jsreg"/.test(html) && html.includes('data-pane="exec"') && /<b>現在の作業内容<\/b>[\s\S]*id="kt-ai-right-body"[\s\S]*id="kt-ai-pane-exec"/.test(html), 'Workspace のペイン exec（反映）: 右のタブ「反映」（中身が無い間は案内だけ）');
   assert(/<div id="kt-ai-pane-log" class="kt-ai-pane"><div id="kt-ai-apply-log">/.test(html) && !html.includes('data-pane="log"') && /id="kt-ai-log-open"[^>]*data-act="open-log"/.test(m.$('kt-ai-header').innerHTML), 'Workspace のペイン log（反映の記録）: タブではなくヘッダーの［反映の記録］から開く');
-  assert(/<details id="kt-ai-plan-detail"[^>]*>[\s\S]*?id="kt-ai-plan-result"/.test(html) && /id="kt-ai-pane-plan"[^>]*><div id="kt-ai-subject-info"><\/div><div id="kt-ai-pane-plan-empty"[^>]*>会話からまとまった変更内容を、ここに表示します。<\/div><div id="kt-ai-change-summary"><\/div><div id="kt-ai-spec"><\/div>/.test(html), '変更内容のペイン: 相談対象・空のときの案内・変更内容の要約・実装の内容、計画の全文は［計画の詳細と根拠］（details）の中');
+  assert(/<details id="kt-ai-plan-detail"[^>]*>[\s\S]*?id="kt-ai-plan-result"/.test(html) && /id="kt-ai-pane-plan"[^>]*><div id="kt-ai-subject-info"><\/div><div id="kt-ai-pane-plan-empty"[^>]*>会話からまとまった変更内容を、ここに表示します。<\/div><div id="kt-ai-change-summary"><\/div><details id="kt-ai-plan-detail"/.test(html), '変更内容のペイン: 相談対象・空のときの案内・変更内容の要約、計画の全文は［計画の詳細と根拠］（details）の中（実装仕様のカードは 2026-10-19 に廃止）');
   const tabs = m.$('kt-ai-drawer-tabs').innerHTML;
   const tabOf = (p) => { const x = tabs.match(new RegExp(`<button type="button" class="([^"]*)" data-pane="${p}"([^>]*)>([^<]*)`)) || []; return { cls: x[1] || '', attrs: x[2] || '', label: x[3] || '' }; };
   const order = [...tabs.matchAll(/data-pane="(\w+)"/g)].map(x => x[1]).join();
@@ -281,7 +281,7 @@ console.log('\n--- §7 / §20. Customize → 開発支援（JS 相談）: 左は
   const vH = m.conv().activePlan();
   assert(m.calls.propose.length === 1 && m.calls.propose[0].ctx.facts.some(f => /相談中の JavaScript「fieldOnOff\.js」/.test(f.statement)) && vH && vH.final && /<b>最終案ができました。<\/b>/.test(c1) && !/JavaScript の実装の内容をまとめました。/.test(c1) && !/data-act="confirm-spec"/.test(c1) && !/data-act="open-spec"/.test(c1) && !m.msgs().some(x => ['spec-intro', 'code-intro'].includes(x.data?.kind) || ['SPEC', 'CODE'].includes(x.type)), '相談の依頼 → 仮案（相談中の JavaScript を渡す）→ 採用 → 最終案のカード 1 枚（仕様・コードのカードと確定ボタンは無い）');
   assert(/設定の手順 1 件/.test(m.$('kt-ai-change-summary').innerHTML) && /fieldOnOff\.js/.test(c1) && !/\bC1\b/.test(c1.replace(/<[^>]+>/g, ' ')), '最終案のカード: 設定の手順の件数と JavaScript のファイル（番号 C1 は出さない）');
-  assert(!/data-act="confirm-spec"/.test(m.$('kt-ai-spec').innerHTML) && /「[^」]+」（制御）/.test(m.$('kt-ai-spec').innerHTML) && !/amount（CONTROL）/.test(m.$('kt-ai-spec').innerHTML) &&/最終案の一部です/.test(m.$('kt-ai-spec').innerHTML) && vH.spec.status === 'CONFIRMED' && vH.spec.autoConfirmed === true && /data-status="ready">未反映</.test(m.$('kt-ai-ws-state').innerHTML), `実装の内容（右の「変更内容」）: 詳細の閲覧だけ（確定は最終案の中で自動）。右の見出しは「未反映」: ${m.$('kt-ai-ws-state').innerHTML}`);
+  assert(!/data-act="confirm-spec"/.test(m.$('kt-ai-change-summary').innerHTML) && /対象のフィールド: [^<]*「[^」]+」（制御）/.test(m.$('kt-ai-change-summary').innerHTML) && !/amount（CONTROL）/.test(m.$('kt-ai-change-summary').innerHTML) && vH.spec.status === 'CONFIRMED' && vH.spec.autoConfirmed === true && /data-status="ready">未反映</.test(m.$('kt-ai-ws-state').innerHTML), `実装の内容（右の「変更内容」の対象のフィールド）: 閲覧だけ（確定は最終案の中で自動）。右の見出しは「未反映」: ${m.$('kt-ai-ws-state').innerHTML}`);
   // 右の「コード」: 全文・検査の内訳・参考パターン・［動作テスト環境へ登録］
   //   C-1 第 3 段: 新しい流れでは、最終案ができたら作った JavaScript を右の「コード」に描いておき（ペインは切り替えない）、最終案のカードの［コードを見る］
   //   からも開ける（以前はコードのカードの［コードを見る］と従来の生成の後の自動表示）

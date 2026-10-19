@@ -222,8 +222,9 @@ console.log('\n--- §45. 実装仕様（C-1 第 3 段で変更）: 最終案の�
   m.panel.consult(seedFor('fieldOnOff.js', 'desktop', { text: FIELD_ON_OFF }));
   const { v: v1 } = await adoptScreen(m, '承認済みになったら金額を編集できなくしたい');
   assert(v1.spec && v1.spec.version === 1 && v1.spec.status === 'CONFIRMED' && v1.spec.customizeRevision === '12' && v1.spec.specId === `${v1.planId}:spec` && v1.spec.subject?.name === 'fieldOnOff.js' && !m.types().includes('SPEC'), '計画 v1 → 実装仕様 v1（相談対象付き）。最終案の一部として自動で確定し customize revision 12 を記録（会話に仕様のカードは出さない）');
-  const html = m.$('kt-ai-spec').innerHTML;
-  assert(/実装仕様 v1/.test(html) && /確定済み/.test(html) && /目的/.test(html) && /承認済みになったら金額を編集できなくしたい/.test(html) && /✎ fieldOnOff\.js を変更/.test(html) && /「[^」]+」（制御）/.test(html) && /編集画面/.test(html) && !/amount（CONTROL）|app\.record\./.test(html) && /最終案の一部です/.test(html) && !/data-act="(confirm-spec|revise-spec|confirm-generate|generate)"/.test(html), '仕様（右の「変更内容」）: 目的 / PC ✎ fieldOnOff.js を変更 / 対象フィールド（名前と扱い）/ 画面（§0e.3: フィールドのコード・扱いの英語・イベント名は出さない）。閲覧だけ（［仕様を修正］［この仕様で確定］［確定してコードを作る］は無い）');
+  //   2026-10-19: 実装仕様のカード（右の「変更内容」の #kt-ai-spec）は廃止した。目的・方針（統合先）・画面・対象のフィールドは右の「変更内容」の要約
+  const html = m.$('kt-ai-change-summary').innerHTML;
+  assert(/<h3>承認済みになったら金額を編集できなくしたい<\/h3>/.test(html) && /既存の「fieldOnOff\.js」に統合/.test(html) && /対象のフィールド: [^<]*「[^」]+」（制御）/.test(html) && /編集画面/.test(html) && !/amount（CONTROL）|app\.record\./.test(html) && !/data-act="(confirm-spec|revise-spec|confirm-generate|generate)"/.test(html), `${KIT.stripC(html).replace(/\s+/g, ' ').slice(0, 300)} / ` + '仕様（右の「変更内容」）: 目的 / PC ✎ fieldOnOff.js を変更 / 対象フィールド（名前と扱い）/ 画面（§0e.3: フィールドのコード・扱いの英語・イベント名は出さない）。閲覧だけ（［仕様を修正］［この仕様で確定］［確定してコードを作る］は無い）');
   assert(!/kt-ai-spec-card/.test(m.chat()) && !/data-act="confirm-spec"/.test(m.chat()) && /最終案ができました。/.test(m.chat()), '会話は最終案のカード 1 枚（仕様のカード・確定ボタンは無い）');
   assert(m.mock.calls.filter(c => c === 'GET customize').length >= 1 && writes(m).length === 0, '仕様の確定のときに動作テスト環境の設定を読むだけ（書き込み 0）');
   const c1 = await m.panel.send('それでいい'); await ticks();
@@ -233,8 +234,8 @@ console.log('\n--- §45. 実装仕様（C-1 第 3 段で変更）: 最終案の�
   assert(rv.intent === KTAiConversation.INTENT.REVISE_PLAN && m.calls.plan.length === 2 && m.calls.plan[1].ctx.revision && m.calls.plan[1].ctx.subject?.sourceId === 'desktop:js:fieldOnOff.js', '修正の依頼: REVISE_PLAN（subject 付き）');
   const v2 = m.conv().activePlan();
   assert(v2.version === 2 && v2.spec.version === 2 && v2.spec.status === 'CONFIRMED' && v1.spec.status === 'SUPERSEDED' && v1.status === 'SUPERSEDED', 'v2 の仕様（最終案の一部として確定）・v1 の仕様は SUPERSEDED');
-  const rightSpec = m.$('kt-ai-spec').innerHTML;
-  assert(/Mobile/.test(rightSpec) && /＋ 新規 JS/.test(rightSpec) && /✎ fieldOnOff\.js を変更/.test(rightSpec) && /実装仕様 v2/.test(rightSpec) && !/実装仕様 v1/.test(rightSpec), '仕様 v2: PC は既存へ統合・Mobile は新しい JavaScript（§6）。右は v2 だけ');
+  const rightSpec = m.$('kt-ai-change-summary').innerHTML;
+  assert(/モバイル/.test(rightSpec) && /新しい JavaScript「[^」]+」を登録/.test(rightSpec) && /既存の「fieldOnOff\.js」に統合/.test(rightSpec), `仕様 v2: PC は既存へ統合・モバイルは新しい JavaScript（§6）。右の「変更内容」は v2 だけ: ${KIT.stripC(rightSpec).replace(/\s+/g, ' ').slice(0, 300)}`);
   //   旧版（v1）の仕様のカードは削除した。前の最終案は 1 行に畳む（ai-flow-redesign の R10-4・F2-2）
   assert(/前の最終案 — このあと直した案があります/.test(m.chat()) && !/実装仕様 v\d/.test(m.chat()), '前の最終案は「このあと直した案があります」に畳む（会話に仕様の版の番号は出さない）');
   assert(typeof m.conv().confirmSpec === 'undefined' && KTAiConversation.MSG.SPEC === undefined && typeof m.panel.confirmSpec === 'undefined', '仕様の確定の操作・仕様のカードの種類は無い（ai-flow-redesign の F7-1・F7-4）');
