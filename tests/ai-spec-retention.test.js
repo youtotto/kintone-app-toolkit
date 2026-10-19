@@ -341,12 +341,10 @@ await section(async () => {
   const owner = un.checks.filter(ch => ch.name === 'coverage-owner');
   assert(un.coverage.unowned.map(x => x.requirement).join('|') === '承認後に Slack へ知らせる|100万円以上は部長承認|帳票の出力' && un.coverage.outOfScope.length === 4 && !(un.checks || []).some(ch => ch.name === 'coverage-unmet'), `担当（設定を変える手順）の無い OUT_OF_SCOPE は unowned（R9 は台帳に無い・P1 は確認待ち・C9 は計画に無い）: ${JSON.stringify(un.coverage.unowned)}`);
   assert(owner.length === 3 && owner.every(ch => !ch.ok && ch.severity === 'review') && owner[0].message === '担当範囲外とされた要件「承認後に Slack へ知らせる」の担当が計画に見つかりません。計画全体の確認に残します' && un.status !== 'OK', `check coverage-owner（review）: ${JSON.stringify(owner)}`);
-  const csUn = VM.codeSummary({ generated: gen([]), review: un, existingSource: null }, 'C2', { planId: 'p', version: 1, plan: revPlan });
-  assert(Array.isArray(csUn.unowned) && csUn.unowned.length === 3, 'codeSummary に unowned');
   //   C-1 第 3 段: 会話のコードのカード（MSG.CODE・codeCardHtml）は削除した。担当の決まっていない要件は右の「コード」の見出し（codePaneHtml）と最終案のカードに出す（最終案は §6 の下の会話の節）
   let cardUn = '';
   try { cardUn = KTAiChatUi.codePaneHtml({ generated: gen([]), review: un, existingSource: null }).head; } catch (e) { cardUn = `例外: ${e && e.stack}`; }
-  assert(!/kt-ai-code-unowned|kt-ai-code-out-of-scope|計画で担当が決まっていない要件|担当範囲外/.test(cardUn) && /登録：/.test(cardUn), `右の「コード」の見出しには担当範囲外・担当の無い要件を出さない（2026-10-14: 担当の無い要件は右の「変更内容」の「確認できないこと」に 1 回）: ${cardUn.slice(0, 400)}`);
+  assert(!/kt-ai-code-unowned|kt-ai-code-out-of-scope|計画で担当が決まっていない要件|担当範囲外/.test(cardUn) && /＋ 新規 JS: |✎ 既存 JS を変更: /.test(cardUn), `右の「コード」の見出しには担当範囲外・担当の無い要件を出さない（2026-10-14: 担当の無い要件は右の「変更内容」の「確認できないこと」に 1 回）: ${cardUn.slice(0, 400)}`);
   // クライアントの検証は OUT_OF_SCOPE を語彙として受け取る（語彙外は従来どおり PARTIAL）
   const gctx = KTContext.buildGenerator({ customization: C2, plan: SR.CASE2_PLAN, planId: 'p', version: 1, data: INPUTS.data, deps: INPUTS.deps, scan: INPUTS.scan });
   const RESP = { ok: true, contractVersion: '2.1', meta: { requestId: 'g1', gateway: { product: 'toolkit', feature: 'customization-generator', promptVersion: '1', contextVersion: 'customization-1' }, normalization: { warnings: [] }, ai: { model: 'm' } }, generated: { ...gen([{ requirement: '100万円以上は部長承認', status: 'OUT_OF_SCOPE', note: 'P1' }, { requirement: 'x', status: 'BOGUS', note: '' }]), gatewayChecks: { security: [] } } };
@@ -358,9 +356,8 @@ await section(async () => {
   assert(Array.isArray(other) && other.length === 2 && other.map(x => x.customizationId).join(',') === 'C1,C3' && other[0].requirement === C1.requirement && JSON.stringify(other[0].platform) === '["desktop"]' && Object.keys(other[0]).sort().join(',') === 'customizationId,platform,requirement', `buildGenerator: plan.otherCustomizations = C1 / C3（customizationId・requirement・platform）: ${JSON.stringify(other)}`);
   const solo = KTContext.buildGenerator({ customization: C2, plan: { ...SR.CASE2_PLAN, customizations: [C2] }, planId: 'p', version: 1, data: INPUTS.data });
   assert(Array.isArray(solo.plan.otherCustomizations) && solo.plan.otherCustomizations.length === 0 && Array.isArray(KTContext.buildGenerator({ customization: C2, plan: null, data: INPUTS.data }).plan.otherCustomizations), '他に customization が無ければ []（plan が無くても []）');
-  // 表示: コードカード（VM.codeSummary）に outOfScope
-  const cs = VM.codeSummary({ generated: gen(cov), review: rv, existingSource: null }, 'C2', { planId: 'p', version: 1, plan: SR.CASE2_PLAN });
-  assert(Array.isArray(cs.outOfScope) && cs.outOfScope.length === 3 && cs.notAchieved.length >= 1, `codeSummary: outOfScope と notAchieved を分けて持つ: ${JSON.stringify({ oos: cs.outOfScope.length, na: cs.notAchieved.length })}`);
+  // 確認の結果（KTCodeReview の coverage）は outOfScope と notAchieved を分けて持つ（2026-10-19: 同じ値を写す表示の型の codeSummary は削除した。表示は codePaneHtml と最終案）
+  assert(rv.coverage.outOfScope.length === 3 && rv.coverage.notAchieved.length >= 1, `coverage: outOfScope と notAchieved を分けて持つ: ${JSON.stringify({ oos: rv.coverage.outOfScope.length, na: rv.coverage.notAchieved.length })}`);
   // 会話: 満たせない部分と担当範囲外を分けて出す。
   //   C-1 第 3 段: 従来の生成の案内（code-intro）は削除した。新しい流れでは最終案のカードの「実現できない点・対応範囲」に、満たせない部分（cannot）・
   //   この JavaScript の対応範囲外（担当のある要件）・担当が計画に無い要件の順に分けて出す

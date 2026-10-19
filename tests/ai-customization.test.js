@@ -397,7 +397,7 @@ const clickCode = (m, id) => m.$('kt-ai-pane-code').dispatch({ type: 'click', ta
   // 右の「コード」: コード / Diff / 検査の内訳 / 登録ボタン（会話のコードのカードは削除した。右の「コード」は残す）
   m.panel.showCode('C1', { view: 'code' });
   assert(m.panel.drawerState().open && m.panel.drawerState().pane === 'code' && m.$('kt-ai-code-view').textContent === entry.review.finalCode && m.$('kt-ai-code-view').style.display === '' && m.$('kt-ai-diff-view').style.display === 'none', '右の「コード」: 最終コード');
-  assert(/✎ 既存 JS を変更/.test(m.$('kt-ai-code-head').innerHTML) && /✓ 検査を通過/.test(m.$('kt-ai-code-head').innerHTML) && /既存ファイルへの統合/.test(m.$('kt-ai-code-review').innerHTML) && /元のコードは保持/.test(m.$('kt-ai-code-review').innerHTML) && /＋3 行 \/ −0 行/.test(m.$('kt-ai-code-review').innerHTML) && /構文/.test(m.$('kt-ai-code-review').innerHTML) && !/Patch|Security/.test(m.$('kt-ai-code-review').innerHTML), '右の「コード」: 見出し（✓ 検査を通過）と Code Review の一覧（既存ファイルへの統合 ＋3 / −0 行・元のコードは保持。検査名は日本語）');
+  assert(/✎ 既存 JS を変更/.test(m.$('kt-ai-code-head').innerHTML) && !/検査を通過|採用不可|登録：/.test(m.$('kt-ai-code-head').innerHTML) && /既存ファイルへの統合/.test(m.$('kt-ai-code-review').innerHTML) && /元のコードは保持/.test(m.$('kt-ai-code-review').innerHTML) && /＋3 行 \/ −0 行/.test(m.$('kt-ai-code-review').innerHTML) && /構文/.test(m.$('kt-ai-code-review').innerHTML) && !/Patch|Security/.test(m.$('kt-ai-code-review').innerHTML), '右の「コード」: 見出し（方針とファイル。判定の札は出さない: 判定は右の「変更内容」の「JavaScript の状態」と最終案。2026-10-19）と Code Review の一覧（既存ファイルへの統合 ＋3 / −0 行・元のコードは保持。検査名は日本語）');
   //   簡素化（2026-10-17）: 右の「コード」の登録ボタン（仮案から作っていない計画のときだけ出ていた）は要素ごと削除した（出さないことの確かめは不要）
   m.panel.showCode('C1', { view: 'diff' });
   assert(m.$('kt-ai-diff-view').style.display === '' && /^\+\s*if \(record\['ステータス'\] && record\['ステータス'\]\.value === '完了'\)/m.test(m.$('kt-ai-diff-view').textContent) && / {0,}kintone\.events\.on/.test(m.$('kt-ai-diff-view').textContent), '差分 → Before / After（追加行は +・既存行は保持）');
@@ -445,7 +445,7 @@ console.log('\n--- §53-2. 複数のカスタマイズ / カスタマイズの�
   const fin = finalText(m);
   assert(FS.readyOf(v) === false && v.generated.C1.status === 'verified' && v.generated.C2.status !== 'verified' && /確認できないこと／反映を止めている理由/.test(fin) && /要件未達（「担当者」: 編集できないようにする）/.test(fin) && !/C1|C2/.test(textOf(m.chat())), `最終案のカード: C2 は要件未達で承認できない（C1 は検証済み。内部の番号は会話に出さない）: ${fin.slice(fin.indexOf('実現できない点'), fin.indexOf('実現できない点') + 160)}`);
   m.panel.showCode('C2', { view: 'code' });
-  assert(/× 採用不可/.test(m.$('kt-ai-code-head').innerHTML), '右の「コード」: × 採用不可。登録ボタンは出ない');
+  assert(/×[^<]*owner/.test(m.$('kt-ai-code-review').innerHTML) && !/採用不可|登録：/.test(m.$('kt-ai-code-head').innerHTML), `右の「コード」: 止める理由（× の検査の行。owner の処理が無い）を出す。判定の札は出さない（判定は最終案のカードと右の「変更内容」の「JavaScript の状態」）: ${m.$('kt-ai-code-review').innerHTML.replace(/<[^>]+>/g, ' ').slice(0, 200)}`);
   // 計画の修正（カスタマイズの対象をモバイルにも）→ 新しい版。前の版の生成結果は新しい版に引き継がない
   m.panel.showCode('C1', { view: 'code' });
   const rv = await m.panel.send('金額のロックはモバイルでも動くようにして'); await ticks(8);
@@ -485,7 +485,7 @@ console.log('\n--- §53-2. 複数のカスタマイズ / カスタマイズの�
   assert(/設定の変更はありません/.test(m.$('kt-ai-change-summary').innerHTML) && /新しい JavaScript「amountWarning\.js」を登録/.test(m.$('kt-ai-change-summary').innerHTML) && v.plan.solution === 'CUSTOMIZATION', '新規 JS の計画: 最終案のカードは「設定の変更はありません」・新しい JavaScript を登録（右の「変更内容」）・solution CUSTOMIZATION');
   assert(m.calls2.generate.length === 1 && m.panel.generated('C1').review.status === 'BLOCKED' && m.panel.generated('C1').review.checks.some(x => x.name === 'behavior-fail' && !x.ok) && m.panel.generated('C1').review.checks.some(x => x.name === 'fields' && x.gateway && !x.ok), `Generator の応答に未知フィールド → 生成工程の結果（模擬テストの不合格・fields の確認）で BLOCKED: ${JSON.stringify(m.panel.generated('C1').review.checks.filter(x => !x.ok).map(x => x.name))}`);
   m.panel.showCode('C1', { view: 'code' });
-  assert(FS.readyOf(v) === false && /模擬テストで、必須の動作のとおりに動きませんでした/.test(fin) && /計画か実装仕様/.test(fin) && /× 採用不可/.test(m.$('kt-ai-code-head').innerHTML) && /アプリに無いフィールドコード/.test(m.$('kt-ai-code-review').innerHTML), `最終案のカード: 承認できない・次の方針（計画か実装仕様を見直す）。理由（生成工程の fields の確認）は右の「コード」。登録ボタンは出ない: ${FS.readyOf(v)} ${String(fin).replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').slice(0, 400)}`);
+  assert(FS.readyOf(v) === false && /模擬テストで、必須の動作のとおりに動きませんでした/.test(fin) && /計画か実装仕様/.test(fin) && /× /.test(m.$('kt-ai-code-review').innerHTML) && /アプリに無いフィールドコード/.test(m.$('kt-ai-code-review').innerHTML), `最終案のカード: 承認できない・次の方針（計画か実装仕様を見直す）。理由（生成工程の fields の確認）は右の「コード」。登録ボタンは出ない: ${FS.readyOf(v)} ${String(fin).replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').slice(0, 400)}`);
   await clickCode(m, 'kt-ai-code-copy');
   assert(m.copies.length === 1, 'BLOCKED でもコードの確認（コピー）はできる（登録はしない）');
 }
@@ -568,7 +568,7 @@ console.log('\n--- §53-4. KTAiChatUi（純関数）---');
     { requiredEffects: [], customization: hy.plan.customizations[0] });
   assert(rv.checks.filter(x => x.name === 'patch').length === 1 && rv.checks.some(x => x.name === 'patch' && !x.gateway && /元のコードは保持/.test(x.message)), '生成工程の patch の合格は、Toolkit の統合の行と重ねない（同じ事実）');
   v.generated.C1 = { generated: genPatch(), review: rv, existingSource: SRC };
-  assert(/✓ 検査を通過/.test(KTAiChatUi.codePaneHtml(v.generated.C1).head) && /✓ 既存ファイルへの統合/.test(KTAiChatUi.codePaneHtml(v.generated.C1).review) && /✓ 構文/.test(KTAiChatUi.codePaneHtml(v.generated.C1).review), 'codePaneHtml: 見出しは要約（✓ 検査を通過）。検査の ✓ 一覧（Toolkit の統合の確認と生成工程の項目。検査名は日本語）は review');
+  assert(/✎ 既存 JS を変更: /.test(KTAiChatUi.codePaneHtml(v.generated.C1).head) && !/検査を通過/.test(KTAiChatUi.codePaneHtml(v.generated.C1).head) && /✓ 既存ファイルへの統合/.test(KTAiChatUi.codePaneHtml(v.generated.C1).review) && /✓ 構文/.test(KTAiChatUi.codePaneHtml(v.generated.C1).review), 'codePaneHtml: 見出しは方針とファイル（判定の札は出さない）。検査の ✓ 一覧（Toolkit の統合の確認と生成工程の項目。検査名は日本語）は review');
   const pane = KTAiChatUi.codePaneHtml(v.generated.C1, { view: 'diff' });
   assert(pane.code === rv.finalCode && /^\+/m.test(pane.diff) && /fieldOnOff\.js/.test(pane.head), 'codePaneHtml: code / diff / head');
   //   簡素化 §5（2026-10-16）: 通った検査（✓ の記録）は［詳しく］の中。止める・確かめる必要のある検査（× △）は［詳しく］の外に出す（表示だけ。判定は変えない）

@@ -175,16 +175,13 @@ await section(() => {
   // 段階 C: 計画の新設の名前を requirement の文から照合する plannedHint（段階 A）は削除した（文からの推定を減らす）。新設に関わる未達も、この JavaScript の id の NOT_MET として対応づける
   const rvPl = KTCodeReview.review({ generated: { ...GEN_R14, coverage: [{ requirementId: 'C1', requirement: 'ステータスが「部長承認待ち」のときは部長承認者以外は金額を編集不可にする', status: 'NOT_MET', note: '部長承認待ちというステータスは存在しないため実装できません' }] }, customization: CUST_R14, plan: PLAN_R14, data: DATA, scan: null, existingSource: null });
   assert(!('plannedHint' in rvPl.coverage) && rvPl.coverage.notAchieved.some(x => x.code === 'AI_NOT_MET' && x.requirementId === 'C1'), `plannedHint は無い。自分の id の NOT_MET として対応づける: ${JSON.stringify(rvPl.coverage.notAchieved)}`);
-  // 表示: VM.codeSummary（見出し・登録できるか）・コードペイン
+  // 表示: コードペイン（2026-10-19: 同じ値を写す表示の型の codeSummary と、見出しの判定の札（登録：…）は削除した。判定は右の「変更内容」の「JavaScript の状態」と最終案）
   //   C-1 第 3 段（2026-10-08）: 会話のコードのカード（MSG.CODE・codeCardHtml）は削除した（JavaScript は最終案のカードの中だけ）。カードの見出し・「生成 N 回目」・
   //   AI の申告を 1 回だけ出す期待は、下のコードペインの同じ期待と、ai-flow-redesign の F7-2（コードのカードの描画は無い）・F2-3（最終案を通らない生成のカードは出ない）・
   //   R19-3 / R19-5（未解決の理由と次の方針は最終案のカードに 1 回だけ）・D1-4（検証の区分に必須の動作の未達）で守る
   const entry = { generated: gen(okCode, { coverage: covNotMet }), review: rv, existingSource: null, attempts: { count: 2, measured: 2, tokens: { input: 3000, output: 400 }, costUsd: 0.01 } };
-  const v = { planId: 'p', version: 1, goal: 'g', plan: mkPlan([], { customizations: [cust()] }), review: null, ctx: null, status: 'ACTIVE', generated: { C1: entry } };
-  const cs = VM.codeSummary(entry, 'C1', v);
-  assert(cs.unmet.length === 1 && cs.headline === 'JavaScript を作りましたが、要件を満たしていない部分があると生成した AI が申告しています（反映の前に確かめてください）。' && cs.verdictJa === '△ 登録の前に確認が必要' && !cs.blocked && cs.attemptCount === 2, `codeSummary: 見出しは AI の申告があること・登録の判定は確認が必要・生成の回数: ${JSON.stringify({ headline: cs.headline, verdictJa: cs.verdictJa, blocked: cs.blocked })}`);
   const pane = KTAiChatUi.codePaneHtml(entry);
-  assert(/△ 登録の前に確認が必要/.test(pane.head) && /要件を満たしていない部分があると申告されています/.test(pane.head) && !/静的な検査は通過/.test(pane.head) && /生成 2 回目（使用量: 入力 3000 \/ 出力 400 token/.test(pane.head) && !/見積もり/.test(pane.head), `コードペインの見出しも同じ（登録の判定・生成の回数と実測の使用量）: ${pane.head.replace(/<[^>]*>/g, '').slice(0, 300)}`);
+  assert(!/登録：|静的な検査は通過|申告されています/.test(pane.head) && /生成 2 回目（使用量: 入力 3000 \/ 出力 400 token/.test(pane.head) && !/見積もり/.test(pane.head), `コードペインの見出し: 判定の札は出さない・生成の回数と実測の使用量（AI の申告は下の検査の一覧に 1 回）: ${pane.head.replace(/<[^>]*>/g, '').slice(0, 300)}`);
   assert(!/（Toolkit の確認）/.test(pane.head) && (pane.review.match(/要件の達成（AI の申告）/g) || []).length === 1, 'コードペイン: AI の申告は検査の一覧（生成工程の要件の達成）に 1 回だけ。Toolkit の確認の行には出さない');
   //   C-1 第 3 段: コードのカードの「新設の項目の案内（plannedHint）は出さない」は、上の rvPl（plannedHint は無い）とコードペインで守る
   const panePl = KTAiChatUi.codePaneHtml({ generated: GEN_R14, review: rvPl, existingSource: null });

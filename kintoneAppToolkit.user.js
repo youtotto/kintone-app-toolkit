@@ -28527,55 +28527,7 @@
     //   反映（exec）もタブ（2026-10-07 利用者の指示: 分割の欄ではなくタブ）。詳細情報・接続（接続機能の無い環境では Context）は控えめなタブ。反映の記録（log）はヘッダーから開く
     const PRIMARY_TABS = Object.freeze(['plan', 'code', 'exec']);
     const TABS = Object.freeze(['plan', 'code', 'exec', 'evidence', 'context', 'connection']);
-    const STATUS_JA = { ACTIVE: '最新', SUPERSEDED: '旧バージョン', STALE: '要再作成', EXECUTED: '動作テスト環境へ反映済み', ROLLED_BACK: '元に戻し済み' };
-    const SOLUTION_JA = { STANDARD: '標準設定', CUSTOMIZATION: 'JavaScript', HYBRID: '標準設定 ＋ JavaScript', UNKNOWN: '判断できず' };
     const STRATEGY_JA = { NEW_JS_FILE: '＋ 新規 JS', EXTEND_EXISTING_JS: '✎ 既存 JS を変更', REPLACE_EXISTING_LOGIC: '既存処理の置き換え（計画のみ）', PLUGIN_CANDIDATE: 'プラグイン候補（計画のみ）', NOT_RECOMMENDED: '推奨しない' };
-    const SPEC_STATUS_JA = { DRAFT: '確認待ち', CONFIRMED: '確定済み', SUPERSEDED: '旧版' };
-    const CODE_STATUS_JA = { OK: '✓ 検査を通過', REVIEW_REQUIRED: '△ 要確認', BLOCKED: '× 採用不可' };
-    // Phase 21: JS の登録の判定（KTCodeReview の registration.verdict）
-    const VERDICT_JA = { BLOCKED: '× 登録できません（要件との不一致・不整合）', NEEDS_CONFIRMATION: '△ 登録の前に確認が必要', RUNTIME_UNVERIFIED: '✓ 静的な検査は通過（動作は未確認）' };
-
-    /** 実装仕様 → 要約（確定は UI だけ。ここは状態を読むだけ） */
-    function specSummary(v) {
-      const sp = v?.spec; if (!sp) return null;
-      const reviewOf = (cid) => (v.review?.steps || []).find(r => r.customization?.customizationId === cid) || null;
-      const status = sp.status;
-      return {
-        planId: v.planId, version: v.version, specVersion: sp.version, status, statusJa: SPEC_STATUS_JA[status] || status, confirmedAt: sp.confirmedAt || null, subject: sp.subject || null,
-        customizations: (sp.customizations || []).map(c => ({ customizationId: c.customizationId, requirement: c.requirement || '', strategy: c.strategy || null, strategyJa: STRATEGY_JA[c.strategy] || c.strategy || '（未定）', platform: [...(c.platform || [])], files: (c.existingFiles || []).map(f => f.name), implementation: c.implementation || 'JAVASCRIPT', generatable: reviewOf(c.customizationId)?.codeGeneration?.supported ?? null })),
-        questions: [...new Set([...(v.plan?.questions || []).map(q => q.question), ...(sp.customizations || []).flatMap(c => c.questions || [])].map(q => String(q || '').trim()).filter(Boolean))].length,
-      };
-    }
-    /** 生成コード（v.generated[cid]）→ 要約 */
-    function codeSummary(entry, customizationId = null, v = null) {
-      if (!entry || !entry.generated) return null;
-      const g = entry.generated, rv = entry.review || null;
-      const c = v ? ((v.plan?.customizations || []).find(x => x.customizationId === customizationId) || null) : null;
-      const status = rv?.status || 'REVIEW_REQUIRED';
-      // Phase 21: 登録の判定（登録不可 / 登録前に確認が必要 / 静的な検査は通過・動作は未確認）と、要件のうち満たせない部分
-      const reg = rv?.registration || null;
-      const verdict = reg?.verdict || (status === 'BLOCKED' ? 'BLOCKED' : status === 'OK' ? 'RUNTIME_UNVERIFIED' : 'NEEDS_CONFIRMATION');
-      // 段階 A（5.4）: 範囲内の NOT_MET（AI の申告）があれば、見出しは「要件を満たしていない部分があります（登録できません）」（「✓ 静的な検査は通過」とは並べない）
-      const unmet = (rv?.coverage?.notAchieved || []).filter(x => x && x.code === 'AI_NOT_MET');
-      const attempts = entry.attempts || null;
-      return {
-        customizationId, targetFile: g.targetFile || '', strategy: g.strategy || null, strategyJa: STRATEGY_JA[g.strategy] || g.strategy || '',
-        target: entry.existingSource?.target || (Array.isArray(c?.platform) && c.platform.length === 1 ? c.platform[0] : null),
-        verdict, verdictJa: VERDICT_JA[verdict] || verdict, blockers: reg?.blockers || [], confirmCount: (reg?.confirmations || []).length, unverified: reg?.unverified || [],
-        unmet, headline: unmet.length ? 'JavaScript を作りましたが、要件を満たしていない部分があると生成した AI が申告しています（反映の前に確かめてください）。' : 'JavaScript を作りました。',
-        // 段階 A（5.6）: 生成の回数（「生成 N 回目」）と token / 費用（独立レビュー A4: 実測が取れた回だけ「使用量」として出す）
-        attempts, attemptCount: attempts?.count || 1, usageMeasured: !!attempts && ((attempts.measured ?? (((attempts.tokens?.input || 0) + (attempts.tokens?.output || 0)) > 0 ? 1 : 0)) > 0),
-        achieved: rv?.coverage?.achieved || [], notAchieved: rv?.coverage?.notAchieved || [], outOfScope: rv?.coverage?.outOfScope || [], unowned: rv?.coverage?.unowned || [],
-        // 独立レビュー C: AI の申告（AI_NOT_MET / AI_PARTIAL）と Toolkit の確認（SUBTABLE_ROWS など）を分け、coverage-unmet の blocker と同じ項目を 2 回出さない
-        //   （簡素化 B 以降の申告の確認は生成工程の coverage。coverage-unmet は保存済みの記録だけ）
-        notAchievedAi: (rv?.coverage?.notAchieved || []).filter(x => x && /^AI_/.test(String(x.code))), notAchievedToolkit: (rv?.coverage?.notAchieved || []).filter(x => x && !/^AI_/.test(String(x.code))),
-        blockersOther: (reg?.blockers || []).filter(b => b && b.code !== 'coverage-unmet'),
-        status, statusJa: CODE_STATUS_JA[status] || status, ok: status === 'OK', blocked: status === 'BLOCKED' || verdict === 'BLOCKED',
-        added: rv?.diff?.added ?? null, removed: rv?.diff?.removed ?? null, hasDiff: !!rv?.diff,
-        patterns: (g.patterns || []).map(p => p.id), external: !!(entry.existingSource?.from === 'url' || entry.existingSource?.external),
-        summary: g.summary || c?.requirement || '', requirement: c?.requirement || '',
-      };
-    }
     /** 標準設定の反映（KTPlanExecutor の状態 execState）→ 要約 */
     function executionSummary(execState) {
       const ex = execState?.execution || null;
@@ -28607,23 +28559,6 @@
         firstStep: steps[0] || null,
       };
     }
-    /** 成果物の表示名（Workspace State / タブの印用） */
-    function artifactLabel(a) {
-      if (!a) return '';
-      const ver = a.version != null ? ` v${a.version}` : '';
-      switch (a.type) {
-        case ARTIFACT.CHANGE_PLAN: return `変更計画${ver}`;
-        case ARTIFACT.CUSTOMIZATION_SPEC: return `実装仕様${a.specVersion != null ? ` v${a.specVersion}` : ver}`;
-        case ARTIFACT.GENERATED_CODE: return `生成コード${a.customizationId ? ` ${a.customizationId}` : ''}${a.targetFile ? `（${a.targetFile}）` : ''}`;
-        case ARTIFACT.EXECUTION: return a.js ? 'JavaScript の登録' : '動作テスト環境への反映';
-        case ARTIFACT.ROLLBACK: return a.js ? 'JavaScript の復元' : '元に戻す';
-        case ARTIFACT.DOCUMENT: return `ドキュメント${a.kind ? `（${a.kind}）` : ''}`;
-        case ARTIFACT.EVIDENCE: return `根拠${a.id ? ` ${a.id}` : ''}`;
-        case ARTIFACT.CONTEXT: return 'Context';
-        case ARTIFACT.CONSULTATION: return `相談: ${a.name || a.id || ''}`;
-        default: return String(a.type || '');
-      }
-    }
     /**
      * 右の見出しの状態（2026-10-06）。実際の処理の状態だけから決める（固定の「確認済み」などは出さない）。
      * @param {object} o version = 今の変更案 / working = 会話の作業（PLAN・REVISE・GENERATE。作業中だけ）/ running = 反映・元に戻すの処理中の段階 /
@@ -28648,13 +28583,8 @@
       return { key: 'empty', label: '未作成' };
     }
     const paneFor = (a) => (a && PANE_OF[a.type]) || 'plan';
-    /** 右ペインの既定の成果物（明示の操作が無いとき）: 最新の計画 */
-    function defaultArtifact({ version = null, subject = null } = {}) {
-      if (version) return { type: ARTIFACT.CHANGE_PLAN, id: version.planId, version: version.version };
-      if (subject) return { type: ARTIFACT.CONSULTATION, id: subject.sourceId ?? null, version: null, name: subject.name ?? null };
-      return null;
-    }
-    return { ARTIFACT, PANE_OF, PANES, PANE_JA, PRIMARY_TABS, TABS, STATUS_JA, SOLUTION_JA, STRATEGY_JA, SPEC_STATUS_JA, CODE_STATUS_JA, specSummary, codeSummary, executionSummary, jsExecutionSummary, workStatus, artifactLabel, paneFor, defaultArtifact };
+    //   2026-10-19: 製品から呼ばれない要約（specSummary・codeSummary）・表示名（artifactLabel）・既定の成果物（defaultArtifact）と、それだけが使う名前の表は削除した
+    return { ARTIFACT, PANE_OF, PANES, PANE_JA, PRIMARY_TABS, TABS, STRATEGY_JA, executionSummary, jsExecutionSummary, workStatus, paneFor };
   })();
 
   // ==========================================
@@ -30119,15 +30049,16 @@
       const mark = (ch) => (ch.ok ? '✓' : ch.severity === 'block' ? '×' : '△');
       const color = (ch) => (ch.ok ? '#2e7d32' : ch.severity === 'block' ? '#b00020' : '#b26a00');
       const checkRow = (ch) => `<div style="color:${color(ch)};">${mark(ch)} ${esc(CHECK_JA[ch.name] || ch.name)}: ${esc(ch.message)}</div>`;
-      // Phase 21: 要約・詳細・検査結果をそろえる。登録の判定と、要件のうち満たせない部分（Toolkit の確認）を AI の要約より先に出す
+      // Phase 21: 要件のうち満たせない部分（Toolkit の確認）を AI の要約より先に出す。
+      //   2026-10-19: 判定の札（検査の通過・登録の判定・確認の件数）と通った範囲の列挙は出さない。判定は右の「変更内容」の「JavaScript の状態」と最終案、
+      //   確認項目は承認の欄。ここは止める理由・確かめていないこと・検査の一覧（根拠）とコード
       const reg = rv?.registration || null;
-      const VJ = { BLOCKED: '× 登録できません（要件との不一致・不整合）', NEEDS_CONFIRMATION: '△ 登録の前に確認が必要', RUNTIME_UNVERIFIED: '✓ 静的な検査は通過（動作は未確認）' };
       //   会話の設計し直し（2026-10-14・指示書 §6.1）: 「この JavaScript の担当範囲外」の列挙と「計画で担当が決まっていない要件」はここに出さない（担当のある要件は
       //   右の「変更内容」の反映する内容で分かる。担当が決まっていない要件は右の「変更内容」の「確認できないこと」に 1 回）
-      const notAch = rv?.coverage?.notAchieved || [], ach = rv?.coverage?.achieved || [];
-      // 段階 A（5.4 / 5.6）: NOT_MET（AI の申告）があれば「要件を満たしていない部分があります（登録できません）」。生成の回数も見出しに
-      const unmetP = notAch.filter(x => x && x.code === 'AI_NOT_MET'), attemptsP = entry.attempts || null;
-      const regHtml = reg ? `<div class="kt-ai-code-verdict" style="margin-top:2px; color:${reg.verdict === 'BLOCKED' ? '#b00020' : reg.verdict === 'NEEDS_CONFIRMATION' ? '#b26a00' : '#2e7d32'};">登録：${esc(VJ[reg.verdict] || reg.verdict)}${unmetP.length ? esc('（要件を満たしていない部分があると申告されています）') : ''}${reg.verdict === 'NEEDS_CONFIRMATION' ? `（確認 ${esc(String((reg.confirmations || []).length))} 件）` : ''}</div>${(reg.blockers || []).map(b => `<div style="color:#b00020;">× ${esc(b.message)}</div>`).join('')}${(reg.unverified || []).map(u => `<div style="opacity:.8;">・${esc(u.message)}</div>`).join('')}` : '';
+      const notAch = rv?.coverage?.notAchieved || [];
+      // 段階 A（5.6）: 生成の回数も見出しに
+      const attemptsP = entry.attempts || null;
+      const regHtml = reg ? `${(reg.blockers || []).map(b => `<div style="color:#b00020;">× ${esc(b.message)}</div>`).join('')}${(reg.unverified || []).map(u => `<div style="opacity:.8;">・${esc(u.message)}</div>`).join('')}` : '';
       // 独立レビュー C: AI の申告（AI_NOT_MET / AI_PARTIAL）は検査の一覧（生成工程の coverage。保存済みの記録では coverage-unmet）に出るので、ここでは Toolkit の確認（SUBTABLE_ROWS など）だけ（同じ項目を 2 回出さない）
       const notAchTk = notAch.filter(x => x && !/^AI_/.test(String(x.code)));
       // 独立レビュー A4: token は実測が取れた回だけ「使用量」と書く。取れていなければ「使用量は未取得」
@@ -30137,9 +30068,9 @@
       const usageP = !attemptsP ? '' : !usageMeasured ? '（使用量は未取得）' : unknownP
         ? `（確認できた分の使用量: 入力 ${esc(String(attemptsP.tokens.input || 0))} / 出力 ${esc(String(attemptsP.tokens.output || 0))} token・約 ${esc(String(attemptsP.costUsd || 0))} 米ドル。使用量が不明な回が ${esc(String(unknownP))} 回あり、費用は未確定）`
         : `（使用量: 入力 ${esc(String(attemptsP.tokens.input || 0))} / 出力 ${esc(String(attemptsP.tokens.output || 0))} token・約 ${esc(String(attemptsP.costUsd || 0))} 米ドル）`;
-      const covHtml = `${ach.length ? `<div style="margin-top:2px;">Toolkit が確かめた範囲: ${ach.map(esc).join('／')}</div>` : ''}${notAchTk.length ? `<div class="kt-ai-code-not-achieved" style="margin-top:2px; color:#b00020;">要件のうち満たせない部分（Toolkit の確認）: ${notAchTk.map(x => esc(x.message)).join('／')}</div>` : ''}${attemptsP ? `<div class="kt-ai-code-attempts" style="margin-top:2px; opacity:.75;">生成 ${esc(String(attemptsP.count || 1))} 回目${usageP}</div>` : ''}`;
+      const covHtml = `${notAchTk.length ? `<div class="kt-ai-code-not-achieved" style="margin-top:2px; color:#b00020;">要件のうち満たせない部分（Toolkit の確認）: ${notAchTk.map(x => esc(x.message)).join('／')}</div>` : ''}${attemptsP ? `<div class="kt-ai-code-attempts" style="margin-top:2px; opacity:.75;">生成 ${esc(String(attemptsP.count || 1))} 回目${usageP}</div>` : ''}`;
       return {
-        head: `<b>${esc(g.strategy === 'EXTEND_EXISTING_JS' ? '✎ 既存 JS を変更' : '＋ 新規 JS')}: ${esc(g.targetFile)}</b>　${rv?.status === 'OK' ? '✓ 検査を通過' : rv?.status === 'BLOCKED' ? '× 採用不可' : '△ 要確認'}${regHtml}${covHtml}${notAch.length ? `<details style="margin-top:2px;"><summary style="cursor:pointer; opacity:.75;">AI の要約（Toolkit の確認と食い違う部分があります。そのまま採用しないでください）</summary><span style="opacity:.85;">${esc(g.summary || '')}</span></details>` : `<div style="margin-top:2px;"><span style="opacity:.7;">AI の要約:</span> <span style="opacity:.85;">${esc(g.summary || '')}</span></div>`}`,
+        head: `<b>${esc(g.strategy === 'EXTEND_EXISTING_JS' ? '✎ 既存 JS を変更' : '＋ 新規 JS')}: ${esc(g.targetFile)}</b>${regHtml}${covHtml}${notAch.length ? `<details style="margin-top:2px;"><summary style="cursor:pointer; opacity:.75;">AI の要約（Toolkit の確認と食い違う部分があります。そのまま採用しないでください）</summary><span style="opacity:.85;">${esc(g.summary || '')}</span></details>` : `<div style="margin-top:2px;"><span style="opacity:.7;">AI の要約:</span> <span style="opacity:.85;">${esc(g.summary || '')}</span></div>`}`,
         //   簡素化 §5（2026-10-16）: 通常表示は止める・確かめる必要のある検査（× △）だけ。通った検査（✓ の記録）は［詳しく］の中（表示だけ。判定は変えない）
         review: (rv?.checks || []).filter(ch => !ch.ok).map(checkRow).join('') + ((rv?.checks || []).some(ch => ch.ok) ? `<details class="kt-ai-tech kt-ai-code-passed"><summary>通った検査（${(rv.checks || []).filter(ch => ch.ok).length} 件）</summary>${(rv.checks || []).filter(ch => ch.ok).map(checkRow).join('')}</details>` : '') + ((rv?.mismatches || []).length ? `<div style="margin-top:4px; opacity:.85;">計画との照合: ${rv.mismatches.map(x => esc(x.message)).join('／')}</div>` : '') + (((rv?.assumptions ?? g.assumptions) || []).length ? `<div style="margin-top:4px; opacity:.85;">前提: ${esc((rv?.assumptions ?? g.assumptions).join('／'))}</div>` : '') + ((g.warnings || []).length ? `<div style="color:#b26a00;">${g.warnings.map(w => `⚠ ${esc(w)}`).join('<br>')}</div>` : '') + patternsHtml(g),
         code: rv?.finalCode ?? g.code ?? '',

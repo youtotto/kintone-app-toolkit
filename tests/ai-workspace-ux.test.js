@@ -379,15 +379,11 @@ console.log('\n--- §27. ViewModel（純関数）: Chat と Workspace は同じ�
   const v = { planId: 'p', version: 1, status: 'ACTIVE', goal: GOAL, plan: { ...KTAiClient.validatePlan(PLAN_V1, gen.ctx).normalized, requestId: 'pl-1' } };
   v.review = KTPlanReview.review({ plan: v.plan, ...INPUTS });
   //   簡素化（2026-10-17）: 画面に出ていなかった作業状態（workspaceState）と、それだけが使う planSummary・reviewSummary は削除した
-  assert(VM.specSummary(v) === null && VM.executionSummary({ stage: 'idle' }) === null && VM.jsExecutionSummary({ stage: 'idle' }) === null, '無いものは null');
-  const vh = { planId: 'h', version: 2, status: 'ACTIVE', goal: GOAL_HYBRID, plan: PLAN_HYBRID.plan, review: null, spec: { specId: 'h:spec', version: 2, status: 'CONFIRMED', confirmedAt: 'x', customizations: PLAN_HYBRID.plan.customizations }, generated: { C1: { generated: { ...genPatch(), patterns: PATTERNS }, review: { status: 'OK', diff: { added: 3, removed: 0 } }, existingSource: { name: 'fieldOnOff.js', target: 'desktop', text: FIELD_ON_OFF } } } };
-  const cs = VM.codeSummary(vh.generated.C1, 'C1', vh);
-  assert(cs.targetFile === 'fieldOnOff.js' && cs.ok && cs.added === 3 && cs.removed === 0 && cs.target === 'desktop' && cs.patterns.join() === 'field-disable' && cs.external === false, 'codeSummary');
-  const sp = VM.specSummary(vh);
-  assert(sp.specVersion === 2 && sp.status === 'CONFIRMED' && sp.customizations[0].files.join() === 'fieldOnOff.js' && sp.customizations[0].platform.join() === 'desktop', 'specSummary');
+  assert(VM.executionSummary({ stage: 'idle' }) === null && VM.jsExecutionSummary({ stage: 'idle' }) === null, '無いものは null');
+  //   2026-10-19: 製品から呼ばれない表示の型の要約（codeSummary・specSummary）と表示名（artifactLabel）は削除した（表示はコードのタブ・変更内容・最終案）
   const js = VM.jsExecutionSummary({ stage: 'done', execution: { executionId: 'x', status: 'DONE', put: { ok: true }, steps: [{ name: 'a.js', target: 'mobile', kind: 'ADD_FILE', status: 'VERIFIED' }, { name: 'b.js', target: 'desktop', kind: 'REPLACE_FILE', status: 'VERIFY_FAILED' }], rollback: { status: 'ROLLED_BACK_VERIFIED', verification: { restoredToSnapshot: true } } } });
   assert(js.verified === 1 && js.steps.length === 2 && js.ok && js.written && js.rolledBack && js.rollbackRestored === true && js.firstStep.name === 'a.js', 'jsExecutionSummary');
-  assert(VM.artifactLabel({ type: 'CHANGE_PLAN', version: 3 }) === '変更計画 v3' && VM.artifactLabel({ type: 'GENERATED_CODE', customizationId: 'C1', targetFile: 'a.js' }) === '生成コード C1（a.js）' && VM.paneFor({ type: 'EXECUTION' }) === 'exec' && VM.paneFor({ type: 'DOCUMENT' }) === 'context', 'artifactLabel / paneFor');
+  assert(VM.paneFor({ type: 'EXECUTION' }) === 'exec' && VM.paneFor({ type: 'DOCUMENT' }) === 'context' && VM.paneFor({ type: 'GENERATED_CODE' }) === 'code' && !['codeSummary', 'specSummary', 'artifactLabel', 'defaultArtifact'].some(k => k in VM), 'paneFor（製品から呼ばれない要約・表示名の公開口は無い）');
   assert(Object.keys(VM.ARTIFACT).sort().join() === 'CHANGE_PLAN,CONSULTATION,CONTEXT,CUSTOMIZATION_SPEC,DOCUMENT,EVIDENCE,EXECUTION,GENERATED_CODE,ROLLBACK', 'Artifact Types（§12。2026-10-19: 確認結果のタブと一緒に REVIEW は廃止）');
   // 2026-10-06: ペインの名前・主のタブ・右の見出しの状態（workStatus）
   assert(JSON.stringify(VM.PANE_JA) === JSON.stringify({ plan: '変更内容', code: 'コード', exec: '反映', evidence: '詳細情報', context: 'Context', connection: '接続', log: '反映の記録' }) && VM.PANES.includes('log') && VM.PRIMARY_TABS.join() === 'plan,code,exec' && VM.TABS.join() === 'plan,code,exec,evidence,context,connection', 'VM: ペインの名前（変更内容・コード・反映・詳細情報・Context・接続・反映の記録）・主のタブ（変更内容・コード・反映）');
