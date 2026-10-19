@@ -281,7 +281,7 @@ console.log('\n--- §38. Pattern Library（Gateway の generated.patterns）: �
   assert(entry && Array.isArray(entry.generated.patterns) && entry.generated.patterns[0].id === 'field-disable' && entry.generated.patterns[0].preferredStandardAlternatives.length === 2 && !('implementationNotes' in entry.generated.patterns[0]), 'validateGenerated: patterns（id / purpose / implementation / preferredStandardAlternatives）を通す。知識本体は無い');
   //   右の「コード」に出す操作（act open-code）で開く。C-1 第 3 段（2026-10-08）: open-code のボタンを出していたコードのカードは削除し、
   //   最終案のカードに［コードを見る］（act open-code）を置いた。最終案の後に右の「コード」を開く入口があることを確かめてから、表示の中身を確かめる
-  assert(/data-act="open-code"/.test(m.chat() + m.$('kt-ai-review-result').innerHTML), '最終案の後に、生成したコードを右の「コード」で開く入口（［コードを見る］）がある');
+  assert(/data-act="open-code"/.test(m.chat()), '最終案の後に、生成したコードを右の「コード」で開く入口（［コードを見る］）がある');
   await clickChat(m, 'open-code', { cid: 'C1', view: 'code' }); await ticks();
   const codePane = m.$('kt-ai-code-review').innerHTML;
   assert(/参考パターン: <span class="kt-ai-pattern" title="条件に応じてフィールドの編集可否を制御する">field-disable<\/span>/.test(codePane) && /標準設定で代替できないか再確認: フィールドのアクセス権 \/ プロセス管理の「作業者だけ編集可」/.test(codePane) && !/参考パターン/.test(m.chat()), '右「コード」: 参考パターンと「標準設定で代替できないか再確認」（人間への standard-first の再確認）。会話には出さない（Phase 19）');
