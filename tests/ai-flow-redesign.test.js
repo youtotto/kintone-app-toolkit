@@ -233,7 +233,10 @@ await section(async () => {
   const t = x2.c.metrics().timings.slice(-1)[0];
   assert(t.intent === 'ADOPT_DRAFT' && t.ackMs != null && t.calls.some(k => k.kind === 'plan'), `採用-3: 計測（ADOPT_DRAFT・calls に plan）: ${JSON.stringify({ intent: t.intent, calls: t.calls.map(k => k.kind) })}`);
   const dec = p0.decisions || [];
-  assert(dec.length === 4 && dec.every((d, i) => d.id === `D${i + 1}` && d.source === 'chat' && d.status === 'answered') && dec.find(d => d.key === 'approval.threshold').topic === 'approver' && dec.find(d => d.key === 'deadline.days').topic === 'timing' && dec.find(d => d.key === 'deadline.holidays').topic === 'timing' && dec.find(d => d.key === 'approval.threshold_middle').delegated === true && !/おまかせ/.test(dec.find(d => d.key === 'approval.threshold_middle').answer) && dec.every(d => d.kind === 'question' && d.question), `採用-4: 決定事項は計画の AI に構造化して渡す（id D…・topic は key から・おまかせは別の印）: ${JSON.stringify(dec)}`);
+  //   2026-10-19: 送る決定事項は台帳から作る（計画の依頼の前に仮案の台帳へ入れる）。id は台帳の番号で、仮案の判断の key は台帳の項目（draftKey）にだけある
+  const lgD = x2.ledger(x2.c.draft().id);
+  const sentOf = (k) => { const e = lgD && lgD.entries.find(x => x.draftKey === k); return e ? dec.find(d => d.id === KTAiAnswers.decisionIdOf(e)) || null : null; };
+  assert(dec.length === 4 && dec.every(d => lgD.entries.some(e => e.draftKey && KTAiAnswers.decisionIdOf(e) === d.id) && d.source === 'chat' && d.status === 'answered' && !('key' in d)) && sentOf('approval.threshold').topic === 'approver' && sentOf('deadline.days').topic === 'timing' && sentOf('deadline.holidays').topic === 'timing' && sentOf('approval.threshold_middle').delegated === true && !/おまかせ/.test(sentOf('approval.threshold_middle').answer) && dec.every(d => d.kind === 'question' && d.question), `採用-4: 決定事項は計画の AI に構造化して渡す（id は台帳の番号・topic は key から・おまかせは別の印）: ${JSON.stringify(dec)}`);
   assert(Array.isArray(p0.requirements) && p0.requirements.length >= 4 && p0.requirements.every(r => /^R[0-9]+$/.test(r.id)) && p0.requirements.some(r => r.decision === 'decided' && /課長と部長の承認者/.test(r.behavior)), `採用-5: 要件の台帳も渡す: ${JSON.stringify(p0.requirements.map(r => [r.id, r.decision]))}`);
 });
 // C-1 第 3 段（2026-10-08）: 仮案の能力が無い接続先は、古い流れに入らず「接続先が非対応」で止める（質問には今の assistant-qa の通常の返事で答える。計画・生成・登録には進まない）
@@ -433,7 +436,8 @@ await section(async () => {
   const p0 = calls.plan[0];
   assert(r7.ok && v && d.status === 'adopted' && d.adoptedBy === 'AI_ADOPT' && d.planId === v.planId, `B3-18: 1 文で不採用・変更・採用 → 計画 → adopted: ${d.status}/${d.adoptedBy}`);
   assert(p0.goal.split('\n').length === 2 && p0.goal.startsWith('課長・部長の承認者を選ぶ運用にしたい') && /^採用した方針: /.test(p0.goal.split('\n')[1]) && !/通知/.test(p0.goal.split('\n')[1]) && !/決定事項|前提|不採用/.test(p0.goal), `B3-19: goal は依頼文 ＋ 採用した方針 1 行（不採用の通知は入らない）: ${p0.goal}`);
-  assert(p0.decisions.length === 5 && p0.decisions.find(x => x.key === 'deadline.days').answer === '承認の期限は申請から 5 営業日（土日祝のみ除く）' && p0.decisions.find(x => x.key === 'lock.scope').answer === '全員' && p0.requirements.filter(r => r.decision === 'revoked').length === 2 && p0.requirements.some(r => r.decision !== 'revoked' && /5 営業日/.test(r.behavior)), `B3-20: 決定事項（5 件・最新の答え）と要件（取り消し 2 件を含む）を渡す: ${JSON.stringify(p0.decisions.map(x => [x.key, x.answer]))}`);
+  const sentP = (k) => { const lg0 = c.state.ledgers.get(v.planId); const e = lg0 && lg0.entries.find(x => x.draftKey === k); return e ? p0.decisions.find(x => x.id === KTAiAnswers.decisionIdOf(e)) || {} : {}; };
+  assert(p0.decisions.length === 5 && sentP('deadline.days').answer === '承認の期限は申請から 5 営業日（土日祝のみ除く）' && sentP('lock.scope').answer === '全員' && p0.requirements.filter(r => r.decision === 'revoked').length === 2 && p0.requirements.some(r => r.decision !== 'revoked' && /5 営業日/.test(r.behavior)), `B3-20: 決定事項（5 件・最新の答え）と要件（取り消し 2 件を含む）を渡す: ${JSON.stringify(p0.decisions.map(x => [x.label, x.answer]))}`);
   const lgP = c.state.ledgers.get(v.planId);
   assert(c.requirements().map(r => r.id).join() === before.join() && !c.requirements().some(r => r.decision === 'undecided') && !(lgP.userTexts || []).some(s => /採用した方針/.test(s)) && !c.messages().some(m => m.data?.kind === 'requirements-unresolved'), `B3-21: 計画のターンで要件が増えない（合成文を未解決の要件にしない）・台帳の原文に合成文が無い: ${JSON.stringify(lgP.userTexts)}`);
 });
@@ -666,7 +670,7 @@ await section(async () => {
   for (const s of ['課長・部長の承認者を選ぶ運用にしたい', '100円未満は部長不要、100万円以上は必要', '7営業日で。会社独自の休業日は今回はなし']) await c.send(s);
   const r = await c.send('おすすめで。この案で進めて');
   const v = c.activePlan();
-  assert(r.ok && r.intent === 'ADOPT_DRAFT' && v && calls.plan.length === 1 && !calls.plan[0].revision && Array.isArray(calls.plan[0].decisions) && calls.plan[0].decisions.length === 4 && calls.plan[0].decisions.some(d => d.key === 'deadline.days' && d.answer === '7営業日'), `B6-1: 採用 → 最初の計画（revision 無し）の services.plan に仮案で答えた決定事項（4 件）を渡す: ${JSON.stringify((calls.plan[0] || {}).decisions)}`);
+  assert(r.ok && r.intent === 'ADOPT_DRAFT' && v && calls.plan.length === 1 && !calls.plan[0].revision && Array.isArray(calls.plan[0].decisions) && calls.plan[0].decisions.length === 4 && calls.plan[0].decisions.some(d => { const e = (x.ledger(v.planId) || { entries: [] }).entries.find(y => y.draftKey === 'deadline.days'); return e && d.id === KTAiAnswers.decisionIdOf(e) && d.answer === '7営業日'; }), `B6-1: 採用 → 最初の計画（revision 無し）の services.plan に仮案で答えた決定事項（4 件）を渡す: ${JSON.stringify((calls.plan[0] || {}).decisions)}`);
   const openTexts = (v.openQuestions || []).map(q => q.text), reasked = (v.reaskedQuestions || []).map(q => q.text);
   assert(openTexts.join('|') === '承認者はどの画面で指定しますか' && reasked.join('|') === '承認の期限は申請から何営業日にしますか', `B6-2: 計画の AI が仮案で答えた論点（期限の日数）をもう一度質問しても openQuestions に出ない（reasked に記録）。新しい論点だけ残る: open=${openTexts.join('|')} / reasked=${reasked.join('|')}`);
   const lg = c.ledger(v.planId);
@@ -681,6 +685,21 @@ await section(async () => {
   assert(rr.ok && rr.intent === 'REVISE_PLAN' && calls.plan.length === 2 && p1.revision === true && p1.goal === v.goalSent && (p1.decisions || []).some(d => d.topic === 'timing' && d.answer === '7営業日') && (p1.decisions || []).some(d => d.topic === 'approver' && d.answer === '100円未満は不要、100万円以上は必要') && (p1.decisions || []).length >= 4, `B6-6: 以後の差分更新でも仮案の決定事項が decisionsForContext に入り、goal は Gateway へ送ったもの（2 行）のまま: ${JSON.stringify({ goal: p1.goal.split('\n').length, decisions: (p1.decisions || []).map(d => [d.topic, d.answer]) })}`);
   const v2 = c.activePlan();
   assert(v2.version === 2 && v2.goal === '課長・部長の承認者を選ぶ運用にしたい' && v2.goalSent === v.goalSent && v2.fromDraft && v2.fromDraft.id === c.draft().id, `B6-7: 次の版も表示用の goal は 1 行目のまま（fromDraft を引き継ぐ）: ${JSON.stringify({ goal: v2.goal, version: v2.version })}`);
+});
+// 1a（2026-10-19）. 最初の計画に送る決定事項は台帳から作り（差分更新と同じ経路）、送ったものを最初の版に持ち、最初の版の生成にも同じものを渡す（前は生成に空を渡していた）
+await section(async () => {
+  const seenPlan = [], seenGen = [];
+  const gen0 = makeGenerate({ sequence: ['good'] });
+  const y = makeConvC({ planImpl: (args) => { seenPlan.push(clone(args.decisions || [])); return planJs(args); }, generate: { ...gen0, impl: async (args) => { seenGen.push(clone(args.decisions || [])); return gen0.impl(args); } } });
+  await adoptC(y);
+  const v = y.c.activePlan();
+  const lg = v && y.c.state.ledgers.get(v.planId);
+  const sent = seenPlan[0] || [];
+  const pair = (list) => JSON.stringify((list || []).map(d => [d.id, d.answer, d.delegated === true]));
+  assert(v && v.final && sent.length >= 3 && sent.every(d => lg.entries.some(e => e.draftKey && KTAiAnswers.decisionIdOf(e) === d.id && e.answer === d.answer)) && pair(v.decisionsSent) === pair(sent),
+    `B6-23: 最初の計画に送る決定事項の id は台帳の番号（仮案の判断の項目）で、送ったものを最初の版に持つ: ${pair(sent)} / ${pair(v && v.decisionsSent)}`);
+  assert(seenGen.length >= 1 && pair(seenGen[0]) === pair(sent) && seenGen[0].every(d => d.status === 'answered'),
+    `B6-24: 最初の版の生成にも、最初の計画に送った決定事項（回答済み）を渡す（前は空）: ${pair(seenGen[0])}`);
 });
 // 1b. 画面: Gateway に送る Planner Context（KTContextUi.generatePlan の ctx）に decisions が入る・右の見出しは依頼文の 1 行目・計画の AI の再質問は出ない
 await section(async () => {

@@ -26367,32 +26367,24 @@
         if (adopted.length) lines.push(cut(`採用した方針: ${adopted.map(b => cut(b.text, 80)).join('／')}`, 400));
         return lines.join('\n').slice(0, 1200);
       };
-      /**
-       * 採用した仮案の決定事項 → 計画の AI に渡す決定事項の形（KTAiAnswers.decisionsForContext と同じ形。id D1…・source chat・status answered）。
-       * topic は key の先頭から（approval → approver / notify → notify_target / deadline → timing / lock → scope / ほかは other）。
-       * 「おすすめで」で採用した推奨は answer に「（おまかせ）」を書かず delegated の印を別に持つ
-       */
+      /** 仮案の判断の key → 決定事項の論点（approval → approver / notify → notify_target / deadline → timing / lock → scope / ほかは other） */
       const draftTopicOf = (key) => { const k = String(key || ''); return /^approval/.test(k) ? 'approver' : /^notify/.test(k) ? 'notify_target' : /^deadline/.test(k) ? 'timing' : /^lock/.test(k) ? 'scope' : 'other'; };
-      const draftDecisionsForPlan = () => {
-        const cut = (s, n) => { const x = String(s ?? '').replace(/\s+/g, ' ').trim(); return x.length > n ? x.slice(0, n) : x; };
-        return state.draftDecisions.slice(-30).map((d, i) => {
-          const topic = draftTopicOf(d.key);
-          return { id: `D${i + 1}`, topic, topics: [topic], label: cut(d.label || d.key, 60) || '確認事項', question: d.question ? cut(d.question, 300) : null, answer: cut(d.answer, 300), source: 'chat', status: 'answered', kind: d.question ? 'question' : 'condition', key: d.key, ...(d.kind === 'delegated' ? { delegated: true } : {}) };
-        });
-      };
       /**
        * 段階 B 修正後（2026-10-07 確認 1b）: 採用した仮案の決定事項を、計画の系列の台帳（planId）に「回答済みの論点」として入れる。
        * registerPlan の syncQuestions が、計画の AI が同じ論点をもう一度質問しても openQuestions に出さず reasked に記録し、以後の差分更新でも decisionsForContext に入る。
        * topics は key から（draftTopicOf）・label は仮案の判断の見出し・question / answer / kind・「おすすめで」は delegated の印。仮案の key ごとに 1 件（既存の決定事項に重ねない）。
        * 最初の計画に送ったので appliedInVersion はその版（まだ入っていない回答として作り直しを促さない）
+       * 2026-10-19: 計画の AI に送る前に入れ、送る決定事項はこの台帳から作る（id は台帳の番号）。計画を作れずに仮案で答え直してからの採用では、
+       *   入れた後に答え直した判断（仮案の決定事項の seq が進んだもの）だけ、同じ項目を今の答えに直す（前の答えは項目の履歴に残る）
        */
       const carryDraftDecisions = (lg, { version = 1 } = {}) => {
         const carried = [];
         for (const d of state.draftDecisions.slice(-30)) {
-          if (lg.entries.some(e => e.draftKey === d.key)) continue;
-          const r = KTAiAnswers.recordAnswer(lg, { topics: [draftTopicOf(d.key)], label: d.label || '', question: d.question || null, questionKey: d.key, answer: d.answer, kind: d.question ? 'question' : 'condition', source: 'chat', version: null, at: d.at || now(), merge: false, delegated: d.kind === 'delegated' });
+          const ex = lg.entries.find(e => e.draftKey === d.key) || null;
+          if (ex && ex.draftSeq === d.seq) continue;
+          const r = KTAiAnswers.recordAnswer(lg, { ...(ex ? { entryId: ex.id } : {}), topics: [draftTopicOf(d.key)], label: d.label || '', question: d.question || null, questionKey: d.key, answer: d.answer, kind: d.question ? 'question' : 'condition', source: 'chat', version: null, at: d.at || now(), merge: false, delegated: d.kind === 'delegated' });
           if (!r) continue;
-          r.entry.draftKey = d.key; r.entry.appliedInVersion = version;
+          r.entry.draftKey = d.key; r.entry.draftSeq = d.seq; r.entry.appliedInVersion = version;
           carried.push(r.entry);
         }
         return carried;
@@ -27815,9 +27807,12 @@
               state.workInbox = { kind: 'PLAN', epoch: state.epoch, texts: [], text: t };
               // 段階 B（レビューの指摘 3・2026-10-07）: 採用した仮案からの計画は、要件の台帳（取り消し済みを含む）と仮案の判断への回答（決定事項）を構造化して渡す
               const dft = clsP.fromDraft && state.draft && state.draft.id === clsP.fromDraft.id ? state.draft : null;
-              const lgD0 = dft ? state.ledgers.get(dft.id) || null : null;
+              const lgD0 = dft ? ledgerOf(dft.id) : null;
+              //   2026-10-19: 仮案で答えた決定事項は計画の AI に送る前に台帳へ入れ、送る決定事項は差分更新と同じく台帳から作る（plannerDecisionsOf。id は台帳の番号）。
+              //   前は送る形（id は並びの位置の D1…）と台帳の項目を別々に作り、並びの位置で番号が合うことに頼っていた。送ったものは版に持つ（最初の版の生成も同じものを使う）
+              if (dft) carryDraftDecisions(lgD0, { version: 1 });
               //   §0e.2（2026-10-09）: 採用していない任意の提案だけに結び付く AI の提案の要件は計画の AI に渡さない（計画に入れない）
-              const fromDraftArgs = dft ? { requirements: planRequirementsOf(lgD0), decisions: draftDecisionsForPlan() } : {};
+              const fromDraftArgs = dft ? { requirements: planRequirementsOf(lgD0), decisions: plannerDecisionsOf(lgD0) } : {};
               const tPlan = clock();
               //   Customize タブの相談（subject）は、相談中の JavaScript を計画の Context にも付ける（統合先の第一候補）
               let r;
@@ -27837,16 +27832,15 @@
                 //   §0e.2（2026-10-09）: 採用の時点の任意の提案の項目 id は、採用の記録（lg.adoption）が台帳に持っている（以後の差分更新でも、その提案だけの要件を計画の AI に渡さない）
                 if (clsP.fromDraft) { const lgD = state.ledgers.get(clsP.fromDraft.id); if (lgD) { lgD.planId = planIdNext; state.ledgers.set(planIdNext, lgD); } state.draftPlanLink = { planId: planIdNext, fromDraft: clsP.fromDraft }; }
                 const lgNew = ledgerOf(planIdNext);
-                // 段階 B 修正後（確認 1b）: 仮案で答えた決定事項を計画の系列の台帳へ（registerPlan の syncQuestions が「回答済みの論点」として扱う。以後の差分更新の decisionsForContext にも入る）
-                if (dft) carryDraftDecisions(lgNew, { version: 1 });
+                //   段階 B 修正後（確認 1b）: 仮案で答えた決定事項は計画の依頼の前に台帳へ入れた（registerPlan の syncQuestions が「回答済みの論点」として扱う。以後の差分更新にも入る）
                 //   採用した仮案から（レビューの指摘 2）: 根拠の照合は利用者の原文（仮案の依頼文・台帳の発言・判断への回答）だけ。Toolkit が組んだ依頼文は数えない・台帳に入れない
                 //   §0f.2 の 1: 計画の AI が足した要件は planner。レビューの指摘 row3 の 2（2026-10-09）: 推奨の無い判断を 1 つでも委ねたら計画の AI の追加をすべて
                 //   delegated にする扱いはやめた（混入した保存禁止まで範囲内になった）。印の無い古い Gateway では、未実現の委任があるときだけ、範囲の判定（requirementScopeOf）が
                 //   E_in に無い効果を足す計画の AI の要件を判断の候補にする（黙って入れない・黙って消さない。再検証前の指示 §1）。
-                //   §0f.2 の 9（2026-10-09）: decisionRefs の印がある Gateway では、送った決定事項（draftDecisionsForPlan の id・key・委ねた印）に結び付けた要件だけを
+                //   §0f.2 の 9（2026-10-09）: decisionRefs の印がある Gateway では、送った決定事項（台帳の id・台帳の項目の仮案の判断の key・委ねた印）に結び付けた要件だけを
                 //   delegated（委ねた判断）か item-user（値で答えた判断）にする
-                const dKinds = dft && decisionRefsOn() ? decisionKindsOf(fromDraftArgs.decisions) : null;
-                const ti = dft ? noteTurn(lgNew, r.turn, { version: 1, goal: dft.request, utterances: [], extraUserTexts: state.draftDecisions.map(x => x.answer), createdBy: 'plan', decisionKinds: dKinds, plan: r.plan || null }) : noteTurn(lgNew, r.turn, { version: 1, goal: goalT, utterances: [goalT], createdBy: 'plan' });
+                const dKinds = dft && decisionRefsOn() ? ledgerDecisionKindsOf(lgNew, fromDraftArgs.decisions) : null;
+                const ti = dft ? noteTurn(lgNew, r.turn, { version: 1, goal: dft.request, utterances: [], createdBy: 'plan', decisionKinds: dKinds, plan: r.plan || null }) : noteTurn(lgNew, r.turn, { version: 1, goal: goalT, utterances: [goalT], createdBy: 'plan' });
                 /** 仮案を採用済みにするのは、計画が登録できた後（announcePlan の後）。失敗なら open のまま（adoptDraftNow の finally が失敗の印を付ける） */
                 const markAdopted = () => { if (!dft || late() || !state.activePlan || state.activePlan.planId !== planIdNext) return; dft.status = 'adopted'; dft.adoptedAt = now(); dft.adoptedBy = clsP.fromDraft.reason || 'ADOPT_WORDS'; dft.planId = planIdNext; delete dft.planFailed; };
                 const queuedP = wP && wP.epoch === state.epoch ? wP.texts : [];
@@ -27858,10 +27852,10 @@
                   //   土台はまだ版にしない。作り始めた時点の計画（activeAtStart。反映済みの前の計画のこともある）が最新のままなら有効。
                   //   続けた作業が失敗・取り消しになったら、この最初の計画を版にする（registerInitial）
                   const base0 = { planId: planIdNext, version: 0, goal: goalT, goalSent: goalT, revisionRequests: [], plan: r.plan, gatewayPlan: r.gatewayPlan || null, ctx: r.ctx || null, review: r.review || null, unregistered: true, activeAtStart: prev ?? null,
-                    registerInitial: () => { const v1 = registerPlan({ plan: r.plan, ctx: r.ctx || null, review: r.review || null, gatewayPlan: r.gatewayPlan || null, revisionMeta: r.revisionMeta || null, turnInfo: ti, planId: planIdNext, goalSent: goalT }); announcePlan(v1); return v1; } };
+                    registerInitial: () => { const v1 = registerPlan({ plan: r.plan, ctx: r.ctx || null, review: r.review || null, gatewayPlan: r.gatewayPlan || null, revisionMeta: r.revisionMeta || null, decisionsSent: fromDraftArgs.decisions, turnInfo: ti, planId: planIdNext, goalSent: goalT }); announcePlan(v1); return v1; } };
                   await reviseWith(base0, queuedP.map(x => `修正の依頼：${String(x.text).replace(/\s+/g, ' ').trim()}`).join('\n').slice(0, 1900), { rawTexts: queuedP.map(x => x.text), extraAcks: queuedP.map(x => x.ack), priorTurnInfos: [ti ? { ...ti, hidden: true } : null], generateAfter: genP, retry: { text: queuedP.map(x => x.text).join('\n'), intent: null } });
                   markAdopted();
-                } else { announcePlan(registerPlan({ plan: r.plan, ctx: r.ctx || null, review: r.review || null, gatewayPlan: r.gatewayPlan || null, revisionMeta: r.revisionMeta || null, turnInfo: ti, planId: planIdNext, goalSent: goalT })); markAdopted(); }
+                } else { announcePlan(registerPlan({ plan: r.plan, ctx: r.ctx || null, review: r.review || null, gatewayPlan: r.gatewayPlan || null, revisionMeta: r.revisionMeta || null, decisionsSent: fromDraftArgs.decisions, turnInfo: ti, planId: planIdNext, goalSent: goalT })); markAdopted(); }
               } else {
                 // 計画を作れなかった: 作成中に受け付けた指示は入っていない（受領の表示を失敗に）。計画を作れなかったこと自体もエラーとして出す
                 //   採用した仮案から（レビューの指摘 1）: ［再試行］は「採用します」（ADOPT_DRAFT）で、仮案から作り直す（利用者の発言を依頼文にしない）

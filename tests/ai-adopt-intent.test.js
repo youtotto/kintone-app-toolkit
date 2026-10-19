@@ -173,7 +173,7 @@ await section(async () => {
   //   「おまかせ」の後に「採用します」で採用（記録した推奨は委ねた印で計画の AI に渡る）
   const ra = await y.c.send('採用します');
   const dec2 = seenPlan.length ? seenPlan[0] : [];
-  assert(ra.ok && ra.intent === I.ADOPT_DRAFT && y.calls.plan.length === 1 && y.c.draft().status === 'adopted' && dec2.some(d => d.key === 'lock.scope' && d.delegated === true), `A5-5: そのあとの「採用します」で採用 → 計画 1 回（おまかせの判断は委ねた印で渡る）: ${JSON.stringify({ intent: ra.intent, plan: y.calls.plan.length, dec: dec2.map(d => [d.key, d.delegated]) })}`);
+  assert(ra.ok && ra.intent === I.ADOPT_DRAFT && y.calls.plan.length === 1 && y.c.draft().status === 'adopted' && dec2.some(d => d.label === '編集不可の対象' && d.delegated === true), `A5-5: そのあとの「採用します」で採用 → 計画 1 回（おまかせの判断は委ねた印で渡る）: ${JSON.stringify({ intent: ra.intent, plan: y.calls.plan.length, dec: dec2.map(d => [d.label, d.delegated]) })}`);
   //   開いている判断が無い「おまかせ」は AI に読ませる（update と判断する）
   const z = convOf({ mode: 'vague' });
   await z.c.send(U0);
@@ -185,7 +185,7 @@ await section(async () => {
   await w.c.send(U0);
   const rw = await w.c.send('おまかせで進めてください');
   const decW = w.c.draftDecisions().find(d => d.key === 'lock.scope');
-  assert(rw.ok && rw.intent === I.ADOPT_DRAFT && rw.reason === 'DELEGATE' && w.calls.propose.length === 1 && w.calls.plan.length === 1 && w.c.draft().status === 'adopted' && decW && decW.kind === 'delegated' && decW.answer === '全員' && seenPlan2.length === 1 && seenPlan2[0].some(d => d.key === 'lock.scope' && d.delegated === true), `A5-7:「おまかせで進めてください」（委ねる言い方 ＋ 進めて）は、委ねた回答（推奨）を記録した上で採用 → 計画 1 回（仮案の AI は呼ばない。委ねた判断は委ねた印で渡る）: ${JSON.stringify({ intent: rw.intent, reason: rw.reason, propose: w.calls.propose.length, plan: w.calls.plan.length, dec: decW })}`);
+  assert(rw.ok && rw.intent === I.ADOPT_DRAFT && rw.reason === 'DELEGATE' && w.calls.propose.length === 1 && w.calls.plan.length === 1 && w.c.draft().status === 'adopted' && decW && decW.kind === 'delegated' && decW.answer === '全員' && seenPlan2.length === 1 && seenPlan2[0].some(d => d.label === '編集不可の対象' && d.delegated === true), `A5-7:「おまかせで進めてください」（委ねる言い方 ＋ 進めて）は、委ねた回答（推奨）を記録した上で採用 → 計画 1 回（仮案の AI は呼ばない。委ねた判断は委ねた印で渡る）: ${JSON.stringify({ intent: rw.intent, reason: rw.reason, propose: w.calls.propose.length, plan: w.calls.plan.length, dec: decW })}`);
 });
 
 // =========================================================

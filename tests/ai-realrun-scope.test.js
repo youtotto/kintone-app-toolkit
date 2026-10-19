@@ -518,7 +518,8 @@ const markOn = (x) => { x.services.plannerRequirementOps = () => ['decisionRefs'
 /** 印がある Gateway の要件の操作の形（strict の必須＝すべての操作に decisionRefs の配列）。refOf(op) = その操作の decisionRefs */
 const withRefs = (ops, refOf) => ops.map(op => ({ ...op, decisionRefs: refOf(op) || [] }));
 /** 計画の AI に送られた決定事項のうち、委ねた判断（delegated: true）の id（key を渡すとその判断だけ） */
-const delegatedIdOf = (decisions, key = null) => ((decisions || []).find(d => d && d.delegated === true && (!key || d.key === key)) || {}).id || null;
+//   2026-10-19: 計画の AI に見えるのは決定事項の見出し（label）と id。仮案の判断の key は送らない（最初の計画の決定事項も台帳から作る）ので、見出しで引く
+const delegatedIdOf = (decisions, label = null) => ((decisions || []).find(d => d && d.delegated === true && (!label || d.label === label)) || {}).id || null;
 const isWarnAdd = (op) => op.op === 'add' && (op.effects || []).includes('warn');
 const reqRowOf = (sco, pred) => (sco.requirements || []).find(pred) || {};
 await section(async () => {
@@ -548,7 +549,7 @@ const S7_SF = (args) => { const r = scopeScript(args); if (!r) return r; if (arg
 const s7Plan = ({ mark, linkWarn = true, linkSuggestion = false }) => (args) => {
   const r = planImplOf({ refs: { R1: REFS_MAIN.R1, R3: REFS_MAIN.R3, R4: REFS_MAIN.R4, R5: REFS_MAIN.R5 } })(args);
   if (!args.revision) r.turn.requirementOps = [...r.turn.requirementOps, { ...WARN_PLAN_OP }];
-  const dw = delegatedIdOf(args.decisions, 'lock.warn');
+  const dw = delegatedIdOf(args.decisions, '備考の警告');
   //   linkSuggestion: 計画の AI が任意の提案の扱いの要件（R4 明細の保存禁止）の update にも委ねた判断の id を付ける（結び付けで採用の根拠を変えないことの確認）
   if (mark) r.turn.requirementOps = withRefs(r.turn.requirementOps, (op) => (((isWarnAdd(op) && linkWarn) || (linkSuggestion && op.op === 'update' && op.id === 'R4')) && dw ? [dw] : []));
   return r;
@@ -565,7 +566,7 @@ await section(async () => {
   const v = x.c.activePlan();
   const v1 = (v && x.c.planHistory().find(z => z.planId === v.planId && z.version === 1)) || null;
   const sco = scopeOf(x);
-  const dId = delegatedIdOf(planCalls[0] && planCalls[0].decisions, 'lock.warn');
+  const dId = delegatedIdOf(planCalls[0] && planCalls[0].decisions, '備考の警告');
   const warnReq = reqRowOf(sco, q => q.createdBy === 'plan' && (q.effects || []).includes('warn'));
   const saveReq = reqRowOf(sco, q => q.createdBy === 'plan' && (q.effects || []).includes('block-save'));
   assert(!!dId && sco.decisionRefs === true && warnReq.basis === 'planner' && !warnReq.via && warnReq.inScope === false && warnReq.out === 'candidate' && (warnReq.candidate || {}).via === 'decisionRefs' && ((warnReq.candidate || {}).decisionIds || []).includes(dId) && (warnReq.decisionLinks || []).some(l => l.id === dId && l.kind === 'delegated' && l.verdict === 'unverified'),
@@ -819,7 +820,7 @@ await section(async () => {
   await x.c.send(REQ); await x.c.send(DELEGATE_U); await x.c.send('採用します');
   const v = x.c.activePlan();
   const sco = scopeOf(x);
-  const dId = delegatedIdOf(planCalls[0] && planCalls[0].decisions, 'lock.warn');
+  const dId = delegatedIdOf(planCalls[0] && planCalls[0].decisions, '備考の警告');
   const warnReq = reqRowOf(sco, q => q.createdBy === 'plan' && (q.effects || []).includes('warn'));
   const saveReq = reqRowOf(sco, q => q.createdBy === 'plan' && (q.effects || []).includes('block-save'));
   const g1 = gen.seen.filter(g => g.cid === 'C1' && v && g.version === v.version)[0] || null;
@@ -835,7 +836,7 @@ await section(async () => {
 //   link = false（(d4)・前の確認の K-5）: どちらにも決定事項の id を付けない（decisionRefs []）
 const dPlan = ({ warnFirst, warns = [WARN_PLAN_OP], refs = S8_REFS, link = true }) => (args) => {
   const r = planImplOf({ refs })(args);
-  const dw = delegatedIdOf(args.decisions, 'lock.warn') || delegatedIdOf(args.decisions);
+  const dw = delegatedIdOf(args.decisions, '備考の警告') || delegatedIdOf(args.decisions);
   const ops = r.turn.requirementOps;
   const warn = args.revision ? [] : warns.map(w => ({ ...w }));
   const ordered = [...ops.filter(op => op.op === 'update'), ...(warnFirst ? [...warn, ...ops.filter(isSaveAdd)] : [...ops.filter(isSaveAdd), ...warn]), ...ops.filter(op => op.op !== 'update' && !isSaveAdd(op))];
@@ -866,7 +867,7 @@ for (const warnFirst of [true, false]) {
     await x.c.send(REQ); await x.c.send(DELEGATE_U); await x.c.send('採用します');
     const v = x.c.activePlan();
     const sco = scopeOf(x);
-    const dId = delegatedIdOf(planCalls[0] && planCalls[0].decisions, 'lock.warn');
+    const dId = delegatedIdOf(planCalls[0] && planCalls[0].decisions, '備考の警告');
     const warnReq = reqRowOf(sco, q => q.createdBy === 'plan' && (q.effects || []).includes('warn'));
     const saveReq = reqRowOf(sco, q => q.createdBy === 'plan' && (q.effects || []).includes('block-save'));
     const r6 = reqRowOf(sco, q => q.id === 'R6');
