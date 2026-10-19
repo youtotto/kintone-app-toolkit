@@ -466,7 +466,7 @@ console.log('\n--- §53-2. 複数のカスタマイズ / カスタマイズの�
   const sumU = m.$('kt-ai-change-summary').innerHTML;
   assert(/Toolkit ではコードを作れません（PC かモバイルかが未定）/.test(sumU) && /PC かモバイルかは未定/.test(sumU), `PC / モバイル未定: 右の「変更内容」の「反映できないこと」に作れない理由・対象に「PC かモバイルかは未定」: ${K.stripC(sumU).slice(0, 400)}`);
   //   簡素化 D: 「全体」の件数（安全区分から別に数えた件数）は削除した。生成できないことは「反映できないこと」の理由で出す
-  assert(!/コード生成可能/.test(sumU) && !/kt-ai-review-card/.test(m.chat()), 'JS のコード生成の可否: 別に数えた件数は出さない・会話に確認のカードを出さない');
+  assert(/反映できないこと/.test(sumU) && /最終案/.test(m.chat()) && !/コード生成可能/.test(sumU) && !/kt-ai-review-card/.test(m.chat()), 'JS のコード生成の可否: 右の「変更内容」の「反映できないこと」に出し、別に数えた件数は出さない・会話は最終案のカードで、確認のカードを出さない');
   const fin = finalText(m);
   assert(v && v.final && FS.readyOf(v) === false && m.calls2.generate.length === 0 && /Toolkit では JavaScript を作れない部分があります: 承認後（完了）は金額を編集できなくする（PC かモバイルかが未定）/.test(fin) && !/問題は見つかりませんでした/.test(fin), `最終案のカード: 作れない理由（PC かモバイルかが未定）を出し、承認できない（生成工程は呼ばない）: ${fin.slice(fin.indexOf('実現できない点'), fin.indexOf('実現できない点') + 160)}`);
   const g = await m.panel.send('コードを作って');
@@ -557,7 +557,7 @@ console.log('\n--- §53-4. KTAiChatUi（純関数）---');
   //   簡素化 §5（2026-10-16）: 同じフィールドを扱う既存 JS は通常表示に「既存 JS との競合」と出さない
   const nwS = reviewPlan(PLAN_NEW_JS);
   const sumShared = KTAiChatUi.changeSummaryHtml({ planId: 'p', version: 1, status: 'ACTIVE', plan: nwS.plan, review: nwS.review }, { labels: { amount: '金額' } });
-  assert(!/既存 JS との競合|競合/.test(sumShared), `変更内容: 同じフィールドを扱う既存 JS を「競合」と書かない: ${K.stripC(sumShared).replace(/\s+/g, ' ').slice(0, 300)}`);
+  assert(/何が変わるか/.test(sumShared) && /対象のフィールド: [^<]*「金額」/.test(sumShared) && !/既存 JS との競合|競合/.test(sumShared), `変更内容: 対象のフィールドを出し、同じフィールドを扱う既存 JS を「競合」と書かない: ${K.stripC(sumShared).replace(/\s+/g, ' ').slice(0, 300)}`);
   //   会話のコードのカード（MSG.CODE・codeCardHtml）は削除した（F7-1・F7-2）。検査の一覧は右の「コード」（codePaneHtml）
   //   簡素化 B（2026-10-17）: 検査の一覧は、Toolkit の統合の確認（patch）と、生成工程の機械検査の項目（本物と同じ名前。ここでは構文と安全）を合わせたもの
   const rv = KTCodeReview.attachBehavior(KTCodeReview.review({ generated: genPatch(), customization: hy.plan.customizations[0], plan: hy.plan, data: INPUTS.data, scan: INPUTS.scan, existingSource: SRC }),

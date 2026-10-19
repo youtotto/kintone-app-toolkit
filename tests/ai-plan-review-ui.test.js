@@ -106,10 +106,10 @@ console.log('\n--- 1. Toolkit が確かめた結果の表示（右の「変更�
   assert(p6.includes('必須: false → true') && p6.includes('△ Toolkit が確かめてほしい点（2 件）') && p6.includes('「顧客コード」を必須に変更します') && p6.includes('Planner の影響範囲に、その JavaScript のファイルが挙がっていません'), `確かめてほしい指摘（必須への変更・影響範囲の食い違い）は手順の行に出す（前は確認結果の手順ごとの判定）: ${p6.slice(0, 300)}`);
   const outside = (x) => x.replace(/<details[\s\S]*?<\/details>/g, '');
   assert(!outside(p6).includes('必須に変更します') && outside(p6).includes('必須: false → true') && !outside(rowOf(sum, 'P5')).includes('1000000&quot;）と同一'), '指摘の文（実行される式・内部の語を含む）は開くと出す。行に見せるのは変更前後と件数の 1 行');
-  assert(!/kt-ai-sum-notes/.test(sum), '計画全体の注意点のうち、手順の行に出した指摘（同じ手順・同じ種類）は重ねない（この計画ではすべて手順の行）');
+  assert(rowOf(sum, 'P5').includes('と同一です') && rowOf(sum, 'P1').includes('代用できる可能性') && !/kt-ai-sum-notes/.test(sum), '計画全体の注意点のうち、手順の行に出した指摘（同じ手順・同じ種類）は重ねない（この計画ではすべて手順の行）');
   const p8 = rowOf(sum, 'P8');
   assert(p8.includes('計画のみ') && !(sum + detail).includes('コードを作る'), `JavaScript の手順（customization の無い CUSTOMIZATION_REQUIRED）は無視せず「計画のみ」と出す（［コードを作る］は出さない）: ${p8.slice(0, 160)}`);
-  assert(!/kt-ai-review-|kt-ai-decision|この手順を反映しない|Review JSON/.test(sum + detail), '確認結果の操作（変更前後を比較・Review JSON・Raw Diff・手順を外す欄）は無い（記録は反映の監査 JSON）');
+  assert(/何が変わるか（Toolkit が確かめた変更前後）/.test(sum) && /変更計画（AI の提案）/.test(detail) && !/kt-ai-review-|kt-ai-decision|この手順を反映しない|Review JSON/.test(sum + detail), '確認結果の操作（変更前後を比較・Review JSON・Raw Diff・手順を外す欄）は無い（記録は反映の監査 JSON）');
   assert(rowOf(sum, 'P1').includes('＋ 新規フィールド「部長承認者」') && p6.includes('必須: false → true'), '変更前後: 人間が読める差分（変更のある属性だけ）を手順の行に出す');
   const out = KTPlanReview.executorOutput(plan, rev);
   assert(out.outputVersion === '1' && out.plan.planVersion === '1' && out.review.reviewVersion === '1' && out.review.steps.every(s => s.stepId) && out.approvedSteps.length === 0 && !out.review.simulation.after, 'Executor の入力: { plan, review, approvedSteps: [] }（stepId は安定・After モデルは含めない）');

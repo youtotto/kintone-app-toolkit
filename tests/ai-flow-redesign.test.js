@@ -694,7 +694,7 @@ await section(async () => {
   assert(v && ctx && !ctx.revision && Array.isArray(ctx.decisions) && ctx.decisions.length === 4 && ctx.decisions.every((d, i) => d.id === `D${i + 1}` && d.source === 'chat' && d.status === 'answered' && d.answer) && ctx.decisions.some(d => d.topic === 'timing' && d.answer === '7営業日') && ctx.decisions.some(d => d.topic === 'approver' && /部長承認/.test(d.question || '')), `B6-8: 採用後の最初の計画の Planner Context（Gateway に送る形）に decisions（D1…・topic・question・answer）が入る: ${JSON.stringify(ctx && ctx.decisions)}`);
   assert(ctx.goal.split('\n').length === 2 && v.goal === '課長・部長の承認者を選ぶ運用にしたい' && /<h3>課長・部長の承認者を選ぶ運用にしたい<\/h3>/.test(m.$('kt-ai-change-summary').innerHTML) && !/<h3>[^<]*採用した方針/.test(m.$('kt-ai-change-summary').innerHTML), `B6-9: 右ペインの見出しは依頼文の 1 行目（合成の 2 行にならない）。Context の goal は 2 行のまま: ${(m.$('kt-ai-change-summary').innerHTML.match(/<h3>[^<]*<\/h3>/) || [])[0]}`);
   const openTexts = (v.openQuestions || []).map(q => q.text), reasked = (v.reaskedQuestions || []).map(q => q.text);
-  assert(openTexts.join('|') === '承認者はどの画面で指定しますか' && reasked.join('|') === '承認の期限は申請から何営業日にしますか' && !/承認の期限は申請から何営業日にしますか[\s\S]*data-qkey/.test(outsideDetails(m.chat())) && /後で決めてよいことが 1 件あります/.test(m.chat()) && !/承認者はどの画面で指定しますか[\s\S]*data-qkey/.test(outsideDetails(m.chat())) && /承認者はどの画面で指定しますか/.test(m.$('kt-ai-change-summary').innerHTML + (m.$('kt-ai-questions') ? m.$('kt-ai-questions').innerHTML : '')), `B6-10（反証 B6: 最終案のカードは先に決めたいことだけ。後で決めてよい質問は件数と右ペイン）: 画面でも、仮案で答えた論点の再質問は確認事項に出ず、新しい論点だけ出る: open=${openTexts.join('|')} / reasked=${reasked.join('|')}`);
+  assert(openTexts.join('|') === '承認者はどの画面で指定しますか' && reasked.join('|') === '承認の期限は申請から何営業日にしますか' && !/承認の期限は申請から何営業日にしますか[\s\S]*data-qkey/.test(outsideDetails(m.chat())) && /後で決めてよいことが 1 件あります/.test(m.chat()) && !/承認者はどの画面で指定しますか[\s\S]*data-qkey/.test(outsideDetails(m.chat())) && /承認者はどの画面で指定しますか/.test(m.$('kt-ai-change-summary').innerHTML), `B6-10（反証 B6: 最終案のカードは先に決めたいことだけ。後で決めてよい質問は件数と右ペイン）: 画面でも、仮案で答えた論点の再質問は確認事項に出ず、新しい論点だけ出る: open=${openTexts.join('|')} / reasked=${reasked.join('|')}`);
 });
 // 2. 画面: 仮案の AI の応答待ち中（working PROPOSE）は、仮案のカードの［採用］［一部採用］［不採用］と回答欄を出さず、短い案内を出す（カードは畳まない）
 await section(async () => {
@@ -970,7 +970,7 @@ await section(async () => {
   await m.panel.send('おすすめで。この案で進めて'); await ticks(14);
   const v = m.conv().activePlan();
   assert(v && v.final && m.msgs().some(x => x.type === 'FINAL') && /kt-ai-final-card/.test(m.chat()) && !/kt-ai-plan-card/.test(m.chat()) && /data-act="final-approve"/.test(m.chat()), `画面-1: 採用 → 最終案のカード（設定の手順だけの計画でも 1 枚）: ${JSON.stringify(m.msgs().map(x => x.data?.kind || x.type))}`);
-  assert(/data-status="ready">未反映</.test(m.$('kt-ai-ws-state').innerHTML) && !/confirm-spec/.test(m.$('kt-ai-change-summary').innerHTML + m.chat()), '画面-2: 右の見出しは「未反映」。［この仕様で確定］は無い（実装仕様のカードは 2026-10-19 に廃止）');
+  assert(/data-status="ready">未反映</.test(m.$('kt-ai-ws-state').innerHTML) && /何が変わるか/.test(m.$('kt-ai-change-summary').innerHTML) && !/confirm-spec/.test(m.$('kt-ai-change-summary').innerHTML + m.chat()), '画面-2: 右の見出しは「未反映」。［この仕様で確定］は無い（実装仕様のカードは 2026-10-19 に廃止）');
   assert(m.panel.executorState().stage === 'idle' && !v.approval && KIT.writesOf(m).length === 0, '画面-2b: 押す前は承認も反映の準備（右の「反映」の準備の段）もしない（承認の欄の準備は読み取りだけ・書き込み 0）');
   //   §0e.1（2026-10-09）: 承認の欄の準備（書き込みなし）が終わると押せる。［動作テスト環境へ反映］1 回で承認（準備の結果の指紋つき）と反映
   const r3 = await KIT.applyOnScreen(m);
@@ -2942,7 +2942,7 @@ await section(async () => {
   assert(['specChatCardHtml', 'codeCardHtml', 'questionsCardHtml', 'planCardHtml', 'reviewCardHtml', 'questionList'].every(k => KTAiChatUi[k] === undefined) && KTAiChatUi.specCardHtml === undefined, 'F7-2: 仕様のカード・コードのカード・確認事項のカード・変更案のカードの描画は無い（右の実装仕様のカード specCardHtml も 2026-10-19 に廃止）');
   await adoptC(x);
   const sp = KTAiChatUi.changeSummaryHtml(x.c.activePlan(), {});
-  assert(!/data-act="(confirm-spec|confirm-generate|generate|revise-spec)"/.test(sp), 'F7-3: 右の「変更内容」は閲覧だけ（［この仕様で確定］［確定してコードを作る］［JavaScript を生成］［仕様を修正］は無い）');
+  assert(/何が変わるか/.test(sp) && !/data-act="(confirm-spec|confirm-generate|generate|revise-spec)"/.test(sp), 'F7-3: 右の「変更内容」は閲覧だけ（［この仕様で確定］［確定してコードを作る］［JavaScript を生成］［仕様を修正］は無い）');
   const m = mount();
   assert(typeof m.panel.confirmSpec === 'undefined', 'F7-4: 画面に仕様の確定（confirmSpec）は無い');
   const askCalls = [];

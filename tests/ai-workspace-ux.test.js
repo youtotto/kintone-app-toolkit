@@ -219,7 +219,7 @@ console.log('\n--- §3〜§8. 計画 / Review / Before・After / 実行: 左は�
   //   変更前後を比較・Review JSON）は廃止した。承認と反映は最終案のカードの［動作テスト環境へ反映］の 1 回で、手順を外す操作は無い
   //   C-1 第 3 段: Review の会話のカード（REVIEW）と要約の通知（review-summary）は作らない（tests/ai-flow-redesign.test.js の R09-3）
   assert(!/kt-ai-review-card/.test(chat) && !/Toolkitで変更計画を検証しました/.test(chat) && !/Toolkit で変更案を確認しました。/.test(chat) && !m.msgs().some(x => x.type === MSG.REVIEW || x.data?.kind === 'review-summary') && /Toolkit が確かめた変更前後は「何が変わるか」/.test(sum) && !/kt-ai-decision/.test(chat) && !/安全に追加できる変更/.test(chat + sum), 'review summary: Toolkit の確認は右の「変更内容」（何が変わるか・確かめたこと）。判断 select・内訳は会話に無い');
-  assert(!/kt-ai-pane-review|kt-ai-review-result|data-pane="review"/.test(m.host.innerHTML + m.$('kt-ai-drawer-tabs').innerHTML) && !/kt-ai-decision|この手順を反映しない|kt-ai-review-/.test(sum + plan + chat), '確認結果のタブ・手順を外す欄・Review JSON の操作は無い（記録は反映の監査 JSON）');
+  assert(/id="kt-ai-pane-plan"/.test(m.host.innerHTML) && /data-pane="plan"/.test(m.$('kt-ai-drawer-tabs').innerHTML) && /何が変わるか/.test(sum) && /変更計画（AI の提案）/.test(plan) && /最終案ができました/.test(chat) && !/kt-ai-pane-review|kt-ai-review-result|data-pane="review"/.test(m.host.innerHTML + m.$('kt-ai-drawer-tabs').innerHTML) && !/kt-ai-decision|この手順を反映しない|kt-ai-review-/.test(sum + plan + chat), '確認結果のタブ・手順を外す欄・Review JSON の操作は無い（記録は反映の監査 JSON）');
   // Before / After: 右の「変更内容」の「何が変わるか」の手順の行（2026-10-19: 確認結果の［変更前後を比較］は廃止）
   assert(/＋ 新規フィールド「更新状況」/.test(sum) && /＋ 一覧「担当者別」/.test(sum) && !/kt-ai-diff-card/.test(m.chat()), `変更前後は右の「変更内容」の手順の行（会話には出さない）: ${(sum.match(/<li><span>[^<]*/g) || []).join(' | ')}`);
   // 旧版 / 最新版（§15）

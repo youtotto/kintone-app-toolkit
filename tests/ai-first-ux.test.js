@@ -314,7 +314,7 @@ console.log('\n--- §38b. implementation（JAVASCRIPT / CSS / JS_CSS）: validat
   const sumCss = KTAiChatUi.changeSummaryHtml({ planId: 'p', version: 1, status: 'ACTIVE', goal: GOAL_HYBRID, plan: css.plan, review: css.review });
   assert(/Toolkit ではコードを作れません（CSS は生成の対象外）/.test(sumCss), `変更内容: 実装 CSS は「反映できないこと」に作れない理由（CSS は生成の対象外）: ${sumCss.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').slice(0, 300)}`);
   const sumJs = KTAiChatUi.changeSummaryHtml({ planId: 'p', version: 1, status: 'ACTIVE', goal: GOAL_HYBRID, plan: plain.plan, review: plain.review });
-  assert(!/CSS は生成の対象外/.test(sumJs), 'JAVASCRIPT のときは CSS の理由を出さない（既定）');
+  assert(/何が変わるか/.test(sumJs) && !/CSS は生成の対象外/.test(sumJs), 'JAVASCRIPT のときは変更内容に CSS の理由を出さない（既定）');
 }
 
 // =========================================================

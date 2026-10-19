@@ -175,6 +175,30 @@ console.log('\n--- 4. 並べ方: Before / After を縦に並べる（実機: 横
   assert(!!rv && rv.simulation.process.changed && /data-side="before"/.test(sec) && /data-side="after"/.test(sec), '前提: 右の「変更内容」の［プロセス管理の変更前後（図）］にプロセスの Before / After がある');
   assert(/display:grid/.test(sec) && !/flex:1 1/.test(sec) && !/flex-wrap/.test(sec), `Before / After は縦に並べる（横に並べない）: ${sec.slice(0, 160)}`);
   assert((sec.match(/min-width:0; overflow-x:auto;/g) || []).length === 2, '枠は横にスクロールできる（図は縮めない）');
+  // =========================================================
+  //   5（2026-10-19）. 開く操作から描画の呼び出しまで: 画面と同じ部品で作った変更内容の要約（この計画）の図のコードを、［プロセス管理の変更前後（図）］を開いたときに描く
+  //   （偽の DOM は HTML を解析しないので、要約の HTML から図の枠と図のコードを取り出して、開いた枠の中の要素として渡す。実ブラウザーでは確かめていない）
+  {
+    const T5 = loadToolkit();
+    const drawn = [];
+    T5.__sandbox.mermaid = { render: (id, code) => { drawn.push(code); return Promise.resolve({ svg: `<svg id="${id}" width="100%" style="max-width: 320px;"></svg>` }); } };
+    T5.__sandbox.document.createElement = (tag) => ({ tagName: String(tag).toUpperCase(), style: {}, children: [], attrs: {}, className: '', textContent: '', innerHTML: '', setAttribute(k, v) { this.attrs[k] = v; }, appendChild(c) { this.children.push(c); return c; }, addEventListener() { }, querySelector() { return null; } });
+    const host5 = makeFakeHost();
+    T5.mountAiWorkspace(host5, withDevBase(T5, { getInputs: () => ({ data: FX.makeData() }), copyText: async () => true, downloadText: () => { }, colors: { border: '#ccc', bg: '#fff' } }));
+    const $sum5 = host5.querySelector('#kt-ai-change-summary');
+    const dec = (s) => String(s).replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&amp;/g, '&');
+    const box = (h.match(/<details class="kt-ai-tech kt-ai-sum-process">[\s\S]*?<\/details>/) || [''])[0];
+    const codes = [...box.matchAll(/<pre class="kt-ai-mermaid" data-side="(before|after)"[^>]*>([\s\S]*?)<\/pre>/g)].map((x) => ({ side: x[1], code: dec(x[2]) }));
+    assert(box && codes.map((c) => c.side).join() === 'before,after' && codes.every((c) => /^flowchart LR\n/.test(c.code)) && /部長承認待ち/.test(codes[1].code), `前提: 変更内容の［プロセス管理の変更前後（図）］の中に Before / After の図のコードがある: ${JSON.stringify(codes.map((c) => c.code.split('\n')[0]))}`);
+    $sum5.innerHTML = h;
+    const pres = codes.map((c) => ({ textContent: c.code, getClientRects() { return [{ width: 100 }]; }, replaceWith(d) { this.replaced = d; } }));
+    const opened = { open: true, querySelectorAll: (sel) => (sel === 'pre.kt-ai-mermaid' ? pres.filter((p) => !p.replaced) : []) };
+    assert($sum5.listenerCount('toggle') === 1, '画面は右の「変更内容」の開閉（toggle）を受け取る');
+    await $sum5.dispatch({ type: 'toggle', target: { ...opened, open: false } }); await tick();
+    assert(drawn.length === 0 && pres.every((p) => !p.replaced), `閉じたときは描かない: ${drawn.length}`);
+    await $sum5.dispatch({ type: 'toggle', target: opened }); await tick(); await tick();
+    assert(drawn.length === 2 && drawn[0] === codes[0].code && drawn[1] === codes[1].code && pres.every((p) => p.replaced && /data-processed/.test(JSON.stringify(p.replaced.attrs || {}))), `［プロセス管理の変更前後（図）］を開くと、変更内容の Before / After の図のコードで描き、描いた図を枠に入れる: ${drawn.length}`);
+  }
 }
 
 console.log(`\n${state.failed === 0 ? 'ALL PASSED' : 'FAILED'}: ${state.passed} passed / ${state.failed} failed`);
