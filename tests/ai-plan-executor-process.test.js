@@ -77,7 +77,7 @@ console.log('\n--- 1. §37 / §40 / §41 承認分岐（Change Group = 1 PUT・�
   const rolled2 = await E.executeRollback(rb2, { api: mock.api, execution: log });
   assert(rolled2.status === 'ROLLED_BACK_VERIFIED' && JSON.stringify(statusOf(mock)) === JSON.stringify(before) && rolled2.verification.restoredToSnapshot === true && log.steps.every(s => s.rollbackStatus === 'ROLLBACK_VERIFIED') && mock.calls.filter(c => c === 'PUT status').length === 2, '§43 Rollback: snapshot のプロセス設定と完全一致（ROLLED_BACK_VERIFIED）・各 step に rollbackStatus');
   const audit = E.buildAudit({ plan: p, review: rv, prepared, execution: log, rollback: rolled2 });
-  assert(audit.execution.process && audit.execution.process.before.states.length === 3 && audit.execution.process.planned.states.length === 4 && audit.execution.process.actual.states.length === 4 && audit.rollback.status === 'ROLLED_BACK_VERIFIED' && audit.afterSnapshot.status && audit.beforeSnapshot.status, '§32 Audit: Before / Planned / Actual のプロセス・snapshot・rollback');
+  assert(audit.execution.process && audit.execution.process.before.states.length === 3 && /部長承認/.test(audit.execution.process.mermaid.planned) && audit.execution.process.actual.states.length === 4 && audit.rollback.status === 'ROLLED_BACK_VERIFIED' && audit.afterSnapshot.status && audit.beforeSnapshot.status, '§32 Audit: Before / Planned / Actual のプロセス（Planned は計画の図。2026-10-19: 確認の結果の要約の写しは持たない）・snapshot・rollback');
 }
 {
   // §40: 3 状態 / 3 アクション → 4 状態 / 6 アクション（SECONDARY の差し戻しを含む）

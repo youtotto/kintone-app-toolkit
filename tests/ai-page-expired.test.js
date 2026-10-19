@@ -232,7 +232,6 @@ const planJs3 = (args) => {
     r.plan.steps.push({ id: c.customizationId, actionType: 'CUSTOMIZATION_REQUIRED', targetKind: 'JS', targetRef: null, title: c.customizationId === 'C2' ? 'モバイルの編集制御' : 'モバイルの入力チェック', spec: { customizationId: c.customizationId }, dependsOn: [] });
     r.plan.customizations.push(clone(c));
     r.review.steps.push({ stepId: c.customizationId, status: 'VALID', safety: 'PLAN_ONLY', customization: clone(c), codeGeneration: { supported: true, strategy: 'NEW_JS_FILE', reason: null }, issues: [] });
-    r.review.executionReadiness.planOnlySteps.push(c.customizationId);
   }
   return r;
 };

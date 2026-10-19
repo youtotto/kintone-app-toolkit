@@ -130,26 +130,26 @@ console.log('\n--- §51-1. KTJsCatalog（決定的な Event / API Catalog）---'
 console.log('\n--- §51-2. Toolkit Review: 標準のみ / カスタマイズのみ / Hybrid ---');
 {
   const std = reviewPlan(PLAN_STD);
-  assert(std.plan.solution === 'STANDARD' && std.plan.customizations.length === 0 && std.review.hybrid.solution === 'STANDARD' && std.review.summary.counts.customizations === 0, '標準のみ: solution STANDARD・customizations なし');
+  assert(std.plan.solution === 'STANDARD' && std.plan.customizations.length === 0 && !std.review.steps.some(r => r.solution === 'CUSTOMIZATION'), '標準のみ: solution STANDARD・customizations なし');
   const js = reviewPlan(PLAN_JS_ONLY);
-  assert(js.plan.solution === 'CUSTOMIZATION' && js.review.hybrid.solution === 'CUSTOMIZATION' && js.review.hybrid.standard.steps.length === 0 && js.review.hybrid.customization.steps.length === 1, 'カスタマイズのみ: solution CUSTOMIZATION');
+  assert(js.plan.solution === 'CUSTOMIZATION' && js.review.steps.length === 1 && js.review.steps[0].solution === 'CUSTOMIZATION', 'カスタマイズのみ: solution CUSTOMIZATION');
   const hy = reviewPlan(PLAN_HYBRID);
-  assert(hy.plan.solution === 'HYBRID' && hy.review.hybrid.solution === 'HYBRID' && hy.review.hybrid.standard.steps.includes('P1') && hy.review.hybrid.customization.steps.includes('P2'), 'Hybrid: 標準設定 P1 ＋ JavaScript P2 を同じ Review 上で分けて要約');
+  assert(hy.plan.solution === 'HYBRID' && hy.review.steps.find(r => r.stepId === 'P1')?.solution !== 'CUSTOMIZATION' && hy.review.steps.find(r => r.stepId === 'P2')?.solution === 'CUSTOMIZATION', 'Hybrid: 標準設定 P1 ＋ JavaScript P2 を同じ確認の結果の中で手順ごとに区別（2026-10-19: 内訳の集計は持たない）');
   assert(hy.jsReview && hy.jsReview.solution === 'CUSTOMIZATION' && hy.jsReview.safety === 'PLAN_ONLY' && hy.jsReview.customization.customizationId === 'C1', 'JS の step は PLAN_ONLY（Executor は反映しない）・customization を保持');
-  assert(hy.jsReview.codeGeneration.supported === true && hy.jsReview.codeGeneration.strategy === 'EXTEND_EXISTING_JS' && hy.jsReview.codeGeneration.existingFile?.name === 'fieldOnOff.js' && hy.jsReview.codeGeneration.sourceAvailable === true, '既存 JS への統合: 統合先 fieldOnOff.js を解決・本文あり・コード生成可');
-  assert(hy.review.executionReadiness.generatableSteps.includes('P2') && hy.review.hybrid.customization.generatable.includes('P2'), 'executionReadiness.generatableSteps に P2');
-  assert(hy.review.executionReadiness.planOnlySteps.includes('P2') && !hy.review.executionReadiness.safeSteps.includes('P2'), 'JS は safeSteps に入らない（Executor の対象外）');
+  assert(hy.jsReview.codeGeneration.supported === true && hy.jsReview.codeGeneration.strategy === 'EXTEND_EXISTING_JS' && hy.jsReview.codeGeneration.existingFile?.name === 'fieldOnOff.js' && !hy.jsReview.issues.some(i => i.code === 'JS_SOURCE_UNAVAILABLE'), '既存 JS への統合: 統合先 fieldOnOff.js を解決・本文あり（本文が無いという指摘なし）・コード生成可');
+  const arHy = KTPlanExecutor.applyReadiness(hy.plan, hy.review);
+  assert(arHy.find(a => a.stepId === 'P1')?.apply === 'AUTO' && arHy.find(a => a.stepId === 'P2')?.apply === 'JS', `反映の分類: 標準設定の P1 は自動で反映・JavaScript の P2 は JS（設定の手順の後に登録。2026-10-19: 実行の見込みの集約は持たない）: ${JSON.stringify(arHy.map(a => [a.stepId, a.apply]))}`);
   const out = KTPlanReview.executorOutput(hy.plan, hy.review, ['P1', 'P2']);
   const cls = KTPlanExecutor.classifySteps(out);
   assert(cls.find(x => x.stepId === 'P2')?.status === 'UNSUPPORTED' && cls.find(x => x.stepId === 'P1')?.status === 'PENDING', 'Executor の分類: P1 は PENDING（実行可）・JS の P2 は UNSUPPORTED（反映しない）');
-  assert(out.plan.solution === 'HYBRID' && out.plan.customizations?.length === 1 && out.review.hybrid?.customization?.steps?.includes('P2'), 'executorOutput に solution / customizations / hybrid が残る（監査 JSON）');
+  assert(out.plan.solution === 'HYBRID' && out.plan.customizations?.length === 1 && out.review.steps.some(r => r.stepId === 'P2' && r.solution === 'CUSTOMIZATION'), 'executorOutput に solution / customizations と JavaScript の手順の確認の結果が残る（監査 JSON）');
   // 新規 JS
   const nw = reviewPlan(PLAN_NEW_JS);
   assert(nw.jsReview.codeGeneration.supported === true && nw.jsReview.codeGeneration.strategy === 'NEW_JS_FILE' && nw.jsReview.codeGeneration.existingFile === null, '新規 JS: NEW_JS_FILE でコード生成可');
   //   簡素化 §5（2026-10-16）: 既存 JS と同じフィールドを扱うだけでは競合と確定せず、確認も求めない（以前の期待は JS_FIELD_CONFLICT の medium で NEEDS_CONFIRMATION・
   //   「新しいファイルを足す前に既存処理への統合を検討してください」）。一緒の動きは生成工程の動作テスト（同じ画面の既存 JS を送る）が確かめる
   const sh = nw.jsReview.issues.find(i => i.code === 'JS_SHARED_FIELD' && i.file === 'fieldOnOff.js');
-  assert(sh && sh.severity === 'low' && /amount（CONTROL）/.test(sh.message) && /生成工程の動作テストで確かめます/.test(sh.message) && !/新しいファイルを足す前に/.test(sh.message) && !nw.jsReview.issues.some(i => i.severity === 'medium' && /fieldOnOff\.js/.test(i.message)) && nw.jsReview.status !== 'NEEDS_CONFIRMATION' && !nw.review.hybrid.customization.conflicts.includes('P2') && !nw.review.hybrid.customization.needsConfirmation.includes('P2'),
+  assert(sh && sh.severity === 'low' && /amount（CONTROL）/.test(sh.message) && /生成工程の動作テストで確かめます/.test(sh.message) && !/新しいファイルを足す前に/.test(sh.message) && !nw.jsReview.issues.some(i => i.severity === 'medium' && /fieldOnOff\.js/.test(i.message)) && nw.jsReview.status !== 'NEEDS_CONFIRMATION' && !nw.jsReview.issues.some(i => i.code === 'JS_EXECUTION_ORDER_RISK'),
     `既存 JS（fieldOnOff.js）が同じ amount を CONTROL → 同じフィールドを扱う情報（JS_SHARED_FIELD・low）。競合・要確認にはしない: ${JSON.stringify({ status: nw.jsReview.status, issue: sh })}`);
   const nwPlain = reviewPlan(PLAN_NEW_JS, INPUTS_PLAIN);
   assert(!nwPlain.jsReview.issues.some(i => i.code === 'JS_SHARED_FIELD') && nwPlain.jsReview.status === 'VALID', '同じフィールドを扱う既存 JS が無ければ競合なし（VALID）');
@@ -163,7 +163,7 @@ console.log('\n--- §51-3. Toolkit Review: 統合先が曖昧 / 本文なし / P
   const notFound = reviewPlan(planOf({ steps: [JS_STEP()], customizations: [cust({ existingFiles: [{ name: 'ghost.js', target: 'desktop', reason: '' }] })] }));
   assert(notFound.jsReview.status === 'INVALID' && notFound.jsReview.issues.some(i => i.code === 'JS_TARGET_FILE_NOT_FOUND'), '登録されていないファイルへの統合: INVALID（実行不可）');
   const cached = reviewPlan(PLAN_HYBRID, INPUTS_CACHED);
-  assert(cached.jsReview.codeGeneration.sourceAvailable === false && cached.jsReview.issues.some(i => i.code === 'JS_SOURCE_UNAVAILABLE') && cached.jsReview.codeGeneration.supported === true, 'キャッシュ payload（本文なし）: JS_SOURCE_UNAVAILABLE（低）。生成時に取得を試みる');
+  assert(cached.jsReview.issues.some(i => i.code === 'JS_SOURCE_UNAVAILABLE') && cached.jsReview.codeGeneration.supported === true, 'キャッシュ payload（本文なし）: JS_SOURCE_UNAVAILABLE（低）。生成時に取得を試みる');
   const noPlatform = reviewPlan(planOf({ steps: [JS_STEP()], customizations: [cust({ platform: [] })] }));
   assert(noPlatform.jsReview.issues.some(i => i.code === 'JS_PLATFORM_UNSPECIFIED') && noPlatform.jsReview.codeGeneration.supported === false && noPlatform.jsReview.codeGeneration.reason === 'PLATFORM_UNSPECIFIED' && noPlatform.jsReview.status === 'NEEDS_CONFIRMATION', 'PC / モバイル未定: 確認が必要・生成不可（勝手に desktop にしない）');
   const badEvent = reviewPlan(planOf({ steps: [JS_STEP()], customizations: [cust({ events: ['app.record.update.show'] })] }));
@@ -178,7 +178,7 @@ console.log('\n--- §51-3. Toolkit Review: 統合先が曖昧 / 本文なし / P
   assert(missing.jsReview.status === 'INVALID' && missing.jsReview.issues.some(i => i.code === 'CUSTOMIZATION_NOT_FOUND'), 'step が指す customization が無い: INVALID');
   // 実機（Scenario A 2 回目）: 依存する標準設定（新しいステータス等）が無効 → JS は BLOCKED_BY_DEPENDENCY で生成不可（存在しない設定名を前提にしたコードを作らない）
   const depBad = reviewPlan(planOf({ steps: [mkStep('P1', 'ADD_FIELD', 'PROPOSED_FIELD', 'NEW_FIELD_9', { fieldType: 'DROP_DOWN', options: ['a'] }, { title: '提案に無い新規フィールド' }), JS_STEP('C1', { dependsOn: ['P1'] })], customizations: [cust({ dependsOn: ['P1'] })], solution: 'HYBRID' }));
-  assert(depBad.jsReview.status === 'BLOCKED_BY_DEPENDENCY' && depBad.jsReview.codeGeneration.supported === false && depBad.jsReview.codeGeneration.reason === 'BLOCKED_BY_DEPENDENCY' && depBad.review.hybrid.customization.blocked.includes('P2') && !depBad.review.hybrid.customization.generatable.includes('P2'), '依存する標準設定が無効: JS は BLOCKED_BY_DEPENDENCY・生成不可（generatable に入らない）');
+  assert(depBad.jsReview.status === 'BLOCKED_BY_DEPENDENCY' && depBad.jsReview.codeGeneration.supported === false && depBad.jsReview.codeGeneration.reason === 'BLOCKED_BY_DEPENDENCY', '依存する標準設定が無効: JS は BLOCKED_BY_DEPENDENCY・生成不可');
   assert(/Toolkit ではコードを作れません（前提の標準設定が無効）/.test(KTAiChatUi.changeSummaryHtml({ plan: depBad.plan, review: depBad.review })), '右の「変更内容」の「反映できないこと」: 生成できない理由を日本語で（2026-10-19: 確認結果のタブは廃止）');
   //   簡素化（2026-10-17）: 要件の文の語（「警告」「編集不可」など）で CONTROL の不足を指摘する注意（JS_ACCESS_HINT）は削除した（要件の文を Toolkit が読み直さない）
   // validatePlan（client）: customizations の正規化と solution の導出
@@ -364,7 +364,7 @@ const clickCode = (m, id) => m.$('kt-ai-pane-code').dispatch({ type: 'click', ta
   await ticks();
   const v = await K.adoptOnScreen(m);
   assert(v && v.final && v.fromDraft && m.calls2.plan.length === 1 && m.calls2.generate.length === 1 && v.generated.C1.status === 'verified' && FS.readyOf(v) === true, `前提: 仮案を採用すると計画 1 回・生成 1 回で最終案まで進み、承認できる: ${JSON.stringify({ final: !!(v && v.final), plan: m.calls2.plan.length, gen: m.calls2.generate.length })}`);
-  assert(v.plan.solution === 'HYBRID' && v.plan.customizations.length === 1 && v.review && v.review.hybrid.solution === 'HYBRID', '計画の版: solution HYBRID・customizations 1・Toolkit Review に hybrid');
+  assert(v.plan.solution === 'HYBRID' && v.plan.customizations.length === 1 && v.review && v.review.steps.some(r => r.solution === 'CUSTOMIZATION') && v.review.steps.some(r => r.solution !== 'CUSTOMIZATION'), '計画の版: solution HYBRID・customizations 1・確認の結果に標準設定と JavaScript の手順');
   const html = m.chat();
   const fin = finalText(m);
   // 会話の要約は最終案のカード 1 枚（設定の手順と JavaScript の反映先）。内訳は右の「変更内容」の要約（対象・何が変わるか・JavaScript の状態）
@@ -498,7 +498,7 @@ console.log('\n--- §53-3. 統合先の本文を取得できない / 契約に�
   const m = mountV({ inputs: INPUTS_CACHED, downloadFails: (name) => name === 'common.js' || (name === 'fieldOnOff.js' && !available) });
   await ticks();
   const v = await K.adoptOnScreen(m);
-  assert(v.review.steps.find(r => r.solution === 'CUSTOMIZATION').codeGeneration.sourceAvailable === false && v.review.steps.find(r => r.solution === 'CUSTOMIZATION').codeGeneration.supported === true, 'キャッシュ payload: 本文なし（生成は試みる）');
+  assert(v.review.steps.find(r => r.solution === 'CUSTOMIZATION').issues.some(i => i.code === 'JS_SOURCE_UNAVAILABLE') && v.review.steps.find(r => r.solution === 'CUSTOMIZATION').codeGeneration.supported === true, 'キャッシュ payload: 本文なし（生成は試みる）');
   // 2026-10-06: 会話は利用者の言葉だけ（JS_SOURCE_UNAVAILABLE の文字は出さない。失敗の理由は生成結果に残る）
   const fin = finalText(m);
   assert(m.calls2.generate.length === 0 && v.generated.C1.status === 'failed' && v.generated.C1.failure.reason === 'JS_SOURCE_UNAVAILABLE' && FS.readyOf(v) === false && /JavaScript を生成できませんでした: 統合先の既存の JavaScript の本文を取得できませんでした/.test(fin) && !/JS_SOURCE_UNAVAILABLE/.test(m.chat()), '本文を取得できない: Generator を呼ばず（既存ファイルへの推測の生成はしない）、最終案のカードに取得できない旨（内部の名前 JS_SOURCE_UNAVAILABLE は会話に出さない）・承認できない');

@@ -116,7 +116,7 @@ await section(async () => {
   const p2 = st(rv, 'P2'), p3 = st(rv, 'P3');
   assert(p2 && p2.status === 'NEEDS_CONFIRMATION' && p2.safety === 'REVIEW_REQUIRED' && codes(p2).includes('EXISTING_PATH_RESTRICTED') && p2.issues.find(i => i.code === 'EXISTING_PATH_RESTRICTED').severity === 'high' && p2.diff.after.filterCond === LOW,
     `B3-1: P2 は無条件 → 条件ありの EXISTING_PATH_RESTRICTED（high・確認待ち）で、BLOCKED / INVALID でない: ${JSON.stringify([p2 && p2.status, codes(p2)])}`);
-  assert(!rv.steps.some(r => codes(r).some(c => UNPARSED.includes(c))) && !rv.warnings.some(w => UNPARSED.includes(w.code)) && !rv.steps.some(r => r.status === 'INVALID') && !(rv.executionReadiness.blockedSteps || []).length,
+  assert(!rv.steps.some(r => codes(r).some(c => UNPARSED.includes(c))) && !rv.warnings.some(w => UNPARSED.includes(w.code)) && !rv.steps.some(r => r.status === 'INVALID') && !rv.steps.some(r => r.safety === 'BLOCKED'),
     `B3-2: どの手順にも ACTION_CONDITION_OVERLAP / ACTION_CONDITION_UNPARSED / CONDITION_CHANGE_UNPARSED / PROCESS_CONDITION_* が無く、実行できない手順も無い: ${JSON.stringify(rv.steps.map(r => [r.stepId, r.status, codes(r)]))}`);
   const reasons = [...p2.issues.map(i => i.message), ...rv.warnings.map(w => w.message)];
   assert(!reasons.some(t => /整数|小数/.test(t)), `B3-3: P2 の確認待ちの理由と警告に「整数」「小数」の文が無い: ${JSON.stringify(reasons)}`);

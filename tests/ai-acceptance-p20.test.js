@@ -357,7 +357,7 @@ console.log('\n--- F7 / GM-6（UI）. 相談: 取得済みの本文を Context �
   assert(jsFact && jsFact.jsFile.sourceAvailable === true && /本文は取得済み/.test(jsFact.statement) && !/本文は未取得/.test(jsFact.statement), 'F7: 相談中のファイルは Planner Context で「本文は取得済み」（キャッシュに本文が無くても）');
   assert(!JSON.stringify(ctx).includes("record['amount'].disabled"), 'F7: 本文そのものは Planner Context に入れない');
   const rvStep = panel.conversation().activePlan().review.steps.find(r => r.stepId === 'C1');
-  assert(rvStep && !rvStep.issues.some(i => i.code === 'JS_SOURCE_UNAVAILABLE') && rvStep.codeGeneration.sourceAvailable === true, 'F7: Review も「本文はまだ取得していません」と言わない（codeGeneration.sourceAvailable）');
+  assert(rvStep && !rvStep.issues.some(i => i.code === 'JS_SOURCE_UNAVAILABLE') && rvStep.codeGeneration.existingFile && rvStep.codeGeneration.existingFile.name === 'fieldOnOff.js', 'F7: Review も「本文はまだ取得していません」と言わない（統合先 fieldOnOff.js を解決し、本文が無いという指摘を出さない）');
   // GM-6（UI）: 送信中に別の JS で新しい相談を始めると、送信中の要求を中断し、前の応答を新しい会話に入れない
   gate = {};
   const nCalls = calls.length;

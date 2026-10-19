@@ -238,7 +238,7 @@ console.log('\n--- 2e. Phase 12: プロセス管理の結果（Before / Planned 
   assert(r.confirm.includes('・プロセス管理の変更 1 件') && r.confirm.includes('実行前のプロセス管理（ステータス・アクション・作業者）全体に戻す') && r.confirm.includes('運用環境には影響しません。'), 'rollback 確認: プロセス管理の変更 1 件 → 全体に戻す');
   assert(x.s.rollback.status === 'ROLLED_BACK_VERIFIED' && r.done.includes('動作テスト環境を実行前の状態に戻しました。') && Object.keys(x.mock.st.status.states).length === 3 && x.mock.st.status.actions.length === 3 && x.mock.st.status.actions[1].filterCond === '', 'rollback: プロセス設定が実行前（3 ステータス / 3 アクション・承認するは条件なし）に戻る');
   const audit = auditOf(x);
-  assert(audit.execution.process && audit.execution.process.planned && audit.execution.process.actual && audit.rollback.status === 'ROLLED_BACK_VERIFIED' && audit.rollback.steps[0].actionType === 'RESTORE_PROCESS_SETTINGS', '監査 JSON に Before / Planned / Actual のプロセスと rollback');
+  assert(audit.execution.process && audit.execution.process.mermaid && audit.execution.process.mermaid.planned && audit.execution.process.actual && audit.rollback.status === 'ROLLED_BACK_VERIFIED' && audit.rollback.steps[0].actionType === 'RESTORE_PROCESS_SETTINGS', '監査 JSON に Before / Planned / Actual のプロセスと rollback');
 }
 
 console.log('\n--- 2f. Phase 13: ルックアップの結果（§41）・参照元が読めない（§40）・元に戻す ---');

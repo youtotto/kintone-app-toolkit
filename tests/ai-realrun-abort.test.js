@@ -44,7 +44,6 @@ const planJs2 = (args) => {
   r.plan.steps.push({ id: 'C2', actionType: 'CUSTOMIZATION_REQUIRED', targetKind: 'JS', targetRef: null, title: 'JavaScript 2', spec: { customizationId: 'C2' }, dependsOn: [] });
   r.plan.customizations.push(clone(CUST2));
   r.review.steps.push({ stepId: 'C2', status: 'VALID', safety: 'PLAN_ONLY', customization: clone(CUST2), codeGeneration: { supported: true, strategy: 'NEW_JS_FILE', reason: null }, issues: [] });
-  r.review.executionReadiness.planOnlySteps.push('C2');
   return r;
 };
 const aiErr = (code, o = {}) => new KTAiClient.AiClientError({ code, message: o.message || `テスト: ${code}`, ...(o.details ? { details: o.details } : {}), ...(o.requestId ? { requestId: o.requestId } : {}) });

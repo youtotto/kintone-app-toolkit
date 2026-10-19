@@ -321,7 +321,7 @@ function createNewFlowKit(T) {
   const planJs = (args, { questions = [], cust = CUST_C1, summary = '承認待ちでは金額を編集不可にします。', requirementOps = [], gatewayPlan = null } = {}) => ({
     plan: { goal: args.goal, assessment: { summary }, steps: [{ id: 'C1', actionType: 'CUSTOMIZATION_REQUIRED', targetKind: 'JS', targetRef: null, title: 'JavaScript', spec: { customizationId: 'C1' }, dependsOn: [] }], customizations: [clone(cust)], provisionals: [{ id: 'V1', choice: '編集不可の間は入力欄を灰色にする', changeHint: '' }], questions, unknowns: [], impact: [{ targetRef: 'amount', description: '承認待ちの間、金額は変更できません' }], solution: 'CUSTOMIZATION' },
     ctx: null, gatewayPlan, turn: { reply: '計画を作りました。承認待ちの間だけ金額を編集不可にします。', requirementOps, utteranceCoverage: [] },
-    review: { base: { baseVersion: '1', env: 'preview', ok: true, fingerprint: 'fp-1', revision: { preview: '10' } }, steps: [{ stepId: 'C1', status: 'VALID', safety: 'PLAN_ONLY', customization: clone(cust), codeGeneration: { supported: true, strategy: cust.strategy, reason: null }, issues: [] }], executionReadiness: { safeSteps: [], reviewSteps: [], blockedSteps: [], planOnlySteps: ['C1'] }, warnings: [] },
+    review: { base: { baseVersion: '1', env: 'preview', ok: true, fingerprint: 'fp-1', revision: { preview: '10' } }, steps: [{ stepId: 'C1', status: 'VALID', safety: 'PLAN_ONLY', customization: clone(cust), codeGeneration: { supported: true, strategy: cust.strategy, reason: null }, issues: [] }], warnings: [] },
   });
   /**
    * 偽の生成（Gateway の customization-generator）。sequence = 呼び出しごとの候補（CAND のキー）。repairs / stoppedBy = 生成工程の 1 依頼の中の修復。

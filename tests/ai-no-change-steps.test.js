@@ -57,7 +57,7 @@ console.log('\n--- §N1 今と同じ値の承認分岐 2 つ（10-16 の実機�
     assert(r.status === 'VALID' && r.safety === 'SAFE' && r.diff.changeType === 'REUSE' && !r.issues.length, `${id}: 変更不要（VALID・REUSE・指摘なし）。以前は NO_STRUCTURED_CHANGE（要確認・「変更内容が構造化されていない」）: ${r.status}/${r.diff.changeType}/${r.issues.map(i => i.code)}`);
     assert(JSON.stringify(r.diff.before) === JSON.stringify(r.diff.after) && r.diff.before.filterCond === r.spec.filterCond, `${id}: 変更前と変更後は同じ（今の設定の値）`);
   }
-  assert(rv.summary.counts.confirmations === 0 && rv.summary.counts.updates === 0, `確認事項・変更する設定に数えない: 確認 ${rv.summary.counts.confirmations}・変更 ${rv.summary.counts.updates}`);
+  assert(!rv.steps.some(r => r.status === 'NEEDS_CONFIRMATION' || r.diff.changeType === 'UPDATE'), `確認事項・変更する設定にしない（手順ごとの確認の結果）: ${JSON.stringify(rv.steps.map(r => [r.stepId, r.status, r.diff.changeType]))}`);
   const cls = classOf(p, rv), ap = applyOf(p, rv);
   assert(['P1', 'P2'].every(id => cls.get(id).status === 'SKIPPED' && cls.get(id).reason === 'NO_CHANGE'), `反映の分類: 書き込まない（SKIPPED・NO_CHANGE。以前は UNSUPPORTED＝反映できない）: ${[...cls.values()].map(s => `${s.stepId}:${s.status}/${s.reason}`)}`);
   assert(['P1', 'P2'].every(id => ap.get(id).apply === 'CONFIRM' && ap.get(id).reason === 'NO_CHANGE'), `反映の見込み: 「反映できない（MANUAL）」にしない: ${[...ap.values()].map(a => `${a.stepId}:${a.apply}`)}`);
@@ -75,7 +75,7 @@ console.log('\n--- §N2 値が無い手順は変更不要にしない ---');
   const cls = classOf(p, rv);
   assert(cls.get('P1').status === 'UNSUPPORTED' && cls.get('P1').reason === 'NO_VALUES', `反映の分類: 「変更の値が計画にありません」（変更不要の NO_CHANGE と別の理由）: ${cls.get('P1').status}/${cls.get('P1').reason}`);
   assert(cls.get('V1').status === 'BLOCKED' && cls.get('V1').reason === 'DEPENDENCY_NOT_EXECUTABLE', `値の無い手順は依存先として満たさない（依存する手順は止まる）: ${cls.get('V1').status}/${cls.get('V1').reason}`);
-  assert(rv.summary.counts.confirmations === 1, '確認事項に数える（1 件）');
+  assert(rv.steps.filter(r => r.status === 'NEEDS_CONFIRMATION').map(r => r.stepId).join() === 'P1', `確認が必要な手順は P1 の 1 件（手順ごとの確認の結果）: ${JSON.stringify(rv.steps.map(r => [r.stepId, r.status]))}`);
 }
 
 console.log('\n--- §N3 同じ遷移元で、片方が変更不要・片方が本当に変わる ---');

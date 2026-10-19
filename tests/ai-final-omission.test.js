@@ -10,6 +10,7 @@
 //       (c) 同じ遷移元の分岐の片方だけは反映しない（承認できない）
 //       (d) 本当に変更不要な手順は止めない（書き込まない・手作業や失敗に数えない）
 //       (e) 実行の途中の失敗による一部反映は、承認の前から分かっていた手作業の手順と別の文で出す
+//       (f) 計画の確認で無効な手順（依存先が無効な確認の手順を含む）は、反映の分類だけから「実行できない手順」に指摘の文で出し、承認させない
 //
 // 実行方法: node tests/ai-final-omission.test.js
 'use strict';
@@ -161,6 +162,26 @@ await section(async () => {
   const ap = await K.applyOnScreen(m);
   assert(ap.clicked && JSON.stringify(ap.writes) === JSON.stringify(['PUT views']) && /一部だけ反映しました（要確認）/.test(ap.card) && /標準設定: ✓ 1 件反映・× 1 件は失敗（以降は未実行）/.test(ap.card) && !/承認の前から分かっていたもの/.test(ap.card),
     `O2-e: 途中の失敗による一部反映は「一部だけ反映しました（要確認）」と失敗の件数で出し、承認の前から分かっていた手作業の手順と同じ文にしない: ${ap.card.replace(/\s+/g, ' ').slice(0, 300)}`);
+});
+await section(async () => {
+  // (f) 無いフィールドの変更（計画の確認で無効）と、それに依存する確認の手順。実行できない手順は反映の分類の 1 つから出す（2026-10-19。前は計画の確認の実行の見込みからも拾っていた）
+  const { m, v } = await mountPlan([
+    VIEW(),
+    K.mkStep('P2', 'UPDATE_FIELD', 'FIELD', 'ghost_field', { required: true }, { title: '備考を必須にする' }),
+    K.mkStep('Q1', 'REQUIRE_CONFIRMATION', 'NONE', null, {}, { title: '必須にする時期を担当者に確かめる', dependsOn: ['P2'] }),
+  ]);
+  const cls = new Map(KTPlanExecutor.applyReadiness(v.plan, v.review).map(x => [x.stepId, x]));
+  const rvOf = (id) => (v.review.steps || []).find(r => r.stepId === id) || {};
+  assert(rvOf('P2').status === 'INVALID' && rvOf('Q1').status === 'BLOCKED_BY_DEPENDENCY' && cls.get('P2').apply === 'BLOCKED' && cls.get('Q1').apply === 'BLOCKED' && cls.get('Q1').reason === 'REVIEW_BLOCKED' && cls.get('Q1').message === rvOf('Q1').issues[0].message && cls.get('P1').apply === 'AUTO',
+    `前提: 計画の確認で無効な手順は、確認の手順も反映の分類で止める（理由は計画の確認の指摘の文）: ${JSON.stringify([...cls.values()].map(x => [x.stepId, x.apply, x.reason, x.message]))}`);
+  const rd = m.conv().finalReadiness(v);
+  const card = stripC(outside(lastCard(m)));
+  const ap = await K.applyOnScreen(m);
+  assert(rd.ready === false && rd.reasons.some(x => x.kind === 'blocked') && /実行できない手順: 備考を必須にする（[^）]+）/.test(card) && /実行できない手順: 必須にする時期を担当者に確かめる（依存する P2 が無効のため実行できません）/.test(card) && !/Review で実行不可/.test(card) && ap.button && ap.button.disabled && !ap.writes.length,
+    `O2-f: 計画の確認で無効な手順は、確認の手順も含めて「実行できない手順」に指摘の文で出し、承認させない（一覧だけを反映しない・書き込み 0）: ${card.replace(/\s+/g, ' ').slice(0, 400)}`);
+  const sum = stripC(m.$('kt-ai-change-summary').innerHTML).replace(/\s+/g, ' ');
+  assert(/備考を必須にする：反映できません（存在しないFIELD「ghost_field」を既存として参照）/.test(sum) && /必須にする時期を担当者に確かめる：反映できません（依存する P2 が無効のため実行できません）/.test(sum) && !/Review で実行不可/.test(sum),
+    `O2-f2: 右の「変更内容」の「反映できないこと」も同じ 2 件を指摘の文で出す（左の最終案と同じ集まり）: ${(sum.match(/反映できないこと.{0,240}/) || [''])[0]}`);
 });
 
 console.log(`\n${state.failed ? 'FAILED' : 'ALL PASSED'}: ${state.passed} passed / ${state.failed} failed`);

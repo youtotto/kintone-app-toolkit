@@ -211,7 +211,7 @@ await section(async () => {
   const line = (p2.diff.human || []).find(l => l.startsWith('確認してから決める：'));
   assert(p2.spec && p2.spec.filterCond === 'ステータス in ("承認待ち") and amount >= "1000000"' && p2.spec.daysLater === '3' && p2.spec.time === '09:00' && p2.spec.timingField === '更新日時', `REQUIRE_CONFIRMATION に spec があれば r.spec に正規化して残す: ${JSON.stringify(p2.spec)}`);
   assert(line && /条件 ステータス in \("承認待ち"\) and amount >= "1000000"/.test(line) && /基準日 更新日時/.test(line) && /3 日後/.test(line) && /09:00/.test(line), `diff.human に「確認してから決める：条件 …・基準日 …・3 日後・09:00」: ${line}`);
-  assert(p2.diff.human[0] === '100万円以上の案件の上長宛通知先を確定する（仮適用なし）' && p2.safety === 'PLAN_ONLY' && p2.diff.changeType === 'NO_CHANGE' && p2.simulated === false, '定型の行・計画のみ（仮適用しない）は従来どおり');
+  assert(p2.diff.human[0] === '100万円以上の案件の上長宛通知先を確定する（仮適用なし）' && p2.safety === 'PLAN_ONLY' && p2.diff.changeType === 'NO_CHANGE', '定型の行・計画のみ（仮適用しない）は従来どおり');
   const p2new = st(review(SR.CASE1_PLAN), 'P2');
   assert(p2new.spec === null && !(p2new.diff.human || []).some(l => /確認してから決める/.test(l)), 'spec が {} なら従来どおり（spec null・1 行を足さない）');
   // details の文章（未確定事項・確定後の設定）からは spec を作らない（説明文の語を条件にしない）
@@ -247,50 +247,48 @@ await section(async () => {
     mkStep('C1', 'CUSTOMIZATION_REQUIRED', 'JS', null, { customizationId: 'C1' }, { dependsOn: ['P1'], confidence: 'CONFIRMED' }),
   ], { solution: 'HYBRID', customizations: [cust(access)] });
   const rd = review(planOf('READ'));
-  const item = (rd.impactCheck || []).find(x => x.fieldCode === 'ステータス');
-  assert(item && item.toolkit.direct > 0 && item.toolkit.js >= 1, `前提: ステータス は既存の設定・JS（dealLock.js）から参照されている: ${JSON.stringify(item && item.toolkit)}`);
+  //   2026-10-19: 影響の照合の項目（access・note）は確認の結果に持たない（警告の文に扱いの理由を書く）。前提は依存関係の影響で確かめる
+  const impSt = T.KTDeps.impactOf(INPUTS.deps, 'ステータス').direct || [];
+  assert(impSt.length > 0 && impSt.some(d => d.sourceType === 'CUSTOMIZE'), `前提: ステータス は既存の設定・JS（dealLock.js）から参照されている: ${impSt.length}`);
   assert(!rd.warnings.some(w => /^PLANNER_IMPACT_(MISSING|MISMATCH)$/.test(w.code) && w.stepIds.includes('P1')) && !codes(st(rd, 'P1')).some(c => /^PLANNER_IMPACT/.test(c)) && st(rd, 'P1').status === 'VALID', `JS が READ するだけ → PLANNER_IMPACT_MISSING を出さない（手順も VALID のまま）: ${JSON.stringify(rd.warnings.map(w => w.code))}`);
-  assert(item.access === 'READ' && item.note === '読むだけなので依存先は変わらない', `items には access READ と「読むだけなので依存先は変わらない」を残す: ${JSON.stringify({ access: item.access, note: item.note })}`);
   const ct = review(planOf('CONTROL'));
   const w = ct.warnings.find(x => x.code === 'PLANNER_IMPACT_MISSING' && x.stepIds.includes('P1'));
   assert(w && /JavaScript が編集可否を変える/.test(w.message) && codes(st(ct, 'P1')).includes('PLANNER_IMPACT_MISSING') && st(ct, 'P1').status === 'WARNING', `JS が CONTROL する → 従来どおり PLANNER_IMPACT_MISSING（message に「JavaScript が編集可否を変える」）: ${w && w.message}`);
   const wr = review(planOf('WRITE'));
-  assert(wr.warnings.some(x => x.code === 'PLANNER_IMPACT_MISSING' && /JavaScript が値を変える/.test(x.message)) && (wr.impactCheck || []).find(x => x.fieldCode === 'ステータス').access === 'WRITE', 'JS が WRITE する → 警告（message に「JavaScript が値を変える」）');
+  assert(wr.warnings.some(x => x.code === 'PLANNER_IMPACT_MISSING' && /JavaScript が値を変える/.test(x.message)), 'JS が WRITE する → 警告（message に「JavaScript が値を変える」）');
   // 影響範囲を挙げていれば CONTROL でも MISSING は出ない（従来どおり）。参照の無いフィールドへの影響の主張は OVERSTATED（従来どおり）
   //   簡素化（2026-10-17）: JavaScript の影響を挙げたかは構造（targetKind JS・targetRef = 参照する JavaScript のファイル）で決める（説明文の語では決めない。tests/ai-plan-review.test.js の §8）
   const said = review({ ...planOf('CONTROL'), impact: [{ targetKind: 'FIELD', targetRef: 'ステータス', description: '一覧がステータスを参照', evidenceIds: [], confidence: 'CONFIRMED' }, { targetKind: 'JS', targetRef: 'dealLock.js', description: 'ステータスを参照して編集可否を変える', evidenceIds: [], confidence: 'CONFIRMED' }] });
   assert(!said.warnings.some(x => /^PLANNER_IMPACT_(MISSING|MISMATCH)$/.test(x.code)), 'Planner が JS の影響を JavaScript のファイル（dealLock.js）で挙げていれば CONTROL でも警告なし');
   // 作成日時 は App 353 のどの設定・JS からも参照されていない（memo は一覧が参照している）
   const over = review({ ...mkPlan([mkStep('P1', 'REUSE_FIELD', 'FIELD', '作成日時', { fields: ['作成日時'] }, { confidence: 'CONFIRMED' })]), impact: [{ targetKind: 'FIELD', targetRef: '作成日時', description: '多くの設定が参照', evidenceIds: [], confidence: 'INFERRED' }] });
-  const overItem = (over.impactCheck || []).find(x => x.fieldCode === '作成日時');
-  assert(overItem && overItem.toolkit.direct === 0 && over.warnings.some(x => x.code === 'PLANNER_IMPACT_OVERSTATED' && x.stepIds.includes('P1')), `OVERSTATED は従来どおり（参照が無いのに影響を主張）: ${JSON.stringify({ item: overItem && overItem.toolkit, codes: over.warnings.map(w => w.code) })}`);
+  assert((T.KTDeps.impactOf(INPUTS.deps, '作成日時').direct || []).length === 0 && over.warnings.some(x => x.code === 'PLANNER_IMPACT_OVERSTATED' && x.stepIds.includes('P1')), `OVERSTATED は従来どおり（参照が無いのに影響を主張）: ${JSON.stringify(over.warnings.map(w => w.code))}`);
   // 独立レビュー 3: READ と確定したときだけ警告を出さない。customizations が空（JS にも標準手順にも出ない）の REUSE_FIELD は判定不能 → 従来どおり警告
   const bare = review(mkPlan([mkStep('P1', 'REUSE_FIELD', 'FIELD', 'ステータス', { fields: ['ステータス'] }, { confidence: 'CONFIRMED' })]));
-  const bareItem = (bare.impactCheck || []).find(x => x.fieldCode === 'ステータス');
-  assert(bare.warnings.some(x => x.code === 'PLANNER_IMPACT_MISSING' && x.stepIds.includes('P1')) && bareItem && bareItem.access === null && /判定できない/.test(bareItem.note), `customizations が空の REUSE_FIELD は従来どおり警告（access null・判定不能）: ${JSON.stringify({ codes: bare.warnings.map(w => w.code), item: bareItem })}`);
+  const bareW = bare.warnings.find(x => x.code === 'PLANNER_IMPACT_MISSING' && x.stepIds.includes('P1'));
+  assert(bareW && !/この計画の/.test(bareW.message), `customizations が空の REUSE_FIELD は従来どおり警告（扱いを判定できないので、扱いの理由の文は付けない）: ${JSON.stringify({ codes: bare.warnings.map(w => w.code), msg: bareW && bareW.message })}`);
   // ステータス型のフィールドで、計画に ADD_PROCESS_STATUS があれば値の集合が変わる → JS が READ だけでも警告（WRITE 扱い）
   const withStatus = planOf('READ');
   withStatus.steps.push(mkStep('P2', 'ADD_PROCESS_STATUS', 'PROCESS_STATUS', '部長承認待ち', { name: '部長承認待ち', assigneeType: 'ONE' }, { confidence: 'CONFIRMED' }));
   const ws = review(withStatus);
-  const wsItem = (ws.impactCheck || []).find(x => x.fieldCode === 'ステータス');
-  assert(ws.warnings.some(x => x.code === 'PLANNER_IMPACT_MISSING' && x.stepIds.includes('P1') && /ステータスの追加・変更で値の集合が変わる/.test(x.message)) && wsItem.access === 'WRITE' && wsItem.accessVia === 'status', `ADD_PROCESS_STATUS がある計画の ステータス REUSE は警告あり（WRITE 扱い）: ${JSON.stringify({ item: { access: wsItem.access, via: wsItem.accessVia }, msg: (ws.warnings.find(x => x.code === 'PLANNER_IMPACT_MISSING') || {}).message })}`);
+  assert(ws.warnings.some(x => x.code === 'PLANNER_IMPACT_MISSING' && x.stepIds.includes('P1') && /ステータスの追加・変更で値の集合が変わる/.test(x.message)), `ADD_PROCESS_STATUS がある計画の ステータス REUSE は警告あり（WRITE 扱い。文に「ステータスの追加・変更で値の集合が変わる」）: ${(ws.warnings.find(x => x.code === 'PLANNER_IMPACT_MISSING') || {}).message}`);
   const withUpd = planOf('READ');
   withUpd.steps.push(mkStep('P2', 'UPDATE_PROCESS', 'PROCESS_STATUS', '承認待ち', { name: '承認待ち', changeKind: 'STATUS', assignees: ['FIELD_ENTITY:作業者'] }, { confidence: 'CONFIRMED' }));
-  assert(((review(withUpd).impactCheck || []).find(x => x.fieldCode === 'ステータス') || {}).access === 'WRITE', 'UPDATE_PROCESS（changeKind STATUS）でも同じ');
+  assert(review(withUpd).warnings.some(x => x.code === 'PLANNER_IMPACT_MISSING' && x.stepIds.includes('P1') && /ステータスの追加・変更で値の集合が変わる/.test(x.message)), 'UPDATE_PROCESS（changeKind STATUS）でも同じ');
   // 標準手順の spec がフィールドに値を書き込む（アプリアクションの転記先・ルックアップの取得項目）→ WRITE 扱い
   const withAct = mkPlan([
     mkStep('P1', 'REUSE_FIELD', 'FIELD', 'amount', { fields: ['amount'] }, { confidence: 'CONFIRMED' }),
     mkStep('P2', 'ADD_APP_ACTION', 'APP_ACTION', '見積を複製', { name: '見積を複製', destApp: '353', actionMappings: [{ srcType: 'FIELD', srcField: 'amount', destField: 'amount' }] }, { confidence: 'CONFIRMED' }),
   ]);
   const wa = review(withAct);
-  const waItem = (wa.impactCheck || []).find(x => x.fieldCode === 'amount');
-  assert(waItem && waItem.access === 'WRITE' && waItem.accessVia === 'spec' && wa.warnings.some(x => x.code === 'PLANNER_IMPACT_MISSING' && x.stepIds.includes('P1') && /値を書き込む/.test(x.message)), `アプリアクションの転記先 → WRITE（spec）で警告: ${JSON.stringify(waItem && { access: waItem.access, via: waItem.accessVia })}`);
+  const SPEC_WRITES = /この計画の手順（ルックアップ \/ アプリアクション \/ フィールドの変更）がこのフィールドに値を書き込む/;
+  assert(wa.warnings.some(x => x.code === 'PLANNER_IMPACT_MISSING' && x.stepIds.includes('P1') && SPEC_WRITES.test(x.message)), `アプリアクションの転記先 → WRITE（標準手順が値を書き込む）で警告: ${JSON.stringify(wa.warnings.map(w => w.message))}`);
   const withLk = mkPlan([
     mkStep('P1', 'REUSE_FIELD', 'FIELD', 'amount', { fields: ['amount'] }, { confidence: 'CONFIRMED' }),
     mkStep('P2', 'UPDATE_LOOKUP', 'FIELD', 'customer_code', { addMappings: [{ relatedField: 'price', field: 'amount' }] }, { confidence: 'CONFIRMED' }),
   ]);
   const wl = review(withLk);
-  assert((((wl.impactCheck || []).find(x => x.fieldCode === 'amount')) || {}).accessVia === 'spec', `ルックアップの取得項目（addMappings[].field）→ WRITE（spec）: ${JSON.stringify((wl.impactCheck || []).find(x => x.fieldCode === 'amount'))}`);
+  assert(wl.warnings.some(x => x.code === 'PLANNER_IMPACT_MISSING' && x.stepIds.includes('P1') && SPEC_WRITES.test(x.message)), `ルックアップの取得項目（addMappings[].field）→ WRITE（標準手順が値を書き込む）: ${JSON.stringify(wl.warnings.map(w => w.message))}`);
   // 有料確認の新ケース 2 そのもの: P3（REUSE_FIELD ステータス）に PLANNER_IMPACT_MISSING が出ていたが、C1 / C2 は READ なので出ない
   const c2 = review(SR.CASE2_PLAN);
   assert(!c2.warnings.some(x => x.code === 'PLANNER_IMPACT_MISSING' && x.stepIds.includes('P3')) && st(c2, 'P3').status === 'VALID', `新ケース 2 の P3（REUSE_FIELD ステータス・JS は READ）に PLANNER_IMPACT_MISSING を出さない: ${JSON.stringify(c2.warnings.map(w => w.code))}`);

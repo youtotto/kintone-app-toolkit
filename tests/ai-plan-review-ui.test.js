@@ -90,9 +90,9 @@ console.log('\n--- 1. Toolkit が確かめた結果の表示（右の「変更�
   const sum = summaryHtml(plan, rev), detail = detailHtml(plan);
   assert(rev && rev.reviewVersion === '1' && rev.steps.length === 8, '計画を Toolkit が確認する（KTPlanReview.review）');
   assert(sum.includes('何が変わるか（Toolkit が確かめた変更前後）') && !sum.includes('安全に追加できる変更') && !sum.includes('AI の説明より優先'), '変更内容: Toolkit が確かめた変更前後（安全区分から別に数えた行と「AI の説明より優先」の包括的な文は出さない）');
-  assert(!/追加：\d|既存変更：|高リスク変更：|競合候補：/.test(sum + detail) && typeof rev.summary.counts.highRisk === 'number' && typeof rev.summary.counts.conflicts === 'number', `内部の分類の件数（追加・既存変更・高リスク・競合候補）は画面に出さない（確認のデータと監査 JSON には残る）: ${JSON.stringify(rev.summary.counts)}`);
-  const er = rev.executionReadiness;
-  assert(er.safeSteps.includes('P1') && er.reviewSteps.includes('P2') && er.reviewSteps.includes('P4') && er.blockedSteps.includes('P7') && er.planOnlySteps.includes('P8'), `safe / review / blocked / plan-only の振り分け（確認のデータ。表示はしない）（${JSON.stringify(er)}）`);
+  assert(!/追加：\d|既存変更：|高リスク変更：|競合候補：/.test(sum + detail), '内部の分類の件数（追加・既存変更・高リスク・競合候補）は画面に出さない（2026-10-19: 確認の結果にも件数の集計は持たない）');
+  const sf = (id) => (rev.steps.find(r => r.stepId === id) || {}).safety;
+  assert(sf('P1') === 'SAFE' && sf('P2') === 'REVIEW_REQUIRED' && sf('P4') === 'REVIEW_REQUIRED' && sf('P7') === 'BLOCKED' && sf('P8') === 'PLAN_ONLY', `safe / review / blocked / plan-only は手順ごとの確認の結果（表示はしない。2026-10-19: 実行の見込みの集約は持たない）: ${JSON.stringify(rev.steps.map(r => [r.stepId, r.safety]))}`);
   assert(detail.includes('以下は AI の提案です') && detail.includes('この上の要約にあります') && !detail.includes('kt-ai-sum-check') && !detail.includes('Toolkit で確認した結果'), 'AI の提案（計画の全文）と Toolkit の確認（変更内容の要約）を分ける。計画の全文に確認の結果を併記しない');
   const p4 = rowOf(sum, 'P4');
   assert(p4.includes('Before:') && p4.includes('After:') && p4.includes('amount &lt; &quot;1000000&quot;') && !p4.includes('△'), `既存アクションの条件変更: 手順の行に Before / After と実行される式（反映できない手順の行に「確かめてください」の指摘は重ねない）: ${p4.slice(0, 200)}`);
@@ -126,7 +126,7 @@ console.log('\n--- 2. 回帰（計画の表示 / Q&A / Free）---');
   const rev = KTPlanReview.review({ plan, ...INPUTS });
   const sum = summaryHtml(plan, rev), detail = detailHtml(plan);
   assert(detail.includes('変更計画（AI の提案）') && detail.includes('kt-ai-plan-json-toggle') && sum.includes('何が変わるか（Toolkit が確かめた変更前後）') && rowOf(sum, 'P1').includes('＋ 新規フィールド'), '計画の表示（AI 提案の全文・JSON）と Toolkit が確かめた変更前後');
-  assert(rev.executionReadiness.status === 'REVIEW_REQUIRED' || rev.executionReadiness.status === 'SAFE', '単純な追加計画は SAFE / REVIEW_REQUIRED');
+  assert(rev.steps.length === 1 && ['SAFE', 'REVIEW_REQUIRED'].includes(rev.steps[0].safety), '単純な追加計画は SAFE / REVIEW_REQUIRED');
   // Q&A（質問する）は変わらない
   const qa = mount();
   await tick();

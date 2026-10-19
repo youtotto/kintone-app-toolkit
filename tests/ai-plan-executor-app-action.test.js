@@ -57,7 +57,7 @@ console.log('\n--- 1. §43 / §44 UPDATE_APP_ACTION: 転記の追加（既存 3 
   const p = UPD(); const mock = makeKintoneMock(DATA); const before = actsOf(mock);
   const { rv, prepared, log } = await flow(p, mock, { skipRollback: true });
   const r1 = rv.steps[0];
-  assert(['VALID', 'WARNING', 'NEEDS_CONFIRMATION'].includes(r1.status) && r1.safety === 'REVIEW_REQUIRED' && r1.diff.target.identity.id === '5520' && r1.diff.target.identity.dest.appId === '311' && rv.crossApp.some(c => c.appId === '311' && c.role === 'destination'), '前提: Review は REVIEW_REQUIRED・identity に id / コピー先の指紋');
+  assert(['VALID', 'WARNING', 'NEEDS_CONFIRMATION'].includes(r1.status) && r1.safety === 'REVIEW_REQUIRED' && r1.diff.target.identity.id === '5520' && r1.diff.target.identity.dest.appId === '311' && r1.crossApp && r1.crossApp.appId === '311' && r1.crossApp.role === 'destination', '前提: Review は REVIEW_REQUIRED・identity に id / 手順の crossApp にコピー先の指紋');
   assert(prepared.status === 'PREPARED' && prepared.steps[0].status === 'PENDING' && mock.calls.includes('GET actions') && mock.calls.includes('GET app fields') && prepared.snapshot.actions && Object.keys(prepared.snapshot.actions.actions).length === 3 && prepared.snapshot.relatedApps['311'].name === '見積管理', 'prepare: 現在の全アクションを snapshot に・コピー先 311 の定義を read-only で再取得');
   assert(prepared.crossApp.length === 1 && prepared.crossApp[0].role === 'destination' && prepared.crossApp[0].current.fieldsHash === prepared.crossApp[0].reviewed.fieldsHash && prepared.stale.status === 'FRESH', 'prepare: コピー先の指紋が Review 時点と一致 → FRESH');
   const pp = prepared.steps[0].prepared;
@@ -155,7 +155,7 @@ console.log('\n--- 6. §41 Review 時点で未取得のコピー先: 実行直�
   const p = plan([step('P1', 'ADD_APP_ACTION', 'APP_ACTION', '請求書作成', { name: '請求書作成', destApp: '311', actionMappings: [{ srcType: 'FIELD', srcField: 'case_name', destField: 'customer' }], entities: ['GROUP:everyone'] })]);
   const mock = makeKintoneMock({ ...data, relatedApps: FX.makeData().relatedApps });   // kintone 側には 311 が存在する
   const { rv, prepared, log, rolled } = await flow(p, mock, { data });
-  assert(rv.steps[0].issues.some(i => i.code === 'DEST_APP_NOT_LOADED') && rv.steps[0].safety === 'REVIEW_REQUIRED' && rv.crossApp[0].available === false, 'Review: コピー先 311 は未取得 → DEST_APP_NOT_LOADED（要確認・推測しない）');
+  assert(rv.steps[0].issues.some(i => i.code === 'DEST_APP_NOT_LOADED') && rv.steps[0].safety === 'REVIEW_REQUIRED' && rv.steps[0].crossApp.available === false, 'Review: コピー先 311 は未取得 → DEST_APP_NOT_LOADED（要確認・推測しない）');
   assert(prepared.status === 'PREPARED' && prepared.freshReviewSteps.join() === 'P1' && prepared.crossApp[0].fetchedAtPrepare === true && prepared.crossApp[0].current.available === true && prepared.steps[0].prepared.sensitive.some(x => x.code === 'DEST_REQUIRED_FIELD_UNMAPPED'), 'prepare: 311 を取得して再 Review した結果で準備（必須項目の警告が実行直前に出る）');
   assert(log.status === 'DONE' && log.steps[0].status === 'VERIFIED' && log.simulation.match === true && rolled.status === 'ROLLED_BACK_VERIFIED' && Object.keys(actsOf(mock)).length === 0, '反映 → 検証 → Simulation 一致（再 Review の After）→ rollback で元の 0 件');
   const data2 = FX.makeData(); delete data2.relatedApps['311']; data2.actions = { actions: {}, revision: '12' };

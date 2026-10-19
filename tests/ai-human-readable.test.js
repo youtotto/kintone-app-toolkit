@@ -47,7 +47,6 @@ const planJs3 = (args) => {
     r.plan.steps.push({ id: cid, actionType: 'CUSTOMIZATION_REQUIRED', targetKind: 'JS', targetRef: null, title: TITLES[cid], spec: { customizationId: cid }, dependsOn: [] });
     r.plan.customizations.push(clone(CUST[cid]));
     r.review.steps.push({ stepId: cid, status: 'VALID', safety: 'PLAN_ONLY', customization: clone(CUST[cid]), codeGeneration: { supported: true, strategy: 'NEW_JS_FILE', reason: null }, issues: [] });
-    r.review.executionReadiness.planOnlySteps.push(cid);
   }
   return r;
 };
@@ -286,7 +285,7 @@ await section(async () => {
 });
 await section(async () => {
   // 既存の設定を変える手順（Toolkit Review の変更前後）は「この案で実現すること」に 1 文（見落とすと業務の結果が変わる変更は左にも残す）
-  const withUpdate = (args) => { const r = planJs1(args); r.plan.steps.push({ id: 'P2', actionType: 'UPDATE_VIEW', targetKind: 'VIEW', targetRef: '承認待ち一覧', title: '一覧「承認待ち一覧」の絞り込みを変更', spec: { name: '承認待ち一覧' }, dependsOn: [] }); r.review.steps.push({ stepId: 'P2', status: 'VALID', safety: 'REVIEW', diff: { human: ['絞り込み: なし → ステータスが「承認待ち」'] }, issues: [] }); r.review.executionReadiness.reviewSteps.push('P2'); return r; };
+  const withUpdate = (args) => { const r = planJs1(args); r.plan.steps.push({ id: 'P2', actionType: 'UPDATE_VIEW', targetKind: 'VIEW', targetRef: '承認待ち一覧', title: '一覧「承認待ち一覧」の絞り込みを変更', spec: { name: '承認待ち一覧' }, dependsOn: [] }); r.review.steps.push({ stepId: 'P2', status: 'VALID', safety: 'REVIEW', diff: { human: ['絞り込み: なし → ステータスが「承認待ち」'] }, issues: [] }); return r; };
   const x = makeConvC({ planImpl: withUpdate, generate: stagedGenerate({ C1: ['good'] }) });
   await sendUntilAdopt(x);
   const fin = x.c.activePlan().final, vis = stripC(outsideDetails(finalHtml(x)));
@@ -309,7 +308,6 @@ await section(async () => {
     const r = planJs1(args);
     r.plan.steps.push({ id: 'P3', actionType: 'UPDATE_PROCESS', targetKind: 'PROCESS', targetRef: '申請する', title: 'アクション「申請する」の条件を変更', spec: { name: '申請する', from: '未処理', to: '承認待ち', filterCond: 'amount < 1000000' }, dependsOn: [] });
     r.review.steps.push({ stepId: 'P3', status: 'NEEDS_CONFIRMATION', safety: 'REVIEW', diff: { changeType: 'UPDATE', changeKind: 'ACTION_CONDITION', target: { kind: 'PROCESS_ACTION', id: '申請する' }, before: { name: '申請する', from: '未処理', to: '承認待ち', filterCond: '' }, after: { name: '申請する', from: '未処理', to: '承認待ち', filterCond: 'amount < 1000000' }, human: ['✎ アクション「申請する」を変更', 'Before: 未処理 → 承認待ち（条件なし）', 'After: 未処理 → 承認待ち [amount < 1000000]'] }, issues: [] });
-    r.review.executionReadiness.reviewSteps.push('P3');
     return r;
   };
   const x = makeConvC({ planImpl: withProcess, generate: stagedGenerate({ C1: ['good'] }) });
@@ -410,7 +408,7 @@ await section(async () => {
   const portPlan = (args) => {
     const c = { ...clone(F.CUSTOMIZATIONS.find(z => z.customizationId === 'C3')), dependsOn: [], evidenceIds: [] };
     const plan = { goal: args.goal, assessment: { summary: 'PC の入力チェックをモバイルへ移します。' }, steps: [{ id: 'C3', actionType: 'CUSTOMIZATION_REQUIRED', targetKind: 'JS', targetRef: null, title: 'モバイルの入力チェック', spec: { customizationId: 'C3' }, dependsOn: [] }], customizations: [clone(c)], provisionals: [], questions: [], unknowns: [], impact: [], solution: 'CUSTOMIZATION' };
-    return { plan, ctx: null, gatewayPlan: clone(plan), turn: { reply: 'PC の入力チェックをモバイルへ移します。', requirementOps: [], utteranceCoverage: [] }, review: { base: { baseVersion: '1', env: 'preview', ok: true, fingerprint: 'fp-1', revision: { preview: '10' } }, steps: [{ stepId: 'C3', status: 'VALID', safety: 'PLAN_ONLY', customization: clone(c), codeGeneration: { supported: true, strategy: 'NEW_JS_FILE', reason: null }, issues: [] }], executionReadiness: { safeSteps: [], reviewSteps: [], blockedSteps: [], planOnlySteps: ['C3'] }, warnings: [] } };
+    return { plan, ctx: null, gatewayPlan: clone(plan), turn: { reply: 'PC の入力チェックをモバイルへ移します。', requirementOps: [], utteranceCoverage: [] }, review: { base: { baseVersion: '1', env: 'preview', ok: true, fingerprint: 'fp-1', revision: { preview: '10' } }, steps: [{ stepId: 'C3', status: 'VALID', safety: 'PLAN_ONLY', customization: clone(c), codeGeneration: { supported: true, strategy: 'NEW_JS_FILE', reason: null }, issues: [] }], warnings: [] } };
   };
   const gen = makeGenerate();
   const x = makeConvC({ scriptFn: portScript, labels: LABELS, generate: gen, planImpl: portPlan });

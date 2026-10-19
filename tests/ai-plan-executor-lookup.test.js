@@ -54,7 +54,7 @@ console.log('\n--- 1. §46 代表ユースケース: ADD_FIELD ×2 → UPDATE_LO
   const p = ADD_TWO(); const mock = makeKintoneMock(DATA); const before = lkOf(mock);
   const { rv, prepared, log } = await flow(p, mock, { skipRollback: true });
   const r3 = rv.steps.find(r => r.stepId === 'P3');
-  assert(r3.status === 'VALID' && r3.safety === 'REVIEW_REQUIRED' && r3.diff.target.identity.related.appId === '500' && rv.crossApp.length === 1, '前提: Review は P3 を REVIEW_REQUIRED・identity に参照元の指紋');
+  assert(r3.status === 'VALID' && r3.safety === 'REVIEW_REQUIRED' && r3.diff.target.identity.related.appId === '500' && rv.steps.filter(r => r.crossApp).map(r => r.stepId).join() === 'P3' && r3.crossApp.appId === '500', '前提: Review は P3 を REVIEW_REQUIRED・identity と手順の crossApp に参照元の指紋');
   assert(prepared.status === 'PREPARED' && prepared.steps.every(s => s.status === 'PENDING') && mock.calls.includes('GET app fields') && mock.calls.includes('GET app') && prepared.snapshot.relatedApps['500'].name === '顧客マスタ', 'prepare: 3 step とも PENDING・参照元アプリの定義を read-only で再取得（snapshot.relatedApps）');
   assert(prepared.crossApp.length === 1 && prepared.crossApp[0].appId === '500' && prepared.crossApp[0].current.fieldsHash === prepared.crossApp[0].reviewed.fieldsHash && prepared.crossApp[0].current.revision === '21' && prepared.stale.status === 'FRESH', 'prepare: 参照元の指紋（revision / fieldsHash）が Review 時点と一致 → FRESH');
   const pp = prepared.steps[2].prepared;

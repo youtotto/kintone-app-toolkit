@@ -261,7 +261,7 @@ await section(async () => {
     //   2026-10-18: 最終案の判定は設定の手順の反映の分類（手順ごとの確認の結果が要る）も見るので、偽の確認の結果も計画のすべての手順を持つ（製品の確認はすべての手順を確かめる。
     //   前の素材は P1 だけで、P2〜P4 は「確認の結果が無い」で反映できない手順になる）
     //   2026-10-19: P1 の一覧の変更後は計画と同じ表示フィールドを持つ（前は表示フィールドが無く、値の無い一覧を判定が通していた）
-    review: { base: { baseVersion: '1', env: 'preview', ok: true, fingerprint: 'fp-1', revision: { preview: '10' } }, steps: [{ stepId: 'P1', status: 'VALID', safety: 'SAFE', diff: { before: null, after: { name: '承認待ち一覧', fields: ['owner'], filterCond: 'ステータス in ("承認待ち")' }, human: ['＋ 一覧「承認待ち一覧」（条件: ステータス in ("承認待ち")）'] }, issues: [] }, ...routeSteps.map(s => ({ stepId: s.id, status: 'VALID', safety: 'SAFE', spec: JSON.parse(JSON.stringify(s.spec)), diff: { before: null, after: JSON.parse(JSON.stringify(s.spec)), human: [`＋ ${s.title}`] }, issues: [] }))], executionReadiness: { safeSteps: ['P1', 'P2', 'P3', 'P4'], reviewSteps: [], blockedSteps: [], planOnlySteps: [] }, warnings: [] } });
+    review: { base: { baseVersion: '1', env: 'preview', ok: true, fingerprint: 'fp-1', revision: { preview: '10' } }, steps: [{ stepId: 'P1', status: 'VALID', safety: 'SAFE', diff: { before: null, after: { name: '承認待ち一覧', fields: ['owner'], filterCond: 'ステータス in ("承認待ち")' }, human: ['＋ 一覧「承認待ち一覧」（条件: ステータス in ("承認待ち")）'] }, issues: [] }, ...routeSteps.map(s => ({ stepId: s.id, status: 'VALID', safety: 'SAFE', spec: JSON.parse(JSON.stringify(s.spec)), diff: { before: null, after: JSON.parse(JSON.stringify(s.spec)), human: [`＋ ${s.title}`] }, issues: [] }))], warnings: [] } });
   const x = K.makeConvC({ planImpl });
   await K.adoptC(x);
   const v = x.c.activePlan(), fin = v && v.final;

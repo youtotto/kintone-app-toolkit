@@ -200,7 +200,6 @@ const planJs2 = (args) => {
   r.plan.steps.push({ id: 'C2', actionType: 'CUSTOMIZATION_REQUIRED', targetKind: 'JS', targetRef: null, title: 'JavaScript 2', spec: { customizationId: 'C2' }, dependsOn: [] });
   r.plan.customizations.push(clone(CUST2));
   r.review.steps.push({ stepId: 'C2', status: 'VALID', safety: 'PLAN_ONLY', customization: clone(CUST2), codeGeneration: { supported: true, strategy: 'NEW_JS_FILE', reason: null }, issues: [] });
-  r.review.executionReadiness.planOnlySteps.push('C2');
   return r;
 };
 /** 生成工程の偽物: C1 の最初の呼び出しだけ、実際の client（送り方は手で返す）を通してから検証済みの結果を返す */

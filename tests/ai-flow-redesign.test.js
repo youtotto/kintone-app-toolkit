@@ -1039,7 +1039,7 @@ await section(async () => {
 });
 // 指示 A7: 実行できない手順（BLOCKED）があれば承認できない / B6: 残る判断は先に決めたいことだけ
 await section(async () => {
-  const y = makeConvC({ planImpl: (args) => { const r = planJs(args); r.plan.steps.unshift({ id: 'P1', actionType: 'ADD_FIELD', targetKind: 'FIELD', targetRef: 'x', title: 'フィールド追加', spec: {}, dependsOn: [] }); r.review.steps.unshift({ stepId: 'P1', status: 'INVALID', safety: 'BLOCKED', issues: [{ code: 'X', message: 'フィールドの型が指定されていません' }] }); r.review.executionReadiness = { safeSteps: [], reviewSteps: [], blockedSteps: ['P1'], planOnlySteps: ['C1'] }; return r; } });
+  const y = makeConvC({ planImpl: (args) => { const r = planJs(args); r.plan.steps.unshift({ id: 'P1', actionType: 'ADD_FIELD', targetKind: 'FIELD', targetRef: 'x', title: 'フィールド追加', spec: {}, dependsOn: [] }); r.review.steps.unshift({ stepId: 'P1', status: 'INVALID', safety: 'BLOCKED', issues: [{ code: 'X', message: 'フィールドの型が指定されていません' }] }); return r; } });
   await adoptC(y);
   const vy = y.c.activePlan();
   assert(FS.readyOf(vy) === false && vy.final.blockedSteps.length === 1 && vy.final.cannot.some(c => c.kind === 'blocked' && /実行できない手順: フィールド追加（フィールドの型が指定されていません）/.test(c.text)) && /実行できない設定の手順が 1 件/.test(FS.reasonOf(vy)), `指示 A7: 実行できない手順があれば承認できない（手順の名前と理由）: ${JSON.stringify(vy.final.cannot)}`);
@@ -3095,7 +3095,6 @@ await section(async () => {
     b.plan.steps = [b.plan.steps[0], { ...clone(b.plan.steps[0]), id: 'C2', spec: { customizationId: 'C2' } }];
     b.plan.customizations = [c1, c2];
     b.review.steps = [b.review.steps[0], { ...clone(b.review.steps[0]), stepId: 'C2', customization: clone(c2) }];
-    b.review.executionReadiness.planOnlySteps = ['C1', 'C2'];
     return b;
   };
   const x = makeConvC({ planImpl: twoPlats });
