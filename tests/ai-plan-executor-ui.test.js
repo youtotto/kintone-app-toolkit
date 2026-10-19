@@ -87,7 +87,7 @@ async function rollbackFlow(x, { before = null } = {}) {
   x.s.stage = 'rolled-back';
   return { confirm, done: x.html() };
 }
-const auditOf = (x) => KTPlanExecutor.buildAudit({ goal: x.plan.goal, plan: x.plan, review: x.review, decisions: {}, prepared: x.s.prepared, execution: x.s.execution, rollback: x.s.rollback });
+const auditOf = (x) => KTPlanExecutor.buildAudit({ goal: x.plan.goal, plan: x.plan, review: x.review, prepared: x.s.prepared, execution: x.s.execution, rollback: x.s.rollback });
 
 (async () => {
 console.log('\n--- 1. 反映の画面: 最終案の反映の前・反映中・完了・監査 ---');
@@ -106,7 +106,7 @@ console.log('\n--- 1. 反映の画面: 最終案の反映の前・反映中・�
   assert(e3.includes('再解析：フィールド 24 件（実行前 23）'), '再解析の要約（フィールド数 23 → 24）');
   assert(e3.includes('id="kt-ai-exec-audit-copy"') && e3.includes('id="kt-ai-exec-audit-download"') && e3.includes('id="kt-ai-exec-snapshot-copy"') && hasButton(e3, '変更前の状態に戻す'), '完了画面の［詳しく］: 監査 JSON のコピー・保存・実行前スナップショット・［変更前の状態に戻す］');
   const audit = auditOf(x);
-  assert(audit.auditVersion === '2' && audit.goal === GOAL && audit.plan.steps.length === 3 && JSON.stringify(audit.humanDecisions) === '{}' && audit.execution.status === 'DONE' && audit.verification.length === 3 && audit.beforeSnapshot.revision === '12' && audit.actualAfter.addedFields.join() === 'progress' && audit.rollbackPlan.steps.length === 2 && audit.rollbackPlan.executed === false, '監査 JSON: goal / plan / review / 外した手順（無し）/ execution / verification / before snapshot / actual after / rollback 計画');
+  assert(audit.auditVersion === '2' && audit.goal === GOAL && audit.plan.steps.length === 3 && !('humanDecisions' in audit) && audit.execution.status === 'DONE' && audit.verification.length === 3 && audit.beforeSnapshot.revision === '12' && audit.actualAfter.addedFields.join() === 'progress' && audit.rollbackPlan.steps.length === 2 && audit.rollbackPlan.executed === false, '監査 JSON: goal / plan / review / execution / verification / before snapshot / actual after / rollback 計画（手順を外す判断の欄は無い: 2026-10-19 廃止）');
   const snap = x.s.execution.snapshot || x.s.prepared.snapshot;
   assert(snap.revision === '12' && snap.fields.properties.owner && !snap.fields.properties.progress, '実行前スナップショット（追加前の設定）');
   assert(e3.includes('DELETE_FIELD') && e3.includes('RESTORE_VIEWS') && e3.includes('&quot;executed&quot;: false'), 'ロールバック計画（DELETE_FIELD / RESTORE_VIEWS）を表示できる・実行はしない');

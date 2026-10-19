@@ -330,7 +330,7 @@ console.log('\n--- 3. AI タブ（mountRoot / switch / minimized / 旧 Templates
   assert(Object.values(MIGRATED).every(id => html.includes(`id="${id}"`)) && !html.includes('id="kt-ai-plan"'), `移行一覧: ${Object.keys(MIGRATED).join(' / ')} の要素が AI タブにある（Context ペインの［変更計画を作成］は無い）`);
   await adoptScreen(m);
   const plan = m.$('kt-ai-plan-result').innerHTML;
-  assert(!plan.includes('id="kt-ai-review"') && m.$('kt-ai-review-result').innerHTML.includes('id="kt-ai-review"') && /動作テスト環境への反映/.test(m.$('kt-ai-exec').innerHTML) && m.$('kt-ai-exec').innerHTML.includes('kt-ai-apply-note') && m.$('kt-ai-exec-empty').style.display === 'none', '2026-10-06: 「変更内容」は AI の提案だけ。Toolkit で確認した結果は右の「確認結果」、動作テスト環境への反映は右のタブ「反映」（§0e.1: 最終案の流れでは、反映の操作は最終案のカードの［動作テスト環境へ反映］）');
+  assert(!plan.includes('id="kt-ai-review"') && /何が変わるか（Toolkit が確かめた変更前後）/.test(m.$('kt-ai-change-summary').innerHTML) && !/kt-ai-pane-review/.test(html) && /動作テスト環境への反映/.test(m.$('kt-ai-exec').innerHTML) && m.$('kt-ai-exec').innerHTML.includes('kt-ai-apply-note') && m.$('kt-ai-exec-empty').style.display === 'none', '2026-10-06: 「変更内容」の［計画の詳細と根拠］は AI の提案だけ。Toolkit が確かめた結果は右の「変更内容」の要約（2026-10-19: 確認結果のタブは廃止）、動作テスト環境への反映は右のタブ「反映」（§0e.1: 最終案の流れでは、反映の操作は最終案のカードの［動作テスト環境へ反映］）');
   assert(html.includes(KTContextUi_INTRO()) , '無料の説明文（KTContextUi.INTRO_TEXT）も AI タブに移行');
   function KTContextUi_INTRO() { return loadToolkit().KTContextUi.INTRO_TEXT.slice(0, 20); }
 }
@@ -367,19 +367,19 @@ console.log('\n--- 4. AI Workspace: free / connected / responsive / header ---')
   //   接続できる環境の通常の画面に「Context」のタブを出さない。何も選ばずに、開いた直後の入力をそのまま送れる（実 AI の会話）
   { const h = c.host.innerHTML;
     assert(!/会話の方式|例の発言|模擬応答|kt-ai-agent-bar|data-pane="dev"/.test(h + c.$('kt-ai-drawer-tabs').innerHTML) && (h.match(/>新しい会話</g) || []).length === 1, '通常の入口: 会話の方式・例の発言・模擬応答・開発者の画面が無い・［新しい会話］は 1 か所');
-    // 2026-10-07: 右のタブは 変更内容・コード・確認結果・反映（主）と 詳細情報・接続（控えめ）。"btn" クラスは付かない
+    // 2026-10-07: 右のタブは 変更内容・コード・反映（主）と 詳細情報・接続（控えめ。2026-10-19: 確認結果のタブは廃止）。"btn" クラスは付かない
     const tabs = c.$('kt-ai-drawer-tabs').innerHTML;
     const tabOf = (p) => (new RegExp(`<button[^>]*data-pane="${p}"[^>]*>([^<]*)`).exec(tabs) || [])[0] || '';
-    assert(/data-pane="context"[^>]*style="display:none;"/.test(tabs) && !/data-pane="(plan|review|code|exec|evidence|connection)"[^>]*display:none/.test(tabs) && /data-pane="exec"[^>]*>反映</.test(tabs) && !/class="btn/.test(tabs)
-      && /変更内容$/.test(tabOf('plan')) && /コード$/.test(tabOf('code')) && /確認結果$/.test(tabOf('review')) && /詳細情報$/.test(tabOf('evidence')) && /接続$/.test(tabOf('connection'))
-      && ['plan', 'code', 'review', 'exec'].every(p => /class="kt-ai-dtab(?: active)?"/.test(tabOf(p))) && ['evidence', 'connection'].every(p => /is-quiet/.test(tabOf(p))), '通常の入口: 右は 変更内容・コード・確認結果・反映（と控えめな 詳細情報・接続）。「Context」のタブは出さない');
+    assert(/data-pane="context"[^>]*style="display:none;"/.test(tabs) && !/data-pane="(plan|code|exec|evidence|connection)"[^>]*display:none/.test(tabs) && !/data-pane="review"/.test(tabs) && /data-pane="exec"[^>]*>反映</.test(tabs) && !/class="btn/.test(tabs)
+      && /変更内容$/.test(tabOf('plan')) && /コード$/.test(tabOf('code')) && /詳細情報$/.test(tabOf('evidence')) && /接続$/.test(tabOf('connection'))
+      && ['plan', 'code', 'exec'].every(p => /class="kt-ai-dtab(?: active)?"/.test(tabOf(p))) && ['evidence', 'connection'].every(p => /is-quiet/.test(tabOf(p))), '通常の入口: 右は 変更内容・コード・反映（と控えめな 詳細情報・接続）。「Context」のタブは出さない');
     const c2 = mount(); await ticks();
     await c2.panel.send('このフィールドは何に使ってる？'); await ticks();
     assert(c2.calls.ask.length === 1 && c2.msgs().some(m => m.type === 'USER' && /何に使ってる/.test(m.text)), '何も選ばずに、自分の言葉をそのまま送れる（実 AI の会話）'); }
   { const h = c.host.innerHTML; const i = (t) => h.indexOf(t);
     assert(i('id="kt-ai-pane-context"') > 0 && i('id="kt-ai-pane-context"') < i('id="kt-ai-generate"') && i('id="kt-ai-generate"') < i('id="kt-ai-pane-connection"') && i('id="kt-ai-pane-connection"') < i('id="kt-ai-connect-start"') && i('id="kt-ai-pane-plan"') < i('id="kt-ai-plan-result"') && i('id="kt-ai-plan-result"') < i('id="kt-ai-pane-evidence"'), '無料出力は Context ペイン・接続は接続ペイン・計画の全文は「変更内容」ペイン（削除していない）');
     // 2026-10-06: 「変更内容」= 対象の JS・空の案内・要約・実装の内容・<details> の中の計画の全文。右の「反映」（#kt-ai-pane-exec）は内容の領域の外（右下）・反映の記録は 'log' ペイン
-    assert(i('id="kt-ai-pane-plan"') < i('id="kt-ai-subject-info"') && i('id="kt-ai-subject-info"') < i('id="kt-ai-pane-plan-empty"') && i('id="kt-ai-pane-plan-empty"') < i('id="kt-ai-change-summary"') && i('id="kt-ai-change-summary"') < i('id="kt-ai-spec"') && i('id="kt-ai-spec"') < i('<details id="kt-ai-plan-detail"') && i('<details id="kt-ai-plan-detail"') < i('id="kt-ai-plan-result"') && i('id="kt-ai-plan-result"') < i('id="kt-ai-pane-review"'), '「変更内容」ペイン: 相談中の JS・空の案内・変更内容の要約・実装の内容・［計画の詳細と根拠］の中の計画の全文');
+    assert(i('id="kt-ai-pane-plan"') < i('id="kt-ai-subject-info"') && i('id="kt-ai-subject-info"') < i('id="kt-ai-pane-plan-empty"') && i('id="kt-ai-pane-plan-empty"') < i('id="kt-ai-change-summary"') && i('id="kt-ai-change-summary"') < i('id="kt-ai-spec"') && i('id="kt-ai-spec"') < i('<details id="kt-ai-plan-detail"') && i('<details id="kt-ai-plan-detail"') < i('id="kt-ai-plan-result"') && i('id="kt-ai-plan-result"') < i('id="kt-ai-pane-code"'), '「変更内容」ペイン: 相談中の JS・空の案内・変更内容の要約・実装の内容・［計画の詳細と根拠］の中の計画の全文');
     assert(i('id="kt-ai-right-body"') < i('id="kt-ai-pane-log"') && i('id="kt-ai-pane-log"') < i('id="kt-ai-apply-log"') && /id="kt-ai-pane-exec" class="kt-ai-pane"/.test(h) && i('id="kt-ai-right-body"') < i('id="kt-ai-pane-exec"') && i('id="kt-ai-pane-exec"') < i('id="kt-ai-exec"') && i('id="kt-ai-exec"') < i('id="kt-ai-jsreg"') && c.$('kt-ai-pane-exec').style.display === 'none', '右のタブ「反映」（#kt-ai-pane-exec）は内容の領域の中で #kt-ai-exec・#kt-ai-jsreg を持つ（初期は「変更内容」のタブなので隠れている）・反映の記録は #kt-ai-pane-log の中');
     assert(/id="kt-ai-split" class="kt-ai-split" role="separator"/.test(h) && i('class="kt-ai-ws-main"') < i('id="kt-ai-split"') && i('id="kt-ai-split"') < i('id="kt-ai-drawer"') && /<b>会話<\/b><button id="kt-ai-new-conv"/.test(h) && /<b>現在の作業内容<\/b><span id="kt-ai-ws-state"/.test(h), '画面: 左＝「会話」と［新しい会話］・右＝「現在の作業内容」・間に幅を変える境目（role=separator）'); }
   // ヘッダー（2026-10-06）: 開発支援・アプリ名（App ID）・反映先（動作テスト環境。運用環境は変えない）・AI の接続のボタン。「解析 ✓ JavaScript ✓ AI ✓」の並びは無い。件数は［詳細］に
@@ -401,7 +401,7 @@ console.log('\n--- 4. AI Workspace: free / connected / responsive / header ---')
   await c.$('kt-ai-header').dispatch({ type: 'click', target: { id: 'kt-ai-header-toggle' } });
   assert(detailOpen(), '詳細を展開できる');
   c.panel.renderHeader();
-  await c.$('kt-ai-drawer-tabs').dispatch({ type: 'click', target: { dataset: { pane: 'review' } } });
+  await c.$('kt-ai-drawer-tabs').dispatch({ type: 'click', target: { dataset: { pane: 'code' } } });
   assert(detailOpen(), '詳細の開閉は描き直しても保つ（ペインの切り替えでヘッダーを描き直しても閉じない）');
   await c.$('kt-ai-header').dispatch({ type: 'click', target: { id: 'kt-ai-header-toggle' } });
   assert(!detailOpen() && /id="kt-ai-header-detail" style="display:none;/.test(c.$('kt-ai-header').innerHTML), '詳細をもう一度押すと閉じる');
@@ -430,7 +430,7 @@ console.log('\n--- 4. AI Workspace: free / connected / responsive / header ---')
 // =========================================================
 console.log('\n--- 5. AI Workspace: 会話（ASK / PLAN / REVISE / EXPLAIN / PREVIEW / Review 統合）---');
 //   C-1 第 3 段（2026-10-08）: 依頼は仮案 → 採用 → 計画 → 最終案のカード 1 枚（変更案のカード・確認のカード・変更前後のカードは削除）。
-//   右の「変更内容」「確認結果」「反映」と、説明・反映の依頼の扱いは、この流れの上で確かめる
+//   右の「変更内容」「反映」と、説明・反映の依頼の扱いは、この流れの上で確かめる（2026-10-19: 右の「確認結果」のタブは廃止）
 {
   const m = mount();
   await ticks();
@@ -463,14 +463,14 @@ console.log('\n--- 5. AI Workspace: 会話（ASK / PLAN / REVISE / EXPLAIN / PRE
   assert(!/提案の内容（/.test(chat1) && /＋ 新規フィールド<\/b>/.test(m.$('kt-ai-plan-result').innerHTML) && /更新状況/.test(m.$('kt-ai-plan-result').innerHTML) && /DROP_DOWN/.test(m.$('kt-ai-plan-result').innerHTML), '提案資産（新規フィールド / 一覧）の詳細は右の「変更内容」の計画の全文だけ（WORKSPACE_ONLY）');
   { const sum = m.$('kt-ai-change-summary').innerHTML;
     assert(/<h3>更新状況を管理したい<\/h3>/.test(sum) && /何が変わるか（Toolkit が確かめた変更前後）/.test(sum) && /新しいフィールド：更新状況（DROP_DOWN）/.test(sum) && /確認したいこと（1 件）/.test(sum) && /更新状況の選択肢は 3 段階でよいですか/.test(sum) && !/P1|P2|E\d/.test(sum.replace(/<[^>]*>/g, '')) && m.$('kt-ai-pane-plan-empty').style.display === 'none' && m.$('kt-ai-plan-detail').style.display === '', '右の「変更内容」: 変更内容の要約（見出し=goal・何が変わるか・確認したいこと。手順・根拠の番号は出さない）・計画の全文は［計画の詳細と根拠］'); }
-  //   Toolkit の確認（REVIEW）の記録のメッセージは削除した（F5-1）。確認の結果は右の「確認結果」にまとめる。判断の select は会話に無い
+  //   Toolkit の確認（REVIEW）の記録のメッセージは削除した（F5-1）。確認の結果は右の「変更内容」にまとめる。判断の select は会話に無い
   assert(!m.msgs().some(x => x.type === 'REVIEW') && !/kt-ai-review-card/.test(chat1) && !/Toolkitで変更計画を検証しました|検証結果を見る/.test(chat1) && !/kt-ai-decision/.test(chat1), 'Toolkit の確認は会話のカードにしない（REVIEW のメッセージは無い）。判断の select は会話に無い');
   //   会話のカードの承認は最終案の［この内容で反映する］だけ（R16・画面-3）。チャットの文章・手順ごとの判断の select・反映の開始は会話に無い
   assert(!/<select/.test(chat1) && !/data-act="(approve|decide|exec-start|exec-go)"/.test(chat1) && !/id="kt-ai-exec-(start|go)"/.test(chat1) && !/まだ何も反映していません。/.test(chat1), '会話のカードに手順ごとの判断・右の「反映」の操作は無い（承認と反映は最終案の［動作テスト環境へ反映］だけ。チャットの文章では承認にならない）');
-  assert(m.$('kt-ai-review-result').innerHTML.includes('Toolkit で確認した結果') && !m.$('kt-ai-plan-result').innerHTML.includes('kt-ai-decision') && m.panel.drawerState().open === true && m.panel.drawerState().pane === 'plan' && m.panel.activeArtifact()?.type === 'CHANGE_PLAN', 'Review 統合: 右の「確認結果」に Toolkit で確認した結果。計画受信で右は「変更内容」（activeArtifact CHANGE_PLAN）');
+  assert(/何が変わるか（Toolkit が確かめた変更前後）/.test(m.$('kt-ai-change-summary').innerHTML) && !m.$('kt-ai-plan-result').innerHTML.includes('kt-ai-decision') && m.panel.drawerState().open === true && m.panel.drawerState().pane === 'plan' && m.panel.activeArtifact()?.type === 'CHANGE_PLAN', 'Review 統合: 右の「変更内容」に Toolkit が確かめた変更前後。計画受信で右は「変更内容」（activeArtifact CHANGE_PLAN）');
   //   ［Before / After］（DIFF のカード）は変更案のカードのボタンだった。変更案のカードと一緒に入口が無くなった（R の報告の「到達しなくなった小さな残り」）。
-  //   変更前後は右の「確認結果」の中にある
-  assert(m.$('kt-ai-review-diff') && /P2<\/b>/.test(m.$('kt-ai-review-result').innerHTML) && !/data-act="before-after"/.test(chat1), '変更前後は右の「確認結果」の中（会話に［Before / After］は無い）');
+  //   変更前後は右の「変更内容」の「何が変わるか」の手順の行（2026-10-19: 確認結果のタブは廃止）
+  assert((m.$('kt-ai-change-summary').innerHTML.match(/<li><span>[^<]*<\/span><div class="kt-ai-sum-diff">/g) || []).length >= 2 && !/data-act="before-after"/.test(chat1), '変更前後は右の「変更内容」の手順の行（会話に［Before / After］は無い）');
   // 右のペインを開く（右は常に表示。別のペインを見ていても切り替わる）
   m.panel.showPane('evidence');
   await clickChat(m, 'open-plan', { plan: v1.planId, version: '1' });
@@ -548,7 +548,7 @@ console.log('\n--- 6. Executor / Rollback 統合と Versioning（v1 は Executor
   { const pre = m.panel.finalPrecheck();
     assert(pre.status === 'ready' && pre.planId === v2.planId && pre.items.settings.length === 1 && pre.items.manual.length === 0 && writes(m).length === 0 && !m.msgs().some(x => x.type === 'EXECUTION') && m.panel.applyHold() === null && !v2.approval, '承認の欄: v2 の最終案ができると書き込みをしない準備を自動で走らせ、重要事項を出す（書き込み 0・まだ承認しない・反映を止める理由は無い）');
     assert(/kt-ai-apply-note/.test(m.$('kt-ai-exec').innerHTML) && /最終案のカードの［動作テスト環境へ反映］/.test(m.$('kt-ai-exec').innerHTML) && !/id="kt-ai-exec-start"/.test(m.$('kt-ai-exec').innerHTML), '右の「反映」に準備・最終確認の段は出さない（最終案のカードの［動作テスト環境へ反映］1 回で反映する）'); }
-  m.panel.showPane('review');
+  m.panel.showPane('code');
   const ar6 = await applyScreen(m);
   const out = m.panel.reviewOutput();
   assert(ar6.button && !ar6.button.disabled && v2.approval && v2.approval.precheck && out.plan.steps[0].actionType === 'REUSE_FIELD' && !out.plan.steps.some(s => s.actionType === 'ADD_FIELD') && out.approvedSteps.join() === 'P1,P2', '［動作テスト環境へ反映］1 回で v2 を承認（承認の欄の準備の指紋つき）。Executor の入力（executorOutput）は v2 だけ（v1 の ADD_FIELD は含まれない）');

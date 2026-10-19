@@ -61,10 +61,10 @@ console.log('\n--- 1. ADD_FIELD: 承認 → prepare → preview へ反映 → �
   assert(log.actualAfter.addedFields.join() === 'progress' && log.finishedAt && !/cookie|Bearer|refreshToken/i.test(JSON.stringify(log)), 'actualAfter の要約・秘密情報なし');
   const rb = E.buildRollbackPlan(log, prepared);
   assert(rb.executed === false && rb.steps.length === 1 && rb.steps[0].actionType === 'DELETE_FIELD' && rb.steps[0].api.payload.fields.join() === 'progress' && rb.snapshotRevision === '12', 'ロールバック計画: DELETE_FIELD（実行しない）＋ snapshot');
-  const audit = E.buildAudit({ goal: '更新状況を管理したい', plan: p, review: rv, decisions: new Map([['P1', 'approve']]), prepared, execution: log });
-  const auditChecks = { v: audit.auditVersion === '2', goal: audit.goal === '更新状況を管理したい', plan: audit.plan.steps.length === 1, review: audit.review.steps.length === 1, dec: audit.humanDecisions.P1 === 'approve', exec: audit.execution.executionId === prepared.executionId, ver: audit.verification[0].status === 'VERIFIED', snap: audit.beforeSnapshot.revision === '12', after: audit.actualAfter.addedFields.join() === 'progress', rb: audit.rollbackPlan.steps.length === 1, noAfter: !audit.review.simulation.after };
+  const audit = E.buildAudit({ goal: '更新状況を管理したい', plan: p, review: rv, prepared, execution: log });
+  const auditChecks = { v: audit.auditVersion === '2', goal: audit.goal === '更新状況を管理したい', plan: audit.plan.steps.length === 1, review: audit.review.steps.length === 1, noDec: !('humanDecisions' in audit), exec: audit.execution.executionId === prepared.executionId, ver: audit.verification[0].status === 'VERIFIED', snap: audit.beforeSnapshot.revision === '12', after: audit.actualAfter.addedFields.join() === 'progress', rb: audit.rollbackPlan.steps.length === 1, noAfter: !audit.review.simulation.after };
   if (!Object.values(auditChecks).every(Boolean)) console.log('audit checks', auditChecks);
-  assert(Object.values(auditChecks).every(Boolean), 'Audit JSON: goal / plan / review / 判断 / execution / verification / before snapshot / actual after / rollback（After モデルは含めない）');
+  assert(Object.values(auditChecks).every(Boolean), 'Audit JSON: goal / plan / review / execution / verification / before snapshot / actual after / rollback（After モデルは含めない。手順を外す判断の欄は無い: 2026-10-19 廃止）');
   // 二重実行
   let err = null; try { await E.executePreview(prepared, { api: mock.api }); } catch (e) { err = e; }
   assert(err && err.code === 'ALREADY_EXECUTED' && Object.keys(mock.st.fields).filter(c => c === 'progress').length === 1 && mock.calls.filter(c => c.startsWith('POST')).length === 1, '同じ prepare の二重実行は拒否（POST は 1 回だけ）');

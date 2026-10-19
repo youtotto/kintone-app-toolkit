@@ -1,5 +1,5 @@
 // 開発支援の左右 2 ペイン（2026-10-06 利用者の指示）: 左 = 会話と入力欄、右 = 現在の作業内容（常に表示・幅を変えられる）。
-//   右のタブは成果物を見るためのもの（変更内容・コード・確認結果）。右の見出しの状態は実際の処理から。直している間は前の内容として示し、反映を止める。
+//   右のタブは成果物を見るためのもの（変更内容・コード。2026-10-19: 確認結果のタブは廃止）。右の見出しの状態は実際の処理から。直している間は前の内容として示し、反映を止める。
 //   通常の会話に内部の番号・処理の通知を出さない。［新しい会話］は 1 か所で、左右を切り替える（前の処理の遅い応答を混ぜない）。反映の記録はページを開いている間残る。
 //   必要な確認（先に確認したいこと）が終わった内容だけを反映できる
 //
@@ -100,7 +100,7 @@ function mount({ inputs = INPUTS, paid = true, plans = null, now = null, extra =
     ...extra,
   }));
   const $ = (id) => host.querySelector(`#${id}`);
-  const ws = () => ['kt-ai-subject-info', 'kt-ai-spec', 'kt-ai-plan-result', 'kt-ai-review-result', 'kt-ai-exec', 'kt-ai-jsreg', 'kt-ai-code-head', 'kt-ai-code-review'].map(id => $(id).innerHTML).join('\n');
+  const ws = () => ['kt-ai-subject-info', 'kt-ai-spec', 'kt-ai-plan-result', 'kt-ai-exec', 'kt-ai-jsreg', 'kt-ai-code-head', 'kt-ai-code-review'].map(id => $(id).innerHTML).join('\n');
   return { host, panel, $, calls, copies, opened, mock, clock, ws, conv: () => panel.conversation(), chat: () => $('kt-ai-chat').innerHTML, msgs: () => panel.conversation().state.messages, types: () => panel.conversation().state.messages.map(m => m.type) };
 }
 const clickChat = (m, act, extra = {}) => m.$('kt-ai-chat').dispatch({ type: 'click', target: { dataset: { act, ...extra } } });
@@ -128,7 +128,7 @@ console.log('\n--- §1. 画面の構成: 左 = 会話と入力欄、右 = 現在
   assert(!/kt-ai-drawer-toggle|is-drawer-collapsed|作業パネルを(隠す|表示)/.test(html + m.$('kt-ai-header').innerHTML) && typeof m.panel.closeDrawer === 'undefined' && m.panel.drawerState().open === true, '右は常に表示（折りたたみの操作・API は無い）');
   const tabs = m.$('kt-ai-drawer-tabs').innerHTML;
   const order = [...tabs.matchAll(/data-pane="(\w+)"/g)].map(x => x[1]);
-  assert(order.slice(0, 3).join(',') === 'plan,code,review' && />変更内容</.test(tabs) && />コード</.test(tabs) && />確認結果</.test(tabs), `右の主のタブは 変更内容・コード・確認結果: ${order}`);
+  assert(order.slice(0, 3).join(',') === 'plan,code,exec' && />変更内容</.test(tabs) && />コード</.test(tabs) && !/>確認結果</.test(tabs), `右の主のタブは 変更内容・コード・反映（確認結果のタブは無い）: ${order}`);
   assert(/is-quiet[^"]*" data-pane="evidence"[^>]*>詳細情報/.test(tabs) && /data-pane="connection"[^>]*>接続/.test(tabs) && /data-pane="context"[^>]*style="display:none;"/.test(tabs) && /data-pane="exec"[^>]*>反映</.test(tabs), '控えめなタブ（詳細情報・接続）。反映もタブ・Context は接続できる環境では出さない');
   assert(!/会話の方式|例の発言|模擬応答|再現|計測/.test(html), '会話を始める前の選択（方式・例文・模擬応答・再現・計測）は無い');
   assert((html.match(/>新しい会話</g) || []).length === 1 && m.$('kt-ai-new-conv').disabled === true, '［新しい会話］は 1 か所（会話が無い間は押せない）');
@@ -208,7 +208,7 @@ console.log('\n--- §5. 更新中: 右は前の内容として示し、反映を
   await adopt(m);
   const sending = m.panel.send('担当者は既存のフィールドを使って、一覧の追加だけにして'); await ticks(6);
   assert(m.conv().isBusy() && m.conv().state.working === 'REVISE', `前提: 直している途中: ${m.conv().state.working}`);
-  assert(/data-status="updating">更新中</.test(m.$('kt-ai-ws-state').innerHTML) && m.$('kt-ai-right-banner').style.display === '' && /できるまで、変更内容・確認結果・コードは前の内容です（反映はできません）。/.test(m.$('kt-ai-right-banner').textContent), `右の見出しは「更新中」・前の内容であることを示す: ${m.$('kt-ai-ws-state').innerHTML} / ${m.$('kt-ai-right-banner').textContent}`);
+  assert(/data-status="updating">更新中</.test(m.$('kt-ai-ws-state').innerHTML) && m.$('kt-ai-right-banner').style.display === '' && /できるまで、変更内容・コードは前の内容です（反映はできません）。/.test(m.$('kt-ai-right-banner').textContent), `右の見出しは「更新中」・前の内容であることを示す: ${m.$('kt-ai-ws-state').innerHTML} / ${m.$('kt-ai-right-banner').textContent}`);
   assert(/新しい内容の確認が終わるまで/.test(m.panel.applyHold() || '') && !/id="kt-ai-exec-start"/.test(m.$('kt-ai-exec').innerHTML) && /新しい内容の確認が終わるまで/.test(m.$('kt-ai-exec').innerHTML) && K.applyButtonOf(m) && K.applyButtonOf(m).disabled, `直している間は反映できない（最終案のカードの［動作テスト環境へ反映］は押せず、右の「反映」に理由）: ${m.panel.applyHold()}`);
   g.open(); await sending; await ticks(8);
   assert(/data-status="ready">未反映</.test(m.$('kt-ai-ws-state').innerHTML) && m.$('kt-ai-right-banner').style.display === 'none' && m.panel.applyHold() === null, `直し終わったら最新の内容（案内を消す・反映できる状態に戻す）: ${m.panel.applyHold()}`);
@@ -440,8 +440,8 @@ console.log('\n--- §18. タブの中の印（●）を押しても切り替わ�
 {
   const m = mount();
   await ticks();
-  await m.$('kt-ai-drawer-tabs').dispatch({ type: 'click', target: { closest: (sel) => (sel === '[data-pane]' ? { dataset: { pane: 'review' } } : null) } });
-  assert(m.panel.drawerState().pane === 'review', 'タブの中の印を押しても、そのタブに切り替わる');
+  await m.$('kt-ai-drawer-tabs').dispatch({ type: 'click', target: { closest: (sel) => (sel === '[data-pane]' ? { dataset: { pane: 'code' } } : null) } });
+  assert(m.panel.drawerState().pane === 'code', 'タブの中の印を押しても、そのタブに切り替わる');
   const MSG = KTAiConversation.MSG;
   const mk = (type, role, text, data = null) => ({ id: `m${Math.random()}`, type, role, text, at: '', ...(data ? { data } : {}) });
   const choices = KTAiChatUi.messageHtml(mk(MSG.ASSISTANT_TEXT, 'toolkit', '何についてでしょうか。', { kind: 'choices', choices: ['EXPLAIN_REVIEW', 'REVISE_PLAN', 'PLAN'], text: 'これどう？' }));
@@ -506,17 +506,13 @@ console.log('\n--- §20. 読みやすさ: AI の文は段落と箇条書き（AI
   assert(/border-radius:10px; padding:16px 18px; margin-top:0;/.test(K.finalHtml(xPad)), 'カードの中の余白 16〜18px（最終案のカード）');
 }
 {
-  // 右「確認結果」: 先に必要な判断を短い文で。手順は 1 文の判定と判断。バッジ・技術的な内容は［詳しく］
+  // 2026-10-19: 右の「確認結果」のタブ（必要な判断・手順ごとの判定・［この手順を反映しない］）は廃止した。反映できる手順の件数は右の「変更内容」の「反映する内容」、
+  //   承認と反映は最終案のカードの［動作テスト環境へ反映］の 1 回。手順を外す欄は無い
   const m = mount();
   await ticks();
   await adopt(m);
-  const rv = m.$('kt-ai-review-result').innerHTML;
-  //   簡素化 D・E（2026-10-16）: 手順ごとの承認・保留は削除し、承認は最終案の 1 回（見出しは「手順ごとの判定」・欄は［この手順を反映しない］だけ）
-  const iDecide = rv.indexOf('必要な判断'), iSteps = rv.indexOf('手順ごとの判定'), iDetail = rv.indexOf('詳しく（Toolkit で確認した結果の内訳');
-  assert(iDecide >= 0 && iDecide < iSteps && iSteps < iDetail && /設定の手順 2 件のうち、動作テスト環境へ反映できるのは 2 件です。/.test(rv) && /反映は最終案のカードの［動作テスト環境へ反映］で一度に行います/.test(rv), `確認結果: 必要な判断 → 手順 → 詳しく の順: ${iDecide} ${iSteps} ${iDetail}`);
-  const step = (rv.match(/<div class="kt-ai-review-step"[\s\S]*?<\/details>\s*<\/div>/) || [''])[0];
-  const visible = step.replace(/<details[\s\S]*?<\/details>/g, '');
-  assert(/kt-ai-step-verdict/.test(visible) && /問題は見つかりませんでした。最終案の［動作テスト環境へ反映］で反映します。/.test(visible) && /type="checkbox" class="kt-ai-decision"/.test(visible) && /この手順を反映しない（外す）/.test(visible) && !/承認<\/option>|保留<\/option>/.test(rv) && !/<span style="display:inline-block; font-size:10px; padding:0 6px; border-radius:8px; border:1px solid/.test(visible) && /＋ 新規/.test(step), '手順: 1 文の判定と［この手順を反映しない］だけを出す（承認・保留の選択は無い）。色付きのバッジは［詳しく］の中だけ');
+  const sum = m.$('kt-ai-change-summary').innerHTML;
+  assert(/設定の手順 2 件（Toolkit から自動で反映できるのは 2 件）/.test(sum) && !/kt-ai-pane-review|kt-ai-review-result/.test(m.host.innerHTML) && !/kt-ai-decision|この手順を反映しない/.test(m.host.innerHTML + sum + m.chat()) && K.applyButtonOf(m), `反映できる手順の件数は右の「変更内容」・承認と反映は最終案のカードの 1 回・手順を外す欄は無い: ${K.stripC(sum).replace(/\s+/g, ' ').slice(0, 300)}`);
 }
 {
   const m = mount({ plans: (ctx) => (ctx.revision ? PLAN_V2 : PLAN_V1) });

@@ -154,7 +154,7 @@ console.log('\n--- 3. 計画の表示（会話の計画の右の「計画」と�
   const vp = KTAiClient.validatePlan(PLAN_RESPONSE, PCTX);
   const planN = { ...vp.normalized, clientWarnings: vp.warnings };
   //   右の「計画」と同じ呼び方（計画の確認の結果は渡さない。mountAiWorkspace の renderDrawer）
-  const h = KTContextUi.planHtml(planN, null, { data: INPUTS.data, ctx: PCTX });
+  const h = KTContextUi.planHtml(planN, { data: INPUTS.data, ctx: PCTX });
   assert(h.includes('＋ 新規フィールド') && h.includes('部長承認者') && h.includes('USER_SELECT') && h.includes('kt-ai-new-field') && h.includes('特定する情報がありません'), '新規フィールド提案は目立つ枠（＋ 新規フィールド / 名前 / 種類 / 理由）');
   assert(h.includes('>既存<') && h.includes('>＋ 新規<') && h.includes('>△ 確認必要<') && h.includes('>× 無効<') && h.includes('>↻ 再利用<') && h.includes('>✎ 既存変更<'), '既存 / ＋ 新規 / ✎ 既存変更 / ↻ 再利用 / △ 確認必要 / × 無効 のバッジ（Phase 11 §35）');
   assert(h.includes('<b>P1</b>') && h.includes('<b>P2</b>') && h.includes('<b>P3</b>') && h.includes('依存：P1 の後') && h.includes('依存：P2 の後'), '手順 P1〜P3 と依存関係');

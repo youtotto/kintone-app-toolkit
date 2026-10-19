@@ -7,6 +7,7 @@
 //   2. 図の大きさ: 同じ画面で Before の図が 16px に潰れた。描き始めた後（Mermaid の描画を待つ間）にペインが隠れると、
 //      ペインの中で測る mermaid.run は大きさを 0 と計算する。mermaid.render（ページの body の一時的な要素で測る）で描き、SVG を枠に入れる。
 //      描けなかった図は Mermaid のエラー画像ではなく、理由とコードを出す
+//   2026-10-19: 計画のプロセス図は右の「確認結果」のタブ（廃止）から、右の「変更内容」の［プロセス管理の変更前後（図）］の中へ移した（開いたときに描く）
 //
 // Node では Mermaid を動かせないので、構文エラーの原因（引用符の無いラベル・ラベルの中の生の "）が無いことを行の形で確かめる。
 // 実機のページの Mermaid 10.9.8 では、かっこ・[ ]・{ }・|・;・#・%%・矢印の記号など 36 種類を、引用符つきのラベルで描けることを確かめた。
@@ -128,8 +129,12 @@ console.log('\n--- 3. 描画: mermaid.render（body で測る）で描き、描�
   // 修正前の構文エラーになるコード（引用符の無いラベル）を After として描かせる
   const brokenAfter = 'flowchart LR\n  S0["申請前"]\n  S3["課長承認待ち"]\n  S0 ==>|申請する 課長承認者 not in () and 部長承認者 not in ()| S3';
   const okPre = mk(codeBefore || 'flowchart LR\n  S0["申請前"]'), badPre = mk(brokenAfter);
-  host.querySelector('#kt-ai-pane-review').querySelectorAll = (sel) => (sel === 'pre.kt-ai-mermaid' ? [okPre, badPre].filter((p) => !p.replaced) : []);
-  panel.showPane('review');
+  //   右の「変更内容」の［プロセス管理の変更前後（図）］を開いた（toggle）ときに、その中の図を描く
+  const procDetails = { open: true, querySelectorAll: (sel) => (sel === 'pre.kt-ai-mermaid' ? [okPre, badPre].filter((p) => !p.replaced) : []) };
+  const $sum = host.querySelector('#kt-ai-change-summary');
+  await $sum.dispatch({ type: 'toggle', target: { ...procDetails, open: false } });
+  assert(calls.render.length === 0, `閉じたときは描かない: ${calls.render.length}`);
+  await $sum.dispatch({ type: 'toggle', target: procDetails });
   await tick(); await tick();
   const d1 = okPre.replaced, d2 = badPre.replaced;
   assert(calls.run === 0 && calls.render.length === 2 && calls.render.every((c) => c.container === undefined),
@@ -142,8 +147,8 @@ console.log('\n--- 3. 描画: mermaid.render（body で測る）で描き、描�
     '描けなかった図は Mermaid のエラー画像ではなく、理由（1 行目）と元のコードを出す（もう一度描こうとしない class にする）');
   const ids = calls.render.map((c) => c.id);
   assert(ids.length === 2 && new Set(ids).size === 2 && ids.every((id) => /^kt-ai-mermaid-[0-9a-z]+-\d+$/.test(id)), `id はページの中で一意（Mermaid は同じ id の要素を消してから描く）: ${JSON.stringify(ids)}`);
-  // ペインを開き直しても、描いた図・理由を出した図をもう一度描かない
-  panel.showPane('review');
+  // 開き直しても、描いた図・理由を出した図をもう一度描かない
+  await $sum.dispatch({ type: 'toggle', target: procDetails });
   await tick();
   assert(calls.render.length === 2, `描き直さない: ${calls.render.length}`);
 }
@@ -151,7 +156,7 @@ console.log('\n--- 3. 描画: mermaid.render（body で測る）で描き、描�
 // =========================================================
 console.log('\n--- 4. 並べ方: Before / After を縦に並べる（実機: 横に並べると枠が半分の幅になり、図が縮んで文字が読めなかった）---');
 {
-  const { KTDeps, KTContextUi } = T;
+  const { KTDeps } = T;
   const data = FX.makeData();
   const deps = KTDeps.buildDependencyData(data, KTDeps.normalizeFields(data.fields));
   const step = (id, actionType, targetKind, targetRef, details = [], extra = {}) => ({ id, actionType, targetKind, targetRef, title: `${id} ${actionType}`, proposal: { summary: '', details: details.map(([key, value]) => ({ key, value })) }, dependsOn: [], reason: '', evidenceIds: [], confidence: 'INFERRED', alternativeId: null, validation: { status: 'ok', issues: [] }, ...extra });
@@ -163,11 +168,11 @@ console.log('\n--- 4. 並べ方: Before / After を縦に並べる（実機: 横
     ],
   };
   const rv = safe(() => PR.review({ plan, data, deps, scan: null, incoming: null }), null);
-  const h = rv ? String(safe(() => KTContextUi.reviewHtml(rv, plan), '')) : '';
-  const at = h.indexOf('プロセス管理の変更前後');
-  const end = at >= 0 ? h.indexOf('After: ', at) : -1;
+  const h = rv ? String(safe(() => T.KTAiChatUi.changeSummaryHtml({ plan, review: rv }), '')) : '';
+  const at = h.indexOf('<summary>プロセス管理の変更前後（図）</summary>');
+  const end = at >= 0 ? h.indexOf('</details>', at) : -1;
   const sec = at >= 0 ? h.slice(at, end > at ? end : at + 4000) : '';
-  assert(!!rv && rv.simulation.process.changed && /data-side="before"/.test(sec) && /data-side="after"/.test(sec), '前提: 検証ペインにプロセスの Before / After がある');
+  assert(!!rv && rv.simulation.process.changed && /data-side="before"/.test(sec) && /data-side="after"/.test(sec), '前提: 右の「変更内容」の［プロセス管理の変更前後（図）］にプロセスの Before / After がある');
   assert(/display:grid/.test(sec) && !/flex:1 1/.test(sec) && !/flex-wrap/.test(sec), `Before / After は縦に並べる（横に並べない）: ${sec.slice(0, 160)}`);
   assert((sec.match(/min-width:0; overflow-x:auto;/g) || []).length === 2, '枠は横にスクロールできる（図は縮めない）');
 }

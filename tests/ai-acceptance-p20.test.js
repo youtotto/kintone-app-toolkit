@@ -170,7 +170,9 @@ console.log('\n--- F2. 復元: リマインダー未設定（timezone null）の
   const pNoTime = plan([step('P1', 'ADD_REMINDER', 'NEW_SETTING', '対応日7日後', { name: '対応日7日後', timingField: 'due_date', daysLater: 7, targets: ['FIELD_ENTITY:owner'] })]);
   const rNoTime = reviewOf(pNoTime).steps[0];
   assert(rNoTime.status === 'NEEDS_CONFIRMATION' && rNoTime.safety === 'REVIEW_REQUIRED' && rNoTime.issues.some(i => i.code === 'REMINDER_TIME_MISSING' && /9時に通知/.test(i.message)) && rNoTime.diff.human.some(l => /時刻 未定/.test(l)), '実機 354: 時刻の無いリマインダー → 確認が必要（REMINDER_TIME_MISSING・「時刻 未定」）');
-  assert(/チャットで伝えて計画を修正/.test(KTContextUi.reviewHtml(reviewOf(pNoTime), pNoTime)), '自動で反映できない理由に「チャットで伝えて計画を修正」を案内');
+  //   2026-10-19: 右の「確認結果」（廃止）の手順の判定に出していた理由と直し方は、右の「変更内容」の「反映できないこと」に出す
+  const sumNoTime = KTAiChatUi.changeSummaryHtml({ plan: pNoTime, review: reviewOf(pNoTime) });
+  assert(/反映できないこと[\s\S]*自動で反映できません（通知時刻[\s\S]*足りない値を会話で伝えて変更案を直すか、kintone の画面で設定/.test(sumNoTime), `自動で反映できない理由と次の操作（足りない値を会話で伝えて直すか、kintone の画面で設定）（右の「変更内容」の「反映できないこと」）: ${K.stripC(sumNoTime).slice(0, 300)}`);
   // 右上の見出し（workStatus）: 復元の失敗・検証不一致は「反映済み」と出さない（簡素化（2026-10-17）: 作業状態 workspaceState は削除した）
   const v = { planId: 'p', version: 1, status: 'EXECUTED', plan: p, review: rv };
   const failedRb = { stage: 'rolled-back', execution: { ...log, rollback: { status: 'ROLLBACK_VERIFY_FAILED' } }, rollback: { status: 'ROLLBACK_VERIFY_FAILED' } };
@@ -217,12 +219,14 @@ console.log('\n--- F3. 承認の前の「自動で反映できるか」と、ル
   assert(a4.get('P1').apply === 'MANUAL' && a4.get('P1').reason === 'LINK_PROTOCOL_UNKNOWN', 'リンクの種類が決まらない新規リンク → 自動で反映できない（LINK_PROTOCOL_UNKNOWN）');
   assert(a4.get('P2').apply === 'MANUAL' && a4.get('P2').reason === 'FIELD_TYPE_NOT_SUPPORTED' && !/Executor|Tier/.test(a4.get('P2').message), '計算フィールド → 自動で反映できない（理由の文言に Executor / Tier を出さない）');
   assert(a4.get('P3').apply === 'BLOCKED' && a4.get('P3').reason === 'DEPENDENCY_NOT_EXECUTABLE' && a4.get('P4').apply === 'AUTO', '依存先が反映されない手順 → 反映できない（DEPENDENCY_NOT_EXECUTABLE）。関係ない手順は自動で反映できる');
-  const html = KTContextUi.reviewHtml(rv4, p4);
-  assert(/id="kt-ai-review-apply"/.test(html) && /できる：1 件（P4）/.test(html) && /できない：3 件（P1, P2, P3）/.test(html), '検証ペイン: 自動反映できる / できない手順の集計（承認の前に分かる）');
-  assert((html.match(/class="kt-ai-apply" data-apply="MANUAL"/g) || []).length === 2 && /data-apply="BLOCKED"/.test(html) && /承認しても反映されません/.test(html), '検証ペイン: 手順ごとに「Toolkit からは自動で反映できません — 理由（承認しても反映されません）」');
+  //   2026-10-19: 右の「確認結果」（廃止）の集計と手順ごとの行の代わりに、右の「変更内容」の「反映できないこと」に、自動で反映できない手順と反映できない手順を理由と一緒に出す
+  const html = KTAiChatUi.changeSummaryHtml({ plan: p4, review: rv4 });
+  const cannot4 = html.slice(html.indexOf('>反映できないこと</div>'));
+  const cannotRows = (cannot4.slice(0, cannot4.indexOf('</ul>')).match(/<li>[\s\S]*?<\/li>/g) || []).map(x => K.stripC(x));
+  assert(cannotRows.length === 3 && cannotRows.filter(x => /自動で反映できません/.test(x)).length === 2 && cannotRows.filter(x => /：反映できません/.test(x)).length === 1 && !cannotRows.some(x => /メモ2|NEW_FIELD_3/.test(x)), `変更内容: 反映できないこと 3 件（自動で反映できない 2 件・反映できない 1 件）。自動で反映できる手順は入らない（承認の前に分かる）: ${JSON.stringify(cannotRows)}`);
   //   C-1 第 3 段（2026-10-08）: 会話の検証カード（reviewCardHtml）は削除した。会話では最終案のカードの「反映先と主な影響」と、
   //   実行できない手順があれば承認できないこと（tests/ai-flow-redesign.test.js の 指示 A7・R09-9）で示す。
-  //   簡素化（2026-10-17）: 画面に出ていなかった要約の集計（VM.reviewSummary の notAuto）は削除した（自動で反映できない手順は上の applyReadiness と確認結果の集計）
+  //   簡素化（2026-10-17）: 画面に出ていなかった要約の集計（VM.reviewSummary の notAuto）は削除した（自動で反映できない手順は上の applyReadiness と変更内容の「反映できないこと」）
 }
 
 {
@@ -574,7 +578,7 @@ console.log('\n--- CX-2a / CX-7 / XA-5（再実行）. 通知の種類・未確�
   //   どのアプリか・例外として扱うかは計画の AI と質問の AI が扱う。ここでは手順の無い計画で「問題は見つかりませんでした」と言わないことだけを確かめる
   {
     //   C-1 第 3 段（2026-10-08）: 会話の検証の要約（review-summary の「計画全体に確認が必要な点があります」）は削除した。
-    //   新しい流れでは、最終案のカードで「問題は見つかりませんでした」と言わず、計画全体の指摘は右の「確認結果」（Toolkit からの指摘）に出る
+    //   新しい流れでは、最終案のカードで「問題は見つかりませんでした」と言わず、計画全体の指摘は右の「変更内容」（手順の行の指摘・重なりと注意点）に出る
     const mX = mountWith(respOf('顧客マスタ（旧）の顧客コードで会社名を取ってきたい', []));
     await ticks();
     await adoptOnPanel(mX.panel);
@@ -873,10 +877,10 @@ console.log('\n--- U5. ［新しい会話］: 続けて書いた別の依頼が�
   for (let i = 0; i < 60 && panel.finalPrecheck().status !== 'ready'; i++) await ticks(1);
   const preBefore = panel.finalPrecheck();
   // 2026-10-06 利用者の指示で意図して更新: 確認のカード（new-conv-choices・［このまま続ける］）は廃止。［新しい会話］はすぐ新しい会話を始める
-  //   （ここでは右の「確認結果」を開いた状態から押し、右も新しい会話の分に片づくことを確かめる）
-  panel.showPane('review'); await ticks();
+  //   （ここでは右の「反映」を開いた状態から押し、右も新しい会話の分に片づくことを確かめる。2026-10-19: 右の「確認結果」のタブは廃止）
+  panel.showPane('exec'); await ticks();
   const summaryBefore = $('kt-ai-change-summary').innerHTML;
-  assert(panel.drawerState().pane === 'review' && /承認済みの案件/.test(summaryBefore), `前提: 右に前の変更案の内容がある（「確認結果」を表示中）: ${panel.drawerState().pane}`);
+  assert(panel.drawerState().pane === 'exec' && /承認済みの案件/.test(summaryBefore), `前提: 右に前の変更案の内容がある（「反映」を表示中）: ${panel.drawerState().pane}`);
   await $('kt-ai-new-conv').dispatch('click'); await ticks();
   assert(!panel.conversation().messages().some(m => m.data && m.data.kind === 'new-conv-choices') && !/data-act="new-conv-cancel"/.test($('kt-ai-chat').innerHTML), '［新しい会話］→ 確認のカードは出さない');
   assert(panel.conversation().messages().length === 0 && panel.conversation().planHistory().length === 0 && !panel.conversation().activePlan() && $('kt-ai-new-conv').disabled === true, '［新しい会話］→ すぐ会話・計画が消え、ボタンは押せない状態に戻る');

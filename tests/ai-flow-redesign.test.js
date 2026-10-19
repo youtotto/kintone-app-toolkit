@@ -3192,7 +3192,7 @@ await section(async () => {
   // (c) 承認の欄の準備の後に JavaScript の候補が変わった → 承認しない（準備をやり直してから押してもらう）
   { const { m, v } = await KIT.mountFinal({ kind: 'mixed' });
     const r = await KIT.applyOnScreen(m, { before: () => { v.generated.C1 = { ...v.generated.C1, candidateHash: 'f'.repeat(16) }; } });
-    assert(!v.approval && r.run === null && r.writes.length === 0 && /最終案の内容（JavaScript の候補・動作テスト環境の設定・却下した手順）が変わりました/.test(stripC(m.chat())) && m.panel.finalPrecheck().notice, `H4-5: 候補が変わった → 承認せず（書き込み 0）、承認の欄に変わったことを出して準備をやり直す: ${m.panel.finalPrecheck().notice}`); }
+    assert(!v.approval && r.run === null && r.writes.length === 0 && /最終案の内容（JavaScript の候補・動作テスト環境の設定）が変わりました/.test(stripC(m.chat())) && m.panel.finalPrecheck().notice, `H4-5: 候補が変わった → 承認せず（書き込み 0）、承認の欄に変わったことを出して準備をやり直す: ${m.panel.finalPrecheck().notice}`); }
   // (d) 承認の後（設定の反映の後の登録の準備）に、承認の欄に無かった確認の項目が出た → JavaScript は登録しない（設定は反映済みの一部反映・承認を外す）。
   //   簡素化（2026-10-17）: 承認したときの確認の項目の写しで自動でチェックする経路は削除した。承認を受けた確認の項目は、承認の欄の準備の指紋で照らす
   { const { m, v } = await KIT.mountFinal({ kind: 'mixed' });
