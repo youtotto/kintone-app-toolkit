@@ -11450,6 +11450,11 @@
     const LOOKUP_BLOCKING = ['RELATED_APP_SETTINGS_UNAVAILABLE', 'RELATED_FIELD_NOT_FOUND', 'RELATED_KEY_MISSING', 'PICKER_FIELD_NOT_FOUND', 'DESTINATION_MISSING', 'SORT_FIELD_UNKNOWN', 'INVALID_SORT'];
     const APP_ACTION_BLOCKING = ['DEST_APP_SETTINGS_UNAVAILABLE', 'DEST_FIELD_NOT_FOUND', 'SOURCE_FIELD_MISSING', 'TARGET_EXISTS', 'TARGET_MISSING', 'ENTITY_UNRESOLVED'];
     /**
+     * 2026-10-19: 計画に必要な値が無いために自動で反映しない理由（値を会話で伝えて最終案を作り直す）。手作業に回す種類（計画のみ・Toolkit が扱わない種類）とは別。
+     *   最終案の判定（KTAiConversation.finalReadinessOf）は、これを NO_VALUES と同じく反映を止める理由にする（ほかの手順だけを反映して「この内容で反映できます」としない）
+     */
+    const VALUE_MISSING = Object.freeze(['NO_VALUES', 'OPTIONS_MISSING', 'LINK_PROTOCOL_UNKNOWN', 'VIEW_FIELDS_MISSING', 'NOTIFICATION_SCOPE_AMBIGUOUS', 'TARGETS_MISSING', 'EVENTS_MISSING', 'CONDITION_MISSING', 'TIMING_FIELD_MISSING', 'REMINDER_DAYS_INVALID', 'REMINDER_TIME_MISSING', 'ASSIGNEE_TYPE_UNKNOWN', 'ASSIGNEES_PENDING']);
+    /**
      * 簡素化 A（2026-10-16）: 書き込みの要らない手順 = 計画の確認で REUSE（既存フィールドを使う手順と、値を指定して今の設定と同じ手順）かつ無効でないもの。
      *   分類・反映の見込み・実行中の依存・計画の版の反映済みの判定（KTAiConversation）が、この 1 つを使う
      */
@@ -11564,7 +11569,7 @@
         if (st.actionType === 'REQUIRE_CONFIRMATION') return { ...base, apply: 'CONFIRM', reason: null, message: '確認事項（設定の変更はありません。承認すると確認済みとして扱い、これに依存する手順も反映できます）' };
         if (noChangeDone(x)) return { ...base, apply: 'CONFIRM', reason: 'NO_CHANGE', message: x.message || NO_CHANGE_TEXT(st) };
         if (x.status === STEP.PENDING) return { ...base, apply: 'AUTO', reason: null, message: '動作テスト環境へ自動で反映できます' };
-        if (x.status === STEP.UNSUPPORTED) return { ...base, apply: 'MANUAL', reason: x.reason, message: x.message || 'Toolkit からは自動で反映できません（計画のみ）' };
+        if (x.status === STEP.UNSUPPORTED) return { ...base, apply: 'MANUAL', reason: x.reason, message: x.message || 'Toolkit からは自動で反映できません（計画のみ）', ...(VALUE_MISSING.includes(x.reason) ? { valueMissing: true } : {}) };
         return { ...base, apply: 'BLOCKED', reason: x.reason, message: x.message || '反映できません' };
       });
     }
@@ -25718,13 +25723,15 @@
         if (entries.some(([, e]) => ktUrlTarget(e))) reasons.push({ kind: 'external', text: 'URL 指定の JavaScript への変更を含みます。外部サーバーのファイルは Toolkit から書き換えられないため、このままでは反映できません（実現できない点を見てください）。' });
         //   2026-10-18: 設定の手順の反映の分類（KTPlanExecutor.applyReadiness。承認の欄・右の「反映する内容」と同じ分類）も見る。確認の結果の BLOCKED だけでなく、
         //   計画の構造で止まる手順（分岐の片方だけ・反映されない手順への依存・孤立するステータス）と、変更の値が計画に無い手順（NO_VALUES。説明文からは補わない）が
+        //   2026-10-19: 値が無い手順は NO_VALUES だけでなく、通知時刻・選択肢・通知先・作業者などが決まっていない手順も同じ扱い（KTPlanExecutor の VALUE_MISSING。applyReadiness の valueMissing）。
+        //   前は「手作業の手順」と同じく止めず、ほかの手順だけを反映して結果のカードにも出なかった
         //   あるときは反映できない（ほかの手順だけを反映して「この内容で反映できます」としない）。手作業の手順（計画のみ・Toolkit が扱わない種類）は今までどおり止めない
         let cls = [];
         try { cls = v.review && v.plan && typeof KTPlanExecutor !== 'undefined' && KTPlanExecutor.applyReadiness ? KTPlanExecutor.applyReadiness(v.plan, v.review) : []; } catch (e) { cls = []; }
         const blockedAll = [...new Set([...blockedIds, ...cls.filter(a => a && a.apply === 'BLOCKED').map(a => a.stepId)])];
-        const noValues = cls.filter(a => a && a.apply === 'MANUAL' && a.reason === 'NO_VALUES').map(a => a.stepId);
+        const noValues = cls.filter(a => a && a.apply === 'MANUAL' && a.valueMissing).map(a => a.stepId);
         if (blockedAll.length) reasons.push({ kind: 'blocked', text: `実行できない設定の手順が ${blockedAll.length} 件あります（実現できない点を見てください）。` });
-        if (noValues.length) reasons.push({ kind: 'no-values', text: `変更の値が計画に無い設定の手順が ${noValues.length} 件あります（説明文からは値を補いません）。値を会話で伝えて最終案を作り直してください。` });
+        if (noValues.length) reasons.push({ kind: 'no-values', text: `必要な値が計画に無い設定の手順が ${noValues.length} 件あります（説明文からは値を補いません）。値を会話で伝えて最終案を作り直してください。` });
         //   2026-10-15（追加の指示 1）: 採用した仮案の項目だけに結び付き、実現する手順・JavaScript を確かめられない・足りない要件を含むときは、その言い方にする（担当が無いものと合わせて数える）
         //   簡素化 C（2026-10-16）: 止めるのは明確な欠落（対応づけた手順・JavaScript が計画から外れた・構造化した効果を持つ JavaScript が無い）だけ
         if (ownerlessDecided.length) reasons.push({ kind: 'ownerless', text: `決まった要件のうち、実現する手順・JavaScript が足りないものが ${ownerlessDecided.length} 件あります（反映を止めている理由を見てください）。足りないものを計画に入れて最終案を作り直すか、その要件を取り消してから反映します。` });
@@ -27248,7 +27255,7 @@
             ...ready.filter(a => a && a.apply === 'BLOCKED' && !blockedIds.includes(a.stepId)).map(a => ({ id: a.stepId, title: stepTitleOf(a.stepId), reason: cut(fix(a.message || ''), 120) })),
           ];
           for (const b of blockedSteps) cannot.push({ kind: 'blocked', text: `実行できない手順: ${b.title}${b.reason ? `（${b.reason}）` : ''}`, next: '計画を見直して、この手順を直すか外してから最終案を作り直します。' });
-          for (const a of ready.filter(x => x && x.apply === 'MANUAL' && x.reason === 'NO_VALUES')) cannot.push({ kind: 'no-values', text: `変更の値が計画に無い手順: ${stepTitleOf(a.stepId)}（説明文からは値を補いません）`, next: '値を会話で伝えて、最終案を作り直します。' });
+          for (const a of ready.filter(x => x && x.apply === 'MANUAL' && x.valueMissing)) cannot.push({ kind: 'no-values', text: a.reason === 'NO_VALUES' ? `変更の値が計画に無い手順: ${stepTitleOf(a.stepId)}（説明文からは値を補いません）` : `必要な値が計画に無い手順: ${stepTitleOf(a.stepId)}（${cut(fix(a.message || ''), 120)}）`, next: '値を会話で伝えて、最終案を作り直します。' });
           for (const st of (Array.isArray(p.steps) ? p.steps : []).filter(s => s && s.actionType === 'REQUIRE_CONFIRMATION')) cannot.push({ kind: 'confirm', text: `確認が済むまで反映しない手順: ${cut(st.title || st.targetRef || '', 80)}` });
           for (const u of (Array.isArray(p.unknowns) ? p.unknowns : []).slice(0, 3)) cannot.push({ kind: 'unknown', text: cut(fix(typeof u === 'string' ? u : (u && (u.text || u.description)) || ''), 160) });
           // 追加指示 §4: 対応できないとされた決まった要件は、黙って落とさず実現できない点に出す
@@ -29066,7 +29073,7 @@
       // 反映できないこと（Toolkit の判定）・確かめられなかったこと（反映の分類 ready は「何が変わるか」の前で作る）
       const titleOf = (id) => { const st = (p.steps || []).find(x => x.id === id); return st ? (st.title || KTPlanText.stepSummary(st, { customizations: custs })) : ''; };
       const cannot = [
-        ...ready.filter(a => a.apply === 'MANUAL' || a.apply === 'BLOCKED').map(a => `${titleOf(a.stepId) || '設定の変更'}：${a.apply === 'MANUAL' ? 'Toolkit からは自動で反映できません' : '反映できません'}${a.message ? `（${a.message}）` : ''}`),
+        ...ready.filter(a => a.apply === 'MANUAL' || a.apply === 'BLOCKED').map(a => `${titleOf(a.stepId) || '設定の変更'}：${a.valueMissing ? '必要な値が計画に無いため反映できません' : a.apply === 'MANUAL' ? 'Toolkit からは自動で反映できません' : '反映できません'}${a.message ? `（${a.message}）` : ''}`),
         ...(review?.steps || []).filter(r => r.customization && r.codeGeneration && r.codeGeneration.supported === false).map(r => `${r.customization?.requirement || 'JavaScript'}：Toolkit ではコードを作れません（${KTContextUi.CODEGEN_REASON_JA[r.codeGeneration.reason] || r.codeGeneration.reason || '要確認'}）`),
       ];
       // 確かめられなかったこと: AI が書いた不明点 ＋ 解析範囲（coverage / truncation）から Toolkit が分かること（出力削減・2026-10-07: 後者は AI に書かせない）
@@ -29103,7 +29110,7 @@
         ${confirmSteps.length ? `<div class="kt-ai-sum-label kt-ai-sum-warn">反映の前に確かめること</div><div class="kt-ai-sum-warn">${list(confirmSteps)}<div style="font-size:11px;">最終案の承認で確認済みとして扱い、これに依存する手順も反映します。</div></div>` : ''}
         ${impact.length ? `<div class="kt-ai-sum-label">影響範囲</div>${list(impact)}` : ''}
         ${constraintRows.length ? `<div class="kt-ai-sum-label kt-ai-sum-warn">できないこと</div><div class="kt-ai-sum-warn kt-ai-sum-constraints">${list(constraintRows)}</div>` : ''}
-        ${cannot.length ? `<div class="kt-ai-sum-label kt-ai-sum-warn">反映できないこと</div><div class="kt-ai-sum-warn">${list(cannot)}${ready.some(a => a.apply === 'MANUAL') ? '<div style="font-size:11px;">自動で反映できない手順は、足りない値を会話で伝えて変更案を直すか、kintone の画面で設定してください。</div>' : ''}</div>` : ''}
+        ${cannot.length ? `<div class="kt-ai-sum-label kt-ai-sum-warn">反映できないこと</div><div class="kt-ai-sum-warn">${list(cannot)}${ready.some(a => a.valueMissing) ? '<div style="font-size:11px;">必要な値が計画に無い手順は、値を会話で伝えて変更案を直してください（それまで反映できません）。</div>' : ''}${ready.some(a => a.apply === 'MANUAL' && !a.valueMissing) ? '<div style="font-size:11px;">Toolkit から自動で反映できない手順は、この承認では反映しません。kintone の画面で設定してください。</div>' : ''}</div>` : ''}
         ${unownedRows.length || unconfirmedHtml ? `<div class="kt-ai-sum-label kt-ai-sum-warn">確認できないこと</div><div class="kt-ai-sum-warn kt-ai-sum-unowned">${unownedRows.length ? list(unownedRows) : ''}${unconfirmedHtml}</div>` : ''}
         ${fin ? `<div class="kt-ai-sum-label">確かめたこと</div><div class="kt-ai-sum-verified">${esc(verificationLineOf(fin))}</div><details class="kt-ai-tech kt-ai-sum-verification"><summary>検証の明細</summary>${verificationDetailHtml(fin)}</details>` : ''}
         ${unknowns.length ? `<div class="kt-ai-sum-label">確かめられなかったこと</div>${list(unknowns)}` : ''}
@@ -29156,6 +29163,7 @@
       const s = run.settings, j = run.js;
       const lines = [];
       if (s && s.started) lines.push(s.failed ? `標準設定: ✓ ${s.verified} 件反映・× ${s.failed} 件は失敗（以降は未実行）${setRolled ? '（変更前の状態に戻し済み）' : ''}` : `標準設定: ✓ ${s.verified} 件を反映（反映後の確認で一致）${setRolled ? '（変更前の状態に戻し済み）' : ''}`);
+      if (s && s.started && Array.isArray(s.manual) && s.manual.length) lines.push(`自動では反映していない手順（承認の前から分かっていたもの。kintone の画面で設定してください）: ${s.manual.join('、')}`);
       if (j && j.registered) lines.push(`JavaScript: ${j.files.join('、')} を登録（反映後の確認 ✓ ${j.verified} / ${j.total} 件一致）${jsRolled ? '（登録前の状態に戻し済み）' : ''}`);
       else if (j && (run.written || run.stage !== 'stopped' || j.reason)) lines.push(`JavaScript: 未登録${j.reason ? `（${j.reason}）` : ''}`);
       const title = run.stage === 'stopped' && !run.written ? '反映を止めました。動作テスト環境には何も書き込んでいません。' : run.partial ? '一部だけ反映しました（要確認）。' : run.ok ? '動作テスト環境へ反映しました。' : '反映しましたが、確認で一致しない点があります（要確認）。';
@@ -29877,15 +29885,18 @@
         ...(preItems.target ? [`<div style="font-size:12px;">対象: ${esc(preItems.target)}</div>`] : []),
         //   追加だけの設定の手順は件数だけ（手順の本文は会話に出さず、右の「変更内容」で見る）。プロセス管理の変更・既存の設定の変更は名前を出す
         ...(Array.isArray(preItems.settings) && preItems.settings.length + (preItems.process || []).length + (preItems.existing || []).length ? [`<div style="font-size:12px; margin-top:4px;">反映する設定の手順: ${preItems.settings.length + (preItems.process || []).length + (preItems.existing || []).length} 件（内容は右の「変更内容」）</div>`] : []),
-        ...[['process', 'プロセス管理の変更'], ['existing', '既存の設定の変更'], ['duplicate', '既存の設定と似ているもの（重複の疑い）'], ['files', '追加・置き換える JavaScript'], ['keep', 'JavaScript の登録先と変更しない設定'], ['deferred', '設定の反映の後に確かめること'], ['confirmations', '確認項目（この承認で確認済みとして扱います）'], ['warnings', '注意'], ['manual', '自動では反映しない手順']]
+        ...[['process', 'プロセス管理の変更'], ['existing', '既存の設定の変更'], ['duplicate', '既存の設定と似ているもの（重複の疑い）'], ['files', '追加・置き換える JavaScript'], ['keep', 'JavaScript の登録先と変更しない設定'], ['deferred', '設定の反映の後に確かめること'], ['confirmations', '確認項目（この承認で確認済みとして扱います）'], ['warnings', '注意']]
           //   §0f.5 の 3（2026-10-09）: 確認項目は { text（画面の言葉）, detail（元の文。イベント名入り）}。元の文は詳細だけに出す（文字列の項目もそのまま受ける）
           .filter(([k]) => Array.isArray(preItems[k]) && preItems[k].length).map(([k, label]) => `<div style="font-size:12px; margin-top:4px;"><b>${esc(label)}</b>${li(preItems[k].slice(0, 12).map(x => (x && typeof x === 'object' ? `${esc(x.text || '')}${x.detail && x.detail !== x.text ? `<details class="kt-ai-tech kt-ai-final-pre-detail" style="font-size:11px;"><summary>元の検査の文</summary>${esc(x.detail)}</details>` : ''}` : esc(x))))}${preItems[k].length > 12 ? `<div style="font-size:11px; opacity:.75;">ほかに ${preItems[k].length - 12} 件（右の「変更内容」）</div>` : ''}</div>`),
       ] : [];
+      //   2026-10-19: 自動では反映しない手順（手作業に回す種類）は、閉じた［反映の前の確認］の中ではなく、ボタンの前に見える文で出す（この承認では反映しないことを決める時点で読めるように）
+      const manualItems = preItems && Array.isArray(preItems.manual) ? preItems.manual : [];
+      const manualHtml = manualItems.length ? `<div class="kt-ai-final-pre-manual" style="font-size:12px; color:#b26a00; margin-top:4px;"><b>自動では反映しない手順（この承認では反映しません。kintone の画面で設定します）</b>${li(manualItems.slice(0, 12).map(esc))}${manualItems.length > 12 ? `<div style="font-size:11px; opacity:.75;">ほかに ${manualItems.length - 12} 件（右の「変更内容」）</div>` : ''}</div>` : '';
       const preReasons = pre && Array.isArray(pre.reasons) && pre.reasons.length ? `<div class="kt-ai-final-pre-blocked" style="font-size:12px; color:#b00020; margin-top:4px;">${pre.reasons.slice(0, 6).map(x => `× ${esc(x)}`).join('<br>')}</div>` : '';
       //   指示書 §1.5: 反映できるかは見出しの下の 1 文（準備が整ったときだけ「この内容で反映できます。」。整っていなければ準備の文か止めている理由を 1 文）。
       //   ［動作テスト環境へ反映］の文字は変えず、反映先と順序はボタンの添え書きに。「反映の前の確認（書き込みなし）」は折りたたみ（止まる理由 preReasons は畳まずに見せる）
       const waitText = applyBlock || (!pre ? PRE_WAIT.idle : PRE_WAIT[pre.status] || (pre.reasons && pre.reasons.length ? '反映の前の確認で止まる理由があるため、まだ反映できません（理由は下）。' : '反映できる状態になるまで待ってください。'));
-      const statusLine = active && !approved && !writtenNow ? `<div class="kt-ai-final-status" data-can-apply="${canApply ? '1' : '0'}" style="margin-top:4px; font-size:12px;${canApply ? ' color:#2e7d32; font-weight:600;' : ''}">${esc(canApply ? 'この内容で反映できます。' : waitText)}</div>` : '';
+      const statusLine = active && !approved && !writtenNow ? `<div class="kt-ai-final-status" data-can-apply="${canApply ? '1' : '0'}" style="margin-top:4px; font-size:12px;${canApply ? ' color:#2e7d32; font-weight:600;' : ''}">${esc(canApply ? (manualItems.length ? `この内容で反映できます（自動では反映しない手順 ${manualItems.length} 件を除く）。` : 'この内容で反映できます。') : waitText)}</div>` : '';
       //   2026-10-15（最終案の重複と担当未定の食い違い §1・§4）: 反映するものに合わせる（設定だけ・JavaScript だけの最終案に「設定の手順 → JavaScript の順」と出さない）
       //   数えるのは Toolkit が反映するものだけ: 自動で反映する設定の手順（settings.auto。手動・反映できない手順は数えない）と検証済みの JavaScript（独立レビュー L1）。
       //   fin.impact の無い古い最終案は今までの文（両方）。検証済みの JavaScript が無ければ設定の手順の文（手動の手順だけでも「JavaScript」とは言わない）
@@ -29893,7 +29904,7 @@
       const APPLY_NOTE = !hasJs ?'承認すると動作テスト環境へ設定の手順を反映します（運用環境は変更しません）。反映後に、動作テスト環境の画面で動作を確認します。'
         : hasJs && !hasSettings ? '承認すると動作テスト環境へ JavaScript を反映します（運用環境は変更しません）。反映後に、動作テスト環境の画面で動作を確認します。'
         : '承認すると動作テスト環境へ反映します（設定の手順 → JavaScript の順。運用環境は変更しません）。反映後に、動作テスト環境の画面で動作を確認します。';
-      const preBlock = canApprove && pre ? `<div class="kt-ai-final-pre-wrap" data-status="${esc(pre.status)}" style="margin-top:8px;">${pre.notice ? `<div class="kt-ai-final-pre-notice" style="font-size:12px; color:#b26a00; margin-bottom:4px;">${esc(pre.notice)}</div>` : ''}${preReasons}<details class="kt-ai-tech kt-ai-final-pre" data-status="${esc(pre.status)}"><summary>反映の前の確認（書き込みなし）</summary><div style="margin-top:4px;">${preRows.length ? preRows.join('') : `<div style="font-size:12px; opacity:.75;">${esc(PRE_WAIT[pre.status] || '準備が終わると、反映する設定・JavaScript・確認項目をここに出します。')}</div>`}</div></details></div>` : '';
+      const preBlock = canApprove && pre ? `<div class="kt-ai-final-pre-wrap" data-status="${esc(pre.status)}" style="margin-top:8px;">${pre.notice ? `<div class="kt-ai-final-pre-notice" style="font-size:12px; color:#b26a00; margin-bottom:4px;">${esc(pre.notice)}</div>` : ''}${preReasons}${manualHtml}<details class="kt-ai-tech kt-ai-final-pre" data-status="${esc(pre.status)}"><summary>反映の前の確認（書き込みなし）</summary><div style="margin-top:4px;">${preRows.length ? preRows.join('') : `<div style="font-size:12px; opacity:.75;">${esc(PRE_WAIT[pre.status] || '準備が終わると、反映する設定・JavaScript・確認項目をここに出します。')}</div>`}</div></details></div>` : '';
       const runText = !run ? '<b>承認済み。</b>' : run.stage === 'running' ? '<b>承認済み。</b>動作テスト環境へ反映しています（結果は下のカード）。' : '<b>承認済み。</b>反映の結果は下のカードにまとめています。';
       const writtenText = '動作テスト環境へ書き込みました（一部だけの反映を含みます）。結果と次の手は下のカードにまとめています。この最終案はもう一度反映できません。直すときは依頼を送ると、今の設定で最終案を作り直します。';
       const approveHtml = active ? `${approved || writtenNow ? '' : preBlock}<div class="kt-ai-final-apply" style="margin-top:10px; display:flex; gap:6px; flex-wrap:wrap; align-items:center;">${approved ? `<span style="font-size:12px; color:#2e7d32;">${runText}</span>` : writtenNow ? `<span class="kt-ai-final-written" style="font-size:12px; color:#b26a00;">${esc(writtenText)}</span>` : `<button type="button" class="btn kt-ai-act" data-act="final-approve" data-plan="${esc(v.planId)}" data-version="${esc(String(v.version))}" style="height:28px; font-weight:600; border-color:#2e7d32;"${canApply ? '' : ' disabled'}>動作テスト環境へ反映</button><span class="kt-ai-final-apply-note" style="font-size:11px; opacity:.8;">${esc(APPLY_NOTE)}</span>`}</div>` : '';
@@ -31842,7 +31853,7 @@
           else if (/^UPDATE_/.test(String(st.actionType))) items.existing.push(t);
           else items.settings.push(t);
           if (st.warnings.includes('POSSIBLE_DUPLICATE')) items.duplicate.push(t);
-        } else if (st.status === 'UNSUPPORTED' && st.actionType !== 'CUSTOMIZATION_REQUIRED') items.manual.push(st.message ? `${t}（${st.message}）` : t);
+        } else if (st.status === 'UNSUPPORTED' && st.actionType !== 'CUSTOMIZATION_REQUIRED' && st.actionType !== 'REQUIRE_CONFIRMATION') items.manual.push(st.message ? `${t}（${st.message}）` : t);   // 確認の手順は手作業に数えない（「確認が済むまで反映しない手順」）
       }
       for (const c of (jp && jp.changes) || []) if (c.status !== 'BLOCKED') items.files.push(c.kind === 'REPLACE_FILE' ? `✎ ${c.name}（${TARGET_JA(c.target)}）既存ファイルを更新（同じ位置）` : `＋ ${c.name}（${TARGET_JA(c.target)}）新規追加${c.position != null ? `（${c.position + 1} 番目・末尾）` : ''}`);
       //   登録先の件数と、変更しない設定（登録の最終確認に出していた内容を承認の欄へ）
@@ -32073,7 +32084,8 @@
           await confirmExecutor();
           const sum = VM.executionSummary(execState);
           const ok = settingsAllOk(execState.execution, pendingIds);
-          run.settings = { started: true, executionId: sum ? sum.executionId : null, verified: sum ? sum.verified : 0, failed: sum ? sum.failed + sum.warn : 0, written: !!(sum && sum.written) };
+          //   2026-10-19: 承認の前から分かっていた「自動では反映しない手順」（手作業に回す種類。承認の欄と同じ文）を結果に残す（途中の失敗の × と分ける）
+          run.settings = { started: true, executionId: sum ? sum.executionId : null, verified: sum ? sum.verified : 0, failed: sum ? sum.failed + sum.warn : 0, written: !!(sum && sum.written), manual: preItemsOf(sp, null, v).manual };
           run.written = run.written || run.settings.written;
           if (!ok) {
             revoke('設定の手順が途中で止まったため、止まった後の環境で反映を続けないようにしました。');

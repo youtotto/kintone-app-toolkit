@@ -172,7 +172,8 @@ console.log('\n--- F2. 復元: リマインダー未設定（timezone null）の
   assert(rNoTime.status === 'NEEDS_CONFIRMATION' && rNoTime.safety === 'REVIEW_REQUIRED' && rNoTime.issues.some(i => i.code === 'REMINDER_TIME_MISSING' && /9時に通知/.test(i.message)) && rNoTime.diff.human.some(l => /時刻 未定/.test(l)), '実機 354: 時刻の無いリマインダー → 確認が必要（REMINDER_TIME_MISSING・「時刻 未定」）');
   //   2026-10-19: 右の「確認結果」（廃止）の手順の判定に出していた理由と直し方は、右の「変更内容」の「反映できないこと」に出す
   const sumNoTime = KTAiChatUi.changeSummaryHtml({ plan: pNoTime, review: reviewOf(pNoTime) });
-  assert(/反映できないこと[\s\S]*自動で反映できません（通知時刻[\s\S]*足りない値を会話で伝えて変更案を直すか、kintone の画面で設定/.test(sumNoTime), `自動で反映できない理由と次の操作（足りない値を会話で伝えて直すか、kintone の画面で設定）（右の「変更内容」の「反映できないこと」）: ${K.stripC(sumNoTime).slice(0, 300)}`);
+  //   2026-10-19: 通知時刻が無い手順は値が無い手順（最終案の判定で反映を止める）。右も「必要な値が計画に無いため反映できません」と、値を伝える次の操作（kintone の画面で設定する案内は手作業に回す種類だけ）
+  assert(/反映できないこと[\s\S]*必要な値が計画に無いため反映できません（通知時刻[\s\S]*値を会話で伝えて変更案を直してください（それまで反映できません）/.test(sumNoTime) && !/kintone の画面で設定/.test(sumNoTime), `反映できない理由と次の操作（値を会話で伝えて直す）（右の「変更内容」の「反映できないこと」）: ${K.stripC(sumNoTime).slice(0, 300)}`);
   // 右上の見出し（workStatus）: 復元の失敗・検証不一致は「反映済み」と出さない（簡素化（2026-10-17）: 作業状態 workspaceState は削除した）
   const v = { planId: 'p', version: 1, status: 'EXECUTED', plan: p, review: rv };
   const failedRb = { stage: 'rolled-back', execution: { ...log, rollback: { status: 'ROLLBACK_VERIFY_FAILED' } }, rollback: { status: 'ROLLBACK_VERIFY_FAILED' } };
@@ -223,7 +224,8 @@ console.log('\n--- F3. 承認の前の「自動で反映できるか」と、ル
   const html = KTAiChatUi.changeSummaryHtml({ plan: p4, review: rv4 });
   const cannot4 = html.slice(html.indexOf('>反映できないこと</div>'));
   const cannotRows = (cannot4.slice(0, cannot4.indexOf('</ul>')).match(/<li>[\s\S]*?<\/li>/g) || []).map(x => K.stripC(x));
-  assert(cannotRows.length === 3 && cannotRows.filter(x => /自動で反映できません/.test(x)).length === 2 && cannotRows.filter(x => /：反映できません/.test(x)).length === 1 && !cannotRows.some(x => /メモ2|NEW_FIELD_3/.test(x)), `変更内容: 反映できないこと 3 件（自動で反映できない 2 件・反映できない 1 件）。自動で反映できる手順は入らない（承認の前に分かる）: ${JSON.stringify(cannotRows)}`);
+  //   2026-10-19: リンクの種類が決まっていない P1 は値が無い手順（反映を止める）。計算フィールドの P2 は手作業に回す種類（Toolkit から自動で反映できない）
+  assert(cannotRows.length === 3 && cannotRows.filter(x => /必要な値が計画に無いため反映できません（リンクの種類/.test(x)).length === 1 && cannotRows.filter(x => /Toolkit からは自動で反映できません/.test(x)).length === 1 && cannotRows.filter(x => /：反映できません/.test(x)).length === 1 && !cannotRows.some(x => /メモ2|NEW_FIELD_3/.test(x)), `変更内容: 反映できないこと 3 件（値が無い 1 件・自動で反映できない 1 件・反映できない 1 件）。自動で反映できる手順は入らない（承認の前に分かる）: ${JSON.stringify(cannotRows)}`);
   //   C-1 第 3 段（2026-10-08）: 会話の検証カード（reviewCardHtml）は削除した。会話では最終案のカードの「反映先と主な影響」と、
   //   実行できない手順があれば承認できないこと（tests/ai-flow-redesign.test.js の 指示 A7・R09-9）で示す。
   //   簡素化（2026-10-17）: 画面に出ていなかった要約の集計（VM.reviewSummary の notAuto）は削除した（自動で反映できない手順は上の applyReadiness と変更内容の「反映できないこと」）
