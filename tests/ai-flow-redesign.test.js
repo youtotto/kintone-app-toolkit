@@ -1396,7 +1396,7 @@ await section(async () => {
   const { m, genCtx, setBaseFail } = await run();
   const v = m.conv().activePlan();
   const vf = genCtx[0] && genCtx[0].verification;
-  assert(genCtx.length === 1 && vf && JSON.stringify(vf.requiredEffects) === JSON.stringify([{ requirementId: 'C1', requirementIds: ['C1'], field: 'case_name', effect: 'lock', events: ['app.record.edit.show'], condition: 'ステータス in ("承認待ち")' }]) && !('cases' in vf) && Array.isArray(vf.relatedFiles) && vf.relatedFiles.map(f => f.name).join(',') === 'common.js' && !/sk_live_0123456789abcdef0123/.test(vf.relatedFiles[0].text) && /case_name/.test(vf.relatedFiles[0].text), `D10-1: Generator Context に必須の効果と、そのフィールドを参照する既存 JS（同じ platform・秘密情報は伏字）を渡し、代表条件は送らない: ${JSON.stringify(vf && { re: vf.requiredEffects, files: (vf.relatedFiles || []).map(f => f.name), cases: 'cases' in vf })}`);
+  assert(genCtx.length === 1 && vf && JSON.stringify(vf.requiredEffects) === JSON.stringify([{ requirementId: 'C1', requirementIds: ['C1'], field: 'case_name', effect: 'lock', events: ['app.record.edit.show'], condition: 'ステータス in ("承認待ち")' }]) && !('cases' in vf) && Array.isArray(vf.relatedFiles) && vf.relatedFiles.map(f => f.name).join(',') === 'autoLookup.js,common.js' && ((cm) => !!cm && !/sk_live_0123456789abcdef0123/.test(cm.text) && /case_name/.test(cm.text) && cm.fields.includes('case_name'))(vf.relatedFiles.find(f => f.name === 'common.js')) && !vf.relatedFiles.find(f => f.name === 'autoLookup.js').fields.includes('case_name'), `D10-1: Generator Context に必須の効果と、同じ platform の kintone の語を含む既存 JS の本文（秘密情報は伏字）と画面の解析のフィールドの参照を渡し（2026-10-20: どれを動作テストで動かすかは生成工程が登録とフィールドの参照から選ぶ）、代表条件は送らない: ${JSON.stringify(vf && { re: vf.requiredEffects, files: (vf.relatedFiles || []).map(f => f.name), cases: 'cases' in vf })}`);
   assert(v && v.final && FS.readyOf(v) === true && v.generated.C1.status === 'verified' && v.generated.C1.verification.behavior.status === 'passed', `D10-2: 生成工程の結果（必須の効果・動作テスト）で最終案は承認できる: ${JSON.stringify(v && v.final && { approvable: FS.readyOf(v), reason: FS.reasonOf(v), status: v.generated.C1 && v.generated.C1.status })}`);
   //   §0e.1: 基準を取得できない → 照合を飛ばさない（承認の欄の準備の後、押す前に取得できなくなった場合。何も書き込まずに止め、承認を外す）
   const rF = await run();
@@ -1577,9 +1577,8 @@ await section(async () => {
 });
 // D17（レビュー A2・§3・§0c.6）: 動作テストに渡せなかった既存 JS（Toolkit が外した・Gateway が落とした）が同じイベントを登録していれば、その効果は合格でも verified にしない
 await section(async () => {
-  const LIM = KTContext.RELATED_FILES;
-  //   §0c.7（2026-10-08）: 1 ファイルの上限はやめ、4 件・合計 131,072 文字（伏字にした後の文字数）だけ（Gateway と同じ値）
-  assert(LIM.max === 4 && LIM.totalChars === 131072 && !('maxChars' in LIM), `D17-0: 上限は Gateway と同じ（4 件・合計 131,072 文字・1 ファイルの上限なし）: ${JSON.stringify(LIM)}`);
+  //   §0c.7（2026-10-08）・2026-10-20: 動作テストで動かす 4 件・合計 131,072 文字は生成工程が選ぶ。Toolkit が送る本文の合計の上限は生成工程と同じ 1 MiB（伏字にした後のバイト数）
+  assert(KTContext.RELATED_SOURCE_MAX_BYTES === 1024 * 1024, `D17-0: 送る本文の合計の上限は生成工程と同じ（1 MiB）: ${KTContext.RELATED_SOURCE_MAX_BYTES}`);
   const er1 = KTCodeReview.effectResults(VER_LOCK_OK, REQ_LOCK, { omitted: [{ name: 'ext5.js', target: 'desktop', reason: 'limit', events: ['app.record.edit.show'] }] });
   const er2 = KTCodeReview.effectResults(VER_LOCK_OK, REQ_LOCK, { omitted: [{ name: 'list.js', target: 'desktop', reason: 'limit', events: ['app.record.index.show'] }] });
   const er3 = KTCodeReview.effectResults(VER_LOCK_OK, REQ_LOCK, { omitted: [{ name: 'luxon.min.js', target: 'desktop', reason: 'url', events: [] }] });
@@ -1590,10 +1589,10 @@ await section(async () => {
   const v = x.c.activePlan(), e = v.generated.C1;
   //   §0c.9（2026-10-08）: 送れなかった既存 JS（件数の上限）は計画を直しても解けない → 操作を出さず「対応できない範囲」（理由とファイル名。詳細は詳細表示）
   assert(e.status === 'not-run' && e.verdict.kind === 'out-of-reach' && e.verdict.unfixable === true && !e.verdict.fix && !v.final.fix && /対応できない範囲/.test(e.verdict.reason) && /既存の JavaScript/.test(e.verdict.reason) && /「big\.js」/.test(e.verdict.reason) && /計画を直しても解けない/.test(e.verdict.next) && e.verdict.details.some(d => /「big\.js」: 模擬テストに渡せる既存の JavaScript の件数・文字数の上限/.test(d)) && !/実機/.test(e.verdict.next) && !/環境の制約/.test(FS.reasonOf(v)) && /既存の JavaScript と一緒の動き/.test(FS.reasonOf(v)) && !/実機で確かめる/.test(FS.reasonOf(v)) && FS.readyOf(v) === false && x.gen.calls.length === 1 && !x.gen.calls[0].feedback, `D17-2: 送れなかった既存 JS が同じイベント → 動作テストは合格でも反映できない（理由は既存 JS・§0c.9: 対応できない範囲として出し操作は出さない（実機で確かめるとも出さない）・修復は依頼しない）: ${JSON.stringify({ status: e.status, verdict: e.verdict, reason: FS.reasonOf(v) })}`);
-  // Generator Context: relatedFiles は 4 件まで・送れなかったものは relatedOmitted で Gateway にも知らせる
+  // Generator Context: relatedFiles は送った本文をそのまま渡す（2026-10-20: 動かす 4 件は生成工程が選ぶ。fields は画面の解析の手がかり）・送れなかったものは relatedOmitted で知らせる
   const files = [1, 2, 3, 4, 5].map(i => ({ name: `f${i}.js`, target: 'desktop', text: `/* ${i} */` }));
   const ctx = KTContext.buildGenerator({ customization: CUST_C1, plan: { customizations: [CUST_C1] }, planId: 'p', version: 1, data: clone(DATA_C), verification: { requirementIds: [], requiredEffects: REQ_LOCK, relatedFiles: files, relatedOmitted: [{ name: 'f6.js', target: 'desktop', reason: 'limit', events: ['app.record.edit.show'] }] } });
-  assert(ctx.verification.relatedFiles.length === 4 && ctx.verification.relatedOmitted.length === 1 && ctx.verification.relatedOmitted[0].name === 'f6.js' && ctx.verification.relatedOmitted[0].events[0] === 'app.record.edit.show', `D17-3: Generator Context の relatedFiles は 4 件まで・relatedOmitted を渡す: ${JSON.stringify({ n: ctx.verification.relatedFiles.length, omitted: ctx.verification.relatedOmitted })}`);
+  assert(ctx.verification.relatedFiles.length === 5 && ctx.verification.relatedFiles.every(f => Array.isArray(f.fields) && !f.fields.length) && ctx.verification.relatedOmitted.length === 1 && ctx.verification.relatedOmitted[0].name === 'f6.js' && ctx.verification.relatedOmitted[0].events[0] === 'app.record.edit.show', `D17-3: Generator Context の relatedFiles は送った本文をそのまま（fields の手がかりつき。動かす 4 件は生成工程が選ぶ）・relatedOmitted を渡す: ${JSON.stringify({ n: ctx.verification.relatedFiles.length, omitted: ctx.verification.relatedOmitted })}`);
 });
 // D18（レビュー A8・§0c.6 の理由の語彙）: 実行できなかった理由は区分ごとに理由と次の方針を変える（環境 / 条件の形 / 件数の上限 / 既存の JavaScript / 機械検査で未実行 / 対象外）
 await section(async () => {
@@ -1834,7 +1833,7 @@ await section(async () => {
   assert(eok.verification.bound === true && eok.candidateHash === hok && eok.verification.bodyHash === hok && eok.status === 'verified' && FS.readyOf(xok.c.activePlan()) === true,
     `D27-5: 結び付いた検証結果（受け取った候補から作った指紋 = 検証結果の指紋）は合格の材料にし、承認の指紋もこの値: ${JSON.stringify({ bound: eok.verification.bound, hash: [eok.candidateHash, eok.verification.bodyHash, hok] })}`);
 });
-// D28（A6・B1・隔離 7・画面）: 動作テストに送る既存 JS の選び方と上限（4 件・合計 131,072 文字。1 ファイルの上限は無い）・送れなかった既存 JS の events（分からなければ null・外部のライブラリは []）
+// D28（A6・B1・隔離 7・画面）: 動作テストに送る既存 JS の選び方と上限（2026-10-20: 動かす 4 件・合計 131,072 文字は生成工程が選ぶ。Toolkit は本文を合計 1 MiB まで送る。1 ファイルの上限は無い）・送れなかった既存 JS の events（分からなければ null・外部のライブラリは []）
 await section(async () => {
   const CUST_S = { customizationId: 'C1', requirement: '承認待ちでは案件名を編集できないようにする', whyStandardInsufficient: 'ステータスで切り替えるアクセス権は無い', strategy: 'NEW_JS_FILE', platform: ['desktop'], implementation: 'JAVASCRIPT', events: ['app.record.edit.show'], fields: [{ code: 'ステータス', access: 'READ' }, { code: 'case_name', access: 'CONTROL', condition: 'ステータス in ("承認待ち")', effects: ['lock'] }], apis: [], existingFiles: [], risks: [], questions: [], dependsOn: [], evidenceIds: [] };
   const planResp = (goal) => { const b = PLAN_V1(goal); return { ...b, plan: { ...b.plan, solution: 'CUSTOMIZATION', assessment: { ...b.plan.assessment, summary: '承認待ちでは案件名を編集できないようにします。' }, steps: [mkStep('C1', 'CUSTOMIZATION_REQUIRED', 'JS', null, { customizationId: 'C1' }, { title: 'JavaScript', solution: 'CUSTOMIZATION' })], customizations: [CUST_S] } }; };
@@ -1859,7 +1858,8 @@ await section(async () => {
     return out;
   };
   //   envReason: 偽の生成工程が返す動作テストの not-run の理由（§0c.9 の次の手の分け方の画面の回帰）
-  const run = async (inputs, { health = null, envReason = null } = {}) => {
+  //   gwOmitted（2026-10-20）: 偽の生成工程が返す verification.relatedOmitted（生成工程が動作テストで動かさなかった既存 JS と、本文から読んだ登録）
+  const run = async (inputs, { health = null, envReason = null, gwOmitted = null } = {}) => {
     const HEALTH_V = clone(HEALTH);
     HEALTH_V.registry.toolkit['customization-generator'].verification = health || ['requirementId', 'feedback', ...GEN_EFFECT_FEATURES, ...GEN_CURRENT_FEATURES];
     const genCtx = [];
@@ -1867,7 +1867,7 @@ await section(async () => {
       genCtx.push(clone(ctx));
       const req = (ctx.verification && ctx.verification.requiredEffects) || [];
       const candidateHash = gwCandidateHash({ strategy: 'NEW_JS_FILE', targetFile: 'caseLock.js', code: CODE_S, customizationId: 'C1' });
-      const resp = { ok: true, contractVersion: '2.1', meta: { requestId, gateway: { product: 'toolkit', feature: 'customization-generator', promptVersion: '1', contextVersion: 'customization-1' }, normalization: { warnings: [] }, ai: { model: 'm' } }, generated: { strategy: 'NEW_JS_FILE', targetFile: 'caseLock.js', summary: '承認待ちでは案件名を編集できないようにします。', code: CODE_S, patch: null, events: ['app.record.edit.show'], fields: [{ code: 'case_name', access: 'CONTROL' }], apis: [], assumptions: [], warnings: [], coverage: [{ requirementId: 'C1', status: 'MET', note: '' }] }, ...(req.length ? { verification: fakeVerification({ code: CODE_S, has: { case_name: ['lock'] } }, req, { candidateHash, ...(envReason ? { env: envReason, caseReason: envReason } : {}) }) } : {}) };
+      const resp = { ok: true, contractVersion: '2.1', meta: { requestId, gateway: { product: 'toolkit', feature: 'customization-generator', promptVersion: '1', contextVersion: 'customization-1' }, normalization: { warnings: [] }, ai: { model: 'm' } }, generated: { strategy: 'NEW_JS_FILE', targetFile: 'caseLock.js', summary: '承認待ちでは案件名を編集できないようにします。', code: CODE_S, patch: null, events: ['app.record.edit.show'], fields: [{ code: 'case_name', access: 'CONTROL' }], apis: [], assumptions: [], warnings: [], coverage: [{ requirementId: 'C1', status: 'MET', note: '' }] }, ...(req.length ? { verification: { ...fakeVerification({ code: CODE_S, has: { case_name: ['lock'] } }, req, { candidateHash, ...(envReason ? { env: envReason, caseReason: envReason } : {}) }), ...(gwOmitted ? { relatedOmitted: clone(gwOmitted) } : {}) } } : {}) };
       const v = KTAiClient.validateGenerated(resp, ctx);
       if (!v.ok) throw new Error(JSON.stringify(v.errors));
       return { ...v.normalized, requestId };
@@ -1884,12 +1884,17 @@ await section(async () => {
   const va = a.genCtx[0] && a.genCtx[0].verification;
   assert(va && va.relatedFiles.some(f => f.name === 'big.js' && f.text.length >= 96 * 1024) && !(va.relatedOmitted || []).some(f => f.name === 'big.js') && JSON.stringify((va.relatedOmitted || []).find(f => f.name === 'luxon.min.js')) === JSON.stringify({ name: 'luxon.min.js', target: 'desktop', reason: 'url', events: [] }) && FS.readyOf(a.v) === true, `D28-1: 64〜128 KiB の既存 JS も送る（1 ファイルの上限なし）・外部のライブラリは events []・承認できる: ${JSON.stringify(va && { files: va.relatedFiles.map(f => [f.name, f.text.length]), omitted: va.relatedOmitted, approvable: FS.readyOf(a.v), reason: FS.reasonOf(a.v) })}`);
   assert(va && Array.isArray(va.appFields) && va.appFields.length >= 20 && va.appFields.every(f => Object.keys(f).every(k => ['code', 'type', 'label', 'subtable', 'planned', 'readOnly', 'required', 'options'].includes(k))) && va.appFields.some(f => f.readOnly === true), `D28-2: appFields は code・type・label・subtable・planned・readOnly・options の形（§0c.8: readOnly を送る）: ${JSON.stringify(va && va.appFields.slice(0, 3))}`);
-  // 2) 合計が 131,072 文字を超える → 超えたファイルは limit（イベントは解析で分かる edit.show）→ その効果は verified にしない
+  // 2) 合計が 131,072 文字を超える → 2026-10-20: Toolkit は両方の本文を送り（合計 1 MiB まで）、生成工程が上限で動かさなかったファイル（limit・本文から読んだ登録 edit.show）を
+  //   応答の relatedOmitted で返す → その効果は verified にしない（二重の安全）
   const big2 = { name: 'big2.js', text: bigJs('big2', 40 * 1024) };
-  const b = await run(inputsWith([big, big2]));
+  const b = await run(inputsWith([big, big2]), { gwOmitted: [{ name: 'big2.js', target: 'desktop', events: ['app.record.edit.show'], reason: 'limit' }] });
   const vb = b.genCtx[0] && b.genCtx[0].verification;
   const om2 = vb && (vb.relatedOmitted || []).find(f => f.name === 'big2.js');
-  assert(vb && vb.relatedFiles.reduce((n, f) => n + f.text.length, 0) <= 131072 && om2 && om2.reason === 'limit' && JSON.stringify(om2.events) === JSON.stringify(['app.record.edit.show']) && b.v.generated.C1.status === 'not-run' && b.v.generated.C1.verdict.category === 'existing' && b.v.generated.C1.verdict.kind === 'out-of-reach' && !b.v.generated.C1.verdict.fix && /「big2\.js」/.test(b.v.generated.C1.verdict.reason), `D28-3: 合計 131,072 文字を超えた分は limit（イベントは解析の結果）→ verified にしない・§0c.9: 計画を直しても解けないので対応できない範囲（操作なし）: ${JSON.stringify({ files: vb && vb.relatedFiles.map(f => [f.name, f.text.length]), om2, verdict: b.v.generated.C1.verdict })}`);
+  assert(vb && ['big.js', 'big2.js'].every(n => vb.relatedFiles.some(f => f.name === n && f.fields.includes('case_name'))) && !om2 && b.v.generated.C1.status === 'not-run' && b.v.generated.C1.verdict.category === 'existing' && b.v.generated.C1.verdict.kind === 'out-of-reach' && !b.v.generated.C1.verdict.fix && /「big2\.js」/.test(b.v.generated.C1.verdict.reason), `D28-3: 合計 131,072 文字を超えても Toolkit は両方の本文を送り、生成工程が動かさなかった分（limit・本文から読んだ登録）は verified にしない・§0c.9: 計画を直しても解けないので対応できない範囲（操作なし）: ${JSON.stringify({ files: vb && vb.relatedFiles.map(f => [f.name, f.text.length]), om2, verdict: b.v.generated.C1.verdict })}`);
+  //   2026-10-20: Toolkit の上限は送る本文の合計 1 MiB（伏字にした後のバイト数）。超えたファイルは送らず limit・events null（登録が分からない＝その platform のすべて）
+  const hugeA = { name: 'hugeA.js', target: 'desktop', text: bigJs('hugeA', 700 * 1024), fields: { case_name: { READ: 1 } } }, hugeB = { name: 'hugeB.js', target: 'desktop', text: bigJs('hugeB', 400 * 1024), fields: {} };
+  const selH = KTContext.relatedFilesFor([hugeA, hugeB], { targets: ['desktop'], requiredEffects: [{ field: 'case_name', effect: 'lock', events: ['app.record.edit.show'] }] });
+  assert(selH.relatedFiles.length === 1 && selH.relatedFiles[0].name === 'hugeA.js' && JSON.stringify(selH.relatedOmitted) === JSON.stringify([{ name: 'hugeB.js', target: 'desktop', reason: 'limit', events: null }]), `D28-3b: 送る本文は合計 1 MiB まで・超えたファイルは limit（events null）: ${JSON.stringify({ sent: selH.relatedFiles.map(f => [f.name, f.text.length]), omitted: selH.relatedOmitted })}`);
   // 3) 同じホスト（kintone の画面と同じ）の URL 指定の既存 JS は本文もイベントも分からない → events null（その platform のすべて）→ verified にしない
   const c = await run(inputsWith([], ['https://t.cybozu.com/k/api/js/biz.js']));
   const vc = c.genCtx[0] && c.genCtx[0].verification;
@@ -1914,7 +1919,7 @@ await section(async () => {
   await clickChat(e7.m, 'choice', { text: fx.text, intent: fx.intent || 'REVISE_PLAN', display: fx.display }); await ticks(20);
   assert(e7.m.conv().activePlan().version === vBefore + 1 && e7.genCtx.length === 2 && e7.m.conv().activePlan().final, `D28-8: 画面のボタンで計画の差分更新（新しい版）→ 最終案を作り直す: ${JSON.stringify({ version: e7.m.conv().activePlan().version, gen: e7.genCtx.length })}`);
 });
-// D29（契約の形）: Generator Context の relatedOmitted は reason を url・no-source・limit・other に限り（too-large・gateway-dropped は送らない）、events null を保つ。appFields は 2000 件・options は 50 件まで
+// D29（契約の形）: Generator Context の relatedOmitted は reason を url・no-source・limit・other に限り（語彙外の古い理由 too-large・gateway-dropped は送らない）、events null を保つ。appFields は 2000 件・options は 50 件まで
 await section(async () => {
   const ctx = KTContext.buildGenerator({ customization: CUST_C1, plan: { customizations: [CUST_C1] }, planId: 'p', version: 1, data: clone(DATA_C), verification: { requirementIds: [], requiredEffects: REQ_LOCK, relatedFiles: [], relatedOmitted: [{ name: 'a.js', target: 'desktop', reason: 'url', events: null }, { name: 'b.js', target: 'desktop', reason: 'too-large', events: ['app.record.edit.show'] }, { name: 'c.js', target: 'desktop', reason: 'gateway-dropped', events: null }, { name: 'd.js', target: 'mobile', reason: 'no-source', events: [] }] } });
   assert(JSON.stringify(ctx.verification.relatedOmitted) === JSON.stringify([{ name: 'a.js', target: 'desktop', reason: 'url', events: null }, { name: 'd.js', target: 'mobile', reason: 'no-source', events: [] }]), `D29-1: reason は 4 つの語彙だけ・events null は null のまま送る: ${JSON.stringify(ctx.verification.relatedOmitted)}`);
@@ -2231,8 +2236,9 @@ await section(async () => {
   const sel2 = KTContext.relatedFilesFor(files, { targets: ['desktop'], requiredEffects: REQ_LOCK, existing: { name: 'main.js', target: 'desktop' } });
   assert(sel2.relatedOmitted.filter(f => f.reason === 'url').length === 2 && !sel2.relatedFiles.some(f => f.name === 'main.js'), `D40-4: 統合先は URL 全体でも見る（同じ名前の URL のファイルを統合先と取り違えない）: ${JSON.stringify(sel2)}`);
   //   Generator Context には url を送らない（契約の形のまま。Toolkit の表示用）
-  const ctx = KTContext.buildGenerator({ customization: CUST_C1, plan: { customizations: [CUST_C1] }, planId: 'p', version: 1, data: clone(DATA_C), verification: { requirementIds: [], requiredEffects: REQ_LOCK, relatedFiles: [], relatedOmitted: sel.relatedOmitted } });
-  assert(ctx.verification.relatedOmitted.every(f => !('url' in f)) && ctx.verification.relatedOmitted.filter(f => f.name === 'main.js' && f.reason === 'url').length === 2 && ctx.verification.relatedOmitted.filter(f => f.name === 'main.js' && f.reason === 'other').length === 1, `D40-5: Generator Context の relatedOmitted は契約の形（name・target・reason・events）のまま: ${JSON.stringify(ctx.verification.relatedOmitted)}`);
+  //   2026-10-20: FILE の main.js（kintone の語を含む）は本文を送る（動かすかは生成工程が決める）
+  const ctx = KTContext.buildGenerator({ customization: CUST_C1, plan: { customizations: [CUST_C1] }, planId: 'p', version: 1, data: clone(DATA_C), verification: { requirementIds: [], requiredEffects: REQ_LOCK, relatedFiles: sel.relatedFiles, relatedOmitted: sel.relatedOmitted } });
+  assert(ctx.verification.relatedOmitted.every(f => !('url' in f)) && ctx.verification.relatedOmitted.filter(f => f.name === 'main.js' && f.reason === 'url').length === 2 && ctx.verification.relatedFiles.filter(f => f.name === 'main.js' && !('url' in f)).length === 1, `D40-5: Generator Context の relatedOmitted は契約の形（name・target・reason・events）のまま: ${JSON.stringify(ctx.verification.relatedOmitted)}`);
   //   抜け道（隔離 4）: userinfo・/npm/../gh/・%2e%2e・既定以外の port は既知の配布元にしない。正規化しても /npm/ の中なら既知
   const bad = ['https://js.cybozu.com@evil.example/biz.js', 'https://cdn.jsdelivr.net/npm/../gh/acme/x.js', 'https://cdn.jsdelivr.net/npm/%2e%2e/gh/acme/x.js', 'https://user:pw@unpkg.com/x.js', 'https://cdn.jsdelivr.net:8443/npm/x.js', 'https://ajax.googleapis.com/ajax/libs/../../other/x.js', 'ftp://js.cybozu.com/x.js', 'https://js.cybozu.com./x.js'];
   //   §0d.3: jsDelivr・unpkg は既知の配布元から外したので、正規化の確かめは cdnjs の /ajax/libs/ と code.jquery.com の既定の port で行う
@@ -2257,46 +2263,38 @@ await section(async () => {
   const n = KTAiClient.normalizeVerification(raw);
   assert(JSON.stringify(n.behavior.cases[0].details.files) === '["e.js","f.js"]', `D42: details.files のオブジェクトの要素は name の文字列として残す（文字列の要素はそのまま）: ${JSON.stringify(n.behavior.cases[0].details)}`);
 });
-// D43（§0c.10・隔離レビュー A1）: kintone.events.on を呼んでいるのに第 1 引数を解けないファイル（イベント名を組み立てる・別名で登録する）に eventsUnresolved の印を付け、
-//   同じ platform なら必須の効果に関係が見えなくても動作テストに送る。送れなければ relatedOmitted の events null（その platform の代表条件は verified にしない）
+// D43（§0c.10・隔離レビュー A1）・2026-10-20（同梱の構文解析器の削除）: kintone.events.on を呼んでいるのに第 1 引数を解けないファイル（イベント名を組み立てる・別名で登録する）も、
+//   同じ platform なら本文を送る（登録を読むのは生成工程だけ。読めないファイルは生成工程が動作テストで動かす。読み方のテストは AI版 worker の required-effects §0c.10・§0c.11）。
+//   Toolkit は登録を読まず、件数で切らない（動かす 4 件は生成工程が選ぶ）。本文の無いキャッシュのファイルは送れないので events null（解析の記録のイベントで代えない）
 await section(async () => {
   const REQ_AL = [reqLockOf('amount', [EV_E, EV_I], 'ステータス in ("承認済み")')];
   const VER_AL = verOfCases(['amount'], fullCases(['amount'], [EV_E, EV_I]));
   const X1 = "(function(){ 'use strict'; var screens = ['edit', 'index.edit']; kintone.events.on(screens.map(function (s) { return `app.record.${s}.show`; }), function (e) { e.record.memo.error = '備考を確認してください'; return e; }); })();";
   const X1B = "(function(){ const P = 'app.record.'; kintone.events.on([P + 'edit.show', P + 'index.edit.show'], function (e) { e.record.memo.error = 'x'; return e; }); })();";
   const ALIAS = "(function(){ const on = kintone.events.on; on('app.record.edit.show', function (e) { e.record.memo.error = 'x'; return e; }); })();";
-  const LIT = "(function(){ kintone.events.on('app.record.detail.show', function (e) { return e; }); })();";
-  const R = KTScan.eventRegistrationsOf;
-  assert(R(X1).unresolved && R(X1).reasons.includes('dynamic-event-name') && !R(X1B).unresolved && JSON.stringify(R(X1B).events) === JSON.stringify([EV_E, EV_I]) && R(ALIAS).unresolved && R(ALIAS).reasons.includes('events-reference') && !R(LIT).unresolved && JSON.stringify(R(LIT).events) === '["app.record.detail.show"]' && !R("window.CommonUtil = {};").unresolved && R("const k = kintone; k.events.on('app.record.edit.show', function (e) { return e; });").unresolved && !R("(function (kintone) { kintone.events.on('app.record.edit.show', function (e) { return e; }); })(kintone);").unresolved && R("var evs = ['app.record.detail.show']; evs.push('app.record.edit.show'); kintone.events.on(evs, function (e) { return e; });").unresolved,
-    `D43-1: 登録の第 1 引数を構文解析で読む（組み立て・別名・書き換える配列は読めない。リテラル・連結・const は読める。§0c.11 で Gateway と同じ理由の名前）: ${JSON.stringify({ X1: R(X1), X1B: R(X1B), ALIAS: R(ALIAS) })}`);
-  //   簡素化 B（2026-10-16）: 同梱の acorn の使い先はこの登録の読み取りだけになった（記法の検査 KTModernJs は削除）。kintone のページには AMD の define（define.amd）が
-  //   あるが、同梱の acorn は define に登録されず、登録を読める（以前は ai-modern-js の M6 が KTModernJs で確かめていた）
-  const regsOnPage = loadToolkit({ pageDefine: true }).KTScan.eventRegistrationsOf;
-  assert(!regsOnPage(LIT).unresolved && JSON.stringify(regsOnPage(LIT).events) === '["app.record.detail.show"]' && !regsOnPage(LIT).reasons.includes('no-parser'), `D43-0: ページに AMD の define があっても、同梱の acorn で登録を読める: ${JSON.stringify(regsOnPage(LIT))}`);
   const dataOf = (names) => ({ customize: { desktop: { js: names.map(n => ({ type: 'FILE', file: { name: n, fileKey: `k-${n}` } })) }, mobile: { js: [] } } });
   const filesOf = (list) => KTScan.summarizeFiles({ files: list.map(([name, text]) => ({ name, target: 'desktop', kind: 'js', text })) }, dataOf(list.map(([n]) => n)));
   const f1 = filesOf([['memo-check.js', X1], ['memo-check2.js', X1B], ['memo-alias.js', ALIAS]]);
   const sel1 = KTContext.relatedFilesFor(f1, { targets: ['desktop'], requiredEffects: REQ_AL });
-  assert(f1.find(f => f.name === 'memo-check.js').eventsUnresolved === true && f1.find(f => f.name === 'memo-alias.js').eventsUnresolved === true && !f1.find(f => f.name === 'memo-check2.js').eventsUnresolved && f1.find(f => f.name === 'memo-check2.js').events.includes(EV_I)
-    && ['memo-check.js', 'memo-check2.js', 'memo-alias.js'].every(n => sel1.relatedFiles.some(f => f.name === n)) && sel1.relatedFiles.find(f => f.name === 'memo-check.js').events === null,
-    `D43-2（rv6s X1・X1b）: 第 1 引数を解けないファイルは印を付けて送る・連結のイベント名は読めたイベントとして選ぶ: ${JSON.stringify({ files: f1.map(f => [f.name, f.eventsUnresolved || false, f.events]), sent: sel1.relatedFiles.map(f => [f.name, f.events]), omitted: sel1.relatedOmitted })}`);
-  //   送れない（件数の上限）→ relatedOmitted の events null → 動作テストが合格でも verified にしない（related-file-omitted）
+  assert(['memo-check.js', 'memo-check2.js', 'memo-alias.js'].every(n => sel1.relatedFiles.some(f => f.name === n && Array.isArray(f.fields) && !('events' in f))) && !sel1.relatedOmitted.length,
+    `D43-2（rv6s X1・X1b）: 第 1 引数を解けないファイルも本文を送る（登録の印・イベントは付けない。動かすかは生成工程が登録から決める）: ${JSON.stringify({ sent: sel1.relatedFiles.map(f => [f.name, f.fields]), omitted: sel1.relatedOmitted })}`);
+  //   Toolkit は件数で切らない。生成工程が上限で動かさなかったファイル（登録を読めなければ events null）は応答の relatedOmitted で返り、動作テストが合格でも verified にしない（二重の安全）
   const many = filesOf([1, 2, 3, 4, 5].map(i => [`alias${i}.js`, ALIAS.replace("'x'", `'x${i}'`)]));
   const sel2 = KTContext.relatedFilesFor(many, { targets: ['desktop'], requiredEffects: REQ_AL });
-  const er2 = KTCodeReview.effectResults(VER_AL, REQ_AL, { omitted: sel2.relatedOmitted });
-  assert(sel2.relatedFiles.length === 4 && sel2.relatedOmitted.length === 1 && sel2.relatedOmitted[0].reason === 'limit' && sel2.relatedOmitted[0].events === null && !er2.ok && er2.items[0].notRunReasons.includes('related-file-omitted'), `D43-3: 印のあるファイルを送れなければ events null → 合格でも verified にしない: ${JSON.stringify({ sent: sel2.relatedFiles.length, omitted: sel2.relatedOmitted, er: er2.items[0] })}`);
-  //   本文の無いキャッシュ（Field Scanner の slim な payload）でも、解析の記録（fileEventsUnresolved）で印を付ける
+  const er2 = KTCodeReview.effectResults(VER_AL, REQ_AL, { omitted: [{ name: 'alias5.js', target: 'desktop', reason: 'limit', events: null }] });
+  assert(sel2.relatedFiles.length === 5 && !sel2.relatedOmitted.length && !er2.ok && er2.items[0].notRunReasons.includes('related-file-omitted'), `D43-3: 5 件とも本文を送る・生成工程が動かさなかった登録の読めないファイル（events null）は合格でも verified にしない: ${JSON.stringify({ sent: sel2.relatedFiles.length, omitted: sel2.relatedOmitted, er: er2.items[0] })}`);
+  //   本文の無いキャッシュ（Field Scanner の slim な payload）のファイルは送れない → events null（解析の記録のイベントで代えない。登録は生成工程が本文から読む）
   const scan = KTScan.buildPayload({ appId: '353', fields: [], files: [{ name: 'memo-check.js', target: 'desktop', kind: 'js', text: X1 }, { name: 'memo-check2.js', target: 'desktop', kind: 'js', text: X1B }], scannedAt: '2026-10-08T00:00:00.000Z' });
   const slim = { ...scan, files: scan.files.map(f => ({ name: f.name, target: f.target, kind: f.kind })) };
   const f3 = KTScan.summarizeFiles(slim, dataOf(['memo-check.js', 'memo-check2.js']));
   const sel3 = KTContext.relatedFilesFor(f3, { targets: ['desktop'], requiredEffects: REQ_AL });
-  assert(scan.fileEventsUnresolved && scan.fileEventsUnresolved['desktop:js:memo-check.js'] === true && !scan.fileEventsUnresolved['desktop:js:memo-check2.js'] && scan.fileEvents['desktop:js:memo-check2.js'].some(e => e.name === EV_I)
-    && f3.find(f => f.name === 'memo-check.js').eventsUnresolved === true && sel3.relatedOmitted.find(f => f.name === 'memo-check.js').events === null && JSON.stringify(sel3.relatedOmitted.find(f => f.name === 'memo-check2.js').events.slice().sort()) === JSON.stringify([EV_E, EV_I]),
-    `D43-4: 本文の無いキャッシュでも印を使う（送れないので events null）・連結のイベント名も解析の記録に残す: ${JSON.stringify({ unres: scan.fileEventsUnresolved, omitted: sel3.relatedOmitted })}`);
+  assert(JSON.stringify(Object.keys(scan)) === JSON.stringify(['results', 'files', 'fields', 'appRefs', 'fileEvents', 'unknownRefs', 'unknownStatuses', 'externalRefs', 'meta']) && sel3.relatedOmitted.length === 2 && sel3.relatedOmitted.every(f => f.reason === 'no-source' && f.events === null) && !sel3.relatedFiles.length,
+    `D43-4: 本文の無いキャッシュのファイルは送れない → events null（解析の記録のイベントで代えない）。payload に登録の印は無い: ${JSON.stringify({ keys: Object.keys(scan), omitted: sel3.relatedOmitted })}`);
 });
 
-// D44（§0c.10・隔離レビュー A5）: 同じ platform で送らなかった本文ありのファイル（必須の効果に関係しないもの）も relatedOmitted（reason other、events は解析の結果・登録が無ければ []）として送る。
-//   events [] のファイルは代表条件を止めない（Gateway は候補が知らない名前を読んだときだけ related-file-omitted にする）。Gateway に送るのは 50 件まで（other は後ろ）
+// D44（§0c.10・隔離レビュー A5）・2026-10-20: 同じ platform で kintone の語を含まず必須の効果のフィールドも参照しないファイルは本文を送らず relatedOmitted（reason other・events []）。
+//   kintone の語を含むファイルは本文を送り、動かさなかったら生成工程が応答の relatedOmitted（other・本文から読んだ登録）で返す。events [] / 関係しないイベントの other は
+//   代表条件を止めない（Gateway は候補が知らない名前を読んだときだけ related-file-omitted にする）。Gateway に送るのは 50 件まで（other は後ろ）
 await section(async () => {
   const REQ_AL = [reqLockOf('amount', [EV_E, EV_I], 'ステータス in ("承認済み")')];
   const VER_AL = verOfCases(['amount'], fullCases(['amount'], [EV_E, EV_I]));
@@ -2306,9 +2304,10 @@ await section(async () => {
   const files = KTScan.summarizeFiles({ files: [{ name: 'common.js', target: 'desktop', kind: 'js', text: COMMON }, { name: 'detail.js', target: 'desktop', kind: 'js', text: DETAIL }, { name: 'm.js', target: 'mobile', kind: 'js', text: COMMON }] }, data);
   const sel = KTContext.relatedFilesFor(files, { targets: ['desktop'], requiredEffects: REQ_AL });
   const other = sel.relatedOmitted.filter(f => f.reason === 'other');
-  assert(!sel.relatedFiles.length && other.length === 2 && JSON.stringify(other.find(f => f.name === 'common.js').events) === '[]' && JSON.stringify(other.find(f => f.name === 'detail.js').events) === '["app.record.detail.show"]' && !sel.relatedOmitted.some(f => f.name === 'm.js'),
-    `D44-1（rv6s Y2e）: 送らなかった本文ありのファイルは reason other（events は解析の結果・登録が無ければ []）。別の platform のファイルは入れない: ${JSON.stringify(sel.relatedOmitted)}`);
-  const er = KTCodeReview.effectResults(VER_AL, REQ_AL, { omitted: sel.relatedOmitted });
+  assert(sel.relatedFiles.length === 1 && sel.relatedFiles[0].name === 'detail.js' && other.length === 1 && other[0].name === 'common.js' && JSON.stringify(other[0].events) === '[]' && !sel.relatedOmitted.some(f => f.name === 'm.js') && !sel.relatedFiles.some(f => f.name === 'm.js'),
+    `D44-1（rv6s Y2e）: kintone の語を含まないファイル（common.js）は送らず other（events []）・含むファイル（detail.js）は本文を送る。別の platform のファイルは入れない: ${JSON.stringify(sel)}`);
+  //   生成工程が detail.js を動かさなかったときの応答の relatedOmitted（本文から読んだ登録）と合わせても、関係しないイベントは代表条件を止めない
+  const er = KTCodeReview.effectResults(VER_AL, REQ_AL, { omitted: [...sel.relatedOmitted, { name: 'detail.js', target: 'desktop', reason: 'other', events: ['app.record.detail.show'] }] });
   assert(er.ok && !er.omittedHit.length, `D44-2: events [] / 関係しないイベントの other は代表条件を止めない: ${JSON.stringify({ ok: er.ok, hit: er.omittedHit })}`);
   //   Generator Context: other は後ろにして 50 件まで（limit・url などの送れなかった関係のあるファイルを先に残す）
   const many = [...Array.from({ length: 52 }, (_, i) => ({ name: `o${i}.js`, target: 'desktop', reason: 'other', events: [] })), { name: 'big.js', target: 'desktop', reason: 'limit', events: null }];
@@ -2496,50 +2495,16 @@ await section(async () => {
   assert(!rv.checks.some(ch => ch.name === 'planned-fields') && re1 && !re1.ok && re1.severity === 'block' && /対応していない/.test(re1.message), `D50-6: 生成工程が必須の効果の確認に非対応なら止める（Toolkit は planned-fields を作らない）: ${JSON.stringify({ re1 })}`);
   delete CAND.saveconfirm; delete CAND.saveconfirmr;
 });
-// D51（§0c.11・隔離レビュー 2）: アプリ解析の登録の印（eventsUnresolved）は、契約 20 §13 の登録の照合（Gateway の staticRegistrationsOf）と同じ言葉で決める。
-//   計算した添字の kintone・window / globalThis / self 以外からの .kintone・eval / Function（文字列のタイマー）・const の配列の書き換え・ループの中の登録は読めない。
-//   呼び出しの場所ごとのイベントの回数（counts）も返す。読めないファイルは同じ platform なら動作テストに送る（送れなければ events null）
+// D51（§0c.11・隔離レビュー 2）・2026-10-20（同梱の構文解析器の削除）: 登録を読めない形（計算した添字の kintone・window / globalThis / self 以外からの .kintone・
+//   eval / Function（文字列のタイマー）・const の配列の書き換え・ループの中の登録など）の判定は生成工程だけ（Gateway の staticRegistrationsOf。契約 20 §13。その形のテストは
+//   AI版 worker の required-effects §0c.10・§0c.11 に移した）。Toolkit は同じ platform の kintone の語を含む本文を送る（読めないファイルも生成工程が動作テストで動かす）
 await section(async () => {
-  const R = KTScan.eventRegistrationsOf;
   const H = "function (e) { e.record.amount.error = 'x'; return e; }";
-  const EVS = "['app.record.edit.show','app.record.index.edit.show']";
-  const cases = [
-    ['R2（window の計算した添字）', `(function(){ if (location.hostname !== 'a.cybozu.com') return; window['kintone'].events.on(${EVS}, ${H}); })();`, ['kintone-computed']],
-    ['計算した添字（名前を連結）', `(function(){ var k = 'kin' + 'tone'; window[k].events.on(${EVS}, ${H}); })();`, ['kintone-computed']],
-    ['R2e（top.kintone）', `(function(){ if (kintone.getLoginUser().code !== 'admin') return; top.kintone.events.on(${EVS}, ${H}); })();`, ['kintone-foreign']],
-    ['this.kintone', `this.kintone.events.on(${EVS}, ${H});`, ['kintone-foreign']],
-    ['R2d（eval の文字列）', `(function(){ if (kintone.getLoginUser().code !== 'admin') return; eval("kintone.events.on('app.record.edit.show', function (e) { return e; })"); })();`, ['eval-reference']],
-    ['new Function', `(function(){ new Function("kintone.events.on('app.record.edit.show', function (e) { return e; })")(); })();`, ['eval-reference']],
-    ['文字列のタイマー', `(function(){ setTimeout("kintone.events.on('app.record.edit.show', function (e) { return e; })", 0); })();`, ['eval-reference']],
-    ['R10（const の配列に push）', `(function(){ const E = ['app.record.detail.show']; if (kintone.getLoginUser().code === 'admin') E.push('app.record.edit.show'); kintone.events.on(E, ${H}); })();`, ['mutable-array']],
-    ['R10b（添字への代入）', `(function(){ const E = ['app.record.detail.show']; if (location.hostname === 'a.cybozu.com') E[0] = 'app.record.edit.show'; kintone.events.on(E, ${H}); })();`, ['mutable-array']],
-    ['関数への受け渡し', `(function(){ const E = ['app.record.detail.show']; addMore(E); kintone.events.on(E, ${H}); })();`, ['mutable-array']],
-    ['ループの中の登録', `(function(){ for (var i = 0; i < 2; i++) { kintone.events.on('app.record.edit.show', ${H}); } })();`, ['in-loop']],
-    ['var の変数', `(function(){ var E = ['app.record.edit.show']; kintone.events.on(E, ${H}); })();`, ['dynamic-event-name']],
-    ['即時実行でない関数の中', `function init(){ kintone.events.on('app.record.edit.show', ${H}); } init();`, ['not-top-level']],
-    ['handler の中の登録', `kintone.events.on('app.record.detail.show', function (e) { kintone.events.on('app.record.edit.show', ${H}); return e; });`, ['nested-registration']],
-    ['window.kintone.events', `(function(){ window.kintone.events.on('app.record.edit.show', ${H}); })();`, ['events-reference']],
-    ['kintone.events.off', `(function(){ kintone.events.on('app.record.edit.show', ${H}); kintone.events.off('app.record.edit.show'); })();`, ['events-off']],
-  ];
-  const bad = cases.filter(([, text, want]) => { const r = R(text); return !(r.unresolved && JSON.stringify(r.reasons) === JSON.stringify(want)); }).map(([id, text]) => [id, R(text)]);
-  assert(!bad.length, `D51-1: 読めない形は契約と同じ理由の名前で unresolved: ${JSON.stringify(bad)}`);
-  //   読める形（対照）と回数: R1（同じイベントに 2 つの登録。片方は利用者で分岐）は読めて、回数は呼び出しの場所ごと。typeof・instanceof・Function.prototype の参照は読める
-  const r1 = R(`(function(){ kintone.events.on(${EVS}, function (e) { return e; }); if (kintone.getLoginUser().code === 'admin') { kintone.events.on(${EVS}, ${H}); } })();`);
-  const r5 = R(`(function(){ const P = 'app.record.'; const E = [P + 'edit.show', P + 'index.edit.show']; kintone.events.on(E, ${H}); })();`);
-  const rt = R(`(function(){ if (typeof Function === 'function' && x instanceof Function) {} var f = Function.prototype.call; if (typeof kintone === 'undefined' || !window.kintone) return; kintone.events.on('app.record.edit.show', ${H}); })();`);
-  const ri = R(`(function (kintone) { kintone.events.on('app.record.edit.show', ${H}); })(window.kintone);`);
-  assert(!r1.unresolved && JSON.stringify(r1.counts) === JSON.stringify({ 'app.record.edit.show': 2, 'app.record.index.edit.show': 2 }) && !r5.unresolved && JSON.stringify(r5.events) === JSON.stringify(['app.record.edit.show', 'app.record.index.edit.show']) && !rt.unresolved && !ri.unresolved,
-    `D51-2: 読める形（同じイベントの 2 つの登録・const の連結・判定の位置・即時実行の関数の引数 kintone）と、呼び出しの場所ごとの回数: ${JSON.stringify({ r1, r5, rt, ri })}`);
-  //   共通の関数だけのファイル（kintone も events も無い）は読める（登録なし）。構文エラーは kintone と events を含むときだけ読めない（Toolkit だけの扱い）
-  const rc = R("window.KtCommon = { isBlank: function (v) { return v == null || v === ''; } };");
-  const rp = R("kintone.events.on('app.record.edit.show', function (e) { return e; ");
-  assert(!rc.unresolved && !rc.events.length && rp.unresolved && JSON.stringify(rp.reasons) === '["parse-error"]' && !R('var x = ;').unresolved, `D51-3: 登録の無いファイル・構文エラーの扱い: ${JSON.stringify({ rc, rp })}`);
-  //   読めないファイルは同じ platform なら必須の効果に関係が見えなくても送る（R10: 静的には詳細画面だけに見えるが、管理者のときは編集画面にも登録する）
   const REQ_AL = [reqLockOf('amount', [EV_E, EV_I], 'ステータス in ("承認済み")')];
-  const R10 = cases.find(c => /^R10（/.test(c[0]))[1];
+  const R10 = `(function(){ const E = ['app.record.detail.show']; if (kintone.getLoginUser().code === 'admin') E.push('app.record.edit.show'); kintone.events.on(E, ${H}); })();`;
   const files = KTScan.summarizeFiles({ files: [{ name: 'r10.js', target: 'desktop', kind: 'js', text: R10 }] }, { customize: { desktop: { js: [{ type: 'FILE', file: { name: 'r10.js', fileKey: 'k' } }] }, mobile: { js: [] } } });
   const sel = KTContext.relatedFilesFor(files, { targets: ['desktop'], requiredEffects: REQ_AL });
-  assert(files[0].eventsUnresolved === true && sel.relatedFiles.some(f => f.name === 'r10.js' && f.events === null), `D51-4（rv7s R10）: 書き換える配列のファイルは印を付けて送る: ${JSON.stringify({ f: files[0].eventsUnresolved, sent: sel.relatedFiles.map(f => [f.name, f.events]) })}`);
+  assert(sel.relatedFiles.some(f => f.name === 'r10.js' && f.text.includes('E.push')) && !sel.relatedOmitted.length, `D51-4（rv7s R10）: 書き換える配列のファイル（静的には詳細画面だけに見える）も本文を送る（読めないかは生成工程が決める）: ${JSON.stringify({ sent: sel.relatedFiles.map(f => f.name), omitted: sel.relatedOmitted })}`);
 });
 // 追加指示 §5 の表の 9 行は、§0c.8・§0c.9 の修正の後も上の D1〜D9 で同じ期待のまま確かめている（期待値は弱めていない。§0c.9 では偽の生成工程の代表条件を、イベントごとの合う・合わない（side）の形にしただけ）
 

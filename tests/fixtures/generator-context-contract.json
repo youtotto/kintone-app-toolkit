@@ -268,7 +268,8 @@
         {
           "name": "tantou.js",
           "target": "desktop",
-          "text": "(function () {\n  'use strict';\n  kintone.events.on(['app.record.edit.show'], function (event) {\n    var name = event.record['tantou'].value;\n    if (!name) console.log('担当が未入力です');\n    return event;\n  });\n})();"
+          "text": "(function () {\n  'use strict';\n  kintone.events.on(['app.record.edit.show'], function (event) {\n    var name = event.record['tantou'].value;\n    if (!name) console.log('担当が未入力です');\n    return event;\n  });\n})();",
+          "fields": []
         }
       ],
       "relatedOmitted": [

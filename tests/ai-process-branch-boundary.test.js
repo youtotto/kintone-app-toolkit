@@ -136,8 +136,8 @@ await section(async () => {
 // =========================================================
 console.log('\n--- §B4. 会話（偽の services）: 直した計画 ＋ 3 本の検証済みの生成 → 最終案が承認できる ---');
 const JSF = (o = {}) => [
-  { name: 'dealLock.js', target: 'desktop', events: ['app.record.create.show', 'app.record.edit.show'], fields: ['amount', 'ステータス'], source: true, analyzed: true, eventsUnresolved: false },
-  { name: 'dealValidate.js', target: 'desktop', events: [...SUBMITS], fields: ['amount'], source: true, analyzed: true, eventsUnresolved: false, ...o },
+  { name: 'dealLock.js', target: 'desktop', events: ['app.record.create.show', 'app.record.edit.show'], fields: ['amount', 'ステータス'], source: true, analyzed: true },
+  { name: 'dealValidate.js', target: 'desktop', events: [...SUBMITS], fields: ['amount'], source: true, analyzed: true, ...o },
 ];
 const U = FX.PLAN_FIXED.goal.split('\n')[0];
 /** 仮案の台本: 依頼の 1 発言で 3 つの振る舞い（分岐・編集不可・入力チェックの移植）を要件にする */

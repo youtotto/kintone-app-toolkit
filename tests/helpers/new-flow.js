@@ -271,9 +271,10 @@ function createNewFlowKit(T) {
   /** §5.1: 移植元と同じ動きかを比べる検査の印（health の customization-generator.verification の conditionFrom。今の Gateway の偽物には付ける） */
   const GEN_PORT_FEATURE = 'conditionFrom';
   /** 2026-10-18: 外部への通信と通知の検査の印（health の networkCheck）・検査と模擬テストに使った本文を返す印（verifiedBody）・効果ごとの確かめ方（effectCheck）・
-   *   移植元と比べる代表条件（conditionFrom）。今の Gateway の偽物には付ける（どれかが無い接続先には、会話が生成を依頼しない） */
+   *   移植元と比べる代表条件（conditionFrom）。2026-10-20: 既存 JS の登録を読むのは生成工程だけ（registrationSelect）。
+   *   今の Gateway の偽物には付ける（どれかが無い接続先には、会話が生成を依頼しない） */
   const GEN_NETWORK_FEATURE = 'networkCheck';
-  const GEN_CURRENT_FEATURES = Object.freeze([GEN_NETWORK_FEATURE, 'verifiedBody', 'effectCheck', GEN_PORT_FEATURE]);
+  const GEN_CURRENT_FEATURES = Object.freeze([GEN_NETWORK_FEATURE, 'verifiedBody', 'effectCheck', GEN_PORT_FEATURE, 'registrationSelect']);
   const EXPECT_OF = { lock: 'lock', warn: 'warn', 'block-save': 'block-save', 'set-value': 'set-value', 'show-hide': 'show-hide' };
   /** §0c.9: 「合わない」側の期待（Gateway の behavior-cases の neg） */
   const NOMATCH_OF = { lock: 'not-locked', warn: 'not-warned', 'block-save': 'save-allowed', 'set-value': 'value-unchanged', 'show-hide': 'show-hide' };

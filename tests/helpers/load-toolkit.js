@@ -5,17 +5,14 @@ const fs = require('fs');
 const path = require('path');
 const vm = require('vm');
 
-/**
- * pageDefine: true でページに AMD の define（define.amd）がある状態を作る（kintone のページと同じ。同梱の acorn が define に登録されないことを確かめる）
- */
-function loadToolkit({ document: docOverride = null, localStorage: lsOverride = null, pageDefine = false } = {}) {
+function loadToolkit({ document: docOverride = null, localStorage: lsOverride = null } = {}) {
   // KT_SRC: 別のビルド（修正前の版など）で同じテストを走らせるとき（RED の確認）に使う
   const SRC = process.env.KT_SRC || path.join(__dirname, '..', '..', 'kintoneAppToolkit.user.js');
   let code = fs.readFileSync(SRC, 'utf8');
   const lastClose = code.lastIndexOf('})();');
   if (lastClose < 0) throw new Error('IIFE close not found');
   code = code.slice(0, lastClose)
-    + '\n  globalThis.__TEST__ = { KTDeps, KTScan, KTIncoming, KTDevBase: typeof KTDevBase !== "undefined" ? KTDevBase : undefined, KTContext, KTPlanText: typeof KTPlanText !== "undefined" ? KTPlanText : undefined, KTContextUi, KTAiClient, KTAiBudget: typeof KTAiBudget !== "undefined" ? KTAiBudget : undefined, KTQueryCheck, KTPlanReview, KTPlanExecutor, KTAiConversation, KTAiAnswers: typeof KTAiAnswers !== "undefined" ? KTAiAnswers : undefined, KTAiWorkspaceViewModel, KTAiChatUi, KTJsCatalog, KTCodeReview, KTAcornLib: typeof KTAcornLib !== "undefined" ? KTAcornLib : undefined, KTJsExecutor, mountAiWorkspace, mountRoot, renderCustomize, renderAiWorkspace, SCRIPT_VERSION, buildProcessMermaid: typeof buildProcessMermaid !== "undefined" ? buildProcessMermaid : undefined, startToolkit: typeof startToolkit !== "undefined" ? startToolkit : undefined, KTFetchGate: typeof KTFetchGate !== "undefined" ? KTFetchGate : undefined, KTApi: typeof KTApi !== "undefined" ? KTApi : undefined, prefetchAppData: typeof prefetchAppData !== "undefined" ? prefetchAppData : undefined, fetchRelatedApps: typeof fetchRelatedApps !== "undefined" ? fetchRelatedApps : undefined, renderPlugins: typeof renderPlugins !== "undefined" ? renderPlugins : undefined };\n'
+    + '\n  globalThis.__TEST__ = { KTDeps, KTScan, KTIncoming, KTDevBase: typeof KTDevBase !== "undefined" ? KTDevBase : undefined, KTContext, KTPlanText: typeof KTPlanText !== "undefined" ? KTPlanText : undefined, KTContextUi, KTAiClient, KTAiBudget: typeof KTAiBudget !== "undefined" ? KTAiBudget : undefined, KTQueryCheck, KTPlanReview, KTPlanExecutor, KTAiConversation, KTAiAnswers: typeof KTAiAnswers !== "undefined" ? KTAiAnswers : undefined, KTAiWorkspaceViewModel, KTAiChatUi, KTJsCatalog, KTCodeReview, KTJsExecutor, mountAiWorkspace, mountRoot, renderCustomize, renderAiWorkspace, SCRIPT_VERSION, buildProcessMermaid: typeof buildProcessMermaid !== "undefined" ? buildProcessMermaid : undefined, startToolkit: typeof startToolkit !== "undefined" ? startToolkit : undefined, KTFetchGate: typeof KTFetchGate !== "undefined" ? KTFetchGate : undefined, KTApi: typeof KTApi !== "undefined" ? KTApi : undefined, prefetchAppData: typeof prefetchAppData !== "undefined" ? prefetchAppData : undefined, fetchRelatedApps: typeof fetchRelatedApps !== "undefined" ? fetchRelatedApps : undefined, renderPlugins: typeof renderPlugins !== "undefined" ? renderPlugins : undefined };\n'
     + code.slice(lastClose);
 
   const noop = () => { };
@@ -40,7 +37,6 @@ function loadToolkit({ document: docOverride = null, localStorage: lsOverride = 
     requestIdleCallback: noop,
     ResizeObserver: class { observe() { } disconnect() { } },
     addEventListener: noop, removeEventListener: noop,
-    ...(pageDefine ? { define: Object.assign(function define() { throw new Error('ページの define が呼ばれた'); }, { amd: {} }) } : {}),
   };
   sandbox.window = sandbox;
   sandbox.globalThis = sandbox;
