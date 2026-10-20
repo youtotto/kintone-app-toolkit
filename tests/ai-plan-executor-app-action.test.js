@@ -116,9 +116,18 @@ console.log('\n--- 4. §44 利用者 / 利用条件の変更・計画のみ ---'
   assert(rv.steps[0].status === 'NEEDS_CONFIRMATION' && rv.steps[0].issues.some(i => i.code === 'APP_ACTION_ENTITIES_REMOVED') && prepared.steps[0].prepared.payload.changes.entities.length === 2 && prepared.steps[0].prepared.payload.changes.filterCond === 'ステータス in ("承認待ち")' && !('mappings' in prepared.steps[0].prepared.payload.changes) && prepared.steps[0].prepared.sensitive.some(x => x.code === 'APP_ACTION_ENTITIES_REMOVED'), 'prepare: 利用者と条件だけ変更（転記は送らない）・利用者の削除は sensitive');
   assert(log.status === 'DONE' && log.steps[0].status === 'VERIFIED' && log.actualAfterRaw.actions.actions['見積を作成'].entities.map(e => e.code).join() === 'sales_group,sales_div' && log.actualAfterRaw.actions.actions['見積を作成'].filterCond === 'ステータス in ("承認待ち")' && log.actualAfterRaw.actions.actions['見積を作成'].mappings.length === 2 && check(log, 0, 'entities').ok && check(log, 0, 'filterCond').ok, '反映: 利用者 / 条件が変わり転記は不変');
   assert(rolled.status === 'ROLLED_BACK_VERIFIED' && actsOf(mock)['見積を作成'].entities.map(e => e.code).join() === 'user1,sales_group' && actsOf(mock)['見積を作成'].filterCond === '', 'rollback: 利用者 / 条件が元に戻る');
-  const mk = (after, before) => E.HANDLERS.UPDATE_APP_ACTION.prepare({}, { stepReview: { diff: { before, after, target: { identity: { kind: 'APP_ACTION', id: '5520', name: before.name, index: '0', destApp: before.destApp, mappings: before.mappings, entities: before.entities, filterCond: before.filterCond, dest: { appId: '311', name: '見積管理', revision: '7', fieldsHash: 'x' } } } }, issues: [] } });
+  //   2026-10-21: handler は変更の組を計画の検査の appActionChanges から作る（前後の差から組み直さない）。組が無ければ作らない（NO_APP_ACTION_SPEC）
+  const mk = (after, before, ch) => E.HANDLERS.UPDATE_APP_ACTION.prepare({}, { stepReview: { diff: { before, after, ...(ch ? { appActionChanges: ch } : {}), target: { identity: { kind: 'APP_ACTION', id: '5520', name: before.name, index: '0', destApp: before.destApp, mappings: before.mappings, entities: before.entities, filterCond: before.filterCond, dest: { appId: '311', name: '見積管理', revision: '7', fieldsHash: 'x' } } } }, issues: [] } });
   const b0 = R.appActionView(R.buildBeforeModel(DATA).appActions[0]);
-  assert(mk({ ...b0, name: '見積書作成' }, b0).unsupported === 'APP_ACTION_RENAME_NOT_SUPPORTED' && mk({ ...b0, destApp: { app: '600', code: '' } }, b0).unsupported === 'APP_ACTION_DEST_CHANGE_NOT_SUPPORTED' && mk({ ...b0, mappings: [b0.mappings[0]] }, b0).unsupported === 'APP_ACTION_MAPPING_REMOVAL_NOT_SUPPORTED' && mk(b0, b0).unsupported === 'NO_CHANGE', 'handler: 名前 / コピー先の変更・転記の削除・変更なしは反映しない（計画のみ）');
+  const NONE = { mappings: [], entities: null, filterCond: null };
+  const withMap = { ...b0, mappings: [...b0.mappings, { srcType: 'FIELD', srcField: 'secret_memo', destField: 'note' }] };
+  const pm = mk(withMap, b0, { ...NONE, mappings: [{ srcType: 'FIELD', srcField: 'secret_memo', destField: 'note' }] });
+  assert(mk(b0, b0, NONE).unsupported === 'NO_CHANGE' && mk(b0, b0, null).unsupported === 'NO_APP_ACTION_SPEC' && !pm.unsupported && JSON.stringify(pm.payload.changes.mappings) === JSON.stringify(withMap.mappings.map(m => ({ srcType: m.srcType, srcField: m.srcType === 'RECORD_URL' ? null : m.srcField, destField: m.destField }))) && pm.expect.addedMappings.length === 1,
+    'handler: 変更の組は計画の検査の appActionChanges（変更なしは NO_CHANGE・組が無ければ作らない・転記の追加は完全な転記の一覧で送る）');
+  //   名前・コピー先の変更は計画の検査が計画のみにする（handler に来ない）
+  const rvRen = reviewOf(plan([step('P1', 'UPDATE_APP_ACTION', 'APP_ACTION', '見積を作成', { name: '見積書作成', filterCond: 'amount >= "1"' })]));
+  const clRen = E.classifySteps(approveAll(plan([step('P1', 'UPDATE_APP_ACTION', 'APP_ACTION', '見積を作成', { name: '見積書作成', filterCond: 'amount >= "1"' })]), rvRen));
+  assert(rvRen.steps[0].safety === 'PLAN_ONLY' && rvRen.steps[0].issues.some(i => i.code === 'APP_ACTION_RENAME') && clRen[0].status === 'UNSUPPORTED' && clRen[0].reason === 'PLAN_ONLY', '名前の変更: 計画の検査が計画のみにする（handler で名前の変更を探さない）');
 }
 
 console.log('\n--- 5. §41 / §44 stale: 対象・無関係なアクション・コピー先の定義・コピー先が読めない ---');
@@ -132,13 +141,13 @@ console.log('\n--- 5. §41 / §44 stale: 対象・無関係なアクション・
   assert(pr2.status === 'BLOCKED' && pr2.stale.diffs.some(d => d.kind === 'APP_ACTION' && d.id === '見積を作成'), '対象アクションの変更 → STALE_PLAN');
   const mock3 = makeKintoneMock(DATA); delete mock3.st.relatedApps['311'].fields.note; mock3.st.relatedApps['311'].revision = '8';
   const { prepared: pr3 } = await flow(p, mock3);
-  assert(pr3.status === 'BLOCKED' && pr3.stale.diffs.some(d => d.code === 'DEST_APP_CHANGED' && /コピー先 App 311「見積管理」/.test(d.message)) && pr3.steps[0].status === 'BLOCKED' && pr3.steps[0].reason === 'DEST_FIELD_NOT_FOUND', 'コピー先の定義が変わった（転記先が消えた）→ STALE_PLAN（DEST_APP_CHANGED）＋ 転記先なしで BLOCKED');
+  assert(pr3.status === 'BLOCKED' && pr3.stale.diffs.some(d => d.code === 'DEST_APP_CHANGED' && /コピー先 App 311「見積管理」/.test(d.message)) && pr3.steps[0].status === 'BLOCKED' && pr3.steps[0].reason === 'REVIEW_BLOCKED' && /転記先「[^」]+」はコピー先 App 311/.test(pr3.steps[0].message), 'コピー先の定義が変わった（転記先が消えた）→ STALE_PLAN（DEST_APP_CHANGED）＋ 取り直した設定に対する計画の検査が転記先なしで止める（REVIEW_BLOCKED）');
   const mock4 = makeKintoneMock(DATA); mock4.st.relatedApps['311'].revision = '9';
   const { prepared: pr4, log: log4 } = await flow(p, mock4, { skipRollback: true });
   assert(pr4.status === 'PREPARED' && pr4.steps[0].warnings?.some(w => w.code === 'RELATED_APP_REVISION_CHANGED') && log4.status === 'DONE', 'コピー先の revision だけ変わった → 警告・実行できる');
   const mock5 = makeKintoneMock(DATA); mock5.ctl.destUnavailable = '311';
   const { prepared: pr5 } = await flow(p, mock5);
-  assert(pr5.status === 'BLOCKED' && pr5.steps[0].status === 'BLOCKED' && pr5.steps[0].reason === 'DEST_APP_SETTINGS_UNAVAILABLE' && pr5.stale.diffs.some(d => d.kind === 'APP_ACTION'), 'コピー先アプリへの権限が無い（destApp null）→ BLOCKED（DEST_APP_SETTINGS_UNAVAILABLE・推測しない）');
+  assert(pr5.status === 'BLOCKED' && pr5.steps[0].status === 'BLOCKED' && pr5.steps[0].reason === 'REVIEW_BLOCKED' && /コピー先アプリの設定を kintone が返しません/.test(pr5.steps[0].message) && pr5.stale.diffs.some(d => d.kind === 'APP_ACTION'), 'コピー先アプリへの権限が無い（destApp null）→ 取り直した設定に対する計画の検査が止める（REVIEW_BLOCKED・推測しない）');
   // identity: prepare → 実行の間に対象が変わった → TARGET_CHANGED
   const mock6 = makeKintoneMock(DATA);
   const { log: log6 } = await flow(p, mock6, { skipRollback: true, between: () => { mock6.st.actions['見積を作成'].filterCond = 'amount >= "5"'; } });

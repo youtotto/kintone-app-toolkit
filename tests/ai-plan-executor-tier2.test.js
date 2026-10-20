@@ -159,7 +159,7 @@ console.log('\n--- 3. UPDATE_FIELD（表示名・必須のみ）---');
   assert(st0(rv).safety === 'REVIEW_REQUIRED' && st0(rv).diff.before.required === false && st0(rv).diff.after.required === true, '前提: Review は REVIEW_REQUIRED・Before 必須いいえ → After はい');
   const { prepared, log } = await run(approveAll(req, rv), mock, { review: rv });
   const pp = prepared.steps[0].prepared;
-  assert(prepared.status === 'PREPARED' && pp.payload.code === 'owner' && same(pp.payload.changes, { required: true }) && pp.sensitive[0].code === 'REQUIRED_ON' && /今後の入力・保存に影響/.test(pp.sensitive[0].message) && /既存レコードの値は Toolkit では確認していません/.test(pp.sensitive[0].message), 'required only: payload は required だけ・Sensitive（今後の保存時に必須 / 既存レコードは未確認）');
+  assert(prepared.status === 'PREPARED' && pp.payload.code === 'owner' && same(pp.payload.changes, { required: true }) && pp.sensitive[0].code === 'REQUIRED_CHANGE' && /今後の保存時に入力必須になります/.test(pp.sensitive[0].message) && /既存レコードに値が入っているかは確認していません/.test(pp.sensitive[0].message), 'required only: payload は required だけ・注意は計画の検査の指摘（今後の保存時に必須 / 既存レコードは未確認）');
   assert(log.status === 'DONE' && log.steps[0].status === 'VERIFIED' && mock.st.fields.owner.required === true && mock.st.fields.owner.type === 'USER_SELECT' && mock.st.fields.owner.label === '担当者' && same(mock.st.fields.owner.entities, DATA.fields.owner.entities), '反映: required だけ変わり type / label / entities は保持');
   assert(['exists', 'codePreserved', 'typePreserved', 'changed:required', 'otherPropertiesPreserved', 'existingFieldsPreserved'].every(n => check(log, n)?.ok) && log.steps[0].before.required === false && log.steps[0].after.required === true && log.simulation.match === true, 'verification: code / type 不変・requested attribute だけ変更・その他保持・before / after・Simulation 一致');
   assert(E.buildRollbackPlan(log, prepared).steps[0].actionType === 'RESTORE_FIELD_PROPERTY' && E.buildRollbackPlan(log, prepared).steps[0].api.payload.properties.owner.required === false, 'rollback: RESTORE_FIELD_PROPERTY（required を false に戻す計画）');
@@ -183,10 +183,17 @@ console.log('\n--- 3. UPDATE_FIELD（表示名・必須のみ）---');
   const rvO = reviewOf(opt); const mO = makeKintoneMock(DATA);
   const prO = await E.prepare({ ...R.executorOutput(opt, rvO, ['P1']), approvedSteps: ['P1'] }, { api: mO.api, appId: '341' });
   assert(prO.steps[0].status !== 'PENDING', '選択肢の変更は実行しない');
-  // field code change rejection: diff.after.code を書き換えた Review を与えても拒否
+  // field code change rejection: diff.after.code を書き換えた Review を与えても拒否（2026-10-21: コードは表示名・必須以外の変更として、分類で反映しない）
   const rvC = clone(rv); rvC.steps[0].diff.after = { ...rvC.steps[0].diff.before, code: 'amount2' }; rvC.steps[0].status = 'VALID'; rvC.steps[0].safety = 'REVIEW_REQUIRED';
   const prC = await E.prepare({ plan: typ, review: rvC, approvedSteps: ['P1'] }, { api: makeKintoneMock(DATA).api, appId: '341' });
-  assert(prC.steps[0].status === 'UNSUPPORTED' && prC.steps[0].reason === 'FIELD_CODE_CHANGE_NOT_SUPPORTED', 'field code change rejection');
+  assert(prC.steps[0].status === 'UNSUPPORTED' && prC.steps[0].reason === 'FIELD_CHANGE_NOT_SUPPORTED' && /code/.test(prC.steps[0].message), 'field code change rejection');
+  //   2026-10-21: 渡された計画の検査の結果の書き込む値（表示名）を書き換えても、書き込む内容は取り直した設定に対する計画の検査から作る。書き換えた結果と違うので止まり、書き込まない
+  const req2 = plan([step('P1', 'UPDATE_FIELD', 'FIELD', 'owner', { required: true })]);
+  const rvT = reviewOf(req2); rvT.steps[0].diff.after = { ...rvT.steps[0].diff.after, label: '書き換えた表示名' };
+  const mT = makeKintoneMock(DATA);
+  const prT = await E.prepare(approveAll(req2, rvT), { api: mT.api, appId: '341' });
+  assert(prT.status === 'BLOCKED' && prT.steps[0].status === 'BLOCKED' && prT.steps[0].reason === 'REVALIDATION_FAILED' && same(prT.steps[0].prepared.payload.changes, { required: true }) && mT.calls.every(c => c.startsWith('GET')),
+    '計画の検査の結果を書き換えても: 書き込む内容（必須だけ）は取り直した設定に対する計画の検査から作り、計画の検査のときの内容と違うので止める（書き込みなし）');
   // stale field: Review 後に label が変わっていた
   const lab = plan([step('P1', 'UPDATE_FIELD', 'FIELD', 'owner', { required: true })]);
   const rvL = reviewOf(lab); const mL = makeKintoneMock(DATA); mL.st.fields.owner.label = '担当者（変更済み）';

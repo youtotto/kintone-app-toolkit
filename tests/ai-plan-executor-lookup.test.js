@@ -121,17 +121,25 @@ console.log('\n--- 4. §19 cross-app stale / identity / 参照元が読めない
   // 参照元が読めない（権限なし）: Review 時点は読めていた → preview の lookup は null → stale（RELATED_APP_SETTINGS_UNAVAILABLE）
   const mock3 = makeKintoneMock(DATA); mock3.ctl.relatedUnavailable = '500';
   const { prepared: pr3 } = await flow(p, mock3);
-  assert(pr3.status === 'BLOCKED' && pr3.stale.diffs.some(d => d.code === 'RELATED_APP_SETTINGS_UNAVAILABLE') && pr3.steps[2].status === 'BLOCKED' && pr3.steps[2].reason === 'RELATED_APP_SETTINGS_UNAVAILABLE' && pr3.crossApp[0].current.available === false, '参照元アプリへのアクセス権が無い → ルックアップ設定が読めない → BLOCKED（RELATED_APP_SETTINGS_UNAVAILABLE・推測しない）');
+  assert(pr3.status === 'BLOCKED' && pr3.stale.diffs.some(d => d.code === 'RELATED_APP_SETTINGS_UNAVAILABLE') && pr3.steps[2].status === 'BLOCKED' && pr3.steps[2].reason === 'REVIEW_BLOCKED' && /参照元アプリへのアクセス権を確認してください/.test(pr3.steps[2].message) && pr3.crossApp[0].current.available === false, '参照元アプリへのアクセス権が無い → ルックアップ設定が読めない → 取り直した設定に対する計画の検査が止める（REVIEW_BLOCKED・推測しない）');
   // identity: prepare → 実行の間にルックアップ設定が変わった（取得項目を手で足した）→ TARGET_CHANGED
   const mock4 = makeKintoneMock(DATA);
   const { log: log4 } = await flow(p, mock4, { skipRollback: true, between: () => { mock4.st.fields.customer_lookup.lookup.fieldMappings.push({ field: 'secret_memo', relatedField: 'memo' }); } });   // revision は変えない（revision 不一致より前に identity で止まることを見る）
   assert(log4.status === 'PARTIAL' && log4.steps[2].status === 'FAILED' && log4.steps[2].reason === 'TARGET_CHANGED' && /fieldMappings/.test(log4.steps[2].error.message) && lkOf(mock4).fieldMappings.length === 3, 'prepare → 実行の間に取得項目が変わった → TARGET_CHANGED（PUT しない。先行 ADD_FIELD は残る = 部分状態を記録）');
   assert(log4.steps[0].status === 'VERIFIED' && E.buildRollbackPlan(log4, (await E.prepare(approveAll(p, reviewOf(p)), { api: makeKintoneMock(DATA).api, appId: '310' }))).steps.length === 2, '非アトミック: 失敗時の rollback 計画は反映済みの ADD_FIELD 2 件だけ');
-  // 参照元・キーの変更 / 取得項目の削除は handler が反映しない（計画のみ）
+  //   2026-10-21: handler は変更の組を計画の検査の lookupChanges から作る（前後の差から組み直さない）。参照元・キーの変更は計画の検査が計画のみにする（handler に来ない）
   const idn = { kind: 'LOOKUP', code: 'customer_lookup', type: 'SINGLE_LINE_TEXT', relatedApp: { app: '500', code: '' }, relatedKeyField: 'code', mappings: [{ from: 'code', to: 'customer_code' }, { from: 'name', to: 'case_name' }], pickerFields: ['code', 'name'], filterCond: '', sort: '', related: { appId: '500', name: '顧客マスタ', revision: '21', fieldsHash: 'x' } };
   const lkB = { app: '500', code: '', keyField: 'code', mappings: [{ from: 'code', to: 'customer_code' }, { from: 'name', to: 'case_name' }], pickerFields: ['code', 'name'], filterCond: '', sort: '' };
-  const mk = (after) => E.HANDLERS.UPDATE_LOOKUP.prepare({}, { stepReview: { diff: { before: { code: 'customer_lookup', label: 'x', lookup: lkB }, after: { code: 'customer_lookup', label: 'x', lookup: after }, target: { identity: idn } }, issues: [] } });
-  assert(mk({ ...lkB, mappings: [lkB.mappings[0]] }).unsupported === 'LOOKUP_MAPPING_REMOVAL_NOT_SUPPORTED' && mk({ ...lkB, keyField: 'name' }).unsupported === 'LOOKUP_SOURCE_CHANGE_NOT_SUPPORTED' && mk({ ...lkB, app: '600' }).unsupported === 'LOOKUP_SOURCE_CHANGE_NOT_SUPPORTED' && mk({ ...lkB, pickerFields: ['code'] }).unsupported === 'LOOKUP_PICKER_REMOVAL_NOT_SUPPORTED' && mk(lkB).unsupported === 'NO_CHANGE', 'handler: 取得項目 / picker の削除・参照元 / キーの変更・変更なしは反映しない');
+  const mk = (after, lc) => E.HANDLERS.UPDATE_LOOKUP.prepare({}, { stepReview: { diff: { before: { code: 'customer_lookup', label: 'x', lookup: lkB }, after: { code: 'customer_lookup', label: 'x', lookup: after }, ...(lc ? { lookupChanges: lc } : {}), target: { identity: idn } }, issues: [] } });
+  const NONE = { mappings: [], pickerFields: [], filterCond: null, sort: null };
+  const addOne = { ...lkB, mappings: [...lkB.mappings, { from: 'address', to: 'customer_address' }] };
+  const pa = mk(addOne, { ...NONE, mappings: [{ from: 'address', to: 'customer_address' }] });
+  assert(mk(lkB, NONE).unsupported === 'NO_CHANGE' && mk(lkB, null).unsupported === 'NO_LOOKUP_SPEC' && !pa.unsupported && pa.payload.lookup.fieldMappings.length === 3 && pa.expect.addedMappings.length === 1 && pa.payload.changes.join() === 'mappings'
+    && mk({ ...lkB, sort: 'code' }, { ...NONE, sort: { from: '', to: 'code' } }).unsupported === 'INVALID_SORT',
+    'handler: 変更の組は計画の検査の lookupChanges（変更なしは NO_CHANGE・組が無ければ作らない・取得項目の追加は完全な取得項目で送る）。並び順の形は書き込みの条件として handler が止める');
+  const keyChange = plan([step('P1', 'UPDATE_LOOKUP', 'FIELD', 'customer_lookup', { keyField: 'name' })]);
+  const rvK = reviewOf(keyChange), clK = E.classifySteps(approveAll(keyChange, rvK));
+  assert(rvK.steps[0].safety === 'PLAN_ONLY' && rvK.steps[0].issues.some(i => i.code === 'LOOKUP_KEY_CHANGE') && clK[0].status === 'UNSUPPORTED' && clK[0].reason === 'PLAN_ONLY', 'キーの変更: 計画の検査が計画のみにする（handler で参照元・キーの変更を探さない）');
   // コピー先が未承認の ADD_FIELD に依存 → P3 は BLOCKED（依存）
   const { prepared: pr5 } = await flow(p, makeKintoneMock(DATA), { approved: ['P3'] });
   assert(pr5.steps[2].status === 'BLOCKED' && pr5.steps[2].reason === 'DEPENDENCY_NOT_EXECUTABLE', 'コピー先を追加する step が承認されていない → UPDATE_LOOKUP は BLOCKED（依存）');

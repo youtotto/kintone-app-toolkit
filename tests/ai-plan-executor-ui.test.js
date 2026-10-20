@@ -265,7 +265,7 @@ console.log('\n--- 2f. Phase 13: ルックアップの結果（§41）・参照�
   // §40: 参照元アプリへのアクセス権が無い（確認のときは読めたが、反映の準備で読めない）
   const x2 = await applyFlow(PLAN_LK, { beforePrepare: (mock) => { mock.ctl.relatedUnavailable = '500'; } });
   const b1 = x2.html();
-  assert(x2.s.stage === 'blocked' && b1.includes('>顧客マスタ参照で住所と与信枠も取得：<b>実行不可</b>') && b1.includes('顧客マスタのフィールド設定を確認できません。参照元アプリへのアクセス権を確認してください') && b1.includes('data-code="RELATED_APP_SETTINGS_UNAVAILABLE"') && !b1.includes('[RELATED_APP_SETTINGS_UNAVAILABLE]') && b1.includes('設定は変更していません。'), '§40: 参照元を読めない → 実行不可・「顧客マスタのフィールド設定を確認できません。参照元アプリへのアクセス権を確認してください」');
+  assert(x2.s.stage === 'blocked' && b1.includes('>顧客マスタ参照で住所と与信枠も取得：<b>実行不可</b>') && b1.includes('（customer_lookup）のルックアップ設定を kintone が返しません') && b1.includes('参照元アプリへのアクセス権を確認してください') && b1.includes('data-code="REVIEW_BLOCKED"') && !b1.includes('[REVIEW_BLOCKED]') && b1.includes('計画作成後にアプリ設定が変更されています') && b1.includes('設定は変更していません。'), '§40: 参照元を読めない → 実行不可・「顧客マスタのフィールド設定を確認できません。参照元アプリへのアクセス権を確認してください」');
 }
 
 console.log('\n--- 2g. Phase 14: アプリアクションの結果・コピー先が読めない・元に戻す ---');
@@ -287,7 +287,7 @@ console.log('\n--- 2g. Phase 14: アプリアクションの結果・コピー�
   assert(audit.crossApp.every(c => c.appId === '311' && c.role === 'destination') && audit.rollback.steps[0].actionType === 'RESTORE_APP_ACTION_SETTINGS' && audit.execution.actualAfter.addedAppActions.join() === '請求書作成' && audit.execution.actualAfter.updatedAppActions.join() === '見積を作成', '監査 JSON: crossApp（コピー先）・rollback・added / updatedAppActions');
   const x2 = await applyFlow(PLAN_AA, { beforePrepare: (mock) => { mock.ctl.destUnavailable = '311'; } });
   const b1 = x2.html();
-  assert(x2.s.stage === 'blocked' && b1.includes('>見積を作成に備考も転記：<b>実行不可</b>') && b1.includes('コピー先アプリへのアクセス権を確認してください') && b1.includes('data-code="DEST_APP_SETTINGS_UNAVAILABLE"') && !b1.includes('[DEST_APP_SETTINGS_UNAVAILABLE]'), 'コピー先を読めない → 実行不可（DEST_APP_SETTINGS_UNAVAILABLE）');
+  assert(x2.s.stage === 'blocked' && b1.includes('>見積を作成に備考も転記：<b>実行不可</b>') && b1.includes('コピー先アプリへのアクセス権を確認してください') && b1.includes('のコピー先アプリの設定を kintone が返しません') && b1.includes('data-code="REVIEW_BLOCKED"') && !b1.includes('[REVIEW_BLOCKED]'), 'コピー先を読めない → 実行不可（取り直した設定に対する計画の検査が止める・指摘の文）');
 }
 
 console.log('\n--- 3. 回帰 ---');

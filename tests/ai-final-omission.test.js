@@ -11,6 +11,9 @@
 //       (d) 本当に変更不要な手順は止めない（書き込まない・手作業や失敗に数えない）
 //       (e) 実行の途中の失敗による一部反映は、承認の前から分かっていた手作業の手順と別の文で出す
 //       (f) 計画の確認で無効な手順（依存先が無効な確認の手順を含む）は、反映の分類だけから「実行できない手順」に指摘の文で出し、承認させない
+//   §O3 反映の前の準備（2026-10-21）: 書き込む手順は、取り直した設定に対する計画の検査で分類し、その結果から書き込む内容を作る（手順ごとの準備で取り直した設定を
+//       もう一度確かめない）。最終案の［動作テスト環境へ反映］から: (g) 書いた内容は承認した準備・計画の検査の After と同じ (h) 依存が成り立たない手順は止める（書き込み 0）
+//       (i) 承認の後（押す直前）に書き込む手順の対象の設定が変わると止める（書き込み 0。承認を取り消す）
 //
 // 実行方法: node tests/ai-final-omission.test.js
 'use strict';
@@ -182,6 +185,41 @@ await section(async () => {
   const sum = stripC(m.$('kt-ai-change-summary').innerHTML).replace(/\s+/g, ' ');
   assert(/備考を必須にする：反映できません（存在しないFIELD「ghost_field」を既存として参照）/.test(sum) && /必須にする時期を担当者に確かめる：反映できません（依存する P2 が無効のため実行できません）/.test(sum) && !/Review で実行不可/.test(sum),
     `O2-f2: 右の「変更内容」の「反映できないこと」も同じ 2 件を指摘の文で出す（左の最終案と同じ集まり）: ${(sum.match(/反映できないこと.{0,240}/) || [''])[0]}`);
+});
+
+// =========================================================
+console.log('\n--- §O3. 反映の前の準備: 取り直した設定に対する計画の検査から書き込む内容を作る（最終案の［動作テスト環境へ反映］）---');
+await section(async () => {
+  // (g) 承認の欄の準備と、押した後の準備のどちらも、取り直した設定に対する計画の検査で書き込む内容を作る。押した後の内容が承認した準備と違えば止まる（applyFinal の指紋の比較）ので、
+  //     反映できたことは同じ内容だったこと。書いた一覧は計画の検査の After と同じ
+  const { m, v } = await mountPlan([VIEW()]);
+  const ap = await K.applyOnScreen(m);
+  const after = (v.review.steps.find(r => r.stepId === 'P1') || {}).diff.after;
+  const st = ((ap.exec.prepared && ap.exec.prepared.steps) || []).find(s => s.stepId === 'P1');
+  const view = m.mock.st.views['承認待ち一覧'];
+  const pick = (x) => x && { fields: [...(x.fields || [])], filterCond: x.filterCond || '', sort: x.sort || '' };
+  assert(ap.clicked && ap.run && ap.run.ok && JSON.stringify(ap.writes) === JSON.stringify(['PUT views']) && v.approval && v.approval.precheck && v.approval.precheck.fingerprint && v.approval.precheck.fingerprint.settings
+    && st && st.prepared && JSON.stringify(pick(st.prepared.payload.view)) === JSON.stringify(pick(after)) && view && JSON.stringify(pick(view)) === JSON.stringify(pick(after)) && (ap.exec.prepared.blockers || []).length === 0,
+    `O3-g: 承認した準備と同じ内容を書く（押した後の準備で作り直した書き込む内容が承認の指紋と一致して反映・書いた一覧は計画の検査の After と同じ）: ${JSON.stringify({ writes: ap.writes, payload: st && st.prepared && pick(st.prepared.payload.view), after: pick(after), view: pick(view) })}`);
+});
+await section(async () => {
+  // (h) 依存先が自動では反映できない手順（型の変更は手作業）に依存する手順は止める（ほかの手順だけを反映しない・書き込み 0）
+  const { m, v } = await mountPlan([
+    K.mkStep('P1', 'UPDATE_FIELD', 'FIELD', 'amount', { fieldType: 'SINGLE_LINE_TEXT' }, { title: '金額を文字列にする' }),
+    K.mkStep('P2', 'ADD_VIEW', 'VIEW', '承認待ち一覧', { name: '承認待ち一覧', fields: ['owner', 'case_name'], filterCond: 'owner in (LOGINUSER())', sort: 'due_date asc' }, { title: '一覧「承認待ち一覧」を追加', dependsOn: ['P1'] }),
+  ]);
+  const cls = new Map(KTPlanExecutor.applyReadiness(v.plan, v.review).map(x => [x.stepId, x]));
+  const rd = m.conv().finalReadiness(v);
+  const ap = await K.applyOnScreen(m);
+  assert(cls.get('P1') && cls.get('P1').apply === 'MANUAL' && cls.get('P2') && cls.get('P2').apply === 'BLOCKED' && cls.get('P2').reason === 'DEPENDENCY_NOT_EXECUTABLE' && rd.ready === false && ap.button && ap.button.disabled && !ap.writes.length && !m.mock.st.views['承認待ち一覧'],
+    `O3-h: 依存先が反映できない手順は止める（承認できない・書き込み 0）: ${JSON.stringify({ P1: cls.get('P1'), P2: cls.get('P2'), reasons: rd.reasons.map(x => x.kind), writes: ap.writes })}`);
+});
+await section(async () => {
+  // (i) 承認の欄の準備の後（押す直前）に、書き込む手順の対象のフィールドを別の作業者が変えた → 押した直後の取り直しで止め、何も書き込まずに承認を取り消す
+  const { m, v } = await mountPlan([K.mkStep('P1', 'UPDATE_FIELD', 'FIELD', 'case_name', { name: '案件の名前' }, { title: '案件名の表示名を変える' })]);
+  const ap = await K.applyOnScreen(m, { before: () => { m.mock.st.fields.case_name.label = '別の作業者が変えた名前'; } });
+  assert(ap.clicked && ap.run && ap.run.stage === 'stopped' && !ap.run.written && !ap.writes.length && m.mock.st.fields.case_name.label === '別の作業者が変えた名前' && !v.approval && /何も書き込/.test(ap.card),
+    `O3-i: 承認の後に書き込む手順の対象が変わると、押した直後の取り直しで止める（書き込み 0・承認を取り消す）: ${JSON.stringify({ run: ap.run && { stage: ap.run.stage, stop: ap.run.stop && ap.run.stop.text }, writes: ap.writes })}`);
 });
 
 console.log(`\n${state.failed ? 'FAILED' : 'ALL PASSED'}: ${state.passed} passed / ${state.failed} failed`);
