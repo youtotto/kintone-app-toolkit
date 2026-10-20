@@ -309,6 +309,9 @@ await section(async () => {
   const eu = ur.v && ur.v.generated && ur.v.generated.C3;
   assert(eu && eu.status === 'not-ready' && eu.verdict.port === true && !eu.verdict.fix && /^必須の動作はまだ確かめていません（/.test(eu.verdict.reason) && /移植元「dealValidate\.js」のイベントの登録を本文から読めないので、同じ条件かは確かめていません/.test(eu.verdict.reason) && /イベントの登録を本文から読めないので、同じ条件かは確かめていません/.test(eu.verdict.next) && !/確かめられません/.test(`${eu.verdict.reason}${eu.verdict.next}`) && !/events-unreadable|CONDITION_SOURCE_UNVERIFIABLE/.test(`${eu.verdict.reason}${eu.verdict.next}`) && ur.gen.seen.length === 1 && ur.x.calls.plan.length === 1 && FS.readyOf(ur.v) === false && !ur.v.final.fix,
     `P3-6b: 移植元のイベントの登録を本文から読めない → 生成工程が AI を呼ばずに返し、準備未完了（「いつでも」にしない・自動の差分更新なし・「確かめていません」の形）: ${JSON.stringify(eu && eu.verdict)}`);
+  //   2026-10-20: 生成工程が AI を呼ばずに返した CONDITION_SOURCE_UNVERIFIABLE は、予算の記録で AI を呼ぶ前に止まった失敗（確保を解放し、有料の呼び出しに数えない）
+  const eSrc = new KTAiClient.AiClientError({ code: 'CONDITION_SOURCE_UNVERIFIABLE', httpStatus: 422, message: 'x', details: { ok: false, contractVersion: '2.1', error: { code: 'CONDITION_SOURCE_UNVERIFIABLE', message: 'x', requestId: 'r', detail: { effects: [] } } } });
+  assert(T.KTAiBudget.preAiOf(eSrc) === true && KTAiClient.ERROR_CODES.CONDITION_SOURCE_UNVERIFIABLE === 'CONDITION_SOURCE_UNVERIFIABLE', 'P3-6d: 生成工程が AI を呼ばずに返した CONDITION_SOURCE_UNVERIFIABLE は、AI を呼ぶ前に止まった失敗（予算の確保を解放する）');
   //   画面の解析が無い（services.jsFiles が null）→ 同じく止める（10-10 の不具合の経路: 空欄のまま生成へ渡さない）
   const nl = await runPort({ jsFiles: () => null });
   const el = nl.v && nl.v.generated && nl.v.generated.C3;
