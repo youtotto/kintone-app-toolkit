@@ -59,7 +59,10 @@ const JSF = (o = {}) => [
   { name: 'dealLock.js', target: 'desktop', events: ['app.record.create.show', 'app.record.edit.show'], fields: ['amount', 'ステータス'], source: false },
   { name: 'dealValidate.js', target: 'desktop', events: [...SUBMITS], fields: ['amount'], source: true, ...o },
 ];
+/** 生成工程が確かめた移植元（応答の必須の効果の conditionFrom の形） */
 const CF = { file: 'dealValidate.js', target: 'desktop', events: [...SUBMITS] };
+/** 2026-10-21: 送る移植元の候補（構造だけで決めた一覧。生成工程が本文の登録で移植元を決める） */
+const CFC = [{ file: CF.file, target: CF.target }];
 const reqOf = (plan, cid, o = {}) => KTAiConversation.requiredEffectsOf(plan, cid, [], { labels: LABELS, columns: { item_name: 'items', qty: 'items', unit_price: 'items', subtotal: 'items' }, readOnly: null, ...o });
 const planWith = (c3) => ({ customizations: [...clone(F.CUSTOMIZATIONS).filter(c => c.customizationId !== 'C3'), c3], proposedFields: [] });
 const short = (r) => ({ effects: (r.effects || []).map(e => ({ field: e.field, effect: e.effect, events: e.events, condition: e.condition, ...(e.conditionFrom ? { conditionFrom: e.conditionFrom } : {}) })), unresolved: r.unresolved || [] });
@@ -76,7 +79,7 @@ await section(async () => {
   assert(JSON.stringify(F.C3_REQUIRED_EFFECTS_THEN.map(e => e.condition)) === JSON.stringify(['']) && F.C3_CASES_THEN.filter(x => x.verdict === 'fail').every(x => x.expect === 'block-save') && F.C3_REPAIRS_THEN.count === 1 && F.C3_REPAIRS_THEN.stoppedBy === 'same-failure',
     'P1-0b: 前提（保存済みのログ）: そのときの必須の効果は条件が空で、正しいコードが「保存が止まる」の期待で不合格になり、修復を 1 回呼んで同じ候補が返った');
   const r = reqOf(PLAN, 'C3', { jsFiles: JSF() });
-  assert(JSON.stringify(short(r)) === JSON.stringify({ effects: [{ field: 'amount', effect: 'block-save', events: M_SUBMITS, condition: '', conditionFrom: CF }], unresolved: [] }),
+  assert(JSON.stringify(short(r)) === JSON.stringify({ effects: [{ field: 'amount', effect: 'block-save', events: M_SUBMITS, condition: '', conditionFrom: CFC }], unresolved: [] }),
     `P1-1: 移植元（PC の dealValidate.js が対の保存のイベントを登録し金額を参照・本文を送れる）→ conditionFrom（条件は移植元と同じ。未解決なし）: ${JSON.stringify(short(r))}`);
   const ns = reqOf(PLAN, 'C3', { jsFiles: JSF({ source: false }) });
   assert(ns.unresolved.length === 1 && ns.unresolved[0].reason === 'condition-unknown' && ns.unresolved[0].source === 'dealValidate.js' && ns.unresolved[0].why === 'no-source',
@@ -92,7 +95,7 @@ await section(async () => {
   const half = reqOf(PLAN, 'C3', { ...on, jsFiles: JSF({ events: ['app.record.edit.submit'] }) });
   //   2026-10-20: 画面の解析で対のイベントの一部しか見えなくても、本文を送れる候補は移植元の候補として送る（登録は生成工程が本文から読み、対のイベントを登録しなければ
   //   移植元にしない＝条件の無い必須の動作として確かめる。AI版 worker の port-and-table-change 5-2b）
-  assert(JSON.stringify(short(half)) === JSON.stringify({ effects: [{ field: 'amount', effect: 'block-save', events: M_SUBMITS, condition: '', conditionFrom: CF }], unresolved: [] }), `P1-6: 画面の解析で対のイベントの一部（編集の保存だけ）しか見えない → 本文を送れるので候補として送る（移植元かは生成工程が本文の登録で決める）: ${JSON.stringify(short(half))}`);
+  assert(JSON.stringify(short(half)) === JSON.stringify({ effects: [{ field: 'amount', effect: 'block-save', events: M_SUBMITS, condition: '', conditionFrom: CFC }], unresolved: [] }), `P1-6: 画面の解析で対のイベントの一部（編集の保存だけ）しか見えない → 本文を送れるので候補として送る（移植元かは生成工程が本文の登録で決める）: ${JSON.stringify(short(half))}`);
   const noField = reqOf(PLAN, 'C3', { ...on, jsFiles: JSF({ fields: ['deal_name'] }) });
   assert(JSON.stringify(short(noField)) === ALWAYS, `P1-7: 移植元が金額を参照しない → 移植元にしない: ${JSON.stringify(short(noField))}`);
   //   レビュー T-1（2026-10-14）: 期待を「今までどおり（'' はいつでも・未解決なし）」から「condition-unknown（no-source）」に変えた。別の画面の移植元が計画にあるのに
@@ -106,18 +109,28 @@ await section(async () => {
   //   2026-10-20: 登録を本文から読めるかは生成工程が決める（読めなければ AI を呼ばずに返し、会話が events-unreadable の準備未完了にする: P3-6b）。画面の解析でイベントが
   //   見えない（events []）候補でも、本文を送れるなら候補として送る（「登録しない」と読まない）
   const unread = reqOf(PLAN, 'C3', { ...on, jsFiles: JSF({ events: [], analyzed: true }) });
-  assert(JSON.stringify(short(unread)) === JSON.stringify({ effects: [{ field: 'amount', effect: 'block-save', events: M_SUBMITS, condition: '', conditionFrom: CF }], unresolved: [] }),
+  assert(JSON.stringify(short(unread)) === JSON.stringify({ effects: [{ field: 'amount', effect: 'block-save', events: M_SUBMITS, condition: '', conditionFrom: CFC }], unresolved: [] }),
     `P1-8c: 画面の解析でイベントが見えない（events []）候補も、本文を送れるなら候補として送る（登録を読めるかは生成工程が決める）: ${JSON.stringify(short(unread))}`);
   const noAn = reqOf(PLAN, 'C3', { ...on, jsFiles: JSF({ events: [], fields: [], source: false, analyzed: false }) });
   assert(noAn.unresolved.length === 1 && noAn.unresolved[0].why === 'no-source' && noAn.unresolved[0].source === 'dealValidate.js' && !noAn.effects.some(e => e.conditionFrom),
     `P1-8d: 移植元の本文の解析が無い（analyzed false）→ condition-unknown（2026-10-20: no-source。本文を解析できていない＝本文を渡せない）: ${JSON.stringify(noAn.unresolved)}`);
   const unrelated = reqOf(PLAN, 'C3', { ...on, jsFiles: JSF({ events: ['app.record.edit.show'], analyzed: true }) });
-  assert(JSON.stringify(short(unrelated)) === JSON.stringify({ effects: [{ field: 'amount', effect: 'block-save', events: M_SUBMITS, condition: '', conditionFrom: CF }], unresolved: [] }), `P1-8e: 画面の解析で対のイベントが見えない F も、本文を送れるなら候補として送る（2026-10-20: 対のイベントを登録しなければ、生成工程が移植元ではないとして条件の無い必須の動作で確かめる）: ${JSON.stringify(short(unrelated))}`);
-  //   複数の移植元の候補（existingFiles が 2 つ）: 1 つが確かめられなくても、確かめられた方を移植元にする／どれも確かめられなければ最初の確かめられなかった理由
+  assert(JSON.stringify(short(unrelated)) === JSON.stringify({ effects: [{ field: 'amount', effect: 'block-save', events: M_SUBMITS, condition: '', conditionFrom: CFC }], unresolved: [] }), `P1-8e: 画面の解析で対のイベントが見えない F も、本文を送れるなら候補として送る（2026-10-20: 対のイベントを登録しなければ、生成工程が移植元ではないとして条件の無い必須の動作で確かめる）: ${JSON.stringify(short(unrelated))}`);
+  //   複数の移植元の候補（existingFiles が 2 つ）。2026-10-21: 確かめられない候補（other.js・解析していない）が 1 つでもあれば、ほかの候補（dealValidate.js）で決めない
+  //   （確かめられない候補を移植元ではないと扱わず、別の候補へ差し替えない）→ other.js で unresolved（no-source。AI を呼ぶ前の準備未完了）
   const two = planWith({ ...C3(), existingFiles: [{ name: 'other.js', target: 'desktop', reason: '関連' }, { name: 'dealValidate.js', target: 'desktop', reason: '移植元' }] });
   const twoR = reqOf(two, 'C3', { ...on, jsFiles: [...JSF(), { name: 'other.js', target: 'desktop', events: [], fields: [], source: false, analyzed: false }] });
-  assert(twoR.effects.length === 1 && twoR.effects[0].conditionFrom && twoR.effects[0].conditionFrom.file === 'dealValidate.js' && !twoR.unresolved.length,
-    `P1-8f: 複数の候補のうち 1 つ（other.js）が確かめられなくても、確かめられた dealValidate.js を移植元にする: ${JSON.stringify(short(twoR))}`);
+  assert(twoR.unresolved.length === 1 && twoR.unresolved[0].source === 'other.js' && twoR.unresolved[0].why === 'no-source' && !twoR.effects.some(e => e.conditionFrom),
+    `P1-8f: 候補の一つ（other.js）を確かめられない → ほかの候補（dealValidate.js）で決めずに other.js で unresolved（no-source）: ${JSON.stringify(short(twoR))}`);
+  //   2026-10-21: フィールドを参照しないと解析で分かったファイル（関係しない）は候補にせず、止める理由にもしない。参照する候補は 2 つとも送る（生成工程が決める）
+  const twoA = reqOf(two, 'C3', { ...on, jsFiles: [...JSF(), { name: 'other.js', target: 'desktop', events: [], fields: ['deal_name'], source: true, analyzed: true }] });
+  const twoB = reqOf(two, 'C3', { ...on, jsFiles: [...JSF(), { name: 'other.js', target: 'desktop', events: [], fields: ['amount'], source: true, analyzed: true }] });
+  assert(JSON.stringify(short(twoA)) === JSON.stringify({ effects: [{ field: 'amount', effect: 'block-save', events: M_SUBMITS, condition: '', conditionFrom: CFC }], unresolved: [] }) && JSON.stringify(twoB.effects[0].conditionFrom) === JSON.stringify([{ file: 'other.js', target: 'desktop' }, ...CFC]) && !twoB.unresolved.length,
+    `P1-8h: 関係しない（金額を参照しない）other.js は候補にせず止めない・参照する候補は 2 つとも送る: ${JSON.stringify({ a: short(twoA), b: short(twoB) })}`);
+  //   16 KB を超えて本文を送れない候補（source false）は確かめられないので、画面の解析のイベントに関係なく unresolved（no-source）。生成を呼ばない
+  const bigSeen = reqOf(PLAN, 'C3', { ...on, jsFiles: JSF({ source: false }) }), bigUnseen = reqOf(PLAN, 'C3', { ...on, jsFiles: JSF({ source: false, events: ['app.record.edit.show'] }) });
+  assert([bigSeen, bigUnseen].every(r => r.unresolved.length === 1 && r.unresolved[0].source === 'dealValidate.js' && r.unresolved[0].why === 'no-source' && !r.effects.some(e => e.conditionFrom)),
+    `P1-8i: 本文を送れない候補は、画面の解析のイベントが見えても見えなくても確かめられない（移植元ではないと扱わない）: ${JSON.stringify([bigSeen, bigUnseen].map(r => r.unresolved))}`);
   //   2026-10-20: 確かめられないファイル（other.js）があるときは、画面の解析で対のイベントが見える候補だけを送る（見えない dealValidate.js を生成工程が移植元ではないと
   //   したときに other.js を見落とさない）→ どれも送らず、確かめられなかった other.js で unresolved（no-source）
   const twoU = reqOf(two, 'C3', { ...on, jsFiles: [...JSF({ events: [], analyzed: true }), { name: 'other.js', target: 'desktop', events: [], fields: [], source: false, analyzed: false }] });
@@ -168,8 +181,8 @@ await section(async () => {
   const eff = reqOf(PLAN, 'C3', { jsFiles: JSF() }).effects;
   const ctx = KTContext.buildGenerator({ customization: C3(), plan: PLAN, data: DATA, scan: scanOf(), verification: { requirementIds: [{ id: 'C3', kind: 'customization', text: 'x' }], requiredEffects: eff, relatedFiles: [], relatedOmitted: [] }, options: { now: '2026-10-10T00:00:00.000Z' } });
   const re = ctx.verification && ctx.verification.requiredEffects;
-  assert(Array.isArray(re) && re.length === 1 && JSON.stringify(re[0].conditionFrom) === JSON.stringify(CF) && re[0].condition === '' && JSON.stringify(re[0].events) === JSON.stringify(M_SUBMITS),
-    `P2-5: 生成の ctx の verification.requiredEffects に conditionFrom（file・target・events）が載る（condition は空のまま）: ${JSON.stringify(re)}`);
+  assert(Array.isArray(re) && re.length === 1 && JSON.stringify(re[0].conditionFrom) === JSON.stringify(CFC) && re[0].condition === '' && JSON.stringify(re[0].events) === JSON.stringify(M_SUBMITS),
+    `P2-5: 生成の ctx の verification.requiredEffects に conditionFrom（移植元の候補の一覧 file・target。2026-10-21）が載る（condition は空のまま）: ${JSON.stringify(re)}`);
   const ctx0 = KTContext.buildGenerator({ customization: C3(), plan: PLAN, data: DATA, scan: scanOf(), verification: { requirementIds: [], requiredEffects: [{ ...eff[0], conditionFrom: { file: '', target: 'desktop', events: [] } }], relatedFiles: [], relatedOmitted: [] }, options: { now: '2026-10-10T00:00:00.000Z' } });
   assert(!('conditionFrom' in ctx0.verification.requiredEffects[0]), 'P2-6: 壊れた conditionFrom（file・events が空）は載せない');
 });
@@ -183,7 +196,7 @@ await section(async () => {
   const f = list.find(x => x.name === name);
   const ctx = KTContext.buildGenerator({ customization: c3, plan: planWith(c3), data, scan, options: { now: '2026-10-10T00:00:00.000Z' } });
   const r = reqOf(planWith(c3), 'C3', { jsFiles: list });
-  assert(f && f.source === true && f.analyzed === true && otherSrc(ctx, name) === true && r.effects.length === 1 && r.effects[0].conditionFrom && r.effects[0].conditionFrom.file === name && !r.unresolved.length,
+  assert(f && f.source === true && f.analyzed === true && otherSrc(ctx, name) === true && r.effects.length === 1 && JSON.stringify(r.effects[0].conditionFrom) === JSON.stringify([{ file: name, target: 'desktop' }]) && !r.unresolved.length,
     `P2-7: 日本語の名前の移植元でも本文を送れる（effectJsFilesOf と生成の ctx で同じ規則）→ conditionFrom: ${JSON.stringify({ f, ctx: otherSrc(ctx, name), r: short(r) })}`);
   //   レビュー T-1: effectJsFilesOf は analyzed を載せる。2026-10-20: イベント名を組み立てる本文は画面の解析（文字列の走査）ではイベントが見えないが、本文を送れるので
   //   候補として送る（登録を読めるかは生成工程が決める。読めなければ AI を呼ばずに返す → P3-6b）
@@ -192,7 +205,7 @@ await section(async () => {
   const listD = KTContext.effectJsFilesOf({ customization: C3(), data: DATA, scan: scanDyn });
   const ld = listD.find(x => x.name === 'dealValidate.js');
   const rd = reqOf(PLAN, 'C3', { jsFiles: listD });
-  assert(ld && ld.analyzed === true && !ld.events.length && ld.fields.includes('amount') && ld.source === true && !rd.unresolved.length && rd.effects.length === 1 && JSON.stringify(rd.effects[0].conditionFrom) === JSON.stringify(CF),
+  assert(ld && ld.analyzed === true && !ld.events.length && ld.fields.includes('amount') && ld.source === true && !rd.unresolved.length && rd.effects.length === 1 && JSON.stringify(rd.effects[0].conditionFrom) === JSON.stringify(CFC),
     `P2-8: イベント名を組み立てる本文 → 画面の解析ではイベントが見えないが、本文を送れるので候補として送る（「いつでも」にしない。登録は生成工程が読む）: ${JSON.stringify({ ld, r: short(rd) })}`);
   //   本文の無いファイル（取得失敗の note）→ analyzed false → 同じく確かめられない
   const scanNo = { files: [{ name: 'dealValidate.js', target: 'desktop', kind: 'js', note: '本文を取得できません' }] };
@@ -201,14 +214,13 @@ await section(async () => {
   const rn = reqOf(PLAN, 'C3', { jsFiles: listN });
   assert(ln && ln.analyzed === false && ln.source === false && rn.unresolved.length === 1 && rn.unresolved[0].why === 'no-source',
     `P2-9: 本文の無いファイル（取得できない）→ analyzed false → condition-unknown（no-source）: ${JSON.stringify({ ln, u: rn.unresolved })}`);
-  //   2026-10-20: 移植元の候補は生成工程が本文の登録で確かめる。移植元と比べた代表条件（same-as-source）が無い（移植元ではない・条件が分からない）ときは、効果の行に移植元を載せない
-  //   （「移植元と同じ条件」と出さず、生成工程が確かめたとおりに出す）。代表条件がまだ無いときは送った候補のまま
-  const REQ_P = [{ requirementId: 'C3', requirementIds: ['C3'], field: 'amount', effect: 'block-save', events: [...M_SUBMITS], condition: '', conditionFrom: clone(CF) }];
+  //   2026-10-21: 効果の行の移植元は、生成工程が確かめた移植元（応答の必須の効果の conditionFrom）だけ。送った候補（まだ確かめていない）・移植元ではないと分かった候補は載せない
+  const REQ_P = [{ requirementId: 'C3', requirementIds: ['C3'], field: 'amount', effect: 'block-save', events: [...M_SUBMITS], condition: '', conditionFrom: clone(CFC) }];
   const casesOf = (expect, kind) => M_SUBMITS.map((ev, i) => ({ id: `K${i}`, requirementId: 'C3', requirementIds: ['C3'], field: 'amount', effect: 'block-save', expect, side: 'match', kind, event: ev, verdict: 'pass' }));
-  const verOf = (cases) => ({ requiredEffects: [{ requirementId: 'C3', requirementIds: ['C3'], field: 'amount', effect: 'block-save', status: 'present' }], behavior: { status: 'passed', reason: null, cases } });
-  const erPort = KTCodeReview.effectResults(verOf(casesOf('same-as-source', 'port')), REQ_P), erPlain = KTCodeReview.effectResults(verOf(casesOf('block-save', 'match')), REQ_P), erNone = KTCodeReview.effectResults(null, REQ_P);
-  assert(erPort.items[0].conditionFrom && erPort.items[0].conditionFrom.file === 'dealValidate.js' && !erPlain.items[0].conditionFrom && erPlain.items[0].behavior === 'pass' && erNone.items[0].conditionFrom && erNone.items[0].conditionFrom.file === 'dealValidate.js',
-    `P2-10: 効果の行の移植元は、生成工程が移植元と比べた代表条件があるときだけ（無ければ載せない。代表条件がまだ無ければ送った候補のまま）: ${JSON.stringify({ port: erPort.items[0].conditionFrom, plain: erPlain.items[0].conditionFrom || null, none: erNone.items[0].conditionFrom })}`);
+  const verOf = (cases, cf = null) => ({ requiredEffects: [{ requirementId: 'C3', requirementIds: ['C3'], field: 'amount', effect: 'block-save', status: 'present', ...(cf ? { conditionFrom: cf } : {}) }], behavior: { status: 'passed', reason: null, cases } });
+  const erPort = KTCodeReview.effectResults(verOf(casesOf('same-as-source', 'port'), clone(CF)), REQ_P), erPlain = KTCodeReview.effectResults(verOf(casesOf('block-save', 'match')), REQ_P), erNone = KTCodeReview.effectResults(null, REQ_P);
+  assert(JSON.stringify(erPort.items[0].conditionFrom) === JSON.stringify(CF) && !erPlain.items[0].conditionFrom && erPlain.items[0].behavior === 'pass' && !erNone.items[0].conditionFrom,
+    `P2-10: 効果の行の移植元は、生成工程が確かめた移植元だけ（移植元ではないと分かった・まだ確かめていない候補は載せない）: ${JSON.stringify({ port: erPort.items[0].conditionFrom, plain: erPlain.items[0].conditionFrom || null, none: erNone.items[0].conditionFrom || null })}`);
 });
 
 // =========================================================
@@ -229,11 +241,12 @@ const VALUES = [['', '空', { stopped: true, errors: { amount: '金額を入力�
 /** 生成工程の偽物: C3 の生成されたコードを返し、移植元と比べる代表条件（expect same-as-source・kind port）の結果を契約 20 の形で返す（KTAiClient.normalizeVerification を通す）。
  *  mode = pass（移植元と同じ）/ fail（負の数の判定を抜いた候補: -1 で移植元は止めるのに止めない）/
  *  fail-event（空のとき event.error で止める候補）/ fail-field（空のとき金額でなく品名（item_name）に error を置く候補）— レビュー T-5 の置き場所の違い */
-const portGenerate = ({ mode = 'pass' } = {}) => {
+const portGenerate = ({ mode = 'pass', gate = null } = {}) => {
   const seen = [];
   const failing = /^fail/.test(mode);
   const impl = async (args) => {
     seen.push({ cid: args.customizationId, version: args.version.version, requiredEffects: clone(args.requiredEffects || []) });
+    if (gate) await gate.p;
     //   2026-10-20: 移植元の候補の登録を本文から読めない生成工程の偽物（AI を呼ばずに 422 CONDITION_SOURCE_UNVERIFIABLE。detail は AI版 worker の customization-generator と同じ形）
     if (mode === 'source-unverifiable') {
       const e0u = (args.requiredEffects || [])[0] || {};
@@ -247,7 +260,8 @@ const portGenerate = ({ mode = 'pass' } = {}) => {
     const review = KTCodeReview.review({ generated, customization: c, plan: args.version.plan, data: clone(K.DATA_C), scan: null, existingSource: null });
     const candidateHash = gwCandidateHash({ strategy: generated.strategy, targetFile: generated.targetFile, code: generated.code, patch: null, customizationId: 'C3' });
     let n = 0;
-    const cases = (e0.events || []).flatMap(ev => VALUES.map(([val, ja, ref]) => {
+    //   2026-10-21: mode not-port = 生成工程が移植元ではないと決めた（条件の無い保存禁止の代表条件・応答の必須の効果に conditionFrom が無い）
+    const cases = mode === 'not-port' ? (e0.events || []).map((ev, i) => ({ id: `K${i + 1}`, requirementId: 'C3', requirementIds: ['C3'], field: 'amount', effect: 'block-save', expect: 'block-save', side: 'match', kind: 'match', event: ev, verdict: 'pass', message: '保存を止めました' })) : (e0.events || []).flatMap(ev => VALUES.map(([val, ja, ref]) => {
       const mine = mode === 'fail' && val === '-1' ? { stopped: false, errors: {}, eventError: null }
         : mode === 'fail-event' && val === '' ? { stopped: true, errors: {}, eventError: '金額を入力してください' }
         : mode === 'fail-field' && val === '' ? { stopped: true, errors: { item_name: '金額を入力してください' }, eventError: null }
@@ -258,15 +272,15 @@ const portGenerate = ({ mode = 'pass' } = {}) => {
         message: fail ? (mode === 'fail' ? `金額 が ${ja} で保存する: 移植元は止める・エラー「金額は0円以上で入力してください」のに、生成したコードは止めない` : `金額 が ${ja} で保存する: 移植元と違う動きです`) : '移植元と同じ動きです' };
     }));
     const raw = { version: '1', bodyHash: candidateHash, sameAsPrevious: false, passed: !failing, machine: [{ name: 'syntax', ok: true, severity: 'info', message: '構文エラーなし' }, { name: 'required-effects', ok: true, severity: 'info', message: '必須の効果の処理があります' }],
-      requiredEffects: [{ requirementId: 'C3', requirementIds: ['C3'], field: 'amount', effect: 'block-save', status: 'present' }],
+      requiredEffects: [{ requirementId: 'C3', requirementIds: ['C3'], field: 'amount', effect: 'block-save', status: 'present', ...(mode !== 'not-port' && e0.conditionFrom ? { conditionFrom: clone(CF) } : {}) }],
       behavior: { status: failing ? 'failed' : 'passed', reason: null, cases, ...clone(K.GW_SCOPE) }, repairs: { count: failing ? 1 : 0, reasons: [], stoppedBy: failing ? 'same-failure' : null }, unverified: ['実機での動作'] };
     const verification = KTAiClient.normalizeVerification(raw);
     return { ok: true, generated, review, ctx: { size: { approxTokens: 1000 } }, existingSource: null, inputHash: `h-${seen.length}`, verification, candidateHash, requirementIds: [{ id: 'C3', kind: 'customization', text: c.requirement }] };
   };
   return { impl, seen, calls: seen };
 };
-const convOf = ({ mode = 'pass', supported = true, jsFiles = () => JSF(), marks = null } = {}) => {
-  const gen = portGenerate({ mode });
+const convOf = ({ mode = 'pass', supported = true, jsFiles = () => JSF(), marks = null, gate = null } = {}) => {
+  const gen = portGenerate({ mode, gate });
   const x = makeConvC({ scriptFn: portScript, labels: LABELS, generate: gen, planImpl: portPlan, supported });
   x.services.jsFiles = jsFiles;
   //   marks = 接続先（生成工程）の health の印の一覧をそのまま差し替える（1 つの印だけが無い接続先を作る）
@@ -278,7 +292,7 @@ await section(async () => {
   const { x, gen, v } = await runPort();
   const e = v && v.generated && v.generated.C3;
   const sent = gen.seen[0] && gen.seen[0].requiredEffects;
-  assert(gen.seen.length === 1 && Array.isArray(sent) && sent.length === 1 && JSON.stringify(sent[0].conditionFrom) === JSON.stringify(CF) && sent[0].condition === '',
+  assert(gen.seen.length === 1 && Array.isArray(sent) && sent.length === 1 && JSON.stringify(sent[0].conditionFrom) === JSON.stringify(CFC) && sent[0].condition === '',
     `P3-1: 生成に渡す必須の効果に conditionFrom（移植元 dealValidate.js の保存のイベント）が付く（会話の呼び出し側が services.jsFiles と印から作る）: ${JSON.stringify(sent)}`);
   assert(e && e.status === 'verified' && v.final && FS.readyOf(v) === true && x.calls.plan.length === 1,
     `P3-2: 移植元と比べる代表条件（same-as-source）の合格で検証済み・承認できる（計画の AI 1 回・生成 1 回・修復 0）: ${JSON.stringify({ status: e && e.status, verdict: e && e.verdict && [e.verdict.kind, e.verdict.reason], approvable: v.final && FS.readyOf(v), plans: x.calls.plan.length })}`);
@@ -358,6 +372,30 @@ await section(async () => {
   const sent3 = gen.seen[1] && gen.seen[1].requiredEffects;
   assert(v3 && v3.version !== v2.version && v3.generated.C3 && !v3.generated.C3.reused && gen.seen.length === 2 && Array.isArray(sent3) && sent3.length === 1 && !sent3[0].conditionFrom,
     `P3-12: 移植元が無くなった → 流用せず作り直す（必須の効果に conditionFrom が無い）: ${JSON.stringify({ reused: v3 && v3.generated.C3 && v3.generated.C3.reused, gens: gen.seen.length, sent3 })}`);
+});
+
+await section(async () => {
+  //   2026-10-21: 生成工程が移植元をまだ確かめていない間（生成中）の進みのカードは「…と同じ条件かを確かめる予定」（比べたようには書かない）
+  const gate = K.gateMk();
+  const g1 = convOf({ gate });
+  const run1 = (async () => { await g1.x.c.send(U_PORT); await g1.x.c.send('採用します'); })();
+  await K.ticks(16);
+  const pr = g1.x.c.progress();
+  const ph = pr ? K.stripC(T.KTAiChatUi.progressInnerHtml(g1.x.last())) : '';
+  assert(pr && /「金額」: 保存を止める（移植元「dealValidate\.js」と同じ条件かを確かめる予定）/.test(ph) && !/移植元「dealValidate\.js」と同じ条件）/.test(ph),
+    `P3-14: 生成中の進みのカードは「移植元「dealValidate.js」と同じ条件かを確かめる予定」（比べたようには書かない）: ${(ph.match(/「金額」[^\n]{0,80}/) || [''])[0]}`);
+  gate.open(); await run1; await K.ticks(4);
+  //   生成工程が移植元ではないと決めた → 結果の後は移植元の言い方を残さない（条件の無い保存禁止として確かめた）
+  const np = await runPort({ mode: 'not-port' });
+  const enp = np.v && np.v.generated && np.v.generated.C3;
+  const hnp = K.stripC(T.KTAiChatUi.changeSummaryHtml(np.v, {}));
+  assert(enp && enp.status === 'verified' && /「金額」（モバイル）: 保存を止める/.test(hnp) && !/移植元「dealValidate\.js」と同じ条件/.test(hnp) && !/確かめる予定/.test(hnp),
+    `P3-15: 生成工程が移植元ではないと決めた後は、比べたような文（移植元と同じ条件）も予定の文も残さない: ${(hnp.match(/「金額」[^\n]{0,80}/) || [''])[0]}`);
+  //   確かめられない（生成工程が AI を呼ばずに返した）→ 準備未完了。最終案のカードと右の「変更内容」に、比べたような文を残さない
+  const su = await runPort({ mode: 'source-unverifiable', jsFiles: () => JSF({ events: [], analyzed: true }) });
+  const hsu = `${K.stripC(K.finalHtml(su.x))}\n${K.stripC(T.KTAiChatUi.changeSummaryHtml(su.v, {}))}`;
+  assert(su.v.generated.C3.status === 'not-ready' && !/移植元「dealValidate\.js」と同じ条件）/.test(hsu) && !/同じ条件かを確かめる予定/.test(hsu) && /同じ条件かは確かめていません/.test(hsu),
+    `P3-16: 確かめられないと分かった後は、比べたような文も予定の文も残さず「確かめていません」と出す: ${(hsu.match(/移植元[^\n]{0,80}/g) || []).slice(0, 4).join(' / ')}`);
 });
 
 // =========================================================
@@ -462,7 +500,7 @@ await section(async () => {
   const ctx = calls[0] || null;
   const re = ctx && ctx.verification && ctx.verification.requiredEffects;
   const of = ctx && (ctx.otherFiles || []).find(f => f.name === 'dealValidate.js');
-  assert(ctx && Array.isArray(re) && re.length === 1 && JSON.stringify(re[0].conditionFrom) === JSON.stringify(CF) && of && of.source === F.DEAL_VALIDATE_JS && of.sourceUse === 'reference-only',
+  assert(ctx && Array.isArray(re) && re.length === 1 && JSON.stringify(re[0].conditionFrom) === JSON.stringify(CFC) && of && of.source === F.DEAL_VALIDATE_JS && of.sourceUse === 'reference-only',
     `P6-1: 画面: アプリの JavaScript の一覧（services.jsFiles）を作り、health の印 conditionFrom がある接続先で、生成の ctx の requiredEffects に conditionFrom・otherFiles に移植元の本文: ${JSON.stringify({ calls: calls.length, re, of: of && { name: of.name, src: typeof of.source } })}`);
   const fv = (m.conv().activePlan() || v || {});
   assert(fv.generated && fv.generated.C3 && fv.generated.C3.status === 'verified', `P6-2: 画面でも C3 は移植元と比べる代表条件で検証済み: ${JSON.stringify(fv.generated && fv.generated.C3 && fv.generated.C3.verdict)}`);

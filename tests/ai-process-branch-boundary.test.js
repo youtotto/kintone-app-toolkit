@@ -232,7 +232,7 @@ await section(async () => {
   assert(x.calls.plan.length === 1 && gen.seen.map(s => s.cid).join() === 'C1,C2,C3' && ['C1', 'C2', 'C3'].every(cid => g[cid] && g[cid].status === 'verified') && Object.values(g).every(e => (e.repairs || 0) === 0 && !(e.verification && e.verification.repairs && e.verification.repairs.count)),
     `B4-1: 計画の AI 1 回・生成 3 回（C1 → C2 → C3）・修復 0 で 3 本とも検証済み: ${JSON.stringify({ plans: x.calls.plan.length, gens: gen.seen.map(s => s.cid), status: Object.fromEntries(Object.entries(g).map(([k, e]) => [k, e.status])) })}`);
   const sentC3 = gen.seen.find(s => s.cid === 'C3');
-  assert(sentC3 && sentC3.requiredEffects.length === 1 && sentC3.requiredEffects[0].conditionFrom && sentC3.requiredEffects[0].conditionFrom.file === 'dealValidate.js' && sentC3.requiredEffects[0].condition === '',
+  assert(sentC3 && sentC3.requiredEffects.length === 1 && JSON.stringify(sentC3.requiredEffects[0].conditionFrom) === JSON.stringify([{ file: 'dealValidate.js', target: 'desktop' }]) && sentC3.requiredEffects[0].condition === '',
     `B4-2: C3 の生成に渡した必須の効果は移植元 dealValidate.js と同じ条件（計画から生成へ移植元が渡る）: ${JSON.stringify(sentC3 && sentC3.requiredEffects)}`);
   const f = v && v.final;
   assert(f && f.approvable === true && f.readiness && f.readiness.ready === true && !(f.readiness.reasons || []).length && !f.blockingReason && !(f.blockedSteps || []).length && !f.fix,

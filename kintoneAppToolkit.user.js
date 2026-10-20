@@ -6841,8 +6841,10 @@
      * 承認済みの Customization Plan ＋ 関係するフィールド ＋ 統合先の既存 JS（本文・解析）＋ 他の JS の要約 ＋ 規約。アプリ全体の facts は送らない。
      * @param {object} p { customization, plan, planId, version, data, deps, scan, existingSource: { name, target, text } | null, options }
      */
-    /** 2026-10-20: 動作テストと登録の読み取りに送る既存 JS の本文の合計の上限（伏字にした後の UTF-8 のバイト数。Gateway の validate-generator-context の
-     *   RELATED_SOURCE_MAX_BYTES と同じ値）。動作テストで動かすファイル（4 件・合計 131,072 文字まで）は生成工程が選ぶ */
+    /** 2026-10-20: 動作テストと登録の読み取りに送る既存 JS の本文の合計の上限（Gateway の validate-generator-context の RELATED_SOURCE_MAX_BYTES と同じ値）。
+     *   2026-10-21: 伏字にした後の本文を JSON の文字列にしたときの UTF-8 のバイト数で数える（要求の大きさ（Gateway の review.mjs は要求の JSON のバイト数で切る）と同じ数え方。
+     *   日本語・引用符・改行・\ を含む本文でも、要求が生成の依頼の上限（1.5 MiB）を超えない。Gateway は本文そのもののバイト数で数えるので、こちらの方が大きく数える）。
+     *   動作テストで動かすファイル（4 件・合計 131,072 文字まで）は生成工程が選ぶ */
     const KT_RELATED_SOURCE_MAX_BYTES = 1024 * 1024;
     /** §0c.7: 送れなかった既存 JS の理由（Gateway へ送る語彙。生成工程が返す verification.relatedOmitted も同じ語彙） */
     const KT_RELATED_OMIT_REASONS = Object.freeze(['url', 'no-source', 'limit', 'other']);
@@ -7292,7 +7294,7 @@
      *   files = KTScan.summarizeFiles の結果。targets（PC / モバイル）のファイルのうち、統合先（existing）を除いたもの。
      *   2026-10-20（同梱の構文解析器の削除。契約 20 §21）: どれを動作テストで動かすかは生成工程が決める（本文の登録とフィールドの参照から。4 件・合計 131,072 文字まで）。
      *   Toolkit は、本文があって kintone の語を含むか必須の効果のフィールドを参照するファイルの本文（秘密情報らしい文字列は伏字）と、画面の解析で分かったフィールドの
-     *   参照（fields。生成工程の選び方の手がかり）を送る。本文の合計は KT_RELATED_SOURCE_MAX_BYTES（伏字にした後の UTF-8 のバイト数。生成工程の上限と同じ）まで。
+     *   参照（fields。生成工程の選び方の手がかり）を送る。本文の合計は KT_RELATED_SOURCE_MAX_BYTES（伏字にした後の本文を JSON の文字列にしたときの UTF-8 のバイト数）まで。
      *   本文が空のファイルは何も登録しないので送らない。送れなかったファイルは relatedOmitted: 本文が無い（url・no-source。events は既知のライブラリの配布元（KTScan.isKnownLibraryUrl）だけ []、それ以外は null。
      *   画面とホストが違うかどうかでは決めない）・上限を超えた（limit・null）・kintone の語を含まず必須の効果のフィールドも参照しない（other・[]。kintone のイベントを
      *   登録しない）。生成工程が動かさなかったファイルとその登録は、応答の verification.relatedOmitted で返る（Toolkit が送れなかったものも含む）
@@ -7311,9 +7313,9 @@
         if (!f.text.trim()) continue;
         const fields = Object.keys(f.fields || {});
         if (!/\bkintone\b/.test(f.text) && !fields.some(code => effFields.has(code))) { omit(f, 'other', []); continue; }
-        //   秘密情報らしい文字列は伏字にしてから送る（動作テストでは値を使わない）。上限は伏字にした後のバイト数で数える
+        //   秘密情報らしい文字列は伏字にしてから送る（動作テストでは値を使わない）。上限は伏字にした後の本文を JSON の文字列にしたときのバイト数で数える（引用符の 2 バイトを除く）
         const text = redactSecretLikeText(f.text);
-        const b = new TextEncoder().encode(text).length;
+        const b = new TextEncoder().encode(JSON.stringify(text)).length - 2;
         if (bytes + b > KT_RELATED_SOURCE_MAX_BYTES) { omit(f, 'limit', null); continue; }
         bytes += b;
         relatedFiles.push({ name: f.name, target: f.target, text, fields });
@@ -12239,17 +12241,18 @@
     return out;
   };
   /**
-   * 2026-10-10（誤った検証による修復の繰り返しを止める §4.1・§5.1）: 必須の効果の conditionFrom（この効果の条件は、移植元の既存 JavaScript（file・target）が
-   *   events で行っている判定と同じ）の正規化。file が無い・events が空なら null（「いつでも」と区別する印を壊れた形で持たない）
-   * @returns {{ file: string, target: 'desktop' | 'mobile', events: string[] } | null}
+   * 2026-10-10（誤った検証による修復の繰り返しを止める §4.1・§5.1）・2026-10-21: 必須の効果の conditionFrom（この効果の条件は、移植元の既存 JavaScript が行っている判定と同じ）の
+   *   移植元の候補の正規化。Toolkit は構造だけで決めた候補の一覧を送り、生成工程が本文の登録で移植元を決める（AI版 契約 20 §21）。{ file, target } かその配列（3 件まで。
+   *   events は読まない）。file の無い要素は落とす。候補が無ければ null（「いつでも」と区別する印を壊れた形で持たない）
+   * @returns {Array<{ file: string, target: 'desktop' | 'mobile' }> | null}
    */
   const ktConditionFromOf = (x) => {
-    if (!x || typeof x !== 'object' || typeof x.file !== 'string' || !x.file.trim()) return null;
-    const events = [...new Set((Array.isArray(x.events) ? x.events : []).filter(e => typeof e === 'string' && e.trim()).map(e => e.trim()))].slice(0, 20);
-    return events.length ? { file: x.file.trim().slice(0, 300), target: x.target === 'mobile' ? 'mobile' : 'desktop', events } : null;
+    const list = (Array.isArray(x) ? x : [x]).filter(c => c && typeof c === 'object' && typeof c.file === 'string' && c.file.trim()).map(c => ({ file: c.file.trim().slice(0, 300), target: c.target === 'mobile' ? 'mobile' : 'desktop' }));
+    const uniq = list.filter((c, i) => list.findIndex(d => d.file === c.file && d.target === c.target) === i).slice(0, 3);
+    return uniq.length ? uniq : null;
   };
-  /** conditionFrom の指紋（流用の鍵・効果の組の鍵。無ければ ''） */
-  const ktConditionFromKey = (x) => { const cf = ktConditionFromOf(x); return cf ? `${cf.target}:${cf.file}:${[...cf.events].sort().join(',')}` : ''; };
+  /** conditionFrom（移植元の候補）の指紋（流用の鍵・効果の組の鍵。無ければ ''） */
+  const ktConditionFromKey = (x) => { const cf = ktConditionFromOf(x); return cf ? cf.map(c => `${c.target}:${c.file}`).join('|') : ''; };
   /**
    * §0c.7（2026-10-08）: 生成工程が必須の効果の検証（新しい形）に対応しているか。health の customization-generator.verification に
    *   requiredEffects・effectGroups・relatedOmitted・appFields・saveDialog・reasonCategory・caseSide がすべてあるときだけ対応とみなす（欠ければ「接続先が非対応」）。
@@ -12671,11 +12674,11 @@
         //   渡せなかった既存 JS が同じイベントを登録している → 合格でも verified にしない（既存 JS の区分）
         const hits = omit.filter(f => omitHits(f, g));
         if (hits.length && behavior !== 'fail') { omittedHit.push(...hits.map(f => ({ name: f.name, target: f.target, reason: f.reason, field: g.field, effect: g.effect, ...(f.url ? { url: String(f.url) } : {}) }))); if (behavior === 'pass' || behavior === 'untested') { behavior = 'not-run'; notRunReasons = []; } notRunReasons = [...new Set([...notRunReasons, 'related-file-omitted'])]; }
-        //   2026-10-20: 移植元の候補（conditionFrom）は生成工程が本文の登録で確かめる。移植元と比べた代表条件（expect same-as-source）が無い（移植元ではない・条件が分からない）
-        //   ときは、行に移植元を載せない（「移植元と同じ条件」と出さず、生成工程が確かめたとおりに出す）。代表条件がまだ無いときは送った候補のまま
-        const { conditionFrom: cf0, ...g0 } = g;
-        const portKept = !!cf0 && (!mine.length || mine.some(y => y.expect === KT_PORT_EXPECT));
-        return { ...g0, ...(portKept ? { conditionFrom: cf0 } : {}), structure, behavior, notRunReasons, cases: mine, ...(lacking.length ? { lacking } : {}) };
+        //   2026-10-21: 効果の行の移植元は、生成工程が確かめた移植元（応答の必須の効果の conditionFrom）だけ。送った候補（まだ確かめていない）・移植元ではないと分かった候補は
+        //   載せない（生成中の進みのカードは必須の効果の候補で「確かめる予定」と出す。確かめていないことを比べたように書かない）
+        const { conditionFrom: _declared, ...g0 } = g;
+        const resolved = (st.find(y => y && y.conditionFrom && !Array.isArray(y.conditionFrom) && typeof y.conditionFrom.file === 'string') || {}).conditionFrom || null;
+        return { ...g0, ...(resolved ? { conditionFrom: { file: resolved.file, target: resolved.target, events: [...(resolved.events || [])] } } : {}), structure, behavior, notRunReasons, cases: mine, ...(lacking.length ? { lacking } : {}) };
       });
       //   §0c.9 二重の安全（1）: 全体の状態が合格でない（入口で切った・Gateway が failed / not-run を返した）のに、代表条件ごとの照合では合格に見える効果は、合格にしない。
       //   対象: 入口で切った／照合できなかった代表条件に fail・not-run（対象外を除く）がある／状態が passed でないのに、その原因の代表条件が 1 件も無い（食い違い）。
@@ -13909,7 +13912,9 @@
       const checkReasonOf = (x) => [...new Set([...listOf(x.checkReason), ...listOf(x.checkReasons)].filter(y => typeof y === 'string' && y.trim()).map(y => str(y.trim(), 200)))].slice(0, 10);
       const EVENT_STATUS = ['present', 'missing', 'unchecked', 'other-platform', 'not-on-create'];
       const effectEventsOf = (x) => (Array.isArray(x.events) ? x.events : []).filter(y => y && typeof y === 'object' && typeof y.event === 'string' && y.event).slice(0, 40).map(y => ({ event: str(y.event, 120), status: EVENT_STATUS.includes(y.status) ? y.status : 'missing' }));
-      const requiredEffects = Array.isArray(v.requiredEffects) ? v.requiredEffects.filter(x => x && typeof x.field === 'string' && KT_EFFECTS.includes(x.effect)).slice(0, 80).map(x => ({ requirementId: idsOf(x)[0] || '', requirementIds: idsOf(x), field: str(x.field, 200), effect: x.effect, status: x.status === 'present' ? 'present' : x.status === 'unchecked' ? 'unchecked' : 'missing', ...(typeof x.message === 'string' ? { message: str(x.message) } : {}), ...(x.check === 'machine' || x.check === 'behavior' ? { check: x.check } : {}), ...(checkReasonOf(x).length ? { checkReason: checkReasonOf(x) } : {}), ...(Array.isArray(x.events) ? { events: effectEventsOf(x) } : {}) })) : null;
+      //   2026-10-21（AI版 契約 20 §21）: 生成工程が確かめた移植元（{ file, target, events }。候補の一覧ではない）。無ければ持たない
+      const sourceOf = (c) => (c && typeof c === 'object' && !Array.isArray(c) && typeof c.file === 'string' && c.file ? { file: str(c.file, 300), target: c.target === 'mobile' ? 'mobile' : 'desktop', events: (Array.isArray(c.events) ? c.events : []).filter(e => typeof e === 'string' && e).slice(0, 20).map(e => str(e, 120)) } : null);
+      const requiredEffects = Array.isArray(v.requiredEffects) ? v.requiredEffects.filter(x => x && typeof x.field === 'string' && KT_EFFECTS.includes(x.effect)).slice(0, 80).map(x => ({ requirementId: idsOf(x)[0] || '', requirementIds: idsOf(x), field: str(x.field, 200), effect: x.effect, status: x.status === 'present' ? 'present' : x.status === 'unchecked' ? 'unchecked' : 'missing', ...(typeof x.message === 'string' ? { message: str(x.message) } : {}), ...(x.check === 'machine' || x.check === 'behavior' ? { check: x.check } : {}), ...(checkReasonOf(x).length ? { checkReason: checkReasonOf(x) } : {}), ...(Array.isArray(x.events) ? { events: effectEventsOf(x) } : {}), ...(sourceOf(x.conditionFrom) ? { conditionFrom: sourceOf(x.conditionFrom) } : {}) })) : null;
       const bh = v.behavior && typeof v.behavior === 'object' ? v.behavior : null;
       const VERDICTS = ['pass', 'fail', 'not-run'];
       //   §0c.6: 代表条件ごとの実行できなかった理由（reason。区分は KT_BEHAVIOR_REASONS）・候補の例外などの原因（cause）・イベント・条件も保つ（表示と判定は構造化した値で）
@@ -14696,7 +14701,7 @@
       const maxOut = hOut && hOut > 0 ? Math.ceil(hOut) : OUTPUT_LIMITS[feature];
       const hCallsRaw = lf ? num(lf.maxAiCalls) : null;
       const hCalls = hCallsRaw && hCallsRaw > 0 ? Math.floor(hCallsRaw) : 0;
-      const bytes = num(ctxBytes) != null ? num(ctxBytes) : utf8Bytes(safeJson(ctx));
+      const bytes = num(ctxBytes) != null ? num(ctxBytes) : utf8Bytes(safeJson(aiInputOf(ctx)));
       const inTok = (key) => Math.ceil((PROMPT_BYTES[key] + CTX_FACTOR * bytes) / BYTES_PER_TOKEN);
       const patch = kind === 'plan' && !!(ctx && ctx.revision && ctx.revision.mode === 'patch');
       const mode = kind === 'plan' ? (patch ? 'plan-patch' : 'plan-full') : kind;
@@ -14722,7 +14727,10 @@
     const PREV_OUTPUT_BYTES_PER_TOKEN = 2, RETRY_EXTRA_BYTES = 8000;
     const ceil6 = (x) => Math.ceil(Math.round(Number(x) * 1e9) / 1e3) / 1e6;
     /** 送る Context を Gateway が provider への本文に入れる形（字下げ 1 の JSON を、さらに本文の JSON の文字列として入れる）のバイト数。Toolkit の推定（Gateway は一部だけを入れることもある） */
-    const gatewayBodyBytesOf = (ctx) => { let s = ''; try { s = JSON.stringify(JSON.stringify(ctx === undefined ? null : ctx, null, 1)) || ''; } catch (e) { s = safeJson(ctx); } return utf8Bytes(s); };
+    /** 2026-10-21: 見積もりに使う Context（AI に渡す部分）。生成の Context の動作テストに使う既存 JS の本文（verification.relatedFiles[].text）は生成の AI の指示文に入らないので数えない
+     *   （Gateway の validate-generator-context が Context の上限から除くものと同じ。要求の大きさとは別。AI版 契約 20 §21） */
+    const aiInputOf = (ctx) => (ctx && typeof ctx === 'object' && ctx.verification && typeof ctx.verification === 'object' && Array.isArray(ctx.verification.relatedFiles) ? { ...ctx, verification: { ...ctx.verification, relatedFiles: ctx.verification.relatedFiles.map(f => (f && typeof f === 'object' && typeof f.text === 'string' ? { ...f, text: '' } : f)) } } : ctx);
+    const gatewayBodyBytesOf = (ctx) => { const c = aiInputOf(ctx); let s = ''; try { s = JSON.stringify(JSON.stringify(c === undefined ? null : c, null, 1)) || ''; } catch (e) { s = safeJson(c); } return utf8Bytes(s); };
     /**
      * 再検証前の確認（並行の要求・2026-10-10）: 印のある Gateway（enforcement gateway）に渡す allowanceUsd の上限にする「この要求の上界の見積もり」。
      *   Gateway の上界の式（worker の budget.mjs: (provider に送る本文のバイト数 ＋ 64 × メッセージの数) × 入力の単価 / 1e6 ＋ 出力の上限 × 出力の単価 / 1e6）に寄せた
@@ -16956,11 +16964,10 @@
      *   2026-10-10（誤った検証による修復の繰り返しを止める §5.1）: 条件の空の保存禁止（block-save）の組は、その customization が統合（EXTEND_EXISTING_JS）でなく、
      *   existingFiles に候補の platform に無い target のファイル F があり、F がその組のすべてのイベントの対のイベント（mobile. の有無だけ違う）を登録し、
      *   その組のフィールドを参照しているとき、F を移植元とする（条件は「移植元が対のイベントで行っている判定と同じ」。空欄を「いつでも」にしない）。日本語の文から推定しない。
-     *   2026-10-20（同梱の構文解析器の削除）: F の登録は生成工程が本文から読む。jsFiles の F がその組のフィールドを参照し、F の本文を生成に送れる → 組に
-     *   conditionFrom { file, target, events }（生成工程が確かめる。登録を読めなければ AI を呼ばずに返し、会話が events-unreadable の準備未完了にする）／本文を送れず、
-     *   画面の解析のイベントで対のイベントが見える → unresolved condition-unknown（source: F の名前・why: no-source = 本文を送れない）。別の画面の existingFiles が
-     *   あるのに F を確かめられない（jsFiles が null = 画面の解析が無い・F が一覧に無い・F を解析していない）ときも '' にしない（unresolved condition-unknown・no-source。
-     *   そのときは画面の解析で対のイベントが見える候補だけを送る）。フィールドを参照しない F は移植元ではない
+     *   2026-10-20（同梱の構文解析器の削除）・2026-10-21: F の登録は生成工程が本文から読む。Toolkit は構造だけで候補を決める: jsFiles の F がその組のフィールドを参照する。
+     *   すべての候補の本文を生成に送れる → 組に conditionFrom（候補の一覧 [{ file, target }]。生成工程が確かめる。登録を読めなければ AI を呼ばずに返し、会話が
+     *   events-unreadable の準備未完了にする）／確かめられない portFiles（jsFiles が null = 画面の解析が無い・F が一覧に無い・F を解析していない・候補だが本文を送れない）が
+     *   1 つでもある → '' にせず、ほかの候補でも決めない（unresolved condition-unknown・source: その名前・why: no-source）。フィールドを参照しないと解析で分かった F は移植元ではない
      * @returns {{ effects: [{ requirementId, requirementIds, field, effect, events, condition, conditionFrom? }], unresolved: [{ field, requirementId?, effect?, reason, platforms?, source?, why? }], delegated: [{ field, effect, platform, customizationId }], notPossible: [{ field, effect, table, reason, requirementIds }] }}
      *   unresolved の reason: field-unspecified（効果の無い CONTROL を補えない）/ target-unresolved（要件の対象のフィールドを特定できない）/
      *   no-owner-field（対象のフィールドに、その効果を担当する access が計画に無い）/ none（READ 以外のフィールドがあるのに必須の効果が 0 件）/
@@ -17152,33 +17159,28 @@
       }
       // 2b) 2026-10-10（誤った検証による修復の繰り返しを止める §5.1）: 既存の入力チェックの移植。条件の空の保存禁止は、別の画面（PC / モバイル）の既存 JavaScript F が
       //   その組のイベントの対のイベントを登録し、その組のフィールドを参照しているなら、F の判定と同じ条件（conditionFrom）にする（「いつでも」にしない）。
-      //   構造（計画の existingFiles・画面の解析の jsFiles）だけで決める。本文を送れないときは条件が分からない（condition-unknown）
-      //   2026-10-20（同梱の構文解析器の削除。契約 20 §21）: 既存 JS の登録を読むのは生成工程だけ。移植元の候補は、別の画面の existingFiles（portFiles）のうち、画面の解析で
-      //   その組のフィールドを参照するファイル（画面の解析のイベントで対のイベントがすべて見えるものを先に）。本文を送れる候補は conditionFrom として送り、生成工程が本文の登録で
-      //   確かめる（対のイベントを登録すれば移植元・登録しなければ移植元ではない・登録を読めなければ AI を呼ばずに CONDITION_SOURCE_UNVERIFIABLE を返すので、会話が
-      //   condition-unknown（events-unreadable）の準備未完了にする）。本文を送れない候補は、画面の解析のイベントで対のイベントが見えれば condition-unknown（no-source）、
-      //   見えなければ移植元ではない。画面の解析が無い（jsFiles が null）・F が一覧に無い・F を解析していない（確かめられない）ときは condition-unknown（no-source。
-      //   空欄を「いつでも」にすると 10-10 の不具合が再発する）。確かめられないファイルがあるときは、画面の解析で対のイベントが見える候補だけを送る（見えない候補を
-      //   生成工程が移植元ではないとしたときに、確かめられないファイルを見落とさない）
-      const pairEvent = (ev) => (String(ev).startsWith('mobile.') ? String(ev).slice('mobile.'.length) : `mobile.${ev}`);
+      //   2026-10-20（同梱の構文解析器の削除。契約 20 §21）・2026-10-21: 既存 JS の登録を読むのは生成工程だけ。Toolkit は構造だけで移植元の候補を決める（画面の解析のイベントでは
+      //   決めない）: 別の画面の existingFiles（portFiles）のうち、画面の解析でその組のフィールドを参照するファイル。フィールドを参照しないと解析で分かったファイルは候補にしない
+      //   （無関係なファイルで止めない）。確かめられない portFiles（画面の解析が無い・一覧に無い・解析していない・候補だが本文を生成に送れない（16 KB を超えるなど））が 1 つでも
+      //   あれば、ほかの候補で決めずに condition-unknown（no-source。AI を呼ぶ前の準備未完了。空欄を「いつでも」にすると 10-10 の不具合が再発する）。候補が 3 件を超えるときも同じ。
+      //   すべての候補の本文を送れるときは conditionFrom に候補の一覧を載せ、生成工程が本文の登録で決める（移植元である・移植元ではない・登録を読めない＝AI を呼ばずに
+      //   CONDITION_SOURCE_UNVERIFIABLE を返し、会話が events-unreadable の準備未完了にする）
       const jsList = Array.isArray(jsFiles) ? jsFiles.filter(f => f && f.name) : null;
       const portFiles = c.strategy === 'EXTEND_EXISTING_JS' ? [] : (Array.isArray(c.existingFiles) ? c.existingFiles : []).filter(e => e && e.name && !mine.includes(e.target === 'mobile' ? 'mobile' : 'desktop'));
       if (portFiles.length) {
         for (const g of groups.values()) {
           if (g.effect !== 'block-save' || g.condition || !g.events.length) continue;
-          const pairs = g.events.map(pairEvent);
           const cands = [];
           let unsure = null;
           for (const e of portFiles) {
             const f = jsList ? jsList.find(x => x.name === String(e.name) && x.target === (e.target === 'mobile' ? 'mobile' : 'desktop')) || null : null;
             if (!f || f.analyzed === false) { if (!unsure) unsure = String(e.name); continue; }
-            if ((f.fields || []).includes(g.field)) cands.push(f);
+            if (!(f.fields || []).includes(g.field)) continue;
+            if (f.source !== true || cands.length >= 3) { if (!unsure) unsure = f.name; continue; }
+            cands.push({ file: f.name, target: f.target });
           }
-          const seen = (f) => pairs.every(p => (f.events || []).includes(p));
-          const src = cands.find(seen) || cands.find(f => f.source === true) || null;
-          if (src && src.source === true && (seen(src) || !unsure)) { g.conditionFrom = { file: src.name, target: src.target, events: pairs }; continue; }
-          const name = src && src.source !== true ? src.name : unsure;
-          if (name) pushUnresolved({ field: g.field, requirementId: g.requirementId, effect: 'block-save', reason: 'condition-unknown', source: name, why: 'no-source' });
+          if (unsure) { pushUnresolved({ field: g.field, requirementId: g.requirementId, effect: 'block-save', reason: 'condition-unknown', source: unsure, why: 'no-source' }); continue; }
+          if (cands.length) g.conditionFrom = cands;
         }
       }
       // 3) READ 以外のフィールドがあるのに必須の効果が 0 件 → 特定できない（必須の効果が無いまま verified にしない。別の platform の担当に任せただけのときは除く）
@@ -20286,8 +20288,16 @@
           //   2026-10-18: 接続先の印 conditionFrom は生成の前の確認で求める（ここでは渡さない）
           return requiredEffectsOf(v.plan, cid, reqs, { labels: fieldLabels(), columns: tableColumns(), readOnly: readOnlyFields(), jsFiles: appJsFiles(v, cid) });
         };
-        /** 2026-10-10（§5.2）: 効果の言い方。移植元と同じ条件の効果は、その旨を添える（条件の空を「いつでも」と読ませない） */
-        const effectJaOf = (x) => `${KT_EFFECT_JA[x.effect] || x.effect}${x && x.conditionFrom && x.conditionFrom.file ? `（移植元「${x.conditionFrom.file}」と同じ条件）` : ''}`;
+        /** 2026-10-10（§5.2）・2026-10-21: 効果の言い方。生成工程が確かめた移植元（効果の行の conditionFrom。{ file }）は「移植元「…」と同じ条件」、まだ確かめていない
+         *   移植元の候補（必須の効果の conditionFrom。候補の一覧。生成中の進みのカード）は「…と同じ条件かを確かめる予定」（条件の空を「いつでも」と読ませない。
+         *   確かめていないことを比べたように書かない） */
+        const effectJaOf = (x) => {
+          const base = KT_EFFECT_JA[x.effect] || x.effect;
+          const cf = x && x.conditionFrom;
+          if (cf && !Array.isArray(cf) && typeof cf.file === 'string' && cf.file) return `${base}（移植元「${cf.file}」と同じ条件）`;
+          const cands = Array.isArray(cf) ? cf.filter(c => c && c.file) : [];
+          return cands.length ? `${base}（${cands.length > 1 ? '移植元の候補' : '移植元'}${cands.map(c => `「${c.file}」`).join('・')}と同じ条件かを確かめる予定）` : base;
+        };
         /** 進みのカードの「これから確かめる条件」: 動作テストの結果（Gateway の behavior.cases）が届く前は必須の効果の一覧、届いたら代表条件ごとの結果 */
         const checklistOfEffects = (effects) => [...new Map((effects || []).map(x => [`${x.field}|${x.effect}`, { label: `${fieldName(x.field)}: ${effectJaOf(x)}`, state: 'todo' }])).values()];
         const checklistOfBehavior = (behavior) => ((behavior && Array.isArray(behavior.cases)) ? behavior.cases : []).filter(Boolean).map(x => ({ label: caseLabelOf(x), state: x.verdict === 'pass' ? 'pass' : x.verdict === 'fail' ? 'fail' : 'unverified', message: String(x.message || '') }));
@@ -20320,7 +20330,11 @@
             const d = e && e.details && e.details.error && typeof e.details.error === 'object' ? e.details.error.detail : null;
             const why = new Map();
             for (const x of (d && Array.isArray(d.effects) ? d.effects : [])) for (const f of (x && Array.isArray(x.files) ? x.files : [])) if (f && typeof f.file === 'string') why.set(f.file, f.why);
-            return req.effects.filter(x => x && x.conditionFrom && x.conditionFrom.file).map(x => ({ field: x.field, requirementId: x.requirementId, effect: x.effect, reason: 'condition-unknown', source: x.conditionFrom.file, why: why.get(x.conditionFrom.file) === 'no-source' ? 'no-source' : 'events-unreadable' }));
+            //   2026-10-21: conditionFrom は候補の一覧。生成工程が確かめられなかった候補（error.detail の files）を移植元の名前にする（無ければ先頭の候補）
+            return req.effects.map(x => ({ x, cands: x ? ktConditionFromOf(x.conditionFrom) : null })).filter(o => o.cands).map(({ x, cands }) => {
+              const hit = cands.find(c => why.has(c.file)) || cands[0];
+              return { field: x.field, requirementId: x.requirementId, effect: x.effect, reason: 'condition-unknown', source: hit.file, why: why.get(hit.file) === 'no-source' ? 'no-source' : 'events-unreadable' };
+            });
           };
           //   §0c.6: 必須の効果は生成工程の上限（20 件）まで。超える分を黙って落とすと確かめないまま残るので、生成を呼ばずに準備未完了（件数の上限）にする
           if (req.effects.length > 20) return { ...base, generated: null, review: null, existingSource: null, status: 'not-ready', candidateHash: null, attempts: previous ? previous.attempts || null : null,

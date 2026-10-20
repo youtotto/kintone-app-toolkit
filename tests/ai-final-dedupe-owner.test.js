@@ -65,13 +65,15 @@ const gwCoverageMutate = (map) => (cid, ver) => {
   return item ? { ...ver, machine: ver.machine.map(m => (m.name === 'coverage' ? item : m)) } : ver;
 };
 
+/** 2026-10-21: 必須の効果を記録（§12.31）と比べる形。移植元の候補は一覧（{ file, target }）になったので、記録の時点の形（{ file, target, events }）とは候補で比べる（記録は変えない） */
+const effJson = (list) => JSON.stringify((Array.isArray(list) ? list : []).map(e => (e && e.conditionFrom ? { ...e, conditionFrom: (Array.isArray(e.conditionFrom) ? e.conditionFrom : [e.conditionFrom]).map(c => ({ file: c.file, target: c.target })) } : e)));
 (async () => {
 // =========================================================
 console.log('\n--- §D1. 保存済みの素材の再生（§12.31）: 左は同じ業務の変更を 1 回だけ・担当未定は左右と反映の前の確認のどこにも無い ---');
 await section(async () => {
   const x = await R.run();
   const v = x.c.activePlan(), fin = v && v.final;
-  assert(x.sends.map(r => r && r.intent).join(',') === `${I.PROPOSE},${I.DRAFT_REPLY},${I.ADOPT_DRAFT}` && x.calls.plan.length === 1 && x.gen.calls.length === 3 && fin && !fin.incomplete && ['C1', 'C2', 'C3'].every(c => v.generated[c].status === 'verified') && FS.readyOf(fin) === true && ['C1', 'C2', 'C3'].every(c => JSON.stringify(v.generated[c].requiredEffects) === JSON.stringify(F.GENERATED[c].requiredEffects)),
+  assert(x.sends.map(r => r && r.intent).join(',') === `${I.PROPOSE},${I.DRAFT_REPLY},${I.ADOPT_DRAFT}` && x.calls.plan.length === 1 && x.gen.calls.length === 3 && fin && !fin.incomplete && ['C1', 'C2', 'C3'].every(c => v.generated[c].status === 'verified') && FS.readyOf(fin) === true && ['C1', 'C2', 'C3'].every(c => effJson(v.generated[c].requiredEffects) === effJson(F.GENERATED[c].requiredEffects)),
     `D1-1: 前提（再生）: 仮案 2 回 → 採用 → 計画 1 回 → 生成 3 本（必須の動作は実機と同じ）→ 承認できる最終案: ${JSON.stringify({ sends: x.sends.map(r => r && r.intent), plan: x.calls.plan.length, gen: x.gen.calls.length, st: v && Object.values(v.generated || {}).map(e => e.status), approvable: fin && FS.readyOf(fin) })}`);
   const owners = x.gen.calls[0].planOwners || [];
   //   2026-10-19（契約 13 §11.11）: 項目の id はターンをまたいで同じ（記録の当時は出力の順で振り直していた）。任意の提案は 1 回目の B5 のまま、2 回目に足した利用者の項目が B6
@@ -651,7 +653,7 @@ await section(async () => {
   const base = await R.run();
   const L = vis(R.leftHtml(x, { pre: READY })), doSec = secOf(L, 'この案で実現すること', LEFT_SECTIONS.slice(1));
   assert(JSON.stringify(sumU(one).effects) === JSON.stringify([`amount|lock|${ST}|C1+R9`, `memo|lock|${ST}|C1`]) && JSON.stringify(sumU(notIn).unresolved) === JSON.stringify(['|lock|target-unresolved|R9'])
-    && ['C1', 'C2', 'C3'].every(cid => JSON.stringify((base.c.activePlan().generated[cid] || {}).requiredEffects) === JSON.stringify(F.GENERATED[cid].requiredEffects))
+    && ['C1', 'C2', 'C3'].every(cid => effJson((base.c.activePlan().generated[cid] || {}).requiredEffects) === effJson(F.GENERATED[cid].requiredEffects))
     && ADOPTED.every(t => count(doSec, t) === 1) && doSec.split('\n').map(s => s.trim()).filter(Boolean).length === 4 && !/品名|数量|単価/.test(doSec),
     `D12-9: 単一対象・成功素材は今までどおり、対応づけた版の左も依頼の 4 行（列の一覧に戻さない）: ${JSON.stringify({ one: sumU(one), notIn: sumU(notIn), left: doSec.replace(/\s+/g, ' ') })}`);
 

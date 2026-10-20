@@ -1895,6 +1895,26 @@ await section(async () => {
   const hugeA = { name: 'hugeA.js', target: 'desktop', text: bigJs('hugeA', 700 * 1024), fields: { case_name: { READ: 1 } } }, hugeB = { name: 'hugeB.js', target: 'desktop', text: bigJs('hugeB', 400 * 1024), fields: {} };
   const selH = KTContext.relatedFilesFor([hugeA, hugeB], { targets: ['desktop'], requiredEffects: [{ field: 'case_name', effect: 'lock', events: ['app.record.edit.show'] }] });
   assert(selH.relatedFiles.length === 1 && selH.relatedFiles[0].name === 'hugeA.js' && JSON.stringify(selH.relatedOmitted) === JSON.stringify([{ name: 'hugeB.js', target: 'desktop', reason: 'limit', events: null }]), `D28-3b: 送る本文は合計 1 MiB まで・超えたファイルは limit（events null）: ${JSON.stringify({ sent: selH.relatedFiles.map(f => [f.name, f.text.length]), omitted: selH.relatedOmitted })}`);
+  //   2026-10-21: 上限は伏字にした後の本文を JSON の文字列にしたときのバイト数で数える（要求の大きさと同じ数え方。日本語は 3 バイト・引用符と \ と改行は 2 バイト）。
+  //   ちょうど 1 MiB は送り、1 バイト超えたら limit（events null）。本文そのもののバイト数より大きく数えるので、Gateway の本文の上限（本文のバイト数）では落ちない
+  const UNIT = "kintone.events.on('app.record.detail.show', function (e) { var s = \"金額\\\"確認\\\\\"; return e; });\n";
+  const jb = (t) => new TextEncoder().encode(JSON.stringify(t)).length - 2, rb = (t) => new TextEncoder().encode(t).length;
+  //   JSON の文字列のバイト数は文字ごとに決まるので足し算できる（'kintone ' の後に UNIT を入るだけ繰り返し、残りを空白で埋める）
+  const fillTo = (n) => { const head = 'kintone ', k = Math.max(0, Math.floor((n - jb(head)) / jb(UNIT))); const t = head + UNIT.repeat(k); return t + ' '.repeat(n - jb(t)); };
+  const MAX = KTContext.RELATED_SOURCE_MAX_BYTES;
+  const fa = { name: 'a.js', target: 'desktop', text: fillTo(MAX - 100), fields: {} }, fb = { name: 'b.js', target: 'desktop', text: fillTo(100), fields: {} }, fb1 = { name: 'b1.js', target: 'desktop', text: fillTo(101), fields: {} };
+  const atMax = KTContext.relatedFilesFor([fa, fb], { targets: ['desktop'], requiredEffects: [] }), overMax = KTContext.relatedFilesFor([fa, fb1], { targets: ['desktop'], requiredEffects: [] });
+  const sumJ = (sel) => sel.relatedFiles.reduce((n, f) => n + jb(f.text), 0), sumR = (sel) => sel.relatedFiles.reduce((n, f) => n + rb(f.text), 0);
+  assert(atMax.relatedFiles.length === 2 && !atMax.relatedOmitted.length && sumJ(atMax) === MAX && sumR(atMax) < MAX && overMax.relatedFiles.length === 1 && JSON.stringify(overMax.relatedOmitted) === JSON.stringify([{ name: 'b1.js', target: 'desktop', reason: 'limit', events: null }]) && /金額/.test(fa.text) && jb(UNIT) > rb(UNIT),
+    `D28-3c: 送る本文は JSON の文字列にしたときのバイト数で合計 1 MiB まで（ちょうど 1 MiB は送る・1 バイト超えたら limit）。本文そのもののバイト数は上限より小さい: ${JSON.stringify({ at: [atMax.relatedFiles.length, sumJ(atMax), sumR(atMax)], over: overMax.relatedOmitted, unit: [jb(UNIT), rb(UNIT)] })}`);
+  //   2026-10-21: 予算の見積もりは AI に渡す部分で数える（生成の Context の既存 JS の本文は生成の AI の指示文に入らない）。本文が 1 MiB 増えても見積もりの入力は変わらない
+  const cBase = KTContext.buildGenerator({ customization: CUST_C1, plan: { customizations: [CUST_C1] }, planId: 'p', version: 1, data: clone(DATA_C), verification: { requirementIds: [], requiredEffects: REQ_LOCK, relatedFiles: [], relatedOmitted: [] } });
+  const cBig = KTContext.buildGenerator({ customization: CUST_C1, plan: { customizations: [CUST_C1] }, planId: 'p', version: 1, data: clone(DATA_C), verification: { requirementIds: [], requiredEffects: REQ_LOCK, relatedFiles: atMax.relatedFiles.map(f => ({ name: f.name, target: f.target, text: f.text, fields: f.fields })), relatedOmitted: [] } });
+  const eBase = T.KTAiBudget.estimate({ kind: 'generate', ctx: cBase }), eBig = T.KTAiBudget.estimate({ kind: 'generate', ctx: cBig });
+  const gBase = T.KTAiBudget.gatewayBodyBytesOf(cBase), gBig = T.KTAiBudget.gatewayBodyBytesOf(cBig);
+  const names = JSON.stringify(atMax.relatedFiles.map(f => ({ name: f.name, target: f.target, text: '', fields: f.fields })));
+  assert(eBase.ok && eBig.ok && eBig.calls[0].input - eBase.calls[0].input < 100 && gBig - gBase < 1000 && gBig - gBase > 0 && rb(JSON.stringify(cBig)) - rb(JSON.stringify(cBase)) > MAX && names.length < 1000,
+    `D28-3d: 予算の見積もりは AI に渡す部分で数える（既存 JS の本文 1 MiB を送っても、生成の入力の見積もりは名前と手がかりの分しか増えない）: ${JSON.stringify({ input: [eBase.calls[0].input, eBig.calls[0].input], body: [gBase, gBig], ctx: [rb(JSON.stringify(cBase)), rb(JSON.stringify(cBig))] })}`);
   // 3) 同じホスト（kintone の画面と同じ）の URL 指定の既存 JS は本文もイベントも分からない → events null（その platform のすべて）→ verified にしない
   const c = await run(inputsWith([], ['https://t.cybozu.com/k/api/js/biz.js']));
   const vc = c.genCtx[0] && c.genCtx[0].verification;
