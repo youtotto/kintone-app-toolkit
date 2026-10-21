@@ -169,8 +169,7 @@ console.log('\n--- §N9 計画の版の反映済み（JavaScript の登録の後
     const c = KTAiConversation.create({ services: svc });
     await c.send('承認済みの備考を編集できないようにしたい'); await c.send('これで進めて');
     const v = c.activePlan(); v.generated = { C1: { generated: { strategy: 'NEW_JS_FILE' } } };
-    c.noteJsExecution({ stage: 'running', execution: { executionId: 'jx1', status: 'RUNNING', put: null } });
-    c.noteJsExecution({ stage: 'done', execution: { executionId: 'jx1', status: 'DONE', put: { ok: true } } });
+    c.noteApplied(v, { jsExecutionId: 'jx1' });   // 2026-10-21: 画面が登録を書き終えたときに会話へ知らせる（会話は登録の状態を写さない）
     return v;
   };
   const vSame = await run(withJs(SAME_P1()));

@@ -263,6 +263,7 @@ console.log('\n--- §46〜§53（UI 経由）: 既存 FILE の差し替え登録
     assert(/反映の前の確認（書き込みなし）/.test(chatPre) && /✎ fieldOnOff\.js（PC）既存ファイルを更新/.test(chatPre) && /既存の CSS（1 件）・その他の JS（2 件）・適用範囲（全員）は変更しません/.test(chatPre) && !/適用範囲（ALL）|Mobile：/.test(chatPre) && KIT.applyButtonOf(m) && !KIT.applyButtonOf(m).disabled, '最終案のカードの承認の欄に同じ内容を出し、［動作テスト環境へ反映］を押せる'); }
   const r1 = await m.panel.send('JS を登録して');
   assert(r1.intent === KTAiConversation.INTENT.REQUEST_JS_PREVIEW && m.msgs()[m.msgs().length - 1].data?.kind === 'js-preview-needs-approval' && /［動作テスト環境へ反映］/.test(m.msgs()[m.msgs().length - 1].text) && writes(m).length === 0 && m.panel.jsExecState().stage === 'idle', '「JS を登録して」: 最終案のカードの［動作テスト環境へ反映］へ案内するだけ（登録しない・書き込み 0）');
+  const nA = m.msgs().length;
   const ar = await applyScreen(m);
   assert(ar.button && !ar.button.disabled && v.approval && v.approval.precheck && m.panel.drawerState().open === true && m.panel.drawerState().pane === 'exec' && m.$('kt-ai-pane-exec').style.display === 'block' && m.panel.activeArtifact()?.type === 'EXECUTION' && m.panel.activeArtifact()?.js === true, '［動作テスト環境へ反映］1 回で承認と登録。進捗と結果は右のタブ「反映」（activeArtifact EXECUTION / js。タブが切り替わる）');
   { const jx = m.panel.jsExecState();
@@ -272,17 +273,24 @@ console.log('\n--- §46〜§53（UI 経由）: 既存 FILE の差し替え登録
   const after = jsNames(m, 'desktop');
   assert(after.length === before.length && after[0] === before[0] && after[1] === 'fieldOnOff.js' && m.mock.st.customize.desktop.js[1].fileKey !== 'dl:fieldOnOff' && m.mock.st.files.get(m.mock.st.customize.desktop.js[1].fileKey).content.includes("value === '承認済'") && jsNames(m, 'mobile').join() === 'mobileLock.js' && m.mock.st.customize.desktop.css.length === 1, '動作テスト環境: 同じ位置の fieldOnOff.js だけ新しい本文（承認済の分岐入り）。URL / mobile / CSS はそのまま');
   // 2026-10-06: 会話のカードは「反映後の確認：✓ x / y 件一致」（VERIFIED などの内部の語は出さない）
-  assert(m.types().includes('JS_EXECUTION') && ar.cardCount === 1 && /動作テスト環境へ反映しました/.test(ar.card) && /JavaScript: ✎ fieldOnOff\.js（PC） を登録（反映後の確認 ✓ 1 \/ 1 件一致）/.test(ar.card) && !/kt-ai-js-execution-card/.test(m.chat()) && !/VERIFIED/.test(m.chat()) && !/Plan との一致/.test(m.chat()) && /運用環境には反映されていません/.test(m.chat()) && /data-act="js-rollback"/.test(m.chat()) && /登録結果を見る/.test(m.chat()) && /sourceHash/.test(m.pane()), '結果カード（§8 / §31・2026-10-09 は 1 枚にまとめる）: ✎ fieldOnOff.js（PC）反映後の確認：✓ 1 / 1 件一致・運用環境には反映されていません・［登録結果を見る］［変更前の状態に戻す］。検証の内訳（sourceHash 等）は右下の右の「反映」');
-  // 処理の通知（js-preview-changed）は記録に残すが、通常の会話には出さない（登録のカードと同じ内容）
-  const changedNotice = m.msgs().find(x => x.data?.kind === 'js-preview-changed');
-  assert(m.conv().activeJsExecution()?.written === true && changedNotice && KTAiChatUi.isHiddenMessage(changedNotice) && !m.chat().includes(changedNotice.text) && m.rescans.length === 1 && v.jsExecutionId === ex.executionId, '会話の状態: 登録済み（written）・SYSTEM 通知は記録だけ（会話には出さない）・再スキャンを 1 回');
+  assert(JSON.stringify(m.msgs().slice(nA).map(x => x.data?.kind || x.type)) === JSON.stringify(['final-apply']) && ar.cardCount === 1 && /動作テスト環境へ反映しました/.test(ar.card) && /JavaScript: ✎ fieldOnOff\.js（PC） を登録（反映後の確認 ✓ 1 \/ 1 件一致）/.test(ar.card) && !/kt-ai-js-execution-card/.test(m.chat()) && !/VERIFIED/.test(m.chat()) && !/Plan との一致/.test(m.chat()) && /運用環境には反映されていません/.test(m.chat()) && /data-act="js-rollback"/.test(m.chat()) && /登録結果を見る/.test(m.chat()) && /sourceHash/.test(m.pane()), '結果カード（§8 / §31・2026-10-09 は 1 枚にまとめる）: ✎ fieldOnOff.js（PC）反映後の確認：✓ 1 / 1 件一致・運用環境には反映されていません・［登録結果を見る］［変更前の状態に戻す］。検証の内訳（sourceHash 等）は右下の右の「反映」');
+  // 2026-10-21: 会話は登録の状態を写さない（上の確かめ: 登録の操作で会話に足すのは結果のカード 1 枚だけ）。計画の版には登録した印と「反映済み」を残す
+  assert(m.rescans.length === 1 && v.jsExecutionId === ex.executionId && v.status === 'EXECUTED', `計画の版: 登録した印・反映済み・再スキャンを 1 回: ${v.status}`);
+  //   2026-10-21: 別の JS の相談に切り替える前の注意（戻していない変更）は、画面の反映・登録の状態（unrevertedPreviewChange）から出す（会話は登録の状態を写さない）
+  m.panel.consult(seedFor('other.js', 'desktop', { text: FIELD_ON_OFF }));
+  const choicesBefore = KIT.stripC(m.chat());
+  await clickChat(m, 'consult-resume');
+  assert(/「other\.js」の相談に切り替える/.test(choicesBefore) && /まだ元に戻していない変更があります/.test(choicesBefore) && !m.msgs().some(x => x.data?.kind === 'consult-choices'), '別の JS の相談に切り替える前: 登録して戻していない変更があることを出す（［今の相談を続ける］で選択肢を消す）');
   assert(/PUT \/preview\/app\/customize: ✓（revision 12 → 13）/.test(m.pane()) && /sourceHash/.test(m.pane()) && /id="kt-ai-jsreg-audit-copy"/.test(m.pane()) && /id="kt-ai-jsreg-rollback-start"/.test(m.pane()), 'コードペインの結果: PUT の revision・検証項目・［Audit JSON をコピー］［変更前の状態に戻す］');
   await clickPane(m, 'kt-ai-jsreg-audit-copy');
   const audit = JSON.parse(m.copies.pop());
   assert(audit.kind === 'customization' && audit.consultationSubject.sourceId === 'desktop:js:fieldOnOff.js' && audit.approvedSpec?.version === 1 && audit.specVersions.length === 1 && audit.generated[0].codeReview.status === 'OK' && audit.generated[0].sourceBeforeHash === KTScan.hashText(FIELD_ON_OFF) && audit.customizationBefore.revision === '12' && audit.customizationAfter.revision === '13' && audit.verification.ok, 'Customization Audit（§37）: 相談対象・承認 spec・生成の出所と前後の指紋・登録前後・検証');
-  // 文章だけでは戻さない → カード → 確認 → 戻す
+  // 文章だけでは戻さない → 戻し方の案内 → 結果のカードの［JavaScript を変更前に戻す］→ 確認 → 戻す
+  //   2026-10-21: 発言から出していた「戻せます」のカード（js-rollback-ready）は廃止した。戻す操作は結果のカードと反映の記録のボタンだけ
   const rb0 = await m.panel.send('やっぱり元に戻して');
-  assert(rb0.intent === KTAiConversation.INTENT.REQUEST_JS_ROLLBACK && m.msgs().some(x => x.data?.kind === 'js-rollback-ready') && writes(m).length === 2, '「元に戻して」（標準設定の反映は無し）→ JS の復元の案内だけ（書き込み無し）');
+  const guide = m.msgs()[m.msgs().length - 1];
+  assert(rb0.intent === KTAiConversation.INTENT.REQUEST_ROLLBACK && guide.data?.kind === 'rollback-guide' && /［JavaScript を変更前に戻す］/.test(guide.text) && writes(m).length === 2, '「元に戻して」→ 戻し方の案内だけ（書き込み無し）');
+  const nR = m.msgs().length;
   await clickChat(m, 'js-rollback', { execution: ex.executionId });
   await ticks(6);
   assert(m.panel.jsExecState().stage === 'rollback-confirm' && /登録前の状態に戻します。/.test(m.pane()) && /✎ <b>fieldOnOff\.js<\/b>（PC）を登録前の本文に戻す/.test(m.pane()) && /id="kt-ai-jsreg-rollback-go"/.test(m.pane()) && writes(m).length === 2, '［変更前の状態に戻す］→ prepareRollback（読み取りだけ）→ 確認画面');
@@ -291,11 +299,34 @@ console.log('\n--- §46〜§53（UI 経由）: 既存 FILE の差し替え登録
   const rb = m.panel.jsExecState().rollback;
   const restoredKey = m.mock.st.customize.desktop.js[1].fileKey;
   assert(m.panel.jsExecState().stage === 'rolled-back' && rb.status === 'ROLLED_BACK_VERIFIED' && restoredKey !== 'dl:fieldOnOff' && m.mock.st.files.get(restoredKey).content === FIELD_ON_OFF && m.mock.st.files.get(restoredKey).name === 'fieldOnOff.js' && writes(m).join(',') === 'POST file,PUT customize,POST file,PUT customize', 'Rollback: 登録前の本文を再アップロードして同じ位置に戻し、検証 ✓（upload 1 ＋ PUT 1。実機: 旧 fileKey は再指定できない）');
-  // 2026-10-06: 復元のカードは「登録する前の設定との比較：…」（snapshot などの内部の語は出さない）。処理の通知（js-rolled-back）は記録だけ
-  const rolledNotice = m.msgs().find(x => x.data?.kind === 'js-rolled-back');
-  assert(m.types().includes('JS_ROLLBACK') && /JavaScript を登録前の状態へ戻しました/.test(m.chat()) && /登録する前の設定との比較：✓ 一致/.test(m.chat()) && !/snapshot/i.test(m.chat()) && m.conv().activeJsExecution().rolledBack === true && rolledNotice && KTAiChatUi.isHiddenMessage(rolledNotice) && !m.chat().includes(rolledNotice.text) && m.rescans.length === 2, '復元カード（登録する前の設定との比較）・SYSTEM 通知は記録だけ・再スキャン');
+  // 2026-10-06: 復元のカードは「登録する前の設定との比較：…」（snapshot などの内部の語は出さない）。
+  //   2026-10-21: 復元のカード（JS_ROLLBACK）は、今の会話の登録を戻し始めたときに画面が会話に出す。計画の版は「元に戻し済み」。処理の通知（js-rolled-back）は作らない
+  assert(m.msgs().slice(nR).filter(x => x.type === 'JS_ROLLBACK').length === 1 && m.types().filter(t => t === 'JS_ROLLBACK').length === 1 && /JavaScript を登録前の状態へ戻しました/.test(m.chat()) && /登録する前の設定との比較：✓ 一致/.test(m.chat()) && !/snapshot/i.test(m.chat()) && v.status === 'ROLLED_BACK' && m.rescans.length === 2, `復元カード（戻し始めたときに 1 枚・登録する前の設定との比較）・計画の版は元に戻し済み・再スキャン: ${JSON.stringify({ status: v.status, added: m.msgs().slice(nR).map(x => x.data?.kind || x.type) })}`);
+  m.panel.consult(seedFor('other.js', 'desktop', { text: FIELD_ON_OFF }));
+  const choicesAfter = KIT.stripC(m.chat());
+  await clickChat(m, 'consult-resume');
+  assert(/「other\.js」の相談に切り替える/.test(choicesAfter) && !/まだ元に戻していない変更があります/.test(choicesAfter), '戻した後は、別の JS の相談に切り替える前の注意に戻していない変更を出さない');
   const again = await m.panel.send('戻して');
-  assert(again.intent === KTAiConversation.INTENT.GENERAL && again.reason === 'NO_EXECUTION', '戻した後は戻すものが無い');
+  assert(again.intent === KTAiConversation.INTENT.REQUEST_ROLLBACK && m.msgs()[m.msgs().length - 1].data?.kind === 'rollback-guide' && !/data-act="js-rollback"/.test(m.chat()) && writes(m).length === 4, '戻した後の「戻して」も案内だけ（会話に戻すボタンは残らない・書き込み無し）');
+}
+{
+  //   2026-10-21: 前の会話の JavaScript の登録を、新しい会話で反映の記録から開いて戻す → 新しい会話には元に戻すのカードを出さず、戻したことを一言で知らせる
+  //   （会話は登録の状態を写さない。戻し終えたときに画面が知らせる）
+  const m = mount();
+  await ticks();
+  m.panel.consult(seedFor('fieldOnOff.js', 'desktop', { text: FIELD_ON_OFF }));
+  const { v } = await adoptScreen(m, '承認済みになったら金額を編集できなくしたい');
+  const ar = await applyScreen(m);
+  const exId = m.panel.jsExecState().execution?.executionId;
+  assert(ar.run && ar.run.ok && exId && v.status === 'EXECUTED' && writes(m).length === 2, `前提: JavaScript を登録した（計画の版は反映済み）: ${JSON.stringify({ ok: ar.run && ar.run.ok, status: v.status })}`);
+  await m.$('kt-ai-new-conv').dispatch('click'); await ticks();
+  await m.$('kt-ai-header').dispatch({ type: 'click', target: { dataset: { act: 'open-log' } } });
+  const logId = (/data-log="([^"]+)"/.exec(m.$('kt-ai-apply-log').innerHTML) || [])[1] || null;
+  await m.$('kt-ai-pane-log').dispatch({ type: 'click', target: { dataset: { act: 'log-open', log: logId } } }); await ticks(4);
+  await clickPane(m, 'kt-ai-jsreg-rollback-start'); await ticks(6);
+  await clickPane(m, 'kt-ai-jsreg-rollback-go'); await ticks(10);
+  const chat = KIT.stripC(m.chat());
+  assert(logId && m.panel.jsExecState().stage === 'rolled-back' && m.panel.jsExecState().rollback?.status === 'ROLLED_BACK_VERIFIED' && writes(m).length === 4 && !m.msgs().some(x => x.type === 'JS_ROLLBACK') && m.msgs().some(x => x.data?.kind === 'apply-log-js-rolled-back') && /反映の記録から開いた JavaScript の登録（前の会話・依頼: [^）]+）を、登録前の状態に戻しました。/.test(chat), `前の会話の JavaScript の登録を記録から戻す: 新しい会話に元に戻すのカードを出さず、戻したことを一言で知らせる: ${JSON.stringify({ logId, stage: m.panel.jsExecState().stage, types: m.msgs().map(x => x.data?.kind || x.type) })}`);
 }
 
 // =========================================================

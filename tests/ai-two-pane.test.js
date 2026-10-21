@@ -317,7 +317,9 @@ console.log('\n--- §12. 会話の表示の決まり（部品）: 出さない�
   const mk = (type, role, text, data = null) => ({ id: `m${Math.random()}`, type, role, text, at: '', ...(data ? { data } : {}) });
   //   C-1 第 3 段: reasked・plan-summary・review-summary・spec-intro・code-intro の知らせは作らなくなった（削除した古い確認の流れ）。
   //   作らないことは tests/ai-flow-redesign.test.js の F5-1・F2-3・F11-3 で守る
-  for (const kind of ['connected', 'preview-changed', 'js-preview-changed', 'rolled-back', 'js-rolled-back']) assert(isHidden(mk(MSG.ASSISTANT_TEXT, 'toolkit', 'x', { kind })), `会話に出さない: ${kind}`);
+  //   2026-10-21: 反映・元に戻すの知らせ（preview-changed・js-preview-changed・rolled-back・js-rolled-back）は作らなくなった（会話は反映の状態を写さない）。
+  //   作らないことは tests/ai-workspace.test.js の §40（反映と元に戻すの後の会話のメッセージ）で守る
+  assert(isHidden(mk(MSG.ASSISTANT_TEXT, 'toolkit', 'x', { kind: 'connected' })), '会話に出さない: connected');
   assert(isHidden(mk(MSG.ASSISTANT_TEXT, 'toolkit', '', { kind: 'answers-ack', stage: 'done' })) && isHidden(mk(MSG.ASSISTANT_TEXT, 'toolkit', '', { kind: 'answers-ack', stage: 'queued' })), '受け付けた・入れたの知らせ・Toolkit の確認のカードは出さない');
   const failed = KTAiChatUi.messageHtml(mk(MSG.ASSISTANT_TEXT, 'toolkit', '回答を受け付けました：…', { kind: 'answers-ack', stage: 'failed', records: [{ label: '通知先', answer: '上長' }] }));
   assert(/「通知先：上長」は、まだ変更案に入っていません（作り直しに失敗しました）/.test(failed) && !/受け付けました/.test(failed), `失敗は出す（利用者の言葉）: ${failed}`);

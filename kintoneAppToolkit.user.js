@@ -16510,7 +16510,7 @@
 
   // ==========================================
   // 3.7 AI Workspace の会話コントローラ (KTAiConversation) — Phase 15
-  //   責務: 会話の状態（messages / activePlan / activeReview / activeExecution）、intent の振り分け（Toolkit 側の決定的規則。
+  //   責務: 会話の状態（messages / activePlan / activeReview。反映・登録の状態は持たない）、intent の振り分け（Toolkit 側の決定的規則。
   //   LLM は使わない）、計画のバージョン管理（activePlan だけが Executor へ進める。旧版は SUPERSEDED）、rich message の生成。
   //   AI の安全判定・承認・Executor の状態管理はしない（Human Approval の正本は Review / Decision UI、実行状態は KTPlanExecutor）。
   //   自然言語（「全部承認」「そのまま実行」「戻して」）は意図として認識するだけで、承認・最終確認・書き込みにはならない。
@@ -16602,17 +16602,18 @@
     const INTENT = { ASK: 'ASK', PLAN: 'PLAN', REVISE_PLAN: 'REVISE_PLAN', EXPLAIN_PLAN: 'EXPLAIN_PLAN', EXPLAIN_REVIEW: 'EXPLAIN_REVIEW', REQUEST_PREVIEW: 'REQUEST_PREVIEW', REQUEST_ROLLBACK: 'REQUEST_ROLLBACK', GENERAL: 'GENERAL', AMBIGUOUS: 'AMBIGUOUS',
       // Phase 16: JavaScript カスタマイズ。C-1 第 3 段（2026-10-08）: GENERATE_CODE（「コードを作って」・右の［コードを作る］）は最終案の作り直し（版を上げる）だけ
       GENERATE_CODE: 'GENERATE_CODE', EXPLAIN_CUSTOMIZATION: 'EXPLAIN_CUSTOMIZATION',
-      // Phase 17: JS の登録 / 復元の依頼（UI の確認へ案内するだけ）。C-1 第 3 段: JS の相談（DISCUSS_JS）は仮案の流れへ・仕様の確定（CONFIRM_SPEC）は削除した
-      REQUEST_JS_PREVIEW: 'REQUEST_JS_PREVIEW', REQUEST_JS_ROLLBACK: 'REQUEST_JS_ROLLBACK',
+      // Phase 17: JS の登録の依頼（UI へ案内するだけ）。C-1 第 3 段: JS の相談（DISCUSS_JS）は仮案の流れへ・仕様の確定（CONFIRM_SPEC）は削除した。
+      //   2026-10-21: JS の登録を元に戻す依頼（REQUEST_JS_ROLLBACK）は、元に戻し方の案内（REQUEST_ROLLBACK）にまとめた
+      REQUEST_JS_PREVIEW: 'REQUEST_JS_PREVIEW',
       // Phase 18: ドキュメント（仕様書 / 要件定義 / レビュー依頼 / 変更内容のまとめ / 引継ぎ / 非エンジニア向け説明 / 改善提案）。Toolkit が Prompt / Markdown を作る（LLM 不使用・無料）
       DOCUMENT: 'DOCUMENT',
       // 会話の応答性（2026-10-05）: 確認事項への回答（チャット欄・回答欄の共通の経路。KTAiAnswers が論点で対応づける）
       ANSWER: 'ANSWER',
       // 会話フローの再設計 段階 B（2026-10-07）: 仮案の経路（新しい依頼 → 仮案 / 仮案への返事 / 仮案の採用）。能力 'proposal' があるときだけ
       PROPOSE: 'PROPOSE', DRAFT_REPLY: 'DRAFT_REPLY', ADOPT_DRAFT: 'ADOPT_DRAFT' };
-    const MSG = { USER: 'USER', ASSISTANT_TEXT: 'ASSISTANT_TEXT', ANSWER: 'ANSWER', PLAN: 'PLAN', REVIEW: 'REVIEW', EXECUTION: 'EXECUTION', ROLLBACK: 'ROLLBACK', SYSTEM_NOTICE: 'SYSTEM_NOTICE', ERROR: 'ERROR', LOADING: 'LOADING',
-      // Phase 17: JS 登録 / 復元の写し。Phase 18: ドキュメントの出力カード。C-1 第 3 段（2026-10-08）: 実装仕様のカード（SPEC）・コードのカード（CODE）は削除した（最終案のカードに統合）
-      JS_EXECUTION: 'JS_EXECUTION', JS_ROLLBACK: 'JS_ROLLBACK', DOCUMENT: 'DOCUMENT',
+    const MSG = { USER: 'USER', ASSISTANT_TEXT: 'ASSISTANT_TEXT', ANSWER: 'ANSWER', PLAN: 'PLAN', REVIEW: 'REVIEW', ROLLBACK: 'ROLLBACK', SYSTEM_NOTICE: 'SYSTEM_NOTICE', ERROR: 'ERROR', LOADING: 'LOADING',
+      // Phase 17: JS の登録を元に戻すときのカード（2026-10-21: 反映・登録の写しのカード EXECUTION・JS_EXECUTION は廃止した）。Phase 18: ドキュメントの出力カード。C-1 第 3 段（2026-10-08）: 実装仕様のカード（SPEC）・コードのカード（CODE）は削除した（最終案のカードに統合）
+      JS_ROLLBACK: 'JS_ROLLBACK', DOCUMENT: 'DOCUMENT',
       // 段階 B: 仮案のカード（会話に 1 枚。更新で置き換え、前の仮案は 1 行に畳む）
       DRAFT: 'DRAFT',
       // 段階 C: 最終案のカード（会話に 1 枚。計画の版ごと。前の最終案は 1 行に畳む）
@@ -17428,7 +17429,7 @@
       return { open, decided, pending: lg ? KTAiAnswers.pendingAnswers(lg).length : 0 };
     }
     /**
-     * 入力文 → intent（決定的）。state = { activePlan, activeReview, activeExecution }
+     * 入力文 → intent（決定的）。state = { activePlan, activeReview }
      * @returns {{ intent, reason, stepIds?, choices? }}
      */
     // ---- 会話フローの再設計 段階 B（2026-10-07）: 仮案の経路の決定的な前段（AI を呼ばない判定。能力 'proposal' があるときだけ使う）----
@@ -17543,10 +17544,6 @@
       const plan = state.activePlan && state.activePlan.status !== PLAN_STATUS.SUPERSEDED ? state.activePlan : null;
       const canRevise = !!plan && (plan.status === PLAN_STATUS.ACTIVE || plan.status === PLAN_STATUS.STALE);
       const review = plan ? (state.activeReview?.review || plan.review || null) : null;
-      const ex = state.activeExecution;
-      const canRollback = !!(ex && ex.written && !ex.rolledBack);
-      const jx = state.activeJsExecution;
-      const canJsRollback = !!(jx && jx.written && !jx.rolledBack);
       const hasGenerated = !!(plan && plan.generated && Object.keys(plan.generated).length);
       // 2026-10-05 第 3 段: 文ごとに質問か分ける。質問の文だけの発言は説明・質問（計画は作り直さない）。質問とそれ以外が混ざった発言は、
       //   質問の部分を質問の AI に同時に送り（askText）、それ以外を回答・計画の更新として扱う（以前は全体が ASK になり、回答の部分が失われた）。
@@ -17602,13 +17599,10 @@
         }
         // 生成の語が要件の文に混ざっているだけ（「見積書をPDFで生成して」）は、下の規則（計画の AI・新しい計画）へ
       }
-      // 2) 元に戻す（反映済みの実行があるときだけ意味を持つ。即 Rollback はしない）
+      // 2) 元に戻す（即 Rollback はしない。戻す操作は反映の結果のカードと反映の記録のボタンだけ。2026-10-21: 会話は反映の状態を持たないので、戻せるかに関わらず戻し方を案内する）
       //   手順・カスタマイズの番号を指す取り消し（「P2は取り消して」）は、修正できる計画があれば計画の修正（反映の取り消しではない）
       if (RE.rollback.test(cmdText) && ((pureCommand(cmdText, RE.rollback) && !(plan && canRevise && /\b[CP][0-9]+\b/.test(cmdText))) || !(plan && canRevise))) {
-        // Phase 17: JS の登録だけがあれば JS の復元。両方あれば標準設定の Rollback を優先し、JS は言葉（JS / コード / ファイル）で指定したときだけ
-        const wantsJs = /JS|JavaScript|コード|スクリプト|ファイル/i.test(cmdText);
-        if (canJsRollback && (!canRollback || wantsJs)) return { intent: INTENT.REQUEST_JS_ROLLBACK, reason: 'JS_ROLLBACK_WORDS', askText };
-        return canRollback ? { intent: INTENT.REQUEST_ROLLBACK, reason: 'ROLLBACK_WORDS', askText } : { intent: INTENT.GENERAL, reason: 'NO_EXECUTION', askText };
+        return { intent: INTENT.REQUEST_ROLLBACK, reason: 'ROLLBACK_WORDS', askText };
       }
       // 2b) 会話の応答性（2026-10-05）: 確認事項への回答。未回答の確認事項と決定事項の論点で対応づける（「PCだけ」「部長です」「保存時です」「PCだけ。保存は止めない」）。
       //     以前は計画があると「何についてでしょうか」（AMBIGUOUS）になり、用途の選び直しや言い直しが要った。対応先が決まらない部分は確定せず、
@@ -17728,13 +17722,13 @@
      *   'full' = いつも全体を作り直す。評価で前後を同じ条件で比べるため・問題があったときに戻すため）
      */
     function create({ services = {}, now = () => new Date().toISOString(), maxMessages = MAX_MESSAGES, clock = () => Date.now(), revisionMode = 'auto', storage = null } = {}) {
-      const state = { messages: [], activePlan: null, activeReview: null, activeExecution: null, planHistory: [], dropped: 0,
+      const state = { messages: [], activePlan: null, activeReview: null, planHistory: [], dropped: 0,
         // 追加指示 §4（b）（2026-10-08）: 担当の無い決まった要件について、自動で計画の差分更新を依頼した要件の id（planId → Set。同じ要件は 1 回だけ）
         ownerRetried: new Map(), ownerRetryActive: false,
         // §0c.6（2026-10-08）: 必須の効果を特定できない（unresolved）ときに、自動で計画の差分更新を依頼した customization（planId → Set。計画の系列ごとに 1 回だけ）
         effectRetried: new Map(),
-        // Phase 17: 相談対象の JS（Customize タブから。無ければ null）と、JS の登録（KTJsExecutor の写し）
-        subject: null, consultation: null, activeJsExecution: null,
+        // Phase 17: 相談対象の JS（Customize タブから。無ければ null）
+        subject: null, consultation: null,
         // 2026-10-05 第 3 段（作業中も会話を続ける）: 最初の計画・コードの生成の途中に受け付けた指示（{ kind: 'PLAN' | 'GENERATE', epoch, texts[{ text, kind, ack }] }）と、
         //   作業と並べて走らせている質問（答えを待つため）
         workInbox: null, sideAsks: [],
@@ -18423,13 +18417,11 @@
         cancelAsides();
         state.epoch += 1;
         state.messages.length = 0; state.dropped = 0;
-        // 反映済み（未復元）の実行は残す（「戻して」と drawer の Rollback 確認は引き続き使える）。計画・仕様・生成コードは消える
+        // 計画・仕様・生成コードは消える（反映・登録の状態は画面の部品と反映の記録が持ち、前の会話の反映は反映の記録から戻せる）
         state.planHistory.length = 0; state.activePlan = null; state.activeReview = null;
         // 会話の応答性: 確認事項と決定事項は会話（計画の系列）のもの。新しい会話には持ち込まない
         state.ledgers.clear(); state.metrics = newMetrics(); state.job = null; state.inbox = null;
         state.draft = null; state.draftDecisions = []; state.draftPlanLink = null; state.stoppedInstructions = [];
-        if (state.activeExecution && !(state.activeExecution.written && !state.activeExecution.rolledBack)) state.activeExecution = null;
-        if (state.activeJsExecution && !(state.activeJsExecution.written && !state.activeJsExecution.rolledBack)) state.activeJsExecution = null;
       }
       /**
        * 相談を始める。同じ JS の相談中なら再開（会話を残す）。別の JS の会話があれば { needsConfirm } を返し、UI が「戻る / 新しい会話」を聞く
@@ -18439,7 +18431,7 @@
       function startConsultation(seed, { force = false } = {}) {
         if (!seed || !seed.sourceId) return { ok: false, reason: 'NO_SEED' };
         if (state.subject && state.subject.sourceId === seed.sourceId && state.messages.length) { state.consultation = { ...state.consultation, resumedAt: now() }; emit(); return { ok: true, resumed: true, subject: state.subject }; }
-        if (!force && state.messages.length) return { ok: false, needsConfirm: true, current: state.subject ? { sourceId: state.subject.sourceId, name: state.subject.name } : null, hasPlan: !!state.activePlan, pendingExecution: !!((state.activeExecution && state.activeExecution.written && !state.activeExecution.rolledBack) || (state.activeJsExecution && state.activeJsExecution.written && !state.activeJsExecution.rolledBack)) };
+        if (!force && state.messages.length) return { ok: false, needsConfirm: true, current: state.subject ? { sourceId: state.subject.sourceId, name: state.subject.name } : null, hasPlan: !!state.activePlan };
         resetConversation();
         state.subject = subjectOf(seed);
         state.consultation = { seed, startedAt: now(), resumedAt: null };
@@ -18449,73 +18441,32 @@
         push(MSG.ASSISTANT_TEXT, ROLE.TOOLKIT, `${state.subject.name} について相談します。`, { kind: 'consultation-start', subject: state.subject, lines });
         return { ok: true, resumed: false, subject: state.subject };
       }
-      /** JS の登録（KTJsExecutor の状態）を写す。登録は最終案のカードの［動作テスト環境へ反映］1 回の反映の中でだけ始まる */
-      function noteJsExecution(jsState) {
-        const ex = jsState?.execution || null;
-        const executionId = ex?.executionId || jsState?.prepared?.executionId || null;
-        const stage = jsState?.stage || 'idle';
-        if (!executionId || ['idle', 'preparing', 'confirm', 'blocked'].includes(stage)) return;
-        if (!state.activeJsExecution || state.activeJsExecution.executionId !== executionId) {
-          const v = state.activePlan;
-          state.activeJsExecution = { executionId, planId: v?.planId ?? null, version: v?.version ?? null, stage, written: false, rolledBack: false, status: null, rollbackMessage: null };
-          push(MSG.JS_EXECUTION, ROLE.TOOLKIT, 'JavaScript を動作テスト環境へ登録しています。', { executionId, planId: v?.planId ?? null, version: v?.version ?? null, ...(jsState?.finalRunId ? { finalRun: jsState.finalRunId } : {}) });
-        }
-        const ae = state.activeJsExecution;
-        ae.stage = stage;
-        ae.written = ae.written || !!ex?.put?.ok;
-        // Phase 21（実機 §2）: JS を登録した計画の版。標準設定の手順が無い（または反映済み）なら、登録で計画は「反映済み」になる。
-        //   以前は ACTIVE のままで、次の依頼がその計画の見直しになり、登録済みのカスタマイズがもう一度計画に入った（生成し直すと同じ処理が重なる）
-        const jv = state.planHistory.find(x => x.planId === ae.planId && x.version === ae.version) || null;
-        //   生成していないカスタマイズ（C2 など）が残っていれば、まだ反映済みにしない（登録はその時点で生成済みのものをまとめて行う）
-        //   簡素化 A（2026-10-16）: 書き込まない手順（確認の手順・既存のものを使う・今の設定と同じ = KTPlanExecutor.noWriteOf）は残りに数えない
-        const writes = (pv, st) => st.actionType !== 'REQUIRE_CONFIRMATION' && !KTPlanExecutor.noWriteOf(st, (pv?.review?.steps || []).find(x => x && x.stepId === st.id) || null);
-        const standardLeft = (pv) => ((pv?.plan?.steps || []).some(st => st.actionType !== 'CUSTOMIZATION_REQUIRED' && !st.alternativeId && writes(pv, st)) && !pv.executionId)
-          || (pv?.plan?.customizations || []).some(c => ['NEW_JS_FILE', 'EXTEND_EXISTING_JS'].includes(c.strategy) && !(pv.generated && pv.generated[c.customizationId]));
-        if (stage === 'done' && ae.status !== (ex?.status || 'DONE')) {
-          ae.status = ex?.status || 'DONE';
-          if (jv && ae.written) { jv.jsExecutionId = executionId; if (!standardLeft(jv) && jv.status !== PLAN_STATUS.SUPERSEDED) jv.status = PLAN_STATUS.EXECUTED; }
-          if (ae.written) push(MSG.SYSTEM_NOTICE, ROLE.SYSTEM, '動作テスト環境の JavaScript カスタマイズ設定が変更されました。運用環境には反映されていません。', { executionId, kind: 'js-preview-changed' });
-        }
-        if (/^roll/.test(stage) && !ae.rollbackMessage) ae.rollbackMessage = push(MSG.JS_ROLLBACK, ROLE.TOOLKIT, 'JavaScript の登録を元に戻します。', { executionId, planId: ae.planId, version: ae.version }).id;
-        if (stage === 'rolled-back' && !ae.rolledBack) {
-          const rb = jsState?.rollback || ex?.rollback || null;
-          ae.rolledBack = rb?.status === 'ROLLED_BACK_VERIFIED';
-          if (ae.rolledBack) {
-            if (jv && jv.jsExecutionId === executionId && jv.status === PLAN_STATUS.EXECUTED && !jv.executionId) jv.status = PLAN_STATUS.ROLLED_BACK;
-            push(MSG.SYSTEM_NOTICE, ROLE.SYSTEM, 'JavaScript カスタマイズ設定を登録前の状態に戻しました。', { executionId, kind: 'js-rolled-back' });
-          }
+      /**
+       * 2026-10-21: 最終案の反映が書き込んだことを計画の版に記録する（画面の反映の結果から。会話は反映・登録の状態を写さない。
+       *   以前は画面が描くたびに部品の状態を会話へ写し、写しから会話のカードと計画の状態を決めていた）。
+       *   標準設定を書いた（executionId）→ その版は「反映済み」。JavaScript を登録した（jsExecutionId）→ 標準設定の手順と生成していないカスタマイズが
+       *   残っていなければ「反映済み」（Phase 21 実機 §2: 以前は ACTIVE のままで、次の依頼がその計画の見直しになり、登録済みのカスタマイズがもう一度計画に入った）
+       */
+      function noteApplied(v, { executionId = null, jsExecutionId = null } = {}) {
+        if (!v) return;
+        if (executionId) { v.executionId = executionId; v.status = PLAN_STATUS.EXECUTED; }
+        if (jsExecutionId) {
+          //   生成していないカスタマイズ（C2 など）が残っていれば、まだ反映済みにしない（登録はその時点で生成済みのものをまとめて行う）
+          //   簡素化 A（2026-10-16）: 書き込まない手順（確認の手順・既存のものを使う・今の設定と同じ = KTPlanExecutor.noWriteOf）は残りに数えない
+          const writes = (st) => st.actionType !== 'REQUIRE_CONFIRMATION' && !KTPlanExecutor.noWriteOf(st, (v.review?.steps || []).find(x => x && x.stepId === st.id) || null);
+          const standardLeft = ((v.plan?.steps || []).some(st => st.actionType !== 'CUSTOMIZATION_REQUIRED' && !st.alternativeId && writes(st)) && !v.executionId)
+            || (v.plan?.customizations || []).some(c => ['NEW_JS_FILE', 'EXTEND_EXISTING_JS'].includes(c.strategy) && !(v.generated && v.generated[c.customizationId]));
+          v.jsExecutionId = jsExecutionId;
+          if (!standardLeft && v.status !== PLAN_STATUS.SUPERSEDED) v.status = PLAN_STATUS.EXECUTED;
         }
         emit();
       }
-
-      // ---- 実行・Rollback（KTPlanExecutor の状態を写すだけ。ここでは管理しない）----
-      function noteExecution(execState) {
-        const ex = execState?.execution || null;
-        const executionId = ex?.executionId || execState?.prepared?.executionId || null;
-        const stage = execState?.stage || 'idle';
-        // 反映の開始（running）より前（prepare / 最終確認 / blocked）は会話に出さない（まだ何も書いていない）
-        if (!executionId || ['idle', 'preparing', 'confirm', 'blocked'].includes(stage)) return;
-        if (!state.activeExecution || state.activeExecution.executionId !== executionId) {
-          const v = state.activePlan;
-          state.activeExecution = { executionId, planId: v?.planId ?? null, version: v?.version ?? null, stage, written: false, rolledBack: false, status: null, rollbackMessage: null };
-          if (v) v.executionId = executionId;
-          push(MSG.EXECUTION, ROLE.TOOLKIT, '動作テスト環境へ反映しています。', { executionId, planId: v?.planId ?? null, version: v?.version ?? null, ...(execState?.finalRunId ? { finalRun: execState.finalRunId } : {}) });
-        }
-        const ae = state.activeExecution;
-        const pv = state.planHistory.find(x => x.planId === ae.planId && x.version === ae.version) || null;   // 実行した計画の版（最新の版とは限らない）
-        const steps = ex?.steps || [];
-        ae.stage = stage;
-        ae.written = ae.written || steps.some(x => ['APPLIED', 'VERIFIED', 'VERIFY_FAILED'].includes(x.status) || (x.status === 'FAILED' && x.partial));
-        if (stage === 'done' && ae.status !== (ex?.status || 'DONE')) {
-          ae.status = ex?.status || 'DONE';
-          if (pv && ae.written) pv.status = PLAN_STATUS.EXECUTED;
-          if (ae.written) push(MSG.SYSTEM_NOTICE, ROLE.SYSTEM, '動作テスト環境の設定が変更されました。運用環境には反映されていません。', { executionId, kind: 'preview-changed' });
-        }
-        if (/^roll/.test(stage) && !ae.rollbackMessage) { ae.rollbackMessage = push(MSG.ROLLBACK, ROLE.TOOLKIT, '動作テスト環境の変更を元に戻します。', { executionId, planId: ae.planId, version: ae.version }).id; }
-        if (stage === 'rolled-back' && !ae.rolledBack) {
-          const rb = execState?.rollback || ex?.rollback || null;
-          ae.rolledBack = rb?.status === 'ROLLED_BACK_VERIFIED' || (rb?.steps || []).some(s => s.status === 'ROLLBACK_VERIFIED');
-          if (ae.rolledBack) { if (pv && pv.executionId === executionId) pv.status = PLAN_STATUS.ROLLED_BACK; push(MSG.SYSTEM_NOTICE, ROLE.SYSTEM, '動作テスト環境を変更前の状態に戻しました。', { executionId, kind: 'rolled-back' }); }
+      /** 2026-10-21: 反映・登録を元に戻した（画面の復元の結果から）。その反映を書いた計画の版を「元に戻し済み」にする（JavaScript は、標準設定を書いていない版だけ） */
+      function noteRolledBack(executionId, { js = false } = {}) {
+        if (!executionId) return;
+        for (const pv of state.planHistory) {
+          if (!js && pv.executionId === executionId) pv.status = PLAN_STATUS.ROLLED_BACK;
+          if (js && pv.jsExecutionId === executionId && pv.status === PLAN_STATUS.EXECUTED && !pv.executionId) pv.status = PLAN_STATUS.ROLLED_BACK;
         }
         emit();
       }
@@ -21310,8 +21261,8 @@
               break;
             }
             case INTENT.REQUEST_ROLLBACK: {
-              const ae = state.activeExecution;
-              push(MSG.ASSISTANT_TEXT, ROLE.TOOLKIT, '動作テスト環境を変更前の状態へ戻せます。', { kind: 'rollback-ready', executionId: ae.executionId, planId: ae.planId, version: ae.version });
+              //   2026-10-21: 戻す操作は反映の結果のカードと反映の記録のボタンだけ。会話は反映の状態を持たないので、戻し方を案内する（「戻せます」のカードは廃止した）
+              toolkit('元に戻すときは、反映の結果のカードの［設定を変更前の状態に戻す］（JavaScript は［JavaScript を変更前に戻す］）を押してください。前の反映は、画面上部の［反映の記録］から開いて戻せます。戻せる反映が無いときは、ボタンは出ません。', { kind: 'rollback-guide' });
               break;
             }
             // Phase 17: JS の登録 / 復元は UI の操作だけ。ここでは案内する（C-1 第 3 段: 登録も最終案の承認の後だけ）
@@ -21321,11 +21272,6 @@
               //   簡素化（2026-10-17）: 承認済みのときに会話のカードから JavaScript だけを登録する経路（js-preview-ready・［登録の確認を開く］）は削除した。
               //   登録は最終案のカードの［動作テスト環境へ反映］1 回の反映の中だけ（承認の後に増えた確認・注意の照合を通る）
               toolkit(v ? 'この最終案は承認済みです。JavaScript の登録の結果は、会話の反映のカードと右の「反映」にあります。' : '登録できる最終案がまだありません。実現したいことを入力すると、仮案から最終案を作ります。', { kind: v ? 'js-preview-approved' : 'js-preview-needs-approval', planId: v ? v.planId : null, version: v ? v.version : null });
-              break;
-            }
-            case INTENT.REQUEST_JS_ROLLBACK: {
-              const jx = state.activeJsExecution;
-              push(MSG.ASSISTANT_TEXT, ROLE.TOOLKIT, 'JavaScript の登録を登録前の状態へ戻せます。', { kind: 'js-rollback-ready', executionId: jx.executionId, planId: jx.planId, version: jx.version });
               break;
             }
             // Phase 18: ドキュメント（Toolkit が作る。AI へは送らない）
@@ -21345,7 +21291,7 @@
               break;
             }
             default: {
-              const v = state.activePlan, ae = state.activeExecution;
+              const v = state.activePlan;
               // 質問の部分は、分類の後の共通の処理で質問の AI に送っている（ここでは送らない。二重に答えない）
               const draftOpen = !!(state.draft && state.draft.status === 'open');
               //   2026-10-15（§3.2）: 「おすすめで」「おまかせ」だけ（進行の語句なし）は、開いている判断に推奨の回答を記録して仮案のカード（右の詳細）を描き直すだけ。
@@ -21360,8 +21306,8 @@
                 : cls.reason === 'DRAFT_SMALLTALK' ? (cls.ack ? '採用するときは「採用します」、変えたい点があればそのまま書いてください（質問もできます）。' : 'はい。仮案への返事（採用・変えたい点・質問）は、いつでもどうぞ。')
                 : cls.reason === 'NO_PLAN' && draftOpen ? '反映できる変更案はまだありません。いまは仮案への返事（採用・変えたい点・質問）を受け付けています。採用すると最終案を作ります。'
                 : cls.reason === 'ADOPT_NO_RECOMMENDATION' ? `残っている確認事項は業務の判断で、推奨がありません：「${(cls.openTexts || []).join('」「')}」。答えを書いてください（確認事項のカードの回答欄からも送れます）。kintone にはまだ何も反映していません。`
-                : cls.reason === 'NO_GENERATED_CODE' ? '登録できる JavaScript はまだありません。JavaScript は最終案の中で作ります（最終案の承認の後に登録します）。' : cls.reason === 'NO_EXECUTION' ? '元に戻せる反映はありません（動作テスト環境への反映はまだ行っていません）。' : cls.reason === 'NO_CUSTOMIZATION' ? `現在の${planLabel(v)}に JavaScript カスタマイズはありません（標準設定だけで実現できます）。` : cls.reason === 'NO_PLAN' ? '反映できる変更案がまだありません。実現したいことを入力すると変更案を作ります。' : cls.reason === 'GREETING' ? 'このアプリについての質問や、実現したいことを入力してください。' : v ? '今の変更案があります。質問・変更案の修正・「これで進めたい」のいずれかで続けられます。' : 'このアプリについての質問（例: このフィールドは何に使ってる？）や、実現したいこと（例: 100万円以上なら部長承認を追加したい）を入力してください。';
-              assistant(text2, { kind: 'general', reason: cls.reason, ...(ae ? { executionId: ae.executionId } : {}) });
+                : cls.reason === 'NO_GENERATED_CODE' ? '登録できる JavaScript はまだありません。JavaScript は最終案の中で作ります（最終案の承認の後に登録します）。' : cls.reason === 'NO_CUSTOMIZATION' ? `現在の${planLabel(v)}に JavaScript カスタマイズはありません（標準設定だけで実現できます）。` : cls.reason === 'NO_PLAN' ? '反映できる変更案がまだありません。実現したいことを入力すると変更案を作ります。' : cls.reason === 'GREETING' ? 'このアプリについての質問や、実現したいことを入力してください。' : v ? '今の変更案があります。質問・変更案の修正・「これで進めたい」のいずれかで続けられます。' : 'このアプリについての質問（例: このフィールドは何に使ってる？）や、実現したいこと（例: 100万円以上なら部長承認を追加したい）を入力してください。';
+              assistant(text2, { kind: 'general', reason: cls.reason });
             }
           }
         } catch (e) {
@@ -21445,31 +21391,11 @@
         canQueue,
         registerPlan: (p) => { const v = registerPlan(p); if (v) announcePlan(v); return v; },   // 仮案から作った（受け継いだ）版でなければ登録しない（null）
         activePlan: () => state.activePlan, planHistory: () => state.planHistory,
-        noteExecution, markStale,
+        noteApplied, noteRolledBack, markStale,
         // 段階 C: 最終案の承認・承認の有効性・進みのカードの描き直し・反映後の基準の更新
         approveFinal, approvalValid: (v = state.activePlan, o = {}) => approvalValid(v, o), finalReadiness: (v = state.activePlan) => (v ? finalReadinessNow(v) : null), advanceApprovalBase, revokeApproval, tickProgress, progress: () => progressOf(),
-        /**
-         * 反映の記録から開いた、ほかの会話（または前の版）の反映 / 登録を戻したとき、会話側の写し（「戻して」の判定に使う）も戻し済みにする。
-         * メッセージは足さない（新しい会話に前の会話の反映のカードを出さない）
-         */
-        markExecutionRolledBack: (executionId, { js = false } = {}) => { const ae = js ? state.activeJsExecution : state.activeExecution; if (ae && executionId && ae.executionId === executionId) { ae.rolledBack = true; emit(); } },
-        /**
-         * 反映 / 登録の途中で新しい会話にした後、その反映が書き込んで終わったとき、「戻して」の判定に使う写しだけを置く（メッセージは足さない）。
-         * 新しい会話は、書き込んだ前の反映を写しとして残す（resetConversation と同じ）。途中だった反映は、そのとき書き込み前で写しが消えていた。
-         * 会話にまだ戻していない別の反映の写しがあれば置き換えない
-         */
-        rememberExecution: (executionId, { js = false, status = null } = {}) => {
-          if (!executionId) return false;
-          const key = js ? 'activeJsExecution' : 'activeExecution';
-          const ae = state[key];
-          if (ae && ae.executionId === executionId) { if (!ae.written) { ae.written = true; ae.stage = 'done'; ae.status = ae.status || status; emit(); } return true; }
-          if (ae && ae.written && !ae.rolledBack) return false;
-          state[key] = { executionId, planId: null, version: null, stage: 'done', written: true, rolledBack: false, status, rollbackMessage: null };
-          emit();
-          return true;
-        },
         // Phase 17
-        startConsultation, noteJsExecution, specSummary, subject: () => state.subject, activeJsExecution: () => state.activeJsExecution,
+        startConsultation, specSummary, subject: () => state.subject,
         notice: (text, data) => push(MSG.SYSTEM_NOTICE, ROLE.SYSTEM, text, data),
         pushMessage: push,
         // 会話の応答性（2026-10-05）: 確認事項・決定事項の台帳（読み取り用の写し）と計測
@@ -21754,7 +21680,7 @@
   const KTAiChatUi = (() => {
     const esc = (v) => escapeHtml(v);
     const { MSG, INTENT, PLAN_STATUS } = KTAiConversation;
-    const INTENT_JA_P17 = { REQUEST_JS_PREVIEW: 'JavaScript を動作テスト環境へ登録', REQUEST_JS_ROLLBACK: 'JavaScript の登録を元に戻す', DOCUMENT: 'ドキュメントを作る' };
+    const INTENT_JA_P17 = { REQUEST_JS_PREVIEW: 'JavaScript を動作テスト環境へ登録', DOCUMENT: 'ドキュメントを作る' };
     const INTENT_JA = { ...INTENT_JA_P17, ASK: '質問する', PLAN: '新しい変更案を作る', REVISE_PLAN: '今の変更案を直す', EXPLAIN_PLAN: '変更案の説明を聞く', EXPLAIN_REVIEW: '確認結果の説明を聞く', REQUEST_PREVIEW: '動作テスト環境への反映へ進む', REQUEST_ROLLBACK: '変更前の状態に戻す', GENERAL: 'その他', ANSWER: '確認事項への回答として送る' };
     const STATUS_JA = { ACTIVE: '最新', SUPERSEDED: '旧版（SUPERSEDED）', STALE: '要再作成（STALE）', EXECUTED: '動作テスト環境へ反映済み', ROLLED_BACK: '元に戻し済み' };
     const btn = (act, label, attrs = '', style = '') => `<button type="button" class="btn kt-ai-act" data-act="${esc(act)}" ${attrs} style="height:26px; font-size:11px; ${style}">${esc(label)}</button>`;
@@ -22268,10 +22194,6 @@
         ${openQs.length ? `<div class="kt-ai-sum-label kt-ai-sum-warn">確認したいこと（${openQs.length} 件）</div><div class="kt-ai-sum-warn">${list(openQs.slice(0, 5).map(q => q.text))}${openQs.length > 5 ? `<div>ほか ${openQs.length - 5} 件</div>` : ''}<div style="font-size:11px;">左の会話で答えると、変更案に入れます。</div></div>` : ''}
       </div>`;
     }
-    /** 元に戻す準備（§16）: 既存の Rollback 確認へ。即 Rollback はしない */
-    function rollbackReadyHtml(m) {
-      return card('kt-ai-rollback-ready', `<div><b>${esc(m.text)}</b></div><div style="font-size:11px; opacity:.8; margin-top:2px;">反映する前の設定に戻します。反映の後にほかの変更があれば止まります。</div><div style="margin-top:6px; display:flex; gap:6px;">${btn('rollback', '変更前の状態に戻す', `data-execution="${esc(m.data?.executionId || '')}"`, 'border-color:#6a1b9a; font-weight:600;')}</div><div style="font-size:10px; opacity:.6; margin-top:4px;">押すと現在の動作テスト環境を確認（書き込みなし）し、確認画面で「変更前の状態に戻す」を押したときだけ戻します。</div>`, '#6a1b9a');
-    }
     /** Phase 20（実機）: 反映・登録して戻していない間の注意（会話と「変更前の状態に戻す」はこのページの中だけ） */
     const LEAVE_NOTE = '<div style="font-size:11px; opacity:.8; margin-top:2px;">このページを離れる・再読み込みすると、この会話と「変更前の状態に戻す」は使えなくなります（動作テスト画面は別のタブで開いてください）。その後に取り消すときは、kintone のアプリの設定の［変更を中止］を使います（ほかの未反映の変更もまとめて取り消されます）。</div>';
     /**
@@ -22283,15 +22205,6 @@
       const howTo = ap && ap.final && ap.final.verification && Array.isArray(ap.final.verification.howTo) ? ap.final.verification.howTo.filter(Boolean) : [];
       const rows = howTo.length ? howTo : ['動作テスト環境で、変更したアプリのレコードを開いて（条件に合うものと合わないもの）、変更した動きを確かめる'];
       return `<div class="kt-ai-real-check" style="margin-top:4px; font-size:12px;"><b>実機（動作テスト環境）での動作はまだ確かめていません。</b>反映後の確認は書き込んだ設定を読み直した結果で、動作の確認ではありません。確かめ方:<ul style="margin:2px 0 0; padding-left:1.2em;">${rows.slice(0, 4).map(x => `<li>${esc(x)}</li>`).join('')}</ul></div>`;
-    }
-    /** 実行カード（§8）: 件数と運用環境への注意だけ。進捗 / Before・After / 監査は右の「反映」 */
-    function executionCardHtml(m, execState, view = {}) {
-      const ex = VM.executionSummary(execState);
-      if (!ex || ex.running || !execState?.execution) return card('kt-ai-execution-card', `<div><b>動作テスト環境へ反映しています。</b></div><div style="font-size:11px; opacity:.7; margin-top:4px;">運用環境には反映されません。進捗は右の「反映」で確認できます。</div>`, '#1a73e8');
-      return card('kt-ai-execution-card', `<div><b>${ex.ok ? '動作テスト環境へ反映しました。' : `${ex.verified} 件反映済み・${ex.failed + ex.warn} 件失敗（以降は未実行）`}</b></div>
-        <div style="margin-top:4px; font-size:12px;">反映後の確認：✓ ${ex.verified} 件一致${ex.warn ? `　⚠ ${ex.warn} 件は一致しません` : ''}${ex.failed ? `　× ${ex.failed} 件は失敗` : ''}</div>
-        ${ex.verified ? realCheckHtml(view) : ''}<div style="margin-top:4px; font-size:12px;"><b>運用環境には反映されていません。</b></div>${ex.written && !ex.rollbackStatus && ex.done ? LEAVE_NOTE : ''}
-        <div style="margin-top:6px; display:flex; gap:6px; flex-wrap:wrap;">${btn('exec-details', '実行結果を見る', `data-execution="${esc(ex.executionId || '')}"`, 'font-weight:600;')}${ex.written && !ex.rollbackStatus && ex.done ? btn('rollback', '変更前の状態に戻す', `data-execution="${esc(ex.executionId || '')}"`, 'border-color:#6a1b9a;') : ''}</div>`, ex.ok ? '#2e7d32' : '#b00020');
     }
     /**
      * §0e.1（2026-10-09）: ［動作テスト環境へ反映］1 回の結果のカード（標準設定と JavaScript を 1 枚にまとめる）。一部だけ反映したとき（設定は反映・JavaScript は未登録など）は
@@ -22349,23 +22262,9 @@
       const sub = m.data?.subject || {};
       return card('kt-ai-consultation-card', `<div><b>${esc(sub.name || '')} について相談します。</b> <span style="font-size:11px; opacity:.7;">${sub.platform === 'mobile' ? 'モバイル' : 'PC'}用 JavaScript${sub.customizationType === 'URL' ? '（URL 指定）' : ''}</span></div><div style="margin-top:6px; font-size:13px;"><b>何を変更したいですか？</b></div><div style="font-size:11px; opacity:.7; margin-top:2px;">例: 「承認済みになったら金額を編集できなくしたい」「モバイルでも同じようにしたい」。質問（「このファイルは何をしている？」）もできます。</div><div style="margin-top:6px; display:flex; gap:6px;">${btn('open-plan', '現在の情報を見る', '')}</div>`, '#6a1b9a');
     }
-    function jsRollbackReadyHtml(m) {
-      return card('kt-ai-js-rollback-ready', `<div><b>${esc(m.text)}</b></div><div style="font-size:11px; opacity:.8; margin-top:2px;">登録する前のカスタマイズ設定に戻します。登録の後にほかの変更があれば止まります。</div><div style="margin-top:6px; display:flex; gap:6px;">${btn('js-rollback', '変更前の状態に戻す', `data-execution="${esc(m.data?.executionId || '')}"`, 'border-color:#6a1b9a; font-weight:600;')}</div><div style="font-size:10px; opacity:.6; margin-top:4px;">押すと現在の設定を確認（書き込みなし）し、確認画面で「変更前の状態に戻す」を押したときだけ戻します。</div>`, '#6a1b9a');
-    }
     const JS_ST_MARK = { VERIFIED: '✓', APPLIED: '…', UPLOADED: '…', RUNNING: '…', PENDING: '・', VERIFY_FAILED: '⚠', FAILED: '×', BLOCKED: '×', SKIPPED: '－' };
     /** §0e.3（2026-10-09）: JavaScript の登録の手順の状態の画面の言葉（状態の名前は詳細表示だけに出す） */
     const JS_STATUS_JA = { VERIFIED: '登録済み（確認で一致）', VERIFY_FAILED: '登録済み（確認で一致しない）', FAILED: '失敗', BLOCKED: '登録できません', SKIPPED: '未実行', PENDING: '待機中', RUNNING: '登録中', UPLOADED: '登録中', APPLIED: '登録済み（確認中）' };
-    /** JS 登録カード（§8 / §31）: 結果の要約だけ。確認画面・検証の詳細・監査は右の「反映」 */
-    function jsExecutionCardHtml(m, jx, view = {}) {
-      const s = VM.jsExecutionSummary(jx);
-      if (!s || s.running || !jx?.execution) return card('kt-ai-js-execution-card', `<div><b>JavaScript を動作テスト環境へ登録しています。</b></div><div style="font-size:11px; opacity:.7; margin-top:4px;">運用環境には反映されません。進捗は右の「反映」で確認できます。</div>`, '#6a1b9a');
-      const files = s.steps.map(st => `${st.kind === 'REPLACE_FILE' ? '✎' : '＋'} ${esc(st.name)}（${st.target === 'mobile' ? 'モバイル' : 'PC'}）`).join('、');
-      if (!s.put) return card('kt-ai-js-execution-card', `<div><b>JavaScript を登録できませんでした。</b></div><div style="font-size:12px; margin-top:4px;">${files}</div><div style="margin-top:4px; font-size:12px;"><b>${s.previewUnchanged === true ? '動作テスト環境の設定は変更されていません。' : s.previewUnchanged === false ? '動作テスト環境の設定が変わっている可能性があります。Customize タブで確認してください。' : '動作テスト環境の設定を確認できませんでした。'}</b></div><div style="margin-top:6px;">${btn('open-js-result', '詳細を見る', '')}</div>`, '#b00020');
-      return card('kt-ai-js-execution-card', `<div><b>${s.ok ? 'JavaScript を動作テスト環境へ登録しました。' : 'JavaScript を登録しましたが、検証で一致しない点があります。'}</b></div>
-        <div style="margin-top:4px; font-size:12px;">${files}　反映後の確認：✓ ${s.verified} / ${s.steps.length} 件一致</div>
-        ${s.verified ? realCheckHtml(view) : ''}<div style="margin-top:4px; font-size:12px;"><b>運用環境には反映されていません。</b></div>${!s.rollbackStatus && s.done ? LEAVE_NOTE : ''}
-        <div style="margin-top:6px; display:flex; gap:6px; flex-wrap:wrap;">${btn('open-js-result', '登録結果を見る', '', 'font-weight:600;')}${s.firstStep ? btn('open-customize', 'Customize で確認', `data-target="${esc(s.firstStep.target)}" data-name="${esc(s.firstStep.name)}"`) : ''}${!s.rollbackStatus && s.done ? btn('js-rollback', '変更前の状態に戻す', `data-execution="${esc(s.executionId || '')}"`, 'border-color:#6a1b9a;') : ''}</div>`, s.ok ? '#2e7d32' : '#b26a00');
-    }
     function jsRollbackCardHtml(m, jx) {
       const s = VM.jsExecutionSummary(jx);
       const stage = jx?.stage || '';
@@ -22522,18 +22421,16 @@
     const WHO = { user: 'あなた', assistant: 'AI', toolkit: '', system: '' };
     /**
      * 通常の会話に出さない内部処理の通知（2026-10-06 利用者の指示）。回答・おすすめ・何が変わるか・必要な確認・作業結果・失敗は出す。
-     *   connected: 接続の処理の通知 / preview-changed・js-preview-changed・rolled-back・js-rolled-back: 反映・元に戻すのカードと同じ内容
+     *   connected: 接続の処理の通知（2026-10-21: 反映・元に戻すの知らせ（preview-changed・js-preview-changed・rolled-back・js-rolled-back）は作らなくなった）
      *   （C-1 第 3 段・2026-10-08: 変更案の要約・確認・仕様・コードの案内（plan-summary・review-summary・spec-intro・code-intro・reasked）は作らなくなった）
      */
-    const HIDDEN_KINDS = new Set(['connected', 'preview-changed', 'js-preview-changed', 'rolled-back', 'js-rolled-back']);
+    const HIDDEN_KINDS = new Set(['connected']);
     // 回答・依頼の受け付けは出さない。まだ変更案に入っていない（失敗・取り消し・上限・置き換え）ときだけ、そのことを出す
     const ACK_FAILED = { failed: '作り直しに失敗しました', cancelled: '作り直しを取り消しました', pending: '続けて入れられる数を超えました', superseded: '作り直しの間に変更案が置き換わりました', stopped: '処理を途中で止めました' };
     function isHiddenMessage(m) {
       if (!m) return true;
       const kind = m.data?.kind;
       if (HIDDEN_KINDS.has(kind)) return true;
-      //   §0e.1（2026-10-09）: ［動作テスト環境へ反映］1 回の反映の中の標準設定・JavaScript の実行のカードは、結果のカード（final-apply）に 1 枚にまとめる
-      if ((m.type === MSG.EXECUTION || m.type === MSG.JS_EXECUTION) && m.data?.finalRun) return true;
       if (kind === 'answers-ack') return !ACK_FAILED[m.data?.stage] && !isAnsweredAck(m);
       return false;
     }
@@ -23088,21 +22985,17 @@
         // C-1 第 3 段（2026-10-08）: 変更案のカード（MSG.PLAN）は削除した（最終案のカードに統合）。簡素化（2026-10-17）: 本体は MSG.PLAN・MSG.REVIEW を作らないので、描画・隠す判定も削除した
         case MSG.DRAFT: return wrap(draftCardHtml(m, view));   // 段階 B: 仮案のカード
         case MSG.ANSWER: return wrap(answerCardHtml(m));
-        case MSG.JS_EXECUTION: return wrap(jsExecutionCardHtml(m, view.jsExecState, view));
         case MSG.JS_ROLLBACK: return wrap(jsRollbackCardHtml(m, view.jsExecState));
         case MSG.DOCUMENT: return wrap(documentCardHtml(m));
-        case MSG.EXECUTION: return wrap(executionCardHtml(m, view.execState, view));
         case MSG.ROLLBACK: return wrap(rollbackCardHtml(m, view.execState));
         case MSG.ERROR: return wrap(errorCardHtml(m));
         case MSG.SYSTEM_NOTICE: return wrap(bubble(m.text));
         default: {
           const kind = m.data?.kind;
           if (kind === 'final-apply') return wrap(finalApplyCardHtml(m, view));   // §0e.1: 承認と反映を 1 回にした結果のカード
-          if (kind === 'rollback-ready') return wrap(rollbackReadyHtml(m));
           if (kind === 'choices') return wrap(choicesHtml(m));
           if (kind === 'consultation-start') return wrap(consultationStartHtml(m));
           if (kind === 'consult-choices') return wrap(consultChoicesHtml(m));
-          if (kind === 'js-rollback-ready') return wrap(jsRollbackReadyHtml(m));
           if (kind === 'candidates') return wrap(candidatesHtml(m));
           if (kind === 'answers-ack') return wrap(ACK_FAILED[m.data?.stage] ? ackFailedHtml(m) : ackAnsweredHtml(m));
           return wrap(bubble(m.text));
@@ -23255,9 +23148,9 @@
     return { progressInnerHtml, progressCardHtml, finalCardHtml, verificationDetailHtml, verificationLineOf, impactRowsOf,   // 段階 C（検証の明細は右の「変更内容」。2026-10-14）
       condSentenceOf, existingChangeTextOf,   // 2026-10-15（最終案の重複と担当未定の食い違い §2）: 条件式の文（テストから確かめる）
       constraintLineOf,   // 2026-10-16（説明文を読みやすくする）: 「この案の制約」の 1 行（テストから確かめる）
-      INTENT_JA, STATUS_JA, STRATEGY_JA, CHECK_JA, busyHintText, themedMermaid, workspaceHtml, headerHtml, baseHtml, baseDiffHtml, applyLogHtml, freePanelHtml, chatHtml, messageHtml, codePaneHtml, rollbackReadyHtml, executionCardHtml, rollbackCardHtml, answerCardHtml, errorCardHtml, patternsHtml,
+      INTENT_JA, STATUS_JA, STRATEGY_JA, CHECK_JA, busyHintText, themedMermaid, workspaceHtml, headerHtml, baseHtml, baseDiffHtml, applyLogHtml, freePanelHtml, chatHtml, messageHtml, codePaneHtml, rollbackCardHtml, answerCardHtml, errorCardHtml, patternsHtml,
       // Phase 17
-      consultationStartHtml, jsRollbackReadyHtml, jsExecutionCardHtml, jsRollbackCardHtml, consultChoicesHtml, jsRegisterPaneHtml, customizeScopeJa,
+      consultationStartHtml, jsRollbackCardHtml, consultChoicesHtml, jsRegisterPaneHtml, customizeScopeJa,
       // Phase 19: 会話は要約、右 Workspace が正本
       wsStateHtml, subjectInfoHtml, drawerTabsHtml, changeSummaryHtml, isHiddenMessage, finalApplyCardHtml, streamingInnerHtml, draftCardHtml, draftSummaryHtml, COMPOSER_PLACEHOLDER, PLAN_EMPTY_TEXT, PLAN_CHECKING_TEXT, CODE_EMPTY_TEXT, EXEC_EMPTY_TEXT };
   })();
@@ -24379,6 +24272,33 @@
     let applyLogSeq = 0, execLogRef = null, jsLogRef = null, execOpenedFromLog = false, jsOpenedFromLog = false, shownLogCount = 0;   // OpenedFromLog = 利用者が記録の［詳細］から開いた
     const logById = (id) => applyLog.find(e => e.id === id) || null;
     const execIdOf = (st) => st?.execution?.executionId || st?.prepared?.executionId || null;
+    /**
+     * 2026-10-21: 反映・登録を書き終えたこと・元に戻すことは、書き終えたとき・戻し始めたとき・戻し終えたときに会話へ知らせる（会話は反映・登録の状態を写さない。
+     *   以前は描くたびに写しを作り、そこから会話のカードと計画の状態を決め、「戻して」の発言にも使っていた）。
+     *   今の会話で始めた反映・登録は、会話に元に戻すのカードを 1 枚出す（反映の記録の［詳細］から開いても同じ）。前の会話のものは、戻した後に知らせだけを出す
+     */
+    const ownRun = (js) => { const ref = js ? jsLogRef : execLogRef; return !!conv && (!ref || ref.epoch === conv.state.epoch); };
+    /** 書き終えた直後（取り直し・読み直しの前）に、その反映・登録を始めた計画の版へ知らせる（取り直しの後だと、その間の発言が反映済みの版の見直しになる） */
+    function noteWritten(js) {
+      const st = js ? jsExec : execState, ref = js ? jsLogRef : execLogRef, sum = js ? VM.jsExecutionSummary(st) : VM.executionSummary(st);
+      if (!ownRun(js) || !ref || !sum || !sum.written) return;
+      conv.noteApplied(conv.planHistory().find(x => x.planId === ref.planId && x.version === ref.version) || null, js ? { jsExecutionId: sum.executionId } : { executionId: sum.executionId });
+    }
+    function noteRollbackStart(js) {
+      const exId = execIdOf(js ? jsExec : execState), type = js ? KTAiConversation.MSG.JS_ROLLBACK : KTAiConversation.MSG.ROLLBACK, ref = js ? jsLogRef : execLogRef;
+      if (!exId || !ownRun(js) || conv.state.messages.some(x => x.type === type && x.data && x.data.executionId === exId)) return;
+      conv.pushMessage(type, KTAiConversation.ROLE.TOOLKIT, js ? 'JavaScript の登録を元に戻します。' : '動作テスト環境の変更を元に戻します。', { executionId: exId, planId: ref ? ref.planId : null, version: ref ? ref.version : null });
+    }
+    function noteRollbackDone(js) {
+      if (!conv) return;
+      const st = js ? jsExec : execState, ref = js ? jsLogRef : execLogRef, exId = execIdOf(st);
+      const rb = st.rollback || (st.execution && st.execution.rollback) || null;
+      //   標準設定は、一部の手順を戻せたときもその版を「元に戻し済み」にする（前の写しと同じ）
+      if (rb && (rb.status === 'ROLLED_BACK_VERIFIED' || (!js && (rb.steps || []).some(s => s.status === 'ROLLBACK_VERIFIED')))) conv.noteRolledBack(exId, { js });
+      if (ownRun(js) || !ref || !rb || rb.status !== 'ROLLED_BACK_VERIFIED') return;
+      const where = `${ref.epoch !== conv.state.epoch ? '前の会話・' : ''}依頼: ${ref.goal || '不明'}`;
+      conv.notice(js ? `反映の記録から開いた JavaScript の登録（${where}）を、登録前の状態に戻しました。運用環境には影響していません。` : `反映の記録から開いた反映（${where}）を、変更前の状態に戻しました。運用環境には影響していません。`, { kind: js ? 'apply-log-js-rolled-back' : 'apply-log-rolled-back', executionId: exId });
+    }
     const logByExecution = (kind, executionId) => (executionId ? applyLog.find(e => e.kind === kind && (e.executionId === executionId || execIdOf(e.state) === executionId)) || null : null);
     const EXEC_BUSY = ['preparing', 'running', 'rollback-preparing', 'rolling-back'];
     /** 右上の反映 / 登録の今の状態を記録へ写す（記録は同じオブジェクトを指すので、戻した結果もそのまま残る） */
@@ -24410,8 +24330,6 @@
         syncApplyLog();
         const st = entry.state;
         const done = st.stage === 'rolled-back' ? 'rolled-back' : (st.execution ? 'done' : 'idle');
-        // すでに戻した登録を開いただけで、「戻しました」の通知を出さない（開いた後に戻したときだけ出す）
-        if (done === 'rolled-back' || VM.jsExecutionSummary(st)?.rolledBack) entry.rolledBackNoticed = true;
         jsExec.stage = done; jsExec.prepared = st.prepared; jsExec.execution = st.execution; jsExec.rollback = done === 'rolled-back' ? st.rollback : null; jsExec.error = null;
         jsExec.planId = entry.planId; jsExec.version = entry.version; jsExec.paneClosed = false; jsLogRef = entry; jsOpenedFromLog = true;
         renderJsReg(); showPane('exec', { scrollTo: '#kt-ai-jsreg' });
@@ -24424,7 +24342,6 @@
       syncApplyLog();
       const st = entry.state;
       const done = st.stage === 'rolled-back' ? 'rolled-back' : (st.execution ? 'done' : 'idle');
-      if (done === 'rolled-back' || VM.executionSummary(st)?.rolledBack) entry.rolledBackNoticed = true;
       execState.stage = done; execState.prepared = st.prepared; execState.execution = st.execution; execState.rollbackPlan = st.rollbackPlan; execState.rollback = done === 'rolled-back' ? st.rollback : null; execState.error = null; execState.planRef = null;
       execLogRef = entry; execOpenedFromLog = true;
       renderExec(); showPane('exec', { scrollTo: '#kt-ai-exec' });
@@ -24456,18 +24373,7 @@
       const note = foreign ? `<div class="kt-ai-log-focus" style="font-size:11px; color:#6a1b9a; margin:4px 0;">${jsOpenedFromLog ? `反映の記録から開いた JavaScript の登録です（${jsLogRef.epoch !== conv.state.epoch ? '前の会話・' : ''}依頼: ${escapeHtml(jsLogRef.goal || '不明')}）。` : `${jsLogRef.epoch !== conv.state.epoch ? '前の会話' : '前の計画'}（依頼: ${escapeHtml(jsLogRef.goal || '不明')}）の JavaScript の登録です。`}</div>` : '';
       if (el) el.innerHTML = jsExec.paneClosed ? '' : note + KTAiChatUi.jsRegisterPaneHtml(jsExec, vReg || (foreign ? jsLogRef.v || null : null), { finalRunning: !foreign && !!jsExec.finalRunId && !!finalRun && finalRun.id === jsExec.finalRunId && finalRun.stage === 'running' });
       if ($execEmpty) $execEmpty.style.display = (jsExec.stage !== 'idle' && !jsExec.paneClosed) || (execState.stage !== 'idle') || !!lastReview ? 'none' : '';
-      if (conv) {
-        const own = !jsLogRef || (jsLogRef.epoch === conv.state.epoch && (jsExec.stage === 'running' || conv.state.activeJsExecution?.executionId === execIdOf(jsExec)));
-        const sum = own ? null : VM.jsExecutionSummary(jsExec);
-        if (own) conv.noteJsExecution(jsExec);
-        else if (sum && sum.done && sum.written && !sum.rolledBack) conv.rememberExecution(execIdOf(jsExec), { js: true, status: sum.status });
-        else if (sum?.rolledBack && !jsLogRef.rolledBackNoticed) {
-          jsLogRef.rolledBackNoticed = true;
-          conv.markExecutionRolledBack(execIdOf(jsExec), { js: true });
-          conv.notice(`反映の記録から開いた JavaScript の登録（${jsLogRef.epoch !== conv.state.epoch ? '前の会話・' : ''}依頼: ${jsLogRef.goal || '不明'}）を、登録前の状態に戻しました。運用環境には影響していません。`, { kind: 'apply-log-js-rolled-back', executionId: execIdOf(jsExec) });
-        }
-        renderChat();
-      }
+      if (conv) renderChat();
       renderApplyLog();
       renderApplyArea();
       renderWsState();
@@ -24478,7 +24384,7 @@
       const r = conv.startConsultation(seed);
       if (r.needsConfirm) {
         pendingSeed = seed;
-        conv.pushMessage(KTAiConversation.MSG.ASSISTANT_TEXT, KTAiConversation.ROLE.TOOLKIT, r.current ? `現在は「${r.current.name}」の相談中です。${seed.name} について新しい会話を始めますか？` : `現在の会話を続けますか、${seed.name} について新しい会話を始めますか？`, { kind: 'consult-choices', current: r.current, next: { sourceId: seed.sourceId, name: seed.name }, hasPlan: r.hasPlan, pendingExecution: r.pendingExecution });
+        conv.pushMessage(KTAiConversation.MSG.ASSISTANT_TEXT, KTAiConversation.ROLE.TOOLKIT, r.current ? `現在は「${r.current.name}」の相談中です。${seed.name} について新しい会話を始めますか？` : `現在の会話を続けますか、${seed.name} について新しい会話を始めますか？`, { kind: 'consult-choices', current: r.current, next: { sourceId: seed.sourceId, name: seed.name }, hasPlan: r.hasPlan, pendingExecution: unrevertedPreviewChange() });
       }
       // Phase 21: Customize タブが動作テスト環境の設定を取れず運用環境の内容を表示していたときは、そのことを会話に出す（計画・生成の前に動作テスト環境を取り直し、取れなければ止める）
       if (r.ok && !r.resumed && seed.customizeSource && seed.customizeSource !== 'preview') conv.notice(`「${seed.name}」は運用環境の内容を表示しています（動作テスト環境のカスタマイズ設定を取得できませんでした）。計画・コード生成の前に動作テスト環境を取り直し、取れなければ止めます（運用環境の本文では生成しません）。`, { kind: 'consult-production-source' });
@@ -24637,7 +24543,7 @@
         jsExec.execution = jsExec.execution || { executionId: jsExec.prepared.executionId, status: 'FAILED', steps: jsExec.prepared.changes, put: null, error: { code: e?.code || 'EXECUTE_FAILED', message: jsExec.error }, previewUnchanged: null };
       }
       jsExec.stage = 'done';
-      const v = planIndex().get(`${jsExec.planId}:${jsExec.version}`); if (v && jsExec.execution?.put?.ok) v.jsExecutionId = jsExec.execution.executionId;
+      noteWritten(true);   // 2026-10-21: 登録を終えた直後に計画の版へ知らせる（読み直しの前。前はここで登録の印だけを版に書き、反映済みは会話の写しが決めていた）
       renderJsReg();
       if (jsExec.execution?.put?.ok && typeof d.rescanJs === 'function') { try { await d.rescanJs(); fillTargets(); renderHeader(); } catch (e) { } }
       if (jsExec.execution?.put?.ok) notifySettingsChanged('js-register');   // 設定取得の関所: Customize の一覧など、ほかの場所の取得済みを古いとする
@@ -24646,7 +24552,7 @@
     }
     async function startJsRollback() {
       if (!executor || !jsExec.execution || !['done', 'rollback-blocked'].includes(jsExec.stage)) return null;
-      jsExec.stage = 'rollback-preparing'; jsExec.rollback = null; jsExec.paneClosed = false; renderJsReg();
+      jsExec.stage = 'rollback-preparing'; jsExec.rollback = null; jsExec.paneClosed = false; noteRollbackStart(true); renderJsReg();
       try { const rb = await KTJsExecutor.prepareRollback(jsExec.execution, { api: executor.api }); jsExec.rollback = rb; jsExec.stage = rb.status === 'PREPARED' ? 'rollback-confirm' : 'rollback-blocked'; }
       catch (e) { jsExec.stage = 'rollback-blocked'; jsExec.rollback = { status: 'BLOCKED', blockers: [{ code: 'PREPARE_FAILED', message: e?.message || String(e) }], restores: [] }; }
       renderJsReg();
@@ -24658,7 +24564,7 @@
       jsExec.stage = 'rolling-back'; renderJsReg();
       try { await KTJsExecutor.executeRollback(jsExec.rollback, { api: executor.api, execution: jsExec.execution, onProgress: () => renderJsReg() }); }
       catch (e) { jsExec.error = e?.message || String(e); }
-      jsExec.stage = 'rolled-back'; renderJsReg();
+      jsExec.stage = 'rolled-back'; renderJsReg(); noteRollbackDone(true);
       if (typeof d.rescanJs === 'function') { try { await d.rescanJs(); fillTargets(); renderHeader(); } catch (e) { } }
       notifySettingsChanged('js-rollback');
       refreshDevBase({ reason: 'after-js-rollback' });   // Phase 21
@@ -25318,21 +25224,7 @@
       // 右の「反映」を出してから図を描く（隠れている間に描くと、プロセス図の大きさが 0 になる）
       if (el) { el.innerHTML = rv ? note + KTContextUi.executorHtml({ ...execState, classified: foreign ? (focused.classified || []) : execClassified(), available: !!executor, review: rv, hold: foreign ? null : applyHold(), hasJs, finalFlow: !foreign && finalFlow(), finalRunning: !foreign && !!execState.finalRunId && !!finalRun && finalRun.id === execState.finalRunId && finalRun.stage === 'running' }) : ''; renderApplyArea(); renderMermaid(el); }
       if ($execEmpty) $execEmpty.style.display = rv || execState.stage !== 'idle' || jsExec.stage !== 'idle' ? 'none' : '';
-      if (conv) {
-        // 会話には、この会話で始めた反映だけを写す（前の会話の反映を開いても、新しい会話に「反映しています」のカードを出さない）。
-        //   前の会話の反映を戻したときは、「戻して」の判定に使う写しだけを戻し済みにする
-        const own = !focused || (focused.epoch === conv.state.epoch && (execState.stage === 'running' || conv.state.activeExecution?.executionId === execIdOf(execState)));
-        const sum = own ? null : VM.executionSummary(execState);
-        if (own) conv.noteExecution(execState);
-        // 反映の途中で新しい会話にした反映が書き込んで終わった: 「戻して」の判定に使う写しだけを置く（以前は「反映はまだ行っていません」と答えた）
-        else if (sum && sum.done && sum.written && !sum.rolledBack) conv.rememberExecution(execIdOf(execState), { status: sum.status });
-        else if (sum?.rolledBack && !focused.rolledBackNoticed) {
-          focused.rolledBackNoticed = true;
-          conv.markExecutionRolledBack(execIdOf(execState));
-          conv.notice(`反映の記録から開いた反映（${focused.epoch !== conv.state.epoch ? '前の会話・' : ''}依頼: ${focused.goal || '不明'}）を、変更前の状態に戻しました。運用環境には影響していません。`, { kind: 'apply-log-rolled-back', executionId: execIdOf(execState) });
-        }
-        renderChat();
-      }
+      if (conv) renderChat();
       renderApplyLog();
       renderApplyArea();
       renderWsState();
@@ -25389,6 +25281,7 @@
         execState.rollbackPlan = KTPlanExecutor.buildRollbackPlan(execution, execState.prepared);
       } catch (e) { execState.error = e?.message || String(e); execState.execution = execState.execution || { status: 'FAILED', steps: execState.prepared.steps }; }
       execState.stage = 'done'; renderExec();
+      noteWritten(false);   // 2026-10-21: 書き終えた直後に計画の版を「反映済み」にする（取り直しの前）
       // Phase 21: 反映した後の動作テスト環境を次の作業の基準にする（取り直す）
       //   2026-10-21: 書いた後に今の基準を古いとする（世代を進め、書く前・書いている途中に止めた取得の続きを捨てる）。取り直しは、この後に始めた取得の結果だけを使う
       //   （JavaScript の登録の準備は登録の前に取り直さず、この基準を使う）
@@ -25409,7 +25302,7 @@
     // ---- Rollback（Phase 11）: 「変更前の状態に戻す」→ 現在の設定を確認（書き込みなし）→ 確認 → 逆順に戻す。運用環境には触れない ----
     async function startRollback() {
       if (!executor || !execState.execution || !execState.prepared || !['done', 'rollback-blocked'].includes(execState.stage)) return null;
-      execState.stage = 'rollback-preparing'; execState.rollback = null; execState.error = null; renderExec();
+      execState.stage = 'rollback-preparing'; execState.rollback = null; execState.error = null; noteRollbackStart(false); renderExec();
       if (!activeArtifact || activeArtifact.type !== VM.ARTIFACT.ROLLBACK) setArtifact({ type: VM.ARTIFACT.ROLLBACK, id: execState.execution?.executionId ?? null, version: null }, { scrollTo: '#kt-ai-rollback' });
       try {
         const rb = await KTPlanExecutor.prepareRollback(execState.execution, execState.prepared, { api: executor.api });
@@ -25426,7 +25319,7 @@
       try {
         await KTPlanExecutor.executeRollback(execState.rollback, { api: executor.api, execution: execState.execution, onProgress: () => renderExec() });
       } catch (e) { execState.error = e?.message || String(e); }
-      execState.stage = 'rolled-back'; renderExec();
+      execState.stage = 'rolled-back'; renderExec(); noteRollbackDone(false);
       notifySettingsChanged('rollback');
       refreshDevBase({ reason: 'after-rollback' });   // Phase 21
       return execState.rollback;

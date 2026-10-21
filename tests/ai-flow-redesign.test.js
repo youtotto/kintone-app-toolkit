@@ -3133,8 +3133,8 @@ const wsLabel = (m) => stripC(m.$('kt-ai-ws-state').innerHTML).trim();
 await section(async () => {
   const { m, v } = await KIT.mountFinal({ kind: 'mixed' });
   assert(v && v.final && FS.readyOf(v) === true && v.generated.C1.status === 'verified', `H1-0: 前提: 混在の最終案（承認メモの追加・一覧の追加・承認メモを編集不可にする JavaScript）: ${JSON.stringify(v && v.final && FS.reasonOf(v))}`);
-  let preChat = '';
-  const r = await KIT.applyOnScreen(m, { before: () => { preChat = stripC(m.chat()); } });
+  let preChat = '', nH = 0;
+  const r = await KIT.applyOnScreen(m, { before: () => { preChat = stripC(m.chat()); nH = m.msgs().length; } });
   assert(r.pre.status === 'ready' && r.pre.items.settings.length === 2 && r.pre.items.files.join() === '＋ memoLock.js（PC）新規追加（4 番目・末尾）' && r.pre.items.deferred.length === 1 && /フィールド「承認メモ」を前提にしています。設定の反映の後に、その存在を確かめてから登録します/.test(r.pre.items.deferred[0]) && r.button && !r.button.disabled && r.pre.reasons.length === 0, `H1-1: 承認の欄: 書き込みをしない準備を自動で走らせ、反映する設定 2 件・追加する JavaScript・「設定の反映の後に確かめる」依存を出す（依存では止めない）: ${JSON.stringify(r.pre)}`);
   assert(/反映の前の確認（書き込みなし）/.test(preChat) && /反映する設定の手順: 2 件/.test(preChat) && /＋ memoLock\.js（PC）新規追加/.test(preChat) && /設定の反映の後に確かめること/.test(preChat) && /対象: 動作テスト環境/.test(preChat) && !/承認メモフィールドを追加/.test(preChat), 'H1-2: 押す前の最終案のカードの承認の欄に重要事項（設定の件数・追加するファイル・依存・対象の環境）を出す（追加だけの手順の本文は会話に出さない）');
   const w = r.writes;
@@ -3143,7 +3143,7 @@ await section(async () => {
   assert(jsP && jsP.status === 'PREPARED' && !(jsP.blockers || []).length && chg.length === 1 && chg[0].dependsOn.fields.some(f => f.code === 'approval_memo') && !chg[0].deferredDependsOn && (jsP.warnings || []).some(x => x.code === 'CUSTOMIZE_REVISION_ADVANCED') && r.js.execution.status === 'DONE' && r.js.execution.steps[0].status === 'VERIFIED', `H1-4: 実行のときの JavaScript の準備は依存の存在を確かめ（DEPENDENCY_NOT_APPLIED にならない）、設定の書き込みで進んだ revision は内容が同じなので止めない（不具合 B）・登録後の照合も一致: ${JSON.stringify({ blockers: jsP && jsP.blockers, warnings: jsP && jsP.warnings && jsP.warnings.map(x => x.code), st: r.js.execution && r.js.execution.steps.map(s => [s.status, s.reason]) })}`);
   const exSteps = r.exec.execution.steps.map(s => [s.stepId, s.status]);
   assert(JSON.stringify(exSteps) === '[["P1","VERIFIED"],["P2","VERIFIED"],["C1","UNSUPPORTED"]]' && v.approval && !m.msgs().some(x => x.data && ['approval-revoked', 'js-register-skipped'].includes(x.data.kind)), `H1-5: 設定の成否は実行した手順だけで判定する（JavaScript の手順 C1 は数えない。不具合 A）: ${JSON.stringify(exSteps)}`);
-  assert(r.cardCount === 1 && /動作テスト環境へ反映しました。/.test(r.card) && /標準設定: ✓ 2 件を反映（反映後の確認で一致）/.test(r.card) && /JavaScript: ＋ memoLock\.js（PC） を登録（反映後の確認 ✓ 1 \/ 1 件一致）/.test(r.card) && !/kt-ai-execution-card|kt-ai-js-execution-card/.test(m.chat()) && m.msgs().filter(x => x.type === 'EXECUTION' || x.type === 'JS_EXECUTION').length === 2 && wsLabel(m) === '反映済み', `H1-6: 結果は 1 枚のカード（標準設定と JavaScript）・右の見出しは「反映済み」: ${r.card.slice(0, 300)}`);
+  assert(r.cardCount === 1 && /動作テスト環境へ反映しました。/.test(r.card) && /標準設定: ✓ 2 件を反映（反映後の確認で一致）/.test(r.card) && /JavaScript: ＋ memoLock\.js（PC） を登録（反映後の確認 ✓ 1 \/ 1 件一致）/.test(r.card) && JSON.stringify(m.msgs().slice(nH).map(x => x.data?.kind || x.type)) === JSON.stringify(['final-apply']) && wsLabel(m) === '反映済み', `H1-6: 結果は 1 枚のカード（標準設定と JavaScript。2026-10-21: 反映の操作で会話に足すのは結果のカードだけ）・右の見出しは「反映済み」: ${JSON.stringify(m.msgs().slice(nH).map(x => x.data?.kind || x.type))} ${r.card.slice(0, 300)}`);
   assert(!/まだ何も反映していません/.test(finalCardText(m)) && /承認済み。/.test(finalCardText(m)) && /反映の結果は下のカード/.test(finalCardText(m)), 'H1-7: 反映の後、最終案のカードに「まだ何も反映していません」を出さない');
   assert(m.msgs().filter(x => x.type === 'USER').length === KIT.REQUESTS.length, 'H1-8: 同じ最終案で利用者の確認は 1 回（会話で承認を求めない。簡素化 2026-10-17: 右の「反映」の最終確認・登録の確認の画面は削除した）');
   assert(/data-act="js-rollback"/.test(r.cardHtml) && !/data-act="rollback"/.test(r.cardHtml) && /JavaScript を先に戻してから設定を戻します/.test(r.card), 'H1-9: 復元の案内は JavaScript を先に（設定の［戻す］は JavaScript を戻した後に出す）');

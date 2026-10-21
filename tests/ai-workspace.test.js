@@ -142,7 +142,6 @@ console.log('\n--- 1. KTAiConversation.classifyIntent（決定的規則） ---')
   const noPlan = {};
   const v1 = { planId: 'p1', version: 1, status: 'ACTIVE', plan: PLAN_V1.plan, review: { steps: [] } };
   const withPlan = { activePlan: v1, activeReview: { review: v1.review } };
-  const withExec = { ...withPlan, activeExecution: { executionId: 'ex1', written: true, rolledBack: false } };
   const cls = (t, st = noPlan) => KTAiConversation.classifyIntent(t, st).intent;
   // ASK（Planner は起動しない）
   assert(cls('このフィールドは何に使ってる？') === I.ASK && cls('このフィールドは何に使ってる？', withPlan) === I.ASK, 'ASK: 現在の設定の質問（計画があっても ASK）');
@@ -160,9 +159,8 @@ console.log('\n--- 1. KTAiConversation.classifyIntent（決定的規則） ---')
   // REQUEST_PREVIEW（承認にはならない。意図の認識だけ）
   for (const t of ['これで進めたい', '動作テストして', 'Previewに反映して', '全部承認', 'そのまま実行', 'いいから反映して', '実行して']) assert(cls(t, withPlan) === I.REQUEST_PREVIEW, `REQUEST_PREVIEW: 「${t}」`);
   assert(cls('これで進めたい') === I.GENERAL && KTAiConversation.classifyIntent('これで進めたい', noPlan).reason === 'NO_PLAN', '計画が無ければ進めるものがない（GENERAL / NO_PLAN）');
-  // REQUEST_ROLLBACK
-  assert(cls('やっぱり元に戻して', withExec) === I.REQUEST_ROLLBACK && cls('戻して', withExec) === I.REQUEST_ROLLBACK && cls('ロールバックして', withExec) === I.REQUEST_ROLLBACK, 'REQUEST_ROLLBACK: 反映済みの実行がある');
-  assert(cls('元に戻して', withPlan) === I.GENERAL && KTAiConversation.classifyIntent('元に戻して', withPlan).reason === 'NO_EXECUTION', '反映していなければ戻すものがない（GENERAL / NO_EXECUTION）');
+  // REQUEST_ROLLBACK（2026-10-21: 会話は反映の状態を持たないので、反映の有無に関わらず戻し方の案内。戻す操作は結果のカードと反映の記録のボタンだけ）
+  assert(cls('やっぱり元に戻して', withPlan) === I.REQUEST_ROLLBACK && cls('戻して', withPlan) === I.REQUEST_ROLLBACK && cls('ロールバックして', withPlan) === I.REQUEST_ROLLBACK && cls('元に戻して') === I.REQUEST_ROLLBACK, 'REQUEST_ROLLBACK: 戻す言葉は、計画・反映の有無に関わらず戻し方の案内');
   // 曖昧
   assert(cls('これどう？', withPlan) === I.AMBIGUOUS && (KTAiConversation.classifyIntent('これどう？', withPlan).choices || []).includes(I.EXPLAIN_PLAN), 'AMBIGUOUS: 「これどう？」は何を指すか聞く（選択肢に計画の説明）');
   // 2026-10-05 第 3 段で変更: 計画があるときの新しい要望は、聞き返さずに計画の AI に読ませる（要件として追加し、計画の更新・返答を 1 回の応答で返す。
@@ -227,34 +225,28 @@ console.log('\n--- 2. KTAiConversation.create（fake services。履歴は送ら�
   const r7 = await c.send('全部承認');
   assert(r7.intent === 'REQUEST_PREVIEW' && c.activePlan().status === 'ACTIVE' && log.length === n, '「全部承認」は意図の認識だけ（計画の状態も AI 呼び出しも変わらない）');
   const r8 = await c.send('元に戻して');
-  assert(r8.intent === 'GENERAL' && r8.reason === 'NO_EXECUTION' && /元に戻せる反映はありません/.test(c.messages()[c.messages().length - 1].text), '反映していないときの「元に戻して」は案内だけ');
+  assert(r8.intent === 'REQUEST_ROLLBACK' && c.messages()[c.messages().length - 1].data.kind === 'rollback-guide' && /反映の結果のカード/.test(c.messages()[c.messages().length - 1].text) && log.length === n, '「元に戻して」は戻し方の案内だけ（2026-10-21: 会話は反映の状態を持たないので、反映の前も後も同じ案内。AI は呼ばない）');
   const r9 = await c.send('これどう？');
   assert(r9.intent === 'AMBIGUOUS' && c.messages()[c.messages().length - 1].data.kind === 'choices' && c.messages()[c.messages().length - 1].data.choices.length >= 2, 'AMBIGUOUS → 選択肢（計画は変えない）');
   const r10 = await c.send('これどう？', { intentOverride: 'EXPLAIN_PLAN' });
   assert(r10.intent === 'EXPLAIN_PLAN' && r10.reason === 'USER_CHOICE' && log[log.length - 1][0] === 'explain', '選択肢を選ぶと、その intent で送る');
-  // 実行の写し（KTPlanExecutor の状態を渡すだけ）
-  const exec = { stage: 'running', prepared: { executionId: 'ex_1', steps: [{ stepId: 'P2', actionType: 'ADD_VIEW', status: 'PENDING' }] }, execution: { executionId: 'ex_1', status: 'RUNNING', steps: [{ stepId: 'P2', actionType: 'ADD_VIEW', status: 'RUNNING' }] } };
-  c.noteExecution({ stage: 'preparing', prepared: exec.prepared, execution: null });
-  assert(!c.messages().some(m => m.type === 'EXECUTION'), 'prepare / 最終確認の段階では会話に出さない（まだ書いていない）');
-  c.noteExecution(exec);
-  assert(c.messages().filter(m => m.type === 'EXECUTION').length === 1 && c.state.activeExecution.executionId === 'ex_1' && c.state.activeExecution.planId === v2.planId && c.state.activeExecution.version === 2 && v2.executionId === 'ex_1', 'running → EXECUTION メッセージ 1 件（実行は最新版 v2 に結び付く）');
-  c.noteExecution({ ...exec, stage: 'running' });
-  assert(c.messages().filter(m => m.type === 'EXECUTION').length === 1, '同じ executionId では増えない');
-  c.noteExecution({ ...exec, stage: 'done', execution: { executionId: 'ex_1', status: 'DONE', steps: [{ stepId: 'P2', actionType: 'ADD_VIEW', status: 'VERIFIED' }], reanalysis: { available: true, after: { fields: 23, edges: 10 } } } });
-  assert(v2.status === 'EXECUTED' && c.messages()[c.messages().length - 1].type === 'SYSTEM_NOTICE' && /動作テスト環境の設定が変更されました/.test(c.messages()[c.messages().length - 1].text) && !/再解析/.test(c.messages()[c.messages().length - 1].text), 'done → SYSTEM_NOTICE「動作テスト環境の設定が変更されました」（実行の記録に前の形の再解析があっても文に入れない）・計画は EXECUTED');
+  // 2026-10-21: 会話は反映・登録の状態を写さない。画面が反映を書き終えたとき・元に戻したときに、計画の版の状態だけを知らせる（メッセージは足さない）
+  const nMsg = c.messages().length;
+  c.noteApplied(v2, { executionId: 'ex_1' });
+  assert(v2.status === 'EXECUTED' && v2.executionId === 'ex_1' && c.messages().length === nMsg, '反映を書き終えた → 計画の版は EXECUTED（会話に反映のメッセージ・処理の通知を足さない）');
   const r11 = await c.send('やっぱり元に戻して');
-  assert(r11.intent === 'REQUEST_ROLLBACK' && c.messages()[c.messages().length - 1].data.kind === 'rollback-ready' && c.messages()[c.messages().length - 1].data.executionId === 'ex_1', 'REQUEST_ROLLBACK → 「変更前の状態へ戻せます」（即 Rollback しない）');
+  assert(r11.intent === 'REQUEST_ROLLBACK' && c.messages()[c.messages().length - 1].data.kind === 'rollback-guide' && !c.messages().some(m => /rollback-ready/.test(m.data?.kind || '')), 'REQUEST_ROLLBACK → 戻し方の案内（即 Rollback しない・「戻せます」のカードは作らない）');
   const r12 = await c.send('通知はいらない');
   //   反映済みの計画の後の依頼は、新しい依頼として仮案から作る（C-1 第 3 段。計画の AI でその計画を直さない）
   assert(r12.intent === 'PROPOSE' && r12.reason === 'NEW_REQUEST_NEW_PLAN_AFTER_EXECUTION' && proposeLog[proposeLog.length - 1] === '通知はいらない' && log.filter(l => l[0] === 'plan').length === 2 && c.planHistory().length === 2 && v2.status === 'EXECUTED' && c.draft() && c.draft().status === 'open', '反映済みの計画は修正しない: 新しい依頼として仮案から作る（旧計画は EXECUTED のまま・計画の AI は呼ばない）');
   //   「反映済みです。この依頼は新しい計画として作ります（基準は今の動作テスト環境…）」と何を基準にするかを先に伝える（kind 'new-plan-after-execution'）。
   //   C-1 第 3 段: この知らせは仮案の入口で出す（新しい依頼として仮案から作るとき）
   assert(c.messages().some(m => m.data && m.data.kind === 'new-plan-after-execution' && /反映済み/.test(m.text) && /新しい計画として作ります/.test(m.text)), '反映済みの計画の後の依頼: 何を基準にするか（反映後の動作テスト環境）を先に伝える');
-  c.noteExecution({ stage: 'rollback-confirm', prepared: exec.prepared, execution: exec.execution, rollback: { status: 'PREPARED', steps: [] } });
-  c.noteExecution({ stage: 'rolled-back', prepared: exec.prepared, execution: exec.execution, rollback: { status: 'ROLLED_BACK_VERIFIED', steps: [{ stepId: 'R1', status: 'ROLLBACK_VERIFIED' }] } });
-  assert(c.messages().filter(m => m.type === 'ROLLBACK').length === 1 && v2.status === 'ROLLED_BACK' && c.state.activeExecution.rolledBack === true && /変更前の状態に戻しました/.test(c.messages()[c.messages().length - 1].text), 'rollback → ROLLBACK メッセージ 1 件・rolled-back → 計画は ROLLED_BACK・通知');
+  const nMsg2 = c.messages().length;
+  c.noteRolledBack('ex_1');
+  assert(v2.status === 'ROLLED_BACK' && c.messages().length === nMsg2, '元に戻した → 計画の版は ROLLED_BACK（会話にメッセージを足さない。元に戻すのカードは画面が戻し始めたときに出す）');
   const r13 = await c.send('元に戻して');
-  assert(r13.reason === 'NO_EXECUTION', '戻した後は戻すものがない');
+  assert(r13.intent === 'REQUEST_ROLLBACK' && c.messages()[c.messages().length - 1].data.kind === 'rollback-guide', '戻した後の「元に戻して」も戻し方の案内（戻すボタンが無ければ戻せない）');
   // エラー / キャンセル
   const failing = KTAiConversation.create({ services: { ...services, async ask() { throw new KTAiClient.AiClientError({ code: 'RATE_LIMITED', message: 'x', retryAfterSeconds: 42, requestId: 'e-1' }); } } });
   const fr = await failing.send('何に使ってる？');
@@ -549,6 +541,7 @@ console.log('\n--- 6. Executor / Rollback 統合と Versioning（v1 は Executor
     assert(pre.status === 'ready' && pre.planId === v2.planId && pre.items.settings.length === 1 && pre.items.manual.length === 0 && writes(m).length === 0 && !m.msgs().some(x => x.type === 'EXECUTION') && m.panel.applyHold() === null && !v2.approval, '承認の欄: v2 の最終案ができると書き込みをしない準備を自動で走らせ、重要事項を出す（書き込み 0・まだ承認しない・反映を止める理由は無い）');
     assert(/kt-ai-apply-note/.test(m.$('kt-ai-exec').innerHTML) && /最終案のカードの［動作テスト環境へ反映］/.test(m.$('kt-ai-exec').innerHTML) && !/id="kt-ai-exec-start"/.test(m.$('kt-ai-exec').innerHTML), '右の「反映」に準備・最終確認の段は出さない（最終案のカードの［動作テスト環境へ反映］1 回で反映する）'); }
   m.panel.showPane('code');
+  const n6 = m.msgs().length;
   const ar6 = await applyScreen(m);
   const out = m.panel.reviewOutput();
   assert(ar6.button && !ar6.button.disabled && v2.approval && v2.approval.precheck && out.plan.steps[0].actionType === 'REUSE_FIELD' && !out.plan.steps.some(s => s.actionType === 'ADD_FIELD') && out.approvedSteps.join() === 'P1,P2', '［動作テスト環境へ反映］1 回で v2 を承認（承認の欄の準備の指紋つき）。Executor の入力（executorOutput）は v2 だけ（v1 の ADD_FIELD は含まれない）');
@@ -556,7 +549,7 @@ console.log('\n--- 6. Executor / Rollback 統合と Versioning（v1 は Executor
   const st = m.panel.executorState();
   assert(st.stage === 'done' && st.execution.status === 'DONE' && m.mock.st.views['担当者別'] && !m.mock.st.fields.progress && JSON.stringify(ar6.writes) === '["PUT views"]', '1 回の操作で反映: v2 の一覧だけが入る（v1 の新規フィールドは作られない）');
   const chat = m.chat();
-  assert(m.msgs().filter(x => x.type === 'EXECUTION').length === 1 && ar6.cardCount === 1 && /動作テスト環境へ反映しました。/.test(ar6.card) && /標準設定: ✓ 1 件を反映（反映後の確認で一致）/.test(ar6.card) && !/VERIFIED/.test(chat) && !/Simulation/.test(chat) && /運用環境には反映されていません。/.test(ar6.card) && /data-act="exec-details"/.test(ar6.cardHtml) && /data-act="rollback"/.test(ar6.cardHtml) && !/kt-ai-execution-card/.test(chat) && /反映後の確認：✓ 1 件一致/.test(m.$('kt-ai-exec').innerHTML) && !/Simulation/.test(m.$('kt-ai-exec').innerHTML) && !/まだ何も反映していません/.test(chat.slice(chat.indexOf('class="kt-ai-card kt-ai-final-card"'))), '結果のカード 1 枚（2026-10-09）: 反映しました・標準設定 ✓ 1 件（VERIFIED の語は出さない）/ 運用環境には反映されていません / [実行結果を見る][設定を変更前の状態に戻す]。実行のカードは結果のカードにまとめ、最終案のカードに「まだ何も反映していません」を出さない。反映後の確認・進捗は右の「反映」');
+  assert(JSON.stringify(m.msgs().slice(n6).map(x => x.data?.kind || x.type)) === JSON.stringify(['final-apply']) && ar6.cardCount === 1 && /動作テスト環境へ反映しました。/.test(ar6.card) && /標準設定: ✓ 1 件を反映（反映後の確認で一致）/.test(ar6.card) && !/VERIFIED/.test(chat) && !/Simulation/.test(chat) && /運用環境には反映されていません。/.test(ar6.card) && /data-act="exec-details"/.test(ar6.cardHtml) && /data-act="rollback"/.test(ar6.cardHtml) && !/kt-ai-execution-card/.test(chat) && /反映後の確認：✓ 1 件一致/.test(m.$('kt-ai-exec').innerHTML) && !/Simulation/.test(m.$('kt-ai-exec').innerHTML) && !/まだ何も反映していません/.test(chat.slice(chat.indexOf('class="kt-ai-card kt-ai-final-card"'))), '結果のカード 1 枚（2026-10-09）: 反映しました・標準設定 ✓ 1 件（VERIFIED の語は出さない）/ 運用環境には反映されていません / [実行結果を見る][設定を変更前の状態に戻す]。実行のカードは結果のカードにまとめ、最終案のカードに「まだ何も反映していません」を出さない。反映後の確認・進捗は右の「反映」');
   { const paneNow = m.panel.drawerState().pane;
     await clickChat(m, 'exec-details', { execution: st.execution.executionId });
     assert(m.panel.drawerState().pane === 'exec' && m.$('kt-ai-pane-exec').style.display === 'block' && /id="kt-ai-exec-result"/.test(m.$('kt-ai-exec').innerHTML), '［実行結果を見る］→ 右のタブ「反映」に切り替わる'); }
@@ -569,20 +562,22 @@ console.log('\n--- 6. Executor / Rollback 統合と Versioning（v1 は Executor
     await m.$('kt-ai-pane-log').dispatch({ type: 'click', target: { dataset: { act: 'log-audit', log: logId } } });
     const copied = m.copies.length === nCopies + 1 ? JSON.parse(m.copies[m.copies.length - 1]) : null;
     assert(copied && copied.execution && copied.execution.executionId === st.execution.executionId && copied.plan.steps[0].actionType === 'REUSE_FIELD', '反映の記録の［監査 JSON をコピー］（#kt-ai-pane-log のクリック）→ 実行した版（v2）の監査 JSON'); }
-  { const notice = m.msgs().find(x => x.type === 'SYSTEM_NOTICE' && /動作テスト環境の設定が変更されました/.test(x.text));
-    assert(notice && notice.data?.kind === 'preview-changed' && KTAiChatUi.isHiddenMessage(notice) && !/動作テスト環境の設定が変更されました/.test(chat) && v2.status === 'EXECUTED' && v2.executionId === st.execution.executionId && v1.status === 'SUPERSEDED', 'SYSTEM: 動作テスト環境の設定が変更されました（記録に残す。反映のカードと同じ内容なので会話には出さない）。v2 は EXECUTED（実行 ID を保持）'); }
+  assert(!m.msgs().some(x => x.type === 'SYSTEM_NOTICE' && /動作テスト環境の設定が変更されました/.test(x.text)) && v2.status === 'EXECUTED' && v2.executionId === st.execution.executionId && v1.status === 'SUPERSEDED', '2026-10-21: 会話に処理の通知（preview-changed）を作らない（結果のカードが同じ内容を出す）。v2 は EXECUTED（実行 ID を保持）');
   const audit = m.panel.auditJson();
   assert(audit.plan.steps[0].actionType === 'REUSE_FIELD' && audit.execution.executionId === st.execution.executionId, '監査 JSON は実行した版（v2）の計画');
-  // REQUEST_ROLLBACK（即 Rollback しない）
+  // REQUEST_ROLLBACK（即 Rollback しない）。2026-10-21: 「戻せます」のカードは廃止した。戻す操作は結果のカードの［設定を変更前の状態に戻す］
   const w1 = writes(m).length;
   await m.panel.send('やっぱり元に戻して'); await ticks();
   const rr = m.msgs()[m.msgs().length - 1];
-  assert(rr.data.kind === 'rollback-ready' && rr.data.executionId === st.execution.executionId && /変更前の状態へ戻せます/.test(m.chat()) && /反映する前の設定に戻します。/.test(m.chat()) && !/snapshot|スナップショット/i.test(m.chat().replace(/<[^>]*>/g, '')) && m.panel.executorState().stage === 'done' && writes(m).length === w1 && m.mock.st.views['担当者別'], 'REQUEST_ROLLBACK → 「変更前の状態へ戻せます」「反映する前の設定に戻します。」（snapshot の語は出さない）[変更前の状態に戻す]。Rollback はまだ始まらない（書き込み 0・一覧は残る）');
+  assert(rr.data.kind === 'rollback-guide' && /［設定を変更前の状態に戻す］/.test(rr.text) && /data-act="rollback"/.test(m.chat()) && m.chat().includes(`data-execution="${st.execution.executionId}"`) && !/snapshot|スナップショット/i.test(m.chat().replace(/<[^>]*>/g, '')) && m.panel.executorState().stage === 'done' && writes(m).length === w1 && m.mock.st.views['担当者別'], 'REQUEST_ROLLBACK → 戻し方の案内（結果のカードの［設定を変更前の状態に戻す］。snapshot の語は出さない）。Rollback はまだ始まらない（書き込み 0・一覧は残る）');
   await clickChat(m, 'rollback', { execution: st.execution.executionId }); await ticks();
-  assert(m.panel.executorState().stage === 'rollback-confirm' && writes(m).length === w1 && m.$('kt-ai-exec').innerHTML.includes('id="kt-ai-exec-rollback-go"') && m.msgs().filter(x => x.type === 'ROLLBACK').length === 1 && /確認画面で「変更前の状態に戻す」を押すと戻します/.test(m.chat()), 'カードの [変更前の状態に戻す] → 現在の設定を確認（書き込みなし）→ 既存の Rollback 確認（右下の右の「反映」）。会話には ROLLBACK カード');
+  assert(m.panel.executorState().stage === 'rollback-confirm' && writes(m).length === w1 && m.$('kt-ai-exec').innerHTML.includes('id="kt-ai-exec-rollback-go"') && m.msgs().filter(x => x.type === 'ROLLBACK').length === 1 && /確認画面で「変更前の状態に戻す」を押すと戻します/.test(m.chat()), '結果のカードの [設定を変更前の状態に戻す] → 現在の設定を確認（書き込みなし）→ 既存の Rollback 確認（右下の右の「反映」）。会話には ROLLBACK カード（今の会話の反映を戻し始めたときに画面が出す）');
+  //   2026-10-21: 戻す確認を取り消して、もう一度押しても、元に戻すのカードは 1 枚（会話は反映の状態を写さない。画面が戻し始めたときに 1 つの反映に 1 回だけ出す）
+  await clickExec(m, 'kt-ai-exec-rollback-cancel'); await ticks();
+  await clickChat(m, 'rollback', { execution: st.execution.executionId }); await ticks();
+  assert(m.panel.executorState().stage === 'rollback-confirm' && m.msgs().filter(x => x.type === 'ROLLBACK').length === 1 && writes(m).length === w1, '戻す確認を取り消してもう一度押しても、元に戻すのカードは 1 枚（書き込み 0）');
   await clickExec(m, 'kt-ai-exec-rollback-go'); await ticks(8);
-  { const rbNotice = m.msgs().find(x => x.type === 'SYSTEM_NOTICE' && /変更前の状態に戻しました/.test(x.text));
-    assert(m.panel.executorState().stage === 'rolled-back' && !m.mock.st.views['担当者別'] && /変更前の状態へ戻しました。/.test(m.chat()) && /反映する前の設定との比較：✓ 一致/.test(m.chat()) && !/ROLLBACK_VERIFIED|snapshot/i.test(m.chat()) && /✓ 1 件 ROLLBACK_VERIFIED/.test(m.$('kt-ai-exec').innerHTML) && v2.status === 'ROLLED_BACK' && rbNotice && KTAiChatUi.isHiddenMessage(rbNotice) && !/変更前の状態に戻しました/.test(m.chat()), 'Rollback 確認 → 戻す → Rollback Result カード「変更前の状態へ戻しました。」「反映する前の設定との比較：✓ 一致」（詳細は右下の右の「反映」）・v2 は ROLLED_BACK・戻した通知は記録に残し会話には出さない'); }
+  assert(m.panel.executorState().stage === 'rolled-back' && !m.mock.st.views['担当者別'] && /変更前の状態へ戻しました。/.test(m.chat()) && /反映する前の設定との比較：✓ 一致/.test(m.chat()) && !/ROLLBACK_VERIFIED|snapshot/i.test(m.chat()) && /✓ 1 件 ROLLBACK_VERIFIED/.test(m.$('kt-ai-exec').innerHTML) && v2.status === 'ROLLED_BACK' && !m.msgs().some(x => x.type === 'SYSTEM_NOTICE' && /変更前の状態に戻しました/.test(x.text)), 'Rollback 確認 → 戻す → Rollback Result カード「変更前の状態へ戻しました。」「反映する前の設定との比較：✓ 一致」（詳細は右下の右の「反映」）・v2 は ROLLED_BACK・戻した通知は作らない（2026-10-21）');
   assert(m.panel.auditJson().rollback && m.panel.auditJson().plan.steps[0].actionType === 'REUSE_FIELD', 'rollback は正しい実行（v2）に結び付く（監査 JSON）');
   // 反映後に新しい計画を作っても、戻していない実行は失わない（別シナリオ）
   const n = mount();
@@ -612,7 +607,7 @@ console.log('\n--- 7. Safety: 自然言語 ≠ 承認（write 0 件）/ errors /
     assert(last.data?.kind === 'preview-needs-approval' && !m.conv().activePlan().approval && writes(m).length === 0 && m.panel.executorState().stage === 'idle' && [...(m.panel.reviewOutput().approvedSteps)].length === 0, `Safety: 「${t}」→ 承認への案内だけ。承認 0・Executor idle・write 0 件`);
   }
   await m.panel.send('戻して'); await ticks();
-  assert(writes(m).length === 0 && m.panel.executorState().stage === 'idle' && /元に戻せる反映はありません/.test(m.chat()), 'Safety: 「戻して」だけでは write 0 件（反映していない）');
+  assert(writes(m).length === 0 && m.panel.executorState().stage === 'idle' && m.msgs()[m.msgs().length - 1].data?.kind === 'rollback-guide' && !/data-act="(js-)?rollback"/.test(m.chat()), 'Safety: 「戻して」だけでは write 0 件（反映していない。2026-10-21: 戻し方の案内だけで、戻すボタンは出ない）');
   assert(!/<button[^>]*>[^<]*運用環境へ反映/.test(m.chat()) && !/deploy/i.test(m.chat()), '会話にも「運用環境へ反映」/ deploy は無い');
   // 先に確認したいこと（priority 'blocking'）が残っている間は反映しない（2026-10-06: 必要な確認が終わった内容だけを反映できる）。答えて変更案に入れると反映できる
   {

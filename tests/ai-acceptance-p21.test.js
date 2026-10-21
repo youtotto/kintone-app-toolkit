@@ -638,16 +638,15 @@ console.log('\n--- G9 / G10. Generator Context の欠落（モデル比較の候
   const one = KTAiConversation.create({ services: svc(mkPlan(['C1'])) });
   await startPlan(one, '紹介元を顧客区分で切り替えて表示したい');
   const v1 = one.activePlan(); v1.generated = { C1: { generated: { strategy: 'NEW_JS_FILE' } } };
-  one.noteJsExecution({ stage: 'running', execution: { executionId: 'jx1', status: 'RUNNING', put: null } });
-  one.noteJsExecution({ stage: 'done', execution: { executionId: 'jx1', status: 'DONE', put: { ok: true } } });
+  //   2026-10-21: 画面が登録を書き終えたときに会話へ知らせる（会話は登録の状態を写さない）
+  one.noteApplied(v1, { jsExecutionId: 'jx1' });
   assert(v1.status === 'EXECUTED' && v1.jsExecutionId === 'jx1', `カスタマイズだけの計画で、すべて生成して登録 → 計画は反映済み: ${v1.status}`);
   const next = KTAiConversation.classifyIntent('顧客区分を既存に変えたら紹介元を空にして', { activePlan: { ...v1, plan: { ...v1.plan, proposedFields: [{ temporaryId: 'NEW_FIELD_1', label: '紹介元', suggestedCode: 'referral_source' }] } } });
   assert(next.intent === KTAiConversation.INTENT.PLAN, `登録の後の依頼は新しい計画（登録済みのカスタマイズを含む見直しにしない）: ${next.intent}/${next.reason}`);
   const two = KTAiConversation.create({ services: svc(mkPlan(['C1', 'C2'])) });
   await startPlan(two, '紹介元を顧客区分で切り替えて表示したい');
   const v2 = two.activePlan(); v2.generated = { C1: { generated: { strategy: 'NEW_JS_FILE' } } };
-  two.noteJsExecution({ stage: 'running', execution: { executionId: 'jx2', status: 'RUNNING', put: null } });
-  two.noteJsExecution({ stage: 'done', execution: { executionId: 'jx2', status: 'DONE', put: { ok: true } } });
+  two.noteApplied(v2, { jsExecutionId: 'jx2' });
   assert(v2.status === 'ACTIVE', `まだ生成していないカスタマイズ（C2）が残る計画は反映済みにしない: ${v2.status}`);
 }
 {

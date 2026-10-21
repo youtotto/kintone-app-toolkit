@@ -108,10 +108,10 @@ await section(async () => {
   assert(e1.intent === I.ANSWER && e1.reason === 'ANSWERS' && /CSV/.test(e1.askText || '') && e1.answers.answers.length === 2, `C1: 回答＋条件＋質問 → 回答（PC・保存の 2 つ）と、質問の部分は同時に質問の AI へ（以前は全体が ASK で回答が失われた）: ${JSON.stringify({ intent: e1.intent, askText: e1.askText, n: e1.answers && e1.answers.answers.length })}`);
   const e5 = cls('部長が不在のときは副部長が承認します');
   assert(e5.intent === I.REVISE_PLAN && e5.reason === 'TURN', `C2: 「副部長が承認します」は反映へ進む言葉ではない → 計画の AI へ（以前は REQUEST_PREVIEW で代理の指示が落ちた）: ${e5.intent}/${e5.reason}`);
-  const withExec = { ...st, activeExecution: { executionId: 'x', written: true, rolledBack: false } };
-  const e3 = cls('警告の文の指定は取り消します。文はおまかせで', withExec);
+  //   2026-10-21: 会話は反映の状態を持たない（戻す言葉の判定は反映の有無を見ない）ので、反映済みの実行を渡す形はやめた
+  const e3 = cls('警告の文の指定は取り消します。文はおまかせで');
   assert(e3.intent === I.REVISE_PLAN && e3.reason === 'TURN', `C3: 「指定は取り消します」は元に戻す操作ではない → 計画の AI へ（以前は GENERAL で何もしなかった）: ${e3.intent}/${e3.reason}`);
-  assert(cls('反映して').intent === I.REQUEST_PREVIEW && cls('これで進めて').intent === I.REQUEST_PREVIEW && cls('全部承認').intent === I.REQUEST_PREVIEW && cls('元に戻して', withExec).intent === I.REQUEST_ROLLBACK && cls('やっぱり元に戻して', withExec).intent === I.REQUEST_ROLLBACK && cls('コードを作って').intent === I.GENERATE_CODE && cls('C1 のコードを作って').intent === I.GENERATE_CODE, 'C4: 命令だけの文は従来どおり（反映へ進む・元に戻す・コードを作る）');
+  assert(cls('反映して').intent === I.REQUEST_PREVIEW && cls('これで進めて').intent === I.REQUEST_PREVIEW && cls('全部承認').intent === I.REQUEST_PREVIEW && cls('元に戻して').intent === I.REQUEST_ROLLBACK && cls('やっぱり元に戻して').intent === I.REQUEST_ROLLBACK && cls('コードを作って').intent === I.GENERATE_CODE && cls('C1 のコードを作って').intent === I.GENERATE_CODE, 'C4: 命令だけの文は従来どおり（反映へ進む・元に戻す・コードを作る）');
   const e10 = cls('100万円ちょうども警告の対象に変えて、コードも作って');
   assert(e10.intent === I.REVISE_PLAN && e10.reason === 'TURN_THEN_GENERATE' && e10.alsoGenerate === true, `C5: 「条件を変えて、コードも作って」→ 先に計画を更新して検証し、最新の仕様でコードを作る（以前は「仕様を直してから作りますか？」）: ${e10.intent}/${e10.reason}`);
   assert(cls('ありがとう').intent === I.GENERAL, 'C6: 挨拶は計画の AI を呼ばない');
@@ -442,7 +442,7 @@ await section(async () => {
 await section(async () => {
   // R8（M8）: 名詞＋「取り消して / 元に戻して」は、修正できる計画があれば計画の修正（反映の取り消しではない）。命令だけの文は従来どおり
   const v = { planId: 'p', version: 1, status: 'ACTIVE', plan: planWith([]), review: { steps: [] }, spec: { status: 'CONFIRMED', version: 1 } };
-  const st = { activePlan: v, ledgers: new Map(), activeExecution: { executionId: 'x', written: true, rolledBack: false } };
+  const st = { activePlan: v, ledgers: new Map() };
   const cls = (t) => KTAiConversation.classifyIntent(t, st);
   assert(['警告を取り消して', '通知を取り消して', '金額を元に戻して', 'P2は取り消して'].every(t => cls(t).intent === I.REVISE_PLAN), `R8: 要件・手順の取り消しは計画の修正: ${JSON.stringify(['警告を取り消して', 'P2は取り消して'].map(t => cls(t).intent))}`);
   assert(cls('元に戻して').intent === I.REQUEST_ROLLBACK && cls('C1 のコードを作り直して').intent === I.GENERATE_CODE && cls('反映でお願いします').intent === I.REQUEST_PREVIEW && cls('今すぐ反映して').intent === I.REQUEST_PREVIEW, 'R8: 命令だけの文は従来どおり（元に戻す・作り直す・反映）');
@@ -739,12 +739,11 @@ await section(async () => {
 console.log('\n--- G2. 3 回目の差分レビューの指摘（依頼の問いの形・コードについての質問・複合語・計画が無いとき・コードの依頼を残す） ---');
 await section(async () => {
   const v = { planId: 'p', version: 1, status: 'ACTIVE', plan: planWith([]), review: { steps: [] }, spec: { status: 'CONFIRMED', version: 1 } };
-  const withExec = { activePlan: v, ledgers: new Map(), activeExecution: { executionId: 'x', written: true, rolledBack: false } };
   const cls = (t, s = { activePlan: v, ledgers: new Map() }) => KTAiConversation.classifyIntent(t, s);
   const isQ = KTAiConversation.isQuestionSentence;
   // 依頼の問いの形: 変更・操作は依頼、説明・情報を求めるもの・疑問の語・「〜か確認して」は質問
   assert(!isQ('保存を止めてもらえる？') && !isQ('反映してもらえますか？') && isQ('今の計画の手順を見せてもらえる？') && isQ('調べてもらえますか？') && isQ('ご説明いただけますか？') && isQ('誰が承認してくれる？') && isQ('保存が止まるか確認してもらえますか？'), 'G2-1: 依頼の問いの形は、変更・操作のときだけ依頼（説明・情報・疑問の語・「〜か確認して」は質問）');
-  assert(cls('反映してもらえますか？').intent === I.REQUEST_PREVIEW && cls('元に戻してもらえる？', withExec).intent === I.REQUEST_ROLLBACK, 'G2-2: 操作の命令を依頼の問いの形で言っても、操作の案内（計画を作り直さない）');
+  assert(cls('反映してもらえますか？').intent === I.REQUEST_PREVIEW && cls('元に戻してもらえる？').intent === I.REQUEST_ROLLBACK, 'G2-2: 操作の命令を依頼の問いの形で言っても、操作の案内（計画を作り直さない）');
   // コードについての質問は、コードの生成にも計画の作り直しにもしない
   const qs2 = ['コードを作った？', 'コードを作れますか？', 'コードを作る必要はありますか？', 'コードを作ってある？'];
   const bad = qs2.map(t => ({ t, c: cls(t) })).filter(x => x.c.intent === I.GENERATE_CODE || x.c.reason === 'TURN_THEN_GENERATE' || x.c.alsoGenerate);
