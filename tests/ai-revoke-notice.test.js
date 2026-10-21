@@ -6,9 +6,11 @@
 //   §R1 JavaScript の登録の準備で止まった（設定を書いた後、書いた直後の取り直しの前に、別の作業者がカスタマイズを変えた）
 //   §R2 JavaScript を登録できなかった（ファイルのアップロードの失敗）
 //   §R3 設定の手順が途中で止まった（フィールドの追加の失敗。もとから一文の理由は変えない）
-//   §R4 承認の後に動作テスト環境の設定が変わった（押す前に別の作業者がカスタマイズを変えた）: 承認を外す知らせと、計画の作り直しをすすめる知らせ
-//       （どちらも理由の一文をそのままつなぐ。理由の後ろに空白を入れない）
-//   §R5 反映を途中で止めるときの理由（applyFinal の revoke に渡す文）と、承認を外すときの理由（markStale に渡す文）は、どれも空か句点で終わる一文
+//   §R4 承認の後に動作テスト環境の設定が変わった（押す前に別の作業者がカスタマイズを変えた）: 知らせは承認の取り消しの 1 つだけで、変わったことを一度だけ言い、
+//       計画の作り直しも同じ知らせで案内する（前は計画の作り直しをすすめる知らせが続けて出て、同じ理由を繰り返していた）
+//   §R5 最終案を作った後に設定が変わった（承認の前。会話の approveFinal）: 承認は無いので、計画の作り直しをすすめる知らせだけで、変わったことを一度だけ言う。
+//       理由を渡さない markStale は既定の一文で言う
+//   §R6 反映を途中で止めるときの理由（applyFinal の revoke に渡す文）と、承認を外すときの理由（markStale に渡す文）は、どれも空か句点で終わる一文
 //       （画面から作りにくい止め方も含めて、本体の文で確かめる）
 //
 // 実行方法: node tests/ai-revoke-notice.test.js（KT_SRC=<別ビルド> で修正前の版に対して走らせると RED になる）
@@ -86,23 +88,46 @@ await section(async () => {
 // =========================================================
 console.log('\n--- §R4. 承認の後に動作テスト環境の設定が変わった ---');
 await section(async () => {
-  //   JavaScript だけ。承認の欄の準備の後（押す前）に別の作業者がカスタマイズを変えた → 押した直後の取り直しで止める（書き込み 0）
+  //   JavaScript だけ。承認の欄の準備の後（押す前）に別の作業者がカスタマイズを変えた → 押した直後の取り直しで止める（書き込み 0）。
+  //   知らせは承認の取り消しの 1 つだけ（計画の作り直しも同じ知らせで案内する。計画は STALE にする）
   const { m } = await K.mountFinal({ kind: 'js' });
   const r = await K.applyOnScreen(m, { before: () => otherJs(m) });
   const revoked = noticesOf(m, 'approval-revoked'), stale = noticesOf(m, 'stale');
   const reason = '承認の後に動作テスト環境の設定が変わりました。';
-  const wantRevoked = `動作テスト環境の設定が変更されたため、最終案の承認を取り消しました。${reason}最新の設定で最終案を作り直してください（同じ依頼をもう一度送ると作り直します）。`;
-  const wantStale = `動作テスト環境の設定が変更されました。${reason}現在の計画は最新の設定で作り直すことをおすすめします。`;
-  assert(r.clicked && r.run && r.run.stage === 'stopped' && r.run.stop.text === '承認の欄の準備の後に、動作テスト環境の設定が変わりました。何も書き込まずに止めました。' && !r.writes.length && !r.v.approval,
-    `R4-1: 押す前にカスタマイズが変わると、何も書き込まずに止める（承認を外す）: ${JSON.stringify(runOf(r))}`);
-  assert(revoked.length === 1 && revoked[0] === wantRevoked && tidy(revoked[0]) && shown(m, wantRevoked),
-    `R4-2: 承認を外す知らせは理由の一文をそのままつなぐ: ${JSON.stringify(revoked)}`);
-  assert(stale.length === 1 && stale[0] === wantStale && tidy(stale[0]) && shown(m, wantStale),
-    `R4-3: 計画の作り直しをすすめる知らせも、理由の後ろに空白を入れずにつなぐ（「。 現在の計画は」にしない）: ${JSON.stringify(stale)}`);
+  const want = `最終案の承認を取り消しました。${reason}最新の設定で最終案を作り直してください（同じ依頼をもう一度送ると作り直します）。`;
+  const chat = K.stripC(m.chat());
+  assert(r.clicked && r.run && r.run.stage === 'stopped' && r.run.stop.text === '承認の欄の準備の後に、動作テスト環境の設定が変わりました。何も書き込まずに止めました。' && !r.writes.length && !r.v.approval && r.v.status === 'STALE',
+    `R4-1: 押す前にカスタマイズが変わると、何も書き込まずに止める（承認を外し、計画は STALE）: ${JSON.stringify({ ...runOf(r), status: r.v && r.v.status })}`);
+  assert(revoked.length === 1 && revoked[0] === want && tidy(revoked[0]) && shown(m, want),
+    `R4-2: 承認を外す知らせは「最終案の承認を取り消しました。」＋変わったことの一文＋作り直しの案内（決まった書き出しで同じことを言い直さない）: ${JSON.stringify(revoked)}`);
+  assert(!stale.length && chat.split(reason).length - 1 === 1 && !chat.includes('現在の計画は最新の設定で作り直すことをおすすめします'),
+    `R4-3: 計画の作り直しをすすめる知らせを続けて出さない（変わったことは会話の中で一度だけ）: ${JSON.stringify({ stale, times: chat.split(reason).length - 1 })}`);
 });
 
 // =========================================================
-console.log('\n--- §R5. 理由の文の決まり（本体の文）---');
+console.log('\n--- §R5. 最終案を作った後に設定が変わった（承認の前）---');
+await section(async () => {
+  //   会話: 最終案を作った後に作業の基準が変わった → 承認せず計画を STALE にする。承認は無いので、計画の作り直しをすすめる知らせだけ（変わったことは一度だけ）
+  const notices = (c) => c.messages().filter(x => x.data && ['approval-revoked', 'stale'].includes(x.data.kind)).map(x => `${x.data.kind}:${x.text}`);
+  const x = K.makeConvC();
+  await K.adoptC(x);
+  const v = x.c.activePlan();
+  const r = x.c.approveFinal(K.approveArgs(v, { baseStamp: { fingerprint: 'fp-2' } }));
+  const want = 'stale:最終案を作った後に動作テスト環境の設定が変わりました。現在の計画は最新の設定で作り直すことをおすすめします。';
+  assert(r.ok === false && r.reason === 'BASE_CHANGED' && !v.approval && v.status === 'STALE' && JSON.stringify(notices(x.c)) === JSON.stringify([want]),
+    `R5-1: 承認の前に変わったときは、計画の作り直しをすすめる知らせだけで、変わったことを一度だけ言う: ${JSON.stringify(notices(x.c))}`);
+  //   理由を渡さない markStale（承認した最終案）: 既定の一文で言う（知らせは 1 つ）
+  const y = K.makeConvC();
+  await K.adoptC(y);
+  const a = K.approveC(y);
+  y.c.markStale();
+  const wantY = 'approval-revoked:最終案の承認を取り消しました。動作テスト環境の設定が変更されました。最新の設定で最終案を作り直してください（同じ依頼をもう一度送ると作り直します）。';
+  assert(a.ok && !y.c.activePlan().approval && y.c.activePlan().status === 'STALE' && JSON.stringify(notices(y.c)) === JSON.stringify([wantY]),
+    `R5-2: 理由を渡さない markStale は既定の一文で言い、知らせは 1 つ: ${JSON.stringify({ approved: a.ok, notices: notices(y.c) })}`);
+});
+
+// =========================================================
+console.log('\n--- §R6. 理由の文の決まり（本体の文）---');
 await section(async () => {
   //   画面から作りにくい止め方（反映の直前の確かめ・準備を始められない・承認の後の登録の内容の変化・途中の例外など）の理由も、句点で終わる一文にそろえる
   const src = fs.readFileSync(process.env.KT_SRC || path.join(__dirname, '..', 'kintoneAppToolkit.user.js'), 'utf8');
@@ -110,7 +135,7 @@ await section(async () => {
   const revokes = reasonsOf(/\brevoke\('([^']*)'\)/g), stales = reasonsOf(/\bmarkStale\('([^']*)'\)/g);
   const bad = [...revokes, ...stales].filter(t => t !== '' && !/。$/.test(t));
   assert(revokes.length > 0 && stales.length > 0 && !bad.length,
-    `R5-1: 反映を途中で止める理由（revoke ${revokes.length} か所）と承認を外す理由（markStale ${stales.length} か所）は、空か句点で終わる一文: ${JSON.stringify(bad)}`);
+    `R6-1: 反映を途中で止める理由（revoke ${revokes.length} か所）と承認を外す理由（markStale ${stales.length} か所）は、空か句点で終わる一文: ${JSON.stringify(bad)}`);
 });
 
 console.log(`\n${state.failed ? 'FAILED' : 'ALL PASSED'}: ${state.passed} passed / ${state.failed} failed`);

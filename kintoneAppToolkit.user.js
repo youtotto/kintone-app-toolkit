@@ -18521,9 +18521,13 @@
       }
       /** Executor 等で動作テスト環境が変わった（他の経路）→ 計画は STALE。段階 C（R16）: 最終案の承認も外す（古い承認で反映しない） */
       function markStale(reason = '') {
+        //   2026-10-21: 知らせは 1 つにし、変わったことは一度だけ言う（reason = 変わったことの一文。無ければ既定の文）。承認を外したときは計画の作り直しも
+        //   同じ知らせで案内する（前は承認の取り消しと計画の知らせが続けて出て、決まった書き出しと理由で同じことを繰り返していた）
         const v = state.activePlan;
-        if (v && v.approval) { delete v.approval; push(MSG.SYSTEM_NOTICE, ROLE.SYSTEM, `動作テスト環境の設定が変更されたため、最終案の承認を取り消しました。${joinReason(reason)}最新の設定で最終案を作り直してください（同じ依頼をもう一度送ると作り直します）。`, { kind: 'approval-revoked', planId: v.planId, version: v.version }); }
-        if (v && v.status === PLAN_STATUS.ACTIVE) { v.status = PLAN_STATUS.STALE; push(MSG.SYSTEM_NOTICE, ROLE.SYSTEM, `動作テスト環境の設定が変更されました。${joinReason(reason)}現在の計画は最新の設定で作り直すことをおすすめします。`, { kind: 'stale' }); }
+        const what = joinReason(reason) || '動作テスト環境の設定が変更されました。';
+        const revoked = !!(v && v.approval);
+        if (revoked) { delete v.approval; push(MSG.SYSTEM_NOTICE, ROLE.SYSTEM, `最終案の承認を取り消しました。${what}最新の設定で最終案を作り直してください（同じ依頼をもう一度送ると作り直します）。`, { kind: 'approval-revoked', planId: v.planId, version: v.version }); }
+        if (v && v.status === PLAN_STATUS.ACTIVE) { v.status = PLAN_STATUS.STALE; if (!revoked) push(MSG.SYSTEM_NOTICE, ROLE.SYSTEM, `${what}現在の計画は最新の設定で作り直すことをおすすめします。`, { kind: 'stale' }); }
       }
       // ---- 段階 C（C3b）: 進みの 1 枚カードと、段階ごとの目安（この端末の実測の平均。localStorage の ktAi.timing.v1。読めなければ既定値）----
       const timingStore = {
