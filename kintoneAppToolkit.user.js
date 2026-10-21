@@ -18655,7 +18655,7 @@
       function markStale(reason = '') {
         const v = state.activePlan;
         if (v && v.approval) { delete v.approval; push(MSG.SYSTEM_NOTICE, ROLE.SYSTEM, `動作テスト環境の設定が変更されたため、最終案の承認を取り消しました。${joinReason(reason)}最新の設定で最終案を作り直してください（同じ依頼をもう一度送ると作り直します）。`, { kind: 'approval-revoked', planId: v.planId, version: v.version }); }
-        if (v && v.status === PLAN_STATUS.ACTIVE) { v.status = PLAN_STATUS.STALE; push(MSG.SYSTEM_NOTICE, ROLE.SYSTEM, `動作テスト環境の設定が変更されました。${reason ? `${reason} ` : ''}現在の計画は最新の設定で作り直すことをおすすめします。`, { kind: 'stale' }); }
+        if (v && v.status === PLAN_STATUS.ACTIVE) { v.status = PLAN_STATUS.STALE; push(MSG.SYSTEM_NOTICE, ROLE.SYSTEM, `動作テスト環境の設定が変更されました。${joinReason(reason)}現在の計画は最新の設定で作り直すことをおすすめします。`, { kind: 'stale' }); }
       }
       // ---- 段階 C（C3b）: 進みの 1 枚カードと、段階ごとの目安（この端末の実測の平均。localStorage の ktAi.timing.v1。読めなければ既定値）----
       const timingStore = {
@@ -25319,6 +25319,7 @@
       const epoch0 = conv.state.epoch;
       //   反映の途中で新しい会話にしたときは、前の会話の承認の取り消しの知らせを新しい会話に出さない（承認は外す）
       //   一度の反映の途中で止めたときの知らせは、結果のカードの次の手に合わせる（この最終案はもう一度承認しない）
+      //   2026-10-21: 理由は「最終案の承認を取り消しました。」に続く一文（「…ためです。」のように句点で終える）。会話の revokeApproval は句点を補ってつなぐだけなので、「…ため、」で終えると「、。」になる
       const revoke = (reason) => { if (!v.approval) return; if (conv.state.epoch === epoch0) conv.revokeApproval(v, reason, { next: '次の手は下の結果のカードにまとめています。' }); else delete v.approval; };
       const NEXT_AGAIN = '変わった点を確かめて、最終案のカードの［動作テスト環境へ反映］をもう一度押してください（新しい内容への確認になります）。';
       const NEXT_SETTINGS_ONLY = '設定は反映済みです。JavaScript を入れないときは、［設定を変更前の状態に戻す］で戻せます。続けるときは、理由を確かめてから同じ依頼をもう一度送ると最終案を作り直します。';
@@ -25328,7 +25329,7 @@
         if (conv.activePlan() !== v) return finish({ stage: 'stopped', stop: { text: '反映の前に最終案が新しくなりました。何も書き込んでいません。', changes: [], next: '最新の最終案のカードから反映してください。' } });
         const a = approvalNow();
         if (!a.ok) {
-          revoke('反映の直前の確かめで、承認した時点から変わったことが分かったため、');
+          revoke('反映の直前の確かめで、承認した時点から変わったことが分かったためです。');
           let changes = [];
           //   照合の取り直しは利用者が押した［動作テスト環境へ反映］の中の取得なので、設定取得の関所で止めない（最小化中・開発支援を表示していなくても変わった点を出す）
           try { const r2 = await computePrecheck(v, { intent: FETCH.EXPLICIT }); changes = diffParts(approvedParts, r2.parts); if (finalPreEligible(v)) applyPrecheckResult(v, r2); } catch (e) { changes = []; }
@@ -25339,7 +25340,7 @@
         if (approvedParts.settings) {
           execState.finalRunId = run.id;   // 準備の間も最終確認の段を出さない（renderExec）
           await startExecutor();
-          if (!['confirm', 'blocked'].includes(execState.stage) || !execState.prepared) { revoke('反映の準備を始められなかったため、'); return finish({ stage: 'stopped', stop: { text: '設定の反映の準備を始められませんでした。何も書き込んでいません。', changes: [], next: '右の「反映」で理由を確かめてください。' } }); }
+          if (!['confirm', 'blocked'].includes(execState.stage) || !execState.prepared) { revoke('反映の準備を始められなかったためです。'); return finish({ stage: 'stopped', stop: { text: '設定の反映の準備を始められませんでした。何も書き込んでいません。', changes: [], next: '右の「反映」で理由を確かめてください。' } }); }
           sp = execState.prepared;
         }
         if (approvedParts.js) jp = await jsPrecheck(v);
@@ -25347,7 +25348,7 @@
         if (stableStr(nowParts) !== stableStr(approvedParts)) {
           const changes = diffParts(approvedParts, nowParts);
           cancelExecutor();
-          revoke('承認の欄に出した準備の後に内容が変わったため、');
+          revoke('承認の欄に出した準備の後に内容が変わったためです。');
           applyPrecheckResult(v, { settings: sp, js: jp, parts: nowParts, items: preItemsOf(sp, jp, v), reasons: preReasonsOf(sp, jp, v) });
           return finish({ stage: 'stopped', stop: { text: '承認の欄に出した準備の後に、内容が変わりました。何も書き込まずに止めました。', changes, next: NEXT_AGAIN } });
         }
@@ -25377,13 +25378,13 @@
           const pj = await startJsRegister(v, { expected: { revision: approvedParts.js.revision, content: approvedParts.js.content }, finalRunId: run.id });
           if (!pj || jsExec.stage !== 'confirm') {
             const reasons = ((pj && pj.blockers) || []).map(b => b.message);
-            revoke('JavaScript の登録の準備で止まったため、');
+            revoke('JavaScript の登録の準備で止まったためです。');
             return finish({ stage: 'stopped', partial: run.written, ok: false, js: { ...run.js, reason: reasons[0] || '登録の準備で止まりました' }, stop: { text: 'JavaScript の登録の準備で止まりました。', changes: reasons, next: run.written ? NEXT_SETTINGS_ONLY : '右の「反映」で理由を確かめてください。動作テスト環境は変わっていません。' } });
           }
           const added = jsNewSince(approvedParts.js, jsPartsOf(pj));
           if (added.length) {
             jsExec.stage = 'blocked'; jsExec.prepared = { ...pj, status: 'BLOCKED', blockers: [{ code: 'CHANGED_AFTER_APPROVAL', message: '承認の後に、登録の内容・確認項目・注意が変わりました（登録していません）' }] }; renderJsReg();
-            revoke('承認の後に JavaScript の登録の内容・確認項目・注意が変わったため、');
+            revoke('承認の後に JavaScript の登録の内容・確認項目・注意が変わったためです。');
             return finish({ stage: 'stopped', partial: run.written, ok: false, js: { ...run.js, reason: '承認の後に登録の内容・確認項目・注意が変わったため' }, stop: { text: '承認の後に、JavaScript の登録の内容が変わりました。登録していません。', changes: added, next: run.written ? NEXT_SETTINGS_ONLY : NEXT_AGAIN } });
           }
           //   確認項目は承認の欄で示して承認を受けたもの（新しいものは上で止めた）。同じ内容を 1 件ずつ答えさせない
@@ -25393,14 +25394,14 @@
           run.js = { executionId: js ? js.executionId : null, registered: !!(js && js.put), written: !!(js && js.written), ok: !!(js && js.ok), files: js ? js.steps.map(st => `${st.kind === 'REPLACE_FILE' ? '✎' : '＋'} ${st.name}（${TARGET_JA(st.target)}）`) : [], first: js && js.firstStep ? { target: js.firstStep.target, name: js.firstStep.name } : null, verified: js ? js.verified : 0, total: js ? js.steps.length : 0, reason: js && js.put ? null : ((ex && (ex.error?.message || ex.put?.error?.message)) || jsExec.error || '登録できませんでした') };
           run.written = run.written || run.js.written;
           if (!run.js.registered) {
-            revoke('JavaScript を登録できなかったため、');
+            revoke('JavaScript を登録できなかったためです。');
             return finish({ stage: 'stopped', partial: !!(run.settings && run.settings.written), ok: false, stop: { text: 'JavaScript を登録できませんでした。', changes: [], next: run.settings && run.settings.written ? NEXT_SETTINGS_ONLY : (ex && ex.previewUnchanged === false ? '動作テスト環境の設定が変わっている可能性があります。Customize タブで確かめてください。' : '右の「反映」で理由を確かめてください。動作テスト環境は変わっていません。') } });
           }
         }
         const ok = (!run.settings || (run.settings.started && !run.settings.failed)) && (!run.js || run.js.ok);
         return finish({ stage: 'done', ok, partial: false });
       } catch (e) {
-        revoke('反映の途中で問題が起きたため、');
+        revoke('反映の途中で問題が起きたためです。');
         return finish({ stage: 'stopped', partial: run.written, ok: false, stop: { text: `反映の途中で問題が起きました: ${e?.message || String(e)}`, changes: [], next: '右の「反映」で状態を確かめてください。' } });
       }
     }
