@@ -26,7 +26,7 @@ const reviewOf = (p) => R.review({ plan: p, data: DATA, deps: DEPS, scan: null, 
 const approveAll = (p, rv) => R.executorOutput(p, rv, p.steps.map(s => s.id));
 const st0 = (rv) => rv.steps[0];
 const codes0 = (rv) => rv.steps[0].issues.map(i => i.code);
-const run = async (input, mock, { review = null } = {}) => { const prepared = await E.prepare(input, { api: mock.api, appId: '341' }); const log = prepared.status === 'PREPARED' ? await E.executePreview(prepared, { api: mock.api, review, data: DATA }) : null; return { prepared, log }; };
+const run = async (input, mock, { review = null } = {}) => { const prepared = await E.prepare(input, { api: mock.api, appId: '341' }); const log = prepared.status === 'PREPARED' ? await E.executePreview(prepared, { api: mock.api, review }) : null; return { prepared, log }; };
 const check = (log, name) => log.steps[0].verification?.checks?.find(c => c.name === name);
 
 (async () => {
@@ -42,7 +42,7 @@ console.log('\n--- 1. ADD_NOTIFICATION（レコードの条件通知）---');
   assert(log.steps[0].requests[0].path.endsWith('/perRecord.json') && log.steps[0].requests[0].existing === 2 && log.steps[0].requests[0].total === 3 && log.steps[0].before.count === 2 && log.steps[0].after.count === 3, 'full payload: 現在の設定 ＋ 承認分 = 完全な After payload（before 2 → after 3）');
   const v = log.steps[0].verification;
   assert(v.ok && ['existingCountBefore', 'existingPreserved', 'addedCount', 'unexpectedRemoved', 'unexpectedChanged', 'exists', 'condition', 'recipients', 'title'].every(n => v.checks.find(c => c.name === n)?.ok) && check(log, 'existingCountBefore').actual === 2 && check(log, 'addedCount').actual === 1, 'verification: existingCountBefore 2 / existingPreserved / addedCount 1 / unexpectedRemoved 0 / unexpectedChanged 0 / 新規通知の条件・通知先・タイトル');
-  assert(log.simulation.compared && log.simulation.match === true, 'Simulation（Review の After の通知）と実際が一致');
+  assert(!('simulation' in log) && !('reanalysis' in log), '書いた通知が期待どおりかは手順ごとの読み戻しだけが判定する（照合・再解析の記録は無い。2026-10-21）');
   const rb = E.buildRollbackPlan(log, prepared);
   assert(rb.steps[0].actionType === 'RESTORE_NOTIFICATION_SETTINGS' && /2 件/.test(rb.steps[0].note) && rb.executed === false, 'rollback 計画: RESTORE_NOTIFICATION_SETTINGS（実行しない）');
   const audit = E.buildAudit({ plan: p, review: rv, prepared, execution: log });
@@ -92,7 +92,7 @@ console.log('\n--- 1. ADD_NOTIFICATION（レコードの条件通知）---');
   const rv = reviewOf(p); const mock = makeKintoneMock(DATA); mock.st.notifyToCommenter = true;
   const { prepared, log } = await run(approveAll(p, rv), mock, { review: rv });
   assert(prepared.steps[0].prepared.payload.scope === 'general' && log.status === 'DONE' && mock.st.general.length === 6 && mock.st.general[5].entity.code === 'owner_group' && mock.st.general[5].recordAdded && mock.st.general[5].statusChanged && !mock.st.general[5].recordEdited && mock.st.notifyToCommenter === true, 'アプリの条件通知: scope general・イベントのフラグ・既存 5 件と notifyToCommenter を保持');
-  assert(check(log, 'event').ok && check(log, 'recipients').ok && check(log, 'existingPreserved').ok && log.simulation.match === true, 'verification: event / recipients / 既存保持・Simulation 一致');
+  assert(check(log, 'event').ok && check(log, 'recipients').ok && check(log, 'existingPreserved').ok, 'verification: event / recipients / 既存保持');
 }
 {
   // verification mismatch（API 200 だが既存が 1 件抜ける mutant）→ VERIFY_FAILED・unexpectedRemoved 1
@@ -121,7 +121,7 @@ console.log('\n--- 2. ADD_REMINDER ---');
   const e = prepared.steps[0].prepared.payload.entries[0];
   assert(prepared.status === 'PREPARED' && e.timing.code === 'due_date' && e.timing.daysLater === '-30' && e.timing.time === '09:00' && e.targets[0].entity.code === 'owner' && e.filterCond === 'ステータス not in ("完了")', 'prepare: base date field / timing / days / recipients / condition を構造化');
   assert(log.status === 'DONE' && log.steps[0].status === 'VERIFIED' && mock.st.reminders.length === 2 && mock.st.reminders[0].title === '期限前日のリマインド' && mock.st.timezone === 'Asia/Tokyo', '反映: 既存 1 件 ＋ 新規 = 2 件・timezone 保持');
-  assert(['exists', 'timing', 'recipients', 'condition', 'existingPreserved', 'addedCount'].every(n => check(log, n)?.ok) && log.simulation.match === true, 'verification: reminder存在 / timing / recipients / condition / 既存維持・Simulation 一致');
+  assert(['exists', 'timing', 'recipients', 'condition', 'existingPreserved', 'addedCount'].every(n => check(log, n)?.ok), 'verification: reminder存在 / timing / recipients / condition / 既存維持');
   assert(E.buildRollbackPlan(log, prepared).steps[0].actionType === 'RESTORE_REMINDER_SETTINGS', 'rollback: RESTORE_REMINDER_SETTINGS');
 }
 {
@@ -161,7 +161,7 @@ console.log('\n--- 3. UPDATE_FIELD（表示名・必須のみ）---');
   const pp = prepared.steps[0].prepared;
   assert(prepared.status === 'PREPARED' && pp.payload.code === 'owner' && same(pp.payload.changes, { required: true }) && pp.sensitive[0].code === 'REQUIRED_CHANGE' && /今後の保存時に入力必須になります/.test(pp.sensitive[0].message) && /既存レコードに値が入っているかは確認していません/.test(pp.sensitive[0].message), 'required only: payload は required だけ・注意は計画の検査の指摘（今後の保存時に必須 / 既存レコードは未確認）');
   assert(log.status === 'DONE' && log.steps[0].status === 'VERIFIED' && mock.st.fields.owner.required === true && mock.st.fields.owner.type === 'USER_SELECT' && mock.st.fields.owner.label === '担当者' && same(mock.st.fields.owner.entities, DATA.fields.owner.entities), '反映: required だけ変わり type / label / entities は保持');
-  assert(['exists', 'codePreserved', 'typePreserved', 'changed:required', 'otherPropertiesPreserved', 'existingFieldsPreserved'].every(n => check(log, n)?.ok) && log.steps[0].before.required === false && log.steps[0].after.required === true && log.simulation.match === true, 'verification: code / type 不変・requested attribute だけ変更・その他保持・before / after・Simulation 一致');
+  assert(['exists', 'codePreserved', 'typePreserved', 'changed:required', 'otherPropertiesPreserved', 'existingFieldsPreserved'].every(n => check(log, n)?.ok) && log.steps[0].before.required === false && log.steps[0].after.required === true, 'verification: code / type 不変・requested attribute だけ変更・その他保持・before / after');
   assert(E.buildRollbackPlan(log, prepared).steps[0].actionType === 'RESTORE_FIELD_PROPERTY' && E.buildRollbackPlan(log, prepared).steps[0].api.payload.properties.owner.required === false, 'rollback: RESTORE_FIELD_PROPERTY（required を false に戻す計画）');
 }
 {
@@ -227,7 +227,7 @@ console.log('\n--- 4. Combined plan（DAG）・full payload safety ---');
   const order = mock.calls.filter(c => /^(POST|PUT)/.test(c));
   assert(order.join(' | ') === 'POST fields | PUT fields | PUT reminders | PUT perRecord', `API 順序: フィールド追加 → 必須化 → リマインダー → 通知（${order.join(' | ')}）`);
   assert(mock.st.fields.renewal_date.required === true && mock.st.reminders[1].timing.code === 'renewal_date' && mock.st.perRecord[2].filterCond === 'renewal_date >= TODAY()' && mock.st.reminders.length === 2 && mock.st.perRecord.length === 3, '実コードで反映され、既存の通知 2 件・リマインダー 1 件は保持');
-  assert(log.simulation.match === true && log.reanalysis.after.fields === log.reanalysis.before.fields + 1, 'Simulation 一致・再解析');
+  assert(log.actualAfter.addedFields.join() === 'renewal_date' && log.actualAfterRaw.fields.properties.renewal_date && log.actualAfterRaw.fields.properties.renewal_date.required === true, '反映後の要約（追加したフィールド）・元に戻すときの基準に反映直後のフィールド');
   // P1 が失敗 → 依存する P2 / P3 / P4 は未実行
   const m2 = makeKintoneMock(DATA); m2.ctl.failAddField = 'renewal_date';
   const r2 = await run(approveAll(p, rv), m2, { review: rv });

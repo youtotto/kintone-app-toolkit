@@ -241,7 +241,7 @@ console.log('\n--- 2. KTAiConversation.create（fake services。履歴は送ら�
   c.noteExecution({ ...exec, stage: 'running' });
   assert(c.messages().filter(m => m.type === 'EXECUTION').length === 1, '同じ executionId では増えない');
   c.noteExecution({ ...exec, stage: 'done', execution: { executionId: 'ex_1', status: 'DONE', steps: [{ stepId: 'P2', actionType: 'ADD_VIEW', status: 'VERIFIED' }], reanalysis: { available: true, after: { fields: 23, edges: 10 } } } });
-  assert(v2.status === 'EXECUTED' && c.messages()[c.messages().length - 1].type === 'SYSTEM_NOTICE' && /動作テスト環境の設定が変更されました/.test(c.messages()[c.messages().length - 1].text) && /再解析/.test(c.messages()[c.messages().length - 1].text), 'done → SYSTEM_NOTICE「動作テスト環境の設定が変更されました」＋再解析・計画は EXECUTED');
+  assert(v2.status === 'EXECUTED' && c.messages()[c.messages().length - 1].type === 'SYSTEM_NOTICE' && /動作テスト環境の設定が変更されました/.test(c.messages()[c.messages().length - 1].text) && !/再解析/.test(c.messages()[c.messages().length - 1].text), 'done → SYSTEM_NOTICE「動作テスト環境の設定が変更されました」（実行の記録に前の形の再解析があっても文に入れない）・計画は EXECUTED');
   const r11 = await c.send('やっぱり元に戻して');
   assert(r11.intent === 'REQUEST_ROLLBACK' && c.messages()[c.messages().length - 1].data.kind === 'rollback-ready' && c.messages()[c.messages().length - 1].data.executionId === 'ex_1', 'REQUEST_ROLLBACK → 「変更前の状態へ戻せます」（即 Rollback しない）');
   const r12 = await c.send('通知はいらない');
@@ -556,7 +556,7 @@ console.log('\n--- 6. Executor / Rollback 統合と Versioning（v1 は Executor
   const st = m.panel.executorState();
   assert(st.stage === 'done' && st.execution.status === 'DONE' && m.mock.st.views['担当者別'] && !m.mock.st.fields.progress && JSON.stringify(ar6.writes) === '["PUT views"]', '1 回の操作で反映: v2 の一覧だけが入る（v1 の新規フィールドは作られない）');
   const chat = m.chat();
-  assert(m.msgs().filter(x => x.type === 'EXECUTION').length === 1 && ar6.cardCount === 1 && /動作テスト環境へ反映しました。/.test(ar6.card) && /標準設定: ✓ 1 件を反映（反映後の確認で一致）/.test(ar6.card) && !/VERIFIED/.test(chat) && !/Simulation/.test(chat) && /運用環境には反映されていません。/.test(ar6.card) && /data-act="exec-details"/.test(ar6.cardHtml) && /data-act="rollback"/.test(ar6.cardHtml) && !/kt-ai-execution-card/.test(chat) && /Simulationとの一致：✓/.test(m.$('kt-ai-exec').innerHTML) && !/まだ何も反映していません/.test(chat.slice(chat.indexOf('class="kt-ai-card kt-ai-final-card"'))), '結果のカード 1 枚（2026-10-09）: 反映しました・標準設定 ✓ 1 件（VERIFIED の語は出さない）/ 運用環境には反映されていません / [実行結果を見る][設定を変更前の状態に戻す]。実行のカードは結果のカードにまとめ、最終案のカードに「まだ何も反映していません」を出さない。Simulation・進捗は右の「反映」');
+  assert(m.msgs().filter(x => x.type === 'EXECUTION').length === 1 && ar6.cardCount === 1 && /動作テスト環境へ反映しました。/.test(ar6.card) && /標準設定: ✓ 1 件を反映（反映後の確認で一致）/.test(ar6.card) && !/VERIFIED/.test(chat) && !/Simulation/.test(chat) && /運用環境には反映されていません。/.test(ar6.card) && /data-act="exec-details"/.test(ar6.cardHtml) && /data-act="rollback"/.test(ar6.cardHtml) && !/kt-ai-execution-card/.test(chat) && /反映後の確認：✓ 1 件一致/.test(m.$('kt-ai-exec').innerHTML) && !/Simulation/.test(m.$('kt-ai-exec').innerHTML) && !/まだ何も反映していません/.test(chat.slice(chat.indexOf('class="kt-ai-card kt-ai-final-card"'))), '結果のカード 1 枚（2026-10-09）: 反映しました・標準設定 ✓ 1 件（VERIFIED の語は出さない）/ 運用環境には反映されていません / [実行結果を見る][設定を変更前の状態に戻す]。実行のカードは結果のカードにまとめ、最終案のカードに「まだ何も反映していません」を出さない。反映後の確認・進捗は右の「反映」');
   { const paneNow = m.panel.drawerState().pane;
     await clickChat(m, 'exec-details', { execution: st.execution.executionId });
     assert(m.panel.drawerState().pane === 'exec' && m.$('kt-ai-pane-exec').style.display === 'block' && /id="kt-ai-exec-result"/.test(m.$('kt-ai-exec').innerHTML), '［実行結果を見る］→ 右のタブ「反映」に切り替わる'); }

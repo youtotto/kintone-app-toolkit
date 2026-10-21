@@ -3,7 +3,7 @@
 // 検証内容（§43〜§47）:
 //   §46 execution: ADD_FIELD ×2 → UPDATE_LOOKUP（順序・依存）/ 既存コピー先の再利用 / picker・絞り込み・並び順 / 完全保持（参照元・キー・既存取得項目・表示名・必須）
 //        verification: fieldMappings / existingMappingsPreserved / added / destinationExists / sourceFieldsExist / searchMode（SERVER_MANAGED）/ 既存取得項目を落とす mutant
-//        Simulation vs Actual / 再解析（ルックアップの edge）/ actualAfter.updatedLookups / 監査の crossApp
+//        actualAfter.updatedLookups / 監査の crossApp（反映した後の照合・再解析は 2026-10-21 に廃止。判定は手順ごとの読み戻し）
 //   §19 cross-app stale: 参照元のフィールド定義が変わった → STALE_PLAN（LOOKUP_RELATED_APP_CHANGED）/ revision だけ → 警告 / 参照元が読めない → BLOCKED・lookup null
 //        identity: prepare → 実行の間にルックアップ設定が変わった → TARGET_CHANGED / 取得項目の削除・参照元の変更は計画のみ
 //   §47 rollback: RESTORE_LOOKUP_SETTINGS が DELETE_FIELD より先 → snapshot と完全一致 / 反映後の第三者変更 → ROLLBACK_STALE / 参照元の変化は警告のみ
@@ -32,7 +32,7 @@ async function flow(p, mock, { data = DATA, between = null, betweenRollback = nu
   const rv = reviewOf(p, data);
   const prepared = await E.prepare(approved ? R.executorOutput(p, rv, approved) : approveAll(p, rv), { api: mock.api, appId: '310' });
   if (between && prepared.status === 'PREPARED') between(prepared);
-  const log = prepared.status === 'PREPARED' ? await E.executePreview(prepared, { api: mock.api, review: rv, data }) : null;
+  const log = prepared.status === 'PREPARED' ? await E.executePreview(prepared, { api: mock.api, review: rv }) : null;
   if (afterExec && log) afterExec(log, prepared);
   const rb = log && !skipRollback ? await E.prepareRollback(log, prepared, { api: mock.api }) : null;
   if (rb && betweenRollback) betweenRollback(rb);
@@ -49,7 +49,7 @@ const ADD_TWO = () => plan([
 ], [pf('NEW_FIELD_1', '顧客住所', 'customer_address', 'SINGLE_LINE_TEXT'), pf('NEW_FIELD_2', '与信枠', 'customer_credit', 'NUMBER')]);
 
 (async () => {
-console.log('\n--- 1. §46 代表ユースケース: ADD_FIELD ×2 → UPDATE_LOOKUP（完全保持・検証・再解析）---');
+console.log('\n--- 1. §46 代表ユースケース: ADD_FIELD ×2 → UPDATE_LOOKUP（完全保持・検証）---');
 {
   const p = ADD_TWO(); const mock = makeKintoneMock(DATA); const before = lkOf(mock);
   const { rv, prepared, log } = await flow(p, mock, { skipRollback: true });
@@ -65,8 +65,7 @@ console.log('\n--- 1. §46 代表ユースケース: ADD_FIELD ×2 → UPDATE_LO
   assert(mock.st.fields.customer_address.type === 'SINGLE_LINE_TEXT' && mock.st.fields.customer_credit.type === 'NUMBER', 'コピー先 2 フィールドが追加されている（型は参照元と互換）');
   const v = log.steps[2].verification;
   assert(v.ok && ['exists', 'isLookup', 'typePreserved', 'relatedAppPreserved', 'relatedKeyFieldPreserved', 'fieldMappings', 'existingMappingsPreserved', 'added:customer_address', 'added:customer_credit', 'destinationExists:customer_address', 'lookupPickerFields', 'filterCond', 'sort', 'otherPropertiesPreserved', 'otherFieldsPreserved', 'sourceFieldsExist', 'relatedKeyExists', 'relatedAppFingerprint', 'searchMode'].every(n => v.checks.find(c => c.name === n)?.ok) && v.coverage.searchMode === 'SEARCH_MODE_SERVER_MANAGED' && /API では読めない/.test(v.checks.find(c => c.name === 'searchMode').note), 'verification: 取得項目 / 既存保持 / 追加分 / コピー先実在 / 参照元の取得元が存在 / 検索方法は SERVER_MANAGED（検証対象外と明記）');
-  assert(log.simulation.compared && log.simulation.match === true, 'Simulation（Review の After）と実際が一致');
-  assert(log.reanalysis.available && log.reanalysis.updatedLookups.length === 1 && log.reanalysis.updatedLookups[0].code === 'customer_lookup' && log.reanalysis.updatedLookups[0].edgesAfter === log.reanalysis.updatedLookups[0].edgesBefore + 4 && log.reanalysis.updatedLookups[0].copyTargets.includes('customer_address') && log.reanalysis.updatedLookups[0].newEdges.some(e => e.relationType === 'LOOKUP_PICKER' && e.target === '500:credit'), '再解析: ルックアップの依存 edge が 4 本増えた（コピー先 2 ＋ 取得元 2）');
+  assert(!('simulation' in log) && !('reanalysis' in log), '書いた内容の判定は手順ごとの読み戻しだけ（照合・再解析の記録は無い。反映した後の依存関係は画面が取り直す作業の基準が持つ。2026-10-21）');
   assert(log.actualAfter.updatedLookups.join() === '顧客マスタ参照' && log.actualAfter.addedFields.join() === 'customer_address,customer_credit' && log.crossApp[0].appId === '500', 'actualAfter.updatedLookups・log.crossApp');
   const audit = E.buildAudit({ plan: p, review: rv, prepared, execution: log });
   assert(audit.crossApp[0].appId === '500' && audit.crossApp[0].reviewed.fieldsHash && audit.crossApp[0].current.fieldsHash && audit.beforeAfter.some(x => x.stepId === 'P3' && x.before.mappings.length === 2 && x.after.mappings.length === 4) && !JSON.stringify(audit).includes('"records"'), '監査 JSON: crossApp（参照元の ID / 名前 / 指紋）・取得項目の before / after・レコードデータは含まない');
@@ -98,12 +97,12 @@ console.log('\n--- 2. §46 既存コピー先の再利用 / picker・絞り込�
   assert(bad.steps[0].status === 'INVALID' && bad.steps[0].issues.some(i => i.code === 'LOOKUP_FILTER_FIELD_UNKNOWN') && prBad.status === 'BLOCKED' && prBad.steps[0].status !== 'PENDING', '参照元に無いフィールドの絞り込み: Review が INVALID（承認対象にならない）→ Executor は実行しない');
 }
 
-console.log('\n--- 3. verification mutant / Simulation 不一致 ---');
+console.log('\n--- 3. verification mutant ---');
 {
   const p = ADD_TWO(); const mock = makeKintoneMock(DATA);
   mock.ctl.mutateLookup = (lk) => ({ ...lk, fieldMappings: lk.fieldMappings.filter(m => m.field !== 'case_name') });   // 既存の取得項目を 1 件落とす
   const { log } = await flow(p, mock, { skipRollback: true });
-  assert(log.status === 'PARTIAL' && log.steps[2].status === 'VERIFY_FAILED' && !check(log, 2, 'fieldMappings').ok && !check(log, 2, 'existingMappingsPreserved').ok && check(log, 2, 'added:customer_address').ok && log.simulation.compared === true, '既存取得項目が落ちる mutant: VERIFY_FAILED（fieldMappings / existingMappingsPreserved）・Simulation は VERIFIED の step だけ比較');
+  assert(log.status === 'PARTIAL' && log.steps[2].status === 'VERIFY_FAILED' && !check(log, 2, 'fieldMappings').ok && !check(log, 2, 'existingMappingsPreserved').ok && check(log, 2, 'added:customer_address').ok, '既存取得項目が落ちる mutant: VERIFY_FAILED（fieldMappings / existingMappingsPreserved）');
   assert(lkOf(mock).fieldMappings.length === 3 && !lkOf(mock).fieldMappings.some(m => m.field === 'case_name'), '（mutant の結果: 既存の case_name が落ちた状態が残る → VERIFY_FAILED は rollback の対象）');
 }
 

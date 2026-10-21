@@ -153,7 +153,7 @@ console.log('\n--- F2. 復元: リマインダー未設定（timezone null）の
   const mock = makeKintoneMock(data);
   assert(mock.st.timezone === null, '前提: モックも実機と同じく未設定の timezone は null');
   const prepared = await KTPlanExecutor.prepare(KTPlanReview.executorOutput(p, rv, ['P1']), { api: mock.api, appId: '310' });
-  const log = await KTPlanExecutor.executePreview(prepared, { api: mock.api, review: rv, data });
+  const log = await KTPlanExecutor.executePreview(prepared, { api: mock.api, review: rv });
   assert(log.status === 'DONE' && mock.st.reminders.length === 1 && mock.st.timezone === 'Asia/Tokyo', '反映: リマインダー 1 件・kintone が既定の timezone を入れる');
   const rb = await KTPlanExecutor.prepareRollback(log, prepared, { api: mock.api });
   const rolled = await KTPlanExecutor.executeRollback(rb, { api: mock.api, execution: log });
@@ -162,7 +162,7 @@ console.log('\n--- F2. 復元: リマインダー未設定（timezone null）の
   const data2 = clone(DATA); data2.reminderNotify = { notifications: [], timezone: 'UTC', revision: '4' };
   const mock2 = makeKintoneMock(data2);
   const prep2 = await KTPlanExecutor.prepare(KTPlanReview.executorOutput(p, reviewOf(p, data2), ['P1']), { api: mock2.api, appId: '310' });
-  const log2 = await KTPlanExecutor.executePreview(prep2, { api: mock2.api, review: reviewOf(p, data2), data: data2 });
+  const log2 = await KTPlanExecutor.executePreview(prep2, { api: mock2.api, review: reviewOf(p, data2) });
   const rb2 = await KTPlanExecutor.prepareRollback(log2, prep2, { api: mock2.api });
   const rolled2 = await KTPlanExecutor.executeRollback(rb2, { api: mock2.api, execution: log2 });
   assert(rolled2.status === 'ROLLED_BACK_VERIFIED' && mock2.st.timezone === 'UTC', 'timezone が設定済み（UTC）のアプリは snapshot の timezone で戻す');
@@ -203,7 +203,7 @@ console.log('\n--- F3. 承認の前の「自動で反映できるか」と、ル
   const prepared = await KTPlanExecutor.prepare(KTPlanReview.executorOutput(p, rv, ['P1', 'P2', 'P3']), { api: mock.api, appId: '310' });
   const p2 = prepared.steps.find(s => s.stepId === 'P2');
   assert(prepared.status === 'PREPARED' && p2.status === 'PENDING' && p2.prepared.payload.properties.phone.protocol === 'CALL', 'Executor の準備: phone を LINK（CALL）で追加する payload');
-  const log = await KTPlanExecutor.executePreview(prepared, { api: mock.api, review: rv, data: DATA });
+  const log = await KTPlanExecutor.executePreview(prepared, { api: mock.api, review: rv });
   const added = mock.st.fields.phone;
   const lk = mock.st.fields.customer_lookup.lookup.fieldMappings.map(m => `${m.relatedField}→${m.field}`);
   assert(log.status === 'DONE' && log.steps.every(s => s.status === 'VERIFIED') && added && added.type === 'LINK' && added.protocol === 'CALL' && lk.includes('address→address') && lk.includes('phone→phone'), '反映: phone（LINK・CALL）を追加し、ルックアップの取得項目に address / phone が入る（3 手順 VERIFIED）');
@@ -493,7 +493,7 @@ console.log('\n--- U2 / U3. 文言と最終確認の確認事項 ---');
   //   ここでは、反映の画面に最終確認の段（書き込みのボタン）が戻っていないことだけを確かめる
   const confirmHtml = KTContextUi.executorHtml({ stage: 'confirm', prepared, execution: null, classified: KTPlanExecutor.classifySteps(KTPlanReview.executorOutput(p, rv, ['P1'])), available: true, review: rv, questions: ['通知の送信時間は何時が適切ですか？'] });
   assert(!/id="kt-ai-exec-confirm"|id="kt-ai-exec-go"|id="kt-ai-exec-start"/.test(confirmHtml), 'U3: 反映の画面に最終確認の段と書き込みのボタンは無い（反映は最終案のカードの 1 回。未回答の確認事項は最終案のカードで出す）');
-  const log = await KTPlanExecutor.executePreview(prepared, { api: mock.api, review: rv, data: DATA });
+  const log = await KTPlanExecutor.executePreview(prepared, { api: mock.api, review: rv });
   const doneHtml = KTContextUi.executorHtml({ stage: 'done', prepared, execution: log, classified: [], available: true, review: rv });
   assert(/運用環境への反映は kintone のアプリ設定画面の［アプリを更新］で行います。Toolkit は運用環境へ反映しません/.test(doneHtml) && !/Executor/.test(doneHtml), 'U2: 結果の文言に Executor を出さない');
 }

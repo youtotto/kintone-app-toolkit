@@ -14,6 +14,15 @@
 //   §O3 反映の前の準備（2026-10-21）: 書き込む手順は、取り直した設定に対する計画の検査で分類し、その結果から書き込む内容を作る（手順ごとの準備で取り直した設定を
 //       もう一度確かめない）。最終案の［動作テスト環境へ反映］から: (g) 書いた内容は承認した準備・計画の検査の After と同じ (h) 依存が成り立たない手順は止める（書き込み 0）
 //       (i) 承認の後（押す直前）に書き込む手順の対象の設定が変わると止める（書き込み 0。承認を取り消す）
+//   §O4 反映前後の取得・比較・検証（2026-10-21）: 最終案の［動作テスト環境へ反映］から:
+//       (j) 設定 → JavaScript: 登録の準備は設定を書いた直後に取り直した作業の基準で行い、作業の基準をもう一度取り直さない
+//       (k) その取り直しが失敗したら、設定を書く前の基準で JavaScript を登録しない (l) JavaScript だけの反映は、押した直後の準備（承認した指紋と一致）を登録に使い、
+//       承認した本文・位置を書く (m)(n) 押す前・書き込みの直前にカスタマイズが変わったら止める（書き込み 0）(o) 設定の読み戻しの不一致を完了と出さない
+//       (p) JavaScript の本文・順序・PC／モバイルの不一致を完了と出さない (q) 一部失敗の記録と元に戻す対象 (r) 反映した後の照合・再解析を持たない
+//       (s) 設定を書く前に始まった作業の基準の取得が書いた後まで続いても、設定を書いた直後の取り直しはそれに合流せず、書いた後の設定で登録の準備をする
+//       (t) 書いている途中に始まって止めた取得の続き（書く前の設定）を、設定を書いた直後の取り直しが使わない
+//       (u) JavaScript だけの反映で、押した直後の準備に「設定の反映の後に確かめる依存」が残るときは使い回さず、作り直した準備が止める（書き込み 0）
+//       （変更が無い手順を書かないことは §O2 (d)、承認の後に設定の対象が変わったら止めることは §O3 (i)）
 //
 // 実行方法: node tests/ai-final-omission.test.js
 'use strict';
@@ -220,6 +229,209 @@ await section(async () => {
   const ap = await K.applyOnScreen(m, { before: () => { m.mock.st.fields.case_name.label = '別の作業者が変えた名前'; } });
   assert(ap.clicked && ap.run && ap.run.stage === 'stopped' && !ap.run.written && !ap.writes.length && m.mock.st.fields.case_name.label === '別の作業者が変えた名前' && !v.approval && /何も書き込/.test(ap.card),
     `O3-i: 承認の後に書き込む手順の対象が変わると、押した直後の取り直しで止める（書き込み 0・承認を取り消す）: ${JSON.stringify({ run: ap.run && { stage: ap.run.stage, stop: ap.run.stop && ap.run.stop.text }, writes: ap.writes })}`);
+});
+
+// =========================================================
+console.log('\n--- §O4. 反映前後の取得・比較・検証（最終案の［動作テスト環境へ反映］）---');
+//   作業の基準の読み込み（理由・結果）と、JavaScript の登録の準備（そのときの作業の基準）を記録して、最終案のカードから反映する。
+//   fail = その理由の読み込みを失敗させる / beforeJsWrite = JavaScript の登録（書き込み）を始める直前に呼ぶ（並行の変更の回帰用）
+const countedApply = async (kind, { before = null, fail = null, beforeJsWrite = null } = {}) => {
+  const JX = T.KTJsExecutor;
+  const loads = [], jsPrepares = [];
+  let mref = null;
+  const loader = K.loadDevBaseFromMock(() => mref.mock);
+  const gen = K.screenGenerate({ field: kind === 'js' ? 'case_name' : 'approval_memo', targetFile: kind === 'js' ? 'caseLock.js' : 'memoLock.js' });
+  const m = K.mount({ health: K.HEALTH_V, planImpl: K.planImplOf(K.screenPlan(kind)), generateImpl: gen.impl,
+    extra: { loadDevBase: (a = {}) => {
+      const rec = { reason: a.reason || null, at: mref.mock.calls.length, base: null }; loads.push(rec);
+      if (fail && fail === a.reason) { rec.base = { ok: false, status: 'FETCH_FAILED', message: '取得に失敗しました（テスト）', loadedAt: new Date().toISOString(), errors: [] }; return Promise.resolve(rec.base); }
+      return loader(a).then((b) => { rec.base = b; return b; });
+    } } });
+  mref = m;
+  await K.ticks();
+  const v = await K.adoptOnScreen(m); await K.ticks(20);
+  await K.waitUntil(() => !['base', 'running'].includes(m.panel.finalPrecheck().status) && m.panel.finalPrecheck().planId === v.planId, 80); await K.ticks(4);
+  const origP = JX.prepare, origE = JX.executePreview;
+  JX.prepare = function (input, o) { const b = m.panel.devBase(); jsPrepares.push({ at: m.mock.calls.length, base: b, memo: !!(b && b.data && b.data.fields && b.data.fields.approval_memo), defer: !!(input && input.deferDependencies) }); return origP.call(this, input, o); };
+  if (beforeJsWrite) JX.executePreview = function (p, o) { beforeJsWrite(m); return origE.call(this, p, o); };
+  try {
+    const l0 = loads.length, c0 = m.mock.calls.length;
+    const ap = await K.applyOnScreen(m, { before });
+    await K.ticks(20);
+    //   位置（at）は押した後の偽の kintone の呼び出しの番号（calls と同じ数え方）
+    return { m, v, ap, loads: loads.slice(l0).map(x => ({ ...x, at: x.at - c0 })), reasons: loads.slice(l0).map(x => x.reason), calls: m.mock.calls.slice(c0), jsPrepares: jsPrepares.map(x => ({ ...x, at: x.at - c0 })) };
+  } finally { JX.prepare = origP; JX.executePreview = origE; }
+};
+/** 押す前・書き込みの直前に、別の作業者が動作テスト環境のカスタマイズに JavaScript（URL）を足した */
+const otherJs = (m) => { m.mock.st.customize.desktop.js.push({ type: 'URL', url: 'https://example.com/other.js' }); m.mock.st.revision += 1; };
+await section(async () => {
+  // (j) 押した直後の準備（設定を書く前）は新設のフィールドを「設定の反映の後に確かめる」にする。登録の準備は、設定を書いた直後に取り直した作業の基準（after-apply）で
+  //     新設のフィールドを確かめ、作業の基準をもう一度取り直さない（前は登録の準備の前に register の取り直しがあった）。revision は進み、カスタマイズの内容は同じ
+  const r = await countedApply('mixed');
+  const pre = r.jsPrepares[0], reg = r.jsPrepares[1], aa = r.loads.find(x => x.reason === 'after-apply');
+  const jp = r.m.panel.jsExecState().prepared;
+  assert(r.ap.run.stage === 'done' && r.ap.run.ok && JSON.stringify(r.ap.writes) === JSON.stringify(['POST fields', 'PUT views', 'POST file', 'PUT customize'])
+    && JSON.stringify(r.reasons) === JSON.stringify(['execute', 'after-apply', 'after-js-register']) && r.jsPrepares.length === 2
+    && pre.defer && !pre.memo && pre.at < r.calls.indexOf('POST fields') && reg && !reg.defer && reg.memo && !!aa && reg.base === aa.base && reg.at > r.calls.indexOf('PUT views')
+    && jp && jp.snapshot && aa.base.revision.preview === jp.snapshot.revision && (jp.warnings || []).some(w => w.code === 'CUSTOMIZE_REVISION_ADVANCED') && jp.changes.every(c => c.status === 'PENDING'),
+    `O4-j: 設定 → JavaScript の登録の準備は設定を書いた直後の作業の基準で行う（取り直さない）: ${JSON.stringify({ reasons: r.reasons, writes: r.ap.writes, prepares: r.jsPrepares.map(x => ({ at: x.at, memo: x.memo, defer: x.defer })), sameBase: !!(aa && reg && reg.base === aa.base), rev: jp && jp.snapshot && jp.snapshot.revision })}`);
+});
+await section(async () => {
+  // (k) 設定を書いた直後の取り直しが失敗した → 設定を書く前の作業の基準で JavaScript を登録しない（今の設定を確かめられないとして止める。設定は書いたまま・元に戻せる）
+  const r = await countedApply('mixed', { fail: 'after-apply' });
+  assert(r.ap.run.stage === 'stopped' && r.ap.run.partial && JSON.stringify(r.ap.writes) === JSON.stringify(['POST fields', 'PUT views']) && JSON.stringify(r.reasons) === JSON.stringify(['execute', 'after-apply'])
+    && r.jsPrepares.length === 1 && r.ap.run.stop.text === 'JavaScript の登録の準備で止まりました。' && /JavaScript: 未登録（動作テスト環境の今の設定を確かめられませんでした/.test(r.ap.card) && /data-act="rollback"/.test(r.ap.cardHtml),
+    `O4-k: 設定を書いた直後の取り直しが失敗したら、前の基準で JavaScript を登録しない: ${JSON.stringify({ reasons: r.reasons, writes: r.ap.writes, stop: r.ap.run.stop, js: r.ap.run.js })}`);
+});
+await section(async () => {
+  // (l) JavaScript だけ: 押した直後の準備（承認した指紋と一致を確かめた）を登録に使う（同じ時点・同じ作業の基準から作り直さない。取り直しも無い）。書いた本文・位置は承認した指紋と同じ
+  const r = await countedApply('js');
+  const fp = r.v.approval && r.v.approval.precheck && r.v.approval.precheck.fingerprint && r.v.approval.precheck.fingerprint.js;
+  const list = r.m.mock.st.customize.desktop.js;
+  const idx = list.findIndex(e => e.type === 'FILE' && (r.m.mock.st.files.get(e.fileKey) || {}).name === 'caseLock.js');
+  const body = idx >= 0 ? r.m.mock.st.files.get(list[idx].fileKey).content : null;
+  const ex = r.m.panel.jsExecState().execution;
+  assert(r.ap.run.ok && JSON.stringify(r.ap.writes) === JSON.stringify(['POST file', 'PUT customize']) && JSON.stringify(r.reasons) === JSON.stringify(['execute', 'after-js-register']) && r.jsPrepares.length === 1
+    && fp && fp.changes.length === 1 && typeof body === 'string' && T.KTScan.hashText(body) === fp.changes[0].hash && idx === fp.changes[0].position && ex && ex.status === 'DONE' && ex.verification.ok,
+    `O4-l: JavaScript だけの反映は押した直後の準備で登録する（承認した本文・位置を書く）: ${JSON.stringify({ reasons: r.reasons, prepares: r.jsPrepares.length, writes: r.ap.writes, idx, fp: fp && fp.changes })}`);
+});
+await section(async () => {
+  // (m) 承認の後（押す前）に別の作業者がカスタマイズを変えた → 押した直後の取り直しと承認の照合で止める（書き込み 0・承認を取り消す）
+  const r = await countedApply('js', { before: ({ m }) => otherJs(m) });
+  // (n) 押した直後の準備の後（登録の書き込みの直前）に変えた → 登録の部品が書き込みの直前に取り直して止める（アップロードも PUT もしない）
+  const r2 = await countedApply('js', { beforeJsWrite: (m) => otherJs(m) });
+  const ex2 = r2.m.panel.jsExecState().execution;
+  assert(r.ap.run.stage === 'stopped' && !r.ap.writes.length && r.ap.run.stop.text === '承認の欄の準備の後に、動作テスト環境の設定が変わりました。何も書き込まずに止めました。' && !r.v.approval
+    && r2.ap.run.stage === 'stopped' && !r2.ap.writes.length && ex2 && ex2.error && ex2.error.code === 'STALE_CUSTOMIZATION' && ex2.previewUnchanged === true && r2.ap.run.stop.text === 'JavaScript を登録できませんでした。' && !r2.v.approval,
+    `O4-m/n: 押す前・書き込みの直前にカスタマイズが変わったら止める（書き込み 0）: ${JSON.stringify({ m: { stop: r.ap.run.stop && r.ap.run.stop.text, writes: r.ap.writes }, n: { stop: r2.ap.run.stop && r2.ap.run.stop.text, writes: r2.ap.writes, err: ex2 && ex2.error } })}`);
+});
+await section(async () => {
+  // (o) 設定の読み戻しの不一致（kintone に保存された一覧の絞り込みが違う）→ VERIFY_FAILED。右の「反映」も結果のカードも完了と出さない（照合の行は無い）
+  const r = await countedApply('settings', { before: ({ m }) => { m.mock.ctl.mutateList = (what, list) => { if (what === 'views' && list['承認待ち一覧']) list['承認待ち一覧'].filterCond = ''; return list; }; } });
+  const ex = r.m.panel.executorState().execution, pane = r.m.$('kt-ai-exec').innerHTML;
+  assert(r.ap.run.stage === 'stopped' && r.ap.run.partial && ex.status === 'FAILED' && ex.steps[0].status === 'VERIFY_FAILED' && ex.steps[0].verification.checks.some(c => c.name === 'filterCond' && !c.ok)
+    && !pane.includes('動作テスト環境への反映が完了しました。') && pane.includes('⚠ 1 件は一致しません') && !/Simulation|再解析/.test(pane) && /^一部だけ反映しました（要確認）。/.test(r.ap.card),
+    `O4-o: 設定の読み戻しの不一致を完了と出さない: ${JSON.stringify({ status: ex.status, step: ex.steps[0].status, card: r.ap.card.split('\n')[0] })}`);
+});
+await section(async () => {
+  // (p) JavaScript の読み戻し: 本文が違う・登録の順序が違う・PC ではなくモバイルに入った → VERIFY_FAILED。結果のカードは「反映しましたが、確認で一致しない点があります」
+  const cases = [
+    ['本文', (m) => { m.mock.ctl.corruptUploaded = true; }, 'sourceHash'],
+    ['順序', (m) => { m.mock.ctl.mutateCustomize = (next) => { const js = next.desktop.js; js.unshift(js.pop()); return next; }; }, 'position'],
+    ['PC／モバイル', (m) => { m.mock.ctl.mutateCustomize = (next) => { next.mobile.js.push(next.desktop.js.pop()); return next; }; }, 'platform'],
+  ];
+  for (const [label, ctl, check] of cases) {
+    const r = await countedApply('js', { before: ({ m }) => ctl(m) });
+    const ex = r.m.panel.jsExecState().execution;
+    const fails = ((ex && ex.steps) || []).flatMap(s => ((s.verification && s.verification.checks) || []).filter(c => !c.ok).map(c => c.name));
+    assert(r.ap.run.stage === 'done' && r.ap.run.ok === false && ex.status === 'VERIFY_FAILED' && fails.includes(check) && /^反映しましたが、確認で一致しない点があります（要確認）。/.test(r.ap.card) && !/^動作テスト環境へ反映しました。/.test(r.ap.card),
+      `O4-p ${label}: JavaScript の読み戻しの不一致を完了と出さない（${check}）: ${JSON.stringify({ status: ex && ex.status, fails, card: r.ap.card.split('\n')[0] })}`);
+  }
+});
+await section(async () => {
+  // (q) 設定を書いた後に JavaScript のアップロードが失敗した → 一部反映。設定の記録（反映直後の設定）と元に戻す対象（書いた手順を逆順）は変わらない。カスタマイズは PUT していない
+  const r = await countedApply('mixed', { before: ({ m }) => { m.mock.ctl.failUpload = 'GENERIC'; } });
+  const st = r.m.panel.executorState();
+  const rb = ((st.rollbackPlan && st.rollbackPlan.steps) || []).map(s => `${s.stepId}:${s.actionType}:${s.target || ''}`);
+  assert(r.ap.run.stage === 'stopped' && r.ap.run.partial && JSON.stringify(r.ap.writes) === JSON.stringify(['POST fields', 'PUT views', 'POST file']) && r.m.panel.jsExecState().execution.previewUnchanged === true
+    && JSON.stringify(rb) === JSON.stringify(['P2:RESTORE_VIEWS:承認待ち一覧', 'P1:DELETE_FIELD:approval_memo']) && st.execution.actualAfterRaw && st.execution.actualAfterRaw.fields.properties.approval_memo
+    && r.ap.run.stop.text === 'JavaScript を登録できませんでした。' && /data-act="rollback"/.test(r.ap.cardHtml),
+    `O4-q: 一部失敗の記録と元に戻す対象: ${JSON.stringify({ writes: r.ap.writes, rollback: rb, stop: r.ap.run.stop && r.ap.run.stop.text })}`);
+});
+await section(async () => {
+  // (r) 設定だけ: 反映した後の判定は手順ごとの読み戻しだけ（照合・再解析の記録も表示も無い）。反映直後の設定は元に戻すときの基準として持つ
+  const r = await countedApply('settings');
+  const ex = r.m.panel.executorState().execution, pane = r.m.$('kt-ai-exec').innerHTML;
+  assert(r.ap.run.ok && JSON.stringify(r.ap.writes) === JSON.stringify(['PUT views']) && JSON.stringify(r.reasons) === JSON.stringify(['execute', 'after-apply']) && !('simulation' in ex) && !('reanalysis' in ex)
+    && ex.actualAfterRaw && ex.actualAfterRaw.views.views['承認待ち一覧'] && pane.includes('反映後の確認：✓ 1 件一致') && !/Simulation|再解析/.test(pane),
+    `O4-r: 反映した後の照合・再解析を持たない: ${JSON.stringify({ keys: Object.keys(ex).sort(), reasons: r.reasons })}`);
+});
+
+await section(async () => {
+  // (s) 設定を書く前に始まった作業の基準の取得（ほかの操作。ここでは［取り直す］を書き込みの直前に押した）が、書いた後まで続いた → 設定を書いた直後の取り直しは
+  //     それに合流せず、終わるのを待ってから書いた後の設定を取る。JavaScript の登録の準備はその基準（新設のフィールドがある）で行い、書く前の基準を使わない
+  //     （前は合流した書く前の基準で承認の基準を進め、登録の前の取り直しとの食い違いで承認を取り消して止めていた）
+  const JX = T.KTJsExecutor, PE = T.KTPlanExecutor;
+  const loads = []; let mref = null, release = null;
+  const loader = K.loadDevBaseFromMock(() => mref.mock);
+  const gen = K.screenGenerate({ field: 'approval_memo', targetFile: 'memoLock.js' });
+  const m = K.mount({ health: K.HEALTH_V, planImpl: K.planImplOf(K.screenPlan('mixed')), generateImpl: gen.impl,
+    extra: { loadDevBase: (a = {}) => { const rec = { reason: a.reason || null, base: null }; loads.push(rec); const p = loader(a).then((b) => { rec.base = b; return b; }); return a.reason === 'manual' ? new Promise((res) => { release = () => p.then(res); }) : p; } } });
+  mref = m;
+  await K.ticks();
+  const v = await K.adoptOnScreen(m); await K.ticks(20);
+  await K.waitUntil(() => !['base', 'running'].includes(m.panel.finalPrecheck().status) && m.panel.finalPrecheck().planId === v.planId, 80); await K.ticks(4);
+  const origP = JX.prepare, origE = PE.executePreview; const regBases = [];
+  JX.prepare = function (input, o) { if (!input.deferDependencies) regBases.push(m.panel.devBase()); return origP.call(this, input, o); };
+  //   設定の反映が終わった後（設定を書いた直後の取り直しを始めた後）に、書く前に始まった取得を終わらせる
+  PE.executePreview = async function (...a) { const r = await origE.apply(this, a); setTimeout(() => { if (release) release(); }, 0); return r; };
+  try {
+    const l0 = loads.length;
+    const ap = await K.applyOnScreen(m, { before: ({ m: mm }) => { mm.mock.ctl.onWrite = (what) => { if (what === 'POST fields') mm.panel.refreshDevBase({ reason: 'manual' }); }; } });
+    await K.ticks(30);
+    const ls = loads.slice(l0), manual = ls.find(x => x.reason === 'manual'), aa = ls.find(x => x.reason === 'after-apply');
+    const memo = (b) => !!(b && b.data && b.data.fields && b.data.fields.approval_memo);
+    assert(ap.run.stage === 'done' && ap.run.ok && JSON.stringify(ap.writes) === JSON.stringify(['POST fields', 'PUT views', 'POST file', 'PUT customize']) && JSON.stringify(ls.map(x => x.reason)) === JSON.stringify(['execute', 'manual', 'after-apply', 'after-js-register'])
+      && manual && !memo(manual.base) && aa && memo(aa.base) && regBases.length === 1 && regBases[0] === aa.base && !m.msgs().some(x => x.data && x.data.kind === 'approval-revoked'),
+      `O4-s: 書く前に始まった取得に合流せず、書いた後の設定で登録の準備をする: ${JSON.stringify({ reasons: ls.map(x => x.reason), manualMemo: memo(manual && manual.base), afterApplyMemo: memo(aa && aa.base), reg: regBases.map(b => ({ memo: memo(b), afterApply: !!(aa && b === aa.base) })), stage: ap.run && ap.run.stage, stop: ap.run && ap.run.stop })}`);
+  } finally { JX.prepare = origP; PE.executePreview = origE; m.mock.ctl.onWrite = null; }
+});
+
+await section(async () => {
+  // (t) 設定を書いている途中（押してから 60 秒より後）に開発支援が見えて自動の取り直し（tab）が始まり、すぐ見えなくなって止まった（取れた段 = 書く前の設定が続きとして残る）
+  //     → 設定を書いた後に作業の基準を古いとし、続きを捨てる。設定を書いた直後の取り直しは新しく取り、登録の準備はその基準（新設のフィールドがある）で行う
+  //     画面の入口と同じく、止める条件（shouldContinue）と続き（resume）を KTDevBase.load へ渡す読み込みを使う（テストの補助の loadDevBaseFromMock は渡さない）
+  const { makeEnvGetter } = require('./helpers/dev-base-fake.js');
+  const prodGet = makeEnvGetter({ preview: {}, production: K.INPUTS.data }).getImpl;
+  let mref = null, visible = true, fired = false;
+  const loads = [];
+  const loadDevBase = ({ reason = null, shouldContinue = null, resume = null } = {}) => {
+    const rec = { reason, resumed: !!resume, base: null }; loads.push(rec);
+    const api = mref.mock.api;
+    const PREV = { 'app/form/fields': () => api.getPreviewFields('341'), 'app/form/layout': () => api.getPreviewLayout('341'), 'app/views': () => api.getPreviewViews('341'), 'app/status': () => api.getPreviewStatus('341'),
+      'app/notifications/general': () => api.getPreviewGeneralNotifications('341'), 'app/notifications/perRecord': () => api.getPreviewPerRecordNotifications('341'), 'app/notifications/reminder': () => api.getPreviewReminders('341'),
+      'app/actions': () => api.getPreviewActions('341'), 'app/customize': () => api.getPreviewCustomize('341') };
+    const getImpl = async (p) => { const mm = /^\/k\/v1\/preview\/(.+)$/.exec(p); return mm && PREV[mm[1]] ? PREV[mm[1]]() : prodGet(p); };
+    return T.KTDevBase.load({ appId: '341', getImpl, download: (fk) => api.downloadFile(fk), shouldContinue, resume, now: () => mref.clock.t }).then((b) => { rec.base = b; return b; });
+  };
+  const gen = K.screenGenerate({ field: 'approval_memo', targetFile: 'memoLock.js' });
+  const m = K.mount({ health: K.HEALTH_V, planImpl: K.planImplOf(K.screenPlan('mixed')), generateImpl: gen.impl, extra: { loadDevBase, canAutoFetch: () => visible } });
+  mref = m;
+  await K.ticks();
+  const v = await K.adoptOnScreen(m); await K.ticks(20);
+  await K.waitUntil(() => !['base', 'running'].includes(m.panel.finalPrecheck().status) && m.panel.finalPrecheck().planId === v.planId, 80); await K.ticks(4);
+  const JX = T.KTJsExecutor, origP = JX.prepare, regBases = [];
+  JX.prepare = function (input, o) { if (!input.deferDependencies) regBases.push(m.panel.devBase()); return origP.call(this, input, o); };
+  const memo = (b) => !!(b && b.data && b.data.fields && b.data.fields.approval_memo);
+  try {
+    const l0 = loads.length;
+    const ap = await K.applyOnScreen(m, { before: ({ m: mm }) => { mm.mock.ctl.onWrite = (what) => { if (what === 'POST fields' && !fired) { fired = true; mm.clock.t += 61000; mm.panel.onVisible(); visible = false; } }; } });
+    await K.ticks(30);
+    const ls = loads.slice(l0), tab = ls.find(x => x.reason === 'tab'), aa = ls.find(x => x.reason === 'after-apply');
+    assert(ap.run.stage === 'done' && ap.run.ok && JSON.stringify(ap.writes) === JSON.stringify(['POST fields', 'PUT views', 'POST file', 'PUT customize']) && JSON.stringify(ls.map(x => x.reason)) === JSON.stringify(['execute', 'tab', 'after-apply'])
+      && tab && tab.base && tab.base.paused && aa && !aa.resumed && memo(aa.base) && regBases.length === 1 && regBases[0] === aa.base,
+      `O4-t: 書いている途中に止めた取得の続き（書く前の設定）を、書いた直後の取り直しが使わない: ${JSON.stringify({ reasons: ls.map(x => `${x.reason}${x.resumed ? '(続き)' : ''}${x.base && x.base.paused ? '(止めた)' : ''}`), afterApplyMemo: memo(aa && aa.base), reg: regBases.map(memo), stage: ap.run && ap.run.stage, stop: ap.run && ap.run.stop })}`);
+  } finally { JX.prepare = origP; m.mock.ctl.onWrite = null; }
+});
+await section(async () => {
+  // (u) JavaScript だけ: 新設のフィールドを Toolkit が作れない種類（計算。手作業に回る）にし、自動で反映できる設定の手順を無くす → 承認の欄の準備に設定の部分が無く、
+  //     押した直後の準備は「設定の反映の後に確かめる」依存を残したまま PREPARED。使い回さずに作り直した準備が DEPENDENCY_NOT_APPLIED で止める（無いフィールドに依存する JavaScript を登録しない）
+  const base = K.screenPlan('mixed');
+  const raw = (goal) => { const r = base(goal); return { ...r, plan: { ...r.plan, proposedFields: r.plan.proposedFields.map(f => ({ ...f, type: 'CALC' })), steps: r.plan.steps.filter(s => s.id !== 'P2').map(s => (s.id === 'P1' ? { ...s, spec: { ...s.spec, fieldType: 'CALC' } } : s)) } }; };
+  const gen = K.screenGenerate({ field: 'approval_memo', targetFile: 'memoLock.js' });
+  const m = K.mount({ health: K.HEALTH_V, planImpl: K.planImplOf(raw), generateImpl: gen.impl });
+  await K.ticks();
+  await K.adoptOnScreen(m); await K.ticks(20);
+  const JX = T.KTJsExecutor, origP = JX.prepare, preps = [];
+  JX.prepare = function (input, o) { const rec = { defer: !!input.deferDependencies }; preps.push(rec); return origP.call(this, input, o).then((p) => { rec.status = p.status; rec.deferred = (p.deferred || []).length; rec.blockers = (p.blockers || []).map(b => b.code); return p; }); };
+  try {
+    const ap = await K.applyOnScreen(m);
+    await K.ticks(20);
+    assert(ap.pre.status === 'ready' && ap.pre.settingsStatus === null && (ap.pre.items.deferred || []).length === 1 && ap.button && !ap.button.disabled
+      && preps.length === 2 && preps[0].defer && preps[0].status === 'PREPARED' && preps[0].deferred === 1 && !preps[1].defer && preps[1].status === 'BLOCKED' && preps[1].blockers.includes('DEPENDENCY_NOT_APPLIED')
+      && ap.run.stage === 'stopped' && !ap.writes.length && ap.run.stop.text === 'JavaScript の登録の準備で止まりました。' && /先に手順「承認メモフィールドを追加」を反映してください/.test(ap.card),
+      `O4-u: 依存が残る準備は使い回さず、作り直した準備が止める（書き込み 0）: ${JSON.stringify({ pre: ap.pre && { status: ap.pre.status, deferred: ap.pre.items && ap.pre.items.deferred }, preps, stage: ap.run && ap.run.stage, writes: ap.writes, stop: ap.run && ap.run.stop })}`);
+  } finally { JX.prepare = origP; }
 });
 
 console.log(`\n${state.failed ? 'FAILED' : 'ALL PASSED'}: ${state.passed} passed / ${state.failed} failed`);

@@ -3277,7 +3277,7 @@
           if (m?.srcType === 'FIELD' && m?.srcField) {
             fieldEdge(src, REL.ACTION_MAPS_FROM, m.srcField, 'ACTION_MAPPING', name);
           }
-          // 転記先（相手アプリのフィールド。Phase 14: 反映後の再解析で新しい転記が edge として現れる）
+          // 転記先（相手アプリのフィールド。Phase 14: 反映した後の作業の基準の依存関係に新しい転記が edge として現れる）
           if (m?.destField && destApp != null) {
             addEdge({
               ...src, relationType: REL.ACTION_MAPS_TO,
@@ -9837,9 +9837,9 @@
         for (const [name, v] of Object.entries(existing)) { const { id, ...rest } = v || {}; views[name] = rest; }   // id は応答プロパティ。builtinType（作業者が自分）は保持
         views[p.expect.name] = { ...p.payload.view, index: String(maxIndex + 1) };
         const res = await api.putPreviewViews(appId, views, String(cur?.revision ?? ''));
-        return { revision: String(res?.revision ?? ''), requests: [{ method: 'PUT', path: '/k/v1/preview/app/views.json', existingViews: Object.keys(existing).length, totalViews: Object.keys(views).length }] };
+        return { revision: String(res?.revision ?? ''), requests: [{ method: 'PUT', path: '/k/v1/preview/app/views.json', existingViews: Object.keys(existing).length, totalViews: Object.keys(views).length }], existingList: clone(existing) };
       },
-      async verify({ api, appId, snapshot }, p) {
+      async verify({ api, appId, snapshot }, p, applied) {
         const cur = await api.getPreviewViews(appId);
         const v = cur?.views?.[p.expect.name];
         const checks = [];
@@ -9851,9 +9851,12 @@
           check('filterCond', String(v.filterCond || '') === p.expect.filterCond, p.expect.filterCond, String(v.filterCond || ''));
           check('sort', String(v.sort || '') === p.expect.sort, p.expect.sort, String(v.sort || ''));
         }
-        const beforeNames = Object.keys(snapshot?.views?.views || {});
-        const lost = beforeNames.filter(n => !cur?.views?.[n]);
-        check('existingViewsPreserved', lost.length === 0, beforeNames.length, beforeNames.length - lost.length);
+        //   ほかの一覧は、この手順の書き込みの直前に取得した一覧と同じ（id を除く。全体置換なので）。2026-10-21: 反映した後の照合を廃止したので、同じ実行の後の手順の
+        //   全体置換が前の手順の一覧を変えたことも、ここで見つける（直前の一覧が無いときは、実行の前の snapshot の一覧が残っているか）
+        const stripId = (x) => { if (!x) return x; const { id, ...rest } = x; return rest; };
+        const beforeV = applied?.existingList || null;
+        const changed = beforeV ? Object.keys(beforeV).filter(n => !same(stripId(beforeV[n]), stripId(cur?.views?.[n]))) : Object.keys(snapshot?.views?.views || {}).filter(n => !cur?.views?.[n]);
+        check('existingViewsPreserved', changed.length === 0, [], changed);
         return { ok: checks.every(c => c.ok), checks, revision: String(cur?.revision ?? '') };
       },
       rollback({ appId, snapshot }, p) {
@@ -10448,7 +10451,7 @@
             check('relatedAppFingerprint', true, reviewedHash, relM.fieldsHash, { note: reviewedHash && relM.fieldsHash !== reviewedHash ? '参照元のフィールド定義が Review 時点と違います（反映後の変更。取得元は上で確認済み）' : '参照元のフィールド定義は Review 時点と同じ' });
           } catch (e) { check('sourceFieldsExist', true, 'read', 'UNVERIFIED', { note: `参照元アプリの定義を再取得できませんでした（${strErr(e).message}）` }); }
         }
-        // 検索方法（search mode）は kintone が管理し API では取得・指定できない → 検証対象外（Simulation 不一致ではない）
+        // 検索方法（search mode）は kintone が管理し API では取得・指定できない → 検証対象外
         check('searchMode', true, 'SERVER_MANAGED', 'SERVER_MANAGED', { note: 'ルックアップの検索方法は kintone が自動設定し API では読めないため検証の対象外（SEARCH_MODE_SERVER_MANAGED）' });
         return { ok: checks.every(c => c.ok), checks, revision: String(cur?.revision ?? ''), coverage: { searchMode: 'SEARCH_MODE_SERVER_MANAGED' } };
       },
@@ -10935,6 +10938,11 @@
           const c = (name, ok, expected, actual) => { own.push({ name, ok, expected, actual }); };
           if (m.kind === 'ADD_STATUS' || m.kind === 'UPDATE_STATUS') { const name = m.kind === 'ADD_STATUS' ? m.name : m.identity.name; const got = now?.states?.[name]; c(m.kind === 'ADD_STATUS' ? 'newStatusExists' : 'statusUpdated', !!got && same(stateKeyOf(got), stateKeyOf(exp.states[name])), stateKeyOf(exp.states[name]), got ? stateKeyOf(got) : null); }
           else { const name = m.kind === 'ADD_ACTION' ? m.action.name : m.identity.name, from = m.kind === 'ADD_ACTION' ? m.action.from : (m.set.from ?? m.identity.from); const i = findAction(now?.actions, name, from), j = findAction(exp.actions, name, from); c(m.kind === 'ADD_ACTION' ? 'newActionExists' : 'actionUpdated', i >= 0 && j >= 0 && same(actionKeyOf(now.actions[i]), actionKeyOf(exp.actions[j])), j >= 0 ? actionKeyOf(exp.actions[j]) : null, i >= 0 ? actionKeyOf(now.actions[i]) : null); }
+          //   2026-10-21: 書いた結果が、この手順の承認した内容（計画の検査の After から作った expect）と同じか。上の確かめは合成した送信の内容（exp）と比べるので、
+          //   合成の誤りはここで見つける（前は反映した後の照合が、注意の表示だけで見ていた）
+          { const ex = st.prepared?.expect || {}, keys = (list) => (list || []).map(e => entityKey(e.entity)).sort();
+            if (m.kind === 'ADD_STATUS' || m.kind === 'UPDATE_STATUS') { const got = now?.states?.[m.kind === 'ADD_STATUS' ? m.name : m.identity.name]; const want = { assigneeType: ex.assigneeType ?? null, assignees: [...(ex.assignees || [])].sort() }, act = got ? { assigneeType: got.assignee?.type ?? null, assignees: keys(got.assignee?.entities) } : null; c('matchesApproved', !!act && same(act, want), want, act); }
+            else { const i = findAction(now?.actions, m.kind === 'ADD_ACTION' ? m.action.name : m.identity.name, m.kind === 'ADD_ACTION' ? m.action.from : (m.set.from ?? m.identity.from)), a = i >= 0 ? now.actions[i] : null; const want = { from: ex.from, to: ex.to, filterCond: normCondE(ex.filterCond), type: ex.type || 'PRIMARY', executableUsers: [...(ex.executableUsers || [])].sort() }, act = a ? { from: a.from, to: a.to, filterCond: normCondE(a.filterCond), type: a.type || 'PRIMARY', executableUsers: a.type === 'SECONDARY' ? keys(a.executableUser?.entities) : [] } : null; c('matchesApproved', !!act && same(act, want), want, act); } }
           perStep.set(st.stepId, own);
         }
         // kintone 側の副作用（§17）: 一覧 / 通知 / リマインダーが PUT の前後で変わっていないか
@@ -10974,7 +10982,7 @@
     /** 行の比較用（size は kintone が補正することがあるので code / type だけ） */
     const stripLayoutRow = (row) => row ? { type: row.type, code: row.code ?? null, fields: (row.fields || []).map(f => ({ type: f.type, code: f.code ?? null, elementId: f.elementId ?? null })), layout: Array.isArray(row.layout) ? row.layout.map(stripLayoutRow) : null } : null;
 
-    // ================= preview の設定 → Review の Before と同じ形（stale 判定・再検証・再解析に使う）=================
+    // ================= preview の設定 → Review の Before と同じ形（stale 判定・再検証・反映した後のモデルに使う）=================
     function previewDataFrom({ fields, layout, views, generalNotify = undefined, perRecordNotify = undefined, reminderNotify = undefined, status = undefined, actions = undefined }, base = null) {
       return {
         ...(base && typeof base === 'object' ? base : {}),
@@ -10994,8 +11002,6 @@
     const SYSTEM_FIELD_TYPES = ['RECORD_NUMBER', 'CREATOR', 'CREATED_TIME', 'MODIFIER', 'UPDATED_TIME', 'STATUS', 'STATUS_ASSIGNEE', 'CATEGORY'];
     const isSystemField = (f) => !!f && SYSTEM_FIELD_TYPES.includes(f.type);
     const viewKey = (v) => ({ type: v.type, fields: v.fields, filterCond: v.filterCond, sort: v.sort });
-    /** Review の Before モデル形のルックアップの比較キー（参照元の code 表記は環境で揺れるので app ID で見る。検索方法は API に無い） */
-    const lookupKey = (f) => ({ app: String(f.lookup?.app ?? ''), keyField: f.lookup?.keyField ?? null, mappings: (f.lookup?.mappings || []).map(m => `${m.from}→${m.to}`), pickerFields: [...(f.lookup?.pickerFields || [])], filterCond: normCondE(f.lookup?.filterCond), sort: normCondE(f.lookup?.sort) });
     /** Review 時点の Before と現在の preview の差（stale 判定）。kinds は比較対象 */
     const notifKey = (n) => ({ scope: n.scope, title: n.scope === 'general' ? '' : (n.title || ''), targets: (n.targets || []).map(t => `${t.type}:${t.code ?? ''}`).sort(), filterCond: normCondE(n.filterCond), events: [...(n.events || [])].sort() });
     const remKey = (n) => ({ title: n.title || '', timing: n.timing, targets: (n.targets || []).map(t => `${t.type}:${t.code ?? ''}`).sort(), filterCond: normCondE(n.filterCond) });
@@ -11181,7 +11187,7 @@
     // ================= prepare =================
     /**
      * @param {object} input executorOutput() の { plan, review, approvedSteps }（review は simulation.before / after を含んでよい）
-     * @param {object} o { api, appId, now?, data? (再解析用の運用環境 DATA), layoutPolicy? ('APPEND_ROW' | 'NONE'), shouldContinue? }
+     * @param {object} o { api, appId, now?, layoutPolicy? ('APPEND_ROW' | 'NONE'), shouldContinue? }
      *   shouldContinue: 自動の準備（承認の欄の準備）のとき（設定取得の関所）。偽になったら後続の取得（相手アプリの定義）を始めずに止める（KTFetchGate.paused を投げる）。
      *   利用者の明示の操作（反映・［動作テスト環境へ反映］の照合の取り直し）では渡さない（止めない）
      */
@@ -11241,8 +11247,6 @@
       //   書き込む内容が計画の検査のときと同じか（下の 4.）は、計画を作ったときの結果と比べる
       const writes = (r) => { const s = plan.steps.find(x => x.id === r.stepId); return !!(s && HANDLERS[s.actionType] && ACTION_CAPABILITIES[s.actionType]?.previewExecute && reFreshMap.has(r.stepId)); };
       const reviewNow = reFresh ? { ...review, conflicts: reFresh.conflicts, simulation: { ...review.simulation, order: reFresh.simulation?.order || review.simulation?.order }, steps: review.steps.map(r => (writes(r) ? reFreshMap.get(r.stepId) : r)) } : review;
-      prepared.freshReviewSteps = [...freshSteps];
-      if (freshSteps.size && reFresh?.simulation?.after) prepared.freshSimulationAfter = clone(reFresh.simulation.after);
       {
         const re = classifySteps({ plan, review: reviewNow, approvedSteps: approved, fieldsNow: previewNow.fields, processNow: status || null });
         const map = new Map(re.map(s => [s.stepId, s]));
@@ -11337,13 +11341,13 @@
 
     // ================= executePreview =================
     /** 承認済み・実行可能な step を dependsOn 順に動作テスト環境へ反映し、1 step ごとに再取得して検証する。失敗したら以降を止める（Fail Stop） */
-    async function executePreview(prepared, { api, now = Date.now, onProgress = null, review = null, data = null } = {}) {
+    async function executePreview(prepared, { api, now = Date.now, onProgress = null, review = null } = {}) {
       if (!prepared || prepared.status !== RUN.PREPARED) throw Object.assign(new Error('prepare が完了していない、または実行できない状態です'), { code: 'NOT_PREPARED' });
       if (prepared.executed) throw Object.assign(new Error('この prepare は既に実行されています（二重実行の防止。やり直すには prepare からやり直してください）'), { code: 'ALREADY_EXECUTED' });
       prepared.executed = true;
       const log = {
         executorVersion: EXECUTOR_VERSION, executionId: prepared.executionId, appId: prepared.appId, env: ENV, startedAt: nowIso(now), finishedAt: null,
-        beforeRevision: prepared.revision.preview, afterRevision: null, status: RUN.RUNNING, steps: [], simulation: null, reanalysis: null, snapshot: prepared.snapshot,
+        beforeRevision: prepared.revision.preview, afterRevision: null, status: RUN.RUNNING, steps: [], snapshot: prepared.snapshot,
       };
       const progress = (st) => { if (typeof onProgress === 'function') { try { onProgress(clone(st), clone(log)); } catch (e) { } } };
       const yieldUi = () => new Promise(r => setTimeout(r, 0));
@@ -11433,155 +11437,30 @@
       const verified = log.steps.filter(s => s.status === STEP.VERIFIED).length;
       const bad = log.steps.filter(s => s.status === STEP.FAILED || s.status === STEP.VERIFY_FAILED).length;
       log.status = bad ? (verified ? RUN.PARTIAL : RUN.FAILED) : RUN.DONE;
-      // ---- 反映後の再取得 → Simulation との比較・再解析 ----
+      // ---- 反映後の再取得（元に戻すときの基準・監査の要約・プロセス管理の図）----
+      //   2026-10-21: 書いた内容が期待どおりかは、手順ごとの読み戻し（verify。書いた直後に取り直し、ほかの項目の保持も確かめる）だけが判定する。ここで取り直した設定を
+      //   計画の検査の After と照らし直す照合（compareSimulation。状態にも成否にも効かず、不一致でも完了の枠の中の注意だった）と、依存関係を作り直す再解析（reanalyze。
+      //   反映の直後に取り直す作業の基準 after-apply が同じ時点の依存関係を持つ）は削除した。この取得は、元に戻すときに「反映直後から変わったか」を比べる基準（actualAfterRaw）で、
+      //   作業の基準の取り直し（画面の側。本文・運用環境・依存関係を含み、取得に失敗することがある）と役目が違うので残す
       try {
         const [fields, layout, views, generalNotify, perRecordNotify, reminderNotify, status, actions] = await Promise.all([api.getPreviewFields(prepared.appId), api.getPreviewLayout(prepared.appId), api.getPreviewViews(prepared.appId), api.getPreviewGeneralNotifications(prepared.appId), api.getPreviewPerRecordNotifications(prepared.appId), api.getPreviewReminders(prepared.appId), typeof api.getPreviewStatus === 'function' ? api.getPreviewStatus(prepared.appId) : Promise.resolve(null), typeof api.getPreviewActions === 'function' ? api.getPreviewActions(prepared.appId) : Promise.resolve(null)]);
         log.afterRevision = String(fields?.revision ?? log.afterRevision ?? '');
         // 反映直後の設定（Execution Actual After）。Rollback はこれと「現在」を比べ、違えば ROLLBACK_STALE で止める
         log.actualAfterRaw = clone({ fields, layout, views, generalNotify, perRecordNotify, reminderNotify, ...(status ? { status } : {}), ...(actions ? { actions } : {}) });
-        const previewData = previewDataFrom({ fields, layout, views, generalNotify, perRecordNotify, reminderNotify, ...(status ? { status } : {}), ...(actions ? { actions } : {}) }, data && typeof data === 'object' ? { ...data, appId: prepared.appId, ...(prepared.snapshot?.relatedApps ? { relatedApps: { ...(data.relatedApps || {}), ...prepared.snapshot.relatedApps } } : {}) } : { appId: prepared.appId, ...(prepared.snapshot?.relatedApps ? { relatedApps: prepared.snapshot.relatedApps } : {}) });
-        const actual = KTPlanReview.buildBeforeModel(previewData);
-        log.simulation = compareSimulation(review?.simulation?.after || null, actual, log.steps, prepared);
+        const actual = KTPlanReview.buildBeforeModel(previewDataFrom({ fields, layout, views, generalNotify, perRecordNotify, reminderNotify, ...(status ? { status } : {}), ...(actions ? { actions } : {}) }, { appId: prepared.appId, ...(prepared.snapshot?.relatedApps ? { relatedApps: prepared.snapshot.relatedApps } : {}) }));
         // プロセス管理の Before / Planned / Actual（§18）: Mermaid と要約
         if (log.steps.some(x => isProcessAction(x.actionType) && x.status !== STEP.SKIPPED && x.status !== STEP.BLOCKED && x.status !== STEP.UNSUPPORTED)) {
           const beforeModel = prepared.snapshot?.status ? KTPlanReview.buildBeforeModel(previewDataFrom(prepared.snapshot, { appId: prepared.appId })) : null;
           log.process = { before: beforeModel ? KTPlanReview.processSummary(beforeModel.process) : null, actual: KTPlanReview.processSummary(actual.process), partition: review?.simulation?.process?.partition ?? null, mermaid: { before: beforeModel ? KTPlanReview.processMermaid(beforeModel.process, null, KTPlanReview.labelsOfModel(beforeModel)) : '', planned: review?.simulation?.process?.mermaid?.after ?? '', actual: KTPlanReview.processMermaid(actual.process, beforeModel ? beforeModel.process : null, KTPlanReview.labelsOfModel(actual) || KTPlanReview.labelsOfModel(beforeModel)) } };
         }
-        log.reanalysis = reanalyze(previewData, data, log.steps, prepared);
         const verifiedOf = (a) => log.steps.filter(s => s.actionType === a && s.status === STEP.VERIFIED);
         log.actualAfter = { fieldCount: Object.keys(actual.fields).length, views: actual.views.length, notifications: actual.notifications.general.length + actual.notifications.perRecord.length, reminders: actual.reminders.length, processStates: actual.process.states.length, processActions: actual.process.actions.length, addedStatuses: verifiedOf('ADD_PROCESS_STATUS').map(s => stepLogLabel(s, prepared)), addedActions: verifiedOf('ADD_PROCESS_ACTION').map(s => stepLogLabel(s, prepared)), updatedProcess: verifiedOf('UPDATE_PROCESS').map(s => stepLogLabel(s, prepared)), addedFields: verifiedOf('ADD_FIELD').map(s => stepLogTarget(s, prepared)), addedViews: verifiedOf('ADD_VIEW').map(s => stepLogTarget(s, prepared)), addedNotifications: verifiedOf('ADD_NOTIFICATION').length, addedReminders: verifiedOf('ADD_REMINDER').length, updatedFields: verifiedOf('UPDATE_FIELD').map(s => stepLogTarget(s, prepared)), updatedNotifications: verifiedOf('UPDATE_NOTIFICATION').map(s => stepLogLabel(s, prepared)), updatedReminders: verifiedOf('UPDATE_REMINDER').map(s => stepLogLabel(s, prepared)), updatedViews: verifiedOf('UPDATE_VIEW').map(s => stepLogLabel(s, prepared)), updatedLookups: verifiedOf('UPDATE_LOOKUP').map(s => stepLogLabel(s, prepared)), appActions: actual.appActions.length, addedAppActions: verifiedOf('ADD_APP_ACTION').map(s => stepLogLabel(s, prepared)), updatedAppActions: verifiedOf('UPDATE_APP_ACTION').map(s => stepLogLabel(s, prepared)) };
-      } catch (e) { log.simulation = { compared: false, match: null, mismatches: [], error: strErr(e).message }; log.actualAfterRaw = null; }
+      } catch (e) { log.actualAfterRaw = null; }
       log.finishedAt = nowIso(now);
       return log;
     }
     const stepLogTarget = (s, prepared) => prepared.steps.find(x => x.stepId === s.stepId)?.prepared?.expect?.code || prepared.steps.find(x => x.stepId === s.stepId)?.prepared?.expect?.name || null;
     const stepLogLabel = (s, prepared) => prepared.steps.find(x => x.stepId === s.stepId)?.prepared?.targetLabel || stepLogTarget(s, prepared);
-
-    /** Simulation After（Review が仮適用したモデル）と実際の After を、実行した対象だけ比較する */
-    function compareSimulation(simAfter, actual, stepLogs, prepared) {
-      if (!simAfter) return { compared: false, match: null, mismatches: [], note: 'Review の After モデルが無いため比較していません' };
-      if (!stepLogs.some(s => s.status === STEP.VERIFIED)) return { compared: false, match: null, mismatches: [], note: '反映した step が無いため比較していません' };
-      const mismatches = [];
-      for (const s of stepLogs) {
-        if (s.status !== STEP.VERIFIED) continue;
-        const expect = prepared?.steps?.find(x => x.stepId === s.stepId)?.prepared?.expect || null;
-        if (s.actionType === 'ADD_FIELD') {
-          const code = expect?.code;
-          const sim = simAfter.fields?.[code], act = actual.fields?.[code];
-          if (!sim || !act) { mismatches.push({ stepId: s.stepId, kind: 'FIELD', id: code, message: sim ? '実際の設定に追加したフィールドがありません' : 'Simulation に該当フィールドがありません' }); continue; }
-          const a = fieldKey(sim), b = fieldKey(act);
-          if (!same(a, b)) mismatches.push({ stepId: s.stepId, kind: 'FIELD', id: code, message: 'Simulation と実際の設定が一致しません', simulation: a, actual: b });
-        } else if (s.actionType === 'ADD_VIEW') {
-          const name = expect?.name || null;
-          const sim = (simAfter.views || []).find(v => v.origin === 'proposed' && v.stepId === s.stepId) || (name ? (simAfter.views || []).find(v => v.name === name) : null) || null;
-          const act = sim ? (actual.views || []).find(v => v.name === sim.name) : null;
-          if (!sim || !act) { mismatches.push({ stepId: s.stepId, kind: 'VIEW', id: sim?.name || name, message: sim ? '実際の設定に追加した一覧がありません' : 'Simulation に該当一覧がありません' }); continue; }
-          const a = viewKey(sim), b = viewKey(act);
-          if (!same(a, b)) mismatches.push({ stepId: s.stepId, kind: 'VIEW', id: sim.name, message: 'Simulation と実際の設定が一致しません', simulation: a, actual: b });
-        } else if (s.actionType === 'ADD_NOTIFICATION') {
-          const sim = [...(simAfter.notifications?.general || []), ...(simAfter.notifications?.perRecord || [])].find(n => n.origin === 'proposed' && n.stepId === s.stepId) || null;
-          const key = sim ? JSON.stringify(notifKey(sim)) : null;
-          const act = key ? [...(actual.notifications?.general || []), ...(actual.notifications?.perRecord || [])].find(n => JSON.stringify(notifKey(n)) === key) : null;
-          if (!sim || !act) mismatches.push({ stepId: s.stepId, kind: 'NOTIFICATION', id: sim?.title || null, message: sim ? '実際の設定に追加した通知がありません（通知先 / 条件 / イベントが Simulation と違います）' : 'Simulation に該当通知がありません', ...(sim ? { simulation: notifKey(sim) } : {}) });
-        } else if (s.actionType === 'ADD_REMINDER') {
-          const sim = (simAfter.reminders || []).find(n => n.origin === 'proposed' && n.stepId === s.stepId) || null;
-          const key = sim ? JSON.stringify(remKey(sim)) : null;
-          const act = key ? (actual.reminders || []).find(n => JSON.stringify(remKey(n)) === key) : null;
-          if (!sim || !act) mismatches.push({ stepId: s.stepId, kind: 'REMINDER', id: sim?.title || null, message: sim ? '実際の設定に追加したリマインダーがありません（基準日 / 日数 / 時刻 / 通知先 / 条件が Simulation と違います）' : 'Simulation に該当リマインダーがありません', ...(sim ? { simulation: remKey(sim) } : {}) });
-        } else if (s.actionType === 'UPDATE_FIELD') {
-          const code = expect?.code;
-          const sim = simAfter.fields?.[code], act = actual.fields?.[code];
-          if (!sim || !act) { mismatches.push({ stepId: s.stepId, kind: 'FIELD', id: code, message: 'Simulation または実際の設定にフィールドがありません' }); continue; }
-          const a = fieldKey(sim), b = fieldKey(act);
-          if (!same(a, b)) mismatches.push({ stepId: s.stepId, kind: 'FIELD', id: code, message: 'Simulation と実際の設定が一致しません', simulation: a, actual: b });
-        } else if (s.actionType === 'ADD_APP_ACTION' || s.actionType === 'UPDATE_APP_ACTION') {
-          const name = expect?.name;
-          const simSrc = (prepared?.freshReviewSteps || []).includes(s.stepId) && prepared?.freshSimulationAfter ? prepared.freshSimulationAfter : simAfter;   // コピー先を実行直前に取得した step は再 Review の After と比べる
-          const sim = (simSrc.appActions || []).find(a => a.name === name), act = (actual.appActions || []).find(a => a.name === name);
-          if (!sim || !act) { mismatches.push({ stepId: s.stepId, kind: 'APP_ACTION', id: name, message: sim ? '実際の設定に対象のアプリアクションがありません' : 'Simulation に該当アプリアクションがありません' }); continue; }
-          const a = appActionKey(sim), b = appActionKey(act);
-          // index は Review が末尾と仮定するので、実際の末尾と一致すればよい（他は完全一致）
-          if (!same({ ...a, index: null }, { ...b, index: null })) mismatches.push({ stepId: s.stepId, kind: 'APP_ACTION', id: name, message: 'Simulation と実際の設定が一致しません（コピー先 / 転記 / 利用者 / 利用条件）', simulation: a, actual: b });
-        } else if (s.actionType === 'UPDATE_LOOKUP') {
-          const code = expect?.code;
-          const sim = simAfter.fields?.[code], act = actual.fields?.[code];
-          if (!sim || !act || !sim.lookup || !act.lookup) { mismatches.push({ stepId: s.stepId, kind: 'LOOKUP', id: code, message: 'Simulation または実際の設定に対象のルックアップがありません' }); continue; }
-          const a = lookupKey(sim), b = lookupKey(act);
-          if (!same(a, b)) mismatches.push({ stepId: s.stepId, kind: 'LOOKUP', id: code, message: 'Simulation と実際の設定が一致しません（参照元 / キー / 取得項目 / 選択時表示 / 絞り込み / 並び順）', simulation: a, actual: b });
-        } else if (s.actionType === 'UPDATE_NOTIFICATION') {
-          const scope = expect?.scope, idx = expect?.index;
-          const sim = (simAfter.notifications?.[scope] || [])[idx], act = (actual.notifications?.[scope] || [])[idx];
-          if (!sim || !act) { mismatches.push({ stepId: s.stepId, kind: 'NOTIFICATION', id: expect?.title || null, message: 'Simulation または実際の設定に対象の通知がありません' }); continue; }
-          if (!same(notifKey(sim), notifKey(act))) mismatches.push({ stepId: s.stepId, kind: 'NOTIFICATION', id: sim.title || sim.id, message: 'Simulation と実際の設定が一致しません', simulation: notifKey(sim), actual: notifKey(act) });
-        } else if (s.actionType === 'UPDATE_REMINDER') {
-          const idx = expect?.index;
-          const sim = (simAfter.reminders || [])[idx], act = (actual.reminders || [])[idx];
-          if (!sim || !act) { mismatches.push({ stepId: s.stepId, kind: 'REMINDER', id: expect?.title || null, message: 'Simulation または実際の設定に対象のリマインダーがありません' }); continue; }
-          if (!same(remKey(sim), remKey(act))) mismatches.push({ stepId: s.stepId, kind: 'REMINDER', id: sim.title || sim.id, message: 'Simulation と実際の設定が一致しません', simulation: remKey(sim), actual: remKey(act) });
-        } else if (s.actionType === 'UPDATE_VIEW') {
-          const name = expect?.name;
-          const sim = (simAfter.views || []).find(v => v.name === name), act = (actual.views || []).find(v => v.name === name);
-          if (!sim || !act) { mismatches.push({ stepId: s.stepId, kind: 'VIEW', id: name, message: 'Simulation または実際の設定に対象の一覧がありません' }); continue; }
-          if (!same(viewKey(sim), viewKey(act))) mismatches.push({ stepId: s.stepId, kind: 'VIEW', id: name, message: 'Simulation と実際の設定が一致しません', simulation: viewKey(sim), actual: viewKey(act) });
-        } else if (s.actionType === 'ADD_PROCESS_STATUS' || (s.actionType === 'UPDATE_PROCESS' && expect?.kind === 'PROCESS_STATUS')) {
-          const name = expect?.name;
-          const sim = (simAfter.process?.states || []).find(x => x.name === name), act = (actual.process?.states || []).find(x => x.name === name);
-          if (!sim || !act) { mismatches.push({ stepId: s.stepId, kind: 'PROCESS_STATUS', id: name, message: 'Simulation または実際の設定に対象のステータスがありません' }); continue; }
-          const a = { assigneeType: sim.assigneeType, assignees: (sim.assignees || []).map(e => `${e.type}:${e.code ?? ''}`).sort() }, b = { assigneeType: act.assigneeType, assignees: (act.assignees || []).map(e => `${e.type}:${e.code ?? ''}`).sort() };
-          if (!same(a, b)) mismatches.push({ stepId: s.stepId, kind: 'PROCESS_STATUS', id: name, message: 'Simulation と実際の設定が一致しません（作業者）', simulation: a, actual: b });
-        } else if (s.actionType === 'ADD_PROCESS_ACTION' || (s.actionType === 'UPDATE_PROCESS' && expect?.kind === 'PROCESS_ACTION')) {
-          const name = expect?.name, from = expect?.from;
-          const sim = (simAfter.process?.actions || []).find(x => x.name === name && x.from === from), act = (actual.process?.actions || []).find(x => x.name === name && x.from === from);
-          if (!sim || !act) { mismatches.push({ stepId: s.stepId, kind: 'PROCESS_ACTION', id: name, message: 'Simulation または実際の設定に対象のアクションがありません' }); continue; }
-          if (!same(procActionKey(sim), procActionKey(act))) mismatches.push({ stepId: s.stepId, kind: 'PROCESS_ACTION', id: name, message: 'Simulation と実際の設定が一致しません', simulation: procActionKey(sim), actual: procActionKey(act) });
-        }
-      }
-      return { compared: true, match: mismatches.length === 0, mismatches, ...(mismatches.length ? { code: 'SIMULATION_MISMATCH' } : {}) };
-    }
-
-    /** 反映後の再解析（可能な範囲）: preview の fields / layout / views ＋ 運用環境のその他設定で DEPS を作り直し、追加フィールドの参照・壊れた参照を数える */
-    function reanalyze(previewData, baseData, stepLogs, prepared) {
-      const out = { available: false, before: null, after: null, addedFields: [] };
-      if (!KTDeps || typeof KTDeps.buildDependencyData !== 'function') return out;
-      const safe = (fn, fb) => { try { return fn(); } catch (e) { return fb; } };
-      const build = (d) => safe(() => { const fieldsN = KTDeps.normalizeFields(d?.fields || {}); const deps = KTDeps.buildDependencyData(d, fieldsN); return { deps, fields: fieldsN.length, edges: Array.isArray(deps?.edges) ? deps.edges.length : 0, broken: safe(() => KTDeps.findBrokenRefs(deps).length, null) }; }, null);
-      const after = build(previewData);
-      const before = baseData ? build(baseData) : null;
-      if (!after) return out;
-      out.available = true;
-      out.before = before ? { fields: before.fields, edges: before.edges, brokenRefs: before.broken } : null;
-      out.after = { fields: after.fields, edges: after.edges, brokenRefs: after.broken };
-      for (const s of stepLogs) {
-        if (s.actionType !== 'ADD_FIELD' || s.status !== STEP.VERIFIED) continue;
-        const code = prepared.steps.find(x => x.stepId === s.stepId)?.prepared?.expect?.code;
-        if (!code) continue;
-        const impact = safe(() => KTDeps.impactOf(after.deps, code), null);
-        out.addedFields.push({ code, directRefs: impact ? (impact.direct || []).length : null, indirectRefs: impact ? (impact.indirect || []).length : null });
-      }
-      // Phase 14: 追加・変更したアプリアクションの依存 edge（転記元 / 転記先 / コピー先アプリ）を再解析前後で数える
-      out.appActions = [];
-      const actionEdges = (deps, name) => (Array.isArray(deps?.edges) ? deps.edges : []).filter(e => e.sourceType === 'ACTION' && e.sourceName === name && ['ACTION_MAPS_FROM', 'ACTION_MAPS_TO', 'APP_REFERENCE'].includes(e.relationType));
-      for (const s of stepLogs) {
-        if ((s.actionType !== 'ADD_APP_ACTION' && s.actionType !== 'UPDATE_APP_ACTION') || s.status !== STEP.VERIFIED) continue;
-        const name = prepared.steps.find(x => x.stepId === s.stepId)?.prepared?.expect?.name;
-        if (!name) continue;
-        const ea = actionEdges(after.deps, name), eb = before ? actionEdges(before.deps, name) : null;
-        const key = (e) => `${e.relationType}:${e.targetId}`;
-        out.appActions.push({ name, edgesBefore: eb ? eb.length : null, edgesAfter: ea.length, newEdges: eb ? ea.filter(e => !eb.some(x => key(x) === key(e))).map(e => ({ relationType: e.relationType, target: e.targetId })) : ea.map(e => ({ relationType: e.relationType, target: e.targetId })), sourceFields: ea.filter(e => e.relationType === 'ACTION_MAPS_FROM').map(e => e.targetId), destFields: ea.filter(e => e.relationType === 'ACTION_MAPS_TO').map(e => e.targetId) });
-      }
-      // Phase 13: 変更したルックアップの依存 edge（コピー先 / 取得元）を再解析前後で数える（新しい取得項目の edge が増えていること）
-      out.updatedLookups = [];
-      const lookupEdges = (deps, code) => (Array.isArray(deps?.edges) ? deps.edges : []).filter(e => e.sourceType === 'FIELD' && e.sourceId === code && (e.relationType === 'LOOKUP_COPY_TO' || e.relationType === 'LOOKUP_PICKER'));
-      for (const s of stepLogs) {
-        if (s.actionType !== 'UPDATE_LOOKUP' || s.status !== STEP.VERIFIED) continue;
-        const code = prepared.steps.find(x => x.stepId === s.stepId)?.prepared?.expect?.code;
-        if (!code) continue;
-        const ea = lookupEdges(after.deps, code), eb = before ? lookupEdges(before.deps, code) : null;
-        const key = (e) => `${e.relationType}:${e.targetId}`;
-        out.updatedLookups.push({ code, edgesBefore: eb ? eb.length : null, edgesAfter: ea.length, newEdges: eb ? ea.filter(e => !eb.some(x => key(x) === key(e))).map(e => ({ relationType: e.relationType, target: e.targetId })) : ea.map(e => ({ relationType: e.relationType, target: e.targetId })), copyTargets: ea.filter(e => e.relationType === 'LOOKUP_COPY_TO').map(e => e.targetId) });
-      }
-      return out;
-    }
 
     // ================= rollback 計画（逆順。Rollback Executor の入力）=================
     /** step ごとの Before / After（監査用。全体 payload ではなく要約と snapshot 参照） */
@@ -11963,8 +11842,6 @@
         beforeAfter: execution ? stepBeforeAfter(execution) : null,
         beforeSnapshot: execution?.snapshot ?? prepared?.snapshot ?? null,
         actualAfter: execution?.actualAfter ?? null,
-        simulation: execution?.simulation ?? null,
-        reanalysis: execution?.reanalysis ?? null,
         afterSnapshot: execution?.actualAfterRaw ?? null,
         rollbackPlan: execution && prepared ? buildRollbackPlan(execution, prepared) : null,
         rollback: rollbackSection(rollback || execution?.rollback || null),
@@ -12017,7 +11894,7 @@
 
     return {
       EXECUTOR_VERSION, ENV, STEP, RUN, RB, RB_RUN, PREVIEW_FIELD_TYPES, ACTION_CAPABILITIES, HANDLERS, ROLLBACK_STRATEGIES,
-      classifySteps, applyReadiness, noWriteOf, prepare, executePreview, buildRollbackPlan, prepareRollback, executeRollback, rollbackSection, fieldReferences, buildAudit, compareSimulation, diffBefore, previewDataFrom, layoutHasCode, createKintoneApi,
+      classifySteps, applyReadiness, noWriteOf, prepare, executePreview, buildRollbackPlan, prepareRollback, executeRollback, rollbackSection, fieldReferences, buildAudit, diffBefore, previewDataFrom, layoutHasCode, createKintoneApi,
       recipientEntity, notificationDuplicate, reminderDuplicate, preservationChecks, UPDATABLE_FIELD_KEYS,
       preservationExceptIndex, notificationIdentityMismatch, reminderIdentityMismatch, viewIdentityMismatch,
       PROCESS_GROUP, PROCESS_ACTIONS, processEntity, processIdentityMismatch, formProcessGroups,
@@ -15781,10 +15658,6 @@
         if (s.stage === 'running') return `${headLead}<div style="margin-top:8px;"><b>動作テスト環境へ反映しています...</b>${list}${note('画面を閉じずにお待ちください（運用環境には反映されません）')}</div>${breakdown}${foot}`;
         const verified = steps.filter(x => x.status === 'VERIFIED').length, warn = steps.filter(x => x.status === 'VERIFY_FAILED').length, failed = steps.filter(x => x.status === 'FAILED').length, skipped = steps.filter(x => x.status === 'SKIPPED' && x.reason !== 'NOT_APPROVED').length;
         const ok = ex?.status === 'DONE';
-        const sim = ex?.simulation;
-        const simText = !sim || sim.compared === false ? 'Simulationとの一致：—（比較していません）' : sim.match ? 'Simulationとの一致：✓' : `Simulationとの一致：× SIMULATION_MISMATCH（${(sim.mismatches || []).map(m => m.id).join(', ')}）`;
-        const re = ex?.reanalysis;
-        const reText = re?.available ? `再解析：フィールド ${re.after.fields} 件（実行前 ${re.before?.fields ?? '—'}）・依存 ${re.after.edges} 件・存在しない参照 ${re.after.brokenRefs ?? '—'} 件（実行前 ${re.before?.brokenRefs ?? '—'}）${(re.addedFields || []).length ? '・追加フィールドの参照 ' + re.addedFields.map(a => `${a.code}: ${a.directRefs}`).join(', ') : ''}${(re.updatedLookups || []).length ? '・ルックアップの依存 ' + re.updatedLookups.map(l => `${l.code}: ${l.edgesBefore ?? '—'} → ${l.edgesAfter}`).join(', ') : ''}${(re.appActions || []).length ? '・アプリアクションの依存 ' + re.appActions.map(a => `${a.name}: ${a.edgesBefore ?? '—'} → ${a.edgesAfter}`).join(', ') : ''}` : '再解析：—';
         // ルックアップ（Phase 13 §41）: 反映した取得項目の件数と参照元の確認結果
         const lkDone = steps.filter(x => x.actionType === 'UPDATE_LOOKUP' && ['VERIFIED', 'VERIFY_FAILED'].includes(x.status)).map(x => {
           const pp = (s.prepared?.steps || []).find(y => y.stepId === x.stepId)?.prepared || {};
@@ -15810,18 +15683,15 @@
         const written = steps.some(x => ['APPLIED', 'VERIFIED', 'VERIFY_FAILED'].includes(x.status) || (x.status === 'FAILED' && x.partial));
         const rolled = ex?.rollback || null;
         const rollbackBtn = written && !rolled && s.stage === 'done' ? `<button type="button" id="kt-ai-exec-rollback-start" class="btn" style="height:26px; font-size:11px; border-color:#6a1b9a;">変更前の状態に戻す</button>` : '';
-        const simBad = !!(sim && sim.compared !== false && !sim.match);
         return `${headLead}<div id="kt-ai-exec-result" style="margin-top:8px; border:2px solid ${ok ? '#2e7d32' : '#b00020'}; border-radius:6px; padding:8px;">
           <b>${esc(title)}</b>
           <div style="margin-top:4px; font-size:12px;">反映後の確認：✓ ${verified} 件一致${warn ? `　⚠ ${warn} 件は一致しません` : ''}${failed ? `　× ${failed} 件は失敗` : ''}${skipped ? `　－ ${skipped} 件は未実行` : ''}</div>
-          ${simBad ? `<div style="font-size:12px; color:#b26a00;">予定した内容と反映後の設定が一致しない点があります（［詳しく］で確かめてください）。</div>` : ''}${lkDoneHtml}${aaDoneHtml}
+          ${lkDoneHtml}${aaDoneHtml}
           ${ex?.process ? `<div id="kt-ai-exec-process" style="margin-top:6px;"><b>プロセス管理（反映前 / 計画 / 反映後）</b><div style="${MERMAID_STACK} margin-top:4px;">${mermaidBox('反映前', ex.process.mermaid?.before, 'var(--kt-ai-border, #ccc)')}${mermaidBox('計画（反映後の予定）', ex.process.mermaid?.planned, '#1a73e8')}${mermaidBox('反映後（動作テスト環境。青＝反映前との差）', ex.process.mermaid?.actual, '#2e7d32')}</div><div style="font-size:11px; opacity:.8; margin-top:2px;">反映後: ステータス ${(ex.process.actual?.states || []).map(x => x.name).join(' → ')}　アクション ${(ex.process.actual?.actions || []).length} 件（実行前 ${(ex.process.before?.actions || []).length} 件）</div>${partitionHtml(ex.process.partition)}</div>` : ''}
           <div style="margin-top:6px; font-size:12px;"><b>運用環境にはまだ反映されていません。</b>（運用環境への反映は kintone のアプリ設定画面の［アプリを更新］で行います。Toolkit は運用環境へ反映しません）</div>
           ${rollbackBtn ? `<div style="margin-top:8px; display:flex; gap:6px; flex-wrap:wrap;">${rollbackBtn}</div>` : ''}
           <details class="kt-ai-tech"><summary>詳しく（手順ごとの結果・検証の内訳・監査）</summary>
           <div style="margin-top:4px; font-size:12px;">✓ ${verified} 件 VERIFIED　⚠ ${warn} 件　× ${failed} 件</div>
-          <div style="font-size:12px;">${esc(simText)}</div>
-          <div style="font-size:11px;">${esc(reText)}</div>
           ${list}
           <div style="margin-top:8px; display:flex; gap:6px; flex-wrap:wrap;">
             <button type="button" id="kt-ai-exec-audit-copy" class="btn" style="height:26px; font-size:11px;">監査 JSON をコピー</button>
@@ -18639,9 +18509,7 @@
         if (stage === 'done' && ae.status !== (ex?.status || 'DONE')) {
           ae.status = ex?.status || 'DONE';
           if (pv && ae.written) pv.status = PLAN_STATUS.EXECUTED;
-          const re = ex?.reanalysis;
-          const reText = re?.available ? `反映後の動作テスト環境を再解析しました（フィールド ${re.after?.fields ?? '—'} 件・依存関係 ${re.after?.edges ?? '—'} 件）。` : '';
-          if (ae.written) push(MSG.SYSTEM_NOTICE, ROLE.SYSTEM, `動作テスト環境の設定が変更されました。${reText}運用環境には反映されていません。`, { executionId, kind: 'preview-changed' });
+          if (ae.written) push(MSG.SYSTEM_NOTICE, ROLE.SYSTEM, '動作テスト環境の設定が変更されました。運用環境には反映されていません。', { executionId, kind: 'preview-changed' });
         }
         if (/^roll/.test(stage) && !ae.rollbackMessage) { ae.rollbackMessage = push(MSG.ROLLBACK, ROLE.TOOLKIT, '動作テスト環境の変更を元に戻します。', { executionId, planId: ae.planId, version: ae.version }).id; }
         if (stage === 'rolled-back' && !ae.rolledBack) {
@@ -23556,6 +23424,10 @@
         return devBase;
       }
       if (devBase && !devBaseStale && maxAgeMs > 0 && (nowMs() - devBaseAt) < maxAgeMs) return devBase;
+      //   2026-10-21: 設定を書いた直後の取り直し（after-apply）は、書く前に始まったかもしれない取得（ほかの操作の取り直し）に合流しない。その終わりを待ってから、
+      //   書いた後の設定を取る（JavaScript の登録の準備は登録の前に取り直さず、この基準を使う。after-apply は明示の理由なので、見えていなくても途中で止めない。
+      //   書く前・書いている途中に止めた取得の続きは、書いた後に confirmExecutor が古い印を付けて捨てる）
+      if (devBasePromise && reason === 'after-apply') { await devBasePromise.catch(() => null); return refreshDevBase({ maxAgeMs, reason }); }
       if (devBasePromise) return auto ? devBasePromise : joinDevBase();
       const seq = ++devBaseSeq;
       const gen = devBaseGen, ownDeferred = devBaseOwnDeferred;
@@ -24686,8 +24558,10 @@
      *   内容が同じかで比べる（不具合 B）。finalRunId = その反映の印（会話の登録のカードは結果のカードにまとめる）。
      *   簡素化（2026-10-17）: 画面の外から呼ぶ口は削除した。最新の版か・URL 指定の JS か・承認があるかは、呼ぶ直前に applyFinal と最終案の判定が確かめるので重ねない
      *   （ここでは準備の間に変わったこと（会話・版・基準・承認）だけを確かめる）
+     *   2026-10-21: prepared = 押した直後の準備（設定を書かない反映で、承認した指紋と一致を確かめたもの。applyFinal が渡す）。渡されたときは変更と準備を作り直さない
+     *   （同じ時点・同じ作業の基準から同じものを作るだけ）。登録の準備で作業の基準を取り直さない（直前の取り直しの後に書き込みが無い。古い印があるときだけ取り直す）
      */
-    async function startJsRegister(v, { expected = null, finalRunId = null } = {}) {
+    async function startJsRegister(v, { expected = null, finalRunId = null, prepared: given = null } = {}) {
       if (!v) return null;
       if (['preparing', 'running', 'rollback-preparing', 'rolling-back'].includes(jsExec.stage)) return null;
       if (!executor || typeof executor.api.getPreviewCustomize !== 'function') { conv.notice('この環境では動作テスト環境への登録ができません（kintone API がありません）。', { kind: 'js-register-unavailable' }); return null; }
@@ -24702,13 +24576,16 @@
         if (jsExec.stage === 'preparing' && jsExec.planId === v.planId && jsExec.version === v.version) { resetJsExec(); renderJsReg(); }
         return true;
       };
-      const { changes, blocked } = jsChangesOf(v);
+      //   2026-10-21: 作業の基準に古い印がある（直前の取り直しの間に、Toolkit のほかの場所が動作テスト環境を変えた）ときだけ、変更を作る前に取り直す
+      if (!given && devBaseStale) { await refreshDevBase({ reason: 'register' }); if (stalePrep()) return null; }
+      const { changes, blocked } = given ? { changes: given.changes || [], blocked: [] } : jsChangesOf(v);
       if (!changes.length) { jsExec.prepared = { executionId: null, status: 'BLOCKED', blockers: blocked.length ? blocked : [{ code: 'NOTHING_TO_REGISTER', message: '登録できる JavaScript がありません（仕様を確定してコードを生成してください）' }], warnings: [], changes: [], summary: JS_EMPTY_SUMMARY(), snapshot: null }; jsExec.stage = 'blocked'; renderJsReg(); return jsExec.prepared; }
-      // Phase 21: 登録の直前に、生成したコードを最新の作業基準（動作テスト環境）で検査し直す（生成の後にフィールドが消えた・変わったなども登録不可にする）
-      await refreshDevBase({ reason: 'register' });
-      if (stalePrep()) return null;
-      //   段階 C（C4）: 登録の直前の基準の取り直しの後も、承認が有効か（設定の反映の後の基準・外部の変更・準備の間の変化）
+      // Phase 21: 登録の直前に、生成したコードを最新の作業基準（動作テスト環境）で検査し直す（生成の後にフィールドが消えた・変わったなども登録不可にする）。
+      //   2026-10-21: 作業の基準は、設定を書いた直後の取り直し（after-apply）か押した直後の取り直し（execute）のもの。その後に書き込みは無いので、古い印が無ければ取り直さない（上）
+      //   （前は同じ時点の基準をもう一度取り、承認の基準と比べ直していた）。書き込みの直前の確かめ（カスタマイズの revision と内容・統合先の本文）は登録の部品が持つ
+      //   段階 C（C4）: 承認がまだ有効か（準備の間にほかの取り直しや操作が承認を外したとき）
       { const a2 = approvalNow(); if (!a2.ok) { jsExec.prepared = { executionId: null, status: 'BLOCKED', blockers: [{ code: 'APPROVAL_REQUIRED', message: a2.message }], warnings: [], changes: [], summary: JS_EMPTY_SUMMARY(), snapshot: null, confirmations: [], unverified: [] }; jsExec.stage = 'blocked'; renderJsReg(); return jsExec.prepared; } }
+      if (given) { jsExec.prepared = given; jsExec.stage = given.status === 'PREPARED' ? 'confirm' : 'blocked'; renderJsReg(); return jsExec.prepared; }
       try {
         const prepared = await KTJsExecutor.prepare({ appId: executor.appId, changes, recheck: jsRecheckOf(v), expectedRevision: expected && expected.revision != null ? expected.revision : (v.spec?.customizeRevision ?? null), ...(expected && expected.content != null ? { expectedContent: expected.content } : {}), spec: conv.specSummary(v), provenance: jsProvenanceOf(v) }, { api: executor.api });
         if (stalePrep()) return null;
@@ -25375,13 +25252,16 @@
         if (approvedParts.js && (conv.state.epoch !== epoch0 || conv.activePlan() !== v)) { revoke(''); return finish({ stage: 'stopped', partial: run.written, ok: false, js: { ...run.js, reason: '反映の途中で新しい会話・新しい最終案になったため、登録していません' }, stop: { text: '反映の途中で新しい会話・新しい最終案になったため、JavaScript は登録していません。', changes: [], next: run.written ? NEXT_SETTINGS_ONLY : '' } }); }
         if (approvedParts.js) {
           step('js');
-          const pj = await startJsRegister(v, { expected: { revision: approvedParts.js.revision, content: approvedParts.js.content }, finalRunId: run.id });
+          //   2026-10-21: 設定を書かない反映（JavaScript だけ）は、押した直後の準備（jp。上で承認した指紋と一致を確かめた）を登録に使う（同じ時点・同じ作業の基準から作り直さない）。
+          //   設定を書いた後は、書いた後の作業の基準で準備し直す（新設のフィールドの存在・進んだ revision は内容で比べる）。設定の反映の後に確かめる依存が残る準備と、作業の基準に古い印があるとき（登録の準備で取り直す）も作り直す
+          const reuse = !sp && !!jp && !(jp.deferred || []).length && !devBaseStale;
+          const pj = await startJsRegister(v, reuse ? { prepared: jp, finalRunId: run.id } : { expected: { revision: approvedParts.js.revision, content: approvedParts.js.content }, finalRunId: run.id });
           if (!pj || jsExec.stage !== 'confirm') {
             const reasons = ((pj && pj.blockers) || []).map(b => b.message);
             revoke('JavaScript の登録の準備で止まったためです。');
             return finish({ stage: 'stopped', partial: run.written, ok: false, js: { ...run.js, reason: reasons[0] || '登録の準備で止まりました' }, stop: { text: 'JavaScript の登録の準備で止まりました。', changes: reasons, next: run.written ? NEXT_SETTINGS_ONLY : '右の「反映」で理由を確かめてください。動作テスト環境は変わっていません。' } });
           }
-          const added = jsNewSince(approvedParts.js, jsPartsOf(pj));
+          const added = reuse ? [] : jsNewSince(approvedParts.js, jsPartsOf(pj));   // 使い回した準備は上で承認した指紋と同じ（同じ比較をしない）
           if (added.length) {
             jsExec.stage = 'blocked'; jsExec.prepared = { ...pj, status: 'BLOCKED', blockers: [{ code: 'CHANGED_AFTER_APPROVAL', message: '承認の後に、登録の内容・確認項目・注意が変わりました（登録していません）' }] }; renderJsReg();
             revoke('承認の後に JavaScript の登録の内容・確認項目・注意が変わったためです。');
@@ -25493,13 +25373,15 @@
       applyLog.push(execLogRef);
       renderExec();
       try {
-        const inputs = inputsNow();   // Phase 21: 作業の基準（動作テスト環境）があればそれで再解析する
-        const execution = await KTPlanExecutor.executePreview(execState.prepared, { api: executor.api, review: lastReview, data: inputs.data || null, onProgress: (step, partial) => { execState.execution = partial; renderExec(); } });
+        const execution = await KTPlanExecutor.executePreview(execState.prepared, { api: executor.api, review: lastReview, onProgress: (step, partial) => { execState.execution = partial; renderExec(); } });
         execState.execution = execution;
         execState.rollbackPlan = KTPlanExecutor.buildRollbackPlan(execution, execState.prepared);
-      } catch (e) { execState.error = e?.message || String(e); execState.execution = execState.execution || { status: 'FAILED', steps: execState.prepared.steps, simulation: null, reanalysis: null }; }
+      } catch (e) { execState.error = e?.message || String(e); execState.execution = execState.execution || { status: 'FAILED', steps: execState.prepared.steps }; }
       execState.stage = 'done'; renderExec();
       // Phase 21: 反映した後の動作テスト環境を次の作業の基準にする（取り直す）
+      //   2026-10-21: 書いた後に今の基準を古いとする（世代を進め、書く前・書いている途中に止めた取得の続きを捨てる）。取り直しは、この後に始めた取得の結果だけを使う
+      //   （JavaScript の登録の準備は登録の前に取り直さず、この基準を使う）
+      markDevBaseStale();
       notifySettingsChanged('apply');
       await refreshDevBase({ reason: 'after-apply' });
       return execState.execution;

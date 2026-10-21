@@ -30,7 +30,7 @@ const approveAll = (p, rv) => R.executorOutput(p, rv, p.steps.map(s => s.id));
 async function flow(p, mock, { data = DATA, between = null, betweenRollback = null, skipRollback = false } = {}) {
   const rv = reviewOf(p, data);
   const prepared = await E.prepare(approveAll(p, rv), { api: mock.api, appId: '341' });
-  const log = prepared.status === 'PREPARED' ? await E.executePreview(prepared, { api: mock.api, review: rv, data }) : null;
+  const log = prepared.status === 'PREPARED' ? await E.executePreview(prepared, { api: mock.api, review: rv }) : null;
   if (between) between(log, prepared);
   const rb = log && !skipRollback ? await E.prepareRollback(log, prepared, { api: mock.api }) : null;
   if (rb && betweenRollback) betweenRollback(rb);

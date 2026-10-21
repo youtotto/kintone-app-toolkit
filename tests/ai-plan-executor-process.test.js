@@ -34,7 +34,7 @@ async function flow(p, mock, { data = DATA, between = null, betweenRollback = nu
   const rv = reviewOf(p, data);
   const prepared = await E.prepare(approveAll(p, rv), { api: mock.api, appId: '341' });
   if (between && prepared.status === 'PREPARED') between(prepared);
-  const log = prepared.status === 'PREPARED' ? await E.executePreview(prepared, { api: mock.api, review: rv, data }) : null;
+  const log = prepared.status === 'PREPARED' ? await E.executePreview(prepared, { api: mock.api, review: rv }) : null;
   if (afterExec && log) afterExec(log, prepared);
   const rb = log && !skipRollback ? await E.prepareRollback(log, prepared, { api: mock.api }) : null;
   if (rb && betweenRollback) betweenRollback(rb);
@@ -69,7 +69,7 @@ console.log('\n--- 1. §37 / §40 / §41 承認分岐（Change Group = 1 PUT・�
   assert(now.actions.find(a => a.name === '部長へ申請').from === '承認待ち' && now.actions.find(a => a.name === '部長へ申請').filterCond === 'amount >= "1000000"' && now.actions.find(a => a.name === '部長承認する').to === '完了', '新しいアクション 2 件');
   const v = log.steps[0].verification;
   assert(v.ok && ['enableUnchanged', 'existingStatesPreserved', 'existingActionsPreserved', 'unexpectedRemoved', 'unexpectedChanged', 'noUnexpectedAdditions', 'noSideEffects'].every(n => v.checks.find(c => c.name === n)?.ok) && check(log, 0, 'newStatusExists').ok && check(log, 1, 'actionUpdated').ok && check(log, 2, 'newActionExists').ok && check(log, 3, 'newActionExists').ok, 'verification: enable / 既存の保持 / 予期しない変更なし / 新規・変更の確認 / 副作用なし');
-  assert(log.simulation.compared && log.simulation.match === true && log.process && log.process.mermaid.before && log.process.mermaid.planned.includes('部長承認') && log.process.mermaid.actual.includes('部長承認') && log.process.actual.states.length === 4 && log.process.partition.length, 'Simulation（Review の After）と実際が一致・Before / Planned / Actual の Mermaid と分割判定');
+  assert(log.process && log.process.mermaid.before && log.process.mermaid.planned.includes('部長承認') && log.process.mermaid.actual.includes('部長承認') && log.process.actual.states.length === 4 && log.process.partition.length, 'Before / Planned / Actual の Mermaid と分割判定（書いた内容の判定は手順ごとの読み戻し）');
   assert(log.actualAfter.processStates === 4 && log.actualAfter.processActions === 5 && log.actualAfter.addedStatuses.join() === '部長承認' && log.actualAfter.addedActions.join() === '部長へ申請,部長承認する' && log.actualAfter.updatedProcess.join() === '承認する', 'actualAfter にプロセスの件数');
   const plan1 = E.buildRollbackPlan(log, prepared);
   assert(plan1.steps.length === 1 && plan1.steps[0].actionType === 'RESTORE_PROCESS_SETTINGS' && plan1.steps[0].stepIds.join() === 'P1,P2,P3,P4' && plan1.steps[0].collection === 'status', 'rollback 計画: Change Group は 1 手順（RESTORE_PROCESS_SETTINGS）');
@@ -102,6 +102,22 @@ console.log('\n--- 1. §37 / §40 / §41 承認分岐（Change Group = 1 PUT・�
   assert(r3.log.steps[0].status === 'VERIFY_FAILED' && check(r3.log, 0, 'existingStatesPreserved').ok === false && check(r3.log, 0, 'unexpectedChanged').actual === 1, '既存ステータスの作業者が変わる mutant → unexpectedChanged 1');
 }
 
+console.log('\n--- 1b. 書いた結果を手順ごとに承認した内容と比べる（2026-10-21。反映した後の照合の代わり）---');
+{
+  //   (a) 手順ごとの確かめに matchesApproved（書いた結果が、計画の検査の After から作った承認した内容 expect と同じ）がある
+  const p = BRANCH(); const mock = makeKintoneMock(DATA);
+  const { log } = await flow(p, mock, { skipRollback: true });
+  assert(log.status === 'DONE' && [0, 1, 2, 3].every(i => check(log, i, 'matchesApproved')?.ok === true), `手順ごとに、書いた結果が承認した内容と同じ（matchesApproved）: ${JSON.stringify(log.steps.map(s => check(log, log.steps.indexOf(s), 'matchesApproved')))}`);
+  //   (b) 合成の誤り（送る内容が承認した内容と違う）: 送った内容と kintone の保存結果は一致するが、承認した内容と違う → その手順が VERIFY_FAILED・反映は PARTIAL
+  //       （グループ全体の確かめは通る。前は反映した後の照合の注意だけで、反映は DONE だった）
+  const m2 = makeKintoneMock(DATA); const orig = E.PROCESS_GROUP.compose;
+  E.PROCESS_GROUP.compose = function (cur, steps) { const next = orig.call(this, cur, steps); const a = next.actions.find(x => x.name === '部長へ申請'); if (a) a.filterCond = 'amount >= "2000000"'; return next; };
+  let r2 = null; try { r2 = await flow(p, m2, { skipRollback: true }); } finally { E.PROCESS_GROUP.compose = orig; }
+  const mis = check(r2.log, 2, 'matchesApproved');
+  assert(r2.log.status === 'PARTIAL' && r2.log.steps.map(s => s.status).join() === 'VERIFIED,VERIFIED,VERIFY_FAILED,VERIFIED' && check(r2.log, 2, 'newActionExists')?.ok === true && mis && mis.ok === false && /1000000/.test(mis.expected.filterCond) && /2000000/.test(mis.actual.filterCond),
+    `合成の誤りは、手順ごとの承認した内容との比べが見つける（送った内容との一致だけでは見つからない）: ${JSON.stringify({ steps: r2.log.steps.map(s => s.status), mis })}`);
+}
+
 console.log('\n--- 2. §36 / §37 Change Group の形成・孤立・新規フィールドの作業者・cross-category rollback ---');
 {
   // ADD_FIELD（部長承認者）→ Process group（作業者 = NEW_FIELD_1）。group は P1 の後に 1 回の PUT。Rollback は Process → Field の順
@@ -130,7 +146,7 @@ console.log('\n--- 2. §36 / §37 Change Group の形成・孤立・新規フィ
   const rv = reviewOf(p); const mock = makeKintoneMock(DATA);
   const prepared = await E.prepare(approveAll(p, rv), { api: mock.api, appId: '341' });
   assert(prepared.status === 'PREPARED' && prepared.groups.map(g => g.stepIds.join('+')).join(' ') === 'P1+P2+P3 P5', 'P5 は P4（フィールド追加）の後なので 2 つ目の Change Group');
-  const log = await E.executePreview(prepared, { api: mock.api, review: rv, data: DATA });
+  const log = await E.executePreview(prepared, { api: mock.api, review: rv });
   assert(log.status === 'DONE' && mock.calls.filter(c => c === 'PUT status').length === 2 && mock.st.status.states['部長承認'].assignee.entities[0].entity.code === 'manager_approver', '2 グループ → PUT 2 回・順序どおり');
 }
 {

@@ -275,7 +275,7 @@ console.log('\n--- 余計な確認: 確認の手順（REQUIRE_CONFIRMATION）を
   // 反映: P2 だけを書き込む（確認の手順は設定を変えない）
   const mock = makeKintoneMock(data);
   const prepared = await PE.prepare(PR.executorOutput(p, rv, ['P1', 'P2']), { api: mock.api, appId: '310' });
-  const log = prepared.status === 'PREPARED' ? await PE.executePreview(prepared, { api: mock.api, review: rv, data }) : null;
+  const log = prepared.status === 'PREPARED' ? await PE.executePreview(prepared, { api: mock.api, review: rv }) : null;
   const p2 = log ? (log.steps || []).find(x => x.stepId === 'P2') : null;
   assert(prepared.status === 'PREPARED' && log && p2 && p2.status === 'VERIFIED', `確認の手順を承認して反映 → P2（確認日）を動作テスト環境へ追加・検証: ${prepared.status} ${JSON.stringify(prepared.blockers)} ${p2 && p2.status}`);
   // 必須の確認（回答が無いと安全に変更できない）: 依存する手順そのものに必要な値が無ければ、確認の手順を承認しても反映しない

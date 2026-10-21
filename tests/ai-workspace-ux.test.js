@@ -240,7 +240,7 @@ console.log('\n--- §3〜§8. 計画 / Review / Before・After / 実行: 左は�
   const c2 = m.chat();
   assert(m.panel.executorState().stage === 'done' && /kt-ai-final-apply-card/.test(c2) && !/kt-ai-execution-card/.test(c2) && /動作テスト環境へ反映しました。/.test(c2) && /標準設定: ✓ \d+ 件を反映（反映後の確認で一致）/.test(c2) && !/VERIFIED/.test(c2) && /運用環境には反映されていません。/.test(c2) && /data-act="exec-details"/.test(c2) && !/Simulationとの一致/.test(c2) && !/監査 JSON/.test(c2), 'execution summary（結果のカード 1 枚）: 反映後の確認（✓ N 件。VERIFIED の語は出さない）・運用環境の注意・［実行結果を見る］。進捗 / Simulation / 監査は会話に無い');
   assert(m.msgs().some(x => x.data?.kind === 'preview-changed') && !/動作テスト環境の設定が変更されました/.test(c2), '反映の処理の通知（preview-changed）は conv.messages に残し、会話には出さない（反映のカードと同じ内容）');
-  assert(/Simulationとの一致/.test(m.$('kt-ai-exec').innerHTML) && /kt-ai-exec-audit-copy/.test(m.$('kt-ai-exec').innerHTML) && /kt-ai-exec-rollback-start/.test(m.$('kt-ai-exec').innerHTML) && m.$('kt-ai-ws-state').innerHTML === '<span class="kt-ai-status" data-status="applied">反映済み</span>', '右下の右の「反映」に詳細（Simulation / 監査 / 戻す）。右の見出しの状態は「反映済み」');
+  assert(/反映後の確認：✓/.test(m.$('kt-ai-exec').innerHTML) && !/Simulation|再解析/.test(m.$('kt-ai-exec').innerHTML) && /kt-ai-exec-audit-copy/.test(m.$('kt-ai-exec').innerHTML) && /kt-ai-exec-rollback-start/.test(m.$('kt-ai-exec').innerHTML) && m.$('kt-ai-ws-state').innerHTML === '<span class="kt-ai-status" data-status="applied">反映済み</span>', '右下の右の「反映」に詳細（反映後の確認 / 監査 / 戻す。照合・再解析の行は無い）。右の見出しの状態は「反映済み」');
 }
 
 // =========================================================
@@ -479,9 +479,10 @@ await section(async () => {
   await m.$('kt-ai-header').dispatch({ type: 'click', target: { id: 'kt-ai-log-open', dataset: { act: 'open-log' } } });
   assert(m.panel.drawerState().pane === 'log' && /class="kt-ai-apply-log-item"/.test(m.$('kt-ai-apply-log').innerHTML), 'N3: ［反映の記録］→ 右に反映の記録（drawerState().pane は log）');
   const logId = (log.match(/data-log="([^"]+)"/) || [])[1];
+  const execShown = /id="kt-ai-exec-result"/.test(m.$('kt-ai-exec').innerHTML);   // 新しい会話の前は、右の「反映」に反映の結果がある
   await m.$('kt-ai-new-conv').dispatch('click'); await ticks();
   log = m.$('kt-ai-apply-log').innerHTML;
-  assert(m.msgs().length === 0 && !/Simulationとの一致/.test(m.$('kt-ai-exec').innerHTML) && /前の会話/.test(log) && /反映済み（未復元）/.test(log) && /data-act="log-open"/.test(log) && /詳細・元に戻す/.test(log) && !/上で表示中/.test(log), 'N3: 新しい会話の右下の右の「反映」に前の会話の反映結果は出さず、反映の記録に「前の会話」として残す');
+  assert(m.msgs().length === 0 && execShown && !/id="kt-ai-exec-result"/.test(m.$('kt-ai-exec').innerHTML) && /前の会話/.test(log) && /反映済み（未復元）/.test(log) && /data-act="log-open"/.test(log) && /詳細・元に戻す/.test(log) && !/上で表示中/.test(log), 'N3: 新しい会話の右下の右の「反映」に前の会話の反映結果は出さず、反映の記録に「前の会話」として残す');
   assert(m.panel.unrevertedPreviewChange() === true, 'N3: 戻していない反映がある間は、ページを離れる前の確認を続ける（記録の分も含む）');
   // 監査 JSON（記録から）: 反映した時点の計画と判断（新しい会話の後も）
   m.copies.length = 0;

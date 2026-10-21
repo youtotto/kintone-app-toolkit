@@ -1,7 +1,7 @@
 // KTPlanExecutor（Phase 9: Preview Executor MVP）
 //
 // 検証内容（§32〜34）: ADD_FIELD / duplicate field / stale revision / not approved / review invalid / unsupported action /
-//   dependency order / failed dependency / double execute / partial failure / verification success・failure / simulation mismatch /
+//   dependency order / failed dependency / double execute / partial failure / verification success・failure（反映した後の判定は手順ごとの読み戻しだけ。2026-10-21）/
 //   snapshot / ADD_VIEW（add・duplicate・existing views preserved・field missing・proposed field resolved・stale config）/
 //   layout（existing layout preserved・added field・no accidental removal）/ permission / revision mismatch / production deploy 無し
 //
@@ -33,7 +33,7 @@ const planFieldView = () => plan([
   step('P3', 'ADD_VIEW', 'VIEW', '担当者別', { name: '担当者別', fields: ['owner', 'case_name', 'NEW_FIELD_1', 'NEW_FIELD_2'], filterCond: 'owner in (LOGINUSER())', sort: 'due_date asc' }, { dependsOn: ['P1', 'P2'] }),
 ], [pf('NEW_FIELD_1', '更新状況', 'progress', 'DROP_DOWN', { options: PROGRESS.options }), pf('NEW_FIELD_2', '確認日', 'checked_on', 'DATE')]);
 const approveAll = (p, rv) => R.executorOutput(p, rv, p.steps.map(s => s.id));
-const run = async (input, mock, { review = null, onProgress = null } = {}) => { const prepared = await E.prepare(input, { api: mock.api, appId: '341' }); const log = prepared.status === 'PREPARED' ? await E.executePreview(prepared, { api: mock.api, review, data: DATA, onProgress }) : null; return { prepared, log }; };
+const run = async (input, mock, { review = null, onProgress = null } = {}) => { const prepared = await E.prepare(input, { api: mock.api, appId: '341' }); const log = prepared.status === 'PREPARED' ? await E.executePreview(prepared, { api: mock.api, review, onProgress }) : null; return { prepared, log }; };
 
 (async () => {
 console.log('\n--- 1. ADD_FIELD: 承認 → prepare → preview へ反映 → 再取得で検証 ---');
@@ -48,7 +48,7 @@ console.log('\n--- 1. ADD_FIELD: 承認 → prepare → preview へ反映 → �
   assert(prepared.temporaryIdMap.NEW_FIELD_1 === 'progress' && prepared.steps[0].prepared.payload.properties.progress.type === 'DROP_DOWN' && prepared.steps[0].prepared.payload.properties.progress.options['進行中'].index === '1', 'temporaryId → 実コード（progress）・API payload（options に index）');
   assert(mock.calls.filter(c => c.startsWith('POST') || c.startsWith('PUT')).length === 0, 'prepare は書き込まない');
   const events = [];
-  const log = await E.executePreview(prepared, { api: mock.api, review: rv, data: DATA, onProgress: (s) => events.push(`${s.stepId}:${s.status}`) });
+  const log = await E.executePreview(prepared, { api: mock.api, review: rv, onProgress: (s) => events.push(`${s.stepId}:${s.status}`) });
   assert(log.status === 'DONE' && log.steps[0].status === 'VERIFIED' && log.beforeRevision === '12' && log.afterRevision === '14', `実行: DONE・P1 VERIFIED・revision 12 → 14（POST fields ＋ PUT layout）: ${log.status} ${log.steps[0].status} ${log.afterRevision}`);
   assert(events.join(',') === 'P1:RUNNING,P1:APPLIED,P1:VERIFIED', `進捗: RUNNING → APPLIED → VERIFIED（${events.join(',')}）`);
   assert(mock.st.fields.progress && mock.st.fields.progress.type === 'DROP_DOWN' && mock.st.fields.progress.label === '更新状況' && Object.keys(mock.st.fields.progress.options).length === 3, 'モックの動作テスト環境にフィールドが追加された');
@@ -56,8 +56,9 @@ console.log('\n--- 1. ADD_FIELD: 承認 → prepare → preview へ反映 → �
   assert(v.ok && v.checks.find(c => c.name === 'options').ok && v.checks.find(c => c.name === 'existingFieldsPreserved').ok && v.checks.find(c => c.name === 'layoutContainsField').ok && v.checks.find(c => c.name === 'existingLayoutPreserved').ok, 'verification: exists / type / label / required / options / 既存フィールド・レイアウト保持');
   assert(log.steps[0].requests.map(r => r.method + ' ' + r.path).join(' | ') === 'POST /k/v1/preview/app/form/fields.json | PUT /k/v1/preview/app/form/layout.json' && log.steps[0].requests[1].placement === 'APPENDED_ROW', 'レイアウト: 末尾の行として追加（既存の行は変えない）');
   assert(mock.st.layout.length === prepared.snapshot.layout.layout.length + 1 && mock.st.layout[mock.st.layout.length - 1].fields[0].code === 'progress' && JSON.stringify(mock.st.layout.slice(0, -1)) === JSON.stringify(prepared.snapshot.layout.layout), 'レイアウト: 既存の行は完全に保持され、新しい行が 1 つ増える');
-  assert(log.simulation.compared && log.simulation.match === true && log.simulation.mismatches.length === 0, 'Simulation After と実際の After が一致');
-  assert(log.reanalysis.available && log.reanalysis.after.fields === log.reanalysis.before.fields + 1 && log.reanalysis.addedFields[0].code === 'progress' && typeof log.reanalysis.addedFields[0].directRefs === 'number', '再解析: DEPS を作り直し、追加フィールドの参照数（0）と壊れた参照を数える');
+  //   2026-10-21: 反映した後の取得は、元に戻すときの基準（actualAfterRaw）と要約（actualAfter）に使う。書いた内容が期待どおりかは手順ごとの読み戻し（上の verification）だけが判定し、
+  //   計画の検査の After との照合（Simulation）・依存関係の再解析は持たない（反映した後の依存関係は、画面が反映の直後に取り直す作業の基準が持つ）
+  assert(!('simulation' in log) && !('reanalysis' in log) && log.actualAfterRaw && log.actualAfterRaw.fields.properties.progress && log.actualAfterRaw.layout.layout.length === mock.st.layout.length, '反映した後の判定は手順ごとの読み戻しだけ（照合・再解析の記録は無い）・元に戻すときの基準は反映直後の設定');
   assert(log.actualAfter.addedFields.join() === 'progress' && log.finishedAt && !/cookie|Bearer|refreshToken/i.test(JSON.stringify(log)), 'actualAfter の要約・秘密情報なし');
   const rb = E.buildRollbackPlan(log, prepared);
   assert(rb.executed === false && rb.steps.length === 1 && rb.steps[0].actionType === 'DELETE_FIELD' && rb.steps[0].api.payload.fields.join() === 'progress' && rb.snapshotRevision === '12', 'ロールバック計画: DELETE_FIELD（実行しない）＋ snapshot');
@@ -146,7 +147,7 @@ console.log('\n--- 4. 実行順（DAG）・部分失敗・Fail Stop・検証失�
   const order = mock.calls.filter(c => /^(POST|PUT views)/.test(c));
   assert(order.join(' | ') === 'POST fields | POST fields | PUT views', `API 呼び出し順: P1 → P2 → P3（${order.join(' | ')}）`);
   assert(mock.st.views['担当者別'] && mock.st.views['担当者別'].fields.join() === 'owner,case_name,progress,checked_on' && mock.st.views['担当者別'].index === '2' && Object.keys(mock.st.views).length === 3, '一覧: 既存 2 件を保持して 3 件目として追加（index は最大 + 1）');
-  assert(log.simulation.match === true && log.actualAfter.addedViews.join() === '担当者別', 'Simulation と一致');
+  assert(log.actualAfter.addedViews.join() === '担当者別', 'actualAfter の要約（追加した一覧）');
   // 部分失敗（P2 が失敗 → P3 は未実行。P1 は戻さない）
   const m2 = makeKintoneMock(DATA); m2.ctl.failAddField = 'checked_on';
   const r2 = await run(approveAll(p, rv), m2, { review: rv });
@@ -166,13 +167,12 @@ console.log('\n--- 4. 実行順（DAG）・部分失敗・Fail Stop・検証失�
   const m5 = makeKintoneMock(DATA); m5.ctl.mangleLabel = true;
   const r5 = await run(approveAll(p, rv), m5, { review: rv });
   assert(r5.log.steps[0].status === 'VERIFY_FAILED' && r5.log.steps[0].verification.checks.find(c => c.name === 'label').ok === false && r5.log.steps[1].status === 'SKIPPED' && r5.log.status === 'FAILED', 'API 成功・状態不一致 → VERIFY_FAILED・以降停止');
-  // Simulation mismatch（Review の After が実際と違う）
-  const m6 = makeKintoneMock(DATA);
+  //   2026-10-21: 反映した後の照合（Review の After と実際の After の比較・SIMULATION_MISMATCH）は廃止した。kintone の補正は手順ごとの読み戻しが VERIFY_FAILED にする（上の r5）。
+  //   計画と違う内容を書かないことは反映の前の準備が持つ（取り直した設定に対する計画の検査の After と、計画を作ったときの After が違えば REVALIDATION_FAILED。tier2 の 1-6）。
+  //   計画の検査の After を書き換えて渡しても、反映の判定（状態・読み戻し）は変わらない（判定に使わない）
   const rvBad = clone(rv); rvBad.simulation.after.fields.progress.label = '進捗（別名）';
-  const r6 = await run(approveAll(p, rv), m6, { review: rvBad });
-  assert(r6.log.status === 'DONE' && r6.log.simulation.match === false && r6.log.simulation.code === 'SIMULATION_MISMATCH' && r6.log.simulation.mismatches[0].id === 'progress', 'Simulation After と実際が違えば SIMULATION_MISMATCH（Executor のバグ / kintone の補正を検出）');
-  const r7 = await run(approveAll(p, rv), makeKintoneMock(DATA), { review: null });
-  assert(r7.log.simulation.compared === false, 'Review の After が無ければ比較しない（compared: false）');
+  const r6 = await run(approveAll(p, rv), makeKintoneMock(DATA), { review: rvBad });
+  assert(r6.log.status === 'DONE' && r6.log.steps.every(s => s.status === 'VERIFIED') && !('simulation' in r6.log) && !('simulation' in r5.log), '計画の検査の After は反映の判定に使わない（書いた内容の判定は手順ごとの読み戻しだけ。照合の記録は無い）');
 }
 
 console.log('\n--- 5. ADD_VIEW / layout ---');
@@ -186,6 +186,16 @@ console.log('\n--- 5. ADD_VIEW / layout ---');
   assert(v.ok && ['exists', 'type', 'fields', 'filterCond', 'sort', 'existingViewsPreserved'].every(n => v.checks.find(c => c.name === n)?.ok), 'verification: exists / fields / filter / sort / 既存保持');
   const rb = E.buildRollbackPlan(log, prepared);
   assert(rb.steps[0].actionType === 'RESTORE_VIEWS' && /2 件/.test(rb.steps[0].note), 'ロールバック計画: snapshot の一覧設定を戻す');
+  //   2026-10-21: 一覧の追加の読み戻しは、ほかの一覧の中身まで見る（書き込みの直前に取得した一覧と同じ）。同じ実行の後の手順の全体置換が前の手順の一覧を変えたら、
+  //   後の手順が VERIFY_FAILED（前は反映した後の照合が、注意の表示だけで見ていた）
+  const pv2 = plan([step('P1', 'ADD_VIEW', 'VIEW', '担当者別', { name: '担当者別', fields: ['owner', 'case_name', 'amount'], filterCond: 'owner in (LOGINUSER())', sort: 'due_date asc' }),
+    step('P2', 'ADD_VIEW', 'VIEW', '期限順', { name: '期限順', fields: ['case_name', 'due_date'], sort: 'due_date asc' })]);
+  const rv2 = reviewOf(pv2); const m7 = makeKintoneMock(DATA); let viewPuts = 0;
+  m7.ctl.mutateList = (what, list) => { if (what === 'views' && ++viewPuts === 2 && list['担当者別']) list['担当者別'].filterCond = ''; return list; };
+  const r7 = await run(approveAll(pv2, rv2), m7, { review: rv2 });
+  const pres7 = r7.log.steps[1].verification && r7.log.steps[1].verification.checks.find(c => c.name === 'existingViewsPreserved');
+  assert(r7.log.steps[0].status === 'VERIFIED' && r7.log.steps[1].status === 'VERIFY_FAILED' && pres7 && pres7.ok === false && JSON.stringify(pres7.actual) === JSON.stringify(['担当者別']) && r7.log.status === 'PARTIAL',
+    `一覧の追加の読み戻し: 後の手順の全体置換が前の手順の一覧を変えたら VERIFY_FAILED（ほかの一覧の中身まで見る）: ${JSON.stringify({ steps: r7.log.steps.map(s => s.status), pres: pres7 })}`);
   // duplicate: Review が INVALID
   const dupV = plan([step('P1', 'ADD_VIEW', 'VIEW', '承認待ち', { name: '承認待ち', fields: ['case_name'] })]);
   const dupRv = reviewOf(dupV);
@@ -220,10 +230,10 @@ console.log('\n--- 5b. staging E2E（app 344）で見つかった癖 ---');
   assert(st0(rv).status === 'NEEDS_CONFIRMATION' && codes0(rv).includes('COND_UNKNOWN_FUNCTION'), '前提: Review は要確認（COND_UNKNOWN_FUNCTION）');
   const prep = await E.prepare(R.executorOutput(pv, rv, ['P1']), { api: mock.api, appId: '341' });
   assert(prep.steps[0].status === 'BLOCKED' && prep.steps[0].reason === 'INVALID_CONDITION' && prep.status === 'BLOCKED' && mock.calls.length === 0, '条件式が kintone で評価できない step は承認されても BLOCKED（INVALID_CONDITION）・API を呼ばない');
-  // 反映した step が無いときは Simulation を「一致」と言わない
+  // 反映した step が無いときは「一致」と言わない（反映後の確認は手順ごとの読み戻しの件数だけ。2026-10-21）
   const p2 = planField(); const rv2 = reviewOf(p2); const m2 = makeKintoneMock(DATA); m2.ctl.failAddField = 'progress';
   const r2 = await run(approveAll(p2, rv2), m2, { review: rv2 });
-  assert(r2.log.status === 'FAILED' && r2.log.simulation.compared === false && r2.log.simulation.match === null, '全 step 失敗 → simulation.compared false（✓ と表示しない）');
+  assert(r2.log.status === 'FAILED' && r2.log.steps[0].status === 'FAILED' && !r2.log.steps.some(s => s.status === 'VERIFIED') && !('simulation' in r2.log), '全 step 失敗 → FAILED（読み戻しで一致した手順は 0 件・照合の記録は無い）');
 }
 
 console.log('\n--- 6. 入力の検証・DATA 不変 ---');

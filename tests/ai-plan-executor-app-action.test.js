@@ -38,7 +38,7 @@ async function flow(p, mock, { data = DATA, between = null, betweenRollback = nu
   const rv = reviewOf(p, data);
   const prepared = await E.prepare(approved ? R.executorOutput(p, rv, approved) : approveAll(p, rv), { api: mock.api, appId: '310' });
   if (between && prepared.status === 'PREPARED') between(prepared);
-  const log = prepared.status === 'PREPARED' ? await E.executePreview(prepared, { api: mock.api, review: rv, data }) : null;
+  const log = prepared.status === 'PREPARED' ? await E.executePreview(prepared, { api: mock.api, review: rv }) : null;
   if (afterExec && log) afterExec(log, prepared);
   const rb = log && !skipRollback ? await E.prepareRollback(log, prepared, { api: mock.api }) : null;
   if (rb && betweenRollback) betweenRollback(rb);
@@ -52,7 +52,7 @@ const UPD = (sp = {}, extra = {}) => plan([step('P1', 'UPDATE_APP_ACTION', 'APP_
 const ADD = (sp = {}) => plan([step('P1', 'ADD_APP_ACTION', 'APP_ACTION', '請求書作成', { name: '請求書作成', destApp: '311', actionMappings: [{ srcType: 'FIELD', srcField: 'case_name', destField: 'customer' }, { srcType: 'FIELD', srcField: 'amount', destField: 'quote_amount' }, { srcType: 'RECORD_URL', srcField: null, destField: 'source_url' }], entities: ['GROUP:sales_group'], filterCond: 'ステータス in ("承認待ち")', ...sp })]);
 
 (async () => {
-console.log('\n--- 1. §43 / §44 UPDATE_APP_ACTION: 転記の追加（既存 3 件の完全保持・検証・再解析）---');
+console.log('\n--- 1. §43 / §44 UPDATE_APP_ACTION: 転記の追加（既存 3 件の完全保持・検証）---');
 {
   const p = UPD(); const mock = makeKintoneMock(DATA); const before = actsOf(mock);
   const { rv, prepared, log } = await flow(p, mock, { skipRollback: true });
@@ -67,8 +67,7 @@ console.log('\n--- 1. §43 / §44 UPDATE_APP_ACTION: 転記の追加（既存 3 
   assert(now['見積を作成'].mappings.length === 3 && now['見積を作成'].mappings[2].destField === 'note' && now['見積を作成'].id === '5520' && now['見積を作成'].index === '0' && now['見積を作成'].destApp.app === '311' && JSON.stringify(now['見積を作成'].entities) === JSON.stringify(before['見積を作成'].entities) && JSON.stringify(strip({ a: now['再見積'] })) === JSON.stringify(strip({ a: before['再見積'] })) && JSON.stringify(strip({ a: now['複製'] })) === JSON.stringify(strip({ a: before['複製'] })) && now['再見積'].id === '5521', '完全保持: 対象は転記だけ増え、id / 並び順 / コピー先 / 利用者は不変。他の 2 件は bit 単位で同じ（id も）');
   const v = log.steps[0].verification;
   assert(v.ok && ['existingCountBefore', 'countPreserved', 'otherActionsPreserved', 'unexpectedRemoved', 'unexpectedChanged', 'targetExists', 'destAppPreserved', 'indexPreserved', 'mappingCount', 'existingMappingsPreserved', 'added:note', 'mappings', 'entities', 'filterCond', 'unchangedAttributesPreserved'].every(n => v.checks.find(c => c.name === n)?.ok), 'verification: 件数 / 他アクション保持 / 対象の転記（全件・既存・追加）/ コピー先 / 並び順 / 利用者 / 条件 / 他属性');
-  assert(log.simulation.compared && log.simulation.match === true, 'Simulation（Review の After）と実際が一致');
-  assert(log.reanalysis.available && log.reanalysis.appActions.length === 1 && log.reanalysis.appActions[0].name === '見積を作成' && log.reanalysis.appActions[0].edgesAfter === log.reanalysis.appActions[0].edgesBefore + 2 && log.reanalysis.appActions[0].newEdges.some(e => e.relationType === 'ACTION_MAPS_FROM' && e.target === 'secret_memo') && log.reanalysis.appActions[0].newEdges.some(e => e.relationType === 'ACTION_MAPS_TO' && e.target === '311:note') && log.reanalysis.appActions[0].destFields.includes('311:note'), '再解析: 転記元（secret_memo）と転記先（311:note）の edge が増えた');
+  assert(!('simulation' in log) && !('reanalysis' in log), '書いた内容の判定は手順ごとの読み戻しだけ（照合・再解析の記録は無い。反映した後の依存関係は画面が取り直す作業の基準が持つ。2026-10-21）');
   assert(log.actualAfter.appActions === 3 && log.actualAfter.updatedAppActions.join() === '見積を作成' && log.crossApp[0].appId === '311', 'actualAfter.updatedAppActions・log.crossApp');
   const audit = E.buildAudit({ plan: p, review: rv, prepared, execution: log });
   assert(audit.crossApp[0].role === 'destination' && audit.beforeAfter.some(x => x.stepId === 'P1' && x.before.mappings.length === 2 && x.after.mappings.length === 3) && audit.rollbackPlan.steps[0].actionType === 'RESTORE_APP_ACTION_SETTINGS' && !JSON.stringify(audit).includes('"records"'), '監査 JSON: crossApp（コピー先）・転記の before / after・rollback 計画・レコードデータは含まない');
@@ -101,7 +100,7 @@ console.log('\n--- 3. ADD_APP_ACTION: 新規アクション（index 末尾・転
   const mid = log.actualAfterRaw.actions.actions;
   assert(Object.keys(mid).length === 4 && mid['請求書作成'].index === '3' && mid['請求書作成'].destApp.app === '311' && mid['請求書作成'].mappings.length === 3 && mid['請求書作成'].mappings[2].srcType === 'RECORD_URL' && mid['請求書作成'].mappings[2].destField === 'source_url' && mid['請求書作成'].entities[0].type === 'GROUP' && mid['請求書作成'].id && JSON.stringify(strip({ a: mid['見積を作成'] })) === JSON.stringify(strip({ a: before['見積を作成'] })), '反映直後: 新規アクションは末尾・id 採番・RECORD_URL 転記。既存 3 件は同じ');
   const v = log.steps[0].verification;
-  assert(v.ok && ['countPreserved', 'existingActionsPreserved', 'unexpectedRemoved', 'unexpectedChanged', 'targetExists', 'destAppPreserved', 'requestedMappingsExist', 'entities', 'filterCond', 'index'].every(n => v.checks.find(c => c.name === n)?.ok) && log.simulation.match === true && log.reanalysis.appActions[0].name === '請求書作成' && log.reanalysis.appActions[0].edgesAfter === 6 && log.actualAfter.addedAppActions.join() === '請求書作成', 'verification / Simulation 一致 / 再解析（転記元 2 ＋ 転記先 3 ＋ コピー先 1 = 6 edge）');
+  assert(v.ok && ['countPreserved', 'existingActionsPreserved', 'unexpectedRemoved', 'unexpectedChanged', 'targetExists', 'destAppPreserved', 'requestedMappingsExist', 'entities', 'filterCond', 'index'].every(n => v.checks.find(c => c.name === n)?.ok) && log.actualAfter.addedAppActions.join() === '請求書作成', 'verification / actualAfter の要約');
   assert(rolled.status === 'ROLLED_BACK_VERIFIED' && JSON.stringify(strip(actsOf(mock))) === JSON.stringify(strip(before)) && !actsOf(mock)['請求書作成'], '§45 rollback: 追加したアクションが消え、元の 3 件に戻る');
   // ADD で同名が既にある（prepare 後に人間が作った）→ TARGET_EXISTS
   const mock2 = makeKintoneMock(DATA);
@@ -165,8 +164,8 @@ console.log('\n--- 6. §41 Review 時点で未取得のコピー先: 実行直�
   const mock = makeKintoneMock({ ...data, relatedApps: FX.makeData().relatedApps });   // kintone 側には 311 が存在する
   const { rv, prepared, log, rolled } = await flow(p, mock, { data });
   assert(rv.steps[0].issues.some(i => i.code === 'DEST_APP_NOT_LOADED') && rv.steps[0].safety === 'REVIEW_REQUIRED' && rv.steps[0].crossApp.available === false, 'Review: コピー先 311 は未取得 → DEST_APP_NOT_LOADED（要確認・推測しない）');
-  assert(prepared.status === 'PREPARED' && prepared.freshReviewSteps.join() === 'P1' && prepared.crossApp[0].fetchedAtPrepare === true && prepared.crossApp[0].current.available === true && prepared.steps[0].prepared.sensitive.some(x => x.code === 'DEST_REQUIRED_FIELD_UNMAPPED'), 'prepare: 311 を取得して再 Review した結果で準備（必須項目の警告が実行直前に出る）');
-  assert(log.status === 'DONE' && log.steps[0].status === 'VERIFIED' && log.simulation.match === true && rolled.status === 'ROLLED_BACK_VERIFIED' && Object.keys(actsOf(mock)).length === 0, '反映 → 検証 → Simulation 一致（再 Review の After）→ rollback で元の 0 件');
+  assert(prepared.status === 'PREPARED' && prepared.crossApp[0].fetchedAtPrepare === true && prepared.crossApp[0].current.available === true && prepared.steps[0].prepared.sensitive.some(x => x.code === 'DEST_REQUIRED_FIELD_UNMAPPED'), 'prepare: 311 を取得して再 Review した結果で準備（必須項目の警告が実行直前に出る）');
+  assert(log.status === 'DONE' && log.steps[0].status === 'VERIFIED' && rolled.status === 'ROLLED_BACK_VERIFIED' && Object.keys(actsOf(mock)).length === 0, '反映 → 検証（再 Review の After で準備した内容を読み戻す）→ rollback で元の 0 件');
   const data2 = FX.makeData(); delete data2.relatedApps['311']; data2.actions = { actions: {}, revision: '12' };
   const p2 = plan([step('P1', 'ADD_APP_ACTION', 'APP_ACTION', '請求書作成', { name: '請求書作成', destApp: '311', actionMappings: [{ srcType: 'FIELD', srcField: 'amount', destField: 'customer' }], entities: ['GROUP:everyone'] })]);
   const mock2 = makeKintoneMock({ ...data2, relatedApps: FX.makeData().relatedApps });

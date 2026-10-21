@@ -143,7 +143,7 @@ console.log('\n--- モデル更新の評価: 既存フィールドを使う手�
   assert(rdOf('P1').apply === 'CONFIRM' && /設定の変更はありません/.test(rdOf('P1').message || '') && rdOf('P2').apply === 'AUTO', `承認前の見込み: P1 は確認（既存フィールドの利用）・P2 は自動で反映できる: ${JSON.stringify(rd.map(x => [x.stepId, x.apply]))}`);
   const mock = makeKintoneMock(data);
   const prepared = await PE.prepare(PR.executorOutput(p, rv, ['P1', 'P2']), { api: mock.api, appId: '310' });
-  const log = prepared.status === 'PREPARED' ? await PE.executePreview(prepared, { api: mock.api, review: rv, data }) : null;
+  const log = prepared.status === 'PREPARED' ? await PE.executePreview(prepared, { api: mock.api, review: rv }) : null;
   const p2 = log ? (log.steps || []).find(x => x.stepId === 'P2') : null;
   assert(prepared.status === 'PREPARED' && p2 && p2.status === 'VERIFIED', `反映: P1（設定の変更なし）を承認して P2（確認日）を動作テスト環境へ追加・検証: ${prepared.status} ${p2 && p2.status}`);
   // 無いフィールドを「使う」手順は検証で無効 → 依存する手順も止める（従来どおり）

@@ -24,7 +24,7 @@ const DATA = FX.makeData();
 const DEPS = KTDeps.buildDependencyData(DATA, KTDeps.normalizeFields(DATA.fields));
 const reviewOf = (p, data = DATA) => R.review({ plan: p, data, deps: data === DATA ? DEPS : null, scan: null, incoming: null });
 const approveAll = (p, rv) => R.executorOutput(p, rv, p.steps.map(s => s.id));
-const run = async (input, mock, { review = null, between = null } = {}) => { const prepared = await E.prepare(input, { api: mock.api, appId: '341' }); if (between && prepared.status === 'PREPARED') between(prepared); const log = prepared.status === 'PREPARED' ? await E.executePreview(prepared, { api: mock.api, review, data: DATA }) : null; return { prepared, log }; };
+const run = async (input, mock, { review = null, between = null } = {}) => { const prepared = await E.prepare(input, { api: mock.api, appId: '341' }); if (between && prepared.status === 'PREPARED') between(prepared); const log = prepared.status === 'PREPARED' ? await E.executePreview(prepared, { api: mock.api, review }) : null; return { prepared, log }; };
 const check = (log, name, i = 0) => log.steps[i].verification?.checks?.find(c => c.name === name);
 const okNames = (log, names, i = 0) => names.every(n => check(log, n, i)?.ok === true);
 const PRESERVE = ['existingCountBefore', 'countPreserved', 'otherEntriesPreserved', 'unexpectedRemoved', 'unexpectedChanged', 'targetExists', 'unchangedAttributesPreserved'];
@@ -42,7 +42,7 @@ console.log('\n--- 1. UPDATE_NOTIFICATION ---');
   assert(log.status === 'DONE' && log.steps[0].status === 'VERIFIED' && mock.st.perRecord.length === 2 && mock.st.perRecord[0].filterCond === 'amount >= "2000000"' && mock.st.perRecord[0].title === before[0].title && JSON.stringify(mock.st.perRecord[0].targets) === JSON.stringify(before[0].targets) && JSON.stringify(mock.st.perRecord[1]) === JSON.stringify(before[1]) && mock.st.general.length === 5, '反映: 対象 1 件の条件だけ変わり、名前・通知先（includeSubs 含む）・他の通知はそのまま');
   assert(log.steps[0].requests[0].index === 0 && log.steps[0].requests[0].total === 2 && log.steps[0].requests[0].changedKeys.join() === 'filterCond' && JSON.stringify(log.steps[0].before) === JSON.stringify({ filterCond: 'amount >= "1000000"' }) && JSON.stringify(log.steps[0].after) === JSON.stringify({ filterCond: 'amount >= "2000000"' }), 'full payload: 現在の一覧 → 対象 1 件だけ変更 → 完全な After payload（before / after は変更した属性だけ）');
   assert(okNames(log, [...PRESERVE, 'changed:filterCond']) && check(log, 'existingCountBefore').actual === 2 && check(log, 'countPreserved').actual === 2, 'verification: existingCountBefore 2 / countPreserved / otherEntriesPreserved（bit 単位）/ changed:filterCond / unchangedAttributesPreserved');
-  assert(log.simulation.compared === true && log.simulation.match === true, 'Simulation（Review の After）と実際が一致');
+  assert(!('simulation' in log) && !('reanalysis' in log), '書いた内容が期待どおりかは手順ごとの読み戻しだけが判定する（照合・再解析の記録は無い。2026-10-21）');
   const rb = E.buildRollbackPlan(log, prepared);
   assert(rb.steps[0].actionType === 'RESTORE_NOTIFICATION_SETTINGS' && rb.steps[0].collection === 'perRecordNotify' && /高額案件の登録/.test(rb.steps[0].note), 'rollback 計画: RESTORE_NOTIFICATION_SETTINGS（perRecordNotify）');
 }
@@ -53,7 +53,7 @@ console.log('\n--- 1. UPDATE_NOTIFICATION ---');
   const { prepared, log } = await run(approveAll(p, rv), mock, { review: rv });
   const t = mock.st.perRecord[0].targets;
   assert(log.status === 'DONE' && t.length === 4 && t[2].entity.code === 'owner_org' && t[2].includeSubs === true && t[3].entity.code === 'owner' && t[3].includeSubs === false && mock.st.perRecord[0].filterCond === 'amount >= "1000000"', '通知先の追加: 既存の通知先（includeSubs true の組織）はそのまま・追加分は includeSubs false・条件は変わらない');
-  assert(!prepared.steps[0].prepared.sensitive.length && okNames(log, [...PRESERVE, 'changed:targets']) && log.simulation.match === true, '追加だけなら sensitive なし・verification OK');
+  assert(!prepared.steps[0].prepared.sensitive.length && okNames(log, [...PRESERVE, 'changed:targets']), '追加だけなら sensitive なし・verification OK');
 }
 {
   // recipient removal: 通知先を user1 だけにする → 高リスク警告（sensitive）付きで反映
@@ -69,7 +69,7 @@ console.log('\n--- 1. UPDATE_NOTIFICATION ---');
   const { prepared, log } = await run(approveAll(p, rv), mock, { review: rv });
   const g = mock.st.general[2];
   assert(prepared.steps[0].prepared.payload.scope === 'general' && prepared.steps[0].prepared.sensitive.some(x => x.code === 'NOTIFICATION_EVENTS_REMOVED') && log.status === 'DONE' && g.entity.code === 'owner' && g.recordAdded && !g.recordEdited && !g.commentAdded && !g.statusChanged && JSON.stringify(mock.st.general.filter((_, i) => i !== 2)) === JSON.stringify(before.filter((_, i) => i !== 2)) && mock.st.notifyToCommenter === true, 'イベント削除: general#3 のフラグだけ変わり、他 4 件と notifyToCommenter は bit 単位でそのまま');
-  assert(okNames(log, [...PRESERVE, 'changed:events']) && log.simulation.match === true, 'verification / Simulation OK');
+  assert(okNames(log, [...PRESERVE, 'changed:events']), 'verification OK');
 }
 {
   // stale target（Review → prepare）: Review 後に対象の条件が変わった → STALE_PLAN（書き込みなし）
@@ -133,7 +133,7 @@ const DATA2 = (() => { const d = FX.makeData(); d.fields.contract_end = { type: 
   const pp = prepared.steps[0].prepared;
   assert(prepared.status === 'PREPARED' && pp.payload.index === 1 && Object.keys(pp.payload.changes).join() === 'timing' && pp.payload.changes.timing.daysLater === '-45' && pp.payload.changes.timing.time === '09:00' && !pp.sensitive.length && /✎ リマインダー「契約更新リマインダー」: タイミング: contract_end の 30 日前 09:00 → contract_end の 45 日前 09:00/.test(pp.summary), 'prepare: 変更は timing だけ・summary は差分');
   assert(log.status === 'DONE' && log.steps[0].status === 'VERIFIED' && mock.st.reminders.length === 2 && mock.st.reminders[1].timing.daysLater === '-45' && mock.st.reminders[1].timing.time === '09:00' && mock.st.reminders[1].timing.code === 'contract_end' && JSON.stringify(mock.st.reminders[1].targets) === JSON.stringify(before[1].targets) && mock.st.reminders[1].filterCond === before[1].filterCond && JSON.stringify(mock.st.reminders[0]) === JSON.stringify(before[0]) && mock.st.timezone === 'Asia/Tokyo', '反映: 日数だけ変わり、時刻・基準日・通知先・条件・他のリマインダー・timezone はそのまま');
-  assert(okNames(log, [...PRESERVE, 'changed:timing']) && log.simulation.match === true, 'verification / Simulation OK');
+  assert(okNames(log, [...PRESERVE, 'changed:timing']), 'verification OK');
   const rb = E.buildRollbackPlan(log, prepared);
   assert(rb.steps[0].actionType === 'RESTORE_REMINDER_SETTINGS' && rb.steps[0].collection === 'reminderNotify', 'rollback 計画: RESTORE_REMINDER_SETTINGS');
 }
@@ -196,7 +196,7 @@ console.log('\n--- 3. UPDATE_VIEW ---');
   const pp = prepared.steps[0].prepared;
   assert(prepared.status === 'PREPARED' && Object.keys(pp.payload.changes).join() === 'fields' && !pp.sensitive.length && /✎ 一覧「承認待ち」: 表示フィールド: case_name, approver → case_name, approver, amount/.test(pp.summary), 'prepare: 変更は fields だけ');
   assert(log.status === 'DONE' && log.steps[0].status === 'VERIFIED' && mock.st.views['承認待ち'].fields.join() === 'case_name,approver,amount' && mock.st.views['承認待ち'].id === '102' && mock.st.views['承認待ち'].index === '1' && mock.st.views['承認待ち'].filterCond === before['承認待ち'].filterCond && mock.st.views['承認待ち'].sort === before['承認待ち'].sort && JSON.stringify(mock.st.views['顧客別一覧']) === JSON.stringify(before['顧客別一覧']) && Object.keys(mock.st.views).length === 2, '反映: 表示項目だけ変わり、id / index / 絞り込み / 並び順 / 他の一覧はそのまま');
-  assert(okNames(log, ['existingCountBefore', 'countPreserved', 'otherViewsPreserved', 'unexpectedRemoved', 'unexpectedChanged', 'targetExists', 'changed:fields', 'unchangedAttributesPreserved', 'idPreserved']) && log.simulation.match === true, 'verification: otherViewsPreserved / changed:fields / unchangedAttributesPreserved / idPreserved・Simulation 一致');
+  assert(okNames(log, ['existingCountBefore', 'countPreserved', 'otherViewsPreserved', 'unexpectedRemoved', 'unexpectedChanged', 'targetExists', 'changed:fields', 'unchangedAttributesPreserved', 'idPreserved']), 'verification: otherViewsPreserved / changed:fields / unchangedAttributesPreserved / idPreserved');
   const rb = E.buildRollbackPlan(log, prepared);
   assert(rb.steps[0].actionType === 'RESTORE_VIEWS' && rb.steps[0].collection === 'views', 'rollback 計画: RESTORE_VIEWS');
 }
@@ -211,7 +211,7 @@ console.log('\n--- 3. UPDATE_VIEW ---');
   const { prepared, log } = await run(approveAll(p, rv), mock, { review: rv });
   assert(prepared.steps[0].prepared.sensitive.some(x => x.code === 'VIEW_FIELDS_REMOVED') && prepared.steps[1].prepared.sensitive.some(x => x.code === 'VIEW_FILTER_CHANGE'), 'sensitive: 表示項目の削除・絞り込みの変更を最終確認に出す');
   assert(log.status === 'DONE' && mock.st.views['承認待ち'].fields.join() === 'case_name' && mock.st.views['顧客別一覧'].filterCond === 'customer_code != "" and amount >= "1"' && mock.st.views['顧客別一覧'].sort === 'amount desc' && mock.st.views['顧客別一覧'].fields.join() === 'customer_code,case_name,amount,owner', '2 step とも反映（2 回目の PUT は 1 回目の結果を含む完全 payload）');
-  assert(okNames(log, ['otherViewsPreserved', 'changed:fields'], 0) && okNames(log, ['otherViewsPreserved', 'changed:filterCond', 'changed:sort'], 1) && log.simulation.match === true, 'verification OK（両 step）');
+  assert(okNames(log, ['otherViewsPreserved', 'changed:fields'], 0) && okNames(log, ['otherViewsPreserved', 'changed:filterCond', 'changed:sort'], 1), 'verification OK（両 step）');
 }
 {
   // missing field: 存在しないフィールド → Review INVALID。Review 後にフィールドが消えた → STALE_PLAN

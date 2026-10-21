@@ -87,7 +87,7 @@ console.log('\n--- §N3 同じ遷移元で、片方が変更不要・片方が�
   assert(cls.get('P2').status === 'PENDING' && cls.get('P1').reason === 'NO_CHANGE', `変わる P2 は反映できる（変更不要の P1 を「反映されない分岐」に数えない。以前は PROCESS_BRANCH_PARTIAL）: P2 ${cls.get('P2').status}/${cls.get('P2').reason}`);
   const mock = makeKintoneMock(DATA);
   const pr = await E.prepare(approveAll(p, rv), { api: mock.api, appId: '310' });
-  const log = pr.status === 'PREPARED' ? await E.executePreview(pr, { api: mock.api, review: rv, data: DATA }) : null;
+  const log = pr.status === 'PREPARED' ? await E.executePreview(pr, { api: mock.api, review: rv }) : null;
   const now = new Map(mock.st.status.actions.map(a => [a.name, a]));
   assert(log && log.status === 'DONE' && mock.calls.filter(c => c === 'PUT status').length === 1, `書き込みは P2 の 1 回だけ: ${log && log.status}/${mock.calls.filter(c => c === 'PUT status').length}`);
   assert(now.get('申請する').to === '承認待ち' && now.get('部長へ申請する').filterCond === 'amount >= "1000000"' && now.get('部長へ申請する').to === '承認待ち', '反映の後: P2 は変わり、変更不要の P1 は今のまま');
@@ -113,7 +113,7 @@ console.log('\n--- §N5 対象が無い・反映の直前に設定が変わっ�
   const mock = makeKintoneMock(DATA);
   const pr = await E.prepare(approveAll(p, rv), { api: mock.api, appId: '310' });
   mock.st.status.actions.find(a => a.name === '申請する').filterCond = 'amount < "500000"';   // 準備の後に人が変えた
-  const log = await E.executePreview(pr, { api: mock.api, review: rv, data: DATA });
+  const log = await E.executePreview(pr, { api: mock.api, review: rv });
   const s2 = log.steps.find(s => s.stepId === 'P2');
   assert(log.status === 'FAILED' && s2.reason === 'TARGET_CHANGED' && !mock.calls.some(c => c === 'PUT status') && mock.st.status.actions.find(a => a.name === '申請する').filterCond === 'amount < "500000"', `反映の直前の照合は残る（TARGET_CHANGED・書き込みなし・人の変更はそのまま）: ${log.status}/${s2 && s2.reason}`);
 }
