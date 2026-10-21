@@ -3158,7 +3158,7 @@ await section(async () => {
   //   C-1 後の仕上げの確認（2026-10-09）: 一部だけ反映した後、最終案のカードに承認の欄と押しても進まないボタンを戻さない。取り消しの知らせは結果のカードの次の手に合わせる
   const fct = finalCardText(m);
   const revoked = m.msgs().filter(x => x.data?.kind === 'approval-revoked').map(x => String(x.text || ''));
-  assert(!/反映の前の確認（書き込みなし）/.test(fct) && !/押すと、上の内容を承認して/.test(fct) && /この最終案はもう一度反映できません/.test(fct) && !/data-act="final-approve"/.test(m.chat().split('kt-ai-final-written')[0].slice(-4000) + '') && revoked.length > 0 && revoked.every(t => t.includes('次の手は下の結果のカードにまとめています。') && !/もう一度承認してください/.test(t) && !/[、。] /.test(t)), `H2-3b: 一部だけ反映の後は承認の欄とボタンを出さず、取り消しの知らせは結果のカードの次の手に合わせる（余分な空白なし）: ${JSON.stringify({ card: fct.slice(-300), revoked })}`);
+  assert(!/反映の前の確認（書き込みなし）/.test(fct) && !/押すと、上の内容を承認して/.test(fct) && /この最終案はもう一度反映できません/.test(fct) && !/data-act="final-approve"/.test(m.chat().split('kt-ai-final-written')[0].slice(-4000) + '') && revoked.length > 0 && revoked.every(t => t.includes('次の手は上の結果のカードにまとめています。') && !/もう一度承認してください/.test(t) && !/[、。] /.test(t)), `H2-3b: 一部だけ反映の後は承認の欄とボタンを出さず、取り消しの知らせは結果のカードの次の手に合わせる（余分な空白なし）: ${JSON.stringify({ card: fct.slice(-300), revoked })}`);
   assert(/data-act="rollback"/.test(r.cardHtml) && !/data-act="js-rollback"/.test(r.cardHtml) && m.panel.unrevertedPreviewChange() === true, 'H2-4: JavaScript は登録していないので、設定の［変更前の状態に戻す］だけを出す');
   const exId = r.exec.execution.executionId;
   await clickChat(m, 'rollback', { execution: exId }); await ticks(8);

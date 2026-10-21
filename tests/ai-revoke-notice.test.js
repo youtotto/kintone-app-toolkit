@@ -2,12 +2,15 @@
 //
 // 検証内容: 最終案のカードの［動作テスト環境へ反映］を途中で止めたとき、会話に出る承認の取り消しの知らせは
 //   「最終案の承認を取り消しました。」＋理由の一文＋次の手 の形で、句読点を重ねない（「、。」にしない）・文の間に空白を入れない。
-//   理由は句点で終わる一文（「…ためです。」）にそろえ、会話の組み立て（joinReason）はそのままつなぐ
+//   理由は句点で終わる一文（「…ためです。」）にそろえ、会話の組み立て（joinReason）はそのままつなぐ。
+//   反映の途中の知らせは、押したときに出る結果のカードの下に出るので、次の手は「次の手は上の結果のカードにまとめています。」で結果のカードを指す
+//   （結果のカードと同じ次の手を知らせに書かない）
 //   §R1 JavaScript の登録の準備で止まった（設定を書いた後、書いた直後の取り直しの前に、別の作業者がカスタマイズを変えた）
 //   §R2 JavaScript を登録できなかった（ファイルのアップロードの失敗）
 //   §R3 設定の手順が途中で止まった（フィールドの追加の失敗。もとから一文の理由は変えない）
-//   §R4 承認の後に動作テスト環境の設定が変わった（押す前に別の作業者がカスタマイズを変えた）: 知らせは承認の取り消しの 1 つだけで、変わったことを一度だけ言い、
-//       計画の作り直しも同じ知らせで案内する（前は計画の作り直しをすすめる知らせが続けて出て、同じ理由を繰り返していた）
+//   §R4 承認の後に動作テスト環境の設定が変わった（押す前に別の作業者がカスタマイズを変えた）: 知らせは承認の取り消しの 1 つだけで、変わったことを一度だけ言う
+//       （前は計画の作り直しをすすめる知らせが続けて出て、同じ理由を繰り返していた）。反映の途中なので、作り直しの次の手は結果のカードだけに書く。
+//       反映が終わった後に変わったとき（反映の途中でない）は、知らせの中で作り直しを案内する
 //   §R5 最終案を作った後に設定が変わった（承認の前。会話の approveFinal）: 承認は無いので、計画の作り直しをすすめる知らせだけで、変わったことを一度だけ言う。
 //       理由を渡さない markStale は既定の一文で言う
 //   §R6 反映を途中で止めるときの理由（applyFinal の revoke に渡す文）と、承認を外すときの理由（markStale に渡す文）は、どれも空か句点で終わる一文
@@ -29,7 +32,9 @@ const noticesOf = (m, kind) => m.msgs().filter(x => x.data && x.data.kind === ki
 const tidy = (t) => !/[、。][、。]/.test(t) && !/[、。] /.test(t);
 /** 会話の画面（描いた HTML の文）に出ているか */
 const shown = (m, text) => K.stripC(m.chat()).includes(text);
-const NEXT = '次の手は下の結果のカードにまとめています。';
+const NEXT = '次の手は上の結果のカードにまとめています。';
+/** 知らせが結果のカード（押したときに出す「動作テスト環境へ反映します。」のカード）より下に出ているか（会話の画面の HTML の順） */
+const belowCard = (m, text) => { const h = m.chat(); const c = h.lastIndexOf('kt-ai-final-apply-card'), i = h.indexOf(text); return c >= 0 && i > c; };
 /** 別の作業者が動作テスト環境のカスタマイズに JavaScript（URL）を足した */
 const otherJs = (m) => { m.mock.st.customize.desktop.js.push({ type: 'URL', url: 'https://example.com/other.js' }); m.mock.st.revision += 1; };
 const runOf = (r) => ({ stage: r.run && r.run.stage, stop: r.run && r.run.stop && r.run.stop.text, writes: r.writes });
@@ -53,8 +58,8 @@ await section(async () => {
   const want = `最終案の承認を取り消しました。JavaScript の登録の準備で止まったためです。${NEXT}`;
   assert(r.clicked && r.run && r.run.stage === 'stopped' && r.run.stop.text === 'JavaScript の登録の準備で止まりました。' && JSON.stringify(r.writes) === JSON.stringify(['POST fields', 'PUT views']) && !r.v.approval,
     `R1-1: 設定を書いた後にカスタマイズが変わると、JavaScript の登録の準備で止まる（JavaScript は書き込まない・承認を外す）: ${JSON.stringify(runOf(r))}`);
-  assert(revoked.length === 1 && revoked[0] === want && tidy(revoked[0]) && shown(m, want),
-    `R1-2: 取り消しの知らせは「…止まったためです。」の一文でつなぐ（「、。」にしない。会話の画面も同じ文）: ${JSON.stringify(revoked)}`);
+  assert(revoked.length === 1 && revoked[0] === want && tidy(revoked[0]) && shown(m, want) && belowCard(m, want),
+    `R1-2: 取り消しの知らせは「…止まったためです。」の一文でつなぐ（「、。」にしない。会話の画面も同じ文で、結果のカードの下に出る）: ${JSON.stringify(revoked)}`);
 });
 
 // =========================================================
@@ -67,8 +72,8 @@ await section(async () => {
   const want = `最終案の承認を取り消しました。JavaScript を登録できなかったためです。${NEXT}`;
   assert(r.clicked && r.run && r.run.stage === 'stopped' && r.run.partial === true && r.run.stop.text === 'JavaScript を登録できませんでした。' && JSON.stringify(r.writes) === JSON.stringify(['POST fields', 'PUT views', 'POST file']) && !r.v.approval,
     `R2-1: アップロードが失敗すると一部だけ反映で止まる（カスタマイズは PUT しない・承認を外す）: ${JSON.stringify(runOf(r))}`);
-  assert(revoked.length === 1 && revoked[0] === want && tidy(revoked[0]) && shown(m, want),
-    `R2-2: 取り消しの知らせは「…登録できなかったためです。」の一文でつなぐ（「、。」にしない。会話の画面も同じ文）: ${JSON.stringify(revoked)}`);
+  assert(revoked.length === 1 && revoked[0] === want && tidy(revoked[0]) && shown(m, want) && belowCard(m, want),
+    `R2-2: 取り消しの知らせは「…登録できなかったためです。」の一文でつなぐ（「、。」にしない。会話の画面も同じ文で、結果のカードの下に出る）: ${JSON.stringify(revoked)}`);
 });
 
 // =========================================================
@@ -81,27 +86,40 @@ await section(async () => {
   const want = `最終案の承認を取り消しました。設定の手順が途中で止まったため、止まった後の環境で反映を続けないようにしました。${NEXT}`;
   assert(r.clicked && r.run && r.run.stage === 'stopped' && r.run.stop.text === '設定の手順が途中で止まりました。' && !r.writes.some(w => /file|customize/.test(w)) && !r.v.approval,
     `R3-1: フィールドの追加が失敗すると、JavaScript を登録せずに止まる（承認を外す）: ${JSON.stringify(runOf(r))}`);
-  assert(revoked.length === 1 && revoked[0] === want && tidy(revoked[0]) && shown(m, want),
-    `R3-2: もとから一文の理由は、そのまま取り消しの知らせにつなぐ: ${JSON.stringify(revoked)}`);
+  assert(revoked.length === 1 && revoked[0] === want && tidy(revoked[0]) && shown(m, want) && belowCard(m, want),
+    `R3-2: もとから一文の理由は、そのまま取り消しの知らせにつなぐ（結果のカードの下に出る）: ${JSON.stringify(revoked)}`);
 });
 
 // =========================================================
 console.log('\n--- §R4. 承認の後に動作テスト環境の設定が変わった ---');
 await section(async () => {
   //   JavaScript だけ。承認の欄の準備の後（押す前）に別の作業者がカスタマイズを変えた → 押した直後の取り直しで止める（書き込み 0）。
-  //   知らせは承認の取り消しの 1 つだけ（計画の作り直しも同じ知らせで案内する。計画は STALE にする）
+  //   知らせは承認の取り消しの 1 つだけ（計画は STALE にする）。反映の途中なので、作り直しの次の手は結果のカードだけに書き、知らせはそれを指す
   const { m } = await K.mountFinal({ kind: 'js' });
   const r = await K.applyOnScreen(m, { before: () => otherJs(m) });
   const revoked = noticesOf(m, 'approval-revoked'), stale = noticesOf(m, 'stale');
   const reason = '承認の後に動作テスト環境の設定が変わりました。';
-  const want = `最終案の承認を取り消しました。${reason}最新の設定で最終案を作り直してください（同じ依頼をもう一度送ると作り直します）。`;
+  const want = `最終案の承認を取り消しました。${reason}${NEXT}`;
   const chat = K.stripC(m.chat());
   assert(r.clicked && r.run && r.run.stage === 'stopped' && r.run.stop.text === '承認の欄の準備の後に、動作テスト環境の設定が変わりました。何も書き込まずに止めました。' && !r.writes.length && !r.v.approval && r.v.status === 'STALE',
     `R4-1: 押す前にカスタマイズが変わると、何も書き込まずに止める（承認を外し、計画は STALE）: ${JSON.stringify({ ...runOf(r), status: r.v && r.v.status })}`);
-  assert(revoked.length === 1 && revoked[0] === want && tidy(revoked[0]) && shown(m, want),
-    `R4-2: 承認を外す知らせは「最終案の承認を取り消しました。」＋変わったことの一文＋作り直しの案内（決まった書き出しで同じことを言い直さない）: ${JSON.stringify(revoked)}`);
-  assert(!stale.length && chat.split(reason).length - 1 === 1 && !chat.includes('現在の計画は最新の設定で作り直すことをおすすめします'),
-    `R4-3: 計画の作り直しをすすめる知らせを続けて出さない（変わったことは会話の中で一度だけ）: ${JSON.stringify({ stale, times: chat.split(reason).length - 1 })}`);
+  assert(revoked.length === 1 && revoked[0] === want && tidy(revoked[0]) && shown(m, want) && belowCard(m, want),
+    `R4-2: 承認を外す知らせは「最終案の承認を取り消しました。」＋変わったことの一文＋上の結果のカードを指す文（結果のカードの下に出る）: ${JSON.stringify(revoked)}`);
+  assert(!stale.length && chat.split(reason).length - 1 === 1 && !chat.includes('現在の計画は最新の設定で作り直すことをおすすめします') && /最新の設定で最終案を作り直します/.test(r.card) && !/作り直/.test(revoked[0] || ''),
+    `R4-3: 計画の作り直しをすすめる知らせを続けて出さない（変わったことは会話の中で一度だけ）。作り直しの次の手は結果のカードだけに書く: ${JSON.stringify({ stale, times: chat.split(reason).length - 1, card: r.card.slice(0, 200) })}`);
+});
+await section(async () => {
+  //   JavaScript だけ。反映が終わった後（承認は残る）に別の作業者がカスタマイズを変え、［再取得］で取り直した → 反映の途中ではないので、
+  //   知らせの中で作り直しを案内する（結果のカードを指さない）
+  const { m } = await K.mountFinal({ kind: 'js' });
+  const r = await K.applyOnScreen(m);
+  const had = !!(r.v && r.v.approval);
+  otherJs(m);
+  await m.panel.refreshDevBase({ reason: 'manual' }); await K.ticks(20);
+  const revoked = noticesOf(m, 'approval-revoked');
+  const want = '最終案の承認を取り消しました。承認の後に動作テスト環境の設定が変わりました。最新の設定で最終案を作り直してください（同じ依頼をもう一度送ると作り直します）。';
+  assert(r.run && r.run.stage === 'done' && r.run.ok && had && !r.v.approval && revoked.length === 1 && revoked[0] === want && tidy(revoked[0]) && shown(m, want),
+    `R4-4: 反映が終わった後に変わったとき（反映の途中でない）は、知らせの中で作り直しを案内する: ${JSON.stringify({ stage: r.run && r.run.stage, had, revoked })}`);
 });
 
 // =========================================================

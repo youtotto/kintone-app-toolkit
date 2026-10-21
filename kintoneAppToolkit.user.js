@@ -18520,14 +18520,15 @@
         emit();
       }
       /** Executor 等で動作テスト環境が変わった（他の経路）→ 計画は STALE。段階 C（R16）: 最終案の承認も外す（古い承認で反映しない） */
-      function markStale(reason = '') {
+      function markStale(reason = '', { next = null } = {}) {
         //   2026-10-21: 知らせは 1 つにし、変わったことは一度だけ言う（reason = 変わったことの一文。無ければ既定の文）。承認を外したときは計画の作り直しも
         //   同じ知らせで案内する（前は承認の取り消しと計画の知らせが続けて出て、決まった書き出しと理由で同じことを繰り返していた）
+        //   next = 知らせの最後の次の手の文（反映の途中で、上の結果のカードに次の手があるとき。無ければ作り直しの案内）
         const v = state.activePlan;
         const what = joinReason(reason) || '動作テスト環境の設定が変更されました。';
         const revoked = !!(v && v.approval);
-        if (revoked) { delete v.approval; push(MSG.SYSTEM_NOTICE, ROLE.SYSTEM, `最終案の承認を取り消しました。${what}最新の設定で最終案を作り直してください（同じ依頼をもう一度送ると作り直します）。`, { kind: 'approval-revoked', planId: v.planId, version: v.version }); }
-        if (v && v.status === PLAN_STATUS.ACTIVE) { v.status = PLAN_STATUS.STALE; if (!revoked) push(MSG.SYSTEM_NOTICE, ROLE.SYSTEM, `${what}現在の計画は最新の設定で作り直すことをおすすめします。`, { kind: 'stale' }); }
+        if (revoked) { delete v.approval; push(MSG.SYSTEM_NOTICE, ROLE.SYSTEM, `最終案の承認を取り消しました。${what}${next || '最新の設定で最終案を作り直してください（同じ依頼をもう一度送ると作り直します）。'}`, { kind: 'approval-revoked', planId: v.planId, version: v.version }); }
+        if (v && v.status === PLAN_STATUS.ACTIVE) { v.status = PLAN_STATUS.STALE; if (!revoked) push(MSG.SYSTEM_NOTICE, ROLE.SYSTEM, `${what}${next || '現在の計画は最新の設定で作り直すことをおすすめします。'}`, { kind: 'stale' }); }
       }
       // ---- 段階 C（C3b）: 進みの 1 枚カードと、段階ごとの目安（この端末の実測の平均。localStorage の ktAi.timing.v1。読めなければ既定値）----
       const timingStore = {
@@ -23458,7 +23459,8 @@
         devBasePromise = null;
         // 段階 C（C4・R16）: 承認した最終案の基準（stamp）と今の動作テスト環境が違えば承認を外す（自分の反映の直後の取り直しは、反映の側で基準を進める）
         //   見えていない間に見送った自分の登録の直後の取り直し（ownDeferred）も、after-js-register と同じに扱う
-        try { const vA = conv ? conv.activePlan() : null; if (vA && vA.approval && devBase && devBase.ok && !['after-apply', 'after-js-register'].includes(reason) && !ownDeferred) { const stNow = KTDevBase.stamp(devBase); const ref = vA.approval.baseStamp; if (ref && stNow && ref.fingerprint && stNow.fingerprint && ref.fingerprint !== stNow.fingerprint) conv.markStale('承認の後に動作テスト環境の設定が変わりました。'); } } catch (e) { }
+        //   2026-10-21: 反映の途中（その最終案の結果のカードがある）なら、知らせの次の手は上の結果のカードを指す（結果のカードと同じ次の手を知らせに書かない）
+        try { const vA = conv ? conv.activePlan() : null; if (vA && vA.approval && devBase && devBase.ok && !['after-apply', 'after-js-register'].includes(reason) && !ownDeferred) { const stNow = KTDevBase.stamp(devBase); const ref = vA.approval.baseStamp; if (ref && stNow && ref.fingerprint && stNow.fingerprint && ref.fingerprint !== stNow.fingerprint) conv.markStale('承認の後に動作テスト環境の設定が変わりました。', inFinalRun(vA) ? { next: RUN_CARD_NEXT } : {}); } } catch (e) { }
         // 反映の記録の「運用環境との差」の件数も取り直した結果にする（以前はヘッダーだけが新しくなった）
         try { renderHeader(); renderBaseDiff(); renderApplyLog(); } catch (e) { }
         //   §0e.1（2026-10-09）: 作業の基準が変わったら、最終案の承認の欄の準備をやり直す（承認の前だけ。同じ基準なら何もしない）
@@ -24955,6 +24957,11 @@
     let finalPreDeferred = false;   // 設定取得の関所で見送った準備（開発支援が見えたときに始める）
     let precheckHeld = null;        // 設定取得の関所で止めた準備の読み取りの記録（続きに使う。{ key, entries: Map<読み取りの名前と引数, { v, at }> }。precheckReadsOf）
     let finalRun = null, finalRunSeq = 0;
+    /** 2026-10-21: 反映の途中で承認を取り消す知らせの最後の文。知らせは押したときに出す結果のカード（「動作テスト環境へ反映します。」）の下に出るので「上の」。
+     *   次の手は結果のカードにまとめ、知らせには書かない（前は「下の」と書き、markStale の知らせは結果のカードと同じ次の手を書いていた） */
+    const RUN_CARD_NEXT = '次の手は上の結果のカードにまとめています。';
+    /** 最終案 v の反映の途中か（その版の結果のカードがあり、まだ終わっていない） */
+    const inFinalRun = (v) => !!(finalRun && v && finalRun.stage === 'running' && finalRun.planId === v.planId && String(finalRun.version) === String(v.version));
     const finalPreView = () => ({ planId: finalPre.planId, version: finalPre.version, status: finalPre.status, items: finalPre.items, reasons: finalPre.reasons, notice: finalPre.notice || null, settingsStatus: finalPre.settings ? finalPre.settings.status : null, jsStatus: finalPre.js ? finalPre.js.status : null });
     /** 承認済み扱い（計画のすべての手順）の標準設定の入力。承認の前の準備でも、承認の後の reviewOutput と同じ手順の組になる */
     const finalOutput = () => (lastPlan && lastReview ? KTPlanReview.executorOutput(lastPlan, lastReview, (lastReview.steps || []).map(r => r.stepId)) : null);
@@ -25201,7 +25208,7 @@
       //   反映の途中で新しい会話にしたときは、前の会話の承認の取り消しの知らせを新しい会話に出さない（承認は外す）
       //   一度の反映の途中で止めたときの知らせは、結果のカードの次の手に合わせる（この最終案はもう一度承認しない）
       //   2026-10-21: 理由は「最終案の承認を取り消しました。」に続く一文（「…ためです。」のように句点で終える）。会話の revokeApproval は句点を補ってつなぐだけなので、「…ため、」で終えると「、。」になる
-      const revoke = (reason) => { if (!v.approval) return; if (conv.state.epoch === epoch0) conv.revokeApproval(v, reason, { next: '次の手は下の結果のカードにまとめています。' }); else delete v.approval; };
+      const revoke = (reason) => { if (!v.approval) return; if (conv.state.epoch === epoch0) conv.revokeApproval(v, reason, { next: RUN_CARD_NEXT }); else delete v.approval; };
       const NEXT_AGAIN = '変わった点を確かめて、最終案のカードの［動作テスト環境へ反映］をもう一度押してください（新しい内容への確認になります）。';
       const NEXT_SETTINGS_ONLY = '設定は反映済みです。JavaScript を入れないときは、［設定を変更前の状態に戻す］で戻せます。続けるときは、理由を確かめてから同じ依頼をもう一度送ると最終案を作り直します。';
       try {
