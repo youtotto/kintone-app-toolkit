@@ -2528,7 +2528,6 @@
   const KTDevBase = (() => {
     const BASE_VERSION = 'dev-base-1';
     const ENV = Object.freeze({ PREVIEW: 'preview', PRODUCTION: 'production' });
-    const ENV_JA = Object.freeze({ preview: '動作テスト環境', production: '運用環境' });
     // 作業の基準に必須の設定（どれかが取れなければ基準にしない）
     const CORE = Object.freeze({ fields: 'app/form/fields', layout: 'app/form/layout', views: 'app/views', status: 'app/status', generalNotify: 'app/notifications/general', perRecordNotify: 'app/notifications/perRecord', reminderNotify: 'app/notifications/reminder', actions: 'app/actions', customize: 'app/customize', settings: 'app/settings' });
     // 取れなくても基準にはする（取得できなかったことを facts と画面に出し、「無い」とは扱わない）
@@ -2816,7 +2815,7 @@
       return base;
     }
 
-    return { BASE_VERSION, ENV, ENV_JA, CORE, OPTIONAL, LABEL, fetchEnv, dataFrom, loadFiles, diffEnvs, fingerprint, stamp, facts, notesOf, inputsOf, environmentOf, currentOf, load, stable, timeText };
+    return { BASE_VERSION, ENV, CORE, OPTIONAL, LABEL, fetchEnv, dataFrom, loadFiles, diffEnvs, fingerprint, stamp, facts, notesOf, inputsOf, environmentOf, currentOf, load, stable, timeText };
   })();
 
   // ==========================================
@@ -7763,7 +7762,6 @@
       }
       return out;
     }
-    const sameOriginHint = (url) => /^\/k\//.test(url) || /^\/api\//.test(url) || /\bkintone\.api\.url/.test(url);
     /**
      * 外部通信の検出: fetch / XMLHttpRequest / axios / kintone.proxy と、URL リテラル。
      *   external: true = kintone 外（http(s):// で始まり、cybozu.com / kintone.com 以外か、ホストが分からない）
@@ -7810,11 +7808,7 @@
       }
       return out;
     }
-    const STRATEGIES = Object.freeze(['NEW_JS_FILE', 'EXTEND_EXISTING_JS', 'REPLACE_EXISTING_LOGIC', 'PLUGIN_CANDIDATE', 'NOT_RECOMMENDED']);
-    const PLATFORMS = Object.freeze(['desktop', 'mobile']);
-    const ACCESS = Object.freeze(['READ', 'WRITE', 'CONTROL']);
-    const SOLUTIONS = Object.freeze(['STANDARD', 'CUSTOMIZATION', 'HYBRID', 'UNKNOWN']);
-    return { CATALOG_VERSION, EVENTS, DESKTOP_EVENTS, MOBILE_EVENTS, CHANGE_PREFIXES, APIS, STRATEGIES, PLATFORMS, ACCESS, SOLUTIONS, SECURITY_RULES, checkEvent, eventPlatform, screenOf, extractApis, extractNetwork, scanSecurity, eventJa };
+    return { CATALOG_VERSION, EVENTS, DESKTOP_EVENTS, MOBILE_EVENTS, CHANGE_PREFIXES, APIS, SECURITY_RULES, checkEvent, eventPlatform, screenOf, extractApis, extractNetwork, scanSecurity, eventJa };
   })();
 
   // ==========================================
@@ -12267,7 +12261,7 @@
       //   担当が無い・設定を変えない手順（確認待ち）だけが担当なら unowned（計画全体の確認に残す。review）。coverage の文（text / requirement）は表示だけに使う。
       //   requirementId の形が崩れた要素は、この customization の要件として扱う
       coverage.outOfScope = []; coverage.unowned = []; coverage.met = []; coverage.planUnconfirmed = [];
-      const stepIdsAll = new Set(planStepsAll.map(s => s && s.id).filter(Boolean)), custIdsAll = new Set(planCustsAll.map(x => x && x.customizationId).filter(Boolean));
+      const custIdsAll = new Set(planCustsAll.map(x => x && x.customizationId).filter(Boolean));
       const settingStepIds = new Set(planStepsAll.filter(s => s && !['CUSTOMIZATION_REQUIRED', 'REQUIRE_CONFIRMATION'].includes(s.actionType)).map(s => s.id).filter(Boolean));
       const reqRefs = new Map((Array.isArray(requirements) ? requirements : []).filter(r => r && r.id).map(r => [String(r.id), (Array.isArray(r.planRefs) ? r.planRefs : []).map(String)]));
       //   2026-10-15（最終案の重複と担当未定の食い違い §3）: 要件の planRefs が採用した仮案の項目（B…）だけを指すとき（計画の AI が要件の対応づけを返さなかった版）、
@@ -15256,7 +15250,6 @@
     const APP_ACTION_ATTR_JA = { mappings: '転記', entities: '利用者', filterCond: '利用条件' };
     const execAttrDiff = (before, after, ja = EXEC_ATTR_JA) => Object.keys(after || {}).map(k => `${ja[k] || k}: ${execAttrVal(k, before?.[k])} → ${execAttrVal(k, after[k])}`);
     const execActionJa = (a) => ({ ADD_FIELD: 'フィールド追加', ADD_VIEW: '一覧追加', ADD_NOTIFICATION: '通知追加', ADD_REMINDER: 'リマインダー追加', PROCESS_CHANGE: 'プロセス管理の変更', KINTONE_SIDE_EFFECT: 'kintone 側の自動変更', UPDATE_LOOKUP: 'ルックアップ変更', ADD_APP_ACTION: 'アプリアクション追加', UPDATE_APP_ACTION: 'アプリアクション変更' }[a] || ACTION_JA[a] || a);
-    const PROCESS_KIND_JA = { ACTION_CONDITION: '条件変更', ACTION_TRANSITION: '遷移の変更', ASSIGNEE: '作業者の変更', EXECUTABLE_USER: '実行可能ユーザーの変更', ACTION_BRANCH: '分岐の追加', ADD_STATUS: 'ステータス追加', ADD_ACTION: 'アクション追加' };
     /** Mermaid（Before / Planned / Actual）の枠。描画は mountAiWorkspace の renderMermaid。
      *  枠は縦に並べる（横に並べると枠の幅が分かれて図が縮み、文字が読めなかった）。図は縮めずに枠の中で横へスクロールする */
     const mermaidBox = (title, code, color) => (code ? `<div style="border:1px solid ${color}; border-radius:6px; padding:6px; min-width:0; overflow-x:auto;"><div style="font-size:11px; opacity:.7;">${esc(title)}</div><pre class="kt-ai-mermaid" style="font-size:11px; white-space:pre-wrap; margin:0;">${esc(code)}</pre></div>` : '');
@@ -15922,11 +15915,6 @@
       }
       return { entry: e, previous: previous ?? superseded };
     }
-    /** 論点がすべて決定事項で埋まった未回答の質問を「回答済みの論点で解決」にする（一部の論点だけを答えた質問は未回答のまま） */
-    function settleCovered(lg) {
-      const union = new Set(lg.entries.filter(e => e.status === 'answered').flatMap(e => e.topics));
-      for (const e of lg.entries) if (e.status === 'open' && e.topics.length && e.topics.every(t => union.has(t))) e.status = 'covered';
-    }
     /** まだ計画に入れていない回答（作り直しの依頼に含める） */
     const pendingAnswers = (lg) => lg.entries.filter(e => isDecided(e) && e.appliedInVersion == null);
     /** 決定事項の番号（D1…。計画の系列の中で版をまたいで変わらない。Q1 などの版ごとの番号とは別） */
@@ -16162,7 +16150,7 @@
       }
       return out;
     }
-    return { TOPICS, AI_TOPICS: Object.freeze([...TOPICS.map(t => t.key), 'other']), labelOf, canonTopic, topicsOf, questionTopics, topicKey, splitClauses, interpret, isPure, isChange: (s) => CHANGE.test(String(s ?? '')), restatesDecision, sameAnswer, createLedger, touch, syncQuestions, sameQuestionText, sameAsDecided, recordAnswer, settleCovered, pendingAnswers, decisionsForContext, decisionIdOf, platformValueOf, isDecided, questionList, MAX_DECISIONS, MAX_ANSWER_CHARS,
+    return { TOPICS, AI_TOPICS: Object.freeze([...TOPICS.map(t => t.key), 'other']), labelOf, canonTopic, topicsOf, questionTopics, topicKey, splitClauses, interpret, isPure, isChange: (s) => CHANGE.test(String(s ?? '')), restatesDecision, sameAnswer, createLedger, touch, syncQuestions, sameQuestionText, sameAsDecided, recordAnswer, pendingAnswers, decisionsForContext, decisionIdOf, platformValueOf, isDecided, questionList, MAX_DECISIONS, MAX_ANSWER_CHARS,
       // 2026-10-05 第 3 段: 要件・はい / いいえの形の答えか
       isYesNo: (s) => YESNO.test(String(s ?? '').trim()), applyRequirementOps, uncoveredClauses, addUnresolvedRequirement, requirementsForContext, requirementsOf, REQ_DECISIONS, REQ_DISPOSITIONS,
       isGreeting, MAX_REQUIREMENTS };
@@ -17483,7 +17471,7 @@
         scopePlanOf(v, lg, { from: scopeFrom });
         applyStepsOf(v);
         for (const id of appliedEntryIds || []) { const e = lg.entries.find(x => x.id === id); if (e && e.appliedInVersion == null) e.appliedInVersion = version; }
-        // この版で聞かれた質問は、論点がほかの決定事項で埋まっていても閉じない（settleCovered は使わない。未回答は台帳の項目で判定する）
+        // この版で聞かれた質問は、論点がほかの決定事項で埋まっていても閉じない（未回答は台帳の項目で判定する）
         //   作り直しの途中に受け付けた回答（answeredAfter より後の改訂）は、この版の AI に届いていない（再確認・聞き直しの判定に使わない）
         const sync = KTAiAnswers.syncQuestions(lg, KTAiAnswers.questionList(plan), { version, answeredAfter });
         v.openQuestions = sync.open; v.reaskedQuestions = sync.reasked;
@@ -21295,7 +21283,6 @@
     const { MSG, INTENT, PLAN_STATUS } = KTAiConversation;
     const INTENT_JA_P17 = { REQUEST_JS_PREVIEW: 'JavaScript を動作テスト環境へ登録', DOCUMENT: 'ドキュメントを作る' };
     const INTENT_JA = { ...INTENT_JA_P17, ASK: '質問する', PLAN: '新しい変更案を作る', REVISE_PLAN: '今の変更案を直す', EXPLAIN_PLAN: '変更案の説明を聞く', EXPLAIN_REVIEW: '確認結果の説明を聞く', REQUEST_PREVIEW: '動作テスト環境への反映へ進む', REQUEST_ROLLBACK: '変更前の状態に戻す', GENERAL: 'その他', ANSWER: '確認事項への回答として送る' };
-    const STATUS_JA = { ACTIVE: '最新', SUPERSEDED: '旧版（SUPERSEDED）', STALE: '要再作成（STALE）', EXECUTED: '動作テスト環境へ反映済み', ROLLED_BACK: '元に戻し済み' };
     const btn = (act, label, attrs = '', style = '') => `<button type="button" class="btn kt-ai-act" data-act="${esc(act)}" ${attrs} style="height:26px; font-size:11px; ${style}">${esc(label)}</button>`;
     // 2026-10-06: 開いた直後の案内（短く。何かを選ばせない）
     const COMPOSER_PLACEHOLDER = 'このアプリについて、相談したいことや変更したいことを入力してください';
@@ -22597,7 +22584,6 @@
       const wrap = (inner) => `<div class="kt-ai-msg role-${esc(m.role)}" data-mid="${esc(m.id)}">${m.role === 'user' ? '' : who}${inner}</div>`;
       //   §12.60（2026-10-23）: 元に戻すのカードは、そのカードの反映の記録の state を直接読む（右上に別の記録を出していても、そのカードの反映の状態を描く）
       const logStateOf = (kind) => { const exId = m.data ? m.data.executionId : null; const e = exId && Array.isArray(view.applyLog) ? view.applyLog.find(x => x && x.kind === kind && x.executionId === exId) : null; if (e) return e.state; const st = kind === 'js' ? view.jsExecState : view.execState; const id = st ? ((st.execution && st.execution.executionId) || (st.prepared && st.prepared.executionId) || null) : null; return st && (!exId || id === exId) ? st : null; };   // 記録に無いときは、右上の状態が同じ反映のときだけ
-      const planOf = () => (view.plans && m.data ? view.plans.get(`${m.data.planId}:${m.data.version}`) : null) || null;
       const bubble = (text) => `<div class="kt-ai-bubble kt-ai-rich">${KTContextUi.richTextHtml(plainText(text))}</div>`;
       switch (m.type) {
         case MSG.USER: return wrap(`<div class="kt-ai-bubble">${esc(m.data?.displayText || m.text)}</div>`);
@@ -22772,7 +22758,7 @@
     return { progressInnerHtml, progressCardHtml, finalCardHtml, verificationDetailHtml, verificationLineOf, impactRowsOf,   // 段階 C（検証の明細は右の「変更内容」。2026-10-14）
       condSentenceOf, existingChangeTextOf,   // 2026-10-15（最終案の重複と担当未定の食い違い §2）: 条件式の文（テストから確かめる）
       constraintLineOf,   // 2026-10-16（説明文を読みやすくする）: 「この案の制約」の 1 行（テストから確かめる）
-      INTENT_JA, STATUS_JA, STRATEGY_JA, CHECK_JA, busyHintText, themedMermaid, workspaceHtml, headerHtml, baseHtml, baseDiffHtml, applyLogHtml, freePanelHtml, chatHtml, messageHtml, codePaneHtml, rollbackCardHtml, answerCardHtml, errorCardHtml, patternsHtml,
+      INTENT_JA, STRATEGY_JA, CHECK_JA, busyHintText, themedMermaid, workspaceHtml, headerHtml, baseHtml, baseDiffHtml, applyLogHtml, freePanelHtml, chatHtml, messageHtml, codePaneHtml, rollbackCardHtml, answerCardHtml, errorCardHtml, patternsHtml,
       // Phase 17
       consultationStartHtml, jsRollbackCardHtml, consultChoicesHtml, jsRegisterPaneHtml, customizeScopeJa,
       // Phase 19: 会話は要約、右 Workspace が正本
