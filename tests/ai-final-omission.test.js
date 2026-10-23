@@ -28,6 +28,9 @@
 //       （変更が無い手順を書かないことは §O2 (d)、承認の後に設定の対象が変わったら止めることは §O3 (i)）
 //   §O6 最終案の判定の材料は版の記録から（2026-10-23・§12.59）: (z) 最終案ができた後、押せるか・会話の今の判定・右の描き直しで設定の手順の反映の分類
 //       （applyReadiness・classifySteps）を呼ばない（版の登録で 1 回作った分類を読む）。最終案の記録の JavaScript の一覧は計画の JavaScript ごとに 1 つ
+//   §O7 分類の内部の例外（2026-10-23・§12.60）: (aa) 設定の手順がある計画で分類が例外になると、版で固定の理由（設定の手順の分類に失敗しました）で止まり、左のカード・右の「変更内容」・右の「反映」で同じ。押せない・書き込み 0・承認なし
+//       （前は [] の「設定変更なし」として進み、設定だけの計画は何も書かずに「反映しました」と成功で記録した。JavaScript を含む計画は設定を飛ばして JavaScript だけを登録しうる）
+//       (ab) 分類が正常な JavaScript だけの案・設定だけの案は進む（分類の失敗 null と設定変更なしの区別）
 //
 // 実行方法: node tests/ai-final-omission.test.js
 'use strict';
@@ -524,6 +527,34 @@ await section(async () => {
   const fin = v.final;
   assert(fin && Array.isArray(fin.customizations) && fin.customizations.map(c => c.customizationId).sort().join() === (v.plan.customizations || []).map(c => c.customizationId).sort().join() && fin.readiness && Array.isArray(fin.readiness.reasons) && !fin.readiness.reasons.some(r => r.kind === 'ownerless'),
     `O6-z2: 最終案の記録の JavaScript の一覧は計画の JavaScript ごとに 1 つ（customizations）。版で固定の理由（readiness.reasons）に台帳で変わる分（ownerless）は入れない: ${JSON.stringify({ custs: fin && fin.customizations.map(c => `${c.customizationId}:${c.status}`), reasons: fin && fin.readiness })}`);
+});
+
+console.log('\n--- §O7 分類の内部の例外は版で固定の理由で止める（§12.60） ---');
+await section(async () => {
+  // (aa) 設定だけ・設定と JavaScript の計画で、分類（KTPlanExecutor.applyReadiness）が内部の例外になる → 版の分類は null（[] ではない）、版で固定の理由で止まり（承認の欄の準備は走らない）、左右で同じ理由・押せない・書き込み 0・承認なし
+  for (const kind of ['settings', 'mixed']) {
+    const orig = KTPlanExecutor.applyReadiness;
+    KTPlanExecutor.applyReadiness = () => { throw new Error('テスト: 分類の内部の例外'); };
+    try {
+      const { m, v } = await K.mountFinal({ kind });
+      await K.waitUntil(() => !['base', 'running', 'idle'].includes(m.panel.finalPrecheck().status) && m.panel.finalPrecheck().planId === v.planId, 80); await K.ticks(4);
+      const pre = m.panel.finalPrecheck(), btn = K.applyButtonOf(m), rd = m.conv().finalReadiness(v);
+      const right = stripC(T.KTAiChatUi.changeSummaryHtml(v, {})), exec = m.$('kt-ai-exec').innerHTML;
+      const r = await K.applyOnScreen(m);
+      const log = m.$('kt-ai-apply-log').innerHTML;
+      assert(v.applySteps === null && /分類の内部の例外/.test(v.applyStepsError || '') && rd.ready === false && rd.reasons[0].kind === 'classification-failed' && pre.status !== 'ready' && !pre.settings && btn && btn.disabled && /設定の手順の分類に失敗しました（Toolkit の内部の問題: テスト: 分類の内部の例外）/.test(stripC(m.chat())) && /設定の手順：分類に失敗したため反映できません/.test(right) && /設定の手順の分類に失敗しました/.test(exec) && !/設定の変更はありません|自動で反映できる設定の手順はありません/.test(exec)
+        && !r.run && !r.writes.length && !v.approval && v.status === 'ACTIVE' && !/kt-ai-apply-log-item/.test(log),
+        `O7-aa（${kind}）: 分類の内部の例外は版で固定の理由で止める（左のカード・右の「変更内容」・右の「反映」で同じ。承認の欄の準備は走らず、押せない・書き込み 0・承認なし・記録なし）: ${JSON.stringify({ applySteps: v.applySteps, reasons: rd.reasons.map(x => x.kind), pre: { status: pre.status }, button: btn, run: r.run && { stage: r.run.stage, ok: r.run.ok }, writes: r.writes, approval: !!v.approval })}`);
+    } finally { KTPlanExecutor.applyReadiness = orig; }
+  }
+  // (ab) 分類が正常なら、JavaScript だけの案は登録まで、設定だけの案は反映まで進む（null と「設定変更なし」の区別。[] は設定の手順の無い版）
+  const js = await K.mountFinal({ kind: 'js' });
+  const rj = await K.applyOnScreen(js.m);
+  const st = await K.mountFinal({ kind: 'settings' });
+  const rs = await K.applyOnScreen(st.m);
+  assert(Array.isArray(js.v.applySteps) && js.v.applySteps.map(a => a.apply).join() === 'JS' && rj.run && rj.run.ok && rj.writes.includes('PUT customize') && js.v.status === 'EXECUTED'
+    && Array.isArray(st.v.applySteps) && st.v.applySteps.map(a => a.apply).join() === 'AUTO' && rs.run && rs.run.ok && rs.writes.includes('PUT views') && st.v.status === 'EXECUTED',
+    `O7-ab: 分類が正常な JavaScript だけ・設定だけの案は進む: ${JSON.stringify({ js: { steps: js.v.applySteps, writes: rj.writes, status: js.v.status }, settings: { steps: st.v.applySteps, writes: rs.writes, status: st.v.status } })}`);
 });
 
 console.log(`\n${state.failed ? 'FAILED' : 'ALL PASSED'}: ${state.passed} passed / ${state.failed} failed`);

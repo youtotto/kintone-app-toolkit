@@ -11185,8 +11185,8 @@
     function applyReadiness(plan, review) {
       const steps = Array.isArray(plan?.steps) ? plan.steps.filter(st => !st.alternativeId) : [];
       if (!steps.length || !review) return [];
-      let cls = [];
-      try { cls = classifySteps({ plan: { ...plan, steps }, review, approvedSteps: steps.map(st => st.id) }); } catch (e) { return []; }
+      //   §12.60（2026-10-23）: 分類の内部の例外は呼ぶ側へ投げる（空の結果＝「設定変更なし」にしない。前は [] を返し、承認の欄の準備が設定の準備を走らせず、何も書かずに成功として記録できた）
+      const cls = classifySteps({ plan: { ...plan, steps }, review, approvedSteps: steps.map(st => st.id) });
       return cls.map(x => {
         const st = steps.find(y => y.id === x.stepId) || {};
         const base = { stepId: x.stepId, actionType: st.actionType || x.actionType };
@@ -17788,7 +17788,11 @@
 
       // ---- 計画のバージョン ----
       /** §12.59（2026-10-23）: 設定の手順の反映の分類（KTPlanExecutor.applyReadiness。計画と確認だけで決まる＝版で固定）は版の登録で 1 回だけ作り、最終案の作成・版で固定の理由・右の「変更内容」・承認の欄の準備が読む（場所ごとに分類し直さない） */
-      const applyStepsOf = (plan, review) => { try { return plan && review && typeof KTPlanExecutor !== 'undefined' && KTPlanExecutor.applyReadiness ? KTPlanExecutor.applyReadiness(plan, review) : []; } catch (e) { return []; } };
+      //   §12.60（2026-10-23）: 分類の内部の例外は「設定変更なし」（[]）と区別する。v.applySteps = null と理由を版に残し、承認の欄の準備が既存の失敗の経路（反映の前の準備に失敗しました）で止める
+      const applyStepsOf = (v) => {
+        if (!(v.plan && v.review && typeof KTPlanExecutor !== 'undefined' && KTPlanExecutor.applyReadiness)) { v.applySteps = []; return; }
+        try { v.applySteps = KTPlanExecutor.applyReadiness(v.plan, v.review); } catch (e) { v.applySteps = null; v.applyStepsError = e && e.message ? String(e.message) : String(e); }
+      };
       function registerPlan({ plan, ctx = null, review = null, revisionRequest = null, basedOn = null, decisionsSent = null, appliedEntryIds = [], gatewayPlan = null, revisionMeta = null, answeredAfter = null, turnInfo = null, planId: planIdIn = null, goalSent: goalSentIn = null, scopeFrom = null }) {
         //   scopeFrom（省略可）: plan がその版の外した後の計画の写しのとき、その版（範囲の記録を引き継ぐ。scopePlanOf の from）
         const parent = basedOn || null;
@@ -17825,7 +17829,7 @@
         //   v.plan と v.gatewayPlan の fields[].effects から外して v.scopeStripped に記録する（実装仕様・照合の前に行う）
         //   K-4（2026-10-10）: 外した後の計画の写しの版（scopeFrom）は、その版の範囲の記録を引き継ぐ
         scopePlanOf(v, lg, { from: scopeFrom });
-        v.applySteps = applyStepsOf(v.plan, v.review);
+        applyStepsOf(v);
         for (const id of appliedEntryIds || []) { const e = lg.entries.find(x => x.id === id); if (e && e.appliedInVersion == null) e.appliedInVersion = version; }
         // この版で聞かれた質問は、論点がほかの決定事項で埋まっていても閉じない（settleCovered は使わない。未回答は台帳の項目で判定する）
         //   作り直しの途中に受け付けた回答（answeredAfter より後の改訂）は、この版の AI に届いていない（再確認・聞き直しの判定に使わない）
@@ -18818,6 +18822,8 @@
         //   前は「手作業の手順」と同じく止めず、ほかの手順だけを反映して結果のカードにも出なかった
         //   あるときは反映できない（ほかの手順だけを反映して「この内容で反映できます」としない）。手作業の手順（計画のみ・Toolkit が扱わない種類）は今までどおり止めない
         const cls = Array.isArray(v.applySteps) ? v.applySteps : [];
+        //   §12.60（2026-10-23）: 分類が内部の例外で作れていない（null。設定の手順の無い版の [] とは別）ときは版で固定の理由にする（左のカード・右の「変更内容」・承認の口で同じ。承認の欄の準備は走らない）
+        if (v.applySteps === null) reasons.push({ kind: 'classification-failed', text: `設定の手順の分類に失敗しました（Toolkit の内部の問題: ${v.applyStepsError || '理由不明'}）。この最終案は反映できません。` });
         //   2026-10-19: 実行できない手順は反映の分類の 1 つから取る（計画の確認の実行の見込み blockedSteps は廃止。確認で無効な手順は分類でも REVIEW_BLOCKED）
         const blockedAll = cls.filter(a => a && a.apply === 'BLOCKED').map(a => a.stepId);
         const noValues = cls.filter(a => a && a.apply === 'MANUAL' && a.valueMissing).map(a => a.stepId);
@@ -20362,6 +20368,7 @@
           //   （NO_VALUES。説明文からは補わない）も出す（fixedReasonsOf が反映できない理由にするものと同じ集まり。理由は分類の文）
           //   §12.59（2026-10-23）: 分類は版の登録で 1 回作ったもの（v.applySteps）。ここで分類し直さない
           const ready = Array.isArray(v.applySteps) ? v.applySteps : [];
+          if (v.applySteps === null) cannot.push({ kind: 'classification-failed', text: `設定の手順の分類に失敗しました（Toolkit の内部の問題: ${cut(fix(v.applyStepsError || '理由不明'), 160)}）`, next: '同じ依頼をもう一度送ると最終案を作り直します。それでも同じなら Toolkit の問題です（この最終案は反映しません）。' });
           const stepTitleOf = (id) => { const st = (Array.isArray(p.steps) ? p.steps : []).find(s => s && s.id === id) || {}; return cut(st.title || st.targetRef || '設定の手順', 80); };
           //   2026-10-19: 実行できない手順は反映の分類の 1 つから（確認で無効な手順の理由は分類が持つ計画の確認の指摘の文）
           const blockedSteps = ready.filter(a => a && a.apply === 'BLOCKED').map(a => ({ id: a.stepId, title: stepTitleOf(a.stepId), reason: cut(fix(a.message || ''), 120) }));
@@ -20640,7 +20647,7 @@
           const supplements = [...changed.provisionals, ...planAdds, ...candidates, ...(notice ? [notice] : [])].filter((x, i, a) => x && a.indexOf(x) === i);
           //   blockers = 確認できないこと／反映を止めている理由（未解決・未確認・非対応・生成の失敗・実行できない手順・扱いが決まっていない指示・機械検査の block・模擬テストの不合格・
           //   担当が決まっていない決まった要件）。reason と next を保つ。同じ文は重ねない
-          const blockers = cannot.filter(c => ['unresolved', 'not-ready', 'not-run', 'unverified', 'unsupported', 'failed', 'blocked', 'no-values', 'req-unresolved'].includes(c.kind)).map(c => ({ kind: c.kind, text: c.text, next: c.next || '', details: Array.isArray(c.details) ? c.details : [], ...(c.platforms ? { platforms: c.platforms } : {}), ...(c.requirementId ? { requirementId: c.requirementId } : {}) }));
+          const blockers = cannot.filter(c => ['unresolved', 'not-ready', 'not-run', 'unverified', 'unsupported', 'failed', 'blocked', 'no-values', 'classification-failed', 'req-unresolved'].includes(c.kind)).map(c => ({ kind: c.kind, text: c.text, next: c.next || '', details: Array.isArray(c.details) ? c.details : [], ...(c.platforms ? { platforms: c.platforms } : {}), ...(c.requirementId ? { requirementId: c.requirementId } : {}) }));
           //   レビュー 9（2026-10-14）: 重複は text 全体の一致か代表条件の id（caseId）の一致で見る（先頭 30 字の部分一致はしない）
           const hasText = (t) => blockers.some(b => b.text === t);
           const hasCase = (id) => !!id && blockers.some(b => b.caseId && b.caseId === id);
@@ -22162,6 +22169,7 @@
       // 反映できないこと（Toolkit の判定）・確かめられなかったこと（反映の分類 ready は「何が変わるか」の前で作る）
       const titleOf = (id) => { const st = (p.steps || []).find(x => x.id === id); return st ? (st.title || KTPlanText.stepSummary(st, { customizations: custs })) : ''; };
       const cannot = [
+        ...(v.applySteps === null ? ['設定の手順：分類に失敗したため反映できません（Toolkit の内部の問題）'] : []),   // §12.60
         ...ready.filter(a => a.apply === 'MANUAL' || a.apply === 'BLOCKED').map(a => `${titleOf(a.stepId) || '設定の変更'}：${a.valueMissing ? '必要な値が計画に無いため反映できません' : a.apply === 'MANUAL' ? 'Toolkit からは自動で反映できません' : '反映できません'}${a.message ? `（${a.message}）` : ''}`),
         ...(review?.steps || []).filter(r => r.customization && r.codeGeneration && r.codeGeneration.supported === false).map(r => `${r.customization?.requirement || 'JavaScript'}：Toolkit ではコードを作れません（${KTContextUi.CODEGEN_REASON_JA[r.codeGeneration.reason] || r.codeGeneration.reason || '要確認'}）`),
       ];
@@ -22232,8 +22240,10 @@
         const STEP = { recheck: '反映の前の準備をやり直して、承認した内容と同じかを確かめています（書き込みはしません）。', settings: '標準設定を動作テスト環境へ反映しています…', js: 'JavaScript を動作テスト環境へ登録しています…' };
         return card('kt-ai-final-apply-card', `<div><b>動作テスト環境へ反映しています。</b></div><div style="font-size:12px; margin-top:4px;">${esc(STEP[run.step] || STEP.recheck)}</div><div style="font-size:11px; opacity:.7; margin-top:4px;">運用環境には反映されません。進捗は右の「反映」で確認できます。</div>`, '#1a73e8');
       }
-      const exSum = live && view.execState ? VM.executionSummary(view.execState) : null;
-      const jsSum = live && view.jsExecState ? VM.jsExecutionSummary(view.jsExecState) : null;
+      //   §12.60（2026-10-23）: 戻し済みかは、その反映の記録の state を executionId で引いて読む（右上に別の記録を出していても変わらない）
+      const recOf = (kind, exId) => { const e = exId && Array.isArray(view.applyLog) ? view.applyLog.find(x => x && x.kind === kind && x.executionId === exId) : null; return e ? e.state : null; };
+      const exSum = live && run.settings ? VM.executionSummary(recOf('settings', run.settings.executionId) || view.execState) : null;
+      const jsSum = live && run.js ? VM.jsExecutionSummary(recOf('js', run.js.executionId) || view.jsExecState) : null;
       const setRolled = !!(exSum && run.settings && exSum.executionId === run.settings.executionId && exSum.rolledBack);
       const jsRolled = !!(jsSum && run.js && jsSum.executionId === run.js.executionId && jsSum.rolledBack);
       const s = run.settings, j = run.js;
@@ -22266,6 +22276,8 @@
       if (stage === 'rollback-confirm') return card('kt-ai-rollback-card', `<div><b>変更前の状態に戻す確認を表示しています。</b></div><div style="font-size:11px; opacity:.8;">右の「反映」の確認画面で「変更前の状態に戻す」を押すと戻します（キャンセルもできます）。</div><div style="margin-top:6px;">${btn('open-rollback', '確認画面を開く', '', 'border-color:#6a1b9a;')}</div>`, '#6a1b9a');
       if (stage === 'rollback-blocked') return card('kt-ai-rollback-card', `<div><b>自動では元に戻せません。</b></div><div style="font-size:11px; opacity:.8; margin-top:2px;">設定は変更していません。理由は右の「反映」に出ています。</div><div style="margin-top:6px;">${btn('open-rollback', '詳細を見る', '')}</div>`, '#b00020');
       if (stage === 'rolling-back') return card('kt-ai-rollback-card', '<div><b>変更前の状態に戻しています...</b></div>', '#6a1b9a');
+      //   §12.60（2026-10-23）: 確認を取り消した（キャンセル・別の最終案へ移った）後は、そのことを 1 文で（設定は変更していない）
+      if (stage === 'done' && ex && !ex.rollbackStatus) return card('kt-ai-rollback-card', '<div><b>変更前の状態に戻す確認を取り消しました。</b></div><div style="font-size:11px; opacity:.8;">設定は変更していません。</div>', '#6a1b9a');
       if (!ex || !ex.rollbackStatus) return card('kt-ai-rollback-card', `<div><b>${esc(m.text)}</b></div>`, '#6a1b9a');
       return card('kt-ai-rollback-card', `<div><b>${ex.rolledBack ? '変更前の状態へ戻しました。' : '元に戻せませんでした。'}</b></div>${ex.rollbackRestored != null ? `<div style="font-size:12px; margin-top:4px;">反映する前の設定との比較：${ex.rollbackRestored ? '✓ 一致' : '× 差分あり'}</div>` : ''}<div style="margin-top:4px; font-size:12px;"><b>運用環境には影響していません。</b></div><div style="margin-top:6px;">${btn('open-rollback', '結果を見る', '')}</div>`, ex.rolledBack ? '#2e7d32' : '#b00020');
     }
@@ -22284,6 +22296,7 @@
       if (stage === 'rollback-confirm') return card('kt-ai-js-rollback-card', `<div><b>登録前の状態に戻す確認を表示しています。</b></div><div style="font-size:11px; opacity:.8;">右の「反映」の確認画面で「変更前の状態に戻す」を押すと戻します。</div><div style="margin-top:6px;">${btn('open-js-result', '確認画面を開く', '', 'border-color:#6a1b9a;')}</div>`, '#6a1b9a');
       if (stage === 'rollback-blocked') return card('kt-ai-js-rollback-card', `<div><b>自動では元に戻せません。</b></div><div style="font-size:11px; opacity:.8; margin-top:2px;">設定は変更していません。理由は右の「反映」に出ています。</div><div style="margin-top:6px;">${btn('open-js-result', '詳細を見る', '')}</div>`, '#b00020');
       if (stage === 'rolling-back') return card('kt-ai-js-rollback-card', '<div><b>登録前の状態に戻しています...</b></div>', '#6a1b9a');
+      if (stage === 'done' && s && !s.rollbackStatus) return card('kt-ai-js-rollback-card', '<div><b>登録前の状態に戻す確認を取り消しました。</b></div><div style="font-size:11px; opacity:.8;">JavaScript は変更していません。</div>', '#6a1b9a');
       if (!s || !s.rollbackStatus) return card('kt-ai-js-rollback-card', `<div><b>${esc(m.text)}</b></div>`, '#6a1b9a');
       return card('kt-ai-js-rollback-card', `<div><b>${s.rolledBack ? 'JavaScript を登録前の状態へ戻しました。' : '元に戻せませんでした。'}</b></div>${s.rollbackRestored != null ? `<div style="font-size:12px; margin-top:4px;">登録する前の設定との比較：${s.rollbackRestored ? '✓ 一致' : '× 差分あり'}</div>` : ''}<div style="margin-top:4px; font-size:12px;"><b>運用環境には影響していません。</b></div><div style="margin-top:6px;">${btn('open-js-result', '結果を見る', '')}</div>`, s.rolledBack ? '#2e7d32' : '#b00020');
     }
@@ -22990,6 +23003,8 @@
       const label = WHO[m.role] ?? '';
       const who = label ? `<div class="kt-ai-who">${esc(label)}</div>` : '';
       const wrap = (inner) => `<div class="kt-ai-msg role-${esc(m.role)}" data-mid="${esc(m.id)}">${m.role === 'user' ? '' : who}${inner}</div>`;
+      //   §12.60（2026-10-23）: 元に戻すのカードは、そのカードの反映の記録の state を直接読む（右上に別の記録を出していても、そのカードの反映の状態を描く）
+      const logStateOf = (kind) => { const exId = m.data ? m.data.executionId : null; const e = exId && Array.isArray(view.applyLog) ? view.applyLog.find(x => x && x.kind === kind && x.executionId === exId) : null; if (e) return e.state; const st = kind === 'js' ? view.jsExecState : view.execState; const id = st ? ((st.execution && st.execution.executionId) || (st.prepared && st.prepared.executionId) || null) : null; return st && (!exId || id === exId) ? st : null; };   // 記録に無いときは、右上の状態が同じ反映のときだけ
       const planOf = () => (view.plans && m.data ? view.plans.get(`${m.data.planId}:${m.data.version}`) : null) || null;
       const bubble = (text) => `<div class="kt-ai-bubble kt-ai-rich">${KTContextUi.richTextHtml(plainText(text))}</div>`;
       switch (m.type) {
@@ -23000,9 +23015,9 @@
         // C-1 第 3 段（2026-10-08）: 変更案のカード（MSG.PLAN）は削除した（最終案のカードに統合）。簡素化（2026-10-17）: 本体は MSG.PLAN・MSG.REVIEW を作らないので、描画・隠す判定も削除した
         case MSG.DRAFT: return wrap(draftCardHtml(m, view));   // 段階 B: 仮案のカード
         case MSG.ANSWER: return wrap(answerCardHtml(m));
-        case MSG.JS_ROLLBACK: return wrap(jsRollbackCardHtml(m, view.jsExecState));
+        case MSG.JS_ROLLBACK: return wrap(jsRollbackCardHtml(m, logStateOf('js')));
         case MSG.DOCUMENT: return wrap(documentCardHtml(m));
-        case MSG.ROLLBACK: return wrap(rollbackCardHtml(m, view.execState));
+        case MSG.ROLLBACK: return wrap(rollbackCardHtml(m, logStateOf('settings')));
         case MSG.ERROR: return wrap(errorCardHtml(m));
         case MSG.SYSTEM_NOTICE: return wrap(bubble(m.text));
         default: {
@@ -23123,7 +23138,7 @@
     /**
      * 動作テスト環境への反映の記録（右の「反映」の下）。会話をまたいで、このページを開いている間だけ持つ（Toolkit は保存しない）。
      * 読み込み直した後は、kintone の設定から毎回作る「運用環境との差」で確かめる（どの依頼で反映したかは分からない）
-     * @param {Array} entries [{ id, kind: 'settings'|'js', executionId, epoch, at, goal, version, items, state }]（古い順）
+     * @param {Array} entries [{ id, kind: 'settings'|'js', executionId, epoch, at, goal, planId, version, plan, review, state }]（古い順。state = 反映・登録の状態の入れ物そのもの。§12.60: 手順・ファイルの一覧は state.prepared と計画から描くときに作る）
      * @param {object} o { currentEpoch, focusedIds: Set（右上の反映 / 登録で表示中の executionId）, base（KTDevBase の結果）}
      */
     function applyLogHtml(entries = [], { currentEpoch = null, focusedIds = new Set(), base = null } = {}) {
@@ -23142,7 +23157,9 @@
         // 標準設定の手順は、承認して実行した手順だけ（{ id, title }）。反映が終わったら、書き込んだ手順だけにする（Fail Stop で実行しなかった手順を「反映した」と見せない）
         const exSteps = e.kind === 'settings' ? (e.state?.execution?.steps || null) : null;
         const wrote = (id) => { const st = exSteps ? exSteps.find(x => x.stepId === id) : null; return !st || ['APPLIED', 'VERIFIED', 'VERIFY_FAILED'].includes(st.status) || (st.status === 'FAILED' && st.partial); };
-        const items = (e.items || []).filter(x => typeof x === 'string' || !exSteps || s?.running || wrote(x.id)).map(x => (typeof x === 'string' ? x : x.title));
+        const titleOf = (st) => ((e.plan && Array.isArray(e.plan.steps) ? e.plan.steps.find(p => p && p.id === st.stepId) : null) || {}).title || (st.prepared && st.prepared.targetLabel) || st.stepId;
+        const listed = e.kind === 'js' ? (e.state?.prepared?.changes || []).map(c => `${c.target === 'mobile' ? 'モバイル' : 'PC'}「${c.name}」`) : (e.state?.prepared?.steps || []).filter(st => st && st.status === 'PENDING').map(st => ({ id: st.stepId, title: titleOf(st) })).filter(x => x.title);
+        const items = listed.filter(x => typeof x === 'string' || !exSteps || s?.running || wrote(x.id)).map(x => (typeof x === 'string' ? x : x.title));
         const what = items.slice(0, 6).map(x => esc(x)).join('・') + (items.length > 6 ? ` ほか ${items.length - 6} 件` : '');
         const tags = [e.kind === 'js' ? 'JavaScript の登録' : '標準設定の反映', e.version != null ? `計画 v${e.version}` : '', e.epoch !== currentEpoch ? '前の会話' : 'この会話', focusedIds.has(e.executionId) ? '上で表示中' : ''].filter(Boolean).map(t => `<span class="kt-ai-base-chip">${esc(t)}</span>`).join(' ');
         const open = btn('log-open', written && !(s && s.rolledBack) ? '詳細・元に戻す' : '詳細を見る', `data-log="${esc(e.id)}"`, written && !(s && s.rolledBack) ? 'border-color:#6a1b9a;' : '');
@@ -23243,7 +23260,10 @@
     let lastReview = null;         // KTPlanReview.review の結果（Toolkit 検証）
     // Preview Executor（Phase 9）。d.executor = { api, appId }。api は kintone のセッション認証（このユーザーの権限）で動作テスト環境だけを書く
     const executor = d.executor && d.executor.api ? d.executor : null;
-    const execState = { stage: 'idle', prepared: null, execution: null, error: null, rollbackPlan: null, rollback: null };
+    //   §12.60（2026-10-23）: 反映の状態の入れ物は反映ごとに作り、反映を始めた記録（applyLog）がそのまま持つ。execState = 右上に出している状態（記録を開いているときはその記録の state そのもの）。
+    //   記録への写し（描くたびの syncApplyLog）と、記録を開くときの逆写しは廃止した
+    const freshExec = () => ({ stage: 'idle', prepared: null, execution: null, error: null, rollbackPlan: null, rollback: null, planRef: null, finalRunId: null });
+    let execState = freshExec();
     // tokenless connect（Nest Rec の承認ページ → PKCE → Access / Refresh）。credential 文字列を UI に出さない
     let preWin = null;
     const openUrl = d.openUrl || ((url) => {
@@ -23814,7 +23834,7 @@
       try { for (const det of ($chat.querySelectorAll ? $chat.querySelectorAll('details[open]') : [])) { const w = det.closest ? det.closest('[data-mid]') : null; if (w) openKeys.add(`${w.dataset.mid}:${[...w.querySelectorAll('details')].indexOf(det)}`); } } catch (e) { }
       // 会話の応答性: 最新の版の確認事項は「未回答」だけに回答欄を出し、回答済みは答えと一緒に示す（answerState / ledger）
       //   working: 仮案の AI の応答待ち（PROPOSE）の間は、仮案のカードの［採用］［一部採用］［不採用］と回答欄を出さない（確認 2・2026-10-07）
-      $chat.innerHTML = KTAiChatUi.chatHtml(st.messages, { plans: planIndex(), activePlan: st.activePlan, execState, jsExecState: jsExec, answers: answerDrafts, answerState: conv.answerContext(), ledger: conv.ledger(), hold: applyHold(), draft: conv.draft(), draftDecisions: conv.draftDecisions(), draftAnswers: answerDrafts, working: workingNow(), finalPre: finalPreView(), finalRun, labels: labelsNow(), numbers: numbersNow() }, { showAll, dropped: st.dropped });
+      $chat.innerHTML = KTAiChatUi.chatHtml(st.messages, { plans: planIndex(), activePlan: st.activePlan, execState, jsExecState: jsExec, applyLog, answers: answerDrafts, answerState: conv.answerContext(), ledger: conv.ledger(), hold: applyHold(), draft: conv.draft(), draftDecisions: conv.draftDecisions(), draftAnswers: answerDrafts, working: workingNow(), finalPre: finalPreView(), finalRun, labels: labelsNow(), numbers: numbersNow() }, { showAll, dropped: st.dropped });
       renderMermaid($chat);
       if (openKeys.size) { try { for (const w of $chat.querySelectorAll('[data-mid]')) { [...w.querySelectorAll('details')].forEach((det, k) => { if (openKeys.has(`${w.dataset.mid}:${k}`)) det.open = true; }); } } catch (e) { } }
       // 回答を入力中なら、その欄にフォーカスを戻す（会話の末尾へは移動しない）
@@ -23897,7 +23917,6 @@
      * 前の会話で反映・登録したものは「反映の記録」に残り、そこから開いて戻せる（右上の「実行」は新しい会話の分だけ）
      */
     function clearWorkspaceForNewConversation() {
-      syncApplyLog();
       adopted = null; lastPlan = null; lastReview = null;
       finalPre.seq++; Object.assign(finalPre, { key: null, runKey: null, status: 'idle', planId: null, version: null, settings: null, js: null, parts: null, items: null, reasons: [], notice: null });
       if (finalRun && finalRun.stage !== 'running') finalRun = null;
@@ -23907,10 +23926,7 @@
       $factDetail.innerHTML = ''; $factDetail.style.display = 'none';
       //   2026-10-16: 詳細情報の運用環境との差の一覧も閉じる（新しい会話では［差分を見る］を押すまで出さない）
       baseDiffShown = false; renderBaseDiff();
-      // 戻す確認の画面のままなら、確認を取り消してから記録に写す（PREPARED のまま記録に残すと、戻せなかったように見えた）
-      if (['rollback-confirm', 'rollback-blocked'].includes(execState.stage)) { execState.rollback = null; execState.error = null; execState.stage = 'done'; }
-      if (['rollback-confirm', 'rollback-blocked'].includes(jsExec.stage)) { jsExec.rollback = null; jsExec.error = null; jsExec.stage = 'done'; }
-      syncApplyLog();
+      // 復元を実行する前の確認（rollback-confirm）は、入れ物を離れるとき（下の resetExec / resetJsExec）に取り消す（§12.60。戻せなかった確認の理由は残す）
       // 処理の途中（反映中・戻している途中）は触らない（終わった結果は記録に残り、会話には写さない）
       if (!EXEC_BUSY.includes(execState.stage)) resetExec();
       if (!EXEC_BUSY.includes(jsExec.stage)) resetJsExec();
@@ -23943,7 +23959,7 @@
       if (v.plan) setArtifact({ type: VM.ARTIFACT.CHANGE_PLAN, id: v.planId, version: v.version }, { auto: true });
       // 反映済み（まだ戻していない）実行があれば残す（戻せなくならないように）。新しい版で反映を始めるときに prepare が作り直す
       //   処理の途中は触らない。記録から開いた・前の会話の反映（閉じてよいもの）は、記録に残して右上を今の計画に戻す
-      if (!EXEC_BUSY.includes(execState.stage) && (!execState.execution || execState.stage === 'rolled-back' || execClosable())) { syncApplyLog(); resetExec(); }
+      if (!EXEC_BUSY.includes(execState.stage) && (!execState.execution || execState.stage === 'rolled-back' || execClosable())) resetExec();
       renderExec();
     }
     //   2026-10-19: 右の「変更内容」の実装仕様のカード（renderSpec）は廃止した。JavaScript の対象・方針・画面・フィールドは変更内容の要約（changeSummaryHtml）
@@ -24210,7 +24226,7 @@
       // ヘッダーの［反映の記録］（新しい会話を始めても、このページを開いている間は残る）・［AI 接続済み］
       if (act === 'open-log') { renderApplyLog(); showPane('log'); return; }
       if (act === 'open-connection') { showPane('connection'); return; }
-      if (act === 'log-audit') { const e = logById(dataOf(t, 'log')); if (e && (e === execLogRef || e === jsLogRef)) syncApplyLog(); const a = applyLogAudit(e); const ok = a ? await d.copyText(JSON.stringify(a, null, 2)) : false; if (t && t.textContent != null) flashBtnText(t, ok ? 'Copied!' : 'Failed'); return; }
+      if (act === 'log-audit') { const e = logById(dataOf(t, 'log')); const a = applyLogAudit(e); const ok = a ? await d.copyText(JSON.stringify(a, null, 2)) : false; if (t && t.textContent != null) flashBtnText(t, ok ? 'Copied!' : 'Failed'); return; }
       // 会話の応答性: ［再試行］は入力欄を上書きしない（応答待ちや、エラーの後に書いた下書きを消していた）。入力欄が同じ文のときだけ入力欄からの送信として扱う
       if (act === 'retry') { const text = dataOf(t, 'text'); const intent = dataOf(t, 'intent'); if (text) await sendChat(text, { intent: intent || null, source: String($input.value ?? '').trim() === String(text).trim() ? 'composer' : 'api', displayText: dataOf(t, 'display') || null }); return; }
       if (act === 'choice') { const text = dataOf(t, 'text'), intent = dataOf(t, 'intent'); if (text && intent) await sendChat(text, { intent, displayText: dataOf(t, 'display') || null }); return; }
@@ -24278,14 +24294,21 @@
     //   登録・復元は drawer（コードペイン）の確認画面の操作だけで始まる。チャットの文章・AI の出力では始まらない
     // ==================================================================
     let pendingSeed = null;
-    const jsExec = { stage: 'idle', prepared: null, execution: null, rollback: null, error: null, planId: null, version: null, paneClosed: false };
+    const freshJsExec = () => ({ stage: 'idle', prepared: null, execution: null, rollback: null, error: null, planId: null, version: null, paneClosed: false, finalRunId: null });
+    let jsExec = freshJsExec();   // §12.60: 登録ごとに新しい入れ物（記録がそのまま持つ）
     // Phase 21: 登録の前に利用者が 1 件ずつ確認した項目（prepared.confirmations[].key）。準備をやり直すと空に戻る
-    const resetJsExec = () => { jsExec.stage = 'idle'; jsExec.prepared = null; jsExec.execution = null; jsExec.rollback = null; jsExec.error = null; jsExec.planId = null; jsExec.version = null; jsExec.paneClosed = false; jsExec.finalRunId = null; jsLogRef = null; jsOpenedFromLog = false; };
+    /**
+     * §12.60（2026-10-23）: 入れ物を離れるとき（別の最終案の反映・登録へ移る・新しい会話・閉じる）に、復元を実行する前の確認（rollback-confirm）だけ取り消す。
+     *   書き込みも復元もしない。反映の結果・一部失敗の内訳・復元の snapshot はそのまま。進行中の復元・戻した結果・戻せなかった確認（rollback-blocked。理由は残す）は触らない
+     */
+    const leaveRollbackConfirm = (st) => { if (st && st.stage === 'rollback-confirm') { st.rollback = null; st.error = null; st.stage = 'done'; } };
+    const resetJsExec = () => { leaveRollbackConfirm(jsExec); jsExec = freshJsExec(); jsLogRef = null; jsOpenedFromLog = false; };   // §12.60: 新しい入れ物（前の登録の状態は、その記録が持つ）
     // ---- 動作テスト環境への反映の記録（会話をまたいで・このページを開いている間だけ。Toolkit は保存しない）----
     //   標準設定の反映（execState）と JS の登録（jsExec）は 1 件ずつしか持たず、次の反映・登録や新しい会話で上書きされていた
     //   （前の反映を戻す材料も失った）。反映・登録を始めた時点で記録を作り、戻す材料（prepared / execution / snapshot）と、その時点の
     //   計画・検証・判断を記録に持たせる。右上の表示を新しい会話の分にしても、記録の［詳細・元に戻す］から前の反映を開き、既存の確認
     //   （現在の設定との照合）を通して戻せる。execLogRef / jsLogRef = いま右上に出している反映 / 登録の記録
+    //   §12.60（2026-10-23）: 記録の state は反映・登録の状態の入れ物そのもの（execState / jsExec は右上に出している記録の state を指す）。描くたびの写しと記録を開くときの逆写しは廃止
     const applyLog = [];
     let applyLogSeq = 0, execLogRef = null, jsLogRef = null, execOpenedFromLog = false, jsOpenedFromLog = false, shownLogCount = 0;   // OpenedFromLog = 利用者が記録の［詳細］から開いた
     const logById = (id) => applyLog.find(e => e.id === id) || null;
@@ -24319,11 +24342,6 @@
     }
     const logByExecution = (kind, executionId) => (executionId ? applyLog.find(e => e.kind === kind && (e.executionId === executionId || execIdOf(e.state) === executionId)) || null : null);
     const EXEC_BUSY = ['preparing', 'running', 'rollback-preparing', 'rolling-back'];
-    /** 右上の反映 / 登録の今の状態を記録へ写す（記録は同じオブジェクトを指すので、戻した結果もそのまま残る） */
-    function syncApplyLog() {
-      if (execLogRef) execLogRef.state = { stage: execState.stage, prepared: execState.prepared, execution: execState.execution, rollbackPlan: execState.rollbackPlan, rollback: execState.rollback };
-      if (jsLogRef) jsLogRef.state = { stage: jsExec.stage, prepared: jsExec.prepared, execution: jsExec.execution, rollback: jsExec.rollback };
-    }
     function renderApplyLog() {
       const el = $('kt-ai-apply-log');
       if (!el) return;
@@ -24339,29 +24357,16 @@
     function openApplyLogEntry(entry) {
       if (!entry || !entry.state) return false;
       const busy = (stage) => EXEC_BUSY.includes(stage) || ['confirm', 'rollback-confirm'].includes(stage);
+      //   §12.60: 記録の state をそのまま右上に出す（逆写しをやめた。右上の今の状態は、その記録の state が持ったまま）。処理・確認の途中は別の記録を開かない（表示中の記録なら見せるだけ）
       if (entry.kind === 'js') {
-        // 処理・確認の途中は、表示中の記録でも状態を書き換えない（途中の反映を「完了」にして、別の記録を開けるようにしていた）
-        if (busy(jsExec.stage)) {
-          if (jsLogRef === entry) { jsExec.paneClosed = false; renderJsReg(); showPane('exec', { scrollTo: '#kt-ai-jsreg' }); return true; }
-          conv.notice('右の「反映」で JavaScript の登録・復元の確認の途中です。確認を終えるかキャンセルしてから、記録を開いてください。', { kind: 'apply-log-busy' }); return false;
-        }
-        syncApplyLog();
-        const st = entry.state;
-        const done = st.stage === 'rolled-back' ? 'rolled-back' : (st.execution ? 'done' : 'idle');
-        jsExec.stage = done; jsExec.prepared = st.prepared; jsExec.execution = st.execution; jsExec.rollback = done === 'rolled-back' ? st.rollback : null; jsExec.error = null;
-        jsExec.planId = entry.planId; jsExec.version = entry.version; jsExec.paneClosed = false; jsLogRef = entry; jsOpenedFromLog = true;
+        if (busy(jsExec.stage) && jsLogRef !== entry) { conv.notice('右の「反映」で JavaScript の登録・復元の確認の途中です。確認を終えるかキャンセルしてから、記録を開いてください。', { kind: 'apply-log-busy' }); return false; }
+        if (jsLogRef !== entry) { jsExec = entry.state; jsLogRef = entry; jsOpenedFromLog = true; }
+        jsExec.paneClosed = false;
         renderJsReg(); showPane('exec', { scrollTo: '#kt-ai-jsreg' });
         return true;
       }
-      if (busy(execState.stage)) {
-        if (execLogRef === entry) { renderExec(); showPane('exec', { scrollTo: '#kt-ai-exec' }); return true; }
-        conv.notice('右の「反映」で反映・元に戻す確認の途中です。確認を終えるかキャンセルしてから、記録を開いてください。', { kind: 'apply-log-busy' }); return false;
-      }
-      syncApplyLog();
-      const st = entry.state;
-      const done = st.stage === 'rolled-back' ? 'rolled-back' : (st.execution ? 'done' : 'idle');
-      execState.stage = done; execState.prepared = st.prepared; execState.execution = st.execution; execState.rollbackPlan = st.rollbackPlan; execState.rollback = done === 'rolled-back' ? st.rollback : null; execState.error = null; execState.planRef = null;
-      execLogRef = entry; execOpenedFromLog = true;
+      if (busy(execState.stage) && execLogRef !== entry) { conv.notice('右の「反映」で反映・元に戻す確認の途中です。確認を終えるかキャンセルしてから、記録を開いてください。', { kind: 'apply-log-busy' }); return false; }
+      if (execLogRef !== entry) { execState = entry.state; execLogRef = entry; execOpenedFromLog = true; }
       renderExec(); showPane('exec', { scrollTo: '#kt-ai-exec' });
       return true;
     }
@@ -24372,7 +24377,7 @@
     const execClosable = () => !!(execLogRef && execLogRef.plan !== lastPlan && conv && (execOpenedFromLog || execLogRef.epoch !== conv.state.epoch) && ['done', 'rolled-back', 'rollback-blocked'].includes(execState.stage));
     function closeLoggedExec() {
       if (!execClosable()) return false;
-      syncApplyLog(); resetExec(); renderExec();
+      resetExec(); renderExec();
       return true;
     }
     /** 記録の監査 JSON（反映した時点の計画・検証・判断と、戻す前後の結果。JS の本文・認証情報は含めない） */
@@ -24383,7 +24388,6 @@
       return (entry.plan && entry.review) ? KTPlanExecutor.buildAudit({ goal: entry.goal, plan: entry.plan, review: entry.review, prepared: st.prepared, execution: st.execution, rollback: st.rollback }) : null;
     }
     function renderJsReg() {
-      syncApplyLog();
       const el = $('kt-ai-jsreg');
       const vReg = jsExec.planId != null ? planIndex().get(`${jsExec.planId}:${jsExec.version}`) || null : null;
       // 記録から開いた、前の会話（今の会話に無い版）の登録: どの依頼の登録かを添え、会話には前の会話のカードを出さない
@@ -24540,7 +24544,8 @@
       { const h = applyHold(); if (h) return stop('APPLY_HOLD', h); }
       { const a = approvalNow(); if (!a.ok) return stop('APPROVAL_REQUIRED', a.message); }
       const vNow = conv.activePlan();
-      jsExec.stage = 'running';
+      const jx = jsExec;   // §12.60: この登録の入れ物（読み直しの間に右上が替わっても、この入れ物に書く）
+      jx.stage = 'running';
       // 反映の記録: 登録を始めた時点の版・仕様・生成の出所を持たせる（次の登録や新しい会話で jsExec が上書きされても、戻す材料と監査が残る）
       {
         const vReg = vNow;
@@ -24548,25 +24553,25 @@
           specs: conv.planHistory().filter(x => x.planId === vReg.planId && x.spec).map(x => x.spec), approvedSpec: vReg.spec?.status === 'CONFIRMED' ? vReg.spec : null,
           generated: Object.entries(vReg.generated || {}).map(([customizationId, g]) => ({ customizationId, generated: g.generated, review: g.review, existingSource: g.existingSource })),
           subject: conv.subject() ? { ...conv.subject(), source: { hash: conv.subject().sourceHash } } : null,
-          items: (jsExec.prepared.changes || []).map(c => `${c.target === 'mobile' ? 'モバイル' : 'PC'}「${c.name}」`), state: null };
+          state: jx };   // §12.60: 登録の状態の入れ物そのもの（ファイルの一覧は描くときに state.prepared.changes から）
         applyLog.push(jsLogRef);
       }
       renderJsReg();
       try {
-        jsExec.execution = await KTJsExecutor.executePreview(jsExec.prepared, { api: executor.api, acknowledged, onProgress: (ex) => { jsExec.execution = ex; renderJsReg(); } });
+        jx.execution = await KTJsExecutor.executePreview(jx.prepared, { api: executor.api, acknowledged, onProgress: (ex) => { jx.execution = ex; renderJsReg(); } });
       } catch (e) {
-        jsExec.error = e?.message || String(e);
+        jx.error = e?.message || String(e);
         // 確認の項目の不足は、書き込む前に止まる（動作テスト環境は変わっていない。登録の判定は登録の準備が止める）
-        if (e?.code === 'CONFIRMATION_REQUIRED') return stop(e.code, jsExec.error);
-        jsExec.execution = jsExec.execution || { executionId: jsExec.prepared.executionId, status: 'FAILED', steps: jsExec.prepared.changes, put: null, error: { code: e?.code || 'EXECUTE_FAILED', message: jsExec.error }, previewUnchanged: null };
+        if (e?.code === 'CONFIRMATION_REQUIRED') return stop(e.code, jx.error);
+        jx.execution = jx.execution || { executionId: jx.prepared.executionId, status: 'FAILED', steps: jx.prepared.changes, put: null, error: { code: e?.code || 'EXECUTE_FAILED', message: jx.error }, previewUnchanged: null };
       }
-      jsExec.stage = 'done';
+      jx.stage = 'done';
       noteWritten(true);   // 2026-10-21: 登録を終えた直後に計画の版へ知らせる（読み直しの前。前はここで登録の印だけを版に書き、反映済みは会話の写しが決めていた）
       renderJsReg();
-      if (jsExec.execution?.put?.ok && typeof d.rescanJs === 'function') { try { await d.rescanJs(); fillTargets(); renderHeader(); } catch (e) { } }
-      if (jsExec.execution?.put?.ok) notifySettingsChanged('js-register');   // 設定取得の関所: Customize の一覧など、ほかの場所の取得済みを古いとする
+      if (jx.execution?.put?.ok && typeof d.rescanJs === 'function') { try { await d.rescanJs(); fillTargets(); renderHeader(); } catch (e) { } }
+      if (jx.execution?.put?.ok) notifySettingsChanged('js-register');   // 設定取得の関所: Customize の一覧など、ほかの場所の取得済みを古いとする
       refreshDevBase({ reason: 'after-js-register' });   // Phase 21: 登録した後の動作テスト環境を次の基準にする
-      return jsExec.execution;
+      return jx.execution;
     }
     async function startJsRollback() {
       if (!executor || !jsExec.execution || !['done', 'rollback-blocked'].includes(jsExec.stage)) return null;
@@ -24591,7 +24596,7 @@
     /** Customization Audit（§37）。相談対象・仕様の版・承認した仕様・生成の出所・Code Review・登録前後・検証・復元。token / cookie / 本文は含めない */
     const jsAudit = () => {
       // 登録を始めた後は、その時点の版・仕様・生成の写し（反映の記録）から作る（新しい会話・次の登録の後も同じ監査になる）
-      if (jsLogRef) { syncApplyLog(); return applyLogAudit(jsLogRef); }
+      if (jsLogRef) return applyLogAudit(jsLogRef);
       const v = jsExec.planId != null ? planIndex().get(`${jsExec.planId}:${jsExec.version}`) : conv.activePlan();
       const specs = v ? conv.planHistory().filter(x => x.planId === v.planId && x.spec).map(x => x.spec) : [];
       const generated = v ? Object.entries(v.generated || {}).map(([customizationId, g]) => ({ customizationId, generated: g.generated, review: g.review, existingSource: g.existingSource })) : [];
@@ -24991,6 +24996,8 @@
       const current = KTDevBase.currentOf(b);   // 2026-10-23: 設定の準備・JavaScript の準備は、この基準の今の設定を受け取る（自分で取らない）
       const shouldContinue = KTFetchGate.continuer(intent, canAutoFetch);
       try {
+        //   §12.60（2026-10-23）: 版の分類が内部の例外で作れていない（null。[] の「設定変更なし」とは別）ときは、承認の欄の準備を失敗で止める（既存の経路: 反映の前の準備に失敗しました）
+        if (v.applySteps === null) throw new Error(`設定の手順の分類に失敗しました（Toolkit の内部の問題: ${v.applyStepsError || '理由不明'}）。この最終案は反映できません`);
         const out = finalOutput();
         const hasSettings = !!out && (Array.isArray(v.applySteps) ? v.applySteps : []).some(a => a && a.apply === 'AUTO');   // §12.59: 版の分類。自動で反映する手順が無ければ設定の準備は走らせない
         let settings = null;
@@ -25119,8 +25126,7 @@
         }
         let sp = null, jp = null;
         if (approvedParts.settings) {
-          execState.finalRunId = run.id;   // 準備の間も最終確認の段を出さない（renderExec）
-          await startExecutor();
+          await startExecutor({ finalRunId: run.id });   // 準備の間も最終確認の段を出さない（renderExec）
           if (!['confirm', 'blocked'].includes(execState.stage) || !execState.prepared) { revoke('反映の準備を始められなかったためです。'); return finish({ stage: 'stopped', stop: { text: '設定の反映の準備を始められませんでした。何も書き込んでいません。', changes: [], next: '右の「反映」で理由を確かめてください。' } }); }
           sp = execState.prepared;
         }
@@ -25136,11 +25142,10 @@
         // 2. 標準設定を依存順に実行（Fail Stop・1 手順ごとに検証）
         if (sp) {
           step('settings');
-          execState.finalRunId = run.id;
           const pendingIds = (sp.steps || []).filter(s => s.status === 'PENDING').map(s => s.stepId);
-          await confirmExecutor();
-          const sum = VM.executionSummary(execState);
-          const ok = settingsAllOk(execState.execution, pendingIds);
+          const stA = (await confirmExecutor()) || execState;   // §12.60: この反映の入れ物（書いた後の取り直しの間に右上が替わっても、この反映の結果を読む）
+          const sum = VM.executionSummary(stA);
+          const ok = settingsAllOk(stA.execution, pendingIds);
           //   2026-10-19: 承認の前から分かっていた「自動では反映しない手順」（手作業に回す種類。承認の欄と同じ文）を結果に残す（途中の失敗の × と分ける）
           run.settings = { started: true, executionId: sum ? sum.executionId : null, verified: sum ? sum.verified : 0, failed: sum ? sum.failed + sum.warn : 0, written: !!(sum && sum.written), manual: preItemsOf(sp, null, v).manual };
           run.written = run.written || run.settings.written;
@@ -25172,9 +25177,10 @@
             return finish({ stage: 'stopped', partial: run.written, ok: false, js: { ...run.js, reason: '承認の後に登録の内容・確認項目・注意が変わったため' }, stop: { text: '承認の後に、JavaScript の登録の内容が変わりました。登録していません。', changes: added, next: run.written ? NEXT_SETTINGS_ONLY : NEXT_AGAIN } });
           }
           //   確認項目は承認の欄で示して承認を受けたもの（新しいものは上で止めた）。同じ内容を 1 件ずつ答えさせない
+          const jx = jsExec;   // §12.60: この登録の入れ物（読み直しの間に右上が替わっても、この登録の結果を読む）
           await confirmJsRegister({ acknowledged: (pj.confirmations || []).filter(x => x && x.key).map(x => x.key) });
-          const js = VM.jsExecutionSummary(jsExec);
-          const ex = jsExec.execution || null;
+          const js = VM.jsExecutionSummary(jx);
+          const ex = jx.execution || null;
           run.js = { executionId: js ? js.executionId : null, registered: !!(js && js.put), written: !!(js && js.written), ok: !!(js && js.ok), files: js ? js.steps.map(st => `${st.kind === 'REPLACE_FILE' ? '✎' : '＋'} ${st.name}（${TARGET_JA(st.target)}）`) : [], first: js && js.firstStep ? { target: js.firstStep.target, name: js.firstStep.name } : null, verified: js ? js.verified : 0, total: js ? js.steps.length : 0, reason: js && js.put ? null : ((ex && (ex.error?.message || ex.put?.error?.message)) || jsExec.error || '登録できませんでした') };
           run.written = run.written || run.js.written;
           if (!run.js.registered) {
@@ -25198,7 +25204,6 @@
     // ---- Preview Executor の表示・操作（状態は execState が正本。会話カードはこれを写す）----
     function renderExec() {
       const el = host.querySelector('#kt-ai-exec');
-      syncApplyLog();
       // 記録から開いた、今の計画ではない反映（前の会話・別の計画）: その時点の検証で描き、どの依頼の反映かを添える。承認の件数も、その時点のもの
       const focused = execLogRef;
       const foreign = !!(focused && focused.plan !== lastPlan);
@@ -25209,7 +25214,7 @@
       const hasJs = !foreign && !!(lastPlan && Array.isArray(lastPlan.customizations) && lastPlan.customizations.length);
       //   §12.59（2026-10-23）: 承認の前の手順の分類（承認を仮定しない classifySteps。承認＝反映の 1 回の流れでは常に 0 件）は廃止。自動で反映する設定の手順があるかは
       //   版の分類（承認の欄の準備と同じ AUTO）。記録から開いた前の反映（foreign）は案内の 1 文だけ
-      const hasSettings = !foreign && !!(adopted && Array.isArray(adopted.applySteps) && adopted.applySteps.some(a => a && a.apply === 'AUTO'));
+      const hasSettings = !foreign && !!adopted && (adopted.applySteps === null || (Array.isArray(adopted.applySteps) && adopted.applySteps.some(a => a && a.apply === 'AUTO')));   // 分類できていないときは案内を出さず、止めている理由（hold）を見せる
       // 右の「反映」を出してから図を描く（隠れている間に描くと、プロセス図の大きさが 0 になる）
       if (el) { el.innerHTML = rv ? note + KTContextUi.executorHtml({ ...execState, available: !!executor, review: rv, hold: foreign ? null : applyHold(), hasJs, hasSettings, foreign, finalRunning: !foreign && !!execState.finalRunId && !!finalRun && finalRun.id === execState.finalRunId && finalRun.stage === 'running' }) : ''; renderApplyArea(); renderMermaid(el); }
       if ($execEmpty) $execEmpty.style.display = rv || execState.stage !== 'idle' || jsExec.stage !== 'idle' ? 'none' : '';
@@ -25218,12 +25223,12 @@
       renderApplyArea();
       renderWsState();
     }
-    const resetExec = () => { execState.finalRunId = null; execState.stage = 'idle'; execState.prepared = null; execState.execution = null; execState.error = null; execState.rollbackPlan = null; execState.rollback = null; execState.planRef = null; execLogRef = null; execOpenedFromLog = false; };
+    const resetExec = () => { leaveRollbackConfirm(execState); execState = freshExec(); execLogRef = null; execOpenedFromLog = false; };   // §12.60: 新しい入れ物（前の反映の状態は、その記録が持つ）
     /**
      * 標準設定の反映の準備: 現在の設定を取得して stale / 権限 / 再検証（書き込みなし）。［動作テスト環境へ反映］1 回の反映（applyFinal）の部品。
      *   簡素化（2026-10-17）: 画面の外から呼ぶ口は削除した。仮案の流れか・承認が有効かは、呼ぶ直前に applyFinal が確かめるので重ねない
      */
-    async function startExecutor() {
+    async function startExecutor({ finalRunId = null } = {}) {
       if (!executor || ['running', 'preparing', 'rolling-back', 'rollback-preparing'].includes(execState.stage)) return null;
       // 2026-10-06: 更新中・必要な確認が残っているときは反映の準備もしない（ボタンも押せない）
       if (applyHold()) { renderExec(); return null; }
@@ -25231,8 +25236,8 @@
       // 準備は、いまの会話の計画（lastPlan）に結び付ける。準備の途中で新しい会話・別の計画になったら、その準備は使わない
       //   （以前は［新しい会話］の後も前の計画の検証と承認が残り、前の計画を反映できた）
       const planRef = lastPlan;
-      syncApplyLog(); execLogRef = null; execOpenedFromLog = false;   // 前の反映は記録に残したまま、新しい準備を始める
-      execState.stage = 'preparing'; execState.prepared = null; execState.execution = null; execState.error = null; execState.rollbackPlan = null; execState.rollback = null; execState.planRef = planRef; renderExec();
+      leaveRollbackConfirm(execState); execLogRef = null; execOpenedFromLog = false;   // 前の反映は記録（その state）に残したまま、新しい入れ物で準備を始める（§12.60。放置した復元の確認は取り消す）
+      execState = { ...freshExec(), stage: 'preparing', planRef, finalRunId }; renderExec();
       setArtifact({ type: VM.ARTIFACT.EXECUTION, id: null, version: conv.activePlan()?.version ?? null }, { scrollTo: '#kt-ai-exec' });
       try {
         const prepared = await KTPlanExecutor.prepare(out, { api: executor.api, appId: executor.appId, current: currentNow() });
@@ -25256,20 +25261,21 @@
       if (applyHold()) { renderExec(); return null; }
       // 準備した計画が、いまの会話の計画のままか（新しい会話・別の計画になっていたら反映しない）
       if (!lastPlan || execState.planRef !== lastPlan) { resetExec(); renderExec(); if (conv) conv.notice('準備した計画は、いまの会話の計画ではなくなりました。反映していません（動作テスト環境は変わっていません）。', { kind: 'exec-plan-changed' }); return null; }
-      execState.stage = 'running';
-      // 反映の記録: 反映を始めた時点の計画・検証を持たせる（次の反映や新しい会話で execState が上書きされても、戻す材料と監査が残る）
+      //   §12.60: この反映の入れ物。書き終えた後の取り直しの間に右上の入れ物が替わっても（新しい会話・新しい版）、この入れ物（記録の state）に書き、呼ぶ側に返す
+      const st = execState;
+      st.stage = 'running';
+      // 反映の記録: 反映を始めた時点の計画・検証と、反映の状態の入れ物そのもの（state）を持たせる（次の反映や新しい会話は新しい入れ物を使うので、戻す材料と監査が残る。§12.60）。
+      //   手順の一覧は描くときに state.prepared.steps（承認して実行する PENDING）と計画の title から作る
       execLogRef = { id: `log_${++applyLogSeq}`, kind: 'settings', executionId: execState.prepared.executionId || null, epoch: conv ? conv.state.epoch : null, at: new Date().toISOString(), goal: lastPlan.goal || adopted?.goal || '', planId: adopted?.planId ?? null, version: adopted?.version ?? null,
-        plan: lastPlan, review: lastReview,
-        // 手順は、承認して実行するもの（PENDING）だけ。未対応・実行不可の手順は反映しない
-        items: (execState.prepared.steps || []).filter(s => s.status === 'PENDING').map(s => ({ id: s.stepId, title: (lastPlan.steps || []).find(p => p.id === s.stepId)?.title || s.prepared?.targetLabel || s.stepId })).filter(x => x.title), state: null };
+        plan: lastPlan, review: lastReview, state: st };
       applyLog.push(execLogRef);
       renderExec();
       try {
-        const execution = await KTPlanExecutor.executePreview(execState.prepared, { api: executor.api, review: lastReview, onProgress: (step, partial) => { execState.execution = partial; renderExec(); } });
-        execState.execution = execution;
-        execState.rollbackPlan = KTPlanExecutor.buildRollbackPlan(execution, execState.prepared);
-      } catch (e) { execState.error = e?.message || String(e); execState.execution = execState.execution || { status: 'FAILED', steps: execState.prepared.steps }; }
-      execState.stage = 'done'; renderExec();
+        const execution = await KTPlanExecutor.executePreview(st.prepared, { api: executor.api, review: lastReview, onProgress: (step, partial) => { st.execution = partial; renderExec(); } });
+        st.execution = execution;
+        st.rollbackPlan = KTPlanExecutor.buildRollbackPlan(execution, st.prepared);
+      } catch (e) { st.error = e?.message || String(e); st.execution = st.execution || { status: 'FAILED', steps: st.prepared.steps }; }
+      st.stage = 'done'; renderExec();
       noteWritten(false);   // 2026-10-21: 書き終えた直後に計画の版を「反映済み」にする（取り直しの前）
       // Phase 21: 反映した後の動作テスト環境を次の作業の基準にする（取り直す）
       //   2026-10-21: 書いた後に今の基準を古いとする（世代を進め、書く前・書いている途中に止めた取得の続きを捨てる）。取り直しは、この後に始めた取得の結果だけを使う
@@ -25277,12 +25283,12 @@
       markDevBaseStale();
       notifySettingsChanged('apply');
       await refreshDevBase({ reason: 'after-apply' });
-      return execState.execution;
+      return st;
     }
     /** 監査 JSON。実行した計画の版（最新の版とは限らない）の plan / review を使う */
     const auditJson = () => {
       // 反映を始めた後は、その時点の計画・検証・判断の写し（反映の記録）から作る（以前は判断が今の Map で、新しい版の採用で空になっていた）
-      if (execLogRef) { syncApplyLog(); return applyLogAudit(execLogRef); }
+      if (execLogRef) return applyLogAudit(execLogRef);
       const exId = execState.execution?.executionId || execState.prepared?.executionId || null;
       const pv = exId && conv ? conv.planHistory().find(v => v.executionId === exId) : null;
       const plan = pv?.plan || lastPlan, review = pv?.review || lastReview;
@@ -25704,13 +25710,8 @@
     if (budget && typeof budget.subscribe === 'function') budget.subscribe(() => { try { renderHeader(); } catch (e) { } });
     // Phase 20（実機）: 会話・計画・承認・生成コードと「変更前の状態に戻す」の情報はこのページの中にだけある（ページの移動・再読み込みで消える）。
     //   動作テスト環境へ反映・登録して戻していない間は、ページを離れる前にブラウザの確認を出す（戻す手段を黙って失わない）
-    const unrevertedPreviewChange = () => {
-      syncApplyLog();
-      const ex = VM.executionSummary(execState), js = VM.jsExecutionSummary(jsExec);
-      if ((ex && ex.done && ex.written && !ex.rollbackStatus) || (js && js.done && js.put && !js.rollbackStatus)) return true;
-      // 右上に出していない反映（前の会話・前の反映）も、書き込んで戻していなければ対象（記録の［詳細・元に戻す］で戻せるのはこのページの中だけ）
-      return applyLog.some(e => { const s = e.kind === 'js' ? VM.jsExecutionSummary(e.state) : VM.executionSummary(e.state); return !!(s && s.written && !s.rolledBack); });
-    };
+    //   §12.60: 反映・登録の状態は記録が持つ（右上に出しているものも記録の state）ので、記録だけを見る（記録の［詳細・元に戻す］で戻せるのはこのページの中だけ）
+    const unrevertedPreviewChange = () => applyLog.some(e => { const s = e.kind === 'js' ? VM.jsExecutionSummary(e.state) : VM.executionSummary(e.state); return !!(s && s.written && !s.rolledBack); });
     if (typeof window !== 'undefined' && typeof window.addEventListener === 'function') {
       window.addEventListener('beforeunload', (e) => { if (!unrevertedPreviewChange()) return undefined; e.preventDefault(); e.returnValue = ''; return ''; });
     }
