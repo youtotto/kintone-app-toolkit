@@ -198,10 +198,10 @@ await section(async () => {
   const rd = m.conv().finalReadiness(v);
   const card = stripC(outside(lastCard(m)));
   const ap = await K.applyOnScreen(m);
-  assert(rd.ready === false && rd.reasons.some(x => x.kind === 'blocked') && /実行できない手順: 備考を必須にする（[^）]+）/.test(card) && /実行できない手順: 必須にする時期を担当者に確かめる（依存する P2 が無効のため実行できません）/.test(card) && !/Review で実行不可/.test(card) && ap.button && ap.button.disabled && !ap.writes.length,
+  assert(rd.ready === false && rd.reasons.some(x => x.kind === 'blocked') && /実行できない手順: 備考を必須にする（[^）]+）/.test(card) && /実行できない手順: 必須にする時期を担当者に確かめる（依存する P2 が無効のため実行できません）/.test(card) && !/Toolkit の確認で反映できない/.test(card) && ap.button && ap.button.disabled && !ap.writes.length,
     `O2-f: 計画の確認で無効な手順は、確認の手順も含めて「実行できない手順」に指摘の文で出し、承認させない（一覧だけを反映しない・書き込み 0）: ${card.replace(/\s+/g, ' ').slice(0, 400)}`);
   const sum = stripC(m.$('kt-ai-change-summary').innerHTML).replace(/\s+/g, ' ');
-  assert(/備考を必須にする：反映できません（存在しないFIELD「ghost_field」を既存として参照）/.test(sum) && /必須にする時期を担当者に確かめる：反映できません（依存する P2 が無効のため実行できません）/.test(sum) && !/Review で実行不可/.test(sum),
+  assert(/備考を必須にする：反映できません（存在しないFIELD「ghost_field」を既存として参照）/.test(sum) && /必須にする時期を担当者に確かめる：反映できません（依存する P2 が無効のため実行できません）/.test(sum) && !/Toolkit の確認で反映できない/.test(sum),
     `O2-f2: 右の「変更内容」の「反映できないこと」も同じ 2 件を指摘の文で出す（左の最終案と同じ集まり）: ${(sum.match(/反映できないこと.{0,240}/) || [''])[0]}`);
 });
 
@@ -543,7 +543,7 @@ await section(async () => {
       const right = stripC(T.KTAiChatUi.changeSummaryHtml(v, {})), exec = m.$('kt-ai-exec').innerHTML;
       const r = await K.applyOnScreen(m);
       const log = m.$('kt-ai-apply-log').innerHTML;
-      assert(v.applySteps === null && /分類の内部の例外/.test(v.applyStepsError || '') && rd.ready === false && rd.reasons[0].kind === 'classification-failed' && pre.status !== 'ready' && !pre.settings && btn && btn.disabled && /設定の手順の分類に失敗しました（Toolkit の内部の問題: テスト: 分類の内部の例外）/.test(stripC(m.chat())) && /設定の手順：分類に失敗したため反映できません/.test(right) && /設定の手順の分類に失敗しました/.test(exec) && !/設定の変更はありません|自動で反映できる設定の手順はありません/.test(exec)
+      assert(v.applySteps === null && /分類の内部の例外/.test(v.applyStepsError || '') && rd.ready === false && rd.reasons[0].kind === 'classification-failed' && pre.status !== 'ready' && !pre.settings && btn && btn.disabled && /設定の手順を反映できるか判定できませんでした（Toolkit の内部の問題: テスト: 分類の内部の例外）/.test(stripC(m.chat())) && /設定の手順：反映できるか判定できなかったため反映できません/.test(right) && /設定の手順を反映できるか判定できませんでした/.test(exec) && !/設定の変更はありません|自動で反映できる設定の手順はありません/.test(exec)
         && !r.run && !r.writes.length && !v.approval && v.status === 'ACTIVE' && !/kt-ai-apply-log-item/.test(log),
         `O7-aa（${kind}）: 分類の内部の例外は版で固定の理由で止める（左のカード・右の「変更内容」・右の「反映」で同じ。承認の欄の準備は走らず、押せない・書き込み 0・承認なし・記録なし）: ${JSON.stringify({ applySteps: v.applySteps, reasons: rd.reasons.map(x => x.kind), pre: { status: pre.status }, button: btn, run: r.run && { stage: r.run.stage, ok: r.run.ok }, writes: r.writes, approval: !!v.approval })}`);
     } finally { KTPlanExecutor.applyReadiness = orig; }

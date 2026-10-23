@@ -25,7 +25,7 @@ const { makeConvC, B, A, Q, req, idBy, META, stripC } = K;
 async function section(fn) { try { await fn(); } catch (e) { assert(false, `例外: ${e && e.stack ? e.stack.split('\n').slice(0, 4).join(' / ') : e}`); } }
 const I = KTAiConversation.INTENT;
 // tests/ai-two-pane.test.js の INTERNAL_IN_CHAT と同じ（内部の番号・処理の通知）
-const INTERNAL_IN_CHAT = /\bv[0-9]+\b|requestId|\bR[0-9]+「|\bQ[0-9]+[：:]|\[E[0-9]+\]|［\s*E[0-9]+|【\s*E[0-9]+|\[\s*E[0-9]+\s*[・、,]|Toolkit Review|Code Review|VERIFIED|snapshot|受け付けました|台帳|を検証しました|kt-ai-who">(Toolkit|SYSTEM)</;
+const INTERNAL_IN_CHAT = /\bv[0-9]+\b|requestId|\bR[0-9]+「|\bQ[0-9]+[：:]|\[E[0-9]+\]|［\s*E[0-9]+|【\s*E[0-9]+|\[\s*E[0-9]+\s*[・、,]|Toolkit の確認|Code Review|VERIFIED|snapshot|受け付けました|台帳|を検証しました|kt-ai-who">(Toolkit|SYSTEM)</;
 
 // ---- 部品: 短い仮案（承認済みでは金額を編集できないようにする）と、場合ごとの Gateway の模擬の応答 ----
 const U0 = '承認済みのレコードは金額を編集できないようにしたい';
@@ -78,7 +78,7 @@ const outsideDetails = (html) => String(html).replace(/<details[\s\S]*?<\/detail
 // =========================================================
 
 // =========================================================
-console.log('\n--- §A2. (1) 修正の指示だけの発言は採用にしない（模擬 update。模擬 adopt の下げは Gateway の仕事） ---');
+console.log('\n--- §A2. (1) 修正の指示だけの発言は採用にしない（模擬 update。模擬 adopt の下げは AI サービスの仕事） ---');
 await section(async () => {
   const x = convOf({ mode: 'update' });
   await x.c.send(U0);

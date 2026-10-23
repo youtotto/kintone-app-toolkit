@@ -99,15 +99,15 @@ console.log('\n--- 1. 反映の画面: 最終案の反映の前・反映中・�
   assert(x.s.prepared.status === 'PREPARED' && x.progress && x.progress.includes('動作テスト環境へ反映しています') && />1\.<[\s\S]*処理中/.test(x.progress), `反映中: 1. 処理中… の進捗表示（画面を固めない）`);
   const e3 = x.html();
   //   §12.59: 内訳（承認した手順・反映できない手順）は押した後の準備の結果から。押す前の右の「反映」には出さない（承認＝反映の 1 回の流れでは常に 0 件だった）
-  assert(/承認済み・実行可能[\s\S]*?<b>2 件（P1, P2）/.test(e3) && !/承認済みだが未対応[\s\S]*?<b>1 件/.test(e3) && !/内訳（承認した手順/.test(x.idle), '内訳（押した後）: 実行できる設定の手順 2 件。JavaScript の手順（P3）は「未対応」に数えない（最終案の反映で続けて登録する）。押す前の右の「反映」に内訳は出さない');
-  assert(x.s.execution.status === 'DONE' && e3.includes('動作テスト環境への反映が完了しました。') && e3.includes('✓ 2 件 VERIFIED') && e3.includes('⚠ 0 件') && e3.includes('× 0 件') && e3.includes('運用環境にはまだ反映されていません。'), '完了: ✓ 2 件 VERIFIED / 運用環境にはまだ反映されていません');
+  assert(/承認済み・実行可能[\s\S]*?<b>2 件（P1, P2）/.test(e3) && !/承認したが Toolkit からは反映できない[\s\S]*?<b>1 件/.test(e3) && !/内訳（承認した手順/.test(x.idle), '内訳（押した後）: 実行できる設定の手順 2 件。JavaScript の手順（P3）は「未対応」に数えない（最終案の反映で続けて登録する）。押す前の右の「反映」に内訳は出さない');
+  assert(x.s.execution.status === 'DONE' && e3.includes('動作テスト環境への反映が完了しました。') && e3.includes('✓ 2 件 確認で一致') && e3.includes('⚠ 0 件') && e3.includes('× 0 件') && e3.includes('運用環境にはまだ反映されていません。'), '完了: ✓ 2 件 確認で一致 / 運用環境にはまだ反映されていません');
   assert(/>1\.<[\s\S]*反映済み（確認で一致）[\s\S]*>2\.<[\s\S]*反映済み（確認で一致）/.test(e3) && !/>3\.</.test(e3) && !/>P[0-9]+</.test(e3), '結果一覧: 1・2 は反映済み（確認で一致）。JavaScript の手順は設定の反映の一覧に出さない（手順の番号 P1 も出さない）');
   assert(x.mock.st.fields.progress && x.mock.st.views['担当者別'] && x.mock.st.views['担当者別'].fields.join() === 'owner,case_name,progress', 'モックの動作テスト環境にフィールドと一覧が入った（一覧の NEW_FIELD_1 は実コード）');
   assert(!hasButton(e3, '運用環境へ反映') && !/<button[^>]*>[^<]*deploy/i.test(e3), '完了画面に「運用環境へ反映」ボタンは無い（Never Auto Deploy）');
   assert(e3.includes('反映後の確認：✓ 2 件一致') && !/Simulation|再解析/.test(e3), '反映後の確認は手順ごとの読み戻しの件数だけ（照合・再解析の行は出さない。2026-10-21）');
-  assert(e3.includes('id="kt-ai-exec-audit-copy"') && e3.includes('id="kt-ai-exec-audit-download"') && e3.includes('id="kt-ai-exec-snapshot-copy"') && hasButton(e3, '変更前の状態に戻す'), '完了画面の［詳しく］: 監査 JSON のコピー・保存・実行前スナップショット・［変更前の状態に戻す］');
+  assert(e3.includes('id="kt-ai-exec-audit-copy"') && e3.includes('id="kt-ai-exec-audit-download"') && e3.includes('id="kt-ai-exec-snapshot-copy"') && hasButton(e3, '変更前の状態に戻す'), '完了画面の［詳しく］: 反映の記録（JSON・技術者向け） のコピー・保存・実行前スナップショット・［変更前の状態に戻す］');
   const audit = auditOf(x);
-  assert(audit.auditVersion === '2' && audit.goal === GOAL && audit.plan.steps.length === 3 && !('humanDecisions' in audit) && audit.execution.status === 'DONE' && audit.verification.length === 3 && audit.beforeSnapshot.revision === '12' && audit.actualAfter.addedFields.join() === 'progress' && audit.rollbackPlan.steps.length === 2 && audit.rollbackPlan.executed === false, '監査 JSON: goal / plan / review / execution / verification / before snapshot / actual after / rollback 計画（手順を外す判断の欄は無い: 2026-10-19 廃止）');
+  assert(audit.auditVersion === '2' && audit.goal === GOAL && audit.plan.steps.length === 3 && !('humanDecisions' in audit) && audit.execution.status === 'DONE' && audit.verification.length === 3 && audit.beforeSnapshot.revision === '12' && audit.actualAfter.addedFields.join() === 'progress' && audit.rollbackPlan.steps.length === 2 && audit.rollbackPlan.executed === false, '反映の記録（JSON・技術者向け）: goal / plan / review / execution / verification / before snapshot / actual after / rollback 計画（手順を外す判断の欄は無い: 2026-10-19 廃止）');
   const snap = x.s.execution.snapshot || x.s.prepared.snapshot;
   assert(snap.revision === '12' && snap.fields.properties.owner && !snap.fields.properties.progress, '実行前スナップショット（追加前の設定）');
   assert(e3.includes('DELETE_FIELD') && e3.includes('RESTORE_VIEWS') && e3.includes('&quot;executed&quot;: false'), 'ロールバック計画（DELETE_FIELD / RESTORE_VIEWS）を表示できる・実行はしない');
@@ -124,7 +124,7 @@ console.log('\n--- 2. 失敗 / 止まった理由（stale・権限・重複）/ 
 {
   const x = await applyFlow(PLAN_X, { approve: ['P1'], beforePrepare: (mock) => { mock.st.prodRevision = 13; } });
   const e = x.html();
-  assert(x.s.stage === 'blocked' && e.includes('計画作成後にアプリ設定が変更されています。再レビューしてください。') && e.includes('STALE_PLAN') && e.includes('12 → 13') && e.includes('設定は変更していません') && e.includes('最終案のカードの［動作テスト環境へ反映］をもう一度押してください') && !/id="kt-ai-exec-start"/.test(e) && x.mock.calls.every(c => c.startsWith('GET')), 'stale: STALE_PLAN の文言と差分・書き込みなし（やり直しは最終案のカードから。準備だけをやり直すボタンは無い）');
+  assert(x.s.stage === 'blocked' && e.includes('計画作成後にアプリ設定が変更されています。設定を取り直して、同じ依頼をもう一度送ってください。') && e.includes('STALE_PLAN') && e.includes('12 → 13') && e.includes('設定は変更していません') && e.includes('最終案のカードの［動作テスト環境へ反映］をもう一度押してください') && !/id="kt-ai-exec-start"/.test(e) && x.mock.calls.every(c => c.startsWith('GET')), 'stale: STALE_PLAN の文言と差分・書き込みなし（やり直しは最終案のカードから。準備だけをやり直すボタンは無い）');
 }
 {
   //   2026-10-21: 反映した後の照合（Simulation との一致）は廃止した。書いた内容が期待と違う（kintone が値を補正した）ことは手順ごとの読み戻しが VERIFY_FAILED にし、
@@ -172,8 +172,8 @@ console.log('\n--- 2b. Tier 2（通知 / リマインダー / フィールド変
   assert(/通知追加[\s\S]*?<b>2（P1, P5）/.test(x.html()) && /リマインダー追加[\s\S]*?<b>1（P2）/.test(x.html()) && /フィールド変更[\s\S]*?<b>2（P3, P4）/.test(x.html()), '内訳（押した後）: カテゴリ別の件数（通知追加 2 / リマインダー追加 1 / フィールド変更 2）');
   assert(x.s.prepared.steps.some(st => (st.warnings || []).some(w => w && w.code === 'POSSIBLE_DUPLICATE' && /既存の設定と似ています/.test(w.message || ''))), '準備で、似た既存の設定（POSSIBLE_DUPLICATE）を見つける（最終案の反映の前の確認に「重複の可能性」として出す）');
   const e3 = x.html();
-  assert(x.s.execution.status === 'DONE' && e3.includes('✓ 5 件 VERIFIED'), `完了: 5 件 VERIFIED（${x.s.execution.status}）`);
-  assert(e3.includes('通知: Before 既存 2 件 → After 3 件（＋1 件）') && e3.includes('リマインダー: Before 1 件 → After 2 件') && e3.includes('必須: いいえ → はい') && e3.includes('表示名: 案件名 → 案件名（正式）'), '結果一覧の各 step に Before / After');
+  assert(x.s.execution.status === 'DONE' && e3.includes('✓ 5 件 確認で一致'), `完了: 5 件 確認で一致（${x.s.execution.status}）`);
+  assert(e3.includes('通知: 変更前 既存 2 件 → 変更後 3 件（＋1 件）') && e3.includes('リマインダー: 変更前 1 件 → 変更後 2 件') && e3.includes('必須: いいえ → はい') && e3.includes('表示名: 案件名 → 案件名（正式）'), '結果一覧の各 step に Before / After');
   assert(x.mock.st.perRecord.length === 4 && x.mock.st.reminders.length === 2 && x.mock.st.fields.owner.required === true && x.mock.st.fields.case_name.label === '案件名（正式）' && x.mock.st.fields.case_name.code === 'case_name' && x.mock.st.general.length === 5, 'モックの動作テスト環境: 通知 2 → 4・リマインダー 1 → 2・必須化・表示名変更・既存はすべて保持');
   const audit = auditOf(x);
   assert(audit.beforeAfter.length === 5 && audit.beforeAfter.find(b => b.stepId === 'P3').before.required === false && audit.beforeAfter.find(b => b.stepId === 'P3').after.required === true && audit.rollbackPlan.steps.map(st => st.actionType).sort().join() === 'RESTORE_FIELD_PROPERTY,RESTORE_FIELD_PROPERTY,RESTORE_NOTIFICATION_SETTINGS,RESTORE_NOTIFICATION_SETTINGS,RESTORE_REMINDER_SETTINGS', 'Audit: 各 step の before / after と rollback 計画（RESTORE_*）');
@@ -196,15 +196,15 @@ const PLAN_U = { ...PLAN_X, plan: { ...PLAN_X.plan, proposedFields: [], steps: [
   assert(x.html().includes('✎ 通知変更') && x.html().includes('✎ 一覧変更') && /承認済み・実行可能[\s\S]*?<b>3 件/.test(x.html()), '内訳（押した後）: カテゴリに ✎ 通知変更 / ✎ 一覧変更');
   assert(x.s.execution.status === 'DONE' && x.mock.st.perRecord[0].filterCond === 'amount >= "2000000"' && x.mock.st.views['承認待ち'].fields.join() === 'case_name,approver,amount' && x.mock.st.views['担当者別'], '反映: 通知の条件・一覧の表示項目・新しい一覧');
   const e2 = x.html();
-  assert(e2.includes('動作テスト環境への反映が完了しました。') && e2.includes('✓ 3 件 VERIFIED') && e2.includes('運用環境にはまだ反映されていません。') && hasButton(e2, '変更前の状態に戻す') && e2.includes('id="kt-ai-exec-rollback-start"') && e2.includes('条件: amount &gt;= &quot;1000000&quot; → amount &gt;= &quot;2000000&quot;'), '完了画面: ✓ 3 件 VERIFIED・運用環境には反映されていません・[変更前の状態に戻す]（§17）・進捗行に属性単位の差分');
+  assert(e2.includes('動作テスト環境への反映が完了しました。') && e2.includes('✓ 3 件 確認で一致') && e2.includes('運用環境にはまだ反映されていません。') && hasButton(e2, '変更前の状態に戻す') && e2.includes('id="kt-ai-exec-rollback-start"') && e2.includes('条件: amount &gt;= &quot;1000000&quot; → amount &gt;= &quot;2000000&quot;'), '完了画面: ✓ 3 件 確認で一致・運用環境には反映されていません・[変更前の状態に戻す]（§17）・進捗行に属性単位の差分');
   const r = await rollbackFlow(x);
   assert(r.confirm.includes('動作テスト環境の変更を元に戻します。') && r.confirm.includes('・一覧追加 1 件') && r.confirm.includes('・通知変更 1 件') && r.confirm.includes('・一覧変更 1 件') && r.confirm.includes('運用環境には影響しません。') && hasButton(r.confirm, 'キャンセル') && r.confirm.includes('id="kt-ai-exec-rollback-go"') && hasButton(r.confirm, '変更前の状態に戻す'), 'rollback 確認: 元に戻す内容の件数・運用環境には影響しません・[キャンセル][変更前の状態に戻す]（§18）');
   assert(/P3[\s\S]*?P2[\s\S]*?P1/.test(r.confirm.slice(r.confirm.indexOf('kt-ai-rollback'))), '元に戻す順序は P3 → P2 → P1（逆順）');
   const rb = x.s.rollback;
-  assert(rb.status === 'ROLLED_BACK_VERIFIED' && r.done.includes('動作テスト環境を実行前の状態に戻しました。') && r.done.includes('✓ 3 件 ROLLBACK_VERIFIED') && r.done.includes('反映する前の設定との比較：✓ 一致') && r.done.includes('運用環境には影響していません。') && !r.done.includes('id="kt-ai-exec-rollback-start"'), 'rollback 結果: ROLLED_BACK_VERIFIED・snapshot と一致・ボタンは消える');
+  assert(rb.status === 'ROLLED_BACK_VERIFIED' && r.done.includes('動作テスト環境を実行前の状態に戻しました。') && r.done.includes('✓ 3 件 戻して確認で一致') && r.done.includes('反映する前の設定との比較：✓ 一致') && r.done.includes('運用環境には影響していません。') && !r.done.includes('id="kt-ai-exec-rollback-start"'), 'rollback 結果: ROLLED_BACK_VERIFIED・反映前の設定と一致・ボタンは消える');
   assert(x.mock.st.perRecord[0].filterCond === 'amount >= "1000000"' && x.mock.st.views['承認待ち'].fields.join() === 'case_name,approver' && !x.mock.st.views['担当者別'], '動作テスト環境が実行前に戻っている');
   const audit = auditOf(x);
-  assert(audit.auditVersion === '2' && audit.rollback && audit.rollback.status === 'ROLLED_BACK_VERIFIED' && audit.rollback.steps.length === 3 && audit.rollback.verification.restoredToSnapshot === true && audit.rollback.requestedAt, '監査 JSON に rollback { requestedAt, status, steps, verification }（§27）');
+  assert(audit.auditVersion === '2' && audit.rollback && audit.rollback.status === 'ROLLED_BACK_VERIFIED' && audit.rollback.steps.length === 3 && audit.rollback.verification.restoredToSnapshot === true && audit.rollback.requestedAt, '反映の記録（JSON・技術者向け） に rollback { requestedAt, status, steps, verification }（§27）');
 }
 {
   // Rollback stale（Case D）: 反映後に人間が同じ集合を変更 → 「自動では元に戻せません」・人間の変更は残る
@@ -238,13 +238,13 @@ console.log('\n--- 2e. Phase 12: プロセス管理の結果（Before / Planned 
   const ex = x.s.execution;
   assert(ex.status === 'DONE' && ex.steps.every(st => st.status === 'VERIFIED' && st.groupId === 'PROCESS_CHANGE_1') && Object.keys(x.mock.st.status.states).length === 4 && x.mock.calls.filter(c => c === 'PUT status').length === 1, '反映: 4 step が 1 回の PUT で VERIFIED');
   const e2 = x.html();
-  assert(e2.includes('✓ 4 件 VERIFIED') && e2.includes('id="kt-ai-exec-process"') && e2.includes('プロセス管理（反映前 / 計画 / 反映後）') && (e2.match(/class="kt-ai-mermaid"/g) || []).length >= 3 && e2.includes('反映後: ステータス 未処理 → 承認待ち → 完了 → 部長承認') && !/Planned|Actual|Before（/.test(e2) && e2.includes('（プロセス管理の変更はまとめて 1 回で更新）') && !e2.includes('[PROCESS_CHANGE_1]') && hasButton(e2, '変更前の状態に戻す'), '§18: 完了画面に Before / Planned / Actual の Mermaid・Actual の要約・グループ表示・[変更前の状態に戻す]');
+  assert(e2.includes('✓ 4 件 確認で一致') && e2.includes('id="kt-ai-exec-process"') && e2.includes('プロセス管理（反映前 / 計画 / 反映後）') && (e2.match(/class="kt-ai-mermaid"/g) || []).length >= 3 && e2.includes('反映後: ステータス 未処理 → 承認待ち → 完了 → 部長承認') && !/Planned|Actual|Before（/.test(e2) && e2.includes('（プロセス管理の変更はまとめて 1 回で更新）') && !e2.includes('[PROCESS_CHANGE_1]') && hasButton(e2, '変更前の状態に戻す'), '§18: 完了画面に Before / Planned / Actual の Mermaid・Actual の要約・グループ表示・[変更前の状態に戻す]');
   assert(/プロセス管理（反映前 \/ 計画 \/ 反映後）<\/b><div style="display:grid; gap:6px; margin-top:4px;">/.test(e2) && (e2.match(/min-width:0; overflow-x:auto;"><div style="font-size:11px; opacity:.7;">(反映前|計画（反映後の予定）|反映後（)/g) || []).length === 3 && !/flex:1 1 220px/.test(e2), '完了画面の Before / Planned / Actual は縦に並べる（3 つを横に並べない）');
   const r = await rollbackFlow(x);
   assert(r.confirm.includes('・プロセス管理の変更 1 件') && r.confirm.includes('実行前のプロセス管理（ステータス・アクション・作業者）全体に戻す') && r.confirm.includes('運用環境には影響しません。'), 'rollback 確認: プロセス管理の変更 1 件 → 全体に戻す');
   assert(x.s.rollback.status === 'ROLLED_BACK_VERIFIED' && r.done.includes('動作テスト環境を実行前の状態に戻しました。') && Object.keys(x.mock.st.status.states).length === 3 && x.mock.st.status.actions.length === 3 && x.mock.st.status.actions[1].filterCond === '', 'rollback: プロセス設定が実行前（3 ステータス / 3 アクション・承認するは条件なし）に戻る');
   const audit = auditOf(x);
-  assert(audit.execution.process && audit.execution.process.mermaid && audit.execution.process.mermaid.planned && audit.execution.process.actual && audit.rollback.status === 'ROLLED_BACK_VERIFIED' && audit.rollback.steps[0].actionType === 'RESTORE_PROCESS_SETTINGS', '監査 JSON に Before / Planned / Actual のプロセスと rollback');
+  assert(audit.execution.process && audit.execution.process.mermaid && audit.execution.process.mermaid.planned && audit.execution.process.actual && audit.rollback.status === 'ROLLED_BACK_VERIFIED' && audit.rollback.steps[0].actionType === 'RESTORE_PROCESS_SETTINGS', '反映の記録（JSON・技術者向け） に Before / Planned / Actual のプロセスと rollback');
 }
 
 console.log('\n--- 2f. Phase 13: ルックアップの結果（§41）・参照元が読めない（§40）・元に戻す ---');
@@ -262,12 +262,12 @@ console.log('\n--- 2f. Phase 13: ルックアップの結果（§41）・参照�
   const ex = x.s.execution;
   assert(ex.status === 'DONE' && ex.steps.every(st => st.status === 'VERIFIED') && x.mock.st.fields.customer_lookup.lookup.fieldMappings.length === 4 && x.mock.st.fields.customer_lookup.lookup.relatedApp.app === '500', '反映: 3 step VERIFIED・取得項目 4 件・参照元は不変');
   const e2 = x.html();
-  assert(e2.includes('✓ 3 件 VERIFIED') && e2.includes('id="kt-ai-exec-lookup-result"') && e2.includes('✓ ルックアップ「顧客マスタ参照」: 取得項目 2 → 4 件。参照元 App 500「顧客マスタ」: 取得元フィールドは存在・参照元のフィールド定義は Review 時点と同じ。検索方法は kintone が管理（検証対象外）') && hasButton(e2, '変更前の状態に戻す'), '§41: 結果にルックアップの行（取得項目 2 → 4・参照元の確認・検索方法の注記）');
+  assert(e2.includes('✓ 3 件 確認で一致') && e2.includes('id="kt-ai-exec-lookup-result"') && e2.includes('✓ ルックアップ「顧客マスタ参照」: 取得項目 2 → 4 件。参照元 App 500「顧客マスタ」: 取得元フィールドは存在・参照元のフィールド定義は 計画を確かめた時点と同じ。検索方法は kintone が管理（検証対象外）') && hasButton(e2, '変更前の状態に戻す'), '§41: 結果にルックアップの行（取得項目 2 → 4・参照元の確認・検索方法の注記）');
   const r = await rollbackFlow(x);
   assert(r.confirm.includes('・ルックアップ変更 1 件') && r.confirm.includes('・フィールド追加 2 件') && r.confirm.includes('実行前のルックアップ設定（取得項目・選択時表示・絞り込み・並び順）に戻す。参照元アプリには触れない') && (() => { const rb1 = r.confirm.slice(r.confirm.indexOf('id="kt-ai-rollback"')); return rb1.indexOf('ルックアップ変更') < rb1.indexOf('フィールドを削除'); })(), 'rollback 確認: ルックアップの復元（先）とフィールド削除（後）');
   assert(x.s.rollback.status === 'ROLLED_BACK_VERIFIED' && r.done.includes('動作テスト環境を実行前の状態に戻しました。') && x.mock.st.fields.customer_lookup.lookup.fieldMappings.length === 2 && !x.mock.st.fields.customer_address && !x.mock.st.fields.customer_credit, 'rollback: 取得項目 2 件・追加フィールドなしに戻る');
   const audit = auditOf(x);
-  assert(audit.crossApp && audit.crossApp[0].appId === '500' && audit.crossApp[0].reviewed.fieldsHash === audit.crossApp[0].current.fieldsHash && audit.rollback.steps[0].actionType === 'RESTORE_LOOKUP_SETTINGS' && audit.execution.actualAfter.updatedLookups.join() === '顧客マスタ参照', '監査 JSON: crossApp（指紋）・rollback の先頭は RESTORE_LOOKUP_SETTINGS・updatedLookups');
+  assert(audit.crossApp && audit.crossApp[0].appId === '500' && audit.crossApp[0].reviewed.fieldsHash === audit.crossApp[0].current.fieldsHash && audit.rollback.steps[0].actionType === 'RESTORE_LOOKUP_SETTINGS' && audit.execution.actualAfter.updatedLookups.join() === '顧客マスタ参照', '反映の記録（JSON・技術者向け）: crossApp（指紋）・rollback の先頭は RESTORE_LOOKUP_SETTINGS・updatedLookups');
   // §40: 参照元アプリへのアクセス権が無い（確認のときは読めたが、反映の準備で読めない）
   const x2 = await applyFlow(PLAN_LK, { beforePrepare: (mock) => { mock.ctl.relatedUnavailable = '500'; } });
   const b1 = x2.html();
@@ -285,12 +285,12 @@ console.log('\n--- 2g. Phase 14: アプリアクションの結果・コピー�
   const ex = x.s.execution;
   assert(ex.status === 'DONE' && ex.steps.every(st => st.status === 'VERIFIED') && Object.keys(x.mock.st.actions).length === 2 && x.mock.st.actions['見積を作成'].mappings.length === 3 && x.mock.st.actions['請求書作成'].mappings.length === 3 && x.mock.calls.filter(c => c === 'PUT actions').length === 2, '反映: 2 step VERIFIED（PUT 2 回・既存に転記 1 件追加・新規 1 件）');
   const e2 = x.html();
-  assert(e2.includes('✓ 2 件 VERIFIED') && e2.includes('id="kt-ai-exec-app-action-result"') && e2.includes('✓ アプリアクション「見積を作成」: 転記 2 → 3 件。コピー先 App 311「見積管理」（変更なし）。他のアクション 0 件はそのまま') && e2.includes('✓ アプリアクション「請求書作成」を追加: 転記 3 件。コピー先 App 311「見積管理」（変更なし）。他のアクション 1 件はそのまま') && hasButton(e2, '変更前の状態に戻す'), '結果: アプリアクションの行（転記 2 → 3 / 追加 3 件・コピー先・他のアクションはそのまま）');
+  assert(e2.includes('✓ 2 件 確認で一致') && e2.includes('id="kt-ai-exec-app-action-result"') && e2.includes('✓ アプリアクション「見積を作成」: 転記 2 → 3 件。コピー先 App 311「見積管理」（変更なし）。他のアクション 0 件はそのまま') && e2.includes('✓ アプリアクション「請求書作成」を追加: 転記 3 件。コピー先 App 311「見積管理」（変更なし）。他のアクション 1 件はそのまま') && hasButton(e2, '変更前の状態に戻す'), '結果: アプリアクションの行（転記 2 → 3 / 追加 3 件・コピー先・他のアクションはそのまま）');
   const r = await rollbackFlow(x);
   assert(r.confirm.includes('・アプリアクション追加 1 件') && r.confirm.includes('・アプリアクション変更 1 件') && r.confirm.includes('実行前のアプリアクション全体に戻す（追加したアクションは消え、変更した転記 / 利用者 / 利用条件は元に戻る）。コピー先アプリには触れない'), 'rollback 確認: アプリアクション全体の復元');
   assert(x.s.rollback.status === 'ROLLED_BACK_VERIFIED' && r.done.includes('動作テスト環境を実行前の状態に戻しました。') && Object.keys(x.mock.st.actions).length === 1 && x.mock.st.actions['見積を作成'].mappings.length === 2, 'rollback: 元の 1 件・転記 2 件に戻る');
   const audit = auditOf(x);
-  assert(audit.crossApp.every(c => c.appId === '311' && c.role === 'destination') && audit.rollback.steps[0].actionType === 'RESTORE_APP_ACTION_SETTINGS' && audit.execution.actualAfter.addedAppActions.join() === '請求書作成' && audit.execution.actualAfter.updatedAppActions.join() === '見積を作成', '監査 JSON: crossApp（コピー先）・rollback・added / updatedAppActions');
+  assert(audit.crossApp.every(c => c.appId === '311' && c.role === 'destination') && audit.rollback.steps[0].actionType === 'RESTORE_APP_ACTION_SETTINGS' && audit.execution.actualAfter.addedAppActions.join() === '請求書作成' && audit.execution.actualAfter.updatedAppActions.join() === '見積を作成', '反映の記録（JSON・技術者向け）: crossApp（コピー先）・rollback・added / updatedAppActions');
   const x2 = await applyFlow(PLAN_AA, { beforePrepare: (mock) => { mock.ctl.destUnavailable = '311'; } });
   const b1 = x2.html();
   assert(x2.s.stage === 'blocked' && b1.includes('>見積を作成に備考も転記：<b>実行不可</b>') && b1.includes('コピー先アプリへのアクセス権を確認してください') && b1.includes('のコピー先アプリの設定を kintone が返しません') && b1.includes('data-code="REVIEW_BLOCKED"') && !b1.includes('[REVIEW_BLOCKED]'), 'コピー先を読めない → 実行不可（取り直した設定に対する計画の検査が止める・指摘の文）');

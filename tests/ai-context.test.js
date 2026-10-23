@@ -192,7 +192,7 @@ console.log('\n--- 7. coverage ---');
 {
   const bare = KTContext.build({ question: '顧客コードを削除して大丈夫？', ...buildInputs({ withScan: false, withIncoming: false }), options: { now: NOW } });
   assert(bare.coverage.javascript === false && bare.coverage.incoming === false, 'JS 未解析・incoming 未走査が false で明示される');
-  assert(bare.coverage.notes.some(n => n.includes('未解析')) && bare.coverage.notes.some(n => n.includes('未走査')), 'coverage.notes に未解析・未走査の説明');
+  assert(bare.coverage.notes.some(n => n.includes('まだ解析していません')) && bare.coverage.notes.some(n => n.includes('まだ調べていません')), 'coverage.notes に未解析・未走査の説明');
   assert(bare.coverage.plugins === false && bare.coverage.pluginCount === 1 && bare.coverage.recordData === false && bare.coverage.attachments === false, 'プラグイン設定・レコード実データ・添付は含まない');
   assert(bare.coverage.notAnalyzed.includes('JavaScript/CSS本文'), 'DEPS.meta.notAnalyzed を引き継ぐ');
   assert(bare.app.javascript.analyzed === false && bare.app.incoming.scanned === false, 'L0 の解析状態も未解析を示す');

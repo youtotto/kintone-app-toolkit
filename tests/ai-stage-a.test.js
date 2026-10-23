@@ -107,7 +107,7 @@ await section(() => {
 });
 
 // =========================================================
-console.log('\n--- T-A2（5.2）新規フィールドの接続: 条件・spec の NEW_FIELD_n の置換（条件の値の照合は C-1 第 2 段で生成工程へ） ---');
+console.log('\n--- T-A2（5.2）新規フィールドの接続: 条件・spec の NEW_FIELD_n の置換（条件の値の照合は C-1 第 2 段でAI サービスへ） ---');
 await section(() => {
   const ctx = KTContext.buildGenerator({ customization: CUST_R14, plan: PLAN_R14, planId: 'p1', version: 1, data: DATA });
   const f1 = ctx.customization.fields.find(f => f.code === 'approver_mgr');
@@ -126,15 +126,15 @@ await section(() => {
   //   sandbox/test/cross-toolkit.mjs「7-3: 条件に合う側は in の値ごとに作る」・「7-6: 条件の両方・in の値のすべてを見る正しい候補は passed」。
   //   ここでは、置換後の計画（approver_mgr）で形式確認が通ること・正しい条件の書き方を形式確認が止めないことだけを確かめる
   const rv = KTCodeReview.review({ generated: GEN_R14, customization: CUST_R14, plan: PLAN_R14, data: DATA, scan: null, existingSource: null });
-  assert(rv.status !== 'BLOCKED' && !(rv.checks || []).some(x => /NEW_FIELD/.test(x.message || '')), `Review: 置換後の計画（approver_mgr）で形式確認が通る（NEW_FIELD_n を指摘の文に出さない）: ${rv.status} ${JSON.stringify(codesOf(rv.registration.blockers))}`);
+  assert(rv.status !== 'BLOCKED' && !(rv.checks || []).some(x => /NEW_FIELD/.test(x.message || '')), `Review: 置換後の計画（approver_mgr）でコードの検査が通る（NEW_FIELD_n を指摘の文に出さない）: ${rv.status} ${JSON.stringify(codesOf(rv.registration.blockers))}`);
   const right = review(handler(EDIT, "    if (record['ステータス'].value === '承認待ち') {\n      record['amount'].disabled = true;\n    }"));
   assert(right.registration.verdict === 'RUNTIME_UNVERIFIED', '値が同じ（承認待ち）→ 通過（動作は未確認のまま）');
   const sw = review(handler(EDIT, "    switch (record['ステータス'].value) {\n      case '承認待ち':\n        record['amount'].disabled = true;\n        break;\n      default:\n        break;\n    }"));
-  assert(sw.registration.verdict !== 'BLOCKED', `switch の case の中 → 形式確認では止めない: ${sw.registration.verdict}`);
+  assert(sw.registration.verdict !== 'BLOCKED', `switch の case の中 → コードの検査では止めない: ${sw.registration.verdict}`);
 });
 
 // =========================================================
-console.log('\n--- T-A3（5.3 → 段階 C → C-1 第 2 段）R12 / R13: error と disabled の重なりは Toolkit では判定しない（実際の競合は生成工程の模擬テスト） ---');
+console.log('\n--- T-A3（5.3 → 段階 C → C-1 第 2 段）R12 / R13: error と disabled の重なりは Toolkit では判定しない（実際の競合は模擬テスト） ---');
 //   段階 A の静的な排他判定（早い return の否定・同じ判別式と別の値・switch の別の case・if / else の別の枝）は段階 C で削除した（改訂 2: 任意の分岐の解析で採用可否を決めない）。
 //   C-1 第 2 段（2026-10-08・設計 §0d.4）: Toolkit の模擬実行（KTJsSim）と、同じイベントの error と disabled / value の重なりの静的な判定
 //   （error-cancels-edit・error-cancels-other-js・errorGuarded・errorGuardedByDisabled・simDecides）は削除した。守っていた振る舞いは次の生成工程の回帰で守る:
@@ -148,14 +148,14 @@ console.log('\n--- T-A3（5.3 → 段階 C → C-1 第 2 段）R12 / R13: error 
 //   - 生成工程で確かめていない JavaScript は登録しない・承認できない（Toolkit が維持する取り込みの判定。ai-flow-redesign の D14・D27・D8）
 await section(async () => {
   //   簡素化 B（2026-10-17）: siteConds（ロックの場所の条件の字句の解析。fieldOperations）は、生成した候補を Toolkit が解析し直す関数と一緒に削除した
-  assert(typeof KTCodeReview.fieldOperations === 'undefined', 'siteConds（fieldOperations）は Toolkit に無い（候補の検査は生成工程）');
+  assert(typeof KTCodeReview.fieldOperations === 'undefined', 'siteConds（fieldOperations）は Toolkit に無い（候補の検査はAI サービス）');
   // 形式確認（静的）は動作を確かめた扱いにしない: 同じ経路で無条件に disabled と error を設定するコードでも、動作の未確認（RUNTIME_NOT_RUN）が残る
   const both = review(handler(EDIT, "    record['amount'].disabled = true;\n    record['amount'].error = '確認してください';"));
-  assert((both.registration.unverified || []).some(u => u.code === 'RUNTIME_NOT_RUN') && !check(both, 'error-cancels-edit'), `R13: 形式確認は動作を確かめた扱いにしない（RUNTIME_NOT_RUN）。重なりの判定は生成工程の模擬テスト（sandbox §3）: ${both.registration.verdict} ${JSON.stringify((both.registration.unverified || []).map(u => u.code))}`);
+  assert((both.registration.unverified || []).some(u => u.code === 'RUNTIME_NOT_RUN') && !check(both, 'error-cancels-edit'), `R13: コードの検査は動作を確かめた扱いにしない（RUNTIME_NOT_RUN）。重なりの判定は模擬テスト（sandbox §3）: ${both.registration.verdict} ${JSON.stringify((both.registration.unverified || []).map(u => u.code))}`);
 });
 
 // =========================================================
-console.log('\n--- T-A4（5.4）未実装を完成扱いしない: AI の申告の確認（生成工程の coverage）・見出し・計画の新設を前提に作り直す案内 ---');
+console.log('\n--- T-A4（5.4）未実装を完成扱いしない: AI の自己申告の確認（AI サービスの coverage）・見出し・計画の新設を前提に作り直す案内 ---');
 //   簡素化 B（2026-10-17）: 自分の要件の NOT_MET・PARTIAL（AI の申告）の確認は、生成工程の機械検査の coverage（review）が行う（Toolkit の coverage-unmet と、
 //   NOT_MET の登録不可は削除した）。Toolkit は申告を計画の構造に対応づけ（notAchieved）、見出しで申告があることを示す
 await section(() => {
@@ -165,12 +165,12 @@ await section(() => {
   const rv0 = review(okCode, cust(), { coverage: covNotMet });
   assert(!(rv0.checks || []).some(x => x.name === 'coverage-unmet') && rv0.registration.verdict !== 'BLOCKED' && rv0.coverage.notAchieved.some(x => x.code === 'AI_NOT_MET' && /部長承認待ちでも金額を編集不可にする/.test(x.message)), `範囲内の NOT_MET: Toolkit は計画の構造に対応づける（検査にしない）: ${JSON.stringify(rv0.coverage.notAchieved.map(x => x.code))}`);
   const rv = KTCodeReview.attachBehavior(rv0, gwCov('この JavaScript の要件のうち満たせないと申告されたものがあります: 未実装「部長承認待ちでも金額を編集不可にする」（部長承認待ちは現在のステータスに無いため実装していません）'), { requiredEffects: [], customization: cust() });
-  assert(rv.registration.verdict === 'NEEDS_CONFIRMATION' && codesOf(rv.registration.confirmations).includes('coverage') && !rv.registration.blockers.length, `生成工程の coverage（review）→ 承認の欄の確認事項: ${rv.registration.verdict}`);
+  assert(rv.registration.verdict === 'NEEDS_CONFIRMATION' && codesOf(rv.registration.confirmations).includes('coverage') && !rv.registration.blockers.length, `AI サービスの coverage（review）→ 承認の欄の確認事項: ${rv.registration.verdict}`);
   const rvP = review(okCode, cust(), { coverage: [{ requirementId: 'C1', text: '明細の行の追加・削除も止める', status: 'PARTIAL', note: 'セルだけ' }] });
-  assert(!(rvP.checks || []).some(x => x.name === 'coverage-unmet') && rvP.coverage.notAchieved.some(x => x.code === 'AI_PARTIAL'), `PARTIAL → 計画の構造に対応づける（確認は生成工程の coverage）: ${JSON.stringify(rvP.coverage.notAchieved.map(x => x.code))}`);
+  assert(!(rvP.checks || []).some(x => x.name === 'coverage-unmet') && rvP.coverage.notAchieved.some(x => x.code === 'AI_PARTIAL'), `PARTIAL → 計画の構造に対応づける（確認はAI サービスの coverage）: ${JSON.stringify(rvP.coverage.notAchieved.map(x => x.code))}`);
   // SUBTABLE_ROWS（行の追加・削除）は確認事項（check にしない・block にしない）。当てはまるかは計画の構造（明細に編集不可の効果）で決める
   const tableCust = cust({ requirement: '承認待ちでは明細（items）を編集不可にする', fields: [{ code: 'ステータス', access: 'READ' }, { code: 'items', access: 'CONTROL', condition: 'ステータス in ("承認待ち")', effects: ['lock'] }] });
-  const rvT = review(handler(EDIT, "    if (record['ステータス'].value === '承認待ち') {\n      record['items'].value.forEach(function (row) {\n        row.value['qty'].disabled = true;\n      });\n    }"), tableCust, { summary: '承認待ちでは明細のセルを編集不可にします', fields: [{ code: 'items', access: 'CONTROL' }] });
+  const rvT = review(handler(EDIT, "    if (record['ステータス'].value === '承認待ち') {\n      record['items'].value.forEach(function (row) {\n        row.value['qty'].disabled = true;\n      });\n    }"), tableCust, { summary: '承認待ちでは明細の入力欄を編集不可にします', fields: [{ code: 'items', access: 'CONTROL' }] });
   assert(rvT.coverage.notAchieved.some(x => x.code === 'SUBTABLE_ROWS') && !(rvT.checks || []).some(x => x.name === 'coverage-unmet') && rvT.registration.verdict !== 'BLOCKED', `SUBTABLE_ROWS は coverage の確認事項のまま（coverage-unmet にしない・登録不可にしない）: ${rvT.registration.verdict} ${JSON.stringify(codesOf(rvT.registration.blockers))}`);
   // 段階 C: 計画の新設の名前を requirement の文から照合する plannedHint（段階 A）は削除した（文からの推定を減らす）。新設に関わる未達も、この JavaScript の id の NOT_MET として対応づける
   const rvPl = KTCodeReview.review({ generated: { ...GEN_R14, coverage: [{ requirementId: 'C1', requirement: 'ステータスが「部長承認待ち」のときは部長承認者以外は金額を編集不可にする', status: 'NOT_MET', note: '部長承認待ちというステータスは存在しないため実装できません' }] }, customization: CUST_R14, plan: PLAN_R14, data: DATA, scan: null, existingSource: null });
@@ -181,8 +181,8 @@ await section(() => {
   //   R19-3 / R19-5（未解決の理由と次の方針は最終案のカードに 1 回だけ）・D1-4（検証の区分に必須の動作の未達）で守る
   const entry = { generated: gen(okCode, { coverage: covNotMet }), review: rv, existingSource: null, attempts: { count: 2, measured: 2, tokens: { input: 3000, output: 400 }, costUsd: 0.01 } };
   const pane = KTAiChatUi.codePaneHtml(entry);
-  assert(!/登録：|静的な検査は通過|申告されています/.test(pane.head) && /生成 2 回目（使用量: 入力 3000 \/ 出力 400 token/.test(pane.head) && !/見積もり/.test(pane.head), `コードペインの見出し: 判定の札は出さない・生成の回数と実測の使用量（AI の申告は下の検査の一覧に 1 回）: ${pane.head.replace(/<[^>]*>/g, '').slice(0, 300)}`);
-  assert(!/（Toolkit の確認）/.test(pane.head) && (pane.review.match(/要件の達成（AI の申告）/g) || []).length === 1, 'コードペイン: AI の申告は検査の一覧（生成工程の要件の達成）に 1 回だけ。Toolkit の確認の行には出さない');
+  assert(!/登録：|静的な検査は通過|申告されています/.test(pane.head) && /生成 2 回目（使用量: 入力 3000 \/ 出力 400 トークン/.test(pane.head) && !/見積もり/.test(pane.head), `コードペインの見出し: 判定の札は出さない・生成の回数と実測の使用量（AI の自己申告は下の検査の一覧に 1 回）: ${pane.head.replace(/<[^>]*>/g, '').slice(0, 300)}`);
+  assert(!/（Toolkit の確認）/.test(pane.head) && (pane.review.match(/要件の達成（AI の説明）/g) || []).length === 1, 'コードペイン: AI の自己申告は検査の一覧（AI サービスの要件の達成）に 1 回だけ。Toolkit の確認の行には出さない');
   //   C-1 第 3 段: コードのカードの「新設の項目の案内（plannedHint）は出さない」は、上の rvPl（plannedHint は無い）とコードペインで守る
   const panePl = KTAiChatUi.codePaneHtml({ generated: GEN_R14, review: rvPl, existingSource: null });
   assert(!/kt-ai-code-planned-hint/.test(panePl.head + panePl.review) && !/前提にした作り直し/.test(panePl.head + panePl.review), 'コードペイン: 新設の項目の案内（plannedHint）は出さない');
@@ -208,7 +208,7 @@ await section(() => {
   assert(nmOf(noCode) && !nmOf(noCode).limit && !noCode.coverage.notAchieved.some(x => x.code === 'SUBTABLE_ROWS'), `確認 7: limitCode の無い NOT_MET は文を読まずに印を付けない: ${JSON.stringify(nmOf(noCode))}`);
 });
 // =========================================================
-console.log('\n--- T-A5（5.5 → 段階 C → 簡素化 B）var: 記法の修正と検査は生成工程だけ。既存の var を含む統合先に足した本文でも、既存の行を消さない ---');
+console.log('\n--- T-A5（5.5 → 段階 C → 簡素化 B）var: 記法の修正と検査はAI サービスだけ。既存の var を含む統合先に足した本文でも、既存の行を消さない ---');
 //   段階 A の「変更する handler の本体の既存 var の自動変換」は段階 C で外した（改訂 2: 任意の既存コードの独自変換器を広げない）。簡素化 B（2026-10-16）で、Toolkit の記法の
 //   写し（KTModernJs）も削除した（追加した var だけを直し、handler の外・別の handler・同じ handler の既存の var を変えないことは AI版 worker/test/cases/modern-js.mjs が確かめる）
 await section(() => {
@@ -219,7 +219,7 @@ await section(() => {
   const c = { customizationId: 'C1', requirement: '承認済みでは明細の数量を編集不可', strategy: 'EXTEND_EXISTING_JS', platform: ['desktop'], events: ['app.record.create.show', 'app.record.edit.show'], fields: [{ code: 'qty', access: 'CONTROL' }], apis: [], existingFiles: [{ name: 'dealLock.js', target: 'desktop' }] };
   const rv = KTCodeReview.review({ generated: g, customization: c, plan: null, data: DATA, scan: null, existingSource: src });
   const pc = check(rv, 'patch');
-  assert(pc && pc.ok && /元のコードは保持（既存の行の削除なし）$/.test(pc.message) && rv.finalCode === g.body && !/既存の宣言/.test(pc.message) && !check(rv, 'patch-removal') && !check(rv, 'modern-js') && /var record = event\.record;/.test(rv.finalCode || ''), `patch の検査: 既存の var record を含む統合先に足した本文（生成工程の本文のまま書き込む）は既存の行を消さず、置き換えも無い（記法は Toolkit では確かめない）: ${pc && pc.message}`);
+  assert(pc && pc.ok && /元のコードは保持（既存の行の削除なし）$/.test(pc.message) && rv.finalCode === g.body && !/既存の宣言/.test(pc.message) && !check(rv, 'patch-removal') && !check(rv, 'modern-js') && /var record = event\.record;/.test(rv.finalCode || ''), `patch の検査: 既存の var record を含む統合先に足した本文（AI サービスの本文のまま書き込む）は既存の行を消さず、置き換えも無い（記法は Toolkit では確かめない）: ${pc && pc.message}`);
 });
 
 // =========================================================
@@ -243,7 +243,7 @@ await section(async () => {
   assert(repeatOf(null, 'h1').repeat === false && repeatOf({ attempts: a1 }, null).repeat === false, '前の記録が無い・指紋が無ければ判定しない');
   // 独立レビュー A2: 対応表に無い指摘の案内は検査の日本語名（KTAiChatUi.CHECK_JA）で書く。内部名（code）は出さない
   const repDup = repeatOf({ attempts: nextAttempts(null, { inputHash: 'h1', blockers: ['duplicate-handler'] }) }, 'h1');
-  assert(repDup.hints.some(h => h === '「重複 handler」の指摘の内容を直してください') && !/duplicate-handler/.test(repDup.message), `対応表に無い指摘 → 検査の日本語名: ${repDup.message}`);
+  assert(repDup.hints.some(h => h === '「同じ処理の重複」の指摘の内容を直してください') && !/duplicate-handler/.test(repDup.message), `対応表に無い指摘 → 検査の日本語名: ${repDup.message}`);
   const repUnknown = repeatOf({ attempts: nextAttempts(null, { inputHash: 'h1', blockers: ['no-such-check'] }) }, 'h1');
   assert(repUnknown.hints.some(h => h === '「検査で止まった点」の指摘の内容を直してください') && !/no-such-check/.test(repUnknown.message), '日本語名も無い指摘 → 「検査で止まった点」');
   // 独立レビュー A4: 使用量は AI の記録（provider の生の形 input_tokens / output_tokens。無ければ prompt_tokens / completion_tokens）だけ。取れなければ数字を出さない
@@ -344,7 +344,7 @@ await section(() => {
   const rows = rv.coverage.notAchieved.find(x => x.code === 'SUBTABLE_ROWS');
   assert(rows && /行の追加・削除/.test(rows.message) && !/保存/.test(rows.message) && !codes.includes('coverage-unmet'), `行操作の制限: SUBTABLE_ROWS は「行の追加・削除は止められない」の確認（保存の話ではない・登録不可にしない）: ${rows && rows.message}`);
   const partial = rv.coverage.notAchieved.find(x => x.code === 'AI_PARTIAL');
-  assert(partial && /行の追加・削除/.test(partial.message) && !rv.checks.some(x => x.name === 'coverage-unmet'), `AI の申告の PARTIAL（行の追加・削除）は計画の構造に対応づける（確認は生成工程の coverage）: ${partial && partial.message}`);
+  assert(partial && /行の追加・削除/.test(partial.message) && !rv.checks.some(x => x.name === 'coverage-unmet'), `AI の自己申告の PARTIAL（行の追加・削除）は計画の構造に対応づける（確認はAI サービスの coverage）: ${partial && partial.message}`);
   // 保存禁止: 保存を止めるのは既存 dealValidate.js の submit の error。生成コードも dealLock.js も error を設定しない（競合の判定は生成工程の模擬テスト）
   assert(!/\.error\s*=/.test(text) && !check(rv, 'error-cancels-edit') && !check(rv, 'error-cancels-other-js'), '生成コードも dealLock.js も error を設定しない（Toolkit は競合を判定しない）');
   assert(!rv.checks.some(x => x.name === 'summary-scope') && check(rv, 'patch').ok && !check(rv, 'patch-removal'), `AI の要約は「セル」と書いている（行の追加・削除を言い切らない）・既存の 2 ファイルは書き換えない: ${JSON.stringify(rv.checks.filter(x => /scope|patch/.test(x.name)).map(x => [x.name, x.ok]))}`);
@@ -496,7 +496,7 @@ await section(async () => {
   // ---- 3: 検査名は日本語（会話の案内・コードペインの検査一覧の両方）
   const latin = Object.entries(KTAiChatUi.CHECK_JA).filter(([, v]) => /^[A-Za-z /（）()]+$/.test(v));
   assert(latin.length === 0, `3: CHECK_JA に英語のままの値を残さない: ${JSON.stringify(latin)}`);
-  assert(KTAiChatUi.CHECK_JA.syntax === '構文' && KTAiChatUi.CHECK_JA.patch === '既存ファイルへの統合' && KTAiChatUi.CHECK_JA.security === '安全性' && KTAiChatUi.CHECK_JA.handler === 'handler の形' && KTAiChatUi.CHECK_JA.apis === '使う API' && KTAiChatUi.CHECK_JA['return-event'] === 'return event の有無' && KTAiChatUi.CHECK_JA.async === 'async の使い方' && KTAiChatUi.CHECK_JA['modern-js'] === '新しい記法', `3: 対応表: ${JSON.stringify(KTAiChatUi.CHECK_JA)}`);
+  assert(KTAiChatUi.CHECK_JA.syntax === '構文' && KTAiChatUi.CHECK_JA.patch === '既存ファイルへの統合' && KTAiChatUi.CHECK_JA.security === '安全性' && KTAiChatUi.CHECK_JA.handler === '処理の書き方' && KTAiChatUi.CHECK_JA.apis === '使う kintone の機能' && KTAiChatUi.CHECK_JA['return-event'] === '処理の終わり方（return event）' && KTAiChatUi.CHECK_JA.async === '非同期処理の書き方（async）' && KTAiChatUi.CHECK_JA['modern-js'] === '新しい記法', `3: 対応表: ${JSON.stringify(KTAiChatUi.CHECK_JA)}`);
   const repSyntax = repeatOf({ attempts: nextAttempts(null, { inputHash: 'h', blockers: ['syntax', 'security', 'modern-js'] }) }, 'h');
   assert(repSyntax.hints.includes('「構文」の指摘の内容を直してください') && repSyntax.hints.includes('「安全性」の指摘の内容を直してください') && !/Syntax|Security/.test(repSyntax.message), `3: 会話の案内に英語の検査名が出ない: ${repSyntax.message}`);
   const paneJa = KTAiChatUi.codePaneHtml({ generated: gen(okCode), review: { status: 'BLOCKED', checks: [{ name: 'syntax', ok: false, severity: 'block', message: '構文エラー' }, { name: 'patch', ok: true, severity: 'info', message: '適用' }], registration: { verdict: 'BLOCKED', blockers: [], confirmations: [], unverified: [] } }, existingSource: null });

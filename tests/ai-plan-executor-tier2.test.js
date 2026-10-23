@@ -157,7 +157,7 @@ console.log('\n--- 3. UPDATE_FIELD（表示名・必須のみ）---');
 {
   const req = plan([step('P1', 'UPDATE_FIELD', 'FIELD', 'owner', { required: true })]);
   const rv = reviewOf(req); const mock = makeKintoneMock(DATA);
-  assert(st0(rv).safety === 'REVIEW_REQUIRED' && st0(rv).diff.before.required === false && st0(rv).diff.after.required === true, '前提: Review は REVIEW_REQUIRED・Before 必須いいえ → After はい');
+  assert(st0(rv).safety === 'REVIEW_REQUIRED' && st0(rv).diff.before.required === false && st0(rv).diff.after.required === true, '前提: Review は REVIEW_REQUIRED・Before 必須いいえ → 変更後 はい');
   const { prepared, log } = await run(approveAll(req, rv), mock, { review: rv });
   const pp = prepared.steps[0].prepared;
   assert(prepared.status === 'PREPARED' && pp.payload.code === 'owner' && same(pp.payload.changes, { required: true }) && pp.sensitive[0].code === 'REQUIRED_CHANGE' && /今後の保存時に入力必須になります/.test(pp.sensitive[0].message) && /既存レコードに値が入っているかは確認していません/.test(pp.sensitive[0].message), 'required only: payload は required だけ・注意は計画の検査の指摘（今後の保存時に必須 / 既存レコードは未確認）');

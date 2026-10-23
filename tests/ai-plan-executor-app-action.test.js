@@ -59,7 +59,7 @@ console.log('\n--- 1. §43 / §44 UPDATE_APP_ACTION: 転記の追加（既存 3 
   const r1 = rv.steps[0];
   assert(['VALID', 'WARNING', 'NEEDS_CONFIRMATION'].includes(r1.status) && r1.safety === 'REVIEW_REQUIRED' && r1.diff.target.identity.id === '5520' && r1.diff.target.identity.dest.appId === '311' && r1.crossApp && r1.crossApp.appId === '311' && r1.crossApp.role === 'destination', '前提: Review は REVIEW_REQUIRED・identity に id / 手順の crossApp にコピー先の指紋');
   assert(prepared.status === 'PREPARED' && prepared.steps[0].status === 'PENDING' && mock.calls.includes('GET actions') && mock.calls.includes('GET app fields') && prepared.snapshot.actions && Object.keys(prepared.snapshot.actions.actions).length === 3 && prepared.snapshot.relatedApps['311'].name === '見積管理', 'prepare: 現在の全アクションを snapshot に・コピー先 311 の定義を read-only で再取得');
-  assert(prepared.crossApp.length === 1 && prepared.crossApp[0].role === 'destination' && prepared.crossApp[0].current.fieldsHash === prepared.crossApp[0].reviewed.fieldsHash && prepared.stale.status === 'FRESH', 'prepare: コピー先の指紋が Review 時点と一致 → FRESH');
+  assert(prepared.crossApp.length === 1 && prepared.crossApp[0].role === 'destination' && prepared.crossApp[0].current.fieldsHash === prepared.crossApp[0].reviewed.fieldsHash && prepared.stale.status === 'FRESH', 'prepare: コピー先の指紋が 計画を確かめた時点と一致 → FRESH');
   const pp = prepared.steps[0].prepared;
   assert(pp.payload.name === '見積を作成' && pp.payload.changes.mappings.length === 3 && pp.payload.changes.mappings[2].srcField === 'secret_memo' && !('entities' in pp.payload.changes) && !('filterCond' in pp.payload.changes) && pp.expect.addedMappings.length === 1 && /コピー先 App 311「見積管理」/.test(pp.summary) && pp.crossApp.reviewed.fieldsHash, 'prepare: payload は対象 1 件の転記（既存 ＋ 追加の全件）だけ。他の属性は変更しない');
   assert(log.status === 'DONE' && log.steps[0].status === 'VERIFIED' && mock.calls.filter(c => c === 'PUT actions').length === 1 && log.steps[0].requests[0].total === 3 && log.steps[0].requests[0].changedKeys.join() === 'mappings', '反映: 全 3 件を含む PUT 1 回で VERIFIED');
@@ -70,7 +70,7 @@ console.log('\n--- 1. §43 / §44 UPDATE_APP_ACTION: 転記の追加（既存 3 
   assert(!('simulation' in log) && !('reanalysis' in log), '書いた内容の判定は手順ごとの読み戻しだけ（照合・再解析の記録は無い。反映した後の依存関係は画面が取り直す作業の基準が持つ。2026-10-21）');
   assert(log.actualAfter.appActions === 3 && log.actualAfter.updatedAppActions.join() === '見積を作成' && log.crossApp[0].appId === '311', 'actualAfter.updatedAppActions・log.crossApp');
   const audit = E.buildAudit({ plan: p, review: rv, prepared, execution: log });
-  assert(audit.crossApp[0].role === 'destination' && audit.beforeAfter.some(x => x.stepId === 'P1' && x.before.mappings.length === 2 && x.after.mappings.length === 3) && audit.rollbackPlan.steps[0].actionType === 'RESTORE_APP_ACTION_SETTINGS' && !JSON.stringify(audit).includes('"records"'), '監査 JSON: crossApp（コピー先）・転記の before / after・rollback 計画・レコードデータは含まない');
+  assert(audit.crossApp[0].role === 'destination' && audit.beforeAfter.some(x => x.stepId === 'P1' && x.before.mappings.length === 2 && x.after.mappings.length === 3) && audit.rollbackPlan.steps[0].actionType === 'RESTORE_APP_ACTION_SETTINGS' && !JSON.stringify(audit).includes('"records"'), '反映の記録（JSON・技術者向け）: crossApp（コピー先）・転記の before / after・rollback 計画・レコードデータは含まない');
   const rb = await E.prepareRollback(log, prepared, { api: mock.api });
   const rolled = await E.executeRollback(rb, { api: mock.api, execution: log });
   assert(rolled.status === 'ROLLED_BACK_VERIFIED' && rolled.steps[0].actionType === 'RESTORE_APP_ACTION_SETTINGS' && rolled.verification.restoredToSnapshot === true && JSON.stringify(strip(actsOf(mock))) === JSON.stringify(strip(before)) && mock.calls.filter(c => c === 'PUT actions').length === 2, '§45 rollback: snapshot の全アクションを PUT → 元の 3 件と一致');
@@ -156,7 +156,7 @@ console.log('\n--- 5. §41 / §44 stale: 対象・無関係なアクション・
   assert(log7.steps[0].status === 'FAILED' && log7.steps[0].reason === 'TARGET_CHANGED' && /sincePrepare|確認時点/.test(log7.steps[0].error.message), 'prepare → 実行の間に無関係なアクションが変わった → TARGET_CHANGED（全体置換なので他も bit 比較）');
 }
 
-console.log('\n--- 6. §41 Review 時点で未取得のコピー先: 実行直前に取得して検証（DEST_APP_NOT_LOADED） ---');
+console.log('\n--- 6. §41 計画を確かめた時点で未取得のコピー先: 実行直前に取得して検証（DEST_APP_NOT_LOADED） ---');
 {
   // 311 を prefetch していない DATA（既存アクションも無い）で、311 へ新規アクション → Review は DEST_APP_NOT_LOADED（要確認）→ Executor が 311 を取得して検証
   const data = FX.makeData(); delete data.relatedApps['311']; data.actions = { actions: {}, revision: '12' };
@@ -170,7 +170,7 @@ console.log('\n--- 6. §41 Review 時点で未取得のコピー先: 実行直�
   const p2 = plan([step('P1', 'ADD_APP_ACTION', 'APP_ACTION', '請求書作成', { name: '請求書作成', destApp: '311', actionMappings: [{ srcType: 'FIELD', srcField: 'amount', destField: 'customer' }], entities: ['GROUP:everyone'] })]);
   const mock2 = makeKintoneMock({ ...data2, relatedApps: FX.makeData().relatedApps });
   const { prepared: pr2 } = await flow(p2, mock2, { data: data2 });
-  assert(pr2.status === 'BLOCKED' && pr2.steps[0].status === 'BLOCKED' && pr2.steps[0].reason === 'REVIEW_BLOCKED', '取得後の再 Review で型不一致（数値 → 文字列）→ BLOCKED（Review 時点では分からなかった不備を実行前に止める）');
+  assert(pr2.status === 'BLOCKED' && pr2.steps[0].status === 'BLOCKED' && pr2.steps[0].reason === 'REVIEW_BLOCKED', '取得後の再 Review で型不一致（数値 → 文字列）→ BLOCKED（計画を確かめた時点では分からなかった不備を実行前に止める）');
 }
 
 console.log('\n--- 7. §45 rollback stale ---');

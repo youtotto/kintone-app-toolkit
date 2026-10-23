@@ -195,7 +195,7 @@ await section(async () => {
   //   C-1 第 3 段: 確認事項の案内は質問カード（kind questions）ではなく最終案のカード
   const qCard = finalCard(c);
   assert(qCard && !/スマートフォン/.test(qCard) && /件あります/.test(qCard) && !/スマートフォン/.test(finalQuestionsText(c)), '確認事項の案内（最終案のカード）にも再質問を出さない');
-  assert(v2.review && Array.isArray(v2.review.steps) && v2.review.steps.length === 1 && v2.final, '回答から作った版も Toolkit Review を通る（回答済みでも検証を省かない。C-1 第 3 段: Review の会話のカード REVIEW は作らず、版の review と最終案に入る）');
+  assert(v2.review && Array.isArray(v2.review.steps) && v2.review.steps.length === 1 && v2.final, '回答から作った版も Toolkit の確認 を通る（回答済みでも検証を省かない。C-1 第 3 段: Review の会話のカード REVIEW は作らず、版の review と最終案に入る）');
   // 別の質問に答えても、前の決定事項を保つ
   await c.send('部長です');
   const p3 = calls.plan[2];
@@ -342,11 +342,11 @@ await section(async () => {
   assert(Array.isArray(ctx.decisions) && ctx.decisions.map(d => d.id).join() === 'D1,D2' && ctx.decisions[0].value.join() === 'desktop', `Planner Context: 決定事項は revision と一緒に送る（形の不正・利用者の入力でないものは落とす）: ${JSON.stringify(ctx.decisions)}`);
   const ctx0 = KTContext.buildPlan({ goal: 'g', data: DATA, deps: DEPS, scan: null, incoming: null, options: { decisions } });
   // 再設計 段階 B（2026-10-07・契約 16）: 仮案で答えた決定事項は、採用後の最初の計画（revision 無し）にも載せる（以前は revision と一緒のときだけ）
-  assert(Array.isArray(ctx0.decisions) && ctx0.decisions.map(d => d.id).join() === 'D1,D2' && !('revision' in ctx0), `Planner Context: 新しい計画（revision 無し）にも渡された決定事項を載せる（形の不正・利用者の入力でないものは落とす）: ${JSON.stringify(ctx0.decisions)}`);
+  assert(Array.isArray(ctx0.decisions) && ctx0.decisions.map(d => d.id).join() === 'D1,D2' && !('revision' in ctx0), `Planner Context: 新しい計画（設定の版 無し）にも渡された決定事項を載せる（形の不正・利用者の入力でないものは落とす）: ${JSON.stringify(ctx0.decisions)}`);
   const ctx00 = KTContext.buildPlan({ goal: 'g', data: DATA, deps: DEPS, scan: null, incoming: null, options: {} });
   assert(!('decisions' in ctx00), 'Planner Context: 決定事項が無ければ decisions を付けない');
   const r2 = KTContext.compactRevision({ basedOnVersion: 1, request: 'あ'.repeat(2100), previousPlan: planWith([]) });
-  assert(r2.request.length === 2000, `依頼文は Gateway の上限（2000 文字）ちょうどに収める（以前は 2001 文字で INVALID_CONTEXT）: ${r2.request.length}`);
+  assert(r2.request.length === 2000, `依頼文は AI サービスの上限（2000 文字）ちょうどに収める（以前は 2001 文字で INVALID_CONTEXT）: ${r2.request.length}`);
   const custObj = { customizationId: 'C1', requirement: 'r', whyStandardInsufficient: 'w', strategy: 'NEW_JS_FILE', implementation: 'JAVASCRIPT', platform: ['desktop'], events: ['app.record.create.show'], fields: [], apis: [], existingFiles: [], risks: [], questions: [], dependsOn: [], evidenceIds: [], confidence: 'INFERRED' };
   const g = KTContext.buildGenerator({ customization: custObj, plan: planWith([], { customizations: [custObj] }), planId: 'p', version: 2, data: DATA, deps: DEPS, decisions });
   assert(Array.isArray(g.decisions) && g.decisions.map(d => d.id).join() === 'D1', 'Generator Context: 回答済みの決定事項だけ（再確認中は送らない）');
@@ -356,10 +356,10 @@ await section(async () => {
   const ctxD = { ...KTContext.buildPlan({ goal: 'g', data: DATA, deps: DEPS, scan: null, incoming: null, options: { revision: rev, decisions: [{ ...decisions[0], value: ['desktop', 'mobile'], answer: 'モバイルも必要' }] } }) };
   void ctxD;
   const a = KTAiClient.receive('plan', resp(['desktop', 'mobile'], ['PC とモバイルの両方で必要ですか？']));
-  assert(a.customizations[0].platform.join() === 'desktop,mobile' && a.customizations[0].questions.length === 1 && a.decisionsMeta.received === 1, 'receive: Gateway の計画（platform・質問）をそのまま返し、決定事項の受け取りの証（meta.decisions）を decisionsMeta に運ぶ');
+  assert(a.customizations[0].platform.join() === 'desktop,mobile' && a.customizations[0].questions.length === 1 && a.decisionsMeta.received === 1, 'receive: AI サービスの計画（platform・質問）をそのまま返し、決定事項の受け取りの証（meta.decisions）を decisionsMeta に運ぶ');
   const b = KTAiClient.receive('plan', resp([], []));
   const n = KTAiClient.receive('plan', { ...resp(['desktop', 'mobile'], ['PC とモバイルの両方で必要ですか？']), meta: { requestId: 'r' } });
-  assert(b.customizations[0].platform.length === 0 && n.customizations[0].platform.join() === 'desktop,mobile' && n.decisionsMeta === null, 'receive: 決定事項で platform を補わず、質問しながら両方でも空にしない（どちらも Gateway の validate-plan の仕事）');
+  assert(b.customizations[0].platform.length === 0 && n.customizations[0].platform.join() === 'desktop,mobile' && n.decisionsMeta === null, 'receive: 決定事項で platform を補わず、質問しながら両方でも空にしない（どちらも AI サービスの validate-plan の仕事）');
 });
 
 // =========================================================

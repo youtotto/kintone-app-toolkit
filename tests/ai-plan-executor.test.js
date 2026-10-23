@@ -43,7 +43,7 @@ console.log('\n--- 1. ADD_FIELD: 承認 → prepare → preview へ反映 → �
   assert(input.approvedSteps.join() === 'P1' && st0(rv).safety === 'SAFE', '前提: Review は SAFE・承認済み');
   const prepared = await E.prepare(input, { api: mock.api, current: await mock.current(), appId: '341' });
   assert(prepared.status === 'PREPARED' && prepared.summary.executable === 1 && prepared.blockers.length === 0 && prepared.stale.status === 'FRESH', `prepare: PREPARED（executable 1・stale FRESH）: ${JSON.stringify(prepared.blockers)}`);
-  assert(prepared.executionId.startsWith('ex_') && prepared.env === 'preview' && prepared.appId === '341' && prepared.revision.preview === '12' && prepared.revision.production === '12' && prepared.revision.reviewed === '12', 'executionId / env preview / revision（preview・production・Review 時点）');
+  assert(prepared.executionId.startsWith('ex_') && prepared.env === 'preview' && prepared.appId === '341' && prepared.revision.preview === '12' && prepared.revision.production === '12' && prepared.revision.reviewed === '12', 'executionId / env preview / revision（preview・production・計画を確かめた時点）');
   assert(prepared.snapshot && prepared.snapshot.revision === '12' && Object.keys(prepared.snapshot.fields.properties).length === Object.keys(DATA.fields).length && Array.isArray(prepared.snapshot.layout.layout) && prepared.snapshot.views.views['顧客別一覧'], 'snapshot: 実行前の fields / layout / views / revision');
   assert(prepared.temporaryIdMap.NEW_FIELD_1 === 'progress' && prepared.steps[0].prepared.payload.properties.progress.type === 'DROP_DOWN' && prepared.steps[0].prepared.payload.properties.progress.options['進行中'].index === '1', 'temporaryId → 実コード（progress）・API payload（options に index）');
   assert(mock.calls.filter(c => c.startsWith('POST') || c.startsWith('PUT')).length === 0, 'prepare は書き込まない');
@@ -107,7 +107,7 @@ console.log('\n--- 3. stale（Review 後の変更）・revision・権限 ---');
   const p = planField(); const rv = reviewOf(p);
   const m1 = makeKintoneMock(DATA); m1.st.prodRevision = 13; m1.st.revision = 13;
   const s1 = await E.prepare(approveAll(p, rv), { api: m1.api, current: await m1.current(), appId: '341' });
-  assert(s1.status === 'BLOCKED' && s1.blockers.some(b => b.code === 'STALE_PLAN' && /再レビュー/.test(b.message)) && s1.stale.diffs[0].kind === 'APP' && /12 → 13/.test(s1.stale.diffs[0].message), '運用環境の revision が変わった → STALE_PLAN「計画作成後にアプリ設定が変更されています。再レビューしてください。」');
+  assert(s1.status === 'BLOCKED' && s1.blockers.some(b => b.code === 'STALE_PLAN' && /同じ依頼をもう一度送って/.test(b.message)) && s1.stale.diffs[0].kind === 'APP' && /12 → 13/.test(s1.stale.diffs[0].message), '運用環境の revision が変わった → STALE_PLAN「計画作成後にアプリ設定が変更されています。設定を取り直して、同じ依頼をもう一度送ってください。」');
   const m2 = makeKintoneMock(DATA); m2.st.fields.extra_memo = { type: 'SINGLE_LINE_TEXT', code: 'extra_memo', label: '人間が足したメモ' }; m2.st.layout.push({ type: 'ROW', fields: [{ type: 'SINGLE_LINE_TEXT', code: 'extra_memo' }] });
   const s2 = await E.prepare(approveAll(p, rv), { api: m2.api, current: await m2.current(), appId: '341' });
   assert(s2.status === 'BLOCKED' && s2.stale.diffs.some(d => d.kind === 'FIELD' && d.id === 'extra_memo' && d.change === 'ADDED') && m2.calls.every(c => c.startsWith('GET')), '動作テスト環境に未反映の変更（人間がフィールド追加）→ STALE_PLAN・書き込みなし');
@@ -214,7 +214,7 @@ console.log('\n--- 5. ADD_VIEW / layout ---');
   // stale config（一覧の設定が変わった）
   const m3 = makeKintoneMock(DATA); m3.st.views['承認待ち'].fields = ['case_name'];
   const prep3 = await E.prepare(approveAll(pv, rv), { api: m3.api, current: await m3.current(), appId: '341' });
-  assert(prep3.status === 'BLOCKED' && prep3.stale.diffs.some(d => d.kind === 'VIEW' && d.id === '承認待ち' && d.change === 'CHANGED'), '一覧設定が Review 後に変わった → STALE_PLAN');
+  assert(prep3.status === 'BLOCKED' && prep3.stale.diffs.some(d => d.kind === 'VIEW' && d.id === '承認待ち' && d.change === 'CHANGED'), '一覧設定が 計画を確かめた後に変わった → STALE_PLAN');
   // layout: kintone が自動配置した場合は PUT しない
   const pf1 = planField(); const rvf = reviewOf(pf1); const m4 = makeKintoneMock(DATA, { autoPlace: true });
   const r4 = await run(approveAll(pf1, rvf), m4, { review: rvf });
@@ -244,7 +244,7 @@ console.log('\n--- 6. 入力の検証・DATA 不変 ---');
   assert(bad.status === 'BLOCKED' && bad.blockers[0].code === 'INVALID_INPUT', 'plan / review が無ければ INVALID_INPUT');
   const p = planField(); const rv = reviewOf(p);
   const out = R.executorOutput(p, rv, ['P1']);
-  assert(out.review.simulation.before && out.review.simulation.before.revision === '12' && !out.review.simulation.after && Array.isArray(out.review.simulation.order), 'executorOutput は Before（revision 含む）と order を残し After は落とす');
+  assert(out.review.simulation.before && out.review.simulation.before.revision === '12' && !out.review.simulation.after && Array.isArray(out.review.simulation.order), 'executorOutput は Before（設定の版 含む）と order を残し After は落とす');
   const noBefore = clone(out); delete noBefore.review.simulation.before;
   const nb = await E.prepare(noBefore, { api: mock.api, current: await mock.current(), appId: '341' });
   assert(nb.status === 'BLOCKED' && nb.blockers[0].code === 'NO_BEFORE_MODEL', 'Before モデルの無い古い Review は実行しない');

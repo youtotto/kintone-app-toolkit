@@ -74,7 +74,7 @@ await section(async () => {
   assert(ePlan.ok && ePlan.mode === 'plan-full' && ePlan.maxCalls === 1 && ePlan.calls[0].input === 85000 && ePlan.calls[0].output === 48000 && ePlan.maxUsd === 0.65, `B0-3: 計画の全体: 1 回・出力 48,000・0.65 米ドル: ${JSON.stringify(ePlan.calls)}`);
   const ePatch = E({ kind: 'plan', ctx: { revision: { mode: 'patch' } }, ctxBytes: 60000 });
   assert(ePatch.ok && ePatch.mode === 'plan-patch' && ePatch.maxCalls === 2 && ePatch.calls.map(c => c.kind).join() === 'plan-patch,plan-full' && ePatch.calls.every(c => c.output === 48000) && ePatch.maxUsd === 1.308,
-    `B0-4: 計画の差分更新: 差分 → 全体の作り直しで最大 2 回（Gateway の内部の追加の呼び出しも確保する）: ${JSON.stringify(ePatch.calls)}`);
+    `B0-4: 計画の差分更新: 差分 → 全体の作り直しで最大 2 回（AI サービスの内部の追加の呼び出しも確保する）: ${JSON.stringify(ePatch.calls)}`);
   const eGen = E({ kind: 'generate', ctxBytes: 10000 });
   assert(eGen.ok && eGen.maxCalls === 3 && eGen.calls.map(c => c.kind).join() === 'generate,repair,repair' && eGen.calls[0].input === 21500 && eGen.calls[1].input === 21500 + 32000 + 4000 && eGen.calls.every(c => c.output === 32000) && eGen.maxUsd === 1.233,
     `B0-5: 生成: 最初の 1 回 ＋ 修復 2 回（修復の入力に前の出力と指摘を足す）・出力 32,000 × 3・1.233 米ドル: ${JSON.stringify(eGen.calls)}`);
@@ -128,7 +128,7 @@ await section(async () => {
     const b = KTAiBudget.create({ storage: st, host: HOST, locks: null });
     const f = fakeClient();
     const e = await catchOf(b.wrap(f.client).propose({ ctx: { q: 1 }, requestId: 'r' }));
-    assert(e && e.code === 'BUDGET_EXCEEDED' && reasonOf(e) === want && f.calls.length === 0 && b.enabled() && b.summary().ok === false && /読めない/.test(KTAiBudget.summaryText(b.summary())) && /検証の上限を確かめられないため、AI に送りませんでした/.test(KTAiClient.errorText(e.code, e)),
+    assert(e && e.code === 'BUDGET_EXCEEDED' && reasonOf(e) === want && f.calls.length === 0 && b.enabled() && b.summary().ok === false && /読めない/.test(KTAiBudget.summaryText(b.summary())) && /費用の上限を確かめられないため、AI に送りませんでした/.test(KTAiClient.errorText(e.code, e)),
       `B1-2（${want}）: 設定があるのに設定・記録を読めない／壊れている／設定と合わない → 送らない（送信 0 件）: ${e && e.code} / ${reasonOf(e)} / ${e && KTAiClient.errorText(e.code, e)}`);
   }
   //   記録を読めない（getItem が例外）・書けない（setItem が例外）
@@ -162,7 +162,7 @@ await section(async () => {
   const b = e && e.details && e.details.budget;
   const text = e ? KTAiClient.errorText(e.code, e) : '';
   assert(e && e.code === 'BUDGET_EXCEEDED' && b.reason === 'limit' && b.needUsd > b.remainingUsd && b.remainingUsd === 0.5 && b.needCalls === 3 && fc.calls.length === 0 && (ledgerOf(storage) === null || ledgerOf(storage).entries.length === 0)
-    && /検証の上限（費用・回数）を超えるため、AI に送りませんでした（次の要求は推定で最大 約 [0-9.]+ 米ドル・AI の呼び出し 3 回、残りは 約 0\.5 米ドル・100 回です（[^）]*推定による送信制限で、Gateway による上限の強制はありません）/.test(text) && KTAiConversation.stopKindOf(e) === 'budget',
+    && /費用と回数の上限を超えるため、AI に送りませんでした（次の要求は推定で最大 約 [0-9.]+ 米ドル・AI の呼び出し 3 回、残りは 約 0\.5 米ドル・100 回です（[^）]*推定による送信制限で、AI サービスによる上限の強制はありません）/.test(text) && KTAiConversation.stopKindOf(e) === 'budget',
     `B2-2: 残りの予算より次の要求の最大費用が大きい → 送信 0 件・記録も書かない・画面の文に必要な額と残り・会話の停止の種類は budget: ${text}`);
   const { budget: b2 } = mkBudget({ config: { limitUsd: 100, maxCalls: 2 } });
   const f2 = fakeClient();
@@ -372,10 +372,10 @@ await section(async () => {
   const head = m.$('kt-ai-header').innerHTML;
   assert(seen.length === 0 && gen.calls.length === 0 && m.calls.plan.length === 1 && fin && fin.incomplete && fin.incomplete.kind === 'budget' && fin.incomplete.budget && fin.incomplete.budget.reason === 'limit' && fin.incomplete.budget.needUsd > fin.incomplete.budget.remainingUsd && !FS.readyOf(fin),
     `B4-1: 残りより生成の最大が大きい → 生成の送信 0 件（偽の client の呼び出し 0）・最終案は予算で止まった未完成（承認できない）: ${JSON.stringify({ seen: seen.length, inc: fin && fin.incomplete, kinds })}`);
-  assert(btn && btn.disabled && /利用の上限（予算・回数）に達しました（次の要求は推定で最大 約 [0-9.]+ 米ドル・AI の呼び出し 3 回、残りは 約 [0-9.]+ 米ドル/.test(stripC(chat)) && kinds.join() === 'propose:done,propose:done,propose:done,plan:done' && /検証の上限（推定による送信制限・上限の強制は無い）: 記録済み 約 [0-9.]+ 米ドル・確保中 約 0 米ドル ／ 上限 1 米ドル・AI の呼び出し 4 \/ 100 回/.test(stripC(head)),
+  assert(btn && btn.disabled && /費用と回数の上限に達しました（次の要求は推定で最大 約 [0-9.]+ 米ドル・AI の呼び出し 3 回、残りは 約 [0-9.]+ 米ドル/.test(stripC(chat)) && kinds.join() === 'propose:done,propose:done,propose:done,plan:done' && /費用の上限（推定による送信制限・上限の強制は無い）: 記録済み 約 [0-9.]+ 米ドル・確保中 約 0 米ドル ／ 上限 1 米ドル・AI の呼び出し 4 \/ 100 回/.test(stripC(head)),
     `B4-2: 最終案の理由に必要な額と残り・［残りの JavaScript を作る］は無効・記録に生成は無い・見出しに記録済み・確保中・上限: ${JSON.stringify({ btn, kinds, head: stripC(head).slice(0, 120) })}`);
   const line = stripC(chat).split('\n').find(s => /AI の呼び出し \d+ 回（内部を含め最大/.test(s)) || '';
-  assert(/AI の呼び出し 1 回（内部を含め最大 1 回）。合計 入力 500 \/ 出力 200 トークン・約 0\.003 米ドル（キャッシュの割引なし）/.test(line) && /検証の上限で送らなかった要求 1 件（費用なし）/.test(stripC(chat)), `B4-3: 最終案の詳細: 送った呼び出しだけを数え、送らなかった要求は費用なしと分けて出す: ${line}`);
+  assert(/AI の呼び出し 1 回（内部を含め最大 1 回）。合計 入力 500 \/ 出力 200 トークン・約 0\.003 米ドル（推定。割引は考慮していません）/.test(line) && /費用の上限で送らなかった要求 1 件（費用なし）/.test(stripC(chat)), `B4-3: 最終案の詳細: 送った呼び出しだけを数え、送らなかった要求は費用なしと分けて出す: ${line}`);
   //   記録に本文が入らない（発言・ゴール・フィールドのコード・コード）
   const raw = storage.getItem(ledgerKey());
   assert(!K.REQUESTS.some(r => raw.includes(r)) && !/課長|部長|承認|case_name|amount|kintone\.events|record/.test(raw) && JSON.parse(raw).entries.every(e => Object.keys(e).every(k => ALLOWED_ENTRY_KEYS.includes(k))), `B4-4: 画面の記録にも本文（発言・計画・フィールド・コード）が入らない: ${raw.slice(0, 200)}`);
@@ -447,7 +447,7 @@ await section(async () => {
   const askSent = m.calls.ask.length - askBefore;
   const midBoth = budget.summary();
   g.open(); await pAdopt; await ticks(20);
-  assert(mid.inFlight === 1 && askRefused === 0 && /検証の上限（費用・回数）を超えるため、AI に送りませんでした（次の要求は推定で最大 約/.test(refusedText) && askSent === 1 && midBoth.reservedUsd >= mid.reservedUsd,
+  assert(mid.inFlight === 1 && askRefused === 0 && /費用と回数の上限を超えるため、AI に送りませんでした（次の要求は推定で最大 約/.test(refusedText) && askSent === 1 && midBoth.reservedUsd >= mid.reservedUsd,
     `B4-10: 生成中の並行の質問は、生成の確保額を含めて判定する（収まらなければ送らず理由を出す・収まれば送る）: ${JSON.stringify({ mid, askRefused, askSent, midBoth })}`);
 });
 await section(async () => {
@@ -457,11 +457,11 @@ await section(async () => {
   await ticks();
   const v = await K.adoptOnScreen(m); await ticks(20);
   const head = m.$('kt-ai-header').innerHTML;
-  assert(seen.length === 1 && seen[0].noProxyFallback === undefined && storage.getItem(ledgerKey()) === null && !/kt-ai-budget|検証の上限/.test(head) && v && v.final && !v.final.incomplete && m.calls.propose.length === 3 && m.calls.plan.length === 1,
+  assert(seen.length === 1 && seen[0].noProxyFallback === undefined && storage.getItem(ledgerKey()) === null && !/kt-ai-budget|費用の上限/.test(head) && v && v.final && !v.final.incomplete && m.calls.propose.length === 3 && m.calls.plan.length === 1,
     `B4-11: 予算の設定が無ければ今までと同じ（包まない・記録を書かない・見出しに出さない・最終案は完成）: ${JSON.stringify({ seen, inc: v && v.final && v.final.incomplete })}`);
   //   d.budget を渡さない画面（既定の作り方）でも、テストの localStorage に設定が無ければ無効
   const m0 = K.mount();
-  assert(m0.panel.budget() && m0.panel.budget().enabled() === false, 'B4-12: 既定の画面の検証の上限は、設定が無ければ無効');
+  assert(m0.panel.budget() && m0.panel.budget().enabled() === false, 'B4-12: 既定の画面の費用の上限は、設定が無ければ無効');
 });
 await section(async () => {
   //   設定があるのに壊れている → 最初の仮案も送らない（理由を出す）
@@ -472,7 +472,7 @@ await section(async () => {
   await m.panel.send(K.REQUESTS[0]); await ticks(10);
   const text = stripC(m.chat());
   const head = stripC(m.$('kt-ai-header').innerHTML);
-  assert(m.calls.propose.length === 0 && /検証の上限を確かめられないため、AI に送りませんでした（検証の上限の設定の形が正しくありません）/.test(text) && /設定または記録を読めないため、AI に送りません/.test(head),
+  assert(m.calls.propose.length === 0 && /費用の上限を確かめられないため、AI に送りませんでした（費用の上限の設定の形が正しくありません）/.test(text) && /設定または記録を読めないため、AI に送りません/.test(head),
     `B4-13: 設定が壊れていれば最初の仮案も送らない（送信 0 件・理由を出す・見出しにも出す）: ${text.slice(-200)} / ${head.slice(0, 80)}`);
 });
 
@@ -490,7 +490,7 @@ await section(async () => {
   const u2 = finalUsageOf({ aiCalls: 2, calls: [] });
   assert(u2.sentCalls === 2 && u2.usageUnknown === 2 && u2.measured === 0 && u2.costUsd === 0, `B5-2: 呼び出しの回数に入っているのに記録の無い呼び出しは、使用量が不明として数える（0 として扱わない）: ${JSON.stringify(u2)}`);
   const u3 = finalUsageOf({ aiCalls: 2, calls: [{ kind: 'generate', end: 'error', preAi: true }, { kind: 'generate', end: 'error', notSent: true }] });
-  assert(u3.sentCalls === 0 && u3.preAi === 1 && u3.notSent === 1 && u3.notSentBudget === 0 && u3.usageUnknown === 0, `B5-3: Gateway が AI を呼ぶ前に止めた要求・送る前の理由で送らなかった要求は費用なし（使用量が不明に数えない。検証の上限の件数には入れない）: ${JSON.stringify(u3)}`);
+  assert(u3.sentCalls === 0 && u3.preAi === 1 && u3.notSent === 1 && u3.notSentBudget === 0 && u3.usageUnknown === 0, `B5-3: AI サービスが AI を呼ぶ前に止めた要求・送る前の理由で送らなかった要求は費用なし（使用量が不明に数えない。費用の上限の件数には入れない）: ${JSON.stringify(u3)}`);
   //   修復の token が一部だけ → 'partial'・不明の回数
   const eP = generationEstimate({ generated: { ai: { usage: { input_tokens: 5000, output_tokens: 800 } }, timing: { ai: { count: 3, repairs: 2 }, calls: [{ kind: 'generate', inputTokens: 5000, outputTokens: 800 }, { kind: 'repair', inputTokens: 6000, outputTokens: 900 }, { kind: 'repair', inputTokens: null, outputTokens: null }] } } });
   const eN = generationEstimate({ generated: { ai: { usage: { input_tokens: 5000, output_tokens: 800 } }, verification: { repairs: { count: 2 } } } });
@@ -503,7 +503,7 @@ await section(async () => {
   const head2 = KTAiChatUi.codePaneHtml({ generated: gen, review: null, existingSource: null, attempts: a2 }).head;
   const headOld = KTAiChatUi.codePaneHtml({ generated: gen, review: null, existingSource: null, attempts: { count: 2, measured: 1, tokens: { input: 3000, output: 400 }, costUsd: 0.01 } }).head;
   const headAll = KTAiChatUi.codePaneHtml({ generated: gen, review: null, existingSource: null, attempts: a1 }).head;
-  assert(a2.unknown === 1 && /生成 2 回目（確認できた分の使用量: 入力 3000 \/ 出力 400 token・約 0\.01 米ドル。使用量が不明な回が 1 回あり、費用は未確定）/.test(stripC(head2)) && /使用量が不明な回が 1 回/.test(stripC(headOld)) && /生成 1 回目（使用量: 入力 3000 \/ 出力 400 token・約 0\.01 米ドル）/.test(stripC(headAll)),
+  assert(a2.unknown === 1 && /生成 2 回目（確認できた分の使用量: 入力 3000 \/ 出力 400 トークン・約 0\.01 米ドル。使用量が不明な回が 1 回あり、費用は未確定）/.test(stripC(head2)) && /使用量が不明な回が 1 回/.test(stripC(headOld)) && /生成 1 回目（使用量: 入力 3000 \/ 出力 400 トークン・約 0\.01 米ドル）/.test(stripC(headAll)),
     `B5-5: JavaScript ごとの表示も、使用量が不明な回があれば「確認できた分」と不明の回数（古い記録は回数の差から）。すべて分かれば今までどおり: ${stripC(head2).slice(0, 200)}`);
   //   レビューの指摘 row7（2026-10-09）: 生成の応答の usage に入力か出力の片方しか無いときは使用量が不明（欠けた側を 0 として「合計」と言わない。KTAiBudget.callsOf と同じ）
   const eIn = generationEstimate({ generated: { ai: { usage: { input_tokens: 5000 } } } });
@@ -534,7 +534,7 @@ await section(async () => {
   const b2 = KTAiBudget.create({ storage: cfgThrows, session: K.makeStorage(), host: HOST, locks: null });
   const f2 = fakeClient();
   const e2 = await catchOf(b2.wrap(f2.client).propose({ ctx: {} }));
-  assert(e2 && e2.code === 'BUDGET_EXCEEDED' && reasonOf(e2) === 'config-unreadable' && f2.calls.length === 0 && b2.enabled() === true && /検証の上限を確かめられないため、AI に送りませんでした（検証の上限の設定を確かめられません（設定を読めません））/.test(KTAiClient.errorText(e2.code, e2)) && /設定を確かめられないため、AI に送りません/.test(KTAiBudget.summaryText(b2.summary())) && KTAiConversation.stopKindOf(e2) === 'budget',
+  assert(e2 && e2.code === 'BUDGET_EXCEEDED' && reasonOf(e2) === 'config-unreadable' && f2.calls.length === 0 && b2.enabled() === true && /費用の上限を確かめられないため、AI に送りませんでした（費用の上限の設定を確かめられません（設定を読めません））/.test(KTAiClient.errorText(e2.code, e2)) && /設定を確かめられないため、AI に送りません/.test(KTAiBudget.summaryText(b2.summary())) && KTAiConversation.stopKindOf(e2) === 'budget',
     `B6-2: 設定の読取が例外 → 送信 0 件（理由「設定を確かめられない」・画面は包む側（enabled）・停止の種類は budget）: ${e2 && KTAiClient.errorText(e2.code, e2)}`);
   //   保存領域が無い（storage が取れない）: このタブで一度有効だった印があれば送らない。印が無ければ通常の利用
   //   （localStorage の参照そのものが例外になる場合も「設定を読めない」にしているが、テストの vm では参照の例外を作れないので、ここでは印で確かめる）
@@ -608,12 +608,12 @@ await section(async () => {
   await m.panel.send(K.REQUESTS[1]); await ticks(10);
   const text = stripC(m.chat());
   const head = stripC(m.$('kt-ai-header').innerHTML);
-  assert(sent1 === 1 && m.calls.propose.length === 1 && /検証の上限を確かめられないため、AI に送りませんでした（検証の上限の設定を確かめられません（このページで有効だった設定が見つかりません/.test(text) && /設定を確かめられないため、AI に送りません/.test(head),
+  assert(sent1 === 1 && m.calls.propose.length === 1 && /費用の上限を確かめられないため、AI に送りませんでした（費用の上限の設定を確かめられません（このページで有効だった設定が見つかりません/.test(text) && /設定を確かめられないため、AI に送りません/.test(head),
     `B6-8: 画面: 一度有効だった設定が消えた後の送信は 0 件（理由を会話と見出しに出す）: ${JSON.stringify({ sent1, now: m.calls.propose.length })} / ${text.slice(-400)} / ${head.slice(0, 200)}`);
 });
 
 // =========================================================
-console.log('\n--- §B7. Gateway が要求の上界で強制する上限（health の limits.budgetAllowance・再検証前の指示 §4・2026-10-10） ---');
+console.log('\n--- §B7. AI サービスが要求の上界で強制する上限（health の limits.budgetAllowance・再検証前の指示 §4・2026-10-10） ---');
 //   印（limits.budgetAllowance = { version: 1, models }）があるときだけ envelope に budget: { allowanceUsd } を付ける。allowanceUsd = 上限 − 記録済みの費用（不明は確保額）− ほかの進行中・
 //   終了不明の確保額。この要求の確保額 = allowanceUsd。meta.budget で精算。Gateway の BUDGET_EXCEEDED（stage first・AI を呼んでいない）は解放して送信を止める。
 //   印の無い Gateway は今の推定による送信制限だけ（画面と記録に「推定による送信制限（上限の強制は無い）」と区別して出す）
@@ -701,15 +701,15 @@ await section(async () => {
   const e = await catchOf(w.generate({ ctx: { customization: {} } }));
   const x = ledgerOf(storage).entries[0];
   const text = KTAiClient.errorText(e.code, e);
-  assert(e === first && x.status === 'released' && x.reservedUsd === 0 && x.costUsd === 0 && budget.summary().reservedUsd === 0 && KTAiBudget.preAiOf(e) === true && KTAiBudget.notSentOf(e) === true && KTAiConversation.stopKindOf(e) === 'budget' && /この呼び出しの上界 約 1\.27 米ドル（送る要求の大きさと出力の上限から Gateway が計算）が、渡した残り 約 1 米ドルを超えるため、AI を呼びませんでした/.test(text),
-    `B7-5: Gateway の BUDGET_EXCEEDED（stage first）→ 確保を解放・送らなかった要求（費用なし）・送信の停止の種類は budget・画面の文は上界と残り: ${JSON.stringify(x)} / ${text}`);
+  assert(e === first && x.status === 'released' && x.reservedUsd === 0 && x.costUsd === 0 && budget.summary().reservedUsd === 0 && KTAiBudget.preAiOf(e) === true && KTAiBudget.notSentOf(e) === true && KTAiConversation.stopKindOf(e) === 'budget' && /この呼び出しの費用の見積もりの最大 約 1\.27 米ドル（送る要求の大きさと出力の上限から AI サービスが計算）が、渡した残り 約 1 米ドルを超えるため、AI を呼びませんでした/.test(text),
+    `B7-5: AI サービスの BUDGET_EXCEEDED（stage first）→ 確保を解放・送らなかった要求（費用なし）・送信の停止の種類は budget・画面の文は上界と残り: ${JSON.stringify(x)} / ${text}`);
   const { storage: s2, budget: b2 } = mkBudget({ config: { limitUsd: 1 } });
   const full = gwBudgetErr({ reason: 'over-allowance', stage: 'plan-full', allowanceUsd: 1, boundUsd: 0.9, budget: metaOf(1, [{ kind: 'plan-patch', boundUsd: 0.5, costUsd: 0.2 }]) });
   const f2 = fakeClient({ plan: () => { throw full; } });
   const e2 = await catchOf(b2.wrap(f2.client, { limits: LIM_ON }).plan({ ctx: { goal: 'g', revision: { mode: 'patch' } } }));
   const y = ledgerOf(s2).entries[0];
   assert(e2 === full && y.status === 'done' && y.costUsd === 0.2 && y.reservedUsd === 0 && y.reason === 'BUDGET_EXCEEDED' && KTAiBudget.preAiOf(e2) === false && KTAiBudget.notSentOf(e2) === false && /計画の差分更新を全体の作り直しに切り替える呼び出しは/.test(KTAiClient.errorText(e2.code, e2)),
-    `B7-6: Gateway が差分の後の全体の作り直しを止めた（stage plan-full）→ 解放せず detail.budget で精算（差分の 0.2 米ドル）・送った要求として数える: ${JSON.stringify(y)}`);
+    `B7-6: AI サービスが差分の後の全体の作り直しを止めた（stage plan-full）→ 解放せず detail.budget で精算（差分の 0.2 米ドル）・送った要求として数える: ${JSON.stringify(y)}`);
   //   AI を呼んだ後のほかのエラーも detail.budget があれば精算・無ければ終了不明（渡した allowanceUsd を確保に残す）
   const { storage: s3, budget: b3 } = mkBudget({ config: { limitUsd: 1 } });
   const up = gwErr('UPSTREAM_ERROR', { reason: 'timeout', budget: metaOf(1, [{ kind: 'generate', boundUsd: 0.4, costUsd: null }]) });
@@ -750,9 +750,9 @@ await section(async () => {
   bOn.wrap(fakeClient().client, { limits: LIM_ON });
   const headOn = KTAiBudget.summaryText(bOn.summary());
   const texts = [head, headOn, textE, ...['limit', 'calls', 'unknown-model', 'stopped', 'config-unreadable', 'config-missing', 'gateway-over-allowance'].map(r => KTAiClient.budgetDetailText({ reason: r, needUsd: 1, remainingUsd: 0.5, allowanceUsd: 0.5, boundUsd: 1 }))];
-  assert(seen.length === 1 && seen[0] === undefined && x.enforcement === 'estimate' && !('allowanceUsd' in x) && /^検証の上限（推定による送信制限・上限の強制は無い）: 記録済み/.test(head) && /^検証の上限（Gateway が要求ごとに上限を強制）: 記録済み/.test(headOn)
-    && /次の要求は推定で最大 約 [0-9.]+ 米ドル/.test(textE) && /推定による送信制限で、Gateway による上限の強制はありません/.test(textE) && texts.every(t => !/超えない|超えることはありません|保証/.test(t)),
-    `B7-9: 印なし: budget を付けない・記録は推定・見出しと拒否の文は「推定による送信制限（上限の強制は無い）」。印ありの見出しは「Gateway が要求ごとに上限を強制」。どの文も「超えない」「保証」と言わない: ${JSON.stringify({ head, headOn, textE })}`);
+  assert(seen.length === 1 && seen[0] === undefined && x.enforcement === 'estimate' && !('allowanceUsd' in x) && /^費用の上限（推定による送信制限・上限の強制は無い）: 記録済み/.test(head) && /^費用の上限（AI サービスが要求ごとに上限を強制）: 記録済み/.test(headOn)
+    && /次の要求は推定で最大 約 [0-9.]+ 米ドル/.test(textE) && /推定による送信制限で、AI サービスによる上限の強制はありません/.test(textE) && texts.every(t => !/超えない|超えることはありません|保証/.test(t)),
+    `B7-9: 印なし: budget を付けない・記録は推定・見出しと拒否の文は「推定による送信制限（上限の強制は無い）」。印ありの見出しは「AI サービスが要求ごとに上限を強制」。どの文も「超えない」「保証」と言わない: ${JSON.stringify({ head, headOn, textE })}`);
 });
 await section(async () => {
   //   画面: health の印を読み、makeClient の包みが budget を付ける（仮案・計画・生成）。meta.budget で精算し、見出しは「Gateway が要求ごとに上限を強制」
@@ -775,8 +775,8 @@ await section(async () => {
   const allow = sent.map(([k, b]) => `${k}:${b ? b.allowanceUsd : 'none'}`);
   //   送った順の i 番目の残りは 3 − 0.01 × i（前の要求はどれも 0.01 米ドルで確定）。期待 = min(残り, その要求の Context の上界の見積もり)
   const want = sent.map(([k, , ctx], i) => Math.round(Math.min(3 - 0.01 * i, GBv(k, ctx)) * 1e6) / 1e6);
-  assert(sent.length === 5 && sent.map(([k]) => k).join() === 'propose,propose,propose,plan,generate' && sent.every(([, b], i) => b && b.allowanceUsd === want[i] && b.allowanceUsd < 3 - 0.01 * i) && JSON.stringify(led.entries.map(e => e.allowanceUsd)) === JSON.stringify(want) && led.entries.every(e => e.enforcement === 'gateway' && e.status === 'done' && e.costUsd === 0.01 && e.reservedUsd === 0) && v && v.final && !v.final.incomplete && /検証の上限（Gateway が要求ごとに上限を強制）: 記録済み 約 0\.05 米ドル・確保中 約 0 米ドル/.test(head),
-    `B7-10: 画面: 印のある Gateway には仮案・計画・生成の要求ごとに allowanceUsd = min(残り, その要求の上界の見積もり) を渡し（残り全額にしない）、meta.budget で精算・見出しは強制の印: ${JSON.stringify({ allow, want, head: head.slice(0, 120) })}`);
+  assert(sent.length === 5 && sent.map(([k]) => k).join() === 'propose,propose,propose,plan,generate' && sent.every(([, b], i) => b && b.allowanceUsd === want[i] && b.allowanceUsd < 3 - 0.01 * i) && JSON.stringify(led.entries.map(e => e.allowanceUsd)) === JSON.stringify(want) && led.entries.every(e => e.enforcement === 'gateway' && e.status === 'done' && e.costUsd === 0.01 && e.reservedUsd === 0) && v && v.final && !v.final.incomplete && /費用の上限（AI サービスが要求ごとに上限を強制）: 記録済み 約 0\.05 米ドル・確保中 約 0 米ドル/.test(head),
+    `B7-10: 画面: 印のある AI サービスには仮案・計画・生成の要求ごとに allowanceUsd = min(残り, その要求の上界の見積もり) を渡し（残り全額にしない）、meta.budget で精算・見出しは強制の印: ${JSON.stringify({ allow, want, head: head.slice(0, 120) })}`);
 });
 await section(async () => {
   //   画面: Gateway が生成を上限で止めた（stage first）→ 確保を解放・最終案は予算で止まった未完成（［残りの JavaScript を作る］は無効・理由は上界と残り）
@@ -794,12 +794,12 @@ await section(async () => {
   const chat = m.chat();
   const g = ledgerOf(storage).entries.find(e => e.kind === 'generate');
   const btn = restButtonOf(chat);
-  assert(fin && fin.incomplete && fin.incomplete.kind === 'budget' && fin.incomplete.budget && fin.incomplete.budget.reason === 'gateway-over-allowance' && !FS.readyOf(fin) && g && g.status === 'released' && g.reservedUsd === 0 && btn && btn.disabled && /呼び出しの上界 約 3\.2 米ドル（送る要求の大きさと出力の上限から Gateway が計算）が、渡した残り 約 2\.96 米ドルを超えるため、Gateway が呼び出しませんでした/.test(stripC(chat)),
-    `B7-11: 画面: Gateway が上限で生成を止めた → 確保を解放・送信を止める（予算で止まった未完成・続きのボタンは無効・理由は上界と残り）: ${JSON.stringify({ inc: fin && fin.incomplete, g: g && [g.status, g.reservedUsd] })}`);
+  assert(fin && fin.incomplete && fin.incomplete.kind === 'budget' && fin.incomplete.budget && fin.incomplete.budget.reason === 'gateway-over-allowance' && !FS.readyOf(fin) && g && g.status === 'released' && g.reservedUsd === 0 && btn && btn.disabled && /この呼び出しの費用の見積もりの最大 約 3\.2 米ドル（送る要求の大きさと出力の上限から AI サービスが計算）が、渡した残り 約 2\.96 米ドルを超えるため、AI サービスが呼び出しませんでした/.test(stripC(chat)),
+    `B7-11: 画面: AI サービスが上限で生成を止めた → 確保を解放・送信を止める（予算で止まった未完成・続きのボタンは無効・理由は上界と残り）: ${JSON.stringify({ inc: fin && fin.incomplete, g: g && [g.status, g.reservedUsd] })}`);
 });
 
 // =========================================================
-console.log('\n--- §B8. 印のある Gateway の要求ごとの allowance（再検証前の確認・2026-10-10: 並行の要求が残りを全部確保しない・最初の呼び出しの前の BUDGET_EXCEEDED の後の 1 回だけの送り直し・時間切れの費用の記録） ---');
+console.log('\n--- §B8. 印のある AI サービスの要求ごとの allowance（再検証前の確認・2026-10-10: 並行の要求が残りを全部確保しない・最初の呼び出しの前の BUDGET_EXCEEDED の後の 1 回だけの送り直し・時間切れの費用の記録） ---');
 //   allowanceUsd = min(残り, その要求の上界の見積もり KTAiBudget.gatewayBound)。見積もりは Gateway の上界の式（(本文のバイト数 ＋ 64 × 2) × 入力の単価 ＋ 出力の上限 × 出力の単価）に
 //   寄せた Toolkit の推定（入力 = 送る Context を Gateway が本文に入れる形のバイト数 ＋ 指示と schema の保守的な定数 ＋ 64 × 2・出力 = 出力の上限・内部の呼び出しの最大の分）
 const gwErrB = (code, detail, budgetRec) => aiErr(code, { details: { ok: false, error: { code, message: 'x', ...(detail != null ? { detail } : {}), ...(budgetRec ? { budget: budgetRec } : {}) } } });
@@ -820,7 +820,7 @@ await section(async () => {
     && g.calls.map(c => c.kind).join() === 'generate,repair,repair' && g.calls[0].inputBytes === P.generate + body(ctxG) + 128 && g.calls[1].inputBytes === g.calls[0].inputBytes + 32000 * 2 + 8000 && g.calls.every(c => c.output === 32000) && g.maxUsd === Math.round(g.calls.reduce((s, c) => s + usd(c.inputBytes, 32000), 0) * 1e6) / 1e6
     && pp.calls.map(c => c.kind).join() === 'plan-patch,plan-full' && pp.calls[0].inputBytes === P['plan-patch'] + body(ctxP) + 128 && pp.calls[1].inputBytes === P['plan-full'] + body(ctxP) + 128 + 8000 && pf.calls.length === 1 && pf.calls[0].kind === 'plan-full'
     && big.calls.length === 4 && big.calls.every(c => c.output === 16000) && big.calls[1].inputBytes === big.calls[0].inputBytes + 16000 * 2 + 8000,
-    `B8-0: 上界の見積もり = (Gateway が本文に入れる形の Context のバイト数 ＋ 指示と schema の定数 ＋ 64 × 2) × 2 / 1e6 ＋ 出力の上限 × 10 / 1e6 を内部の呼び出しの最大の分（生成 ＋ 修復 2・差分 → 全体）。修復・作り直しは前回の出力と余裕を足す。health の出力の上限・呼び出しの最大を使う: ${JSON.stringify({ a: a.maxUsd, g: g.calls, pp: pp.calls, big: big.calls.map(c => [c.inputBytes, c.output]) })}`);
+    `B8-0: 上界の見積もり = (AI サービスが本文に入れる形の Context のバイト数 ＋ 指示と schema の定数 ＋ 64 × 2) × 2 / 1e6 ＋ 出力の上限 × 10 / 1e6 を内部の呼び出しの最大の分（生成 ＋ 修復 2・差分 → 全体）。修復・作り直しは前回の出力と余裕を足す。health の出力の上限・呼び出しの最大を使う: ${JSON.stringify({ a: a.maxUsd, g: g.calls, pp: pp.calls, big: big.calls.map(c => [c.inputBytes, c.output]) })}`);
 });
 await section(async () => {
   //   concurrency-probe の形: 上限 5 米ドル・質問（askAside）の進行中に計画の更新 → 両方送る（以前は質問が残り全額 5 を確保して計画の更新が残り 0 で止まった）。
@@ -901,7 +901,7 @@ await section(async () => {
   assert(a.e && a.e.code === 'UPSTREAM_ERROR' && a.x.allowanceUsd === GG && a.x.status === 'unknown' && a.x.reservedUsd === 0.43 && a.x.reservedUsd < GG && a.x.costUsd === null && JSON.stringify(a.x.gatewayCalls) === JSON.stringify([{ kind: 'generate', boundUsd: 0.43, costUsd: null }]) && a.s.reservedUsd === 0.43 && a.s.unknown === 1,
     `B8-6: 印ありで生成が時間切れ（error.budget に呼び出しの記録・費用不明）→ 確保額は記録の上界 0.43（渡した allowance ${GG} の全額のまま残さない）・終了不明: ${JSON.stringify(a.x)}`);
   assert(b.x.status === 'partial-unknown' && b.x.costKnownUsd === 0.1 && b.x.reservedUsd === 0.5 && b.s.recordedUsd === 0.1 && b.s.reservedUsd === 0.5 && c.x.status === 'unknown' && c.x.reservedUsd === GG && c.x.allowanceUsd === GG,
-    `B8-7: error.budget の一部の呼び出しの費用が分かる → 確認できた費用を記録し、分からない呼び出しの上界を確保に残す。費用の記録の無い時間切れは今までどおり渡した allowance を確保に残す: ${JSON.stringify({ b: [b.x.status, b.x.costKnownUsd, b.x.reservedUsd], c: [c.x.status, c.x.reservedUsd] })}`);
+    `B8-7: error.budget の一部の呼び出しの費用が分かる → 確認できた費用を記録し、分からないこの呼び出しの費用の見積もりの最大を確保に残す。費用の記録の無い時間切れは今までどおり渡した allowance を確保に残す: ${JSON.stringify({ b: [b.x.status, b.x.costKnownUsd, b.x.reservedUsd], c: [c.x.status, c.x.reservedUsd] })}`);
 });
 
 console.log(`\n${state.failed ? 'NG' : 'OK'}: ${state.passed} passed, ${state.failed} failed`);

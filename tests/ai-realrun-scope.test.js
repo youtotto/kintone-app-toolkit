@@ -137,7 +137,7 @@ const contaminatedPlan = (args, { ids = ['C1', 'C2', 'C3'], refs = {}, label = '
     // 依頼を実現するための手順（効果 []。計画の AI が足した提案）
     { op: 'add', target: 'プロセス管理', condition: '', behavior: `部長承認待ちへ進むアクションを追加する（${label}）`, exceptions: [], decision: 'proposed', disposition: 'adopted', sourceQuotes: [], planRefs: ['P1'], effects: [], note: '' },
   ];
-  return { plan, ctx: null, gatewayPlan: clone(plan), turn: { reply: '明細の行の追加・削除ボタン自体は止められないため、承認済みではセルを編集不可にし、行の変更を含む変更は保存時に検出して止める計画です。', requirementOps: ops, utteranceCoverage: [] },
+  return { plan, ctx: null, gatewayPlan: clone(plan), turn: { reply: '明細の行の追加・削除ボタン自体は止められないため、承認済みでは入力欄を編集不可にし、行の変更を含む変更は保存時に検出して止める計画です。', requirementOps: ops, utteranceCoverage: [] },
     //   2026-10-18: 最終案の判定は設定の手順の反映の分類（手順ごとの確認の結果が要る）も見るので、偽の確認の結果にも P1（ステータスの追加）を入れる
     //   （製品の確認はすべての手順を確かめる。前の素材は JavaScript の手順だけで、P1 は「確認の結果が無い」で反映できない手順になる）
     //   2026-10-19: P1 の変更後は製品の確認と同じ形（作業者の指定形式は既定の ONE・作業者なし）。前は形式が無く、反映の部品が「自動で反映しない」にした P1 を判定が通していた
@@ -502,7 +502,7 @@ await section(async () => {
   const ch2 = KTAiAnswers.applyRequirementOps(lg, [{ op: 'update', id: e1.id, target: '備考', behavior: '警告を出す', decision: 'proposed', planRefs: ['C1'], effects: ['warn'], decisionRefs: [] }], { version: 2 });
   const refs2 = e1.decisionRefs ? [...e1.decisionRefs] : null;
   KTAiAnswers.applyRequirementOps(lg, [{ op: 'update', id: e1.id, target: '備考', behavior: '警告を出す', decision: 'proposed', planRefs: ['C1'], effects: ['warn'] }], { version: 3 });
-  assert(JSON.stringify(ch1.decisionRefs && ch1.decisionRefs.get(e1.id)) === '["D2","D3"]' && JSON.stringify(refs2) === '[]' && ch2.decisionRefs && JSON.stringify(ch2.decisionRefs.get(e1.id)) === '[]' && JSON.stringify(e1.decisionRefs) === '[]' && !('decisionRefs' in KTAiAnswers.requirementsForContext(lg)[0]), `S7-0c: 要件の操作の decisionRefs を取り込む（D の形だけ・重複なし。update は上書き・項目が無ければ前の値。Gateway に戻す要件には付けない）: ${JSON.stringify({ add: ch1.decisionRefs && ch1.decisionRefs.get(e1.id), upd: refs2, now: e1.decisionRefs })}`);
+  assert(JSON.stringify(ch1.decisionRefs && ch1.decisionRefs.get(e1.id)) === '["D2","D3"]' && JSON.stringify(refs2) === '[]' && ch2.decisionRefs && JSON.stringify(ch2.decisionRefs.get(e1.id)) === '[]' && JSON.stringify(e1.decisionRefs) === '[]' && !('decisionRefs' in KTAiAnswers.requirementsForContext(lg)[0]), `S7-0c: 要件の操作の decisionRefs を取り込む（D の形だけ・重複なし。update は上書き・項目が無ければ前の値。AI サービスに戻す要件には付けない）: ${JSON.stringify({ add: ch1.decisionRefs && ch1.decisionRefs.get(e1.id), upd: refs2, now: e1.decisionRefs })}`);
   const lg2 = KTAiAnswers.createLedger('p2');
   KTAiAnswers.recordAnswer(lg2, { topics: ['other'], answer: '出す', source: 'chat', version: 1, delegated: true });
   KTAiAnswers.recordAnswer(lg2, { topics: ['approver'], answer: '部長です', source: 'chat', version: 1 });
@@ -945,7 +945,7 @@ await section(async () => {
   const reqRow = ctx && ctx.verification && Array.isArray(ctx.verification.requirementIds) ? ctx.verification.requirementIds.find(rr => rr.id === 'C1') : null;
   const custText = ctx && ctx.customization ? String(ctx.customization.requirement || '') : '';
   assert(v && strippedOf(v).some(st => st.field === 'amount' && st.effect === 'block-save' && st.reason === 'unattributed') && sg.calls.length >= 1 && ctx, `前提: 画面で範囲外の保存禁止（fields[].effects だけ）を外して生成した: ${JSON.stringify({ stripped: strippedOf(v), gen: sg.calls.length })}`);
-  assert(custText.includes(REQ_S) && !custText.includes('保存') && reqRow && reqRow.text.includes(REQ_S) && !/保存/.test(reqRow.text) && v.plan.customizations[0].requirement === CUST_TEXT, `S6-1: 生成工程に送る customization の requirement と「満たすべき要件」の customization の行は、範囲内の要件の文（利用者の原文の引用）。計画の文は書き換えない: ${JSON.stringify({ custText, reqRow })}`);
+  assert(custText.includes(REQ_S) && !custText.includes('保存') && reqRow && reqRow.text.includes(REQ_S) && !/保存/.test(reqRow.text) && v.plan.customizations[0].requirement === CUST_TEXT, `S6-1: AI サービスに送る customization の requirement と「満たすべき要件」の customization の行は、範囲内の要件の文（利用者の原文の引用）。計画の文は書き換えない: ${JSON.stringify({ custText, reqRow })}`);
   assert(ctx && (ctx.verification.requiredEffects || []).every(e => e.effect !== 'block-save'), 'S6-2: 必須の効果にも保存禁止は無い');
 });
 

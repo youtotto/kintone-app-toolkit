@@ -50,7 +50,7 @@ const codesOf = (list) => (list || []).map(x => x.code);
 console.log('\n--- N3 API の目録（簡素化 B: 使える画面の照合は削除）---');
 {
   const apis = safe(() => KTJsCatalog.extractApis("kintone.mobile.app.record.getFieldElement('a'); kintone.mobile.app.getFieldElements('a');"), []);
-  assert(apis.length === 2 && apis.every(a => a.known), `モバイルの getFieldElement / getFieldElements を目録に足す（目録に無い API と扱わない）: ${JSON.stringify(apis.map(a => [a.name, a.known]))}`);
+  assert(apis.length === 2 && apis.every(a => a.known), `モバイルの getFieldElement / getFieldElements を目録に足す（Toolkit が知らない機能（API） と扱わない）: ${JSON.stringify(apis.map(a => [a.name, a.known]))}`);
   assert(Number(KTJsCatalog.CATALOG_VERSION) >= 2 && Number(KTScan.ANALYZER_VERSION) >= 15, `目録・解析の版を上げた（古い Field Scanner のキャッシュの API の判定を使わない）: ${KTJsCatalog.CATALOG_VERSION} / ${KTScan.ANALYZER_VERSION}`);
   assert(typeof KTJsCatalog.apiScreens === 'undefined' && !('api-screen' in (KTCodeReview.HOW_TO_CHECK || {})), '簡素化 B: 使える画面（apiScreens）と api-screen の確かめ方は持たない');
 }
@@ -61,11 +61,11 @@ console.log('\n--- N3 実機の再生（RC E2E の BF-C）: 作成・編集画�
   const data = JSON.parse(JSON.stringify(DATA));
   const rv = KTCodeReview.review({ generated: E2E.BFC.generated, customization: E2E.BFC.customization, plan: null, data, scan: null, existingSource: { name: 'dealLock.js', target: 'desktop', text: R.DEAL_LOCK } });
   assert(E2E.BFC.review.verdict === 'NEEDS_CONFIRMATION' && /getFieldElement/.test(E2E.BFC.generated.code), '前提: 実機の判定は確認が必要（getFieldElement を見逃した）');
-  assert(!rv.checks.some(x => x.name === 'api-screen') && !codesOf(rv.registration.blockers).includes('api-screen'), `簡素化 B: Toolkit の形式確認は使える画面を照合しない（生成工程の検査にも同じ規則は無い）: ${JSON.stringify(codesOf(rv.registration.blockers))}`);
+  assert(!rv.checks.some(x => x.name === 'api-screen') && !codesOf(rv.registration.blockers).includes('api-screen'), `簡素化 B: Toolkit のコードの検査は使える画面を照合しない（AI サービスの検査にも同じ規則は無い）: ${JSON.stringify(codesOf(rv.registration.blockers))}`);
 }
 
 // =========================================================
-console.log('\n--- N2 実機の再生（RC E2E の §2 手順 4）: 記録した出力のパッチを適用できる（記法は生成工程の機械検査・空の判定の undefined は生成工程の模擬テスト）---');
+console.log('\n--- N2 実機の再生（RC E2E の §2 手順 4）: 記録した出力のパッチを適用できる（記法はAI サービスのコードの検査・空の判定の undefined は模擬テスト）---');
 {
   const edited = R.DEAL_VALIDATE.replace(/\s*$/, '') + '\n// 別の担当者のメモ（RC E2E: 外部からの変更の確認）\n';
   assert(KTScan.hashText(edited) === '17734541' && KTScan.hashText(R.DEAL_VALIDATE) === '6a64035a', `前提: 別の担当者の変更の後の dealValidate.js を再現（指紋 17734541）: ${KTScan.hashText(edited)}`);
@@ -73,9 +73,9 @@ console.log('\n--- N2 実機の再生（RC E2E の §2 手順 4）: 記録した
   //   既存の var を変えないことは AI版 worker/test/cases/modern-js.mjs が確かめる）。Toolkit の形式確認は記録した出力（var を含む）をそのまま検査する
   const src3 = { name: 'dealValidate.js', target: 'desktop', text: edited };
   const v3 = KTCodeReview.review({ generated: gwWithBody(E2E.S2_V3.generated, edited), customization: E2E.S2_V3.customization, plan: null, data: JSON.parse(JSON.stringify(DATA)), scan: null, existingSource: src3 });
-  assert(!v3.checks.some(x => x.name === 'modern-js'), 'Toolkit の形式確認は記法を確かめない（生成工程の機械検査の modern-js が確かめる）');
+  assert(!v3.checks.some(x => x.name === 'modern-js'), 'Toolkit のコードの検査は記法を確かめない（AI サービスのコードの検査の modern-js が確かめる）');
   // 段階 C（5.5 の縮小）: 既存の handler の var は自動では変えない（直すのは追加した var だけ）。既存の var amount は変更していない行なので記法の検査の対象外
-  assert(/var amount = event\.record\['amount'\]\.value;/.test(v3.finalCode || '') && v3.checks.some(x => x.name === 'patch' && /元のコードは保持（既存の行の削除なし）$/.test(x.message)) && v3.finalCode === gwWithBody(E2E.S2_V3.generated, edited).body, `既存の dealValidate.js の var amount はそのまま（受け取った統合の本文のまま書き込む。既存の var を変えないのは生成工程の合成）: ${JSON.stringify(v3.checks.filter(x => /^patch/.test(x.name)).map(x => x.message))}`);
+  assert(/var amount = event\.record\['amount'\]\.value;/.test(v3.finalCode || '') && v3.checks.some(x => x.name === 'patch' && /元のコードは保持（既存の行の削除なし）$/.test(x.message)) && v3.finalCode === gwWithBody(E2E.S2_V3.generated, edited).body, `既存の dealValidate.js の var amount はそのまま（受け取った統合の本文のまま書き込む。既存の var を変えないのはAI サービスの合成）: ${JSON.stringify(v3.checks.filter(x => /^patch/.test(x.name)).map(x => x.message))}`);
   assert(!check(v3, 'patch').length, '再生の前提: 統合の本文を受け取れる（patch の確認に止める項目が無い）');
   // v3 の空の判定（undefined を扱わない）・v2（undefined も判定）の違いは、生成工程の模擬テストが確かめる（sandbox/test/run.mjs §5 の S2_V3・S2_V2）
 }
@@ -92,9 +92,9 @@ console.log('\n--- モデル更新（gpt-6.1-sol）の評価で見つけた誤�
   const bfc = run(M.SOL_BFC);
   assert(M.SOL_BFC.verdictAtRun === 'BLOCKED' && /field\.error = null/.test(M.SOL_BFC.generated.code), '前提: 実行時の判定は登録不可（保存時の分岐の field.error = null を数えた）');
   // 同じイベントの error と編集不可の判定（error-cancels-edit）は §0d.4 で外した。生成工程で守る: AI版 worker/test/cases/required-effects.mjs「§0d.1 S7（既知の競合）」（排他的な分岐の正しい候補を機械検査で止めない）
-  assert(bfc.registration.verdict !== 'BLOCKED', `SOL_BFC: 注意は編集不可（!field.disabled）を見る条件の中だけ・保存時は null で消すだけ → 形式確認では登録不可にしない: ${bfc.registration.verdict} ${JSON.stringify(codesOf(bfc.registration.blockers))}`);
+  assert(bfc.registration.verdict !== 'BLOCKED', `SOL_BFC: 注意は編集不可（!field.disabled）を見る条件の中だけ・保存時は null で消すだけ → コードの検査では登録不可にしない: ${bfc.registration.verdict} ${JSON.stringify(codesOf(bfc.registration.blockers))}`);
   //   簡素化 B（2026-10-17）: error = null の数え方（Toolkit の kintoneFieldOps）は、Toolkit のエラー表示の規則と一緒に削除した
-  assert(typeof KTCodeReview.kintoneFieldOps === 'undefined', 'error = null の数え方は Toolkit に無い（生成工程の検査と模擬テスト）');
+  assert(typeof KTCodeReview.kintoneFieldOps === 'undefined', 'error = null の数え方は Toolkit に無い（AI サービスの検査と模擬テスト）');
   const genuine = review(handler(['app.record.edit.show'], "    if (record['ステータス'].value === '承認済み') {\n      record['amount'].disabled = true;\n    }\n    if (Number(record['amount'].value) > 1000000) {\n      record['amount'].error = '金額が大きい';\n    } else {\n      record['amount'].error = null;\n    }"), cust({ fields: [{ code: 'amount', access: 'CONTROL' }] }));
   // §0d.4: 競合の断定は生成工程（Gateway の check behavior・candidate-error-same-event と模擬テスト。AI版 required-effects.mjs「§0d.1 S7」・sandbox/test/run.mjs「R13 同じ handler」）。
   //   Toolkit は生成工程の結果を取り込み、結果が無い（返却の欠落）・模擬テストの fail（明示された失敗）なら登録不可にする（attachBehavior）
@@ -103,8 +103,8 @@ console.log('\n--- モデル更新（gpt-6.1-sol）の評価で見つけた誤�
     behavior: { status: 'failed', reason: null, cases: [{ id: 'k1', field: 'amount', effect: 'lock', expect: 'lock', event: 'app.record.edit.show', side: 'match', verdict: 'fail', message: '承認済みで金額が編集できます（同じイベントの error で編集不可が取り消されました）' }] } };
   const gNone = KTCodeReview.attachBehavior(genuine, null, { requiredEffects: REQ_G, customization: cust() });
   const gFail = KTCodeReview.attachBehavior(genuine, GW_G, { requiredEffects: REQ_G, customization: cust() });
-  assert(gNone.registration.verdict === 'BLOCKED' && check(gNone, 'required-effects').some(x => x.severity === 'block'), `編集不可を見ずにエラーを出す（同じイベントで disabled）→ 生成工程の結果が無い間は登録不可（返却の欠落）: ${gNone.registration.verdict}`);
-  assert(gFail.registration.verdict === 'BLOCKED' && check(gFail, 'behavior-fail').some(x => x.severity === 'block'), `同じ候補で模擬テストが編集不可の取り消しを見つけた（Gateway の behavior の fail）→ 登録不可: ${gFail.registration.verdict}`);
+  assert(gNone.registration.verdict === 'BLOCKED' && check(gNone, 'required-effects').some(x => x.severity === 'block'), `編集不可を見ずにエラーを出す（同じイベントで disabled）→ AI サービスの結果が無い間は登録不可（返却の欠落）: ${gNone.registration.verdict}`);
+  assert(gFail.registration.verdict === 'BLOCKED' && check(gFail, 'behavior-fail').some(x => x.severity === 'block'), `同じ候補で模擬テストが編集不可の取り消しを見つけた（AI サービスの behavior の fail）→ 登録不可: ${gFail.registration.verdict}`);
   // 2) 画面を見分ける前方一致の文字列（'app.record.index.'）を、登録しているイベント名と取り違えない
   const cx1 = run(M.SOL_CX1);
   assert(M.SOL_CX1.blockersAtRun.includes('events') && /indexOf\('app\.record\.index\.'\)/.test(M.SOL_CX1.generated.code), '前提: 実行時は「kintone に無いイベント: app.record.index.」で登録不可');
@@ -113,7 +113,7 @@ console.log('\n--- モデル更新（gpt-6.1-sol）の評価で見つけた誤�
   //   Toolkit はその結果を登録不可として取り込む
   const directBad = review("(function () {\n  kintone.events.on('app.record.update.show', function (event) {\n    return event;\n  });\n})();");
   const directV = KTCodeReview.attachBehavior(directBad, { version: '1', candidateHash: '0123456789abcdef', passed: false, machine: [{ name: 'events', ok: false, severity: 'block', message: 'kintone に無いイベントをコードで使っています: 「app.record.update.show」' }], requiredEffects: [], behavior: { status: 'not-run', reason: 'machine-blocked', cases: [] } }, { requiredEffects: [], customization: cust() });
-  assert(!codesOf(directBad.registration.blockers).includes('events') && directV.registration.verdict === 'BLOCKED' && codesOf(directV.registration.blockers).includes('events'), '登録しているイベント名が kintone に無い → 生成工程の events（block）で登録不可（Toolkit は判定し直さない）');
+  assert(!codesOf(directBad.registration.blockers).includes('events') && directV.registration.verdict === 'BLOCKED' && codesOf(directV.registration.blockers).includes('events'), '登録しているイベント名が kintone に無い → AI サービスの events（block）で登録不可（Toolkit は判定し直さない）');
 }
 
 // =========================================================

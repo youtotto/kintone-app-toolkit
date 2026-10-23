@@ -208,7 +208,7 @@ await section(async () => {
 });
 
 // =========================================================
-console.log('\n--- §V5. 進みのカード: 経過と「残り時間は未推定」・AI の説明の付け替え・根拠の無い時間の文 ---');
+console.log('\n--- §V5. 進みのカード: 経過と「残り時間は分かりません」・AI の説明の付け替え・根拠の無い時間の文 ---');
 await section(async () => {
   //   実機の「目安 約 50 秒」: 1 会話目の計画の実測（49.6 秒）が端末に保存されていた。保存した実測があっても残り時間を推定しない
   const storage = makeStorage();
@@ -217,20 +217,20 @@ await section(async () => {
   const x = makeConvC({ storage, planGate: pg, labels: LABELS });
   const plan0 = x.services.plan;
   //   計画の AI の説明（実機の reply の逐次表示の文）
-  x.services.plan = async (args) => { if (typeof args.onText === 'function') args.onText('明細（items）の行追加・削除ボタン自体は止められないため［E12・E16］、承認済みではセルを編集不可にし、行の変更を含む変更は保存時に検出して止める計画です。'); return plan0({ ...args, onText: null }); };
+  x.services.plan = async (args) => { if (typeof args.onText === 'function') args.onText('明細（items）の行追加・削除ボタン自体は止められないため［E12・E16］、承認済みでは入力欄を編集不可にし、行の変更を含む変更は保存時に検出して止める計画です。'); return plan0({ ...args, onText: null }); };
   for (const s of ['課長・部長の承認者を選ぶ運用にしたい', '100円未満は部長不要、100万円以上は必要', '7営業日で。会社独自の休業日は今回はなし']) await x.c.send(s);
   const p = x.c.send('おすすめで。この案で進めて'); await ticks(6);
   const pm = x.c.messages().find(mm => mm.data && mm.data.kind === 'progress');
   x.advance(134000); x.c.tickProgress();
   const h = KTAiChatUi.progressInnerHtml(pm, { labels: LABELS });
   const vh = visible(h);
-  assert(pm && /最終案を作っています（経過 2:1[0-9]）/.test(vh) && /残り時間は未推定/.test(vh) && !ESTIMATE.test(vh), `V5-1: 見出しは経過だけ・2 行目に「残り時間は未推定」（保存した実測 49.6 秒から「目安 約 50 秒」を出さない。経過が長くても隠さない）: ${vh.replace(/\s+/g, ' ').slice(0, 160)}`);
+  assert(pm && /最終案を作っています（経過 2:1[0-9]）/.test(vh) && /残り時間は分かりません/.test(vh) && !ESTIMATE.test(vh), `V5-1: 見出しは経過だけ・2 行目に「残り時間は分かりません」（保存した実測 49.6 秒から「目安 約 50 秒」を出さない。経過が長くても隠さない）: ${vh.replace(/\s+/g, ' ').slice(0, 160)}`);
   assert(/● 計画を作っています（経過 2 分 1[0-9] 秒）/.test(vh) && /○ まとめ/.test(vh), `V5-2: 段階の行（段階と経過）は残す（2026-10-14: 段階の名前は「計画を作っています」）: ${vh.replace(/\s+/g, ' ').slice(0, 200)}`);
-  assert(/明細の行追加・削除ボタン自体は止められないため、承認済みではセルを編集不可にし/.test(vh) && !EVIDENCE.test(vh) && !CODES.test(vh), `V5-3: 進みのカードの AI の説明も、フィールドのコードを名前に・根拠の番号を外す: ${firstHit(vh, EVIDENCE, CODES)}`);
+  assert(/明細の行追加・削除ボタン自体は止められないため、承認済みでは入力欄を編集不可にし/.test(vh) && !EVIDENCE.test(vh) && !CODES.test(vh), `V5-3: 進みのカードの AI の説明も、フィールドのコードを名前に・根拠の番号を外す: ${firstHit(vh, EVIDENCE, CODES)}`);
   //   データに目安の値（estimateMs）が残っていても表示には使わない（実機の「約 1 分」の形）
-  const fake = { type: 'LOADING', data: { kind: 'progress', progress: { title: '最終案を直しています', startedAt: 0, now: 137600, estimateMs: 87500, stages: [{ key: 'revise', label: '計画を修正', state: 'done', elapsedMs: 27000 }, { key: 'generate', label: 'JavaScript を生成・検証（生成工程）', activeLabel: 'JavaScript を生成・検証しています（生成工程）', state: 'active', startedAt: 30000, n: 1, m: 3, estimateMs: 47013 }], aiText: '', checklist: [], materials: '', hint: '' } } };
+  const fake = { type: 'LOADING', data: { kind: 'progress', progress: { title: '最終案を直しています', startedAt: 0, now: 137600, estimateMs: 87500, stages: [{ key: 'revise', label: '計画を修正', state: 'done', elapsedMs: 27000 }, { key: 'generate', label: 'JavaScript を作成と確認（AI サービス）', activeLabel: 'JavaScript を作成と確認しています（AI サービス）', state: 'active', startedAt: 30000, n: 1, m: 3, estimateMs: 47013 }], aiText: '', checklist: [], materials: '', hint: '' } } };
   const vf = visible(KTAiChatUi.progressInnerHtml(fake));
-  assert(/最終案を直しています（経過 2:17）/.test(vf) && /残り時間は未推定/.test(vf) && !ESTIMATE.test(vf) && /JavaScript を生成・検証しています（生成工程）（1 \/ 3・経過 1 分 47 秒）/.test(vf), `V5-4: 目安の値が残っていても「約 1 分」を出さない（何件目と経過は出す。経過は見出しと同じく秒の切り捨て）: ${vf.replace(/\s+/g, ' ')}`);
+  assert(/最終案を直しています（経過 2:17）/.test(vf) && /残り時間は分かりません/.test(vf) && !ESTIMATE.test(vf) && /JavaScript を作成と確認しています（AI サービス）（1 \/ 3・経過 1 分 47 秒）/.test(vf), `V5-4: 目安の値が残っていても「約 1 分」を出さない（何件目と経過は出す。経過は見出しと同じく秒の切り捨て）: ${vf.replace(/\s+/g, ' ')}`);
   pg.open(); await p; await ticks(8);
   const saved = JSON.parse(storage.getItem('ktAi.timing.v1'));
   assert(saved.plan.n === 2 && x.c.progress() === null, `V5-5: 段階の実測は記録に残す（表示には使わない）: ${JSON.stringify(saved.plan)}`);
@@ -242,7 +242,7 @@ await section(async () => {
 });
 
 // =========================================================
-console.log('\n--- §V6. 計画の自動の見直しで進みのカードを作り直さない（経過を 0 に戻さない） ---');
+console.log('\n--- §V6. 計画の不足の見直しで進みのカードを作り直さない（経過を 0 に戻さない） ---');
 await section(async () => {
   //   I5-1 と同じ形（効果を特定できない customization → 同じ送信の中で 1 回だけ計画の自動の差分更新）
   const x = makeConvC({ planImpl: (args) => planJs(args, { cust: custOf(null), gatewayPlan: { plan: true } }) });
@@ -256,15 +256,15 @@ await section(async () => {
   };
   await K.adoptC(x);
   const [s0, s1] = seen;
-  assert(seen.length === 2 && s0 && !s0.revision && s1 && s1.revision, `前提: 最初の計画と、計画の自動の見直し（差分更新）の 2 回: ${JSON.stringify(seen.map(s => s.revision))}`);
+  assert(seen.length === 2 && s0 && !s0.revision && s1 && s1.revision, `前提: 最初の計画と、計画の不足の見直し（差分更新）の 2 回: ${JSON.stringify(seen.map(s => s.revision))}`);
   assert(s1.title === 'この案で最終案を作っています' && s1.startedAt === s0.startedAt && s1.mid === s0.mid && s1.loadings === 1, `V6-1: 自動の見直しは同じ進みのカード（見出しは「この案で最終案を作っています」のまま・開始の時刻も同じ・カードは 1 枚）: ${JSON.stringify({ t0: s0.title, t1: s1.title, a0: s0.startedAt, a1: s1.startedAt, loadings: s1.loadings })}`);
-  assert(/plan-auto:active/.test(s1.stages) && /計画を自動で見直しています/.test(s1.head) && /最終案を作っています（経過 0:3[0-9]）/.test(s1.head) && !/最終案を直しています/.test(s1.head), `V6-2: 段階に「計画の自動の見直し」を足し、見出しの経過は採用からのまま（0 に戻さない）: ${s1.stages} ｜ ${s1.head.replace(/\s+/g, ' ').slice(0, 160)}`);
+  assert(/plan-auto:active/.test(s1.stages) && /計画の不足を見直しています/.test(s1.head) && /最終案を作っています（経過 0:3[0-9]）/.test(s1.head) && !/最終案を直しています/.test(s1.head), `V6-2: 段階に「計画の不足の見直し」を足し、見出しの経過は採用からのまま（0 に戻さない）: ${s1.stages} ｜ ${s1.head.replace(/\s+/g, ' ').slice(0, 160)}`);
   const v = x.c.activePlan();
   assert(x.c.progress() === null && v && v.final && x.finals().length === 1 && v.final.timing.planAutoMs != null, 'V6-3: 最終案ができたらカードは消える（最終案は 1 枚・自動の見直しの時間は記録に残る）');
 });
 
 // =========================================================
-console.log('\n--- §V7. 承認の欄の確認項目（生成工程の確認の項目）: 画面の言葉・元の文は詳細・照合の key と指紋は元のまま ---');
+console.log('\n--- §V7. 承認の欄の確認項目（AI サービスの確認の項目）: 画面の言葉・元の文は詳細・照合の key と指紋は元のまま ---');
 await section(async () => {
   //   実機の 1 会話目と同じ形（既存の dealLock.js への統合）: Phase 21 BF-C の記録
   //   簡素化 B（2026-10-17）: 例は、以前は Toolkit の重複の handler（duplicate-handler。Toolkit だけの規則で、削除した。生成工程には移植していない）。
@@ -281,7 +281,7 @@ await section(async () => {
   const rv0 = KTCodeReview.review({ generated: RP.GENERATED, customization: RP.CUSTOMIZATION, plan: null, data, scan: null, existingSource: srcL });
   const rv = KTCodeReview.attachBehavior(rv0, { version: '1', candidateHash: '0123456789abcdef', passed: true, machine: GW_ITEMS, requiredEffects: [], behavior: { status: 'not-run', reason: 'no-required-effects', cases: [] } }, { requiredEffects: [], customization: RP.CUSTOMIZATION });
   const dup = rv.registration.confirmations.find(x => x.code === 'plan-consistency'), re = rv.registration.confirmations.find(x => x.code === 'return-event');
-  assert(dup && /app\.record\.detail\.show/.test(dup.message) && re && /handler/.test(re.message), `前提: 生成工程の確認の元の文はイベント名・handler を含む: ${dup && dup.message} ｜ ${re && re.message}`);
+  assert(dup && /app\.record\.detail\.show/.test(dup.message) && re && /handler/.test(re.message), `前提: AI サービスの確認の元の文はイベント名・handler を含む: ${dup && dup.message} ｜ ${re && re.message}`);
   assert(dup && !EVENTS.test(dup.screenText) && /レコード詳細画面を開いたとき（PC）/.test(dup.screenText) && re && !EVENTS.test(re.screenText) && /処理/.test(re.screenText) && dup.howToCheck === KTCodeReview.HOW_TO_CHECK['plan-consistency'],
     `V7-1: 確認項目の画面の言葉（イベント名・handler を画面とタイミング・処理に置き換える）と確かめ方: ${dup && dup.screenText} ｜ ${re && re.screenText}`);
   assert(dup.id === `plan-consistency#${rv.registration.confirmations.indexOf(dup) + 1}` && dup.code === 'plan-consistency', 'V7-2: 確認項目の id・code（承認の照合に使う）は元のまま');
@@ -295,7 +295,7 @@ await section(async () => {
   const htmlReady = KTAiChatUi.messageHtml(fm, { plans: new Map(x.c.planHistory().map(z => [`${z.planId}:${z.version}`, z])), activePlan: va, answerState: x.c.answerContext(), ledger: x.c.ledger(), answers: new Map(), finalPre: { planId: va.planId, version: va.version, status: 'ready', reasons: [], items: { target: '動作テスト環境（このアプリ）。運用環境には反映しません', settings: [], process: [], existing: [], duplicate: [], files: ['✎ dealLock.js（PC）既存ファイルを更新（同じ位置）'], keep: [], deferred: [], confirmations: [{ text: confText, detail: dup.message }, '文字列の確認項目'], warnings: [], manual: [] } } });
   const out = visible(outsideDetails(htmlReady)), all = visible(htmlReady);
   assert(/確認項目（この承認で確認済みとして扱います）/.test(all) && all.includes(dup.screenText) && /文字列の確認項目/.test(all) && !EVENTS.test(out) && /反映の前の確認（書き込みなし）/.test(all), `V7-4: 承認の欄の確認項目は画面の言葉（通常表示にイベント名・handler を出さない）: ${firstHit(out, EVENTS)}`);
-  assert(all.includes(dup.message) && /元の検査の文/.test(all), 'V7-5: 元の文（イベント名入り）は承認の欄の詳細に残る');
+  assert(all.includes(dup.message) && /元の文（技術者向け）/.test(all), 'V7-5: 元の文（イベント名入り）は承認の欄の詳細に残る');
 });
 await section(async () => {
   //   画面: 承認の欄の準備（書き込みなし）→ 確認項目 → ［動作テスト環境へ反映］で承認と登録（照合の key・指紋の文は元のまま。登録は動作テスト環境のモックだけ）
@@ -321,7 +321,7 @@ await section(async () => {
   const pre = m.panel.finalPrecheck();
   const conf = (pre.items && pre.items.confirmations) || [];
   const dupC = conf.find(c => c && typeof c === 'object' && /計画に無いイベント/.test(c.text || ''));
-  assert(v && v.final && calls.length === 1 && pre.status === 'ready' && dupC, `前提: 生成工程が計画に無いイベントの確認を返した → 承認の欄の準備が終わり、確認項目がある: ${JSON.stringify({ status: pre.status, conf })}`);
+  assert(v && v.final && calls.length === 1 && pre.status === 'ready' && dupC, `前提: AI サービスが計画に無いイベントの確認を返した → 承認の欄の準備が終わり、確認項目がある: ${JSON.stringify({ status: pre.status, conf })}`);
   assert(dupC && /計画に無いイベントを使っています: 「レコード詳細画面を開いたとき（PC）」/.test(dupC.text) && !EVENTS.test(dupC.text) && /app\.record\.detail\.show/.test(dupC.detail), `V7-6: 画面の承認の欄の確認項目は画面の言葉（元の文は detail）: ${JSON.stringify(dupC)}`);
   const chatOut = visible(outsideDetails(m.chat())), chatAll = visible(m.chat());
   assert(chatAll.includes('計画に無いイベントを使っています: 「レコード詳細画面を開いたとき（PC）」') && !EVENTS.test(chatOut), `V7-7: 会話の最終案のカード（通常表示）に app.record.edit.show・handler が出ない: ${firstHit(chatOut, EVENTS)}`);

@@ -101,10 +101,10 @@ await section(async () => {
   const x = makeConv([v1, planWith(qs(QS))]);
   const { c, calls, acks } = x;
   await start(c, '金額が大きい案件に注意を出したい');
-  assert(c.activePlan().gatewayPlan && c.activePlan().gatewayPlan.gw === 1, 'P1: 版に Gateway の計画（次の差分の土台）を持つ');
+  assert(c.activePlan().gatewayPlan && c.activePlan().gatewayPlan.gw === 1, 'P1: 版に AI サービスの計画（次の差分の土台）を持つ');
   const { loading } = await sendHeld(x, 'PCだけ');
   const r = calls[1].revision;
-  assert(r.mode === 'patch' && r.previousPlan.gw === 1 && Array.isArray(r.focus) && r.focus.includes('Q1') && calls[1].baseCtx && calls[1].baseCtx.n === 1, `P1: 回答の後の作り直しは mode patch・前の版の Gateway の計画・回答した質問（Q1）を focus・前の版の Context: ${JSON.stringify({ mode: r.mode, focus: r.focus })}`);
+  assert(r.mode === 'patch' && r.previousPlan.gw === 1 && Array.isArray(r.focus) && r.focus.includes('Q1') && calls[1].baseCtx && calls[1].baseCtx.n === 1, `P1: 回答の後の作り直しは mode patch・前の版の AI サービスの計画・回答した質問（Q1）を focus・前の版の Context: ${JSON.stringify({ mode: r.mode, focus: r.focus })}`);
   // 2026-10-06: 受領の記録は会話に出さない。待ち時間は作業中の読み込み中の文で伝える（記録の文も同じ待ち時間）
   //   C-1 第 3 段（2026-10-08）: 最終案の流れの作業中の表示は進みの 1 枚カード（経過と段階。§0f.5 の 3 で残り時間は推定しない。ai-flow-redesign の C3b-13）。
   //   差分か全体かは、受領の記録（answers-ack）に作業の名前で残る。§0f.5 の 3（2026-10-09）: 根拠の無い待ち時間の文（十数秒ほど・1 分前後）は出さない
@@ -112,7 +112,7 @@ await section(async () => {
   assert(c.activePlan().revisionMeta?.mode === 'patch' && c.metrics().revisionModes.slice(-1)[0].mode === 'patch', 'P1: 版の作り方（patch）を版と計測に記録する');
   await c.send('更新状況は3段階ではなく5段階にして');
   // 2026-10-05 第 3 段で変更: 自由な修正の依頼も差分（大きな変更は Gateway が同じ依頼の中で全体の作り直しに切り替える）
-  assert(calls[2].revision.mode === 'patch' && calls[2].revision.previousPlan.gw === 2 && !calls[2].revision.focus, `P2: 自由な修正の依頼も差分（前の版の Gateway の計画を土台に・回答の focus は付けない）: ${JSON.stringify({ mode: calls[2].revision.mode, focus: calls[2].revision.focus })}`);
+  assert(calls[2].revision.mode === 'patch' && calls[2].revision.previousPlan.gw === 2 && !calls[2].revision.focus, `P2: 自由な修正の依頼も差分（前の版の AI サービスの計画を土台に・回答の focus は付けない）: ${JSON.stringify({ mode: calls[2].revision.mode, focus: calls[2].revision.focus })}`);
 });
 await section(async () => {
   const x = makeConv([planWith(qs(QP, QS)), planWith(qs(QS))], { revisionMode: 'full' });
@@ -140,7 +140,7 @@ await section(async () => {
   const transport = async () => ({ status: 200, ok: true, json: async () => raw, text: async () => JSON.stringify(raw), headers: { get: () => null } });
   let out = null;
   try { const client = KTAiClient.createAiClient({ apiBase: 'https://gw.test', getToken: async () => 'T', transport: async (req) => ({ status: 200, body: JSON.stringify(raw), headers: {} }) }); out = await client.plan({ ctx }); } catch (e) { out = { err: e.message }; }
-  assert(out && out.gatewayPlan && out.gatewayPlan.goal === raw.plan.goal && !JSON.stringify(out).includes('"gatewayPlan"'), `P7: client.plan は Gateway の計画を列挙しないプロパティで返す: ${out && out.err ? out.err : 'ok'}`);
+  assert(out && out.gatewayPlan && out.gatewayPlan.goal === raw.plan.goal && !JSON.stringify(out).includes('"gatewayPlan"'), `P7: client.plan は AI サービスの計画を列挙しないプロパティで返す: ${out && out.err ? out.err : 'ok'}`);
 });
 
 // =========================================================
@@ -334,7 +334,7 @@ await section(async () => {
   // validatePlan（customizations の質問）: 簡素化（2026-10-17）: 回答済みの PC / モバイルの再質問を外す正規化は Gateway の validate-plan だけが行う（Toolkit は受け取った質問をそのまま運ぶ）
   const ctx = { facts: [], dictionary: { fieldCodes: ['amount'] }, decisions: [{ id: 'D1', topic: 'platform', status: 'answered', answer: 'PCだけ', value: ['desktop'] }] };
   const r = KTAiClient.receive('plan', { ok: true, contractVersion: KTAiClient.CONTRACT_VERSION || '2.1', meta: {}, plan: planWith([], { customizations: [cust({ questions: [...keep, ...drop] })] }) });
-  assert(r.customizations[0].questions.join('|') === [...keep, ...drop].join('|'), `S5: 受け取りは質問を外さない（Gateway の validate-plan が外す）: ${JSON.stringify(r.customizations[0].questions)}`);
+  assert(r.customizations[0].questions.join('|') === [...keep, ...drop].join('|'), `S5: 受け取りは質問を外さない（AI サービスの validate-plan が外す）: ${JSON.stringify(r.customizations[0].questions)}`);
 });
 await section(async () => {
   // Gateway の isPurePlatformQuestion と同じ例で同じ結果

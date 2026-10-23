@@ -100,8 +100,8 @@ function buildContract() {
 
 const { req, ctx } = buildContract();
 const doc = {
-  purpose: '担当間の契約の素材（会話フローの再設計 §0c.7）。Toolkit の KTContext.buildGenerator が作る Generator Context。tests/ai-generator-context-contract.test.js が毎回作り直して一致を確かめる。AI版に写して Gateway の検証と隔離環境に通す',
-  material: '既存 JS（tantou.js）が計画に無いフィールド（担当）を編集画面で読む／保存だけの警告（備考）と画面の編集不可（金額）を同じ customization に持つ／計画で新設するフィールド（承認メモ）の編集不可／§0c.10: 関係しない共通の関数のファイル（common.js）は送らず relatedOmitted の reason other・events []',
+  purpose: '担当間の契約の素材（会話フローの再設計 §0c.7）。Toolkit の KTContext.buildGenerator が作る Generator Context。tests/ai-generator-context-contract.test.js が毎回作り直して一致を確かめる。AI版に写して AI サービスの検証と模擬テストの環境に通す',
+  material: '既存の JavaScript（tantou.js）が計画に無いフィールド（担当）を編集画面で読む／保存だけの警告（備考）と画面の編集不可（金額）を同じ customization に持つ／計画で新設するフィールド（承認メモ）の編集不可／§0c.10: 関係しない共通の関数のファイル（common.js）は送らず relatedOmitted の reason other・events []',
   ctx,
 };
 const text = `${JSON.stringify(doc, null, 2)}\n`;
@@ -127,10 +127,10 @@ const ro = (code) => !!(app(code) && app(code).readOnly === true);
 assert(['レコード番号', 'ステータス', 'total', 'kokyaku_name', 'title_auto'].every(ro) && !['kokyaku_lookup', 'amount', 'memo', 'tantou', 'customer', 'category', 'qty', 'approver_note'].some(ro), `readOnly は入力できないフィールドだけ（レコード番号・ステータス・計算・ルックアップのコピー先・自動計算の文字列）: ${JSON.stringify((v.appFields || []).filter(f => f.readOnly).map(f => f.code))}`);
 //   §0c.8: URL 指定のファイルの events。既知のライブラリの配布元だけ []、それ以外（自社のサーバーなど）は null（画面とホストが違うかどうかでは決めない）
 const urlOmitted = (url) => KTContext.relatedFilesFor(KTScan.summarizeFiles(null, { customize: { desktop: { js: [{ type: 'URL', url }] } } }), { targets: ['desktop'], requiredEffects: req.effects }).relatedOmitted[0] || null;
-assert(JSON.stringify(urlOmitted('https://js.cybozu.com/luxon/3.4.4/luxon.min.js').events) === '[]' && urlOmitted('https://biz.example.co.jp/kintone/biz.js').events === null && urlOmitted('https://cdn.jsdelivr.net/gh/someone/repo/biz.js').events === null && urlOmitted('https://ajax.googleapis.com/other/biz.js').events === null && JSON.stringify(urlOmitted('https://ajax.googleapis.com/ajax/libs/jquery/3.7.1/jquery.min.js').events) === '[]', 'URL 指定の既存 JS: 既知のライブラリの配布元だけ events []・自社のサーバーや配布元の別のパスは null');
+assert(JSON.stringify(urlOmitted('https://js.cybozu.com/luxon/3.4.4/luxon.min.js').events) === '[]' && urlOmitted('https://biz.example.co.jp/kintone/biz.js').events === null && urlOmitted('https://cdn.jsdelivr.net/gh/someone/repo/biz.js').events === null && urlOmitted('https://ajax.googleapis.com/other/biz.js').events === null && JSON.stringify(urlOmitted('https://ajax.googleapis.com/ajax/libs/jquery/3.7.1/jquery.min.js').events) === '[]', 'URL 指定の既存の JavaScript: 既知のライブラリの配布元だけ events []・自社のサーバーや配布元の別のパスは null');
 const custFields = ctx.customization.fields;
 assert(JSON.stringify(custFields.find(f => f.code === 'memo').effects) === JSON.stringify([{ effect: 'warn', condition: 'memo = ""', events: ['app.record.edit.submit'] }]) && JSON.stringify(custFields.find(f => f.code === 'approver_note').effects) === JSON.stringify([{ effect: 'lock', condition: '', events: ['app.record.edit.show'] }]), `customization.fields[].effects は効果ごとの条件とイベント（新設フィールドのコードは採番後）: ${JSON.stringify(custFields)}`);
-assert(JSON.stringify(v.relatedOmitted) === JSON.stringify([{ name: 'luxon.min.js', target: 'desktop', reason: 'url', events: [] }, { name: 'list.js', target: 'desktop', reason: 'limit', events: ['app.record.index.show'] }, { name: 'common.js', target: 'desktop', reason: 'other', events: [] }]) && v.relatedFiles.length === 1 && !('cases' in v), `送れなかった既存 JS（reason・events）と送る既存 JS。代表条件は送らない: ${JSON.stringify({ omitted: v.relatedOmitted, files: v.relatedFiles.map(f => f.name) })}`);
+assert(JSON.stringify(v.relatedOmitted) === JSON.stringify([{ name: 'luxon.min.js', target: 'desktop', reason: 'url', events: [] }, { name: 'list.js', target: 'desktop', reason: 'limit', events: ['app.record.index.show'] }, { name: 'common.js', target: 'desktop', reason: 'other', events: [] }]) && v.relatedFiles.length === 1 && !('cases' in v), `送れなかった既存の JavaScript（reason・events）と送る既存の JavaScript。確かめる条件は送らない: ${JSON.stringify({ omitted: v.relatedOmitted, files: v.relatedFiles.map(f => f.name) })}`);
 assert(ctx.generatedAt === NOW && ctx.size === null && ctx.generator.version === 'contract', '時刻・版・大きさは固定の値');
 
 console.log('\n--- 契約の素材: 決定的に作れる・書き出した JSON と一致する ---');

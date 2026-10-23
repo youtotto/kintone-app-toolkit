@@ -37,9 +37,9 @@ const EDIT = ['app.record.edit.show'];
 
 (async () => {
 // =========================================================
-console.log('\n--- F-F2 生成した候補の解析し直し（簡素化 B で削除）---');
+console.log('\n--- F-F2 作った JavaScriptの解析し直し（簡素化 B で削除）---');
 {
-  assert(['disableSites', 'inputChecks', 'fieldOperations', 'writeTargets', 'kintoneFieldOps'].every(n => typeof KTCodeReview[n] === 'undefined'), '生成した候補を Toolkit が解析し直す関数は持たない（候補の検査は生成工程）');
+  assert(['disableSites', 'inputChecks', 'fieldOperations', 'writeTargets', 'kintoneFieldOps'].every(n => typeof KTCodeReview[n] === 'undefined'), '作った JavaScriptを Toolkit が解析し直す関数は持たない（候補の検査はAI サービス）');
 }
 
 // =========================================================
@@ -86,20 +86,20 @@ const blockNames = (rv) => (rv.checks || []).filter(x => !x.ok && x.severity ===
   const AE = review(handler(EDIT, "    const field = record['金額'];\n    if (record['ステータス'].value === '承認済み') {\n      console.log('approved');\n    }\n    field.disabled = true;"));
   const AD = review(handler(EDIT, "    const field = record['金額'];\n    if (record['ステータス'].value === '承認済み') {\n      field.disabled = true;\n    }"));
   const L = [effOf()];
-  assert([E, D, DO, AE, AD].every(r => !deletedIn(r).length && r.registration.verdict === 'RUNTIME_UNVERIFIED'), `形式確認だけでは条件とロックの関係を推定しない（削除した検査を出さない。生成工程の結果が無ければ動作は未確認）: ${JSON.stringify([E, D, DO, AE, AD].map(r => [r.registration.verdict, deletedIn(r)]))}`);
+  assert([E, D, DO, AE, AD].every(r => !deletedIn(r).length && r.registration.verdict === 'RUNTIME_UNVERIFIED'), `コードの検査だけでは条件とロックの関係を推定しない（削除した検査を出さない。AI サービスの結果が無ければ動作は未確認）: ${JSON.stringify([E, D, DO, AE, AD].map(r => [r.registration.verdict, deletedIn(r)]))}`);
   const gE = withGw(E, L, gwCasesOf(L[0], [['nomatch', 'not-locked']]));
-  assert(gE.registration.verdict === 'BLOCKED' && blockNames(gE).includes('behavior-fail'), `E（条件なし）の新しいロック → 生成工程の模擬テストの「合わない」の不合格で登録不可: ${gE.registration.verdict} ${JSON.stringify(blockNames(gE))}`);
+  assert(gE.registration.verdict === 'BLOCKED' && blockNames(gE).includes('behavior-fail'), `E（条件なし）の新しいロック → 模擬テストの「合わない」の不合格で登録不可: ${gE.registration.verdict} ${JSON.stringify(blockNames(gE))}`);
   const gD = withGw(D, L, gwCasesOf(L[0]));
-  assert(gD.registration.verdict === 'RUNTIME_UNVERIFIED' && !blockNames(gD).length, `D（計画の条件の中）の新しいロック → 生成工程の合格のまま通過（動作テスト環境での確認は残る）: ${gD.registration.verdict} ${JSON.stringify(blockNames(gD))}`);
+  assert(gD.registration.verdict === 'RUNTIME_UNVERIFIED' && !blockNames(gD).length, `D（計画の条件の中）の新しいロック → AI サービスの合格のまま通過（動作テスト環境での確認は残る）: ${gD.registration.verdict} ${JSON.stringify(blockNames(gD))}`);
   const gDO = withGw(DO, L, gwCasesOf(L[0], [['nomatch', 'not-locked']]));
-  assert(gDO.registration.verdict === 'BLOCKED' && blockNames(gDO).includes('behavior-fail'), `別の条件（備考）の中の新しいロック → 生成工程の「合わない」（作成中・備考あり）の不合格で登録不可: ${JSON.stringify(blockNames(gDO))}`);
+  assert(gDO.registration.verdict === 'BLOCKED' && blockNames(gDO).includes('behavior-fail'), `別の条件（備考）の中の新しいロック → AI サービスの「合わない」（作成中・備考あり）の不合格で登録不可: ${JSON.stringify(blockNames(gDO))}`);
   const gAE = withGw(AE, L, gwCasesOf(L[0], [['nomatch', 'not-locked']]));
-  assert(gAE.registration.verdict === 'BLOCKED' && blockNames(gAE).includes('behavior-fail'), `変数経由の条件の外のロック → 生成工程の不合格で登録不可（本当に危険なコードは止める）: ${JSON.stringify(blockNames(gAE))}`);
+  assert(gAE.registration.verdict === 'BLOCKED' && blockNames(gAE).includes('behavior-fail'), `変数経由の条件の外のロック → AI サービスの不合格で登録不可（本当に危険なコードは止める）: ${JSON.stringify(blockNames(gAE))}`);
   const gAD = withGw(AD, L, gwCasesOf(L[0]));
   assert(gAD.registration.verdict === 'RUNTIME_UNVERIFIED' && !blockNames(gAD).length, `変数経由の条件の中のロック → 通過: ${gAD.registration.verdict}`);
   // 生成工程の結果が返らない（返却の欠落）ときは、Toolkit が自分で合否を作らずに登録不可（未確認を合格に読み替えない）
   const nE = withGw(E, L, null), nD = withGw(D, L, null);
-  assert([nE, nD].every(r => r.registration.verdict === 'BLOCKED' && blockNames(r).includes('required-effects') && blockNames(r).includes('behavior-untested')), `生成工程の結果が無い → 条件の中のロックでも登録不可（required-effects・behavior-untested）: ${JSON.stringify([nE, nD].map(blockNames))}`);
+  assert([nE, nD].every(r => r.registration.verdict === 'BLOCKED' && blockNames(r).includes('required-effects') && blockNames(r).includes('behavior-untested')), `AI サービスの結果が無い → 条件の中のロックでも登録不可（required-effects・behavior-untested）: ${JSON.stringify([nE, nD].map(blockNames))}`);
 }
 {
   // 既存のコード（統合先）にあるロック: 条件なし（E）と別の条件の中（D）を分ける
@@ -113,20 +113,20 @@ const blockNames = (rv) => (rv.checks || []).filter(x => !x.ok && x.severity ===
   // 既存の条件つきロック（承認済みのとき）＋ 新しい入力チェック: Gateway の代表条件（作成中・100 万円超）では既存のロックは効かず、警告が出て編集もできる → 合格のまま
   const rD = ext(BASE_D, warn, warnCust);
   const gD = withGw(rD, W, gwCasesOf(W[0]), warnCust);
-  assert(!deletedIn(rD).length && gD.registration.verdict !== 'BLOCKED' && !blockNames(gD).length, `既存の条件つきロック（D: 承認済みのとき）＋ 新しい入力チェック → Toolkit は条件の推定で確認・登録不可にしない（生成工程の合格のまま）: ${gD.registration.verdict} ${JSON.stringify(deletedIn(rD))}`);
+  assert(!deletedIn(rD).length && gD.registration.verdict !== 'BLOCKED' && !blockNames(gD).length, `既存の条件つきロック（D: 承認済みのとき）＋ 新しい入力チェック → Toolkit は条件の推定で確認・登録不可にしない（AI サービスの合格のまま）: ${gD.registration.verdict} ${JSON.stringify(deletedIn(rD))}`);
   // 既存の条件なしロック（E）＋ 新しい入力チェック: 統合した候補では金額が常に編集不可なので、Gateway の warn-unlocked（not-locked）と「合う」の警告が不合格 → 登録不可
   const rE = ext(BASE_E, warn, warnCust);
   const gE = withGw(rE, W, gwCasesOf(W[0], [['match', 'warn'], ['match', 'not-locked']]), warnCust);
-  assert(!deletedIn(rE).length && gE.registration.verdict === 'BLOCKED' && blockNames(gE).includes('behavior-fail'), `既存の条件なしロック（E）＋ 新しい入力チェック → 生成工程の warn-unlocked の不合格を取り込んで登録不可（Toolkit の推定の確認は出さない）: ${gE.registration.verdict} ${JSON.stringify(blockNames(gE))}`);
+  assert(!deletedIn(rE).length && gE.registration.verdict === 'BLOCKED' && blockNames(gE).includes('behavior-fail'), `既存の条件なしロック（E）＋ 新しい入力チェック → AI サービスの warn-unlocked の不合格を取り込んで登録不可（Toolkit の推定の確認は出さない）: ${gE.registration.verdict} ${JSON.stringify(blockNames(gE))}`);
   // 既存の別の条件のロック ＋ 新しいロック（計画の条件の中）: 計画の効果（100 万円以上で編集不可）は Gateway の代表条件で合格。既存の承認済みのロックは計画の外の既存の動作で、
   //   Toolkit は「別の条件のときにも編集不可」を推定で確認にしない（隔離環境は統合した候補を動かして観測する: AI版 sandbox/test/run.mjs の R15）
   const lockCust = cust({ requirement: '金額が100万円以上なら金額を編集不可にする', strategy: 'EXTEND_EXISTING_JS', fields: [{ code: '金額', access: 'CONTROL', condition: '金額 >= "1000000"' }], existingFiles: [{ name: 'lock.js', target: 'desktop' }] });
   const both = ext(BASE_D, "  kintone.events.on(['app.record.edit.show'], function (event) {\n    if (Number(event.record['金額'].value) >= 1000000) {\n      event.record['金額'].disabled = true;\n    }\n    return event;\n  });\n", lockCust);
   const BL = [effOf({ condition: '金額 >= 1000000' })];
   const gB = withGw(both, BL, gwCasesOf(BL[0]), lockCust);
-  assert(!deletedIn(both).length && gB.registration.verdict !== 'BLOCKED' && !blockNames(gB).length, `既存の別の条件のロック ＋ 新しいロック → Toolkit は推定の確認を出さず、生成工程の合格のまま: ${gB.registration.verdict} ${JSON.stringify(deletedIn(both))}`);
+  assert(!deletedIn(both).length && gB.registration.verdict !== 'BLOCKED' && !blockNames(gB).length, `既存の別の条件のロック ＋ 新しいロック → Toolkit は推定の確認を出さず、AI サービスの合格のまま: ${gB.registration.verdict} ${JSON.stringify(deletedIn(both))}`);
   const fB = withGw(both, BL, gwCasesOf(BL[0], [['nomatch', 'not-locked']]), lockCust);
-  assert(fB.registration.verdict === 'BLOCKED' && blockNames(fB).includes('behavior-fail'), `同じ統合で、生成工程が「合わない」の不合格を返したら登録不可（明示された失敗は取り込む）: ${JSON.stringify(blockNames(fB))}`);
+  assert(fB.registration.verdict === 'BLOCKED' && blockNames(fB).includes('behavior-fail'), `同じ統合で、AI サービスが「合わない」の不合格を返したら登録不可（明示された失敗は取り込む）: ${JSON.stringify(blockNames(fB))}`);
 }
 
 // =========================================================
@@ -149,9 +149,9 @@ console.log('\n--- F-F2 実機の再生（Phase 21 BF-C）: 実際の生成コ�
   assert(!deletedIn(rv).length, `BF-C: Toolkit は条件・競合の推定の検査を出さない: ${JSON.stringify(deletedIn(rv))}`);
   // 段階 A（5.4）・簡素化 B（2026-10-17）: AI の申告の PARTIAL（承認済みでは警告を出さない）の確認は、生成工程の機械検査の coverage（review）が行う
   //   （Toolkit の coverage-unmet と、Toolkit だけの規則の重複した handler（duplicate-handler）は削除した）。Toolkit の形式確認だけでは確認事項にならない
-  assert(!codes.some(x => DELETED_CHECKS.includes(x) || x === 'duplicate-handler' || x === 'coverage-unmet') && rv.registration.verdict !== 'BLOCKED', `BF-C: Toolkit の形式確認は候補の検査・申告の確認を作らない: ${JSON.stringify(codes)}`);
+  assert(!codes.some(x => DELETED_CHECKS.includes(x) || x === 'duplicate-handler' || x === 'coverage-unmet') && rv.registration.verdict !== 'BLOCKED', `BF-C: Toolkit のコードの検査は候補の検査・申告の確認を作らない: ${JSON.stringify(codes)}`);
   const rvG = KTCodeReview.attachBehavior(rv, { version: '1', candidateHash: '0123456789abcdef', passed: true, machine: [{ name: 'coverage', ok: false, severity: 'review', message: 'この JavaScript の要件のうち満たせないと申告されたものがあります: 一部だけ「金額が1,000,000円を厳密に超えるとき…」' }], requiredEffects: [], behavior: { status: 'not-run', reason: 'no-required-effects', cases: [] } }, { requiredEffects: [], customization: R.CUSTOMIZATION });
-  assert(rvG.registration.verdict === 'NEEDS_CONFIRMATION' && rvG.registration.confirmations.some(x => x.code === 'coverage'), 'BF-C: 生成工程の coverage の確認を取り込むと確認が必要');
+  assert(rvG.registration.verdict === 'NEEDS_CONFIRMATION' && rvG.registration.confirmations.some(x => x.code === 'coverage'), 'BF-C: AI サービスの coverage の確認を取り込むと確認が必要');
   assert(!rv.registration.blockers.length, '登録不可にはならない（動作テスト環境での確認は残る）');
 }
 
@@ -166,7 +166,7 @@ console.log('\n--- F-F2 他の検査（簡素化 B で削除）: 作成画面の
   const aliasRead = mob("    const st = record['ステータス'];\n    if (st.value === '承認済み') {\n      record['金額'].disabled = true;\n    }");
   const off = review(handler(EDIT, "    if (record['ステータス'].value === '承認済み') {\n      record['金額'].disabled = true;\n    }\n    const memo = record['備考'];\n    memo.value = '承認済み';"));
   const REMOVED = ['create-missing-field', 'target-fields', 'platform-fields'];
-  assert([aliasRead, off].every(r => !r.checks.some(x => REMOVED.includes(x.name)) && r.registration.verdict !== 'BLOCKED'), `Toolkit の形式確認は作成画面の読み方・計画に無い書き換えを判定しない: ${JSON.stringify([aliasRead, off].map(r => r.checks.filter(x => !x.ok).map(x => x.name)))}`);
+  assert([aliasRead, off].every(r => !r.checks.some(x => REMOVED.includes(x.name)) && r.registration.verdict !== 'BLOCKED'), `Toolkit のコードの検査は作成画面の読み方・計画に無い書き換えを判定しない: ${JSON.stringify([aliasRead, off].map(r => r.checks.filter(x => !x.ok).map(x => x.name)))}`);
 }
 
 // =========================================================
@@ -181,7 +181,7 @@ console.log('\n--- F-F2 Field Scanner（KTScan）: 日本語のコードのド�
 }
 
 // =========================================================
-console.log('\n--- 生成の拒否（GENERATION_DECLINED）: AI が生成しなかったことを、通信・認証・契約・時間切れ・応答形式の異常と区別する ---');
+console.log('\n--- 生成の拒否（GENERATION_DECLINED）: AI が生成しなかったことを、通信・認証・契約・時間切れ・AI の返答を読み取れないと区別する ---');
 const GCTX = { contextVersion: 'customization-1', customization: { customizationId: 'C1', strategy: 'NEW_JS_FILE' } };
 const reply = (status, body) => async () => ({ status, body: typeof body === 'string' ? body : JSON.stringify(body) });
 const gwError = (status, code, detail = null) => reply(status, { ok: false, contractVersion: '2.1', error: { code, message: code, requestId: 'gen-x', ...(detail ? { detail } : {}) } });
@@ -199,8 +199,8 @@ const tryGenerate = async (transport) => { try { return { ok: true, r: await aiC
     ['契約・利用範囲（403 FEATURE_NOT_ENTITLED）', gwError(403, 'FEATURE_NOT_ENTITLED'), 'FEATURE_NOT_ENTITLED', 'license'],
     ['契約・利用範囲（429 MONTHLY_LIMIT_EXCEEDED）', gwError(429, 'MONTHLY_LIMIT_EXCEEDED'), 'MONTHLY_LIMIT_EXCEEDED', 'license'],
     ['時間切れ', hang, 'TIMEOUT', 'timeout'],
-    ['応答形式の異常（502 MODEL_OUTPUT_INVALID）', gwError(502, 'MODEL_OUTPUT_INVALID'), 'MODEL_OUTPUT_INVALID', 'format'],
-    ['応答形式の異常（JSON でない）', reply(200, '<html>maintenance</html>'), 'INVALID_RESPONSE', 'format'],
+    ['AI の返答を読み取れない（502 MODEL_OUTPUT_INVALID）', gwError(502, 'MODEL_OUTPUT_INVALID'), 'MODEL_OUTPUT_INVALID', 'format'],
+    ['AI の返答を読み取れない（JSON でない）', reply(200, '<html>maintenance</html>'), 'INVALID_RESPONSE', 'format'],
   ];
   const ok = await tryGenerate(reply(200, OK_BODY));
   assert(ok.ok && ok.r && typeof ok.r.code === 'string' && /kintone\.events\.on/.test(ok.r.code), '成功: AI が正常にコードを返した（例外なし・generated を返す）');
@@ -211,10 +211,10 @@ const tryGenerate = async (transport) => { try { return { ok: true, r: await aiC
   }
   const d = await tryGenerate(gwError(422, 'GENERATION_DECLINED', DECLINE_DETAIL));
   //   §12.67（2026-10-23）: AI の説明は Gateway の detail をそのまま届ける（coverage の要件と状態（満たせない／一部だけ満たす）＋ note。summary があれば「AI の要約」）
-  { const t = safe(() => KTAiClient.declineReasonOf(d.e)) || ''; assert(t.includes(DECLINE_DETAIL.coverage[0].note) && t.includes(DECLINE_DETAIL.coverage[0].requirement) && /は満たせない: /.test(t) && !/AI の要約/.test(t), `AI の説明（Gateway の detail の要件・状態・note）を取り出せる: ${t}`); }
+  { const t = safe(() => KTAiClient.declineReasonOf(d.e)) || ''; assert(t.includes(DECLINE_DETAIL.coverage[0].note) && t.includes(DECLINE_DETAIL.coverage[0].requirement) && /は満たせない: /.test(t) && !/AI の要約/.test(t), `AI の説明（AI サービスの detail の要件・状態・note）を取り出せる: ${t}`); }
   const text = KTAiClient.errorText('GENERATION_DECLINED');
-  assert(/AI はこの依頼に対するコード生成を行いませんでした/.test(text) && /通信や契約の問題ではありません/.test(text), `生成しなかったことが分かる文言（通信・契約の障害としない）: ${text}`);
-  assert(!/契約形式/.test(KTAiClient.errorText('MODEL_OUTPUT_INVALID')) && /応答の形式/.test(KTAiClient.errorText('MODEL_OUTPUT_INVALID')), `応答形式の異常の文言に「契約」を使わない: ${KTAiClient.errorText('MODEL_OUTPUT_INVALID')}`);
+  assert(/AI はこの依頼に対する JavaScript を作りませんでした/.test(text) && /通信や契約の問題ではありません/.test(text), `生成しなかったことが分かる文言（通信・契約の障害としない）: ${text}`);
+  assert(!/契約形式/.test(KTAiClient.errorText('MODEL_OUTPUT_INVALID')) && /返答を Toolkit が読み取れません/.test(KTAiClient.errorText('MODEL_OUTPUT_INVALID')), `AI の返答を読み取れないの文言に「契約」を使わない: ${KTAiClient.errorText('MODEL_OUTPUT_INVALID')}`);
   //   2026-10-15（ページ期限切れへの対応）: 種類「ページの有効期限」（PAGE_EXPIRED。接続・認証や契約にまとめない）を足したので 9 種類
   assert(Object.values(KTAiClient.CATEGORY_JA || {}).length === 9 && KTAiClient.CATEGORY_JA.declined === 'AI が生成しなかった' && KTAiClient.CATEGORY_JA.license === '契約・利用範囲' && KTAiClient.CATEGORY_JA.page === 'ページの有効期限', '種類の表示名（AI が生成しなかった・契約・利用範囲・ページの有効期限 …）');
 }
@@ -241,10 +241,10 @@ const tryGenerate = async (transport) => { try { return { ok: true, r: await aiC
   assert(cannot.length === 1 && cannot[0].text.includes(KTAiClient.errorText('GENERATION_DECLINED').slice(0, 40)) && /通信や契約の問題ではありません/.test(cannot[0].text) && /もう一度最終案を作る/.test(cannot[0].next), `拒否は通信・契約の障害と区別して書き、作り直せることを示す: ${JSON.stringify(cannot)}`);
   assert(v.generated.C1 === first && e2.generated === first.generated && JSON.stringify(v2.plan) === planBefore, '前に生成したコード・計画の状態は変わらない（前の版の結果は書き換えず、新しい版にも前のコードを持つ）');
   const html = K.finalHtml(x);
-  assert(/AI はこの依頼に対するコード生成を行いませんでした/.test(html) && !/ネットワークエラー/.test(html), '最終案のカード: AI が生成しなかったことを出す（ネットワークエラーとしない）');
+  assert(/AI はこの依頼に対する JavaScript を作りませんでした/.test(html) && !/ネットワークエラー/.test(html), '最終案のカード: AI が生成しなかったことを出す（ネットワークエラーとしない）');
   //   C-1 第 3 段: 生成工程の 1 依頼（generateAndVerify）が AI の生成の拒否を受けたときは、AI の説明（KTAiClient.declineReasonOf）を
   //   最終案のカードの「実現できない点」に出す（以前はエラーのカードに「AI の説明: …」を出した）
-  assert(/items が許可されたフィールドに無いため実装できません/.test(html),`最終案のカードに AI の説明（Gateway が返した理由）を出す: ${JSON.stringify(e2.failure)}`);
+  assert(/items が許可されたフィールドに無いため実装できません/.test(html),`最終案のカードに AI の説明（AI サービスが返した理由）を出す: ${JSON.stringify(e2.failure)}`);
   const again = await x.c.send('C1 のコードを作って');
   const v3 = x.c.activePlan();
   assert(again && again.ok === true && v3 !== v2 && v3.generated.C1 && v3.generated.C1.status === 'verified' && FS.readyOf(v3) === true, '再試行（もう一度作る）で生成できる');

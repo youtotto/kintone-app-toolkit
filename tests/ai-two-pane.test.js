@@ -63,7 +63,7 @@ const PATTERNS = [{ id: 'field-disable', purpose: '条件に応じてフィー�
 //   この試験は登録の経路（upload・PUT・検証・戻す）を確かめるので、偽の生成工程は Toolkit が渡した必須の効果をそのまま「処理あり・動作テストで合格」で返す
 //   （効果の区別そのものの検証は tests/ai-flow-redesign.test.js の §D）
 //   簡素化 B（2026-10-17）・2026-10-18: 本物の Gateway と同じく、検証結果に書き込む本文の指紋（bodyHash。Gateway と同じ計算。tests/helpers/gw-hash.js）を入れる
-const passVerification = (ctx, g = null) => { const re = (ctx && ctx.verification && ctx.verification.requiredEffects) || []; return re.length ? { version: '1', ...(g ? { bodyHash: gwHashOfCtx(ctx, g) } : {}), passed: true, machine: [], requiredEffects: re.map(x => ({ requirementId: x.requirementId, requirementIds: x.requirementIds, field: x.field, effect: x.effect, status: 'present' })), behavior: { status: 'passed', reason: null, cases: re.flatMap((x, i) => (x.events && x.events.length ? x.events : [null]).flatMap((ev, j) => (x.condition ? ['match', 'nomatch'] : ['match']).map(side => ({ id: `K${i + 1}-${j + 1}-${side}`, requirementIds: x.requirementIds, field: x.field, effect: x.effect, expect: side === 'match' ? x.effect : ({ lock: 'not-locked', warn: 'not-warned', 'block-save': 'save-allowed', 'set-value': 'value-unchanged', 'show-hide': 'show-hide' })[x.effect], side, ...(ev ? { event: ev } : {}), verdict: 'pass', observed: {}, message: '期待どおり' })))) }, repairs: { count: 0, reasons: [], stoppedBy: null }, unverified: ['実機での動作'] } : undefined; };
+const passVerification = (ctx, g = null) => { const re = (ctx && ctx.verification && ctx.verification.requiredEffects) || []; return re.length ? { version: '1', ...(g ? { bodyHash: gwHashOfCtx(ctx, g) } : {}), passed: true, machine: [], requiredEffects: re.map(x => ({ requirementId: x.requirementId, requirementIds: x.requirementIds, field: x.field, effect: x.effect, status: 'present' })), behavior: { status: 'passed', reason: null, cases: re.flatMap((x, i) => (x.events && x.events.length ? x.events : [null]).flatMap((ev, j) => (x.condition ? ['match', 'nomatch'] : ['match']).map(side => ({ id: `K${i + 1}-${j + 1}-${side}`, requirementIds: x.requirementIds, field: x.field, effect: x.effect, expect: side === 'match' ? x.effect : ({ lock: 'not-locked', warn: 'not-warned', 'block-save': 'save-allowed', 'set-value': 'value-unchanged', 'show-hide': 'show-hide' })[x.effect], side, ...(ev ? { event: ev } : {}), verdict: 'pass', observed: {}, message: '期待どおり' })))) }, repairs: { count: 0, reasons: [], stoppedBy: null }, unverified: ['実際の画面での動作'] } : undefined; };
 const genResponse = (ctx, g) => ({ ok: true, contractVersion: '2.1', meta: { requestId: 'gen-1', usage: { usedThisMonth: 3, monthlyLimit: 20 }, normalization: { warnings: [] }, gateway: { feature: 'customization-generator' } }, generated: { strategy: ctx.customization.strategy, targetFile: ctx.existingFile?.name || 'amountWarning.js', summary: ctx.customization.requirement, events: ctx.customization.events, fields: ctx.customization.fields, apis: [], assumptions: [], warnings: [], gatewayChecks: { security: [] }, patterns: PATTERNS, ...g }, ...(passVerification(ctx, g) ? { verification: passVerification(ctx, g) } : {}) });
 //   2026-10-18（AI版 契約 20 §20）: 統合の書き込む本文は生成工程が合成して返す（偽の生成工程は送られた既存の本文と patch から作る）
 const genPatch = (patch = PATCH_GOOD, src = FIELD_ON_OFF) => gwWithBody({ strategy: 'EXTEND_EXISTING_JS', targetFile: 'fieldOnOff.js', summary: '完了でも金額を編集不可にする', code: patch.operations.map(o => o.content).join('\n'), patch, events: ['app.record.edit.show'], fields: [{ code: 'amount', access: 'CONTROL' }], apis: [], assumptions: [], warnings: [] }, src);
@@ -113,7 +113,7 @@ const isHidden = (m) => KTAiChatUi.isHiddenMessage(m);
 // 会話（左）に出ている文だけ（右の作業内容・詳細の中は除く）
 const outsideDetails = (html) => String(html).replace(/<details[\s\S]*?<\/details>/g, '');
 //   §0f.5 の 3（2026-10-09）: 根拠の番号は半角の [E12] だけでなく、全角の ［E12・E16］・【E3】・半角で複数の [E12・E16] も見る（実機の仮案の文）
-const INTERNAL_IN_CHAT = /\bv[0-9]+\b|requestId|\bR[0-9]+「|\bQ[0-9]+[：:]|\[E[0-9]+\]|［\s*E[0-9]+|【\s*E[0-9]+|\[\s*E[0-9]+\s*[・、,]|Toolkit Review|Code Review|VERIFIED|snapshot|受け付けました|台帳|を検証しました|kt-ai-who">(Toolkit|SYSTEM)</;
+const INTERNAL_IN_CHAT = /\bv[0-9]+\b|requestId|\bR[0-9]+「|\bQ[0-9]+[：:]|\[E[0-9]+\]|［\s*E[0-9]+|【\s*E[0-9]+|\[\s*E[0-9]+\s*[・、,]|Toolkit の確認|Code Review|VERIFIED|snapshot|受け付けました|台帳|を検証しました|kt-ai-who">(Toolkit|SYSTEM)</;
 const PLAN_VIEW = () => { const p = JSON.parse(JSON.stringify(PLAN_V1)); p.plan.proposedFields = []; p.plan.questions = []; p.plan.steps = [{ ...PLAN_V1.plan.steps[1], id: 'P1', dependsOn: [], spec: { ...PLAN_V1.plan.steps[1].spec, fields: ['owner', 'case_name'] }, title: '一覧「担当者別」を追加' }]; return p; };
 const gate = () => { let open; const p = new Promise(r => { open = r; }); return { p, open }; };
 
@@ -447,8 +447,8 @@ console.log('\n--- §18. タブの中の印（●）を押しても切り替わ�
   const MSG = KTAiConversation.MSG;
   const mk = (type, role, text, data = null) => ({ id: `m${Math.random()}`, type, role, text, at: '', ...(data ? { data } : {}) });
   const choices = KTAiChatUi.messageHtml(mk(MSG.ASSISTANT_TEXT, 'toolkit', '何についてでしょうか。', { kind: 'choices', choices: ['EXPLAIN_REVIEW', 'REVISE_PLAN', 'PLAN'], text: 'これどう？' }));
-  assert(/確認結果の説明を聞く/.test(choices) && /今の変更案を直す/.test(choices) && /新しい変更案を作る/.test(choices) && !/Toolkit Review|計画/.test(choices.replace(/data-[a-z-]+="[^"]*"/g, '')), `選択肢のボタン: 今の言葉（確認結果・変更案）: ${choices.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ')}`);
-  const err = KTAiChatUi.messageHtml(mk(MSG.ERROR, 'toolkit', 'JavaScript を生成できませんでした。', { code: 'UPSTREAM_ERROR', retryText: 'C1 のコードを作って', retryDisplay: '「承認後は金額を編集できなくする」のコードを作って', intent: 'GENERATE_CODE' }));
+  assert(/確認結果の説明を聞く/.test(choices) && /今の変更案を直す/.test(choices) && /新しい変更案を作る/.test(choices) && !/Toolkit の確認|計画/.test(choices.replace(/data-[a-z-]+="[^"]*"/g, '')), `選択肢のボタン: 今の言葉（確認結果・変更案）: ${choices.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ')}`);
+  const err = KTAiChatUi.messageHtml(mk(MSG.ERROR, 'toolkit', 'JavaScript を作れませんでした。', { code: 'UPSTREAM_ERROR', retryText: 'C1 のコードを作って', retryDisplay: '「承認後は金額を編集できなくする」のコードを作って', intent: 'GENERATE_CODE' }));
   assert(/data-act="retry"[^>]*data-display="「承認後は金額を編集できなくする」のコードを作って"/.test(err), '［再試行］も会話には利用者の言葉で出す（送る文は従来どおり）');
   const ans = KTAiChatUi.messageHtml(mk(MSG.ANSWER, 'assistant', '', { answer: { answer: '金額は条件で使っています（E1、E2）。', facts: [], analysis: [], recommendations: [], unknowns: [] } }));
   assert(/金額は条件で使っています。/.test(ans) && !/E1|E2/.test(outsideDetails(ans)), '回答の本文から（E1、E2）の形の根拠の番号も外す');
@@ -540,7 +540,7 @@ const HEALTH_STREAM = JSON.parse(JSON.stringify(HEALTH)); HEALTH_STREAM.registry
   const chat1 = m.chat();
   assert(/kt-ai-streaming/.test(chat1) && /このフィールドは金額です。/.test(chat1) && /一覧で使われています。/.test(chat1) && !/\[E1\]/.test(chat1) && /kt-ai-stream-cursor/.test(chat1), '届いた部分が段落に整形されて出る（根拠の番号は出さない・生成中の印）');
   assert(/kt-ai-who">AI</.test(chat1.slice(Math.max(0, chat1.indexOf('kt-ai-streaming') - 400), chat1.indexOf('kt-ai-streaming'))), '部分の吹き出しにも AI の名札');
-  assert(m.calls.ask[0].stream === true, 'Gateway が対応しているときは逐次表示を求めて送る');
+  assert(m.calls.ask[0].stream === true, 'AI サービスが対応しているときは逐次表示を求めて送る');
   assert(!/kt-ai-answer-card/.test(chat1), 'そろう前は答えのカードは無い');
   assert(!INTERNAL_IN_CHAT.test(outsideDetails(chat1)), `部分の表示に内部の番号・処理の通知が無い: ${(outsideDetails(chat1).match(INTERNAL_IN_CHAT) || [])[0]}`);
   g.open(); await p; await ticks(4);
@@ -656,7 +656,7 @@ console.log('\n--- §23. 出力削減（2026-10-07）: 計画の AI が書かな
   assert(/プロセス管理を変更：「申請する」（遷移元 作成中・遷移先 承認待ち・条件 amount <= "999999"・変更の種別 アクションの条件）/.test(d4.summary) && d4.human.length === 1, `プロセスの手順の説明と、Toolkit の変更前後の文: ${d4.summary}`);
   const data = { fields: { end_date: { code: 'end_date', label: '契約終了日', type: 'DATE' }, items: { code: 'items', type: 'SUBTABLE', fields: { qty: { code: 'qty', label: '数量', type: 'NUMBER' } } } } };
   assert(KTPlanText.labelOf('end_date', data) === '契約終了日（end_date）' && KTPlanText.labelOf('qty', data) === '数量（qty）' && KTPlanText.labelOf('NEW_FIELD_1', data) === 'NEW_FIELD_1' && KTPlanText.fieldText('end_date', data) === '契約終了日（end_date・DATE）', '設定からラベル・型を引く（テーブルの中も。無ければコードのまま）');
-  const notes = KTPlanText.coverageNotes({ coverage: { notes: ['他アプリからこのアプリへの参照は未走査。被参照は含まれていない', 'レコードの実データ・添付ファイルは含まない'] }, truncation: { applied: true, sections: [{ name: 'facts' }] } });
+  const notes = KTPlanText.coverageNotes({ coverage: { notes: ['ほかのアプリからこのアプリへの参照はまだ調べていません', 'レコードの実データ・添付ファイルは含まない'] }, truncation: { applied: true, sections: [{ name: 'facts' }] } });
   assert(notes.length === 3 && /入力の上限で省略した項目があります（facts）/.test(notes[2]), `coverage と truncation から「確かめられなかったこと」: ${notes.join(' / ')}`);
   // 計画の要約（説明・文書の入力）: 説明は spec から作られ、spec・仮の案・条件・候補は残る
   const plan = { goal: 'g', assessment: { summary: '方針。' }, steps: [rem, proc], proposedFields: [], questions: [{ id: 'Q1', question: 'q', reason: 'r', options: ['a', 'b'], priority: 'blocking' }], unknowns: [], provisionals: [{ id: 'A1', topic: '日数', choice: '暦日 3 日後', reason: 'r', changeHint: 'h' }], customizations: [{ customizationId: 'C1', requirement: 'r', strategy: 'NEW_JS_FILE', implementation: 'JAVASCRIPT', platform: ['desktop'], events: [], fields: [{ code: 'amount', access: 'CONTROL', condition: 'ステータス in ("承認済み")' }], apis: [], existingFiles: [], risks: [], questions: [], dependsOn: [] }], solution: 'HYBRID', summary: { steps: 2 } };

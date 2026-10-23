@@ -369,7 +369,7 @@ console.log('\n--- 4. AI Workspace: free / connected / responsive / header ---')
   { const h = c.host.innerHTML; const i = (t) => h.indexOf(t);
     assert(i('id="kt-ai-pane-context"') > 0 && i('id="kt-ai-pane-context"') < i('id="kt-ai-generate"') && i('id="kt-ai-generate"') < i('id="kt-ai-pane-connection"') && i('id="kt-ai-pane-connection"') < i('id="kt-ai-connect-start"') && i('id="kt-ai-pane-plan"') < i('id="kt-ai-plan-result"') && i('id="kt-ai-plan-result"') < i('id="kt-ai-pane-evidence"'), '無料出力は Context ペイン・接続は接続ペイン・計画の全文は「変更内容」ペイン（削除していない）');
     // 2026-10-06: 「変更内容」= 対象の JS・空の案内・要約・実装の内容・<details> の中の計画の全文。右の「反映」（#kt-ai-pane-exec）は内容の領域の外（右下）・反映の記録は 'log' ペイン
-    assert(i('id="kt-ai-pane-plan"') < i('id="kt-ai-subject-info"') && i('id="kt-ai-subject-info"') < i('id="kt-ai-pane-plan-empty"') && i('id="kt-ai-pane-plan-empty"') < i('id="kt-ai-change-summary"') && i('id="kt-ai-change-summary"') < i('<details id="kt-ai-plan-detail"') && i('<details id="kt-ai-plan-detail"') < i('id="kt-ai-plan-result"') && i('id="kt-ai-plan-result"') < i('id="kt-ai-pane-code"'), '「変更内容」ペイン: 相談中の JS・空の案内・変更内容の要約・［計画の詳細と根拠］の中の計画の全文（実装仕様のカードは 2026-10-19 に廃止）');
+    assert(i('id="kt-ai-pane-plan"') < i('id="kt-ai-subject-info"') && i('id="kt-ai-subject-info"') < i('id="kt-ai-pane-plan-empty"') && i('id="kt-ai-pane-plan-empty"') < i('id="kt-ai-change-summary"') && i('id="kt-ai-change-summary"') < i('<details id="kt-ai-plan-detail"') && i('<details id="kt-ai-plan-detail"') < i('id="kt-ai-plan-result"') && i('id="kt-ai-plan-result"') < i('id="kt-ai-pane-code"'), '「変更内容」ペイン: 相談中の JS・空の案内・変更内容の要約・［計画の詳細と根拠］の中の計画の全文（JavaScript の仕様のカードは 2026-10-19 に廃止）');
     assert(i('id="kt-ai-right-body"') < i('id="kt-ai-pane-log"') && i('id="kt-ai-pane-log"') < i('id="kt-ai-apply-log"') && /id="kt-ai-pane-exec" class="kt-ai-pane"/.test(h) && i('id="kt-ai-right-body"') < i('id="kt-ai-pane-exec"') && i('id="kt-ai-pane-exec"') < i('id="kt-ai-exec"') && i('id="kt-ai-exec"') < i('id="kt-ai-jsreg"') && c.$('kt-ai-pane-exec').style.display === 'none', '右のタブ「反映」（#kt-ai-pane-exec）は内容の領域の中で #kt-ai-exec・#kt-ai-jsreg を持つ（初期は「変更内容」のタブなので隠れている）・反映の記録は #kt-ai-pane-log の中');
     assert(/id="kt-ai-split" class="kt-ai-split" role="separator"/.test(h) && i('class="kt-ai-ws-main"') < i('id="kt-ai-split"') && i('id="kt-ai-split"') < i('id="kt-ai-drawer"') && /<b>会話<\/b><button id="kt-ai-new-conv"/.test(h) && /<b>現在の作業内容<\/b><span id="kt-ai-ws-state"/.test(h), '画面: 左＝「会話」と［新しい会話］・右＝「現在の作業内容」・間に幅を変える境目（role=separator）'); }
   // ヘッダー（2026-10-06）: 開発支援・アプリ名（App ID）・反映先（動作テスト環境。運用環境は変えない）・AI の接続のボタン。「解析 ✓ JavaScript ✓ AI ✓」の並びは無い。件数は［詳細］に
@@ -382,7 +382,7 @@ console.log('\n--- 4. AI Workspace: free / connected / responsive / header ---')
     const hb = KTAiChatUi.headerHtml({ app: { id: '341', name: '案件管理' }, connection: conn, base: okBase });
     assert(/反映先：<b>動作テスト環境<\/b>（運用環境は変更しません）｜<span id="kt-ai-base"/.test(hb) && /\d{1,2}:\d{2} 取得・運用環境との差 1 件/.test(hb) && /data-act="open-base-diff"[^>]*>差分を見る</.test(hb) && /data-act="refresh-base"[^>]*>再取得</.test(hb) && !/今回の変更の基準|revision/.test(hb), 'ヘッダーの作業の基準: 「HH:MM 取得・運用環境との差 1 件」［差分を見る］［再取得］（「今回の変更の基準」「revision」の語は出さない）');
     const hbErr = KTAiChatUi.headerHtml({ app: { id: '341', name: '案件管理' }, connection: conn, base: { ok: false, message: '権限がありません' } });
-    assert(/動作テスト環境の設定を取得できませんでした（権限がありません）。変更案・コードの作成と反映は止めています（運用環境の設定では進めません）。/.test(hbErr) && /data-act="refresh-base"/.test(hbErr), 'ヘッダーの作業の基準: 取得できないときは、変更案・コードの作成と反映を止めていることを書く（運用環境の設定では進めない）');
+    assert(/動作テスト環境の設定を取得できませんでした（権限がありません）。変更案・JavaScript の作成と反映は止めています（運用環境の設定では進めません）。/.test(hbErr) && /data-act="refresh-base"/.test(hbErr), 'ヘッダーの作業の基準: 取得できないときは、変更案・コードの作成と反映を止めていることを書く（運用環境の設定では進めない）');
     const hbFree = KTAiChatUi.headerHtml({ app: { id: '341', name: '案件管理' }, connection: { paidEnabled: false } });
     assert(!/反映先：/.test(hbFree) && !/kt-ai-header-status/.test(hbFree), '接続機能の無い環境のヘッダーには反映先と AI の接続を出さない'); }
   // ［詳細］の開閉（描き直しても保つ）
@@ -427,7 +427,7 @@ console.log('\n--- 5. AI Workspace: 会話（ASK / PLAN / REVISE / EXPLAIN / PRE
   // ASK
   m.$('kt-ai-input').value = 'このフィールドは何に使ってる？';
   await m.$('kt-ai-send').dispatch('click'); await ticks();
-  assert(m.calls.ask.length === 1 && m.calls.plan.length === 0 && m.calls.ask[0].ctx.contextVersion === '1' && m.calls.ask[0].ctx.question === 'このフィールドは何に使ってる？' && !('planContext' in m.calls.ask[0].ctx), 'ASK: assistant-qa（contextVersion 1）だけ。Planner は呼ばない。planContext 無し');
+  assert(m.calls.ask.length === 1 && m.calls.plan.length === 0 && m.calls.ask[0].ctx.contextVersion === '1' && m.calls.ask[0].ctx.question === 'このフィールドは何に使ってる？' && !('planContext' in m.calls.ask[0].ctx), 'ASK: assistant-qa（contextVersion 1）だけ。AI の計画は呼ばない。planContext 無し');
   assert(m.types().join() === 'USER,ANSWER' && /kt-ai-answer-card/.test(m.chat()) && /ルックアップのコピー先/.test(m.chat()) && m.$('kt-ai-input').value === '', 'ASK → 回答カード（送信後に入力欄は空）');
   { const card = (/<div class="kt-ai-card kt-ai-answer-card[\s\S]*$/.exec(m.chat()) || [''])[0];
     const head = card.split('<details')[0];
@@ -504,7 +504,7 @@ console.log('\n--- 5. AI Workspace: 会話（ASK / PLAN / REVISE / EXPLAIN / PRE
   { const d0 = m.downloads.length, c0 = m.copies.length;
     await clickExec(m, 'kt-ai-exec-audit-download'); await clickExec(m, 'kt-ai-exec-snapshot-copy');
     const dl = m.downloads[d0], snap = m.copies.length > c0 ? JSON.parse(m.copies[m.copies.length - 1]) : null;
-    assert(dl && /^toolkit-ai-execution-ex_.*\.json$/.test(dl.name) && JSON.parse(dl.text).auditVersion === '2' && JSON.parse(dl.text).execution.status === 'DONE' && snap && snap.views && !(snap.views.views || {})['担当者別'], `右の「反映」: 監査 JSON を保存（ファイル名に executionId）・実行前スナップショットをコピー（追加前の一覧）: ${dl && dl.name}`); }
+    assert(dl && /^toolkit-ai-execution-ex_.*\.json$/.test(dl.name) && JSON.parse(dl.text).auditVersion === '2' && JSON.parse(dl.text).execution.status === 'DONE' && snap && snap.views && !(snap.views.views || {})['担当者別'], `右の「反映」: 反映の記録（JSON・技術者向け） を保存（ファイル名に executionId）・実行前スナップショットをコピー（追加前の一覧）: ${dl && dl.name}`); }
   await m.panel.send('これで進めたい'); await ticks();
   const pr2 = m.msgs()[m.msgs().length - 1];
   assert(pr2.data.kind === 'preview-approved' && /承認済みです/.test(pr2.text) && !/動作テスト環境へ反映する準備ができました/.test(m.chat()), 'REQUEST_PREVIEW（承認・反映の後）: 結果の場所を案内するだけ');
@@ -559,10 +559,10 @@ console.log('\n--- 6. Executor / Rollback 統合と Versioning（v1 は Executor
     const nCopies = m.copies.length;
     await m.$('kt-ai-pane-log').dispatch({ type: 'click', target: { dataset: { act: 'log-audit', log: logId } } });
     const copied = m.copies.length === nCopies + 1 ? JSON.parse(m.copies[m.copies.length - 1]) : null;
-    assert(copied && copied.execution && copied.execution.executionId === st.execution.executionId && copied.plan.steps[0].actionType === 'REUSE_FIELD', '反映の記録の［監査 JSON をコピー］（#kt-ai-pane-log のクリック）→ 実行した版（v2）の監査 JSON'); }
+    assert(copied && copied.execution && copied.execution.executionId === st.execution.executionId && copied.plan.steps[0].actionType === 'REUSE_FIELD', '反映の記録の［反映の記録（JSON・技術者向け） をコピー］（#kt-ai-pane-log のクリック）→ 実行した版（v2）の反映の記録（JSON・技術者向け）'); }
   assert(!m.msgs().some(x => x.type === 'SYSTEM_NOTICE' && /動作テスト環境の設定が変更されました/.test(x.text)) && v2.status === 'EXECUTED' && v2.executionId === st.execution.executionId && v1.status === 'SUPERSEDED', '2026-10-21: 会話に処理の通知（preview-changed）を作らない（結果のカードが同じ内容を出す）。v2 は EXECUTED（実行 ID を保持）');
   const audit = m.panel.auditJson();
-  assert(audit.plan.steps[0].actionType === 'REUSE_FIELD' && audit.execution.executionId === st.execution.executionId, '監査 JSON は実行した版（v2）の計画');
+  assert(audit.plan.steps[0].actionType === 'REUSE_FIELD' && audit.execution.executionId === st.execution.executionId, '反映の記録（JSON・技術者向け） は実行した版（v2）の計画');
   // REQUEST_ROLLBACK（即 Rollback しない）。2026-10-21: 「戻せます」のカードは廃止した。戻す操作は結果のカードの［設定を変更前の状態に戻す］
   const w1 = writes(m).length;
   await m.panel.send('やっぱり元に戻して'); await ticks();
@@ -575,8 +575,8 @@ console.log('\n--- 6. Executor / Rollback 統合と Versioning（v1 は Executor
   await clickChat(m, 'rollback', { execution: st.execution.executionId }); await ticks();
   assert(m.panel.executorState().stage === 'rollback-confirm' && m.msgs().filter(x => x.type === 'ROLLBACK').length === 1 && writes(m).length === w1, '戻す確認を取り消してもう一度押しても、元に戻すのカードは 1 枚（書き込み 0）');
   await clickExec(m, 'kt-ai-exec-rollback-go'); await ticks(8);
-  assert(m.panel.executorState().stage === 'rolled-back' && !m.mock.st.views['担当者別'] && /変更前の状態へ戻しました。/.test(m.chat()) && /反映する前の設定との比較：✓ 一致/.test(m.chat()) && !/ROLLBACK_VERIFIED|snapshot/i.test(m.chat()) && /✓ 1 件 ROLLBACK_VERIFIED/.test(m.$('kt-ai-exec').innerHTML) && v2.status === 'ROLLED_BACK' && !m.msgs().some(x => x.type === 'SYSTEM_NOTICE' && /変更前の状態に戻しました/.test(x.text)), 'Rollback 確認 → 戻す → Rollback Result カード「変更前の状態へ戻しました。」「反映する前の設定との比較：✓ 一致」（詳細は右下の右の「反映」）・v2 は ROLLED_BACK・戻した通知は作らない（2026-10-21）');
-  assert(m.panel.auditJson().rollback && m.panel.auditJson().plan.steps[0].actionType === 'REUSE_FIELD', 'rollback は正しい実行（v2）に結び付く（監査 JSON）');
+  assert(m.panel.executorState().stage === 'rolled-back' && !m.mock.st.views['担当者別'] && /変更前の状態へ戻しました。/.test(m.chat()) && /反映する前の設定との比較：✓ 一致/.test(m.chat()) && !/ROLLBACK_VERIFIED|snapshot/i.test(m.chat()) && /✓ 1 件 戻して確認で一致/.test(m.$('kt-ai-exec').innerHTML) && v2.status === 'ROLLED_BACK' && !m.msgs().some(x => x.type === 'SYSTEM_NOTICE' && /変更前の状態に戻しました/.test(x.text)), 'Rollback 確認 → 戻す → Rollback Result カード「変更前の状態へ戻しました。」「反映する前の設定との比較：✓ 一致」（詳細は右下の右の「反映」）・v2 は ROLLED_BACK・戻した通知は作らない（2026-10-21）');
+  assert(m.panel.auditJson().rollback && m.panel.auditJson().plan.steps[0].actionType === 'REUSE_FIELD', 'rollback は正しい実行（v2）に結び付く（反映の記録（JSON・技術者向け））');
   // 反映後に新しい計画を作っても、戻していない実行は失わない（別シナリオ）
   const n = mount();
   await ticks();
@@ -635,7 +635,7 @@ console.log('\n--- 7. Safety: 自然言語 ≠ 承認（write 0 件）/ errors /
   await ticks();
   e1.$('kt-ai-input').value = 'このフィールドは何に使ってる？';
   await e1.$('kt-ai-send').dispatch('click'); await ticks();
-  assert(e1.types()[e1.types().length - 1] === 'ERROR' && /kt-ai-error-card/.test(e1.chat()) && /AI プロバイダが応答しませんでした/.test(e1.chat()) && /<details class="kt-ai-tech"><summary>詳細情報<\/summary><div class="kt-ai-error-code">UPSTREAM_ERROR \/ requestId: e-1<\/div><\/details>/.test(e1.chat()) && !/\[UPSTREAM_ERROR\]/.test(e1.chat()) && /data-act="retry"/.test(e1.chat()) && e1.$('kt-ai-input').value === 'このフィールドは何に使ってる？', 'errors: ERROR カード（文言・[再試行]。code と requestId は［詳細情報］の中・[CODE] の形では出さない）。入力欄の内容は残る');
+  assert(e1.types()[e1.types().length - 1] === 'ERROR' && /kt-ai-error-card/.test(e1.chat()) && /AI が応答しませんでした/.test(e1.chat()) && /<details class="kt-ai-tech"><summary>詳細情報<\/summary><div class="kt-ai-error-code">UPSTREAM_ERROR \/ requestId: e-1<\/div><\/details>/.test(e1.chat()) && !/\[UPSTREAM_ERROR\]/.test(e1.chat()) && /data-act="retry"/.test(e1.chat()) && e1.$('kt-ai-input').value === 'このフィールドは何に使ってる？', 'errors: ERROR カード（文言・[再試行]。code と requestId は［詳細情報］の中・[CODE] の形では出さない）。入力欄の内容は残る');
   // rate limit → retry
   let fail = true;
   const r = mount({ askError: () => (fail ? new KTAiClient.AiClientError({ code: 'RATE_LIMITED', message: 'x', retryAfterSeconds: 42, requestId: 'e-2' }) : null) });

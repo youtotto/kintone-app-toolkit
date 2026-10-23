@@ -29,8 +29,8 @@ console.log('\n--- §C1 能力の確認（純関数）: 印がそろえば使え
 await section(async () => {
   const full = cap(K.HEALTH_V);
   assert(full.available === true && full.features['assistant-qa'].available === true && full.features['change-planner'].available === true && full.features['customization-generator'].available === true,
-    `C1-1: 今の Gateway の印がそろった health は会話・計画・生成を使える: ${JSON.stringify(Object.fromEntries(Object.entries(full.features).map(([k, v]) => [k, [v.available, v.reason]])))}`);
-  assert(OUTDATED === 'CAPABILITY_OUTDATED' && /接続先（AI サービス）が、今の Toolkit が使う受け渡しに対応していません/.test(KTAiClient.errorText(OUTDATED)) && KTAiClient.errorCategory(OUTDATED) === 'version', 'C1-2: 符号 CAPABILITY_OUTDATED・利用者に見せる文・種類（version）');
+    `C1-1: 今の AI サービスの印がそろった health は会話・計画・生成を使える: ${JSON.stringify(Object.fromEntries(Object.entries(full.features).map(([k, v]) => [k, [v.available, v.reason]])))}`);
+  assert(OUTDATED === 'CAPABILITY_OUTDATED' && /AI サービスの版が古く、今の Toolkit と組み合わせて使えません/.test(KTAiClient.errorText(OUTDATED)) && KTAiClient.errorCategory(OUTDATED) === 'version', 'C1-2: 符号 CAPABILITY_OUTDATED・利用者に見せる文・種類（version）');
   for (const mark of KTAiClient.CONVERSATION_MARKS) {
     const c = cap(withoutQa(mark));
     assert(c.available === false && c.reason === OUTDATED && c.features['assistant-qa'].available === false && JSON.stringify(c.features['assistant-qa'].lacking) === JSON.stringify([mark]) && c.features['change-planner'].available === true && c.features['customization-generator'].available === true,
@@ -67,10 +67,10 @@ await section(async () => {
   const text = K.stripC(m.chat()) + K.stripC(m.$('kt-ai-paid-status').innerHTML);
   assert(m.calls.propose.length === 0 && m.calls.plan.length === 0 && m.calls.ask.length === 0 && m.conv().draft() === null && m.conv().activePlan() === null && !/kt-ai-draft-card|kt-ai-plan-card/.test(m.chat()) && !m.mock.calls.some(c => /^(PUT|POST) /.test(c)),
     `C2-1: 仮案・計画・質問の AI を呼ばず、仮案・変更案のカードは出ず、書き込み 0: ${JSON.stringify({ propose: m.calls.propose.length, plan: m.calls.plan.length, ask: m.calls.ask.length, writes: m.mock.calls.filter(c => /^(PUT|POST) /.test(c)) })}`);
-  assert(/今の Toolkit が使う受け渡しに対応していません/.test(text) || /今の Toolkit が使う受け渡しに対応していません/.test(K.stripC(status)), `C2-2: 理由の文（接続先の更新が必要）が画面に出る: ${(text.match(/.{0,80}対応していません.{0,40}/) || [K.stripC(status).slice(0, 160)])[0]}`);
+  assert(/AI サービスの版が古く、今の Toolkit と組み合わせて使えません/.test(text) || /AI サービスの版が古く、今の Toolkit と組み合わせて使えません/.test(K.stripC(status)), `C2-2: 理由の文（接続先の更新が必要）が画面に出る: ${(text.match(/.{0,80}組み合わせて使えません.{0,40}/) || [K.stripC(status).slice(0, 160)])[0]}`);
 });
 
-console.log('\n--- §C3 画面: 生成の印が欠ける接続先では、生成工程を呼ばず、反映できる最終案にならない ---');
+console.log('\n--- §C3 画面: 生成の印が欠ける接続先では、AI サービスを呼ばず、反映できる最終案にならない ---');
 await section(async () => {
   const gen = K.screenGenerate({ field: 'case_name', targetFile: 'caseLock.js' });
   const m = K.mount({ health: withoutGen('registrationSelect'), planImpl: K.planImplOf(K.screenPlan('js')), generateImpl: gen.impl });
@@ -78,15 +78,15 @@ await section(async () => {
   const v = await K.adoptOnScreen(m); await K.ticks(20);
   const ready = !!(v && v.final && m.conv().finalReadiness(v).ready);
   assert(m.calls.plan.length === 1 && gen.calls.length === 0 && !!v && ready === false && !m.mock.calls.some(c => c === 'PUT customize' || c === 'POST file'),
-    `C3-1: 仮案の採用から計画までは進む（計画の AI 1 回）が、生成工程は呼ばず（0 回）、反映できる最終案にならない・登録しない: ${JSON.stringify({ plan: m.calls.plan.length, gen: gen.calls.length, final: !!(v && v.final), ready, status: v && v.generated && v.generated.C1 && v.generated.C1.status })}`);
+    `C3-1: 仮案の採用から計画までは進む（計画の AI 1 回）が、AI サービスは呼ばず（0 回）、反映できる最終案にならない・登録しない: ${JSON.stringify({ plan: m.calls.plan.length, gen: gen.calls.length, final: !!(v && v.final), ready, status: v && v.generated && v.generated.C1 && v.generated.C1.status })}`);
   //   独立レビュー（中 2）: 生成だけが使えないときの理由も契約の文（NOT_ENTITLED の文）ではなく、接続先の更新が必要という文
   const chat3 = K.stripC(m.chat());
   const e3 = v && v.generated && v.generated.C1;
-  assert(e3 && e3.status === 'failed' && e3.failure && e3.failure.reason === 'CAPABILITY_OUTDATED' && /今の Toolkit が使う受け渡しに対応していません/.test(chat3) && !/この契約では|契約内容を確認/.test(chat3),
-    `C3-2: 生成を使えない理由は CAPABILITY_OUTDATED の文（契約の文にしない）: ${JSON.stringify({ failure: e3 && e3.failure, text: (chat3.match(/.{0,60}対応していません.{0,30}/) || [])[0] })}`);
+  assert(e3 && e3.status === 'failed' && e3.failure && e3.failure.reason === 'CAPABILITY_OUTDATED' && /AI サービスの版が古く、今の Toolkit と組み合わせて使えません/.test(chat3) && !/この契約では|契約内容を確認/.test(chat3),
+    `C3-2: 生成を使えない理由は CAPABILITY_OUTDATED の文（契約の文にしない）: ${JSON.stringify({ failure: e3 && e3.failure, text: (chat3.match(/.{0,60}組み合わせて使えません.{0,30}/) || [])[0] })}`);
 });
 
-console.log('\n--- §C4 受け取り（KTAiClient.receive）: 契約の関所だけ。Gateway の形をそのまま ---');
+console.log('\n--- §C4 受け取り（KTAiClient.receive）: 契約の関所だけ。AI サービスの形をそのまま ---');
 await section(async () => {
   const ver = { version: '1', bodyHash: '0123456789abcdef', passed: true, machine: [{ name: 'syntax', ok: true, severity: 'info', message: 'ok' }], requiredEffects: [{ requirementId: 'C1', requirementIds: ['C1'], field: 'amount', effect: 'lock', status: 'present', check: 'behavior', checkReason: 'conditional', checkReasons: ['conditional', 'nested'] }],
     behavior: { status: 'not-run', reason: 'unavailable', cases: [{ id: 'K1', requirementIds: ['C1'], field: 'amount', effect: 'lock', expect: 'lock', side: 'match', verdict: 'not-run', reason: 'existing-unrunnable', details: { files: [{ name: 'biz.js', kinds: ['network'], apis: ['kintone.api'] }], values: ['a'] } }], conditions: null, uncheckedScope: [{ key: 'k', text: '確かめない範囲' }], truncated: 3 }, repairs: { count: 0, reasons: [], stoppedBy: null, notRepaired: [{ reason: 'x', count: 0 }] } };
@@ -94,7 +94,7 @@ await section(async () => {
     generated: { strategy: 'NEW_JS_FILE', targetFile: 'a.js', code: 'x', coverage: [{ requirementId: 'C1', status: 'MET', text: 't', note: '', limitCode: 'SUBTABLE_ROWS' }], patterns: 'bad', extraField: 1 }, verification: ver };
   const g = KTAiClient.receive('generated', body, { requestId: 'fallback' });
   assert(JSON.stringify(g.verification) === JSON.stringify(ver) && g.extraField === 1 && g.patterns === 'bad' && g.coverage[0].limitCode === 'SUBTABLE_ROWS' && g.requestId === 'g-1' && g.usage.monthlyLimit === 20 && g.gatewayWarnings.length === 1 && g.budgetMeta.allowanceUsd === 1 && g.aiRepair && g.timing.totalMs === 5 && g.clientWarnings.length === 0,
-    `C4-1: 生成の応答は Gateway の形をそのまま返す（白リスト・上限・派生の欄（fileKinds・conditionsNotRun・checkReason の配列化）は作らない）。meta は読み手の形に: ${JSON.stringify(Object.keys(g))}`);
+    `C4-1: 生成の応答は AI サービスの形をそのまま返す（白リスト・上限・派生の欄（fileKinds・conditionsNotRun・checkReason の配列化）は作らない）。meta は読み手の形に: ${JSON.stringify(Object.keys(g))}`);
   const thrown = (kind, r) => { try { KTAiClient.receive(kind, r); return null; } catch (e) { return `${e.code}:${e.message}`; } };
   assert(/INVALID_RESPONSE/.test(thrown('generated', { ...body, verification: { machine: [] } })) && /INVALID_RESPONSE/.test(thrown('generated', { ...body, generated: { ...body.generated, strategy: 'EXTEND_EXISTING_JS', patch: null } })) && /INVALID_RESPONSE/.test(thrown('generated', { ...body, generated: { strategy: 'NEW_JS_FILE', code: '' } })) && /UNSUPPORTED_CONTRACT_VERSION/.test(thrown('generated', { ...body, contractVersion: '9' })) && /INVALID_RESPONSE/.test(thrown('generated', null)) && /INVALID_RESPONSE/.test(thrown('proposal', { ok: true, contractVersion: '2.1', meta: {}, reply: 'r', proposal: {} })),
     'C4-2: 関所: 検証結果（machine・requiredEffects）が無い・統合なのに patch が無い・code が無い・契約の版が違う・応答が無い・仮案に turn が無い → AiClientError');
@@ -105,9 +105,9 @@ await section(async () => {
   assert(p.goal === 'g' && p.steps[0].validation.issues[0] === 'x' && p.customizations[0].implementation === 'SASS' && p.decisionsMeta.received === 1 && p.revisionMeta.mode === 'patch' && p.requirementsMeta.received === 2 && p.turn && p.gatewayPlan && p.gatewayPlan !== p && JSON.stringify(p.gatewayPlan.steps) === JSON.stringify(p.steps) && !Object.keys(p).includes('gatewayPlan'),
     'C4-3: 計画の応答は plan をそのまま（語彙外の値も読み直さない）。meta の決定事項・修正の方式・要件の受け取りを運び、gatewayPlan は列挙しない写し');
   const pr = KTAiClient.receive('proposal', { ok: true, contractVersion: '2.1', meta: { requestId: 'pp-1', proposalUnchanged: true }, reply: 'r', intent: 'question', adoptQuote: '', proposal: { behaviors: [{ id: 'B1', text: 'x', origin: 'suggestion' }] }, turn: { ops: [{ id: 'Q1', op: 'adopt' }] } });
-  assert(pr.proposalUnchanged === true && pr.intent === 'question' && pr.proposal.behaviors[0].origin === 'suggestion' && pr.turn.ops.length === 1 && pr.adoptQuote === '', 'C4-4: 仮案の応答は仮案・turn・adoptQuote をそのまま（整理は Gateway の validate-proposal-response）。proposalUnchanged は meta から');
+  assert(pr.proposalUnchanged === true && pr.intent === 'question' && pr.proposal.behaviors[0].origin === 'suggestion' && pr.turn.ops.length === 1 && pr.adoptQuote === '', 'C4-4: 仮案の応答は仮案・turn・adoptQuote をそのまま（整理は AI サービスの validate-proposal-response）。proposalUnchanged は meta から');
   const a = KTAiClient.receive('answer', { ok: true, contractVersion: '2.1', meta: {}, answer: '本文 [E999]', facts: [{ text: 'f', evidenceIds: ['E999'] }], answerEvidenceIds: ['E999'] }, { requestId: 'q-1' });
-  assert(a.answer === '本文 [E999]' && a.facts[0].evidenceIds[0] === 'E999' && a.requestId === 'q-1', 'C4-5: 回答の応答は本文・根拠 ID をそのまま（除去は Gateway の validate-response）。meta に requestId が無ければ呼び出しの requestId');
+  assert(a.answer === '本文 [E999]' && a.facts[0].evidenceIds[0] === 'E999' && a.requestId === 'q-1', 'C4-5: 回答の応答は本文・根拠 ID をそのまま（除去は AI サービスの validate-response）。meta に requestId が無ければ呼び出しの requestId');
   assert(!('validateGenerated' in KTAiClient) && !('normalizeVerification' in KTAiClient) && !('validatePlan' in KTAiClient) && !('validateProposal' in KTAiClient) && !('validateAnswer' in KTAiClient) && !('normalizeUpstream' in KTAiClient) && !('BEHAVIOR_CASES_MAX' in KTAiClient) && !('normalizeLegacyErrorCode' in KTAiClient),
     'C4-6: 入口の再検証・正規化・旧い符号の読み替えの口は無い');
 });

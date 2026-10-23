@@ -221,7 +221,7 @@ console.log('\n--- 3. UPDATE_VIEW ---');
   const p2 = plan([step('P1', 'UPDATE_VIEW', 'VIEW', '承認待ち', { fields: ['case_name', 'approver', 'amount'] })]);
   const rv2 = reviewOf(p2); const m2 = makeKintoneMock(DATA); delete m2.st.fields.amount;
   const pr2 = await E.prepare(approveAll(p2, rv2), { api: m2.api, current: await m2.current(), appId: '341' });
-  assert(pr2.status === 'BLOCKED' && pr2.blockers.some(b => b.code === 'STALE_PLAN'), 'Review 後にフィールドが消えた: STALE_PLAN');
+  assert(pr2.status === 'BLOCKED' && pr2.blockers.some(b => b.code === 'STALE_PLAN'), '計画を確かめた後にフィールドが消えた: STALE_PLAN');
   // invalid filter（USER_SELECT に !=）/ invalid sort
   const p3 = plan([step('P1', 'UPDATE_VIEW', 'VIEW', '承認待ち', { filterCond: 'owner != ""' })]);
   const rv3 = reviewOf(p3); const m3 = makeKintoneMock(DATA);

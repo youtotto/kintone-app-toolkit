@@ -276,9 +276,9 @@ function createNewFlowKit(T) {
    *   今の Gateway の偽物には付ける（どれかが無い接続先には、会話が生成を依頼しない） */
   const GEN_NETWORK_FEATURE = 'networkCheck';
   const GEN_CURRENT_FEATURES = Object.freeze([GEN_NETWORK_FEATURE, 'verifiedBody', 'effectCheck', GEN_PORT_FEATURE, 'registrationSelect']);
-  const EXPECT_OF = { lock: 'lock', warn: 'warn', 'block-save': 'block-save', 'set-value': 'set-value', 'show-hide': 'show-hide' };
+  const EXPECT_OF = { lock: 'lock', warn: 'warn', 'block-save': 'block-save', 'set-value': 'set-value', 'show-hide': 'show-hide', 'hide-row-buttons': 'row-buttons-hidden' };
   /** §0c.9: 「合わない」側の期待（Gateway の behavior-cases の neg） */
-  const NOMATCH_OF = { lock: 'not-locked', warn: 'not-warned', 'block-save': 'save-allowed', 'set-value': 'value-unchanged', 'show-hide': 'show-hide' };
+  const NOMATCH_OF = { lock: 'not-locked', warn: 'not-warned', 'block-save': 'save-allowed', 'set-value': 'value-unchanged', 'show-hide': 'show-hide', 'hide-row-buttons': 'row-buttons-shown' };
   /** 偽の生成工程の verification（契約 20 §5・§0c.3 の 5 の形）。env = 動作テストを実行できない理由（timeout など）。supported:false は旧い接続先（requiredEffects・behavior を返さない） */
   //   §0c.6 の回帰用: statusOverride = 必須の効果の status を上書き（unchecked など）/ extraCases = 足す代表条件 / caseReason = 実行できない代表条件の理由（代表条件ごと）
   /** C-1 第 4 段（2026-10-09）: 偽の生成工程が返す模擬テストの条件（behavior.conditions）と確かめていない範囲（behavior.uncheckedScope）。Toolkit はこの文をそのまま出す（テスト用の文） */
@@ -298,7 +298,9 @@ function createNewFlowKit(T) {
       const evs = Array.isArray(x.events) && x.events.length ? x.events : [null];
       return evs.flatMap(ev => (x.condition ? ['match', 'nomatch'] : ['match']).map(side => {
         const base = { id: `K${++n}`, requirementId: x.requirementId, requirementIds: x.requirementIds, field: x.field, effect: x.effect, expect: side === 'match' ? EXPECT_OF[x.effect] : NOMATCH_OF[x.effect], side, kind: side, ...(ev ? { event: ev } : {}) };
-        if (env) return { ...base, verdict: 'not-run', observed: null, message: '隔離環境で実行できませんでした', ...(caseReason ? { reason: caseReason } : {}) };
+        //   2026-10-24（§12.69）: 本物の Gateway（behavior-cases）と同じく、行のボタンを隠す効果は追加・編集画面の表示・変更以外のイベントを no-event の not-run にする
+        if (x.effect === 'hide-row-buttons' && ev && !/(^|\.)app\.record\.(create|edit)\.(show$|change\.)/.test(ev)) return { ...base, expect: null, verdict: 'not-run', reason: 'no-event', observed: null, message: '確かめるイベントがありません' };
+        if (env) return { ...base, verdict: 'not-run', observed: null, message: '模擬テストの環境で実行できませんでした', ...(caseReason ? { reason: caseReason } : {}) };
         const fail = side === 'match' && (!has(x) || (cand.fails || []).includes(`${x.field}|${x.effect}`));
         return { ...base, verdict: fail ? 'fail' : 'pass', observed: {}, message: fail ? (cand.failMsg || `${x.field} は期待した動きになりませんでした`) : '期待どおり' };
       }));
@@ -313,10 +315,10 @@ function createNewFlowKit(T) {
     //   （Toolkit の coverage-unmet は削除した。申告が無い・満たすときの合格の項目は省く）
     //   要件の id の無い旧い形（{ requirement }）は、本物の入口（normalizeCoverage）と同じくこの customization の要件として扱う
     const coverageItem = (c) => { const own = (Array.isArray(c.coverage) ? c.coverage : []).filter(x => x && (x.requirementId == null ? c.ownId : x.requirementId) === c.ownId && (x.status === 'NOT_MET' || x.status === 'PARTIAL')); return own.length ? [{ name: 'coverage', ok: false, severity: 'review', message: `この JavaScript の要件のうち満たせないと申告されたものがあります: ${own.map(x => `${x.status === 'NOT_MET' ? '未実装' : '一部だけ'}「${String(x.text || x.requirement || x.note || '').slice(0, 80)}」${x.note ? `（${String(x.note).slice(0, 120)}）` : ''}`).join('；')}` }] : []; };
-    const machine = [{ name: 'syntax', ok: true, severity: 'info', message: '構文エラーなし' }, varLeft ? { name: 'modern-js', ok: false, severity: 'block', message: '記法の問題が残っています（var）' } : { name: 'modern-js', ok: true, severity: 'info', message: '新しいコードに var はありません' }, ...(supported && req.length ? [{ name: 'required-effects', ok: !missing.length, severity: missing.length ? 'block' : 'info', message: missing.length ? `要件未達（${missing.map(x => `${x.field}: ${x.effect}`).join('、')}の処理がありません）` : '必須の効果の処理があります' }] : []), ...coverageItem(cand)];
+    const machine = [{ name: 'syntax', ok: true, severity: 'info', message: '構文エラーなし' }, varLeft ? { name: 'modern-js', ok: false, severity: 'block', message: '記法の問題が残っています（var）' } : { name: 'modern-js', ok: true, severity: 'info', message: '新しいコードに var はありません' }, ...(supported && req.length ? [{ name: 'required-effects', ok: !missing.length, severity: missing.length ? 'block' : 'info', message: missing.length ? `要件を満たしていません（${missing.map(x => `${x.field}: ${x.effect}`).join('、')}の処理がありません）` : '必須の効果の処理があります' }] : []), ...coverageItem(cand)];
     return { version: '1', bodyHash: candidateHash, sameAsPrevious: false, passed: !machine.some(m => !m.ok && m.severity === 'block'), machine,
       ...(supported ? { requiredEffects: re, behavior: { status: env ? 'not-run' : cases.some(c => c.verdict === 'fail') ? 'failed' : 'passed', reason: env, cases, ...(scope === false ? {} : clone(scope || GW_SCOPE)) } } : {}),
-      repairs: { count: repairs, reasons: [], stoppedBy }, unverified: ['実機での動作'] };
+      repairs: { count: repairs, reasons: [], stoppedBy }, unverified: ['実際の画面での動作'] };
   }
   /** JS ありの計画（C1）。questions / cust / turn（requirementOps）/ gatewayPlan で変える */
   const planJs = (args, { questions = [], cust = CUST_C1, summary = '承認待ちでは金額を編集不可にします。', requirementOps = [], gatewayPlan = null } = {}) => ({

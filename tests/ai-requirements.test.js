@@ -705,7 +705,7 @@ await section(async () => {
 await section(async () => {
   // W6（実機 2026-10-05）: 作業中の入力欄の案内は作業の種類ごと。最初の計画の作成中に「作り直しています」・質問は「応答の後に」と出さない
   const h = KTAiChatUi.busyHintText;
-  assert(/^計画を作っています。質問にはすぐ答えます/.test(h('PLAN')) && /できた計画に続けて入れます/.test(h('PLAN')) && /^コードを作っています/.test(h('GENERATE')) && /^計画を作り直しています/.test(h('REVISE'))
+  assert(/^計画を作っています。質問にはすぐ答えます/.test(h('PLAN')) && /できた計画に続けて入れます/.test(h('PLAN')) && /^JavaScript を作っています/.test(h('GENERATE')) && /^計画を作り直しています/.test(h('REVISE'))
     && ![h('PLAN'), h('GENERATE'), h('REVISE')].some(x => /応答の後に送れます/.test(x)) && /下書きとして残しています/.test(h('PLAN', { accepted: false })) && /^計画を作っています/.test(h('PLAN', { accepted: false })), `W6: 作業の種類ごとの案内: ${h('PLAN')} ｜ ${h('PLAN', { accepted: false })}`);
 });
 await section(async () => {

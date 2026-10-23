@@ -77,7 +77,7 @@ console.log('\n--- 1. §37 / §40 / §41 承認分岐（Change Group = 1 PUT・�
   const rolled2 = await E.executeRollback(rb2, { api: mock.api, execution: log });
   assert(rolled2.status === 'ROLLED_BACK_VERIFIED' && JSON.stringify(statusOf(mock)) === JSON.stringify(before) && rolled2.verification.restoredToSnapshot === true && log.steps.every(s => s.rollbackStatus === 'ROLLBACK_VERIFIED') && mock.calls.filter(c => c === 'PUT status').length === 2, '§43 Rollback: snapshot のプロセス設定と完全一致（ROLLED_BACK_VERIFIED）・各 step に rollbackStatus');
   const audit = E.buildAudit({ plan: p, review: rv, prepared, execution: log, rollback: rolled2 });
-  assert(audit.execution.process && audit.execution.process.before.states.length === 3 && /部長承認/.test(audit.execution.process.mermaid.planned) && audit.execution.process.actual.states.length === 4 && audit.rollback.status === 'ROLLED_BACK_VERIFIED' && audit.afterSnapshot.status && audit.beforeSnapshot.status, '§32 Audit: Before / Planned / Actual のプロセス（Planned は計画の図。2026-10-19: 確認の結果の要約の写しは持たない）・snapshot・rollback');
+  assert(audit.execution.process && audit.execution.process.before.states.length === 3 && /部長承認/.test(audit.execution.process.mermaid.planned) && audit.execution.process.actual.states.length === 4 && audit.rollback.status === 'ROLLED_BACK_VERIFIED' && audit.afterSnapshot.status && audit.beforeSnapshot.status, '§32 Audit: 変更前 / Planned / Actual のプロセス（Planned は計画の図。2026-10-19: 確認の結果の要約の写しは持たない）・snapshot・rollback');
 }
 {
   // §40: 3 状態 / 3 アクション → 4 状態 / 6 アクション（SECONDARY の差し戻しを含む）
@@ -132,7 +132,7 @@ console.log('\n--- 2. §36 / §37 Change Group の形成・孤立・新規フィ
   const { prepared, log, rb, rolled } = await flow(p, mock);
   assert(prepared.groups.length === 1 && prepared.groups[0].stepIds.join() === 'P2,P3,P4,P5' && prepared.groups[0].anchorStepId === 'P2' && prepared.steps[0].groupId === null, 'group: P2〜P5（非 Process の依存 P1 が先に済む）');
   assert(log.status === 'DONE' && log.steps.map(s => s.status).join() === 'VERIFIED,VERIFIED,VERIFIED,VERIFIED,VERIFIED' && mock.calls.indexOf('POST fields') < mock.calls.indexOf('PUT status') && mock.calls.filter(c => c === 'PUT status').length === 2 && log.processActual.states['部長承認'].assignee.entities[0].entity.code === 'manager_approver', '§24 順序: フィールド追加 → Process 1 PUT・作業者は新規フィールド（temporaryId を解決）');
-  assert(rb.steps.map(s => s.actionType).join() === 'RESTORE_PROCESS_SETTINGS,DELETE_FIELD' && rolled.status === 'ROLLED_BACK_VERIFIED' && JSON.stringify(statusOf(mock)) === JSON.stringify(beforeS) && !mock.st.fields.manager_approver, '§31 cross-category rollback: Process を先に戻し（参照が消えてから）フィールドを削除・snapshot と一致');
+  assert(rb.steps.map(s => s.actionType).join() === 'RESTORE_PROCESS_SETTINGS,DELETE_FIELD' && rolled.status === 'ROLLED_BACK_VERIFIED' && JSON.stringify(statusOf(mock)) === JSON.stringify(beforeS) && !mock.st.fields.manager_approver, '§31 cross-category rollback: Process を先に戻し（参照が消えてから）フィールドを削除・反映前の設定と一致');
 }
 {
   // Change Group の分割: Process step の非 Process 依存がアンカーより後にあれば別グループ
@@ -266,7 +266,7 @@ console.log('\n--- 6. §41 / §27 Transaction group の失敗・§17 副作用�
   ], [pf('NEW_FIELD_1', '部長承認者', 'manager_approver', 'USER_SELECT')]);
   const mock = makeKintoneMock(DATA); mock.ctl.failPut = 'status'; const beforeS = statusOf(mock);
   const { log, rb, rolled } = await flow(p, mock);
-  assert(log.status === 'PARTIAL' && log.steps.map(s => s.status).join() === 'VERIFIED,FAILED,FAILED,FAILED,SKIPPED' && log.steps[1].reason === 'API_ERROR' && log.steps[4].reason === 'STOPPED_AFTER_FAILURE' && JSON.stringify(stripRev(log.actualAfterRaw.status)) === JSON.stringify(beforeS) && log.actualAfterRaw.fields.properties.manager_approver, 'PUT 失敗: Process 3 step FAILED・後続 SKIPPED・プロセス設定は無傷・先行フィールドは残る');
+  assert(log.status === 'PARTIAL' && log.steps.map(s => s.status).join() === 'VERIFIED,FAILED,FAILED,FAILED,SKIPPED' && log.steps[1].reason === 'API_ERROR' && log.steps[4].reason === 'STOPPED_AFTER_FAILURE' && JSON.stringify(stripRev(log.actualAfterRaw.status)) === JSON.stringify(beforeS) && log.actualAfterRaw.fields.properties.manager_approver, '書き込み 失敗: Process 3 step FAILED・後続 SKIPPED・プロセス設定は無傷・先行フィールドは残る');
   assert(rb.steps.map(s => s.actionType).join() === 'DELETE_FIELD' && rolled.status === 'ROLLED_BACK_VERIFIED' && !mock.st.fields.manager_approver, 'rollback 対象は反映済みのフィールドだけ');
 }
 {

@@ -113,7 +113,7 @@ console.log('\n--- 1. KTAiClient: plan envelope / receive ---');
   bad.plan.steps.push({ ...bad.plan.steps[3], id: 'P6', targetRef: 'ghost2', alternativeId: null, validation: { status: 'ok', issues: [] } });
   //   2026-10-23（§12.61）: 未知の根拠 ID の除去・存在しない既存資産の invalid は Gateway（validate-plan）の仕事。Toolkit の受け取りは契約の関所だけで、形はそのまま返す
   const thrownP = (r) => { try { KTAiClient.receive('plan', r); return null; } catch (e) { return e.code; } };
-  assert(KTAiClient.receive('plan', bad).relevantFields.some(x => x.fieldCode === 'ghost') && thrownP({ ...PLAN_RESPONSE, plan: null }) === 'INVALID_RESPONSE' && thrownP({ ...PLAN_RESPONSE, contractVersion: '2.0' }) === 'UNSUPPORTED_CONTRACT_VERSION', 'receive: Gateway の形をそのまま返す（根拠 ID・既存資産を読み直さない）。plan 無し / contractVersion 不一致 → AiClientError');
+  assert(KTAiClient.receive('plan', bad).relevantFields.some(x => x.fieldCode === 'ghost') && thrownP({ ...PLAN_RESPONSE, plan: null }) === 'INVALID_RESPONSE' && thrownP({ ...PLAN_RESPONSE, contractVersion: '2.0' }) === 'UNSUPPORTED_CONTRACT_VERSION', 'receive: AI サービスの形をそのまま返す（根拠 ID・既存資産を読み直さない）。plan 無し / contractVersion 不一致 → AiClientError');
   const cap = KTAiClient.capabilityFromHealth(HEALTH_BOTH);
   const capQa = KTAiClient.capabilityFromHealth(HEALTH_QA_ONLY);
   assert(cap.available && cap.features['change-planner'].available === true && capQa.available && capQa.features['change-planner'].available === false && capQa.features['change-planner'].reason === C.NOT_ENTITLED, 'capability: feature ごとの可否（Q&A のみの契約では planner 不可）');
@@ -157,7 +157,7 @@ console.log('\n--- 3. 計画の表示（会話の計画の右の「計画」と�
   assert(h.includes('<b>P1</b>') && h.includes('<b>P2</b>') && h.includes('<b>P3</b>') && h.includes('依存：P1 の後') && h.includes('依存：P2 の後'), '手順 P1〜P3 と依存関係');
   assert(h.includes('<b>A1</b>') && h.includes('既存「承認者」を再利用') && h.indexOf('<b>P4</b>') > h.indexOf('代替案'), '代替案 A1 の下に P4');
   assert(h.includes(`data-eid="${E_AMOUNT}"`) && h.includes(`data-eid="${E_APPROVER}"`), '根拠チップ（data-eid）');
-  assert(h.includes('kt-ai-plan-json-toggle') && h.includes('kt-ai-plan-json-copy') && h.includes('&quot;planVersion&quot;: &quot;1&quot;') && h.includes('検証で除去・調整した項目'), 'JSON view / copy と検証の warnings');
+  assert(h.includes('kt-ai-plan-json-toggle') && h.includes('kt-ai-plan-json-copy') && h.includes('&quot;planVersion&quot;: &quot;1&quot;') && h.includes('AI の返答から Toolkit が外した項目（技術者向け）'), 'JSON view / copy と検証の warnings');
   assert(h.includes('存在しない一覧') && h.includes('既存として参照'), '無効な step は理由付きで表示（黙って消さない）');
   const json = KTContextUi.planJson(planN);
   assert(json.planVersion === '1' && json.steps.length === 5 && json.steps[0].execution.mode === 'PLAN_ONLY' && !('clientWarnings' in json) && !('usage' in json), 'Change Plan JSON（右の「計画」の［JSON をコピー］と同じ部品 planJson）: planVersion / steps / execution');

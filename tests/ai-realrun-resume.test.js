@@ -151,7 +151,7 @@ await section(async () => {
 });
 
 // =========================================================
-console.log('\n--- §R2. 検証の上限と組み合わせ: 猶予の間に届いた応答は done（終了不明にしない）---');
+console.log('\n--- §R2. 費用の上限と組み合わせ: 猶予の間に届いた応答は done（終了不明にしない）---');
 const HOST = 't.cybozu.com';
 const setConfig = (storage, o = {}) => storage.setItem(`ktAi.budget.v1.${HOST}`, JSON.stringify({ id: 'v1', limitUsd: 10, maxCalls: 100, createdAt: '2026-10-10T00:00:00Z', ...o }));
 const ledgerOf = (storage) => { const raw = storage.getItem(`ktAi.budgetLedger.v1.${HOST}.v1`); return raw ? JSON.parse(raw) : null; };

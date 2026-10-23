@@ -32,7 +32,7 @@ const C = KTAiClient.ERROR_CODES;
 const I = KTAiConversation.INTENT;
 async function section(fn) { try { await fn(); } catch (e) { assert(false, `例外: ${e && e.stack ? e.stack.split('\n').slice(0, 4).join(' / ') : e}`); } }
 const HOST = 't.cybozu.com';
-const PAGE_TEXT = 'このページの有効期限が切れ、AIとの接続を更新できません。作成済みの内容はこの画面に残っています。再読み込みすると、この会話は失われます。';
+const PAGE_TEXT = 'このページの有効期限が切れ、AI との接続を更新できません。作成済みの内容はこの画面に残っています。再読み込みすると、この会話は失われます。';
 /** kintone.proxy の実際の失敗（2026-10-15 の実機で受けた形: JSON の文字列） */
 const CB_CS01 = JSON.stringify({ code: 'CB_CS01', messageType: 'text', success: false, id: 'x', message: 'ページの有効期限が切れています。ページを再読み込みしてください。' });
 const jsonResponse = (status, obj) => ({ status, headers: { get: (k) => (/content-type/i.test(k) ? 'application/json' : null) }, text: async () => JSON.stringify(obj) });
@@ -202,7 +202,7 @@ await section(async () => {
 });
 
 // =========================================================
-console.log('\n--- §P3. 検証の上限の記録: 接続の更新で止まった失敗は AI を呼んでいない → 確保を解放 ---');
+console.log('\n--- §P3. 費用の上限の記録: 接続の更新で止まった失敗は AI を呼んでいない → 確保を解放 ---');
 await section(async () => {
   const pe = new KTAiClient.AiClientError({ code: C.PAGE_EXPIRED, message: PAGE_TEXT }); pe.tokenStage = true;
   const te = new KTAiClient.AiClientError({ code: C.TRANSPORT_ERROR, message: 'x' }); te.tokenStage = true;
@@ -260,7 +260,7 @@ await section(async () => {
   assert(v.generated.C1.status === 'verified' && v.generated.C2.status === 'verified' && v.generated.C3.status === 'failed' && v.generated.C3.failure.reason === C.PAGE_EXPIRED && v.generated.C3.failure.stop === 'page' && !v.generated.C3.failure.endUnknown && inc && inc.kind === 'page' && inc.stoppedAt === 'C3' && FS.readyOf(v) === false, `P4-1: C3 の前の接続の更新が PAGE_EXPIRED → 止める理由 page（終了不明にしない）。C1 / C2 は検証済みのまま・C3 の失敗の記録を残す: ${JSON.stringify({ C3: v.generated.C3.failure, inc })}`);
   const h = finalHtml(x), vis = visibleText(h);
   const b = restButtonOf(h);
-  assert(/JavaScript・モバイルの編集制御はできました。モバイルの入力チェックの作成中に、このページの有効期限が切れ、AIとの接続を更新できませんでした。/.test(vis) && /作成済みの内容はこの画面に残っています。再読み込みすると、この会話は失われます。/.test(vis) && /残り 1 件から再開できます。/.test(vis) && b && !b.disabled && !/接続解除|Nest Rec AIに接続|再読み込みしてください|契約/.test(vis) && !/PAGE_EXPIRED|CB_CS01|token/i.test(vis), `P4-2: 作成途中のカード: できたもの・止めたもの・ページの有効期限の理由・作成済みの内容が残ること・再読み込みで会話が失われること（再読み込みや再接続を勧めない。内部の値・契約の語は出さない）: ${vis.replace(/\s+/g, ' ').slice(0, 300)}`);
+  assert(/JavaScript・モバイルの編集制御はできました。モバイルの入力チェックの作成中に、このページの有効期限が切れ、AI との接続を更新できませんでした。/.test(vis) && /作成済みの内容はこの画面に残っています。再読み込みすると、この会話は失われます。/.test(vis) && /残り 1 件から再開できます。/.test(vis) && b && !b.disabled && !/接続解除|Nest Rec AIに接続|再読み込みしてください|契約/.test(vis) && !/PAGE_EXPIRED|CB_CS01|token/i.test(vis), `P4-2: 作成途中のカード: できたもの・止めたもの・ページの有効期限の理由・作成済みの内容が残ること・再読み込みで会話が失われること（再読み込みや再接続を勧めない。内部の値・契約の語は出さない）: ${vis.replace(/\s+/g, ' ').slice(0, 300)}`);
   assert(x.calls.ask.length === 0 && (v.openQuestions || []).length === 0 && !x.c.messages().some(m => m.type === 'ERROR'), 'P4-3: 失敗を新しい確認（質問・エラーのカード）に変えない');
   const hashes = [v.generated.C1.candidateHash, v.generated.C2.candidateHash];
   //   回復した後（接続の更新が通る）に［残りの JavaScript を作る］→ C3 だけ
@@ -273,7 +273,7 @@ await section(async () => {
   const te = new KTAiClient.AiClientError({ code: C.TRANSPORT_ERROR, message: 'x' }); te.tokenStage = true;
   const pe = new KTAiClient.AiClientError({ code: C.PAGE_EXPIRED, message: PAGE_TEXT });
   const se = new KTAiClient.AiClientError({ code: C.SESSION_EXPIRED, message: 'x' }); se.tokenStage = true;
-  assert(S.stopKindOf(pe) === 'page' && S.stopKindOf(te) === 'token' && S.stopKindOf(se) === 'auth' && S.stopKindOf(new KTAiClient.AiClientError({ code: C.TRANSPORT_ERROR, message: 'x' })) === 'disconnected' && S.STOP_KINDS.includes('page') && S.STOP_KINDS.includes('token') && !S.stopEndUnknown('page') && !S.stopEndUnknown('token') && S.callEndOf(pe) === 'error', 'P4-5: 止める理由: PAGE_EXPIRED → page・接続の更新の通信の失敗 → token・更新で認証が切れた → auth（どれも終了不明にしない）。送った後の切断は今まで通り disconnected');
+  assert(S.stopKindOf(pe) === 'page' && S.stopKindOf(te) === 'token' && S.stopKindOf(se) === 'auth' && S.stopKindOf(new KTAiClient.AiClientError({ code: C.TRANSPORT_ERROR, message: 'x' })) === 'disconnected' && S.STOP_KINDS.includes('page') && S.STOP_KINDS.includes('token') && !S.stopEndUnknown('page') && !S.stopEndUnknown('token') && S.callEndOf(pe) === 'error', 'P4-5: 止める理由: PAGE_EXPIRED → page・接続の更新の通信の失敗 → トークン・更新で認証が切れた → auth（どれも終了不明にしない）。送った後の切断は今まで通り disconnected');
   assert(typeof S.STOP_REASON_JA.page === 'string' && typeof S.STOP_REASON_JA.token === 'string' && /AI には送っていません/.test(S.STOP_REASON_JA.token), 'P4-6: 理由の文がある（接続の更新の失敗は「AI には送っていません」と書く）');
 });
 
@@ -287,7 +287,7 @@ await section(async () => {
   const lines = stripC(KTContextUi.sessionLinesHtml({ connected: true, scope: { domain: HOST }, refreshExpiresAt: '2099-01-01T00:00:00Z' }, cap));
   assert(st === PAGE_TEXT && KTAiClient.ERROR_TEXT.PAGE_EXPIRED === PAGE_TEXT && !/契約|接続してください/.test(st), `P5-1: 状態の文は指示書の文のまま（契約・再接続を勧めない）: ${st}`);
   assert(/AI ページの有効期限切れ/.test(head) && !/AI 利用できません/.test(head) && /AI 利用できません/.test(headOther), `P5-2: ヘッダーは「AI ページの有効期限切れ」（ほかの理由は今まで通り「利用できません」）: ${head.replace(/\s+/g, ' ').slice(0, 160)}`);
-  assert(/契約—（このページからは確かめられません）/.test(lines.replace(/\s+/g, '')) && /対処接続解除・再接続では回復しません/.test(lines.replace(/\s+/g, '')) && (lines.match(/有効期限が切れ、AIとの接続/g) || []).length === 1, `P5-3: 接続の欄: 契約の欄にページの文を出さない・回復しない操作を勧めない（文は AI Assistant の欄に 1 回）: ${lines.replace(/\s+/g, ' ')}`);
+  assert(/契約—（このページからは確かめられません）/.test(lines.replace(/\s+/g, '')) && /対処接続解除・再接続では回復しません/.test(lines.replace(/\s+/g, '')) && (lines.match(/有効期限が切れ、AI との接続/g) || []).length === 1, `P5-3: 接続の欄: 契約の欄にページの文を出さない・回復しない操作を勧めない（文は AI Assistant の欄に 1 回）: ${lines.replace(/\s+/g, ' ')}`);
   assert(KTAiClient.errorCategory(C.PAGE_EXPIRED) === 'page' && KTAiClient.CATEGORY_JA.page === 'ページの有効期限' && KTAiClient.errorCategory(C.SESSION_EXPIRED) === 'auth', 'P5-4: エラーの種類は page（接続・認証や契約の種類にしない）');
 });
 await section(async () => {

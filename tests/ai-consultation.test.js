@@ -86,7 +86,7 @@ const PLAN_NEW_DESKTOP = planOf({ customizations: [CUST({ requirement: '金額�
 //   簡素化 B（2026-10-16）: 記法（var）は生成工程の機械検査が止める（Toolkit の写しは削除）。偽の生成工程も、新しいコードに var が残れば modern-js の block を返す（本物の文の形）
 const varBlockOf = (g) => { const code = g && g.patch && Array.isArray(g.patch.operations) ? g.patch.operations.map(o => String((o && o.content) || '')).join('\n') : String((g && g.code) || ''); const lines = code.split('\n'); const at = lines.findIndex(l => /(^|[^\w$.'"`])var\s+[A-Za-z_$]/.test(l)); if (at < 0) return null; const name = (/var\s+([A-Za-z_$][\w$]*)/.exec(lines[at]) || [])[1]; return { name: 'modern-js', ok: false, severity: 'block', message: `記法の問題が残っています（1 件）: ${at + 1} 行目「${lines[at].trim()}」: var ${name}` }; };
 //   簡素化 B（2026-10-17）・2026-10-18: 本物の Gateway と同じく、検証結果に書き込む本文の指紋（bodyHash。Gateway と同じ計算。tests/helpers/gw-hash.js）を入れる
-const passVerification = (ctx, g = null) => { const vb = varBlockOf(g); const re = (ctx && ctx.verification && ctx.verification.requiredEffects) || []; return re.length ? { version: '1', ...(g ? { bodyHash: gwHashOfCtx(ctx, g) } : {}), passed: !vb, machine: vb ? [vb] : [], requiredEffects: re.map(x => ({ requirementId: x.requirementId, requirementIds: x.requirementIds, field: x.field, effect: x.effect, status: 'present' })), behavior: { status: 'passed', reason: null, cases: re.flatMap((x, i) => (x.events && x.events.length ? x.events : [null]).flatMap((ev, j) => (x.condition ? ['match', 'nomatch'] : ['match']).map(side => ({ id: `K${i + 1}-${j + 1}-${side}`, requirementIds: x.requirementIds, field: x.field, effect: x.effect, expect: side === 'match' ? x.effect : ({ lock: 'not-locked', warn: 'not-warned', 'block-save': 'save-allowed', 'set-value': 'value-unchanged', 'show-hide': 'show-hide' })[x.effect], side, ...(ev ? { event: ev } : {}), verdict: 'pass', observed: {}, message: '期待どおり' })))) }, repairs: { count: 0, reasons: [], stoppedBy: null }, unverified: ['実機での動作'] } : undefined; };
+const passVerification = (ctx, g = null) => { const vb = varBlockOf(g); const re = (ctx && ctx.verification && ctx.verification.requiredEffects) || []; return re.length ? { version: '1', ...(g ? { bodyHash: gwHashOfCtx(ctx, g) } : {}), passed: !vb, machine: vb ? [vb] : [], requiredEffects: re.map(x => ({ requirementId: x.requirementId, requirementIds: x.requirementIds, field: x.field, effect: x.effect, status: 'present' })), behavior: { status: 'passed', reason: null, cases: re.flatMap((x, i) => (x.events && x.events.length ? x.events : [null]).flatMap((ev, j) => (x.condition ? ['match', 'nomatch'] : ['match']).map(side => ({ id: `K${i + 1}-${j + 1}-${side}`, requirementIds: x.requirementIds, field: x.field, effect: x.effect, expect: side === 'match' ? x.effect : ({ lock: 'not-locked', warn: 'not-warned', 'block-save': 'save-allowed', 'set-value': 'value-unchanged', 'show-hide': 'show-hide' })[x.effect], side, ...(ev ? { event: ev } : {}), verdict: 'pass', observed: {}, message: '期待どおり' })))) }, repairs: { count: 0, reasons: [], stoppedBy: null }, unverified: ['実際の画面での動作'] } : undefined; };
 const genResponse = (ctx, g) => ({ ok: true, contractVersion: '2.1', meta: { requestId: 'gen-1', usage: { usedThisMonth: 3, monthlyLimit: 20 }, normalization: { warnings: [] } }, generated: g, ...(passVerification(ctx, g) ? { verification: passVerification(ctx, g) } : {}) });
 const genFor = (ctx) => {
   const c = ctx.customization;
@@ -194,12 +194,12 @@ console.log('\n--- §44-2. 会話の開始 / 再開 / 別 JS の確認 / Planner
   assert(ctx.subject && ctx.subject.type === 'javascript' && ctx.subject.sourceId === 'desktop:js:fieldOnOff.js' && ctx.subject.name === 'fieldOnOff.js' && ctx.subject.target === 'desktop' && ctx.subject.customizationType === 'FILE' && ctx.subject.sourceAvailable === true && ctx.subject.fields.some(f => f.code === 'amount' && f.access === 'CONTROL'), 'Planner Context に subject（相談中の JS。本文なし）');
   const jsFact = ctx.facts.find(f => f.kind === 'js-file' && /fieldOnOff\.js/.test(f.statement));
   assert(jsFact && ctx.dictionary.jsFiles.includes('fieldOnOff.js') && ctx.dictionary.jsFiles.includes('ext.js'), 'subject の js-file fact は Context に残る（相談対象は省略しない）・dictionary.jsFiles に URL の basename も');
-  assert(/fieldOnOff\.jsへ処理を統合する案が適切/.test(m.$('kt-ai-change-summary').innerHTML) && m.conv().activePlan().plan.customizations[0].strategy === 'EXTEND_EXISTING_JS', 'AI の回答: 既存 JS へ統合する案（§6）');
+  assert(/fieldOnOff\.jsへ処理を統合する案が適切/.test(m.$('kt-ai-change-summary').innerHTML) && m.conv().activePlan().plan.customizations[0].strategy === 'EXTEND_EXISTING_JS', 'AI の回答: 既存の JavaScript へ統合する案（§6）');
   // 相談中の短い文も相談（計画）として扱う
   assert(m.conv().classify('金額を 100 万円以上にする').intent !== KTAiConversation.INTENT.ASK || true, '（分類の参考）');
   const q = await m.panel.send('このファイルは何をしている？');
   assert(q.intent === KTAiConversation.INTENT.EXPLAIN_CUSTOMIZATION || q.intent === KTAiConversation.INTENT.ASK, '相談中の質問は質問として扱う（計画は作らない）');
-  assert(m.calls.plan.length === 1, '質問で Planner は呼ばれない');
+  assert(m.calls.plan.length === 1, '質問で AI の計画は呼ばれない');
   // 別の JS を相談 → 確認 → 新しい会話
   const seed2 = seedFor('mobileLock.js', 'mobile', { text: MOBILE_LOCK });
   const r4 = m.panel.consult(seed2);
@@ -213,7 +213,7 @@ console.log('\n--- §44-2. 会話の開始 / 再開 / 別 JS の確認 / Planner
 }
 
 // =========================================================
-console.log('\n--- §45. 実装仕様（C-1 第 3 段で変更）: 最終案の一部として自動で確定・右は閲覧だけ・チャットの文では承認しない・修正で v2（v1 は旧版）---');
+console.log('\n--- §45. JavaScript の仕様（C-1 第 3 段で変更）: 最終案の一部として自動で確定・右は閲覧だけ・チャットの文では承認しない・修正で v2（v1 は旧版）---');
 //   C-1 第 3 段（2026-10-08）: 仕様の確定（［この仕様で確定］・「それでいい」の案内・確定前は生成しない・会話の仕様のカード）は削除した。
 //   仕様は最終案の一部として自動で確定し（ai-flow-redesign の R09-2）、右の「変更内容」で閲覧だけできる（F7-1〜F7-4）。承認は最終案の［この内容で反映する］だけ
 {
@@ -221,7 +221,7 @@ console.log('\n--- §45. 実装仕様（C-1 第 3 段で変更）: 最終案の�
   await ticks();
   m.panel.consult(seedFor('fieldOnOff.js', 'desktop', { text: FIELD_ON_OFF }));
   const { v: v1 } = await adoptScreen(m, '承認済みになったら金額を編集できなくしたい');
-  assert(v1.spec && v1.spec.version === 1 && v1.spec.status === 'CONFIRMED' && v1.spec.customizeRevision === '12' && v1.spec.specId === `${v1.planId}:spec` && v1.spec.subject?.name === 'fieldOnOff.js' && !m.types().includes('SPEC'), '計画 v1 → 実装仕様 v1（相談対象付き）。最終案の一部として自動で確定し customize revision 12 を記録（会話に仕様のカードは出さない）');
+  assert(v1.spec && v1.spec.version === 1 && v1.spec.status === 'CONFIRMED' && v1.spec.customizeRevision === '12' && v1.spec.specId === `${v1.planId}:spec` && v1.spec.subject?.name === 'fieldOnOff.js' && !m.types().includes('SPEC'), '計画 v1 → JavaScript の仕様 v1（相談対象付き）。最終案の一部として自動で確定し customize revision 12 を記録（会話に仕様のカードは出さない）');
   //   2026-10-19: 実装仕様のカード（右の「変更内容」の #kt-ai-spec）は廃止した。目的・方針（統合先）・画面・対象のフィールドは右の「変更内容」の要約
   const html = m.$('kt-ai-change-summary').innerHTML;
   assert(/<h3>承認済みになったら金額を編集できなくしたい<\/h3>/.test(html) && /既存の「fieldOnOff\.js」に統合/.test(html) && /対象のフィールド: [^<]*「[^」]+」（制御）/.test(html) && /編集画面/.test(html) && !/amount（CONTROL）|app\.record\./.test(html) && !/data-act="(confirm-spec|revise-spec|confirm-generate|generate)"/.test(html), `${KIT.stripC(html).replace(/\s+/g, ' ').slice(0, 300)} / ` + '仕様（右の「変更内容」）: 目的 / PC ✎ fieldOnOff.js を変更 / 対象フィールド（名前と扱い）/ 画面（§0e.3: フィールドのコード・扱いの英語・イベント名は出さない）。閲覧だけ（［仕様を修正］［この仕様で確定］［確定してコードを作る］は無い）');
@@ -237,7 +237,7 @@ console.log('\n--- §45. 実装仕様（C-1 第 3 段で変更）: 最終案の�
   const rightSpec = m.$('kt-ai-change-summary').innerHTML;
   assert(/モバイル/.test(rightSpec) && /新しい JavaScript「[^」]+」を登録/.test(rightSpec) && /既存の「fieldOnOff\.js」に統合/.test(rightSpec), `仕様 v2: PC は既存へ統合・モバイルは新しい JavaScript（§6）。右の「変更内容」は v2 だけ: ${KIT.stripC(rightSpec).replace(/\s+/g, ' ').slice(0, 300)}`);
   //   旧版（v1）の仕様のカードは削除した。前の最終案は 1 行に畳む（ai-flow-redesign の R10-4・F2-2）
-  assert(/前の最終案 — このあと直した案があります/.test(m.chat()) && !/実装仕様 v\d/.test(m.chat()), '前の最終案は「このあと直した案があります」に畳む（会話に仕様の版の番号は出さない）');
+  assert(/前の最終案 — このあと直した案があります/.test(m.chat()) && !/JavaScript の仕様 v\d/.test(m.chat()), '前の最終案は「このあと直した案があります」に畳む（会話に仕様の版の番号は出さない）');
   assert(typeof m.conv().confirmSpec === 'undefined' && KTAiConversation.MSG.SPEC === undefined && typeof m.panel.confirmSpec === 'undefined', '仕様の確定の操作・仕様のカードの種類は無い（ai-flow-redesign の F7-1・F7-4）');
 }
 
@@ -259,8 +259,8 @@ console.log('\n--- §46〜§53（UI 経由）: 既存 FILE の差し替え登録
   //   §0e.1（2026-10-09）: 登録の準備（読み取りだけ）は最終案が承認できる状態になると自動で走り、以前の登録の最終確認（§21）の内容を承認の欄に出す
   await KIT.waitUntil(() => m.panel.finalPrecheck().status === 'ready', 60);
   { const pre = m.panel.finalPrecheck(); const chatPre = KIT.stripC(m.chat());
-    assert(pre.items.files.join() === '✎ fieldOnOff.js（PC）既存ファイルを更新（同じ位置）' && pre.items.keep[0] === 'PC：1件変更　モバイル：変更なし' && pre.items.keep[1] === '既存の CSS（1 件）・その他の JS（2 件）・適用範囲（全員）は変更しません' && /運用環境には反映しません/.test(pre.items.target) && writes(m).length === 0 && m.panel.jsExecState().stage === 'idle', '承認の欄（以前の最終確認 §21）: 変更の一覧・PC / モバイルの件数・保持する設定（適用範囲は画面の言葉「全員」）・運用環境には反映しない（準備は読み取りだけ・書き込み 0）');
-    assert(/反映の前の確認（書き込みなし）/.test(chatPre) && /✎ fieldOnOff\.js（PC）既存ファイルを更新/.test(chatPre) && /既存の CSS（1 件）・その他の JS（2 件）・適用範囲（全員）は変更しません/.test(chatPre) && !/適用範囲（ALL）|Mobile：/.test(chatPre) && KIT.applyButtonOf(m) && !KIT.applyButtonOf(m).disabled, '最終案のカードの承認の欄に同じ内容を出し、［動作テスト環境へ反映］を押せる'); }
+    assert(pre.items.files.join() === '✎ fieldOnOff.js（PC）既存ファイルを更新（同じ位置）' && pre.items.keep[0] === 'PC：1件変更　モバイル：変更なし' && pre.items.keep[1] === '既存の CSS（1 件）・その他の JavaScript（2 件）・適用範囲（全員）は変更しません' && /運用環境には反映しません/.test(pre.items.target) && writes(m).length === 0 && m.panel.jsExecState().stage === 'idle', '承認の欄（以前の最終確認 §21）: 変更の一覧・PC / モバイルの件数・保持する設定（適用範囲は画面の言葉「全員」）・運用環境には反映しない（準備は読み取りだけ・書き込み 0）');
+    assert(/反映の前の確認（書き込みなし）/.test(chatPre) && /✎ fieldOnOff\.js（PC）既存ファイルを更新/.test(chatPre) && /既存の CSS（1 件）・その他の JavaScript（2 件）・適用範囲（全員）は変更しません/.test(chatPre) && !/適用範囲（ALL）|Mobile：/.test(chatPre) && KIT.applyButtonOf(m) && !KIT.applyButtonOf(m).disabled, '最終案のカードの承認の欄に同じ内容を出し、［動作テスト環境へ反映］を押せる'); }
   const r1 = await m.panel.send('JS を登録して');
   assert(r1.intent === KTAiConversation.INTENT.REQUEST_JS_PREVIEW && m.msgs()[m.msgs().length - 1].data?.kind === 'js-preview-needs-approval' && /［動作テスト環境へ反映］/.test(m.msgs()[m.msgs().length - 1].text) && writes(m).length === 0 && m.panel.jsExecState().stage === 'idle', '「JS を登録して」: 最終案のカードの［動作テスト環境へ反映］へ案内するだけ（登録しない・書き込み 0）');
   const nA = m.msgs().length;
@@ -281,7 +281,7 @@ console.log('\n--- §46〜§53（UI 経由）: 既存 FILE の差し替え登録
   const choicesBefore = KIT.stripC(m.chat());
   await clickChat(m, 'consult-resume');
   assert(/「other\.js」の相談に切り替える/.test(choicesBefore) && /まだ元に戻していない変更があります/.test(choicesBefore) && !m.msgs().some(x => x.data?.kind === 'consult-choices'), '別の JS の相談に切り替える前: 登録して戻していない変更があることを出す（［今の相談を続ける］で選択肢を消す）');
-  assert(/PUT \/preview\/app\/customize: ✓（revision 12 → 13）/.test(m.pane()) && /sourceHash/.test(m.pane()) && /id="kt-ai-jsreg-audit-copy"/.test(m.pane()) && /id="kt-ai-jsreg-rollback-start"/.test(m.pane()), 'コードペインの結果: PUT の revision・検証項目・［Audit JSON をコピー］［変更前の状態に戻す］');
+  assert(/PUT \/preview\/app\/customize: ✓（設定の版 12 → 13）/.test(m.pane()) && /sourceHash/.test(m.pane()) && /id="kt-ai-jsreg-audit-copy"/.test(m.pane()) && /id="kt-ai-jsreg-rollback-start"/.test(m.pane()), 'コードペインの結果: PUT の revision・検証項目・［Audit JSON をコピー］［変更前の状態に戻す］');
   await clickPane(m, 'kt-ai-jsreg-audit-copy');
   const audit = JSON.parse(m.copies.pop());
   assert(audit.kind === 'customization' && audit.consultationSubject.sourceId === 'desktop:js:fieldOnOff.js' && audit.approvedSpec?.version === 1 && audit.specVersions.length === 1 && audit.generated[0].codeReview.status === 'OK' && audit.generated[0].sourceBeforeHash === KTScan.hashText(FIELD_ON_OFF) && audit.customizationBefore.revision === '12' && audit.customizationAfter.revision === '13' && audit.verification.ok, 'Customization Audit（§37）: 相談対象・承認 spec・生成の出所と前後の指紋・登録前後・検証');
@@ -330,13 +330,13 @@ console.log('\n--- §46〜§53（UI 経由）: 既存 FILE の差し替え登録
 }
 
 // =========================================================
-console.log('\n--- 新規 JS（desktop）の登録 / mobile（desktop を変えない）/ URL の fallback / stale / Rollback stale ---');
+console.log('\n--- 新しい JavaScript（desktop）の登録 / mobile（desktop を変えない）/ URL の fallback / stale / Rollback stale ---');
 {
   const m = mount({ planResponse: PLAN_NEW_DESKTOP });
   await ticks();
   const { v } = await adoptScreen(m, '100万円以上なら警告を表示したい');
   const arN = await applyScreen(m);
-  assert(arN.pre.items.files.join() === '＋ amount-warning.js（PC）新規追加（3 番目・末尾）' && arN.pre.items.keep[0] === 'PC：1件追加　モバイル：変更なし' && m.panel.jsExecState().prepared.changes[0].kind === 'ADD_FILE' && m.panel.jsExecState().prepared.changes[0].name === 'amount-warning.js' && v.approval, '新規 JS: 承認の欄に ADD_FILE・末尾（3 番目）・PC 1 件追加 →［動作テスト環境へ反映］1 回で承認と登録');
+  assert(arN.pre.items.files.join() === '＋ amount-warning.js（PC）新規追加（3 番目・末尾）' && arN.pre.items.keep[0] === 'PC：1件追加　モバイル：変更なし' && m.panel.jsExecState().prepared.changes[0].kind === 'ADD_FILE' && m.panel.jsExecState().prepared.changes[0].name === 'amount-warning.js' && v.approval, '新しい JavaScript: 承認の欄に ADD_FILE・末尾（3 番目）・PC 1 件追加 →［動作テスト環境へ反映］1 回で承認と登録');
   assert(m.panel.jsExecState().execution.status === 'DONE' && jsNames(m, 'desktop').join() === 'https://cdnjs.cloudflare.com/ajax/libs/ext-lib/1.0.0/ext.js,fieldOnOff.js,amount-warning.js' && jsNames(m, 'mobile').join() === 'mobileLock.js', '§48 desktop JS 2 → 3（URL と既存を保持・mobile は不変）');
 }
 {
@@ -347,7 +347,7 @@ console.log('\n--- 新規 JS（desktop）の登録 / mobile（desktop を変え�
   assert(d.intent === KTAiConversation.INTENT.PROPOSE && d.reason === 'CONSULTATION' && m.calls.plan[0].ctx.subject.target === 'mobile', 'mobile JS の相談: 仮案 → 採用 → 計画（subject.target mobile）');
   const before = jsNames(m, 'desktop');
   const arM = await applyScreen(m);
-  assert(v.approval && m.panel.jsExecState().prepared.changes[0].target === 'mobile' && /（モバイル）新規追加/.test(arM.pre.items.files.join()) && arM.pre.items.keep[0] === 'PC：変更なし　モバイル：1件追加', 'mobile の新規 JS: 承認の欄にモバイル 1 件追加・PC 変更なし →［動作テスト環境へ反映］1 回で登録');
+  assert(v.approval && m.panel.jsExecState().prepared.changes[0].target === 'mobile' && /（モバイル）新規追加/.test(arM.pre.items.files.join()) && arM.pre.items.keep[0] === 'PC：変更なし　モバイル：1件追加', 'mobile の新しい JavaScript: 承認の欄にモバイル 1 件追加・PC 変更なし →［動作テスト環境へ反映］1 回で登録');
   assert(m.panel.jsExecState().execution.status === 'DONE' && jsNames(m, 'mobile').join() === 'mobileLock.js,approved-lock-mobile.js' && jsNames(m, 'desktop').join() === before.join(), '§56 mobile に登録・desktop は変更なし');
 }
 {
@@ -409,7 +409,7 @@ console.log('\n--- 新規 JS（desktop）の登録 / mobile（desktop を変え�
   assert(/自動では元に戻せません/.test(m.chat()), '会話にも案内');
 }
 
-console.log('\n--- §54 modern JavaScript（2026-10-05。§0d.3・簡素化 B で変更）: Toolkit は生成工程が検証したコードを書き換えない。var は生成工程の機械検査で止まり、登録できない ---');
+console.log('\n--- §54 modern JavaScript（2026-10-05。§0d.3・簡素化 B で変更）: Toolkit はAI サービスが検証したコードを書き換えない。var はAI サービスのコードの検査で止まり、登録できない ---');
 {
   // AI が var を含むコードを返した（古い Gateway・Gateway の修正の前と同じ）
   //   §0d.3（2026-10-08）の決定で期待値を変えた: 以前は Toolkit が生成の直後に const へ直して登録していたが、検証した候補と登録する候補（candidateHash）が
@@ -422,7 +422,7 @@ console.log('\n--- §54 modern JavaScript（2026-10-05。§0d.3・簡素化 B �
   const { v } = await adoptScreen(m, '100万円以上なら警告を表示したい');
   const g = v.generated.C1;
   const mj = g && g.verification && (g.verification.machine || []).find(x => x.name === 'modern-js' && !x.ok);
-  assert(g && g.generated.code === VAR_JS && g.status === 'unresolved' && mj && mj.severity === 'block' && /var record/.test(mj.message) && !g.review.checks.some(x => x.name === 'modern-js' && !x.gateway) && (v.final.blockers || []).some(b => b.text === `機械検査で登録を止める問題: ${mj.message}`), `§54 AI の var は書き換えず（生成工程が返したコードのまま）、生成工程の機械検査の block で止まる（Toolkit は記法を確かめない）: ${g && g.status} ${mj && mj.message}`);
+  assert(g && g.generated.code === VAR_JS && g.status === 'unresolved' && mj && mj.severity === 'block' && /var record/.test(mj.message) && !g.review.checks.some(x => x.name === 'modern-js' && !x.gateway) && (v.final.blockers || []).some(b => b.text === `コードの検査で登録を止める問題: ${mj.message}`), `§54 AI の var は書き換えず（AI サービスが返したコードのまま）、AI サービスのコードの検査の block で止まる（Toolkit は記法を確かめない）: ${g && g.status} ${mj && mj.message}`);
   assert(v.final && FS.readyOf(v) === false && !(await approveScreen(m)), '§54 var の残る候補の最終案は承認できない');
   //   簡素化（2026-10-17）: 会話のカードから JavaScript だけを登録する経路（open-js-register・登録の確認画面）は削除した。登録は［動作テスト環境へ反映］1 回の反映の中だけ
   await ticks(10);
@@ -438,7 +438,7 @@ console.log('\n--- §54 modern JavaScript（2026-10-05。§0d.3・簡素化 B �
   const { v } = await adoptScreen(m, '100万円以上なら警告を表示したい');
   const g = v.generated.C1;
   const mj = g && g.verification && (g.verification.machine || []).find(x => x.name === 'modern-js' && !x.ok);
-  assert(g && g.status === 'unresolved' && mj && /1 行目「var LIMIT = 1000000;」: var LIMIT/.test(mj.message) && (v.final.blockers || []).some(b => b.text === `機械検査で登録を止める問題: ${mj.message}`) && FS.readyOf(v) === false, `§54 直せない var は生成工程の機械検査の文（行・文）のまま止める理由に出す: ${mj && mj.message}`);
+  assert(g && g.status === 'unresolved' && mj && /1 行目「var LIMIT = 1000000;」: var LIMIT/.test(mj.message) && (v.final.blockers || []).some(b => b.text === `コードの検査で登録を止める問題: ${mj.message}`) && FS.readyOf(v) === false, `§54 直せない var はAI サービスのコードの検査の文（行・文）のまま止める理由に出す: ${mj && mj.message}`);
   //   簡素化（2026-10-17）: 会話のカードから JavaScript だけを登録する経路（open-js-register）は削除した。登録は［動作テスト環境へ反映］1 回の反映の中だけ
   assert(!(await approveScreen(m)) && !m.panel.jsExecState().prepared, `§54 承認できず、登録の準備もしない（登録は［動作テスト環境へ反映］の中だけ）: ${JSON.stringify(m.panel.jsExecState().prepared && m.panel.jsExecState().prepared.blockers)}`);
 }

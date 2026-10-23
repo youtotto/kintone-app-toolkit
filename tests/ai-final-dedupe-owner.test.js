@@ -40,16 +40,16 @@ const ADOPTED = F.PROPOSE[1].behaviors.filter(b => b.origin === 'user').map(b =>
 const AI_ITEM = F.PROPOSE[1].behaviors.find(b => b.origin === 'ai').text;
 //   2026-10-16（説明文を読みやすくする）: 制約の行は「本体（画面）。理由。」、実現した部分は「条件の場合、対象を編集できなくします（画面）。」の文
 //   （条件は満たした必須の動作の構造化した条件式 ステータス in ("承認済み") の文）。意味（対象・条件・画面・理由）は前の文と同じ
-const ROW_TEXT = '明細の行の追加・削除は防ぎません';
-const ROW_REASON = '入力欄（セル）の編集不可だけでは止められず、行のボタンを隠す API は Toolkit がまだ扱っていません';
+const ROW_TEXT = '「明細」テーブルの行は追加・削除できます';
+const ROW_REASON = '入力欄を編集できなくしても、行の追加・削除のボタンは残るためです。行の追加・削除もできなくしたいときは、その旨を依頼に加えてください（ボタンを隠す処理を計画に入れられます）';
 const ROWS = `${ROW_TEXT}（PC・モバイル）。${ROW_REASON}。`;
 const REALIZED_COND = '「ステータス」が「承認済み」の場合、';
 const REALIZED = `${REALIZED_COND}明細の品名・数量・単価を編集できなくします`;
 const READY = { status: 'ready', items: { target: '動作テスト環境（このアプリ）。運用環境には反映しません', confirmations: [] } };
-const OWNERLESS_RE = /担当するか決まっていません|担当が計画にありません|担当が計画に見つかりません|担当範囲外とされた要件/;
+const OWNERLESS_RE = /担当するか決まっていません|担当が計画にありません|担当が計画に見つかりません|担当範囲外と AI が申告した要件/;
 const INTERNAL = /\b[RBCP][0-9]+\b|requestId|PLAN_OWNER|AI_OUT_OF_SCOPE|coverage-owner|SUBTABLE_ROWS|requirementId|planOwners/;
 /** 反映の前の確認の確認項目（3 本の JavaScript の再検査。画面の jsRecheckOf と同じ引数）の画面の文 */
-const UNCONF_SUM = /計画の構造からは実現を確かめていない要件が \d+ 件あります/;
+const UNCONF_SUM = /計画の手順と JavaScript の内容からは実現を確かめられていない要件が \d+ 件あります/;
 const precheckTexts = (x, o = {}) => ['C1', 'C2', 'C3'].flatMap(cid => (R.recheckOf(x, cid, o).registration.confirmations || []).map(c => c.screenText));
 /** 生成の応答の coverage を差し替える mutate（cid → coverage を返す関数） */
 const withCoverage = (map) => (cid, g) => (map[cid] ? { ...g, coverage: map[cid](clone(g.coverage)) } : g);
@@ -93,7 +93,7 @@ await section(async () => {
   assert(!/今ある操作|申請する|1000000|でもない/.test(L) && /After: 作成中 → 承認待ち\s*（条件: 「金額」が100万円未満）/.test(RV) && /アクション「部長へ申請する」: 作成中 → 部長承認待ち\s*（条件: 「金額」が100万円以上）/.test(RV) && !/amount|1000000/.test(RV) && RT.includes('変更後: amount <= "1000000" and amount != "1000000"') && RT.includes('変更後: amount >= "1000000"'),
     `D1-6: 「申請する」の変更は左に重ねず、右の変更前後に「100万円未満」。実行される元の式は右の詳細だけ（実行する条件は変えない）: ${(RV.match(/After:[^\n]*/) || [''])[0]}`);
   assert(v.plan.steps.find(s => s.id === 'P2').spec.filterCond === 'amount <= "1000000" and amount != "1000000"' && v.review.steps.find(s => s.stepId === 'P2').diff.after.filterCond === 'amount <= "1000000" and amount != "1000000"', 'D1-6b: 計画と確認の変更後の条件式（実行される式）は変えていない');
-  assert(count(L, ROWS) === 1 && /この案の制約\s*明細の行の追加・削除は防ぎません（PC・モバイル）。/.test(L) && count(RV, ROWS) === 1 && fin.constraints.length === 1 && fin.constraints[0].text === ROW_TEXT && fin.constraints[0].reason === ROW_REASON,
+  assert(count(L, ROWS) === 1 && /この案の制約\s*「明細」テーブルの行は追加・削除できます（PC・モバイル）。/.test(L) && count(RV, ROWS) === 1 && fin.constraints.length === 1 && fin.constraints[0].text === ROW_TEXT && fin.constraints[0].reason === ROW_REASON,
     `D1-7: 行の追加・削除の制約は左の通常表示に 1 回・右の「できないこと」に 1 回（PC・モバイルで 1 行）: ${JSON.stringify(fin.constraints)}`);
   const supSec = secOf(L, '仮案からの補足', LEFT_SECTIONS.filter(s => s !== '仮案からの補足' && s !== 'この案で実現すること' && s !== 'この案の制約'));
   assert(!supSec.includes(F.PLAN_REPLY.slice(0, 20)) && !L.includes(F.PLAN_REPLY.slice(0, 20)) && !/kt-ai-final-reply/.test(hReady) && v.plan.provisionals.every(p => count(supSec, p.choice) === 1) && fin.changed.revision === false,
@@ -107,8 +107,8 @@ await section(async () => {
   //   文の値（100万円など）を計画の中で探して「実現している」とする判定は差し戻した。右の「確認できないこと」に件数の 1 行（止めない・左と反映の前の確認には出さない）
   assert(!OWNERLESS_RE.test(L) && !OWNERLESS_RE.test(RT) && !/確認できないこと/.test(L) && UNCONF_SUM.test(RV) && pre.length === 1 && /既存のファイルの 2 行が置き換え・削除されます/.test(pre[0]) && !pre.some(t => OWNERLESS_RE.test(t) || /計画の構造からは実現を確かめていません/.test(t)),
     `D1-10: 左・右・反映の前の確認のどれにも担当未定が無い（確認の限界は右の件数の 1 行だけ。反映の前の確認の確認項目は既存の行の置き換えの 1 件）: ${JSON.stringify(pre)}`);
-  assert(preBefore.some(t => /担当範囲外とされた要件「承認済み。PCとモバイルの両方：金額と明細を編集不可にする」の担当が計画に見つかりません/.test(t)),
-    `D1-11: 原因の再現: 反映の前の再検査に要件の台帳と担当の集まりを渡さない（修正の前の画面の引数）と、同じ素材で「担当範囲外とされた要件…計画に見つかりません」が出る: ${JSON.stringify(preBefore)}`);
+  assert(preBefore.some(t => /担当範囲外と AI が申告した要件「承認済み。PCとモバイルの両方：金額と明細を編集不可にする」の担当が計画に見つかりません/.test(t)),
+    `D1-11: 原因の再現: 反映の前の再検査に要件の台帳と担当の集まりを渡さない（修正の前の画面の引数）と、同じ素材で「担当範囲外と AI が申告した要件…計画に見つかりません」が出る: ${JSON.stringify(preBefore)}`);
   const btns = [...hReady.matchAll(/<button[^>]*data-act="open-code"\s+data-cid="([^"]+)"[^>]*>([^<]*)<\/button>/g)].map(m => [m[1], m[2]]);
   assert(JSON.stringify(btns) === JSON.stringify([['C1', 'コードを見る（PCの編集制御）'], ['C2', 'コードを見る（モバイルの編集制御）'], ['C3', 'コードを見る（モバイルの入力チェック）']]) && !/[\w.-]+\.js\b/.test(L),
     `D1-12: ［コードを見る］は役割の名前（計画の画面と効果から。ファイル名は出さない）: ${JSON.stringify(btns)}`);
@@ -117,8 +117,8 @@ await section(async () => {
   assert(!/反映できます/.test(vis(h0)) && !/反映できます/.test(vis(hRun)) && !/この内容で反映できます/.test(vis(hBlocked)) && status(hReady) === 'この内容で反映できます。' && count(L, 'この内容で反映できます。') === 1 && fin.impact.settings.auto === 5 && /承認すると動作テスト環境へ反映します（設定の手順 → JavaScript の順。運用環境は変更しません）/.test(L),
     `D1-13: 「この内容で反映できます。」は承認の欄の準備が整った（ready）ときだけ（準備の前・準備中・止まる理由がある間は言わない）: ${JSON.stringify([status(h0), status(hRun), status(hBlocked), status(hReady)])}`);
   const detail = stripC(right);
-  assert(/モバイルの編集制御・モバイルの入力チェック: 動作テスト環境にはモバイルの画面が無いため、反映した後もここでは確かめられません（運用環境のモバイル画面か実機で確かめます）/.test(detail) && !/モバイルの画面が無い/.test(L),
-    'D1-14: モバイルの実機での確かめ方は、右の検証の明細に役割の名前で（左には出さない）');
+  assert(/モバイルの編集制御・モバイルの入力チェック: 動作テスト環境にはモバイルの画面が無いため、反映した後もここでは確かめられません（運用環境のモバイル画面かスマートフォンのアプリで確かめます）/.test(detail) && !/モバイルの画面が無い/.test(L),
+    'D1-14: モバイルの実際の画面での確かめ方は、右の検証の明細に役割の名前で（左には出さない）');
   assert(!INTERNAL.test(L) && !INTERNAL.test(RV), `D1-15: 左右の通常表示に内部の番号・コードの語が無い: ${(L.match(INTERNAL) || RV.match(INTERNAL) || [''])[0]}`);
   //   この修正の前の検査の結果を流用したとき（検査に担当の集まりを渡していない）も、最終案の担当の判定は同じ（台帳の planRefs と準備の判定の集まりで引き直す）
   const y = await R.run({ ownersOff: true });
@@ -180,7 +180,7 @@ await section(async () => {
       `D4-1（${tag}）: 計画に対応づけていない決まった要件は止めず、自動の見直しも呼ばない（右の確認の限界）: ${JSON.stringify(fin && { approvable: FS.readyOf(fin), blockers: fin.blockers.map(b => b.kind), plan: x.calls.plan.length })}`);
   }
   //   計画全体で扱う要件（R4 の planRefs は仮案の項目 B3）を、生成の AI が担当外と言い（C3）、ほかの JavaScript も満たしたと言わない（C1 の R4 MET を外す）
-  const line4 = '「PCとモバイルの入力・保存時：既存の入力チェックを維持して両方で利用できるようにする」は、作った JavaScript では担当外とされました。計画のどの手順で実現するかは書かれていません';
+  const line4 = '「PCとモバイルの入力・保存時：既存の入力チェックを維持して両方で利用できるようにする」は、作った JavaScript では担当外と AI が答えました。計画のどの手順で実現するかは書かれていません';
   const x = await R.run({ mutate: withCoverage({ C1: (cov) => cov.filter(c => c.requirementId !== 'R4'), C3: (cov) => cov.map(c => (c.requirementId === 'R4' ? { ...c, status: 'OUT_OF_SCOPE', note: '入力チェックの維持は計画の別の手順で扱う' } : c)) }) });
   const v = x.c.activePlan(), fin = v.final;
   const L = vis(R.leftHtml(x, { pre: READY })), RV = vis(R.rightHtml(x)), pre = precheckTexts(x);
@@ -199,7 +199,7 @@ await section(async () => {
   assert(FS.readyOf(fz) === true && fz.blockers.filter(b => b.kind === 'plan-scope').length === 1 && count(vis(R.leftHtml(z, { pre: READY })), line3) === 1 && count(vis(R.rightHtml(z)), line3) === 1 && prez.filter(t => t === line3).length === 1,
     `D4-4: 別の JavaScript の MET の申告では確認を消さず、左・右・反映の前の確認に同じ文 1 回ずつ: ${JSON.stringify({ blockers: fz.blockers.map(b => b.kind), pre: prez })}`);
   //   独立レビュー H1: 要件の担当がその JavaScript 自身（R4 の planRefs が C3）なのに、C3 が担当外と申告した → 担当未定にせず、左・右・反映の前の確認に同じ self の文
-  const lineSelf = '「PCとモバイルの入力・保存時：既存の入力チェックを維持して両方で利用できるようにする」は、担当の JavaScript では担当外とされました。どこで実現するかは計画に書かれていません';
+  const lineSelf = '「PCとモバイルの入力・保存時：既存の入力チェックを維持して両方で利用できるようにする」は、担当の JavaScript では担当外と AI が答えました。どこで実現するかは計画に書かれていません';
   const s1 = await R.run({ reqMutate: (r) => (r.id === 'R4' ? { ...r, planRefs: ['C3'] } : r), mutate: withCoverage({ C1: (cov) => cov.filter(c => c.requirementId !== 'R4'), C3: (cov) => cov.map(c => (c.requirementId === 'R4' ? { ...c, status: 'OUT_OF_SCOPE', note: '移植だけを担当' } : c)) }) });
   const fs1 = s1.c.activePlan().final, pres1 = precheckTexts(s1), Ls1 = vis(R.leftHtml(s1, { pre: READY })), Rs1 = vis(R.rightHtml(s1));
   assert(FS.readyOf(fs1) === true && count(Ls1, lineSelf) === 1 && count(Rs1, lineSelf) === 1 && pres1.filter(t => t === lineSelf).length === 1 && !OWNERLESS_RE.test(Ls1 + Rs1 + pres1.join('')) && s1.c.activePlan().generated.C3.review.coverage.unowned.some(u => u.owner === 'self'),
@@ -233,7 +233,7 @@ await section(async () => {
   const conSec = secOf(L, 'この案の制約', LEFT_SECTIONS.slice(2));
   assert(fin.constraints.some(c => c.kind === 'coverage' && c.text === '一覧の画面のセルは対象外' && JSON.stringify(c.platforms) === '["mobile"]') && conSec.includes('モバイル: 一覧の画面のセルは対象外') && !fin.blockers.length && FS.readyOf(fin) === true && x.c.activePlan().generated.C2.status === 'verified'
     && preD51.filter(t => /満たせないと申告されたもの/.test(t) && t.includes('一覧の画面のセルは対象外')).length === 1 && !OWNERLESS_RE.test(L),
-    `D5-1: この JavaScript の一部達成は残る範囲を「この案の制約」に、生成工程の coverage の確認を反映の前の確認に 1 回。担当未定・計画全体の確認にしない: ${JSON.stringify({ constraints: fin.constraints, blockers: fin.blockers.map(b => b.kind), pre: preD51 })}`);
+    `D5-1: この JavaScript の一部達成は残る範囲を「この案の制約」に、AI サービスの coverage の確認を反映の前の確認に 1 回。担当未定・計画全体の確認にしない: ${JSON.stringify({ constraints: fin.constraints, blockers: fin.blockers.map(b => b.kind), pre: preD51 })}`);
   //   まだ作っていない（C3 が時間切れ）→ 作成途中のカード（反映できますと言わない）→ ［残りの JavaScript を作る］で C3 だけ作って完成
   const y = await R.run({ throwFor: { C3: 'TIMEOUT' } });
   const vy = y.c.activePlan(), fy = vy.final, hy = R.leftHtml(y, { pre: READY }), Ly = vis(hy), Ry = vis(R.rightHtml(y));
@@ -245,9 +245,9 @@ await section(async () => {
   assert(y.gen.calls.length === n0 + 1 && y.gen.calls[y.gen.calls.length - 1].cid === 'C3' && y.calls.plan.length === 1 && fz && !fz.incomplete && FS.readyOf(fz) === true && ['C1', 'C2', 'C3'].every(c => vz.generated[c].status === 'verified') && ADOPTED.every(t => count(Lz, t) === 1) && count(Lz, ROWS) === 1 && !OWNERLESS_RE.test(Lz) && /この内容で反映できます。/.test(Lz),
     `D5-3: ［残りの JavaScript を作る］で C3 だけ作り（計画の AI は呼ばない）、完成した最終案は §D1 と同じ形: ${JSON.stringify({ gen: y.gen.calls.map(c => c.cid), plan: y.calls.plan.length, approvable: fz && FS.readyOf(fz) })}`);
   //   模擬テストを実行できない（C2 の verification の behavior が not-run）→ 確認できないこと（未確認）。担当未定・制約と混同しない
-  const w = await R.run({ verificationMutate: (cid, ver) => (cid === 'C2' ? { ...ver, behavior: { ...ver.behavior, status: 'not-run', reason: 'timeout', cases: ver.behavior.cases.map(c => ({ ...c, verdict: 'not-run', reason: 'timeout', message: '隔離環境で実行できませんでした' })) } } : ver) });
+  const w = await R.run({ verificationMutate: (cid, ver) => (cid === 'C2' ? { ...ver, behavior: { ...ver.behavior, status: 'not-run', reason: 'timeout', cases: ver.behavior.cases.map(c => ({ ...c, verdict: 'not-run', reason: 'timeout', message: '模擬テストの環境で実行できませんでした' })) } } : ver) });
   const fw = w.c.activePlan().final, Lw = vis(R.leftHtml(w, { pre: READY })), Rw = vis(R.rightHtml(w));
-  assert(fw && FS.readyOf(fw) === false && fw.blockers.some(b => b.kind === 'not-run') && !fw.blockers.some(b => ['ownerless', 'plan-scope'].includes(b.kind)) && !OWNERLESS_RE.test(Lw + Rw) && !fw.constraints.some(c => /実行できません|隔離環境/.test(c.text)) && /確認できないこと/.test(Lw) && /確認できないこと/.test(Rw) && /模擬テスト/.test(stripC(R.rightHtml(w))) && !/この内容で反映できます/.test(Lw),
+  assert(fw && FS.readyOf(fw) === false && fw.blockers.some(b => b.kind === 'not-run') && !fw.blockers.some(b => ['ownerless', 'plan-scope'].includes(b.kind)) && !OWNERLESS_RE.test(Lw + Rw) && !fw.constraints.some(c => /実行できません|模擬テストの環境/.test(c.text)) && /確認できないこと/.test(Lw) && /確認できないこと/.test(Rw) && /模擬テスト/.test(stripC(R.rightHtml(w))) && !/この内容で反映できます/.test(Lw),
     `D5-4: 模擬テストを実行できないときは検証の区分（確認できないこと・確かめたこと）で示し、担当未定・制約と混同しない: ${JSON.stringify({ approvable: fw && FS.readyOf(fw), blockers: fw && fw.blockers.map(b => [b.kind, b.text.slice(0, 60)]) })}`);
 });
 
@@ -498,7 +498,7 @@ await section(async () => {
   const warnB = va.final.blockers.map(b => b.text);
   const w6 = await R.run({ planOps: mapOps, planMutate: addEff('C1', 'amount', 'warn') });
   const so6 = w6.c.activePlan().final.scopeOut || {};
-  assert(ra && ra.decision === 'decided' && JSON.stringify(ra.effects) === '["warn"]' && FS.readyOf(va) === false && warnB.includes('「警告も出して」を実現する計画の手順・JavaScript が足りません（計画に無いもの: 警告）') && warnB.filter(t => /警告も出して/.test(t)).length === 1 && warnB.some(t => /要件未達/.test(t))
+  assert(ra && ra.decision === 'decided' && JSON.stringify(ra.effects) === '["warn"]' && FS.readyOf(va) === false && warnB.includes('「警告も出して」を実現する計画の手順・JavaScript が足りません（計画に無いもの: 警告）') && warnB.filter(t => /警告も出して/.test(t)).length === 1 && warnB.some(t => /要件を満たしていません/.test(t))
     && so6.notice === '依頼に無い「金額の警告」は入れていません（詳細）',
     `D10-6: 合意した警告の実装漏れは止め（構造の欠落と検証の不一致）、計画の AI が勝手に足した警告は採用範囲の外として外す: ${JSON.stringify({ agreed: warnB, unagreed: so6 })}`);
   //   (7) 表示: 確認の限界は右の「確認できないこと」に件数の 1 行（文は［詳しく］）、左の通常表示と反映を止める理由には出さない。
@@ -631,7 +631,7 @@ await section(async () => {
     verificationMutate: (cid, ver) => (cid === 'C2' ? { ...ver, machine: ver.machine.map(m => (m.name === 'plan-consistency' ? PC_D126B : m)) } : ver) });
   const preD126b = precheckTexts(mobPart);
   assert(FS.readyOf(mobPart.c.activePlan()) === true && !blockTexts(mobPart).length && !mobPart.c.activePlan().final.blockers.some(b => b.kind === 'ownerless') && preD126b.filter(t => t.includes('amount CONTROL')).length === 1,
-    `D12-6b: モバイルが明細だけで金額が無い計画は、文の対象からは止めず、金額の操作は生成工程の計画との一致の確認で反映の前の確認に 1 回: ${JSON.stringify({ blockers: blockTexts(mobPart), pre: preD126b })}`);
+    `D12-6b: モバイルが明細だけで金額が無い計画は、文の対象からは止めず、金額の操作はAI サービスの計画との一致の確認で反映の前の確認に 1 回: ${JSON.stringify({ blockers: blockTexts(mobPart), pre: preD126b })}`);
 
 
   //   (7) 一部の実装漏れ: 生成工程の検査（固定の結果）が PC の数量の編集不可を「無い」と返した → 金額などの成功で全体を達成にしない（その JavaScript は検証済みにならず、承認できない）
@@ -670,7 +670,7 @@ await section(async () => {
   //   簡素化 B（2026-10-17）: C2 の一部達成の確認（Toolkit の coverage-unmet。要件 R3・明細の行）は削除した。生成工程の coverage は自分の要件（C2）の NOT_MET・PARTIAL だけを
   //   確認にするので、対応づけた要件 R3 の PARTIAL は確認事項にならない。残る範囲（明細の行）は今までどおり「この案の制約」に 1 回（下の count(con, ROWS)）
   const WANT_CONF = JSON.stringify([['C1', 'NEEDS_CONFIRMATION', [['patch-removal', 'review', null, null]], 1], ['C2', 'RUNTIME_UNVERIFIED', [], 0], ['C3', 'RUNTIME_UNVERIFIED', [], 0]]);
-  const PARTIAL_PRE = '要件の一部を満たしていません（AI の申告）: 承認済み。PCとモバイルの両方：金額と明細を編集不可にする（担当するモバイルの金額と明細の入力セルは編集不可にしますが、明細の行追加・削除はセルの編集不可では止められません。）。セルの編集不可では行の追加・削除は止まりません（行のボタンを隠す API は Toolkit がまだ扱っていません。実現できない点）';
+  const PARTIAL_PRE = '要件の一部を満たしていません（AI の説明）: 承認済み。PCとモバイルの両方：金額と明細を編集不可にする（担当するモバイルの金額と明細の入力セルは編集不可にしますが、明細の行追加・削除は入力欄の編集不可では止められません。）。入力欄の編集不可では行の追加・削除は止まりません（行のボタンを隠す API は Toolkit がまだ扱っていません。実現できない点）';
   const howOf = (xx) => (vis(R.rightHtml(xx)).match(/最終的にどう動くか[\s\S]*?(?=何が変わるか|$)/) || [''])[0];
   const conOf = (xx) => (vis(R.leftHtml(xx, { pre: READY })).match(/この案の制約[\s\S]*?(?=仮案からの補足|動作テスト環境へ反映)/) || [''])[0];
   for (const [name, xx, want] of [['金額・明細', x, [`${REALIZED_COND}金額を編集できなくします（PC・モバイル）。`, `${REALIZED}（PC・モバイル）。`]], ['明細だけ', itemsOnly, [`${REALIZED}（PC・モバイル）。`]]]) {
@@ -705,13 +705,13 @@ await section(async () => {
   //   → 担当の JavaScript 自身の担当外の申告（self の文）。反映の前の再検査に要件の台帳と担当の集まりが渡っていなければ「担当範囲外とされた要件…計画に見つかりません」になる
   const { m, v } = await K.mountFinal({ kind: 'js', coverage: [{ requirementId: 'C1', status: 'MET', note: '' }, { requirementId: 'R4', status: 'OUT_OF_SCOPE', note: '期限はプロセス管理の設定で扱う', text: '7 営業日以内に承認する' }] });
   const { pre } = await K.prepareOnScreen(m);
-  const line = '「7 営業日以内に承認する」は、担当の JavaScript では担当外とされました。どこで実現するかは計画に書かれていません';
+  const line = '「7 営業日以内に承認する」は、担当の JavaScript では担当外と AI が答えました。どこで実現するかは計画に書かれていません';
   const confs = (pre && pre.items && Array.isArray(pre.items.confirmations) ? pre.items.confirmations : []).map(c => (c && typeof c === 'object' ? c.text : String(c)));
   const fin = v && v.final, chat = m.chat(), L = vis(chat), RV = vis(KTAiChatUi.changeSummaryHtml(m.conv().activePlan(), {}));
   const ledgerR4 = m.conv().requirements(v.planId).find(r => r.id === 'R4');
   //   反映の前の確認の確認項目は、同じ文の後ろに確かめ方（HOW_TO_CHECK の coverage-owner）を括弧で添える
   assert(ledgerR4 && JSON.stringify(ledgerR4.planRefs) === '["C1"]' && fin && FS.readyOf(fin) === true && pre && pre.status === 'ready' && confs.filter(t => t === `${line}（計画のどの手順で扱われているかを変更内容の「何が変わるか」で確かめ、扱われていなければ計画を直す）`).length === 1 && !confs.some(t => OWNERLESS_RE.test(t)) && count(L, line) === 1 && count(RV, line) === 1 && !OWNERLESS_RE.test(L + RV),
-    `D7-1: 画面の反映の前の確認の確認項目・左のカード・右の変更内容に同じ文 1 回ずつ（「担当範囲外とされた要件…計画に見つかりません」は出ない。反映は止めない）: ${JSON.stringify({ planRefs: ledgerR4 && ledgerR4.planRefs, approvable: fin && FS.readyOf(fin), status: pre && pre.status, confs })}`);
+    `D7-1: 画面の反映の前の確認の確認項目・左のカード・右の変更内容に同じ文 1 回ずつ（「担当範囲外と AI が申告した要件…計画に見つかりません」は出ない。反映は止めない）: ${JSON.stringify({ planRefs: ledgerR4 && ledgerR4.planRefs, approvable: fin && FS.readyOf(fin), status: pre && pre.status, confs })}`);
 });
 
 // =========================================================
@@ -756,7 +756,7 @@ await section(async () => {
     `D13-4: 承認の可否・止める理由・反映の前の確認事項の件数は文の形に関係しない: ${JSON.stringify([both, pcOnly, mobOnly, diffMap, fn2].map(judge))}`);
   //   (5) 制約の行: 理由を別に持つ構造の行は「本体（画面）。理由。」、それ以外（AI の申告の文など）は今までどおり「画面: 文」
   assert(KTAiChatUi.constraintLineOf({ text: ROW_TEXT, reason: ROW_REASON, platforms: ['desktop', 'mobile'] }) === ROWS && KTAiChatUi.constraintLineOf({ text: '一覧の画面のセルは対象外', platforms: ['mobile'] }) === 'モバイル: 一覧の画面のセルは対象外' && KTAiChatUi.constraintLineOf({ text: ROW_TEXT, reason: ROW_REASON }) === `${ROW_TEXT}。${ROW_REASON}。`,
-    'D13-5: 制約の行の文（構造の行は画面を本体の直後に 1 回・AI の申告の行は今までどおり）');
+    'D13-5: 制約の行の文（構造の行は画面を本体の直後に 1 回・AI の自己申告の行は今までどおり）');
 });
 
 console.log(`\n${state.failed === 0 ? 'ALL PASSED' : 'FAILED'}: ${state.passed} passed / ${state.failed} failed`);

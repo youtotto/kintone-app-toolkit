@@ -106,7 +106,7 @@ console.log('\n--- 4. Process ---');
 {
   const add = review(plan([step('P1', 'ADD_PROCESS_STATUS', 'PROCESS_STATUS', '部長承認待ち', [], { spec: { assignees: ['approver'] } }), step('P2', 'ADD_PROCESS_ACTION', 'PROCESS_ACTION', '部長へ', [], { spec: { from: '承認待ち', to: '部長承認待ち', filterCond: 'amount >= "1000000"' }, dependsOn: ['P1'] }), step('P3', 'ADD_PROCESS_ACTION', 'PROCESS_ACTION', '部長承認', [], { spec: { from: '部長承認待ち', to: '完了' }, dependsOn: ['P1'] })]));
   assert(st(add, 'P1').status === 'NEEDS_CONFIRMATION' && st(add, 'P1').diff.changeType === 'ADD' && add.simulation.after.process.states.length === 4 && add.simulation.after.process.actions.length === 5, 'add status / add action: After に反映・プロセス変更は確認');
-  assert(add.simulation.process.changed && add.simulation.process.mermaid.after.includes('部長承認待ち') && add.simulation.process.mermaid.after.includes('==>') && add.simulation.process.mermaid.before.split('\n').length < add.simulation.process.mermaid.after.split('\n').length && /」 ≧/.test(add.simulation.process.mermaid.after) && !add.simulation.process.mermaid.after.includes('amount ≧'), 'Process Mermaid: Before / After・新規遷移を強調・比較演算子を全角に・条件のフィールドは名前で出す（C-1 後の仕上げ: フィールドのコードを通常表示に出さない）', add.simulation.process.mermaid.after);
+  assert(add.simulation.process.changed && add.simulation.process.mermaid.after.includes('部長承認待ち') && add.simulation.process.mermaid.after.includes('==>') && add.simulation.process.mermaid.before.split('\n').length < add.simulation.process.mermaid.after.split('\n').length && /」 ≧/.test(add.simulation.process.mermaid.after) && !add.simulation.process.mermaid.after.includes('amount ≧'), 'Process Mermaid: 変更前 / After・新規遷移を強調・比較演算子を全角に・条件のフィールドは名前で出す（C-1 後の仕上げ: フィールドのコードを通常表示に出さない）', add.simulation.process.mermaid.after);
   assert(!add.conflicts.some(c => c.code === 'STATUS_UNREACHABLE'), '遷移で繋がったステータスは到達可能');
   const ov = st(add, 'P2');
   assert(codes(ov).includes('ACTION_CONDITION_OVERLAP') && ov.issues.find(i => i.code === 'ACTION_CONDITION_OVERLAP').message.includes('承認する'), 'overlapping condition candidate: 同じ遷移元「承認待ち」の既存「承認する」（条件なし）と重なる');
@@ -134,7 +134,7 @@ console.log('\n--- 5. Lookup ---');
 {
   const add = review(plan([step('P1', 'UPDATE_LOOKUP', 'LOOKUP', 'customer_lookup', [], { spec: { mappings: [{ from: 'address', to: 'customer_address' }] } })]), (() => { const i = buildInputs(); i.data.fields.customer_address = { type: 'SINGLE_LINE_TEXT', code: 'customer_address', label: '顧客住所' }; i.deps = KTDeps.buildDependencyData(i.data, KTDeps.normalizeFields(i.data.fields)); return i; })());
   const a = st(add, 'P1');
-  assert((a.status === 'VALID' || a.status === 'WARNING') && a.safety === 'REVIEW_REQUIRED' && a.diff.changeType === 'UPDATE' && a.diff.after.lookup.mappings.length === 3 && a.diff.after.lookup.mappings.some(m => m.to === 'customer_address') && a.diff.before.lookup.mappings.length === 2, 'add mapping: 既存ルックアップに取得項目を追加（Before 2 → After 3）');
+  assert((a.status === 'VALID' || a.status === 'WARNING') && a.safety === 'REVIEW_REQUIRED' && a.diff.changeType === 'UPDATE' && a.diff.after.lookup.mappings.length === 3 && a.diff.after.lookup.mappings.some(m => m.to === 'customer_address') && a.diff.before.lookup.mappings.length === 2, 'add mapping: 既存ルックアップに取得項目を追加（Before 2 → 変更後 3）');
   const dupDest = review(plan([step('P1', 'UPDATE_LOOKUP', 'LOOKUP', 'customer_lookup', [], { spec: { mappings: [{ from: 'addr', to: 'amount' }, { from: 'tel', to: 'amount' }] } })]));
   assert(st(dupDest, 'P1').status === 'INVALID' && codes(st(dupDest, 'P1')).includes('LOOKUP_DEST_DUPLICATE'), 'duplicate destination → INVALID');
   const over = review(plan([step('P1', 'UPDATE_LOOKUP', 'LOOKUP', 'customer_lookup', [], { spec: { mappings: [{ from: 'address', to: 'case_name' }] } })]));   // Phase 13: 取得元は参照元アプリに実在するフィールド（address）
@@ -160,7 +160,7 @@ console.log('\n--- 6. View / ACL / App Action ---');
   assert(st(v3, 'P1').status === 'VALID' && st(v3, 'P1').safety === 'SAFE' && v3.simulation.after.views.length === 3, 'ADD_VIEW normal → SAFE');
   const acl = review(plan([step('P1', 'UPDATE_FIELD_ACL', 'FIELD_ACL', 'amount', [], { spec: { entities: ['owner'] } })]));
   const as = st(acl, 'P1');
-  assert(as.status === 'NEEDS_CONFIRMATION' && as.safety === 'REVIEW_REQUIRED' && codes(as).includes('ACL_CHANGE') && codes(as).includes('ACL_EXISTING_RULE') && as.diff.before && as.diff.human[0].includes('仮適用なし'), 'ACL: 高リスク・既存ルールあり・仮適用なし（validate only）');
+  assert(as.status === 'NEEDS_CONFIRMATION' && as.safety === 'REVIEW_REQUIRED' && codes(as).includes('ACL_CHANGE') && codes(as).includes('ACL_EXISTING_RULE') && as.diff.before && as.diff.human[0].includes('Toolkit からは反映しません'), 'ACL: 高リスク・既存ルールあり・仮適用なし（validate only）');
   const aclBad = review(plan([step('P1', 'UPDATE_FIELD_ACL', 'FIELD_ACL', 'ghost', [])]));
   assert(st(aclBad, 'P1').status === 'INVALID' && codes(st(aclBad, 'P1')).includes('UNKNOWN_FIELD'), 'ACL unknown target → INVALID');
   const racl = review(plan([step('P1', 'UPDATE_RECORD_ACL', 'RECORD_ACL', '', [], { spec: { filterCond: 'amount >= "1000000"' } })]));
@@ -310,7 +310,7 @@ console.log('\n--- 10. Phase 11: 既存設定の変更（UPDATE_NOTIFICATION / U
   const sa = st(add, 'P1');
   assert(sa.status === 'NEEDS_CONFIRMATION' && sa.safety === 'REVIEW_REQUIRED' && sa.diff.changeType === 'UPDATE' && codes(sa).includes('NOTIFICATION_RECIPIENTS_ADDED') && !codes(sa).includes('NOTIFICATION_RECIPIENTS_REMOVED'), 'UPDATE_NOTIFICATION 通知先の追加: REVIEW_REQUIRED・RECIPIENTS_ADDED（削除なし）');
   assert(sa.diff.target.identity && sa.diff.target.identity.scope === 'perRecord' && sa.diff.target.identity.index === 0 && sa.diff.target.identity.id === 'perRecord#1' && sa.diff.target.identity.title === '高額案件の登録' && sa.diff.target.identity.filterCond === 'amount >= "1000000"' && sa.diff.target.identity.targets.length === 3, 'target.identity に scope / index / id / title / 条件 / 通知先を固定');
-  assert(sa.diff.human.length === 2 && /✎ レコードの条件通知「高額案件の登録」を変更/.test(sa.diff.human[0]) && /^通知先: .* → .*FIELD_ENTITY:owner$/.test(sa.diff.human[1]), '属性単位の差分: 変更した通知先だけが Before → After で出る（条件・名前は出ない）');
+  assert(sa.diff.human.length === 2 && /✎ レコードの条件通知「高額案件の登録」を変更/.test(sa.diff.human[0]) && /^通知先: .* → .*FIELD_ENTITY:owner$/.test(sa.diff.human[1]), '属性単位の差分: 変更した通知先だけが Before → 変更後 で出る（条件・名前は出ない）');
   const byTitle = review(plan([step('P1', 'UPDATE_NOTIFICATION', 'NOTIFICATION', '高額案件の登録', [], { spec: { filterCond: 'amount >= "2000000"' } })]));
   const sb = st(byTitle, 'P1');
   assert(sb.diff.target.id === 'perRecord#1' && codes(sb).includes('NOTIFICATION_CONDITION_CHANGE') && sb.issues.find(i => i.code === 'NOTIFICATION_CONDITION_CHANGE').message.includes('通知される範囲が狭くなります') && sb.diff.after.filterCond === 'amount >= "2000000"' && sb.diff.human.length === 2 && /^条件: /.test(sb.diff.human[1]), '名前で特定・条件を 100 万→200 万: 範囲が狭くなる警告（通知が届かなくなる可能性）・差分は条件だけ');

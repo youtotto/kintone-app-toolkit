@@ -64,7 +64,7 @@ const PATTERNS = [{ id: 'field-disable', purpose: '条件に応じてフィー�
 //   この試験は登録の経路（upload・PUT・検証・戻す）を確かめるので、偽の生成工程は Toolkit が渡した必須の効果をそのまま「処理あり・動作テストで合格」で返す
 //   （効果の区別そのものの検証は tests/ai-flow-redesign.test.js の §D）
 //   簡素化 B（2026-10-17）・2026-10-18: 本物の Gateway と同じく、検証結果に書き込む本文の指紋（bodyHash。Gateway と同じ計算。tests/helpers/gw-hash.js）を入れる
-const passVerification = (ctx, g = null) => { const re = (ctx && ctx.verification && ctx.verification.requiredEffects) || []; return re.length ? { version: '1', ...(g ? { bodyHash: gwHashOfCtx(ctx, g) } : {}), passed: true, machine: [], requiredEffects: re.map(x => ({ requirementId: x.requirementId, requirementIds: x.requirementIds, field: x.field, effect: x.effect, status: 'present' })), behavior: { status: 'passed', reason: null, cases: re.flatMap((x, i) => (x.events && x.events.length ? x.events : [null]).flatMap((ev, j) => (x.condition ? ['match', 'nomatch'] : ['match']).map(side => ({ id: `K${i + 1}-${j + 1}-${side}`, requirementIds: x.requirementIds, field: x.field, effect: x.effect, expect: side === 'match' ? x.effect : ({ lock: 'not-locked', warn: 'not-warned', 'block-save': 'save-allowed', 'set-value': 'value-unchanged', 'show-hide': 'show-hide' })[x.effect], side, ...(ev ? { event: ev } : {}), verdict: 'pass', observed: {}, message: '期待どおり' })))) }, repairs: { count: 0, reasons: [], stoppedBy: null }, unverified: ['実機での動作'] } : undefined; };
+const passVerification = (ctx, g = null) => { const re = (ctx && ctx.verification && ctx.verification.requiredEffects) || []; return re.length ? { version: '1', ...(g ? { bodyHash: gwHashOfCtx(ctx, g) } : {}), passed: true, machine: [], requiredEffects: re.map(x => ({ requirementId: x.requirementId, requirementIds: x.requirementIds, field: x.field, effect: x.effect, status: 'present' })), behavior: { status: 'passed', reason: null, cases: re.flatMap((x, i) => (x.events && x.events.length ? x.events : [null]).flatMap((ev, j) => (x.condition ? ['match', 'nomatch'] : ['match']).map(side => ({ id: `K${i + 1}-${j + 1}-${side}`, requirementIds: x.requirementIds, field: x.field, effect: x.effect, expect: side === 'match' ? x.effect : ({ lock: 'not-locked', warn: 'not-warned', 'block-save': 'save-allowed', 'set-value': 'value-unchanged', 'show-hide': 'show-hide' })[x.effect], side, ...(ev ? { event: ev } : {}), verdict: 'pass', observed: {}, message: '期待どおり' })))) }, repairs: { count: 0, reasons: [], stoppedBy: null }, unverified: ['実際の画面での動作'] } : undefined; };
 const genResponse = (ctx, g) => ({ ok: true, contractVersion: '2.1', meta: { requestId: 'gen-1', usage: { usedThisMonth: 3, monthlyLimit: 20 }, normalization: { warnings: [] }, gateway: { feature: 'customization-generator' }, patternLibrary: { version: '1', selected: ['field-disable'] } }, generated: { strategy: ctx.customization.strategy, targetFile: ctx.existingFile?.name || 'amountWarning.js', summary: ctx.customization.requirement, events: ctx.customization.events, fields: ctx.customization.fields, apis: [], assumptions: [], warnings: [], gatewayChecks: { security: [] }, patterns: PATTERNS, ...g }, ...(passVerification(ctx, g) ? { verification: passVerification(ctx, g) } : {}) });
 //   2026-10-18（AI版 契約 20 §20）: 統合の書き込む本文は生成工程が合成して返す（偽の生成工程は送られた既存の本文と patch から作る）
 const genPatch = (patch = PATCH_GOOD, src = FIELD_ON_OFF) => gwWithBody({ strategy: 'EXTEND_EXISTING_JS', targetFile: 'fieldOnOff.js', summary: '完了でも金額を編集不可にする', code: patch.operations.map(o => o.content).join('\n'), patch, events: ['app.record.edit.show'], fields: [{ code: 'amount', access: 'CONTROL' }], apis: [], assumptions: [], warnings: [] }, src);
@@ -161,7 +161,7 @@ console.log('\n--- §36b. Customize 正常（Snippets 無し・［AIに相談］
   const c = await T2.renderCustomize(wrap, data, '310', { consult: (seed) => { consulted = seed; return { ok: true }; }, getInputs: () => INPUTS });
   const sel = byId.get('kt-customize-source');
   const selHtml = (/<select id="kt-customize-source"[\s\S]*?<\/select>/.exec(byId.get('view-customize').innerHTML) || [''])[0];
-  assert(sel && [...selHtml.matchAll(/<option value="([^"]+)"/g)].map(m => m[1]).join(',') === 'JavaScript,css,JavaScriptMobile,cssMobile', 'Customize の一覧の種類は JS / CSS × PC / モバイルだけ（GitHub Snippets は無い）');
+  assert(sel && [...selHtml.matchAll(/<option value="([^"]+)"/g)].map(m => m[1]).join(',') === 'JavaScript,css,JavaScriptMobile,cssMobile', 'Customize の一覧の種類は JavaScript / CSS × PC / モバイルだけ（GitHub Snippets は無い）');
   assert(!byId.has('kt-customize-insert') && byId.has('kt-customize-refresh') && byId.has('kt-customize-env'), '［挿入］ボタンは無い。一覧更新と環境差分の表示はある');
   assert(c && typeof c.show === 'function' && typeof c.refresh === 'function', 'renderCustomize は { show, refresh } を返す（AI → Customize 導線用）');
   assert(doc.head.children.some(el => el.id === 'kt-customize-inline-style' && /\.btn \{/.test(el.textContent)), 'ダイアログ用の .btn 共通 style は Customize が 1 回だけ付ける（旧 Templates から移管）');
@@ -234,7 +234,7 @@ console.log('\n--- §37. Feature Migration: AI Prompt / Markdown / JSON / Docume
 }
 
 // =========================================================
-console.log('\n--- §37b. DOCUMENT intent（チャット）: LLM を使わずカード・コピー・Context ペインで開く ---');
+console.log('\n--- §37b. DOCUMENT intent（チャット）: LLM を使わずカード・コピー・「Context」タブで開く ---');
 {
   const I = KTAiConversation.INTENT;
   const cls = (t, st = {}) => KTAiConversation.classifyIntent(t, st);
@@ -252,31 +252,31 @@ console.log('\n--- §37b. DOCUMENT intent（チャット）: LLM を使わずカ
   const r = await m.panel.send('このアプリの仕様書を作って');
   assert(r && r.ok && r.intent === I.DOCUMENT && m.calls.ask.length === 0 && m.calls.plan.length === 0 && m.calls.generate.length === 0, 'チャットの DOCUMENT: Gateway を呼ばない（無料）');
   const dm = m.msgs().find(x => x.type === 'DOCUMENT');
-  assert(dm && dm.data.kind === 'spec' && dm.data.outputs.prompt.includes('## Context') && /kt-ai-document-card/.test(m.chat()) && /無料・AI 送信なし/.test(m.chat()) && /data-act="copy-doc"/.test(m.chat()) && /data-act="open-doc-context"/.test(m.chat()), 'DOCUMENT カード: 種類・Prompt / Markdown / JSON のコピー・Context ペインで開く');
+  assert(dm && dm.data.kind === 'spec' && dm.data.outputs.prompt.includes('## Context') && /kt-ai-document-card/.test(m.chat()) && /無料・AI 送信なし/.test(m.chat()) && /data-act="copy-doc"/.test(m.chat()) && /data-act="open-doc-context"/.test(m.chat()), 'DOCUMENT カード: 種類・Prompt / Markdown / JSON のコピー・「Context」タブで開く');
   await clickChat(m, 'copy-doc', { mid: dm.id, key: 'prompt' });
   assert(m.copies.length === 1 && m.copies[0] === dm.data.outputs.prompt, '［Prompt をコピー］');
   await clickChat(m, 'copy-doc', { mid: dm.id, key: 'markdown' });
   assert(m.copies.length === 2 && m.copies[1] === dm.data.outputs.markdown, '［Markdown をコピー］');
   assert(m.panel.mode() === 'doc' && m.$('kt-ai-doc-kind').value === 'spec' && m.panel.currentOutput()?.text === dm.data.outputs.prompt, 'Context ペインも同じ結果（モード doc・種類 spec・保存できる）');
   await clickChat(m, 'open-doc-context', { kind: 'handover' });
-  assert(m.panel.drawerState().pane === 'context' && m.$('kt-ai-doc-kind').value === 'handover' && /引継ぎ資料/.test(m.panel.currentOutput().text), '［Context ペインで開く］: ペインを開き、その種類で作り直す');
+  assert(m.panel.drawerState().pane === 'context' && m.$('kt-ai-doc-kind').value === 'handover' && /引継ぎ資料/.test(m.panel.currentOutput().text), '［「Context」タブで開く］: ペインを開き、その種類で作り直す');
   // 計画 → 変更内容のまとめ（Toolkit の記録）。C-1 第 3 段: 最終案（JavaScript は生成工程で検証済み）まで新しい流れで進める
   await adoptFinal(m);
   const r2 = await m.panel.send('この改修内容をまとめて');
   const dm2 = m.msgs().filter(x => x.type === 'DOCUMENT').pop();
-  assert(r2.ok && dm2.data.kind === 'changes' && /# 変更内容のまとめ — 計画 v1/.test(dm2.data.outputs.markdown) && /\| P1 \| 一覧「承認済み」を追加 \| ADD_VIEW \| 標準設定 \|/.test(dm2.data.outputs.markdown) && /\*\*C1\*\* 承認後（完了）は金額を編集できなくする（既存 fieldOnOff\.js を変更・PC・JavaScript）/.test(dm2.data.outputs.markdown) && /生成コード: fieldOnOff\.js（Toolkit Code Review: OK・参考パターン field-disable）/.test(dm2.data.outputs.markdown) && /運用環境には反映していません/.test(dm2.data.outputs.markdown), '「この改修内容をまとめて」: 計画 v1 の手順表・JS カスタマイズ・生成コード（Code Review・参考パターン）・運用環境は未反映');
+  assert(r2.ok && dm2.data.kind === 'changes' && /# 変更内容のまとめ — 計画 v1/.test(dm2.data.outputs.markdown) && /\| P1 \| 一覧「承認済み」を追加 \| ADD_VIEW \| 標準設定 \|/.test(dm2.data.outputs.markdown) && /\*\*C1\*\* 承認後（完了）は金額を編集できなくする（既存 fieldOnOff\.js を変更・PC・JavaScript）/.test(dm2.data.outputs.markdown) && /生成コード: fieldOnOff\.js（Toolkit のコードの検査: OK・参考パターン field-disable）/.test(dm2.data.outputs.markdown) && /運用環境には反映していません/.test(dm2.data.outputs.markdown), '「この改修内容をまとめて」: 計画 v1 の手順表・JS カスタマイズ・生成コード（Code Review・参考パターン）・運用環境は未反映');
   assert(/## 変更計画（Toolkit の記録）/.test(dm2.data.outputs.prompt) && /改修記録を書くエンジニア/.test(dm2.data.outputs.prompt) && JSON.parse(dm2.data.outputs.json).plan.goal === GOAL_HYBRID, 'changes の Prompt は記録 ＋ Context、JSON は計画（compact）＋ Context');
   assert(writes(m).length === 0, 'ドキュメントで kintone への書き込みは 0 件');
 }
 
 // =========================================================
-console.log('\n--- §38. Pattern Library（Gateway の generated.patterns）: 表示 / Audit / Standard-first の再確認 ---');
+console.log('\n--- §38. Pattern Library（AI サービスの generated.patterns）: 表示 / Audit / Standard-first の再確認 ---');
 {
   const m = mount();
   await ticks();
   //   C-1 第 3 段: コードは最終案のパイプラインが生成工程に 1 回頼む（「コードを作って」の従来の生成は削除）
   const vP = await adoptFinal(m);
-  assert(vP && vP.final && m.calls.generate.length === 1, `コード生成（Gateway が patterns を返す）: ${m.calls.generate.length}`);
+  assert(vP && vP.final && m.calls.generate.length === 1, `コード生成（AI サービスが patterns を返す）: ${m.calls.generate.length}`);
   const entry = m.panel.generated('C1');
   assert(entry && Array.isArray(entry.generated.patterns) && entry.generated.patterns[0].id === 'field-disable' && entry.generated.patterns[0].preferredStandardAlternatives.length === 2 && !('implementationNotes' in entry.generated.patterns[0]), 'validateGenerated: patterns（id / purpose / implementation / preferredStandardAlternatives）を通す。知識本体は無い');
   //   右の「コード」に出す操作（act open-code）で開く。C-1 第 3 段（2026-10-08）: open-code のボタンを出していたコードのカードは削除し、
@@ -284,9 +284,9 @@ console.log('\n--- §38. Pattern Library（Gateway の generated.patterns）: �
   assert(/data-act="open-code"/.test(m.chat()), '最終案の後に、生成したコードを右の「コード」で開く入口（［コードを見る］）がある');
   await clickChat(m, 'open-code', { cid: 'C1', view: 'code' }); await ticks();
   const codePane = m.$('kt-ai-code-review').innerHTML;
-  assert(/参考パターン: <span class="kt-ai-pattern" title="条件に応じてフィールドの編集可否を制御する">field-disable<\/span>/.test(codePane) && /標準設定で代替できないか再確認: フィールドのアクセス権 \/ プロセス管理の「作業者だけ編集可」/.test(codePane) && !/参考パターン/.test(m.chat()), '右「コード」: 参考パターンと「標準設定で代替できないか再確認」（人間への standard-first の再確認）。会話には出さない（Phase 19）');
+  assert(/参考にした実装パターン: <span class="kt-ai-pattern" title="条件に応じてフィールドの編集可否を制御する">field-disable<\/span>/.test(codePane) && /標準設定で代替できないか再確認: フィールドのアクセス権 \/ プロセス管理の「作業者だけ編集可」/.test(codePane) && !/参考パターン/.test(m.chat()), '右「コード」: 参考パターンと「標準設定で代替できないか再確認」（人間への standard-first の再確認）。会話には出さない（Phase 19）');
   //   C-1 第 3 段（2026-10-08）: 会話のコードのカード（type CODE）は削除した。参考パターンの行は右の「コード」の部品（patternsHtml）だけが作る
-  assert(KTAiChatUi.patternsHtml({ ...genPatch(), patterns: [] }) === '' && /参考パターン/.test(KTAiChatUi.patternsHtml(entry.generated)) && KTAiConversation.MSG.CODE === undefined, 'patterns が空なら参考パターンの行は出ない（右の「コード」の部品）');
+  assert(KTAiChatUi.patternsHtml({ ...genPatch(), patterns: [] }) === '' && /参考にした実装パターン/.test(KTAiChatUi.patternsHtml(entry.generated)) && KTAiConversation.MSG.CODE === undefined, 'patterns が空なら参考パターンの行は出ない（右の「コード」の部品）');
   // Audit に patterns
   const audit = KTJsExecutor.buildAudit({ generated: [{ customizationId: 'C1', generated: entry.generated, review: entry.review, existingSource: entry.existingSource }] });
   assert(audit.generated[0].patterns.length === 1 && audit.generated[0].patterns[0] === 'field-disable', 'Customization Audit の generated に patterns（id だけ）');
@@ -306,7 +306,7 @@ console.log('\n--- §38b. implementation（JAVASCRIPT / CSS / JS_CSS）: 受け�
   const jscss = reviewOf(cust({ implementation: 'JS_CSS' }));
   assert(jscss.js.codeGeneration.supported === true && jscss.js.customization.implementation === 'JS_CSS' && jscss.js.issues.some(i => i.code === 'JS_CSS_PART_MANUAL' && i.severity === 'low'), 'implementation JS_CSS: JavaScript 部分は生成可（CSS は手動の注記）');
   const plain = reviewOf(cust({ implementation: 'JAVASCRIPT' }));
-  assert(plain.js.codeGeneration.supported === true && plain.js.customization.implementation === 'JAVASCRIPT' && !plain.js.issues.some(i => /^JS_CSS/.test(i.code)), 'implementation JAVASCRIPT: 従来どおり（Gateway の既定を受け取った形）');
+  assert(plain.js.codeGeneration.supported === true && plain.js.customization.implementation === 'JAVASCRIPT' && !plain.js.issues.some(i => /^JS_CSS/.test(i.code)), 'implementation JAVASCRIPT: 従来どおり（AI サービスの既定を受け取った形）');
   //   2026-10-19: 実装仕様のカード（実装の行）は廃止した。CSS で生成しないことは右の「変更内容」の「反映できないこと」に理由と一緒に出す
   const sumCss = KTAiChatUi.changeSummaryHtml({ planId: 'p', version: 1, status: 'ACTIVE', goal: GOAL_HYBRID, plan: css.plan, review: css.review });
   assert(/Toolkit ではコードを作れません（CSS は生成の対象外）/.test(sumCss), `変更内容: 実装 CSS は「反映できないこと」に作れない理由（CSS は生成の対象外）: ${sumCss.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').slice(0, 300)}`);
@@ -315,7 +315,7 @@ console.log('\n--- §38b. implementation（JAVASCRIPT / CSS / JS_CSS）: 受け�
 }
 
 // =========================================================
-console.log('\n--- §30. AI → Customize（結果カード / コードペインの「Customize で確認」） ---');
+console.log('\n--- §30. AI → Customize（結果カード / コードペインの「Customize タブで確認」） ---');
 {
   const m = mount();
   await ticks();
@@ -324,12 +324,12 @@ console.log('\n--- §30. AI → Customize（結果カード / コードペイン
   assert(ar.button && !ar.button.disabled && ar.v.approval && ar.pre.items.files.length === 1, '［動作テスト環境へ反映］1 回で承認と登録（承認の欄に登録するファイル）');
   const jx = m.panel.jsExecState();
   assert(jx.stage === 'done' && jx.execution.status === 'DONE', `登録 → DONE（${jx.stage} / ${jx.execution?.status}）`);
-  assert(/data-act="open-customize" data-target="desktop" data-name="fieldOnOff\.js"/.test(ar.cardHtml) && /Customize で確認/.test(ar.cardHtml), '反映の結果のカードに［Customize で確認］（登録したファイルの platform と名前）');
-  assert(/id="kt-ai-jsreg-open-customize"/.test(m.$('kt-ai-jsreg').innerHTML), 'コードペインの結果にも［Customize で確認］');
+  assert(/data-act="open-customize" data-target="desktop" data-name="fieldOnOff\.js"/.test(ar.cardHtml) && /Customize タブで確認/.test(ar.cardHtml), '反映の結果のカードに［Customize タブで確認］（登録したファイルの platform と名前）');
+  assert(/id="kt-ai-jsreg-open-customize"/.test(m.$('kt-ai-jsreg').innerHTML), 'コードペインの結果にも［Customize タブで確認］');
   await clickChat(m, 'open-customize', { target: 'desktop', name: 'fieldOnOff.js' });
   assert(m.opened.length === 1 && m.opened[0].target === 'desktop' && m.opened[0].kind === 'js' && m.opened[0].name === 'fieldOnOff.js', 'クリック → openCustomize({ desktop, js, fieldOnOff.js })（タブ切替と一覧の表示は boot 側）');
   await m.$('kt-ai-pane-code').dispatch({ type: 'click', target: { id: 'kt-ai-jsreg-open-customize' } });
-  assert(m.opened.length === 2 && m.opened[1].name === 'fieldOnOff.js', 'コードペインの［Customize で確認］も同じ');
+  assert(m.opened.length === 2 && m.opened[1].name === 'fieldOnOff.js', 'コードペインの［Customize タブで確認］も同じ');
   const m2 = mount({ openCustomize: null });
   await ticks();
   await adoptFinal(m2); await applyFinal(m2);

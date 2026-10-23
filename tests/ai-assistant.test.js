@@ -161,7 +161,7 @@ console.log('\n--- 1. KTAiClient ---');
   const bad = { ...GOOD_RESPONSE, answer: '参照なし [E999]', facts: [{ text: 'x', evidenceIds: ['E999'] }, { text: 'y', evidenceIds: ['E8', 'E777'] }], analysis: [{ text: 'z', evidenceIds: ['E555'] }] };
   //   2026-10-23（§12.61）: 根拠 ID の除去・根拠の無い事実の降格は Gateway（validate-response）の仕事。Toolkit の受け取り（receive）は契約の関所（ok・契約の版・answer）だけで、形はそのまま返す
   const got = KTAiClient.receive('answer', bad);
-  assert(got.answer === bad.answer && got.facts.length === 2 && got.analysis.length === 1 && Array.isArray(got.clientWarnings) && got.clientWarnings.length === 0, 'receive: Gateway の形をそのまま返す（Toolkit では根拠 ID を読み直さない）');
+  assert(got.answer === bad.answer && got.facts.length === 2 && got.analysis.length === 1 && Array.isArray(got.clientWarnings) && got.clientWarnings.length === 0, 'receive: AI サービスの形をそのまま返す（Toolkit では根拠 ID を読み直さない）');
   const thrown = (r) => { try { KTAiClient.receive('answer', r); return null; } catch (e) { return e.code; } };
   assert(thrown({ ...GOOD_RESPONSE, contractVersion: '2.0' }) === 'UNSUPPORTED_CONTRACT_VERSION' && thrown({ ...GOOD_RESPONSE, answer: '' }) === 'INVALID_RESPONSE' && thrown({ ok: false }) === 'INVALID_RESPONSE', 'receive: contractVersion 不一致 / answer 無し / ok でない → AiClientError');
 }
@@ -251,7 +251,7 @@ console.log('\n--- 3. ask: 同意 → 送信 → loading → 回答 ---');
   const p = m.$('kt-ai-consent-ok').dispatch('click');   // 送信開始（pending）
   await tick();
   assert(m.settings.hasConsent() && m.calls.ask.length === 1, '同意 → 記録して送信');
-  assert(m.$('kt-ai-ask').disabled === true && m.$('kt-ai-paid-status').textContent.includes('送信中') && /requestId: tk-/.test(m.$('kt-ai-paid-status').textContent), 'loading: ボタン無効・送信中表示・requestId 保持');
+  assert(m.$('kt-ai-ask').disabled === true && m.$('kt-ai-paid-status').textContent.includes('送信中') && /問い合わせ番号: tk-/.test(m.$('kt-ai-paid-status').textContent), 'loading: ボタン無効・送信中表示・requestId 保持');
   await m.$('kt-ai-ask').dispatch('click');
   assert(m.calls.ask.length === 1, '送信中の再クリックは無視（二重送信防止）');
   const sentCtx = m.calls.ask[0].ctx;
@@ -290,8 +290,8 @@ console.log('\n--- 4. 根拠チップ / 未知根拠 / エラー ---');
   await tick(); m.settings.setConsent(true);
   await m.generate(); await m.$('kt-ai-ask').dispatch('click'); await tick();
   const html = m.$('kt-ai-answer').innerHTML;
-  assert(!html.includes('data-eid="E999"') && html.includes('[根拠不明]') && html.includes('根拠付きの事実はありません') && html.includes('未使用'), 'Gateway が除去・降格した回答をそのまま表示（未知の根拠 ID のチップは無い）');
-  assert(html.includes('検証で除去・調整した項目'), '除去を開示（Gateway の normalization.warnings）');
+  assert(!html.includes('data-eid="E999"') && html.includes('[根拠不明]') && html.includes('根拠付きの事実はありません') && html.includes('未使用'), 'AI サービスが除去・降格した回答をそのまま表示（未知の根拠 ID のチップは無い）');
+  assert(html.includes('AI の返答から Toolkit が外した項目（技術者向け）'), '除去を開示（AI サービスの normalization.warnings）');
 }
 {
   const errs = [
@@ -302,12 +302,12 @@ console.log('\n--- 4. 根拠チップ / 未知根拠 / エラー ---');
     [new KTAiClient.AiClientError({ code: C.RATE_LIMITED, message: 'x', retryAfterSeconds: 42 }), 'アクセスが集中', 'RATE_LIMITED'],
     [new KTAiClient.AiClientError({ code: C.MONTHLY_LIMIT_EXCEEDED, message: 'x' }), '今月の AI 利用回数の上限', 'MONTHLY_LIMIT_EXCEEDED'],
     [new KTAiClient.AiClientError({ code: C.INTERNAL_ERROR, message: 'x' }), 'AI サービス内部でエラー', 'INTERNAL_ERROR'],
-    [new KTAiClient.AiClientError({ code: C.UPSTREAM_ERROR, message: 'x' }), 'AI プロバイダが応答しません', 'UPSTREAM_ERROR'],
+    [new KTAiClient.AiClientError({ code: C.UPSTREAM_ERROR, message: 'x' }), 'AI が応答しません', 'UPSTREAM_ERROR'],
     [new KTAiClient.AiClientError({ code: C.TIMEOUT, message: 'x' }), '時間内に応答しません', 'TIMEOUT'],
     [new KTAiClient.AiClientError({ code: C.INVALID_RESPONSE, message: 'x' }), '応答を解釈できません', 'INVALID_RESPONSE'],
-    [new KTAiClient.AiClientError({ code: C.INVALID_CONTEXT, message: 'x' }), '検証を通りませんでした', 'INVALID_CONTEXT'],
+    [new KTAiClient.AiClientError({ code: C.INVALID_CONTEXT, message: 'x' }), '受け付けませんでした', 'INVALID_CONTEXT'],
     // Phase 22: 「契約形式」は利用契約の障害と読まれるので、応答の形式の異常と書く
-    [new KTAiClient.AiClientError({ code: C.MODEL_OUTPUT_INVALID, message: 'x' }), '応答の形式が正しくありませんでした', 'MODEL_OUTPUT_INVALID'],
+    [new KTAiClient.AiClientError({ code: C.MODEL_OUTPUT_INVALID, message: 'x' }), '返答を Toolkit が読み取れませんでした', 'MODEL_OUTPUT_INVALID'],
     [new Error('plain'), 'ネットワークエラー', 'TRANSPORT_ERROR'],
   ];
   for (const [e, text, code] of errs) {
@@ -317,7 +317,7 @@ console.log('\n--- 4. 根拠チップ / 未知根拠 / エラー ---');
     const st = m.$('kt-ai-paid-status').textContent;
     assert(st.includes(text) && st.includes(`[${code}]`) && st.includes('requestId: '), `エラー文言: ${code}`);
     if (code === 'RATE_LIMITED') assert(st.includes('約42秒後'), 'retryAfterSeconds を表示');
-    if (code === 'PRODUCT_NOT_ENTITLED') assert(st.includes('requestId: e-9') && m.$('kt-ai-ask').disabled === true, '認証・契約系の失敗後はボタンを無効化し Gateway の requestId を表示');
+    if (code === 'PRODUCT_NOT_ENTITLED') assert(st.includes('requestId: e-9') && m.$('kt-ai-ask').disabled === true, '認証・契約系の失敗後はボタンを無効化し AI サービスの requestId を表示');
     assert(m.$('kt-ai-answer').style.display === 'none' && m.$('kt-ai-ask').disabled === (code === 'PRODUCT_NOT_ENTITLED' || code === 'AUTH_INVALID_TOKEN' || code === 'AUTH_TOKEN_EXPIRED' || code === 'AUTH_DOMAIN_MISMATCH'), `エラー後の状態: ${code}`);
   }
 }

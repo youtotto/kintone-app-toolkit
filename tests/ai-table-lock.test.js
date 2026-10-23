@@ -157,7 +157,7 @@ const tablePlanOf = (custsOf, refsOf = null) => (args) => {
   const ids = custs.map(c => c.customizationId);
   const ops = (args.requirements || []).map(r => ({ op: 'update', id: r.id, target: r.target, condition: r.condition, behavior: r.behavior, exceptions: r.exceptions || [], decision: r.decision, disposition: 'adopted', sourceQuotes: [], planRefs: refsOf ? refsOf(r, args) : ids, effects: Array.isArray(r.effects) && r.effects.length ? r.effects : ['lock'], note: '' }));
   const plan = { goal: args.goal, assessment: { summary: '承認済みでは金額と明細を編集不可にします。' }, steps: custs.map(c => ({ id: c.customizationId, actionType: 'CUSTOMIZATION_REQUIRED', targetKind: 'JS', targetRef: null, title: 'JavaScript', spec: { customizationId: c.customizationId }, dependsOn: [] })), customizations: clone(custs), provisionals: [], questions: [], unknowns: [], impact: [], solution: 'CUSTOMIZATION' };
-  return { plan, ctx: null, gatewayPlan: clone(plan), turn: { reply: '承認済みでは金額と明細のセルを編集不可にします。', requirementOps: ops, utteranceCoverage: [] },
+  return { plan, ctx: null, gatewayPlan: clone(plan), turn: { reply: '承認済みでは金額と明細の入力欄を編集不可にします。', requirementOps: ops, utteranceCoverage: [] },
     review: { base: { baseVersion: '1', env: 'preview', ok: true, fingerprint: 'fp-1', revision: { preview: '10' } }, steps: custs.map(c => ({ stepId: c.customizationId, status: 'VALID', safety: 'PLAN_ONLY', customization: clone(c), codeGeneration: { supported: true, strategy: 'NEW_JS_FILE', reason: null }, issues: [] })), warnings: [] } };
 };
 /** 生成工程の偽物: 計画の C の fields の「編集できない」を、その C の列ごとに処理する候補（実 AI の CX-1 の C1 の処理と同じ書き方）。渡された必須の効果を記録する */

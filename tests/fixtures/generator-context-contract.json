@@ -1,6 +1,6 @@
 {
-  "purpose": "担当間の契約の素材（会話フローの再設計 §0c.7）。Toolkit の KTContext.buildGenerator が作る Generator Context。tests/ai-generator-context-contract.test.js が毎回作り直して一致を確かめる。AI版に写して Gateway の検証と隔離環境に通す",
-  "material": "既存 JS（tantou.js）が計画に無いフィールド（担当）を編集画面で読む／保存だけの警告（備考）と画面の編集不可（金額）を同じ customization に持つ／計画で新設するフィールド（承認メモ）の編集不可／§0c.10: 関係しない共通の関数のファイル（common.js）は送らず relatedOmitted の reason other・events []",
+  "purpose": "担当間の契約の素材（会話フローの再設計 §0c.7）。Toolkit の KTContext.buildGenerator が作る Generator Context。tests/ai-generator-context-contract.test.js が毎回作り直して一致を確かめる。AI版に写して AI サービスの検証と模擬テストの環境に通す",
+  "material": "既存の JavaScript（tantou.js）が計画に無いフィールド（担当）を編集画面で読む／保存だけの警告（備考）と画面の編集不可（金額）を同じ customization に持つ／計画で新設するフィールド（承認メモ）の編集不可／§0c.10: 関係しない共通の関数のファイル（common.js）は送らず relatedOmitted の reason other・events []",
   "ctx": {
     "contextVersion": "customization-1",
     "generatedAt": "2026-10-08T00:00:00.000Z",

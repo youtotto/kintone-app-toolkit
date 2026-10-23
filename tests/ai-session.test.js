@@ -207,7 +207,7 @@ console.log('\n--- 6. Refresh robustness（Phase 8.5: 応答喪失 ≠ replay）
   let err = null; try { await session.client.getHealth(); } catch (e) { err = e; }
   const c1 = store.load();
   assert(err && err.code === C.TIMEOUT && session.status().connected === true && c1.refreshToken === 'RT-2', 'refresh の timeout → 接続情報を捨てない（旧 Refresh を保持・接続済みのまま）');
-  assert(c1.refreshAttempt && /^[A-Za-z0-9_-]{8,128}$/.test(c1.refreshAttempt.requestId) && c1.refreshAttempt.at, 'refresh 要求の requestId を接続情報と一緒に保存（Gateway の形式に合う）');
+  assert(c1.refreshAttempt && /^[A-Za-z0-9_-]{8,128}$/.test(c1.refreshAttempt.requestId) && c1.refreshAttempt.at, 'refresh 要求の requestId を接続情報と一緒に保存（AI サービスの形式に合う）');
   const rid = c1.refreshAttempt.requestId;
   assert(gw.ctl.lastRefreshBody.requestId === rid, 'refresh 要求に requestId を送る');
   const h = await session.client.getHealth();
@@ -248,7 +248,7 @@ console.log('\n--- 6. Refresh robustness（Phase 8.5: 応答喪失 ≠ replay）
   store.save({ ...store.load(), refreshAttempt: { requestId: 'rf_someone-else-0001', at: new Date(t).toISOString() } });
   let err = null; try { await session.client.getHealth(); } catch (e) { err = e; }
   // 2026-10-05 で意図して更新: 接続先（apiBase）は残す
-  assert(err && err.code === C.SESSION_EXPIRED && session.status().connected === false && !/RT-|refreshAttempt/.test(storage.dump()) && store.load().apiBase === 'https://gw.test', 'Gateway が reused（family 失効）→ SESSION_EXPIRED・接続情報を破棄（接続先は残す）');
+  assert(err && err.code === C.SESSION_EXPIRED && session.status().connected === false && !/RT-|refreshAttempt/.test(storage.dump()) && store.load().apiBase === 'https://gw.test', 'AI サービスが reused（family 失効）→ SESSION_EXPIRED・接続情報を破棄（接続先は残す）');
 }
 {
   // browser sleep: 猶予（Gateway 側 30 分）内に起きれば回復、超えれば失効（client はループしない）
@@ -269,7 +269,7 @@ console.log('\n--- 6. Refresh robustness（Phase 8.5: 応答喪失 ≠ replay）
   try { await session.client.getHealth(); } catch (e) { }
   t += 2 * 60 * 60 * 1000;
   let err = null; try { await session.client.getHealth(); } catch (e) { err = e; }
-  assert(err && err.code === C.SESSION_EXPIRED && session.status().connected === false, '猶予後（2 時間）の再送は Gateway が失効 → SESSION_EXPIRED（再接続が必要）');
+  assert(err && err.code === C.SESSION_EXPIRED && session.status().connected === false, '猶予後（2 時間）の再送は AI サービスが失効 → SESSION_EXPIRED（再接続が必要）');
 }
 {
   // 通信断（TRANSPORT_ERROR）でも同様に保持して再送。成功した refresh は attempt を残さない

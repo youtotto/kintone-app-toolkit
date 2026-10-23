@@ -61,7 +61,7 @@ console.log('\n--- F4 / F5. KTCodeReview: kintone のエラー表示の作法（
   const BAD = "(function () {\n  'use strict';\n  kintone.events.on(['app.record.edit.change.amount'], function (event) {\n    const f = event.record['amount'];\n    f.error = Number(f.value || 0) > 1000000 ? '金額が100万円を超えています。' : '';\n    return event;\n  });\n})();";
   const custom = { customizationId: 'C1', requirement: '金額が100万円を超えたら警告', strategy: 'NEW_JS_FILE', platform: ['desktop'], events: ['app.record.edit.change.amount'], fields: [{ code: 'amount', access: 'CONTROL' }], apis: [] };
   const rv = KTCodeReview.review({ generated: { strategy: 'NEW_JS_FILE', targetFile: 'warn.js', code: BAD, patch: null, events: custom.events, fields: custom.fields, apis: [] }, customization: custom, plan: null, data: DATA, scan: null, existingSource: null });
-  assert(typeof KTCodeReview.kintoneFieldOps === 'undefined' && !rv.checks.some(c => c.name === 'error-clear') && rv.status !== 'BLOCKED', `F4（簡素化 B）: エラー表示の解除の書き方は Toolkit の形式確認で止めない（生成工程の検査の範囲）: ${JSON.stringify(rv.checks.map(c => c.name))}`);
+  assert(typeof KTCodeReview.kintoneFieldOps === 'undefined' && !rv.checks.some(c => c.name === 'error-clear') && rv.status !== 'BLOCKED', `F4（簡素化 B）: エラー表示の解除の書き方は Toolkit のコードの検査で止めない（AI サービスの検査の範囲）: ${JSON.stringify(rv.checks.map(c => c.name))}`);
 }
 
 // =========================================================
@@ -86,10 +86,10 @@ console.log('\n--- BF-C（再 3）/ F24. エラー表示と編集不可: 条件�
   const GW_SEP_FAIL = { requiredEffects: GW_SEP_RE, behavior: { status: 'failed', reason: null, cases: [{ id: 'k1', field: 'amount', effect: 'lock', expect: 'lock', event: 'app.record.edit.show', side: 'match', verdict: 'fail', message: '承認済みで金額が編集できます（同じイベントの error で編集不可が取り消されました）' }] } };
   const sepNone = KTCodeReview.attachBehavior(rSep, null, { requiredEffects: REQ_SEP, customization: custom });
   const sepFail = KTCodeReview.attachBehavior(rSep, GW_SEP_FAIL, { requiredEffects: REQ_SEP, customization: custom });
-  assert(sepNone.status === 'BLOCKED' && sepNone.registration.verdict === 'BLOCKED' && (chk(sepNone, 'required-effects') || {}).severity === 'block', `F5（実機 1 本目）: 別 handler でも条件なしに同じ表示イベントで error → 生成工程の結果が無い間は登録不可（返却の欠落）: ${sepNone.registration.verdict}`);
-  assert(sepFail.status === 'BLOCKED' && sepFail.registration.verdict === 'BLOCKED' && (chk(sepFail, 'behavior-fail') || {}).severity === 'block' && /取り消され/.test((chk(sepFail, 'behavior-fail') || {}).message || ''), `F5（実機 1 本目）: 模擬テストで編集不可の取り消しが見つかった（Gateway の behavior の fail）→ 登録不可: ${sepFail.registration.verdict} ${(chk(sepFail, 'behavior-fail') || {}).message}`);
+  assert(sepNone.status === 'BLOCKED' && sepNone.registration.verdict === 'BLOCKED' && (chk(sepNone, 'required-effects') || {}).severity === 'block', `F5（実機 1 本目）: 別 handler でも条件なしに同じ表示イベントで error → AI サービスの結果が無い間は登録不可（返却の欠落）: ${sepNone.registration.verdict}`);
+  assert(sepFail.status === 'BLOCKED' && sepFail.registration.verdict === 'BLOCKED' && (chk(sepFail, 'behavior-fail') || {}).severity === 'block' && /取り消され/.test((chk(sepFail, 'behavior-fail') || {}).message || ''), `F5（実機 1 本目）: 模擬テストで編集不可の取り消しが見つかった（AI サービスの behavior の fail）→ 登録不可: ${sepFail.registration.verdict} ${(chk(sepFail, 'behavior-fail') || {}).message}`);
   const rGuard = KTCodeReview.review({ generated: gen(GUARDED), customization: custom, plan: null, data: DATA, scan: null, existingSource: null });
-  assert(rGuard.status !== 'BLOCKED', 'F24（実機 2 本目）: 編集不可を見る条件で分けたコードは形式確認で停止しない（競合の有無は生成工程の模擬テストで確かめる）');
+  assert(rGuard.status !== 'BLOCKED', 'F24（実機 2 本目）: 編集不可を見る条件で分けたコードはコードの検査で停止しない（競合の有無は模擬テストで確かめる）');
   // 別ファイル（新規 JS が条件なしに show で error、既存の dealLock.js が同じ show で disabled）の判定は、C-1 第 3 段（2026-10-08）で
   //   Toolkit の形式確認から外した（error-cancels-other-js・errorGuarded は削除）。守り手は生成工程の模擬テスト（Gateway の cause candidate-cancels-existing-lock の fail）で、
   //   Toolkit はその fail をほかの fail と同じく未解決（承認できない）として取り込む。既存 JS の編集不可の条件（承認済みなど）が代表条件で成り立たず
@@ -105,7 +105,7 @@ console.log('\n--- BF-C（再 3）/ F24. エラー表示と編集不可: 条件�
   const REQ4 = [{ requirementId: 'C1', requirementIds: ['C1'], field: 'amount', effect: 'warn', events: ['app.record.edit.change.amount'], condition: '' }];
   const r4v = KTCodeReview.attachBehavior(r4, { version: '1', passed: false, machine: [], requiredEffects: [{ requirementId: 'C1', requirementIds: ['C1'], field: 'amount', effect: 'warn', status: 'missing', events: [{ event: 'app.record.edit.change.amount', status: 'missing' }] }], behavior: { status: 'not-run', reason: 'machine-blocked', cases: [] } }, { requiredEffects: REQ4, customization: cust4 });
   assert(chk(r4, 'patch').ok && !chk(r4, 'planned-events') && !chk(r4, 'duplicate-handler') && r4.status !== 'BLOCKED' && r4v.status === 'BLOCKED' && r4v.registration.verdict === 'BLOCKED' && chk(r4v, 'required-effects') && !chk(r4v, 'required-effects').ok,
-    'F26（BF-C 4 回目・簡素化 B）: 計画の change をコードが登録していないことは、生成工程の必須の効果の結果（missing）で登録不可にする（Toolkit は同じ判定を作り直さない）');
+    'F26（BF-C 4 回目・簡素化 B）: 計画の change をコードが登録していないことは、AI サービスの必須の効果の結果（missing）で登録不可にする（Toolkit は同じ判定を作り直さない）');
   // F27（BF-C 4 回目）: 「C1 のコードを作り直して。金額を変更したときにも…」の後半を黙って捨てない。
   //   C-1 第 3 段（2026-10-08）: 古い確認の流れ（extraRequestIn・［この変更で確定してコードを作る］・仕様の確定）は削除した。
   //   要望付きの生成の指示は最終案を直す依頼（REVISE_PLAN・TURN_THEN_GENERATE）になり、JavaScript は最終案のパイプラインが作り直す。
@@ -138,7 +138,7 @@ console.log('\n--- BF-C（再）. スペース要素: 実在するスペース�
   const withLayout = clone(DATA); withLayout.layout = [{ type: 'ROW', fields: [{ type: 'NUMBER', code: 'amount' }, { type: 'SPACER', elementId: 'amount_warning_space', size: { width: '200' } }] }];
   const ok = KTCodeReview.review({ generated: gen, customization: cust, plan: null, data: withLayout, scan: null, existingSource: null, existingOnly: true });
   const atGen = KTCodeReview.review({ generated: gen, customization: cust, plan: null, data: DATA, scan: null, existingSource: null });
-  assert(!chk(atGen, 'space-element') && !chk(atGen, 'fields'), '生成のとき（existingOnly でない）は、存在の確認を Toolkit で繰り返さない（生成工程の検査）');
+  assert(!chk(atGen, 'space-element') && !chk(atGen, 'fields'), '生成のとき（existingOnly でない）は、存在の確認を Toolkit で繰り返さない（AI サービスの検査）');
   assert(chk(ok, 'space-element').ok && chk(ok, 'fields').ok && ok.status !== 'BLOCKED', 'フォームに実在するスペースは通す（存在しないフィールドと数えない）');
   assert(KTCodeReview.layoutSpaceIds([{ type: 'GROUP', code: 'g', layout: [{ type: 'ROW', fields: [{ type: 'SPACER', elementId: 'inner' }] }] }, { type: 'ROW', fields: [{ type: 'SPACER', elementId: 'top' }, { type: 'LABEL', elementId: 'lbl' }] }]).sort().join() === 'inner,top', 'layoutSpaceIds: グループ内のスペースも・ラベルは含めない');
   const gctx = KTContext.buildGenerator({ customization: cust, plan: null, data: withLayout, deps: null, scan: null });
@@ -257,13 +257,13 @@ console.log('\n--- F1. 文書: 計画のある会話の引継ぎ資料 / 仕様�
   const doc = KTContextUi.generateDocument({ kind: 'handover', inputs, version, execState });
   const md = doc.outputs.markdown;
   assert(doc.ok && /## 変更計画（Toolkit の記録）/.test(md) && /動作テスト環境へ反映済み/.test(md) && /P1: VERIFIED/.test(md) && /通知の送信時間は何時が適切ですか/.test(md) && /運用環境には反映していません/.test(md), 'F1: 引継ぎ資料の Markdown に変更の記録（状態・反映結果・確認事項・運用環境は未反映）');
-  assert(/この Context は運用環境の設定（画面を開いた時点）から作っています/.test(md) && /運用環境へ反映したとは書かない/.test(doc.outputs.prompt), 'F1: Context が運用環境の設定であることを明記・Prompt にも「運用環境へ反映したとは書かない」');
+  assert(/この資料は運用環境の設定（画面を開いた時点）から作っています/.test(md) && /運用環境へ反映したとは書かない/.test(doc.outputs.prompt), 'F1: Context が運用環境の設定であることを明記・Prompt にも「運用環境へ反映したとは書かない」');
   const j = JSON.parse(doc.outputs.json);
   assert(j.document === 'handover' && j.plan && j.planStatus === 'EXECUTED' && j.execution && j.execution.status === 'DONE' && j.execution.environment === 'preview' && j.production.deployed === false && j.contextEnvironment === 'production' && j.context, 'F1: JSON にも計画・状態・動作テスト環境の反映結果・運用環境は未反映');
   const specDoc = KTContextUi.generateDocument({ kind: 'spec', inputs, version });
   assert(/## 変更計画（Toolkit の記録）/.test(specDoc.outputs.markdown), '仕様書など他の種類でも、計画がある会話なら変更の記録を入れる');
   const plain = KTContextUi.generateDocument({ kind: 'handover', inputs, version: null });
-  assert(!/変更計画（Toolkit の記録）/.test(plain.outputs.markdown) && !/この Context は運用環境の設定/.test(plain.outputs.markdown) && JSON.parse(plain.outputs.json).contextVersion, '計画の無い会話では従来どおり（骨格 ＋ Context、JSON は Context）');
+  assert(!/変更計画（Toolkit の記録）/.test(plain.outputs.markdown) && !/この資料は運用環境の設定/.test(plain.outputs.markdown) && JSON.parse(plain.outputs.json).contextVersion, '計画の無い会話では従来どおり（骨格 ＋ Context、JSON は Context）');
 }
 
 // =========================================================
@@ -380,11 +380,11 @@ console.log('\n--- F7 / GM-6（UI）. 相談: 取得済みの本文を Context �
 console.log('\n--- CX-4（intent）. 「誰も」「いつでも」などの不定の言い方を質問と判定しない ---');
 {
   const C = (t) => KTAiConversation.classifyIntent(t, {}).intent;
-  assert(C('承認後は誰も金額を変更できないようにして。ただし営業担当はいつでも変更できるようにして') === 'PLAN', '「承認後は誰も…変更できないようにして。…いつでも変更できるようにして」は計画（実機で質問扱いになった）');
+  assert(C('承認後は誰も金額を変更できないようにして。ただし営業担当はいつでも変更できるようにして') === 'PLAN', '「承認後は誰も…変更できないようにして。…いつでも変更できるようにして」は計画（実際の画面で質問扱いになった）');
   assert(C('誰でも編集できるようにして') === 'PLAN' && C('何も入力しなくても通知されるようにしたい') === 'PLAN' && C('どこでも見られるようにして') === 'PLAN' && C('いつも担当者に通知したい') === 'PLAN', '「誰でも / 何も / どこでも / いつも」を含む依頼は計画');
   assert(C('このフィールドは何に使ってる？') === 'ASK' && C('誰が承認するの') === 'ASK' && C('いつ通知されますか') === 'ASK' && C('通知は何件ある？') === 'ASK' && C('どこで使われている？') === 'ASK', '「何に / 誰が / いつ / 何件 / どこで」の質問は従来どおり質問');
   // XA-4（実機）: 文末の「〜たい / 〜てほしい / 〜てください」は依頼
-  assert(C('顧客マスタの電話番号を連絡先電話にも入れたい') === 'PLAN' && C('承認済みの案件だけ一覧に出したいです') === 'PLAN' && C('金額の入力欄を分けてほしい') === 'PLAN' && C('担当者を必須にしてください') === 'PLAN', 'XA-4: 「入れたい / 出したいです / 分けてほしい / してください」は計画（実機で質問扱いになった）');
+  assert(C('顧客マスタの電話番号を連絡先電話にも入れたい') === 'PLAN' && C('承認済みの案件だけ一覧に出したいです') === 'PLAN' && C('金額の入力欄を分けてほしい') === 'PLAN' && C('担当者を必須にしてください') === 'PLAN', 'XA-4: 「入れたい / 出したいです / 分けてほしい / してください」は計画（実際の画面で質問扱いになった）');
   assert(C('このアプリの通知の仕組みを知りたい') === 'ASK' && C('どこで金額を使っているか聞きたい') === 'ASK', '「知りたい / 聞きたい」は質問のまま');
   // F29（CX-5 実機）: 計画がある会話の途中変更「やっぱり税込150万円以上。既存フィールドは増やさないで」は修正
   {
@@ -435,7 +435,7 @@ console.log('\n--- CX-2a / CX-3 / CX-7. 条件式の in / not in への正規化
 }
 
 // =========================================================
-console.log('\n--- CX-7. 外部連携・通知の語で生成の可否を変えない（簡素化 2026-10-18: 制限は生成工程の機械検査）・生成できない項目の案内 ---');
+console.log('\n--- CX-7. 外部連携・通知の語で生成の可否を変えない（簡素化 2026-10-18: 制限はAI サービスのコードの検査）・生成できない項目の案内 ---');
 {
   //   簡素化（2026-10-18）: 要件の文を語の照合で読み、外部サービスとの連携（EXTERNAL_INTEGRATION）と JavaScript による通知（NOTIFICATION_BY_JS）を生成の対象外にする
   //   処理（7b・7c）は削除した。外部への通信と通知の制限は生成工程の責任（生成の指示と機械検査の security・security-review・notification が生成したコードの形で止める。
@@ -702,11 +702,11 @@ console.log('\n--- F41（F39 の確認・実機）. PC とモバイルの計画�
   const genOf = (add) => gwWithBody({ strategy: 'EXTEND_EXISTING_JS', targetFile: 'dealLock.js', code: add, patch: { baseHash, operations: [{ type: 'INSERT_BEFORE', anchor: '})();', content: add }] }, events: cust.events, fields: cust.fields, apis: ['kintone.events.on'] }, DL);
   const chk = (r, n) => r.checks.find(c => c.name === n) || null;
   const bad = KTCodeReview.review({ generated: genOf(ADD), customization: cust, plan: null, data: DATA, scan: null, existingSource: SRC });
-  assert(chk(bad, 'patch').ok && !chk(bad, 'platform-fields') && bad.status !== 'BLOCKED', `F41（簡素化 B）: Toolkit の形式確認は画面ごとの処理の有無を判定しない（生成工程の必須の効果の範囲）: ${JSON.stringify(bad.checks.map(c => c.name))}`);
+  assert(chk(bad, 'patch').ok && !chk(bad, 'platform-fields') && bad.status !== 'BLOCKED', `F41（簡素化 B）: Toolkit のコードの検査は画面ごとの処理の有無を判定しない（AI サービスの必須の効果の範囲）: ${JSON.stringify(bad.checks.map(c => c.name))}`);
   const REQ = [{ requirementId: 'C1', requirementIds: ['C1'], field: 'owner', effect: 'lock', events: cust.events, condition: 'ステータス = "承認済み"' }];
   const badV = KTCodeReview.attachBehavior(bad, { version: '1', passed: false, machine: [], requiredEffects: [{ requirementId: 'C1', requirementIds: ['C1'], field: 'owner', effect: 'lock', status: 'missing', events: [{ event: 'app.record.create.show', status: 'not-on-create' }, { event: 'app.record.edit.show', status: 'missing' }, { event: 'mobile.app.record.create.show', status: 'not-on-create' }, { event: 'mobile.app.record.edit.show', status: 'present' }] }], behavior: { status: 'not-run', reason: 'machine-blocked', cases: [] } }, { requiredEffects: REQ, customization: cust });
   assert(badV.status === 'BLOCKED' && badV.registration.verdict === 'BLOCKED' && chk(badV, 'required-effects') && !chk(badV, 'required-effects').ok && /owner/.test(chk(badV, 'required-effects').message),
-    `F41（簡素化 B）: PC の画面の処理が無いことは、生成工程の必須の効果の結果（PC のイベントが missing）で登録不可にする: ${JSON.stringify(badV.checks.filter(c => !c.ok).map(c => c.name + ':' + c.message))}`);
+    `F41（簡素化 B）: PC の画面の処理が無いことは、AI サービスの必須の効果の結果（PC のイベントが missing）で登録不可にする: ${JSON.stringify(badV.checks.filter(c => !c.ok).map(c => c.name + ':' + c.message))}`);
   // 両方の画面で制御するコード（PC の handler にも担当者）は、Toolkit の形式確認で止めない
   const BOTH = "  kintone.events.on(['app.record.create.show', 'app.record.edit.show', 'mobile.app.record.create.show', 'mobile.app.record.edit.show'], function (event) {\n    const record = event.record;\n    if (record['ステータス'] && record['ステータス'].value === '承認済み') {\n      record['owner'].disabled = true;\n    }\n    return event;\n  });\n";
   const good = KTCodeReview.review({ generated: genOf(BOTH), customization: cust, plan: null, data: DATA, scan: null, existingSource: SRC });
@@ -831,7 +831,7 @@ console.log('\n--- F35 / F36（XA-7 / XA-9 実機）. 関連レコードの設�
   assert(sB.issues.some(i => i.code === 'REFERENCE_TABLE_NOT_VIEW' && /関連レコード/.test(i.message) && /反映しません/.test(i.message)), 'F35: 一覧の手順の対象が関連レコード（フィールド）→ 設定の場所と、Toolkit は反映しないことを示す');
   const pB2 = plan([step('P1', 'UPDATE_VIEW', 'VIEW', '見積一覧', { fields: ['quote_no', 'amount'], sort: 'レコード番号 desc' })]);
   const rvB2 = reviewOf(pB2);
-  assert(rvB2.steps[0].issues.some(i => i.code === 'REFERENCE_TABLE_NOT_VIEW') && KTPlanExecutor.applyReadiness(pB2, rvB2)[0].apply !== 'AUTO', 'F35: Gateway が通しても（ラベルで指定）関連レコードを一覧として反映しない');
+  assert(rvB2.steps[0].issues.some(i => i.code === 'REFERENCE_TABLE_NOT_VIEW') && KTPlanExecutor.applyReadiness(pB2, rvB2)[0].apply !== 'AUTO', 'F35: AI サービスが通しても（ラベルで指定）関連レコードを一覧として反映しない');
   //   F35c（依頼の文に参照元アプリの名前と関連レコードの名前があれば指摘する RELATED_RECORDS_IN_OTHER_APP）は、依頼の文を語の照合で読み直す指摘なので 2026-10-17 に削除した。
   //   関連レコードを一覧として反映しないこと（F35b の REFERENCE_TABLE_NOT_VIEW）は構造で決まるので残る
 
@@ -1017,7 +1017,7 @@ console.log('\n--- FR-1 / FR-2 / FR-6 / FR-7（UI・実際の AI client と tran
   assert(posts.length === 2 && last().type === 'ERROR' && last().data.code === 'INVALID_RESPONSE' && techCode('INVALID_RESPONSE') && plans() === 0, 'FR-2: plan の形が不完全な応答 → INVALID_RESPONSE（計画として登録しない・理由の code は［詳細情報］の中に表示し、本文に [CODE] の形では出さない）');
   queue.push('model-invalid');
   retry(); await settle();
-  assert(posts.length === 3 && last().type === 'ERROR' && last().data.code === 'MODEL_OUTPUT_INVALID' && techCode('MODEL_OUTPUT_INVALID', { requestId: true }) && plans() === 0 && $('kt-ai-input').value === ADOPT, 'FR-2: Gateway が AI 出力を契約違反と判定（502 MODEL_OUTPUT_INVALID）→ 登録しない・入力は残る（code と requestId は［詳細情報］の中）');
+  assert(posts.length === 3 && last().type === 'ERROR' && last().data.code === 'MODEL_OUTPUT_INVALID' && techCode('MODEL_OUTPUT_INVALID', { requestId: true }) && plans() === 0 && $('kt-ai-input').value === ADOPT, 'FR-2: AI サービスが AI 出力を契約違反と判定（502 MODEL_OUTPUT_INVALID）→ 登録しない・入力は残る（code と requestId は［詳細情報］の中）');
   // FR-7 / FR-6: 再試行の応答待ちに［再試行］と［送信］をもう一度押しても要求は 1 回。応答が来たら計画は 1 件だけ
   queue.push('gate');
   const p1 = retry(); await sentCount(4);

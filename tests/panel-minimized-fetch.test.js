@@ -372,7 +372,7 @@ await safe('§5f', async () => {
   const s0 = e.fk.settingsCalls();
   TABLE.push({ c: '5', label: '開発支援: 接続済みでも見えていない間（最小化中・別のタブ）', s: s0, o: e.fk.otherCalls(), fk: e.fk });
   assert(s0.length === 0 && ai.loads() === 0, `5f-1 見えていない間は接続しても作業の基準を取らない: ${s0.length} 回・読み込み ${ai.loads()}`);
-  assert(ai.health.n >= 1, `5f-2 設定取得ではない通信（Gateway の health）は止めない: ${ai.health.n} 回`);
+  assert(ai.health.n >= 1, `5f-2 設定取得ではない通信（AI サービスの health）は止めない: ${ai.health.n} 回`);
   // 見えた → 段階 1 の途中で見えなくなる → 完了の後は後続（他アプリの定義・本文）を取らない
   const h = e.fk.hold(/\/k\/v1\/preview\/app\/views$/);
   visible.v = true; ai.panel.onVisible(); await ticks();

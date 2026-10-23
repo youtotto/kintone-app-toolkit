@@ -44,7 +44,7 @@ function mount({ keepQ2 = false } = {}) {
     ctl.waiters.push(res);
     if (signal) signal.addEventListener('abort', () => { const e = new Error('キャンセルしました'); e.name = 'AbortError'; e.code = 'CANCELLED'; rej(e); });
   });
-  const failMaybe = () => { if (ctl.failNext) { const code = ctl.failNext; ctl.failNext = null; const e = new Error('AI プロバイダが応答しませんでした'); e.code = code; throw e; } };
+  const failMaybe = () => { if (ctl.failNext) { const code = ctl.failNext; ctl.failNext = null; const e = new Error('AI が応答しませんでした'); e.code = code; throw e; } };
   const client = {
     async getHealth() { return HEALTH; },
     async plan({ ctx, requestId, signal }) { calls.push({ kind: 'plan', ctx }); await wait(signal); failMaybe(); return { ...KTAiClient.receive('plan', planResp(ctx, keepQ2)), requestId, clientWarnings: [] }; },

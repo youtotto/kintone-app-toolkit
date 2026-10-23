@@ -59,7 +59,7 @@ console.log('\n--- 4. KTPlanReview との連携 ---');
   const okv = rv(plan([step('P1', 'ADD_VIEW', 'VIEW', 'v', { name: 'v', fields: ['case_name'], filterCond: 'owner in (LOGINUSER()) and amount >= "1"' })])).steps[0];
   assert(!okv.issues.some(i => /^COND_/.test(i.code)), 'Review: 一覧の正しい条件式は指摘なし');
   const pr = rv(plan([step('P1', 'ADD_PROCESS_ACTION', 'PROCESS_ACTION', 'a', { name: 'a', from: '未処理', to: '承認待ち', filterCond: 'amount > "1000000"' })])).steps[0];
-  assert(pr.issues.some(i => i.code === 'COND_INVALID' && />/.test(i.message)), 'Review: プロセスの条件で > は COND_INVALID（実機で設定できない）');
+  assert(pr.issues.some(i => i.code === 'COND_INVALID' && />/.test(i.message)), 'Review: プロセスの条件で > は COND_INVALID（実際の画面で設定できない）');
 }
 
 console.log(`\n${state.failed ? 'FAILED' : 'ALL PASSED'}: ${state.passed} passed / ${state.failed} failed`);

@@ -106,7 +106,7 @@ console.log('\n--- 2. prepare（読み取りだけ）: snapshot / 位置 / 保�
   const m = mk();
   const ch = replaceChange().change;
   const prep = await X.prepare({ appId: '310', changes: [ch], expectedRevision: '12' }, { api: m.api, current: await m.current() });
-  assert(prep.status === 'PREPARED' && prep.blockers.length === 0 && prep.snapshot.revision === '12' && prep.snapshot.scope === 'ALL', 'prepare: PREPARED・snapshot（revision / scope）');
+  assert(prep.status === 'PREPARED' && prep.blockers.length === 0 && prep.snapshot.revision === '12' && prep.snapshot.scope === 'ALL', 'prepare: PREPARED・snapshot（設定の版 / scope）');
   assert(prep.snapshot.desktop.js.length === 4 && prep.snapshot.desktop.css.length === 2 && prep.snapshot.mobile.js.length === 2 && prep.snapshot.mobile.css.length === 1 && prep.snapshot.desktop.js[0].type === 'URL' && prep.snapshot.desktop.js[2].name === 'fieldOnOff.js', 'snapshot は 4 つの一覧すべて（URL / FILE・順序）');
   assert(prep.changes[0].position === 2 && prep.changes[0].oldFileKey === 'dl:fieldOnOff' && prep.changes[0].currentHash === KTScan.hashText(FIELD_ON_OFF) && prep.summary.replace === 1 && prep.summary.add === 0 && prep.summary.preservedJs === 5 && prep.summary.preservedCss === 3, 'REPLACE: 位置 2・旧 fileKey・現在の本文の指紋 ＝ baseHash・保持 JS 5 / CSS 3');
   assert(prep.after.desktop.js.length === 4 && prep.after.desktop.js[2].fileKey === '<pending>' && prep.after.desktop.js[1].fileKey === 'dl:common' && prep.after.mobile.js.length === 2, 'after（完全な payload の元）: 同じ位置だけ差し替え・他は不変');
@@ -179,8 +179,8 @@ console.log('\n--- 4. §47 / §48 / §51 登録と検証: replace（全保持）
   const m2 = mk();
   const prep2 = await X.prepare({ appId: '310', changes: [newChange().change] }, { api: m2.api, current: await m2.current() });
   const ex2 = await X.executePreview(prep2, { api: m2.api });
-  assert(ex2.status === 'DONE' && ex2.steps[0].status === 'VERIFIED' && jsNames(m2, 'desktop').length === 5 && jsNames(m2, 'desktop')[4] === 'amount-warning-v1.js' && JSON.stringify(keysOf(m2, 'desktop').slice(0, 4)) === JSON.stringify(before.d) && keysOf(m2, 'mobile').length === 2, '§48 新規 JS: 4 → 5・末尾・既存 4 件と mobile は保持');
-  assert(ex2.steps[0].verification.checks.find(c => c.name === 'sourceHash').ok && ex2.steps[0].verification.checks.find(c => c.name === 'platform').ok, '新規 JS: 本文の指紋・platform');
+  assert(ex2.status === 'DONE' && ex2.steps[0].status === 'VERIFIED' && jsNames(m2, 'desktop').length === 5 && jsNames(m2, 'desktop')[4] === 'amount-warning-v1.js' && JSON.stringify(keysOf(m2, 'desktop').slice(0, 4)) === JSON.stringify(before.d) && keysOf(m2, 'mobile').length === 2, '§48 新しい JavaScript: 4 → 5・末尾・既存 4 件と mobile は保持');
+  assert(ex2.steps[0].verification.checks.find(c => c.name === 'sourceHash').ok && ex2.steps[0].verification.checks.find(c => c.name === 'platform').ok, '新しい JavaScript: 本文の指紋・platform');
   // mobile に登録（desktop を変えない）
   const m3 = mk();
   const mobCh = { ...newChange(['common.js', 'mobileLock.js']).change, target: 'mobile', content: NEW_JS.replace(/app\.record\.(create|edit)\.change\.amount/g, 'mobile.app.record.$1.change.amount') };
@@ -188,7 +188,7 @@ console.log('\n--- 4. §47 / §48 / §51 登録と検証: replace（全保持）
   mobCh.registration = { ...mobCh.registration, codeHash: mobCh.contentHash };   // Phase 21: 検査したコードの指紋（本文を差し替えた変更は、検査し直した指紋が無いと登録しない）
   const prep3 = await X.prepare({ appId: '310', changes: [mobCh] }, { api: m3.api, current: await m3.current() });
   const ex3 = await X.executePreview(prep3, { api: m3.api });
-  assert(ex3.status === 'DONE' && jsNames(m3, 'mobile').length === 3 && jsNames(m3, 'mobile')[2] === 'amount-warning-v1.js' && JSON.stringify(keysOf(m3, 'desktop')) === JSON.stringify(before.d), 'mobile への新規 JS: mobile 2 → 3・desktop は変更なし');
+  assert(ex3.status === 'DONE' && jsNames(m3, 'mobile').length === 3 && jsNames(m3, 'mobile')[2] === 'amount-warning-v1.js' && JSON.stringify(keysOf(m3, 'desktop')) === JSON.stringify(before.d), 'mobile への新しい JavaScript: mobile 2 → 3・desktop は変更なし');
   // PC の replace ＋ mobile の新規を 1 回で
   const m4 = mk();
   const prep4 = await X.prepare({ appId: '310', changes: [replaceChange().change, mobCh] }, { api: m4.api, current: await m4.current() });
@@ -261,7 +261,7 @@ console.log('\n--- 4b. 同じ画面へ新規 2 本（＋ PC の置き換え 1 �
 }
 
 // =========================================================
-console.log('\n--- 5. §46 失敗: upload（CSRF / 権限 / サイズ / 不正 / 一般）・upload 後の PUT 失敗（設定は不変）・execute の stale ---');
+console.log('\n--- 5. §46 失敗: upload（CSRF / 権限 / サイズ / 不正 / 一般）・upload 後の 書き込み 失敗（設定は不変）・execute の stale ---');
 {
   for (const [mode, code] of [['CSRF', 'UPLOAD_CSRF'], ['PERMISSION', 'PERMISSION_DENIED'], ['TOO_LARGE', 'FILE_TOO_LARGE'], ['INVALID', 'INVALID_FILE'], ['GENERIC', 'UPLOAD_FAILED']]) {
     const m = mk(); m.ctl.failUpload = mode;
@@ -272,7 +272,7 @@ console.log('\n--- 5. §46 失敗: upload（CSRF / 権限 / サイズ / 不正 /
   const m = mk(); m.ctl.failPut = 'customize';
   const prep = await X.prepare({ appId: '310', changes: [newChange().change] }, { api: m.api, current: await m.current() });
   const ex = await X.executePreview(prep, { api: m.api });
-  assert(ex.status === 'FAILED' && ex.put.ok === false && ex.steps[0].status === 'FAILED' && ex.previewUnchanged === true && m.st.revision === 12 && jsNames(m, 'desktop').length === 4, 'upload 済みで PUT 失敗 → FAILED・再取得で「設定は変わっていない」を確認（previewUnchanged）');
+  assert(ex.status === 'FAILED' && ex.put.ok === false && ex.steps[0].status === 'FAILED' && ex.previewUnchanged === true && m.st.revision === 12 && jsNames(m, 'desktop').length === 4, 'upload 済みで 書き込み 失敗 → FAILED・再取得で「設定は変わっていない」を確認（previewUnchanged）');
   const m2 = mk({ permission: false });
   // prepare は権限で止まるので、prepare 後に権限を落とす
   const m3 = mk();

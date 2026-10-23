@@ -47,7 +47,7 @@ const planJs2 = (args) => {
   return r;
 };
 const aiErr = (code, o = {}) => new KTAiClient.AiClientError({ code, message: o.message || `テスト: ${code}`, ...(o.details ? { details: o.details } : {}), ...(o.requestId ? { requestId: o.requestId } : {}) });
-const UPSTREAM_TIMEOUT = () => aiErr('UPSTREAM_ERROR', { details: { ok: false, error: { code: 'UPSTREAM_ERROR', message: 'AI プロバイダが時間内に応答しませんでした', detail: 'timeout' } } });
+const UPSTREAM_TIMEOUT = () => aiErr('UPSTREAM_ERROR', { details: { ok: false, error: { code: 'UPSTREAM_ERROR', message: 'AIが時間内に応答しませんでした', detail: 'timeout' } } });
 /**
  * 偽の生成工程（cid ごとの振る舞い）。plan = { C1: [ 'throw:TIMEOUT', 'good' ], ... }（呼び出しの順に使う。尽きたら最後）。
  *   'throw:<code>' = その code の AiClientError を投げる / 'upstream-timeout' = Gateway の期限 / 'gate' = gates[cid] が開くまで待つ（signal の abort で CANCELLED）/
@@ -106,7 +106,7 @@ await section(async () => {
 });
 
 // =========================================================
-console.log('\n--- §T1. C1 の生成が時間切れ・切断・Gateway の期限 → C2・自動の見直し・取り込みは 0 件、未完成の最終案と［残りの JavaScript を作る］ ---');
+console.log('\n--- §T1. C1 の生成が時間切れ・切断・AI サービスの期限 → C2・自動の見直し・取り込みは 0 件、未完成の最終案と［残りの JavaScript を作る］ ---');
 for (const [label, what, kind] of [['TIMEOUT', 'throw:TIMEOUT', 'timeout'], ['TRANSPORT_ERROR', 'throw:TRANSPORT_ERROR', 'disconnected'], ['UPSTREAM_ERROR detail timeout', 'upstream-timeout', 'timeout']]) {
   await section(async () => {
     const gates = { C1: K.gate() };
@@ -135,7 +135,7 @@ for (const [label, what, kind] of [['TIMEOUT', 'throw:TIMEOUT', 'timeout'], ['TR
     const b = restButtonOf(h);
     //   2026-10-14 の設計し直し（指示書 §1.4）: 止めた送信の最終案は「作成途中」の短いカード（見出し・できたもの・止めたもの・理由・残り n 件・ボタン。理由は 1 回だけ）
     assert(/作成途中/.test(vis) && !/未完成/.test(vis) && b && !b.disabled && /data-text="コードを作って"/.test(b.html) && [...h.matchAll(/<button[^>]*data-intent="REVISE_PLAN"[^>]*>/g)].every(mm => /data-display="受け付けた指示を計画に入れる"/.test(mm[0])) && !/data-fix=/.test(h) && !/data-act="final-fix"/.test(h), `T1-6（${label}）: カードの見出しは「作成途中」（「未完成」は出さない）・JavaScript の次の手は［残りの JavaScript を作る］1 つ（計画の修正の依頼（fix）は出さない。計画の差分更新のボタンは、まだ入っていない受け付けた指示を入れる［受け付けた指示を計画に入れる］だけ）: ${b && b.html}`);
-    const WHY = { timeout: 'AIの応答が時間切れになりました', disconnected: 'AIサービスとの通信が切れました' }[kind];
+    const WHY = { timeout: 'AI の応答が時間切れになりました', disconnected: 'AI サービスとの通信が切れました' }[kind];
     assert(vis.includes(`まだできた JavaScript はありません。JavaScriptの作成中に、${WHY}。JavaScript 2は手を付けていません。`) && /残り 2 件から再開できます/.test(vis) && (vis.match(new RegExp(WHY, 'g')) || []).length === 1 && !/JavaScript を作っている途中で止めました|まだ作っていない JavaScript が/.test(vis), `T1-7（${label}）: 作成途中のカードに、止めた JavaScript（手順の title）と理由・作っていない JavaScript・残りの件数（理由は 1 回だけ）: ${vis.replace(/\s+/g, ' ').slice(0, 240)}`);
     //   レビューの指摘 row4（2026-10-09）: 止めた送信で受け付けていた指示は、未完成の最終案のカードにも「まだ計画に入っていません」と、計画に入れる次の手（既存の choice の導線）
     const pendBtn = /<button[^>]*data-act="choice"[^>]*data-intent="REVISE_PLAN"[^>]*data-display="受け付けた指示を計画に入れる"[^>]*>/.exec(h);
@@ -168,7 +168,7 @@ await section(async () => {
   const ac = new AbortController();
   const p = sendUntilAdopt(x, { signal: ac.signal });
   await K.ticks(30);
-  assert(gen.count('C1') === 1 && gen.seen[0].signal === ac.signal, 'T2-0: 前提: C1 の生成中（送信の signal を生成工程に渡している）');
+  assert(gen.count('C1') === 1 && gen.seen[0].signal === ac.signal, 'T2-0: 前提: C1 の生成中（送信の signal をAI サービスに渡している）');
   ac.abort();
   const r = await p; await K.ticks(4);
   const v = x.c.activePlan();
@@ -206,7 +206,7 @@ await section(async () => {
   assert(v.generated.C1.status === 'verified' && v.generated.C2.status === 'failed' && v.generated.C2.failure.stop === 'timeout' && v.final.incomplete && v.final.incomplete.stoppedAt === 'C2' && v.final.incomplete.notStarted.length === 0 && FS.readyOf(v) === false, `T3-1: 完了した C1 は残し、止めた C2 で未完成: ${JSON.stringify(v.final.incomplete)}`);
   const vis = visibleText(finalHtml(x));
   //   2026-10-14 の設計し直し: できた C1（手順の title）・止めた C2・残り 1 件。未着手の文は出さない
-  assert(/JavaScriptはできました。JavaScript 2の作成中に、AIの応答が時間切れになりました。/.test(vis) && !/手を付けていません/.test(vis) && /完成した分は残っています。残り 1 件から再開できます。/.test(vis) && !/未完成/.test(vis), `T3-2: 作っていない JavaScript が無いときは、できたものと止めたものの文だけ: ${vis.replace(/\s+/g, ' ').slice(0, 240)}`);
+  assert(/JavaScriptはできました。JavaScript 2の作成中に、AI の応答が時間切れになりました。/.test(vis) && !/手を付けていません/.test(vis) && /完成した分は残っています。残り 1 件から再開できます。/.test(vis) && !/未完成/.test(vis), `T3-2: 作っていない JavaScript が無いときは、できたものと止めたものの文だけ: ${vis.replace(/\s+/g, ' ').slice(0, 240)}`);
   const c1Hash = v.generated.C1.candidateHash;
   const r2 = await pressRest(x);
   const v2 = x.c.activePlan();
@@ -280,7 +280,7 @@ await section(async () => {
 });
 
 // =========================================================
-console.log('\n--- §T5. 計画の自動の見直しの時間切れ・失敗 ---');
+console.log('\n--- §T5. 計画の不足の見直しの時間切れ・失敗 ---');
 const CUST_NOEFF = K.custOf(null);
 const planNoEff = (args) => K.planJs(args, { cust: CUST_NOEFF });
 await section(async () => {
@@ -294,7 +294,7 @@ await section(async () => {
   assert(!x.c.messages().some(m => m.type === 'ERROR') && !x.c.messages().some(m => internal.test(String(m.text || '')) || internal.test(String((m.data && (m.data.retryText || m.data.text)) || ''))), 'T5-2: 内部の依頼文を会話・［再試行］に出さない（エラーのカードも出さない）');
   const vis = visibleText(finalHtml(x));
   //   2026-10-14 の設計し直し: 作成途中のカードに、止めた段階（計画の自動の見直し）と理由・作っていない JavaScript（手順の title）・残り 1 件・ボタン
-  assert(/まだできた JavaScript はありません。計画の自動の見直しの途中で、AIの応答が時間切れになりました。JavaScriptは手を付けていません。/.test(vis) && /残り 1 件から再開できます/.test(vis) && restButtonOf(finalHtml(x)), `T5-3: カードに止めた段階（計画の自動の見直し）と作っていない JavaScript・［残りの JavaScript を作る］: ${vis.replace(/\s+/g, ' ').slice(0, 240)}`);
+  assert(/まだできた JavaScript はありません。計画の不足の見直しの途中で、AI の応答が時間切れになりました。JavaScriptは手を付けていません。/.test(vis) && /残り 1 件から再開できます/.test(vis) && restButtonOf(finalHtml(x)), `T5-3: カードに止めた段階（計画の不足の見直し）と作っていない JavaScript・［残りの JavaScript を作る］: ${vis.replace(/\s+/g, ' ').slice(0, 240)}`);
   await pressRest(x);
   assert(x.calls.plan.length === 2 && !x.c.messages().some(m => m.type === 'USER' && internal.test(String(m.text))), `T5-4: 押しても自動の見直し（計画の AI）は繰り返さない・利用者の発言に内部の文が入らない: ${x.calls.plan.length}`);
 });
@@ -377,7 +377,7 @@ for (const code of ['MONTHLY_LIMIT_EXCEEDED', 'BUDGET_EXCEEDED']) {
     await sendUntilAdopt(x);
     const v = x.c.activePlan();
     const h = finalHtml(x), b = restButtonOf(h);
-    assert(v.final.incomplete && v.final.incomplete.kind === 'budget' && gen.count('C2') === 0 && b && b.disabled === true && /の作成中に、利用の上限（予算・回数）に達しました/.test(stripC(h)) && /上限を見直すまで、続きは送りません。/.test(stripC(h)) && !/残り [0-9]+ 件/.test(stripC(h)) && FS.readyOf(v) === false, `T6-1（${code}）: 上限で止めた → C2 は 0 件・［残りの JavaScript を作る］は無効で理由: ${b && b.html}`);
+    assert(v.final.incomplete && v.final.incomplete.kind === 'budget' && gen.count('C2') === 0 && b && b.disabled === true && /の作成中に、費用と回数の上限に達しました/.test(stripC(h)) && /上限を見直すまで、続きは送りません。/.test(stripC(h)) && !/残り [0-9]+ 件/.test(stripC(h)) && FS.readyOf(v) === false, `T6-1（${code}）: 上限で止めた → C2 は 0 件・［残りの JavaScript を作る］は無効で理由: ${b && b.html}`);
     assert(!v.final.incomplete.endUnknown && !/終わったかは確かめられていません/.test(stripC(h)) && v.final.usage.unknownCalls === 0, `T6-2（${code}）: 上限の拒否は送る前・AI を呼ぶ前の失敗（終了不明にしない）`);
   });
 }

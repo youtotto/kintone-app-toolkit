@@ -162,7 +162,7 @@ await section(async () => {
   const pE = pE0.steps.find(s => s.id === 'P1');
   assert(pE && pE.validation.pending === 'ACTOR' && pE.validation.status === 'needs_confirmation' && pE.confidence === 'INFERRED', `受け取りは validation.pending = 'ACTOR' を運ぶ（confidence は変えない）: ${JSON.stringify(pE && pE.validation)}`);
   const rvE = review(pE0), cE = classify(pE0, rvE).find(x => x.stepId === 'P1');
-  assert(rvE && codes(st(rvE, 'P1')).includes('ASSIGNEES_PENDING') && cE.status === 'UNSUPPORTED' && cE.reason === 'ASSIGNEES_PENDING', `Gateway の印だけの計画が、正規化を通しても Review と Executor で確認待ちになる: ${JSON.stringify(rvE && { codes: codes(st(rvE, 'P1')), status: cE && cE.status })}`);
+  assert(rvE && codes(st(rvE, 'P1')).includes('ASSIGNEES_PENDING') && cE.status === 'UNSUPPORTED' && cE.reason === 'ASSIGNEES_PENDING', `AI サービスの印だけの計画が、正規化を通しても Review と Executor で確認待ちになる: ${JSON.stringify(rvE && { codes: codes(st(rvE, 'P1')), status: cE && cE.status })}`);
   // 独立レビュー 1・4: 承認者 / 作業者の blocking 質問が無ければ、confidence NEEDS_CONFIRMATION でも止めない（別の理由の確認待ちを作業者の確認待ちにしない）
   const noQ = branch({ confidence: 'NEEDS_CONFIRMATION', validation: { status: 'needs_confirmation', issues: [] } }, { questions: [{ ...Q_APPROVER[0], topic: 'threshold', question: '金額の境界は 100 万円ちょうどを含みますか' }] });
   const rvQ = review(noQ);
@@ -209,7 +209,7 @@ await section(async () => {
   const line = (p2.diff.human || []).find(l => l.startsWith('確認してから決める：'));
   assert(p2.spec && p2.spec.filterCond === 'ステータス in ("承認待ち") and amount >= "1000000"' && p2.spec.daysLater === '3' && p2.spec.time === '09:00' && p2.spec.timingField === '更新日時', `REQUIRE_CONFIRMATION に spec があれば r.spec に正規化して残す: ${JSON.stringify(p2.spec)}`);
   assert(line && /条件 ステータス in \("承認待ち"\) and amount >= "1000000"/.test(line) && /基準日 更新日時/.test(line) && /3 日後/.test(line) && /09:00/.test(line), `diff.human に「確認してから決める：条件 …・基準日 …・3 日後・09:00」: ${line}`);
-  assert(p2.diff.human[0] === '100万円以上の案件の上長宛通知先を確定する（仮適用なし）' && p2.safety === 'PLAN_ONLY' && p2.diff.changeType === 'NO_CHANGE', '定型の行・計画のみ（仮適用しない）は従来どおり');
+  assert(p2.diff.human[0] === '100万円以上の案件の上長宛通知先を確定する（Toolkit からは反映しません）' && p2.safety === 'PLAN_ONLY' && p2.diff.changeType === 'NO_CHANGE', '定型の行・計画のみ（仮適用しない）は従来どおり');
   const p2new = st(review(SR.CASE1_PLAN), 'P2');
   assert(p2new.spec === null && !(p2new.diff.human || []).some(l => /確認してから決める/.test(l)), 'spec が {} なら従来どおり（spec null・1 行を足さない）');
   // details の文章（未確定事項・確定後の設定）からは spec を作らない（説明文の語を条件にしない）
@@ -301,7 +301,7 @@ console.log('\n--- §6. coverage の担当範囲（T4）---');
 await section(async () => {
   const C1 = SR.CASE2_PLAN.customizations[0], C2 = SR.CASE2_PLAN.customizations[1];
   const CODE = "(function () {\n  'use strict';\n  kintone.events.on(['mobile.app.record.create.show', 'mobile.app.record.edit.show', 'mobile.app.record.create.change.items', 'mobile.app.record.edit.change.items'], function (event) {\n    var record = event.record;\n    if (record['ステータス'].value === '承認済み') {\n      record['amount'].disabled = true;\n      var rows = record['items'].value;\n      for (var i = 0; i < rows.length; i++) {\n        rows[i].value['item_name'].disabled = true;\n        rows[i].value['qty'].disabled = true;\n        rows[i].value['unit_price'].disabled = true;\n      }\n    }\n    return event;\n  });\n})();\n";
-  const gen = (coverage) => ({ strategy: 'NEW_JS_FILE', targetFile: 'mobileDealLock.js', summary: 'モバイルで承認済みの金額と明細セルを編集不可にする', code: CODE, patch: null, events: C2.events, fields: C2.fields.map(f => ({ code: f.code, access: f.access })), apis: ['kintone.events.on'], assumptions: [], warnings: [], coverage });
+  const gen = (coverage) => ({ strategy: 'NEW_JS_FILE', targetFile: 'mobileDealLock.js', summary: 'モバイルで承認済みの金額と明細の入力欄を編集不可にする', code: CODE, patch: null, events: C2.events, fields: C2.fields.map(f => ({ code: f.code, access: f.access })), apis: ['kintone.events.on'], assumptions: [], warnings: [], coverage });
   const rvOf = (coverage, plan = SR.CASE2_PLAN) => KTCodeReview.review({ generated: gen(coverage), customization: C2, plan, data: INPUTS.data, scan: INPUTS.scan, existingSource: null });
   // 段階 C: 担当は requirementId で引く（契約 20 §5）。文の照合（同一文・2-gram の Dice 係数）・note の文言（P1 の名指し・標準設定）からの推定は削除した。
   //   記録した有料確認の応答は自分の要件（C2）の申告として扱う。
@@ -337,11 +337,11 @@ await section(async () => {
   const un = rvRev([{ requirementId: 'R9', text: '承認後に Slack へ知らせる', status: 'OUT_OF_SCOPE', note: '別の仕組みで扱う' }, { requirementId: 'P1', text: '100万円以上は部長承認', status: 'OUT_OF_SCOPE', note: 'P1 で承認者を確定し、標準のプロセス管理で分岐を設定する' }, { requirementId: 'P3', text: '承認待ちの通知', status: 'OUT_OF_SCOPE', note: '標準設定で対応' }, { requirementId: 'C9', text: '帳票の出力', status: 'OUT_OF_SCOPE', note: 'C9 の担当' }]);
   const owner = un.checks.filter(ch => ch.name === 'coverage-owner');
   assert(un.coverage.unowned.map(x => x.requirement).join('|') === '承認後に Slack へ知らせる|100万円以上は部長承認|帳票の出力' && un.coverage.outOfScope.length === 4 && !(un.checks || []).some(ch => ch.name === 'coverage-unmet'), `担当（設定を変える手順）の無い OUT_OF_SCOPE は unowned（R9 は台帳に無い・P1 は確認待ち・C9 は計画に無い）: ${JSON.stringify(un.coverage.unowned)}`);
-  assert(owner.length === 3 && owner.every(ch => !ch.ok && ch.severity === 'review') && owner[0].message === '担当範囲外とされた要件「承認後に Slack へ知らせる」の担当が計画に見つかりません。計画全体の確認に残します' && un.status !== 'OK', `check coverage-owner（review）: ${JSON.stringify(owner)}`);
+  assert(owner.length === 3 && owner.every(ch => !ch.ok && ch.severity === 'review') && owner[0].message === '担当範囲外と AI が申告した要件「承認後に Slack へ知らせる」の担当が計画に見つかりません。計画全体の確認に残します' && un.status !== 'OK', `check coverage-owner（review）: ${JSON.stringify(owner)}`);
   //   C-1 第 3 段: 会話のコードのカード（MSG.CODE・codeCardHtml）は削除した。担当の決まっていない要件は右の「コード」の見出し（codePaneHtml）と最終案のカードに出す（最終案は §6 の下の会話の節）
   let cardUn = '';
   try { cardUn = KTAiChatUi.codePaneHtml({ generated: gen([]), review: un, existingSource: null }).head; } catch (e) { cardUn = `例外: ${e && e.stack}`; }
-  assert(!/kt-ai-code-unowned|kt-ai-code-out-of-scope|計画で担当が決まっていない要件|担当範囲外/.test(cardUn) && /＋ 新規 JS: |✎ 既存 JS を変更: /.test(cardUn), `右の「コード」の見出しには担当範囲外・担当の無い要件を出さない（2026-10-14: 担当の無い要件は右の「変更内容」の「確認できないこと」に 1 回）: ${cardUn.slice(0, 400)}`);
+  assert(!/kt-ai-code-unowned|kt-ai-code-out-of-scope|計画で担当が決まっていない要件|担当範囲外/.test(cardUn) && /＋ 新しい JavaScript: |✎ 既存の JavaScript を変更: /.test(cardUn), `右の「コード」の見出しには担当範囲外・担当の無い要件を出さない（2026-10-14: 担当の無い要件は右の「変更内容」の「確認できないこと」に 1 回）: ${cardUn.slice(0, 400)}`);
   // 受け取りは coverage をそのまま返す（OUT_OF_SCOPE を含む。語彙は Gateway の validate-generated が整える）
   const gctx = KTContext.buildGenerator({ customization: C2, plan: SR.CASE2_PLAN, planId: 'p', version: 1, data: INPUTS.data, deps: INPUTS.deps, scan: INPUTS.scan });
   const RESP = { ok: true, contractVersion: '2.1', meta: { requestId: 'g1', gateway: { product: 'toolkit', feature: 'customization-generator', promptVersion: '1', contextVersion: 'customization-1' }, normalization: { warnings: [] }, ai: { model: 'm' } }, generated: { ...gen([{ requirementId: 'C2', text: '100万円以上は部長承認', status: 'OUT_OF_SCOPE', note: 'P1' }, { requirementId: 'C2', text: 'x', status: 'PARTIAL', note: '' }]), gatewayChecks: { security: [] } } };
@@ -371,10 +371,11 @@ await section(async () => {
   };
   const f1 = await runFinal({ notAchieved: [{ code: 'SUBTABLE_ROWS', message: '明細の行の追加・削除は止められません' }], outOfScope: [{ code: 'AI_OUT_OF_SCOPE', requirement: '100万円以上は部長承認', owner: 'step', message: '100万円以上は部長承認（P1 の標準設定で扱う）' }] });
   const t1 = f1.text;
-  //   2026-10-16（説明文を読みやすくする）: 制約の行は「明細の行の追加・削除は防ぎません（画面）。理由。」
-  assert(f1.gen === 1 && /この案の制約/.test(t1) && /明細（テーブル）の行の追加・削除は防ぎません/.test(t1) && !/対応範囲外|担当が計画にありません|100万円以上は部長承認（P1 の標準設定で扱う）/.test(t1 + f1.right), `最終案のカード: 満たせない部分は「この案の制約」。ほかの手順が担当する要件は左右どちらにも範囲外として出さない（2026-10-14）: ${t1.slice(t1.indexOf('実現できない点'), t1.indexOf('実現できない点') + 300)}`);
+  //   2026-10-16（説明文を読みやすくする）: 制約の行は「本体（画面）。理由。」。2026-10-23（§12.69）: 本体は「テーブルの行は追加・削除できます」
+  //   （この素材の SUBTABLE_ROWS には tables が無いので名前の無い一般形。利用者が付けた名前つきの形は ai-human-readable §H9）
+  assert(f1.gen === 1 && /この案の制約/.test(t1) && /テーブルの行は追加・削除できます/.test(t1) && !/対応範囲外|担当が計画にありません|100万円以上は部長承認（P1 の標準設定で扱う）/.test(t1 + f1.right), `最終案のカード: 満たせない部分は「この案の制約」。ほかの手順が担当する要件は左右どちらにも範囲外として出さない（2026-10-14）: ${t1.slice(t1.indexOf('実現できない点'), t1.indexOf('実現できない点') + 300)}`);
   const f2 = await runFinal({ outOfScope: [{ code: 'OTHER_OWNER', requirement: 'r', owner: 'customization', customizationId: 'C2', message: 'モバイルの編集制御（C2 の担当）' }] });
-  assert(f2.gen === 1 && !/明細の行の追加・削除|この案の制約/.test(f2.text) && !/対応範囲外|モバイルの編集制御（C2 の担当）/.test(f2.text + f2.right), `最終案のカード: 担当範囲外だけのときは制約の節を出さず、担当のある要件は列挙しない（2026-10-14）: ${f2.text.slice(f2.text.indexOf('実現できない点'), f2.text.indexOf('実現できない点') + 200)}`);
+  assert(f2.gen === 1 && !/行は追加・削除できます|この案の制約/.test(f2.text) && !/対応範囲外|モバイルの編集制御（C2 の担当）/.test(f2.text + f2.right), `最終案のカード: 担当範囲外だけのときは制約の節を出さず、担当のある要件は列挙しない（2026-10-14）: ${f2.text.slice(f2.text.indexOf('実現できない点'), f2.text.indexOf('実現できない点') + 200)}`);
   // 担当が計画に無い要件（unowned）は「担当が計画にありません」として、担当のある範囲外とは別の行に出す
   const f3 = await runFinal({ outOfScope: [{ code: 'OTHER_OWNER', requirement: '承認待ちの通知', owner: 'step', message: '承認待ちの通知（標準設定で対応）' }, { code: 'AI_OUT_OF_SCOPE', requirement: '承認後に Slack へ知らせる', owner: 'unowned', note: '別の仕組み', message: '承認後に Slack へ知らせる（別の仕組み）' }], unowned: [{ code: 'UNOWNED', requirement: '承認後に Slack へ知らせる', message: '承認後に Slack へ知らせる' }] });
   const t3 = f3.text;

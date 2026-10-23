@@ -1318,7 +1318,7 @@
       const claimedArrays = extractRestParamFieldRefs(s, decls, push);
 
       // 1) kintone のフィールド操作API：第1引数はフィールドコード（またはグループコード）
-      const rxApi = /\b(setFieldShown|setFieldValue|setFieldRequired|getFieldElements?|getSpaceElement|getHeaderMenuSpaceElement)\s*\(\s*['"`]([^'"`]+)['"`]/g;
+      const rxApi = /\b(setFieldShown|setFieldValue|setFieldRequired|getFieldElements?|getSpaceElement|getHeaderMenuSpaceElement|showAddTableRowButtons|showDeleteTableRowButtons|getAddTableRowButtonsDisplayState|getDeleteTableRowButtonsDisplayState)\s*\(\s*['"`]([^'"`]+)['"`]/g;
       let m;
       while ((m = rxApi.exec(s)) !== null) push(m[2], m.index, m[1], 'HIGH');
 
@@ -1975,6 +1975,9 @@
       const before = text.slice(Math.max(0, start - 80), start);
       const after = text.slice(end, end + 80);
 
+      //   2026-10-23（§12.69）: テーブルの行の追加・削除のボタン（公式 API）。表示・非表示の切り替えはテーブルの制御（CONTROL）、状態の取得は読むだけ（READ）
+      if (/(showAddTableRowButtons|showDeleteTableRowButtons)\(\s*$/.test(before)) return { access: 'CONTROL', confidence: 'HIGH' };
+      if (/(getAddTableRowButtonsDisplayState|getDeleteTableRowButtonsDisplayState)\(\s*$/.test(before)) return { access: 'READ', confidence: 'HIGH' };
       if (/setFieldShown\(\s*$/.test(before)) return { access: 'SHOW_HIDE', confidence: 'HIGH' };
 
       // 裸の識別子は同名変数・関数名の可能性があるため確度を1段下げる（ドット記法もレコード以外のオブジェクトの可能性がある）
@@ -2692,7 +2695,7 @@
       const out = [];
       if (!base) return out;
       if (!base.ok) {
-        out.push({ kind: 'environment', key: 'ENV:base', confidence: 'CERTAIN', environment: { env: ENV.PRODUCTION, previewAvailable: false, status: base.status ?? null }, statement: `動作テスト環境の設定を取得できませんでした（${base.message || base.status || '不明'}）。この Context は運用環境の設定（画面を開いた時点）です。動作テスト環境にある未反映の変更は含みません（「無い」とは言えません）。` });
+        out.push({ kind: 'environment', key: 'ENV:base', confidence: 'CERTAIN', environment: { env: ENV.PRODUCTION, previewAvailable: false, status: base.status ?? null }, statement: `動作テスト環境の設定を取得できませんでした（${base.message || base.status || '不明'}）。この資料は運用環境の設定（画面を開いた時点）です。動作テスト環境にある未反映の変更は含みません（「無い」とは言えません）。` });
         return out;
       }
       const d = base.diff || { available: false, items: [] };
@@ -5378,15 +5381,15 @@
       const scanFiles = (scan?.files || []).filter(f => !f?.note);
       const jsSource = !jsAnalyzed ? null : scanFiles.some(f => typeof f.text === 'string') ? 'full' : 'snippets';
       const notes = [];
-      if (!jsAnalyzed) notes.push('JavaScript/CSS 本文は未解析（Field Scanner 未実行）。JS からの参照は含まれていない');
-      if (jsSource === 'snippets') notes.push('JavaScript 本文はキャッシュから復元した解析結果のため含まない（コード抜粋は Scanner の断片のみ）');
+      if (!jsAnalyzed) notes.push('JavaScript / CSS の本文はまだ解析していません（Field Scanner タブで解析できます）。JS からの参照は含まれていない');
+      if (jsSource === 'snippets') notes.push('JavaScript の本文は前回の解析結果だけを使っているため、一部しか含みません');
       if (jsAnalyzed && urlJs) notes.push(`URL 指定の JavaScript ${urlJs} 件は本文を取得できないため未解析`);
-      if (!incomingScanned) notes.push('他アプリからこのアプリへの参照は未走査。被参照は含まれていない');
-      if (incomingScanned && incoming?.stats?.truncated) notes.push('他アプリの走査は上限件数で打ち切られている');
+      if (!incomingScanned) notes.push('ほかのアプリからこのアプリへの参照はまだ調べていません');
+      if (incomingScanned && incoming?.stats?.truncated) notes.push('ほかのアプリを調べる処理は上限の件数で止めています');
       if (incomingScanned && (incoming?.stats?.failedApps || meta.incomingStats?.failedApps)) {
         notes.push(`他アプリの走査で取得できなかったアプリがある（${incoming?.stats?.failedApps ?? meta.incomingStats?.failedApps} 件）`);
       }
-      if (meta.pluginCount) notes.push(`プラグイン ${meta.pluginCount} 個の設定内容は API で取得できないため未解析`);
+      if (meta.pluginCount) notes.push(`プラグイン ${meta.pluginCount} 個の設定内容は Toolkit では読めないため、調べていません`);
       notes.push('レコードの実データ・添付ファイルは含まない');
       return {
         fields: !!data?.fields,
@@ -5537,7 +5540,7 @@
         : 'JavaScript は未解析（JS からの参照は含まれていない）', { analyzed: !!app.javascript?.analyzed });
       push('incoming', app.incoming?.scanned ? `他アプリからの参照は走査済み（参照元 ${app.incoming.referencingApps ?? 0} アプリ）` : '他アプリからの参照は未走査（被参照は含まれていない）', { scanned: !!app.incoming?.scanned });
       push('brokenRefs', `壊れた参照（存在しないフィールド・ステータスの指定）は ${app.brokenRefs?.total ?? 0} 件`, { count: app.brokenRefs?.total ?? 0 });
-      if (app.plugins?.count) push('plugins', `プラグインが ${app.plugins.count} 個追加されている（設定内容は API で取得できないため未解析）`, { count: app.plugins.count });
+      if (app.plugins?.count) push('plugins', `プラグインが ${app.plugins.count} 個追加されている（設定内容は Toolkit では読めないため、調べていません）`, { count: app.plugins.count });
       return f;
     }
 
@@ -6965,8 +6968,9 @@
         // Phase 20（実機）: spaces = フォームに実在するスペース要素の ID（getSpaceElement に使える ID はこれだけ。無いスペースを前提にしたコードは使えない）
         //   段階 A（5.1）: allowedFields は fields[]（実装仕様のフィールド ＋ イベント由来 ＋ ステータス ＋ 新規フィールド）と親のテーブルの集合から作る
         constraints: { style: "即時関数 (function () { 'use strict'; … })(); で包む。ハンドラは必ず return event。ライブラリは使わない。フィールドコード・ステータス名は dictionary の表記のまま。dictionary に無い名前は書けない。ただし planned にある名前（計画で新設するステータス・フィールド）は、その手順（stepId）が反映される前提で書ける", platform: cust.platform, noNetwork: true, noSecrets: true, allowedEvents: cust.events, allowedFields: [...new Set([...fields.map(f => f.code), ...cust.fields.map(f => f.code), ...tables.keys()])], allowedApis: cust.apis, patchOnly: cust.strategy === 'EXTEND_EXISTING_JS', spaces: (typeof KTCodeReview !== 'undefined' && KTCodeReview.layoutSpaceIds) ? KTCodeReview.layoutSpaceIds(data?.layout) : [],
-          //   2026-10-10（§6）: 行の追加・削除を JavaScript 全般で不可能と言い切らない（セルの disabled では止まらない・行のボタンを隠す API は Toolkit がまだ扱っていない）
-          ...(tables.size ? { tables: [...tables].map(([code, cols]) => ({ code, columns: cols, access: 'READ', how: `行は record['${code}'].value の配列。列は row.value['<列のコード>']（例: row.value['${cols[0]}'].disabled = true）。テーブル自体の値は書き換えない。セルの disabled では行の追加・削除は止まらない（行の ＋ / − は残る。行のボタンを隠す API は Toolkit がまだ扱っていないので使わない）` })) } : {}),
+          //   2026-10-10（§6）: 行の追加・削除を JavaScript 全般で不可能と言い切らない（入力欄の disabled では止まらない）
+          //   2026-10-23（§12.69）: 行のボタンを隠す公式 API は効果 hide-row-buttons で扱う。計画にその効果が無いテーブルでは使わせない（「Toolkit がまだ扱っていない」とは書かない）
+          ...(tables.size ? { tables: [...tables].map(([code, cols]) => ({ code, columns: cols, access: 'READ', how: `行は record['${code}'].value の配列。列は row.value['<列のコード>']（例: row.value['${cols[0]}'].disabled = true）。テーブル自体の値は書き換えない。入力欄の disabled では行の追加・削除は止まらない（行の追加・削除のボタンは残る）。行のボタンを隠す（showAddTableRowButtons / showDeleteTableRowButtons に 'HIDDEN'）のは、計画にこのテーブルの効果 hide-row-buttons があるときだけ` })) } : {}),
           ...(otherFiles.some(f => f.source) ? { referenceFiles: 'otherFiles[].source は参照用（同じ検証・処理を別の画面に用意するときの元）。そのファイル自体は書き換えない' } : {}) },
         // 段階 C（契約 20 §12）: 要件の id（coverage の書き先）
         //   §0c.3（2026-10-08）: 必須の効果 requiredEffects（Toolkit が採用済みの計画から作り、生成の前に固定。フィールドのコードは採番後のコードに置き換える）と、
@@ -7643,7 +7647,7 @@
   //   2026-10-03 確認）の語彙を正本にし、AI の自由文からイベント名・API 名を作らせない。
   // ==========================================
   const KTJsCatalog = (() => {
-    const CATALOG_VERSION = '2';   // 2: モバイルの getFieldElement / getFieldElements（RC E2E）。簡素化 B（2026-10-17）で使える画面（screens）は削除した（API の名前は同じ）
+    const CATALOG_VERSION = '3';   // 3（2026-10-23・§12.69）: テーブルの行の追加・削除のボタンの公式 API（showAddTableRowButtons ほか PC / モバイル 4 つずつ）。2: モバイルの getFieldElement / getFieldElements（RC E2E）。簡素化 B（2026-10-17）で使える画面（screens）は削除した（API の名前は同じ）
     /** 固定名のイベント（desktop）。mobile は同じ名前に mobile. を付ける（一覧の編集・印刷・ポータルは mobile に無いものがある） */
     const DESKTOP_EVENTS = [
       'app.record.index.show', 'app.record.index.edit.show', 'app.record.index.edit.submit', 'app.record.index.edit.submit.success', 'app.record.index.delete.submit',
@@ -7726,12 +7730,15 @@
       { name: 'kintone.app.record.get', kind: 'record' }, { name: 'kintone.app.record.set', kind: 'record' }, { name: 'kintone.app.record.getId', kind: 'record' },
       { name: 'kintone.app.record.getFieldElement', kind: 'ui' }, { name: 'kintone.app.record.getSpaceElement', kind: 'ui' }, { name: 'kintone.app.record.getHeaderMenuSpaceElement', kind: 'ui' },
       { name: 'kintone.app.record.setFieldShown', kind: 'ui' }, { name: 'kintone.app.record.setGroupFieldOpen', kind: 'ui' },
+      //   2026-10-23（§12.69）: テーブルの行の追加・削除のボタンの表示・非表示（公式 API。追加・編集画面。state は 'VISIBLE' | 'HIDDEN'。Promise を返す）
+      { name: 'kintone.app.record.showAddTableRowButtons', kind: 'ui' }, { name: 'kintone.app.record.showDeleteTableRowButtons', kind: 'ui' }, { name: 'kintone.app.record.getAddTableRowButtonsDisplayState', kind: 'ui' }, { name: 'kintone.app.record.getDeleteTableRowButtonsDisplayState', kind: 'ui' },
       { name: 'kintone.mobile.app.getId', kind: 'app' }, { name: 'kintone.mobile.app.getQueryCondition', kind: 'app' }, { name: 'kintone.mobile.app.getQuery', kind: 'app' },
       { name: 'kintone.mobile.app.getHeaderSpaceElement', kind: 'ui' }, { name: 'kintone.mobile.app.getLookupTargetAppId', kind: 'app' }, { name: 'kintone.mobile.app.getRelatedRecordsTargetAppId', kind: 'app' },
       { name: 'kintone.mobile.app.getFieldElements', kind: 'ui' },
       { name: 'kintone.mobile.app.record.get', kind: 'record' }, { name: 'kintone.mobile.app.record.set', kind: 'record' }, { name: 'kintone.mobile.app.record.getId', kind: 'record' },
       { name: 'kintone.mobile.app.record.getFieldElement', kind: 'ui' },
       { name: 'kintone.mobile.app.record.getSpaceElement', kind: 'ui' }, { name: 'kintone.mobile.app.record.setFieldShown', kind: 'ui' }, { name: 'kintone.mobile.app.record.setGroupFieldOpen', kind: 'ui' },
+      { name: 'kintone.mobile.app.record.showAddTableRowButtons', kind: 'ui' }, { name: 'kintone.mobile.app.record.showDeleteTableRowButtons', kind: 'ui' }, { name: 'kintone.mobile.app.record.getAddTableRowButtonsDisplayState', kind: 'ui' }, { name: 'kintone.mobile.app.record.getDeleteTableRowButtonsDisplayState', kind: 'ui' },
       { name: 'kintone.api', kind: 'api', review: true, network: true }, { name: 'kintone.api.url', kind: 'api' }, { name: 'kintone.api.urlForGet', kind: 'api' },
       { name: 'kintone.proxy', kind: 'api', review: true, network: true, external: true }, { name: 'kintone.proxy.upload', kind: 'api', review: true, network: true, external: true },
       { name: 'kintone.getLoginUser', kind: 'user' }, { name: 'kintone.getUiVersion', kind: 'user' }, { name: 'kintone.getRequestToken', kind: 'api', review: true },
@@ -8370,8 +8377,8 @@
       if (!String(c.whyStandardInsufficient || '').trim()) add('JS_REASON_MISSING', 'medium', '標準設定だけでは不足する理由が書かれていません（AI に理由を求めてください）');
       else h(`標準設定で不足する理由: ${c.whyStandardInsufficient}`);
       // 2. strategy
-      if (!c.strategy) add('JS_STRATEGY_UNKNOWN', 'medium', '実装方針（新規 JS / 既存 JS へ統合）が決まっていません');
-      else if (!GENERATABLE_STRATEGIES.includes(c.strategy)) add('JS_STRATEGY_NOT_GENERATED', 'low', `方針 ${c.strategy} はコード生成の対象外です（計画のみ）`);
+      if (!c.strategy) add('JS_STRATEGY_UNKNOWN', 'medium', '作り方（新しい JavaScript／既存の JavaScript に追加）が決まっていません');
+      else if (!GENERATABLE_STRATEGIES.includes(c.strategy)) add('JS_STRATEGY_NOT_GENERATED', 'low', `方針 ${c.strategy} はJavaScript の作成の対象外です（計画のみ）`);
       // 2b. Phase 18: implementation（JAVASCRIPT / CSS / JS_CSS）。CSS だけは生成しない（計画に残して手動）。JS_CSS は JavaScript 部分だけ生成
       const impl = ['JAVASCRIPT', 'CSS', 'JS_CSS'].includes(c.implementation) ? c.implementation : 'JAVASCRIPT';
       if (impl === 'CSS') add('JS_CSS_ONLY', 'low', '見た目だけ（CSS）のカスタマイズです。CSS の生成は未対応のため計画のみ（手動で登録）');
@@ -8386,7 +8393,7 @@
       const events = Array.isArray(c.events) ? c.events : [];
       const evInfo = events.map(ev => KTJsCatalog.checkEvent(ev, { fields: knownCodes }));
       if (!events.length && impl !== 'CSS') add('JS_EVENT_MISSING', 'medium', 'イベントが決まっていません');
-      for (const e of evInfo) if (!e.ok) add('JS_EVENT_UNKNOWN', 'high', `イベント「${e.name}」は kintone のイベント目録にありません${e.reason === 'UNKNOWN_FIELD' ? `（フィールド ${e.field} が無い）` : ''}`);
+      for (const e of evInfo) if (!e.ok) add('JS_EVENT_UNKNOWN', 'high', `イベント「${e.name}」は kintone にありません${e.reason === 'UNKNOWN_FIELD' ? `（フィールド ${e.field} が無い）` : ''}`);
       if (events.length) h(`イベント: ${events.join(', ')}`);
       if (platform.length && !platform.includes('mobile') && evInfo.some(e => e.platform === 'mobile')) add('JS_PLATFORM_EVENT_MISMATCH', 'low', 'PC だけが対象なのにモバイルのイベントが含まれています');
       if (platform.includes('mobile') && events.length && !evInfo.some(e => e.platform === 'mobile')) add('JS_MOBILE_EVENT_MISSING', 'medium', 'モバイルが対象なのに mobile.app.record.* のイベントがありません');
@@ -8400,7 +8407,7 @@
       const controls = fields.filter(f => f.access === 'CONTROL' || f.access === 'WRITE');
       // 値の記録（WRITE）は、値を書き換えられるイベント（process.proceed。公式）があれば合う。入力欄の操作（CONTROL）は編集できる画面だけ
       const needEditable = controls.filter(f => !(f.access === 'WRITE' && evInfo.some(e => e.ok && e.writable === true)));
-      if (needEditable.length && evInfo.length && evInfo.every(e => e.ok && e.editable === false)) add('JS_SCREEN_MISMATCH', 'medium', `${needEditable.map(f => f.code).join(', ')} を ${needEditable[0].access} するのに、編集できない画面のイベント（${events.join(', ')}）だけが選ばれています（${needEditable.some(f => f.access === 'CONTROL') ? 'create.show / edit.show が必要' : 'create.show / edit.show / submit、またはプロセス管理のアクションの実行時（process.proceed）が必要'}）`);
+      if (needEditable.length && evInfo.length && evInfo.every(e => e.ok && e.editable === false)) add('JS_SCREEN_MISMATCH', 'medium', `${needEditable.map(f => f.code).join(', ')} を ${needEditable[0].access} するのに、編集できない画面（${events.join(', ')}）だけが選ばれています（${needEditable.some(f => f.access === 'CONTROL') ? '作成画面・編集画面を開いたときの処理が必要です' : '作成画面・編集画面を開いたとき・保存するとき、またはプロセス管理のアクションを実行するときの処理が必要です'}）`);
       // 5b. 簡素化（2026-10-17）: 要件の文（requirement・title）を語の照合で読み直す注意（編集の制御の語なのに CONTROL が無い・値の比較の語なのに change イベントが無い・
       //     明細の行の追加・削除の禁止の語）は削除した。明細の行の追加・削除を止められないことは、生成した JavaScript の達成範囲（KTCodeReview の SUBTABLE_ROWS。
       //     計画のテーブル・列の編集不可の効果から決める）が最終案の制約に出す
@@ -8409,18 +8416,18 @@
       const targets = Array.isArray(c.existingFiles) ? c.existingFiles : [];
       const isTarget = (f) => targets.some(t => t.name === f.name && (t.target || 'desktop') === f.target);
       if (c.strategy === 'EXTEND_EXISTING_JS') {
-        if (!targets.length) add('JS_TARGET_FILE_MISSING', 'medium', '統合先の既存 JS が指定されていません');
+        if (!targets.length) add('JS_TARGET_FILE_MISSING', 'medium', '統合先の既存の JavaScript が指定されていません');
         for (const t of targets) {
           const f = files.find(x => x.name === t.name && x.target === (t.target || 'desktop'));
           if (!f) { add('JS_TARGET_FILE_NOT_FOUND', 'high', `統合先「${t.name}」（${t.target}）は登録されていません`); continue; }
           if (!f.analyzed) add('JS_TARGET_NOT_ANALYZED', 'medium', `統合先「${t.name}」は未解析（URL 指定）のため内容が分かりません`);
           r.codeGeneration.existingFile = { name: f.name, target: f.target, fileKey: f.fileKey ?? null, url: f.url ?? null };
-          if (!f.sourceAvailable) add('JS_SOURCE_UNAVAILABLE', 'low', `統合先「${t.name}」の本文はまだ取得していません（生成時に取得します。取得できなければ 再スキャン / 新規 JS として設計 / 手動確認 のいずれか）`);
+          if (!f.sourceAvailable) add('JS_SOURCE_UNAVAILABLE', 'low', `統合先「${t.name}」の本文はまだ取得していません（JavaScript を作るときに取得します。取得できなければこの JavaScript は作れないので、新しい JavaScript として作る計画に直すよう依頼してください）`);
           const shared = fields.filter(x => f.fields[x.code]);
           if (shared.length) add('JS_EXISTING_INTEGRATION', 'low', `「${t.name}」は ${shared.map(x => `${x.code}（${Object.keys(f.fields[x.code]).join('/')}）`).join(', ')} を既に扱っています。既存処理へ統合します`);
           h(`方針: ✎ 既存 ${f.name}（${f.target === 'mobile' ? 'モバイル' : 'PC'}）へ統合`);
         }
-      } else if (c.strategy === 'NEW_JS_FILE') h('方針: ＋ 新規 JS');
+      } else if (c.strategy === 'NEW_JS_FILE') h('方針: ＋ 新しい JavaScript');
       // 既存 JS との関係: 統合先以外の既存 JS が同じフィールドを WRITE / CONTROL している（JS_SHARED_FIELD）、同じイベント（候補）、実行順序
       //   簡素化 §5（2026-10-16）: 同じフィールドを扱うだけでは競合と確定せず、確認も求めない（以前は JS_FIELD_CONFLICT の medium で要確認にし、統合の手順にも
       //   「新しいファイルを足す前に既存処理への統合を検討してください」と出していた）。一緒の動きは生成工程の動作テスト（同じ画面の既存 JS を送る）が確かめる
@@ -8428,12 +8435,12 @@
         if (!f.analyzed || isTarget(f)) continue;
         if (platform.length && !platform.includes(f.target) && events.length && !events.some(ev => KTJsCatalog.eventPlatform(ev) === f.target)) continue;   // 対象でない platform のファイル
         const fieldHits = fields.filter(x => (x.access === 'WRITE' || x.access === 'CONTROL') && f.fields[x.code] && ACCESS_WRITES(f.fields[x.code]).length);
-        if (fieldHits.length) add('JS_SHARED_FIELD', 'low', `既存 JS「${f.name}」（${f.target === 'mobile' ? 'モバイル' : 'PC'}）も ${fieldHits.map(x => `${x.code}（${ACCESS_WRITES(f.fields[x.code]).join('/')}）`).join(', ')} を書き換え・制御しています（一緒に動かしたときの動きは、生成工程の動作テストで確かめます）`, { file: f.name, target: f.target, fields: fieldHits.map(x => x.code) });
+        if (fieldHits.length) add('JS_SHARED_FIELD', 'low', `既存の JavaScript「${f.name}」（${f.target === 'mobile' ? 'モバイル' : 'PC'}）も ${fieldHits.map(x => `${x.code}（${ACCESS_WRITES(f.fields[x.code]).join('/')}）`).join(', ')} を書き換え・制御しています（一緒に動かしたときの動きは、模擬テストで確かめます）`, { file: f.name, target: f.target, fields: fieldHits.map(x => x.code) });
         const sameEvents = events.filter(ev => f.events.includes(ev));
         if (sameEvents.length) {
-          add('JS_EVENT_CONFLICT_CANDIDATE', 'low', `既存 JS「${f.name}」も ${sameEvents.join(', ')} を使っています（同じイベントだけでは競合とは限りません）`, { file: f.name, events: sameEvents });
+          add('JS_EVENT_CONFLICT_CANDIDATE', 'low', `既存の JavaScript「${f.name}」も ${sameEvents.join(', ')} を使っています（同じ画面の操作だけでは競合とは限りません）`, { file: f.name, events: sameEvents });
           const orderRisk = fields.filter(x => f.fields[x.code] && (f.fields[x.code].WRITE || x.access === 'WRITE'));
-          if (orderRisk.length) add('JS_EXECUTION_ORDER_RISK', 'medium', `同じイベント ${sameEvents.join(', ')} で「${f.name}」と同じフィールド ${orderRisk.map(x => x.code).join(', ')} の値を扱うため、kintone.events.on の実行順序に依存する可能性があります`, { file: f.name });
+          if (orderRisk.length) add('JS_EXECUTION_ORDER_RISK', 'medium', `同じイベント ${sameEvents.join(', ')} で「${f.name}」と同じフィールド ${orderRisk.map(x => x.code).join(', ')} の値を扱うため、どちらが先に動くかで結果が変わることがあります`, { file: f.name });
         }
       }
       // 7. 依存（標準設定の step の後に生成する）
@@ -8487,7 +8494,7 @@
       // Phase 20: Toolkit が受信時に直した点（条件式の in / not in など）を、その手順の注記として見せる（黙って直さない）
       for (const n of (Array.isArray(step.toolkitNotes) ? step.toolkitNotes : [])) if (n && n.code && n.message) issue(n.code, 'low', n.message);
       // Gateway 側の判定を引き継ぐ（AI の文章より Toolkit を優先するが、Gateway の検証は決定的なので尊重する）
-      if (step.validation?.status === 'invalid') invalid('GATEWAY_INVALID', (step.validation.issues || []).join('；') || 'Gateway の検証で無効と判定されています');
+      if (step.validation?.status === 'invalid') invalid('GATEWAY_INVALID', (step.validation.issues || []).join('；') || 'AI サービスの検証で無効と判定されています');
       // Phase 20（XA-7 実機）: 一覧（ビュー）の手順の対象が関連レコードのフィールド（AI が UPDATE_VIEW の targetRef に support_history と書いた）。
       //   関連レコードの表示項目・並び順はフィールドの設定で、Toolkit は反映しない。Gateway の「存在しない VIEW」だけでは利用者に理由が分からない
       if (step.actionType === 'ADD_VIEW' || step.actionType === 'UPDATE_VIEW') {
@@ -8504,11 +8511,11 @@
       if (step.actionType === 'CUSTOMIZATION_REQUIRED' && step.spec && step.spec.customizationId && r.status !== STATUS.INVALID) return reviewCustomization(step, r, ctx);
       if (!cap.simulate || !cap.validate) {
         if (cap.validate) validateOnly(step, r, ctx);
-        if (!cap.simulate) { if (r.status === STATUS.VALID && cap.defaultSafety === SAFETY.PLAN_ONLY) r.diff.human.push('（計画のみ。Toolkit の仮適用には未対応）'); if (!cap.simulate && cap.validate && r.status !== STATUS.INVALID) { r.safety = r.safety === SAFETY.BLOCKED ? r.safety : SAFETY.REVIEW_REQUIRED; } }
-        if (!cap.validate) { r.safety = SAFETY.PLAN_ONLY; r.diff.changeType = CHANGE.NO_CHANGE; r.diff.human.push('（計画のみ。自動検証・仮適用の対象外）'); }
+        if (!cap.simulate) { if (r.status === STATUS.VALID && cap.defaultSafety === SAFETY.PLAN_ONLY) r.diff.human.push('（計画のみ。Toolkit からは反映しません）'); if (!cap.simulate && cap.validate && r.status !== STATUS.INVALID) { r.safety = r.safety === SAFETY.BLOCKED ? r.safety : SAFETY.REVIEW_REQUIRED; } }
+        if (!cap.validate) { r.safety = SAFETY.PLAN_ONLY; r.diff.changeType = CHANGE.NO_CHANGE; r.diff.human.push('（計画のみ。Toolkit からは反映しません）'); }
         if (r.status === STATUS.INVALID) return r;
         if (!cap.simulate) {
-          r.diff.human.unshift(`${step.title || step.actionType}（仮適用なし）`);
+          r.diff.human.unshift(`${step.title || step.actionType}（Toolkit からは反映しません）`);
           // 2026-10-07（有料確認）: 確認待ちの手順（REQUIRE_CONFIRMATION）でも、決まっている条件・日数・遷移などは spec に残す。spec に値があれば
           //   正規化して r.spec に入れる（未確定の承認者だけが保留。構造化した spec だけを読み、説明文の details からは作らない）。
           //   1 行「確認してから決める：…」は proposal.summary があるときだけ足す（summary が空なら手順カードの要約が spec から作られるので二重になる。独立レビュー 5）
@@ -8545,7 +8552,7 @@
       // 条件式・並び順の中の NEW_FIELD_n を、先行 step で仮適用した実コードに置き換える（未適用なら実行不可）
       for (const k of ['filterCond', 'sort']) {
         if (typeof spec[k] !== 'string') continue;
-        spec[k] = spec[k].replace(/NEW_FIELD_[1-9][0-9]*/g, (m) => { const code = resolvedCodes.get(m); if (!code) { invalid('PROPOSED_FIELD_NOT_APPLIED', `条件式の新規フィールド ${m} はこの step より前に追加されていません（順序 / dependsOn を確認）`); return m; } return code; });
+        spec[k] = spec[k].replace(/NEW_FIELD_[1-9][0-9]*/g, (m) => { const code = resolvedCodes.get(m); if (!code) { invalid('PROPOSED_FIELD_NOT_APPLIED', `条件式の新規フィールド ${m} はこの手順より前に追加されていません（手順の順序を確認）`); return m; } return code; });
       }
       r.spec = spec;
       const h = (line) => r.diff.human.push(line);
@@ -8573,7 +8580,7 @@
       };
       const addingStepOf = (temporaryId) => { const s = (ctx.steps || []).find(x => x.targetRef === temporaryId && /^ADD_/.test(String(x.actionType))); return s ? `（${s.id} で追加予定）` : ''; };
       // Phase 20（CX-1 実機）: 新規フィールドを提案しただけで追加の手順（ADD_FIELD）が無い計画が 2 回あった。「順序を確認」ではなく、追加の手順が無いことを伝える
-      const notAppliedMsg = (prefix, temporaryId) => (addingStepOf(temporaryId) ? `${prefix} ${temporaryId}${addingStepOf(temporaryId)} はこの step より前に追加されていません（順序 / dependsOn を確認）` : `${prefix} ${temporaryId} を追加する手順が計画にありません（新規フィールドの提案だけで ADD_FIELD の手順が無い。追加する手順を足すよう計画の修正を依頼してください）`);
+      const notAppliedMsg = (prefix, temporaryId) => (addingStepOf(temporaryId) ? `${prefix} ${temporaryId}${addingStepOf(temporaryId)} はこの手順より前に追加されていません（手順の順序を確認）` : `${prefix} ${temporaryId} を追加する手順が計画にありません（新規フィールドの提案だけで ADD_FIELD の手順が無い。追加する手順を足すよう計画の修正を依頼してください）`);
       const requireField = (ref, role) => {
         const f = resolveField(ref);
         if (!f) { invalid('UNKNOWN_FIELD', `${role}のフィールド「${ref}」が存在しません`); return null; }
@@ -8629,7 +8636,7 @@
           if (sameLabel) issue('LABEL_DUPLICATE', 'medium', sameLabel.origin === 'proposed' ? `フィールド名「${p.label}」は ${sameLabel.stepId} で追加する新規フィールドと重複します` : `フィールド名「${p.label}」は既存のフィールドと重複します`);
           if (!KINTONE_FIELD_TYPES.includes(type)) invalid('INVALID_FIELD_TYPE', `フィールド型「${type}」は kintone の型ではありません`);
           if (OPTION_TYPES.includes(type) && !(p.options || spec.options || []).length) issue('OPTIONS_MISSING', 'medium', '選択肢が指定されていません（要確認）');
-          if ([...resolvedCodes.entries()].some(([tid, c]) => tid !== p.temporaryId && c === code)) invalid('PLAN_INTERNAL_DUPLICATE', `同じコード「${code}」を別の step でも追加しています`);
+          if ([...resolvedCodes.entries()].some(([tid, c]) => tid !== p.temporaryId && c === code)) invalid('PLAN_INTERNAL_DUPLICATE', `同じコード「${code}」を別の手順でも追加しています`);
           if (r.status === STATUS.INVALID) return r;
           const linkProtocol = type === 'LINK' ? String(p.protocol || spec.protocol || '').toUpperCase() : '';
           const field = { code, label: p.label, type, baseType: type === 'LOOKUP' ? (spec.fieldType && spec.fieldType !== 'LOOKUP' ? spec.fieldType : 'SINGLE_LINE_TEXT') : type, required: !!(p.required || spec.required), unique: false, subtable: null, ...(['WEB', 'CALL', 'MAIL'].includes(linkProtocol) ? { protocol: linkProtocol } : {}), ...(((p.options || spec.options) || []).length ? { options: [...(p.options?.length ? p.options : spec.options)] } : {}), origin: 'proposed', temporaryId: p.temporaryId, stepId: step.id };
@@ -8698,7 +8705,7 @@
             break;
           }
           // システムフィールド: ステータス / 作業者 / カテゴリー は API で変更できない。レコード番号・作成者・作成日時・更新者・更新日時 は表示名以外を変えられない
-          if (['STATUS', 'STATUS_ASSIGNEE', 'CATEGORY'].includes(f.type)) { invalid('SYSTEM_FIELD_IMMUTABLE', `「${f.label}」（${f.type}）は kintone の API で変更できないフィールドです`); return r; }
+          if (['STATUS', 'STATUS_ASSIGNEE', 'CATEGORY'].includes(f.type)) { invalid('SYSTEM_FIELD_IMMUTABLE', `「${f.label}」（${f.type}）は Toolkit からは変更できないフィールドです`); return r; }
           if (['RECORD_NUMBER', 'CREATOR', 'CREATED_TIME', 'MODIFIER', 'UPDATED_TIME'].includes(f.type) && (spec.fieldType || spec.required != null || (spec.options || []).length || step.actionType === 'UPDATE_LOOKUP')) { invalid('SYSTEM_FIELD_IMMUTABLE', `「${f.label}」（${f.type}）は表示名以外を変更できないフィールドです`); return r; }
           const after = clone(f);
           let changed = false;
@@ -8800,7 +8807,7 @@
               if (!planOnly.length && sameAsNow([...(spec.addMappings || []), ...(spec.mappings || []), ...(spec.addPickerFields || [])].length > 0 || !!spec.filterCond || !!spec.sort, beforeView)) break;
               r.diff.changeType = CHANGE.NO_CHANGE; r.diff.before = beforeView; r.diff.after = beforeView; r.status = STATUS.NEEDS_CONFIRMATION;
               if (planOnly.length) { r.safety = SAFETY.PLAN_ONLY; h(`ルックアップ「${f.label}」（${f.code}）: ${planOnly.join(' / ')}の変更は計画のみ（Toolkit は反映しません）`); break; }
-              issue('NO_STRUCTURED_CHANGE', 'medium', '変更内容が構造化されていないため仮適用できません（addMappings / addPickerFields / filterCond / sort を確認）'); h(`ルックアップ「${f.label}」（${f.code}）: 変更内容を特定できません`); break;
+              issue('NO_STRUCTURED_CHANGE', 'medium', '変更内容が構造化されていないため Toolkit からは反映できません（addMappings / addPickerFields / filterCond / sort を確認）'); h(`ルックアップ「${f.label}」（${f.code}）: 変更内容を特定できません`); break;
             }
             model.fields[f.code] = after;
             r.diff.before = beforeView; r.diff.after = fieldView(after); r.diff.lookupChanges = changes;
@@ -8830,7 +8837,7 @@
           }
           if (r.status === STATUS.INVALID) return r;
           if (!changed && sameAsNow(!!spec.fieldType || typeof spec.required === 'boolean' || !!(spec.name || spec.label), beforeView)) break;
-          if (!changed) { r.diff.changeType = CHANGE.NO_CHANGE; r.diff.before = beforeView; r.diff.after = beforeView; h(`「${f.label}」（${f.code}）: 変更内容を特定できません（計画に変更の値がありません）`); issue('NO_STRUCTURED_CHANGE', 'medium', '変更内容が構造化されていないため仮適用できません（要確認）'); r.status = STATUS.NEEDS_CONFIRMATION; break; }
+          if (!changed) { r.diff.changeType = CHANGE.NO_CHANGE; r.diff.before = beforeView; r.diff.after = beforeView; h(`「${f.label}」（${f.code}）: 変更内容を特定できません（計画に変更の値がありません）`); issue('NO_STRUCTURED_CHANGE', 'medium', '変更内容が構造化されていないため Toolkit からは反映できません（要確認）'); r.status = STATUS.NEEDS_CONFIRMATION; break; }
           model.fields[f.code] = after;
           r.diff.before = beforeView; r.diff.after = fieldView(after);
           h(`「${f.label}」（${f.code}）`); for (const line of fieldDiffLines(beforeView, r.diff.after)) h(line);
@@ -8940,7 +8947,7 @@
             }
             if (r.status === STATUS.INVALID) return r;
             if (!changed && sameAsNow(!!(primary && (primary.cond || primary.to)) || !!spec.to || !!spec.from || (spec.entities || []).length > 0, actionView(beforeAct))) return r;
-            if (!changed) { issue('NO_STRUCTURED_CHANGE', 'medium', '変更内容が構造化されていないため仮適用できません（要確認）'); r.status = STATUS.NEEDS_CONFIRMATION; r.diff.changeType = CHANGE.NO_CHANGE; r.diff.before = actionView(beforeAct); r.diff.after = actionView(beforeAct); return r; }
+            if (!changed) { issue('NO_STRUCTURED_CHANGE', 'medium', '変更内容が構造化されていないため Toolkit からは反映できません（要確認）'); r.status = STATUS.NEEDS_CONFIRMATION; r.diff.changeType = CHANGE.NO_CHANGE; r.diff.before = actionView(beforeAct); r.diff.after = actionView(beforeAct); return r; }
             const branchList = model.process.actions.filter(a => a.name === act.name && a.stepId === step.id).map(a => ({ from: a.from, to: a.to, filterCond: a.filterCond }));
             if (branchList.length) kinds.push('ACTION_BRANCH');
             r.diff.changeKind = kinds[0] || 'ACTION_CONDITION'; r.diff.changeKinds = kinds;
@@ -8990,7 +8997,7 @@
             if (!cands.length) { invalid('UNKNOWN_NOTIFICATION', `通知「${ref || '（未指定）'}」が存在しません（通知の id（perRecord#1 等）か名前で指定します）`); return r; }
             if (cands.length > 1) { invalid('NOTIFICATION_TARGET_AMBIGUOUS', `「${ref}」に一致する通知が ${cands.length} 件あり、対象を 1 件に特定できません（id で指定してください）`); return r; }
             const ex = cands[0];
-            if (ex.origin === 'proposed') { invalid('NOTIFICATION_TARGET_PROPOSED', `「${ref}」はこの計画で追加する通知です（追加の step で内容を決めてください）`); return r; }
+            if (ex.origin === 'proposed') { invalid('NOTIFICATION_TARGET_PROPOSED', `「${ref}」はこの計画で追加する通知です（追加の手順で内容を決めてください）`); return r; }
             const beforeN = clone(ex);
             // Review 時点の同一性（Executor は実行直前にこれと現在の設定を比べ、1 属性でも違えば TARGET_CHANGED で止める）
             const identity = { scope: ex.scope, index: ex.index ?? null, id: ex.id, title: ex.title || '', filterCond: ex.filterCond || '', targets: ex.targets.map(entityText), events: [...(ex.events || [])] };
@@ -9048,8 +9055,8 @@
           for (const ex of [...model.notifications.general, ...model.notifications.perRecord]) {
             const exact = normCond(ex.filterCond) === normCond(n.filterCond) && sameTargets(ex.targets, n.targets) && (ex.scope !== 'general' || (ex.events.length === n.events.length && ex.events.every(e => n.events.includes(e))));
             const similar = !exact && (overlapTargets(ex.targets, n.targets) && (normCond(ex.filterCond) === normCond(n.filterCond) || (!ex.filterCond && !n.filterCond) || similarLabel(ex.title, n.title) || condsOverlap(ex.filterCond, n.filterCond) === true));
-            if (exact) issue(ex.origin === 'proposed' ? 'PLAN_INTERNAL_DUPLICATE' : 'DUPLICATE', 'high', `${ex.origin === 'proposed' ? 'この計画の別の step' : '既存'}の通知「${ex.title || ex.id}」（通知先 ${ex.targets.map(entityText).join(', ')}${ex.filterCond ? `・条件 ${ex.filterCond}` : ''}）と同一です`, { existing: notifView(ex), proposed: notifView(n) });
-            else if (similar) issue(ex.origin === 'proposed' ? 'PLAN_INTERNAL_POSSIBLE_DUPLICATE' : 'POSSIBLE_DUPLICATE', 'medium', `${ex.origin === 'proposed' ? 'この計画の別の step' : '既存'}の通知「${ex.title || ex.id}」と類似しています（通知先 ${ex.targets.map(entityText).join(', ')}${ex.filterCond ? `・条件 ${ex.filterCond}` : ''}${ex.events.length ? `・イベント ${ex.events.join(',')}` : ''}）`, { existing: notifView(ex), proposed: notifView(n) });
+            if (exact) issue(ex.origin === 'proposed' ? 'PLAN_INTERNAL_DUPLICATE' : 'DUPLICATE', 'high', `${ex.origin === 'proposed' ? 'この計画の別の手順' : '既存'}の通知「${ex.title || ex.id}」（通知先 ${ex.targets.map(entityText).join(', ')}${ex.filterCond ? `・条件 ${ex.filterCond}` : ''}）と同一です`, { existing: notifView(ex), proposed: notifView(n) });
+            else if (similar) issue(ex.origin === 'proposed' ? 'PLAN_INTERNAL_POSSIBLE_DUPLICATE' : 'POSSIBLE_DUPLICATE', 'medium', `${ex.origin === 'proposed' ? 'この計画の別の手順' : '既存'}の通知「${ex.title || ex.id}」と類似しています（通知先 ${ex.targets.map(entityText).join(', ')}${ex.filterCond ? `・条件 ${ex.filterCond}` : ''}${ex.events.length ? `・イベント ${ex.events.join(',')}` : ''}）`, { existing: notifView(ex), proposed: notifView(n) });
           }
           model.notifications[scope].push(n);
           r.diff.target = { kind: 'NOTIFICATION', id: n.title || n.id }; r.diff.before = null; r.diff.after = notifView(n);
@@ -9072,8 +9079,8 @@
           for (const ex of model.reminders) {
             const same = ex.timing.code === rem.timing.code && String(ex.timing.daysLater) === String(rem.timing.daysLater) && normCond(ex.filterCond) === normCond(rem.filterCond) && sameTargets(ex.targets, rem.targets);
             const similar = !same && ex.timing.code === rem.timing.code && overlapTargets(ex.targets, rem.targets);
-            if (same) issue(ex.origin === 'proposed' ? 'PLAN_INTERNAL_DUPLICATE' : 'DUPLICATE', 'high', `${ex.origin === 'proposed' ? 'この計画の別の step' : '既存'}のリマインダー「${ex.title || ex.id}」と同一です`, { existing: ex, proposed: rem });
-            else if (similar) issue(ex.origin === 'proposed' ? 'PLAN_INTERNAL_POSSIBLE_DUPLICATE' : 'POSSIBLE_DUPLICATE', 'medium', `${ex.origin === 'proposed' ? 'この計画の別の step' : '既存'}のリマインダー「${ex.title || ex.id}」（${ex.timing.code} の ${ex.timing.daysLater} 日後・通知先 ${ex.targets.map(entityText).join(', ')}）と類似しています`, { existing: ex, proposed: rem });
+            if (same) issue(ex.origin === 'proposed' ? 'PLAN_INTERNAL_DUPLICATE' : 'DUPLICATE', 'high', `${ex.origin === 'proposed' ? 'この計画の別の手順' : '既存'}のリマインダー「${ex.title || ex.id}」と同一です`, { existing: ex, proposed: rem });
+            else if (similar) issue(ex.origin === 'proposed' ? 'PLAN_INTERNAL_POSSIBLE_DUPLICATE' : 'POSSIBLE_DUPLICATE', 'medium', `${ex.origin === 'proposed' ? 'この計画の別の手順' : '既存'}のリマインダー「${ex.title || ex.id}」（${ex.timing.code} の ${ex.timing.daysLater} 日後・通知先 ${ex.targets.map(entityText).join(', ')}）と類似しています`, { existing: ex, proposed: rem });
           }
           // Phase 20（実機 354）: 通知時刻が無いリマインダーは kintone に設定できない（Executor も反映しない）。「問題なし」と出さず確認事項にする
           if (!rem.timing.time || !/^\d{1,2}:\d{2}$/.test(String(rem.timing.time))) { issue('REMINDER_TIME_MISSING', 'medium', '通知する時刻が決まっていません（例:「9時に通知」と伝えて計画を修正してください。時刻は 10 分単位）'); if (r.status === STATUS.VALID) r.status = STATUS.NEEDS_CONFIRMATION; if (r.safety === SAFETY.SAFE) r.safety = SAFETY.REVIEW_REQUIRED; }
@@ -9092,7 +9099,7 @@
           if (!cands.length) { invalid('UNKNOWN_REMINDER', `リマインダー「${ref || '（未指定）'}」が存在しません（id（reminder#1 等）か名前で指定します）`); return r; }
           if (cands.length > 1) { invalid('REMINDER_TARGET_AMBIGUOUS', `「${ref}」に一致するリマインダーが ${cands.length} 件あり、対象を 1 件に特定できません（id で指定してください）`); return r; }
           const ex = cands[0];
-          if (ex.origin === 'proposed') { invalid('REMINDER_TARGET_PROPOSED', `「${ref}」はこの計画で追加するリマインダーです（追加の step で内容を決めてください）`); return r; }
+          if (ex.origin === 'proposed') { invalid('REMINDER_TARGET_PROPOSED', `「${ref}」はこの計画で追加するリマインダーです（追加の手順で内容を決めてください）`); return r; }
           const beforeR = clone(ex);
           const identity = { index: ex.index ?? null, id: ex.id, title: ex.title || '', timing: clone(ex.timing), filterCond: ex.filterCond || '', targets: ex.targets.map(entityText) };
           const label = ex.title || ex.id;
@@ -9136,7 +9143,7 @@
         case 'ADD_VIEW': case 'UPDATE_VIEW': {
           const name = spec.name || step.targetRef;
           const fields = (spec.fields || []).map(f => { const rf = resolveField(f); return rf ? (rf.missingProposed ? rf : rf.code) : f; });
-          for (const f of fields) { if (typeof f === 'object') invalid('PROPOSED_FIELD_NOT_APPLIED', `一覧の表示フィールド ${f.missingProposed} はこの step より前に追加されていません`); else if (!model.fields[f] && !RESERVED_CODES.includes(f)) invalid('UNKNOWN_FIELD', `一覧の表示フィールド「${f}」が存在しません`); }
+          for (const f of fields) { if (typeof f === 'object') invalid('PROPOSED_FIELD_NOT_APPLIED', `一覧の表示フィールド ${f.missingProposed} はこの手順より前に追加されていません`); else if (!model.fields[f] && !RESERVED_CODES.includes(f)) invalid('UNKNOWN_FIELD', `一覧の表示フィールド「${f}」が存在しません`); }
           for (const c of condFields(spec.filterCond || '', model)) requireField(c, '絞り込み条件');
           checkCond(spec.filterCond || '', '絞り込み条件', 'view');
           if (spec.sort) { const sf = String(spec.sort).trim().split(/\s+/)[0]; if (sf && !model.fields[sf] && !RESERVED_CODES.includes(sf)) issue('SORT_FIELD_UNKNOWN', 'medium', `ソート条件のフィールド「${sf}」が存在しません（要確認）`); }
@@ -9153,8 +9160,8 @@
             if (!v) { invalid('UNKNOWN_VIEW', `一覧「${name}」が存在しません`); return r; }
             if (r.status === STATUS.INVALID) return r;
             const noSim = (code, message) => { issue(code, 'medium', message); r.status = STATUS.NEEDS_CONFIRMATION; r.diff.changeType = CHANGE.NO_CHANGE; r.diff.target = { kind: 'VIEW', id: name }; r.diff.before = viewView(v); r.diff.after = viewView(v); h(`一覧「${name}」: ${message}`); };
-            if ((v.type || 'LIST') !== 'LIST') { noSim('VIEW_TYPE_NOT_SUPPORTED', `${v.type === 'CALENDAR' ? 'カレンダー形式' : v.type === 'CUSTOM' ? 'カスタマイズ形式' : v.type} の一覧です。表形式以外の一覧の変更は計画のみ（仮適用しません）`); return r; }
-            if (v.builtinType) { noSim('BUILTIN_VIEW_NOT_SUPPORTED', `kintone 組み込みの一覧（${v.builtinType}）です。変更は計画のみ（仮適用しません）`); return r; }
+            if ((v.type || 'LIST') !== 'LIST') { noSim('VIEW_TYPE_NOT_SUPPORTED', `${v.type === 'CALENDAR' ? 'カレンダー形式' : v.type === 'CUSTOM' ? 'カスタマイズ形式' : v.type} の一覧です。表形式以外の一覧の変更は計画のみ（Toolkit からは反映しません）`); return r; }
+            if (v.builtinType) { noSim('BUILTIN_VIEW_NOT_SUPPORTED', `kintone 組み込みの一覧（${v.builtinType}）です。変更は計画のみ（Toolkit からは反映しません）`); return r; }
             const beforeV = clone(v); let changed = false;
             const identity = { name: v.name, id: v.id ?? null, type: v.type || 'LIST', fields: [...v.fields], filterCond: v.filterCond || '', sort: v.sort || '' };
             const newFields = fields.filter(f => typeof f === 'string');
@@ -9217,7 +9224,7 @@
           const destLoaded = dest.available;
           r.crossApp = { appId: dest.appId, name: dest.name, code: dest.code, revision: dest.revision, fieldsHash: dest.fieldsHash, available: dest.available, error: dest.error, role: 'destination' };
           if (!destLoaded && dest.error?.code !== 'NOT_LOADED') { invalid('DEST_APP_SETTINGS_UNAVAILABLE', `コピー先 ${appLabel} のフィールド設定を確認できません（${dest.error?.message || '取得できません'}）。コピー先アプリへのアクセス権を確認してください。転記先のフィールドは推測しません`); return r; }
-          if (!destLoaded) { issue('DEST_APP_NOT_LOADED', 'medium', `コピー先 App ${destId} のフィールド設定はまだ取得していません（このアプリの既存設定が参照していないアプリ）。転記先の実在・型・必須は Executor が実行直前に取得して検証します（要確認）`); }
+          if (!destLoaded) { issue('DEST_APP_NOT_LOADED', 'medium', `コピー先 App ${destId} のフィールド設定はまだ取得していません（このアプリの既存設定が参照していないアプリ）。転記先の実在・型・必須は Toolkit が反映の直前に取得して確かめます（要確認）`); }
           if (destId === String(model.appId)) issue('APP_ACTION_SELF_COPY', 'low', 'コピー先がこのアプリ自身です（レコードの再利用アクション）');
           // 転記（§8〜§14）: 既存 ＋ 追加 = 完全な一覧。既存の転記は消さない
           const beforeA = isAdd ? null : clone(target);
@@ -9278,7 +9285,7 @@
             if (!planOnly.length && sameAsNow(specMaps.length > 0 || (spec.entities || []).length > 0 || !!spec.filterCond, appActionView(target), { kind: 'APP_ACTION', id: name, identity: appActionIdentity(target, destLoaded ? dest : null) })) break;
             r.diff.changeType = CHANGE.NO_CHANGE; r.diff.target = { kind: 'APP_ACTION', id: name, identity: appActionIdentity(target, destLoaded ? dest : null) }; r.diff.before = appActionView(target); r.diff.after = appActionView(target); r.status = STATUS.NEEDS_CONFIRMATION;
             if (planOnly.length) { r.safety = SAFETY.PLAN_ONLY; h(`アプリアクション「${name}」: ${planOnly.join(' / ')}の変更は計画のみ（Toolkit は反映しません）`); break; }
-            issue('NO_STRUCTURED_CHANGE', 'medium', '変更内容が構造化されていないため仮適用できません（actionMappings / entities / filterCond を確認）'); h(`アプリアクション「${name}」: 変更内容を特定できません`); break;
+            issue('NO_STRUCTURED_CHANGE', 'medium', '変更内容が構造化されていないため Toolkit からは反映できません（actionMappings / entities / filterCond を確認）'); h(`アプリアクション「${name}」: 変更内容を特定できません`); break;
           }
           if (isAdd) model.appActions.push(after); else model.appActions[model.appActions.indexOf(target)] = after;
           r.diff.target = { kind: 'APP_ACTION', id: name, ...(isAdd ? {} : { identity: appActionIdentity(target, destLoaded ? dest : null) }) };
@@ -9316,14 +9323,14 @@
         else { r.diff.target = { kind: 'FIELD_ACL', id: f.code }; const ex = model.acl.field.find(x => x.code === f.code); r.diff.before = ex ? clone(ex) : null; if (ex) issue('ACL_EXISTING_RULE', 'medium', `「${f.code}」には既にフィールドのアクセス権（${ex.entities.map(e => `${entityText(e)}=${e.accessibility}`).join(', ')}）があります`); }
         issue('ACL_CHANGE', 'high', 'アクセス権の変更は閲覧・編集できる人を変えるため、必ず確認してください');
         for (const e of (spec.entities || [])) { const en = parseEntity(e, model, proposedMap); if (en?.type === 'UNKNOWN') issue('UNKNOWN_ENTITY', 'medium', `対象「${en.code}」の種別（ユーザー / グループ / 組織 / フィールド）を判別できません`); else if (en?.type === 'FIELD_ENTITY' && !model.fields[en.code]) issue('UNKNOWN_FIELD', 'medium', `対象フィールド「${en.code}」が存在しません`); }
-        r.diff.human.push(`フィールド「${step.targetRef}」のアクセス権を変更（仮適用なし）`);
+        r.diff.human.push(`フィールド「${step.targetRef}」のアクセス権を変更（Toolkit からは反映しません）`);
       } else if (step.actionType === 'UPDATE_RECORD_ACL') {
         issue('ACL_CHANGE', 'high', 'レコードのアクセス権の変更は閲覧・編集・削除できる人を変えるため、必ず確認してください');
         for (const c of condFields(spec.filterCond || '', model)) if (!model.fields[c]) issue('UNKNOWN_FIELD', 'medium', `条件のフィールド「${c}」が存在しません`);
         const ex = model.acl.record.find(x => spec.filterCond && normCond(x.filterCond) === normCond(spec.filterCond));
         if (ex) issue('ACL_EXISTING_RULE', 'medium', `同じ条件（${ex.filterCond || '全レコード'}）のレコードのアクセス権 ${ex.id} が既にあります`);
         r.diff.target = { kind: 'RECORD_ACL', id: step.targetRef || null }; r.diff.before = ex ? clone(ex) : null;
-        r.diff.human.push(`レコードのアクセス権を変更${spec.filterCond ? `（条件 ${spec.filterCond}）` : ''}（仮適用なし）`);
+        r.diff.human.push(`レコードのアクセス権を変更${spec.filterCond ? `（条件 ${spec.filterCond}）` : ''}（Toolkit からは反映しません）`);
       }
       if (r.status !== STATUS.INVALID) r.status = STATUS.NEEDS_CONFIRMATION;
     }
@@ -9334,7 +9341,7 @@
         if (!m.to) { issue('LOOKUP_DEST_MISSING', 'medium', `取得項目「${m.from}」のコピー先が指定されていません`); continue; }
         const f = resolveField(m.to);
         if (!f) { invalid('LOOKUP_DEST_UNKNOWN', `コピー先フィールド「${m.to}」が存在しません`); continue; }
-        if (f.missingProposed) { invalid('PROPOSED_FIELD_NOT_APPLIED', notAppliedMsg ? notAppliedMsg('コピー先の新規フィールド', f.missingProposed) : `コピー先の新規フィールド ${f.missingProposed}${addingStepOf(f.missingProposed)} はこの step より前に追加されていません（順序 / dependsOn を確認）`); continue; }
+        if (f.missingProposed) { invalid('PROPOSED_FIELD_NOT_APPLIED', notAppliedMsg ? notAppliedMsg('コピー先の新規フィールド', f.missingProposed) : `コピー先の新規フィールド ${f.missingProposed}${addingStepOf(f.missingProposed)} はこの手順より前に追加されていません（手順の順序を確認）`); continue; }
         m.to = f.code;
         if (seen.has(m.to)) invalid('LOOKUP_DEST_DUPLICATE', `コピー先「${m.to}」に複数の取得元（${seen.get(m.to)}, ${m.from}）があります`); else seen.set(m.to, m.from);
         if (f.type === 'LOOKUP' && f.code !== selfCode) issue('LOOKUP_DEST_IS_LOOKUP', 'medium', `コピー先「${m.to}」はルックアップフィールドです`);
@@ -9449,10 +9456,10 @@
         const jsFilesOfField = new Set(direct.filter(d => d.sourceType === 'CUSTOMIZE').map(d => String(d.title || '')).filter(Boolean));
         const plannerListsJs = plannerImpact.some(x => x && x.targetKind === 'JS' && jsFilesOfField.has(String(x.targetRef || '')));
         const how = hit && !readOnly ? `。${accessJa(hit)}ため、参照する設定・JS への影響を確かめてください` : '';
-        if (plannerSaid.length && !direct.length) warnings.push({ code: 'PLANNER_IMPACT_OVERSTATED', severity: 'low', stepIds, message: `Planner は「${code}」への影響を挙げていますが、Toolkit の解析では参照する設定・JS はありません` });
+        if (plannerSaid.length && !direct.length) warnings.push({ code: 'PLANNER_IMPACT_OVERSTATED', severity: 'low', stepIds, message: `AI の計画は「${code}」への影響を挙げていますが、Toolkit の解析では参照する設定・JS はありません` });
         else if (readOnly) continue;
-        else if (!plannerSaid.length && direct.length) warnings.push({ code: 'PLANNER_IMPACT_MISSING', severity: 'medium', stepIds, message: `「${code}」は ${direct.length} 件の設定・JS から参照されていますが、Planner の影響範囲に挙がっていません（${Object.entries(byCat).map(([k, v]) => `${k} ${v}`).join('・')}）${how}` });
-        else if (jsCount && !plannerListsJs) warnings.push({ code: 'PLANNER_IMPACT_MISMATCH', severity: 'medium', stepIds, message: `「${code}」を参照する JavaScript が ${jsCount} 件あります（Planner の影響範囲に、その JavaScript のファイルが挙がっていません）${how}` });
+        else if (!plannerSaid.length && direct.length) warnings.push({ code: 'PLANNER_IMPACT_MISSING', severity: 'medium', stepIds, message: `「${code}」は ${direct.length} 件の設定・JS から参照されていますが、AI の計画の影響範囲に挙がっていません（${Object.entries(byCat).map(([k, v]) => `${k} ${v}`).join('・')}）${how}` });
+        else if (jsCount && !plannerListsJs) warnings.push({ code: 'PLANNER_IMPACT_MISMATCH', severity: 'medium', stepIds, message: `「${code}」を参照する JavaScript が ${jsCount} 件あります（AI の計画の影響範囲に、その JavaScript のファイルが挙がっていません）${how}` });
       }
       return { warnings };
     }
@@ -9750,7 +9757,7 @@
     HANDLERS.ADD_FIELD = {
       prepare(step, { stepReview }) {
         const after = stepReview?.diff?.after;
-        if (!after || !after.code) return { unsupported: 'NO_FIELD_SPEC', message: 'Review に追加後のフィールド定義がありません' };
+        if (!after || !after.code) return { unsupported: 'NO_FIELD_SPEC', message: 'Toolkit の確認の結果に追加後のフィールド定義がありません' };
         const type = after.type;
         if (!PREVIEW_FIELD_TYPES.includes(type)) return { unsupported: 'FIELD_TYPE_NOT_SUPPORTED', message: `フィールドの種類「${type}」は Toolkit から自動で追加できません（kintone のフォームの設定で追加してください）` };
         const options = Array.isArray(after.options) ? after.options : [];
@@ -9829,7 +9836,7 @@
     HANDLERS.ADD_VIEW = {
       prepare(step, { stepReview }) {
         const after = stepReview?.diff?.after;
-        if (!after || !after.name) return { unsupported: 'NO_VIEW_SPEC', message: 'Review に追加後の一覧定義がありません' };
+        if (!after || !after.name) return { unsupported: 'NO_VIEW_SPEC', message: 'Toolkit の確認の結果に追加後の一覧定義がありません' };
         if ((after.type || 'LIST') !== 'LIST') return { unsupported: 'VIEW_TYPE_NOT_SUPPORTED', message: `一覧の形式 ${after.type} は Toolkit から自動で追加できません（表形式のみ）` };
         if (!Array.isArray(after.fields) || !after.fields.length) return { unsupported: 'VIEW_FIELDS_MISSING', message: '表示フィールドが決まっていないため追加できません' };
         return {
@@ -9951,7 +9958,7 @@
     HANDLERS.ADD_NOTIFICATION = {
       prepare(step, { stepReview, fieldsNow = null }) {
         const after = stepReview?.diff?.after;
-        if (!after || !after.scope) return { unsupported: 'NO_NOTIFICATION_SPEC', message: 'Review に追加後の通知定義がありません' };
+        if (!after || !after.scope) return { unsupported: 'NO_NOTIFICATION_SPEC', message: 'Toolkit の確認の結果に追加後の通知定義がありません' };
         const spec = stepReview?.spec || {};
         // 曖昧さの判定は kintone に実在するイベント名だけで行う（AI が書いた不明なイベント名は Review が要確認として落としている）
         const hasCond = !!String(spec.filterCond || after.filterCond || '').trim(), hasEvents = Array.isArray(spec.events) && spec.events.some(e => NOTIFY_EVENTS.includes(e));
@@ -10018,7 +10025,7 @@
     HANDLERS.ADD_REMINDER = {
       prepare(step, { stepReview, fieldsNow = null }) {
         const after = stepReview?.diff?.after;
-        if (!after || !after.timing) return { unsupported: 'NO_REMINDER_SPEC', message: 'Review に追加後のリマインダー定義がありません' };
+        if (!after || !after.timing) return { unsupported: 'NO_REMINDER_SPEC', message: 'Toolkit の確認の結果に追加後のリマインダー定義がありません' };
         const code = after.timing.code;
         if (!code) return { unsupported: 'TIMING_FIELD_MISSING', message: '基準となる日付フィールドが決まっていません' };
         const days = after.timing.daysLater;
@@ -10065,7 +10072,7 @@
     HANDLERS.UPDATE_FIELD = {
       prepare(step, { stepReview }) {
         const before = stepReview?.diff?.before, after = stepReview?.diff?.after;
-        if (!before || !after || !before.code) return { unsupported: 'NO_FIELD_SPEC', message: 'Review に変更前後のフィールド定義がありません' };
+        if (!before || !after || !before.code) return { unsupported: 'NO_FIELD_SPEC', message: 'Toolkit の確認の結果に変更前後のフィールド定義がありません' };
         const changed = Object.keys({ ...before, ...after }).filter(k => k !== 'temporaryId' && !same(before[k], after[k]));
         const unsupported = changed.filter(k => !UPDATABLE_FIELD_KEYS.includes(k));
         if (unsupported.length) return { unsupported: 'FIELD_CHANGE_NOT_SUPPORTED', message: `${unsupported.map(k => ({ type: '型', options: '選択肢', unique: '重複禁止', expression: '計算式', lookup: 'ルックアップ' }[k] || k)).join('・')}の変更は Toolkit から自動で反映できません（表示名・必須のみ）` };
@@ -10080,7 +10087,7 @@
         const f = cur?.properties?.[p.payload.code];
         if (!f) throw Object.assign(new Error(`フィールド「${p.payload.code}」が動作テスト環境にありません`), { code: 'TARGET_MISSING' });
         // Review 時点の値（before）と今の値が違えば他の変更が入っている → 当て直さない
-        for (const [k, v] of Object.entries(p.before || {})) { const now = k === 'required' ? !!f.required : f[k]; if (!same(now, v)) throw Object.assign(new Error(`「${p.payload.code}」の ${k} が Review 時点（${JSON.stringify(v)}）から変わっています（現在 ${JSON.stringify(now)}）`), { code: 'TARGET_CHANGED' }); }
+        for (const [k, v] of Object.entries(p.before || {})) { const now = k === 'required' ? !!f.required : f[k]; if (!same(now, v)) throw Object.assign(new Error(`「${p.payload.code}」の ${k} が 計画を確かめた時点（${JSON.stringify(v)}）から変わっています（現在 ${JSON.stringify(now)}）`), { code: 'TARGET_CHANGED' }); }
         const prop = { type: f.type, code: p.payload.code, ...p.payload.changes };
         const res = await api.updatePreviewFields(appId, { [p.payload.code]: prop }, String(cur?.revision ?? revision ?? ''));
         return { revision: String(res?.revision ?? ''), requests: [{ method: 'PUT', path: '/k/v1/preview/app/form/fields.json', codes: [p.payload.code], keys: Object.keys(p.payload.changes) }], before: p.before, after: p.after };
@@ -10103,7 +10110,7 @@
         return { ok: checks.every(c => c.ok), checks, revision: String(cur?.revision ?? '') };
       },
       rollback({ appId }, p) {
-        return { actionType: 'RESTORE_FIELD_PROPERTY', collection: 'fields', target: p.expect.code, api: { method: 'PUT', path: '/k/v1/preview/app/form/fields.json', payload: { app: appId, properties: { [p.expect.code]: { type: p.expect.type, code: p.expect.code, ...(p.before || {}) } } } }, note: `${Object.keys(p.before || {}).join('・')} を Review 時点の値に戻す（snapshot の fields から）` };
+        return { actionType: 'RESTORE_FIELD_PROPERTY', collection: 'fields', target: p.expect.code, api: { method: 'PUT', path: '/k/v1/preview/app/form/fields.json', payload: { app: appId, properties: { [p.expect.code]: { type: p.expect.type, code: p.expect.code, ...(p.before || {}) } } } }, note: `${Object.keys(p.before || {}).join('・')} を 計画を確かめた時点の値に戻す（snapshot の fields から）` };
       },
     };
 
@@ -10156,7 +10163,7 @@
       if (normCondE(entry.sort) !== normCondE(identity.sort)) out.push('sort');
       return out;
     }
-    const targetChanged = (what, mismatch) => Object.assign(new Error(`対象の${what}が Review 時点から変わっています（${mismatch.join(', ')}）。再レビューしてください`), { code: 'TARGET_CHANGED', detail: mismatch });
+    const targetChanged = (what, mismatch) => Object.assign(new Error(`対象の${what}が 計画を確かめた時点から変わっています（${mismatch.join(', ')}）。設定を取り直して、同じ依頼をもう一度送ってください`), { code: 'TARGET_CHANGED', detail: mismatch });
     /** 実行直前の再取得と prepare 時の snapshot を bit 単位で比べる（prepare → 実行の間の変更も止める） */
     const changedSincePrepare = (what, cur, snap) => (snap !== undefined && !same(cur, snap)) ? Object.assign(new Error(`対象の${what}が実行直前に変更されています（確認時点と一致しません）。もう一度確認してください`), { code: 'TARGET_CHANGED', detail: ['sincePrepare'] }) : null;
     const sensitiveFrom = (stepReview, codes) => (stepReview?.issues || []).filter(i => codes.includes(i.code)).map(i => ({ code: i.code, message: i.message }));
@@ -10171,7 +10178,7 @@
     HANDLERS.UPDATE_NOTIFICATION = {
       prepare(step, { stepReview, fieldsNow = null }) {
         const before = stepReview?.diff?.before, after = stepReview?.diff?.after, identity = stepReview?.diff?.target?.identity;
-        if (!before || !after || !identity || !before.scope || identity.index == null) return { unsupported: 'NO_NOTIFICATION_SPEC', message: 'Review に変更前後の通知定義（対象の同一性）がありません。計画を作り直してください' };
+        if (!before || !after || !identity || !before.scope || identity.index == null) return { unsupported: 'NO_NOTIFICATION_SPEC', message: 'Toolkit の確認の結果に変更前後の通知定義（対象の同一性）がありません。計画を作り直してください' };
         const scope = before.scope === 'general' ? 'general' : 'perRecord';
         const changes = {};
         if (!sameKeys(before.targets, after.targets)) changes.targets = { from: [...before.targets], to: [...after.targets] };
@@ -10263,7 +10270,7 @@
     HANDLERS.UPDATE_REMINDER = {
       prepare(step, { stepReview, fieldsNow = null }) {
         const before = stepReview?.diff?.before, after = stepReview?.diff?.after, identity = stepReview?.diff?.target?.identity;
-        if (!before || !after || !identity || identity.index == null) return { unsupported: 'NO_REMINDER_SPEC', message: 'Review に変更前後のリマインダー定義（対象の同一性）がありません。計画を作り直してください' };
+        if (!before || !after || !identity || identity.index == null) return { unsupported: 'NO_REMINDER_SPEC', message: 'Toolkit の確認の結果に変更前後のリマインダー定義（対象の同一性）がありません。計画を作り直してください' };
         const changes = {};
         const tB = { code: before.timingField ?? null, daysLater: before.daysLater ?? null, time: before.time ?? null }, tA = { code: after.timingField ?? null, daysLater: after.daysLater ?? null, time: after.time ?? null };
         if (!same(tB, tA)) changes.timing = { from: tB, to: tA };
@@ -10370,7 +10377,7 @@
     HANDLERS.UPDATE_LOOKUP = {
       prepare(step, { stepReview }) {
         const before = stepReview?.diff?.before, after = stepReview?.diff?.after, identity = stepReview?.diff?.target?.identity, lc = stepReview?.diff?.lookupChanges;
-        if (!before || !after || !before.lookup || !after.lookup || !identity || identity.kind !== 'LOOKUP' || !lc) return { unsupported: 'NO_LOOKUP_SPEC', message: 'Review に変更前後のルックアップ定義（対象の同一性）がありません。計画を作り直してください' };
+        if (!before || !after || !before.lookup || !after.lookup || !identity || identity.kind !== 'LOOKUP' || !lc) return { unsupported: 'NO_LOOKUP_SPEC', message: 'Toolkit の確認の結果に変更前後のルックアップ定義（対象の同一性）がありません。計画を作り直してください' };
         const b = before.lookup, a = after.lookup;
         //   2026-10-21: 変更の組は、取り直した設定に対する計画の検査の lookupChanges をそのまま使う（取得項目の追加・上書き・選択時表示の追加・絞り込み・並び順）。
         //   参照元・キーの変更は計画の検査が計画のみにし、取得項目・選択時表示は追加と上書きだけなので、前後の差から組み直して削除や参照元の変更を探さない。
@@ -10458,11 +10465,11 @@
             check('sourceFieldsExist', missing.length === 0, [], missing);
             check('relatedKeyExists', !!relM.fields[p.expect.relatedKeyField], true, !!relM.fields[p.expect.relatedKeyField]);
             const reviewedHash = p.crossApp?.reviewed?.fieldsHash ?? null;
-            check('relatedAppFingerprint', true, reviewedHash, relM.fieldsHash, { note: reviewedHash && relM.fieldsHash !== reviewedHash ? '参照元のフィールド定義が Review 時点と違います（反映後の変更。取得元は上で確認済み）' : '参照元のフィールド定義は Review 時点と同じ' });
+            check('relatedAppFingerprint', true, reviewedHash, relM.fieldsHash, { note: reviewedHash && relM.fieldsHash !== reviewedHash ? '参照元のフィールド定義が 計画を確かめた時点と違います（反映後の変更。取得元は上で確認済み）' : '参照元のフィールド定義は 計画を確かめた時点と同じ' });
           } catch (e) { check('sourceFieldsExist', true, 'read', 'UNVERIFIED', { note: `参照元アプリの定義を再取得できませんでした（${strErr(e).message}）` }); }
         }
         // 検索方法（search mode）は kintone が管理し API では取得・指定できない → 検証対象外
-        check('searchMode', true, 'SERVER_MANAGED', 'SERVER_MANAGED', { note: 'ルックアップの検索方法は kintone が自動設定し API では読めないため検証の対象外（SEARCH_MODE_SERVER_MANAGED）' });
+        check('searchMode', true, 'SERVER_MANAGED', 'SERVER_MANAGED', { note: 'ルックアップの検索方法は kintone が自動設定し Toolkit からは読めないため確認の対象外（SEARCH_MODE_SERVER_MANAGED）' });
         return { ok: checks.every(c => c.ok), checks, revision: String(cur?.revision ?? ''), coverage: { searchMode: 'SEARCH_MODE_SERVER_MANAGED' } };
       },
       rollback({ appId, snapshot }, p) {
@@ -10505,7 +10512,7 @@
     HANDLERS.ADD_APP_ACTION = {
       prepare(step, { stepReview }) {
         const after = stepReview?.diff?.after;
-        if (!after || !after.name || !after.destApp?.app) return { unsupported: 'NO_APP_ACTION_SPEC', message: 'Review に追加後のアプリアクション定義がありません' };
+        if (!after || !after.name || !after.destApp?.app) return { unsupported: 'NO_APP_ACTION_SPEC', message: 'Toolkit の確認の結果に追加後のアプリアクション定義がありません' };
         const ch = stepReview?.diff?.appActionChanges || {};
         const appLabel = `App ${after.destApp.app}${stepReview?.crossApp?.name ? `「${stepReview.crossApp.name}」` : ''}`;
         const entry = { name: after.name, index: after.index ?? null, destApp: { app: String(after.destApp.app), code: after.destApp.code || '' }, mappings: after.mappings.map(m => ({ srcType: m.srcType, srcField: m.srcType === 'RECORD_URL' ? null : m.srcField, destField: m.destField })), entities: after.entities.map(e => ({ type: e.type, code: e.code })), filterCond: after.filterCond || '' };
@@ -10566,7 +10573,7 @@
     HANDLERS.UPDATE_APP_ACTION = {
       prepare(step, { stepReview }) {
         const before = stepReview?.diff?.before, after = stepReview?.diff?.after, identity = stepReview?.diff?.target?.identity, ch = stepReview?.diff?.appActionChanges;
-        if (!before || !after || !identity || identity.kind !== 'APP_ACTION' || !ch) return { unsupported: 'NO_APP_ACTION_SPEC', message: 'Review に変更前後のアプリアクション定義（対象の同一性）がありません。計画を作り直してください' };
+        if (!before || !after || !identity || identity.kind !== 'APP_ACTION' || !ch) return { unsupported: 'NO_APP_ACTION_SPEC', message: 'Toolkit の確認の結果に変更前後のアプリアクション定義（対象の同一性）がありません。計画を作り直してください' };
         //   2026-10-21: 変更の組は、取り直した設定に対する計画の検査の appActionChanges をそのまま使う（転記の追加・利用者・利用条件）。名前・コピー先の変更は計画の検査が
         //   計画のみにし、転記は追加だけなので、前後の差から組み直して削除や名前の変更を探さない。対象・転記元・コピー先・転記先の実在と利用条件も計画の検査が確かめる
         const bm = before.mappings || [], am = after.mappings || [];
@@ -10648,7 +10655,7 @@
     HANDLERS.UPDATE_VIEW = {
       prepare(step, { stepReview, fieldsNow = null }) {
         const before = stepReview?.diff?.before, after = stepReview?.diff?.after, identity = stepReview?.diff?.target?.identity;
-        if (!before || !after || !before.name) return { unsupported: 'NO_VIEW_SPEC', message: 'Review に変更前後の一覧定義がありません。計画を作り直してください' };
+        if (!before || !after || !before.name) return { unsupported: 'NO_VIEW_SPEC', message: 'Toolkit の確認の結果に変更前後の一覧定義がありません。計画を作り直してください' };
         if ((before.type || 'LIST') !== 'LIST' || (after.type || 'LIST') !== 'LIST') return { unsupported: 'VIEW_TYPE_NOT_SUPPORTED', message: `${before.type === 'CALENDAR' ? 'カレンダー形式' : before.type === 'CUSTOM' ? 'カスタマイズ形式' : before.type} の一覧は変更しません（表形式のみ）` };
         if (before.builtinType) return { unsupported: 'BUILTIN_VIEW_NOT_SUPPORTED', message: 'kintone 組み込みの一覧は変更しません' };
         if (!identity) return { unsupported: 'NO_VIEW_SPEC', message: 'Review に対象の同一性（identity）がありません。計画を作り直してください' };
@@ -10780,7 +10787,7 @@
       group: 'process',
       prepare(step, { stepReview, processNow = null }) {
         const after = stepReview?.diff?.after;
-        if (!after || !after.name) return { unsupported: 'NO_STATUS_SPEC', message: 'Review に追加後のステータス定義がありません' };
+        if (!after || !after.name) return { unsupported: 'NO_STATUS_SPEC', message: 'Toolkit の確認の結果に追加後のステータス定義がありません' };
         if (processNow && processNow.enable !== true) return { unsupported: 'PROCESS_ENABLE_NOT_SUPPORTED', message: 'プロセス管理が無効なアプリです。有効化は Toolkit では行いません（kintone の設定画面で有効にしてから計画を作り直してください）' };
         const type = after.assigneeType;   // 計画の検査が ONE / ALL / ANY に決める（2026-10-21: ここで語彙を確かめ直さない）
         const entities = [];
@@ -10801,10 +10808,10 @@
       group: 'process',
       prepare(step, { stepReview, processNow = null }) {
         const after = stepReview?.diff?.after;
-        if (!after || !after.name) return { unsupported: 'NO_ACTION_SPEC', message: 'Review に追加後のアクション定義がありません' };
+        if (!after || !after.name) return { unsupported: 'NO_ACTION_SPEC', message: 'Toolkit の確認の結果に追加後のアクション定義がありません' };
         if (processNow && processNow.enable !== true) return { unsupported: 'PROCESS_ENABLE_NOT_SUPPORTED', message: 'プロセス管理が無効なアプリです。有効化は Toolkit では行いません' };
         const froms = Array.isArray(after.from) ? after.from : [after.from];
-        if (froms.length !== 1 || !froms[0]) return { unsupported: 'MULTI_FROM_NOT_SUPPORTED', message: '遷移元が複数のアクションは 1 件ずつの step に分けてください（計画のみ）' };
+        if (froms.length !== 1 || !froms[0]) return { unsupported: 'MULTI_FROM_NOT_SUPPORTED', message: '遷移元が複数のアクションは 1 件ずつの手順に分けてください（計画のみ）' };
         if (!after.to) return { unsupported: 'NO_ACTION_SPEC', message: '遷移先がありません' };
         const filterCond = String(after.filterCond || '').trim();
         const execUsers = [];
@@ -10824,7 +10831,7 @@
       group: 'process',
       prepare(step, { stepReview, processNow = null }) {
         const identity = stepReview?.diff?.target?.identity, before = stepReview?.diff?.before, after = stepReview?.diff?.after;
-        if (!identity || !before || !after) return { unsupported: 'NO_PROCESS_SPEC', message: 'Review に変更前後のプロセス定義（対象の同一性）がありません。計画を作り直してください' };
+        if (!identity || !before || !after) return { unsupported: 'NO_PROCESS_SPEC', message: 'Toolkit の確認の結果に変更前後のプロセス定義（対象の同一性）がありません。計画を作り直してください' };
         if (processNow && processNow.enable !== true) return { unsupported: 'PROCESS_ENABLE_NOT_SUPPORTED', message: 'プロセス管理が無効なアプリです。有効化は Toolkit では行いません' };
         const kinds = stepReview?.diff?.changeKinds || [];
         if (kinds.includes('ACTION_BRANCH') || after.branches) return { unsupported: 'BRANCH_NOT_SUPPORTED', message: '既存アクションに分岐を足す変更は反映しません（ADD_PROCESS_ACTION で別名のアクションにしてください）' };
@@ -10888,7 +10895,7 @@
             next.actions.push(clone(a));
           } else if (m.kind === 'UPDATE_ACTION') {
             const mis = processIdentityMismatch(m.identity, next);
-            if (mis.length) throw Object.assign(new Error(`対象のアクション「${m.identity.name}」が Review 時点から変わっています（${mis.join(', ')}）。再レビューしてください`), { code: 'TARGET_CHANGED', stepId: st.stepId, detail: mis });
+            if (mis.length) throw Object.assign(new Error(`対象のアクション「${m.identity.name}」が 計画を確かめた時点から変わっています（${mis.join(', ')}）。設定を取り直して、同じ依頼をもう一度送ってください`), { code: 'TARGET_CHANGED', stepId: st.stepId, detail: mis });
             const i = findAction(next.actions, m.identity.name, m.identity.from);
             const a = next.actions[i];
             if (m.set.to != null) { if (!next.states[m.set.to]) throw Object.assign(new Error(`遷移先ステータス「${m.set.to}」がありません`), { code: 'TARGET_MISSING', stepId: st.stepId }); a.to = m.set.to; }
@@ -10897,7 +10904,7 @@
             if (m.set.executableUser) { const old = a.executableUser?.entities || []; a.executableUser = { entities: m.set.executableUser.entities.map(e => { const o = old.find(x => entityKey(x.entity) === entityKey(e.entity)); return o ? clone(o) : clone(e); }) }; a.type = m.set.type; if (a.type === 'PRIMARY') delete a.executableUser; }
           } else if (m.kind === 'UPDATE_STATUS') {
             const mis = processIdentityMismatch(m.identity, next);
-            if (mis.length) throw Object.assign(new Error(`対象のステータス「${m.identity.name}」が Review 時点から変わっています（${mis.join(', ')}）。再レビューしてください`), { code: 'TARGET_CHANGED', stepId: st.stepId, detail: mis });
+            if (mis.length) throw Object.assign(new Error(`対象のステータス「${m.identity.name}」が 計画を確かめた時点から変わっています（${mis.join(', ')}）。設定を取り直して、同じ依頼をもう一度送ってください`), { code: 'TARGET_CHANGED', stepId: st.stepId, detail: mis });
             const stx = next.states[m.identity.name];
             const old = stx.assignee?.entities || [];
             stx.assignee = { type: m.set.assignee.type, entities: m.set.assignee.entities.map(e => { const o = old.find(x => entityKey(x.entity) === entityKey(e.entity)); return o ? clone(o) : clone(e); }) };
@@ -11019,7 +11026,7 @@
     const procActionKey = (a) => ({ name: a.name, from: a.from, to: a.to, filterCond: normCondE(a.filterCond), type: a.type || 'PRIMARY', executableUsers: (a.executableUsers || []).map(e => `${e.type}:${e.code ?? ''}`).sort() });
     /** アプリアクションの比較キー（Phase 14。id は環境で揺れるので除く。全体置換 API なので 1 件の違いで stale） */
     const appActionKey = (a) => ({ name: a.name, index: a.index != null ? String(a.index) : null, destApp: String(a.destApp?.app ?? ''), destUnavailable: !!a.destUnavailable, mappings: (a.mappings || []).map(m => `${m.srcType}:${m.srcType === 'RECORD_URL' ? '' : (m.srcField ?? '')}>${m.destField}`), entities: (a.entities || []).map(e => `${e.type}:${e.code ?? ''}`).sort(), filterCond: normCondE(a.filterCond) });
-    function diffBefore(before, current, { kinds = ['fields', 'views', 'notifications', 'reminders', 'process'], baseline = 'Review 時点', addedNote = '（未反映の変更）' } = {}) {
+    function diffBefore(before, current, { kinds = ['fields', 'views', 'notifications', 'reminders', 'process'], baseline = '計画を確かめた時点', addedNote = '（未反映の変更）' } = {}) {
       const diffs = [];
       if (kinds.includes('process') && (before.process || current.process)) {
         const bp = before.process || { enabled: false, states: [], actions: [] }, cp = current.process || { enabled: false, states: [], actions: [] };
@@ -11098,14 +11105,14 @@
         // 簡素化 A（2026-10-16）: 書き込みの要らない手順は「未対応」にしない（実行しない理由は NO_CHANGE。反映できないこと・手動の一覧・反映の残りに数えない）
         if (noWriteOf(step, r)) set(STEP.SKIPPED, 'NO_CHANGE', NO_CHANGE_TEXT(step));
         else if (!st.approved) set(STEP.SKIPPED, 'NOT_APPROVED', '承認されていません');
-        else if (!r) set(STEP.BLOCKED, 'NO_REVIEW', 'Review の結果がありません');
-        else if (r.status === KTPlanReview.STATUS.INVALID || r.status === KTPlanReview.STATUS.BLOCKED_BY_DEPENDENCY || r.safety === KTPlanReview.SAFETY.BLOCKED) set(STEP.BLOCKED, 'REVIEW_BLOCKED', (r.issues || []).map(i => i && i.message).filter(Boolean)[0] || 'Review で実行不可と判定されています');   // 理由は計画の確認の指摘の文（2026-10-19）
+        else if (!r) set(STEP.BLOCKED, 'NO_REVIEW', 'Toolkit の確認の結果がありません');
+        else if (r.status === KTPlanReview.STATUS.INVALID || r.status === KTPlanReview.STATUS.BLOCKED_BY_DEPENDENCY || r.safety === KTPlanReview.SAFETY.BLOCKED) set(STEP.BLOCKED, 'REVIEW_BLOCKED', (r.issues || []).map(i => i && i.message).filter(Boolean)[0] || 'Toolkit の確認で反映できないと判定されています');   // 理由は計画の確認の指摘の文（2026-10-19）
         //   簡素化 A: 計画に変更の値が無い手順（計画の確認の NO_STRUCTURED_CHANGE）は、変更不要（NO_CHANGE）と別の理由にする（依存先として満たさない・要確認のまま）
         else if ((r.issues || []).some(i => i.code === 'NO_STRUCTURED_CHANGE')) set(STEP.UNSUPPORTED, 'NO_VALUES', '変更の値が計画にありません（値を会話で伝えるか、kintone の画面で設定してください）');
         else if (r.safety === KTPlanReview.SAFETY.PLAN_ONLY) set(STEP.UNSUPPORTED, 'PLAN_ONLY', step.actionType === 'REQUIRE_CONFIRMATION' ? '確認の手順（承認で確認済み。設定の変更はありません）' : '計画のみ（自動反映の対象外）');
         else if ((r.issues || []).some(i => i.code === 'COND_UNKNOWN_FUNCTION' || i.code === 'COND_NOT_EXPRESSION' || i.code === 'COND_INVALID')) set(STEP.BLOCKED, 'INVALID_CONDITION', '条件式が kintone で評価できないため反映しません（計画の条件式を直してください）');
         else if (!cap || !cap.previewExecute || !HANDLERS[step.actionType]) set(STEP.UNSUPPORTED, 'PREVIEW_NOT_SUPPORTED', 'Toolkit からは自動で反映できません（計画のみ）');
-        else if (step.actionType === 'ADD_PROCESS_STATUS' && (review?.conflicts || []).some(c => c.code === 'STATUS_UNREACHABLE' && (c.stepIds || []).includes(id))) set(STEP.BLOCKED, 'STATUS_UNREACHABLE', 'このステータスへ遷移するアクションが計画に無く孤立するため反映しません（遷移するアクションの step を足してください）');
+        else if (step.actionType === 'ADD_PROCESS_STATUS' && (review?.conflicts || []).some(c => c.code === 'STATUS_UNREACHABLE' && (c.stepIds || []).includes(id))) set(STEP.BLOCKED, 'STATUS_UNREACHABLE', 'このステータスへ遷移するアクションが計画に無く孤立するため反映しません（遷移するアクションの手順を足してください）');
         // Phase 20（CX-3 3 回目・実機）: 同じアクションを別の手順も変更する（後の手順が前を上書きする）計画は反映しない
         else if ((review?.conflicts || []).some(c => c.code === 'PLAN_INTERNAL_SAME_TARGET' && (c.stepIds || []).includes(id))) set(STEP.BLOCKED, 'SAME_TARGET_IN_PLAN', '同じアクションを別の手順も変更するため反映しません（後の手順が前の変更を上書きします。計画を直してください）');
         else {
@@ -11225,10 +11232,10 @@
       for (const st of prepared.steps) if (st.prepared?.temporaryId) prepared.temporaryIdMap[st.prepared.temporaryId] = st.prepared.expect.code;
       const summarize = () => { prepared.summary = { executable: prepared.steps.filter(s => s.status === STEP.PENDING).length, unsupported: prepared.steps.filter(s => s.status === STEP.UNSUPPORTED).length, blocked: prepared.steps.filter(s => s.status === STEP.BLOCKED).length, skipped: prepared.steps.filter(s => s.status === STEP.SKIPPED).length }; };
       const pending = prepared.steps.filter(s => s.status === STEP.PENDING);
-      if (!pending.length) { block('NOTHING_TO_EXECUTE', '承認済みで実行できる step がありません'); summarize(); return prepared; }
+      if (!pending.length) { block('NOTHING_TO_EXECUTE', '承認済みで実行できる手順がありません'); summarize(); return prepared; }
 
       // ---- 2. 今の設定（作業の基準の今の設定を受け取る。2026-10-23: 準備は動作テスト環境の設定を自分で取らない。権限が無い・取れないときは作業の基準の取得が止めている）----
-      if (!current || !current.fields || !current.layout || !current.views) { block('CURRENT_MISSING', '今の動作テスト環境の設定（作業の基準）が渡されていません'); summarize(); return prepared; }
+      if (!current || !current.fields || !current.layout || !current.views) { block('CURRENT_MISSING', '今の動作テスト環境の設定を取得できていません'); summarize(); return prepared; }
       const { fields, layout, views, prodViews = null, generalNotify, perRecordNotify, reminderNotify } = current;
       const status = current.status ?? null, actions = current.actions ?? null;
       prepared.snapshot = { takenAt: current.takenAt ?? nowIso(now), revision: String(fields?.revision ?? ''), fields: clone(fields), layout: clone(layout), views: clone(views), generalNotify: clone(generalNotify), perRecordNotify: clone(perRecordNotify), reminderNotify: clone(reminderNotify), ...(status ? { status: clone(status) } : {}), ...(actions ? { actions: clone(actions) } : {}) };
@@ -11268,10 +11275,10 @@
         if (!h || typeof h.recheck !== 'function' || !st.prepared) continue;
         const re = h.recheck(st.prepared, { generalNow: generalNotify, perRecordNow: perRecordNotify, remindersNow: reminderNotify });
         if (re.verdict === 'EXACT_DUPLICATE') { st.status = STEP.BLOCKED; st.reason = 'EXACT_DUPLICATE'; st.message = '同じ設定が動作テスト環境に既にあります（反映しません）'; }
-        else if (re.verdict === 'POSSIBLE_DUPLICATE') { st.warnings = [...(st.warnings || []), { code: 'POSSIBLE_DUPLICATE', message: '既存の設定と似ています。承認した内容を最終確認でもう一度確かめてください', existing: clone(re.existing) }]; }
+        else if (re.verdict === 'POSSIBLE_DUPLICATE') { st.warnings = [...(st.warnings || []), { code: 'POSSIBLE_DUPLICATE', message: '既存の設定と似ています。承認の前に「既存の設定と似ているもの」でもう一度確かめてください', existing: clone(re.existing) }]; }
       }
       pending.length = 0; pending.push(...prepared.steps.filter(s => s.status === STEP.PENDING));
-      if (!pending.length) { block('NOTHING_TO_EXECUTE', '承認済みで実行できる step がありません'); }
+      if (!pending.length) { block('NOTHING_TO_EXECUTE', '承認済みで実行できる手順がありません'); }
       // Phase 21: Review の基準の環境（開発支援は最新の動作テスト環境で計画する。古い Review は運用環境の設定が基準）
       const reviewedEnv = review.base?.env === 'preview' ? 'preview' : 'production';
       prepared.revision = { production: prodViews?.revision != null ? String(prodViews.revision) : null, preview: fields?.revision != null ? String(fields.revision) : null, reviewed: before.revision != null ? String(before.revision) : null, reviewedEnv, reviewedAt: review.base?.loadedAt ?? null };
@@ -11283,8 +11290,8 @@
       const diffs = diffBefore(before, currentModel, { kinds: ['fields', 'views', 'notifications', 'reminders', ...(status ? ['process'] : []), ...(actions ? ['appActions'] : [])], ...(reviewedEnv === 'preview' ? { baseline: '計画を作った時点の動作テスト環境', addedNote: '（計画を作った後の変更）' } : {}) });
       if (reviewedEnv === 'preview') {
         // revision は内容が同じでも進む（同じ内容の PUT など）。内容の差が無ければ止めずに記録だけする
-        if (prepared.revision.reviewed && prepared.revision.preview && prepared.revision.reviewed !== prepared.revision.preview && !diffs.length) prepared.warnings.push({ code: 'PREVIEW_REVISION_ADVANCED', message: `計画を作った後に動作テスト環境の revision が進んでいます（${prepared.revision.reviewed} → ${prepared.revision.preview}）が、この計画に関係する設定の内容は同じです` });
-      } else if (prepared.revision.reviewed && prepared.revision.production && prepared.revision.reviewed !== prepared.revision.production) diffs.unshift({ kind: 'APP', id: 'revision', change: 'CHANGED', message: `運用環境の設定が Review 後に変更されています（revision ${prepared.revision.reviewed} → ${prepared.revision.production}）` });
+        if (prepared.revision.reviewed && prepared.revision.preview && prepared.revision.reviewed !== prepared.revision.preview && !diffs.length) prepared.warnings.push({ code: 'PREVIEW_REVISION_ADVANCED', message: `計画を作った後に動作テスト環境の設定が更新されています（${prepared.revision.reviewed} → ${prepared.revision.preview}）が、この計画に関係する設定の内容は同じです` });
+      } else if (prepared.revision.reviewed && prepared.revision.production && prepared.revision.reviewed !== prepared.revision.production) diffs.unshift({ kind: 'APP', id: 'revision', change: 'CHANGED', message: `運用環境の設定が、計画を確かめた後に変更されています（設定の版 ${prepared.revision.reviewed} → ${prepared.revision.production}）` });
       // ---- 3a. 参照元アプリの指紋（Phase 13）: フィールド定義（fieldsHash）が Review 時点と違えば STALE（LOOKUP_RELATED_APP_CHANGED）。revision だけの違い（一覧・通知など）は警告に留める ----
       prepared.crossApp = [];
       for (const st of prepared.steps.filter(x => ['UPDATE_LOOKUP', 'ADD_APP_ACTION', 'UPDATE_APP_ACTION'].includes(x.actionType) && x.status !== STEP.SKIPPED)) {
@@ -11297,11 +11304,11 @@
         const item = { stepId: st.stepId, appId: ca.appId, role: isAction ? 'destination' : 'source', name: rel?.name || ca.name || null, reviewed: ca.reviewed, current: rel ? { revision: rel.revision, fieldsHash: rel.fieldsHash, available: rel.available, ...(rel.error ? { error: rel.error } : {}) } : null, ...(freshSteps.has(st.stepId) ? { fetchedAtPrepare: true } : {}) };
         prepared.crossApp.push(item);
         if (!rel || !rel.available) continue;   // BLOCKED の step でも相手アプリの指紋の違いは stale として記録する（人が原因を見られるように）
-        if (ca.reviewed?.fieldsHash && rel.fieldsHash !== ca.reviewed.fieldsHash) diffs.push({ kind: 'RELATED_APP', id: ca.appId, change: 'CHANGED', code: isAction ? 'DEST_APP_CHANGED' : 'LOOKUP_RELATED_APP_CHANGED', stepId: st.stepId, message: `${roleJa} App ${ca.appId}${item.name ? `「${item.name}」` : ''} のフィールド設定が Review 時点から変わっています（revision ${ca.reviewed.revision ?? '?'} → ${rel.revision ?? '?'}）。再レビューしてください`, before: ca.reviewed, after: { revision: rel.revision, fieldsHash: rel.fieldsHash } });
-        else if (ca.reviewed?.revision != null && rel.revision != null && String(rel.revision) !== String(ca.reviewed.revision)) st.warnings = [...(st.warnings || []), { code: 'RELATED_APP_REVISION_CHANGED', message: `${roleJa} App ${ca.appId}${item.name ? `「${item.name}」` : ''} の設定は Review 後に変更されています（revision ${ca.reviewed.revision} → ${rel.revision}）が、フィールド定義（コード / 種類 / 重複禁止 / テーブル）は同じです` }];
+        if (ca.reviewed?.fieldsHash && rel.fieldsHash !== ca.reviewed.fieldsHash) diffs.push({ kind: 'RELATED_APP', id: ca.appId, change: 'CHANGED', code: isAction ? 'DEST_APP_CHANGED' : 'LOOKUP_RELATED_APP_CHANGED', stepId: st.stepId, message: `${roleJa} App ${ca.appId}${item.name ? `「${item.name}」` : ''} のフィールド設定が 計画を確かめた時点から変わっています（設定の版 ${ca.reviewed.revision ?? '?'} → ${rel.revision ?? '?'}）。設定を取り直して、同じ依頼をもう一度送ってください`, before: ca.reviewed, after: { revision: rel.revision, fieldsHash: rel.fieldsHash } });
+        else if (ca.reviewed?.revision != null && rel.revision != null && String(rel.revision) !== String(ca.reviewed.revision)) st.warnings = [...(st.warnings || []), { code: 'RELATED_APP_REVISION_CHANGED', message: `${roleJa} App ${ca.appId}${item.name ? `「${item.name}」` : ''} の設定は 計画を確かめた後に変更されています（設定の版 ${ca.reviewed.revision} → ${rel.revision}）が、フィールド定義（コード / 種類 / 重複禁止 / テーブル）は同じです` }];
       }
       prepared.stale = { status: diffs.length ? 'STALE' : 'FRESH', diffs };
-      if (diffs.length) block('STALE_PLAN', '計画作成後にアプリ設定が変更されています。再レビューしてください。', { count: diffs.length });
+      if (diffs.length) block('STALE_PLAN', '計画作成後にアプリ設定が変更されています。設定を取り直して、同じ依頼をもう一度送ってください。', { count: diffs.length });
 
       // ---- 4. 書き込む内容が計画を作ったときの検査と同じか（取り直した設定に対する計画の検査の After と比べる。実行できない手順は、取り直した設定に対する計画の検査での分類で止めてある）----
       if (prepared.status === RUN.PREPARED) {
@@ -11310,9 +11317,9 @@
           for (const st of pending) {
             //   計画を作ったときにコピー先を取得していなかった手順（DEST_APP_NOT_LOADED）は、取り直した設定で初めて確かめたので比べない
             if (freshSteps.has(st.stepId) || same(rv.get(st.stepId)?.diff?.after, reFreshMap.get(st.stepId)?.diff?.after)) continue;
-            st.status = STEP.BLOCKED; st.reason = 'REVALIDATION_FAILED'; st.message = '再検証の結果が Review 時点と異なります';
+            st.status = STEP.BLOCKED; st.reason = 'REVALIDATION_FAILED'; st.message = '再検証の結果が 計画を確かめた時点と異なります';
           }
-          if (!prepared.steps.some(s => s.status === STEP.PENDING)) block('REVALIDATION_FAILED', '再検証で実行できる step が無くなりました');
+          if (!prepared.steps.some(s => s.status === STEP.PENDING)) block('REVALIDATION_FAILED', '再検証で実行できる手順が無くなりました');
         }
       }
       // Process Change Group（§25〜26）: Process 関連の PENDING step は 1 つの payload・1 回の PUT にまとめる
@@ -11373,7 +11380,7 @@
         const l = stepLogs.get(st.stepId);
         if (done.has(st.stepId)) continue;
         if (st.status !== STEP.PENDING) { progress(l); continue; }
-        if (failed) { l.status = STEP.SKIPPED; l.reason = 'STOPPED_AFTER_FAILURE'; l.message = '前の step が失敗したため実行していません'; progress(l); continue; }
+        if (failed) { l.status = STEP.SKIPPED; l.reason = 'STOPPED_AFTER_FAILURE'; l.message = '前の手順が失敗したため実行していません'; progress(l); continue; }
         // ---- Process Change Group: アンカー step に来たらグループ全体を 1 回の PUT で反映する（§25〜27）----
         const group = st.groupId ? groups.find(g => g.groupId === st.groupId) : null;
         if (group) {
@@ -11399,7 +11406,7 @@
               const ok = v.checks.every(c => c.ok) && own.every(c => c.ok);
               gl.verification = { ok, checks: [...own, ...v.checks], revision: v.revision, groupId: group.groupId, ...(side ? { sideEffects: side } : {}) };
               gl.status = ok ? STEP.VERIFIED : STEP.VERIFY_FAILED;
-              if (!ok) { gl.reason = side && own.every(c => c.ok) && v.checks.filter(c => !c.ok).every(c => c.name === 'noSideEffects') ? 'KINTONE_SIDE_EFFECT' : 'VERIFY_FAILED'; gl.message = gl.reason === 'KINTONE_SIDE_EFFECT' ? `プロセス管理の変更は反映されましたが、kintone 側で他の設定が自動変更されました（${side.map(x => x.message).join('、')}）。正常扱いにはしません` : `API は成功しましたが、再取得した設定が期待と一致しません（${[...own, ...v.checks].filter(c => !c.ok).map(c => c.name).join(', ')}）`; }
+              if (!ok) { gl.reason = side && own.every(c => c.ok) && v.checks.filter(c => !c.ok).every(c => c.name === 'noSideEffects') ? 'KINTONE_SIDE_EFFECT' : 'VERIFY_FAILED'; gl.message = gl.reason === 'KINTONE_SIDE_EFFECT' ? `プロセス管理の変更は反映されましたが、kintone 側で他の設定が自動変更されました（${side.map(x => x.message).join('、')}）。正常扱いにはしません` : `書き込みは成功しましたが、再取得した設定が期待と一致しません（${[...own, ...v.checks].filter(c => !c.ok).map(c => c.name).join(', ')}）`; }
               progress(gl);
             }
             if (logs.some(gl => gl.status !== STEP.VERIFIED)) failed = true;
@@ -11408,7 +11415,7 @@
             for (const gl of logs) {
               gl.status = STEP.FAILED; gl.error = s;
               gl.reason = isPermissionError(e) ? 'PERMISSION_DENIED' : isRevisionError(e) ? 'REVISION_MISMATCH' : ['TARGET_EXISTS', 'TARGET_CHANGED', 'TARGET_MISSING', 'STATUS_UNREACHABLE', 'PROCESS_ENABLE_NOT_SUPPORTED', 'FIRST_STATUS_CHANGED', 'NO_PROCESS_SPEC'].includes(s.code) ? s.code : 'API_ERROR';
-              gl.message = gl.reason === 'PERMISSION_DENIED' ? 'アプリ設定を変更する権限がありません' : gl.reason === 'REVISION_MISMATCH' ? '実行中に他の変更が入りました（revision 不一致）。再レビューしてください' : (e && e.stepId && e.stepId !== gl.stepId ? `同じグループの ${e.stepId} で止まりました: ${s.message}` : s.message);
+              gl.message = gl.reason === 'PERMISSION_DENIED' ? 'アプリ設定を変更する権限がありません' : gl.reason === 'REVISION_MISMATCH' ? '実行中に他の変更が入りました（設定が途中で変わりました）。設定を取り直して、同じ依頼をもう一度送ってください' : (e && e.stepId && e.stepId !== gl.stepId ? `同じグループの手順 ${e.stepId} で止まりました: ${s.message}` : s.message);
               progress(gl);
             }
             failed = true;
@@ -11417,7 +11424,7 @@
           continue;
         }
         const depsOk = st.dependsOn.every(d => depMet(d));
-        if (!depsOk) { l.status = STEP.SKIPPED; l.reason = 'DEPENDENCY_NOT_VERIFIED'; l.message = '依存する step が検証済みでないため実行していません'; progress(l); continue; }
+        if (!depsOk) { l.status = STEP.SKIPPED; l.reason = 'DEPENDENCY_NOT_VERIFIED'; l.message = '依存する手順が検証済みでないため実行していません'; progress(l); continue; }
         l.status = STEP.RUNNING; progress(l); await yieldUi();
         const handler = HANDLERS[st.actionType];
         const ctx = { api, appId: prepared.appId, revision, snapshot: prepared.snapshot, layoutPolicy: prepared.layoutPolicy, actionsBaseline };
@@ -11429,13 +11436,13 @@
           if (v.actions) { actionsBaseline = stripActionIds(v.actions); delete v.actions; }
           l.verification = v; if (v.revision) revision = v.revision;
           l.status = v.ok ? STEP.VERIFIED : STEP.VERIFY_FAILED;
-          if (!v.ok) { l.reason = 'VERIFY_FAILED'; l.message = `API は成功しましたが、再取得した設定が期待と一致しません（${v.checks.filter(c => !c.ok).map(c => c.name).join(', ')}）`; failed = true; }
+          if (!v.ok) { l.reason = 'VERIFY_FAILED'; l.message = `書き込みは成功しましたが、再取得した設定が期待と一致しません（${v.checks.filter(c => !c.ok).map(c => c.name).join(', ')}）`; failed = true; }
         } catch (e) {
           const s = strErr(e);
           l.status = STEP.FAILED; l.error = s; failed = true;
           if (e && typeof e === 'object' && e.applied) { l.partial = clone({ ...e.applied, requests: undefined }); l.requests = e.applied.requests || []; l.revision = e.applied.revision || null; revision = l.revision || revision; }   // 途中まで反映された（rollback の対象）
           l.reason = isPermissionError(e) ? 'PERMISSION_DENIED' : isRevisionError(e) ? 'REVISION_MISMATCH' : ['TARGET_EXISTS', 'EXACT_DUPLICATE', 'TARGET_CHANGED', 'TARGET_MISSING', 'RELATED_APP_SETTINGS_UNAVAILABLE', 'NOT_A_LOOKUP', 'DEST_APP_SETTINGS_UNAVAILABLE'].includes(s.code) ? s.code : 'API_ERROR';
-          l.message = l.reason === 'PERMISSION_DENIED' ? 'アプリ設定を変更する権限がありません' : l.reason === 'REVISION_MISMATCH' ? '実行中に他の変更が入りました（revision 不一致）。再レビューしてください' : s.message;
+          l.message = l.reason === 'PERMISSION_DENIED' ? 'アプリ設定を変更する権限がありません' : l.reason === 'REVISION_MISMATCH' ? '実行中に他の変更が入りました（設定が途中で変わりました）。設定を取り直して、同じ依頼をもう一度送ってください' : s.message;
         }
         progress(l); await yieldUi();
       }
@@ -11565,7 +11572,7 @@
         async verify({ api, appId, snapshot }) {
           const cur = await get(api, appId);
           const ok = equal(cur, snapshot[collection]);
-          return { ok, checks: [{ name: 'restoredToSnapshot', ok, expected: label, actual: ok ? 'snapshot と一致' : 'snapshot と不一致' }], revision: String(cur?.revision ?? '') };
+          return { ok, checks: [{ name: 'restoredToSnapshot', ok, expected: label, actual: ok ? '反映前の設定と一致' : '反映前の設定と一致しない' }], revision: String(cur?.revision ?? '') };
         },
       };
     }
@@ -11642,7 +11649,7 @@
           const rows = Array.isArray(lay?.layout) ? lay.layout : [], snapRows = Array.isArray(snapshot.layout?.layout) ? snapshot.layout.layout : [];
           check('layoutFieldRemoved', !layoutHasCode(rows, code), true, !layoutHasCode(rows, code));
           const restored = same(rows.map(stripLayoutRow), snapRows.map(stripLayoutRow));
-          check('layoutRestored', restored || !sameKeys(layoutCodes(rows), layoutCodes(snapRows)), restored ? 'snapshot と一致' : '他のフィールドが増えているため比較対象外', restored ? 'snapshot と一致' : 'snapshot と不一致');
+          check('layoutRestored', restored || !sameKeys(layoutCodes(rows), layoutCodes(snapRows)), restored ? '反映前の設定と一致' : '他のフィールドが増えているため比較対象外', restored ? '反映前の設定と一致' : '反映前の設定と一致しない');
           return { ok: checks.every(c => c.ok), checks, revision: String(cur?.revision ?? '') };
         },
       },
@@ -11657,7 +11664,7 @@
           const code = step.target;
           const curF = current.fields?.properties?.[code], expF = expected.fields?.properties?.[code], snapF = snapshot.fields?.properties?.[code];
           if (!curF) return { ok: false, code: 'FIELD_MISSING', message: `ルックアップ「${code}」が動作テスト環境にありません` };
-          if (!snapF || !snapF.lookup) return { ok: false, code: 'SNAPSHOT_MISSING', message: `ルックアップ「${code}」の実行前の設定が snapshot にありません` };
+          if (!snapF || !snapF.lookup) return { ok: false, code: 'SNAPSHOT_MISSING', message: `ルックアップ「${code}」の実行前の設定が反映前の設定の控えにありません` };
           if (curF.lookup === null) return { ok: false, code: 'RELATED_APP_SETTINGS_UNAVAILABLE', message: `ルックアップ「${curF.label || code}」（${code}）の設定を kintone が返しません（参照元アプリへのアクセス権を確認してください）` };
           if (same(lookupOf(state.fields?.properties?.[code]), lookupOf(snapF))) return { ok: true, alreadyRestored: true };
           if (expF && !same(lookupOf(curF), lookupOf(expF))) return { ok: false, code: 'FIELD_CHANGED', message: `ルックアップ「${curF.label || code}」（${code}）の設定が反映後に変更されています（自動では戻しません）`, diffs: [{ kind: 'LOOKUP', id: code, change: 'CHANGED', message: `ルックアップ「${curF.label || code}」（${code}）の取得項目 / 選択時表示 / 絞り込み / 並び順が反映直後と違います`, before: lookupOf(expF), after: lookupOf(curF) }] };
@@ -11698,7 +11705,7 @@
           const code = step.target;
           const curF = current.fields?.properties?.[code], expF = expected.fields?.properties?.[code], snapF = snapshot.fields?.properties?.[code];
           if (!curF) return { ok: false, code: 'FIELD_MISSING', message: `フィールド「${code}」が動作テスト環境にありません` };
-          if (!snapF) return { ok: false, code: 'SNAPSHOT_MISSING', message: `フィールド「${code}」の実行前の定義が snapshot にありません` };
+          if (!snapF) return { ok: false, code: 'SNAPSHOT_MISSING', message: `フィールド「${code}」の実行前の定義が反映前の設定の控えにありません` };
           if (same(state.fields?.properties?.[code], snapF)) return { ok: true, alreadyRestored: true };
           if (expF && !same(curF, expF)) return { ok: false, code: 'FIELD_CHANGED', message: `フィールド「${curF.label || code}」（${code}）が反映後に変更されています（自動では戻しません）`, diffs: [{ kind: 'FIELD', id: code, change: 'CHANGED', message: `フィールド「${curF.label || code}」（${code}）の定義が反映直後と違います`, before: fieldKey(expF), after: fieldKey(curF) }] };
           return { ok: true };
@@ -11744,11 +11751,11 @@
       if (!execution || !prepared || execution.executionId !== prepared.executionId) { block('INVALID_INPUT', '実行結果と準備（prepare）の組が一致しません'); return rb; }
       if (execution.status === RUN.RUNNING) { block('EXECUTION_RUNNING', '反映の処理中です'); return rb; }
       if (execution.rollback) { block('ALREADY_ROLLED_BACK', 'この実行は既に元に戻す処理を行っています（結果を確認してください。同じ実行を 2 回戻すことはできません）'); return rb; }
-      if (!execution.snapshot) { block('NO_SNAPSHOT', '実行前の snapshot が無いため元に戻せません'); return rb; }
+      if (!execution.snapshot) { block('NO_SNAPSHOT', '反映前の設定の控えが無いため元に戻せません'); return rb; }
       if (!execution.actualAfterRaw) { block('NO_ACTUAL_AFTER', '反映直後の設定を取得できていないため、安全に元に戻せません。現在の動作テスト環境を確認してください'); return rb; }
       rb.steps = buildRollbackPlan(execution, prepared).steps.map(st => ({ ...st, status: RB.PENDING, reason: null, message: '', requests: [], revision: null, verification: null, error: null }));
       rb.summary.total = rb.steps.length; for (const st of rb.steps) rb.summary.bySource[st.sourceActionType] = (rb.summary.bySource[st.sourceActionType] || 0) + 1;
-      if (!rb.steps.length) { block('NOTHING_TO_ROLLBACK', '元に戻す変更がありません（動作テスト環境に書き込んだ step はありません）'); return rb; }
+      if (!rb.steps.length) { block('NOTHING_TO_ROLLBACK', '元に戻す変更がありません（動作テスト環境に書き込んだ手順はありません）'); return rb; }
       let current;
       try { current = await fetchPreviewAll(api, rb.appId); } catch (e) { const s = strErr(e); if (isPermissionError(e)) block('PERMISSION_DENIED', 'アプリ設定を変更する権限がありません（動作テスト環境の設定を取得できませんでした）', s); else block('FETCH_FAILED', `現在の設定を取得できませんでした: ${s.message}`, s); return rb; }
       rb.currentRevision = String(current.fields?.revision ?? '');
@@ -11764,8 +11771,8 @@
       }
       const stale = rb.steps.filter(x => x.status === RB.STALE);
       if (stale.length) { rb.stale = { status: 'STALE', diffs: stale.flatMap(x => (x.diffs || []).map(d => ({ stepId: x.stepId, ...d }))) }; block('ROLLBACK_STALE', '反映後に動作テスト環境の設定が変更されているため、自動では元に戻せません。現在の動作テスト環境を確認してください。', { steps: stale.map(x => x.stepId) }); }
-      if (rb.steps.some(x => x.status === RB.FAILED)) block('ROLLBACK_NOT_POSSIBLE', '元に戻す方法が無い step があります');
-      if (rb.status === RB_RUN.PREPARED && rb.afterRevision && rb.currentRevision && rb.afterRevision !== rb.currentRevision) rb.warnings.push({ code: 'OTHER_CHANGES_SINCE_EXECUTION', message: `反映後に他の設定が変更されています（revision ${rb.afterRevision} → ${rb.currentRevision}）。元に戻す対象の設定は変わっていないため戻せますが、それ以外の変更には触れません` });
+      if (rb.steps.some(x => x.status === RB.FAILED)) block('ROLLBACK_NOT_POSSIBLE', '元に戻す方法が無い手順があります');
+      if (rb.status === RB_RUN.PREPARED && rb.afterRevision && rb.currentRevision && rb.afterRevision !== rb.currentRevision) rb.warnings.push({ code: 'OTHER_CHANGES_SINCE_EXECUTION', message: `反映後に他の設定が変更されています（設定の版 ${rb.afterRevision} → ${rb.currentRevision}）。元に戻す対象の設定は変わっていないため戻せますが、それ以外の変更には触れません` });
       // Phase 13: 参照元アプリの変化は戻す対象ではない（戻すのはこのアプリのルックアップ設定）。フィールド定義が反映時点から変わっていれば警告だけ出す（取得元が無くなっていれば kintone が PUT を拒否し、失敗として止まる）
       if (rb.status === RB_RUN.PREPARED && rb.steps.some(x => x.actionType === 'RESTORE_LOOKUP_SETTINGS') && typeof api.getAppFields === 'function') {
         for (const ca of (Array.isArray(prepared.crossApp) ? prepared.crossApp : [])) {
@@ -11808,12 +11815,12 @@
           const v = await strat.verify({ api, appId: rb.appId, expected, snapshot, step: st, applied });
           st.verification = v; if (v.revision) st.revision = v.revision;
           st.status = v.ok ? RB.VERIFIED : RB.VERIFY_FAILED;
-          if (!v.ok) { st.reason = 'ROLLBACK_VERIFY_FAILED'; st.message = `API は成功しましたが、再取得した設定が実行前の snapshot と一致しません（${v.checks.filter(c => !c.ok).map(c => c.name).join(', ')}）`; failed = true; }
+          if (!v.ok) { st.reason = 'ROLLBACK_VERIFY_FAILED'; st.message = `書き込みは成功しましたが、再取得した設定が反映前の設定の控えと一致しません（${v.checks.filter(c => !c.ok).map(c => c.name).join(', ')}）`; failed = true; }
         } catch (e) {
           const s = strErr(e);
           st.status = RB.FAILED; st.error = s; failed = true;
           st.reason = isPermissionError(e) ? 'PERMISSION_DENIED' : isRevisionError(e) ? 'REVISION_MISMATCH' : 'API_ERROR';
-          st.message = st.reason === 'PERMISSION_DENIED' ? 'アプリ設定を変更する権限がありません' : st.reason === 'REVISION_MISMATCH' ? '元に戻す途中で他の変更が入りました（revision 不一致）。再試行せず停止しました' : s.message;
+          st.message = st.reason === 'PERMISSION_DENIED' ? 'アプリ設定を変更する権限がありません' : st.reason === 'REVISION_MISMATCH' ? '元に戻す途中で他の変更が入りました（設定が途中で変わりました）。再試行せず停止しました' : s.message;
         }
         progress(st); await yieldUi();
       }
@@ -11821,7 +11828,7 @@
       try {
         const cur = await fetchPreviewAll(api, rb.appId);
         rb.afterRollbackRevision = String(cur.fields?.revision ?? '');
-        const diffs = collectionDiffs(snapshot, cur, ['fields', 'views', 'notifications', 'reminders', ...(snapshot.actions ? ['appActions'] : [])], '実行前の snapshot');
+        const diffs = collectionDiffs(snapshot, cur, ['fields', 'views', 'notifications', 'reminders', ...(snapshot.actions ? ['appActions'] : [])], '反映前の設定の控え');
         rb.verification = { restoredToSnapshot: diffs.length === 0, diffs, snapshotRevision: rb.snapshotRevision, currentRevision: rb.afterRollbackRevision };
       } catch (e) { rb.verification = { restoredToSnapshot: null, diffs: [], error: strErr(e).message }; }
       const okCount = rb.steps.filter(x => x.status === RB.VERIFIED).length, badCount = rb.steps.filter(x => [RB.FAILED, RB.STALE, RB.VERIFY_FAILED].includes(x.status)).length;
@@ -11926,12 +11933,12 @@
   // 効果の語彙（会話フローの再設計 §0c.2・2026-10-08）: lock（編集できない）/ warn（警告を出す。編集・保存は許可）/ block-save（保存を止める）/
   //   set-value（値を設定する）/ show-hide（表示を切り替える）。同じ効果として扱わない。要件の台帳・計画・必須の効果（requiredEffects）で同じ語彙を使い回す
   //   （各段階で文から効果を推定しない）
-  const KT_EFFECTS = Object.freeze(['lock', 'warn', 'block-save', 'set-value', 'show-hide']);
-  const KT_EFFECT_JA = Object.freeze({ lock: '編集できない', warn: '警告を出す（編集・保存は許可）', 'block-save': '保存を止める', 'set-value': '値を設定する', 'show-hide': '表示を切り替える' });
+  const KT_EFFECTS = Object.freeze(['lock', 'warn', 'block-save', 'set-value', 'show-hide', 'hide-row-buttons']);   // hide-row-buttons（2026-10-23・§12.69）: テーブルの行の追加・削除のボタンを隠す（公式 API showAddTableRowButtons / showDeleteTableRowButtons。テーブルのフィールドに付ける。condition は隠す条件）
+  const KT_EFFECT_JA = Object.freeze({ lock: '編集できない', warn: '警告を出す（編集・保存は許可）', 'block-save': '保存を止める', 'set-value': '値を設定する', 'show-hide': '表示を切り替える', 'hide-row-buttons': 'テーブルの行の追加・削除のボタンを隠す' });
   /** 要件として必要な動作の言い方（要件未達の理由の文） */
   /** レビューの指摘 row1（2026-10-09）: 効果の名詞の形（最終案の「依頼に無い「明細の保存の停止」は入れていません」の 1 行） */
-  const KT_EFFECT_NOUN_JA = Object.freeze({ lock: '編集の禁止', warn: '警告', 'block-save': '保存の停止', 'set-value': '値の設定', 'show-hide': '表示の切り替え' });
-  const KT_EFFECT_NEED_JA = Object.freeze({ lock: '編集できないようにする', warn: '警告を出す（編集・保存は止めない）', 'block-save': '保存を止める', 'set-value': '値を設定する', 'show-hide': '表示を切り替える' });
+  const KT_EFFECT_NOUN_JA = Object.freeze({ lock: '編集の禁止', warn: '警告', 'block-save': '保存の停止', 'set-value': '値の設定', 'show-hide': '表示の切り替え', 'hide-row-buttons': '行の追加・削除のボタンの非表示' });
+  const KT_EFFECT_NEED_JA = Object.freeze({ lock: '編集できないようにする', warn: '警告を出す（編集・保存は止めない）', 'block-save': '保存を止める', 'set-value': '値を設定する', 'show-hide': '表示を切り替える', 'hide-row-buttons': 'テーブルの行の追加・削除のボタンを隠す' });
   /**
    * 動作テストを実行できなかった理由の語彙（§0c.6・契約 20 §13。生成工程の behavior.reason と behavior.cases[].reason）。区分ごとに利用者への理由と次の方針を変える:
    *   env（環境）/ condition（条件の形）/ limit（件数）/ existing（既存 JS）/ machine（機械検査で未実行）/ scope（対象外。その代表条件はこの効果に当たらない）。
@@ -11939,79 +11946,79 @@
    */
   const KT_BEHAVIOR_REASONS = Object.freeze({
     timeout: { category: 'env', text: '時間内に終わりませんでした' }, memory: { category: 'env', text: 'メモリの上限を超えました' },
-    internal: { category: 'env', text: '隔離環境の内部の問題で実行できませんでした' }, unavailable: { category: 'env', text: '模擬テストの環境を使えませんでした' },
-    'not-configured': { category: 'env', text: '模擬テストの環境が用意されていません' }, network: { category: 'env', text: '通信を試みる処理は隔離環境では確かめられません' },
+    internal: { category: 'env', text: '模擬テストの環境の内部の問題で実行できませんでした' }, unavailable: { category: 'env', text: '模擬テストの環境を使えませんでした' },
+    'not-configured': { category: 'env', text: '模擬テストの環境が用意されていません' }, network: { category: 'env', text: '通信を試みる処理は模擬テストの環境では確かめられません' },
     //   §0c.8（2026-10-08）: 候補が隔離環境で動かせない機能を使った（unsupported・unsupported-feature）ときは、作り直しの操作（fix regenerate）を出す。
     //   作り直しは通常の計画の差分更新の依頼として送る（依頼の文が生成の入力に入るので、同じ入力の再生成を AI を呼ばずに案内する規則とぶつからない）
-    unsupported: { category: 'env', text: '作った JavaScript が、隔離環境で扱えない書き方・機能を使っています', fix: 'regenerate', next: '作った JavaScript が隔離環境で動かせない書き方・機能を使っているため、修復は依頼していません。最終案のカードの［作り直しを依頼する］で、その書き方を使わない形での作り直しを依頼できます（自動では依頼しません）。', readiness: '作った JavaScript が隔離環境で動かせない書き方・機能を使っていて、必須の動作を模擬テストで確かめられないため、まだ反映できません（［作り直しを依頼する］で作り直せます）。' },
-    'load-error': { category: 'env', text: '隔離環境での読み込みに失敗しました' },
-    'condition-unparsed': { category: 'condition', text: '計画の条件を、模擬テストの代表条件にできる形で読めませんでした' },
+    unsupported: { category: 'env', text: '作った JavaScript が、模擬テストの環境で扱えない書き方・機能を使っています', fix: 'regenerate', next: '作った JavaScript が模擬テストの環境で動かせない書き方・機能を使っているため、AI に直させてはいません。最終案のカードの［作り直しを依頼する］で、その書き方を使わない形での作り直しを依頼できます（自動では依頼しません）。', readiness: '作った JavaScript が模擬テストの環境で動かせない書き方・機能を使っていて、必須の動作を模擬テストで確かめられないため、まだ反映できません（［作り直しを依頼する］で作り直せます）。' },
+    'load-error': { category: 'env', text: '模擬テストの環境での読み込みに失敗しました' },
+    'condition-unparsed': { category: 'condition', text: '計画の条件を、模擬テストで確かめる条件にできる形で読めませんでした' },
     //   §0c.8（2026-10-08）: 条件に合うレコードを作れない（条件の値が今の設定にも計画の新設にも無い）。条件の形の区分で判定に数える
-    'condition-value-unknown': { category: 'condition', text: '条件に合うレコードを作れません（条件の値が、今の設定にも計画で新設するものにもありません）', next: '計画の条件の値（ステータス名・選択肢など）を今の設定か計画で新設するものと同じ表記に直すか、新設の手順を足します。最終案のカードの［計画を直すよう依頼する］で依頼できます（自動では依頼しません。修復は依頼していません）。', readiness: '条件に合うレコードを作れず（条件の値が今の設定にも計画の新設にもありません）、必須の動作を確かめられないため、まだ反映できません（計画の条件を直します。作った JavaScript の誤りとは判定していません）。' },
-    limit: { category: 'limit', text: '確かめる代表条件が上限を超えました' },
+    'condition-value-unknown': { category: 'condition', text: '条件に合うレコードを作れません（条件の値が、今の設定にも計画で新設するものにもありません）', next: '計画の条件の値（ステータス名・選択肢など）を今の設定か計画で新設するものと同じ表記に直すか、新設の手順を足します。最終案のカードの［計画を直すよう依頼する］で依頼できます（自動では依頼しません。AI に直させてはいません）。', readiness: '条件に合うレコードを作れず（条件の値が今の設定にも計画の新設にもありません）、必須の動作を確かめられないため、まだ反映できません（計画の条件を直します。作った JavaScript の誤りとは判定していません）。' },
+    limit: { category: 'limit', text: '確かめる条件が上限を超えました' },
     //   §0c.10（2026-10-08）: existing は隔離環境で既存 JS との競合が観測されたとき（既存 JS の error で編集不可が取り消された・既存 JS が値を変えた・
     //   既存 JS が保存を止めて作った JavaScript の処理が動かなかった）。次の手は［計画を直すよう依頼する］（既存の JavaScript に統合する・役割分担を見直す）
-    existing: { category: 'existing', text: '既存の JavaScript との競合を、模擬テストで観測しました（既存の JavaScript が同じ画面で編集の可否・値・エラー・保存を変えました）' },
+    existing: { category: 'existing', text: '既存の JavaScript との競合を、模擬テストで確認しました（既存の JavaScript が同じ画面で編集の可否・値・エラー・保存を変えました）' },
     //   C-1 第 3 段（2026-10-08）: 既存 JS の編集不可を、作った JavaScript の警告（error）が取り消さないかを確かめられない（既存 JS の編集不可の条件が、
     //   隔離環境の代表条件のレコードで成り立たない。例: 承認済のときだけ編集不可）。取り消しを観測できないので合格にしない。
     //   次の手は［計画を直すよう依頼する］。依頼の文は構造化した値（代表条件の details.files・details.file のファイル名）から作る（fixRequestOf）
-    'existing-lock-unverified': { category: 'existing', fix: 'revise', text: '既存の JavaScript の編集不可を、作った JavaScript の警告が取り消さないかを、模擬テストで確かめられません（既存の JavaScript が編集不可にする条件のレコードを、隔離環境で作れません）', next: '警告を変更・保存のイベントで出す形か、作る JavaScript を既存の JavaScript に統合する形に計画を直します。最終案のカードの［計画を直すよう依頼する］で依頼できます（自動では依頼しません。修復は依頼していません）。', readiness: '既存の JavaScript の編集不可を、作った JavaScript の警告が取り消さないかを確かめられないため、まだ反映できません（計画を直します。作った JavaScript の誤りとは判定していません）。' },
+    'existing-lock-unverified': { category: 'existing', fix: 'revise', text: '既存の JavaScript の編集不可を、作った JavaScript の警告が取り消さないかを、模擬テストで確かめられません（既存の JavaScript が編集不可にする条件のレコードを、模擬テストの環境で作れません）', next: '警告を、値を変えたとき・保存するときに出す形か、作る JavaScript を既存の JavaScript に統合する形に計画を直します。最終案のカードの［計画を直すよう依頼する］で依頼できます（自動では依頼しません。AI に直させてはいません）。', readiness: '既存の JavaScript の編集不可を、作った JavaScript の警告が取り消さないかを確かめられないため、まだ反映できません（計画を直します。作った JavaScript の誤りとは判定していません）。' },
     //   §0c.10: 既存 JS の handler が隔離環境で動かせない（handler の中の例外・unsupported・通信）。計画を直しても解けないので、操作を出さず「対応できない範囲」
-    'existing-unrunnable': { category: 'existing', unfixable: true, text: '既存の JavaScript のこの画面の処理（handler）が、隔離環境で動かせない処理（例外・通信・隔離環境に無い機能）を含んでいます', readiness: '既存の JavaScript と一緒の動きを模擬テストで確かめられないため、まだ反映できません（対応できない範囲です。計画を直しても解けないため、依頼の操作は出していません。作った JavaScript の誤りとは判定していません）。' },
+    'existing-unrunnable': { category: 'existing', unfixable: true, text: '既存の JavaScript のこの画面の処理が、模擬テストの環境で動かせない処理（例外・通信・模擬テストの環境に無い機能）を含んでいます', readiness: '既存の JavaScript と一緒の動きを模擬テストで確かめられないため、まだ反映できません（対応できない範囲です。計画を直しても解けないため、依頼の操作は出していません。作った JavaScript の誤りとは判定していません）。' },
     //   旧い名前（handler の中の例外）。existing-unrunnable と同じく計画を直しても解けない
-    'existing-exception': { category: 'existing', unfixable: true, text: '既存の JavaScript が隔離環境で例外になりました' },
+    'existing-exception': { category: 'existing', unfixable: true, text: '既存の JavaScript が模擬テストの環境で例外になりました' },
     //   §0c.9（2026-10-08）: 計画を直しても解けない理由（unfixable）。既存 JS の本文を渡せない（URL 指定・本文が無い・件数の上限など）・既存 JS の読み込みを隔離環境で再現できない
     //   （existing-unverifiable）は、操作（［計画を直すよう依頼する］）を出さず「対応できない範囲」として理由とファイル名を出す
     'related-file-omitted': { category: 'existing', unfixable: true, text: '同じ画面で動く既存の JavaScript を、模擬テストに渡せませんでした', readiness: '既存の JavaScript と一緒の動きを模擬テストで確かめられないため、まだ反映できません（対応できない範囲です。計画を直しても解けないため、依頼の操作は出していません。作った JavaScript の誤りとは判定していません）。' },
     //   §0c.10: 既存 JS の登録が読めない（イベント名を組み立てる・入れ子の登録・別名など）・静的に読んだ登録が隔離環境で登録されなかった（読み込み時の例外・環境の値での分岐・タイマーなど）
-    'existing-unverifiable': { category: 'existing', unfixable: true, text: '既存の JavaScript がその画面で登録する処理を確かめられません（登録を本文から読めない、または読み込みのときに隔離環境で登録されませんでした）', readiness: '既存の JavaScript と一緒の動きを模擬テストで確かめられないため、まだ反映できません（対応できない範囲です。計画を直しても解けないため、依頼の操作は出していません。作った JavaScript の誤りとは判定していません）。' },
+    'existing-unverifiable': { category: 'existing', unfixable: true, text: '既存の JavaScript がその画面で登録する処理を確かめられません（登録を本文から読めない、または読み込みのときに模擬テストの環境で登録されませんでした）', readiness: '既存の JavaScript と一緒の動きを模擬テストで確かめられないため、まだ反映できません（対応できない範囲です。計画を直しても解けないため、依頼の操作は出していません。作った JavaScript の誤りとは判定していません）。' },
     //   §0c.9: Toolkit の二重の安全（Toolkit の中だけの理由）。効果のイベントのそれぞれで「条件に合う」（条件つきなら「合わない」も）の合格が揃わない。区分は条件の形
-    'case-coverage': { category: 'condition', text: '必須の動作のイベントのうち、条件に合うレコード・合わないレコードで確かめた結果が揃わないものがあります', next: '計画の効果のイベント・条件を、それぞれのイベントで条件に合う・合わないレコードを作れる形に直します。最終案のカードの［計画を直すよう依頼する］で依頼できます（自動では依頼しません。修復は依頼していません）。', readiness: '必須の動作のイベントのうち、条件に合う・合わないレコードで確かめた結果が揃わないため、まだ反映できません（計画のイベント・条件を直します。作った JavaScript の誤りとは判定していません）。' },
-    'machine-blocked': { category: 'machine', text: '機械検査で登録を止める問題があるため、模擬テストは実行していません' },
+    'case-coverage': { category: 'condition', text: '必須の動作のうち、画面の操作ごとに条件に合うレコードと合わないレコードの両方の結果がそろわなかったものがあります', next: '計画の動作の画面の操作・条件を、それぞれの画面の操作で条件に合う・合わないレコードを作れる形に直します。最終案のカードの［計画を直すよう依頼する］で依頼できます（自動では依頼しません。AI に直させてはいません）。', readiness: '必須の動作の画面の操作のうち、条件に合う・合わないレコードで確かめた結果がそろわないため、まだ反映できません（計画の画面の操作・条件を直します。作った JavaScript の誤りとは判定していません）。' },
+    'machine-blocked': { category: 'machine', text: 'コードの検査で登録を止める問題があるため、模擬テストは実行していません' },
     'patch-not-applicable': { category: 'machine', text: '既存の JavaScript への統合を合成できないため、模擬テストは実行していません' },
-    'no-event': { category: 'scope', text: 'その確かめ方に当たるイベントが計画にありません' },
+    'no-event': { category: 'scope', text: 'その確かめ方に当たる画面の操作が計画にありません' },
     //   §0c.10（2026-10-08）: 「条件に合う・条件に使わないフィールドは空」のケースを既存 JS が原因で確かめられない（判定に数えない・対象外）
     'empty-by-existing': { category: 'scope', text: '条件に使わないフィールドが空のレコードは、既存の JavaScript が原因で確かめられないため、判定に数えていません' }, 'not-on-create': { category: 'scope', text: '作成画面では当たらない確かめ方です' },
     //   §0c.8: 代表条件が無い効果は、確かめられるようになるのを待つのではなく計画（効果のイベント・条件）を直す
-    'no-cases': { category: 'scope', text: '確かめる代表条件がありません', fix: 'revise', next: '計画の効果のイベント・条件を、模擬テストの代表条件を作れる形に直します。最終案のカードの［計画を直すよう依頼する］で依頼できます（自動では依頼しません）。' },
+    'no-cases': { category: 'scope', text: '確かめる条件がありません', fix: 'revise', next: '計画の動作の画面の操作・条件を、模擬テストで確かめる条件を作れる形に直します。最終案のカードの［計画を直すよう依頼する］で依頼できます（自動では依頼しません）。' },
     //   §0c.7（2026-10-08）: no-other-value（条件に合わない値を作れない＝その確かめ方は当たらない）は対象外。other-platform は「条件の形」の区分で判定に数える
     //   （必須の効果のイベントに、候補が読み込まれない画面のものがある＝その効果は確かめていない。次の手は計画を直す）
     'no-other-value': { category: 'scope', text: '条件に合わない値（またはほかの保存を止める条件に合わない値）を作れないため、この確かめ方は当たりません' },
-    'other-platform': { category: 'condition', text: '必須の動作のイベントに、この JavaScript が読み込まれない画面（PC / モバイル）のものがあります', next: 'その画面のイベントを外すか、その画面（PC / モバイル）を担当する JavaScript を計画に置きます。最終案のカードの［計画を直すよう依頼する］で依頼できます（自動では依頼しません。修復は依頼していません）。', readiness: '必須の動作のイベントに、作った JavaScript が読み込まれない画面（PC / モバイル）のものがあるため、まだ反映できません（計画を直します。作った JavaScript の誤りとは判定していません）。' },
+    'other-platform': { category: 'condition', text: '必須の動作に、この JavaScript が読み込まれない画面（PC / モバイル）のものがあります', next: 'その画面の操作を外すか、その画面（PC / モバイル）を担当する JavaScript を計画に置きます。最終案のカードの［計画を直すよう依頼する］で依頼できます（自動では依頼しません。AI に直させてはいません）。', readiness: '必須の動作の画面の操作に、作った JavaScript が読み込まれない画面（PC / モバイル）のものがあるため、まだ反映できません（計画を直します。作った JavaScript の誤りとは判定していません）。' },
     //   §0c.7 の補い: 隔離環境で扱えない機能（BigInt など。機械検査 unsupported-feature）は環境の区分（候補の誤りにしない）。
     //   ignored（window・document のイベントの登録を呼ばずに記録したもの）は判定に使わない記録。実行できなかった理由として届いたときは合格に数えない（環境の区分）
-    'unsupported-feature': { category: 'env', text: '隔離環境で扱えない機能（BigInt など）を使っているため、模擬テストを実行していません', fix: 'regenerate', next: '作った JavaScript が隔離環境で動かせない機能（BigInt など）を使っているため、修復は依頼していません。最終案のカードの［作り直しを依頼する］で、その機能を使わない形での作り直しを依頼できます（自動では依頼しません）。', readiness: '作った JavaScript が隔離環境で動かせない機能（BigInt など）を使っていて、必須の動作を模擬テストで確かめられないため、まだ反映できません（［作り直しを依頼する］で作り直せます）。' },
-    ignored: { category: 'env', text: 'ブラウザのイベントの登録（addEventListener など）は隔離環境では呼ばずに記録だけしました' },
+    'unsupported-feature': { category: 'env', text: '模擬テストの環境で扱えない機能（BigInt など）を使っているため、模擬テストを実行していません', fix: 'regenerate', next: '作った JavaScript が模擬テストの環境で動かせない機能（BigInt など）を使っているため、AI に直させてはいません。最終案のカードの［作り直しを依頼する］で、その機能を使わない形での作り直しを依頼できます（自動では依頼しません）。', readiness: '作った JavaScript が模擬テストの環境で動かせない機能（BigInt など）を使っていて、必須の動作を模擬テストで確かめられないため、まだ反映できません（［作り直しを依頼する］で作り直せます）。' },
+    ignored: { category: 'env', text: 'ブラウザのイベントの登録（addEventListener など）は模擬テストの環境では呼ばずに記録だけしました' },
     //   2026-10-10（誤った検証による修復の繰り返しを止める §3.2・契約 20 §13）: 模擬テストの入力（代表条件の change の形など）が隔離環境の約束と合わない。
     //   検証入力の誤りで、作った JavaScript の不合格ではない（区分 env。修復も［計画を直すよう依頼する］も出さない）
-    'case-invalid': { category: 'env', text: '模擬テストの入力（代表条件）の形が隔離環境の約束と合わないため、実行していません（生成したコードの誤りとは判定していません）', readiness: '模擬テストの入力（代表条件）の形が隔離環境の約束と合わず、必須の動作を確かめられないため、まだ反映できません（検証の入力の問題です。作った JavaScript の誤りとは判定していないため、修復は依頼していません）。' },
+    'case-invalid': { category: 'env', text: '模擬テストに使う条件の形が模擬テストの環境の決まりと合わないため、実行していません（生成したコードの誤りとは判定していません）', readiness: '模擬テストに使う条件の形が模擬テストの環境の決まりと合わず、必須の動作を確かめられないため、まだ反映できません（検証の入力の問題です。作った JavaScript の誤りとは判定していないため、AI に直させてはいません）。' },
     //   §4.2: 保存を止める条件が分からない（移植元の本文が無い・比べられない）ので代表条件を作らなかった。計画を直す対象（区分 condition。修復はしない）
-    'condition-unknown': { category: 'condition', text: '保存を止める条件が分からない（移植元の本文が無い・比べられない）ため、代表条件を作っていません', next: '保存を止める条件を推測で決めず、移植元の既存の JavaScript（本文を取得できるもの）から引き継ぐ形に計画を直します。最終案のカードの［計画を直すよう依頼する］で依頼できます（自動では依頼しません。修復は依頼していません）。', readiness: '保存を止める条件が分からず（移植元の本文が無い・比べられない）、必須の動作を確かめられないため、まだ反映できません（計画を直します。作った JavaScript の誤りとは判定していません）。' },
+    'condition-unknown': { category: 'condition', text: '保存を止める条件が分からない（移植元の本文が無い・比べられない）ため、確かめる条件を作っていません', next: '保存を止める条件を推測で決めず、移植元の既存の JavaScript（本文を取得できるもの）から引き継ぐ形に計画を直します。最終案のカードの［計画を直すよう依頼する］で依頼できます（自動では依頼しません。AI に直させてはいません）。', readiness: '保存を止める条件が分からず（移植元の本文が無い・比べられない）、必須の動作を確かめられないため、まだ反映できません（計画を直します。作った JavaScript の誤りとは判定していません）。' },
   });
   /** 区分ごとの見出しと次の方針（通常画面に出す。理由の名前・例外文は詳細表示） */
   const KT_REASON_CATEGORY = Object.freeze({
     //   §0c.8: 環境の制約は作り直しても変わらないので、操作（修復・作り直しの依頼）は出さない。待つだけの次の手にせず、何が起きていて利用者が何をすれば作り直せるかを書く
-    env: { label: '環境', next: '作った JavaScript の誤りとは判定していないため、修復は依頼していません（同じ内容で作り直しても結果は変わりません）。この最終案は反映できません。模擬テストの環境の問題が解消したら、チャット欄で変更を頼むと最終案を作り直します。' },
+    env: { label: '環境', next: '作った JavaScript の誤りとは判定していないため、AI に直させてはいません（同じ内容で作り直しても結果は変わりません）。この最終案は反映できません。模擬テストの環境の問題が解消したら、チャット欄で変更を頼むと最終案を作り直します。' },
     //   §0c.8（2026-10-08）: 「計画を直す」が次の手の区分（fix revise）は、構造化した理由から作った修正の依頼を、最終案のカードの［計画を直すよう依頼する］で
     //   通常の計画の差分更新に送れる（自動では送らない）。日付の条件も Gateway が解くので「単純な比較に直す」とは言わない
-    condition: { label: '条件の形', fix: 'revise', next: '計画の条件を、模擬テストで条件に合うレコード・合わないレコードを作れる形（フィールドと値の比較を and でつないだ形）に直します。最終案のカードの［計画を直すよう依頼する］で依頼できます（自動では依頼しません。修復は依頼していません）。' },
-    limit: { label: '件数の上限', fix: 'revise', next: '確かめる条件が多すぎます。計画の JavaScript を分けるか、対象のフィールド・条件を絞ります。最終案のカードの［計画を直すよう依頼する］で依頼できます（自動では依頼しません。修復は依頼していません）。' },
+    condition: { label: '条件の形', fix: 'revise', next: '計画の条件を、模擬テストで条件に合うレコード・合わないレコードを作れる形（フィールドと値の比較を and でつないだ形）に直します。最終案のカードの［計画を直すよう依頼する］で依頼できます（自動では依頼しません。AI に直させてはいません）。' },
+    limit: { label: '件数の上限', fix: 'revise', next: '確かめる条件が多すぎます。計画の JavaScript を分けるか、対象のフィールド・条件を絞ります。最終案のカードの［計画を直すよう依頼する］で依頼できます（自動では依頼しません。AI に直させてはいません）。' },
     //   §0c.7（2026-10-08）: 既存 JS が原因で確かめられないときは準備未完了のまま、次の手は計画を直す（承認できないので「実機で確かめる」とは出さない）
-    existing: { label: '既存の JavaScript', fix: 'revise', next: '既存の JavaScript との競合を直すため、計画を直します（作る JavaScript を既存の JavaScript に統合する・既存の処理を見直す）。最終案のカードの［計画を直すよう依頼する］で依頼できます（自動では依頼しません）。競合が残る間は、反映できる最終案にしません（修復は依頼していません）。' },
-    machine: { label: '機械検査で未実行', next: '機械検査の問題を直した候補で、模擬テストを実行します。' },
-    scope: { label: '対象外', fix: 'revise', next: '計画のイベント・対象の画面を見直します。最終案のカードの［計画を直すよう依頼する］で依頼できます（自動では依頼しません）。' },
-    other: { label: 'そのほか', next: '詳細を確かめてから、最終案を作り直します（修復は依頼していません）。' },
+    existing: { label: '既存の JavaScript', fix: 'revise', next: '既存の JavaScript との競合を直すため、計画を直します（作る JavaScript を既存の JavaScript に統合する・既存の処理を見直す）。最終案のカードの［計画を直すよう依頼する］で依頼できます（自動では依頼しません）。競合が残る間は、反映できる最終案にしません（AI に直させてはいません）。' },
+    machine: { label: 'コードの検査で未実行', next: 'コードの検査の問題を直した JavaScript で、模擬テストを実行します。' },
+    scope: { label: '対象外', fix: 'revise', next: '計画の画面の操作・対象の画面を見直します。最終案のカードの［計画を直すよう依頼する］で依頼できます（自動では依頼しません）。' },
+    other: { label: 'そのほか', next: '詳細を確かめてから、最終案を作り直します（AI に直させてはいません）。' },
   });
   /** §0c.8: 代表条件の「条件に合う」側の期待（Gateway の behavior-cases の pos。show-hide は条件があれば show-hide、無ければ hidden）。
    *  §0c.10（2026-10-08）: show-hide の condition は隠す条件（条件に合えば hidden・合わなければ表示）。向きは Gateway が side ごとに判定する（Toolkit は期待を作らない） */
-  const KT_MATCH_EXPECTS = Object.freeze(['lock', 'warn', 'block-save', 'set-value', 'show-hide', 'hidden']);
+  const KT_MATCH_EXPECTS = Object.freeze(['lock', 'warn', 'block-save', 'set-value', 'show-hide', 'hidden', 'row-buttons-hidden']);   // row-buttons-hidden（2026-10-23・§12.69）
   /** 2026-10-10（§4.2）: 移植元と同じ動きかを比べる代表条件の期待（kind port・side match）。conditionFrom のある効果だけ「合う」側の確かめに数える */
   const KT_PORT_EXPECT = 'same-as-source';
   /** §0c.8: 次の手の操作の名前（最終案のカードのボタン。fix revise = 計画の差分更新の依頼 / regenerate = 作り直しの依頼） */
   const KT_FIX_LABEL = Object.freeze({ revise: '計画を直すよう依頼する', regenerate: '作り直しを依頼する' });
   const ktBehaviorReasonOf = (r) => (r && KT_BEHAVIOR_REASONS[r]) || null;
   const ktBehaviorReasonCategory = (r) => (ktBehaviorReasonOf(r) ? ktBehaviorReasonOf(r).category : r ? 'other' : 'env');
-  const ktBehaviorReasonJa = (r) => (r ? (ktBehaviorReasonOf(r) ? ktBehaviorReasonOf(r).text : '生成工程が、この画面では扱えない理由を返しました（詳細を見てください）') : '');
+  const ktBehaviorReasonJa = (r) => (r ? (ktBehaviorReasonOf(r) ? ktBehaviorReasonOf(r).text : 'AI サービスが、この画面では扱えない理由を返しました（詳細を見てください）') : '');
   /**
    * §0d.1（2026-10-08）: 模擬テストが要る理由（生成工程の requiredEffects[].checkReason の語）の言い方。語の名前は利用者に出さない。
    *   語彙外の語は、文字が英小文字・数字・ハイフンだけなら共通の言い方にし（語の名前は詳細表示だけ）、それ以外（生成工程が文で返したもの）はそのまま使う
@@ -12020,21 +12027,21 @@
   //   effect-kind（警告・保存禁止）は、Toolkit が効果の種類（warn・block-save）から足す語と重なるので、文にしない（空文字）。
   //   §0d.4（2026-10-08）: 既知の競合（同じ表示のイベントの error と編集不可）は生成工程の candidate-error-same-event だけで受ける（Toolkit の形式確認では判定しない）
   const KT_CHECK_REASON_JA = Object.freeze({
-    'event-missing': '効果のイベントの一部に処理が無い', 'candidate-error-same-event': '同じ表示のイベントで error と編集不可の両方を設定している',
-    'existing-same-event': '既存の JavaScript が同じイベントを登録している（または登録を読めない）', 'platform-omitted': '模擬テストに渡せなかった既存の JavaScript が同じ画面にある',
-    'other-platform': 'この JavaScript が読み込まれない画面のイベントがある', 'subtable-column': 'テーブルの列', 'effect-kind': '',
-    conditional: '条件つき', 'no-event': '効果のイベントが無い', 'event-unreadable': '登録するイベントを本文から読めない処理がある',
+    'event-missing': '動作を行う画面の操作の一部に処理がありません', 'candidate-error-same-event': '同じ画面の操作でエラーの表示と編集不可の両方を設定しています',
+    'existing-same-event': '既存の JavaScript が同じ画面の操作で動きます（または読み取れません）', 'platform-omitted': '模擬テストに渡せなかった既存の JavaScript が同じ画面にあります',
+    'other-platform': 'この JavaScript が読み込まれない画面の操作があります', 'subtable-column': 'テーブルの列', 'effect-kind': '',
+    conditional: '条件つき', 'no-event': '動作を行う画面の操作がありません', 'event-unreadable': 'どの画面の操作で動くかを本文から読めない処理があります',
     'not-top-level': '処理の登録がトップレベルにない（ループの中など）', nested: '処理の本体の直下で設定していない（条件・try・入れ子の関数の中など）',
     'early-return': '設定の前に処理を抜ける return がある（または event を返さない）', 'not-constant': '設定する値が定数ではない（表示の切り替えが隠すでない）', unchecked: '本文を解析できない',
     //   Toolkit が構造から足す語（Toolkit が固定した必須の効果の条件・効果の種類）
     condition: '条件つき', warn: '警告', 'block-save': '保存を止める',
   });
-  const ktCheckReasonJa = (r) => (Object.prototype.hasOwnProperty.call(KT_CHECK_REASON_JA, r) ? KT_CHECK_REASON_JA[r] : (/^[a-z0-9-]+$/.test(String(r)) ? '機械検査だけでは確かめられない形' : String(r)));
+  const ktCheckReasonJa = (r) => (Object.prototype.hasOwnProperty.call(KT_CHECK_REASON_JA, r) ? KT_CHECK_REASON_JA[r] : (/^[a-z0-9-]+$/.test(String(r)) ? 'コードの検査だけでは確かめられない形' : String(r)));
   /** §0d.1: 模擬テストが要る効果を、模擬テストの環境が使えないために確かめられないときの理由（一度にまとめて出す。labels = 効果の言い方、reasons = checkReason の語） */
   const ktBehaviorNeededText = (labels, reasons) => {
     const rs = [...new Set((reasons || []).map(ktCheckReasonJa).filter(Boolean))];
     const ls = [...new Set(labels || [])];
-    return `この効果は模擬テストで確かめる必要があります（${rs.length ? rs.join('・') : '条件つき・警告・保存を止めるなど、機械検査だけでは確かめられない形'}）。模擬テストの環境が使えないため、まだ反映できません${ls.length ? `（対象: ${ls.slice(0, 4).join('・')}${ls.length > 4 ? ` ほか ${ls.length - 4} 件` : ''}。作った JavaScript の誤りとは判定していません）` : '（作った JavaScript の誤りとは判定していません）'}`;
+    return `この動作は模擬テストで確かめる必要があります（${rs.length ? rs.join('・') : '条件つき・警告・保存を止めるなど、コードの検査だけでは確かめられない形'}）。模擬テストの環境が使えないため、まだ反映できません${ls.length ? `（対象: ${ls.slice(0, 4).join('・')}${ls.length > 4 ? ` ほか ${ls.length - 4} 件` : ''}。作った JavaScript の誤りとは判定していません）` : '（作った JavaScript の誤りとは判定していません）'}`;
   };
   /** 効果の配列の正規化（語彙外は落とす・重複は 1 つ）。配列でなければ null（未指定と [] を区別する）。要件の台帳の effects（文字列の配列）用 */
   const ktEffectsOf = (a) => (Array.isArray(a) ? [...new Set(a.map(x => (x && typeof x === 'object' ? x.effect : x)).filter(x => KT_EFFECTS.includes(x)))] : null);
@@ -12161,8 +12168,8 @@
      */
     function planScopeText(requirement, status, { self = false } = {}) {
       const req = String(requirement ?? '').replace(/\s+/g, ' ').trim() || 'この要件';
-      if (self) return `「${req}」は、担当の JavaScript では担当外とされました。どこで実現するかは計画に書かれていません`;
-      const head = status === 'PARTIAL' ? '一部だけ満たすとされました' : status === 'NOT_MET' ? '満たしていないとされました' : '担当外とされました';
+      if (self) return `「${req}」は、担当の JavaScript では担当外と AI が答えました。どこで実現するかは計画に書かれていません`;
+      const head = status === 'PARTIAL' ? '一部だけ満たすとされました' : status === 'NOT_MET' ? '満たしていないとされました' : '担当外と AI が答えました';
       return `「${req}」は、作った JavaScript では${head}。${status === 'PARTIAL' ? '残りを' : ''}計画のどの手順で実現するかは書かれていません`;
     }
     /**
@@ -12223,12 +12230,12 @@
       const addedCode = finalCode;
       let diff = null;
       if (g.strategy === 'EXTEND_EXISTING_JS') {
-        if (!existingSource || typeof existingSource.text !== 'string') { add('patch', false, 'block', '統合先の既存ソースがありません（JS_SOURCE_UNAVAILABLE）。再スキャン / 新規 JS として設計 / 手動確認 のいずれかを選んでください'); return finish(); }
-        if (typeof g.body !== 'string' || !g.body.trim()) { add('patch', false, 'block', '生成工程が既存ファイルに統合した本文を返していません（統合の本文を作れなかった・接続先が古い）。この候補は登録しません'); return finish(); }
+        if (!existingSource || typeof existingSource.text !== 'string') { add('patch', false, 'block', '統合先の既存の JavaScript の本文を取得できません。設定を取り直すか、新しい JavaScript として作る計画に直すよう依頼してください'); return finish(); }
+        if (typeof g.body !== 'string' || !g.body.trim()) { add('patch', false, 'block', 'AI サービスが既存ファイルに統合した本文を返していません（統合の本文を作れなかった・AI サービスが古い）。この JavaScript は登録しません'); return finish(); }
         finalCode = g.body;
         diff = diffLines(existingSource.text, finalCode);
         //   改行: 生成工程は LF で合成する（契約 20 §20）。元のファイルに CR があれば、改行の文字が LF に変わることを書く（行の差分には出ない）
-        add('patch', true, 'info', `既存「${existingSource.name}」に ${(g.patch?.operations || []).length} 件の操作を合成した本文（生成工程が検査と模擬テストに使った本文）を書き込みます（＋${diff.added} 行 / −${diff.removed} 行）${diff.removed === 0 ? '。元のコードは保持（既存の行の削除なし）' : ''}${existingSource.text.includes('\r') && !finalCode.includes('\r') ? '。元のファイルの改行（CRLF）は LF になります' : ''}`);
+        add('patch', true, 'info', `既存「${existingSource.name}」に ${(g.patch?.operations || []).length} 件の操作を合成した本文（AI サービスが検査と模擬テストに使った本文）を書き込みます（＋${diff.added} 行 / −${diff.removed} 行）${diff.removed === 0 ? '。元のコードは保持（既存の行の削除なし）' : ''}${existingSource.text.includes('\r') && !finalCode.includes('\r') ? '。元のファイルの改行（CRLF）は LF になります' : ''}`);
         //   書き込む内容の確認: 既存の行が置き換わる・消える（登録した後の動きではなく、書き込む本文そのものの事実）
         if (diff.removed > 0) add('patch-removal', false, 'review', `既存の ${diff.removed} 行が置き換え・削除されます（REPLACE）。既存処理が失われないか確認してください`, null, `既存のファイルの ${diff.removed} 行が置き換え・削除されます（既存の処理が失われないか確かめてください）`);
       } else if (g.strategy !== 'NEW_JS_FILE') { add('strategy', false, 'block', `方針 ${String(g.strategy)} は登録の対象外です`); return finish(); }
@@ -12246,16 +12253,18 @@
         if (spaceCalls.length) add('space-element', !missingSpaces.length, 'block', missingSpaces.length ? `スペース要素「${missingSpaces.join('」「')}」は今のフォームにありません（getSpaceElement が null を返し、警告などは表示されません）。フォームの設定でスペースを追加するか、別の表示方法にしてください` : `スペース要素 ${spaceCalls.join(', ')} は今のフォームにあります`);
       }
       // ---- 3. 生成した AI の要件の達成の申告（coverage）を、計画の構造に対応づける（最終案の表示の材料。登録の可否はここで決めない）----
-      //   明細（テーブル）の編集を止める計画: JavaScript の disabled はセルにだけ効き、行の追加・削除（＋ / −）は止まらない（行のボタンを隠す API は Toolkit がまだ扱っていない）。
+      //   明細（テーブル）の編集を止める計画: JavaScript の disabled は入力欄にだけ効き、行の追加・削除は止まらない（2026-10-23・§12.69: 行のボタンを隠す公式 API は効果 hide-row-buttons で扱う。計画にあればこの制約は書かない）。
       //   簡素化 B（2026-10-17）: 当てはまるかは計画の構造（テーブル・列に編集不可の効果がある）で決める（以前はコードを解析して、セルを編集不可にしている所を探していた。
       //   その処理が実際にあるかは、生成工程の必須の効果と模擬テストが確かめる）
       const coverage = { achieved: [], notAchieved: [], declared: Array.isArray(g.coverage) ? g.coverage : [] };
       const subtableOf = new Map(fieldsN.filter(f => f.parent).map(f => [f.code, f.parent]));
       const planCode = (code) => proposedCodes.get(code) ?? code;
       const locksField = (f) => !!f && (ktFieldEffectsOf(f.effects) || []).some(x => x.effect === 'lock');
-      const lockedTables = fieldsN.filter(f => f.rawType === 'SUBTABLE').map(f => f.code).filter(t => (c.fields || []).some(f => locksField(f) && (planCode(f.code) === t || subtableOf.get(planCode(f.code)) === t)));
+      //   2026-10-23（§12.69）: 計画がそのテーブルに行の追加・削除のボタンを隠す効果（hide-row-buttons。公式 API）を置いていれば、この制約は書かない（隠せているかは必須の効果と模擬テストが確かめる）
+      const hidesRowButtons = (t) => (c.fields || []).some(f => f && (planCode(f.code) === t || subtableOf.get(planCode(f.code)) === t) && (ktFieldEffectsOf(f.effects) || []).some(x => x.effect === 'hide-row-buttons'));
+      const lockedTables = fieldsN.filter(f => f.rawType === 'SUBTABLE').map(f => f.code).filter(t => !hidesRowButtons(t) && (c.fields || []).some(f => locksField(f) && (planCode(f.code) === t || subtableOf.get(planCode(f.code)) === t)));
       //   2026-10-15（§4(b)）: tables = セルを編集不可にするテーブルのコード（最終案の制約の文がテーブルの名前で「残る範囲」を書くための構造。判定は変えない）
-      if (lockedTables.length) coverage.notAchieved.push({ code: 'SUBTABLE_ROWS', tables: [...lockedTables], message: 'セルを編集不可にしても、明細（テーブル）の行の追加・削除は止まりません（行の ＋ / − ボタンは残ります。ボタンを隠す API は Toolkit がまだ扱っていません）' });
+      if (lockedTables.length) coverage.notAchieved.push({ code: 'SUBTABLE_ROWS', tables: [...lockedTables], message: `${lockedTables.map(fieldJa).join('・')}テーブルの入力欄を編集できなくしても、行の追加・削除はできます（行の追加・削除のボタンは残ります。ボタンを隠す処理はこの計画に入っていません。必要なら依頼に加えてください）` });
       // 段階 C（改訂 2・5.3 / 5.4）: coverage は requirementId で判定する（契約 20 §5）。文の照合・同義語の読み替え・note のキーワードからの担当の推定・plannedHint（段階 A）は削除した。
       //   この customization の id → 範囲内（NOT_MET は登録不可・PARTIAL は確認）。要件 R… / 手順 P… / 別の C… → 範囲外（担当は計画の構造（steps / customizations）と要件の planRefs で引く。
       //   担当が無い・設定を変えない手順（確認待ち）だけが担当なら unowned（計画全体の確認に残す。review）。coverage の文（text / requirement）は表示だけに使う。
@@ -12315,7 +12324,7 @@
         }
         if (!/NOT_MET|PARTIAL/.test(stt)) continue;
         // 段階 C（反証 D・C3）: 行の追加・削除を理由にした NOT_MET を文の照合（ROW_OPS_RE）で PARTIAL に下げる処理は削除した。AI の申告（requirementId と status）どおりに扱い、
-        //   セルの編集不可では行の追加・削除が止まらないこと（行のボタンを隠す API は Toolkit がまだ扱っていない）は Toolkit の決定的な検査（SUBTABLE_ROWS・確認）で別に示す
+        //   入力欄の編集不可では行の追加・削除が止まらないこと（計画に行のボタンを隠す効果が無いとき）は Toolkit の決定的な検査（SUBTABLE_ROWS・確認）で別に示す
         //   2026-10-15（§4(b)）: noteText = 表示用に整えた AI の理由（内部の番号を手順の名前に）。最終案の制約の文は PARTIAL のとき理由だけを書く（判定は変えない）
         coverage.notAchieved.push({ code: `AI_${stt}`, requirementId: id, requirement: text, note: d.note, noteText: note, ...(d.limitCode ? { limitCode: d.limitCode } : {}), message: `${text}${note ? `（${note}）` : ''}` });
       }
@@ -12324,15 +12333,20 @@
       const SUBTABLE_LIMIT = 'SUBTABLE_ROWS';
       for (const x of coverage.notAchieved.filter(y => y.code === 'AI_NOT_MET' && y.limitCode === SUBTABLE_LIMIT)) {
         x.limit = SUBTABLE_LIMIT;
-        if (!coverage.notAchieved.some(y => y.code === SUBTABLE_LIMIT)) coverage.notAchieved.push({ code: SUBTABLE_LIMIT, fromLimitCode: true, message: 'セルを編集不可にしても、明細（テーブル）の行の追加・削除は止まりません（行の ＋ / − ボタンは残ります。ボタンを隠す API は Toolkit がまだ扱っていません）' });
+        //   2026-10-23（§12.69）: テーブルの名前は計画のフィールド（テーブルと、列の親のテーブル）から引く（AI の申告は id だけなので、文に出す名前はここで補う）
+        //   2026-10-24（§12.69 独立レビュー）: 計画にそのテーブルの hide-row-buttons があるテーブルは名指ししない。計画のテーブルがすべてそうなら固定文は足さない（AI の申告の行 AI_NOT_MET は残る）
+        const allPlanTables = [...new Set((c.fields || []).map(f => planCode(f && f.code)).map(code => subtableOf.get(code) || (fieldsN.some(x => x && x.code === code && x.rawType === 'SUBTABLE') ? code : null)).filter(Boolean))];
+        const planTables = allPlanTables.filter(t => !hidesRowButtons(t));
+        if (allPlanTables.length && !planTables.length) continue;
+        if (!coverage.notAchieved.some(y => y.code === SUBTABLE_LIMIT)) coverage.notAchieved.push({ code: SUBTABLE_LIMIT, fromLimitCode: true, tables: planTables, message: `${planTables.map(fieldJa).join('・')}テーブルの入力欄を編集できなくしても、行の追加・削除はできます（行の追加・削除のボタンは残ります。ボタンを隠す処理はこの計画に入っていません。必要なら依頼に加えてください）` });
       }
       const structuralRows = coverage.notAchieved.some(y => y.code === SUBTABLE_LIMIT && !y.fromLimitCode);
       for (const x of coverage.notAchieved.filter(y => y.code === 'AI_PARTIAL')) if (structuralRows && x.limitCode === SUBTABLE_LIMIT) x.limit = SUBTABLE_LIMIT;
       //   2026-10-15（§3）: 要件の担当（担当範囲外・一部だけ・満たしていないとされた要件のうち、計画のどこで実現するかが書かれていないもの）は確認事項に残す。
       //   生成工程の検査には無い計画全体の確認で、反映の前の確認の文は左のカード・右の変更内容と同じ（planScopeText）。簡素化 B でも残す（候補の検査ではない）
       for (const u of coverage.unowned) {
-        if (u.owner === 'self') add('coverage-owner', false, 'review', `この JavaScript が担当する要件「${u.requirement}」が担当範囲外とされました。どこで実現するかが計画に書かれていないので、計画全体の確認に残します`, null, u.screen);
-        else add('coverage-owner', false, 'review', `担当範囲外とされた要件「${u.requirement}」の担当が計画に見つかりません。計画全体の確認に残します`);
+        if (u.owner === 'self') add('coverage-owner', false, 'review', `この JavaScript が担当する要件「${u.requirement}」が担当範囲外と AI が答えました。どこで実現するかが計画に書かれていないので、計画全体の確認に残します`, null, u.screen);
+        else add('coverage-owner', false, 'review', `担当範囲外と AI が申告した要件「${u.requirement}」の担当が計画に見つかりません。計画全体の確認に残します`);
       }
       for (const u of coverage.planUnconfirmed) add('coverage-owner', false, 'review', u.message, null, u.screen);
       return finish({ finalCode, addedCode, diff, coverage });
@@ -12363,13 +12377,13 @@
     //   empty-undefined・summary-scope・requirement-scope・C-1 第 3 段の error-cancels-other-js）は削除したので、その確かめ方も持たない
     const HOW_TO_CHECK = Object.freeze({
       //   簡素化 B（2026-10-17）: 生成工程の機械検査の確認（要件の一部を満たしていない・範囲外と申告された）
-      coverage: '要件の一部を満たしていない部分（AI の申告）を、計画・実装仕様・運用のどれで扱うか決める',
-      'plan-consistency': '計画に無いタイミング・フィールドの操作が要件どおりかを、作ったコードの差分で確かめる',
+      coverage: '要件の一部を満たしていない部分（AI の説明）を、計画・JavaScript の仕様・運用のどれで扱うか決める',
+      'plan-consistency': '計画に無いタイミング・フィールドの操作が要件どおりかを、作った変更前後のコードで確かめる',
       //   2026-10-15（§3）: 担当の確認（担当が計画に無い・計画全体で扱う要件をどの手順で実現するか書かれていない）
       'coverage-owner': '計画のどの手順で扱われているかを変更内容の「何が変わるか」で確かめ、扱われていなければ計画を直す',
       'patch-removal': '置き換え・削除される既存の行が不要かを確かめる',
       //   2026-10-18: 生成工程の機械検査の確認（宛先をコードから読めない通信）
-      'security-review': '作ったコードの通信の宛先が kintone の中か（kintone の外のサーバーへ送っていないか）を、コードの差分で確かめる',
+      'security-review': '作ったコードの通信の宛先が kintone の中か（kintone の外のサーバーへ送っていないか）を、変更前後のコードで確かめる',
     });
     /**
      * §0f.5 の 3（2026-10-09）: 確認項目の画面の言葉（承認の欄に出す文）。検査が組み立てた screen（イベント名・フィールドのコード・handler を出さない文）があればそれ、
@@ -12393,12 +12407,12 @@
       const pfs = Array.isArray(c?.platform) && c.platform.length ? c.platform : ['desktop'];
       const pcIn = pfs.includes('desktop');
       const after = verdictNow === 'BLOCKED' || !pcIn ? '' : pfs.includes('mobile') ? '。登録した後、PC の画面は動作テスト環境で確かめてください' : '。登録した後、動作テスト環境で確かめてください';
-      const realJa = pcIn ? '実機（動作テスト環境）' : '実機';
+      const realJa = pcIn ? '動作テスト環境の画面' : '実際の画面';
       const unverified = [];
       //   §0d.1（2026-10-08）: 機械検査で足りる効果だけで合格したときは「機械検査で確認（模擬テストは未実施）」と書く（模擬テストで確かめたとは書かない）
-      if (behavior) unverified.push(behavior.ok ? { code: 'BEHAVIOR_VERIFIED', message: behavior.machineOnly ? `必須の動作は、生成工程の機械検査で確認しました（模擬テストは未実施）。${realJa}では未確認です${after}` : `必須の動作は、生成工程の模擬テストで確かめました${behavior.machineSome ? '（一部は機械検査で確認し、模擬テストは未実施）' : ''}。${realJa}では未確認です${after}` } : { code: 'BEHAVIOR_NOT_VERIFIED', message: `必須の動作を、生成工程の模擬テストで確かめられていません。${realJa}でも未確認です` });
-      else unverified.push({ code: 'RUNTIME_NOT_RUN', message: `動作はまだ確かめていません（Toolkit の検査はコードを実行しない静的な確認です）${after}` });
-      if (Array.isArray(c?.platform) && c.platform.includes('mobile')) unverified.push({ code: 'MOBILE_RUNTIME_NOT_VERIFIABLE', message: `モバイルの画面は kintone の動作テスト環境に無いため、この流れでは動作を確かめられません${verdictNow === 'BLOCKED' ? '' : '（運用環境のモバイル画面か実機で確かめる必要があります）'}` });
+      if (behavior) unverified.push(behavior.ok ? { code: 'BEHAVIOR_VERIFIED', message: behavior.machineOnly ? `必須の動作は、AI サービスのコードの検査で確認しました（模擬テストは未実施）。${realJa}では未確認です${after}` : `必須の動作は、模擬テストで確かめました${behavior.machineSome ? '（一部はコードの検査で確認し、模擬テストは未実施）' : ''}。${realJa}では未確認です${after}` } : { code: 'BEHAVIOR_NOT_VERIFIED', message: `必須の動作を、模擬テストで確かめられていません。${realJa}でも未確認です` });
+      else unverified.push({ code: 'RUNTIME_NOT_RUN', message: `動作はまだ確かめていません（Toolkit の検査はコードを読むだけで、実行はしません）${after}` });
+      if (Array.isArray(c?.platform) && c.platform.includes('mobile')) unverified.push({ code: 'MOBILE_RUNTIME_NOT_VERIFIABLE', message: `モバイルの画面は kintone の動作テスト環境に無いため、この流れでは動作を確かめられません${verdictNow === 'BLOCKED' ? '' : '（運用環境のモバイル画面かスマートフォンのアプリで確かめる必要があります）'}` });
       const verdict = verdictNow;
       return { version: '1', verdict, blockers, confirmations, unverified, codeHash: typeof finalCode === 'string' && finalCode ? hash(finalCode) : null };
     }
@@ -12581,9 +12595,9 @@
         add(m.name, ok, ok ? 'info' : (m.severity === 'block' ? 'block' : 'review'), String(m.message || ''), { gateway: true });
       }
       if (req.length) {
-        if (er.missing.length) add('required-effects', false, 'block', `要件未達（${er.missing.map(i => `「${i.field}」: ${KT_EFFECT_NEED_JA[i.effect] || i.effect}`).join('・')}）。必要な処理がありません${er.missing.some(i => i.effect === 'lock' || i.effect === 'block-save') ? '（警告だけ・値の変更だけでは、編集できない・保存を止める要件を満たしません）' : ''}`);
-        else if (er.unchecked.length) add('required-effects', false, 'block', `生成工程の検査で、${er.unchecked.map(effectLabel).join('・')}の処理があるかを解析できませんでした（未確認。処理が無いとは判定していません）`, { noRepair: true, unchecked: true });
-        else if (er.unknown.length) add('required-effects', false, 'block', `生成工程の検査で、${er.unknown.map(effectLabel).join('・')}の処理があるかが返りませんでした（確かめられていません）`, { noRepair: true });
+        if (er.missing.length) add('required-effects', false, 'block', `要件を満たしていません（${er.missing.map(i => `「${i.field}」: ${KT_EFFECT_NEED_JA[i.effect] || i.effect}`).join('・')}）。必要な処理がありません${er.missing.some(i => i.effect === 'lock' || i.effect === 'block-save') ? '（警告だけ・値の変更だけでは、編集できない・保存を止める要件を満たしません）' : ''}`);
+        else if (er.unchecked.length) add('required-effects', false, 'block', `AI サービスの検査で、${er.unchecked.map(effectLabel).join('・')}の処理があるかを解析できませんでした（未確認。処理が無いとは判定していません）`, { noRepair: true, unchecked: true });
+        else if (er.unknown.length) add('required-effects', false, 'block', `AI サービスの検査で、${er.unknown.map(effectLabel).join('・')}の処理があるかが返りませんでした（確かめられていません）`, { noRepair: true });
         else add('required-effects', true, 'info', `必須の動作（${er.items.map(effectLabel).join('・')}）の処理があります`);
       }
       const failMsg = [...er.failed.flatMap(i => i.cases.filter(y => y.verdict === 'fail')), ...er.otherFailed].map(y => String(y.message || '')).filter(Boolean);
@@ -12591,7 +12605,7 @@
       if (er.notRun.length) {
         const cat = er.reasonCategory || 'env';
         const files = [...new Set(er.omittedHit.map(f => `「${f.url || f.name}」`))];
-        const msg = cat === 'machine' ? `機械検査で登録を止める問題があるため、${er.notRun.map(effectLabel).join('・')}の模擬テストは実行していません`
+        const msg = cat === 'machine' ? `コードの検査で登録を止める問題があるため、${er.notRun.map(effectLabel).join('・')}の模擬テストは実行していません`
           : `模擬テストを実行できませんでした（${notRunText(er)}${cat === 'existing' && files.length ? `。${files.slice(0, 3).join('・')}` : ''}）。${er.notRun.map(effectLabel).join('・')}は確かめていません（コードの誤りとは判定していません）`;
         add('behavior-not-run', false, 'block', msg, { noRepair: true, category: cat, ...(cat === 'env' ? { environment: true } : {}) });
       }
@@ -12599,7 +12613,7 @@
       //   §0d.1（2026-10-08）: 機械検査で足りる効果（checkedBy machine）は「機械検査で確認（模擬テストは未実施）」。模擬テストで確かめたものと分けて書く
       if (er.behaviorRan && !er.failed.length && !er.otherFailed.length && !er.notRun.length && !er.untested.length && req.length) {
         const byMachine = er.items.filter(i => i.checkedBy === 'machine'), bySim = er.items.filter(i => i.checkedBy !== 'machine');
-        add('behavior', true, 'info', [bySim.length ? `模擬テストで必須の動作を確かめました（${bySim.map(effectLabel).join('・')}。代表条件 ${bySim.reduce((n, i) => n + i.cases.length, 0)} 件）` : '', byMachine.length ? `${byMachine.map(effectLabel).join('・')}は機械検査で確認しました（模擬テストは未実施）` : ''].filter(Boolean).join('。') + '。実機は未確認です', { ...(byMachine.length ? { machineChecked: byMachine.map(i => ({ field: i.field, effect: i.effect })) } : {}) });
+        add('behavior', true, 'info', [bySim.length ? `模擬テストで必須の動作を確かめました（${bySim.map(effectLabel).join('・')}。確かめる条件 ${bySim.reduce((n, i) => n + i.cases.length, 0)} 件）` : '', byMachine.length ? `${byMachine.map(effectLabel).join('・')}はコードの検査で確認しました（模擬テストは未実施）` : ''].filter(Boolean).join('。') + '。実際の画面ではまだ確かめていません', { ...(byMachine.length ? { machineChecked: byMachine.map(i => ({ field: i.field, effect: i.effect })) } : {}) });
       }
       const status = checks.some(x => !x.ok && x.severity === 'block') ? STATUS.BLOCKED : checks.some(x => !x.ok) ? STATUS.REVIEW_REQUIRED : STATUS.OK;
       const c = customization || { platform: review.registration && review.registration.platform } || {};
@@ -12704,8 +12718,8 @@
       if (!generated || typeof generated.code !== 'string') return { ok: false, reason: 'NO_CODE', message: '生成コードがありません' };
       // Phase 21: 登録の判定（Code Review の registration）。要件違反・不整合（BLOCKED）は、注意事項に同意しても登録しない
       const reg = review?.registration || null;
-      if (!review || review.status === KTCodeReview.STATUS.BLOCKED) return { ok: false, reason: 'CODE_REVIEW_BLOCKED', message: `Toolkit Code Review で採用不可・要件との不一致が確認されたため登録できません${reg && (reg.blockers || []).length ? `: ${reg.blockers.map(b => b.message).join('／')}` : ''}` };
-      if (reg && reg.verdict === 'BLOCKED') return { ok: false, reason: 'REGISTRATION_BLOCKED', message: `Toolkit の検査で要件との不一致・不整合が確認されたため登録できません: ${(reg.blockers || []).map(b => b.message).join('／') || '（詳細は Code Review）'}` };
+      if (!review || review.status === KTCodeReview.STATUS.BLOCKED) return { ok: false, reason: 'CODE_REVIEW_BLOCKED', message: `Toolkit のコードの検査で採用不可・要件との不一致が確認されたため登録できません${reg && (reg.blockers || []).length ? `: ${reg.blockers.map(b => b.message).join('／')}` : ''}` };
+      if (reg && reg.verdict === 'BLOCKED') return { ok: false, reason: 'REGISTRATION_BLOCKED', message: `Toolkit の検査で要件との不一致・不整合が確認されたため登録できません: ${(reg.blockers || []).map(b => b.message).join('／') || '（詳細は右の「コード」）'}` };
       const content = typeof review.finalCode === 'string' && review.finalCode ? review.finalCode : generated.code;
       // registration を持たない古い Code Review の結果: 状態から作る（REVIEW_REQUIRED の項目は「確認が必要」にする。同意だけで登録できる OK 扱いにしない）
       const registration = reg ? { version: reg.version, verdict: reg.verdict, blockers: reg.blockers || [], confirmations: reg.confirmations || [], unverified: reg.unverified || [], codeHash: reg.codeHash || hash(content) }
@@ -12768,7 +12782,7 @@
       if (!changes.length) { block('NOTHING_TO_REGISTER', '登録する JavaScript がありません（仕様を確定してコードを生成してください）'); return prepared; }
       //   2026-10-23: カスタマイズ設定・依存のフィールドとステータス・統合先の本文は、作業の基準の今の設定（current。KTDevBase.currentOf）を受け取る（自分で取らない。
       //   権限が無い・取れないときは作業の基準の取得が止めている）。書き込みの直前の取り直しと照合（STALE_CUSTOMIZATION）は executePreview が持つ
-      if (!current || !current.customize) { block('CURRENT_MISSING', '今の動作テスト環境のカスタマイズ設定（作業の基準）が渡されていません'); return prepared; }
+      if (!current || !current.customize) { block('CURRENT_MISSING', '今の動作テスト環境のカスタマイズ設定を取得できていません'); return prepared; }
       const raw = current.customize;
       const snap = snapshotOf(raw);
       prepared.snapshot = snap;
@@ -12776,11 +12790,11 @@
       //   §0e.1（2026-10-09・不具合 B）: expectedContent（承認の前の準備のカスタマイズの内容の指紋）を渡したときは、revision の違いだけでは止めない。
       //   アプリの revision は標準設定の書き込みでも進む（設定を反映してから JavaScript を登録する流れで必ず止まっていた）。内容が違えば STALE_CUSTOMIZATION（照合は消さない）
       if (input?.expectedRevision != null && String(input.expectedRevision) !== String(snap.revision)) {
-        if (input?.expectedContent != null && String(input.expectedContent) === prepared.contentFingerprint) prepared.warnings.push({ code: 'CUSTOMIZE_REVISION_ADVANCED', message: `設定の反映で revision が進みました（${input.expectedRevision} → ${snap.revision}）。JavaScript / CSS の一覧と適用範囲は承認の前の準備と同じです` });
-        else if (input?.expectedContent != null) block('STALE_CUSTOMIZATION', `承認の前の準備の後に、JavaScript / CSS の一覧または適用範囲が変わっています（revision ${input.expectedRevision} → ${snap.revision}）。登録していません。最終案の内容を確かめ直してください`, { expected: String(input.expectedRevision), current: snap.revision, content: true });
-        else block('STALE_CUSTOMIZATION', `仕様確定の後に設定が変更されています（revision ${input.expectedRevision} → ${snap.revision}）。Customize タブで現在の設定を確認し、相談をやり直してください`, { expected: String(input.expectedRevision), current: snap.revision });
+        if (input?.expectedContent != null && String(input.expectedContent) === prepared.contentFingerprint) prepared.warnings.push({ code: 'CUSTOMIZE_REVISION_ADVANCED', message: `設定の反映で設定が更新されました（${input.expectedRevision} → ${snap.revision}）。JavaScript / CSS の一覧と適用範囲は承認の前の準備と同じです` });
+        else if (input?.expectedContent != null) block('STALE_CUSTOMIZATION', `承認の前の準備の後に、JavaScript / CSS の一覧または適用範囲が変わっています（設定の版 ${input.expectedRevision} → ${snap.revision}）。登録していません。最終案の内容を確かめ直してください`, { expected: String(input.expectedRevision), current: snap.revision, content: true });
+        else block('STALE_CUSTOMIZATION', `最終案を作った後に設定が変更されています（設定の版 ${input.expectedRevision} → ${snap.revision}）。Customize タブで現在の設定を確認し、相談をやり直してください`, { expected: String(input.expectedRevision), current: snap.revision });
       } else if (input?.expectedContent != null && String(input.expectedContent) !== prepared.contentFingerprint) block('STALE_CUSTOMIZATION', '承認の前の準備の後に、JavaScript / CSS の一覧または適用範囲が変わっています。登録していません。最終案の内容を確かめ直してください', { content: true });
-      if (snap.scope === 'NONE') prepared.warnings.push({ code: 'CUSTOMIZATION_DISABLED', message: 'このアプリの JavaScript / CSS カスタマイズは現在無効（scope NONE）です。登録はできますが有効化はしません（scope は変更しません）' });
+      if (snap.scope === 'NONE') prepared.warnings.push({ code: 'CUSTOMIZATION_DISABLED', message: 'このアプリの JavaScript / CSS カスタマイズは現在無効です。登録はできますが有効化はしません（適用範囲は変更しません）' });
       // 段階 A（R14）: 計画で新設するステータス・フィールドに依存するコードは、その設定の手順が動作テスト環境に反映されるまで登録しない
       //   dependsOn は input（全体）と各 change（KTCodeReview の dependsOn）の両方を受ける。{ statuses: [name | { name, stepId, title }], fields: [code | { code, label, stepId, title }] }
       //   独立レビュー A5: 依存が未反映の change は、その文だけを出す（登録前の再検査が同じフィールドを「存在しない」と重ねて言わない。再検査は飛ばす）
@@ -12857,10 +12871,10 @@
           const cur = src && src.sourceAvailable !== false && typeof src.text === 'string' ? src.text : null;
           if (typeof cur !== 'string') { ch.status = ST.BLOCKED; ch.reason = 'JS_SOURCE_UNAVAILABLE'; ch.message = `統合先「${ch.name}」の現在の本文を取得できません`; block('JS_SOURCE_UNAVAILABLE', ch.message); continue; }
           ch.currentHash = hash(cur); ch.currentSource = cur;   // 復元（§28）は旧 fileKey を再指定できない（実機: 差し替え後の旧ファイルは PUT で「見つかりません」）ので、本文を保持して再アップロードする
-          if (ch.baseHash && ch.currentHash !== ch.baseHash) { ch.status = ST.BLOCKED; ch.reason = 'JS_SOURCE_CHANGED'; ch.message = `統合先「${ch.name}」の本文がコード生成の時点から変わっています（指紋 ${ch.baseHash} → ${ch.currentHash}）。自動では統合しません。再スキャンして計画からやり直してください`; block('JS_SOURCE_CHANGED', ch.message, { name: ch.name, baseHash: ch.baseHash, currentHash: ch.currentHash }); continue; }
+          if (ch.baseHash && ch.currentHash !== ch.baseHash) { ch.status = ST.BLOCKED; ch.reason = 'JS_SOURCE_CHANGED'; ch.message = `統合先「${ch.name}」の本文がJavaScript を作った時点から変わっています（指紋 ${ch.baseHash} → ${ch.currentHash}）。自動では統合しません。同じ依頼をもう一度送ると、今の本文で最終案を作り直します`; block('JS_SOURCE_CHANGED', ch.message, { name: ch.name, baseHash: ch.baseHash, currentHash: ch.currentHash }); continue; }
           prepared.summary.replace++; prepared.summary.byTarget[ch.target].replace++;
         } else if (ch.kind === CHANGE.ADD_FILE) {
-          if (list.some(e => e.type === 'FILE' && e.name.toLowerCase() === String(ch.name).toLowerCase())) { ch.status = ST.BLOCKED; ch.reason = 'NAME_CONFLICT'; ch.message = `同じ名前のファイル「${ch.name}」が既に登録されています（既存の変更なら「既存 JS を変更」の計画にしてください）`; block('NAME_CONFLICT', ch.message); continue; }
+          if (list.some(e => e.type === 'FILE' && e.name.toLowerCase() === String(ch.name).toLowerCase())) { ch.status = ST.BLOCKED; ch.reason = 'NAME_CONFLICT'; ch.message = `同じ名前のファイル「${ch.name}」が既に登録されています（既存の変更なら「既存の JavaScript を変更」の計画にしてください）`; block('NAME_CONFLICT', ch.message); continue; }
           addCount[ch.target]++;
           if (list.length + addCount[ch.target] > MAX_FILES) { ch.status = ST.BLOCKED; ch.reason = 'CUSTOMIZATION_FILE_LIMIT'; ch.message = `${ch.target === 'mobile' ? 'モバイル' : 'PC'}の JavaScript は ${MAX_FILES} 個までです（現在 ${list.length} 個）`; block('CUSTOMIZATION_FILE_LIMIT', ch.message); continue; }
           ch.position = list.length + addCount[ch.target] - 1;
@@ -12883,7 +12897,7 @@
     const classifyUpload = (e) => { const x = strErr(e); const m = `${x.code ?? ''} ${x.message}`; if (/CSRF|__REQUEST_TOKEN__|request token/i.test(m)) return 'UPLOAD_CSRF'; if (isPermissionError(e)) return 'PERMISSION_DENIED'; if (x.status === 413 || /too large|サイズ|size limit|大きすぎ/i.test(m)) return 'FILE_TOO_LARGE'; if (x.status === 400 || /invalid|不正/i.test(m)) return 'INVALID_FILE'; return 'UPLOAD_FAILED'; };
     const classifyPut = (e) => { const x = strErr(e); const m = `${x.code ?? ''} ${x.message}`; if (isRevisionError(e)) return 'REVISION_MISMATCH'; if (isPermissionError(e)) return 'PERMISSION_DENIED'; if (/30|上限|limit/i.test(m) && /ファイル|file|js|css/i.test(m)) return 'CUSTOMIZATION_FILE_LIMIT'; if (/fileKey|ファイルキー/i.test(m)) return 'INVALID_FILE_KEY'; if (x.code === 'GAIA_IL02' || x.code === 'GAIA_IL04' || /invalid|不正/i.test(m)) return 'INVALID_CUSTOMIZATION'; return 'API_ERROR'; };
     const UPLOAD_JA = { UPLOAD_CSRF: 'アップロードがブラウザの保護（CSRF）で拒否されました。ページを再読み込みしてからやり直してください', PERMISSION_DENIED: 'ファイルをアップロードする権限がありません', FILE_TOO_LARGE: 'ファイルが大きすぎます', INVALID_FILE: 'ファイルが不正です', UPLOAD_FAILED: 'ファイルのアップロードに失敗しました' };
-    const PUT_JA = { REVISION_MISMATCH: '登録の途中で他の変更が入りました（revision 不一致）。再試行せず停止しました', PERMISSION_DENIED: 'カスタマイズ設定を変更する権限がありません（システム管理権限とアプリ管理権限が必要です）', CUSTOMIZATION_FILE_LIMIT: 'ファイル数の上限（30 個）に達しています', INVALID_FILE_KEY: 'アップロードしたファイルのキーが受け付けられませんでした', INVALID_CUSTOMIZATION: 'カスタマイズ設定の内容が受け付けられませんでした', API_ERROR: 'カスタマイズ設定の変更に失敗しました' };
+    const PUT_JA = { REVISION_MISMATCH: '登録の途中で他の変更が入りました（設定が途中で変わりました）。再試行せず停止しました', PERMISSION_DENIED: 'カスタマイズ設定を変更する権限がありません（システム管理権限とアプリ管理権限が必要です）', CUSTOMIZATION_FILE_LIMIT: 'ファイル数の上限（30 個）に達しています', INVALID_FILE_KEY: 'アップロードしたファイルのキーが受け付けられませんでした', INVALID_CUSTOMIZATION: 'カスタマイズ設定の内容が受け付けられませんでした', API_ERROR: 'カスタマイズ設定の変更に失敗しました' };
 
     // ---- 検証（§23〜§27）----
     function verifyAfter(execution, actual, { downloaded = {} } = {}) {
@@ -12951,7 +12965,7 @@
       try { current = snapshotOf(await api.getPreviewCustomize(execution.appId)); }
       catch (e) { const x = strErr(e); execution.error = { code: isPermissionError(e) ? 'PERMISSION_DENIED' : 'FETCH_FAILED', message: x.message }; for (const st of execution.steps) { st.status = ST.BLOCKED; st.reason = execution.error.code; } execution.previewUnchanged = true; return finish(RUN.FAILED); }
       if (String(current.revision) !== String(execution.snapshot.revision) || diffSnapshots(execution.snapshot, current).length) {
-        execution.error = { code: 'STALE_CUSTOMIZATION', message: `準備の後にカスタマイズ設定が変更されています（revision ${execution.snapshot.revision} → ${current.revision}）。登録していません。準備からやり直してください` };
+        execution.error = { code: 'STALE_CUSTOMIZATION', message: `準備の後にカスタマイズ設定が変更されています（設定の版 ${execution.snapshot.revision} → ${current.revision}）。登録していません。準備からやり直してください` };
         for (const st of execution.steps) { st.status = ST.BLOCKED; st.reason = 'STALE_CUSTOMIZATION'; st.message = execution.error.message; }
         execution.previewUnchanged = true; return finish(RUN.FAILED);
       }
@@ -13023,14 +13037,14 @@
       if (execution.status === RUN.RUNNING) { block('EXECUTION_RUNNING', '登録の処理中です'); return rb; }
       if (execution.rollback) { block('ALREADY_ROLLED_BACK', 'この登録は既に元に戻す処理を行っています（同じ登録を 2 回戻すことはできません）'); return rb; }
       if (!execution.put?.ok) { block('NOTHING_TO_ROLLBACK', '動作テスト環境の設定は変更されていません（戻すものはありません）'); return rb; }
-      if (!execution.snapshot || !execution.actualAfterRaw) { block('NO_SNAPSHOT', '登録前の snapshot か登録直後の設定が無いため、安全に元に戻せません'); return rb; }
+      if (!execution.snapshot || !execution.actualAfterRaw) { block('NO_SNAPSHOT', '登録前の設定の控え か登録直後の設定が無いため、安全に元に戻せません'); return rb; }
       let current;
       try { current = snapshotOf(await api.getPreviewCustomize(rb.appId)); }
       catch (e) { const x = strErr(e); if (isPermissionError(e)) block('PERMISSION_DENIED', 'カスタマイズ設定を変更する権限がありません', x); else block('FETCH_FAILED', `現在の設定を取得できませんでした: ${x.message}`, x); return rb; }
       rb.currentRevision = current.revision;
       const diffs = diffSnapshots(execution.actualAfterRaw, current);
       if (diffs.length) { rb.stale = { status: 'STALE', diffs }; block('ROLLBACK_STALE', '登録後に動作テスト環境のカスタマイズ設定が変更されているため、自動では元に戻せません（第三者の変更は上書きしません）。Customize タブで現在の設定を確認してください', { diffs }); return rb; }
-      if (String(current.revision) !== String(execution.afterRevision)) rb.warnings.push({ code: 'OTHER_CHANGES_SINCE_EXECUTION', message: `登録後に他の設定が変更されています（revision ${execution.afterRevision} → ${current.revision}）。カスタマイズ設定は登録直後と同じなので戻せますが、それ以外の変更には触れません` });
+      if (String(current.revision) !== String(execution.afterRevision)) rb.warnings.push({ code: 'OTHER_CHANGES_SINCE_EXECUTION', message: `登録後に他の設定が変更されています（設定の版 ${execution.afterRevision} → ${current.revision}）。カスタマイズ設定は登録直後と同じなので戻せますが、それ以外の変更には触れません` });
       rb.restores = execution.steps.filter(st => [ST.APPLIED, ST.VERIFIED, ST.VERIFY_FAILED].includes(st.status)).map(st => ({ changeId: st.changeId, kind: st.kind, target: st.target, name: st.name, position: st.position ?? null, ...(st.kind === CHANGE.REPLACE_FILE ? { restoreFileKey: st.oldFileKey, restoreHash: st.currentHash ?? st.baseHash ?? null, restoreSource: typeof st.currentSource === 'string' ? st.currentSource : null } : { removeName: st.name }) }));
       // 差し替えた既存ファイルは、登録前の本文を再アップロードして戻す（旧 fileKey は PUT で受け付けられない）。本文を保持していなければ自動では戻せない
       const noSource = rb.restores.filter(r => r.kind === CHANGE.REPLACE_FILE && (typeof r.restoreSource !== 'string' || !r.restoreSource || hash(r.restoreSource) !== r.restoreHash));
@@ -13082,11 +13096,11 @@
         }
         rb.verification = { restoredToSnapshot: checks.every(c => c.ok), checks, snapshotRevision: rb.snapshotRevision, currentRevision: after.revision };
         rb.status = rb.verification.restoredToSnapshot ? RB.VERIFIED : RB.VERIFY_FAILED;
-        rb.message = rb.status === RB.VERIFIED ? '動作テスト環境の JavaScript カスタマイズ設定を登録前の状態に戻しました。' : 'API は成功しましたが、再取得した設定が登録前の snapshot と一致しません。';
+        rb.message = rb.status === RB.VERIFIED ? '動作テスト環境の JavaScript カスタマイズ設定を登録前の状態に戻しました。' : '書き込みは成功しましたが、再取得した設定が登録前の設定の控えと一致しません。';
       } catch (e) {
         const x = strErr(e);
         rb.status = RB.FAILED; rb.error = x; rb.reason = isPermissionError(e) ? 'PERMISSION_DENIED' : isRevisionError(e) ? 'REVISION_MISMATCH' : 'API_ERROR';
-        rb.message = rb.reason === 'PERMISSION_DENIED' ? 'カスタマイズ設定を変更する権限がありません' : rb.reason === 'REVISION_MISMATCH' ? '元に戻す途中で他の変更が入りました（revision 不一致）。再試行せず停止しました' : `元に戻せませんでした: ${x.message}`;
+        rb.message = rb.reason === 'PERMISSION_DENIED' ? 'カスタマイズ設定を変更する権限がありません' : rb.reason === 'REVISION_MISMATCH' ? '元に戻す途中で他の変更が入りました（設定が途中で変わりました）。再試行せず停止しました' : `元に戻せませんでした: ${x.message}`;
       }
       rb.finishedAt = nowIso(now);
       execution.lifecycle = rb.status;
@@ -13178,7 +13192,7 @@
       NO_CONFIG: 'AI 機能を利用するには Nest Rec AI の契約が必要です。「Nest Rec AIに接続」から接続してください。',
       NOT_CONNECTED: 'Nest Rec AI に接続されていません。「Nest Rec AIに接続」から接続してください。',
       SESSION_EXPIRED: 'Nest Rec AI との接続の有効期限が切れました。もう一度「Nest Rec AIに接続」してください。',
-      PAGE_EXPIRED: 'このページの有効期限が切れ、AIとの接続を更新できません。作成済みの内容はこの画面に残っています。再読み込みすると、この会話は失われます。',
+      PAGE_EXPIRED: 'このページの有効期限が切れ、AI との接続を更新できません。作成済みの内容はこの画面に残っています。再読み込みすると、この会話は失われます。',
       NOT_ENTITLED: 'この契約では kintone App Toolkit の AI 機能を利用できません。契約内容を確認してください。',
       PRODUCT_NOT_ENTITLED: 'この契約では kintone App Toolkit の AI 機能を利用できません。契約内容を確認してください。',
       FEATURE_NOT_ENTITLED: 'この契約では「AIに質問」を利用できません。契約内容を確認してください。',
@@ -13188,39 +13202,39 @@
       CONNECT_EXPIRED: '接続の確認が時間切れになりました。もう一度「Nest Rec AIに接続」してください。',
       CONNECT_CANCELLED: '接続をキャンセルしました。',
       NOT_FOUND: '接続セッションが見つかりません。もう一度「Nest Rec AIに接続」してください。',
-      FEATURE_NOT_IMPLEMENTED: 'この機能は AI サービス側でまだ有効化されていません。',
+      FEATURE_NOT_IMPLEMENTED: 'この機能は AI サービスでまだ使えるようになっていません。',
       CONTRACT_INCOMPATIBLE: 'Toolkit と AI サービスのバージョンが一致しません。Toolkit の更新または AI サービスの更新をお待ちください。',
       UNSUPPORTED_CONTRACT_VERSION: 'Toolkit と AI サービスのバージョンが一致しません。Toolkit の更新が必要です。',
       //   2026-10-23（§12.61）: 今の Toolkit が使う受け渡しの印（health の registry）が欠ける接続先（接続時の 1 回の確認で止める。使う場所ごとの分岐は持たない）
-      CAPABILITY_OUTDATED: '接続先（AI サービス）が、今の Toolkit が使う受け渡しに対応していません。接続先の更新が必要です。',
+      CAPABILITY_OUTDATED: 'AI サービスの版が古く、今の Toolkit と組み合わせて使えません。AI サービスの更新が必要です。',
       UNKNOWN_PROMPT_VERSION: 'Toolkit と AI サービスのバージョンが一致しません。Toolkit の更新が必要です。',
       AUTH_INVALID_TOKEN: 'Nest Rec AI との接続が無効です。もう一度「Nest Rec AIに接続」してください。',
       AUTH_TOKEN_EXPIRED: 'Nest Rec AI との接続または契約の有効期限が切れています。もう一度「Nest Rec AIに接続」してください。',
       AUTH_DOMAIN_MISMATCH: 'この kintone 環境では AI サービスを利用できません。契約の対象ドメインを確認してください。',
       RATE_LIMITED: 'アクセスが集中しています。しばらく待ってから再実行してください。',
       MONTHLY_LIMIT_EXCEEDED: '今月の AI 利用回数の上限に達しています。',
-      UPSTREAM_ERROR: 'AI プロバイダが応答しませんでした。時間をおいて再実行してください。',
+      UPSTREAM_ERROR: 'AI が応答しませんでした。時間をおいて再実行してください。',
       // Phase 22: 「契約形式」は利用契約の障害と読まれる → 応答の形式の異常と書く
-      MODEL_OUTPUT_INVALID: 'AI の応答の形式が正しくありませんでした（応答形式の異常。通信や契約の問題ではありません）。もう一度実行してください。続く場合はお問い合わせください。',
-      GENERATION_DECLINED: 'AI はこの依頼に対するコード生成を行いませんでした（通信や契約の問題ではありません）。AI の説明を確かめ、実装仕様を直してから作り直すか、もう一度作ってください。',
-      CONDITION_SOURCE_UNVERIFIABLE: '移植元の既存の JavaScript のイベントの登録を本文から読めない（または本文が無い）ので、同じ条件かは確かめていません（AI は呼んでいません）。',
+      MODEL_OUTPUT_INVALID: 'AI の返答を Toolkit が読み取れませんでした（通信や契約の問題ではありません）。もう一度実行してください。続く場合はお問い合わせください。',
+      GENERATION_DECLINED: 'AI はこの依頼に対する JavaScript を作りませんでした（通信や契約の問題ではありません）。AI の説明を確かめ、JavaScript の仕様を直してから作り直すか、もう一度作ってください。',
+      CONDITION_SOURCE_UNVERIFIABLE: '元にする既存の JavaScript の本文を読み取れない（または本文が無い）ので、同じ条件かは確かめていません（AI は呼んでいません）。',
       INTERNAL_ERROR: 'AI サービス内部でエラーが発生しました。時間をおいて再実行してください。',
       TIMEOUT: 'AI サービスが時間内に応答しませんでした。時間をおいて再実行してください。',
       INVALID_RESPONSE: 'AI サービスの応答を解釈できませんでした。',
-      INVALID_CONTEXT: '送信した解析データが AI サービスの検証を通りませんでした。Toolkit の更新が必要な可能性があります。',
-      INVALID_ENVELOPE: '送信データの生成に失敗しました。',
-      PAYLOAD_TOO_LARGE: '解析データが送信上限を超えています。対象を絞って再実行してください。',
+      INVALID_CONTEXT: 'Toolkit が送った内容を AI サービスが受け付けませんでした。Toolkit の更新が必要な可能性があります。',
+      INVALID_ENVELOPE: 'Toolkit が送る内容を作れませんでした。',
+      PAYLOAD_TOO_LARGE: '送る内容が上限を超えています。対象を絞って再実行してください。',
       TRANSPORT_ERROR: 'ネットワークエラーが発生しました。通信環境を確認して再実行してください。',
       WORKER_ERROR: 'AI サービスでエラーが発生しました。',
       NO_CONTEXT: '先に「AI Prompt を生成」で Context を作成してください。',
       CANCELLED: 'キャンセルしました。',
-      BUDGET_EXCEEDED: '検証の上限（費用・回数）を超えるため、AI に送りませんでした。',
+      BUDGET_EXCEEDED: '費用と回数の上限を超えるため、AI に送りませんでした。',
     };
     /**
      * §0f.4（2026-10-09）: 検証の上限の拒否の理由（KTAiBudget の details.budget）→ 画面の文（必要な額・残り）。金額は米ドル（キャッシュの割引なし）
      */
     const usdText = (v) => { const n = Number(v); return Number.isFinite(n) ? String(Math.round(n * 10000) / 10000) : '—'; };
-    const BUDGET_STOP_JA = Object.freeze({ model: '応答のモデルが単価の表に無い・表より高い', 'output-limit': '応答の出力の上限が見積もりの表より大きい', calls: '1 回の要求の中の AI の呼び出しが見積もりの最大より多い', 'no-budget-meta': '上限を渡した応答に Gateway の費用の記録（meta.budget）が無い', 'over-allowance': 'Gateway の費用の記録が渡した上限を超えている' });
+    const BUDGET_STOP_JA = Object.freeze({ model: '応答のモデルが単価の表に無い・表より高い', 'output-limit': '応答の出力の上限が見積もりの表より大きい', calls: '1 回の要求の中の AI の呼び出しが見積もりの最大より多い', 'no-budget-meta': '上限を渡した応答に AI サービスの費用の記録が無い', 'over-allowance': 'AI サービスの費用の記録が渡した上限を超えている' });
     //   2026-10-10（再検証前の指示 §4）: Toolkit の見積もり（推定。provider に送る入力をこの値以下に制限してはいない）による送信制限と、Gateway が要求の上界で強制する上限を
     //   文で分ける。推定の文に「超えない」「保証」とは書かない
     function budgetDetailText(b) {
@@ -13228,35 +13242,35 @@
       switch (b.reason) {
         case 'limit': case 'calls':
           if (b.mode === 'gateway') return `残りは 約 ${usdText(b.remainingUsd)} 米ドル・${b.remainingCalls ?? '—'} 回です（上限 ${usdText(b.limitUsd)} 米ドル・${b.maxCalls ?? '—'} 回。記録済みの費用と、進行中・終了不明の要求の確保額を引いた残り。この要求には AI の呼び出し ${b.needCalls ?? '—'} 回分の回数が要ります）`;
-          return `次の要求は推定で最大 約 ${usdText(b.needUsd)} 米ドル・AI の呼び出し ${b.needCalls ?? '—'} 回、残りは 約 ${usdText(b.remainingUsd)} 米ドル・${b.remainingCalls ?? '—'} 回です（上限 ${usdText(b.limitUsd)} 米ドル・${b.maxCalls ?? '—'} 回。記録済みの費用と、進行中・終了不明の要求の確保額を引いた残り。推定による送信制限で、Gateway による上限の強制はありません）`;
+          return `次の要求は推定で最大 約 ${usdText(b.needUsd)} 米ドル・AI の呼び出し ${b.needCalls ?? '—'} 回、残りは 約 ${usdText(b.remainingUsd)} 米ドル・${b.remainingCalls ?? '—'} 回です（上限 ${usdText(b.limitUsd)} 米ドル・${b.maxCalls ?? '—'} 回。記録済みの費用と、進行中・終了不明の要求の確保額を引いた残り。推定による送信制限で、AI サービスによる上限の強制はありません）`;
         case 'unknown-model': return `単価の表に無いモデル（${String(b.model || '不明').slice(0, 60)}）のため、費用を見積もれません`;
         case 'unknown-feature': return '見積もりの表に無い種類の要求です';
         case 'stopped': return `前の応答で${BUDGET_STOP_JA[b.stopReason] || '見積もりの表を超える値'}ことが分かったため、以後の送信を止めています。上限の設定を新しい id で作り直してください`;
-        case 'config-invalid': return '検証の上限の設定の形が正しくありません';
+        case 'config-invalid': return '費用の上限の設定の形が正しくありません';
         //   再検証前の指示 §3: 予算を使う検証で設定を確かめられない（設定を読めない・このページで有効だった設定が消えた）。予算を使わない通常の利用（設定のキーが無く読めた）とは別
-        case 'config-unreadable': return '検証の上限の設定を確かめられません（設定を読めません）';
-        case 'config-missing': return '検証の上限の設定を確かめられません（このページで有効だった設定が見つかりません。検証を終えるときは、タブを開き直してください）';
-        case 'ledger-unreadable': case 'ledger-broken': case 'ledger-mismatch': return '検証の上限の記録を読めません（壊れている・設定と合わない）';
-        case 'ledger-write': return '検証の上限の記録を書き込めません';
+        case 'config-unreadable': return '費用の上限の設定を確かめられません（設定を読めません）';
+        case 'config-missing': return '費用の上限の設定を確かめられません（このページで有効だった設定が見つかりません。検証を終えるときは、タブを開き直してください）';
+        case 'ledger-unreadable': case 'ledger-broken': case 'ledger-mismatch': return '費用の上限の記録を読めません（壊れている・設定と合わない）';
+        case 'ledger-write': return '費用の上限の記録を書き込めません';
         //   再検証前の指示 §4: Gateway が要求の上界で止めた（AI を呼ぶ前。計画の差分の後の全体の作り直しは、それまでの呼び出しの後）
-        case 'gateway-over-allowance': return `${b.stage === 'plan-full' ? '計画の全体の作り直しの' : ''}呼び出しの上界 約 ${usdText(b.boundUsd)} 米ドル（送る要求の大きさと出力の上限から Gateway が計算）が、渡した残り 約 ${usdText(b.allowanceUsd)} 米ドルを超えるため、Gateway が呼び出しませんでした`;
-        case 'gateway-unknown-model': return 'Gateway の単価の表に無いモデルのため、Gateway が上限を確かめられず、呼び出しませんでした';
+        case 'gateway-over-allowance': return `この呼び出し${b.stage === 'plan-full' ? '（計画の全体の作り直し）' : ''}の費用の見積もりの最大 約 ${usdText(b.boundUsd)} 米ドル（送る要求の大きさと出力の上限から AI サービスが計算）が、渡した残り 約 ${usdText(b.allowanceUsd)} 米ドルを超えるため、AI サービスが呼び出しませんでした`;
+        case 'gateway-unknown-model': return 'AI サービスの単価の表に無いモデルのため、AI サービスが上限を確かめられず、呼び出しませんでした';
         default: return '';
       }
     }
     /** Gateway の BUDGET_EXCEEDED（402。error.detail = { reason: over-allowance / unknown-model, stage: first / plan-full, allowanceUsd, boundUsd, budget? }）の文 */
     function gatewayBudgetText(d) {
       if (!d || typeof d !== 'object') return '';
-      if (d.reason === 'unknown-model') return '検証の上限: Gateway の単価の表に無いモデルのため、上限を確かめられず、AI を呼びませんでした。';
+      if (d.reason === 'unknown-model') return '費用の上限: AI サービスの単価の表に無いモデルのため、上限を確かめられず、AI を呼びませんでした。';
       if (d.reason !== 'over-allowance') return '';
-      const bound = `この呼び出しの上界 約 ${usdText(d.boundUsd)} 米ドル（送る要求の大きさと出力の上限から Gateway が計算）が、渡した残り 約 ${usdText(d.allowanceUsd)} 米ドルを超えるため`;
-      return d.stage === 'plan-full' ? `検証の上限: 計画の差分更新を全体の作り直しに切り替える呼び出しは、${bound}、行いませんでした（それまでの呼び出しの費用は記録しています）。` : `検証の上限: ${bound}、AI を呼びませんでした。`;
+      const bound = `この呼び出しの費用の見積もりの最大 約 ${usdText(d.boundUsd)} 米ドル（送る要求の大きさと出力の上限から AI サービスが計算）が、渡した残り 約 ${usdText(d.allowanceUsd)} 米ドルを超えるため`;
+      return d.stage === 'plan-full' ? `費用の上限: 計画の差分更新を全体の作り直しに切り替える呼び出しは、${bound}、行いませんでした（それまでの呼び出しの費用は記録しています）。` : `費用の上限: ${bound}、AI を呼びませんでした。`;
     }
     const errorText = (code, e = null) => {
       if (code === 'BUDGET_EXCEEDED') {
         const b = e && e.details && e.details.budget, t = budgetDetailText(b);
         if (!t) { const g = gatewayBudgetText(e && e.details && e.details.error && e.details.error.detail); return g || ERROR_TEXT.BUDGET_EXCEEDED; }
-        return b.reason === 'limit' || b.reason === 'calls' ? `検証の上限（費用・回数）を超えるため、AI に送りませんでした（${t}）。` : `検証の上限を確かめられないため、AI に送りませんでした（${t}）。`;
+        return b.reason === 'limit' || b.reason === 'calls' ? `費用と回数の上限を超えるため、AI に送りませんでした（${t}）。` : `費用の上限を確かめられないため、AI に送りませんでした（${t}）。`;
       }
       return ERROR_TEXT[code] || 'AI への質問に失敗しました。';
     };
@@ -13276,7 +13290,7 @@
       // 2026-10-15: ページの有効期限（接続・契約の問題として見せない）
       PAGE_EXPIRED: 'page',
     });
-    const CATEGORY_JA = Object.freeze({ declined: 'AI が生成しなかった', network: '通信・AI サービスのエラー', auth: '接続・認証', license: '契約・利用範囲', timeout: '時間切れ', format: '応答形式の異常', version: 'バージョンの不一致', input: '送信データ', page: 'ページの有効期限' });
+    const CATEGORY_JA = Object.freeze({ declined: 'AI が生成しなかった', network: '通信・AI サービスのエラー', auth: '接続・認証', license: '契約・利用範囲', timeout: '時間切れ', format: 'AI の返答を読み取れない', version: 'バージョンの不一致', input: '送信データ', page: 'ページの有効期限' });
     const errorCategory = (code) => ERROR_CATEGORY[code] || 'other';
     /** Phase 22: GENERATION_DECLINED の AI の説明（Gateway が長さで切った理由）。AiClientError の details は Gateway の応答そのもの */
     const declineReasonOf = (e) => {
@@ -13725,7 +13739,7 @@
           const expire = (lateMs) => {
             timer = null;
             try { controller?.abort(); } catch (e) { }
-            reject(new AiClientError({ code: ERROR_CODES.TIMEOUT, message: `AI サービスが ${timeoutMs}ms 以内に応答しませんでした`, ...(lateMs != null ? { details: { timerLateMs: lateMs } } : {}) }));
+            reject(new AiClientError({ code: ERROR_CODES.TIMEOUT, message: `AI サービスが ${Math.round(timeoutMs / 1000)} 秒以内に応答しませんでした`, ...(lateMs != null ? { details: { timerLateMs: lateMs } } : {}) }));
           };
           //   2026-10-10（実機・生成結果が届かない）: 見えないタブをブラウザーが凍結すると、打ち切りのタイマーは期限を過ぎても動かず、再開した時に
           //   届いていた応答の処理より先に動くことがある（330 秒の打ち切りが送信の 627 秒後に動き、Gateway が成功で数えた生成を捨てて終了不明にした）。
@@ -13783,7 +13797,7 @@
         } catch (e) {
           tm.endAt = Date.now() - t0;
           const err = isAiClientError(e) ? e
-            : e?.name === 'AbortError' ? (outer?.aborted ? cancelled() : new AiClientError({ code: ERROR_CODES.TIMEOUT, message: `AI サービスが ${limitMs}ms 以内に応答しませんでした` }))
+            : e?.name === 'AbortError' ? (outer?.aborted ? cancelled() : new AiClientError({ code: ERROR_CODES.TIMEOUT, message: `AI サービスが ${Math.round(limitMs / 1000)} 秒以内に応答しませんでした` }))
             : new AiClientError({ code: ERROR_CODES.TRANSPORT_ERROR, message: e?.message || String(e) });
           try { if (!err.transport) err.transport = tm; } catch (x) { }
           throw err;
@@ -13817,7 +13831,7 @@
             if (refreshed) {
               const bounded = Number.isFinite(limitMs) && limitMs > 0;
               const left = bounded ? limitMs - (Date.now() - t0) : limitMs;
-              if (bounded && left <= 0) throw tokenStageError(new AiClientError({ code: ERROR_CODES.TIMEOUT, message: `AI サービスが ${limitMs}ms 以内に応答しませんでした（接続の更新の後の再送の時間が残っていません）` }));
+              if (bounded && left <= 0) throw tokenStageError(new AiClientError({ code: ERROR_CODES.TIMEOUT, message: `AI サービスが ${Math.round(limitMs / 1000)} 秒以内に応答しませんでした（接続の更新の後の再送の時間が残っていません）` }));
               const token1 = await resolveToken().catch((x) => { throw tokenStageError(x); });
               return rawRequest({ path, method, body, token: token1, signal, limitMs: left, onEvent, long, trace, noProxyFallback });
             }
@@ -14655,14 +14669,14 @@
     }
     /** 見出しの 1 行（予算が有効なときだけ。金額と回数だけ。内部の値は出さない） */
     //   再検証前の指示 §4（2026-10-10）: Gateway が要求ごとに上限を強制するか（budgetAllowance の印）、Toolkit の推定による送信制限だけか（上限の強制は無い）を分けて書く
-    const ENFORCEMENT_JA = Object.freeze({ gateway: '（Gateway が要求ごとに上限を強制）', estimate: '（推定による送信制限・上限の強制は無い）', mixed: '（一部の要求は推定による送信制限・上限の強制は無い）' });
+    const ENFORCEMENT_JA = Object.freeze({ gateway: '（AI サービスが要求ごとに上限を強制）', estimate: '（推定による送信制限・上限の強制は無い）', mixed: '（一部の要求は推定による送信制限・上限の強制は無い）' });
     function summaryText(s) {
       if (!s || !s.enabled) return '';
       const usd = KTAiClient.usdText;
-      if (!s.ok) return s.reason === 'config-unreadable' || s.reason === 'config-missing' ? '検証の上限: 設定を確かめられないため、AI に送りません' : '検証の上限: 設定または記録を読めないため、AI に送りません';
+      if (!s.ok) return s.reason === 'config-unreadable' || s.reason === 'config-missing' ? '費用の上限: 設定を確かめられないため、AI に送りません' : '費用の上限: 設定または記録を読めないため、AI に送りません';
       const mode = ENFORCEMENT_JA[s.enforcement] || '';
-      if (s.stopped) return `検証の上限${mode}: 見積もりの表・上限の取り決めと合わない応答があったため、以後の送信を止めています（記録済み 約 ${usd(s.recordedUsd)} 米ドル・確保中 約 ${usd(s.reservedUsd)} 米ドル）`;
-      return `検証の上限${mode}: 記録済み 約 ${usd(s.recordedUsd)} 米ドル・確保中 約 ${usd(s.reservedUsd)} 米ドル${s.unknown ? `（終了不明 ${s.unknown} 件）` : ''} ／ 上限 ${usd(s.limitUsd)} 米ドル・AI の呼び出し ${s.usedCalls} / ${s.maxCalls} 回`;
+      if (s.stopped) return `費用の上限${mode}: 見積もりの表・上限の取り決めと合わない応答があったため、以後の送信を止めています（記録済み 約 ${usd(s.recordedUsd)} 米ドル・確保中 約 ${usd(s.reservedUsd)} 米ドル）`;
+      return `費用の上限${mode}: 記録済み 約 ${usd(s.recordedUsd)} 米ドル・確保中 約 ${usd(s.reservedUsd)} 米ドル${s.unknown ? `（終了不明 ${s.unknown} 件）` : ''} ／ 上限 ${usd(s.limitUsd)} 米ドル・AI の呼び出し ${s.usedCalls} / ${s.maxCalls} 回`;
     }
     return { CONFIG_PREFIX, LEDGER_PREFIX, ARMED_PREFIX, LEDGER_VERSION, PRICES, FEATURE_OF, DEFAULT_MODEL, OUTPUT_LIMITS, MAX_CALLS, PROMPT_BYTES, CTX_FACTOR, BYTES_PER_TOKEN, REPAIR_EXTRA_TOKENS, STATUSES,
       MESSAGE_OVERHEAD_BYTES, MESSAGES_PER_CALL, PREV_OUTPUT_BYTES_PER_TOKEN, RETRY_EXTRA_BYTES,
@@ -14705,7 +14719,7 @@
     };
     const CONFIDENCE_HELP = [
       { code: 'CERTAIN', label: '確実', text: 'アプリ設定の値から直接取得した事実' },
-      { code: 'LIKELY', label: '可能性が高い', text: '条件式・計算式・JavaScript のトークン一致による推定' },
+      { code: 'LIKELY', label: '可能性が高い', text: '条件式・計算式・JavaScript の語句の一致による推定' },
       { code: 'UNCERTAIN', label: '要確認', text: '文字列一致のみ。実際の設定・コードでの確認を推奨' },
       { code: 'NOT_ANALYZED', label: '未解析', text: '解析対象外（外部URLのJS・プラグイン設定など）' },
     ];
@@ -14768,7 +14782,7 @@
         { label: '依存関係', included: !!cv.dependencies },
         { label: 'JavaScript', included: !!cv.javascript },
         { label: '他アプリからの参照', included: !!cv.incoming },
-        { label: 'プラグイン設定', included: false, reason: cv.pluginCount ? `${cv.pluginCount} 個あり・設定内容は API で取得不可` : '取得不可' },
+        { label: 'プラグイン設定', included: false, reason: cv.pluginCount ? `${cv.pluginCount} 個あり・設定内容は Toolkit では読めません` : '取得不可' },
         { label: 'レコードデータ', included: false, reason: '対象外（取得しない）' },
         { label: '添付ファイル', included: false, reason: '対象外（取得しない）' },
       ];
@@ -14790,7 +14804,7 @@
       const kb = Math.max(1, Math.round((sz.bytes || 0) / 1024));
       return {
         tokens: sz.approxTokens ?? 0, bytes: sz.bytes ?? 0, facts: sz.facts ?? 0,
-        text: `約 ${(sz.approxTokens ?? 0).toLocaleString()} tokens（近似） / ${kb} KB / Facts: ${sz.facts ?? 0}`,
+        text: `約 ${(sz.approxTokens ?? 0).toLocaleString()} トークン（概算） / ${kb} KB / 根拠: ${sz.facts ?? 0}`,
       };
     }
 
@@ -14875,9 +14889,9 @@
       { id: 'review-request', label: '開発レビュー依頼', hint: 'このアプリのレビューを依頼する文章を作って', role: 'あなたは kintone アプリの開発レビューを行うレビュアーです。Context を読み、カテゴリごとに「良い点 / 指摘事項 / 改善提案」をコメントします。',
         rules: ['指摘は Context の根拠ID を引用し、推測は推測と明示する。', 'カテゴリ: フィールド命名（表示名とコードの一致）/ 通知設定（重複・抜け）/ 権限設定の整合性 / ビュー・グラフ構成 / カスタマイズ構成（JS の重複・依存・壊れた参照）/ プロセス管理（条件の複雑さ・保守性）/ 関連アプリ連携。', '最後に「総評」として保守性・再利用性・運用負荷の 3 観点で ★1〜5 の簡易スコア。'],
         outline: ['フィールド命名', '通知設定', '権限設定', 'ビュー・グラフ構成', 'カスタマイズ構成', 'プロセス管理', '関連アプリ連携', '総評（★）'] },
-      { id: 'changes', label: '変更内容のまとめ（改修記録）', hint: 'この改修内容をまとめて', needsPlan: true, role: 'あなたは kintone アプリの改修記録を書くエンジニアです。Toolkit の変更計画・Toolkit Review・動作テスト環境への反映結果（下の「変更計画」）を、関係者に共有できる改修内容のまとめにします。',
+      { id: 'changes', label: '変更内容のまとめ（改修記録）', hint: 'この改修内容をまとめて', needsPlan: true, role: 'あなたは kintone アプリの改修記録を書くエンジニアです。Toolkit の変更計画・Toolkit の確認・動作テスト環境への反映結果（下の「変更計画」）を、関係者に共有できる改修内容のまとめにします。',
         rules: ['記録にある手順・判定・結果だけを書き、実施していないこと（運用環境への反映など）を実施したと書かない。', '標準設定の変更と JavaScript カスタマイズを分けて書く。', '確認事項・未確定の点はそのまま残す。'],
-        outline: ['目的（実現したいこと）', '変更の概要（標準設定 / JavaScript）', '手順と結果（Toolkit Review の判定・動作テスト環境への反映・検証）', 'JavaScript の変更点（ファイル・イベント・触るフィールド）', '影響範囲と確認事項', '運用環境への反映について（未反映）'] },
+        outline: ['目的（実現したいこと）', '変更の概要（標準設定 / JavaScript）', '手順と結果（Toolkit の確認 の判定・動作テスト環境への反映・検証）', 'JavaScript の変更点（ファイル・イベント・触るフィールド）', '影響範囲と確認事項', '運用環境への反映について（未反映）'] },
       { id: 'handover', label: '引継ぎ資料', hint: '引継ぎ資料を作って', role: 'あなたは kintone アプリの管理を引き継ぐための資料を書く担当者です。後任者が「何がどこで決まり、何を触ると何に影響するか」を把握できる引継ぎ資料のドラフトを作ります。',
         rules: ['Context の事実だけを書き、業務上の判断基準・担当者は TODO として空ける。', '変更時に確認すべき箇所（依存関係・他アプリからの参照・JavaScript が触るフィールド）を必ず載せる。', '壊れた参照・未解析の範囲は注意として明示する。'],
         outline: ['アプリの役割（分かる範囲）と利用部門（TODO）', '業務の流れ（プロセス管理から）', '主要フィールドと意味（コード・表示名）', '通知・リマインダー（誰にいつ）', '関連アプリ（参照 / 被参照）', 'JavaScript / プラグイン（何をしているか・触るフィールド）', '変更時の注意（依存関係・壊れた参照）', '未確定事項・引継ぎ時に確認すること'] },
@@ -14926,7 +14940,7 @@
       if (main.length) {
         out.push('## 手順（標準設定 / JavaScript）');
         out.push('');
-        out.push('| ID | 内容 | 種別 | 方式 | Toolkit Review | 依存 |');
+        out.push('| ID | 内容 | 種別 | 方式 | Toolkit の確認 | 依存 |');
         out.push('|---|---|---|---|---|---|');
         for (const st of main) { const r = reviewOf(st.id); out.push(`| ${st.id} | ${esc1(st.title || '')} | ${esc1(st.actionType)} | ${st.solution === 'CUSTOMIZATION' || st.actionType === 'CUSTOMIZATION_REQUIRED' ? 'JavaScript' : '標準設定'} | ${r ? esc1(r.status) : '—'} | ${(st.dependsOn || []).join(', ') || '—'} |`); }
         out.push('');
@@ -14937,14 +14951,14 @@
         out.push('## JavaScript カスタマイズ');
         for (const c of custs) {
           const g = v.generated?.[c.customizationId] || null;
-          out.push(`- **${c.customizationId}** ${esc1(c.requirement)}（${c.strategy === 'EXTEND_EXISTING_JS' ? `既存 ${(c.existingFiles || []).map(f => f.name).join(', ') || 'JS'} を変更` : c.strategy === 'NEW_JS_FILE' ? '新規 JS' : esc1(c.strategy || '方針未定')}・${(c.platform || []).map(x => (x === 'mobile' ? 'モバイル' : 'PC')).join(' / ') || '対象未定'}・${c.implementation === 'CSS' ? 'CSS' : c.implementation === 'JS_CSS' ? 'JavaScript + CSS' : 'JavaScript'}）`);
+          out.push(`- **${c.customizationId}** ${esc1(c.requirement)}（${c.strategy === 'EXTEND_EXISTING_JS' ? `既存 ${(c.existingFiles || []).map(f => f.name).join(', ') || 'JS'} を変更` : c.strategy === 'NEW_JS_FILE' ? '新しい JavaScript' : esc1(c.strategy || '方針未定')}・${(c.platform || []).map(x => (x === 'mobile' ? 'モバイル' : 'PC')).join(' / ') || '対象未定'}・${c.implementation === 'CSS' ? 'CSS' : c.implementation === 'JS_CSS' ? 'JavaScript + CSS' : 'JavaScript'}）`);
           out.push(`  - 標準設定で不足する理由: ${esc1(c.whyStandardInsufficient || '（未記載）')}`);
           out.push(`  - イベント: ${(c.events || []).join(', ') || '（未定）'}　フィールド: ${(c.fields || []).map(f => `${f.code}（${f.access}）`).join(', ') || '（なし）'}`);
-          if (g) out.push(`  - 生成コード: ${esc1(g.generated?.targetFile || '')}（Toolkit Code Review: ${esc1(g.review?.status || '—')}${(g.generated?.patterns || []).length ? `・参考パターン ${g.generated.patterns.map(x => x.id).join(', ')}` : ''}）`);
+          if (g) out.push(`  - 生成コード: ${esc1(g.generated?.targetFile || '')}（Toolkit のコードの検査: ${esc1(g.review?.status || '—')}${(g.generated?.patterns || []).length ? `・参考パターン ${g.generated.patterns.map(x => x.id).join(', ')}` : ''}）`);
         }
         out.push('');
       }
-      if (v.spec) { out.push('## 実装仕様'); out.push(`- v${v.spec.version} ${v.spec.status === 'CONFIRMED' ? `確定（${String(v.spec.confirmedAt || '').replace('T', ' ').slice(0, 16)}）` : v.spec.status === 'DRAFT' ? '確認待ち' : '旧版'}`); out.push(''); }
+      if (v.spec) { out.push('## JavaScript の仕様'); out.push(`- v${v.spec.version} ${v.spec.status === 'CONFIRMED' ? `確定（${String(v.spec.confirmedAt || '').replace('T', ' ').slice(0, 16)}）` : v.spec.status === 'DRAFT' ? '確認待ち' : '旧版'}`); out.push(''); }
       const ex = execState?.execution || null;
       const jx = jsExecState?.execution || null;
       if (ex || jx) {
@@ -14975,8 +14989,8 @@
       // Phase 20（実機）: Context がどの環境の設定かを明記する。Phase 21: 開発支援の作業基準（動作テスト環境）で作ったときはそう書き、運用環境に未反映の変更を含むことを示す
       const envInfo = inputs.environment || null;
       const envNote = envInfo && envInfo.env === 'preview'
-        ? `> この Context は動作テスト環境の設定（${KTDevBase.timeText(envInfo.loadedAt)} に取得）から作っています。運用環境へ未反映の変更を${envInfo.diffAvailable ? ` ${envInfo.diffCount} 件` : ''}含みます（運用環境の利用者にはまだ見えていません）${envInfo.diffAvailable ? '' : '。運用環境との差は取得できませんでした'}。`
-        : '> この Context は運用環境の設定（画面を開いた時点）から作っています。動作テスト環境へ反映した変更・提案中の変更は含みません（それらは「変更計画（Toolkit の記録）」の状態を見てください）。';
+        ? `> この資料は動作テスト環境の設定（${KTDevBase.timeText(envInfo.loadedAt)} に取得）から作っています。運用環境へ未反映の変更を${envInfo.diffAvailable ? ` ${envInfo.diffCount} 件` : ''}含みます（運用環境の利用者にはまだ見えていません）${envInfo.diffAvailable ? '' : '。運用環境との差は取得できませんでした'}。`
+        : '> この資料は運用環境の設定（画面を開いた時点）から作っています。動作テスト環境へ反映した変更・提案中の変更は含みません（それらは「変更計画（Toolkit の記録）」の状態を見てください）。';
       const contextMd = `${KTContext.toMarkdown(ctx)}${(version && version.plan) || (envInfo && envInfo.env === 'preview') ? `\n\n${envNote}` : ''}`;
       const changeMd = version && version.plan ? changeSummaryMarkdown(version, { execState, jsExecState }) : '';
       const instruction = [k.role, ...k.rules, '出力は日本語 Markdown（H1〜H3・箇条書き中心・表は最小限）。10〜15 分でレビューできる密度にし、曖昧な点は「未確定事項」に列挙する。', ...(changeMd ? ['変更計画（Toolkit の記録）の状態（提案中 / 動作テスト環境へ反映済み / 元に戻し済み）をそのまま書き、運用環境へ反映したとは書かない（Toolkit は運用環境へ反映しない）。確認事項は未確定事項として残す。'] : []), '', '## 出力の構成', ...k.outline.map((o, i) => `${i + 1}. ${o}`)].join('\n');
@@ -14992,7 +15006,7 @@
       const size = KTContext.measureText(prompt);
       return {
         ok: true, mode: 'document', kind: k.id, label: k.label, ctx, outputs: { prompt, markdown, json },
-        coverage: coverageRows(ctx), truncation: truncationSummary(ctx), size: { tokens: size.approxTokens ?? 0, bytes: size.bytes ?? 0, facts: ctx.facts.length, text: `約 ${(size.approxTokens ?? 0).toLocaleString()} tokens（近似） / ${Math.max(1, Math.round((size.bytes || 0) / 1024))} KB / Facts: ${ctx.facts.length}` }, warnings,
+        coverage: coverageRows(ctx), truncation: truncationSummary(ctx), size: { tokens: size.approxTokens ?? 0, bytes: size.bytes ?? 0, facts: ctx.facts.length, text: `約 ${(size.approxTokens ?? 0).toLocaleString()} トークン（概算） / ${Math.max(1, Math.round((size.bytes || 0) / 1024))} KB / 根拠: ${ctx.facts.length}` }, warnings,
       };
     }
 
@@ -15042,7 +15056,7 @@
             <label style="display:flex; align-items:center; gap:6px; white-space:nowrap;">種類
               <select id="kt-ai-doc-kind" class="btn" style="padding:3px 4px; height:28px; flex:1;">${DOCUMENT_KINDS.map(k => `<option value="${esc(k.id)}">${esc(k.label)}</option>`).join('')}</select>
             </label>
-            <div id="kt-ai-doc-note" style="opacity:.75; font-size:11px;">Toolkit の解析結果（Context）と、この種類の文書の構成・規則を 1 つの Prompt にします。ChatGPT / Claude などへ貼り付けると本文のドラフトができます。Markdown は骨格 ＋ Context、「変更内容のまとめ」は Toolkit の記録（計画・Review・反映結果）そのものです。チャットで「このアプリの仕様書を作って」と伝えても同じものを作ります。</div>
+            <div id="kt-ai-doc-note" style="opacity:.75; font-size:11px;">Toolkit の解析結果（Context）と、この種類の文書の構成・規則を 1 つの Prompt にします。ChatGPT / Claude などへ貼り付けると本文のドラフトができます。Markdown は文書の構成と「Context」タブの内容、「変更内容のまとめ」は Toolkit の記録（計画・Toolkit の確認・反映の結果）そのものです。チャットで「このアプリの仕様書を作って」と伝えても同じものを作ります。</div>
           </div>
           <div style="display:flex; gap:6px; align-items:center;">
             <button id="kt-ai-generate" class="btn" style="flex:1; height:32px; font-weight:600;">AI Prompt を生成</button>
@@ -15125,7 +15139,7 @@
     function consentHtml({ border, bg }) {
       return `
             <div id="kt-ai-consent" style="display:none; border:1px solid ${border}; border-radius:8px; padding:8px; background:${bg}; line-height:1.5;">
-              <div><b>この Context を AI サービス（Nest Rec AI Gateway）へ送信します。</b></div>
+              <div><b>この Context を AI サービス（Nest Rec AI）へ送信します。</b></div>
               <div>送信する内容: アプリ設定の要約・依存関係・JavaScript の解析結果と抜粋（伏字済み）・質問</div>
               <div>送信しない内容: レコードの値・添付ファイル・cookie・API キー</div>
               <div style="display:flex; gap:6px; margin-top:6px;">
@@ -15229,7 +15243,7 @@
           <div style="margin-top:8px;"><b>見立て</b><span style="font-size:10px; opacity:.7;">（推論・一般的な知識）</span>${list(a.analysis, '見立てはありません')}</div>
           <div style="margin-top:8px;"><b>おすすめ</b>${list(a.recommendations, 'おすすめはありません')}</div>
           ${(a.unknowns && a.unknowns.length) ? `<div style="margin-top:8px;"><b>読み取れなかったこと</b><ul style="margin:4px 0 0 18px; padding:0;">${a.unknowns.map(u => `<li>${esc(u)}</li>`).join('')}</ul></div>` : ''}
-          ${warn.length ? `<details style="margin-top:6px; font-size:11px;"><summary style="cursor:pointer;">検証で除去・調整した項目（${warn.length}）</summary>${warn.map(w => `<div>${esc(w.code)}: ${esc(w.message)}</div>`).join('')}</details>` : ''}
+          ${warn.length ? `<details style="margin-top:6px; font-size:11px;"><summary style="cursor:pointer;">AI の返答から Toolkit が外した項目（技術者向け）（${warn.length}）</summary>${warn.map(w => `<div>${esc(w.code)}: ${esc(w.message)}</div>`).join('')}</details>` : ''}
           ${a.usage ? `<div style="margin-top:6px; opacity:.6; font-size:11px;">今月の利用: ${esc(a.usage.usedThisMonth)} / ${esc(a.usage.monthlyLimit)} 回</div>` : ''}${chat && a.requestId ? `<div style="opacity:.6; font-size:11px;">requestId: ${esc(a.requestId)}</div>` : ''}
           <div style="margin-top:6px; opacity:.6; font-size:11px;">（設定）は Toolkit が kintone から取得した設定、（コード）は JavaScript から読んだ処理です（実際の動作は確かめていません）。設定を変更するときは、変更計画と検証・確認の手順で行います。</div>
         </details>`;
@@ -15251,11 +15265,11 @@
     };
     /** コードを作れない理由（Toolkit の Review の codeGeneration.reason → 利用者の言葉）。会話の文でも使う。
      *   2026-10-18: 削除した要件の文の語句判定（7b・7c）の理由 EXTERNAL_INTEGRATION・NOTIFICATION_BY_JS の文は消した（会話は保存しないので、前の記録も出ない） */
-    const CODEGEN_REASON_JA = Object.freeze({ INVALID: '変更案が無効', CSS_NOT_GENERATED: 'CSS は生成の対象外', STRATEGY_NOT_GENERATED: '方針が生成の対象外', PLATFORM_UNSPECIFIED: 'PC かモバイルかが未定', EVENT_MISSING: '動かす画面（イベント）が未定', TARGET_FILE_MISSING: '組み込む先の JavaScript が未定', BLOCKED_BY_DEPENDENCY: '前提の標準設定が無効', CUSTOMIZATION_NOT_FOUND: 'JavaScript の内容が見つからない' });
+    const CODEGEN_REASON_JA = Object.freeze({ INVALID: '変更案が無効', CSS_NOT_GENERATED: 'CSS は生成の対象外', STRATEGY_NOT_GENERATED: '方針が生成の対象外', PLATFORM_UNSPECIFIED: 'PC かモバイルかが未定', EVENT_MISSING: '動かす画面が未定', TARGET_FILE_MISSING: '組み込む先の JavaScript が未定', BLOCKED_BY_DEPENDENCY: '前提の標準設定が無効', CUSTOMIZATION_NOT_FOUND: 'JavaScript の内容が見つからない' });
 
     // ---- Preview Executor（Phase 9）の表示。設定を書くのは KTPlanExecutor。ここは HTML だけ ----
-    const EXEC_STEP_JA = { PENDING: '待機中', RUNNING: '処理中...', APPLIED: '反映済み（検証中）', VERIFIED: '反映済み（確認で一致）', VERIFY_FAILED: '反映済み（確認で一致しない）', FAILED: '失敗', SKIPPED: '未実行', BLOCKED: '実行不可', UNSUPPORTED: '自動では反映できません',
-      ROLLBACK_PENDING: '待機中', ROLLING_BACK: '戻しています...', ROLLED_BACK: '戻しました（検証中）', ROLLBACK_VERIFIED: '戻しました（確認で一致）', ROLLBACK_VERIFY_FAILED: '戻しました（確認で一致しない）', ROLLBACK_FAILED: '戻せませんでした', ROLLBACK_STALE: '戻せません（反映後に変更あり）', ROLLBACK_SKIPPED: '未実行' };
+    const EXEC_STEP_JA = { PENDING: '待機中', RUNNING: '処理中...', APPLIED: '反映済み（確認中）', VERIFIED: '反映済み（確認で一致）', VERIFY_FAILED: '反映済み（確認で一致しない）', FAILED: '失敗', SKIPPED: '未実行', BLOCKED: '実行不可', UNSUPPORTED: '自動では反映できません',
+      ROLLBACK_PENDING: '待機中', ROLLING_BACK: '戻しています...', ROLLED_BACK: '戻しました（確認中）', ROLLBACK_VERIFIED: '戻しました（確認で一致）', ROLLBACK_VERIFY_FAILED: '戻しました（確認で一致しない）', ROLLBACK_FAILED: '戻せませんでした', ROLLBACK_STALE: '戻せません（反映後に変更あり）', ROLLBACK_SKIPPED: '未実行' };
     const EXEC_STEP_COLOR = { VERIFIED: '#2e7d32', APPLIED: '#1a73e8', RUNNING: '#1a73e8', VERIFY_FAILED: '#b00020', FAILED: '#b00020', BLOCKED: '#b00020', UNSUPPORTED: '#555', SKIPPED: '#777', PENDING: '#777', ROLLBACK_VERIFIED: '#2e7d32', ROLLED_BACK: '#1a73e8', ROLLING_BACK: '#1a73e8', ROLLBACK_VERIFY_FAILED: '#b00020', ROLLBACK_FAILED: '#b00020', ROLLBACK_STALE: '#b00020', ROLLBACK_SKIPPED: '#777', ROLLBACK_PENDING: '#777' };
     /** 既存設定の変更の属性名（Phase 11。属性単位の Before / After に使う） */
     const EXEC_ATTR_JA = { targets: '通知先', filterCond: '条件', events: 'イベント', title: '名前', timing: 'タイミング', fields: '表示項目', sort: '並び順', label: '表示名', required: '必須', to: '遷移先', from: '遷移元', executableUsers: '実行可能ユーザー', assignees: '作業者', assigneeType: '作業者の指定形式', mappings: '取得項目', pickerFields: '選択時に表示するフィールド', entities: '利用者', destApp: 'コピー先' };
@@ -15276,8 +15290,8 @@
     const execStepLine = (st, i) => `<div style="display:flex; gap:8px; align-items:baseline; font-size:12px;"><span style="min-width:34px; font-weight:600;">${esc(Number.isInteger(i) ? `${i + 1}.` : '・')}</span><span style="flex:1;">${esc(st.title || execActionJa(st.actionType))}${st.groupId ? ' <span style="font-size:10px; opacity:.6;">（プロセス管理の変更はまとめて 1 回で更新）</span>' : ''}</span><span style="color:${EXEC_STEP_COLOR[st.status] || '#555'}; font-weight:600;">${esc(EXEC_STEP_JA[st.status] || st.status)}</span></div>${st.status !== 'VERIFIED' && st.status !== 'RUNNING' && st.status !== 'PENDING' && (st.message || st.reason) ? `<div style="font-size:11px; opacity:.75; margin-left:42px;">${esc(st.message || st.reason)}</div>` : ''}${st.before || st.after ? `<div style="font-size:11px; opacity:.75; margin-left:42px;">${esc(beforeAfterText(st))}</div>` : ''}`;
     const beforeAfterText = (st) => {
       const b = st.before || {}, a = st.after || {};
-      if (st.actionType === 'ADD_NOTIFICATION') return `通知: Before 既存 ${b.count ?? '—'} 件 → After ${a.count ?? '—'} 件（＋${a.added ?? 1} 件）`;
-      if (st.actionType === 'ADD_REMINDER') return `リマインダー: Before ${b.count ?? '—'} 件 → After ${a.count ?? '—'} 件`;
+      if (st.actionType === 'ADD_NOTIFICATION') return `通知: 変更前 既存 ${b.count ?? '—'} 件 → 変更後 ${a.count ?? '—'} 件（＋${a.added ?? 1} 件）`;
+      if (st.actionType === 'ADD_REMINDER') return `リマインダー: 変更前 ${b.count ?? '—'} 件 → 変更後 ${a.count ?? '—'} 件`;
       if (st.actionType === 'UPDATE_FIELD') return Object.keys(a).map(k => k === 'required' ? `必須: ${b.required ? 'はい' : 'いいえ'} → ${a.required ? 'はい' : 'いいえ'}` : `${k === 'label' ? '表示名' : k}: ${b[k] ?? '—'} → ${a[k] ?? '—'}`).join('・');
       if (st.actionType === 'UPDATE_APP_ACTION') return execAttrDiff(b, a, APP_ACTION_ATTR_JA).join('・');
       if (isUpdateAction(st.actionType)) return execAttrDiff(b, a).join('・');
@@ -15300,12 +15314,12 @@
       const note = (t, color = '#555') => `<div style="font-size:11px; color:${color}; margin-top:4px;">${esc(t)}</div>`;
       // 2026-10-06 読みやすさ: 見出しは 1 行。承認した手順・反映できない手順の件数の内訳は、どの段階でも［内訳］の中（色付きの行を並べない）
       const headLead = '<div style="padding-top:4px;"><b>動作テスト環境への反映</b>';
-      const breakdown = `<details class="kt-ai-tech" style="margin-top:6px;"><summary>内訳（承認した手順・反映できない手順）</summary><div style="margin-top:4px; display:grid; gap:2px;">${line(executable, '承認済み・実行可能', '#2e7d32', '✓')}${catLines ? `<div style="margin-left:12px; display:grid; gap:1px;">${catLines}</div>` : ''}${line(unsupported, '承認済みだが未対応', '#b26a00', '△')}${line(blocked, '実行不可', '#b00020', '×')}</div>${unsupportedList}</details>`;
+      const breakdown = `<details class="kt-ai-tech" style="margin-top:6px;"><summary>内訳（承認した手順・反映できない手順）</summary><div style="margin-top:4px; display:grid; gap:2px;">${line(executable, '承認済み・実行可能', '#2e7d32', '✓')}${catLines ? `<div style="margin-left:12px; display:grid; gap:1px;">${catLines}</div>` : ''}${line(unsupported, '承認したが Toolkit からは反映できない', '#b26a00', '△')}${line(blocked, '実行不可', '#b00020', '×')}</div>${unsupportedList}</details>`;
       //   §0e.1（2026-10-09）: ［動作テスト環境へ反映］1 回の反映の中の準備は、最終確認の段（kt-ai-exec-go）を出さず進みだけを出す
       if (s.finalRunning && ['preparing', 'confirm'].includes(s.stage)) return `${headLead}<div class="kt-ai-apply-note" style="margin-top:4px; font-size:12px;">最終案のカードの［動作テスト環境へ反映］の反映を進めています（準備をやり直して、承認した内容と同じかを照合しています。まだ書き込んでいません）…</div>${foot}`;
       if (s.stage === 'idle' && !s.foreign) {
         // 2026-10-06: 自動で反映する設定の手順が無い変更案（JavaScript だけ・手作業の手順だけ など）は、件数の表ではなく短い案内だけ
-        if (!s.hasSettings) return `<div class="kt-ai-apply-note" style="padding-top:4px;"><b>動作テスト環境への反映</b><div style="font-size:12px; opacity:.85; margin-top:2px;">${s.jsUnchangedOnly ? 'この変更案に、設定の変更はありません。JavaScript は統合後の本文が既存と同じため登録しません（反映する変更はありません）。' : s.hasJs ? 'この変更案に、設定の変更はありません。JavaScript は最終案のカードの［動作テスト環境へ反映］から登録します。' : 'この変更案に、動作テスト環境へ自動で反映できる設定の手順はありません。'}</div></div>`;
+        if (!s.hasSettings) return `<div class="kt-ai-apply-note" style="padding-top:4px;"><b>動作テスト環境への反映</b><div style="font-size:12px; opacity:.85; margin-top:2px;">${s.jsUnchangedOnly ? 'この変更案に、設定の変更はありません。JavaScript は追加した結果が今登録されている内容と同じため登録しません（反映する変更はありません）。' : s.hasJs ? 'この変更案に、設定の変更はありません。JavaScript は最終案のカードの［動作テスト環境へ反映］から登録します。' : 'この変更案に、動作テスト環境へ自動で反映できる設定の手順はありません。'}</div></div>`;
         //   §0e.1（2026-10-09）: 承認と反映は最終案のカードの 1 回（右では準備・最終確認の段を出さない）。§12.59: 押す前の内訳（常に 0 件）は出さない
         return `${headLead}<div class="kt-ai-apply-note" style="margin-top:4px; font-size:12px;">最終案のカードの［動作テスト環境へ反映］で、承認と反映（標準設定 → JavaScript の順）を 1 回で行います。押すまで書き込みません。</div>${s.hold ? `<div class="kt-ai-exec-note" style="font-size:11px; color:#b26a00; margin-top:2px;">${esc(s.hold)}</div>` : ''}${foot}`;
       }
@@ -15358,13 +15372,13 @@
           <div style="margin-top:6px; font-size:12px;"><b>運用環境にはまだ反映されていません。</b>（運用環境への反映は kintone のアプリ設定画面の［アプリを更新］で行います。Toolkit は運用環境へ反映しません）</div>
           ${rollbackBtn ? `<div style="margin-top:8px; display:flex; gap:6px; flex-wrap:wrap;">${rollbackBtn}</div>` : ''}
           <details class="kt-ai-tech"><summary>詳しく（手順ごとの結果・検証の内訳・監査）</summary>
-          <div style="margin-top:4px; font-size:12px;">✓ ${verified} 件 VERIFIED　⚠ ${warn} 件　× ${failed} 件</div>
+          <div style="margin-top:4px; font-size:12px;">✓ ${verified} 件 確認で一致　⚠ ${warn} 件　× ${failed} 件</div>
           ${list}
           <div style="margin-top:8px; display:flex; gap:6px; flex-wrap:wrap;">
-            <button type="button" id="kt-ai-exec-audit-copy" class="btn" style="height:26px; font-size:11px;">監査 JSON をコピー</button>
-            <button type="button" id="kt-ai-exec-audit-download" class="btn" style="height:26px; font-size:11px;">監査 JSON を保存</button>
+            <button type="button" id="kt-ai-exec-audit-copy" class="btn" style="height:26px; font-size:11px;">反映の記録（JSON・技術者向け）をコピー</button>
+            <button type="button" id="kt-ai-exec-audit-download" class="btn" style="height:26px; font-size:11px;">反映の記録（JSON・技術者向け） を保存</button>
             <button type="button" id="kt-ai-exec-snapshot-copy" class="btn" style="height:26px; font-size:11px;">実行前スナップショットをコピー</button>
-            <button type="button" id="kt-ai-exec-rollback-toggle" class="btn" style="height:26px; font-size:11px;">ロールバック計画を見る</button>
+            <button type="button" id="kt-ai-exec-rollback-toggle" class="btn" style="height:26px; font-size:11px;">元に戻す手順（技術者向け）を見る</button>
           </div>
           <pre id="kt-ai-exec-rollback" style="display:none; margin-top:6px; max-height:240px; overflow:auto; font-size:11px; white-space:pre-wrap;">${esc(JSON.stringify(s.rollbackPlan || null, null, 2))}</pre>
           </details>
@@ -15413,7 +15427,7 @@
         ${!ok ? note('現在の動作テスト環境を確認してください。', '#b00020') : ''}
         <div style="font-size:12px; margin-top:4px;">${esc(vText.replace('実行前 snapshot との比較', '反映する前の設定との比較'))}</div>
         <div style="margin-top:6px; font-size:12px;"><b>運用環境には影響していません。</b></div>
-        <details class="kt-ai-tech"><summary>詳しく（手順ごとの結果・検証）</summary><div style="margin-top:4px; font-size:12px;">✓ ${okCount} 件 ROLLBACK_VERIFIED　× ${bad.length} 件</div><div style="font-size:12px;">${esc(vText)}</div>${list}<div style="font-size:11px; margin-top:4px;">監査 JSON に rollback の結果が含まれます。</div></details>
+        <details class="kt-ai-tech"><summary>詳しく（手順ごとの結果・検証）</summary><div style="margin-top:4px; font-size:12px;">✓ ${okCount} 件 戻して確認で一致　× ${bad.length} 件</div><div style="font-size:12px;">${esc(vText)}</div>${list}<div style="font-size:11px; margin-top:4px;">反映の記録（JSON）に元に戻した結果が含まれます。</div></details>
       </div>`;
     }
 
@@ -15464,7 +15478,7 @@
         ${sec('影響範囲', li(plan.impact || [], x => `<li>${x.validation?.status === 'invalid' ? badge('不明な対象', '#b00020') : (x.validation?.status === 'proposed' || x.targetKind === 'PROPOSED_FIELD') ? badge('新規提案', '#1a73e8') : badge('既存', '#2e7d32')}${esc(x.targetKind)}${x.targetRef ? ` <code>${esc(x.targetRef)}</code>` : ''}: ${esc(x.description)}${chips(x.evidenceIds)}</li>`, '既存設定への影響は挙げられていません'))}
         ${sec('確認したいこと', li(plan.questions || [], q => `<li>${badge('確認必要', '#b26a00')}<b>${esc(q.id)}</b> ${esc(q.question)} <span style="opacity:.7;">（${esc(q.reason)}）</span>${chips(q.relatedEvidenceIds)}</li>`, '確認事項はありません'))}
         ${sec('解析できないこと', li([...new Set([...(plan.unknowns || []), ...KTPlanText.coverageNotes(ctx)])], u => `<li>${esc(u)}</li>`, 'なし'))}
-        ${warn.length ? `<details style="margin-top:6px; font-size:11px;"><summary style="cursor:pointer;">検証で除去・調整した項目（${warn.length}）</summary>${warn.map(w => `<div>${esc(w.code)}: ${esc(w.message)}</div>`).join('')}</details>` : ''}
+        ${warn.length ? `<details style="margin-top:6px; font-size:11px;"><summary style="cursor:pointer;">AI の返答から Toolkit が外した項目（技術者向け）（${warn.length}）</summary>${warn.map(w => `<div>${esc(w.code)}: ${esc(w.message)}</div>`).join('')}</details>` : ''}
         <details class="kt-ai-tech"><summary>技術者向け（requestId / Change Plan JSON）</summary>
         <div style="margin-top:4px; opacity:.7;">requestId: ${esc(plan.requestId || '')}${plan.usage ? `　今月の利用: ${esc(plan.usage.usedThisMonth)} / ${esc(plan.usage.monthlyLimit)} 回` : ''}</div>
         <div style="margin-top:6px; display:flex; gap:6px;">
@@ -15473,7 +15487,7 @@
         </div>
         <pre id="kt-ai-plan-json" style="display:none; margin-top:6px; max-height:320px; overflow:auto; font-size:11px; white-space:pre-wrap;">${esc(JSON.stringify(planJson(plan), null, 2))}</pre>
         </details>
-        <div style="margin-top:6px; opacity:.6; font-size:11px;">この変更計画は提案です。Toolkit は設定を変更しません。実施前に各手順と影響範囲を確認してください。</div>`;
+        <div style="margin-top:6px; opacity:.6; font-size:11px;">この変更計画は AI の提案です。反映は最終案のカードの［動作テスト環境へ反映］で行い、運用環境は変更しません。実施前に各手順と影響範囲を確認してください。</div>`;
     }
     /** Executor へ渡す形（表示用の warnings / usage を除いた計画そのもの） */
     function planJson(plan) {
@@ -15507,7 +15521,7 @@
         ? `<details style="margin-top:6px;"><summary style="cursor:pointer;">⚠ ${esc(gen.truncation.message)}</summary><div style="opacity:.85; padding-left:8px;">${gen.truncation.details.map(d => `<div>${esc(d)}</div>`).join('')}</div></details>`
         : '';
       const warn = gen.warnings.length ? `<div style="margin-top:6px; opacity:.85;">${gen.warnings.map(w => `<div>※ ${esc(w)}</div>`).join('')}</div>` : '';
-      const help = `<details style="margin-top:6px;"><summary style="cursor:pointer;">確度（confidence）の意味</summary><div style="padding-left:8px;">${CONFIDENCE_HELP.map(h => `<div><b>${esc(h.label)}</b>（${esc(h.code)}）: ${esc(h.text)}</div>`).join('')}</div></details>`;
+      const help = `<details style="margin-top:6px;"><summary style="cursor:pointer;">確度の意味</summary><div style="padding-left:8px;">${CONFIDENCE_HELP.map(h => `<div><b>${esc(h.label)}</b>（${esc(h.code)}）: ${esc(h.text)}</div>`).join('')}</div></details>`;
       const focus = gen.ctx.focus || {};
       const target = gen.mode === 'document' ? `ドキュメント: ${esc(gen.label || gen.kind)}（アプリ全体の Context）` : focus.target ? `${esc(focus.target.type)} <code>${esc(focus.target.id)}</code>` : (gen.ctx.goal != null ? '変更計画（アプリ全体の既存資産）' : 'アプリ全体');
       const levelText = Array.isArray(gen.ctx.levels) ? gen.ctx.levels.join(' + ') : 'planner';
@@ -16321,7 +16335,7 @@
     /** §0f.3（FP7）: 呼び出しの記録の end（ok / error / unknown = 中断・時間切れ・切断） */
     const callEndOf = (e) => (stopEndUnknown(stopKindOf(e)) ? 'unknown' : 'error');
     /** §0f.3 の 1: 止めた理由（利用者に見せる文。内部の値は出さない） */
-    const STOP_REASON_JA = Object.freeze({ cancelled: 'キャンセルしました', timeout: 'AI サービスが時間内に応答しませんでした', disconnected: 'AI サービスとの通信が途中で切れました', budget: '利用の上限（予算・回数）に達しました', rate: 'AI サービスへのアクセスが集中しています', auth: 'AI サービスとの接続の有効期限が切れています', page: 'このページの有効期限が切れ、AI との接続を更新できませんでした', token: 'AI サービスとの接続の更新の途中で止まりました（AI には送っていません）' });
+    const STOP_REASON_JA = Object.freeze({ cancelled: 'キャンセルしました', timeout: 'AI サービスが時間内に応答しませんでした', disconnected: 'AI サービスとの通信が途中で切れました', budget: '費用と回数の上限に達しました', rate: 'AI サービスへのアクセスが集中しています', auth: 'AI サービスとの接続の有効期限が切れています', page: 'このページの有効期限が切れ、AI との接続を更新できませんでした', token: 'AI サービスとの接続の更新の途中で止まりました（AI には送っていません）' });
     /**
      * 会話の設計し直し（2026-10-14・指示書 §1.3〜§1.4・§5.1）: 作っている JavaScript を利用者に見せる名前 = 計画の手順（CUSTOMIZATION_REQUIRED）の title。
      *   進みの段階の名前（「{title}」を作っています）・作成途中のカード・右の「変更内容」の JavaScript の状態で同じ名前を使う（内部の番号・ファイル名は出さない）。
@@ -16344,7 +16358,7 @@
      *   （編集の禁止 → 編集制御・保存の停止 / 警告 → 入力チェック・値の設定 → 自動入力・表示の切り替え → 表示の切り替え）。例「PCの編集制御」「モバイルの入力チェック」。
      *   ファイル名・AI の文は使わない。効果が分からない、または同じ計画の別の JavaScript と同じ名前になるときは手順の title（customizationTitleOf）
      */
-    const ROLE_OF_EFFECT = Object.freeze({ lock: '編集制御', 'block-save': '入力チェック', warn: '入力チェック', 'set-value': '自動入力', 'show-hide': '表示の切り替え' });
+    const ROLE_OF_EFFECT = Object.freeze({ lock: '編集制御', 'block-save': '入力チェック', warn: '入力チェック', 'set-value': '自動入力', 'show-hide': '表示の切り替え', 'hide-row-buttons': '行の追加・削除の制御' });
     function customizationRoleOf(plan, cid) {
       const custs = plan && Array.isArray(plan.customizations) ? plan.customizations : [];
       const raw = (c) => {
@@ -16380,7 +16394,7 @@
     /** §0f.3 の 1: 未完成の最終案の理由の文（承認できない理由の先頭。内部の値・時間の目安は出さない） */
     function incompleteReasonText(inc) {
       const why = STOP_REASON_JA[inc && inc.kind] || '処理を続けられませんでした';
-      const where = inc && inc.stage === 'plan-auto' ? '計画の自動の見直し' : 'JavaScript の生成';
+      const where = inc && inc.stage === 'plan-auto' ? '計画の不足の見直し' : 'JavaScript の生成';
       const n = inc && Array.isArray(inc.notStarted) ? inc.notStarted.length : 0;
       //   §0f.4: 検証の上限で止めたときは、必要な額・残り（KTAiClient.budgetDetailText）を添える
       const bd = inc && inc.kind === 'budget' && inc.budget && typeof KTAiClient !== 'undefined' && KTAiClient.budgetDetailText ? KTAiClient.budgetDetailText(inc.budget) : '';
@@ -16471,11 +16485,15 @@
       //   §0c.8（2026-10-08）: テーブルの列（columns: { 列のコード: テーブルのコード }。アプリ解析の構造）の表示切り替えは kintone ではできない。
       //   必須の効果にせず「実現できない点」（notPossible。SUBTABLE_ROWS と同じ扱い。承認は止めない）
       const columnOf = (code) => (columns && typeof columns === 'object' && columns[code] ? String(columns[code]) : null);
-      const addNotPossible = (code, effect, rid) => { const x = notPossible.find(n => n.field === code && n.effect === effect); if (x) { if (rid && !x.requirementIds.includes(rid)) x.requirementIds.push(rid); return; } notPossible.push({ field: code, effect, table: columnOf(code), reason: 'subtable-column-show-hide', requirementIds: rid ? [rid] : [] }); };
+      const addNotPossible = (code, effect, rid, reason = 'subtable-column-show-hide') => { const x = notPossible.find(n => n.field === code && n.effect === effect); if (x) { if (rid && !x.requirementIds.includes(rid)) x.requirementIds.push(rid); return; } notPossible.push({ field: code, effect, table: columnOf(code), reason, requirementIds: rid ? [rid] : [] }); };
+      //   2026-10-23（§12.69）: テーブルのコードの集まり（列の親。アプリの構造が無ければ空＝テーブルかどうかを判定しない）
+      const tableSet = new Set(Object.values(columns && typeof columns === 'object' ? columns : {}).map(String));
       const keyOf = (code, effect, evs, condition) => `${code}|${effect}|${evs.join(',')}|${mapText(condition)}`;
       const add = (rid, f, effect, condition, evs0) => {
-        const code = mapCode(f.code);
+        let code = mapCode(f.code);
         if (effect === 'show-hide' && columnOf(code)) { addNotPossible(code, effect, String(rid)); return; }
+        //   2026-10-23（§12.69）: 行の追加・削除のボタンを隠す効果はテーブルのフィールドに付ける。列に付いていればそのテーブルへ、テーブルでも列でもなければ「実現できない点」（計画の誤り）
+        if (effect === 'hide-row-buttons') { if (columnOf(code)) code = columnOf(code); else if (tableSet.size && !tableSet.has(code)) { addNotPossible(code, effect, String(rid), 'row-buttons-not-table'); return; } }
         const evs = (Array.isArray(evs0) && evs0.length ? evs0.map(e => mapText(e)) : events);
         //   §0c.7: 候補が読み込まれない platform のイベントは、その platform の担当の customization に任せる（無ければ unresolved other-platform）
         const inP = evs.filter(e => mine.includes(KTJsCatalog.eventPlatform(e)));
@@ -16609,9 +16627,10 @@
         }
         if (!tf) { unresolved.push({ field: '', requirementId: String(r.id), effect: e, reason: 'target-unresolved' }); continue; }
         if (!owns(tf, e)) { unresolved.push({ field: mapCode(tf.code), requirementId: String(r.id), effect: e, reason: 'no-owner-field', access: tf.access || 'READ' }); continue; }
-        const code = mapCode(tf.code);
+        let code = mapCode(tf.code);
         //   §0c.8: テーブルの列の表示切り替えは kintone ではできない（必須の効果にせず「実現できない点」）
         if (e === 'show-hide' && columnOf(code)) { addNotPossible(code, e, String(r.id)); continue; }
+        if (e === 'hide-row-buttons') { if (columnOf(code)) code = columnOf(code); else if (tableSet.size && !tableSet.has(code)) { addNotPossible(code, e, String(r.id), 'row-buttons-not-table'); continue; } }   // 2026-10-23（§12.69）: 行のボタンを隠す効果はテーブルへ
         const placed = [...groups.values()].filter(g => g.field === code && g.effect === e);
         const condUnknown = () => { if (!unresolved.some(u => u.reason === 'condition-unknown' && u.field === code && u.effect === e && u.requirementId === String(r.id))) unresolved.push({ field: code, requirementId: String(r.id), effect: e, reason: 'condition-unknown' }); };
         //   §0c.8（2026-10-08）: 台帳の要件に条件があるのに、計画のその効果に構造化した条件が無い（「いつでも」）→ 計画が条件を落としている。condition-unknown
@@ -16880,7 +16899,7 @@
       //   簡素化（2026-10-17）: 承認の記録の customizeRevision と仕様の revision の照合（REVISION_CHANGED）は削除した（仕様の revision を書くのは承認より前の自動の確定だけで、
       //   同じ値の写しどうしの比較だった）。承認の後のカスタマイズの変更は、基準の指紋（BASE_CHANGED）と登録の準備の revision の照合（STALE_CUSTOMIZATION）が止める
       const gen = v.generated || {};
-      for (const cid of new Set([...Object.keys(gen), ...Object.keys(a.candidates || {})])) if ((gen[cid] && gen[cid].candidateHash ? gen[cid].candidateHash : null) !== ((a.candidates || {})[cid] ?? null)) return fail('CANDIDATE_CHANGED', '承認の後に JavaScript の候補が変わりました（作り直し）。内容を確かめて、もう一度承認してください。');
+      for (const cid of new Set([...Object.keys(gen), ...Object.keys(a.candidates || {})])) if ((gen[cid] && gen[cid].candidateHash ? gen[cid].candidateHash : null) !== ((a.candidates || {})[cid] ?? null)) return fail('CANDIDATE_CHANGED', '承認の後に JavaScript が作り直されました。内容を確かめて、もう一度承認してください。');
       return { ok: true };
     }
     const TRANSIENT = ['RATE_LIMITED', 'TIMEOUT', 'TRANSPORT_ERROR', 'UPSTREAM_ERROR', 'INTERNAL_ERROR', 'WORKER_ERROR', 'INVALID_RESPONSE', 'MODEL_OUTPUT_INVALID'];
@@ -18181,7 +18200,7 @@
       // ---- 生成の停滞の観測（2026-10-14・契約 20 §18）: 生成工程の進みの通知（progress）→ 進みのカードの段階 generate の detail を事実に合わせる ----
       //   打ち切り・再送はしない（期限は client の打ち切りのまま）。keepalive は届かない（transport がコメントを捨てる）。通知の無い接続先では detail は今までどおり空
       /** 文言（§6）。部品名・英語・内部の番号は出さない。「速くなる」とは書かない */
-      const GEN_DETAIL = Object.freeze({ generate: 'コードを生成しています', repair: (n) => `コードを直しています（${n} 回目）`, verify: 'コードを確認しています', slow: '応答に時間がかかっています' });
+      const GEN_DETAIL = Object.freeze({ generate: 'JavaScript を作っています', repair: (n) => `JavaScript を直しています（${n} 回目）`, verify: 'JavaScript を確かめています', slow: '応答に時間がかかっています' });
       /**
        * 「応答に時間がかかっています」の閾値（1 か所）: この段階の普段の所要時間（timingStore.estimate('generate') = この端末の実測の平均。無ければ既定の 30 秒）。
        *   根拠: 普段なら生成と検証が済む時間を過ぎても最初の本文断片（phase text）が届いていない = いつもより待っている。表示だけで、打ち切りではない。
@@ -18418,14 +18437,14 @@
         const reasons = [];
         //   §0f.3 の 1: 止めた送信の最終案は未完成（承認できない）。理由は最初に出す（blockingReason）
         if (incomplete && incomplete.kind) reasons.push({ kind: 'incomplete', text: incompleteReasonText(incomplete) });
-        if (st('unresolved') || st('failed') || notReady.some(([, e]) => !known.includes(e.status))) reasons.push({ kind: 'unresolved', text: '反映できる完成品になっていない JavaScript があります（未解決の理由と次の方針を見てください）。' });
+        if (st('unresolved') || st('failed') || notReady.some(([, e]) => !known.includes(e.status))) reasons.push({ kind: 'unresolved', text: '確認が済んでいない JavaScript があります（理由と次の方針は「確認できないこと／反映を止めている理由」にあります）。' });
         //   2026-10-10（§5.1）: 既存の入力チェックの移植で、移植元と同じ条件かを確かめる手段が無いだけ（verdict.port）のときは、その理由で書く（「特定できない」と言わない）
         const effUnknown = notReady.filter(([, e]) => e.status === 'not-ready' && !(e.verdict && e.verdict.kind === 'effects-limit'));
         //   レビュー 3（2026-10-14）: 移植元の本文を取れない（読めない）ときは「確かめていません」（不可能と読める「確かめられない」は使わない）。判定は変えない
         if (effUnknown.length) reasons.push({ kind: 'effects-unknown', text: effUnknown.every(([, e]) => e.verdict && e.verdict.port) ? '既存の JavaScript から移す保存の条件が移植元と同じかは、移植元の本文を取れない（読めない）ので確かめていません。そのため、まだ反映できません（「いつでも保存を止める」にはしていません）。' : 'JavaScript で必要な動作（編集できない・警告・保存を止めるなど）を特定できないため、まだ反映できません。' });
-        if (notReady.some(([, e]) => e.status === 'not-ready' && e.verdict && e.verdict.kind === 'effects-limit')) reasons.push({ kind: 'effects-limit', text: '必須の動作が多すぎて、生成工程で一度に確かめられないため、まだ反映できません（計画の JavaScript を分けます）。' });
+        if (notReady.some(([, e]) => e.status === 'not-ready' && e.verdict && e.verdict.kind === 'effects-limit')) reasons.push({ kind: 'effects-limit', text: '必須の動作が多すぎて、AI サービスで一度に確かめられないため、まだ反映できません（計画の JavaScript を分けます）。' });
         //   §0c.6: 実行できなかった理由の区分ごとに文を変える（環境だけ「環境の制約」と言う）
-        const NOT_RUN_TEXT = { env: '必須の動作を模擬テストで確かめられていないため、まだ反映できません（環境の制約です。作った JavaScript の誤りとは判定していません）。', condition: '計画の条件を模擬テストの代表条件にできる形で読めないため、まだ反映できません（計画の条件を直します。作った JavaScript の誤りとは判定していません）。', limit: '確かめる条件が模擬テストの上限を超えたため、まだ反映できません（計画を分けるか絞ります。作った JavaScript の誤りとは判定していません）。', existing: '既存の JavaScript と一緒の動きを模擬テストで確かめられないため、まだ反映できません（計画を直します: 作る JavaScript を既存の JavaScript に統合する・既存の処理を見直す。作った JavaScript の誤りとは判定していません）。' };
+        const NOT_RUN_TEXT = { env: '必須の動作を模擬テストで確かめられていないため、まだ反映できません（環境の制約です。作った JavaScript の誤りとは判定していません）。', condition: '計画の条件を模擬テストで確かめる条件にできる形で読めないため、まだ反映できません（計画の条件を直します。作った JavaScript の誤りとは判定していません）。', limit: '確かめる条件が模擬テストの上限を超えたため、まだ反映できません（計画を分けるか絞ります。作った JavaScript の誤りとは判定していません）。', existing: '既存の JavaScript と一緒の動きを模擬テストで確かめられないため、まだ反映できません（計画を直します: 作る JavaScript を既存の JavaScript に統合する・既存の処理を見直す。作った JavaScript の誤りとは判定していません）。' };
         //   §0c.7: 理由ごとの文があればそれを使う（other-platform）
         const readinessTextOf = (e) => { const ri = e.verdict && e.verdict.reasonKey ? ktBehaviorReasonOf(e.verdict.reasonKey) : null; return ri && ri.readiness ? ri.readiness : null; };
         //   §0d.1（2026-10-08）: 模擬テストが要る効果を環境のために確かめられない JavaScript が複数あっても、理由は 1 つにまとめる（対象と理由を合わせる）
@@ -18433,10 +18452,10 @@
         const neededText = needed.length ? `${ktBehaviorNeededText(needed.flatMap(n => n.labels || []), needed.flatMap(n => n.reasons || []))}。` : null;
         for (const [cat, e] of [...new Map(notReady.filter(([, e]) => e.status === 'not-run').map(([, e]) => [(e.verdict && e.verdict.category) || 'env', e])).entries()]) reasons.push({ kind: cat === 'env' ? 'environment' : `not-run-${cat}`, text: (cat === 'env' && neededText) || readinessTextOf(e) || NOT_RUN_TEXT[cat] || '必須の動作を模擬テストで確かめられていないため、まだ反映できません（作った JavaScript の誤りとは判定していません）。' });
         if (st('unverified')) reasons.push({ kind: 'unverified', text: '必須の動作を確かめた模擬テストの結果が無いため、まだ反映できません。' });
-        if (unsupported.length) reasons.push({ kind: 'unsupported', text: 'Toolkit では作れない JavaScript を含む計画です（実現できない点を見てください）。' });
+        if (unsupported.length) reasons.push({ kind: 'unsupported', text: 'Toolkit では作れない JavaScript を含む計画です（「この案の制約」「確認できないこと／反映を止めている理由」を見てください）。' });
         //   URL 指定の JavaScript（外部サーバー・同一ドメインの URL）への統合は、Toolkit から書き換えられない（登録の準備が EXTERNAL_JS_NOT_WRITABLE で止める）。
         //   C-1 第 3 段で従来のコードのカードの案内を削除したので、最終案の時点で承認できない理由にする（登録の準備で初めて止めない）
-        if (entries.some(([, e]) => ktUrlTarget(e))) reasons.push({ kind: 'external', text: 'URL 指定の JavaScript への変更を含みます。外部サーバーのファイルは Toolkit から書き換えられないため、このままでは反映できません（実現できない点を見てください）。' });
+        if (entries.some(([, e]) => ktUrlTarget(e))) reasons.push({ kind: 'external', text: 'URL 指定の JavaScript への変更を含みます。外部サーバーのファイルは Toolkit から書き換えられないため、このままでは反映できません（「この案の制約」「確認できないこと／反映を止めている理由」を見てください）。' });
         //   2026-10-18: 設定の手順の反映の分類（KTPlanExecutor.applyReadiness。承認の欄・右の「反映する内容」と同じ分類）も見る。確認の結果の BLOCKED だけでなく、
         //   計画の構造で止まる手順（分岐の片方だけ・反映されない手順への依存・孤立するステータス）と、変更の値が計画に無い手順（NO_VALUES。説明文からは補わない）が
         //   2026-10-19: 値が無い手順は NO_VALUES だけでなく、通知時刻・選択肢・通知先・作業者などが決まっていない手順も同じ扱い（KTPlanExecutor の VALUE_MISSING。applyReadiness の valueMissing）。
@@ -18444,11 +18463,11 @@
         //   あるときは反映できない（ほかの手順だけを反映して「この内容で反映できます」としない）。手作業の手順（計画のみ・Toolkit が扱わない種類）は今までどおり止めない
         const cls = Array.isArray(v.applySteps) ? v.applySteps : [];
         //   §12.60（2026-10-23）: 分類が内部の例外で作れていない（null。設定の手順の無い版の [] とは別）ときは版で固定の理由にする（左のカード・右の「変更内容」・承認の口で同じ。承認の欄の準備は走らない）
-        if (v.applySteps === null) reasons.push({ kind: 'classification-failed', text: `設定の手順の分類に失敗しました（Toolkit の内部の問題: ${v.applyStepsError || '理由不明'}）。この最終案は反映できません。` });
+        if (v.applySteps === null) reasons.push({ kind: 'classification-failed', text: `設定の手順を反映できるか判定できませんでした（Toolkit の内部の問題: ${v.applyStepsError || '理由不明'}）。この最終案は反映できません。` });
         //   2026-10-19: 実行できない手順は反映の分類の 1 つから取る（計画の確認の実行の見込み blockedSteps は廃止。確認で無効な手順は分類でも REVIEW_BLOCKED）
         const blockedAll = cls.filter(a => a && a.apply === 'BLOCKED').map(a => a.stepId);
         const noValues = cls.filter(a => a && a.apply === 'MANUAL' && a.valueMissing).map(a => a.stepId);
-        if (blockedAll.length) reasons.push({ kind: 'blocked', text: `実行できない設定の手順が ${blockedAll.length} 件あります（実現できない点を見てください）。` });
+        if (blockedAll.length) reasons.push({ kind: 'blocked', text: `実行できない設定の手順が ${blockedAll.length} 件あります（「この案の制約」「確認できないこと／反映を止めている理由」を見てください）。` });
         if (noValues.length) reasons.push({ kind: 'no-values', text: `必要な値が計画に無い設定の手順が ${noValues.length} 件あります（説明文からは値を補いません）。値を会話で伝えて最終案を作り直してください。` });
         if (blocking.length) reasons.push({ kind: 'questions', text: `先に決めたいことが ${blocking.length} 件残っています。答えると反映できるようになります。` });
         return reasons;
@@ -18633,7 +18652,7 @@
         else if (stage === 'pending') m.text = `${body}。続けて入れられる作業の数を超えたため、まだ計画に入っていません（記録したままです。同じ内容をもう一度送ると計画に入れます）。`;
         //   §0f.3 の 1（2026-10-09）: この送信を途中で止めた（時間切れ・取り消し・切断・上限）ので、受け付けた指示は計画に入れていない（計画の AI を呼ばない）
         else if (stage === 'stopped') { m.text = `${body}。この送信の処理を途中で止めたため、まだ計画に入っていません（記録したままです。同じ内容をもう一度送ると計画に入れます）。`; noteStoppedInstruction(m); }
-        else if (stage === 'superseded') m.text = `${body}。作り直しの間に別の操作で計画が置き換わったため、この作り直しの結果は使いませんでした。回答は前の計画の系列に記録したままです。`;
+        else if (stage === 'superseded') m.text = `${body}。作り直しの間に別の操作で計画が置き換わったため、この作り直しの結果は使いませんでした。回答は前の計画に記録したままです。`;
         else if (stage === 'failed' || stage === 'cancelled') m.text = `${body}。計画の作り直しは${stage === 'cancelled' ? '取り消しました' : '完了していません（失敗しました）'}。${m.data.texts ? '依頼の文はチャットに残っています（もう一度送ると計画に入れます）' : `回答は記録したままです（${stage === 'cancelled' ? '' : '［再試行］か、'}同じ回答をもう一度送ると計画に入れます）`}。`;
         emit();
       }
@@ -18860,7 +18879,7 @@
           if (delegatedA.length) toolkit(adoptNoRecText(delegatedA), { kind: 'adopt-delegated', planId: base.planId, version: base.version });
           if (!recs.length && !notes.length) {
             if (cls.reason === 'ANSWER_PENDING') { toolkit('その回答は、いま直している変更案に入れています。', { kind: 'answers-in-progress', planId: base.planId, version: base.version }); return out; }
-            if (!(outA.adoptNoRec && outA.adoptNoRec.length)) toolkit('回答として記録できる内容がありませんでした。作り直しの後に、確認事項のカードの回答欄から送ってください。', { kind: 'answers-none', planId: base.planId, version: base.version });
+            if (!(outA.adoptNoRec && outA.adoptNoRec.length)) toolkit('回答として記録できる内容がありませんでした。作り直しの後に、最終案のカードの回答欄から送ってください。', { kind: 'answers-none', planId: base.planId, version: base.version });
             return { ...out, ok: false };
           }
           if (notes.length) KTAiAnswers.touch(lg, null);
@@ -19208,7 +19227,7 @@
           if (!ackMsg || late() || ackMsg.data?.stage === 'done') return;
           const lines = (ackMsg.data?.records || []).map(answerLine).join('／');
           ackMsg.data = { ...ackMsg.data, stage };
-          if (stage === 'superseded') ackMsg.text = `回答を受け付けました：${lines}。作り直しの間に別の操作で計画が置き換わったため、この作り直しの結果は使いませんでした。回答は前の計画の系列に記録したままです。kintone にはまだ何も反映していません。`;
+          if (stage === 'superseded') ackMsg.text = `回答を受け付けました：${lines}。作り直しの間に別の操作で計画が置き換わったため、この作り直しの結果は使いませんでした。回答は前の計画に記録したままです。kintone にはまだ何も反映していません。`;
           else if (stage !== 'done') ackMsg.text = `回答を受け付けました：${lines}。計画の作り直しは${stage === 'cancelled' ? '取り消しました' : '完了していません（失敗しました）'}。回答は記録したままです（${stage === 'cancelled' ? '' : '［再試行］か、'}同じ回答をもう一度送ると計画に入れます）。kintone にはまだ何も反映していません。`;
           emit();
         };
@@ -19315,7 +19334,7 @@
         /** 効果を「要件として必要な動作」の言い方で（要件未達の理由の文） */
         const EFFECT_NEED_JA = KT_EFFECT_NEED_JA;
         /** 動作テストの期待（Gateway の behavior.cases[].expect）の言い方 */
-        const EXPECT_JA = Object.freeze({ lock: '編集できない', 'not-locked': '編集できる', warn: '警告が出る（保存は止まらない）', 'not-warned': '警告が出ない', 'block-save': '保存が止まる', 'save-allowed': '保存できる', 'set-value': '値が設定される', 'value-unchanged': '値は変わらない', hidden: '表示されない', shown: '表示される', 'show-hide': '表示が切り替わる', [KT_PORT_EXPECT]: '移植元と同じ動き' });
+        const EXPECT_JA = Object.freeze({ lock: '編集できない', 'not-locked': '編集できる', warn: '警告が出る（保存は止まらない）', 'not-warned': '警告が出ない', 'block-save': '保存が止まる', 'save-allowed': '保存できる', 'set-value': '値が設定される', 'value-unchanged': '値は変わらない', hidden: '表示されない', shown: '表示される', 'show-hide': '表示が切り替わる', 'row-buttons-hidden': '行の追加・削除のボタンが表示されない', 'row-buttons-shown': '行の追加・削除のボタンが表示される', [KT_PORT_EXPECT]: '移植元と同じ動き' });
         /** 2026-10-10（§5.2）: 移植元と比べた動き（{ stopped, errors: { フィールドのコード: 文 }, eventError }）の文（「止める（…のエラー「…」）」／「止めない」）。
          *  レビュー T-5（2026-10-14・Gateway の R-2 と同じ形）: error の置き場所を出す。フィールドの error は「「金額」（amount）のエラー「…」」（ラベルが無ければコードだけ）、
          *  event.error は「画面全体のエラー「…」」。両方あれば並べる（3 件まで）。置き場所が違うだけの不合格を同じ文に見せない */
@@ -19418,19 +19437,19 @@
           const details = [...new Set(blocks.map(ch => String(ch.message || '')).filter(Boolean))].slice(0, 8);
           const repairs = ver && ver.repairs && typeof ver.repairs === 'object' ? ver.repairs : null;
           const rc = repairs && repairs.count ? repairs.count : 0;
-          if (!entry.review) return { status: 'unresolved', kind: 'no-review', reason: 'Toolkit の形式確認を完了できませんでした', next: '時間をおいて最終案を作り直します。', details };
+          if (!entry.review) return { status: 'unresolved', kind: 'no-review', reason: 'Toolkit のコードの検査を完了できませんでした', next: '時間をおいて最終案を作り直します。', details };
           //   簡素化 B（2026-10-16）: 生成工程の検証結果が無い応答は、必須の効果が無い JavaScript でも合格にしない（Toolkit の形式確認だけで検証済みにしない）。
           //   2026-10-23（§12.61）: 検証結果の無い応答は受け取りの関所（KTAiClient.receive）が通さない。ここに無いのは Toolkit の内部の問題（合格にはしない）
-          if (!ver) return { status: 'unresolved', kind: 'no-verification', reason: '生成工程の検証結果がありません（Toolkit の内部の問題）', next: '最終案を作り直します。', details };
+          if (!ver) return { status: 'unresolved', kind: 'no-verification', reason: 'AI サービスの検証結果がありません（Toolkit の内部の問題）', next: '最終案を作り直します。', details };
           //   簡素化 B（2026-10-17）: 検証結果の指紋が、受け取った本文の指紋と一致しない（別の候補の検証結果・指紋の無い検証結果）→ 合格にしない
-          if (ver.bound !== true) return { status: 'unresolved', kind: 'verification-mismatch', fix: 'regenerate', reason: '生成工程の検証結果が、受け取った本文と対応していません（本文の指紋が一致しません）。この検証結果では合格にしません', next: '最終案を作り直します（候補を作り直し、その候補で検証し直します）。', details };
+          if (ver.bound !== true) return { status: 'unresolved', kind: 'verification-mismatch', fix: 'regenerate', reason: 'AI サービスの検証結果が、受け取った本文と対応していません（本文の指紋が一致しません）。この検証結果では合格にしません', next: '最終案を作り直します（JavaScript を作り直して検証し直します）。', details };
           const behaviorFailed = er.failed.length > 0 || er.otherFailed.length > 0;
           if (codeBlocks.length || er.missing.length || behaviorFailed || (ver && ver.passed === false)) {
             const missing = er.missing.map(i => `${fieldName(i.field)}: ${EFFECT_NEED_JA[i.effect] || i.effect}`);
-            const head = rc ? `生成工程で修復を ${rc} 回行いましたが、直りませんでした。` : '';
-            const reason = missing.length ? `要件未達（${missing.join('・')}）。必要な処理がありません` : behaviorFailed ? '模擬テストで、必須の動作のとおりに動きませんでした' : '生成工程の機械検査、または登録する本文の確認で、登録を止める問題が残りました';
+            const head = rc ? `AI が直しを ${rc} 回行いましたが、直りませんでした。` : '';
+            const reason = missing.length ? `要件を満たしていません（${missing.join('・')}）。必要な処理がありません` : behaviorFailed ? '模擬テストで、必須の動作のとおりに動きませんでした' : 'AI サービスのコードの検査、または登録する本文の確認で、登録を止める問題が残りました';
             //   §0c.8: 次の手は最終案のカードの［計画を直すよう依頼する］で実行できる（fix revise。自動では送らない）
-            return { status: 'unresolved', kind: missing.length ? 'missing' : behaviorFailed ? 'behavior-fail' : 'machine', fix: 'revise', reason: `${head}${reason}`, next: `${missing.length ? '必要な動作が計画（実装仕様）のフィールド・イベントで扱えるかを見直します。' : '同じ依頼のまま作り直しても結果は変わりません。計画か実装仕様（条件・対象・イベント・既存の JavaScript との役割分担）を見直します。'}${FIX_HINT.revise}`, details, stoppedBy: repairs && repairs.stoppedBy ? repairs.stoppedBy : null, repairs: rc };
+            return { status: 'unresolved', kind: missing.length ? 'missing' : behaviorFailed ? 'behavior-fail' : 'machine', fix: 'revise', reason: `${head}${reason}`, next: `${missing.length ? '必要な動作が計画（JavaScript の仕様）のフィールド・画面の操作で扱えるかを見直します。' : '同じ依頼のまま作り直しても結果は変わりません。計画かJavaScript の仕様（条件・対象・画面の操作・既存の JavaScript との役割分担）を見直します。'}${FIX_HINT.revise}`, details, stoppedBy: repairs && repairs.stoppedBy ? repairs.stoppedBy : null, repairs: rc };
           }
           //   §0c.6: 実行できなかった理由は区分ごとに理由と次の方針を変える（環境・条件の形・件数の上限・既存の JavaScript・そのほか）。どれも修復は依頼しない
           if (er.notRun.length) {
@@ -19441,11 +19460,11 @@
             if (hard.length) {
               const OMIT_JA = { url: 'URL で読み込むファイルのため、本文を確かめられません', 'no-source': '本文を取得できませんでした', limit: '模擬テストに渡せる既存の JavaScript の件数・文字数の上限を超えました', other: '必須の動作に関係しないと判断して、模擬テストに渡していません' };
               //   §0c.10（2026-10-08）: Gateway の代表条件の理由ごとのファイルの事情（details.files の名前・種類（kinds）・API の名前（apis）。構造化した値だけを使う）
-              const CASE_FILE_JA = { 'existing-unverifiable': 'その画面で登録する処理を確かめられません（登録を本文から読めない、または読み込みのときに隔離環境で登録されませんでした）', 'existing-unrunnable': 'その画面の処理（handler）を隔離環境で動かせません', 'existing-exception': 'その画面の処理（handler）が隔離環境で例外になりました', 'related-file-omitted': '作った JavaScript が使う名前を定義しているかもしれませんが、模擬テストに渡していません' };
-              const KIND_JA = { exception: '例外', unsupported: '隔離環境に無い機能', network: '通信', listener: 'ブラウザのイベントの登録', 'stub-callback': '代わりの値に関数を渡す呼び出し（jQuery(function) など）', timer: 'タイマー', 'undefined-name': '定義されていない名前', 'pending-jobs': '読み込みの後に残った非同期の処理', 'registered-unlisted': '本文から読んだ以外のイベントの登録', 'first-arg': '登録のイベント名を本文から読めない', nested: 'handler の中での登録', 'events-alias': 'kintone.events を呼び出し以外で参照', 'not-registered': '本文から読んだ登録が隔離環境で登録されなかった', 'parse-error': '構文解析できない',
+              const CASE_FILE_JA = { 'existing-unverifiable': 'その画面で登録する処理を確かめられません（登録を本文から読めない、または読み込みのときに模擬テストの環境で登録されませんでした）', 'existing-unrunnable': 'その画面の処理を模擬テストの環境で動かせません', 'existing-exception': 'その画面の処理が模擬テストの環境で例外になりました', 'related-file-omitted': '作った JavaScript が使う名前を定義しているかもしれませんが、模擬テストに渡していません' };
+              const KIND_JA = { exception: '例外', unsupported: '模擬テストの環境に無い機能', network: '通信', listener: 'ブラウザのイベントの登録', 'stub-callback': '代わりの値に関数を渡す呼び出し（jQuery(function) など）', timer: 'タイマー', 'undefined-name': '定義されていない名前', 'pending-jobs': '読み込みの後に残った非同期の処理', 'registered-unlisted': '本文から読んだ以外のイベントの登録', 'first-arg': '登録のイベント名を本文から読めない', nested: '処理の中での登録', 'events-alias': 'kintone.events を呼び出し以外で参照', 'not-registered': '本文から読んだ登録が模擬テストの環境で登録されなかった', 'parse-error': '構文解析できない',
                 //   §0c.10 / §0c.11（2026-10-08）: Gateway の登録の照合の種類（契約 20 §13・Gateway の staticRegistrationsOf の理由の名前）
-                'dynamic-event-name': '登録のイベント名を本文から読めない', 'nested-registration': 'handler の中での登録', 'not-top-level': '即時実行でない関数・コールバックの中での登録', 'events-reference': 'kintone.events を呼び出し以外で参照', 'events-off': 'kintone.events.off で登録を外す', 'kintone-alias': 'kintone を別の名前に入れる・引数で渡す', 'kintone-shadowed': 'kintone という名前を宣言し直す',
-                'in-loop': '繰り返しの中での登録', 'mutable-array': 'イベント名の配列を書き換える', 'kintone-computed': '計算した添字で kintone を取り出す', 'kintone-foreign': 'window・globalThis・self 以外から kintone を取り出す', 'eval-reference': 'eval・Function・文字列のタイマーの使用', 'fewer-registrations': '本文から読んだ登録の一部が隔離環境で登録されなかった', 'registered-truncated': '登録の記録が上限を超えた', 'load-network': '読み込みのときの通信' };
+                'dynamic-event-name': '登録のイベント名を本文から読めない', 'nested-registration': '処理の中での登録', 'not-top-level': '即時実行でない関数・コールバックの中での登録', 'events-reference': 'kintone.events を呼び出し以外で参照', 'events-off': 'kintone.events.off で登録を外す', 'kintone-alias': 'kintone を別の名前に入れる・引数で渡す', 'kintone-shadowed': 'kintone という名前を宣言し直す',
+                'in-loop': '繰り返しの中での登録', 'mutable-array': 'イベント名の配列を書き換える', 'kintone-computed': '計算した添字で kintone を取り出す', 'kintone-foreign': 'window・globalThis・self 以外から kintone を取り出す', 'eval-reference': 'eval・Function・文字列のタイマーの使用', 'fewer-registrations': '本文から読んだ登録の一部が模擬テストの環境で登録されなかった', 'registered-truncated': '登録の記録が上限を超えた', 'load-network': '読み込みのときの通信' };
               const kindsText = (fk) => { if (!fk) return ''; const ks = (fk.kinds || []).map(k => (KIND_JA[k] ? `${KIND_JA[k]}（${k}）` : k)); const as = fk.apis || []; return ks.length || as.length ? `（${[ks.length ? `種類: ${ks.join('・')}` : '', as.length ? `API: ${as.join('・')}` : ''].filter(Boolean).join('／')}）` : ''; };
               const fileRows = new Map();
               for (const f of (er.omittedHit || [])) { const label = f.url || f.name; if (!fileRows.has(label)) fileRows.set(label, OMIT_JA[f.reason] || OMIT_JA.other); }
@@ -19459,7 +19478,7 @@
               return { status: 'not-run', kind: 'out-of-reach', category: 'existing', reasonKey: hard[0], unfixable: true,
                 reason: `対応できない範囲: 既存の JavaScript${names.length ? `（${names.slice(0, 3).map(n => `「${n}」`).join('・')}${names.length > 3 ? ` ほか ${names.length - 3} 件` : ''}）` : ''}と一緒の動きを模擬テストで確かめられないため、この最終案は反映できません`,
                 next: '計画を直しても解けない理由のため、依頼の操作は出していません（作った JavaScript の誤りとは判定していません）。詳細に理由とファイルを出しています。',
-                details: [...[...fileRows.entries()].map(([n, why]) => `「${n}」: ${why}`), ...hard.map(r => `理由: ${ktBehaviorReasonJa(r)}（生成工程の語: ${r}）`), ...details].slice(0, 10) };
+                details: [...[...fileRows.entries()].map(([n, why]) => `「${n}」: ${why}`), ...hard.map(r => `理由: ${ktBehaviorReasonJa(r)}（AI サービスの区分: ${r}）`), ...details].slice(0, 10) };
             }
             const cat = er.reasonCategory || 'env';
             //   §0d.1（2026-10-08）: 模擬テストが要る効果（生成工程の check: behavior）を、模擬テストの環境が使えないために確かめられないときは、理由を一度にまとめて出す
@@ -19471,7 +19490,7 @@
               const labels = needed.map(i => `${fieldName(i.field)}: ${KT_EFFECT_JA[i.effect] || i.effect}`);
               const reasons = [...new Set([...needed.flatMap(i => i.checkReason || []), ...(needed.some(i => i.condition) ? ['condition'] : []), ...needed.filter(i => i.effect === 'warn' || i.effect === 'block-save').map(i => i.effect)])];
               const text = ktBehaviorNeededText(labels, reasons);
-              return { status: 'not-run', kind: 'environment', category: 'env', reasonKey: er.reason || null, behaviorNeeded: { labels, reasons }, reason: text, readiness: `${text}。`, next: KT_REASON_CATEGORY.env.next, details: [...details, ...reasons.map(r => `模擬テストが要る理由（生成工程の語）: ${r}`), ...[...new Set(er.notRun.flatMap(i => i.notRunReasons || []))].map(r => `模擬テストを実行できなかった理由（生成工程の語）: ${r}`)].slice(0, 10) };
+              return { status: 'not-run', kind: 'environment', category: 'env', reasonKey: er.reason || null, behaviorNeeded: { labels, reasons }, reason: text, readiness: `${text}。`, next: KT_REASON_CATEGORY.env.next, details: [...details, ...reasons.map(r => `模擬テストが要る理由（AI サービスの区分）: ${r}`), ...[...new Set(er.notRun.flatMap(i => i.notRunReasons || []))].map(r => `模擬テストを実行できなかった理由（AI サービスの区分）: ${r}`)].slice(0, 10) };
             }
             const info = KT_REASON_CATEGORY[cat] || KT_REASON_CATEGORY.other;
             //   C-1 第 3 段: 既存 JS の編集不可の取り消しを確かめられない代表条件（existing-lock-unverified）のファイル名も出す
@@ -19483,12 +19502,12 @@
             //   C-1 第 4 段（2026-10-09・ledger U1）: 既存の編集不可がある所が候補自身の統合先だけなら、「統合する」の案は出さない（効果のイベントで具体的に書く）
             const ownLock = ownLockOnlyOf(entry, er);
             const nextText = ownLock ? `${ownLockFixText(ownLock)}。${FIX_HINT.revise}` : (rInfo && rInfo.next) || info.next;
-            return { status: 'not-run', kind: cat === 'env' ? 'environment' : cat, category: cat, reasonKey: er.reason || null, ...(fix ? { fix } : {}), reason: `模擬テストを実行できませんでした（${info.label}${er.reason ? `: ${envReasonJa(er.reason)}` : ''}${cat === 'existing' && files.length ? `。${files.slice(0, 3).join('・')}` : ''}）。作った JavaScript の誤りとは判定していません`, next: nextText, details: [...details, ...[...new Set(er.notRun.flatMap(i => i.notRunReasons || []))].map(r => `模擬テストを実行できなかった理由（生成工程の語）: ${r}`)].slice(0, 10) };
+            return { status: 'not-run', kind: cat === 'env' ? 'environment' : cat, category: cat, reasonKey: er.reason || null, ...(fix ? { fix } : {}), reason: `模擬テストを実行できませんでした（${info.label}${er.reason ? `: ${envReasonJa(er.reason)}` : ''}${cat === 'existing' && files.length ? `。${files.slice(0, 3).join('・')}` : ''}）。作った JavaScript の誤りとは判定していません`, next: nextText, details: [...details, ...[...new Set(er.notRun.flatMap(i => i.notRunReasons || []))].map(r => `模擬テストを実行できなかった理由（AI サービスの区分）: ${r}`)].slice(0, 10) };
           }
           //   §0c.8: 代表条件の無い効果（untested）は、確かめられるようになるのを待たずに計画を直す（fix revise）。解析できない・返らない（unknown・unchecked）・
           //   作り直しを依頼できる（fix regenerate。依頼の文が生成の入力に入る）
-          if (er.untested.length) return { status: 'unverified', kind: 'unverified', fix: 'revise', reasonKey: 'no-cases', reason: '必須の動作を確かめた模擬テストの結果がありません（確かめる代表条件がありません）', next: KT_BEHAVIOR_REASONS['no-cases'].next, details };
-          if (er.unknown.length || er.unchecked.length) return { status: 'unverified', kind: 'unverified', fix: 'regenerate', reason: er.unchecked.length && !er.unknown.length ? '必須の動作の処理があるかを、生成工程の検査で解析できませんでした（未確認。処理が無いとは判定していません）' : '必須の動作を確かめた模擬テストの結果がありません（未確認）', next: `同じ入力では同じ結果になるため、自動では作り直していません。${FIX_HINT.regenerate}`, details };
+          if (er.untested.length) return { status: 'unverified', kind: 'unverified', fix: 'revise', reasonKey: 'no-cases', reason: '必須の動作を確かめた模擬テストの結果がありません（確かめる条件がありません）', next: KT_BEHAVIOR_REASONS['no-cases'].next, details };
+          if (er.unknown.length || er.unchecked.length) return { status: 'unverified', kind: 'unverified', fix: 'regenerate', reason: er.unchecked.length && !er.unknown.length ? '必須の動作の処理があるかを、AI サービスの検査で解析できませんでした（未確認。処理が無いとは判定していません）' : '必須の動作を確かめた模擬テストの結果がありません（未確認）', next: `同じ入力では同じ結果になるため、自動では作り直していません。${FIX_HINT.regenerate}`, details };
           return { status: 'verified', kind: null, reason: '', next: '', details };
         };
         /**
@@ -19531,7 +19550,7 @@
               //   §0c.10（2026-10-08）: 候補の unsupported の原因の API の名前（Gateway の details.apis・読み込みの details.files の apis。構造化した値）を依頼の文に入れる
               const apis = [...new Set((er ? er.notRun : []).flatMap(i => i.cases.filter(y => y.verdict === 'not-run' && y.details).flatMap(y => [...(Array.isArray(y.details.apis) ? y.details.apis : []), ...(Array.isArray(y.details.files) ? y.details.files.flatMap(f => (f && typeof f === 'object' && Array.isArray(f.apis) ? f.apis : [])) : [])])).map(String).filter(Boolean))].slice(0, 8);
               for (const a of apis) regenApis.add(a);
-              regen.push(`・${file}: ${vd.reason}${apis.length ? `（原因の API: ${apis.join('・')}）` : ''}${msgs.length ? `（生成工程の記録: ${[...new Set(msgs.map(m => cut(m, 120)))].slice(0, 2).join('／')}）` : ''}`);
+              regen.push(`・${file}: ${vd.reason}${apis.length ? `（原因の API: ${apis.join('・')}）` : ''}${msgs.length ? `（AI サービスの記録: ${[...new Set(msgs.map(m => cut(m, 120)))].slice(0, 2).join('／')}）` : ''}`);
               continue;
             }
             revise = true;
@@ -19545,7 +19564,7 @@
             if (vd.kind === 'effects-limit') { lines.push(`${head}: ${vd.reason}`); hints.add('limit'); continue; }
             if (!er) { lines.push(`${head}: ${vd.reason}`); hints.add('missing'); continue; }
             if (vd.status === 'unresolved') {
-              for (const i of er.missing.slice(0, 4)) lines.push(`${head}: ${fieldName(i.field)}を${KT_EFFECT_NEED_JA[i.effect] || i.effect}処理がありません（要件未達）`);
+              for (const i of er.missing.slice(0, 4)) lines.push(`${head}: ${fieldName(i.field)}を${KT_EFFECT_NEED_JA[i.effect] || i.effect}処理がありません（要件を満たしていません）`);
               //   2026-10-10（§5.2）: 移植元と同じ条件の効果（conditionFrom）は「移植元と同じ動きにならなかった」と書く（「保存を止める動きにならなかった」と言わない）
               for (const i of er.failed.slice(0, 4)) lines.push(`${head}: ${i.conditionFrom ? `${fieldName(i.field)}の保存を止める動きが、移植元「${i.conditionFrom.file}」と同じになりませんでした` : `${fieldName(i.field)}を${KT_EFFECT_NEED_JA[i.effect] || i.effect}動きになりませんでした`}（模擬テスト）${i.cases.filter(y => y.verdict === 'fail' && y.message).length ? `: ${cut(i.cases.find(y => y.verdict === 'fail' && y.message).message, 120)}` : ''}`);
               if (!er.missing.length && !er.failed.length) lines.push(`${head}: ${vd.reason}`);
@@ -19559,7 +19578,7 @@
               const values = [...new Set(nonPass.flatMap(y => (y.details && Array.isArray(y.details.values) ? y.details.values : []).map(String)))].slice(0, 6);
               const msgs = [...new Set(nonPass.map(y => cut(y.message, 120)).filter(Boolean))].slice(0, 2);
               const cats = [...new Set(reasons.map(r => (KT_REASON_CATEGORY[ktBehaviorReasonCategory(r)] || KT_REASON_CATEGORY.other).label))];
-              lines.push(`${head}: ${fieldName(i.field)}を${KT_EFFECT_NEED_JA[i.effect] || i.effect}動作を確かめられません（${cats.join('・')}: ${[...new Set(reasons.map(envReasonJa))].join('・')}${values.length ? `・値 ${values.map(x => `「${x}」`).join('')}` : ''}）${msgs.length ? `。生成工程の記録: ${msgs.join('／')}` : ''}`);
+              lines.push(`${head}: ${fieldName(i.field)}を${KT_EFFECT_NEED_JA[i.effect] || i.effect}動作を確かめられません（${cats.join('・')}: ${[...new Set(reasons.map(envReasonJa))].join('・')}${values.length ? `・値 ${values.map(x => `「${x}」`).join('')}` : ''}）${msgs.length ? `。AI サービスの記録: ${msgs.join('／')}` : ''}`);
               for (const r of reasons) hints.add(hintKeyOfReason(r));
             }
             //   C-1 第 4 段（2026-10-09・ledger U1）: 既存の編集不可がある所が候補自身の統合先だけなら、統合の案は出さず効果のイベントで具体的に書く
@@ -19576,9 +19595,9 @@
           const lockHint = () => [...ownLocks.map(ownLockFixText), ...(lockFiles.size || !ownLocks.length ? [`警告を変更・保存のイベントで出すか、既存の JavaScript${lockFiles.size ? `（${[...lockFiles].slice(0, 4).join('・')}）` : ''}に統合する形に計画を直してください`] : [])].join('。');
           const hintText = (k) => (k === 'existing-lock-unverified' ? lockHint() : FIX_REASON_HINT[k]);
           if (revise) parts.push(`最終案で、次の点を確かめられないため反映できません。計画を直してください。\n${lines.join('\n')}\n直し方: ${[...hints].map(hintText).filter(Boolean).join('。')}。`);
-          if (regen.length) parts.push(`${revise ? '' : '最終案の JavaScript を作り直してください。'}作った JavaScript が、模擬テストの隔離環境で動かせない書き方・機能を使っていたため、必須の動作を確かめられませんでした。要件は変えずに、その書き方・機能（${regenApis.size ? [...regenApis].slice(0, 8).join('・') : 'BigInt・ブラウザの画面の API など'}）を使わない形で JavaScript を作り直してください。\n${regen.join('\n')}`);
+          if (regen.length) parts.push(`${revise ? '' : '最終案の JavaScript を作り直してください。'}作った JavaScript が、模擬テストの環境で動かせない書き方・機能を使っていたため、必須の動作を確かめられませんでした。要件は変えずに、その書き方・機能（${regenApis.size ? [...regenApis].slice(0, 8).join('・') : 'BigInt・ブラウザの画面ごとに使える機能 など'}）を使わない形で JavaScript を作り直してください。\n${regen.join('\n')}`);
           const kind = revise ? 'revise' : 'regenerate';
-          return { kind, label: KT_FIX_LABEL[kind], text: parts.join('\n').slice(0, 1900), display: revise ? '最終案で確かめられなかった点を直すよう、計画の修正を依頼します' : '隔離環境で動かせない書き方を使わずに、JavaScript の作り直しを依頼します' };
+          return { kind, label: KT_FIX_LABEL[kind], text: parts.join('\n').slice(0, 1900), display: revise ? '最終案で確かめられなかった点を直すよう、計画の修正を依頼します' : '模擬テストの環境で動かせない書き方を使わずに、JavaScript の作り直しを依頼します' };
         };
         /** 模擬の環境の指紋（同じ platform の既存 JS の本文・ステータスなどの設定・計画の新設。画面が services.simEnvKey で作る。無ければ null） */
         const envKeyOf = async (v, cid) => { if (typeof services.simEnvKey !== 'function') return null; try { return (await services.simEnvKey({ version: v, customizationId: cid })) ?? null; } catch (e) { return null; } };
@@ -19649,12 +19668,12 @@
           //   レビュー T-1（2026-10-14）: why ごとの理由（events-unreadable = 移植元のイベントの登録を本文から読めない／no-source = 本文を渡せない。2026-10-18: 接続先の非対応は生成の前の確認で扱う）。
           //   2026-10-20: events-unreadable は生成工程の答え（CONDITION_SOURCE_UNVERIFIABLE。Toolkit は登録を読まない）から
           //   レビュー 3（2026-10-14）: 本文を取れない（読めない）ときは「同じ条件かは確かめていません」（不可能と読める「確かめられません」は使わない）。接続先が非対応のときだけ「検査ができません」
-          const portWhyJa = (xs, src) => (xs.some(u => u.why === 'events-unreadable') ? `移植元「${src}」のイベントの登録を本文から読めないので、同じ条件かは確かめていません` : '移植元の本文を取れない（取得できない・大きすぎるなど）ので、同じ条件かは確かめていません');
+          const portWhyJa = (xs, src) => (xs.some(u => u.why === 'events-unreadable') ? `移植元「${src}」がどの画面の操作で動くかを本文から読み取れないので、同じ条件かは確かめていません` : '移植元の本文を取れない（取得できない・大きすぎるなど）ので、同じ条件かは確かめていません');
           for (const src of [...new Set(list.filter(u => u.reason === 'condition-unknown' && u.source).map(u => u.source))]) {
             const xs = list.filter(u => u.reason === 'condition-unknown' && u.source === src);
             parts.push(`${names(xs)}の保存を止める条件は既存の JavaScript「${src}」の判定と同じ（移植）ですが、${portWhyJa(xs, src)}（「いつでも保存を止める」にはしていません）`);
           }
-          if (op.length) parts.push(`${names(op)}の動作（${[...new Set(op.map(u => KT_EFFECT_JA[u.effect] || u.effect))].join('・')}）に、この JavaScript が読み込まれない画面（${[...new Set(op.flatMap(u => u.platforms || []).map(p => (p === 'mobile' ? 'モバイル' : 'PC')))].join('・')}）のイベントがあり、その画面を担当する JavaScript が計画にありません`);
+          if (op.length) parts.push(`${names(op)}の動作（${[...new Set(op.map(u => KT_EFFECT_JA[u.effect] || u.effect))].join('・')}）に、この JavaScript が読み込まれない画面（${[...new Set(op.flatMap(u => u.platforms || []).map(p => (p === 'mobile' ? 'モバイル' : 'PC')))].join('・')}）の操作が含まれ、その画面を担当する JavaScript が計画にありません`);
           //   レビュー T-2（2026-10-14）: すべてが移植元つきの condition-unknown（動作は決まっていて、同じ条件かを確かめる手段が無いだけ）のときは「特定できません」と言わない
           const portOnly = list.length > 0 && list.every(u => u.reason === 'condition-unknown' && u.source);
           return `必須の動作${portOnly ? 'はまだ確かめていません' : 'を特定できません'}（${parts.join('。') || '計画と要件から特定できません'}）`;
@@ -19702,7 +19721,7 @@
             const portOnly = unresolved.every(u => u.reason === 'condition-unknown' && u.source);
             //   レビュー T-1（2026-10-14）: events-unreadable（移植元のイベントの登録を本文から読めない）も、計画を直しても解けない理由として同じ扱い
             //   レビュー 3（2026-10-14）: 本文を取れない（読めない）ときの次の方針は「同じ条件かは確かめていません」の形（不可能と読める語を使わない）
-            const portNext = unresolved.some(u => u.why === 'events-unreadable') ? '移植元の既存の JavaScript のイベントの登録を本文から読めないので、同じ条件かは確かめていません（計画を直しても解けないため、依頼の操作は出していません。移植元の本文を解析できる状態で最終案を作り直します）。' : '移植元の既存の JavaScript の本文を取れないので、同じ条件かは確かめていません（計画を直しても解けないため、依頼の操作は出していません。本文を取得できる状態で最終案を作り直します）。';
+            const portNext = unresolved.some(u => u.why === 'events-unreadable') ? '元にする既存の JavaScript の本文を読み取れないので、同じ条件かは確かめていません（計画を直しても解けないため、依頼の操作は出していません。移植元の本文を解析できる状態で最終案を作り直します）。' : '移植元の既存の JavaScript の本文を取れないので、同じ条件かは確かめていません（計画を直しても解けないため、依頼の操作は出していません。本文を取得できる状態で最終案を作り直します）。';
             return { ...base, generated: null, review: null, existingSource: null, status: 'not-ready', candidateHash: null, attempts: previous ? previous.attempts || null : null,
               verdict: { status: 'not-ready', kind: 'effects-unknown', ...(portOnly ? { port: true } : { fix: 'revise' }), unresolved: unresolved.map(u => ({ ...u })), reason: unresolvedReasonOf(unresolved), next: portOnly ? portNext : `${(state.effectRetried.get(v.planId) || new Set()).has(cid) ? '計画の差分更新を 1 回自動で依頼しましたが、まだ決まっていません。' : ''}計画のフィールドと必要な動作（編集できない・警告・保存を止めるなど）を見直します（同じ要望を言い直す必要はありません）。${FIX_HINT.revise}`, details: unresolved.map(u => `${u.reason}${u.field ? `: ${u.field}` : ''}${u.effect ? ` / ${u.effect}` : ''}${u.requirementId ? ` / ${u.requirementId}` : ''}${u.source ? ` / 移植元 ${u.source}（${u.why}）` : ''}`) } };
           };
@@ -19721,7 +19740,7 @@
           };
           //   §0c.6: 必須の効果は生成工程の上限（20 件）まで。超える分を黙って落とすと確かめないまま残るので、生成を呼ばずに準備未完了（件数の上限）にする
           if (req.effects.length > 20) return { ...base, generated: null, review: null, existingSource: null, status: 'not-ready', candidateHash: null, attempts: previous ? previous.attempts || null : null,
-            verdict: { status: 'not-ready', kind: 'effects-limit', fix: 'revise', reasonKey: 'limit', reason: `必須の動作が ${req.effects.length} 件あり、生成工程で一度に確かめられる 20 件を超えています`, next: KT_REASON_CATEGORY.limit.next, details: [] } };
+            verdict: { status: 'not-ready', kind: 'effects-limit', fix: 'revise', reasonKey: 'limit', reason: `必須の動作が ${req.effects.length} 件あり、AI サービスで一度に確かめられる 20 件を超えています`, next: KT_REASON_CATEGORY.limit.next, details: [] } };
           progressChecklist(checklistOfEffects(req.effects));
           aiCall();
           const tg = clock();
@@ -19756,7 +19775,7 @@
           }
           //   同じ入力・同じ指摘で AI を呼ばなかった回（REPEAT_SAME_INPUT）は回数・履歴を進めない（履歴の指摘を空にすると、次の同じ入力で「検査は通っています」と案内してしまう）
           //   §0f.3 の 1: 止めた回も回数・履歴を進めない（同じ入力の作り直しを「繰り返し」と数えない）
-          if (!r || !r.ok) return { ...base, generated: previous ? previous.generated : null, review: previous ? previous.review : null, existingSource: previous ? previous.existingSource : null, status: 'failed', failure: { reason: r?.reason || 'ERROR', message: r?.message || 'JavaScript を生成できませんでした。', ...(r && r.aiReason ? { aiReason: r.aiReason } : {}), ...(r && r.stop ? { stop: r.stop, endUnknown: stopEndUnknown(r.stop) } : {}), ...(r && r.upstream ? { upstream: { ...r.upstream } } : {}), ...(r && r.textChars != null ? { textChars: r.textChars } : {}) }, attempts: r && (r.reason === 'REPEAT_SAME_INPUT' || r.stop) ? ((previous && previous.attempts) || r.attempts || null) : nextAttempts(previous, { inputHash: r?.inputHash ?? null, blockers: [], at: now() }), candidateHash: null };
+          if (!r || !r.ok) return { ...base, generated: previous ? previous.generated : null, review: previous ? previous.review : null, existingSource: previous ? previous.existingSource : null, status: 'failed', failure: { reason: r?.reason || 'ERROR', message: r?.message || 'JavaScript を作れませんでした。', ...(r && r.aiReason ? { aiReason: r.aiReason } : {}), ...(r && r.stop ? { stop: r.stop, endUnknown: stopEndUnknown(r.stop) } : {}), ...(r && r.upstream ? { upstream: { ...r.upstream } } : {}), ...(r && r.textChars != null ? { textChars: r.textChars } : {}) }, attempts: r && (r.reason === 'REPEAT_SAME_INPUT' || r.stop) ? ((previous && previous.attempts) || r.attempts || null) : nextAttempts(previous, { inputHash: r?.inputHash ?? null, blockers: [], at: now() }), candidateHash: null };
           const estimate = generationEstimate({ ctx: r.ctx || null, generated: r.generated || null });
           //   C-1 第 4 段（2026-10-09・K-2 の残り）: 生成の使用量は、この送信の呼び出しの記録に付ける（attempts の累計は版をまたぐので使用量に使わない）
           { const lastCall = timing.calls.length ? timing.calls[timing.calls.length - 1] : null; if (lastCall && lastCall.kind === 'generate' && estimate && estimate.measured !== false && (estimate.input != null || estimate.output != null)) lastCall.genEstimate = estimate; }
@@ -19831,11 +19850,11 @@
           //   2026-10-16（説明文を読みやすくする）: 構造の SUBTABLE_ROWS は「明細の行の追加・削除は防ぎません」を文の本体にし、理由（constraintReasonOf）は別の文にする
           //   （画面の表記は本体の直後。KTAiChatUi.constraintLineOf）。入力欄の編集不可と行の操作を同じ意味にしない。AI の申告（AI_PARTIAL）の文は今のまま
           const constraintTextOf = (x) => {
-            if (x.code === 'SUBTABLE_ROWS') { const names = (Array.isArray(x.tables) ? x.tables : []).filter(Boolean).map(code => String(fieldLabels()[code] || code)).join('・'); return `${names || '明細（テーブル）'}の行の追加・削除は防ぎません`; }
+            if (x.code === 'SUBTABLE_ROWS') { const names = (Array.isArray(x.tables) ? x.tables : []).filter(Boolean).map(code => String(fieldLabels()[code] || code)).join('・'); return `${names ? `「${names}」テーブル` : 'テーブル'}の行は追加・削除できます`; }
             if (x.code === 'AI_PARTIAL') { const note = String(x.noteText ?? x.note ?? '').replace(/\s+/g, ' ').trim(); return fix(note || x.message); }
             return fix(x.message);
           };
-          const constraintReasonOf = (x) => (x.code === 'SUBTABLE_ROWS' ? '入力欄（セル）の編集不可だけでは止められず、行のボタンを隠す API は Toolkit がまだ扱っていません' : '');
+          const constraintReasonOf = (x) => (x.code === 'SUBTABLE_ROWS' ? '入力欄を編集できなくしても、行の追加・削除のボタンは残るためです。行の追加・削除もできなくしたいときは、その旨を依頼に加えてください（ボタンを隠す処理を計画に入れられます）' : '');
           //   この版の要件の台帳（決定事項の見出し・実現した部分の文の条件に使う。2026-10-15 T5: 実現した部分の文を先に作るのでここで引く）
           const lgF = state.ledgers.get(v.planId) || null;
           //   2026-10-15（§4(b)）: 部分対応（AI の PARTIAL・構造の SUBTABLE_ROWS）の要件のうち実現した部分を 1 文にして「この案で実現すること」（左）と「最終的にどう動くか」（右）に足す
@@ -19844,7 +19863,7 @@
           //   レビューの反映 T5: 文を実際に作れた要件の id（ids）も返す。必須の動作の項目に要件の id があればその id、テーブルの列の一致で拾った項目は limitCode SUBTABLE_ROWS の
           //   PARTIAL の要件だけ（ほかの PARTIAL を実現したことにしない）。文を作れなかった要件は ids に入らない
           //   効果の言葉（フィールドの名前 ＋ 助詞 ＋ 動作。実現した部分の文と、計画で足した動作（planAdds）の文で同じ言葉を使う）
-          const EFF_DO = { lock: ['を', '編集できないようにします', '編集できないようにする'], warn: ['に', '警告を出します', '警告を出す'], 'block-save': ['の', '保存を止めます', '保存を止める'], 'set-value': ['に', '値を設定します', '値を設定する'], 'show-hide': ['の', '表示を切り替えます', '表示を切り替える'] };
+          const EFF_DO = { lock: ['を', '編集できないようにします', '編集できないようにする'], warn: ['に', '警告を出します', '警告を出す'], 'block-save': ['の', '保存を止めます', '保存を止める'], 'set-value': ['に', '値を設定します', '値を設定する'], 'show-hide': ['の', '表示を切り替えます', '表示を切り替える'], 'hide-row-buttons': ['の', '行の追加・削除のボタンを隠します', '行の追加・削除のボタンを隠す'] };
           const effPhrase = (fields, e, polite) => { const d = EFF_DO[e] || ['の', `${KT_EFFECT_NEED_JA[e] || e}をします`, KT_EFFECT_NEED_JA[e] || e]; const f = [...new Set((fields || []).filter(Boolean))].map(fieldName).join(''); return `${f ? `${f}${d[0]}` : ''}${polite ? d[1] : d[2]}`; };
           const realizedPartsOf = (ents) => {
             const cols = tableColumns();
@@ -19947,10 +19966,12 @@
             if (ktUrlTarget(e)) cannot.push({ kind: 'external', text: `${file}は URL 指定（${cut(e.existingSource.url || e.existingSource.name || '', 120)}）の JavaScript です。外部サーバーのファイルは Toolkit から書き換えられません`, next: '計画で新しい JavaScript ファイルとして作るよう直してから、最終案を作り直します（URL のファイルは自動で置き換えません）。' });
             //   §0f.3 の 1: 送信を止めた JavaScript（作っている途中で止めた。結果は使っていない）は行にしない（作成途中のカードが 1 回だけ言う。§12.59: 読まれない stopped の行を廃止）
             const stoppedE = e.status === 'failed' && !!(e.failure && e.failure.stop);
-            if (!stoppedE && e.status === 'failed' && e.failure) cannot.push({ kind: 'failed', text: `JavaScript を生成できませんでした: ${cut(fix(FAILURE_JA[e.failure.reason] || e.failure.message), 160)}${e.failure.aiReason ? `（AI の説明: ${cut(e.failure.aiReason, 600)}）` : ''}`, next: 'もう一度最終案を作るか、計画を見直してください。' });
+            if (!stoppedE && e.status === 'failed' && e.failure) cannot.push({ kind: 'failed', text: `JavaScript を作れませんでした: ${cut(fix(FAILURE_JA[e.failure.reason] || e.failure.message), 160)}${e.failure.aiReason ? `（AI の説明: ${cut(e.failure.aiReason, 600)}）` : ''}`, next: 'もう一度最終案を作るか、計画を見直してください。' });
             else if (!stoppedE && e.status !== 'verified' && e.verdict) cannot.push({ kind: e.status === 'unresolved' ? 'unresolved' : e.status, text: `${head}: ${e.verdict.reason}`, next: e.verdict.next, details: (e.verdict.details || []).map(x => cut(x, 300)) });
             //   §0c.8: kintone でできない効果（テーブルの列の表示切り替え）は必須の効果にせず、実現できない点に出す（SUBTABLE_ROWS と同じく承認は止めない）
             for (const np of (Array.isArray(e.notPossible) ? e.notPossible : [])) if (np && np.reason === 'subtable-column-show-hide') cannot.push({ kind: 'limit', text: `${fieldName(np.field)}はテーブル${np.table ? `（${fieldName(np.table)}）` : ''}の列のため、表示・非表示を切り替えられません（kintone の JavaScript で切り替えられるのはテーブル全体だけです）。この動作は作る JavaScript に含めません` });
+            //   2026-10-23（§12.69）: 行の追加・削除のボタンを隠す効果がテーブルでないフィールドに置かれた（計画の誤り。テーブルのフィールドを指定する）
+            for (const np of (Array.isArray(e.notPossible) ? e.notPossible : [])) if (np && np.reason === 'row-buttons-not-table') cannot.push({ kind: 'limit', text: `${fieldName(np.field)}はテーブルではないため、行の追加・削除のボタンを隠す対象にできません（テーブルのフィールドを指定してください）。この動作は作る JavaScript に含めません` });
             //   C-1 第 4 段（2026-10-09・K-3）: JavaScript ごとの行に PC / モバイルを付ける（同じ内容の行は下でまとめる）
             for (let i = from; i < cannot.length; i++) cannot[i].platforms = platformsOfEntry(e);
           }
@@ -19975,7 +19996,7 @@
           //   （NO_VALUES。説明文からは補わない）も出す（fixedReasonsOf が反映できない理由にするものと同じ集まり。理由は分類の文）
           //   §12.59（2026-10-23）: 分類は版の登録で 1 回作ったもの（v.applySteps）。ここで分類し直さない
           const ready = Array.isArray(v.applySteps) ? v.applySteps : [];
-          if (v.applySteps === null) cannot.push({ kind: 'classification-failed', text: `設定の手順の分類に失敗しました（Toolkit の内部の問題: ${cut(fix(v.applyStepsError || '理由不明'), 160)}）`, next: '同じ依頼をもう一度送ると最終案を作り直します。それでも同じなら Toolkit の問題です（この最終案は反映しません）。' });
+          if (v.applySteps === null) cannot.push({ kind: 'classification-failed', text: `設定の手順を反映できるか判定できませんでした（Toolkit の内部の問題: ${cut(fix(v.applyStepsError || '理由不明'), 160)}）`, next: '同じ依頼をもう一度送ると最終案を作り直します。それでも同じなら Toolkit の問題です（この最終案は反映しません）。' });
           const stepTitleOf = (id) => { const st = (Array.isArray(p.steps) ? p.steps : []).find(s => s && s.id === id) || {}; return cut(st.title || st.targetRef || '設定の手順', 80); };
           //   2026-10-19: 実行できない手順は反映の分類の 1 つから（確認で無効な手順の理由は分類が持つ計画の確認の指摘の文）
           const blockedSteps = ready.filter(a => a && a.apply === 'BLOCKED').map(a => ({ id: a.stepId, title: stepTitleOf(a.stepId), reason: cut(fix(a.message || ''), 120) }));
@@ -20147,7 +20168,7 @@
           const scope = { conditions: scopeTexts('conditions'), unchecked: scopeTexts('uncheckedScope'), conditionsNotRun: scopeEntries.some(([, e]) => e.verification.behavior.conditions === null) };
           // 実機で確かめること: 保存を止める・警告（保存は止めない）の必須の効果があるときだけ保存の行を出す（構造化した効果で決める。編集制限と保存の禁止を混同しない）
           const savesMatter = effectRows.some(x => x.effect === 'block-save' || x.effect === 'warn');
-          const howTo = [...new Set([...entries.flatMap(([, e]) => (e.review?.registration?.confirmations || []).map(x => x.howToCheck).filter(Boolean)), ...(effectRows.length ? ['動作テスト環境で、条件に合うレコードと合わないレコードを開いて、必須の動作（' + [...new Set(effectRows.map(x => `${x.label}を${x.effectJa}`))].slice(0, 3).join('・') + '）を確かめる'] : []), ...(entries.length && savesMatter ? ['登録した後、実際に保存して、保存が止まる・止まらないことを確かめる'] : [])])].slice(0, 4);
+          const howTo = [...new Set([...entries.flatMap(([, e]) => (e.review?.registration?.confirmations || []).map(x => x.howToCheck).filter(Boolean)), ...(effectRows.length ? ['動作テスト環境で、条件に合うレコードと合わないレコードを開いて、必須の動作（' + [...new Set(effectRows.map(x => (x.effect === 'hide-row-buttons' ? `${x.label}テーブルの行の追加・削除のボタンを隠す` : `${x.label}を${x.effectJa}`)))].slice(0, 3).join('・') + '）を確かめる'] : []), ...(entries.length && savesMatter ? ['登録した後、実際に保存して、保存が止まる・止まらないことを確かめる'] : [])])].slice(0, 4);
           const unverified = [...new Set([...entries.flatMap(([, e]) => (e.review?.registration?.unverified || []).map(u => u.message)), ...entries.flatMap(([, e]) => e.verification?.unverified || [])].map(fix))].slice(0, 6);
           const questions = [...(v.openQuestions || []).filter(q => q.priority === 'blocking'), ...(v.openQuestions || []).filter(q => q.priority !== 'blocking')];
           const approvable = readiness.ready;
@@ -20259,7 +20280,7 @@
           //   レビュー 9（2026-10-14）: 重複は text 全体の一致か代表条件の id（caseId）の一致で見る（先頭 30 字の部分一致はしない）
           const hasText = (t) => blockers.some(b => b.text === t);
           const hasCase = (id) => !!id && blockers.some(b => b.caseId && b.caseId === id);
-          for (const b of machine.blocks) { const t = `機械検査で登録を止める問題: ${b}`; if (!hasText(t)) blockers.push({ kind: 'machine', text: t, next: '' }); }
+          for (const b of machine.blocks) { const t = `コードの検査で登録を止める問題: ${b}`; if (!hasText(t)) blockers.push({ kind: 'machine', text: t, next: '' }); }
           for (const c of behCases0.filter(x => x.row.verdict === 'fail')) { const t = `模擬テストで不合格: ${c.row.label}${c.row.message ? `（${c.row.message}）` : ''}`; if (!hasText(t) && !hasCase(c.caseId)) blockers.push({ kind: 'behavior-fail', text: t, next: '', ...(c.caseId ? { caseId: c.caseId } : {}) }); }
           for (const r of outOfScope.filter(x => x && typeof x === 'object' && !x.owned && x.decision === 'decided')) blockers.push({ kind: 'ownerless', text: r.line || `「${r.text}」は、この計画のどの手順・JavaScript が担当するか決まっていません`, next: r.line ? '計画を直す（この要件を実現する手順か JavaScript を入れる）か、この要件を取り消してから反映します。' : '計画を直すか、この要件を取り消してから反映します。' });
           //   2026-10-15（§3）: 計画全体で扱う要件の確認（反映は止めない。右の変更内容・反映の前の確認と同じ文）
@@ -20343,7 +20364,7 @@
           const reviewOf = (cid) => (v.review?.steps || []).find(r => r.customization?.customizationId === cid) || null;
           const genList = custs.filter(c => { const rv = reviewOf(c.customizationId); return rv ? !!(rv.codeGeneration && rv.codeGeneration.supported) : ['NEW_JS_FILE', 'EXTEND_EXISTING_JS'].includes(c.strategy); });
           // 生成できない customization（外部連携など）は黙って落とさず、実現できない点・承認できない理由にする（反証 A2）
-          const unsupported = custs.filter(c => !genList.includes(c)).map(c => { const rv = reviewOf(c.customizationId); return { customizationId: c.customizationId, requirement: String(c.requirement || ''), strategy: c.strategy || null, reason: (rv && rv.codeGeneration && rv.codeGeneration.reason) || (rv ? '' : `方針「${c.strategy || '未定'}」は Toolkit のコード生成の対象外です`) }; });
+          const unsupported = custs.filter(c => !genList.includes(c)).map(c => { const rv = reviewOf(c.customizationId); return { customizationId: c.customizationId, requirement: String(c.requirement || ''), strategy: c.strategy || null, reason: (rv && rv.codeGeneration && rv.codeGeneration.reason) || (rv ? '' : `方針「${c.strategy || '未定'}」は Toolkit のJavaScript の作成の対象外です`) }; });
           const canGenerate = typeof services.generate === 'function' && genList.length > 0;
           //   §0c（2026-10-08）: 生成と検証は生成工程の 1 依頼（生成 → 機械検査 → 動作テスト → 修復）。Toolkit の段階は「JavaScript を生成・検証」の 1 つ
           //   指示書 §1.3（2026-10-14）: 段階の名前は作っているものの名前。label「JavaScript を作る（N 本）」、作業中は「{計画の手順の title}」を作っています（生成の呼び出しごとに activeLabel を入れ替える。
@@ -20457,7 +20478,7 @@
           //   §0f.5 の 3（2026-10-09）: 計画の自動の見直し（finalizeVersion が担当・効果・範囲を補う）は、いまの進みのカードに段階を足す。
           //   カードを作り直さない（見出しは「最終案を作っています」のまま・経過は採用からのまま。0 に戻すと長く待っていることが隠れる）
           const intoAuto = !intoInitial && state.ownerRetryActive && !!progressOf();
-          if (intoAuto) { const pr = progressOf(); if (!pr.stages.some(x => x.key === 'plan-auto')) { const gi = pr.stages.findIndex(x => x.key === 'generate'); const at = gi >= 0 ? gi : pr.stages.findIndex(x => x.key === 'summarize'); pr.stages.splice(at < 0 ? pr.stages.length : at, 0, { key: 'plan-auto', label: '計画の自動の見直し', activeLabel: '計画を自動で見直しています', state: 'todo', startedAt: null, doneAt: null, elapsedMs: null, detail: '', n: null, m: null, count: 1, estimateMs: 0 }); } progressStage('plan-auto', { state: 'active' }); loading = null; }
+          if (intoAuto) { const pr = progressOf(); if (!pr.stages.some(x => x.key === 'plan-auto')) { const gi = pr.stages.findIndex(x => x.key === 'generate'); const at = gi >= 0 ? gi : pr.stages.findIndex(x => x.key === 'summarize'); pr.stages.splice(at < 0 ? pr.stages.length : at, 0, { key: 'plan-auto', label: '計画の不足の見直し', activeLabel: '計画の不足を見直しています', state: 'todo', startedAt: null, doneAt: null, elapsedMs: null, detail: '', n: null, m: null, count: 1, estimateMs: 0 }); } progressStage('plan-auto', { state: 'active' }); loading = null; }
           else if (intoInitial) { const pr = progressOf(); if (!pr.stages.some(x => x.key === 'revise')) { const at = pr.stages.findIndex(x => x.key === 'summarize'); pr.stages.splice(at < 0 ? pr.stages.length : at, 0, { key: 'revise', label: '受け付けた指示を計画に入れる', activeLabel: '受け付けた指示を計画に入れています', state: 'todo', startedAt: null, doneAt: null, elapsedMs: null, detail: '', n: null, m: null, count: 1, estimateMs: timingStore.estimate('revise') }); pr.estimateMs = pr.stages.reduce((k, x) => k + (x.estimateMs || 0), 0); } progressStage('revise', { state: 'active' }); loading = null; }
           else { finishProgress(); startProgress({ title: '最終案を直しています', stages: [{ key: 'revise', label: '計画を修正' }, { key: 'summarize', label: 'まとめ' }], materials: materialsText() }); progressStage('revise', { state: 'active' }); loading = null; }
           const reviseText = { onText: (txt) => { noteFirstText(); progressText(txt); } };
@@ -20848,7 +20869,7 @@
               if (v.status !== PLAN_STATUS.ACTIVE && v.status !== PLAN_STATUS.STALE) { toolkit(`現在の${planLabel(v)}は${v.status === PLAN_STATUS.ROLLED_BACK ? '動作テスト環境へ反映したあと元に戻しました' : '動作テスト環境へ反映済みです'}。追加の変更は、実現したいことを入力すると新しい仮案から作ります。`, { kind: 'generate-after-execution', planId: v.planId, version: v.version }); result.ok = false; break; }
               const reviewOfG = (cid) => (v.review?.steps || []).find(r => r.customization?.customizationId === cid) || null;
               const genListG = (v.plan?.customizations || []).filter(c => c && c.customizationId).filter(c => { const rv = reviewOfG(c.customizationId); return rv ? !!(rv.codeGeneration && rv.codeGeneration.supported) : ['NEW_JS_FILE', 'EXTEND_EXISTING_JS'].includes(c.strategy); });
-              if (!genListG.length) { toolkit(`現在の最終案に、Toolkit が作る JavaScript はありません（${(v.plan?.customizations || []).length ? 'Toolkit では作れない JavaScript だけです。理由は最終案の「実現できない点」' : '設定の変更だけです'}）。`, { kind: 'generate-not-needed', planId: v.planId, version: v.version }); result.ok = false; break; }
+              if (!genListG.length) { toolkit(`現在の最終案に、Toolkit が作る JavaScript はありません（${(v.plan?.customizations || []).length ? 'Toolkit では作れない JavaScript だけです。理由は最終案の「確認できないこと／反映を止めている理由」' : '設定の変更だけです'}）。`, { kind: 'generate-not-needed', planId: v.planId, version: v.version }); result.ok = false; break; }
               // 会話の応答性（2026-10-05）: 記録したのにまだ計画に入っていない回答があれば作り直さない（その回答を無視した最終案になる）
               const lgG = state.ledgers.get(v.planId);
               const pendG = lgG ? KTAiAnswers.pendingAnswers(lgG) : [];
@@ -20931,7 +20952,7 @@
               }
               const text2 = cls.reason === 'DRAFT_SMALLTALK' ? (cls.ack ? '採用するときは「採用します」、変えたい点があればそのまま書いてください（質問もできます）。' : 'はい。仮案への返事（採用・変えたい点・質問）は、いつでもどうぞ。')
                 : cls.reason === 'NO_PLAN' && draftOpen ? '反映できる変更案はまだありません。いまは仮案への返事（採用・変えたい点・質問）を受け付けています。採用すると最終案を作ります。'
-                : cls.reason === 'ADOPT_NO_RECOMMENDATION' ? `残っている確認事項は業務の判断で、推奨がありません：「${(cls.openTexts || []).join('」「')}」。答えを書いてください（確認事項のカードの回答欄からも送れます）。kintone にはまだ何も反映していません。`
+                : cls.reason === 'ADOPT_NO_RECOMMENDATION' ? `残っている確認事項は業務の判断で、推奨がありません：「${(cls.openTexts || []).join('」「')}」。答えを書いてください（最終案のカードの回答欄からも送れます）。kintone にはまだ何も反映していません。`
                 : cls.reason === 'NO_GENERATED_CODE' ? '登録できる JavaScript はまだありません。JavaScript は最終案の中で作ります（最終案の承認の後に登録します）。' : cls.reason === 'NO_CUSTOMIZATION' ? `現在の${planLabel(v)}に JavaScript カスタマイズはありません（標準設定だけで実現できます）。` : cls.reason === 'NO_PLAN' ? '反映できる変更案がまだありません。実現したいことを入力すると変更案を作ります。' : cls.reason === 'GREETING' ? 'このアプリについての質問や、実現したいことを入力してください。' : v ? '今の変更案があります。質問・変更案の修正・「これで進めたい」のいずれかで続けられます。' : 'このアプリについての質問（例: このフィールドは何に使ってる？）や、実現したいこと（例: 100万円以上なら部長承認を追加したい）を入力してください。';
               assistant(text2, { kind: 'general', reason: cls.reason });
             }
@@ -21143,14 +21164,14 @@
      *   簡素化 B（2026-10-17）: coverage-unmet・planned-fields・planned-events・target-fields・platform は削除した Toolkit の検査の名前。保存済みの会話の生成の記録に
      *   残った指摘の案内として残す（新しい生成では出ない） */
     const REPEAT_HINT = Object.freeze({
-      fields: '存在しないフィールドを参照しています。計画で新設する項目に無い名前なら、計画を修正してフィールドを追加するか、実装仕様の対象を直してください',
-      'coverage-unmet': '要件を満たしていない部分があります。計画で新設する項目を前提にできるものは計画と実装仕様をそろえ、それ以外は要件か実装仕様を直してください',
-      'planned-fields': '計画のフィールドを扱う処理がコードにありません。実装仕様の対象（フィールド・条件）を見直してください',
-      'planned-events': '計画のイベントがコードにありません。実装仕様のイベントを見直してください',
-      'modern-js': '直せない var が残っています。統合先のコードを見直すか、新規の JavaScript として設計してください',
-      'target-fields': '計画に無いフィールドを操作しています。実装仕様の対象に入れるか、要件を直してください',
-      events: 'kintone に無いイベントを使っています。実装仕様のイベントを見直してください',
-      platform: 'PC / モバイルの対象とイベントが合っていません。実装仕様の対象を見直してください',
+      fields: '存在しないフィールドを参照しています。計画で新設する項目に無い名前なら、計画を修正してフィールドを追加するか、JavaScript の仕様の対象を直してください',
+      'coverage-unmet': '要件を満たしていない部分があります。計画で新設する項目を前提にできるものは計画とJavaScript の仕様をそろえ、それ以外は要件かJavaScript の仕様を直してください',
+      'planned-fields': '計画のフィールドを扱う処理がコードにありません。JavaScript の仕様の対象（フィールド・条件）を見直してください',
+      'planned-events': '計画で決めた画面の操作がコードにありません。JavaScript の仕様の画面の操作を見直してください',
+      'modern-js': '古い書き方の変数（var）が残っています。統合先のコードを見直すか、新規の JavaScript として設計してください',
+      'target-fields': '計画に無いフィールドを操作しています。JavaScript の仕様の対象に入れるか、要件を直してください',
+      events: 'kintone に無い画面の操作を使っています。JavaScript の仕様の画面の操作を見直してください',
+      platform: 'PC / モバイルの対象と画面の操作が合っていません。JavaScript の仕様の対象を見直してください',
     });
     /** 検査の名前（利用者向け）。KTAiChatUi の対応表（CHECK_JA）を使い、無ければ「検査で止まった点」。内部の名前（blocker の code）は出さない */
     function checkNameJa(code) {
@@ -21172,9 +21193,9 @@
       const reviewFailed = !!last.reviewFailed;
       const hints = [...new Set(blockers.map(code => REPEAT_HINT[code] || `「${checkNameJa(code)}」の指摘の内容を直してください`))];
       if (blockers.includes('fields') && !plannedNames.length) hints.push('計画に新設するフィールド・ステータスがありません。新しい名前を使うなら、計画の修正で追加の手順を入れてください');
-      if (reviewFailed) hints.push('前回は Toolkit の検査を完了できなかったため、このコードが登録できるかは確かめられていません。同じ入力では同じコードになるので、変えたい点を実装仕様か計画に入れてください');
-      else if (!blockers.length) hints.push('検査は通っています。同じ入力では同じコードになるので、変えたい点を実装仕様か計画に入れてください');
-      hints.push('入力（計画・実装仕様・統合先の既存コード）が同じなら結果は変わりません。計画の修正・実装仕様の変更・統合先の変更のどれかをしてください');
+      if (reviewFailed) hints.push('前回は Toolkit の検査を完了できなかったため、このコードが登録できるかは確かめられていません。同じ入力では同じコードになるので、変えたい点をJavaScript の仕様か計画に入れてください');
+      else if (!blockers.length) hints.push('検査は通っています。同じ入力では同じコードになるので、変えたい点をJavaScript の仕様か計画に入れてください');
+      hints.push('入力（計画・JavaScript の仕様・統合先の既存コード）が同じなら結果は変わりません。計画の修正・JavaScript の仕様の変更・統合先の変更のどれかをしてください');
       // 再レビュー 2026-10-07: 判定は入力の指紋だけ。新設の手順を反映すると planned が変わり入力も変わる（反映で作り直せる）
       hints.push('計画で新設するステータス・フィールドを動作テスト環境に反映すると、生成の入力が変わり作り直せます。入力が同じまま作り直しても同じ結果になります');
       return { repeat: true, blockers, reviewFailed, hints, message: `同じ入力・同じ指摘です。原因（入力の不足・指示・検証）を直してから作り直してください。${hints.map(h => `${h}。`).join('')}` };
@@ -21240,7 +21261,7 @@
     //   反映（exec）もタブ（2026-10-07 利用者の指示: 分割の欄ではなくタブ）。詳細情報・接続（接続機能の無い環境では Context）は控えめなタブ。反映の記録（log）はヘッダーから開く
     const PRIMARY_TABS = Object.freeze(['plan', 'code', 'exec']);
     const TABS = Object.freeze(['plan', 'code', 'exec', 'evidence', 'context', 'connection']);
-    const STRATEGY_JA = { NEW_JS_FILE: '＋ 新規 JS', EXTEND_EXISTING_JS: '✎ 既存 JS を変更', REPLACE_EXISTING_LOGIC: '既存処理の置き換え（計画のみ）', PLUGIN_CANDIDATE: 'プラグイン候補（計画のみ）', NOT_RECOMMENDED: '推奨しない' };
+    const STRATEGY_JA = { NEW_JS_FILE: '＋ 新しい JavaScript', EXTEND_EXISTING_JS: '✎ 既存の JavaScript を変更', REPLACE_EXISTING_LOGIC: '既存処理の置き換え（計画のみ）', PLUGIN_CANDIDATE: 'プラグイン候補（計画のみ）', NOT_RECOMMENDED: '推奨しない' };
     /** 標準設定の反映（KTPlanExecutor の状態 execState）→ 要約 */
     function executionSummary(execState) {
       const ex = execState?.execution || null;
@@ -21479,7 +21500,7 @@
               <div id="kt-ai-right-banner" class="kt-ai-right-banner" role="status" style="display:none;"></div>
               <div id="kt-ai-right-body" class="kt-ai-right-body">
                 <div id="kt-ai-pane-plan" class="kt-ai-pane active"><div id="kt-ai-subject-info"></div><div id="kt-ai-pane-plan-empty" class="kt-ai-empty-side">${esc(PLAN_EMPTY_TEXT)}</div><div id="kt-ai-change-summary"></div><details id="kt-ai-plan-detail" class="kt-ai-detail-block" style="display:none;"><summary>計画の詳細と根拠（AI の提案の全文）</summary>${KTContextUi.planPaneHtml(c)}</details></div>
-                <div id="kt-ai-pane-code" class="kt-ai-pane"><div id="kt-ai-code-head" style="font-size:11px; padding:4px;">${esc(CODE_EMPTY_TEXT)}</div><div id="kt-ai-code-actions" style="display:none; gap:6px; flex-wrap:wrap; margin:4px 0;"><button type="button" id="kt-ai-code-copy" class="btn" style="height:26px; font-size:11px;">コードをコピー</button><button type="button" id="kt-ai-diff-copy" class="btn" style="height:26px; font-size:11px;">差分をコピー</button><button type="button" id="kt-ai-cplan-copy" class="btn" style="height:26px; font-size:11px;">Customization Plan JSON をコピー</button><button type="button" id="kt-ai-code-download" class="btn" style="height:26px; font-size:11px;">ファイルとして保存</button></div><div id="kt-ai-code-review" style="font-size:11px;"></div><div id="kt-ai-code-tabs" style="display:none; gap:4px; margin-top:6px;"><button type="button" class="btn kt-ai-ctab active" data-code-view="code" style="height:24px; font-size:11px;">コード</button><button type="button" class="btn kt-ai-ctab" data-code-view="diff" style="height:24px; font-size:11px;">変更前後（差分）</button></div><pre id="kt-ai-code-view" style="margin-top:4px; max-height:60vh; overflow:auto; white-space:pre; font-size:11px; border:1px solid ${esc(c.border)}; border-radius:8px; padding:8px; display:none;"></pre><pre id="kt-ai-diff-view" style="margin-top:4px; max-height:60vh; overflow:auto; white-space:pre; font-size:11px; border:1px solid ${esc(c.border)}; border-radius:8px; padding:8px; display:none;"></pre></div>
+                <div id="kt-ai-pane-code" class="kt-ai-pane"><div id="kt-ai-code-head" style="font-size:11px; padding:4px;">${esc(CODE_EMPTY_TEXT)}</div><div id="kt-ai-code-actions" style="display:none; gap:6px; flex-wrap:wrap; margin:4px 0;"><button type="button" id="kt-ai-code-copy" class="btn" style="height:26px; font-size:11px;">コードをコピー</button><button type="button" id="kt-ai-diff-copy" class="btn" style="height:26px; font-size:11px;">差分をコピー</button><button type="button" id="kt-ai-cplan-copy" class="btn" style="height:26px; font-size:11px;">計画（JSON・技術者向け）をコピー</button><button type="button" id="kt-ai-code-download" class="btn" style="height:26px; font-size:11px;">ファイルとして保存</button></div><div id="kt-ai-code-review" style="font-size:11px;"></div><div id="kt-ai-code-tabs" style="display:none; gap:4px; margin-top:6px;"><button type="button" class="btn kt-ai-ctab active" data-code-view="code" style="height:24px; font-size:11px;">コード</button><button type="button" class="btn kt-ai-ctab" data-code-view="diff" style="height:24px; font-size:11px;">変更前後（差分）</button></div><pre id="kt-ai-code-view" style="margin-top:4px; max-height:60vh; overflow:auto; white-space:pre; font-size:11px; border:1px solid ${esc(c.border)}; border-radius:8px; padding:8px; display:none;"></pre><pre id="kt-ai-diff-view" style="margin-top:4px; max-height:60vh; overflow:auto; white-space:pre; font-size:11px; border:1px solid ${esc(c.border)}; border-radius:8px; padding:8px; display:none;"></pre></div>
                 <div id="kt-ai-pane-exec" class="kt-ai-pane"><div id="kt-ai-exec-empty" class="kt-ai-empty-side">${esc(EXEC_EMPTY_TEXT)}</div><div id="kt-ai-exec"></div><div id="kt-ai-jsreg"></div></div>
                 <div id="kt-ai-pane-evidence" class="kt-ai-pane"><div id="kt-ai-base-diff"></div><div class="kt-ai-empty-side" style="font-size:11px;">回答や変更案の根拠を開くと、Toolkit が kintone から確かめた事実（どこで何を使っているか・設定・ファイルと行）をここに表示します。</div>${KTContextUi.evidencePaneHtml(c)}</div>
                 <div id="kt-ai-pane-context" class="kt-ai-pane">${KTContextUi.generatorHtml(c)}<div style="margin-top:8px; display:flex; gap:6px; align-items:center;"><b style="font-size:12px;">プレビュー</b><button type="button" id="kt-ai-download" class="btn" style="height:26px; font-size:11px;" disabled>⬇ ローカルに保存</button></div><pre id="kt-ai-preview" style="margin-top:4px; max-height:320px; overflow:auto; white-space:pre-wrap; font-size:11px; border:1px solid ${esc(c.border)}; border-radius:8px; padding:8px;"></pre></div>
@@ -21503,7 +21524,7 @@
         // KTDevBase.load の文は「動作テスト環境の設定を取得できませんでした（理由）」の形のことがある（そのときは包まない）
         const why = String(base.message || base.status || '不明');
         const what = /^動作テスト環境の設定を取得できませんでした/.test(why) ? why.replace(/。+$/, '') : `動作テスト環境の設定を取得できませんでした（${why}）`;
-        return `<span id="kt-ai-base" class="kt-ai-base is-error" style="color:#c62828;">${esc(what)}。変更案・コードの作成と反映は止めています（運用環境の設定では進めません）。${b('refresh-base', '再取得', '動作テスト環境の現在の設定と JavaScript を取り直します')}</span>`;
+        return `<span id="kt-ai-base" class="kt-ai-base is-error" style="color:#c62828;">${esc(what)}。変更案・JavaScript の作成と反映は止めています（運用環境の設定では進めません）。${b('refresh-base', '再取得', '動作テスト環境の現在の設定と JavaScript を取り直します')}</span>`;
       }
       const d = base.diff || {};
       const diffText = !d.available ? '運用環境との差は分かりません' : d.items.length ? `運用環境との差 ${d.items.length} 件` : '運用環境との差なし';
@@ -21521,7 +21542,7 @@
       const missing = [...(base.errors || []).filter(e => e.env === 'preview' && !e.core).map(e => `${e.label}（${e.message || e.code || '不明'}）`), ...(base.files || []).filter(f => f.type === 'FILE' && !f.sourceAvailable).map(f => `JavaScript「${f.name}」の本文（${f.error?.message || '不明'}）`)];
       const rel = Object.entries(base.data?.relatedApps || {});
       return `<div id="kt-ai-base-detail" class="kt-ai-base-detail">${head}
-        <div>${esc(KTDevBase.timeText(base.loadedAt))} 取得・動作テスト環境 revision ${esc(String(base.revision?.preview ?? '?'))} / 運用環境 revision ${esc(String(base.revision?.production ?? '?'))}。AI の質問・計画・コード生成・検証はこの内容で行います。</div>
+        <div>${esc(KTDevBase.timeText(base.loadedAt))} 取得・動作テスト環境の設定の版 ${esc(String(base.revision?.preview ?? '?'))} / 運用環境の設定の版 ${esc(String(base.revision?.production ?? '?'))}。AI の質問・計画・コード作成と確認はこの内容で行います。</div>
         ${!d.available ? `<div style="color:#b26a00; margin-top:4px;">運用環境の設定を取得できなかったため、運用環境との差は分かりません（${esc(d.reason || '不明')}）。差が無いとは言えません。</div>` : d.items.length ? `<div style="margin-top:4px;">運用環境へ未反映の変更（${d.items.length} 件）:</div><ul class="kt-ai-base-list">${rows}</ul>` : '<div style="margin-top:4px;">運用環境との差はありません。</div>'}
         ${missing.length ? `<div style="color:#b26a00; margin-top:4px;">取得できなかったもの（「無い」とは扱いません）: ${missing.map(esc).join('、')}</div>` : ''}
         ${rel.length ? `<div style="opacity:.85; margin-top:4px;">他アプリ（${rel.map(([id, r]) => `${esc(id)}${r?.name ? `「${esc(r.name)}」` : ''}`).join('、')}）の定義は運用環境から読み取り専用で取得（${esc(KTDevBase.timeText(base.relatedLoadedAt || base.loadedAt))}）。</div>` : ''}
@@ -21549,7 +21570,7 @@
         <div id="kt-ai-header-detail" style="${detailOpen ? '' : 'display:none; '}flex:1 1 100%; font-size:11px; opacity:.85; line-height:1.6;">
           <div>フィールド ${esc(String(o.fieldCount ?? '—'))}　依存関係 ${esc(String(o.dependencies?.edgeCount ?? '—'))}　一覧 ${esc(String(o.views?.count ?? '—'))}　グラフ ${esc(String(o.reports?.count ?? '—'))}　通知 ${esc(String(KTContext.notifyCountText(o.notifications)))}　プロセス管理 ${o.process?.enabled ? `有効（ステータス ${esc(String(o.process.stateCount))}・アクション ${esc(String(o.process.actionCount))}）` : '無効'}　アプリアクション ${esc(String(o.actions?.count ?? '—'))}　プラグイン ${esc(String(o.plugins?.count ?? '不明'))}　壊れた参照 ${esc(String(o.brokenRefs?.total ?? '—'))}</div>
           <div>JavaScript: PC ${esc(String(o.customize?.desktop?.js?.length ?? 0))} / モバイル ${esc(String(o.customize?.mobile?.js?.length ?? 0))}（解析 ${o.javascript?.analyzed ? '済' : '未'}）　他アプリからの参照: ${o.incoming?.scanned ? `走査済（${esc(String(o.incoming.referencingApps ?? 0))} アプリ）` : '未走査'}　アプリ間連携 ${esc(String(o.appLinks?.count ?? 0))}</div>
-          ${(jsFiles || []).length ? `<div id="kt-ai-header-js">登録済み JS: ${jsFiles.map(f => `<span style="white-space:nowrap;">${esc(f.target === 'mobile' ? 'モバイル' : 'PC')}: <b>${esc(f.name)}</b>${f.analyzed ? `（${esc((f.events || []).slice(0, 4).join(', ') || 'イベント検出なし')}${(f.events || []).length > 4 ? ' …' : ''}${Object.keys(f.fields || {}).length ? `・フィールド ${Object.keys(f.fields).length}` : ''}）` : '（未解析）'}</span>`).join('　')}</div>` : ''}
+          ${(jsFiles || []).length ? `<div id="kt-ai-header-js">登録済みの JavaScript: ${jsFiles.map(f => `<span style="white-space:nowrap;">${esc(f.target === 'mobile' ? 'モバイル' : 'PC')}: <b>${esc(f.name)}</b>${f.analyzed ? `（${esc((f.events || []).slice(0, 4).join(', ') || 'イベント検出なし')}${(f.events || []).length > 4 ? ' …' : ''}${Object.keys(f.fields || {}).length ? `・フィールド ${Object.keys(f.fields).length}` : ''}）` : '（未解析）'}</span>`).join('　')}</div>` : ''}
           <div>Nest Rec AI: ${esc(connection.text || '—')}（詳細は右の「接続」）　／　この欄の件数は${base && base.ok ? '動作テスト環境' : '運用環境（画面を開いた時点）'}の設定です。AI の提案の反映先は動作テスト環境だけで、運用環境には反映しません。</div>
         </div>`;
     }
@@ -21585,7 +21606,7 @@
       if (working === 'PROPOSE') return accepted ? '仮案を作っています。質問にはすぐ答えます。仮案への返事・追加の指示は、仮案ができてから送ってください。' : '仮案を作っています。この文は仮案ができてから送ってください。下書きとして残しています。';
       // 段階 C: 最終案（生成と検証）の間は、質問はすぐ答え、追加の指示はできあがった最終案に入れる（変わる JavaScript だけ作り直す）
       if (working === 'FINAL') return accepted ? '最終案を作っています。質問にはすぐ答えます。追加の指示はできあがった最終案に入れます（変わる JavaScript だけ作り直します）。' : '最終案を作っています。この文（反映・登録などの操作）は最終案ができてから送ってください。下書きとして残しています。';
-      const what = working === 'PLAN' ? '計画を作っています' : working === 'GENERATE' ? 'コードを作っています' : '計画を作り直しています';
+      const what = working === 'PLAN' ? '計画を作っています' : working === 'GENERATE' ? 'JavaScript を作っています' : '計画を作り直しています';
       const after = working === 'PLAN' ? 'できた計画に続けて入れます' : working === 'GENERATE' ? 'コードの後に計画に入れます' : '作り直しの後に、まとめて計画に入れます';
       if (!accepted) return `${what}。この文（反映・コードの生成などの操作、または確認の要る回答）は作業の後に送ってください。下書きとして残しています。`;
       return `${what}。質問にはすぐ答えます。追加の指示・回答もこのまま送れます（${after}）。`;
@@ -21607,7 +21628,7 @@
       const ps = Array.isArray(gen?.patterns) ? gen.patterns : [];
       if (!ps.length) return '';
       const alts = [...new Set(ps.flatMap(p => p.preferredStandardAlternatives || []))].slice(0, 3);
-      return `<div style="margin-top:4px; font-size:11px; opacity:.85;">参考パターン: ${ps.map(p => `<span class="kt-ai-pattern" title="${esc(p.purpose || '')}">${esc(p.id)}</span>`).join('、')}<span style="opacity:.7;">（Pattern Library。コードは現在のアプリに合わせて生成）</span></div>${alts.length ? `<div style="font-size:11px; color:#b26a00;">標準設定で代替できないか再確認: ${esc(alts.join(' / '))}</div>` : ''}`;
+      return `<div style="margin-top:4px; font-size:11px; opacity:.85;">参考にした実装パターン: ${ps.map(p => `<span class="kt-ai-pattern" title="${esc(p.purpose || '')}">${esc(p.id)}</span>`).join('、')}<span style="opacity:.7;">（Toolkit の実装パターン集。コードは現在のアプリに合わせて生成）</span></div>${alts.length ? `<div style="font-size:11px; color:#b26a00;">標準設定で代替できないか再確認: ${esc(alts.join(' / '))}</div>` : ''}`;
     }
     // ---- 右「変更内容」の要約（2026-10-06 利用者の指示: 変更前後・対象画面・影響範囲・確認結果を整理する）----
     /** JavaScript のイベント → 画面の名前 */
@@ -21674,9 +21695,9 @@
         //   レビュー 2（2026-10-14）: status ごとに語を分ける（できた／作成中（止めた）／まだ作っていません／作れませんでした／模擬テストで不合格／確認できないことがあります）
         const vk = e && e.verdict && e.verdict.kind ? String(e.verdict.kind) : '';
         const state = !e || e.status === 'not-started' ? 'まだ作っていません'
-          : e.status === 'verified' ? (e.unchanged ? 'できた（検証済み・既存の本文と同じため登録しません）' : 'できた（検証済み）')
+          : e.status === 'verified' ? (e.unchanged ? 'できた（検証済み・今登録されている内容と同じため登録しません）' : 'できた（検証済み）')
           : e.status === 'failed' ? (e.failure && e.failure.stop ? '作成中（止めた）' : '作れませんでした')
-          : e.status === 'unresolved' ? (vk === 'behavior-fail' ? '模擬テストで不合格' : vk === 'missing' || vk === 'partial' ? '必要な動作が足りません' : vk === 'machine' ? '機械検査で登録を止める問題があります' : '確認できないことがあります')
+          : e.status === 'unresolved' ? (vk === 'behavior-fail' ? '模擬テストで不合格' : vk === 'missing' || vk === 'partial' ? '必要な動作が足りません' : vk === 'machine' ? 'コードの検査で登録を止める問題があります' : '確認できないことがあります')
           : '確認できないことがあります';
         return { title: KTAiConversation.customizationTitleOf(v.plan, c.customizationId) || 'JavaScript', state };
       });
@@ -21776,7 +21797,7 @@
       // 反映できないこと（Toolkit の判定）・確かめられなかったこと（反映の分類 ready は「何が変わるか」の前で作る）
       const titleOf = (id) => { const st = (p.steps || []).find(x => x.id === id); return st ? (st.title || KTPlanText.stepSummary(st, { customizations: custs })) : ''; };
       const cannot = [
-        ...(v.applySteps === null ? ['設定の手順：分類に失敗したため反映できません（Toolkit の内部の問題）'] : []),   // §12.60
+        ...(v.applySteps === null ? ['設定の手順：反映できるか判定できなかったため反映できません（Toolkit の内部の問題）'] : []),   // §12.60
         ...ready.filter(a => a.apply === 'MANUAL' || a.apply === 'BLOCKED').map(a => `${titleOf(a.stepId) || '設定の変更'}：${a.valueMissing ? '必要な値が計画に無いため反映できません' : a.apply === 'MANUAL' ? 'Toolkit からは自動で反映できません' : '反映できません'}${a.message ? `（${a.message}）` : ''}`),
         ...(review?.steps || []).filter(r => r.customization && r.codeGeneration && r.codeGeneration.supported === false).map(r => `${r.customization?.requirement || 'JavaScript'}：Toolkit ではコードを作れません（${KTContextUi.CODEGEN_REASON_JA[r.codeGeneration.reason] || r.codeGeneration.reason || '要確認'}）`),
       ];
@@ -21798,7 +21819,7 @@
       const notesHtml = notesHigh.length || notesRest.length ? `<div class="kt-ai-sum-label">重なりと注意点（Toolkit の確認）</div><div class="kt-ai-sum-notes">${notesHigh.length ? `<div class="kt-ai-sum-warn">${list(notesHigh)}</div>` : ''}${notesRest.length ? `${esc(`${notesHigh.length ? 'ほかに、' : ''}既存の設定や計画の中の重なり・注意点が ${notesRest.length} 件あります。`)}<details class="kt-ai-tech"><summary>内容</summary>${list(notesRest)}</details>` : ''}</div>` : '';
       //   簡素化 C（2026-10-16）: 計画の構造からは実現を確かめていない要件（確認の限界。反映は止めない）は、件数の 1 行と［詳しく］の中の文にまとめる（1 件ずつ並べない）
       const unconfirmedLines = fin && Array.isArray(fin.unconfirmedReqs) ? uniq(fin.unconfirmedReqs.filter(x => x && x.line).map(x => x.line)) : [];
-      const unconfirmedHtml0 = unconfirmedLines.length ? `<div class="kt-ai-sum-unconfirmed">${esc(`計画の構造からは実現を確かめていない要件が ${unconfirmedLines.length} 件あります（今の設定や既存のコードで満たしていることがあります。この点では反映を止めていません）`)}<details class="kt-ai-tech"><summary>要件</summary>${list(unconfirmedLines)}</details></div>` : '';
+      const unconfirmedHtml0 = unconfirmedLines.length ? `<div class="kt-ai-sum-unconfirmed">${esc(`計画の手順と JavaScript の内容からは実現を確かめられていない要件が ${unconfirmedLines.length} 件あります（今の設定や既存のコードで満たしていることがあります。この点では反映を止めていません）`)}<details class="kt-ai-tech"><summary>要件</summary>${list(unconfirmedLines)}</details></div>` : '';
       //   2026-10-18: 仮案の項目に結び付かない AI の提案（採用の範囲に入れず、取り消してもいない）の件数の 1 行（中立の文。1 件ずつは［詳しく］の中）
       const unlinkedLines = fin && Array.isArray(fin.unlinkedReqs) ? uniq(fin.unlinkedReqs.filter(x => x && x.line).map(x => x.line)) : [];
       const unconfirmedHtml = unconfirmedHtml0 + (unlinkedLines.length ? `<div class="kt-ai-sum-unlinked">${esc(`仮案のどの項目とも結び付かない AI の提案が ${unlinkedLines.length} 件あり、計画に入れていません（取り消してもいません。入れるときは伝えてください）`)}<details class="kt-ai-tech"><summary>提案</summary>${list(unlinkedLines)}</details></div>` : '');
@@ -21831,7 +21852,7 @@
       const ap = view && view.activePlan ? view.activePlan : null;
       const howTo = ap && ap.final && ap.final.verification && Array.isArray(ap.final.verification.howTo) ? ap.final.verification.howTo.filter(Boolean) : [];
       const rows = howTo.length ? howTo : ['動作テスト環境で、変更したアプリのレコードを開いて（条件に合うものと合わないもの）、変更した動きを確かめる'];
-      return `<div class="kt-ai-real-check" style="margin-top:4px; font-size:12px;"><b>実機（動作テスト環境）での動作はまだ確かめていません。</b>反映後の確認は書き込んだ設定を読み直した結果で、動作の確認ではありません。確かめ方:<ul style="margin:2px 0 0; padding-left:1.2em;">${rows.slice(0, 4).map(x => `<li>${esc(x)}</li>`).join('')}</ul></div>`;
+      return `<div class="kt-ai-real-check" style="margin-top:4px; font-size:12px;"><b>動作テスト環境の画面での動作はまだ確かめていません。</b>反映後の確認は書き込んだ設定を読み直した結果で、動作の確認ではありません。確かめ方:<ul style="margin:2px 0 0; padding-left:1.2em;">${rows.slice(0, 4).map(x => `<li>${esc(x)}</li>`).join('')}</ul></div>`;
     }
     /**
      * §0e.1（2026-10-09）: ［動作テスト環境へ反映］1 回の結果のカード（標準設定と JavaScript を 1 枚にまとめる）。一部だけ反映したとき（設定は反映・JavaScript は未登録など）は
@@ -21867,7 +21888,7 @@
       const btns = [
         ...(s && s.started ? [btn('exec-details', '実行結果を見る', `data-execution="${esc(s.executionId || '')}"`, 'font-weight:600;')] : []),
         ...(j && (j.registered || j.written) ? [btn('open-js-result', '登録結果を見る', '')] : []),
-        ...(j && j.registered && j.first ? [btn('open-customize', 'Customize で確認', `data-target="${esc(j.first.target)}" data-name="${esc(j.first.name)}"`)] : []),
+        ...(j && j.registered && j.first ? [btn('open-customize', 'Customize タブで確認', `data-target="${esc(j.first.target)}" data-name="${esc(j.first.name)}"`)] : []),
         ...(live && jsW ? [btn('js-rollback', 'JavaScript を変更前に戻す', `data-execution="${esc(j.executionId || '')}"`, 'border-color:#6a1b9a;')] : []),
         ...(live && setW && !jsW ? [btn('rollback', '設定を変更前の状態に戻す', `data-execution="${esc(s.executionId || '')}"`, 'border-color:#6a1b9a;')] : []),
       ];
@@ -21912,15 +21933,15 @@
       return card('kt-ai-choices-card', `<div>${esc(m.text)}</div><div style="margin-top:6px; display:flex; gap:6px; flex-wrap:wrap;">${btn('consult-resume', d.current?.name ? `今の相談を続ける（${d.current.name}）` : '今の相談を続ける', '')}${btn('consult-new', `「${d.next?.name || 'この JavaScript'}」の相談に切り替える`, '', 'font-weight:600;')}</div>${d.pendingExecution ? '<div style="font-size:11px; color:#b26a00; margin-top:4px;">動作テスト環境に反映して、まだ元に戻していない変更があります。元に戻す操作は、切り替えた後もヘッダーの「反映の記録」から続けられます。</div>' : ''}<div style="font-size:10px; opacity:.6; margin-top:4px;">切り替えると、今の会話・変更案・作ったコードはこの画面から消えます（kintone の設定は変わりません。反映の記録は残ります）。</div>`, '#6a1b9a');
     }
     // 再レビュー 2026-10-07: 検査の名前は日本語（会話の案内 repeatOf・コードペインの検査一覧の両方で使う。英語のままの値を残さない）
-    const CHECK_JA = { patch: '既存ファイルへの統合', 'patch-removal': '既存行の置換', syntax: '構文', events: 'イベント', handler: 'handler の形', fields: 'フィールドの参照', 'plan-consistency': '計画との一致', apis: '使う API', 'apis-network': '通信 API', security: '安全性', 'security-review': '安全性（確認）', globals: 'グローバル汚染', 'return-event': 'return event の有無', async: 'async の使い方', 'async-then': 'Promise の扱い', 'modern-js': '新しい記法', 'duplicate-handler': '重複 handler', 'error-clear': 'エラー表示の解除', 'error-cancels-edit': 'エラー表示と編集不可', 'existing-conflict': '既存 JS との競合', platform: 'PC / モバイル', strategy: '方針', code: 'コード', 'coverage-owner': '要件の担当', 'coverage-unmet': '要件の達成', 'status-names': 'ステータス名',
+    const CHECK_JA = { patch: '既存ファイルへの統合', 'patch-removal': '既存行の置換', syntax: '構文', events: 'イベント', handler: '処理の書き方', fields: 'フィールドの参照', 'plan-consistency': '計画との一致', apis: '使う kintone の機能', 'apis-network': '通信', security: '安全性', 'security-review': '安全性（確認）', globals: '変数名の衝突（変数名の衝突（グローバル汚染））', 'return-event': '処理の終わり方（return event）', async: '非同期処理の書き方（async）', 'async-then': '非同期処理の扱い（Promise）', 'modern-js': '新しい記法', 'duplicate-handler': '同じ処理の重複', 'error-clear': 'エラー表示の解除', 'error-cancels-edit': 'エラー表示と編集不可', 'existing-conflict': '既存の JavaScript との競合', platform: 'PC / モバイル', strategy: '方針', code: 'コード', 'coverage-owner': '要件の担当', 'coverage-unmet': '要件の達成', 'status-names': 'ステータス名',
       // 再確認 2026-10-07: Code Review が出す残りの検査名（内部名のまま画面に出さない）
       //   §0d.4（2026-10-08）: 削除した検査（conditional-control・unconditional-control・error-cancels-*・existing-conflict・empty-undefined・summary-scope・
       //   requirement-scope）の名前は、保存済みの会話に残った結果を表示するために残す（新しい検査では出さない）
-      'conditional-control': '条件つきの制御', 'unconditional-control': '条件の無い制御', 'target-fields': '対象のフィールド', 'planned-fields': '計画のフィールド', 'planned-events': '計画のイベント', 'space-element': 'スペースの要素', 'api-screen': '画面の API', 'empty-undefined': '空の値の扱い', 'error-clear-compare': 'エラー表示の解除の条件', 'nested-registration': '入れ子の登録', 'create-missing-field': '作成画面に無いフィールド', 'summary-scope': '要約の範囲', 'requirement-scope': '要件の範囲', refetch: '再取得', 'error-cancels-other-js': '他の JavaScript の編集不可との競合', 'subtable-rows': '明細の行の操作', 'field-type': 'フィールドの型', 'event-field': 'イベントのフィールド', 'apis-unknown': '目録に無い API',
+      'conditional-control': '条件つきの制御', 'unconditional-control': '条件の無い制御', 'target-fields': '対象のフィールド', 'planned-fields': '計画のフィールド', 'planned-events': '計画のイベント', 'space-element': 'スペースの要素', 'api-screen': '画面ごとに使える機能', 'empty-undefined': '空の値の扱い', 'error-clear-compare': 'エラー表示の解除の条件', 'nested-registration': '入れ子の登録', 'create-missing-field': '作成画面に無いフィールド', 'summary-scope': '要約の範囲', 'requirement-scope': '要件の範囲', refetch: '再取得', 'error-cancels-other-js': '他の JavaScript の編集不可との競合', 'subtable-rows': 'テーブルの行の操作', 'field-type': 'フィールドの型', 'event-field': 'イベントのフィールド', 'apis-unknown': 'Toolkit が知らない機能（API）',
       // §0c（2026-10-08）: 生成工程の検証結果の取り込み（必須の効果・動作テスト）
       'required-effects': '必須の動作', behavior: '模擬テスト', 'behavior-fail': '模擬テスト: 不合格', 'behavior-not-run': '模擬テスト: 実行できない（環境）', 'behavior-untested': '模擬テスト: 結果なし',
       //   簡素化 B（2026-10-17）: 生成工程の機械検査の項目は検査の一覧にそのまま入る（Toolkit が作り直さない）。上に無い項目の名前
-      'planned-usage': '計画で新設する項目', 'unsupported-feature': '隔離環境で扱えない機能', 'lock-revert': '編集不可の戻し', 'record-api': 'レコードの API の使い方', coverage: '要件の達成（AI の申告）',
+      'planned-usage': '計画で新設する項目', 'unsupported-feature': '模擬テストの環境で扱えない機能', 'lock-revert': '編集不可の戻し', 'record-api': 'レコードの読み書きの仕方', coverage: '要件の達成（AI の説明）',
       //   2026-10-18: 生成工程の機械検査の通知の項目（メンション付きのコメントの登録。外部への通信は今までの security・宛先を読めない通信は security-review）
       notification: '通知（メンション付きのコメント）' };
     /** Phase 18: ドキュメントカード（Toolkit が作った Prompt / Markdown / JSON。AI へは送っていない） */
@@ -21930,8 +21951,8 @@
       return card('kt-ai-document-card', `<div style="display:flex; align-items:center; justify-content:space-between; gap:6px; flex-wrap:wrap;"><b>${esc(d.label || 'ドキュメント')}</b>${KTContextUi.badge('無料・AI 送信なし', '#2e7d32')}</div>
         <div style="margin-top:2px; font-size:12px;">${esc(m.text)}</div>
         ${d.size?.text ? `<div style="font-size:11px; opacity:.75; margin-top:2px;">Prompt のサイズ: ${esc(d.size.text)}</div>` : ''}
-        <div style="margin-top:6px; display:flex; gap:6px; flex-wrap:wrap;">${btn('copy-doc', 'Prompt をコピー', `data-mid="${mid}" data-key="prompt"`, 'font-weight:600;')}${btn('copy-doc', 'Markdown をコピー', `data-mid="${mid}" data-key="markdown"`)}${btn('copy-doc', 'JSON をコピー', `data-mid="${mid}" data-key="json"`)}${btn('open-doc-context', 'Context ペインで開く（保存）', `data-kind="${esc(d.kind || 'spec')}"`)}</div>
-        <div style="font-size:10px; opacity:.6; margin-top:4px;">Prompt は ChatGPT / Claude などへ貼り付けると本文のドラフトになります。Markdown は ${d.kind === 'changes' ? 'Toolkit の記録（計画・Review・反映結果）そのもの' : '構成の骨格 ＋ Context'}です。${(d.warnings || []).filter(w => !/本文は生成していません/.test(w)).map(w => ` ${esc(w)}`).join('')}</div>`, '#2e7d32');
+        <div style="margin-top:6px; display:flex; gap:6px; flex-wrap:wrap;">${btn('copy-doc', 'Prompt をコピー', `data-mid="${mid}" data-key="prompt"`, 'font-weight:600;')}${btn('copy-doc', 'Markdown をコピー', `data-mid="${mid}" data-key="markdown"`)}${btn('copy-doc', 'JSON をコピー', `data-mid="${mid}" data-key="json"`)}${btn('open-doc-context', '「Context」タブで開く（保存）', `data-kind="${esc(d.kind || 'spec')}"`)}</div>
+        <div style="font-size:10px; opacity:.6; margin-top:4px;">Prompt は ChatGPT / Claude などへ貼り付けると本文のドラフトになります。Markdown は ${d.kind === 'changes' ? 'Toolkit の記録（計画・Toolkit の確認・反映の結果）そのもの' : '文書の構成と「Context」タブの内容'}です。${(d.warnings || []).filter(w => !/本文は生成していません/.test(w)).map(w => ` ${esc(w)}`).join('')}</div>`, '#2e7d32');
     }
     /** 回答カード（Q&A / 説明）。根拠チップはそのまま（クリックで根拠ペイン） */
     function answerCardHtml(m) {
@@ -21999,8 +22020,8 @@
           : draft.status === 'adopted' ? '前の仮案 — このあと直して採用しました' : '前の仮案 — このあと直した案があります';
         return collapsedCard('kt-ai-draft-card is-old', summary, body);
       }
-      const head = draft.planFailed ? '仮案 — 採用（変更案の作成に失敗。再試行できます）' : d.rev > 1 ? '仮案を直しました。' : '仮案ができました。';
-      return card('kt-ai-draft-card', `<div><b>${esc(head)}</b></div>${draft.planFailed ? '<div style="font-size:12px; margin-top:4px;">採用しましたが、変更案の作成に失敗しました。エラーの［再試行］か「採用します」で、もう一度作れます。変えたい点があればそのまま書いてください。</div>' : ''}${body}`, draft.planFailed ? '#b26a00' : '#1a73e8');
+      const head = draft.planFailed ? '仮案 — 採用（最終案を作れませんでした。再試行できます）' : d.rev > 1 ? '仮案を直しました。' : '仮案ができました。';
+      return card('kt-ai-draft-card', `<div><b>${esc(head)}</b></div>${draft.planFailed ? '<div style="font-size:12px; margin-top:4px;">採用しましたが、最終案を作れませんでした。エラーの［再試行］か「採用します」で、もう一度作れます。変えたい点があればそのまま書いてください。</div>' : ''}${body}`, draft.planFailed ? '#b26a00' : '#1a73e8');
     }
     /**
      * 右ペイン「変更内容」の仮案の詳細（必要な判断を先に → 決めたこと → 実現する動作 → 前提の全件 → 進め方（標準設定 / JavaScript）→ 対応できない範囲 →
@@ -22024,7 +22045,7 @@
       //   2026-10-15（レビューの反映 T4）: 採用した仮案の状態の文は「採用した仮案（採用済み）。」の 1 つ（最終案ができたか・計画があるかで変えない。左の見出し §4(a) と同じ区別）
       const stateText = working === 'PLAN' && draft.planning ? '採用した仮案（最終案を作っています）。'
         : draft.status === 'adopted' ? '採用した仮案（採用済み）。'
-        : draft.planFailed ? '仮案 — 採用（変更案の作成に失敗。再試行できます）。もう一度採用するか、変えたい点を伝えてください。'
+        : draft.planFailed ? '仮案 — 採用（最終案を作れませんでした。再試行できます）。もう一度採用するか、変えたい点を伝えてください。'
         : '仮案（採用前）。採用すると、設定の手順と JavaScript を含む最終案を作ります。まだ何も反映していません。';
       const head = `<h3 style="margin:0 0 4px; font-size:14px;">${esc(String(draft.request || '仮案').slice(0, 120))}</h3><div style="font-size:12px; opacity:.8;">${esc(stateText)}</div>`;
       const decisionsHtml = sec(open.length ? `必要な判断（${open.length} 件）` : '必要な判断', open.length
@@ -22041,7 +22062,7 @@
       const cannotHtml = (it.cannot || []).length ? sec('対応できない範囲', ul(it.cannot.map(c => `<li>${esc(tx(c))}</li>`))) : '';
       const rejectedHtml = (draft.rejected || []).length ? sec('不採用にした項目', ul(draft.rejected.map(x => `<li>${esc(tx(x.text || x.question || ''))}</li>`))) : '';
       const hist = draft.history || [];
-      const histHtml = hist.length > 1 ? `<details class="kt-ai-tech" style="margin-top:10px;"><summary>判断の経緯（${hist.length} 回のやり取り）</summary>${ul(hist.map(h => (h.kind === 'plan-failed' ? '<li>採用 → 変更案の作成に失敗（再試行できます）</li>' : `<li>${esc(tx(String(h.reply || '')).slice(0, 160))}${h.applied ? hint(`採用 ${h.applied.adopted.length}・変更 ${h.applied.modified.length}・不採用 ${h.applied.rejected.length}・回答 ${(h.answers || []).length}`) : ''}</li>`)))}</details>` : '';
+      const histHtml = hist.length > 1 ? `<details class="kt-ai-tech" style="margin-top:10px;"><summary>判断の経緯（${hist.length} 回のやり取り）</summary>${ul(hist.map(h => (h.kind === 'plan-failed' ? '<li>採用 → 最終案を作れませんでした（再試行できます）</li>' : `<li>${esc(tx(String(h.reply || '')).slice(0, 160))}${h.applied ? hint(`採用 ${h.applied.adopted.length}・変更 ${h.applied.modified.length}・不採用 ${h.applied.rejected.length}・回答 ${(h.answers || []).length}`) : ''}</li>`)))}</details>` : '';
       //   §0f.5 の 3: 根拠（仮案の文が引いた番号と、Toolkit が確かめた事実の文。番号のボタンで右の根拠を開く）。会話のカードには出さない
       const ev = Array.isArray(draft.evidence) ? draft.evidence.filter(x => x && x.id) : [];
       //   2026-10-16（詳細情報に以前の根拠が残る不具合）: 番号のボタンは出どころ（この仮案の id と回数）を持つ。番号は依頼ごとに振り直されるので、押したときは
@@ -22106,7 +22127,7 @@
     const CHECK_MARK = { pass: '✓', fail: '×', unverified: '未確認', todo: '○' };
     //   §0f.5 の 3（2026-10-09）: 見出しは「経過」だけ。段階の所要時間は出力の大きさで数倍変わる（計画 49.6 秒と 240.3 秒）ので、段階の平均から残り時間を推定しない
     //   （2 行目に「残り時間は未推定」。長く待っていることを隠さない）。段階の実測（timingStore.note）は記録に残す。view.labels = AI の説明のフィールドのコードを名前に
-    const PROGRESS_REMAINING = '残り時間は未推定';
+    const PROGRESS_REMAINING = '残り時間は分かりません';
     function progressInnerHtml(m, view = {}) {
       const pr = (m && m.data && m.data.progress) || null;
       if (!pr) return `<div class="kt-ai-bubble kt-ai-loading" style="opacity:.75;">${esc(m?.text || '')}</div>`;
@@ -22119,7 +22140,7 @@
         return `<div class="kt-ai-progress-stage is-${esc(s.state)}" style="font-size:12px;">${esc(PROGRESS_MARK[s.state] || '○')} ${esc(s.state === 'active' ? (s.activeLabel || `${s.label}中`) : s.state === 'done' && s.doneLabel ? s.doneLabel : s.label)}${esc(detail)}</div>`;
       }).join('');
       const ai = pr.aiText ? `<div class="kt-ai-progress-ai" style="margin-top:8px;"><div style="font-size:11px; opacity:.7;">AI の説明</div><div class="kt-ai-rich kt-ai-streaming">${KTContextUi.richTextHtml(aiTx(pr.aiText, view && view.labels))}<span class="kt-ai-stream-cursor" aria-hidden="true"></span></div></div>` : '';
-      const list = Array.isArray(pr.checklist) && pr.checklist.length ? `<div class="kt-ai-progress-checklist" style="margin-top:8px;"><div style="font-size:11px; opacity:.7;">これから確かめる条件（生成工程の模擬テスト）</div>${pr.checklist.slice(0, 12).map(x => `<div style="font-size:11px;">${esc(CHECK_MARK[x.state] || '○')} ${esc(x.label)}</div>`).join('')}</div>` : '';
+      const list = Array.isArray(pr.checklist) && pr.checklist.length ? `<div class="kt-ai-progress-checklist" style="margin-top:8px;"><div style="font-size:11px; opacity:.7;">これから確かめる条件（模擬テスト）</div>${pr.checklist.slice(0, 12).map(x => `<div style="font-size:11px;">${esc(CHECK_MARK[x.state] || '○')} ${esc(x.label)}</div>`).join('')}</div>` : '';
       const materials = pr.materials ? `<div class="kt-ai-progress-materials" style="margin-top:6px; font-size:11px; opacity:.7;">${esc(pr.materials)}</div>` : '';
       return `<div class="kt-ai-progress-head" style="font-weight:600;">${esc(head)}</div><div class="kt-ai-progress-remaining" style="font-size:11px; opacity:.75;">${esc(PROGRESS_REMAINING)}</div><div style="margin-top:4px; display:grid; gap:2px;">${rows}</div>${ai}${list}${materials}<div class="kt-ai-progress-hint" style="margin-top:6px; font-size:11px; opacity:.7;">${esc(pr.hint || '')}</div>`;
     }
@@ -22151,15 +22172,15 @@
       //   2026-10-15（§4(d)）: 同じ送信で仮案の返答（propose）を呼んだときはその時間も部に出す（総経過と部が合うように）。部ごとに Gateway の処理時間（計画: AI の待ち時間・
       //   生成: 生成工程の処理全体）が分かり、壁時計との差が 10 秒以上なら「Gateway の処理」と「画面への反映までの遅れ」に分ける。差が小さければ今のまま。総経過は壁時計のまま
       const gwMs = timing && timing.gatewayMs && typeof timing.gatewayMs === 'object' ? timing.gatewayMs : {};
-      const part = (label, wall, gw) => (wall == null ? null : gw != null && wall - gw >= 10000 ? `${label} ${secText(wall)}（Gateway の処理 ${secText(gw)}・画面への反映までの遅れ ${secText(wall - gw)}）` : `${label} ${secText(wall)}`);
-      const timeParts = timing ? [timing.proposeMs != null ? `仮案の返答 ${secText(timing.proposeMs)}` : null, part('計画', timing.planMs, gwMs.plan), part('計画の自動の見直し', timing.planAutoMs, gwMs.planAuto), part('生成・検証', timing.generateMs, gwMs.generate)].filter(Boolean) : [];
+      const part = (label, wall, gw) => (wall == null ? null : gw != null && wall - gw >= 10000 ? `${label} ${secText(wall)}（AI サービスの処理 ${secText(gw)}・画面への反映までの遅れ ${secText(wall - gw)}）` : `${label} ${secText(wall)}`);
+      const timeParts = timing ? [timing.proposeMs != null ? `仮案の返答 ${secText(timing.proposeMs)}` : null, part('計画', timing.planMs, gwMs.plan), part('計画の不足の見直し', timing.planAutoMs, gwMs.planAuto), part('作成と確認', timing.generateMs, gwMs.generate)].filter(Boolean) : [];
       //   2026-10-15（§1.5）: 作成途中（時間切れで止めた）のとき、止めた試行までに受信した本文の文字数（Gateway の観測 upstream.textChars。無ければ Toolkit が受けた進みの通知の累計）が
       //   あれば 1 句だけ添える（UTF-16 の長さ。token 数ではない）。無ければ何も出さない
       const inc = fin.incomplete && fin.incomplete.kind ? fin.incomplete : null;
       const stoppedC = inc && inc.stoppedAt != null && Array.isArray(fin.customizations) ? fin.customizations.find(c => c && String(c.customizationId) === String(inc.stoppedAt)) || null : null;
       const fl = stoppedC && stoppedC.failure ? stoppedC.failure : null;
       const charsN = fl ? (fl.upstream && fl.upstream.textChars != null && Number.isFinite(Number(fl.upstream.textChars)) ? Number(fl.upstream.textChars) : fl.textChars != null && Number.isFinite(Number(fl.textChars)) ? Number(fl.textChars) : null) : null;
-      const charsLine = inc && inc.kind === 'timeout' && charsN != null ? `<br><span class="kt-ai-final-chars">${esc(`時間切れまでに受信した本文 約 ${Math.round(charsN)} 文字（token 数ではありません）`)}</span>` : '';
+      const charsLine = inc && inc.kind === 'timeout' && charsN != null ? `<br><span class="kt-ai-final-chars">${esc(`時間切れまでに受信した本文 約 ${Math.round(charsN)} 文字（文字数です。AI の利用量（トークン）ではありません）`)}</span>` : '';
       //   §0f.4 の 6（2026-10-09）: 「AI の呼び出し N 回（内部を含め最大 M 回）。うち K 回は使用量が不明のため、費用は未確定です。確認できた分 … 約 X 米ドル（キャッシュの割引なし）」。
       //   K > 0 のときは合計と言わない（一部だけの合計を全体のように見せない）。古い記録（sentCalls が無い）は aiCalls で数える
       const usageHtml = (() => {
@@ -22169,11 +22190,11 @@
         //   2026-10-23（§12.67）: 集計の区間を書く（採用から最終案まで。見出しの検証の上限は会話全体）。送った要求すべてに Gateway の費用の記録があれば、費用はその記録（台帳と同じ）で出す
         const usd4 = (v) => String(Math.round(Number(v) * 10000) / 10000);   // 表示の桁は見出し（KTAiClient.usdText）と同じ 4 桁（独立レビュー 軽-1）
         const gwAll = (usage.gatewayCostCalls || 0) > 0 && usage.gatewayCostCalls === N && (usage.costUnknown || 0) === 0;
-        const head = `採用から最終案までの AI の呼び出し ${N} 回${usage.maxCalls != null ? `（内部を含め最大 ${usage.maxCalls} 回）` : ''}${usage.gatewayRepairs ? `・生成工程の修復 ${usage.gatewayRepairs} 回` : ''}。`;
-        const unk = K > 0 ? (gwAll ? `うち ${K} 回は token の内訳が分かりません（費用は Gateway の記録で確定）。` : `うち ${K} 回は使用量が不明のため、費用は未確定です。`) : '';
+        const head = `採用から最終案までの AI の呼び出し ${N} 回${usage.maxCalls != null ? `（内部を含め最大 ${usage.maxCalls} 回）` : ''}${usage.gatewayRepairs ? `・AI による直し ${usage.gatewayRepairs} 回` : ''}。`;
+        const unk = K > 0 ? (gwAll ? `うち ${K} 回はトークンの内訳が分かりません（費用は AI サービスの記録で確定）。` : `うち ${K} 回は使用量が不明のため、費用は未確定です。`) : '';
         const rt = usage.repairTokens && (usage.repairTokens.input || usage.repairTokens.output) ? `（うち修復 入力 ${usage.repairTokens.input} / 出力 ${usage.repairTokens.output}${usage.repairTokens.measured === 'last' ? '・最後の修復の分だけ' : usage.repairTokens.measured === 'partial' ? '・使用量が分かった修復の分だけ' : ''}）` : '';
-        const known = usage.measured ? `${K > 0 ? '確認できた分' : '合計'} 入力 ${usage.tokens.input} / 出力 ${usage.tokens.output} トークン・${gwAll ? `費用 約 ${usd4(usage.gatewayCostUsd)} 米ドル（Gateway の記録）` : `約 ${usage.costUsd} 米ドル（キャッシュの割引なし）`}${rt}` : (K > 0 ? (gwAll ? `費用 約 ${usd4(usage.gatewayCostUsd)} 米ドル（Gateway の記録。token の内訳はありません）。` : '確認できた使用量はありません。') : '');
-        const ns = usage.notSentBudget ? `<br>検証の上限で送らなかった要求 ${usage.notSentBudget} 件（費用なし）` : '';
+        const known = usage.measured ? `${K > 0 ? '確認できた分' : '合計'} 入力 ${usage.tokens.input} / 出力 ${usage.tokens.output} トークン・${gwAll ? `費用 約 ${usd4(usage.gatewayCostUsd)} 米ドル（AI サービスの記録）` : `約 ${usage.costUsd} 米ドル（推定。割引は考慮していません）`}${rt}` : (K > 0 ? (gwAll ? `費用 約 ${usd4(usage.gatewayCostUsd)} 米ドル（AI サービスの記録。トークンの内訳はありません）。` : '確認できた使用量はありません。') : '');
+        const ns = usage.notSentBudget ? `<br>費用の上限で送らなかった要求 ${usage.notSentBudget} 件（費用なし）` : '';
         return `<br><span class="kt-ai-final-usage">${esc(head + unk + known)}</span>${ns}`;
       })();
       //   2026-10-15（レビューの反映 T6）: どれかの部に括弧の分割（Gateway の処理・画面への反映までの遅れ）があるときは外側の区切りを「、」にする（括弧の中の「・」と見分けるため）。分割が無ければ今までどおり「・」
@@ -22191,7 +22212,7 @@
       return pendHtml;
     }
     //   会話の設計し直し（2026-10-14・指示書 §1.4）: 止まった理由を人の言葉で（STOP_REASON_JA は会話の知らせ・readiness の文で使うので変えない）
-    const STOP_REASON_PLAIN = Object.freeze({ timeout: 'AIの応答が時間切れになりました', cancelled: '取り消しました', disconnected: 'AIサービスとの通信が切れました', budget: '利用の上限（予算・回数）に達しました', rate: 'AIサービスへのアクセスが集中しています', auth: 'AIサービスとの接続の有効期限が切れています', page: 'このページの有効期限が切れ、AIとの接続を更新できませんでした', token: 'AIサービスとの接続の更新の途中で止まりました（AIには送っていません）' });
+    const STOP_REASON_PLAIN = Object.freeze({ timeout: 'AI の応答が時間切れになりました', cancelled: '取り消しました', disconnected: 'AI サービスとの通信が切れました', budget: '費用と回数の上限に達しました', rate: 'AI サービスへのアクセスが集中しています', auth: 'AI サービスとの接続の有効期限が切れています', page: 'このページの有効期限が切れ、AI との接続を更新できませんでした', token: 'AI サービスとの接続の更新の途中で止まりました（AIには送っていません）' });
     /**
      * 作成途中のカード（指示書 §1.4。fin.incomplete があるとき。最終案の全文は出さない）:
      *   見出し「作成途中」／「{できた JavaScript の計画の手順の title を「・」でつなぐ}はできました。{止めた JavaScript の title}の作成中に、{止まった理由}。」
@@ -22243,7 +22264,7 @@
       //   §0f.4: 検証の上限で止めたときは、必要な額・残り（KTAiClient.budgetDetailText）を理由に添える（理由はこの 1 文だけ）
       const bd = inc.kind === 'budget' && inc.budget && typeof KTAiClient !== 'undefined' && KTAiClient.budgetDetailText ? KTAiClient.budgetDetailText(inc.budget) : '';
       const why = `${STOP_REASON_PLAIN[inc.kind] || '処理を続けられませんでした'}${bd ? `（${bd}）` : ''}`;
-      const where = stoppedId ? `${titleOf(stoppedId)}の作成中に` : inc.stage === 'plan-auto' ? '計画の自動の見直しの途中で' : 'JavaScript の作成中に';
+      const where = stoppedId ? `${titleOf(stoppedId)}の作成中に` : inc.stage === 'plan-auto' ? '計画の不足の見直しの途中で' : 'JavaScript の作成中に';
       const sentences = [
         done.length ? `${done.join('・')}はできました。` : 'まだできた JavaScript はありません。',
         `${where}、${why}。`,
@@ -22286,7 +22307,7 @@
       //   統合テストの指摘 13（2026-10-14）: 計画の AI の影響の文（p.impact）は右の「影響範囲」の節に 1 回だけ出す。ここは設定の手順の件数と JavaScript の登録先の行だけ（二重に並べない）
       //   §12.59（2026-10-23）: JavaScript ごとの行は fin.customizations から（止めた JavaScript は failure.stop。生成の結果の unsupported の行の文は今までどおり）
       const js = Array.isArray(fin.customizations) ? fin.customizations.filter(c => c && typeof c === 'object') : [];
-      return [...(st.total ? [`設定の手順 ${st.total} 件（Toolkit から自動で反映できるのは ${st.auto} 件${st.blocked ? `・実行できない手順 ${st.blocked} 件` : ''}）`] : ['設定の変更はありません']), ...js.map(j => { const file = j.targetFile || ''; const stopped = j.status === 'failed' && !!(j.failure && j.failure.stop); return (j.status === 'cannot-generate' ? `Toolkit では作れない JavaScript${j.requirement ? `（${esc(j.requirement)}）` : ''}（反映の対象にしません）` : j.status === 'not-started' ? 'JavaScript（前の JavaScript の生成を止めたため、まだ作っていません）' : !file ? `JavaScript（${stopped ? '作っている途中で止めたため、ファイルはまだありません' : j.status === 'failed' ? '生成できなかったため、ファイルはまだありません' : 'ファイル名は未定'}）` : `${j.strategy === 'EXTEND_EXISTING_JS' ? (j.unchanged ? `「${esc(file)}」は変更なし（統合後の本文が既存と同じため登録しません）` : `既存の「${esc(file)}」に統合`) : `新しい JavaScript「${esc(file)}」を登録`}${j.status === 'verified' ? '' : j.status === 'unresolved' ? '（未解決。反映の対象にしません）' : j.status === 'failed' ? (stopped ? '（作っている途中で止めました。前の結果は反映の対象にしません）' : '（生成できませんでした）') : j.status === 'not-run' ? '（模擬テストを実行できていません。反映の対象にしません）' : '（確かめられていません。反映の対象にしません）'}`); })];
+      return [...(st.total ? [`設定の手順 ${st.total} 件（Toolkit から自動で反映できるのは ${st.auto} 件${st.blocked ? `・実行できない手順 ${st.blocked} 件` : ''}）`] : ['設定の変更はありません']), ...js.map(j => { const file = j.targetFile || ''; const stopped = j.status === 'failed' && !!(j.failure && j.failure.stop); return (j.status === 'cannot-generate' ? `Toolkit では作れない JavaScript${j.requirement ? `（${esc(j.requirement)}）` : ''}（反映の対象にしません）` : j.status === 'not-started' ? 'JavaScript（前の JavaScript の生成を止めたため、まだ作っていません）' : !file ? `JavaScript（${stopped ? '作っている途中で止めたため、ファイルはまだありません' : j.status === 'failed' ? '作れなかったため、ファイルはまだありません' : 'ファイル名は未定'}）` : `${j.strategy === 'EXTEND_EXISTING_JS' ? (j.unchanged ? `「${esc(file)}」は変更なし（追加した結果が今登録されている内容と同じため登録しません）` : `既存の「${esc(file)}」に統合`) : `新しい JavaScript「${esc(file)}」を登録`}${j.status === 'verified' ? '' : j.status === 'unresolved' ? '（確認が済んでいません。反映の対象にしません）' : j.status === 'failed' ? (stopped ? '（作っている途中で止めました。前の結果は反映の対象にしません）' : '（作れませんでした）') : j.status === 'not-run' ? '（模擬テストができていません。反映の対象にしません）' : '（確かめられていません。反映の対象にしません）'}`); })];
     }
     /**
      * 「確かめたこと」の 1 行（右の「変更内容」。指示書 §5.1）: 「構文と対象の照合、模擬テストで必須の動作を確認しました。実機は未確認です。」の形。
@@ -22305,21 +22326,21 @@
       const ran = beh.status !== 'none' && cases.length > 0;
       const counts = beh.counts || { pass: 0, fail: 0, notRun: 0 };
       const parts = [];
-      if (!machineRan) parts.push('構文と対象の照合は実行できませんでした（検査する JavaScript がありません）');
-      else if (blocks) parts.push(`構文と対象の照合で登録を止める問題が ${blocks} 件あります`);
-      const head = machineRan && !blocks ? '構文と対象の照合' : '';
+      if (!machineRan) parts.push('コードの書き方と対象の確認は実行できませんでした（検査する JavaScript がありません）');
+      else if (blocks) parts.push(`コードの書き方と対象の確認で登録を止める問題が ${blocks} 件あります`);
+      const head = machineRan && !blocks ? 'コードの書き方と対象の確認' : '';
       //   統合テストの指摘 14（2026-10-14）: 設計上 skip した代表条件（対象外。category scope の not-run。例: 作成画面に当たらない確かめ方）は「実行できていません」に数えない。
       //   環境・材料不足で実行できなかった not-run だけを件数に出し、対象外があれば「対象外の条件は除く」と添える（判定は変えない）
       const notRunCounted = cases.filter(x => x && x.verdict === 'not-run' && x.category !== 'scope').length;
       const skipped = cases.filter(x => x && x.verdict === 'not-run' && x.category === 'scope').length;
       if (!ran) parts.push(head ? `${head}だけを行いました（模擬テストは実行できていません）` : '模擬テストは実行できていません');
       else if (counts.fail) parts.push(`${head ? `${head}、` : ''}模擬テストで不合格が ${counts.fail} 件あります`);
-      else if (notRunCounted) parts.push(`${head ? `${head}を行い、` : ''}模擬テストの代表条件 ${notRunCounted} 件は実行できていません${skipped ? '（対象外の条件は除く）' : ''}`);
+      else if (notRunCounted) parts.push(`${head ? `${head}を行い、` : ''}模擬テストで確かめる条件 ${notRunCounted} 件は実行できていません${skipped ? '（対象外の条件は除く）' : ''}`);
       else if (counts.pass) parts.push(`${head ? `${head}、` : ''}模擬テストで必須の動作を確認しました${skipped ? '（対象外の条件は除く）' : ''}`);
-      else parts.push(`${head ? `${head}を行い、` : ''}模擬テストで確かめた代表条件はありません（対象外の条件 ${skipped} 件は除く）`);
+      else parts.push(`${head ? `${head}を行い、` : ''}模擬テストで確かめた確かめる条件はありません（対象外の条件 ${skipped} 件は除く）`);
       //   レビュー 5（2026-10-14）: モバイルの確認先（運用環境のモバイル画面か実機）は、この 1 行で 1 回だけ言う（明細の「まだ確かめていないこと」では繰り返さない）
       const mobile = (Array.isArray(ver.unverified) ? ver.unverified : []).some(u => MOBILE_UNVERIFIED_RE.test(String(u || '')));
-      return `${parts.join('。')}。実機は未確認です${mobile ? '（モバイルは運用環境のモバイル画面か実機で確かめます）' : ''}。`;
+      return `${parts.join('。')}。実際の画面ではまだ確かめていません${mobile ? '（モバイルは運用環境のモバイル画面かスマートフォンのアプリで確かめます）' : ''}。`;
     }
     /** モバイルの確認先の文（KTCodeReview の登録の確認 MOBILE_RUNTIME_NOT_VERIFIABLE の文。fin.verification.unverified に入る）の見分け */
     const MOBILE_UNVERIFIED_RE = /モバイルの画面は kintone の動作テスト環境に無い/;
@@ -22336,27 +22357,27 @@
       const ver = fin.verification || { machine: { blocks: [], reviews: [], gateway: [], toolkit: [], gatewayRepairs: 0 }, effects: [], behavior: { status: 'none', reasons: [], cases: [], counts: { pass: 0, fail: 0, notRun: 0 } }, unverified: [], howTo: [] };
       const mc = ver.machine || { blocks: [], reviews: [], gateway: [], toolkit: [], gatewayRepairs: 0 };
       const machineRan = (mc.gateway || []).length + (mc.toolkit || []).length > 0;
-      const machineLine = !machineRan ? '機械検査: 実行できませんでした（検査する JavaScript がありません）' : `機械検査: 生成工程の検査 ${mc.gateway.length} 項目${mc.gatewayRepairs ? `（生成工程で ${mc.gatewayRepairs} 回修復）` : ''}・Toolkit の形式確認 ${mc.toolkit.length} 項目${(mc.blocks || []).length ? ` — 登録不可 ${mc.blocks.length} 件` : ' — 登録を止める問題はありません'}${(mc.reviews || []).length ? `（確認 ${mc.reviews.length} 件）` : ''}（構文・記法・対象の照合です。業務上の動作の確認ではありません）`;
-      const STRUCT_JA = { present: '処理あり', missing: '処理なし（要件未達）', unchecked: '解析できません（未確認）', unknown: '確かめられません', unsupported: '接続先が確認に非対応', 'not-generated': 'まだ作っていません' };
+      const machineLine = !machineRan ? 'コードの検査: 実行できませんでした（検査する JavaScript がありません）' : `コードの検査: AI サービスの検査 ${mc.gateway.length} 項目${mc.gatewayRepairs ? `（AI サービスで ${mc.gatewayRepairs} 回修復）` : ''}・Toolkit のコードの検査 ${mc.toolkit.length} 項目${(mc.blocks || []).length ? ` — 登録不可 ${mc.blocks.length} 件` : ' — 登録を止める問題はありません'}${(mc.reviews || []).length ? `（確認 ${mc.reviews.length} 件）` : ''}（コードの書き方と対象の確認です。業務上の動作の確認ではありません）`;
+      const STRUCT_JA = { present: '処理あり', missing: '処理なし（要件を満たしていません）', unchecked: '解析できません（未確認）', unknown: '確かめられません', unsupported: 'AI サービスがこの確認に対応していません', 'not-generated': 'まだ作っていません' };
       const BEH_JA = { pass: '模擬テストで合格', fail: '模擬テストで不合格', 'not-run': '模擬テストを実行できません', untested: '模擬テストの結果なし' };
       const effects = Array.isArray(ver.effects) ? ver.effects : [];
       //   §0d.1（2026-10-08）: 機械検査で足りる効果（checkedBy machine）は「機械検査で確認（模擬テストは未実施）」（模擬テストの合格とは書かない）
-      const behJa = (x) => (x.structure === 'not-generated' ? '作っていないので確かめていません' : x.behavior === 'pass' && x.checkedBy === 'machine' ? '機械検査で確認（模擬テストは未実施）' : (BEH_JA[x.behavior] || x.behavior));
+      const behJa = (x) => (x.structure === 'not-generated' ? '作っていないので確かめていません' : x.behavior === 'pass' && x.checkedBy === 'machine' ? 'コードの検査で確認（模擬テストは未実施）' : (BEH_JA[x.behavior] || x.behavior));
       const effRows = effects.map(x => `<div class="kt-ai-final-effect" data-structure="${esc(x.structure)}" style="font-size:11px;">${esc(x.structure === 'present' && x.behavior === 'pass' ? '✓' : (x.structure === 'missing' || x.behavior === 'fail') ? '×' : x.structure === 'not-generated' ? '－' : '未確認')} ${esc(`${x.label}${platJaOf(x.platforms) ? `（${platJaOf(x.platforms)}）` : ''}: ${x.effectJa}`)} — ${esc(STRUCT_JA[x.structure] || x.structure)}・${esc(behJa(x))}${x.behavior === 'not-run' ? esc(`（${x.notRunCategory || '環境'}）`) : ''}</div>`).join('');
       const effLine = effects.length ? `<div style="font-size:12px; margin-top:4px;">必須の動作（${effects.length} 件）</div>${effRows}` : '';
       const beh = ver.behavior || { status: 'none', reasons: [], cases: [], counts: { pass: 0, fail: 0, notRun: 0 } };
-      const behLine = beh.status === 'none' ? '模擬テスト: 結果はありません' : (beh.status === 'not-run' && !beh.cases.length) ? `模擬テスト: 実行できませんでした（${beh.reasons.length ? beh.reasons.join('／') : '環境'}）。作った JavaScript の誤りとは判定していません` : `模擬テスト（代表条件 ${beh.cases.length} 件）: 合格 ${beh.counts.pass}・不合格 ${beh.counts.fail}・実行できない ${beh.counts.notRun}${beh.status === 'not-run' && beh.reasons.length ? `（${beh.reasons.join('／')}）` : ''}`;
+      const behLine = beh.status === 'none' ? '模擬テスト: 結果はありません' : (beh.status === 'not-run' && !beh.cases.length) ? `模擬テスト: 実行できませんでした（${beh.reasons.length ? beh.reasons.join('／') : '環境'}）。作った JavaScript の誤りとは判定していません` : `模擬テスト（確かめる条件 ${beh.cases.length} 件）: 合格 ${beh.counts.pass}・不合格 ${beh.counts.fail}・実行できない ${beh.counts.notRun}${beh.status === 'not-run' && beh.reasons.length ? `（${beh.reasons.join('／')}）` : ''}`;
       //   2026-10-10（§3.3・§5.2）: 生成工程が修復を依頼しなかった結果（模擬テストの入力の不正・条件が分からない必須の動作）は、代表条件の一覧の詳細に 1 行で出す
-      const NOT_REPAIRED_JA = { 'case-invalid': (n) => `模擬テストの入力の不正 ${n} 件（生成したコードの不合格ではありません）`, 'condition-unknown': (n) => `条件が分からない必須の動作 ${n} 件（計画を直す対象です）` };
+      const NOT_REPAIRED_JA = { 'case-invalid': (n) => `確認に使う条件に問題があったもの ${n} 件（生成したコードの不合格ではありません）`, 'condition-unknown': (n) => `条件が分からない必須の動作 ${n} 件（計画を直す対象です）` };
       const notRep = (Array.isArray(mc.notRepaired) ? mc.notRepaired : []).filter(x => NOT_REPAIRED_JA[x.reason]);
-      const notRepLine = notRep.length ? `<div class="kt-ai-final-not-repaired" style="font-size:11px; opacity:.85;">修復を依頼しなかった結果: ${esc(notRep.map(x => NOT_REPAIRED_JA[x.reason](x.count)).join('・'))}</div>` : '';
+      const notRepLine = notRep.length ? `<div class="kt-ai-final-not-repaired" style="font-size:11px; opacity:.85;">AI に直させなかったもの: ${esc(notRep.map(x => NOT_REPAIRED_JA[x.reason](x.count)).join('・'))}</div>` : '';
       const behRows = (beh.cases || []).slice(0, 12).map(x => `<div style="font-size:11px;">${esc(x.verdict === 'pass' ? '✓' : x.verdict === 'fail' ? '×' : '未確認')} ${esc(x.label)}${x.verdict !== 'pass' && x.message ? ` — ${esc(x.message)}` : ''}${x.verdict === 'not-run' && x.reason ? `（${esc(x.reason)}）` : ''}</div>`).join('') + notRepLine;
       const realLines = [...(Array.isArray(ver.howTo) ? ver.howTo : []).map(esc)];
       //   2026-10-15（最終案の重複と担当未定の食い違い §1）: モバイルの JavaScript は、どれが動作テスト環境で確かめられないかを役割の名前で書く（検査の登録の確認 MOBILE_RUNTIME_NOT_VERIFIABLE があるときだけ）
       const mobileRoles = (Array.isArray(ver.unverified) ? ver.unverified : []).some(u => MOBILE_UNVERIFIED_RE.test(String(u || ''))) ? [...new Set(custs.filter(c => c && Array.isArray(c.platforms) && c.platforms.includes('mobile')).map(c => c.role || 'モバイルの JavaScript'))] : [];
-      if (mobileRoles.length) realLines.push(esc(`${mobileRoles.join('・')}: 動作テスト環境にはモバイルの画面が無いため、反映した後もここでは確かめられません（運用環境のモバイル画面か実機で確かめます）`));
+      if (mobileRoles.length) realLines.push(esc(`${mobileRoles.join('・')}: 動作テスト環境にはモバイルの画面が無いため、反映した後もここでは確かめられません（運用環境のモバイル画面かスマートフォンのアプリで確かめます）`));
       //   §0d.1（2026-10-08）: 機械検査で足りる必須の動作があり、模擬テストが合格していないときは、その扱いを 1 行で書く（模擬テストの合格とは書かない）
-      const machineNote = effects.some(x => x.checkedBy === 'machine') && beh.status !== 'passed' ? '機械検査で確認した必須の動作は、模擬テストの結果を待たずに反映できる扱いにしています（模擬テストは未実施）' : '';
+      const machineNote = effects.some(x => x.checkedBy === 'machine') && beh.status !== 'passed' ? 'コードの検査で確認した必須の動作は、模擬テストの結果を待たずに反映できる扱いにしています（模擬テストは未実施）' : '';
       //   §0d.3（2026-10-08）: 未確認の一覧（モバイルの確認先・生成工程が記録した未確認の点・既存の JavaScript との実行順など。fin.verification.unverified）
       //   レビュー 5（2026-10-14）: モバイルの確認先は「確かめたこと」の 1 行（verificationLineOf）で言うので、ここでは出さない（1 回だけ）
       const unverRows = Array.isArray(ver.unverified) ? ver.unverified.filter(u => u && !MOBILE_UNVERIFIED_RE.test(String(u))) : [];
@@ -22364,13 +22385,13 @@
       //   C-1 第 4 段（2026-10-09）: 模擬テストの条件と確かめていない範囲は、生成工程（Gateway）が返した文（fin.verification.scope）をそのまま出す。返っていなければその旨だけ
       const sc0 = ver.scope || { conditions: [], unchecked: [] };
       const scopeRows = sc0.conditions.length || sc0.unchecked.length ? [
-        ...(sc0.conditions.length ? ['<b>模擬テストの条件</b>', ...sc0.conditions.map(x => `・${esc(x)}`)] : [sc0.conditionsNotRun ? '模擬テストを隔離環境で実行していないため、模擬テストの条件はありません' : '模擬テストの条件は接続先から返っていません']),
-        ...(sc0.unchecked.length ? ['<b>確かめていない範囲</b>', ...sc0.unchecked.map(x => `・${esc(x)}`)] : ['確かめていない範囲は接続先から返っていません']),
-      ] : [sc0.conditionsNotRun ? '模擬テストを隔離環境で実行していないため、模擬テストの条件はありません' : '模擬テストの条件は接続先から返っていません'];
-      const scopeHtml = `<details class="kt-ai-tech kt-ai-final-scope" style="margin-top:2px;"><summary>模擬テストの条件と確かめていない範囲</summary><div style="font-size:11px;">${[...scopeRows, '反映は動作テスト環境から始まります。PC の画面の実機での確かめは、動作テスト環境で行ってください（モバイルの画面は動作テスト環境にありません）。'].join('<br>')}</div></details>`;
+        ...(sc0.conditions.length ? ['<b>模擬テストの条件</b>', ...sc0.conditions.map(x => `・${esc(x)}`)] : [sc0.conditionsNotRun ? '模擬テストを実行していないため、模擬テストの条件はありません' : '模擬テストの条件はAI サービスから返っていません']),
+        ...(sc0.unchecked.length ? ['<b>確かめていない範囲</b>', ...sc0.unchecked.map(x => `・${esc(x)}`)] : ['確かめていない範囲はAI サービスから返っていません']),
+      ] : [sc0.conditionsNotRun ? '模擬テストを実行していないため、模擬テストの条件はありません' : '模擬テストの条件はAI サービスから返っていません'];
+      const scopeHtml = `<details class="kt-ai-tech kt-ai-final-scope" style="margin-top:2px;"><summary>模擬テストの条件と確かめていない範囲</summary><div style="font-size:11px;">${[...scopeRows, '反映は動作テスト環境から始まります。PC の画面の実際の動きは、動作テスト環境で確かめてください（モバイルの画面は動作テスト環境にありません）。'].join('<br>')}</div></details>`;
       //   反映した後に動作テスト環境で確かめること（実機未確認は「確かめたこと」の 1 行で言うので、ここでは繰り返さない）
-      const realHtml = fin.approvable ? `<div style="font-size:12px; margin-top:4px;"><b>反映した後、動作テスト環境で確かめること:</b></div>${li(realLines.length ? realLines : ['動作テスト環境で、条件に合うレコードと合わないレコードを開いて動きを確かめる'])}` : '<div class="kt-ai-final-real" style="font-size:12px; margin-top:4px;">反映できない点が残っているため、まだ実機で確かめる段階ではありません（理由と次の方針は最終案のカード）。</div>';
-      return `<div style="font-size:12px; margin-top:2px;">${esc(machineLine)}</div>${(mc.blocks || []).length ? `<details class="kt-ai-tech" style="margin-top:2px;"><summary>登録を止める問題（詳細）</summary><div style="font-size:11px; color:#b00020;">${mc.blocks.map(x => `× ${esc(x)}`).join('<br>')}</div></details>` : ''}${effLine}<div style="font-size:12px; margin-top:4px;">${esc(behLine)}</div>${machineNote ? `<div class="kt-ai-final-machine" style="font-size:11px; margin-top:2px; opacity:.85;">${esc(machineNote)}</div>` : ''}${behRows ? `<details class="kt-ai-tech" style="margin-top:2px;"${beh.counts.fail || beh.counts.notRun ? ' open' : ''}><summary>代表条件の一覧</summary>${behRows}</details>` : ''}${beh.status !== 'none' ? scopeHtml : ''}${realHtml}${unverHtml}`;
+      const realHtml = fin.approvable ? `<div style="font-size:12px; margin-top:4px;"><b>反映した後、動作テスト環境で確かめること:</b></div>${li(realLines.length ? realLines : ['動作テスト環境で、条件に合うレコードと合わないレコードを開いて動きを確かめる'])}` : '<div class="kt-ai-final-real" style="font-size:12px; margin-top:4px;">反映できない点が残っているため、まだ実際の画面で確かめる段階ではありません（理由と次の方針は最終案のカード）。</div>';
+      return `<div style="font-size:12px; margin-top:2px;">${esc(machineLine)}</div>${(mc.blocks || []).length ? `<details class="kt-ai-tech" style="margin-top:2px;"><summary>登録を止める問題（詳細）</summary><div style="font-size:11px; color:#b00020;">${mc.blocks.map(x => `× ${esc(x)}`).join('<br>')}</div></details>` : ''}${effLine}<div style="font-size:12px; margin-top:4px;">${esc(behLine)}</div>${machineNote ? `<div class="kt-ai-final-machine" style="font-size:11px; margin-top:2px; opacity:.85;">${esc(machineNote)}</div>` : ''}${behRows ? `<details class="kt-ai-tech" style="margin-top:2px;"${beh.counts.fail || beh.counts.notRun ? ' open' : ''}><summary>確かめる条件の一覧</summary>${behRows}</details>` : ''}${beh.status !== 'none' ? scopeHtml : ''}${realHtml}${unverHtml}`;
     }
     /**
      * レビュー 1（2026-10-14）: 条件式（kintone のクエリの単純な比較。and / or で並べたもの）を画面の文にする。
@@ -22557,7 +22578,7 @@
       const canApprove = active && !applyBlock && !approved && !writtenNow;
       //   §0c.8（2026-10-08）: 承認できない最終案の次の手（計画を直す・作り直し）は、このボタン 1 つで通常の計画の差分更新（自由入力の修正と同じ REVISE_PLAN）に送る。
       //   既存の候補の返事の仕組み（data-act choice）を使う。自動では送らない
-      const fixHtml = active && !approved && !fin.approvable && fin.fix && fin.fix.text ? `<div class="kt-ai-final-fix" style="margin-top:8px; display:flex; gap:6px; flex-wrap:wrap; align-items:center;">${btn('choice', fin.fix.label, `data-text="${esc(fin.fix.text)}" data-intent="${esc(KTAiConversation.INTENT.REVISE_PLAN)}" data-display="${esc(fin.fix.display || fin.fix.label)}" data-fix="${esc(fin.fix.kind)}"`, 'font-weight:600;')}<span style="font-size:11px; opacity:.8;">${esc(fin.fix.kind === 'regenerate' ? '押すと、要件は変えずに JavaScript の作り直しを依頼します（計画の差分更新として送ります）。' : '押すと、確かめられなかった点（区分・ファイル・フィールド）を添えて計画の修正を依頼します。')}</span></div>` : '';
+      const fixHtml = active && !approved && !fin.approvable && fin.fix && fin.fix.text ? `<div class="kt-ai-final-fix" style="margin-top:8px; display:flex; gap:6px; flex-wrap:wrap; align-items:center;">${btn('choice', fin.fix.label, `data-text="${esc(fin.fix.text)}" data-intent="${esc(KTAiConversation.INTENT.REVISE_PLAN)}" data-display="${esc(fin.fix.display || fin.fix.label)}" data-fix="${esc(fin.fix.kind)}"`, 'font-weight:600;')}<span style="font-size:11px; opacity:.8;">${esc(fin.fix.kind === 'regenerate' ? '押すと、要件は変えずに JavaScript の作り直しを依頼します。' : '押すと、確かめられなかった点を添えて計画の修正を依頼します。')}</span></div>` : '';
       //   §0e.1（2026-10-09）: 承認の欄。最終案が承認できる状態になると、画面が書き込みをしない準備（標準設定と JavaScript の登録の準備）を自動で走らせ、
       //   重要事項（プロセスの変更・既存の設定の変更・重複の疑い・追加と置き換えるファイル・確認項目・対象の環境）をここにまとめる（view.finalPre）。
       //   ［動作テスト環境へ反映］の 1 回で承認と反映（標準設定 → JavaScript）を行う。準備中・基準の取得中・止まる理由があるときは押せない
@@ -22573,7 +22594,7 @@
         ...(Array.isArray(preItems.settings) && preItems.settings.length + (preItems.process || []).length + (preItems.existing || []).length ? [`<div style="font-size:12px; margin-top:4px;">反映する設定の手順: ${preItems.settings.length + (preItems.process || []).length + (preItems.existing || []).length} 件（内容は右の「変更内容」）</div>`] : []),
         ...[['process', 'プロセス管理の変更'], ['existing', '既存の設定の変更'], ['duplicate', '既存の設定と似ているもの（重複の疑い）'], ['files', '追加・置き換える JavaScript'], ['keep', 'JavaScript の登録先と変更しない設定'], ['deferred', '設定の反映の後に確かめること'], ['confirmations', '確認項目（この承認で確認済みとして扱います）'], ['warnings', '注意']]
           //   §0f.5 の 3（2026-10-09）: 確認項目は { text（画面の言葉）, detail（元の文。イベント名入り）}。元の文は詳細だけに出す（文字列の項目もそのまま受ける）
-          .filter(([k]) => Array.isArray(preItems[k]) && preItems[k].length).map(([k, label]) => `<div style="font-size:12px; margin-top:4px;"><b>${esc(label)}</b>${li(preItems[k].slice(0, 12).map(x => (x && typeof x === 'object' ? `${esc(x.text || '')}${x.detail && x.detail !== x.text ? `<details class="kt-ai-tech kt-ai-final-pre-detail" style="font-size:11px;"><summary>元の検査の文</summary>${esc(x.detail)}</details>` : ''}` : esc(x))))}${preItems[k].length > 12 ? `<div style="font-size:11px; opacity:.75;">ほかに ${preItems[k].length - 12} 件（右の「変更内容」）</div>` : ''}</div>`),
+          .filter(([k]) => Array.isArray(preItems[k]) && preItems[k].length).map(([k, label]) => `<div style="font-size:12px; margin-top:4px;"><b>${esc(label)}</b>${li(preItems[k].slice(0, 12).map(x => (x && typeof x === 'object' ? `${esc(x.text || '')}${x.detail && x.detail !== x.text ? `<details class="kt-ai-tech kt-ai-final-pre-detail" style="font-size:11px;"><summary>元の文（技術者向け）</summary>${esc(x.detail)}</details>` : ''}` : esc(x))))}${preItems[k].length > 12 ? `<div style="font-size:11px; opacity:.75;">ほかに ${preItems[k].length - 12} 件（右の「変更内容」）</div>` : ''}</div>`),
       ] : [];
       //   2026-10-19: 自動では反映しない手順（手作業に回す種類）は、閉じた［反映の前の確認］の中ではなく、ボタンの前に見える文で出す（この承認では反映しないことを決める時点で読めるように）
       const manualItems = preItems && Array.isArray(preItems.manual) ? preItems.manual : [];
@@ -22587,12 +22608,12 @@
       const custsAll = Array.isArray(fin.customizations) ? fin.customizations.filter(c => c && typeof c === 'object') : [];
       const unchangedJsN = custsAll.filter(c => c.status === 'verified' && c.unchanged).length;
       const nothingToApply = !!fin.impact && !(fin.impact.settings && fin.impact.settings.auto > 0) && custsAll.length > 0 && unchangedJsN === custsAll.length;
-      const statusLine = active && !approved && !writtenNow ? `<div class="kt-ai-final-status" data-can-apply="${canApply ? '1' : '0'}" style="margin-top:4px; font-size:12px;${canApply ? ' color:#2e7d32; font-weight:600;' : ''}">${esc(canApply ? (nothingToApply ? '反映する変更はありません（設定の変更なし。JavaScript は統合後の本文が既存と同じため登録しません）。' : manualItems.length ? `この内容で反映できます（自動では反映しない手順 ${manualItems.length} 件を除く）。` : 'この内容で反映できます。') : waitText)}</div>` : '';
+      const statusLine = active && !approved && !writtenNow ? `<div class="kt-ai-final-status" data-can-apply="${canApply ? '1' : '0'}" style="margin-top:4px; font-size:12px;${canApply ? ' color:#2e7d32; font-weight:600;' : ''}">${esc(canApply ? (nothingToApply ? '反映する変更はありません（設定の変更なし。JavaScript は追加した結果が今登録されている内容と同じため登録しません）。' : manualItems.length ? `この内容で反映できます（自動では反映しない手順 ${manualItems.length} 件を除く）。` : 'この内容で反映できます。') : waitText)}</div>` : '';
       //   2026-10-15（最終案の重複と担当未定の食い違い §1・§4）: 反映するものに合わせる（設定だけ・JavaScript だけの最終案に「設定の手順 → JavaScript の順」と出さない）
       //   数えるのは Toolkit が反映するものだけ: 自動で反映する設定の手順（settings.auto。手動・反映できない手順は数えない）と検証済みの JavaScript（独立レビュー L1）。
       //   fin.impact の無い古い最終案は今までの文（両方）。検証済みの JavaScript が無ければ設定の手順の文（手動の手順だけでも「JavaScript」とは言わない）
       const hasSettings = !fin.impact || !!(fin.impact.settings && fin.impact.settings.auto > 0), hasJs = !fin.impact || (Array.isArray(fin.customizations) && fin.customizations.some(c => c && c.status === 'verified' && !c.unchanged));
-      const APPLY_NOTE = nothingToApply ? '反映する変更はありません（設定の変更なし。JavaScript は統合後の本文が既存と同じため登録しません）。' : !hasJs ?'承認すると動作テスト環境へ設定の手順を反映します（運用環境は変更しません）。反映後に、動作テスト環境の画面で動作を確認します。'
+      const APPLY_NOTE = nothingToApply ? '反映する変更はありません（設定の変更なし。JavaScript は追加した結果が今登録されている内容と同じため登録しません）。' : !hasJs ?'承認すると動作テスト環境へ設定の手順を反映します（運用環境は変更しません）。反映後に、動作テスト環境の画面で動作を確認します。'
         : hasJs && !hasSettings ? '承認すると動作テスト環境へ JavaScript を反映します（運用環境は変更しません）。反映後に、動作テスト環境の画面で動作を確認します。'
         : '承認すると動作テスト環境へ反映します（設定の手順 → JavaScript の順。運用環境は変更しません）。反映後に、動作テスト環境の画面で動作を確認します。';
       const preBlock = canApprove && pre ? `<div class="kt-ai-final-pre-wrap" data-status="${esc(pre.status)}" style="margin-top:8px;">${pre.notice ? `<div class="kt-ai-final-pre-notice" style="font-size:12px; color:#b26a00; margin-bottom:4px;">${esc(pre.notice)}</div>` : ''}${preReasons}${manualHtml}<details class="kt-ai-tech kt-ai-final-pre" data-status="${esc(pre.status)}"><summary>反映の前の確認（書き込みなし）</summary><div style="margin-top:4px;">${preRows.length ? preRows.join('') : `<div style="font-size:12px; opacity:.75;">${esc(PRE_WAIT[pre.status] || '準備が終わると、反映する設定・JavaScript・確認項目をここに出します。')}</div>`}</div></details></div>` : '';
@@ -22682,21 +22703,21 @@
         //   §0e.3（2026-10-09）: 通常表示はファイルごとの結果を画面の言葉で 1 行ずつ。状態の名前・検証の項目名・再解析のイベント名とフィールドのコード・
         //   登録の API と revision は［詳しく］の中（詳細表示）に置く
         const plainSteps = (ex.steps || []).map(c => `<div style="margin-top:4px; font-size:12px;">${esc(JS_ST_MARK[c.status] || '・')} ${name(c)} <span style="opacity:.8; font-size:11px;">${esc(JS_STATUS_JA[c.status] || '')}${c.message ? ` — ${esc(c.message)}` : ''}</span></div>`).join('');
-        const tech = `<div style="margin-top:6px;">${stepsHtml}</div>${ex.put ? `<div style="font-size:11px; margin-top:4px; opacity:.85;">PUT /preview/app/customize: ${ex.put.ok ? `✓（revision ${esc(ex.snapshot?.revision || '—')} → ${esc(ex.afterRevision || ex.put.revision || '—')}）` : `×（${esc(ex.put.error?.code || '')}）`}　アップロード: ${(ex.uploads || []).filter(u => u.ok).length} / ${(ex.uploads || []).length}</div>` : ''}${checks ? `<div style="margin-top:4px;">${checks}</div>` : ''}`;
+        const tech = `<div style="margin-top:6px;">${stepsHtml}</div>${ex.put ? `<div style="font-size:11px; margin-top:4px; opacity:.85;">PUT /preview/app/customize: ${ex.put.ok ? `✓（設定の版 ${esc(ex.snapshot?.revision || '—')} → ${esc(ex.afterRevision || ex.put.revision || '—')}）` : `×（${esc(ex.put.error?.code || '')}）`}　アップロード: ${(ex.uploads || []).filter(u => u.ok).length} / ${(ex.uploads || []).length}</div>` : ''}${checks ? `<div style="margin-top:4px;">${checks}</div>` : ''}`;
         return `<div style="margin-top:6px;">${plainSteps}</div><details class="kt-ai-tech" style="margin-top:4px;"><summary>詳しく（ファイルごとの確認・再解析・登録の記録）</summary>${tech}</details>${ex.previewUnchanged === true ? '<div style="font-size:12px; margin-top:4px;"><b>動作テスト環境の設定は変更されていません。</b></div>' : ''}`;
       };
       if (stage === 'done') {
         const ok = ex?.status === 'DONE';
-        return `${head(ok ? 'JavaScript を動作テスト環境へ登録しました。' : ex?.put?.ok ? '登録しましたが、検証で一致しない点があります。' : 'JavaScript を登録できませんでした。', ok ? '#2e7d32' : '#b00020')}${ex?.error ? `<div style="font-size:12px; color:#b00020; margin-top:4px;" data-code="${esc(ex.error.code)}">${esc(ex.error.message)}</div>` : ''}${resultHtml()}<div style="margin-top:4px; font-size:12px;"><b>運用環境には反映されていません。</b></div>
-          <div style="margin-top:8px; display:flex; gap:6px; flex-wrap:wrap;"><button type="button" id="kt-ai-jsreg-audit-copy" class="btn" style="height:26px; font-size:11px;">Customization Audit JSON をコピー</button>${ex?.put?.ok ? '<button type="button" id="kt-ai-jsreg-open-customize" class="btn" style="height:26px; font-size:11px;">Customize で確認</button>' : ''}${ex?.put?.ok && !ex.rollback ? '<button type="button" id="kt-ai-jsreg-rollback-start" class="btn" style="height:26px; font-size:11px; border-color:#6a1b9a;">変更前の状態に戻す</button>' : ''}<button type="button" id="kt-ai-jsreg-close" class="btn" style="height:26px; font-size:11px;">閉じる</button></div></div>`;
+        return `${head(ok ? 'JavaScript を動作テスト環境へ登録しました。' : ex?.put?.ok ? '登録しましたが、確認で一致しない点があります。' : 'JavaScript を登録できませんでした。', ok ? '#2e7d32' : '#b00020')}${ex?.error ? `<div style="font-size:12px; color:#b00020; margin-top:4px;" data-code="${esc(ex.error.code)}">${esc(ex.error.message)}</div>` : ''}${resultHtml()}<div style="margin-top:4px; font-size:12px;"><b>運用環境には反映されていません。</b></div>
+          <div style="margin-top:8px; display:flex; gap:6px; flex-wrap:wrap;"><button type="button" id="kt-ai-jsreg-audit-copy" class="btn" style="height:26px; font-size:11px;">登録の記録（JSON・技術者向け）をコピー</button>${ex?.put?.ok ? '<button type="button" id="kt-ai-jsreg-open-customize" class="btn" style="height:26px; font-size:11px;">Customize タブで確認</button>' : ''}${ex?.put?.ok && !ex.rollback ? '<button type="button" id="kt-ai-jsreg-rollback-start" class="btn" style="height:26px; font-size:11px; border-color:#6a1b9a;">変更前の状態に戻す</button>' : ''}<button type="button" id="kt-ai-jsreg-close" class="btn" style="height:26px; font-size:11px;">閉じる</button></div></div>`;
       }
       if (stage === 'rollback-preparing') return `${head('現在のカスタマイズ設定を確認しています...')}<div style="font-size:11px; opacity:.7; margin-top:4px;">書き込みはしません</div></div>`;
       if (stage === 'rollback-blocked') return `${head('自動では元に戻せません', '#b00020')}<div style="margin-top:4px;">${blockers(rb?.blockers)}${(rb?.stale?.diffs || []).slice(0, 8).map(d => `<div style="font-size:11px; margin-left:8px;">${esc(d.where)}: ${esc(String(d.before ?? '（なし）'))} → ${esc(String(d.after ?? '（なし）'))}</div>`).join('')}</div><div style="font-size:11px; opacity:.8; margin-top:4px;">設定は変更していません。</div><div style="margin-top:6px; display:flex; gap:6px;"><button type="button" id="kt-ai-jsreg-rollback-cancel" class="btn" style="height:26px; font-size:11px;">閉じる</button></div></div>`;
-      if (stage === 'rollback-confirm') return `${head('登録前の状態に戻します。')}<div style="margin-top:6px; display:grid; gap:2px; font-size:12px;">${(rb?.restores || []).map(r => `<div>${r.kind === 'REPLACE_FILE' ? `✎ <b>${esc(r.name)}</b>（${r.target === 'mobile' ? 'モバイル' : 'PC'}）を登録前の本文に戻す（指紋 ${esc(r.restoreHash || '—')}）` : `－ <b>${esc(r.name)}</b>（${r.target === 'mobile' ? 'モバイル' : 'PC'}）を外す`}</div>`).join('')}</div>${warns(rb?.warnings)}<div style="font-size:12px; margin-top:4px;">登録前の snapshot（revision ${esc(rb?.snapshotRevision || '—')}）のカスタマイズ設定全体を PUT します（更新したファイルは登録前の本文を再アップロードして同じ位置に戻します）。その他の JS / CSS / 適用範囲は snapshot のとおりです。<b>運用環境には反映されません。</b></div><div style="margin-top:8px; display:flex; gap:6px;"><button type="button" id="kt-ai-jsreg-rollback-cancel" class="btn" style="height:28px;">キャンセル</button><button type="button" id="kt-ai-jsreg-rollback-go" class="btn" style="height:28px; font-weight:600; border-color:#6a1b9a;">変更前の状態に戻す</button></div></div>`;
+      if (stage === 'rollback-confirm') return `${head('登録前の状態に戻します。')}<div style="margin-top:6px; display:grid; gap:2px; font-size:12px;">${(rb?.restores || []).map(r => `<div>${r.kind === 'REPLACE_FILE' ? `✎ <b>${esc(r.name)}</b>（${r.target === 'mobile' ? 'モバイル' : 'PC'}）を登録前の本文に戻す（指紋 ${esc(r.restoreHash || '—')}）` : `－ <b>${esc(r.name)}</b>（${r.target === 'mobile' ? 'モバイル' : 'PC'}）を外す`}</div>`).join('')}</div>${warns(rb?.warnings)}<div style="font-size:12px; margin-top:4px;">登録前の設定の控え（設定の版 ${esc(rb?.snapshotRevision || '—')}）のカスタマイズ設定全体を 書き込みます（更新したファイルは登録前の本文を再アップロードして同じ位置に戻します）。その他の JavaScript / CSS / 適用範囲は登録前の設定の控えのとおりです。<b>運用環境には反映されません。</b></div><div style="margin-top:8px; display:flex; gap:6px;"><button type="button" id="kt-ai-jsreg-rollback-cancel" class="btn" style="height:28px;">キャンセル</button><button type="button" id="kt-ai-jsreg-rollback-go" class="btn" style="height:28px; font-weight:600; border-color:#6a1b9a;">変更前の状態に戻す</button></div></div>`;
       if (stage === 'rolling-back') return `${head('登録前の状態に戻しています...')}</div>`;
       if (stage === 'rolled-back') {
         const ok = rb?.status === 'ROLLED_BACK_VERIFIED';
-        return `${head(rb?.message || (ok ? '登録前の状態へ戻しました。' : '元に戻せませんでした。'), ok ? '#2e7d32' : '#b00020')}${(rb?.verification?.checks || []).map(c => `<div style="font-size:11px; color:${c.ok ? '#2e7d32' : '#b00020'};">${c.ok ? '✓' : '×'} ${esc(c.name)}</div>`).join('')}${rb?.error ? `<div style="font-size:12px; color:#b00020;">${esc(rb.error.message)}</div>` : ''}<div style="margin-top:4px; font-size:12px;"><b>運用環境には影響していません。</b></div><div style="margin-top:8px; display:flex; gap:6px;"><button type="button" id="kt-ai-jsreg-audit-copy" class="btn" style="height:26px; font-size:11px;">Customization Audit JSON をコピー</button><button type="button" id="kt-ai-jsreg-close" class="btn" style="height:26px; font-size:11px;">閉じる</button></div></div>`;
+        return `${head(rb?.message || (ok ? '登録前の状態へ戻しました。' : '元に戻せませんでした。'), ok ? '#2e7d32' : '#b00020')}${(rb?.verification?.checks || []).map(c => `<div style="font-size:11px; color:${c.ok ? '#2e7d32' : '#b00020'};">${c.ok ? '✓' : '×'} ${esc(c.name)}</div>`).join('')}${rb?.error ? `<div style="font-size:12px; color:#b00020;">${esc(rb.error.message)}</div>` : ''}<div style="margin-top:4px; font-size:12px;"><b>運用環境には影響していません。</b></div><div style="margin-top:8px; display:flex; gap:6px;"><button type="button" id="kt-ai-jsreg-audit-copy" class="btn" style="height:26px; font-size:11px;">登録の記録（JSON・技術者向け）をコピー</button><button type="button" id="kt-ai-jsreg-close" class="btn" style="height:26px; font-size:11px;">閉じる</button></div></div>`;
       }
       return '';
     }
@@ -22726,13 +22747,13 @@
       //   §0f.4 の 6（2026-10-09）: 使用量が分からない回があれば「確認できた分」と不明の回数を分ける（一部の合計を全体のように見せない）
       const unknownP = attemptsP ? (Number.isFinite(Number(attemptsP.unknown)) ? Number(attemptsP.unknown) : Math.max(0, (attemptsP.count || 0) - (attemptsP.measured || 0))) : 0;
       const usageP = !attemptsP ? '' : !usageMeasured ? '（使用量は未取得）' : unknownP
-        ? `（確認できた分の使用量: 入力 ${esc(String(attemptsP.tokens.input || 0))} / 出力 ${esc(String(attemptsP.tokens.output || 0))} token・約 ${esc(String(attemptsP.costUsd || 0))} 米ドル。使用量が不明な回が ${esc(String(unknownP))} 回あり、費用は未確定）`
-        : `（使用量: 入力 ${esc(String(attemptsP.tokens.input || 0))} / 出力 ${esc(String(attemptsP.tokens.output || 0))} token・約 ${esc(String(attemptsP.costUsd || 0))} 米ドル）`;
+        ? `（確認できた分の使用量: 入力 ${esc(String(attemptsP.tokens.input || 0))} / 出力 ${esc(String(attemptsP.tokens.output || 0))} トークン・約 ${esc(String(attemptsP.costUsd || 0))} 米ドル。使用量が不明な回が ${esc(String(unknownP))} 回あり、費用は未確定）`
+        : `（使用量: 入力 ${esc(String(attemptsP.tokens.input || 0))} / 出力 ${esc(String(attemptsP.tokens.output || 0))} トークン・約 ${esc(String(attemptsP.costUsd || 0))} 米ドル）`;
       const covHtml = `${notAchTk.length ? `<div class="kt-ai-code-not-achieved" style="margin-top:2px; color:#b00020;">要件のうち満たせない部分（Toolkit の確認）: ${notAchTk.map(x => esc(x.message)).join('／')}</div>` : ''}${attemptsP ? `<div class="kt-ai-code-attempts" style="margin-top:2px; opacity:.75;">生成 ${esc(String(attemptsP.count || 1))} 回目${usageP}</div>` : ''}`;
       return {
-        head: `<b>${esc(g.strategy === 'EXTEND_EXISTING_JS' ? '✎ 既存 JS を変更' : '＋ 新規 JS')}: ${esc(g.targetFile)}</b>${regHtml}${covHtml}${notAch.length ? `<details style="margin-top:2px;"><summary style="cursor:pointer; opacity:.75;">AI の要約（Toolkit の確認と食い違う部分があります。そのまま採用しないでください）</summary><span style="opacity:.85;">${esc(g.summary || '')}</span></details>` : `<div style="margin-top:2px;"><span style="opacity:.7;">AI の要約:</span> <span style="opacity:.85;">${esc(g.summary || '')}</span></div>`}`,
+        head: `<b>${esc(g.strategy === 'EXTEND_EXISTING_JS' ? '✎ 既存の JavaScript を変更' : '＋ 新しい JavaScript')}: ${esc(g.targetFile)}</b>${regHtml}${covHtml}${notAch.length ? `<details style="margin-top:2px;"><summary style="cursor:pointer; opacity:.75;">AI の要約（Toolkit の確認と食い違う部分があります。そのまま採用しないでください）</summary><span style="opacity:.85;">${esc(g.summary || '')}</span></details>` : `<div style="margin-top:2px;"><span style="opacity:.7;">AI の要約:</span> <span style="opacity:.85;">${esc(g.summary || '')}</span></div>`}`,
         //   簡素化 §5（2026-10-16）: 通常表示は止める・確かめる必要のある検査（× △）だけ。通った検査（✓ の記録）は［詳しく］の中（表示だけ。判定は変えない）
-        review: (rv?.checks || []).filter(ch => !ch.ok).map(checkRow).join('') + ((rv?.checks || []).some(ch => ch.ok) ? `<details class="kt-ai-tech kt-ai-code-passed"><summary>通った検査（${(rv.checks || []).filter(ch => ch.ok).length} 件）</summary>${(rv.checks || []).filter(ch => ch.ok).map(checkRow).join('')}</details>` : '') + ((rv?.mismatches || []).length ? `<div style="margin-top:4px; opacity:.85;">計画との照合: ${rv.mismatches.map(x => esc(x.message)).join('／')}</div>` : '') + (((rv?.assumptions ?? g.assumptions) || []).length ? `<div style="margin-top:4px; opacity:.85;">前提: ${esc((rv?.assumptions ?? g.assumptions).join('／'))}</div>` : '') + ((g.warnings || []).length ? `<div style="color:#b26a00;">${g.warnings.map(w => `⚠ ${esc(w)}`).join('<br>')}</div>` : '') + patternsHtml(g),
+        review: (rv?.checks || []).filter(ch => !ch.ok).map(checkRow).join('') + ((rv?.checks || []).some(ch => ch.ok) ? `<details class="kt-ai-tech kt-ai-code-passed"><summary>通った検査（${(rv.checks || []).filter(ch => ch.ok).length} 件）</summary>${(rv.checks || []).filter(ch => ch.ok).map(checkRow).join('')}</details>` : '') + ((rv?.mismatches || []).length ? `<div style="margin-top:4px; opacity:.85;">計画との照らし合わせ: ${rv.mismatches.map(x => esc(x.message)).join('／')}</div>` : '') + (((rv?.assumptions ?? g.assumptions) || []).length ? `<div style="margin-top:4px; opacity:.85;">前提: ${esc((rv?.assumptions ?? g.assumptions).join('／'))}</div>` : '') + ((g.warnings || []).length ? `<div style="color:#b26a00;">${g.warnings.map(w => `⚠ ${esc(w)}`).join('<br>')}</div>` : '') + patternsHtml(g),
         code: rv?.finalCode ?? g.code ?? '',
         diff: rv?.diff ? (rv.diff.lines || []).map(l => `${l.type}${l.text}`).join('\n') : '',
       };
@@ -22781,7 +22802,7 @@
           <div><b>${esc(hhmm(e.at))}</b> <span style="color:${color}; font-weight:600;">${esc(state)}</span> ${tags}</div>
           <div style="font-size:12px;">依頼: ${esc(e.goal || '（不明）')}</div>
           ${what ? `<div style="font-size:12px; opacity:.85;">${e.kind === 'js' ? '登録' : '手順'}: ${what}</div>` : ''}
-          <div style="margin-top:4px; display:flex; gap:6px; flex-wrap:wrap;">${open}${btn('log-audit', '監査 JSON をコピー', `data-log="${esc(e.id)}"`)}</div>
+          <div style="margin-top:4px; display:flex; gap:6px; flex-wrap:wrap;">${open}${btn('log-audit', '反映の記録（JSON・技術者向け）をコピー', `data-log="${esc(e.id)}"`)}</div>
         </li>`;
       }).join('');
       return `<div class="kt-ai-apply-log" style="border-top:1px solid var(--kt-ai-border, #ccc); margin-top:10px; padding-top:6px;">
@@ -23272,7 +23293,7 @@
       },
       /** EXPLAIN_PLAN / EXPLAIN_REVIEW: 計画の要約 ＋ Review の写し ＋ 計画が引用した根拠 → assistant-qa（説明だけ。計画は変えない） */
       async explain({ question, kind, plan, review, ctx, version, signal = null }) {
-        if (!ctx) throw new KTAiClient.AiClientError({ code: KTAiClient.ERROR_CODES.NO_CONTEXT, message: 'この計画の Context がありません（Context ペインから作った計画は説明の対象外です）' });
+        if (!ctx) throw new KTAiClient.AiClientError({ code: KTAiClient.ERROR_CODES.NO_CONTEXT, message: 'この計画の Context がありません（「Context」タブから作った計画は説明の対象外です）' });
         const ectx = KTContext.buildExplain({ question, plan, review, plannerCtx: ctx, kind, version });
         const client = await ensureReady();
         const requestId = KTAiClient.newRequestId(), trace = {};
@@ -23301,8 +23322,8 @@
         const scopedReq = v && v.scopeRequirementText && typeof v.scopeRequirementText[customizationId] === 'string' && v.scopeRequirementText[customizationId].trim() ? v.scopeRequirementText[customizationId] : null;
         const c = scopedReq ? { ...c0, requirement: scopedReq } : c0;
         const rv = (v.review?.steps || []).find(r => r.customization?.customizationId === customizationId) || null;
-        if (rv && !rv.codeGeneration?.supported) return { ok: false, reason: 'GENERATE_BLOCKED', message: `${customizationId} は Toolkit Review でコード生成できない状態です（${rv.codeGeneration?.reason || '要確認'}）。` };
-        if (!rv && !['NEW_JS_FILE', 'EXTEND_EXISTING_JS'].includes(c.strategy)) return { ok: false, reason: 'STRATEGY_NOT_GENERATED', message: `方針 ${c.strategy || '（未定）'} はコード生成の対象外です。` };
+        if (rv && !rv.codeGeneration?.supported) return { ok: false, reason: 'GENERATE_BLOCKED', message: `${customizationId} は Toolkit の確認 でJavaScript を作れない状態です（${rv.codeGeneration?.reason || '要確認'}）。` };
+        if (!rv && !['NEW_JS_FILE', 'EXTEND_EXISTING_JS'].includes(c.strategy)) return { ok: false, reason: 'STRATEGY_NOT_GENERATED', message: `方針 ${c.strategy || '（未定）'} はJavaScript の作成の対象外です。` };
         // Phase 21: 生成の基準（統合先の本文・フィールド）は、生成の直前に取り直した動作テスト環境。取れなければ止める（運用環境の本文で生成しない）
         const gate = await ensureDevBase('generate');
         if (!gate.ok) return { ok: false, reason: 'DEV_BASE_UNAVAILABLE', message: gate.message };
@@ -23310,7 +23331,7 @@
         let existingSource = null;
         if (c.strategy === 'EXTEND_EXISTING_JS') {
           const t = (c.existingFiles || [])[0] || rv?.codeGeneration?.existingFile || null;
-          if (!t) return { ok: false, reason: 'JS_TARGET_FILE_MISSING', message: '統合先の既存 JS が指定されていません。計画を修正してください。' };
+          if (!t) return { ok: false, reason: 'JS_TARGET_FILE_MISSING', message: '統合先の既存の JavaScript が指定されていません。計画を修正してください。' };
           const target = t.target || 'desktop';
           const seed = conv?.state?.consultation?.seed || null;
           //   簡素化（2026-10-17）: gate.ok なら基準がある。基準が無いとき（読み込みが無いときだけ）に相談の元の本文や解析の本文で代える分岐は削除した
@@ -23606,7 +23627,7 @@
       const partial = !!(finalRun && finalRun.partial && v && finalRun.planId === v.planId && String(finalRun.version) === String(v.version));
       $wsState.innerHTML = KTAiChatUi.wsStateHtml(VM.workStatus({ version: v, working, running, current, subject: conv ? conv.subject() : null, draft: conv ? conv.draft() : null, partial }));
       const stale = working === 'REVISE' || (working === 'PLAN' && !!adopted);
-      const bannerText = working === 'FINAL' ? '最終案（JavaScript の生成と検証）を作っています。できるまで反映はできません。' : working === 'GENERATE' ? 'コードを作っています。できたら「コード」に表示します（できるまで反映はできません）。'
+      const bannerText = working === 'FINAL' ? '最終案（JavaScript の作成と確認）を作っています。できるまで反映はできません。' : working === 'GENERATE' ? 'JavaScript を作っています。できたら「コード」に表示します（できるまで反映はできません）。'
         : working === 'PLAN' && adopted ? '新しい変更案を作っています。できるまで、変更内容・コードは前の変更案のものです（反映はできません）。'
         : working === 'REVISE' ? '変更案を直しています。できるまで、変更内容・コードは前の内容です（反映はできません）。' : '';
       if ($banner) { $banner.textContent = bannerText; $banner.style.display = bannerText ? '' : 'none'; }
@@ -24436,7 +24457,7 @@
       const showCode = (div, src, e) => {
         const reason = String((e && (e.message || e)) || '').split('\n')[0].slice(0, 120);
         const note = document.createElement('div'); note.style.fontSize = '11px'; note.style.color = '#b26a00';
-        note.textContent = `図を描けませんでした${reason ? `（${reason}）` : ''}。コードをそのまま表示します。`;
+        note.textContent = `図を描けませんでした${reason ? `（${reason}）` : ''}。図の元の文をそのまま表示します。`;
         const pre = document.createElement('pre'); pre.style.fontSize = '11px'; pre.style.whiteSpace = 'pre-wrap'; pre.style.margin = '0'; pre.textContent = src;
         div.className = 'kt-ai-mermaid-fallback'; div.textContent = ''; div.appendChild(note); div.appendChild(pre);
       };
@@ -24559,10 +24580,10 @@
         const by = jp.summary.byTarget;
         const t = (x) => [x.replace ? `${x.replace}件変更` : '', x.add ? `${x.add}件追加` : ''].filter(Boolean).join('・') || '変更なし';
         //   レビューの指摘 row8（2026-10-09）: 適用範囲（ALL など）と Mobile は画面の言葉（全員・モバイル）
-        items.keep = [`PC：${t(by.desktop)}　モバイル：${t(by.mobile)}`, `既存の CSS（${jp.summary.preservedCss} 件）・その他の JS（${jp.summary.preservedJs} 件）・適用範囲（${KTAiChatUi.customizeScopeJa(jp.snapshot.scope)}）は変更しません`];
+        items.keep = [`PC：${t(by.desktop)}　モバイル：${t(by.mobile)}`, `既存の CSS（${jp.summary.preservedCss} 件）・その他の JavaScript（${jp.summary.preservedJs} 件）・適用範囲（${KTAiChatUi.customizeScopeJa(jp.snapshot.scope)}）は変更しません`];
       }
       //   2026-10-23（§12.67）: 統合後の本文が既存と同じ JavaScript（登録しない）は、承認の欄にその旨を 1 行（登録先の件数の行の後ろ。items.keep を作り直す代入の後に足す）
-      for (const c of (v && v.final && Array.isArray(v.final.customizations) ? v.final.customizations : []).filter(c => c && c.unchanged && c.targetFile)) items.keep.push(`「${c.targetFile}」は変更なし（統合後の本文が既存と同じため登録しません）`);
+      for (const c of (v && v.final && Array.isArray(v.final.customizations) ? v.final.customizations : []).filter(c => c && c.unchanged && c.targetFile)) items.keep.push(`「${c.targetFile}」は変更なし（追加した結果が今登録されている内容と同じため登録しません）`);
       for (const x of (jp && jp.deferred) || []) items.deferred.push(x.message);
       //   §0f.5 の 3（2026-10-09）: 確認項目は画面の言葉（screenText。イベント名・handler を出さない）。元の文（イベント名入り）は detail（承認の欄の詳細）に残す。
       //   承認の照合の key・code と指紋（jsPartsOf の key・message）は変えない
@@ -24604,7 +24625,7 @@
       const shouldContinue = KTFetchGate.continuer(intent, canAutoFetch);
       try {
         //   §12.60（2026-10-23）: 版の分類が内部の例外で作れていない（null。[] の「設定変更なし」とは別）ときは、承認の欄の準備を失敗で止める（既存の経路: 反映の前の準備に失敗しました）
-        if (v.applySteps === null) throw new Error(`設定の手順の分類に失敗しました（Toolkit の内部の問題: ${v.applyStepsError || '理由不明'}）。この最終案は反映できません`);
+        if (v.applySteps === null) throw new Error(`設定の手順を反映できるか判定できませんでした（Toolkit の内部の問題: ${v.applyStepsError || '理由不明'}）。この最終案は反映できません`);
         const out = finalOutput();
         const hasSettings = !!out && (Array.isArray(v.applySteps) ? v.applySteps : []).some(a => a && a.apply === 'AUTO');   // §12.59: 版の分類。自動で反映する手順が無ければ設定の準備は走らせない
         let settings = null;
@@ -24694,7 +24715,7 @@
       const refuse = (text) => { finalPre.notice = text; $note.textContent = text; scheduleFinalPrecheck(); renderChat(); return null; };
       if (!(finalPre.status === 'ready' && finalPre.planId === v.planId && finalPre.version === v.version && finalPre.parts)) return refuse('反映の前の準備がまだ終わっていません。準備が終わると押せます。');
       //   承認の欄の準備の後に、候補・作業の基準が変わっていたら承認しない（準備をやり直してから、新しい内容で押してもらう）
-      if (finalPre.key !== finalPreKeyOf(v)) return refuse('承認の欄の準備の後に、最終案の内容（JavaScript の候補・動作テスト環境の設定）が変わりました。準備をやり直しています。終わったら内容を確かめて、もう一度押してください。');
+      if (finalPre.key !== finalPreKeyOf(v)) return refuse('承認の欄の準備の後に、最終案の内容（作った JavaScript・動作テスト環境の設定）が変わりました。準備をやり直しています。終わったら内容を確かめて、もう一度押してください。');
       finalPre.notice = null;
       const approvedParts = JSON.parse(JSON.stringify(finalPre.parts));
       const ap = conv.approveFinal({ planId: v.planId, version: v.version, baseStamp: devBaseStampNow(), precheck: { fingerprint: approvedParts, items: finalPre.items } });
@@ -24977,7 +24998,7 @@
       if (!client || client.error) { capability = { available: false, reason: client?.error ? KTAiClient.ERROR_CODES.TRANSPORT_ERROR : KTAiClient.ERROR_CODES.NOT_CONNECTED }; setPaidStatus(KTContextUi.capabilityStatusText(capability)); setAskEnabled(); renderSession(); return null; }
       sending = true; setAskEnabled();
       const requestId = KTAiClient.newRequestId();
-      setPaidStatus(`AI に送信中... （requestId: ${requestId}）`);
+      setPaidStatus(`AI に送信中…（問い合わせ番号: ${requestId}）`);
       $answer.style.display = 'none'; $factDetail.style.display = 'none';
       try {
         const sent = last;
@@ -25054,7 +25075,7 @@
           settings.setConsent(false);
           $answer.style.display = 'none'; $factDetail.style.display = 'none';
           await refreshCapability({ force: true });
-          setPaidStatus(r?.revoked ? 'Nest Rec AI との接続を解除しました。' : 'Nest Rec AI との接続を解除しました（サーバー側の失効は確認できませんでした。接続の有効期限で自動的に失効します）。');
+          setPaidStatus(r?.revoked ? 'Nest Rec AI との接続を解除しました。' : 'Nest Rec AI との接続を解除しました（AI サービス側での解除は確認できませんでした。接続の有効期限が来ると自動的に無効になります）。');
         } finally { $sessionDisconnect.disabled = false; }
       });
       $ask.addEventListener('click', async () => {
@@ -25638,7 +25659,7 @@
           <button id="tab-customize" class="tab">Customize</button>
           <button id="tab-field-scanner" class="tab">Field Scanner</button>
           <button id="tab-plugins" class="tab">Plugins</button>
-          <button id="tab-ai" class="tab" title="開発支援（実現したい業務から、変更計画・Toolkit Review・JavaScript の生成・動作テスト環境への反映・検証・元に戻すまで。内部名 AI Workspace）">開発支援</button>
+          <button id="tab-ai" class="tab" title="開発支援（実現したい業務から、変更計画・Toolkit の確認・JavaScript の作成・動作テスト環境への反映・確認・元に戻すまで）">開発支援</button>
         </div>
         <div class="actions" style="display:flex;gap:6px;align-items:center;">
           <button id="kt-zoom" class="btn" title="全画面表示の文字サイズ（押すたびに 110% → 120% → 130% → 100%）">文字 110%</button>
@@ -25650,7 +25671,7 @@
           </div>
         </div>
       </div>
-      <div id="kt-migration-notice" role="status"><span style="flex:1;">Templates タブの機能は <b>開発支援</b>（ドキュメント・AI Prompt・JavaScript の生成）と <b>Customize</b>（登録済み JS / CSS の確認・AI への相談）へ移動しました。</span><button type="button" id="kt-migration-close" class="btn" style="height:22px; padding:0 8px; font-size:11px;" title="この案内を閉じる（次回から表示しません）">×</button></div>
+      <div id="kt-migration-notice" role="status"><span style="flex:1;">Templates タブの機能は <b>開発支援</b>（ドキュメント・AI Prompt・JavaScript の生成）と <b>Customize</b>（登録済みの JavaScript / CSS の確認・AI への相談）へ移動しました。</span><button type="button" id="kt-migration-close" class="btn" style="height:22px; padding:0 8px; font-size:11px;" title="この案内を閉じる（次回から表示しません）">×</button></div>
       <div class="body">
         <div id="view-health"></div>
         <div id="view-fields" style="display:none"></div>
@@ -29918,7 +29939,7 @@
           </div>
         </div>
 
-        <!-- 右：ファイル一覧（登録済みの JS / CSS。PC / モバイル） -->
+        <!-- 右：ファイル一覧（登録済みの JavaScript / CSS。PC / モバイル） -->
         <div class="kt-split-col kt-flex-column" style="flex:1; --kt-col-min:240px; gap:10px;">
           <div class="kt-flex-fixed" style="display:flex; align-items:center; justify-content:space-between;
             padding:6px 0; background:${isDark ? '#1b1b1b' : '#fff'};">

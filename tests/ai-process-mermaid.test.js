@@ -143,7 +143,7 @@ console.log('\n--- 3. 描画: mermaid.render（body で測る）で描き、描�
   const svg1 = d1 && typeof d1.querySelector === 'function' ? d1.querySelector('svg') : null;
   assert(!!svg1 && svg1.style.minWidth === '741px', `図を縮めない: 本来の幅（max-width 741.234px）を最小の幅にする（枠より広ければ枠の中で横にスクロール）: ${svg1 && svg1.style.minWidth}`);
   const kids = (d2 && d2.children) || [];
-  assert(!!d2 && d2.className === 'kt-ai-mermaid-fallback' && kids.some((c) => /^図を描けませんでした（Parse error on line 7:）。コードをそのまま表示します。$/.test(c.textContent)) && kids.some((c) => c.tagName === 'PRE' && c.textContent === brokenAfter),
+  assert(!!d2 && d2.className === 'kt-ai-mermaid-fallback' && kids.some((c) => /^図を描けませんでした（Parse error on line 7:）。図の元の文をそのまま表示します。$/.test(c.textContent)) && kids.some((c) => c.tagName === 'PRE' && c.textContent === brokenAfter),
     '描けなかった図は Mermaid のエラー画像ではなく、理由（1 行目）と元のコードを出す（もう一度描こうとしない class にする）');
   const ids = calls.render.map((c) => c.id);
   assert(ids.length === 2 && new Set(ids).size === 2 && ids.every((id) => /^kt-ai-mermaid-[0-9a-z]+-\d+$/.test(id)), `id はページの中で一意（Mermaid は同じ id の要素を消してから描く）: ${JSON.stringify(ids)}`);
@@ -154,7 +154,7 @@ console.log('\n--- 3. 描画: mermaid.render（body で測る）で描き、描�
 }
 
 // =========================================================
-console.log('\n--- 4. 並べ方: Before / After を縦に並べる（実機: 横に並べると枠が半分の幅になり、図が縮んで文字が読めなかった）---');
+console.log('\n--- 4. 並べ方: 変更前 / After を縦に並べる（実機: 横に並べると枠が半分の幅になり、図が縮んで文字が読めなかった）---');
 {
   const { KTDeps } = T;
   const data = FX.makeData();
