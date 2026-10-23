@@ -48,6 +48,8 @@ const plan = (steps, proposedFields = [], extra = {}) => ({ planVersion: '1', re
 const DATA = FX.makeData();
 const DEPS = KTDeps.buildDependencyData(DATA, KTDeps.normalizeFields(DATA.fields));
 const reviewOf = (p, data = DATA) => KTPlanReview.review({ plan: p, data, deps: data === DATA ? DEPS : null, scan: null, incoming: null });
+//   §12.59（2026-10-23）: 設定の手順の反映の分類（KTPlanExecutor.applyReadiness）は版が持つ（会話の registerPlan が 1 回だけ作る v.applySteps）。右の「変更内容」を手作りの版で描くときも同じ形で持たせる
+const verOf = (plan, review) => ({ plan, review, applySteps: KTPlanExecutor.applyReadiness(plan, review) });
 
 (async () => {
 // =========================================================
@@ -171,7 +173,7 @@ console.log('\n--- F2. 復元: リマインダー未設定（timezone null）の
   const rNoTime = reviewOf(pNoTime).steps[0];
   assert(rNoTime.status === 'NEEDS_CONFIRMATION' && rNoTime.safety === 'REVIEW_REQUIRED' && rNoTime.issues.some(i => i.code === 'REMINDER_TIME_MISSING' && /9時に通知/.test(i.message)) && rNoTime.diff.human.some(l => /時刻 未定/.test(l)), '実機 354: 時刻の無いリマインダー → 確認が必要（REMINDER_TIME_MISSING・「時刻 未定」）');
   //   2026-10-19: 右の「確認結果」（廃止）の手順の判定に出していた理由と直し方は、右の「変更内容」の「反映できないこと」に出す
-  const sumNoTime = KTAiChatUi.changeSummaryHtml({ plan: pNoTime, review: reviewOf(pNoTime) });
+  const sumNoTime = KTAiChatUi.changeSummaryHtml(verOf(pNoTime, reviewOf(pNoTime)));
   //   2026-10-19: 通知時刻が無い手順は値が無い手順（最終案の判定で反映を止める）。右も「必要な値が計画に無いため反映できません」と、値を伝える次の操作（kintone の画面で設定する案内は手作業に回す種類だけ）
   assert(/反映できないこと[\s\S]*必要な値が計画に無いため反映できません（通知時刻[\s\S]*値を会話で伝えて変更案を直してください（それまで反映できません）/.test(sumNoTime) && !/kintone の画面で設定/.test(sumNoTime), `反映できない理由と次の操作（値を会話で伝えて直す）（右の「変更内容」の「反映できないこと」）: ${K.stripC(sumNoTime).slice(0, 300)}`);
   // 右上の見出し（workStatus）: 復元の失敗・検証不一致は「反映済み」と出さない（簡素化（2026-10-17）: 作業状態 workspaceState は削除した）
@@ -221,7 +223,7 @@ console.log('\n--- F3. 承認の前の「自動で反映できるか」と、ル
   assert(a4.get('P2').apply === 'MANUAL' && a4.get('P2').reason === 'FIELD_TYPE_NOT_SUPPORTED' && !/Executor|Tier/.test(a4.get('P2').message), '計算フィールド → 自動で反映できない（理由の文言に Executor / Tier を出さない）');
   assert(a4.get('P3').apply === 'BLOCKED' && a4.get('P3').reason === 'DEPENDENCY_NOT_EXECUTABLE' && a4.get('P4').apply === 'AUTO', '依存先が反映されない手順 → 反映できない（DEPENDENCY_NOT_EXECUTABLE）。関係ない手順は自動で反映できる');
   //   2026-10-19: 右の「確認結果」（廃止）の集計と手順ごとの行の代わりに、右の「変更内容」の「反映できないこと」に、自動で反映できない手順と反映できない手順を理由と一緒に出す
-  const html = KTAiChatUi.changeSummaryHtml({ plan: p4, review: rv4 });
+  const html = KTAiChatUi.changeSummaryHtml(verOf(p4, rv4));
   const cannot4 = html.slice(html.indexOf('>反映できないこと</div>'));
   const cannotRows = (cannot4.slice(0, cannot4.indexOf('</ul>')).match(/<li>[\s\S]*?<\/li>/g) || []).map(x => K.stripC(x));
   //   2026-10-19: リンクの種類が決まっていない P1 は値が無い手順（反映を止める）。計算フィールドの P2 は手作業に回す種類（Toolkit から自動で反映できない）
@@ -491,10 +493,10 @@ console.log('\n--- U2 / U3. 文言と最終確認の確認事項 ---');
   //   簡素化 E（2026-10-16）: 手順ごとの承認の後の最終確認の段（未回答の確認事項・［キャンセル］［動作テスト環境へ反映］）は削除した。
   //   反映は最終案のカードの［動作テスト環境へ反映］1 回で、未回答の確認事項（先に決めたいこと・後で決めてよいこと）は最終案のカードが出す（ai-flow-redesign の指示 A7・B6）。
   //   ここでは、反映の画面に最終確認の段（書き込みのボタン）が戻っていないことだけを確かめる
-  const confirmHtml = KTContextUi.executorHtml({ stage: 'confirm', prepared, execution: null, classified: KTPlanExecutor.classifySteps(KTPlanReview.executorOutput(p, rv, ['P1'])), available: true, review: rv, questions: ['通知の送信時間は何時が適切ですか？'] });
+  const confirmHtml = KTContextUi.executorHtml({ stage: 'confirm', prepared, execution: null, available: true, review: rv, questions: ['通知の送信時間は何時が適切ですか？'] });
   assert(!/id="kt-ai-exec-confirm"|id="kt-ai-exec-go"|id="kt-ai-exec-start"/.test(confirmHtml), 'U3: 反映の画面に最終確認の段と書き込みのボタンは無い（反映は最終案のカードの 1 回。未回答の確認事項は最終案のカードで出す）');
   const log = await KTPlanExecutor.executePreview(prepared, { api: mock.api, review: rv });
-  const doneHtml = KTContextUi.executorHtml({ stage: 'done', prepared, execution: log, classified: [], available: true, review: rv });
+  const doneHtml = KTContextUi.executorHtml({ stage: 'done', prepared, execution: log, available: true, review: rv });
   assert(/運用環境への反映は kintone のアプリ設定画面の［アプリを更新］で行います。Toolkit は運用環境へ反映しません/.test(doneHtml) && !/Executor/.test(doneHtml), 'U2: 結果の文言に Executor を出さない');
 }
 

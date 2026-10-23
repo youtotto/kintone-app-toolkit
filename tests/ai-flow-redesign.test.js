@@ -1061,7 +1061,7 @@ await section(async () => {
   const y = makeConvC({ planImpl: (args) => { const r = planJs(args); r.plan.steps.unshift({ id: 'P1', actionType: 'ADD_FIELD', targetKind: 'FIELD', targetRef: 'x', title: 'フィールド追加', spec: {}, dependsOn: [] }); r.review.steps.unshift({ stepId: 'P1', status: 'INVALID', safety: 'BLOCKED', issues: [{ code: 'X', message: 'フィールドの型が指定されていません' }] }); return r; } });
   await adoptC(y);
   const vy = y.c.activePlan();
-  assert(FS.readyOf(vy) === false && vy.final.blockedSteps.length === 1 && vy.final.cannot.some(c => c.kind === 'blocked' && /実行できない手順: フィールド追加（フィールドの型が指定されていません）/.test(c.text)) && /実行できない設定の手順が 1 件/.test(FS.reasonOf(vy)), `指示 A7: 実行できない手順があれば承認できない（手順の名前と理由）: ${JSON.stringify(vy.final.cannot)}`);
+  assert(FS.readyOf(vy) === false && vy.final.impact.settings.blocked === 1 && vy.final.cannot.some(c => c.kind === 'blocked' && /実行できない手順: フィールド追加（フィールドの型が指定されていません）/.test(c.text)) && /実行できない設定の手順が 1 件/.test(FS.reasonOf(vy)), `指示 A7: 実行できない手順があれば承認できない（手順の名前と理由）: ${JSON.stringify(vy.final.cannot)}`);
   const Qs = [{ id: 'Q1', question: '承認待ちの間、申請者本人も編集できなくしますか', topic: 'scope', priority: 'blocking', options: ['全員', '申請者以外'] }, ...['灰色の表示色は既定のままでよいですか', 'モバイルでも同じ制御にしますか', 'CSV 読み込みでも止めますか', '一覧の編集でも止めますか'].map((q, i) => ({ id: `Q${i + 2}`, question: q, topic: `t${i}`, priority: 'later', options: [] }))];
   const x = makeConvC({ planImpl: (args) => planJs(args, { questions: Qs }) });
   await adoptC(x);
@@ -3234,27 +3234,24 @@ await section(async () => {
 });
 // H5b（簡素化 2・2026-10-17）: 反映できるかは今の判定だけ。最終案を作った時点で反映できた記録（v.final.approvable）を、今も反映できる根拠にしない。
 //   押せるか・左右の止める理由・承認の口は同じ今の判定（会話の finalReadiness と画面の applyHold）。最終案の記録は書き換えない
+//   §12.59（2026-10-23）: 版で固定の理由（生成の結果・設定の手順の分類・その版の確認事項）は最終案の記録（fin.readiness.reasons）に 1 回だけ作り、今の判定はそれに台帳の分
+//   （担当の無い決まった要件）を足す。最終案を作った後に今の判定だけが変わるのは台帳なので、台帳に決まった要件（実装先が計画に無い）を足して確かめる
+//   （前は v.openQuestions・v.generated を直接書き換えていた。どちらも版で固定で、製品ではその版の最終案の作成でしか変わらない）
 await section(async () => {
   const { m, v } = await KIT.mountFinal({ kind: 'mixed' });
   const p0 = await KIT.prepareOnScreen(m);
   assert(p0.ready && p0.button && !p0.button.disabled && v.final.approvable === true && FS.readyOf(v) === true, `H5b-0: 前提: 承認の欄の準備が終わり、押せる（作った時点の判定も今の判定も反映できる）: ${p0.pre && p0.pre.status}`);
-  //   最終案を作った後に、この版に先に決めたいこと（まだ答えていない）がある状態にする（今の判定だけが変わる。最終案の記録はそのまま）
-  v.openQuestions = [...(v.openQuestions || []), { key: 'Q9', id: 'Q9', text: '承認の後の通知は要りますか', reason: 'テスト', priority: 'blocking', topics: ['other:h5b'] }];
+  //   最終案を作った後に、決まった要件の実装先（対応づけた JavaScript）が計画に無い状態にする（台帳だけが変わる。最終案の記録はそのまま）
+  const lg = m.conv().state.ledgers.get(v.planId);
+  const said = '承認済みでも金額は編集不可にして';
+  T.KTAiAnswers.applyRequirementOps(lg, [{ op: 'add', target: '金額', condition: '承認済み', behavior: '編集不可にする', exceptions: [], decision: 'decided', disposition: 'adopted', sourceQuotes: [said], planRefs: ['C9'], effects: [] }], { version: v.version, userTexts: [said], utterances: [said] });
   m.conv().notice('（テスト）描き直し', { kind: 'test-redraw' }); await ticks(4);
-  const reason = '先に決めたいことが 1 件残っています。答えると反映できるようになります。';
+  const reason = '決まった要件のうち、実現する手順・JavaScript が足りないものが 1 件あります（反映を止めている理由を見てください）。足りないものを計画に入れて最終案を作り直すか、その要件を取り消してから反映します。';
   const b1 = KIT.applyButtonOf(m);
   const r = await KIT.applyOnScreen(m);
-  assert(b1 && b1.disabled && m.panel.applyHold() === reason && stripC(m.chat()).includes(reason) && m.$('kt-ai-exec').innerHTML.includes(reason) && !v.approval && r.writes.length === 0 && FS.readyOf(v) === false, `H5b-1: 作った時点で反映できた最終案でも、今の判定で反映できなければ押せず（左のカードと右の「反映」に同じ理由）、押しても承認・書き込みをしない: ${JSON.stringify({ b1, hold: m.panel.applyHold(), writes: r.writes })}`);
+  assert(b1 && b1.disabled && m.panel.applyHold() === reason && stripC(m.chat()).includes(reason) && m.$('kt-ai-exec').innerHTML.includes(reason) && !v.approval && r.writes.length === 0 && FS.readyOf(v) === false, `H5b-1: 作った時点で反映できた最終案でも、今の判定（台帳）で反映できなければ押せず（左のカードと右の「反映」に同じ理由）、押しても承認・書き込みをしない: ${JSON.stringify({ hold: m.panel.applyHold(), disabled: b1 && b1.disabled, writes: r.writes, reasons: m.conv().finalReadiness(v).reasons })}`);
   const ap = m.conv().approveFinal(KIT.approveArgs(v));
-  assert(!ap.ok && ap.reason === 'NOT_APPROVABLE' && ap.message === reason && !v.approval && v.final.approvable === true && v.final.readiness.ready === true && !v.final.blockingReason, `H5b-2: 承認の口も今の判定で止める（記録の「反映できる」を根拠にしない）。最終案の記録は作った時点のまま: ${JSON.stringify(ap)}`);
-  //   作った後に JavaScript の検証の結果が未解決になった（候補の指紋は同じなので承認の欄の準備は「準備完了」のまま）。以前は最終案の記録でボタンを出していたので押せた
-  const { m: m2, v: w } = await KIT.mountFinal({ kind: 'mixed' });
-  const q0 = await KIT.prepareOnScreen(m2);
-  w.generated.C1.status = 'unresolved';
-  m2.conv().notice('（テスト）描き直し', { kind: 'test-redraw' }); await ticks(4);
-  const b2 = KIT.applyButtonOf(m2), hold2 = m2.panel.applyHold();
-  const r2 = await KIT.applyOnScreen(m2);
-  assert(q0.ready && m2.panel.finalPrecheck().status === 'ready' && b2 && b2.disabled && /反映できる完成品になっていない JavaScript があります/.test(hold2 || '') && stripC(m2.chat()).includes(hold2) && m2.$('kt-ai-exec').innerHTML.includes(hold2) && !w.approval && r2.writes.length === 0 && w.final.approvable === true, `H5b-3: 承認の欄の準備が終わったままでも、今の判定で反映できなければ押せず（左右に同じ理由）、押しても承認・書き込みをしない。最終案の記録は作った時点のまま: ${JSON.stringify({ b2, hold2, pre: m2.panel.finalPrecheck().status })}`);
+  assert(!ap.ok && ap.reason === 'NOT_APPROVABLE' && ap.message === reason && !v.approval && v.final.approvable === true && v.final.readiness.ready === true && !v.final.blockingReason, `H5b-2: 承認の口も今の判定で止める（記録の「反映できる」を根拠にしない）。最終案の記録（作った時点の判定・版で固定の理由）はそのまま: ${JSON.stringify(ap)}`);
 });
 // H6: KTJsExecutor.prepare の部品: 承認の前の準備（deferDependencies）と、内容の比較（expectedContent。不具合 B の置き換え。照合は消さない）
 await section(async () => {

@@ -26,6 +26,8 @@
 //       書き込みの直前の取り直しと読み戻しは残る）(w) 準備の snapshot は押した直後の作業の基準そのもの (x) 権限が無いことは作業の基準の取得で分かり、承認の欄の理由に出て押せない（準備に届かない）
 //       (y) 押した瞬間に進行中の取得があっても合流せず取り直し、承認の後の変化を書き込みの前に止める
 //       （変更が無い手順を書かないことは §O2 (d)、承認の後に設定の対象が変わったら止めることは §O3 (i)）
+//   §O6 最終案の判定の材料は版の記録から（2026-10-23・§12.59）: (z) 最終案ができた後、押せるか・会話の今の判定・右の描き直しで設定の手順の反映の分類
+//       （applyReadiness・classifySteps）を呼ばない（版の登録で 1 回作った分類を読む）。最終案の記録の JavaScript の一覧は計画の JavaScript ごとに 1 つ
 //
 // 実行方法: node tests/ai-final-omission.test.js
 'use strict';
@@ -497,6 +499,31 @@ await section(async () => {
   const ap = await p; await K.ticks(10);
   assert(ap.clicked && ap.run && ap.run.stage === 'stopped' && !ap.writes.length && JSON.stringify(loads.slice(l0).map(x => x.reason)) === JSON.stringify(['manual', 'execute']) && !v.approval && /設定が変わりました/.test(ap.run.stop.text),
     `O5-y: 押した直後の取り直しは進行中の取得に合流せず取り直し、承認の後の変化を書き込みの前に止める: ${JSON.stringify({ reasons: loads.slice(l0).map(x => x.reason), stage: ap.run && ap.run.stage, stop: ap.run && ap.run.stop && ap.run.stop.text, writes: ap.writes })}`);
+});
+
+console.log('\n--- §O6 最終案の判定の材料は版の記録から（§12.59） ---');
+await section(async () => {
+  // (z) 最終案ができた後は、押せるか（applyHold）・会話の今の判定（finalReadiness）・左右の描き直し・右の「変更内容」で、設定の手順の反映の分類
+  //     （KTPlanExecutor.applyReadiness・classifySteps）を呼ばない。版の登録で 1 回作った分類（v.applySteps）と、最終案の作成で 1 回作った版で固定の理由（fin.readiness.reasons）を読む。
+  //     前は押せるかの判定のたび・右を描くたびに分類し直していた（finalReadinessOf・changeSummaryHtml・computePrecheck の 3〜4 回）
+  const { m, v } = await K.mountFinal({ kind: 'mixed' });
+  const p0 = await K.prepareOnScreen(m);
+  const calls = { applyReadiness: 0, classifySteps: 0 };
+  const orig = { applyReadiness: KTPlanExecutor.applyReadiness, classifySteps: KTPlanExecutor.classifySteps };
+  KTPlanExecutor.applyReadiness = (...a) => { calls.applyReadiness += 1; return orig.applyReadiness(...a); };
+  KTPlanExecutor.classifySteps = (...a) => { calls.classifySteps += 1; return orig.classifySteps(...a); };
+  let rd = null, right = '';
+  try {
+    for (let i = 0; i < 3; i++) m.panel.applyHold();
+    rd = m.conv().finalReadiness(v);
+    m.conv().notice('（テスト）描き直し', { kind: 'test-redraw' }); await K.ticks(4);
+    right = T.KTAiChatUi.changeSummaryHtml(v, {});
+  } finally { KTPlanExecutor.applyReadiness = orig.applyReadiness; KTPlanExecutor.classifySteps = orig.classifySteps; }
+  assert(p0.ready && rd && rd.ready === true && /何が変わるか/.test(right) && calls.applyReadiness === 0 && calls.classifySteps === 0 && Array.isArray(v.applySteps) && v.applySteps.length === v.plan.steps.length,
+    `O6-z: 最終案ができた後、押せるか・今の判定・描き直しで設定の手順を分類し直さない（版の分類を読む）: ${JSON.stringify({ calls, ready: rd && rd.ready, steps: v.applySteps && v.applySteps.map(a => `${a.stepId}:${a.apply}`) })}`);
+  const fin = v.final;
+  assert(fin && Array.isArray(fin.customizations) && fin.customizations.map(c => c.customizationId).sort().join() === (v.plan.customizations || []).map(c => c.customizationId).sort().join() && fin.readiness && Array.isArray(fin.readiness.reasons) && !fin.readiness.reasons.some(r => r.kind === 'ownerless'),
+    `O6-z2: 最終案の記録の JavaScript の一覧は計画の JavaScript ごとに 1 つ（customizations）。版で固定の理由（readiness.reasons）に台帳で変わる分（ownerless）は入れない: ${JSON.stringify({ custs: fin && fin.customizations.map(c => `${c.customizationId}:${c.status}`), reasons: fin && fin.readiness })}`);
 });
 
 console.log(`\n${state.failed ? 'FAILED' : 'ALL PASSED'}: ${state.passed} passed / ${state.failed} failed`);

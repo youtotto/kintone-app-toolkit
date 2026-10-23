@@ -8,7 +8,7 @@
 const { loadToolkit, makeAssert } = require('./helpers/load-toolkit.js');
 const { withDevBase } = require('./helpers/dev-base-fake.js');
 const { makeFakeHost } = require('./helpers/fake-dom.js');
-const { KTDevBase, KTDeps, KTScan, KTContext, KTAiClient, KTContextUi, KTAiChatUi, KTPlanReview, mountAiWorkspace } = loadToolkit();
+const { KTDevBase, KTDeps, KTScan, KTContext, KTAiClient, KTContextUi, KTAiChatUi, KTPlanReview, KTPlanExecutor, mountAiWorkspace } = loadToolkit();
 const { assert, state } = makeAssert();
 const FX = require('./fixtures/ai-context-app.js');
 const { buildScanPayload } = require('./helpers/scan-payload.js');
@@ -75,7 +75,8 @@ function mount({ planResponse = PLAN_B, inputs = INPUTS } = {}) {
 //   （KTAiChatUi.changeSummaryHtml）、AI の提案の全文は［計画の詳細と根拠］（KTContextUi.planHtml）。ここでは画面と同じ部品を同じ呼び方で使って表示を確かめる
 const planOf = (raw) => { const v = KTAiClient.validatePlan(raw, PCTX); return { ...v.normalized, clientWarnings: v.warnings }; };
 const LABELS = Object.fromEntries(KTDeps.normalizeFields(INPUTS.data.fields).map(f => [f.code, f.label]));
-const summaryHtml = (plan, review) => KTAiChatUi.changeSummaryHtml({ plan, review, ctx: PCTX }, { labels: LABELS });
+//   §12.59（2026-10-23）: 設定の手順の反映の分類（applyReadiness）は版が持つ（会話の registerPlan が 1 回だけ作る）。手作りの版にも同じ形で持たせる
+const summaryHtml = (plan, review) => KTAiChatUi.changeSummaryHtml({ plan, review, ctx: PCTX, applySteps: KTPlanExecutor.applyReadiness(plan, review) }, { labels: LABELS });
 const detailHtml = (plan) => KTContextUi.planHtml(plan, { data: INPUTS.data, ctx: PCTX });
 /** 「何が変わるか」の手順の行（手順の名前で始まる li） */
 const rowOf = (h, id) => { const a = h.indexOf(`<li><span>${id} `); return a < 0 ? '' : h.slice(a, h.indexOf('</li>', a)); };

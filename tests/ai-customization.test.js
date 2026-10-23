@@ -467,6 +467,10 @@ console.log('\n--- §53-2. 複数のカスタマイズ / カスタマイズの�
   assert(/Toolkit ではコードを作れません（PC かモバイルかが未定）/.test(sumU) && /PC かモバイルかは未定/.test(sumU), `PC / モバイル未定: 右の「変更内容」の「反映できないこと」に作れない理由・対象に「PC かモバイルかは未定」: ${K.stripC(sumU).slice(0, 400)}`);
   //   簡素化 D: 「全体」の件数（安全区分から別に数えた件数）は削除した。生成できないことは「反映できないこと」の理由で出す
   assert(/反映できないこと/.test(sumU) && /最終案/.test(m.chat()) && !/コード生成可能/.test(sumU) && !/kt-ai-review-card/.test(m.chat()), 'JS のコード生成の可否: 右の「変更内容」の「反映できないこと」に出し、別に数えた件数は出さない・会話は最終案のカードで、確認のカードを出さない');
+  //   §12.59（2026-10-23）: Toolkit では作れない JavaScript は、最終案の記録の JavaScript の一覧（customizations。計画の JavaScript ごとに 1 つ）に cannot-generate で入り、右の「反映する内容」の行はそこから描く
+  const sumU2 = m.$('kt-ai-change-summary').innerHTML;
+  assert(v && v.final && Array.isArray(v.final.customizations) && v.final.customizations.some(c => c.customizationId === 'C1' && c.status === 'cannot-generate') && /Toolkit では作れない JavaScript（承認後（完了）は金額を編集できなくする）（反映の対象にしません）/.test(sumU2),
+    `PC / モバイル未定: 最終案の記録の JavaScript の一覧に cannot-generate で入り、右の「反映する内容」に「Toolkit では作れない JavaScript」の行: ${JSON.stringify(v && v.final && v.final.customizations)}`);
   const fin = finalText(m);
   assert(v && v.final && FS.readyOf(v) === false && m.calls2.generate.length === 0 && /Toolkit では JavaScript を作れない部分があります: 承認後（完了）は金額を編集できなくする（PC かモバイルかが未定）/.test(fin) && !/問題は見つかりませんでした/.test(fin), `最終案のカード: 作れない理由（PC かモバイルかが未定）を出し、承認できない（生成工程は呼ばない）: ${fin.slice(fin.indexOf('実現できない点'), fin.indexOf('実現できない点') + 160)}`);
   const g = await m.panel.send('コードを作って');

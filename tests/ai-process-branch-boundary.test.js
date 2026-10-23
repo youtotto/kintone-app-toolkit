@@ -235,8 +235,8 @@ await section(async () => {
   assert(sentC3 && sentC3.requiredEffects.length === 1 && JSON.stringify(sentC3.requiredEffects[0].conditionFrom) === JSON.stringify([{ file: 'dealValidate.js', target: 'desktop' }]) && sentC3.requiredEffects[0].condition === '',
     `B4-2: C3 の生成に渡した必須の効果は移植元 dealValidate.js と同じ条件（計画から生成へ移植元が渡る）: ${JSON.stringify(sentC3 && sentC3.requiredEffects)}`);
   const f = v && v.final;
-  assert(f && f.approvable === true && f.readiness && f.readiness.ready === true && !(f.readiness.reasons || []).length && !f.blockingReason && !(f.blockedSteps || []).length && !f.fix,
-    `B4-3: 最終案は承認できる（readiness.ready true・理由なし・実行できない手順なし・直す依頼なし）: ${JSON.stringify(f && { approvable: f.approvable, readiness: f.readiness, blocked: f.blockedSteps })}`);
+  assert(f && f.approvable === true && f.readiness && f.readiness.ready === true && !(f.readiness.reasons || []).length && !f.blockingReason && !(f.impact && f.impact.settings && f.impact.settings.blocked) && !f.fix,
+    `B4-3: 最終案は承認できる（readiness.ready true・理由なし・実行できない手順なし・直す依頼なし）: ${JSON.stringify(f && { approvable: f.approvable, readiness: f.readiness, blocked: f.impact && f.impact.settings })}`);
   assert(f && f.questions.length === 1 && f.questions[0].id === 'Q1' && f.questions[0].priority === 'later' && !f.questions.some(q => /整数|小数/.test(q.text)),
     `B4-4: 残る質問は Q1（priority later）だけで、整数か小数かの質問（Q2）は無い: ${JSON.stringify(f && f.questions.map(q => [q.id, q.priority]))}`);
   const html = K.stripC(K.finalHtml(x));

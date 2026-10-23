@@ -57,7 +57,8 @@ async function applyFlow(raw, { inputs = INPUTS, approve = null, beforePrepare =
   const review = KTPlanReview.review({ plan, ...inputs });
   const out = KTPlanReview.executorOutput(plan, review, approve || plan.steps.map(st => st.id));
   const mock = makeKintoneMock(inputs.data);
-  const s = { stage: 'idle', prepared: null, execution: null, rollbackPlan: null, rollback: null, error: null, classified: KTPlanExecutor.classifySteps(out), available: true, review, finalFlow: true };
+  //   §12.59（2026-10-23）: 承認の前の手順の分類（classified）は廃止した。画面（renderExec）と同じく、自動で反映する設定の手順の有無（版の分類の AUTO）と JavaScript の有無だけを渡す。内訳は押した後の準備の結果（prepared.steps）から
+  const s = { stage: 'idle', prepared: null, execution: null, rollbackPlan: null, rollback: null, error: null, available: true, review, hasSettings: KTPlanExecutor.applyReadiness(plan, review).some(a => a.apply === 'AUTO'), hasJs: plan.steps.some(st => st.actionType === 'CUSTOMIZATION_REQUIRED') };
   const html = () => KTContextUi.executorHtml(s);
   const idle = html();
   if (beforePrepare) beforePrepare(mock);
@@ -95,9 +96,10 @@ console.log('\n--- 1. 反映の画面: 最終案の反映の前・反映中・�
   //   反映の前（最終案の流れ）: 反映の画面には準備・最終確認の段もボタンも出さず、最終案のカードの［動作テスト環境へ反映］を案内する
   assert(x.idle.includes('動作テスト環境への反映') && x.idle.includes('最終案のカードの［動作テスト環境へ反映］') && !/id="kt-ai-exec-start"|id="kt-ai-exec-go"|id="kt-ai-exec-confirm"/.test(x.idle), '反映の前: 最終案のカードの［動作テスト環境へ反映］を案内する（手順ごとの承認・最終確認の段とボタンは無い）');
   assert(!hasButton(x.idle, '運用環境へ反映') && !/<button[^>]*>(実行|反映)<\/button>/.test(x.idle), '「運用環境へ反映」「実行」「反映」だけのボタンは無い');
-  assert(/承認済み・実行可能[\s\S]*?<b>2 件（P1, P2）/.test(x.idle) && !/承認済みだが未対応[\s\S]*?<b>1 件/.test(x.idle), '内訳: 実行できる設定の手順 2 件。JavaScript の手順（P3）は「未対応」に数えない（最終案の反映で続けて登録する）');
   assert(x.s.prepared.status === 'PREPARED' && x.progress && x.progress.includes('動作テスト環境へ反映しています') && />1\.<[\s\S]*処理中/.test(x.progress), `反映中: 1. 処理中… の進捗表示（画面を固めない）`);
   const e3 = x.html();
+  //   §12.59: 内訳（承認した手順・反映できない手順）は押した後の準備の結果から。押す前の右の「反映」には出さない（承認＝反映の 1 回の流れでは常に 0 件だった）
+  assert(/承認済み・実行可能[\s\S]*?<b>2 件（P1, P2）/.test(e3) && !/承認済みだが未対応[\s\S]*?<b>1 件/.test(e3) && !/内訳（承認した手順/.test(x.idle), '内訳（押した後）: 実行できる設定の手順 2 件。JavaScript の手順（P3）は「未対応」に数えない（最終案の反映で続けて登録する）。押す前の右の「反映」に内訳は出さない');
   assert(x.s.execution.status === 'DONE' && e3.includes('動作テスト環境への反映が完了しました。') && e3.includes('✓ 2 件 VERIFIED') && e3.includes('⚠ 0 件') && e3.includes('× 0 件') && e3.includes('運用環境にはまだ反映されていません。'), '完了: ✓ 2 件 VERIFIED / 運用環境にはまだ反映されていません');
   assert(/>1\.<[\s\S]*反映済み（確認で一致）[\s\S]*>2\.<[\s\S]*反映済み（確認で一致）/.test(e3) && !/>3\.</.test(e3) && !/>P[0-9]+</.test(e3), '結果一覧: 1・2 は反映済み（確認で一致）。JavaScript の手順は設定の反映の一覧に出さない（手順の番号 P1 も出さない）');
   assert(x.mock.st.fields.progress && x.mock.st.views['担当者別'] && x.mock.st.views['担当者別'].fields.join() === 'owner,case_name,progress', 'モックの動作テスト環境にフィールドと一覧が入った（一覧の NEW_FIELD_1 は実コード）');
@@ -167,7 +169,7 @@ console.log('\n--- 2b. Tier 2（通知 / リマインダー / フィールド変
     },
   };
   const x = await applyFlow(PLAN_T2);
-  assert(/通知追加[\s\S]*?<b>2（P1, P5）/.test(x.idle) && /リマインダー追加[\s\S]*?<b>1（P2）/.test(x.idle) && /フィールド変更[\s\S]*?<b>2（P3, P4）/.test(x.idle), '内訳: カテゴリ別の件数（通知追加 2 / リマインダー追加 1 / フィールド変更 2）');
+  assert(/通知追加[\s\S]*?<b>2（P1, P5）/.test(x.html()) && /リマインダー追加[\s\S]*?<b>1（P2）/.test(x.html()) && /フィールド変更[\s\S]*?<b>2（P3, P4）/.test(x.html()), '内訳（押した後）: カテゴリ別の件数（通知追加 2 / リマインダー追加 1 / フィールド変更 2）');
   assert(x.s.prepared.steps.some(st => (st.warnings || []).some(w => w && w.code === 'POSSIBLE_DUPLICATE' && /既存の設定と似ています/.test(w.message || ''))), '準備で、似た既存の設定（POSSIBLE_DUPLICATE）を見つける（最終案の反映の前の確認に「重複の可能性」として出す）');
   const e3 = x.html();
   assert(x.s.execution.status === 'DONE' && e3.includes('✓ 5 件 VERIFIED'), `完了: 5 件 VERIFIED（${x.s.execution.status}）`);
@@ -180,7 +182,7 @@ console.log('\n--- 2b. Tier 2（通知 / リマインダー / フィールド変
   // 評価できない条件式（AI の `owner != ""`）は、反映の分類で実行不可
   const PLAN_BAD = { ...PLAN_X, plan: { ...PLAN_X.plan, proposedFields: [], steps: [mkStep('P1', 'ADD_NOTIFICATION', 'NOTIFICATION', 'x', { name: 'x', targets: ['FIELD_ENTITY:owner'], filterCond: 'owner != ""' })], summary: { steps: 1, invalidSteps: 0, needsConfirmation: 0, proposedFields: 0, questions: 0 } } };
   const x = await applyFlow(PLAN_BAD);
-  assert(/実行不可[\s\S]*?<b>1 件（P1）/.test(x.idle) && x.s.stage === 'blocked' && !x.mock.calls.some(c => /^PUT|^POST/.test(c)), '条件式が受理されない通知は「× 実行不可」・書き込みなし');
+  assert(/実行不可[\s\S]*?<b>1 件（P1）/.test(x.html()) && x.s.stage === 'blocked' && !x.mock.calls.some(c => /^PUT|^POST/.test(c)), '条件式が受理されない通知は「× 実行不可」（押した後の準備の結果）・書き込みなし');
 }
 
 console.log('\n--- 2d. Phase 11: 既存設定の変更の結果と元に戻す ---');
@@ -191,7 +193,7 @@ const PLAN_U = { ...PLAN_X, plan: { ...PLAN_X.plan, proposedFields: [], steps: [
 ], summary: { steps: 3, invalidSteps: 0, needsConfirmation: 0, proposedFields: 0, questions: 0 } } };
 {
   const x = await applyFlow(PLAN_U);
-  assert(x.idle.includes('✎ 通知変更') && x.idle.includes('✎ 一覧変更') && /承認済み・実行可能[\s\S]*?<b>3 件/.test(x.idle), '内訳: カテゴリに ✎ 通知変更 / ✎ 一覧変更');
+  assert(x.html().includes('✎ 通知変更') && x.html().includes('✎ 一覧変更') && /承認済み・実行可能[\s\S]*?<b>3 件/.test(x.html()), '内訳（押した後）: カテゴリに ✎ 通知変更 / ✎ 一覧変更');
   assert(x.s.execution.status === 'DONE' && x.mock.st.perRecord[0].filterCond === 'amount >= "2000000"' && x.mock.st.views['承認待ち'].fields.join() === 'case_name,approver,amount' && x.mock.st.views['担当者別'], '反映: 通知の条件・一覧の表示項目・新しい一覧');
   const e2 = x.html();
   assert(e2.includes('動作テスト環境への反映が完了しました。') && e2.includes('✓ 3 件 VERIFIED') && e2.includes('運用環境にはまだ反映されていません。') && hasButton(e2, '変更前の状態に戻す') && e2.includes('id="kt-ai-exec-rollback-start"') && e2.includes('条件: amount &gt;= &quot;1000000&quot; → amount &gt;= &quot;2000000&quot;'), '完了画面: ✓ 3 件 VERIFIED・運用環境には反映されていません・[変更前の状態に戻す]（§17）・進捗行に属性単位の差分');
@@ -232,7 +234,7 @@ console.log('\n--- 2e. Phase 12: プロセス管理の結果（Before / Planned 
     mkStep('P4', 'ADD_PROCESS_ACTION', 'PROCESS_ACTION', '部長承認する', { name: '部長承認する', from: '部長承認', to: '完了' }, { title: '部長が承認', dependsOn: ['P1'] }),
   ], summary: { steps: 4, invalidSteps: 0, needsConfirmation: 0, proposedFields: 0, questions: 0 } } };
   const x = await applyFlow(PLAN_PR);
-  assert(x.idle.includes('＋ ステータス追加') && x.idle.includes('＋ アクション追加') && x.idle.includes('✎ プロセス管理変更') && /承認済み・実行可能[\s\S]*?<b>4 件/.test(x.idle), '内訳: ステータス追加 / アクション追加 / プロセス管理変更');
+  assert(x.html().includes('＋ ステータス追加') && x.html().includes('＋ アクション追加') && x.html().includes('✎ プロセス管理変更') && /承認済み・実行可能[\s\S]*?<b>4 件/.test(x.html()), '内訳（押した後）: ステータス追加 / アクション追加 / プロセス管理変更');
   const ex = x.s.execution;
   assert(ex.status === 'DONE' && ex.steps.every(st => st.status === 'VERIFIED' && st.groupId === 'PROCESS_CHANGE_1') && Object.keys(x.mock.st.status.states).length === 4 && x.mock.calls.filter(c => c === 'PUT status').length === 1, '反映: 4 step が 1 回の PUT で VERIFIED');
   const e2 = x.html();
@@ -256,7 +258,7 @@ console.log('\n--- 2f. Phase 13: ルックアップの結果（§41）・参照�
     mkStep('P3', 'UPDATE_LOOKUP', 'LOOKUP', 'customer_lookup', { addMappings: [{ relatedField: 'address', field: 'NEW_FIELD_1' }, { relatedField: 'credit', field: 'NEW_FIELD_2' }] }, { title: '顧客マスタ参照で住所と与信枠も取得', dependsOn: ['P1', 'P2'] }),
   ], summary: { steps: 3, invalidSteps: 0, needsConfirmation: 0, proposedFields: 2, questions: 0 } } };
   const x = await applyFlow(PLAN_LK);
-  assert(x.idle.includes('✓ フィールド追加') && x.idle.includes('✎ ルックアップ変更') && /承認済み・実行可能[\s\S]*?<b>3 件/.test(x.idle), '内訳: フィールド追加 2 / ルックアップ変更 1');
+  assert(x.html().includes('✓ フィールド追加') && x.html().includes('✎ ルックアップ変更') && /承認済み・実行可能[\s\S]*?<b>3 件/.test(x.html()), '内訳（押した後）: フィールド追加 2 / ルックアップ変更 1');
   const ex = x.s.execution;
   assert(ex.status === 'DONE' && ex.steps.every(st => st.status === 'VERIFIED') && x.mock.st.fields.customer_lookup.lookup.fieldMappings.length === 4 && x.mock.st.fields.customer_lookup.lookup.relatedApp.app === '500', '反映: 3 step VERIFIED・取得項目 4 件・参照元は不変');
   const e2 = x.html();
@@ -279,7 +281,7 @@ console.log('\n--- 2g. Phase 14: アプリアクションの結果・コピー�
     mkStep('P2', 'ADD_APP_ACTION', 'APP_ACTION', '請求書作成', { name: '請求書作成', destApp: '311', actionMappings: [{ srcType: 'FIELD', srcField: 'case_name', destField: 'quote_title' }, { srcType: 'FIELD', srcField: 'amount', destField: 'quote_amount' }, { srcType: 'RECORD_URL', srcField: null, destField: 'source_url' }], entities: ['GROUP:everyone'] }, { title: '請求書作成アクションを追加' }),
   ], summary: { steps: 2, invalidSteps: 0, needsConfirmation: 0, proposedFields: 0, questions: 0 } } };
   const x = await applyFlow(PLAN_AA);
-  assert(x.idle.includes('✎ アプリアクション変更') && x.idle.includes('＋ アプリアクション追加') && /承認済み・実行可能[\s\S]*?<b>2 件/.test(x.idle), '内訳: アプリアクション変更 1 / 追加 1');
+  assert(x.html().includes('✎ アプリアクション変更') && x.html().includes('＋ アプリアクション追加') && /承認済み・実行可能[\s\S]*?<b>2 件/.test(x.html()), '内訳（押した後）: アプリアクション変更 1 / 追加 1');
   const ex = x.s.execution;
   assert(ex.status === 'DONE' && ex.steps.every(st => st.status === 'VERIFIED') && Object.keys(x.mock.st.actions).length === 2 && x.mock.st.actions['見積を作成'].mappings.length === 3 && x.mock.st.actions['請求書作成'].mappings.length === 3 && x.mock.calls.filter(c => c === 'PUT actions').length === 2, '反映: 2 step VERIFIED（PUT 2 回・既存に転記 1 件追加・新規 1 件）');
   const e2 = x.html();
