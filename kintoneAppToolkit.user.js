@@ -17762,6 +17762,8 @@
       const ledgerOf = (planId) => { if (!state.ledgers.has(planId)) state.ledgers.set(planId, KTAiAnswers.createLedger(planId)); return state.ledgers.get(planId); };
       /**
        * 2026-10-05 第 3 段: 質問の AI に渡す会話の現在の要件と計画（計画は変えない）。作業中（計画の作成・更新・コードの生成）の質問にも、今の要件と計画で答える
+       *   2026-10-23: 未回答の確認事項は画面の未回答と同じ判定（answerContext。台帳の項目の今の status）で作る。版に登録した時点の写し（v.openQuestions）は
+       *   その後に回答欄・チャットで答えても変わらないので、回答してから作り直しが終わるまでの間や作り直しが失敗した後の質問で、答えた質問を未回答として送っていた
        */
       const conversationContext = () => {
         // 新しい計画を作っている間は、前の計画を今の計画として渡さない（作成中と伝える）
@@ -17773,7 +17775,7 @@
         const p = v ? v.plan || {} : null;
         return {
           requirements: lg ? KTAiAnswers.requirementsForContext(lg) : [],
-          plan: p ? { goal: v.goal, version: v.version, summary: String(p.assessment?.summary || '').slice(0, 600), steps: (p.steps || []).slice(0, 24).map(s => ({ id: s.id, title: s.title })), customizations: (p.customizations || []).map(c => ({ customizationId: c.customizationId, requirement: c.requirement, platform: c.platform, events: c.events, risks: (c.risks || []).slice(0, 6) })), provisionals: p.provisionals || [], questions: (v.openQuestions || []).map(q => ({ id: q.id, question: q.text })) } : draftAsPlanContext(),
+          plan: p ? { goal: v.goal, version: v.version, summary: String(p.assessment?.summary || '').slice(0, 600), steps: (p.steps || []).slice(0, 24).map(s => ({ id: s.id, title: s.title })), customizations: (p.customizations || []).map(c => ({ customizationId: c.customizationId, requirement: c.requirement, platform: c.platform, events: c.events, risks: (c.risks || []).slice(0, 6) })), provisionals: p.provisionals || [], questions: answerContext(state).open.map(q => ({ id: q.id, question: q.text })) } : draftAsPlanContext(),
           // 仮案の作成中（PROPOSE）は Gateway の語彙（PLAN / REVISE / GENERATE / null）に無いので null で送る（画面の表示だけに使う）
           working: state.working === 'PROPOSE' ? null : state.working === 'FINAL' ? 'GENERATE' : (state.working || null),
         };

@@ -49,7 +49,7 @@ const startPlan = async (c) => { await c.send(GOAL0); return c.send('これで�
  *   C-1 第 3 段: 仮案の能力（conversationFeatures の proposal・services.propose）と、生成工程の能力の印（generatorFeatures）を持つ接続先
  */
 function makeConv(plans, { fail = null, review = true } = {}) {
-  const calls = { plan: [], generate: [], propose: [] };
+  const calls = { plan: [], generate: [], propose: [], ask: [] };
   let t = 1000;
   let gate = null;
   const ctl = {
@@ -70,7 +70,8 @@ function makeConv(plans, { fail = null, review = true } = {}) {
       return { plan: p, ctx: null, review: review ? KTPlanReview.review({ plan: p, data: DATA, deps: DEPS, scan: null, incoming: null }) : null, decisionsMeta: args.decisions && args.decisions.length ? { version: '1', received: args.decisions.length } : null };
     },
     async generate(args) { calls.generate.push({ customizationId: args.customizationId, decisions: JSON.parse(JSON.stringify(args.decisions)) }); return { ok: true, generated: { code: '// x' }, review: { status: 'PASS', coverage: { notAchieved: [] } } }; },
-    async ask() { return { ok: true, answer: { answer: 'A', facts: [], analysis: [], recommendations: [], unknowns: [] }, ctx: { facts: [] } }; },
+    // H: 質問の AI に渡した会話の文脈（conversationContext の写し）を残す
+    async ask(args) { calls.ask.push({ question: args.question, conversation: JSON.parse(JSON.stringify(args.conversation || null)) }); return { ok: true, answer: { answer: 'A', facts: [], analysis: [], recommendations: [], unknowns: [] }, ctx: { facts: [] } }; },
     async explain() { return { answer: 'E', facts: [], analysis: [], recommendations: [], unknowns: [] }; },
     readiness(v) { return { approved: 0, executable: 0, unsupported: 0, blocked: 0, undecided: v.plan.steps.length }; },
   };
@@ -642,6 +643,46 @@ await section(async () => {
   const v3 = c.activePlan();
   const g3 = calls.generate[calls.generate.length - 1];
   assert(v3.version === 3 && v3.final && calls.generate.length === 3 && g3.decisions.some(d => d.id === 'D1' && d.status === 'answered' && !d.reconfirmReason), `R9: 回答済みに戻った D1 を、その版（v3）の生成に渡す: ${JSON.stringify(calls.generate.map(g => g.decisions))}`);
+});
+
+// =========================================================
+console.log('\n--- H. 質問の AI に渡す未回答の確認事項（2026-10-23）: 画面の未回答（answerContext。台帳の項目の今の status）と同じ判定で作る ---');
+//   版の写し（v.openQuestions）は計画の版を登録した時点（registerPlan の syncQuestions の結果）のままで、その後に回答欄・チャットで答えても変わらない。
+//   回答してから作り直しが終わるまでの間（H1）と、作り直しが失敗した後（H2）の質問で、答えた質問を未回答として質問の AI に送っていた
+const askedPlan = (calls) => calls.ask[0] && calls.ask[0].conversation && calls.ask[0].conversation.plan;
+const askedQuestions = (calls) => (askedPlan(calls) && askedPlan(calls).questions || []).map(x => x.question);
+await section(async () => {
+  // H1: 回答を記録 → 作り直しの途中（計画の AI の応答待ち）に質問 → 質問の AI に渡す plan.questions は画面の未回答と同じ
+  const { c, calls, ctl } = makeConv([planWith(qs(QP, QS)), planWith(qs(QS))]);
+  await startPlan(c);
+  const release = ctl.hold();
+  const p = c.send('PCだけ');
+  await tick();
+  const v1 = c.activePlan();
+  assert(c.isBusy() && v1.version === 1 && answered(c).length === 1 && open(c).join('|') === QS && (v1.openQuestions || []).map(q => q.text).join('|') === `${QP}|${QS}`, `前提: 回答を記録して作り直しの途中。画面の未回答は保存の質問だけ・版の写し（openQuestions）には PC / モバイルの質問が残る: open=${open(c).join(' / ')}`);
+  const q = await c.send('このフィールドは何に使ってる？');
+  await tick();
+  assert(q && q.asked === true && calls.ask.length === 1 && askedPlan(calls) && askedPlan(calls).version === 1, `前提: 作り直しの途中の質問は作業と並べて質問の AI へ（今の計画 v1 を渡す）: ${JSON.stringify({ asked: q && q.asked, asks: calls.ask.length, version: askedPlan(calls) && askedPlan(calls).version })}`);
+  assert(askedQuestions(calls).join('|') === QS && !askedQuestions(calls).includes(QP), `H1: 質問の AI に渡す未回答の確認事項は画面の未回答と同じ（答えた PC / モバイルの質問を未回答として送らない）: ${JSON.stringify(askedQuestions(calls))}`);
+  release(); await p; await tick();
+  assert(c.activePlan().version === 2 && open(c).join('|') === QS, '後始末: 作り直しは v2 で終わり、未回答は保存の質問だけ');
+});
+await section(async () => {
+  // H2: 作り直しが失敗した後（版は v1 のまま・回答は記録したまま）の質問
+  const { c, calls, ctl } = makeConv([planWith(qs(QP, QS)), planWith(qs(QS))]);
+  await startPlan(c);
+  ctl.fail = 'TIMEOUT';
+  const r = await c.send('PCだけ');
+  assert(!r.ok && !c.isBusy() && c.activePlan().version === 1 && answered(c).length === 1 && open(c).join('|') === QS, `前提: 作り直しの失敗。版は v1 のまま・回答は記録したまま（画面の未回答は保存の質問だけ）: open=${open(c).join(' / ')}`);
+  const q = await c.send('このフィールドは何に使ってる？');
+  assert(q && q.intent === 'ASK' && calls.ask.length === 1 && askedPlan(calls) && askedPlan(calls).version === 1 && askedQuestions(calls).join('|') === QS, `H2: 失敗の後の質問にも、答えた質問を未回答として送らない: ${JSON.stringify(askedQuestions(calls))}`);
+});
+await section(async () => {
+  // H3: 回答の無い計画（最初の版のまま）の質問は今までどおり、その版の確認事項をすべて渡す（判定をそろえても減らない）
+  const { c, calls } = makeConv([planWith(qs(QP, QS))]);
+  await startPlan(c);
+  const q = await c.send('このフィールドは何に使ってる？');
+  assert(q && q.intent === 'ASK' && calls.ask.length === 1 && askedQuestions(calls).join('|') === `${QP}|${QS}` && askedPlan(calls).questions.every(x => /^Q[0-9]+$/.test(x.id)), `H3: 答えていない確認事項はすべて渡す（id と question の形は変えない）: ${JSON.stringify(askedPlan(calls).questions)}`);
 });
 
 console.log(`\n${state.failed ? 'FAILED' : 'ALL PASSED'}: ${state.passed} passed / ${state.failed} failed`);
