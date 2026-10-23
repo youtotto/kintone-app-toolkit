@@ -210,7 +210,8 @@ const tryGenerate = async (transport) => { try { return { ok: true, r: await aiC
     assert(!r.ok && e.code === code && safe(() => KTAiClient.errorCategory(e.code)) === cat, `${label} → ${code}（種類 ${cat}）: ${e.code} / ${safe(() => KTAiClient.errorCategory(e.code))}`);
   }
   const d = await tryGenerate(gwError(422, 'GENERATION_DECLINED', DECLINE_DETAIL));
-  assert(safe(() => KTAiClient.declineReasonOf(d.e)) === DECLINE_DETAIL.reason, 'AI の説明（Gateway が長さで切った理由）を取り出せる');
+  //   §12.67（2026-10-23）: AI の説明は Gateway の detail をそのまま届ける（coverage の要件と状態（満たせない／一部だけ満たす）＋ note。summary があれば「AI の要約」）
+  { const t = safe(() => KTAiClient.declineReasonOf(d.e)) || ''; assert(t.includes(DECLINE_DETAIL.coverage[0].note) && t.includes(DECLINE_DETAIL.coverage[0].requirement) && /は満たせない: /.test(t) && !/AI の要約/.test(t), `AI の説明（Gateway の detail の要件・状態・note）を取り出せる: ${t}`); }
   const text = KTAiClient.errorText('GENERATION_DECLINED');
   assert(/AI はこの依頼に対するコード生成を行いませんでした/.test(text) && /通信や契約の問題ではありません/.test(text), `生成しなかったことが分かる文言（通信・契約の障害としない）: ${text}`);
   assert(!/契約形式/.test(KTAiClient.errorText('MODEL_OUTPUT_INVALID')) && /応答の形式/.test(KTAiClient.errorText('MODEL_OUTPUT_INVALID')), `応答形式の異常の文言に「契約」を使わない: ${KTAiClient.errorText('MODEL_OUTPUT_INVALID')}`);
