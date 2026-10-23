@@ -72,9 +72,6 @@ function makeConv(steps, { askAnswer = 'JavaScript は画面の操作だけで�
       //   2026-10-15（追加の指示 1）: 偽の計画の AI は要件の対応づけ（requirementOps）を返す（K.withPlannerMapping。turn に要件の操作があればそのまま・s.noAutoMap なら返さない）
       return K.withPlannerMapping({ plan: p, ctx: { facts: [] }, review: KTPlanReview.review({ plan: p, data: DATA, deps: DEPS, scan: null, incoming: null }), gatewayPlan: { ...JSON.parse(JSON.stringify(p)), gw: n + 1 }, revisionMeta: args.revision ? { requested: args.revision.mode || 'full', mode: args.revision.mode || 'full', fallbackReason: null } : null, turn: s.turn || null, ...(s.noAutoMap ? { noAutoMap: true } : {}) }, args.requirements, { merge: true });
     },
-    revisionModes: () => ['full', 'patch'],
-    conversationFeatures: () => ['requirements', 'stream', 'proposal', 'itemIds'],
-    generatorFeatures: () => ['requirementId', 'cases', 'feedback', ...K.GEN_EFFECT_FEATURES, ...K.GEN_CURRENT_FEATURES], plannerFeatures: () => ['reply'],
     materials: () => '見ている設定: 一覧 1 件・既存の JavaScript 0 ファイル', fieldLabels: () => K.LABELS_C, async customizeRevision() { return '42'; },
     async ask(args) { const ga = askGates.shift(); if (ga) await ga; calls.ask.push(JSON.parse(JSON.stringify({ question: args.question, conversation: args.conversation || null }))); if (askResult) { const x = askResult(args); if (x) return x; } return { ok: true, answer: { answer: askAnswer, facts: [], analysis: [], recommendations: [], unknowns: [] }, ctx: { facts: [] } }; },
     async generate(args) { const g = gates.shift(); if (g) await g; calls.generate++; t += 20000; return gen.impl(args); },

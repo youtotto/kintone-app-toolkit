@@ -31,7 +31,7 @@ const LIMIT = 1000;                        // 要求の打ち切り（longTimeou
 const LATE = KTAiClient.LATE_TIMER_MS, GRACE = KTAiClient.RESUME_GRACE_MS;
 const MODEL = 'gpt-6.1-sol';
 const usage = (i, o) => ({ input_tokens: i, output_tokens: o, input_tokens_details: { cached_tokens: 0 }, output_tokens_details: { reasoning_tokens: 0 } });
-const GEN_RESP = (requestId = 'g-1') => ({ ok: true, contractVersion: '2.1', meta: { requestId, ai: { model: MODEL, usage: usage(1000, 200) } }, generated: { strategy: 'NEW_JS_FILE', targetFile: 'a.js', summary: '承認済みでは金額を編集不可にします。', code: '(function () {\n  \'use strict\';\n})();', patch: null } });
+const GEN_RESP = (requestId = 'g-1') => ({ ok: true, contractVersion: '2.1', meta: { requestId, ai: { model: MODEL, usage: usage(1000, 200) } }, generated: { strategy: 'NEW_JS_FILE', targetFile: 'a.js', summary: '承認済みでは金額を編集不可にします。', code: '(function () {\n  \'use strict\';\n})();', patch: null }, verification: { version: '1', passed: true, machine: [], requiredEffects: [] } });
 const GCTX = { contextVersion: '1', customization: { customizationId: 'C1', strategy: 'NEW_JS_FILE', requirement: '承認済みでは金額を編集不可にする' } };
 
 /**

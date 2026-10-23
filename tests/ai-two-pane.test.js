@@ -68,7 +68,7 @@ const genResponse = (ctx, g) => ({ ok: true, contractVersion: '2.1', meta: { req
 //   2026-10-18（AI版 契約 20 §20）: 統合の書き込む本文は生成工程が合成して返す（偽の生成工程は送られた既存の本文と patch から作る）
 const genPatch = (patch = PATCH_GOOD, src = FIELD_ON_OFF) => gwWithBody({ strategy: 'EXTEND_EXISTING_JS', targetFile: 'fieldOnOff.js', summary: '完了でも金額を編集不可にする', code: patch.operations.map(o => o.content).join('\n'), patch, events: ['app.record.edit.show'], fields: [{ code: 'amount', access: 'CONTROL' }], apis: [], assumptions: [], warnings: [] }, src);
 //   C-1 第 3 段: 依頼は仮案の流れなので、会話の能力（conversation の proposal）を持つ接続先にする
-const HEALTH = { ok: true, supportedContractVersions: ['2.0', '2.1'], entitlements: [{ product: 'toolkit', features: ['assistant-qa', 'change-planner', 'customization-generator'] }], registry: { toolkit: { 'assistant-qa': { implemented: true, promptVersions: ['1'], conversation: ['requirements', 'proposal', 'itemIds'] }, 'change-planner': { implemented: true, promptVersions: ['1'] }, 'customization-generator': { implemented: true, promptVersions: ['1'], verification: ['requirementId', 'requiredEffects', 'effectGroups', 'relatedOmitted', 'appFields', 'saveDialog', 'reasonCategory', 'caseSide', 'eventCases', 'loadFaithful', 'registrationCheck', 'emptyCase', 'hideCondition', 'registrationCounts', 'caseCoverage', 'cancelCheck', 'limitCode', 'scopeList', 'tableRowChange', 'caseInvalid', 'conditionFrom', 'effectCheck', 'networkCheck', 'verifiedBody', 'registrationSelect'] } } }, usage: { monthlyLimit: 20, usedThisMonth: 1 } };
+const HEALTH = { ok: true, supportedContractVersions: ['2.0', '2.1'], entitlements: [{ product: 'toolkit', features: ['assistant-qa', 'change-planner', 'customization-generator'] }], registry: { toolkit: { 'assistant-qa': { implemented: true, promptVersions: ['1'], conversation: ['requirements', 'brief', 'stream', 'proposal', 'suggestion', 'adoptQuote', 'itemIds'] }, 'change-planner': { implemented: true, promptVersions: ['1'], revisionModes: ['full', 'patch'], stream: ['reply'], requirementOps: ['decisionRefs'] }, 'customization-generator': { implemented: true, promptVersions: ['1'], stream: ['progress'], verification: ['requirementId', 'requiredEffects', 'effectGroups', 'relatedOmitted', 'appFields', 'saveDialog', 'reasonCategory', 'caseSide', 'eventCases', 'loadFaithful', 'registrationCheck', 'emptyCase', 'hideCondition', 'registrationCounts', 'caseCoverage', 'cancelCheck', 'limitCode', 'scopeList', 'tableRowChange', 'caseInvalid', 'conditionFrom', 'effectCheck', 'networkCheck', 'verifiedBody', 'registrationSelect'] } } }, usage: { monthlyLimit: 20, usedThisMonth: 1 } };
 const makeStorage = () => { const m = new Map(); return { getItem: (k) => (m.has(k) ? m.get(k) : null), setItem: (k, v) => m.set(k, String(v)), removeItem: (k) => m.delete(k) }; };
 const answerFor = (ctx, text) => ({ ok: true, contractVersion: '2.1', meta: { requestId: 'qa-1', usage: { usedThisMonth: 2, monthlyLimit: 20 }, normalization: { warnings: [] }, ai: { model: 'm', latencyMs: 12, streamed: true, firstTextMs: 4, usage: { input_tokens: 100, output_tokens: 20, input_tokens_details: { cached_tokens: 40 }, output_tokens_details: { reasoning_tokens: 3 } } } }, answer: text, facts: ctx.facts.length ? [{ text: 'fact', evidenceIds: [ctx.facts[0].id] }] : [], analysis: [], recommendations: [], unknowns: [] });
 const tick = () => new Promise(r => setTimeout(r, 0));
@@ -80,11 +80,11 @@ function mount({ inputs = INPUTS, paid = true, plans = null, now = null, extra =
   const calls = { ask: [], plan: [], generate: [] };
   const client = {
     async getHealth() { return health; },
-    async ask({ ctx, requestId, onText = null }) { calls.ask.push({ ctx, stream: typeof onText === 'function' }); if (askStream && typeof onText === 'function') await askStream(onText, ctx); if (askGate) await askGate(ctx); const v = KTAiClient.validateAnswer(answerFor(ctx, 'このフィールドは金額です。'), ctx); return { ...v.normalized, requestId, clientWarnings: v.warnings }; },
+    async ask({ ctx, requestId, onText = null }) { calls.ask.push({ ctx, stream: typeof onText === 'function' }); if (askStream && typeof onText === 'function') await askStream(onText, ctx); if (askGate) await askGate(ctx); return { ...KTAiClient.receive('answer', answerFor(ctx, 'このフィールドは金額です。')), requestId, clientWarnings: [] }; },
     //   仮案は共有の部品の台本で答える（K.REQUESTS の 4 発言で採用まで進む）
     async propose({ ctx, requestId }) { calls.propose = (calls.propose || 0) + 1; const raw = K.script({ utterance: ctx.question, previous: ctx.conversation.proposal, requirements: ctx.conversation.requirements }); if (!raw) throw new Error(`台本がありません: ${ctx.question}`); return K.normalized(raw, requestId, null, ctx.conversation); },
-    async plan({ ctx, requestId }) { calls.plan.push({ ctx }); if (planGate) await planGate(ctx); const resp = plans ? plans(ctx) : (ctx.revision ? PLAN_V2 : PLAN_V1); const v = KTAiClient.validatePlan(K.rawWithPlannerMapping(resp, ctx), ctx); /* 2026-10-15（追加の指示 1）: 偽の計画の AI は要件の対応づけを返す */ const out = { ...v.normalized, requestId, clientWarnings: v.warnings }; if (gatewayPlan) Object.defineProperty(out, 'gatewayPlan', { value: JSON.parse(JSON.stringify(resp.plan)), enumerable: false }); return out; },
-    async generate({ ctx, requestId }) { calls.generate.push({ ctx }); if (genGate) await genGate(ctx); const v = KTAiClient.validateGenerated(genResponse(ctx, genPatch({ ...PATCH_GOOD, baseHash: ctx.existingFile?.hash || PATCH_GOOD.baseHash }, ctx.existingFile ? ctx.existingFile.source : FIELD_ON_OFF)), ctx); if (!v.ok) throw new Error(v.errors[0].message); return { ...v.normalized, requestId, clientWarnings: v.warnings }; },
+    async plan({ ctx, requestId }) { calls.plan.push({ ctx }); if (planGate) await planGate(ctx); const resp = plans ? plans(ctx) : (ctx.revision ? PLAN_V2 : PLAN_V1); const out = { ...KTAiClient.receive('plan', K.rawWithPlannerMapping(resp, ctx)), requestId, clientWarnings: [] }; /* 2026-10-15（追加の指示 1）: 偽の計画の AI は要件の対応づけを返す */ if (gatewayPlan) Object.defineProperty(out, 'gatewayPlan', { value: JSON.parse(JSON.stringify(resp.plan)), enumerable: false }); return out; },
+    async generate({ ctx, requestId }) { calls.generate.push({ ctx }); if (genGate) await genGate(ctx); return { ...KTAiClient.receive('generated', genResponse(ctx, genPatch({ ...PATCH_GOOD, baseHash: ctx.existingFile?.hash || PATCH_GOOD.baseHash }, ctx.existingFile ? ctx.existingFile.source : FIELD_ON_OFF))), requestId, clientWarnings: [] }; },
   };
   const session = { status() { return { connected: true, apiBase: 'https://gw.test', refreshExpiresAt: '2099-01-01T00:00:00Z', scope: { product: 'toolkit', feature: 'assistant-qa,change-planner,customization-generator', domain: 't.cybozu.com' } }; }, async migrateLegacy() { return false; }, async refresh() { return {}; }, async disconnect() { return { revoked: true }; }, client };
   const flow = { start: async () => ({}), cancel() { }, reopen: () => false, state: () => ({ phase: 'idle' }), isRunning: () => false };
@@ -529,7 +529,7 @@ console.log('\n--- §20. 読みやすさ: AI の文は段落と箇条書き（AI
 
 // =========================================================
 console.log('\n--- §21. 会話の返答の逐次表示（2026-10-07）: 届いた部分から順に出す・先回りの見立ては変更案ができたら折りたたむ・基準の取り直しを待たない ---');
-const HEALTH_STREAM = JSON.parse(JSON.stringify(HEALTH)); HEALTH_STREAM.registry.toolkit['assistant-qa'].conversation = ['requirements', 'brief', 'stream'];
+const HEALTH_STREAM = JSON.parse(JSON.stringify(HEALTH)); HEALTH_STREAM.registry.toolkit['assistant-qa'].conversation = ['requirements', 'brief', 'stream', 'proposal', 'suggestion', 'adoptQuote', 'itemIds'];
 {
   // 質問: 部分が届くたびに読み込み中の吹き出しに本文が出て、そろったら答えのカードに置き換わる
   const g = gate();
@@ -550,12 +550,12 @@ const HEALTH_STREAM = JSON.parse(JSON.stringify(HEALTH)); HEALTH_STREAM.registry
   assert(last && last.intent === 'ASK' && Number.isFinite(last.firstTextMs) && last.firstTextMs <= last.doneMs && last.ok === true, `計測: 最初の文字（firstTextMs）と完了（doneMs）: ${JSON.stringify(last)}`);
 }
 {
-  // Gateway が逐次表示に対応していない（health に stream が無い）ときは従来どおり（onText を渡さない・kintone.proxy のまま）
-  const m = mount({ askStream: async (onText) => { onText('x'); } });
+  // 2026-10-23（§12.61）: 逐次表示は常に求める（印の無い接続先は接続時の確認で使えない。tests/ai-capability-marks.test.js）。Gateway が本文の断片を送らなければ firstTextMs は記録しない
+  const m = mount({ askStream: async () => { } });
   await ticks(); await m.panel.send('金額フィールドは何に使われていますか？'); await ticks(6);
-  assert(m.calls.ask[0].stream === false && !/kt-ai-streaming/.test(m.chat()) && /kt-ai-answer-card/.test(m.chat()), '対応していない Gateway には逐次表示を求めない');
+  assert(m.calls.ask[0].stream === true && !/kt-ai-streaming/.test(m.chat()) && /kt-ai-answer-card/.test(m.chat()), '逐次表示を求めても、断片が届かなければ読み込み中の吹き出しは出ず、答えのカードだけ');
   const last = m.panel.metrics().timings.slice(-1)[0];
-  assert(last && last.firstTextMs == null && Number.isFinite(last.doneMs), '逐次表示が無いときは firstTextMs を記録しない');
+  assert(last && last.firstTextMs == null && Number.isFinite(last.doneMs), '断片が届かなければ firstTextMs を記録しない');
 }
 {
   // 失敗: 部分が届いた後に失敗したら、部分の吹き出しは消えてエラー（再試行つき）
@@ -620,9 +620,8 @@ const HEALTH_STREAM = JSON.parse(JSON.stringify(HEALTH)); HEALTH_STREAM.registry
 // =========================================================
 console.log('\n--- §22. 区間の記録（2026-10-07）: 送信ごとの timings に perf（基準の待ち・Context・往復・検証）と ai（モデル・待ち時間・token）、先回りの見立ては asideTimings ---');
 {
-  //   C-1 第 3 段: 依頼は仮案の流れなので、逐次表示と仮案の両方に対応した接続先にする
-  const HEALTH_STREAM_NF = JSON.parse(JSON.stringify(HEALTH)); HEALTH_STREAM_NF.registry.toolkit['assistant-qa'].conversation = ['requirements', 'stream', 'proposal', 'itemIds'];
-  const m = mount({ health: HEALTH_STREAM_NF });
+  //   C-1 第 3 段: 依頼は仮案の流れ（今の Gateway の印をすべて持つ health）
+  const m = mount({ health: HEALTH });
   await ticks(); await m.panel.send('金額フィールドは何に使われていますか？'); await ticks(6);
   const t1 = m.panel.metrics().timings.slice(-1)[0];
   assert(t1 && t1.perf && ['baseWaitMs', 'contextMs', 'requestMs'].every(k => Number.isFinite(t1.perf[k])) && t1.calls.length === 1 && t1.calls[0].kind === 'ask', `質問: perf と calls: ${JSON.stringify({ perf: t1 && t1.perf, calls: t1 && t1.calls })}`);

@@ -68,7 +68,7 @@ const passVerification = (ctx, g = null) => { const re = (ctx && ctx.verificatio
 const genResponse = (ctx, g) => ({ ok: true, contractVersion: '2.1', meta: { requestId: 'gen-1', usage: { usedThisMonth: 3, monthlyLimit: 20 }, normalization: { warnings: [] }, gateway: { feature: 'customization-generator' }, patternLibrary: { version: '1', selected: ['field-disable'] } }, generated: { strategy: ctx.customization.strategy, targetFile: ctx.existingFile?.name || 'amountWarning.js', summary: ctx.customization.requirement, events: ctx.customization.events, fields: ctx.customization.fields, apis: [], assumptions: [], warnings: [], gatewayChecks: { security: [] }, patterns: PATTERNS, ...g }, ...(passVerification(ctx, g) ? { verification: passVerification(ctx, g) } : {}) });
 //   2026-10-18（AI版 契約 20 §20）: 統合の書き込む本文は生成工程が合成して返す（偽の生成工程は送られた既存の本文と patch から作る）
 const genPatch = (patch = PATCH_GOOD, src = FIELD_ON_OFF) => gwWithBody({ strategy: 'EXTEND_EXISTING_JS', targetFile: 'fieldOnOff.js', summary: '完了でも金額を編集不可にする', code: patch.operations.map(o => o.content).join('\n'), patch, events: ['app.record.edit.show'], fields: [{ code: 'amount', access: 'CONTROL' }], apis: [], assumptions: [], warnings: [] }, src);
-const HEALTH = { ok: true, supportedContractVersions: ['2.0', '2.1'], entitlements: [{ product: 'toolkit', features: ['assistant-qa', 'change-planner', 'customization-generator'] }], registry: { toolkit: { 'assistant-qa': { implemented: true, promptVersions: ['1'], conversation: ['requirements', 'stream', 'proposal', 'itemIds'] }, 'change-planner': { implemented: true, promptVersions: ['1'] }, 'customization-generator': { implemented: true, promptVersions: ['1'], verification: ['requirementId', 'requiredEffects', 'effectGroups', 'relatedOmitted', 'appFields', 'saveDialog', 'reasonCategory', 'caseSide', 'eventCases', 'loadFaithful', 'registrationCheck', 'emptyCase', 'hideCondition', 'registrationCounts', 'caseCoverage', 'cancelCheck', 'limitCode', 'scopeList', 'tableRowChange', 'caseInvalid', 'conditionFrom', 'effectCheck', 'networkCheck', 'verifiedBody', 'registrationSelect'] } } }, usage: { monthlyLimit: 20, usedThisMonth: 1 } };
+const HEALTH = { ok: true, supportedContractVersions: ['2.0', '2.1'], entitlements: [{ product: 'toolkit', features: ['assistant-qa', 'change-planner', 'customization-generator'] }], registry: { toolkit: { 'assistant-qa': { implemented: true, promptVersions: ['1'], conversation: ['requirements', 'brief', 'stream', 'proposal', 'suggestion', 'adoptQuote', 'itemIds'] }, 'change-planner': { implemented: true, promptVersions: ['1'], revisionModes: ['full', 'patch'], stream: ['reply'], requirementOps: ['decisionRefs'] }, 'customization-generator': { implemented: true, promptVersions: ['1'], stream: ['progress'], verification: ['requirementId', 'requiredEffects', 'effectGroups', 'relatedOmitted', 'appFields', 'saveDialog', 'reasonCategory', 'caseSide', 'eventCases', 'loadFaithful', 'registrationCheck', 'emptyCase', 'hideCondition', 'registrationCounts', 'caseCoverage', 'cancelCheck', 'limitCode', 'scopeList', 'tableRowChange', 'caseInvalid', 'conditionFrom', 'effectCheck', 'networkCheck', 'verifiedBody', 'registrationSelect'] } } }, usage: { monthlyLimit: 20, usedThisMonth: 1 } };
 const makeStorage = () => { const m = new Map(); return { getItem: (k) => (m.has(k) ? m.get(k) : null), setItem: (k, v) => m.set(k, String(v)), removeItem: (k) => m.delete(k) }; };
 const answerFor = (ctx, text) => ({ ok: true, contractVersion: '2.1', meta: { requestId: 'qa-1', usage: { usedThisMonth: 2, monthlyLimit: 20 }, normalization: { warnings: [] } }, answer: text, facts: [], analysis: [], recommendations: [], unknowns: [] });
 const tick = () => new Promise(r => setTimeout(r, 0));
@@ -80,11 +80,11 @@ function mount({ inputs = INPUTS, paid = true, planResponse = PLAN_HYBRID, openC
   const calls = { ask: [], plan: [], generate: [], health: 0 };
   const client = {
     async getHealth() { calls.health++; return HEALTH; },
-    async ask({ ctx, requestId, signal }) { calls.ask.push({ ctx }); const v = KTAiClient.validateAnswer(answerFor(ctx, 'このフィールドは金額です。'), ctx); return { ...v.normalized, requestId, clientWarnings: v.warnings }; },
+    async ask({ ctx, requestId, signal }) { calls.ask.push({ ctx }); return { ...KTAiClient.receive('answer', answerFor(ctx, 'このフィールドは金額です。')), requestId, clientWarnings: [] }; },
     //   仮案は共有の部品の台本で答える（計画は PLAN_HYBRID・生成は fieldOnOff.js の patch と生成工程の合格）
     async propose({ ctx, requestId }) { calls.propose = (calls.propose || 0) + 1; const raw = K.script({ utterance: ctx.question, previous: ctx.conversation.proposal, requirements: ctx.conversation.requirements }); if (!raw) throw new Error(`台本がありません: ${ctx.question}`); return K.normalized(raw, requestId, null, ctx.conversation); },
-    async plan({ ctx, requestId }) { calls.plan.push({ ctx }); const v = KTAiClient.validatePlan(K.rawWithPlannerMapping(planResponse, ctx), ctx); return { ...v.normalized, requestId, clientWarnings: v.warnings }; },
-    async generate({ ctx, requestId }) { calls.generate.push({ ctx }); const v = KTAiClient.validateGenerated(genResponse(ctx, genPatch({ ...PATCH_GOOD, baseHash: ctx.existingFile?.hash || PATCH_GOOD.baseHash }, ctx.existingFile ? ctx.existingFile.source : FIELD_ON_OFF)), ctx); if (!v.ok) throw new Error(v.errors[0].message); return { ...v.normalized, requestId, clientWarnings: v.warnings }; },
+    async plan({ ctx, requestId }) { calls.plan.push({ ctx }); return { ...KTAiClient.receive('plan', K.rawWithPlannerMapping(planResponse, ctx)), requestId, clientWarnings: [] }; },
+    async generate({ ctx, requestId }) { calls.generate.push({ ctx }); return { ...KTAiClient.receive('generated', genResponse(ctx, genPatch({ ...PATCH_GOOD, baseHash: ctx.existingFile?.hash || PATCH_GOOD.baseHash }, ctx.existingFile ? ctx.existingFile.source : FIELD_ON_OFF))), requestId, clientWarnings: [] }; },
   };
   const session = { status() { return { connected: true, apiBase: 'https://gw.test', refreshExpiresAt: '2099-01-01T00:00:00Z', scope: { product: 'toolkit', feature: 'assistant-qa,change-planner,customization-generator', domain: 't.cybozu.com' } }; }, async migrateLegacy() { return false; }, async refresh() { return {}; }, async disconnect() { return { revoked: true }; }, client };
   const flow = { start: async () => ({}), cancel() { }, reopen: () => false, state: () => ({ phase: 'idle' }), isRunning: () => false };
@@ -285,8 +285,6 @@ console.log('\n--- §38. Pattern Library（Gateway の generated.patterns）: �
   await clickChat(m, 'open-code', { cid: 'C1', view: 'code' }); await ticks();
   const codePane = m.$('kt-ai-code-review').innerHTML;
   assert(/参考パターン: <span class="kt-ai-pattern" title="条件に応じてフィールドの編集可否を制御する">field-disable<\/span>/.test(codePane) && /標準設定で代替できないか再確認: フィールドのアクセス権 \/ プロセス管理の「作業者だけ編集可」/.test(codePane) && !/参考パターン/.test(m.chat()), '右「コード」: 参考パターンと「標準設定で代替できないか再確認」（人間への standard-first の再確認）。会話には出さない（Phase 19）');
-  const noPat = KTAiClient.validateGenerated({ ok: true, contractVersion: '2.1', meta: {}, generated: { strategy: 'NEW_JS_FILE', code: 'x', patterns: 'bad' } }, { customization: { strategy: 'NEW_JS_FILE' } });
-  assert(noPat.ok && Array.isArray(noPat.normalized.patterns) && noPat.normalized.patterns.length === 0, 'patterns が無い / 不正でも空配列（表示なし）');
   //   C-1 第 3 段（2026-10-08）: 会話のコードのカード（type CODE）は削除した。参考パターンの行は右の「コード」の部品（patternsHtml）だけが作る
   assert(KTAiChatUi.patternsHtml({ ...genPatch(), patterns: [] }) === '' && /参考パターン/.test(KTAiChatUi.patternsHtml(entry.generated)) && KTAiConversation.MSG.CODE === undefined, 'patterns が空なら参考パターンの行は出ない（右の「コード」の部品）');
   // Audit に patterns
@@ -296,20 +294,19 @@ console.log('\n--- §38. Pattern Library（Gateway の generated.patterns）: �
 }
 
 // =========================================================
-console.log('\n--- §38b. implementation（JAVASCRIPT / CSS / JS_CSS）: validatePlan の既定・Review・表示 ---');
+console.log('\n--- §38b. implementation（JAVASCRIPT / CSS / JS_CSS）: 受け取り・Review・表示 ---');
 {
   const gen = KTContextUi.generatePlan({ goal: GOAL_HYBRID, inputs: INPUTS });
-  const v = KTAiClient.validatePlan(PLAN_HYBRID, gen.ctx);
-  assert(v.ok && v.normalized.customizations[0].implementation === 'JAVASCRIPT', 'implementation 省略 → JAVASCRIPT（Gateway validate-plan と同じ既定）');
-  const vc = KTAiClient.validatePlan(planOf({ steps: [STD_STEP(), JS_STEP()], customizations: [cust({ implementation: 'CSS', events: [], fields: [] })], solution: 'HYBRID' }), gen.ctx);
-  assert(vc.normalized.customizations[0].implementation === 'CSS' && KTAiClient.validatePlan(planOf({ steps: [JS_STEP()], customizations: [cust({ implementation: 'SASS' })] }), gen.ctx).normalized.customizations[0].implementation === 'JAVASCRIPT', 'CSS はそのまま・語彙外は JAVASCRIPT');
-  const reviewOf = (c) => { const p = { ...KTAiClient.validatePlan(planOf({ steps: [STD_STEP(), JS_STEP()], customizations: [c], solution: 'HYBRID' }), gen.ctx).normalized, requestId: 'x' }; const rv = KTPlanReview.review({ plan: p, ...INPUTS }); return { plan: p, review: rv, js: (rv.steps || []).find(r => r.solution === 'CUSTOMIZATION') }; };
+  //   2026-10-23（§12.61）: implementation の既定（省略・語彙外 → JAVASCRIPT）は Gateway の validate-plan だけが行う。Toolkit の受け取りは形をそのまま返す
+  const vc = KTAiClient.receive('plan', planOf({ steps: [STD_STEP(), JS_STEP()], customizations: [cust({ implementation: 'CSS', events: [], fields: [] })], solution: 'HYBRID' }));
+  assert(vc.customizations[0].implementation === 'CSS', 'CSS はそのまま（語彙外の既定は Gateway）');
+  const reviewOf = (c) => { const p = { ...KTAiClient.receive('plan', planOf({ steps: [STD_STEP(), JS_STEP()], customizations: [c], solution: 'HYBRID' })), requestId: 'x' }; const rv = KTPlanReview.review({ plan: p, ...INPUTS }); return { plan: p, review: rv, js: (rv.steps || []).find(r => r.solution === 'CUSTOMIZATION') }; };
   const css = reviewOf(cust({ implementation: 'CSS', events: [], fields: [], strategy: 'NEW_JS_FILE', existingFiles: [] }));
   assert(css.js.codeGeneration.supported === false && css.js.codeGeneration.reason === 'CSS_NOT_GENERATED' && css.js.customization.implementation === 'CSS' && css.js.issues.some(i => i.code === 'JS_CSS_ONLY') && !css.js.issues.some(i => i.code === 'JS_EVENT_MISSING') && css.js.status !== 'INVALID', 'implementation CSS: 生成不可（CSS_NOT_GENERATED）・イベント無しでも要確認にしない・計画には残る');
   const jscss = reviewOf(cust({ implementation: 'JS_CSS' }));
   assert(jscss.js.codeGeneration.supported === true && jscss.js.customization.implementation === 'JS_CSS' && jscss.js.issues.some(i => i.code === 'JS_CSS_PART_MANUAL' && i.severity === 'low'), 'implementation JS_CSS: JavaScript 部分は生成可（CSS は手動の注記）');
-  const plain = reviewOf(cust());
-  assert(plain.js.codeGeneration.supported === true && plain.js.customization.implementation === 'JAVASCRIPT' && !plain.js.issues.some(i => /^JS_CSS/.test(i.code)), 'implementation JAVASCRIPT: 従来どおり');
+  const plain = reviewOf(cust({ implementation: 'JAVASCRIPT' }));
+  assert(plain.js.codeGeneration.supported === true && plain.js.customization.implementation === 'JAVASCRIPT' && !plain.js.issues.some(i => /^JS_CSS/.test(i.code)), 'implementation JAVASCRIPT: 従来どおり（Gateway の既定を受け取った形）');
   //   2026-10-19: 実装仕様のカード（実装の行）は廃止した。CSS で生成しないことは右の「変更内容」の「反映できないこと」に理由と一緒に出す
   const sumCss = KTAiChatUi.changeSummaryHtml({ planId: 'p', version: 1, status: 'ACTIVE', goal: GOAL_HYBRID, plan: css.plan, review: css.review });
   assert(/Toolkit ではコードを作れません（CSS は生成の対象外）/.test(sumCss), `変更内容: 実装 CSS は「反映できないこと」に作れない理由（CSS は生成の対象外）: ${sumCss.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').slice(0, 300)}`);

@@ -1,7 +1,7 @@
 // 修正コメントを採用として扱わない（2026-10-15 §3.2。有料の AI は使わない。Gateway の応答は模擬）
 //
 // 検証内容:
-//   §A1 validateProposal: 応答に adoptQuote キーがある Gateway では、intent adopt は今回の発言にその語句があるときだけ。空・見つからない → update に下げて PROPOSAL_ADOPT_UNGROUNDED。
+//   §A1（2026-10-23・§12.61 で削除）: 進行の語句（adoptQuote）の照合（空・発言に無い adopt → update）は Gateway の validate-proposal-response が同じ発言で行う（AI版 worker/test/cases/toolkit-proposal.mjs）。Toolkit は繰り返さない。
 //        キーが無い古い Gateway では今のまま（adopt のまま）。照合は空白・句読点を除いた部分一致・2 文字以上
 //   §A2 (1) 修正の指示だけの発言「承認者は今のまま、ステータスを一つ追加してください」+ 模擬 update → 計画 0・仮案が更新・［採用］が残る。
 //        同じ発言に模擬が adopt（adoptQuote ""）→ Toolkit が update に下げ、計画 0。adoptQuote が発言に無い語句でも同じ。古い Gateway（キー無し）の adopt は今のまま採用
@@ -76,28 +76,9 @@ const outsideDetails = (html) => String(html).replace(/<details[\s\S]*?<\/detail
 
 (async () => {
 // =========================================================
-console.log('\n--- §A1. validateProposal: adoptQuote の照合（空・発言に無い → update。古い Gateway はそのまま） ---');
-await section(async () => {
-  const base = { ok: true, contractVersion: '2.1', meta: META, reply: '進めます。', intent: 'adopt', proposal: { behaviors: [{ id: 'B1', text: '動作', origin: 'user' }], assumptions: [], decisions: [], approach: { standard: [], js: [] }, cannot: [] }, turn: { ops: [], answers: [], requirementOps: [] } };
-  const v1 = KTAiClient.validateProposal({ ...base, adoptQuote: 'この案で進めて' }, { utterance: '承認者は今のままで。この案で進めて' });
-  assert(v1.ok && v1.normalized.intent === 'adopt' && !v1.warnings.some(w => w.code === 'PROPOSAL_ADOPT_UNGROUNDED'), `A1-1: adoptQuote が今回の発言にあれば adopt のまま: ${JSON.stringify({ intent: v1.normalized.intent, warnings: v1.warnings.map(w => w.code) })}`);
-  const v2 = KTAiClient.validateProposal({ ...base, adoptQuote: '' }, { utterance: '承認者は今のまま、ステータスを一つ追加してください' });
-  assert(v2.ok && v2.normalized.intent === 'update' && v2.warnings.some(w => w.code === 'PROPOSAL_ADOPT_UNGROUNDED'), `A1-2: adoptQuote が空なら update に下げて PROPOSAL_ADOPT_UNGROUNDED: ${JSON.stringify({ intent: v2.normalized.intent, warnings: v2.warnings.map(w => w.code) })}`);
-  const v3 = KTAiClient.validateProposal({ ...base, adoptQuote: 'この案で進めて' }, { utterance: '承認者は今のまま、ステータスを一つ追加してください' });
-  assert(v3.ok && v3.normalized.intent === 'update' && v3.warnings.some(w => w.code === 'PROPOSAL_ADOPT_UNGROUNDED'), `A1-3: adoptQuote が今回の発言に無ければ update に下げる: ${JSON.stringify({ intent: v3.normalized.intent })}`);
-  const v4 = KTAiClient.validateProposal({ ...base }, { utterance: '承認者は今のまま、ステータスを一つ追加してください' });
-  assert(v4.ok && v4.normalized.intent === 'adopt' && !v4.warnings.some(w => w.code === 'PROPOSAL_ADOPT_UNGROUNDED'), `A1-4: adoptQuote キーの無い古い Gateway では今のまま（adopt）: ${JSON.stringify({ intent: v4.normalized.intent })}`);
-  const v5 = KTAiClient.validateProposal({ ...base, adoptQuote: '進めて下さい。' }, { utterance: 'それで 進めて下さい' });
-  const v6 = KTAiClient.validateProposal({ ...base, adoptQuote: 'で' }, { utterance: 'この案で進めて' });
-  assert(v5.ok && v5.normalized.intent === 'adopt' && v6.ok && v6.normalized.intent === 'update', `A1-5: 照合は空白・句読点を除いた部分一致（2 文字以上。1 文字の語句は見つからない扱い）: ${JSON.stringify({ v5: v5.normalized.intent, v6: v6.normalized.intent })}`);
-  const v7 = KTAiClient.validateProposal({ ...base, intent: 'update', adoptQuote: 'この案で進めて' }, { utterance: '承認者は今のまま' });
-  assert(v7.ok && v7.normalized.intent === 'update' && !v7.warnings.some(w => w.code === 'PROPOSAL_ADOPT_UNGROUNDED'), 'A1-6: adopt 以外の intent は adoptQuote を見ない（警告も出さない）');
-  const v8 = KTAiClient.validateProposal({ ...base, adoptQuote: 'この案で進めて' });
-  assert(v8.ok && v8.normalized.intent === 'adopt', 'A1-7: 発言が渡されない（照合できない）ときは語句があれば adopt のまま');
-});
 
 // =========================================================
-console.log('\n--- §A2. (1) 修正の指示だけの発言は採用にしない（模擬 update / 模擬 adopt の下げ / 古い Gateway の互換） ---');
+console.log('\n--- §A2. (1) 修正の指示だけの発言は採用にしない（模擬 update。模擬 adopt の下げは Gateway の仕事） ---');
 await section(async () => {
   const x = convOf({ mode: 'update' });
   await x.c.send(U0);
@@ -107,20 +88,6 @@ await section(async () => {
   const d2 = x.c.draft();
   assert(r.ok && r.intent === I.DRAFT_REPLY && r.draft && r.draft.intent === 'update' && d2.status === 'open' && d2.rev === 2 && d2.items.behaviors.some(b => /ステータスを一つ追加する/.test(b.text)) && x.calls.plan.length === 0 && x.calls.propose.length === 2, `A2-1: 修正の指示 + 模擬 update → 計画の呼び出し 0・仮案が更新（rev 2）: ${JSON.stringify({ intent: r.intent, draft: r.draft, plan: x.calls.plan.length })}`);
   assert(/data-act="draft-adopt"/.test(draftCardOf(x)) && !/仮案 — 採用済み/.test(chatOf(x)) && !INTERNAL_IN_CHAT.test(outsideDetails(chatOf(x)).replace(/data-[a-z]+="[^"]*"/g, '')), 'A2-2: ［採用］が残る（採用済みの見出しは無い）・内部の語は無い');
-});
-await section(async () => {
-  for (const mode of ['adopt-empty', 'adopt-foreign']) {
-    const x = convOf({ mode });
-    await x.c.send(U0);
-    const r = await x.c.send(U_FIX);
-    const d2 = x.c.draft();
-    assert(r.ok && r.draft && r.draft.intent === 'update' && d2.status === 'open' && d2.rev === 2 && d2.history.slice(-1)[0].intent === 'update' && x.calls.plan.length === 0 && /data-act="draft-adopt"/.test(draftCardOf(x)), `A2-3（${mode}）: 模擬が adopt でも adoptQuote が空・発言に無ければ Toolkit が update に下げる → 計画 0・仮案は open・［採用］が残る: ${JSON.stringify({ draft: r.draft, status: d2.status, plan: x.calls.plan.length })}`);
-  }
-  //   古い Gateway（adoptQuote キー無し）: 今のまま adopt → 採用して計画 1 回（互換）
-  const y = convOf({ mode: 'adopt-legacy' });
-  await y.c.send(U0);
-  const ry = await y.c.send(U_FIX);
-  assert(ry.ok && ry.draft && ry.draft.intent === 'adopt' && y.c.draft().status === 'adopted' && y.calls.plan.length === 1, `A2-4: adoptQuote キーの無い古い Gateway の adopt は今のまま（採用 → 計画 1 回）: ${JSON.stringify({ draft: ry.draft, status: y.c.draft().status, plan: y.calls.plan.length })}`);
 });
 
 // =========================================================

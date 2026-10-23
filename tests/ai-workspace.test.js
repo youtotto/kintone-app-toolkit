@@ -71,7 +71,7 @@ const PLAN_V2 = {
   },
 };
 //   C-1 第 3 段（2026-10-08）: 接続先は仮案に対応した形（assistant-qa の conversation に proposal）。無い接続先は「接続先が非対応」で計画に進まない（ai-flow-redesign の F 系）
-const HEALTH = { ok: true, supportedContractVersions: ['2.0', '2.1'], entitlements: [{ product: 'toolkit', features: ['assistant-qa', 'change-planner'] }], registry: { toolkit: { 'assistant-qa': { implemented: true, promptVersions: ['1'], conversation: ['requirements', 'proposal', 'itemIds'] }, 'change-planner': { implemented: true, promptVersions: ['1'] } } }, usage: { monthlyLimit: 20, usedThisMonth: 1 } };
+const HEALTH = { ok: true, supportedContractVersions: ['2.0', '2.1'], entitlements: [{ product: 'toolkit', features: ['assistant-qa', 'change-planner'] }], registry: { toolkit: { 'assistant-qa': { implemented: true, promptVersions: ['1'], conversation: ['requirements', 'brief', 'stream', 'proposal', 'suggestion', 'adoptQuote', 'itemIds'] }, 'change-planner': { implemented: true, promptVersions: ['1'], revisionModes: ['full', 'patch'], stream: ['reply'], requirementOps: ['decisionRefs'] } } }, usage: { monthlyLimit: 20, usedThisMonth: 1 } };
 /**
  * 仮案の偽の応答（決めることの無い仮案。依頼の文を実現する動作にする）。
  *   C-1 第 3 段（2026-10-08）: 古い確認の流れ（依頼から直接計画を作る）は削除した。依頼は仮案 →「これで進めて」で採用 → 計画（PLAN_V1）→ 最終案の順
@@ -97,15 +97,13 @@ function mount({ paid = true, connected = true, planResponses = null, askError =
       if (askDelay) await askDelay(signal);
       if (askError) { const e = typeof askError === 'function' ? askError() : askError; if (e) throw e; }
       const text = ctx.planContext ? (ctx.planContext.kind === 'EXPLAIN_REVIEW' ? '条件の変更を含むため確認が必要と判定されています。実は安全です。' : `${ctx.planContext.plan.steps[0]?.id || 'P1'} は一覧を追加する手順です。`) : 'このフィールドはルックアップのコピー先です。';
-      const v = KTAiClient.validateAnswer(answerFor(ctx, text), ctx);
-      return { ...v.normalized, requestId: v.normalized.requestId || requestId, clientWarnings: v.warnings };
+      const got = KTAiClient.receive('answer', answerFor(ctx, text)); return { ...got, requestId: got.requestId || requestId, clientWarnings: [] };
     },
     async plan({ ctx, requestId, signal }) {
       calls.plan.push({ ctx, requestId, signal });
       if (planError) { const e = typeof planError === 'function' ? planError() : planError; if (e) throw e; }
       const resp = planResponses ? planResponses(ctx) : (ctx.revision ? PLAN_V2 : PLAN_V1);
-      const v = KTAiClient.validatePlan(resp, ctx);
-      return { ...v.normalized, requestId, clientWarnings: v.warnings };
+      return { ...KTAiClient.receive('plan', resp), requestId, clientWarnings: [] };
     },
   };
   let isConnected = connected;
@@ -182,7 +180,7 @@ console.log('\n--- 2. KTAiConversation.create（fake services。履歴は送ら�
 {
   const log = [], proposeLog = [];
   const pctx = KTContext.buildPlan({ goal: GOAL, ...INPUTS, options: { now: '2026-10-02T00:00:00.000Z' } });
-  const planOf = (resp, ctx) => KTAiClient.validatePlan(resp, ctx).normalized;
+  const planOf = (resp, ctx) => KTAiClient.receive('plan', resp);
   const services = {
     conversationFeatures: () => ['requirements', 'proposal', 'itemIds'],
     async propose(args) { proposeLog.push(args.utterance); return { ok: true, proposal: proposalFor(args.utterance), ctx: { facts: [] }, perf: {} }; },

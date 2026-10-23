@@ -200,7 +200,7 @@ await section(async () => {
   assert(snap && snap.textAt === null && snap.events === 3 && snap.received === 3 && snap.firstByteAt != null && snap.lastAt === trace.progress.startedAt && trace.progress.textAt != null && events.every(e => e === 'progress'), `S1-5: keepalive のコメントは onEvent に届かず進捗に数えない（開始通知の後も textAt は null・最後の進捗は started のまま）。本文が届いてから textAt: ${JSON.stringify({ snap, after: trace.progress })}`);
 });
 await section(async () => {
-  //   画面: health の customization-generator.stream に progress がある接続先にだけ onEvent を渡す（無い接続先 = 古い Gateway には渡さない = Accept が付かない）
+  //   画面: 生成の依頼に onEvent を渡す（Accept: text/event-stream）。2026-10-23（§12.61）: 印 progress の無い接続先は接続時の確認で生成を使えない（画面の generate を呼ばない）
   const run = async (health) => {
     const sg = K.screenGenerate({ field: 'case_name', targetFile: 'caseLock.js' });
     const seen = [];
@@ -209,9 +209,10 @@ await section(async () => {
     const v = await K.adoptOnScreen(m); await K.ticks(20);
     return { seen, v };
   };
-  const withMark = await run(HEALTH_S), without = await run(K.HEALTH_V);
+  const hNoProgress = K.clone(K.HEALTH_V); hNoProgress.registry.toolkit['customization-generator'].stream = [];
+  const withMark = await run(HEALTH_S), without = await run(hNoProgress);
   assert(withMark.seen.length === 1 && withMark.seen[0].onEvent === 'function' && withMark.v && withMark.v.final && FS.readyOf(withMark.v) === true, `S1-6: 印のある接続先: 画面の generate は client に onEvent を渡す（最終案は今までどおり承認できる）: ${JSON.stringify(withMark.seen)}`);
-  assert(without.seen.length === 1 && without.seen[0].onEvent === 'undefined' && !/onEvent/.test(without.seen[0].keys) && without.v && without.v.final && FS.readyOf(without.v) === true, `S1-7: 印の無い接続先（古い Gateway）: onEvent を渡さない（Accept を付けない・JSON のまま）: ${JSON.stringify(without.seen)}`);
+  assert(without.seen.length === 0 && !(without.v && without.v.final && FS.readyOf(without.v) === true), `S1-7: 印（progress）の無い接続先は接続時の確認で生成を使えない（画面の generate は呼ばれない・反映できる最終案にならない）: ${JSON.stringify({ seen: without.seen, ready: !!(without.v && without.v.final && FS.readyOf(without.v)) })}`);
 });
 await section(async () => {
   //   レビューの指摘 3（2026-10-14）: progress の相対 ms の起点は transport と同じ（rawRequest の t0 = token を取った後）。偽の getToken に待ちを入れても、
@@ -439,10 +440,8 @@ await section(async () => {
   assert(trace.progress && trace.progress.textChars === 5200 && trace.progress.deltaEvents === 3 && trace.progress.events === 9 && !NO_BODY.test(JSON.stringify(trace)), `S9-1: trace.progress の textChars は最後に受けた累計（5200）・deltaEvents は本文の断片の通知の数（3。keepalive・started は数えない。events は progress の総数 9）: ${JSON.stringify(trace.progress)}`);
   //   (c) 成功の generated.timing.calls[0].upstream は 8 キー（契約の順）。upstream の無い呼び出しは null
   const up = g.timing && Array.isArray(g.timing.calls) ? g.timing.calls[0].upstream : null;
-  assert(up && Object.keys(up).join(',') === UPSTREAM_KEYS_JOINED && up.textChars === 5200 && up.deltaCount === 61 && up.end === 'completed' && up.headersMs === 800 && g.timing.calls[1].upstream === null && KTAiClient.UPSTREAM_KEYS.join(',') === UPSTREAM_KEYS_JOINED, `S9-2: 成功の記録 generated.timing.calls[0].upstream は 8 キー（headersMs … textChars, deltaCount）。無い呼び出しは null: ${JSON.stringify(g.timing && g.timing.calls)}`);
-  //   白リスト: 余計なキーは落ちる・文字列の数は数に・負の数と数でない end は null・形が違えば null
-  const nu = KTAiClient.normalizeUpstream({ headersMs: '12', end: 7, textChars: -1, bogus: 1 });
-  assert(nu && Object.keys(nu).join(',') === UPSTREAM_KEYS_JOINED && nu.headersMs === 12 && nu.end === null && nu.textChars === null && nu.deltaCount === null && KTAiClient.normalizeUpstream(null) === null && KTAiClient.normalizeUpstream('x') === null && KTAiClient.normalizeUpstream([1]) === null, `S9-3: upstream は 8 キーの白リスト（数か null・end は文字列か null。形が違えば null）: ${JSON.stringify(nu)}`);
+  assert(up && Object.keys(up).join(',') === UPSTREAM_KEYS_JOINED && up.textChars === 5200 && up.deltaCount === 61 && up.end === 'completed' && up.headersMs === 800 && g.timing.calls[1].upstream == null, `S9-2: 成功の記録 generated.timing.calls[0].upstream は 8 キー（headersMs … textChars, deltaCount）。無い呼び出しは null: ${JSON.stringify(g.timing && g.timing.calls)}`);
+  //   2026-10-23（§12.61）: 上流の観測の白リスト（normalizeUpstream）は廃止。Gateway の形（契約 20 §16 の 8 キー）をそのまま記録する
 });
 await section(async () => {
   //   (b) 画面（実際の client・偽の Gateway）: 本文が届き始めてから Gateway の期限（SSE の error 502。error.upstream つき）→ 失敗の記録に upstream（8 キー）と Toolkit が受けた累計（textChars）。本文は残さない

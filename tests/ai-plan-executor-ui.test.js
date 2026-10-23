@@ -49,7 +49,7 @@ const { makeKintoneMock } = require('./helpers/kintone-preview-mock.js');
 //   右の「反映」は、最終案の反映の中で同じ部品（KTPlanExecutor の prepare → executePreview → buildRollbackPlan、元に戻すは prepareRollback → executeRollback）の
 //   結果を KTContextUi.executorHtml で描く。ここでは画面と同じ材料で段（反映中・完了・失敗・止まった理由・元に戻す）を描いて確かめる。
 //   画面の操作（最終案のカードの［動作テスト環境へ反映］・反映の記録・［変更前の状態に戻す］のボタン）は tests/ai-workspace.test.js・tests/ai-workspace-ux.test.js
-const planOf = (raw) => { const v = KTAiClient.validatePlan(raw, PCTX); return { ...v.normalized, clientWarnings: v.warnings }; };
+const planOf = (raw) => ({ ...KTAiClient.receive('plan', raw), clientWarnings: [] });
 const hasButton = (h, label) => new RegExp(`<button[^>]*>[^<]*${label}[^<]*</button>`).test(h);
 /** 画面の反映の状態（execState）と同じ形で段を進める（mountAiWorkspace の startExecutor・confirmExecutor・startRollback・confirmRollback と同じ順） */
 async function applyFlow(raw, { inputs = INPUTS, approve = null, beforePrepare = null, between = null } = {}) {

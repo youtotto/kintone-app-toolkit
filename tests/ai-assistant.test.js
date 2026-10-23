@@ -2,7 +2,7 @@
 //
 // 検証内容:
 //   1. KTAiClient: envelope（Contract 2.1・payload は生成済み ctx と同一）/ transport・header / 構造化エラーの passthrough /
-//      legacy 文字列 / retryAfterSeconds / timeout（fetch を abort）/ capabilityFromHealth / validateAnswer
+//      エラーの本文 / retryAfterSeconds / timeout（fetch を abort）/ capabilityFromHealth / receive
 //   2. UI: 利用不可（未設定・未契約・contract 不一致・Gateway 停止）でも無料機能はそのまま / 利用可で「AIに質問」有効
 //   3. ask: 同意 → 送信 → loading（二重送信防止・requestId）→ 回答表示（回答 / 事実 / 分析 / 提案 / 不明）→ 根拠チップ → fact 詳細
 //   4. 未知根拠ID の拒否（client 側の再検証）/ 各エラーの文言 / retryAfterSeconds 表示
@@ -36,7 +36,7 @@ const CTX = KTContext.build({ question: '顧客コードを削除して大丈夫
 const HEALTH_OK = {
   ok: true, supportedContractVersions: ['2.0', '2.1'],
   entitlements: [{ product: 'toolkit', features: ['assistant-qa'] }],
-  registry: { toolkit: { 'assistant-qa': { implemented: true, directCall: true, promptVersions: ['1'], defaultPromptVersion: '1' } } },
+  registry: { toolkit: { 'assistant-qa': { implemented: true, directCall: true, promptVersions: ['1'], defaultPromptVersion: '1', conversation: ['requirements', 'brief', 'stream', 'proposal', 'suggestion', 'adoptQuote', 'itemIds'] } } },
   usage: { yyyymm: '202610', monthlyLimit: 100, usedThisMonth: 3, remainingThisMonth: 97 }, tokenExpiresAt: '2026-10-02T00:45:00Z', contractExpiresAt: '2099-01-01T00:00:00Z',
 };
 /** Gateway の 200 応答 */
@@ -68,9 +68,7 @@ function mount({ token = 'tok', health = HEALTH_OK, responses = [], onAsk = null
       if (onAsk) return onAsk({ ctx, requestId });
       const r = queue.shift();
       if (r instanceof Error || r?.name === 'AiClientError') throw r;
-      const v = KTAiClient.validateAnswer(r, ctx);
-      if (!v.ok) throw new KTAiClient.AiClientError({ code: v.errors[0].code, message: v.errors[0].message, requestId });
-      return { ...v.normalized, requestId: v.normalized.requestId || requestId, clientWarnings: v.warnings };
+      const got = KTAiClient.receive('answer', r); return { ...got, requestId: got.requestId || requestId, clientWarnings: [] };
     },
   };
   let isConnected = !!(token && connected);
@@ -132,7 +130,7 @@ console.log('\n--- 1. KTAiClient ---');
   let rl = null; try { await KTAiClient.createAiClient({ apiBase: 'https://gw.test', customerToken: 't', hostname: 'h', transport: async () => v2err(429, C.RATE_LIMITED, { retryAfterSeconds: 42 }) }).ask({ ctx: CTX }); } catch (e) { rl = e; }
   assert(rl.code === C.RATE_LIMITED && rl.retryAfterSeconds === 42, 'retryAfterSeconds を引き継ぐ');
   let lg = null; try { await KTAiClient.createAiClient({ apiBase: 'https://gw.test', customerToken: 't', hostname: 'h', transport: async () => ({ status: 403, body: JSON.stringify({ ok: false, error: 'Token expired' }) }) }).ask({ ctx: CTX }); } catch (e) { lg = e; }
-  assert(lg.code === C.AUTH_TOKEN_EXPIRED, 'legacy 文字列（v1 形式）も翻訳');
+  assert(lg.code === C.WORKER_ERROR && lg.message === 'Token expired', '構造化していないエラー（旧い /v1 形式の文字列）は WORKER_ERROR のまま（符号の読み替えは持たない。2026-10-23・§12.61）');
   let nj = null; try { await KTAiClient.createAiClient({ apiBase: 'https://gw.test', customerToken: 't', hostname: 'h', transport: async () => ({ status: 200, body: '<html>' }) }).ask({ ctx: CTX }); } catch (e) { nj = e; }
   assert(nj.code === C.INVALID_RESPONSE, 'JSON でない応答 → INVALID_RESPONSE');
   let tr = null; try { await KTAiClient.createAiClient({ apiBase: 'https://gw.test', customerToken: 't', hostname: 'h', transport: async () => { throw new Error('net'); } }).ask({ ctx: CTX }); } catch (e) { tr = e; }
@@ -161,11 +159,11 @@ console.log('\n--- 1. KTAiClient ---');
 }
 {
   const bad = { ...GOOD_RESPONSE, answer: '参照なし [E999]', facts: [{ text: 'x', evidenceIds: ['E999'] }, { text: 'y', evidenceIds: ['E8', 'E777'] }], analysis: [{ text: 'z', evidenceIds: ['E555'] }] };
-  const v = KTAiClient.validateAnswer(bad, CTX);
-  assert(v.ok && v.normalized.answer === '参照なし [根拠不明]' && v.normalized.answerEvidenceIds.length === 0, 'validateAnswer: 本文の未知 ID は [根拠不明]');
-  assert(v.normalized.facts.length === 1 && v.normalized.facts[0].evidenceIds.join() === 'E8' && v.normalized.analysis.length === 2 && v.normalized.analysis[0].text === 'x' && v.normalized.analysis[1].evidenceIds.length === 0, 'validateAnswer: 未知 ID 除去・根拠なし fact は analysis へ');
-  assert(!JSON.stringify(v.normalized).includes('E999') && !JSON.stringify(v.normalized).includes('E777') && v.warnings.length >= 3, '未知 ID は残らず warnings に記録');
-  assert(KTAiClient.validateAnswer({ ...GOOD_RESPONSE, contractVersion: '2.0' }, CTX).ok === false && KTAiClient.validateAnswer({ ...GOOD_RESPONSE, answer: '' }, CTX).ok === false, 'contractVersion 不一致 / answer 無し → NG');
+  //   2026-10-23（§12.61）: 根拠 ID の除去・根拠の無い事実の降格は Gateway（validate-response）の仕事。Toolkit の受け取り（receive）は契約の関所（ok・契約の版・answer）だけで、形はそのまま返す
+  const got = KTAiClient.receive('answer', bad);
+  assert(got.answer === bad.answer && got.facts.length === 2 && got.analysis.length === 1 && Array.isArray(got.clientWarnings) && got.clientWarnings.length === 0, 'receive: Gateway の形をそのまま返す（Toolkit では根拠 ID を読み直さない）');
+  const thrown = (r) => { try { KTAiClient.receive('answer', r); return null; } catch (e) { return e.code; } };
+  assert(thrown({ ...GOOD_RESPONSE, contractVersion: '2.0' }) === 'UNSUPPORTED_CONTRACT_VERSION' && thrown({ ...GOOD_RESPONSE, answer: '' }) === 'INVALID_RESPONSE' && thrown({ ok: false }) === 'INVALID_RESPONSE', 'receive: contractVersion 不一致 / answer 無し / ok でない → AiClientError');
 }
 
 // =========================================================
@@ -239,7 +237,7 @@ console.log('\n--- 3. ask: 同意 → 送信 → loading → 回答 ---');
 {
   let resolveAsk;
   const pending = new Promise(r => { resolveAsk = r; });
-  const m = mount({ onAsk: async ({ ctx, requestId }) => { await pending; const v = KTAiClient.validateAnswer(GOOD_RESPONSE, ctx); return { ...v.normalized, requestId: 'tk-x', clientWarnings: v.warnings }; } });
+  const m = mount({ onAsk: async ({ ctx, requestId }) => { await pending; return { ...KTAiClient.receive('answer', GOOD_RESPONSE), requestId: 'tk-x', clientWarnings: [] }; } });
   await tick();
   await m.$('kt-ai-ask').dispatch('click');
   assert(m.$('kt-ai-paid-status').textContent.includes('先に「AI Prompt を生成」'), '生成前に押す → NO_CONTEXT の文言・送信しない');
@@ -286,13 +284,14 @@ console.log('\n--- 4. 根拠チップ / 未知根拠 / エラー ---');
   assert(none === null && d.innerHTML.includes('見つかりません'), '存在しない ID は「見つかりません」');
 }
 {
-  const bad = { ...GOOD_RESPONSE, answer: 'どこからも参照なし [E999]', facts: [{ text: '未使用', evidenceIds: ['E999'] }], analysis: [], recommendations: [], unknowns: [] };
+  //   2026-10-23（§12.61）: 根拠 ID の除去・降格は Gateway（validate-response）が行い、その結果（本文の [根拠不明]・analysis へ降格・normalization.warnings）が届く。Toolkit はそのまま表示する
+  const bad = { ...GOOD_RESPONSE, answer: 'どこからも参照なし [根拠不明]', facts: [], analysis: [{ text: '未使用', evidenceIds: [] }], recommendations: [], unknowns: [], meta: { ...(GOOD_RESPONSE.meta || {}), normalization: { warnings: [{ code: 'INVALID_EVIDENCE_REF_REMOVED', path: 'facts[0]', message: '未知の根拠ID を除去しました: E999' }, { code: 'UNGROUNDED_FACT_DEMOTED', path: 'facts[0]', message: '根拠ID が 0 件のため facts から analysis へ降格しました' }] } } };
   const m = mount({ responses: [bad] });
   await tick(); m.settings.setConsent(true);
   await m.generate(); await m.$('kt-ai-ask').dispatch('click'); await tick();
   const html = m.$('kt-ai-answer').innerHTML;
-  assert(!html.includes('data-eid="E999"') && html.includes('[根拠不明]') && html.includes('根拠付きの事実はありません') && html.includes('未使用'), '未知根拠ID は表示されず、事実は分析へ降格（client 側の再検証）');
-  assert(html.includes('検証で除去・調整した項目'), '除去を開示');
+  assert(!html.includes('data-eid="E999"') && html.includes('[根拠不明]') && html.includes('根拠付きの事実はありません') && html.includes('未使用'), 'Gateway が除去・降格した回答をそのまま表示（未知の根拠 ID のチップは無い）');
+  assert(html.includes('検証で除去・調整した項目'), '除去を開示（Gateway の normalization.warnings）');
 }
 {
   const errs = [

@@ -171,17 +171,18 @@ function createNewFlowKit(T) {
     return { ...raw, proposal, turn };
   };
   /**
-   * 契約の形の応答 → Toolkit の client.propose が返す形（偽の Gateway の id を付けて validateProposal を通す）。utterance = 今回の発言（2026-10-15 §3.2: 進行を求める語句 adoptQuote の照合に使う）。
+   * 契約の形の応答 → Toolkit の client.propose が返す形（偽の Gateway の id を付けて受け取り KTAiClient.receive に通す）。utterance = 今回の発言（進行を求める語句 adoptQuote の照合は Gateway が行うので、ここでは使わない）。
    *   conv = 今回の依頼の会話（services.propose の args か ctx.conversation。2026-10-19: 前回の仮案と使った番号の上限から id を付ける。無ければ最初の仮案）
    */
-  const normalized = (raw, requestId = 'pp-1', utterance = null, conv = null) => { const v = KTAiClient.validateProposal({ ok: true, contractVersion: '2.1', meta: META, ...gatewayIds(raw, conv) }, { utterance }); if (!v.ok) throw new Error(`台本の形が不正: ${v.errors[0].message}`); return { ...v.normalized, requestId, clientWarnings: v.warnings }; };
+  //   相談・相づち・不明（question / smalltalk / unclear）の返事は、本物の Gateway（validate-proposal-response）と同じく turn を外し proposalUnchanged を付ける（偽の Gateway の正規化）
+  const normalized = (raw, requestId = 'pp-1', utterance = null, conv = null) => { void utterance; const out = { ...KTAiClient.receive('proposal', { ok: true, contractVersion: '2.1', meta: META, ...gatewayIds(raw, conv) }), requestId, clientWarnings: [] }; if (['question', 'smalltalk', 'unclear'].includes(out.intent)) { out.turn = { ops: [], answers: [], requirementOps: [] }; out.proposalUnchanged = true; } return out; };
   /** 計画の AI の成功の応答（最小の計画。turn に coverage 無し） */
   //   2026-10-15（追加の指示 1）: 要件の担当になる設定の手順を 1 つ持つ（手順の無い計画では、採用した仮案の要件を実現する手順が無いので反映できない＝自動の見直しが 1 回増える）
   const planOk = (args) => ({ plan: { goal: args.goal, assessment: { summary: '承認の流れを設定します。' }, steps: [mkStep('P1', 'ADD_PROCESS_STATUS', 'PROCESS_STATUS', '部長承認待ち', { name: '部長承認待ち' }, { title: '承認の流れを設定' })], customizations: [], provisionals: [], questions: [] }, ctx: null, review: null, gatewayPlan: null, turn: { reply: '計画を作りました。', requirementOps: [], utteranceCoverage: [] } });
   const planFail = () => ({ plan: null, message: '計画を作れませんでした（テスト）', reason: 'TEST' });
   const planThrow = () => { throw Object.assign(new Error('timeout'), { code: 'TIMEOUT' }); };
   const gateMk = () => { let open; const p = new Promise(r => { open = r; }); return { p, open }; };
-  const HEALTH = { ok: true, supportedContractVersions: ['2.0', '2.1'], entitlements: [{ product: 'toolkit', features: ['assistant-qa', 'change-planner', 'customization-generator'] }], registry: { toolkit: { 'assistant-qa': { implemented: true, promptVersions: ['1'], conversation: ['requirements', 'brief', 'stream', 'proposal', 'itemIds'] }, 'change-planner': { implemented: true, promptVersions: ['1'] }, 'customization-generator': { implemented: true, promptVersions: ['1'] } } }, usage: { monthlyLimit: 20, usedThisMonth: 1 } };
+  const HEALTH = { ok: true, supportedContractVersions: ['2.0', '2.1'], entitlements: [{ product: 'toolkit', features: ['assistant-qa', 'change-planner', 'customization-generator'] }], registry: { toolkit: { 'assistant-qa': { implemented: true, promptVersions: ['1'], conversation: ['requirements', 'brief', 'stream', 'proposal', 'suggestion', 'adoptQuote', 'itemIds'] }, 'change-planner': { implemented: true, promptVersions: ['1'], revisionModes: ['full', 'patch'], stream: ['reply'], requirementOps: ['decisionRefs'] }, 'customization-generator': { implemented: true, promptVersions: ['1'], stream: ['progress'] } } }, usage: { monthlyLimit: 20, usedThisMonth: 1 } };
   const spec = (o) => ({ name: null, from: null, to: null, filterCond: null, assignees: [], targets: [], events: [], timingField: null, daysLater: null, time: null, fields: [], sort: null, sourceApp: null, keyField: null, mappings: [], fieldType: null, required: null, options: [], destApp: null, accessibility: null, entities: [], customizationId: null, ...o });
   const mkStep = (id, actionType, targetKind, targetRef, sp, extra = {}) => ({ id, actionType, targetKind, targetRef, targetExists: null, title: `${id} ${actionType}`, proposal: { summary: '', details: [] }, spec: spec(sp), dependsOn: [], reason: '', evidenceIds: [], confidence: 'INFERRED', alternativeId: null, validation: { status: 'ok', issues: [] }, execution: { mode: 'PLAN_ONLY', supported: false, reason: 'x' }, ...extra });
   const PLAN_META = { requestId: 'pl-1', gateway: { product: 'toolkit', feature: 'change-planner', promptVersion: '1', contextVersion: 'planner-1' }, normalization: { warnings: [] }, ai: { model: 'm', latencyMs: 30, usage: { input_tokens: 500, output_tokens: 200 } }, usage: { usedThisMonth: 1, monthlyLimit: 20 } };
@@ -209,8 +210,8 @@ function createNewFlowKit(T) {
     const client = {
       async getHealth() { return health; },
       //   §0f.3（2026-10-09）: 画面が渡した期限（health の deadlineMs。無ければ null）も記録する
-      async ask({ ctx, requestId, deadlineMs = null }) { calls.ask.push({ ctx, deadlineMs }); const v = KTAiClient.validateAnswer(answerFor(ctx, '答えです。'), ctx); return { ...v.normalized, requestId, clientWarnings: v.warnings }; },
-      async plan({ ctx, requestId, deadlineMs = null }) { calls.plan.push({ ctx, deadlineMs }); clock.t += 30000; if (mx.planImpl) { const r0 = mx.planImpl({ ctx, requestId }); const r = r0 && typeof r0.then === 'function' ? await r0 : r0; return mapFlat(r, ctx); } const v = KTAiClient.validatePlan(PLAN_V1(ctx.goal), ctx); return mapFlat({ ...v.normalized, requestId, clientWarnings: v.warnings }, ctx); },
+      async ask({ ctx, requestId, deadlineMs = null }) { calls.ask.push({ ctx, deadlineMs }); return { ...KTAiClient.receive('answer', answerFor(ctx, '答えです。')), requestId, clientWarnings: [] }; },
+      async plan({ ctx, requestId, deadlineMs = null }) { calls.plan.push({ ctx, deadlineMs }); clock.t += 30000; if (mx.planImpl) { const r0 = mx.planImpl({ ctx, requestId }); const r = r0 && typeof r0.then === 'function' ? await r0 : r0; return mapFlat(r, ctx); } return mapFlat({ ...KTAiClient.receive('plan', PLAN_V1(ctx.goal)), requestId, clientWarnings: [] }, ctx); },
       async propose({ ctx, requestId, onText = null, deadlineMs = null }) {
         calls.propose.push({ ctx, stream: typeof onText === 'function', deadlineMs });
         const raw = scriptFn({ utterance: ctx.question, previous: ctx.conversation.proposal, requirements: ctx.conversation.requirements });
@@ -287,9 +288,8 @@ function createNewFlowKit(T) {
     const req = Array.isArray(requiredEffects) ? requiredEffects : [];
     const has = (x) => (cand.has[x.field] || []).includes(x.effect);
     //   §0d.1（2026-10-08）: cand.check（`フィールド|効果` → { check, checkReason }）があれば、今の契約の Gateway と同じく効果ごとの確かめ方とイベントごとの有無も返す
-    //   （checkReason は Toolkit の正規化の後の形 = 語の配列。raw: true なら Gateway の応答そのものの形 = 先頭の理由の文字列 checkReason と全部の配列 checkReasons。
-    //   KTAiClient.validateGenerated を通す偽物で使う。cand.check が無ければ check を返さない旧い形のまま）
-    const checkOf = (x) => { const k = cand.check && cand.check[`${x.field}|${x.effect}`]; return k ? { check: k.check, ...(k.raw ? { checkReason: k.checkReason[0], checkReasons: [...k.checkReason] } : { checkReason: [...k.checkReason] }), events: (Array.isArray(x.events) ? x.events : []).map(ev => ({ event: ev, status: has(x) ? 'present' : 'missing' })) } : {}; };
+    //   （Gateway の応答そのものの形 = 先頭の理由の文字列 checkReason と全部の配列 checkReasons。2026-10-23・§12.61: Toolkit は入口で正規化しないので、この形だけ）
+    const checkOf = (x) => { const k = cand.check && cand.check[`${x.field}|${x.effect}`]; return k ? { check: k.check, checkReason: k.checkReason[0], checkReasons: [...k.checkReason], events: (Array.isArray(x.events) ? x.events : []).map(ev => ({ event: ev, status: has(x) ? 'present' : 'missing' })) } : {}; };
     const re = req.map(x => ({ requirementId: x.requirementId, requirementIds: x.requirementIds, field: x.field, effect: x.effect, status: statusOverride || (has(x) ? 'present' : 'missing'), ...checkOf(x) }));
     const uniq = [...new Map(req.map(x => [`${x.field}|${x.effect}`, x])).values()].filter(x => `${x.field}|${x.effect}` !== dropCaseFor);
     //   §0c.9: Gateway と同じく、効果のイベントごとに「合う」（side match）と、条件つきなら「合わない」（side nomatch）を 1 件ずつ作る。不合格の候補は「合う」側で fail
@@ -361,7 +361,7 @@ function createNewFlowKit(T) {
    *   わざと担当を欠いた計画の回帰は autoMap: false か、計画の返答に noAutoMap: true を付ける
    */
   //   台本の計画が要件の操作を返していても、操作していない要件を結び付ける（merge は互換のための引数。今は常にこの動き）
-  /** 画面の client.plan の応答（validatePlan の normalized。計画の値と turn が平らに並ぶ形）に withPlannerMapping を当てる。ctx = 計画の Context（requirements を持つ） */
+  /** 画面の client.plan の応答（KTAiClient.receive の形。計画の値と turn が平らに並ぶ形）に withPlannerMapping を当てる。ctx = 計画の Context（requirements を持つ） */
   function mapPlanResponse(res, ctx) { if (!res || res.noAutoMap || !Array.isArray(res.steps)) return res; const m = withPlannerMapping({ plan: res, turn: res.turn }, ctx && ctx.requirements); return m && m.turn && m.turn !== res.turn ? { ...res, turn: m.turn } : res; }
   /** Gateway の計画の応答の形（{ ok, contractVersion, meta, plan, turn }）に withPlannerMapping を当てる（偽の Gateway・画面の client の偽物の計画の応答用）。ctx = 計画の Context */
   function rawWithPlannerMapping(raw, ctx) { if (!raw || !raw.plan) return raw; const m = withPlannerMapping({ plan: raw.plan, turn: raw.turn }, ctx && ctx.requirements); return m && m.turn && m.turn !== raw.turn ? { ...raw, turn: m.turn } : raw; }
@@ -398,8 +398,6 @@ function createNewFlowKit(T) {
     let t = 1000;
     const x = { planImpl };
     const services = {
-      conversationFeatures: () => ['requirements', 'brief', 'stream', 'proposal', 'itemIds'], revisionModes: () => ['full'],
-      generatorFeatures: () => ['requirementId', 'cases', ...(feedback ? ['feedback'] : []), ...(supported ? (Array.isArray(supported) ? supported : [...GEN_EFFECT_FEATURES, GEN_PORT_FEATURE]) : []), ...(current ? GEN_CURRENT_FEATURES : [])], plannerFeatures: () => ['reply'],
       materials: () => materials,
       fieldLabels: () => labels,
       async customizeRevision() { return '42'; },
@@ -472,9 +470,9 @@ function createNewFlowKit(T) {
       steps: [mkStep('P1', 'ADD_FIELD', 'PROPOSED_FIELD', 'NEW_FIELD_1', { fieldType: 'SINGLE_LINE_TEXT' }, { title: '承認メモフィールドを追加' }), view, mkStep('C1', 'CUSTOMIZATION_REQUIRED', 'JS', null, { customizationId: 'C1' }, { title: 'JavaScript', solution: 'CUSTOMIZATION', dependsOn: ['P1'] })],
       customizations: [custLock('NEW_FIELD_1', { requirement: '承認待ちでは承認メモを編集できないようにする', dependsOn: ['P1'] })] } };
   };
-  /** 画面の client.plan の偽物（契約の形を validatePlan に通す） */
-  const planImplOf = (raw) => ({ ctx, requestId }) => { const vv = KTAiClient.validatePlan(raw(ctx.goal), ctx); if (!vv.ok) throw new Error(JSON.stringify(vv.errors)); return { ...vv.normalized, requestId, clientWarnings: vv.warnings }; };
-  /** 画面の client.generate の偽物（生成工程の応答の形を validateGenerated に通す）。field = 生成したコードが編集不可にするフィールドのコード。coverage = 生成の AI の申告（省略すると C1 の MET だけ） */
+  /** 画面の client.plan の偽物（契約の形を受け取り KTAiClient.receive に通す） */
+  const planImplOf = (raw) => ({ ctx, requestId }) => ({ ...KTAiClient.receive('plan', raw(ctx.goal)), requestId, clientWarnings: [] });
+  /** 画面の client.generate の偽物（生成工程の応答の形を受け取り KTAiClient.receive に通す）。field = 生成したコードが編集不可にするフィールドのコード。coverage = 生成の AI の申告（省略すると C1 の MET だけ） */
   const screenGenerate = ({ field = 'approval_memo', targetFile = 'memoLock.js', coverage = null } = {}) => {
     const calls = [];
     const impl = async ({ ctx, requestId }) => {
@@ -483,9 +481,7 @@ function createNewFlowKit(T) {
       const req0 = (ctx.verification && ctx.verification.requiredEffects) || [];
       const candidateHash = gwCandidateHash({ strategy: 'NEW_JS_FILE', targetFile, code, baseHash: ctx.existingFile ? ctx.existingFile.hash : null, customizationId: (ctx.customization && ctx.customization.customizationId) || 'C1' });
       const resp = { ok: true, contractVersion: '2.1', meta: { requestId, gateway: { product: 'toolkit', feature: 'customization-generator', promptVersion: '1', contextVersion: 'customization-1' }, normalization: { warnings: [] }, ai: { model: 'm' } }, generated: { strategy: 'NEW_JS_FILE', targetFile, summary: '承認待ちでは編集できないようにします。', code, patch: null, events: ['app.record.edit.show'], fields: [{ code: field, access: 'CONTROL' }], apis: [], assumptions: [], warnings: [], coverage: coverage ? clone(coverage) : [{ requirementId: 'C1', status: 'MET', note: '' }] }, verification: fakeVerification({ code, has: { [field]: ['lock'] } }, req0, { candidateHash }) };
-      const vv = KTAiClient.validateGenerated(resp, ctx);
-      if (!vv.ok) throw new Error(JSON.stringify(vv.errors));
-      return { ...vv.normalized, requestId };
+      return { ...KTAiClient.receive('generated', resp), requestId };
     };
     return { impl, calls };
   };

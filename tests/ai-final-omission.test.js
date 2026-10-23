@@ -187,7 +187,8 @@ await section(async () => {
   // (f) 無いフィールドの変更（計画の確認で無効）と、それに依存する確認の手順。実行できない手順は反映の分類の 1 つから出す（2026-10-19。前は計画の確認の実行の見込みからも拾っていた）
   const { m, v } = await mountPlan([
     VIEW(),
-    K.mkStep('P2', 'UPDATE_FIELD', 'FIELD', 'ghost_field', { required: true }, { title: '備考を必須にする' }),
+    //   2026-10-23（§12.61）: 存在しないフィールドの参照は Gateway の validate-plan が invalid と指摘の文を付けて返す（Toolkit の受け取りは読み直さない）
+    K.mkStep('P2', 'UPDATE_FIELD', 'FIELD', 'ghost_field', { required: true }, { title: '備考を必須にする', validation: { status: 'invalid', issues: ['存在しないFIELD「ghost_field」を既存として参照'] } }),
     K.mkStep('Q1', 'REQUIRE_CONFIRMATION', 'NONE', null, {}, { title: '必須にする時期を担当者に確かめる', dependsOn: ['P2'] }),
   ]);
   const cls = new Map(KTPlanExecutor.applyReadiness(v.plan, v.review).map(x => [x.stepId, x]));

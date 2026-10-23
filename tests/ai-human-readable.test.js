@@ -484,19 +484,6 @@ await section(async () => {
   assert(ap.ok === false, 'H6-3: 分類を直しても作成途中の判定は変わらない（承認できない）');
   keep('H6-stop', finalHtml(x), rightOf(x));
 });
-await section(async () => {
-  // 接続先（生成工程）が今の生成の受け渡しに対応していない（health の印が足りない）。2026-10-18: 生成の前の確認で生成を依頼しない（有料の生成をしない）。
-  //   作っていないので効果の行は「まだ作っていません」。止めている理由（接続先が非対応）は左の理由と右の JavaScript の状態に出す。承認できない
-  const x = makeConvC({ supported: false, generate: makeGenerate({ sequence: ['good'], supported: false }) });
-  await sendUntilAdopt(x);
-  const v = x.c.activePlan(), fin = v.final, e = v.generated.C1;
-  const rt = stripC(rightOf(x)), vis = stripC(outsideDetails(finalHtml(x)));
-  assert(x.gen.calls.length === 0 && e.status === 'unsupported' && e.verdict.capability === 'generator' && FS.readyOf(fin) === false && fin.verification.effects.length > 0 && fin.verification.effects.every(r => r.structure === 'not-generated') && /まだ作っていません/.test(rt), `H6-4: 接続先が今の受け渡しに非対応 → 生成を依頼しない（効果の行は「まだ作っていません」）: ${JSON.stringify({ gen: x.gen.calls.length, st: e.status, eff: fin.verification.effects.map(r => r.structure) })}`);
-  assert(/確認できないこと／反映を止めている理由/.test(vis) && /接続先（生成工程）が今の Toolkit の生成の受け渡し/.test(vis), `H6-5: 左には止めている理由として接続先の非対応が出る: ${(vis.match(/確認できないこと[\s\S]{0,200}/) || [''])[0]}`);
-  //   レビュー 2（2026-10-14）: 右の JavaScript の状態は status ごとの語（unsupported → この接続先では確かめる検査ができません）
-  assert(/JavaScript：この接続先では確かめる検査ができません/.test(rt) && !/確認できないことがあります/.test(rt), `H6-6: 右の JavaScript の状態は「この接続先では確かめる検査ができません」: ${(rt.match(/JavaScript の状態[\s\S]{0,80}/) || [''])[0]}`);
-  keep('H6-cap', finalHtml(x), rightOf(x));
-});
 
 // =========================================================
 console.log('\n--- §H7. 別の短い依頼（設定の変更だけ・JavaScript なし。画面）: 同じ構成が自然に読める ---');
@@ -599,7 +586,7 @@ await section(async () => {
   const unsupR1 = fin.cannot.find(c => c.kind === 'req-unsupported' && c.requirementId === 'R1');
   assert(unsupR1 && unsupR1.text === `計画では対応できないとされた要件: ${Q_T[0]}（理由: 行の追加・削除は止められないため）` && fin.cannot.some(c => c.kind === 'req-unsupported' && c.requirementId === 'R2'), `H9b-2: 文を作れなかった PARTIAL の要件（R1）は「計画では対応できないとされた要件」に今の文で残る（R2 も今のまま）: ${JSON.stringify(fin.cannot.filter(c => c.kind === 'req-unsupported').map(c => [c.requirementId, c.text]))}`);
   assert(fin.constraints.some(c => c.kind === 'coverage' && c.text === ROWS && c.requirementId === 'R1') && !vis.includes(H9K.REQ_TEXT_FULL), `H9b-3: 制約の行（テーブルの名前の「残る範囲」）は §H9 と同じ: ${JSON.stringify(fin.constraints.map(c => [c.kind, c.requirementId, c.text]))}`);
-  assert(e.status === 'unsupported' && FS.readyOf(fin) === false && fin.blockers.some(b => b.kind === 'unsupported' && /接続先/.test(b.text)) && x.c.approveFinal(K.approveArgs(v)).ok === false, `H9b-4: 承認の可否は接続先の非対応（必須の動作の結果が無い）で決まる（表示では変えない）: ${JSON.stringify({ st: e.status, approvable: FS.readyOf(fin), blockers: fin.blockers.map(b => [b.kind, b.text]) })}`);
+  assert(e.status === 'unverified' && FS.readyOf(fin) === false && fin.blockers.some(b => b.kind === 'unverified') && x.c.approveFinal(K.approveArgs(v)).ok === false, `H9b-4: 承認の可否は必須の動作の結果が無いこと（未確認）で決まる（表示では変えない）: ${JSON.stringify({ st: e.status, approvable: FS.readyOf(fin), blockers: fin.blockers.map(b => [b.kind, b.text]) })}`);
   keep('H9b', h, right);
 });
 

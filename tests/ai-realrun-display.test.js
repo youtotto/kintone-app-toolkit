@@ -311,9 +311,7 @@ await section(async () => {
     const req0 = (ctx.verification && ctx.verification.requiredEffects) || [];
     const candidateHash = gwCandidateHash({ strategy: 'NEW_JS_FILE', targetFile, code, customizationId: 'C1' });
     const resp = { ok: true, contractVersion: '2.1', meta: { requestId, gateway: { product: 'toolkit', feature: 'customization-generator', promptVersion: '1', contextVersion: 'customization-1' }, normalization: { warnings: [] }, ai: { model: 'm' } }, generated: { strategy: 'NEW_JS_FILE', targetFile, summary: '承認待ちでは案件名を編集できないようにします。', code, patch: null, events: ['app.record.edit.show'], fields: [{ code: field, access: 'CONTROL' }], apis: [], assumptions: [], warnings: [], coverage: [{ requirementId: 'C1', status: 'MET', note: '' }] }, verification: (() => { const vf = K.fakeVerification({ code, has: { [field]: ['lock'] } }, req0, { candidateHash }); return { ...vf, machine: [...vf.machine, GW_PC] }; })() };
-    const vv = KTAiClient.validateGenerated(resp, ctx);
-    if (!vv.ok) throw new Error(JSON.stringify(vv.errors));
-    return { ...vv.normalized, requestId };
+    return { ...KTAiClient.receive('generated', resp), requestId, clientWarnings: [] };
   };
   const m = K.mount({ health: K.HEALTH_V, planImpl: K.planImplOf(K.screenPlan('js')), generateImpl: dupGenerate });
   await ticks();

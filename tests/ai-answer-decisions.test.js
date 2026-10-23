@@ -330,7 +330,7 @@ await section(async () => {
 });
 
 // =========================================================
-console.log('\n--- D. Context と応答の検証（KTContext / KTAiClient.validatePlan） ---');
+console.log('\n--- D. Context と応答の受け取り（KTContext / KTAiClient.receive） ---');
 await section(async () => {
   const decisions = [
     { id: 'D1', topic: 'platform', label: 'PC / モバイル', question: QP, answer: 'PCだけ', source: 'chat', status: 'answered', kind: 'question', value: ['desktop'] },
@@ -354,11 +354,12 @@ await section(async () => {
   //   （worker/test/cases/decisions.mjs・change-planner.mjs・plan-patch.mjs で確かめる）が必ず通すので、Toolkit の validatePlan ではやり直さない
   const resp = (platform, questions) => ({ ok: true, contractVersion: '2.1', meta: { requestId: 'r', decisions: { version: '1', received: 1 } }, plan: { goal: 'g', solution: 'CUSTOMIZATION', assessment: { summary: '' }, relevantFields: [], proposedFields: [], steps: [], alternatives: [], impact: [], questions: [], unknowns: [], planConfidence: 'INFERRED', customizations: [{ ...custObj, platform, questions }] } });
   const ctxD = { ...KTContext.buildPlan({ goal: 'g', data: DATA, deps: DEPS, scan: null, incoming: null, options: { revision: rev, decisions: [{ ...decisions[0], value: ['desktop', 'mobile'], answer: 'モバイルも必要' }] } }) };
-  const a = KTAiClient.validatePlan(resp(['desktop', 'mobile'], ['PC とモバイルの両方で必要ですか？']), ctxD);
-  assert(a.normalized.customizations[0].platform.join() === 'desktop,mobile' && a.normalized.customizations[0].questions.length === 1 && !a.warnings.some(w => /^(ANSWERED_TOPIC_REASKED|CUSTOMIZATION_PLATFORM_)/.test(w.code)) && a.normalized.decisionsMeta.received === 1, 'validatePlan: Gateway の正規化をやり直さない（platform・質問は受け取ったまま。Gateway の受け取りの証は読む）');
-  const b = KTAiClient.validatePlan(resp([], []), ctx);
-  const n = KTAiClient.validatePlan({ ...resp(['desktop', 'mobile'], ['PC とモバイルの両方で必要ですか？']), meta: { requestId: 'r' } }, KTContext.buildPlan({ goal: 'g', data: DATA, deps: DEPS, scan: null, incoming: null, options: { revision: rev } }));
-  assert(b.normalized.customizations[0].platform.length === 0 && n.normalized.customizations[0].platform.join() === 'desktop,mobile' && n.normalized.decisionsMeta === null, 'validatePlan: 決定事項で platform を補わず、質問しながら両方でも空にしない（どちらも Gateway の validate-plan が扱う）');
+  void ctxD;
+  const a = KTAiClient.receive('plan', resp(['desktop', 'mobile'], ['PC とモバイルの両方で必要ですか？']));
+  assert(a.customizations[0].platform.join() === 'desktop,mobile' && a.customizations[0].questions.length === 1 && a.decisionsMeta.received === 1, 'receive: Gateway の計画（platform・質問）をそのまま返し、決定事項の受け取りの証（meta.decisions）を decisionsMeta に運ぶ');
+  const b = KTAiClient.receive('plan', resp([], []));
+  const n = KTAiClient.receive('plan', { ...resp(['desktop', 'mobile'], ['PC とモバイルの両方で必要ですか？']), meta: { requestId: 'r' } });
+  assert(b.customizations[0].platform.length === 0 && n.customizations[0].platform.join() === 'desktop,mobile' && n.decisionsMeta === null, 'receive: 決定事項で platform を補わず、質問しながら両方でも空にしない（どちらも Gateway の validate-plan の仕事）');
 });
 
 // =========================================================

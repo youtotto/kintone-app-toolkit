@@ -341,7 +341,7 @@ await safe('§5e', async () => {
   assert(n === 1 && map.size === 100 && Array.isArray(map.pending) && map.pending.length === 50, `5e-1 アプリ名の 2 回目の問い合わせ（後続）は始めず、残りは pending に: 問い合わせ ${n} 回・解決 ${map.size}・残り ${map.pending ? map.pending.length : '-'}`);
 });
 // 開発支援の作業の基準（接続済み。本物の KTDevBase.load を偽の kintone で動かす）
-const HEALTH = { ok: true, supportedContractVersions: ['2.0', '2.1'], entitlements: [{ product: 'toolkit', features: ['assistant-qa', 'change-planner', 'customization-generator'] }], registry: { toolkit: { 'assistant-qa': { implemented: true, promptVersions: ['1'] }, 'change-planner': { implemented: true, promptVersions: ['1'] }, 'customization-generator': { implemented: true, promptVersions: ['1'] } } }, usage: { monthlyLimit: 20, usedThisMonth: 1 } };
+const HEALTH = { ok: true, supportedContractVersions: ['2.0', '2.1'], entitlements: [{ product: 'toolkit', features: ['assistant-qa', 'change-planner', 'customization-generator'] }], registry: { toolkit: { 'assistant-qa': { implemented: true, promptVersions: ['1'], conversation: ['requirements', 'brief', 'stream', 'proposal', 'suggestion', 'adoptQuote', 'itemIds'] }, 'change-planner': { implemented: true, promptVersions: ['1'], revisionModes: ['full', 'patch'], stream: ['reply'], requirementOps: ['decisionRefs'] }, 'customization-generator': { implemented: true, promptVersions: ['1'], stream: ['progress'] } } }, usage: { monthlyLimit: 20, usedThisMonth: 1 } };
 function mountAi(T, fk, { visible }) {
   const storage = makeStorage();
   const settings = T.KTAiClient.createSettingsStore({ storage, host: 't.cybozu.com' });

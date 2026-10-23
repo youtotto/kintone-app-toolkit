@@ -56,12 +56,12 @@ const PLAN_B = {
 };
 const makeStorage = () => { const m = new Map(); return { getItem: (k) => (m.has(k) ? m.get(k) : null), setItem: (k, v) => m.set(k, String(v)), removeItem: (k) => m.delete(k) }; };
 const tick = () => new Promise(r => setTimeout(r, 0));
-const HEALTH = { ok: true, supportedContractVersions: ['2.0', '2.1'], entitlements: [{ product: 'toolkit', features: ['assistant-qa', 'change-planner'] }], registry: { toolkit: { 'assistant-qa': { implemented: true, promptVersions: ['1'] }, 'change-planner': { implemented: true, promptVersions: ['1'] } } }, usage: { monthlyLimit: 20, usedThisMonth: 1 } };
+const HEALTH = { ok: true, supportedContractVersions: ['2.0', '2.1'], entitlements: [{ product: 'toolkit', features: ['assistant-qa', 'change-planner'] }], registry: { toolkit: { 'assistant-qa': { implemented: true, promptVersions: ['1'], conversation: ['requirements', 'brief', 'stream', 'proposal', 'suggestion', 'adoptQuote', 'itemIds'] }, 'change-planner': { implemented: true, promptVersions: ['1'], revisionModes: ['full', 'patch'], stream: ['reply'], requirementOps: ['decisionRefs'] } } }, usage: { monthlyLimit: 20, usedThisMonth: 1 } };
 function mount({ planResponse = PLAN_B, inputs = INPUTS } = {}) {
   const storage = makeStorage();
   const settings = KTAiClient.createSettingsStore({ storage, host: 't.cybozu.com' });
   settings.setConsent(true);
-  const client = { async getHealth() { return HEALTH; }, async ask() { throw new Error('x'); }, async plan({ ctx, requestId }) { const v = KTAiClient.validatePlan(planResponse, ctx); return { ...v.normalized, requestId, clientWarnings: v.warnings }; } };
+  const client = { async getHealth() { return HEALTH; }, async ask() { throw new Error('x'); }, async plan({ ctx, requestId }) { return { ...KTAiClient.receive('plan', planResponse), requestId, clientWarnings: [] }; } };
   const session = { status() { return { connected: true, apiBase: 'https://gw.test', refreshExpiresAt: '2099-01-01T00:00:00Z', scope: { product: 'toolkit', feature: 'assistant-qa,change-planner', domain: 't.cybozu.com' } }; }, async migrateLegacy() { return false; }, async refresh() { return {}; }, async disconnect() { return { revoked: true }; }, client };
   const flow = { start: async () => { throw new Error('x'); }, cancel() { }, reopen: () => false, state: () => ({ phase: 'idle' }), isRunning: () => false };
   const host = makeFakeHost();
@@ -73,7 +73,7 @@ function mount({ planResponse = PLAN_B, inputs = INPUTS } = {}) {
 // 簡素化 D・E（2026-10-16）: Context ペインの［変更計画を作成］（仮案を経ない計画 → 手順ごとの承認 → 反映の入口）は削除した。
 // 2026-10-19: 右の「確認結果」のタブ（KTContextUi.reviewHtml）と［この手順を反映しない］は廃止した。Toolkit が確かめた結果は右の「変更内容」の要約
 //   （KTAiChatUi.changeSummaryHtml）、AI の提案の全文は［計画の詳細と根拠］（KTContextUi.planHtml）。ここでは画面と同じ部品を同じ呼び方で使って表示を確かめる
-const planOf = (raw) => { const v = KTAiClient.validatePlan(raw, PCTX); return { ...v.normalized, clientWarnings: v.warnings }; };
+const planOf = (raw) => ({ ...KTAiClient.receive('plan', raw), clientWarnings: [] });
 const LABELS = Object.fromEntries(KTDeps.normalizeFields(INPUTS.data.fields).map(f => [f.code, f.label]));
 //   §12.59（2026-10-23）: 設定の手順の反映の分類（applyReadiness）は版が持つ（会話の registerPlan が 1 回だけ作る）。手作りの版にも同じ形で持たせる
 const summaryHtml = (plan, review) => KTAiChatUi.changeSummaryHtml({ plan, review, ctx: PCTX, applySteps: KTPlanExecutor.applyReadiness(plan, review) }, { labels: LABELS });

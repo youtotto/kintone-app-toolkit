@@ -238,7 +238,7 @@ const portPlan = (args) => {
 };
 const pairOf = (ev) => ev.replace(/^mobile\./, '');
 const VALUES = [['', '空', { stopped: true, errors: { amount: '金額を入力してください' }, eventError: null }], ['-1', '-1', { stopped: true, errors: { amount: '金額は0円以上で入力してください' }, eventError: null }], ['0', '0', { stopped: false, errors: {}, eventError: null }], ['1', '1', { stopped: false, errors: {}, eventError: null }]];
-/** 生成工程の偽物: C3 の生成されたコードを返し、移植元と比べる代表条件（expect same-as-source・kind port）の結果を契約 20 の形で返す（KTAiClient.normalizeVerification を通す）。
+/** 生成工程の偽物: C3 の生成されたコードを返し、移植元と比べる代表条件（expect same-as-source・kind port）の結果を契約 20 の形で返す（Gateway の形のまま。入口の正規化は無い）。
  *  mode = pass（移植元と同じ）/ fail（負の数の判定を抜いた候補: -1 で移植元は止めるのに止めない）/
  *  fail-event（空のとき event.error で止める候補）/ fail-field（空のとき金額でなく品名（item_name）に error を置く候補）— レビュー T-5 の置き場所の違い */
 const portGenerate = ({ mode = 'pass', gate = null } = {}) => {
@@ -274,7 +274,7 @@ const portGenerate = ({ mode = 'pass', gate = null } = {}) => {
     const raw = { version: '1', bodyHash: candidateHash, sameAsPrevious: false, passed: !failing, machine: [{ name: 'syntax', ok: true, severity: 'info', message: '構文エラーなし' }, { name: 'required-effects', ok: true, severity: 'info', message: '必須の効果の処理があります' }],
       requiredEffects: [{ requirementId: 'C3', requirementIds: ['C3'], field: 'amount', effect: 'block-save', status: 'present', ...(mode !== 'not-port' && e0.conditionFrom ? { conditionFrom: clone(CF) } : {}) }],
       behavior: { status: failing ? 'failed' : 'passed', reason: null, cases, ...clone(K.GW_SCOPE) }, repairs: { count: failing ? 1 : 0, reasons: [], stoppedBy: failing ? 'same-failure' : null }, unverified: ['実機での動作'] };
-    const verification = KTAiClient.normalizeVerification(raw);
+    const verification = (raw);
     return { ok: true, generated, review, ctx: { size: { approxTokens: 1000 } }, existingSource: null, inputHash: `h-${seen.length}`, verification, candidateHash, requirementIds: [{ id: 'C3', kind: 'customization', text: c.requirement }] };
   };
   return { impl, seen, calls: seen };
@@ -303,16 +303,7 @@ await section(async () => {
     `P3-3: 最終案の代表条件の一覧は「移植元「dealValidate.js」と同じ動き」と、比べた動き（移植元: 止める（「金額」（amount）のエラー「…」）／生成したコード: …）で出す。必須の動作の行は「保存を止める（移植元「dealValidate.js」と同じ条件）」（内部の語を出さない）: ${(html.match(/移植元「dealValidate[\s\S]{0,200}/) || [''])[0]}`);
 });
 await section(async () => {
-  //   接続先が非対応（印 conditionFrom が無い）→ 2026-10-18: 生成の前の確認で生成を依頼しない（ほかの印の不足と同じ理由。移植の専用の理由の文は削除した）。
-  //   計画の差分更新を自動で依頼しない・［計画を直すよう依頼する］を出さない
-  const MARKS_NO_PORT = ['requirementId', 'cases', 'feedback', ...GEN_EFFECT_FEATURES, 'effectCheck', 'networkCheck', 'verifiedBody', 'registrationSelect'];
-  const { x, gen, v } = await runPort({ marks: MARKS_NO_PORT });
-  const e = v && v.generated && v.generated.C3;
-  const html = K.finalHtml(x);
-  assert(e && e.status === 'unsupported' && e.verdict.kind === 'capability' && e.verdict.capability === 'generator' && /生成を依頼していません/.test(e.verdict.reason) && !/condition-unknown|not-capable|block-save|conditionFrom/.test(e.verdict.reason),
-    `P3-4: 印 conditionFrom の無い接続先 → 生成を依頼しない（生成の前の確認。理由は今の Toolkit が使う受け渡し。内部の語を出さない）: ${JSON.stringify(e && e.verdict)}`);
-  assert(gen.seen.length === 0 && x.calls.plan.length === 1 && v.final && FS.readyOf(v) === false && !v.final.fix && !/kt-ai-final-fix/.test(html) && (FS.readinessOf(v).reasons || []).some(t => /今の Toolkit の生成の受け渡し/.test(t && t.text)),
-    `P3-5: 生成 0・計画の差分更新を自動で依頼しない（計画の AI 1 回）・最終案は承認できず、直す操作は出さない: ${JSON.stringify({ gens: gen.seen.length, plans: x.calls.plan.length, fix: v.final && v.final.fix, reasons: v.final && FS.readinessOf(v) && FS.readinessOf(v).reasons })}`);
+  //   2026-10-23（§12.61）: 印 conditionFrom の無い接続先は接続時の確認で生成を使えない（tests/ai-capability-marks.test.js）。ここでは移植元の本文を送れないときだけ確かめる
   const ns = await runPort({ jsFiles: () => JSF({ source: false }) });
   const en = ns.v && ns.v.generated && ns.v.generated.C3;
   assert(en && en.status === 'not-ready' && en.verdict.port === true && /^必須の動作はまだ確かめていません（/.test(en.verdict.reason) && /移植元の本文を取れない/.test(en.verdict.reason) && /同じ条件かは確かめていません/.test(en.verdict.reason) && !/確かめられません/.test(`${en.verdict.reason}${en.verdict.next}`) && /本文を取れないので、同じ条件かは確かめていません/.test(en.verdict.next) && (FS.readinessOf(ns.v).reasons || []).some(t => /移植元の本文を取れない（読めない）ので確かめていません/.test(t && t.text)) && ns.gen.seen.length === 0 && ns.x.calls.plan.length === 1 && !ns.v.final.fix,
@@ -428,14 +419,6 @@ await section(async () => {
     `P4-5: condition-unknown → 区分 condition・［計画を直すよう依頼する］の文は移植元から引き継ぐ指示（条件を推測で書かせない）・修復しない: ${JSON.stringify({ v: e && e.verdict && [e.verdict.category, e.verdict.fix], fix: v.final.fix && v.final.fix.text })}`);
 });
 await section(async () => {
-  //   health の印: tableRowChange・caseInvalid のどちらかが欠ける接続先は「接続先が非対応」（壊れた入力で正しい候補を不合格にする形の Gateway を新しい形として受け入れない）
-  const out = [];
-  for (const mark of ['tableRowChange', 'caseInvalid']) {
-    const x = makeConvC({ supported: GEN_EFFECT_FEATURES.filter(f => f !== mark) });
-    await K.adoptC(x);
-    out.push([mark, x.c.activePlan().generated.C1.status, FS.readyOf(x.c.activePlan())]);
-  }
-  assert(out.every(r => r[1] === 'unsupported' && r[2] === false), `P4-6: 印 tableRowChange・caseInvalid が欠ける接続先は「接続先が非対応」: ${JSON.stringify(out)}`);
   const y = makeConvC({ supported: [...GEN_EFFECT_FEATURES] });
   await K.adoptC(y);
   assert(y.c.activePlan().generated.C1.status === 'verified', 'P4-7: 印 conditionFrom が無くても、移植元の無い計画は今までどおり検証済み（conditionFrom は移植元の判定だけに使う）');
@@ -446,14 +429,14 @@ console.log('\n--- §P5. 生成結果の正規化: 修復しなかった理由�
 await section(async () => {
   const raw = { version: '1', candidateHash: 'abcdef0123456789', passed: true, machine: [], requiredEffects: [{ requirementId: 'C3', field: 'amount', effect: 'block-save', status: 'present' }],
     behavior: { status: 'not-run', reason: 'partial', cases: [{ id: 'K1', requirementId: 'C3', field: 'amount', effect: 'block-save', expect: 'same-as-source', side: 'match', kind: 'port', event: 'mobile.app.record.edit.submit', refEvent: 'app.record.edit.submit', refFile: { file: 'dealValidate.js', target: 'desktop' }, verdict: 'pass', reference: { stopped: true, errors: { amount: '金額を入力してください' }, eventError: null }, message: 'ok' }, { id: 'K2', requirementId: 'C3', field: 'amount', effect: 'block-save', expect: 'block-save', side: 'match', verdict: 'not-run', reason: 'case-invalid', message: '模擬テストの入力の形が合いません' }] },
-    repairs: { count: 0, reasons: ['模擬テストの入力の不正（1 件）は生成したコードの不合格ではないので、修復を依頼していません'], stoppedBy: null, notRepaired: [{ reason: 'case-invalid', category: 'environment', count: 1 }, { reason: 'condition-unknown', category: 'condition', count: 2 }, { reason: 'x', count: 0 }] } };
-  const n = KTAiClient.normalizeVerification(raw);
+    repairs: { count: 0, reasons: ['模擬テストの入力の不正（1 件）は生成したコードの不合格ではないので、修復を依頼していません'], stoppedBy: null, notRepaired: [{ reason: 'case-invalid', category: 'environment', count: 1 }, { reason: 'condition-unknown', category: 'condition', count: 2 }] } };
+  const n = (raw);
   assert(n && n.repairs && JSON.stringify(n.repairs.notRepaired) === JSON.stringify([{ reason: 'case-invalid', category: 'environment', count: 1 }, { reason: 'condition-unknown', category: 'condition', count: 2 }]),
-    `P5-1: repairs.notRepaired（理由ごとの数）を落とさない（数が 0 のものは落とす）: ${JSON.stringify(n && n.repairs)}`);
+    `P5-1: repairs.notRepaired（理由ごとの数）は Gateway の形のまま: ${JSON.stringify(n && n.repairs)}`);
   const k1 = n.behavior.cases[0];
   assert(k1.expect === 'same-as-source' && k1.kind === 'port' && k1.refEvent === 'app.record.edit.submit' && JSON.stringify(k1.refFile) === JSON.stringify({ file: 'dealValidate.js', target: 'desktop' }) && k1.reference && k1.reference.stopped === true && k1.reference.errors.amount === '金額を入力してください' && k1.reference.eventError === null,
     `P5-2: 移植元と比べた代表条件の refFile・refEvent・reference を落とさない: ${JSON.stringify(k1)}`);
-  const n0 = KTAiClient.normalizeVerification({ ...raw, repairs: { count: 0, reasons: [], stoppedBy: null } });
+  const n0 = ({ ...raw, repairs: { count: 0, reasons: [], stoppedBy: null } });
   assert(!('notRepaired' in n0.repairs), 'P5-3: notRepaired が無い応答（今までの Gateway）では持たない');
 });
 await section(async () => {
@@ -487,9 +470,7 @@ await section(async () => {
     const resp = { ok: true, contractVersion: '2.1', meta: { requestId, gateway: { product: 'toolkit', feature: 'customization-generator', promptVersion: '1', contextVersion: 'customization-1' }, normalization: { warnings: [] }, ai: { model: 'm' } },
       generated: { strategy: 'NEW_JS_FILE', targetFile: 'dealValidateMobile.js', summary: 'PC と同じ保存時の入力チェックをモバイルにも用意します。', code: F.C3_CODE, patch: null, events: [...M_SUBMITS], fields: [{ code: 'amount', access: 'CONTROL' }], apis: ['kintone.events.on'], assumptions: [], warnings: [], coverage: [{ requirementId: 'C3', status: 'MET', note: '' }] },
       verification: { version: '1', bodyHash: candidateHash, sameAsPrevious: false, passed: true, machine: [{ name: 'syntax', ok: true, severity: 'info', message: '構文エラーなし' }], requiredEffects: re.map(e => ({ requirementId: e.requirementId, requirementIds: e.requirementIds, field: e.field, effect: e.effect, status: 'present' })), behavior: { status: 'passed', reason: null, cases, ...clone(K.GW_SCOPE) }, repairs: { count: 0, reasons: [], stoppedBy: null }, unverified: [] } };
-    const vv = KTAiClient.validateGenerated(resp, ctx);
-    if (!vv.ok) throw new Error(JSON.stringify(vv.errors));
-    return { ...vv.normalized, requestId };
+    return { ...KTAiClient.receive('generated', resp), requestId, clientWarnings: [] };
   };
   //   簡素化（2026-10-17）: 作業の基準は動作テスト環境のファイルから作る（画面は基準の読み込みが必須）。移植元の本文は偽の kintone にも持たせる
   const mockP = makeKintoneMock(inputs.data, { jsSources: [{ name: 'dealValidate.js', target: 'desktop', text: F.DEAL_VALIDATE_JS }] });

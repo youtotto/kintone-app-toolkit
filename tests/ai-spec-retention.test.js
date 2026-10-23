@@ -155,16 +155,14 @@ await section(async () => {
   const actor = branch({ confidence: 'INFERRED', validation: { status: 'needs_confirmation', pending: 'ACTOR', issues: ['承認者が未確定'] } }, { questions: [] });
   const rvA = review(actor);
   assert(codes(st(rvA, 'P1')).includes('ASSIGNEES_PENDING') && classify(actor, rvA).find(x => x.stepId === 'P1').reason === 'ASSIGNEES_PENDING', `validation.pending = ACTOR だけで止まる: ${JSON.stringify(codes(st(rvA, 'P1')))}`);
-  // 再レビュー 2026-10-07（実害 1）: Gateway の応答 → KTAiClient.validatePlan → Review → classify の経路でも印が落ちない
-  //   （以前は validatePlan が validation を { status, issues } に作り直していて pending が消え、Gateway の印だけでは止まらなかった）
+  // 再レビュー 2026-10-07（実害 1）: Gateway の応答 → KTAiClient.receive → Review → classify の経路でも印が落ちない（2026-10-23・§12.61: 受け取りは形をそのまま返す）
   const ctxE = KTContext.buildPlan({ goal: 'g', data: INPUTS.data, deps: INPUTS.deps, scan: INPUTS.scan, incoming: null });
-  const vE = KTAiClient.validatePlan({ ok: true, contractVersion: '2.1', meta: { requestId: 'r' }, plan: clone(actor) }, ctxE);
-  const pE = vE.ok ? vE.normalized.steps.find(s => s.id === 'P1') : null;
-  assert(vE.ok && pE && pE.validation.pending === 'ACTOR' && pE.validation.status === 'needs_confirmation' && pE.confidence === 'INFERRED', `validatePlan は validation.pending = 'ACTOR' を運ぶ（confidence は変えない）: ${JSON.stringify(vE.ok ? pE && pE.validation : vE.errors)}`);
-  const rvE = vE.ok ? review(vE.normalized) : null, cE = rvE ? classify(vE.normalized, rvE).find(x => x.stepId === 'P1') : null;
+  void ctxE;
+  const pE0 = KTAiClient.receive('plan', { ok: true, contractVersion: '2.1', meta: { requestId: 'r' }, plan: clone(actor) });
+  const pE = pE0.steps.find(s => s.id === 'P1');
+  assert(pE && pE.validation.pending === 'ACTOR' && pE.validation.status === 'needs_confirmation' && pE.confidence === 'INFERRED', `受け取りは validation.pending = 'ACTOR' を運ぶ（confidence は変えない）: ${JSON.stringify(pE && pE.validation)}`);
+  const rvE = review(pE0), cE = classify(pE0, rvE).find(x => x.stepId === 'P1');
   assert(rvE && codes(st(rvE, 'P1')).includes('ASSIGNEES_PENDING') && cE.status === 'UNSUPPORTED' && cE.reason === 'ASSIGNEES_PENDING', `Gateway の印だけの計画が、正規化を通しても Review と Executor で確認待ちになる: ${JSON.stringify(rvE && { codes: codes(st(rvE, 'P1')), status: cE && cE.status })}`);
-  const vE2 = KTAiClient.validatePlan({ ok: true, contractVersion: '2.1', meta: { requestId: 'r' }, plan: clone(branch({ confidence: 'INFERRED', validation: { status: 'needs_confirmation', pending: 'OTHER', issues: [] } }, { questions: [] })) }, ctxE);
-  assert(vE2.ok && !('pending' in vE2.normalized.steps.find(s => s.id === 'P1').validation), 'validatePlan は pending の値が ACTOR 以外なら運ばない（契約の値だけ受ける）');
   // 独立レビュー 1・4: 承認者 / 作業者の blocking 質問が無ければ、confidence NEEDS_CONFIRMATION でも止めない（別の理由の確認待ちを作業者の確認待ちにしない）
   const noQ = branch({ confidence: 'NEEDS_CONFIRMATION', validation: { status: 'needs_confirmation', issues: [] } }, { questions: [{ ...Q_APPROVER[0], topic: 'threshold', question: '金額の境界は 100 万円ちょうどを含みますか' }] });
   const rvQ = review(noQ);
@@ -306,9 +304,10 @@ await section(async () => {
   const gen = (coverage) => ({ strategy: 'NEW_JS_FILE', targetFile: 'mobileDealLock.js', summary: 'モバイルで承認済みの金額と明細セルを編集不可にする', code: CODE, patch: null, events: C2.events, fields: C2.fields.map(f => ({ code: f.code, access: f.access })), apis: ['kintone.events.on'], assumptions: [], warnings: [], coverage });
   const rvOf = (coverage, plan = SR.CASE2_PLAN) => KTCodeReview.review({ generated: gen(coverage), customization: C2, plan, data: INPUTS.data, scan: INPUTS.scan, existingSource: null });
   // 段階 C: 担当は requirementId で引く（契約 20 §5）。文の照合（同一文・2-gram の Dice 係数）・note の文言（P1 の名指し・標準設定）からの推定は削除した。
-  //   記録した有料確認の応答（旧い形。requirementId 無し）は入口で C2（この JavaScript の id）に変換する（自分の要件の申告として扱う）。
+  //   記録した有料確認の応答は自分の要件（C2）の申告として扱う。
   //   簡素化 B（2026-10-17）: NOT_MET・PARTIAL の確認は生成工程の機械検査の coverage（review）が行う（Toolkit の coverage-unmet は削除した。以前の期待: NOT_MET は登録不可）
-  const asIs = rvOf(SR.CASE2_GENERATED_COVERAGE);
+  //   2026-10-23（§12.61）: Toolkit は旧い形（requirement だけ）を受けない。記録した応答は Gateway の形（requirementId・text）に直して渡す
+  const asIs = rvOf(SR.CASE2_GENERATED_COVERAGE.map(d => ({ requirementId: 'C2', text: d.requirement, status: d.status, note: d.note })));
   assert(asIs.coverage.declared.every(d => d.requirementId === 'C2') && asIs.coverage.outOfScope.length === 0 && asIs.coverage.notAchieved.some(x => x.code === 'AI_NOT_MET' && /100万円以上は部長承認/.test(x.message) && /手順「/.test(x.message) && !/\bP1\b/.test(x.message)) && asIs.coverage.notAchieved.some(x => x.code === 'AI_PARTIAL' && /PCとモバイルの両方で使う/.test(x.message)) && !(asIs.checks || []).some(x => x.name === 'coverage-unmet'), `旧い形の coverage: すべて自分の id に変換（申告は計画の構造に対応づけるだけ。Toolkit は検査にしない。note の番号は手順の名前に）: ${JSON.stringify({ na: asIs.coverage.notAchieved.map(x => [x.code, x.message]), oos: asIs.coverage.outOfScope })}`);
   // Gateway の新しい形（requirementId つき）: P1（確認待ち）→ unowned、P3（REUSE_FIELD。設定を変える手順）→ 手順の担当、C1 → 別の JavaScript の担当、C2 → 自分
   const cov = [
@@ -343,12 +342,11 @@ await section(async () => {
   let cardUn = '';
   try { cardUn = KTAiChatUi.codePaneHtml({ generated: gen([]), review: un, existingSource: null }).head; } catch (e) { cardUn = `例外: ${e && e.stack}`; }
   assert(!/kt-ai-code-unowned|kt-ai-code-out-of-scope|計画で担当が決まっていない要件|担当範囲外/.test(cardUn) && /＋ 新規 JS: |✎ 既存 JS を変更: /.test(cardUn), `右の「コード」の見出しには担当範囲外・担当の無い要件を出さない（2026-10-14: 担当の無い要件は右の「変更内容」の「確認できないこと」に 1 回）: ${cardUn.slice(0, 400)}`);
-  // クライアントの検証は OUT_OF_SCOPE を語彙として受け取る（語彙外は従来どおり PARTIAL）
+  // 受け取りは coverage をそのまま返す（OUT_OF_SCOPE を含む。語彙は Gateway の validate-generated が整える）
   const gctx = KTContext.buildGenerator({ customization: C2, plan: SR.CASE2_PLAN, planId: 'p', version: 1, data: INPUTS.data, deps: INPUTS.deps, scan: INPUTS.scan });
-  const RESP = { ok: true, contractVersion: '2.1', meta: { requestId: 'g1', gateway: { product: 'toolkit', feature: 'customization-generator', promptVersion: '1', contextVersion: 'customization-1' }, normalization: { warnings: [] }, ai: { model: 'm' } }, generated: { ...gen([{ requirement: '100万円以上は部長承認', status: 'OUT_OF_SCOPE', note: 'P1' }, { requirement: 'x', status: 'BOGUS', note: '' }]), gatewayChecks: { security: [] } } };
-  const vg = KTAiClient.validateGenerated(RESP, gctx);
-  const covN = vg.normalized?.coverage || vg.normalized?.generated?.coverage || [];
-  assert(vg.ok && covN[0]?.status === 'OUT_OF_SCOPE' && covN[1]?.status === 'PARTIAL', `validateGenerated: OUT_OF_SCOPE を残す（語彙外は PARTIAL）: ${JSON.stringify({ ok: vg.ok, errors: vg.errors, cov: covN })}`);
+  const RESP = { ok: true, contractVersion: '2.1', meta: { requestId: 'g1', gateway: { product: 'toolkit', feature: 'customization-generator', promptVersion: '1', contextVersion: 'customization-1' }, normalization: { warnings: [] }, ai: { model: 'm' } }, generated: { ...gen([{ requirementId: 'C2', text: '100万円以上は部長承認', status: 'OUT_OF_SCOPE', note: 'P1' }, { requirementId: 'C2', text: 'x', status: 'PARTIAL', note: '' }]), gatewayChecks: { security: [] } } };
+  const covN = KTAiClient.receive('generated', { ...RESP, verification: { version: '1', passed: true, machine: [], requiredEffects: [] } }).coverage || [];
+  assert(covN[0]?.status === 'OUT_OF_SCOPE' && covN[1]?.status === 'PARTIAL', `receive: coverage をそのまま返す（OUT_OF_SCOPE を含む）: ${JSON.stringify(covN)}`);
   // buildGenerator の plan.otherCustomizations（この customization 以外。無ければ []）
   const other = gctx.plan.otherCustomizations;
   assert(Array.isArray(other) && other.length === 2 && other.map(x => x.customizationId).join(',') === 'C1,C3' && other[0].requirement === C1.requirement && JSON.stringify(other[0].platform) === '["desktop"]' && Object.keys(other[0]).sort().join(',') === 'customizationId,platform,requirement', `buildGenerator: plan.otherCustomizations = C1 / C3（customizationId・requirement・platform）: ${JSON.stringify(other)}`);

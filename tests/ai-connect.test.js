@@ -80,7 +80,7 @@ function makeGateway({ now = () => Date.now(), ttlSec = 600, pollSec = 2, author
     const bearer = (req.headers.Authorization || '').replace(/^Bearer /, '');
     const a = access.get(bearer);
     if (!a || revokedFamilies.has(a.familyId)) return err(401, 'AUTH_INVALID_TOKEN');
-    if (u.pathname === '/v2/health') return { status: 200, body: JSON.stringify({ ok: true, supportedContractVersions: ['2.0', '2.1'], entitlements: [{ product: 'toolkit', features: ['assistant-qa'] }], registry: { toolkit: { 'assistant-qa': { implemented: true, promptVersions: ['1'] } } }, usage: { yyyymm: '202610', monthlyLimit: 100, usedThisMonth: 6, remainingThisMonth: 94 }, tokenExpiresAt: '2026-10-02T00:45:00Z', contractExpiresAt: '2099-01-01T00:00:00Z', auth: { type: 'access_token' } }) };
+    if (u.pathname === '/v2/health') return { status: 200, body: JSON.stringify({ ok: true, supportedContractVersions: ['2.0', '2.1'], entitlements: [{ product: 'toolkit', features: ['assistant-qa'] }], registry: { toolkit: { 'assistant-qa': { implemented: true, promptVersions: ['1'], conversation: ['requirements', 'brief', 'stream', 'proposal', 'suggestion', 'adoptQuote', 'itemIds'] } } }, usage: { yyyymm: '202610', monthlyLimit: 100, usedThisMonth: 6, remainingThisMonth: 94 }, tokenExpiresAt: '2026-10-02T00:45:00Z', contractExpiresAt: '2099-01-01T00:00:00Z', auth: { type: 'access_token' } }) };
     return err(404, 'NOT_FOUND');
   };
   return { transport, reqs, sessions, access, refresh, revokedFamilies, approve: (sid) => { sessions.get(sid).status = 'AUTHORIZED'; }, deny: (sid) => { sessions.get(sid).status = 'DENIED'; } };

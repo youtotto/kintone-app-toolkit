@@ -122,13 +122,6 @@ await section(async () => {
   assert(!calls[1].revision.mode && /計画全体を作り直します/.test(acks()[0].text) && !/変わる箇所だけ/.test(acks()[0].text) && !/1 分前後|十数秒|約\s*[0-9]+\s*(秒|分)/.test(acks()[0].text) && loading === '最終案を直しています', `P3: revisionMode full（評価の対照・戻すとき）はいつも全体の作り直し（受領の記録は「計画全体を作り直します」。時間の目安なし・作業中の表示は進みの 1 枚カード）: ${loading} ｜ ${acks()[0].text}`);
 });
 await section(async () => {
-  const x = makeConv([planWith(qs(QP, QS)), planWith(qs(QS))], { revisionModes: ['full'] });
-  const { c, calls, acks } = x;
-  await start(c, '金額が大きい案件に注意を出したい');
-  const { loading } = await sendHeld(x, 'PCだけ');
-  assert(calls[1].revision.mode === 'patch' && /計画全体を作り直します/.test(acks()[0].text) && !/変わる箇所だけ/.test(acks()[0].text) && !/1 分前後|十数秒|約\s*[0-9]+\s*(秒|分)/.test(acks()[0].text) && loading === '最終案を直しています', `P4: health が patch を示さない古い Gateway では、差分を頼んでも全体を作り直す前提の文（古い Gateway は mode を無視する。受領の記録の文。時間の目安なし）: ${loading} ｜ ${acks()[0].text}`);
-});
-await section(async () => {
   // 根拠ID の付け替え（Context は作り直しのたびに予算で facts を削って番号を振り直す）
   const from = { facts: [{ id: 'E1', key: 'a' }, { id: 'E2', key: 'b' }, { id: 'E3', key: 'c' }] };
   const to = { facts: [{ id: 'E1', key: 'b' }, { id: 'E2', key: 'c' }] };
@@ -142,8 +135,8 @@ await section(async () => {
   // KTAiClient: Gateway の計画は列挙しない（JSON に入らない＝全体の作り直しで前の版の計画として二重に送らない）・版の作り方を返す
   const ctx = KTContext.buildPlan({ goal: '金額が大きい案件に注意を出したい', data: DATA, deps: DEPS });
   const raw = { ok: true, contractVersion: KTAiClient.CONTRACT_VERSION || '2.1', meta: { requestId: 'r1', revision: { requested: 'patch', mode: 'patch', fallbackReason: null } }, plan: planWith(qs(QP)) };
-  const v = KTAiClient.validatePlan(raw, ctx);
-  assert(v.ok && v.normalized.revisionMeta.mode === 'patch', 'P7: validatePlan は meta.revision を revisionMeta として返す');
+  const v = KTAiClient.receive('plan', raw);
+  assert(v.revisionMeta.mode === 'patch', 'P7: receive は meta.revision を revisionMeta として返す');
   const transport = async () => ({ status: 200, ok: true, json: async () => raw, text: async () => JSON.stringify(raw), headers: { get: () => null } });
   let out = null;
   try { const client = KTAiClient.createAiClient({ apiBase: 'https://gw.test', getToken: async () => 'T', transport: async (req) => ({ status: 200, body: JSON.stringify(raw), headers: {} }) }); out = await client.plan({ ctx }); } catch (e) { out = { err: e.message }; }
@@ -340,8 +333,8 @@ await section(async () => {
   assert(s2.open.map(q => q.text).join('|') === keep.join('|') && s2.reasked.map(q => q.text).join('|') === drop.join('|'), `S5: PC / モバイルだけを聞く質問だけ出さない（場所・別の点は出す）: open=${JSON.stringify(s2.open.map(q => q.text))}`);
   // validatePlan（customizations の質問）: 簡素化（2026-10-17）: 回答済みの PC / モバイルの再質問を外す正規化は Gateway の validate-plan だけが行う（Toolkit は受け取った質問をそのまま運ぶ）
   const ctx = { facts: [], dictionary: { fieldCodes: ['amount'] }, decisions: [{ id: 'D1', topic: 'platform', status: 'answered', answer: 'PCだけ', value: ['desktop'] }] };
-  const r = KTAiClient.validatePlan({ ok: true, contractVersion: KTAiClient.CONTRACT_VERSION || '2.1', meta: {}, plan: planWith([], { customizations: [cust({ questions: [...keep, ...drop] })] }) }, ctx);
-  assert(r.ok && r.normalized.customizations[0].questions.join('|') === [...keep, ...drop].join('|'), `S5: validatePlan は質問を外さない（Gateway の validate-plan が外す）: ${JSON.stringify(r.normalized && r.normalized.customizations[0].questions)}`);
+  const r = KTAiClient.receive('plan', { ok: true, contractVersion: KTAiClient.CONTRACT_VERSION || '2.1', meta: {}, plan: planWith([], { customizations: [cust({ questions: [...keep, ...drop] })] }) });
+  assert(r.customizations[0].questions.join('|') === [...keep, ...drop].join('|'), `S5: 受け取りは質問を外さない（Gateway の validate-plan が外す）: ${JSON.stringify(r.customizations[0].questions)}`);
 });
 await section(async () => {
   // Gateway の isPurePlatformQuestion と同じ例で同じ結果

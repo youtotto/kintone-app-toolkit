@@ -79,9 +79,7 @@ const PLAN_NEW_JS = planOf({ steps: [JS_STEP('C1', { title: '金額が100万円�
 /** Planner Context → client 側の validatePlan（会話経路と同じ）→ KTPlanReview.review */
 function reviewPlan(resp, inputs = INPUTS) {
   const gen = KTContextUi.generatePlan({ goal: resp.plan.goal, inputs });
-  const v = KTAiClient.validatePlan(resp, gen.ctx);
-  if (!v.ok) throw new Error(`validatePlan failed: ${JSON.stringify(v.errors)}`);
-  const plan = { ...v.normalized, requestId: resp.meta.requestId };
+  const plan = { ...KTAiClient.receive('plan', resp), requestId: resp.meta.requestId };
   const review = KTPlanReview.review({ plan, ...inputs });
   return { plan, review, ctx: gen.ctx, jsReview: (review.steps || []).find(r => r.solution === 'CUSTOMIZATION') || null };
 }
@@ -102,8 +100,8 @@ const PATCH_GOOD = {
   operations: [{ type: 'INSERT_AFTER', anchor: "      record['amount'].disabled = true;\n    }", content: "    if (record['ステータス'] && record['ステータス'].value === '完了') {\n      record['amount'].disabled = true;\n    }" }],
 };
 const PATCH_ADDED = PATCH_GOOD.operations[0].content;
-/** Gateway の応答（generated）。validateGenerated を通して会話経路と同じ形にする */
-const genResponse = (ctx, g) => ({ ok: true, contractVersion: '2.1', meta: { requestId: 'gen-1', usage: { usedThisMonth: 3, monthlyLimit: 20 }, normalization: { warnings: [] }, gateway: { feature: 'customization-generator' } }, generated: { strategy: ctx.customization.strategy, targetFile: ctx.existingFile?.name || 'amountWarning.js', summary: ctx.customization.requirement, events: ctx.customization.events, fields: ctx.customization.fields, apis: [], assumptions: [], warnings: [], gatewayChecks: { security: [] }, ...g } });
+/** Gateway の応答（generated）。KTAiClient.receive を通して会話経路と同じ形にする */
+const genResponse = (ctx, g) => ({ ok: true, contractVersion: '2.1', verification: { version: '1', passed: true, machine: [], requiredEffects: [] }, meta: { requestId: 'gen-1', usage: { usedThisMonth: 3, monthlyLimit: 20 }, normalization: { warnings: [] }, gateway: { feature: 'customization-generator' } }, generated: { strategy: ctx.customization.strategy, targetFile: ctx.existingFile?.name || 'amountWarning.js', summary: ctx.customization.requirement, events: ctx.customization.events, fields: ctx.customization.fields, apis: [], assumptions: [], warnings: [], gatewayChecks: { security: [] }, ...g } });
 const genNew = (code = NEW_JS_GOOD, g = {}) => ({ strategy: 'NEW_JS_FILE', targetFile: 'amountWarning.js', summary: '金額の警告', code, patch: null, events: ['app.record.create.change.amount', 'app.record.edit.change.amount'], fields: [{ code: 'amount', access: 'CONTROL' }], apis: [], assumptions: [], warnings: [], ...g });
 //   2026-10-18（AI版 契約 20 §20）: 統合の書き込む本文は生成工程が合成して返す generated.body（Toolkit は合成しない）。偽の生成工程の本文は gwFakeBody（テストの部品）
 const genPatch = (patch = PATCH_GOOD, g = {}, src = FIELD_ON_OFF) => ({ strategy: 'EXTEND_EXISTING_JS', targetFile: 'fieldOnOff.js', summary: '完了でも金額を編集不可にする', code: patch.operations.map(o => o.content).join('\n'), patch, body: gwFakeBody(src, patch), events: ['app.record.edit.show'], fields: [{ code: 'amount', access: 'CONTROL' }], apis: [], assumptions: [], warnings: [], ...g });
@@ -181,13 +179,7 @@ console.log('\n--- §51-3. Toolkit Review: 統合先が曖昧 / 本文なし / P
   assert(depBad.jsReview.status === 'BLOCKED_BY_DEPENDENCY' && depBad.jsReview.codeGeneration.supported === false && depBad.jsReview.codeGeneration.reason === 'BLOCKED_BY_DEPENDENCY', '依存する標準設定が無効: JS は BLOCKED_BY_DEPENDENCY・生成不可');
   assert(/Toolkit ではコードを作れません（前提の標準設定が無効）/.test(KTAiChatUi.changeSummaryHtml({ plan: depBad.plan, review: depBad.review })), '右の「変更内容」の「反映できないこと」: 生成できない理由を日本語で（2026-10-19: 確認結果のタブは廃止）');
   //   簡素化（2026-10-17）: 要件の文の語（「警告」「編集不可」など）で CONTROL の不足を指摘する注意（JS_ACCESS_HINT）は削除した（要件の文を Toolkit が読み直さない）
-  // validatePlan（client）: customizations の正規化と solution の導出
-  const gen = KTContextUi.generatePlan({ goal: GOAL_HYBRID, inputs: INPUTS });
-  const v = KTAiClient.validatePlan(planOf({ steps: [STD_STEP(), JS_STEP()], customizations: [cust({ platform: ['desktop', 'tablet'], fields: [{ code: 'amount', access: 'ADMIN' }], evidenceIds: ['E999'] })] }), gen.ctx);
-  assert(v.ok && v.normalized.solution === 'HYBRID' && v.normalized.customizations[0].platform.join() === 'desktop' && v.normalized.customizations[0].fields[0].access === 'READ' && v.normalized.customizations[0].evidenceIds.length === 0 && v.warnings.some(w => w.code === 'UNKNOWN_EVIDENCE_REMOVED') && !v.warnings.some(w => w.code === 'CUSTOMIZATION_ACCESS_ADJUSTED'), 'validatePlan: platform / access の語彙外を落とし（語彙外の access は READ。要件の文の語で CONTROL にする正規化は Gateway の validate-plan だけ）、未知の根拠ID を除去、solution を導出');
-  //   簡素化（2026-10-17）: 「PC とモバイル両方で必要か」を質問しながら両方を platform に入れたときに空にする正規化は、Gateway の validate-plan だけが行う
-  const vq = KTAiClient.validatePlan(planOf({ steps: [JS_STEP()], customizations: [{ ...NEW_JS_CUST(), platform: ['desktop', 'mobile'], questions: ['PCとモバイル両方で必要か？'] }] }), gen.ctx);
-  assert(vq.ok && vq.normalized.customizations[0].platform.join() === 'desktop,mobile' && !vq.warnings.some(w => w.code === 'CUSTOMIZATION_PLATFORM_QUESTIONED'), 'validatePlan: Gateway の正規化（質問しながら両方なら空にする）をやり直さない');
+  //   2026-10-23（§12.61）: customizations の正規化（platform・access・根拠 ID・solution・PC / モバイルの質問）は Gateway の validate-plan だけが行う。Toolkit の受け取りは形をそのまま返す（確かめは AI版 worker/test）
 }
 
 // =========================================================
@@ -209,12 +201,11 @@ console.log('\n--- §51-4. Planner Context の js-file facts と Generator Conte
   assert(env.meta.feature === KTAiClient.FEATURE_GENERATOR && env.meta.feature === 'customization-generator' && env.meta.contextVersion === 'customization-1' && env.payload === gctx, 'envelope: feature customization-generator（Planner と別 feature）');
   let threw = null; try { KTAiClient.buildGenerateEnvelope({ ctx: { contextVersion: 'x' } }); } catch (e) { threw = e; }
   assert(threw && threw.code === KTAiClient.ERROR_CODES.NO_CONTEXT, 'customization の無い ctx は送れない');
-  const vg = KTAiClient.validateGenerated(genResponse(gctx, genPatch()), gctx);
-  assert(vg.ok && vg.normalized.strategy === 'EXTEND_EXISTING_JS' && vg.normalized.patch?.operations?.length === 1 && vg.normalized.requestId === 'gen-1', 'validateGenerated: strategy / code / patch を正規化');
-  const vgBad = KTAiClient.validateGenerated(genResponse(gctx, genPatch(PATCH_GOOD, { patch: null })), gctx);
-  assert(!vgBad.ok && vgBad.errors[0].code === KTAiClient.ERROR_CODES.INVALID_RESPONSE, 'EXTEND_EXISTING_JS なのに patch が無い応答は拒否');
-  const vgMis = KTAiClient.validateGenerated(genResponse(gctx, genNew()), gctx);
-  assert(vgMis.ok && vgMis.warnings.some(w => w.code === 'STRATEGY_MISMATCH'), '方針が計画と違えば warning（Toolkit Code Review が計画との照合を行う）');
+  //   2026-10-23（§12.61）: 受け取りは契約の関所だけ（Gateway が正規化した形をそのまま）。EXTEND_EXISTING_JS なのに patch・body が無い応答は拒否。方針の違いの警告は Gateway の normalization.warnings
+  const vg = KTAiClient.receive('generated', genResponse(gctx, genPatch()));
+  assert(vg.strategy === 'EXTEND_EXISTING_JS' && vg.patch?.operations?.length === 1 && vg.requestId === 'gen-1' && vg.verification && Array.isArray(vg.clientWarnings), 'receive: strategy / code / patch / verification をそのまま返す');
+  let eBad = null; try { KTAiClient.receive('generated', genResponse(gctx, genPatch(PATCH_GOOD, { patch: null }))); } catch (e) { eBad = e; }
+  assert(eBad && eBad.code === KTAiClient.ERROR_CODES.INVALID_RESPONSE, 'EXTEND_EXISTING_JS なのに patch が無い応答は拒否');
 }
 
 // =========================================================
@@ -335,9 +326,7 @@ function mountV({ inputs = INPUTS, planResponse = PLAN_HYBRID_V, generatedFor = 
   const planImpl = ({ ctx, requestId }) => {
     calls.plan.push({ ctx });
     const resp = typeof planResponse === 'function' ? planResponse(ctx) : planResponse;
-    const v = KTAiClient.validatePlan(resp, ctx);
-    if (!v.ok) throw new Error(JSON.stringify(v.errors));
-    return { ...v.normalized, requestId, clientWarnings: v.warnings };
+    return { ...KTAiClient.receive('plan', resp), requestId, clientWarnings: [] };
   };
   const generateImpl = async ({ ctx, requestId }) => {
     calls.generate.push({ ctx });
@@ -346,9 +335,7 @@ function mountV({ inputs = INPUTS, planResponse = PLAN_HYBRID_V, generatedFor = 
     //   簡素化 B（2026-10-17）: 本物の Gateway と同じく、検証結果に候補の指紋（Gateway と同じ計算）を入れる
     resp.verification = K.fakeVerification({ code: g.code, has, fails, ...(failMsg ? { failMsg } : {}) }, (ctx.verification && ctx.verification.requiredEffects) || [], { candidateHash: gwHashOfCtx(ctx, resp.generated) });
     if (verify) resp.verification = verify(resp.verification);
-    const v = KTAiClient.validateGenerated(resp, ctx);
-    if (!v.ok) throw new KTAiClient.AiClientError({ code: v.errors[0].code, message: v.errors[0].message, requestId });
-    return { ...v.normalized, requestId, clientWarnings: v.warnings };
+    return { ...KTAiClient.receive('generated', resp), requestId, clientWarnings: [] };
   };
   const m = K.mount({ health, planImpl, generateImpl, extra: { getInputs: () => inputs, copyText: async (t) => { copies.push(t); return true; }, downloadText: (name, text) => downloads.push({ name, text }), executor: { api: mock.api, appId: '310' } } });
   return Object.assign(m, { calls2: calls, copies, downloads, mock, types: () => m.msgs().map(x => x.type) });

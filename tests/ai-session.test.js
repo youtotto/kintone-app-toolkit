@@ -57,7 +57,7 @@ function makeGateway({ customerToken = 'CUSTOMER-TOKEN-1', now = () => Date.now(
     const exp = access.get(bearer);
     if (!exp) return err(401, 'AUTH_INVALID_TOKEN');
     if (Date.parse(exp) <= now()) return err(401, 'AUTH_TOKEN_EXPIRED');
-    if (req.url.endsWith('/v2/health')) return { status: 200, body: JSON.stringify({ ok: true, supportedContractVersions: ['2.0', '2.1'], entitlements: [{ product: 'toolkit', features: ['assistant-qa'] }], registry: { toolkit: { 'assistant-qa': { implemented: true, promptVersions: ['1'] } } }, auth: { type: 'access_token' } }) };
+    if (req.url.endsWith('/v2/health')) return { status: 200, body: JSON.stringify({ ok: true, supportedContractVersions: ['2.0', '2.1'], entitlements: [{ product: 'toolkit', features: ['assistant-qa'] }], registry: { toolkit: { 'assistant-qa': { implemented: true, promptVersions: ['1'], conversation: ['requirements', 'brief', 'stream', 'proposal', 'suggestion', 'adoptQuote', 'itemIds'] } } }, auth: { type: 'access_token' } }) };
     return err(404, 'NOT_FOUND');
   };
   return { transport, reqs, access, refresh, ctl };

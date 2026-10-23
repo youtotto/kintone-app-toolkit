@@ -6651,7 +6651,7 @@
     const strList = (list, n = 20) => (Array.isArray(list) ? list.filter(x => typeof x === 'string') : []).slice(0, n);
     /** spec のうち値のある項目だけ（null / [] / '' は落とす）。AI の提案を機械的に写すだけで、解釈はしない */
     const compactSpec = (spec) => Object.fromEntries(Object.entries(spec || {}).filter(([, v]) => v != null && v !== '' && !(Array.isArray(v) && !v.length)));
-    /** Change Plan の要約（再計画・説明の入力）。plan は KTAiClient.validatePlan の normalized */
+    /** Change Plan の要約（再計画・説明の入力）。plan は KTAiClient.receive が返した計画 */
     function compactPlan(plan, { version = null, maxSteps = REVISION_LIMITS.maxSteps, maxItems = REVISION_LIMITS.maxItems, withSpec = true, review = null } = {}) {
       if (!plan) return null;
       // 出力削減（2026-10-07）: proposal の無い手順は、spec・Toolkit の検証から作った 1 行の説明を summary にする（spec を渡すので details は作らない）
@@ -6809,7 +6809,7 @@
     // ================= Phase 16: Generator Context（JavaScript Generator の入力。contextVersion "customization-1"）=================
     const GENERATOR_CONTEXT_VERSION = 'customization-1';
     /**
-     * 段階 A（5.2）: 計画の新規フィールドの対応表（temporaryId → 採番後のコード suggestedCode）。計画の正規化（KTAiClient.validatePlan）が残した
+     * 段階 A（5.2）: 計画の新規フィールドの対応表（temporaryId → 採番後のコード suggestedCode）。計画の正規化（Gateway の validate-plan）が残した
      *   suggestedCode をそのまま使う。Generator Context・KTCodeReview・実装仕様の条件の置換は、すべてこの 1 つの対応表で行う
      */
     const proposedCodeMap = (plan) => new Map((plan?.proposedFields || []).filter(p => p && p.temporaryId && p.suggestedCode).map(p => [String(p.temporaryId), String(p.suggestedCode)]));
@@ -12099,7 +12099,8 @@
   //   2026-10-18 から生成の前の確認（KT_GENERATOR_REQUIRED）で求める（印ごとに判定を分けない）
   const KT_EFFECT_FEATURES = Object.freeze(['requiredEffects', 'effectGroups', 'relatedOmitted', 'appFields', 'saveDialog', 'reasonCategory', 'caseSide', 'eventCases', 'loadFaithful', 'registrationCheck', 'emptyCase', 'hideCondition', 'registrationCounts', 'caseCoverage', 'cancelCheck', 'limitCode', 'scopeList', 'tableRowChange', 'caseInvalid']);
   /**
-   * 2026-10-18: 生成を依頼してよい接続先か（health の customization-generator.verification の印。既存の能力の確認の仕組み）。足りなければ生成を呼ばない
+   * 2026-10-18: 生成に使う接続先に要る印（health の customization-generator.verification）。2026-10-23（§12.61）: 接続時の能力の確認（KTAiClient.capabilityFromHealth）が
+   *   この一覧で確かめ、足りない接続先は生成を使えないと示す（生成の前に使う場所ごとに照らす分岐は持たない）
    *   （使えないと分かっている結果のために有料の生成をしてから止めない）。要る印は今の受け渡しのすべて: requirementId（要件の id で達成を返す）・
    *   KT_EFFECT_FEATURES（必須の効果と模擬テスト）・networkCheck（外部への通信と通知の機械検査。Toolkit は要件の文の語の判定 7b・7c を消した。AI版 契約 20 §19）・
    *   verifiedBody（検査と模擬テストに使った本文を返す。Toolkit は合成しない。§20）・effectCheck（効果ごとの確かめ方。check machine の効果は模擬テストなしで合格に数える）・
@@ -12108,10 +12109,6 @@
    *   決め、動かさなかったファイルを verification.relatedOmitted で返す。Toolkit は構文解析器を持たないので、この印の無い接続先には生成を依頼しない。AI版 契約 20 §21）
    */
   const KT_GENERATOR_REQUIRED = Object.freeze(['requirementId', ...KT_EFFECT_FEATURES, 'effectCheck', 'conditionFrom', 'networkCheck', 'verifiedBody', 'registrationSelect']);
-  const generatorLackOf = (marks) => {
-    const m = Array.isArray(marks) ? marks : [];
-    return KT_GENERATOR_REQUIRED.every(f => m.includes(f)) ? null : { capability: 'generator', reason: '接続先（生成工程）が、今の Toolkit が使う受け渡し（必須の動作の確認・検査と模擬テストに使った本文・外部への通信と通知の検査）に対応していないため、JavaScript の生成を依頼していません' };
-  };
   /**
    * C-1 第 4 段（2026-10-09）: 模擬テストの条件と確かめていない範囲は、Toolkit で一覧を持たない（前の KT_BEHAVIOR_UNVERIFIED_SCOPE と固定の文は削除した）。
    *   生成工程（Gateway）が返す verification.behavior.conditions と uncheckedScope（契約 20 の「確かめない範囲」と同じ文）をそのまま最終案の詳細表示に出す。
@@ -12268,7 +12265,7 @@
       // 段階 C（改訂 2・5.3 / 5.4）: coverage は requirementId で判定する（契約 20 §5）。文の照合・同義語の読み替え・note のキーワードからの担当の推定・plannedHint（段階 A）は削除した。
       //   この customization の id → 範囲内（NOT_MET は登録不可・PARTIAL は確認）。要件 R… / 手順 P… / 別の C… → 範囲外（担当は計画の構造（steps / customizations）と要件の planRefs で引く。
       //   担当が無い・設定を変えない手順（確認待ち）だけが担当なら unowned（計画全体の確認に残す。review）。coverage の文（text / requirement）は表示だけに使う。
-      //   旧い Gateway（requirementId 無し。記録した応答・fixture）は入口で「この customization の id」に変換する（文は text に）
+      //   requirementId の形が崩れた要素は、この customization の要件として扱う
       coverage.outOfScope = []; coverage.unowned = []; coverage.met = []; coverage.planUnconfirmed = [];
       const stepIdsAll = new Set(planStepsAll.map(s => s && s.id).filter(Boolean)), custIdsAll = new Set(planCustsAll.map(x => x && x.customizationId).filter(Boolean));
       const settingStepIds = new Set(planStepsAll.filter(s => s && !['CUSTOMIZATION_REQUIRED', 'REQUIRE_CONFIRMATION'].includes(s.actionType)).map(s => s.id).filter(Boolean));
@@ -12294,7 +12291,7 @@
       };
       const ownerLabel = (id, owner) => (owner === 'self' ? 'この JavaScript' : idLabel(id));
       const ownedMessage = (id, owner, text, note) => (owner === 'unowned' ? `${text}（担当が計画にありません${note ? `。${note}` : ''}）` : owner === 'plan' ? `${text}（採用した仮案の項目として計画全体で扱う要件${note ? `。${note}` : ''}）` : `${text}（${ownerLabel(id, owner)}の担当${note ? `。${note}` : ''}）`);
-      const declared = (Array.isArray(g.coverage) ? g.coverage : []).map(d => (d && typeof d === 'object' ? { requirementId: typeof d.requirementId === 'string' && /^[CRP]\d+$/.test(d.requirementId) ? d.requirementId : c.customizationId, status: String(d.status || ''), note: String(d.note || ''), text: String(d.text ?? d.requirement ?? '').trim(), ...(typeof d.limitCode === 'string' && /^[A-Z][A-Z0-9_]{0,39}$/.test(d.limitCode) ? { limitCode: d.limitCode } : {}) } : null)).filter(d => d && (d.text || d.requirementId));
+      const declared = (Array.isArray(g.coverage) ? g.coverage : []).map(d => (d && typeof d === 'object' ? { requirementId: typeof d.requirementId === 'string' && /^[CRP]\d+$/.test(d.requirementId) ? d.requirementId : c.customizationId, status: String(d.status || ''), note: String(d.note || ''), text: String(d.text ?? '').trim(), ...(typeof d.limitCode === 'string' && /^[A-Z][A-Z0-9_]{0,39}$/.test(d.limitCode) ? { limitCode: d.limitCode } : {}) } : null)).filter(d => d && (d.text || d.requirementId));
       coverage.declared = declared;
       for (const d of declared) {
         const id = d.requirementId, owner = ownerOfId(id), text = d.text || `要件 ${id}`;
@@ -12423,7 +12420,7 @@
      * @param {object} verification Gateway の verification（{ requiredEffects[{ requirementId(s), field, effect, status }], behavior{ status, reason, cases[{ id, requirementId(s), field, effect, expect, verdict, reason, observed, message }] } }）
      * @param {Array} requiredEffects Toolkit の必須の効果 [{ requirementId, requirementIds, field, effect, events, condition }]
      * @param {object} o { omitted: [{ name, target, reason, events[] | null }] }
-     * @returns {{ supported, behaviorRan, behaviorStatus, reason, reasonCategory, items[{ field, effect, events, condition, requirementIds, structure: present|missing|unchecked|unknown|unsupported, behavior: pass|fail|not-run|untested, notRunReasons, cases }], missing, unchecked, unknown, failed, notRun, untested, otherFailed, omittedHit, ok }}
+     * @returns {{ behaviorRan, behaviorStatus, reason, reasonCategory, items[{ field, effect, events, condition, requirementIds, structure: present|missing|unchecked|unknown|not-generated, behavior: pass|fail|not-run|untested, notRunReasons, cases }], missing, unchecked, unknown, failed, notRun, untested, otherFailed, omittedHit, ok }}
      */
     //   会話の設計し直し（2026-10-14・指示書 §6.2）: notGenerated = まだ作っていない JavaScript（送信を止めた・生成の結果が無い）の効果の行。構造は not-generated
     //   （表示「まだ作っていません」）・動作は untested にする。接続先が確認に非対応（unsupported）とは分ける。判定（ok・supported）は変えない（作っていなければ合格にならない）
@@ -12452,10 +12449,10 @@
       const platformOf = (ev) => KTJsCatalog.eventPlatform(ev);
       /** 送れなかったファイルが、この効果のイベントに関わるか（events が null なら同じ platform のすべてのイベント） */
       const omitHits = (f, g) => (f.events == null ? g.events.some(e => platformOf(e) === (f.target === 'mobile' ? 'mobile' : 'desktop')) : f.events.some(e => g.events.includes(e)));
-      //   §0c.9（2026-10-08）: 代表条件の side（Gateway の caseSide。match = 条件に合うレコード / nomatch = 合わないレコード）。無い旧い形は期待から（合う側の期待なら match）
-      const sideOf = (y) => (y && (y.side === 'match' || y.side === 'nomatch') ? y.side : (y && KT_MATCH_EXPECTS.includes(y.expect) ? 'match' : 'nomatch'));
+      //   §0c.9（2026-10-08）: 代表条件の side（Gateway の caseSide。match = 条件に合うレコード / nomatch = 合わないレコード）
+      const sideOf = (y) => (y && y.side === 'match' ? 'match' : 'nomatch');
       const scopeCase = (y) => y.verdict === 'not-run' && ktBehaviorReasonCategory(reasonOfCase(y)) === 'scope';
-      //   §0c.9 二重の安全（1）: 入口で切った（truncated）・全体の状態が passed でない動作テストは合格にしない。ただし not-run の原因が対象外（scope。作れない確かめ方）の
+      //   §0c.9 二重の安全（1）: Gateway が代表条件を切った（truncated = 落とした件数）・全体の状態が passed でない動作テストは合格にしない。ただし not-run の原因が対象外（scope。作れない確かめ方）の
       //   代表条件だけのときは、代表条件ごとの判定（下の items）に任せる（作れない確かめ方で、正しい候補を止め続けない）
       const truncated = !!(beh && beh.truncated);
       const statusOk = !!beh && !truncated && (beh.status === 'passed' || (beh.status === 'not-run' && cases.length > 0 && cases.every(y => y.verdict === 'pass' || scopeCase(y))));
@@ -12466,7 +12463,7 @@
       const omittedHit = [];
       const items = [...groups.values()].map(g => {
         const st = gwRe ? matchOf(gwRe, g) : [];
-        const structure = notGenerated ? 'not-generated' : !gwRe ? 'unsupported' : st.some(y => y.status === 'missing') ? 'missing' : st.some(y => y.status === 'unchecked') ? 'unchecked' : st.some(y => y.status === 'present') ? 'present' : 'unknown';
+        const structure = notGenerated ? 'not-generated' : !gwRe ? 'unknown' : st.some(y => y.status === 'missing') ? 'missing' : st.some(y => y.status === 'unchecked') ? 'unchecked' : st.some(y => y.status === 'present') ? 'present' : 'unknown';
         const mine = matchOf(cases, g);
         //   対象外（scope）の理由で実行しなかった代表条件は、この効果の判定に数えない（例: 作成画面に当たらない確かめ方）
         const relevant = mine.filter(y => !(y.verdict === 'not-run' && ktBehaviorReasonCategory(reasonOfCase(y)) === 'scope'));
@@ -12480,7 +12477,7 @@
           notRunReasons = [...new Set(pos.length ? pos : ['condition-value-unknown'])];
         }
         //   §0c.9 二重の安全（2）: 効果のイベント（候補の platform に絞ったもの）のそれぞれで「合う」（side match・期待が合う側の語）の合格が 1 件以上、
-        //   条件つきなら「合わない」（side nomatch）の合格も 1 件以上。足りなければ確かめていない（入口で切ったなら件数の上限、それ以外は条件の形 case-coverage）
+        //   条件つきなら「合わない」（side nomatch）の合格も 1 件以上。足りなければ確かめていない（Gateway が切ったなら件数の上限、それ以外は条件の形 case-coverage）
         const lacking = [];
         if (behavior === 'pass') {
           for (const ev of (g.events.length ? g.events : [null])) {
@@ -12504,7 +12501,7 @@
         return { ...g0, ...(resolved ? { conditionFrom: { file: resolved.file, target: resolved.target, events: [...(resolved.events || [])] } } : {}), structure, behavior, notRunReasons, cases: mine, ...(lacking.length ? { lacking } : {}) };
       });
       //   §0c.9 二重の安全（1）: 全体の状態が合格でない（入口で切った・Gateway が failed / not-run を返した）のに、代表条件ごとの照合では合格に見える効果は、合格にしない。
-      //   対象: 入口で切った／照合できなかった代表条件に fail・not-run（対象外を除く）がある／状態が passed でないのに、その原因の代表条件が 1 件も無い（食い違い）。
+      //   対象: Gateway が切った／照合できなかった代表条件に fail・not-run（対象外を除く）がある／状態が passed でないのに、その原因の代表条件が 1 件も無い（食い違い）。
       //   原因の代表条件がほかの効果に照合できている（その効果が fail・not-run になっている）ときは、合格の効果はそのまま（効果ごとに別々に判定する）
       const matchedAll = new Set(items.flatMap(i => i.cases));
       const strayBad = cases.filter(y => !matchedAll.has(y) && y.verdict !== 'pass' && !scopeCase(y));
@@ -12514,12 +12511,12 @@
         const why = truncated ? 'limit' : (strayReason || (beh.reason && beh.reason !== 'partial' ? beh.reason : 'internal'));
         for (const i of items) if (i.behavior === 'pass') { i.behavior = 'not-run'; i.notRunReasons = [why]; i.statusGuard = true; }
       }
-      //   §0d.1（2026-10-08）: 効果ごとの確かめ方（Gateway の requiredEffects[].check・checkReason）を効果に写す（照合した要素のどれかが behavior なら behavior）
+      //   §0d.1（2026-10-08）: 効果ごとの確かめ方（Gateway の requiredEffects[].check・checkReasons）を効果に写す（照合した要素のどれかが behavior なら behavior）
       for (const i of items) {
         const st = gwRe ? matchOf(gwRe, i) : [];
         const checks = st.map(y => y.check).filter(Boolean);
         i.check = !st.length || checks.length < st.length ? null : checks.every(c => c === 'machine') ? 'machine' : 'behavior';
-        i.checkReason = [...new Set(st.flatMap(y => (Array.isArray(y.checkReason) ? y.checkReason : [])))];
+        i.checkReason = [...new Set(st.flatMap(y => (Array.isArray(y.checkReasons) ? y.checkReasons : [])))];
       }
       //   §0d.1: 機械検査で足りる効果（check: machine）は、模擬テストが実行できなくても合格に数える。Toolkit は構造の照合だけを行う（業務の合否を二重に作らない）:
       //   Toolkit が自分で固定した condition が空・照合した Gateway の要素がすべて check machine で present（2026-10-18: 印 effectCheck は生成の前の確認で求める）・
@@ -12551,10 +12548,10 @@
       const cats = notRun.flatMap(i => i.notRunReasons.map(ktBehaviorReasonCategory));
       const reasonCategory = notRun.length ? (ORDER.find(cc => cats.includes(cc)) || 'env') : null;
       const reasonByCat = reasonCategory ? (notRun.flatMap(i => i.notRunReasons).find(r => ktBehaviorReasonCategory(r) === reasonCategory) || null) : null;
-      const out = { supported: !!gwRe, behaviorRan: !!beh, behaviorStatus: beh ? beh.status || null : null, reason: reasonByCat || (beh ? beh.reason || null : null), reasonCategory, items,
-        missing: pick(i => i.structure === 'missing'), unchecked: pick(i => i.structure === 'unchecked'), unknown: pick(i => i.structure === 'unknown' || i.structure === 'unsupported' || i.structure === 'not-generated'), failed: pick(i => i.behavior === 'fail'), notRun, untested: pick(i => i.behavior === 'untested'), otherFailed, omittedHit, truncated, statusOk,
+      const out = { behaviorRan: !!beh, behaviorStatus: beh ? beh.status || null : null, reason: reasonByCat || (beh ? beh.reason || null : null), reasonCategory, items,
+        missing: pick(i => i.structure === 'missing'), unchecked: pick(i => i.structure === 'unchecked'), unknown: pick(i => i.structure === 'unknown' || i.structure === 'not-generated'), failed: pick(i => i.behavior === 'fail'), notRun, untested: pick(i => i.behavior === 'untested'), otherFailed, omittedHit, truncated, statusOk,
         machineChecked: pick(i => i.checkedBy === 'machine') };
-      //   §0c.9: 全体の状態が passed でない（対象外だけの not-run を除く）・入口で切ったときは合格にしない（二重の安全）
+      //   §0c.9: 全体の状態が passed でない（対象外だけの not-run を除く）・Gateway が切ったときは合格にしない（二重の安全）
       //   §0d.1: 例外は、合格でない代表条件（対象外を除く）がすべて機械検査で足りる効果のものだけのとき（ほかの効果・照合できない代表条件の未確認は残す。
       //   全体が failed・入口で切った・動作テストの結果が無いときは合格にしない）
       const machineCovered = out.machineChecked.length > 0 && !!beh && !truncated && beh.status !== 'failed' && cases.filter(y => y.verdict !== 'pass' && !scopeCase(y)).every(y => out.machineChecked.some(i => i.cases.includes(y)));
@@ -12570,7 +12567,7 @@
      *   Toolkit は生成のときの検査を繰り返さないので、ここで取り込む結果が登録の判定（registration）の生成のときの分になる:
      *   - 機械検査（verification.machine）: block は登録不可、review は承認の欄の確認事項（項目の名前と文は生成工程のまま。gateway の印つき）。
      *     必須の効果の機械検査の行は、下の必須の効果の照合で扱う
-     *   - required-effects: 必須の効果の処理が無い（missing）→ 登録不可。確かめられない（返らない・unchecked・生成工程が非対応）→ 登録不可（未確認。修復しない）
+     *   - required-effects: 必須の効果の処理が無い（missing）→ 登録不可。確かめられない（返らない・unchecked）→ 登録不可（未確認。修復しない）
      *   - behavior-fail / behavior-not-run / behavior-untested: 模擬テストの不合格・実行できなかった・結果が無い → 登録不可（未確認を合格に読み替えない）
      *   Toolkit は業務の合否を作らない（構造の照合と、返却の欠落・明示された失敗の検出だけ）。検証結果と候補の結び付きは会話と登録の直前の照合が確かめる
      * @param {object} o { requiredEffects, customization, omitted: 動作テストに渡せなかった既存 JS }
@@ -12590,8 +12587,7 @@
         add(m.name, ok, ok ? 'info' : (m.severity === 'block' ? 'block' : 'review'), String(m.message || ''), { gateway: true });
       }
       if (req.length) {
-        if (!er.supported) add('required-effects', false, 'block', `生成工程が必須の動作の確認に対応していないため、${er.items.map(effectLabel).join('・')}の処理があるかを確かめられません（接続先の更新が必要です）`, { noRepair: true });
-        else if (er.missing.length) add('required-effects', false, 'block', `要件未達（${er.missing.map(i => `「${i.field}」: ${KT_EFFECT_NEED_JA[i.effect] || i.effect}`).join('・')}）。必要な処理がありません${er.missing.some(i => i.effect === 'lock' || i.effect === 'block-save') ? '（警告だけ・値の変更だけでは、編集できない・保存を止める要件を満たしません）' : ''}`);
+        if (er.missing.length) add('required-effects', false, 'block', `要件未達（${er.missing.map(i => `「${i.field}」: ${KT_EFFECT_NEED_JA[i.effect] || i.effect}`).join('・')}）。必要な処理がありません${er.missing.some(i => i.effect === 'lock' || i.effect === 'block-save') ? '（警告だけ・値の変更だけでは、編集できない・保存を止める要件を満たしません）' : ''}`);
         else if (er.unchecked.length) add('required-effects', false, 'block', `生成工程の検査で、${er.unchecked.map(effectLabel).join('・')}の処理があるかを解析できませんでした（未確認。処理が無いとは判定していません）`, { noRepair: true, unchecked: true });
         else if (er.unknown.length) add('required-effects', false, 'block', `生成工程の検査で、${er.unknown.map(effectLabel).join('・')}の処理があるかが返りませんでした（確かめられていません）`, { noRepair: true });
         else add('required-effects', true, 'info', `必須の動作（${er.items.map(effectLabel).join('・')}）の処理があります`);
@@ -13170,7 +13166,7 @@
       CONDITION_SOURCE_UNVERIFIABLE: 'CONDITION_SOURCE_UNVERIFIABLE',
       // client 側のみ
       TRANSPORT_ERROR: 'TRANSPORT_ERROR', TIMEOUT: 'TIMEOUT', INVALID_RESPONSE: 'INVALID_RESPONSE', WORKER_ERROR: 'WORKER_ERROR',
-      NO_CONFIG: 'NO_CONFIG', NOT_ENTITLED: 'NOT_ENTITLED', CONTRACT_INCOMPATIBLE: 'CONTRACT_INCOMPATIBLE', NO_CONTEXT: 'NO_CONTEXT', PLANNER_NOT_AVAILABLE: 'PLANNER_NOT_AVAILABLE', GENERATOR_NOT_AVAILABLE: 'GENERATOR_NOT_AVAILABLE',
+      NO_CONFIG: 'NO_CONFIG', NOT_ENTITLED: 'NOT_ENTITLED', CONTRACT_INCOMPATIBLE: 'CONTRACT_INCOMPATIBLE', CAPABILITY_OUTDATED: 'CAPABILITY_OUTDATED', NO_CONTEXT: 'NO_CONTEXT', PLANNER_NOT_AVAILABLE: 'PLANNER_NOT_AVAILABLE', GENERATOR_NOT_AVAILABLE: 'GENERATOR_NOT_AVAILABLE',
       NOT_CONNECTED: 'NOT_CONNECTED', SESSION_EXPIRED: 'SESSION_EXPIRED',
       // 2026-10-15（ページ期限切れへの対応）: kintone のページの有効期限が切れ（kintone.proxy が CB_CS01）、Gateway へ直接も送れなかった。
       //   接続や契約の失効ではない（接続情報・会話・生成済みの結果は残っている）。再読み込みすると回復するが、会話は保存しないので失われる
@@ -13199,6 +13195,8 @@
       FEATURE_NOT_IMPLEMENTED: 'この機能は AI サービス側でまだ有効化されていません。',
       CONTRACT_INCOMPATIBLE: 'Toolkit と AI サービスのバージョンが一致しません。Toolkit の更新または AI サービスの更新をお待ちください。',
       UNSUPPORTED_CONTRACT_VERSION: 'Toolkit と AI サービスのバージョンが一致しません。Toolkit の更新が必要です。',
+      //   2026-10-23（§12.61）: 今の Toolkit が使う受け渡しの印（health の registry）が欠ける接続先（接続時の 1 回の確認で止める。使う場所ごとの分岐は持たない）
+      CAPABILITY_OUTDATED: '接続先（AI サービス）が、今の Toolkit が使う受け渡しに対応していません。接続先の更新が必要です。',
       UNKNOWN_PROMPT_VERSION: 'Toolkit と AI サービスのバージョンが一致しません。Toolkit の更新が必要です。',
       AUTH_INVALID_TOKEN: 'Nest Rec AI との接続が無効です。もう一度「Nest Rec AIに接続」してください。',
       AUTH_TOKEN_EXPIRED: 'Nest Rec AI との接続または契約の有効期限が切れています。もう一度「Nest Rec AIに接続」してください。',
@@ -13277,7 +13275,7 @@
       NO_CONFIG: 'license', NOT_ENTITLED: 'license', PRODUCT_NOT_ENTITLED: 'license', FEATURE_NOT_ENTITLED: 'license', PLANNER_NOT_AVAILABLE: 'license', GENERATOR_NOT_AVAILABLE: 'license', MONTHLY_LIMIT_EXCEEDED: 'license', FEATURE_NOT_IMPLEMENTED: 'license',
       TIMEOUT: 'timeout',
       MODEL_OUTPUT_INVALID: 'format', INVALID_RESPONSE: 'format',
-      CONTRACT_INCOMPATIBLE: 'version', UNSUPPORTED_CONTRACT_VERSION: 'version', UNKNOWN_PROMPT_VERSION: 'version',
+      CONTRACT_INCOMPATIBLE: 'version', UNSUPPORTED_CONTRACT_VERSION: 'version', UNKNOWN_PROMPT_VERSION: 'version', CAPABILITY_OUTDATED: 'version',
       INVALID_CONTEXT: 'input', INVALID_ENVELOPE: 'input', PAYLOAD_TOO_LARGE: 'input',
       // 2026-10-15: ページの有効期限（接続・契約の問題として見せない）
       PAGE_EXPIRED: 'page',
@@ -13478,18 +13476,6 @@
       return final;
     }
 
-    /** Legacy（/v1 形式）エラー文字列の翻訳（AppInsight ai-client と同じ表）。未知は null */
-    function normalizeLegacyErrorCode(message) {
-      const m = String(message || '');
-      if (m === 'Missing Bearer token' || m === 'Invalid token' || m === 'Token revoked' || m === 'Token expiry invalid') return ERROR_CODES.AUTH_INVALID_TOKEN;
-      if (m === 'Token expired') return ERROR_CODES.AUTH_TOKEN_EXPIRED;
-      if (m === 'Domain mismatch' || m === 'Token domain not set' || m === 'Missing X-Kintone-Domain header') return ERROR_CODES.AUTH_DOMAIN_MISMATCH;
-      if (m === 'Monthly limit exceeded') return ERROR_CODES.MONTHLY_LIMIT_EXCEEDED;
-      if (m === 'Rate limit exceeded') return ERROR_CODES.RATE_LIMITED;
-      if (m === 'Payload too large') return ERROR_CODES.PAYLOAD_TOO_LARGE;
-      return null;
-    }
-
     const newRequestId = () => `tk-${(typeof crypto !== 'undefined' && crypto.randomUUID) ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(16).slice(2)}`}`;
 
     /**
@@ -13540,6 +13526,16 @@
       return t.replace(PLATFORM_WORDS_RE, '').replace(PLATFORM_GENERIC_RE, '').length === 0;
     }
     /**
+     * 2026-10-23（§12.61）: 今の Toolkit が使う受け渡しの印（health の registry。AI版 prompt-registry と同じ語）。生成の verification の印は KT_GENERATOR_REQUIRED。
+     *   接続時の能力の確認（capabilityFromHealth）の 1 回で確かめ、欠ける接続先はその機能を使えないと示す（CAPABILITY_OUTDATED）。使う場所ごとの印の分岐・
+     *   古い形の応答の読み替え・印の無い接続先のための代わりの経路は持たない
+     */
+    const CONVERSATION_MARKS = Object.freeze(['requirements', 'brief', 'stream', 'proposal', 'suggestion', 'adoptQuote', 'itemIds']);
+    const PLANNER_MARKS = Object.freeze({ revisionModes: ['patch'], stream: ['reply'], requirementOps: ['decisionRefs'] });
+    const GENERATOR_MARKS = Object.freeze({ stream: ['progress'] });
+    const lackOf = (have, need) => need.filter(x => !(Array.isArray(have) && have.includes(x)));
+    const requireMarks = (cap, lackFn) => { if (!cap.available) return cap; const lacking = lackFn(cap); return lacking.length ? { available: false, reason: ERROR_CODES.CAPABILITY_OUTDATED, lacking } : cap; };
+    /**
      * /v2/health → 利用可否。available / reason は assistant-qa（従来どおり）。features に feature ごとの可否
      * （change-planner は契約に含まれない場合もある。Q&A が使えても Planner は不可、ということがある）
      */
@@ -13547,9 +13543,9 @@
       if (!health || health.ok !== true) return { available: false, reason: ERROR_CODES.INVALID_RESPONSE };
       const versions = Array.isArray(health.supportedContractVersions) ? health.supportedContractVersions : [];
       if (!versions.includes(CONTRACT_VERSION)) return { available: false, reason: ERROR_CODES.CONTRACT_INCOMPATIBLE };
-      const qa = featureCapability(health, FEATURE, PROMPT_VERSION);
-      const planner = featureCapability(health, FEATURE_PLANNER, PLANNER_PROMPT_VERSION);
-      const generator = featureCapability(health, FEATURE_GENERATOR, GENERATOR_PROMPT_VERSION);
+      const qa = requireMarks(featureCapability(health, FEATURE, PROMPT_VERSION), (c) => lackOf(c.conversation, CONVERSATION_MARKS));
+      const planner = requireMarks(featureCapability(health, FEATURE_PLANNER, PLANNER_PROMPT_VERSION), (c) => [...lackOf(c.revisionModes, PLANNER_MARKS.revisionModes), ...lackOf(c.stream, PLANNER_MARKS.stream), ...lackOf(c.requirementOps, PLANNER_MARKS.requirementOps)]);
+      const generator = requireMarks(featureCapability(health, FEATURE_GENERATOR, GENERATOR_PROMPT_VERSION), (c) => [...lackOf(c.verification, KT_GENERATOR_REQUIRED), ...lackOf(c.stream, GENERATOR_MARKS.stream)]);
       const features = { [FEATURE]: qa, [FEATURE_PLANNER]: planner, [FEATURE_GENERATOR]: generator };
       //   §0f.3 の 3（2026-10-09）: 1 要求の処理全体の期限（health の limits。古い Gateway は返さない = null）
       const limits = limitsFromHealth(health);
@@ -13641,375 +13637,48 @@
       };
     }
     /**
-     * 生成コードの応答を送信した Generator Context で再検証する（Worker の検証と二重。strategy / code / patch の形だけ。
-     * コードの静的検査（構文・イベント・フィールド・API・セキュリティ・計画との一致）は KTCodeReview が行う）
+     * 2026-10-23（§12.61）: 接続先の応答の受け取り。契約の関所（ok・契約の版・必須の本文）だけを確かめ、Gateway が正規化した形（AI版 validate-response /
+     *   validate-proposal-response / validate-plan / validate-generated・verify-generated が返す前に通したもの）をそのまま返す。欄ごとの白リスト・上限・派生の欄・
+     *   旧い形の読み替え（要件の id・checkReason・coverage の requirement・代表条件の側の推定など）は持たない（前は同じ規則を Toolkit でも繰り返し、写しで要素を落とす回帰があった）。
+     *   読み手の形は今までどおり: meta を requestId・usage・ai・budgetMeta・gatewayWarnings・（生成）aiRepair・timing・（計画）decisionsMeta・revisionMeta・requirementsMeta・
+     *   （仮案）proposalUnchanged に平らに並べ、clientWarnings は常に []。関所に通らない応答は AiClientError（INVALID_RESPONSE / UNSUPPORTED_CONTRACT_VERSION）
+     * @param {'answer'|'proposal'|'plan'|'generated'} kind
      */
-    function validateGenerated(response, ctx) {
-      const errors = [], warnings = [];
-      const r = response || {};
-      if (r.ok !== true) { errors.push({ code: ERROR_CODES.INVALID_RESPONSE, path: 'ok', message: 'ok:true ではありません' }); return { ok: false, errors, warnings, normalized: null }; }
-      if (r.contractVersion !== CONTRACT_VERSION) errors.push({ code: ERROR_CODES.UNSUPPORTED_CONTRACT_VERSION, path: 'contractVersion', message: `contractVersion が一致しません: ${r.contractVersion}` });
-      const g = r.generated;
-      if (!g || typeof g !== 'object' || typeof g.code !== 'string' || !g.code.trim() || typeof g.strategy !== 'string') errors.push({ code: ERROR_CODES.INVALID_RESPONSE, path: 'generated', message: 'generated（strategy / code）がありません' });
-      if (errors.length) return { ok: false, errors, warnings, normalized: null };
-      const want = ctx?.customization?.strategy;
-      if (want && g.strategy !== want) warnings.push({ code: 'STRATEGY_MISMATCH', path: 'generated.strategy', message: `方針が計画（${want}）と違います: ${g.strategy}` });
-      if (g.strategy === 'EXTEND_EXISTING_JS' && (!g.patch || !Array.isArray(g.patch.operations) || !g.patch.operations.length)) errors.push({ code: ERROR_CODES.INVALID_RESPONSE, path: 'generated.patch', message: '既存 JS への統合なのに patch がありません' });
-      if (errors.length) return { ok: false, errors, warnings, normalized: null };
-      return {
-        ok: true, errors, warnings,
-        normalized: {
-          strategy: g.strategy, targetFile: String(g.targetFile || ''), summary: String(g.summary || ''), code: g.code, patch: g.patch && typeof g.patch === 'object' ? g.patch : null,
-          //   2026-10-18（契約 20 §20）: 統合の本文（生成工程が既存の本文に差分を合成して検査・模擬テストに使った全文）。Toolkit は合成せず、この本文をそのまま書き込む
-          body: g.strategy === 'EXTEND_EXISTING_JS' && typeof g.body === 'string' ? g.body : null,
-          events: Array.isArray(g.events) ? g.events.filter(x => typeof x === 'string') : [], fields: Array.isArray(g.fields) ? g.fields.filter(f => f && typeof f.code === 'string') : [], apis: Array.isArray(g.apis) ? g.apis.filter(x => typeof x === 'string') : [],
-          assumptions: Array.isArray(g.assumptions) ? g.assumptions.filter(x => typeof x === 'string') : [], warnings: Array.isArray(g.warnings) ? g.warnings.filter(x => typeof x === 'string') : [],
-          // Phase 21: 要件ごとの達成（AI の自己申告。KTCodeReview が検査結果と照合して、満たせない部分を要約より先に出す）
-          // 段階 C（契約 20 §5）: coverage は { requirementId, status, note, text } を正とし、旧い形 { requirement } も受ける（requirementId が無い要素は Toolkit の Code Review が入口でこの customization の id に変換する）。
-          //   C-1 第 3 段（2026-10-08）: kintone の制約の印 limitCode（SUBTABLE_ROWS など。英大文字の語だけ）も落とさない（使うかは画面の generate が health の印で決める）
-          coverage: Array.isArray(g.coverage) ? g.coverage.filter(x => x && ((typeof x.requirementId === 'string' && x.requirementId.trim()) || (typeof x.requirement === 'string' && x.requirement.trim()) || (typeof x.text === 'string' && x.text.trim()))).slice(0, 50).map(x => ({ ...(typeof x.requirementId === 'string' && /^[CRP]\d+$/.test(x.requirementId.trim()) ? { requirementId: x.requirementId.trim() } : {}), requirement: String(x.text ?? x.requirement ?? ''), text: String(x.text ?? x.requirement ?? ''), status: ['MET', 'PARTIAL', 'NOT_MET', 'OUT_OF_SCOPE'].includes(x.status) ? x.status : 'PARTIAL', note: String(x.note || ''), ...(typeof x.limitCode === 'string' && /^[A-Z][A-Z0-9_]{0,39}$/.test(x.limitCode) ? { limitCode: x.limitCode } : {}) })) : [],
-          gatewayChecks: g.gatewayChecks && typeof g.gatewayChecks === 'object' ? g.gatewayChecks : null,
-          // Phase 18: Gateway が決定的に選んだ Pattern Library の pattern（表示・Audit 用。知識本体は来ない）
-          patterns: Array.isArray(g.patterns) ? g.patterns.filter(p => p && typeof p.id === 'string').map(p => ({ id: p.id, purpose: String(p.purpose ?? ''), implementation: typeof p.implementation === 'string' ? p.implementation : null, preferredStandardAlternatives: Array.isArray(p.preferredStandardAlternatives) ? p.preferredStandardAlternatives.filter(x => typeof x === 'string') : [] })) : [],
-          requestId: r.meta?.requestId ?? null, usage: r.meta?.usage ?? null, ai: r.meta?.ai ?? null, budgetMeta: r.meta?.budget && typeof r.meta.budget === 'object' ? r.meta.budget : null, gatewayWarnings: r.meta?.normalization?.warnings ?? [],
-          //   §0e.4（2026-10-09）: 修復の呼び出しの観測（最後の修復の分）と生成工程の時間（契約 20 §15。数値・種類だけに整える）を落とさない（区間の記録と費用の見積もりに使う）
-          aiRepair: r.meta?.aiRepair && typeof r.meta.aiRepair === 'object' ? r.meta.aiRepair : null, timing: normalizeGenTiming(r.meta?.timing),
-          // 段階 C（契約 20 §12）: 生成と一体の検証結果。無い（古い Gateway）ときは null（Toolkit が入口で従来の形に合わせる）
-          verification: normalizeVerification(r.verification),
-        },
-      };
-    }
-    /**
-     * §0e.4（2026-10-09）: 生成工程の meta.timing（契約 20 §15: { version, totalMs, ai: { count, ms, repairs }, calls: [{ kind, attempt, ms, ok, inputTokens, outputTokens }],
-     *   behavior: { ms, runs, calls } }）を数値・種類・真偽だけに整える。無い（古い Gateway）・形が違うときは null
-     */
-    function normalizeGenTiming(t) {
-      if (!t || typeof t !== 'object') return null;
-      const n = (v) => (v == null || v === '' || !Number.isFinite(Number(v)) || Number(v) < 0 ? null : Number(v));
-      const ai = t.ai && typeof t.ai === 'object' ? t.ai : {};
-      const b = t.behavior && typeof t.behavior === 'object' ? t.behavior : {};
-      return {
-        version: String(t.version ?? '').slice(0, 10), totalMs: n(t.totalMs),
-        ai: { count: n(ai.count), ms: n(ai.ms), repairs: n(ai.repairs) },
-        //   2026-10-15（§1.5）: 呼び出しごとの上流（AI プロバイダ）の観測 upstream（契約 20 §15 の 8 キー）も白リストで残す（無い・ストリームでない呼び出しは null）
-        calls: (Array.isArray(t.calls) ? t.calls : []).slice(0, 20).filter(c => c && typeof c === 'object').map(c => ({ kind: c.kind === 'repair' ? 'repair' : 'generate', attempt: n(c.attempt), ms: n(c.ms), ok: c.ok !== false, inputTokens: n(c.inputTokens), outputTokens: n(c.outputTokens), upstream: normalizeUpstream(c.upstream) })),
-        behavior: { ms: n(b.ms), runs: n(b.runs), calls: n(b.calls) },
-      };
-    }
-    /**
-     * 2026-10-15（§1.5・契約 20 §15 / §16）: 上流（AI プロバイダ）の観測 upstream を 8 キーの白リストに整える。
-     *   headersMs / firstEventMs / firstTextMs / lastProgressMs / endMs = 送信からの相対 ms、end = 終わり方（completed / incomplete / aborted など。文字列か null）、
-     *   textChars = 受信した本文の文字数（UTF-16 の長さの累計。token 数ではない）、deltaCount = 本文の断片の数。数は数か null。形が違えば null（本文は入れない）
-     */
-    const UPSTREAM_KEYS = Object.freeze(['headersMs', 'firstEventMs', 'firstTextMs', 'lastProgressMs', 'endMs', 'end', 'textChars', 'deltaCount']);
-    function normalizeUpstream(u) {
-      if (!u || typeof u !== 'object' || Array.isArray(u)) return null;
-      const n = (v) => (v == null || v === '' || !Number.isFinite(Number(v)) || Number(v) < 0 ? null : Number(v));
-      const out = {};
-      for (const k of UPSTREAM_KEYS) out[k] = k === 'end' ? (typeof u.end === 'string' && u.end.trim() ? u.end.trim().slice(0, 40) : null) : n(u[k]);
-      return out;
-    }
-    /** §0c.9: 入口で受ける動作テストの代表条件の上限（Gateway の最大 PC・モバイル 192 件＋skipped より十分に大きい。超えたら truncated で合格にしない） */
-    const KT_BEHAVIOR_CASES_MAX = 1000;
-    /**
-     * 契約 20 §12 の verification を Toolkit の形に（語彙外は落とす。指紋は 16 桁の 16 進だけ）。
-     *   2026-10-18: Toolkit が結び付けに使うのは書き込む本文の指紋 bodyHash（候補の指紋 candidateHash は生成工程の中の判定のもので、Toolkit は見ない）
-     */
-    function normalizeVerification(v) {
-      if (!v || typeof v !== 'object') return null;
-      const str = (x, n = 300) => String(x ?? '').slice(0, n);
-      const hash = typeof v.bodyHash === 'string' && /^[0-9a-f]{16}$/i.test(v.bodyHash) ? v.bodyHash.toLowerCase() : null;
-      const machine = (Array.isArray(v.machine) ? v.machine : []).filter(x => x && typeof x.name === 'string').slice(0, 40).map(x => ({ name: str(x.name, 40), ok: x.ok === true, severity: ['block', 'review', 'info'].includes(x.severity) ? x.severity : (x.ok === true ? 'info' : 'review'), message: str(x.message), ...(Number.isFinite(Number(x.count)) ? { count: Number(x.count) } : {}) }));
-      const rp = v.repairs && typeof v.repairs === 'object' ? v.repairs : {};
-      // §0c.3 の 5（2026-10-08）: 必須の効果の構造の有無と動作テスト（隔離環境の模擬）の結果。返さない旧い Gateway では持たない（「非対応」として扱う。合格に読み替えない）
-      //   §0c.6: 要件の id は requirementIds（配列）も受ける。unchecked（本文を解析できない）は missing に変えない（未確認として表示する）
-      const idsOf = (x) => [...new Set([...(Array.isArray(x.requirementIds) ? x.requirementIds : []), x.requirementId].filter(y => typeof y === 'string' && y).map(y => str(y, 40)))].slice(0, 20);
-      //   §0d.1（2026-10-08）: 効果ごとの確かめ方（check: machine = 機械検査で足りる / behavior = 模擬テストが要る）・その理由（checkReason。語の配列）・
-      //   イベントごとの有無（events: [{ event, status }]）を落とさない。語彙外の check は持たない（machine に読み替えない）
-      //   checkReason は先頭の理由（文字列）、checkReasons はすべて（配列）。両方を 1 つの配列にまとめる。events の status は present・missing・unchecked と、
-      //   生成工程が数えないイベントの印（other-platform・not-on-create）。語彙外は missing（present に読み替えない）
-      const listOf = (a) => (Array.isArray(a) ? a : typeof a === 'string' ? [a] : []);
-      const checkReasonOf = (x) => [...new Set([...listOf(x.checkReason), ...listOf(x.checkReasons)].filter(y => typeof y === 'string' && y.trim()).map(y => str(y.trim(), 200)))].slice(0, 10);
-      const EVENT_STATUS = ['present', 'missing', 'unchecked', 'other-platform', 'not-on-create'];
-      const effectEventsOf = (x) => (Array.isArray(x.events) ? x.events : []).filter(y => y && typeof y === 'object' && typeof y.event === 'string' && y.event).slice(0, 40).map(y => ({ event: str(y.event, 120), status: EVENT_STATUS.includes(y.status) ? y.status : 'missing' }));
-      //   2026-10-21（AI版 契約 20 §21）: 生成工程が確かめた移植元（{ file, target, events }。候補の一覧ではない）。無ければ持たない
-      const sourceOf = (c) => (c && typeof c === 'object' && !Array.isArray(c) && typeof c.file === 'string' && c.file ? { file: str(c.file, 300), target: c.target === 'mobile' ? 'mobile' : 'desktop', events: (Array.isArray(c.events) ? c.events : []).filter(e => typeof e === 'string' && e).slice(0, 20).map(e => str(e, 120)) } : null);
-      const requiredEffects = Array.isArray(v.requiredEffects) ? v.requiredEffects.filter(x => x && typeof x.field === 'string' && KT_EFFECTS.includes(x.effect)).slice(0, 80).map(x => ({ requirementId: idsOf(x)[0] || '', requirementIds: idsOf(x), field: str(x.field, 200), effect: x.effect, status: x.status === 'present' ? 'present' : x.status === 'unchecked' ? 'unchecked' : 'missing', ...(typeof x.message === 'string' ? { message: str(x.message) } : {}), ...(x.check === 'machine' || x.check === 'behavior' ? { check: x.check } : {}), ...(checkReasonOf(x).length ? { checkReason: checkReasonOf(x) } : {}), ...(Array.isArray(x.events) ? { events: effectEventsOf(x) } : {}), ...(sourceOf(x.conditionFrom) ? { conditionFrom: sourceOf(x.conditionFrom) } : {}) })) : null;
-      const bh = v.behavior && typeof v.behavior === 'object' ? v.behavior : null;
-      const VERDICTS = ['pass', 'fail', 'not-run'];
-      //   §0c.6: 代表条件ごとの実行できなかった理由（reason。区分は KT_BEHAVIOR_REASONS）・候補の例外などの原因（cause）・イベント・条件も保つ（表示と判定は構造化した値で）
-      //   §0c.9（2026-10-08）: 動作テストの結果を入口で切らない。上限は Gateway の最大（platform ごとに 96 件の実行と skipped。PC とモバイルで 192 件＋skipped）より十分に大きい
-      //   KT_BEHAVIOR_CASES_MAX 件。それでも超えたら truncated の印を付け、Toolkit の判定（effectResults）は合格にしない（切った後ろに fail・limit があるかもしれない）。
-      //   代表条件の side（match / nomatch）・kind・platform・details（condition-value-unknown の値・既存 JS のファイル名など）を落とさない（二重の安全と次の手の依頼の文で使う）
-      const rawCases = bh && Array.isArray(bh.cases) ? bh.cases.filter(x => x && typeof x === 'object') : [];
-      const detailsOf = (d) => {
-        if (!d || typeof d !== 'object' || Array.isArray(d)) return null;
-        const o = {};
-        for (const [k, val] of Object.entries(d).slice(0, 20)) {
-          if (typeof val === 'string') o[str(k, 40)] = str(val);
-          else if (typeof val === 'number' || typeof val === 'boolean') o[str(k, 40)] = val;
-          //   契約 20 §13: existing-unverifiable / unsupported（読み込み）の details.files は [{ name, kinds[] }]。Toolkit はファイル名（name）だけを文字列で持つ
-          //   （結合の回帰で、オブジェクトの要素が落ちて「対応できない範囲」にファイル名が出なかった）
-          else if (Array.isArray(val)) o[str(k, 40)] = val.map(y => (y && typeof y === 'object' && typeof y.name === 'string' ? y.name : y)).filter(y => typeof y === 'string' || typeof y === 'number').slice(0, 20).map(y => str(y, 200));
-        }
-        //   §0c.10（2026-10-08）: files の { name, kinds[], apis[] } の種類と API の名前は fileKinds に残す（「対応できない範囲」の詳細表示にファイルごとの事情を出す。files は名前の文字列のまま）
-        const fk = Array.isArray(d.files) ? d.files.filter(y => y && typeof y === 'object' && typeof y.name === 'string').slice(0, 20).map(y => {
-          const list = (a) => (Array.isArray(a) ? a.filter(z => typeof z === 'string' && z).slice(0, 10).map(z => str(z, 80)) : []);
-          return { name: str(y.name, 200), kinds: list(y.kinds), apis: list(y.apis) };
-        }) : [];
-        if (fk.length) o.fileKinds = fk;
-        return Object.keys(o).length ? o : null;
-      };
-      //   C-1 第 4 段（2026-10-09）: 模擬テストの条件（conditions）と確かめていない範囲（uncheckedScope）は、生成工程が返した文をそのまま持つ（Toolkit で一覧を作らない）。
-      //   要素は文字列か { text }（key などは画面に出さない）。uncheckedScope は behavior の中を優先し、無ければ verification の直下も受ける
-      const textsOf = (a) => [...new Set((Array.isArray(a) ? a : []).map(y => (typeof y === 'string' ? y : y && typeof y === 'object' && typeof y.text === 'string' ? y.text : '')).map(y => y.trim()).filter(Boolean).map(y => str(y, 600)))].slice(0, 30);
-      //   conditions が null（生成工程が隔離環境の応答を得ていない）なら conditionsNotRun の印だけを持つ（条件を推測して出さない）
-      const scopeOf = bh ? { ...(Array.isArray(bh.conditions) ? { conditions: textsOf(bh.conditions) } : bh.conditions === null ? { conditionsNotRun: true } : {}), ...(Array.isArray(bh.uncheckedScope) ? { uncheckedScope: textsOf(bh.uncheckedScope) } : Array.isArray(v.uncheckedScope) ? { uncheckedScope: textsOf(v.uncheckedScope) } : {}) } : {};
-      //   2026-10-10（§4.3）: 移植元と同じ動きかを比べた代表条件（expect same-as-source）の移植元（refFile・refEvent）と、比べた移植元の動き（reference: 止めたか・
-      //   その役割が設定したエラー・event.error）を落とさない（最終案の代表条件の一覧に「移植元: 止める（エラー「…」）」を出す根拠）
-      const behaviorOf = (o) => {
-        if (!o || typeof o !== 'object' || Array.isArray(o)) return null;
-        const errors = o.errors && typeof o.errors === 'object' && !Array.isArray(o.errors) ? Object.fromEntries(Object.entries(o.errors).slice(0, 20).filter(([, t]) => typeof t === 'string').map(([k, t]) => [str(k, 200), str(t, 200)])) : {};
-        return { stopped: o.stopped === true, errors, eventError: typeof o.eventError === 'string' && o.eventError ? str(o.eventError, 200) : null };
-      };
-      const portOf = (x) => ({ ...(x.refFile && typeof x.refFile === 'object' && typeof x.refFile.file === 'string' ? { refFile: { file: str(x.refFile.file, 300), target: x.refFile.target === 'mobile' ? 'mobile' : 'desktop' } } : {}), ...(typeof x.refEvent === 'string' && x.refEvent ? { refEvent: str(x.refEvent, 120) } : {}), ...(behaviorOf(x.reference) ? { reference: behaviorOf(x.reference) } : {}) });
-      const behavior = bh ? { status: ['passed', 'failed', 'not-run'].includes(bh.status) ? bh.status : 'not-run', reason: typeof bh.reason === 'string' ? str(bh.reason, 40) : null, ...(typeof bh.reasonText === 'string' ? { reasonText: str(bh.reasonText) } : {}), ...scopeOf, ...(rawCases.length > KT_BEHAVIOR_CASES_MAX ? { truncated: true, totalCases: rawCases.length } : {}), cases: rawCases.slice(0, KT_BEHAVIOR_CASES_MAX).map(x => { const det = detailsOf(x.details); return { id: str(x.id, 40), requirementId: idsOf(x)[0] || '', requirementIds: idsOf(x), field: str(x.field, 200), effect: KT_EFFECTS.includes(x.effect) ? x.effect : null, expect: str(x.expect, 40), verdict: VERDICTS.includes(x.verdict) ? x.verdict : 'not-run', observed: x.observed ?? null, message: str(x.message), ...(typeof x.note === 'string' ? { note: str(x.note, 200) } : {}), ...(typeof x.reason === 'string' && x.reason ? { reason: str(x.reason, 40) } : {}), ...(typeof x.reasonCategory === 'string' && x.reasonCategory ? { reasonCategory: str(x.reasonCategory, 40) } : {}), ...(typeof x.cause === 'string' && x.cause ? { cause: str(x.cause, 40) } : {}), ...(typeof x.event === 'string' ? { event: str(x.event, 120) } : {}), ...(typeof x.condition === 'string' ? { condition: str(x.condition) } : {}), ...(x.side === 'match' || x.side === 'nomatch' ? { side: x.side } : {}), ...(typeof x.kind === 'string' && x.kind ? { kind: str(x.kind, 40) } : {}), ...(x.platform === 'desktop' || x.platform === 'mobile' ? { platform: x.platform } : {}), ...portOf(x), ...(det ? { details: det } : {}) }; }) } : null;
-      //   2026-10-10（§3.3）: 修復しなかった理由（最後の候補の模擬テストの not-run のうち case-invalid・condition-unknown を理由ごとに数えたもの）を落とさない
-      const notRepaired = (Array.isArray(rp.notRepaired) ? rp.notRepaired : []).filter(x => x && typeof x.reason === 'string' && x.reason && Number.isFinite(Number(x.count)) && Number(x.count) > 0).slice(0, 10).map(x => ({ reason: str(x.reason, 40), category: typeof x.category === 'string' ? str(x.category, 40) : null, count: Number(x.count) }));
-      //   2026-10-20（AI版 契約 20 §21）: 動作テストで動かさなかった既存 JS（Toolkit が送れなかったものと、生成工程が動かさなかったもの）と、生成工程が本文から読んだ登録
-      //   （読めなければ null = その platform のすべて）。語彙外の理由は other。イベントが多すぎるときも null（切って重なりを見落とさない）
-      const relatedOmitted = Array.isArray(v.relatedOmitted) ? v.relatedOmitted.filter(o => o && typeof o.name === 'string' && o.name).slice(0, 100).map(o => { const evs = Array.isArray(o.events) ? [...new Set(o.events.filter(e => typeof e === 'string' && e).map(e => str(e, 120)))] : null; return { name: str(o.name, 200), target: o.target === 'mobile' ? 'mobile' : 'desktop', reason: KTContext.RELATED_OMIT_REASONS.includes(o.reason) ? o.reason : 'other', events: evs && evs.length <= 200 ? evs : null }; }) : null;
-      return { version: str(v.version || '1', 8), bodyHash: hash, sameAsPrevious: v.sameAsPrevious === true, passed: v.passed === true, machine, repairs: { count: Number.isFinite(Number(rp.count)) ? Number(rp.count) : 0, reasons: (Array.isArray(rp.reasons) ? rp.reasons : []).filter(x => typeof x === 'string').slice(0, 10).map(x => str(x, 120)), stoppedBy: ['limit', 'budget', 'time', 'same-failure', 'error'].includes(rp.stoppedBy) ? rp.stoppedBy : null, ...(notRepaired.length ? { notRepaired } : {}) }, unverified: (Array.isArray(v.unverified) ? v.unverified : []).filter(x => typeof x === 'string').slice(0, 10).map(x => str(x)), ...(requiredEffects ? { requiredEffects } : {}), ...(behavior ? { behavior } : {}), ...(relatedOmitted ? { relatedOmitted } : {}) };
-    }
-
-    /**
-     * Change Plan の応答を送信した Planner Context で再検証する（Worker の検証と二重。未知の根拠ID は除去、
-     * 存在しない既存資産（dictionary に無い fieldCode / ステータス / 通知 / 一覧）への参照は invalid にして warnings に記録）
-     * @returns {{ ok:boolean, errors:Array, warnings:Array, normalized:object|null }}
-     */
-    function validatePlan(response, ctx) {
-      const errors = [], warnings = [];
-      const r = response || {};
-      if (r.ok !== true) { errors.push({ code: ERROR_CODES.INVALID_RESPONSE, path: 'ok', message: 'ok:true ではありません' }); return { ok: false, errors, warnings, normalized: null }; }
-      if (r.contractVersion !== CONTRACT_VERSION) errors.push({ code: ERROR_CODES.UNSUPPORTED_CONTRACT_VERSION, path: 'contractVersion', message: `contractVersion が一致しません: ${r.contractVersion}` });
-      const p = r.plan;
-      if (!p || typeof p !== 'object' || typeof p.goal !== 'string' || !Array.isArray(p.steps) || !p.assessment) errors.push({ code: ERROR_CODES.INVALID_RESPONSE, path: 'plan', message: 'plan がありません' });
-      if (errors.length) return { ok: false, errors, warnings, normalized: null };
-      const known = new Set((ctx?.facts || []).map(x => x.id));
-      const dict = ctx?.dictionary || {};
-      const setOf = (k) => new Set(Array.isArray(dict[k]) ? dict[k] : []);
-      const D = { FIELD: setOf('fieldCodes'), LOOKUP: setOf('fieldCodes'), FIELD_ACL: setOf('fieldCodes'), PROCESS_STATUS: setOf('statuses'), PROCESS_ACTION: setOf('processActions'), NOTIFICATION: setOf('notifications'), REMINDER: setOf('reminders'), VIEW: setOf('views'), REPORT: setOf('reports'), APP_ACTION: setOf('appActions'), JS: setOf('jsFiles') };
-      const ids = (list, path) => { const kept = []; for (const id of Array.isArray(list) ? list : []) { if (known.has(id)) { if (!kept.includes(id)) kept.push(id); } else warnings.push({ code: 'UNKNOWN_EVIDENCE_REMOVED', path, message: `未知の根拠ID を除去しました: ${id}` }); } return kept; };
-      const proposedIds = new Set((p.proposedFields || []).map(x => x.temporaryId));
-      const addKinds = { ADD_FIELD: 'PROPOSED_FIELD', ADD_PROCESS_STATUS: 'PROCESS_STATUS', ADD_PROCESS_ACTION: 'PROCESS_ACTION', ADD_NOTIFICATION: 'NOTIFICATION', ADD_REMINDER: 'REMINDER', ADD_VIEW: 'VIEW', ADD_APP_ACTION: 'APP_ACTION' };
-      const relevantFields = (p.relevantFields || []).filter(x => { const ok = D.FIELD.has(x.fieldCode); if (!ok) warnings.push({ code: 'HALLUCINATED_EXISTING_REMOVED', path: 'relevantFields', message: `存在しないフィールド「${x.fieldCode}」を除去しました` }); return ok; }).map(x => ({ ...x, evidenceIds: ids(x.evidenceIds, 'relevantFields') }));
-      const assessment = { ...p.assessment, usableExistingFields: (p.assessment.usableExistingFields || []).filter(x => D.FIELD.has(x.fieldCode)).map(x => ({ ...x, evidenceIds: ids(x.evidenceIds, 'assessment') })), usableExistingSettings: (p.assessment.usableExistingSettings || []).map(x => ({ ...x, evidenceIds: ids(x.evidenceIds, 'assessment') })) };
-      const proposedFields = (p.proposedFields || []).map((x, i) => ({ ...x, evidenceIds: ids(x.evidenceIds, `proposedFields[${i}]`), codeConflict: x.codeConflict || D.FIELD.has(x.suggestedCode), labelDuplicate: x.labelDuplicate || setOf('fieldLabels').has(x.label) }));
-      const steps = (p.steps || []).map((st, i) => {
-        // Gateway の確認待ちの印（validation.pending = 'ACTOR'。契約 16 §3a）は捨てずに運ぶ（値は 'ACTOR' だけ受ける。再レビュー 2026-10-07: ここで落ちて Review に届いていなかった）
-        const v = { status: st.validation?.status || 'ok', issues: [...(st.validation?.issues || [])], ...(st.validation?.pending === 'ACTOR' ? { pending: 'ACTOR' } : {}) };
-        if (st.targetKind === 'PROPOSED_FIELD') { if (!proposedIds.has(st.targetRef)) { v.status = 'invalid'; v.issues.push(`新規フィールド ${st.targetRef} が提案に無い`); } }
-        else if (st.targetRef && D[st.targetKind] && !D[st.targetKind].has(st.targetRef) && addKinds[st.actionType] !== st.targetKind && !['REQUIRE_CONFIRMATION', 'CUSTOMIZATION_REQUIRED', 'UPDATE_PROCESS', 'UPDATE_RECORD_ACL'].includes(st.actionType)) {
-          v.status = 'invalid'; v.issues.push(`存在しない${st.targetKind}「${st.targetRef}」を既存として参照`);
-          warnings.push({ code: 'HALLUCINATED_EXISTING_STEP', path: `steps[${i}]`, message: `${st.id}: 存在しない${st.targetKind}「${st.targetRef}」を既存として参照しています` });
-        }
-        return { ...st, evidenceIds: ids(st.evidenceIds, `steps[${i}]`), dependsOn: Array.isArray(st.dependsOn) ? st.dependsOn : [], validation: v, execution: st.execution || { mode: 'PLAN_ONLY', supported: false, reason: 'Planner MVP では自動変更未実装' } };
-      });
-      const impact = (p.impact || []).map((x, i) => ({ ...x, evidenceIds: ids(x.evidenceIds, `impact[${i}]`) }));
-      const questions = (p.questions || []).map((x, i) => ({ ...x, relatedEvidenceIds: ids(x.relatedEvidenceIds, `questions[${i}]`) }));
-      // Phase 16: Customization Plan（形だけ正規化。イベント目録・フィールドの実在・既存 JS との競合は KTPlanReview.reviewCustomization が検証する）
-      const strs = (a) => (Array.isArray(a) ? a.filter(x => typeof x === 'string' && x.trim()) : []);
-      const customizations = (Array.isArray(p.customizations) ? p.customizations : []).filter(c => c && typeof c === 'object' && typeof c.customizationId === 'string').map((c, i) => ({
-        customizationId: c.customizationId, requirement: String(c.requirement ?? ''), whyStandardInsufficient: String(c.whyStandardInsufficient ?? ''),
-        strategy: typeof c.strategy === 'string' ? c.strategy : null, platform: strs(c.platform).filter(x => x === 'desktop' || x === 'mobile'),
-        implementation: ['JAVASCRIPT', 'CSS', 'JS_CSS'].includes(c.implementation) ? c.implementation : 'JAVASCRIPT',   // Phase 18（Gateway validate-plan と同じ既定）
-        events: strs(c.events), fields: (Array.isArray(c.fields) ? c.fields : []).filter(f => f && typeof f.code === 'string').map(f => { const ef0 = ktFieldEffectsOf(f.effects); const ef = f.access === 'SHOW_HIDE' && !(ef0 || []).some(x => x.effect === 'show-hide') ? [...(ef0 || []), { effect: 'show-hide', condition: '' }] : ef0; return { code: f.code, access: ['READ', 'WRITE', 'CONTROL'].includes(f.access) ? f.access : f.access === 'SHOW_HIDE' ? 'CONTROL' : 'READ', ...(typeof f.condition === 'string' && f.condition.trim() ? { condition: f.condition.trim().slice(0, 300) } : {}), ...(ef ? { effects: ef } : {}) }; }),   // §0c.2 / §0c.6（2026-10-08）: effects = そのフィールドで求める効果と効果ごとの条件 [{ effect, condition }]（未指定は持たない。旧い文字列の配列は condition "" に変換）。旧い SHOW_HIDE は Gateway と同じく CONTROL ＋ show-hide   // Phase 21: condition = そのフィールドを制御・変更する条件（任意）
-        apis: strs(c.apis), existingFiles: (Array.isArray(c.existingFiles) ? c.existingFiles : []).filter(f => f && typeof f.name === 'string').map(f => ({ name: f.name, target: f.target === 'mobile' ? 'mobile' : 'desktop', reason: String(f.reason ?? '') })),
-        risks: strs(c.risks), questions: strs(c.questions), dependsOn: strs(c.dependsOn), evidenceIds: ids(c.evidenceIds, `customizations[${i}]`),
-      })).map((c, i) => {
-        // §0c.7 の補い（2026-10-08）: 効果ごとのイベントは customization の events に含める（無いイベントは events に足し、正規化の記録を残す。Gateway validate-plan と同じ）
-        const effEvents = c.fields.flatMap(f => (Array.isArray(f.effects) ? f.effects : []).flatMap(x => (Array.isArray(x.events) ? x.events : [])));
-        const addEv = [...new Set(effEvents.filter(e => !c.events.includes(e)))];
-        if (addEv.length) { c.events = [...c.events, ...addEv]; warnings.push({ code: 'CUSTOMIZATION_EFFECT_EVENTS_ADDED', path: `customizations[${i}].events`, message: `${c.customizationId}: 効果のイベント（${addEv.join(', ')}）を events に足しました` }); }
-        //   簡素化（2026-10-17）: 回答済みの PC / モバイルの再質問を外す・platform を決定事項で補う・PC / モバイルの要否を質問しながら両方なら空にする・
-        //   要件の文の語（警告・編集不可など）で唯一の READ を CONTROL にする正規化は、Gateway の validate-plan（normalizeChangePlan）が全体の作り直しにも
-        //   差分にも同じ規則で通すので、ここではやり直さない（要件の文を Toolkit が読み直さない）
-        return c;
-      });
-      const custSteps = steps.filter(st => st.actionType === 'CUSTOMIZATION_REQUIRED' && st.spec?.customizationId);
-      for (const st of custSteps) if (!customizations.some(c => c.customizationId === st.spec.customizationId)) warnings.push({ code: 'CUSTOMIZATION_MISSING', path: 'customizations', message: `${st.id} の customization ${st.spec.customizationId} が plan.customizations にありません` });
-      const hasStd = steps.some(st => !st.alternativeId && st.actionType !== 'CUSTOMIZATION_REQUIRED' && st.actionType !== 'REQUIRE_CONFIRMATION');
-      const solution = ['STANDARD', 'CUSTOMIZATION', 'HYBRID', 'UNKNOWN'].includes(p.solution) ? p.solution : (custSteps.length ? (hasStd ? 'HYBRID' : 'CUSTOMIZATION') : 'STANDARD');
-      return {
-        ok: true, errors, warnings,
-        normalized: {
-          ...p, assessment, relevantFields, proposedFields, steps, impact, questions, customizations, solution,
-          requestId: r.meta?.requestId ?? null, usage: r.meta?.usage ?? null, ai: r.meta?.ai ?? null, budgetMeta: r.meta?.budget && typeof r.meta.budget === 'object' ? r.meta.budget : null, gatewayWarnings: r.meta?.normalization?.warnings ?? [],
-          // 会話の応答性（2026-10-05）: Gateway が決定事項を受け取った証（古い Gateway は返さない＝黙って無視した）
-          decisionsMeta: r.meta?.decisions ?? null,
-          // 計画の修正の方式（patch = 変わる箇所だけ / full = 全体。差分から全体に切り替えた理由）。古い Gateway は返さない
-          revisionMeta: r.meta?.revision ?? null,
-          // 2026-10-05 第 3 段: 今回の発言の扱い（返答・要件の追加 / 変更 / 取り消し・発言の各部分の扱い）と、要件を受け取った証。古い Gateway は返さない
-          turn: r.turn && typeof r.turn === 'object' ? r.turn : null, requirementsMeta: r.meta?.requirements ?? null,
-        },
-      };
-    }
-
-    /**
-     * 応答の根拠ID を送信した ctx.facts[].id で再検証する（Worker の検証と二重。未知 ID は除去して warnings に記録）
-     * @returns {{ ok:boolean, errors:Array, warnings:Array, normalized:object|null }}
-     */
-    // ---- 会話フローの再設計 段階 B（2026-10-07）: 仮案の経路（assistant-qa の conversation mode proposal。契約 13 §11）----
-    /** 仮案の応答の intent の語彙（語彙に無いものは unclear として扱う） */
-    const PROPOSAL_INTENTS = Object.freeze(['propose', 'update', 'adopt', 'question', 'smalltalk', 'unclear']);
-    /**
-     * 仮案の動作の出どころ（契約 13 §11.6）: user = 利用者の発言にあるもの（入れると言った提案を含む）/ ai = 依頼を実現するために AI が補ったもの /
-     * suggestion = 依頼に無い AI の任意の提案（§0e.2・2026-10-09。採用の既定に含めない・計画の依頼文に入れない）。語彙に無い値は ai
-     */
-    const PROPOSAL_ORIGINS = Object.freeze(['user', 'ai', 'suggestion']);
-    /**
-     * 仮案の応答（mode proposal）の検証と正規化。Gateway の正規化（§11.3）を信頼しつつ、形が崩れていれば直して clientWarnings に残す
-     * （件数 8 / 8 / 4・options 5・approach と cannot 各 6・文字数・key の正規化と重複・blocking 2 件まで・turn の形）。項目の id は Gateway のまま使う（2026-10-19）。
-     * ok でない・契約の版が違う・reply が無い・項目の id の形が崩れている（重複を含む）ときだけ失敗にする
-     * @returns {{ ok:boolean, errors:Array, warnings:Array, normalized:object|null }}
-     */
-    /** 2026-10-15（§3.2）: 進行を求める語句（adoptQuote）の照合（空白・句読点・括弧を除いた部分一致。2 文字以上） */
-    const normQuoteText = (s) => String(s ?? '').replace(/[\s　、。．，,.!！?？「」『』（）()［］\[\]・:：;；…〜~]/g, '');
-    /**
-     * @param {object} response Gateway の応答
-     * @param {{ utterance?: string|null }} o utterance = 今回の発言（adoptQuote の照合に使う。無ければ照合できないので語句があれば adopt のまま）
-     */
-    function validateProposal(response, { utterance = null } = {}) {
-      const errors = [], warnings = [];
-      const r = response || {};
-      const warn = (code, path, message) => warnings.push({ code, path, message });
-      if (r.ok !== true) { errors.push({ code: ERROR_CODES.INVALID_RESPONSE, path: 'ok', message: 'ok:true ではありません' }); return { ok: false, errors, warnings, normalized: null }; }
-      if (r.contractVersion !== CONTRACT_VERSION) errors.push({ code: ERROR_CODES.UNSUPPORTED_CONTRACT_VERSION, path: 'contractVersion', message: `contractVersion が一致しません: ${r.contractVersion}` });
-      if (typeof r.reply !== 'string' || !r.reply.trim()) errors.push({ code: ERROR_CODES.INVALID_RESPONSE, path: 'reply', message: 'reply がありません' });
-      if (errors.length) return { ok: false, errors, warnings, normalized: null };
-      const str = (v, max, path) => { if (typeof v !== 'string') return ''; const s = v.trim(); if (s.length > max) { warn('PROPOSAL_TEXT_TRUNCATED', path, `${max} 文字に切り詰めました`); return s.slice(0, max); } return s; };
-      const list = (v, max, path) => { const a = Array.isArray(v) ? v : []; if (a.length > max) warn('PROPOSAL_LIST_TRUNCATED', path, `${max} 件に切り詰めました（${a.length} 件）`); return a.slice(0, max); };
-      // key は小文字の英数字と . _ だけ（空白・ハイフンは _）。空なら other。1 つの仮案の中で同じ key になったら _2 … を付ける
-      const keyOf = (v, path) => {
-        const raw = typeof v === 'string' ? v.trim() : '';
-        const k = raw.toLowerCase().replace(/[\s-]+/g, '_').replace(/[^a-z0-9._]/g, '').slice(0, 60);
-        if (k !== raw) warn(k ? 'PROPOSAL_KEY_NORMALIZED' : 'PROPOSAL_KEY_EMPTY', path, `key を正規化しました: ${raw || '（空）'} → ${k || 'other'}`);
-        return k || 'other';
-      };
-      const seenKeys = new Set();
-      const uniqKey = (k, path) => { let out = k, n = 2; while (seenKeys.has(out)) out = `${k}_${n++}`; if (out !== k) warn('PROPOSAL_KEY_DUPLICATE', path, `key が重複したため ${out} にしました`); seenKeys.add(out); return out; };
-      //   2026-10-19（契約 13 §11.11）: 項目の id は Gateway がターンをまたいで保ったもの（前回からの項目はその id・新しい項目は使った番号の続き）。そのまま使い、
-      //   形（B… / A… / Q…）と重複だけを確かめる（崩れていれば結び付きが壊れた応答として失敗にする。前は出力の順で B1… / A1… / Q1… に振り直していた）
-      const seenIds = new Set();
-      const idOf = (x, prefix, path) => { const id = x && typeof x.id === 'string' ? x.id.trim() : ''; if (!new RegExp(`^${prefix}[1-9][0-9]{0,2}$`).test(id) || seenIds.has(id)) errors.push({ code: ERROR_CODES.INVALID_RESPONSE, path, message: `仮案の項目の id が不正か重複しています（${id || '空'}）` }); seenIds.add(id); return id; };
-      const p = r.proposal && typeof r.proposal === 'object' ? r.proposal : {};
-      const behaviors = list(p.behaviors, 8, 'proposal.behaviors')
-        .map((x, i) => ({ id: idOf(x, 'B', `proposal.behaviors[${i}].id`), text: str(x && x.text, 400, `proposal.behaviors[${i}].text`), origin: x && PROPOSAL_ORIGINS.includes(x.origin) ? x.origin : 'ai' }))
-        .filter(x => x.text);
-      const assumptions = list(p.assumptions, 8, 'proposal.assumptions')
-        .map((x, i) => ({ id: idOf(x, 'A', `proposal.assumptions[${i}].id`), key: keyOf(x && x.key, `proposal.assumptions[${i}].key`), label: str(x && x.label, 60, `proposal.assumptions[${i}].label`), text: str(x && x.text, 400, `proposal.assumptions[${i}].text`), changeHint: str(x && x.changeHint, 400, `proposal.assumptions[${i}].changeHint`) }))
-        .filter(x => x.text).map((x, i) => ({ ...x, key: uniqKey(x.key, `proposal.assumptions[${i}].key`) }));
-      let blockingN = 0;
-      const decisions = list(p.decisions, 4, 'proposal.decisions')
-        .map((x, i) => ({
-          id: idOf(x, 'Q', `proposal.decisions[${i}].id`), key: keyOf(x && x.key, `proposal.decisions[${i}].key`), label: str(x && x.label, 60, `proposal.decisions[${i}].label`), question: str(x && x.question, 400, `proposal.decisions[${i}].question`),
-          options: list(x && x.options, 5, `proposal.decisions[${i}].options`).map((o, j) => str(o, 120, `proposal.decisions[${i}].options[${j}]`)).filter(Boolean),
-          recommendation: str(x && x.recommendation, 400, `proposal.decisions[${i}].recommendation`), impact: str(x && x.impact, 400, `proposal.decisions[${i}].impact`), blocking: !!(x && x.blocking === true),
-        }))
-        .filter(x => x.question)
-        .map((x, i) => {
-          let blocking = x.blocking;
-          if (blocking) { blockingN += 1; if (blockingN > 2) { blocking = false; warn('PROPOSAL_BLOCKING_LIMIT', `proposal.decisions[${i}].blocking`, '先に必要な判断は 2 件まで（3 件目からは後で決めてよい扱い）'); } }
-          return { ...x, key: uniqKey(x.key, `proposal.decisions[${i}].key`), blocking };
-        });
-      if (errors.length) return { ok: false, errors, warnings, normalized: null };
-      const ap = p.approach && typeof p.approach === 'object' ? p.approach : {};
-      const approach = {
-        standard: list(ap.standard, 6, 'proposal.approach.standard').map((s, i) => str(s, 400, `proposal.approach.standard[${i}]`)).filter(Boolean),
-        js: list(ap.js, 6, 'proposal.approach.js').map((s, i) => str(s, 400, `proposal.approach.js[${i}]`)).filter(Boolean),
-      };
-      const cannot = list(p.cannot, 6, 'proposal.cannot').map((s, i) => str(s, 400, `proposal.cannot[${i}]`)).filter(Boolean);
-      let intent = typeof r.intent === 'string' ? r.intent : '';
-      if (!PROPOSAL_INTENTS.includes(intent)) { warn('PROPOSAL_INTENT_INVALID', 'intent', `語彙に無い intent（${intent || '空'}）を unclear にしました`); intent = 'unclear'; }
-      if (intent === 'adopt' && decisions.some(d => d.blocking)) { warn('PROPOSAL_ADOPT_WITH_BLOCKING', 'intent', '先に必要な判断が残るため update にしました'); intent = 'update'; }
-      const t = r.turn && typeof r.turn === 'object' ? r.turn : {};
-      //   2026-10-15（§3.2）: 進行を求める語句（adoptQuote）を返す Gateway では、adopt は今回の発言にその語句があるときだけ。空・見つからないときは update に下げる
-      //   （修正・回答だけの発言を採用と読まない）。キーの無い古い Gateway では今のまま。発言が渡されていない（照合できない）ときは語句があれば adopt のまま
-      const hasOwn = (o, k) => !!o && typeof o === 'object' && Object.prototype.hasOwnProperty.call(o, k);
-      const adoptQuoteRaw = hasOwn(r, 'adoptQuote') ? r.adoptQuote : hasOwn(t, 'adoptQuote') ? t.adoptQuote : undefined;
-      if (intent === 'adopt' && adoptQuoteRaw !== undefined) {
-        const q = normQuoteText(adoptQuoteRaw);
-        const found = q.length >= 2 && (typeof utterance !== 'string' || normQuoteText(utterance).includes(q));
-        if (!found) { warn('PROPOSAL_ADOPT_UNGROUNDED', 'adoptQuote', q ? '進行を求める語句が今回の発言に見つからないため update にしました' : '進行を求める語句（adoptQuote）が無いため update にしました'); intent = 'update'; }
+    const RECEIVE_REQUIRED = Object.freeze({
+      answer: (r) => (typeof r.answer === 'string' && r.answer.trim() ? null : 'answer がありません'),
+      proposal: (r) => (typeof r.reply !== 'string' || !r.reply.trim() ? 'reply がありません' : !(r.proposal && typeof r.proposal === 'object') ? 'proposal がありません' : !(r.turn && typeof r.turn === 'object') ? 'turn がありません' : null),
+      plan: (r) => (r.plan && typeof r.plan === 'object' && typeof r.plan.goal === 'string' && Array.isArray(r.plan.steps) && r.plan.assessment ? null : 'plan がありません'),
+      generated: (r) => {
+        const g = r.generated;
+        if (!g || typeof g !== 'object' || typeof g.code !== 'string' || !g.code.trim() || typeof g.strategy !== 'string') return 'generated（strategy・code）がありません';
+        if (g.strategy === 'EXTEND_EXISTING_JS' && (!g.patch || !Array.isArray(g.patch.operations) || !g.patch.operations.length)) return '既存ファイルへの統合の差分（patch）がありません';
+        //   統合の本文 body は文字列か null（契約 20 §20: 合成できなかった正常な応答は null・機械検査の patch の block。登録できないことは KTCodeReview の patch の確認が出す）
+        if (g.strategy === 'EXTEND_EXISTING_JS' && g.body != null && typeof g.body !== 'string') return '既存ファイルへの統合の本文（body）の形が違います';
+        const v = r.verification;
+        if (!v || typeof v !== 'object' || !Array.isArray(v.machine) || !Array.isArray(v.requiredEffects)) return '検証結果（verification の machine・requiredEffects）がありません';
+        return null;
+      },
+    });
+    function receive(kind, response, { requestId = null } = {}) {
+      const r = response && typeof response === 'object' ? response : {};
+      const fail = (code, message) => { throw new AiClientError({ code, message, details: { errors: [{ code, message }] }, requestId }); };
+      if (r.ok !== true) fail(ERROR_CODES.INVALID_RESPONSE, 'ok:true ではありません');
+      if (r.contractVersion !== CONTRACT_VERSION) fail(ERROR_CODES.UNSUPPORTED_CONTRACT_VERSION, `contractVersion が一致しません: ${r.contractVersion}`);
+      const why = RECEIVE_REQUIRED[kind](r);
+      if (why) fail(ERROR_CODES.INVALID_RESPONSE, why);
+      const m = r.meta && typeof r.meta === 'object' ? r.meta : {};
+      const meta = { requestId: m.requestId ?? requestId ?? null, usage: m.usage ?? null, ai: m.ai ?? null, budgetMeta: m.budget && typeof m.budget === 'object' ? m.budget : null,
+        gatewayWarnings: m.normalization && Array.isArray(m.normalization.warnings) ? m.normalization.warnings : [], clientWarnings: [] };
+      if (kind === 'answer' || kind === 'proposal') { const { ok: _ok, contractVersion: _cv, meta: _m, ...body } = r; return { ...body, ...(kind === 'proposal' ? { proposalUnchanged: m.proposalUnchanged === true } : {}), ...meta }; }
+      if (kind === 'plan') {
+        const out = { ...r.plan, decisionsMeta: m.decisions ?? null, revisionMeta: m.revision ?? null, turn: r.turn && typeof r.turn === 'object' ? r.turn : null, requirementsMeta: m.requirements ?? null, ...meta };
+        // 会話の応答性（2026-10-05）: Gateway が返した計画そのもの（次の差分の土台。写し）。Toolkit が書き換える計画とは別に持ち、列挙しない（計画を JSON にしても入らない）
+        Object.defineProperty(out, 'gatewayPlan', { value: JSON.parse(JSON.stringify(r.plan)), enumerable: false, writable: true, configurable: true });
+        return out;
       }
-      const OPS = ['adopt', 'reject', 'modify'];
-      const ops = list(t.ops, 20, 'turn.ops')
-        .map((o, i) => ({ id: o && typeof o.id === 'string' ? o.id.trim() : '', op: o && OPS.includes(o.op) ? o.op : null, text: str(o && o.text, 400, `turn.ops[${i}].text`), quote: str(o && o.quote, 400, `turn.ops[${i}].quote`) }))
-        .filter((o, i) => {
-          if (!o.id || !o.op) return false;
-          if (o.op === 'modify' && !o.text) { warn('PROPOSAL_OP_EMPTY_TEXT', `turn.ops[${i}]`, 'modify の text が空のため外しました'); return false; }
-          // 判断（Q…）への ops は reject だけ（「その判断は不要（推奨で進める）」）。答えは turn.answers
-          if (/^Q/.test(o.id) && o.op !== 'reject') { warn('PROPOSAL_OP_ON_DECISION', `turn.ops[${i}]`, '判断への adopt / modify は外しました'); return false; }
-          return true;
-        });
-      const answers = list(t.answers, 10, 'turn.answers')
-        .map((a, i) => ({ id: a && typeof a.id === 'string' ? a.id.trim() : '', kind: a && a.kind === 'delegated' ? 'delegated' : 'value', text: str(a && a.text, 400, `turn.answers[${i}].text`), quote: str(a && a.quote, 400, `turn.answers[${i}].quote`) }))
-        .filter(a => a.id && /^Q/.test(a.id) && (a.kind === 'delegated' || a.text));
-      const requirementOps = list(t.requirementOps, 20, 'turn.requirementOps').filter(o => o && typeof o === 'object');
-      // 相談・相づち・不明のときは仮案も要件も変えない（Gateway は前回の仮案をそのまま返し turn を空にする。形が崩れていても同じ扱い）
-      const unchanged = (r.meta && r.meta.proposalUnchanged === true) || ['question', 'smalltalk', 'unclear'].includes(intent);
-      if (unchanged && (ops.length || answers.length || requirementOps.length)) warn('PROPOSAL_TURN_DROPPED', 'turn', '仮案を変えない応答の turn を外しました');
-      return {
-        ok: true, errors, warnings,
-        normalized: {
-          reply: String(r.reply).trim().slice(0, 1200), intent,
-          proposal: { behaviors, assumptions, decisions, approach, cannot },
-          turn: unchanged ? { ops: [], answers: [], requirementOps: [] } : { ops, answers, requirementOps },
-          proposalUnchanged: unchanged,
-          requestId: r.meta?.requestId ?? null, usage: r.meta?.usage ?? null, ai: r.meta?.ai ?? null, budgetMeta: r.meta?.budget && typeof r.meta.budget === 'object' ? r.meta.budget : null,
-          gatewayWarnings: r.meta?.normalization?.warnings ?? [],
-        },
-      };
-    }
-    function validateAnswer(response, ctx) {
-      const errors = [], warnings = [];
-      const r = response || {};
-      if (r.ok !== true) { errors.push({ code: ERROR_CODES.INVALID_RESPONSE, path: 'ok', message: 'ok:true ではありません' }); return { ok: false, errors, warnings, normalized: null }; }
-      if (r.contractVersion !== CONTRACT_VERSION) errors.push({ code: ERROR_CODES.UNSUPPORTED_CONTRACT_VERSION, path: 'contractVersion', message: `contractVersion が一致しません: ${r.contractVersion}` });
-      if (typeof r.answer !== 'string' || !r.answer.trim()) errors.push({ code: ERROR_CODES.INVALID_RESPONSE, path: 'answer', message: 'answer がありません' });
-      const known = new Set((ctx?.facts || []).map(f => f.id));
-      const filter = (ids, path) => {
-        const kept = [];
-        for (const id of Array.isArray(ids) ? ids : []) {
-          if (known.has(id)) { if (!kept.includes(id)) kept.push(id); continue; }
-          warnings.push({ code: 'UNKNOWN_EVIDENCE_REMOVED', path, message: `未知の根拠ID を除去しました: ${id}` });
-        }
-        return kept;
-      };
-      const items = (list, path) => (Array.isArray(list) ? list : []).filter(x => x && typeof x.text === 'string' && x.text.trim())
-        .map((x, i) => ({ text: x.text, evidenceIds: filter(x.evidenceIds, `${path}[${i}]`) }));
-      if (errors.length) return { ok: false, errors, warnings, normalized: null };
-      const facts = [];
-      const demoted = [];
-      for (const f of items(r.facts, 'facts')) (f.evidenceIds.length ? facts : demoted).push(f);
-      if (demoted.length) warnings.push({ code: 'UNGROUNDED_FACT_DEMOTED', path: 'facts', message: `根拠ID の無い事実 ${demoted.length} 件を分析へ移しました` });
-      const answer = String(r.answer).replace(/\[((?:E[0-9]*|L[0-9]+|app|overview)[A-Za-z0-9_-]*)\]/g, (m, id) => (known.has(id) ? m : '[根拠不明]'));
-      return {
-        ok: true, errors, warnings,
-        normalized: {
-          answer,
-          answerEvidenceIds: [...new Set([...answer.matchAll(/\[(E[1-9][0-9]*)\]/g)].map(m => m[1]))],
-          facts, analysis: [...demoted, ...items(r.analysis, 'analysis')], recommendations: items(r.recommendations, 'recommendations'),
-          unknowns: (Array.isArray(r.unknowns) ? r.unknowns : []).filter(s => typeof s === 'string' && s.trim()),
-          requestId: r.meta?.requestId ?? null, usage: r.meta?.usage ?? null, ai: r.meta?.ai ?? null, budgetMeta: r.meta?.budget && typeof r.meta.budget === 'object' ? r.meta.budget : null,
-          gatewayWarnings: r.meta?.normalization?.warnings ?? [],
-        },
-      };
+      return { ...r.generated, verification: r.verification, aiRepair: m.aiRepair && typeof m.aiRepair === 'object' ? m.aiRepair : null, timing: m.timing && typeof m.timing === 'object' ? m.timing : null, ...meta };
     }
 
-    /**
-     * @param {object} p apiBase / customerToken（必須）/ hostname（既定 location.hostname）/ transport / timeoutMs（既定 60000）/ pluginVersion
-     */
     /**
      * @param {object} p apiBase（必須）/ customerToken（固定 token。staging 等）または getToken()（短命 Access Token の供給。async 可）/
      *   onAuthExpired()（AUTH_TOKEN_EXPIRED のとき 1 回だけ呼んで再試行。Refresh に使う）/ hostname / transport / timeoutMs / pluginVersion
@@ -14078,8 +13747,7 @@
         if (we && typeof we === 'object' && we.code) {
           throw new AiClientError({ code: we.code, httpStatus: status, message: we.message || we.code, details: json, retryAfterSeconds: pickRetryAfter(we, json), requestId: we.requestId ?? null });
         }
-        const legacy = typeof we === 'string' ? we : '';
-        throw new AiClientError({ code: normalizeLegacyErrorCode(legacy) ?? ERROR_CODES.WORKER_ERROR, httpStatus: status, message: legacy || `AI API error: ${status}`, details: json, retryAfterSeconds: pickRetryAfter(null, json) });
+        throw new AiClientError({ code: ERROR_CODES.WORKER_ERROR, httpStatus: status, message: typeof we === 'string' && we ? we : `AI API error: ${status}`, details: json, retryAfterSeconds: pickRetryAfter(null, json) });
       };
       //   §0f.3（2026-10-09・FP9）: trace（任意）= 呼び出しの記録に残す時刻（startedAt・headersAt・firstByteAt・endAt。この要求の開始からの相対 ms）と打ち切りの ms。
       //   本文は入れない。失敗した要求でも残す（例外の transport にも同じ値）。long = 長い要求（kintone.proxy の約 60 秒の上限を避けて直接送る）
@@ -14178,9 +13846,7 @@
           let acc = '';
           const onEvent = typeof onText === 'function' ? ({ event, data }) => { if (event === 'delta' && data && typeof data.text === 'string') { acc += data.text; try { onText(acc); } catch (e) { } } } : null;
           const response = await request({ path: '/v2/review', method: 'POST', body: JSON.stringify(envelope), signal, trace, noProxyFallback, ...(onEvent ? { limitMs: longFor(deadlineMs), long: true, onEvent } : {}) });
-          const v = validateAnswer(response, ctx);
-          if (!v.ok) throw new AiClientError({ code: v.errors[0].code, message: v.errors[0].message, details: { errors: v.errors }, requestId });
-          return { ...v.normalized, requestId: v.normalized.requestId || requestId, clientWarnings: v.warnings, raw: null };
+          return { ...receive('answer', response, { requestId }), raw: null };
         },
         /**
          * 段階 B: POST /v2/review（toolkit.assistant-qa・conversation mode proposal。契約 13 §11）。仮案の経路。ctx は KTContext.buildProposal の結果
@@ -14194,9 +13860,8 @@
           let acc = '';
           const onEvent = typeof onText === 'function' ? ({ event, data }) => { if (event === 'delta' && data && typeof data.text === 'string') { acc += data.text; try { onText(acc); } catch (e) { } } } : null;
           const response = await request({ path: '/v2/review', method: 'POST', body: JSON.stringify(envelope), signal, limitMs: longFor(deadlineMs), long: true, trace, noProxyFallback, ...(onEvent ? { onEvent } : {}) });
-          const v = validateProposal(response, { utterance: ctx.question });   // 2026-10-15（§3.2）: 進行を求める語句（adoptQuote）は今回の発言と照合する
-          if (!v.ok) throw new AiClientError({ code: v.errors[0].code, message: v.errors[0].message, details: { errors: v.errors }, requestId });
-          return { ...v.normalized, requestId: v.normalized.requestId || requestId, clientWarnings: v.warnings };
+          //   2026-10-15（§3.2）の進行を求める語句（adoptQuote）の照合は Gateway（validate-proposal-response）が同じ発言で行う（adopt は語句が発言にあるときだけ。Toolkit は繰り返さない）
+          return receive('proposal', response, { requestId });
         },
         /** POST /v2/review（toolkit.change-planner）。Planner Context を送り、Change Plan を再検証して返す（計画のみ。設定変更はしない） */
         async plan({ ctx, requestId = newRequestId(), signal = null, onText = null, deadlineMs = null, trace = null, noProxyFallback = false, budget = null } = {}) {
@@ -14205,13 +13870,7 @@
           let acc = '';
           const onEvent = typeof onText === 'function' ? ({ event, data }) => { if (event === 'delta' && data && typeof data.text === 'string') { acc += data.text; try { onText(acc); } catch (e) { } } } : null;
           const response = await request({ path: '/v2/review', method: 'POST', body: JSON.stringify(envelope), signal, limitMs: longFor(deadlineMs), long: true, trace, noProxyFallback, ...(onEvent ? { onEvent } : {}) });
-          const v = validatePlan(response, ctx);
-          if (!v.ok) throw new AiClientError({ code: v.errors[0].code, message: v.errors[0].message, details: { errors: v.errors }, requestId });
-          const out = { ...v.normalized, requestId: v.normalized.requestId || requestId, clientWarnings: v.warnings };
-          // 会話の応答性（2026-10-05）: Gateway が返した計画そのもの（次の差分の土台）。Toolkit が書き換えた計画とは別に持つ。
-          //   列挙しない（計画を JSON にしても入らない。全体の作り直しで前の版の計画として送るとき、二重に送らない）
-          Object.defineProperty(out, 'gatewayPlan', { value: response.plan, enumerable: false, writable: true, configurable: true });
-          return out;
+          return receive('plan', response, { requestId });
         },
         /** POST /v2/review（toolkit.customization-generator）。Generator Context を送り、生成コードを再検証して返す（登録はしない） */
         //   生成の停滞の観測（2026-10-14・契約 20 §18）: onEvent（任意）があれば計画の plan と同じく SSE で受け（Accept は transport が付ける。SSE でない応答が返れば従来どおり）、
@@ -14228,9 +13887,7 @@
           const sinceOrigin = () => Date.now() - (trace && Number.isFinite(trace.origin) ? trace.origin : t0);
           const onEv = typeof onEvent === 'function' ? ({ event, data, raw }) => { if (pg && event === 'progress' && data && typeof data === 'object') noteProgressTrace(pg, data, sinceOrigin()); onEvent({ event, data, raw }); } : null;
           const response = await request({ path: '/v2/review', method: 'POST', body: JSON.stringify(envelope), signal, limitMs: longFor(deadlineMs), long: true, trace, noProxyFallback, ...(onEv ? { onEvent: onEv } : {}) });
-          const v = validateGenerated(response, ctx);
-          if (!v.ok) throw new AiClientError({ code: v.errors[0].code, message: v.errors[0].message, details: { errors: v.errors }, requestId });
-          return { ...v.normalized, requestId: v.normalized.requestId || requestId, clientWarnings: v.warnings };
+          return receive('generated', response, { requestId });
         },
       };
     }
@@ -14447,8 +14104,8 @@
       budgetDetailText, usdText,
       // Phase 22: エラーの種類・AI が生成しなかった理由
       ERROR_CATEGORY, CATEGORY_JA, errorCategory, declineReasonOf,
-      createSettingsStore, createDefaultTransport, normalizeLegacyErrorCode,
-      buildAskEnvelope, buildPlanEnvelope, buildGenerateEnvelope, capabilityFromHealth, limitsFromHealth, clientLimitFromDeadline, RECEIVE_MARGIN_MS, CLIENT_LIMIT_MAX_MS, CLIENT_LIMIT_DEFAULT_MS, LATE_TIMER_MS, RESUME_GRACE_MS, validateAnswer, validateProposal, PROPOSAL_INTENTS, validatePlan, validateGenerated, normalizeVerification, normalizeUpstream, UPSTREAM_KEYS, BEHAVIOR_CASES_MAX: KT_BEHAVIOR_CASES_MAX, createAiClient, createSession, newRequestId, isPurePlatformQuestion,
+      createSettingsStore, createDefaultTransport,
+      buildAskEnvelope, buildPlanEnvelope, buildGenerateEnvelope, capabilityFromHealth, limitsFromHealth, clientLimitFromDeadline, RECEIVE_MARGIN_MS, CLIENT_LIMIT_MAX_MS, CLIENT_LIMIT_DEFAULT_MS, LATE_TIMER_MS, RESUME_GRACE_MS, receive, CONVERSATION_MARKS, PLANNER_MARKS, GENERATOR_MARKS, createAiClient, createSession, newRequestId, isPurePlatformQuestion,
       FEATURE_GENERATOR, GENERATOR_PROMPT_VERSION,
       createPkce, createConnectFlow, isDevMode,
     };
@@ -17075,13 +16732,10 @@
      *   必須の効果の材料にしない（noMaterial。target-unresolved にしない）。
      *   判断の候補（再検証前の指示 §1・2026-10-10。以前の「委任の実現の可能性」possible＝外さずに必須の効果に残す扱いの置き換え）: E_in に無い効果を足す要件のうち、
      *   (a) candidateLinks にある（計画の AI が、採用の時点に構造の無い・まだ実現していない決定事項に結び付けた＝AI の id だけでは確かめられない）もの、
-     *   (b) delegationOpen（印の無い Gateway で未実現の委任がある）のとき計画の AI が足した proposed のもの（possibleSince の版より後に作った・直したものだけ）は、
-     *   黙って入れず（範囲外・計画から外す）、黙って消さず（out の reason candidate と decisions。最終案の通常表示と承認の欄に「判断が残っている」と一度に示す）。
-     *   §0f.2 の 9（2026-10-09）: 呼び出し側は、decisionRefs の印がある Gateway では delegationOpen を渡さない（委任の実現は要件の decisionRefs と X(D) の照合で決まる）。
      * @param {Array} reqs 台帳の要件（KTAiAnswers.requirementsOf の要素。scope を持てる）
      * @param {object|null} plan 計画（customizations）
      * @param {object} o { labels（フィールドのコード → 名前。対象のフィールドの照合に使う）, columns（列のコード → テーブルのコード。対象がテーブルの「編集できない」を
-     *   そのテーブルの列にも当てる。2026-10-10）, delegationOpen, possibleSince, openDecisions（(b) の決定事項 [{ id, key, kind, label }]）,
+     *   そのテーブルの列にも当てる。2026-10-10）,
      *   candidateLinks（(a) 要件 id → 結び付いた決定事項 [{ id, key, kind, label }]） }
      * @returns {{ inIds: Set<string>, out: Map<string, { reason: 'suggestion'|'adds-effect'|'candidate', customizationIds?: string[], effects?: string[], decisions?: Array }>, eIn: Map<string, Set<string>>, undetermined: Set<string>,
      *   eInField: Map<string, Map<string, Set<string>>>, noMaterial: Map<string, Set<string>>,
@@ -17089,8 +16743,7 @@
      *   linked = 決定事項の結び付き（scope.via decisionRefs。採用の時点の組 X(D) に入る＝D の実現）で範囲内に上がった要件が、それを除いた範囲内の要件の効果に無い効果を足すもの
      *   （外さない。最終案の通常表示の「仮案から変わった点と理由」に出す）
      */
-    function requirementScopeOf(reqs, plan, { labels = null, columns = null, delegationOpen = false, possibleSince = null, openDecisions = [], candidateLinks = null } = {}) {
-      const sinceOk = (r) => possibleSince == null || (Number(r.updatedIn ?? r.createdIn) || 0) >= Number(possibleSince);
+    function requirementScopeOf(reqs, plan, { labels = null, columns = null, candidateLinks = null } = {}) {
       const list = (Array.isArray(reqs) ? reqs : []).filter(r => r && r.id && r.decision !== 'revoked');
       const custs = ((plan && Array.isArray(plan.customizations)) ? plan.customizations : []).filter(c => c && c.customizationId);
       const custIds = new Set(custs.map(c => c.customizationId));
@@ -17153,7 +16806,6 @@
         //   再検証前の指示 §1: 判断の候補（黙って入れない・黙って消さない）
         const linkedTo = candidateLinks && typeof candidateLinks.get === 'function' && candidateLinks.has(r.id) ? candidateLinks.get(r.id) : null;
         if (linkedTo && linkedTo.length) { out.set(r.id, { reason: 'candidate', via: 'decisionRefs', ...info, decisions: linkedTo.map(d => ({ ...d })) }); continue; }
-        if (delegationOpen && scopeBasisOf(r) === 'planner' && r.decision === 'proposed' && sinceOk(r)) { out.set(r.id, { reason: 'candidate', via: 'delegation', ...info, decisions: (Array.isArray(openDecisions) ? openDecisions : []).map(d => ({ ...d })) }); continue; }
         out.set(r.id, { reason: 'adds-effect', ...info });
       }
       //   §0f.2 の 9（2026-10-09・前の確認の結び付けの誤り）: 決定事項の結び付きで範囲内に上がった要件（scope.via decisionRefs）が、それを除いた範囲内の要件の効果に
@@ -17863,8 +17515,6 @@
       const planLabel = () => '変更案';
       // ---- §0f.2 の 9（2026-10-09）: 要件と決定事項の結び付き（計画の AI の decisionRefs。契約 16 §12）----
       //   使うのは構造化した id だけ（決定事項の id・仮案の判断の key・委ねた印）。自然文は読まない
-      /** decisionRefs の印がある Gateway か（health の change-planner の requirementOps。古い Gateway・services に無いときは false） */
-      const decisionRefsOn = () => { try { return typeof services.plannerRequirementOps === 'function' && (services.plannerRequirementOps() || []).includes('decisionRefs'); } catch (e) { return false; } };
       /** 結び付けで採用の根拠を上げてよい要件の根拠（計画の AI の追加・ai の補足・根拠の無い要件。任意の提案の扱い・利用者の要件は変えない） */
       const LINK_UPGRADABLE = Object.freeze(['planner', 'item-ai', 'unlinked']);
       const MAX_DECISION_LINKS = 16;
@@ -18042,7 +17692,7 @@
        * 計画の AI に送る決定事項（計画の系列の台帳の決定事項 ＋ decisionRefs の印がある Gateway なら、台帳の決定事項にしない計画の段階の委任を委ねた判断として）。上限 30 件
        */
       const plannerDecisionsOf = (lg) => {
-        const syn = decisionRefsOn() ? livePlanDelegations(lg).filter(pd => pd.source !== 'answer').slice(-10).map(pd => ({ id: pd.id, topic: 'other', topics: ['other'], label: pd.label, question: pd.question || null, answer: pd.answer, source: 'chat', status: 'answered', kind: pd.kind, delegated: true })) : [];
+        const syn = livePlanDelegations(lg).filter(pd => pd.source !== 'answer').slice(-10).map(pd => ({ id: pd.id, topic: 'other', topics: ['other'], label: pd.label, question: pd.question || null, answer: pd.answer, source: 'chat', status: 'answered', kind: pd.kind, delegated: true }));
         return [...KTAiAnswers.decisionsForContext(lg, { max: KTAiAnswers.MAX_DECISIONS - syn.length }), ...syn];
       };
       /**
@@ -18096,7 +17746,7 @@
       }
       // ---- §0f.2（2026-10-09）: 採用範囲。判定は requirementScopeOf の 1 か所。状態（採用の時点の記録・要件ごとの根拠）は Toolkit の台帳だけが持つ ----
       /** 採用した仮案の系列の台帳（採用の時点の記録 lg.adoption がある）だけ範囲を照合する。仮案を通らない計画の台帳は今までどおり（null） */
-      //   レビューの指摘 row3（2026-10-09）: 対象のフィールドの照合に画面のフィールドの名前を使う（requiredEffectsOf と同じ）。未実現の委任があるか（delegationOpenOf）も渡す
+      //   レビューの指摘 row3（2026-10-09）: 対象のフィールドの照合に画面のフィールドの名前を使う（requiredEffectsOf と同じ）
       const scopeLabels = () => { try { const m = typeof services.fieldLabels === 'function' ? services.fieldLabels() : null; return m && typeof m === 'object' ? m : {}; } catch (e) { return {}; } };
       //   2026-10-10: テーブルの列（列のコード → テーブルのコード。採用範囲の判定でテーブルの要件の効果を列にも当てる）
       const scopeColumns = () => { try { const m = typeof services.tableColumns === 'function' ? services.tableColumns() : null; return m && typeof m === 'object' ? m : {}; } catch (e) { return {}; } };
@@ -18104,23 +17754,6 @@
        * レビューの指摘 row3 の 2: 未実現の委任があるか（採用の時点で委ねた判断の key のうち、その key に結び付く取り消していない要件が 1 つも無いものがある）。
        *   key への結び付きは仮案の項目の id → 要件の対応（lg.itemReqs の key:<key>。同じ key の判断・前提をターンをまたいでつないだもの）
        */
-      //   §0f.2 の 9（2026-10-09）: 計画の AI が decisionRefs で委ねた判断に結び付けた要件（decisionLinks。委ねた key・計画の段階の委任の id）も実現として数える。
-      //   計画の段階の委任（lg.planDelegations。「おすすめで」など）も、結び付く要件が無ければ未実現（since = その委任の版。古い版の追加を判断の候補にしない）
-      const delegationStateOf = (lg) => {
-        const ad = lg && lg.adoption;
-        const none = { open: false, since: null, keys: [], plan: [] };
-        if (!ad) return none;
-        const liveReqs = KTAiAnswers.requirementsOf(lg).filter(r => r && r.decision !== 'revoked');
-        const live = new Set(liveReqs.map(r => r.id));
-        //   再検証前の指示 §1（2026-10-10）: 委任の実現として数える結び付きは D の実現（verdict match）だけ（AI の id だけの結び付きでは実現にしない）
-        const links = liveReqs.flatMap(r => (Array.isArray(r.decisionLinks) ? r.decisionLinks : []).filter(l => l && l.kind === 'delegated' && l.verdict === 'match'));
-        const ir = ad.itemReqs || lg.itemReqs || {};
-        const keys = (Array.isArray(ad.delegatedKeys) ? ad.delegatedKeys : []).filter(k => !((ir[`key:${k}`] || []).some(id => live.has(id))) && !links.some(l => l.key === k));
-        const plan = livePlanDelegations(lg).filter(pd => !links.some(l => l.id === pd.id && (l.at == null || Number(l.at) >= Number(pd.at))));
-        if (!keys.length && !plan.length) return none;
-        return { open: true, since: keys.length ? null : Math.min(...plan.map(pd => Number(pd.at) || 0)), keys, plan: plan.map(pd => pd.id) };
-      };
-      const delegationOpenOf = (lg) => delegationStateOf(lg).open;
       /** 決定事項の見出し（仮案の判断の key → 計画の系列の台帳の決定事項・仮案の判断の見出し。計画の段階の委任は問いの文）。構造化した値だけ */
       const keyDecisionLabelOf = (lg, key) => {
         const e = (lg && Array.isArray(lg.entries) ? lg.entries : []).find(x => x && x.draftKey === key);
@@ -18130,9 +17763,8 @@
       };
       /**
        * 再検証前の指示 §1（2026-10-10）: 判断の候補の材料。
-       *   印のある Gateway: 計画の AI の追加・ai の補足・根拠の無い要件（LINK_UPGRADABLE）で、採用の時点に構造の無い（X(D) が空 = verdict unverified）・まだ実現していない
+       *   計画の AI の追加・ai の補足・根拠の無い要件（LINK_UPGRADABLE）で、採用の時点に構造の無い（X(D) が空 = verdict unverified）・まだ実現していない
        *   決定事項 D に結び付いたもの（要件 id → [{ id, key, kind, label }]）。AI の id だけでは上げない・黙って消さない（requirementScopeOf の out の reason candidate）。
-       *   印の無い Gateway: 未実現の委任（delegationStateOf）のとき、その委任（委ねた key・計画の段階の委任）の見出し（openDecisions）
        */
       const candidateLinksOf = (lg) => {
         const m = new Map();
@@ -18144,18 +17776,11 @@
         }
         return m;
       };
-      const openDecisionsOf = (lg, ds) => [
-        ...(ds.keys || []).map(k => ({ id: null, key: k, kind: 'delegated', label: keyDecisionLabelOf(lg, k) })),
-        ...livePlanDelegations(lg).filter(pd => (ds.plan || []).includes(pd.id)).map(pd => { const e = pd.source === 'answer' ? (lg.entries || []).find(x => x && x.id === pd.entryId) : null; return { id: pd.id, key: null, kind: 'delegated', label: e ? decisionLabelOf({ label: e.label, question: e.question, key: e.draftKey || '' }, e.draftKey || null) : decisionLabelOf(pd) }; }),
-      ];
-      //   §0f.2 の 9: decisionRefs の印がある Gateway では、未実現の委任の扱い（delegationOpen）を使わない（委任の実現は要件の decisionRefs と X(D) の照合で決まる。
-      //   結び付きの無い計画の AI の追加は planner として判定する）。印の無い古い Gateway（今の staging など）は、未実現の委任の間の計画の AI の追加を判断の候補にする
+      //   §0f.2 の 9: 委任の実現は要件の decisionRefs と採用の時点の組 X(D) の照合で決まる（結び付きの無い計画の AI の追加は planner として判定する）
       //   （再検証前の指示 §1。以前の「外さずに残す」possible の置き換え）
       const scopeOfLedger = (lg, plan = null) => {
         if (!(lg && lg.adoption)) return null;
-        const on = decisionRefsOn();
-        const ds = on ? { open: false, since: null, keys: [], plan: [] } : delegationStateOf(lg);
-        return requirementScopeOf(KTAiAnswers.requirementsOf(lg), plan, { labels: scopeLabels(), columns: scopeColumns(), delegationOpen: ds.open, possibleSince: ds.since, openDecisions: ds.open ? openDecisionsOf(lg, ds) : [], candidateLinks: on ? candidateLinksOf(lg) : null });
+        return requirementScopeOf(KTAiAnswers.requirementsOf(lg), plan, { labels: scopeLabels(), columns: scopeColumns(), candidateLinks: candidateLinksOf(lg) });
       };
       /** 範囲内の要件（KTAiAnswers.requirementsForContext の形。取り消し済みは今までどおり含める）。必須の効果・流用の指紋・生成の要件・自動の見直しの引き金に使う */
       const inScopeRequirements = (lg, plan = null, sc0 = undefined) => { if (!lg) return []; const sc = sc0 !== undefined ? sc0 : scopeOfLedger(lg, plan); return KTAiAnswers.requirementsForContext(lg).filter(r => !(sc && r && r.decision !== 'revoked' && sc.out.has(r.id))); };
@@ -18784,7 +18409,7 @@
         //   §0f.3 の 1（2026-10-09）: 送信を止めた JavaScript（failed ＋ failure.stop）は「未完成」の理由にまとめる（JS ごとの失敗の文と重ねない）
         const stoppedEntry = (e) => !!(e && e.status === 'failed' && e.failure && e.failure.stop);
         const st = (s) => notReady.filter(([, e]) => e.status === s && !(s === 'failed' && stoppedEntry(e))).length;
-        const known = ['unresolved', 'failed', 'not-ready', 'unsupported', 'not-run', 'unverified'];
+        const known = ['unresolved', 'failed', 'not-ready', 'not-run', 'unverified'];
         //   先に決めたいことは、その版の確認事項（答えても、変更案に入れた新しい版になるまでは、この版は答えを含まないので数える）。
         //   簡素化（2026-10-17）: 画面の反映を止める理由（applyHold）は、ここを使い、今の未回答を別に数えない
         const blocking = (v.openQuestions || []).filter(q => q.priority === 'blocking');
@@ -18797,12 +18422,6 @@
         //   レビュー 3（2026-10-14）: 移植元の本文を取れない（読めない）ときは「確かめていません」（不可能と読める「確かめられない」は使わない）。判定は変えない
         if (effUnknown.length) reasons.push({ kind: 'effects-unknown', text: effUnknown.every(([, e]) => e.verdict && e.verdict.port) ? '既存の JavaScript から移す保存の条件が移植元と同じかは、移植元の本文を取れない（読めない）ので確かめていません。そのため、まだ反映できません（「いつでも保存を止める」にはしていません）。' : 'JavaScript で必要な動作（編集できない・警告・保存を止めるなど）を特定できないため、まだ反映できません。' });
         if (notReady.some(([, e]) => e.status === 'not-ready' && e.verdict && e.verdict.kind === 'effects-limit')) reasons.push({ kind: 'effects-limit', text: '必須の動作が多すぎて、生成工程で一度に確かめられないため、まだ反映できません（計画の JavaScript を分けます）。' });
-        //   2026-10-18: 今の Toolkit が使う受け渡しに対応していない接続先（生成の前の確認。verdict.capability generator）は、その理由で書く（必須の動作の確認の文と分ける）
-        if (st('unsupported')) {
-          const capGen = notReady.some(([, e]) => e.status === 'unsupported' && e.verdict && e.verdict.capability === 'generator');
-          const capOther = notReady.some(([, e]) => e.status === 'unsupported' && !(e.verdict && e.verdict.capability === 'generator'));
-          reasons.push({ kind: 'capability', text: [capOther ? '接続先（生成工程）が必須の動作の確認に対応していないため、まだ反映できません。' : '', capGen ? '接続先（生成工程）が今の Toolkit の生成の受け渡し（必須の動作の確認・検査と模擬テストに使った本文・外部への通信と通知の検査）に対応していないため、まだ反映できません。' : ''].filter(Boolean).join('') });
-        }
         //   §0c.6: 実行できなかった理由の区分ごとに文を変える（環境だけ「環境の制約」と言う）
         const NOT_RUN_TEXT = { env: '必須の動作を模擬テストで確かめられていないため、まだ反映できません（環境の制約です。作った JavaScript の誤りとは判定していません）。', condition: '計画の条件を模擬テストの代表条件にできる形で読めないため、まだ反映できません（計画の条件を直します。作った JavaScript の誤りとは判定していません）。', limit: '確かめる条件が模擬テストの上限を超えたため、まだ反映できません（計画を分けるか絞ります。作った JavaScript の誤りとは判定していません）。', existing: '既存の JavaScript と一緒の動きを模擬テストで確かめられないため、まだ反映できません（計画を直します: 作る JavaScript を既存の JavaScript に統合する・既存の処理を見直す。作った JavaScript の誤りとは判定していません）。' };
         //   §0c.7: 理由ごとの文があればそれを使う（other-platform）
@@ -18909,8 +18528,6 @@
       const pendingRecords = (lg) => KTAiAnswers.pendingAnswers(lg).map(recordOf);
       /** 回答に関係する計画の箇所（答えた質問の Q1 / C1-1 と、そのカスタマイズ C1。差分の手がかりとして Gateway へ送る） */
       const focusOf = (lg) => [...new Set(KTAiAnswers.pendingAnswers(lg).flatMap(e => { const k = String(e.questionKey || ''); const m = /^(C[0-9]{1,3})-[0-9]{1,2}$/.exec(k); return [k, ...(m ? [m[1]] : [])]; }).filter(x => /^[A-Z][0-9]{1,3}(-[0-9]{1,2})?$/.test(x)))].slice(0, 20);
-      /** Gateway が計画の差分更新に対応しているか（health。services.revisionModes が無い・古い Gateway は全体の作り直しと見なす） */
-      const patchExpected = () => { try { return typeof services.revisionModes === 'function' && (services.revisionModes() || []).includes('patch'); } catch (e) { return false; } };
       /**
        * 回答から作り直すときの依頼文（revision.request）。Q1 などの版ごとの番号は使わず、論点と質問文で書く。
        * 同じ内容は構造化した decisions でも送る（依頼文は経緯、決定事項が正）。Gateway の上限（2000 文字）に収める
@@ -19258,30 +18875,20 @@
         return { ...out, queued: true };
       }
       // ---- 会話フローの再設計 段階 B（2026-10-07）: 仮案の会話（計画ができる前は state.draft に持つ。planId はまだ無い）----
-      /**
-       * 仮案の経路を使えるか（Gateway の health の conversation に 'proposal' を含み、services.propose がある）。
-       *   C-1 第 3 段（2026-10-08）: 無い接続先では古い流れに入らない（routeFlow が「接続先が非対応」で止める）
-       */
-      //   2026-10-19（契約 13 §11.11）: 仮案の項目の id をターンをまたいで保つ Gateway（conversation に itemIds）だけ。印の無い Gateway は id を出力の順で振り直すので、
-      //   採用の記録を id で持てない（「接続先が非対応」で止める。文の照合で前の項目との対応を戻す処理は削除した）
-      const proposalOn = () => { try { const f = typeof services.conversationFeatures === 'function' ? (services.conversationFeatures() || []) : []; return typeof services.propose === 'function' && f.includes('proposal') && f.includes('itemIds'); } catch (e) { return false; } };
+      //   2026-10-23（§12.61）: 仮案の経路の能力（conversation の proposal・itemIds など）は接続時の 1 回の確認で確かめる。印の無い接続先のための経路（「接続先が非対応」で止める・古い流れ）は持たない
       /**
        * C-1 第 3 段（2026-10-08）: 入口を新しい流れ（依頼 → 仮案 → 採用 → 最終案 → 承認 → 反映）に寄せる。置き換えた古い確認の流れには入らない。
-       *   - 仮案の能力が無い接続先: 変更案を作る・直す・JavaScript を作る意図（PLAN・REVISE_PLAN・ANSWER・GENERATE_CODE・仮案の意図）は「接続先が非対応」で止める
-       *     （質問・説明・資料・反映 / 元に戻すの案内は今のまま。計画・生成・登録には進まない）
        *   - 新しい変更案の依頼（PLAN: Customize タブの相談・反映済みの計画の後の依頼・相談の答えへの「おすすめで」・「新しい変更案にする」の選択）→ 仮案（PROPOSE）
        *   - 仮案から作っていない計画（Context ペインの「変更計画を作成」で登録した計画など）は、修正・回答・コードの生成を進めない（新しい依頼として仮案から作る）
        */
       const FLOW_INTENTS = [INTENT.PLAN, INTENT.REVISE_PLAN, INTENT.ANSWER, INTENT.GENERATE_CODE, INTENT.PROPOSE, INTENT.DRAFT_REPLY, INTENT.ADOPT_DRAFT];
       const routeFlow = (cls, text) => {
         if (!cls || !FLOW_INTENTS.includes(cls.intent)) return cls;
-        const ask = cls.askText ? { askText: cls.askText } : {};
-        if (!proposalOn()) return { intent: INTENT.GENERAL, reason: 'UNSUPPORTED_CONNECTION', from: cls.intent, ...ask };
         if (cls.intent === INTENT.PLAN) return { intent: INTENT.PROPOSE, reason: /^CONSULTATION/.test(String(cls.reason || '')) ? 'CONSULTATION' : `NEW_REQUEST_${cls.reason || 'PLAN'}`, utterance: cls.goal || norm(text) };
         return cls;
       };
-      /** 分類: 仮案の経路の前段（能力があるときだけ）→ 従来の classifyIntent → 新しい流れへの寄せ（routeFlow） */
-      const classifyAll = (text) => routeFlow((proposalOn() ? classifyDraft(text, state) : null) || classifyIntent(text, state), text);
+      /** 分類: 仮案の経路の前段（classifyDraft）→ 従来の classifyIntent → 新しい流れへの寄せ（routeFlow） */
+      const classifyAll = (text) => routeFlow(classifyDraft(text, state) || classifyIntent(text, state), text);
       const EMPTY_ITEMS = () => ({ behaviors: [], assumptions: [], decisions: [], approach: { standard: [], js: [] }, cannot: [] });
       /** Gateway に送る前回の仮案（契約の形。表示用の状態は送らない）。open の仮案が無ければ null */
       const previousForContext = () => {
@@ -19290,13 +18897,9 @@
         const it = d.items || EMPTY_ITEMS();
         // 回答済み（「おすすめで」で採用した推奨を含む）の key の判断は前回の仮案から外す（決定事項として渡す。同じ点を再確認させない）。
         //   AI が理由をつけてもう一度出した「再確認」の判断（まだ答えていないもの）は残す（答えの id の対応を切らない）
-        //   §0e.2（2026-10-09）: 任意の提案（origin suggestion）は、health の conversation に suggestion を出す Gateway にだけそのまま送る
-        //   （印の無い Gateway は語彙外として 422 にする。契約 13 §11.4）。無いときは ai として送る
-        let sugOn = false;
-        try { sugOn = typeof services.conversationFeatures === 'function' && (services.conversationFeatures() || []).includes('suggestion'); } catch (e) { sugOn = false; }
         return {
-          //   §0f.2 の 3: 任意の提案の扱いにした ai の項目（asSuggestion）は、suggestion を受ける Gateway には suggestion として送る（画面と同じ扱い）
-          behaviors: it.behaviors.map((b) => ({ id: b.id, text: b.text, origin: isSuggestionItem(b) ? (sugOn ? 'suggestion' : 'ai') : b.origin })),
+          //   §0f.2 の 3・§0e.2: 任意の提案（origin suggestion）と、その扱いにした ai の項目（asSuggestion）は suggestion として送る（画面と同じ扱い。契約 13 §11.4）
+          behaviors: it.behaviors.map((b) => ({ id: b.id, text: b.text, origin: isSuggestionItem(b) ? 'suggestion' : b.origin })),
           assumptions: it.assumptions.map(({ id, key, label, text, changeHint }) => ({ id, key, label, text, changeHint })),
           decisions: openDraftDecisions(d, state.draftDecisions).map(({ id, key, label, question, options, recommendation, impact, blocking }) => ({ id, key, label, question, options: [...(options || [])], recommendation, impact, blocking: !!blocking })),
           approach: { standard: [...(it.approach.standard || [])], js: [...(it.approach.js || [])] }, cannot: [...(it.cannot || [])],
@@ -19764,14 +19367,14 @@
          * §0c.3 / §0c.4（2026-10-08）: 1 件の生成結果の判定。生成工程の verification（machine・requiredEffects・behavior）と Toolkit の形式確認（KTCodeReview。
          *   attachBehavior で必須の効果と動作テストを取り込んだもの）から決める。Toolkit は模擬を実行せず、修復も依頼しない。
          *   status: verified（反映できる）/ unresolved（候補に起因する問題が生成工程の修復の後も残った。要件未達を含む）/
-         *   not-run（必須の効果に結び付く動作テストを環境の制約で実行できなかった。コードの誤りとは言わない）/ unverified（必須の効果を確かめた結果が無い）/
-         *   unsupported（生成工程が必須の効果の確認に対応していない）。未確認・環境を合格にも不合格にも読み替えない。
+         *   not-run（必須の効果に結び付く動作テストを環境の制約で実行できなかった。コードの誤りとは言わない）/ unverified（必須の効果を確かめた結果が無い）。
+         *   未確認・環境を合格にも不合格にも読み替えない。
          *   通常画面には状態と理由（reason・next）だけ。検査の文・例外文・条件式は details（詳細表示）に入れる
          */
         /** §0c.8: 次の手の文に添える操作の案内（最終案のカードのボタン。自動では送らない） */
         const FIX_HINT = Object.freeze({ revise: `最終案のカードの［${KT_FIX_LABEL.revise}］で依頼できます（自動では依頼しません）。`, regenerate: `最終案のカードの［${KT_FIX_LABEL.regenerate}］で、作り直しを依頼できます（自動では依頼しません）。` });
         /** C-1 第 3 段: existing-lock-unverified の代表条件が示す既存 JS のファイル名（details.files・details.file。構造化した値だけを使う） */
-        const lockUnverifiedFilesOf = (er) => [...new Set((er ? er.notRun : []).flatMap(i => (i.cases || []).filter(y => y && y.verdict === 'not-run' && y.reason === 'existing-lock-unverified' && y.details).flatMap(y => [...(Array.isArray(y.details.files) ? y.details.files : []), ...(typeof y.details.file === 'string' ? [y.details.file] : [])])).map(String).filter(Boolean))];
+        const lockUnverifiedFilesOf = (er) => [...new Set((er ? er.notRun : []).flatMap(i => (i.cases || []).filter(y => y && y.verdict === 'not-run' && y.reason === 'existing-lock-unverified' && y.details).flatMap(y => [...(Array.isArray(y.details.files) ? y.details.files.map(f => (f && typeof f === 'object' ? f.name : f)) : []), ...(typeof y.details.file === 'string' ? [y.details.file] : [])])).map(String).filter(Boolean))];
         /**
          * C-1 第 4 段（2026-10-09・ledger U1）: existing-lock-unverified の既存の編集不可がある所が、候補自身の統合先（計画の EXTEND_EXISTING_JS の targetFile）だけか。
          *   そうなら「既存の JavaScript に統合する」は解決にならない（生成工程は統合先の元の本文も既存 JS として数える）。そのときは、確かめられなかった代表条件の
@@ -19810,11 +19413,10 @@
           const rc = repairs && repairs.count ? repairs.count : 0;
           if (!entry.review) return { status: 'unresolved', kind: 'no-review', reason: 'Toolkit の形式確認を完了できませんでした', next: '時間をおいて最終案を作り直します。', details };
           //   簡素化 B（2026-10-16）: 生成工程の検証結果が無い応答は、必須の効果が無い JavaScript でも合格にしない（Toolkit の形式確認だけで検証済みにしない）。
-          //   2026-10-18: 能力の印の足りない接続先には生成を依頼しない（generateAndVerify の生成の前の確認 generatorLackOf）。ここは返った応答の形だけを見る
-          if (!ver) return { status: 'unsupported', kind: 'capability', reason: '接続先（生成工程）が生成したコードの検証結果を返さないため、反映できるかを確かめられません', next: '接続先が更新されてから最終案を作り直します（いまの接続先では反映できる最終案にしません）。', details };
+          //   2026-10-23（§12.61）: 検証結果の無い応答は受け取りの関所（KTAiClient.receive）が通さない。ここに無いのは Toolkit の内部の問題（合格にはしない）
+          if (!ver) return { status: 'unresolved', kind: 'no-verification', reason: '生成工程の検証結果がありません（Toolkit の内部の問題）', next: '最終案を作り直します。', details };
           //   簡素化 B（2026-10-17）: 検証結果の指紋が、受け取った本文の指紋と一致しない（別の候補の検証結果・指紋の無い検証結果）→ 合格にしない
           if (ver.bound !== true) return { status: 'unresolved', kind: 'verification-mismatch', fix: 'regenerate', reason: '生成工程の検証結果が、受け取った本文と対応していません（本文の指紋が一致しません）。この検証結果では合格にしません', next: '最終案を作り直します（候補を作り直し、その候補で検証し直します）。', details };
-          if (req.length && !er.supported) return { status: 'unsupported', kind: 'capability', reason: '接続先（生成工程）が必須の動作の確認に対応していないため、要件を満たすかを確かめられません', next: '接続先が更新されてから最終案を作り直します（いまの接続先では反映できる最終案にしません）。', details };
           const behaviorFailed = er.failed.length > 0 || er.otherFailed.length > 0;
           if (codeBlocks.length || er.missing.length || behaviorFailed || (ver && ver.passed === false)) {
             const missing = er.missing.map(i => `${fieldName(i.field)}: ${EFFECT_NEED_JA[i.effect] || i.effect}`);
@@ -19831,7 +19433,7 @@
             const hard = allReasons.filter(r => (ktBehaviorReasonOf(r) || {}).unfixable);
             if (hard.length) {
               const OMIT_JA = { url: 'URL で読み込むファイルのため、本文を確かめられません', 'no-source': '本文を取得できませんでした', limit: '模擬テストに渡せる既存の JavaScript の件数・文字数の上限を超えました', other: '必須の動作に関係しないと判断して、模擬テストに渡していません' };
-              //   §0c.10（2026-10-08）: Gateway の代表条件の理由ごとのファイルの事情（details.files の名前・details.fileKinds の種類と API の名前。構造化した値だけを使う）
+              //   §0c.10（2026-10-08）: Gateway の代表条件の理由ごとのファイルの事情（details.files の名前・種類（kinds）・API の名前（apis）。構造化した値だけを使う）
               const CASE_FILE_JA = { 'existing-unverifiable': 'その画面で登録する処理を確かめられません（登録を本文から読めない、または読み込みのときに隔離環境で登録されませんでした）', 'existing-unrunnable': 'その画面の処理（handler）を隔離環境で動かせません', 'existing-exception': 'その画面の処理（handler）が隔離環境で例外になりました', 'related-file-omitted': '作った JavaScript が使う名前を定義しているかもしれませんが、模擬テストに渡していません' };
               const KIND_JA = { exception: '例外', unsupported: '隔離環境に無い機能', network: '通信', listener: 'ブラウザのイベントの登録', 'stub-callback': '代わりの値に関数を渡す呼び出し（jQuery(function) など）', timer: 'タイマー', 'undefined-name': '定義されていない名前', 'pending-jobs': '読み込みの後に残った非同期の処理', 'registered-unlisted': '本文から読んだ以外のイベントの登録', 'first-arg': '登録のイベント名を本文から読めない', nested: 'handler の中での登録', 'events-alias': 'kintone.events を呼び出し以外で参照', 'not-registered': '本文から読んだ登録が隔離環境で登録されなかった', 'parse-error': '構文解析できない',
                 //   §0c.10 / §0c.11（2026-10-08）: Gateway の登録の照合の種類（契約 20 §13・Gateway の staticRegistrationsOf の理由の名前）
@@ -19842,9 +19444,9 @@
               for (const f of (er.omittedHit || [])) { const label = f.url || f.name; if (!fileRows.has(label)) fileRows.set(label, OMIT_JA[f.reason] || OMIT_JA.other); }
               for (const i of er.notRun) for (const y of (i.cases || [])) {
                 if (!y || y.verdict !== 'not-run' || !CASE_FILE_JA[y.reason] || !y.details) continue;
-                const fks = Array.isArray(y.details.fileKinds) ? y.details.fileKinds : [];
+                const fks = (Array.isArray(y.details.files) ? y.details.files : []).filter(x => x && typeof x === 'object' && typeof x.name === 'string');
                 const names = y.reason === 'related-file-omitted' && Array.isArray(y.details.names) && y.details.names.length ? `。作った JavaScript が使う名前: ${y.details.names.slice(0, 5).join('・')}` : '';
-                for (const n of [...(Array.isArray(y.details.files) ? y.details.files : []), ...(typeof y.details.file === 'string' ? [y.details.file] : [])]) if (n && !fileRows.has(String(n))) fileRows.set(String(n), `${CASE_FILE_JA[y.reason]}${kindsText(fks.find(x => x.name === String(n)))}${names}`);
+                for (const n of [...(Array.isArray(y.details.files) ? y.details.files.map(f => (f && typeof f === 'object' ? f.name : f)) : []), ...(typeof y.details.file === 'string' ? [y.details.file] : [])]) if (n && !fileRows.has(String(n))) fileRows.set(String(n), `${CASE_FILE_JA[y.reason]}${kindsText(fks.find(x => x.name === String(n)))}${names}`);
               }
               const names = [...fileRows.keys()];
               return { status: 'not-run', kind: 'out-of-reach', category: 'existing', reasonKey: hard[0], unfixable: true,
@@ -19919,8 +19521,8 @@
             const er = e.review && e.review.effects ? e.review.effects : null;
             if (vd.fix === 'regenerate') {
               const msgs = [...((e.verification && Array.isArray(e.verification.machine)) ? e.verification.machine : []).filter(m => m && !m.ok && m.name === 'unsupported-feature').map(m => m.message), ...((er ? er.notRun : []).flatMap(i => i.cases.filter(y => y.verdict === 'not-run').map(y => y.message)))].filter(Boolean);
-              //   §0c.10（2026-10-08）: 候補の unsupported の原因の API の名前（Gateway の details.apis・読み込みの details.fileKinds の apis。構造化した値）を依頼の文に入れる
-              const apis = [...new Set((er ? er.notRun : []).flatMap(i => i.cases.filter(y => y.verdict === 'not-run' && y.details).flatMap(y => [...(Array.isArray(y.details.apis) ? y.details.apis : []), ...(Array.isArray(y.details.fileKinds) ? y.details.fileKinds.flatMap(f => f.apis || []) : [])])).map(String).filter(Boolean))].slice(0, 8);
+              //   §0c.10（2026-10-08）: 候補の unsupported の原因の API の名前（Gateway の details.apis・読み込みの details.files の apis。構造化した値）を依頼の文に入れる
+              const apis = [...new Set((er ? er.notRun : []).flatMap(i => i.cases.filter(y => y.verdict === 'not-run' && y.details).flatMap(y => [...(Array.isArray(y.details.apis) ? y.details.apis : []), ...(Array.isArray(y.details.files) ? y.details.files.flatMap(f => (f && typeof f === 'object' && Array.isArray(f.apis) ? f.apis : [])) : [])])).map(String).filter(Boolean))].slice(0, 8);
               for (const a of apis) regenApis.add(a);
               regen.push(`・${file}: ${vd.reason}${apis.length ? `（原因の API: ${apis.join('・')}）` : ''}${msgs.length ? `（生成工程の記録: ${[...new Set(msgs.map(m => cut(m, 120)))].slice(0, 2).join('／')}）` : ''}`);
               continue;
@@ -19946,8 +19548,8 @@
             for (const i of [...er.notRun, ...er.untested].slice(0, 6)) {
               const reasons = i.behavior === 'untested' ? ['no-cases'] : (i.notRunReasons || []);
               const nonPass = i.cases.filter(y => y.verdict !== 'pass');
-              //   §0c.9: condition-value-unknown の値は Gateway の details.values（入口で落とさない）。旧い形の values / missingValues も受ける
-              const values = [...new Set(nonPass.flatMap(y => (y.details && Array.isArray(y.details.values) ? y.details.values : Array.isArray(y.values) ? y.values : Array.isArray(y.missingValues) ? y.missingValues : []).map(String)))].slice(0, 6);
+              //   §0c.9: condition-value-unknown の値は Gateway の details.values（構造化した値）
+              const values = [...new Set(nonPass.flatMap(y => (y.details && Array.isArray(y.details.values) ? y.details.values : []).map(String)))].slice(0, 6);
               const msgs = [...new Set(nonPass.map(y => cut(y.message, 120)).filter(Boolean))].slice(0, 2);
               const cats = [...new Set(reasons.map(r => (KT_REASON_CATEGORY[ktBehaviorReasonCategory(r)] || KT_REASON_CATEGORY.other).label))];
               lines.push(`${head}: ${fieldName(i.field)}を${KT_EFFECT_NEED_JA[i.effect] || i.effect}動作を確かめられません（${cats.join('・')}: ${[...new Set(reasons.map(envReasonJa))].join('・')}${values.length ? `・値 ${values.map(x => `「${x}」`).join('')}` : ''}）${msgs.length ? `。生成工程の記録: ${msgs.join('／')}` : ''}`);
@@ -20113,11 +19715,6 @@
           //   §0c.6: 必須の効果は生成工程の上限（20 件）まで。超える分を黙って落とすと確かめないまま残るので、生成を呼ばずに準備未完了（件数の上限）にする
           if (req.effects.length > 20) return { ...base, generated: null, review: null, existingSource: null, status: 'not-ready', candidateHash: null, attempts: previous ? previous.attempts || null : null,
             verdict: { status: 'not-ready', kind: 'effects-limit', fix: 'revise', reasonKey: 'limit', reason: `必須の動作が ${req.effects.length} 件あり、生成工程で一度に確かめられる 20 件を超えています`, next: KT_REASON_CATEGORY.limit.next, details: [] } };
-          //   2026-10-18: 接続先（生成工程）の能力の印で、生成の結果を使えないと分かっているときは、生成を呼ばずに止める（有料の生成をしてから止めない。古い形の応答の読み替えはしない）
-          const marksNow = typeof services.generatorFeatures === 'function' ? services.generatorFeatures() : null;
-          const lack = Array.isArray(marksNow) ? generatorLackOf(marksNow) : null;
-          if (lack) return { ...base, generated: null, review: null, existingSource: null, status: 'unsupported', candidateHash: null, attempts: previous ? previous.attempts || null : null,
-            verdict: { status: 'unsupported', kind: 'capability', capability: lack.capability, reason: lack.reason, next: '接続先が更新されてから最終案を作り直します（いまの接続先では反映できる最終案にしません）。', details: [] } };
           progressChecklist(checklistOfEffects(req.effects));
           aiCall();
           const tg = clock();
@@ -20135,8 +19732,7 @@
             if (kind) haltWith(e, { stage: 'generate', customizationId: cid });
             //   2026-10-15（§1.5）: 失敗（時間切れ・中断・失敗）の記録に、Gateway の 502 の error.upstream（契約 20 §16。8 キーに整える）と、Toolkit が受けた進みの通知の
             //   本文の文字数の累計（callTrace.progress.textChars）を残す（本文は残さない。表示は作成途中の詳細の 1 句だけ）
-            const kcU = typeof KTAiClient !== 'undefined' ? KTAiClient : null;
-            const upstream = kcU && typeof kcU.normalizeUpstream === 'function' ? kcU.normalizeUpstream(e && e.details && e.details.error && typeof e.details.error === 'object' ? e.details.error.upstream : null) : null;
+            const upstream = e && e.details && e.details.error && typeof e.details.error === 'object' && e.details.error.upstream && typeof e.details.error.upstream === 'object' ? e.details.error.upstream : null;
             const pgT = e && e.callTrace && e.callTrace.progress && typeof e.callTrace.progress === 'object' ? e.callTrace.progress : null;
             const textChars = pgT && pgT.textChars != null && Number.isFinite(Number(pgT.textChars)) ? Number(pgT.textChars) : null;
             r = { ok: false, reason: er.code, message: er.message, ...(er.reason ? { aiReason: er.reason } : {}), ...(kind ? { stop: kind } : {}), end: kind && stopEndUnknown(kind) ? 'unknown' : 'error', callTrace: e && e.callTrace ? e.callTrace : null, ...(upstream ? { upstream } : {}), ...(textChars != null ? { textChars } : {}), ...(budgetNotSent(e) ? { notSent: 'budget' } : budgetPreAi(e) ? { preAi: true } : {}) };   // AI が生成を断ったときの AI の説明（declineReasonOf）は最終案のカードに出す
@@ -20520,7 +20116,7 @@
             notRepaired: [...entries.flatMap(([, e]) => (e.verification && e.verification.repairs && Array.isArray(e.verification.repairs.notRepaired) ? e.verification.repairs.notRepaired : [])).reduce((m, x) => m.set(x.reason, (m.get(x.reason) || 0) + (Number(x.count) || 0)), new Map())].map(([reason, count]) => ({ reason, count })).filter(x => x.count > 0) };
           //   C-1 第 4 段（2026-10-09・K-3）: 必須の動作の行に PC / モバイルを付ける（効果のイベントの platform。構造化した値）。同じ内容の行は 1 行にまとめる
           //   会話の設計し直し（2026-10-14・指示書 §6.2）: まだ作っていない JavaScript（生成の結果が無い・送信を止めた）の効果の行は「まだ作っていません」（not-generated）。
-          //   前の候補の review があっても、止めた JavaScript の結果は使っていないので、その検査の行は出さない。接続先が非対応（unsupported）とは分ける。判定は変えない
+          //   前の候補の review があっても、止めた JavaScript の結果は使っていないので、その検査の行は出さない。判定は変えない
           const notGenOf = (e) => !e.generated || (e.status === 'failed' && !!(e.failure && e.failure.stop));
           const effectRows0 = entries.flatMap(([, e]) => { const er = notGenOf(e) ? (Array.isArray(e.requiredEffects) && e.requiredEffects.length ? KTCodeReview.effectResults(null, e.requiredEffects, { notGenerated: true }) : null) : (e.review && e.review.effects) || (Array.isArray(e.requiredEffects) && e.requiredEffects.length ? KTCodeReview.effectResults(e.verification, e.requiredEffects) : null); return er ? er.items.map(i => ({ field: i.field, label: fieldName(i.field), effect: i.effect, effectJa: effectJaOf(i), platforms: platformsOfEvents(i.events), structure: i.structure, behavior: i.behavior, ...(i.checkedBy ? { checkedBy: i.checkedBy } : {}), ...(i.behavior === 'not-run' ? { notRunCategory: (KT_REASON_CATEGORY[ktBehaviorReasonCategory((i.notRunReasons || [])[0] || er.reason || 'unavailable')] || KT_REASON_CATEGORY.other).label } : {}) })) : []; });
           const effectRows = effectRows0.filter((x, i, a) => a.findIndex(y => JSON.stringify(y) === JSON.stringify(x)) === i);
@@ -20535,8 +20131,9 @@
           //   C-1 第 4 段（2026-10-09）: 模擬テストの条件と確かめていない範囲は、生成工程が返した文（behavior.conditions・uncheckedScope）をそのまま使う（Toolkit で一覧を持たない）。
           //   同じ文は 1 行にまとめる（2026-10-18: 生成を依頼するのは印 scopeList を持つ今の接続先だけなので、結果ごとの印の写しは持たない）
           const scopeEntries = entries.filter(([, e]) => e.verification && e.verification.behavior);
-          const scopeTexts = (k) => [...new Set(scopeEntries.flatMap(([, e]) => (Array.isArray(e.verification.behavior[k]) ? e.verification.behavior[k] : []).filter(x => typeof x === 'string' && x.trim()).map(x => x.trim())))];
-          const scope = { conditions: scopeTexts('conditions'), unchecked: scopeTexts('uncheckedScope'), conditionsNotRun: scopeEntries.some(([, e]) => e.verification.behavior.conditionsNotRun === true) };
+          //   2026-10-23（§12.61）: 要素は Gateway の形 { key, text }（文字列も受ける）。入口で文の配列に写し直さない
+          const scopeTexts = (k) => [...new Set(scopeEntries.flatMap(([, e]) => (Array.isArray(e.verification.behavior[k]) ? e.verification.behavior[k] : []).map(x => (typeof x === 'string' ? x : x && typeof x === 'object' && typeof x.text === 'string' ? x.text : '')).map(x => x.trim()).filter(Boolean)))];
+          const scope = { conditions: scopeTexts('conditions'), unchecked: scopeTexts('uncheckedScope'), conditionsNotRun: scopeEntries.some(([, e]) => e.verification.behavior.conditions === null) };
           // 実機で確かめること: 保存を止める・警告（保存は止めない）の必須の効果があるときだけ保存の行を出す（構造化した効果で決める。編集制限と保存の禁止を混同しない）
           const savesMatter = effectRows.some(x => x.effect === 'block-save' || x.effect === 'warn');
           const howTo = [...new Set([...entries.flatMap(([, e]) => (e.review?.registration?.confirmations || []).map(x => x.howToCheck).filter(Boolean)), ...(effectRows.length ? ['動作テスト環境で、条件に合うレコードと合わないレコードを開いて、必須の動作（' + [...new Set(effectRows.map(x => `${x.label}を${x.effectJa}`))].slice(0, 3).join('・') + '）を確かめる'] : []), ...(entries.length && savesMatter ? ['登録した後、実際に保存して、保存が止まる・止まらないことを確かめる'] : [])])].slice(0, 4);
@@ -20924,7 +20521,7 @@
               done = { r, decisions, snap, n: jobs, requests: [...requests] };
               // 2026-10-05 第 3 段: 要件の追加・変更・取り消しは作業ごとに台帳へ（続けた作業の途中の結果は版にしないが、利用者の発言の扱いは残す）
               //   今回の発言は利用者の原文だけ（Toolkit が組み立てた依頼文を利用者の発言として数えない）
-              turnInfos.push(noteTurn(lg, r.turn, { version: base.version + 1, goal: base.goal, utterances: utterancesNow, createdBy: state.ownerRetryActive ? 'plan-auto' : 'revise', decisionKinds: decisionRefsOn() ? ledgerDecisionKindsOf(lg, decisions) : null, plan: r.plan || null }));
+              turnInfos.push(noteTurn(lg, r.turn, { version: base.version + 1, goal: base.goal, utterances: utterancesNow, createdBy: state.ownerRetryActive ? 'plan-auto' : 'revise', decisionKinds: ledgerDecisionKindsOf(lg, decisions), plan: r.plan || null }));
               // この作業を始めた後に受け付けた指示（回答・修正の依頼）。無ければ、この結果を版にする
               const newer = KTAiAnswers.pendingAnswers(lg).filter(e => (e.rev || 0) > snap);
               const waiting = state.inbox ? state.inbox.texts.length : 0;
@@ -21022,9 +20619,9 @@
                 //   §0f.2 の 1: 計画の AI が足した要件は planner。レビューの指摘 row3 の 2（2026-10-09）: 推奨の無い判断を 1 つでも委ねたら計画の AI の追加をすべて
                 //   delegated にする扱いはやめた（混入した保存禁止まで範囲内になった）。印の無い古い Gateway では、未実現の委任があるときだけ、範囲の判定（requirementScopeOf）が
                 //   E_in に無い効果を足す計画の AI の要件を判断の候補にする（黙って入れない・黙って消さない。再検証前の指示 §1）。
-                //   §0f.2 の 9（2026-10-09）: decisionRefs の印がある Gateway では、送った決定事項（台帳の id・台帳の項目の仮案の判断の key・委ねた印）に結び付けた要件だけを
+                //   §0f.2 の 9（2026-10-09）: 送った決定事項（台帳の id・台帳の項目の仮案の判断の key・委ねた印）に結び付けた要件だけを
                 //   delegated（委ねた判断）か item-user（値で答えた判断）にする
-                const dKinds = dft && decisionRefsOn() ? ledgerDecisionKindsOf(lgNew, fromDraftArgs.decisions) : null;
+                const dKinds = dft ? ledgerDecisionKindsOf(lgNew, fromDraftArgs.decisions) : null;
                 const ti = dft ? noteTurn(lgNew, r.turn, { version: 1, goal: dft.request, utterances: [], createdBy: 'plan', decisionKinds: dKinds, plan: r.plan || null }) : noteTurn(lgNew, r.turn, { version: 1, goal: goalT, utterances: [goalT], createdBy: 'plan' });
                 /** 仮案を採用済みにするのは、計画が登録できた後（announcePlan の後）。失敗なら open のまま（adoptDraftNow の finally が失敗の印を付ける） */
                 const markAdopted = () => { if (!dft || late() || !state.activePlan || state.activePlan.planId !== planIdNext) return; dft.status = 'adopted'; dft.adoptedAt = now(); dft.adoptedBy = clsP.fromDraft.reason || 'ADOPT_WORDS'; dft.planId = planIdNext; delete dft.planFailed; };
@@ -21139,9 +20736,9 @@
               // 受領の表示: 何を理解したかを、計画の完成の前に出す（AI は呼ばない。計画の更新完了・kintone への反映とは別の表示）。
               //   計画全体の作り直しの待ち時間は、今回の改善では残る（その旨を書く）
               state.metrics.roundTrips += 1;
-              //   変わる箇所だけを作り直せるとき（Gateway が対応・前の版の Gateway の計画がある）は、そのことを書く。
+              //   変わる箇所だけを作り直せるとき（前の版の Gateway の計画がある）は、そのことを書く。
               //   §0f.5 の 3（2026-10-09）: 根拠の無い待ち時間の文（「十数秒ほど」「1 分前後」）は書かない
-              const patchNow = revisionMode !== 'full' && !!base.gatewayPlan && patchExpected();
+              const patchNow = revisionMode !== 'full' && !!base.gatewayPlan;
               ackMsg = toolkit(`回答を受け付けました：${[...records.map(answerLine), ...delegated.map(d => `「${String(d.question).slice(0, 40)}」：おまかせ（こちらの提案で進めます）`), ...out.unresolved.map(c => `「${String(c).slice(0, 60)}」：どの確認事項への回答か決められないため、そのまま計画に渡します`)].join('／')}。この条件で計画を作り直しています（${patchNow ? '変わる箇所だけを作り直します' : '計画全体を作り直します'}）。kintone にはまだ何も反映していません。`, { kind: 'answers-ack', planId: base.planId, version: base.version, records, ...(delegated.length ? { delegated } : {}), ...(out.unresolved.length ? { unresolved: out.unresolved } : {}), stage: 'revising', rev: lg.rev || 0, acceptedAt: clock() });
               timing.ackMs = clock() - t0;
               const openLeft = answerContext(state).open;
@@ -21321,9 +20918,7 @@
                 assistant('おすすめの内容で決めました。', { kind: 'draft-delegated', draftId: state.draft.id, rev: state.draft.rev, keys: recorded.map(e => e.key) });
                 break;
               }
-              //   C-1 第 3 段（2026-10-08）: 仮案の能力が無い接続先（UNSUPPORTED_CONNECTION）は、ここで止める
-              const text2 = cls.reason === 'UNSUPPORTED_CONNECTION' ? '接続先が非対応です（仮案と最終案の流れに対応した接続先が必要です）。質問には答えますが、変更案の作成・JavaScript の生成・動作テスト環境への登録には進みません。接続先が更新されてから、実現したいことを送ってください。'
-                : cls.reason === 'DRAFT_SMALLTALK' ? (cls.ack ? '採用するときは「採用します」、変えたい点があればそのまま書いてください（質問もできます）。' : 'はい。仮案への返事（採用・変えたい点・質問）は、いつでもどうぞ。')
+              const text2 = cls.reason === 'DRAFT_SMALLTALK' ? (cls.ack ? '採用するときは「採用します」、変えたい点があればそのまま書いてください（質問もできます）。' : 'はい。仮案への返事（採用・変えたい点・質問）は、いつでもどうぞ。')
                 : cls.reason === 'NO_PLAN' && draftOpen ? '反映できる変更案はまだありません。いまは仮案への返事（採用・変えたい点・質問）を受け付けています。採用すると最終案を作ります。'
                 : cls.reason === 'ADOPT_NO_RECOMMENDATION' ? `残っている確認事項は業務の判断で、推奨がありません：「${(cls.openTexts || []).join('」「')}」。答えを書いてください（確認事項のカードの回答欄からも送れます）。kintone にはまだ何も反映していません。`
                 : cls.reason === 'NO_GENERATED_CODE' ? '登録できる JavaScript はまだありません。JavaScript は最終案の中で作ります（最終案の承認の後に登録します）。' : cls.reason === 'NO_CUSTOMIZATION' ? `現在の${planLabel(v)}に JavaScript カスタマイズはありません（標準設定だけで実現できます）。` : cls.reason === 'NO_PLAN' ? '反映できる変更案がまだありません。実現したいことを入力すると変更案を作ります。' : cls.reason === 'GREETING' ? 'このアプリについての質問や、実現したいことを入力してください。' : v ? '今の変更案があります。質問・変更案の修正・「これで進めたい」のいずれかで続けられます。' : 'このアプリについての質問（例: このフィールドは何に使ってる？）や、実現したいこと（例: 100万円以上なら部長承認を追加したい）を入力してください。';
@@ -21364,7 +20959,7 @@
         // §0f.3 の 2（2026-10-09）: 作業中の質問を止める（［キャンセル］・新しい会話）・走っている作業中の質問の数
         cancelAsides, asidesRunning: () => state.asideAborts.size,
         // 段階 B: 仮案（計画ができる前）・判断への回答（key 付き）・要件（計画の系列か仮案の台帳）・仮案の経路を使えるか
-        draft: () => state.draft, draftDecisions: () => JSON.parse(JSON.stringify(state.draftDecisions)), proposalOn,
+        draft: () => state.draft, draftDecisions: () => JSON.parse(JSON.stringify(state.draftDecisions)),
         requirements: (id = state.activePlan ? state.activePlan.planId : (state.draft ? state.draft.id : null)) => { const lg = id ? state.ledgers.get(id) : null; return lg ? KTAiAnswers.requirementsForContext(lg) : []; },
         /**
          * §0f.2 の 4（2026-10-09）: 採用範囲の中の要件（requirements と同じ形。取り消し済みは含める）。生成の requirementIds・形式確認の要件に使う。
@@ -21400,9 +20995,7 @@
             //   §0f.2 の 9（2026-10-09・前の確認の結び付けの誤り）: 決定事項の結び付きで範囲内に上がった要件が足した効果の数（v.scopeLinked。外していない。最終案の詳細に出す）。
             //   要件ごとの decisionLinks の verdict = match（採用の時点の組 X(D) に入る＝D の実現。根拠に数える）/ mismatch / unverified（数えない）
             linked: v && Array.isArray(v.scopeLinked) ? v.scopeLinked.length : 0,
-            delegationOpen: delegationOpenOf(lg),
-            //   §0f.2 の 9: decisionRefs の印がある Gateway か（あれば未実現の委任の扱い delegationOpen を使わず、要件の decisionRefs と採用の時点の組 X(D) で決める）・計画の段階の委任の数（id と版だけ）
-            decisionRefs: decisionRefsOn(),
+            //   計画の段階の委任（id と版だけ）
             planDelegations: livePlanDelegations(lg).map(pd => ({ id: pd.id, source: pd.source, at: pd.at })),
           };
         },
@@ -22063,13 +21656,12 @@
       const unsupported = new Set((Array.isArray(v.finalUnsupported) ? v.finalUnsupported : []).map(u => String(u && u.customizationId)));
       return (Array.isArray(v.plan.customizations) ? v.plan.customizations : []).filter(c => c && c.customizationId && !unsupported.has(String(c.customizationId))).map(c => {
         const e = v.generated[c.customizationId] || null;
-        //   レビュー 2（2026-10-14）: status ごとに語を分ける（できた／作成中（止めた）／まだ作っていません／作れませんでした／模擬テストで不合格／この接続先では確かめる検査ができません／確認できないことがあります）
+        //   レビュー 2（2026-10-14）: status ごとに語を分ける（できた／作成中（止めた）／まだ作っていません／作れませんでした／模擬テストで不合格／確認できないことがあります）
         const vk = e && e.verdict && e.verdict.kind ? String(e.verdict.kind) : '';
         const state = !e || e.status === 'not-started' ? 'まだ作っていません'
           : e.status === 'verified' ? 'できた（検証済み）'
           : e.status === 'failed' ? (e.failure && e.failure.stop ? '作成中（止めた）' : '作れませんでした')
           : e.status === 'unresolved' ? (vk === 'behavior-fail' ? '模擬テストで不合格' : vk === 'missing' || vk === 'partial' ? '必要な動作が足りません' : vk === 'machine' ? '機械検査で登録を止める問題があります' : '確認できないことがあります')
-          : e.status === 'unsupported' ? 'この接続先では確かめる検査ができません'
           : '確認できないことがあります';
         return { title: KTAiConversation.customizationTitleOf(v.plan, c.customizationId) || 'JavaScript', state };
       });
@@ -22676,7 +22268,7 @@
       //   統合テストの指摘 13（2026-10-14）: 計画の AI の影響の文（p.impact）は右の「影響範囲」の節に 1 回だけ出す。ここは設定の手順の件数と JavaScript の登録先の行だけ（二重に並べない）
       //   §12.59（2026-10-23）: JavaScript ごとの行は fin.customizations から（止めた JavaScript は failure.stop。生成の結果の unsupported の行の文は今までどおり）
       const js = Array.isArray(fin.customizations) ? fin.customizations.filter(c => c && typeof c === 'object') : [];
-      return [...(st.total ? [`設定の手順 ${st.total} 件（Toolkit から自動で反映できるのは ${st.auto} 件${st.blocked ? `・実行できない手順 ${st.blocked} 件` : ''}）`] : ['設定の変更はありません']), ...js.map(j => { const file = j.targetFile || ''; const stopped = j.status === 'failed' && !!(j.failure && j.failure.stop); return (j.status === 'unsupported' || j.status === 'cannot-generate' ? `Toolkit では作れない JavaScript${j.requirement ? `（${esc(j.requirement)}）` : ''}（反映の対象にしません）` : j.status === 'not-started' ? 'JavaScript（前の JavaScript の生成を止めたため、まだ作っていません）' : !file ? `JavaScript（${stopped ? '作っている途中で止めたため、ファイルはまだありません' : j.status === 'failed' ? '生成できなかったため、ファイルはまだありません' : 'ファイル名は未定'}）` : `${j.strategy === 'EXTEND_EXISTING_JS' ? `既存の「${esc(file)}」に統合` : `新しい JavaScript「${esc(file)}」を登録`}${j.status === 'verified' ? '' : j.status === 'unresolved' ? '（未解決。反映の対象にしません）' : j.status === 'failed' ? (stopped ? '（作っている途中で止めました。前の結果は反映の対象にしません）' : '（生成できませんでした）') : j.status === 'not-run' ? '（模擬テストを実行できていません。反映の対象にしません）' : '（確かめられていません。反映の対象にしません）'}`); })];
+      return [...(st.total ? [`設定の手順 ${st.total} 件（Toolkit から自動で反映できるのは ${st.auto} 件${st.blocked ? `・実行できない手順 ${st.blocked} 件` : ''}）`] : ['設定の変更はありません']), ...js.map(j => { const file = j.targetFile || ''; const stopped = j.status === 'failed' && !!(j.failure && j.failure.stop); return (j.status === 'cannot-generate' ? `Toolkit では作れない JavaScript${j.requirement ? `（${esc(j.requirement)}）` : ''}（反映の対象にしません）` : j.status === 'not-started' ? 'JavaScript（前の JavaScript の生成を止めたため、まだ作っていません）' : !file ? `JavaScript（${stopped ? '作っている途中で止めたため、ファイルはまだありません' : j.status === 'failed' ? '生成できなかったため、ファイルはまだありません' : 'ファイル名は未定'}）` : `${j.strategy === 'EXTEND_EXISTING_JS' ? `既存の「${esc(file)}」に統合` : `新しい JavaScript「${esc(file)}」を登録`}${j.status === 'verified' ? '' : j.status === 'unresolved' ? '（未解決。反映の対象にしません）' : j.status === 'failed' ? (stopped ? '（作っている途中で止めました。前の結果は反映の対象にしません）' : '（生成できませんでした）') : j.status === 'not-run' ? '（模擬テストを実行できていません。反映の対象にしません）' : '（確かめられていません。反映の対象にしません）'}`); })];
     }
     /**
      * 「確かめたこと」の 1 行（右の「変更内容」。指示書 §5.1）: 「構文と対象の照合、模擬テストで必須の動作を確認しました。実機は未確認です。」の形。
@@ -23475,8 +23067,10 @@
       if (!paidEnabled) throw new KTAiClient.AiClientError({ code: KTAiClient.ERROR_CODES.NO_CONFIG, message: KTAiClient.errorText(KTAiClient.ERROR_CODES.NO_CONFIG) });
       if (!capability.available && isTransient()) await refreshCapability({ force: true });
       if (!capability.available) throw new KTAiClient.AiClientError({ code: capability.reason || KTAiClient.ERROR_CODES.NOT_CONNECTED, message: KTContextUi.capabilityStatusText(capability) });
-      if (planner && !plannerAvailable()) throw new KTAiClient.AiClientError({ code: KTAiClient.ERROR_CODES.PLANNER_NOT_AVAILABLE, message: `${KTAiClient.errorText(KTAiClient.ERROR_CODES.PLANNER_NOT_AVAILABLE)} [${capability.features?.[KTAiClient.FEATURE_PLANNER]?.reason || 'NOT_ENTITLED'}]` });
-      if (generator && !generatorAvailable()) throw new KTAiClient.AiClientError({ code: KTAiClient.ERROR_CODES.GENERATOR_NOT_AVAILABLE, message: `${KTAiClient.errorText(KTAiClient.ERROR_CODES.GENERATOR_NOT_AVAILABLE)} [${capability.features?.[KTAiClient.FEATURE_GENERATOR]?.reason || 'NOT_ENTITLED'}]` });
+      //   2026-10-23（§12.61）: 今の Toolkit が使う印が欠ける接続先（CAPABILITY_OUTDATED）は、その符号と文で止める（契約に無い機能の文にしない）
+      const featErr = (feature, code) => { const reason = capability.features?.[feature]?.reason || 'NOT_ENTITLED'; return reason === KTAiClient.ERROR_CODES.CAPABILITY_OUTDATED ? new KTAiClient.AiClientError({ code: reason, message: KTAiClient.errorText(reason) }) : new KTAiClient.AiClientError({ code, message: `${KTAiClient.errorText(code)} [${reason}]` }); };
+      if (planner && !plannerAvailable()) throw featErr(KTAiClient.FEATURE_PLANNER, KTAiClient.ERROR_CODES.PLANNER_NOT_AVAILABLE);
+      if (generator && !generatorAvailable()) throw featErr(KTAiClient.FEATURE_GENERATOR, KTAiClient.ERROR_CODES.GENERATOR_NOT_AVAILABLE);
       const client = makeClient();
       if (!client || client.error) { capability = { available: false, reason: client?.error ? KTAiClient.ERROR_CODES.TRANSPORT_ERROR : KTAiClient.ERROR_CODES.NOT_CONNECTED }; setAskEnabled(); renderSession(); throw new KTAiClient.AiClientError({ code: capability.reason, message: KTContextUi.capabilityStatusText(capability) }); }
       return client;
@@ -23517,8 +23111,7 @@
         if (conversation && typeof conversation === 'object') gen.ctx.conversation = conversation;
         const client = await ensureReady();
         const requestId = KTAiClient.newRequestId();
-        // 逐次表示は Gateway が対応している（health の conversation に stream）ときだけ求める（古い Gateway には従来どおり kintone.proxy で送る）
-        const streamOn = typeof onText === 'function' && (services.conversationFeatures() || []).includes('stream');
+        const streamOn = typeof onText === 'function';
         const tr = nowMs();
         const trace = {};
         try { const a = await client.ask({ ctx: gen.ctx, requestId, signal, deadlineMs: deadlineOf(KTAiClient.FEATURE || 'assistant-qa'), trace, ...(streamOn ? { onText } : {}) }); perf.requestMs = nowMs() - tr; lastAnswer = a; return { ok: true, answer: a, ctx: gen.ctx, perf, callTrace: callTraceOf(requestId, trace) }; }
@@ -23546,8 +23139,7 @@
         perf.contextMs = nowMs() - tc;
         const client = await ensureReady();
         const requestId = KTAiClient.newRequestId();
-        const feats = services.conversationFeatures() || [];
-        const streamOn = typeof onText === 'function' && (feats.includes('stream') || feats.includes('proposal'));
+        const streamOn = typeof onText === 'function';
         const tr = nowMs();
         const trace = {};
         try { const a = await client.propose({ ctx, requestId, signal, deadlineMs: deadlineOf(KTAiClient.FEATURE || 'assistant-qa'), trace, ...(streamOn ? { onText } : {}) }); perf.requestMs = nowMs() - tr; return { ok: true, proposal: a, ctx, perf, callTrace: callTraceOf(requestId, trace) }; }
@@ -23576,7 +23168,7 @@
         const requestId = KTAiClient.newRequestId();
         let p;
         const tr = nowMs();
-        const streamReply = typeof onText === 'function' && (services.plannerFeatures() || []).includes('reply');   // 段階 C（C3b）: 能力があるときだけ逐次表示を求める
+        const streamReply = typeof onText === 'function';
         const trace = {};
         const planMode = { mode: gen.ctx && gen.ctx.revision && gen.ctx.revision.mode === 'patch' ? 'patch' : 'full' };
         try { p = await client.plan({ ctx: gen.ctx, requestId, signal, deadlineMs: deadlineOf(KTAiClient.FEATURE_PLANNER), trace, ...(streamReply ? { onText } : {}) }); }
@@ -23594,18 +23186,8 @@
         if (p) { delete p.turn; delete p.requirementsMeta; }
         return { plan: p, ctx: gen.ctx, review, decisionsMeta: p?.decisionsMeta ?? null, gatewayPlan: p?.gatewayPlan ?? null, revisionMeta: p?.revisionMeta ?? null, turn, requirementsMeta, perf, callTrace: callTraceOf(requestId, trace, planMode) };
       },
-      /** 会話の応答性（2026-10-05）: Gateway の計画の修正の方式（health。返さない古い Gateway は全体の作り直しだけ） */
-      revisionModes() { return capability?.features?.[KTAiClient.FEATURE_PLANNER || 'change-planner']?.revisionModes || ['full']; },
-      /** 2026-10-05 第 3 段: 質問の AI が受け取れる会話の文脈（requirements / brief。返さない古い Gateway は無し = 先回りの返答を使わない） */
-      conversationFeatures() { return capability?.features?.['assistant-qa']?.conversation || []; },
-      // 段階 C: 生成の検証の能力（requirementId・requiredEffects などの印。契約 20 §12）と計画の AI の逐次表示（stream: reply。契約 16）。古い Gateway は空
-      //   2026-10-18: 生成を使えない（契約に無い・Gateway に無いなど。features の customization-generator が available でない）ときは null（会話の生成の前の確認は印の不足と言わず、生成の呼び出しの GENERATOR_NOT_AVAILABLE に任せる）
-      generatorFeatures() { const g = capability?.features?.[KTAiClient.FEATURE_GENERATOR]; return g && g.available === true ? (g.verification || []) : null; },
-      /** 生成の停滞の観測（2026-10-14）: 生成工程の逐次配信の印（health の customization-generator.stream。progress = 進みの通知。契約 20 §18）。古い Gateway は空 */
-      generatorStream() { return capability?.features?.[KTAiClient.FEATURE_GENERATOR]?.stream || []; },
-      plannerFeatures() { return capability?.features?.[KTAiClient.FEATURE_PLANNER]?.stream || []; },
-      /** §0f.2 の 9（2026-10-09）: 計画の要件の操作の印（decisionRefs = 要件が実現する決定事項の id を返す Gateway）。古い Gateway は空 */
-      plannerRequirementOps() { return capability?.features?.[KTAiClient.FEATURE_PLANNER]?.requirementOps || []; },
+      //   2026-10-23（§12.61）: 接続先の能力の印は接続時の 1 回の確認（KTAiClient.capabilityFromHealth）で確かめる。使う場所ごとに印を読む口（revisionModes・conversationFeatures・
+      //   generatorFeatures・generatorStream・plannerFeatures・plannerRequirementOps）は持たない
       /** 進みのカードの「見ている材料」（手元の情報だけ。内部の番号は出さない） */
       materials() {
         try {
@@ -23717,10 +23299,10 @@
           else if (bf && bf.sourceAvailable) existingSource = { name: t.name, target, text: bf.text, from: 'preview-base', env: 'preview', hash: bf.hash, ...(seed && seed.name === t.name && seed.platform === target && seed.source?.hash && seed.source.hash !== bf.hash ? { changedSinceConsult: { consulted: seed.source.hash, current: bf.hash } } : {}) };
           if (!existingSource || typeof existingSource.text !== 'string') return { ok: false, reason: 'JS_SOURCE_UNAVAILABLE', file: { name: t.name, target }, message: bf ? (bf.type === 'URL' ? `統合先「${t.name}」は URL 指定の JavaScript です（本文を取得しません）。` : `統合先「${t.name}」の動作テスト環境の本文を取得できませんでした（${bf.error?.message || '不明'}）。運用環境の本文では生成しません。`) : `統合先「${t.name}」（${target === 'mobile' ? 'モバイル' : 'PC'}）は動作テスト環境に登録されていません。` };
         }
-        // 段階 C（契約 20 §4 / §12）: 要件の id（この customization・要件 R…・手順 P…）。能力の無い Gateway には送らない
+        // 段階 C（契約 20 §4 / §12）: 要件の id（この customization・要件 R…・手順 P…）
         //   §0c.3（2026-10-08）: 代表条件は作らない（Gateway が必須の効果から作る）。必須の効果（会話が採用済みの計画から作って固定したもの）と、
         //   動作テストに使う既存 JS の本文（同じ platform の既存 JS。動作テストで動かすものは生成工程が選ぶ）を渡す。
-        //   2026-10-18: 能力の印の足りない接続先には、会話の生成の前の確認（generatorLackOf）で依頼しない。ここでは今の受け渡しの形だけで送る（古い形の分岐は持たない）
+        //   2026-10-23（§12.61）: 能力の印の足りない接続先は、接続時の能力の確認（capabilityFromHealth）で生成を使えないと示す。ここでは今の受け渡しの形だけで送る
         const files = KTScan.summarizeFiles(inputs.scan || null, inputs.data || null);
         //   §0f.2 の 4（2026-10-09）: 「満たすべき要件」と形式確認の要件は採用範囲の中だけ（この版の計画で判定する）
         const gapsG = conv && typeof conv.implementationGaps === 'function' ? conv.implementationGaps(v) : {};
@@ -23749,7 +23331,7 @@
         const requestId = KTAiClient.newRequestId();
         let generated;
         const trace = {};
-        const wantProgress = typeof onProgress === 'function' && (services.generatorStream() || []).includes('progress');
+        const wantProgress = typeof onProgress === 'function';
         const onEvent = wantProgress ? ({ event, data }) => { if (event === 'progress' && data && typeof data === 'object') onProgress(data); } : null;
         try { generated = await client.generate({ ctx, requestId, signal, deadlineMs: deadlineOf(KTAiClient.FEATURE_GENERATOR), trace, ...(onEvent ? { onEvent } : {}) }); }
         catch (e) { noteAuthError(e); tagCallError(e, requestId, trace); throw e; }

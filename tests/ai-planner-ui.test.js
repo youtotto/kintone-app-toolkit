@@ -1,4 +1,4 @@
-// AI Change Planner の UI（mountAiWorkspace のモード切替・変更計画の作成・表示）と KTAiClient.plan / validatePlan
+// AI Change Planner の UI（mountAiWorkspace のモード切替・変更計画の作成・表示）と KTAiClient.plan / receive
 //
 // 検証内容（Phase 7 §38）:
 //   - mode switch（質問する / 変更計画を作る）/ goal 入力・例プリセット / 無料: 変更計画 Prompt の生成・コピー
@@ -38,7 +38,7 @@ const E_STATE = PCTX.facts.find(f => f.kind === 'process-state' && f.state?.name
 const HEALTH_BOTH = {
   ok: true, supportedContractVersions: ['2.0', '2.1'],
   entitlements: [{ product: 'toolkit', features: ['assistant-qa', 'change-planner'] }],
-  registry: { toolkit: { 'assistant-qa': { implemented: true, promptVersions: ['1'] }, 'change-planner': { implemented: true, promptVersions: ['1'] } } },
+  registry: { toolkit: { 'assistant-qa': { implemented: true, promptVersions: ['1'], conversation: ['requirements', 'brief', 'stream', 'proposal', 'suggestion', 'adoptQuote', 'itemIds'] }, 'change-planner': { implemented: true, promptVersions: ['1'], revisionModes: ['full', 'patch'], stream: ['reply'], requirementOps: ['decisionRefs'] } } },
   usage: { yyyymm: '202610', monthlyLimit: 100, usedThisMonth: 3, remainingThisMonth: 97 }, contractExpiresAt: '2099-01-01T00:00:00Z', auth: { type: 'access_token' },
 };
 const HEALTH_QA_ONLY = { ...HEALTH_BOTH, entitlements: [{ product: 'toolkit', features: ['assistant-qa'] }] };
@@ -84,9 +84,7 @@ function mount({ health = HEALTH_BOTH, planResponses = [], askResponses = [], co
       calls.plan.push({ ctx, requestId });
       const r = pq.shift();
       if (r?.name === 'AiClientError') throw r;
-      const v = KTAiClient.validatePlan(r, ctx);
-      if (!v.ok) throw new KTAiClient.AiClientError({ code: v.errors[0].code, message: v.errors[0].message, requestId });
-      return { ...v.normalized, requestId: v.normalized.requestId || requestId, clientWarnings: v.warnings };
+      const got = KTAiClient.receive('plan', r); return { ...got, requestId: got.requestId || requestId, clientWarnings: [] };
     },
   };
   const session = { status() { return { connected, apiBase: 'https://gw.test', refreshExpiresAt: '2099-01-01T00:00:00Z', scope: { product: 'toolkit', feature: 'assistant-qa,change-planner', domain: 't.cybozu.com' } }; }, async migrateLegacy() { return false; }, async refresh() { return {}; }, async disconnect() { return { revoked: true }; }, client };
@@ -99,7 +97,7 @@ function mount({ health = HEALTH_BOTH, planResponses = [], askResponses = [], co
 }
 
 (async () => {
-console.log('\n--- 1. KTAiClient: plan envelope / validatePlan ---');
+console.log('\n--- 1. KTAiClient: plan envelope / receive ---');
 {
   const env = KTAiClient.buildPlanEnvelope({ ctx: PCTX, requestId: 'pl-1', pluginVersion: '9.9.9', now: 'N' });
   assert(env.contractVersion === '2.1' && env.meta.product === 'toolkit' && env.meta.feature === 'change-planner' && env.meta.promptVersion === '1' && env.meta.contextVersion === 'planner-1' && env.payload === PCTX, 'buildPlanEnvelope: toolkit.change-planner / planner-1 / payload は Planner Context そのもの');
@@ -113,9 +111,9 @@ console.log('\n--- 1. KTAiClient: plan envelope / validatePlan ---');
   bad.plan.relevantFields.push({ fieldCode: 'ghost', role: 'x', evidenceIds: ['E1'] });
   bad.plan.steps[0].evidenceIds = [E_APPROVER, 'E999'];
   bad.plan.steps.push({ ...bad.plan.steps[3], id: 'P6', targetRef: 'ghost2', alternativeId: null, validation: { status: 'ok', issues: [] } });
-  const v = KTAiClient.validatePlan(bad, PCTX);
-  assert(v.ok && !v.normalized.relevantFields.some(f => f.fieldCode === 'ghost') && v.normalized.steps[0].evidenceIds.join() === E_APPROVER && v.normalized.steps.find(s => s.id === 'P6').validation.status === 'invalid' && v.warnings.length >= 3, 'validatePlan: 未知の根拠ID 除去・存在しない既存フィールド除去・存在しない既存を参照する step は invalid（クライアント側でも検証）');
-  assert(KTAiClient.validatePlan({ ...PLAN_RESPONSE, plan: null }, PCTX).ok === false && KTAiClient.validatePlan({ ...PLAN_RESPONSE, contractVersion: '2.0' }, PCTX).ok === false, 'plan 無し / contractVersion 不一致 → NG');
+  //   2026-10-23（§12.61）: 未知の根拠 ID の除去・存在しない既存資産の invalid は Gateway（validate-plan）の仕事。Toolkit の受け取りは契約の関所だけで、形はそのまま返す
+  const thrownP = (r) => { try { KTAiClient.receive('plan', r); return null; } catch (e) { return e.code; } };
+  assert(KTAiClient.receive('plan', bad).relevantFields.some(x => x.fieldCode === 'ghost') && thrownP({ ...PLAN_RESPONSE, plan: null }) === 'INVALID_RESPONSE' && thrownP({ ...PLAN_RESPONSE, contractVersion: '2.0' }) === 'UNSUPPORTED_CONTRACT_VERSION', 'receive: Gateway の形をそのまま返す（根拠 ID・既存資産を読み直さない）。plan 無し / contractVersion 不一致 → AiClientError');
   const cap = KTAiClient.capabilityFromHealth(HEALTH_BOTH);
   const capQa = KTAiClient.capabilityFromHealth(HEALTH_QA_ONLY);
   assert(cap.available && cap.features['change-planner'].available === true && capQa.available && capQa.features['change-planner'].available === false && capQa.features['change-planner'].reason === C.NOT_ENTITLED, 'capability: feature ごとの可否（Q&A のみの契約では planner 不可）');
@@ -151,8 +149,7 @@ console.log('\n--- 2. UI: mode switch / goal / 無料の生成 ---');
 console.log('\n--- 3. 計画の表示（会話の計画の右の「計画」と同じ部品 KTContextUi.planHtml・planJson）---');
 //   送信前の確認・受信の文言・drawer の扱いは会話の流れのテスト（ai-workspace・ai-flow-redesign）が確かめる
 {
-  const vp = KTAiClient.validatePlan(PLAN_RESPONSE, PCTX);
-  const planN = { ...vp.normalized, clientWarnings: vp.warnings };
+  const planN = { ...KTAiClient.receive('plan', PLAN_RESPONSE), clientWarnings: [] };
   //   右の「計画」と同じ呼び方（計画の確認の結果は渡さない。mountAiWorkspace の renderDrawer）
   const h = KTContextUi.planHtml(planN, { data: INPUTS.data, ctx: PCTX });
   assert(h.includes('＋ 新規フィールド') && h.includes('部長承認者') && h.includes('USER_SELECT') && h.includes('kt-ai-new-field') && h.includes('特定する情報がありません'), '新規フィールド提案は目立つ枠（＋ 新規フィールド / 名前 / 種類 / 理由）');
@@ -197,10 +194,10 @@ console.log('\n--- 段階 C: 計画の reply の SSE ---');
     let k = 0; const enc = new TextEncoder();
     return { status: 200, headers: { get: (h) => (String(h).toLowerCase() === 'content-type' ? 'text/event-stream; charset=utf-8' : null) }, body: { getReader: () => ({ read: async () => (k < parts.length ? { value: enc.encode(parts[k++]), done: false } : { value: undefined, done: true }) }) }, text: async () => text };
   };
-  // 能力: registry.toolkit['change-planner'].stream に 'reply' を含むときだけ
-  const health = (stream) => ({ ok: true, supportedContractVersions: ['2.1'], entitlements: [{ product: 'toolkit', features: ['assistant-qa', 'change-planner'] }], registry: { toolkit: { 'assistant-qa': { implemented: true, promptVersions: ['1'] }, 'change-planner': { implemented: true, promptVersions: ['1'], ...(stream ? { stream } : {}) } } } });
+  // 能力: registry.toolkit['change-planner'].stream に 'reply' を含む接続先だけ計画を使える（接続時の 1 回の確認）
+  const health = (stream) => ({ ok: true, supportedContractVersions: ['2.1'], entitlements: [{ product: 'toolkit', features: ['assistant-qa', 'change-planner'] }], registry: { toolkit: { 'assistant-qa': { implemented: true, promptVersions: ['1'], conversation: ['requirements', 'brief', 'stream', 'proposal', 'suggestion', 'adoptQuote', 'itemIds'] }, 'change-planner': { implemented: true, promptVersions: ['1'], revisionModes: ['full', 'patch'], requirementOps: ['decisionRefs'], ...(stream ? { stream } : {}) } } } });
   const capNew = KTAiClient.capabilityFromHealth(health(['reply'])), capOld = KTAiClient.capabilityFromHealth(health(null));
-  assert(JSON.stringify(capNew.features['change-planner'].stream) === '["reply"]' && capOld.features['change-planner'].stream === undefined, `health の stream（reply）を能力として読む。古い Gateway は無い: ${JSON.stringify(capNew.features['change-planner'].stream)}`);
+  assert(JSON.stringify(capNew.features['change-planner'].stream) === '["reply"]' && capNew.features['change-planner'].available === true && capOld.features['change-planner'].available === false && capOld.features['change-planner'].reason === 'CAPABILITY_OUTDATED' && JSON.stringify(capOld.features['change-planner'].lacking) === '["reply"]', `health の stream（reply）を能力として読む。2026-10-23（§12.61）: 無い接続先は接続時の確認で計画を使えない（CAPABILITY_OUTDATED・足りない印）: ${JSON.stringify(capOld.features['change-planner'])}`);
   // SSE: delta は reply の増分 → onText にここまでの全文、done の本文は通常の計画と同じに検証
   const text = ': start\n\n' + sse([['delta', { text: '承認待ちの間だけ' }], ['delta', { text: '金額を編集不可にします。' }]]) + sse([['done', PLAN_RESPONSE]]);
   let sentHeaders = null, sentBody = null; const seen = [];

@@ -165,7 +165,7 @@ console.log('\n--- §N9 計画の版の反映済み（JavaScript の登録の後
   const withJs = (procStep) => plan([step('C1', 'CUSTOMIZATION_REQUIRED', 'JS', null, { customizationId: 'C1' }, { solution: 'CUSTOMIZATION' }), procStep], { solution: 'HYBRID', customizations: [cust] });
   const run = async (p) => {
     const rv = reviewOf(p);
-    const svc = { conversationFeatures: () => ['requirements', 'stream', 'proposal', 'itemIds'], async propose(args) { return { ok: true, proposal: K.normalized(draftRaw(args.utterance), 'pp-1', null, args), ctx: { facts: [] } }; }, async plan() { return { plan: clone(p), ctx: null, review: clone(rv) }; }, async ask() { return { ok: true, answer: { answer: 'a' } }; } };
+    const svc = { async propose(args) { return { ok: true, proposal: K.normalized(draftRaw(args.utterance), 'pp-1', null, args), ctx: { facts: [] } }; }, async plan() { return { plan: clone(p), ctx: null, review: clone(rv) }; }, async ask() { return { ok: true, answer: { answer: 'a' } }; } };
     const c = KTAiConversation.create({ services: svc });
     await c.send('承認済みの備考を編集できないようにしたい'); await c.send('これで進めて');
     const v = c.activePlan(); v.generated = { C1: { generated: { strategy: 'NEW_JS_FILE' } } };
@@ -186,7 +186,7 @@ console.log('\n--- §N10 最終案の判定: 値の無い手順と、それで�
   const draftRaw = (u) => ({ reply: `「${u}」を実現する変更案にできます。`, intent: 'propose', proposal: { behaviors: [{ text: u, origin: 'user' }], assumptions: [], decisions: [], approach: { standard: ['プロセス管理と一覧'], js: [] }, cannot: [] }, turn: { ops: [], answers: [], requirementOps: [] } });
   const finalOf = async (p) => {
     const rv = reviewOf(p);
-    const svc = { conversationFeatures: () => ['requirements', 'stream', 'proposal', 'itemIds'], async propose(args) { return { ok: true, proposal: K.normalized(draftRaw(args.utterance), 'pp-1', null, args), ctx: { facts: [] } }; }, async plan() { return { plan: clone(p), ctx: null, review: clone(rv) }; }, async ask() { return { ok: true, answer: { answer: 'a' } }; } };
+    const svc = { async propose(args) { return { ok: true, proposal: K.normalized(draftRaw(args.utterance), 'pp-1', null, args), ctx: { facts: [] } }; }, async plan() { return { plan: clone(p), ctx: null, review: clone(rv) }; }, async ask() { return { ok: true, answer: { answer: 'a' } }; } };
     const c = KTAiConversation.create({ services: svc });
     await c.send('100万円未満の申請の条件を変えて、一覧も足したい'); await c.send('これで進めて');
     return c.activePlan();
