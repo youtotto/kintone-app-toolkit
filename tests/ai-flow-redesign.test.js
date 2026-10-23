@@ -3211,8 +3211,8 @@ await section(async () => {
   const { m, v } = await (async () => {
     const gen = KIT.screenGenerate({});
     const mm = mount({ health: KIT.HEALTH_V, planImpl: KIT.planImplOf(KIT.screenPlan('mixed')), generateImpl: gen.impl });
-    //   運用環境の一覧の取得（設定の手順の準備 KTPlanExecutor.prepare だけが使う）を止めておき、承認の欄の準備を途中で待たせる
-    const o = mm.mock.api.getProductionViews; mm.mock.api.getProductionViews = async (...a) => { await g.p; return o.apply(mm.mock.api, a); };
+    //   2026-10-23: 準備は作業の基準の今の設定を受け取り、取得しない（前は運用環境の一覧の取得を止めて待たせた）。JavaScript の準備の部品の入口を止めておき、承認の欄の準備を途中で待たせる
+    const o = T.KTJsExecutor.prepare; T.KTJsExecutor.prepare = async function (...a) { await g.p; return o.apply(this, a); }; g.restore = () => { T.KTJsExecutor.prepare = o; };
     await ticks();
     for (const s of KIT.REQUESTS) { await mm.panel.send(s); await ticks(10); }
     await ticks(30);
@@ -3223,6 +3223,7 @@ await section(async () => {
   await clickChat(m, 'final-approve', { plan: v.planId, version: String(v.version) }); await ticks(4);
   assert(!v.approval && KIT.writesOf(m).length === 0 && /反映の前の準備がまだ終わっていません/.test(stripC(m.chat())), 'H5-2: 準備中に押しても承認・書き込みをしない（押せなかったことを承認の欄に出す）');
   g.open(); await KIT.waitUntil(() => m.panel.finalPrecheck().status === 'ready', 60);
+  g.restore();   // 止めていた入口を戻す
   assert(KIT.applyButtonOf(m) && !KIT.applyButtonOf(m).disabled, 'H5-3: 準備が終わると押せる');
   //   止まる理由: 別の担当者が同じフィールドを先に足した → 作業の基準の取り直しで準備をやり直し、理由を出して押せない
   await m.mock.api.addPreviewFields('341', { approval_memo: { type: 'SINGLE_LINE_TEXT', code: 'approval_memo', label: '承認メモ' } });
@@ -3261,20 +3262,20 @@ await section(async () => {
   const mk = makeKintoneMock(INPUTS.data);
   const ch = (dep) => ({ changeId: 'c1', customizationId: 'C1', strategy: 'NEW_JS_FILE', kind: 'ADD_FILE', target: 'desktop', name: 'memoLock.js', content: '// x', contentHash: T.KTScan.hashText('// x'), bytes: 4, registration: { verdict: 'RUNTIME_UNVERIFIED', blockers: [], confirmations: [], unverified: [], codeHash: T.KTScan.hashText('// x') }, dependsOn: dep });
   const dep = { statuses: [], fields: [{ code: 'approval_memo', label: '承認メモ', stepId: 'P1', title: '承認メモフィールドを追加' }] };
-  const p0 = await KTJsExecutor.prepare({ appId: '341', changes: [ch(dep)] }, { api: mk.api });
-  const p1 = await KTJsExecutor.prepare({ appId: '341', changes: [ch(dep)], deferDependencies: true }, { api: mk.api });
-  const p2 = await KTJsExecutor.prepare({ appId: '341', changes: [ch({ statuses: [], fields: [{ code: 'approval_memo' }] })], deferDependencies: true }, { api: mk.api });
+  const p0 = await KTJsExecutor.prepare({ appId: '341', changes: [ch(dep)] }, { api: mk.api, current: await mk.current() });
+  const p1 = await KTJsExecutor.prepare({ appId: '341', changes: [ch(dep)], deferDependencies: true }, { api: mk.api, current: await mk.current() });
+  const p2 = await KTJsExecutor.prepare({ appId: '341', changes: [ch({ statuses: [], fields: [{ code: 'approval_memo' }] })], deferDependencies: true }, { api: mk.api, current: await mk.current() });
   assert(p0.status === 'BLOCKED' && p0.blockers[0].code === 'DEPENDENCY_NOT_APPLIED' && p1.status === 'PREPARED' && p1.deferred.length === 1 && p1.deferred[0].code === 'DEPENDENCY_AFTER_SETTINGS' && p1.changes[0].status === 'PENDING' && p2.status === 'BLOCKED' && p2.blockers[0].code === 'DEPENDENCY_NOT_APPLIED', `H6-1: 依存の確かめは残し、承認の前の準備だけ「設定の反映の後に確かめる」にする（計画の手順が新設するものに限る）: ${JSON.stringify([p0.blockers, p1.deferred, p2.blockers].map(x => x.map(y => y.code)))}`);
   const cz = await mk.api.getPreviewCustomize('341');
   const fp = KTJsExecutor.contentFingerprint(KTJsExecutor.snapshotOf(cz));
   await mk.api.addPreviewFields('341', { approval_memo: { type: 'SINGLE_LINE_TEXT', code: 'approval_memo', label: '承認メモ' } }, cz.revision);
-  const q1 = await KTJsExecutor.prepare({ appId: '341', changes: [ch(dep)], expectedRevision: cz.revision, expectedContent: fp }, { api: mk.api });
-  const q0 = await KTJsExecutor.prepare({ appId: '341', changes: [ch(dep)], expectedRevision: cz.revision }, { api: mk.api });
+  const q1 = await KTJsExecutor.prepare({ appId: '341', changes: [ch(dep)], expectedRevision: cz.revision, expectedContent: fp }, { api: mk.api, current: await mk.current() });
+  const q0 = await KTJsExecutor.prepare({ appId: '341', changes: [ch(dep)], expectedRevision: cz.revision }, { api: mk.api, current: await mk.current() });
   const cz2 = await mk.api.getPreviewCustomize('341');
   const up = await mk.api.uploadFile('manual.js', '// m', 'text/javascript');
   const keep = (l) => l.map(e => (e.type === 'URL' ? { type: 'URL', url: e.url } : { type: 'FILE', file: { fileKey: e.file.fileKey } }));
   await mk.api.putPreviewCustomize('341', { app: 341, scope: cz2.scope, desktop: { js: [...keep(cz2.desktop.js), { type: 'FILE', file: { fileKey: up } }], css: keep(cz2.desktop.css) }, mobile: { js: keep(cz2.mobile.js), css: keep(cz2.mobile.css) } }, cz2.revision);
-  const q2 = await KTJsExecutor.prepare({ appId: '341', changes: [ch(dep)], expectedRevision: cz.revision, expectedContent: fp }, { api: mk.api });
+  const q2 = await KTJsExecutor.prepare({ appId: '341', changes: [ch(dep)], expectedRevision: cz.revision, expectedContent: fp }, { api: mk.api, current: await mk.current() });
   assert(q1.status === 'PREPARED' && q1.warnings.some(w => w.code === 'CUSTOMIZE_REVISION_ADVANCED') && q0.status === 'BLOCKED' && q0.blockers.some(b => b.code === 'STALE_CUSTOMIZATION') && q2.status === 'BLOCKED' && q2.blockers.some(b => b.code === 'STALE_CUSTOMIZATION' && b.detail && b.detail.content), `H6-2: 設定の書き込みで revision だけが進んだ → 内容が同じなので止めない。内容（JS / CSS の一覧）が変われば STALE_CUSTOMIZATION（照合は残す）。内容の指紋が無い呼び出しは従来どおり revision で止める: ${JSON.stringify([q1.status, q0.status, q2.status])}`);
 });
 

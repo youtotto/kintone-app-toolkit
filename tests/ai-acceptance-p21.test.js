@@ -262,24 +262,24 @@ console.log('\n--- G4. 反映の直前: 計画を作った時点の動作テス�
   // 動作テスト環境（revision 12）は計画の時点と同じ。運用環境（views の revision）は 10 で古い
   const mock = makeKintoneMock(PREV);
   mock.st.revision = 12; mock.st.prodRevision = 10;
-  const prep = await KTPlanExecutor.prepare(out, { api: mock.api, appId: '310' });
+  const prep = await KTPlanExecutor.prepare(out, { api: mock.api, current: await mock.current(), appId: '310' });
   assert(prep.status === 'PREPARED' && prep.stale.status === 'FRESH' && prep.revision.reviewedEnv === 'preview', '動作テスト環境が計画の時点と同じなら FRESH（運用環境に未反映の変更があっても止めない）');
   // 運用環境の設定で作った計画（Phase 20 まで）は、動作テスト環境に未反映の変更があると必ず止まっていた（運用環境にもあるフィールドだけの一覧でも）
   const pOld = plan([step('P1', 'ADD_VIEW', 'NEW_SETTING', '金額の大きい案件', { name: '金額の大きい案件', fields: ['case_name', 'amount'], filterCond: 'amount >= 1000000', sort: 'レコード番号 desc' })]);
   const rvProd = KTPlanReview.review({ plan: pOld, data: PROD, deps: null, scan: null, incoming: null });
-  const prepOld = await KTPlanExecutor.prepare(KTPlanReview.executorOutput(pOld, rvProd, ['P1']), { api: mock.api, appId: '310' });
+  const prepOld = await KTPlanExecutor.prepare(KTPlanReview.executorOutput(pOld, rvProd, ['P1']), { api: mock.api, current: await mock.current(), appId: '310' });
   console.log('   old blockers:', prepOld.blockers.map(b => b.code).join(','));
   assert(prepOld.status === 'BLOCKED' && prepOld.blockers.some(b => b.code === 'STALE_PLAN'), '前提: 運用環境の設定で作った計画は、動作テスト環境に未反映の変更があると STALE_PLAN（Phase 20 までの挙動）');
   // 別の操作で動作テスト環境が変わった（計画の後にフィールドが追加された）→ 競合として止める
   const mock2 = makeKintoneMock(PREV);
   mock2.st.revision = 13; mock2.st.prodRevision = 10;
   mock2.st.fields.coupon_code = { type: 'SINGLE_LINE_TEXT', code: 'coupon_code', label: 'クーポン', noLabel: false, required: false };
-  const prep2 = await KTPlanExecutor.prepare(out, { api: mock2.api, appId: '310' });
+  const prep2 = await KTPlanExecutor.prepare(out, { api: mock2.api, current: await mock2.current(), appId: '310' });
   assert(prep2.status === 'BLOCKED' && prep2.blockers.some(b => b.code === 'STALE_PLAN') && prep2.stale.diffs.some(d => d.id === 'coupon_code' && /計画を作った後の変更/.test(d.message)), '計画の後に別の操作で入った変更（クーポン）を競合として止める');
   // revision だけが進んだ（内容は同じ）→ 止めずに記録
   const mock3 = makeKintoneMock(PREV);
   mock3.st.revision = 14; mock3.st.prodRevision = 10;
-  const prep3 = await KTPlanExecutor.prepare(out, { api: mock3.api, appId: '310' });
+  const prep3 = await KTPlanExecutor.prepare(out, { api: mock3.api, current: await mock3.current(), appId: '310' });
   assert(prep3.status === 'PREPARED' && prep3.warnings.some(w => w.code === 'PREVIEW_REVISION_ADVANCED'), 'revision だけが進み内容が同じ → 止めずに記録（PREVIEW_REVISION_ADVANCED）');
 }
 
@@ -289,10 +289,10 @@ console.log('\n--- G2. 生成後に統合先の本文が変わった → 登録�
   const ch = KTJsExecutor.changeFromGenerated({ customization: { customizationId: 'C1', platform: ['desktop'], fields: [], events: [] }, generated: { strategy: 'EXTEND_EXISTING_JS', code: '', targetFile: 'dealLock.js', summary: '' }, review: { status: KTCodeReview.STATUS.OK, finalCode: LOCK_V2 + '\n// added', checks: [] }, existingSource: { name: 'dealLock.js', target: 'desktop', text: LOCK_V2 } });
   assert(ch.ok && ch.change.baseHash === KTScan.hashText(LOCK_V2), '前提: 生成の基準は動作テスト環境の本文（LOCK_V2）');
   const mock = makeKintoneMock(PREV, { jsSources: [{ name: 'dealLock.js', target: 'desktop', text: LOCK_V2 + '\n// 別の人が直した' }] });
-  const prep = await KTJsExecutor.prepare({ appId: '310', changes: [ch.change] }, { api: mock.api });
+  const prep = await KTJsExecutor.prepare({ appId: '310', changes: [ch.change] }, { api: mock.api, current: await mock.current() });
   assert(prep.status === 'BLOCKED' && prep.blockers.some(b => b.code === 'JS_SOURCE_CHANGED'), '生成の後に動作テスト環境の本文が変わっていれば JS_SOURCE_CHANGED（上書きしない）');
   const mockSame = makeKintoneMock(PREV, { jsSources: [{ name: 'dealLock.js', target: 'desktop', text: LOCK_V2 }] });
-  const prepOk = await KTJsExecutor.prepare({ appId: '310', changes: [ch.change] }, { api: mockSame.api });
+  const prepOk = await KTJsExecutor.prepare({ appId: '310', changes: [ch.change] }, { api: mockSame.api, current: await mockSame.current() });
   assert(prepOk.status === 'PREPARED', '本文が生成の時点と同じなら登録の準備ができる');
 }
 
@@ -474,15 +474,16 @@ console.log('\n--- G7. 登録処理の側での判定（KTJsExecutor）: 古い�
   assert(good.ok && good.change.registration && good.change.registration.verdict === 'RUNTIME_UNVERIFIED' && good.change.registration.codeHash === KTScan.hashText(okCode), '前提: 通過したコードの変更には判定と検査したコードの指紋が付く');
   const forged = clone(good.change); forged.registration = { ...forged.registration, verdict: 'BLOCKED', blockers: [{ code: 'conditional-control', message: '条件の外でロック' }] };
   const mk = () => makeKintoneMock(REG.data);
-  const p1 = await KTJsExecutor.prepare({ appId: '310', changes: [forged] }, { api: mk().api });
+  const mkO = async () => { const m = mk(); return { api: m.api, current: await m.current() }; };   // 2026-10-23: 準備に渡す今の設定
+  const p1 = await KTJsExecutor.prepare({ appId: '310', changes: [forged] }, await mkO());
   assert(p1.status === 'BLOCKED' && p1.blockers.some(b => b.code === 'REQUIREMENT_VIOLATION'), 'prepare: 判定が登録不可の変更は止める（UI を通らない呼び出しでも）');
   const tampered = clone(good.change); tampered.content = badCode; tampered.contentHash = KTScan.hashText(badCode);
-  const p2 = await KTJsExecutor.prepare({ appId: '310', changes: [tampered] }, { api: mk().api });
+  const p2 = await KTJsExecutor.prepare({ appId: '310', changes: [tampered] }, await mkO());
   assert(p2.status === 'BLOCKED' && p2.blockers.some(b => b.code === 'CONTENT_CHANGED_AFTER_REVIEW'), 'prepare: 検査の後にコードを差し替えた変更は止める');
-  const p3 = await KTJsExecutor.prepare({ appId: '310', changes: [clone(good.change)], recheck: async () => ({ ...rvBad.registration }) }, { api: mk().api });
+  const p3 = await KTJsExecutor.prepare({ appId: '310', changes: [clone(good.change)], recheck: async () => ({ ...rvBad.registration }) }, await mkO());
   assert(p3.status === 'BLOCKED' && p3.blockers.some(b => b.code === 'REQUIREMENT_VIOLATION' && /検査し直すと/.test(b.message)), 'prepare: 最新の基準で検査し直して登録不可なら止める（recheck）');
   const noReg = clone(good.change); delete noReg.registration;
-  const p4 = await KTJsExecutor.prepare({ appId: '310', changes: [noReg] }, { api: mk().api });
+  const p4 = await KTJsExecutor.prepare({ appId: '310', changes: [noReg] }, await mkO());
   assert(p4.status === 'BLOCKED' && p4.blockers.some(b => b.code === 'REGISTRATION_UNKNOWN'), 'prepare: 検査結果の無い変更は止める');
   // 確認が必要な項目: 1 件ずつ確認したものがそろわないと登録しない（まとめての同意では通さない）
   const needCode = wrap(['app.record.edit.show'], IF_LOCK + "\n    kintone.api(kintone.api.url('/k/v1/records', true), 'GET', { app: 500, query: '' });");
@@ -491,7 +492,7 @@ console.log('\n--- G7. 登録処理の側での判定（KTJsExecutor）: 古い�
   const rvNeed = KTCodeReview.attachBehavior(review(needCode, c), { version: '1', candidateHash: '0123456789abcdef', passed: true, machine: [{ name: 'apis', ok: false, severity: 'review', message: '計画に無い通信 API を使っています: 「kintone.api」' }], requiredEffects: [], behavior: { status: 'not-run', reason: 'no-required-effects', cases: [] } }, { requiredEffects: [], customization: c });
   const need = KTJsExecutor.changeFromGenerated({ customization: c, generated: REG.gen(needCode), review: rvNeed });
   const m5 = mk();
-  const p5 = await KTJsExecutor.prepare({ appId: '310', changes: [need.change] }, { api: m5.api });
+  const p5 = await KTJsExecutor.prepare({ appId: '310', changes: [need.change] }, { api: m5.api, current: await m5.current() });
   assert(p5.status === 'PREPARED' && p5.confirmations.length >= 1 && p5.confirmations.every(x => x.key && x.howToCheck) && p5.unverified.some(u => u.code === 'RUNTIME_NOT_RUN'), 'prepare: 確認が必要な項目（key・確かめること）と動作が未確認であることを返す');
   let err = null;
   try { await KTJsExecutor.executePreview(p5, { api: m5.api, acknowledged: [] }); } catch (e) { err = e; }

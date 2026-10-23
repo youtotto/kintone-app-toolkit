@@ -152,7 +152,7 @@ console.log('\n--- F2. 復元: リマインダー未設定（timezone null）の
   const rv = reviewOf(p, data);
   const mock = makeKintoneMock(data);
   assert(mock.st.timezone === null, '前提: モックも実機と同じく未設定の timezone は null');
-  const prepared = await KTPlanExecutor.prepare(KTPlanReview.executorOutput(p, rv, ['P1']), { api: mock.api, appId: '310' });
+  const prepared = await KTPlanExecutor.prepare(KTPlanReview.executorOutput(p, rv, ['P1']), { api: mock.api, current: await mock.current(), appId: '310' });
   const log = await KTPlanExecutor.executePreview(prepared, { api: mock.api, review: rv });
   assert(log.status === 'DONE' && mock.st.reminders.length === 1 && mock.st.timezone === 'Asia/Tokyo', '反映: リマインダー 1 件・kintone が既定の timezone を入れる');
   const rb = await KTPlanExecutor.prepareRollback(log, prepared, { api: mock.api });
@@ -161,7 +161,7 @@ console.log('\n--- F2. 復元: リマインダー未設定（timezone null）の
   // 通知があるときの timezone の違いは従来どおり差分（設定済み同士）
   const data2 = clone(DATA); data2.reminderNotify = { notifications: [], timezone: 'UTC', revision: '4' };
   const mock2 = makeKintoneMock(data2);
-  const prep2 = await KTPlanExecutor.prepare(KTPlanReview.executorOutput(p, reviewOf(p, data2), ['P1']), { api: mock2.api, appId: '310' });
+  const prep2 = await KTPlanExecutor.prepare(KTPlanReview.executorOutput(p, reviewOf(p, data2), ['P1']), { api: mock2.api, current: await mock2.current(), appId: '310' });
   const log2 = await KTPlanExecutor.executePreview(prep2, { api: mock2.api, review: reviewOf(p, data2) });
   const rb2 = await KTPlanExecutor.prepareRollback(log2, prep2, { api: mock2.api });
   const rolled2 = await KTPlanExecutor.executeRollback(rb2, { api: mock2.api, execution: log2 });
@@ -200,7 +200,7 @@ console.log('\n--- F3. 承認の前の「自動で反映できるか」と、ル
   const ar = KTPlanExecutor.applyReadiness(p, rv);
   assert(ar.length === 3 && ar.every(a => a.apply === 'AUTO'), 'applyReadiness: 3 手順とも自動で反映できる（LINK の種類が決まっている）');
   const mock = makeKintoneMock(DATA);
-  const prepared = await KTPlanExecutor.prepare(KTPlanReview.executorOutput(p, rv, ['P1', 'P2', 'P3']), { api: mock.api, appId: '310' });
+  const prepared = await KTPlanExecutor.prepare(KTPlanReview.executorOutput(p, rv, ['P1', 'P2', 'P3']), { api: mock.api, current: await mock.current(), appId: '310' });
   const p2 = prepared.steps.find(s => s.stepId === 'P2');
   assert(prepared.status === 'PREPARED' && p2.status === 'PENDING' && p2.prepared.payload.properties.phone.protocol === 'CALL', 'Executor の準備: phone を LINK（CALL）で追加する payload');
   const log = await KTPlanExecutor.executePreview(prepared, { api: mock.api, review: rv });
@@ -487,7 +487,7 @@ console.log('\n--- U2 / U3. 文言と最終確認の確認事項 ---');
   const p = plan([step('P1', 'ADD_REMINDER', 'NEW_SETTING', '契約終了30日前通知', { name: '契約終了30日前通知', timingField: 'due_date', daysLater: -30, time: '09:00', targets: ['FIELD_ENTITY:owner'] })]);
   const rv = reviewOf(p);
   const mock = makeKintoneMock(DATA);
-  const prepared = await KTPlanExecutor.prepare(KTPlanReview.executorOutput(p, rv, ['P1']), { api: mock.api, appId: '310' });
+  const prepared = await KTPlanExecutor.prepare(KTPlanReview.executorOutput(p, rv, ['P1']), { api: mock.api, current: await mock.current(), appId: '310' });
   //   簡素化 E（2026-10-16）: 手順ごとの承認の後の最終確認の段（未回答の確認事項・［キャンセル］［動作テスト環境へ反映］）は削除した。
   //   反映は最終案のカードの［動作テスト環境へ反映］1 回で、未回答の確認事項（先に決めたいこと・後で決めてよいこと）は最終案のカードが出す（ai-flow-redesign の指示 A7・B6）。
   //   ここでは、反映の画面に最終確認の段（書き込みのボタン）が戻っていないことだけを確かめる
@@ -790,7 +790,7 @@ console.log('\n--- F39（CX-1 2 回目・実機）. PC とモバイルの計画:
   data.customize = { scope: 'ALL', desktop: { js: [{ type: 'FILE', file: { contentType: 'text/javascript', fileKey: 'dl:lock', name: 'dealLock.js', size: '100' } }], css: [] }, mobile: { js: [], css: [] }, revision: '5' };
   const m = makeKintoneMock(data, { jsSources: [{ name: 'dealLock.js', target: 'desktop', text: DL }] });
   if (mob.ok) {
-    const prep = await KTJsExecutor.prepare({ appId: '310', changes: [r.change, mob.change] }, { api: m.api });
+    const prep = await KTJsExecutor.prepare({ appId: '310', changes: [r.change, mob.change] }, { api: m.api, current: await m.current() });
     assert(prep.status === 'PREPARED' && prep.summary.byTarget.desktop.replace === 1 && prep.summary.byTarget.mobile.add === 1, `F39: 確認画面の件数は PC：差し替え 1・モバイル：追加 1（${JSON.stringify(prep.summary.byTarget)}）`);
     const ex = await KTJsExecutor.executePreview(prep, { api: m.api });
     const mobJs = m.st.customize.mobile.js;
@@ -811,7 +811,7 @@ console.log('\n--- F39（CX-1 2 回目・実機）. PC とモバイルの計画:
     const mob2 = KTJsExecutor.mobileCompanionOf(r2.change, { customization: cust2, mobileNames: [] });
     const data2 = clone(data); data2.customize.mobile.js = [];
     const m2 = makeKintoneMock(data2, { jsSources: [{ name: 'dealLock.js', target: 'desktop', text: DL }] });
-    const prep2 = await KTJsExecutor.prepare({ appId: '310', changes: [r2.change, mob2.change] }, { api: m2.api });
+    const prep2 = await KTJsExecutor.prepare({ appId: '310', changes: [r2.change, mob2.change] }, { api: m2.api, current: await m2.current() });
     const ex2 = await KTJsExecutor.executePreview(prep2, { api: m2.api, acknowledged: (prep2.confirmations || []).map(x => x.key) });   // Phase 21: 確認が必要な項目（既存のイベントに handler を足す）を確認した
     const ms = ex2.steps.find(s => s.target === 'mobile') || {};
     assert(ex2.status === 'DONE' && ms.status === 'VERIFIED', `F39: 既存ファイルを写したモバイル側は、既存の処理（amount）を計画外の書き込みとして扱わない: ${ex2.status} / ${ms.status} ${JSON.stringify((ms.verification?.checks || []).filter(c => !c.ok).map(c => c.name + ':' + JSON.stringify(c.actual)))}`);

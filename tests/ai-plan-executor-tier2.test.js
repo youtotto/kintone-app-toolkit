@@ -10,6 +10,7 @@
 const { loadToolkit, makeAssert } = require('./helpers/load-toolkit.js');
 const { KTDeps, KTPlanReview, KTPlanExecutor } = loadToolkit();
 const { makeKintoneMock } = require('./helpers/kintone-preview-mock.js');
+const optsOf = async (mm, appId) => ({ api: mm.api, appId, current: await mm.current() });   // 2026-10-23: 準備に渡す今の設定（作業の基準）
 const { assert, state } = makeAssert();
 const FX = require('./fixtures/ai-context-app.js');
 const E = KTPlanExecutor, R = KTPlanReview;
@@ -26,7 +27,7 @@ const reviewOf = (p) => R.review({ plan: p, data: DATA, deps: DEPS, scan: null, 
 const approveAll = (p, rv) => R.executorOutput(p, rv, p.steps.map(s => s.id));
 const st0 = (rv) => rv.steps[0];
 const codes0 = (rv) => rv.steps[0].issues.map(i => i.code);
-const run = async (input, mock, { review = null } = {}) => { const prepared = await E.prepare(input, { api: mock.api, appId: '341' }); const log = prepared.status === 'PREPARED' ? await E.executePreview(prepared, { api: mock.api, review }) : null; return { prepared, log }; };
+const run = async (input, mock, { review = null } = {}) => { const prepared = await E.prepare(input, { api: mock.api, current: await mock.current(), appId: '341' }); const log = prepared.status === 'PREPARED' ? await E.executePreview(prepared, { api: mock.api, review }) : null; return { prepared, log }; };
 const check = (log, name) => log.steps[0].verification?.checks?.find(c => c.name === name);
 
 (async () => {
@@ -53,14 +54,14 @@ console.log('\n--- 1. ADD_NOTIFICATION（レコードの条件通知）---');
   const p = plan([step('P1', 'ADD_NOTIFICATION', 'NOTIFICATION', '高額案件', { name: '高額案件の登録', targets: ['USER:user1', 'FIELD_ENTITY:approver', 'FIELD_ENTITY:owner_org'], filterCond: 'amount >= "1000000"' })]);
   const rv = reviewOf(p); const mock = makeKintoneMock(DATA);
   assert(codes0(rv).includes('DUPLICATE'), '前提: Review が DUPLICATE');
-  const prepared = await E.prepare(approveAll(p, rv), { api: mock.api, appId: '341' });
+  const prepared = await E.prepare(approveAll(p, rv), { api: mock.api, current: await mock.current(), appId: '341' });
   assert(prepared.status === 'BLOCKED' && prepared.steps[0].status === 'BLOCKED' && prepared.steps[0].reason === 'EXACT_DUPLICATE' && mock.calls.every(c => c.startsWith('GET')), 'exact duplicate: 実行直前の再チェックで EXACT_DUPLICATE → 実行しない・書き込みなし');
 }
 {
   // possible duplicate: 既存と通知先が重なり条件が同じ（タイトル違い）→ 警告付きで最終確認へ
   const p = plan([step('P1', 'ADD_NOTIFICATION', 'NOTIFICATION', '高額案件アラート', { name: '高額案件アラート', targets: ['FIELD_ENTITY:approver'], filterCond: 'amount >= "1000000"' })]);
   const rv = reviewOf(p); const mock = makeKintoneMock(DATA);
-  const prepared = await E.prepare(approveAll(p, rv), { api: mock.api, appId: '341' });
+  const prepared = await E.prepare(approveAll(p, rv), { api: mock.api, current: await mock.current(), appId: '341' });
   assert(prepared.status === 'PREPARED' && prepared.steps[0].status === 'PENDING' && prepared.steps[0].warnings?.[0]?.code === 'POSSIBLE_DUPLICATE' && prepared.steps[0].warnings[0].existing.title === '高額案件の登録', 'possible duplicate: PENDING のまま warnings に POSSIBLE_DUPLICATE（最終確認で再度人間に見せる）');
 }
 {
@@ -70,20 +71,20 @@ console.log('\n--- 1. ADD_NOTIFICATION（レコードの条件通知）---');
   assert(st0(rv1).status === 'INVALID' && R.executorOutput(p1, rv1, ['P1']).approvedSteps.length === 0, '存在しないフィールドの通知先は Review で INVALID');
   const p2 = plan([step('P1', 'ADD_NOTIFICATION', 'NOTIFICATION', 'x', { name: 'x', targets: ['FIELD_ENTITY:case_name'], filterCond: 'amount >= "1"' })]);
   const rv2 = reviewOf(p2); const m2 = makeKintoneMock(DATA);
-  const pr2 = await E.prepare(approveAll(p2, rv2), { api: m2.api, appId: '341' });
+  const pr2 = await E.prepare(approveAll(p2, rv2), { api: m2.api, current: await m2.current(), appId: '341' });
   assert(pr2.steps[0].status === 'UNSUPPORTED' && pr2.steps[0].reason === 'RECIPIENT_FIELD_INVALID', '文字列フィールドを通知先にした → RECIPIENT_FIELD_INVALID（通知先に使える型だけ）');
   const p3 = plan([step('P1', 'ADD_NOTIFICATION', 'NOTIFICATION', 'x', { name: 'x', targets: ['FIELD_ENTITY:owner'], filterCond: 'owner != ""' })]);
   const rv3 = reviewOf(p3); const m3 = makeKintoneMock(DATA);
-  const pr3 = await E.prepare(approveAll(p3, rv3), { api: m3.api, appId: '341' });
+  const pr3 = await E.prepare(approveAll(p3, rv3), { api: m3.api, current: await m3.current(), appId: '341' });
   assert(codes0(rv3).includes('COND_INVALID') && pr3.steps[0].status === 'BLOCKED' && pr3.steps[0].reason === 'INVALID_CONDITION' && m3.calls.length === 0, 'invalid condition（USER_SELECT に !=）: Review が COND_INVALID → Executor は API に投げず INVALID_CONDITION で停止');
   const p4 = plan([step('P1', 'ADD_NOTIFICATION', 'NOTIFICATION', 'x', { name: 'x', targets: ['FIELD_ENTITY:owner'], filterCond: 'amount >= "1"', events: ['recordEdited'] })]);
   const rv4 = reviewOf(p4); const m4 = makeKintoneMock(DATA);
-  const pr4 = await E.prepare(approveAll(p4, rv4), { api: m4.api, appId: '341' });
+  const pr4 = await E.prepare(approveAll(p4, rv4), { api: m4.api, current: await m4.current(), appId: '341' });
   assert(pr4.steps[0].status === 'UNSUPPORTED' && pr4.steps[0].reason === 'NOTIFICATION_SCOPE_AMBIGUOUS', '条件式とイベントの両方 → どちらの通知か決められず実行しない（REQUIRE_CONFIRMATION 相当）');
   // staging E2E（app 343）: AI が存在しないイベント名（recordAdd）を条件通知に添えた → 不明なイベントは曖昧さの根拠にしない（Review が要確認・After から除外済み）
   const p5 = plan([step('P1', 'ADD_NOTIFICATION', 'NOTIFICATION', 'x', { name: 'x', targets: ['FIELD_ENTITY:owner'], filterCond: 'amount >= "1"', events: ['recordAdd', 'recordEdit'] })]);
   const rv5 = reviewOf(p5); const m5 = makeKintoneMock(DATA);
-  const pr5 = await E.prepare(approveAll(p5, rv5), { api: m5.api, appId: '341' });
+  const pr5 = await E.prepare(approveAll(p5, rv5), { api: m5.api, current: await m5.current(), appId: '341' });
   assert(codes0(rv5).includes('NOTIFICATION_EVENT_UNKNOWN') && pr5.steps[0].status === 'PENDING' && pr5.steps[0].prepared.payload.scope === 'perRecord', '不明なイベント名だけなら曖昧ではない → レコードの条件通知として実行可（Review は要確認）');
 }
 {
@@ -105,10 +106,10 @@ console.log('\n--- 1. ADD_NOTIFICATION（レコードの条件通知）---');
   // stale notification config: Review 後に通知設定が変わった → STALE_PLAN
   const p = plan([step('P1', 'ADD_NOTIFICATION', 'NOTIFICATION', 'z', { name: 'z', targets: ['FIELD_ENTITY:owner'], filterCond: 'amount >= "9"' })]);
   const rv = reviewOf(p); const mock = makeKintoneMock(DATA); mock.st.perRecord[0].filterCond = 'amount >= "2000000"';
-  const prepared = await E.prepare(approveAll(p, rv), { api: mock.api, appId: '341' });
+  const prepared = await E.prepare(approveAll(p, rv), { api: mock.api, current: await mock.current(), appId: '341' });
   assert(prepared.status === 'BLOCKED' && prepared.blockers.some(b => b.code === 'STALE_PLAN') && prepared.stale.diffs.some(d => d.kind === 'NOTIFICATION'), 'stale: 通知設定の変更を検出 → STALE_PLAN');
   const m2 = makeKintoneMock(DATA); m2.st.general.push({ entity: { type: 'USER', code: 'user9' }, includeSubs: false, recordAdded: true, recordEdited: false, commentAdded: false, statusChanged: false, fileImported: false });
-  const pr2 = await E.prepare(approveAll(p, rv), { api: m2.api, appId: '341' });
+  const pr2 = await E.prepare(approveAll(p, rv), { api: m2.api, current: await m2.current(), appId: '341' });
   assert(pr2.status === 'BLOCKED' && pr2.stale.diffs.some(d => d.kind === 'NOTIFICATION' && d.change === 'ADDED'), 'stale: アプリの条件通知の追加（未反映の変更）も検出');
 }
 
@@ -130,22 +131,22 @@ console.log('\n--- 2. ADD_REMINDER ---');
   assert(st0(rv).status === 'INVALID' && codes0(rv).includes('REMINDER_FIELD_TYPE') && R.executorOutput(bad, rv, ['P1']).approvedSteps.length === 0, 'invalid base field（文字列）→ Review INVALID（BLOCK）');
   const noTime = plan([step('P1', 'ADD_REMINDER', 'REMINDER', 'x', { name: 'x', timingField: 'due_date', daysLater: '-3', targets: ['FIELD_ENTITY:owner'] })]);
   const rvT = reviewOf(noTime); const mT = makeKintoneMock(DATA);
-  const prT = await E.prepare(approveAll(noTime, rvT), { api: mT.api, appId: '341' });
+  const prT = await E.prepare(approveAll(noTime, rvT), { api: mT.api, current: await mT.current(), appId: '341' });
   assert(prT.steps[0].status === 'UNSUPPORTED' && prT.steps[0].reason === 'REMINDER_TIME_MISSING', '通知時刻が無い → REMINDER_TIME_MISSING（勝手に決めない）');
   const dup = plan([step('P1', 'ADD_REMINDER', 'REMINDER', '期限前日のリマインド', { name: '期限前日のリマインド', timingField: 'due_date', daysLater: '-1', time: '09:00', targets: ['FIELD_ENTITY:owner', 'FIELD_ENTITY:owner_group', 'USER:user1'], filterCond: 'amount > "0"' })]);
   const rvD = reviewOf(dup); const mD = makeKintoneMock(DATA);
-  const prD = await E.prepare({ ...R.executorOutput(dup, rvD, ['P1']), approvedSteps: ['P1'] }, { api: mD.api, appId: '341' });
+  const prD = await E.prepare({ ...R.executorOutput(dup, rvD, ['P1']), approvedSteps: ['P1'] }, { api: mD.api, current: await mD.current(), appId: '341' });
   assert(prD.steps[0].status === 'BLOCKED' && ['EXACT_DUPLICATE', 'INVALID_CONDITION', 'REVIEW_BLOCKED'].includes(prD.steps[0].reason), `duplicate reminder: 実行しない（${prD.steps[0].reason}）`);
   const poss = plan([step('P1', 'ADD_REMINDER', 'REMINDER', '期限3日前', { name: '期限3日前', timingField: 'due_date', daysLater: '-3', time: '10:00', targets: ['FIELD_ENTITY:owner'] })]);
   const rvP = reviewOf(poss); const mP = makeKintoneMock(DATA);
-  const prP = await E.prepare(approveAll(poss, rvP), { api: mP.api, appId: '341' });
+  const prP = await E.prepare(approveAll(poss, rvP), { api: mP.api, current: await mP.current(), appId: '341' });
   assert(prP.steps[0].status === 'PENDING' && prP.steps[0].warnings?.[0]?.code === 'POSSIBLE_DUPLICATE', 'possible duplicate（同じ基準日・通知先が重なる）→ 警告付きで実行可');
   const cr = plan([step('P1', 'ADD_REMINDER', 'REMINDER', 'c', { name: 'c', timingField: 'due_date', daysLater: '1', time: '08:00', targets: ['CREATOR'] })]);
   const rvC = reviewOf(cr); const mC = makeKintoneMock(DATA);
-  const prC = await E.prepare(approveAll(cr, rvC), { api: mC.api, appId: '341' });
+  const prC = await E.prepare(approveAll(cr, rvC), { api: mC.api, current: await mC.current(), appId: '341' });
   assert(prC.steps[0].prepared?.payload.entries[0].targets[0].entity.code === '作成者' && prC.steps[0].prepared.payload.entries[0].targets[0].entity.type === 'FIELD_ENTITY', 'recipient resolution: CREATOR → FIELD_ENTITY 作成者');
   const stale = makeKintoneMock(DATA); stale.st.reminders[0].timing.daysLater = '-2';
-  const prS = await E.prepare(approveAll(poss, rvP), { api: stale.api, appId: '341' });
+  const prS = await E.prepare(approveAll(poss, rvP), { api: stale.api, current: await stale.current(), appId: '341' });
   assert(prS.status === 'BLOCKED' && prS.stale.diffs.some(d => d.kind === 'REMINDER'), 'stale: リマインダー設定の変更を検出');
   const mut = makeKintoneMock(DATA); mut.ctl.mangleReminderTime = true;
   const rM = await run(approveAll(poss, rvP), mut, { review: rvP });
@@ -177,31 +178,31 @@ console.log('\n--- 3. UPDATE_FIELD（表示名・必須のみ）---');
 {
   const typ = plan([step('P1', 'UPDATE_FIELD', 'FIELD', 'amount', { fieldType: 'SINGLE_LINE_TEXT' })]);
   const rv = reviewOf(typ); const mock = makeKintoneMock(DATA);
-  const pr = await E.prepare({ ...R.executorOutput(typ, rv, ['P1']), approvedSteps: ['P1'] }, { api: mock.api, appId: '341' });
+  const pr = await E.prepare({ ...R.executorOutput(typ, rv, ['P1']), approvedSteps: ['P1'] }, { api: mock.api, current: await mock.current(), appId: '341' });
   assert(pr.steps[0].status !== 'PENDING' && (pr.steps[0].reason === 'FIELD_CHANGE_NOT_SUPPORTED' || pr.steps[0].reason === 'REVIEW_BLOCKED') && mock.calls.every(c => c.startsWith('GET')), 'unsupported type change → 実行しない');
   const opt = plan([step('P1', 'UPDATE_FIELD', 'FIELD', 'kind', { options: ['A'] })]);
   const rvO = reviewOf(opt); const mO = makeKintoneMock(DATA);
-  const prO = await E.prepare({ ...R.executorOutput(opt, rvO, ['P1']), approvedSteps: ['P1'] }, { api: mO.api, appId: '341' });
+  const prO = await E.prepare({ ...R.executorOutput(opt, rvO, ['P1']), approvedSteps: ['P1'] }, { api: mO.api, current: await mO.current(), appId: '341' });
   assert(prO.steps[0].status !== 'PENDING', '選択肢の変更は実行しない');
   // field code change rejection: diff.after.code を書き換えた Review を与えても拒否（2026-10-21: コードは表示名・必須以外の変更として、分類で反映しない）
   const rvC = clone(rv); rvC.steps[0].diff.after = { ...rvC.steps[0].diff.before, code: 'amount2' }; rvC.steps[0].status = 'VALID'; rvC.steps[0].safety = 'REVIEW_REQUIRED';
-  const prC = await E.prepare({ plan: typ, review: rvC, approvedSteps: ['P1'] }, { api: makeKintoneMock(DATA).api, appId: '341' });
+  const prC = await E.prepare({ plan: typ, review: rvC, approvedSteps: ['P1'] }, await optsOf(makeKintoneMock(DATA), '341'));
   assert(prC.steps[0].status === 'UNSUPPORTED' && prC.steps[0].reason === 'FIELD_CHANGE_NOT_SUPPORTED' && /code/.test(prC.steps[0].message), 'field code change rejection');
   //   2026-10-21: 渡された計画の検査の結果の書き込む値（表示名）を書き換えても、書き込む内容は取り直した設定に対する計画の検査から作る。書き換えた結果と違うので止まり、書き込まない
   const req2 = plan([step('P1', 'UPDATE_FIELD', 'FIELD', 'owner', { required: true })]);
   const rvT = reviewOf(req2); rvT.steps[0].diff.after = { ...rvT.steps[0].diff.after, label: '書き換えた表示名' };
   const mT = makeKintoneMock(DATA);
-  const prT = await E.prepare(approveAll(req2, rvT), { api: mT.api, appId: '341' });
+  const prT = await E.prepare(approveAll(req2, rvT), { api: mT.api, current: await mT.current(), appId: '341' });
   assert(prT.status === 'BLOCKED' && prT.steps[0].status === 'BLOCKED' && prT.steps[0].reason === 'REVALIDATION_FAILED' && same(prT.steps[0].prepared.payload.changes, { required: true }) && mT.calls.every(c => c.startsWith('GET')),
     '計画の検査の結果を書き換えても: 書き込む内容（必須だけ）は取り直した設定に対する計画の検査から作り、計画の検査のときの内容と違うので止める（書き込みなし）');
   // stale field: Review 後に label が変わっていた
   const lab = plan([step('P1', 'UPDATE_FIELD', 'FIELD', 'owner', { required: true })]);
   const rvL = reviewOf(lab); const mL = makeKintoneMock(DATA); mL.st.fields.owner.label = '担当者（変更済み）';
-  const prL = await E.prepare(approveAll(lab, rvL), { api: mL.api, appId: '341' });
+  const prL = await E.prepare(approveAll(lab, rvL), { api: mL.api, current: await mL.current(), appId: '341' });
   assert(prL.status === 'BLOCKED' && prL.stale.diffs.some(d => d.id === 'owner' && d.change === 'CHANGED'), 'stale field → STALE_PLAN');
   // apply 直前に値が変わった（prepare 後）→ TARGET_CHANGED で失敗・当て直さない
   const mX = makeKintoneMock(DATA);
-  const prX = await E.prepare(approveAll(lab, rvL), { api: mX.api, appId: '341' });
+  const prX = await E.prepare(approveAll(lab, rvL), { api: mX.api, current: await mX.current(), appId: '341' });
   mX.st.fields.owner.required = true; mX.st.revision += 1;
   const lgX = await E.executePreview(prX, { api: mX.api, review: rvL });
   assert(lgX.steps[0].status === 'FAILED' && ['TARGET_CHANGED', 'REVISION_MISMATCH'].includes(lgX.steps[0].reason), `prepare 後の変更 → 失敗（${lgX.steps[0].reason}）`);

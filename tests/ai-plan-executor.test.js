@@ -33,7 +33,7 @@ const planFieldView = () => plan([
   step('P3', 'ADD_VIEW', 'VIEW', '担当者別', { name: '担当者別', fields: ['owner', 'case_name', 'NEW_FIELD_1', 'NEW_FIELD_2'], filterCond: 'owner in (LOGINUSER())', sort: 'due_date asc' }, { dependsOn: ['P1', 'P2'] }),
 ], [pf('NEW_FIELD_1', '更新状況', 'progress', 'DROP_DOWN', { options: PROGRESS.options }), pf('NEW_FIELD_2', '確認日', 'checked_on', 'DATE')]);
 const approveAll = (p, rv) => R.executorOutput(p, rv, p.steps.map(s => s.id));
-const run = async (input, mock, { review = null, onProgress = null } = {}) => { const prepared = await E.prepare(input, { api: mock.api, appId: '341' }); const log = prepared.status === 'PREPARED' ? await E.executePreview(prepared, { api: mock.api, review, onProgress }) : null; return { prepared, log }; };
+const run = async (input, mock, { review = null, onProgress = null } = {}) => { const prepared = await E.prepare(input, { api: mock.api, current: await mock.current(), appId: '341' }); const log = prepared.status === 'PREPARED' ? await E.executePreview(prepared, { api: mock.api, review, onProgress }) : null; return { prepared, log }; };
 
 (async () => {
 console.log('\n--- 1. ADD_FIELD: 承認 → prepare → preview へ反映 → 再取得で検証 ---');
@@ -41,7 +41,7 @@ console.log('\n--- 1. ADD_FIELD: 承認 → prepare → preview へ反映 → �
   const p = planField(); const rv = reviewOf(p); const mock = makeKintoneMock(DATA, { autoPlace: false });   // 自動配置しない場合（Executor が末尾行を足す）
   const input = approveAll(p, rv);
   assert(input.approvedSteps.join() === 'P1' && st0(rv).safety === 'SAFE', '前提: Review は SAFE・承認済み');
-  const prepared = await E.prepare(input, { api: mock.api, appId: '341' });
+  const prepared = await E.prepare(input, { api: mock.api, current: await mock.current(), appId: '341' });
   assert(prepared.status === 'PREPARED' && prepared.summary.executable === 1 && prepared.blockers.length === 0 && prepared.stale.status === 'FRESH', `prepare: PREPARED（executable 1・stale FRESH）: ${JSON.stringify(prepared.blockers)}`);
   assert(prepared.executionId.startsWith('ex_') && prepared.env === 'preview' && prepared.appId === '341' && prepared.revision.preview === '12' && prepared.revision.production === '12' && prepared.revision.reviewed === '12', 'executionId / env preview / revision（preview・production・Review 時点）');
   assert(prepared.snapshot && prepared.snapshot.revision === '12' && Object.keys(prepared.snapshot.fields.properties).length === Object.keys(DATA.fields).length && Array.isArray(prepared.snapshot.layout.layout) && prepared.snapshot.views.views['顧客別一覧'], 'snapshot: 実行前の fields / layout / views / revision');
@@ -70,19 +70,19 @@ console.log('\n--- 1. ADD_FIELD: 承認 → prepare → preview へ反映 → �
   let err = null; try { await E.executePreview(prepared, { api: mock.api }); } catch (e) { err = e; }
   assert(err && err.code === 'ALREADY_EXECUTED' && Object.keys(mock.st.fields).filter(c => c === 'progress').length === 1 && mock.calls.filter(c => c.startsWith('POST')).length === 1, '同じ prepare の二重実行は拒否（POST は 1 回だけ）');
   // 再度 prepare すると、追加済みのフィールドが「Review 時点との差異」になる（stale）
-  const again = await E.prepare(input, { api: mock.api, appId: '341' });
+  const again = await E.prepare(input, { api: mock.api, current: await mock.current(), appId: '341' });
   assert(again.status === 'BLOCKED' && again.blockers.some(b => b.code === 'STALE_PLAN') && again.stale.diffs.some(d => d.kind === 'FIELD' && d.id === 'progress' && d.change === 'ADDED'), '再クリック相当（新しい prepare）は STALE_PLAN で止まり、同じ ADD_FIELD が 2 つ作られない');
 }
 
 console.log('\n--- 2. 承認・Review・allowlist による拒否 ---');
 {
   const p = planField(); const rv = reviewOf(p); const mock = makeKintoneMock(DATA);
-  const none = await E.prepare(R.executorOutput(p, rv, []), { api: mock.api, appId: '341' });
+  const none = await E.prepare(R.executorOutput(p, rv, []), { api: mock.api, current: await mock.current(), appId: '341' });
   assert(none.status === 'BLOCKED' && none.blockers[0].code === 'NOTHING_TO_EXECUTE' && none.steps[0].status === 'SKIPPED' && none.steps[0].reason === 'NOT_APPROVED' && mock.calls.length === 0, 'not approved → SKIPPED・何も呼ばない');
   const dup = plan([step('P1', 'ADD_FIELD', 'PROPOSED_FIELD', 'NEW_FIELD_1', { fieldType: 'NUMBER' })], [pf('NEW_FIELD_1', '金額2', 'amount', 'NUMBER')]);
   const dupRv = reviewOf(dup);
   const dupOut = R.executorOutput(dup, dupRv, ['P1']);
-  const dupPrep = await E.prepare({ ...dupOut, approvedSteps: ['P1'] }, { api: mock.api, appId: '341' });
+  const dupPrep = await E.prepare({ ...dupOut, approvedSteps: ['P1'] }, { api: mock.api, current: await mock.current(), appId: '341' });
   assert(st0(dupRv).status === 'INVALID' && dupOut.approvedSteps.length === 0 && dupPrep.steps[0].status === 'BLOCKED' && dupPrep.steps[0].reason === 'REVIEW_BLOCKED', 'duplicate field（Review INVALID）→ executorOutput は承認を落とし、無理に渡しても REVIEW_BLOCKED');
   const unsup = plan([
     step('P1', 'ADD_PROCESS_STATUS', 'PROCESS_STATUS', '部長承認', { name: '部長承認', assignees: ['FIELD_ENTITY:approver'] }),
@@ -92,7 +92,7 @@ console.log('\n--- 2. 承認・Review・allowlist による拒否 ---');
     step('P5', 'UPDATE_RECORD_ACL', 'RECORD_ACL', 'record#1', { entities: ['USER:user1'], accessibility: 'READ' }),
   ], [pf('NEW_FIELD_1', '合計2', 'total2', 'CALC'), pf('NEW_FIELD_2', '区分', 'kubun', 'DROP_DOWN')]);
   const unsupRv = reviewOf(unsup);
-  const unsupPrep = await E.prepare(R.executorOutput(unsup, unsupRv, ['P1', 'P2', 'P3', 'P4', 'P5']), { api: mock.api, appId: '341' });
+  const unsupPrep = await E.prepare(R.executorOutput(unsup, unsupRv, ['P1', 'P2', 'P3', 'P4', 'P5']), { api: mock.api, current: await mock.current(), appId: '341' });
   const reasons = Object.fromEntries(unsupPrep.steps.map(s => [s.stepId, `${s.status}:${s.reason}`]));
   assert(reasons.P1 === 'BLOCKED:STATUS_UNREACHABLE' && reasons.P2 === 'UNSUPPORTED:PLAN_ONLY' && reasons.P3 === 'UNSUPPORTED:FIELD_TYPE_NOT_SUPPORTED' && /UNSUPPORTED|BLOCKED/.test(reasons.P5), `unsupported: 孤立ステータス（STATUS_UNREACHABLE）/ JS / CALC 型 / ACL は無視せず理由を出す: ${JSON.stringify(reasons)}`);
   assert(reasons.P4 === 'UNSUPPORTED:OPTIONS_MISSING' || reasons.P4 === 'BLOCKED:REVIEW_BLOCKED' || /UNSUPPORTED|BLOCKED/.test(reasons.P4), `選択肢の無い DROP_DOWN は実行しない（${reasons.P4}）`);
@@ -106,32 +106,33 @@ console.log('\n--- 3. stale（Review 後の変更）・revision・権限 ---');
 {
   const p = planField(); const rv = reviewOf(p);
   const m1 = makeKintoneMock(DATA); m1.st.prodRevision = 13; m1.st.revision = 13;
-  const s1 = await E.prepare(approveAll(p, rv), { api: m1.api, appId: '341' });
+  const s1 = await E.prepare(approveAll(p, rv), { api: m1.api, current: await m1.current(), appId: '341' });
   assert(s1.status === 'BLOCKED' && s1.blockers.some(b => b.code === 'STALE_PLAN' && /再レビュー/.test(b.message)) && s1.stale.diffs[0].kind === 'APP' && /12 → 13/.test(s1.stale.diffs[0].message), '運用環境の revision が変わった → STALE_PLAN「計画作成後にアプリ設定が変更されています。再レビューしてください。」');
   const m2 = makeKintoneMock(DATA); m2.st.fields.extra_memo = { type: 'SINGLE_LINE_TEXT', code: 'extra_memo', label: '人間が足したメモ' }; m2.st.layout.push({ type: 'ROW', fields: [{ type: 'SINGLE_LINE_TEXT', code: 'extra_memo' }] });
-  const s2 = await E.prepare(approveAll(p, rv), { api: m2.api, appId: '341' });
+  const s2 = await E.prepare(approveAll(p, rv), { api: m2.api, current: await m2.current(), appId: '341' });
   assert(s2.status === 'BLOCKED' && s2.stale.diffs.some(d => d.kind === 'FIELD' && d.id === 'extra_memo' && d.change === 'ADDED') && m2.calls.every(c => c.startsWith('GET')), '動作テスト環境に未反映の変更（人間がフィールド追加）→ STALE_PLAN・書き込みなし');
   const m3 = makeKintoneMock(DATA); m3.st.fields.amount.label = '金額（税込）';
-  const s3 = await E.prepare(approveAll(p, rv), { api: m3.api, appId: '341' });
+  const s3 = await E.prepare(approveAll(p, rv), { api: m3.api, current: await m3.current(), appId: '341' });
   assert(s3.status === 'BLOCKED' && s3.stale.diffs.some(d => d.id === 'amount' && d.change === 'CHANGED'), '既存フィールドの設定変更 → STALE_PLAN（当て直さない）');
   const m4 = makeKintoneMock(DATA); delete m4.st.views['承認待ち'];
-  const s4 = await E.prepare(approveAll(p, rv), { api: m4.api, appId: '341' });
+  const s4 = await E.prepare(approveAll(p, rv), { api: m4.api, current: await m4.current(), appId: '341' });
   assert(s4.status === 'BLOCKED' && s4.stale.diffs.some(d => d.kind === 'VIEW' && d.id === '承認待ち' && d.change === 'REMOVED'), '一覧の削除 → STALE_PLAN');
   const m35 = makeKintoneMock(DATA); delete m35.st.fields['カテゴリー']; m35.st.fields['作成者'].label = 'Created by';
-  const s35 = await E.prepare(approveAll(p, rv), { api: m35.api, appId: '341' });
+  const s35 = await E.prepare(approveAll(p, rv), { api: m35.api, current: await m35.current(), appId: '341' });
   assert(s35.status === 'PREPARED' && s35.stale.status === 'FRESH', 'システムフィールド（カテゴリー・作成者 など）の有無・表記の揺れは stale にしない');
+  //   2026-10-23: 準備は設定を自分で取らない。権限が無いことは作業の基準の取得（画面）で分かり、準備には届かない（今の設定を作る段で CB_NO02）・書き込みも無い
   const m5 = makeKintoneMock(DATA, { permission: false });
-  const s5 = await E.prepare(approveAll(p, rv), { api: m5.api, appId: '341' });
-  assert(s5.status === 'BLOCKED' && s5.blockers[0].code === 'PERMISSION_DENIED' && m5.calls.every(c => c.startsWith('GET')), 'アプリ管理権限が無い → PERMISSION_DENIED（kintone の認可結果が正本）・書き込みなし');
+  let e5 = null; try { await m5.current(); } catch (e) { e5 = e; }
+  assert(e5 && e5.code === 'CB_NO02' && m5.calls.length === 0, 'アプリ管理権限が無い → 今の設定（作業の基準）を取れずに止まる（kintone の認可結果が正本。準備に届かない・書き込みなし）');
   // revision mismatch: prepare と execute の間に他の変更
   const m6 = makeKintoneMock(DATA);
-  const prep6 = await E.prepare(approveAll(p, rv), { api: m6.api, appId: '341' });
+  const prep6 = await E.prepare(approveAll(p, rv), { api: m6.api, current: await m6.current(), appId: '341' });
   m6.st.revision = 20;
   const log6 = await E.executePreview(prep6, { api: m6.api, review: rv });
   assert(log6.status === 'FAILED' && log6.steps[0].status === 'FAILED' && log6.steps[0].reason === 'REVISION_MISMATCH' && !m6.st.fields.progress, '実行直前に revision が変わった → API が拒否 → FAILED（REVISION_MISMATCH）・何も反映されない');
   // 実行直前の重複（prepare 後に同じコードが作られた）
   const m7 = makeKintoneMock(DATA);
-  const prep7 = await E.prepare(approveAll(p, rv), { api: m7.api, appId: '341' });
+  const prep7 = await E.prepare(approveAll(p, rv), { api: m7.api, current: await m7.current(), appId: '341' });
   m7.st.fields.progress = { type: 'SINGLE_LINE_TEXT', code: 'progress', label: '別の進捗' }; m7.st.layout.push({ type: 'ROW', fields: [{ type: 'SINGLE_LINE_TEXT', code: 'progress' }] });
   const log7 = await E.executePreview(prep7, { api: m7.api, review: rv });
   assert(log7.status === 'FAILED' && log7.steps[0].status === 'FAILED' && m7.st.fields.progress.label === '別の進捗', 'prepare 後に同じコードが作られた → API の重複エラーで FAILED（上書きしない）');
@@ -161,7 +162,7 @@ console.log('\n--- 4. 実行順（DAG）・部分失敗・Fail Stop・検証失�
   assert(r3.log.status === 'FAILED' && r3.log.steps.map(s => s.status).join() === 'FAILED,SKIPPED,SKIPPED' && Object.keys(m3.st.fields).length === Object.keys(DATA.fields).length, 'Fail Stop: 最初の失敗で独立 step も止める（安全側）');
   // 依存先が未承認なら後続は BLOCKED
   const m4 = makeKintoneMock(DATA);
-  const prep4 = await E.prepare(R.executorOutput(p, rv, ['P2', 'P3']), { api: m4.api, appId: '341' });
+  const prep4 = await E.prepare(R.executorOutput(p, rv, ['P2', 'P3']), { api: m4.api, current: await m4.current(), appId: '341' });
   assert(prep4.steps.map(s => `${s.stepId}:${s.status}`).join() === 'P1:SKIPPED,P2:PENDING,P3:BLOCKED' && prep4.steps[2].reason === 'DEPENDENCY_NOT_EXECUTABLE', '依存する P1 が未承認 → P3 は BLOCKED（P2 だけ実行対象）');
   // 検証失敗（API は 200 だが状態が一致しない）
   const m5 = makeKintoneMock(DATA); m5.ctl.mangleLabel = true;
@@ -202,7 +203,7 @@ console.log('\n--- 5. ADD_VIEW / layout ---');
   assert(st0(dupRv).status === 'INVALID' && R.executorOutput(dupV, dupRv, ['P1']).approvedSteps.length === 0, '同名の一覧（Review INVALID）は実行対象にならない');
   // 実行直前に同名の一覧が作られた
   const m2 = makeKintoneMock(DATA);
-  const prep2 = await E.prepare(approveAll(pv, rv), { api: m2.api, appId: '341' });
+  const prep2 = await E.prepare(approveAll(pv, rv), { api: m2.api, current: await m2.current(), appId: '341' });
   m2.st.views['担当者別'] = { id: '555', name: '担当者別', type: 'LIST', index: '2', fields: ['case_name'], filterCond: '', sort: '' };
   const log2 = await E.executePreview(prep2, { api: m2.api, review: rv });
   assert(log2.steps[0].status === 'FAILED' && log2.steps[0].reason === 'TARGET_EXISTS' && m2.st.views['担当者別'].fields.join() === 'case_name', '実行直前の重複 → TARGET_EXISTS（既存を上書きしない）');
@@ -212,7 +213,7 @@ console.log('\n--- 5. ADD_VIEW / layout ---');
   assert(st0(missRv).status === 'INVALID' && st0(missRv).issues.some(i => i.code === 'UNKNOWN_FIELD'), '存在しないフィールドの一覧は Review で INVALID');
   // stale config（一覧の設定が変わった）
   const m3 = makeKintoneMock(DATA); m3.st.views['承認待ち'].fields = ['case_name'];
-  const prep3 = await E.prepare(approveAll(pv, rv), { api: m3.api, appId: '341' });
+  const prep3 = await E.prepare(approveAll(pv, rv), { api: m3.api, current: await m3.current(), appId: '341' });
   assert(prep3.status === 'BLOCKED' && prep3.stale.diffs.some(d => d.kind === 'VIEW' && d.id === '承認待ち' && d.change === 'CHANGED'), '一覧設定が Review 後に変わった → STALE_PLAN');
   // layout: kintone が自動配置した場合は PUT しない
   const pf1 = planField(); const rvf = reviewOf(pf1); const m4 = makeKintoneMock(DATA, { autoPlace: true });
@@ -228,7 +229,7 @@ console.log('\n--- 5b. staging E2E（app 344）で見つかった癖 ---');
   const pv = plan([step('P1', 'ADD_VIEW', 'VIEW', '担当者別', { name: '担当者別', fields: ['case_name', 'amount'], filterCond: 'owner = LOGIN_USER()' })]);
   const rv = reviewOf(pv); const mock = makeKintoneMock(DATA);
   assert(st0(rv).status === 'NEEDS_CONFIRMATION' && codes0(rv).includes('COND_UNKNOWN_FUNCTION'), '前提: Review は要確認（COND_UNKNOWN_FUNCTION）');
-  const prep = await E.prepare(R.executorOutput(pv, rv, ['P1']), { api: mock.api, appId: '341' });
+  const prep = await E.prepare(R.executorOutput(pv, rv, ['P1']), { api: mock.api, current: await mock.current(), appId: '341' });
   assert(prep.steps[0].status === 'BLOCKED' && prep.steps[0].reason === 'INVALID_CONDITION' && prep.status === 'BLOCKED' && mock.calls.length === 0, '条件式が kintone で評価できない step は承認されても BLOCKED（INVALID_CONDITION）・API を呼ばない');
   // 反映した step が無いときは「一致」と言わない（反映後の確認は手順ごとの読み戻しの件数だけ。2026-10-21）
   const p2 = planField(); const rv2 = reviewOf(p2); const m2 = makeKintoneMock(DATA); m2.ctl.failAddField = 'progress';
@@ -239,13 +240,13 @@ console.log('\n--- 5b. staging E2E（app 344）で見つかった癖 ---');
 console.log('\n--- 6. 入力の検証・DATA 不変 ---');
 {
   const mock = makeKintoneMock(DATA);
-  const bad = await E.prepare({ plan: null, review: null, approvedSteps: [] }, { api: mock.api, appId: '341' });
+  const bad = await E.prepare({ plan: null, review: null, approvedSteps: [] }, { api: mock.api, current: await mock.current(), appId: '341' });
   assert(bad.status === 'BLOCKED' && bad.blockers[0].code === 'INVALID_INPUT', 'plan / review が無ければ INVALID_INPUT');
   const p = planField(); const rv = reviewOf(p);
   const out = R.executorOutput(p, rv, ['P1']);
   assert(out.review.simulation.before && out.review.simulation.before.revision === '12' && !out.review.simulation.after && Array.isArray(out.review.simulation.order), 'executorOutput は Before（revision 含む）と order を残し After は落とす');
   const noBefore = clone(out); delete noBefore.review.simulation.before;
-  const nb = await E.prepare(noBefore, { api: mock.api, appId: '341' });
+  const nb = await E.prepare(noBefore, { api: mock.api, current: await mock.current(), appId: '341' });
   assert(nb.status === 'BLOCKED' && nb.blockers[0].code === 'NO_BEFORE_MODEL', 'Before モデルの無い古い Review は実行しない');
   let err = null; try { await E.executePreview(nb, { api: mock.api }); } catch (e) { err = e; }
   assert(err && err.code === 'NOT_PREPARED', 'BLOCKED な prepare は実行できない');

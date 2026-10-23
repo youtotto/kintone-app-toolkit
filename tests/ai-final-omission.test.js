@@ -22,6 +22,9 @@
 //       (s) 設定を書く前に始まった作業の基準の取得が書いた後まで続いても、設定を書いた直後の取り直しはそれに合流せず、書いた後の設定で登録の準備をする
 //       (t) 書いている途中に始まって止めた取得の続き（書く前の設定）を、設定を書いた直後の取り直しが使わない
 //       (u) JavaScript だけの反映で、押した直後の準備に「設定の反映の後に確かめる依存」が残るときは使い回さず、作り直した準備が止める（書き込み 0）
+//   §O5 反映・登録の準備は作業の基準の今の設定を受け取る（2026-10-23）: (v) 押した後の動作テスト環境の設定の取得は作業の基準の読み込みの中だけ（準備は取らない。
+//       書き込みの直前の取り直しと読み戻しは残る）(w) 準備の snapshot は押した直後の作業の基準そのもの (x) 権限が無いことは作業の基準の取得で分かり、承認の欄の理由に出て押せない（準備に届かない）
+//       (y) 押した瞬間に進行中の取得があっても合流せず取り直し、承認の後の変化を書き込みの前に止める
 //       （変更が無い手順を書かないことは §O2 (d)、承認の後に設定の対象が変わったら止めることは §O3 (i)）
 //
 // 実行方法: node tests/ai-final-omission.test.js
@@ -243,9 +246,9 @@ const countedApply = async (kind, { before = null, fail = null, beforeJsWrite = 
   const gen = K.screenGenerate({ field: kind === 'js' ? 'case_name' : 'approval_memo', targetFile: kind === 'js' ? 'caseLock.js' : 'memoLock.js' });
   const m = K.mount({ health: K.HEALTH_V, planImpl: K.planImplOf(K.screenPlan(kind)), generateImpl: gen.impl,
     extra: { loadDevBase: (a = {}) => {
-      const rec = { reason: a.reason || null, at: mref.mock.calls.length, base: null }; loads.push(rec);
-      if (fail && fail === a.reason) { rec.base = { ok: false, status: 'FETCH_FAILED', message: '取得に失敗しました（テスト）', loadedAt: new Date().toISOString(), errors: [] }; return Promise.resolve(rec.base); }
-      return loader(a).then((b) => { rec.base = b; return b; });
+      const rec = { reason: a.reason || null, at: mref.mock.calls.length, to: null, base: null }; loads.push(rec);
+      if (fail && fail === a.reason) { rec.base = { ok: false, status: 'FETCH_FAILED', message: '取得に失敗しました（テスト）', loadedAt: new Date().toISOString(), errors: [] }; rec.to = rec.at; return Promise.resolve(rec.base); }
+      return loader(a).then((b) => { rec.base = b; rec.to = mref.mock.calls.length; return b; });
     } } });
   mref = m;
   await K.ticks();
@@ -259,7 +262,7 @@ const countedApply = async (kind, { before = null, fail = null, beforeJsWrite = 
     const ap = await K.applyOnScreen(m, { before });
     await K.ticks(20);
     //   位置（at）は押した後の偽の kintone の呼び出しの番号（calls と同じ数え方）
-    return { m, v, ap, loads: loads.slice(l0).map(x => ({ ...x, at: x.at - c0 })), reasons: loads.slice(l0).map(x => x.reason), calls: m.mock.calls.slice(c0), jsPrepares: jsPrepares.map(x => ({ ...x, at: x.at - c0 })) };
+    return { m, v, ap, loads: loads.slice(l0).map(x => ({ ...x, at: x.at - c0, to: x.to == null ? null : x.to - c0 })), reasons: loads.slice(l0).map(x => x.reason), calls: m.mock.calls.slice(c0), jsPrepares: jsPrepares.map(x => ({ ...x, at: x.at - c0 })) };
   } finally { JX.prepare = origP; JX.executePreview = origE; }
 };
 /** 押す前・書き込みの直前に、別の作業者が動作テスト環境のカスタマイズに JavaScript（URL）を足した */
@@ -272,7 +275,7 @@ await section(async () => {
   const jp = r.m.panel.jsExecState().prepared;
   assert(r.ap.run.stage === 'done' && r.ap.run.ok && JSON.stringify(r.ap.writes) === JSON.stringify(['POST fields', 'PUT views', 'POST file', 'PUT customize'])
     && JSON.stringify(r.reasons) === JSON.stringify(['execute', 'after-apply', 'after-js-register']) && r.jsPrepares.length === 2
-    && pre.defer && !pre.memo && pre.at < r.calls.indexOf('POST fields') && reg && !reg.defer && reg.memo && !!aa && reg.base === aa.base && reg.at > r.calls.indexOf('PUT views')
+    && pre.defer && !pre.memo && pre.at <= r.calls.indexOf('POST fields') && reg && !reg.defer && reg.memo && !!aa && reg.base === aa.base && reg.at > r.calls.indexOf('PUT views')
     && jp && jp.snapshot && aa.base.revision.preview === jp.snapshot.revision && (jp.warnings || []).some(w => w.code === 'CUSTOMIZE_REVISION_ADVANCED') && jp.changes.every(c => c.status === 'PENDING'),
     `O4-j: 設定 → JavaScript の登録の準備は設定を書いた直後の作業の基準で行う（取り直さない）: ${JSON.stringify({ reasons: r.reasons, writes: r.ap.writes, prepares: r.jsPrepares.map(x => ({ at: x.at, memo: x.memo, defer: x.defer })), sameBase: !!(aa && reg && reg.base === aa.base), rev: jp && jp.snapshot && jp.snapshot.revision })}`);
 });
@@ -432,6 +435,68 @@ await section(async () => {
       && ap.run.stage === 'stopped' && !ap.writes.length && ap.run.stop.text === 'JavaScript の登録の準備で止まりました。' && /先に手順「承認メモフィールドを追加」を反映してください/.test(ap.card),
       `O4-u: 依存が残る準備は使い回さず、作り直した準備が止める（書き込み 0）: ${JSON.stringify({ pre: ap.pre && { status: ap.pre.status, deferred: ap.pre.items && ap.pre.items.deferred }, preps, stage: ap.run && ap.run.stage, writes: ap.writes, stop: ap.run && ap.run.stop })}`);
   } finally { JX.prepare = origP; }
+});
+
+// =========================================================
+console.log('\n--- §O5. 反映・登録の準備は作業の基準の今の設定を受け取る（最終案の［動作テスト環境へ反映］。2026-10-23）---');
+await section(async () => {
+  // (v) 押した後の動作テスト環境の設定の取得は、作業の基準の読み込みの中だけ。設定の準備（押した直後）・JavaScript の準備（押した直後と登録の前）は取らない
+  //     （前は設定の準備が 9 件、JavaScript の準備が 1〜2 件、登録の準備が 1〜2 件を同じ時点で取り直していた）。書き込みの直前の取り直し（apply・登録の部品の GET customize 1 回）と読み戻しは残る
+  const r = await countedApply('mixed');
+  const inLoad = (i) => r.loads.some(l => l.to != null && i >= l.at && i < l.to);
+  const outside = r.calls.map((c, i) => ({ c, i })).filter(x => /^GET /.test(x.c) && !inLoad(x.i));
+  const first = r.calls.indexOf('POST fields'), jsWrite = r.calls.indexOf('POST file'), aa = r.loads.find(l => l.reason === 'after-apply');
+  //   登録の準備の窓 = 設定を書いた直後の作業の基準の読み込みが終わってから、登録の書き込み（upload）まで。残るのは登録の部品の書き込みの直前の取り直し（GET customize 1 回）だけ
+  const beforeWrite = outside.filter(x => x.i < first).map(x => x.c), regWindow = aa ? outside.filter(x => x.i >= aa.to && x.i < jsWrite).map(x => x.c) : null;
+  assert(r.ap.run.ok && first > 0 && aa && jsWrite > aa.to && beforeWrite.length === 0 && JSON.stringify(regWindow) === JSON.stringify(['GET customize']) && JSON.stringify(r.reasons) === JSON.stringify(['execute', 'after-apply', 'after-js-register']),
+    `O5-v: 押した後の設定の取得は作業の基準の読み込みの中だけ（準備は取らない。設定を書いた後から登録の書き込みまでは、書き込みの直前の取り直し 1 回だけ）: ${JSON.stringify({ beforeWrite, regWindow, reasons: r.reasons })}`);
+  const j = await countedApply('js');
+  const inLoadJ = (i) => j.loads.some(l => l.to != null && i >= l.at && i < l.to);
+  const beforeJs = j.calls.map((c, i) => ({ c, i })).filter(x => /^GET /.test(x.c) && !inLoadJ(x.i) && x.i < j.calls.indexOf('POST file')).map(x => x.c);
+  assert(j.ap.run.ok && JSON.stringify(beforeJs) === JSON.stringify(['GET customize']), `O5-v（JavaScript だけ）: 押した直後の準備は取らない（登録の書き込みの直前の取り直し 1 回だけ。前は準備の 1 回が加わった）: ${JSON.stringify(beforeJs)}`);
+});
+await section(async () => {
+  // (w) 押した直後の準備の snapshot（書き込み直前の照合・元に戻すときの基準）は、押した直後の作業の基準 ① と同じ時点・同じ内容（別の取得ではない）
+  const r = await countedApply('settings');
+  const b1 = r.loads[0] && r.loads[0].base, sp = r.m.panel.executorState().prepared;
+  assert(r.ap.run.ok && r.loads[0].reason === 'execute' && b1 && sp && sp.snapshot && sp.snapshot.revision === b1.revision.preview && JSON.stringify(sp.snapshot.fields.properties) === JSON.stringify(b1.data.fields) && JSON.stringify(sp.snapshot.views.views) === JSON.stringify(b1.data.views.views) && sp.snapshot.takenAt === b1.loadedAt,
+    `O5-w: 準備の snapshot は押した直後の作業の基準そのもの: ${JSON.stringify({ rev: sp && sp.snapshot && sp.snapshot.revision, base: b1 && b1.revision, takenAt: sp && sp.snapshot && sp.snapshot.takenAt, loadedAt: b1 && b1.loadedAt })}`);
+});
+await section(async () => {
+  // (x) 権限が無い（動作テスト環境の設定を読めない）: 前は設定の準備の取得が PERMISSION_DENIED で止めていた。今は準備が取らないので、作業の基準の取得が止め、
+  //     承認の欄の理由に出て［動作テスト環境へ反映］を押せない（準備に届かず、書き込みも無い）。計画を作った後の取り直しから権限が無くなった場面
+  let deny = false; let mref = null;
+  const loader = K.loadDevBaseFromMock(() => mref.mock);
+  const planImpl = (a) => { const r = K.planImplOf(K.screenPlan('settings'))(a); deny = true; return r; };   // 計画を作った後（最終案の承認の欄の準備から）権限が無い
+  const m = K.mount({ planImpl, extra: { loadDevBase: (a = {}) => (deny ? Promise.resolve({ ok: false, status: 'PERMISSION_DENIED', message: '動作テスト環境の設定を読む権限がありません（アプリ管理権限が必要です）', loadedAt: new Date().toISOString(), errors: [] }) : loader(a)) } });
+  mref = m;
+  await K.ticks();
+  const v = await K.adoptOnScreen(m); await K.ticks(20);
+  await K.waitUntil(() => !['base', 'running'].includes(m.panel.finalPrecheck().status) && m.panel.finalPrecheck().planId === v.planId, 80); await K.ticks(4);
+  const pre = m.panel.finalPrecheck(), btn = K.applyButtonOf(m);
+  assert(deny && pre.status === 'blocked' && pre.reasons.length === 1 && /権限がありません/.test(pre.reasons[0]) && /取得できませんでした/.test(pre.reasons[0]) && pre.settingsStatus === null && btn && btn.disabled && !K.writesOf(m).length && /権限がありません/.test(stripC(m.chat())),
+    `O5-x: 権限が無いことは作業の基準の取得で分かり、承認の欄の理由に出て押せない（準備に届かない・書き込み 0）: ${JSON.stringify({ status: pre.status, reasons: pre.reasons, settings: pre.settingsStatus, button: btn })}`);
+});
+await section(async () => {
+  // (y) 押した瞬間に進行中の取得（押す前に始まった［取り直す］）があり、その取得が始まった後に別の作業者が設定を変えた → 押した直後の取り直しは進行中の取得に合流せず、
+  //     終わるのを待って取り直す。変化は承認の基準との照合で止まる（書き込み 0）。前は合流した古い基準で承認を通し、設定の準備が自分で取り直した設定で止めていた（準備が取らなくなると、止まらずに書いていた）
+  const loads = []; let mref = null, release = null;
+  const loader = K.loadDevBaseFromMock(() => mref.mock);
+  const m = K.mount({ planImpl: K.planImplOf(K.screenPlan('settings')),
+    extra: { loadDevBase: (a = {}) => { loads.push({ reason: a.reason || null }); const p = loader(a); return a.reason === 'manual' ? new Promise((res) => { release = () => p.then(res); }) : p; } } });
+  mref = m;
+  await K.ticks();
+  const v = await K.adoptOnScreen(m); await K.ticks(20);
+  await K.waitUntil(() => !['base', 'running'].includes(m.panel.finalPrecheck().status) && m.panel.finalPrecheck().planId === v.planId, 80); await K.ticks(4);
+  const l0 = loads.length;
+  m.panel.refreshDevBase({ reason: 'manual' });   // 押す前に始まった取得（設定は読み終えて、結果を返す前で止まっている）
+  const p = K.applyOnScreen(m);
+  await K.ticks(6);
+  m.mock.st.fields.case_name.label = '別の作業者が変えた名前'; m.mock.st.revision += 1;   // 進行中の取得が設定を読んだ後・押した後に変わった
+  release();
+  const ap = await p; await K.ticks(10);
+  assert(ap.clicked && ap.run && ap.run.stage === 'stopped' && !ap.writes.length && JSON.stringify(loads.slice(l0).map(x => x.reason)) === JSON.stringify(['manual', 'execute']) && !v.approval && /設定が変わりました/.test(ap.run.stop.text),
+    `O5-y: 押した直後の取り直しは進行中の取得に合流せず取り直し、承認の後の変化を書き込みの前に止める: ${JSON.stringify({ reasons: loads.slice(l0).map(x => x.reason), stage: ap.run && ap.run.stage, stop: ap.run && ap.run.stop && ap.run.stop.text, writes: ap.writes })}`);
 });
 
 console.log(`\n${state.failed ? 'FAILED' : 'ALL PASSED'}: ${state.passed} passed / ${state.failed} failed`);

@@ -317,7 +317,25 @@ function makeKintoneMock(data, { permission = true, autoPlace = true, jsSources 
       return { revision: String(st.revision) };
     },
   };
-  return { api, st, calls, ctl };
+  /**
+   * 2026-10-23: 反映・登録の部品（KTPlanExecutor.prepare・KTJsExecutor.prepare）に渡す今の設定（画面の作業の基準 KTDevBase.currentOf と同じ形）。
+   *   GET と同じ中身・同じ権限・同じ ctl の挙動で作り、呼び出しの記録（calls）には残さない（画面では作業の基準の取得が担う。部品のテストは `current: await mock.current()` で渡す）。
+   *   権限が無ければ GET と同じく CB_NO02 を投げる（画面では作業の基準の取得が止まる場面）
+   */
+  async function current() {
+    const n = calls.length;
+    try {
+      const [fields, layout, views, prodViews, generalNotify, perRecordNotify, reminderNotify, status, actions, customize] = await Promise.all([api.getPreviewFields(), api.getPreviewLayout(), api.getPreviewViews(), api.getProductionViews(), api.getPreviewGeneralNotifications(), api.getPreviewPerRecordNotifications(), api.getPreviewReminders(), api.getPreviewStatus(), api.getPreviewActions(), api.getPreviewCustomize()]);
+      const files = [];
+      for (const target of ['desktop', 'mobile']) for (const e of customize[target].js) {
+        if (e.type !== 'FILE') continue;
+        let text = null; try { text = await api.downloadFile(e.file.fileKey); } catch (e2) { text = null; }
+        files.push({ target, name: e.file.name, fileKey: e.file.fileKey, text, sourceAvailable: typeof text === 'string' });
+      }
+      return { takenAt: null, fields, layout, views, prodViews, generalNotify, perRecordNotify, reminderNotify, status, actions, customize, files };
+    } finally { calls.length = n; }
+  }
+  return { api, st, calls, ctl, current };
 }
 
 module.exports = { makeKintoneMock };

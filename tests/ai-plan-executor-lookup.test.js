@@ -13,6 +13,7 @@
 const { loadToolkit, makeAssert } = require('./helpers/load-toolkit.js');
 const { KTDeps, KTPlanReview, KTPlanExecutor } = loadToolkit();
 const { makeKintoneMock } = require('./helpers/kintone-preview-mock.js');
+const optsOf = async (mm, appId) => ({ api: mm.api, appId, current: await mm.current() });   // 2026-10-23: 準備に渡す今の設定（作業の基準）
 const { assert, state } = makeAssert();
 const FX = require('./fixtures/ai-context-app.js');
 const E = KTPlanExecutor, R = KTPlanReview;
@@ -30,7 +31,7 @@ const reviewOf = (p, data = DATA) => R.review({ plan: p, data, deps: data === DA
 const approveAll = (p, rv) => R.executorOutput(p, rv, p.steps.map(s => s.id));
 async function flow(p, mock, { data = DATA, between = null, betweenRollback = null, skipRollback = false, afterExec = null, approved = null } = {}) {
   const rv = reviewOf(p, data);
-  const prepared = await E.prepare(approved ? R.executorOutput(p, rv, approved) : approveAll(p, rv), { api: mock.api, appId: '310' });
+  const prepared = await E.prepare(approved ? R.executorOutput(p, rv, approved) : approveAll(p, rv), { api: mock.api, current: await mock.current(), appId: '310' });
   if (between && prepared.status === 'PREPARED') between(prepared);
   const log = prepared.status === 'PREPARED' ? await E.executePreview(prepared, { api: mock.api, review: rv }) : null;
   if (afterExec && log) afterExec(log, prepared);
@@ -93,7 +94,7 @@ console.log('\n--- 2. §46 既存コピー先の再利用 / picker・絞り込�
   assert(rolled2.status === 'ROLLED_BACK_VERIFIED' && lkOf(mock2).lookupPickerFields.join() === 'code,name' && lkOf(mock2).filterCond === '' && lkOf(mock2).sort === '', 'rollback: picker / 絞り込み / 並び順が元に戻る');
   // 絞り込みがこのアプリのフィールドで書かれている → Review INVALID → 実行対象にならない
   const bad = reviewOf(plan([step('P1', 'UPDATE_LOOKUP', 'LOOKUP', 'customer_lookup', { filterCond: 'customer_code = "A"' })]));
-  const prBad = await E.prepare(approveAll(plan([step('P1', 'UPDATE_LOOKUP', 'LOOKUP', 'customer_lookup', { filterCond: 'customer_code = "A"' })]), bad), { api: makeKintoneMock(DATA).api, appId: '310' });
+  const prBad = await E.prepare(approveAll(plan([step('P1', 'UPDATE_LOOKUP', 'LOOKUP', 'customer_lookup', { filterCond: 'customer_code = "A"' })]), bad), await optsOf(makeKintoneMock(DATA), '310'));
   assert(bad.steps[0].status === 'INVALID' && bad.steps[0].issues.some(i => i.code === 'LOOKUP_FILTER_FIELD_UNKNOWN') && prBad.status === 'BLOCKED' && prBad.steps[0].status !== 'PENDING', '参照元に無いフィールドの絞り込み: Review が INVALID（承認対象にならない）→ Executor は実行しない');
 }
 
@@ -125,7 +126,7 @@ console.log('\n--- 4. §19 cross-app stale / identity / 参照元が読めない
   const mock4 = makeKintoneMock(DATA);
   const { log: log4 } = await flow(p, mock4, { skipRollback: true, between: () => { mock4.st.fields.customer_lookup.lookup.fieldMappings.push({ field: 'secret_memo', relatedField: 'memo' }); } });   // revision は変えない（revision 不一致より前に identity で止まることを見る）
   assert(log4.status === 'PARTIAL' && log4.steps[2].status === 'FAILED' && log4.steps[2].reason === 'TARGET_CHANGED' && /fieldMappings/.test(log4.steps[2].error.message) && lkOf(mock4).fieldMappings.length === 3, 'prepare → 実行の間に取得項目が変わった → TARGET_CHANGED（PUT しない。先行 ADD_FIELD は残る = 部分状態を記録）');
-  assert(log4.steps[0].status === 'VERIFIED' && E.buildRollbackPlan(log4, (await E.prepare(approveAll(p, reviewOf(p)), { api: makeKintoneMock(DATA).api, appId: '310' }))).steps.length === 2, '非アトミック: 失敗時の rollback 計画は反映済みの ADD_FIELD 2 件だけ');
+  assert(log4.steps[0].status === 'VERIFIED' && E.buildRollbackPlan(log4, (await E.prepare(approveAll(p, reviewOf(p)), await optsOf(makeKintoneMock(DATA), '310')))).steps.length === 2, '非アトミック: 失敗時の rollback 計画は反映済みの ADD_FIELD 2 件だけ');
   //   2026-10-21: handler は変更の組を計画の検査の lookupChanges から作る（前後の差から組み直さない）。参照元・キーの変更は計画の検査が計画のみにする（handler に来ない）
   const idn = { kind: 'LOOKUP', code: 'customer_lookup', type: 'SINGLE_LINE_TEXT', relatedApp: { app: '500', code: '' }, relatedKeyField: 'code', mappings: [{ from: 'code', to: 'customer_code' }, { from: 'name', to: 'case_name' }], pickerFields: ['code', 'name'], filterCond: '', sort: '', related: { appId: '500', name: '顧客マスタ', revision: '21', fieldsHash: 'x' } };
   const lkB = { app: '500', code: '', keyField: 'code', mappings: [{ from: 'code', to: 'customer_code' }, { from: 'name', to: 'case_name' }], pickerFields: ['code', 'name'], filterCond: '', sort: '' };

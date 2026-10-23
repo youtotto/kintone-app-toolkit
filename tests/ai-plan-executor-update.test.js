@@ -24,7 +24,7 @@ const DATA = FX.makeData();
 const DEPS = KTDeps.buildDependencyData(DATA, KTDeps.normalizeFields(DATA.fields));
 const reviewOf = (p, data = DATA) => R.review({ plan: p, data, deps: data === DATA ? DEPS : null, scan: null, incoming: null });
 const approveAll = (p, rv) => R.executorOutput(p, rv, p.steps.map(s => s.id));
-const run = async (input, mock, { review = null, between = null } = {}) => { const prepared = await E.prepare(input, { api: mock.api, appId: '341' }); if (between && prepared.status === 'PREPARED') between(prepared); const log = prepared.status === 'PREPARED' ? await E.executePreview(prepared, { api: mock.api, review }) : null; return { prepared, log }; };
+const run = async (input, mock, { review = null, between = null } = {}) => { const prepared = await E.prepare(input, { api: mock.api, current: await mock.current(), appId: '341' }); if (between && prepared.status === 'PREPARED') between(prepared); const log = prepared.status === 'PREPARED' ? await E.executePreview(prepared, { api: mock.api, review }) : null; return { prepared, log }; };
 const check = (log, name, i = 0) => log.steps[i].verification?.checks?.find(c => c.name === name);
 const okNames = (log, names, i = 0) => names.every(n => check(log, n, i)?.ok === true);
 const PRESERVE = ['existingCountBefore', 'countPreserved', 'otherEntriesPreserved', 'unexpectedRemoved', 'unexpectedChanged', 'targetExists', 'unchangedAttributesPreserved'];
@@ -75,7 +75,7 @@ console.log('\n--- 1. UPDATE_NOTIFICATION ---');
   // stale target（Review → prepare）: Review 後に対象の条件が変わった → STALE_PLAN（書き込みなし）
   const p = plan([step('P1', 'UPDATE_NOTIFICATION', 'NOTIFICATION', 'perRecord#1', { targets: ['USER:user1', 'FIELD_ENTITY:approver', 'FIELD_ENTITY:owner_org', 'FIELD_ENTITY:owner'] })]);
   const rv = reviewOf(p); const mock = makeKintoneMock(DATA); mock.st.perRecord[0].filterCond = 'amount >= "5000000"';
-  const prepared = await E.prepare(approveAll(p, rv), { api: mock.api, appId: '341' });
+  const prepared = await E.prepare(approveAll(p, rv), { api: mock.api, current: await mock.current(), appId: '341' });
   assert(prepared.status === 'BLOCKED' && prepared.blockers.some(b => b.code === 'STALE_PLAN') && mock.calls.every(c => c.startsWith('GET')), 'stale（Review → prepare）: STALE_PLAN・書き込みなし');
   // stale target（prepare → 実行）: 最終確認の間に人間が対象を変えた → TARGET_CHANGED（1 属性でも違えば当て直さない・自動 merge しない）
   const m2 = makeKintoneMock(DATA);
@@ -89,12 +89,12 @@ console.log('\n--- 1. UPDATE_NOTIFICATION ---');
   // invalid query: USER_SELECT に != → Review が COND_INVALID → Executor は API に投げない
   const p = plan([step('P1', 'UPDATE_NOTIFICATION', 'NOTIFICATION', 'perRecord#1', { filterCond: 'owner != ""' })]);
   const rv = reviewOf(p); const mock = makeKintoneMock(DATA);
-  const prepared = await E.prepare(approveAll(p, rv), { api: mock.api, appId: '341' });
+  const prepared = await E.prepare(approveAll(p, rv), { api: mock.api, current: await mock.current(), appId: '341' });
   assert(rv.steps[0].issues.some(i => i.code === 'COND_INVALID') && prepared.steps[0].status === 'BLOCKED' && prepared.steps[0].reason === 'INVALID_CONDITION' && mock.calls.length === 0, 'invalid query: INVALID_CONDITION で停止・API 呼び出しなし');
   // 条件式に LOGINUSER()（レコードの条件通知では使えない）
   const p2 = plan([step('P1', 'UPDATE_NOTIFICATION', 'NOTIFICATION', 'perRecord#1', { filterCond: 'owner in (LOGINUSER())' })]);
   const rv2 = reviewOf(p2); const m2 = makeKintoneMock(DATA);
-  const pr2 = await E.prepare(approveAll(p2, rv2), { api: m2.api, appId: '341' });
+  const pr2 = await E.prepare(approveAll(p2, rv2), { api: m2.api, current: await m2.current(), appId: '341' });
   assert(pr2.steps[0].status === 'BLOCKED' && pr2.steps[0].reason === 'INVALID_CONDITION' && m2.calls.length === 0, 'API ごとの制限（LOGINUSER）も Toolkit で止める');
 }
 {
@@ -153,7 +153,7 @@ const DATA2 = (() => { const d = FX.makeData(); d.fields.contract_end = { type: 
   // 日付 → 日時（作成日時）: 通知時刻の指定方法（time / hoursLater）が変わる → 反映しない
   const p2 = plan([step('P1', 'UPDATE_REMINDER', 'REMINDER', 'reminder#2', { timingField: '作成日時' })]);
   const rv2 = reviewOf(p2, DATA2); const m2 = makeKintoneMock(DATA2);
-  const pr2 = await E.prepare(approveAll(p2, rv2), { api: m2.api, appId: '341' });
+  const pr2 = await E.prepare(approveAll(p2, rv2), { api: m2.api, current: await m2.current(), appId: '341' });
   assert(pr2.steps[0].status === 'UNSUPPORTED' && pr2.steps[0].reason === 'REMINDER_TIMING_MODE_CHANGE' && !m2.calls.some(c => c.startsWith('PUT')), '日付 → 日時の基準日変更: REMINDER_TIMING_MODE_CHANGE（計画のみ）');
 }
 {
@@ -164,7 +164,7 @@ const DATA2 = (() => { const d = FX.makeData(); d.fields.contract_end = { type: 
   // 条件に LOGINUSER（リマインダーでは不可）
   const p2 = plan([step('P1', 'UPDATE_REMINDER', 'REMINDER', 'reminder#2', { filterCond: 'owner in (LOGINUSER())' })]);
   const rv2 = reviewOf(p2, DATA2); const m2 = makeKintoneMock(DATA2);
-  const pr2 = await E.prepare(approveAll(p2, rv2), { api: m2.api, appId: '341' });
+  const pr2 = await E.prepare(approveAll(p2, rv2), { api: m2.api, current: await m2.current(), appId: '341' });
   assert(pr2.steps[0].status === 'BLOCKED' && pr2.steps[0].reason === 'INVALID_CONDITION', 'リマインダー条件の LOGINUSER: INVALID_CONDITION');
 }
 {
@@ -172,7 +172,7 @@ const DATA2 = (() => { const d = FX.makeData(); d.fields.contract_end = { type: 
   const p = plan([step('P1', 'UPDATE_REMINDER', 'REMINDER', 'reminder#2', { daysLater: '-45' })]);
   const rv = reviewOf(p, DATA2);
   const m1 = makeKintoneMock(DATA2); m1.st.reminders[1].timing.time = '10:00';
-  const pr1 = await E.prepare(approveAll(p, rv), { api: m1.api, appId: '341' });
+  const pr1 = await E.prepare(approveAll(p, rv), { api: m1.api, current: await m1.current(), appId: '341' });
   assert(pr1.status === 'BLOCKED' && pr1.blockers.some(b => b.code === 'STALE_PLAN') && pr1.stale.diffs.some(d => d.kind === 'REMINDER'), 'stale（Review → prepare）: STALE_PLAN');
   const m2 = makeKintoneMock(DATA2);
   const r2 = await run(approveAll(p, rv), m2, { review: rv, between: () => { m2.st.reminders[1].targets.push({ entity: { type: 'USER', code: 'user9' }, includeSubs: false }); } });
@@ -220,16 +220,16 @@ console.log('\n--- 3. UPDATE_VIEW ---');
   assert(rv.steps[0].status === 'INVALID' && R.executorOutput(p, rv, ['P1']).approvedSteps.length === 0, 'missing field: INVALID');
   const p2 = plan([step('P1', 'UPDATE_VIEW', 'VIEW', '承認待ち', { fields: ['case_name', 'approver', 'amount'] })]);
   const rv2 = reviewOf(p2); const m2 = makeKintoneMock(DATA); delete m2.st.fields.amount;
-  const pr2 = await E.prepare(approveAll(p2, rv2), { api: m2.api, appId: '341' });
+  const pr2 = await E.prepare(approveAll(p2, rv2), { api: m2.api, current: await m2.current(), appId: '341' });
   assert(pr2.status === 'BLOCKED' && pr2.blockers.some(b => b.code === 'STALE_PLAN'), 'Review 後にフィールドが消えた: STALE_PLAN');
   // invalid filter（USER_SELECT に !=）/ invalid sort
   const p3 = plan([step('P1', 'UPDATE_VIEW', 'VIEW', '承認待ち', { filterCond: 'owner != ""' })]);
   const rv3 = reviewOf(p3); const m3 = makeKintoneMock(DATA);
-  const pr3 = await E.prepare(approveAll(p3, rv3), { api: m3.api, appId: '341' });
+  const pr3 = await E.prepare(approveAll(p3, rv3), { api: m3.api, current: await m3.current(), appId: '341' });
   assert(pr3.steps[0].status === 'BLOCKED' && pr3.steps[0].reason === 'INVALID_CONDITION' && m3.calls.length === 0, 'invalid filter: INVALID_CONDITION');
   const p4 = plan([step('P1', 'UPDATE_VIEW', 'VIEW', '承認待ち', { sort: 'amount downwards' })]);
   const rv4 = reviewOf(p4); const m4 = makeKintoneMock(DATA);
-  const pr4 = await E.prepare(approveAll(p4, rv4), { api: m4.api, appId: '341' });
+  const pr4 = await E.prepare(approveAll(p4, rv4), { api: m4.api, current: await m4.current(), appId: '341' });
   assert(pr4.steps[0].status === 'UNSUPPORTED' && pr4.steps[0].reason === 'INVALID_SORT', 'invalid sort: INVALID_SORT（計画のみ）');
 }
 {
@@ -237,7 +237,7 @@ console.log('\n--- 3. UPDATE_VIEW ---');
   const p = plan([step('P1', 'UPDATE_VIEW', 'VIEW', '承認待ち', { fields: ['case_name', 'approver', 'amount'] })]);
   const rv = reviewOf(p);
   const m1 = makeKintoneMock(DATA); m1.st.views['承認待ち'].sort = 'case_name asc';
-  const pr1 = await E.prepare(approveAll(p, rv), { api: m1.api, appId: '341' });
+  const pr1 = await E.prepare(approveAll(p, rv), { api: m1.api, current: await m1.current(), appId: '341' });
   assert(pr1.status === 'BLOCKED' && pr1.blockers.some(b => b.code === 'STALE_PLAN') && pr1.stale.diffs.some(d => d.kind === 'VIEW'), 'stale（Review → prepare）: STALE_PLAN');
   const m2 = makeKintoneMock(DATA);
   const r2 = await run(approveAll(p, rv), m2, { review: rv, between: () => { m2.st.views['承認待ち'].fields = ['case_name']; } });
@@ -255,7 +255,7 @@ console.log('\n--- 3. UPDATE_VIEW ---');
   const d = FX.makeData(); d.views.views['カレンダー'] = { id: '103', name: 'カレンダー', type: 'CALENDAR', index: '2', date: 'due_date', title: 'case_name', filterCond: '', sort: '' };
   const p = plan([step('P1', 'UPDATE_VIEW', 'VIEW', 'カレンダー', { fields: ['case_name'] })]);
   const rv = reviewOf(p, d); const mock = makeKintoneMock(d);
-  const prepared = await E.prepare(approveAll(p, rv), { api: mock.api, appId: '341' });
+  const prepared = await E.prepare(approveAll(p, rv), { api: mock.api, current: await mock.current(), appId: '341' });
   assert(rv.steps[0].issues.some(i => i.code === 'VIEW_TYPE_NOT_SUPPORTED') && prepared.steps[0].status === 'UNSUPPORTED' && prepared.steps[0].reason === 'VIEW_TYPE_NOT_SUPPORTED', 'カレンダー形式: 計画のみ（Executor も反映しない）');
 }
 

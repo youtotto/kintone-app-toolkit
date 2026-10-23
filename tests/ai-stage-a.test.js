@@ -297,23 +297,24 @@ await section(async () => {
   const m = makeKintoneMock(dataEnv, { jsSources: [] });
   const ch = KTJsExecutor.changeFromGenerated({ customization: CUST_R14, generated: GEN_R14, review: rv, existingNames: [] });
   assert(ch.ok && ch.change.dependsOn && ch.change.dependsOn.statuses[0].name === '部長承認待ち' && ch.change.dependsOn.fields[0].code === 'approver_mgr', `変更（change）に dependsOn が付く: ${JSON.stringify(ch.change && ch.change.dependsOn)}`);
-  const p1 = await KTJsExecutor.prepare({ appId: '310', changes: [ch.change] }, { api: m.api });
+  const p1 = await KTJsExecutor.prepare({ appId: '310', changes: [ch.change] }, { api: m.api, current: await m.current() });
   const dep = (p1.blockers || []).find(b => b.code === 'DEPENDENCY_NOT_APPLIED');
   // 独立レビュー A5: 文は「先に手順「…」を反映してください（このコードはその…を前提にしています）」（三重の括弧をやめる）。依存の文だけで、再検査の blocker を重ねない
   assert(p1.status === 'BLOCKED' && dep && dep.message === '先に手順「ステータス「部長承認待ち」を追加」・手順「フィールド「部長承認者」を追加」を反映してください（このコードはそのステータス・フィールドを前提にしています）' && p1.blockers.length === 1 && p1.changes[0].status === 'BLOCKED' && p1.changes[0].reason === 'DEPENDENCY_NOT_APPLIED' && !m.calls.some(x => /^(PUT|POST)/.test(x)), `prepare: 新設のステータス・フィールドが動作テスト環境に無い → DEPENDENCY_NOT_APPLIED（手順の名前つき）・書き込みなし: ${dep && dep.message}`);
   // input.dependsOn（全体）でも同じ。名前だけの指定も受ける（手順の名前が無ければ「ステータス「…」を追加する手順」）
-  const p1b = await KTJsExecutor.prepare({ appId: '310', changes: [{ ...ch.change, dependsOn: null }], dependsOn: { statuses: ['部長承認待ち'], fields: [] } }, { api: m.api });
+  const p1b = await KTJsExecutor.prepare({ appId: '310', changes: [{ ...ch.change, dependsOn: null }], dependsOn: { statuses: ['部長承認待ち'], fields: [] } }, { api: m.api, current: await m.current() });
   assert(p1b.status === 'BLOCKED' && (p1b.blockers || []).some(b => b.code === 'DEPENDENCY_NOT_APPLIED' && b.message === '先にステータス「部長承認待ち」を追加する手順を反映してください（このコードはそのステータスを前提にしています）'), `prepare: input.dependsOn（名前だけ）でも止める: ${JSON.stringify((p1b.blockers || []).map(b => b.message))}`);
   // 標準設定の手順が EXECUTED になった後（動作テスト環境にステータスとフィールドがある）→ 登録できる
   m.st.status.states['部長承認待ち'] = { name: '部長承認待ち', index: '3', assignee: { type: 'ONE', entities: [] } };
   m.st.fields.approver_mgr = { type: 'USER_SELECT', code: 'approver_mgr', label: '部長承認者', noLabel: false, required: false, entities: [], defaultValue: [] };
-  const p2 = await KTJsExecutor.prepare({ appId: '310', changes: [ch.change] }, { api: m.api });
+  const p2 = await KTJsExecutor.prepare({ appId: '310', changes: [ch.change] }, { api: m.api, current: await m.current() });
   assert(p2.status === 'PREPARED' && !(p2.blockers || []).length && p2.changes[0].status === 'PENDING', `手順の反映後（ステータス・フィールドが動作テスト環境にある）→ 登録できる（PREPARED）: ${p2.status} ${JSON.stringify((p2.blockers || []).map(b => b.code))}`);
+  assert(!m.calls.some(c => /^GET /.test(c)), `2026-10-23: 依存のある変更でも、準備は動作テスト環境の設定を取らない（今の設定を見る。前は GET customize・GET status・GET fields）: ${JSON.stringify(m.calls)}`);
   // 依存の無い変更はこれまでどおり（確認の API も呼ばない）
   const m2 = makeKintoneMock(dataEnv, { jsSources: [] });
   const plain = KTJsExecutor.changeFromGenerated({ customization: cust(), generated: gen(handler(EDIT, "    if (record['ステータス'].value === '承認待ち') {\n      record['amount'].disabled = true;\n    }")), review: review(handler(EDIT, "    if (record['ステータス'].value === '承認待ち') {\n      record['amount'].disabled = true;\n    }")), existingNames: [] });
-  const p3 = await KTJsExecutor.prepare({ appId: '310', changes: [plain.change] }, { api: m2.api });
-  assert(p3.status === 'PREPARED' && !m2.calls.includes('GET status') && !m2.calls.includes('GET fields'), `依存が無ければ設定の確認は呼ばない: ${JSON.stringify(m2.calls)}`);
+  const p3 = await KTJsExecutor.prepare({ appId: '310', changes: [plain.change] }, { api: m2.api, current: await m2.current() });
+  assert(p3.status === 'PREPARED' && !m2.calls.includes('GET status') && !m2.calls.includes('GET fields'), `依存の有無にかかわらず、準備は設定を取らない（今の設定を見る）: ${JSON.stringify(m2.calls)}`);
 });
 
 // =========================================================
@@ -382,20 +383,21 @@ await section(async () => {
   assert(!/既存の宣言/.test(check(innerR, 'patch').message) && check(innerR, 'patch-removal') && /既存の 1 行が置き換え/.test(check(innerR, 'patch-removal').message), `B-5: handler の中の var record → const の REPLACE も同じ扱い（特別に数えない）: ${check(innerR, 'patch').message}`);
   // ---- B8（段階 C）: handler の本文の範囲（handlerBodiesOf）は削除した（使う処理が無くなった）。簡素化 B（2026-10-16）で記法の写し（KTModernJs）ごと削除した
   assert(typeof T.KTModernJs === 'undefined', 'B8: handlerBodiesOf は段階 C、parseAst は C-1 第 2 段で削除し、簡素化 B で KTModernJs ごと削除した（本体に呼び出し元が無い。KTJsSim も削除）');
-  // ---- B6 / B7: api に getPreviewStatus / getPreviewFields が無ければ依存の成立を確かめられない → DEPENDENCY_CHECK_FAILED（登録しない）
+  // ---- B6 / B7: 今の設定（作業の基準）にプロセス管理 / フィールドが無ければ依存の成立を確かめられない → DEPENDENCY_CHECK_FAILED（登録しない。2026-10-23: 準備は api で取らず、今の設定を見る）
   const base6 = { getPreviewCustomize: async () => ({ scope: 'ALL', desktop: { js: [], css: [] }, mobile: { js: [], css: [] }, revision: '1' }), putPreviewCustomize: async () => ({}), uploadFile: async () => ({ fileKey: 'k' }) };
+  const cur6 = { customize: { scope: 'ALL', desktop: { js: [], css: [] }, mobile: { js: [], css: [] }, revision: '1' }, files: [] };   // 今の設定（プロセス管理・フィールドは無い）
   const change6 = (dependsOn) => ({ changeId: 'c1', kind: 'ADD_FILE', name: 'x.js', target: 'desktop', content: 'x', contentHash: KTScan.hashText('x'), bytes: 1, dependsOn, registration: { verdict: 'RUNTIME_UNVERIFIED', blockers: [], confirmations: [], unverified: [], codeHash: KTScan.hashText('x') } });
-  const p6 = await KTJsExecutor.prepare({ appId: '1', changes: [change6({ statuses: [{ name: '部長承認待ち', title: 'ステータス「部長承認待ち」を追加' }], fields: [] })] }, { api: base6 });
-  assert(p6.status === 'BLOCKED' && p6.blockers.length === 1 && p6.blockers[0].code === 'DEPENDENCY_CHECK_FAILED' && /依存の成立を確かめられませんでした/.test(p6.blockers[0].message), `B6: getPreviewStatus が無い api ＋ ステータスの依存 → DEPENDENCY_CHECK_FAILED: ${JSON.stringify(p6.blockers)}`);
-  const p7 = await KTJsExecutor.prepare({ appId: '1', changes: [change6({ statuses: [], fields: [{ code: 'approver_mgr', label: '部長承認者' }] })] }, { api: { ...base6, getPreviewStatus: async () => ({ states: {} }) } });
-  assert(p7.status === 'BLOCKED' && p7.blockers.length === 1 && p7.blockers[0].code === 'DEPENDENCY_CHECK_FAILED' && /依存の成立を確かめられませんでした/.test(p7.blockers[0].message), `B7: getPreviewFields が無い api ＋ フィールドの依存 → DEPENDENCY_CHECK_FAILED: ${JSON.stringify(p7.blockers)}`);
+  const p6 = await KTJsExecutor.prepare({ appId: '1', changes: [change6({ statuses: [{ name: '部長承認待ち', title: 'ステータス「部長承認待ち」を追加' }], fields: [] })] }, { api: base6, current: cur6 });
+  assert(p6.status === 'BLOCKED' && p6.blockers.length === 1 && p6.blockers[0].code === 'DEPENDENCY_CHECK_FAILED' && /依存の成立を確かめられませんでした/.test(p6.blockers[0].message), `B6: 今の設定にプロセス管理が無い ＋ ステータスの依存 → DEPENDENCY_CHECK_FAILED: ${JSON.stringify(p6.blockers)}`);
+  const p7 = await KTJsExecutor.prepare({ appId: '1', changes: [change6({ statuses: [], fields: [{ code: 'approver_mgr', label: '部長承認者' }] })] }, { api: base6, current: { ...cur6, status: { states: {} } } });
+  assert(p7.status === 'BLOCKED' && p7.blockers.length === 1 && p7.blockers[0].code === 'DEPENDENCY_CHECK_FAILED' && /依存の成立を確かめられませんでした/.test(p7.blockers[0].message), `B7: 今の設定にフィールドが無い ＋ フィールドの依存 → DEPENDENCY_CHECK_FAILED: ${JSON.stringify(p7.blockers)}`);
   // ---- A5: 依存が未反映の change は依存の文だけ（再検査の「存在しないフィールド」を重ねない・再検査は呼ばない）
   const dataEnv = clone(DATA); dataEnv.customize = { scope: 'ALL', desktop: { js: [], css: [] }, mobile: { js: [], css: [] }, revision: '12' };
   const m5 = makeKintoneMock(dataEnv, { jsSources: [] });
   const rv14 = KTCodeReview.review({ generated: GEN_R14, customization: CUST_R14, plan: PLAN_R14, data: DATA, scan: null, existingSource: null });
   const ch14 = KTJsExecutor.changeFromGenerated({ customization: CUST_R14, generated: GEN_R14, review: rv14, existingNames: [] });
   let rechecked = 0;
-  const pA5 = await KTJsExecutor.prepare({ appId: '310', changes: [ch14.change], recheck: () => { rechecked++; return KTCodeReview.review({ generated: GEN_R14, customization: CUST_R14, plan: PLAN_R14, data: DATA, scan: null, existingSource: null, existingOnly: true }).registration; } }, { api: m5.api });
+  const pA5 = await KTJsExecutor.prepare({ appId: '310', changes: [ch14.change], recheck: () => { rechecked++; return KTCodeReview.review({ generated: GEN_R14, customization: CUST_R14, plan: PLAN_R14, data: DATA, scan: null, existingSource: null, existingOnly: true }).registration; } }, { api: m5.api, current: await m5.current() });
   assert(pA5.status === 'BLOCKED' && pA5.blockers.length === 1 && pA5.blockers[0].code === 'DEPENDENCY_NOT_APPLIED' && !/approver_mgr/.test(JSON.stringify(pA5.blockers)) && pA5.changes[0].reason === 'DEPENDENCY_NOT_APPLIED' && /先に手順「ステータス「部長承認待ち」を追加」/.test(pA5.changes[0].message) && rechecked === 0, `A5: 依存未反映 → DEPENDENCY_NOT_APPLIED だけ（再検査の blocker を重ねない・再検査を呼ばない）: ${JSON.stringify(pA5.blockers.map(b => [b.code, b.message]))} rechecked=${rechecked}`);
   // ---- B-2: NOT_MET でも note が計画の手順・標準設定を名指ししていてその手順が計画にあれば担当範囲外。行の追加・削除を理由にした NOT_MET は確認（review）
   const planNotify = mkPlan([mkStep('P1', 'ADD_NOTIFICATION', 'NOTIFICATION', null, { targets: ['a'] }, { title: '承認待ちの通知を追加' }), mkStep('C1', 'CUSTOMIZATION_REQUIRED', 'JS', null, { customizationId: 'C1' })], { solution: 'HYBRID', customizations: [cust()] });

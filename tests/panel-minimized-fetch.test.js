@@ -9,7 +9,7 @@
 //   あわせて: 利用者の明示の操作（［一覧更新］・［再取得］・［Scan］・開発支援の［再取得］）は最小化の前後に関係なく動く／
 //   設定取得ではない通信（AI の Gateway の health）は止めない／最小化の保存・復元は今のまま
 //   2026-10-10 の独立の確認で見つかった漏れ・止めすぎ・古い印（追加）:
-//     §5h〜§5j 段の中の順の取得（承認の欄の準備の JavaScript の準備・相手アプリの定義・Field Scanner のフィールド定義の取り直し）も、途中で最小化したら後続 0 回。再展開で足りない分だけ
+//     §5i〜§5j 段の中の順の取得（承認の欄の準備の相手アプリの定義（JavaScript の準備は 2026-10-23 から取得しない）・Field Scanner のフィールド定義の取り直し）も、途中で最小化したら後続 0 回。再展開で足りない分だけ
 //     §8 ［動作テスト環境へ反映］の中の照合の取り直し（利用者の明示の操作）は、最小化中でも止めずに正しい変わった点を出す
 //     §9 最小化で開いたページでも、AI の接続の確認（トークンの交換・/v2/health）は起動時に 1 回ずつ行う（設定取得は 0 回のまま）
 //     4-13 Plugins の deploy（運用環境が変わる）の後に Customize を開くと、一覧（運用環境との差・「動作テスト環境のみ」の印）を取り直す
@@ -420,14 +420,18 @@ await safe('§5f', async () => {
   assert(e.fk.settingsCalls(m6).length === DEVBASE_RELATED + DEVBASE_FILES, `5f-12 明示の処理（計画）が合流した取得は、見えなくなっても最後まで取る: ${fmt(e.fk.byPath(e.fk.settingsCalls(m6)))}`);
 });
 
-// 承認の欄の準備（最終案ができると自動で始まる。作業の基準・動作テスト環境の設定・JavaScript の準備を取る）
+// 承認の欄の準備（最終案ができると自動で始まる。作業の基準を取る。2026-10-23: 設定の準備・JavaScript の準備は、その基準の今の設定を受け取り、動作テスト環境の設定・カスタマイズ・本文を取らない）
 await safe('§5g', async () => {
   const T = loadToolkit();
   const { createNewFlowKit } = require('./helpers/new-flow.js');
   const KIT = createNewFlowKit(T);
   const visible = { v: false };
   const gen = KIT.screenGenerate({});
-  const m = KIT.mount({ health: KIT.HEALTH_V, planImpl: KIT.planImplOf(KIT.screenPlan('mixed')), generateImpl: gen.impl, extra: { canAutoFetch: () => visible.v } });
+  //   2026-10-23: 作業の基準の読み込みの間の GET を区別する（準備の中の GET が 0 件であることを確かめる）
+  const loads = []; let mref = null;
+  const loader = KIT.loadDevBaseFromMock(() => mref.mock);
+  const m = KIT.mount({ health: KIT.HEALTH_V, planImpl: KIT.planImplOf(KIT.screenPlan('mixed')), generateImpl: gen.impl, extra: { canAutoFetch: () => visible.v, loadDevBase: async (a = {}) => { const from = mref.mock.calls.length; const b = await loader(a); loads.push({ reason: a.reason || null, from, to: mref.mock.calls.length }); return b; } } });
+  mref = m;
   await ticks();
   for (const s of KIT.REQUESTS) { await m.panel.send(s); await ticks(10); }   // 依頼・計画・生成は利用者の操作（見えていなくても進む）
   await ticks(30);
@@ -436,20 +440,14 @@ await safe('§5g', async () => {
   const g0 = gets();
   await ticks(20);
   assert(v && v.final && FS.readyOf(v) && m.panel.finalPrecheck().status === 'idle' && m.panel.devBaseFetchState().precheckDeferred === true && gets() === g0, `5g-1 見えていない間は承認の欄の準備（自動の取得）を始めない: ${m.panel.finalPrecheck().status}・GET ${gets() - g0}`);
-  // 見えた → 準備の途中（運用環境の一覧の取得）で見えなくなる → 完了の後は JavaScript の準備（後続）を始めない
-  let open; const held = new Promise((r) => { open = r; });
-  const o = m.mock.api.getProductionViews; m.mock.api.getProductionViews = async (...a) => { await held; return o.apply(m.mock.api, a); };
-  visible.v = true; m.panel.onVisible();
-  await KIT.waitUntil(() => m.panel.finalPrecheck().status === 'running', 60);
-  visible.v = false;
+  // 見えた → 承認の欄の準備が終わる。2026-10-23: 設定の準備・JavaScript の準備は作業の基準の今の設定を受け取り、動作テスト環境の設定・カスタマイズ・本文を取らない
+  //   （準備の中の GET は 0 件。作業の基準の取り直しがあれば、その読み込みの中だけ）。見えなくなっても準備の中に後続の取得は無い（前は運用環境の一覧の取得で止めていた）
   const g1 = m.mock.calls.length;
-  open(); await ticks(30);
-  const after = m.mock.calls.slice(g1);
-  assert(m.panel.finalPrecheck().status === 'idle' && m.panel.devBaseFetchState().precheckDeferred === true && !after.some(c => /^GET (customize|file)/.test(c)), `5g-2 準備の途中で見えなくなったら、JavaScript の準備（後続の取得）は始めず、準備前に戻す: ${m.panel.finalPrecheck().status}・${after.join(', ') || 'なし'}`);
-  m.mock.api.getProductionViews = o;
   visible.v = true; m.panel.onVisible();
-  await KIT.waitUntil(() => m.panel.finalPrecheck().status === 'ready', 80);
-  assert(m.panel.finalPrecheck().status === 'ready', `5g-3 再び見えたら準備をやり直して終わる: ${m.panel.finalPrecheck().status}`);
+  await KIT.waitUntil(() => ['ready', 'blocked'].includes(m.panel.finalPrecheck().status), 80);
+  const inLoad = (i) => loads.some(l => i >= l.from && i < l.to);
+  const outside = m.mock.calls.map((c, i) => ({ c, i })).slice(g1).filter(x => /^GET /.test(x.c) && !inLoad(x.i)).map(x => x.c);
+  assert(m.panel.finalPrecheck().status === 'ready' && outside.length === 0, `5g-2 見えたら準備が終わる。準備の中で動作テスト環境の設定・カスタマイズ・本文を取らない（作業の基準の今の設定を使う）: ${m.panel.finalPrecheck().status}・準備の中の GET ${outside.join(', ') || '0 件'}・基準の読み込み ${loads.filter(l => l.from >= g1).map(l => l.reason).join(', ') || 'なし'}`);
 });
 
 // 承認の欄の準備の「段の中の順の取得」（2026-10-10 の独立の確認で見つかった漏れ）。
@@ -475,26 +473,6 @@ async function precheckEnv() {
   const gets = (from) => m.mock.calls.slice(from).filter(c => /^GET /.test(c));
   return { T, KIT, m, visible, holdOnce, gets };
 }
-await safe('§5h', async () => {
-  // JavaScript の準備（KTJsExecutor.prepare）: カスタマイズ設定 → フィールド（新設のフィールドに依存するコード）の順の取得
-  const { KIT, m, visible, holdOnce, gets } = await precheckEnv();
-  const h = holdOnce('getPreviewCustomize');
-  visible.v = true; m.panel.onVisible();
-  await KIT.waitUntil(() => h.hit, 80);
-  visible.v = false;                                  // 最小化（開発支援が見えなくなった）
-  const g1 = m.mock.calls.length;
-  h.release(); await ticks(40);
-  const after = gets(g1);
-  TABLE.push({ c: '5', label: '承認の欄の準備: JavaScript の準備の途中（カスタマイズ設定を送った後）で最小化 → 完了の後', s: after, o: [], fk: KITFK });
-  assert(h.hit && sameSet(after, ['GET customize']) && m.panel.finalPrecheck().status === 'idle' && m.panel.devBaseFetchState().precheckDeferred === true, `5h-1 送ったカスタマイズ設定の完了の後、後続（ステータス・フィールド・本文）の取得は 0 回で、準備前に戻す: ${after.join(', ') || 'なし'}・${m.panel.finalPrecheck().status}`);
-  h.restore();
-  const g2 = m.mock.calls.length;
-  visible.v = true; m.panel.onVisible();
-  await KIT.waitUntil(() => ['ready', 'blocked'].includes(m.panel.finalPrecheck().status), 80);
-  const re = gets(g2);
-  TABLE.push({ c: '5', label: '↑の後に再び見えた（足りない分だけ）', s: re, o: [], fk: KITFK });
-  assert(m.panel.finalPrecheck().status === 'ready' && !re.includes('GET customize') && !re.some(c => /^GET (fields|layout|views|prod views|general|perRecord|reminders|status|actions)$/.test(c)), `5h-2 再び見えたら、取れていた読み取り（設定の準備の 9 件・カスタマイズ設定。フィールドは設定の準備で取得済み）は取り直さず、足りない分だけで準備を終える: ${re.join(', ') || '（追加 0 回）'}・${m.panel.finalPrecheck().status}`);
-});
 await safe('§5i', async () => {
   // 設定の準備（KTPlanExecutor.prepare）の相手アプリの定義（fetchRelatedAppsForLookups: アプリごとに 基本情報 → フィールド定義 の順の取得）。
   //   画面の計画にはルックアップの手順が無いので、準備に渡す承認済みの出力だけを、ルックアップの手順のある出力（tests/ai-plan-executor-lookup.test.js の代表ユースケース）に差し替える
@@ -529,7 +507,7 @@ await safe('§5i', async () => {
     await KIT.waitUntil(() => ['ready', 'blocked'].includes(m.panel.finalPrecheck().status), 80);
     const re = gets(g2);
     TABLE.push({ c: '5', label: '↑の後に再び見えた（足りない分だけ）', s: re, o: [], fk: KITFK });
-    assert(['ready', 'blocked'].includes(m.panel.finalPrecheck().status) && sameSet(re, ['GET app fields', 'GET customize']), `5i-2 再び見えたら足りない分（相手アプリのフィールド定義・JavaScript の準備のカスタマイズ設定）だけ。設定の準備の 9 件・基本情報は取り直さない: ${re.join(', ') || 'なし'}`);
+    assert(['ready', 'blocked'].includes(m.panel.finalPrecheck().status) && sameSet(re, ['GET app', 'GET app fields']), `5i-2 再び見えたら相手アプリ（基本情報とフィールド定義）を取り直す。動作テスト環境の設定・カスタマイズは取らない（作業の基準の今の設定を使う。2026-10-23）: ${re.join(', ') || 'なし'}`);
     // 部品の単位: 明示の操作（shouldContinue なし）は止めない／自動（偽）は基本情報の後で止める
     const mock2 = { calls: [], api: { getApp: async (id) => { mock2.calls.push(`GET app ${id}`); return { appId: String(id), name: 'x', code: '' }; }, getAppFields: async (id) => { mock2.calls.push(`GET app fields ${id}`); return { properties: {}, revision: '1' }; } } };
     const reviews = [{ actionType: 'UPDATE_LOOKUP', diff: { target: { identity: { relatedApp: { app: '500' } } } } }, { actionType: 'UPDATE_LOOKUP', diff: { target: { identity: { relatedApp: { app: '311' } } } } }];
@@ -639,7 +617,8 @@ await safe('§8', async () => {
   TABLE.push({ c: 'E', label: '［動作テスト環境へ反映］の照合の取り直し（押した直後に最小化）', s: b.gets, o: [], fk: KITFK });
   assert(a.stage === 'stopped' && a.written === false && a.changes.length === 4, `8-1 前提（見えているとき）: 書き込まずに止め、変わった点 4 項目: ${a.changes.join(' / ')}`);
   assert(b.stage === 'stopped' && b.written === false && b.writes.length === 0 && JSON.stringify(b.changes) === JSON.stringify(a.changes), `8-2 最小化中でも同じ正しい変わった点（4 項目）を出す（「反映する設定の手順が無くなりました」などの誤りを出さない）: ${b.changes.join(' / ')}`);
-  assert(b.gets.filter(c => c === 'GET prod views').length === 1 && b.gets.includes('GET customize'), `8-3 照合の取り直しの取得（設定の準備・JavaScript の準備）を関所で止めない: ${b.gets.join(', ')}`);
+  //   2026-10-23: 押した直後の作業の基準の取り直し（明示の操作）は関所で止めない。照合の取り直しの準備（設定・JavaScript）はその基準の今の設定を受け取り、取得しない（前は運用環境の一覧・カスタマイズを取っていた）
+  assert(b.gets.includes('GET fields') && b.gets.includes('GET customize') && !b.gets.includes('GET prod views') && JSON.stringify(b.gets) === JSON.stringify(a.gets), `8-3 押した直後の作業の基準の取り直しを関所で止めず、見えているときと同じ取得（照合の準備は取得しない）: ${b.gets.join(', ')}`);
 });
 
 // =========================================================

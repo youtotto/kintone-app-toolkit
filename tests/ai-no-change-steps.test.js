@@ -62,7 +62,7 @@ console.log('\n--- §N1 今と同じ値の承認分岐 2 つ（10-16 の実機�
   assert(['P1', 'P2'].every(id => cls.get(id).status === 'SKIPPED' && cls.get(id).reason === 'NO_CHANGE'), `反映の分類: 書き込まない（SKIPPED・NO_CHANGE。以前は UNSUPPORTED＝反映できない）: ${[...cls.values()].map(s => `${s.stepId}:${s.status}/${s.reason}`)}`);
   assert(['P1', 'P2'].every(id => ap.get(id).apply === 'CONFIRM' && ap.get(id).reason === 'NO_CHANGE'), `反映の見込み: 「反映できない（MANUAL）」にしない: ${[...ap.values()].map(a => `${a.stepId}:${a.apply}`)}`);
   const mock = makeKintoneMock(DATA);
-  const pr = await E.prepare(approveAll(p, rv), { api: mock.api, appId: '310' });
+  const pr = await E.prepare(approveAll(p, rv), { api: mock.api, current: await mock.current(), appId: '310' });
   assert(!pr.steps.some(s => s.status === 'PENDING') && !mock.calls.some(c => /^PUT /.test(c)), `反映の準備: 実行する手順なし・書き込みなし: ${pr.status}/${mock.calls.filter(c => /^PUT /.test(c))}`);
 }
 
@@ -86,7 +86,7 @@ console.log('\n--- §N3 同じ遷移元で、片方が変更不要・片方が�
   const cls = classOf(p, rv);
   assert(cls.get('P2').status === 'PENDING' && cls.get('P1').reason === 'NO_CHANGE', `変わる P2 は反映できる（変更不要の P1 を「反映されない分岐」に数えない。以前は PROCESS_BRANCH_PARTIAL）: P2 ${cls.get('P2').status}/${cls.get('P2').reason}`);
   const mock = makeKintoneMock(DATA);
-  const pr = await E.prepare(approveAll(p, rv), { api: mock.api, appId: '310' });
+  const pr = await E.prepare(approveAll(p, rv), { api: mock.api, current: await mock.current(), appId: '310' });
   const log = pr.status === 'PREPARED' ? await E.executePreview(pr, { api: mock.api, review: rv }) : null;
   const now = new Map(mock.st.status.actions.map(a => [a.name, a]));
   assert(log && log.status === 'DONE' && mock.calls.filter(c => c === 'PUT status').length === 1, `書き込みは P2 の 1 回だけ: ${log && log.status}/${mock.calls.filter(c => c === 'PUT status').length}`);
@@ -111,7 +111,7 @@ console.log('\n--- §N5 対象が無い・反映の直前に設定が変わっ�
   const p = plan([SAME_P1(), step('P2', 'UPDATE_PROCESS', 'PROCESS_ACTION', '申請する', { name: '申請する', from: '未処理', to: '承認待ち', filterCond: 'amount < "1000000"', changeKind: 'ACTION_TRANSITION' })]);
   const rv = reviewOf(p);
   const mock = makeKintoneMock(DATA);
-  const pr = await E.prepare(approveAll(p, rv), { api: mock.api, appId: '310' });
+  const pr = await E.prepare(approveAll(p, rv), { api: mock.api, current: await mock.current(), appId: '310' });
   mock.st.status.actions.find(a => a.name === '申請する').filterCond = 'amount < "500000"';   // 準備の後に人が変えた
   const log = await E.executePreview(pr, { api: mock.api, review: rv });
   const s2 = log.steps.find(s => s.stepId === 'P2');

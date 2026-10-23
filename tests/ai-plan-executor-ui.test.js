@@ -62,7 +62,7 @@ async function applyFlow(raw, { inputs = INPUTS, approve = null, beforePrepare =
   const idle = html();
   if (beforePrepare) beforePrepare(mock);
   s.stage = 'preparing';
-  s.prepared = await KTPlanExecutor.prepare(out, { api: mock.api, appId: '341' });
+  s.prepared = await KTPlanExecutor.prepare(out, { api: mock.api, current: await mock.current(), appId: '341' });
   if (s.prepared.status !== 'PREPARED') { s.stage = 'blocked'; return { plan, review, out, mock, s, html, idle, progress: null }; }
   if (between) between(mock, s);
   s.stage = 'running';
@@ -109,7 +109,7 @@ console.log('\n--- 1. 反映の画面: 最終案の反映の前・反映中・�
   const snap = x.s.execution.snapshot || x.s.prepared.snapshot;
   assert(snap.revision === '12' && snap.fields.properties.owner && !snap.fields.properties.progress, '実行前スナップショット（追加前の設定）');
   assert(e3.includes('DELETE_FIELD') && e3.includes('RESTORE_VIEWS') && e3.includes('&quot;executed&quot;: false'), 'ロールバック計画（DELETE_FIELD / RESTORE_VIEWS）を表示できる・実行はしない');
-  const again = await KTPlanExecutor.prepare(x.out, { api: x.mock.api, appId: '341' });
+  const again = await KTPlanExecutor.prepare(x.out, { api: x.mock.api, current: await x.mock.current(), appId: '341' });
   assert(again.status === 'BLOCKED' && again.blockers.some(b => b.code === 'STALE_PLAN') && Object.keys(x.mock.st.fields).filter(c => c === 'progress').length === 1, 'もう一度反映しようとしても STALE_PLAN で止まり、同じフィールドは 2 つ作られない');
 }
 
@@ -132,8 +132,10 @@ console.log('\n--- 2. 失敗 / 止まった理由（stale・権限・重複）/ 
   assert(x.s.execution.status === 'FAILED' && x.s.execution.steps[0].status === 'VERIFY_FAILED' && !e.includes('動作テスト環境への反映が完了しました。') && /id="kt-ai-exec-result" style="[^"]*border:2px solid #b00020/.test(e) && e.includes('⚠ 1 件は一致しません') && !/Simulation|SIMULATION_MISMATCH/.test(e), '読み戻しの不一致（kintone が表示名を補正）は VERIFY_FAILED・失敗の枠で出し、完了と出さない（照合の行は無い）');
 }
 {
-  const x = await applyFlow(PLAN_X, { approve: ['P1'], beforePrepare: (mock) => { mock.api.getPreviewFields = async () => { throw Object.assign(new Error('権限がありません。'), { code: 'CB_NO02' }); }; } });
-  assert(x.s.stage === 'blocked' && x.html().includes('PERMISSION_DENIED') && x.html().includes('権限'), 'アプリ管理権限が無い → PERMISSION_DENIED を明示');
+  //   2026-10-23: 準備は設定を自分で取らない。権限が無いことは作業の基準の取得（画面の承認の欄の準備の理由）で分かり、右の「反映」の準備には届かない
+  const mockP = makeKintoneMock(INPUTS.data, { permission: false });
+  let permErr = null; try { await mockP.current(); } catch (e) { permErr = e; }
+  assert(permErr && permErr.code === 'CB_NO02' && mockP.calls.length === 0, 'アプリ管理権限が無い → 今の設定（作業の基準）を取れずに止まる（準備に届かない・書き込みなし）');
 }
 {
   // 実機 Case D: 既存と同一の通知は、準備の重複の再確認で止まり、理由（EXACT_DUPLICATE）が手順ごとに出る

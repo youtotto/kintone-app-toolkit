@@ -36,7 +36,7 @@ const reviewOf = (p, data = DATA) => R.review({ plan: p, data, deps: data === DA
 const approveAll = (p, rv) => R.executorOutput(p, rv, p.steps.map(s => s.id));
 async function flow(p, mock, { data = DATA, between = null, betweenRollback = null, skipRollback = false, afterExec = null, approved = null } = {}) {
   const rv = reviewOf(p, data);
-  const prepared = await E.prepare(approved ? R.executorOutput(p, rv, approved) : approveAll(p, rv), { api: mock.api, appId: '310' });
+  const prepared = await E.prepare(approved ? R.executorOutput(p, rv, approved) : approveAll(p, rv), { api: mock.api, current: await mock.current(), appId: '310' });
   if (between && prepared.status === 'PREPARED') between(prepared);
   const log = prepared.status === 'PREPARED' ? await E.executePreview(prepared, { api: mock.api, review: rv }) : null;
   if (afterExec && log) afterExec(log, prepared);

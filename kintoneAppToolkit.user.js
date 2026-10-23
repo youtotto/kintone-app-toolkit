@@ -2732,6 +2732,22 @@
     }
 
     /**
+     * 反映・登録の部品（KTPlanExecutor.prepare・KTJsExecutor.prepare）に渡す、この基準を取った時点の今の設定（生の API の応答の形。2026-10-23）。
+     *   部品は動作テスト環境の設定・カスタマイズ・本文を自分で取り直さず、これを使う（承認の基準の印と、準備の基準が同じ 1 回の取得になる）。
+     *   fields と layout は取得の応答の形に戻す（revision はこの基準の動作テスト環境の revision）。本文は取れたファイルだけ text を持つ。取れていない基準なら null
+     */
+    function currentOf(base) {
+      if (!base || !base.ok || !base.data) return null;
+      const d = base.data, revision = base.revision?.preview ?? null;
+      return {
+        takenAt: base.loadedAt ?? null,
+        fields: { properties: d.fields || {}, revision }, layout: { layout: Array.isArray(d.layout) ? d.layout : [], revision },
+        views: d.views ?? null, generalNotify: d.generalNotify ?? null, perRecordNotify: d.perRecordNotify ?? null, reminderNotify: d.reminderNotify ?? null,
+        status: d.status ?? null, actions: d.actions ?? null, customize: d.customize ?? null, prodViews: base.productionData?.views ?? null,
+        files: (base.files || []).filter(f => f && f.type === 'FILE').map(f => ({ target: f.target, name: f.name, fileKey: f.fileKey ?? null, text: f.sourceAvailable && typeof f.text === 'string' ? f.text : null, sourceAvailable: !!f.sourceAvailable })),
+      };
+    }
+    /**
      * 作業の基準を取得する（動作テスト環境 ＋ 比較用の運用環境。並列で GET だけ）。
      * @param {object} p { appId, getImpl(path, params), download(fileKey), fetchRelated(fields, actions) → relatedApps, incoming, appNames（Map）, plugins, now }
      *   shouldContinue（省略可・自動の取得のときの設定取得の関所の手形）: 段の間（設定の一括取得 → 他アプリの定義 → 動作テスト環境の本文 → 運用環境の本文）で確かめ、
@@ -2800,7 +2816,7 @@
       return base;
     }
 
-    return { BASE_VERSION, ENV, ENV_JA, CORE, OPTIONAL, LABEL, fetchEnv, dataFrom, loadFiles, diffEnvs, fingerprint, stamp, facts, notesOf, inputsOf, environmentOf, load, stable, timeText };
+    return { BASE_VERSION, ENV, ENV_JA, CORE, OPTIONAL, LABEL, fetchEnv, dataFrom, loadFiles, diffEnvs, fingerprint, stamp, facts, notesOf, inputsOf, environmentOf, currentOf, load, stable, timeText };
   })();
 
   // ==========================================
@@ -11187,11 +11203,14 @@
     // ================= prepare =================
     /**
      * @param {object} input executorOutput() の { plan, review, approvedSteps }（review は simulation.before / after を含んでよい）
-     * @param {object} o { api, appId, now?, layoutPolicy? ('APPEND_ROW' | 'NONE'), shouldContinue? }
+     * @param {object} o { api, appId, current, now?, layoutPolicy? ('APPEND_ROW' | 'NONE'), shouldContinue? }
+     *   current: 作業の基準の今の設定（KTDevBase.currentOf。この時点の動作テスト環境の設定の生の応答と運用環境の一覧）。準備はこれを使い、動作テスト環境の設定を自分で取らない
+     *     （2026-10-23。前は同じ時点の設定を 9 件取り直し、承認の基準の印と準備の基準が別の取得だった）。無ければ CURRENT_MISSING で止める。相手アプリ（ルックアップの参照元・
+     *     アプリアクションのコピー先）の定義だけは、手順が決める相手を api で取る（計画を作ったときに取っていないコピー先を含む）
      *   shouldContinue: 自動の準備（承認の欄の準備）のとき（設定取得の関所）。偽になったら後続の取得（相手アプリの定義）を始めずに止める（KTFetchGate.paused を投げる）。
      *   利用者の明示の操作（反映・［動作テスト環境へ反映］の照合の取り直し）では渡さない（止めない）
      */
-    async function prepare(input, { api, appId, now = Date.now, layoutPolicy = 'APPEND_ROW', shouldContinue = null } = {}) {
+    async function prepare(input, { api, appId, now = Date.now, layoutPolicy = 'APPEND_ROW', shouldContinue = null, current = null } = {}) {
       const plan = input?.plan, review = input?.review;
       const approved = Array.isArray(input?.approvedSteps) ? [...new Set(input.approvedSteps)] : [];
       const prepared = {
@@ -11214,23 +11233,17 @@
       const pending = prepared.steps.filter(s => s.status === STEP.PENDING);
       if (!pending.length) { block('NOTHING_TO_EXECUTE', '承認済みで実行できる step がありません'); summarize(); return prepared; }
 
-      // ---- 2. 現在の設定（動作テスト環境）と revision を取得（アプリ管理権限が無ければここで止まる）----
-      let fields, layout, views, prodViews, generalNotify, perRecordNotify, reminderNotify, status, actions;
-      try {
-        [fields, layout, views, prodViews, generalNotify, perRecordNotify, reminderNotify, status, actions] = await Promise.all([api.getPreviewFields(prepared.appId), api.getPreviewLayout(prepared.appId), api.getPreviewViews(prepared.appId), api.getProductionViews(prepared.appId), api.getPreviewGeneralNotifications(prepared.appId), api.getPreviewPerRecordNotifications(prepared.appId), api.getPreviewReminders(prepared.appId), typeof api.getPreviewStatus === 'function' ? api.getPreviewStatus(prepared.appId) : Promise.resolve(null), typeof api.getPreviewActions === 'function' ? api.getPreviewActions(prepared.appId) : Promise.resolve(null)]);
-      } catch (e) {
-        const s = strErr(e);
-        if (isPermissionError(e)) block('PERMISSION_DENIED', 'このユーザーにはアプリ設定を変更する権限がありません（動作テスト環境の設定を取得できませんでした）', s);
-        else block('FETCH_FAILED', `現在の設定を取得できませんでした: ${s.message}`, s);
-        summarize(); return prepared;
-      }
-      prepared.snapshot = { takenAt: nowIso(now), revision: String(fields?.revision ?? ''), fields: clone(fields), layout: clone(layout), views: clone(views), generalNotify: clone(generalNotify), perRecordNotify: clone(perRecordNotify), reminderNotify: clone(reminderNotify), ...(status ? { status: clone(status) } : {}), ...(actions ? { actions: clone(actions) } : {}) };
+      // ---- 2. 今の設定（作業の基準の今の設定を受け取る。2026-10-23: 準備は動作テスト環境の設定を自分で取らない。権限が無い・取れないときは作業の基準の取得が止めている）----
+      if (!current || !current.fields || !current.layout || !current.views) { block('CURRENT_MISSING', '今の動作テスト環境の設定（作業の基準）が渡されていません'); summarize(); return prepared; }
+      const { fields, layout, views, prodViews = null, generalNotify, perRecordNotify, reminderNotify } = current;
+      const status = current.status ?? null, actions = current.actions ?? null;
+      prepared.snapshot = { takenAt: current.takenAt ?? nowIso(now), revision: String(fields?.revision ?? ''), fields: clone(fields), layout: clone(layout), views: clone(views), generalNotify: clone(generalNotify), perRecordNotify: clone(perRecordNotify), reminderNotify: clone(reminderNotify), ...(status ? { status: clone(status) } : {}), ...(actions ? { actions: clone(actions) } : {}) };
       // Phase 13 / 14: ルックアップ・アプリアクションの step があれば、相手アプリ（参照元 / コピー先）の定義を read-only で再取得する（運用環境の GET。相手アプリには書き込まない）。読めないアプリは推測しない
       let relatedApps = null, relatedNow = null;
       const crossSteps = pending.filter(s => ['UPDATE_LOOKUP', 'ADD_APP_ACTION', 'UPDATE_APP_ACTION'].includes(s.actionType));
       if (crossSteps.length) {
         KTFetchGate.check(shouldContinue);   // 設定取得の関所: 自動の準備の途中で見えなくなったら、相手アプリの定義（後続）は取らない
-        relatedApps = await fetchRelatedAppsForLookups(api, fields, crossSteps.map(s => rv.get(s.stepId)), actions, { shouldContinue });
+        relatedApps = await fetchRelatedAppsForLookups(api || {}, fields, crossSteps.map(s => rv.get(s.stepId)), actions, { shouldContinue });
         prepared.snapshot.relatedApps = clone(relatedApps);
         relatedNow = Object.fromEntries(Object.entries(relatedApps).map(([id, e]) => [id, KTPlanReview.relatedAppModel(e, id)]));
       }
@@ -12754,17 +12767,17 @@
      *   shouldContinue: 自動の準備（承認の欄の準備）のとき（設定取得の関所）。順の取得（カスタマイズ設定 → ステータス → フィールド → 統合先の本文）の間で確かめ、
      *   偽になったら後続を始めずに止める（KTFetchGate.paused を投げる。送った通信の結果は呼び出し側が続きに使える）。利用者の明示の操作（登録・反映）では渡さない（止めない）
      */
-    async function prepare(input, { api, now = Date.now, shouldContinue = null } = {}) {
-      const goOn = () => KTFetchGate.check(shouldContinue);
+    async function prepare(input, { api, now = Date.now, current = null } = {}) {
       const changes = clone(Array.isArray(input?.changes) ? input.changes : []);
       const prepared = { executorVersion: EXECUTOR_VERSION, executionId: newId('jsx'), appId: String(input?.appId ?? ''), env: ENV, preparedAt: nowIso(now), status: RUN.PREPARED, blockers: [], warnings: [], snapshot: null, changes, after: null, summary: { add: 0, replace: 0, byTarget: { desktop: { add: 0, replace: 0 }, mobile: { add: 0, replace: 0 } }, preservedJs: 0, preservedCss: 0 }, spec: input?.spec ?? null, provenance: input?.provenance ?? null, confirmations: [], unverified: [], verdict: null, deferred: [] };
       const block = (code, message, detail = null) => { prepared.blockers.push({ code, message, ...(detail ? { detail } : {}) }); prepared.status = RUN.BLOCKED; };
       if (!api || typeof api.getPreviewCustomize !== 'function' || typeof api.putPreviewCustomize !== 'function' || typeof api.uploadFile !== 'function') { block('NO_API', 'kintone API（カスタマイズ設定）がありません'); return prepared; }
       if (!prepared.appId) { block('NO_APP', 'appId がありません'); return prepared; }
       if (!changes.length) { block('NOTHING_TO_REGISTER', '登録する JavaScript がありません（仕様を確定してコードを生成してください）'); return prepared; }
-      let raw;
-      try { raw = await api.getPreviewCustomize(prepared.appId); }
-      catch (e) { const x = strErr(e); if (isPermissionError(e)) block('PERMISSION_DENIED', 'カスタマイズ設定を変更する権限がありません（kintone のシステム管理権限とアプリ管理権限が必要です）', x); else block('FETCH_FAILED', `動作テスト環境のカスタマイズ設定を取得できませんでした: ${x.message}`, x); return prepared; }
+      //   2026-10-23: カスタマイズ設定・依存のフィールドとステータス・統合先の本文は、作業の基準の今の設定（current。KTDevBase.currentOf）を受け取る（自分で取らない。
+      //   権限が無い・取れないときは作業の基準の取得が止めている）。書き込みの直前の取り直しと照合（STALE_CUSTOMIZATION）は executePreview が持つ
+      if (!current || !current.customize) { block('CURRENT_MISSING', '今の動作テスト環境のカスタマイズ設定（作業の基準）が渡されていません'); return prepared; }
+      const raw = current.customize;
       const snap = snapshotOf(raw);
       prepared.snapshot = snap;
       prepared.contentFingerprint = contentFingerprint(snap);
@@ -12794,13 +12807,11 @@
           const steps = items.map(x => stepText(x)).filter(t => (seen.has(t) ? false : (seen.add(t), true)));
           return `先に${steps.join('・')}を反映してください（このコードはその${kinds}を前提にしています）`;
         };
-        if (depAll.statuses.length && typeof api.getPreviewStatus !== 'function') { block('DEPENDENCY_CHECK_FAILED', '依存の成立を確かめられませんでした（動作テスト環境のプロセス管理の設定を読む手段がありません）。このコードは新設のステータスを前提にしているため登録しません'); return prepared; }
-        if (depAll.fields.length && typeof api.getPreviewFields !== 'function') { block('DEPENDENCY_CHECK_FAILED', '依存の成立を確かめられませんでした（動作テスト環境のフィールドの設定を読む手段がありません）。このコードは新設のフィールドを前提にしているため登録しません'); return prepared; }
+        if (depAll.statuses.length && !current.status) { block('DEPENDENCY_CHECK_FAILED', '依存の成立を確かめられませんでした（今の設定にプロセス管理の設定がありません）。このコードは新設のステータスを前提にしているため登録しません'); return prepared; }
+        if (depAll.fields.length && !current.fields) { block('DEPENDENCY_CHECK_FAILED', '依存の成立を確かめられませんでした（今の設定にフィールドの設定がありません）。このコードは新設のフィールドを前提にしているため登録しません'); return prepared; }
         let names = null, codes = null;
-        try {
-          if (depAll.statuses.length) { goOn(); names = new Set(Object.values((await api.getPreviewStatus(prepared.appId))?.states || {}).map(s => s?.name).filter(Boolean)); }
-          if (depAll.fields.length) { goOn(); codes = new Set(); const props = (await api.getPreviewFields(prepared.appId))?.properties || {}; for (const [k, p] of Object.entries(props)) { codes.add(k); for (const ck of Object.keys(p?.fields || {})) codes.add(ck); } }
-        } catch (e) { if (KTFetchGate.isPaused(e)) throw e; const x = strErr(e); block('DEPENDENCY_CHECK_FAILED', `依存の成立を確かめられませんでした（このコードが前提にする新設のステータス・フィールドが反映済みかを読めません）: ${x.message}`, x); return prepared; }
+        if (depAll.statuses.length) names = new Set(Object.values(current.status?.states || {}).map(s => s?.name).filter(Boolean));
+        if (depAll.fields.length) { codes = new Set(); const props = current.fields?.properties || {}; for (const [k, p] of Object.entries(props)) { codes.add(k); for (const ck of Object.keys(p?.fields || {})) codes.add(ck); } }
         const missingOf = (d) => [
           ...d.statuses.filter(x => x.name && !names.has(x.name)).map(x => ({ ...x, kind: 'ステータス' })),
           ...d.fields.filter(x => x.code && !codes.has(x.code)).map(x => ({ ...x, kind: 'フィールド' })),
@@ -12849,13 +12860,12 @@
           }
           ch.position = i; ch.oldFileKey = list[i].fileKey;
           // 登録直前の本文照合（§11）: baseHash が違えば止める（自動 merge しない）
-          try {
-            if (typeof api.downloadFile === 'function') goOn();
-            const cur = typeof api.downloadFile === 'function' ? await api.downloadFile(list[i].fileKey) : null;
-            if (typeof cur !== 'string') { ch.status = ST.BLOCKED; ch.reason = 'JS_SOURCE_UNAVAILABLE'; ch.message = `統合先「${ch.name}」の現在の本文を取得できません`; block('JS_SOURCE_UNAVAILABLE', ch.message); continue; }
-            ch.currentHash = hash(cur); ch.currentSource = cur;   // 復元（§28）は旧 fileKey を再指定できない（実機: 差し替え後の旧ファイルは PUT で「見つかりません」）ので、本文を保持して再アップロードする
-            if (ch.baseHash && ch.currentHash !== ch.baseHash) { ch.status = ST.BLOCKED; ch.reason = 'JS_SOURCE_CHANGED'; ch.message = `統合先「${ch.name}」の本文がコード生成の時点から変わっています（指紋 ${ch.baseHash} → ${ch.currentHash}）。自動では統合しません。再スキャンして計画からやり直してください`; block('JS_SOURCE_CHANGED', ch.message, { name: ch.name, baseHash: ch.baseHash, currentHash: ch.currentHash }); continue; }
-          } catch (e) { if (KTFetchGate.isPaused(e)) throw e; const x = strErr(e); ch.status = ST.BLOCKED; ch.reason = 'JS_SOURCE_UNAVAILABLE'; ch.message = `統合先「${ch.name}」の現在の本文を取得できません: ${x.message}`; block('JS_SOURCE_UNAVAILABLE', ch.message, x); continue; }
+          //   2026-10-23: 本文は作業の基準が取ったもの（current.files。取れていなければ sourceAvailable: false）。ここで取り直さない
+          const src = (current.files || []).find(f => f && f.fileKey != null && String(f.fileKey) === String(list[i].fileKey)) || null;
+          const cur = src && src.sourceAvailable !== false && typeof src.text === 'string' ? src.text : null;
+          if (typeof cur !== 'string') { ch.status = ST.BLOCKED; ch.reason = 'JS_SOURCE_UNAVAILABLE'; ch.message = `統合先「${ch.name}」の現在の本文を取得できません`; block('JS_SOURCE_UNAVAILABLE', ch.message); continue; }
+          ch.currentHash = hash(cur); ch.currentSource = cur;   // 復元（§28）は旧 fileKey を再指定できない（実機: 差し替え後の旧ファイルは PUT で「見つかりません」）ので、本文を保持して再アップロードする
+          if (ch.baseHash && ch.currentHash !== ch.baseHash) { ch.status = ST.BLOCKED; ch.reason = 'JS_SOURCE_CHANGED'; ch.message = `統合先「${ch.name}」の本文がコード生成の時点から変わっています（指紋 ${ch.baseHash} → ${ch.currentHash}）。自動では統合しません。再スキャンして計画からやり直してください`; block('JS_SOURCE_CHANGED', ch.message, { name: ch.name, baseHash: ch.baseHash, currentHash: ch.currentHash }); continue; }
           prepared.summary.replace++; prepared.summary.byTarget[ch.target].replace++;
         } else if (ch.kind === CHANGE.ADD_FILE) {
           if (list.some(e => e.type === 'FILE' && e.name.toLowerCase() === String(ch.name).toLowerCase())) { ch.status = ST.BLOCKED; ch.reason = 'NAME_CONFLICT'; ch.message = `同じ名前のファイル「${ch.name}」が既に登録されています（既存の変更なら「既存 JS を変更」の計画にしてください）`; block('NAME_CONFLICT', ch.message); continue; }
@@ -23325,7 +23335,10 @@
       //   2026-10-21: 設定を書いた直後の取り直し（after-apply）は、書く前に始まったかもしれない取得（ほかの操作の取り直し）に合流しない。その終わりを待ってから、
       //   書いた後の設定を取る（JavaScript の登録の準備は登録の前に取り直さず、この基準を使う。after-apply は明示の理由なので、見えていなくても途中で止めない。
       //   書く前・書いている途中に止めた取得の続きは、書いた後に confirmExecutor が古い印を付けて捨てる）
-      if (devBasePromise && reason === 'after-apply') { await devBasePromise.catch(() => null); return refreshDevBase({ maxAgeMs, reason }); }
+      //   2026-10-23: 押した直後の取り直し（execute）も合流しない（承認の基準の印と、設定・JavaScript の準備が受け取る今の設定を、押した後の 1 回の取得にそろえる。
+      //   前は合流した取得の結果に準備が自分で取り直した設定を合わせていた）。登録の前の取り直し（register。基準に古い印があるときだけ）も同じ（古い印の原因より前に
+      //   始まった取得の結果で登録の準備をしない。独立レビュー 2026-10-23）
+      if (devBasePromise && ['after-apply', 'execute', 'register'].includes(reason)) { await devBasePromise.catch(() => null); return refreshDevBase({ maxAgeMs, reason }); }
       if (devBasePromise) return auto ? devBasePromise : joinDevBase();
       const seq = ++devBaseSeq;
       const gen = devBaseGen, ownDeferred = devBaseOwnDeferred;
@@ -24450,19 +24463,19 @@
     /**
      * §0e.1（2026-10-09）: 承認の欄の準備（読み取りだけ・jsExec は変えない）。この計画の手順が新設するフィールド・ステータスに依存する JavaScript は
      *   「設定の反映の後に確かめる」（deferred）にして止めない（実行のときの準備で DEPENDENCY_NOT_APPLIED を確かめる）
-     *   api / shouldContinue（省略可）: 自動の準備（承認の欄の準備）のときに computePrecheck が渡す（続きに使う読み取りの記録・設定取得の関所）。
-     *   途中で見えなくなって止めたとき（KTFetchGate.paused）は失敗にせずそのまま投げる
+     *   current（省略可）: 作業の基準の今の設定（既定は今の基準から。承認の欄の準備は、その準備が使った基準のものを渡す）。2026-10-23: 登録の準備は
+     *   カスタマイズ設定・依存・本文を取らないので、ここに取得は無い（設定取得の関所で止まることも無い）
      */
-    async function jsPrecheck(v, { api: apiIn = null, shouldContinue = null } = {}) {
-      const api = apiIn || executor.api;
+    async function jsPrecheck(v, { current = currentNow() } = {}) {
+      const api = executor.api;
       const { changes, blocked } = jsChangesOf(v);
       const empty = (blockers) => ({ executionId: null, status: 'BLOCKED', blockers, warnings: [], changes: [], summary: JS_EMPTY_SUMMARY(), snapshot: null, confirmations: [], unverified: [], deferred: [], contentFingerprint: null });
       if (!changes.length) return empty(blocked.length ? blocked : [{ code: 'NOTHING_TO_REGISTER', message: '登録できる JavaScript がありません' }]);
       try {
-        const p = await KTJsExecutor.prepare({ appId: executor.appId, changes, recheck: jsRecheckOf(v), expectedRevision: v.spec?.customizeRevision ?? null, deferDependencies: true, spec: conv.specSummary(v), provenance: jsProvenanceOf(v) }, { api, shouldContinue });
+        const p = await KTJsExecutor.prepare({ appId: executor.appId, changes, recheck: jsRecheckOf(v), expectedRevision: v.spec?.customizeRevision ?? null, deferDependencies: true, spec: conv.specSummary(v), provenance: jsProvenanceOf(v) }, { api, current });
         if (blocked.length) p.warnings.push(...blocked.map(b => ({ code: b.code, message: `登録対象外: ${b.message}` })));
         return p;
-      } catch (e) { if (KTFetchGate.isPaused(e)) throw e; return empty([{ code: 'PREPARE_FAILED', message: e?.message || String(e) }]); }
+      } catch (e) { return empty([{ code: 'PREPARE_FAILED', message: e?.message || String(e) }]); }
     }
     /**
      * 登録の準備（読み取りだけ）: 版の生成コード → 変更 → KTJsExecutor.prepare。［動作テスト環境へ反映］1 回の反映（applyFinal）の部品。
@@ -24499,7 +24512,7 @@
       { const a2 = approvalNow(); if (!a2.ok) { jsExec.prepared = { executionId: null, status: 'BLOCKED', blockers: [{ code: 'APPROVAL_REQUIRED', message: a2.message }], warnings: [], changes: [], summary: JS_EMPTY_SUMMARY(), snapshot: null, confirmations: [], unverified: [] }; jsExec.stage = 'blocked'; renderJsReg(); return jsExec.prepared; } }
       if (given) { jsExec.prepared = given; jsExec.stage = given.status === 'PREPARED' ? 'confirm' : 'blocked'; renderJsReg(); return jsExec.prepared; }
       try {
-        const prepared = await KTJsExecutor.prepare({ appId: executor.appId, changes, recheck: jsRecheckOf(v), expectedRevision: expected && expected.revision != null ? expected.revision : (v.spec?.customizeRevision ?? null), ...(expected && expected.content != null ? { expectedContent: expected.content } : {}), spec: conv.specSummary(v), provenance: jsProvenanceOf(v) }, { api: executor.api });
+        const prepared = await KTJsExecutor.prepare({ appId: executor.appId, changes, recheck: jsRecheckOf(v), expectedRevision: expected && expected.revision != null ? expected.revision : (v.spec?.customizeRevision ?? null), ...(expected && expected.content != null ? { expectedContent: expected.content } : {}), spec: conv.specSummary(v), provenance: jsProvenanceOf(v) }, { api: executor.api, current: currentNow() });
         if (stalePrep()) return null;
         if (blocked.length) prepared.warnings.push(...blocked.map(b => ({ code: b.code, message: `登録対象外: ${b.message}` })));
         jsExec.prepared = prepared;
@@ -24840,6 +24853,8 @@
      *   （承認に指紋があれば BASE_UNKNOWN で止める。以前は undefined を渡して照合を黙って飛ばした）
      */
     function devBaseStampNow() { if (!devBase || !devBase.ok) return null; try { const st = KTDevBase.stamp(devBase); return st && st.fingerprint ? st : null; } catch (e) { return null; } }
+    /** 反映・登録の部品に渡す今の設定（作業の基準から。2026-10-23: 部品は動作テスト環境の設定・カスタマイズ・本文を自分で取らない） */
+    const currentNow = () => KTDevBase.currentOf(devBase);
     const finalFlow = () => !!adopted;   // 簡素化（2026-10-17）: 版は必ず仮案から作るので、今の計画があれば最終案の流れ
     /**
      * §0e.1（2026-10-09・不具合 A）: 設定の手順が止まらずに反映できたか。準備の時点で実行する手順（PENDING）だけで判定する。
@@ -24861,7 +24876,6 @@
     // ==================================================================
     const finalPre = { key: null, seq: 0, status: 'idle', planId: null, version: null, settings: null, js: null, parts: null, items: null, reasons: [] };
     let finalPreDeferred = false;   // 設定取得の関所で見送った準備（開発支援が見えたときに始める）
-    let precheckHeld = null;        // 設定取得の関所で止めた準備の読み取りの記録（続きに使う。{ key, entries: Map<読み取りの名前と引数, { v, at }> }。precheckReadsOf）
     let finalRun = null, finalRunSeq = 0;
     /** 2026-10-21: 反映の途中で承認を取り消す知らせの最後の文。知らせは押したときに出す結果のカード（「動作テスト環境へ反映します。」）の下に出るので「上の」。
      *   次の手は結果のカードにまとめ、知らせには書かない（前は「下の」と書き、markStale の知らせは結果のカードと同じ次の手を書いていた） */
@@ -24955,64 +24969,32 @@
       return [...new Set(out)];
     }
     /**
-     * 設定取得の関所: 自動の準備（承認の欄の準備）を途中で止めたときに取れていた読み取りの結果（動作テスト環境の設定・相手アプリの定義・統合先の本文）。
-     *   続き（見えたときのやり直し）では取り直さず、足りない分だけを取る。使うのは 1 分以内（DEV_BASE_RESUME_MAX_AGE_MS）で、作業の基準が同じ
-     *   （Toolkit のほかの場所の変更・自分の反映や登録で基準が変わったら使わない）間だけ。利用者の明示の操作の中の準備は使わない（いつも取り直し、記録も消す）。
-     *   記録（precheckHeld）は finalPre の隣で宣言している
-     */
-    const precheckHeldKey = () => { let fp = ''; try { const s = devBase && devBase.ok ? KTDevBase.stamp(devBase) : null; fp = s && s.fingerprint ? String(s.fingerprint) : ''; } catch (e) { fp = ''; } return `${devBaseGen}|${fp}`; };
-    /** 自動の準備に渡す api（読み取り get* / download* の結果を記録し、止めた続きでは記録を先に使う）。hold() で記録を続きに残す */
-    function precheckReadsOf() {
-      const api = executor.api;
-      const key = precheckHeldKey();
-      const held = precheckHeld && precheckHeld.key === key ? precheckHeld.entries : null;
-      precheckHeld = null;
-      const got = new Map();
-      const cl = (x) => (x === undefined ? x : JSON.parse(JSON.stringify(x)));
-      const wrapped = {};
-      for (const k in api) {
-        if (typeof api[k] !== 'function') { wrapped[k] = api[k]; continue; }
-        if (!/^(get|download)/.test(k)) { wrapped[k] = (...a) => api[k](...a); continue; }
-        wrapped[k] = async (...a) => {
-          const id = `${k}|${JSON.stringify(a)}`;
-          const h = held ? held.get(id) : null;
-          if (h && (nowMs() - h.at) < DEV_BASE_RESUME_MAX_AGE_MS) { got.set(id, h); return cl(h.v); }
-          const r = await api[k](...a);
-          got.set(id, { v: cl(r), at: nowMs() });
-          return r;
-        };
-      }
-      return { api: wrapped, hold: () => { if (got.size) precheckHeld = { key, entries: got }; } };
-    }
-    /**
-     * 準備（読み取りだけ）。作業の基準（30 秒以内なら再利用）→ 設定の準備 → JavaScript の準備。
+     * 準備（読み取りだけ）。作業の基準（30 秒以内なら再利用）→ 設定の準備 → JavaScript の準備（どちらも、その基準の今の設定を受け取る。2026-10-23: 準備の中で動作テスト環境の設定・カスタマイズ・本文を取らない。読み取りの記録 precheckHeld は廃止）。
      *   intent（設定取得の関所に渡す取得の種類）:
-     *   - FETCH.AUTO（既定。承認の欄の準備）: 段の前と、段の中の順の取得（KTPlanExecutor.prepare の相手アプリ・KTJsExecutor.prepare のステータス・フィールド・本文）の間で
-     *     canAutoFetch() を確かめ、見えなくなっていたら後続を始めずに { paused } を返す（送った通信の結果は続きのために残す。見えたときにやり直す。runFinalPrecheck）
+     *   - FETCH.AUTO（既定。承認の欄の準備）: 段の前と、設定の準備の中の相手アプリの定義の取得（アプリごとの順の取得）の間で
+     *     canAutoFetch() を確かめ、見えなくなっていたら後続を始めずに { paused } を返す（見えたときにやり直す。runFinalPrecheck。2026-10-23: 相手アプリは取り直す）
      *   - FETCH.EXPLICIT（利用者の明示の操作。［動作テスト環境へ反映］の照合の取り直し）: 最小化中・開発支援を表示していなくても止めない
      */
     async function computePrecheck(v, { onBase = null, intent = FETCH.AUTO } = {}) {
       const explicit = intent === FETCH.EXPLICIT;
       if (!explicit && !canAutoFetch()) return { paused: true };
-      if (explicit) precheckHeld = null;
       const pausedBefore = devBasePausedP;
       const b = await refreshDevBase({ maxAgeMs: DEV_BASE_ASK_MAX_AGE_MS, reason: explicit ? 'execute' : 'precheck' });
       if (!explicit && (!canAutoFetch() || devBasePausedP !== pausedBefore)) return { paused: true };   // 基準の取得が途中で止まった（前の基準で準備しない）
       if (!b || !b.ok) return { settings: null, js: null, parts: null, items: null, reasons: [`動作テスト環境の今の設定を取得できませんでした（${b?.message || '不明'}）。ヘッダーの［再取得］で取り直してください。`] };
       if (typeof onBase === 'function') onBase();
-      const reads = explicit ? { api: executor.api, hold: () => { } } : precheckReadsOf();
+      const current = KTDevBase.currentOf(b);   // 2026-10-23: 設定の準備・JavaScript の準備は、この基準の今の設定を受け取る（自分で取らない）
       const shouldContinue = KTFetchGate.continuer(intent, canAutoFetch);
       try {
         const out = finalOutput();
         const hasSettings = !!out && KTPlanExecutor.classifySteps(out).some(s => s.status === 'PENDING');
         let settings = null;
-        if (hasSettings) { try { settings = await KTPlanExecutor.prepare(out, { api: reads.api, appId: executor.appId, shouldContinue }); } catch (e) { if (KTFetchGate.isPaused(e)) throw e; settings = { status: 'BLOCKED', blockers: [{ code: 'PREPARE_FAILED', message: `反映の前の準備に失敗しました: ${e?.message || String(e)}` }], steps: [], stale: null, revision: {} }; } }
+        if (hasSettings) { try { settings = await KTPlanExecutor.prepare(out, { api: executor.api, appId: executor.appId, shouldContinue, current }); } catch (e) { if (KTFetchGate.isPaused(e)) throw e; settings = { status: 'BLOCKED', blockers: [{ code: 'PREPARE_FAILED', message: `反映の前の準備に失敗しました: ${e?.message || String(e)}` }], steps: [], stale: null, revision: {} }; } }
         const hasJs = Object.keys(v.generated || {}).length > 0;
-        if (hasJs) KTFetchGate.check(shouldContinue);
-        const js = hasJs ? await jsPrecheck(v, { api: reads.api, shouldContinue }) : null;
+        const js = hasJs ? await jsPrecheck(v, { current }) : null;
         return { settings, js, parts: partsOf(settings, js), items: preItemsOf(settings, js, v), reasons: preReasonsOf(settings, js, v) };
       } catch (e) {
-        if (KTFetchGate.isPaused(e)) { reads.hold(); return { paused: true }; }
+        if (KTFetchGate.isPaused(e)) return { paused: true };
         throw e;
       }
     }
@@ -25246,7 +25228,7 @@
       execState.stage = 'preparing'; execState.prepared = null; execState.execution = null; execState.error = null; execState.rollbackPlan = null; execState.rollback = null; execState.planRef = planRef; renderExec();
       setArtifact({ type: VM.ARTIFACT.EXECUTION, id: null, version: conv.activePlan()?.version ?? null }, { scrollTo: '#kt-ai-exec' });
       try {
-        const prepared = await KTPlanExecutor.prepare(out, { api: executor.api, appId: executor.appId });
+        const prepared = await KTPlanExecutor.prepare(out, { api: executor.api, appId: executor.appId, current: currentNow() });
         if (lastPlan !== planRef || execState.planRef !== planRef) { resetExec(); renderExec(); return null; }
         execState.prepared = prepared;
         execState.stage = prepared.status === 'PREPARED' ? 'confirm' : 'blocked';

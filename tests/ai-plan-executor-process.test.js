@@ -32,7 +32,7 @@ const reviewOf = (p, data = DATA) => R.review({ plan: p, data, deps: data === DA
 const approveAll = (p, rv) => R.executorOutput(p, rv, p.steps.map(s => s.id));
 async function flow(p, mock, { data = DATA, between = null, betweenRollback = null, skipRollback = false, afterExec = null } = {}) {
   const rv = reviewOf(p, data);
-  const prepared = await E.prepare(approveAll(p, rv), { api: mock.api, appId: '341' });
+  const prepared = await E.prepare(approveAll(p, rv), { api: mock.api, current: await mock.current(), appId: '341' });
   if (between && prepared.status === 'PREPARED') between(prepared);
   const log = prepared.status === 'PREPARED' ? await E.executePreview(prepared, { api: mock.api, review: rv }) : null;
   if (afterExec && log) afterExec(log, prepared);
@@ -144,7 +144,7 @@ console.log('\n--- 2. §36 / §37 Change Group の形成・孤立・新規フィ
     step('P5', 'UPDATE_PROCESS', 'PROCESS_STATUS', '部長承認', { assignees: ['NEW_FIELD_1'], changeKind: 'ASSIGNEE' }, { dependsOn: ['P4'] }),
   ], [pf('NEW_FIELD_1', '部長承認者', 'manager_approver', 'USER_SELECT')]);
   const rv = reviewOf(p); const mock = makeKintoneMock(DATA);
-  const prepared = await E.prepare(approveAll(p, rv), { api: mock.api, appId: '341' });
+  const prepared = await E.prepare(approveAll(p, rv), { api: mock.api, current: await mock.current(), appId: '341' });
   assert(prepared.status === 'PREPARED' && prepared.groups.map(g => g.stepIds.join('+')).join(' ') === 'P1+P2+P3 P5', 'P5 は P4（フィールド追加）の後なので 2 つ目の Change Group');
   const log = await E.executePreview(prepared, { api: mock.api, review: rv });
   assert(log.status === 'DONE' && mock.calls.filter(c => c === 'PUT status').length === 2 && mock.st.status.states['部長承認'].assignee.entities[0].entity.code === 'manager_approver', '2 グループ → PUT 2 回・順序どおり');
@@ -153,7 +153,7 @@ console.log('\n--- 2. §36 / §37 Change Group の形成・孤立・新規フィ
   // 孤立（遷移するアクションが無い）→ STATUS_UNREACHABLE で BLOCKED（書き込みなし）
   const p = plan([step('P1', 'ADD_PROCESS_STATUS', 'PROCESS_STATUS', '差戻し', { name: '差戻し' })]);
   const rv = reviewOf(p); const mock = makeKintoneMock(DATA);
-  const prepared = await E.prepare(approveAll(p, rv), { api: mock.api, appId: '341' });
+  const prepared = await E.prepare(approveAll(p, rv), { api: mock.api, current: await mock.current(), appId: '341' });
   assert(rv.conflicts.some(c => c.code === 'STATUS_UNREACHABLE') && prepared.status === 'BLOCKED' && prepared.steps[0].status === 'BLOCKED' && prepared.steps[0].reason === 'STATUS_UNREACHABLE' && !mock.calls.some(c => /^PUT/.test(c)), 'unreachable: STATUS_UNREACHABLE で実行不可');
   // 重複 / 不正な作業者フィールドは Review で INVALID → 承認できない
   const dup = reviewOf(plan([step('P1', 'ADD_PROCESS_STATUS', 'PROCESS_STATUS', '承認待ち', { name: '承認待ち' })]));
@@ -163,7 +163,7 @@ console.log('\n--- 2. §36 / §37 Change Group の形成・孤立・新規フィ
   const d = FX.makeData(); d.status.enable = false;
   const p2 = plan([step('P1', 'ADD_PROCESS_STATUS', 'PROCESS_STATUS', '部長承認', { name: '部長承認' }), step('P2', 'ADD_PROCESS_ACTION', 'PROCESS_ACTION', '部長へ', { name: '部長へ', from: '承認待ち', to: '部長承認' }, { dependsOn: ['P1'] })]);
   const rv2 = reviewOf(p2, d); const m2 = makeKintoneMock(d);
-  const pr2 = await E.prepare(approveAll(p2, rv2), { api: m2.api, appId: '341' });
+  const pr2 = await E.prepare(approveAll(p2, rv2), { api: m2.api, current: await m2.current(), appId: '341' });
   assert(rv2.steps[0].issues.some(i => i.code === 'PROCESS_DISABLED') && pr2.steps.every(s => s.status === 'UNSUPPORTED' && s.reason === 'PROCESS_ENABLE_NOT_SUPPORTED') && !m2.calls.some(c => /^PUT/.test(c)), '無効なプロセス管理: PROCESS_ENABLE_NOT_SUPPORTED（Toolkit は有効化しない）');
 }
 
@@ -175,7 +175,7 @@ console.log('\n--- 3. §38 ADD_ACTION ---');
   assert(unkFrom.steps[0].status === 'INVALID' && unkTo.steps[0].status === 'INVALID' && dupName.steps[0].status === 'INVALID' && dupName.steps[0].issues.some(i => i.code === 'ACTION_DUPLICATE'), 'unknown from / unknown to / duplicate name: INVALID');
   const ident = plan([step('P1', 'ADD_PROCESS_ACTION', 'PROCESS_ACTION', '別名承認', { name: '別名承認', from: '承認待ち', to: '完了' })]);
   const rvI = reviewOf(ident); const mI = makeKintoneMock(DATA);
-  const prI = await E.prepare(approveAll(ident, rvI), { api: mI.api, appId: '341' });
+  const prI = await E.prepare(approveAll(ident, rvI), { api: mI.api, current: await mI.current(), appId: '341' });
   assert(rvI.steps[0].issues.some(i => i.code === 'ACTION_SAME_CONDITION') && rvI.steps[0].safety === 'REVIEW_REQUIRED' && prI.status === 'PREPARED', 'identical transition（同じ遷移元・同じ条件）: 高リスク警告付きで承認すれば実行可');
   // Phase 20: 前のステータス（未処理）へ戻すアクションは分岐の相手にしない（kintone の条件は表示するボタンの切り替え）→ 分岐は進む方向（完了）で確かめる
   const ov = plan([step('P1', 'ADD_PROCESS_ACTION', 'PROCESS_ACTION', '部長へ', { name: '部長へ', from: '承認待ち', to: '完了', filterCond: 'amount >= "1000000"' })]);
@@ -183,11 +183,11 @@ console.log('\n--- 3. §38 ADD_ACTION ---');
   assert(rvO.steps[0].issues.some(i => i.code === 'ACTION_CONDITION_OVERLAP') && rvO.steps[0].issues.some(i => i.code === 'PROCESS_CONDITION_OVERLAP'), 'overlapping condition: 既存の無条件「承認する」と重なる警告（分岐が強制されない）');
   const inv = plan([step('P1', 'ADD_PROCESS_ACTION', 'PROCESS_ACTION', 'x', { name: 'x', from: '承認待ち', to: '完了', filterCond: 'owner in (LOGINUSER())' })]);
   const rvV = reviewOf(inv); const mV = makeKintoneMock(DATA);
-  const prV = await E.prepare(approveAll(inv, rvV), { api: mV.api, appId: '341' });
+  const prV = await E.prepare(approveAll(inv, rvV), { api: mV.api, current: await mV.current(), appId: '341' });
   assert(rvV.steps[0].issues.some(i => i.code === 'COND_INVALID') && prV.steps[0].status === 'BLOCKED' && prV.steps[0].reason === 'INVALID_CONDITION' && mV.calls.length === 0, 'invalid condition（プロセスで LOGINUSER）: API に投げず INVALID_CONDITION');
   const multi = plan([step('P1', 'ADD_PROCESS_ACTION', 'PROCESS_ACTION', 'x', { name: 'x', from: '未処理,承認待ち', to: '完了' })]);
   const rvM = reviewOf(multi); const mM = makeKintoneMock(DATA);
-  const prM = await E.prepare(approveAll(multi, rvM), { api: mM.api, appId: '341' });
+  const prM = await E.prepare(approveAll(multi, rvM), { api: mM.api, current: await mM.current(), appId: '341' });
   assert(prM.steps[0].status === 'UNSUPPORTED' && prM.steps[0].reason === 'MULTI_FROM_NOT_SUPPORTED', '遷移元が複数: 計画のみ（1 件ずつに分ける）');
 }
 
@@ -221,17 +221,17 @@ console.log('\n--- 4. §39 UPDATE action（条件）---');
   // invalid expression
   const bad = plan([step('P1', 'UPDATE_PROCESS', 'PROCESS_ACTION', '承認する', { filterCond: 'owner != ""' })]);
   const rvX = reviewOf(bad); const mX = makeKintoneMock(DATA);
-  const prX = await E.prepare(approveAll(bad, rvX), { api: mX.api, appId: '341' });
+  const prX = await E.prepare(approveAll(bad, rvX), { api: mX.api, current: await mX.current(), appId: '341' });
   assert(prX.steps[0].status === 'BLOCKED' && prX.steps[0].reason === 'INVALID_CONDITION' && mX.calls.length === 0, 'invalid expression（USER_SELECT に !=）: INVALID_CONDITION');
   // stale: Review 後に人間がそのアクションを変えた → STALE_PLAN / prepare 後 → TARGET_CHANGED
   const m1 = makeKintoneMock(DATA); m1.st.status.actions[1].filterCond = 'amount >= "1"';
-  const pr1 = await E.prepare(approveAll(p, reviewOf(p)), { api: m1.api, appId: '341' });
+  const pr1 = await E.prepare(approveAll(p, reviewOf(p)), { api: m1.api, current: await m1.current(), appId: '341' });
   assert(pr1.status === 'BLOCKED' && pr1.blockers.some(b => b.code === 'STALE_PLAN') && pr1.stale.diffs.some(d => d.kind === 'PROCESS_ACTION' && d.id === '承認する'), 'stale（Review → prepare）: STALE_PLAN（PROCESS_ACTION の差分）');
   const m2 = makeKintoneMock(DATA);
   const r2 = await flow(p, m2, { between: () => { m2.st.status.actions[1].to = '未処理'; } });
   assert(r2.log.status === 'FAILED' && r2.log.steps[0].status === 'FAILED' && r2.log.steps[0].reason === 'TARGET_CHANGED' && !m2.calls.some(c => c === 'PUT status') && m2.st.status.actions[1].to === '未処理', 'stale（prepare → 実行）: TARGET_CHANGED・PUT なし・人間の変更はそのまま');
   const m3 = makeKintoneMock(DATA); m3.st.status.enable = false;
-  const pr3 = await E.prepare(approveAll(p, reviewOf(p)), { api: m3.api, appId: '341' });
+  const pr3 = await E.prepare(approveAll(p, reviewOf(p)), { api: m3.api, current: await m3.current(), appId: '341' });
   assert(pr3.status === 'BLOCKED' && pr3.stale.diffs.some(d => d.kind === 'PROCESS' && d.id === 'enable'), 'enable の変更も STALE_PLAN（§20）');
 }
 
