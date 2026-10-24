@@ -9,6 +9,14 @@ const { devBaseLoaderOf } = require('./helpers/dev-base-fake.js');
 const { makeKintoneMock } = require('./helpers/kintone-preview-mock.js');
 const fixture = require('./helpers/release-workspace-fixture.js');
 const root = path.resolve(__dirname, '..');
+const supplement = {
+  impact: ['PC用のJavaScriptへ備考の編集制御を追加します。', 'モバイル用のJavaScriptへ備考の編集制御を追加します。'],
+  common: 'PCとモバイルの画面で備考の編集を制限します。',
+  assumption: '差し戻した後は編集画面を開き直してください。',
+  warning: 'ほかの仕組みからの更新は、このJavaScriptでは制限しません。',
+  desktop: 'PCの編集画面を開いたときに切り替わります。',
+  mobile: 'モバイルの編集画面を開いたときに切り替わります。'
+};
 const bundle = () => {
   const source = fs.readFileSync(path.join(root, 'kintoneAppToolkit.user.js'), 'utf8').replace('waitReady().then(() => startToolkit());', '');
   const end = source.lastIndexOf('})();');
@@ -22,7 +30,7 @@ function data() {
     作成中:{name:'作成中',index:'0',assignee:{type:'ONE',entities:[]}},
     承認待ち:{name:'承認待ち',index:'1',assignee:{type:'ONE',entities:[]}},
     承認済み:{name:'承認済み',index:'2',assignee:{type:'ONE',entities:[]}}
-  },actions:[]},customize:{scope:'ALL',desktop:{js:[],css:[]},mobile:{js:[],css:[]}} };
+  },actions:[]},customize:{scope:'NONE',desktop:{js:[],css:[]},mobile:{js:[],css:[]}} };
 }
 test('実ブラウザーの正式な操作で相談・採用・確認・反映・復元を通す（外部通信なし）', {timeout:90000}, async () => {
   let playwright;
@@ -56,10 +64,18 @@ test('実ブラウザーの正式な操作で相談・採用・確認・反映�
       serviceCalls.push({name,ctx});
       if(name==='getHealth')return health;
       if(name==='propose')return heldProposal ? heldProposal.promise : fixture.proposal('承認待ちの一覧を追加します。承認済みの場合、備考を編集できなくします。\n' + '既存の設定と入力チェックを維持します。'.repeat(35));
-      if(name==='plan')return fixture.plan();
+      if(name==='plan') {
+        const plan=fixture.plan();
+        plan.impact=[...supplement.impact, supplement.common].map(description=>({description}));
+        for(const customization of plan.customizations)customization.risks=[supplement.common];
+        return plan;
+      }
       if(failMobile && ctx.customization.platform[0]==='mobile')return {declined:true,artifactOutcome:fixture.generated(ctx.customization,{state:'incomplete',message:'モバイル用の作成が完了していません。'}).artifactOutcome,
         error:{code:'GENERATION_DECLINED',detail:{summary:'対象のファイルを確認できず、変更を作成しませんでした。',reason:'登録先の指定を確認してください。',warnings:[],coverage:[]}}};
-      return fixture.generated(ctx.customization);
+      const generated=fixture.generated(ctx.customization);
+      generated.assumptions=[supplement.assumption];
+      generated.warnings=[supplement.common,supplement.warning,supplement[ctx.customization.platform[0]]];
+      return generated;
     });
     await page.goto('https://release.test.invalid/');
     await page.addScriptTag({content:bundle()});
@@ -103,6 +119,36 @@ test('実ブラウザーの正式な操作で相談・採用・確認・反映�
     assert.equal(await page.locator('.ktr-workspace main .ktr-primary').count(),1);
     assert.match(await page.locator('main').innerText(),/承認待ち|備考/);
     assert.doesNotMatch(await page.locator('body').innerText(),/米ドル|token|トークン|var は|担当が計画に/);
+    // The real executor supplies this confirmation from the fixture's disabled customization scope.
+    const confirmation=page.locator('main .ktr-confirmations');
+    assert.equal(await confirmation.count(),1);
+    assert.equal(await confirmation.isVisible(),true);
+    assert.equal(await confirmation.evaluate(el=>el.closest('details')===null),true);
+    assert.match(await confirmation.innerText(),/現在無効|有効化はしません/);
+    const notices=page.getByRole('heading',{name:'前提と注意点',exact:true}).locator('..');
+    assert.equal(await notices.isVisible(),true);
+    assert.equal(await notices.evaluate(el=>el.closest('details')===null),true);
+    const noticeRows=await notices.locator('li > span').allTextContents();
+    for(const text of [supplement.common,supplement.assumption,supplement.warning,supplement.desktop,supplement.mobile])
+      assert.equal(noticeRows.filter(row=>row===text).length,1,'each full notice remains visible exactly once');
+    const sourceOf=text=>notices.getByText(text,{exact:true}).locator('..').locator('p.ktr-note').innerText();
+    assert.equal(await sourceOf(supplement.common),'説明元：PC／モバイル','a shared notice keeps both origins');
+    assert.equal(await sourceOf(supplement.desktop),'説明元：PC','the PC-specific notice keeps its short source');
+    assert.equal(await sourceOf(supplement.mobile),'説明元：モバイル','the mobile-specific notice keeps its short source');
+    const changeTitles=fixture.plan().customizations.map(c=>c.requirement);
+    const repeatedHeadings=await page.locator('main h3:visible,main h4:visible').allTextContents();
+    for(const title of changeTitles)assert.equal(repeatedHeadings.includes(title),false,'change names are not repeated as supplement headings');
+    const explanation=page.getByText('計画の説明を見る',{exact:true}).locator('..');
+    assert.equal(await explanation.evaluate(el=>el.tagName==='DETAILS'&&!el.open),true);
+    for(const text of supplement.impact)assert.equal((await page.locator('main').innerText()).includes(text),false,'impact descriptions begin folded');
+    const preparedBeforeSupplement=await page.evaluate(()=>JSON.stringify(window.work.controller.getState().prepared));
+    await explanation.locator(':scope > summary').click();
+    for(const text of [...supplement.impact,supplement.common])assert.ok((await explanation.innerText()).includes(text),'the full plan description is still accessible');
+    await explanation.locator(':scope > summary').click();
+    assert.equal(await page.evaluate(()=>JSON.stringify(window.work.controller.getState().prepared)),preparedBeforeSupplement);
+    assert.equal(await page.locator('[data-release-action="apply"]').count(),1);
+    assert.equal(await action('apply').isEnabled(),true);
+    assert.equal(mock.calls.filter(c=>!c.startsWith('GET')).length,0);
     const out=path.join(root,'tests/.build/release-browser');fs.mkdirSync(out,{recursive:true});
     await page.screenshot({path:path.join(out,'review.png'),fullPage:true});
     assert.equal(await page.locator('[data-release-action="consult"]').count(),0);
@@ -160,6 +206,7 @@ test('実ブラウザーの正式な操作で相談・採用・確認・反映�
     assert.equal(run.status,'complete',JSON.stringify(run.result));
     assert.equal(mock.st.customize.desktop.js.length,1);
     assert.equal(mock.st.customize.mobile.js.length,1);
+    assert.equal(mock.st.customize.scope,'NONE','registering files does not enable customization');
     assert.ok(mock.st.views['承認待ち']);
     assert.deepEqual(mock.st.prodViews,{});
     assert.ok(signals.some(s=>s.preview===true && s.production===false));
@@ -170,6 +217,7 @@ test('実ブラウザーの正式な操作で相談・採用・確認・反映�
     await action('rollback').click();await phase('result');
     assert.equal(await page.evaluate(()=>window.work.controller.getState().runs.at(-1).rollback.status),'complete');
     assert.equal(mock.st.customize.desktop.js.length,0);
+    assert.equal(mock.st.customize.scope,'NONE','restoring files preserves the original customization scope');
     assert.deepEqual(mock.st.views,{});
     await page.screenshot({path:path.join(out,'restored.png'),fullPage:true});
     // A second, incomplete conversation stays unwriteable and the previous record remains available.

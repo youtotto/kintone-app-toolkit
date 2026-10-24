@@ -89,18 +89,22 @@ const KTReleaseView = (() => {
   // or additional approval steps; only identical strings are deduplicated.
   function noticesHtml(state) {
     const seen = new Set((state.adopted?.cannot || []).concat(state.adopted?.assumptions || []).map(textOf));
-    const groups = [];
-    const add = (title, rows) => {
-      const texts = rows.map(textOf).filter(text => text && !seen.has(text) && seen.add(text));
-      if (texts.length) groups.push(`<div>${title ? `<h4>${esc(title)}</h4>` : ''}${list(texts)}</div>`);
-    };
-    add('', (state.plan?.impact || []).map(item => typeof item === 'string' ? item : item.description || item.message || ''));
-    for (const c of state.plan?.customizations || []) {
+    const notes = new Map(), customizations = state.plan?.customizations || [];
+    const platformOf = c => (c.platform || []).map(p => ({ desktop: 'PC', mobile: 'モバイル' }[p] || p)).join('・');
+    for (const c of customizations) {
       const a = (state.artifacts || []).find(item => item.customizationId === c.customizationId);
       const g = a?.result?.generated || a?.result || {};
-      add(c.requirement || '', [...(c.risks || []), ...(g.assumptions || []), ...(g.warnings || [])]);
+      const platform = platformOf(c), sharedPlatform = customizations.filter(other => platformOf(other) === platform).length > 1;
+      const source = [platform, sharedPlatform || !platform ? g.targetFile || c.requirement : ''].filter(Boolean).join('：') || 'JavaScript';
+      for (const text of [...(c.risks || []), ...(g.assumptions || []), ...(g.warnings || [])].map(textOf).filter(text => text && !seen.has(text))) {
+        if (!notes.has(text)) notes.set(text, new Set());
+        notes.get(text).add(source);
+      }
     }
-    return groups.length ? `<section><h3>作成時の補足</h3><p class="ktr-note">AIが説明した前提と注意点です。</p>${groups.join('')}</section>` : '';
+    // Impact descriptions also contain change summaries. Keep their original text
+    // available without repeating it as a warning or interpreting its meaning.
+    const impact = (state.plan?.impact || []).map(item => typeof item === 'string' ? item : item.description || item.message || '').filter(Boolean);
+    return `${notes.size ? `<section><h3>前提と注意点</h3><ul>${[...notes].map(([text, sources]) => `<li><span>${esc(text)}</span><p class="ktr-note">説明元：${esc([...sources].join('／'))}</p></li>`).join('')}</ul></section>` : ''}${impact.length ? `<details data-release-panel="plan-explanation"><summary>計画の説明を見る</summary>${list(impact)}</details>` : ''}`;
   }
   function declineHtml(artifacts) {
     return artifacts.filter(a => a.result?.error?.detail).map(a => {

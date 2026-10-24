@@ -76,13 +76,74 @@ test('作成後に届いた前提と注意点も通常表示に残し、新し�
   state.plan.customizations[0].risks = ['他の画面には適用しません。'];
   state.artifacts[0].result.assumptions = ['承認済みから差し戻せる運用が前提です。'];
   state.artifacts[0].result.warnings = ['他の画面には適用しません。', '<script>注意</script>'];
-  const before = JSON.stringify(state), shown = normal(KTReleaseView.render(state));
-  assert.match(shown, /既存の一覧は変更しません/);
+  const before = JSON.stringify(state), html = KTReleaseView.render(state), shown = normal(html);
+  assert.doesNotMatch(shown, /既存の一覧は変更しません/);
+  assert.match(html, /data-release-panel="plan-explanation"><summary>計画の説明を見る<\/summary>[\s\S]*既存の一覧は変更しません/);
   assert.match(shown, /承認済みから差し戻せる運用が前提/);
   assert.equal((shown.match(/他の画面には適用しません/g) || []).length, 1);
   assert.doesNotMatch(shown, /<script>/);
   assert.equal((shown.match(/data-release-action="apply"/g) || []).length, 1);
   assert.equal(JSON.stringify(state), before);
+});
+
+test('反映内容の長い見出しや計画の要約を注意点に重ねず、条件と確認事項は残す', async () => {
+  const f = await mounted();
+  await finishProposal(f);
+  const state = f.controller.getState();
+  const pc = 'PCの備考を承認済みでは編集不可にし、作成中では編集可能にする。';
+  const mobile = 'モバイルの備考を承認済みでは編集不可にし、作成中では編集可能にする。';
+  const warning = 'PC・モバイルとも画面上の編集制御です。';
+  const confirmation = '既存のJavaScriptの2行を置き換えます。';
+  state.prepared.changes = [
+    { id: 'C1', kind: 'javascript', title: pc, target: 'desktop', file: 'dealLock.js', operation: 'REPLACE_FILE' },
+    { id: 'C2', kind: 'javascript', title: mobile, target: 'mobile', file: 'mobile-approved-field-lock.js', operation: 'REPLACE_FILE' }
+  ];
+  state.prepared.confirmations = [confirmation];
+  state.plan.impact = [{ description: 'dealLock.js：備考の編集制御を追加' }, { description: 'mobile-approved-field-lock.js：備考の編集制御を追加' }, { description: warning }];
+  state.plan.customizations[0].requirement = pc;
+  state.plan.customizations[1].requirement = mobile;
+  state.plan.customizations[0].risks = [warning, confirmation];
+  state.plan.customizations[1].risks = [warning];
+  state.artifacts[0].result.assumptions = ['PCでは承認済みの場合に適用します。'];
+  state.artifacts[1].result.warnings = ['モバイルでは作成中の場合に編集できます。'];
+  const before = JSON.stringify(state), html = KTReleaseView.render(state), shown = normal(html);
+  assert.equal(shown.split(pc).length - 1, 1);
+  assert.equal(shown.split(mobile).length - 1, 1);
+  assert.doesNotMatch(shown, /<h4>|備考の編集制御を追加/);
+  assert.match(shown, /<h3>前提と注意点<\/h3><ul/);
+  assert.equal(shown.split(warning).length - 1, 1, 'a plan explanation must not suppress a visible warning');
+  assert.match(shown, /PC・モバイルとも画面上の編集制御です。<\/span><p class="ktr-note">説明元：PC／モバイル/);
+  assert.match(shown, /PCでは承認済みの場合に適用します/);
+  assert.match(shown, /モバイルでは作成中の場合に編集できます/);
+  assert.match(shown, /ktr-confirmations[\s\S]*反映前に確認してください[\s\S]*既存のJavaScriptの2行/);
+  assert.equal((shown.match(/data-release-action="apply"/g) || []).length, 1);
+  assert.equal(buttonOf({ innerHTML: html }, 'apply').disabled, false);
+  assert.equal(JSON.stringify(state), before, 'rendering must not change the prepared signature, decision or confirmations');
+});
+
+test('注意の文が対象を言わなくても説明元を残し、同じ画面の変更はファイルで区別する', async () => {
+  const f = await mounted();
+  await finishProposal(f);
+  const state = f.controller.getState();
+  state.plan.customizations[0].risks = ['一覧での編集には適用しません。'];
+  let shown = normal(KTReleaseView.render(state));
+  assert.match(shown, /一覧での編集には適用しません。<\/span><p class="ktr-note">説明元：PC<\/p>/);
+  state.plan.customizations[1].platform = ['desktop'];
+  state.plan.customizations[1].risks = ['この変更は作成中だけに適用します。'];
+  state.artifacts[0].result.targetFile = 'memo-lock.js';
+  state.artifacts[1].result.targetFile = 'other-rule.js';
+  shown = normal(KTReleaseView.render(state));
+  assert.match(shown, /一覧での編集には適用しません。<\/span><p class="ktr-note">説明元：PC：memo-lock.js/);
+  assert.match(shown, /この変更は作成中だけに適用します。<\/span><p class="ktr-note">説明元：PC：other-rule.js/);
+});
+
+test('注意点がなく計画の説明だけある場合も、空の注意見出しを出さない', () => {
+  const state = { phase: 'review', messages: [], runs: [], artifacts: [], plan: { impact: [{ description: '備考の編集制御を追加' }] }, prepared: { ok: true, changes: [], confirmations: [] } };
+  const html = KTReleaseView.render(state);
+  assert.doesNotMatch(normal(html), /前提と注意点|作成時の補足|備考の編集制御を追加/);
+  assert.match(html, /data-release-panel="plan-explanation"/);
+  state.plan.impact = [];
+  assert.doesNotMatch(KTReleaseView.render(state), /plan-explanation|前提と注意点/);
 });
 
 test('確認事項は折りたたみの外に出し、承認操作を増やさない', async () => {
