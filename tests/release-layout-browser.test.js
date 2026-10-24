@@ -1,0 +1,196 @@
+'use strict';
+// The real Toolkit host is a column flexbox. These fixtures reproduce its dimensions
+// and full-screen CSS zoom; all network traffic and all AI/kintone calls remain local.
+const test = require('node:test');
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
+const { pathToFileURL } = require('node:url');
+const { loadToolkit } = require('./helpers/load-toolkit.js');
+const { devBaseLoaderOf } = require('./helpers/dev-base-fake.js');
+const { makeKintoneMock } = require('./helpers/kintone-preview-mock.js');
+const F = require('./helpers/release-workspace-fixture.js');
+const root = path.resolve(__dirname, '..');
+const cases = [
+  { name: 'full', viewport: { width: 1536, height: 790 }, full: true, zoom: 1, split: true },
+  { name: 'full-110', viewport: { width: 1536, height: 790 }, full: true, zoom: 1.1, split: true },
+  { name: 'panel', viewport: { width: 1440, height: 900 }, full: false, zoom: 1, split: false },
+  { name: 'narrow-110', viewport: { width: 390, height: 844 }, full: true, zoom: 1.1, split: false },
+];
+function html({ full, zoom }) {
+  return `<!doctype html><html lang="ja"><meta charset="utf-8"><title>Toolkit 幅の回帰確認</title>
+  <style>
+    html,body{margin:0;width:100%;height:100%;overflow:hidden}
+    body{font:12px/1.5 "Times New Roman",serif;background:#e8edf2;color:#202020}
+    button,textarea,select{font:11px "Times New Roman",serif}
+    #kt-toolkit{position:fixed;right:16px;top:30px;width:900px;height:760px;max-height:calc(100vh - 60px);display:flex;flex-direction:column;background:#fff;border:1px solid #aab4c0;font:12px/1.5 ui-sans-serif,system-ui}
+    #kt-toolkit.is-full{inset:0;width:auto;height:auto;max-height:none;border:0}
+    #kt-toolkit .bar{display:flex;align-items:center;padding:10px 12px;border-bottom:1px solid #d5dde6;flex:none}
+    #kt-toolkit .body{padding:12px;flex:1 1 0%;min-height:0;overflow:auto}
+    #kt-toolkit.is-full>.bar,#kt-toolkit.is-full>.body{zoom:${zoom}}
+    #kt-toolkit .body>.kt-fill-view{height:100%;min-height:0}
+    #kt-toolkit .kt-flex-column{display:flex;flex-direction:column;min-width:0;min-height:0}
+  </style><body><section id="kt-toolkit" class="${full ? 'is-full' : ''}"><header class="bar">開発支援</header><div class="body"><div id="view-ai" class="kt-fill-view"><div id="kt-ai-host" class="kt-flex-column" style="height:100%;min-height:0"></div></div></div></section></body></html>`;
+}
+function bundle() {
+  const sourcePath = process.env.KT_LAYOUT_TOOLKIT_SOURCE || path.join(root, 'kintoneAppToolkit.user.js');
+  const source = fs.readFileSync(sourcePath, 'utf8').replace('waitReady().then(() => startToolkit());', '');
+  const end = source.lastIndexOf('})();');
+  return source.slice(0, end) + '\nglobalThis.LayoutTest={mountReleaseWorkspace,KTAiClient};\n' + source.slice(end);
+}
+function data() {
+  return { appId: '310', appName: '案件管理', fields: {
+    memo: { type: 'MULTI_LINE_TEXT', code: 'memo', label: '備考', required: false },
+    ステータス: { type: 'STATUS', code: 'ステータス', label: 'ステータス', enabled: true },
+  }, layout: [], views: { views: {}, revision: '1' }, status: { enable: true, states: {
+    作成中: { name: '作成中', index: '0', assignee: { type: 'ONE', entities: [] } },
+    承認待ち: { name: '承認待ち', index: '1', assignee: { type: 'ONE', entities: [] } },
+    承認済み: { name: '承認済み', index: '2', assignee: { type: 'ONE', entities: [] } },
+  }, actions: [] }, customize: { scope: 'ALL', desktop: { js: [], css: [] }, mobile: { js: [], css: [] } } };
+}
+async function measure(page) {
+  return page.evaluate(() => {
+    const box = selector => {
+      const el = document.querySelector(selector), r = el.getBoundingClientRect();
+      return { x: r.x, y: r.y, right: r.right, bottom: r.bottom, width: r.width, height: r.height, clientWidth: el.clientWidth, scrollWidth: el.scrollWidth };
+    };
+    return { host: box('#kt-ai-host'), workspace: box('.ktr-workspace'), main: box('.ktr-workspace main'), support: box('.ktr-support'),
+      documentWidth: document.documentElement.scrollWidth, viewport: innerWidth };
+  });
+}
+async function checkLayout(page, split, label) {
+  const m = await measure(page);
+  assert.ok(m.workspace.width >= m.host.width - 20, `${label}: workspace must use the flex host width: ${JSON.stringify(m)}`);
+  assert.ok(m.workspace.width <= m.host.width + 1, `${label}: workspace exceeds host`);
+  assert.ok(m.workspace.height >= m.host.height - 2, `${label}: workspace must cover the available height`);
+  assert.ok(m.documentWidth <= m.viewport + 1, `${label}: document overflows horizontally`);
+  assert.ok(m.host.scrollWidth <= m.host.clientWidth + 1, `${label}: host overflows horizontally`);
+  if (split) {
+    assert.ok(m.support.x >= m.main.right + 5, `${label}: supplemental information must be alongside the review: ${JSON.stringify(m)}`);
+    assert.ok(Math.abs(m.support.y - m.main.y) < 4, `${label}: main and supplement start together`);
+    assert.ok(m.main.width > m.support.width * 1.35, `${label}: main review has visual priority`);
+  } else {
+    assert.ok(m.support.y >= m.main.bottom - 2, `${label}: supplemental information must stack below: ${JSON.stringify(m)}`);
+  }
+}
+async function checkDialog(page, { wide = false, label = '' } = {}) {
+  const m = await page.locator('dialog[open]').evaluate(el => {
+    const r = el.getBoundingClientRect(), s = getComputedStyle(el);
+    const controls = [...el.querySelectorAll('button,select,textarea')].filter(n => n.getClientRects().length).map(n => {
+      const b = n.getBoundingClientRect(), c = getComputedStyle(n);
+      return { tag: n.tagName, left: b.left, right: b.right, font: c.fontFamily, fontSize: parseFloat(c.fontSize), width: b.width };
+    });
+    return { left: r.left, right: r.right, top: r.top, bottom: r.bottom, width: r.width, clientWidth: el.clientWidth, scrollWidth: el.scrollWidth,
+      viewportWidth: innerWidth, viewportHeight: innerHeight, font: s.fontFamily, fontSize: parseFloat(s.fontSize),
+      workspaceFont: getComputedStyle(document.querySelector('.ktr-workspace')).fontFamily, controls };
+  });
+  assert.ok(m.left >= 14 && m.right <= m.viewportWidth - 14, `${label}: dialog fits viewport width: ${JSON.stringify(m)}`);
+  assert.ok(m.top >= 14 && m.bottom <= m.viewportHeight - 14, `${label}: dialog fits viewport height`);
+  assert.ok(m.scrollWidth <= m.clientWidth + 1, `${label}: dialog has no horizontal overflow`);
+  assert.equal(m.font, m.workspaceFont, `${label}: dialog uses the workspace font, not the page serif font`);
+  assert.ok(m.fontSize >= 13, `${label}: dialog text is readable`);
+  if (m.viewportWidth > 1000) assert.ok(wide ? m.width >= 850 : m.width >= 590 && m.width <= 720, `${label}: width suits dialog purpose (${m.width})`);
+  for (const c of m.controls) {
+    assert.ok(c.left >= m.left - 1 && c.right <= m.right + 1 && c.width > 0, `${label}: ${c.tag} fits dialog`);
+    if (c.tag === 'BUTTON' || c.tag === 'SELECT') {
+      assert.equal(c.font, m.font, `${label}: ${c.tag} inherits dialog font`);
+      assert.ok(c.fontSize >= 13, `${label}: ${c.tag} has readable text`);
+    }
+  }
+}
+
+test('実ホストの幅・高さ・110%表示とダイアログを固定応答で確認する', { timeout: 120000 }, async t => {
+  let pw;
+  try { pw = require(process.env.PLAYWRIGHT_MODULE || 'playwright'); }
+  catch (_) { pw = require(path.join(process.env.USERPROFILE, '.cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules/playwright')); }
+  const { describeRegistry } = await import(pathToFileURL(path.join(process.env.KT_AI_REPO || path.resolve(root, '../AI'), 'worker/src/v2/prompt-registry.mjs')).href);
+  const health = { ok: true, supportedContractVersions: ['2.1'], registry: describeRegistry(), entitlements: [{ product: 'toolkit', features: ['assistant-qa', 'change-planner', 'customization-generator'] }] };
+  const browser = await pw.chromium.launch({ channel: process.env.BROWSER_CHANNEL || 'msedge', headless: true });
+  try {
+    for (const scene of cases) await t.test(scene.name, async () => {
+      const context = await browser.newContext({ viewport: scene.viewport, serviceWorkers: 'block' });
+      const unexpected = [], errors = [], calls = [], T = loadToolkit(), prod = data(), mock = makeKintoneMock(prod);
+      const loadBase = devBaseLoaderOf({ KTDevBase: { load: T.KTDevBase.loadForRelease } }, { appId: '310', production: prod, mockRef: () => mock });
+      const out = path.join(root, 'tests/.build/release-layout'); fs.mkdirSync(out, { recursive: true });
+      try {
+        await context.route('**/*', route => {
+          if (route.request().url() === 'https://layout.test.invalid/') return route.fulfill({ contentType: 'text/html', body: html(scene) });
+          unexpected.push(route.request().url()); return route.abort();
+        });
+        const page = await context.newPage();
+        page.on('pageerror', e => errors.push(e.message));
+        await page.exposeFunction('testBase', loadBase);
+        await page.exposeFunction('testApi', async (name, args) => mock.api[name](...args));
+        await page.exposeFunction('testService', async (name, ctx) => {
+          calls.push(name);
+          if (name === 'getHealth') return health;
+          if (name === 'propose') return F.proposal();
+          if (name === 'plan') return F.plan();
+          return F.generated(ctx.customization);
+        });
+        await page.goto('https://layout.test.invalid/');
+        await page.addScriptTag({ content: bundle() });
+        await page.evaluate(({ prod, names }) => {
+          const client = Object.fromEntries(['getHealth', 'propose', 'plan', 'generate'].map(name => [name, input => window.testService(name, input?.ctx)]));
+          window.work = LayoutTest.mountReleaseWorkspace(document.querySelector('#kt-ai-host'), {
+            appId: '310', settings: LayoutTest.KTAiClient.createSettingsStore(),
+            session: { client, status: () => ({ connected: true, apiBase: 'https://gateway.test.invalid' }) },
+            loadDevBase: window.testBase, executor: { api: Object.fromEntries(names.map(name => [name, (...args) => window.testApi(name, args)])) },
+            getInputs: () => ({ data: prod, deps: {}, scan: { files: [] } }), copyText: async () => {}, downloadText: () => {},
+          });
+          window.work.onVisible();
+        }, { prod, names: Object.keys(mock.api) });
+        const action = name => page.locator('[data-release-action="' + name + '"]').first();
+        const phase = value => page.waitForFunction(v => window.work.controller.getState().phase === v, value);
+        await page.waitForFunction(() => window.work.capability().available);
+        await checkLayout(page, false, scene.name + '/idle');
+        assert.equal(await page.locator('#kt-release-input').count(), 1);
+        assert.equal(await page.locator('[data-release-action="send"]').count(), 1);
+        await page.locator('[data-release-panel="connection"] > summary').click();
+        await action('connect').click(); await checkDialog(page, { label: scene.name + '/connection' });
+        if (scene.zoom === 1.1) await page.screenshot({ path: path.join(out, scene.name + '-connection.png') });
+        await page.locator('dialog [data-close]').click();
+        await action('details').click(); await checkDialog(page, { wide: true, label: scene.name + '/details' });
+        await page.locator('dialog [data-close]').click();
+        await action('free-context').click();
+        await page.locator('dialog [data-make]').click();
+        await checkDialog(page, { wide: true, label: scene.name + '/materials' });
+        if (scene.zoom === 1.1) await page.screenshot({ path: path.join(out, scene.name + '-materials.png') });
+        assert.ok((await page.locator('dialog [data-output]').inputValue()).length > 50);
+        await page.locator('dialog [data-close]').click();
+        assert.equal(calls.filter(n => n !== 'getHealth').length, 0);
+        await page.locator('#kt-release-input').fill(F.REQUEST); await action('send').click();
+        await page.locator('dialog [data-consent]').waitFor(); await checkDialog(page, { label: scene.name + '/consent' });
+        await page.locator('dialog [data-consent]').click(); await phase('proposal');
+        await checkLayout(page, false, scene.name + '/proposal');
+        assert.equal(await page.locator('[data-release-action="adopt"]').count(), 1);
+        await action('adopt').click(); await phase('review');
+        await checkLayout(page, scene.split, scene.name + '/review');
+        assert.equal(await page.locator('[data-release-action="apply"]').count(), 1);
+        assert.equal(await page.locator('.ktr-workspace main .ktr-primary').count(), 1);
+        await page.locator('[data-release-panel="conversation"] > summary').click();
+        await checkLayout(page, scene.split, scene.name + '/review-history-open');
+        await action('consult').click(); await checkLayout(page, false, scene.name + '/consult');
+        await page.locator('#kt-release-input').fill('入力途中の文は残してください。');
+        await page.evaluate(() => window.work.view.render());
+        assert.equal(await page.locator('#kt-release-input').inputValue(), '入力途中の文は残してください。');
+        await action('current').click(); await checkLayout(page, scene.split, scene.name + '/review-return');
+        if (scene.name === 'full-110') {
+          const count = calls.length;
+          await page.setViewportSize({ width: 390, height: 844 });
+          await checkLayout(page, false, scene.name + '/live-resize-narrow');
+          await page.setViewportSize(scene.viewport);
+          await checkLayout(page, true, scene.name + '/live-resize-wide');
+          assert.equal(await page.evaluate(() => window.work.controller.getState().phase), 'review');
+          assert.equal(calls.length, count, 'resizing must not make requests');
+          assert.equal(await page.locator('[data-release-action="apply"]').count(), 1);
+        }
+        fs.writeFileSync(path.join(out, scene.name + '-measurements.json'), JSON.stringify(await measure(page), null, 2));
+        await page.screenshot({ path: path.join(out, scene.name + '.png'), fullPage: true });
+        assert.equal(mock.calls.filter(c => !c.startsWith('GET')).length, 0);
+        assert.deepEqual(errors, []); assert.deepEqual(unexpected, []);
+        await page.evaluate(() => window.work.dispose());
+      } finally { await context.close(); }
+    });
+  } finally { await browser.close(); }
+});
