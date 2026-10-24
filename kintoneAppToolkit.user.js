@@ -7970,25 +7970,27 @@
       async apply({ api, appId, revision, layoutPolicy }, p) {
         const res = await api.addPreviewFields(appId, p.payload.properties, revision);
         const out = { revision: String(res?.revision ?? ''), requests: [{ method: 'POST', path: '/k/v1/preview/app/form/fields.json', codes: Object.keys(p.payload.properties) }] };
-        // 配置: フィールド追加だけでは配置が保証されないので、レイアウトを取得して無ければ末尾の行へ追加する（既存の行は変えない）
-        if (layoutPolicy === 'APPEND_ROW') {
+        if (p.placement || layoutPolicy === 'APPEND_ROW') {
           try { await placeField(); } catch (e) { const err = (e && typeof e === 'object') ? e : new Error(String(e)); err.applied = { ...out, partial: 'FIELD_ADDED_LAYOUT_FAILED' }; throw err; }
         }
         return out;
         async function placeField() {
           const lay = await api.getPreviewLayout(appId);
-          const rows = Array.isArray(lay?.layout) ? lay.layout : [];
-          const code = p.expect.code;
-          if (!layoutHasCode(rows, code)) {
-            const next = [...clone(rows), { type: 'ROW', fields: [{ type: p.expect.type, code }] }];
-            const put = await api.putPreviewLayout(appId, next, String(lay?.revision ?? out.revision));
+          const rows = Array.isArray(lay?.layout) ? lay.layout : [], code = p.expect.code;
+          // Do not adopt a newer form revision between field creation and its layout PUT.
+          if (!out.revision || String(lay?.revision ?? '') !== out.revision) throw Object.assign(new Error('フィールドを追加した後にフォームの設定が変わったため、配置を止めました。'), { code: 'GAIA_CO02' });
+          const found = layoutLocations(rows, code);
+          if (found.length > 1 || found.some(x => x.kind !== 'field' || x.node.type !== 'ROW')) throw Object.assign(new Error('追加したフィールドの配置を一つに特定できません。'), { code: 'TARGET_CHANGED' });
+          const before = withoutLayoutField(rows, code);
+          if (p.layoutBefore && !same(layoutShape(before), layoutShape(p.layoutBefore))) throw Object.assign(new Error('既存のフォームの配置が変わったため、追加したフィールドの配置を止めました。'), { code: 'TARGET_CHANGED' });
+          const field = found[0] ? clone(found[0].node.fields[found[0].fieldIndex]) : { type: p.expect.type, code };
+          const next = p.placement ? insertLayoutField(before, field, p.placement) : found.length ? clone(rows) : [...clone(rows), { type: 'ROW', fields: [field] }];
+          if (!same(layoutShape(rows), layoutShape(next))) {
+            const put = await api.putPreviewLayout(appId, next, out.revision);
             out.revision = String(put?.revision ?? out.revision);
-            out.requests.push({ method: 'PUT', path: '/k/v1/preview/app/form/layout.json', placement: 'APPENDED_ROW', rowsBefore: rows.length, rowsAfter: next.length });
-            out.layout = { placement: 'APPENDED_ROW', rowsBefore: rows.length };
-          } else {
-            out.requests.push({ method: 'GET', path: '/k/v1/preview/app/form/layout.json', placement: 'AUTO' });
-            out.layout = { placement: 'AUTO', rowsBefore: rows.length };
-          }
+            out.requests.push({ method: 'PUT', path: '/k/v1/preview/app/form/layout.json', placement: p.placement?.position || 'APPENDED_ROW', rowsBefore: rows.length, rowsAfter: next.length });
+          } else out.requests.push({ method: 'GET', path: '/k/v1/preview/app/form/layout.json', placement: p.placement?.position || 'AUTO' });
+          out.layout = { placement: p.placement?.position || (found.length ? 'AUTO' : 'APPENDED_ROW'), before, expected: next };
         }
       },
       async verify({ api, appId, snapshot }, p, applied) {
@@ -8015,14 +8017,14 @@
           const lay = await api.getPreviewLayout(appId);
           const rows = Array.isArray(lay?.layout) ? lay.layout : [];
           check('layoutContainsField', layoutHasCode(rows, p.expect.code), true, layoutHasCode(rows, p.expect.code));
-          const beforeRows = Array.isArray(snapshot?.layout?.layout) ? snapshot.layout.layout : [];
-          const preserved = beforeRows.every((row, i) => same(stripLayoutRow(row), stripLayoutRow(rows[i])));
-          check('existingLayoutPreserved', preserved, beforeRows.length, rows.length);
+          const beforeRows = applied.layout.before;
+          check('existingLayoutPreserved', same(layoutShape(withoutLayoutField(rows, p.expect.code)), layoutShape(beforeRows)), beforeRows, withoutLayoutField(rows, p.expect.code));
+          check('layoutPlacement', same(layoutShape(rows), layoutShape(applied.layout.expected)), applied.layout.expected, rows);
         }
         return { ok: checks.every(c => c.ok), checks, revision: String(cur?.revision ?? '') };
       },
       rollback({ appId }, p) {
-        return { actionType: 'DELETE_FIELD', collection: 'fields', target: p.expect.code, api: { method: 'DELETE', path: '/k/v1/preview/app/form/fields.json', payload: { app: appId, fields: [p.expect.code] } }, note: '動作テスト環境のフィールドを削除する（運用環境には無い）。レイアウトは snapshot の layout を PUT で戻す' };
+        return { actionType: 'DELETE_FIELD', collection: 'fields', target: p.expect.code, api: { method: 'DELETE', path: '/k/v1/preview/app/form/fields.json', payload: { app: appId, fields: [p.expect.code] } }, note: '動作テスト環境のフィールドを削除する（運用環境には無い）。追加したフィールドの配置だけを取り除き、既存のフォームの配置は保つ' };
       },
     };
 
@@ -9188,8 +9190,55 @@
       }
       return false;
     }
-    /** 行の比較用（size は kintone が補正することがあるので code / type だけ） */
-    const stripLayoutRow = (row) => row ? { type: row.type, code: row.code ?? null, fields: (row.fields || []).map(f => ({ type: f.type, code: f.code ?? null, elementId: f.elementId ?? null })), layout: Array.isArray(row.layout) ? row.layout.map(stripLayoutRow) : null } : null;
+    // Layout operations are structural insertions only. Existing elements are cloned,
+    // including label HTML, element IDs and sizes. Readback permits kintone size normalization.
+    const layoutShape = (value, ignoreSize = true) => Array.isArray(value) ? value.map(x => layoutShape(x, ignoreSize)) : value && typeof value === 'object'
+      ? Object.fromEntries(Object.keys(value).filter(k => !ignoreSize || k !== 'size').sort().map(k => [k, layoutShape(value[k], ignoreSize)])) : value;
+    function layoutLocations(rows, code) {
+      const found = [];
+      const walk = list => { for (let index = 0; index < list.length; index++) {
+        const node = list[index]; if (node.code === code) found.push({ kind: 'node', list, index, node });
+        for (let fieldIndex = 0; fieldIndex < (node.fields || []).length; fieldIndex++) if (node.fields[fieldIndex].code === code) found.push({ kind: 'field', list, index, node, fieldIndex });
+        if (Array.isArray(node.layout)) walk(node.layout);
+      } };
+      walk(rows); return found;
+    }
+    function withoutLayoutField(rows, code) {
+      return clone(rows).flatMap(node => {
+        if (node.type === 'ROW' && (node.fields || []).some(f => f.code === code)) {
+          node.fields = node.fields.filter(f => f.code !== code); if (!node.fields.length) return [];
+        }
+        if (Array.isArray(node.layout)) node.layout = withoutLayoutField(node.layout, code);
+        return [node];
+      });
+    }
+    function insertLayoutField(rows, field, placement) {
+      const next = clone(rows), positions = ['BEFORE_ROW', 'AFTER_ROW', 'BEFORE_FIELD', 'AFTER_FIELD', 'GROUP_END', 'FORM_END'];
+      const invalid = message => { throw Object.assign(new Error(message), { code: 'INVALID_FIELD_PLACEMENT' }); };
+      if (!placement || Array.isArray(placement) || typeof placement !== 'object' || Object.keys(placement).some(k => !['position', 'anchor'].includes(k)) || !positions.includes(placement.position) || typeof placement.anchor !== 'string') invalid('追加するフィールドの配置が不正です。');
+      const row = { type: 'ROW', fields: [clone(field)] };
+      if (placement.position === 'FORM_END') { if (placement.anchor) invalid('フォームの末尾への配置に基準のフィールドは指定できません。'); next.push(row); return next; }
+      if (!placement.anchor || placement.anchor === field.code) invalid('配置の基準となるフィールドまたはグループが不正です。');
+      const matches = layoutLocations(next, placement.anchor); if (matches.length !== 1) invalid('配置の基準となるフィールドまたはグループを一つに特定できません。');
+      const at = matches[0];
+      if (placement.position === 'GROUP_END') {
+        if (at.kind !== 'node' || at.node.type !== 'GROUP' || !Array.isArray(at.node.layout)) invalid('配置先のグループがありません。');
+        at.node.layout.push(row);
+      } else if (placement.position === 'BEFORE_FIELD' || placement.position === 'AFTER_FIELD') {
+        if (at.kind !== 'field' || at.node.type !== 'ROW') invalid('同じ行に追加する場合は、テーブルの外にあるフィールドを指定してください。');
+        at.node.fields.splice(at.fieldIndex + (placement.position === 'AFTER_FIELD' ? 1 : 0), 0, clone(field));
+      } else {
+        if (at.kind === 'field' ? at.node.type !== 'ROW' : !['GROUP', 'SUBTABLE'].includes(at.node.type)) invalid('テーブル内のフィールドを、別の行に配置する基準にはできません。');
+        at.list.splice(at.index + (placement.position === 'AFTER_ROW' ? 1 : 0), 0, row);
+      }
+      return next;
+    }
+    const fieldPlacementDescription = (placement, fields) => {
+      const label = fields[placement.anchor]?.label || placement.anchor;
+      return ({ BEFORE_ROW: '「' + label + '」のある行の上に配置します。', AFTER_ROW: '「' + label + '」のある行の下に配置します。',
+        BEFORE_FIELD: '「' + label + '」と同じ行の左側に配置します。', AFTER_FIELD: '「' + label + '」と同じ行の右側に配置します。',
+        GROUP_END: 'グループ「' + label + '」の末尾に配置します。', FORM_END: 'フォームの末尾に配置します。' })[placement.position];
+    };
 
     const fieldKey = (f) => ({ type: f.type, label: f.label, required: !!f.required, ...(f.options ? { options: f.options } : {}), ...(f.lookup ? { lookup: f.lookup } : {}) });
     const noChangeDone = s => s?.status === STEP.SKIPPED && s.reason === 'NO_CHANGE';
@@ -9226,6 +9275,7 @@
       try { operations.forEach(visit); } catch (e) { block(e.code, e.message); return finish(); }
       const fields = operationFields(current.fields.properties), process = clone(current.status || { enable: false, states: {}, actions: [] });
       const proposed = new Map((input.proposedFields || []).map(f => [f.temporaryId, f]));
+      let layoutNow = clone(current.layout.layout || []);
       const related = new Map(), targets = new Set();
       const fail = (code, message) => { throw Object.assign(new Error(message), { code }); };
       const has = (s, key) => s[key] !== null && s[key] !== undefined;
@@ -9261,13 +9311,28 @@
           if (!HANDLERS[type]) fail('UNSUPPORTED_OPERATION', 'この種類の設定変更を自動で反映する手順がありません');
           if (s.destApp && !['ADD_APP_ACTION', 'UPDATE_APP_ACTION'].includes(type) && String(s.destApp) !== prepared.appId) fail('OTHER_APP_WRITE', '別のアプリへの設定変更は含められません');
           if ((op.dependsOn || []).some(id => prepared.steps.find(x => x.stepId === id)?.status === STEP.BLOCKED)) fail('DEPENDENCY_BLOCKED', '先に必要な設定の手順が準備できていません');
-          let change = null;
+          let change = null, placement = null, nextLayout = null;
           if (type === 'ADD_FIELD') {
             const p = proposed.get(ref); if (!p) fail('FIELD_DEFINITION_MISSING', '新しいフィールドの定義がありません');
             const code = p.suggestedCode; if (!code || fields[code]) fail('FIELD_CODE_COLLISION', '新しいフィールドのコードが未指定か既に存在します');
             const after = { code, label: p.label, type: p.type || s.fieldType, required: p.required ?? s.required ?? false, options: array(p.options).length ? p.options : array(s.options), protocol: p.protocol || s.protocol, temporaryId: p.temporaryId };
             if (!after.label || typeof after.required !== 'boolean') fail('FIELD_DEFINITION_MISSING', 'フィールド名または必須の指定が不正です');
-            change = { after }; claim(`field:${code}`);
+            if (input.requireFieldPlacement && !s.placement) fail('FIELD_PLACEMENT_MISSING', '新しいフィールドを配置する場所が指定されていません。');
+            if (s.placement != null) {
+              placement = clone(s.placement);
+              if (placement && typeof placement === 'object' && !Array.isArray(placement)) {
+                const anchor = placement.anchor, newAnchor = [...proposed.values()].find(f => f.temporaryId === anchor || f.suggestedCode === anchor);
+                if (newAnchor) {
+                  const prior = prepared.steps.find(x => x.actionType === 'ADD_FIELD' && x.prepared?.expect.code === newAnchor.suggestedCode);
+                  const dependencies = new Set(), collect = id => { if (dependencies.has(id)) return; dependencies.add(id); (byId.get(id)?.dependsOn || []).forEach(collect); };
+                  (op.dependsOn || []).forEach(collect);
+                  if (!prior || !dependencies.has(prior.stepId)) fail('PLACEMENT_DEPENDENCY_MISSING', '配置の基準にする新しいフィールドを先に追加する手順がありません。');
+                  placement.anchor = prior.prepared.expect.code;
+                }
+              }
+              nextLayout = insertLayoutField(layoutNow, { type: after.type, code }, placement);
+            } else nextLayout = [...clone(layoutNow), { type: 'ROW', fields: [{ type: after.type, code }] }];
+            change = { after }; claim('field:' + code);
           } else if (type === 'UPDATE_FIELD') {
             const before = clone(fieldOf(ref)), after = clone(before);
             if (before.subtable || ['STATUS', 'STATUS_ASSIGNEE', 'CATEGORY'].includes(before.type)) fail('FIELD_CHANGE_NOT_SUPPORTED', 'このフィールドは自動変更の対象ではありません');
@@ -9395,7 +9460,12 @@
           if (typeof HANDLERS[type].recheck === 'function') { const duplicate = HANDLERS[type].recheck(built, { generalNow: current.generalNotify, perRecordNow: current.perRecordNotify, remindersNow: current.reminderNotify }); if (duplicate.verdict === 'EXACT_DUPLICATE') { skip(); continue; } }
           st.prepared = built;
           if (type === 'UPDATE_FIELD') built.sourceField = clone(current.fields.properties[ref]);
-          if (type === 'ADD_FIELD') { fields[built.expect.code] = { ...change.after, baseType: change.after.type }; prepared.temporaryIdMap[change.after.temporaryId] = change.after.code; }
+          if (type === 'ADD_FIELD') {
+            built.layoutBefore = clone(layoutNow); built.layoutAfter = nextLayout;
+            if (placement) { built.placement = placement; built.placementDescription = fieldPlacementDescription(placement, fields); }
+            layoutNow = nextLayout;
+            fields[built.expect.code] = { ...change.after, baseType: change.after.type }; prepared.temporaryIdMap[change.after.temporaryId] = change.after.code;
+          }
           if (type === 'ADD_PROCESS_STATUS') process.states[change.after.name] = { name: change.after.name, index: String(Object.keys(process.states).length), assignee: built.mutation.assignee };
         } catch (e) { st.status = STEP.BLOCKED; st.reason = e.code || 'PREPARATION_FAILED'; st.message = e.message || '反映の準備に失敗しました'; block(st.reason, st.message, st.stepId); }
       }
@@ -9575,7 +9645,6 @@
     const stripRevision = (o) => { if (!o || typeof o !== 'object') return o; const { revision, ...rest } = o; return rest; };
     const stripViewIds = (views) => Object.fromEntries(Object.entries(views || {}).map(([n, v]) => { const { id, ...rest } = v || {}; return [n, rest]; }));
     const listOf = (raw) => (Array.isArray(raw?.notifications) ? raw.notifications : []);
-    const layoutCodes = (rows) => { const out = []; const walk = (rs) => { for (const r of rs || []) { for (const x of r?.fields || []) if (x?.code) out.push(x.code); if (Array.isArray(r?.layout)) walk(r.layout); } }; walk(rows); return out; };
     async function fetchPreviewAll(api, appId) {
       const [fields, layout, views, generalNotify, perRecordNotify, reminderNotify, status, actions] = await Promise.all([api.getPreviewFields(appId), api.getPreviewLayout(appId), api.getPreviewViews(appId), api.getPreviewGeneralNotifications(appId), api.getPreviewPerRecordNotifications(appId), api.getPreviewReminders(appId), typeof api.getPreviewStatus === 'function' ? api.getPreviewStatus(appId) : Promise.resolve(null), typeof api.getPreviewActions === 'function' ? api.getPreviewActions(appId) : Promise.resolve(null)]);
       return { fields, layout, views, generalNotify, perRecordNotify, reminderNotify, ...(status ? { status } : {}), ...(actions ? { actions } : {}) };
@@ -9659,7 +9728,7 @@
         project(state, snapshot, step) { return (step.collection === 'generalNotify' ? GENERAL_RESTORE : PER_RECORD_RESTORE).project(state, snapshot, step); },
       },
       RESTORE_REMINDER_SETTINGS: restoreStrategy('reminderNotify', { get: (api, a) => api.getPreviewReminders(a), put: putReminders, equal: eqReminders, kinds: ['reminders'], label: 'リマインダー' }),
-      /** ADD_FIELD → DELETE_FIELD: 定義が反映直後と同じ・他の設定から参照されていない・人間が変えていない、のときだけ削除。レイアウトは snapshot へ */
+      /** ADD_FIELD → DELETE_FIELD: 定義と配置が反映直後と同じ・他の設定から参照されていないときだけ削除。今回のフィールドの配置だけを取り除く */
       DELETE_FIELD: {
         collection: 'fields',
         check({ current, expected, snapshot, step, state = current }) {
@@ -9667,28 +9736,30 @@
           if (snapshot.fields?.properties?.[code]) return { ok: false, code: 'FIELD_MISSING', message: `フィールド「${code}」は実行前からあるため削除しません` };
           const curF = current.fields?.properties?.[code], expF = expected.fields?.properties?.[code];
           if (!state.fields?.properties?.[code]) return { ok: true, alreadyRestored: true };
+          if (!same(layoutShape(current.layout?.layout || [], false), layoutShape(expected.layout?.layout || [], false))) return { ok: false, code: 'LAYOUT_CHANGED', message: '反映後にフォームの配置が変更されているため、自動では元に戻せません。' };
           if (curF && expF && !same(curF, expF)) return { ok: false, code: 'FIELD_CHANGED', message: `追加したフィールド「${curF.label || code}」（${code}）が反映後に変更されています（自動では削除しません）`, diffs: [{ kind: 'FIELD', id: code, change: 'CHANGED', message: `フィールド「${curF.label || code}」（${code}）の定義が反映直後と違います`, before: fieldKey(expF), after: fieldKey(curF) }] };
           // 参照は「先行する手順が戻した後の状態」で見る（この実行で追加した一覧の参照は、先にその一覧が戻るので壊れない）
           const refs = fieldReferences(code, state);
           if (refs.length) return { ok: false, code: 'FIELD_REFERENCED', message: `追加したフィールド「${(curF && curF.label) || code}」（${code}）は ${refs.map(r => r.where).join('、')} から参照されています（削除すると壊れるため自動では削除しません）`, diffs: refs.map(r => ({ kind: r.kind, id: r.id, change: 'REFERENCED', message: `${r.where}が ${code} を参照` })) };
           return { ok: true };
         },
-        project(state, snapshot, step) { const next = { ...state, fields: clone(state.fields), layout: clone(snapshot.layout) }; if (next.fields?.properties) delete next.fields.properties[step.target]; return next; },
+        project(state, snapshot, step) { const next = { ...state, fields: clone(state.fields), layout: { ...clone(state.layout), layout: withoutLayoutField(state.layout?.layout || [], step.target) } }; if (next.fields?.properties) delete next.fields.properties[step.target]; return next; },
         async apply({ api, appId, current, expected, snapshot, step }) {
           const code = step.target;
           const res = await api.deletePreviewFields(appId, [code], String(current.fields?.revision ?? ''));
           let revision = String(res?.revision ?? '');
           const requests = [{ method: 'DELETE', path: '/k/v1/preview/app/form/fields.json', codes: [code] }];
-          // レイアウト: 削除で行ごと消えていれば何もしない。残っていて、フィールドの集合が snapshot と同じなら snapshot のレイアウトを戻す
+          // Remove only this addition. Never restore the complete old form over changes
+          // that may have been observed after a partially completed field creation.
           const lay = await api.getPreviewLayout(appId);
-          const rows = Array.isArray(lay?.layout) ? lay.layout : [], snapRows = Array.isArray(snapshot.layout?.layout) ? snapshot.layout.layout : [];
-          let layoutRestored = same(rows.map(stripLayoutRow), snapRows.map(stripLayoutRow));
-          if (!layoutRestored && sameKeys(layoutCodes(rows), layoutCodes(snapRows))) {
-            const put = await api.putPreviewLayout(appId, clone(snapRows), String(lay?.revision ?? revision));
-            revision = String(put?.revision ?? revision); requests.push({ method: 'PUT', path: '/k/v1/preview/app/form/layout.json', rows: snapRows.length }); layoutRestored = true;
+          if (!revision || String(lay?.revision ?? '') !== revision) throw Object.assign(new Error('フィールドを戻した後にフォームの配置が変わったため、残りの復元を止めました。'), { code: 'GAIA_CO02' });
+          const rows = Array.isArray(lay?.layout) ? lay.layout : [], next = withoutLayoutField(current.layout?.layout || [], code);
+          if (!same(layoutShape(rows), layoutShape(next))) {
+            const put = await api.putPreviewLayout(appId, clone(next), revision);
+            revision = String(put?.revision ?? revision); requests.push({ method: 'PUT', path: '/k/v1/preview/app/form/layout.json', rows: next.length });
           }
           const expFields = clone(expected.fields); if (expFields?.properties) delete expFields.properties[code];
-          return { revision, requests, expected: { fields: expFields, layout: layoutRestored ? clone(snapshot.layout) : clone(lay) }, layoutRestored };
+          return { revision, requests, expected: { fields: expFields, layout: { layout: clone(next), revision } } };
         },
         async verify({ api, appId, expected, snapshot, step }) {
           const code = step.target;
@@ -9700,10 +9771,9 @@
           const expProps = expected.fields?.properties || {};
           const mutated = Object.keys({ ...expProps, ...(cur?.properties || {}) }).filter(k => k !== code && !same(expProps[k], cur?.properties?.[k]));
           check('otherFieldsPreserved', mutated.length === 0, [], mutated);
-          const rows = Array.isArray(lay?.layout) ? lay.layout : [], snapRows = Array.isArray(snapshot.layout?.layout) ? snapshot.layout.layout : [];
+          const rows = Array.isArray(lay?.layout) ? lay.layout : [], expectedRows = expected.layout?.layout || [];
           check('layoutFieldRemoved', !layoutHasCode(rows, code), true, !layoutHasCode(rows, code));
-          const restored = same(rows.map(stripLayoutRow), snapRows.map(stripLayoutRow));
-          check('layoutRestored', restored || !sameKeys(layoutCodes(rows), layoutCodes(snapRows)), restored ? '反映前の設定と一致' : '他のフィールドが増えているため比較対象外', restored ? '反映前の設定と一致' : '反映前の設定と一致しない');
+          check('layoutRestored', same(layoutShape(rows), layoutShape(expectedRows)), expectedRows, rows);
           return { ok: checks.every(c => c.ok), checks, revision: String(cur?.revision ?? '') };
         },
       },
@@ -13372,7 +13442,7 @@
         reports: Object.keys(data.reports?.reports || data.reports || {}).filter(k => k !== 'revision') };
     }
     function proposal({ text, previous, pendingPlanQuestions = [], answers = [], requests = [], base }) {
-      return sizeCheck({ contextVersion: '1', releaseContract: 'release-workspace-1', question: text, app: appOf(base),
+      return sizeCheck({ contextVersion: '1', releaseContract: 'release-workspace-1', clientCapabilities: ['formLayoutPlacement'], question: text, app: appOf(base),
         focus: { resolution: 'none', target: null, candidates: [] }, facts: factsOf(base), coverage: coverageOf(base), truncation: { applied: false, sections: [] },
         conversation: { mode: 'proposal', proposal: clone(previous), pendingPlanQuestions: clone(pendingPlanQuestions), decisions: clone(answers), requirements: [], working: null, userRequests: clone(requests),
           itemIdFloor: { Q: Math.max(0, ...answers.filter(a => /^Q[1-9][0-9]{0,2}$/.test(a.id)).map(a => Number(a.id.slice(1)))) } } }, 256 * 1024);
@@ -13387,7 +13457,7 @@
       });
     }
     function plan({ proposal: accepted, answers = [], goal, requests = [], version, base }) {
-      return sizeCheck({ contextVersion: 'planner-1', releaseContract: 'release-workspace-1', goal, app: appOf(base), facts: factsOf(base), dictionary: dictionaryOf(base),
+      return sizeCheck({ contextVersion: 'planner-1', releaseContract: 'release-workspace-1', clientCapabilities: ['formLayoutPlacement'], goal, app: appOf(base), facts: factsOf(base), dictionary: dictionaryOf(base),
         coverage: coverageOf(base), truncation: { applied: false, sections: [] }, decisions: planDecisions(answers), requirements: [], userRequests: clone(requests),
         acceptedProposal: { revision: version, proposal: clone(accepted) } }, 384 * 1024);
     }
@@ -13477,11 +13547,11 @@
         const current = toCurrent(base), operations = fileOperations(artifacts, plan);
         const identityReasons = fileIdentityReasons(operations, current);
         if (identityReasons.length) return { ok: false, settings: null, files: null, operations, changes: [], confirmations: [], unchanged: [], reasons: identityReasons };
-        const settings = await planExecutor.prepareOperations({ appId, operations: plan.steps || [], proposedFields: plan.proposedFields || [] }, { api, current });
+        const settings = await planExecutor.prepareOperations({ appId, operations: plan.steps || [], proposedFields: plan.proposedFields || [], requireFieldPlacement: true }, { api, current });
         const files = operations.length ? await jsExecutor.prepareFiles({ appId, operations, deferDependencies: true }, { api, current }) : null;
         const unchangedChecks = unchangedReasons(operations, files);
         const changes = [
-          ...pending(settings).map(s => ({ id: s.stepId, kind: 'setting', title: s.title || '設定の変更', technicalSummary: s.prepared?.summary || '', before: clone(s.prepared?.before ?? null), after: clone(s.prepared?.after ?? s.prepared?.expect ?? s.prepared?.payload), actionType: s.actionType })),
+          ...pending(settings).map(s => ({ id: s.stepId, kind: 'setting', title: s.title || '設定の変更', technicalSummary: s.prepared?.summary || '', placementDescription: s.prepared?.placementDescription || '', before: clone(s.prepared?.before ?? null), after: clone(s.prepared?.after ?? s.prepared?.expect ?? s.prepared?.payload), actionType: s.actionType })),
           ...pending(files).map(s => ({ id: s.changeId, kind: 'javascript', title: operations.find(o => o.id === s.changeId)?.summary || s.name, file: s.name, target: s.target, operation: s.kind }))
         ];
         const confirmations = [
@@ -13682,7 +13752,7 @@
           return `<li><strong>${esc(title)}</strong><p class="ktr-note">${esc(detail)}</p></li>`;
         }
         const values = [['変更前', change.before], ['変更後', change.after]].filter(([, value]) => value != null);
-        return `<li><strong>${esc(title)}</strong>${change.description && change.description !== title ? `<p>${esc(change.description)}</p>` : ''}${values.length || change.technicalSummary ? `<details data-release-panel="change-${esc(change.id || index)}"><summary>設定の詳細（技術者向け）</summary>${change.technicalSummary ? `<p>${esc(change.technicalSummary)}</p>` : ''}${values.map(([label, value]) => `<h4>${label}</h4><pre class="ktr-setting-values">${esc(JSON.stringify(value, null, 2))}</pre>`).join('')}</details>` : ''}</li>`;
+        return `<li><strong>${esc(title)}</strong>${change.placementDescription ? `<p class="ktr-note">${esc(change.placementDescription)}</p>` : ''}${change.description && change.description !== title ? `<p>${esc(change.description)}</p>` : ''}${values.length || change.technicalSummary ? `<details data-release-panel="change-${esc(change.id || index)}"><summary>設定の詳細（技術者向け）</summary>${change.technicalSummary ? `<p>${esc(change.technicalSummary)}</p>` : ''}${values.map(([label, value]) => `<h4>${label}</h4><pre class="ktr-setting-values">${esc(JSON.stringify(value, null, 2))}</pre>`).join('')}</details>` : ''}</li>`;
       }).join('')}</ul>`;
     }
     function reviewHtml(state, options) {
@@ -13880,7 +13950,7 @@
     let baseQueue = Promise.resolve();
     let connectionError = '', initialHealth = d.initialHealth || null;
     const esc = KTReleaseView.escape;
-    const supportsRelease = (feature, cap) => !!cap?.available && (feature === KTAiClient.FEATURE_GENERATOR ? cap.verification?.includes('artifactOutcome') : feature === KTAiClient.FEATURE_PLANNER ? cap.requirementOps?.includes('releaseWorkspace') : cap.conversation?.includes('releaseWorkspace'));
+    const supportsRelease = (feature, cap) => !!cap?.available && (feature === KTAiClient.FEATURE_GENERATOR ? cap.verification?.includes('artifactOutcome') : feature === KTAiClient.FEATURE_PLANNER ? ['releaseWorkspace', 'formLayoutPlacement'].every(mark => cap.requirementOps?.includes(mark)) : cap.conversation?.includes('releaseWorkspace'));
     host.style.overflow = 'auto';
     host.style.height = '100%';
     function dialog(title, body, { wide = false } = {}) {
@@ -13895,7 +13965,7 @@
     }
     const connection = () => {
       const status = session.status(), generator = capability.features?.[KTAiClient.FEATURE_GENERATOR];
-      const available = supportsRelease(KTAiClient.FEATURE, capability.features?.[KTAiClient.FEATURE]);
+      const available = supportsRelease(KTAiClient.FEATURE, capability.features?.[KTAiClient.FEATURE]) && supportsRelease(KTAiClient.FEATURE_PLANNER, capability.features?.[KTAiClient.FEATURE_PLANNER]);
       return { connected: status.connected, available, canPlan: supportsRelease(KTAiClient.FEATURE_PLANNER, capability.features?.[KTAiClient.FEATURE_PLANNER]),
         canGenerate: supportsRelease(KTAiClient.FEATURE_GENERATOR, generator),
         message: connectionError || (!status.connected ? 'AIサービスへ接続してください。' : available ? 'AIサービスに接続しています。' : 'AIサービスを利用できません。接続とサービスの更新を確認してください。') };
@@ -13942,6 +14012,7 @@
     const services = {
       async propose(input) {
         await requireFeature(KTAiClient.FEATURE);
+        await requireFeature(KTAiClient.FEATURE_PLANNER);
         const ctx = KTReleaseContext.proposal(input);
         const r = await client.propose({ ctx, signal: input.signal, deadlineMs: capability.limits?.deadlineMs?.[KTAiClient.FEATURE] });
         return { ...r, facts: ctx.facts };

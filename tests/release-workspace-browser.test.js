@@ -237,6 +237,16 @@ test('実ブラウザーの正式な操作で相談・採用・確認・反映�
     await page.locator('dialog [data-close]').click();
     assert.deepEqual(errors,[]);
     assert.deepEqual(unexpected,[]);
+    // An older Gateway must be rejected before any paid proposal or plan request.
+    health.registry.toolkit['change-planner'].requirementOps = health.registry.toolkit['change-planner'].requirementOps.filter(x=>x!=='formLayoutPlacement');
+    const paidBeforeOldGateway=serviceCalls.filter(c=>c.name!=='getHealth').length;
+    await page.evaluate(async()=>{window.work.controller.newTask();await window.work.refreshCapability(true);});
+    assert.equal(await page.locator('#kt-release-input').isDisabled(),true);
+    assert.equal(await action('send').isDisabled(),true);
+    await page.evaluate(()=>window.work.controller.send('金額の右に請求番号を追加してください。'));
+    assert.equal(await page.evaluate(()=>window.work.controller.getState().error.code),'CAPABILITY_OUTDATED');
+    assert.equal(serviceCalls.filter(c=>c.name!=='getHealth').length,paidBeforeOldGateway);
+    assert.equal(await page.locator('[data-release-action="apply"]').count(),0);
     await page.evaluate(()=>window.work.dispose());
   } finally { await browser.close(); }
 });

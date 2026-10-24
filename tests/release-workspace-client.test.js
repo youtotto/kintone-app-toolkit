@@ -178,3 +178,20 @@ test('keepaliveだけで閉じた通信を空の生成成功にしない', async
   const client = clientOf(async () => sse([': start', ': keepalive']));
   await assert.rejects(client.generate({ ctx, onEvent: () => {} }));
 });
+
+test('配置対応の印と現在のフォームを仮案・計画へそのまま渡す', () => {
+  const layout = [{type:'ROW',fields:[{type:'NUMBER',code:'amount',size:{width:'180'}},{type:'LABEL',label:'金額の確認',elementId:'money-note'}]},
+    {type:'GROUP',code:'billing',layout:[{type:'ROW',fields:[{type:'MULTI_LINE_TEXT',code:'memo'}]}]}];
+  const base={appId:'310',data:{fields:{amount:{code:'amount',type:'NUMBER',label:'金額'},memo:{code:'memo',type:'MULTI_LINE_TEXT',label:'備考'}},layout},files:[]};
+  const proposal={behaviors:[{id:'B1',text:'金額の右に請求番号を追加します。'}],assumptions:[],cannot:[],decisions:[],approach:{standard:[],js:[]}};
+  const before=JSON.stringify(base);
+  const contexts=[ReleaseContext.proposal({text:'請求番号を追加',base}),ReleaseContext.plan({proposal,goal:'請求番号を追加',version:1,base})];
+  for(const ctx of contexts){
+    assert.deepEqual(ctx.clientCapabilities,['formLayoutPlacement']);
+    assert.deepEqual(ctx.facts.find(f=>f.kind==='layout').value,layout);
+  }
+  const envelope=Client.buildPlanEnvelope({ctx:contexts[1]});
+  assert.deepEqual(JSON.parse(JSON.stringify(envelope.payload.clientCapabilities)),['formLayoutPlacement']);
+  contexts[0].facts.find(f=>f.kind==='layout').value[0].fields[1].label='後から変更';
+  assert.equal(JSON.stringify(base),before);
+});

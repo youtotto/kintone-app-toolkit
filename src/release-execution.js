@@ -48,11 +48,11 @@ const KTReleaseExecution = (() => {
       const current = toCurrent(base), operations = fileOperations(artifacts, plan);
       const identityReasons = fileIdentityReasons(operations, current);
       if (identityReasons.length) return { ok: false, settings: null, files: null, operations, changes: [], confirmations: [], unchanged: [], reasons: identityReasons };
-      const settings = await planExecutor.prepareOperations({ appId, operations: plan.steps || [], proposedFields: plan.proposedFields || [] }, { api, current });
+      const settings = await planExecutor.prepareOperations({ appId, operations: plan.steps || [], proposedFields: plan.proposedFields || [], requireFieldPlacement: true }, { api, current });
       const files = operations.length ? await jsExecutor.prepareFiles({ appId, operations, deferDependencies: true }, { api, current }) : null;
       const unchangedChecks = unchangedReasons(operations, files);
       const changes = [
-        ...pending(settings).map(s => ({ id: s.stepId, kind: 'setting', title: s.title || '設定の変更', technicalSummary: s.prepared?.summary || '', before: clone(s.prepared?.before ?? null), after: clone(s.prepared?.after ?? s.prepared?.expect ?? s.prepared?.payload), actionType: s.actionType })),
+        ...pending(settings).map(s => ({ id: s.stepId, kind: 'setting', title: s.title || '設定の変更', technicalSummary: s.prepared?.summary || '', placementDescription: s.prepared?.placementDescription || '', before: clone(s.prepared?.before ?? null), after: clone(s.prepared?.after ?? s.prepared?.expect ?? s.prepared?.payload), actionType: s.actionType })),
         ...pending(files).map(s => ({ id: s.changeId, kind: 'javascript', title: operations.find(o => o.id === s.changeId)?.summary || s.name, file: s.name, target: s.target, operation: s.kind }))
       ];
       const confirmations = [

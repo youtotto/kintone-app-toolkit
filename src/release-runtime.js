@@ -9,7 +9,7 @@ function mountReleaseWorkspace(host, d) {
   let baseQueue = Promise.resolve();
   let connectionError = '', initialHealth = d.initialHealth || null;
   const esc = KTReleaseView.escape;
-  const supportsRelease = (feature, cap) => !!cap?.available && (feature === KTAiClient.FEATURE_GENERATOR ? cap.verification?.includes('artifactOutcome') : feature === KTAiClient.FEATURE_PLANNER ? cap.requirementOps?.includes('releaseWorkspace') : cap.conversation?.includes('releaseWorkspace'));
+  const supportsRelease = (feature, cap) => !!cap?.available && (feature === KTAiClient.FEATURE_GENERATOR ? cap.verification?.includes('artifactOutcome') : feature === KTAiClient.FEATURE_PLANNER ? ['releaseWorkspace', 'formLayoutPlacement'].every(mark => cap.requirementOps?.includes(mark)) : cap.conversation?.includes('releaseWorkspace'));
   host.style.overflow = 'auto';
   host.style.height = '100%';
   function dialog(title, body, { wide = false } = {}) {
@@ -24,7 +24,7 @@ function mountReleaseWorkspace(host, d) {
   }
   const connection = () => {
     const status = session.status(), generator = capability.features?.[KTAiClient.FEATURE_GENERATOR];
-    const available = supportsRelease(KTAiClient.FEATURE, capability.features?.[KTAiClient.FEATURE]);
+    const available = supportsRelease(KTAiClient.FEATURE, capability.features?.[KTAiClient.FEATURE]) && supportsRelease(KTAiClient.FEATURE_PLANNER, capability.features?.[KTAiClient.FEATURE_PLANNER]);
     return { connected: status.connected, available, canPlan: supportsRelease(KTAiClient.FEATURE_PLANNER, capability.features?.[KTAiClient.FEATURE_PLANNER]),
       canGenerate: supportsRelease(KTAiClient.FEATURE_GENERATOR, generator),
       message: connectionError || (!status.connected ? 'AIサービスへ接続してください。' : available ? 'AIサービスに接続しています。' : 'AIサービスを利用できません。接続とサービスの更新を確認してください。') };
@@ -71,6 +71,7 @@ function mountReleaseWorkspace(host, d) {
   const services = {
     async propose(input) {
       await requireFeature(KTAiClient.FEATURE);
+      await requireFeature(KTAiClient.FEATURE_PLANNER);
       const ctx = KTReleaseContext.proposal(input);
       const r = await client.propose({ ctx, signal: input.signal, deadlineMs: capability.limits?.deadlineMs?.[KTAiClient.FEATURE] });
       return { ...r, facts: ctx.facts };

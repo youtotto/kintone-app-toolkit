@@ -52,7 +52,7 @@ const KTReleaseContext = (() => {
       reports: Object.keys(data.reports?.reports || data.reports || {}).filter(k => k !== 'revision') };
   }
   function proposal({ text, previous, pendingPlanQuestions = [], answers = [], requests = [], base }) {
-    return sizeCheck({ contextVersion: '1', releaseContract: 'release-workspace-1', question: text, app: appOf(base),
+    return sizeCheck({ contextVersion: '1', releaseContract: 'release-workspace-1', clientCapabilities: ['formLayoutPlacement'], question: text, app: appOf(base),
       focus: { resolution: 'none', target: null, candidates: [] }, facts: factsOf(base), coverage: coverageOf(base), truncation: { applied: false, sections: [] },
       conversation: { mode: 'proposal', proposal: clone(previous), pendingPlanQuestions: clone(pendingPlanQuestions), decisions: clone(answers), requirements: [], working: null, userRequests: clone(requests),
         itemIdFloor: { Q: Math.max(0, ...answers.filter(a => /^Q[1-9][0-9]{0,2}$/.test(a.id)).map(a => Number(a.id.slice(1)))) } } }, 256 * 1024);
@@ -67,7 +67,7 @@ const KTReleaseContext = (() => {
     });
   }
   function plan({ proposal: accepted, answers = [], goal, requests = [], version, base }) {
-    return sizeCheck({ contextVersion: 'planner-1', releaseContract: 'release-workspace-1', goal, app: appOf(base), facts: factsOf(base), dictionary: dictionaryOf(base),
+    return sizeCheck({ contextVersion: 'planner-1', releaseContract: 'release-workspace-1', clientCapabilities: ['formLayoutPlacement'], goal, app: appOf(base), facts: factsOf(base), dictionary: dictionaryOf(base),
       coverage: coverageOf(base), truncation: { applied: false, sections: [] }, decisions: planDecisions(answers), requirements: [], userRequests: clone(requests),
       acceptedProposal: { revision: version, proposal: clone(accepted) } }, 384 * 1024);
   }

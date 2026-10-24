@@ -383,3 +383,17 @@ test('復元を再開する確認では今回戻す設定と戻し済みJavaScri
   assert.equal((shown.match(/data-release-action="rollback"/g) || []).length, 1);
   assert.equal(JSON.stringify(state), before);
 });
+
+test('追加位置は反映前の通常表示に残し、説明の再解釈や承認操作を増やさない', async () => {
+  const f=await mounted(); await finishProposal(f);
+  const state=f.controller.getState();
+  const description='配置：「金額」の右側に並べます。';
+  state.prepared.changes=[{id:'P1',kind:'setting',title:'請求番号を追加します。',placementDescription:description,after:{code:'invoice_no'}}];
+  const before=JSON.stringify(state),shown=normal(KTReleaseView.render(state));
+  assert.ok(shown.includes(description));
+  assert.equal(shown.split(description).length-1,1);
+  assert.equal((shown.match(/data-release-action="apply"/g)||[]).length,1);
+  assert.equal(JSON.stringify(state),before);
+  state.prepared.changes[0].placementDescription='<script>配置</script>';
+  assert.doesNotMatch(normal(KTReleaseView.render(state)),/<script>/);
+});

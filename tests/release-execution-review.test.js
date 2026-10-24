@@ -16,7 +16,7 @@ const setup=(m,overrides={})=>{const loadBase=async()=>({ok:true,current:await m
 const prepare=async(s,steps=[],artifacts=[artifact()])=>s.service.prepare({plan:{steps,proposedFields:[]},artifacts,base:await s.loadBase()});
 (async()=>{
   {
-    const m=mk({autoPlace:false}),s=setup(m),add={id:'P1',actionType:'ADD_FIELD',targetRef:'F1',spec:{},title:'備考を追加'};
+    const m=mk({autoPlace:false}),s=setup(m),add={id:'P1',actionType:'ADD_FIELD',targetRef:'F1',spec:{placement:{position:'FORM_END',anchor:''}},title:'備考を追加'};
     const prepared=await s.service.prepare({plan:{steps:[add],proposedFields:[{temporaryId:'F1',suggestedCode:'extra_memo',label:'備考',type:'MULTI_LINE_TEXT'}]},artifacts:[],base:await s.loadBase()});
     m.ctl.failPut='layout';const result=await s.service.apply({prepared});
     assert(!!m.st.fields.extra_memo&&result.settings.steps[0].partial,'field is written before layout failure');
