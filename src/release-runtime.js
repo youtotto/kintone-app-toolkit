@@ -115,9 +115,45 @@ function mountReleaseWorkspace(host, d) {
     });
   }
   let flow = null;
+  function verificationSettings(el) {
+    const panel = el.querySelector('[data-budget-panel]');
+    if (!panel) return;
+    const status = panel.querySelector('[data-budget-status]'), id = panel.querySelector('[data-budget-id]');
+    const save = panel.querySelector('[data-budget-start]'), note = panel.querySelector('[data-budget-note]');
+    let saving = false;
+    const canConfigure = () => {
+      const state = controller.getState();
+      return state.phase === 'idle' && state.messages.length === 0;
+    };
+    const render = () => {
+      const current = budget.summary();
+      status.textContent = current.enabled ? KTAiBudget.summaryText(current) : '検証用の利用上限は設定されていません。';
+      id.textContent = current.id ? '検証枠: ' + current.id : '';
+      save.disabled = saving || !canConfigure();
+      panel.querySelectorAll('input').forEach(input => { input.disabled = save.disabled; });
+      note.textContent = canConfigure() ? '会話を始める前に設定します。過去の利用記録は残ります。' : '会話の途中で新しい検証枠には切り替えられません。';
+    };
+    save.addEventListener('click', async () => {
+      if (saving || !canConfigure()) return;
+      saving = true; render();
+      const message = panel.querySelector('[data-budget-message]');
+      message.textContent = '';
+      try {
+        await budget.configure({ limitUsd: panel.querySelector('[data-budget-usd]').value, maxCalls: panel.querySelector('[data-budget-calls]').value }, canConfigure);
+        message.textContent = '新しい検証枠を設定しました。上の上限と回数を確認してください。';
+      } catch (error) {
+        message.textContent = error?.details?.budget?.reason === 'in-flight' ? '処理中の要求があるため、検証枠を変更できません。' : '検証枠を設定できませんでした。入力した値と設定の状態を確認してください。';
+      } finally { saving = false; render(); }
+    });
+    const offBudget = budget.subscribe(render), offState = controller.subscribe(render);
+    el.addEventListener('close', () => { offBudget(); offState(); }, { once: true });
+    render();
+  }
   function connectionDialog() {
     const status = session.status();
-    const el = dialog('AIサービスとの接続', '<p data-message>' + esc(connection().message) + '</p><p>接続先: ' + esc(status.apiBase) + '</p><div style="display:flex;gap:10px;flex-wrap:wrap"><button data-connect>接続する</button><button data-refresh>接続を更新</button><button data-disconnect>接続を解除</button></div><p data-link></p>');
+    const verification = typeof budget.configure === 'function' ? '<details data-budget-panel><summary>開発者向け：検証用の利用上限</summary><p data-budget-status></p><p class="ktr-note" data-budget-id></p><label>上限（米ドル） <input data-budget-usd type="number" min="0" step="0.01" value="1.00"></label><label> AIの呼び出し上限（回） <input data-budget-calls type="number" min="0" step="1" value="8"></label><p class="ktr-note" data-budget-note></p><button type="button" data-budget-start>新しい検証枠を設定</button><p data-budget-message role="status"></p></details>' : '';
+    const el = dialog('AIサービスとの接続', '<p data-message>' + esc(connection().message) + '</p><p>接続先: ' + esc(status.apiBase) + '</p><div style="display:flex;gap:10px;flex-wrap:wrap"><button data-connect>接続する</button><button data-refresh>接続を更新</button><button data-disconnect>接続を解除</button></div><p data-link></p>' + verification);
+    verificationSettings(el);
     const message = t => { el.querySelector('[data-message]').textContent = t; };
     el.querySelector('[data-refresh]').addEventListener('click', async () => { await refreshCapability(true); message(connection().message); });
     el.querySelector('[data-disconnect]').addEventListener('click', async () => { flow?.cancel(); await session.disconnect(); capability = { available: false, features: {} }; healthAt = 0; connectionError = ''; message('接続を解除しました。作成した内容はこの画面に残っています。'); view.render(); });

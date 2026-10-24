@@ -11635,7 +11635,7 @@
   // ==========================================
   // 3.5b 検証の費用の確保（KTAiBudget。設計 §0f.4・2026-10-09）
   //   検証用の最小の制御（既定は無効で今と同じ動作。製品の料金体系ではない）。設定は localStorage の ktAi.budget.v1.<host> = { id, limitUsd, maxCalls, createdAt }
-  //   （利用者がコンソールで書く。無ければ無効）。記録は ktAi.budgetLedger.v1.<host>.<id> に要求ごとの状態・確保額・token の数だけ（本文・Context・発言は入れない）。
+  //   （configure で新規枠を設定。無ければ無効）。記録は ktAi.budgetLedger.v1.<host>.<id> に要求ごとの状態・確保額・token の数だけ（本文・Context・発言は入れない）。
   //   送信の直前に「記録済みの費用 ＋ 進行中・終了不明の確保額 ＋ 次の要求の最大費用 ≤ limitUsd」と「同じく AI の呼び出しの回数（内部の呼び出しを含む最大）≤ maxCalls」を
   //   判定し、超えるなら送らない（AiClientError BUDGET_EXCEEDED。会話は送信の停止 halt の budget）。最大費用は送る Context のバイト数・出力の上限（health の limits が
   //   あればその値・無ければ表）・内部の呼び出しの最大・単価の表から保守的に見積もる（キャッシュ命中を前提にしない）。応答で精算し、使用量が分からない呼び出しの確保は解放しない。
@@ -11937,7 +11937,7 @@
       const configKey = configKeyOf(h);
       const armedKey = armedKeyOf(h);
       const LOCK_NAME = `ktAi.budget:${h}`;
-      let seq = 0;
+      let seq = 0, configurationFailure = null;
       const listeners = new Set();
       const notify = () => { for (const fn of [...listeners]) { try { fn(); } catch (e) { } } };
       const withLock = (fn) => (lockApi ? Promise.resolve(lockApi.request(LOCK_NAME, { mode: 'exclusive' }, async () => fn())) : Promise.resolve().then(fn));
@@ -11960,7 +11960,7 @@
        *   broken = 送らない: 設定の形が正しくない・記録を読めない／壊れている・設定と合わない、と、再検証前の指示 §3（2026-10-10）の「予算を使う検証で状態を確かめられない」
        *   （設定の読取の例外 config-unreadable・このページで一度有効だった設定が消えた config-missing）。設定の読取の例外で上限なしの送信に戻さない
        */
-      function readState() {
+      function storedState() {
         if (!st0) return storageThrew || armedOf() ? { mode: 'broken', reason: 'config-unreadable' } : { mode: 'disabled' };
         let raw = null;
         try { raw = st0.getItem(configKey); } catch (e) { return { mode: 'broken', reason: 'config-unreadable' }; }
@@ -11974,9 +11974,37 @@
         const pl = parseLedger(lraw, config);
         return pl.ok ? { mode: 'on', config, ledger: pl.ledger } : { mode: 'broken', reason: pl.reason, config };
       }
+      const readState = () => configurationFailure ? { mode: 'broken', reason: configurationFailure } : storedState();
       const writeLedger = (config, ledger) => {
         try { st0.setItem(ledgerKeyOf(h, config.id), JSON.stringify(ledger)); } catch (e) { throw budgetError('ledger-write'); }
       };
+      /** 新規の検証枠を設定する。旧記録を消さず、進行中の要求がある間は切り替えない。 */
+      const configure = ({ limitUsd, maxCalls } = {}, mayConfigure = () => true) => withLock(() => {
+        if (!mayConfigure()) throw budgetError('conversation-active');
+        const id = `b-${typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : `${now().toString(36)}-${Math.random().toString(36).slice(2)}-${++seq}`}`;
+        const config = parseConfig(JSON.stringify({ id, limitUsd, maxCalls, createdAt: nowIso(now) }));
+        if (!config) throw budgetError('config-invalid');
+        const previous = storedState();
+        if (previous.mode === 'on' && previous.ledger.entries.some(e => e.status === 'in-flight')) throw budgetError('in-flight');
+        try {
+          if (!st0 || previous.mode === 'broken') throw budgetError(previous.reason || 'config-unreadable');
+          const key = ledgerKeyOf(h, config.id);
+          if (config.id === previous.config?.id || st0.getItem(key) != null) throw budgetError('config-write');
+          const ledger = { version: LEDGER_VERSION, id: config.id, configCreatedAt: config.createdAt, entries: [], stopped: null };
+          writeLedger(config, ledger);
+          if (st0.getItem(key) !== JSON.stringify(ledger)) throw budgetError('ledger-write');
+          st0.setItem(configKey, JSON.stringify(config));
+          const saved = storedState();
+          if (saved.mode !== 'on' || JSON.stringify(saved.config) !== JSON.stringify(config)) throw budgetError(saved.reason || 'config-write');
+          configurationFailure = null;
+          notify();
+          return summary();
+        } catch (e) {
+          configurationFailure = e?.details?.budget?.reason || 'config-write';
+          notify();
+          throw budgetError(configurationFailure);
+        }
+      });
       /**
        * 送信の直前の確保（記録に in-flight を書く）。超えるなら BUDGET_EXCEEDED を投げる。無効なら null。
        *   enforcement 'estimate'（印の無い Gateway）: 確保額 = Toolkit の推定の最大費用（推定。provider に送る入力をこの値以下に制限してはいない＝上限の強制は無い）。
@@ -12161,7 +12189,7 @@
       }
       return {
         configKey, ledgerKey: () => { const s = readState(); return s.config ? ledgerKeyOf(h, s.config.id) : null; }, sessionId: sid,
-        enabled: () => readState().mode !== 'disabled', state: () => readState().mode, readState, summary,
+        enabled: () => readState().mode !== 'disabled', state: () => readState().mode, readState, summary, configure,
         reserve, settle, fail, release, wrap,
         subscribe(fn) { if (typeof fn === 'function') listeners.add(fn); return () => listeners.delete(fn); },
       };
@@ -13894,9 +13922,45 @@
       });
     }
     let flow = null;
+    function verificationSettings(el) {
+      const panel = el.querySelector('[data-budget-panel]');
+      if (!panel) return;
+      const status = panel.querySelector('[data-budget-status]'), id = panel.querySelector('[data-budget-id]');
+      const save = panel.querySelector('[data-budget-start]'), note = panel.querySelector('[data-budget-note]');
+      let saving = false;
+      const canConfigure = () => {
+        const state = controller.getState();
+        return state.phase === 'idle' && state.messages.length === 0;
+      };
+      const render = () => {
+        const current = budget.summary();
+        status.textContent = current.enabled ? KTAiBudget.summaryText(current) : '検証用の利用上限は設定されていません。';
+        id.textContent = current.id ? '検証枠: ' + current.id : '';
+        save.disabled = saving || !canConfigure();
+        panel.querySelectorAll('input').forEach(input => { input.disabled = save.disabled; });
+        note.textContent = canConfigure() ? '会話を始める前に設定します。過去の利用記録は残ります。' : '会話の途中で新しい検証枠には切り替えられません。';
+      };
+      save.addEventListener('click', async () => {
+        if (saving || !canConfigure()) return;
+        saving = true; render();
+        const message = panel.querySelector('[data-budget-message]');
+        message.textContent = '';
+        try {
+          await budget.configure({ limitUsd: panel.querySelector('[data-budget-usd]').value, maxCalls: panel.querySelector('[data-budget-calls]').value }, canConfigure);
+          message.textContent = '新しい検証枠を設定しました。上の上限と回数を確認してください。';
+        } catch (error) {
+          message.textContent = error?.details?.budget?.reason === 'in-flight' ? '処理中の要求があるため、検証枠を変更できません。' : '検証枠を設定できませんでした。入力した値と設定の状態を確認してください。';
+        } finally { saving = false; render(); }
+      });
+      const offBudget = budget.subscribe(render), offState = controller.subscribe(render);
+      el.addEventListener('close', () => { offBudget(); offState(); }, { once: true });
+      render();
+    }
     function connectionDialog() {
       const status = session.status();
-      const el = dialog('AIサービスとの接続', '<p data-message>' + esc(connection().message) + '</p><p>接続先: ' + esc(status.apiBase) + '</p><div style="display:flex;gap:10px;flex-wrap:wrap"><button data-connect>接続する</button><button data-refresh>接続を更新</button><button data-disconnect>接続を解除</button></div><p data-link></p>');
+      const verification = typeof budget.configure === 'function' ? '<details data-budget-panel><summary>開発者向け：検証用の利用上限</summary><p data-budget-status></p><p class="ktr-note" data-budget-id></p><label>上限（米ドル） <input data-budget-usd type="number" min="0" step="0.01" value="1.00"></label><label> AIの呼び出し上限（回） <input data-budget-calls type="number" min="0" step="1" value="8"></label><p class="ktr-note" data-budget-note></p><button type="button" data-budget-start>新しい検証枠を設定</button><p data-budget-message role="status"></p></details>' : '';
+      const el = dialog('AIサービスとの接続', '<p data-message>' + esc(connection().message) + '</p><p>接続先: ' + esc(status.apiBase) + '</p><div style="display:flex;gap:10px;flex-wrap:wrap"><button data-connect>接続する</button><button data-refresh>接続を更新</button><button data-disconnect>接続を解除</button></div><p data-link></p>' + verification);
+      verificationSettings(el);
       const message = t => { el.querySelector('[data-message]').textContent = t; };
       el.querySelector('[data-refresh]').addEventListener('click', async () => { await refreshCapability(true); message(connection().message); });
       el.querySelector('[data-disconnect]').addEventListener('click', async () => { flow?.cancel(); await session.disconnect(); capability = { available: false, features: {} }; healthAt = 0; connectionError = ''; message('接続を解除しました。作成した内容はこの画面に残っています。'); view.render(); });
