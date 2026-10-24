@@ -1,5 +1,7 @@
 # 新しい AI 作業画面の更新準備（Toolkit）
 
+追記（2026-10-24）：以下は準備時点の記録。stagingへの配備と接続・画面確認は、その後[実行記録](../../AI/docs/contracts/codex-release-redesign-20261024/ROLLOUT.md)に記載した。画面幅の修正を含む実機の最終版は `2c3a4c8:b3782aaf15d1`。
+
 確認日: 2026-10-24。対象は今回のリリース用の専用 worktree。これは準備の記録で、配備・配布・再インストール・ブラウザー操作・有料 AI・kintone への書き込みは実施していない。
 
 固定した製品ソースは `8934bc0`、配布ファイルの印は `8934bc0:28af2b2a70b8`。[全体の準備記録](../../AI/docs/contracts/codex-release-redesign-20261024/STAGING-PREPARATION.md) と [固定ファイルの作成スクリプト](../../AI/tools/release/prepare-toolkit-staging.mjs) を正とする。今回は本体を変更せず、配布ファイルを専用AI作業場所の `build/staging-codex-20261024/toolkit/` に作成した。
