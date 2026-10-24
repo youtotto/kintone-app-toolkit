@@ -108,34 +108,73 @@ const KTReleaseExecution = (() => {
           error: { code: error?.code, message: error?.message } };
       }
     }
+    // A completed script restoration remains part of this run when a later setting
+    // restoration fails. Its exact readback must still match before skipping it.
+    async function restoredFileReasons(run, restored) {
+      if (!restored) return [];
+      if (restored.status !== 'ROLLED_BACK_VERIFIED' || restored.verification?.restoredToSnapshot !== true ||
+        restored.executionId !== run.result?.files?.executionId || restored.appId !== String(appId) ||
+        restored.env !== run.result?.files?.env || !restored.restoredSnapshot) {
+        return [{ code: 'ROLLBACK_EVIDENCE_MISMATCH', message: '戻し済みのJavaScriptの記録と、対象の反映が一致しません。' }];
+      }
+      const current = jsExecutor.snapshotOf(await api.getPreviewCustomize(String(appId)));
+      return jsExecutor.diffSnapshots(restored.restoredSnapshot, current).length
+        ? [{ code: 'ROLLBACK_STALE', message: 'JavaScriptを戻した後にカスタマイズ設定が変更されたため、残りの復元を止めました。現在の設定を確認してください。' }] : [];
+    }
     async function prepareRollback(run) {
       const r = run.result;
-      if (!r || r.status === 'unknown' || r.written == null || settingUnknown(r.settings) || fileUnknown(r.files)) return { ok: false, files: null, settings: null, changes: [], confirmations: [], reasons: [{ code: 'RESULT_UNKNOWN', message: '反映の結果を確認できないため、自動では元に戻せません。現在の設定を確認してください。' }] };
-      const files = r.files?.put?.ok ? await jsExecutor.prepareRollback(r.files, { api }) : null;
-      const settings = settingWritten(r.settings) ? await planExecutor.prepareRollback(r.settings, run.prepared.settings, { api }) : null;
-      return { ok: !!(files || settings) && good(files) && good(settings), files, settings,
-        changes: run.prepared.changes, reasons: [...(files?.blockers || []), ...(settings?.blockers || [])],
+      if (!r || r.status === 'unknown' || r.written == null || run.rollback?.status === 'unknown' || settingUnknown(r.settings) || fileUnknown(r.files)) return { ok: false, files: null, settings: null, changes: [], confirmations: [], reasons: [{ code: 'RESULT_UNKNOWN', message: '反映または復元の結果を確認できないため、自動では元に戻せません。現在の設定を確認してください。' }] };
+      const restoredFiles = run.rollback?.files?.status === 'ROLLED_BACK_VERIFIED' ? clone(run.rollback.files) : null;
+      const restoredReasons = await restoredFileReasons(run, restoredFiles);
+      if (restoredReasons.length) return { ok: false, files: null, settings: null, restoredFiles, changes: [], confirmations: [], reasons: restoredReasons };
+      const files = r.files?.put?.ok && !restoredFiles ? await jsExecutor.prepareRollback(clone(r.files), { api }) : null;
+      const settings = settingWritten(r.settings) ? await planExecutor.prepareRollback(clone(r.settings), run.prepared.settings, { api }) : null;
+      // Setting notes can describe the projected result of an earlier rollback step,
+      // not the current settings. Keep those changes visible for approval; only the
+      // verified script readback proves a change is already restored here.
+      const restoredChanges = restoredFiles ? (run.prepared.changes || []).filter(change => change.kind === 'javascript') : [];
+      return { ok: !!(files || settings) && good(files) && good(settings), files, settings, restoredFiles, restoredChanges,
+        changes: (run.prepared.changes || []).filter(change => !restoredChanges.includes(change)), reasons: [...(files?.blockers || []), ...(settings?.blockers || [])],
         confirmations: [...(files?.warnings || []), ...(settings?.warnings || [])] };
     }
     async function rollback({ run, prepared, onProgress = () => {} }) {
-      let files = null, settings = null;
-      if (!prepared.ok || run.result?.written == null || run.result?.status === 'unknown' ||
-        (prepared.files && (prepared.files.executionId !== run.result.files?.executionId || prepared.files.appId !== String(appId))) ||
-        (prepared.settings && (prepared.settings.executionId !== run.result.settings?.executionId || prepared.settings.appId !== String(appId)))) return { status: 'failed', message: '元に戻す準備と対象の反映が一致しません。' };
-      if (prepared.files) {
-        files = await jsExecutor.executeRollback(prepared.files, { api, execution: run.result.files, onProgress });
-        if (files.status !== 'ROLLED_BACK_VERIFIED') return { status: 'partial', files, message: 'JavaScriptを戻す処理を完了できませんでした。設定を戻す処理は行っていません。' };
+      let files = clone(prepared.restoredFiles || null), settings = null, writeInFlight = false;
+      try {
+        if (!prepared.ok || run.result?.written == null || run.result?.status === 'unknown' || run.rollback?.status === 'unknown' ||
+          (!!files !== (run.rollback?.files?.status === 'ROLLED_BACK_VERIFIED')) ||
+          (prepared.files && (prepared.files.executionId !== run.result.files?.executionId || prepared.files.appId !== String(appId))) ||
+          (prepared.settings && (prepared.settings.executionId !== run.result.settings?.executionId || prepared.settings.appId !== String(appId))) ||
+          (files && (prepared.files || await hash(files) !== await hash(run.rollback?.files || null)))) return { status: 'failed', message: '元に戻す準備と対象の反映が一致しません。' };
+        const restoredReasons = await restoredFileReasons(run, files);
+        if (restoredReasons.length) return { status: 'partial', files, reasons: restoredReasons, message: 'JavaScriptを戻した後に設定が変わったため、残りを戻していません。' };
+        if (prepared.files) {
+          let readback = null;
+          const rollbackApi = { ...api, async getPreviewCustomize(...args) { const current = await api.getPreviewCustomize(...args); readback = clone(current); return current; } };
+          writeInFlight = true;
+          files = await jsExecutor.executeRollback(prepared.files, { api: rollbackApi, execution: clone(run.result.files), onProgress: result => { files = result; onProgress(result); } });
+          writeInFlight = false;
+          // Preserve the same response that the existing executor verified, not a later
+          // read which could already contain another person's change.
+          if (files.status === 'ROLLED_BACK_VERIFIED' && String(readback?.revision) === String(files.afterRollbackRevision)) files.restoredSnapshot = jsExecutor.snapshotOf(readback);
+          if (files.status !== 'ROLLED_BACK_VERIFIED') return { status: 'partial', files, message: 'JavaScriptを戻す処理を完了できませんでした。設定を戻す処理は行っていません。' };
+        }
+        if (prepared.settings) {
+          // Recheck after restoring scripts; revision changes alone must not reject the
+          // settings rollback, but unrelated setting edits must still be detected.
+          const checked = await planExecutor.prepareRollback(clone(run.result.settings), run.prepared.settings, { api });
+          if (!good(checked)) return { status: 'partial', files, reasons: checked.blockers, message: '設定が変わったため、設定を戻す処理を止めました。' };
+          if (await hash(requiredWarnings(checked)) !== await hash(requiredWarnings(prepared.settings))) return { status: files ? 'partial' : 'failed', files, message: '元に戻す際の確認事項が変わったため、設定を戻す処理を止めました。内容を確認し直してください。' };
+          writeInFlight = true;
+          settings = await planExecutor.executeRollback(checked, { api, execution: clone(run.result.settings), onProgress: (step, result) => { settings = result; onProgress(step); } });
+          writeInFlight = false;
+          if (settings.status !== 'ROLLED_BACK_VERIFIED') return { status: 'partial', files, settings, message: '設定を戻す処理を完了できませんでした。' };
+        }
+        return { status: 'complete', files, settings, message: 'この反映で変更した内容を元に戻しました。' };
+      } catch (error) {
+        return { status: writeInFlight ? 'unknown' : files ? 'partial' : 'failed', files, settings,
+          message: writeInFlight ? '復元の結果を確認できません。再度戻さず、現在の設定を確認してください。' : '残りを戻すための確認を完了できませんでした。戻し済みの記録は残っています。',
+          error: { code: error?.code, message: error?.message } };
       }
-      if (prepared.settings) {
-        // Recheck after restoring scripts; revision changes alone must not reject the
-        // settings rollback, but unrelated setting edits must still be detected.
-        const checked = await planExecutor.prepareRollback(run.result.settings, run.prepared.settings, { api });
-        if (!good(checked)) return { status: 'partial', files, reasons: checked.blockers, message: '設定が変わったため、設定を戻す処理を止めました。' };
-        if (await hash(requiredWarnings(checked)) !== await hash(requiredWarnings(prepared.settings))) return { status: files ? 'partial' : 'failed', files, message: '元に戻す際の確認事項が変わったため、設定を戻す処理を止めました。内容を確認し直してください。' };
-        settings = await planExecutor.executeRollback(checked, { api, execution: run.result.settings, onProgress });
-        if (settings.status !== 'ROLLED_BACK_VERIFIED') return { status: 'partial', files, settings, message: '設定を戻す処理を完了できませんでした。' };
-      }
-      return { status: 'complete', files, settings, message: 'この反映で変更した内容を元に戻しました。' };
     }
     return { prepare, apply, prepareRollback, rollback };
   }

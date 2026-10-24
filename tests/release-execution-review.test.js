@@ -126,5 +126,113 @@ const prepare=async(s,steps=[],artifacts=[artifact()])=>s.service.prepare({plan:
     assert(!error&&p.ok&&p.changes.length===2&&p.unchanged.length===1,'unchanged and actual setting/file changes remain distinct');
     if(!error&&p.ok){const result=await s.service.apply({prepared:p});assert(result.status==='complete'&&m.calls.filter(c=>c==='POST file').length===1&&m.st.customize.desktop.js[0].fileKey==='base','mixed apply registers only the actual file change');}
   }
+  // A script restoration can complete before a setting restoration fails. Resume
+  // only the remaining settings, preserving and rechecking the first readback.
+  async function partialRestore(replace=false) {
+    const m=mk(),s=setup(m),prepared=await prepare(s,[setting],[artifact(replace)]);
+    const result=await s.service.apply({prepared}),run={id:'run-recovery',prepared,result};
+    const rb=await s.service.prepareRollback(clone(run));
+    m.ctl.failPut='fields';run.rollback=await s.service.rollback({run:clone(run),prepared:clone(rb)});m.ctl.failPut=null;
+    return {m,s,run};
+  }
+  for(const replace of [false,true]) {
+    const {m,s,run}=await partialRestore(replace);
+    assert(run.rollback.status==='partial'&&run.rollback.files.status==='ROLLED_BACK_VERIFIED'&&run.rollback.settings.status==='ROLLBACK_FAILED','script restoration is retained when settings fail '+replace);
+    assert(run.rollback.files.restoredSnapshot&&m.st.fields.amount.required,'completed script restoration keeps the exact readback '+replace);
+    const scriptWrites=m.calls.filter(c=>c==='PUT customize'||c==='POST file').length;
+    const retry=await s.service.prepareRollback(clone(run));
+    assert(retry.ok&&!retry.files&&retry.settings&&retry.restoredFiles.executionId===run.result.files.executionId,'retry prepares only remaining settings for the same run '+replace);
+    assert(retry.changes.length===1&&retry.changes[0].kind==='setting'&&retry.restoredChanges?.length===1&&retry.restoredChanges[0].kind==='javascript','retry confirmation separates remaining settings from restored scripts '+replace);
+    run.rollback=await s.service.rollback({run:clone(run),prepared:clone(retry)});
+    assert(run.rollback.status==='complete'&&!m.st.fields.amount.required&&run.rollback.files.status==='ROLLED_BACK_VERIFIED','remaining restoration completes and keeps prior script evidence '+replace);
+    assert(m.calls.filter(c=>c==='PUT customize'||c==='POST file').length===scriptWrites,'retry never repeats script upload or registration '+replace);
+    assert(!run.result.files.rollback&&!run.result.settings.rollback,'original apply records remain immutable '+replace);
+  }
+  for(const when of ['before-prepare','after-prepare']) {
+    const {m,s,run}=await partialRestore();
+    let retry;if(when==='after-prepare')retry=await s.service.prepareRollback(clone(run));
+    m.st.customize.mobile.js.push({type:'URL',url:'https://example.invalid/other-change.js'});m.st.revision++;
+    const before=m.calls.filter(c=>c.startsWith('PUT')||c.startsWith('POST')).length;
+    const checked=when==='before-prepare'?await s.service.prepareRollback(clone(run)):await s.service.rollback({run:clone(run),prepared:clone(retry)});
+    assert(when==='before-prepare'?!checked.ok:checked.status==='partial','concurrent customization edit blocks remaining restoration '+when);
+    assert(m.st.fields.amount.required&&m.st.customize.mobile.js.length===1&&m.calls.filter(c=>c.startsWith('PUT')||c.startsWith('POST')).length===before,'another change is never overwritten by recovery '+when);
+  }
+  {
+    const {m,s,run}=await partialRestore();run.rollback.files.executionId='another-execution';
+    const before=m.calls.length,retry=await s.service.prepareRollback(clone(run));
+    assert(!retry.ok&&retry.reasons.some(r=>r.code==='ROLLBACK_EVIDENCE_MISMATCH')&&m.calls.length===before,'restoration evidence from another execution is rejected before reads');
+  }
+  {
+    const {m,s,run}=await partialRestore();const retry=await s.service.prepareRollback(clone(run));if(retry.restoredFiles)retry.restoredFiles.restoredSnapshot.scope='NONE';
+    const before=m.calls.length,result=await s.service.rollback({run:clone(run),prepared:clone(retry)});
+    assert(result.status==='failed'&&m.calls.length===before&&m.st.fields.amount.required,'changed prepared restoration evidence cannot authorize remaining writes');
+  }
+  {
+    const {m,s,run}=await partialRestore();let retry=await s.service.prepareRollback(clone(run));const get=m.api.getPreviewCustomize;
+    m.api.getPreviewCustomize=async()=>{throw new Error('temporary read failure');};
+    run.rollback=await s.service.rollback({run:clone(run),prepared:clone(retry)});m.api.getPreviewCustomize=get;
+    assert(run.rollback.status==='partial'&&run.rollback.files?.status==='ROLLED_BACK_VERIFIED'&&run.rollback.files?.restoredSnapshot,'temporary recheck failure preserves completed restoration evidence');
+    retry=await s.service.prepareRollback(clone(run));
+    const result=await s.service.rollback({run:clone(run),prepared:clone(retry)});
+    assert(retry.ok&&result.status==='complete'&&!m.st.fields.amount.required,'explicit retry succeeds after a read-only recheck failure');
+  }
+  {
+    const {m,s,run}=await partialRestore();run.rollback.status='unknown';const before=m.calls.length;
+    const retry=await s.service.prepareRollback(clone(run));
+    assert(!retry.ok&&retry.reasons.some(r=>r.code==='RESULT_UNKNOWN')&&m.calls.length===before,'unknown restoration is not automatically replayed');
+  }
+  {
+    const {m,s,run}=await partialRestore();const retry=await s.service.prepareRollback(clone(run));delete retry.restoredFiles;
+    const before=m.calls.length,result=await s.service.rollback({run:clone(run),prepared:clone(retry)});
+    assert(result.status==='failed'&&m.calls.length===before&&m.st.fields.amount.required,'omitting restored script evidence cannot skip its current-state check');
+  }
+  {
+    const m=mk(),s=setup(m),p=await prepare(s,[setting,{...setting,id:'P2',targetRef:'case_name',spec:{required:false},title:'案件名の必須を解除する'}],[]);
+    const result=await s.service.apply({prepared:p}),run={id:'settings-recovery',prepared:p,result};const rb=await s.service.prepareRollback(clone(run));
+    const put=m.api.updatePreviewFields;let fail=true;const restored=[];
+    m.api.updatePreviewFields=async(app,properties,revision)=>{if(Object.keys(properties).includes('amount')&&fail)throw Object.assign(new Error('temporary setting failure'),{code:'GAIA_XX'});const result=await put(app,properties,revision);restored.push(...Object.keys(properties));return result;};
+    run.rollback=await s.service.rollback({run:clone(run),prepared:clone(rb)});fail=false;
+    assert(run.rollback.status==='partial'&&m.st.fields.amount.required&&m.st.fields.case_name.required,'ordinary setting rollback preserves a completed earlier step');
+    const retry=await s.service.prepareRollback(clone(run));
+    assert(retry.ok&&retry.changes.map(x=>x.id).join()==='P1,P2'&&retry.restoredChanges?.length===0,'retry confirmation keeps setting changes visible without inferring current restoration from preparation notes');
+    run.rollback=await s.service.rollback({run:clone(run),prepared:clone(retry)});
+    assert(run.rollback.status==='complete'&&restored.join()==='case_name,amount'&&!m.st.fields.amount.required,'ordinary setting recovery skips the verified restored step and writes only the remainder');
+  }
+  {
+    const m=mk(),s=setup(m),steps=['reviewA','reviewB'].map((name,i)=>({id:'P'+(i+1),actionType:'ADD_VIEW',targetKind:'VIEW',targetRef:name,spec:{name,fields:['amount'],filterCond:'',sort:''},title:'一覧'+name+'を追加',dependsOn:[]}));
+    const p=await prepare(s,steps,[artifact()]),result=await s.service.apply({prepared:p}),run={id:'view-recovery',prepared:p,result};
+    const first=await s.service.prepareRollback(clone(run));m.ctl.failPut='views';
+    run.rollback=await s.service.rollback({run:clone(run),prepared:clone(first)});m.ctl.failPut=null;
+    assert(run.rollback.status==='partial'&&run.rollback.files.status==='ROLLED_BACK_VERIFIED'&&m.st.views.reviewA&&m.st.views.reviewB,'failed first view restoration leaves both applied views after restoring scripts');
+    const retry=await s.service.prepareRollback(clone(run));
+    assert(retry.ok&&retry.settings.steps.some(x=>x.stepId==='P1'&&x.note==='ALREADY_RESTORED'),'view preparation can mark a projected restoration before either current view is restored');
+    assert(retry.changes.filter(x=>x.kind==='setting').map(x=>x.id).join()==='P1,P2'&&retry.restoredChanges.length===1&&retry.restoredChanges[0].kind==='javascript','retry confirmation retains every setting the whole-collection restoration will change');
+    const scriptWrites=m.calls.filter(c=>c==='PUT customize'||c==='POST file').length;
+    run.rollback=await s.service.rollback({run:clone(run),prepared:clone(retry)});
+    assert(run.rollback.status==='complete'&&!m.st.views.reviewA&&!m.st.views.reviewB,'confirmed view restoration removes both views still present at confirmation');
+    assert(m.calls.filter(c=>c==='PUT customize'||c==='POST file').length===scriptWrites,'view recovery does not repeat the completed script restoration');
+  }
+  {
+    const {KTReleaseWorkspace}=require('../src/release-workspace.js');
+    const m=mk(),s=setup(m),a=artifact(),customization={customizationId:'C1',requirement:'モバイルの編集制御'};
+    Object.assign(a.result,{verification:{bodyHash:'verified'}});
+    Object.assign(a.result.artifactOutcome,{version:'artifact-outcome-1',scope:{customizationId:'C1'},verifiedBodyHash:'verified'});
+    a.result.artifactOutcome.operations[0].bodyHash='verified';
+    const controller=KTReleaseWorkspace.create({
+      loadBase:async()=>({...await s.loadBase(),stamp:String(m.st.revision)}),execution:s.service,
+      services:{
+        propose:async()=>({reply:'一覧とJavaScriptを作ります',proposal:{behaviors:[],decisions:[]}}),
+        plan:async()=>({plan:{steps:[setting],customizations:[customization],questions:[],proposedFields:[]}}),
+        generate:async()=>clone(a.result)
+      }
+    });
+    await controller.send('変更してください');await controller.adopt();await controller.apply();
+    const id=controller.getState().runs[0].id;await controller.requestRollback(id);m.ctl.failPut='fields';await controller.rollback(id);m.ctl.failPut=null;
+    assert(controller.getState().runs[0].rollback.status==='partial','workspace retains partial rollback on its original run');
+    await controller.requestRollback(id);
+    assert(controller.getState().phase==='rollback-confirm'&&controller.getState().rollback.prepared.ok,'workspace offers explicit confirmation for remaining restoration');
+    await controller.rollback(id);
+    assert(controller.getState().runs[0].rollback.status==='complete'&&!m.st.fields.amount.required&&m.st.customize.mobile.js.length===0,'workspace resumes only the remaining restoration through its public actions');
+  }
   console.log(`\n${state.failed?'FAILED':'ALL PASSED'}: ${state.passed} passed / ${state.failed} failed`);process.exitCode=state.failed?1:0;
 })().catch(e=>{console.error(e);process.exitCode=1;});

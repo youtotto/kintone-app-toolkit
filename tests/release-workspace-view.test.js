@@ -367,3 +367,19 @@ test('再描画ごとにイベントを重ねず、破棄すると購読と操�
   assert.equal(f.host.listenerCount('click'), 0);
   assert.equal(f.host.listenerCount('input'), 0);
 });
+
+
+test('復元を再開する確認では今回戻す設定と戻し済みJavaScriptを区別する', () => {
+  const setting = { id: 'P1', kind: 'setting', title: '金額の必須設定' };
+  const file = { id: 'C1', kind: 'javascript', title: '登録済みの編集制御' };
+  const state = { phase: 'rollback-confirm', messages: [], artifacts: [], runs: [{ id: 'run-1', prepared: { changes: [setting, file] } }],
+    rollback: { runId: 'run-1', prepared: { ok: true, changes: [setting], restoredChanges: [file], reasons: [], confirmations: [] } } };
+  const before = JSON.stringify(state), shown = normal(KTReleaseView.render(state));
+  const [remaining, restored] = shown.split('<h3>すでに戻した変更</h3>');
+  assert.match(remaining, /金額の必須設定/);
+  assert.doesNotMatch(remaining, /登録済みの編集制御/);
+  assert.match(restored, /登録済みの編集制御/);
+  assert.match(restored, /これらは今回の復元に含めません/);
+  assert.equal((shown.match(/data-release-action="rollback"/g) || []).length, 1);
+  assert.equal(JSON.stringify(state), before);
+});
