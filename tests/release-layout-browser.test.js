@@ -54,7 +54,7 @@ async function measure(page) {
       const el = document.querySelector(selector), r = el.getBoundingClientRect();
       return { x: r.x, y: r.y, right: r.right, bottom: r.bottom, width: r.width, height: r.height, clientWidth: el.clientWidth, scrollWidth: el.scrollWidth };
     };
-    return { host: box('#kt-ai-host'), workspace: box('.ktr-workspace'), conversation: box('.ktr-conversation'), current: box('.ktr-current'), input: box('#kt-release-input'),
+    return { host: box('#kt-ai-host'), workspace: box('.ktr-workspace'), conversation: box('.ktr-conversation'), log: box('.ktr-chat-log'), composer: box('.ktr-composer'), current: box('.ktr-current'), input: box('#kt-release-input'),
       documentWidth: document.documentElement.scrollWidth, viewport: innerWidth };
   });
 }
@@ -69,6 +69,10 @@ async function checkLayout(page, split, label) {
     assert.ok(m.current.x >= m.conversation.right + 5, `${label}: current work stays to the right of the conversation: ${JSON.stringify(m)}`);
     assert.ok(Math.abs(m.current.y - m.conversation.y) < 4, `${label}: both fixed panels start together`);
     assert.ok(m.conversation.width > 300 && m.current.width > 300, `${label}: both panels remain readable`);
+    assert.ok(m.log.height >= m.conversation.height * .6, `${label}: conversation keeps at least 60% for messages: ${JSON.stringify(m)}`);
+    assert.ok(m.input.bottom <= m.conversation.bottom && m.composer.bottom <= m.workspace.bottom, `${label}: composer stays visible`);
+    const outer = await page.locator('.ktr-conversation').evaluate(el => ({ client: el.clientHeight, scroll: el.scrollHeight }));
+    assert.ok(outer.scroll <= outer.client + 1, `${label}: no nested outer conversation scroll`);
   } else {
     assert.ok(m.current.y >= m.conversation.bottom - 2, `${label}: both panels remain stacked: ${JSON.stringify(m)}`);
   }
@@ -152,7 +156,6 @@ test('実ホストの幅・高さ・110%表示とダイアログを固定応答�
         const initialInput = (await measure(page)).input;
         assert.equal(await page.locator('#kt-release-input').count(), 1);
         assert.equal(await page.locator('[data-release-action="send"]').count(), 1);
-        await page.locator('[data-release-panel="connection"] > summary').click();
         await action('connect').click(); await checkDialog(page, { label: scene.name + '/connection' });
         if (scene.zoom === 1.1) await page.screenshot({ path: path.join(out, scene.name + '-connection.png') });
         await page.locator('dialog [data-close]').click();
@@ -164,7 +167,6 @@ test('実ホストの幅・高さ・110%表示とダイアログを固定応答�
         if (scene.zoom === 1.1) await page.screenshot({ path: path.join(out, scene.name + '-materials.png') });
         assert.ok((await page.locator('dialog [data-output]').inputValue()).length > 50);
         await page.locator('dialog [data-close]').click();
-        await page.locator('[data-release-panel="connection"] > summary').click();
         assert.equal(calls.filter(n => n !== 'getHealth').length, 0);
         await page.locator('#kt-release-input').fill(F.REQUEST); await action('send').click();
         await page.locator('dialog [data-consent]').waitFor(); await checkDialog(page, { label: scene.name + '/consent' });

@@ -71,8 +71,6 @@ test('検証用上限は接続の詳細だけで設定し、会話中は切り�
     const phase = value => page.waitForFunction(v => work.controller.getState().phase === v, value);
     const summary = () => page.evaluate(() => testBudget.summary());
     const open = async () => {
-      const connection = page.locator('details[data-release-panel="connection"]');
-      if (!await connection.evaluate(e => e.open)) await connection.locator(':scope > summary').click();
       await action('connect').click();
     };
     const expand = () => page.locator('dialog [data-budget-panel] > summary').click();
