@@ -12448,7 +12448,7 @@
       if (/改修|変更(内容|点|履歴)|実装内容|まとめ/.test(t)) return 'changes';
       return 'spec';
     }
-    /** 変更計画の版（会話の version）→ 関係者に共有できる Markdown（Toolkit の記録だけ。AI の文章は含めない） */
+    /** 変更計画の版（会話の version）→ 関係者に共有できる Markdown（採用記録と計画をそのまま使い、AI は呼ばない） */
     function changeSummaryMarkdown(v, { execState = null, jsExecState = null } = {}) {
       if (!v || !v.plan) return '';
       const p = v.plan;
@@ -12459,7 +12459,16 @@
       const reviewOf = (sid) => (v.review?.steps || []).find(r => r.stepId === sid) || null;
       out.push(`# 変更内容のまとめ — 計画 v${v.version ?? 1}`);
       out.push('');
-      out.push(`**実現したいこと**: ${esc1(v.goal || p.goal)}`);
+      if (v.acceptedProposal) {
+        // The accepted structure is the record; never reconstruct it from request wording.
+        const accepted = v.acceptedProposal.proposal, textOf = x => typeof x === 'string' ? x : x?.text || '';
+        out.push('## 採用した内容', '');
+        for (const item of accepted.behaviors || []) out.push('- ' + esc1(textOf(item)));
+        for (const [key, label] of [['assumptions', '採用した前提'], ['cannot', '採用した制約']]) {
+          if (accepted[key]?.length) { out.push('', '### ' + label, ''); for (const item of accepted[key]) out.push('- ' + esc1(textOf(item))); }
+        }
+        out.push('');
+      } else out.push(`**実現したいこと**: ${esc1(v.goal || p.goal)}`);
       out.push(`**状態**: ${STATUS_JA[v.status] || v.status || '—'}　**実現方法**: ${SOL[p.solution] || p.solution || '—'}　**作成**: ${String(v.createdAt || '').replace('T', ' ').slice(0, 16)}`);
       if (p.assessment?.summary) out.push(`**現状の評価**: ${esc1(p.assessment.summary)}`);
       out.push('');
@@ -12498,6 +12507,14 @@
       if (qs.length) { out.push('## 確認事項'); for (const q of qs) out.push(`- ${esc1(q)}`); out.push(''); }
       out.push('## 運用環境');
       out.push('- 運用環境には反映していません（Toolkit が書くのは動作テスト環境だけ）。');
+      if (v.acceptedProposal) {
+        out.push('', '## 依頼と修正の履歴（採用内容ではありません）', '', '変更後の合意内容は上の「採用した内容」を参照してください。');
+        for (const request of v.requestHistory || []) out.push('- ' + esc1(request));
+        if (v.answerHistory?.length) {
+          out.push('', '### 確認事項への回答履歴', '', '回答した時点の記録です。その後の修正を含む現在の合意は「採用した内容」とその前提・制約を参照してください。');
+          for (const answer of v.answerHistory) out.push('- ' + esc1(answer.question || answer.label || answer.id) + ': ' + esc1(answer.answer));
+        }
+      }
       return out.join('\n');
     }
     /**
@@ -12520,12 +12537,15 @@
         : '> この資料は運用環境の設定（画面を開いた時点）から作っています。動作テスト環境へ反映した変更・提案中の変更は含みません（それらは「変更計画（Toolkit の記録）」の状態を見てください）。';
       const contextMd = `${KTContext.toMarkdown(ctx)}${(version && version.plan) || (envInfo && envInfo.env === 'preview') ? `\n\n${envNote}` : ''}`;
       const changeMd = version && version.plan ? changeSummaryMarkdown(version, { execState, jsExecState }) : '';
-      const instruction = [k.role, ...k.rules, '出力は日本語 Markdown（H1〜H3・箇条書き中心・表は最小限）。10〜15 分でレビューできる密度にし、曖昧な点は「未確定事項」に列挙する。', ...(changeMd ? ['変更計画（Toolkit の記録）の状態（提案中 / 動作テスト環境へ反映済み / 元に戻し済み）をそのまま書き、運用環境へ反映したとは書かない（Toolkit は運用環境へ反映しない）。確認事項は未確定事項として残す。'] : []), '', '## 出力の構成', ...k.outline.map((o, i) => `${i + 1}. ${o}`)].join('\n');
+      const instruction = [k.role, ...k.rules, ...(version?.acceptedProposal ? ['現在の合意内容は「採用した内容」とその前提・制約です。「依頼と修正の履歴」と「確認事項への回答履歴」は経緯であり、修正前の条件を現在の要件として使わないでください。'] : []), '出力は日本語 Markdown（H1〜H3・箇条書き中心・表は最小限）。10〜15 分でレビューできる密度にし、曖昧な点は「未確定事項」に列挙する。', ...(changeMd ? ['変更計画（Toolkit の記録）の状態（提案中 / 動作テスト環境へ反映済み / 元に戻し済み）をそのまま書き、運用環境へ反映したとは書かない（Toolkit は運用環境へ反映しない）。確認事項は未確定事項として残す。'] : []), '', '## 出力の構成', ...k.outline.map((o, i) => `${i + 1}. ${o}`)].join('\n');
       const prompt = `${instruction}\n${changeMd ? `\n## 変更計画（Toolkit の記録）\n${changeMd}\n` : ''}\n## Context\n${contextMd}\n`;
       // Phase 20（実機）: 計画がある会話では、どの種類のドキュメントでも Markdown / JSON に変更の記録を入れる（「この変更を引継ぎ資料に」で Prompt にしか入らなかった）
       const skeleton = `# ${k.label}（ドラフトの骨格）\n\n${k.outline.map(o => `## ${o}\n\n（TODO: 下の Context を基に記入）\n`).join('\n')}\n---\n\n${changeMd ? `## 変更計画（Toolkit の記録）\n\n${changeMd.replace(/^# /m, '### ')}\n\n---\n\n` : ''}${contextMd}`;
       const markdown = k.id === 'changes' ? `${changeMd}\n\n---\n\n${contextMd}` : skeleton;
-      const json = version && version.plan ? JSON.stringify({ document: k.id, plan: KTContext.compactPlan(version.plan), planStatus: version.status || null, planVersion: version.version ?? null, spec: version.spec || null, review: version.review ? KTContext.compactReview(version.review) : null, execution: execState?.execution ? { status: execState.execution.status || null, steps: (execState.execution.steps || []).map(x => ({ stepId: x.stepId, status: x.status })), rollback: (execState.rollback || execState.execution.rollback) ? { status: (execState.rollback || execState.execution.rollback).status || null } : null, environment: 'preview' } : null, jsExecution: jsExecState?.execution ? { status: jsExecState.execution.status || null, rollback: (jsExecState.rollback || jsExecState.execution.rollback) ? { status: (jsExecState.rollback || jsExecState.execution.rollback).status || null } : null, environment: 'preview' } : null, production: { deployed: false, note: 'Toolkit は運用環境へ反映しない' }, contextEnvironment: 'production', context: ctx }, null, 2) : KTContext.toJSON(ctx, { pretty: true });
+      const savedPlan = version?.plan ? KTContext.compactPlan(version.plan) : null;
+      // goal is the initial request in the release contract, not the accepted scope.
+      if (savedPlan && version.acceptedProposal) delete savedPlan.goal;
+      const json = version && version.plan ? JSON.stringify({ document: k.id, ...(version.acceptedProposal ? { acceptedProposal: version.acceptedProposal, answerHistory: version.answerHistory || [], requestHistory: version.requestHistory || [] } : {}), plan: savedPlan, planStatus: version.status || null, planVersion: version.version ?? null, spec: version.spec || null, review: version.review ? KTContext.compactReview(version.review) : null, execution: execState?.execution ? { status: execState.execution.status || null, steps: (execState.execution.steps || []).map(x => ({ stepId: x.stepId, status: x.status })), rollback: (execState.rollback || execState.execution.rollback) ? { status: (execState.rollback || execState.execution.rollback).status || null } : null, environment: 'preview' } : null, jsExecution: jsExecState?.execution ? { status: jsExecState.execution.status || null, rollback: (jsExecState.rollback || jsExecState.execution.rollback) ? { status: (jsExecState.rollback || jsExecState.execution.rollback).status || null } : null, environment: 'preview' } : null, production: { deployed: false, note: 'Toolkit は運用環境へ反映しない' }, contextEnvironment: 'production', context: ctx }, null, 2) : KTContext.toJSON(ctx, { pretty: true });
       const warnings = [];
       if (!ctx.coverage.javascript) warnings.push('JavaScript は未解析です（Field Scanner の Scan 実行で反映されます）。');
       if (!ctx.coverage.incoming) warnings.push('他アプリからの参照は未走査です（Relations タブで走査できます）。');
@@ -14040,7 +14060,9 @@
             result = kind === 'planner' ? KTContextUi.generatePlan({ goal: question, inputs }) : KTContextUi.generate({ targetType: focus?.type || 'app', targetId: focus?.id, targetLabel: focus?.label, question, inputs });
           } else {
             const last = state.runs.findLast(run => run.taskId === state.taskId && run.approval?.version === state.version);
-            const version = state.plan ? { plan: state.plan, goal: state.goal, version: state.version, status: last?.rollback?.status === 'complete' ? 'ROLLED_BACK' : last?.status === 'complete' ? 'EXECUTED' : 'ACTIVE' } : null;
+            const version = state.plan ? { plan: state.plan, goal: state.goal, version: state.version,
+              acceptedProposal: state.adopted ? { revision: state.version, proposal: state.adopted } : null,
+              answerHistory: state.answers, requestHistory: state.messages.filter(m => m.role === 'user').map(m => m.text), status: last?.rollback?.status === 'complete' ? 'ROLLED_BACK' : last?.status === 'complete' ? 'EXECUTED' : 'ACTIVE' } : null;
             result = KTContextUi.generateDocument({ kind, inputs, version, execState: { execution: last?.result?.settings, rollback: last?.rollback?.settings }, jsExecState: { execution: last?.result?.files, rollback: last?.rollback?.files } });
           }
           if (!result.ok) {

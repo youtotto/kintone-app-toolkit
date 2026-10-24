@@ -189,7 +189,9 @@ function mountReleaseWorkspace(host, d) {
           result = kind === 'planner' ? KTContextUi.generatePlan({ goal: question, inputs }) : KTContextUi.generate({ targetType: focus?.type || 'app', targetId: focus?.id, targetLabel: focus?.label, question, inputs });
         } else {
           const last = state.runs.findLast(run => run.taskId === state.taskId && run.approval?.version === state.version);
-          const version = state.plan ? { plan: state.plan, goal: state.goal, version: state.version, status: last?.rollback?.status === 'complete' ? 'ROLLED_BACK' : last?.status === 'complete' ? 'EXECUTED' : 'ACTIVE' } : null;
+          const version = state.plan ? { plan: state.plan, goal: state.goal, version: state.version,
+            acceptedProposal: state.adopted ? { revision: state.version, proposal: state.adopted } : null,
+            answerHistory: state.answers, requestHistory: state.messages.filter(m => m.role === 'user').map(m => m.text), status: last?.rollback?.status === 'complete' ? 'ROLLED_BACK' : last?.status === 'complete' ? 'EXECUTED' : 'ACTIVE' } : null;
           result = KTContextUi.generateDocument({ kind, inputs, version, execState: { execution: last?.result?.settings, rollback: last?.rollback?.settings }, jsExecState: { execution: last?.result?.files, rollback: last?.rollback?.files } });
         }
         if (!result.ok) {
