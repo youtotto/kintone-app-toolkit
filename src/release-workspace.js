@@ -31,7 +31,7 @@ const KTReleaseWorkspace = (() => {
   function create({ services, loadBase, execution, now = () => Date.now(), onChange = null } = {}) {
     if (!services || !loadBase || !execution) throw new Error('作業に必要な部品がありません。');
     const state = { phase: 'idle', taskId: 1, version: 0, goal: '', proposal: null, answers: [], adopted: null, plan: null, artifacts: [], prepared: null, runs: [], resultRunId: null, messages: [], error: null, progress: '', rollback: null };
-    let base = null, controller = null, epoch = 0, sequence = 0;
+    let base = null, controller = null, epoch = 0, sequence = 0, pendingPlanQuestions = [];
     const listeners = new Set(onChange ? [onChange] : []);
     const emit = () => { const snapshot = clone(state); for (const fn of listeners) { try { fn(snapshot); } catch (e) { console.error(e); } } };
     const set = values => { Object.assign(state, values); emit(); };
@@ -116,7 +116,7 @@ const KTReleaseWorkspace = (() => {
       return activity('consulting', async (signal, live) => {
         const fresh = await getBase('consult');
         if (!live()) return;
-        const response = await services.propose({ text: value, previous: clone(state.proposal), pendingPlanQuestions: clone(state.plan?.questions || []), answers: clone(state.answers), requests: state.messages.filter(m => m.role === 'user').map(m => m.text), base: fresh, signal });
+        const response = await services.propose({ text: value, previous: clone(state.proposal), pendingPlanQuestions: clone(state.plan?.questions || pendingPlanQuestions), answers: clone(state.answers), requests: state.messages.filter(m => m.role === 'user').map(m => m.text), base: fresh, signal });
         if (!live()) return;
         if (!response || typeof response.reply !== 'string') throw new Error('AIサービスの返答を受け取れませんでした。');
         message('assistant', response.reply, response.facts);
@@ -125,14 +125,14 @@ const KTReleaseWorkspace = (() => {
           if (question && answer.text) state.answers = state.answers.filter(a => a.id !== answer.id).concat({ id: answer.id, key: question.key, label: question.label, question: question.question || question.text || question.label, answer: answer.text, kind: answer.kind });
         }
         if (response.proposal && !response.proposalUnchanged) { state.proposal = clone(response.proposal); state.version++; }
-        base = fresh;
+        base = fresh; pendingPlanQuestions = [];
         // Model intent never authorizes plan generation or a kintone write.
         set({ phase: state.proposal ? 'proposal' : 'idle', plan: null, adopted: null, artifacts: [] });
       }, state.proposal ? 'proposal' : 'idle');
     }
     async function adopt() {
       if (!state.proposal || questions(state.proposal, state.answers).length || !available()) return false;
-      invalidate(); state.adopted = clone(state.proposal); state.artifacts = [];
+      invalidate(); pendingPlanQuestions = []; state.adopted = clone(state.proposal); state.artifacts = [];
       return activity('building', async (signal, live) => {
         const fresh = await getBase('plan');
         if (!live()) return;
@@ -199,8 +199,19 @@ const KTReleaseWorkspace = (() => {
       send, adopt, resume, apply, requestRollback, rollback,
       async prepare() { if (!state.plan || !available()) return false; return activity('preparing', async (_, live) => prepareInner(live)); },
       cancelRollback() { if (state.phase !== 'rollback-confirm') return false; set({ phase: 'result', rollback: null }); return true; },
-      newTask() { if (!available()) return false; ++epoch; base = null; Object.assign(state, { phase: 'idle', taskId: state.taskId + 1, version: 0, goal: '', proposal: null, answers: [], adopted: null, plan: null, artifacts: [], prepared: null, messages: [], error: null, progress: '', rollback: null }); emit(); return true; },
-      cancel() { if (!['consulting','building','preparing'].includes(state.phase)) return false; ++epoch; controller?.abort(); controller = null; invalidate(); set({ phase: state.plan ? 'incomplete' : state.proposal ? 'proposal' : 'idle', progress: '', error: { code: 'CANCELLED', message: '作成を中断しました。できた内容は残っています。' } }); return true; },
+      newTask() { if (!available()) return false; ++epoch; base = null; pendingPlanQuestions = []; Object.assign(state, { phase: 'idle', taskId: state.taskId + 1, version: 0, goal: '', proposal: null, answers: [], adopted: null, plan: null, artifacts: [], prepared: null, messages: [], error: null, progress: '', rollback: null }); emit(); return true; },
+      cancel() {
+        if (!['consulting','building','preparing'].includes(state.phase)) return false;
+        const consulting = state.phase === 'consulting';
+        ++epoch; controller?.abort(); controller = null; invalidate();
+        // A cancelled revision request cannot resume the plan made before that request.
+        if (consulting) {
+          // Preserve only the question text/structure needed to resend the consultation.
+          pendingPlanQuestions = clone(state.plan?.questions || pendingPlanQuestions);
+          Object.assign(state, { plan: null, adopted: null, artifacts: [] });
+        }
+        set({ phase: state.plan ? 'incomplete' : state.proposal ? 'proposal' : 'idle', progress: '', error: { code: 'CANCELLED', message: consulting ? '相談を中断しました。案は更新していません。' : '作成を中断しました。できた内容は残っています。' } }); return true;
+      },
     };
   }
   return { create, hash, stampOf, generatedBody, questions };

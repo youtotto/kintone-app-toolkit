@@ -3,7 +3,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { KTReleaseWorkspace } = require('../src/release-workspace.js');
 const { KTReleaseView } = require('../src/release-view.js');
-const { fixture, REQUEST, proposal } = require('./helpers/release-workspace-fixture.js');
+const { fixture, REQUEST, proposal, deferred } = require('./helpers/release-workspace-fixture.js');
 const clone = value => JSON.parse(JSON.stringify(value));
 const normal = html => String(html).replace(/<details\b[\s\S]*?<\/details>/g, '').replace(/<style>[\s\S]*?<\/style>/g, '');
 const decode = value => String(value).replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&');
@@ -12,7 +12,20 @@ function hostOf() {
   const listeners = new Map();
   let html = '', input = null;
   const host = { ownerDocument: { activeElement: null }, addEventListener(type, fn) { const values = listeners.get(type) || []; values.push(fn); listeners.set(type, values); }, removeEventListener(type, fn) { listeners.set(type, (listeners.get(type) || []).filter(x => x !== fn)); },
-    querySelector: selector => selector === '#kt-release-input' ? input : null, querySelectorAll: () => [],
+    querySelector: selector => selector === '#kt-release-input' ? input : null,
+    querySelectorAll(selector) {
+      if (selector !== '[data-release-base-disabled]' && selector !== '[data-release-draft-note]') return [];
+      const marker = selector.slice(1, -1), attribute = marker === 'data-release-base-disabled' ? 'disabled' : 'hidden';
+      return (html.match(/<[^>]+>/g) || []).filter(tag => tag.includes(marker)).map(original => {
+        let tag = original;
+        const node = { dataset: { releaseBaseDisabled: /data-release-base-disabled="true"/.test(tag) ? 'true' : 'false' } };
+        Object.defineProperty(node, attribute, { get: () => new RegExp('\\s' + attribute + '(?:\\s|>)').test(tag), set(value) {
+          const next = tag.replace(new RegExp('\\s' + attribute + '(?=\\s|>)', 'g'), '').replace(/>$/, value ? ' ' + attribute + '>' : '>');
+          html = html.replace(tag, next); tag = next;
+        } });
+        return node;
+      });
+    },
     async dispatch(type, event = {}) { for (const fn of listeners.get(type) || []) await fn({ type, preventDefault() {}, ...event }); }, listenerCount: type => (listeners.get(type) || []).length };
   Object.defineProperty(host, 'innerHTML', { get: () => html, set(value) { html = String(value); const tag = /<textarea\b[^>]*id="kt-release-input"([^>]*)>([\s\S]*?)<\/textarea>/.exec(html); input = tag ? { id: 'kt-release-input', value: decode(tag[2]), disabled: /\bdisabled\b/.test(tag[1]), selectionStart: 0, selectionEnd: 0, focus() { host.ownerDocument.activeElement = input; }, setSelectionRange(a, b) { this.selectionStart = a; this.selectionEnd = b; } } : null; } });
   return host;
@@ -32,19 +45,25 @@ async function mounted(options = {}) {
 }
 async function finishProposal(f) { await type(f.host, REQUEST); await click(f.host, 'send'); await click(f.host, 'adopt'); }
 
-test('画面上の依頼→採用→一度の反映で、主に見る内容が相談から変更内容、結果へ移る', async () => {
+test('相談と入力を残したまま、右の案→変更内容→結果で一度だけ採用・反映する', async () => {
   const f = await mounted();
-  assert.match(f.host.innerHTML, /アプリの変更を相談する/);
+  assert.match(normal(f.host.innerHTML), /相談すると、ここに案を表示します/);
+  assert.match(normal(f.host.innerHTML), /class="ktr-pane-title">相談/);
   await type(f.host, REQUEST); await click(f.host, 'send');
   assert.match(normal(f.host.innerHTML), /承認待ちの一覧を追加する/);
-  assert.equal((normal(f.host.innerHTML).match(/class="ktr-primary"/g) || []).length, 1);
+  assert.equal((normal(f.host.innerHTML).match(/data-release-action="adopt"/g) || []).length, 1);
+  assert.equal((f.host.innerHTML.match(/id="kt-release-input"/g) || []).length, 1);
+  assert.match(normal(f.host.innerHTML), /承認待ちの案件を確認する一覧を追加/);
   assert.equal(f.count('plan'), 0);
   await click(f.host, 'adopt');
   assert.match(normal(f.host.innerHTML), /今回反映する内容/);
-  assert.equal(f.host.querySelector('#kt-release-input'), null);
+  assert.ok(f.host.querySelector('#kt-release-input'));
+  assert.equal(f.host.querySelector('#kt-release-input').disabled, false);
+  assert.doesNotMatch(f.host.innerHTML, /data-release-action="(?:consult|current)"/);
   assert.equal(f.writes.length, 0);
   await click(f.host, 'apply');
   assert.match(normal(f.host.innerHTML), /動作テスト環境に反映しました/);
+  assert.equal((f.host.innerHTML.match(/id="kt-release-input"/g) || []).length, 1);
   assert.equal(f.count('apply'), 1);
   assert.equal(f.writes.length, 3);
 });
@@ -120,15 +139,56 @@ test('静的な検証だけで完了した成果物を、模擬テストにも�
   assert.equal(html.split('検証が完了しました。').length - 1, 1);
 });
 
-test('内容を相談するだけでは承認対象を変えず、修正を送ると作成へ戻る', async () => {
-  const f = await mounted(); await finishProposal(f);
+test('右の変更内容を見ながら入力でき、送信時にだけ承認対象を無効化する', async () => {
+  const pending = deferred(), entered = deferred();
+  let responses = 0;
+  const f = await mounted({ fixture: { propose: async () => { if (++responses === 1) return proposal(); entered.resolve(); return pending.promise; } } });
+  await finishProposal(f);
   const before = f.controller.getState().prepared.signature;
-  await click(f.host, 'consult'); await type(f.host, '一覧の名前を変えてください');
+  await type(f.host, '一覧の名前を変えてください');
   assert.equal(f.controller.getState().prepared.signature, before);
-  await click(f.host, 'send');
+  assert.equal(f.controller.getState().phase, 'review');
+  assert.equal(buttonOf(f.host, 'apply').disabled, true, '未送信の修正を含まない案を反映させない');
+  await type(f.host, '');
+  assert.equal(buttonOf(f.host, 'apply').disabled, false);
+  assert.equal(f.controller.getState().prepared.signature, before);
+  await type(f.host, '一覧の名前を変えてください');
+  const sent = click(f.host, 'send'); await entered.promise;
+  assert.equal(f.controller.getState().phase, 'consulting');
+  assert.equal(f.controller.getState().prepared, null);
+  assert.doesNotMatch(f.host.innerHTML, /data-release-action="(?:apply|adopt)"/);
+  assert.match(normal(f.host.innerHTML), /一覧の名前を変えてください/);
+  assert.match(normal(f.host.innerHTML), /承認待ちの一覧を追加します/);
+  assert.equal(f.host.querySelector('#kt-release-input').disabled, true);
+  pending.resolve(proposal('一覧の名前を変更する仮案です。')); await sent;
   assert.equal(f.controller.getState().phase, 'proposal');
+  assert.equal(f.host.querySelector('#kt-release-input').disabled, false);
   assert.equal(f.count('plan'), 1);
   assert.equal(f.count('apply'), 0);
+});
+
+test('すべての進行段階で相談と入力は1つ残り、処理中の入力だけ無効になる', () => {
+  const messages = [{ id: 1, role: 'user', text: '依頼の内容' }, { id: 2, role: 'assistant', text: '前の返答' }];
+  const base = { messages, proposal: proposal().proposal, plan: { customizations: [] }, prepared: { ok: true, changes: [] }, artifacts: [], runs: [] };
+  const locked = new Set(['consulting', 'building', 'preparing', 'applying', 'rolling-back']);
+  for (const phase of ['idle', 'consulting', 'proposal', 'building', 'preparing', 'review', 'incomplete', 'unchanged', 'blocked', 'applying', 'result', 'rollback-confirm', 'rolling-back']) {
+    const host = hostOf(); host.innerHTML = KTReleaseView.render({ ...base, phase });
+    assert.equal((host.innerHTML.match(/id="kt-release-input"/g) || []).length, 1, phase);
+    assert.equal((host.innerHTML.match(/data-release-action="send"/g) || []).length, 1, phase);
+    assert.match(normal(host.innerHTML), /依頼の内容[\s\S]*前の返答/, phase);
+    assert.equal(host.querySelector('#kt-release-input').disabled, locked.has(phase), phase);
+  }
+});
+
+test('再描画で入力中の文字と選択範囲を保持する', async () => {
+  const f = await mounted(); await finishProposal(f);
+  await type(f.host, '書きかけの修正コメント');
+  f.host.querySelector('#kt-release-input').setSelectionRange(2, 7);
+  f.view.render();
+  const input = f.host.querySelector('#kt-release-input');
+  assert.equal(input.value, '書きかけの修正コメント');
+  assert.equal(input.selectionStart, 2); assert.equal(input.selectionEnd, 7);
+  assert.equal(f.controller.getState().phase, 'review');
 });
 
 test('送信前の同意を取り消すと、依頼文を残してAIへ送らない', async () => {
@@ -136,6 +196,33 @@ test('送信前の同意を取り消すと、依頼文を残してAIへ送らな
   await type(f.host, '残しておく依頼文'); await click(f.host, 'send');
   assert.equal(f.host.querySelector('#kt-release-input').value, '残しておく依頼文');
   assert.equal(f.count('propose'), 0);
+});
+
+test('送信の同意待ちでも古い反映を実行できず、取消後は下書きを残す', async () => {
+  const waiting = deferred(), entered = deferred(); let confirmations = 0;
+  const f = await mounted({ view: { beforeSend: async () => { if (++confirmations === 1) return true; entered.resolve(); return waiting.promise; } } });
+  await finishProposal(f); const signature = f.controller.getState().prepared.signature;
+  await type(f.host, '反映前に直す内容');
+  const sent = click(f.host, 'send'); await entered.promise;
+  assert.equal(f.controller.getState().prepared.signature, signature);
+  assert.equal(f.controller.getState().phase, 'review');
+  assert.equal(buttonOf(f.host, 'apply').disabled, true);
+  assert.equal(f.count('propose'), 1);
+  waiting.resolve(false); await sent;
+  assert.equal(f.host.querySelector('#kt-release-input').value, '反映前に直す内容');
+  assert.equal(f.count('apply'), 0); assert.equal(f.count('propose'), 1);
+  await type(f.host, ''); assert.equal(buttonOf(f.host, 'apply').disabled, false);
+});
+
+test('未送信の修正があると採用・再開・反映・復元を抑止し、判定そのものは変えない', () => {
+  const base = { messages: [], proposal: proposal().proposal, plan: { customizations: [] }, prepared: { ok: true, changes: [] }, artifacts: [], runs: [] };
+  for (const [phase, action] of [['proposal', 'adopt'], ['incomplete', 'resume'], ['review', 'apply'], ['rollback-confirm', 'rollback']]) {
+    const state = { ...base, phase, rollback: { runId: 'r1', prepared: { ok: true } }, runs: [{ id: 'r1', prepared: { changes: [] } }] };
+    const original = JSON.stringify(state), host = hostOf();
+    host.innerHTML = KTReleaseView.render(state, { draft: '未送信の修正' });
+    assert.equal(buttonOf(host, action).disabled, true, phase);
+    assert.equal(JSON.stringify(state), original);
+  }
 });
 
 test('必須の判断は未回答なら採用できず、構造化された回答があれば同じ質問を繰り返さない', () => {

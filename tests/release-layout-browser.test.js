@@ -54,7 +54,7 @@ async function measure(page) {
       const el = document.querySelector(selector), r = el.getBoundingClientRect();
       return { x: r.x, y: r.y, right: r.right, bottom: r.bottom, width: r.width, height: r.height, clientWidth: el.clientWidth, scrollWidth: el.scrollWidth };
     };
-    return { host: box('#kt-ai-host'), workspace: box('.ktr-workspace'), main: box('.ktr-workspace main'), support: box('.ktr-support'),
+    return { host: box('#kt-ai-host'), workspace: box('.ktr-workspace'), conversation: box('.ktr-conversation'), current: box('.ktr-current'), input: box('#kt-release-input'),
       documentWidth: document.documentElement.scrollWidth, viewport: innerWidth };
   });
 }
@@ -66,12 +66,17 @@ async function checkLayout(page, split, label) {
   assert.ok(m.documentWidth <= m.viewport + 1, `${label}: document overflows horizontally`);
   assert.ok(m.host.scrollWidth <= m.host.clientWidth + 1, `${label}: host overflows horizontally`);
   if (split) {
-    assert.ok(m.support.x >= m.main.right + 5, `${label}: supplemental information must be alongside the review: ${JSON.stringify(m)}`);
-    assert.ok(Math.abs(m.support.y - m.main.y) < 4, `${label}: main and supplement start together`);
-    assert.ok(m.main.width > m.support.width * 1.35, `${label}: main review has visual priority`);
+    assert.ok(m.current.x >= m.conversation.right + 5, `${label}: current work stays to the right of the conversation: ${JSON.stringify(m)}`);
+    assert.ok(Math.abs(m.current.y - m.conversation.y) < 4, `${label}: both fixed panels start together`);
+    assert.ok(m.conversation.width > 300 && m.current.width > 300, `${label}: both panels remain readable`);
   } else {
-    assert.ok(m.support.y >= m.main.bottom - 2, `${label}: supplemental information must stack below: ${JSON.stringify(m)}`);
+    assert.ok(m.current.y >= m.conversation.bottom - 2, `${label}: both panels remain stacked: ${JSON.stringify(m)}`);
   }
+  assert.equal(await page.locator('#kt-release-input').count(), 1, `${label}: one persistent input`);
+  assert.ok(m.input.x >= m.conversation.x && m.input.right <= m.conversation.right + 1, `${label}: input stays in the conversation`);
+}
+function sameInputPosition(before, after, label) {
+  for (const key of ['x', 'y', 'width', 'height']) assert.ok(Math.abs(before[key] - after[key]) < 3, `${label}: input ${key} moved (${before[key]} -> ${after[key]})`);
 }
 async function checkDialog(page, { wide = false, label = '' } = {}) {
   const m = await page.locator('dialog[open]').evaluate(el => {
@@ -143,7 +148,8 @@ test('実ホストの幅・高さ・110%表示とダイアログを固定応答�
         const action = name => page.locator('[data-release-action="' + name + '"]').first();
         const phase = value => page.waitForFunction(v => window.work.controller.getState().phase === v, value);
         await page.waitForFunction(() => window.work.capability().available);
-        await checkLayout(page, false, scene.name + '/idle');
+        await checkLayout(page, scene.split, scene.name + '/idle');
+        const initialInput = (await measure(page)).input;
         assert.equal(await page.locator('#kt-release-input').count(), 1);
         assert.equal(await page.locator('[data-release-action="send"]').count(), 1);
         await page.locator('[data-release-panel="connection"] > summary').click();
@@ -158,23 +164,30 @@ test('実ホストの幅・高さ・110%表示とダイアログを固定応答�
         if (scene.zoom === 1.1) await page.screenshot({ path: path.join(out, scene.name + '-materials.png') });
         assert.ok((await page.locator('dialog [data-output]').inputValue()).length > 50);
         await page.locator('dialog [data-close]').click();
+        await page.locator('[data-release-panel="connection"] > summary').click();
         assert.equal(calls.filter(n => n !== 'getHealth').length, 0);
         await page.locator('#kt-release-input').fill(F.REQUEST); await action('send').click();
         await page.locator('dialog [data-consent]').waitFor(); await checkDialog(page, { label: scene.name + '/consent' });
         await page.locator('dialog [data-consent]').click(); await phase('proposal');
-        await checkLayout(page, false, scene.name + '/proposal');
+        await checkLayout(page, scene.split, scene.name + '/proposal');
+        if (scene.split) sameInputPosition(initialInput, (await measure(page)).input, scene.name + '/proposal');
+        assert.match(await page.locator('.ktr-chat-log').innerText(), /承認待ちの一覧を追加します/);
         assert.equal(await page.locator('[data-release-action="adopt"]').count(), 1);
         await action('adopt').click(); await phase('review');
         await checkLayout(page, scene.split, scene.name + '/review');
+        if (scene.split) sameInputPosition(initialInput, (await measure(page)).input, scene.name + '/review');
         assert.equal(await page.locator('[data-release-action="apply"]').count(), 1);
         assert.equal(await page.locator('.ktr-workspace main .ktr-primary').count(), 1);
-        await page.locator('[data-release-panel="conversation"] > summary').click();
-        await checkLayout(page, scene.split, scene.name + '/review-history-open');
-        await action('consult').click(); await checkLayout(page, false, scene.name + '/consult');
+        assert.equal(await page.locator('[data-release-action="consult"]').count(), 0);
+        assert.equal(await page.locator('[data-release-action="current"]').count(), 0);
+        const prepared = await page.evaluate(() => window.work.controller.getState().prepared.signature);
         await page.locator('#kt-release-input').fill('入力途中の文は残してください。');
+        await page.locator('#kt-release-input').evaluate(el => el.setSelectionRange(2, 7));
         await page.evaluate(() => window.work.view.render());
         assert.equal(await page.locator('#kt-release-input').inputValue(), '入力途中の文は残してください。');
-        await action('current').click(); await checkLayout(page, scene.split, scene.name + '/review-return');
+        assert.deepEqual(await page.locator('#kt-release-input').evaluate(el => [el.selectionStart, el.selectionEnd]), [2, 7]);
+        assert.equal(await page.evaluate(() => window.work.controller.getState().prepared.signature), prepared);
+        await checkLayout(page, scene.split, scene.name + '/review-editing');
         if (scene.name === 'full-110') {
           const count = calls.length;
           await page.setViewportSize({ width: 390, height: 844 });

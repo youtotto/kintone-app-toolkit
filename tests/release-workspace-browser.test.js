@@ -36,12 +36,12 @@ test('実ブラウザーの正式な操作で相談・採用・確認・反映�
   const t=loadToolkit(), prod=data(), mock=makeKintoneMock(prod);
   const loadBase=devBaseLoaderOf({KTDevBase:{load:t.KTDevBase.loadForRelease}}, {appId:'310',production:prod,mockRef:()=>mock});
   const serviceCalls=[], signals=[], errors=[], unexpected=[];
-  let failMobile=false;
+  let failMobile=false, heldProposal=null;
   const browser = await playwright.chromium.launch({channel:process.env.BROWSER_CHANNEL || 'msedge',headless:true});
   try {
     const context=await browser.newContext({viewport:{width:1120,height:920}});
     await context.route('**/*', async route => {
-      if(route.request().url()==='https://release.test.invalid/') return route.fulfill({contentType:'text/html',body:'<!doctype html><html lang="ja"><meta charset="utf-8"><title>Toolkit 作業画面の確認</title><body style="margin:0;background:#f4f7fa"><div id="app" style="height:100vh"></div></body></html>'});
+      if(route.request().url()==='https://release.test.invalid/') return route.fulfill({contentType:'text/html',body:'<!doctype html><html lang="ja" style="height:100%"><meta charset="utf-8"><title>Toolkit 作業画面の確認</title><body style="margin:0;height:100%;background:#f4f7fa"><div id="app" style="height:100%;display:flex;flex-direction:column;min-height:0"></div></body></html>'});
       unexpected.push(route.request().url()); return route.abort();
     });
     const page=await context.newPage();
@@ -55,7 +55,7 @@ test('実ブラウザーの正式な操作で相談・採用・確認・反映�
     await page.exposeFunction('testService',async (name,ctx)=> {
       serviceCalls.push({name,ctx});
       if(name==='getHealth')return health;
-      if(name==='propose')return fixture.proposal();
+      if(name==='propose')return heldProposal ? heldProposal.promise : fixture.proposal('承認待ちの一覧を追加します。承認済みの場合、備考を編集できなくします。\n' + '既存の設定と入力チェックを維持します。'.repeat(35));
       if(name==='plan')return fixture.plan();
       if(failMobile && ctx.customization.platform[0]==='mobile')return {declined:true,artifactOutcome:fixture.generated(ctx.customization,{state:'incomplete',message:'モバイル用の作成が完了していません。'}).artifactOutcome,
         error:{code:'GENERATION_DECLINED',detail:{summary:'対象のファイルを確認できず、変更を作成しませんでした。',reason:'登録先の指定を確認してください。',warnings:[],coverage:[]}}};
@@ -95,6 +95,8 @@ test('実ブラウザーの正式な操作で相談・採用・確認・反映�
     assert.equal(serviceCalls.filter(c=>c.name==='propose').length,0);
     await page.locator('[data-consent]').click();
     await phase('proposal');
+    assert.equal(await page.locator('#kt-release-input').count(),1);
+    assert.match(await page.locator('.ktr-chat-log').innerText(),/既存の設定と入力チェックを維持します/);
     assert.equal(serviceCalls.filter(c=>c.name==='plan').length,0);
     await action('adopt').click(); await phase('review');
     assert.equal(mock.calls.filter(c=>!c.startsWith('GET')).length,0);
@@ -103,11 +105,56 @@ test('実ブラウザーの正式な操作で相談・採用・確認・反映�
     assert.doesNotMatch(await page.locator('body').innerText(),/米ドル|token|トークン|var は|担当が計画に/);
     const out=path.join(root,'tests/.build/release-browser');fs.mkdirSync(out,{recursive:true});
     await page.screenshot({path:path.join(out,'review.png'),fullPage:true});
-    await action('consult').click();
+    assert.equal(await page.locator('[data-release-action="consult"]').count(),0);
+    assert.equal(await page.locator('[data-release-action="current"]').count(),0);
+    const beforeEdit=await page.evaluate(()=>window.work.controller.getState().prepared.signature);
     await page.locator('#kt-release-input').fill('入力途中の文章');
+    assert.equal(await page.evaluate(()=>window.work.controller.getState().prepared.signature),beforeEdit);
+    assert.equal(await action('apply').isDisabled(),true);
+    await page.locator('#kt-release-input').fill('');
+    assert.equal(await action('apply').isEnabled(),true);
+    await page.locator('#kt-release-input').fill('入力途中の文章');
+    await page.locator('#kt-release-input').evaluate(el=>el.setSelectionRange(2,6));
+    const facts=page.locator('.ktr-chat-log details[data-release-panel^="facts-"]').first();
+    await facts.locator(':scope > summary').click();
+    const values=facts.locator('details[data-release-panel^="fact-value-"]').first();
+    if(await values.count())await values.locator(':scope > summary').click();
+    const factId=await facts.getAttribute('data-release-panel');
+    const factText=await facts.innerText();
+    for(const summary of await page.locator('.ktr-current details > summary').all())await summary.click();
+    await page.locator('.ktr-current').evaluate(el=>{el.scrollTop=Math.min(90,el.scrollHeight-el.clientHeight);});
+    const currentScroll=await page.locator('.ktr-current').evaluate(el=>el.scrollTop);
+    assert.ok(currentScroll>0,'the expanded change details must exercise the current-work scroller');
+    await page.locator('.ktr-chat-log').evaluate(el=>{el.scrollTop=Math.min(72,el.scrollHeight-el.clientHeight);});
+    const chatScroll=await page.locator('.ktr-chat-log').evaluate(el=>el.scrollTop);
+    assert.ok(chatScroll>0,'the long fixed response must exercise the chat scroller: '+JSON.stringify(await page.locator('.ktr-chat-log').evaluate(el=>({height:el.clientHeight,scrollHeight:el.scrollHeight,text:el.textContent.length,overflow:getComputedStyle(el).overflow,workspace:document.querySelector('.ktr-workspace').getBoundingClientRect().height}))));
+    await page.locator('#kt-release-input').focus();
+    await page.locator('#kt-release-input').evaluate(el=>el.setSelectionRange(2,6));
     await page.evaluate(()=>window.work.view.render());
     assert.equal(await page.locator('#kt-release-input').inputValue(),'入力途中の文章');
-    await action('current').click();
+    assert.deepEqual(await page.locator('#kt-release-input').evaluate(el=>[el.selectionStart,el.selectionEnd]),[2,6]);
+    assert.ok(Math.abs(await page.locator('.ktr-chat-log').evaluate(el=>el.scrollTop)-chatScroll)<2,'rerender retains the reading position');
+    assert.ok(Math.abs(await page.locator('.ktr-current').evaluate(el=>el.scrollTop)-currentScroll)<2,'rerender retains the change-details position');
+    assert.equal(await page.locator('[data-release-panel="'+factId+'"]').evaluate(el=>el.open),true);
+    assert.equal(await page.locator('[data-release-panel="'+factId+'"]').innerText(),factText);
+    assert.equal(await page.locator('[data-release-panel="'+factId+'"]').count(),1,'facts belong only to their response');
+    // Revision goes through the persistent input. Waiting on a response must not leave the old plan actionable.
+    heldProposal=fixture.deferred();
+    await action('send').click();await phase('consulting');
+    assert.equal(await page.evaluate(()=>window.work.controller.getState().prepared),null);
+    assert.equal(await page.locator('[data-release-action="apply"]').count(),0);
+    assert.equal(await page.locator('[data-release-action="adopt"]').count(),0);
+    assert.equal(await page.locator('#kt-release-input').isDisabled(),true);
+    assert.match(await page.locator('.ktr-chat-log').innerText(),/入力途中の文章/);
+    assert.ok(Math.abs(await page.locator('.ktr-chat-log').evaluate(el=>el.scrollTop)-chatScroll)<2,'a new user message does not move a reader away from older messages');
+    heldProposal.resolve(fixture.proposal('修正を受け取った仮案です。'));await phase('proposal');heldProposal=null;
+    assert.equal(serviceCalls.filter(c=>c.name==='plan').length,1,'revision alone does not adopt');
+    assert.equal(await page.locator('[data-release-panel="'+factId+'"]').count(),1);
+    assert.equal(await page.locator('[data-release-panel="'+factId+'"]').innerText(),factText,'old response facts remain attached to the old message');
+    assert.ok(Math.abs(await page.locator('.ktr-chat-log').evaluate(el=>el.scrollTop)-chatScroll)<2,'a new response does not move a reader away from older messages');
+    await action('adopt').click();await phase('review');
+    assert.equal(await page.locator('#kt-release-input').count(),1);
+    assert.equal(mock.calls.filter(c=>!c.startsWith('GET')).length,0);
     await action('apply').click(); await phase('result');
     const run=await page.evaluate(()=>window.work.controller.getState().runs.at(-1));
     assert.equal(run.status,'complete',JSON.stringify(run.result));

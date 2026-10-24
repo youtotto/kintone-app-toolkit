@@ -317,6 +317,110 @@ test('作成中の取消し後に届いた応答を、新しい依頼の成果�
   assert.equal(f.count('apply'), 0);
 });
 
+test('修正相談を中断したら古い計画の再開ではなく未更新の仮案へ戻る', async () => {
+  const entered = deferred(), gate = deferred(); let count = 0;
+  const changed = proposal('一覧名を確認待ちへ変更しました。');
+  changed.proposal.behaviors[0].text = '確認待ちの一覧を追加する';
+  const f = fresh({ propose: async () => {
+    count++;
+    if (count === 1) return proposal();
+    if (count === 2) { entered.resolve(); await gate.promise; }
+    return changed;
+  } });
+  await built(f);
+  const sending = f.controller.send('一覧の名前を確認待ちへ変更してください。');
+  await entered.promise;
+  assert.equal(await f.controller.apply(), false);
+  f.controller.cancel(); gate.resolve(); await sending;
+  assert.equal(stateOf(f).phase, 'proposal');
+  assert.equal(stateOf(f).plan, null);
+  assert.equal(stateOf(f).adopted, null);
+  assert.equal(stateOf(f).prepared, null);
+  assert.deepEqual(stateOf(f).artifacts, []);
+  assert.equal(stateOf(f).version, 1, '遅れて届いた修正版を採用しない');
+  assert.match(stateOf(f).error.message, /相談を中断.*案は更新していません/);
+  assert.equal(await f.controller.resume(), false);
+  assert.equal(await f.controller.apply(), false);
+  assert.equal(f.count('plan'), 1); assert.equal(f.count('generate'), 2);
+  assert.equal(f.writes.length, 0);
+  await f.controller.send('一覧の名前を確認待ちへ変更してください。');
+  assert.equal(f.count('plan'), 1, '修正送信だけで計画を作らない');
+  await f.controller.adopt();
+  assert.equal(f.count('plan'), 2);
+  assert.equal(f.calls.filter(c => c.method === 'plan').at(-1).proposal.behaviors[0].text, '確認待ちの一覧を追加する');
+  assert.equal(stateOf(f).phase, 'review');
+  assert.equal(f.writes.length, 0);
+});
+
+test('生成の中断では完成したPCを残し、再開でモバイルだけを作る', async () => {
+  const entered = deferred(), gate = deferred(); let mobile = 0;
+  const f = fresh({ generate: async ({ customization }) => {
+    if (customization.platform[0] === 'mobile' && mobile++ === 0) { entered.resolve(); await gate.promise; }
+    return generated(customization);
+  } });
+  await f.controller.send(REQUEST);
+  const building = f.controller.adopt(); await entered.promise;
+  f.controller.cancel(); gate.resolve(); await building;
+  assert.equal(stateOf(f).phase, 'incomplete');
+  assert.equal(stateOf(f).artifacts.length, 1);
+  assert.equal(stateOf(f).artifacts[0].customizationId, 'C1');
+  await f.controller.resume();
+  assert.equal(stateOf(f).phase, 'review');
+  assert.equal(f.count('plan'), 1);
+  assert.equal(f.calls.filter(c => c.method === 'generate' && c.id === 'C1').length, 1);
+  assert.equal(f.calls.filter(c => c.method === 'generate' && c.id === 'C2').length, 2);
+  assert.equal(f.writes.length, 0);
+});
+
+test('計画の質問への相談を中断しても再送へ原文を渡し、成功後は解消する', async () => {
+  const p = plan(); p.questions = [{ id: 'QP1', question: '一覧に表示する列はどれですか。', blocking: true }];
+  const attempts = [], entered = [deferred(), deferred()], gates = [deferred(), deferred()];
+  const f = fresh({ plan: p, propose: async args => {
+    attempts.push(args);
+    const index = attempts.length - 2;
+    if (index >= 0 && index < gates.length) { entered[index].resolve(); await gates[index].promise; }
+    return proposal();
+  } });
+  await built(f);
+  for (let index = 0; index < gates.length; index++) {
+    const sending = f.controller.send('備考を表示してください。'); await entered[index].promise;
+    assert.deepEqual(attempts.at(-1).pendingPlanQuestions, p.questions);
+    f.controller.cancel(); gates[index].resolve(); await sending;
+    assert.equal(stateOf(f).plan, null);
+    assert.equal(await f.controller.resume(), false);
+    assert.equal(await f.controller.prepare(), false);
+  }
+  await f.controller.send('備考を表示してください。');
+  assert.deepEqual(attempts.at(-1).pendingPlanQuestions, p.questions);
+  assert.equal(attempts.at(-1).text, '備考を表示してください。');
+  await f.controller.send('一覧の名前も確認待ちにしてください。');
+  assert.deepEqual(attempts.at(-1).pendingPlanQuestions, []);
+  assert.equal(f.count('plan'), 1);
+  assert.equal(f.count('generate'), 0);
+  assert.equal(f.writes.length, 0);
+});
+
+for (const next of ['newTask', 'adopt']) test(`中断した計画の質問を${next === 'newTask' ? '新しい会話' : '新しい採用'}へ持ち越さない`, async () => {
+  const p = plan(); p.questions = [{ id: 'QP1', question: '一覧に表示する列はどれですか。', blocking: true }];
+  const entered = deferred(), gate = deferred(), attempts = []; let planned = 0;
+  const f = fresh({ makePlan: () => {
+    if (planned++) throw new Error('新しい計画はまだ取得できません。');
+    return { plan: p };
+  }, propose: async args => {
+    attempts.push(args);
+    if (attempts.length === 2) { entered.resolve(); await gate.promise; }
+    return proposal();
+  } });
+  await built(f);
+  const sending = f.controller.send('備考を表示してください。'); await entered.promise;
+  f.controller.cancel(); gate.resolve(); await sending;
+  await f.controller[next]();
+  await f.controller.send('次の案を相談します。');
+  assert.deepEqual(attempts.at(-1).pendingPlanQuestions, []);
+  assert.equal(stateOf(f).plan, null);
+  assert.equal(f.writes.length, 0);
+});
+
 test('相談前の設定取得を待つ間に取り消したらAIへ送信しない', async () => {
   const gate = deferred();
   const f = fresh({ loadBase: async () => { await gate.promise; return { ok: true, current: {}, stamp: 'preview:1', inputs: { data: {} }, files: [] }; } });
