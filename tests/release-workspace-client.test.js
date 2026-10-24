@@ -8,6 +8,7 @@ const { loadToolkit } = require('./helpers/load-toolkit.js');
 const { generated, plan } = require('./helpers/release-workspace-fixture.js');
 const T = loadToolkit();
 const { KTAiClient: Client, KTAiBudget: Budget, KTContext } = T;
+const { KTReleaseContext: ReleaseContext } = require('../src/release-context.js');
 const C = Client.ERROR_CODES;
 const HOST = 'test.invalid';
 const jsonResponse = (status, body) => ({ status, headers: { get: key => /content-type/i.test(key) ? 'application/json' : null }, text: async () => JSON.stringify(body) });
@@ -20,6 +21,21 @@ function budgetFixture({ limitUsd = 5, maxCalls = 10 } = {}) {
   return { budget, storage, entries: () => JSON.parse(storage.getItem(`ktAi.budgetLedger.v1.${HOST}.release-test`) || '{"entries":[]}').entries };
 }
 const request = { ctx: { question: '試験用の依頼', size: { bytes: 1000 } }, requestId: 'test-request-1' };
+
+test('生成入力は採用した版の前提と制約だけを原形で引き継ぎ、元の仮案と共有しない', () => {
+  const adopted = { behaviors: [{ id: 'B1', text: '備考を編集不可にする' }], assumptions: [{ id: 'A2', key: 'scope.memo', label: '対象', text: '承認済みだけが対象です。\n差戻し後は編集できます。', changeHint: '必要なら条件を変更してください。' }], cannot: ['現在の承認の流れは変更しません。'], approach: { standard: [], js: [] }, decisions: [] };
+  const p = plan({ settings: false, platforms: ['desktop'] });
+  const args = { customization: p.customizations[0], plan: p, proposal: adopted, version: 2, base: { appId: '310', data: { fields: {} }, files: [] } };
+  const ctx = ReleaseContext.generator(args);
+  const expected = JSON.parse(JSON.stringify({ revision: 2, assumptions: adopted.assumptions, cannot: adopted.cannot }));
+  assert.deepEqual(ctx.acceptedProposal, expected);
+  const envelope = Client.buildGenerateEnvelope({ ctx });
+  assert.deepEqual(JSON.parse(JSON.stringify(envelope.payload.acceptedProposal)), expected);
+  adopted.assumptions[0].text = '後から変更した文'; adopted.cannot.push('後から加えた制約');
+  assert.deepEqual(ctx.acceptedProposal, expected);
+  assert.deepEqual(Object.keys(ctx.acceptedProposal).sort(), ['assumptions', 'cannot', 'revision']);
+  assert.equal(ReleaseContext.generator({ ...args, proposal: undefined }).acceptedProposal, undefined);
+});
 
 test('無料のフィールド調査は、既存のモバイル用APIの目録と解析の版を保つ', () => {
   const apis = T.KTJsCatalog.extractApis("kintone.mobile.app.record.getFieldElement('a'); kintone.mobile.app.getFieldElements('a');");

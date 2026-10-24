@@ -71,7 +71,7 @@ const KTReleaseContext = (() => {
       coverage: coverageOf(base), truncation: { applied: false, sections: [] }, decisions: planDecisions(answers), requirements: [], userRequests: clone(requests),
       acceptedProposal: { revision: version, proposal: clone(accepted) } }, 384 * 1024);
   }
-  function generator({ customization, plan, answers = [], requests = [], version, base }) {
+  function generator({ customization, plan, proposal: accepted, answers = [], requests = [], version, base }) {
     const c = clone(customization), allFields = fieldsOf(base.data?.fields), files = base.files || [], existingFiles = c.existingFiles || [];
     let existingFile = null;
     if (c.strategy === 'EXTEND_EXISTING_JS') {
@@ -94,6 +94,7 @@ const KTReleaseContext = (() => {
     const relatedOmitted = files.filter(f => f.type !== 'FILE' || f.sourceAvailable === false || typeof f.text !== 'string').map(f => ({ name: f.name, target: f.target, events: null, reason: f.type === 'URL' ? 'url' : 'unavailable' }));
     const requirementIds = (plan.requirements || []).map(r => ({ id: r.id, kind: r.kind, text: r.text }));
     const ctx = { contextVersion: 'customization-1', releaseContract: 'release-workspace-1', app: appOf(base), customization: c, fields, dictionary, existingFile,
+      ...(accepted ? { acceptedProposal: { revision: version, assumptions: clone(accepted.assumptions || []), cannot: clone(accepted.cannot || []) } } : {}),
       otherFiles: relatedFiles.filter(f => f.name !== existingFile?.name || f.target !== existingFile?.target).map(f => ({ name: f.name, target: f.target, source: f.text })),
       plan: { planId: plan.planId || 'release-plan', version, goal: plan.goal, standardSteps: clone(plan.steps), otherCustomizations: (plan.customizations || []).filter(x => x.customizationId !== c.customizationId).map(x => ({ customizationId: x.customizationId, requirement: x.requirement, platform: x.platform })), userRequests: clone(requests) },
       decisions: planDecisions(answers), planned: { fields: plannedFields, statuses: plannedStatuses },
