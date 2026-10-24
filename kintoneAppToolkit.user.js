@@ -11952,6 +11952,10 @@
     //   作り直しは通常の計画の差分更新の依頼として送る（依頼の文が生成の入力に入るので、同じ入力の再生成を AI を呼ばずに案内する規則とぶつからない）
     unsupported: { category: 'env', text: '作った JavaScript が、模擬テストの環境で扱えない書き方・機能を使っています', fix: 'regenerate', next: '作った JavaScript が模擬テストの環境で動かせない書き方・機能を使っているため、AI に直させてはいません。最終案のカードの［作り直しを依頼する］で、その書き方を使わない形での作り直しを依頼できます（自動では依頼しません）。', readiness: '作った JavaScript が模擬テストの環境で動かせない書き方・機能を使っていて、必須の動作を模擬テストで確かめられないため、まだ反映できません（［作り直しを依頼する］で作り直せます）。' },
     'load-error': { category: 'env', text: '模擬テストの環境での読み込みに失敗しました' },
+    //   2026-10-24（§12.70）: 模擬テストの環境がこの確かめ方に対応していない（AI サービスの sandbox-outdated。features などの印の有無で判定）。計画や JavaScript を直しても解けないので、環境の更新を待つ
+    'sandbox-outdated': { category: 'env', text: '模擬テストの環境が、この確かめ方に対応していません（模擬テストの環境の更新が必要です）', next: '模擬テストの環境の更新が必要です。作った JavaScript の誤りとは判定しておらず、AI に直させてはいません。環境が更新されたら、チャット欄で変更を頼むと最終案を作り直します。', readiness: '模擬テストの環境がこの確かめ方に対応していないため、必須の動作を模擬テストで確かめられず、まだ反映できません（模擬テストの環境の更新が必要です）。' },
+    //   2026-10-24（§12.70）: 画面の処理が終わった後に続く非同期の処理の中で画面を操作する書き方（kintone の画面で効くかは未確認）は、模擬テストでは観測できない。不合格ではなく未確認。作り直しで直接呼ぶ形にできる
+    'async-after-return': { category: 'env', text: '作った JavaScript が、画面の処理が終わった後に続く非同期の処理の中で画面を操作しているため、模擬テストではその結果を観測できません（誤りとは判定していません）', fix: 'regenerate', next: '模擬テストでは確かめられない書き方のため、AI に直させてはいません。最終案のカードの［作り直しを依頼する］で、画面の処理の中で直接呼ぶ形への作り直しを依頼できます（自動では依頼しません）。', readiness: '作った JavaScript の画面の操作が非同期の続きの中にあり、必須の動作を模擬テストで確かめられないため、まだ反映できません（［作り直しを依頼する］で作り直せます）。' },
     'condition-unparsed': { category: 'condition', text: '計画の条件を、模擬テストで確かめる条件にできる形で読めませんでした' },
     //   §0c.8（2026-10-08）: 条件に合うレコードを作れない（条件の値が今の設定にも計画の新設にも無い）。条件の形の区分で判定に数える
     'condition-value-unknown': { category: 'condition', text: '条件に合うレコードを作れません（条件の値が、今の設定にも計画で新設するものにもありません）', next: '計画の条件の値（ステータス名・選択肢など）を今の設定か計画で新設するものと同じ表記に直すか、新設の手順を足します。最終案のカードの［計画を直すよう依頼する］で依頼できます（自動では依頼しません。AI に直させてはいません）。', readiness: '条件に合うレコードを作れず（条件の値が今の設定にも計画の新設にもありません）、必須の動作を確かめられないため、まだ反映できません（計画の条件を直します。作った JavaScript の誤りとは判定していません）。' },
@@ -12098,7 +12102,7 @@
   //   caseInvalid（壊れた模擬テストの入力を case-invalid の not-run にし、修復しない）も印に加える（19 個）。どちらかが欠ける Gateway は、壊れた入力で正しい候補を
   //   不合格にして修復を繰り返す形のままなので、新しい形として受け入れない。effectCheck（効果ごとの確かめ方）・conditionFrom（移植元と同じ動きかを比べる）は、
   //   2026-10-18 から生成の前の確認（KT_GENERATOR_REQUIRED）で求める（印ごとに判定を分けない）
-  const KT_EFFECT_FEATURES = Object.freeze(['requiredEffects', 'effectGroups', 'relatedOmitted', 'appFields', 'saveDialog', 'reasonCategory', 'caseSide', 'eventCases', 'loadFaithful', 'registrationCheck', 'emptyCase', 'hideCondition', 'registrationCounts', 'caseCoverage', 'cancelCheck', 'limitCode', 'scopeList', 'tableRowChange', 'caseInvalid']);
+  const KT_EFFECT_FEATURES = Object.freeze(['requiredEffects', 'effectGroups', 'relatedOmitted', 'appFields', 'saveDialog', 'reasonCategory', 'caseSide', 'eventCases', 'loadFaithful', 'registrationCheck', 'emptyCase', 'hideCondition', 'registrationCounts', 'caseCoverage', 'cancelCheck', 'limitCode', 'scopeList', 'tableRowChange', 'caseInvalid', 'rowButtons']);   // rowButtons（2026-10-24・§12.70）: 行の追加・削除のボタンの効果の検証と、模擬テストの環境の features の確認
   /**
    * 2026-10-18: 生成に使う接続先に要る印（health の customization-generator.verification）。2026-10-23（§12.61）: 接続時の能力の確認（KTAiClient.capabilityFromHealth）が
    *   この一覧で確かめ、足りない接続先は生成を使えないと示す（生成の前に使う場所ごとに照らす分岐は持たない）
@@ -12264,7 +12268,7 @@
       const hidesRowButtons = (t) => (c.fields || []).some(f => f && (planCode(f.code) === t || subtableOf.get(planCode(f.code)) === t) && (ktFieldEffectsOf(f.effects) || []).some(x => x.effect === 'hide-row-buttons'));
       const lockedTables = fieldsN.filter(f => f.rawType === 'SUBTABLE').map(f => f.code).filter(t => !hidesRowButtons(t) && (c.fields || []).some(f => locksField(f) && (planCode(f.code) === t || subtableOf.get(planCode(f.code)) === t)));
       //   2026-10-15（§4(b)）: tables = セルを編集不可にするテーブルのコード（最終案の制約の文がテーブルの名前で「残る範囲」を書くための構造。判定は変えない）
-      if (lockedTables.length) coverage.notAchieved.push({ code: 'SUBTABLE_ROWS', tables: [...lockedTables], message: `${lockedTables.map(fieldJa).join('・')}テーブルの入力欄を編集できなくしても、行の追加・削除はできます（行の追加・削除のボタンは残ります。ボタンを隠す処理はこの計画に入っていません。必要なら依頼に加えてください）` });
+      if (lockedTables.length) coverage.notAchieved.push({ code: 'SUBTABLE_ROWS', tables: [...lockedTables], message: `${lockedTables.map(fieldJa).join('・')}テーブルの入力欄を編集できなくしても、行の追加・削除はできます（行の追加・削除のボタンは残ります）` });
       // 段階 C（改訂 2・5.3 / 5.4）: coverage は requirementId で判定する（契約 20 §5）。文の照合・同義語の読み替え・note のキーワードからの担当の推定・plannedHint（段階 A）は削除した。
       //   この customization の id → 範囲内（NOT_MET は登録不可・PARTIAL は確認）。要件 R… / 手順 P… / 別の C… → 範囲外（担当は計画の構造（steps / customizations）と要件の planRefs で引く。
       //   担当が無い・設定を変えない手順（確認待ち）だけが担当なら unowned（計画全体の確認に残す。review）。coverage の文（text / requirement）は表示だけに使う。
@@ -12338,7 +12342,7 @@
         const allPlanTables = [...new Set((c.fields || []).map(f => planCode(f && f.code)).map(code => subtableOf.get(code) || (fieldsN.some(x => x && x.code === code && x.rawType === 'SUBTABLE') ? code : null)).filter(Boolean))];
         const planTables = allPlanTables.filter(t => !hidesRowButtons(t));
         if (allPlanTables.length && !planTables.length) continue;
-        if (!coverage.notAchieved.some(y => y.code === SUBTABLE_LIMIT)) coverage.notAchieved.push({ code: SUBTABLE_LIMIT, fromLimitCode: true, tables: planTables, message: `${planTables.map(fieldJa).join('・')}テーブルの入力欄を編集できなくしても、行の追加・削除はできます（行の追加・削除のボタンは残ります。ボタンを隠す処理はこの計画に入っていません。必要なら依頼に加えてください）` });
+        if (!coverage.notAchieved.some(y => y.code === SUBTABLE_LIMIT)) coverage.notAchieved.push({ code: SUBTABLE_LIMIT, fromLimitCode: true, tables: planTables, message: `${planTables.map(fieldJa).join('・')}テーブルの入力欄を編集できなくしても、行の追加・削除はできます（行の追加・削除のボタンは残ります）` });
       }
       const structuralRows = coverage.notAchieved.some(y => y.code === SUBTABLE_LIMIT && !y.fromLimitCode);
       for (const x of coverage.notAchieved.filter(y => y.code === 'AI_PARTIAL')) if (structuralRows && x.limitCode === SUBTABLE_LIMIT) x.limit = SUBTABLE_LIMIT;
@@ -13206,7 +13210,8 @@
       CONTRACT_INCOMPATIBLE: 'Toolkit と AI サービスのバージョンが一致しません。Toolkit の更新または AI サービスの更新をお待ちください。',
       UNSUPPORTED_CONTRACT_VERSION: 'Toolkit と AI サービスのバージョンが一致しません。Toolkit の更新が必要です。',
       //   2026-10-23（§12.61）: 今の Toolkit が使う受け渡しの印（health の registry）が欠ける接続先（接続時の 1 回の確認で止める。使う場所ごとの分岐は持たない）
-      CAPABILITY_OUTDATED: 'AI サービスの版が古く、今の Toolkit と組み合わせて使えません。AI サービスの更新が必要です。',
+      //   2026-10-24（§12.70）: 検出しているのは印（この Toolkit が使う機能）の有無だけなので、版が古いとは言い切らない（契約の版の不一致は UNSUPPORTED_CONTRACT_VERSION で別に言う）
+      CAPABILITY_OUTDATED: '接続先の AI サービスが、この Toolkit に必要な機能に対応していません。接続先の設定を確かめてください。接続先が正しければ、AI サービス側の更新が必要です。',
       UNKNOWN_PROMPT_VERSION: 'Toolkit と AI サービスのバージョンが一致しません。Toolkit の更新が必要です。',
       AUTH_INVALID_TOKEN: 'Nest Rec AI との接続が無効です。もう一度「Nest Rec AIに接続」してください。',
       AUTH_TOKEN_EXPIRED: 'Nest Rec AI との接続または契約の有効期限が切れています。もう一度「Nest Rec AIに接続」してください。',
@@ -19854,7 +19859,7 @@
             if (x.code === 'AI_PARTIAL') { const note = String(x.noteText ?? x.note ?? '').replace(/\s+/g, ' ').trim(); return fix(note || x.message); }
             return fix(x.message);
           };
-          const constraintReasonOf = (x) => (x.code === 'SUBTABLE_ROWS' ? '入力欄を編集できなくしても、行の追加・削除のボタンは残るためです。行の追加・削除もできなくしたいときは、その旨を依頼に加えてください（ボタンを隠す処理を計画に入れられます）' : '');
+          const constraintReasonOf = (x) => (x.code === 'SUBTABLE_ROWS' ? '入力欄を編集できなくしても、行の追加・削除のボタンは残るためです' : '');
           //   この版の要件の台帳（決定事項の見出し・実現した部分の文の条件に使う。2026-10-15 T5: 実現した部分の文を先に作るのでここで引く）
           const lgF = state.ledgers.get(v.planId) || null;
           //   2026-10-15（§4(b)）: 部分対応（AI の PARTIAL・構造の SUBTABLE_ROWS）の要件のうち実現した部分を 1 文にして「この案で実現すること」（左）と「最終的にどう動くか」（右）に足す

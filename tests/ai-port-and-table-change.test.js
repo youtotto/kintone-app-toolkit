@@ -501,8 +501,8 @@ await section(async () => {
   const generated = { strategy: 'NEW_JS_FILE', targetFile: 'lock.js', summary: '承認済みでは明細を編集不可にします。', code, patch: null, events: ['app.record.edit.show'], fields: [{ code: 'items', access: 'CONTROL' }], apis: [], assumptions: [], warnings: [], coverage: [{ requirementId: 'C1', status: 'MET', note: '' }] };
   const rv = KTCodeReview.review({ generated, customization: c, plan: { customizations: [c] }, data: clone(K.DATA_C), scan: null, existingSource: null });
   const row = rv.coverage && rv.coverage.notAchieved.find(x => x.code === 'SUBTABLE_ROWS');
-  //   2026-10-23（§12.69）: 文は kintone 標準の用語で「テーブルの入力欄を編集できなくしても、行の追加・削除はできます（…ボタンを隠す処理はこの計画に入っていません…）」。「API は Toolkit がまだ扱っていない」とは書かない
-  assert(row && /テーブルの入力欄を編集できなくしても、行の追加・削除はできます/.test(row.message) && /ボタンを隠す処理はこの計画に入っていません/.test(row.message) && !/API|Toolkit がまだ扱って/.test(row.message) && rv.registration.verdict !== 'BLOCKED',
+  //   2026-10-23（§12.69）: 文は kintone 標準の用語で「テーブルの入力欄を編集できなくしても、行の追加・削除はできます（行の追加・削除のボタンは残ります）」（2026-10-24: 未採用の提案は付けない）。「API は Toolkit がまだ扱っていない」とは書かない
+  assert(row && /テーブルの入力欄を編集できなくしても、行の追加・削除はできます/.test(row.message) && !/ボタンを隠す処理|依頼に加えて/.test(row.message) && !/API|Toolkit がまだ扱って/.test(row.message) && rv.registration.verdict !== 'BLOCKED',
     `P7-2: SUBTABLE_ROWS は今のまま出る（符号・承認を止めない）。文は「入力欄を編集不可にしても…止まりません（…ボタンを隠す API は Toolkit がまだ扱っていません）」: ${JSON.stringify({ row, verdict: rv.registration && rv.registration.verdict })}`);
   //   P7-3（計画の確認の JS_LIMIT_SUBTABLE_ROWS）は、要件の文の語の照合なので 2026-10-17 に削除した（行が残ることは上の P7-2 の SUBTABLE_ROWS が示す）
   //   生成の AI に渡すテーブルの扱いの文も言い切らない

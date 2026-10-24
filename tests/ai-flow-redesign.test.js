@@ -1462,7 +1462,7 @@ await section(async () => {
     return { m, v, pr, applied, genCtx, blockText, cannotText: JSON.stringify(v && v.final ? v.final.cannot : []), draft: m.conv().draft() };
   };
   const a = await run({ proposal: false });
-  assert(a.v === null && a.genCtx.length === 0 && a.m.calls.plan.length === 0 && a.pr === null && /AI サービスの版が古く、今の Toolkit と組み合わせて使えません/.test(a.m.chat() + a.m.$('kt-ai-paid-status').innerHTML) && !a.m.mock.calls.some(c => c === 'PUT customize'), `D14-1: 仮案の能力が無い接続先 → 接続時の確認で使えない（計画・生成・登録に進まない）: ${JSON.stringify({ plan: a.m.calls.plan.length, gen: a.genCtx.length })}`);
+  assert(a.v === null && a.genCtx.length === 0 && a.m.calls.plan.length === 0 && a.pr === null && /この Toolkit に必要な機能に対応していません/.test(a.m.chat() + a.m.$('kt-ai-paid-status').innerHTML) && !a.m.mock.calls.some(c => c === 'PUT customize'), `D14-1: 仮案の能力が無い接続先 → 接続時の確認で使えない（計画・生成・登録に進まない）: ${JSON.stringify({ plan: a.m.calls.plan.length, gen: a.genCtx.length })}`);
   //   簡素化（2026-10-17）: 仮案を経ない計画（以前の Context ペインの「変更計画を作成」）は、会話の公開口からも登録できない（その計画の登録・案内の分岐は削除した）
   const legacyV = a.m.conv().registerPlan({ plan: clone(planRespL('承認待ちでは案件名を編集できないようにしたい').plan), ctx: null, review: null });
   assert(legacyV === null && a.m.conv().activePlan() === null && !a.m.mock.calls.some(c => c === 'PUT customize'), `D14-1b: 仮案を経ない計画は登録しない（版を作らない・書き込みなし）: ${JSON.stringify(legacyV && legacyV.planId)}`);
@@ -1714,7 +1714,7 @@ await section(async () => {
 });
 // D27（B4・能力の見分け）: health の customization-generator.verification に 6 つの印がすべてあるときだけ新しい形で送る。欠ければ「接続先が非対応」
 await section(async () => {
-  assert(GEN_EFFECT_FEATURES.every(f => ['requiredEffects', 'effectGroups', 'relatedOmitted', 'appFields', 'saveDialog', 'reasonCategory', 'caseSide', 'eventCases', 'loadFaithful', 'registrationCheck', 'emptyCase', 'hideCondition', 'registrationCounts', 'caseCoverage', 'cancelCheck', 'limitCode', 'scopeList', 'tableRowChange', 'caseInvalid'].includes(f)) && GEN_EFFECT_FEATURES.length === 19, 'D27-0: 印は requiredEffects・effectGroups・relatedOmitted・appFields・saveDialog・reasonCategory・caseSide（§0c.9）・eventCases・loadFaithful・registrationCheck・emptyCase・hideCondition（§0c.10）・registrationCounts・caseCoverage（§0c.11）・cancelCheck・limitCode（C-1 第 3 段）・scopeList（C-1 第 4 段）・tableRowChange・caseInvalid（2026-10-10）');
+  assert(GEN_EFFECT_FEATURES.every(f => ['requiredEffects', 'effectGroups', 'relatedOmitted', 'appFields', 'saveDialog', 'reasonCategory', 'caseSide', 'eventCases', 'loadFaithful', 'registrationCheck', 'emptyCase', 'hideCondition', 'registrationCounts', 'caseCoverage', 'cancelCheck', 'limitCode', 'scopeList', 'tableRowChange', 'caseInvalid', 'rowButtons'].includes(f)) && GEN_EFFECT_FEATURES.length === 20, 'D27-0: 印は requiredEffects・effectGroups・relatedOmitted・appFields・saveDialog・reasonCategory・caseSide（§0c.9）・eventCases・loadFaithful・registrationCheck・emptyCase・hideCondition（§0c.10）・registrationCounts・caseCoverage（§0c.11）・cancelCheck・limitCode（C-1 第 3 段）・scopeList（C-1 第 4 段）・tableRowChange・caseInvalid（2026-10-10）・rowButtons（2026-10-24 §12.70）');
   //   2026-10-10（誤った検証による修復の繰り返しを止める §5.2）: 17 個 → 19 個。テーブル自体の変更の組み立て（tableRowChange）と壊れた入力の not-run（caseInvalid）が無い Gateway は、
   //   壊れた模擬テストの入力で正しい候補を不合格にして修復を繰り返す形のままなので、新しい形として受け入れない（前の期待 17 個はこの不具合の前の契約）
   //   2026-10-23（§12.61）: 印の欠ける接続先は接続時の確認で生成を使えない（tests/ai-capability-marks.test.js）。会話の生成の前の照合は無い

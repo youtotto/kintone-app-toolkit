@@ -268,7 +268,7 @@ function createNewFlowKit(T) {
   //   §0c.10（2026-10-08）: Gateway の eventCases・loadFaithful・registrationCheck・emptyCase・hideCondition も印に加えた（12 個）
   //   §0c.11 の registrationCounts・caseCoverage、C-1 第 3 段（2026-10-08）の cancelCheck・limitCode、C-1 第 4 段（2026-10-09）の scopeList も加えた（17 個。どれかが欠ける接続先は「接続先が非対応」）
   //   2026-10-10（誤った検証による修復の繰り返しを止める §5.2）: tableRowChange・caseInvalid も加えた（19 個）。conditionFrom は印の一覧ではなく移植元の判定の能力（GEN_PORT_FEATURE）
-  const GEN_EFFECT_FEATURES = ['requiredEffects', 'effectGroups', 'relatedOmitted', 'appFields', 'saveDialog', 'reasonCategory', 'caseSide', 'eventCases', 'loadFaithful', 'registrationCheck', 'emptyCase', 'hideCondition', 'registrationCounts', 'caseCoverage', 'cancelCheck', 'limitCode', 'scopeList', 'tableRowChange', 'caseInvalid'];
+  const GEN_EFFECT_FEATURES = ['requiredEffects', 'effectGroups', 'relatedOmitted', 'appFields', 'saveDialog', 'reasonCategory', 'caseSide', 'eventCases', 'loadFaithful', 'registrationCheck', 'emptyCase', 'hideCondition', 'registrationCounts', 'caseCoverage', 'cancelCheck', 'limitCode', 'scopeList', 'tableRowChange', 'caseInvalid', 'rowButtons'];   // rowButtons（2026-10-24・§12.70）
   /** §5.1: 移植元と同じ動きかを比べる検査の印（health の customization-generator.verification の conditionFrom。今の Gateway の偽物には付ける） */
   const GEN_PORT_FEATURE = 'conditionFrom';
   /** 2026-10-18: 外部への通信と通知の検査の印（health の networkCheck）・検査と模擬テストに使った本文を返す印（verifiedBody）・効果ごとの確かめ方（effectCheck）・

@@ -74,7 +74,7 @@ console.log('\n--- §3 コードの検査: 行の追加・削除の制約の文�
   const review = (c, code) => KTCodeReview.review({ generated: gen(c, code), customization: c, plan: null, data: clone(DATA_C), scan: null, existingSource: null });
   const lockOnly = review(custOf(['lock'], { fields: [F_STATUS, F_AMOUNT, F_QTY] }), CODE_CELLS);
   const rows = (lockOnly.coverage.notAchieved || []).filter(y => y.code === 'SUBTABLE_ROWS');
-  assert(rows.length === 1 && /^「明細」テーブルの入力欄を編集できなくしても、行の追加・削除はできます（行の追加・削除のボタンは残ります。ボタンを隠す処理はこの計画に入っていません。必要なら依頼に加えてください）$/.test(rows[0].message) && rows[0].tables && rows[0].tables[0] === 'items',
+  assert(rows.length === 1 && /^「明細」テーブルの入力欄を編集できなくしても、行の追加・削除はできます（行の追加・削除のボタンは残ります）$/.test(rows[0].message) && rows[0].tables && rows[0].tables[0] === 'items',
     `3-1 列の編集不可だけ → 制約「「明細」テーブルの入力欄を編集できなくしても、行の追加・削除はできます」（テーブルの名前で。API・Toolkit の都合を書かない）: ${JSON.stringify(rows.map(r => r.message))}`);
   assert(!/API|Toolkit|セル|明細行/.test(rows[0] ? rows[0].message : ''), '3-2 制約の文に API・Toolkit・セル・明細行の語が無い');
   const both = review(custOf(['lock'], { fields: [F_STATUS, F_AMOUNT, F_QTY, F_ROWS] }), CODE);
@@ -117,6 +117,32 @@ console.log('\n--- §3c 合否: Gateway が落とした画面の no-event を免
 }
 
 // =========================================================
+console.log('\n--- §3d 合否: 模擬テストの環境の版（sandbox-outdated）と非同期の続き（async-after-return）は環境の理由の未確認（2026-10-24 §12.70） ---');
+{
+  const REQ_TK = [{ requirementId: 'R1', requirementIds: ['R1'], field: 'items', effect: 'hide-row-buttons', events: ['app.record.edit.show'], condition: COND }];
+  const caseOf = (o) => ({ requirementId: 'R1', requirementIds: ['R1'], field: 'items', effect: 'hide-row-buttons', platform: 'desktop', event: 'app.record.edit.show', ...o });
+  const gwVer = (cases) => ({ version: '1', passed: true, machine: [], requiredEffects: [{ requirementId: 'R1', requirementIds: ['R1'], field: 'items', effect: 'hide-row-buttons', status: 'present', check: 'behavior', checkReason: 'conditional', checkReasons: ['conditional'], events: [{ event: 'app.record.edit.show', status: 'present' }] }], behavior: { status: 'not-run', reason: cases[0].reason, cases }, repairs: { count: 0, reasons: [], stoppedBy: null }, unverified: [] });
+  for (const reason of ['sandbox-outdated', 'async-after-return']) {
+    const cases = [caseOf({ id: 'K1', expect: 'row-buttons-hidden', side: 'match', kind: 'match', verdict: 'not-run', reason, reasonCategory: 'environment', observed: null, message: 'x' }), caseOf({ id: 'K2', expect: 'row-buttons-shown', side: 'nomatch', kind: 'nomatch', verdict: 'pass', observed: {}, message: '期待どおり' })];
+    const er = KTCodeReview.effectResults(gwVer(cases), REQ_TK, { omitted: [] });
+    assert(er.ok === false && er.items[0].behavior === 'not-run' && JSON.stringify(er.items[0].notRunReasons) === JSON.stringify([reason]) && er.reasonCategory === 'env', `3d ${reason}: 合格にしない・理由の区分は環境（env。理由の表に項目がある）: ${JSON.stringify({ ok: er.ok, cat: er.reasonCategory, items: er.items.map(i => [i.behavior, i.notRunReasons]) })}`);
+  }
+  assert(/この Toolkit に必要な機能に対応していません/.test(T2.KTAiClient.errorText('CAPABILITY_OUTDATED')) && /接続先の設定を確かめてください/.test(T2.KTAiClient.errorText('CAPABILITY_OUTDATED')) && !/版が古く/.test(T2.KTAiClient.errorText('CAPABILITY_OUTDATED')), `3d-3 能力の印が欠けるときの文は検出した事実と次の行動（版が古いとは言わない）: ${T2.KTAiClient.errorText('CAPABILITY_OUTDATED')}`);
+}
+
+// =========================================================
+console.log('\n--- §3e 接続時の印: 行のボタンの効果を検証できない接続先（health の verification に rowButtons が無い）には生成を依頼しない（2026-10-24 §12.70 レビュー 3） ---');
+{
+  const h = clone(K.HEALTH_V);
+  const g = h.registry.toolkit['customization-generator'];
+  assert(g.verification.includes('rowButtons'), '3e-0 今の偽の health（本物の prompt-registry と同じ印）に rowButtons がある');
+  g.verification = g.verification.filter(x => x !== 'rowButtons');
+  const c = T2.KTAiClient.capabilityFromHealth(h);
+  assert(c.features['customization-generator'].available === false && c.features['customization-generator'].reason === 'CAPABILITY_OUTDATED' && JSON.stringify(c.features['customization-generator'].lacking) === JSON.stringify(['rowButtons']) && c.features['change-planner'].available === true,
+    `3e-1 rowButtons の無い接続先（旧 Gateway）は生成を使えない（CAPABILITY_OUTDATED・lacking rowButtons。効果を落とした有料の生成に進まない）。計画は使える: ${JSON.stringify(c.features['customization-generator'])}`);
+}
+
+// =========================================================
 console.log('\n--- §4 会話: 金額の編集不可＋明細の行のボタンを隠す計画 → 検証済み・承認できる ---');
 {
   CAND.rowbtn = { code: CODE, has: { amount: ['lock'], items: ['hide-row-buttons'] } };
@@ -149,7 +175,7 @@ console.log('\n--- §5 会話: 列の編集不可だけの計画の最終案の�
   await adoptC(x);
   const v = x.c.activePlan(), e = v.generated.C1;
   const text = stripC(finalHtml(x));
-  assert(e && e.status === 'verified' && /「明細」テーブルの行は追加・削除できます/.test(text) && /入力欄を編集できなくしても、行の追加・削除のボタンは残るためです。行の追加・削除もできなくしたいときは、その旨を依頼に加えてください/.test(text),
+  assert(e && e.status === 'verified' && /「明細」テーブルの行は追加・削除できます/.test(text) && /入力欄を編集できなくしても、行の追加・削除のボタンは残るためです/.test(text) && !/依頼に加えて|ボタンを隠す処理/.test(text),
     `5-1 最終案の制約: 「「明細」テーブルの行は追加・削除できます」＋理由と次にすること: ${text.split('\n').filter(l => /行/.test(l)).join(' | ').slice(0, 400)}`);
   assert(!/Toolkit がまだ扱って|行のボタンを隠す API|セル|明細行/.test(text), '5-2 最終案の文に「Toolkit がまだ扱って」「API」「セル」「明細行」が無い');
 }

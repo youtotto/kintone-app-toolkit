@@ -30,7 +30,7 @@ await section(async () => {
   const full = cap(K.HEALTH_V);
   assert(full.available === true && full.features['assistant-qa'].available === true && full.features['change-planner'].available === true && full.features['customization-generator'].available === true,
     `C1-1: 今の AI サービスの印がそろった health は会話・計画・生成を使える: ${JSON.stringify(Object.fromEntries(Object.entries(full.features).map(([k, v]) => [k, [v.available, v.reason]])))}`);
-  assert(OUTDATED === 'CAPABILITY_OUTDATED' && /AI サービスの版が古く、今の Toolkit と組み合わせて使えません/.test(KTAiClient.errorText(OUTDATED)) && KTAiClient.errorCategory(OUTDATED) === 'version', 'C1-2: 符号 CAPABILITY_OUTDATED・利用者に見せる文・種類（version）');
+  assert(OUTDATED === 'CAPABILITY_OUTDATED' && /この Toolkit に必要な機能に対応していません/.test(KTAiClient.errorText(OUTDATED)) && KTAiClient.errorCategory(OUTDATED) === 'version', 'C1-2: 符号 CAPABILITY_OUTDATED・利用者に見せる文・種類（version）');
   for (const mark of KTAiClient.CONVERSATION_MARKS) {
     const c = cap(withoutQa(mark));
     assert(c.available === false && c.reason === OUTDATED && c.features['assistant-qa'].available === false && JSON.stringify(c.features['assistant-qa'].lacking) === JSON.stringify([mark]) && c.features['change-planner'].available === true && c.features['customization-generator'].available === true,
@@ -67,7 +67,7 @@ await section(async () => {
   const text = K.stripC(m.chat()) + K.stripC(m.$('kt-ai-paid-status').innerHTML);
   assert(m.calls.propose.length === 0 && m.calls.plan.length === 0 && m.calls.ask.length === 0 && m.conv().draft() === null && m.conv().activePlan() === null && !/kt-ai-draft-card|kt-ai-plan-card/.test(m.chat()) && !m.mock.calls.some(c => /^(PUT|POST) /.test(c)),
     `C2-1: 仮案・計画・質問の AI を呼ばず、仮案・変更案のカードは出ず、書き込み 0: ${JSON.stringify({ propose: m.calls.propose.length, plan: m.calls.plan.length, ask: m.calls.ask.length, writes: m.mock.calls.filter(c => /^(PUT|POST) /.test(c)) })}`);
-  assert(/AI サービスの版が古く、今の Toolkit と組み合わせて使えません/.test(text) || /AI サービスの版が古く、今の Toolkit と組み合わせて使えません/.test(K.stripC(status)), `C2-2: 理由の文（接続先の更新が必要）が画面に出る: ${(text.match(/.{0,80}組み合わせて使えません.{0,40}/) || [K.stripC(status).slice(0, 160)])[0]}`);
+  assert(/この Toolkit に必要な機能に対応していません/.test(text) || /この Toolkit に必要な機能に対応していません/.test(K.stripC(status)), `C2-2: 理由の文（接続先が必要な機能に対応していない。版が古いとは言い切らない）が画面に出る: ${(text.match(/.{0,80}対応していません.{0,40}/) || [K.stripC(status).slice(0, 160)])[0]}`);
 });
 
 console.log('\n--- §C3 画面: 生成の印が欠ける接続先では、AI サービスを呼ばず、反映できる最終案にならない ---');
@@ -82,7 +82,7 @@ await section(async () => {
   //   独立レビュー（中 2）: 生成だけが使えないときの理由も契約の文（NOT_ENTITLED の文）ではなく、接続先の更新が必要という文
   const chat3 = K.stripC(m.chat());
   const e3 = v && v.generated && v.generated.C1;
-  assert(e3 && e3.status === 'failed' && e3.failure && e3.failure.reason === 'CAPABILITY_OUTDATED' && /AI サービスの版が古く、今の Toolkit と組み合わせて使えません/.test(chat3) && !/この契約では|契約内容を確認/.test(chat3),
+  assert(e3 && e3.status === 'failed' && e3.failure && e3.failure.reason === 'CAPABILITY_OUTDATED' && /この Toolkit に必要な機能に対応していません/.test(chat3) && !/この契約では|契約内容を確認/.test(chat3),
     `C3-2: 生成を使えない理由は CAPABILITY_OUTDATED の文（契約の文にしない）: ${JSON.stringify({ failure: e3 && e3.failure, text: (chat3.match(/.{0,60}組み合わせて使えません.{0,30}/) || [])[0] })}`);
 });
 
