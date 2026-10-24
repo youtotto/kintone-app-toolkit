@@ -12,7 +12,7 @@ function loadToolkit({ document: docOverride = null, localStorage: lsOverride = 
   const lastClose = code.lastIndexOf('})();');
   if (lastClose < 0) throw new Error('IIFE close not found');
   code = code.slice(0, lastClose)
-    + '\n  globalThis.__TEST__ = { KTDeps, KTScan, KTIncoming, KTDevBase: typeof KTDevBase !== "undefined" ? KTDevBase : undefined, KTContext, KTPlanText: typeof KTPlanText !== "undefined" ? KTPlanText : undefined, KTContextUi, KTAiClient, KTAiBudget: typeof KTAiBudget !== "undefined" ? KTAiBudget : undefined, KTQueryCheck, KTPlanReview, KTPlanExecutor, KTAiConversation, KTAiAnswers: typeof KTAiAnswers !== "undefined" ? KTAiAnswers : undefined, KTAiWorkspaceViewModel, KTAiChatUi, KTJsCatalog, KTCodeReview, KTJsExecutor, mountAiWorkspace, mountRoot, renderCustomize, renderAiWorkspace, SCRIPT_VERSION, buildProcessMermaid: typeof buildProcessMermaid !== "undefined" ? buildProcessMermaid : undefined, startToolkit: typeof startToolkit !== "undefined" ? startToolkit : undefined, KTFetchGate: typeof KTFetchGate !== "undefined" ? KTFetchGate : undefined, KTApi: typeof KTApi !== "undefined" ? KTApi : undefined, prefetchAppData: typeof prefetchAppData !== "undefined" ? prefetchAppData : undefined, fetchRelatedApps: typeof fetchRelatedApps !== "undefined" ? fetchRelatedApps : undefined, renderPlugins: typeof renderPlugins !== "undefined" ? renderPlugins : undefined };\n'
+    + '\n  globalThis.__TEST__ = { KTReleaseWorkspace: typeof KTReleaseWorkspace !== "undefined" ? KTReleaseWorkspace : undefined, KTReleaseView: typeof KTReleaseView !== "undefined" ? KTReleaseView : undefined, KTReleaseContext: typeof KTReleaseContext !== "undefined" ? KTReleaseContext : undefined, KTReleaseExecution: typeof KTReleaseExecution !== "undefined" ? KTReleaseExecution : undefined, mountReleaseWorkspace: typeof mountReleaseWorkspace !== "undefined" ? mountReleaseWorkspace : undefined, KTDeps, KTScan, KTIncoming, KTDevBase: typeof KTDevBase !== "undefined" ? KTDevBase : undefined, KTContext, KTPlanText: typeof KTPlanText !== "undefined" ? KTPlanText : undefined, KTContextUi, KTAiClient, KTAiBudget: typeof KTAiBudget !== "undefined" ? KTAiBudget : undefined, KTQueryCheck, KTPlanReview: typeof KTPlanReview !== "undefined" ? KTPlanReview : undefined, KTPlanExecutor, KTAiConversation: typeof KTAiConversation !== "undefined" ? KTAiConversation : undefined, KTAiAnswers: typeof KTAiAnswers !== "undefined" ? KTAiAnswers : undefined, KTAiWorkspaceViewModel: typeof KTAiWorkspaceViewModel !== "undefined" ? KTAiWorkspaceViewModel : undefined, KTAiChatUi: typeof KTAiChatUi !== "undefined" ? KTAiChatUi : undefined, KTJsCatalog, KTCodeReview: typeof KTCodeReview !== "undefined" ? KTCodeReview : undefined, KTJsExecutor, mountAiWorkspace: typeof mountAiWorkspace !== "undefined" ? mountAiWorkspace : undefined, mountRoot, renderCustomize, renderAiWorkspace: typeof renderAiWorkspace !== "undefined" ? renderAiWorkspace : undefined, SCRIPT_VERSION, buildProcessMermaid: typeof buildProcessMermaid !== "undefined" ? buildProcessMermaid : undefined, startToolkit: typeof startToolkit !== "undefined" ? startToolkit : undefined, KTFetchGate: typeof KTFetchGate !== "undefined" ? KTFetchGate : undefined, KTApi: typeof KTApi !== "undefined" ? KTApi : undefined, prefetchAppData: typeof prefetchAppData !== "undefined" ? prefetchAppData : undefined, fetchRelatedApps: typeof fetchRelatedApps !== "undefined" ? fetchRelatedApps : undefined, renderPlugins: typeof renderPlugins !== "undefined" ? renderPlugins : undefined };\n'
     + code.slice(lastClose);
 
   const noop = () => { };
@@ -33,7 +33,7 @@ function loadToolkit({ document: docOverride = null, localStorage: lsOverride = 
       addEventListener: noop,
     },
     matchMedia: () => ({ matches: false, addEventListener: noop }),
-    location: { host: 'test.cybozu.com', origin: 'https://test.cybozu.com' },
+    location: { host: 'test.cybozu.com', origin: 'https://test.cybozu.com', protocol: 'https:', pathname: '/k/310/', href: 'https://test.cybozu.com/k/310/' },
     requestIdleCallback: noop,
     ResizeObserver: class { observe() { } disconnect() { } },
     addEventListener: noop, removeEventListener: noop,
@@ -51,7 +51,7 @@ function loadToolkit({ document: docOverride = null, localStorage: lsOverride = 
   for (const t of loadTimers) clearTimeout(t);
   sandbox.__TEST__.__sandbox = sandbox;   // Phase 18: Customize タブのテストで window.loadMonaco / kintone / fetch を差し込む
   //   簡素化（2026-10-17）: 作った会話を覚え、テストが版から今の判定（反映できるか）を引けるようにする（tests/helpers/final-state.js）
-  require('./final-state.js').trackConversations(sandbox.__TEST__.KTAiConversation);
+  if (sandbox.__TEST__.KTAiConversation) require('./final-state.js').trackConversations(sandbox.__TEST__.KTAiConversation);
   return sandbox.__TEST__;
 }
 

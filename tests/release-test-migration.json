@@ -1,0 +1,724 @@
+{
+  "schema": "release-test-migration-1",
+  "baseline": "Toolkit c77180c",
+  "scope": "今回のAI作業面。非AI調査機能と実行部品の安全性は維持する。",
+  "note": "件数の一致を目標にせず、削除した責任の試験と残す安全性の試験を分ける。この表は個々の旧assertionが新assertionへ一対一対応するとの主張ではない。",
+  "initialTestFiles": 68,
+  "retained": [
+    {
+      "file": "ai-context-size.test.js",
+      "disposition": "retain-component-test"
+    },
+    {
+      "file": "ai-context.test.js",
+      "disposition": "retain-component-test"
+    },
+    {
+      "file": "ai-planner-context.test.js",
+      "disposition": "retain-component-test"
+    },
+    {
+      "file": "ai-query-check.test.js",
+      "disposition": "retain-component-test-move-old-integration",
+      "preserved": "条件式そのものの28件は維持。旧Review連携4件は新実行準備へ移す。",
+      "replacements": [
+        "release-execution-services.test.js"
+      ]
+    },
+    {
+      "file": "ai-session.test.js",
+      "disposition": "retain-component-test"
+    },
+    {
+      "file": "field-entity-deps.test.js",
+      "disposition": "retain-component-test"
+    },
+    {
+      "file": "incoming-lookup-refs.test.js",
+      "disposition": "retain-component-test"
+    },
+    {
+      "file": "js-external-app-refs.test.js",
+      "disposition": "retain-component-test"
+    },
+    {
+      "file": "js-field-refs.test.js",
+      "disposition": "retain-component-test"
+    },
+    {
+      "file": "js-file-key.test.js",
+      "disposition": "retain-component-test"
+    },
+    {
+      "file": "relations-consistency.test.js",
+      "disposition": "retain-component-test"
+    },
+    {
+      "file": "panel-minimized-fetch.test.js",
+      "disposition": "retain-non-ai-properties-replace-old-ai-state",
+      "preserved": "通常タブの初回/再表示/変更後取得、最小化中の通信抑制・途中中断と必要分再開、Scanner、明示再取得、表示状態の保存復元（56件）",
+      "removed": "旧 AI パネル固有のprecheck・同期state・内部取得回数",
+      "replacements": [
+        "release-workspace.test.js",
+        "release-execution-services.test.js",
+        "release-workspace-browser.test.js"
+      ]
+    }
+  ],
+  "replaced": [
+    {
+      "file": "ai-1267-followup.test.js",
+      "disposition": "replace-old-flow",
+      "preserved": "実現する変更と制約の説明、未完成と変更なしの区別、入力と履歴の保全、HTMLの無害化",
+      "removed": "旧カード・タブ名・同期state・件数・内部番号・原価表示に一致させる試験",
+      "replacements": [
+        "release-workspace.test.js",
+        "release-workspace-view.test.js",
+        "release-workspace-browser.test.js"
+      ]
+    },
+    {
+      "file": "ai-acceptance-p20.test.js",
+      "disposition": "replace-old-flow",
+      "preserved": "検証済み本文への結び付け、未検証・未完了を承認しない、PCとモバイルの明示対象、生成と登録の契約、実行前後の一致",
+      "removed": "効果・条件・要件の担当・coverageのクライアントでの再判定、旧仕様確定の関所",
+      "replacements": [
+        "release-workspace.test.js",
+        "release-execution-services.test.js",
+        "Gateway artifact-outcome / verify-generated / required-effects のテスト"
+      ]
+    },
+    {
+      "file": "ai-acceptance-p21.test.js",
+      "disposition": "replace-old-flow",
+      "preserved": "検証済み本文への結び付け、未検証・未完了を承認しない、PCとモバイルの明示対象、生成と登録の契約、実行前後の一致",
+      "removed": "効果・条件・要件の担当・coverageのクライアントでの再判定、旧仕様確定の関所",
+      "replacements": [
+        "release-workspace.test.js",
+        "release-execution-services.test.js",
+        "Gateway artifact-outcome / verify-generated / required-effects のテスト"
+      ]
+    },
+    {
+      "file": "ai-adopt-intent.test.js",
+      "disposition": "replace-old-flow",
+      "preserved": "修正だけでは作成しない、採用した案をサービスに渡す、必要な判断が未解決の間は採用しない",
+      "removed": "自然文から意図・要件・担当を再解釈するクライアント判定",
+      "replacements": [
+        "release-workspace.test.js",
+        "Gateway validate-proposal-response / change-planner の既存テスト"
+      ]
+    },
+    {
+      "file": "ai-answer-decisions.test.js",
+      "disposition": "replace-old-flow",
+      "preserved": "修正だけでは作成しない、採用した案をサービスに渡す、必要な判断が未解決の間は採用しない",
+      "removed": "自然文から意図・要件・担当を再解釈するクライアント判定",
+      "replacements": [
+        "release-workspace.test.js",
+        "Gateway validate-proposal-response / change-planner の既存テスト"
+      ]
+    },
+    {
+      "file": "ai-apply-log-state.test.js",
+      "disposition": "replace-old-flow",
+      "preserved": "一度の承認、基準の再取得、承認後の変更、部分失敗、復元対象と取消し、変更なしを成功と混同しない",
+      "removed": "左右の状態同期、上下の結果カード参照、旧版オブジェクトの照合",
+      "replacements": [
+        "release-workspace.test.js",
+        "release-execution-services.test.js"
+      ]
+    },
+    {
+      "file": "ai-apply-record.test.js",
+      "disposition": "replace-old-flow",
+      "preserved": "一度の承認、基準の再取得、承認後の変更、部分失敗、復元対象と取消し、変更なしを成功と混同しない",
+      "removed": "左右の状態同期、上下の結果カード参照、旧版オブジェクトの照合",
+      "replacements": [
+        "release-workspace.test.js",
+        "release-execution-services.test.js"
+      ]
+    },
+    {
+      "file": "ai-assistant.test.js",
+      "disposition": "replace-old-flow",
+      "preserved": "互換性の無い接続先に生成を依頼しない、認証と接続、契約形式を守る",
+      "removed": "旧ヘッダーと旧接続ペインの描画形式",
+      "replacements": [
+        "release-workspace-client.test.js",
+        "ai-session.test.js",
+        "Gateway health / artifact-outcome の結合テスト"
+      ]
+    },
+    {
+      "file": "ai-capability-marks.test.js",
+      "disposition": "replace-old-flow",
+      "preserved": "互換性の無い接続先に生成を依頼しない、認証と接続、契約形式を守る",
+      "removed": "旧ヘッダーと旧接続ペインの描画形式",
+      "replacements": [
+        "release-workspace-client.test.js",
+        "ai-session.test.js",
+        "Gateway health / artifact-outcome の結合テスト"
+      ]
+    },
+    {
+      "file": "ai-chat-draft.test.js",
+      "disposition": "replace-old-flow",
+      "preserved": "実現する変更と制約の説明、未完成と変更なしの区別、入力と履歴の保全、HTMLの無害化",
+      "removed": "旧カード・タブ名・同期state・件数・内部番号・原価表示に一致させる試験",
+      "replacements": [
+        "release-workspace.test.js",
+        "release-workspace-view.test.js",
+        "release-workspace-browser.test.js"
+      ]
+    },
+    {
+      "file": "ai-connect.test.js",
+      "disposition": "replace-old-flow",
+      "preserved": "互換性の無い接続先に生成を依頼しない、認証と接続、契約形式を守る",
+      "removed": "旧ヘッダーと旧接続ペインの描画形式",
+      "replacements": [
+        "release-workspace-client.test.js",
+        "ai-session.test.js",
+        "Gateway health / artifact-outcome の結合テスト"
+      ]
+    },
+    {
+      "file": "ai-consult-notify.test.js",
+      "disposition": "replace-old-flow",
+      "preserved": "修正だけでは作成しない、採用した案をサービスに渡す、必要な判断が未解決の間は採用しない",
+      "removed": "自然文から意図・要件・担当を再解釈するクライアント判定",
+      "replacements": [
+        "release-workspace.test.js",
+        "Gateway validate-proposal-response / change-planner の既存テスト"
+      ]
+    },
+    {
+      "file": "ai-consultation.test.js",
+      "disposition": "replace-old-flow",
+      "preserved": "修正だけでは作成しない、採用した案をサービスに渡す、必要な判断が未解決の間は採用しない",
+      "removed": "自然文から意図・要件・担当を再解釈するクライアント判定",
+      "replacements": [
+        "release-workspace.test.js",
+        "Gateway validate-proposal-response / change-planner の既存テスト"
+      ]
+    },
+    {
+      "file": "ai-context-ui.test.js",
+      "disposition": "preserve-free-properties-in-new-suite",
+      "preserved": "無料資料7種類・相談/計画用の3形式、明示対象（PC/モバイル同名JS・同名フィールド）、対象曖昧、秘密除外、未解析/キャッシュ/省略の注意、コピー/保存、既存Scanner入口",
+      "removed": "廃止した AI ペイン/Review/内部stateに一致させる試験",
+      "replacements": [
+        "release-free-materials.test.js",
+        "release-free-materials-browser.test.js"
+      ]
+    },
+    {
+      "file": "ai-customization.test.js",
+      "disposition": "replace-old-flow",
+      "preserved": "検証済み本文への結び付け、未検証・未完了を承認しない、PCとモバイルの明示対象、生成と登録の契約、実行前後の一致",
+      "removed": "効果・条件・要件の担当・coverageのクライアントでの再判定、旧仕様確定の関所",
+      "replacements": [
+        "release-workspace.test.js",
+        "release-execution-services.test.js",
+        "Gateway artifact-outcome / verify-generated / required-effects のテスト"
+      ]
+    },
+    {
+      "file": "ai-final-dedupe-owner.test.js",
+      "disposition": "replace-old-flow",
+      "preserved": "検証済み本文への結び付け、未検証・未完了を承認しない、PCとモバイルの明示対象、生成と登録の契約、実行前後の一致",
+      "removed": "効果・条件・要件の担当・coverageのクライアントでの再判定、旧仕様確定の関所",
+      "replacements": [
+        "release-workspace.test.js",
+        "release-execution-services.test.js",
+        "Gateway artifact-outcome / verify-generated / required-effects のテスト"
+      ]
+    },
+    {
+      "file": "ai-final-omission.test.js",
+      "disposition": "replace-old-flow",
+      "preserved": "一度の承認、基準の再取得、承認後の変更、部分失敗、復元対象と取消し、変更なしを成功と混同しない",
+      "removed": "左右の状態同期、上下の結果カード参照、旧版オブジェクトの照合",
+      "replacements": [
+        "release-workspace.test.js",
+        "release-execution-services.test.js"
+      ]
+    },
+    {
+      "file": "ai-first-ux.test.js",
+      "disposition": "replace-old-flow",
+      "preserved": "無料の資料作成を維持、非AI調査機能を維持、通常の読み取りと重要な書込直前取得を区別",
+      "removed": "旧左右ペインを隠す・選択する操作、旧UIと結合した休止フラグ",
+      "replacements": [
+        "ai-context.test.js",
+        "ai-context-size.test.js",
+        "ai-planner-context.test.js",
+        "release-workspace.test.js",
+        "release-workspace-view.test.js",
+        "release-workspace-browser.test.js"
+      ]
+    },
+    {
+      "file": "ai-flow-redesign.test.js",
+      "disposition": "replace-old-flow",
+      "preserved": "実現する変更と制約の説明、未完成と変更なしの区別、入力と履歴の保全、HTMLの無害化",
+      "removed": "旧カード・タブ名・同期state・件数・内部番号・原価表示に一致させる試験",
+      "replacements": [
+        "release-workspace.test.js",
+        "release-workspace-view.test.js",
+        "release-workspace-browser.test.js"
+      ]
+    },
+    {
+      "file": "ai-generate-stream.test.js",
+      "disposition": "replace-old-flow",
+      "preserved": "認証失敗・期限切れ回復・通信の未完了・中断・終了不明の確保・上限制御・未完成のみの再開",
+      "removed": "旧カードの分類名、原価や時間の通常画面表示",
+      "replacements": [
+        "release-workspace-client.test.js",
+        "release-workspace.test.js",
+        "ai-session.test.js"
+      ]
+    },
+    {
+      "file": "ai-generator-context-contract.test.js",
+      "disposition": "replace-old-flow",
+      "preserved": "検証済み本文への結び付け、未検証・未完了を承認しない、PCとモバイルの明示対象、生成と登録の契約、実行前後の一致",
+      "removed": "効果・条件・要件の担当・coverageのクライアントでの再判定、旧仕様確定の関所",
+      "replacements": [
+        "release-workspace.test.js",
+        "release-execution-services.test.js",
+        "Gateway artifact-outcome / verify-generated / required-effects のテスト"
+      ]
+    },
+    {
+      "file": "ai-human-readable.test.js",
+      "disposition": "replace-old-flow",
+      "preserved": "実現する変更と制約の説明、未完成と変更なしの区別、入力と履歴の保全、HTMLの無害化",
+      "removed": "旧カード・タブ名・同期state・件数・内部番号・原価表示に一致させる試験",
+      "replacements": [
+        "release-workspace.test.js",
+        "release-workspace-view.test.js",
+        "release-workspace-browser.test.js"
+      ]
+    },
+    {
+      "file": "ai-no-change-steps.test.js",
+      "disposition": "replace-old-flow",
+      "preserved": "一度の承認、基準の再取得、承認後の変更、部分失敗、復元対象と取消し、変更なしを成功と混同しない",
+      "removed": "左右の状態同期、上下の結果カード参照、旧版オブジェクトの照合",
+      "replacements": [
+        "release-workspace.test.js",
+        "release-execution-services.test.js"
+      ]
+    },
+    {
+      "file": "ai-page-expired.test.js",
+      "disposition": "replace-old-flow",
+      "preserved": "認証失敗・期限切れ回復・通信の未完了・中断・終了不明の確保・上限制御・未完成のみの再開",
+      "removed": "旧カードの分類名、原価や時間の通常画面表示",
+      "replacements": [
+        "release-workspace-client.test.js",
+        "release-workspace.test.js",
+        "ai-session.test.js"
+      ]
+    },
+    {
+      "file": "ai-plan-executor-ui.test.js",
+      "disposition": "replace-old-flow",
+      "preserved": "一度の承認、基準の再取得、承認後の変更、部分失敗、復元対象と取消し、変更なしを成功と混同しない",
+      "removed": "左右の状態同期、上下の結果カード参照、旧版オブジェクトの照合",
+      "replacements": [
+        "release-workspace.test.js",
+        "release-execution-services.test.js"
+      ]
+    },
+    {
+      "file": "ai-plan-review-ui.test.js",
+      "disposition": "replace-old-flow",
+      "preserved": "実現する変更と制約の説明、未完成と変更なしの区別、入力と履歴の保全、HTMLの無害化",
+      "removed": "旧カード・タブ名・同期state・件数・内部番号・原価表示に一致させる試験",
+      "replacements": [
+        "release-workspace.test.js",
+        "release-workspace-view.test.js",
+        "release-workspace-browser.test.js"
+      ]
+    },
+    {
+      "file": "ai-planner-ui.test.js",
+      "disposition": "replace-old-flow",
+      "preserved": "実現する変更と制約の説明、未完成と変更なしの区別、入力と履歴の保全、HTMLの無害化",
+      "removed": "旧カード・タブ名・同期state・件数・内部番号・原価表示に一致させる試験",
+      "replacements": [
+        "release-workspace.test.js",
+        "release-workspace-view.test.js",
+        "release-workspace-browser.test.js"
+      ]
+    },
+    {
+      "file": "ai-port-and-table-change.test.js",
+      "disposition": "replace-old-flow",
+      "preserved": "検証済み本文への結び付け、未検証・未完了を承認しない、PCとモバイルの明示対象、生成と登録の契約、実行前後の一致",
+      "removed": "効果・条件・要件の担当・coverageのクライアントでの再判定、旧仕様確定の関所",
+      "replacements": [
+        "release-workspace.test.js",
+        "release-execution-services.test.js",
+        "Gateway artifact-outcome / verify-generated / required-effects のテスト"
+      ]
+    },
+    {
+      "file": "ai-process-branch-boundary.test.js",
+      "disposition": "replace-old-flow",
+      "preserved": "検証済み本文への結び付け、未検証・未完了を承認しない、PCとモバイルの明示対象、生成と登録の契約、実行前後の一致",
+      "removed": "効果・条件・要件の担当・coverageのクライアントでの再判定、旧仕様確定の関所",
+      "replacements": [
+        "release-workspace.test.js",
+        "release-execution-services.test.js",
+        "Gateway artifact-outcome / verify-generated / required-effects のテスト"
+      ]
+    },
+    {
+      "file": "ai-process-mermaid.test.js",
+      "disposition": "preserve-free-properties-in-new-suite",
+      "preserved": "非AI Healthプロセス図の状態名・操作名・空ラベル・引用符等の安全なエンコード",
+      "removed": "廃止した AI ペイン/Review/内部stateに一致させる試験",
+      "replacements": [
+        "release-free-materials.test.js",
+        "release-free-materials-browser.test.js"
+      ]
+    },
+    {
+      "file": "ai-rc-p22.test.js",
+      "disposition": "replace-old-flow",
+      "preserved": "検証済み本文への結び付け、未検証・未完了を承認しない、PCとモバイルの明示対象、生成と登録の契約、実行前後の一致",
+      "removed": "効果・条件・要件の担当・coverageのクライアントでの再判定、旧仕様確定の関所",
+      "replacements": [
+        "release-workspace.test.js",
+        "release-execution-services.test.js",
+        "Gateway artifact-outcome / verify-generated / required-effects のテスト"
+      ]
+    },
+    {
+      "file": "ai-realrun-abort.test.js",
+      "disposition": "replace-old-flow",
+      "preserved": "認証失敗・期限切れ回復・通信の未完了・中断・終了不明の確保・上限制御・未完成のみの再開",
+      "removed": "旧カードの分類名、原価や時間の通常画面表示",
+      "replacements": [
+        "release-workspace-client.test.js",
+        "release-workspace.test.js",
+        "ai-session.test.js"
+      ]
+    },
+    {
+      "file": "ai-realrun-budget.test.js",
+      "disposition": "replace-old-flow",
+      "preserved": "認証失敗・期限切れ回復・通信の未完了・中断・終了不明の確保・上限制御・未完成のみの再開",
+      "removed": "旧カードの分類名、原価や時間の通常画面表示",
+      "replacements": [
+        "release-workspace-client.test.js",
+        "release-workspace.test.js",
+        "ai-session.test.js"
+      ]
+    },
+    {
+      "file": "ai-realrun-display.test.js",
+      "disposition": "replace-old-flow",
+      "preserved": "実現する変更と制約の説明、未完成と変更なしの区別、入力と履歴の保全、HTMLの無害化",
+      "removed": "旧カード・タブ名・同期state・件数・内部番号・原価表示に一致させる試験",
+      "replacements": [
+        "release-workspace.test.js",
+        "release-workspace-view.test.js",
+        "release-workspace-browser.test.js"
+      ]
+    },
+    {
+      "file": "ai-realrun-resume.test.js",
+      "disposition": "replace-old-flow",
+      "preserved": "認証失敗・期限切れ回復・通信の未完了・中断・終了不明の確保・上限制御・未完成のみの再開",
+      "removed": "旧カードの分類名、原価や時間の通常画面表示",
+      "replacements": [
+        "release-workspace-client.test.js",
+        "release-workspace.test.js",
+        "ai-session.test.js"
+      ]
+    },
+    {
+      "file": "ai-realrun-scope.test.js",
+      "disposition": "replace-old-flow",
+      "preserved": "修正だけでは作成しない、採用した案をサービスに渡す、必要な判断が未解決の間は採用しない",
+      "removed": "自然文から意図・要件・担当を再解釈するクライアント判定",
+      "replacements": [
+        "release-workspace.test.js",
+        "Gateway validate-proposal-response / change-planner の既存テスト"
+      ]
+    },
+    {
+      "file": "ai-requirements.test.js",
+      "disposition": "replace-old-flow",
+      "preserved": "修正だけでは作成しない、採用した案をサービスに渡す、必要な判断が未解決の間は採用しない",
+      "removed": "自然文から意図・要件・担当を再解釈するクライアント判定",
+      "replacements": [
+        "release-workspace.test.js",
+        "Gateway validate-proposal-response / change-planner の既存テスト"
+      ]
+    },
+    {
+      "file": "ai-responsiveness.test.js",
+      "disposition": "replace-old-flow",
+      "preserved": "実現する変更と制約の説明、未完成と変更なしの区別、入力と履歴の保全、HTMLの無害化",
+      "removed": "旧カード・タブ名・同期state・件数・内部番号・原価表示に一致させる試験",
+      "replacements": [
+        "release-workspace.test.js",
+        "release-workspace-view.test.js",
+        "release-workspace-browser.test.js"
+      ]
+    },
+    {
+      "file": "ai-revoke-notice.test.js",
+      "disposition": "replace-old-flow",
+      "preserved": "一度の承認、基準の再取得、承認後の変更、部分失敗、復元対象と取消し、変更なしを成功と混同しない",
+      "removed": "左右の状態同期、上下の結果カード参照、旧版オブジェクトの照合",
+      "replacements": [
+        "release-workspace.test.js",
+        "release-execution-services.test.js"
+      ]
+    },
+    {
+      "file": "ai-row-buttons.test.js",
+      "disposition": "replace-old-flow",
+      "preserved": "検証済み本文への結び付け、未検証・未完了を承認しない、PCとモバイルの明示対象、生成と登録の契約、実行前後の一致",
+      "removed": "効果・条件・要件の担当・coverageのクライアントでの再判定、旧仕様確定の関所",
+      "replacements": [
+        "release-workspace.test.js",
+        "release-execution-services.test.js",
+        "Gateway artifact-outcome / verify-generated / required-effects のテスト"
+      ]
+    },
+    {
+      "file": "ai-spec-retention.test.js",
+      "disposition": "replace-old-flow",
+      "preserved": "検証済み本文への結び付け、未検証・未完了を承認しない、PCとモバイルの明示対象、生成と登録の契約、実行前後の一致",
+      "removed": "効果・条件・要件の担当・coverageのクライアントでの再判定、旧仕様確定の関所",
+      "replacements": [
+        "release-workspace.test.js",
+        "release-execution-services.test.js",
+        "Gateway artifact-outcome / verify-generated / required-effects のテスト"
+      ]
+    },
+    {
+      "file": "ai-stage-a.test.js",
+      "disposition": "replace-old-flow",
+      "preserved": "検証済み本文への結び付け、未検証・未完了を承認しない、PCとモバイルの明示対象、生成と登録の契約、実行前後の一致",
+      "removed": "効果・条件・要件の担当・coverageのクライアントでの再判定、旧仕様確定の関所",
+      "replacements": [
+        "release-workspace.test.js",
+        "release-execution-services.test.js",
+        "Gateway artifact-outcome / verify-generated / required-effects のテスト"
+      ]
+    },
+    {
+      "file": "ai-table-lock.test.js",
+      "disposition": "replace-old-flow",
+      "preserved": "検証済み本文への結び付け、未検証・未完了を承認しない、PCとモバイルの明示対象、生成と登録の契約、実行前後の一致",
+      "removed": "効果・条件・要件の担当・coverageのクライアントでの再判定、旧仕様確定の関所",
+      "replacements": [
+        "release-workspace.test.js",
+        "release-execution-services.test.js",
+        "Gateway artifact-outcome / verify-generated / required-effects のテスト"
+      ]
+    },
+    {
+      "file": "ai-two-pane.test.js",
+      "disposition": "replace-old-flow",
+      "preserved": "実現する変更と制約の説明、未完成と変更なしの区別、入力と履歴の保全、HTMLの無害化",
+      "removed": "旧カード・タブ名・同期state・件数・内部番号・原価表示に一致させる試験",
+      "replacements": [
+        "release-workspace.test.js",
+        "release-workspace-view.test.js",
+        "release-workspace-browser.test.js"
+      ]
+    },
+    {
+      "file": "ai-workspace-ux.test.js",
+      "disposition": "replace-old-flow",
+      "preserved": "実現する変更と制約の説明、未完成と変更なしの区別、入力と履歴の保全、HTMLの無害化",
+      "removed": "旧カード・タブ名・同期state・件数・内部番号・原価表示に一致させる試験",
+      "replacements": [
+        "release-workspace.test.js",
+        "release-workspace-view.test.js",
+        "release-workspace-browser.test.js"
+      ]
+    },
+    {
+      "file": "ai-workspace.test.js",
+      "disposition": "replace-old-flow",
+      "preserved": "実現する変更と制約の説明、未完成と変更なしの区別、入力と履歴の保全、HTMLの無害化",
+      "removed": "旧カード・タブ名・同期state・件数・内部番号・原価表示に一致させる試験",
+      "replacements": [
+        "release-workspace.test.js",
+        "release-workspace-view.test.js",
+        "release-workspace-browser.test.js"
+      ]
+    },
+    {
+      "file": "ai-js-executor.test.js",
+      "disposition": "replace-old-entry",
+      "preserved": "14種類の設定変更・登録対象・書込前後の一致・並行変更・一部失敗・権限・復元対象の分離",
+      "removed": "旧 prepare / classifySteps / applyReadiness / KTCodeReview を直接使う入口",
+      "replacements": [
+        "release-execution-services.test.js",
+        "release-workspace.test.js",
+        "release-workspace-client.test.js",
+        "Gateway artifact-outcome / verify-generated の既存テスト"
+      ]
+    },
+    {
+      "file": "ai-plan-executor-app-action.test.js",
+      "disposition": "replace-old-entry",
+      "preserved": "14種類の設定変更・登録対象・書込前後の一致・並行変更・一部失敗・権限・復元対象の分離",
+      "removed": "旧 prepare / classifySteps / applyReadiness / KTCodeReview を直接使う入口",
+      "replacements": [
+        "release-execution-services.test.js",
+        "release-workspace.test.js",
+        "release-workspace-client.test.js",
+        "Gateway artifact-outcome / verify-generated の既存テスト"
+      ]
+    },
+    {
+      "file": "ai-plan-executor-lookup.test.js",
+      "disposition": "replace-old-entry",
+      "preserved": "14種類の設定変更・登録対象・書込前後の一致・並行変更・一部失敗・権限・復元対象の分離",
+      "removed": "旧 prepare / classifySteps / applyReadiness / KTCodeReview を直接使う入口",
+      "replacements": [
+        "release-execution-services.test.js",
+        "release-workspace.test.js",
+        "release-workspace-client.test.js",
+        "Gateway artifact-outcome / verify-generated の既存テスト"
+      ]
+    },
+    {
+      "file": "ai-plan-executor-process.test.js",
+      "disposition": "replace-old-entry",
+      "preserved": "14種類の設定変更・登録対象・書込前後の一致・並行変更・一部失敗・権限・復元対象の分離",
+      "removed": "旧 prepare / classifySteps / applyReadiness / KTCodeReview を直接使う入口",
+      "replacements": [
+        "release-execution-services.test.js",
+        "release-workspace.test.js",
+        "release-workspace-client.test.js",
+        "Gateway artifact-outcome / verify-generated の既存テスト"
+      ]
+    },
+    {
+      "file": "ai-plan-executor-rollback.test.js",
+      "disposition": "replace-old-entry",
+      "preserved": "14種類の設定変更・登録対象・書込前後の一致・並行変更・一部失敗・権限・復元対象の分離",
+      "removed": "旧 prepare / classifySteps / applyReadiness / KTCodeReview を直接使う入口",
+      "replacements": [
+        "release-execution-services.test.js",
+        "release-workspace.test.js",
+        "release-workspace-client.test.js",
+        "Gateway artifact-outcome / verify-generated の既存テスト"
+      ]
+    },
+    {
+      "file": "ai-plan-executor-tier2.test.js",
+      "disposition": "replace-old-entry",
+      "preserved": "14種類の設定変更・登録対象・書込前後の一致・並行変更・一部失敗・権限・復元対象の分離",
+      "removed": "旧 prepare / classifySteps / applyReadiness / KTCodeReview を直接使う入口",
+      "replacements": [
+        "release-execution-services.test.js",
+        "release-workspace.test.js",
+        "release-workspace-client.test.js",
+        "Gateway artifact-outcome / verify-generated の既存テスト"
+      ]
+    },
+    {
+      "file": "ai-plan-executor-update.test.js",
+      "disposition": "replace-old-entry",
+      "preserved": "14種類の設定変更・登録対象・書込前後の一致・並行変更・一部失敗・権限・復元対象の分離",
+      "removed": "旧 prepare / classifySteps / applyReadiness / KTCodeReview を直接使う入口",
+      "replacements": [
+        "release-execution-services.test.js",
+        "release-workspace.test.js",
+        "release-workspace-client.test.js",
+        "Gateway artifact-outcome / verify-generated の既存テスト"
+      ]
+    },
+    {
+      "file": "ai-plan-executor.test.js",
+      "disposition": "replace-old-entry",
+      "preserved": "14種類の設定変更・登録対象・書込前後の一致・並行変更・一部失敗・権限・復元対象の分離",
+      "removed": "旧 prepare / classifySteps / applyReadiness / KTCodeReview を直接使う入口",
+      "replacements": [
+        "release-execution-services.test.js",
+        "release-workspace.test.js",
+        "release-workspace-client.test.js",
+        "Gateway artifact-outcome / verify-generated の既存テスト"
+      ]
+    },
+    {
+      "file": "ai-rc-e2e.test.js",
+      "disposition": "replace-old-entry",
+      "preserved": "API目録の既知判定、検証未完了と不合格の拒否、検証本文、明示的な既存利用の依存",
+      "removed": "旧 prepare / classifySteps / applyReadiness / KTCodeReview を直接使う入口",
+      "replacements": [
+        "release-execution-services.test.js",
+        "release-workspace.test.js",
+        "release-workspace-client.test.js",
+        "Gateway artifact-outcome / verify-generated の既存テスト"
+      ]
+    },
+    {
+      "file": "ai-plan-review.test.js",
+      "disposition": "replace-removed-responsibility",
+      "preserved": "設定の値・参照・型・条件式・依存・並行変更を、実際の書込みを準備する部品で確かめる。14設定種と明確な欠落を新実行試験で確認。",
+      "removed": "計画時の旧Reviewの判定・差分・表示分類とその再集計",
+      "replacements": [
+        "release-execution-services.test.js",
+        "ai-query-check.test.js",
+        "Gateway validate-plan の既存テスト"
+      ],
+      "note": "旧238件の個々の判定文・分類との同等性を主張しない。現在の書込対象と停止理由は新実行試験の記述を正とする。"
+    }
+  ],
+  "newAcceptance": [
+    {
+      "file": "release-workspace.test.js",
+      "scope": "明示操作による相談・採用・生成・確認・承認・一部失敗・再開・復元と表示"
+    },
+    {
+      "file": "release-workspace-client.test.js",
+      "scope": "ページ期限切れ回復・重複送信防止・内部上限制御・SSE未完了"
+    },
+    {
+      "file": "release-workspace-browser.test.js",
+      "scope": "実ブラウザーで主な操作を確認、非AI入口の維持（親担当）"
+    },
+    {
+      "file": "release-workspace-view.test.js",
+      "scope": "実際に描画したボタンの通常会話・一度承認・復元・入力保持・根拠紐付け・無料機能入口（DOM代替、ブラウザーではない）"
+    },
+    {
+      "file": "release-execution-services.test.js",
+      "scope": "実行部品と反映コーディネーターを使用。14設定種・JS・readback・並行変更・partial・復元。偽kintoneだけに書く。旧全assertionとの同等性を一律には主張しない。旧条件式4性質を新準備入口へ移植、合計124件"
+    },
+    {
+      "file": "release-free-materials.test.js",
+      "scope": "無料資料7種類×3形式・Context/Planner・明示対象・秘密除外・Healthプロセス図（6試験）"
+    },
+    {
+      "file": "release-free-materials-browser.test.js",
+      "scope": "実ブラウザーで資料全種類/形式/対象・コピー/保存・未解析/キャッシュ/曖昧・Scanner入口（外部通信遮断）"
+    },
+    {
+      "file": "release-execution-review.test.js",
+      "scope": "設定のpartial/GET失敗保全、終了不明、登録sourceId、確認事項再prepare、復元対象、正式なunchangedの本文照合（35件）"
+    }
+  ],
+  "integrationOwners": {
+    "gateway": "本物のGateway検証がartifactOutcomeを返す結合テスト",
+    "executors": "承認した設定と本文だけを偽kintoneへ書く実Adapter結合テスト",
+    "browser": "固定応答で実ブラウザー上の操作を通す"
+  }
+}

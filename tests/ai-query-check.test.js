@@ -4,7 +4,7 @@
 // 実行方法: node tests/ai-query-check.test.js
 'use strict';
 const { loadToolkit, makeAssert } = require('./helpers/load-toolkit.js');
-const { KTQueryCheck: Q, KTPlanReview } = loadToolkit();
+const { KTQueryCheck: Q } = loadToolkit();
 const { assert, state } = makeAssert();
 
 const F = { owner: { type: 'USER_SELECT' }, org: { type: 'ORGANIZATION_SELECT' }, grp: { type: 'GROUP_SELECT' }, amount: { type: 'NUMBER' }, total: { type: 'CALC' }, due_date: { type: 'DATE' }, at: { type: 'DATETIME' }, tm: { type: 'TIME' }, case_name: { type: 'SINGLE_LINE_TEXT' }, url: { type: 'LINK' }, memo: { type: 'MULTI_LINE_TEXT' }, rich: { type: 'RICH_TEXT' }, file: { type: 'FILE' }, kind: { type: 'DROP_DOWN' }, tags: { type: 'CHECK_BOX' }, lk: { type: 'LOOKUP', baseType: 'NUMBER' }, ref: { type: 'REFERENCE_TABLE' }, sub_amount: { type: 'NUMBER', subtable: 'tbl' }, 'ステータス': { type: 'STATUS' }, '作成者': { type: 'CREATOR' }, '更新日時': { type: 'UPDATED_TIME' } };
@@ -45,22 +45,7 @@ assert(codesOf('ステータス in ("完了")', 'process').includes('COND_FIELD_
 assert(codesOf('case_name like "a"', 'recordAcl').includes('COND_OPERATOR_NOT_ALLOWED') && codesOf('due_date = TODAY()', 'recordAcl').includes('COND_FUNCTION_NOT_ALLOWED'), 'レコードのアクセス権: like / 関数は不可');
 assert(ok('owner in (LOGINUSER())', 'view') && ok('memo like "x"', 'view'), '一覧は追加の制限なし');
 
-console.log('\n--- 4. KTPlanReview との連携 ---');
-{
-  const FX = require('./fixtures/ai-context-app.js');
-  const DATA = FX.makeData();
-  const step = (id, actionType, targetKind, targetRef, sp) => ({ id, actionType, targetKind, targetRef, title: id, proposal: { summary: '', details: [] }, spec: sp, dependsOn: [], reason: '', evidenceIds: [], confidence: 'INFERRED', alternativeId: null });
-  const plan = (steps) => ({ planVersion: '1', goal: 'g', assessment: { summary: '' }, relevantFields: [], proposedFields: [], steps, alternatives: [], impact: [], questions: [], unknowns: [], planConfidence: 'INFERRED' });
-  const rv = (p) => KTPlanReview.review({ plan: p, data: DATA });
-  const bad = rv(plan([step('P1', 'ADD_NOTIFICATION', 'NOTIFICATION', 'x', { targets: ['FIELD_ENTITY:owner'], filterCond: 'owner != ""' })])).steps[0];
-  assert(bad.status === 'NEEDS_CONFIRMATION' && bad.issues.some(i => i.code === 'COND_INVALID' && /!=/.test(i.message) && i.conditionErrors), 'Review: 受理されない条件式は COND_INVALID（要確認）と理由');
-  const fn = rv(plan([step('P1', 'ADD_NOTIFICATION', 'NOTIFICATION', 'x', { targets: ['FIELD_ENTITY:owner'], filterCond: 'owner in (LOGINUSER())' })])).steps[0];
-  assert(fn.issues.some(i => i.code === 'COND_INVALID' && /LOGINUSER/.test(i.message)), 'Review: レコードの条件通知で LOGINUSER() は COND_INVALID');
-  const okv = rv(plan([step('P1', 'ADD_VIEW', 'VIEW', 'v', { name: 'v', fields: ['case_name'], filterCond: 'owner in (LOGINUSER()) and amount >= "1"' })])).steps[0];
-  assert(!okv.issues.some(i => /^COND_/.test(i.code)), 'Review: 一覧の正しい条件式は指摘なし');
-  const pr = rv(plan([step('P1', 'ADD_PROCESS_ACTION', 'PROCESS_ACTION', 'a', { name: 'a', from: '未処理', to: '承認待ち', filterCond: 'amount > "1000000"' })])).steps[0];
-  assert(pr.issues.some(i => i.code === 'COND_INVALID' && />/.test(i.message)), 'Review: プロセスの条件で > は COND_INVALID（実際の画面で設定できない）');
-}
+// 旧Reviewとの連携4件は release-execution-services.test.js の実行前準備へ移行。
 
 console.log(`\n${state.failed ? 'FAILED' : 'ALL PASSED'}: ${state.passed} passed / ${state.failed} failed`);
 process.exit(state.failed ? 1 : 0);
