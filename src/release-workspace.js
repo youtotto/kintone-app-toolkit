@@ -28,9 +28,10 @@ const KTReleaseWorkspace = (() => {
     plan.questions = [...(plan.questions || []), ...plan.customizations.flatMap(c => c.questions || [])];
     return plan;
   }
+  const explanationBody = e => e ? clone({ title: e.title, sections: e.sections, unknowns: e.unknowns }) : null;
   function create({ services, loadBase, execution, now = () => Date.now(), onChange = null } = {}) {
     if (!services || !loadBase || !execution) throw new Error('作業に必要な部品がありません。');
-    const state = { phase: 'idle', taskId: 1, version: 0, goal: '', proposal: null, proposalPending: false, questionIdFloor: 0, answers: [], adopted: null, plan: null, artifacts: [], prepared: null, runs: [], resultRunId: null, messages: [], error: null, progress: '', rollback: null };
+    const state = { phase: 'idle', taskId: 1, version: 0, goal: '', proposal: null, proposalPending: false, questionIdFloor: 0, answers: [], adopted: null, plan: null, artifacts: [], prepared: null, runs: [], resultRunId: null, messages: [], explanations: [], explanationId: null, error: null, progress: '', rollback: null };
     let base = null, controller = null, epoch = 0, sequence = 0, pendingPlanQuestions = [];
     const listeners = new Set(onChange ? [onChange] : []);
     const emit = () => { const snapshot = clone(state); for (const fn of listeners) { try { fn(snapshot); } catch (e) { console.error(e); } } };
@@ -115,8 +116,22 @@ const KTReleaseWorkspace = (() => {
     async function send(text) {
       const value = String(text || '').trim(); if (!value || !available()) return false;
       if (state.runs.some(r => r.status === 'running')) return false;
-      if (!state.goal) state.goal = value;
       const unresolved = state.proposalPending;
+      // Suspend actions before any consultation. Restore only when the service
+      // explicitly reports no proposal change; failed revisions stay retired.
+      const previousWork = clone({ phase: state.phase === 'rollback-confirm' ? 'result' : state.phase, plan: state.plan,
+        adopted: state.adopted, artifacts: state.artifacts, prepared: state.prepared, error: state.error, progress: state.progress });
+      const previousBase = base;
+      const discussion = state.messages.map(m => ({ role: m.role, text: m.text,
+        explanation: m.explanationId ? explanationBody(state.explanations.find(e => e.id === m.explanationId)) : null }));
+      const currentPlanSummary = state.plan ? JSON.stringify({ status: state.phase, goal: state.plan.goal, steps: state.plan.steps.map(s => ({ title: s.title, actionType: s.actionType, targetRef: s.targetRef })),
+        customizations: state.plan.customizations?.map(c => ({ requirement: c.requirement, platform: c.platform })), questions: state.plan.questions, artifacts: state.artifacts.map(a => ({ title: a.title, state: a.result?.artifactOutcome?.state || 'failed', message: a.result?.artifactOutcome?.message || a.error?.message })), preparation: state.prepared ? { ok: state.prepared.ok, reasons: state.prepared.reasons, confirmations: state.prepared.confirmations } : null }) : null;
+      const run = state.runs.findLast(r => r.taskId === state.taskId);
+      const currentResultSummary = run ? JSON.stringify({ status: run.status, goal: run.goal, version: run.approval?.version,
+        message: run.result?.message, written: run.result?.written, plannedChanges: run.prepared?.changes, rows: run.result?.rows, reasons: run.result?.reasons,
+        rollback: run.rollback ? { status: run.rollback.status, message: run.rollback.message, reasons: run.rollback.reasons,
+          settings: run.rollback.settings ? { status: run.rollback.settings.status, steps: run.rollback.settings.steps?.map(s => ({ title: s.title, status: s.status, message: s.message })) } : null,
+          files: run.rollback.files ? { status: run.rollback.files.status, steps: run.rollback.files.steps?.map(s => ({ title: s.name, status: s.status, message: s.message })) } : null } : null }) : null;
       invalidate(); message('user', value);
       // Retire the previous plan before a revision starts, including failed requests.
       pendingPlanQuestions = clone(state.plan?.questions || pendingPlanQuestions);
@@ -124,10 +139,26 @@ const KTReleaseWorkspace = (() => {
       return activity('consulting', async (signal, live) => {
         const fresh = await getBase('consult');
         if (!live()) return;
-        const response = await services.propose({ text: value, previous: clone(state.proposal), questionIdFloor: state.questionIdFloor, pendingPlanQuestions: clone(pendingPlanQuestions), answers: clone(state.answers), requests: state.messages.filter(m => m.role === 'user').map(m => m.text), base: fresh, signal });
+        const response = await services.propose({ text: value, discussion, acceptedProposal: previousWork.adopted, currentPlanSummary, currentResultSummary, previous: clone(state.proposal), questionIdFloor: state.questionIdFloor, pendingPlanQuestions: clone(pendingPlanQuestions), answers: clone(state.answers), requests: state.messages.filter(m => m.role === 'user').map(m => m.text), base: fresh, signal });
         if (!live()) return;
         if (!response || typeof response.reply !== 'string') throw new Error('AIサービスの返答を受け取れませんでした。');
         message('assistant', response.reply, response.facts);
+        if (response.proposalUnchanged === true && ['question', 'smalltalk', 'unclear'].includes(response.intent)) {
+          let explanationId = state.explanationId;
+          if (response.explanation) {
+            const explanation = { ...clone(response.explanation), id: 'explanation-' + (++sequence), facts: clone(response.facts || []), createdAt: now(), version: state.version };
+            state.explanations.push(explanation); explanationId = explanation.id;
+            state.messages.at(-1).explanationId = explanation.id;
+          }
+          const activePlan = previousWork.plan && previousWork.phase !== 'result';
+          const changedBase = activePlan && stampOf(fresh) !== stampOf(previousBase);
+          base = activePlan ? previousBase : fresh;
+          set({ ...previousWork, proposalPending: unresolved, explanationId, ...(changedBase ? { phase: 'blocked', prepared: null,
+            error: { code: 'BASE_CHANGED', message: '説明を確認している間に設定が変わりました。変更案は最新の設定で作り直してください。' } } : {}) });
+          return;
+        }
+        if (!state.goal) state.goal = value;
+        state.explanationId = null;
         for (const answer of response.turn?.answers || []) {
           const question = (state.proposal?.decisions || []).find(q => q.id === answer.id) || state.answers.find(a => a.id === answer.id);
           if (question && answer.text) state.answers = state.answers.filter(a => a.id !== answer.id).concat({ id: answer.id, key: question.key, label: question.label, question: question.question || question.text || question.label, answer: answer.text, kind: answer.kind });
@@ -211,9 +242,11 @@ const KTReleaseWorkspace = (() => {
     return {
       getState: () => clone(state), subscribe(fn) { listeners.add(fn); return () => listeners.delete(fn); },
       send, adopt, resume, apply, requestRollback, rollback,
+      showExplanation(id) { if (!state.explanations.some(e => e.id === id)) return false; set({ explanationId: id }); return true; },
+      showChanges() { set({ explanationId: null }); return true; },
       async prepare() { if (!state.plan || !available()) return false; return activity('preparing', async (_, live) => prepareInner(live)); },
       cancelRollback() { if (state.phase !== 'rollback-confirm') return false; set({ phase: 'result', rollback: null }); return true; },
-      newTask() { if (!available()) return false; ++epoch; base = null; pendingPlanQuestions = []; Object.assign(state, { phase: 'idle', taskId: state.taskId + 1, version: 0, goal: '', proposal: null, proposalPending: false, questionIdFloor: 0, answers: [], adopted: null, plan: null, artifacts: [], prepared: null, messages: [], error: null, progress: '', rollback: null }); emit(); return true; },
+      newTask() { if (!available()) return false; ++epoch; base = null; pendingPlanQuestions = []; Object.assign(state, { phase: 'idle', taskId: state.taskId + 1, version: 0, goal: '', proposal: null, proposalPending: false, questionIdFloor: 0, answers: [], adopted: null, plan: null, artifacts: [], prepared: null, messages: [], explanations: [], explanationId: null, error: null, progress: '', rollback: null }); emit(); return true; },
       cancel() {
         if (!['consulting','building','preparing'].includes(state.phase)) return false;
         const consulting = state.phase === 'consulting';

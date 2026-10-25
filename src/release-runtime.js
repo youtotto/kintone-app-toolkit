@@ -9,7 +9,7 @@ function mountReleaseWorkspace(host, d) {
   let baseQueue = Promise.resolve();
   let connectionError = '', initialHealth = d.initialHealth || null;
   const esc = KTReleaseView.escape;
-  const supportsRelease = (feature, cap) => !!cap?.available && (feature === KTAiClient.FEATURE_GENERATOR ? cap.verification?.includes('artifactOutcome') : feature === KTAiClient.FEATURE_PLANNER ? ['releaseWorkspace', 'formLayoutPlacement', 'fieldMaintenance'].every(mark => cap.requirementOps?.includes(mark)) : cap.conversation?.includes('releaseWorkspace'));
+  const supportsRelease = (feature, cap) => !!cap?.available && (feature === KTAiClient.FEATURE_GENERATOR ? cap.verification?.includes('artifactOutcome') : feature === KTAiClient.FEATURE_PLANNER ? ['releaseWorkspace', 'formLayoutPlacement', 'fieldMaintenance'].every(mark => cap.requirementOps?.includes(mark)) : ['releaseWorkspace', 'appExplanation'].every(mark => cap.conversation?.includes(mark)));
   host.style.overflow = 'auto';
   host.style.height = '100%';
   function dialog(title, body, { wide = false } = {}) {
@@ -176,7 +176,7 @@ function mountReleaseWorkspace(host, d) {
     let inputs = d.getInputs?.() || {};
     const targets = KTContextUi.listTargets(inputs);
     const choices = [...targets.fields.map(f => ({ type: 'field', id: f.id, label: f.label })), ...targets.files.map(f => ({ type: 'file', id: f.id, label: f.label }))];
-    const el = dialog('資料を作成', '<p>この操作ではAIサービスへ送信しません。レコードの値・添付ファイルは含めません。</p><label>資料の種類 <select data-kind><option value="context">外部AIへの相談用</option><option value="planner">外部AIへの変更計画用</option>' + kinds.map(k => '<option value="' + esc(k.id) + '">' + esc(k.label) + '</option>').join('') + '</select></label><label> 対象 <select data-focus><option value="">アプリ全体</option>' + choices.map((f, i) => '<option value="' + i + '">' + esc(f.label) + '</option>').join('') + '</select></label><p><label>依頼文 <textarea data-question rows="3" style="width:100%"></textarea></label></p><button data-make>資料を作る</button>' + (d.runScan && !inputs.scan ? ' <button data-scan>JavaScriptを解析する</button>' : '') + '<p data-note style="white-space:pre-wrap" role="status"></p><details data-coverage hidden><summary>資料に含めた情報</summary><ul></ul></details><label>形式 <select data-format><option value="markdown">Markdown</option><option value="prompt">AIへの指示</option><option value="json">JSON</option></select></label><textarea data-output rows="15" readonly style="width:100%;font:12px/1.5 monospace"></textarea><div><button data-copy disabled>コピー</button> <button data-save disabled>ファイルで保存</button></div>', { wide: true });
+    const el = dialog('設定資料を書き出す', '<p>この操作ではAIサービスへ送信しません。レコードの値・添付ファイルは含めません。</p><label>資料の種類 <select data-kind><option value="context">外部AIへの相談用</option><option value="planner">外部AIへの変更計画用</option>' + kinds.map(k => '<option value="' + esc(k.id) + '">' + esc(k.label) + '</option>').join('') + '</select></label><label> 対象 <select data-focus><option value="">アプリ全体</option>' + choices.map((f, i) => '<option value="' + i + '">' + esc(f.label) + '</option>').join('') + '</select></label><p><label>依頼文 <textarea data-question rows="3" style="width:100%"></textarea></label></p><button data-make>資料を作る</button>' + (d.runScan && !inputs.scan ? ' <button data-scan>JavaScriptを解析する</button>' : '') + '<p data-note style="white-space:pre-wrap" role="status"></p><details data-coverage hidden><summary>資料に含めた情報</summary><ul></ul></details><label>形式 <select data-format><option value="markdown">Markdown</option><option value="prompt">AIへの指示</option><option value="json">JSON</option></select></label><textarea data-output rows="15" readonly style="width:100%;font:12px/1.5 monospace"></textarea><div><button data-copy disabled>コピー</button> <button data-save disabled>ファイルで保存</button></div>', { wide: true });
     let outputs = null;
     const output = () => { el.querySelector('[data-output]').value = outputs?.[el.querySelector('[data-format]').value] || ''; };
     const resetOutput = () => { outputs = null; output(); el.querySelector('[data-copy]').disabled = true; el.querySelector('[data-save]').disabled = true; el.querySelector('[data-coverage]').hidden = true; };
@@ -235,9 +235,9 @@ function mountReleaseWorkspace(host, d) {
     if (b) el.querySelector('pre').textContent = JSON.stringify({ appId: b.appId, revision: b.revision, diff: b.diff }, null, 2);
   }
   view = KTReleaseView.create(host, { controller, connection, beforeSend: consent, onConnect: connectionDialog, onRefreshConnection: () => refreshCapability(true), onFreeContext: freeContext, onDetails: details,
-    onCopy: d.copyText, onDownload: (name, text) => d.downloadText(name, text, 'text/javascript'),
+    onCopy: d.copyText, onDownload: (name, text, type = 'text/javascript') => d.downloadText(name, text, type),
     onOpenPreview: d.onOpenPreview || (/^\d+$/.test(String(d.appId)) && !location.pathname.startsWith('/k/guest/') ? () => window.open(location.origin + '/k/admin/preview/' + encodeURIComponent(d.appId) + '/', '_blank', 'noopener') : null),
-    appName: d.getInputs?.()?.data?.appName || 'アプリの変更' });
+    appName: d.getInputs?.()?.data?.appName || 'アプリの相談' });
   const warnBeforeLeave = event => {
     const state = controller.getState();
     if (state.messages.length || state.runs.length) { event.preventDefault(); event.returnValue = ''; }

@@ -187,7 +187,7 @@ test('配置対応の印と現在のフォームを仮案・計画へそのま�
   const before=JSON.stringify(base);
   const contexts=[ReleaseContext.proposal({text:'請求番号を追加',base}),ReleaseContext.plan({proposal,goal:'請求番号を追加',version:1,base})];
   for(const ctx of contexts){
-    assert.deepEqual(ctx.clientCapabilities,['formLayoutPlacement','fieldMaintenance']);
+    assert.deepEqual(ctx.clientCapabilities,ctx.contextVersion==='1'?['formLayoutPlacement','fieldMaintenance','appExplanation']:['formLayoutPlacement','fieldMaintenance']);
     assert.deepEqual(ctx.facts.find(f=>f.kind==='layout').value,layout);
   }
   const envelope=Client.buildPlanEnvelope({ctx:contexts[1]});

@@ -13334,9 +13334,10 @@
       plan.questions = [...(plan.questions || []), ...plan.customizations.flatMap(c => c.questions || [])];
       return plan;
     }
+    const explanationBody = e => e ? clone({ title: e.title, sections: e.sections, unknowns: e.unknowns }) : null;
     function create({ services, loadBase, execution, now = () => Date.now(), onChange = null } = {}) {
       if (!services || !loadBase || !execution) throw new Error('作業に必要な部品がありません。');
-      const state = { phase: 'idle', taskId: 1, version: 0, goal: '', proposal: null, proposalPending: false, questionIdFloor: 0, answers: [], adopted: null, plan: null, artifacts: [], prepared: null, runs: [], resultRunId: null, messages: [], error: null, progress: '', rollback: null };
+      const state = { phase: 'idle', taskId: 1, version: 0, goal: '', proposal: null, proposalPending: false, questionIdFloor: 0, answers: [], adopted: null, plan: null, artifacts: [], prepared: null, runs: [], resultRunId: null, messages: [], explanations: [], explanationId: null, error: null, progress: '', rollback: null };
       let base = null, controller = null, epoch = 0, sequence = 0, pendingPlanQuestions = [];
       const listeners = new Set(onChange ? [onChange] : []);
       const emit = () => { const snapshot = clone(state); for (const fn of listeners) { try { fn(snapshot); } catch (e) { console.error(e); } } };
@@ -13421,8 +13422,22 @@
       async function send(text) {
         const value = String(text || '').trim(); if (!value || !available()) return false;
         if (state.runs.some(r => r.status === 'running')) return false;
-        if (!state.goal) state.goal = value;
         const unresolved = state.proposalPending;
+        // Suspend actions before any consultation. Restore only when the service
+        // explicitly reports no proposal change; failed revisions stay retired.
+        const previousWork = clone({ phase: state.phase === 'rollback-confirm' ? 'result' : state.phase, plan: state.plan,
+          adopted: state.adopted, artifacts: state.artifacts, prepared: state.prepared, error: state.error, progress: state.progress });
+        const previousBase = base;
+        const discussion = state.messages.map(m => ({ role: m.role, text: m.text,
+          explanation: m.explanationId ? explanationBody(state.explanations.find(e => e.id === m.explanationId)) : null }));
+        const currentPlanSummary = state.plan ? JSON.stringify({ status: state.phase, goal: state.plan.goal, steps: state.plan.steps.map(s => ({ title: s.title, actionType: s.actionType, targetRef: s.targetRef })),
+          customizations: state.plan.customizations?.map(c => ({ requirement: c.requirement, platform: c.platform })), questions: state.plan.questions, artifacts: state.artifacts.map(a => ({ title: a.title, state: a.result?.artifactOutcome?.state || 'failed', message: a.result?.artifactOutcome?.message || a.error?.message })), preparation: state.prepared ? { ok: state.prepared.ok, reasons: state.prepared.reasons, confirmations: state.prepared.confirmations } : null }) : null;
+        const run = state.runs.findLast(r => r.taskId === state.taskId);
+        const currentResultSummary = run ? JSON.stringify({ status: run.status, goal: run.goal, version: run.approval?.version,
+          message: run.result?.message, written: run.result?.written, plannedChanges: run.prepared?.changes, rows: run.result?.rows, reasons: run.result?.reasons,
+          rollback: run.rollback ? { status: run.rollback.status, message: run.rollback.message, reasons: run.rollback.reasons,
+            settings: run.rollback.settings ? { status: run.rollback.settings.status, steps: run.rollback.settings.steps?.map(s => ({ title: s.title, status: s.status, message: s.message })) } : null,
+            files: run.rollback.files ? { status: run.rollback.files.status, steps: run.rollback.files.steps?.map(s => ({ title: s.name, status: s.status, message: s.message })) } : null } : null }) : null;
         invalidate(); message('user', value);
         // Retire the previous plan before a revision starts, including failed requests.
         pendingPlanQuestions = clone(state.plan?.questions || pendingPlanQuestions);
@@ -13430,10 +13445,26 @@
         return activity('consulting', async (signal, live) => {
           const fresh = await getBase('consult');
           if (!live()) return;
-          const response = await services.propose({ text: value, previous: clone(state.proposal), questionIdFloor: state.questionIdFloor, pendingPlanQuestions: clone(pendingPlanQuestions), answers: clone(state.answers), requests: state.messages.filter(m => m.role === 'user').map(m => m.text), base: fresh, signal });
+          const response = await services.propose({ text: value, discussion, acceptedProposal: previousWork.adopted, currentPlanSummary, currentResultSummary, previous: clone(state.proposal), questionIdFloor: state.questionIdFloor, pendingPlanQuestions: clone(pendingPlanQuestions), answers: clone(state.answers), requests: state.messages.filter(m => m.role === 'user').map(m => m.text), base: fresh, signal });
           if (!live()) return;
           if (!response || typeof response.reply !== 'string') throw new Error('AIサービスの返答を受け取れませんでした。');
           message('assistant', response.reply, response.facts);
+          if (response.proposalUnchanged === true && ['question', 'smalltalk', 'unclear'].includes(response.intent)) {
+            let explanationId = state.explanationId;
+            if (response.explanation) {
+              const explanation = { ...clone(response.explanation), id: 'explanation-' + (++sequence), facts: clone(response.facts || []), createdAt: now(), version: state.version };
+              state.explanations.push(explanation); explanationId = explanation.id;
+              state.messages.at(-1).explanationId = explanation.id;
+            }
+            const activePlan = previousWork.plan && previousWork.phase !== 'result';
+            const changedBase = activePlan && stampOf(fresh) !== stampOf(previousBase);
+            base = activePlan ? previousBase : fresh;
+            set({ ...previousWork, proposalPending: unresolved, explanationId, ...(changedBase ? { phase: 'blocked', prepared: null,
+              error: { code: 'BASE_CHANGED', message: '説明を確認している間に設定が変わりました。変更案は最新の設定で作り直してください。' } } : {}) });
+            return;
+          }
+          if (!state.goal) state.goal = value;
+          state.explanationId = null;
           for (const answer of response.turn?.answers || []) {
             const question = (state.proposal?.decisions || []).find(q => q.id === answer.id) || state.answers.find(a => a.id === answer.id);
             if (question && answer.text) state.answers = state.answers.filter(a => a.id !== answer.id).concat({ id: answer.id, key: question.key, label: question.label, question: question.question || question.text || question.label, answer: answer.text, kind: answer.kind });
@@ -13517,9 +13548,11 @@
       return {
         getState: () => clone(state), subscribe(fn) { listeners.add(fn); return () => listeners.delete(fn); },
         send, adopt, resume, apply, requestRollback, rollback,
+        showExplanation(id) { if (!state.explanations.some(e => e.id === id)) return false; set({ explanationId: id }); return true; },
+        showChanges() { set({ explanationId: null }); return true; },
         async prepare() { if (!state.plan || !available()) return false; return activity('preparing', async (_, live) => prepareInner(live)); },
         cancelRollback() { if (state.phase !== 'rollback-confirm') return false; set({ phase: 'result', rollback: null }); return true; },
-        newTask() { if (!available()) return false; ++epoch; base = null; pendingPlanQuestions = []; Object.assign(state, { phase: 'idle', taskId: state.taskId + 1, version: 0, goal: '', proposal: null, proposalPending: false, questionIdFloor: 0, answers: [], adopted: null, plan: null, artifacts: [], prepared: null, messages: [], error: null, progress: '', rollback: null }); emit(); return true; },
+        newTask() { if (!available()) return false; ++epoch; base = null; pendingPlanQuestions = []; Object.assign(state, { phase: 'idle', taskId: state.taskId + 1, version: 0, goal: '', proposal: null, proposalPending: false, questionIdFloor: 0, answers: [], adopted: null, plan: null, artifacts: [], prepared: null, messages: [], explanations: [], explanationId: null, error: null, progress: '', rollback: null }); emit(); return true; },
         cancel() {
           if (!['consulting','building','preparing'].includes(state.phase)) return false;
           const consulting = state.phase === 'consulting';
@@ -13546,7 +13579,7 @@
     const appOf = base => ({ id: String(base.appId ?? base.data?.appId ?? ''), name: base.data?.appName || base.data?.name || null });
     const statusesOf = base => entries(base.data?.status?.states).map(x => x.name);
     function sizeCheck(ctx, limit) {
-      if (new TextEncoder().encode(JSON.stringify(ctx)).length > limit) throw Object.assign(new Error('このアプリの設定は一度に送れる量を超えています。内容を省略して変更案を作ることはできません。'), { code: 'CONTEXT_TOO_LARGE' });
+      if (new TextEncoder().encode(JSON.stringify(ctx)).length > limit) throw Object.assign(new Error('このアプリの設定と相談の記録は、一度に送れる量を超えています。内容を省略して送信することはできません。'), { code: 'CONTEXT_TOO_LARGE' });
       return ctx;
     }
     function factsOf(base) {
@@ -13585,10 +13618,10 @@
         reminders: (data.reminderNotify?.notifications || []).flatMap((n, i) => ['reminder#' + (i + 1), ...(n.title ? [n.title] : [])]),
         reports: Object.keys(data.reports?.reports || data.reports || {}).filter(k => k !== 'revision') };
     }
-    function proposal({ text, previous, questionIdFloor = 0, pendingPlanQuestions = [], answers = [], requests = [], base }) {
-      return sizeCheck({ contextVersion: '1', releaseContract: 'release-workspace-1', clientCapabilities: ['formLayoutPlacement', 'fieldMaintenance'], question: text, app: appOf(base),
+    function proposal({ text, previous, questionIdFloor = 0, pendingPlanQuestions = [], answers = [], requests = [], discussion = [], acceptedProposal = null, currentPlanSummary = null, currentResultSummary = null, base }) {
+      return sizeCheck({ contextVersion: '1', releaseContract: 'release-workspace-1', clientCapabilities: ['formLayoutPlacement', 'fieldMaintenance', 'appExplanation'], question: text, app: appOf(base),
         focus: { resolution: 'none', target: null, candidates: [] }, facts: factsOf(base), coverage: coverageOf(base), truncation: { applied: false, sections: [] },
-        conversation: { mode: 'proposal', proposal: clone(previous), pendingPlanQuestions: clone(pendingPlanQuestions), decisions: clone(answers), requirements: [], working: null, userRequests: clone(requests),
+        conversation: { mode: 'proposal', discussion: clone(discussion), acceptedProposal: clone(acceptedProposal), currentPlanSummary, currentResultSummary, proposal: clone(previous), pendingPlanQuestions: clone(pendingPlanQuestions), decisions: clone(answers), requirements: [], working: null, userRequests: clone(requests),
           itemIdFloor: { Q: Math.max(0, questionIdFloor, ...answers.filter(a => /^Q[1-9][0-9]{0,2}$/.test(a.id)).map(a => Number(a.id.slice(1)))) } } }, 256 * 1024);
     }
     // Proposal answers retain Q identifiers. The planner/generator contract uses D
@@ -13927,7 +13960,7 @@
       proposal: 'proposal', consulting: 'working', building: 'working', preparing: 'working', applying: 'working', 'rolling-back': 'working',
       review: 'review', result: 'result', incomplete: 'attention', blocked: 'attention', 'rollback-confirm': 'attention', unchanged: 'result'
     }[phase] || 'empty');
-    const stageLabel = { proposal: ['01', '提案を相談する'], working: ['↻', '処理中'], review: ['02', '反映前の確認'], result: ['▤', '結果'], attention: ['!', '確認が必要です'], empty: ['○', 'ここに変更案を表示します'] };
+    const stageLabel = { proposal: ['01', '提案を相談する'], working: ['↻', '処理中'], review: ['02', '反映前の確認'], result: ['▤', '結果'], attention: ['!', '確認が必要です'], empty: ['○', 'ここに変更案を表示します'], explanation: ['≡', '説明を読む'] };
     const activity = '<span class="ktr-activity" aria-hidden="true"><i></i><i></i><i></i></span>';
     const draftActions = new Set(['adopt', 'resume', 'apply', 'rollback']);
     const draftPending = options => !!String(options.draft || '').trim() || !!options.sending;
@@ -13937,13 +13970,66 @@
     function factsHtml(messages) {
       return (messages || []).filter(m => m.role !== 'user' && Array.isArray(m.facts) && m.facts.length).map(m => `<details data-release-panel="facts-${esc(m.id)}"><summary>この返答の根拠</summary><ul>${m.facts.map((f, index) => `<li>${esc(f.text || f.statement || f.description || f.summary || f.title || '')}${f.value != null ? `<details data-release-panel="fact-value-${esc(m.id)}-${index}"><summary>設定の内容</summary><pre class="ktr-fact-value">${esc(typeof f.value === 'string' ? f.value : JSON.stringify(f.value, null, 2))}</pre></details>` : ''}</li>`).join('')}</ul><p class="ktr-note">この返答を作成したときの情報です。</p></details>`).join('');
     }
+
+    const explanationFacts = (document, section) => {
+      const ids = new Set(section.evidenceIds || []);
+      return (document.facts || []).filter(fact => ids.has(fact.id));
+    };
+    function explanationEvidence(document, section, index) {
+      const facts = explanationFacts(document, section);
+      if (!facts.length) return '';
+      return `<details data-release-panel="explanation-facts-${esc(document.id)}-${index}"><summary>この説明の根拠</summary><p class="ktr-note">説明作成時の設定です。現在の設定とは異なる場合があります。</p><ul>${facts.map((fact, at) => `<li><strong>${esc(fact.id)}</strong> ${esc(textOf(fact) || fact.statement || fact.summary || '')}${fact.value != null ? `<details data-release-panel="explanation-value-${esc(document.id)}-${index}-${at}"><summary>設定の内容</summary><pre class="ktr-fact-value">${esc(typeof fact.value === 'string' ? fact.value : JSON.stringify(fact.value, null, 2))}</pre></details>` : ''}</li>`).join('')}</ul></details>`;
+    }
+    function explanationHtml(document) {
+      return `<article class="ktr-section ktr-explanation" data-release-explanation="${esc(document.id)}"><h2>${esc(document.title || 'アプリの説明')}</h2><div class="ktr-actions">${button('copy-explanation', '本文をコピー', { id: document.id })}${button('download-explanation', 'Markdownで保存', { id: document.id })}</div>${(document.sections || []).map((section, index) => {
+        const table = section.table;
+        const tableHtml = table?.columns?.length ? `<div class="ktr-table-scroll" tabindex="0" role="region" aria-label="${esc(section.heading || '説明の表')}"><table><thead><tr>${table.columns.map(column => `<th scope="col">${esc(column)}</th>`).join('')}</tr></thead><tbody>${(table.rows || []).map(row => `<tr>${table.columns.map((_, at) => `<td>${esc(row[at])}</td>`).join('')}</tr>`).join('')}</tbody></table></div>` : '';
+        return `<section class="ktr-explanation-section">${section.heading ? `<h3>${esc(section.heading)}</h3>` : ''}${(section.paragraphs || []).map(paragraph => `<p>${esc(paragraph)}</p>`).join('')}${list(section.items || [])}${tableHtml}${explanationEvidence(document, section, index)}</section>`;
+      }).join('')}${document.unknowns?.length ? `<section class="ktr-explanation-unknowns"><h3>確認できていないこと</h3>${list(document.unknowns)}</section>` : ''}</article>`;
+    }
+    // Export structured display content as Markdown; do not ask AI to rewrite it.
+    const markdownText = value => String(value ?? '').replace(/[\\`*_{}\[\]()#+.!|<>-]/g, ch => '\\' + ch);
+    function explanationMarkdown(document) {
+      if (!document) return '';
+      const lines = ['# ' + markdownText(document.title || 'アプリの説明').replace(/\r?\n/g, ' '), ''];
+      for (const section of document.sections || []) {
+        if (section.heading) lines.push('## ' + markdownText(section.heading).replace(/\r?\n/g, ' '), '');
+        for (const paragraph of section.paragraphs || []) lines.push(markdownText(paragraph), '');
+        for (const item of section.items || []) lines.push('- ' + markdownText(item).replace(/\r?\n/g, '\n  '));
+        if (section.items?.length) lines.push('');
+        const table = section.table, cell = value => markdownText(value).replace(/\r?\n/g, '<br>');
+        if (table?.columns?.length) {
+          lines.push('| ' + table.columns.map(cell).join(' | ') + ' |', '| ' + table.columns.map(() => '---').join(' | ') + ' |');
+          for (const row of table.rows || []) lines.push('| ' + table.columns.map((_, at) => cell(row[at])).join(' | ') + ' |');
+          lines.push('');
+        }
+        const facts = explanationFacts(document, section);
+        if (facts.length) {
+          lines.push('### 根拠（説明作成時の設定）', '');
+          for (const fact of facts) {
+            lines.push('- ' + markdownText(fact.id) + '：' + markdownText(textOf(fact) || fact.statement || fact.summary || '').replace(/\r?\n/g, '\n  '));
+
+          }
+          lines.push('');
+        }
+      }
+      if (document.unknowns?.length) lines.push('## 確認できていないこと', '', ...document.unknowns.map(item => '- ' + markdownText(item).replace(/\r?\n/g, '\n  ')), '');
+      return lines.join('\n').trimEnd() + '\n';
+    }
+    function explanationNavigation(state, explanation, historical) {
+      const documents = state.explanations || [], latest = documents.at(-1);
+      if (!latest) return '';
+      const disabled = busy.has(state.phase);
+      return `<div class="ktr-document-navigation"><nav class="ktr-document-tabs" aria-label="表示する内容">${button('show-explanation', '説明', { id: explanation?.id || latest.id, disabled, extra: ` aria-pressed="${!!explanation && !historical}"` })}${button('show-changes', '変更案', { disabled, extra: ` aria-pressed="${!explanation && !historical}"` })}</nav>${documents.length > 1 ? `<details data-release-panel="explanation-history"><summary>これまでの説明</summary><ul>${documents.map((document, index) => `<li>${button('show-explanation', `${index + 1}. ${document.title || 'アプリの説明'}`, { id: document.id, disabled, extra: ` aria-current="${document.id === explanation?.id ? 'true' : 'false'}"` })}</li>`).join('')}</ul></details>` : ''}</div>`;
+    }
+
     function historyHtml(messages) {
-      if (!messages?.length) return '<p class="ktr-empty-chat">変更したい動きと、今のまま残したいことを教えてください。</p>';
+      if (!messages?.length) return '<p class="ktr-empty-chat">変更したいことや、アプリについて知りたいことを教えてください。</p>';
       return `<ol class="ktr-messages">${messages.map(m => `<li class="ktr-message ${m.role === 'user' ? 'ktr-user' : ''}"><span class="ktr-speaker">${m.role === 'user' ? 'あなた' : 'Toolkit'}</span><p>${esc(m.text)}</p>${m.role !== 'user' ? factsHtml([m]) : ''}</li>`).join('')}</ol>`;
     }
     function composer(state, options = {}) {
       const conn = connectionOf(options), disabled = busy.has(state.phase) || conn.connected === false || conn.available === false || !!options.historical;
-      return `<form class="ktr-composer" data-release-form="consult"><label for="kt-release-input">変更したいこと、質問、修正内容</label><textarea id="kt-release-input" rows="2" placeholder="今の動きと、どう変えたいかを教えてください。"${disabled ? ' disabled' : ''}>${esc(options.draft || '')}</textarea><div class="ktr-compose-actions"><span class="ktr-note">${options.historical ? '過去の反映記録を表示中です。現在の作業に戻ると入力できます。' : 'Enterで送信・Shift＋Enterで改行'}</span>${button('send', '送信', { primary: true, disabled })}</div></form>`;
+      return `<form class="ktr-composer" data-release-form="consult"><label for="kt-release-input">変更したいこと、質問、修正内容</label><textarea id="kt-release-input" rows="2" placeholder="例：このアプリの仕組みを教えて。変更したいことも相談できます。"${disabled ? ' disabled' : ''}>${esc(options.draft || '')}</textarea><div class="ktr-compose-actions"><span class="ktr-note">${options.historical ? '過去の反映記録を表示中です。現在の作業に戻ると入力できます。' : 'Enterで送信・Shift＋Enterで改行'}</span>${button('send', '送信', { primary: true, disabled })}</div></form>`;
     }
     function proposalHtml(state, options) {
       const p = options.proposal || state.proposal || {}, answered = new Map((state.answers || []).filter(a => a.answer).map(a => [a.id, a.answer]));
@@ -14070,10 +14156,11 @@
     }
     function render(state, options = {}) {
       const conn = connectionOf(options), last = (state.runs || []).at(-1), historical = options.selectedRunId ? (state.runs || []).find(r => r.id === options.selectedRunId) : null;
-      const notice = options.notice || '';
+      const notice = options.notice || '', explanation = !historical ? (state.explanations || []).find(item => item.id === state.explanationId) : null;
       let body = '';
       if (historical) body = runHtml(historical, { ...options, operationBusy: busy.has(state.phase) }, true);
-      else if (busy.has(state.phase)) body = `<section class="ktr-section ktr-progress" aria-live="polite"><div class="ktr-working-heading">${activity}<h2>${esc(state.phase === 'consulting' ? '提案を考えています' : phaseText[state.phase])}</h2></div><p role="status">${esc(state.progress || (state.phase === 'consulting' ? '返答を作成しています。' : '処理を進めています。'))}</p>${['consulting', 'building', 'preparing'].includes(state.phase) ? button('cancel', '中断する') : '<p class="ktr-note">処理が終わるまで、この画面を開いたままにしてください。</p>'}</section>${state.adopted || state.proposal ? proposalHtml(state, { ...options, readOnly: true, proposal: state.adopted || state.proposal }) : ''}`;
+      else if (busy.has(state.phase)) body = `<section class="ktr-section ktr-progress" aria-live="polite"><div class="ktr-working-heading">${activity}<h2>${esc(state.phase === 'consulting' ? '返答を考えています' : phaseText[state.phase])}</h2></div><p role="status">${esc(state.progress || (state.phase === 'consulting' ? '返答を作成しています。' : '処理を進めています。'))}</p>${['consulting', 'building', 'preparing'].includes(state.phase) ? button('cancel', '中断する') : '<p class="ktr-note">処理が終わるまで、この画面を開いたままにしてください。</p>'}</section>${explanation ? explanationHtml(explanation) : state.adopted || state.proposal ? proposalHtml(state, { ...options, readOnly: true, proposal: state.adopted || state.proposal }) : ''}`;
+      else if (explanation) body = explanationHtml(explanation);
       else if (state.phase === 'proposal') body = proposalHtml(state, options);
       else if (state.phase === 'review') body = reviewHtml(state, options);
       else if (state.phase === 'incomplete') body = incompleteHtml(state, options);
@@ -14082,20 +14169,20 @@
       else if (state.phase === 'result') body = runHtml((state.runs || []).find(run => run.id === state.resultRunId) || last, options);
       else if (state.phase === 'rollback-confirm') body = rollbackHtml(state, options);
       else body = '<section class="ktr-section"><h2>変更案</h2><p class="ktr-note">相談すると、ここに案を表示します。内容を確認してから動作テスト環境に反映します。</p></section>';
-      const stage = stageOf(state.phase, !!historical), [stageIcon, stageTitle] = stageLabel[stage];
-      const support = historical ? '' : `${diagnosticHtml(state.error)}${codeHtml(state)}${verificationHtml(state)}`;
-      const runHistory = state.runs?.length ? `<details data-release-panel="runs"><summary>これまでの反映</summary><ul>${state.runs.map((run, index) => `<li>${button('history', run.goal || `反映 ${index + 1}`, { id: run.id })} <span>${esc(run.rollback?.status === 'complete' ? '元に戻し済み' : ({ complete: '反映済み', partial: '一部反映', failed: '未完了', unknown: '結果未確認' }[run.status] || '処理中'))}</span></li>`).join('')}</ul></details>` : '';
-      return `<div class="ktr-workspace" data-release-phase="${esc(state.phase)}"><style>${styles}</style><div class="ktr-content"><header class="ktr-header"><div><strong>${esc(options.appName || 'アプリの変更')}</strong><span class="ktr-environment">動作テスト環境</span></div><div class="ktr-header-tools"><span class="ktr-phase">${esc(historical ? '過去の反映記録' : phaseText[state.phase] || '相談')}</span><nav class="ktr-tools" aria-label="補助操作">${button('connect', '接続')}${button('free-context', '資料を作成')}${button('details', 'アプリの情報を見る')}</nav></div></header>
+      const stage = explanation && !busy.has(state.phase) ? 'explanation' : stageOf(state.phase, !!historical), [stageIcon, stageTitle] = stageLabel[stage];
+      const support = historical || explanation ? '' : `${diagnosticHtml(state.error)}${codeHtml(state)}${verificationHtml(state)}`;
+      const runHistory = !explanation && state.runs?.length ? `<details data-release-panel="runs"><summary>これまでの反映</summary><ul>${state.runs.map((run, index) => `<li>${button('history', run.goal || `反映 ${index + 1}`, { id: run.id })} <span>${esc(run.rollback?.status === 'complete' ? '元に戻し済み' : ({ complete: '反映済み', partial: '一部反映', failed: '未完了', unknown: '結果未確認' }[run.status] || '処理中'))}</span></li>`).join('')}</ul></details>` : '';
+      return `<div class="ktr-workspace" data-release-phase="${esc(state.phase)}"><style>${styles}</style><div class="ktr-content"><header class="ktr-header"><div><strong>${esc(options.appName || 'アプリの相談')}</strong><span class="ktr-environment">動作テスト環境</span></div><div class="ktr-header-tools"><span class="ktr-phase">${esc(historical ? '過去の反映記録' : stage === 'explanation' ? '説明' : phaseText[state.phase] || '相談')}</span><nav class="ktr-tools" aria-label="補助操作">${button('connect', '接続')}${button('free-context', '設定資料を書き出す')}${button('details', 'アプリの情報を見る')}</nav></div></header>
         ${conn.connected === false || conn.available === false ? `<aside class="ktr-notice"><p>${esc(conn.message || 'AIサービスへ接続してください。')}</p>${button('connect', '接続する')}</aside>` : ''}
         ${notice ? `<p class="ktr-notice" role="status">${esc(notice)}</p>` : ''}${state.error?.message && !historical && !(state.phase === 'incomplete' && (state.artifacts || []).some(a => a.error?.message === state.error.message || a.result?.artifactOutcome?.message === state.error.message)) ? `<p class="ktr-error" role="alert" tabindex="0">${esc(state.error.message)}</p>` : ''}
-        <div class="ktr-layout"><section class="ktr-conversation" aria-label="相談"><h2 class="ktr-pane-title">相談</h2><div class="ktr-chat-log" data-release-panel="conversation" tabindex="0" aria-label="相談の記録">${historyHtml(state.messages)}${state.phase === 'consulting' && !historical ? `<div class="ktr-chat-pending" role="status">${activity}<span>返答を待っています</span></div>` : ''}</div>${composer(state, { ...options, historical: !!historical })}</section><main class="ktr-current" aria-label="変更案と反映結果" data-release-stage="${stage}"><header class="ktr-stage-header"><span class="ktr-stage-icon" aria-hidden="true">${stageIcon}</span><span>${esc(historical ? '過去の反映記録' : stageTitle)}</span></header>${body}${support || runHistory ? `<div class="ktr-support">${support}${runHistory}</div>` : ''}</main></div></div></div>`;
+        <div class="ktr-layout"><section class="ktr-conversation" aria-label="相談"><h2 class="ktr-pane-title">相談</h2><div class="ktr-chat-log" data-release-panel="conversation" tabindex="0" aria-label="相談の記録">${historyHtml(state.messages)}${state.phase === 'consulting' && !historical ? `<div class="ktr-chat-pending" role="status">${activity}<span>返答を待っています</span></div>` : ''}</div>${composer(state, { ...options, historical: !!historical })}</section><main class="ktr-current" aria-label="説明・変更案・反映結果" data-release-stage="${stage}">${explanationNavigation(state, explanation, historical)}<header class="ktr-stage-header"><span class="ktr-stage-icon" aria-hidden="true">${stageIcon}</span><span>${esc(historical ? '過去の反映記録' : stageTitle)}</span></header>${body}${support || runHistory ? `<div class="ktr-support">${support}${runHistory}</div>` : ''}</main></div></div></div>`;
     }
     function create(host, options = {}) {
       if (!host || !options.controller) throw new Error('作業面を表示するための情報がありません。');
       const controller = options.controller;
       let draft = '', selectedRunId = null, notice = '', disposed = false, sending = false;
       const expanded = new Set();
-      let previousPhase = controller.getState().phase, previousRunId = null, previousMessageCount = 0;
+      let previousPhase = controller.getState().phase, previousRunId = null, previousMessageCount = 0, previousExplanationId = null;
       function draw(state = controller.getState()) {
         if (disposed) return;
         const input = host.querySelector?.('#kt-release-input'), focused = !!input && host.ownerDocument?.activeElement === input;
@@ -14103,7 +14190,7 @@
         const selection = focused ? [input.selectionStart, input.selectionEnd] : null;
         const log = host.querySelector?.('.ktr-chat-log'), current = host.querySelector?.('.ktr-current'), layoutTop = host.querySelector?.('.ktr-layout')?.scrollTop || 0;
         const logTop = log?.scrollTop || 0, followMessages = !log || log.scrollHeight - log.clientHeight - logTop < 24;
-        const currentTop = previousPhase === state.phase && previousRunId === selectedRunId ? current?.scrollTop || 0 : 0;
+        const currentTop = previousPhase === state.phase && previousRunId === selectedRunId && previousExplanationId === state.explanationId ? current?.scrollTop || 0 : 0;
         host.innerHTML = render(state, { ...options, draft, sending, selectedRunId, notice });
         host.querySelectorAll?.('details[data-release-panel]').forEach(el => { if (expanded.has(el.dataset.releasePanel)) el.open = true; });
         const nextInput = host.querySelector?.('#kt-release-input');
@@ -14113,7 +14200,7 @@
         if (nextLog) nextLog.scrollTop = followMessages && (state.messages?.length !== previousMessageCount || previousPhase !== state.phase) ? nextLog.scrollHeight : logTop;
         if (nextCurrent) nextCurrent.scrollTop = currentTop;
         const nextLayout = host.querySelector?.('.ktr-layout'); if (nextLayout) nextLayout.scrollTop = layoutTop;
-        previousPhase = state.phase; previousRunId = selectedRunId; previousMessageCount = state.messages?.length || 0;
+        previousPhase = state.phase; previousRunId = selectedRunId; previousExplanationId = state.explanationId; previousMessageCount = state.messages?.length || 0;
       }
       function updateDraftGuard() {
         const pending = draftPending({ draft, sending });
@@ -14141,6 +14228,24 @@
         if (action === 'send') return send();
         if (action === 'current') { selectedRunId = null; notice = ''; draw(); return; }
         if (action === 'history') { selectedRunId = id; draw(); return; }
+        if (action === 'show-explanation' || action === 'show-changes') {
+          if (busy.has(state.phase)) return;
+          selectedRunId = null; notice = '';
+          return action === 'show-explanation' ? controller.showExplanation(id) : controller.showChanges();
+        }
+        if (action === 'copy-explanation' || action === 'download-explanation') {
+          const document = (state.explanations || []).find(item => item.id === id);
+          if (!document) return;
+          const markdown = explanationMarkdown(document);
+          if (action === 'copy-explanation') {
+            if (typeof options.onCopy !== 'function') { notice = '説明の本文を選択してコピーしてください。'; draw(); return; }
+            await options.onCopy(markdown); notice = '説明をコピーしました。';
+          } else {
+            if (typeof options.onDownload !== 'function') return;
+            await options.onDownload('アプリの説明.md', markdown, 'text/markdown;charset=utf-8'); notice = '説明を保存しました。';
+          }
+          draw(); return;
+        }
         if (action === 'answer') { draft = target.dataset?.releaseAnswer || ''; const input = host.querySelector?.('#kt-release-input'); if (input) { input.value = draft; input.focus?.(); } updateDraftGuard(); return; }
         if (action === 'new-task') { draft = ''; const input = host.querySelector?.('#kt-release-input'); if (input) input.value = ''; selectedRunId = null; notice = ''; return controller.newTask(); }
         if (action === 'cancel-rollback') return controller.cancelRollback();
@@ -14183,6 +14288,7 @@
       .ktr-composer{flex:none;margin:12px 0 0;padding:10px;border:1px solid #aebccf;border-radius:12px;background:var(--ktr-paper)}.ktr-composer label{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip-path:inset(50%);white-space:nowrap}.ktr-composer textarea{display:block;width:100%;min-height:64px;max-height:120px;resize:vertical;padding:6px;font:inherit;border:0;border-radius:5px;color:var(--ktr-text);background:var(--ktr-paper)}.ktr-composer .ktr-compose-actions{margin:6px 0 0;gap:6px}.ktr-composer .ktr-compose-actions button{padding:7px 14px}.ktr-confirmations,.ktr-question,.ktr-notice{padding:14px 16px;border:1px solid var(--ktr-line);border-radius:7px;background:var(--ktr-soft);margin:16px 0}.ktr-confirmations h3,.ktr-question h3{margin-top:0}.ktr-error{max-height:24dvh;overflow:auto;padding:12px 16px;border-left:3px solid #b74826;background:#fff2e9;color:#783418}.ktr-reasons{color:#783418}.ktr-progress{padding:0 0 24px}
       .ktr-support{border-top:1px solid var(--ktr-line);margin-top:22px;padding-top:10px}.ktr-workspace .ktr-support-heading{display:none;font-size:15px;margin:0 0 12px;color:var(--ktr-muted)}.ktr-workspace details,.kt-release-dialog details{margin:8px 0}.ktr-workspace summary,.kt-release-dialog summary{cursor:pointer;padding:9px 0;color:var(--ktr-muted)}.ktr-workspace details[open]>summary,.kt-release-dialog details[open]>summary{font-weight:600;color:var(--ktr-text)}.ktr-workspace .ktr-messages{list-style:none;padding:0 8px 0 0;margin:0;display:flex;flex-direction:column;gap:20px}.ktr-workspace .ktr-message{max-width:94%;margin:0;padding:10px 12px;align-self:flex-start}.ktr-workspace .ktr-message.ktr-user{align-self:flex-end;padding:12px 16px;background:#eef4fd;border-radius:14px 14px 4px 14px}.ktr-message p{margin:6px 0 0;line-height:1.75}.ktr-speaker{font-size:12px;font-weight:600;color:var(--ktr-muted)}.ktr-code{padding:12px 0 20px}.ktr-code pre,.ktr-setting-values,.ktr-fact-value{white-space:pre-wrap;word-break:break-word;font:12px/1.6 ui-monospace,monospace;background:var(--ktr-soft);border:1px solid var(--ktr-line);border-radius:6px;padding:14px}
       .kt-release-dialog{width:min(640px,calc(100vw - 32px));max-width:calc(100vw - 32px);max-height:calc(100vh - 32px);max-height:calc(100dvh - 32px);padding:24px;margin:auto;border:1px solid var(--ktr-line);border-radius:10px;overflow:auto;overscroll-behavior:contain}.kt-release-dialog.ktr-dialog-wide{width:min(960px,calc(100vw - 32px))}.kt-release-dialog::backdrop{background:rgba(15,23,42,.38)}.ktr-dialog-header{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;margin-bottom:16px}.kt-release-dialog .ktr-dialog-header h2{font-size:20px;margin:0}.kt-release-dialog [data-close]{flex:none;white-space:nowrap}.kt-release-dialog :is(textarea,select){font:inherit;max-width:100%;min-width:0;padding:9px 10px;border:1px solid #aebccf;border-radius:6px;color:var(--ktr-text);background:var(--ktr-paper)}.kt-release-dialog textarea{width:100%}.kt-release-dialog pre{white-space:pre-wrap;overflow-wrap:anywhere;max-width:100%}
+      .ktr-document-navigation{margin:0 0 18px}.ktr-document-tabs{display:flex;gap:8px;flex-wrap:wrap}.ktr-workspace .ktr-document-tabs button[aria-pressed="true"]{border-color:var(--ktr-accent);background:#edf3ff;color:var(--ktr-accent);font-weight:650}.ktr-document-navigation>details>ul{list-style:none;padding:0}.ktr-explanation-section{margin:24px 0;padding-bottom:8px}.ktr-explanation-section>h3{font-size:18px}.ktr-explanation-unknowns{border-left:3px solid #c49c48;padding:4px 16px;background:#fffaf0}.ktr-table-scroll{max-width:100%;overflow:auto;margin:16px 0}.ktr-table-scroll:focus-visible{outline:3px solid #83b6fb;outline-offset:2px}.ktr-explanation table{width:100%;min-width:360px;border-collapse:collapse;font-size:13px}.ktr-explanation th,.ktr-explanation td{text-align:left;vertical-align:top;border:1px solid var(--ktr-line);padding:10px 12px;white-space:pre-wrap;overflow-wrap:anywhere}.ktr-explanation th{background:var(--ktr-soft);font-weight:650}[data-release-stage="explanation"] .ktr-stage-header{background:#edf5f0;color:#315e45}
       .ktr-stage-header{display:flex;align-items:center;gap:10px;margin-bottom:22px;padding:12px 14px;border-radius:10px;background:#f1f4f8;color:#45536a;font-weight:650;font-size:13px}.ktr-stage-icon{display:grid;place-items:center;width:28px;height:28px;flex:none;border-radius:50%;background:#fff;font-size:15px}
       [data-release-stage="proposal"] .ktr-stage-header{background:#edf3ff;color:#244e94}[data-release-stage="review"] .ktr-stage-header{background:#fff3d9;color:#715009}[data-release-stage="result"] .ktr-stage-header{background:#eaf2f3;color:#235c63}[data-release-stage="attention"] .ktr-stage-header{background:#fff0e8;color:#8a3c22}
       [data-release-stage="proposal"]>.ktr-section>ul:first-of-type{list-style:none;padding:0;counter-reset:proposal}.ktr-current[data-release-stage="proposal"]>.ktr-section>ul:first-of-type>li{counter-increment:proposal;padding:14px 16px 14px 46px;position:relative;border:1px solid #dce6f5;border-radius:9px;background:#fafcff;margin:10px 0}.ktr-current[data-release-stage="proposal"]>.ktr-section>ul:first-of-type>li::before{content:counter(proposal);position:absolute;left:16px;top:14px;font-weight:700;color:#47699d}
@@ -14192,7 +14298,7 @@
       @container ktr-workspace (min-width:960px){.ktr-layout{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.08fr);grid-template-rows:minmax(0,1fr);gap:24px;overflow:hidden}.ktr-chat-log{min-height:0;max-height:none;overscroll-behavior:contain}.ktr-conversation{overflow:hidden}.ktr-current{border-top:0;border-left:1px solid var(--ktr-line);padding:0 8px 0 24px;margin:0;overflow:auto}}
       @media(max-width:560px){.ktr-workspace{padding:14px}.ktr-header{gap:8px;align-items:flex-start;flex-direction:column}.ktr-header-tools{justify-content:flex-start;gap:8px}.ktr-workspace h2{font-size:19px}.ktr-actions .ktr-primary{width:100%}.ktr-compose-actions{align-items:flex-end}.ktr-phase{white-space:normal;text-align:right}.kt-release-dialog{padding:16px}.ktr-dialog-header{gap:8px}.kt-release-dialog .ktr-dialog-header h2{font-size:18px}.kt-release-dialog label{display:block;margin:8px 0}.kt-release-dialog label>select{display:block;width:100%;margin-top:4px}}
     `;
-    return { create, render, escape: esc };
+    return { create, render, escape: esc, explanationMarkdown };
   })();
 
   /* Browser composition. Authentication, limits and preview executors are reused;
@@ -14206,7 +14312,7 @@
     let baseQueue = Promise.resolve();
     let connectionError = '', initialHealth = d.initialHealth || null;
     const esc = KTReleaseView.escape;
-    const supportsRelease = (feature, cap) => !!cap?.available && (feature === KTAiClient.FEATURE_GENERATOR ? cap.verification?.includes('artifactOutcome') : feature === KTAiClient.FEATURE_PLANNER ? ['releaseWorkspace', 'formLayoutPlacement', 'fieldMaintenance'].every(mark => cap.requirementOps?.includes(mark)) : cap.conversation?.includes('releaseWorkspace'));
+    const supportsRelease = (feature, cap) => !!cap?.available && (feature === KTAiClient.FEATURE_GENERATOR ? cap.verification?.includes('artifactOutcome') : feature === KTAiClient.FEATURE_PLANNER ? ['releaseWorkspace', 'formLayoutPlacement', 'fieldMaintenance'].every(mark => cap.requirementOps?.includes(mark)) : ['releaseWorkspace', 'appExplanation'].every(mark => cap.conversation?.includes(mark)));
     host.style.overflow = 'auto';
     host.style.height = '100%';
     function dialog(title, body, { wide = false } = {}) {
@@ -14373,7 +14479,7 @@
       let inputs = d.getInputs?.() || {};
       const targets = KTContextUi.listTargets(inputs);
       const choices = [...targets.fields.map(f => ({ type: 'field', id: f.id, label: f.label })), ...targets.files.map(f => ({ type: 'file', id: f.id, label: f.label }))];
-      const el = dialog('資料を作成', '<p>この操作ではAIサービスへ送信しません。レコードの値・添付ファイルは含めません。</p><label>資料の種類 <select data-kind><option value="context">外部AIへの相談用</option><option value="planner">外部AIへの変更計画用</option>' + kinds.map(k => '<option value="' + esc(k.id) + '">' + esc(k.label) + '</option>').join('') + '</select></label><label> 対象 <select data-focus><option value="">アプリ全体</option>' + choices.map((f, i) => '<option value="' + i + '">' + esc(f.label) + '</option>').join('') + '</select></label><p><label>依頼文 <textarea data-question rows="3" style="width:100%"></textarea></label></p><button data-make>資料を作る</button>' + (d.runScan && !inputs.scan ? ' <button data-scan>JavaScriptを解析する</button>' : '') + '<p data-note style="white-space:pre-wrap" role="status"></p><details data-coverage hidden><summary>資料に含めた情報</summary><ul></ul></details><label>形式 <select data-format><option value="markdown">Markdown</option><option value="prompt">AIへの指示</option><option value="json">JSON</option></select></label><textarea data-output rows="15" readonly style="width:100%;font:12px/1.5 monospace"></textarea><div><button data-copy disabled>コピー</button> <button data-save disabled>ファイルで保存</button></div>', { wide: true });
+      const el = dialog('設定資料を書き出す', '<p>この操作ではAIサービスへ送信しません。レコードの値・添付ファイルは含めません。</p><label>資料の種類 <select data-kind><option value="context">外部AIへの相談用</option><option value="planner">外部AIへの変更計画用</option>' + kinds.map(k => '<option value="' + esc(k.id) + '">' + esc(k.label) + '</option>').join('') + '</select></label><label> 対象 <select data-focus><option value="">アプリ全体</option>' + choices.map((f, i) => '<option value="' + i + '">' + esc(f.label) + '</option>').join('') + '</select></label><p><label>依頼文 <textarea data-question rows="3" style="width:100%"></textarea></label></p><button data-make>資料を作る</button>' + (d.runScan && !inputs.scan ? ' <button data-scan>JavaScriptを解析する</button>' : '') + '<p data-note style="white-space:pre-wrap" role="status"></p><details data-coverage hidden><summary>資料に含めた情報</summary><ul></ul></details><label>形式 <select data-format><option value="markdown">Markdown</option><option value="prompt">AIへの指示</option><option value="json">JSON</option></select></label><textarea data-output rows="15" readonly style="width:100%;font:12px/1.5 monospace"></textarea><div><button data-copy disabled>コピー</button> <button data-save disabled>ファイルで保存</button></div>', { wide: true });
       let outputs = null;
       const output = () => { el.querySelector('[data-output]').value = outputs?.[el.querySelector('[data-format]').value] || ''; };
       const resetOutput = () => { outputs = null; output(); el.querySelector('[data-copy]').disabled = true; el.querySelector('[data-save]').disabled = true; el.querySelector('[data-coverage]').hidden = true; };
@@ -14432,9 +14538,9 @@
       if (b) el.querySelector('pre').textContent = JSON.stringify({ appId: b.appId, revision: b.revision, diff: b.diff }, null, 2);
     }
     view = KTReleaseView.create(host, { controller, connection, beforeSend: consent, onConnect: connectionDialog, onRefreshConnection: () => refreshCapability(true), onFreeContext: freeContext, onDetails: details,
-      onCopy: d.copyText, onDownload: (name, text) => d.downloadText(name, text, 'text/javascript'),
+      onCopy: d.copyText, onDownload: (name, text, type = 'text/javascript') => d.downloadText(name, text, type),
       onOpenPreview: d.onOpenPreview || (/^\d+$/.test(String(d.appId)) && !location.pathname.startsWith('/k/guest/') ? () => window.open(location.origin + '/k/admin/preview/' + encodeURIComponent(d.appId) + '/', '_blank', 'noopener') : null),
-      appName: d.getInputs?.()?.data?.appName || 'アプリの変更' });
+      appName: d.getInputs?.()?.data?.appName || 'アプリの相談' });
     const warnBeforeLeave = event => {
       const state = controller.getState();
       if (state.messages.length || state.runs.length) { event.preventDefault(); event.returnValue = ''; }
