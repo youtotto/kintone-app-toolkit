@@ -49,7 +49,11 @@ const KTReleaseWorkspace = (() => {
       controller = new AbortController();
       set({ phase, error: null });
       try { await work(controller.signal, () => ticket === epoch); return true; }
-      catch (e) { if (ticket === epoch) set({ phase: failurePhase, error: errorOf(e), progress: '' }); return false; }
+      catch (e) { if (ticket === epoch) {
+        const error = errorOf(e);
+        if (phase === 'consulting') error.message += ' 案は更新していません。相談内容をもう一度送信してください。';
+        set({ phase: failurePhase, error, progress: '' });
+      } return false; }
       finally { if (ticket === epoch) controller = null; }
     }
     async function validateArtifact(result, customization) {
@@ -113,10 +117,13 @@ const KTReleaseWorkspace = (() => {
       if (state.runs.some(r => r.status === 'running')) return false;
       if (!state.goal) state.goal = value;
       invalidate(); message('user', value);
+      // Retire the previous plan before a revision starts, including failed requests.
+      pendingPlanQuestions = clone(state.plan?.questions || pendingPlanQuestions);
+      Object.assign(state, { plan: null, adopted: null, artifacts: [] });
       return activity('consulting', async (signal, live) => {
         const fresh = await getBase('consult');
         if (!live()) return;
-        const response = await services.propose({ text: value, previous: clone(state.proposal), pendingPlanQuestions: clone(state.plan?.questions || pendingPlanQuestions), answers: clone(state.answers), requests: state.messages.filter(m => m.role === 'user').map(m => m.text), base: fresh, signal });
+        const response = await services.propose({ text: value, previous: clone(state.proposal), pendingPlanQuestions: clone(pendingPlanQuestions), answers: clone(state.answers), requests: state.messages.filter(m => m.role === 'user').map(m => m.text), base: fresh, signal });
         if (!live()) return;
         if (!response || typeof response.reply !== 'string') throw new Error('AIサービスの返答を受け取れませんでした。');
         message('assistant', response.reply, response.facts);
@@ -132,7 +139,7 @@ const KTReleaseWorkspace = (() => {
     }
     async function adopt() {
       if (!state.proposal || questions(state.proposal, state.answers).length || !available()) return false;
-      invalidate(); pendingPlanQuestions = []; state.adopted = clone(state.proposal); state.artifacts = [];
+      invalidate(); pendingPlanQuestions = []; state.plan = null; state.adopted = clone(state.proposal); state.artifacts = [];
       // Optional ideas are not adopted by the general create action.
       state.adopted.behaviors = (state.adopted.behaviors || []).filter(b => b.origin !== 'suggestion');
       return activity('building', async (signal, live) => {
@@ -206,13 +213,8 @@ const KTReleaseWorkspace = (() => {
         if (!['consulting','building','preparing'].includes(state.phase)) return false;
         const consulting = state.phase === 'consulting';
         ++epoch; controller?.abort(); controller = null; invalidate();
-        // A cancelled revision request cannot resume the plan made before that request.
-        if (consulting) {
-          // Preserve only the question text/structure needed to resend the consultation.
-          pendingPlanQuestions = clone(state.plan?.questions || pendingPlanQuestions);
-          Object.assign(state, { plan: null, adopted: null, artifacts: [] });
-        }
-        set({ phase: state.plan ? 'incomplete' : state.proposal ? 'proposal' : 'idle', progress: '', error: { code: 'CANCELLED', message: consulting ? '相談を中断しました。案は更新していません。' : '作成を中断しました。できた内容は残っています。' } }); return true;
+        // send() already retired the previous plan and retained pending questions.
+        set({ phase: state.plan ? 'incomplete' : state.proposal ? 'proposal' : 'idle', progress: '', error: { code: 'CANCELLED', message: consulting ? '相談を中断しました。案は更新していません。' : state.artifacts.length ? '作成を中断しました。作成途中の内容は残っています。' : '作成を中断しました。反映はしていません。' } }); return true;
       },
     };
   }

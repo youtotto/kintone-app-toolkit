@@ -13355,7 +13355,11 @@
         controller = new AbortController();
         set({ phase, error: null });
         try { await work(controller.signal, () => ticket === epoch); return true; }
-        catch (e) { if (ticket === epoch) set({ phase: failurePhase, error: errorOf(e), progress: '' }); return false; }
+        catch (e) { if (ticket === epoch) {
+          const error = errorOf(e);
+          if (phase === 'consulting') error.message += ' 案は更新していません。相談内容をもう一度送信してください。';
+          set({ phase: failurePhase, error, progress: '' });
+        } return false; }
         finally { if (ticket === epoch) controller = null; }
       }
       async function validateArtifact(result, customization) {
@@ -13419,10 +13423,13 @@
         if (state.runs.some(r => r.status === 'running')) return false;
         if (!state.goal) state.goal = value;
         invalidate(); message('user', value);
+        // Retire the previous plan before a revision starts, including failed requests.
+        pendingPlanQuestions = clone(state.plan?.questions || pendingPlanQuestions);
+        Object.assign(state, { plan: null, adopted: null, artifacts: [] });
         return activity('consulting', async (signal, live) => {
           const fresh = await getBase('consult');
           if (!live()) return;
-          const response = await services.propose({ text: value, previous: clone(state.proposal), pendingPlanQuestions: clone(state.plan?.questions || pendingPlanQuestions), answers: clone(state.answers), requests: state.messages.filter(m => m.role === 'user').map(m => m.text), base: fresh, signal });
+          const response = await services.propose({ text: value, previous: clone(state.proposal), pendingPlanQuestions: clone(pendingPlanQuestions), answers: clone(state.answers), requests: state.messages.filter(m => m.role === 'user').map(m => m.text), base: fresh, signal });
           if (!live()) return;
           if (!response || typeof response.reply !== 'string') throw new Error('AIサービスの返答を受け取れませんでした。');
           message('assistant', response.reply, response.facts);
@@ -13438,7 +13445,7 @@
       }
       async function adopt() {
         if (!state.proposal || questions(state.proposal, state.answers).length || !available()) return false;
-        invalidate(); pendingPlanQuestions = []; state.adopted = clone(state.proposal); state.artifacts = [];
+        invalidate(); pendingPlanQuestions = []; state.plan = null; state.adopted = clone(state.proposal); state.artifacts = [];
         // Optional ideas are not adopted by the general create action.
         state.adopted.behaviors = (state.adopted.behaviors || []).filter(b => b.origin !== 'suggestion');
         return activity('building', async (signal, live) => {
@@ -13512,13 +13519,8 @@
           if (!['consulting','building','preparing'].includes(state.phase)) return false;
           const consulting = state.phase === 'consulting';
           ++epoch; controller?.abort(); controller = null; invalidate();
-          // A cancelled revision request cannot resume the plan made before that request.
-          if (consulting) {
-            // Preserve only the question text/structure needed to resend the consultation.
-            pendingPlanQuestions = clone(state.plan?.questions || pendingPlanQuestions);
-            Object.assign(state, { plan: null, adopted: null, artifacts: [] });
-          }
-          set({ phase: state.plan ? 'incomplete' : state.proposal ? 'proposal' : 'idle', progress: '', error: { code: 'CANCELLED', message: consulting ? '相談を中断しました。案は更新していません。' : '作成を中断しました。できた内容は残っています。' } }); return true;
+          // send() already retired the previous plan and retained pending questions.
+          set({ phase: state.plan ? 'incomplete' : state.proposal ? 'proposal' : 'idle', progress: '', error: { code: 'CANCELLED', message: consulting ? '相談を中断しました。案は更新していません。' : state.artifacts.length ? '作成を中断しました。作成途中の内容は残っています。' : '作成を中断しました。反映はしていません。' } }); return true;
         },
       };
     }
@@ -14024,6 +14026,7 @@
       }).join('');
     }
     function incompleteHtml(state, options) {
+      if (!state.plan) return `<section class="ktr-section"><h2>計画を作成できませんでした</h2><p>この案の作成は完了していません。相談で内容を修正するか、もう一度作成してください。</p><div class="ktr-actions">${button('adopt', 'もう一度作成', { primary: true, disabled: !state.proposal, blockedByDraft: draftPending(options) })}</div>${draftNotice(options)}</section>`;
       const artifacts = state.artifacts || [], all = state.plan?.customizations || [];
       const finished = artifacts.filter(a => a.result?.artifactOutcome?.state === 'ready');
       const unfinished = all.filter(c => !finished.some(a => a.customizationId === c.customizationId));
@@ -14040,6 +14043,7 @@
       const canRestore = !!run.result?.written && run.rollback?.status !== 'complete' && !recoveryLimited;
       const rows = Array.isArray(result.rows) ? result.rows : [...(Array.isArray(result.settings) ? result.settings : []), ...(Array.isArray(result.files) ? result.files : [])];
       return `<section class="ktr-section"><h2>${esc(title)}</h2>${result.message ? `<p class="ktr-lead">${esc(result.message)}</p>` : ''}
+        ${list(result.reasons || [], 'ktr-reasons')}
         ${status === 'complete' && !run.rollback ? list(run.prepared?.changes || []) : ''}
         ${status !== 'complete' && rows.length ? `<h3>処理ごとの結果</h3>${list(rows.map(row => ({ message: [row.title || row.label || row.stepId || row.targetFile || row.name || '変更', row.message || ({ applied: '反映済み', verified: '確認済み', complete: '完了', failed: '未完了', skipped: '未実施', unknown: '結果を確認できません', PENDING: '未実施', APPLIED: '反映済み', FAILED: '未完了', VERIFIED: '確認済み' }[row.status] || '')].filter(Boolean).join('：') })))}` : ''}
         ${!run.rollback && status === 'complete' ? '<p>動作テスト環境を開き、変更した操作を確かめてください。</p>' : ''}
@@ -14070,7 +14074,7 @@
       const runHistory = state.runs?.length ? `<details data-release-panel="runs"><summary>これまでの反映</summary><ul>${state.runs.map((run, index) => `<li>${button('history', run.goal || `反映 ${index + 1}`, { id: run.id })} <span>${esc(run.rollback?.status === 'complete' ? '元に戻し済み' : ({ complete: '反映済み', partial: '一部反映', failed: '未完了', unknown: '結果未確認' }[run.status] || '処理中'))}</span></li>`).join('')}</ul></details>` : '';
       return `<div class="ktr-workspace" data-release-phase="${esc(state.phase)}"><style>${styles}</style><div class="ktr-content"><header class="ktr-header"><div><strong>${esc(options.appName || 'アプリの変更')}</strong><span class="ktr-environment">動作テスト環境</span></div><div class="ktr-header-tools"><span class="ktr-phase">${esc(historical ? '過去の反映記録' : phaseText[state.phase] || '相談')}</span><nav class="ktr-tools" aria-label="補助操作">${button('connect', '接続')}${button('free-context', '資料を作成')}${button('details', 'アプリの情報を見る')}</nav></div></header>
         ${conn.connected === false || conn.available === false ? `<aside class="ktr-notice"><p>${esc(conn.message || 'AIサービスへ接続してください。')}</p>${button('connect', '接続する')}</aside>` : ''}
-        ${notice ? `<p class="ktr-notice" role="status">${esc(notice)}</p>` : ''}${state.error?.message && !historical && !(state.phase === 'incomplete' && (state.artifacts || []).some(a => a.error?.message === state.error.message || a.result?.artifactOutcome?.message === state.error.message)) ? `<p class="ktr-error" role="alert">${esc(state.error.message)}</p>` : ''}
+        ${notice ? `<p class="ktr-notice" role="status">${esc(notice)}</p>` : ''}${state.error?.message && !historical && !(state.phase === 'incomplete' && (state.artifacts || []).some(a => a.error?.message === state.error.message || a.result?.artifactOutcome?.message === state.error.message)) ? `<p class="ktr-error" role="alert" tabindex="0">${esc(state.error.message)}</p>` : ''}
         <div class="ktr-layout"><section class="ktr-conversation" aria-label="相談"><h2 class="ktr-pane-title">相談</h2><div class="ktr-chat-log" data-release-panel="conversation" tabindex="0" aria-label="相談の記録">${historyHtml(state.messages)}${state.phase === 'consulting' && !historical ? `<div class="ktr-chat-pending" role="status">${activity}<span>返答を待っています</span></div>` : ''}</div>${composer(state, { ...options, historical: !!historical })}</section><main class="ktr-current" aria-label="変更案と反映結果" data-release-stage="${stage}"><header class="ktr-stage-header"><span class="ktr-stage-icon" aria-hidden="true">${stageIcon}</span><span>${esc(historical ? '過去の反映記録' : stageTitle)}</span></header>${body}${support || runHistory ? `<div class="ktr-support">${support}${runHistory}</div>` : ''}</main></div></div></div>`;
     }
     function create(host, options = {}) {
@@ -14163,7 +14167,7 @@
       .ktr-workspace *,.kt-release-dialog *{box-sizing:border-box}.ktr-workspace h2,.kt-release-dialog h2{font-size:22px;line-height:1.4;margin:0 0 16px}.ktr-workspace h3,.kt-release-dialog h3{font-size:15px;margin:20px 0 8px}.ktr-workspace p,.kt-release-dialog p{margin:8px 0 14px;white-space:pre-wrap}.ktr-workspace ul,.ktr-workspace ol{margin:8px 0 18px;padding-left:24px}.ktr-workspace li{margin:7px 0}
       .ktr-header{display:flex;align-items:center;justify-content:space-between;gap:16px;border-bottom:1px solid var(--ktr-line);padding-bottom:10px;margin-bottom:14px}.ktr-header strong{font-size:16px}.ktr-environment{display:block;font-size:12px;color:var(--ktr-muted)}.ktr-phase{font-size:12px;color:var(--ktr-muted);white-space:nowrap;padding:3px 8px;background:var(--ktr-soft);border-radius:5px}.ktr-section{padding-bottom:12px}.ktr-lead{font-size:15px}.ktr-note{font-size:12px;color:var(--ktr-muted)}
       .ktr-actions,.ktr-compose-actions{display:flex;flex-wrap:wrap;align-items:center;gap:10px;margin:20px 0 8px}.ktr-compose-actions{justify-content:space-between}.ktr-workspace button,.kt-release-dialog button{font:inherit;line-height:1.4;padding:9px 14px;border:1px solid var(--ktr-line);border-radius:6px;cursor:pointer;background:var(--ktr-paper);color:var(--ktr-text);max-width:100%;overflow-wrap:anywhere}.ktr-workspace button.ktr-primary,.kt-release-dialog button.ktr-primary{color:#fff;background:var(--ktr-accent);border-color:var(--ktr-accent);font-weight:600}.ktr-workspace button:disabled,.kt-release-dialog button:disabled{opacity:.5;cursor:default}.ktr-workspace button:focus-visible,.ktr-workspace textarea:focus-visible,.ktr-workspace summary:focus-visible,.kt-release-dialog :is(button,textarea,select,summary):focus-visible{outline:3px solid #83b6fb;outline-offset:3px}
-      .ktr-composer{flex:none;margin:12px 0 0;padding:10px;border:1px solid #aebccf;border-radius:12px;background:var(--ktr-paper)}.ktr-composer label{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip-path:inset(50%);white-space:nowrap}.ktr-composer textarea{display:block;width:100%;min-height:64px;max-height:120px;resize:vertical;padding:6px;font:inherit;border:0;border-radius:5px;color:var(--ktr-text);background:var(--ktr-paper)}.ktr-composer .ktr-compose-actions{margin:6px 0 0;gap:6px}.ktr-composer .ktr-compose-actions button{padding:7px 14px}.ktr-confirmations,.ktr-question,.ktr-notice{padding:14px 16px;border:1px solid var(--ktr-line);border-radius:7px;background:var(--ktr-soft);margin:16px 0}.ktr-confirmations h3,.ktr-question h3{margin-top:0}.ktr-error{padding:12px 16px;border-left:3px solid #b74826;background:#fff2e9;color:#783418}.ktr-reasons{color:#783418}.ktr-progress{padding:0 0 24px}
+      .ktr-composer{flex:none;margin:12px 0 0;padding:10px;border:1px solid #aebccf;border-radius:12px;background:var(--ktr-paper)}.ktr-composer label{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip-path:inset(50%);white-space:nowrap}.ktr-composer textarea{display:block;width:100%;min-height:64px;max-height:120px;resize:vertical;padding:6px;font:inherit;border:0;border-radius:5px;color:var(--ktr-text);background:var(--ktr-paper)}.ktr-composer .ktr-compose-actions{margin:6px 0 0;gap:6px}.ktr-composer .ktr-compose-actions button{padding:7px 14px}.ktr-confirmations,.ktr-question,.ktr-notice{padding:14px 16px;border:1px solid var(--ktr-line);border-radius:7px;background:var(--ktr-soft);margin:16px 0}.ktr-confirmations h3,.ktr-question h3{margin-top:0}.ktr-error{max-height:24dvh;overflow:auto;padding:12px 16px;border-left:3px solid #b74826;background:#fff2e9;color:#783418}.ktr-reasons{color:#783418}.ktr-progress{padding:0 0 24px}
       .ktr-support{border-top:1px solid var(--ktr-line);margin-top:22px;padding-top:10px}.ktr-workspace .ktr-support-heading{display:none;font-size:15px;margin:0 0 12px;color:var(--ktr-muted)}.ktr-workspace details,.kt-release-dialog details{margin:8px 0}.ktr-workspace summary,.kt-release-dialog summary{cursor:pointer;padding:9px 0;color:var(--ktr-muted)}.ktr-workspace details[open]>summary,.kt-release-dialog details[open]>summary{font-weight:600;color:var(--ktr-text)}.ktr-workspace .ktr-messages{list-style:none;padding:0 8px 0 0;margin:0;display:flex;flex-direction:column;gap:20px}.ktr-workspace .ktr-message{max-width:94%;margin:0;padding:10px 12px;align-self:flex-start}.ktr-workspace .ktr-message.ktr-user{align-self:flex-end;padding:12px 16px;background:#eef4fd;border-radius:14px 14px 4px 14px}.ktr-message p{margin:6px 0 0;line-height:1.75}.ktr-speaker{font-size:12px;font-weight:600;color:var(--ktr-muted)}.ktr-code{padding:12px 0 20px}.ktr-code pre,.ktr-setting-values,.ktr-fact-value{white-space:pre-wrap;word-break:break-word;font:12px/1.6 ui-monospace,monospace;background:var(--ktr-soft);border:1px solid var(--ktr-line);border-radius:6px;padding:14px}
       .kt-release-dialog{width:min(640px,calc(100vw - 32px));max-width:calc(100vw - 32px);max-height:calc(100vh - 32px);max-height:calc(100dvh - 32px);padding:24px;margin:auto;border:1px solid var(--ktr-line);border-radius:10px;overflow:auto;overscroll-behavior:contain}.kt-release-dialog.ktr-dialog-wide{width:min(960px,calc(100vw - 32px))}.kt-release-dialog::backdrop{background:rgba(15,23,42,.38)}.ktr-dialog-header{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;margin-bottom:16px}.kt-release-dialog .ktr-dialog-header h2{font-size:20px;margin:0}.kt-release-dialog [data-close]{flex:none;white-space:nowrap}.kt-release-dialog :is(textarea,select){font:inherit;max-width:100%;min-width:0;padding:9px 10px;border:1px solid #aebccf;border-radius:6px;color:var(--ktr-text);background:var(--ktr-paper)}.kt-release-dialog textarea{width:100%}.kt-release-dialog pre{white-space:pre-wrap;overflow-wrap:anywhere;max-width:100%}
       .ktr-stage-header{display:flex;align-items:center;gap:10px;margin-bottom:22px;padding:12px 14px;border-radius:10px;background:#f1f4f8;color:#45536a;font-weight:650;font-size:13px}.ktr-stage-icon{display:grid;place-items:center;width:28px;height:28px;flex:none;border-radius:50%;background:#fff;font-size:15px}
