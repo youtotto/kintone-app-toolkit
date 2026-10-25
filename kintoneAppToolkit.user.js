@@ -9107,7 +9107,13 @@
         // 合成結果の整合: 先頭ステータスは変わらない / 全アクションの from・to が存在する / 追加したステータスに到達経路がある
         if (firstName && sortedStates(next.states)[0]?.name !== firstName) throw Object.assign(new Error('先頭のステータスは変更・追加できません'), { code: 'FIRST_STATUS_CHANGED' });
         for (const a of next.actions) if (!next.states[a.from] || !next.states[a.to]) throw Object.assign(new Error(`アクション「${a.name}」の遷移元 / 遷移先（${a.from} → ${a.to}）が存在しません`), { code: 'TARGET_MISSING' });
-        for (const st of steps) { const m = st.prepared?.mutation; if (m?.kind === 'ADD_STATUS' && !next.actions.some(a => a.to === m.name)) throw Object.assign(new Error(`ステータス「${m.name}」へ遷移するアクションがありません（到達不能）`), { code: 'STATUS_UNREACHABLE', stepId: st.stepId }); }
+        // Follow directed edges from the initial state; an incoming edge alone also admits isolated cycles.
+        // Conditions and assignees are not evaluated here. Existing retired states may still hold records.
+        const reachable = new Set(firstName ? [firstName] : []), queue = [...reachable];
+        for (let i = 0; i < queue.length; i++) for (const a of next.actions) {
+          if (a.from === queue[i] && !reachable.has(a.to)) { reachable.add(a.to); queue.push(a.to); }
+        }
+        for (const st of steps) { const m = st.prepared?.mutation; if (m?.kind === 'ADD_STATUS' && !reachable.has(m.name)) throw Object.assign(new Error(`ステータス「${m.name}」へ最初のステータス「${firstName}」から進む経路がありません。アクションのつながりを見直してください。`), { code: 'STATUS_UNREACHABLE', stepId: st.stepId }); }
         return next;
       },
       async apply({ api, appId, snapshot, processBaseline = undefined }, steps) {
