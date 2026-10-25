@@ -9269,7 +9269,7 @@
       const byId = new Map(steps.map(s => [s.stepId, s]));
       const groups = []; let cur = null;
       steps.forEach((st, i) => {
-        if (st.status !== STEP.PENDING || !isProcessAction(st.actionType)) { st.groupId = null; return; }
+        if (st.status !== STEP.PENDING || !isProcessAction(st.actionType)) { st.groupId = null; if (['CUSTOMIZATION_REQUIRED', 'CUSTOMIZE_JS'].includes(st.actionType)) cur = null; return; }
         const nonProc = st.dependsOn.filter(d => byId.has(d) && !isProcessAction(byId.get(d).actionType));
         const maxDep = nonProc.reduce((m, d) => Math.max(m, pos.get(d) ?? -1), -1);
         if (cur && maxDep < cur.anchor) { cur.stepIds.push(st.stepId); }
@@ -9360,6 +9360,8 @@
         if (!op || typeof op.id !== 'string' || !op.id || byId.has(op.id) || !Array.isArray(op.dependsOn || [])) { block('INVALID_OPERATION', '設定の手順の識別子または順序が不正です'); return finish(); }
         byId.set(op.id, op);
       }
+      prepared.registrationStepIds = [...new Set(input.registrationStepIds || [])];
+      if (prepared.registrationStepIds.some(id => !['CUSTOMIZATION_REQUIRED', 'CUSTOMIZE_JS'].includes(byId.get(id)?.actionType))) { block('REGISTRATION_INVALID', 'JavaScriptの登録手順が計画と一致しません'); return finish(); }
       const ordered = [], visiting = new Set(), visited = new Set();
       const visit = (op) => {
         if (visited.has(op.id)) return;
@@ -9401,12 +9403,12 @@
         try {
           if (['CUSTOMIZATION_REQUIRED', 'CUSTOMIZE_JS'].includes(type)) { skip('JAVASCRIPT_OPERATION', 'JavaScript の変更として扱います'); continue; }
           if (type === 'REQUIRE_CONFIRMATION') {
-            if (op.blocking === true || op.validation?.status === 'needs_confirmation' || array(op.questions).some(q => q.blocking === true)) fail('UNRESOLVED_CONFIRMATION', '回答が必要な確認事項が残っています');
+            if (op.blocking === true || op.validation?.status === 'needs_confirmation' || array(op.questions).some(q => q.blocking === true)) fail('UNRESOLVED_CONFIRMATION', [op.title || '回答が必要な確認事項が残っています', typeof op.details === 'string' ? op.details : null, op.proposal?.summary, ...array(op.proposal?.details)].filter(Boolean).join('。'));
             skip('NO_CHANGE', '設定を書き込まない確認事項です'); continue;
           }
           if (type === 'REUSE_FIELD') { fieldOf(ref); skip(); continue; }
           if (!HANDLERS[type]) fail('UNSUPPORTED_OPERATION', 'この種類の設定変更を自動で反映する手順がありません');
-          if ((op.dependsOn || []).some(id => ['CUSTOMIZATION_REQUIRED', 'CUSTOMIZE_JS'].includes(byId.get(id)?.actionType))) fail('DEPENDENCY_ORDER_UNSUPPORTED', '設定の変更より先にJavaScriptを登録する順序には対応していません。変更の順序を見直してください。');
+          if ((op.dependsOn || []).some(id => ['CUSTOMIZATION_REQUIRED', 'CUSTOMIZE_JS'].includes(byId.get(id)?.actionType) && !prepared.registrationStepIds.includes(id))) fail('DEPENDENCY_ORDER_UNSUPPORTED', '設定の変更より先にJavaScriptを登録する順序には対応していません。変更の順序を見直してください。');
           if (s.destApp && !['ADD_APP_ACTION', 'UPDATE_APP_ACTION'].includes(type) && String(s.destApp) !== prepared.appId) fail('OTHER_APP_WRITE', '別のアプリへの設定変更は含められません');
           if ((op.dependsOn || []).some(id => prepared.steps.find(x => x.stepId === id)?.status === STEP.BLOCKED)) fail('DEPENDENCY_BLOCKED', '先に必要な設定の手順が準備できていません');
           let change = null, placement = null, nextLayout = null;
@@ -9591,7 +9593,7 @@
       if (processSteps.length && prepared.status === RUN.PREPARED) { try { PROCESS_GROUP.compose(current.status, processSteps); } catch (e) { block(e.code || 'INVALID_PROCESS', e.message, e.stepId); } }
       return finish();
     }
-    const operationFingerprint = (p) => KTScan.hashText(JSON.stringify({ appId: p.appId, snapshot: p.snapshot, steps: p.steps, layoutPolicy: p.layoutPolicy }));
+    const operationFingerprint = (p) => KTScan.hashText(JSON.stringify({ appId: p.appId, snapshot: p.snapshot, steps: p.steps, layoutPolicy: p.layoutPolicy, registrationStepIds: p.registrationStepIds }));
     function operationFields(properties) {
       const result = {};
       const walk = (props, parent = null) => { for (const [code, p] of Object.entries(props || {})) {
@@ -9604,11 +9606,12 @@
 
     // ================= executePreview =================
     /** 承認済み・実行可能な step を dependsOn 順に動作テスト環境へ反映し、1 step ごとに再取得して検証する。失敗したら以降を止める（Fail Stop） */
-    async function executePreview(prepared, { api, now = Date.now, onProgress = null, review = null } = {}) {
+    async function executePreview(prepared, { api, now = Date.now, onProgress = null, review = null, registerJavaScript = null } = {}) {
       if (!prepared || prepared.status !== RUN.PREPARED) throw Object.assign(new Error('prepare が完了していない、または実行できない状態です'), { code: 'NOT_PREPARED' });
       if (prepared.executed) throw Object.assign(new Error('この prepare は既に実行されています（二重実行の防止。やり直すには prepare からやり直してください）'), { code: 'ALREADY_EXECUTED' });
       if (prepared.operationVersion === '1' && prepared.operationFingerprint !== operationFingerprint(prepared)) throw Object.assign(new Error('承認した設定の変更内容が変わっています'), { code: 'PREPARED_CHANGED' });
       if (prepared.operationVersion === '1' && !prepared.steps.some(s => s.status === STEP.PENDING)) throw Object.assign(new Error('反映する設定の変更がありません'), { code: 'NOTHING_TO_EXECUTE' });
+      if (prepared.registrationStepIds?.length && typeof registerJavaScript !== 'function') throw Object.assign(new Error('先に必要なJavaScriptの登録処理がありません'), { code: 'REGISTRATION_REQUIRED' });
       prepared.executed = true;
       const log = {
         executorVersion: EXECUTOR_VERSION, executionId: prepared.executionId, appId: prepared.appId, env: ENV, startedAt: nowIso(now), finishedAt: null,
@@ -9620,16 +9623,28 @@
       for (const st of prepared.steps) { const l = { stepId: st.stepId, actionType: st.actionType, title: st.title, status: st.status === STEP.PENDING ? STEP.PENDING : st.status, reason: st.reason, message: st.message, summary: st.prepared?.summary || '', requests: [], revision: null, verification: null, error: null, before: null, after: null, ...(st.warnings?.length ? { warnings: clone(st.warnings) } : {}) }; stepLogs.set(st.stepId, l); log.steps.push(l); }
       let revision = prepared.revision.preview;
       let failed = false;
-      const done = new Set();
+      const done = new Set(), registered = new Set();
       let processBaseline = prepared.snapshot?.status ? stripRevision(prepared.snapshot.status) : undefined;   // 直前のグループが作ったプロセス設定（2 つ目以降の bit 比較の基準）
       let actionsBaseline = undefined;   // Phase 14: 直前のアプリアクション step が検証したアクション全体（2 つ目以降の bit 比較の基準）
       const groups = Array.isArray(prepared.groups) ? prepared.groups : formProcessGroups(prepared.steps);
       const stepById = new Map(prepared.steps.map(x => [x.stepId, x]));
       // Phase 22（余計な確認）: 承認された確認の手順（REQUIRE_CONFIRMATION。設定を変えない）は、依存を満たす「確認済み」。書き込みの要らない手順（NO_CHANGE）は承認に関係なく満たす（classifySteps と同じ）
-      const depMet = (d) => { const dl = stepLogs.get(d); if (!dl || dl.status === STEP.VERIFIED) return true; const ds = stepById.get(d); return !!ds && (noChangeDone(ds) || (ds.approved && ds.actionType === 'REQUIRE_CONFIRMATION')); };
+      const depMet = (d) => { if (registered.has(d)) return true; const dl = stepLogs.get(d); if (!dl || dl.status === STEP.VERIFIED) return true; const ds = stepById.get(d); return !!ds && (noChangeDone(ds) || (ds.approved && ds.actionType === 'REQUIRE_CONFIRMATION')); };
       for (const st of prepared.steps) {
         const l = stepLogs.get(st.stepId);
         if (done.has(st.stepId)) continue;
+        if (prepared.registrationStepIds?.includes(st.stepId) && !registered.size && !failed) {
+          const prerequisites = prepared.registrationStepIds.flatMap(id => stepById.get(id).dependsOn).filter(id => !prepared.registrationStepIds.includes(id));
+          if (!prerequisites.every(depMet)) { l.status = STEP.FAILED; l.reason = 'DEPENDENCY_NOT_VERIFIED'; l.message = 'JavaScriptの登録に先行する手順が完了していません'; failed = true; }
+          else {
+            const registration = await registerJavaScript();
+            if (registration?.ok === true && registration.revision != null) {
+              revision = String(registration.revision);
+              prepared.registrationStepIds.forEach(id => registered.add(id));
+            } else { l.status = STEP.FAILED; l.reason = 'REGISTRATION_FAILED'; l.message = registration?.message || 'JavaScriptの登録を確認できないため、後続の設定は変更していません'; failed = true; }
+          }
+          progress(l);
+        }
         if (st.status !== STEP.PENDING) { progress(l); continue; }
         if (failed) { l.status = STEP.SKIPPED; l.reason = 'STOPPED_AFTER_FAILURE'; l.message = '前の手順が失敗したため実行していません'; progress(l); continue; }
         // ---- Process Change Group: アンカー step に来たらグループ全体を 1 回の PUT で反映する（§25〜27）----
@@ -9666,7 +9681,7 @@
             for (const gl of logs) {
               if (gl.status === STEP.APPLIED) gl.partial = { partial: 'WRITE_ACKNOWLEDGED_READBACK_FAILED', revision: gl.revision };
               gl.status = STEP.FAILED; gl.error = s;
-              gl.reason = isPermissionError(e) ? 'PERMISSION_DENIED' : isRevisionError(e) ? 'REVISION_MISMATCH' : ['TARGET_EXISTS', 'TARGET_CHANGED', 'TARGET_MISSING', 'STATUS_UNREACHABLE', 'PROCESS_ENABLE_NOT_SUPPORTED', 'FIRST_STATUS_CHANGED', 'NO_PROCESS_SPEC'].includes(s.code) ? s.code : 'API_ERROR';
+              gl.reason = isPermissionError(e) ? 'PERMISSION_DENIED' : isRevisionError(e) ? 'REVISION_MISMATCH' : ['TARGET_EXISTS', 'TARGET_CHANGED', 'TARGET_MISSING', 'STATUS_UNREACHABLE', 'PROCESS_ENABLE_NOT_SUPPORTED', 'FIRST_STATUS_CHANGED', 'NO_PROCESS_SPEC', 'REGISTERED_JAVASCRIPT_CHANGED', 'REGISTRATION_REVISION_CHANGED'].includes(s.code) ? s.code : 'API_ERROR';
               gl.message = gl.reason === 'PERMISSION_DENIED' ? 'アプリ設定を変更する権限がありません' : gl.reason === 'REVISION_MISMATCH' ? '実行中に他の変更が入りました（設定が途中で変わりました）。設定を取り直して、同じ依頼をもう一度送ってください' : (e && e.stepId && e.stepId !== gl.stepId ? `同じグループの手順 ${e.stepId} で止まりました: ${s.message}` : s.message);
               progress(gl);
             }
@@ -9694,7 +9709,7 @@
           if (l.status === STEP.APPLIED) l.partial = { partial: 'WRITE_ACKNOWLEDGED_READBACK_FAILED', revision: l.revision };
           l.status = STEP.FAILED; l.error = s; failed = true;
           if (e && typeof e === 'object' && e.applied) { l.partial = clone({ ...e.applied, requests: undefined }); l.requests = e.applied.requests || []; l.revision = e.applied.revision || null; revision = l.revision || revision; }   // 途中まで反映された（rollback の対象）
-          l.reason = isPermissionError(e) ? 'PERMISSION_DENIED' : isRevisionError(e) ? 'REVISION_MISMATCH' : ['TARGET_EXISTS', 'EXACT_DUPLICATE', 'TARGET_CHANGED', 'TARGET_MISSING', 'RELATED_APP_SETTINGS_UNAVAILABLE', 'NOT_A_LOOKUP', 'DEST_APP_SETTINGS_UNAVAILABLE'].includes(s.code) ? s.code : 'API_ERROR';
+          l.reason = isPermissionError(e) ? 'PERMISSION_DENIED' : isRevisionError(e) ? 'REVISION_MISMATCH' : ['TARGET_EXISTS', 'EXACT_DUPLICATE', 'TARGET_CHANGED', 'TARGET_MISSING', 'RELATED_APP_SETTINGS_UNAVAILABLE', 'NOT_A_LOOKUP', 'DEST_APP_SETTINGS_UNAVAILABLE', 'FIELD_REFERENCED', 'REGISTERED_JAVASCRIPT_CHANGED', 'REGISTRATION_REVISION_CHANGED'].includes(s.code) ? s.code : 'API_ERROR';
           l.message = l.reason === 'PERMISSION_DENIED' ? 'アプリ設定を変更する権限がありません' : l.reason === 'REVISION_MISMATCH' ? '実行中に他の変更が入りました（設定が途中で変わりました）。設定を取り直して、同じ依頼をもう一度送ってください' : s.message;
         }
         progress(l); await yieldUi();
@@ -13630,8 +13645,9 @@
     const messageOf = item => item?.message || item?.summary || '';
     const good = prepared => !prepared || prepared.status === 'PREPARED';
     const pending = prepared => (prepared?.changes || prepared?.steps || []).filter(s => s.status === 'PENDING');
-    const settingWritten = result => !!result?.steps?.some(s => ['APPLIED', 'VERIFIED', 'VERIFY_FAILED'].includes(s.status) || (s.status === 'FAILED' && !!s.partial));
-    const settingUnknown = result => !!result?.steps?.some(s => s.status === 'FAILED' && !s.partial && s.reason === 'API_ERROR' && !/^(GAIA_|CB_)/.test(s.error?.code || '') && !(s.error?.status >= 400 && s.error?.status < 500));
+    const isJavaScript = step => ['CUSTOMIZATION_REQUIRED', 'CUSTOMIZE_JS'].includes(step.actionType);
+    const settingWritten = result => !!result?.steps?.filter(s => !isJavaScript(s)).some(s => ['APPLIED', 'VERIFIED', 'VERIFY_FAILED'].includes(s.status) || (s.status === 'FAILED' && !!s.partial));
+    const settingUnknown = result => !!result?.steps?.filter(s => !isJavaScript(s)).some(s => s.status === 'FAILED' && !s.partial && s.reason === 'API_ERROR' && !/^(GAIA_|CB_)/.test(s.error?.code || '') && !(s.error?.status >= 400 && s.error?.status < 500));
     const fileUnknown = result => !!result?.put && result.put.ok !== true && result.previewUnchanged !== true;
     const requiredWarnings = prepared => (prepared?.warnings || []).filter(w => w.code !== 'OTHER_CHANGES_SINCE_EXECUTION' && w.code !== 'CUSTOMIZE_REVISION_ADVANCED');
     function create({ appId, api, loadBase, currentOf, planExecutor, jsExecutor, hash }) {
@@ -13669,17 +13685,53 @@
         return operations.filter(op => op.expectedUnchanged && !prepared?.changes?.some(c => c.changeId === op.id && c.status === 'SKIPPED' && c.reason === 'JS_UNCHANGED'))
           .map(op => ({ code: 'UNCHANGED_BODY_MISMATCH', message: `変更なしとされた「${op.name}」の本文が、現在のファイルと一致しません。登録していません。` }));
       }
+      // Collapse the single customization PUT, then order explicit plan dependencies.
+      function registrationOrder(steps, operations) {
+        const js = steps.filter(isJavaScript), ids = new Set(js.map(s => s.id));
+        if (!steps.some(s => !isJavaScript(s) && (s.dependsOn || []).some(id => ids.has(id)))) return { steps, ids: [] };
+        const invalid = (code, message) => ({ steps, ids: [], reasons: [{ code, message }] });
+        if (js.some(s => !operations.some(o => o.customizationId === (s.spec?.customizationId || s.id))))
+          return invalid('REGISTRATION_MISSING', '先に必要なJavaScriptの検証済みの登録内容がありません。');
+        const group = {}, nodes = new Map(), key = id => ids.has(id) ? group : id;
+        for (const step of steps) {
+          const k = key(step.id), n = nodes.get(k) || { steps: [], deps: new Set() };
+          n.steps.push(step);
+          for (const d of step.dependsOn || []) if (key(d) !== k || !ids.has(step.id)) n.deps.add(key(d));
+          nodes.set(k, n);
+        }
+        const additions = new Set(operations.flatMap(o => [...(o.dependsOn?.fields || []), ...(o.dependsOn?.statuses || [])].map(x => x.stepId).filter(Boolean)));
+        additions.forEach(id => nodes.get(group).deps.add(key(id)));
+        const visiting = new Set(), done = new Set(), ordered = [];
+        const visit = k => {
+          if (done.has(k)) return;
+          if (visiting.has(k)) throw new Error('cycle');
+          if (!nodes.has(k)) throw new Error('missing');
+          visiting.add(k); for (const d of nodes.get(k).deps) visit(d);
+          visiting.delete(k); done.add(k); ordered.push(...nodes.get(k).steps);
+        };
+        try { for (const k of nodes.keys()) visit(k); }
+        catch (e) { return invalid(e.message === 'cycle' ? 'REGISTRATION_ORDER_CONFLICT' : 'DEPENDENCY_MISSING',
+          e.message === 'cycle' ? 'JavaScriptの一括登録の前後に、両立しない設定の依存関係があります。登録を複数回に分ける計画はまだ反映できません。' : '先に必要な手順が計画にありません。'); }
+        return { steps: ordered, ids: js.map(s => s.id) };
+      }
       async function prepare({ plan, artifacts, base }) {
         const current = toCurrent(base), operations = fileOperations(artifacts, plan);
         const identityReasons = fileIdentityReasons(operations, current);
         if (identityReasons.length) return { ok: false, settings: null, files: null, operations, changes: [], confirmations: [], unchanged: [], reasons: identityReasons };
-        const settings = await planExecutor.prepareOperations({ appId, operations: plan.steps || [], proposedFields: plan.proposedFields || [], requireFieldPlacement: true }, { api, current });
+        const order = registrationOrder(plan.steps || [], operations);
+        if (order.reasons) return { ok: false, settings: null, files: null, operations, changes: [], confirmations: [], unchanged: [], reasons: order.reasons };
+        const settings = await planExecutor.prepareOperations({ appId, operations: order.steps, registrationStepIds: order.ids, proposedFields: plan.proposedFields || [], requireFieldPlacement: true }, { api, current });
         const files = operations.length ? await jsExecutor.prepareFiles({ appId, operations, deferDependencies: true }, { api, current }) : null;
         const unchangedChecks = unchangedReasons(operations, files);
         const changes = [
           ...pending(settings).map(s => ({ id: s.stepId, kind: 'setting', title: s.title || '設定の変更', technicalSummary: s.prepared?.summary || '', placementDescription: s.prepared?.placementDescription || '', before: clone(s.prepared?.before ?? null), after: clone(s.prepared?.after ?? s.prepared?.expect ?? s.prepared?.payload), actionType: s.actionType })),
           ...pending(files).map(s => ({ id: s.changeId, kind: 'javascript', title: operations.find(o => o.id === s.changeId)?.summary || s.name, file: s.name, target: s.target, operation: s.kind }))
         ];
+        if (order.ids.length) {
+          const ranks = new Map(settings.steps.map((s, i) => [s.stepId, i]));
+          const registrationRank = settings.steps.findIndex(s => order.ids.includes(s.stepId));
+          changes.sort((a, b) => (a.kind === 'javascript' ? registrationRank : ranks.get(a.id)) - (b.kind === 'javascript' ? registrationRank : ranks.get(b.id)));
+        }
         const confirmations = [
           ...(settings.steps || []).flatMap(s => (s.warnings || []).map((w, i) => ({ key: s.stepId + '-' + i, message: messageOf(w) }))),
           ...(files?.confirmations || []),
@@ -13691,41 +13743,83 @@
           reasons: [...(settings.blockers || []), ...(files?.blockers || []), ...unchangedChecks].map(x => ({ code: x.code, message: x.message })) };
       }
       async function apply({ prepared, onProgress = () => {} }) {
-        let settings = null, files = null, filesPrepared = prepared.files, writeInFlight = false;
+        let settings = null, files = null, filesPrepared = prepared.files, writeInFlight = false, registrationFailure = null, registeredSnapshot = null;
+        function resultRows() {
+          const fileRows = (files?.steps || []).map(s => ({ title: s.name, status: s.status, message: s.message }));
+          const ids = prepared.settings?.registrationStepIds || [];
+          let inserted = false;
+          const rows = (settings?.steps || []).flatMap(s => {
+            const row = { title: s.title, status: s.status, message: s.message };
+            if (!ids.includes(s.stepId)) return [row];
+            const batch = inserted ? [] : fileRows;
+            inserted = true;
+            return s.status === 'FAILED' || !fileRows.length ? [...batch, row] : batch;
+          });
+          return inserted ? rows : [...rows, ...fileRows];
+        }
         const result = (status, message) => ({ status, message, settings, files, filesPrepared,
           written: status === 'unknown' ? null : settingWritten(settings) || !!files?.put?.ok,
-          rows: [...(settings?.steps || []).map(s => ({ title: s.title, status: s.status, message: s.message })),
-            ...(files?.steps || []).map(s => ({ title: s.name, status: s.status, message: s.message }))] });
+          rows: resultRows() });
+        // Guard each later setting write against a concurrent replacement of the
+        // prerequisite scripts. The mutation uses the same revision that was checked.
+        const settingApi = { ...api };
+        for (const name of ['addPreviewFields', 'updatePreviewFields', 'deletePreviewFields', 'putPreviewLayout', 'putPreviewViews', 'putPreviewGeneralNotifications', 'putPreviewPerRecordNotifications', 'putPreviewReminders', 'putPreviewStatus', 'putPreviewActions']) {
+          if (typeof api[name] !== 'function') continue;
+          settingApi[name] = async (app, body, revision) => {
+            if (registeredSnapshot) {
+              const current = jsExecutor.snapshotOf(await api.getPreviewCustomize(app));
+              if (jsExecutor.diffSnapshots(registeredSnapshot, current).length)
+                throw Object.assign(new Error('先に登録したJavaScriptが変更されたため、後続の設定変更を止めました。'), { code: 'REGISTERED_JAVASCRIPT_CHANGED' });
+              if (revision == null || String(revision) !== String(current.revision))
+                throw Object.assign(new Error('JavaScriptの登録を確認する間に設定が変わりました。後続の設定は変更していません。'), { code: 'REGISTRATION_REVISION_CHANGED' });
+            }
+            return api[name](app, body, revision);
+          };
+        }
+        async function register() {
+          if (!prepared.operations.length) return null;
+          // Settings writes advance the common revision. Re-read actual state and preserve
+          // the approved customization list/content before preparing its write.
+          const fresh = await loadBase({ reason: 'before-registration' });
+          if (!fresh?.ok) return result(settingWritten(settings) ? 'partial' : 'failed', '現在の設定を取得できないため、JavaScriptの登録を止めました。');
+          const identityReasons = fileIdentityReasons(prepared.operations, toCurrent(fresh));
+          if (identityReasons.length) return { ...result(settingWritten(settings) ? 'partial' : 'failed', 'JavaScriptの登録先が変わったため、登録を止めました。'), reasons: identityReasons };
+          filesPrepared = await jsExecutor.prepareFiles({ appId, operations: prepared.operations,
+            expectedRevision: prepared.files.snapshot?.revision, expectedContent: prepared.files.contentFingerprint,
+            deferDependencies: false }, { api, current: toCurrent(fresh) });
+          if (!good(filesPrepared)) return { ...result(settingWritten(settings) ? 'partial' : 'failed', '設定の反映後、JavaScriptを登録できませんでした。'), reasons: filesPrepared.blockers };
+          const unchangedChecks = unchangedReasons(prepared.operations, filesPrepared);
+          if (unchangedChecks.length) return { ...result(settingWritten(settings) ? 'partial' : 'failed', '変更なしとされたJavaScriptの本文が変わったため、登録を止めました。'), reasons: unchangedChecks };
+          const sameOperations = await hash(pending(filesPrepared).map(s => [s.changeId, s.kind, s.target, s.name, s.verifiedContentHash || s.contentHash, s.baseHash, s.position]));
+          const approvedOperations = await hash(pending(prepared.files).map(s => [s.changeId, s.kind, s.target, s.name, s.verifiedContentHash || s.contentHash, s.baseHash, s.position]));
+          if (sameOperations !== approvedOperations) return result(settingWritten(settings) ? 'partial' : 'failed', '承認したJavaScriptと登録する内容が変わったため、登録を止めました。');
+          if (await hash(filesPrepared.confirmations || []) !== await hash(prepared.files.confirmations || []) || await hash(requiredWarnings(filesPrepared)) !== await hash(requiredWarnings(prepared.files))) return result(settingWritten(settings) ? 'partial' : 'failed', 'JavaScriptの確認事項が変わったため、登録を止めました。内容を確認し直してください。');
+          if (!pending(filesPrepared).length) { registeredSnapshot = clone(filesPrepared.snapshot); return null; }
+          writeInFlight = true;
+          files = await jsExecutor.executePreview(filesPrepared, { api, acknowledged: (prepared.files.confirmations || []).map(c => c.key),
+            onProgress: execution => { files = execution; onProgress({ stage: 'javascript', status: execution.status }); } });
+          writeInFlight = false;
+          if (files.status !== 'DONE') return result(fileUnknown(files) ? 'unknown' : settingWritten(settings) || files.put?.ok ? 'partial' : files.previewUnchanged === true ? 'failed' : 'unknown', 'JavaScriptの登録結果を確認してください。完了していない内容があります。');
+
+          registeredSnapshot = clone(files.actualAfterRaw);
+          return null;
+        }
         try {
           if (!prepared.ok) return result('failed', '反映する準備ができていません。');
           if (pending(prepared.settings).length) {
             writeInFlight = true;
-            settings = await planExecutor.executePreview(prepared.settings, { api, onProgress: (step, execution) => { settings = execution; onProgress({ stage: 'settings', title: step.title, status: step.status }); } });
+            settings = await planExecutor.executePreview(prepared.settings, { api: settingApi,
+              registerJavaScript: async () => {
+                registrationFailure = await register();
+                return registrationFailure ? { ok: false, message: registrationFailure.message } : { ok: true, revision: files?.afterRevision || filesPrepared?.snapshot?.revision };
+              }, onProgress: (step, execution) => { settings = execution; onProgress({ stage: 'settings', title: step.title, status: step.status }); } });
             writeInFlight = false;
-            if (settings.status !== 'DONE') return result(settingUnknown(settings) ? 'unknown' : settingWritten(settings) ? 'partial' : 'failed', '設定の反映を完了できませんでした。反映した内容と、止まった手順を確認してください。');
+            if (registrationFailure) return { ...result(registrationFailure.status, registrationFailure.message), reasons: registrationFailure.reasons };
+            if (settings.status !== 'DONE') return result(settingUnknown(settings) ? 'unknown' : settingWritten(settings) || files?.put?.ok ? 'partial' : 'failed', '設定の反映を完了できませんでした。反映した内容と、止まった手順を確認してください。');
           }
-          if (pending(prepared.files).length) {
-            // Settings writes advance the common revision. Re-read actual state and preserve
-            // the approved customization list/content before preparing its write.
-            const fresh = await loadBase({ reason: 'before-registration' });
-            if (!fresh?.ok) return result(settingWritten(settings) ? 'partial' : 'failed', '現在の設定を取得できないため、JavaScriptの登録を止めました。');
-            const identityReasons = fileIdentityReasons(prepared.operations, toCurrent(fresh));
-            if (identityReasons.length) return { ...result(settingWritten(settings) ? 'partial' : 'failed', 'JavaScriptの登録先が変わったため、登録を止めました。'), reasons: identityReasons };
-            filesPrepared = await jsExecutor.prepareFiles({ appId, operations: prepared.operations,
-              expectedRevision: prepared.files.snapshot?.revision, expectedContent: prepared.files.contentFingerprint,
-              deferDependencies: false }, { api, current: toCurrent(fresh) });
-            if (!good(filesPrepared)) return { ...result(settingWritten(settings) ? 'partial' : 'failed', '設定の反映後、JavaScriptを登録できませんでした。'), reasons: filesPrepared.blockers };
-            const unchangedChecks = unchangedReasons(prepared.operations, filesPrepared);
-            if (unchangedChecks.length) return { ...result(settingWritten(settings) ? 'partial' : 'failed', '変更なしとされたJavaScriptの本文が変わったため、登録を止めました。'), reasons: unchangedChecks };
-            const sameOperations = await hash(pending(filesPrepared).map(s => [s.changeId, s.kind, s.target, s.name, s.verifiedContentHash || s.contentHash, s.baseHash, s.position]));
-            const approvedOperations = await hash(pending(prepared.files).map(s => [s.changeId, s.kind, s.target, s.name, s.verifiedContentHash || s.contentHash, s.baseHash, s.position]));
-            if (sameOperations !== approvedOperations) return result(settingWritten(settings) ? 'partial' : 'failed', '承認したJavaScriptと登録する内容が変わったため、登録を止めました。');
-            if (await hash(filesPrepared.confirmations || []) !== await hash(prepared.files.confirmations || []) || await hash(requiredWarnings(filesPrepared)) !== await hash(requiredWarnings(prepared.files))) return result(settingWritten(settings) ? 'partial' : 'failed', 'JavaScriptの確認事項が変わったため、登録を止めました。内容を確認し直してください。');
-            writeInFlight = true;
-            files = await jsExecutor.executePreview(filesPrepared, { api, acknowledged: (prepared.files.confirmations || []).map(c => c.key),
-              onProgress: execution => { files = execution; onProgress({ stage: 'javascript', status: execution.status }); } });
-            writeInFlight = false;
-            if (files.status !== 'DONE') return result(fileUnknown(files) ? 'unknown' : settingWritten(settings) || files.put?.ok ? 'partial' : files.previewUnchanged === true ? 'failed' : 'unknown', 'JavaScriptの登録結果を確認してください。完了していない内容があります。');
+          if (!prepared.settings?.registrationStepIds?.length || !pending(prepared.settings).length) {
+            const failed = await register();
+            if (failed) return failed;
           }
           return result('complete', '動作テスト環境に反映しました。kintoneの画面で動作を確認してください。');
         } catch (error) {
@@ -13961,7 +14055,7 @@
       else if (state.phase === 'review') body = reviewHtml(state, options);
       else if (state.phase === 'incomplete') body = incompleteHtml(state, options);
       else if (state.phase === 'unchanged') body = `<section class="ktr-section"><h2>反映する変更はありません</h2><p>確認した範囲は、現在の内容で実現しています。設定やJavaScriptの登録は行いません。</p>${list(state.adopted?.behaviors || [])}<div class="ktr-actions">${button('new-task', '別の変更を相談する', { primary: true })}</div></section>`;
-      else if (state.phase === 'blocked') body = `<section class="ktr-section"><h2>内容を確認してください</h2>${list(state.prepared?.reasons || [], 'ktr-reasons')}${state.error?.code === 'PLAN_QUESTION' ? list((state.plan?.questions || []).map(question => ({ text: typeof question === 'string' ? question : question.question || textOf(question) }))) : ''}<p>現在の内容は反映していません。変更や回答は相談欄に入力してください。</p></section>`;
+      else if (state.phase === 'blocked') body = `<section class="ktr-section"><h2>内容を確認してください</h2>${list([...new Map((state.prepared?.reasons || []).map(r => [textOf(r), r])).values()], 'ktr-reasons')}${state.error?.code === 'PLAN_QUESTION' ? list((state.plan?.questions || []).map(question => ({ text: typeof question === 'string' ? question : question.question || textOf(question) }))) : ''}<p>現在の内容は反映していません。変更や回答は相談欄に入力してください。</p></section>`;
       else if (state.phase === 'result') body = runHtml((state.runs || []).find(run => run.id === state.resultRunId) || last, options);
       else if (state.phase === 'rollback-confirm') body = rollbackHtml(state, options);
       else body = '<section class="ktr-section"><h2>変更案</h2><p class="ktr-note">相談すると、ここに案を表示します。内容を確認してから動作テスト環境に反映します。</p></section>';
