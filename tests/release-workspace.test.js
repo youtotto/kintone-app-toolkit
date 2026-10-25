@@ -523,3 +523,39 @@ test('利用上限で止まったときも原価を通常表示へ出さず、�
   assert.doesNotMatch(shown, /USD|0\.80|Cost limit/);
   assert.equal(f.writes.length, 0);
 });
+
+
+test('任意の関連案は別に表示し、そのまま作成しても採用内容と計画に入らない', async () => {
+  const optional = {id:'B3',text:'請求書番号を一覧に表示すると、案件を開かず確認できます。',origin:'suggestion'};
+  const response=proposal(); response.proposal.behaviors.push(optional);
+  const f=fresh({propose:()=>response});
+  await f.controller.send(REQUEST);
+  const html=KTReleaseView.render(stateOf(f));
+  assert.match(html, /data-release-panel="suggestions"><h3>あわせて検討できること/);
+  assert.ok(html.indexOf(optional.text)>html.indexOf('data-release-panel="suggestions"'));
+  assert.equal(f.count('plan'),0);
+  await f.controller.adopt();
+  assert.equal(stateOf(f).phase,'review');
+  assert.deepEqual(f.calls.find(c=>c.method==='plan').proposal.behaviors,response.proposal.behaviors.slice(0,2));
+  assert.equal(stateOf(f).adopted.behaviors.length,2);
+  assert.equal(stateOf(f).proposal.behaviors.length,3);
+  assert.equal(f.writes.length,0);
+});
+
+test('一覧の追加を明示して更新した案だけが採用され、取り下げた関連案は残らない', async () => {
+  const f=fresh({propose:({previous})=>{
+    const response=proposal();
+    response.proposal.behaviors.push({id:'B3',text:'請求書番号を一覧に追加する',origin:previous?'user':'suggestion'});
+    if(!previous)response.proposal.behaviors.push({id:'B4',text:'担当者への通知を設定する',origin:'suggestion'});
+    return response;
+  }});
+  await f.controller.send(REQUEST);
+  await f.controller.send('一覧への追加をお願いします。通知は不要です。');
+  assert.equal(f.count('plan'),0);
+  assert.doesNotMatch(KTReleaseView.render(stateOf(f)),/あわせて検討できること/);
+  await f.controller.adopt();
+  assert.equal(f.calls.find(c=>c.method==='plan').proposal.behaviors.at(-1).id,'B3');
+  assert.equal(stateOf(f).adopted.behaviors.at(-1).origin,'user');
+  assert.ok(!JSON.stringify(stateOf(f).adopted).includes('B4'));
+  assert.equal(f.writes.length,0);
+});

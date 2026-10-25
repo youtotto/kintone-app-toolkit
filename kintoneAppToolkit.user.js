@@ -13304,6 +13304,8 @@
       async function adopt() {
         if (!state.proposal || questions(state.proposal, state.answers).length || !available()) return false;
         invalidate(); pendingPlanQuestions = []; state.adopted = clone(state.proposal); state.artifacts = [];
+        // Optional ideas are not adopted by the general create action.
+        state.adopted.behaviors = (state.adopted.behaviors || []).filter(b => b.origin !== 'suggestion');
         return activity('building', async (signal, live) => {
           const fresh = await getBase('plan');
           if (!live()) return;
@@ -13715,9 +13717,11 @@
     function proposalHtml(state, options) {
       const p = options.proposal || state.proposal || {}, answered = new Map((state.answers || []).filter(a => a.answer).map(a => [a.id, a.answer]));
       const pending = (p.decisions || []).filter(q => q.blocking && !q.answer && !answered.has(q.id));
+      const behaviors = (p.behaviors || []).filter(b => b.origin !== 'suggestion'), suggestions = (p.behaviors || []).filter(b => b.origin === 'suggestion');
       const latest = (state.messages || []).filter(m => m.role !== 'user').at(-1);
       const conn = connectionOf(options);
-      return `<section class="ktr-section"><h2>${options.readOnly ? '参照中の案' : '仮案を確認してください'}</h2>${p.behaviors?.length ? list(p.behaviors) : latest?.text ? `<p class="ktr-lead">${esc(latest.text)}</p>` : ''}
+      return `<section class="ktr-section"><h2>${options.readOnly ? '参照中の案' : '仮案を確認してください'}</h2>${behaviors.length ? list(behaviors) : !suggestions.length && latest?.text ? `<p class="ktr-lead">${esc(latest.text)}</p>` : ''}
+        ${suggestions.length ? `<section data-release-panel="suggestions"><h3>あわせて検討できること</h3>${list(suggestions)}<p class="ktr-note">この案の作成には含めません。追加したいものを相談欄で伝えてください。</p></section>` : ''}
         ${p.assumptions?.length ? `<h3>この案の前提</h3>${list(p.assumptions)}` : ''}${p.cannot?.length ? `<h3>この案の制約</h3>${list(p.cannot)}` : ''}
         ${(p.decisions || []).filter(q => !q.answer && !answered.has(q.id)).map(q => `<div class="ktr-question"><h3>${esc(q.question || q.label || '確認したいこと')}</h3>${!options.readOnly && q.options?.length ? `<div class="ktr-actions">${q.options.map(o => button('answer', textOf(o), { extra: ` data-release-answer="${esc(textOf(o))}"` })).join('')}</div>` : ''}${!options.readOnly && q.blocking ? '<p class="ktr-note">回答を送ってから、仮案を確かめてください。</p>' : ''}</div>`).join('')}
         ${state.answers?.length ? `<h3>決めたこと</h3>${list(state.answers.map(a => ({ text: [a.label, a.answer].filter(Boolean).join('：') })))}` : ''}

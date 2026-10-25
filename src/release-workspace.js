@@ -133,6 +133,8 @@ const KTReleaseWorkspace = (() => {
     async function adopt() {
       if (!state.proposal || questions(state.proposal, state.answers).length || !available()) return false;
       invalidate(); pendingPlanQuestions = []; state.adopted = clone(state.proposal); state.artifacts = [];
+      // Optional ideas are not adopted by the general create action.
+      state.adopted.behaviors = (state.adopted.behaviors || []).filter(b => b.origin !== 'suggestion');
       return activity('building', async (signal, live) => {
         const fresh = await getBase('plan');
         if (!live()) return;
