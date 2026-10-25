@@ -5,7 +5,7 @@ const KTReleaseContext = (() => {
   const entries = x => Object.values(x || {});
   function fieldsOf(properties, parent = null) {
     return entries(properties).flatMap(f => [{ code: f.code, label: f.label || f.code, type: f.type,
-      ...(parent ? { subtable: parent } : {}), ...(f.required != null ? { required: f.required } : {}),
+      ...(parent ? { subtable: parent } : {}), ...(f.lookup ? { lookup: true, lookupMappings: clone(f.lookup.fieldMappings || []) } : {}), ...(typeof f.expression === 'string' ? { expression: f.expression } : {}), ...(f.required != null ? { required: f.required } : {}),
       ...(f.options ? { options: Object.keys(f.options) } : {}), ...(f.type === 'SUBTABLE' ? { columns: Object.keys(f.fields || {}) } : {}) },
       ...(f.type === 'SUBTABLE' ? fieldsOf(f.fields, f.code) : [])]);
   }
