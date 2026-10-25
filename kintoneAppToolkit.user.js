@@ -8263,10 +8263,97 @@
       },
     };
 
-    /** UPDATE_FIELD（Tier 2・限定）: 表示名（label）と必須（required）だけ。型・コード・選択肢・計算式・ルックアップ・entity の変更は反映しない（計画のみ） */
+    // Field maintenance consumes explicit API values; it never extracts edits from prose.
+    const sameFieldDefinition = (a, b) => same(KTDevBase.stable(a), KTDevBase.stable(b));
+    function prepareFieldMaintenance(op, raw) {
+      const bad = message => { throw Object.assign(new Error(message), { code: 'FIELD_CHANGE_INVALID' }); };
+      if (!raw || raw.lookup || ['STATUS', 'STATUS_ASSIGNEE', 'CATEGORY', 'RECORD_NUMBER', 'CREATOR', 'MODIFIER', 'CREATED_TIME', 'UPDATED_TIME', 'GROUP', 'SUBTABLE'].includes(raw.type)) bad('このフィールドの種類は変更・削除の対象にできません。');
+      const spec = op.spec || {}, before = clone(raw), after = clone(raw), changes = {}, summary = [];
+      const deleting = op.actionType === 'DELETE_FIELD';
+      if (deleting && Object.entries(spec).some(([k, v]) => v != null && (!Array.isArray(v) || v.length))) bad('フィールドの削除に別の変更内容を併記できません。');
+      if (spec.fieldType && spec.fieldType !== raw.type) bad('フィールドの種類は変更できません。');
+      if (Array.isArray(spec.options) && spec.options.length) bad('選択肢は、名称変更と削除を区別した指定が必要です。');
+      if (spec.name != null) { if (typeof spec.name !== 'string' || !spec.name.trim()) bad('フィールド名が空です。'); changes.label = spec.name; }
+      if (spec.required != null) { if (typeof spec.required !== 'boolean') bad('必須の指定が不正です。'); changes.required = spec.required; }
+      if (spec.expression != null) {
+        if (!['CALC', 'SINGLE_LINE_TEXT'].includes(raw.type) || (raw.type === 'SINGLE_LINE_TEXT' && (typeof raw.expression !== 'string' || !raw.expression.trim()))) bad('自動計算が設定されたフィールドの計算式だけ変更できます。');
+        if (typeof spec.expression !== 'string' || !spec.expression.trim() || spec.expression.length > 10000) bad('計算式が空か、長すぎます。');
+        changes.expression = spec.expression; summary.push('計算式を変更します。');
+      }
+      if (spec.optionEdits != null) {
+        if (!['DROP_DOWN', 'RADIO_BUTTON', 'CHECK_BOX', 'MULTI_SELECT'].includes(raw.type)) bad('選択式のフィールドではありません。');
+        const e = spec.optionEdits;
+        if (!e || Array.isArray(e) || Object.keys(e).some(k => !['items', 'removed', 'defaultValue'].includes(k)) || !Array.isArray(e.items) || !e.items.length || e.items.length > 1000 || !Array.isArray(e.removed) || !Array.isArray(e.defaultValue)) bad('選択肢の変更内容が不正です。');
+        const prior = Object.keys(raw.options || {}), covered = [], labels = [], request = {}, expected = {};
+        const name = v => typeof v === 'string' && !!v.trim() && v.length <= 200;
+        for (const [i, item] of e.items.entries()) {
+          if (!item || Object.keys(item).some(k => !['from', 'label'].includes(k)) || !name(item.label) || !(item.from === null || name(item.from))) bad('選択肢の変更前と変更後の名前が不正です。');
+          if (item.from !== null && !prior.includes(item.from)) bad('名称変更する選択肢が現在の設定にありません。');
+          if (item.from === null && prior.includes(item.label)) bad('既存の選択肢を新規追加として指定できません。');
+          const key = item.from ?? item.label;
+          if (Object.hasOwn(request, key) || labels.includes(item.label)) bad('選択肢が重複しています。');
+          if (item.from !== null) covered.push(item.from);
+          labels.push(item.label);
+          Object.defineProperty(request, key, { value: { label: item.label, index: String(i) }, enumerable: true });
+          Object.defineProperty(expected, item.label, { value: { label: item.label, index: String(i) }, enumerable: true });
+          if (item.from !== item.label) summary.push(item.from === null ? `「${item.label}」を追加します。` : `「${item.from}」を「${item.label}」に変更します。`);
+        }
+        if (e.removed.some(v => !name(v) || !prior.includes(v))) bad('削除する選択肢が現在の設定にありません。');
+        covered.push(...e.removed);
+        if (new Set(covered).size !== covered.length || covered.length !== prior.length || prior.some(v => !covered.includes(v))) bad('現在の選択肢の維持・変更・削除がすべて指定されていません。');
+        if (e.defaultValue.some(v => !labels.includes(v)) || new Set(e.defaultValue).size !== e.defaultValue.length || (['DROP_DOWN', 'RADIO_BUTTON'].includes(raw.type) && e.defaultValue.length > 1) || (raw.type === 'RADIO_BUTTON' && e.defaultValue.length !== 1)) bad('変更後の初期値を選択肢から指定してください。');
+        changes.options = request;
+        changes.defaultValue = ['DROP_DOWN', 'RADIO_BUTTON'].includes(raw.type) ? (e.defaultValue[0] || '') : clone(e.defaultValue);
+        after.options = expected;
+        summary.push(...e.removed.map(v => `「${v}」を削除します。`));
+      }
+      Object.assign(after, clone(changes));
+      if (changes.options) after.options = Object.fromEntries(Object.values(changes.options).map(v => [v.label, clone(v)]));
+      if (!deleting && sameFieldDefinition(before, after)) return { unsupported: 'NO_CHANGE' };
+      if (!deleting && !Object.keys(changes).length) bad('変更する内容がありません。');
+      const irreversible = deleting || !!changes.options;
+      return { maintenance: true, deleting, irreversible, fieldLabel: raw.label, sourceField: before,
+        before, after: deleting ? null : after, expect: deleting ? { code: raw.code, deleted: true } : after,
+        payload: { code: raw.code, changes },
+        summary: deleting ? `「${raw.label}」（${raw.code}）を削除します。` : summary.join(' ') || `「${raw.label}」の設定を変更します。`,
+        sensitive: irreversible ? [{ code: 'FIELD_DATA_RESTORE_LIMIT', message: deleting ? `「${raw.label}」（${raw.code}）を削除します。入力済みの値を含めて元に戻すことは、この画面ではできません。必要なデータを保管してから反映してください。` : `「${raw.label}」の選択肢を変更します。既存レコードの値への影響を確認してください。この変更は、この画面から自動では元に戻せません。` }] : [] };
+    }
+    const FIELD_MAINTENANCE = {
+      async apply({ api, appId }, p) {
+        const cur = await api.getPreviewFields(appId);
+        if (!sameFieldDefinition(cur.properties?.[p.payload.code], p.sourceField)) throw Object.assign(new Error('準備の後に対象のフィールドが変わりました。'), { code: 'TARGET_CHANGED' });
+        let layoutBefore = null;
+        if (p.deleting) {
+          const state = await fetchPreviewAll(api, appId);
+          layoutBefore = state.layout.layout;
+          if (String(state.fields.revision) !== String(cur.revision)) throw Object.assign(new Error('削除の確認中に設定が変わりました。'), { code: 'TARGET_CHANGED' });
+          const refs = fieldReferences(p.payload.code, state);
+          if (refs.length) throw Object.assign(new Error('削除するフィールドがほかの設定で使われています: ' + refs.map(r => r.where).join('、')), { code: 'FIELD_REFERENCED' });
+        }
+        const res = p.deleting ? await api.deletePreviewFields(appId, [p.payload.code], String(cur.revision)) : await api.updatePreviewFields(appId, { [p.payload.code]: { type: p.sourceField.type, code: p.payload.code, ...p.payload.changes } }, String(cur.revision));
+        return { revision: String(res.revision), before: p.before, after: p.after, fieldsBefore: cur.properties, layoutBefore,
+          requests: [{ method: p.deleting ? 'DELETE' : 'PUT', path: '/k/v1/preview/app/form/fields.json', codes: [p.payload.code] }] };
+      },
+      async verify({ api, appId }, p, applied) {
+        const cur = await api.getPreviewFields(appId), expected = clone(applied.fieldsBefore);
+        if (p.deleting) delete expected[p.payload.code]; else expected[p.payload.code] = p.after;
+        const checks = [{ name: 'fieldsMatchApprovedChange', ok: sameFieldDefinition(cur.properties, expected), expected, actual: cur.properties }];
+        if (p.deleting) {
+          const layout = await api.getPreviewLayout(appId);
+          checks.push({ name: 'otherLayoutPreserved', ok: same(layoutShape(layout.layout), layoutShape(withoutLayoutField(applied.layoutBefore, p.payload.code))), expected: withoutLayoutField(applied.layoutBefore, p.payload.code), actual: layout.layout });
+          checks.push({ name: 'deletedFieldRemovedFromLayout', ok: !layoutHasCode(layout.layout, p.payload.code), expected: false, actual: layoutHasCode(layout.layout, p.payload.code) });
+        }
+        return { ok: checks.every(c => c.ok), checks, revision: String(cur.revision) };
+      },
+      rollback(_ctx, p) { return { actionType: 'MANUAL_FIELD_RECOVERY', collection: 'fields', target: p.payload.code, note: p.sensitive[0]?.message || 'この変更は自動では元に戻せません。' }; }
+    };
+    HANDLERS.DELETE_FIELD = { prepare: (_op, { change }) => change.maintenance, ...FIELD_MAINTENANCE };
+
+    /** Existing label/required handler; release field maintenance adds typed option/formula changes above. */
     const UPDATABLE_FIELD_KEYS = ['label', 'required'];
     HANDLERS.UPDATE_FIELD = {
       prepare(step, { change = null }) {
+        if (change?.maintenance) return change.maintenance;
         const before = change?.before, after = change?.after;
         if (!before || !after || !before.code) return { unsupported: 'NO_FIELD_SPEC', message: 'Toolkit の確認の結果に変更前後のフィールド定義がありません' };
         const changed = Object.keys({ ...before, ...after }).filter(k => k !== 'temporaryId' && !same(before[k], after[k]));
@@ -8279,6 +8366,7 @@
         return { fieldLabel: before.label, payload: { code: before.code, changes: Object.fromEntries(changed.map(k => [k, after[k]])) }, expect: { code: before.code, type: before.type, ...Object.fromEntries(changed.map(k => [k, after[k]])) }, summary: `フィールド「${before.label}」（${before.code}）: ${changed.map(k => k === 'label' ? `表示名 ${before.label} → ${after.label}` : `必須 ${before.required ? 'はい' : 'いいえ'} → ${after.required ? 'はい' : 'いいえ'}`).join('・')}`, sensitive, before: Object.fromEntries(changed.map(k => [k, before[k]])), after: Object.fromEntries(changed.map(k => [k, after[k]])) };
       },
       async apply({ api, appId, revision }, p) {
+        if (p.maintenance) return FIELD_MAINTENANCE.apply({ api, appId }, p);
         const cur = await api.getPreviewFields(appId);
         const f = cur?.properties?.[p.payload.code];
         if (!f) throw Object.assign(new Error(`フィールド「${p.payload.code}」が動作テスト環境にありません`), { code: 'TARGET_MISSING' });
@@ -8289,7 +8377,8 @@
         const res = await api.updatePreviewFields(appId, { [p.payload.code]: prop }, String(cur?.revision ?? revision ?? ''));
         return { revision: String(res?.revision ?? ''), requests: [{ method: 'PUT', path: '/k/v1/preview/app/form/fields.json', codes: [p.payload.code], keys: Object.keys(p.payload.changes) }], before: p.before, after: p.after };
       },
-      async verify({ api, appId, snapshot }, p) {
+      async verify({ api, appId, snapshot }, p, applied) {
+        if (p.maintenance) return FIELD_MAINTENANCE.verify({ api, appId }, p, applied);
         const cur = await api.getPreviewFields(appId);
         const f = cur?.properties?.[p.expect.code];
         const prev = snapshot?.fields?.properties?.[p.expect.code] || null;
@@ -8307,6 +8396,7 @@
         return { ok: checks.every(c => c.ok), checks, revision: String(cur?.revision ?? '') };
       },
       rollback({ appId }, p) {
+        if (p.irreversible) return FIELD_MAINTENANCE.rollback({ appId }, p);
         return { actionType: 'RESTORE_FIELD_PROPERTY', collection: 'fields', target: p.expect.code, api: { method: 'PUT', path: '/k/v1/preview/app/form/fields.json', payload: { app: appId, properties: { [p.expect.code]: { type: p.expect.type, code: p.expect.code, ...(p.before || {}) } } } }, note: `${Object.keys(p.before || {}).join('・')} を 計画を確かめた時点の値に戻す（snapshot の fields から）` };
       },
     };
@@ -9282,6 +9372,7 @@
       const fields = operationFields(current.fields.properties), process = clone(current.status || { enable: false, states: {}, actions: [] });
       const proposed = new Map((input.proposedFields || []).map(f => [f.temporaryId, f]));
       let layoutNow = clone(current.layout.layout || []);
+      const fieldState = clone(current.fields.properties);
       const related = new Map(), targets = new Set();
       const fail = (code, message) => { throw Object.assign(new Error(message), { code }); };
       const has = (s, key) => s[key] !== null && s[key] !== undefined;
@@ -9315,6 +9406,7 @@
           }
           if (type === 'REUSE_FIELD') { fieldOf(ref); skip(); continue; }
           if (!HANDLERS[type]) fail('UNSUPPORTED_OPERATION', 'この種類の設定変更を自動で反映する手順がありません');
+          if ((op.dependsOn || []).some(id => ['CUSTOMIZATION_REQUIRED', 'CUSTOMIZE_JS'].includes(byId.get(id)?.actionType))) fail('DEPENDENCY_ORDER_UNSUPPORTED', '設定の変更より先にJavaScriptを登録する順序には対応していません。変更の順序を見直してください。');
           if (s.destApp && !['ADD_APP_ACTION', 'UPDATE_APP_ACTION'].includes(type) && String(s.destApp) !== prepared.appId) fail('OTHER_APP_WRITE', '別のアプリへの設定変更は含められません');
           if ((op.dependsOn || []).some(id => prepared.steps.find(x => x.stepId === id)?.status === STEP.BLOCKED)) fail('DEPENDENCY_BLOCKED', '先に必要な設定の手順が準備できていません');
           let change = null, placement = null, nextLayout = null;
@@ -9339,6 +9431,14 @@
               nextLayout = insertLayoutField(layoutNow, { type: after.type, code }, placement);
             } else nextLayout = [...clone(layoutNow), { type: 'ROW', fields: [{ type: after.type, code }] }];
             change = { after }; claim('field:' + code);
+          } else if (type === 'DELETE_FIELD' || (type === 'UPDATE_FIELD' && (s.optionEdits != null || s.expression != null))) {
+            if (!fieldState[ref]) fail('FIELD_NOT_FOUND', '対象のフィールドがありません。テーブル内のフィールドの変更・削除はこの手順では扱いません。');
+            if (type === 'DELETE_FIELD') {
+              const refs = fieldReferences(ref, { fields: { properties: fieldState } });
+              if (refs.length) fail('FIELD_REFERENCED', '削除前に参照している計算式などの変更が必要です: ' + refs.map(r => r.where).join('、'));
+            }
+            change = { maintenance: prepareFieldMaintenance(op, fieldState[ref]) };
+            claim('field:' + ref);
           } else if (type === 'UPDATE_FIELD') {
             const before = clone(fieldOf(ref)), after = clone(before);
             if (before.subtable || ['STATUS', 'STATUS_ASSIGNEE', 'CATEGORY'].includes(before.type)) fail('FIELD_CHANGE_NOT_SUPPORTED', 'このフィールドは自動変更の対象ではありません');
@@ -9465,7 +9565,9 @@
           if (built.unsupported) fail(built.unsupported, built.message);
           if (typeof HANDLERS[type].recheck === 'function') { const duplicate = HANDLERS[type].recheck(built, { generalNow: current.generalNotify, perRecordNow: current.perRecordNotify, remindersNow: current.reminderNotify }); if (duplicate.verdict === 'EXACT_DUPLICATE') { skip(); continue; } }
           st.prepared = built;
-          if (type === 'UPDATE_FIELD') built.sourceField = clone(current.fields.properties[ref]);
+          if (type === 'UPDATE_FIELD') { built.sourceField = clone(fieldState[ref]); if (built.maintenance) fieldState[ref] = clone(built.after); else Object.assign(fieldState[ref], built.payload.changes); fields[ref] = operationFields({ [ref]: fieldState[ref] })[ref]; }
+          if (type === 'DELETE_FIELD') { delete fieldState[ref]; delete fields[ref]; layoutNow = withoutLayoutField(layoutNow, ref); }
+          if (built.sensitive?.length) st.warnings = clone(built.sensitive);
           if (type === 'ADD_FIELD') {
             built.layoutBefore = clone(layoutNow); built.layoutAfter = nextLayout;
             if (placement) { built.placement = placement; built.placementDescription = fieldPlacementDescription(placement, fields); }
@@ -9474,6 +9576,16 @@
           }
           if (type === 'ADD_PROCESS_STATUS') process.states[change.after.name] = { name: change.after.name, index: String(Object.keys(process.states).length), assignee: built.mutation.assignee };
         } catch (e) { st.status = STEP.BLOCKED; st.reason = e.code || 'PREPARATION_FAILED'; st.message = e.message || '反映の準備に失敗しました'; block(st.reason, st.message, st.stepId); }
+      }
+      // Reuse the existing setting-reference check against the planned definitions.
+      const projected = { ...current, fields: { ...current.fields, properties: fieldState }, views: clone(current.views) };
+      for (const st of prepared.steps.filter(s => s.status === STEP.PENDING && ['ADD_VIEW', 'UPDATE_VIEW'].includes(s.actionType))) {
+        const op = byId.get(st.stepId), spec = op.spec || {}, ref = op.targetRef;
+        if (projected.views?.views?.[ref]) { if (Array.isArray(spec.fields)) projected.views.views[ref].fields = spec.fields; for (const k of ['filterCond', 'sort']) if (has(spec, k)) projected.views.views[ref][k] = spec[k]; }
+      }
+      for (const st of prepared.steps.filter(s => s.status === STEP.PENDING && s.actionType === 'DELETE_FIELD')) {
+        const refs = fieldReferences(st.prepared.payload.code, projected);
+        if (refs.length) block('FIELD_REFERENCED', '削除するフィールドがほかの設定で使われています: ' + refs.map(r => r.where).join('、'), st.stepId);
       }
       const processSteps = prepared.steps.filter(s => s.status === STEP.PENDING && isProcessAction(s.actionType));
       if (processSteps.length && prepared.status === RUN.PREPARED) { try { PROCESS_GROUP.compose(current.status, processSteps); } catch (e) { block(e.code || 'INVALID_PROCESS', e.message, e.stepId); } }
@@ -9484,7 +9596,7 @@
       const result = {};
       const walk = (props, parent = null) => { for (const [code, p] of Object.entries(props || {})) {
         const options = p.options ? Object.entries(p.options).sort((a, b) => Number(a[1].index) - Number(b[1].index)).map(([key]) => key) : null;
-        result[code] = { code, label: p.label, type: p.lookup ? 'LOOKUP' : p.type, baseType: p.type, required: !!p.required, unique: !!p.unique, subtable: parent, ...(options ? { options } : {}), ...(p.protocol ? { protocol: p.protocol } : {}), ...(p.lookup ? { lookup: KTSettingsTypes.lookupModel(p.lookup) } : {}) };
+        result[code] = { code, label: p.label, type: p.lookup ? 'LOOKUP' : p.type, baseType: p.type, required: !!p.required, unique: !!p.unique, subtable: parent, ...(options ? { options } : {}), ...(p.expression != null ? { expression: p.expression } : {}), ...(p.protocol ? { protocol: p.protocol } : {}), ...(p.lookup ? { lookup: KTSettingsTypes.lookupModel(p.lookup) } : {}) };
         if (p.type === 'SUBTABLE') walk(p.fields, code);
       } };
       walk(properties); return result;
@@ -9677,11 +9789,12 @@
       for (const [name, a] of Object.entries(cur.actions?.actions || {})) { if ((a?.mappings || []).some(m => m.srcType === 'FIELD' && m.srcField === code)) refs.push({ kind: 'APP_ACTION', id: name, where: `アプリアクション「${name}」の転記元` }); if (condMentions(a?.filterCond, code)) refs.push({ kind: 'APP_ACTION', id: name, where: `アプリアクション「${name}」の利用条件` }); }
       for (const [c, f] of Object.entries(cur.fields?.properties || {})) {
         if (c === code) continue;
-        if (f.type === 'CALC' && condMentions(f.expression, code)) refs.push({ kind: 'FIELD', id: c, where: `計算フィールド「${f.label}」（${c}）の計算式` });
+        if (['CALC', 'SINGLE_LINE_TEXT'].includes(f.type) && condMentions(f.expression, code)) refs.push({ kind: 'FIELD', id: c, where: `計算フィールド「${f.label}」（${c}）の計算式` });
         if (f.lookup && (f.lookup.fieldMappings || []).some(m => m.field === code)) refs.push({ kind: 'FIELD', id: c, where: `ルックアップ「${f.label}」（${c}）のコピー先` });
         if (f.type === 'REFERENCE_TABLE' && f.referenceTable?.condition?.field === code) refs.push({ kind: 'FIELD', id: c, where: `関連レコード「${f.label}」（${c}）の条件` });
         if (f.type === 'SUBTABLE' && f.fields && f.fields[code]) refs.push({ kind: 'FIELD', id: c, where: `テーブル「${f.label}」（${c}）` });
       }
+      for (const f of Object.values(cur.fields?.properties || {})) if (f.type === 'SUBTABLE' && f.fields && !f.fields[code]) refs.push(...fieldReferences(code, { fields: { properties: f.fields } }));
       return refs;
     }
     /** 集合の復元（全体置換 API）: check は「反映直後 == 現在」か（違えば stale）・「現在 == snapshot」なら戻す必要なし */
@@ -9879,6 +9992,7 @@
       const rb = { rollbackVersion: '2', rollbackId: newId('rb'), executionId: execution?.executionId ?? null, appId: execution?.appId ?? null, env: ENV, requestedAt: nowIso(now), status: RB_RUN.PREPARED, blockers: [], stale: { status: 'FRESH', diffs: [] }, warnings: [], steps: [], snapshotRevision: execution?.snapshot?.revision ?? null, afterRevision: execution?.afterRevision ?? null, currentRevision: null, summary: { total: 0, bySource: {} } };
       const block = (code, message, detail = null) => { rb.blockers.push({ code, message, ...(detail ? { detail } : {}) }); rb.status = RB_RUN.BLOCKED; };
       if (!execution || !prepared || execution.executionId !== prepared.executionId) { block('INVALID_INPUT', '実行結果と準備（prepare）の組が一致しません'); return rb; }
+      if ((execution.steps || []).some(s => ([STEP.APPLIED, STEP.VERIFIED, STEP.VERIFY_FAILED].includes(s.status) || s.partial) && prepared.steps.find(p => p.stepId === s.stepId)?.prepared?.irreversible)) { block('MANUAL_FIELD_RECOVERY', 'フィールドの削除・選択肢の変更を含むため、入力済みの値を含めた自動復元はできません。ほかの変更も戻していません。'); return rb; }
       if (execution.status === RUN.RUNNING) { block('EXECUTION_RUNNING', '反映の処理中です'); return rb; }
       if (execution.rollback) { block('ALREADY_ROLLED_BACK', 'この実行は既に元に戻す処理を行っています（結果を確認してください。同じ実行を 2 回戻すことはできません）'); return rb; }
       if (!execution.snapshot) { block('NO_SNAPSHOT', '反映前の設定の控えが無いため元に戻せません'); return rb; }
@@ -13450,7 +13564,7 @@
         reports: Object.keys(data.reports?.reports || data.reports || {}).filter(k => k !== 'revision') };
     }
     function proposal({ text, previous, pendingPlanQuestions = [], answers = [], requests = [], base }) {
-      return sizeCheck({ contextVersion: '1', releaseContract: 'release-workspace-1', clientCapabilities: ['formLayoutPlacement'], question: text, app: appOf(base),
+      return sizeCheck({ contextVersion: '1', releaseContract: 'release-workspace-1', clientCapabilities: ['formLayoutPlacement', 'fieldMaintenance'], question: text, app: appOf(base),
         focus: { resolution: 'none', target: null, candidates: [] }, facts: factsOf(base), coverage: coverageOf(base), truncation: { applied: false, sections: [] },
         conversation: { mode: 'proposal', proposal: clone(previous), pendingPlanQuestions: clone(pendingPlanQuestions), decisions: clone(answers), requirements: [], working: null, userRequests: clone(requests),
           itemIdFloor: { Q: Math.max(0, ...answers.filter(a => /^Q[1-9][0-9]{0,2}$/.test(a.id)).map(a => Number(a.id.slice(1)))) } } }, 256 * 1024);
@@ -13465,7 +13579,7 @@
       });
     }
     function plan({ proposal: accepted, answers = [], goal, requests = [], version, base }) {
-      return sizeCheck({ contextVersion: 'planner-1', releaseContract: 'release-workspace-1', clientCapabilities: ['formLayoutPlacement'], goal, app: appOf(base), facts: factsOf(base), dictionary: dictionaryOf(base),
+      return sizeCheck({ contextVersion: 'planner-1', releaseContract: 'release-workspace-1', clientCapabilities: ['formLayoutPlacement', 'fieldMaintenance'], goal, app: appOf(base), facts: factsOf(base), dictionary: dictionaryOf(base),
         coverage: coverageOf(base), truncation: { applied: false, sections: [] }, decisions: planDecisions(answers), requirements: [], userRequests: clone(requests),
         acceptedProposal: { revision: version, proposal: clone(accepted) } }, 384 * 1024);
     }
@@ -13485,7 +13599,11 @@
       c.fields = (c.fields || []).map(f => ({ ...f, code: map.get(f.code) || f.code }));
       const plannedFields = proposed.map(f => ({ code: f.code, label: f.label, type: f.type, stepId: (plan.steps || []).find(s => s.actionType === 'ADD_FIELD' && (s.targetRef === f.temporaryId || s.spec?.fieldCode === f.temporaryId || s.spec?.fieldCode === f.code))?.id || '' }));
       const plannedStatuses = (plan.steps || []).filter(s => s.actionType === 'ADD_PROCESS_STATUS').map(s => ({ name: s.spec?.name || s.spec?.status?.name, stepId: s.id })).filter(x => x.name);
-      const fields = allFields.concat(proposed), dictionary = dictionaryOf(base);
+      const removed = new Set((plan.steps || []).filter(s => s.actionType === 'DELETE_FIELD').map(s => s.targetRef));
+      const fields = allFields.filter(f => !removed.has(f.code)).map(f => {
+        const update = (plan.steps || []).find(s => s.actionType === 'UPDATE_FIELD' && s.targetRef === f.code)?.spec;
+        return update?.optionEdits ? { ...f, options: update.optionEdits.items.map(i => i.label) } : f;
+      }).concat(proposed), dictionary = dictionaryOf(base);
       dictionary.fieldCodes = fields.map(f => f.code); dictionary.fieldTypes = Object.fromEntries(fields.map(f => [f.code, f.type]));
       dictionary.statuses = [...new Set([...dictionary.statuses, ...plannedStatuses.map(s => s.name)])];
       const relatedFiles = files.filter(f => f.type === 'FILE' && f.sourceAvailable !== false && typeof f.text === 'string').map(f => ({ name: f.name, target: f.target, text: f.text }));
@@ -13816,12 +13934,16 @@
       if (!run) return '<p>反映の記録はありません。</p>';
       const result = run.rollback || run.result || {}, status = result.status || run.status;
       const title = run.rollback ? status === 'complete' ? '反映前の状態に戻しました' : '元に戻した結果を確認してください' : ({ complete: '動作テスト環境に反映しました', partial: '一部だけ反映しました', failed: '反映できませんでした', unknown: '反映の結果を確認できません', running: '反映しています' }[status] || '反映結果');
-      const canRestore = !!run.result?.written && run.rollback?.status !== 'complete';
+      const recoveryLimited = (run.result?.settings?.steps || []).some(s =>
+        (['APPLIED', 'VERIFIED', 'VERIFY_FAILED'].includes(s.status) || s.partial) &&
+        run.prepared?.settings?.steps?.find(p => p.stepId === s.stepId)?.prepared?.irreversible);
+      const canRestore = !!run.result?.written && run.rollback?.status !== 'complete' && !recoveryLimited;
       const rows = Array.isArray(result.rows) ? result.rows : [...(Array.isArray(result.settings) ? result.settings : []), ...(Array.isArray(result.files) ? result.files : [])];
       return `<section class="ktr-section"><h2>${esc(title)}</h2>${result.message ? `<p class="ktr-lead">${esc(result.message)}</p>` : ''}
         ${status === 'complete' && !run.rollback ? list(run.prepared?.changes || []) : ''}
         ${status !== 'complete' && rows.length ? `<h3>処理ごとの結果</h3>${list(rows.map(row => ({ message: [row.title || row.label || row.stepId || row.targetFile || row.name || '変更', row.message || ({ applied: '反映済み', verified: '確認済み', complete: '完了', failed: '未完了', skipped: '未実施', unknown: '結果を確認できません', PENDING: '未実施', APPLIED: '反映済み', FAILED: '未完了', VERIFIED: '確認済み' }[row.status] || '')].filter(Boolean).join('：') })))}` : ''}
         ${!run.rollback && status === 'complete' ? '<p>動作テスト環境を開き、変更した操作を確かめてください。</p>' : ''}
+        ${recoveryLimited ? '<p>フィールドの削除・選択肢の変更を含むため、この反映は、この画面から自動では元に戻せません。保管したデータと現在の設定を確認してください。</p>' : ''}
         ${status === 'unknown' ? '<p>同じ変更をもう一度反映せず、現在の設定を確認してください。</p>' : ''}
         <div class="ktr-actions">${historical ? button('current', '現在の作業に戻る', { primary: true }) : `${status === 'complete' && !run.rollback && typeof options.onOpenPreview === 'function' ? button('preview', '動作テスト環境を開く', { primary: true }) : ''}${button('new-task', '別の変更を相談する')}`}${canRestore ? button('request-rollback', 'この反映の変更を戻す', { id: run.id, disabled: !!options.operationBusy }) : ''}</div></section>`;
     }
@@ -13960,7 +14082,7 @@
     let baseQueue = Promise.resolve();
     let connectionError = '', initialHealth = d.initialHealth || null;
     const esc = KTReleaseView.escape;
-    const supportsRelease = (feature, cap) => !!cap?.available && (feature === KTAiClient.FEATURE_GENERATOR ? cap.verification?.includes('artifactOutcome') : feature === KTAiClient.FEATURE_PLANNER ? ['releaseWorkspace', 'formLayoutPlacement'].every(mark => cap.requirementOps?.includes(mark)) : cap.conversation?.includes('releaseWorkspace'));
+    const supportsRelease = (feature, cap) => !!cap?.available && (feature === KTAiClient.FEATURE_GENERATOR ? cap.verification?.includes('artifactOutcome') : feature === KTAiClient.FEATURE_PLANNER ? ['releaseWorkspace', 'formLayoutPlacement', 'fieldMaintenance'].every(mark => cap.requirementOps?.includes(mark)) : cap.conversation?.includes('releaseWorkspace'));
     host.style.overflow = 'auto';
     host.style.height = '100%';
     function dialog(title, body, { wide = false } = {}) {

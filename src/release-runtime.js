@@ -9,7 +9,7 @@ function mountReleaseWorkspace(host, d) {
   let baseQueue = Promise.resolve();
   let connectionError = '', initialHealth = d.initialHealth || null;
   const esc = KTReleaseView.escape;
-  const supportsRelease = (feature, cap) => !!cap?.available && (feature === KTAiClient.FEATURE_GENERATOR ? cap.verification?.includes('artifactOutcome') : feature === KTAiClient.FEATURE_PLANNER ? ['releaseWorkspace', 'formLayoutPlacement'].every(mark => cap.requirementOps?.includes(mark)) : cap.conversation?.includes('releaseWorkspace'));
+  const supportsRelease = (feature, cap) => !!cap?.available && (feature === KTAiClient.FEATURE_GENERATOR ? cap.verification?.includes('artifactOutcome') : feature === KTAiClient.FEATURE_PLANNER ? ['releaseWorkspace', 'formLayoutPlacement', 'fieldMaintenance'].every(mark => cap.requirementOps?.includes(mark)) : cap.conversation?.includes('releaseWorkspace'));
   host.style.overflow = 'auto';
   host.style.height = '100%';
   function dialog(title, body, { wide = false } = {}) {

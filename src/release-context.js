@@ -52,7 +52,7 @@ const KTReleaseContext = (() => {
       reports: Object.keys(data.reports?.reports || data.reports || {}).filter(k => k !== 'revision') };
   }
   function proposal({ text, previous, pendingPlanQuestions = [], answers = [], requests = [], base }) {
-    return sizeCheck({ contextVersion: '1', releaseContract: 'release-workspace-1', clientCapabilities: ['formLayoutPlacement'], question: text, app: appOf(base),
+    return sizeCheck({ contextVersion: '1', releaseContract: 'release-workspace-1', clientCapabilities: ['formLayoutPlacement', 'fieldMaintenance'], question: text, app: appOf(base),
       focus: { resolution: 'none', target: null, candidates: [] }, facts: factsOf(base), coverage: coverageOf(base), truncation: { applied: false, sections: [] },
       conversation: { mode: 'proposal', proposal: clone(previous), pendingPlanQuestions: clone(pendingPlanQuestions), decisions: clone(answers), requirements: [], working: null, userRequests: clone(requests),
         itemIdFloor: { Q: Math.max(0, ...answers.filter(a => /^Q[1-9][0-9]{0,2}$/.test(a.id)).map(a => Number(a.id.slice(1)))) } } }, 256 * 1024);
@@ -67,7 +67,7 @@ const KTReleaseContext = (() => {
     });
   }
   function plan({ proposal: accepted, answers = [], goal, requests = [], version, base }) {
-    return sizeCheck({ contextVersion: 'planner-1', releaseContract: 'release-workspace-1', clientCapabilities: ['formLayoutPlacement'], goal, app: appOf(base), facts: factsOf(base), dictionary: dictionaryOf(base),
+    return sizeCheck({ contextVersion: 'planner-1', releaseContract: 'release-workspace-1', clientCapabilities: ['formLayoutPlacement', 'fieldMaintenance'], goal, app: appOf(base), facts: factsOf(base), dictionary: dictionaryOf(base),
       coverage: coverageOf(base), truncation: { applied: false, sections: [] }, decisions: planDecisions(answers), requirements: [], userRequests: clone(requests),
       acceptedProposal: { revision: version, proposal: clone(accepted) } }, 384 * 1024);
   }
@@ -87,7 +87,11 @@ const KTReleaseContext = (() => {
     c.fields = (c.fields || []).map(f => ({ ...f, code: map.get(f.code) || f.code }));
     const plannedFields = proposed.map(f => ({ code: f.code, label: f.label, type: f.type, stepId: (plan.steps || []).find(s => s.actionType === 'ADD_FIELD' && (s.targetRef === f.temporaryId || s.spec?.fieldCode === f.temporaryId || s.spec?.fieldCode === f.code))?.id || '' }));
     const plannedStatuses = (plan.steps || []).filter(s => s.actionType === 'ADD_PROCESS_STATUS').map(s => ({ name: s.spec?.name || s.spec?.status?.name, stepId: s.id })).filter(x => x.name);
-    const fields = allFields.concat(proposed), dictionary = dictionaryOf(base);
+    const removed = new Set((plan.steps || []).filter(s => s.actionType === 'DELETE_FIELD').map(s => s.targetRef));
+    const fields = allFields.filter(f => !removed.has(f.code)).map(f => {
+      const update = (plan.steps || []).find(s => s.actionType === 'UPDATE_FIELD' && s.targetRef === f.code)?.spec;
+      return update?.optionEdits ? { ...f, options: update.optionEdits.items.map(i => i.label) } : f;
+    }).concat(proposed), dictionary = dictionaryOf(base);
     dictionary.fieldCodes = fields.map(f => f.code); dictionary.fieldTypes = Object.fromEntries(fields.map(f => [f.code, f.type]));
     dictionary.statuses = [...new Set([...dictionary.statuses, ...plannedStatuses.map(s => s.name)])];
     const relatedFiles = files.filter(f => f.type === 'FILE' && f.sourceAvailable !== false && typeof f.text === 'string').map(f => ({ name: f.name, target: f.target, text: f.text }));

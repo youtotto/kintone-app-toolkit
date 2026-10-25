@@ -187,11 +187,11 @@ test('配置対応の印と現在のフォームを仮案・計画へそのま�
   const before=JSON.stringify(base);
   const contexts=[ReleaseContext.proposal({text:'請求番号を追加',base}),ReleaseContext.plan({proposal,goal:'請求番号を追加',version:1,base})];
   for(const ctx of contexts){
-    assert.deepEqual(ctx.clientCapabilities,['formLayoutPlacement']);
+    assert.deepEqual(ctx.clientCapabilities,['formLayoutPlacement','fieldMaintenance']);
     assert.deepEqual(ctx.facts.find(f=>f.kind==='layout').value,layout);
   }
   const envelope=Client.buildPlanEnvelope({ctx:contexts[1]});
-  assert.deepEqual(JSON.parse(JSON.stringify(envelope.payload.clientCapabilities)),['formLayoutPlacement']);
+  assert.deepEqual(JSON.parse(JSON.stringify(envelope.payload.clientCapabilities)),['formLayoutPlacement','fieldMaintenance']);
   contexts[0].facts.find(f=>f.kind==='layout').value[0].fields[1].label='後から変更';
   assert.equal(JSON.stringify(base),before);
 });

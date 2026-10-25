@@ -156,6 +156,7 @@ function makeKintoneMock(data, { permission = true, autoPlace = true, jsSources 
             next.lookup = merged;
             continue;
           }
+          if (k === 'options') { next.options = Object.fromEntries(Object.entries(v).map(([key, value]) => [value.label ?? key, { ...clone(value), label: value.label ?? key }])); continue; }
           next[k] = v;
         }
         if (p.code && p.code !== code) { delete st.fields[code]; next.code = p.code; st.fields[p.code] = next; } else st.fields[code] = next;

@@ -126,12 +126,16 @@ const KTReleaseView = (() => {
     if (!run) return '<p>反映の記録はありません。</p>';
     const result = run.rollback || run.result || {}, status = result.status || run.status;
     const title = run.rollback ? status === 'complete' ? '反映前の状態に戻しました' : '元に戻した結果を確認してください' : ({ complete: '動作テスト環境に反映しました', partial: '一部だけ反映しました', failed: '反映できませんでした', unknown: '反映の結果を確認できません', running: '反映しています' }[status] || '反映結果');
-    const canRestore = !!run.result?.written && run.rollback?.status !== 'complete';
+    const recoveryLimited = (run.result?.settings?.steps || []).some(s =>
+      (['APPLIED', 'VERIFIED', 'VERIFY_FAILED'].includes(s.status) || s.partial) &&
+      run.prepared?.settings?.steps?.find(p => p.stepId === s.stepId)?.prepared?.irreversible);
+    const canRestore = !!run.result?.written && run.rollback?.status !== 'complete' && !recoveryLimited;
     const rows = Array.isArray(result.rows) ? result.rows : [...(Array.isArray(result.settings) ? result.settings : []), ...(Array.isArray(result.files) ? result.files : [])];
     return `<section class="ktr-section"><h2>${esc(title)}</h2>${result.message ? `<p class="ktr-lead">${esc(result.message)}</p>` : ''}
       ${status === 'complete' && !run.rollback ? list(run.prepared?.changes || []) : ''}
       ${status !== 'complete' && rows.length ? `<h3>処理ごとの結果</h3>${list(rows.map(row => ({ message: [row.title || row.label || row.stepId || row.targetFile || row.name || '変更', row.message || ({ applied: '反映済み', verified: '確認済み', complete: '完了', failed: '未完了', skipped: '未実施', unknown: '結果を確認できません', PENDING: '未実施', APPLIED: '反映済み', FAILED: '未完了', VERIFIED: '確認済み' }[row.status] || '')].filter(Boolean).join('：') })))}` : ''}
       ${!run.rollback && status === 'complete' ? '<p>動作テスト環境を開き、変更した操作を確かめてください。</p>' : ''}
+      ${recoveryLimited ? '<p>フィールドの削除・選択肢の変更を含むため、この反映は、この画面から自動では元に戻せません。保管したデータと現在の設定を確認してください。</p>' : ''}
       ${status === 'unknown' ? '<p>同じ変更をもう一度反映せず、現在の設定を確認してください。</p>' : ''}
       <div class="ktr-actions">${historical ? button('current', '現在の作業に戻る', { primary: true }) : `${status === 'complete' && !run.rollback && typeof options.onOpenPreview === 'function' ? button('preview', '動作テスト環境を開く', { primary: true }) : ''}${button('new-task', '別の変更を相談する')}`}${canRestore ? button('request-rollback', 'この反映の変更を戻す', { id: run.id, disabled: !!options.operationBusy }) : ''}</div></section>`;
   }
