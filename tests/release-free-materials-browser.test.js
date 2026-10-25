@@ -68,8 +68,13 @@ test('無料の資料画面は全種類・形式・対象・コピー・保存�
     },{inputs,freshInputs,unscannedInputs,names:Object.keys(mock.api)});
     const action=name=>page.locator('[data-release-action="'+name+'"]').first();
     const field=name=>page.locator('dialog [data-'+name+']');
+    const openOfflineMaterials=async()=>{
+      await action('documents').click();
+      await page.locator('dialog details[data-offline-materials] > summary').click();
+      await page.locator('dialog button[data-offline-export]').click();
+    };
     const phase=value=>page.waitForFunction(v=>work.controller.getState().phase===v,value);
-    await action('free-context').click();
+    await openOfflineMaterials();
     assert.equal(await field('copy').isDisabled(),true);
     const options=await field('focus').locator('option').evaluateAll(nodes=>nodes.map(n=>({value:n.value,label:n.textContent})));
     const pc=options.find(x=>x.label==='PC: common.js'),mobile=options.find(x=>x.label==='モバイル: common.js');
@@ -99,7 +104,7 @@ test('無料の資料画面は全種類・形式・対象・コピー・保存�
     assert.equal(answeredState.answers[0].answer,answer);assert.deepEqual(answeredState.proposal.decisions,[],'the answered question is removed from the next proposal');
     await page.locator('#kt-release-input').fill(correction);await action('send').click();await phase('proposal');
     const beforeAdoption=calls.filter(n=>n!=='getHealth').length;
-    await action('free-context').click();await field('kind').selectOption('changes');await field('make').click();
+    await openOfflineMaterials();await field('kind').selectOption('changes');await field('make').click();
     assert.match(await field('note').innerText(),/まとめる変更計画がありません/);assert.equal(await field('save').isDisabled(),true);
     await field('kind').selectOption('spec');await field('make').click();await field('format').selectOption('json');
     const unadopted=JSON.parse(await field('output').inputValue());assert.equal(Object.hasOwn(unadopted,'acceptedProposal'),false);
@@ -112,7 +117,7 @@ test('無料の資料画面は全種類・形式・対象・コピー・保存�
     assert.equal(acceptedState.answers[0].answer,answer,'the earlier answer remains in the conversation history');
     assert.deepEqual(acceptedState.adopted.decisions,[]);
     assert.equal(acceptedState.adopted.behaviors[0].text,adoptedBehavior,'adoption uses the later correction');
-    await action('free-context').click();
+    await openOfflineMaterials();
     for(const kind of ['context','planner',...T.KTContextUi.DOCUMENT_KINDS.map(k=>k.id)]){
       await field('kind').selectOption(kind);await field('question').fill('備考を一覧に表示する');await field('make').click();
       assert.match(await field('note').innerText(),/資料を作成しました/,kind);
@@ -149,26 +154,26 @@ test('無料の資料画面は全種類・形式・対象・コピー・保存�
     assert.equal(await page.evaluate(()=>JSON.stringify(work.controller.getState())),stateBefore,'creating and saving documents does not change the adopted plan');
     await field('close').click();
     await action('apply').click();await phase('result');
-    await action('free-context').click();await field('kind').selectOption('changes');await field('make').click();await field('format').selectOption('json');
+    await openOfflineMaterials();await field('kind').selectOption('changes');await field('make').click();await field('format').selectOption('json');
     assert.equal(JSON.parse(await field('output').inputValue()).planStatus,'EXECUTED');await field('close').click();
     await action('request-rollback').click();await phase('rollback-confirm');await action('rollback').click();await phase('result');
-    await action('free-context').click();await field('kind').selectOption('changes');await field('make').click();await field('format').selectOption('json');
+    await openOfflineMaterials();await field('kind').selectOption('changes');await field('make').click();await field('format').selectOption('json');
     const restored=JSON.parse(await field('output').inputValue());assert.equal(restored.planStatus,'ROLLED_BACK');assert.equal(restored.production.deployed,false);await field('close').click();
     await action('new-task').click();
     const nextTaskPaidBefore=calls.filter(n=>n!=='getHealth').length;
-    await action('free-context').click();await field('kind').selectOption('changes');await field('make').click();
+    await openOfflineMaterials();await field('kind').selectOption('changes');await field('make').click();
     assert.match(await field('note').innerText(),/まとめる変更計画がありません/);
     await field('kind').selectOption('spec');await field('make').click();await field('format').selectOption('json');
     const emptyTask=JSON.parse(await field('output').inputValue());assert.equal(Object.hasOwn(emptyTask,'acceptedProposal'),false);
     assert.ok(!(await field('output').inputValue()).includes(adoptedBehavior));await field('close').click();
     assert.equal(calls.filter(n=>n!=='getHealth').length,nextTaskPaidBefore);
     await page.locator('#kt-release-input').fill(F.REQUEST);await action('send').click();await phase('proposal');await action('adopt').click();await phase('review');
-    await action('free-context').click();await field('kind').selectOption('changes');await field('make').click();await field('format').selectOption('json');
+    await openOfflineMaterials();await field('kind').selectOption('changes');await field('make').click();await field('format').selectOption('json');
     const next=JSON.parse(await field('output').inputValue());assert.equal(next.planStatus,'ACTIVE');assert.equal(next.execution,null);assert.equal(next.jsExecution,null);
     assert.deepEqual(next.acceptedProposal.proposal,F.proposal().proposal);assert.deepEqual(next.requestHistory,[F.REQUEST]);assert.deepEqual(next.answerHistory,[]);
     assert.ok(!(await field('output').inputValue()).includes(adoptedBehavior));await field('close').click();
     await page.evaluate(()=>window.materialInputs=window.unscannedInputs);
-    await action('free-context').click();await field('make').click();
+    await openOfflineMaterials();await field('make').click();
     assert.match(await field('note').innerText(),/JavaScript は未解析/);
     await field('scan').click();await page.waitForFunction(()=>window.scanCount===1);
     assert.equal(await field('output').inputValue(),'');assert.equal(await field('copy').isDisabled(),true);

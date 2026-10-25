@@ -161,7 +161,9 @@ test('実ホストの幅・高さ・110%表示とダイアログを固定応答�
         await page.locator('dialog [data-close]').click();
         await action('details').click(); await checkDialog(page, { wide: true, label: scene.name + '/details' });
         await page.locator('dialog [data-close]').click();
-        await action('free-context').click();
+        await action('documents').click();
+        await page.locator('dialog details[data-offline-materials] > summary').click();
+        await page.locator('dialog button[data-offline-export]').click();
         await page.locator('dialog [data-make]').click();
         await checkDialog(page, { wide: true, label: scene.name + '/materials' });
         if (scene.zoom === 1.1) await page.screenshot({ path: path.join(out, scene.name + '-materials.png') });

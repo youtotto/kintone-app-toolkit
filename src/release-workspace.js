@@ -32,7 +32,7 @@ const KTReleaseWorkspace = (() => {
   function create({ services, loadBase, execution, now = () => Date.now(), onChange = null } = {}) {
     if (!services || !loadBase || !execution) throw new Error('作業に必要な部品がありません。');
     const state = { phase: 'idle', taskId: 1, version: 0, goal: '', proposal: null, proposalPending: false, questionIdFloor: 0, answers: [], adopted: null, plan: null, artifacts: [], prepared: null, runs: [], resultRunId: null, messages: [], explanations: [], explanationId: null, error: null, progress: '', rollback: null };
-    let base = null, controller = null, epoch = 0, sequence = 0, pendingPlanQuestions = [];
+    let base = null, controller = null, epoch = 0, sequence = 0, pendingPlanQuestions = [], cancelDocument = null;
     const listeners = new Set(onChange ? [onChange] : []);
     const emit = () => { const snapshot = clone(state); for (const fn of listeners) { try { fn(snapshot); } catch (e) { console.error(e); } } };
     const set = values => { Object.assign(state, values); emit(); };
@@ -113,13 +113,13 @@ const KTReleaseWorkspace = (() => {
       base = fresh;
       set({ prepared, progress: '', phase: !prepared.ok ? 'blocked' : prepared.changes?.length ? 'review' : 'unchanged' });
     }
-    async function send(text) {
+    async function send(text, { documentOnly = false } = {}) {
       const value = String(text || '').trim(); if (!value || !available()) return false;
       if (state.runs.some(r => r.status === 'running')) return false;
       const unresolved = state.proposalPending;
       // Suspend actions before any consultation. Restore only when the service
       // explicitly reports no proposal change; failed revisions stay retired.
-      const previousWork = clone({ phase: state.phase === 'rollback-confirm' ? 'result' : state.phase, plan: state.plan,
+      const previousWork = clone({ phase: !documentOnly && state.phase === 'rollback-confirm' ? 'result' : state.phase, plan: state.plan,
         adopted: state.adopted, artifacts: state.artifacts, prepared: state.prepared, error: state.error, progress: state.progress });
       const previousBase = base;
       const discussion = state.messages.map(m => ({ role: m.role, text: m.text,
@@ -132,6 +132,47 @@ const KTReleaseWorkspace = (() => {
         rollback: run.rollback ? { status: run.rollback.status, message: run.rollback.message, reasons: run.rollback.reasons,
           settings: run.rollback.settings ? { status: run.rollback.settings.status, steps: run.rollback.settings.steps?.map(s => ({ title: s.title, status: s.status, message: s.message })) } : null,
           files: run.rollback.files ? { status: run.rollback.files.status, steps: run.rollback.files.steps?.map(s => ({ title: s.name, status: s.status, message: s.message })) } : null } : null }) : null;
+      const requestProposal = (signal, fresh) => services.propose({ text: value, discussion, acceptedProposal: previousWork.adopted, currentPlanSummary, currentResultSummary, previous: clone(state.proposal), questionIdFloor: state.questionIdFloor, pendingPlanQuestions: clone(pendingPlanQuestions), answers: clone(state.answers), requests: state.messages.filter(m => m.role === 'user').map(m => m.text), base: fresh, signal });
+      if (documentOnly) {
+        // The explicit document action cannot revise a plan, even if its AI request fails.
+        // Keep normal chat's failed-revision guard separate from this read-only operation.
+        const previous = { ...previousWork, rollback: clone(state.rollback), proposalPending: unresolved };
+        let fresh = null, completed = false;
+        const restore = (error = null) => {
+          const activePlan = previous.plan && previous.phase !== 'result' && previous.phase !== 'rollback-confirm';
+          const changedBase = activePlan && fresh && stampOf(fresh) !== stampOf(previousBase);
+          base = activePlan ? previousBase : fresh || previousBase;
+          set({ ...previous, error: error || (previous.error?.operation === 'document' ? null : previous.error), ...(changedBase ? { phase: 'blocked', prepared: null,
+            error: { code: 'BASE_CHANGED', message: (error ? error.message + ' ' : '') + '資料を確認している間に設定が変わりました。変更案は最新の設定で作り直してください。' } } : {}) });
+        };
+        const stop = () => restore({ code: 'CANCELLED', operation: 'document', message: '資料の作成を中断しました。変更案はそのまま残っています。' });
+        cancelDocument = stop;
+        message('user', value);
+        try {
+          await activity('consulting', async (signal, live) => {
+            try {
+              fresh = await getBase('consult');
+              if (!live()) return;
+              const response = await requestProposal(signal, fresh);
+              if (!live()) return;
+              if (!response || typeof response.reply !== 'string' || response.intent !== 'question' || response.proposalUnchanged !== true ||
+                  !response.explanation || typeof response.explanation.title !== 'string' || !Array.isArray(response.explanation.sections) || !response.explanation.sections.length) {
+                throw Object.assign(new Error('AIサービスから資料の本文を受け取れませんでした。資料の作成をもう一度依頼してください。'), { code: 'DOCUMENT_RESPONSE_INVALID' });
+              }
+              const explanation = { ...clone(response.explanation), id: 'explanation-' + (++sequence), facts: clone(response.facts || []), createdAt: now(), version: state.version };
+              state.explanations.push(explanation);
+              message('assistant', response.reply, response.facts);
+              state.messages.at(-1).explanationId = explanation.id;
+              state.explanationId = explanation.id;
+              completed = true;
+              restore();
+            } catch (error) {
+              if (live()) { const failure = errorOf(error); failure.operation = 'document'; failure.message = '資料を作成できませんでした。' + failure.message; restore(failure); }
+            }
+          }, previous.phase);
+        } finally { if (cancelDocument === stop) cancelDocument = null; }
+        return completed;
+      }
       invalidate(); message('user', value);
       // Retire the previous plan before a revision starts, including failed requests.
       pendingPlanQuestions = clone(state.plan?.questions || pendingPlanQuestions);
@@ -139,7 +180,7 @@ const KTReleaseWorkspace = (() => {
       return activity('consulting', async (signal, live) => {
         const fresh = await getBase('consult');
         if (!live()) return;
-        const response = await services.propose({ text: value, discussion, acceptedProposal: previousWork.adopted, currentPlanSummary, currentResultSummary, previous: clone(state.proposal), questionIdFloor: state.questionIdFloor, pendingPlanQuestions: clone(pendingPlanQuestions), answers: clone(state.answers), requests: state.messages.filter(m => m.role === 'user').map(m => m.text), base: fresh, signal });
+        const response = await requestProposal(signal, fresh);
         if (!live()) return;
         if (!response || typeof response.reply !== 'string') throw new Error('AIサービスの返答を受け取れませんでした。');
         message('assistant', response.reply, response.facts);
@@ -250,7 +291,9 @@ const KTReleaseWorkspace = (() => {
       cancel() {
         if (!['consulting','building','preparing'].includes(state.phase)) return false;
         const consulting = state.phase === 'consulting';
-        ++epoch; controller?.abort(); controller = null; invalidate();
+        ++epoch; controller?.abort(); controller = null;
+        if (consulting && cancelDocument) { const stop = cancelDocument; cancelDocument = null; stop(); return true; }
+        invalidate();
         // send() already retired the previous plan and retained pending questions.
         set({ phase: state.plan ? 'incomplete' : state.proposal ? 'proposal' : 'idle', progress: '', error: { code: 'CANCELLED', message: consulting ? '相談を中断しました。案は更新していません。' : state.artifacts.length ? '作成を中断しました。作成途中の内容は残っています。' : '作成を中断しました。反映はしていません。' } }); return true;
       },

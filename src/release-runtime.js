@@ -171,6 +171,37 @@ function mountReleaseWorkspace(host, d) {
     });
     el.addEventListener('close', () => { if (flow?.isRunning()) flow.cancel(); flow = null; });
   }
+  function documents({ request, canRequest, hasDraft }) {
+    const templates = [
+      { id: 'overview', title: 'アプリの概要', description: '初めて使う人に、主な入力項目や自動処理を説明します。', prompt: 'このアプリの概要を、初めて使う人にも分かるように説明してください。主な入力項目、画面の使い方、自動計算・自動入力、プロセス管理の流れを整理してください。' },
+      { id: 'specification', title: 'アプリ仕様書', description: 'フィールド・一覧・プロセス管理など、設定を整理します。', prompt: 'このアプリの仕様書を作成してください。フィールドと配置、一覧、プロセス管理、アクセス権、通知、JavaScriptによる動作を、確認できる設定に基づいて整理してください。' },
+      { id: 'instructions', title: '操作説明', description: '入力から保存・承認まで、利用者の操作をまとめます。', prompt: 'このアプリを使う人向けの操作説明を作成してください。レコードの入力・保存・プロセス管理の操作、入力時の注意、PCとモバイルの違いを、実際に確認できる設定とコードに基づいて整理してください。' },
+      { id: 'handover', title: '引継ぎ資料', description: '後任者に、設定や自動処理、確認すべき点を伝えます。', prompt: 'このアプリを後任の担当者へ引き継ぐ資料を作成してください。この会話で説明した内容も踏まえ、主な入力項目、計算式・自動入力、プロセス管理、アクセス権、PCとモバイルの違い、運用上の確認事項を整理してください。' },
+      { id: 'changes', title: '変更内容のまとめ', description: '相談で決めた内容と、反映済み・未反映の違いを整理します。', prompt: 'この会話の変更内容を資料にまとめてください。最新の修正・取り消しを反映した採用内容、変更前後、反映や復元の結果、未反映の内容を区別してください。採用した案や実行の記録がない場合は、その旨を明記し、仮案を採用済みや反映済みとして書かないでください。' }
+    ];
+    const el = dialog('資料を作る', '<p>テンプレートを選ぶと、AIがこのアプリの設定と相談内容をもとに資料を作ります。作成後も相談欄で内容を調整できます。</p><fieldset class="ktr-template-grid"><legend>資料の種類</legend>' + templates.map((t, i) => '<label class="ktr-template-choice"><input type="radio" name="document-template" value="' + t.id + '"' + (i === 0 ? ' checked' : '') + '><span><strong>' + t.title + '</strong><small>' + t.description + '</small></span></label>').join('') + '</fieldset><label>追加の希望（任意）<textarea data-document-extra rows="3" placeholder="例：初めて使う担当者向けに、専門用語を少なくしてください。"></textarea></label><p data-document-status role="status"></p><button type="button" data-document-create>AIで作成</button><details data-offline-materials><summary>AIを使わずに書き出す</summary><p>設定資料や、外部のAIへ渡す資料を作れます。Markdown・JSONなどの形式を選べます。</p><button type="button" data-offline-export>設定資料を書き出す</button></details>', { wide: true });
+    let pending = false;
+    const update = () => {
+      el.querySelector('[data-document-create]').disabled = pending || !canRequest();
+      el.querySelector('[data-document-status]').textContent = !canRequest() ? '作成するには、接続と現在の作業の状態を確認してください。処理中の場合は、完了してから作成できます。' : hasDraft() ? '相談欄の入力は送信せず、そのまま残します。' : '［AIで作成］を押すと、AIサービスに依頼します。';
+    };
+    update();
+    const unsubscribe = controller.subscribe(update);
+    el.addEventListener('close', unsubscribe, { once: true });
+    el.querySelector('[data-document-create]').addEventListener('click', async () => {
+      if (pending || !canRequest()) { update(); return; }
+      const template = templates.find(t => t.id === el.querySelector('input[name="document-template"]:checked').value);
+      const extra = el.querySelector('[data-document-extra]').value.trim();
+      const prompt = template.prompt + '\n資料の作成だけを依頼しています。設定変更の提案や反映は行わないでください。現在の設定、採用済みで未反映の内容、実行結果を区別し、確認できないことは推測せず未確認としてください。kintone標準の用語を使い、同じ説明や不要な補足を繰り返さずにまとめてください。' + (extra ? '\n追加の希望：' + extra : '');
+      pending = true; update();
+      try {
+        const started = await request(prompt, () => el.close());
+        if (!started && el.open) el.querySelector('[data-document-status]').textContent = '資料の作成は開始していません。必要な場合は、もう一度［AIで作成］を押してください。';
+      } catch (error) { if (el.open) el.querySelector('[data-document-status]').textContent = error.message || '資料の作成を開始できませんでした。'; }
+      finally { pending = false; if (el.open) el.querySelector('[data-document-create]').disabled = !canRequest(); }
+    });
+    el.querySelector('[data-offline-export]').addEventListener('click', () => { el.close(); freeContext(); });
+  }
   function freeContext() {
     const state = controller.getState(), kinds = KTContextUi.DOCUMENT_KINDS;
     let inputs = d.getInputs?.() || {};
@@ -234,7 +265,7 @@ function mountReleaseWorkspace(host, d) {
     const el = dialog('アプリの情報', b ? '<p>動作テスト環境の設定の版: ' + esc(b.revision?.preview) + '</p><p>運用環境へ未反映の変更: ' + esc(b.diff?.items?.length ?? b.diff?.length ?? b.diff?.count ?? '未確認') + '</p><details><summary>現在の設定の詳細</summary><pre style="white-space:pre-wrap"></pre></details>' : '<p>この作業では、まだ動作テスト環境の設定を取得していません。</p>', { wide: true });
     if (b) el.querySelector('pre').textContent = JSON.stringify({ appId: b.appId, revision: b.revision, diff: b.diff }, null, 2);
   }
-  view = KTReleaseView.create(host, { controller, connection, beforeSend: consent, onConnect: connectionDialog, onRefreshConnection: () => refreshCapability(true), onFreeContext: freeContext, onDetails: details,
+  view = KTReleaseView.create(host, { controller, connection, beforeSend: consent, onConnect: connectionDialog, onRefreshConnection: () => refreshCapability(true), onDocuments: documents, onDetails: details,
     onCopy: d.copyText, onDownload: (name, text, type = 'text/javascript') => d.downloadText(name, text, type),
     onOpenPreview: d.onOpenPreview || (/^\d+$/.test(String(d.appId)) && !location.pathname.startsWith('/k/guest/') ? () => window.open(location.origin + '/k/admin/preview/' + encodeURIComponent(d.appId) + '/', '_blank', 'noopener') : null),
     appName: d.getInputs?.()?.data?.appName || 'アプリの相談' });

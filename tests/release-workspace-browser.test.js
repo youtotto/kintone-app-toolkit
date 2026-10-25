@@ -230,7 +230,9 @@ test('実ブラウザーの正式な操作で相談・採用・確認・反映�
     await page.setViewportSize({width:390,height:844});
     assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1),'narrow layout must not overflow');
     await page.screenshot({path:path.join(out,'incomplete-mobile.png'),fullPage:true});
-    await action('free-context').click();
+    await action('documents').click();
+    await page.locator('dialog details[data-offline-materials] > summary').click();
+    await page.locator('dialog button[data-offline-export]').click();
     await page.locator('dialog [data-kind]').waitFor();
     await page.locator('dialog [data-make]').click();
     assert.ok((await page.locator('dialog [data-output]').inputValue()).length>50);

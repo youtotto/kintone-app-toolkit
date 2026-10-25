@@ -24,7 +24,7 @@ test('説明本文を読む間は変更操作を出さず、根拠は作成時�
  assert.match(html,/説明作成時の設定/);assert.match(html,/備考は文字列/);
  assert.doesNotMatch(html,/参照していない設定|data-release-action="(?:apply|adopt|resume)"/);
  assert.match(html,/data-release-action="show-changes"/);assert.match(html,/id="kt-release-input"/);
- assert.match(html,/設定資料を書き出す/);assert.equal(JSON.stringify(state),before);
+ assert.match(html,/資料を作る/);assert.equal(JSON.stringify(state),before);
 });
 test('表・本文・タイトル・根拠の文字はHTMLとして実行せず、既知の根拠だけ開ける',()=>{
  const state=stateOf();state.explanations[0].title='<script>alert(1)</script>';

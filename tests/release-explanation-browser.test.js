@@ -59,7 +59,7 @@ test('同じ相談で概要から引継ぎ資料を作り、コピー保存と�
   const send=async text=>{await page.locator('#kt-release-input').fill(text);await action('send').click();};
   const countPaid=()=>calls.filter(c=>c.name!=='getHealth').length;
   await page.waitForFunction(()=>work.capability().available===true);
-  assert.equal(await action('free-context').innerText(),'設定資料を書き出す');
+  assert.equal(await action('documents').innerText(),'資料を作る');
   await send('このアプリの仕組みを教えてください。');await page.locator('[data-consent]').click();
   await page.waitForFunction(()=>work.controller.getState().explanations.length===1);
   assert.equal(await page.locator('.ktr-current').getAttribute('data-release-stage'),'explanation');

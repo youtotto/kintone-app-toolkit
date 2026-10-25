@@ -351,11 +351,11 @@ test('未完了の同じ理由を通常表示へ重複させない', () => {
   assert.equal(normal(KTReleaseView.render(state)).split(message).length - 1, 1);
 });
 
-test('無料の資料とアプリ情報へ、新しいAI作業面から移れる', async () => {
-  let free = 0, details = 0;
-  const f = await mounted({ view: { onFreeContext: async () => { free++; }, onDetails: async () => { details++; } } });
-  await click(f.host, 'free-context'); await click(f.host, 'details');
-  assert.equal(free, 1); assert.equal(details, 1); assert.equal(f.count('propose'), 0);
+test('資料の入口とアプリ情報へ、AIを呼ばず作業面から移れる', async () => {
+  let documents = 0, details = 0;
+  const f = await mounted({ view: { onDocuments: async options => { for (const key of ['request', 'canRequest', 'hasDraft']) assert.equal(typeof options[key], 'function'); documents++; }, onDetails: async () => { details++; } } });
+  await click(f.host, 'documents'); await click(f.host, 'details');
+  assert.equal(documents, 1); assert.equal(details, 1); assert.equal(f.count('propose'), 0);
 });
 
 test('再描画ごとにイベントを重ねず、破棄すると購読と操作を外す', async () => {

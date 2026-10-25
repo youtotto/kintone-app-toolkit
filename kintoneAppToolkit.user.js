@@ -13338,7 +13338,7 @@
     function create({ services, loadBase, execution, now = () => Date.now(), onChange = null } = {}) {
       if (!services || !loadBase || !execution) throw new Error('作業に必要な部品がありません。');
       const state = { phase: 'idle', taskId: 1, version: 0, goal: '', proposal: null, proposalPending: false, questionIdFloor: 0, answers: [], adopted: null, plan: null, artifacts: [], prepared: null, runs: [], resultRunId: null, messages: [], explanations: [], explanationId: null, error: null, progress: '', rollback: null };
-      let base = null, controller = null, epoch = 0, sequence = 0, pendingPlanQuestions = [];
+      let base = null, controller = null, epoch = 0, sequence = 0, pendingPlanQuestions = [], cancelDocument = null;
       const listeners = new Set(onChange ? [onChange] : []);
       const emit = () => { const snapshot = clone(state); for (const fn of listeners) { try { fn(snapshot); } catch (e) { console.error(e); } } };
       const set = values => { Object.assign(state, values); emit(); };
@@ -13419,13 +13419,13 @@
         base = fresh;
         set({ prepared, progress: '', phase: !prepared.ok ? 'blocked' : prepared.changes?.length ? 'review' : 'unchanged' });
       }
-      async function send(text) {
+      async function send(text, { documentOnly = false } = {}) {
         const value = String(text || '').trim(); if (!value || !available()) return false;
         if (state.runs.some(r => r.status === 'running')) return false;
         const unresolved = state.proposalPending;
         // Suspend actions before any consultation. Restore only when the service
         // explicitly reports no proposal change; failed revisions stay retired.
-        const previousWork = clone({ phase: state.phase === 'rollback-confirm' ? 'result' : state.phase, plan: state.plan,
+        const previousWork = clone({ phase: !documentOnly && state.phase === 'rollback-confirm' ? 'result' : state.phase, plan: state.plan,
           adopted: state.adopted, artifacts: state.artifacts, prepared: state.prepared, error: state.error, progress: state.progress });
         const previousBase = base;
         const discussion = state.messages.map(m => ({ role: m.role, text: m.text,
@@ -13438,6 +13438,47 @@
           rollback: run.rollback ? { status: run.rollback.status, message: run.rollback.message, reasons: run.rollback.reasons,
             settings: run.rollback.settings ? { status: run.rollback.settings.status, steps: run.rollback.settings.steps?.map(s => ({ title: s.title, status: s.status, message: s.message })) } : null,
             files: run.rollback.files ? { status: run.rollback.files.status, steps: run.rollback.files.steps?.map(s => ({ title: s.name, status: s.status, message: s.message })) } : null } : null }) : null;
+        const requestProposal = (signal, fresh) => services.propose({ text: value, discussion, acceptedProposal: previousWork.adopted, currentPlanSummary, currentResultSummary, previous: clone(state.proposal), questionIdFloor: state.questionIdFloor, pendingPlanQuestions: clone(pendingPlanQuestions), answers: clone(state.answers), requests: state.messages.filter(m => m.role === 'user').map(m => m.text), base: fresh, signal });
+        if (documentOnly) {
+          // The explicit document action cannot revise a plan, even if its AI request fails.
+          // Keep normal chat's failed-revision guard separate from this read-only operation.
+          const previous = { ...previousWork, rollback: clone(state.rollback), proposalPending: unresolved };
+          let fresh = null, completed = false;
+          const restore = (error = null) => {
+            const activePlan = previous.plan && previous.phase !== 'result' && previous.phase !== 'rollback-confirm';
+            const changedBase = activePlan && fresh && stampOf(fresh) !== stampOf(previousBase);
+            base = activePlan ? previousBase : fresh || previousBase;
+            set({ ...previous, error: error || (previous.error?.operation === 'document' ? null : previous.error), ...(changedBase ? { phase: 'blocked', prepared: null,
+              error: { code: 'BASE_CHANGED', message: (error ? error.message + ' ' : '') + '資料を確認している間に設定が変わりました。変更案は最新の設定で作り直してください。' } } : {}) });
+          };
+          const stop = () => restore({ code: 'CANCELLED', operation: 'document', message: '資料の作成を中断しました。変更案はそのまま残っています。' });
+          cancelDocument = stop;
+          message('user', value);
+          try {
+            await activity('consulting', async (signal, live) => {
+              try {
+                fresh = await getBase('consult');
+                if (!live()) return;
+                const response = await requestProposal(signal, fresh);
+                if (!live()) return;
+                if (!response || typeof response.reply !== 'string' || response.intent !== 'question' || response.proposalUnchanged !== true ||
+                    !response.explanation || typeof response.explanation.title !== 'string' || !Array.isArray(response.explanation.sections) || !response.explanation.sections.length) {
+                  throw Object.assign(new Error('AIサービスから資料の本文を受け取れませんでした。資料の作成をもう一度依頼してください。'), { code: 'DOCUMENT_RESPONSE_INVALID' });
+                }
+                const explanation = { ...clone(response.explanation), id: 'explanation-' + (++sequence), facts: clone(response.facts || []), createdAt: now(), version: state.version };
+                state.explanations.push(explanation);
+                message('assistant', response.reply, response.facts);
+                state.messages.at(-1).explanationId = explanation.id;
+                state.explanationId = explanation.id;
+                completed = true;
+                restore();
+              } catch (error) {
+                if (live()) { const failure = errorOf(error); failure.operation = 'document'; failure.message = '資料を作成できませんでした。' + failure.message; restore(failure); }
+              }
+            }, previous.phase);
+          } finally { if (cancelDocument === stop) cancelDocument = null; }
+          return completed;
+        }
         invalidate(); message('user', value);
         // Retire the previous plan before a revision starts, including failed requests.
         pendingPlanQuestions = clone(state.plan?.questions || pendingPlanQuestions);
@@ -13445,7 +13486,7 @@
         return activity('consulting', async (signal, live) => {
           const fresh = await getBase('consult');
           if (!live()) return;
-          const response = await services.propose({ text: value, discussion, acceptedProposal: previousWork.adopted, currentPlanSummary, currentResultSummary, previous: clone(state.proposal), questionIdFloor: state.questionIdFloor, pendingPlanQuestions: clone(pendingPlanQuestions), answers: clone(state.answers), requests: state.messages.filter(m => m.role === 'user').map(m => m.text), base: fresh, signal });
+          const response = await requestProposal(signal, fresh);
           if (!live()) return;
           if (!response || typeof response.reply !== 'string') throw new Error('AIサービスの返答を受け取れませんでした。');
           message('assistant', response.reply, response.facts);
@@ -13556,7 +13597,9 @@
         cancel() {
           if (!['consulting','building','preparing'].includes(state.phase)) return false;
           const consulting = state.phase === 'consulting';
-          ++epoch; controller?.abort(); controller = null; invalidate();
+          ++epoch; controller?.abort(); controller = null;
+          if (consulting && cancelDocument) { const stop = cancelDocument; cancelDocument = null; stop(); return true; }
+          invalidate();
           // send() already retired the previous plan and retained pending questions.
           set({ phase: state.plan ? 'incomplete' : state.proposal ? 'proposal' : 'idle', progress: '', error: { code: 'CANCELLED', message: consulting ? '相談を中断しました。案は更新していません。' : state.artifacts.length ? '作成を中断しました。作成途中の内容は残っています。' : '作成を中断しました。反映はしていません。' } }); return true;
         },
@@ -14172,7 +14215,7 @@
       const stage = explanation && !busy.has(state.phase) ? 'explanation' : stageOf(state.phase, !!historical), [stageIcon, stageTitle] = stageLabel[stage];
       const support = historical || explanation ? '' : `${diagnosticHtml(state.error)}${codeHtml(state)}${verificationHtml(state)}`;
       const runHistory = !explanation && state.runs?.length ? `<details data-release-panel="runs"><summary>これまでの反映</summary><ul>${state.runs.map((run, index) => `<li>${button('history', run.goal || `反映 ${index + 1}`, { id: run.id })} <span>${esc(run.rollback?.status === 'complete' ? '元に戻し済み' : ({ complete: '反映済み', partial: '一部反映', failed: '未完了', unknown: '結果未確認' }[run.status] || '処理中'))}</span></li>`).join('')}</ul></details>` : '';
-      return `<div class="ktr-workspace" data-release-phase="${esc(state.phase)}"><style>${styles}</style><div class="ktr-content"><header class="ktr-header"><div><strong>${esc(options.appName || 'アプリの相談')}</strong><span class="ktr-environment">動作テスト環境</span></div><div class="ktr-header-tools"><span class="ktr-phase">${esc(historical ? '過去の反映記録' : stage === 'explanation' ? '説明' : phaseText[state.phase] || '相談')}</span><nav class="ktr-tools" aria-label="補助操作">${button('connect', '接続')}${button('free-context', '設定資料を書き出す')}${button('details', 'アプリの情報を見る')}</nav></div></header>
+      return `<div class="ktr-workspace" data-release-phase="${esc(state.phase)}"><style>${styles}</style><div class="ktr-content"><header class="ktr-header"><div><strong>${esc(options.appName || 'アプリの相談')}</strong><span class="ktr-environment">動作テスト環境</span></div><div class="ktr-header-tools"><span class="ktr-phase">${esc(historical ? '過去の反映記録' : stage === 'explanation' ? '説明' : phaseText[state.phase] || '相談')}</span><nav class="ktr-tools" aria-label="補助操作">${button('connect', '接続')}${button('documents', '資料を作る')}${button('details', 'アプリの情報を見る')}</nav></div></header>
         ${conn.connected === false || conn.available === false ? `<aside class="ktr-notice"><p>${esc(conn.message || 'AIサービスへ接続してください。')}</p>${button('connect', '接続する')}</aside>` : ''}
         ${notice ? `<p class="ktr-notice" role="status">${esc(notice)}</p>` : ''}${state.error?.message && !historical && !(state.phase === 'incomplete' && (state.artifacts || []).some(a => a.error?.message === state.error.message || a.result?.artifactOutcome?.message === state.error.message)) ? `<p class="ktr-error" role="alert" tabindex="0">${esc(state.error.message)}</p>` : ''}
         <div class="ktr-layout"><section class="ktr-conversation" aria-label="相談"><h2 class="ktr-pane-title">相談</h2><div class="ktr-chat-log" data-release-panel="conversation" tabindex="0" aria-label="相談の記録">${historyHtml(state.messages)}${state.phase === 'consulting' && !historical ? `<div class="ktr-chat-pending" role="status">${activity}<span>返答を待っています</span></div>` : ''}</div>${composer(state, { ...options, historical: !!historical })}</section><main class="ktr-current" aria-label="説明・変更案・反映結果" data-release-stage="${stage}">${explanationNavigation(state, explanation, historical)}<header class="ktr-stage-header"><span class="ktr-stage-icon" aria-hidden="true">${stageIcon}</span><span>${esc(historical ? '過去の反映記録' : stageTitle)}</span></header>${body}${support || runHistory ? `<div class="ktr-support">${support}${runHistory}</div>` : ''}</main></div></div></div>`;
@@ -14208,18 +14251,25 @@
         host.querySelectorAll?.('[data-release-draft-note]').forEach(el => { el.hidden = !pending; });
       }
       function inputChanged(event) { if (event.target?.id === 'kt-release-input') { draft = event.target.value; updateDraftGuard(); } }
-      async function send() {
+      function canSend() {
         const state = controller.getState(), conn = connectionOf(options);
-        if (sending || busy.has(state.phase) || state.runs?.some(run => run.id === selectedRunId) || conn.connected === false || conn.available === false) return;
-        const input = host.querySelector?.('#kt-release-input');
-        const value = String(input?.value ?? draft).trim();
-        if (!value) return;
+        return !disposed && !sending && !busy.has(state.phase) && !state.runs?.some(run => run.id === selectedRunId) && conn.connected !== false && conn.available !== false;
+      }
+      async function send(request, onStart) {
+        if (!canSend()) return false;
+        const input = host.querySelector?.('#kt-release-input'), fromTemplate = typeof request === 'string';
+        const value = String(fromTemplate ? request : input?.value ?? draft).trim();
+        if (!value) return false;
         sending = true; updateDraftGuard();
         try {
-          if (typeof options.beforeSend === 'function' && await options.beforeSend() === false) return;
-          if (busy.has(controller.getState().phase)) return;
-          draft = ''; const activeInput = host.querySelector?.('#kt-release-input'); if (activeInput) activeInput.value = ''; selectedRunId = null; notice = '';
-          await controller.send(value);
+          if (typeof options.beforeSend === 'function' && await options.beforeSend() === false) return false;
+          const conn = connectionOf(options);
+          if (disposed || busy.has(controller.getState().phase) || conn.connected === false || conn.available === false) return false;
+          if (!fromTemplate) { draft = ''; const activeInput = host.querySelector?.('#kt-release-input'); if (activeInput) activeInput.value = ''; }
+          selectedRunId = null; notice = '';
+          onStart?.();
+          await controller.send(value, fromTemplate ? { documentOnly: true } : undefined);
+          return true;
         } finally { sending = false; updateDraftGuard(); }
       }
       async function act(action, id, target = {}) {
@@ -14260,7 +14310,8 @@
           else { if (typeof options.onDownload !== 'function') return; await options.onDownload(result.generated?.targetFile || result.targetFile || 'customization.js', body); notice = 'ファイルを保存しました。'; }
           draw(); return;
         }
-        const handlers = { connect: options.onConnect, 'refresh-connection': options.onRefreshConnection, 'free-context': options.onFreeContext, details: options.onDetails, preview: options.onOpenPreview };
+        if (action === 'documents') return options.onDocuments?.({ request: send, canRequest: canSend, hasDraft: () => !!String(host.querySelector?.('#kt-release-input')?.value ?? draft).trim() });
+        const handlers = { connect: options.onConnect, 'refresh-connection': options.onRefreshConnection, details: options.onDetails, preview: options.onOpenPreview };
         if (typeof handlers[action] === 'function') { await handlers[action](); draw(); }
       }
       async function clicked(event) {
@@ -14288,7 +14339,8 @@
       .ktr-composer{flex:none;margin:12px 0 0;padding:10px;border:1px solid #aebccf;border-radius:12px;background:var(--ktr-paper)}.ktr-composer label{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip-path:inset(50%);white-space:nowrap}.ktr-composer textarea{display:block;width:100%;min-height:64px;max-height:120px;resize:vertical;padding:6px;font:inherit;border:0;border-radius:5px;color:var(--ktr-text);background:var(--ktr-paper)}.ktr-composer .ktr-compose-actions{margin:6px 0 0;gap:6px}.ktr-composer .ktr-compose-actions button{padding:7px 14px}.ktr-confirmations,.ktr-question,.ktr-notice{padding:14px 16px;border:1px solid var(--ktr-line);border-radius:7px;background:var(--ktr-soft);margin:16px 0}.ktr-confirmations h3,.ktr-question h3{margin-top:0}.ktr-error{max-height:24dvh;overflow:auto;padding:12px 16px;border-left:3px solid #b74826;background:#fff2e9;color:#783418}.ktr-reasons{color:#783418}.ktr-progress{padding:0 0 24px}
       .ktr-support{border-top:1px solid var(--ktr-line);margin-top:22px;padding-top:10px}.ktr-workspace .ktr-support-heading{display:none;font-size:15px;margin:0 0 12px;color:var(--ktr-muted)}.ktr-workspace details,.kt-release-dialog details{margin:8px 0}.ktr-workspace summary,.kt-release-dialog summary{cursor:pointer;padding:9px 0;color:var(--ktr-muted)}.ktr-workspace details[open]>summary,.kt-release-dialog details[open]>summary{font-weight:600;color:var(--ktr-text)}.ktr-workspace .ktr-messages{list-style:none;padding:0 8px 0 0;margin:0;display:flex;flex-direction:column;gap:20px}.ktr-workspace .ktr-message{max-width:94%;margin:0;padding:10px 12px;align-self:flex-start}.ktr-workspace .ktr-message.ktr-user{align-self:flex-end;padding:12px 16px;background:#eef4fd;border-radius:14px 14px 4px 14px}.ktr-message p{margin:6px 0 0;line-height:1.75}.ktr-speaker{font-size:12px;font-weight:600;color:var(--ktr-muted)}.ktr-code{padding:12px 0 20px}.ktr-code pre,.ktr-setting-values,.ktr-fact-value{white-space:pre-wrap;word-break:break-word;font:12px/1.6 ui-monospace,monospace;background:var(--ktr-soft);border:1px solid var(--ktr-line);border-radius:6px;padding:14px}
       .kt-release-dialog{width:min(640px,calc(100vw - 32px));max-width:calc(100vw - 32px);max-height:calc(100vh - 32px);max-height:calc(100dvh - 32px);padding:24px;margin:auto;border:1px solid var(--ktr-line);border-radius:10px;overflow:auto;overscroll-behavior:contain}.kt-release-dialog.ktr-dialog-wide{width:min(960px,calc(100vw - 32px))}.kt-release-dialog::backdrop{background:rgba(15,23,42,.38)}.ktr-dialog-header{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;margin-bottom:16px}.kt-release-dialog .ktr-dialog-header h2{font-size:20px;margin:0}.kt-release-dialog [data-close]{flex:none;white-space:nowrap}.kt-release-dialog :is(textarea,select){font:inherit;max-width:100%;min-width:0;padding:9px 10px;border:1px solid #aebccf;border-radius:6px;color:var(--ktr-text);background:var(--ktr-paper)}.kt-release-dialog textarea{width:100%}.kt-release-dialog pre{white-space:pre-wrap;overflow-wrap:anywhere;max-width:100%}
-      .ktr-document-navigation{margin:0 0 18px}.ktr-document-tabs{display:flex;gap:8px;flex-wrap:wrap}.ktr-workspace .ktr-document-tabs button[aria-pressed="true"]{border-color:var(--ktr-accent);background:#edf3ff;color:var(--ktr-accent);font-weight:650}.ktr-document-navigation>details>ul{list-style:none;padding:0}.ktr-explanation-section{margin:24px 0;padding-bottom:8px}.ktr-explanation-section>h3{font-size:18px}.ktr-explanation-unknowns{border-left:3px solid #c49c48;padding:4px 16px;background:#fffaf0}.ktr-table-scroll{max-width:100%;overflow:auto;margin:16px 0}.ktr-table-scroll:focus-visible{outline:3px solid #83b6fb;outline-offset:2px}.ktr-explanation table{width:100%;min-width:360px;border-collapse:collapse;font-size:13px}.ktr-explanation th,.ktr-explanation td{text-align:left;vertical-align:top;border:1px solid var(--ktr-line);padding:10px 12px;white-space:pre-wrap;overflow-wrap:anywhere}.ktr-explanation th{background:var(--ktr-soft);font-weight:650}[data-release-stage="explanation"] .ktr-stage-header{background:#edf5f0;color:#315e45}
+      .ktr-template-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(240px,100%),1fr));gap:10px;border:0;padding:0;margin:20px 0}.ktr-template-grid legend{font-weight:650;margin-bottom:10px}.kt-release-dialog .ktr-template-choice{display:flex;align-items:flex-start;gap:10px;padding:14px;margin:0;border:1px solid var(--ktr-line);border-radius:8px;cursor:pointer;background:var(--ktr-paper)}.ktr-template-choice:has(input:checked){border-color:var(--ktr-accent);background:var(--ktr-soft)}.ktr-template-choice input{flex:none;margin:4px 0;width:auto}.ktr-template-choice strong{display:block;margin-bottom:5px}.ktr-template-choice small{display:block;line-height:1.6;color:var(--ktr-muted)}.kt-release-dialog [data-document-create]{margin:12px 0;padding:10px 20px;color:#fff;background:var(--ktr-accent);border:1px solid var(--ktr-accent);border-radius:6px}.kt-release-dialog [data-document-create]:disabled{opacity:.5;cursor:not-allowed}.kt-release-dialog [data-offline-materials]{border-top:1px solid var(--ktr-line);padding-top:16px;margin-top:16px}.kt-release-dialog [data-document-status]{font-size:13px;color:var(--ktr-muted)}
+      .ktr-document-navigation{margin:0 0 18px}.ktr-document-tabs{display:flex;gap:8px;flex-wrap:wrap}.ktr-workspace .ktr-document-tabs button[aria-pressed="true"]{border-color:var(--ktr-accent);background:#edf3ff;color:var(--ktr-accent);font-weight:650}.ktr-document-navigation>details>ul{list-style:none;padding:0}.ktr-explanation-section{margin:24px 0;padding-bottom:8px}.ktr-explanation-section>h3{font-size:18px}.ktr-explanation-unknowns{border-left:3px solid #c49c48;padding:4px 16px;background:#fffaf0}.ktr-table-scroll{max-width:100%;overflow:auto;margin:16px 0}.ktr-table-scroll:focus-visible{outline:3px solid #83b6fb;outline-offset:2px}.ktr-explanation table,#kt-toolkit .ktr-explanation table{width:100%;min-width:360px;border-collapse:collapse;font-size:13px}.ktr-explanation th,.ktr-explanation td,#kt-toolkit .ktr-explanation th,#kt-toolkit .ktr-explanation td{text-align:left;vertical-align:top;border:1px solid var(--ktr-line);padding:10px 12px;white-space:pre-wrap;overflow-wrap:anywhere;background:var(--ktr-paper);color:var(--ktr-text);position:static;top:auto}.ktr-explanation th,#kt-toolkit .ktr-explanation th{background:var(--ktr-soft);font-weight:650}[data-release-stage="explanation"] .ktr-stage-header{background:#edf5f0;color:#315e45}
       .ktr-stage-header{display:flex;align-items:center;gap:10px;margin-bottom:22px;padding:12px 14px;border-radius:10px;background:#f1f4f8;color:#45536a;font-weight:650;font-size:13px}.ktr-stage-icon{display:grid;place-items:center;width:28px;height:28px;flex:none;border-radius:50%;background:#fff;font-size:15px}
       [data-release-stage="proposal"] .ktr-stage-header{background:#edf3ff;color:#244e94}[data-release-stage="review"] .ktr-stage-header{background:#fff3d9;color:#715009}[data-release-stage="result"] .ktr-stage-header{background:#eaf2f3;color:#235c63}[data-release-stage="attention"] .ktr-stage-header{background:#fff0e8;color:#8a3c22}
       [data-release-stage="proposal"]>.ktr-section>ul:first-of-type{list-style:none;padding:0;counter-reset:proposal}.ktr-current[data-release-stage="proposal"]>.ktr-section>ul:first-of-type>li{counter-increment:proposal;padding:14px 16px 14px 46px;position:relative;border:1px solid #dce6f5;border-radius:9px;background:#fafcff;margin:10px 0}.ktr-current[data-release-stage="proposal"]>.ktr-section>ul:first-of-type>li::before{content:counter(proposal);position:absolute;left:16px;top:14px;font-weight:700;color:#47699d}
@@ -14474,6 +14526,37 @@
       });
       el.addEventListener('close', () => { if (flow?.isRunning()) flow.cancel(); flow = null; });
     }
+    function documents({ request, canRequest, hasDraft }) {
+      const templates = [
+        { id: 'overview', title: 'アプリの概要', description: '初めて使う人に、主な入力項目や自動処理を説明します。', prompt: 'このアプリの概要を、初めて使う人にも分かるように説明してください。主な入力項目、画面の使い方、自動計算・自動入力、プロセス管理の流れを整理してください。' },
+        { id: 'specification', title: 'アプリ仕様書', description: 'フィールド・一覧・プロセス管理など、設定を整理します。', prompt: 'このアプリの仕様書を作成してください。フィールドと配置、一覧、プロセス管理、アクセス権、通知、JavaScriptによる動作を、確認できる設定に基づいて整理してください。' },
+        { id: 'instructions', title: '操作説明', description: '入力から保存・承認まで、利用者の操作をまとめます。', prompt: 'このアプリを使う人向けの操作説明を作成してください。レコードの入力・保存・プロセス管理の操作、入力時の注意、PCとモバイルの違いを、実際に確認できる設定とコードに基づいて整理してください。' },
+        { id: 'handover', title: '引継ぎ資料', description: '後任者に、設定や自動処理、確認すべき点を伝えます。', prompt: 'このアプリを後任の担当者へ引き継ぐ資料を作成してください。この会話で説明した内容も踏まえ、主な入力項目、計算式・自動入力、プロセス管理、アクセス権、PCとモバイルの違い、運用上の確認事項を整理してください。' },
+        { id: 'changes', title: '変更内容のまとめ', description: '相談で決めた内容と、反映済み・未反映の違いを整理します。', prompt: 'この会話の変更内容を資料にまとめてください。最新の修正・取り消しを反映した採用内容、変更前後、反映や復元の結果、未反映の内容を区別してください。採用した案や実行の記録がない場合は、その旨を明記し、仮案を採用済みや反映済みとして書かないでください。' }
+      ];
+      const el = dialog('資料を作る', '<p>テンプレートを選ぶと、AIがこのアプリの設定と相談内容をもとに資料を作ります。作成後も相談欄で内容を調整できます。</p><fieldset class="ktr-template-grid"><legend>資料の種類</legend>' + templates.map((t, i) => '<label class="ktr-template-choice"><input type="radio" name="document-template" value="' + t.id + '"' + (i === 0 ? ' checked' : '') + '><span><strong>' + t.title + '</strong><small>' + t.description + '</small></span></label>').join('') + '</fieldset><label>追加の希望（任意）<textarea data-document-extra rows="3" placeholder="例：初めて使う担当者向けに、専門用語を少なくしてください。"></textarea></label><p data-document-status role="status"></p><button type="button" data-document-create>AIで作成</button><details data-offline-materials><summary>AIを使わずに書き出す</summary><p>設定資料や、外部のAIへ渡す資料を作れます。Markdown・JSONなどの形式を選べます。</p><button type="button" data-offline-export>設定資料を書き出す</button></details>', { wide: true });
+      let pending = false;
+      const update = () => {
+        el.querySelector('[data-document-create]').disabled = pending || !canRequest();
+        el.querySelector('[data-document-status]').textContent = !canRequest() ? '作成するには、接続と現在の作業の状態を確認してください。処理中の場合は、完了してから作成できます。' : hasDraft() ? '相談欄の入力は送信せず、そのまま残します。' : '［AIで作成］を押すと、AIサービスに依頼します。';
+      };
+      update();
+      const unsubscribe = controller.subscribe(update);
+      el.addEventListener('close', unsubscribe, { once: true });
+      el.querySelector('[data-document-create]').addEventListener('click', async () => {
+        if (pending || !canRequest()) { update(); return; }
+        const template = templates.find(t => t.id === el.querySelector('input[name="document-template"]:checked').value);
+        const extra = el.querySelector('[data-document-extra]').value.trim();
+        const prompt = template.prompt + '\n資料の作成だけを依頼しています。設定変更の提案や反映は行わないでください。現在の設定、採用済みで未反映の内容、実行結果を区別し、確認できないことは推測せず未確認としてください。kintone標準の用語を使い、同じ説明や不要な補足を繰り返さずにまとめてください。' + (extra ? '\n追加の希望：' + extra : '');
+        pending = true; update();
+        try {
+          const started = await request(prompt, () => el.close());
+          if (!started && el.open) el.querySelector('[data-document-status]').textContent = '資料の作成は開始していません。必要な場合は、もう一度［AIで作成］を押してください。';
+        } catch (error) { if (el.open) el.querySelector('[data-document-status]').textContent = error.message || '資料の作成を開始できませんでした。'; }
+        finally { pending = false; if (el.open) el.querySelector('[data-document-create]').disabled = !canRequest(); }
+      });
+      el.querySelector('[data-offline-export]').addEventListener('click', () => { el.close(); freeContext(); });
+    }
     function freeContext() {
       const state = controller.getState(), kinds = KTContextUi.DOCUMENT_KINDS;
       let inputs = d.getInputs?.() || {};
@@ -14537,7 +14620,7 @@
       const el = dialog('アプリの情報', b ? '<p>動作テスト環境の設定の版: ' + esc(b.revision?.preview) + '</p><p>運用環境へ未反映の変更: ' + esc(b.diff?.items?.length ?? b.diff?.length ?? b.diff?.count ?? '未確認') + '</p><details><summary>現在の設定の詳細</summary><pre style="white-space:pre-wrap"></pre></details>' : '<p>この作業では、まだ動作テスト環境の設定を取得していません。</p>', { wide: true });
       if (b) el.querySelector('pre').textContent = JSON.stringify({ appId: b.appId, revision: b.revision, diff: b.diff }, null, 2);
     }
-    view = KTReleaseView.create(host, { controller, connection, beforeSend: consent, onConnect: connectionDialog, onRefreshConnection: () => refreshCapability(true), onFreeContext: freeContext, onDetails: details,
+    view = KTReleaseView.create(host, { controller, connection, beforeSend: consent, onConnect: connectionDialog, onRefreshConnection: () => refreshCapability(true), onDocuments: documents, onDetails: details,
       onCopy: d.copyText, onDownload: (name, text, type = 'text/javascript') => d.downloadText(name, text, type),
       onOpenPreview: d.onOpenPreview || (/^\d+$/.test(String(d.appId)) && !location.pathname.startsWith('/k/guest/') ? () => window.open(location.origin + '/k/admin/preview/' + encodeURIComponent(d.appId) + '/', '_blank', 'noopener') : null),
       appName: d.getInputs?.()?.data?.appName || 'アプリの相談' });
